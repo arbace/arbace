@@ -1,0 +1,430 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.httputil) (go/file "persist.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [net "net"]
+    ^{:line 12} [http "net/http"]
+    ^{:line 13} [textproto "net/textproto"]
+    ^{:line 14} [sync "sync"]])
+
+
+(go/var
+
+  ^{:line 19} [^{:doc "Deprecated: No longer used.\n"} ErrPersistEOF (addr (lit http/ProtocolError :ErrorString "persistent connection closed"))]
+
+
+  ^{:line 22} [^{:doc "Deprecated: No longer used.\n"} ErrClosed (addr (lit http/ProtocolError :ErrorString "connection closed by user"))]
+
+
+  ^{:line 25} [^{:doc "Deprecated: No longer used.\n"} ErrPipeline (addr (lit http/ProtocolError :ErrorString "pipeline error"))])
+
+
+
+
+(go/var ^{:doc "This is an API usage error - the local side is closed.\nErrPersistEOF (above) reports that the remote side is closed.\n"} errClosed (errors/New "i/o operation on closed connection"))
+
+
+
+
+
+
+(go/type ServerConn "ServerConn is an artifact of Go's early HTTP implementation.\nIt is low-level, old, and unused by Go's current HTTP stack.\nWe should have deleted it before Go 1.\n\nDeprecated: Use the Server in package [net/http] instead.\n" (struct
+    ^{:line 38 :tag sync/Mutex} mu ; read-write protects the following fields
+    ^{:line 39 :tag net/Conn} c
+    ^{:line 40 :tag (* bufio/Reader)} r
+    ^{:line 41 :tag error} re ^error we ; read/write errors
+    ^{:line 42 :tag io/ReadCloser} lastbody
+    ^{:line 43 :tag int} nread ^int nwritten
+    ^{:line 44 :tag (map (* http/Request) uint)} pipereq
+
+    ^{:line 46 :tag textproto/Pipeline} pipe))
+
+
+
+
+
+
+
+^{:go/end 59} (go/func NewServerConn "NewServerConn is an artifact of Go's early HTTP implementation.\nIt is low-level, old, and unused by Go's current HTTP stack.\nWe should have deleted it before Go 1.\n\nDeprecated: Use the Server in package [net/http] instead.\n" ^{:tag (* ServerConn)} [^net/Conn c ^{:tag (* bufio/Reader)} r]
+  (when (== r nil)
+    (set! r (bufio/NewReader c)))
+
+  (addr (lit ServerConn :c c :r r :pipereq (make (map (* http/Request) uint)))))
+
+
+
+
+
+
+^{:go/end 73} (go/method Hijack "Hijack detaches the [ServerConn] and returns the underlying connection as well\nas the read-side bufio which may have some left over data. Hijack may be\ncalled before Read has signaled the end of the keep-alive logic. The user\nshould not call Hijack while [ServerConn.Read] or [ServerConn.Write] is in progress.\n" [^{:tag (* ServerConn)} sc] :results [net/Conn (* bufio/Reader)]
+  (.Lock (.-mu sc))
+  (defer (.Unlock (.-mu sc)))
+  (let [c (.-c sc)
+      ^{:line 69} r (.-r sc)]
+    (set! (.-c sc) nil)
+    (set! (.-r sc) nil)
+    (return c r)))
+
+
+
+^{:go/end 82} (go/method Close "Close calls [ServerConn.Hijack] and then also closes the underlying connection.\n" ^error [^{:tag (* ServerConn)} sc]
+  ^{:go/breaks [[3 81]]} (let [(values c _) (.Hijack sc)]
+    (when (!= c nil)
+      (return (.Close c)))
+
+    nil))
+
+
+
+
+
+
+^{:go/end 162} (go/method Read "Read returns the next request on the wire. An [ErrPersistEOF] is returned if\nit is gracefully determined that there are no more requests (e.g. after the\nfirst request on an HTTP/1.0 connection, or after a Connection:close on a\nHTTP/1.1 connection).\n" [^{:tag (* ServerConn)} sc] :results [(* http/Request) error]
+  (let [^{:tag (* http/Request)} req (zero (* http/Request))
+      ^{:line 90 :tag error} err (zero error)
+
+      ;; Ensure ordered execution of Reads and Writes
+      ^{:line 93} id (.Next (.-pipe sc))]
+    (.StartRequest (.-pipe sc) id)
+    (defer (^{:go/end 106} (fn []
+          (.EndRequest (.-pipe sc) id)
+          (if (== req nil) (do
+              (.StartResponse (.-pipe sc) id)
+              (.EndResponse (.-pipe sc) id))
+            (do
+              ;; Remember the pipeline id of this request
+              (.Lock (.-mu sc))
+              (aset (.-pipereq sc) req id)
+              (.Unlock (.-mu sc)))))))
+
+
+
+    (.Lock (.-mu sc))
+    (when (!= (.-we sc) nil) ; no point receiving if write-side broken or closed
+      (defer (.Unlock (.-mu sc)))
+      (return nil (.-we sc)))
+
+    (when (!= (.-re sc) nil)
+      (defer (.Unlock (.-mu sc)))
+      (return nil (.-re sc)))
+
+    (when (== (.-r sc) nil) ; connection closed by user in the meantime
+      (defer (.Unlock (.-mu sc)))
+      (return nil errClosed))
+
+    (let [r (.-r sc)
+        ^{:line 122} lastbody (.-lastbody sc)]
+      (set! (.-lastbody sc) nil)
+      (.Unlock (.-mu sc))
+
+      ;; Make sure body is fully consumed, even if user does not call body.Close
+      (when (!= lastbody nil)
+        ;; body.Close is assumed to be idempotent and multiple calls to
+        ;; it should return the error that its first invocation
+        ;; returned.
+        (set! err (.Close lastbody))
+        (when (!= err nil)
+          (.Lock (.-mu sc))
+          (defer (.Unlock (.-mu sc)))
+          (set! (.-re sc) err)
+          (return nil err)))
+
+
+
+      (set! (values req err) (http/ReadRequest r))
+      (.Lock (.-mu sc))
+      (defer (.Unlock (.-mu sc)))
+      (when (!= err nil)
+        (if (== err io/ErrUnexpectedEOF) (do
+            ;; A close from the opposing client is treated as a
+            ;; graceful close, even if there was some unparse-able
+            ;; data before the close.
+            (set! (.-re sc) ErrPersistEOF)
+            (return nil (.-re sc)))
+          (do
+            (set! (.-re sc) err)
+            (return req err))))
+
+
+      (set! (.-lastbody sc) (.-Body req))
+      (inc! (.-nread sc))
+      (when (.-Close req)
+        (set! (.-re sc) ErrPersistEOF)
+        (return req (.-re sc)))
+
+      (return req err))))
+
+
+
+
+^{:go/end 170} (go/method Pending "Pending returns the number of unanswered requests\nthat have been received on the connection.\n" ^int [^{:tag (* ServerConn)} sc]
+  (.Lock (.-mu sc))
+  (defer (.Unlock (.-mu sc)))
+  (- (.-nread sc) (.-nwritten sc)))
+
+
+
+
+
+^{:go/end 223} (go/method Write "Write writes resp in response to req. To close the connection gracefully, set the\nResponse.Close field to true. Write should be considered operational until\nit returns an error, regardless of any errors returned on the [ServerConn.Read] side.\n" ^error [^{:tag (* ServerConn)} sc ^{:tag (* http/Request)} req ^{:tag (* http/Response)} resp]
+
+  ;; Retrieve the pipeline ID of this request/response pair
+  (.Lock (.-mu sc))
+  (let [(values id ok) (aget (.-pipereq sc) req)]
+    (delete (.-pipereq sc) req)
+    (when (not ok)
+      (.Unlock (.-mu sc))
+      (return ErrPipeline))
+
+    (.Unlock (.-mu sc))
+
+    ;; Ensure pipeline order
+    (.StartResponse (.-pipe sc) id)
+    (defer (.EndResponse (.-pipe sc) id))
+
+    (.Lock (.-mu sc))
+    (when (!= (.-we sc) nil)
+      (defer (.Unlock (.-mu sc)))
+      (return (.-we sc)))
+
+    (when (== (.-c sc) nil) ; connection closed by user in the meantime
+      (defer (.Unlock (.-mu sc)))
+      (return ErrClosed))
+
+    (let [c (.-c sc)]
+      (when (<= (.-nread sc) (.-nwritten sc))
+        (defer (.Unlock (.-mu sc)))
+        (return (errors/New "persist server pipe count")))
+
+      (when (.-Close resp)
+        ;; After signaling a keep-alive close, any pipelined unread
+        ;; requests will be lost. It is up to the user to drain them
+        ;; before signaling.
+        (set! (.-re sc) ErrPersistEOF))
+
+      (.Unlock (.-mu sc))
+
+      ^{:go/breaks [[6 222]]} (let [err (.Write resp c)]
+        (.Lock (.-mu sc))
+        (defer (.Unlock (.-mu sc)))
+        (when (!= err nil)
+          (set! (.-we sc) err)
+          (return err))
+
+        (inc! (.-nwritten sc))
+
+        nil))))
+
+
+
+
+
+
+
+(go/type ClientConn "ClientConn is an artifact of Go's early HTTP implementation.\nIt is low-level, old, and unused by Go's current HTTP stack.\nWe should have deleted it before Go 1.\n\nDeprecated: Use Client or Transport in package [net/http] instead.\n" (struct
+    ^{:line 231 :tag sync/Mutex} mu ; read-write protects the following fields
+    ^{:line 232 :tag net/Conn} c
+    ^{:line 233 :tag (* bufio/Reader)} r
+    ^{:line 234 :tag error} re ^error we ; read/write errors
+    ^{:line 235 :tag io/ReadCloser} lastbody
+    ^{:line 236 :tag int} nread ^int nwritten
+    ^{:line 237 :tag (map (* http/Request) uint)} pipereq
+
+    ^{:line 239 :tag textproto/Pipeline} pipe
+    ^{:line 240 :tag (func [(* http/Request) io/Writer] [error])} writeReq))
+
+
+
+
+
+
+
+^{:go/end 258} (go/func NewClientConn "NewClientConn is an artifact of Go's early HTTP implementation.\nIt is low-level, old, and unused by Go's current HTTP stack.\nWe should have deleted it before Go 1.\n\nDeprecated: Use the Client or Transport in package [net/http] instead.\n" ^{:tag (* ClientConn)} [^net/Conn c ^{:tag (* bufio/Reader)} r]
+  (when (== r nil)
+    (set! r (bufio/NewReader c)))
+
+  (addr ^{:go/breaks [2 4 6 8]} (lit ClientConn
+      :c c
+      :r r
+      :pipereq (make (map (* http/Request) uint))
+      :writeReq (method-expr (* http/Request) Write))))
+
+
+
+
+
+
+
+
+^{:go/end 269} (go/func NewProxyClientConn "NewProxyClientConn is an artifact of Go's early HTTP implementation.\nIt is low-level, old, and unused by Go's current HTTP stack.\nWe should have deleted it before Go 1.\n\nDeprecated: Use the Client or Transport in package [net/http] instead.\n" ^{:tag (* ClientConn)} [^net/Conn c ^{:tag (* bufio/Reader)} r]
+  (let [cc (NewClientConn c r)]
+    (set! (.-writeReq cc) (method-expr (* http/Request) WriteProxy))
+    ^{:line 268} cc))
+
+
+
+
+
+
+^{:go/end 283} (go/method Hijack "Hijack detaches the [ClientConn] and returns the underlying connection as well\nas the read-side bufio which may have some left over data. Hijack may be\ncalled before the user or Read have signaled the end of the keep-alive\nlogic. The user should not call Hijack while [ClientConn.Read] or ClientConn.Write is in progress.\n" [^{:tag (* ClientConn)} cc] :results [^net/Conn c ^{:tag (* bufio/Reader)} r]
+  (.Lock (.-mu cc))
+  (defer (.Unlock (.-mu cc)))
+  (set! c (.-c cc))
+  (set! r (.-r cc))
+  (set! (.-c cc) nil)
+  (set! (.-r cc) nil)
+  (return))
+
+
+
+^{:go/end 292} (go/method Close "Close calls [ClientConn.Hijack] and then also closes the underlying connection.\n" ^error [^{:tag (* ClientConn)} cc]
+  ^{:go/breaks [[3 291]]} (let [(values c _) (.Hijack cc)]
+    (when (!= c nil)
+      (return (.Close c)))
+
+    nil))
+
+
+
+
+
+
+
+^{:go/end 349} (go/method Write "Write writes a request. An [ErrPersistEOF] error is returned if the connection\nhas been closed in an HTTP keep-alive sense. If req.Close equals true, the\nkeep-alive connection is logically closed after this request and the opposing\nserver is informed. An ErrUnexpectedEOF indicates the remote closed the\nunderlying TCP connection, which is usually considered as graceful close.\n" ^error [^{:tag (* ClientConn)} cc ^{:tag (* http/Request)} req]
+  (let [^error err (zero error)
+
+      ;; Ensure ordered execution of Writes
+      ^{:line 303} id (.Next (.-pipe cc))]
+    (.StartRequest (.-pipe cc) id)
+    (defer (^{:go/end 316} (fn []
+          (.EndRequest (.-pipe cc) id)
+          (if (!= err nil) (do
+              (.StartResponse (.-pipe cc) id)
+              (.EndResponse (.-pipe cc) id))
+            (do
+              ;; Remember the pipeline id of this request
+              (.Lock (.-mu cc))
+              (aset (.-pipereq cc) req id)
+              (.Unlock (.-mu cc)))))))
+
+
+
+    (.Lock (.-mu cc))
+    (when (!= (.-re cc) nil) ; no point sending if read-side closed or broken
+      (defer (.Unlock (.-mu cc)))
+      (return (.-re cc)))
+
+    (when (!= (.-we cc) nil)
+      (defer (.Unlock (.-mu cc)))
+      (return (.-we cc)))
+
+    (when (== (.-c cc) nil) ; connection closed by user in the meantime
+      (defer (.Unlock (.-mu cc)))
+      (return errClosed))
+
+    ^{:go/breaks [[9 348]]} (let [c (.-c cc)]
+      (when (.-Close req)
+        ;; We write the EOF to the write-side error, because there
+        ;; still might be some pipelined reads
+        (set! (.-we cc) ErrPersistEOF))
+
+      (.Unlock (.-mu cc))
+
+      (set! err ((.-writeReq cc) req c))
+      (.Lock (.-mu cc))
+      (defer (.Unlock (.-mu cc)))
+      (when (!= err nil)
+        (set! (.-we cc) err)
+        (return err))
+
+      (inc! (.-nwritten cc))
+
+      nil)))
+
+
+
+
+^{:go/end 357} (go/method Pending "Pending returns the number of unanswered requests\nthat have been sent on the connection.\n" ^int [^{:tag (* ClientConn)} cc]
+  (.Lock (.-mu cc))
+  (defer (.Unlock (.-mu cc)))
+  (- (.-nwritten cc) (.-nread cc)))
+
+
+
+
+
+
+^{:go/end 422} (go/method Read "Read reads the next response from the wire. A valid response might be\nreturned together with an [ErrPersistEOF], which means that the remote\nrequested that this be the last request serviced. Read can be called\nconcurrently with [ClientConn.Write], but not with another Read.\n" [^{:tag (* ClientConn)} cc ^{:tag (* http/Request)} req] :results [^{:tag (* http/Response)} resp ^error err]
+  ;; Retrieve the pipeline ID of this request/response pair
+  (.Lock (.-mu cc))
+  (let [(values id ok) (aget (.-pipereq cc) req)]
+    (delete (.-pipereq cc) req)
+    (when (not ok)
+      (.Unlock (.-mu cc))
+      (return nil ErrPipeline))
+
+    (.Unlock (.-mu cc))
+
+    ;; Ensure pipeline order
+    (.StartResponse (.-pipe cc) id)
+    (defer (.EndResponse (.-pipe cc) id))
+
+    (.Lock (.-mu cc))
+    (when (!= (.-re cc) nil)
+      (defer (.Unlock (.-mu cc)))
+      (return nil (.-re cc)))
+
+    (when (== (.-r cc) nil) ; connection closed by user in the meantime
+      (defer (.Unlock (.-mu cc)))
+      (return nil errClosed))
+
+    (let [r (.-r cc)
+        ^{:line 388} lastbody (.-lastbody cc)]
+      (set! (.-lastbody cc) nil)
+      (.Unlock (.-mu cc))
+
+      ;; Make sure body is fully consumed, even if user does not call body.Close
+      (when (!= lastbody nil)
+        ;; body.Close is assumed to be idempotent and multiple calls to
+        ;; it should return the error that its first invocation
+        ;; returned.
+        (set! err (.Close lastbody))
+        (when (!= err nil)
+          (.Lock (.-mu cc))
+          (defer (.Unlock (.-mu cc)))
+          (set! (.-re cc) err)
+          (return nil err)))
+
+
+
+      (set! (values resp err) (http/ReadResponse r req))
+      (.Lock (.-mu cc))
+      (defer (.Unlock (.-mu cc)))
+      (when (!= err nil)
+        (set! (.-re cc) err)
+        (return resp err))
+
+      (set! (.-lastbody cc) (.-Body resp))
+
+      (inc! (.-nread cc))
+
+      (when (.-Close resp)
+        (set! (.-re cc) ErrPersistEOF) ; don't send any more requests
+        (return resp (.-re cc)))
+
+      (return resp err))))
+
+
+
+^{:go/end 431} (go/method Do "Do is convenience method that writes a request and reads a response.\n" [^{:tag (* ClientConn)} cc ^{:tag (* http/Request)} req] :results [(* http/Response) error]
+  (let [err (.Write cc req)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.Read cc req)))

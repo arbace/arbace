@@ -1,0 +1,560 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.net.http) (go/file "http2.go" :build ["//go:build !nethttpomithttp2"] :imports [
+
+
+    ^{:line 10} [context "context"]
+    ^{:line 11} [tls "crypto/tls"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [log "log"]
+    ^{:line 15} [net "net"]
+    ^{:line 16} [http2 "net/http/internal/http2"]
+    ^{:line 17} [time "time"]
+
+    ^{:line 19} [_ "unsafe"]]) ; for go:linkname
+
+
+;; net/http supports HTTP/2 by default, but this support is removed when
+;; the nethttpomithttp2 build tag is set.
+;;
+;; HTTP/2 support is provided by the net/http/internal/http2 package.
+;;
+;; This file (http2.go) connects net/http to the http2 package.
+;; Since http imports http2, to avoid an import cycle we need to
+;; translate http package types (e.g., Request) into the equivalent
+;; http2 package types (e.g., http2.ClientRequest).
+;;
+;; The golang.org/x/net/http2 package is the original source of truth for
+;; the HTTP/2 implementation. At this time, users may still import that
+;; package and register its implementation on a net/http Transport or Server.
+;; However, the x/net package is no longer synchronized with std.
+
+^{:go/end 47} (go/func init []
+  ;; NoBody and LocalAddrContextKey need to have the same value
+  ;; in the http and http2 packages.
+  ;;
+  ;; We can't define these values in net/http/internal,
+  ;; because their concrete types are part of the net/http API and
+  ;; moving them causes API checker failures.
+  ;; Override the http2 package versions at init time instead.
+  (set! http2/LocalAddrContextKey LocalAddrContextKey)
+  (set! http2/NoBody NoBody))
+
+
+(go/type ^:alias http2Server http2/Server)
+(go/type ^:alias http2Transport http2/Transport)
+
+^{:go/end 83} (go/method configureHTTP2 [^{:tag (* Server)} s]
+  (let [h2srv (addr (lit http2/Server))]
+
+    ;; Historically, we've configured the HTTP/2 idle timeout in this fashion:
+    ;; Set once at configuration time.
+    (if (!= (.-IdleTimeout s) 0)
+      (set! (.-h2IdleTimeout s) (.-IdleTimeout s))
+
+      (set! (.-h2IdleTimeout s) (.-ReadTimeout s)))
+
+
+    (when (== (.-TLSConfig s) nil)
+      (set! (.-TLSConfig s) (addr (lit tls/Config))))
+
+    (set! (.-nextProtoErr s) (.Configure h2srv (lit http2ServerConfig s) (.-TLSConfig s)))
+    (when (!= (.-nextProtoErr s) nil)
+      (return))
+
+
+    (.RegisterOnShutdown s (.-GracefulShutdown h2srv))
+
+    (when (== (.-TLSNextProto s) nil)
+      (set! (.-TLSNextProto s) (make (map string (func [(* Server) (* tls/Conn) Handler])))))
+
+    ;; Historically, the presence of a TLSNextProto["h2"] key has been the signal to
+    ;; enable/disable HTTP/2 support. Set a value in the map, but we'll never use it.
+    (aset (.-TLSNextProto s) "h2" ^{:go/end 80} (fn [^{:tag (* Server)} hs ^{:tag (* tls/Conn)} c ^Handler h]
+        (.Close c)))
+
+
+    (set! (.-h2 s) h2srv)))
+
+
+^{:go/end 92} (go/method setHTTP2Config [^{:tag (* Server)} s ^http2ExternalServerConfig conf]
+  (when (!= (.-h2Config s) nil)
+    (panic "http: HTTP/2 Server already registered"))
+
+  (set! (.-h2Config s) conf)
+  (.ServeConnFunc (.-h2Config s) (.-serveHTTP2Conn s))
+  (.configureHTTP2 s))
+
+
+^{:go/end 110} (go/method serveHTTP2Conn [^{:tag (* Server)} s ^context/Context ctx ^net/Conn nc ^Handler h ^bool sawClientPreface ^{:tag (* Request)} upgradeReq ^{:tag (slice byte)} settings]
+  (.setupHTTP2_ServeTLS s)
+  (let [^{:tag (* http2/ServerRequest)} serverUpgradeReq (zero (* http2/ServerRequest))]
+    (when (!= upgradeReq nil)
+      (set! serverUpgradeReq (http2ServerRequestFromRequest upgradeReq)))
+
+    (.SetReadDeadline nc (lit time/Time))
+    (.SetWriteDeadline nc (lit time/Time))
+    (.ServeConn (.-h2 s) nc (addr ^{:go/breaks [2 4 6 8 10 12]} (lit http2/ServeConnOpts
+          :Context ctx
+          :Handler (lit http2Handler h)
+          :BaseConfig (lit http2ServerConfig s)
+          :SawClientPreface sawClientPreface
+          :UpgradeRequest serverUpgradeReq
+          :Settings settings)))))
+
+
+
+^{:go/end 130} (go/func http2ServerRequestFromRequest ^{:tag (* http2/ServerRequest)} [^{:tag (* Request)} req]
+  (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26 28 30]} (lit http2/ServerRequest
+      :Context (.Context req)
+      :Proto (.-Proto req)
+      :ProtoMajor (.-ProtoMajor req)
+      :ProtoMinor (.-ProtoMinor req)
+      :Method (.-Method req)
+      :URL (.-URL req)
+      :Header (conv http2/Header (.-Header req))
+      :Trailer (conv http2/Header (.-Trailer req))
+      :Body (.-Body req)
+      :Host (.-Host req)
+      :ContentLength (.-ContentLength req)
+      :RemoteAddr (.-RemoteAddr req)
+      :RequestURI (.-RequestURI req)
+      :TLS (.-TLS req)
+      :MultipartForm (.-MultipartForm req))))
+
+
+
+(go/type http2Handler (struct
+    ^{:line 133 :tag Handler} h))
+
+
+^{:go/end 154} (go/method ServeHTTP [^http2Handler h ^{:tag (* http2/ResponseWriter)} w ^{:tag (* http2/ServerRequest)} req]
+  (.ServeHTTP (.-h h) (lit http2ResponseWriter w) (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26 28 30]} (lit Request
+        :ctx (.-Context req)
+        :Proto "HTTP/2.0"
+        :ProtoMajor 2
+        :ProtoMinor 0
+        :Method (.-Method req)
+        :URL (.-URL req)
+        :Header (conv Header (.-Header req))
+        :RequestURI (.-RequestURI req)
+        :Trailer (conv Header (.-Trailer req))
+        :Body (.-Body req)
+        :Host (.-Host req)
+        :ContentLength (.-ContentLength req)
+        :RemoteAddr (.-RemoteAddr req)
+        :TLS (.-TLS req)
+        :MultipartForm (.-MultipartForm req)))))
+
+
+
+(go/type http2ResponseWriter (struct
+    (* http2/ResponseWriter)))
+
+
+
+(go/var "Optional http.ResponseWriter interfaces implemented.\n"
+  ^{:line 162} [^CloseNotifier _ (lit http2ResponseWriter)]
+  ^{:line 163} [^Flusher _ (lit http2ResponseWriter)]
+  ^{:line 164} [^io/StringWriter _ (lit http2ResponseWriter)])
+
+
+^{:go/end 167} (go/method Flush [^http2ResponseWriter w] (.FlushError (.-ResponseWriter w)))
+^{:go/end 168} (go/method FlushError ^error [^http2ResponseWriter w] (.FlushError (.-ResponseWriter w)))
+
+^{:go/end 170} (go/method Header ^Header [^http2ResponseWriter w] (conv Header (.Header (.-ResponseWriter w))))
+
+^{:go/end 186} (go/method Push ^error [^http2ResponseWriter w ^string target ^{:tag (* PushOptions)} opts]
+  (let [
+      ^{:line 174 :tag string} method (zero string)
+      ^{:line 175 :tag http2/Header} header (zero http2/Header)]
+
+    (when (!= opts nil)
+      (set! method (.-Method opts))
+      (set! header (conv http2/Header (.-Header opts))))
+
+    (let [err (.Push (.-ResponseWriter w) target method header)]
+      (when (== err http2/ErrNotSupported)
+        (set! err ErrNotSupported))
+
+      ^{:line 185} err)))
+
+
+(go/type http2ServerConfig (struct
+    ^{:line 189 :tag (* Server)} s))
+
+
+^{:go/end 192} (go/method MaxHeaderBytes ^int [^http2ServerConfig s] (.-MaxHeaderBytes (.-s s)))
+^{:go/end 193} (go/method MaxHeaderValueCount ^int [^http2ServerConfig s] (.maxHeaderValueCount (.-s s)))
+^{:go/end 198} (go/method ConnState [^http2ServerConfig s ^net/Conn c ^http2/ConnState st]
+  (when (!= (.-ConnState (.-s s)) nil)
+    ((.-ConnState (.-s s)) c (conv ConnState st))))
+
+
+^{:go/end 199} (go/method DoKeepAlives ^bool [^http2ServerConfig s] (.doKeepAlives (.-s s)))
+^{:go/end 200} (go/method WriteTimeout ^time/Duration [^http2ServerConfig s] (.-WriteTimeout (.-s s)))
+^{:go/end 201} (go/method SendPingTimeout ^time/Duration [^http2ServerConfig s] (.-ReadTimeout (.-s s)))
+^{:go/end 202} (go/method ErrorLog ^{:tag (* log/Logger)} [^http2ServerConfig s] (.-ErrorLog (.-s s)))
+^{:go/end 203} (go/method ReadTimeout ^time/Duration [^http2ServerConfig s] (.-ReadTimeout (.-s s)))
+^{:go/end 204} (go/method DisableClientPriority ^bool [^http2ServerConfig s] (.-DisableClientPriority (.-s s)))
+
+^{:go/end 211} (go/method IdleTimeout ^time/Duration [^http2ServerConfig s]
+  (when (!= (.-h2Config (.-s s)) nil)
+    (return (.IdleTimeout (.-h2Config (.-s s)))))
+
+  (.-h2IdleTimeout (.-s s)))
+
+
+^{:go/end 215} (go/method HTTP2Config ^http2/Config [^http2ServerConfig s]
+  (mergeHTTP2Config (.-HTTP2 (.-s s)) (.-h2Config (.-s s))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type http2ExternalServerConfig "http2ExternalServerConfig is an HTTP/2 configuration provided by x/net/http2.\n\nWhen a x/net/http2.Server wraps a net/http.Server, we need to support the user\nsetting configuration settings on the x/net Server:\n\n\ts1 := &http.Server{}\n\ts2 := &http2.Server{}\n\thttp2.ConfigureServer(s1, s2)\n\n\t// This setting needs to affect s1:\n\ts2.MaxReadFrameSize = 10000\n\nWe handle this by having http2.ConfigureServer pass us an http2ExternalServerConfig\n(see http.Server.Serve) which we can use to query the current state of the http2.Server.\n" (interface
+
+    (^{:doc "Various configuration settings:\n"} HTTP2Config ^HTTP2Config [])
+    (IdleTimeout ^time/Duration [])
+
+
+
+    (^{:doc "ServeConnFunc provides a function to the x/net/http2.Server which it\ncan use to serve a new connection.\n"} ServeConnFunc [(func [^context/Context ctx ^net/Conn nc ^Handler h ^bool sawClientPreface ^{:tag (* Request)} upgradeReq ^{:tag (slice byte)} settings])])))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type http2ExternalTransportConfig "http2ExternalTransportConfig is an HTTP/2 configuration provided by x/net/http2.\n\nWhen a x/net/http2.Transport wraps a net/http.Transport, we need to support the user\nsetting configuration settings on the x/net Transport:\n\n\ttr1 := &http.Transport{}\n\ttr2 := http2.ConfigureTransports(t1)\n\n\t// This setting needs to affect tr1:\n\ttr2.MaxHeaderListSize = 10000\n\nWe handle this by having http2.ConfigureTransports pass us an http2ExternalTransportConfig,\nwhich we can use to query the current state of the http2.Transport.\n" (interface
+
+    (^{:doc "Various configuration settings:\n"} HTTP2Config ^HTTP2Config [])
+    (DisableCompression ^bool [])
+    (MaxHeaderListSize ^int64 [])
+    (IdleConnTimeout ^time/Duration [])
+
+
+
+    (^{:doc "ConnFromContext is used to pass a net.Conn to Transport.NewClientConn\nvia a context value. See Transport.http2NewClientConnFromContext.\n"} ConnFromContext ^net/Conn [context/Context])
+
+
+
+
+    (^{:doc "DialFromContext is used to dial new connections, overriding Transport.DialContext etc.\nThis is used when the user calls x/net/http2.Transport.RoundTrip directly,\nin which case the historical behavior is to use the http2.Transport's dial functions.\n"} DialFromContext [^context/Context ctx ^string network ^string addr] :results [net/Conn error])
+
+
+
+
+
+    (^{:doc "ExternalRoundTrip reports whether Transport.RoundTrip should call the\nexternal transport's RoundTrip. This is used when x/net/http2.Transport.ConnPool\nis set, in which case the user-provided ClientConnPool has taken responsibility\nfor picking a connection to use.\n"} ExternalRoundTrip ^bool [])
+
+
+
+    (^{:doc "RoundTrip performs a round trip.\nIt should only be used when ExternalRoundTrip requests it.\n"} RoundTrip [(* Request)] :results [(* Response) error])
+
+
+    (^{:doc "Registered is called to report successful registration of the config.\n"} Registered [(* Transport)])))
+
+
+^{:go/end 312} (go/method configureHTTP2 [^{:tag (* Transport)} t ^Protocols protocols]
+  (when (== (.-TLSClientConfig t) nil)
+    (set! (.-TLSClientConfig t) (addr (lit tls/Config))))
+
+  (when (== (.-HTTP2 t) nil)
+    (set! (.-HTTP2 t) (addr (lit HTTP2Config))))
+
+  (let [t2 (http2/NewTransport (lit transportConfig t))]
+    (set! (.-h2Transport t) t2)
+
+    (.registerProtocol t "https" (lit http2RoundTripper t2 true))
+    (when (== (.-TLSNextProto t) nil)
+      (set! (.-TLSNextProto t) (make (map string (func [^string authority ^{:tag (* tls/Conn)} c] [RoundTripper])))))
+
+    ;; Historically, the presence of a TLSNextProto["h2"] key has been the signal to
+    ;; enable/disable HTTP/2 support. Set a value in the map, but we'll never use it.
+    (aset (.-TLSNextProto t) "h2" ^{:go/end 304} (fn ^RoundTripper [^string authority ^{:tag (* tls/Conn)} c]
+        (lit http2ErringRoundTripper
+          (errors/New "unexpected use of stub RoundTripper"))))
+
+
+
+    ;; Server.ServeTLS clones the tls.Config before modifying it.
+    ;; Transport doesn't. We may want to make the two consistent some day.
+    ;;
+    ;; http2configureTransport will have already set NextProtos, but adjust it again
+    ;; here to remove HTTP/1.1 if the user has disabled it.
+    (set! (.-NextProtos (.-TLSClientConfig t)) (adjustNextProtos (.-NextProtos (.-TLSClientConfig t)) protocols))))
+
+
+(go/type http2ErringRoundTripper (struct ^error err))
+
+^{:go/end 316} (go/method RoundTripErr ^error [^http2ErringRoundTripper rt] (.-err rt))
+^{:go/end 317} (go/method RoundTrip [^http2ErringRoundTripper rt (* Request)] :results [(* Response) error] (return nil (.-err rt)))
+
+^{:go/end 351} (go/func http2RoundTrip [^{:tag (* Request)} req ^{:tag (func [(* http2/ClientRequest)] [(* http2/ClientResponse) error])} rt] :results [(* Response) error]
+  (let [resp (addr (lit Response))
+      (values cresp err) (rt (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24]} (lit http2/ClientRequest
+            :Context (.Context req)
+            :Method (.-Method req)
+            :URL (.-URL req)
+            :Header (conv http2/Header (.-Header req))
+            :Trailer (conv http2/Header (.-Trailer req))
+            :Body (.-Body req)
+            :Host (.-Host req)
+            :GetBody (.-GetBody req)
+            :ContentLength (.-ContentLength req)
+            :Cancel (.-Cancel req)
+            :Close (.-Close req)
+            :ResTrailer (conv (* http2/Header) (addr (.-Trailer resp))))))]
+
+    (when (!= err nil)
+      (return nil err))
+
+    (set! (.-Status resp) (+ (.-Status cresp) " " (StatusText (.-StatusCode cresp))))
+    (set! (.-StatusCode resp) (.-StatusCode cresp))
+    (set! (.-Proto resp) "HTTP/2.0")
+    (set! (.-ProtoMajor resp) 2)
+    (set! (.-ProtoMinor resp) 0)
+    (set! (.-ContentLength resp) (.-ContentLength cresp))
+    (set! (.-Uncompressed resp) (.-Uncompressed cresp))
+    (set! (.-Header resp) (conv Header (.-Header cresp)))
+    (set! (.-Trailer resp) (conv Header (.-Trailer cresp)))
+    (set! (.-Body resp) (.-Body cresp))
+    (set! (.-TLS resp) (.-TLS cresp))
+    (set! (.-Request resp) req)
+    (return resp nil)))
+
+
+
+^{:go/end 363} (go/method http2AddConn "http2AddConn adds nc to the HTTP/2 connection pool.\n" [^{:tag (* Transport)} t ^string scheme ^string authority ^net/Conn nc] :results [RoundTripper error]
+  (when (== (.-h2Transport t) nil)
+    (return nil errors/ErrUnsupported))
+
+  (let [err (.AddConn (.-h2Transport t) scheme authority nc)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (lit http2RoundTripper (.-h2Transport t) false) nil)))
+
+
+
+
+^{:go/end 376} (go/method http2NewClientConn "http2NewClientConn creates an HTTP/2 genericClientConn (used to implement ClientConn) from nc.\nThe connection is not added to the HTTP/2 connection pool.\n" [^{:tag (* Transport)} t ^net/Conn nc ^{:tag (func [])} internalStateHook] :results [genericClientConn error]
+  (when (== (.-h2Transport t) nil)
+    (return nil errors/ErrUnsupported))
+
+  (let [(values cc err) (.NewClientConn (.-h2Transport t) nc internalStateHook)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (lit http2ClientConn cc) nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 412} (go/method http2NewClientConnFromContext "http2NewClientConnFromContext creates a *ClientConn from a net.Conn.\n\nTransport.NewClientConn takes an address and dials a new net.Conn.\nWe don't currently provide a simple way for the user to provide a net.Conn and get a\n*ClientConn out of it (although we do let the user provide their own Transport.DialContext,\nwhich can be used to effectively do this).\n\nx/net/http2.Transport.NewClientConn, in contrast, requires the user to provide a net.Conn.\nTo support implementing the x/net/http2 NewClientConn in terms of a net/http.Transport,\nwe permit x/net/http2 to pass us a net.Conn via a context key.\n\nhttp2NewClientConnFromContext handles extracting the net.Conn from the Context\n(when present) and creating a *ClientConn from it.\n" [^{:tag (* Transport)} t ^context/Context ctx] :results [(* ClientConn) error]
+  (when (== (.-h2Config t) nil)
+    (return nil errors/ErrUnsupported))
+
+  (let [nc (.ConnFromContext (.-h2Config t) ctx)]
+    (when (== nc nil)
+      (return nil errors/ErrUnsupported))
+
+    (when (== (.-h2Transport t) nil)
+      (return nil (errors/New "http: Transport does not support HTTP/2")))
+
+    (let [cc (addr (lit ClientConn))
+        (values gc err) (.http2NewClientConn t nc (.-maybeRunStateHook cc))]
+      (when (!= err nil)
+        (return nil err))
+
+      (.Lock (.-stateHookMu cc))
+      (defer (.Unlock (.-stateHookMu cc)))
+      (set! (.-cc cc) gc)
+      (set! (.-lastAvailable cc) (.Available gc))
+      (return cc nil))))
+
+
+
+
+
+
+
+
+
+^{:go/end 430} (go/method http2ExternalDial "http2ExternalDial creates a new HTTP/2 connection,\nusing the x/net/http2.Transport's dial functions.\n\nThis is used when the user has called x/net/http2.Transport.RoundTrip.\nIf the RoundTrip needs to create a new connection,\nthe historical behavior is for it to use the http2.Transport's DialTLS or DialTLSContext\nfunctions, and not any dial functions on the http.Transport.\n" [^{:tag (* Transport)} t ^context/Context ctx ^connectMethod cm] :results [RoundTripper error]
+  (when (== (.-h2Config t) nil)
+    (return nil errors/ErrUnsupported))
+
+  (let [(values nc err) (.DialFromContext (.-h2Config t) ctx "tcp" (.-targetAddr cm))]
+    (when (!= err nil)
+      (return nil err))
+
+    (.http2AddConn t (.-targetScheme cm) (.-targetAddr cm) nc)))
+
+
+(go/type http2RoundTripper (struct
+    ^{:line 433 :tag (* http2/Transport)} t
+    ^{:line 434 :tag bool} mapCachedConnErr))
+
+
+^{:go/end 446} (go/method RoundTrip [^http2RoundTripper rt ^{:tag (* Request)} req] :results [(* Response) error]
+  (let [(values resp err) (http2RoundTrip req (.-RoundTrip (.-t rt)))]
+    (when (!= err nil)
+      (when (and (.-mapCachedConnErr rt) (http2isNoCachedConnError err))
+        (set! err ErrSkipAltProtocol))
+
+      (return nil err))
+
+    (return resp nil)))
+
+
+(go/type http2ClientConn (struct
+    ^{:line 449} http2/NetHTTPClientConn))
+
+
+^{:go/end 454} (go/method RoundTrip [^http2ClientConn cc ^{:tag (* Request)} req] :results [(* Response) error]
+  (http2RoundTrip req (.-RoundTrip (.-NetHTTPClientConn cc))))
+
+
+
+
+
+
+
+(go/type transportConfig "transportConfig implements the http2.TransportConfig interface,\nproviding the net/http Transport's configuration to the HTTP/2 implementation.\n\nWhen an x/net/http2 Transport has provided a configuration (see http2ExternalTransportConfig),\nthe transportConfig merges the x/net/http2 and net/http Transport configurations.\n" (struct
+    ^{:line 462 :tag (* Transport)} t))
+
+
+^{:go/end 465} (go/method MaxResponseHeaderBytes ^int64 [^transportConfig t] (.-MaxResponseHeaderBytes (.-t t)))
+^{:go/end 466} (go/method DisableKeepAlives ^bool [^transportConfig t] (.-DisableKeepAlives (.-t t)))
+^{:go/end 467} (go/method ExpectContinueTimeout ^time/Duration [^transportConfig t] (.-ExpectContinueTimeout (.-t t)))
+^{:go/end 468} (go/method ResponseHeaderTimeout ^time/Duration [^transportConfig t] (.-ResponseHeaderTimeout (.-t t)))
+
+^{:go/breaks [[4 474]] :go/end 475} (go/method MaxHeaderListSize ^int64 [^transportConfig t]
+  (when (!= (.-h2Config (.-t t)) nil)
+    (return (.MaxHeaderListSize (.-h2Config (.-t t)))))
+
+  0)
+
+
+^{:go/end 482} (go/method DisableCompression ^bool [^transportConfig t]
+  (when (and (!= (.-h2Config (.-t t)) nil) (.DisableCompression (.-h2Config (.-t t))))
+    (return true))
+
+  (.-DisableCompression (.-t t)))
+
+
+^{:go/end 493} (go/method IdleConnTimeout ^time/Duration [^transportConfig t]
+  ;; Unlike most config settings, historically IdleConnTimeout prefers the
+  ;; http2.Transport's setting over the http.Transport.
+  (when (!= (.-h2Config (.-t t)) nil)
+    (when [timeout (.IdleConnTimeout (.-h2Config (.-t t)))] (!= timeout 0)
+      (return timeout)))
+
+
+  (.-IdleConnTimeout (.-t t)))
+
+
+(go/type http2Configer (interface
+    (HTTP2Config ^HTTP2Config [])))
+
+
+^{:go/end 548} (go/func mergeHTTP2Config ^http2/Config [^{:tag (* HTTP2Config)} c1 ^http2Configer confer]
+  (when (and (== c1 nil) (== confer nil))
+    (return (lit http2/Config)))
+
+  (let [^http2/Config c (zero http2/Config)]
+    (when (!= c1 nil)
+      (set! c (conv http2/Config @c1)))
+
+    (let [^HTTP2Config c2 (zero HTTP2Config)]
+      (when (!= confer nil)
+        (set! c2 (.HTTP2Config confer)))
+
+      (when (== (.-MaxConcurrentStreams c) 0)
+        (set! (.-MaxConcurrentStreams c) (.-MaxConcurrentStreams c2)))
+
+      (when (.-StrictMaxConcurrentRequests c2)
+        (set! (.-StrictMaxConcurrentRequests c) true))
+
+      (when (== (.-MaxDecoderHeaderTableSize c) 0)
+        (set! (.-MaxDecoderHeaderTableSize c) (.-MaxDecoderHeaderTableSize c2)))
+
+      (when (== (.-MaxEncoderHeaderTableSize c) 0)
+        (set! (.-MaxEncoderHeaderTableSize c) (.-MaxEncoderHeaderTableSize c2)))
+
+      (when (== (.-MaxReadFrameSize c) 0)
+        (set! (.-MaxReadFrameSize c) (.-MaxReadFrameSize c2)))
+
+      (when (== (.-MaxReceiveBufferPerConnection c) 0)
+        (set! (.-MaxReceiveBufferPerConnection c) (.-MaxReceiveBufferPerConnection c2)))
+
+      (when (== (.-MaxReceiveBufferPerStream c) 0)
+        (set! (.-MaxReceiveBufferPerStream c) (.-MaxReceiveBufferPerStream c2)))
+
+      (when (== (.-SendPingTimeout c) 0)
+        (set! (.-SendPingTimeout c) (.-SendPingTimeout c2)))
+
+      (when (== (.-PingTimeout c) 0)
+        (set! (.-PingTimeout c) (.-PingTimeout c2)))
+
+      (when (== (.-WriteByteTimeout c) 0)
+        (set! (.-WriteByteTimeout c) (.-WriteByteTimeout c2)))
+
+      (when (.-PermitProhibitedCipherSuites c2)
+        (set! (.-PermitProhibitedCipherSuites c) true))
+
+      (when (== (.-CountError c) nil)
+        (set! (.-CountError c) (.-CountError c2)))
+
+      ^{:line 547} c)))
+
+
+^{:go/end 552} (go/method HTTP2Config ^http2/Config [^transportConfig t]
+  (mergeHTTP2Config (.-HTTP2 (.-t t)) (.-h2Config (.-t t))))
+
+
+
+
+
+
+^{:go/end 561} (go/func ^{:go/linkname "transportFromH1Transport net/http/internal/http2_test.transportFromH1Transport"} transportFromH1Transport "transportFromH1Transport provides a way for HTTP/2 tests to extract\nthe http2.Transport from an http.Transport.\n" ^any [^{:tag (* Transport)} t]
+  (.Do (.-nextProtoOnce t) (.-onceSetNextProtoDefaults t))
+  (.-h2Transport t))

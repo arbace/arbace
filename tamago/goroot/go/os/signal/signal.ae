@@ -1,0 +1,362 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.os.signal) (go/file "signal.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [os "os"]
+    ^{:line 10} [slices "slices"]
+    ^{:line 11} [sync "sync"]])
+
+
+(go/var ^{:tag (struct sync/Mutex ^{:tag (map (chan :send os/Signal) (* handler)) :doc "Map a channel to the signals that should be sent to it.\n"} m ^{:tag (array numSig int64) :doc "Map a signal to the number of channels receiving it.\n"} ref ^{:tag (slice stopping) :doc "Map channels to signals while the channel is being stopped.\nNot a map because entries live here only very briefly.\nWe need a separate container because we need m to correspond to ref\nat all times, and we also need to keep track of the *handler\nvalue for a channel being stopped. See the Stop function.\n"} stopping)} handlers)
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type stopping (struct
+    ^{:line 29 :tag (chan :send os/Signal)} c
+    ^{:line 30 :tag (* handler)} h))
+
+
+(go/type handler (struct
+    ^{:line 34 :tag (array (/ (+ numSig 31) 32) uint32)} mask))
+
+
+^{:go/end 39} (go/method want ^bool [^{:tag (* handler)} h ^int sig]
+  (!= (bit-and (>> (aget (.-mask h) (/ sig 32)) (conv uint (bit-and sig 31))) 1) 0))
+
+
+^{:go/end 43} (go/method set [^{:tag (* handler)} h ^int sig]
+  (set! (aget (.-mask h) (/ sig 32)) bit-or ^uint32 (<< 1 (conv uint (bit-and sig 31)))))
+
+
+^{:go/end 47} (go/method clear [^{:tag (* handler)} h ^int sig]
+  (set! (aget (.-mask h) (/ sig 32)) bit-and-not ^uint32 (<< 1 (conv uint (bit-and sig 31)))))
+
+
+
+
+
+^{:go/end 85} (go/func cancel "Stop relaying the signals, sigs, to any channels previously registered to\nreceive them and either reset the signal handlers to their original values\n(action=disableSignal) or ignore the signals (action=ignoreSignal).\n" [^{:tag (slice os/Signal)} sigs ^{:tag (func [int])} action]
+  ^{:go/via [Mutex]} (.Lock handlers)
+  (defer ^{:go/via [Mutex]} (.Unlock handlers))
+
+  (let [remove ^{:go/end 74} (fn [^int n]
+        (when (< n 0)
+          (return))
+
+
+        (let [^handler zerohandler (zero handler)]
+
+          (range [c h (.-m handlers)]
+            (when (.want h n)
+              (dec! (aget (.-ref handlers) n))
+              (.clear h n)
+              (when (== (.-mask h) (.-mask zerohandler))
+                (delete (.-m handlers) c))))
+
+
+
+
+          (action n)))]
+
+
+    (if (== (len sigs) 0)
+      (for [n 0] (< n numSig) (inc! n)
+        (remove n))
+
+
+      (range [_ s sigs]
+        (remove (signum s))))))
+
+
+
+
+
+
+
+
+^{:go/end 93} (go/func Ignore "Ignore causes the provided signals to be ignored. If they are received by\nthe program, nothing will happen. Ignore undoes the effect of any prior\ncalls to [Notify] for the provided signals.\nIf no signals are provided, all incoming signals will be ignored.\n" [& ^{:tag (slice os/Signal)} sig]
+  (cancel sig ignoreSignal))
+
+
+
+^{:go/end 99} (go/func Ignored "Ignored reports whether sig is currently ignored.\n" ^bool [^os/Signal sig]
+  (let [sn (signum sig)]
+    (and (>= sn 0) (signalIgnored sn))))
+
+
+(go/var
+
+
+
+
+  ^{:line 106} [^{:tag sync/Once :doc "watchSignalLoopOnce guards calling the conditionally\ninitialized watchSignalLoop. If watchSignalLoop is non-nil,\nit will be run in a goroutine lazily once Notify is invoked.\nSee Issue 21576.\n"} watchSignalLoopOnce]
+  ^{:line 107} [^{:tag (func [])} watchSignalLoop])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 181} (go/func Notify "Notify causes package signal to relay incoming signals to c.\nIf no signals are provided, all incoming signals will be relayed to c.\nOtherwise, just the provided signals will.\n\nPackage signal will not block sending to c: the caller must ensure\nthat c has sufficient buffer space to keep up with the expected\nsignal rate. For a channel used for notification of just one signal value,\na buffer of size 1 is sufficient.\n\nIt is allowed to call Notify multiple times with the same channel:\neach call expands the set of signals sent to that channel.\nThe only way to remove signals from the set is to call [Stop].\n\nIt is allowed to call Notify multiple times with different channels\nand the same signals: each channel receives copies of incoming\nsignals independently.\n" [^{:tag (chan :send os/Signal)} c & ^{:tag (slice os/Signal)} sig]
+  (when (== c nil)
+    (panic "os/signal: Notify using nil channel"))
+
+
+  ^{:go/via [Mutex]} (.Lock handlers)
+  (defer ^{:go/via [Mutex]} (.Unlock handlers))
+
+  ;; Lazily create the handler. If all of the signals are bogus there is
+  ;; no need to install a handler at all.
+  (let [getHandler ^{:go/end 147} (fn ^{:tag (* handler)} []
+        (let [h (aget (.-m handlers) c)]
+          (when (== h nil)
+            (when (== (.-m handlers) nil)
+              (set! (.-m handlers) (make (map (chan :send os/Signal) (* handler)))))
+
+            (set! h (new handler))
+            (aset (.-m handlers) c h))
+
+
+          ^{:line 146} h))
+
+
+      ^{:line 149} add ^{:go/end 170} (fn [^int n]
+        (when (< n 0)
+          (return))
+
+
+        (let [h (getHandler)]
+          (when (not (.want h n))
+            (.set h n)
+            (when (== (aget (.-ref handlers) n) 0)
+              (enableSignal n)
+
+              ;; The runtime requires that we enable a
+              ;; signal before starting the watcher.
+              (.Do watchSignalLoopOnce ^{:go/end 166} (fn []
+                  (when (!= watchSignalLoop nil)
+                    (go (watchSignalLoop))))))
+
+
+
+            (inc! (aget (.-ref handlers) n)))))]
+
+
+
+    (if (== (len sig) 0)
+      (for [n 0] (< n numSig) (inc! n)
+        (add n))
+
+
+      (range [_ s sig]
+        (add (signum s))))))
+
+
+
+
+
+
+
+^{:go/end 188} (go/func Reset "Reset undoes the effect of any prior calls to [Notify] for the provided\nsignals.\nIf no signals are provided, all signal handlers will be reset.\n" [& ^{:tag (slice os/Signal)} sig]
+  (cancel sig disableSignal))
+
+
+
+
+
+^{:go/end 239} (go/func Stop "Stop causes package signal to stop relaying incoming signals to c.\nIt undoes the effect of all prior calls to [Notify] using c.\nWhen Stop returns, it is guaranteed that c will receive no more signals.\n" [^{:tag (chan :send os/Signal)} c]
+  ^{:go/via [Mutex]} (.Lock handlers)
+
+  (let [h (aget (.-m handlers) c)]
+    (when (== h nil)
+      ^{:go/via [Mutex]} (.Unlock handlers)
+      (return))
+
+    (delete (.-m handlers) c)
+
+    (for [n 0] (< n numSig) (inc! n)
+      (when (.want h n)
+        (dec! (aget (.-ref handlers) n))
+        (when (== (aget (.-ref handlers) n) 0)
+          (disableSignal n))))
+
+
+
+
+    ;; Signals will no longer be delivered to the channel.
+    ;; We want to avoid a race for a signal such as SIGINT:
+    ;; it should be either delivered to the channel,
+    ;; or the program should take the default action (that is, exit).
+    ;; To avoid the possibility that the signal is delivered,
+    ;; and the signal handler invoked, and then Stop deregisters
+    ;; the channel before the process function below has a chance
+    ;; to send it on the channel, put the channel on a list of
+    ;; channels being stopped and wait for signal delivery to
+    ;; quiesce before fully removing it.
+
+    (set! (.-stopping handlers) (append (.-stopping handlers) (lit stopping c h)))
+
+    ^{:go/via [Mutex]} (.Unlock handlers)
+
+    (signalWaitUntilIdle)
+
+    ^{:go/via [Mutex]} (.Lock handlers)
+
+    (range [i s (.-stopping handlers)]
+      (when (== (.-c s) c)
+        (set! (.-stopping handlers) (^{:inst [(slice stopping) stopping]} slices/Delete (.-stopping handlers) i (+ i 1)))
+        (break)))
+
+
+
+    ^{:go/via [Mutex]} (.Unlock handlers)))
+
+
+
+
+(go/func ^:extern signalWaitUntilIdle "Wait until there are no more signals waiting to be delivered.\nDefined by the runtime package.\n" [])
+
+^{:go/end 273} (go/func process [^os/Signal sig]
+  (let [n (signum sig)]
+    (when (< n 0)
+      (return))
+
+
+    ^{:go/via [Mutex]} (.Lock handlers)
+    (defer ^{:go/via [Mutex]} (.Unlock handlers))
+
+    (range [c h (.-m handlers)]
+      (when (.want h n)
+        ;; send but do not block for it
+        (select
+          (case (>! c sig))
+          (default))))
+
+
+
+
+    ;; Avoid the race mentioned in Stop.
+    (range [_ d (.-stopping handlers)]
+      (when (.want (.-h d) n)
+        (select
+          (case (>! (.-c d) sig))
+          (default))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 312} (go/func NotifyContext "NotifyContext returns a copy of the parent context that is marked done\n(its Done channel is closed) when one of the listed signals arrives,\nwhen the returned stop function is called, or when the parent context's\nDone channel is closed, whichever happens first.\n\nThe stop function unregisters the signal behavior, which, like [signal.Reset],\nmay restore the default behavior for a given signal. For example, the default\nbehavior of a Go program receiving [os.Interrupt] is to exit. Calling\nNotifyContext(parent, os.Interrupt) will change the behavior to cancel\nthe returned context. Future interrupts received will not trigger the default\n(exit) behavior until the returned stop function is called.\n\nIf a signal causes the returned context to be canceled, calling\n[context.Cause] on it will return an error describing the signal.\n\nThe stop function releases resources associated with it, so code should\ncall stop as soon as the operations running in this Context complete and\nsignals no longer need to be diverted to the context.\n" [^context/Context parent & ^{:tag (slice os/Signal)} signals] :results [^context/Context ctx ^context/CancelFunc stop]
+  (let [(values ^:assign ctx cancel) (context/WithCancelCause parent)
+      ^{:line 295} c (addr ^{:go/breaks [2 4 6]} (lit signalCtx
+          :Context ctx
+          :cancel cancel
+          :signals signals))]
+
+    (set! (.-ch c) (make (chan os/Signal) 1))
+    (Notify (.-ch c) (spread (.-signals c)))
+    (when (== (.Err ctx) nil)
+      (go (^{:go/end 309} (fn []
+            (select
+              (case [s (<! (.-ch c))]
+                ((.-cancel c) (conv signalError (+ (.String s) " signal received"))))
+              (case (<! ^{:go/via [Context]} (.Done c))))))))
+
+
+
+    (return c (.-stop c))))
+
+
+(go/type signalCtx (struct
+    ^{:line 315} context/Context
+
+    ^{:line 317 :tag context/CancelCauseFunc} cancel
+    ^{:line 318 :tag (slice os/Signal)} signals
+    ^{:line 319 :tag (chan os/Signal)} ch))
+
+
+^{:go/end 325} (go/method stop [^{:tag (* signalCtx)} c]
+  ((.-cancel c) nil)
+  (Stop (.-ch c)))
+
+
+(go/type stringer (interface
+    (String ^string [])))
+
+
+^{:go/end 350} (go/method String ^string [^{:tag (* signalCtx)} c]
+  (let [^{:tag (slice byte)} buf (zero (slice byte))
+      ;; We know that the type of c.Context is context.cancelCtx, and we know that the
+      ;; String method of cancelCtx returns a string that ends with ".WithCancel".
+      ^{:line 335} name (.String (assert stringer (.-Context c)))]
+    (set! name (subslice name _ (- (len name) (len ".WithCancel"))))
+    (set! buf (append buf (spread (+ "signal.NotifyContext(" name))))
+    (when (!= (len (.-signals c)) 0)
+      (set! buf (append buf (spread ", [")))
+      (range [i s (.-signals c)]
+        (set! buf (append buf (spread (.String s))))
+        (when (!= i (- (len (.-signals c)) 1))
+          (set! buf (append buf \space))))
+
+
+      (set! buf (append buf \])))
+
+    (set! buf (append buf \)))
+    (conv string buf)))
+
+
+(go/type signalError string)
+
+^{:go/end 356} (go/method Error ^string [^signalError s]
+  (conv string s))
+
+
+^{:go/breaks [[4 362]] :go/end 363} (go/method Is ^bool [^signalError s ^error target]
+  (when (== target context/Canceled)
+    (return true))
+
+  false)

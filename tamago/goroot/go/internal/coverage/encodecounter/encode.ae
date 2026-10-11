@@ -1,0 +1,293 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.coverage.encodecounter) (go/file "encode.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [coverage "internal/coverage"]
+    ^{:line 12} [slicewriter "internal/coverage/slicewriter"]
+    ^{:line 13} [stringtab "internal/coverage/stringtab"]
+    ^{:line 14} [uleb128 "internal/coverage/uleb128"]
+    ^{:line 15} [io "io"]
+    ^{:line 16} [maps "maps"]
+    ^{:line 17} [os "os"]
+    ^{:line 18} [slices "slices"]])
+
+
+;; This package contains APIs and helpers for encoding initial portions
+;; of the counter data files emitted at runtime when coverage instrumentation
+;; is enabled.  Counter data files may contain multiple segments; the file
+;; header and first segment are written via the "Write" method below, and
+;; additional segments can then be added using "AddSegment".
+
+(go/type CoverageDataWriter (struct
+    ^{:line 28 :tag (* stringtab/Writer)} stab
+    ^{:line 29 :tag (* bufio/Writer)} w
+    ^{:line 30 :tag coverage/CounterSegmentHeader} csh
+    ^{:line 31 :tag (slice byte)} tmp
+    ^{:line 32 :tag coverage/CounterFlavor} cflavor
+    ^{:line 33 :tag uint32} segs
+    ^{:line 34 :tag bool} debug))
+
+
+^{:go/end 48} (go/func NewCoverageDataWriter ^{:tag (* CoverageDataWriter)} [^io/Writer w ^coverage/CounterFlavor flav]
+  (let [r (addr ^{:go/breaks [2 4 [6 42] 8]} (lit CoverageDataWriter
+          :stab (addr (lit stringtab/Writer))
+          :w (bufio/NewWriter w)
+
+          :tmp (make (slice byte) 64)
+          :cflavor flav))]
+
+    (.InitWriter (.-stab r))
+    (.Lookup (.-stab r) "")
+    ^{:line 47} r))
+
+
+
+
+
+
+
+(go/type CounterVisitor "CounterVisitor describes a helper object used during counter file\nwriting; when writing counter data files, clients pass a\nCounterVisitor to the write/emit routines, then the expectation is\nthat the VisitFuncs method will then invoke the callback \"f\" with\ndata for each function to emit to the file.\n" (interface
+    (VisitFuncs ^error [^CounterVisitorFn f])))
+
+
+
+
+(go/type CounterVisitorFn "CounterVisitorFn describes a callback function invoked when writing\ncoverage counter data.\n" (func [^uint32 pkid ^uint32 funcid ^{:tag (slice uint32)} counters] [error]))
+
+
+
+
+^{:go/end 71} (go/method Write "Write writes the contents of the count-data file to the writer\npreviously supplied to NewCoverageDataWriter. Returns an error\nif something went wrong somewhere with the write.\n" ^error [^{:tag (* CoverageDataWriter)} cfw ^{:tag (array 16 byte)} metaFileHash ^{:tag (map string string)} args ^CounterVisitor visitor]
+  (when [err (.writeHeader cfw metaFileHash)] (!= err nil)
+    (return err))
+
+  (.AppendSegment cfw args visitor))
+
+
+^{:go/end 86} (go/func padToFourByteBoundary ^error [^{:tag (* slicewriter/WriteSeeker)} ws]
+  ^{:go/breaks [[3 85]]} (let [sz (len (.BytesWritten ws))
+      ^{:line 75} zeros (lit (slice byte) 0 0 0 0)
+      ^{:line 76} rem (% (conv uint32 sz) 4)]
+    (when (!= rem 0)
+      (let [pad (subslice zeros _ (- 4 rem))]
+        (if [(values nw err) (.Write ws pad)] (!= err nil)
+          (return err)
+          (when (!= nw (len pad))
+            (return (fmt/Errorf "error: short write"))))))
+
+
+    nil))
+
+
+^{:go/end 109} (go/method patchSegmentHeader ^error [^{:tag (* CoverageDataWriter)} cfw ^{:tag (* slicewriter/WriteSeeker)} ws]
+  ;; record position
+  ^{:go/breaks [[7 108]]} (let [(values off err) (.Seek ws 0 io/SeekCurrent)]
+    (when (!= err nil)
+      (return (fmt/Errorf "error seeking in patchSegmentHeader: %v" err)))
+
+    ;; seek back to start so that we can update the segment header
+    (when [(values _ err) (.Seek ws 0 io/SeekStart)] (!= err nil)
+      (return (fmt/Errorf "error seeking in patchSegmentHeader: %v" err)))
+
+    (when (.-debug cfw)
+      (fmt/Fprintf os/Stderr "=-= writing counter segment header: %+v" (.-csh cfw)))
+
+    (when [err (binary/Write ws binary/LittleEndian (.-csh cfw))] (!= err nil)
+      (return err))
+
+    ;; ... and finally return to the original offset.
+    (when [(values _ err) (.Seek ws off io/SeekStart)] (!= err nil)
+      (return (fmt/Errorf "error seeking in patchSegmentHeader: %v" err)))
+
+    nil))
+
+
+^{:go/end 159} (go/method writeSegmentPreamble ^error [^{:tag (* CoverageDataWriter)} cfw ^{:tag (map string string)} args ^{:tag (* slicewriter/WriteSeeker)} ws]
+  (when [err (binary/Write ws binary/LittleEndian (.-csh cfw))] (!= err nil)
+    (return err))
+
+  (let [hdrsz (conv uint32 (len (.BytesWritten ws)))]
+
+    ;; Write string table and args to a byte slice (since we need
+    ;; to capture offsets at various points), then emit the slice
+    ;; once we are done.
+    (.Freeze (.-stab cfw))
+    (when [err (.Write (.-stab cfw) ws)] (!= err nil)
+      (return err))
+
+    (set! (.-StrTabLen (.-csh cfw)) (- (conv uint32 (len (.BytesWritten ws))) hdrsz))
+
+    ^{:go/breaks [[6 158]]} (let [akeys (^{:inst [string]} slices/Sorted (^{:inst [(map string string) string string]} maps/Keys args))
+
+        ^{:line 128} wrULEB128 ^{:go/breaks [[5 134]] :go/end 135} (fn ^error [^uint v]
+          (set! (.-tmp cfw) (subslice (.-tmp cfw) _ 0))
+          (set! (.-tmp cfw) (uleb128/AppendUleb128 (.-tmp cfw) v))
+          (when [(values _ err) (.Write ws (.-tmp cfw))] (!= err nil)
+            (return err))
+
+          nil)]
+
+
+      ;; Count of arg pairs.
+      (when [err (wrULEB128 (conv uint (len args)))] (!= err nil)
+        (return err))
+
+      ;; Arg pairs themselves.
+      (range [_ k akeys]
+        (let [ki (conv uint (.Lookup (.-stab cfw) k))]
+          (when [err (wrULEB128 ki)] (!= err nil)
+            (return err))
+
+          (let [v (aget args k)
+              ^{:line 148} vi (conv uint (.Lookup (.-stab cfw) v))]
+            (when [err (wrULEB128 vi)] (!= err nil)
+              (return err)))))
+
+
+      (when [err (padToFourByteBoundary ws)] (!= err nil)
+        (return err))
+
+      (set! (.-ArgsLen (.-csh cfw)) (- (conv uint32 (len (.BytesWritten ws))) (+ (.-StrTabLen (.-csh cfw)) hdrsz)))
+
+      nil)))
+
+
+
+
+^{:go/end 195} (go/method AppendSegment "AppendSegment appends a new segment to a counter data, with a new\nargs section followed by a payload of counter data clauses.\n" ^error [^{:tag (* CoverageDataWriter)} cfw ^{:tag (map string string)} args ^CounterVisitor visitor]
+  (set! (.-stab cfw) (addr (lit stringtab/Writer)))
+  (.InitWriter (.-stab cfw))
+  (.Lookup (.-stab cfw) "")
+
+  (let [^error err (zero error)]
+    (range [k v args]
+      (.Lookup (.-stab cfw) k)
+      (.Lookup (.-stab cfw) v))
+
+
+    ^{:go/breaks [9]} (let [ws (addr (lit slicewriter/WriteSeeker))]
+      (when [(set! err (.writeSegmentPreamble cfw args ws))] (!= err nil)
+        (return err))
+
+      (when [(set! err (.writeCounters cfw visitor ws))] (!= err nil)
+        (return err))
+
+      (when [(set! err (.patchSegmentHeader cfw ws))] (!= err nil)
+        (return err))
+
+      (when [err (.writeBytes cfw (.BytesWritten ws))] (!= err nil)
+        (return err))
+
+      (when [(set! err (.writeFooter cfw))] (!= err nil)
+        (return err))
+
+      (when [err (.Flush (.-w cfw))] (!= err nil)
+        (return (fmt/Errorf "write error: %v" err)))
+
+      (set! (.-stab cfw) nil)
+      nil)))
+
+
+^{:go/end 210} (go/method writeHeader ^error [^{:tag (* CoverageDataWriter)} cfw ^{:tag (array 16 byte)} metaFileHash]
+  ;; Emit file header.
+  ^{:go/breaks [[3 209]]} (let [ch ^{:go/breaks [2 4 6 8 10]} (lit coverage/CounterFileHeader
+        :Magic coverage/CovCounterMagic
+        :Version coverage/CounterFileVersion
+        :MetaHash metaFileHash
+        :CFlavor (.-cflavor cfw)
+        :BigEndian false)]
+
+    (when [err (binary/Write (.-w cfw) binary/LittleEndian ch)] (!= err nil)
+      (return err))
+
+    nil))
+
+
+^{:go/end 224} (go/method writeBytes ^error [^{:tag (* CoverageDataWriter)} cfw ^{:tag (slice byte)} b]
+  (when (== (len b) 0)
+    (return nil))
+
+  ^{:go/breaks [[4 223]]} (let [(values nw err) (.Write (.-w cfw) b)]
+    (when (!= err nil)
+      (return (fmt/Errorf "error writing counter data: %v" err)))
+
+    (when (!= (len b) nw)
+      (return (fmt/Errorf "error writing counter data: short write")))
+
+    nil))
+
+
+^{:go/end 282} (go/method writeCounters ^error [^{:tag (* CoverageDataWriter)} cfw ^CounterVisitor visitor ^{:tag (* slicewriter/WriteSeeker)} ws]
+  ;; Notes:
+  ;; - this version writes everything little-endian, which means
+  ;;   a call is needed to encode every value (expensive)
+  ;; - we may want to move to a model in which we just blast out
+  ;;   all counters, or possibly mmap the file and do the write
+  ;;   implicitly.
+  ^{:go/breaks [[3 281]]} (let [ctrb (make (slice byte) 4)
+      ^{:line 234} wrval ^{:go/end 255} (fn ^error [^uint32 val]
+        ^{:go/breaks [[4 254]]} (let [^{:tag (slice byte)} buf (zero (slice byte))
+            ^{:line 236 :tag int} towr (zero int)]
+          (cond (== (.-cflavor cfw) coverage/CtrRaw) (do
+              (.PutUint32 binary/LittleEndian ctrb val)
+              (set! buf ctrb)
+              (set! towr 4))
+            (== (.-cflavor cfw) coverage/CtrULeb128) (do
+              (set! (.-tmp cfw) (subslice (.-tmp cfw) _ 0))
+              (set! (.-tmp cfw) (uleb128/AppendUleb128 (.-tmp cfw) (conv uint val)))
+              (set! buf (.-tmp cfw))
+              (set! towr (len buf))) :else
+
+            (panic "internal error: bad counter flavor"))
+
+          (if [(values sz err) (.Write ws buf)] (!= err nil)
+            (return err)
+            (when (!= sz towr)
+              (return (fmt/Errorf "writing counters: short write"))))
+
+          nil))
+
+
+      ;; Write out entries for each live function.
+      ^{:line 258} emitter ^{:go/breaks [[7 276]] :go/end 277} (fn ^error [^uint32 pkid ^uint32 funcid ^{:tag (slice uint32)} counters]
+        (inc! (.-FcnEntries (.-csh cfw)))
+        (when [err (wrval (conv uint32 (len counters)))] (!= err nil)
+          (return err))
+
+
+        (when [err (wrval pkid)] (!= err nil)
+          (return err))
+
+
+        (when [err (wrval funcid)] (!= err nil)
+          (return err))
+
+        (range [_ val counters]
+          (when [err (wrval val)] (!= err nil)
+            (return err)))
+
+
+        nil)]
+
+    (when [err (.VisitFuncs visitor emitter)] (!= err nil)
+      (return err))
+
+    nil))
+
+
+^{:go/end 294} (go/method writeFooter ^error [^{:tag (* CoverageDataWriter)} cfw]
+  (inc! (.-segs cfw))
+  ^{:go/breaks [[3 293]]} (let [cf ^{:go/breaks [2 4]} (lit coverage/CounterFileFooter
+        :Magic coverage/CovCounterMagic
+        :NumSegments (.-segs cfw))]
+
+    (when [err (binary/Write (.-w cfw) binary/LittleEndian cf)] (!= err nil)
+      (return err))
+
+    nil))

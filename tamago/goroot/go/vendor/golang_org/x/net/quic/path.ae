@@ -1,0 +1,86 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "path.go" :imports [
+
+    ^{:line 7} [time "time"]])
+
+(go/type pathState (struct
+
+
+
+
+
+    ^{:line 15 :tag pathResponseType :doc "Response to a peer's PATH_CHALLENGE.\nThis is not a sentVal, because we don't resend lost PATH_RESPONSE frames.\nWe only track the most recent PATH_CHALLENGE.\nIf the peer sends a second PATH_CHALLENGE before we respond to the first,\nwe'll drop the first response.\n"} sendPathResponse
+    ^{:line 16 :tag pathChallengeData} data))
+
+
+
+(go/type pathChallengeData "pathChallengeData is data carried in a PATH_CHALLENGE or PATH_RESPONSE frame.\n" (array (/ 64 8) byte))
+
+(go/type pathResponseType uint8)
+
+(go/const
+  ^{:line 25} [^{:val 0} pathResponseNotNeeded (conv pathResponseType iota)]
+  ^{:line 26} [^{:val 1} pathResponseSmall] ; send PATH_RESPONSE, do not expand datagram
+  ^{:line 27} [^{:val 2} pathResponseExpanded]) ; send PATH_RESPONSE, expand datagram to 1200 bytes
+
+
+^{:go/end 52} (go/method handlePathChallenge [^{:tag (* Conn)} c ^time/Time _ ^{:tag (* datagram)} dgram ^pathChallengeData data]
+  ;; A PATH_RESPONSE is sent in a datagram expanded to 1200 bytes,
+  ;; except when this would exceed the anti-amplification limit.
+  ;;
+  ;; Rather than maintaining anti-amplification state for each path
+  ;; we may be sending a PATH_RESPONSE on, follow the following heuristic:
+  ;;
+  ;; If we receive a PATH_CHALLENGE in an expanded datagram,
+  ;; respond with an expanded datagram.
+  ;;
+  ;; If we receive a PATH_CHALLENGE in a non-expanded datagram,
+  ;; then the peer is presumably blocked by its own anti-amplification limit.
+  ;; Respond with a non-expanded datagram. Receiving this PATH_RESPONSE
+  ;; will validate the path to the peer, remove its anti-amplification limit,
+  ;; and permit it to send a followup PATH_CHALLENGE in an expanded datagram.
+  ;; https://www.rfc-editor.org/rfc/rfc9000.html#section-8.2.1
+  (if (>= (len (.-b dgram)) smallestMaxDatagramSize)
+    (set! (.-sendPathResponse (.-path c)) pathResponseExpanded)
+
+    (set! (.-sendPathResponse (.-path c)) pathResponseSmall))
+
+  (set! (.-data (.-path c)) data))
+
+
+^{:go/end 65} (go/method handlePathResponse [^{:tag (* Conn)} c ^time/Time now ^pathChallengeData _]
+  ;; "If the content of a PATH_RESPONSE frame does not match the content of
+  ;; a PATH_CHALLENGE frame previously sent by the endpoint,
+  ;; the endpoint MAY generate a connection error of type PROTOCOL_VIOLATION."
+  ;; https://www.rfc-editor.org/rfc/rfc9000.html#section-19.18-4
+  ;;
+  ;; We never send PATH_CHALLENGE frames.
+  (.abort c now ^{:go/breaks [2 4]} (lit localTransportError
+      :code errProtocolViolation
+      :reason "PATH_RESPONSE received when no PATH_CHALLENGE sent")))
+
+
+
+
+
+^{:go/end 87} (go/method appendPathFrames "appendPathFrames appends path validation related frames to the current packet.\nIf the return value pad is true, then the packet should be padded to 1200 bytes.\n" [^{:tag (* Conn)} c] :results [^bool pad ^bool ok]
+  (when (== (.-sendPathResponse (.-path c)) pathResponseNotNeeded)
+    (return pad true))
+
+  ;; We're required to send the PATH_RESPONSE on the path where the
+  ;; PATH_CHALLENGE was received (RFC 9000, Section 8.2.2).
+  ;;
+  ;; At the moment, we don't support path migration and reject packets if
+  ;; the peer changes its source address, so just sending the PATH_RESPONSE
+  ;; in a regular datagram is fine.
+  (when (not (.appendPathResponseFrame (.-w c) (.-data (.-path c))))
+    (return pad false))
+
+  (when (== (.-sendPathResponse (.-path c)) pathResponseExpanded)
+    (set! pad true))
+
+  (set! (.-sendPathResponse (.-path c)) pathResponseNotNeeded)
+  (return pad true))

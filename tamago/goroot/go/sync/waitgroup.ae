@@ -1,0 +1,258 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.sync) (go/file "waitgroup.go" :imports [
+
+
+    ^{:line 8} [race "internal/race"]
+    ^{:line 9} [synctest "internal/synctest"]
+    ^{:line 10} [atomic "sync/atomic"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type WaitGroup "A WaitGroup is a counting semaphore typically used to wait\nfor a group of goroutines or tasks to finish.\n\nTypically, a main goroutine will start tasks, each in a new\ngoroutine, by calling [WaitGroup.Go] and then wait for all tasks to\ncomplete by calling [WaitGroup.Wait]. For example:\n\n\tvar wg sync.WaitGroup\n\twg.Go(task1)\n\twg.Go(task2)\n\twg.Wait()\n\nA WaitGroup may also be used for tracking tasks without using Go to\nstart new goroutines by using [WaitGroup.Add] and [WaitGroup.Done].\n\nThe previous example can be rewritten using explicitly created\ngoroutines along with Add and Done:\n\n\tvar wg sync.WaitGroup\n\twg.Add(1)\n\tgo func() {\n\t\tdefer wg.Done()\n\t\ttask1()\n\t}()\n\twg.Add(1)\n\tgo func() {\n\t\tdefer wg.Done()\n\t\ttask2()\n\t}()\n\twg.Wait()\n\nThis pattern is common in code that predates [WaitGroup.Go].\n\nA WaitGroup must not be copied after first use.\n" (struct
+    ^{:line 49 :tag noCopy} noCopy
+
+
+
+
+
+    ^{:line 55 :tag atomic/Uint64 :doc "Bits (high to low):\n  bits[0:32]  counter\n  bits[32]    flag: synctest bubble membership\n  bits[33:64] wait count\n"} state
+    ^{:line 56 :tag uint32} sema))
+
+
+
+(go/const ^{:val 2147483648 :doc "waitGroupBubbleFlag indicates that a WaitGroup is associated with a synctest bubble.\n"} waitGroupBubbleFlag 0x80000000)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 144} (go/method Add "Add adds delta, which may be negative, to the [WaitGroup] task counter.\nIf the counter becomes zero, all goroutines blocked on [WaitGroup.Wait] are released.\nIf the counter goes negative, Add panics.\n\nCallers should prefer [WaitGroup.Go].\n\nNote that calls with a positive delta that occur when the counter is zero\nmust happen before a Wait. Calls with a negative delta, or calls with a\npositive delta that start when the counter is greater than zero, may happen\nat any time.\nTypically this means the calls to Add should execute before the statement\ncreating the goroutine or other event to be waited for.\nIf a WaitGroup is reused to wait for several independent sets of events,\nnew Add calls must happen after all previous Wait calls have returned.\nSee the WaitGroup example.\n" [^{:tag (* WaitGroup)} wg ^int delta]
+  (when race/Enabled
+    (when (< delta 0)
+      ;; Synchronize decrements with Wait.
+      (race/ReleaseMerge (conv unsafe/Pointer wg)))
+
+    (race/Disable)
+    (defer (race/Enable)))
+
+  (let [bubbled false]
+    (when (synctest/IsInBubble)
+      ;; If Add is called from within a bubble, then all Add calls must be made
+      ;; from the same bubble.
+      (switch (^{:inst [WaitGroup]} synctest/Associate wg)
+        (case [synctest/Unbubbled])
+        (case [synctest/OtherBubble]
+          ;; wg is already associated with a different bubble.
+          (fatal "sync: WaitGroup.Add called from multiple synctest bubbles"))
+        (case [synctest/CurrentBubble]
+          (set! bubbled true)
+          (let [state (.Or (.-state wg) waitGroupBubbleFlag)]
+            (when (and (!= state 0) (== (bit-and state waitGroupBubbleFlag) 0))
+              ;; Add has been called from outside this bubble.
+              (fatal "sync: WaitGroup.Add called from inside and outside synctest bubble"))))))
+
+
+
+    (let [state (.Add (.-state wg) (<< (conv uint64 delta) 32))]
+      (when (and (!= (bit-and state waitGroupBubbleFlag) 0) (not bubbled))
+        ;; Add has been called from within a synctest bubble (and we aren't in one).
+        (fatal "sync: WaitGroup.Add called from inside and outside synctest bubble"))
+
+      (let [v (conv int32 (>> state 32))
+          ^{:line 110} w (conv uint32 (bit-and state 0x7fffffff))]
+        (when (and race/Enabled (> delta 0) (== v (conv int32 delta)))
+          ;; The first increment must be synchronized with Wait.
+          ;; Need to model this as a read, because there can be
+          ;; several concurrent wg.counter transitions from 0.
+          (race/Read (conv unsafe/Pointer (addr (.-sema wg)))))
+
+        (when (< v 0)
+          (panic "sync: negative WaitGroup counter"))
+
+        (when (and (!= w 0) (> delta 0) (== v (conv int32 delta)))
+          (panic "sync: WaitGroup misuse: Add called concurrently with Wait"))
+
+        (when (or (> v 0) (== w 0))
+          (return))
+
+        ;; This goroutine has set counter to 0 when waiters > 0.
+        ;; Now there can't be concurrent mutations of state:
+        ;; - Adds must not happen concurrently with Wait,
+        ;; - Wait does not increment waiters if it sees counter == 0.
+        ;; Still do a cheap sanity check to detect WaitGroup misuse.
+        (when (!= (.Load (.-state wg)) state)
+          (panic "sync: WaitGroup misuse: Add called concurrently with Wait"))
+
+        ;; Reset waiters count to 0.
+        (.Store (.-state wg) 0)
+        (when bubbled
+          ;; Adds must not happen concurrently with wait when counter is 0,
+          ;; so we can safely disassociate wg from its current bubble.
+          (^{:inst [WaitGroup]} synctest/Disassociate wg))
+
+        (for [] (!= w 0) (dec! w)
+          (runtime_Semrelease (addr (.-sema wg)) false 0))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 157} (go/method Done "Done decrements the [WaitGroup] task counter by one.\nIt is equivalent to Add(-1).\n\nCallers should prefer [WaitGroup.Go].\n\nIn the terminology of [the Go memory model], a call to Done\n\"synchronizes before\" the return of any Wait call that it unblocks.\n\n[the Go memory model]: https://go.dev/ref/mem\n" [^{:tag (* WaitGroup)} wg]
+  (.Add wg -1))
+
+
+
+^{:go/end 218} (go/method Wait "Wait blocks until the [WaitGroup] task counter is zero.\n" [^{:tag (* WaitGroup)} wg]
+  (when race/Enabled
+    (race/Disable))
+
+  (while true
+    (let [state (.Load (.-state wg))
+        ^{:line 166} v (conv int32 (>> state 32))
+        ^{:line 167} w (conv uint32 (bit-and state 0x7fffffff))]
+      (when (== v 0)
+        ;; Counter is 0, no need to wait.
+        (when race/Enabled
+          (race/Enable)
+          (race/Acquire (conv unsafe/Pointer wg)))
+
+        (when (and (== w 0) (!= (bit-and state waitGroupBubbleFlag) 0) (^{:inst [WaitGroup]} synctest/IsAssociated wg))
+          ;; Adds must not happen concurrently with wait when counter is 0,
+          ;; so we can disassociate wg from its current bubble.
+          (when (.CompareAndSwap (.-state wg) state 0)
+            (^{:inst [WaitGroup]} synctest/Disassociate wg)))
+
+
+        (return))
+
+      ;; Increment waiters count.
+      (when (.CompareAndSwap (.-state wg) state (+ state 1))
+        (when (and race/Enabled (== w 0))
+          ;; Wait must be synchronized with the first Add.
+          ;; Need to model this is as a write to race with the read in Add.
+          ;; As a consequence, can do the write only for the first waiter,
+          ;; otherwise concurrent Waits will race with each other.
+          (race/Write (conv unsafe/Pointer (addr (.-sema wg)))))
+
+        (let [synctestDurable false]
+          (when (and (!= (bit-and state waitGroupBubbleFlag) 0) (synctest/IsInBubble))
+            (when race/Enabled
+              (race/Enable))
+
+            (when (^{:inst [WaitGroup]} synctest/IsAssociated wg)
+              ;; Add was called within the current bubble,
+              ;; so this Wait is durably blocking.
+              (set! synctestDurable true))
+
+            (when race/Enabled
+              (race/Disable)))
+
+
+          (runtime_SemacquireWaitGroup (addr (.-sema wg)) synctestDurable)
+          (let [isReset (!= (.Load (.-state wg)) 0)]
+            (when race/Enabled
+              (race/Enable)
+              (race/Acquire (conv unsafe/Pointer wg)))
+
+            (when isReset
+              (panic "sync: WaitGroup is reused before previous Wait has returned"))
+
+            (return)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 260} (go/method Go "Go calls f in a new goroutine and adds that task to the [WaitGroup].\nWhen f returns, the task is removed from the WaitGroup.\n\nThe function f must not panic.\n\nIf the WaitGroup is empty, Go must happen before a [WaitGroup.Wait].\nTypically, this simply means Go is called to start tasks before Wait is called.\nIf the WaitGroup is not empty, Go may happen at any time.\nThis means a goroutine started by Go may itself call Go.\nIf a WaitGroup is reused to wait for several independent sets of tasks,\nnew Go calls must happen after all previous Wait calls have returned.\n\nIn the terminology of [the Go memory model], the return from f\n\"synchronizes before\" the return of any Wait call that it unblocks.\n\n[the Go memory model]: https://go.dev/ref/mem\n" [^{:tag (* WaitGroup)} wg ^{:tag (func [])} f]
+  (.Add wg 1)
+  (go (^{:go/end 259} (fn []
+        (defer (^{:go/end 257} (fn []
+              (when [x (recover)] (!= x nil)
+                ;; f panicked, which will be fatal because
+                ;; this is a new goroutine.
+                ;;
+                ;; Calling Done will unblock Wait in the main goroutine,
+                ;; allowing it to race with the fatal panic and
+                ;; possibly even exit the process (os.Exit(0))
+                ;; before the panic completes.
+                ;;
+                ;; This is almost certainly undesirable,
+                ;; so instead avoid calling Done and simply panic.
+                (panic x))
+
+
+              ;; f completed normally, or abruptly using goexit.
+              ;; Either way, decrement the semaphore.
+              (.Done wg))))
+
+        (f)))))

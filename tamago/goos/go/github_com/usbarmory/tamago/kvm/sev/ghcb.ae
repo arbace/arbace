@@ -1,0 +1,233 @@
+;; AMD Secure Encrypted Virtualization support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.sev) (go/file "ghcb.go" :imports [
+
+
+    ^{:line 12} [binary "encoding/binary"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [fmt "fmt"]
+
+    ^{:line 16} [amd64 "github.com/usbarmory/tamago/amd64"]
+    ^{:line 17} [dma "github.com/usbarmory/tamago/dma"]])
+
+
+(go/const
+  ^{:line 21} [^{:val 9007199254740992} sharedPageOp (<< 2 52)]
+  ^{:line 22} [^{:val 4096} pageSize 4096])
+
+
+
+
+(go/const "SEV-ES Guest-Hypervisor Communication Block Standardization\n2.3.1 GHCB MSR Protocol.\n"
+  ^{:line 28} [^{:val 3221291312} MSR_AMD_GHCB 0xc0010130])
+
+
+
+
+(go/const "SEV-ES Guest-Hypervisor Communication Block Standardization\n2.6 GHCB Layout.\n"
+  ^{:line 34} [^{:val 504} RAX 0x01f8]
+  ^{:line 35} [^{:val 912} SW_EXITCODE 0x0390]
+  ^{:line 36} [^{:val 920} SW_EXITINFO1 0x0398]
+  ^{:line 37} [^{:val 928} SW_EXITINFO2 0x03a0]
+  ^{:line 38} [^{:val 936} SW_SCRATCH 0x03a8]
+  ^{:line 39} [^{:val 1008} VALID_BITMAP 0x03f0]
+
+  ^{:line 41} [^{:val 2048} SharedBuffer 0x0800]
+  ^{:line 42} [^{:val 2032} SharedBufferSize 0x7f0])
+
+
+
+
+(go/const ^{:val 2147483665 :doc "SEV-ES Guest-Hypervisor Communication Block Standardization\nTable 7: List of Supported Non-Automatic Events.\n"} SNP_GUEST_REQUEST 0x80000011)
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type GHCB "GHCB represents a Guest-Hypervisor Communication Block instance, used to\nexpose register state to an AMD SEV-ES hypervisor.\n\n# SMP\n\nBefore its first exit to the VMM the [GHCB.Layout], if not previously\ndefined, is opportunistically initialized using the existing GHCB GPA\nregistration for the executing vCPU.\n\nThis entails that after initial use the GHCB instance is bound to a specific\nvCPU, it is the caller responsibility to manage this association.\n" (struct
+
+    ^{:line 62 :tag (* amd64/CPU) :doc "CPU is a required processor instance for [MSR_AMD_GHCB] access.\n"} CPU
+
+
+
+
+
+    ^{:line 68 :tag (* dma/Region) :doc "Layout is an unencrypted memory page for shared guest/hypervisor\naccess of the GHCB Layout. When empty it is automatically\ninitialized at first use using the existing GHCB GPA for the\nexecuting vCPU.\n"} Layout
+
+
+
+    ^{:line 72 :tag (* dma/Region) :doc "Region is an unencrypted memory region for shared guest/hypervisor\nbuffers, required for any function issuing [GHCB.GuestRequest].\n"} Region
+
+
+
+    ^{:line 76 :tag (* dma/Region) :doc "VMSA is an encrypted memory region for shared guest/psp Virtual\nMachine Save Area buffers, required for [GHCB.CreateAP].\n"} VMSA
+
+
+    ^{:line 79 :tag uint :doc "DMA buffer\n"} addr
+    ^{:line 80 :tag (slice byte)} buf))
+
+
+
+(go/func ^:extern vmgexit "defined in sev.s\n" [])
+
+^{:go/end 103} (go/method init [^{:tag (* GHCB)} b] :results [^error err]
+  (when (== (.-CPU b) nil)
+    (return (errors/New "invalid instance, nil CPU field")))
+
+
+  (when [(set! (.-addr b) (conv uint (.MSR (.-CPU b) MSR_AMD_GHCB)))] (== (.-addr b) 0)
+    (return (errors/New "could not find GHCB address")))
+
+
+  (when [(set! (values (.-Layout b) err) (dma/NewRegion (.-addr b) pageSize false))] (!= err nil)
+    (return (fmt/Errorf "could not allocate GHCB layout page, %v" err)))
+
+
+  (set! (values (.-addr b) (.-buf b)) (.Reserve (.-Layout b) (conv int (.Size (.-Layout b))) pageSize))
+  (set! seqNo 1)
+
+  (return))
+
+
+^{:go/end 107} (go/method write [^{:tag (* GHCB)} b ^uint off ^uint64 val]
+  (.PutUint64 binary/LittleEndian (subslice (.-buf b) off (+ off 8)) val))
+
+
+^{:go/end 121} (go/method valid [^{:tag (* GHCB)} b ^{:tag (slice uint64)} offsets]
+  (range [i 16]
+    (aset (.-buf b) (+ VALID_BITMAP i) 0x00))
+
+
+  ;; Each GHCB field set by the guest and returned by the hypervisor must
+  ;; have the appropriate bit set in the GHCB VALID_BITMAP field
+  ;; (4 GHCB Protocol).
+  (range [_ off offsets]
+    (let [bit (/ off 8)]
+      (set! (aget (.-buf b) (+ VALID_BITMAP (/ bit 8))) bit-or ^byte (<< 1 (% bit 8))))))
+
+
+
+^{:go/end 125} (go/method read [^{:tag (* GHCB)} b ^uint64 off] :results [^uint64 val]
+  (.Uint64 binary/LittleEndian (subslice (.-buf b) off (+ off 8))))
+
+
+
+
+
+
+^{:go/end 164} (go/method Exit "Exit triggers an Automatic Exit (AE) event to transfer control to an AMD\nSEV-ES hypervisor for updated GHCB access. The arguments represent guest\nstate towards the hypervisor, the return values represent hypervisor state\ntowards the guest.\n" [^{:tag (* GHCB)} b ^uint64 code ^uint64 info1 ^uint64 info2 ^uint64 scratch] :results [^error err]
+  (when (== (.-Layout b) nil)
+    (when [(set! err (.init b))] (!= err nil)
+      (return)))
+
+
+
+  (.write b SW_EXITCODE code)
+  (.write b SW_EXITINFO1 info1)
+  (.write b SW_EXITINFO2 info2)
+  (.write b SW_SCRATCH scratch)
+
+  (let [valid (lit (slice uint64) RAX SW_EXITCODE SW_EXITINFO1 SW_EXITINFO2)]
+
+    (when (> scratch 0)
+      (set! valid (append valid SW_SCRATCH)))
+
+
+    (.valid b valid)
+    (vmgexit)
+
+    (when [exit (.read b SW_EXITCODE)] (!= exit code)
+      (return (fmt/Errorf "exit code mismatch (%#x)" exit)))
+
+
+    (set! info1 (.read b SW_EXITINFO1))
+    (set! info2 (.read b SW_EXITINFO2))
+
+    (when (or (!= info1 0) (!= (>> info2 32) 0))
+      (return (fmt/Errorf "exit error (info1:%#x info2:%#x)" info1 (.read b SW_EXITINFO2))))
+
+
+    (return)))
+
+
+
+^{:go/end 171} (go/method Dump "Dump returns a copy of the GHCB memory.\n" [^{:tag (* GHCB)} b] :results [^{:tag (slice byte)} buf]
+  (set! buf (make (slice byte) pageSize))
+  (copy buf (.-buf b))
+  (return))
+
+
+
+
+
+
+
+
+
+^{:go/end 234} (go/method GuestRequest "GuestRequest issues an SNP Guest Request from an SEV-SNP guest to the\nSEV-SNP firmware running inside the Platform Security Processor (PSP).\n\nThe message is protected with authenticated AES-256 GCM encryption, using\nthe argument key index and value (see [SecretsPage.VMPCK]).\n\nSee [SEV Secure Nested Paging Firmware ABI Specification - Chapter 7].\n" [^{:tag (* GHCB)} b ^int index ^{:tag (slice byte)} key ^{:tag (slice byte)} req ^int messageType] :results [^{:tag (slice byte)} res ^error err]
+  (let [^{:tag (slice byte)} msg (zero (slice byte))]
+
+    (when (== (.-Region b) nil)
+      (return nil (errors/New "invalid instance, nil DMA Region")))
+
+
+    ;; SEV Secure Nested Paging Firmware ABI Specification
+    ;; 8.26 SNP_GUEST_REQUEST
+
+    (let [hdr (addr ^{:go/breaks [2 4 6 8 10 12]} (lit MessageHeader
+            :Algo AES_256_GCM
+            :HeaderVersion headerVersion
+            :HeaderSize headerSize
+            :MessageType (conv uint8 messageType)
+            :MessageVersion messageVersion
+            :VMPCK (conv uint8 index)))]
+
+
+      ;; encrypt request message
+      (when [(set! (values msg err) (.sealMessage b hdr req key))] (!= err nil)
+        (return))
+
+
+      (let [(values reqAddr reqBuf) (.Reserve (.-Region b) pageSize pageSize)]
+        (defer (.Release (.-Region b) reqAddr))
+
+        (let [(values resAddr resBuf) (.Reserve (.-Region b) pageSize pageSize)]
+          (defer (.Release (.-Region b) resAddr))
+
+          ;; zero out response buffer flush speculative read
+          (copy resBuf (make (slice byte) pageSize))
+          (copy reqBuf msg)
+
+          ;; yield to hypervisor
+          (when [(set! err (.Exit b SNP_GUEST_REQUEST (conv uint64 reqAddr) (conv uint64 resAddr) 0))] (!= err nil)
+            (return))
+
+
+          (set! seqNo + 1)
+
+          ;; copy response buffer as soon as possible as GHCB might overwrite it
+          (let [buf (make (slice byte) pageSize)]
+            (copy buf resBuf)
+
+            (when [(set! err (.unmarshal hdr buf))] (!= err nil)
+              (return nil (fmt/Errorf "could not parse response header, %v" err)))
+
+
+            (when [(set! (values msg err) (.openMessage b hdr (subslice buf headerSize (+ headerSize (.-MessageSize hdr))) key))] (!= err nil)
+              (return nil (fmt/Errorf "could not decrypt response message, %v" err)))
+
+
+            (return msg nil)))))))

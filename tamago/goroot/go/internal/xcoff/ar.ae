@@ -1,0 +1,225 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.xcoff) (go/file "ar.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [strconv "strconv"]
+    ^{:line 13} [strings "strings"]])
+
+
+(go/const
+  ^{:line 17} [^{:val 8} SAIAMAG 0x8]
+  ^{:line 18} [^{:val "`\n"} AIAFMAG "`\n"]
+  ^{:line 19} [^{:val "<aiaff>\n"} AIAMAG "<aiaff>\n"]
+  ^{:line 20} [^{:val "<bigaf>\n"} AIAMAGBIG "<bigaf>\n"]
+
+
+  ^{:line 23} [^{:val 128 :doc "Sizeof\n"} FL_HSZ_BIG 0x80]
+  ^{:line 24} [^{:val 112} AR_HSZ_BIG 0x70])
+
+
+(go/type bigarFileHeader (struct
+    ^{:line 28 :tag (array SAIAMAG byte)} Flmagic ; Archive magic string
+    ^{:line 29 :tag (array 20 byte)} Flmemoff ; Member table offset
+    ^{:line 30 :tag (array 20 byte)} Flgstoff ; 32-bits global symtab offset
+    ^{:line 31 :tag (array 20 byte)} Flgst64off ; 64-bits global symtab offset
+    ^{:line 32 :tag (array 20 byte)} Flfstmoff ; First member offset
+    ^{:line 33 :tag (array 20 byte)} Fllstmoff ; Last member offset
+    ^{:line 34 :tag (array 20 byte)} Flfreeoff)) ; First member on free list offset
+
+
+(go/type bigarMemberHeader (struct
+    ^{:line 38 :tag (array 20 byte)} Arsize ; File member size
+    ^{:line 39 :tag (array 20 byte)} Arnxtmem ; Next member pointer
+    ^{:line 40 :tag (array 20 byte)} Arprvmem ; Previous member pointer
+    ^{:line 41 :tag (array 12 byte)} Ardate ; File member date
+    ^{:line 42 :tag (array 12 byte)} Aruid ; File member uid
+    ^{:line 43 :tag (array 12 byte)} Argid ; File member gid
+    ^{:line 44 :tag (array 12 byte)} Armode ; File member mode (octal)
+    ^{:line 45 :tag (array 4 byte)} Arnamlen)) ; File member name length
+;; _ar_nam is removed because it's easier to get name without it.
+
+
+
+(go/type Archive "Archive represents an open AIX big archive.\n" (struct
+    ^{:line 51} ArchiveHeader
+    ^{:line 52 :tag (slice (* Member))} Members
+
+    ^{:line 54 :tag io/Closer} closer))
+
+
+
+(go/type ArchiveHeader "ArchiveHeader holds information about a big archive file header\n" (struct
+    ^{:line 59 :tag string} magic))
+
+
+
+(go/type Member "Member represents a member of an AIX big archive.\n" (struct
+    ^{:line 64} MemberHeader
+    ^{:line 65 :tag (* io/SectionReader)} sr))
+
+
+
+(go/type MemberHeader "MemberHeader holds information about a big archive member\n" (struct
+    ^{:line 70 :tag string} Name
+    ^{:line 71 :tag uint64} Size))
+
+
+
+
+^{:go/end 88} (go/func OpenArchive "OpenArchive opens the named archive using os.Open and prepares it for use\nas an AIX big archive.\n" [^string name] :results [(* Archive) error]
+  (let [(values f err) (os/Open name)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values arch ^:assign err) (NewArchive f)]
+      (when (!= err nil)
+        (.Close f)
+        (return nil err))
+
+      (set! (.-closer arch) f)
+      (return arch nil))))
+
+
+
+
+
+^{:go/end 100} (go/method Close "Close closes the Archive.\nIf the Archive was created using NewArchive directly instead of OpenArchive,\nClose has no effect.\n" ^error [^{:tag (* Archive)} a]
+  (let [^error err (zero error)]
+    (when (!= (.-closer a) nil)
+      (set! err (.Close (.-closer a)))
+      (set! (.-closer a) nil))
+
+    ^{:line 99} err))
+
+
+
+^{:go/end 214} (go/func NewArchive "NewArchive creates a new Archive for accessing an AIX big archive in an underlying reader.\n" [^io/ReaderAt r] :results [(* Archive) error]
+  (let [parseDecimalBytes ^{:go/end 106} (fn [^{:tag (slice byte)} b] :results [int64 error]
+        (strconv/ParseInt (strings/TrimSpace (conv string b)) 10 64))
+
+      ^{:line 107} sr (io/NewSectionReader r 0 (- (<< 1 63) 1))
+
+      ;; Read File Header
+      ^{:line 110 :tag (array SAIAMAG byte)} magic (zero (array SAIAMAG byte))]
+    (when [(values _ err) (.ReadAt sr (subslice magic) 0)] (!= err nil)
+      (return nil err))
+
+
+    (let [arch (new Archive)]
+      (switch (conv string (subslice magic))
+        (case [AIAMAGBIG]
+          (set! ^{:go/via [ArchiveHeader]} (.-magic arch) (conv string (subslice magic))))
+        (case [AIAMAG]
+          (return nil (fmt/Errorf "small AIX archive not supported")))
+        (default
+          (return nil (fmt/Errorf "unrecognised archive magic: 0x%x" magic))))
+
+
+      (let [^bigarFileHeader fhdr (zero bigarFileHeader)]
+        (when [(values _ err) (.Seek sr 0 io/SeekStart)] (!= err nil)
+          (return nil err))
+
+        (when [err (binary/Read sr binary/BigEndian (addr fhdr))] (!= err nil)
+          (return nil err))
+
+
+        (let [(values off err) (parseDecimalBytes (subslice (.-Flfstmoff fhdr)))]
+          (when (!= err nil)
+            (return nil (fmt/Errorf "error parsing offset of first member in archive header(%q); %v" fhdr err)))
+
+
+          (when (== off 0)
+            ;; Occurs if the archive is empty.
+            (return arch nil))
+
+
+          (let [(values lastoff ^:assign err) (parseDecimalBytes (subslice (.-Fllstmoff fhdr)))]
+            (when (!= err nil)
+              (return nil (fmt/Errorf "error parsing offset of first member in archive header(%q); %v" fhdr err)))
+
+
+            ;; Read members
+            (while true
+              ;; Read Member Header
+              ;; The member header is normally 2 bytes larger. But it's easier
+              ;; to read the name if the header is read without _ar_nam.
+              ;; However, AIAFMAG must be read afterward.
+              (when [(values _ err) (.Seek sr off io/SeekStart)] (!= err nil)
+                (return nil err))
+
+
+              (let [^bigarMemberHeader mhdr (zero bigarMemberHeader)]
+                (when [err (binary/Read sr binary/BigEndian (addr mhdr))] (!= err nil)
+                  (return nil err))
+
+
+                (let [member (new Member)]
+                  (set! (.-Members arch) (append (.-Members arch) member))
+
+                  (let [(values size err) (parseDecimalBytes (subslice (.-Arsize mhdr)))]
+                    (when (!= err nil)
+                      (return nil (fmt/Errorf "error parsing size in member header(%q); %v" mhdr err)))
+
+                    (set! ^{:go/via [MemberHeader]} (.-Size member) (conv uint64 size))
+
+                    ;; Read name
+                    (let [(values namlen ^:assign err) (parseDecimalBytes (subslice (.-Arnamlen mhdr)))]
+                      (when (!= err nil)
+                        (return nil (fmt/Errorf "error parsing name length in member header(%q); %v" mhdr err)))
+
+                      (let [name (make (slice byte) namlen)]
+                        (when [err (binary/Read sr binary/BigEndian name)] (!= err nil)
+                          (return nil err))
+
+                        (set! ^{:go/via [MemberHeader]} (.-Name member) (conv string name))
+
+                        (let [fileoff (+ off AR_HSZ_BIG namlen)]
+                          (when (!= (bit-and fileoff 1) 0)
+                            (inc! fileoff)
+                            (when [(values _ err) (.Seek sr 1 io/SeekCurrent)] (!= err nil)
+                              (return nil err)))
+
+
+
+                          ;; Read AIAFMAG string
+                          (let [^{:tag (array 2 byte)} fmag (zero (array 2 byte))]
+                            (when [err (binary/Read sr binary/BigEndian (addr fmag))] (!= err nil)
+                              (return nil err))
+
+                            (when (!= (conv string (subslice fmag)) AIAFMAG)
+                              (return nil (fmt/Errorf "AIAFMAG not found after member header")))
+
+
+                            (set! fileoff + 2) ; Add the two bytes of AIAFMAG
+                            (set! (.-sr member) (io/NewSectionReader sr fileoff size))
+
+                            (when (== off lastoff)
+                              (break))
+
+                            (set! (values off err) (parseDecimalBytes (subslice (.-Arnxtmem mhdr))))
+                            (when (!= err nil)
+                              (return nil (fmt/Errorf "error parsing offset of first member in archive header(%q); %v" fhdr err)))))))))))
+
+
+
+
+            (return arch nil)))))))
+
+
+
+
+
+^{:go/end 226} (go/method GetFile "GetFile returns the XCOFF file defined by member name.\nFIXME: This doesn't work if an archive has two members with the same\nname which can occur if an archive has both 32-bits and 64-bits files.\n" [^{:tag (* Archive)} arch ^string name] :results [(* File) error]
+  (range [_ mem (.-Members arch)]
+    (when (== ^{:go/via [MemberHeader]} (.-Name mem) name)
+      (return (NewFile (.-sr mem)))))
+
+
+  (return nil (fmt/Errorf "unknown member %s in archive" name)))

@@ -1,0 +1,299 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; The wire protocol for HTTP's "chunked" Transfer-Encoding.
+
+;; Package internal contains HTTP internals shared by net/http and
+;; net/http/httputil.
+(in-ns 'go.net.http.internal) (go/file "chunked.go" :doc "Package internal contains HTTP internals shared by net/http and\nnet/http/httputil.\n" :imports [
+
+
+    ^{:line 12} [bufio "bufio"]
+    ^{:line 13} [bytes "bytes"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [io "io"]])
+
+
+(go/const ^{:val 4096} maxLineLength 4096) ; assumed <= bufio.defaultBufSize
+
+(go/var ErrLineTooLong (errors/New "header line too long"))
+
+
+
+
+
+
+
+^{:go/end 35} (go/func NewChunkedReader "NewChunkedReader returns a new chunkedReader that translates the data read from r\nout of HTTP \"chunked\" format before returning it.\nThe chunkedReader returns [io.EOF] when the final 0-length chunk is read.\n\nNewChunkedReader is not needed by normal applications. The http package\nautomatically decodes chunking when reading response bodies.\n" ^io/Reader [^io/Reader r]
+  (let [(values br ok) (assert (* bufio/Reader) r)]
+    (when (not ok)
+      (set! br (bufio/NewReader r)))
+
+    (addr (lit chunkedReader :r br))))
+
+
+(go/type chunkedReader (struct
+    ^{:line 38 :tag (* bufio/Reader)} r
+    ^{:line 39 :tag uint64} n ; unread bytes in chunk
+    ^{:line 40 :tag error} err
+    ^{:line 41 :tag (array 2 byte)} buf
+    ^{:line 42 :tag bool} checkEnd ; whether need to check for \r\n chunk footer
+    ^{:line 43 :tag int64} excess)) ; "excessive" chunk overhead, for malicious sender detection
+
+
+^{:go/end 86} (go/method beginChunk [^{:tag (* chunkedReader)} cr]
+  ;; chunk-size CRLF
+  (let [^{:tag (slice byte)} line (zero (slice byte))]
+    (set! (values line (.-err cr)) (readChunkLine (.-r cr)))
+    (when (!= (.-err cr) nil)
+      (return))
+
+    (set! (.-excess cr) + (+ (conv int64 (len line)) 2)) ; header, plus \r\n after the chunk data
+    (set! line (trimTrailingWhitespace line))
+    (set! (values line (.-err cr)) (removeChunkExtension line))
+    (when (!= (.-err cr) nil)
+      (return))
+
+    (set! (values (.-n cr) (.-err cr)) (parseHexUint line))
+    (when (!= (.-err cr) nil)
+      (return))
+
+    ;; A sender who sends one byte per chunk will send 5 bytes of overhead
+    ;; for every byte of data. ("1\r\nX\r\n" to send "X".)
+    ;; We want to allow this, since streaming a byte at a time can be legitimate.
+    ;;
+    ;; A sender can use chunk extensions to add arbitrary amounts of additional
+    ;; data per byte read. ("1;very long extension\r\nX\r\n" to send "X".)
+    ;; We don't want to disallow extensions (although we discard them),
+    ;; but we also don't want to allow a sender to reduce the signal/noise ratio
+    ;; arbitrarily.
+    ;;
+    ;; We track the amount of excess overhead read,
+    ;; and produce an error if it grows too large.
+    ;;
+    ;; Currently, we say that we're willing to accept 16 bytes of overhead per chunk,
+    ;; plus twice the amount of real data in the chunk.
+    (set! (.-excess cr) - (+ 16 (* 2 (conv int64 (.-n cr)))))
+    (set! (.-excess cr) (max (.-excess cr) 0))
+    (when (> (.-excess cr) (* 16 1024))
+      (set! (.-err cr) (errors/New "chunked encoding contains too much non-data")))
+
+    (when (== (.-n cr) 0)
+      (set! (.-err cr) io/EOF))))
+
+
+
+^{:go/end 95} (go/method chunkHeaderAvailable ^bool [^{:tag (* chunkedReader)} cr]
+  ^{:go/breaks [[3 94]]} (let [n (.Buffered (.-r cr))]
+    (when (> n 0)
+      (let [(values peek _) (.Peek (.-r cr) n)]
+        (return (>= (bytes/IndexByte peek \newline) 0))))
+
+    false))
+
+
+^{:go/end 149} (go/method Read [^{:tag (* chunkedReader)} cr ^{:tag (slice uint8)} b] :results [^int n ^error err]
+  (while (== (.-err cr) nil)
+    (when (.-checkEnd cr)
+      (when (and (> n 0) (< (.Buffered (.-r cr)) 2))
+        ;; We have some data. Return early (per the io.Reader
+        ;; contract) instead of potentially blocking while
+        ;; reading more.
+        (break))
+
+      (if [(set! (values _ (.-err cr)) (io/ReadFull (.-r cr) (subslice (.-buf cr) _ 2)))] (== (.-err cr) nil)
+        (when (!= (conv string (subslice (.-buf cr))) "\r\n")
+          (set! (.-err cr) (errors/New "malformed chunked encoding"))
+          (break))
+
+        (do
+          (when (== (.-err cr) io/EOF)
+            (set! (.-err cr) io/ErrUnexpectedEOF))
+
+          (break)))
+
+      (set! (.-checkEnd cr) false))
+
+    (when (== (.-n cr) 0)
+      (when (and (> n 0) (not (.chunkHeaderAvailable cr)))
+        ;; We've read enough. Don't potentially block
+        ;; reading a new chunk header.
+        (break))
+
+      (.beginChunk cr)
+      (continue))
+
+    (when (== (len b) 0)
+      (break))
+
+    (let [rbuf b]
+      (when (> (conv uint64 (len rbuf)) (.-n cr))
+        (set! rbuf (subslice rbuf _ (.-n cr))))
+
+      (let [^int n0 (zero int)]
+        (set! (values n0 (.-err cr)) (.Read (.-r cr) rbuf))
+        (set! n + n0)
+        (set! b (subslice b n0))
+        (set! (.-n cr) - (conv uint64 n0))
+        ;; If we're at the end of a chunk, read the next two
+        ;; bytes to verify they are "\r\n".
+        (cond (and (== (.-n cr) 0) (== (.-err cr) nil))
+          (set! (.-checkEnd cr) true)
+          (== (.-err cr) io/EOF)
+          (set! (.-err cr) io/ErrUnexpectedEOF)))))
+
+
+  (return n (.-err cr)))
+
+
+
+
+
+
+^{:go/end 184} (go/func readChunkLine "Read a line of bytes (up to \\n) from b.\nGive up if the line exceeds maxLineLength.\nThe returned bytes are owned by the bufio.Reader\nso they are only valid until the next bufio read.\n" [^{:tag (* bufio/Reader)} b] :results [(slice byte) error]
+  (let [(values p err) (.ReadSlice b \newline)]
+    (when (!= err nil)
+      ;; We always know when EOF is coming.
+      ;; If the caller asked for a line, there should be a line.
+      (cond (== err io/EOF)
+        (set! err io/ErrUnexpectedEOF)
+        (== err bufio/ErrBufferFull)
+        (set! err ErrLineTooLong))
+
+      (return nil err))
+
+
+    ;; RFC 9112 permits parsers to accept a bare \n as a line ending in headers,
+    ;; but not in chunked encoding lines. See https://www.rfc-editor.org/errata/eid7633,
+    ;; which explicitly rejects a clarification permitting \n as a chunk terminator.
+    ;;
+    ;; Verify that the line ends in a CRLF, and that no CRs appear before the end.
+    (if [idx (bytes/IndexByte p \return)] (== idx -1)
+      (return nil (errors/New "chunked line ends with bare LF"))
+      (when (!= idx (- (len p) 2))
+        (return nil (errors/New "invalid CR in chunked line"))))
+
+    (set! p (subslice p _ (- (len p) 2))) ; trim CRLF
+
+    (when (>= (len p) maxLineLength)
+      (return nil ErrLineTooLong))
+
+    (return p nil)))
+
+
+^{:go/end 191} (go/func trimTrailingWhitespace ^{:tag (slice byte)} [^{:tag (slice byte)} b]
+  (while (and (> (len b) 0) (isOWS (aget b (- (len b) 1))))
+    (set! b (subslice b _ (- (len b) 1))))
+
+  ^{:line 190} b)
+
+
+^{:go/end 195} (go/func isOWS ^bool [^byte b]
+  (or (== b \space) (== b \tab)))
+
+
+(go/var semi (conv (slice byte) ";"))
+
+
+
+
+
+
+
+
+^{:go/end 212} (go/func removeChunkExtension "removeChunkExtension removes any chunk-extension from p.\nFor example,\n\n\t\"0\" => \"0\"\n\t\"0;token\" => \"0\"\n\t\"0;token=val\" => \"0\"\n\t`0;token=\"quoted string\"` => \"0\"\n" [^{:tag (slice byte)} p] :results [(slice byte) error]
+  (set! (values p _ _) (bytes/Cut p semi))
+  ;; TODO: care about exact syntax of chunk extensions? We're
+  ;; ignoring and stripping them anyway. For now just never
+  ;; return an error.
+  (return p nil))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 227} (go/func NewChunkedWriter "NewChunkedWriter returns a new chunkedWriter that translates writes into HTTP\n\"chunked\" format before writing them to w. Closing the returned chunkedWriter\nsends the final 0-length chunk that marks the end of the stream but does\nnot send the final CRLF that appears after trailers; trailers and the last\nCRLF must be written separately.\n\nNewChunkedWriter is not needed by normal applications. The http\npackage adds chunking automatically if handlers don't set a\nContent-Length header. Using newChunkedWriter inside a handler\nwould result in double chunking or chunking with a Content-Length\nlength, both of which are wrong.\n" ^io/WriteCloser [^io/Writer w]
+  (addr (lit chunkedWriter w)))
+
+
+
+
+(go/type chunkedWriter "Writing to chunkedWriter translates to writing in HTTP chunked Transfer\nEncoding wire format to the underlying Wire chunkedWriter.\n" (struct
+    ^{:line 232 :tag io/Writer} Wire))
+
+
+
+
+
+^{:go/end 262} (go/method Write "Write the contents of data as one chunk to Wire.\nNOTE: Note that the corresponding chunk-writing procedure in Conn.Write has\na bug since it does not check for success of [io.WriteString]\n" [^{:tag (* chunkedWriter)} cw ^{:tag (slice byte)} data] :results [^int n ^error err]
+
+  ;; Don't send 0-length data. It looks like EOF for chunked encoding.
+  (when (== (len data) 0)
+    (return 0 nil))
+
+
+  (when [(set! (values _ err) (fmt/Fprintf (.-Wire cw) "%x\r\n" (len data)))] (!= err nil)
+    (return 0 err))
+
+  (when [(set! (values n err) (.Write (.-Wire cw) data))] (!= err nil)
+    (return))
+
+  (when (!= n (len data))
+    (set! err io/ErrShortWrite)
+    (return))
+
+  (when [(set! (values _ err) (io/WriteString (.-Wire cw) "\r\n"))] (!= err nil)
+    (return))
+
+  (when [(values bw ok) (assert (* FlushAfterChunkWriter) (.-Wire cw))] ok
+    (set! err ^{:go/via [Writer]} (.Flush bw)))
+
+  (return))
+
+
+^{:go/end 267} (go/method Close ^error [^{:tag (* chunkedWriter)} cw]
+  (let [(values _ err) (io/WriteString (.-Wire cw) "0\r\n")]
+    ^{:line 266} err))
+
+
+
+
+
+
+
+(go/type FlushAfterChunkWriter "FlushAfterChunkWriter signals from the caller of [NewChunkedWriter]\nthat each chunk should be followed by a flush. It is used by the\n[net/http.Transport] code to keep the buffering behavior for headers and\ntrailers, but flush out chunks aggressively in the middle for\nrequest bodies which may be generated slowly. See Issue 6574.\n" (struct
+    (* bufio/Writer)))
+
+
+^{:go/end 300} (go/func parseHexUint [^{:tag (slice byte)} v] :results [^uint64 n ^error err]
+  (when (== (len v) 0)
+    (return 0 (errors/New "empty hex number for chunk length")))
+
+  (range [i b v]
+    (switch
+      (case [(and (<= \0 b) (<= b \9))]
+        (set! b (- b \0)))
+      (case [(and (<= \a b) (<= b \f))]
+        (set! b (+ (- b \a) 10)))
+      (case [(and (<= \A b) (<= b \F))]
+        (set! b (+ (- b \A) 10)))
+      (default
+        (return 0 (errors/New "invalid byte in chunk length"))))
+
+    (when (== i 16)
+      (return 0 (errors/New "http chunk length too large")))
+
+    (set! n << 4)
+    (set! n bit-or (conv uint64 b)))
+
+  (return))

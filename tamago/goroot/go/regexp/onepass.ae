@@ -1,0 +1,507 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.regexp) (go/file "onepass.go" :imports [
+
+
+    ^{:line 8} [syntax "regexp/syntax"]
+    ^{:line 9} [slices "slices"]
+    ^{:line 10} [strings "strings"]
+    ^{:line 11} [unicode "unicode"]
+    ^{:line 12} [utf8 "unicode/utf8"]])
+
+
+;; "One-pass" regexp execution.
+;; Some regexps can be analyzed to determine that they never need
+;; backtracking: they are guaranteed to run in one pass over the string
+;; without bothering to save all the usual NFA state.
+;; Detect those and execute them more quickly.
+
+
+
+(go/type onePassProg "A onePassProg is a compiled one-pass regular expression program.\nIt is the same as syntax.Prog except for the use of onePassInst.\n" (struct
+    ^{:line 24 :tag (slice onePassInst)} Inst
+    ^{:line 25 :tag int} Start ; index of start instruction
+    ^{:line 26 :tag int} NumCap)) ; number of InstCapture insts in re
+
+
+
+
+(go/type onePassInst "A onePassInst is a single instruction in a one-pass regular expression program.\nIt is the same as syntax.Inst except for the new 'Next' field.\n" (struct
+    ^{:line 32} syntax/Inst
+    ^{:line 33 :tag (slice uint32)} Next))
+
+
+
+
+
+
+
+^{:go/end 69} (go/func onePassPrefix "onePassPrefix returns a literal string that all matches for the\nregexp must start with. Complete is true if the prefix\nis the entire match. Pc is the index of the last rune instruction\nin the string. The onePassPrefix skips over the mandatory\nEmptyBeginText.\n" [^{:tag (* syntax/Prog)} p] :results [^string prefix ^bool complete ^uint32 pc]
+  (let [i (addr (aget (.-Inst p) (.-Start p)))]
+    (when (or (!= (.-Op i) syntax/InstEmptyWidth) (== (bit-and (conv syntax/EmptyOp (.-Arg i)) syntax/EmptyBeginText) 0))
+      (return "" (== (.-Op i) syntax/InstMatch) (conv uint32 (.-Start p))))
+
+    (set! pc (.-Out i))
+    (set! i (addr (aget (.-Inst p) pc)))
+    (while (== (.-Op i) syntax/InstNop)
+      (set! pc (.-Out i))
+      (set! i (addr (aget (.-Inst p) pc))))
+
+    ;; Avoid allocation of buffer if prefix is empty.
+    (when (or (!= (iop i) syntax/InstRune) (!= (len (.-Rune i)) 1))
+      (return "" (== (.-Op i) syntax/InstMatch) (conv uint32 (.-Start p))))
+
+
+    ;; Have prefix; gather characters.
+    (let [^strings/Builder buf (zero strings/Builder)]
+      (while (and (== (iop i) syntax/InstRune) (== (len (.-Rune i)) 1) (== (bit-and (conv syntax/Flags (.-Arg i)) syntax/FoldCase) 0) (!= (aget (.-Rune i) 0) utf8/RuneError))
+        (.WriteRune buf (aget (.-Rune i) 0))
+        (set! (values pc i) (values (.-Out i) (addr (aget (.-Inst p) (.-Out i))))))
+
+      (when (and (== (.-Op i) syntax/InstEmptyWidth)
+          (!= (bit-and (conv syntax/EmptyOp (.-Arg i)) syntax/EmptyEndText) 0)
+          (== (.-Op (aget (.-Inst p) (.-Out i))) syntax/InstMatch))
+        (set! complete true))
+
+      (return (.String buf) complete pc))))
+
+
+
+
+
+
+^{:go/end 84} (go/func onePassNext "onePassNext selects the next actionable state of the prog, based on the input character.\nIt should only be called when i.Op == InstAlt or InstAltMatch, and from the one-pass machine.\nOne of the alternates may ultimately lead without input to end of line. If the instruction\nis InstAltMatch the path to the InstMatch is in i.Out, the normal node in i.Next.\n" ^uint32 [^{:tag (* onePassInst)} i ^rune r]
+  ^{:go/breaks [[4 83]]} (let [next ^{:go/via [Inst]} (.MatchRunePos i r)]
+    (when (>= next 0)
+      (return (aget (.-Next i) next)))
+
+    (when (== ^{:go/via [Inst]} (.-Op i) syntax/InstAltMatch)
+      (return ^{:go/via [Inst]} (.-Out i)))
+
+    0))
+
+
+^{:go/end 93} (go/func iop ^syntax/InstOp [^{:tag (* syntax/Inst)} i]
+  (let [op (.-Op i)]
+    (switch op
+      (case [syntax/InstRune1 syntax/InstRuneAny syntax/InstRuneAnyNotNL]
+        (set! op syntax/InstRune)))
+
+    ^{:line 92} op))
+
+
+
+(go/type queueOnePass "Sparse Array implementation is used as a queueOnePass.\n" (struct
+    ^{:line 97 :tag (slice uint32)} sparse
+    ^{:line 98 :tag (slice uint32)} dense
+    ^{:line 99 :tag uint32} size ^uint32 nextIndex))
+
+
+^{:go/end 104} (go/method empty ^bool [^{:tag (* queueOnePass)} q]
+  (>= (.-nextIndex q) (.-size q)))
+
+
+^{:go/end 110} (go/method next [^{:tag (* queueOnePass)} q] :results [^uint32 n]
+  (set! n (aget (.-dense q) (.-nextIndex q)))
+  (inc! (.-nextIndex q))
+  (return))
+
+
+^{:go/end 115} (go/method clear [^{:tag (* queueOnePass)} q]
+  (set! (.-size q) 0)
+  (set! (.-nextIndex q) 0))
+
+
+^{:go/end 122} (go/method contains ^bool [^{:tag (* queueOnePass)} q ^uint32 u]
+  (when (>= u (conv uint32 (len (.-sparse q))))
+    (return false))
+
+  (and (< (aget (.-sparse q) u) (.-size q)) (== (aget (.-dense q) (aget (.-sparse q) u)) u)))
+
+
+^{:go/end 128} (go/method insert [^{:tag (* queueOnePass)} q ^uint32 u]
+  (when (not (.contains q u))
+    (.insertNew q u)))
+
+
+
+^{:go/end 137} (go/method insertNew [^{:tag (* queueOnePass)} q ^uint32 u]
+  (when (>= u (conv uint32 (len (.-sparse q))))
+    (return))
+
+  (aset (.-sparse q) u (.-size q))
+  (aset (.-dense q) (.-size q) u)
+  (inc! (.-size q)))
+
+
+^{:go/end 144} (go/func newQueue [^int size] :results [^{:tag (* queueOnePass)} q]
+  (addr ^{:go/breaks [2 4]} (lit queueOnePass
+      :sparse (make (slice uint32) size)
+      :dense (make (slice uint32) size))))
+
+
+
+
+
+
+
+
+(go/const ^{:val 4294967295 :doc "mergeRuneSets merges two non-intersecting runesets, and returns the merged result,\nand a NextIp array. The idea is that if a rune matches the OnePassRunes at index\ni, NextIp[i/2] is the target. If the input sets intersect, an empty runeset and a\nNextIp array with the single element mergeFailed is returned.\nThe code assumes that both inputs contain ordered and non-intersecting rune pairs.\n"} mergeFailed (conv uint32 0xffffffff))
+
+(go/var
+  ^{:line 154} [noRune (lit (slice rune))]
+  ^{:line 155} [noNext (lit (slice uint32) mergeFailed)])
+
+
+^{:go/end 205} (go/func mergeRuneSets [^{:tag (* (slice rune))} leftRunes ^{:tag (* (slice rune))} rightRunes ^uint32 leftPC ^uint32 rightPC] :results [(slice rune) (slice uint32)]
+  (let [leftLen (len @leftRunes)
+      ^{:line 160} rightLen (len @rightRunes)]
+    (when (or (!= (bit-and leftLen 0x1) 0) (!= (bit-and rightLen 0x1) 0))
+      (panic "mergeRuneSets odd length []rune"))
+
+    (let [
+        (values ^int lx ^int rx) (zero int)
+
+        ^{:line 167} merged (make (slice rune) 0)
+        ^{:line 168} next (make (slice uint32) 0)
+        ^{:line 169} ok true]
+      (defer (^{:go/end 175} (fn []
+            (when (not ok)
+              (set! merged nil)
+              (set! next nil)))))
+
+
+
+      (let [ix -1
+          ^{:line 178} extend ^{:go/breaks [7] :go/end 187} (fn ^bool [^{:tag (* int)} newLow ^{:tag (* (slice rune))} newArray ^uint32 pc]
+            (when (and (> ix 0) (<= (aget @newArray @newLow) (aget merged ix)))
+              (return false))
+
+            (set! merged (append merged (aget @newArray @newLow) (aget @newArray (+ @newLow 1))))
+            (set! @newLow + 2)
+            (set! ix + 2)
+            (set! next (append next pc))
+            true)]
+
+
+        (while (or (< lx leftLen) (< rx rightLen))
+          (switch
+            (case [(>= rx rightLen)]
+              (set! ok (extend (addr lx) leftRunes leftPC)))
+            (case [(>= lx leftLen)]
+              (set! ok (extend (addr rx) rightRunes rightPC)))
+            (case [(< (aget @rightRunes rx) (aget @leftRunes lx))]
+              (set! ok (extend (addr rx) rightRunes rightPC)))
+            (default
+              (set! ok (extend (addr lx) leftRunes leftPC))))
+
+          (when (not ok)
+            (return noRune noNext)))
+
+
+        (return merged next)))))
+
+
+
+^{:go/end 219} (go/func cleanupOnePass "cleanupOnePass drops working memory, and restores certain shortcut instructions.\n" [^{:tag (* onePassProg)} prog ^{:tag (* syntax/Prog)} original]
+  (range [ix instOriginal (.-Inst original)]
+    (switch (.-Op instOriginal)
+      (case [syntax/InstAlt syntax/InstAltMatch syntax/InstRune])
+      (case [syntax/InstCapture syntax/InstEmptyWidth syntax/InstNop syntax/InstMatch syntax/InstFail]
+        (set! (.-Next (aget (.-Inst prog) ix)) nil))
+      (case [syntax/InstRune1 syntax/InstRuneAny syntax/InstRuneAnyNotNL]
+        (set! (.-Next (aget (.-Inst prog) ix)) nil)
+        (aset (.-Inst prog) ix (lit onePassInst :Inst instOriginal))))))
+
+
+
+
+
+^{:go/end 283} (go/func onePassCopy "onePassCopy creates a copy of the original Prog, as we'll be modifying it.\n" ^{:tag (* onePassProg)} [^{:tag (* syntax/Prog)} prog]
+  (let [p (addr ^{:go/breaks [2 4 6]} (lit onePassProg
+          :Start (.-Start prog)
+          :NumCap (.-NumCap prog)
+          :Inst (make (slice onePassInst) (len (.-Inst prog)))))]
+
+    (range [i inst (.-Inst prog)]
+      (aset (.-Inst p) i (lit onePassInst :Inst inst)))
+
+
+    ;; rewrites one or more common Prog constructs that enable some otherwise
+    ;; non-onepass Progs to be onepass. A:BD (for example) means an InstAlt at
+    ;; ip A, that points to ips B & C.
+    ;; A:BC + B:DA => A:BC + B:CD
+    ;; A:BC + B:DC => A:DC + B:DC
+    (range [pc (.-Inst p)]
+      (switch ^{:go/via [Inst]} (.-Op (aget (.-Inst p) pc))
+        (default
+          (continue))
+        (case [syntax/InstAlt syntax/InstAltMatch]
+          ;; A:Bx + B:Ay
+          (let [p_A_Other (addr ^{:go/via [Inst]} (.-Out (aget (.-Inst p) pc)))
+              ^{:line 244} p_A_Alt (addr ^{:go/via [Inst]} (.-Arg (aget (.-Inst p) pc)))
+              ;; make sure a target is another Alt
+              ^{:line 246} instAlt (aget (.-Inst p) @p_A_Alt)]
+            (when (not (or (== ^{:go/via [Inst]} (.-Op instAlt) syntax/InstAlt) (== ^{:go/via [Inst]} (.-Op instAlt) syntax/InstAltMatch)))
+              (set! (values p_A_Alt p_A_Other) (values p_A_Other p_A_Alt))
+              (set! instAlt (aget (.-Inst p) @p_A_Alt))
+              (when (not (or (== ^{:go/via [Inst]} (.-Op instAlt) syntax/InstAlt) (== ^{:go/via [Inst]} (.-Op instAlt) syntax/InstAltMatch)))
+                (continue)))
+
+
+            (let [instOther (aget (.-Inst p) @p_A_Other)]
+              ;; Analyzing both legs pointing to Alts is for another day
+              (when (or (== ^{:go/via [Inst]} (.-Op instOther) syntax/InstAlt) (== ^{:go/via [Inst]} (.-Op instOther) syntax/InstAltMatch))
+                ;; too complicated
+                (continue))
+
+              ;; simple empty transition loop
+              ;; A:BC + B:DA => A:BC + B:DC
+              (let [p_B_Alt (addr ^{:go/via [Inst]} (.-Out (aget (.-Inst p) @p_A_Alt)))
+                  ^{:line 263} p_B_Other (addr ^{:go/via [Inst]} (.-Arg (aget (.-Inst p) @p_A_Alt)))
+                  ^{:line 264} patch false]
+                (cond (== ^{:go/via [Inst]} (.-Out instAlt) (conv uint32 pc))
+                  (set! patch true)
+                  (== ^{:go/via [Inst]} (.-Arg instAlt) (conv uint32 pc)) (do
+                    (set! patch true)
+                    (set! (values p_B_Alt p_B_Other) (values p_B_Other p_B_Alt))))
+
+                (when patch
+                  (set! @p_B_Alt @p_A_Other))
+
+
+                ;; empty transition to common target
+                ;; A:BC + B:DC => A:DC + B:DC
+                (when (== @p_A_Other @p_B_Alt)
+                  (set! @p_A_Alt @p_B_Other))))))))
+
+
+
+    ^{:line 282} p))
+
+
+(go/var anyRuneNotNL (lit (slice rune) 0 (- \newline 1) (+ \newline 1) unicode/MaxRune))
+(go/var anyRune (lit (slice rune) 0 unicode/MaxRune))
+
+
+
+
+
+
+^{:go/end 453} (go/func makeOnePass "makeOnePass creates a onepass Prog, if possible. It is possible if at any alt,\nthe match engine can always tell which branch to take. The routine may modify\np if it is turned into a onepass Prog. If it isn't possible for this to be a\nonepass Prog, the Prog nil is returned. makeOnePass is recursive\nto the size of the Prog.\n" ^{:tag (* onePassProg)} [^{:tag (* onePassProg)} p]
+  ;; If the machine is very long, it's not worth the time to check if we can use one pass.
+  (when (>= (len (.-Inst p)) 1000)
+    (return nil))
+
+
+  (let [
+      ^:var ^{:line 300} instQueue (newQueue (len (.-Inst p)))
+      ^:var ^{:line 301} visitQueue (newQueue (len (.-Inst p)))
+      ^{:line 302 :tag (func [uint32 (slice bool)] [bool])} check (zero (func [uint32 (slice bool)] [bool]))
+      ^:var ^{:line 303} onePassRunes (make (slice (slice rune)) (len (.-Inst p)))]
+
+
+    ;; check that paths from Alt instructions are unambiguous, and rebuild the new
+    ;; program as a onepass program
+    (set! check ^{:go/end 434} (fn [^uint32 pc ^{:tag (slice bool)} m] :results [^bool ok]
+        (set! ok true)
+        (let [inst (addr (aget (.-Inst p) pc))]
+          (when (.contains visitQueue pc)
+            (return))
+
+          (.insert visitQueue pc)
+          (switch ^{:go/via [Inst]} (.-Op inst)
+            (case [syntax/InstAlt syntax/InstAltMatch]
+              (set! ok (and (check ^{:go/via [Inst]} (.-Out inst) m) (check ^{:go/via [Inst]} (.-Arg inst) m)))
+              ;; check no-input paths to InstMatch
+              (let [matchOut (aget m ^{:go/via [Inst]} (.-Out inst))
+                  ^{:line 320} matchArg (aget m ^{:go/via [Inst]} (.-Arg inst))]
+                (when (and matchOut matchArg)
+                  (set! ok false)
+                  (break))
+
+                ;; Match on empty goes in inst.Out
+                (when matchArg
+                  (set! (values ^{:go/via [Inst]} (.-Out inst) ^{:go/via [Inst]} (.-Arg inst)) (values ^{:go/via [Inst]} (.-Arg inst) ^{:go/via [Inst]} (.-Out inst)))
+                  (set! (values matchOut matchArg) (values matchArg matchOut)))
+
+                (when matchOut
+                  (aset m pc true)
+                  (set! ^{:go/via [Inst]} (.-Op inst) syntax/InstAltMatch))
+
+
+                ;; build a dispatch operator from the two legs of the alt.
+                (set! (values (aget onePassRunes pc) (.-Next inst)) (mergeRuneSets
+                    (addr (aget onePassRunes ^{:go/via [Inst]} (.-Out inst))) (addr (aget onePassRunes ^{:go/via [Inst]} (.-Arg inst))) ^{:go/via [Inst]} (.-Out inst) ^{:go/via [Inst]} (.-Arg inst)))
+                (when (and (> (len (.-Next inst)) 0) (== (aget (.-Next inst) 0) mergeFailed))
+                  (set! ok false)
+                  (break))))
+
+            (case [syntax/InstCapture syntax/InstNop]
+              (set! ok (check ^{:go/via [Inst]} (.-Out inst) m))
+              (aset m pc (aget m ^{:go/via [Inst]} (.-Out inst)))
+              ;; pass matching runes back through these no-ops.
+              (aset onePassRunes pc (append (lit (slice rune)) (spread (aget onePassRunes ^{:go/via [Inst]} (.-Out inst)))))
+              (set! (.-Next inst) (make (slice uint32) (+ (/ (len (aget onePassRunes pc)) 2) 1)))
+              (range [i (.-Next inst)]
+                (aset (.-Next inst) i ^{:go/via [Inst]} (.-Out inst))))
+
+            (case [syntax/InstEmptyWidth]
+              (set! ok (check ^{:go/via [Inst]} (.-Out inst) m))
+              (aset m pc (aget m ^{:go/via [Inst]} (.-Out inst)))
+              (aset onePassRunes pc (append (lit (slice rune)) (spread (aget onePassRunes ^{:go/via [Inst]} (.-Out inst)))))
+              (set! (.-Next inst) (make (slice uint32) (+ (/ (len (aget onePassRunes pc)) 2) 1)))
+              (range [i (.-Next inst)]
+                (aset (.-Next inst) i ^{:go/via [Inst]} (.-Out inst))))
+
+            (case [syntax/InstMatch syntax/InstFail]
+              (aset m pc (== ^{:go/via [Inst]} (.-Op inst) syntax/InstMatch)))
+            (case [syntax/InstRune]
+              (aset m pc false)
+              (when (> (len (.-Next inst)) 0)
+                (break))
+
+              (.insert instQueue ^{:go/via [Inst]} (.-Out inst))
+              (when (== (len ^{:go/via [Inst]} (.-Rune inst)) 0)
+                (aset onePassRunes pc (lit (slice rune)))
+                (set! (.-Next inst) (lit (slice uint32) ^{:go/via [Inst]} (.-Out inst)))
+                (break))
+
+              (let [runes (make (slice rune) 0)]
+                (if (and (== (len ^{:go/via [Inst]} (.-Rune inst)) 1) (!= (bit-and (conv syntax/Flags ^{:go/via [Inst]} (.-Arg inst)) syntax/FoldCase) 0))
+                  (let [r0 (aget ^{:go/via [Inst]} (.-Rune inst) 0)]
+                    (set! runes (append runes r0 r0))
+                    (for [r1 (unicode/SimpleFold r0)] (!= r1 r0) (set! r1 (unicode/SimpleFold r1))
+                      (set! runes (append runes r1 r1)))
+
+                    (^{:inst [(slice rune) rune]} slices/Sort runes))
+
+                  (set! runes (append runes (spread ^{:go/via [Inst]} (.-Rune inst)))))
+
+                (aset onePassRunes pc runes)
+                (set! (.-Next inst) (make (slice uint32) (+ (/ (len (aget onePassRunes pc)) 2) 1)))
+                (range [i (.-Next inst)]
+                  (aset (.-Next inst) i ^{:go/via [Inst]} (.-Out inst)))
+
+                (set! ^{:go/via [Inst]} (.-Op inst) syntax/InstRune)))
+            (case [syntax/InstRune1]
+              (aset m pc false)
+              (when (> (len (.-Next inst)) 0)
+                (break))
+
+              (.insert instQueue ^{:go/via [Inst]} (.-Out inst))
+              (let [runes (lit (slice rune))]
+                ;; expand case-folded runes
+                (if (!= (bit-and (conv syntax/Flags ^{:go/via [Inst]} (.-Arg inst)) syntax/FoldCase) 0)
+                  (let [r0 (aget ^{:go/via [Inst]} (.-Rune inst) 0)]
+                    (set! runes (append runes r0 r0))
+                    (for [r1 (unicode/SimpleFold r0)] (!= r1 r0) (set! r1 (unicode/SimpleFold r1))
+                      (set! runes (append runes r1 r1)))
+
+                    (^{:inst [(slice rune) rune]} slices/Sort runes))
+
+                  (set! runes (append runes (aget ^{:go/via [Inst]} (.-Rune inst) 0) (aget ^{:go/via [Inst]} (.-Rune inst) 0))))
+
+                (aset onePassRunes pc runes)
+                (set! (.-Next inst) (make (slice uint32) (+ (/ (len (aget onePassRunes pc)) 2) 1)))
+                (range [i (.-Next inst)]
+                  (aset (.-Next inst) i ^{:go/via [Inst]} (.-Out inst)))
+
+                (set! ^{:go/via [Inst]} (.-Op inst) syntax/InstRune)))
+            (case [syntax/InstRuneAny]
+              (aset m pc false)
+              (when (> (len (.-Next inst)) 0)
+                (break))
+
+              (.insert instQueue ^{:go/via [Inst]} (.-Out inst))
+              (aset onePassRunes pc (append (lit (slice rune)) (spread anyRune)))
+              (set! (.-Next inst) (lit (slice uint32) ^{:go/via [Inst]} (.-Out inst))))
+            (case [syntax/InstRuneAnyNotNL]
+              (aset m pc false)
+              (when (> (len (.-Next inst)) 0)
+                (break))
+
+              (.insert instQueue ^{:go/via [Inst]} (.-Out inst))
+              (aset onePassRunes pc (append (lit (slice rune)) (spread anyRuneNotNL)))
+              (set! (.-Next inst) (make (slice uint32) (+ (/ (len (aget onePassRunes pc)) 2) 1)))
+              (range [i (.-Next inst)]
+                (aset (.-Next inst) i ^{:go/via [Inst]} (.-Out inst)))))
+
+
+          (return))))
+
+
+    (.clear instQueue)
+    (.insert instQueue (conv uint32 (.-Start p)))
+    (let [m (make (slice bool) (len (.-Inst p)))]
+      (while (not (.empty instQueue))
+        (.clear visitQueue)
+        (let [pc (.next instQueue)]
+          (when (not (check pc m))
+            (set! p nil)
+            (break))))
+
+
+      (when (!= p nil)
+        (range [i (.-Inst p)]
+          (set! ^{:go/via [Inst]} (.-Rune (aget (.-Inst p) i)) (aget onePassRunes i))))
+
+
+      ^{:line 452} p)))
+
+
+
+
+
+
+^{:go/end 508} (go/func compileOnePass "compileOnePass returns a new *syntax.Prog suitable for onePass execution if the original Prog\ncan be recharacterized as a one-pass regexp program, or syntax.nil if the\nProg cannot be converted. For a one pass prog, the fundamental condition that must\nbe true is: at any InstAlt, there must be no ambiguity about what branch to  take.\n" [^{:tag (* syntax/Prog)} prog] :results [^{:tag (* onePassProg)} p]
+  (when (== (.-Start prog) 0)
+    (return nil))
+
+  ;; onepass regexp is anchored
+  (when (or (!= (.-Op (aget (.-Inst prog) (.-Start prog))) syntax/InstEmptyWidth)
+      (!= (bit-and (conv syntax/EmptyOp (.-Arg (aget (.-Inst prog) (.-Start prog)))) syntax/EmptyBeginText) syntax/EmptyBeginText))
+    (return nil))
+
+  (let [hasAlt false]
+    (range [_ inst (.-Inst prog)]
+      (when (or (== (.-Op inst) syntax/InstAlt) (== (.-Op inst) syntax/InstAltMatch))
+        (set! hasAlt true)
+        (break)))
+
+
+    ;; If we have alternates, every instruction leading to InstMatch must be EmptyEndText.
+    ;; Also, any match on empty text must be $.
+    (range [_ inst (.-Inst prog)]
+      (let [opOut (.-Op (aget (.-Inst prog) (.-Out inst)))]
+        (switch (.-Op inst)
+          (default
+            (when (and (== opOut syntax/InstMatch) hasAlt)
+              (return nil)))
+
+          (case [syntax/InstAlt syntax/InstAltMatch]
+            (when (or (== opOut syntax/InstMatch) (== (.-Op (aget (.-Inst prog) (.-Arg inst))) syntax/InstMatch))
+              (return nil)))
+
+          (case [syntax/InstEmptyWidth]
+            (when (== opOut syntax/InstMatch)
+              (when (== (bit-and (conv syntax/EmptyOp (.-Arg inst)) syntax/EmptyEndText) syntax/EmptyEndText)
+                (continue))
+
+              (return nil))))))
+
+
+
+    ;; Creates a slightly optimized copy of the original Prog
+    ;; that cleans up some Prog idioms that block valid onepass programs
+    (set! p (onePassCopy prog))
+
+    ;; checkAmbiguity on InstAlts, build onepass Prog if possible
+    (set! p (makeOnePass p))
+
+    (when (!= p nil)
+      (cleanupOnePass p prog))
+
+    ^{:line 507} p))

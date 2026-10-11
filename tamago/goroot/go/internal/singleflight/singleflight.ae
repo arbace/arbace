@@ -1,0 +1,122 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package singleflight provides a duplicate function call suppression
+;; mechanism.
+(in-ns 'go.internal.singleflight) (go/file "singleflight.go" :doc "Package singleflight provides a duplicate function call suppression\nmechanism.\n" :imports [
+
+    ^{:line 9} [sync "sync"]])
+
+
+(go/type call "call is an in-flight or completed singleflight.Do call\n" (struct
+    ^{:line 13 :tag sync/WaitGroup} wg
+
+
+
+    ^{:line 17 :tag any :doc "These fields are written once before the WaitGroup is done\nand are only read after the WaitGroup is done.\n"} val
+    ^{:line 18 :tag error} err
+
+
+
+
+    ^{:line 23 :tag int :doc "These fields are read and written with the singleflight\nmutex held before the WaitGroup is done, and are read but\nnot written after the WaitGroup is done.\n"} dups
+    ^{:line 24 :tag (slice (chan :send Result))} chans))
+
+
+
+
+(go/type Group "Group represents a class of work and forms a namespace in\nwhich units of work can be executed with duplicate suppression.\n" (struct
+    ^{:line 30 :tag sync/Mutex} mu ; protects m
+    ^{:line 31 :tag (map string (* call))} m)) ; lazily initialized
+
+
+
+
+(go/type Result "Result holds the results of Do, so they can be passed\non a channel.\n" (struct
+    ^{:line 37 :tag any} Val
+    ^{:line 38 :tag error} Err
+    ^{:line 39 :tag bool} Shared))
+
+
+
+
+
+
+
+^{:go/end 65} (go/method Do "Do executes and returns the results of the given function, making\nsure that only one execution is in-flight for a given key at a\ntime. If a duplicate comes in, the duplicate caller waits for the\noriginal to complete and receives the same results.\nThe return value shared indicates whether v was given to multiple callers.\n" [^{:tag (* Group)} g ^string key ^{:tag (func [] [any error])} fn] :results [^any v ^error err ^bool shared]
+  (.Lock (.-mu g))
+  (when (== (.-m g) nil)
+    (set! (.-m g) (make (map string (* call)))))
+
+  (when [(values c ok) (aget (.-m g) key)] ok
+    (inc! (.-dups c))
+    (.Unlock (.-mu g))
+    (.Wait (.-wg c))
+    (return (.-val c) (.-err c) true))
+
+  (let [c (new call)]
+    (.Add (.-wg c) 1)
+    (aset (.-m g) key c)
+    (.Unlock (.-mu g))
+
+    (.doCall g c key fn)
+    (return (.-val c) (.-err c) (> (.-dups c) 0))))
+
+
+
+
+^{:go/end 89} (go/method DoChan "DoChan is like Do but returns a channel that will receive the\nresults when they are ready.\n" ^{:tag (chan :recv Result)} [^{:tag (* Group)} g ^string key ^{:tag (func [] [any error])} fn]
+  (let [ch (make (chan Result) 1)]
+    (.Lock (.-mu g))
+    (when (== (.-m g) nil)
+      (set! (.-m g) (make (map string (* call)))))
+
+    (when [(values c ok) (aget (.-m g) key)] ok
+      (inc! (.-dups c))
+      (set! (.-chans c) (append (.-chans c) ch))
+      (.Unlock (.-mu g))
+      (return ch))
+
+    (let [c (addr (lit call :chans (lit (slice (chan :send Result)) ch)))]
+      (.Add (.-wg c) 1)
+      (aset (.-m g) key c)
+      (.Unlock (.-mu g))
+
+      (go (.doCall g c key fn))
+
+      ^{:line 88} ch)))
+
+
+
+^{:go/end 104} (go/method doCall "doCall handles the single call for a key.\n" [^{:tag (* Group)} g ^{:tag (* call)} c ^string key ^{:tag (func [] [any error])} fn]
+  (set! (values (.-val c) (.-err c)) (go/call fn))
+
+  (.Lock (.-mu g))
+  (.Done (.-wg c))
+  (when (== (aget (.-m g) key) c)
+    (delete (.-m g) key))
+
+  (range [_ ch (.-chans c)]
+    (>! ch (lit Result (.-val c) (.-err c) (> (.-dups c) 0))))
+
+  (.Unlock (.-mu g)))
+
+
+
+
+
+
+
+^{:go/end 123} (go/method ForgetUnshared "ForgetUnshared tells the singleflight to forget about a key if it is not\nshared with any other goroutines. Future calls to Do for a forgotten key\nwill call the function rather than waiting for an earlier call to complete.\nReturns whether the key was forgotten or unknown--that is, whether no\nother goroutines are waiting for the result.\n" ^bool [^{:tag (* Group)} g ^string key]
+  (.Lock (.-mu g))
+  (defer (.Unlock (.-mu g)))
+  ^{:go/breaks [[4 122]]} (let [(values c ok) (aget (.-m g) key)]
+    (when (not ok)
+      (return true))
+
+    (when (== (.-dups c) 0)
+      (delete (.-m g) key)
+      (return true))
+
+    false))

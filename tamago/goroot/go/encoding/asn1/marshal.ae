@@ -1,0 +1,748 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.encoding.asn1) (go/file "marshal.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [big "math/big"]
+    ^{:line 12} [reflect "reflect"]
+    ^{:line 13} [slices "slices"]
+    ^{:line 14} [time "time"]
+    ^{:line 15} [utf8 "unicode/utf8"]])
+
+
+(go/var
+  ^{:line 19} [^encoder byte00Encoder (conv byteEncoder 0x00)]
+  ^{:line 20} [^encoder byteFFEncoder (conv byteEncoder 0xff)])
+
+
+
+(go/type encoder "encoder represents an ASN.1 element that is waiting to be marshaled.\n" (interface
+
+    (^{:doc "Len returns the number of bytes needed to marshal this element.\n"} Len ^int [])
+
+    (^{:doc "Encode encodes this element by writing Len() bytes to dst.\n"} Encode [^{:tag (slice byte)} dst])))
+
+
+(go/type byteEncoder byte)
+
+^{:go/breaks [3] :go/end 35} (go/method Len ^int [^byteEncoder c]
+  1)
+
+
+^{:go/end 39} (go/method Encode [^byteEncoder c ^{:tag (slice byte)} dst]
+  (aset dst 0 (conv byte c)))
+
+
+(go/type bytesEncoder (slice byte))
+
+^{:go/end 45} (go/method Len ^int [^bytesEncoder b]
+  (len b))
+
+
+^{:go/end 51} (go/method Encode [^bytesEncoder b ^{:tag (slice byte)} dst]
+  (when (!= (copy dst b) (len b))
+    (panic "internal error")))
+
+
+
+(go/type stringEncoder string)
+
+^{:go/end 57} (go/method Len ^int [^stringEncoder s]
+  (len s))
+
+
+^{:go/end 63} (go/method Encode [^stringEncoder s ^{:tag (slice byte)} dst]
+  (when (!= (copy dst s) (len s))
+    (panic "internal error")))
+
+
+
+(go/type multiEncoder (slice encoder))
+
+^{:go/end 73} (go/method Len ^int [^multiEncoder m]
+  (let [^int size (zero int)]
+    (range [_ e m]
+      (set! size + (.Len e)))
+
+    ^{:line 72} size))
+
+
+^{:go/end 81} (go/method Encode [^multiEncoder m ^{:tag (slice byte)} dst]
+  (let [^int off (zero int)]
+    (range [_ e m]
+      (.Encode e (subslice dst off))
+      (set! off + (.Len e)))))
+
+
+
+(go/type setEncoder (slice encoder))
+
+^{:go/end 91} (go/method Len ^int [^setEncoder s]
+  (let [^int size (zero int)]
+    (range [_ e s]
+      (set! size + (.Len e)))
+
+    ^{:line 90} size))
+
+
+^{:go/end 121} (go/method Encode [^setEncoder s ^{:tag (slice byte)} dst]
+  ;; Per X690 Section 11.6: The encodings of the component values of a
+  ;; set-of value shall appear in ascending order, the encodings being
+  ;; compared as octet strings with the shorter components being padded
+  ;; at their trailing end with 0-octets.
+  ;;
+  ;; First we encode each element to its TLV encoding and then use
+  ;; octetSort to get the ordering expected by X690 DER rules before
+  ;; writing the sorted encodings out to dst.
+  (let [l (make (slice (slice byte)) (len s))]
+    (range [i e s]
+      (aset l i (make (slice byte) (.Len e)))
+      (.Encode e (aget l i)))
+
+
+    ;; Since we are using bytes.Compare to compare TLV encodings we
+    ;; don't need to right pad s[i] and s[j] to the same length as
+    ;; suggested in X690. If len(s[i]) < len(s[j]) the length octet of
+    ;; s[i], which is the first determining byte, will inherently be
+    ;; smaller than the length octet of s[j]. This lets us skip the
+    ;; padding step.
+    (^{:inst [(slice (slice byte)) (slice byte)]} slices/SortFunc l bytes/Compare)
+
+    (let [^int off (zero int)]
+      (range [_ b l]
+        (copy (subslice dst off) b)
+        (set! off + (len b))))))
+
+
+
+(go/type taggedEncoder (struct
+
+
+    ^{:line 126 :tag (array 8 byte) :doc "scratch contains temporary space for encoding the tag and length of\nan element in order to avoid extra allocations.\n"} scratch
+    ^{:line 127 :tag encoder} tag
+    ^{:line 128 :tag encoder} body))
+
+
+^{:go/end 133} (go/method Len ^int [^{:tag (* taggedEncoder)} t]
+  (+ (.Len (.-tag t)) (.Len (.-body t))))
+
+
+^{:go/end 138} (go/method Encode [^{:tag (* taggedEncoder)} t ^{:tag (slice byte)} dst]
+  (.Encode (.-tag t) dst)
+  (.Encode (.-body t) (subslice dst (.Len (.-tag t)))))
+
+
+(go/type int64Encoder int64)
+
+^{:go/end 156} (go/method Len ^int [^int64Encoder i]
+  (let [n 1]
+
+    (while (> i 127)
+      (inc! n)
+      (set! i >> 8))
+
+
+    (while (< i -128)
+      (inc! n)
+      (set! i >> 8))
+
+
+    ^{:line 155} n))
+
+
+^{:go/end 164} (go/method Encode [^int64Encoder i ^{:tag (slice byte)} dst]
+  (let [n (.Len i)]
+
+    (for [j 0] (< j n) (inc! j)
+      (aset dst j (conv byte (>> i (conv uint (* (- n 1 j) 8))))))))
+
+
+
+^{:go/end 177} (go/func base128IntLength ^int [^int64 n]
+  (when (== n 0)
+    (return 1))
+
+
+  (let [l 0]
+    (for [i n] (> i 0) (set! i >> 7)
+      (inc! l))
+
+
+    ^{:line 176} l))
+
+
+^{:go/end 193} (go/func appendBase128Int ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^int64 n]
+  (let [l (base128IntLength n)]
+
+    (for [i (- l 1)] (>= i 0) (dec! i)
+      (let [o (conv byte (>> n (conv uint (* i 7))))]
+        (set! o bit-and 0x7f)
+        (when (!= i 0)
+          (set! o bit-or 0x80))
+
+
+        (set! dst (append dst o))))
+
+
+    ^{:line 192} dst))
+
+
+^{:go/end 227} (go/func makeBigInt [^{:tag (* big/Int)} n] :results [encoder error]
+  (when (== n nil)
+    (return nil (lit StructuralError "empty integer")))
+
+
+  (cond (< (.Sign n) 0)
+    ;; A negative number has to be converted to two's-complement
+    ;; form. So we'll invert and subtract 1. If the
+    ;; most-significant-bit isn't set then we'll need to pad the
+    ;; beginning with 0xff in order to keep the number negative.
+    (let [nMinus1 (.Neg (new big/Int) n)]
+      (.Sub nMinus1 nMinus1 bigOne)
+      (let [bytes (.Bytes nMinus1)]
+        (range [i bytes]
+          (set! (aget bytes i) bit-xor 0xff))
+
+        (when (or (== (len bytes) 0) (== (bit-and (aget bytes 0) 0x80) 0))
+          (return (conv multiEncoder (lit (slice encoder) byteFFEncoder (conv bytesEncoder bytes))) nil))
+
+        (return (conv bytesEncoder bytes) nil)))
+    (== (.Sign n) 0)
+    ;; Zero is written as a single 0 zero rather than no bytes.
+    (return byte00Encoder nil) :else
+
+    (let [bytes (.Bytes n)]
+      (when (and (> (len bytes) 0) (!= (bit-and (aget bytes 0) 0x80) 0))
+        ;; We'll have to pad this with 0x00 in order to stop it
+        ;; looking like a negative number.
+        (return (conv multiEncoder (lit (slice encoder) byte00Encoder (conv bytesEncoder bytes))) nil))
+
+      (return (conv bytesEncoder bytes) nil))))
+
+
+
+^{:go/end 237} (go/func appendLength ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^int i]
+  (let [n (lengthLength i)]
+
+    (for [] (> n 0) (dec! n)
+      (set! dst (append dst (conv byte (>> i (conv uint (* (- n 1) 8)))))))
+
+
+    ^{:line 236} dst))
+
+
+^{:go/end 246} (go/func lengthLength [^int i] :results [^int numBytes]
+  (set! numBytes 1)
+  (while (> i 255)
+    (inc! numBytes)
+    (set! i >> 8))
+
+  (return))
+
+
+^{:go/end 271} (go/func appendTagAndLength ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^tagAndLength t]
+  (let [b (<< (conv uint8 (.-class t)) 6)]
+    (when (.-isCompound t)
+      (set! b bit-or 0x20))
+
+    (if (>= (.-tag t) 31) (do
+        (set! b bit-or 0x1f)
+        (set! dst (append dst b))
+        (set! dst (appendBase128Int dst (conv int64 (.-tag t)))))
+      (do
+        (set! b bit-or (conv uint8 (.-tag t)))
+        (set! dst (append dst b))))
+
+
+    (if (>= (.-length t) 128)
+      (let [l (lengthLength (.-length t))]
+        (set! dst (append dst (bit-or 0x80 (conv byte l))))
+        (set! dst (appendLength dst (.-length t))))
+
+      (set! dst (append dst (conv byte (.-length t)))))
+
+
+    ^{:line 270} dst))
+
+
+(go/type bitStringEncoder BitString)
+
+^{:go/end 277} (go/method Len ^int [^bitStringEncoder b]
+  (+ (len (.-Bytes b)) 1))
+
+
+^{:go/end 284} (go/method Encode [^bitStringEncoder b ^{:tag (slice byte)} dst]
+  (aset dst 0 (conv byte (% (- 8 (% (.-BitLength b) 8)) 8)))
+  (when (!= (copy (subslice dst 1) (.-Bytes b)) (len (.-Bytes b)))
+    (panic "internal error")))
+
+
+
+(go/type oidEncoder (slice int))
+
+^{:go/end 294} (go/method Len ^int [^oidEncoder oid]
+  (let [l (base128IntLength (conv int64 (+ (* (aget oid 0) 40) (aget oid 1))))]
+    (for [i 2] (< i (len oid)) (inc! i)
+      (set! l + (base128IntLength (conv int64 (aget oid i)))))
+
+    ^{:line 293} l))
+
+
+^{:go/end 301} (go/method Encode [^oidEncoder oid ^{:tag (slice byte)} dst]
+  (set! dst (appendBase128Int (subslice dst _ 0) (conv int64 (+ (* (aget oid 0) 40) (aget oid 1)))))
+  (for [i 2] (< i (len oid)) (inc! i)
+    (set! dst (appendBase128Int dst (conv int64 (aget oid i))))))
+
+
+
+^{:go/end 309} (go/func makeObjectIdentifier [^{:tag (slice int)} oid] :results [^encoder e ^error err]
+  (when (or (< (len oid) 2) (> (aget oid 0) 2) ^:go/paren (and (< (aget oid 0) 2) (>= (aget oid 1) 40)))
+    (return nil (lit StructuralError "invalid object identifier")))
+
+
+  (return (conv oidEncoder oid) nil))
+
+
+^{:go/end 325} (go/func makePrintableString [^string s] :results [^encoder e ^error err]
+  (for [i 0] (< i (len s)) (inc! i)
+    ;; The asterisk is often used in PrintableString, even though
+    ;; it is invalid. If a PrintableString was specifically
+    ;; requested then the asterisk is permitted by this code.
+    ;; Ampersand is allowed in parsing due a handful of CA
+    ;; certificates, however when making new certificates
+    ;; it is rejected.
+    (when (not (isPrintable (aget s i) allowAsterisk rejectAmpersand))
+      (return nil (lit StructuralError "PrintableString contains invalid character"))))
+
+
+
+  (return (conv stringEncoder s) nil))
+
+
+^{:go/end 335} (go/func makeIA5String [^string s] :results [^encoder e ^error err]
+  (for [i 0] (< i (len s)) (inc! i)
+    (when (> (aget s i) 127)
+      (return nil (lit StructuralError "IA5String contains invalid character"))))
+
+
+
+  (return (conv stringEncoder s) nil))
+
+
+^{:go/end 345} (go/func makeNumericString [^string s] :results [^encoder e ^error err]
+  (for [i 0] (< i (len s)) (inc! i)
+    (when (not (isNumeric (aget s i)))
+      (return nil (lit StructuralError "NumericString contains invalid character"))))
+
+
+
+  (return (conv stringEncoder s) nil))
+
+
+^{:go/end 349} (go/func makeUTF8String ^encoder [^string s]
+  (conv stringEncoder s))
+
+
+^{:go/end 353} (go/func appendTwoDigits ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^int v]
+  (append dst (conv byte (+ \0 (% (/ v 10) 10))) (conv byte (+ \0 (% v 10)))))
+
+
+^{:go/end 361} (go/func appendFourDigits ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^int v]
+  (append dst
+    (conv byte (+ \0 (% (/ v 1000) 10)))
+    (conv byte (+ \0 (% (/ v 100) 10)))
+    (conv byte (+ \0 (% (/ v 10) 10)))
+    (conv byte (+ \0 (% v 10)))))
+
+
+^{:go/end 366} (go/func outsideUTCRange ^bool [^time/Time t]
+  (let [year (.Year t)]
+    (or (< year 1950) (>= year 2050))))
+
+
+^{:go/end 377} (go/func makeUTCTime [^time/Time t] :results [^encoder e ^error err]
+  (let [dst (make (slice byte) 0 18)]
+
+    (set! (values dst err) (appendUTCTime dst t))
+    (when (!= err nil)
+      (return nil err))
+
+
+    (return (conv bytesEncoder dst) nil)))
+
+
+^{:go/end 388} (go/func makeGeneralizedTime [^time/Time t] :results [^encoder e ^error err]
+  (let [dst (make (slice byte) 0 20)]
+
+    (set! (values dst err) (appendGeneralizedTime dst t))
+    (when (!= err nil)
+      (return nil err))
+
+
+    (return (conv bytesEncoder dst) nil)))
+
+
+^{:go/end 403} (go/func appendUTCTime [^{:tag (slice byte)} dst ^time/Time t] :results [^{:tag (slice byte)} ret ^error err]
+  (let [year (.Year t)]
+
+    (switch
+      (case [(and (<= 1950 year) (< year 2000))]
+        (set! dst (appendTwoDigits dst (- year 1900))))
+      (case [(and (<= 2000 year) (< year 2050))]
+        (set! dst (appendTwoDigits dst (- year 2000))))
+      (default
+        (return nil (lit StructuralError "cannot represent time as UTCTime"))))
+
+
+    (return (appendTimeCommon dst t) nil)))
+
+
+^{:go/end 414} (go/func appendGeneralizedTime [^{:tag (slice byte)} dst ^time/Time t] :results [^{:tag (slice byte)} ret ^error err]
+  (let [year (.Year t)]
+    (when (or (< year 0) (> year 9999))
+      (return nil (lit StructuralError "cannot represent time as GeneralizedTime")))
+
+
+    (set! dst (appendFourDigits dst year))
+
+    (return (appendTimeCommon dst t) nil)))
+
+
+^{:go/end 448} (go/func appendTimeCommon ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^time/Time t]
+  (let [(values _ month day) (.Date t)]
+
+    (set! dst (appendTwoDigits dst (conv int month)))
+    (set! dst (appendTwoDigits dst day))
+
+    (let [(values hour min sec) (.Clock t)]
+
+      (set! dst (appendTwoDigits dst hour))
+      (set! dst (appendTwoDigits dst min))
+      (set! dst (appendTwoDigits dst sec))
+
+      (let [(values _ offset) (.Zone t)]
+
+        (switch
+          (case [(== (/ offset 60) 0)]
+            (return (append dst \Z)))
+          (case [(> offset 0)]
+            (set! dst (append dst \+)))
+          (case [(< offset 0)]
+            (set! dst (append dst \-))))
+
+
+        (let [offsetMinutes (/ offset 60)]
+          (when (< offsetMinutes 0)
+            (set! offsetMinutes (- offsetMinutes)))
+
+
+          (set! dst (appendTwoDigits dst (/ offsetMinutes 60)))
+          (set! dst (appendTwoDigits dst (% offsetMinutes 60)))
+
+          ^{:line 447} dst)))))
+
+
+^{:go/end 456} (go/func stripTagAndLength ^{:tag (slice byte)} [^{:tag (slice byte)} in]
+  (let [(values _ offset err) (parseTagAndLength in 0)]
+    (when (!= err nil)
+      (return in))
+
+    (subslice in offset)))
+
+
+^{:go/end 577} (go/func makeBody [^reflect/Value value ^fieldParameters params] :results [^encoder e ^error err]
+  (switch (.Type value)
+    (case [flagType]
+      (return (conv bytesEncoder nil) nil))
+    (case [timeType]
+      (let [(values t _) ((inst reflect/TypeAssert time/Time) value)]
+        (when (or (== (.-timeType params) TagGeneralizedTime) (outsideUTCRange t))
+          (return (makeGeneralizedTime t)))
+
+        (return (makeUTCTime t))))
+    (case [bitStringType]
+      (let [(values v _) ((inst reflect/TypeAssert BitString) value)]
+        (return (conv bitStringEncoder v) nil)))
+    (case [objectIdentifierType]
+      (let [(values v _) ((inst reflect/TypeAssert ObjectIdentifier) value)]
+        (return (makeObjectIdentifier v))))
+    (case [bigIntType]
+      (let [(values v _) ((inst reflect/TypeAssert (* big/Int)) value)]
+        (return (makeBigInt v)))))
+
+
+  (switch [v value] (.Kind v)
+    (case [reflect/Bool]
+      (when (.Bool v)
+        (return byteFFEncoder nil))
+
+      (return byte00Encoder nil))
+    (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+      (return (conv int64Encoder (.Int v)) nil))
+    (case [reflect/Struct]
+      (let [t (.Type v)]
+
+        (for [i 0] (< i (.NumField t)) (inc! i)
+          (when (not (.IsExported (.Field t i)))
+            (return nil (lit StructuralError "struct contains unexported fields"))))
+
+
+
+        (let [startingField 0
+
+            ^{:line 498} n (.NumField t)]
+          (when (== n 0)
+            (return (conv bytesEncoder nil) nil))
+
+
+          ;; If the first element of the structure is a non-empty
+          ;; RawContents, then we don't bother serializing the rest.
+          (when (== (.-Type (.Field t 0)) rawContentsType)
+            (let [s (.Field v 0)]
+              (when (> (.Len s) 0)
+                (let [bytes (.Bytes s)]
+                  ;; /* The RawContents will contain the tag and
+                  ;; * length fields but we'll also be writing
+                  ;; * those ourselves, so we strip them out of
+                  ;; * bytes */
+                  (return (conv bytesEncoder (stripTagAndLength bytes)) nil)))
+
+
+              (set! startingField 1)))
+
+
+          (switch [n1 (- n startingField)] n1
+            (case [0]
+              (return (conv bytesEncoder nil) nil))
+            (case [1]
+              (return (makeField (.Field v startingField) (parseFieldParameters (.Get (.-Tag (.Field t startingField)) "asn1")))))
+            (default
+              (let [m (make (slice encoder) n1)]
+                (for [i 0] (< i n1) (inc! i)
+                  (set! (values (aget m i) err) (makeField (.Field v (+ i startingField)) (parseFieldParameters (.Get (.-Tag (.Field t (+ i startingField))) "asn1"))))
+                  (when (!= err nil)
+                    (return nil err)))
+
+
+
+                (return (conv multiEncoder m) nil)))))))
+
+    (case [reflect/Slice]
+      (let [sliceType (.Type v)]
+        (when (== (.Kind (.Elem sliceType)) reflect/Uint8)
+          (return (conv bytesEncoder (.Bytes v)) nil))
+
+
+        (let [^fieldParameters fp (zero fieldParameters)]
+
+          (switch [l (.Len v)] l
+            (case [0]
+              (return (conv bytesEncoder nil) nil))
+            (case [1]
+              (return (makeField (.Index v 0) fp)))
+            (default
+              (let [m (make (slice encoder) l)]
+
+                (for [i 0] (< i l) (inc! i)
+                  (set! (values (aget m i) err) (makeField (.Index v i) fp))
+                  (when (!= err nil)
+                    (return nil err)))
+
+
+
+                (when (.-set params)
+                  (return (conv setEncoder m) nil))
+
+                (return (conv multiEncoder m) nil)))))))
+
+    (case [reflect/String]
+      (switch (.-stringType params)
+        (case [TagIA5String]
+          (return (makeIA5String (.String v))))
+        (case [TagPrintableString]
+          (return (makePrintableString (.String v))))
+        (case [TagNumericString]
+          (return (makeNumericString (.String v))))
+        (default
+          (return (makeUTF8String (.String v)) nil)))))
+
+
+
+  (return nil (lit StructuralError "unknown Go type")))
+
+
+^{:go/end 721} (go/func makeField [^reflect/Value v ^fieldParameters params] :results [^encoder e ^error err]
+  (when (not (.IsValid v))
+    (return nil (fmt/Errorf "asn1: cannot marshal nil value")))
+
+  ;; If the field is an interface{} then recurse into it.
+  (when (and (== (.Kind v) reflect/Interface) (== (.NumMethod (.Type v)) 0))
+    (return (makeField (.Elem v) params)))
+
+
+  (when (and (== (.Kind v) reflect/Slice) (== (.Len v) 0) (.-omitEmpty params))
+    (return (conv bytesEncoder nil) nil))
+
+
+  (when (and (.-optional params) (!= (.-defaultValue params) nil) (canHaveDefaultValue (.Kind v)))
+    (let [defaultValue (.Elem (reflect/New (.Type v)))]
+      (.SetInt defaultValue @(.-defaultValue params))
+
+      (when (reflect/DeepEqual (.Interface v) (.Interface defaultValue))
+        (return (conv bytesEncoder nil) nil))))
+
+
+
+  ;; If no default value is given then the zero value for the type is
+  ;; assumed to be the default value. This isn't obviously the correct
+  ;; behavior, but it's what Go has traditionally done.
+  (when (and (.-optional params) (== (.-defaultValue params) nil))
+    (when (reflect/DeepEqual (.Interface v) (.Interface (reflect/Zero (.Type v))))
+      (return (conv bytesEncoder nil) nil)))
+
+
+
+  (when (== (.Type v) rawValueType)
+    (let [(values rv _) ((inst reflect/TypeAssert RawValue) v)]
+      (when (!= (len (.-FullBytes rv)) 0)
+        (return (conv bytesEncoder (.-FullBytes rv)) nil))
+
+
+      (let [t (new taggedEncoder)]
+
+        (set! (.-tag t) (conv bytesEncoder (appendTagAndLength (subslice (.-scratch t) _ 0) (lit tagAndLength (.-Class rv) (.-Tag rv) (len (.-Bytes rv)) (.-IsCompound rv)))))
+        (set! (.-body t) (conv bytesEncoder (.-Bytes rv)))
+
+        (return t nil))))
+
+
+  (let [(values matchAny tag isCompound ok) (getUniversalType (.Type v))]
+    (when (or (not ok) matchAny)
+      (return nil (lit StructuralError (fmt/Sprintf "unknown Go type: %v" (.Type v)))))
+
+
+    (when (and (!= (.-timeType params) 0) (!= tag TagUTCTime))
+      (return nil (lit StructuralError "explicit time type given to non-time member")))
+
+
+    (when (and (!= (.-stringType params) 0) (!= tag TagPrintableString))
+      (return nil (lit StructuralError "explicit string type given to non-string member")))
+
+
+    (switch tag
+      (case [TagPrintableString]
+        (if (== (.-stringType params) 0)
+          ;; This is a string without an explicit string type. We'll use
+          ;; a PrintableString if the character set in the string is
+          ;; sufficiently limited, otherwise we'll use a UTF8String.
+          (range [_ r (.String v)]
+            (when (or (>= r utf8/RuneSelf) (not (isPrintable (conv byte r) rejectAsterisk rejectAmpersand)))
+              (when (not (utf8/ValidString (.String v)))
+                (return nil (errors/New "asn1: string not valid UTF-8")))
+
+              (set! tag TagUTF8String)
+              (break)))
+
+
+
+          (set! tag (.-stringType params))))
+
+      (case [TagUTCTime]
+        (let [(values t _) ((inst reflect/TypeAssert time/Time) v)]
+          (when (or (== (.-timeType params) TagGeneralizedTime) (outsideUTCRange t))
+            (set! tag TagGeneralizedTime)))))
+
+
+
+    (when (.-set params)
+      (when (!= tag TagSequence)
+        (return nil (lit StructuralError "non sequence tagged as set")))
+
+      (set! tag TagSet))
+
+
+    ;; makeField can be called for a slice that should be treated as a SET
+    ;; but doesn't have params.set set, for instance when using a slice
+    ;; with the SET type name suffix. In this case getUniversalType returns
+    ;; TagSet, but makeBody doesn't know about that so will treat the slice
+    ;; as a sequence. To work around this we set params.set.
+    (when (and (== tag TagSet) (not (.-set params)))
+      (set! (.-set params) true))
+
+
+    (let [t (new taggedEncoder)]
+
+      (set! (values (.-body t) err) (makeBody v params))
+      (when (!= err nil)
+        (return nil err))
+
+
+      (let [bodyLen (.Len (.-body t))
+
+          ^{:line 687} class ClassUniversal]
+        (when (!= (.-tag params) nil)
+          (cond (.-application params)
+            (set! class ClassApplication)
+            (.-private params)
+            (set! class ClassPrivate) :else
+
+            (set! class ClassContextSpecific))
+
+
+          (when (.-explicit params)
+            (set! (.-tag t) (conv bytesEncoder (appendTagAndLength (subslice (.-scratch t) _ 0) (lit tagAndLength ClassUniversal tag bodyLen isCompound))))
+
+            (let [tt (new taggedEncoder)]
+
+              (set! (.-body tt) t)
+
+              (set! (.-tag tt) (conv bytesEncoder (appendTagAndLength (subslice (.-scratch tt) _ 0) ^{:go/breaks [2 4 6 8]} (lit tagAndLength
+                      :class class
+                      :tag @(.-tag params)
+                      :length (+ bodyLen (.Len (.-tag t)))
+                      :isCompound true))))
+
+
+              (return tt nil)))
+
+
+          ;; implicit tag.
+          (set! tag @(.-tag params)))
+
+
+        (set! (.-tag t) (conv bytesEncoder (appendTagAndLength (subslice (.-scratch t) _ 0) (lit tagAndLength class tag bodyLen isCompound))))
+
+        (return t nil)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 737} (go/func Marshal "Marshal returns the ASN.1 encoding of val.\n\nIn addition to the struct tags recognized by Unmarshal, the following can be\nused:\n\n\tia5:         causes strings to be marshaled as ASN.1, IA5String values\n\tomitempty:   causes empty slices to be skipped\n\tprintable:   causes strings to be marshaled as ASN.1, PrintableString values\n\tutf8:        causes strings to be marshaled as ASN.1, UTF8String values\n\tnumeric:     causes strings to be marshaled as ASN.1, NumericString values\n\tutc:         causes time.Time to be marshaled as ASN.1, UTCTime values\n\tgeneralized: causes time.Time to be marshaled as ASN.1, GeneralizedTime values\n" [^any val] :results [(slice byte) error]
+  (MarshalWithParams val ""))
+
+
+
+
+^{:go/end 749} (go/func MarshalWithParams "MarshalWithParams allows field parameters to be specified for the\ntop-level element. The form of the params is the same as the field tags.\n" [^any val ^string params] :results [(slice byte) error]
+  (let [(values e err) (makeField (reflect/ValueOf val) (parseFieldParameters params))]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [b (make (slice byte) (.Len e))]
+      (.Encode e b)
+      (return b nil))))

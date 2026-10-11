@@ -1,0 +1,142 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.os) (go/file "exec_unix.go" :build ["//go:build unix || (js && wasm) || wasip1 || tamago"] :imports [
+
+
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [syscall "syscall"]
+    ^{:line 12} [time "time"]])
+
+
+(go/const
+
+  ^{:line 17} [^{:val 0 :doc "Special values for Process.Pid.\n"} pidUnset 0]
+  ^{:line 18} [^{:val -1} pidReleased -1])
+
+
+^{:go/end 30} (go/method wait [^{:tag (* Process)} p] :results [^{:tag (* ProcessState)} ps ^error err]
+  ;; Which type of Process do we have?
+  (if (!= (.-handle p) nil)
+    ;; pidfd
+    (return (.pidfdWait p))
+
+    ;; Regular PID
+    (return (.pidWait p))))
+
+
+
+^{:go/end 75} (go/method pidWait [^{:tag (* Process)} p] :results [(* ProcessState) error]
+  ;; TODO(go.dev/issue/67642): When there are concurrent Wait calls, one
+  ;; may wait on the wrong process if the PID is reused after the
+  ;; completes its wait.
+  ;;
+  ;; Checking for statusDone here would not be a complete fix, as the PID
+  ;; could still be waited on and reused prior to blockUntilWaitable.
+  (switch (.pidStatus p)
+    (case [statusReleased]
+      (return nil syscall/EINVAL)))
+
+
+  ;; If we can block until Wait4 will succeed immediately, do so.
+  (let [(values ready err) (.blockUntilWaitable p)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when ready
+      ;; Mark the process done now, before the call to Wait4,
+      ;; so that Process.pidSignal will not send a signal.
+      (.doRelease p statusDone)
+      ;; Acquire a write lock on sigMu to wait for any
+      ;; active call to the signal method to complete.
+      (.Lock (.-sigMu p))
+      (.Unlock (.-sigMu p)))
+
+
+    (let [
+        ^{:line 60 :tag syscall/WaitStatus} status (zero syscall/WaitStatus)
+        ^{:line 61 :tag syscall/Rusage} rusage (zero syscall/Rusage)
+
+        (values pid1 ^:assign err) (^{:inst [int]} ignoringEINTR2 ^{:go/end 65} (fn [] :results [int error]
+            (syscall/Wait4 (.-Pid p) (addr status) 0 (addr rusage))))]
+
+      (when (!= err nil)
+        (return nil (NewSyscallError "wait" err)))
+
+      (.doRelease p statusDone)
+      ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4 6]} (lit ProcessState
+            :pid pid1
+            :status status
+            :rusage (addr rusage)))
+        nil))))
+
+
+^{:go/end 91} (go/method signal ^error [^{:tag (* Process)} p ^Signal sig]
+  (let [(values s ok) (assert syscall/Signal sig)]
+    (when (not ok)
+      (return (errors/New "os: unsupported signal type")))
+
+
+    ;; Which type of Process do we have?
+    (if (!= (.-handle p) nil)
+      ;; pidfd
+      (return (.pidfdSendSignal p s))
+
+      ;; Regular PID
+      (return (.pidSignal p s)))))
+
+
+
+^{:go/end 112} (go/method pidSignal ^error [^{:tag (* Process)} p ^syscall/Signal s]
+  (when (== (.-Pid p) pidReleased)
+    (return errProcessReleased))
+
+  (when (== (.-Pid p) pidUnset)
+    (return (errors/New "os: process not initialized")))
+
+
+  (.RLock (.-sigMu p))
+  (defer (.RUnlock (.-sigMu p)))
+
+  (switch (.pidStatus p)
+    (case [statusDone]
+      (return ErrProcessDone))
+    (case [statusReleased]
+      (return errProcessReleased)))
+
+
+  (convertESRCH (syscall/Kill (.-Pid p) s)))
+
+
+^{:go/end 119} (go/func convertESRCH ^error [^error err]
+  (when (== err syscall/ESRCH)
+    (return ErrProcessDone))
+
+  ^{:line 118} err)
+
+
+^{:go/end 135} (go/func findProcess [^int pid] :results [^{:tag (* Process)} p ^error err]
+  (let [(values h ^:assign err) (pidfdFind pid)]
+    (cond (== err ErrProcessDone)
+      ;; We can't return an error here since users are not expecting
+      ;; it. Instead, return a process with a "done" state already
+      ;; and let a subsequent Signal or Wait call catch that.
+      (return (newDoneProcess pid) nil)
+      (!= err nil)
+      ;; Ignore other errors from pidfdFind, as the callers
+      ;; do not expect them. Fall back to using the PID.
+      (return (newPIDProcess pid) nil))
+
+    ;; Use the handle.
+    (return (newHandleProcess pid h) nil)))
+
+
+^{:go/end 139} (go/method userTime ^time/Duration [^{:tag (* ProcessState)} p]
+  (* (conv time/Duration (.Nano (.-Utime (.-rusage p)))) time/Nanosecond))
+
+
+^{:go/end 143} (go/method systemTime ^time/Duration [^{:tag (* ProcessState)} p]
+  (* (conv time/Duration (.Nano (.-Stime (.-rusage p)))) time/Nanosecond))

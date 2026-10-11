@@ -1,0 +1,538 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "packet_protection.go" :imports [
+
+
+    ^{:line 8} [crypto "crypto"]
+    ^{:line 9} [aes "crypto/aes"]
+    ^{:line 10} [cipher "crypto/cipher"]
+    ^{:line 11} [sha256 "crypto/sha256"]
+    ^{:line 12} [tls "crypto/tls"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [hash "hash"]
+
+    ^{:line 16} [chacha20 "golang.org/x/crypto/chacha20"]
+    ^{:line 17} [chacha20poly1305 "golang.org/x/crypto/chacha20poly1305"]
+    ^{:line 18} [cryptobyte "golang.org/x/crypto/cryptobyte"]
+    ^{:line 19} [hkdf "golang.org/x/crypto/hkdf"]])
+
+
+(go/var errInvalidPacket (errors/New "quic: invalid packet"))
+
+
+
+(go/const ^{:val 16 :doc "headerProtectionSampleSize is the size of the ciphertext sample used for header protection.\nhttps://www.rfc-editor.org/rfc/rfc9001#section-5.4.2\n"} headerProtectionSampleSize 16)
+
+
+
+(go/const ^{:val 16 :doc "aeadOverhead is the difference in size between the AEAD output and input.\nAll cipher suites defined for use with QUIC have 16 bytes of overhead.\n"} aeadOverhead 16)
+
+
+
+(go/type headerKey "A headerKey applies or removes header protection.\nhttps://www.rfc-editor.org/rfc/rfc9001#section-5.4\n" (struct
+    ^{:line 35 :tag headerProtection} hp))
+
+
+^{:go/end 40} (go/method isSet ^bool [^headerKey k]
+  (!= (.-hp k) nil))
+
+
+^{:go/end 57} (go/method init [^{:tag (* headerKey)} k ^uint16 suite ^{:tag (slice byte)} secret]
+  (let [(values h keySize) (hashForSuite suite)
+      ^{:line 44} hpKey (hkdfExpandLabel (.-New h) secret "quic hp" nil keySize)]
+    (switch suite
+      (case [tls/TLS_AES_128_GCM_SHA256 tls/TLS_AES_256_GCM_SHA384]
+        (let [(values c err) (aes/NewCipher hpKey)]
+          (when (!= err nil)
+            (panic err))
+
+          (set! (.-hp k) (addr (lit aesHeaderProtection :cipher c)))))
+      (case [tls/TLS_CHACHA20_POLY1305_SHA256]
+        (set! (.-hp k) (lit chaCha20HeaderProtection hpKey)))
+      (default
+        (panic "BUG: unknown cipher suite")))))
+
+
+
+
+
+^{:go/end 74} (go/method protect "protect applies header protection.\npnumOff is the offset of the packet number in the packet.\n" [^headerKey k ^{:tag (slice byte)} hdr ^int pnumOff]
+  ;; Apply header protection.
+  (let [pnumSize (+ (conv int (bit-and (aget hdr 0) 0x03)) 1)
+      ^{:line 64} sample (subslice (subslice hdr (+ pnumOff 4)) _ headerProtectionSampleSize)
+      ^{:line 65} mask (.headerProtection (.-hp k) sample)]
+    (if (isLongHeader (aget hdr 0))
+      (set! (aget hdr 0) bit-xor (bit-and (aget mask 0) 0x0f))
+
+      (set! (aget hdr 0) bit-xor (bit-and (aget mask 0) 0x1f)))
+
+    (for [i 0] (< i pnumSize) (inc! i)
+      (set! (aget hdr (+ pnumOff i)) bit-xor (aget mask (+ 1 i))))))
+
+
+
+
+
+
+^{:go/end 101} (go/method unprotect "unprotect removes header protection.\npnumOff is the offset of the packet number in the packet.\npnumMax is the largest packet number seen in the number space of this packet.\n" [^headerKey k ^{:tag (slice byte)} pkt ^int pnumOff ^packetNumber pnumMax] :results [^{:tag (slice byte)} hdr ^{:tag (slice byte)} pay ^packetNumber pnum ^error _]
+  (when (< (len pkt) (+ pnumOff 4 headerProtectionSampleSize))
+    (return nil nil 0 errInvalidPacket))
+
+  (let [numpay (subslice pkt pnumOff)
+      ^{:line 84} sample (subslice (subslice numpay 4) _ headerProtectionSampleSize)
+      ^{:line 85} mask (.headerProtection (.-hp k) sample)]
+    (if (isLongHeader (aget pkt 0))
+      (set! (aget pkt 0) bit-xor (bit-and (aget mask 0) 0x0f))
+
+      (set! (aget pkt 0) bit-xor (bit-and (aget mask 0) 0x1f)))
+
+    (let [pnumLen (+ (conv int (bit-and (aget pkt 0) 0x03)) 1)]
+      (set! pnum (conv packetNumber 0))
+      (for [i 0] (< i pnumLen) (inc! i)
+        (set! (aget numpay i) bit-xor (aget mask (+ 1 i)))
+        (set! pnum (bit-or (<< pnum 8) (conv packetNumber (aget numpay i)))))
+
+      (set! pnum (decodePacketNumber pnumMax pnum pnumLen))
+      (set! hdr (subslice pkt _ (+ pnumOff pnumLen)))
+      (set! pay (subslice numpay pnumLen))
+      (return hdr pay pnum nil))))
+
+
+
+
+
+
+
+
+(go/type headerProtection "headerProtection is the  header_protection function as defined in:\nhttps://www.rfc-editor.org/rfc/rfc9001#section-5.4.1\n\nThis function takes a sample of the packet ciphertext\nand returns a 5-byte mask which will be applied to the\nprotected portions of the packet header.\n" (interface
+    (headerProtection [^{:tag (slice byte)} sample] :results [^{:tag (array 5 byte)} mask])))
+
+
+
+
+(go/type aesHeaderProtection "AES-based header protection.\nhttps://www.rfc-editor.org/rfc/rfc9001#section-5.4.3\n" (struct
+    ^{:line 116 :tag cipher/Block} cipher
+    ^{:line 117 :tag (array aes/BlockSize byte)} scratch))
+
+
+^{:go/end 124} (go/method headerProtection [^{:tag (* aesHeaderProtection)} hp ^{:tag (slice byte)} sample] :results [^{:tag (array 5 byte)} mask]
+  (.Encrypt (.-cipher hp) (subslice (.-scratch hp)) sample)
+  (copy (subslice mask) (subslice (.-scratch hp)))
+  ^{:line 123} mask)
+
+
+
+
+(go/type chaCha20HeaderProtection "ChaCha20-based header protection.\nhttps://www.rfc-editor.org/rfc/rfc9001#section-5.4.4\n" (struct
+    ^{:line 129 :tag (slice byte)} key))
+
+
+^{:go/end 142} (go/method headerProtection [^chaCha20HeaderProtection hp ^{:tag (slice byte)} sample] :results [^{:tag (array 5 byte)} mask]
+  (let [counter (bit-or (<< (conv uint32 (aget sample 3)) 24) (<< (conv uint32 (aget sample 2)) 16) (<< (conv uint32 (aget sample 1)) 8) (conv uint32 (aget sample 0)))
+      ^{:line 134} nonce (subslice sample 4 16)
+      (values c err) (chacha20/NewUnauthenticatedCipher (.-key hp) nonce)]
+    (when (!= err nil)
+      (panic err))
+
+    (.SetCounter c counter)
+    (.XORKeyStream c (subslice mask) (subslice mask))
+    ^{:line 141} mask))
+
+
+
+
+(go/type packetKey "A packetKey applies or removes packet protection.\nhttps://www.rfc-editor.org/rfc/rfc9001#section-5.1\n" (struct
+    ^{:line 147 :tag cipher/AEAD} aead ; AEAD function used for packet protection.
+    ^{:line 148 :tag (slice byte)} iv)) ; IV used to construct the AEAD nonce.
+
+
+^{:go/end 164} (go/method init [^{:tag (* packetKey)} k ^uint16 suite ^{:tag (slice byte)} secret]
+  ;; https://www.rfc-editor.org/rfc/rfc9001#section-5.1
+  (let [(values h keySize) (hashForSuite suite)
+      ^{:line 154} key (hkdfExpandLabel (.-New h) secret "quic key" nil keySize)]
+    (switch suite
+      (case [tls/TLS_AES_128_GCM_SHA256 tls/TLS_AES_256_GCM_SHA384]
+        (set! (.-aead k) (newAESAEAD key)))
+      (case [tls/TLS_CHACHA20_POLY1305_SHA256]
+        (set! (.-aead k) (newChaCha20AEAD key)))
+      (default
+        (panic "BUG: unknown cipher suite")))
+
+    (set! (.-iv k) (hkdfExpandLabel (.-New h) secret "quic iv" nil (.NonceSize (.-aead k))))))
+
+
+^{:go/end 176} (go/func newAESAEAD ^cipher/AEAD [^{:tag (slice byte)} key]
+  (let [(values c err) (aes/NewCipher key)]
+    (when (!= err nil)
+      (panic err))
+
+    (let [(values aead ^:assign err) (cipher/NewGCM c)]
+      (when (!= err nil)
+        (panic err))
+
+      ^{:line 175} aead)))
+
+
+^{:go/end 185} (go/func newChaCha20AEAD ^cipher/AEAD [^{:tag (slice byte)} key]
+  (let [^error err (zero error)
+      (values aead ^:assign err) (chacha20poly1305/New key)]
+    (when (!= err nil)
+      (panic err))
+
+    ^{:line 184} aead))
+
+
+^{:go/end 191} (go/method protect ^{:tag (slice byte)} [^packetKey k ^{:tag (slice byte)} hdr ^{:tag (slice byte)} pay ^packetNumber pnum]
+  (.xorIV k pnum)
+  (defer (.xorIV k pnum))
+  (.Seal (.-aead k) hdr (.-iv k) pay hdr))
+
+
+^{:go/end 197} (go/method unprotect [^packetKey k ^{:tag (slice byte)} hdr ^{:tag (slice byte)} pay ^packetNumber pnum] :results [^{:tag (slice byte)} dec ^error err]
+  (.xorIV k pnum)
+  (defer (.xorIV k pnum))
+  (.Open (.-aead k) (subslice pay _ 0) (.-iv k) pay hdr))
+
+
+
+^{:go/end 209} (go/method xorIV "xorIV xors the packet protection IV with the packet number.\n" [^packetKey k ^packetNumber pnum]
+  (set! (aget (.-iv k) (- (len (.-iv k)) 8)) bit-xor (conv uint8 (>> pnum 56)))
+  (set! (aget (.-iv k) (- (len (.-iv k)) 7)) bit-xor (conv uint8 (>> pnum 48)))
+  (set! (aget (.-iv k) (- (len (.-iv k)) 6)) bit-xor (conv uint8 (>> pnum 40)))
+  (set! (aget (.-iv k) (- (len (.-iv k)) 5)) bit-xor (conv uint8 (>> pnum 32)))
+  (set! (aget (.-iv k) (- (len (.-iv k)) 4)) bit-xor (conv uint8 (>> pnum 24)))
+  (set! (aget (.-iv k) (- (len (.-iv k)) 3)) bit-xor (conv uint8 (>> pnum 16)))
+  (set! (aget (.-iv k) (- (len (.-iv k)) 2)) bit-xor (conv uint8 (>> pnum 8)))
+  (set! (aget (.-iv k) (- (len (.-iv k)) 1)) bit-xor (conv uint8 pnum)))
+
+
+
+
+
+
+(go/type fixedKeys "A fixedKeys is a header protection key and fixed packet protection key.\nThe packet protection key is fixed (it does not update).\n\nFixed keys are used for Initial and Handshake keys, which do not update.\n" (struct
+    ^{:line 216 :tag headerKey} hdr
+    ^{:line 217 :tag packetKey} pkt))
+
+
+^{:go/end 223} (go/method init [^{:tag (* fixedKeys)} k ^uint16 suite ^{:tag (slice byte)} secret]
+  (.init (.-hdr k) suite secret)
+  (.init (.-pkt k) suite secret))
+
+
+^{:go/end 227} (go/method isSet ^bool [^fixedKeys k]
+  (!= (.-hp (.-hdr k)) nil))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 241} (go/method protect "protect applies packet protection to a packet.\n\nOn input, hdr contains the packet header, pay the unencrypted payload,\npnumOff the offset of the packet number in the header, and pnum the untruncated\npacket number.\n\nprotect returns the result of appending the encrypted payload to hdr and\napplying header protection.\n" ^{:tag (slice byte)} [^fixedKeys k ^{:tag (slice byte)} hdr ^{:tag (slice byte)} pay ^int pnumOff ^packetNumber pnum]
+  (let [pkt (.protect (.-pkt k) hdr pay pnum)]
+    (.protect (.-hdr k) pkt pnumOff)
+    ^{:line 240} pkt))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 261} (go/method unprotect "unprotect removes packet protection from a packet.\n\nOn input, pkt contains the full protected packet, pnumOff the offset of\nthe packet number in the header, and pnumMax the largest packet number\nseen in the number space of this packet.\n\nunprotect removes header protection from the header in pkt, and returns\nthe unprotected payload and packet number.\n" [^fixedKeys k ^{:tag (slice byte)} pkt ^int pnumOff ^packetNumber pnumMax] :results [^{:tag (slice byte)} pay ^packetNumber num ^error err]
+  (let [(values hdr ^:assign pay pnum ^:assign err) (.unprotect (.-hdr k) pkt pnumOff pnumMax)]
+    (when (!= err nil)
+      (return nil 0 err))
+
+    (set! (values pay err) (.unprotect (.-pkt k) hdr pay pnum))
+    (when (!= err nil)
+      (return nil 0 err))
+
+    (return pay pnum nil)))
+
+
+
+(go/type fixedKeyPair "A fixedKeyPair is a read/write pair of fixed keys.\n" (struct
+    ^{:line 265 :tag fixedKeys} r ^fixedKeys w))
+
+
+^{:go/end 270} (go/method discard [^{:tag (* fixedKeyPair)} k]
+  (set! @k (lit fixedKeyPair)))
+
+
+^{:go/end 274} (go/method canRead ^bool [^{:tag (* fixedKeyPair)} k]
+  (.isSet (.-r k)))
+
+
+^{:go/end 278} (go/method canWrite ^bool [^{:tag (* fixedKeyPair)} k]
+  (.isSet (.-w k)))
+
+
+
+
+
+
+(go/type updatingKeys "An updatingKeys is a header protection key and updatable packet protection key.\nupdatingKeys are used for 1-RTT keys, where the packet protection key changes\nover the lifetime of a connection.\nhttps://www.rfc-editor.org/rfc/rfc9001#section-6\n" (struct
+    ^{:line 285 :tag uint16} suite
+    ^{:line 286 :tag headerKey} hdr
+    ^{:line 287 :tag (array 2 packetKey)} pkt ; current, next
+    ^{:line 288 :tag (slice byte)} nextSecret)) ; secret used to generate pkt[1]
+
+
+^{:go/end 298} (go/method init [^{:tag (* updatingKeys)} k ^uint16 suite ^{:tag (slice byte)} secret]
+  (set! (.-suite k) suite)
+  (.init (.-hdr k) suite secret)
+  ;; Initialize pkt[1] with secret_0, and then call update to generate secret_1.
+  (.init (aget (.-pkt k) 1) suite secret)
+  (set! (.-nextSecret k) secret)
+  (.update k))
+
+
+
+
+
+
+^{:go/end 308} (go/method update "update performs a key update.\nThe current key in pkt[0] is discarded.\nThe next key in pkt[1] becomes the current key.\nA new next key is generated in pkt[1].\n" [^{:tag (* updatingKeys)} k]
+  (set! (.-nextSecret k) (updateSecret (.-suite k) (.-nextSecret k)))
+  (aset (.-pkt k) 0 (aget (.-pkt k) 1))
+  (.init (aget (.-pkt k) 1) (.-suite k) (.-nextSecret k)))
+
+
+^{:go/end 313} (go/func updateSecret [^uint16 suite ^{:tag (slice byte)} secret] :results [^{:tag (slice byte)} nextSecret]
+  (let [(values h _) (hashForSuite suite)]
+    (hkdfExpandLabel (.-New h) secret "quic ku" nil (len secret))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type updatingKeyPair "An updatingKeyPair is a read/write pair of updating keys.\n\nWe keep two keys (current and next) in both read and write directions.\nWhen an incoming packet's phase matches the current phase bit,\nwe unprotect it using the current keys; otherwise we use the next keys.\n\nWhen updating=false, outgoing packets are protected using the current phase.\n\nAn update is initiated and updating is set to true when:\n  - we decide to initiate a key update; or\n  - we successfully unprotect a packet using the next keys,\n    indicating the peer has initiated a key update.\n\nWhen updating=true, outgoing packets are protected using the next phase.\nWe do not change the current phase bit or generate new keys yet.\n\nThe update concludes when we receive an ACK frame for a packet sent\nwith the next keys. At this time, we set updating to false, flip the\nphase bit, and update the keys. This permits us to handle up to 1-RTT\nof reordered packets before discarding the previous phase's keys after\nan update.\n" (struct
+    ^{:line 337 :tag uint8} phase ; current key phase (r.pkt[0], w.pkt[0])
+    ^{:line 338 :tag bool} updating
+    ^{:line 339 :tag int64} authFailures ; total packet unprotect failures
+    ^{:line 340 :tag packetNumber} minSent ; min packet number sent since entering the updating state
+    ^{:line 341 :tag packetNumber} minReceived ; min packet number received in the next phase
+    ^{:line 342 :tag packetNumber} updateAfter ; packet number after which to initiate key update
+    ^{:line 343 :tag updatingKeys} r ^updatingKeys w))
+
+
+^{:go/end 359} (go/method init [^{:tag (* updatingKeyPair)} k]
+  ;; 1-RTT packets until the first key update.
+  ;;
+  ;; We perform the first key update early in the connection so a peer
+  ;; which does not support key updates will fail rapidly,
+  ;; rather than after the connection has been long established.
+  ;;
+  ;; The QUIC interop runner "keyupdate" test requires that the client
+  ;; initiate a key rotation early in the connection. Increasing this
+  ;; value may cause interop test failures; if we do want to increase it,
+  ;; we should either skip the keyupdate test or provide a way to override
+  ;; the setting in interop tests.
+  (set! (.-updateAfter k) 100))
+
+
+^{:go/end 363} (go/method canRead ^bool [^{:tag (* updatingKeyPair)} k]
+  (!= (.-hp (.-hdr (.-r k))) nil))
+
+
+^{:go/end 367} (go/method canWrite ^bool [^{:tag (* updatingKeyPair)} k]
+  (!= (.-hp (.-hdr (.-w k))) nil))
+
+
+
+^{:go/end 377} (go/method handleAckFor "handleAckFor finishes a key update after receiving an ACK for a packet in the next phase.\n" [^{:tag (* updatingKeyPair)} k ^packetNumber pnum]
+  (when (and (.-updating k) (>= pnum (.-minSent k)))
+    (set! (.-updating k) false)
+    (set! (.-phase k) bit-xor keyPhaseBit)
+    (.update (.-r k))
+    (.update (.-w k))))
+
+
+
+
+
+
+^{:go/end 384} (go/method needAckEliciting "needAckEliciting reports whether we should send an ack-eliciting packet in the next phase.\nThe first packet sent in a phase is ack-eliciting, since the peer must acknowledge a\npacket in the new phase for us to finish the update.\n" ^bool [^{:tag (* updatingKeyPair)} k]
+  (and (.-updating k) (== (.-minSent k) maxPacketNumber)))
+
+
+
+
+^{:go/end 415} (go/method protect "protect applies packet protection to a packet.\nParameters and returns are as for fixedKeyPair.protect.\n" ^{:tag (slice byte)} [^{:tag (* updatingKeyPair)} k ^{:tag (slice byte)} hdr ^{:tag (slice byte)} pay ^int pnumOff ^packetNumber pnum]
+  (let [^{:tag (slice byte)} pkt (zero (slice byte))]
+    (if (.-updating k) (do
+        (set! (aget hdr 0) bit-or (bit-xor (.-phase k) keyPhaseBit))
+        (set! pkt (.protect (aget (.-pkt (.-w k)) 1) hdr pay pnum))
+        (set! (.-minSent k) (min pnum (.-minSent k))))
+      (do
+        (set! (aget hdr 0) bit-or (.-phase k))
+        (set! pkt (.protect (aget (.-pkt (.-w k)) 0) hdr pay pnum))
+        (when (>= pnum (.-updateAfter k))
+          ;; Initiate a key update, starting with the next packet we send.
+          ;;
+          ;; We do this after protecting the current packet
+          ;; to allow Conn.appendFrames to ensure that the first packet sent
+          ;; in the new phase is ack-eliciting.
+          (set! (.-updating k) true)
+          (set! (.-minSent k) maxPacketNumber)
+          (set! (.-minReceived k) maxPacketNumber)
+          ;; The lowest confidentiality limit for a supported AEAD is 2^23 packets.
+          ;; https://www.rfc-editor.org/rfc/rfc9001#section-6.6-5
+          ;;
+          ;; Schedule our next update for half that.
+          (set! (.-updateAfter k) + (<< 1 22)))))
+
+
+    (.protect (.-hdr (.-w k)) pkt pnumOff)
+    ^{:line 414} pkt))
+
+
+
+
+^{:go/end 453} (go/method unprotect "unprotect removes packet protection from a packet.\nParameters and returns are as for fixedKeyPair.unprotect.\n" [^{:tag (* updatingKeyPair)} k ^{:tag (slice byte)} pkt ^int pnumOff ^packetNumber pnumMax] :results [^{:tag (slice byte)} pay ^packetNumber pnum ^error err]
+  (let [(values hdr ^:assign pay ^:assign pnum ^:assign err) (.unprotect (.-hdr (.-r k)) pkt pnumOff pnumMax)]
+    (when (!= err nil)
+      (return nil 0 err))
+
+    ;; To avoid timing signals that might indicate the key phase bit is invalid,
+    ;; we always attempt to unprotect the packet with one key.
+    ;;
+    ;; If the key phase bit matches and the packet number doesn't come after
+    ;; the start of an in-progress update, use the current phase.
+    ;; Otherwise, use the next phase.
+    (if (and (== (bit-and (aget hdr 0) keyPhaseBit) (.-phase k)) ^:go/paren (or (not (.-updating k)) (< pnum (.-minReceived k))))
+      (set! (values pay err) (.unprotect (aget (.-pkt (.-r k)) 0) hdr pay pnum))
+      (do
+        (set! (values pay err) (.unprotect (aget (.-pkt (.-r k)) 1) hdr pay pnum))
+        (when (== err nil)
+          (if (not (.-updating k)) (do
+              ;; The peer has initiated a key update.
+              (set! (.-updating k) true)
+              (set! (.-minSent k) maxPacketNumber)
+              (set! (.-minReceived k) pnum))
+
+            (set! (.-minReceived k) (min pnum (.-minReceived k)))))))
+
+
+
+    (when (!= err nil)
+      (inc! (.-authFailures k))
+      (when (>= (.-authFailures k) (aeadIntegrityLimit (.-suite (.-r k))))
+        (return nil 0 (lit localTransportError :code errAEADLimitReached)))
+
+      (return nil 0 err))
+
+    (return pay pnum nil)))
+
+
+
+
+
+
+
+^{:go/end 469} (go/func aeadIntegrityLimit "aeadIntegrityLimit returns the integrity limit for an AEAD:\nThe maximum number of received packets that may fail authentication\nbefore closing the connection.\n\nhttps://www.rfc-editor.org/rfc/rfc9001#section-6.6-4\n" ^int64 [^uint16 suite]
+  (switch suite
+    (case [tls/TLS_AES_128_GCM_SHA256 tls/TLS_AES_256_GCM_SHA384]
+      (return (<< 1 52)))
+    (case [tls/TLS_CHACHA20_POLY1305_SHA256]
+      (return (<< 1 36)))
+    (default
+      (panic "BUG: unknown cipher suite"))))
+
+
+
+
+(go/var ^{:doc "https://www.rfc-editor.org/rfc/rfc9001#section-5.2-2\n"} initialSalt (lit (slice byte) 0x38 0x76 0x2c 0xf7 0xf5 0x59 0x34 0xb3 0x4d 0x17 0x9a 0xe6 0xa4 0xc8 0x0c 0xad 0xcc 0xbb 0x7f 0x0a))
+
+
+
+
+
+
+
+^{:go/end 493} (go/func initialKeys "initialKeys returns the keys used to protect Initial packets.\n\nThe Initial packet keys are derived from the Destination Connection ID\nfield in the client's first Initial packet.\n\nhttps://www.rfc-editor.org/rfc/rfc9001#section-5.2\n" ^fixedKeyPair [^{:tag (slice byte)} cid ^connSide side]
+  (let [initialSecret (hkdf/Extract sha256/New cid initialSalt)
+      ^{:line 482 :tag fixedKeys} clientKeys (zero fixedKeys)
+      ^{:line 483} clientSecret (hkdfExpandLabel sha256/New initialSecret "client in" nil sha256/Size)]
+    (.init clientKeys tls/TLS_AES_128_GCM_SHA256 clientSecret)
+    (let [^fixedKeys serverKeys (zero fixedKeys)
+        ^{:line 486} serverSecret (hkdfExpandLabel sha256/New initialSecret "server in" nil sha256/Size)]
+      (.init serverKeys tls/TLS_AES_128_GCM_SHA256 serverSecret)
+      (if (== side clientSide)
+        (return (lit fixedKeyPair :r serverKeys :w clientKeys))
+
+        (return (lit fixedKeyPair :w serverKeys :r clientKeys))))))
+
+
+
+
+^{:go/breaks [[5 504]] :go/end 505} (go/func checkCipherSuite "checkCipherSuite returns an error if suite is not a supported cipher suite.\n" ^error [^uint16 suite]
+  (switch suite
+    (case [tls/TLS_AES_128_GCM_SHA256])
+    (case [tls/TLS_AES_256_GCM_SHA384])
+    (case [tls/TLS_CHACHA20_POLY1305_SHA256])
+    (default
+      (return (errors/New "invalid cipher suite"))))
+
+  nil)
+
+
+^{:go/end 518} (go/func hashForSuite [^uint16 suite] :results [^crypto/Hash h ^int keySize]
+  (switch suite
+    (case [tls/TLS_AES_128_GCM_SHA256]
+      (return crypto/SHA256 (/ 128 8)))
+    (case [tls/TLS_AES_256_GCM_SHA384]
+      (return crypto/SHA384 (/ 256 8)))
+    (case [tls/TLS_CHACHA20_POLY1305_SHA256]
+      (return crypto/SHA256 chacha20/KeySize))
+    (default
+      (panic "BUG: unknown cipher suite"))))
+
+
+
+
+
+
+^{:go/end 539} (go/func hkdfExpandLabel "hkdfExpandLabel implements HKDF-Expand-Label from RFC 8446, Section 7.1.\n\nCopied from crypto/tls/key_schedule.go.\n" ^{:tag (slice byte)} [^{:tag (func [] [hash/Hash])} hash ^{:tag (slice byte)} secret ^string label ^{:tag (slice byte)} context ^int length]
+  (let [^cryptobyte/Builder hkdfLabel (zero cryptobyte/Builder)]
+    (.AddUint16 hkdfLabel (conv uint16 length))
+    (.AddUint8LengthPrefixed hkdfLabel ^{:go/end 529} (fn [^{:tag (* cryptobyte/Builder)} b]
+        (.AddBytes b (conv (slice byte) "tls13 "))
+        (.AddBytes b (conv (slice byte) label))))
+
+    (.AddUint8LengthPrefixed hkdfLabel ^{:go/end 532} (fn [^{:tag (* cryptobyte/Builder)} b]
+        (.AddBytes b context)))
+
+    (let [out (make (slice byte) length)
+        (values n err) (.Read (hkdf/Expand hash secret (.BytesOrPanic hkdfLabel)) out)]
+      (when (or (!= err nil) (!= n length))
+        (panic "quic: HKDF-Expand-Label invocation failed unexpectedly"))
+
+      ^{:line 538} out)))

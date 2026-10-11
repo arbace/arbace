@@ -1,0 +1,467 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements rat-to-string conversion functions.
+
+(in-ns 'go.math.big) (go/file "ratconv.go" :imports [
+
+
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [strconv "strconv"]
+    ^{:line 14} [strings "strings"]])
+
+
+^{:go/end 19} (go/func ratTok ^bool [^rune ch]
+  (strings/ContainsRune "+-/0123456789.eE" ch))
+
+
+(go/var ^Rat ratZero)
+(go/var ^fmt/Scanner _ (addr ratZero)) ; *Rat must implement fmt.Scanner
+
+
+
+^{:go/end 38} (go/method Scan "Scan is a support routine for fmt.Scanner. It accepts the formats\n'e', 'E', 'f', 'F', 'g', 'G', and 'v'. All formats are equivalent.\n" ^error [^{:tag (* Rat)} z ^fmt/ScanState s ^rune ch]
+  ^{:go/breaks [[5 37]]} (let [(values tok err) (.Token s true ratTok)]
+    (when (!= err nil)
+      (return err))
+
+    (when (not (strings/ContainsRune "efgEFGv" ch))
+      (return (errors/New "Rat.Scan: invalid verb")))
+
+    (when [(values _ ok) (.SetString z (conv string tok))] (not ok)
+      (return (errors/New "Rat.Scan: invalid syntax")))
+
+    nil))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 208} (go/method SetString "SetString sets z to the value of s and returns z and a boolean indicating\nsuccess. s can be given as a (possibly signed) fraction \"a/b\", or as a\nfloating-point number optionally followed by an exponent.\nIf a fraction is provided, both the dividend and the divisor may be a\ndecimal integer or independently use a prefix of “0b”, “0” or “0o”,\nor “0x” (or their upper-case variants) to denote a binary, octal, or\nhexadecimal integer, respectively. The divisor may not be signed.\nIf a floating-point number is provided, it may be in decimal form or\nuse any of the same prefixes as above but for “0” to denote a non-decimal\nmantissa. A leading “0” is considered a decimal leading 0; it does not\nindicate octal representation in this case.\nAn optional base-10 “e” or base-2 “p” (or their upper-case variants)\nexponent may be provided as well, except for hexadecimal floats which\nonly accept an (optional) “p” exponent (because an “e” or “E” cannot\nbe distinguished from a mantissa digit). If the exponent's absolute value\nis too large, the operation may fail.\nThe entire string, not just a prefix, must be valid for success. If the\noperation failed, the value of z is undefined but the returned value is nil.\n" [^{:tag (* Rat)} z ^string s] :results [(* Rat) bool]
+  (when (== (len s) 0)
+    (return nil false))
+
+  ;; len(s) > 0
+
+  ;; parse fraction a/b, if any
+  (when [sep (strings/Index s "/")] (>= sep 0)
+    (when [(values _ ok) (.SetString (.-a z) (subslice s _ sep) 0)] (not ok)
+      (return nil false))
+
+    (let [r (strings/NewReader (subslice s (+ sep 1)))
+        ^{:line 70 :tag error} err (zero error)]
+      (when [(set! (values (.-abs (.-b z)) _ _ err) (.scan (.-abs (.-b z)) r 0 false))] (!= err nil)
+        (return nil false))
+
+      ;; entire string must have been consumed
+      (when [(set! (values _ err) (.ReadByte r))] (!= err io/EOF)
+        (return nil false))
+
+      (when (== (len (.-abs (.-b z))) 0)
+        (return nil false))
+
+      (return (.norm z) true)))
+
+
+  ;; parse floating-point number
+  (let [r (strings/NewReader s)
+
+      ;; sign
+      (values neg err) (scanSign r)]
+    (when (!= err nil)
+      (return nil false))
+
+
+    ;; mantissa
+    (let [^int base (zero int)
+        ^{:line 95 :tag int} fcount (zero int)] ; fractional digit count; valid if <= 0
+      (set! (values (.-abs (.-a z)) base fcount err) (.scan (.-abs (.-a z)) r 0 true))
+      (when (!= err nil)
+        (return nil false))
+
+
+      ;; exponent
+      (let [^int64 exp (zero int64)
+          ^{:line 103 :tag int} ebase (zero int)]
+        (set! (values exp ebase err) (scanExponent r true true))
+        (when (!= err nil)
+          (return nil false))
+
+
+        ;; there should be no unread characters left
+        (when [(set! (values _ err) (.ReadByte r))] (!= err io/EOF)
+          (return nil false))
+
+
+        ;; special-case 0 (see also issue #16176)
+        (when (== (len (.-abs (.-a z))) 0)
+          (return (.norm z) true))
+
+        ;; len(z.a.abs) > 0
+
+        ;; The mantissa may have a radix point (fcount <= 0) and there
+        ;; may be a nonzero exponent exp. The radix point amounts to a
+        ;; division by base**(-fcount), which equals a multiplication by
+        ;; base**fcount. An exponent means multiplication by ebase**exp.
+        ;; Multiplications are commutative, so we can apply them in any
+        ;; order. We only have powers of 2 and 10, and we split powers
+        ;; of 10 into the product of the same powers of 2 and 5. This
+        ;; may reduce the size of shift/multiplication factors or
+        ;; divisors required to create the final fraction, depending
+        ;; on the actual floating-point value.
+
+        ;; determine binary or decimal exponent contribution of radix point
+        (let [(values ^int64 exp2 ^int64 exp5) (zero int64)]
+          (when (< fcount 0)
+            ;; The mantissa has a radix point ddd.dddd; and
+            ;; -fcount is the number of digits to the right
+            ;; of '.'. Adjust relevant exponent accordingly.
+            (let [d (conv int64 fcount)]
+              (switch base
+                (case [10]
+                  (set! exp5 d)
+                  (fallthrough)) ; 10**e == 5**e * 2**e
+                (case [2]
+                  (set! exp2 d))
+                (case [8]
+                  (set! exp2 (* d 3))) ; octal digits are 3 bits each
+                (case [16]
+                  (set! exp2 (* d 4))) ; hexadecimal digits are 4 bits each
+                (default
+                  (panic "unexpected mantissa base")))))
+
+          ;; fcount consumed - not needed anymore
+
+
+          ;; take actual exponent into account
+          (switch ebase
+            (case [10]
+              (set! exp5 + exp)
+              (fallthrough)) ; see fallthrough above
+            (case [2]
+              (set! exp2 + exp))
+            (default
+              (panic "unexpected exponent base")))
+
+          ;; exp consumed - not needed anymore
+
+          (let [stk (getStack)]
+            (defer (.free stk))
+
+            ;; apply exp5 contributions
+            ;; (start with exp5 so the numbers to multiply are smaller)
+            (if (!= exp5 0)
+              (let [n exp5]
+                (when (< n 0)
+                  (set! n (- n))
+                  (when (< n 0)
+                    ;; This can occur if -n overflows. -(-1 << 63) would become
+                    ;; -1 << 63, which is still negative.
+                    (return nil false)))
+
+
+                (when (> n 1000000.0)
+                  (return nil false)) ; avoid excessively large exponents
+
+                (let [pow5 (.expNN (.-abs (.-b z)) stk natFive (.setWord (conv nat nil) (conv Word n)) nil false)] ; use underlying array of z.b.abs
+                  (if (> exp5 0) (do
+                      (set! (.-abs (.-a z)) (.mul (.-abs (.-a z)) stk (.-abs (.-a z)) pow5))
+                      (set! (.-abs (.-b z)) (.setWord (.-abs (.-b z)) 1)))
+
+                    (set! (.-abs (.-b z)) pow5))))
+
+
+              (set! (.-abs (.-b z)) (.setWord (.-abs (.-b z)) 1)))
+
+
+            ;; apply exp2 contributions
+            (when (or (< exp2 -1.0E7) (> exp2 1.0E7))
+              (return nil false)) ; avoid excessively large exponents
+
+            (cond (> exp2 0)
+              (set! (.-abs (.-a z)) (.lsh (.-abs (.-a z)) (.-abs (.-a z)) (conv uint exp2)))
+              (< exp2 0)
+              (set! (.-abs (.-b z)) (.lsh (.-abs (.-b z)) (.-abs (.-b z)) (conv uint (- exp2)))))
+
+
+            (set! (.-neg (.-a z)) (and neg (> (len (.-abs (.-a z))) 0))) ; 0 has no sign
+
+            (return (.norm z) true)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 301} (go/func scanExponent "scanExponent scans the longest possible prefix of r representing a base 10\n(“e”, “E”) or a base 2 (“p”, “P”) exponent, if any. It returns the\nexponent, the exponent base (10 or 2), or a read or syntax error, if any.\n\nIf sepOk is set, an underscore character “_” may appear between successive\nexponent digits; such underscores do not change the value of the exponent.\nIncorrect placement of underscores is reported as an error if there are no\nother errors. If sepOk is not set, underscores are not recognized and thus\nterminate scanning like any other character that is not a valid digit.\n\n\texponent = ( \"e\" | \"E\" | \"p\" | \"P\" ) [ sign ] digits .\n\tsign     = \"+\" | \"-\" .\n\tdigits   = digit { [ '_' ] digit } .\n\tdigit    = \"0\" ... \"9\" .\n\nA base 2 exponent is only permitted if base2ok is set.\n" [^io/ByteScanner r ^bool base2ok ^bool sepOk] :results [^int64 exp ^int base ^error err]
+  ;; one char look-ahead
+  (let [(values ch ^:assign err) (.ReadByte r)]
+    (when (!= err nil)
+      (when (== err io/EOF)
+        (set! err nil))
+
+      (return 0 10 err))
+
+
+    ;; exponent char
+    (switch ch
+      (case [\e \E]
+        (set! base 10))
+      (case [\p \P]
+        (when base2ok
+          (set! base 2)
+          (break)) ; ok
+
+        (fallthrough)) ; binary exponent not permitted
+      (default
+        (.UnreadByte r) ; ch does not belong to exponent anymore
+        (return 0 10 nil)))
+
+
+    ;; sign
+    (let [^{:tag (slice byte)} digits (zero (slice byte))]
+      (set! (values ch err) (.ReadByte r))
+      (when (and (== err nil) ^:go/paren (or (== ch \+) (== ch \-)))
+        (when (== ch \-)
+          (set! digits (append digits \-)))
+
+        (set! (values ch err) (.ReadByte r)))
+
+
+      ;; prev encodes the previously seen char: it is one
+      ;; of '_', '0' (a digit), or '.' (anything else). A
+      ;; valid separator '_' may only occur after a digit.
+      (let [prev \.
+          ^{:line 265} invalSep false
+
+          ;; exponent value
+          ^{:line 268} hasDigits false]
+        (while (== err nil)
+          (cond (and (<= \0 ch) (<= ch \9)) (do
+              (set! digits (append digits ch))
+              (set! prev \0)
+              (set! hasDigits true))
+            (and (== ch \_) sepOk) (do
+              (when (!= prev \0)
+                (set! invalSep true))
+
+              (set! prev \_)) :else
+            (do
+              (.UnreadByte r) ; ch does not belong to number anymore
+              (break)))
+
+          (set! (values ch err) (.ReadByte r)))
+
+
+        (when (== err io/EOF)
+          (set! err nil))
+
+        (when (and (== err nil) (not hasDigits))
+          (set! err errNoDigits))
+
+        (when (== err nil)
+          (set! (values exp err) (strconv/ParseInt (conv string digits) 10 64)))
+
+        ;; other errors take precedence over invalid separators
+        (when (and (== err nil) ^:go/paren (or invalSep (== prev \_)))
+          (set! err errInvalSep))
+
+
+        (return)))))
+
+
+
+^{:go/end 306} (go/method String "String returns a string representation of x in the form \"a/b\" (even if b == 1).\n" ^string [^{:tag (* Rat)} x]
+  (conv string (.marshal x nil)))
+
+
+
+
+
+^{:go/end 320} (go/method marshal "marshal implements [Rat.String] returning a slice of bytes.\nIt appends the string representation of x in the form \"a/b\" (even if b == 1) to buf,\nand returns the extended buffer.\n" ^{:tag (slice byte)} [^{:tag (* Rat)} x ^{:tag (slice byte)} buf]
+  (set! buf (.Append (.-a x) buf 10))
+  (set! buf (append buf \/))
+  (if (!= (len (.-abs (.-b x))) 0)
+    (set! buf (.Append (.-b x) buf 10))
+
+    (set! buf (append buf \1)))
+
+  ^{:line 319} buf)
+
+
+
+
+^{:go/end 329} (go/method RatString "RatString returns a string representation of x in the form \"a/b\" if b != 1,\nand in the form \"a\" if b == 1.\n" ^string [^{:tag (* Rat)} x]
+  (when (.IsInt x)
+    (return (.String (.-a x))))
+
+  (.String x))
+
+
+
+
+
+^{:go/end 386} (go/method FloatString "FloatString returns a string representation of x in decimal form with prec\ndigits of precision after the radix point. The last digit is rounded to\nnearest, with halves rounded away from zero.\n" ^string [^{:tag (* Rat)} x ^int prec]
+  (let [^{:tag (slice byte)} buf (zero (slice byte))]
+
+    (when (.IsInt x)
+      (set! buf (.Append (.-a x) buf 10))
+      (when (> prec 0)
+        (set! buf (append buf \.))
+        (for [i prec] (> i 0) (dec! i)
+          (set! buf (append buf \0))))
+
+
+      (return (conv string buf)))
+
+    ;; x.b.abs != 0
+
+    (let [stk (getStack)]
+      (defer (.free stk))
+      (let [(values q r) (.div (conv nat nil) stk (conv nat nil) (.-abs (.-a x)) (.-abs (.-b x)))
+
+          ^{:line 353} p natOne]
+        (when (> prec 0)
+          (set! p (.expNN (conv nat nil) stk natTen (.setUint64 (conv nat nil) (conv uint64 prec)) nil false)))
+
+
+        (set! r (.mul r stk r p))
+        (let [(values ^:assign r r2) (.div r stk (conv nat nil) r (.-abs (.-b x)))]
+
+          ;; see if we need to round up
+          (set! r2 (.add r2 r2 r2))
+          (when (<= (.cmp (.-abs (.-b x)) r2) 0)
+            (set! r (.add r r natOne))
+            (when (>= (.cmp r p) 0)
+              (set! q (.add (conv nat nil) q natOne))
+              (set! r (.sub (conv nat nil) r p))))
+
+
+
+          (when (.-neg (.-a x))
+            (set! buf (append buf \-)))
+
+          (set! buf (append buf (spread (.utoa q 10)))) ; itoa ignores sign if q == 0
+
+          (when (> prec 0)
+            (set! buf (append buf \.))
+            (let [rs (.utoa r 10)]
+              (for [i (- prec (len rs))] (> i 0) (dec! i)
+                (set! buf (append buf \0)))
+
+              (set! buf (append buf (spread rs)))))
+
+
+          (conv string buf))))))
+
+
+;; Note: FloatPrec (below) is in this file rather than rat.go because
+;;       its results are relevant for decimal representation/printing.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 468} (go/method FloatPrec "FloatPrec returns the number n of non-repeating digits immediately\nfollowing the decimal point of the decimal representation of x.\nThe boolean result indicates whether a decimal representation of x\nwith that many fractional digits is exact or rounded.\n\nExamples:\n\n\tx      n    exact    decimal representation n fractional digits\n\t0      0    true     0\n\t1      0    true     1\n\t1/2    1    true     0.5\n\t1/3    0    false    0       (0.333... rounded)\n\t1/4    2    true     0.25\n\t1/6    1    false    0.2     (0.166... rounded)\n" [^{:tag (* Rat)} x] :results [^int n ^bool exact]
+  (let [stk (getStack)]
+    (defer (.free stk))
+
+    ;; Determine q and largest p2, p5 such that d = q·2^p2·5^p5.
+    ;; The results n, exact are:
+    ;;
+    ;;     n = max(p2, p5)
+    ;;     exact = q == 1
+    ;;
+    ;; For details see:
+    ;; https://en.wikipedia.org/wiki/Repeating_decimal#Reciprocals_of_integers_not_coprime_to_10
+    (let [d (.-abs (.Denom x)) ; d >= 1
+
+        ;; Determine p2 by counting factors of 2.
+        ;; p2 corresponds to the trailing zero bits in d.
+        ;; Do this first to reduce q as much as possible.
+        ^{:line 422 :tag nat} q (zero nat)
+        ^{:line 423} p2 (.trailingZeroBits d)]
+      (set! q (.rsh q d p2))
+
+      ;; Determine p5 by counting factors of 5.
+      ;; Build a table starting with an initial power of 5,
+      ;; and use repeated squaring until the factor doesn't
+      ;; divide q anymore. Then use the table to determine
+      ;; the power of 5 in q.
+      (let [^:const ^{:val 13} fp 13 ; f == 5^fp
+          ^{:line 432 :tag (slice nat)} tab (zero (slice nat)) ; tab[i] == (5^fp)^(2^i) == 5^(fp·2^i)
+          ^{:line 433} f (lit nat 1220703125) ; == 5^fp (must fit into a uint32 Word)
+          (values ^nat t ^nat r) (zero nat)] ; temporaries
+        (while true
+          (when [(set! (values _ r) (.div t stk r q f))] (!= (len r) 0)
+            (break)) ; f doesn't divide q evenly
+
+          (set! tab (append tab f))
+          (set! f (.sqr (conv nat nil) stk f))) ; nat(nil) to ensure a new f for each table entry
+
+
+        ;; Factor q using the table entries, if any.
+        ;; We start with the largest factor f = tab[len(tab)-1]
+        ;; that evenly divides q. It does so at most once because
+        ;; otherwise f·f would also divide q. That can't be true
+        ;; because f·f is the next higher table entry, contradicting
+        ;; how f was chosen in the first place.
+        ;; The same reasoning applies to the subsequent factors.
+        (let [^uint p5 (zero uint)]
+          (for [i (- (len tab) 1)] (>= i 0) (dec! i)
+            (when [(set! (values t r) (.div t stk r q (aget tab i)))] (== (len r) 0)
+              (set! p5 + (* fp ^uint (<< 1 i))) ; tab[i] == 5^(fp·2^i)
+              (set! q (.set q t))))
+
+
+
+          ;; If fp != 1, we may still have multiples of 5 left.
+          (while true
+            (when [(set! (values t r) (.div t stk r q natFive))] (!= (len r) 0)
+              (break))
+
+            (inc! p5)
+            (set! q (.set q t)))
+
+
+          (return (conv int (max p2 p5)) (== (.cmp q natOne) 0)))))))

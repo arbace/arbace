@@ -1,0 +1,459 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace.internal.testgen) (go/file "trace.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [regexp "regexp"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [time "time"]
+
+    ^{:line 16} [trace "internal/trace"]
+    ^{:line 17} [raw "internal/trace/raw"]
+    ^{:line 18} [tracev2 "internal/trace/tracev2"]
+    ^{:line 19} [version "internal/trace/version"]
+    ^{:line 20} [txtar "internal/txtar"]])
+
+
+^{:go/end 41} (go/func Main [^version/Version ver ^{:tag (func [(* Trace)])} f]
+  ;; Create an output file.
+  (let [(values out err) (os/Create (aget os/Args 1))]
+    (when (!= err nil)
+      (panic (.Error err)))
+
+    (defer (.Close out))
+
+    ;; Create a new trace.
+    (let [trace (NewTrace ver)]
+
+      ;; Call the generator.
+      (f trace)
+
+      ;; Write out the generator's state.
+      (when [(values _ err) (.Write out (.Generate trace))] (!= err nil)
+        (panic (.Error err))))))
+
+
+
+
+
+
+
+
+
+
+
+(go/type Trace "Trace represents an execution trace for testing.\n\nIt does a little bit of work to ensure that the produced trace is valid,\njust for convenience. It mainly tracks batches and batch sizes (so they're\ntrivially correct), tracks strings and stacks, and makes sure emitted string\nand stack batches are valid. That last part can be controlled by a few options.\n\nOtherwise, it performs no validation on the trace at all.\n" (struct
+
+    ^{:line 53 :tag version/Version :doc "Trace data state.\n"} ver
+    ^{:line 54 :tag (map string tracev2/EventType)} names
+    ^{:line 55 :tag (slice tracev2/EventSpec)} specs
+    ^{:line 56 :tag (slice raw/Event)} events
+    ^{:line 57 :tag (slice (* Generation))} gens
+    ^{:line 58 :tag bool} validTimestamps
+    ^{:line 59 :tag Time} lastTs
+
+
+    ^{:line 62 :tag bool :doc "Expectation state.\n"} bad
+    ^{:line 63 :tag (* regexp/Regexp)} badMatch))
+
+
+
+^{:go/end 74} (go/func NewTrace "NewTrace creates a new trace.\n" ^{:tag (* Trace)} [^version/Version ver]
+  (addr ^{:go/breaks [2 4 6 8]} (lit Trace
+      :names (tracev2/EventNames (.Specs ver))
+      :specs (.Specs ver)
+      :ver ver
+      :validTimestamps true)))
+
+
+
+
+
+^{:go/end 81} (go/method ExpectFailure "ExpectFailure writes down that the trace should be broken. The caller\nmust provide a pattern matching the expected error produced by the parser.\n" [^{:tag (* Trace)} t ^string pattern]
+  (set! (.-bad t) true)
+  (set! (.-badMatch t) (regexp/MustCompile pattern)))
+
+
+
+^{:go/end 86} (go/method ExpectSuccess "ExpectSuccess writes down that the trace should successfully parse.\n" [^{:tag (* Trace)} t]
+  (set! (.-bad t) false))
+
+
+
+
+
+^{:go/end 93} (go/method RawEvent "RawEvent emits an event into the trace. name must correspond to one\nof the names in Specs() result for the version that was passed to\nthis trace.\n" [^{:tag (* Trace)} t ^tracev2/EventType typ ^{:tag (slice byte)} data & ^{:tag (slice uint64)} args]
+  (set! (.-events t) (append (.-events t) (.createEvent t typ data (spread args)))))
+
+
+
+
+
+^{:go/end 100} (go/method DisableTimestamps "DisableTimestamps makes the timestamps for all events generated after\nthis call zero. Raw events are exempted from this because the caller\nhas to pass their own timestamp into those events anyway.\n" [^{:tag (* Trace)} t]
+  (set! (.-validTimestamps t) false))
+
+
+
+
+
+
+^{:go/end 116} (go/method Generation "Generation creates a new trace generation.\n\nThis provides more structure than Event to allow for more easily\ncreating complex traces that are mostly or completely correct.\n" ^{:tag (* Generation)} [^{:tag (* Trace)} t ^uint64 gen]
+  (let [g (addr ^{:go/breaks [2 4 6 8 10]} (lit Generation
+          :trace t
+          :gen gen
+          :strings (make (map string uint64))
+          :stacks (make (map stack uint64))
+          :sync (lit sync :freq 15625000)))]
+
+    (set! (.-gens t) (append (.-gens t) g))
+    ^{:line 115} g))
+
+
+
+^{:go/end 150} (go/method Generate "Generate creates a test file for the trace.\n" ^{:tag (slice byte)} [^{:tag (* Trace)} t]
+  ;; Trace file contents.
+  (let [^bytes/Buffer buf (zero bytes/Buffer)
+      (values tw err) (raw/NewTextWriter (addr buf) (.-ver t))]
+    (when (!= err nil)
+      (panic (.Error err)))
+
+
+    ;; Write raw top-level events.
+    (range [_ e (.-events t)]
+      (.WriteEvent tw e))
+
+
+    ;; Write generations.
+    (range [_ g (.-gens t)]
+      (.writeEventsTo g tw))
+
+
+    ;; Expectation file contents.
+    (let [expect (conv (slice byte) "SUCCESS\n")]
+      (when (.-bad t)
+        (set! expect (conv (slice byte) (fmt/Sprintf "FAILURE %q\n" (.-badMatch t)))))
+
+
+      ;; Create the test file's contents.
+      (txtar/Format (addr ^{:go/breaks [2]} (lit txtar/Archive
+            :Files (lit (slice txtar/File)
+              (lit _ :Name "expect" :Data expect)
+              (lit _ :Name "trace" :Data (.Bytes buf)))))))))
+
+
+
+
+^{:go/end 165} (go/method createEvent ^raw/Event [^{:tag (* Trace)} t ^tracev2/EventType ev ^{:tag (slice byte)} data & ^{:tag (slice uint64)} args]
+  (let [spec (aget (.-specs t) ev)]
+    (when (!= ev tracev2/EvStack)
+      (when [arity (len (.-Args spec))] (!= (len args) arity)
+        (panic (fmt/Sprintf "expected %d args for %s, got %d" arity (.-Name spec) (len args)))))
+
+
+    ^{:go/breaks [2 4 6 8]} (lit raw/Event
+      :Version (.-ver t)
+      :Ev ev
+      :Args args
+      :Data data)))
+
+
+
+(go/type stack (struct
+    ^{:line 168 :tag (array 32 trace/StackFrame)} stk
+    ^{:line 169 :tag int} len))
+
+
+(go/var
+  ^{:line 173} [NoString ""]
+  ^{:line 174} [NoStack (lit (slice trace/StackFrame))])
+
+
+
+(go/type Generation "Generation represents a single generation in the trace.\n" (struct
+    ^{:line 179 :tag (* Trace)} trace
+    ^{:line 180 :tag uint64} gen
+    ^{:line 181 :tag (slice (* Batch))} batches
+    ^{:line 182 :tag (map string uint64)} strings
+    ^{:line 183 :tag (map stack uint64)} stacks
+    ^{:line 184 :tag sync} sync
+
+
+    ^{:line 187 :tag bool :doc "Options applied when Trace.Generate is called.\n"} ignoreStringBatchSizeLimit
+    ^{:line 188 :tag bool} ignoreStackBatchSizeLimit))
+
+
+
+
+
+^{:go/end 202} (go/method Batch "Batch starts a new event batch in the trace data.\n\nThis is convenience function for generating correct batches.\n" ^{:tag (* Batch)} [^{:tag (* Generation)} g ^trace/ThreadID thread ^Time time]
+  (let [b (addr ^{:go/breaks [2 4]} (lit Batch
+          :gen g
+          :thread thread))]
+
+    (.setTimestamp b time)
+    (set! (.-batches g) (append (.-batches g) b))
+    ^{:line 201} b))
+
+
+
+
+
+
+^{:go/end 218} (go/method String "String registers a string with the trace.\n\nThis is a convenience function for easily adding correct\nstrings to traces.\n" ^uint64 [^{:tag (* Generation)} g ^string s]
+  (when (== (len s) 0)
+    (return 0))
+
+  (when [(values id ok) (aget (.-strings g) s)] ok
+    (return id))
+
+  (let [id (conv uint64 (+ (len (.-strings g)) 1))]
+    (aset (.-strings g) s id)
+    ^{:line 217} id))
+
+
+
+
+
+
+^{:go/end 240} (go/method Stack "Stack registers a stack with the trace.\n\nThis is a convenience function for easily adding correct\nstacks to traces.\n" ^uint64 [^{:tag (* Generation)} g ^{:tag (slice trace/StackFrame)} stk]
+  (when (== (len stk) 0)
+    (return 0))
+
+  (when (> (len stk) 32)
+    (panic "stack too big for test"))
+
+  (let [^stack stkc (zero stack)]
+    (copy (subslice (.-stk stkc)) stk)
+    (set! (.-len stkc) (len stk))
+    (when [(values id ok) (aget (.-stacks g) stkc)] ok
+      (return id))
+
+    (let [id (conv uint64 (+ (len (.-stacks g)) 1))]
+      (aset (.-stacks g) stkc id)
+      ^{:line 239} id)))
+
+
+
+
+
+
+^{:go/end 256} (go/method Sync "Sync configures the sync batch for the generation. For go1.25 and later,\nthe time value is the timestamp of the EvClockSnapshot event. For earlier\nversion, the time value is the timestamp of the batch containing a lone\nEvFrequency event.\n" [^{:tag (* Generation)} g ^uint64 freq ^Time time ^uint64 mono ^time/Time wall]
+  (when (and (< (.-ver (.-trace g)) version/Go125) ^:go/paren (or (!= mono 0) (not (.IsZero wall))))
+    (panic (fmt/Sprintf "mono and wall args are not supported in go1.%d traces" (.-ver (.-trace g)))))
+
+  (set! (.-sync g) ^{:go/breaks [2 4 6 8]} (lit sync
+      :freq freq
+      :time time
+      :mono mono
+      :walltime wall)))
+
+
+
+(go/type sync (struct
+    ^{:line 259 :tag uint64} freq
+    ^{:line 260 :tag Time} time
+    ^{:line 261 :tag uint64} mono
+    ^{:line 262 :tag time/Time} walltime))
+
+
+
+^{:go/end 333} (go/method writeEventsTo "writeEventsTo emits event batches in the generation to tw.\n" [^{:tag (* Generation)} g ^{:tag (* raw/TextWriter)} tw]
+  ;; go1.25+ sync batches are emitted at the start of the generation.
+  (when (>= (.-ver (.-trace g)) version/Go125)
+    (let [b (.newStructuralBatch g)]
+      ;; Arrange for EvClockSnapshot's ts to be exactly g.sync.time.
+      (.setTimestamp b (- (.-time (.-sync g)) 1))
+      (.RawEvent b tracev2/EvSync nil)
+      (.RawEvent b tracev2/EvFrequency nil (.-freq (.-sync g)))
+      (let [sec (conv uint64 (.Unix (.-walltime (.-sync g))))
+          ^{:line 275} nsec (conv uint64 (.Nanosecond (.-walltime (.-sync g))))]
+        (.Event b "ClockSnapshot" (.-mono (.-sync g)) sec nsec)
+        (.writeEventsTo b tw))))
+
+
+  ;; Write event batches for the generation.
+  (range [_ b (.-batches g)]
+    (.writeEventsTo b tw))
+
+
+  ;; Write lone EvFrequency sync batch for older traces.
+  (when (< (.-ver (.-trace g)) version/Go125)
+    (let [b (.newStructuralBatch g)]
+      (.setTimestamp b (.-time (.-sync g)))
+      (.RawEvent b tracev2/EvFrequency nil (.-freq (.-sync g)))
+      (.writeEventsTo b tw)))
+
+
+  ;; Write stacks.
+  (let [b (.newStructuralBatch g)]
+    (.RawEvent b tracev2/EvStacks nil)
+    (range [stk id (.-stacks g)]
+      (let [stk (subslice (.-stk stk) _ (.-len stk))
+          ^{:line 298} args (lit (slice uint64) id (conv uint64 (len stk)))]
+        (range [_ f stk]
+          (set! args (append args (.-PC f) (.String g (.-Func f)) (.String g (.-File f)) (.-Line f))))
+
+        (.RawEvent b tracev2/EvStack nil (spread args))
+
+        ;; Flush the batch if necessary.
+        (when (and (not (.-ignoreStackBatchSizeLimit g)) (> (.-size b) (/ tracev2/MaxBatchSize 2)))
+          (.writeEventsTo b tw)
+          (set! b (.newStructuralBatch g)))))
+
+
+    (.writeEventsTo b tw)
+
+    ;; Write strings.
+    (set! b (.newStructuralBatch g))
+    (.RawEvent b tracev2/EvStrings nil)
+    (range [s id (.-strings g)]
+      (.RawEvent b tracev2/EvString (conv (slice byte) s) id)
+
+      ;; Flush the batch if necessary.
+      (when (and (not (.-ignoreStringBatchSizeLimit g)) (> (.-size b) (/ tracev2/MaxBatchSize 2)))
+        (.writeEventsTo b tw)
+        (set! b (.newStructuralBatch g))))
+
+
+    (.writeEventsTo b tw)
+
+    ;; Write end-of-generation event if necessary.
+    (when (>= (.-ver (.-trace g)) version/Go126)
+      (.WriteEvent tw ^{:go/breaks [2 4]} (lit raw/Event
+          :Version (.-ver (.-trace g))
+          :Ev tracev2/EvEndOfGeneration)))))
+
+
+
+
+^{:go/end 339} (go/method newStructuralBatch ^{:tag (* Batch)} [^{:tag (* Generation)} g]
+  (let [b (addr (lit Batch :gen g :thread trace/NoThread))]
+    (.setTimestamp b (+ (.-lastTs (.-trace g)) 1))
+    ^{:line 338} b))
+
+
+
+(go/type Batch "Batch represents an event batch.\n" (struct
+    ^{:line 343 :tag (* Generation)} gen
+    ^{:line 344 :tag trace/ThreadID} thread
+    ^{:line 345 :tag Time} timestamp
+    ^{:line 346 :tag uint64} size
+    ^{:line 347 :tag (slice raw/Event)} events))
+
+
+
+
+
+^{:go/end 377} (go/method Event "Event emits an event into a batch. name must correspond to one\nof the names in Specs() result for the version that was passed to\nthis trace. Callers must omit the timestamp delta.\n" [^{:tag (* Batch)} b ^string name & ^{:tag (slice any)} args]
+  (let [(values ev ok) (aget (.-names (.-trace (.-gen b))) name)]
+    (when (not ok)
+      (panic (fmt/Sprintf "invalid or unknown event %s" name)))
+
+    (let [^{:tag (slice uint64)} uintArgs (zero (slice uint64))
+        ^{:line 359} argOff 0]
+      (when (.-IsTimedEvent (aget (.-specs (.-trace (.-gen b))) ev))
+        (if (.-validTimestamps (.-trace (.-gen b))) (do
+            (set! uintArgs (lit (slice uint64) 1))
+            (set! (.-lastTs (.-trace (.-gen b))) + 1))
+
+          (set! uintArgs (lit (slice uint64) 0)))
+
+        (set! argOff 1))
+
+      (let [spec (aget (.-specs (.-trace (.-gen b))) ev)]
+        (when [arity (- (len (.-Args spec)) argOff)] (!= (len args) arity)
+          (panic (fmt/Sprintf "expected %d args for %s, got %d" arity (.-Name spec) (len args))))
+
+        (range [i arg args]
+          (set! uintArgs (append uintArgs (.uintArgFor b arg (aget (.-Args spec) (+ i argOff))))))
+
+        (.RawEvent b ev nil (spread uintArgs))))))
+
+
+^{:go/end 411} (go/method uintArgFor ^uint64 [^{:tag (* Batch)} b ^any arg ^string argSpec]
+  (let [components (strings/SplitN argSpec "_" 2)
+      ^{:line 381} typStr (aget components 0)]
+    (when (== (len components) 2)
+      (set! typStr (aget components 1)))
+
+    (let [^uint64 u (zero uint64)]
+      (switch typStr
+        (case ["value" "mono" "sec" "nsec"]
+          (set! u (assert uint64 arg)))
+        (case ["stack"]
+          (set! u (.Stack (.-gen b) (assert (slice trace/StackFrame) arg))))
+        (case ["seq"]
+          (set! u (conv uint64 (assert Seq arg))))
+        (case ["pstatus"]
+          (set! u (conv uint64 (assert tracev2/ProcStatus arg))))
+        (case ["gstatus"]
+          (set! u (conv uint64 (assert tracev2/GoStatus arg))))
+        (case ["g"]
+          (set! u (conv uint64 (assert trace/GoID arg))))
+        (case ["m"]
+          (set! u (conv uint64 (assert trace/ThreadID arg))))
+        (case ["p"]
+          (set! u (conv uint64 (assert trace/ProcID arg))))
+        (case ["string"]
+          (set! u (.String (.-gen b) (assert string arg))))
+        (case ["task"]
+          (set! u (conv uint64 (assert trace/TaskID arg))))
+        (default
+          (panic (fmt/Sprintf "unsupported arg type %q for spec %q" typStr argSpec))))
+
+      ^{:line 410} u)))
+
+
+
+
+
+^{:go/end 432} (go/method RawEvent "RawEvent emits an event into a batch. name must correspond to one\nof the names in Specs() result for the version that was passed to\nthis trace.\n" [^{:tag (* Batch)} b ^tracev2/EventType typ ^{:tag (slice byte)} data & ^{:tag (slice uint64)} args]
+  (let [ev (.createEvent (.-trace (.-gen b)) typ data (spread args))]
+
+    ;; Compute the size of the event and add it to the batch.
+    (set! (.-size b) + 1) ; One byte for the event header.
+    (let [^{:tag (array binary/MaxVarintLen64 byte)} buf (zero (array binary/MaxVarintLen64 byte))]
+      (range [_ arg args]
+        (set! (.-size b) + (conv uint64 (binary/PutUvarint (subslice buf) arg))))
+
+      (when (!= (len data) 0)
+        (set! (.-size b) + (conv uint64 (binary/PutUvarint (subslice buf) (conv uint64 (len data)))))
+        (set! (.-size b) + (conv uint64 (len data))))
+
+
+      ;; Add the event.
+      (set! (.-events b) (append (.-events b) ev)))))
+
+
+
+^{:go/end 444} (go/method writeEventsTo "writeEventsTo emits events in the batch, including the batch header, to tw.\n" [^{:tag (* Batch)} b ^{:tag (* raw/TextWriter)} tw]
+  (.WriteEvent tw ^{:go/breaks [2 4 6]} (lit raw/Event
+      :Version (.-ver (.-trace (.-gen b)))
+      :Ev tracev2/EvEventBatch
+      :Args (lit (slice uint64) (.-gen (.-gen b)) (conv uint64 (.-thread b)) (conv uint64 (.-timestamp b)) (.-size b))))
+
+  (range [_ e (.-events b)]
+    (.WriteEvent tw e)))
+
+
+
+
+^{:go/end 452} (go/method setTimestamp "setTimestamp sets the timestamp for the batch.\n" [^{:tag (* Batch)} b ^Time t]
+  (when (.-validTimestamps (.-trace (.-gen b)))
+    (set! (.-timestamp b) t)
+    (set! (.-lastTs (.-trace (.-gen b))) t)))
+
+
+
+
+(go/type Seq "Seq represents a sequence counter.\n" uint64)
+
+
+
+(go/type Time "Time represents a low-level trace timestamp (which does not necessarily\ncorrespond to nanoseconds, like trace.Time does).\n" uint64)

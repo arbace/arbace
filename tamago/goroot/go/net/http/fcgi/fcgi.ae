@@ -1,0 +1,275 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package fcgi implements the FastCGI protocol.
+;;
+;; See https://fast-cgi.github.io/ for an unofficial mirror of the
+;; original documentation.
+;;
+;; Currently only the responder role is supported.
+(in-ns 'go.net.http.fcgi) (go/file "fcgi.go" :doc "Package fcgi implements the FastCGI protocol.\n\nSee https://fast-cgi.github.io/ for an unofficial mirror of the\noriginal documentation.\n\nCurrently only the responder role is supported.\n" :imports [
+
+    ;; This file defines the raw protocol and some utilities used by the child and
+    ;; the host.
+
+
+    ^{:line 17} [bufio "bufio"]
+    ^{:line 18} [bytes "bytes"]
+    ^{:line 19} [binary "encoding/binary"]
+    ^{:line 20} [errors "errors"]
+    ^{:line 21} [io "io"]
+    ^{:line 22} [sync "sync"]])
+
+
+
+
+(go/type recType "recType is a record type, as defined by\nhttps://web.archive.org/web/20150420080736/http://www.fastcgi.com/drupal/node/6?q=node/22#S8\n" uint8)
+
+(go/const
+  ^{:line 30} [^{:tag recType :val 1} typeBeginRequest 1]
+  ^{:line 31} [^{:tag recType :val 2} typeAbortRequest 2]
+  ^{:line 32} [^{:tag recType :val 3} typeEndRequest 3]
+  ^{:line 33} [^{:tag recType :val 4} typeParams 4]
+  ^{:line 34} [^{:tag recType :val 5} typeStdin 5]
+  ^{:line 35} [^{:tag recType :val 6} typeStdout 6]
+  ^{:line 36} [^{:tag recType :val 7} typeStderr 7]
+  ^{:line 37} [^{:tag recType :val 8} typeData 8]
+  ^{:line 38} [^{:tag recType :val 9} typeGetValues 9]
+  ^{:line 39} [^{:tag recType :val 10} typeGetValuesResult 10]
+  ^{:line 40} [^{:tag recType :val 11} typeUnknownType 11])
+
+
+
+(go/const ^{:val 1 :doc "keep the connection between web-server and responder open after request\n"} flagKeepConn 1)
+
+(go/const
+  ^{:line 47} [^{:val 65535} maxWrite 65535] ; maximum record body
+  ^{:line 48} [^{:val 255} maxPad 255])
+
+
+(go/const
+  ^{:line 52} [^{:val 1} roleResponder (+ iota 1)] ; only Responders are implemented.
+  ^{:line 53} [^{:val 2} roleAuthorizer]
+  ^{:line 54} [^{:val 3} roleFilter])
+
+
+(go/const
+  ^{:line 58} [^{:val 0} statusRequestComplete iota]
+  ^{:line 59} [^{:val 1} statusCantMultiplex]
+  ^{:line 60} [^{:val 2} statusOverloaded]
+  ^{:line 61} [^{:val 3} statusUnknownRole])
+
+
+(go/type header (struct
+    ^{:line 65 :tag uint8} Version
+    ^{:line 66 :tag recType} Type
+    ^{:line 67 :tag uint16} Id
+    ^{:line 68 :tag uint16} ContentLength
+    ^{:line 69 :tag uint8} PaddingLength
+    ^{:line 70 :tag uint8} Reserved))
+
+
+(go/type beginRequest (struct
+    ^{:line 74 :tag uint16} role
+    ^{:line 75 :tag uint8} flags
+    ^{:line 76 :tag (array 5 uint8)} reserved))
+
+
+^{:go/breaks [6] :go/end 86} (go/method read ^error [^{:tag (* beginRequest)} br ^{:tag (slice byte)} content]
+  (when (!= (len content) 8)
+    (return (errors/New "fcgi: invalid begin request record")))
+
+  (set! (.-role br) (.Uint16 binary/BigEndian content))
+  (set! (.-flags br) (aget content 2))
+  nil)
+
+
+
+
+(go/var ^{:tag (array maxPad byte) :doc "for padding so we don't have to allocate all the time\nnot synchronized because we don't care what the contents are\n"} pad)
+
+^{:go/end 98} (go/method init [^{:tag (* header)} h ^recType recType ^uint16 reqId ^int contentLength]
+  (set! (.-Version h) 1)
+  (set! (.-Type h) recType)
+  (set! (.-Id h) reqId)
+  (set! (.-ContentLength h) (conv uint16 contentLength))
+  (set! (.-PaddingLength h) (conv uint8 (bit-and (- contentLength) 7))))
+
+
+
+(go/type conn "conn sends records over rwc\n" (struct
+    ^{:line 102 :tag sync/Mutex} mutex
+    ^{:line 103 :tag io/ReadWriteCloser} rwc
+    ^{:line 104 :tag error} closeErr
+    ^{:line 105 :tag bool} closed
+
+
+    ^{:line 108 :tag bytes/Buffer :doc "to avoid allocations\n"} buf
+    ^{:line 109 :tag header} h))
+
+
+^{:go/end 114} (go/func newConn ^{:tag (* conn)} [^io/ReadWriteCloser rwc]
+  (addr (lit conn :rwc rwc)))
+
+
+
+^{:go/end 125} (go/method Close "Close closes the conn if it is not already closed.\n" ^error [^{:tag (* conn)} c]
+  (.Lock (.-mutex c))
+  (defer (.Unlock (.-mutex c)))
+  (when (not (.-closed c))
+    (set! (.-closeErr c) (.Close (.-rwc c)))
+    (set! (.-closed c) true))
+
+  (.-closeErr c))
+
+
+(go/type record (struct
+    ^{:line 128 :tag header} h
+    ^{:line 129 :tag (array (+ maxWrite maxPad) byte)} buf))
+
+
+^{:go/end 144} (go/method read [^{:tag (* record)} rec ^io/Reader r] :results [^error err]
+  (when [(set! err (binary/Read r binary/BigEndian (addr (.-h rec))))] (!= err nil)
+    (return err))
+
+  (when (!= (.-Version (.-h rec)) 1)
+    (return (errors/New "fcgi: invalid header version")))
+
+  ^{:go/breaks [[3 143]]} (let [n (+ (conv int (.-ContentLength (.-h rec))) (conv int (.-PaddingLength (.-h rec))))]
+    (when [(set! (values _ err) (io/ReadFull r (subslice (.-buf rec) _ n)))] (!= err nil)
+      (return err))
+
+    nil))
+
+
+^{:go/end 148} (go/method content ^{:tag (slice byte)} [^{:tag (* record)} r]
+  (subslice (.-buf r) _ (.-ContentLength (.-h r))))
+
+
+
+^{:go/end 167} (go/method writeRecord "writeRecord writes and sends a single record.\n" ^error [^{:tag (* conn)} c ^recType recType ^uint16 reqId ^{:tag (slice byte)} b]
+  (.Lock (.-mutex c))
+  (defer (.Unlock (.-mutex c)))
+  (.Reset (.-buf c))
+  (.init (.-h c) recType reqId (len b))
+  (when [err (binary/Write (addr (.-buf c)) binary/BigEndian (.-h c))] (!= err nil)
+    (return err))
+
+  (when [(values _ err) (.Write (.-buf c) b)] (!= err nil)
+    (return err))
+
+  (when [(values _ err) (.Write (.-buf c) (subslice pad _ (.-PaddingLength (.-h c))))] (!= err nil)
+    (return err))
+
+  (let [(values _ err) (.Write (.-rwc c) (.Bytes (.-buf c)))]
+    ^{:line 166} err))
+
+
+^{:go/end 174} (go/method writeEndRequest ^error [^{:tag (* conn)} c ^uint16 reqId ^int appStatus ^uint8 protocolStatus]
+  (let [b (make (slice byte) 8)]
+    (.PutUint32 binary/BigEndian b (conv uint32 appStatus))
+    (aset b 4 protocolStatus)
+    (.writeRecord c typeEndRequest reqId b)))
+
+
+^{:go/end 193} (go/method writePairs ^error [^{:tag (* conn)} c ^recType recType ^uint16 reqId ^{:tag (map string string)} pairs]
+  (let [w (newWriter c recType reqId)
+      ^{:line 178} b (make (slice byte) 8)]
+    (range [k v pairs]
+      (let [n (encodeSize b (conv uint32 (len k)))]
+        (set! n + (encodeSize (subslice b n) (conv uint32 (len v))))
+        (when [(values _ err) ^{:go/via [Writer]} (.Write w (subslice b _ n))] (!= err nil)
+          (return err))
+
+        (when [(values _ err) ^{:go/via [Writer]} (.WriteString w k)] (!= err nil)
+          (return err))
+
+        (when [(values _ err) ^{:go/via [Writer]} (.WriteString w v)] (!= err nil)
+          (return err))))
+
+
+    (.Close w)))
+
+
+^{:go/end 209} (go/func readSize [^{:tag (slice byte)} s] :results [uint32 int]
+  (when (== (len s) 0)
+    (return 0 0))
+
+  (let [(values size n) (values (conv uint32 (aget s 0)) 1)]
+    (when (!= (bit-and size (<< 1 7)) 0)
+      (when (< (len s) 4)
+        (return 0 0))
+
+      (set! n 4)
+      (set! size (.Uint32 binary/BigEndian s))
+      (set! size bit-and-not (<< 1 31)))
+
+    (return size n)))
+
+
+^{:go/end 216} (go/func readString ^string [^{:tag (slice byte)} s ^uint32 size]
+  (when (> size (conv uint32 (len s)))
+    (return ""))
+
+  (conv string (subslice s _ size)))
+
+
+^{:go/breaks [5] :go/end 226} (go/func encodeSize ^int [^{:tag (slice byte)} b ^uint32 size]
+  (when (> size 127)
+    (set! size bit-or (<< 1 31))
+    (.PutUint32 binary/BigEndian b size)
+    (return 4))
+
+  (aset b 0 (conv byte size))
+  1)
+
+
+
+
+(go/type bufWriter "bufWriter encapsulates bufio.Writer but also closes the underlying stream when\nClosed.\n" (struct
+    ^{:line 231 :tag io/Closer} closer
+    (* bufio/Writer)))
+
+
+^{:go/end 241} (go/method Close ^error [^{:tag (* bufWriter)} w]
+  (when [err (.Flush (.-Writer w))] (!= err nil)
+    (.Close (.-closer w))
+    (return err))
+
+  (.Close (.-closer w)))
+
+
+^{:go/end 247} (go/func newWriter ^{:tag (* bufWriter)} [^{:tag (* conn)} c ^recType recType ^uint16 reqId]
+  (let [s (addr (lit streamWriter :c c :recType recType :reqId reqId))
+      ^{:line 245} w (bufio/NewWriterSize s maxWrite)]
+    (addr (lit bufWriter s w))))
+
+
+
+
+(go/type streamWriter "streamWriter abstracts out the separation of a stream into discrete records.\nIt only writes maxWrite bytes at a time.\n" (struct
+    ^{:line 252 :tag (* conn)} c
+    ^{:line 253 :tag recType} recType
+    ^{:line 254 :tag uint16} reqId))
+
+
+^{:go/end 271} (go/method Write [^{:tag (* streamWriter)} w ^{:tag (slice byte)} p] :results [int error]
+  (let [nn 0]
+    (while (> (len p) 0)
+      (let [n (len p)]
+        (when (> n maxWrite)
+          (set! n maxWrite))
+
+        (when [err (.writeRecord (.-c w) (.-recType w) (.-reqId w) (subslice p _ n))] (!= err nil)
+          (return nn err))
+
+        (set! nn + n)
+        (set! p (subslice p n))))
+
+    (return nn nil)))
+
+
+^{:go/end 276} (go/method Close ^error [^{:tag (* streamWriter)} w]
+  ;; send empty record to close the stream
+  (.writeRecord (.-c w) (.-recType w) (.-reqId w) nil))

@@ -1,0 +1,239 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.encoding.gob) (go/file "decoder.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [saferio "internal/saferio"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [reflect "reflect"]
+    ^{:line 13} [sync "sync"]])
+
+
+
+
+
+(go/const ^{:val 8589934592 :doc "tooBig provides a sanity check for sizes; used in several places. Upper limit\nof is 1GB on 32-bit systems, 8GB on 64-bit, allowing room to grow a little\nwithout overflow.\n"} tooBig (<< (<< 1 30) (>> (bit-not (conv uint 0)) 62)))
+
+
+
+
+
+
+
+
+(go/type Decoder "A Decoder manages the receipt of type and data information read from the\nremote side of a connection.  It is safe for concurrent use by multiple\ngoroutines.\n\nThe Decoder does only basic sanity checking on decoded input sizes,\nand its limits are not configurable. Take caution when decoding gob data\nfrom untrusted sources.\n" (struct
+    ^{:line 29 :tag sync/Mutex} mutex ; each item must be received atomically
+    ^{:line 30 :tag io/Reader} r ; source of the data
+    ^{:line 31 :tag decBuffer} buf ; buffer for more efficient i/o from r
+    ^{:line 32 :tag (map typeId (* wireType))} wireType ; map from remote ID to local description
+    ^{:line 33 :tag (map reflect/Type (map typeId (* (* decEngine))))} decoderCache ; cache of compiled engines
+    ^{:line 34 :tag (map typeId (* (* decEngine)))} ignorerCache ; ditto for ignored objects
+    ^{:line 35 :tag (* decoderState)} freeList ; list of free decoderStates; avoids reallocation
+    ^{:line 36 :tag (slice byte)} countBuf ; used for decoding integers while parsing messages
+    ^{:line 37 :tag error} err
+
+    ^{:line 39 :tag int :doc "ignoreDepth tracks the depth of recursively parsed ignored fields\n"} ignoreDepth))
+
+
+
+
+
+^{:go/end 58} (go/func NewDecoder "NewDecoder returns a new decoder that reads from the [io.Reader].\nIf r does not also implement [io.ByteReader], it will be wrapped in a\n[bufio.Reader].\n" ^{:tag (* Decoder)} [^io/Reader r]
+  (let [dec (new Decoder)]
+    ;; We use the ability to read bytes as a plausible surrogate for buffering.
+    (when [(values _ ok) (assert io/ByteReader r)] (not ok)
+      (set! r (bufio/NewReader r)))
+
+    (set! (.-r dec) r)
+    (set! (.-wireType dec) (make (map typeId (* wireType))))
+    (set! (.-decoderCache dec) (make (map reflect/Type (map typeId (* (* decEngine))))))
+    (set! (.-ignorerCache dec) (make (map typeId (* (* decEngine)))))
+    (set! (.-countBuf dec) (make (slice byte) 9)) ; counts may be uint64s (unlikely!), require 9 bytes
+
+    ^{:line 57} dec))
+
+
+
+^{:go/end 76} (go/method recvType "recvType loads the definition of a type.\n" [^{:tag (* Decoder)} dec ^typeId id]
+  ;; Have we already seen this type? That's an error
+  (when (or (< id firstUserId) (!= (aget (.-wireType dec) id) nil))
+    (set! (.-err dec) (errors/New "gob: duplicate type received"))
+    (return))
+
+
+  ;; Type:
+  (let [wire (new wireType)]
+    (.decodeValue dec tWireType (reflect/ValueOf wire))
+    (when (!= (.-err dec) nil)
+      (return))
+
+    ;; Remember we've seen this type.
+    (aset (.-wireType dec) id wire)))
+
+
+(go/var errBadCount (errors/New "invalid message length"))
+
+
+
+^{:go/end 95} (go/method recvMessage "recvMessage reads the next count-delimited item from the input. It is the converse\nof Encoder.writeMessage. It returns false on EOF or other error reading the message.\n" ^bool [^{:tag (* Decoder)} dec]
+  ;; Read a count.
+  (let [(values nbytes _ err) (decodeUintReader (.-r dec) (.-countBuf dec))]
+    (when (!= err nil)
+      (set! (.-err dec) err)
+      (return false))
+
+    (when (>= nbytes tooBig)
+      (set! (.-err dec) errBadCount)
+      (return false))
+
+    (.readMessage dec (conv int nbytes))
+    (== (.-err dec) nil)))
+
+
+
+^{:go/end 110} (go/method readMessage "readMessage reads the next nbytes bytes from the input.\n" [^{:tag (* Decoder)} dec ^int nbytes]
+  (when (!= (.Len (.-buf dec)) 0)
+    ;; The buffer should always be empty now.
+    (panic "non-empty decoder buffer"))
+
+  ;; Read the data
+  (let [^{:tag (slice byte)} buf (zero (slice byte))]
+    (set! (values buf (.-err dec)) (saferio/ReadData (.-r dec) (conv uint64 nbytes)))
+    (.SetBytes (.-buf dec) buf)
+    (when (== (.-err dec) io/EOF)
+      (set! (.-err dec) io/ErrUnexpectedEOF))))
+
+
+
+
+^{:go/end 119} (go/func toInt "toInt turns an encoded uint64 into an int, according to the marshaling rules.\n" ^int64 [^uint64 x]
+  (let [i (conv int64 (>> x 1))]
+    (when (!= (bit-and x 1) 0)
+      (set! i (bit-not i)))
+
+    ^{:line 118} i))
+
+
+^{:go/end 127} (go/method nextInt ^int64 [^{:tag (* Decoder)} dec]
+  (let [(values n _ err) (decodeUintReader (addr (.-buf dec)) (.-countBuf dec))]
+    (when (!= err nil)
+      (set! (.-err dec) err))
+
+    (toInt n)))
+
+
+^{:go/end 135} (go/method nextUint ^uint64 [^{:tag (* Decoder)} dec]
+  (let [(values n _ err) (decodeUintReader (addr (.-buf dec)) (.-countBuf dec))]
+    (when (!= err nil)
+      (set! (.-err dec) err))
+
+    ^{:line 134} n))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 186} (go/method decodeTypeSequence "decodeTypeSequence parses:\nTypeSequence\n\n\t(TypeDefinition DelimitedTypeDefinition*)?\n\nand returns the type id of the next value. It returns -1 at\nEOF.  Upon return, the remainder of dec.buf is the value to be\ndecoded. If this is an interface value, it can be ignored by\nresetting that buffer.\n" ^typeId [^{:tag (* Decoder)} dec ^bool isInterface]
+  ^{:go/breaks [[3 185]]} (let [firstMessage true]
+    (while (== (.-err dec) nil)
+      (when (== (.Len (.-buf dec)) 0)
+        (when (not (.recvMessage dec))
+          ;; We can only return io.EOF if the input was empty.
+          ;; If we read one or more type spec messages,
+          ;; require a data item message to follow.
+          ;; If we hit an EOF before that, then give ErrUnexpectedEOF.
+          (when (and (not firstMessage) (== (.-err dec) io/EOF))
+            (set! (.-err dec) io/ErrUnexpectedEOF))
+
+          (break)))
+
+
+      ;; Receive a type id.
+      (let [id (conv typeId (.nextInt dec))]
+        (when (>= id 0)
+          ;; Value follows.
+          (return id))
+
+        ;; Type definition for (-id) follows.
+        (.recvType dec (- id))
+        (when (!= (.-err dec) nil)
+          (break))
+
+        ;; When decoding an interface, after a type there may be a
+        ;; DelimitedValue still in the buffer. Skip its count.
+        ;; (Alternatively, the buffer is empty and the byte count
+        ;; will be absorbed by recvMessage.)
+        (when (> (.Len (.-buf dec)) 0)
+          (when (not isInterface)
+            (set! (.-err dec) (errors/New "extra data in buffer"))
+            (break))
+
+          (.nextUint dec))
+
+        (set! firstMessage false)))
+
+    -1))
+
+
+
+
+
+
+
+
+
+^{:go/end 207} (go/method Decode "Decode reads the next value from the input stream and stores\nit in the data represented by the empty interface value.\nIf e is nil, the value will be discarded. Otherwise,\nthe value underlying e must be a pointer to the\ncorrect type for the next data item received.\nIf the input is at EOF, Decode returns [io.EOF] and\ndoes not modify e.\n" ^error [^{:tag (* Decoder)} dec ^any e]
+  (when (== e nil)
+    (return (.DecodeValue dec (lit reflect/Value))))
+
+  (let [value (reflect/ValueOf e)]
+    ;; If e represents a value as opposed to a pointer, the answer won't
+    ;; get back to the caller. Make sure it's a pointer.
+    (when (!= (.Kind value) reflect/Pointer)
+      (set! (.-err dec) (errors/New "gob: attempt to decode into a non-pointer"))
+      (return (.-err dec)))
+
+    (.DecodeValue dec value)))
+
+
+
+
+
+
+
+
+^{:go/end 234} (go/method DecodeValue "DecodeValue reads the next value from the input stream.\nIf v is the zero reflect.Value (v.Kind() == Invalid), DecodeValue discards the value.\nOtherwise, it stores the value into v. In that case, v must represent\na non-nil pointer to data or be an assignable reflect.Value (v.CanSet())\nIf the input is at EOF, DecodeValue returns [io.EOF] and\ndoes not modify v.\n" ^error [^{:tag (* Decoder)} dec ^reflect/Value v]
+  (when (.IsValid v)
+    (cond (and (== (.Kind v) reflect/Pointer) (not (.IsNil v))) (do)
+      ;; That's okay, we'll store through the pointer.
+      (not (.CanSet v))
+      (return (errors/New "gob: DecodeValue of unassignable value"))))
+
+
+  ;; Make sure we're single-threaded through here.
+  (.Lock (.-mutex dec))
+  (defer (.Unlock (.-mutex dec)))
+
+  (.Reset (.-buf dec)) ; In case data lingers from previous invocation.
+  (set! (.-err dec) nil)
+  (let [id (.decodeTypeSequence dec false)]
+    (when (== (.-err dec) nil)
+      (.decodeValue dec id v))
+
+    (.-err dec)))
+
+
+
+
+
+(go/var ^{:tag (func [io/Reader]) :doc "If debug.go is compiled into the program, debugFunc prints a human-readable\nrepresentation of the gob data read from r by calling that file's Debug function.\nOtherwise it is nil.\n"} debugFunc)

@@ -1,0 +1,704 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.archive.tar) (go/file "writer.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [fs "io/fs"]
+    ^{:line 12} [maps "maps"]
+    ^{:line 13} [path "path"]
+    ^{:line 14} [slices "slices"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [time "time"]])
+
+
+
+
+
+(go/type Writer "Writer provides sequential writing of a tar archive.\n[Writer.WriteHeader] begins a new file with the provided [Header],\nand then Writer can be treated as an io.Writer to supply that file's data.\n" (struct
+    ^{:line 23 :tag io/Writer} w
+    ^{:line 24 :tag int64} pad ; Amount of padding to write after current file entry
+    ^{:line 25 :tag fileWriter} curr ; Writer for current file entry
+    ^{:line 26 :tag Header} hdr ; Shallow copy of Header that is safe for mutations
+    ^{:line 27 :tag block} blk ; Buffer to use as temporary local storage
+
+
+
+
+    ^{:line 32 :tag error :doc "err is a persistent error.\nIt is only the responsibility of every exported method of Writer to\nensure that this error is sticky.\n"} err))
+
+
+
+^{:go/end 38} (go/func NewWriter "NewWriter creates a new Writer writing to w.\n" ^{:tag (* Writer)} [^io/Writer w]
+  (addr (lit Writer :w w :curr (addr (lit regFileWriter w 0)))))
+
+
+(go/type fileWriter (interface
+    ^{:line 41} io/Writer
+    ^{:line 42} fileState
+
+    (ReadFrom [io/Reader] :results [int64 error])))
+
+
+
+
+
+
+
+^{:go/breaks [8] :go/end 64} (go/method Flush "Flush finishes writing the current file's block padding.\nThe current file must be fully written before Flush can be called.\n\nThis is unnecessary as the next call to [Writer.WriteHeader] or [Writer.Close]\nwill implicitly flush out the file's padding.\n" ^error [^{:tag (* Writer)} tw]
+  (when (!= (.-err tw) nil)
+    (return (.-err tw)))
+
+  (when [nb (.logicalRemaining (.-curr tw))] (> nb 0)
+    (return (fmt/Errorf "archive/tar: missed writing %d bytes" nb)))
+
+  (when [(set! (values _ (.-err tw)) (.Write (.-w tw) (subslice zeroBlock _ (.-pad tw))))] (!= (.-err tw) nil)
+    (return (.-err tw)))
+
+  (set! (.-pad tw) 0)
+  nil)
+
+
+
+
+
+
+^{:go/end 111} (go/method WriteHeader "WriteHeader writes hdr and prepares to accept the file's contents.\nThe Header.Size determines how many bytes can be written for the next file.\nIf the current file is not fully written, then this returns an error.\nThis implicitly flushes any padding necessary before writing the header.\n" ^error [^{:tag (* Writer)} tw ^{:tag (* Header)} hdr]
+  (when [err (.Flush tw)] (!= err nil)
+    (return err))
+
+  (set! (.-hdr tw) @hdr) ; Shallow copy of Header
+
+  ;; Avoid usage of the legacy TypeRegA flag, and automatically promote
+  ;; it to use TypeReg or TypeDir.
+  (when (== (.-Typeflag (.-hdr tw)) TypeRegA)
+    (if (strings/HasSuffix (.-Name (.-hdr tw)) "/")
+      (set! (.-Typeflag (.-hdr tw)) TypeDir)
+
+      (set! (.-Typeflag (.-hdr tw)) TypeReg)))
+
+
+
+  ;; Round ModTime and ignore AccessTime and ChangeTime unless
+  ;; the format is explicitly chosen.
+  ;; This ensures nominal usage of WriteHeader (without specifying the format)
+  ;; does not always result in the PAX format being chosen, which
+  ;; causes a 1KiB increase to every header.
+  (when (== (.-Format (.-hdr tw)) FormatUnknown)
+    (set! (.-ModTime (.-hdr tw)) (.Round (.-ModTime (.-hdr tw)) time/Second))
+    (set! (.-AccessTime (.-hdr tw)) (lit time/Time))
+    (set! (.-ChangeTime (.-hdr tw)) (lit time/Time)))
+
+
+  (let [(values allowedFormats paxHdrs err) (.allowedFormats (.-hdr tw))]
+    (switch
+      (case [(.has allowedFormats FormatUSTAR)]
+        (set! (.-err tw) (.writeUSTARHeader tw (addr (.-hdr tw))))
+        (return (.-err tw)))
+      (case [(.has allowedFormats FormatPAX)]
+        (set! (.-err tw) (.writePAXHeader tw (addr (.-hdr tw)) paxHdrs))
+        (return (.-err tw)))
+      (case [(.has allowedFormats FormatGNU)]
+        (set! (.-err tw) (.writeGNUHeader tw (addr (.-hdr tw))))
+        (return (.-err tw)))
+      (default
+        (return err))))) ; Non-fatal error
+
+
+
+^{:go/end 129} (go/method writeUSTARHeader ^error [^{:tag (* Writer)} tw ^{:tag (* Header)} hdr]
+  ;; Check if we can use USTAR prefix/suffix splitting.
+  (let [^string namePrefix (zero string)]
+    (when [(values prefix suffix ok) (splitUSTARPath (.-Name hdr))] ok
+      (set! (values namePrefix (.-Name hdr)) (values prefix suffix)))
+
+
+    ;; Pack the main header.
+    (let [^formatter f (zero formatter)
+        ^{:line 122} blk (.templateV7Plus tw hdr (.-formatString f) (.-formatOctal f))]
+      (.formatString f (.prefix (.toUSTAR blk)) namePrefix)
+      (.setFormat blk FormatUSTAR)
+      (when (!= (.-err f) nil)
+        (return (.-err f))) ; Should never happen since header is validated
+
+      (.writeRawHeader tw blk (.-Size hdr) (.-Typeflag hdr)))))
+
+
+^{:go/end 229} (go/method writePAXHeader ^error [^{:tag (* Writer)} tw ^{:tag (* Header)} hdr ^{:tag (map string string)} paxHdrs]
+  (let [(values realName realSize) (values (.-Name hdr) (.-Size hdr))]
+
+    ;; TODO(dsnet): Re-enable this when adding sparse support.
+    ;; See https://golang.org/issue/22735
+    ;; /*
+    ;; // Handle sparse files.
+    ;; var spd sparseDatas
+    ;; var spb []byte
+    ;; if len(hdr.SparseHoles) > 0 {
+    ;; sph := append([]sparseEntry{}, hdr.SparseHoles...) // Copy sparse map
+    ;; sph = alignSparseEntries(sph, hdr.Size)
+    ;; spd = invertSparseEntries(sph, hdr.Size)
+    ;; 
+    ;; // Format the sparse map.
+    ;; hdr.Size = 0 // Replace with encoded size
+    ;; spb = append(strconv.AppendInt(spb, int64(len(spd)), 10), '\n')
+    ;; for _, s := range spd {
+    ;; hdr.Size += s.Length
+    ;; spb = append(strconv.AppendInt(spb, s.Offset, 10), '\n')
+    ;; spb = append(strconv.AppendInt(spb, s.Length, 10), '\n')
+    ;; }
+    ;; pad := blockPadding(int64(len(spb)))
+    ;; spb = append(spb, zeroBlock[:pad]...)
+    ;; hdr.Size += int64(len(spb)) // Accounts for encoded sparse map
+    ;; 
+    ;; // Add and modify appropriate PAX records.
+    ;; dir, file := path.Split(realName)
+    ;; hdr.Name = path.Join(dir, "GNUSparseFile.0", file)
+    ;; paxHdrs[paxGNUSparseMajor] = "1"
+    ;; paxHdrs[paxGNUSparseMinor] = "0"
+    ;; paxHdrs[paxGNUSparseName] = realName
+    ;; paxHdrs[paxGNUSparseRealSize] = strconv.FormatInt(realSize, 10)
+    ;; paxHdrs[paxSize] = strconv.FormatInt(hdr.Size, 10)
+    ;; delete(paxHdrs, paxPath) // Recorded by paxGNUSparseName
+    ;; }
+    ;; */
+    (set! _ realSize)
+
+    ;; Write PAX records to the output.
+    (let [isGlobal (== (.-Typeflag hdr) TypeXGlobalHeader)]
+      (when (or (> (len paxHdrs) 0) isGlobal)
+        ;; Write each record to a buffer.
+        (let [^strings/Builder buf (zero strings/Builder)]
+          ;; Sort keys for deterministic ordering.
+          (range [_ k (^{:inst [string]} slices/Sorted (^{:inst [(map string string) string string]} maps/Keys paxHdrs))]
+            (let [(values rec err) (formatPAXRecord k (aget paxHdrs k))]
+              (when (!= err nil)
+                (return err))
+
+              (.WriteString buf rec)))
+
+
+          ;; Write the extended header file.
+          (let [^string name (zero string)
+              ^{:line 186 :tag byte} flag (zero byte)]
+            (if isGlobal (do
+                (set! name realName)
+                (when (== name "")
+                  (set! name "GlobalHead.0.0"))
+
+                (set! flag TypeXGlobalHeader))
+
+              (let [(values dir file) (path/Split realName)]
+                (set! name (path/Join dir "PaxHeaders.0" file))
+                (set! flag TypeXHeader)))
+
+            (let [data (.String buf)]
+              (when (> (len data) maxSpecialFileSize)
+                (return ErrFieldTooLong))
+
+              (when [err (.writeRawFile tw name data flag FormatPAX)] (or (!= err nil) isGlobal)
+                (return err)))))) ; Global headers return here
+
+
+
+      ;; Pack the main header.
+      ^{:go/breaks [[4 228]]} (let [^formatter f (zero formatter) ; Ignore errors since they are expected
+          ^{:line 209} fmtStr ^{:go/end 209} (fn [^{:tag (slice byte)} b ^string s] (.formatString f b (toASCII s)))
+          ^{:line 210} blk (.templateV7Plus tw hdr fmtStr (.-formatOctal f))]
+        (.setFormat blk FormatPAX)
+        (when [err (.writeRawHeader tw blk (.-Size hdr) (.-Typeflag hdr))] (!= err nil)
+          (return err))
+
+
+        ;; TODO(dsnet): Re-enable this when adding sparse support.
+        ;; See https://golang.org/issue/22735
+        ;; /*
+        ;; // Write the sparse map and setup the sparse writer if necessary.
+        ;; if len(spd) > 0 {
+        ;; // Use tw.curr since the sparse map is accounted for in hdr.Size.
+        ;; if _, err := tw.curr.Write(spb); err != nil {
+        ;; return err
+        ;; }
+        ;; tw.curr = &sparseFileWriter{tw.curr, spd, 0}
+        ;; }
+        ;; */
+        nil))))
+
+
+^{:go/end 310} (go/method writeGNUHeader ^error [^{:tag (* Writer)} tw ^{:tag (* Header)} hdr]
+  ;; Use long-link files if Name or Linkname exceeds the field size.
+  (let [^:const ^{:val "././@LongLink"} longName "././@LongLink"]
+    (when (> (len (.-Name hdr)) nameSize)
+      (let [data (+ (.-Name hdr) "\u0000")]
+        (when [err (.writeRawFile tw longName data TypeGNULongName FormatGNU)] (!= err nil)
+          (return err))))
+
+
+    (when (> (len (.-Linkname hdr)) nameSize)
+      (let [data (+ (.-Linkname hdr) "\u0000")]
+        (when [err (.writeRawFile tw longName data TypeGNULongLink FormatGNU)] (!= err nil)
+          (return err))))
+
+
+
+    ;; Pack the main header.
+    ^{:go/breaks [[7 309]]} (let [^formatter f (zero formatter) ; Ignore errors since they are expected
+        ^{:line 249 :tag sparseDatas} spd (zero sparseDatas)
+        ^{:line 250 :tag (slice byte)} spb (zero (slice byte))
+        ^{:line 251} blk (.templateV7Plus tw hdr (.-formatString f) (.-formatNumeric f))]
+      (when (not (.IsZero (.-AccessTime hdr)))
+        (.formatNumeric f (.accessTime (.toGNU blk)) (.Unix (.-AccessTime hdr))))
+
+      (when (not (.IsZero (.-ChangeTime hdr)))
+        (.formatNumeric f (.changeTime (.toGNU blk)) (.Unix (.-ChangeTime hdr))))
+
+      ;; TODO(dsnet): Re-enable this when adding sparse support.
+      ;; See https://golang.org/issue/22735
+      ;; /*
+      ;; if hdr.Typeflag == TypeGNUSparse {
+      ;; sph := append([]sparseEntry{}, hdr.SparseHoles...) // Copy sparse map
+      ;; sph = alignSparseEntries(sph, hdr.Size)
+      ;; spd = invertSparseEntries(sph, hdr.Size)
+      ;; 
+      ;; // Format the sparse map.
+      ;; formatSPD := func(sp sparseDatas, sa sparseArray) sparseDatas {
+      ;; for i := 0; len(sp) > 0 && i < sa.MaxEntries(); i++ {
+      ;; f.formatNumeric(sa.Entry(i).Offset(), sp[0].Offset)
+      ;; f.formatNumeric(sa.Entry(i).Length(), sp[0].Length)
+      ;; sp = sp[1:]
+      ;; }
+      ;; if len(sp) > 0 {
+      ;; sa.IsExtended()[0] = 1
+      ;; }
+      ;; return sp
+      ;; }
+      ;; sp2 := formatSPD(spd, blk.GNU().Sparse())
+      ;; for len(sp2) > 0 {
+      ;; var spHdr block
+      ;; sp2 = formatSPD(sp2, spHdr.Sparse())
+      ;; spb = append(spb, spHdr[:]...)
+      ;; }
+      ;; 
+      ;; // Update size fields in the header block.
+      ;; realSize := hdr.Size
+      ;; hdr.Size = 0 // Encoded size; does not account for encoded sparse map
+      ;; for _, s := range spd {
+      ;; hdr.Size += s.Length
+      ;; }
+      ;; copy(blk.V7().Size(), zeroBlock[:]) // Reset field
+      ;; f.formatNumeric(blk.V7().Size(), hdr.Size)
+      ;; f.formatNumeric(blk.GNU().RealSize(), realSize)
+      ;; }
+      ;; */
+      (.setFormat blk FormatGNU)
+      (when [err (.writeRawHeader tw blk (.-Size hdr) (.-Typeflag hdr))] (!= err nil)
+        (return err))
+
+
+      ;; Write the extended sparse map and setup the sparse writer if necessary.
+      (when (> (len spd) 0)
+        ;; Use tw.w since the sparse map is not accounted for in hdr.Size.
+        (when [(values _ err) (.Write (.-w tw) spb)] (!= err nil)
+          (return err))
+
+        (set! (.-curr tw) (addr (lit sparseFileWriter (.-curr tw) spd 0))))
+
+      nil)))
+
+
+(go/type
+  ^{:line 313} [stringFormatter (func [(slice byte) string])]
+  ^{:line 314} [numberFormatter (func [(slice byte) int64])])
+
+
+
+
+
+
+
+
+^{:go/end 348} (go/method templateV7Plus "templateV7Plus fills out the V7 fields of a block using values from hdr.\nIt also fills out fields (uname, gname, devmajor, devminor) that are\nshared in the USTAR, PAX, and GNU formats using the provided formatters.\n\nThe block returned is only valid until the next call to\ntemplateV7Plus or writeRawFile.\n" ^{:tag (* block)} [^{:tag (* Writer)} tw ^{:tag (* Header)} hdr ^stringFormatter fmtStr ^numberFormatter fmtNum]
+  (.reset (.-blk tw))
+
+  (let [modTime (.-ModTime hdr)]
+    (when (.IsZero modTime)
+      (set! modTime (time/Unix 0 0)))
+
+
+    (let [v7 (.toV7 (.-blk tw))]
+      (aset (.typeFlag v7) 0 (.-Typeflag hdr))
+      (fmtStr (.name v7) (.-Name hdr))
+      (fmtStr (.linkName v7) (.-Linkname hdr))
+      (fmtNum (.mode v7) (.-Mode hdr))
+      (fmtNum (.uid v7) (conv int64 (.-Uid hdr)))
+      (fmtNum (.gid v7) (conv int64 (.-Gid hdr)))
+      (fmtNum (.size v7) (.-Size hdr))
+      (fmtNum (.modTime v7) (.Unix modTime))
+
+      (let [ustar (.toUSTAR (.-blk tw))]
+        (fmtStr (.userName ustar) (.-Uname hdr))
+        (fmtStr (.groupName ustar) (.-Gname hdr))
+        (fmtNum (.devMajor ustar) (.-Devmajor hdr))
+        (fmtNum (.devMinor ustar) (.-Devminor hdr))
+
+        (addr (.-blk tw))))))
+
+
+
+
+
+^{:go/end 383} (go/method writeRawFile "writeRawFile writes a minimal file with the given name and flag type.\nIt uses format to encode the header format and will write data as the body.\nIt uses default values for all of the other fields (as BSD and GNU tar does).\n" ^error [^{:tag (* Writer)} tw ^string name ^string data ^byte flag ^Format format]
+  (.reset (.-blk tw))
+
+  ;; Best effort for the filename.
+  (set! name (toASCII name))
+  (when (> (len name) nameSize)
+    (set! name (subslice name _ nameSize)))
+
+  (set! name (strings/TrimRight name "/"))
+
+  (let [^formatter f (zero formatter)
+      ^{:line 364} v7 (.toV7 (.-blk tw))]
+    (aset (.typeFlag v7) 0 flag)
+    (.formatString f (.name v7) name)
+    (.formatOctal f (.mode v7) 0)
+    (.formatOctal f (.uid v7) 0)
+    (.formatOctal f (.gid v7) 0)
+    (.formatOctal f (.size v7) (conv int64 (len data))) ; Must be < 8GiB
+    (.formatOctal f (.modTime v7) 0)
+    (.setFormat (.-blk tw) format)
+    (when (!= (.-err f) nil)
+      (return (.-err f))) ; Only occurs if size condition is violated
+
+
+    ;; Write the header and data.
+    (when [err (.writeRawHeader tw (addr (.-blk tw)) (conv int64 (len data)) flag)] (!= err nil)
+      (return err))
+
+    (let [(values _ err) (io/WriteString tw data)]
+      ^{:line 382} err)))
+
+
+
+
+
+^{:go/breaks [9] :go/end 401} (go/method writeRawHeader "writeRawHeader writes the value of blk, regardless of its value.\nIt sets up the Writer such that it can accept a file of the given size.\nIf the flag is a special header-only flag, then the size is treated as zero.\n" ^error [^{:tag (* Writer)} tw ^{:tag (* block)} blk ^int64 size ^byte flag]
+  (when [err (.Flush tw)] (!= err nil)
+    (return err))
+
+  (when [(values _ err) (.Write (.-w tw) (subslice blk))] (!= err nil)
+    (return err))
+
+  (when (isHeaderOnlyType flag)
+    (set! size 0))
+
+  (set! (.-curr tw) (addr (lit regFileWriter (.-w tw) size)))
+  (set! (.-pad tw) (blockPadding size))
+  nil)
+
+
+
+
+
+^{:go/end 450} (go/method AddFS "AddFS adds the files from fs.FS to the archive.\nIt walks the directory tree starting at the root of the filesystem\nadding each file to the tar archive while maintaining the directory structure.\n" ^error [^{:tag (* Writer)} tw ^fs/FS fsys]
+  (fs/WalkDir fsys "." ^{:go/end 449} (fn ^error [^string name ^fs/DirEntry d ^error err]
+      (when (!= err nil)
+        (return err))
+
+      (when (== name ".")
+        (return nil))
+
+      (let [(values info ^:assign err) (.Info d)]
+        (when (!= err nil)
+          (return err))
+
+        (let [linkTarget ""]
+          (if [typ (.Type d)] (== typ fs/ModeSymlink)
+            (let [^error err (zero error)]
+              (set! (values linkTarget err) (fs/ReadLink fsys name))
+              (when (!= err nil)
+                (return err)))
+
+            (when (and (not (.IsRegular typ)) (!= typ fs/ModeDir))
+              (return (errors/New "tar: cannot add non-regular file"))))
+
+          (let [(values h ^:assign err) (FileInfoHeader info linkTarget)]
+            (when (!= err nil)
+              (return err))
+
+            (set! (.-Name h) name)
+            (when (.IsDir d)
+              (set! (.-Name h) + "/"))
+
+            (when [err (.WriteHeader tw h)] (!= err nil)
+              (return err))
+
+            (when (not (.IsRegular (.Type d)))
+              (return nil))
+
+            (let [(values f ^:assign err) (.Open fsys name)]
+              (when (!= err nil)
+                (return err))
+
+              (defer (.Close f))
+              (set! (values _ err) (io/Copy tw f))
+              ^{:line 448} err)))))))
+
+
+
+
+
+^{:go/end 471} (go/func splitUSTARPath "splitUSTARPath splits a path according to USTAR prefix and suffix rules.\nIf the path is not splittable, then it will return (\"\", \"\", false).\n" [^string name] :results [^string prefix ^string suffix ^bool ok]
+  (let [length (len name)]
+    (cond (or (<= length nameSize) (not (isASCII name)))
+      (return "" "" false)
+      (> length (+ prefixSize 1))
+      (set! length (+ prefixSize 1))
+      (== (aget name (- length 1)) \/)
+      (dec! length))
+
+
+    (let [i (strings/LastIndex (subslice name _ length) "/")
+        ^{:line 465} nlen (- (len name) i 1) ; nlen is length of suffix
+        ^{:line 466} plen i] ; plen is length of prefix
+      (when (or (<= i 0) (> nlen nameSize) (== nlen 0) (> plen prefixSize))
+        (return "" "" false))
+
+      (return (subslice name _ i) (subslice name (+ i 1)) true))))
+
+
+
+
+
+
+
+
+
+^{:go/end 489} (go/method Write "Write writes to the current file in the tar archive.\nWrite returns the error [ErrWriteTooLong] if more than\nHeader.Size bytes are written after [Writer.WriteHeader].\n\nCalling Write on special types like [TypeLink], [TypeSymlink], [TypeChar],\n[TypeBlock], [TypeDir], and [TypeFifo] returns (0, [ErrWriteTooLong]) regardless\nof what the [Header.Size] claims.\n" [^{:tag (* Writer)} tw ^{:tag (slice byte)} b] :results [int error]
+  (when (!= (.-err tw) nil)
+    (return 0 (.-err tw)))
+
+  (let [(values n err) (.Write (.-curr tw) b)]
+    (when (and (!= err nil) (!= err ErrWriteTooLong))
+      (set! (.-err tw) err))
+
+    (return n err)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 510} (go/method readFrom "readFrom populates the content of the current file by reading from r.\nThe bytes read must match the number of remaining bytes in the current file.\n\nIf the current file is sparse and r is an io.ReadSeeker,\nthen readFrom uses Seek to skip past holes defined in Header.SparseHoles,\nassuming that skipped regions are all NULs.\nThis always reads the last byte to ensure r is the right size.\n\nTODO(dsnet): Re-export this when adding sparse file support.\nSee https://golang.org/issue/22735\n" [^{:tag (* Writer)} tw ^io/Reader r] :results [int64 error]
+  (when (!= (.-err tw) nil)
+    (return 0 (.-err tw)))
+
+  (let [(values n err) (.ReadFrom (.-curr tw) r)]
+    (when (and (!= err nil) (!= err ErrWriteTooLong))
+      (set! (.-err tw) err))
+
+    (return n err)))
+
+
+
+
+
+^{:go/end 532} (go/method Close "Close closes the tar archive by flushing the padding, and writing the footer.\nIf the current file (from a prior call to [Writer.WriteHeader]) is not fully written,\nthen this returns an error.\n" ^error [^{:tag (* Writer)} tw]
+  (when (== (.-err tw) ErrWriteAfterClose)
+    (return nil))
+
+  (when (!= (.-err tw) nil)
+    (return (.-err tw)))
+
+
+  ;; Trailer: two zero blocks.
+  (let [err (.Flush tw)]
+    (for [i 0] (and (< i 2) (== err nil)) (inc! i)
+      (set! (values _ err) (.Write (.-w tw) (subslice zeroBlock))))
+
+
+    ;; Ensure all future actions are invalid.
+    (set! (.-err tw) ErrWriteAfterClose)
+    ^{:line 531} err)) ; Report IO errors
+
+
+
+(go/type regFileWriter "regFileWriter is a fileWriter for writing data to a regular file entry.\n" (struct
+    ^{:line 536 :tag io/Writer} w ; Underlying Writer
+    ^{:line 537 :tag int64} nb)) ; Number of remaining bytes to write
+
+
+^{:go/end 557} (go/method Write [^{:tag (* regFileWriter)} fw ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (let [overwrite (> (conv int64 (len b)) (.-nb fw))]
+    (when overwrite
+      (set! b (subslice b _ (.-nb fw))))
+
+    (when (> (len b) 0)
+      (set! (values n err) (.Write (.-w fw) b))
+      (set! (.-nb fw) - (conv int64 n)))
+
+    (switch
+      (case [(!= err nil)]
+        (return n err))
+      (case [overwrite]
+        (return n ErrWriteTooLong))
+      (default
+        (return n nil)))))
+
+
+
+^{:go/end 561} (go/method ReadFrom [^{:tag (* regFileWriter)} fw ^io/Reader r] :results [int64 error]
+  (io/Copy (lit (struct io/Writer) fw) r))
+
+
+
+^{:go/end 566} (go/method logicalRemaining "logicalRemaining implements fileState.logicalRemaining.\n" ^int64 [^regFileWriter fw]
+  (.-nb fw))
+
+
+
+^{:go/end 571} (go/method physicalRemaining "physicalRemaining implements fileState.physicalRemaining.\n" ^int64 [^regFileWriter fw]
+  (.-nb fw))
+
+
+
+(go/type sparseFileWriter "sparseFileWriter is a fileWriter for writing data to a sparse file entry.\n" (struct
+    ^{:line 575 :tag fileWriter} fw ; Underlying fileWriter
+    ^{:line 576 :tag sparseDatas} sp ; Normalized list of data fragments
+    ^{:line 577 :tag int64} pos)) ; Current position in sparse file
+
+
+^{:go/end 618} (go/method Write [^{:tag (* sparseFileWriter)} sw ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (let [overwrite (> (conv int64 (len b)) (.logicalRemaining sw))]
+    (when overwrite
+      (set! b (subslice b _ (.logicalRemaining sw))))
+
+
+    (let [b0 b
+        ^{:line 587} endPos (+ (.-pos sw) (conv int64 (len b)))]
+      (while (and (> endPos (.-pos sw)) (== err nil))
+        (let [^int nf (zero int) ; Bytes written in fragment
+            (values dataStart dataEnd) (values (.-Offset (aget (.-sp sw) 0)) (.endOffset (aget (.-sp sw) 0)))]
+          (if (< (.-pos sw) dataStart) ; In a hole fragment
+            (let [bf (subslice b _ (min (conv int64 (len b)) (- dataStart (.-pos sw))))]
+              (set! (values nf err) (.Write (lit zeroWriter) bf)))
+            ;; In a data fragment
+            (let [bf (subslice b _ (min (conv int64 (len b)) (- dataEnd (.-pos sw))))]
+              (set! (values nf err) (.Write (.-fw sw) bf))))
+
+          (set! b (subslice b nf))
+          (set! (.-pos sw) + (conv int64 nf))
+          (when (and (>= (.-pos sw) dataEnd) (> (len (.-sp sw)) 1))
+            (set! (.-sp sw) (subslice (.-sp sw) 1))))) ; Ensure last fragment always remains
+
+
+
+      (set! n (- (len b0) (len b)))
+      (switch
+        (case [(== err ErrWriteTooLong)]
+          (return n errMissData)) ; Not possible; implies bug in validation logic
+        (case [(!= err nil)]
+          (return n err))
+        (case [(and (== (.logicalRemaining sw) 0) (> (.physicalRemaining sw) 0))]
+          (return n errUnrefData)) ; Not possible; implies bug in validation logic
+        (case [overwrite]
+          (return n ErrWriteTooLong))
+        (default
+          (return n nil))))))
+
+
+
+^{:go/end 673} (go/method ReadFrom [^{:tag (* sparseFileWriter)} sw ^io/Reader r] :results [^int64 n ^error err]
+  (let [(values rs ok) (assert io/ReadSeeker r)]
+    (when ok
+      (when [(values _ err) (.Seek rs 0 io/SeekCurrent)] (!= err nil)
+        (set! ok false))) ; Not all io.Seeker can really seek
+
+
+    (when (not ok)
+      (return (io/Copy (lit (struct io/Writer) sw) r)))
+
+
+    (let [^bool readLastByte (zero bool)
+        ^{:line 632} pos0 (.-pos sw)]
+      (while (and (> (.logicalRemaining sw) 0) (not readLastByte) (== err nil))
+        (let [^int64 nf (zero int64) ; Size of fragment
+            (values dataStart dataEnd) (values (.-Offset (aget (.-sp sw) 0)) (.endOffset (aget (.-sp sw) 0)))]
+          (if (< (.-pos sw) dataStart) (do ; In a hole fragment
+              (set! nf (- dataStart (.-pos sw)))
+              (when (== (.physicalRemaining sw) 0)
+                (set! readLastByte true)
+                (dec! nf))
+
+              (set! (values _ err) (.Seek rs nf io/SeekCurrent)))
+            (do ; In a data fragment
+              (set! nf (- dataEnd (.-pos sw)))
+              (set! (values nf err) (io/CopyN (.-fw sw) rs nf))))
+
+          (set! (.-pos sw) + nf)
+          (when (and (>= (.-pos sw) dataEnd) (> (len (.-sp sw)) 1))
+            (set! (.-sp sw) (subslice (.-sp sw) 1))))) ; Ensure last fragment always remains
+
+
+
+      ;; If the last fragment is a hole, then seek to 1-byte before EOF, and
+      ;; read a single byte to ensure the file is the right size.
+      (when (and readLastByte (== err nil))
+        (set! (values _ err) (mustReadFull rs (lit (slice byte) 0)))
+        (inc! (.-pos sw)))
+
+
+      (set! n (- (.-pos sw) pos0))
+      (switch
+        (case [(== err io/EOF)]
+          (return n io/ErrUnexpectedEOF))
+        (case [(== err ErrWriteTooLong)]
+          (return n errMissData)) ; Not possible; implies bug in validation logic
+        (case [(!= err nil)]
+          (return n err))
+        (case [(and (== (.logicalRemaining sw) 0) (> (.physicalRemaining sw) 0))]
+          (return n errUnrefData)) ; Not possible; implies bug in validation logic
+        (default
+          (return n (ensureEOF rs)))))))
+
+
+
+^{:go/end 677} (go/method logicalRemaining ^int64 [^sparseFileWriter sw]
+  (- (.endOffset (aget (.-sp sw) (- (len (.-sp sw)) 1))) (.-pos sw)))
+
+
+^{:go/end 681} (go/method physicalRemaining ^int64 [^sparseFileWriter sw]
+  (.physicalRemaining (.-fw sw)))
+
+
+
+(go/type zeroWriter "zeroWriter may only be written with NULs, otherwise it returns errWriteHole.\n" (struct))
+
+^{:go/end 693} (go/method Write [zeroWriter ^{:tag (slice byte)} b] :results [int error]
+  (range [i c b]
+    (when (!= c 0)
+      (return i errWriteHole)))
+
+
+  (return (len b) nil))
+
+
+
+^{:go/end 706} (go/func ensureEOF "ensureEOF checks whether r is at EOF, reporting ErrWriteTooLong if not so.\n" ^error [^io/Reader r]
+  (let [(values n err) (tryReadFull r (lit (slice byte) 0))]
+    (switch
+      (case [(> n 0)]
+        (return ErrWriteTooLong))
+      (case [(== err io/EOF)]
+        (return nil))
+      (default
+        (return err)))))

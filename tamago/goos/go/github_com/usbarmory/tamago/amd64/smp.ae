@@ -1,0 +1,184 @@
+;; AMD64 processor support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.amd64) (go/file "smp.go" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [binary "encoding/binary"]
+    ^{:line 14} [runtime "runtime"]
+    ^{:line 15} [goos "runtime/goos"]
+    ^{:line 16} [time "time"]
+    ^{:line 17} [unsafe "unsafe"]
+
+    ^{:line 19} [lapic "github.com/usbarmory/tamago/amd64/lapic"]
+    ^{:line 20} [dma "github.com/usbarmory/tamago/dma"]
+    ^{:line 21} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+(go/const
+
+  ^{:line 26} [^{:val 16384 :doc "·apinit 16-bit relocation address\n"} apinitAddress 0x4000]
+
+  ^{:line 28} [^{:val 20480 :doc "·apstart pointer address\n"} apstartAddress 0x5000]
+
+
+  ^{:line 31} [^{:val 24576 :doc "AP Global Descriptor Table (GDT) 16-bit address\n"} gdtAddress 0x6000]
+
+  ^{:line 33} [^{:val 24600 :doc "AP GDT Descriptor (GDTR) 16-bit address\n"} gdtrAddress 0x6018]
+
+
+  ^{:line 36} [^{:val 24608 :doc "AP task address\n"} taskAddress 0x6020]
+
+
+  ^{:line 39} [^{:val 24616 :doc "CR3 value address\n"} cr3Address 0x6028])
+
+
+
+(go/func ^:extern apinit_reloc "defined in smp.s\n" [^uintptr init ^uintptr start])
+
+
+(go/type task "task represents a CPU task\n" (struct
+    ^{:line 47 :tag uint64} sp ; stack pointer
+    ^{:line 48 :tag uint64} gp ; G
+    ^{:line 49 :tag uint64} pc)) ; fn
+
+
+
+^{:go/end 68} (go/method Write "Write writes the task structure to memory\n" [^{:tag (* task)} t ^uint addr]
+  (let [buf (new bytes/Buffer)]
+    (binary/Write buf binary/LittleEndian t)
+
+    (let [n (.Len buf)
+        (values r err) (dma/NewRegion addr n false)]
+
+      (when (!= err nil)
+        (panic err))
+
+
+      (let [(values _ p) (.Reserve r n 0)]
+        (defer (.Release r addr))
+
+        (copy p (.Bytes buf))))))
+
+
+
+
+
+
+
+^{:go/end 95} (go/method Task "Task schedules a goroutine on a previously initialized Application Processor\n(see [CPU.InitSMP]).\n\nOn `GOOS=tamago` Go scheduler M's are never dropped, therefore the function\nis invoked only once per AP (i.e. GOMAXPROCS-1).\n" [^{:tag (* CPU)} cpu ^unsafe/Pointer sp ^unsafe/Pointer _ ^unsafe/Pointer gp ^unsafe/Pointer fn]
+  (let [t (addr ^{:go/breaks [2 4 6]} (lit task
+          :sp (conv uint64 (conv uintptr sp))
+          :gp (conv uint64 (conv uintptr gp))
+          :pc (conv uint64 (conv uintptr fn))))]
+
+
+    (when (or (== (.-sp t) 0) (== (.-gp t) 0))
+      (return))
+
+
+    (when (>= (+ (.-init cpu) 1) (runtime/GOMAXPROCS -1))
+      (panic "Task exceeds available resources"))
+
+
+    (.Write t taskAddress)
+
+    ;; set last initialized CPU and signal task through NMI
+    (set! (.-init cpu) + 1)
+    (.IPI (.-LAPIC cpu) (.-init cpu) 0 lapic/ICR_DLV_NMI)))
+
+
+
+^{:go/end 100} (go/method ID "ID returns the processor identifier.\n" ^uint64 [^{:tag (* CPU)} cpu]
+  (conv uint64 (.ID (.-LAPIC cpu))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 126} (go/method GOMAXPROCS "GOMAXPROCS sets the maximum number of CPUs that can be executing\nsimultaneously and returns the previous setting, it must be used instead of\n[runtime.GOMAXPROCS] when using this package.\n\nThe function checks if n-1 APs are ready (within 1s) at their idle state, if\nthe condition fails the current state is not changed.\n\nThe function is not required when using [CPU.InitSMP], which invokes it, as\nit is exported for applications that initialize APs by other means.\n" ^int [^{:tag (* CPU)} cpu ^int n]
+  (when (> (.-init cpu) 0)
+    (return (runtime/GOMAXPROCS n)))
+
+
+  ;; wait for all APs to reach ·apstart idle state
+  (if (reg/WaitFor (* 1 time/Second) taskAddress 0 0xffffffff (conv uint32 (- n 1))) (do
+      (set! goos/ProcID (.-ID cpu))
+      (set! goos/Task (.-Task cpu))
+      (set! goos/Wake (.-Wake cpu)))
+
+    (set! n 1))
+
+
+  (runtime/GOMAXPROCS n))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 180} (go/method InitSMP "InitSMP enables Secure Multiprocessor (SMP) operation by initializing\navailable Application Processors.\n\nA positive argument caps the total (BSP+APs) number of cores, a negative\nargument initializes all available APs, an agument of 0 or 1 disables SMP.\n\nAfter initialization [runtime.NumCPU] or [runtime.GOMAXPROCS] can be used to\nverify SMP use by the runtime.\n" [^{:tag (* CPU)} cpu ^int n]
+  (let [^int i (zero int)]
+
+    (when (or (== n 0) (== n 1))
+      (set! goos/Task nil)
+      (runtime/GOMAXPROCS 1)
+      (return))
+
+
+    ;; copy ·apinit to a 16-bit address reachable in real mode
+    ;; copy ·apstart pointer to avoid RIP/EIP-relative addressing
+    (apinit_reloc apinitAddress apstartAddress)
+
+    ;; create AP Global Descriptor Table (GDT)
+    (reg/Write64 (+ gdtAddress 0x00) 0x0000000000000000) ; null descriptor
+    (reg/Write64 (+ gdtAddress 0x08) 0x00209a00000fffff) ; code descriptor (x/r)
+    (reg/Write64 (+ gdtAddress 0x10) 0x00009200000fffff) ; data descriptor (r/w)
+
+    ;; create AP GDT Descriptor (GDTR)
+    (reg/Write16 (+ gdtrAddress 0x00) (- (* 3 8) 1)) ; GTD Limit
+    (reg/Write32 (+ gdtrAddress 0x02) gdtAddress) ; GDT Base Address
+
+    ;; read fresh CR3 as a cpuinit override might have overridden ours
+    (reg/Write cr3Address (conv uint32 (read_cr3)))
+
+    (for [(set! i 1)] (< i (NumCPU)) (inc! i)
+      (when (== i n)
+        (break))
+
+
+      ;; AMD64 Architecture Programmer’s Manual
+      ;; Volume 2 - 15.27.8 Secure Multiprocessor Initialization
+      ;;
+      ;; AP Startup Sequence:
+      ;; The vector provides the upper 8 bits of a 20-bit physical address.
+      (let [vector (>> apinitAddress 12)]
+
+        (.IPI (.-LAPIC cpu) i vector (bit-or (<< 1 lapic/ICR_INIT) lapic/ICR_DLV_INIT))
+        (time/Sleep (* 10 time/Millisecond))
+
+        (.IPI (.-LAPIC cpu) i vector (bit-or (<< 1 lapic/ICR_INIT) lapic/ICR_DLV_SIPI))))
+
+
+    (.GOMAXPROCS cpu i)))
+
+
+
+^{:go/end 185} (go/method Wake "Wake issues a wake interrupt (see [IRQ_WAKEUP]) to the target processor.\n" [^{:tag (* CPU)} cpu ^uint64 procid]
+  (.IPI (.-LAPIC cpu) (conv int procid) IRQ_WAKEUP lapic/ICR_DLV_IRQ))

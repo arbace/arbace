@@ -1,0 +1,79 @@
+;; NXP Cryptographic Acceleration and Assurance Module (CAAM) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.caam) (go/file "rng.go" :imports [
+
+
+    ^{:line 12} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 13} [reg "github.com/usbarmory/tamago/internal/reg"]
+    ^{:line 14} [rng "github.com/usbarmory/tamago/internal/rng"]])
+
+
+^{:go/end 52} (go/method initRNG [^{:tag (* CAAM)} hw]
+  ;; initialize RNG
+  (let [op1 (lit Operation)]
+    (.SetDefaults op1)
+    (.OpType op1 OPTYPE_ALG_CLASS1)
+    (.Algorithm op1 ALG_RNG 0)
+    (.State op1 AS_INITIALIZE)
+
+    ;; enable Prediction Resistance (PR)
+    (bits/Set (addr ^{:go/via [Command]} (.-Word0 op1)) 1)
+
+    ;; wait for previous operation
+    (let [jmp (lit Jump)]
+      (.SetDefaults jmp)
+      ^{:go/via [Command]} (.Class jmp 1)
+      (.Offset jmp 1)
+
+      ;; clear Class 1 Mode Register
+      (let [c1m (lit Load)]
+        (.SetDefaults c1m)
+        (.Destination c1m CLRW)
+        (.Immediate c1m (<< 1 C0CWR_C1M))
+
+        ;; initialize JDKEK, TDKEK and TDSK
+        (let [op2 (lit Operation)]
+          (.SetDefaults op2)
+          (.OpType op2 OPTYPE_ALG_CLASS1)
+          (.Algorithm op2 ALG_RNG (<< 1 AAI_RNG_SK))
+
+          (let [jd ^{:go/via [Command]} (.Bytes op1)]
+            (set! jd (append jd (spread ^{:go/via [Command]} (.Bytes jmp))))
+            (set! jd (append jd (spread ^{:go/via [LengthCommand Command]} (.Bytes c1m))))
+            (set! jd (append jd (spread ^{:go/via [Command]} (.Bytes op2))))
+
+            (.add (.-jr hw) nil jd)))))))
+
+
+
+^{:go/end 82} (go/method GetRandomData "GetRandomData returns len(b) random bytes gathered from the CAAM TRNG.\n" [^{:tag (* CAAM)} hw ^{:tag (slice byte)} b]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  ;; TRNG access through RTENT registers prevents RNG access in CAAM
+  ;; commands, enable only as needed.
+  (reg/Set (.-rtmctl hw) RTMCTL_TRNG_ACC)
+  (defer (reg/Clear (.-rtmctl hw) RTMCTL_TRNG_ACC))
+
+  (let [read 0
+      ^{:line 65} need (len b)]
+
+    (while (< read need)
+      (when (== (.-rtenta hw) (.-rtent0 hw))
+        (while (== (reg/GetN (.-rtmctl hw) RTMCTL_ENT_VAL 1) 0)))
+      ;; wait for valid entropy
+
+
+
+      (set! read (rng/Fill b read (reg/Read (.-rtenta hw))))
+
+      (if (== (.-rtenta hw) (.-rtent15 hw))
+        (set! (.-rtenta hw) (.-rtent0 hw))
+
+        (set! (.-rtenta hw) + 4)))))

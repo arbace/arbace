@@ -1,0 +1,303 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.internal) (go/file "sniff.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [binary "encoding/binary"]])
+
+
+
+(go/const ^{:val 512 :doc "The algorithm uses at most SniffLen bytes to make its decision.\n"} SniffLen 512)
+
+
+
+
+
+
+
+^{:go/end 38} (go/func DetectContentType "DetectContentType implements the algorithm described\nat https://mimesniff.spec.whatwg.org/ to determine the\nContent-Type of the given data. It considers at most the\nfirst 512 bytes of data. DetectContentType always returns\na valid MIME type: if it cannot determine a more specific one, it\nreturns \"application/octet-stream\".\n" ^string [^{:tag (slice byte)} data]
+  (when (> (len data) SniffLen)
+    (set! data (subslice data _ SniffLen)))
+
+
+  ;; Index of the first non-whitespace byte in data.
+  ^{:go/breaks [[4 37]]} (let [firstNonWS 0]
+    (for [] (and (< firstNonWS (len data)) (isWS (aget data firstNonWS))) (inc! firstNonWS))
+
+
+    (range [_ sig sniffSignatures]
+      (when [ct (.match sig data firstNonWS)] (!= ct "")
+        (return ct)))
+
+
+
+    "application/octet-stream")) ; fallback
+
+
+
+
+^{:go/breaks [[5 47]] :go/end 48} (go/func isWS "isWS reports whether the provided byte is a whitespace byte (0xWS)\nas defined in https://mimesniff.spec.whatwg.org/#terminology.\n" ^bool [^byte b]
+  (switch b
+    (case [\tab \newline \formfeed \return \space]
+      (return true)))
+
+  false)
+
+
+
+
+^{:go/breaks [[5 57]] :go/end 58} (go/func isTT "isTT reports whether the provided byte is a tag-terminating byte (0xTT)\nas defined in https://mimesniff.spec.whatwg.org/#terminology.\n" ^bool [^byte b]
+  (switch b
+    (case [\space \>]
+      (return true)))
+
+  false)
+
+
+(go/type sniffSig (interface
+
+    (^{:doc "match returns the MIME type of the data, or \"\" if unknown.\n"} match ^string [^{:tag (slice byte)} data ^int firstNonWS])))
+
+
+
+(go/var ^{:doc "Data matching the table in section 6.\n"} sniffSignatures (lit (slice sniffSig)
+    (conv htmlSig "<!DOCTYPE HTML")
+    (conv htmlSig "<HTML")
+    (conv htmlSig "<HEAD")
+    (conv htmlSig "<SCRIPT")
+    (conv htmlSig "<IFRAME")
+    (conv htmlSig "<H1")
+    (conv htmlSig "<DIV")
+    (conv htmlSig "<FONT")
+    (conv htmlSig "<TABLE")
+    (conv htmlSig "<A")
+    (conv htmlSig "<STYLE")
+    (conv htmlSig "<TITLE")
+    (conv htmlSig "<B")
+    (conv htmlSig "<BODY")
+    (conv htmlSig "<BR")
+    (conv htmlSig "<P")
+    (conv htmlSig "<!--")
+    (addr ^{:go/breaks [2 4 6 8]} (lit maskedSig
+        :mask (conv (slice byte) (byte-string 0xff 0xff 0xff 0xff 0xff))
+        :pat (conv (slice byte) "<?xml")
+        :skipWS true
+        :ct "text/xml; charset=utf-8"))
+    (addr (lit exactSig (conv (slice byte) "%PDF-") "application/pdf"))
+    (addr (lit exactSig (conv (slice byte) "%!PS-Adobe-") "application/postscript"))
+
+    ;; UTF BOMs.
+    (addr ^{:go/breaks [2 4 6]} (lit maskedSig
+        :mask (conv (slice byte) (byte-string 0xff 0xff "\u0000\u0000"))
+        :pat (conv (slice byte) (byte-string 0xfe 0xff "\u0000\u0000"))
+        :ct "text/plain; charset=utf-16be"))
+
+    (addr ^{:go/breaks [2 4 6]} (lit maskedSig
+        :mask (conv (slice byte) (byte-string 0xff 0xff "\u0000\u0000"))
+        :pat (conv (slice byte) (byte-string 0xff 0xfe "\u0000\u0000"))
+        :ct "text/plain; charset=utf-16le"))
+
+    (addr ^{:go/breaks [2 4 6]} (lit maskedSig
+        :mask (conv (slice byte) (byte-string 0xff 0xff 0xff "\u0000"))
+        :pat (conv (slice byte) "\ufeff\u0000")
+        :ct "text/plain; charset=utf-8"))
+
+
+    ;; Image types
+    ;; For posterity, we originally returned "image/vnd.microsoft.icon" from
+    ;; https://tools.ietf.org/html/draft-ietf-websec-mime-sniff-03#section-7
+    ;; https://codereview.appspot.com/4746042
+    ;; but that has since been replaced with "image/x-icon" in Section 6.2
+    ;; of https://mimesniff.spec.whatwg.org/#matching-an-image-type-pattern
+    (addr (lit exactSig (conv (slice byte) "\u0000\u0000\u0001\u0000") "image/x-icon"))
+    (addr (lit exactSig (conv (slice byte) "\u0000\u0000\u0002\u0000") "image/x-icon"))
+    (addr (lit exactSig (conv (slice byte) "BM") "image/bmp"))
+    (addr (lit exactSig (conv (slice byte) "GIF87a") "image/gif"))
+    (addr (lit exactSig (conv (slice byte) "GIF89a") "image/gif"))
+    (addr ^{:go/breaks [2 4 6]} (lit maskedSig
+        :mask (conv (slice byte) (byte-string 0xff 0xff 0xff 0xff "\u0000\u0000\u0000\u0000" 0xff 0xff 0xff 0xff 0xff 0xff))
+        :pat (conv (slice byte) "RIFF\u0000\u0000\u0000\u0000WEBPVP")
+        :ct "image/webp"))
+
+    (addr (lit exactSig (conv (slice byte) (byte-string 0x89 "PNG\r\n\u001a\n")) "image/png"))
+    (addr (lit exactSig (conv (slice byte) (byte-string 0xff 0xd8 0xff)) "image/jpeg"))
+
+    ;; Audio and Video types
+    ;; Enforce the pattern match ordering as prescribed in
+    ;; https://mimesniff.spec.whatwg.org/#matching-an-audio-or-video-type-pattern
+    (addr ^{:go/breaks [2 4 6]} (lit maskedSig
+        :mask (conv (slice byte) (byte-string 0xff 0xff 0xff 0xff "\u0000\u0000\u0000\u0000" 0xff 0xff 0xff 0xff))
+        :pat (conv (slice byte) "FORM\u0000\u0000\u0000\u0000AIFF")
+        :ct "audio/aiff"))
+
+    (addr ^{:go/breaks [2 4 6]} (lit maskedSig
+        :mask (conv (slice byte) (byte-string 0xff 0xff 0xff))
+        :pat (conv (slice byte) "ID3")
+        :ct "audio/mpeg"))
+
+    (addr ^{:go/breaks [2 4 6]} (lit maskedSig
+        :mask (conv (slice byte) (byte-string 0xff 0xff 0xff 0xff 0xff))
+        :pat (conv (slice byte) "OggS\u0000")
+        :ct "application/ogg"))
+
+    (addr ^{:go/breaks [2 4 6]} (lit maskedSig
+        :mask (conv (slice byte) (byte-string 0xff 0xff 0xff 0xff 0xff 0xff 0xff 0xff))
+        :pat (conv (slice byte) "MThd\u0000\u0000\u0000\u0006")
+        :ct "audio/midi"))
+
+    (addr ^{:go/breaks [2 4 6]} (lit maskedSig
+        :mask (conv (slice byte) (byte-string 0xff 0xff 0xff 0xff "\u0000\u0000\u0000\u0000" 0xff 0xff 0xff 0xff))
+        :pat (conv (slice byte) "RIFF\u0000\u0000\u0000\u0000AVI ")
+        :ct "video/avi"))
+
+    (addr ^{:go/breaks [2 4 6]} (lit maskedSig
+        :mask (conv (slice byte) (byte-string 0xff 0xff 0xff 0xff "\u0000\u0000\u0000\u0000" 0xff 0xff 0xff 0xff))
+        :pat (conv (slice byte) "RIFF\u0000\u0000\u0000\u0000WAVE")
+        :ct "audio/wave"))
+
+    ;; 6.2.0.2. video/mp4
+    (lit mp4Sig)
+    ;; 6.2.0.3. video/webm
+    (addr (lit exactSig (conv (slice byte) "\u001aEߣ") "video/webm"))
+
+    ;; Font types
+    (addr ^{:go/breaks [[2 169] [4 171] 6]} (lit maskedSig
+        ;; 34 NULL bytes followed by the string "LP"
+        :pat (conv (slice byte) "\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000LP")
+        ;; 34 NULL bytes followed by \xF\xF
+        :mask (conv (slice byte) (byte-string "\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000" 0xff 0xff))
+        :ct "application/vnd.ms-fontobject"))
+
+    (addr (lit exactSig (conv (slice byte) "\u0000\u0001\u0000\u0000") "font/ttf"))
+    (addr (lit exactSig (conv (slice byte) "OTTO") "font/otf"))
+    (addr (lit exactSig (conv (slice byte) "ttcf") "font/collection"))
+    (addr (lit exactSig (conv (slice byte) "wOFF") "font/woff"))
+    (addr (lit exactSig (conv (slice byte) "wOF2") "font/woff2"))
+
+    ;; Archive types
+    (addr (lit exactSig (conv (slice byte) (byte-string "\u001f" 0x8b "\b")) "application/x-gzip"))
+    (addr (lit exactSig (conv (slice byte) "PK\u0003\u0004") "application/zip"))
+    ;; RAR's signatures are incorrectly defined by the MIME spec as per
+    ;;    https://github.com/whatwg/mimesniff/issues/63
+    ;; However, RAR Labs correctly defines it at:
+    ;;    https://www.rarlab.com/technote.htm#rarsign
+    ;; so we use the definition from RAR Labs.
+    ;; TODO: do whatever the spec ends up doing.
+    (addr (lit exactSig (conv (slice byte) "Rar!\u001a\u0007\u0000") "application/x-rar-compressed")) ; RAR v1.5-v4.0
+    (addr (lit exactSig (conv (slice byte) "Rar!\u001a\u0007\u0001\u0000") "application/x-rar-compressed")) ; RAR v5+
+
+    (addr (lit exactSig (conv (slice byte) "\u0000asm") "application/wasm"))
+
+    (lit textSig))) ; should be last
+
+
+(go/type exactSig (struct
+    ^{:line 198 :tag (slice byte)} sig
+    ^{:line 199 :tag string} ct))
+
+
+^{:go/breaks [[4 206]] :go/end 207} (go/method match ^string [^{:tag (* exactSig)} e ^{:tag (slice byte)} data ^int firstNonWS]
+  (when (bytes/HasPrefix data (.-sig e))
+    (return (.-ct e)))
+
+  "")
+
+
+(go/type maskedSig (struct
+    ^{:line 210 :tag (slice byte)} mask ^{:tag (slice byte)} pat
+    ^{:line 211 :tag bool} skipWS
+    ^{:line 212 :tag string} ct))
+
+
+^{:go/end 235} (go/method match ^string [^{:tag (* maskedSig)} m ^{:tag (slice byte)} data ^int firstNonWS]
+  ;; pattern matching algorithm section 6
+  ;; https://mimesniff.spec.whatwg.org/#pattern-matching-algorithm
+
+  (when (.-skipWS m)
+    (set! data (subslice data firstNonWS)))
+
+  (when (!= (len (.-pat m)) (len (.-mask m)))
+    (return ""))
+
+  (when (< (len data) (len (.-pat m)))
+    (return ""))
+
+  (range [i pb (.-pat m)]
+    (let [maskedData (bit-and (aget data i) (aget (.-mask m) i))]
+      (when (!= maskedData pb)
+        (return ""))))
+
+
+  (.-ct m))
+
+
+(go/type htmlSig (slice byte))
+
+^{:go/breaks [[7 257]] :go/end 258} (go/method match ^string [^htmlSig h ^{:tag (slice byte)} data ^int firstNonWS]
+  (set! data (subslice data firstNonWS))
+  (when (< (len data) (+ (len h) 1))
+    (return ""))
+
+  (range [i b h]
+    (let [db (aget data i)]
+      (when (and (<= \A b) (<= b \Z))
+        (set! db bit-and 0xDF))
+
+      (when (!= b db)
+        (return ""))))
+
+
+  ;; Next byte must be a tag-terminating byte(0xTT).
+  (when (not (isTT (aget data (len h))))
+    (return ""))
+
+  "text/html; charset=utf-8")
+
+
+(go/var mp4ftype (conv (slice byte) "ftyp"))
+(go/var mp4 (conv (slice byte) "mp4"))
+
+(go/type mp4Sig (struct))
+
+^{:go/end 288} (go/method match ^string [mp4Sig ^{:tag (slice byte)} data ^int firstNonWS]
+  ;; https://mimesniff.spec.whatwg.org/#signature-for-mp4
+  ;; c.f. section 6.2.1
+  (when (< (len data) 12)
+    (return ""))
+
+  ^{:go/breaks [[5 287]]} (let [boxSize (conv int (.Uint32 binary/BigEndian (subslice data _ 4)))]
+    (when (or (< (len data) boxSize) (!= (% boxSize 4) 0))
+      (return ""))
+
+    (when (not (bytes/Equal (subslice data 4 8) mp4ftype))
+      (return ""))
+
+    (for [st 8] (< st boxSize) (set! st + 4)
+      (when (== st 12)
+        ;; Ignores the four bytes that correspond to the version number of the "major brand".
+        (continue))
+
+      (when (bytes/Equal (subslice data st (+ st 3)) mp4)
+        (return "video/mp4")))
+
+
+    ""))
+
+
+(go/type textSig (struct))
+
+^{:go/breaks [[4 303]] :go/end 304} (go/method match ^string [textSig ^{:tag (slice byte)} data ^int firstNonWS]
+  ;; c.f. section 5, step 4.
+  (range [_ b (subslice data firstNonWS)]
+    (switch
+      (case [(<= b 0x08)
+          (== b 0x0B)
+          (and (<= 0x0E b) (<= b 0x1A))
+          (and (<= 0x1C b) (<= b 0x1F))]
+        (return ""))))
+
+
+  "text/plain; charset=utf-8")

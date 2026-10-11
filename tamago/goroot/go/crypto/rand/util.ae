@@ -1,0 +1,105 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.rand) (go/file "util.go" :imports [
+
+
+    ^{:line 8} [fips140only "crypto/internal/fips140only"]
+    ^{:line 9} [rand "crypto/internal/rand"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [big "math/big"]])
+
+
+
+
+
+
+
+
+^{:go/end 67} (go/func Prime "Prime returns a number of the given bit length that is prime with high probability.\nPrime will return error for any error returned by rand.Read or if bits < 2.\n\nSince Go 1.26, a secure source of random bytes is always used, and the Reader is\nignored unless GODEBUG=cryptocustomrand=1 is set. This setting will be removed\nin a future Go release. Instead, use [testing/cryptotest.SetGlobalRandom].\n" [^io/Reader r ^int bits] :results [(* big/Int) error]
+  (when (fips140only/Enforced)
+    (return nil (errors/New "crypto/rand: use of Prime is not allowed in FIPS 140-only mode")))
+
+  (when (< bits 2)
+    (return nil (errors/New "crypto/rand: prime size must be at least 2-bit")))
+
+
+  (set! r (rand/CustomReader r))
+
+  (let [b (conv uint (% bits 8))]
+    (when (== b 0)
+      (set! b 8))
+
+
+    (let [bytes (make (slice byte) (/ (+ bits 7) 8))
+        ^{:line 37} p (new big/Int)]
+
+      (while true
+        (when [(values _ err) (io/ReadFull r bytes)] (!= err nil)
+          (return nil err))
+
+
+        ;; Clear bits in the first byte to make sure the candidate has a size <= bits.
+        (set! (aget bytes 0) bit-and (conv uint8 (- (conv int ^int (<< 1 b)) 1)))
+        ;; Don't let the value be too small, i.e, set the most significant two bits.
+        ;; Setting the top two bits, rather than just the top bit,
+        ;; means that when two of these values are multiplied together,
+        ;; the result isn't ever one bit short.
+        (if (>= b 2)
+          (set! (aget bytes 0) bit-or ^byte (<< 3 (- b 2)))
+          (do
+            ;; Here b==1, because b cannot be zero.
+            (set! (aget bytes 0) bit-or 1)
+            (when (> (len bytes) 1)
+              (set! (aget bytes 1) bit-or 0x80))))
+
+
+        ;; Make the value odd since an even number this large certainly isn't prime.
+        (set! (aget bytes (- (len bytes) 1)) bit-or 1)
+
+        (.SetBytes p bytes)
+        (when (.ProbablyPrime p 20)
+          (return p nil))))))
+
+
+
+
+
+
+^{:go/end 108} (go/func Int "Int returns a uniform random value in [0, max). It panics if max <= 0, and\nreturns an error if rand.Read returns one.\n" [^io/Reader rand ^{:tag (* big/Int)} max] :results [^{:tag (* big/Int)} n ^error err]
+  (when (<= (.Sign max) 0)
+    (panic "crypto/rand: argument to Int is <= 0"))
+
+  (set! n (new big/Int))
+  (.Sub n max (.SetUint64 n 1))
+  ;; bitLen is the maximum bit length needed to encode a value < max.
+  (let [bitLen (.BitLen n)]
+    (when (== bitLen 0)
+      ;; the only valid result is 0
+      (return))
+
+    ;; k is the maximum byte length needed to encode a value < max.
+    (let [k (/ (+ bitLen 7) 8)
+        ;; b is the number of bits in the most significant byte of max-1.
+        ^{:line 86} b (conv uint (% bitLen 8))]
+      (when (== b 0)
+        (set! b 8))
+
+
+      (let [bytes (make (slice byte) k)]
+
+        (while true
+          (set! (values _ err) (io/ReadFull rand bytes))
+          (when (!= err nil)
+            (return nil err))
+
+
+          ;; Clear bits in the first byte to increase the probability
+          ;; that the candidate is < max.
+          (set! (aget bytes 0) bit-and (conv uint8 (- (conv int ^int (<< 1 b)) 1)))
+
+          (.SetBytes n bytes)
+          (when (< (.Cmp n max) 0)
+            (return)))))))

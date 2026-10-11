@@ -1,0 +1,210 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Buffered reading and decoding of DWARF data streams.
+
+(in-ns 'go.debug.dwarf) (go/file "buf.go" :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [binary "encoding/binary"]
+    ^{:line 12} [strconv "strconv"]])
+
+
+
+(go/type buf "Data buffer being decoded.\n" (struct
+    ^{:line 17 :tag (* Data)} dwarf
+    ^{:line 18 :tag binary/ByteOrder} order
+    ^{:line 19 :tag dataFormat} format
+    ^{:line 20 :tag string} name
+    ^{:line 21 :tag Offset} off
+    ^{:line 22 :tag (slice byte)} data
+    ^{:line 23 :tag error} err))
+
+
+
+
+(go/type dataFormat "Data format, other than byte order. This affects the handling of\ncertain field formats.\n" (interface
+
+    (^{:doc "DWARF version number. Zero means unknown.\n"} version ^int [])
+
+
+    (^{:doc "64-bit DWARF format?\n"} dwarf64 [] :results [^bool dwarf64 ^bool isKnown])
+
+
+    (^{:doc "Size of an address, in bytes. Zero means unknown.\n"} addrsize ^int [])))
+
+
+
+(go/type unknownFormat "Some parts of DWARF have no data format, e.g., abbrevs.\n" (struct))
+
+^{:go/breaks [3] :go/end 44} (go/method version ^int [^unknownFormat u]
+  0)
+
+
+^{:go/end 48} (go/method dwarf64 [^unknownFormat u] :results [bool bool]
+  (return false false))
+
+
+^{:go/breaks [3] :go/end 52} (go/method addrsize ^int [^unknownFormat u]
+  0)
+
+
+^{:go/end 56} (go/func makeBuf ^buf [^{:tag (* Data)} d ^dataFormat format ^string name ^Offset off ^{:tag (slice byte)} data]
+  (lit buf d (.-order d) format name off data nil))
+
+
+^{:go/end 67} (go/method uint8 ^uint8 [^{:tag (* buf)} b]
+  (when (< (len (.-data b)) 1)
+    (.error b "underflow")
+    (return 0))
+
+  (let [val (aget (.-data b) 0)]
+    (set! (.-data b) (subslice (.-data b) 1))
+    (inc! (.-off b))
+    ^{:line 66} val))
+
+
+^{:go/end 78} (go/method bytes ^{:tag (slice byte)} [^{:tag (* buf)} b ^int n]
+  (when (or (< n 0) (< (len (.-data b)) n))
+    (.error b "underflow")
+    (return nil))
+
+  (let [data (subslice (.-data b) 0 n)]
+    (set! (.-data b) (subslice (.-data b) n))
+    (set! (.-off b) + (conv Offset n))
+    ^{:line 77} data))
+
+
+^{:go/end 80} (go/method skip [^{:tag (* buf)} b ^int n] (.bytes b n))
+
+^{:go/end 93} (go/method string ^string [^{:tag (* buf)} b]
+  (let [i (bytes/IndexByte (.-data b) 0)]
+    (when (< i 0)
+      (.error b "underflow")
+      (return ""))
+
+
+    (let [s (conv string (subslice (.-data b) 0 i))]
+      (set! (.-data b) (subslice (.-data b) (+ i 1)))
+      (set! (.-off b) + (conv Offset (+ i 1)))
+      ^{:line 92} s)))
+
+
+^{:go/end 101} (go/method uint16 ^uint16 [^{:tag (* buf)} b]
+  (let [a (.bytes b 2)]
+    (when (== a nil)
+      (return 0))
+
+    (.Uint16 (.-order b) a)))
+
+
+^{:go/end 113} (go/method uint24 ^uint32 [^{:tag (* buf)} b]
+  (let [a (.bytes b 3)]
+    (when (== a nil)
+      (return 0))
+
+    (if (.-bigEndian (.-dwarf b))
+      (return (bit-or (conv uint32 (aget a 2)) (<< (conv uint32 (aget a 1)) 8) (<< (conv uint32 (aget a 0)) 16)))
+
+      (return (bit-or (conv uint32 (aget a 0)) (<< (conv uint32 (aget a 1)) 8) (<< (conv uint32 (aget a 2)) 16))))))
+
+
+
+^{:go/end 121} (go/method uint32 ^uint32 [^{:tag (* buf)} b]
+  (let [a (.bytes b 4)]
+    (when (== a nil)
+      (return 0))
+
+    (.Uint32 (.-order b) a)))
+
+
+^{:go/end 129} (go/method uint64 ^uint64 [^{:tag (* buf)} b]
+  (let [a (.bytes b 8)]
+    (when (== a nil)
+      (return 0))
+
+    (.Uint64 (.-order b) a)))
+
+
+
+
+^{:go/end 145} (go/method varint "Read a varint, which is 7 bits per byte, little endian.\nthe 0x80 bit means read another byte.\n" [^{:tag (* buf)} b] :results [^uint64 c ^uint bits]
+  (for [i 0] (< i (len (.-data b))) (inc! i)
+    (let [byte (aget (.-data b) i)]
+      (set! c bit-or (<< (conv uint64 (bit-and byte 0x7F)) bits))
+      (set! bits + 7)
+      (when (== (bit-and byte 0x80) 0)
+        (set! (.-off b) + (conv Offset (+ i 1)))
+        (set! (.-data b) (subslice (.-data b) (+ i 1)))
+        (return c bits))))
+
+
+  (return 0 0))
+
+
+
+^{:go/end 154} (go/method uint "Unsigned int is just a varint.\n" ^uint64 [^{:tag (* buf)} b]
+  (let [(values x bits) (.varint b)]
+    (when (== bits 0)
+      (.error b "underflow"))
+
+    ^{:line 153} x))
+
+
+
+^{:go/end 167} (go/method int "Signed int is a sign-extended varint.\n" ^int64 [^{:tag (* buf)} b]
+  (let [(values ux bits) (.varint b)
+      ^{:line 159} x (conv int64 ux)]
+    (when (!= (bit-and x ^int64 (<< 1 (- bits 1))) 0)
+      (set! x bit-or ^int64 (<< -1 bits)))
+
+    (when (== bits 0)
+      (.error b "underflow"))
+
+    ^{:line 166} x))
+
+
+
+^{:go/breaks [6] :go/end 183} (go/method addr "Address-sized uint.\n" ^uint64 [^{:tag (* buf)} b]
+  (switch (.addrsize (.-format b))
+    (case [1]
+      (return (conv uint64 (.uint8 b))))
+    (case [2]
+      (return (conv uint64 (.uint16 b))))
+    (case [4]
+      (return (conv uint64 (.uint32 b))))
+    (case [8]
+      (return (.uint64 b))))
+
+  (.error b "unknown address size")
+  0)
+
+
+^{:go/end 194} (go/method unitLength [^{:tag (* buf)} b] :results [^Offset length ^bool dwarf64]
+  (set! length (conv Offset (.uint32 b)))
+  (cond (== length 0xffffffff) (do
+      (set! dwarf64 true)
+      (set! length (conv Offset (.uint64 b))))
+    (>= length 0xfffffff0)
+    (.error b "unit length has reserved value"))
+
+  (return))
+
+
+^{:go/end 201} (go/method error [^{:tag (* buf)} b ^string s]
+  (when (== (.-err b) nil)
+    (set! (.-data b) nil)
+    (set! (.-err b) (lit DecodeError (.-name b) (.-off b) s))))
+
+
+
+(go/type DecodeError (struct
+    ^{:line 204 :tag string} Name
+    ^{:line 205 :tag Offset} Offset
+    ^{:line 206 :tag string} Err))
+
+
+^{:go/end 211} (go/method Error ^string [^DecodeError e]
+  (+ "decoding dwarf section " (.-Name e) " at offset 0x" (strconv/FormatInt (conv int64 (.-Offset e)) 16) ": " (.-Err e)))

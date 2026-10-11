@@ -1,0 +1,720 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Runtime type representation.
+
+(in-ns 'go.runtime) (go/file "type.go" :imports [
+
+
+    ^{:line 10} [abi "internal/abi"]
+    ^{:line 11} [goarch "internal/goarch"]
+    ^{:line 12} [atomic "internal/runtime/atomic"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+
+^{:go/end 19} (go/func ^{:go/linkname "maps_typeString internal/runtime/maps.typeString"} maps_typeString ^string [^{:tag (* abi/Type)} typ]
+  (.string (toRType typ)))
+
+
+(go/type ^:alias nameOff abi/NameOff)
+(go/type ^:alias typeOff abi/TypeOff)
+(go/type ^:alias textOff abi/TextOff)
+
+(go/type ^:alias _type abi/Type)
+
+
+(go/type rtype "rtype is a wrapper that allows us to define additional methods.\n" (struct
+    (* abi/Type))) ; embedding is okay here (unlike reflect) because none of this is public
+
+
+^{:go/end 38} (go/method string ^string [^rtype t]
+  (let [s (.Name (.nameOff t ^{:go/via [Type]} (.-Str t)))]
+    (when (!= (bit-and ^{:go/via [Type]} (.-TFlag t) abi/TFlagExtraStar) 0)
+      (return (subslice s 1)))
+
+    ^{:line 37} s))
+
+
+^{:go/end 42} (go/method uncommon ^{:tag (* uncommontype)} [^rtype t]
+  ^{:go/via [Type]} (.Uncommon t))
+
+
+^{:go/end 61} (go/method name ^string [^rtype t]
+  (when (== (bit-and ^{:go/via [Type]} (.-TFlag t) abi/TFlagNamed) 0)
+    (return ""))
+
+  (let [s (.string t)
+      ^{:line 49} i (- (len s) 1)
+      ^{:line 50} sqBrackets 0]
+    (while (and (>= i 0) ^:go/paren (or (!= (aget s i) \.) (!= sqBrackets 0)))
+      (switch (aget s i)
+        (case [\]]
+          (inc! sqBrackets))
+        (case [\[]
+          (dec! sqBrackets)))
+
+      (dec! i))
+
+    (subslice s (+ i 1))))
+
+
+
+
+
+
+^{:go/breaks [[6 79]] :go/end 80} (go/method pkgpath "pkgpath returns the path of the package where t was defined, if\navailable. This is not the same as the reflect package's PkgPath\nmethod, in that it returns the package path for struct and interface\ntypes, not just named types.\n" ^string [^rtype t]
+  (when [u (.uncommon t)] (!= u nil)
+    (return (.Name (.nameOff t (.-PkgPath u)))))
+
+  (switch ^{:go/via [Type]} (.Kind t)
+    (case [abi/Struct]
+      (let [st (conv (* structtype) (conv unsafe/Pointer (.-Type t)))]
+        (return (.Name (.-PkgPath st)))))
+    (case [abi/Interface]
+      (let [it (conv (* interfacetype) (conv unsafe/Pointer (.-Type t)))]
+        (return (.Name (.-PkgPath it))))))
+
+  "")
+
+
+
+
+
+
+
+^{:go/end 93} (go/func ^:go/nosplit getGCMask "getGCMask returns the pointer/nonpointer bitmask for type t.\n\nnosplit because it is used during write barriers and must not be preempted.\n" ^{:tag (* byte)} [^{:tag (* _type)} t]
+  (when (!= (bit-and (.-TFlag t) abi/TFlagGCMaskOnDemand) 0)
+    ;; Split the rest into getGCMaskOnDemand so getGCMask itself is inlineable.
+    (return (getGCMaskOnDemand t)))
+
+  (.-GCData t))
+
+
+
+
+(go/var ^{:tag byte :doc "inProgress is a byte whose address is a sentinel indicating that\nsome thread is currently building the GC bitmask for a type.\n"} inProgress)
+
+
+
+
+^{:go/end 144} (go/func ^:go/nosplit getGCMaskOnDemand "nosplit because it is used during write barriers and must not be preempted.\n" ^{:tag (* byte)} [^{:tag (* _type)} t]
+  ;; For large types, GCData doesn't point directly to a bitmask.
+  ;; Instead it points to a pointer to a bitmask, and the runtime
+  ;; is responsible for (on first use) creating the bitmask and
+  ;; storing a pointer to it in that slot.
+  ;; TODO: we could use &t.GCData as the slot, but types are
+  ;; in read-only memory currently.
+  (let [addr (conv unsafe/Pointer (.-GCData t))]
+
+    (when (== GOOS "aix")
+      (set! addr (add addr (- (.-data firstmoduledata) aixStaticDataBase))))
+
+
+    (while true
+      (let [p (conv (* byte) (atomic/Loadp addr))]
+        (switch p
+          (default ; Already built.
+            (return p))
+          (case [(addr inProgress)] ; Someone else is currently building it.
+            ;; Just wait until the builder is done.
+            ;; We can't block here, so spinning while having
+            ;; the OS thread yield is about the best we can do.
+            (osyield)
+            (continue))
+          (case [nil] ; Not built yet.
+            ;; Attempt to get exclusive access to build it.
+            (when (not (atomic/Casp1 (conv (* unsafe/Pointer) addr) nil (conv unsafe/Pointer (addr inProgress))))
+              (continue))
+
+
+            ;; Build gcmask for this type.
+            (let [bytes (* goarch/PtrSize (divRoundUp (/ (.-PtrBytes t) goarch/PtrSize) (* 8 goarch/PtrSize)))]
+              (set! p (conv (* byte) (persistentalloc bytes goarch/PtrSize (addr (.-other_sys memstats)))))
+              (systemstack ^{:go/end 137} (fn []
+                  (buildGCMask t (lit bitCursor :ptr p :n 0))))
+
+
+              ;; Store the newly-built gcmask for future callers.
+              (atomic/StorepNoWB addr (conv unsafe/Pointer p))
+              (return p))))))))
+
+
+
+
+
+
+(go/type bitCursor "A bitCursor is a simple cursor to memory to which we\ncan write a set of bits.\n" (struct
+    ^{:line 149 :tag (* byte)} ptr ; base of region
+    ^{:line 150 :tag uintptr} n)) ; cursor points to bit n of region
+
+
+
+
+^{:go/end 190} (go/method write "Write to b cnt bits starting at bit 0 of data.\nRequires cnt>0.\n" [^bitCursor b ^{:tag (* byte)} data ^uintptr cnt]
+  ;; Starting byte for writing.
+  (let [p (addb (.-ptr b) (/ (.-n b) 8))
+
+      ;; Note: if we're starting halfway through a byte, we load the
+      ;; existing lower bits so we don't clobber them.
+      ^{:line 161} n (% (.-n b) 8) ; # of valid bits in buf
+      ^{:line 162} buf (bit-and (conv uintptr @p) (- ^uintptr (<< 1 n) 1))] ; buffered bits to start
+
+    ;; Work 8 bits at a time.
+    (while (> cnt 8)
+      ;; Read 8 more bits, now buf has 8-15 valid bits in it.
+      (set! buf bit-or (<< (conv uintptr @data) n))
+      (set! n + 8)
+      (set! data (addb data 1))
+      (set! cnt - 8)
+      ;; Write 8 of the buffered bits out.
+      (set! @p (conv byte buf))
+      (set! buf >> 8)
+      (set! n - 8)
+      (set! p (addb p 1)))
+
+    ;; Read remaining bits.
+    (set! buf bit-or (<< (bit-and (conv uintptr @data) (- ^uintptr (<< 1 cnt) 1)) n))
+    (set! n + cnt)
+
+    ;; Flush remaining bits.
+    (when (> n 8)
+      (set! @p (conv byte buf))
+      (set! buf >> 8)
+      (set! n - 8)
+      (set! p (addb p 1)))
+
+    (set! @p bit-and-not (- ^byte (<< 1 n) 1))
+    (set! @p bit-or (conv byte buf))))
+
+
+^{:go/end 194} (go/method offset ^bitCursor [^bitCursor b ^uintptr cnt]
+  (lit bitCursor :ptr (.-ptr b) :n (+ (.-n b) cnt)))
+
+
+
+
+^{:go/end 258} (go/func buildGCMask "buildGCMask writes the ptr/nonptr bitmap for t to dst.\nt must have a pointer.\n" [^{:tag (* _type)} t ^bitCursor dst]
+  ;; Note: we want to avoid a situation where buildGCMask gets into a
+  ;; very deep recursion, because M stacks are fixed size and pretty small
+  ;; (16KB). We do that by ensuring that any recursive
+  ;; call operates on a type at most half the size of its parent.
+  ;; Thus, the recursive chain can be at most 64 calls deep (on a
+  ;; 64-bit machine).
+  ;; Recursion is avoided by using a "tail call" (jumping to the
+  ;; "top" label) for any recursive call with a large subtype.
+  (label :top
+    (when (== (.-PtrBytes t) 0)
+      (throw "pointerless type")))
+
+  (when (== (bit-and (.-TFlag t) abi/TFlagGCMaskOnDemand) 0)
+    ;; copy t.GCData to dst
+    (.write dst (.-GCData t) (/ (.-PtrBytes t) goarch/PtrSize))
+    (return))
+
+  ;; The above case should handle all kinds except
+  ;; possibly arrays and structs.
+  (switch (.Kind t)
+    (case [abi/Array]
+      (let [a (.ArrayType t)]
+        (when (== (.-Len a) 1)
+          ;; Avoid recursive call for element type that
+          ;; isn't smaller than the parent type.
+          (set! t (.-Elem a))
+          (goto :top))
+
+        (let [e (.-Elem a)]
+          (for [i (conv uintptr 0)] (< i (.-Len a)) (inc! i)
+            (buildGCMask e dst)
+            (set! dst (.offset dst (/ (.-Size_ e) goarch/PtrSize)))))))
+
+    (case [abi/Struct]
+      (let [s (.StructType t)
+          ^{:line 234 :tag abi/StructField} bigField (zero abi/StructField)]
+        (range [_ f (.-Fields s)]
+          (let [ft (.-Typ f)]
+            (when (not (.Pointers ft))
+              (continue))
+
+            (when (> (.-Size_ ft) (/ (.-Size_ t) 2))
+              ;; Avoid recursive call for field type that
+              ;; is larger than half of the parent type.
+              ;; There can be only one.
+              (set! bigField f)
+              (continue))
+
+            (buildGCMask ft (.offset dst (/ (.-Offset f) goarch/PtrSize)))))
+
+        (when (!= (.-Typ bigField) nil)
+          ;; Note: this case causes bits to be written out of order.
+          (set! t (.-Typ bigField))
+          (set! dst (.offset dst (/ (.-Offset bigField) goarch/PtrSize)))
+          (goto :top))))
+
+    (default
+      (throw "unexpected kind"))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag (struct ^mutex lock ^int32 next ^{:tag (map int32 unsafe/Pointer)} m ^{:tag (map unsafe/Pointer int32)} minv) :doc "reflectOffs holds type offsets defined at run time by the reflect package.\n\nWhen a type is defined at run time, its *rtype data lives on the heap.\nThere are a wide range of possible addresses the heap may use, that\nmay not be representable as a 32-bit offset. Moreover the GC may\none day start moving heap memory, in which case there is no stable\noffset that can be defined.\n\nTo provide stable offsets, we add pin *rtype objects in a global map\nand treat the offset as an identifier. We use negative offsets that\ndo not overlap with any compile-time module offsets.\n\nEntries are created by reflect.addReflectOff.\n"} reflectOffs)
+
+
+
+
+
+
+^{:go/end 285} (go/func reflectOffsLock []
+  (lock (addr (.-lock reflectOffs)))
+  (when raceenabled
+    (raceacquire (conv unsafe/Pointer (addr (.-lock reflectOffs))))))
+
+
+
+^{:go/end 292} (go/func reflectOffsUnlock []
+  (when raceenabled
+    (racerelease (conv unsafe/Pointer (addr (.-lock reflectOffs)))))
+
+  (unlock (addr (.-lock reflectOffs))))
+
+
+^{:go/end 322} (go/func resolveNameOff ^name [^unsafe/Pointer ptrInModule ^nameOff off]
+  (when (== off 0)
+    (return (lit name)))
+
+  (let [base (conv uintptr ptrInModule)]
+    (for [md (addr firstmoduledata)] (!= md nil) (set! md (.-next md))
+      (when (and (>= base (.-types md)) (< base (.-etypes md)))
+        (let [res (+ (.-types md) (conv uintptr off))]
+          (when (> res (.-etypes md))
+            (println "runtime: nameOff" (conv hex off) "out of range" (conv hex (.-types md)) "-" (conv hex (.-etypes md)))
+            (throw "runtime: name offset out of range"))
+
+          (return (lit name :Bytes (conv (* byte) (conv unsafe/Pointer res)))))))
+
+
+
+    ;; No module found. see if it is a run time name.
+    (reflectOffsLock)
+    (let [(values res found) (aget (.-m reflectOffs) (conv int32 off))]
+      (reflectOffsUnlock)
+      (when (not found)
+        (println "runtime: nameOff" (conv hex off) "base" (conv hex base) "not in ranges:")
+        (for [next (addr firstmoduledata)] (!= next nil) (set! next (.-next next))
+          (println "\ttypes" (conv hex (.-types next)) "etypes" (conv hex (.-etypes next))))
+
+        (throw "runtime: name offset base pointer out of range"))
+
+      (lit name :Bytes (conv (* byte) res)))))
+
+
+^{:go/end 326} (go/method nameOff ^name [^rtype t ^nameOff off]
+  (resolveNameOff (conv unsafe/Pointer (.-Type t)) off))
+
+
+^{:go/end 365} (go/func resolveTypeOff ^{:tag (* _type)} [^unsafe/Pointer ptrInModule ^typeOff off]
+  (when (or (== off 0) (== off -1))
+    ;; -1 is the sentinel value for unreachable code.
+    ;; See cmd/link/internal/ld/data.go:relocsym.
+    (return nil))
+
+  (let [base (conv uintptr ptrInModule)
+      ^{:line 335 :tag (* moduledata)} md (zero (* moduledata))]
+    (for [next (addr firstmoduledata)] (!= next nil) (set! next (.-next next))
+      (when (and (>= base (.-types next)) (< base (.-etypes next)))
+        (set! md next)
+        (break)))
+
+
+    (when (== md nil)
+      (reflectOffsLock)
+      (let [res (aget (.-m reflectOffs) (conv int32 off))]
+        (reflectOffsUnlock)
+        (when (== res nil)
+          (println "runtime: typeOff" (conv hex off) "base" (conv hex base) "not in ranges:")
+          (for [next (addr firstmoduledata)] (!= next nil) (set! next (.-next next))
+            (println "\ttypes" (conv hex (.-types next)) "etypes" (conv hex (.-etypes next))))
+
+          (throw "runtime: type offset base pointer out of range"))
+
+        (return (conv (* _type) res))))
+
+    (let [res (+ (.-types md) (conv uintptr off))
+        ^{:line 356} resType (conv (* _type) (conv unsafe/Pointer res))]
+      (when [t (aget (.-typemap md) resType)] (!= t nil)
+        (return t))
+
+      (when (> res (.-etypes md))
+        (println "runtime: typeOff" (conv hex off) "out of range" (conv hex (.-types md)) "-" (conv hex (.-etypes md)))
+        (throw "runtime: type offset out of range"))
+
+      ^{:line 364} resType)))
+
+
+^{:go/end 369} (go/method typeOff ^{:tag (* _type)} [^rtype t ^typeOff off]
+  (resolveTypeOff (conv unsafe/Pointer (.-Type t)) off))
+
+
+^{:go/end 400} (go/method textOff ^unsafe/Pointer [^rtype t ^textOff off]
+  (when (== off -1)
+    ;; -1 is the sentinel value for unreachable code.
+    ;; See cmd/link/internal/ld/data.go:relocsym.
+    (return (conv unsafe/Pointer (abi/FuncPCABIInternal unreachableMethod))))
+
+  (let [base (conv uintptr (conv unsafe/Pointer (.-Type t)))
+      ^{:line 378 :tag (* moduledata)} md (zero (* moduledata))]
+    (for [next (addr firstmoduledata)] (!= next nil) (set! next (.-next next))
+      (when (and (>= base (.-types next)) (< base (.-etypes next)))
+        (set! md next)
+        (break)))
+
+
+    (when (== md nil)
+      (reflectOffsLock)
+      (let [res (aget (.-m reflectOffs) (conv int32 off))]
+        (reflectOffsUnlock)
+        (when (== res nil)
+          (println "runtime: textOff" (conv hex off) "base" (conv hex base) "not in ranges:")
+          (for [next (addr firstmoduledata)] (!= next nil) (set! next (.-next next))
+            (println "\ttypes" (conv hex (.-types next)) "etypes" (conv hex (.-etypes next))))
+
+          (throw "runtime: text offset base pointer out of range"))
+
+        (return res)))
+
+    (let [res (.textAddr md (conv uint32 off))]
+      (conv unsafe/Pointer res))))
+
+
+(go/type ^:alias uncommontype abi/UncommonType)
+
+(go/type ^:alias interfacetype abi/InterfaceType)
+
+(go/type ^:alias arraytype abi/ArrayType)
+
+(go/type ^:alias chantype abi/ChanType)
+
+(go/type ^:alias slicetype abi/SliceType)
+
+(go/type ^:alias functype abi/FuncType)
+
+(go/type ^:alias ptrtype abi/PtrType)
+
+(go/type ^:alias name abi/Name)
+
+(go/type ^:alias structtype abi/StructType)
+
+^{:go/end 434} (go/func pkgPath ^string [^name n]
+  (when (or (== (.-Bytes n) nil) (== (bit-and @(.Data n 0) (<< 1 2)) 0))
+    (return ""))
+
+  (let [(values i l) (.ReadVarint n 1)
+      ^{:line 425} off (+ 1 i l)]
+    (when (!= (bit-and @(.Data n 0) (<< 1 1)) 0)
+      (let [(values i2 l2) (.ReadVarint n off)]
+        (set! off + (+ i2 l2))))
+
+    (let [^nameOff nameOff (zero nameOff)]
+      (copy (subslice (conv (* (array 4 byte)) (conv unsafe/Pointer (addr nameOff)))) (subslice (conv (* (array 4 byte)) (conv unsafe/Pointer (.Data n off)))))
+      (let [pkgPathName (resolveNameOff (conv unsafe/Pointer (.-Bytes n)) nameOff)]
+        (.Name pkgPathName)))))
+
+
+
+
+^{:go/end 492} (go/func typelinksinit "typelinksinit scans the types from extra modules and builds the\nmoduledata typemap used to de-duplicate type pointers.\n" []
+  (lockInit (addr moduleToTypelinksLock) lockRankTypelinks)
+
+  (when (== (.-next firstmoduledata) nil)
+    (return))
+
+
+  (let [modules (activeModules)
+      ^{:line 446} prev (aget modules 0)
+      ^{:line 447} prevTypelinks (moduleTypelinks (aget modules 0))
+      ^{:line 448} typehash (make (map uint32 (slice (* _type))) (len prevTypelinks))]
+    (range [_ md (subslice modules 1)]
+      ;; Collect types from the previous module into typehash.
+      (label :collect
+        (range [_ tl prevTypelinks]
+          (let [t tl]
+            (when (!= (.-typemap prev) nil)
+              (set! t (aget (.-typemap prev) tl)))
+
+            ;; Add to typehash if not seen before.
+            (let [tlist (aget typehash (.-Hash t))]
+              (range [_ tcur tlist]
+                (when (== tcur t)
+                  (continue :collect)))
+
+
+              (aset typehash (.-Hash t) (append tlist t))))))
+
+
+      (let [mdTypelinks (moduleTypelinks md)]
+
+        (when (== (.-typemap md) nil)
+          ;; If any of this module's typelinks match a type from a
+          ;; prior module, prefer that prior type by adding the offset
+          ;; to this module's typemap.
+          (let [tm (make (map (* _type) (* _type)) (len mdTypelinks))]
+            (set! pinnedTypemaps (append pinnedTypemaps tm))
+            (set! (.-typemap md) tm)
+            (range [_ t mdTypelinks]
+              (let [set t]
+                (range [_ candidate (aget typehash (.-Hash t))]
+                  (let [seen (lit (map _typePair (struct)))]
+                    (when (typesEqual t candidate seen)
+                      (set! set candidate)
+                      (break))))
+
+
+                (aset (.-typemap md) t set)))))
+
+
+
+        (set! prev md)
+        (set! prevTypelinks mdTypelinks)))))
+
+
+
+
+
+(go/var "moduleToTypelinks maps from moduledata to typelinks.\nWe build this lazily as needed, since most programs do not need it.\n"
+  ^{:line 497} [^{:tag (map (* moduledata) (slice (* _type)))} moduleToTypelinks]
+  ^{:line 498} [^mutex moduleToTypelinksLock])
+
+
+
+
+
+
+
+
+
+^{:go/end 557} (go/func moduleTypelinks "moduleTypelinks takes a moduledata and returns the type\ndescriptors that the reflect package needs to know about.\nThese are the typelinks. They are the types that the user\ncan construct. This is used to ensure that we use a unique\ntype descriptor for all types. The returned types are sorted\nby type string; the sorting is done by the linker.\nThis slice is constructed as needed.\n" ^{:tag (slice (* _type))} [^{:tag (* moduledata)} md]
+  (lock (addr moduleToTypelinksLock))
+  (when raceenabled
+    (raceacquire (conv unsafe/Pointer (addr moduleToTypelinksLock))))
+
+
+  (when [(values typelinks ok) (aget moduleToTypelinks md)] ok
+    (when raceenabled
+      (racerelease (conv unsafe/Pointer (addr moduleToTypelinksLock))))
+
+    (unlock (addr moduleToTypelinksLock))
+    (return typelinks))
+
+
+  ;; Allocate a very rough estimate of the number of types.
+  (let [ret (make (slice (* _type)) 0 (/ (.-typedesclen md) (* 2 (unsafe/Sizeof (lit _type)))))
+
+      ^{:line 525} td (.-types md)]
+
+    ;; We have to increment by the pointer size to match the
+    ;; increment in cmd/link/internal/data.go createRelroSect
+    ;; in allocateDataSections.
+    ;;
+    ;; The linker doesn't do that increment when runtime.types
+    ;; has a non-zero size, but in that case the runtime.types
+    ;; symbol itself pushes the other symbols forward.
+    ;; So either way this increment is correct.
+    (set! td + goarch/PtrSize)
+
+    (let [etypedesc (+ (.-types md) (.-typedesclen md))]
+      (while (< td etypedesc)
+        (set! td (alignUp td goarch/PtrSize))
+
+        (let [typ (conv (* _type) (conv unsafe/Pointer td))]
+          (set! ret (append ret typ))
+
+          (set! td + (conv uintptr (.DescriptorSize typ)))))
+
+
+      (when (== moduleToTypelinks nil)
+        (set! moduleToTypelinks (make (map (* moduledata) (slice (* _type))))))
+
+      (aset moduleToTypelinks md ret)
+
+      (when raceenabled
+        (racerelease (conv unsafe/Pointer (addr moduleToTypelinksLock))))
+
+      (unlock (addr moduleToTypelinksLock))
+      ^{:line 556} ret)))
+
+
+(go/type _typePair (struct
+    ^{:line 560 :tag (* _type)} t1
+    ^{:line 561 :tag (* _type)} t2))
+
+
+^{:go/end 566} (go/func toRType ^rtype [^{:tag (* abi/Type)} t]
+  (lit rtype t))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 722} (go/func typesEqual "typesEqual reports whether two types are equal.\n\nEverywhere in the runtime and reflect packages, it is assumed that\nthere is exactly one *_type per Go type, so that pointer equality\ncan be used to test if types are equal. There is one place that\nbreaks this assumption: buildmode=shared. In this case a type can\nappear as two different pieces of memory. This is hidden from the\nruntime and reflect package by the per-module typemap built in\ntypelinksinit. It uses typesEqual to map types from later modules\nback into earlier ones.\n\nOnly typelinksinit needs this function.\n" ^bool [^{:tag (* _type)} t ^{:tag (* _type)} v ^{:tag (map _typePair (struct))} seen]
+  (let [tp (lit _typePair t v)]
+    (when [(values _ ok) (aget seen tp)] ok
+      (return true))
+
+
+    ;; mark these types as seen, and thus equivalent which prevents an infinite loop if
+    ;; the two types are identical, but recursively defined and loaded from
+    ;; different modules
+    (aset seen tp (lit (struct)))
+
+    (when (== t v)
+      (return true))
+
+    (let [kind (.Kind t)]
+      (when (!= kind (.Kind v))
+        (return false))
+
+      (let [(values rt rv) (values (toRType t) (toRType v))]
+        (when (!= (.string rt) (.string rv))
+          (return false))
+
+        (let [ut (.Uncommon t)
+            ^{:line 603} uv (.Uncommon v)]
+          (when (or (!= ut nil) (!= uv nil))
+            (when (or (== ut nil) (== uv nil))
+              (return false))
+
+            (let [pkgpatht (.Name (.nameOff rt (.-PkgPath ut)))
+                ^{:line 609} pkgpathv (.Name (.nameOff rv (.-PkgPath uv)))]
+              (when (!= pkgpatht pkgpathv)
+                (return false))))
+
+
+          (when (and (<= abi/Bool kind) (<= kind abi/Complex128))
+            (return true))
+
+          (switch kind
+            (case [abi/String abi/UnsafePointer]
+              (return true))
+            (case [abi/Array]
+              (let [at (conv (* arraytype) (conv unsafe/Pointer t))
+                  ^{:line 622} av (conv (* arraytype) (conv unsafe/Pointer v))]
+                (return (and (typesEqual (.-Elem at) (.-Elem av) seen) (== (.-Len at) (.-Len av))))))
+            (case [abi/Chan]
+              (let [ct (conv (* chantype) (conv unsafe/Pointer t))
+                  ^{:line 626} cv (conv (* chantype) (conv unsafe/Pointer v))]
+                (return (and (== (.-Dir ct) (.-Dir cv)) (typesEqual (.-Elem ct) (.-Elem cv) seen)))))
+            (case [abi/Func]
+              (let [ft (conv (* functype) (conv unsafe/Pointer t))
+                  ^{:line 630} fv (conv (* functype) (conv unsafe/Pointer v))]
+                (when (or (!= (.-OutCount ft) (.-OutCount fv)) (!= (.-InCount ft) (.-InCount fv)))
+                  (return false))
+
+                (let [(values tin vin) (values (.InSlice ft) (.InSlice fv))]
+                  (for [i 0] (< i (len tin)) (inc! i)
+                    (when (not (typesEqual (aget tin i) (aget vin i) seen))
+                      (return false)))
+
+
+                  (let [(values tout vout) (values (.OutSlice ft) (.OutSlice fv))]
+                    (for [i 0] (< i (len tout)) (inc! i)
+                      (when (not (typesEqual (aget tout i) (aget vout i) seen))
+                        (return false)))
+
+
+                    (return true)))))
+            (case [abi/Interface]
+              (let [it (conv (* interfacetype) (conv unsafe/Pointer t))
+                  ^{:line 649} iv (conv (* interfacetype) (conv unsafe/Pointer v))]
+                (when (!= (.Name (.-PkgPath it)) (.Name (.-PkgPath iv)))
+                  (return false))
+
+                (when (!= (len (.-Methods it)) (len (.-Methods iv)))
+                  (return false))
+
+                (range [i (.-Methods it)]
+                  (let [tm (addr (aget (.-Methods it) i))
+                      ^{:line 658} vm (addr (aget (.-Methods iv) i))
+                      ;; Note the mhdr array can be relocated from
+                      ;; another module. See #17724.
+                      ^{:line 661} tname (resolveNameOff (conv unsafe/Pointer tm) (.-Name tm))
+                      ^{:line 662} vname (resolveNameOff (conv unsafe/Pointer vm) (.-Name vm))]
+                    (when (!= (.Name tname) (.Name vname))
+                      (return false))
+
+                    (when (!= (pkgPath tname) (pkgPath vname))
+                      (return false))
+
+                    (let [tityp (resolveTypeOff (conv unsafe/Pointer tm) (.-Typ tm))
+                        ^{:line 670} vityp (resolveTypeOff (conv unsafe/Pointer vm) (.-Typ vm))]
+                      (when (not (typesEqual tityp vityp seen))
+                        (return false)))))
+
+
+                (return true)))
+            (case [abi/Map]
+              (let [mt (conv (* abi/MapType) (conv unsafe/Pointer t))
+                  ^{:line 678} mv (conv (* abi/MapType) (conv unsafe/Pointer v))]
+                (return (and (typesEqual (.-Key mt) (.-Key mv) seen) (typesEqual (.-Elem mt) (.-Elem mv) seen)))))
+            (case [abi/Pointer]
+              (let [pt (conv (* ptrtype) (conv unsafe/Pointer t))
+                  ^{:line 682} pv (conv (* ptrtype) (conv unsafe/Pointer v))]
+                (return (typesEqual (.-Elem pt) (.-Elem pv) seen))))
+            (case [abi/Slice]
+              (let [st (conv (* slicetype) (conv unsafe/Pointer t))
+                  ^{:line 686} sv (conv (* slicetype) (conv unsafe/Pointer v))]
+                (return (typesEqual (.-Elem st) (.-Elem sv) seen))))
+            (case [abi/Struct]
+              (let [st (conv (* structtype) (conv unsafe/Pointer t))
+                  ^{:line 690} sv (conv (* structtype) (conv unsafe/Pointer v))]
+                (when (!= (len (.-Fields st)) (len (.-Fields sv)))
+                  (return false))
+
+                (when (!= (.Name (.-PkgPath st)) (.Name (.-PkgPath sv)))
+                  (return false))
+
+                (range [i (.-Fields st)]
+                  (let [tf (addr (aget (.-Fields st) i))
+                      ^{:line 699} vf (addr (aget (.-Fields sv) i))]
+                    (when (!= (.Name (.-Name tf)) (.Name (.-Name vf)))
+                      (return false))
+
+                    (when (not (typesEqual (.-Typ tf) (.-Typ vf) seen))
+                      (return false))
+
+                    (when (!= (.Tag (.-Name tf)) (.Tag (.-Name vf)))
+                      (return false))
+
+                    (when (!= (.-Offset tf) (.-Offset vf))
+                      (return false))
+
+                    (when (!= (.IsEmbedded (.-Name tf)) (.IsEmbedded (.-Name vf)))
+                      (return false))))
+
+
+                (return true)))
+            (default
+              (println "runtime: impossible type kind" kind)
+              (throw "runtime: impossible type kind")
+              (return false))))))))

@@ -1,0 +1,199 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.debug.dwarf) (go/file "unit.go" :imports [
+
+
+    ^{:line 8} [sort "sort"]
+    ^{:line 9} [strconv "strconv"]])
+
+
+;; DWARF debug info is split into a sequence of compilation units.
+;; Each unit has its own abbreviation table and address size.
+
+(go/type unit (struct
+    ^{:line 16 :tag Offset} base ; byte offset of header within the aggregate info
+    ^{:line 17 :tag Offset} off ; byte offset of data within the aggregate info
+    ^{:line 18 :tag (slice byte)} data
+    ^{:line 19 :tag abbrevTable} atable
+    (* unit5) ; info specific to DWARF 5 units
+    ^{:line 21 :tag int} asize
+    ^{:line 22 :tag int} vers
+    ^{:line 23 :tag bool} is64 ; True for 64-bit DWARF format
+    ^{:line 24 :tag uint8} utype)) ; DWARF 5 unit type
+
+
+(go/type unit5 (struct
+    ^{:line 28 :tag uint64} addrBase
+    ^{:line 29 :tag uint64} strOffsetsBase
+    ^{:line 30 :tag uint64} rngListsBase
+    ^{:line 31 :tag uint64} locListsBase))
+
+
+;; Implement the dataFormat interface.
+
+^{:go/end 38} (go/method version ^int [^{:tag (* unit)} u]
+  (.-vers u))
+
+
+^{:go/end 42} (go/method dwarf64 [^{:tag (* unit)} u] :results [bool bool]
+  (return (.-is64 u) true))
+
+
+^{:go/end 46} (go/method addrsize ^int [^{:tag (* unit)} u]
+  (.-asize u))
+
+
+^{:go/breaks [[4 52]] :go/end 53} (go/method addrBase ^uint64 [^{:tag (* unit)} u]
+  (when (!= (.-unit5 u) nil)
+    (return (.-addrBase (.-unit5 u))))
+
+  0)
+
+
+^{:go/breaks [[4 59]] :go/end 60} (go/method strOffsetsBase ^uint64 [^{:tag (* unit)} u]
+  (when (!= (.-unit5 u) nil)
+    (return (.-strOffsetsBase (.-unit5 u))))
+
+  0)
+
+
+^{:go/breaks [[4 66]] :go/end 67} (go/method rngListsBase ^uint64 [^{:tag (* unit)} u]
+  (when (!= (.-unit5 u) nil)
+    (return (.-rngListsBase (.-unit5 u))))
+
+  0)
+
+
+^{:go/breaks [[4 73]] :go/end 74} (go/method locListsBase ^uint64 [^{:tag (* unit)} u]
+  (when (!= (.-unit5 u) nil)
+    (return (.-locListsBase (.-unit5 u))))
+
+  0)
+
+
+^{:go/end 156} (go/method parseUnits [^{:tag (* Data)} d] :results [(slice unit) error]
+  ;; Count units.
+  (let [nunit 0
+      ^{:line 79} b (makeBuf d (lit unknownFormat) "info" 0 (.-info d))]
+    (while (> (len (.-data b)) 0)
+      (let [(values len _) (.unitLength b)]
+        (when (!= len (conv Offset (conv uint32 len)))
+          (.error b "unit length overflow")
+          (break))
+
+        (.skip b (conv int len))
+        (when (> len 0)
+          (inc! nunit))))
+
+
+    (when (!= (.-err b) nil)
+      (return nil (.-err b)))
+
+
+    ;; Again, this time writing them down.
+    (set! b (makeBuf d (lit unknownFormat) "info" 0 (.-info d)))
+    (let [units (make (slice unit) nunit)]
+      (range [i units]
+        (let [u (addr (aget units i))]
+          (set! (.-base u) (.-off b))
+          (let [^Offset n (zero Offset)]
+            (when (!= (.-err b) nil)
+              (return nil (.-err b)))
+
+            (while (== n 0)
+              (set! (values n (.-is64 u)) (.unitLength b)))
+
+            (let [dataOff (.-off b)
+                ^{:line 109} vers (.uint16 b)]
+              (when (or (< vers 2) (> vers 5))
+                (.error b (+ "unsupported DWARF version " (strconv/Itoa (conv int vers))))
+                (break))
+
+              (set! (.-vers u) (conv int vers))
+              (when (>= vers 5)
+                (set! (.-utype u) (.uint8 b))
+                (set! (.-asize u) (conv int (.uint8 b))))
+
+              (let [^uint64 abbrevOff (zero uint64)]
+                (if (.-is64 u)
+                  (set! abbrevOff (.uint64 b))
+
+                  (set! abbrevOff (conv uint64 (.uint32 b))))
+
+                (let [(values atable err) (.parseAbbrev d abbrevOff (.-vers u))]
+                  (when (!= err nil)
+                    (when (== (.-err b) nil)
+                      (set! (.-err b) err))
+
+                    (break))
+
+                  (set! (.-atable u) atable)
+                  (when (< vers 5)
+                    (set! (.-asize u) (conv int (.uint8 b))))
+
+
+                  (switch (.-utype u)
+                    (case [utSkeleton utSplitCompile]
+                      (.uint64 b)) ; unit ID
+                    (case [utType utSplitType]
+                      (.uint64 b) ; type signature
+                      (if (.-is64 u) ; type offset
+                        (.uint64 b)
+
+                        (.uint32 b))))
+
+
+
+                  (set! (.-off u) (.-off b))
+                  (set! (.-data u) (.bytes b (conv int (- n (- (.-off b) dataOff)))))))))))
+
+      (when (!= (.-err b) nil)
+        (return nil (.-err b)))
+
+      (return units nil))))
+
+
+
+
+^{:go/end 173} (go/method offsetToUnit "offsetToUnit returns the index of the unit containing offset off.\nIt returns -1 if no unit contains this offset.\n" ^int [^{:tag (* Data)} d ^Offset off]
+  ;; Find the unit after off
+  (let [next (sort/Search (len (.-unit d)) ^{:go/end 164} (fn ^bool [^int i]
+          (> (.-off (aget (.-unit d) i)) off)))]
+
+    (when (== next 0)
+      (return -1))
+
+    ^{:go/breaks [[3 172]]} (let [u (addr (aget (.-unit d) (- next 1)))]
+      (when (and (<= (.-off u) off) (< off (+ (.-off u) (conv Offset (len (.-data u))))))
+        (return (- next 1)))
+
+      -1)))
+
+
+^{:go/end 200} (go/method collectDwarf5BaseOffsets ^error [^{:tag (* Data)} d ^{:tag (* unit)} u]
+  (when (== (.-unit5 u) nil)
+    (panic "expected unit5 to be set up already"))
+
+  ^{:go/breaks [[7 199]]} (let [b (makeBuf d u "info" (.-off u) (.-data u))
+      ^{:line 180} cu (.entry b nil u)]
+    (when (== cu nil)
+      ;; Unknown abbreviation table entry or some other fatal
+      ;; problem; bail early on the assumption that this will be
+      ;; detected at some later point.
+      (return (.-err b)))
+
+    (when [(values iAddrBase ok) (assert int64 (.Val cu AttrAddrBase))] ok
+      (set! (.-addrBase (.-unit5 u)) (conv uint64 iAddrBase)))
+
+    (when [(values iStrOffsetsBase ok) (assert int64 (.Val cu AttrStrOffsetsBase))] ok
+      (set! (.-strOffsetsBase (.-unit5 u)) (conv uint64 iStrOffsetsBase)))
+
+    (when [(values iRngListsBase ok) (assert int64 (.Val cu AttrRnglistsBase))] ok
+      (set! (.-rngListsBase (.-unit5 u)) (conv uint64 iRngListsBase)))
+
+    (when [(values iLocListsBase ok) (assert int64 (.Val cu AttrLoclistsBase))] ok
+      (set! (.-locListsBase (.-unit5 u)) (conv uint64 iLocListsBase)))
+
+    nil))

@@ -1,0 +1,2492 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Memory allocator.
+;;
+;; This was originally based on tcmalloc, but has diverged quite a bit.
+;; http://goog-perftools.sourceforge.net/doc/tcmalloc.html
+
+;; The main allocator works in runs of pages.
+;; Small allocation sizes (up to and including 32 kB) are
+;; rounded to one of about 70 size classes, each of which
+;; has its own free set of objects of exactly that size.
+;; Any free page of memory can be split into a set of objects
+;; of one size class, which are then managed using a free bitmap.
+;;
+;; The allocator's data structures are:
+;;
+;;	fixalloc: a free-list allocator for fixed-size off-heap objects,
+;;		used to manage storage used by the allocator.
+;;	mheap: the malloc heap, managed at page (8192-byte) granularity.
+;;	mspan: a run of in-use pages managed by the mheap.
+;;	mcentral: collects all spans of a given size class.
+;;	mcache: a per-P cache of mspans with free space.
+;;	mstats: allocation statistics.
+;;
+;; Allocating a small object proceeds up a hierarchy of caches:
+;;
+;;	1. Round the size up to one of the small size classes
+;;	   and look in the corresponding mspan in this P's mcache.
+;;	   Scan the mspan's free bitmap to find a free slot.
+;;	   If there is a free slot, allocate it.
+;;	   This can all be done without acquiring a lock.
+;;
+;;	2. If the mspan has no free slots, obtain a new mspan
+;;	   from the mcentral's list of mspans of the required size
+;;	   class that have free space.
+;;	   Obtaining a whole span amortizes the cost of locking
+;;	   the mcentral.
+;;
+;;	3. If the mcentral's mspan list is empty, obtain a run
+;;	   of pages from the mheap to use for the mspan.
+;;
+;;	4. If the mheap is empty or has no page runs large enough,
+;;	   allocate a new group of pages (at least 1MB) from the
+;;	   operating system. Allocating a large run of pages
+;;	   amortizes the cost of talking to the operating system.
+;;
+;; Sweeping an mspan and freeing objects on it proceeds up a similar
+;; hierarchy:
+;;
+;;	1. If the mspan is being swept in response to allocation, it
+;;	   is returned to the mcache to satisfy the allocation.
+;;
+;;	2. Otherwise, if the mspan still has allocated objects in it,
+;;	   it is placed on the mcentral free list for the mspan's size
+;;	   class.
+;;
+;;	3. Otherwise, if all objects in the mspan are free, the mspan's
+;;	   pages are returned to the mheap and the mspan is now dead.
+;;
+;; Allocating and freeing a large object uses the mheap
+;; directly, bypassing the mcache and mcentral.
+;;
+;; If mspan.needzero is false, then free object slots in the mspan are
+;; already zeroed. Otherwise if needzero is true, objects are zeroed as
+;; they are allocated. There are various benefits to delaying zeroing
+;; this way:
+;;
+;;	1. Stack frame allocation can avoid zeroing altogether.
+;;
+;;	2. It exhibits better temporal locality, since the program is
+;;	   probably about to write to the memory.
+;;
+;;	3. We don't zero pages that never get reused.
+
+;; Virtual memory layout
+;;
+;; The heap consists of a set of arenas, which are 64MB on 64-bit and
+;; 4MB on 32-bit (heapArenaBytes). Each arena's start address is also
+;; aligned to the arena size.
+;;
+;; Each arena has an associated heapArena object that stores the
+;; metadata for that arena: the heap bitmap for all words in the arena
+;; and the span map for all pages in the arena. heapArena objects are
+;; themselves allocated off-heap.
+;;
+;; Since arenas are aligned, the address space can be viewed as a
+;; series of arena frames. The arena map (mheap_.arenas) maps from
+;; arena frame number to *heapArena, or nil for parts of the address
+;; space not backed by the Go heap. The arena map is structured as a
+;; two-level array consisting of a "L1" arena map and many "L2" arena
+;; maps; however, since arenas are large, on many architectures, the
+;; arena map consists of a single, large L2 map.
+;;
+;; The arena map covers the entire possible address space, allowing
+;; the Go heap to use any part of the address space. The allocator
+;; attempts to keep arenas contiguous so that large spans (and hence
+;; large objects) can cross arenas.
+
+(in-ns 'go.runtime) (go/file "malloc.go" :imports [
+
+
+    ^{:line 104} [goarch "internal/goarch"]
+    ^{:line 105} [goexperiment "internal/goexperiment"]
+    ^{:line 106} [goos "internal/goos"]
+    ^{:line 107} [atomic "internal/runtime/atomic"]
+    ^{:line 108} [gc "internal/runtime/gc"]
+    ^{:line 109} [math "internal/runtime/math"]
+    ^{:line 110} [sys "internal/runtime/sys"]
+    ^:alias ^{:line 111} [goos_overlay "runtime/goos"]
+    ^{:line 112} [unsafe "unsafe"]])
+
+
+(go/const
+  ^{:line 116} [^{:val 16} maxTinySize _TinySize]
+  ^{:line 117} [^{:val 2} tinySizeClass _TinySizeClass]
+  ^{:line 118} [^{:val 32768} maxSmallSize gc/MaxSmallSize]
+  ^{:line 119} [^{:val 8192} pageSize (<< 1 gc/PageShift)]
+  ^{:line 120} [^{:val 8191} pageMask (- pageSize 1)]
+
+
+  ^{:line 123} [^{:val 8192 :doc "Unused. Left for viewcore.\n"} _PageSize pageSize]
+  ^{:line 124} [^{:val 512} minSizeForMallocHeader gc/MinSizeForMallocHeader]
+  ^{:line 125} [^{:val 8} mallocHeaderSize gc/MallocHeaderSize]
+
+
+  ^{:line 128} [^{:val 1 :doc "_64bit = 1 on 64-bit systems, 0 on 32-bit systems\n"} _64bit (/ (<< 1 (>> (bit-not (conv uintptr 0)) 63)) 2)]
+
+
+  ^{:line 131} [^{:val 16 :doc "Tiny allocator parameters, see \"Tiny allocator\" comment in malloc.go.\n"} _TinySize gc/TinySize]
+  ^{:line 132} [^{:val 2} _TinySizeClass (conv int8 gc/TinySizeClass)]
+
+  ^{:line 134} [^{:val 16384} _FixAllocChunk (<< 16 10)] ; Chunk size for FixAlloc
+
+
+  ^{:line 137} [^{:val 32768 :doc "Per-P, per order stack segment cache size.\n"} _StackCacheSize (* 32 1024)]
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 151} [^{:val 4 :doc "Number of orders that get caching. Order 0 is FixedStack\nand each successive order is twice as large.\nWe want to cache 2KB, 4KB, 8KB, and 16KB stacks. Larger stacks\nwill be allocated directly.\nSince FixedStack is different on different systems, we\nmust vary NumStackOrders to keep the same maximum cached size.\n  OS               | FixedStack | NumStackOrders\n  -----------------+------------+---------------\n  linux/darwin/bsd | 2KB        | 4\n  windows/32       | 4KB        | 3\n  windows/64       | 8KB        | 2\n  plan9            | 4KB        | 3\n"} _NumStackOrders (- 4 (* (/ goarch/PtrSize 4) goos/IsWindows) (* 1 goos/IsPlan9))]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 214} [^{:val 40 :doc "heapAddrBits is the number of bits in a heap address. On\namd64, addresses are sign-extended beyond heapAddrBits. On\nother arches, they are zero-extended.\n\nOn most 64-bit platforms, we limit this to 48 bits based on a\ncombination of hardware and OS limitations.\n\namd64 hardware limits addresses to 48 bits, sign-extended\nto 64 bits. Addresses where the top 16 bits are not either\nall 0 or all 1 are \"non-canonical\" and invalid. Because of\nthese \"negative\" addresses, we offset addresses by 1<<47\n(arenaBaseOffset) on amd64 before computing indexes into\nthe heap arenas index. In 2017, amd64 hardware added\nsupport for 57 bit addresses; however, currently only Linux\nsupports this extension and the kernel will never choose an\naddress above 1<<47 unless mmap is called with a hint\naddress above 1<<47 (which we never do).\n\narm64 hardware (as of ARMv8) limits user addresses to 48\nbits, in the range [0, 1<<48).\n\nppc64, mips64, and s390x support arbitrary 64 bit addresses\nin hardware. On Linux, Go leans on stricter OS limits. Based\non Linux's processor.h, the user address space is limited as\nfollows on 64-bit architectures:\n\nArchitecture  Name              Maximum Value (exclusive)\n---------------------------------------------------------------------\namd64         TASK_SIZE_MAX     0x007ffffffff000 (47 bit addresses)\narm64         TASK_SIZE_64      0x01000000000000 (48 bit addresses)\nppc64{,le}    TASK_SIZE_USER64  0x00400000000000 (46 bit addresses)\nmips64{,le}   TASK_SIZE64       0x00010000000000 (40 bit addresses)\ns390x         TASK_SIZE         1<<64 (64 bit addresses)\n\nThese limits may increase over time, but are currently at\nmost 48 bits except on s390x. On all architectures, Linux\nstarts placing mmap'd regions at addresses that are\nsignificantly below 48 bits, so even if it's possible to\nexceed Go's 48 bit limit, it's extremely unlikely in\npractice.\n\nOn 32-bit platforms, we accept the full 32-bit address\nspace because doing so is cheap.\nmips32 only has access to the low 2GB of virtual memory, so\nwe further limit it to 31 bits.\n\nOn ios/arm64, although 64-bit pointers are presumably\navailable, pointers are truncated to 33 bits in iOS <14.\nFurthermore, only the top 4 GiB of the address space are\nactually available to the application. In iOS >=14, more\nof the address space is available, and the OS can now\nprovide addresses outside of those 33 bits. Pick 40 bits\nas a reasonable balance between address space usage by the\npage allocator, and flexibility for what mmap'd regions\nwe'll accept for the heap. We can't just move to the full\n48 bits because this uses too much address space for older\niOS versions.\nTODO(mknyszek): Once iOS <14 is deprecated, promote ios/arm64\nto a 48-bit address space like every other arm64 platform.\n\nWebAssembly currently has a limit of 4GB linear memory.\n"} heapAddrBits (+ (* (- 1 goos/IsTamago) (+ (* _64bit (- 1 goarch/IsWasm) (- 1 (* goos/IsIos goarch/IsArm64)) 48) (* (+ (- 1 _64bit) goarch/IsWasm) (- 32 (+ goarch/IsMips goarch/IsMipsle))) (* 40 goos/IsIos goarch/IsArm64))) (* goos_overlay/HeapAddrBits goos/IsTamago))]
+
+
+
+
+
+
+  ^{:line 221} [^{:val 1099511627776 :doc "maxAlloc is the maximum size of an allocation. On 64-bit,\nit's theoretically possible to allocate 1<<heapAddrBits bytes. On\n32-bit, however, this is one less than 1<<32 because the\nnumber of bytes in the address space doesn't actually fit\nin a uintptr.\n"} maxAlloc (- (<< 1 heapAddrBits) (* (- 1 _64bit) 1))]
+
+  ;; The number of bits in a heap address, the size of heap
+  ;; arenas, and the L1 and L2 arena map sizes are related by
+  ;;
+  ;;   (1 << addr bits) = arena size * L1 entries * L2 entries
+  ;;
+  ;; Currently, we balance these as follows:
+  ;;
+  ;;       Platform  Addr bits  Arena size  L1 entries   L2 entries
+  ;; --------------  ---------  ----------  ----------  -----------
+  ;;       */64-bit         48        64MB           1    4M (32MB)
+  ;; windows/64-bit         48         4MB          64    1M  (8MB)
+  ;;      ios/arm64         40         4MB           1  256K  (2MB)
+  ;;       */32-bit         32         4MB           1  1024  (4KB)
+  ;;     */mips(le)         31         4MB           1   512  (2KB)
+  ;;           wasm         32       512KB           1  8192 (64KB)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 253} [^{:val 4194304 :doc "heapArenaBytes is the size of a heap arena. The heap\nconsists of mappings of size heapArenaBytes, aligned to\nheapArenaBytes. The initial heap mapping is one arena.\n\nThis is currently 64MB on 64-bit non-Windows, 4MB on\n32-bit and on Windows, and 512KB on Wasm. We use smaller\narenas on Windows because all committed memory is charged\nto the process, even if it's not touched. Hence, for\nprocesses with small heaps, the mapped arena space needs\nto be commensurate. This is particularly important with\nthe race detector, since it significantly amplifies the\ncost of committed memory. We use smaller arenas on Wasm\nbecause some Wasm programs have very small heap, and\neverything in the Wasm linear memory is charged.\n"} heapArenaBytes (<< 1 logHeapArenaBytes)]
+
+  ^{:line 255} [^{:val 524288} heapArenaWords (/ heapArenaBytes goarch/PtrSize)]
+
+
+
+
+  ^{:line 260} [^{:val 22 :doc "logHeapArenaBytes is log_2 of heapArenaBytes. For clarity,\nprefer using heapArenaBytes where possible (we need the\nconstant to compute some other constants).\n"} logHeapArenaBytes (+ (* (- 1 goos/IsTamago) (+ (* (+ 6 20) (* _64bit (- 1 goos/IsWindows) (- 1 goarch/IsWasm) (- 1 (* goos/IsIos goarch/IsArm64)))) (* (+ 2 20) (* _64bit goos/IsWindows)) (* (+ 2 20) (- 1 _64bit)) (* (+ 9 10) goarch/IsWasm) (* (+ 2 20) goos/IsIos goarch/IsArm64))) (* goos_overlay/LogHeapArenaBytes goos/IsTamago))]
+
+
+  ^{:line 263} [^{:val 8192 :doc "heapArenaBitmapWords is the size of each heap arena's bitmap in uintptrs.\n"} heapArenaBitmapWords (/ heapArenaWords (* 8 goarch/PtrSize))]
+
+  ^{:line 265} [^{:val 512} pagesPerArena (/ heapArenaBytes pageSize)]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 280} [^{:val 0 :doc "arenaL1Bits is the number of bits of the arena number\ncovered by the first level arena map.\n\nThis number should be small, since the first level arena\nmap requires PtrSize*(1<<arenaL1Bits) of space in the\nbinary's BSS. It can be zero, in which case the first level\nindex is effectively unused. There is a performance benefit\nto this, since the generated code can be more efficient,\nbut comes at the cost of having a large L2 mapping.\n\nWe use the L1 map on 64-bit Windows because the arena size\nis small, but the address space is still 48 bits, and\nthere's a high cost to having a large L2.\n"} arenaL1Bits (* 6 (* _64bit goos/IsWindows))]
+
+
+
+
+
+
+
+
+  ^{:line 289} [^{:val 18 :doc "arenaL2Bits is the number of bits of the arena number\ncovered by the second level arena index.\n\nThe size of each arena map allocation is proportional to\n1<<arenaL2Bits, so it's important that this not be too\nlarge. 48 bits leads to 32MB arena index allocations, which\nis about the practical threshold.\n"} arenaL2Bits (- heapAddrBits logHeapArenaBytes arenaL1Bits)]
+
+
+
+  ^{:line 293} [^{:val 18 :doc "arenaL1Shift is the number of bits to shift an arena frame\nnumber by to compute an index into the first level arena map.\n"} arenaL1Shift arenaL2Bits]
+
+
+
+
+  ^{:line 298} [^{:val 18 :doc "arenaBits is the total bits in a combined arena map index.\nThis is split between the index into the L1 arena map and\nthe L2 arena map.\n"} arenaBits (+ arenaL1Bits arenaL2Bits)]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 315} [^{:val 0 :doc "arenaBaseOffset is the pointer value that corresponds to\nindex 0 in the heap arena map.\n\nOn amd64, the address space is 48 bits, sign extended to 64\nbits. This offset lets us handle \"negative\" addresses (or\nhigh addresses if viewed as unsigned).\n\nOn aix/ppc64, this offset allows to keep the heapAddrBits to\n48. Otherwise, it would be 60 in order to handle mmap addresses\n(in range 0x0a00000000000000 - 0x0afffffffffffff). But in this\ncase, the memory reserved in (s *pageAlloc).init for chunks\nis causing important slowdowns.\n\nOn other platforms, the user address space is contiguous\nand starts at 0, so no offset is necessary.\n"} arenaBaseOffset (+ (* (- 1 goos/IsTamago) (+ (* 0xffff800000000000 goarch/IsAmd64) (* 0x0a00000000000000 goos/IsAix))) (* goos_overlay/ArenaBaseOffset goos/IsTamago))]
+
+  ^{:line 317} [^{:val 0 :doc "A typed version of this constant that will make it into DWARF (for viewcore).\n"} arenaBaseOffsetUintptr (conv uintptr arenaBaseOffset)]
+
+
+
+
+
+  ^{:line 323} [^{:val 32 :doc "Max number of threads to run garbage collection.\n2, 3, and 4 are all plausible maximums depending\non the hardware details of the machine. The garbage\ncollector scales well to 32 cpus.\n"} _MaxGcproc 32]
+
+
+
+
+
+
+  ^{:line 330} [^{:tag uintptr :val 4096 :doc "minLegalPointer is the smallest possible legal pointer.\nThis is the smallest possible architectural page size,\nsince we assume that the first page is never mapped.\n\nThis should agree with minZeroPage in the compiler.\n"} minLegalPointer 4096]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 352} [^{:val 1073741824 :doc "minHeapForMetadataHugePages sets a threshold on when certain kinds of\nheap metadata, currently the arenas map L2 entries and page alloc bitmap\nmappings, are allowed to be backed by huge pages. If the heap goal ever\nexceeds this threshold, then huge pages are enabled.\n\nThese numbers are chosen with the assumption that huge pages are on the\norder of a few MiB in size.\n\nThe kind of metadata this applies to has a very low overhead when compared\nto address space used, but their constant overheads for small heaps would\nbe very high if they were to be backed by huge pages (e.g. a few MiB makes\na huge difference for an 8 MiB heap, but barely any difference for a 1 GiB\nheap). The benefit of huge pages is also not worth it for small heaps,\nbecause only a very, very small part of the metadata is used for small heaps.\n\nN.B. If the heap goal exceeds the threshold then shrinks to a very small size\nagain, then huge pages will still be enabled for this mapping. The reason is that\nthere's no point unless we're also returning the physical memory for these\nmetadata mappings back to the OS. That would be quite complex to do in general\nas the heap is likely fragmented after a reduction in heap size.\n"} minHeapForMetadataHugePages (<< 1 30)]
+
+
+
+  ^{:line 356} [^{:val false :doc "randomizeHeapBase indicates if the heap base address should be randomized.\nSee comment in mallocinit for how the randomization is performed.\n"} randomizeHeapBase (and goexperiment/RandomizedHeapBase64 (== goarch/PtrSize 8) (not isSbrkPlatform) (not raceenabled) (not msanenabled) (not asanenabled))]
+
+
+
+  ^{:line 360} [^{:val 18446742978492891135N :doc "randHeapBasePrefixMask is used to extract the top byte of the randomized\nheap base address.\n"} randHeapBasePrefixMask (bit-not (conv uintptr (<< 0xff (- heapAddrBits 8))))])
+
+
+
+
+
+
+
+
+(go/var ^{:tag uintptr :doc "physPageSize is the size in bytes of the OS's physical pages.\nMapping and unmapping operations must be done at multiples of\nphysPageSize.\n\nThis must be set by the OS init code (typically in osinit) before\nmallocinit.\n"} physPageSize)
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var "physHugePageSize is the size in bytes of the OS's default physical huge\npage size whose allocation is opaque to the application. It is assumed\nand verified to be a power of two.\n\nIf set, this must be set by the OS init code (typically in osinit) before\nmallocinit. However, setting it at all is optional, and leaving the default\nvalue is always safe (though potentially less efficient).\n\nSince physHugePageSize is always assumed to be a power of two,\nphysHugePageShift is defined as physHugePageSize == 1 << physHugePageShift.\nThe purpose of physHugePageShift is to avoid doing divisions in\nperformance critical functions.\n"
+  ^{:line 384} [^uintptr physHugePageSize]
+  ^{:line 385} [^uint physHugePageShift])
+
+
+(go/var
+
+
+
+  ^{:line 392} [^{:tag uintptr :doc "heapRandSeed is a random value that is populated in mallocinit if\nrandomizeHeapBase is set. It is used in mallocinit, and mheap.grow, to\nrandomize the base heap address.\n"} heapRandSeed]
+  ^{:line 393} [^int heapRandSeedBitsRemaining])
+
+
+^{:go/end 404} (go/func nextHeapRandBits ^uintptr [^int bits]
+  (when (> bits heapRandSeedBitsRemaining)
+    (throw "not enough heapRandSeed bits remaining"))
+
+  (let [r (>> heapRandSeed (- 64 bits))]
+    (set! heapRandSeed << bits)
+    (set! heapRandSeedBitsRemaining - bits)
+    ^{:line 403} r))
+
+
+^{:go/end 733} (go/func mallocinit []
+  (when (!= (aget gc/SizeClassToSize tinySizeClass) maxTinySize)
+    (throw "bad TinySizeClass"))
+
+
+  (when (!= (bit-and heapArenaBitmapWords (- heapArenaBitmapWords 1)) 0)
+    ;; heapBits expects modular arithmetic on bitmap
+    ;; addresses to work.
+    (throw "heapArenaBitmapWords not a power of 2"))
+
+
+  ;; Check physPageSize.
+  (when (== physPageSize 0)
+    ;; The OS init code failed to fetch the physical page size.
+    (throw "failed to get system page size"))
+
+  (when (> physPageSize maxPhysPageSize)
+    (print "system page size (" physPageSize ") is larger than maximum page size (" maxPhysPageSize ")\n")
+    (throw "bad system page size"))
+
+  (when (< physPageSize minPhysPageSize)
+    (print "system page size (" physPageSize ") is smaller than minimum page size (" minPhysPageSize ")\n")
+    (throw "bad system page size"))
+
+  (when (!= (bit-and physPageSize (- physPageSize 1)) 0)
+    (print "system page size (" physPageSize ") must be a power of 2\n")
+    (throw "bad system page size"))
+
+  (when (!= (bit-and physHugePageSize (- physHugePageSize 1)) 0)
+    (print "system huge page size (" physHugePageSize ") must be a power of 2\n")
+    (throw "bad system huge page size"))
+
+  (when (> physHugePageSize maxPhysHugePageSize)
+    ;; physHugePageSize is greater than the maximum supported huge page size.
+    ;; Don't throw here, like in the other cases, since a system configured
+    ;; in this way isn't wrong, we just don't have the code to support them.
+    ;; Instead, silently set the huge page size to zero.
+    (set! physHugePageSize 0))
+
+  (when (!= physHugePageSize 0)
+    ;; Since physHugePageSize is a power of 2, it suffices to increase
+    ;; physHugePageShift until 1<<physHugePageShift == physHugePageSize.
+    (while (!= ^uintptr (<< 1 physHugePageShift) physHugePageSize)
+      (inc! physHugePageShift)))
+
+
+  (when (!= (% pagesPerArena pagesPerSpanRoot) 0)
+    (print "pagesPerArena (" pagesPerArena ") is not divisible by pagesPerSpanRoot (" pagesPerSpanRoot ")\n")
+    (throw "bad pagesPerSpanRoot"))
+
+  (when (!= (% pagesPerArena pagesPerReclaimerChunk) 0)
+    (print "pagesPerArena (" pagesPerArena ") is not divisible by pagesPerReclaimerChunk (" pagesPerReclaimerChunk ")\n")
+    (throw "bad pagesPerReclaimerChunk"))
+
+  ;; Check that the minimum size (exclusive) for a malloc header is also
+  ;; a size class boundary. This is important to making sure checks align
+  ;; across different parts of the runtime.
+  ;;
+  ;; While we're here, also check to make sure all these size classes'
+  ;; span sizes are one page. Some code relies on this.
+  (let [minSizeForMallocHeaderIsSizeClass false
+      ^{:line 467} sizeClassesUpToMinSizeForMallocHeaderAreOnePage true]
+    (for [i 0] (< i (len gc/SizeClassToSize)) (inc! i)
+      (when (> (aget gc/SizeClassToNPages i) 1)
+        (set! sizeClassesUpToMinSizeForMallocHeaderAreOnePage false))
+
+      (when (== gc/MinSizeForMallocHeader (conv uintptr (aget gc/SizeClassToSize i)))
+        (set! minSizeForMallocHeaderIsSizeClass true)
+        (break)))
+
+
+    (when (not minSizeForMallocHeaderIsSizeClass)
+      (throw "min size of malloc header is not a size class boundary"))
+
+    (when (not sizeClassesUpToMinSizeForMallocHeaderAreOnePage)
+      (throw "expected all size classes up to min size for malloc header to fit in one-page spans"))
+
+    ;; Check that the pointer bitmap for all small sizes without a malloc header
+    ;; fits in a word.
+    (when (> (/ gc/MinSizeForMallocHeader goarch/PtrSize) (* 8 goarch/PtrSize))
+      (throw "max pointer/scan bitmap size for headerless objects is too large"))
+
+
+    (when (> minTagBits tagBits)
+      (throw "tagBits too small"))
+
+
+    ;; Initialize the heap.
+    (.init mheap_)
+    (set! mcache0 (allocmcache))
+    (lockInit (addr (.-lock gcBitsArenas)) lockRankGcBitsArenas)
+    (lockInit (addr profInsertLock) lockRankProfInsert)
+    (lockInit (addr profBlockLock) lockRankProfBlock)
+    (lockInit (addr profMemActiveLock) lockRankProfMemActive)
+    (range [i profMemFutureLock]
+      (lockInit (addr (aget profMemFutureLock i)) lockRankProfMemFuture))
+
+    (lockInit (addr (.-mutex globalAlloc)) lockRankGlobalAlloc)
+
+    ;; Create initial arena growth hints.
+    (cond isSbrkPlatform (do)
+      ;; Don't generate hints on sbrk platforms. We can
+      ;; only grow the break sequentially.
+      (== goarch/PtrSize 8)
+      ;; On a 64-bit machine, we pick the following hints
+      ;; because:
+      ;;
+      ;; 1. Starting from the middle of the address space
+      ;; makes it easier to grow out a contiguous range
+      ;; without running in to some other mapping.
+      ;;
+      ;; 2. This makes Go heap addresses more easily
+      ;; recognizable when debugging.
+      ;;
+      ;; 3. Stack scanning in gccgo is still conservative,
+      ;; so it's important that addresses be distinguishable
+      ;; from other data.
+      ;;
+      ;; Starting at 0x00c0 means that the valid memory addresses
+      ;; will begin 0x00c0, 0x00c1, ...
+      ;; In little-endian, that's c0 00, c1 00, ... None of those are valid
+      ;; UTF-8 sequences, and they are otherwise as far away from
+      ;; ff (likely a common byte) as possible. If that fails, we try other 0xXXc0
+      ;; addresses. An earlier attempt to use 0x11f8 caused out of memory errors
+      ;; on OS X during thread allocations.  0x00c0 causes conflicts with
+      ;; AddressSanitizer which reserves all memory up to 0x0100.
+      ;; These choices reduce the odds of a conservative garbage collector
+      ;; not collecting memory because some non-pointer block of memory
+      ;; had a bit pattern that matched a memory address.
+      ;;
+      ;; However, on arm64, we ignore all this advice above and slam the
+      ;; allocation at 0x40 << 32 because when using 4k pages with 3-level
+      ;; translation buffers, the user address space is limited to 39 bits
+      ;; On ios/arm64, the address space is even smaller.
+      ;;
+      ;; On AIX, mmaps starts at 0x0A00000000000000 for 64-bit.
+      ;; processes.
+      ;;
+      ;; Space mapped for user arenas comes immediately after the range
+      ;; originally reserved for the regular heap when race mode is not
+      ;; enabled because user arena chunks can never be used for regular heap
+      ;; allocations and we want to avoid fragmenting the address space.
+      ;;
+      ;; In race mode we have no choice but to just use the same hints because
+      ;; the race detector requires that the heap be mapped contiguously.
+      ;;
+      ;; If randomizeHeapBase is set, we attempt to randomize the base address
+      ;; as much as possible. We do this by generating a random uint64 via
+      ;; bootstrapRand and using it's bits to randomize portions of the base
+      ;; address as follows:
+      ;;   * We first generate a random heapArenaBytes aligned address that we use for
+      ;;     generating the hints.
+      ;;   * On the first call to mheap.grow, we then generate a random PallocChunkBytes
+      ;;     aligned offset into the mmap'd heap region, which we use as the base for
+      ;;     the heap region.
+      ;;   * We then select a page offset in that PallocChunkBytes region to start the
+      ;;     heap at, and mark all the pages up to that offset as allocated.
+      ;;
+      ;; Our final randomized "heap base address" becomes the first byte of
+      ;; the first available page returned by the page allocator. This results
+      ;; in an address with at least heapAddrBits-gc.PageShift-2-(1*goarch.IsAmd64)
+      ;; bits of entropy.
+
+      (let [^uintptr randHeapBase (zero uintptr)
+          ^{:line 570 :tag byte} randHeapBasePrefix (zero byte)
+          ;; heapAddrBits is 48 on most platforms, but we only use 47 of those
+          ;; bits in order to provide a good amount of room for the heap to grow
+          ;; contiguously. On amd64, there are 48 bits, but the top bit is sign
+          ;; extended, so we throw away another bit, just to be safe.
+          ^{:line 575} randHeapAddrBits (- heapAddrBits 1 (* goarch/IsAmd64 1))]
+        (when randomizeHeapBase
+          ;; Generate a random value, and take the bottom heapAddrBits-logHeapArenaBytes
+          ;; bits, using them as the top bits for randHeapBase.
+          (set! (values heapRandSeed heapRandSeedBitsRemaining) (values (conv uintptr (bootstrapRand)) 64))
+
+          (let [topBits (- randHeapAddrBits logHeapArenaBytes)]
+            (set! randHeapBase (<< (nextHeapRandBits topBits) (- randHeapAddrBits topBits)))
+            (set! randHeapBase (alignUp randHeapBase heapArenaBytes))
+            (set! randHeapBasePrefix (conv byte (>> randHeapBase (- randHeapAddrBits 8))))))
+
+
+        (let [^int vmaSize (zero int)]
+          (when (== GOARCH "riscv64")
+            ;; Identify which memory layout is in use based on the system
+            ;; stack address, knowing that the bottom half of virtual memory
+            ;; is user space. This should result in 39, 48 or 57. It may be
+            ;; possible to use RISCV_HWPROBE_KEY_HIGHEST_VIRT_ADDRESS at some
+            ;; point in the future - for now use the system stack address.
+            (set! vmaSize (+ (sys/Len64 (conv uint64 (.-hi (.-stack (.-g0 (.-m (getg))))))) 1))
+            (when (and raceenabled (!= vmaSize 39) (!= vmaSize 48))
+              (println "vma size = " vmaSize)
+              (throw "riscv64 vma size is unknown and race mode is enabled")))
+
+
+
+          (for [i 0x7f] (>= i 0) (dec! i)
+            (let [^uintptr p (zero uintptr)]
+              (switch
+                (case [(and raceenabled (== GOARCH "riscv64") (== vmaSize 39))]
+                  (set! p (bit-or (<< (conv uintptr i) 28) (bit-and uintptrMask (<< 0x0013 28))))
+                  (when (>= p (bit-and uintptrMask 0x000f00000000))
+                    (continue)))
+
+                (case [raceenabled]
+                  ;; The TSAN runtime requires the heap
+                  ;; to be in the range [0x00c000000000,
+                  ;; 0x00e000000000).
+                  (set! p (bit-or (<< (conv uintptr i) 32) (bit-and uintptrMask (<< 0x00c0 32))))
+                  (when (>= p (bit-and uintptrMask 0x00e000000000))
+                    (continue)))
+
+                (case [randomizeHeapBase]
+                  (let [prefix (<< (conv uintptr (+ randHeapBasePrefix (conv byte i))) (- randHeapAddrBits 8))]
+                    (set! p (bit-or prefix (bit-and randHeapBase randHeapBasePrefixMask)))))
+                (case [(and (== GOARCH "arm64") (== GOOS "ios"))]
+                  (set! p (bit-or (<< (conv uintptr i) 40) (bit-and uintptrMask (<< 0x0013 28)))))
+                (case [(== GOARCH "arm64")]
+                  (set! p (bit-or (<< (conv uintptr i) 40) (bit-and uintptrMask (<< 0x0040 32)))))
+                (case [(and (== GOARCH "riscv64") (== vmaSize 39))]
+                  (set! p (bit-or (<< (conv uintptr i) 32) (bit-and uintptrMask (<< 0x0013 28)))))
+                (case [(== GOOS "aix")]
+                  (when (== i 0)
+                    ;; We don't use addresses directly after 0x0A00000000000000
+                    ;; to avoid collisions with others mmaps done by non-go programs.
+                    (continue))
+
+                  (set! p (bit-or (<< (conv uintptr i) 40) (bit-and uintptrMask (<< 0xa0 52)))))
+                (default
+                  (set! p (bit-or (<< (conv uintptr i) 40) (bit-and uintptrMask (<< 0x00c0 32))))))
+
+              ;; Switch to generating hints for user arenas if we've gone
+              ;; through about half the hints. In race mode, take only about
+              ;; a quarter; we don't have very much space to work with.
+              (let [hintList (addr (.-arenaHints mheap_))]
+                (when (or ^:go/paren (and (not raceenabled) (> i 0x3f)) ^:go/paren (and raceenabled (> i 0x5f)))
+                  (set! hintList (addr (.-arenaHints (.-userArena mheap_)))))
+
+                (let [hint (conv (* arenaHint) (.alloc (.-arenaHintAlloc mheap_)))]
+                  (set! (.-addr hint) p)
+                  (set! (values (.-next hint) @hintList) (values @hintList hint)))))))) :else
+
+
+      ;; On a 32-bit machine, we're much more concerned
+      ;; about keeping the usable heap contiguous.
+      ;; Hence:
+      ;;
+      ;; 1. We reserve space for all heapArenas up front so
+      ;; they don't get interleaved with the heap. They're
+      ;; ~258MB, so this isn't too bad. (We could reserve a
+      ;; smaller amount of space up front if this is a
+      ;; problem.)
+      ;;
+      ;; 2. We hint the heap to start right above the end of
+      ;; the binary so we have the best chance of keeping it
+      ;; contiguous.
+      ;;
+      ;; 3. We try to stake out a reasonably large initial
+      ;; heap reservation.
+      (let [^uintptr heapArenaCount (<< 1 arenaBits)]
+
+        ;; On TamaGo each memory allocation directly consumes physical
+        ;; memory. To keep heapArenas size as low as possible we
+        ;; allocate the exact number needed to fill available RAM.
+        (when (== goos/IsTamago 1)
+          (set! heapArenaCount (/ (conv uintptr goos_overlay/RamSize) heapArenaBytes)))
+
+
+        (let [arenaMetaSize (* heapArenaCount (unsafe/Sizeof (lit heapArena)))
+            ^{:line 674} meta (conv uintptr (sysReserve nil arenaMetaSize "heap reservation"))]
+          (when (!= meta 0)
+            (.init (.-heapArenaAlloc mheap_) meta arenaMetaSize true))
+
+
+          ;; We want to start the arena low, but if we're linked
+          ;; against C code, it's possible global constructors
+          ;; have called malloc and adjusted the process' brk.
+          ;; Query the brk so we can avoid trying to map the
+          ;; region over it (which will cause the kernel to put
+          ;; the region somewhere else, likely at a high
+          ;; address).
+          (let [procBrk (sbrk0)
+
+              ;; If we ask for the end of the data segment but the
+              ;; operating system requires a little more space
+              ;; before we can start allocating, it will give out a
+              ;; slightly higher pointer. Except QEMU, which is
+              ;; buggy, as usual: it won't adjust the pointer
+              ;; upward. So adjust it upward a little bit ourselves:
+              ;; 1/4 MB to get away from the running binary image.
+              ^{:line 695} p (.-end firstmoduledata)]
+            (when (< p procBrk)
+              (set! p procBrk))
+
+            (when (and (<= (.-next (.-heapArenaAlloc mheap_)) p) (< p (.-end (.-heapArenaAlloc mheap_))))
+              (set! p (.-end (.-heapArenaAlloc mheap_))))
+
+            (set! p (alignUp (+ p (<< 256 10)) heapArenaBytes))
+            ;; Because we're worried about fragmentation on
+            ;; 32-bit, we try to make a large initial reservation.
+            (let [arenaSizes (lit (slice uintptr)
+                  (<< 512 20)
+                  (<< 256 20)
+                  (<< 128 20))]
+
+              (range [_ arenaSize arenaSizes]
+                (let [(values a size) (sysReserveAligned (conv unsafe/Pointer p) arenaSize heapArenaBytes "heap reservation")]
+                  (when (!= a nil)
+                    (.init (.-arena mheap_) (conv uintptr a) size false)
+                    (set! p (.-end (.-arena mheap_))) ; For hint below
+                    (break))))
+
+
+              (let [hint (conv (* arenaHint) (.alloc (.-arenaHintAlloc mheap_)))]
+                (set! (.-addr hint) p)
+                (set! (values (.-next hint) (.-arenaHints mheap_)) (values (.-arenaHints mheap_) hint))
+
+                ;; Place the hint for user arenas just after the large reservation.
+                ;;
+                ;; While this potentially competes with the hint above, in practice we probably
+                ;; aren't going to be getting this far anyway on 32-bit platforms.
+                (let [userArenaHint (conv (* arenaHint) (.alloc (.-arenaHintAlloc mheap_)))]
+                  (set! (.-addr userArenaHint) p)
+                  (set! (values (.-next userArenaHint) (.-arenaHints (.-userArena mheap_))) (values (.-arenaHints (.-userArena mheap_)) userArenaHint)))))))))
+
+    ;; Initialize the memory limit here because the allocator is going to look at it
+    ;; but we haven't called gcinit yet and we're definitely going to allocate memory before then.
+    (.Store (.-memoryLimit gcController) math/MaxInt64)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 931} (go/method sysAlloc "sysAlloc allocates heap arena space for at least n bytes. The\nreturned pointer is always heapArenaBytes-aligned and backed by\nh.arenas metadata. The returned size is always a multiple of\nheapArenaBytes. sysAlloc returns nil on failure.\nThere is no corresponding free function.\n\nhintList is a list of hint addresses for where to allocate new\nheap arenas. It must be non-nil.\n\nsysAlloc returns a memory region in the Reserved state. This region must\nbe transitioned to Prepared and then Ready before use.\n\narenaList is the list the arena should be added to.\n\nh must be locked.\n" [^{:tag (* mheap)} h ^uintptr n ^{:tag (* (* arenaHint))} hintList ^{:tag (* (slice arenaIdx))} arenaList] :results [^unsafe/Pointer v ^uintptr size]
+  (assertLockHeld (addr (.-lock h)))
+
+  (set! n (alignUp n heapArenaBytes))
+
+  (when (== hintList (addr (.-arenaHints h)))
+    ;; First, try the arena pre-reservation.
+    ;; Newly-used mappings are considered released.
+    ;;
+    ;; Only do this if we're using the regular heap arena hints.
+    ;; This behavior is only for the heap.
+    (set! v (.alloc (.-arena h) n heapArenaBytes (addr (.-heapReleased gcController)) "heap"))
+    (when (!= v nil)
+      (set! size n)
+      (goto :mapped)))
+
+
+
+  ;; Try to grow the heap at a hint address.
+  (while (!= @hintList nil)
+    (let [hint @hintList
+        ^{:line 771} p (.-addr hint)]
+      (when (.-down hint)
+        (set! p - n))
+
+      (cond (< (+ p n) p)
+        ;; We can't use this, so don't ask.
+        (set! v nil)
+        (>= (arenaIndex (- (+ p n) 1)) (<< 1 arenaBits))
+        ;; Outside addressable heap. Can't use.
+        (set! v nil) :else
+
+        (set! v (sysReserve (conv unsafe/Pointer p) n "heap reservation")))
+
+      (when (== p (conv uintptr v))
+        ;; Success. Update the hint.
+        (when (not (.-down hint))
+          (set! p + n))
+
+        (set! (.-addr hint) p)
+        (set! size n)
+        (break))
+
+      ;; Failed. Discard this hint and try the next.
+      ;;
+      ;; TODO: This would be cleaner if sysReserve could be
+      ;; told to only return the requested address. In
+      ;; particular, this is already how Windows behaves, so
+      ;; it would simplify things there.
+      (when (!= v nil)
+        (sysUnreserve v n))
+
+      (set! @hintList (.-next hint))
+      (.free (.-arenaHintAlloc h) (conv unsafe/Pointer hint))))
+
+
+  (when (== size 0)
+    (when raceenabled
+      ;; The race detector assumes the heap lives in
+      ;; [0x00c000000000, 0x00e000000000), but we
+      ;; just ran out of hints in this region. Give
+      ;; a nice failure.
+      (throw "too many address space collisions for -race mode"))
+
+
+    ;; All of the hints failed, so we'll take any
+    ;; (sufficiently aligned) address the kernel will give
+    ;; us.
+    (set! (values v size) (sysReserveAligned nil n heapArenaBytes "heap"))
+    (when (== v nil)
+      (return nil 0))
+
+
+    ;; Create new hints for extending this region.
+    (let [hint (conv (* arenaHint) (.alloc (.-arenaHintAlloc h)))]
+      (set! (values (.-addr hint) (.-down hint)) (values (conv uintptr v) true))
+      (set! (values (.-next hint) (.-arenaHints mheap_)) (values (.-arenaHints mheap_) hint))
+      (set! hint (conv (* arenaHint) (.alloc (.-arenaHintAlloc h))))
+      (set! (.-addr hint) (+ (conv uintptr v) size))
+      (set! (values (.-next hint) (.-arenaHints mheap_)) (values (.-arenaHints mheap_) hint))))
+
+
+  ;; Check for bad pointers or pointers we can't use.
+  (do
+    (let [^string bad (zero string)
+        ^{:line 835} p (conv uintptr v)]
+      (cond (< (+ p size) p)
+        (set! bad "region exceeds uintptr range")
+        (>= (arenaIndex p) (<< 1 arenaBits))
+        (set! bad "base outside usable address space")
+        (>= (arenaIndex (- (+ p size) 1)) (<< 1 arenaBits))
+        (set! bad "end outside usable address space"))
+
+      (when (!= bad "")
+        ;; This should be impossible on most architectures,
+        ;; but it would be really confusing to debug.
+        (print "runtime: memory allocated by OS [" (conv hex p) ", " (conv hex (+ p size)) ") not in usable address space: " bad "\n")
+        (throw "memory reservation exceeds address space limit"))))
+
+
+
+  (when (!= (bit-and (conv uintptr v) (- heapArenaBytes 1)) 0)
+    (throw "misrounded allocation in sysAlloc"))
+
+
+  (label :mapped
+    (when valgrindenabled
+      (valgrindCreateMempool v)
+      (valgrindMakeMemNoAccess v size)))
+
+
+  ;; Create arena metadata.
+  (for [ri (arenaIndex (conv uintptr v))] (<= ri (arenaIndex (- (+ (conv uintptr v) size) 1))) (inc! ri)
+    (let [l2 (aget (.-arenas h) (.l1 ri))]
+      (when (== l2 nil)
+        ;; Allocate an L2 arena map.
+        ;;
+        ;; Use sysAllocOS instead of sysAlloc or persistentalloc because there's no
+        ;; statistic we can comfortably account for this space in. With this structure,
+        ;; we rely on demand paging to avoid large overheads, but tracking which memory
+        ;; is paged in is too expensive. Trying to account for the whole region means
+        ;; that it will appear like an enormous memory overhead in statistics, even though
+        ;; it is not.
+        (set! l2 (conv (* (array (<< 1 arenaL2Bits) (* heapArena))) (sysAllocOS (unsafe/Sizeof @l2) "heap index")))
+        (when (== l2 nil)
+          (throw "out of memory allocating heap arena map"))
+
+        (if (.-arenasHugePages h)
+          (sysHugePage (conv unsafe/Pointer l2) (unsafe/Sizeof @l2))
+
+          (sysNoHugePage (conv unsafe/Pointer l2) (unsafe/Sizeof @l2)))
+
+        (atomic/StorepNoWB (conv unsafe/Pointer (addr (aget (.-arenas h) (.l1 ri)))) (conv unsafe/Pointer l2)))
+
+
+      (when (!= (aget l2 (.l2 ri)) nil)
+        (throw "arena already initialized"))
+
+      (let [^{:tag (* heapArena)} r (zero (* heapArena))]
+        (set! r (conv (* heapArena) (.alloc (.-heapArenaAlloc h) (unsafe/Sizeof @r) goarch/PtrSize (addr (.-gcMiscSys memstats)) "heap metadata")))
+        (when (== r nil)
+          (set! r (conv (* heapArena) (persistentalloc (unsafe/Sizeof @r) goarch/PtrSize (addr (.-gcMiscSys memstats)))))
+          (when (== r nil)
+            (throw "out of memory allocating heap arena metadata")))
+
+
+
+        ;; Register the arena in allArenas if requested.
+        (when (== (len @arenaList) (cap @arenaList))
+          (let [size (* 2 (conv uintptr (cap @arenaList)) goarch/PtrSize)]
+            (when (== size 0)
+              (set! size physPageSize))
+
+            (let [newArray (conv (* notInHeap) (persistentalloc size goarch/PtrSize (addr (.-gcMiscSys memstats))))]
+              (when (== newArray nil)
+                (throw "out of memory allocating allArenas"))
+
+              (let [oldSlice @arenaList]
+                (set! @(conv (* notInHeapSlice) (conv unsafe/Pointer (addr @arenaList))) (lit notInHeapSlice newArray (len @arenaList) (conv int (/ size goarch/PtrSize))))
+                (copy @arenaList oldSlice)))))
+        ;; Do not free the old backing array because
+        ;; there may be concurrent readers. Since we
+        ;; double the array each time, this can lead
+        ;; to at most 2x waste.
+
+        (set! @arenaList (subslice @arenaList _ (+ (len @arenaList) 1)))
+        (aset @arenaList (- (len @arenaList) 1) ri)
+
+        ;; Store atomically just in case an object from the
+        ;; new heap arena becomes visible before the heap lock
+        ;; is released (which shouldn't happen, but there's
+        ;; little downside to this).
+        (atomic/StorepNoWB (conv unsafe/Pointer (addr (aget l2 (.l2 ri)))) (conv unsafe/Pointer r)))))
+
+
+  ;; Tell the race detector about the new heap memory.
+  (when raceenabled
+    (racemapshadow v size))
+
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 971} (go/method ^:go/systemstack enableMetadataHugePages "enableMetadataHugePages enables huge pages for various sources of heap metadata.\n\nA note on latency: for sufficiently small heaps (<10s of GiB) this function will take constant\ntime, but may take time proportional to the size of the mapped heap beyond that.\n\nThis function is idempotent.\n\nThe heap lock must not be held over this operation, since it will briefly acquire\nthe heap lock.\n\nMust be called on the system stack because it acquires the heap lock.\n" [^{:tag (* mheap)} h]
+  ;; Enable huge pages for page structure.
+  (.enableChunkHugePages (.-pages h))
+
+  ;; Grab the lock and set arenasHugePages if it's not.
+  ;;
+  ;; Once arenasHugePages is set, all new L2 entries will be eligible for
+  ;; huge pages. We'll set all the old entries after we release the lock.
+  (lock (addr (.-lock h)))
+  (when (.-arenasHugePages h)
+    (unlock (addr (.-lock h)))
+    (return))
+
+  (set! (.-arenasHugePages h) true)
+  (unlock (addr (.-lock h)))
+
+  ;; N.B. The arenas L1 map is quite small on all platforms, so it's fine to
+  ;; just iterate over the whole thing.
+  (range [i (.-arenas h)]
+    (let [l2 (conv (* (array (<< 1 arenaL2Bits) (* heapArena))) (atomic/Loadp (conv unsafe/Pointer (addr (aget (.-arenas h) i)))))]
+      (when (== l2 nil)
+        (continue))
+
+      (sysHugePage (conv unsafe/Pointer l2) (unsafe/Sizeof @l2)))))
+
+
+
+
+(go/var ^{:tag uintptr :doc "base address for all 0-byte allocations\n"} zerobase)
+
+
+
+^{:go/end 994} (go/func nextFreeFast "nextFreeFast returns the next free object if one is quickly available.\nOtherwise it returns 0.\n" ^gclinkptr [^{:tag (* mspan)} s]
+  ^{:go/breaks [[3 993]]} (let [theBit (sys/TrailingZeros64 (.-allocCache s))] ; Is there a free object in the allocCache?
+    (when (< theBit 64)
+      (let [result (+ (.-freeindex s) (conv uint16 theBit))]
+        (when (< result (.-nelems s))
+          (let [freeidx (+ result 1)]
+            (when (and (== (% freeidx 64) 0) (!= freeidx (.-nelems s)))
+              (return 0))
+
+            (set! (.-allocCache s) >> (conv uint (+ theBit 1)))
+            (set! (.-freeindex s) freeidx)
+            (inc! (.-allocCount s))
+            (return (conv gclinkptr (+ (* (conv uintptr result) (.-elemsize s)) (.base s))))))))
+
+
+    0))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1033} (go/method nextFree "nextFree returns the next free object from the cached span if one is available.\nOtherwise it refills the cache with a span with an available object and\nreturns that object along with a flag indicating that this was a heavy\nweight allocation. If it is a heavy weight allocation the caller must\ndetermine whether a new GC cycle needs to be started or if the GC is active\nwhether this goroutine needs to assist the GC.\n\nMust run in a non-preemptible context since otherwise the owner of\nc could change.\n" [^{:tag (* mcache)} c ^spanClass spc] :results [^gclinkptr v ^{:tag (* mspan)} s ^bool checkGCTrigger]
+  (set! s (aget (.-alloc c) spc))
+  (set! checkGCTrigger false)
+  (let [freeIndex (.nextFreeIndex s)]
+    (when (== freeIndex (.-nelems s))
+      ;; The span is full.
+      (when (!= (.-allocCount s) (.-nelems s))
+        (println "runtime: s.allocCount=" (.-allocCount s) "s.nelems=" (.-nelems s))
+        (throw "s.allocCount != s.nelems && freeIndex == s.nelems"))
+
+      (.refill c spc)
+      (set! checkGCTrigger true)
+      (set! s (aget (.-alloc c) spc))
+
+      (set! freeIndex (.nextFreeIndex s)))
+
+
+    (when (>= freeIndex (.-nelems s))
+      (throw "freeIndex is not valid"))
+
+
+    (set! v (conv gclinkptr (+ (* (conv uintptr freeIndex) (.-elemsize s)) (.base s))))
+    (inc! (.-allocCount s))
+    (when (> (.-allocCount s) (.-nelems s))
+      (println "s.allocCount=" (.-allocCount s) "s.nelems=" (.-nelems s))
+      (throw "s.allocCount > s.nelems"))
+
+    (return)))
+
+
+
+
+
+
+
+
+
+(go/const ^{:val false :doc "doubleCheckMalloc enables a bunch of extra checks to malloc to double-check\nthat various invariants are upheld.\n\nWe might consider turning these on by default; many of them previously were.\nThey account for a few % of mallocgc's cost though, which does matter somewhat\nat scale. (When testing changes to malloc, consider enabling this, and also\nsome function-local 'doubleCheck' consts such as in mbitmap.go currently.)\n"} doubleCheckMalloc false)
+
+
+
+
+
+(go/const ^{:val true :doc "sizeSpecializedMallocEnabled is the set of conditions where we enable the size-specialized\nmallocgc implementation: the experiment must be enabled, and none of the sanitizers should\nbe enabled. The tables used to select the size-specialized malloc function do not compile\nproperly on plan9, so size-specialized malloc is also disabled on plan9.\n"} sizeSpecializedMallocEnabled (and goexperiment/SizeSpecializedMalloc (!= GOOS "plan9") (not asanenabled) (not raceenabled) (not msanenabled) (not valgrindenabled)))
+
+
+
+
+
+
+
+(go/const ^{:val false :doc "runtimeFreegcEnabled is the set of conditions where we enable the runtime.freegc\nimplementation and the corresponding allocation-related changes: the experiment must be\nenabled, and none of the memory sanitizers should be enabled. We allow the race detector,\nin contrast to sizeSpecializedMallocEnabled.\nTODO(thepudds): it would be nice to check Valgrind integration, though there are some hints\nthere might not be any canned tests in tree for Go's integration with Valgrind.\n"} runtimeFreegcEnabled (and goexperiment/RuntimeFreegc (not asanenabled) (not msanenabled) (not valgrindenabled)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1215} (go/func ^{:go/linkname "mallocgc"} mallocgc "Allocate an object of size bytes.\nSmall objects are allocated from the per-P cache's free lists.\nLarge objects (> 32 kB) are allocated straight from the heap.\n\nmallocgc should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/bytedance/gopkg\n  - github.com/bytedance/sonic\n  - github.com/cloudwego/frugal\n  - github.com/cockroachdb/cockroach\n  - github.com/cockroachdb/pebble\n  - github.com/ugorji/go/codec\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^unsafe/Pointer [^uintptr size ^{:tag (* _type)} typ ^bool needzero]
+  (when doubleCheckMalloc
+    (when (== gcphase _GCmarktermination)
+      (throw "mallocgc called with gcphase == _GCmarktermination")))
+
+
+
+  ;; Short-circuit zero-sized allocation requests.
+  (when (== size 0)
+    (return (conv unsafe/Pointer (addr zerobase))))
+
+
+  (when (and sizeSpecializedMallocEnabled (< size (conv uintptr (len mallocNoScanTable))))
+    (if (or (== typ nil) (not (.Pointers typ))) (do
+        (when (>= size maxTinySize)
+          (return ((aget mallocNoScanTable size) size typ needzero)))
+
+        (return (mallocgcTinySC2 size typ needzero)))
+      (do
+        (when (not needzero)
+          (throw "objects with pointers must be zeroed"))
+
+        (return ((aget mallocScanTable size) size typ needzero)))))
+
+
+
+  ;; It's possible for any malloc to trigger sweeping, which may in
+  ;; turn queue finalizers. Record this dynamic lock edge.
+  ;; N.B. Compiled away if lockrank experiment is not enabled.
+  (lockRankMayQueueFinalizer)
+
+  ;; Pre-malloc debug hooks.
+  (when (.-malloc debug)
+    (when [x (preMallocgcDebug size typ)] (!= x nil)
+      (return x)))
+
+
+
+  ;; For ASAN, we allocate extra memory around each allocation called the "redzone."
+  ;; These "redzones" are marked as unaddressable.
+  (let [^uintptr asanRZ (zero uintptr)]
+    (when asanenabled
+      (set! asanRZ (redZoneSize size))
+      (set! size + asanRZ))
+
+
+    ;; Assist the GC if needed. (On the reuse path, we currently compensate for this;
+    ;; changes here might require changes there.)
+    (when (!= gcBlackenEnabled 0)
+      (deductAssistCredit size))
+
+
+    ;; Actually do the allocation.
+    (let [^unsafe/Pointer x (zero unsafe/Pointer)
+        ^{:line 1130 :tag uintptr} elemsize (zero uintptr)]
+      (if sizeSpecializedMallocEnabled
+        (if (<= size (- maxSmallSize gc/MallocHeaderSize))
+          (if (or (== typ nil) (not (.Pointers typ)))
+            (set! (values x elemsize) (mallocgcSmallNoscan size typ needzero))
+            (do
+              (when (not needzero)
+                (throw "objects with pointers must be zeroed"))
+
+              (if (heapBitsInSpan size)
+                (set! (values x elemsize) (mallocgcSmallScanNoHeader size typ))
+
+                (set! (values x elemsize) (mallocgcSmallScanHeader size typ)))))
+
+
+
+          (set! (values x elemsize) (mallocgcLarge size typ needzero)))
+
+        (do
+          (if (<= size (- maxSmallSize gc/MallocHeaderSize))
+            (if (or (== typ nil) (not (.Pointers typ)))
+              ;; tiny allocations might be kept alive by other co-located values.
+              ;; Make sure secret allocations get zeroed by avoiding the tiny allocator
+              ;; See go.dev/issue/76356
+              (let [gp (getg)]
+                (if (and (< size maxTinySize) (== (.-secret gp) 0))
+                  (set! (values x elemsize) (mallocgcTiny size typ))
+
+                  (set! (values x elemsize) (mallocgcSmallNoscan size typ needzero))))
+
+              (do
+                (when (not needzero)
+                  (throw "objects with pointers must be zeroed"))
+
+                (if (heapBitsInSpan size)
+                  (set! (values x elemsize) (mallocgcSmallScanNoHeader size typ))
+
+                  (set! (values x elemsize) (mallocgcSmallScanHeader size typ)))))
+
+
+
+            (set! (values x elemsize) (mallocgcLarge size typ needzero)))))
+
+
+
+      (let [gp (getg)]
+        (when (and goexperiment/RuntimeSecret (> (.-secret gp) 0))
+          ;; Mark any object allocated while in secret mode as secret.
+          ;; This ensures we zero it immediately when freeing it.
+          (addSecret x size))
+
+
+        ;; Notify sanitizers, if enabled.
+        (when raceenabled
+          (racemalloc x (- size asanRZ)))
+
+        (when msanenabled
+          (msanmalloc x (- size asanRZ)))
+
+        (when asanenabled
+          ;; Poison the space between the end of the requested size of x
+          ;; and the end of the slot. Unpoison the requested allocation.
+          (let [frag (- elemsize size)]
+            (when (and (!= typ nil) (.Pointers typ) (not (heapBitsInSpan elemsize)) (<= size (- maxSmallSize gc/MallocHeaderSize)))
+              (set! frag - gc/MallocHeaderSize))
+
+            (asanpoison (unsafe/Add x (- size asanRZ)) asanRZ)
+            (asanunpoison x (- size asanRZ))))
+
+        (when valgrindenabled
+          (valgrindMalloc x (- size asanRZ)))
+
+
+        ;; Adjust our GC assist debt to account for internal fragmentation.
+        (when (and (!= gcBlackenEnabled 0) (!= elemsize 0))
+          (when [assistG (.-curg (.-m (getg)))] (!= assistG nil)
+            (set! (.-gcAssistBytes assistG) - (conv int64 (- elemsize size)))))
+
+
+
+        ;; Post-malloc debug hooks.
+        (when (.-malloc debug)
+          (postMallocgcDebug x elemsize typ))
+
+        ^{:line 1214} x))))
+
+
+^{:go/end 1371} (go/func mallocgcTiny [^uintptr size ^{:tag (* _type)} typ] :results [unsafe/Pointer uintptr]
+  ;; Set mp.mallocing to keep from being preempted by GC.
+  (let [mp (acquirem)]
+    (when doubleCheckMalloc
+      (when (!= (.-mallocing mp) 0)
+        (throw "malloc deadlock"))
+
+      (when (== (.-gsignal mp) (getg))
+        (throw "malloc during signal"))
+
+      (when (and (!= typ nil) (.Pointers typ))
+        (throw "expected noscan for tiny alloc")))
+
+
+    (set! (.-mallocing mp) 1)
+
+    ;; Tiny allocator.
+    ;;
+    ;; Tiny allocator combines several tiny allocation requests
+    ;; into a single memory block. The resulting memory block
+    ;; is freed when all subobjects are unreachable. The subobjects
+    ;; must be noscan (don't have pointers), this ensures that
+    ;; the amount of potentially wasted memory is bounded.
+    ;;
+    ;; Size of the memory block used for combining (maxTinySize) is tunable.
+    ;; Current setting is 16 bytes, which relates to 2x worst case memory
+    ;; wastage (when all but one subobjects are unreachable).
+    ;; 8 bytes would result in no wastage at all, but provides less
+    ;; opportunities for combining.
+    ;; 32 bytes provides more opportunities for combining,
+    ;; but can lead to 4x worst case wastage.
+    ;; The best case winning is 8x regardless of block size.
+    ;;
+    ;; Objects obtained from tiny allocator must not be freed explicitly.
+    ;; So when an object will be freed explicitly, we ensure that
+    ;; its size >= maxTinySize.
+    ;;
+    ;; SetFinalizer has a special case for objects potentially coming
+    ;; from tiny allocator, it such case it allows to set finalizers
+    ;; for an inner byte of a memory block.
+    ;;
+    ;; The main targets of tiny allocator are small strings and
+    ;; standalone escaping variables. On a json benchmark
+    ;; the allocator reduces number of allocations by ~12% and
+    ;; reduces heap size by ~20%.
+    (let [c (getMCache mp)
+        ^{:line 1263} off (.-tinyoffset c)]
+      ;; Align tiny pointer for required (conservative) alignment.
+      (cond (== (bit-and size 7) 0)
+        (set! off (alignUp off 8))
+        (and (== goarch/PtrSize 4) (== size 12))
+        ;; Conservatively align 12-byte objects to 8 bytes on 32-bit
+        ;; systems so that objects whose first field is a 64-bit
+        ;; value is aligned to 8 bytes and does not cause a fault on
+        ;; atomic access. See issue 37262.
+        ;; TODO(mknyszek): Remove this workaround if/when issue 36606
+        ;; is resolved.
+        (set! off (alignUp off 8))
+        (== (bit-and size 3) 0)
+        (set! off (alignUp off 4))
+        (== (bit-and size 1) 0)
+        (set! off (alignUp off 2)))
+
+      (when (and (<= (+ off size) maxTinySize) (!= (.-tiny c) 0))
+        ;; The object fits into existing tiny block.
+        (let [x (conv unsafe/Pointer (+ (.-tiny c) off))]
+          (set! (.-tinyoffset c) (+ off size))
+          (inc! (.-tinyAllocs c))
+          (set! (.-mallocing mp) 0)
+          (releasem mp)
+          (return x 0)))
+
+      ;; Allocate a new maxTinySize block.
+      (let [checkGCTrigger false
+          ^{:line 1291} span (aget (.-alloc c) tinySpanClass)
+          ^{:line 1292} v (nextFreeFast span)]
+        (when (== v 0)
+          (set! (values v span checkGCTrigger) (.nextFree c tinySpanClass)))
+
+        (let [x (conv unsafe/Pointer v)]
+          (aset (conv (* (array 2 uint64)) x) 0 0) ; Always zero
+          (aset (conv (* (array 2 uint64)) x) 1 0)
+          ;; See if we need to replace the existing tiny block with the new one
+          ;; based on amount of remaining free space.
+          (when (and (not raceenabled) ^:go/paren (or (< size (.-tinyoffset c)) (== (.-tiny c) 0)))
+            ;; Note: disabled when race detector is on, see comment near end of this function.
+            (set! (.-tiny c) (conv uintptr x))
+            (set! (.-tinyoffset c) size))
+
+
+          ;; Ensure that the stores above that initialize x to
+          ;; type-safe memory and set the heap bits occur before
+          ;; the caller can make x observable to the garbage
+          ;; collector. Otherwise, on weakly ordered machines,
+          ;; the garbage collector could follow a pointer to x,
+          ;; but see uninitialized memory or stale heap bits.
+          (publicationBarrier)
+
+          (if (.-enabled writeBarrier)
+            ;; Allocate black during GC.
+            ;; All slots hold nil so no scanning is needed.
+            ;; This may be racing with GC so do it atomically if there can be
+            ;; a race marking the bit.
+            (gcmarknewobject span (conv uintptr x))
+
+            ;; Track the last free index before the mark phase. This field
+            ;; is only used by the garbage collector. During the mark phase
+            ;; this is used by the conservative scanner to filter out objects
+            ;; that are both free and recently-allocated. It's safe to do that
+            ;; because we allocate-black if the GC is enabled. The conservative
+            ;; scanner produces pointers out of thin air, so without additional
+            ;; synchronization it might otherwise observe a partially-initialized
+            ;; object, which could crash the program.
+            (set! (.-freeIndexForScan span) (.-freeindex span)))
+
+
+          ;; Note cache c only valid while m acquired; see #47302
+          ;;
+          ;; N.B. Use the full size because that matches how the GC
+          ;; will update the mem profile on the "free" side.
+          ;;
+          ;; TODO(mknyszek): We should really count the header as part
+          ;; of gc_sys or something. The code below just pretends it is
+          ;; internal fragmentation and matches the GC's accounting by
+          ;; using the whole allocation slot.
+          (set! (.-nextSample c) - (conv int64 (.-elemsize span)))
+          (when (or (< (.-nextSample c) 0) (!= MemProfileRate (.-memProfRate c)))
+            (profilealloc mp x (.-elemsize span)))
+
+          (set! (.-mallocing mp) 0)
+          (releasem mp)
+
+          (when checkGCTrigger
+            (when [t (lit gcTrigger :kind gcTriggerHeap)] (.test t)
+              (gcStart t)))
+
+
+
+          (when raceenabled
+            ;; Pad tinysize allocations so they are aligned with the end
+            ;; of the tinyalloc region. This ensures that any arithmetic
+            ;; that goes off the top end of the object will be detectable
+            ;; by checkptr (issue 38872).
+            ;; Note that we disable tinyalloc when raceenabled for this to work.
+            ;; TODO: This padding is only performed when the race detector
+            ;; is enabled. It would be nice to enable it if any package
+            ;; was compiled with checkptr, but there's no easy way to
+            ;; detect that (especially at compile time).
+            ;; TODO: enable this padding for all allocations, not just
+            ;; tinyalloc ones. It's tricky because of pointer maps.
+            ;; Maybe just all noscan objects?
+            (set! x (add x (- (.-elemsize span) size))))
+
+          (return x (.-elemsize span)))))))
+
+
+^{:go/end 1467} (go/func mallocgcSmallNoscan [^uintptr size ^{:tag (* _type)} typ ^bool needzero] :results [unsafe/Pointer uintptr]
+  ;; Set mp.mallocing to keep from being preempted by GC.
+  (let [mp (acquirem)]
+    (when doubleCheckMalloc
+      (when (!= (.-mallocing mp) 0)
+        (throw "malloc deadlock"))
+
+      (when (== (.-gsignal mp) (getg))
+        (throw "malloc during signal"))
+
+      (when (and (!= typ nil) (.Pointers typ))
+        (throw "expected noscan type for noscan alloc")))
+
+
+    (set! (.-mallocing mp) 1)
+
+    (let [checkGCTrigger false
+        ^{:line 1390} c (getMCache mp)
+        ^{:line 1391 :tag uint8} sizeclass (zero uint8)]
+      (if (<= size (- gc/SmallSizeMax 8))
+        (set! sizeclass (aget gc/SizeToSizeClass8 (divRoundUp size gc/SmallSizeDiv)))
+
+        (set! sizeclass (aget gc/SizeToSizeClass128 (divRoundUp (- size gc/SmallSizeMax) gc/LargeSizeDiv))))
+
+      (set! size (conv uintptr (aget gc/SizeClassToSize sizeclass)))
+      (let [spc (makeSpanClass sizeclass true)
+          ^{:line 1399} span (aget (.-alloc c) spc)]
+
+        ;; First, check for a reusable object.
+        (when (and runtimeFreegcEnabled (.hasReusableNoscan c spc))
+          ;; We have a reusable object, use it.
+          (let [x (mallocgcSmallNoscanReuse c span spc size needzero)]
+            (set! (.-mallocing mp) 0)
+            (releasem mp)
+            (return x size)))
+
+
+        (let [v (nextFreeFast span)]
+          (when (== v 0)
+            (set! (values v span checkGCTrigger) (.nextFree c spc)))
+
+          (let [x (conv unsafe/Pointer v)]
+            (when (and needzero (!= (.-needzero span) 0))
+              (memclrNoHeapPointers x size))
+
+
+            ;; Ensure that the stores above that initialize x to
+            ;; type-safe memory and set the heap bits occur before
+            ;; the caller can make x observable to the garbage
+            ;; collector. Otherwise, on weakly ordered machines,
+            ;; the garbage collector could follow a pointer to x,
+            ;; but see uninitialized memory or stale heap bits.
+            (publicationBarrier)
+
+            (if (.-enabled writeBarrier)
+              ;; Allocate black during GC.
+              ;; All slots hold nil so no scanning is needed.
+              ;; This may be racing with GC so do it atomically if there can be
+              ;; a race marking the bit.
+              (gcmarknewobject span (conv uintptr x))
+
+              ;; Track the last free index before the mark phase. This field
+              ;; is only used by the garbage collector. During the mark phase
+              ;; this is used by the conservative scanner to filter out objects
+              ;; that are both free and recently-allocated. It's safe to do that
+              ;; because we allocate-black if the GC is enabled. The conservative
+              ;; scanner produces pointers out of thin air, so without additional
+              ;; synchronization it might otherwise observe a partially-initialized
+              ;; object, which could crash the program.
+              (set! (.-freeIndexForScan span) (.-freeindex span)))
+
+
+            ;; Note cache c only valid while m acquired; see #47302
+            ;;
+            ;; N.B. Use the full size because that matches how the GC
+            ;; will update the mem profile on the "free" side.
+            ;;
+            ;; TODO(mknyszek): We should really count the header as part
+            ;; of gc_sys or something. The code below just pretends it is
+            ;; internal fragmentation and matches the GC's accounting by
+            ;; using the whole allocation slot.
+            (set! (.-nextSample c) - (conv int64 size))
+            (when (or (< (.-nextSample c) 0) (!= MemProfileRate (.-memProfRate c)))
+              (profilealloc mp x size))
+
+            (set! (.-mallocing mp) 0)
+            (releasem mp)
+
+            (when checkGCTrigger
+              (when [t (lit gcTrigger :kind gcTriggerHeap)] (.test t)
+                (gcStart t)))
+
+
+            (return x size)))))))
+
+
+
+
+^{:go/end 1516} (go/func mallocgcSmallNoscanReuse "mallocgcSmallNoscanReuse returns a previously freed noscan object after preparing it for reuse.\nIt must only be called if hasReusableNoscan returned true.\n" ^unsafe/Pointer [^{:tag (* mcache)} c ^{:tag (* mspan)} span ^spanClass spc ^uintptr size ^bool needzero]
+  ;; TODO(thepudds): could nextFreeFast, nextFree and nextReusable return unsafe.Pointer?
+  ;; Maybe doesn't matter. gclinkptr might be for historical reasons.
+  (let [(values v ^:assign span) (.nextReusableNoScan c span spc)
+      ^{:line 1475} x (conv unsafe/Pointer v)]
+
+    ;; Compensate for the GC assist credit deducted in mallocgc (before calling us and
+    ;; after we return) because this is not a newly allocated object. We use the full slot
+    ;; size (elemsize) here because that's what mallocgc deducts overall. Note we only
+    ;; adjust this when gcBlackenEnabled is true, which follows mallocgc behavior.
+    ;; TODO(thepudds): a follow-up CL adds a more specific test of our assist credit
+    ;; handling, including for validating internal fragmentation handling.
+    (when (!= gcBlackenEnabled 0)
+      (addAssistCredit size))
+
+
+    ;; This is a previously used object, so only check needzero (and not span.needzero)
+    ;; for clearing.
+    (when needzero
+      (memclrNoHeapPointers x size))
+
+
+    ;; See publicationBarrier comment in mallocgcSmallNoscan.
+    (publicationBarrier)
+
+    ;; Finish and return. Note that we do not update span.freeIndexForScan, profiling info,
+    ;; nor do we check gcTrigger.
+    ;; TODO(thepudds): the current approach is viable for a GOEXPERIMENT, but
+    ;; means we do not profile reused heap objects. Ultimately, we will need a better
+    ;; approach for profiling, or at least ensure we are not introducing bias in the
+    ;; profiled allocations.
+    ;; TODO(thepudds): related, we probably want to adjust how allocs and frees are counted
+    ;; in the existing stats. Currently, reused objects are not counted as allocs nor
+    ;; frees, but instead roughly appear as if the original heap object lived on. We
+    ;; probably will also want some additional runtime/metrics, and generally think about
+    ;; user-facing observability & diagnostics, though all this likely can wait for an
+    ;; official proposal.
+    (when (.-enabled writeBarrier)
+      ;; Allocate black during GC.
+      ;; All slots hold nil so no scanning is needed.
+      ;; This may be racing with GC so do it atomically if there can be
+      ;; a race marking the bit.
+      (gcmarknewobject span (conv uintptr x)))
+
+    ^{:line 1515} x))
+
+
+^{:go/end 1607} (go/func mallocgcSmallScanNoHeader [^uintptr size ^{:tag (* _type)} typ] :results [unsafe/Pointer uintptr]
+  ;; Set mp.mallocing to keep from being preempted by GC.
+  (let [mp (acquirem)]
+    (when doubleCheckMalloc
+      (when (!= (.-mallocing mp) 0)
+        (throw "malloc deadlock"))
+
+      (when (== (.-gsignal mp) (getg))
+        (throw "malloc during signal"))
+
+      (when (or (== typ nil) (not (.Pointers typ)))
+        (throw "noscan allocated in scan-only path"))
+
+      (when (not (heapBitsInSpan size))
+        (throw "heap bits in not in span for non-header-only path")))
+
+
+    (set! (.-mallocing mp) 1)
+
+    (let [checkGCTrigger false
+        ^{:line 1538} c (getMCache mp)
+        ^{:line 1539} sizeclass (aget gc/SizeToSizeClass8 (divRoundUp size gc/SmallSizeDiv))
+        ^{:line 1540} spc (makeSpanClass sizeclass false)
+        ^{:line 1541} span (aget (.-alloc c) spc)
+        ^{:line 1542} v (nextFreeFast span)]
+      (when (== v 0)
+        (set! (values v span checkGCTrigger) (.nextFree c spc)))
+
+      (let [x (conv unsafe/Pointer v)]
+        (when (!= (.-needzero span) 0)
+          (memclrNoHeapPointers x size))
+
+        (if (and (== goarch/PtrSize 8) (== sizeclass 1))
+          ;; initHeapBits already set the pointer bits for the 8-byte sizeclass
+          ;; on 64-bit platforms.
+          (set! (.-scanAlloc c) + 8)
+
+          (set! (.-scanAlloc c) + (heapSetTypeNoHeader (conv uintptr x) size typ span)))
+
+        (set! size (conv uintptr (aget gc/SizeClassToSize sizeclass)))
+
+        ;; Ensure that the stores above that initialize x to
+        ;; type-safe memory and set the heap bits occur before
+        ;; the caller can make x observable to the garbage
+        ;; collector. Otherwise, on weakly ordered machines,
+        ;; the garbage collector could follow a pointer to x,
+        ;; but see uninitialized memory or stale heap bits.
+        (publicationBarrier)
+
+        (if (.-enabled writeBarrier)
+          ;; Allocate black during GC.
+          ;; All slots hold nil so no scanning is needed.
+          ;; This may be racing with GC so do it atomically if there can be
+          ;; a race marking the bit.
+          (gcmarknewobject span (conv uintptr x))
+
+          ;; Track the last free index before the mark phase. This field
+          ;; is only used by the garbage collector. During the mark phase
+          ;; this is used by the conservative scanner to filter out objects
+          ;; that are both free and recently-allocated. It's safe to do that
+          ;; because we allocate-black if the GC is enabled. The conservative
+          ;; scanner produces pointers out of thin air, so without additional
+          ;; synchronization it might otherwise observe a partially-initialized
+          ;; object, which could crash the program.
+          (set! (.-freeIndexForScan span) (.-freeindex span)))
+
+
+        ;; Note cache c only valid while m acquired; see #47302
+        ;;
+        ;; N.B. Use the full size because that matches how the GC
+        ;; will update the mem profile on the "free" side.
+        ;;
+        ;; TODO(mknyszek): We should really count the header as part
+        ;; of gc_sys or something. The code below just pretends it is
+        ;; internal fragmentation and matches the GC's accounting by
+        ;; using the whole allocation slot.
+        (set! (.-nextSample c) - (conv int64 size))
+        (when (or (< (.-nextSample c) 0) (!= MemProfileRate (.-memProfRate c)))
+          (profilealloc mp x size))
+
+        (set! (.-mallocing mp) 0)
+        (releasem mp)
+
+        (when checkGCTrigger
+          (when [t (lit gcTrigger :kind gcTriggerHeap)] (.test t)
+            (gcStart t)))
+
+
+        (return x size)))))
+
+
+^{:go/end 1700} (go/func mallocgcSmallScanHeader [^uintptr size ^{:tag (* _type)} typ] :results [unsafe/Pointer uintptr]
+  ;; Set mp.mallocing to keep from being preempted by GC.
+  (let [mp (acquirem)]
+    (when doubleCheckMalloc
+      (when (!= (.-mallocing mp) 0)
+        (throw "malloc deadlock"))
+
+      (when (== (.-gsignal mp) (getg))
+        (throw "malloc during signal"))
+
+      (when (or (== typ nil) (not (.Pointers typ)))
+        (throw "noscan allocated in scan-only path"))
+
+      (when (heapBitsInSpan size)
+        (throw "heap bits in span for header-only path")))
+
+
+    (set! (.-mallocing mp) 1)
+
+    (let [checkGCTrigger false
+        ^{:line 1629} c (getMCache mp)]
+      (set! size + gc/MallocHeaderSize)
+      (let [^uint8 sizeclass (zero uint8)]
+        (if (<= size (- gc/SmallSizeMax 8))
+          (set! sizeclass (aget gc/SizeToSizeClass8 (divRoundUp size gc/SmallSizeDiv)))
+
+          (set! sizeclass (aget gc/SizeToSizeClass128 (divRoundUp (- size gc/SmallSizeMax) gc/LargeSizeDiv))))
+
+        (set! size (conv uintptr (aget gc/SizeClassToSize sizeclass)))
+        (let [spc (makeSpanClass sizeclass false)
+            ^{:line 1639} span (aget (.-alloc c) spc)
+            ^{:line 1640} v (nextFreeFast span)]
+          (when (== v 0)
+            (set! (values v span checkGCTrigger) (.nextFree c spc)))
+
+          (let [x (conv unsafe/Pointer v)]
+            (when (!= (.-needzero span) 0)
+              (memclrNoHeapPointers x size))
+
+            (let [header (conv (* (* _type)) x)]
+              (set! x (add x gc/MallocHeaderSize))
+              (set! (.-scanAlloc c) + (heapSetTypeSmallHeader (conv uintptr x) (- size gc/MallocHeaderSize) typ header span))
+
+              ;; Ensure that the stores above that initialize x to
+              ;; type-safe memory and set the heap bits occur before
+              ;; the caller can make x observable to the garbage
+              ;; collector. Otherwise, on weakly ordered machines,
+              ;; the garbage collector could follow a pointer to x,
+              ;; but see uninitialized memory or stale heap bits.
+              (publicationBarrier)
+
+              (if (.-enabled writeBarrier)
+                ;; Allocate black during GC.
+                ;; All slots hold nil so no scanning is needed.
+                ;; This may be racing with GC so do it atomically if there can be
+                ;; a race marking the bit.
+                (gcmarknewobject span (conv uintptr x))
+
+                ;; Track the last free index before the mark phase. This field
+                ;; is only used by the garbage collector. During the mark phase
+                ;; this is used by the conservative scanner to filter out objects
+                ;; that are both free and recently-allocated. It's safe to do that
+                ;; because we allocate-black if the GC is enabled. The conservative
+                ;; scanner produces pointers out of thin air, so without additional
+                ;; synchronization it might otherwise observe a partially-initialized
+                ;; object, which could crash the program.
+                (set! (.-freeIndexForScan span) (.-freeindex span)))
+
+
+              ;; Note cache c only valid while m acquired; see #47302
+              ;;
+              ;; N.B. Use the full size because that matches how the GC
+              ;; will update the mem profile on the "free" side.
+              ;;
+              ;; TODO(mknyszek): We should really count the header as part
+              ;; of gc_sys or something. The code below just pretends it is
+              ;; internal fragmentation and matches the GC's accounting by
+              ;; using the whole allocation slot.
+              (set! (.-nextSample c) - (conv int64 size))
+              (when (or (< (.-nextSample c) 0) (!= MemProfileRate (.-memProfRate c)))
+                (profilealloc mp x size))
+
+              (set! (.-mallocing mp) 0)
+              (releasem mp)
+
+              (when checkGCTrigger
+                (when [t (lit gcTrigger :kind gcTriggerHeap)] (.test t)
+                  (gcStart t)))
+
+
+              (return x size))))))))
+
+
+^{:go/end 1802} (go/func mallocgcLarge [^uintptr size ^{:tag (* _type)} typ ^bool needzero] :results [unsafe/Pointer uintptr]
+  ;; Set mp.mallocing to keep from being preempted by GC.
+  (let [mp (acquirem)]
+    (when doubleCheckMalloc
+      (when (!= (.-mallocing mp) 0)
+        (throw "malloc deadlock"))
+
+      (when (== (.-gsignal mp) (getg))
+        (throw "malloc during signal")))
+
+
+    (set! (.-mallocing mp) 1)
+
+    (let [c (getMCache mp)
+        ;; For large allocations, keep track of zeroed state so that
+        ;; bulk zeroing can be happen later in a preemptible context.
+        ^{:line 1718} span (.allocLarge c size (or (== typ nil) (not (.Pointers typ))))]
+      (set! (.-freeindex span) 1)
+      (set! (.-allocCount span) 1)
+      (set! (.-largeType span) nil) ; Tell the GC not to look at this yet.
+      (set! size (.-elemsize span))
+      (let [x (conv unsafe/Pointer (.base span))]
+
+        ;; Ensure that the store above that sets largeType to
+        ;; nil happens before the caller can make x observable
+        ;; to the garbage collector.
+        ;;
+        ;; Otherwise, on weakly ordered machines, the garbage
+        ;; collector could follow a pointer to x, but see a stale
+        ;; largeType value.
+        (publicationBarrier)
+
+        (if (.-enabled writeBarrier)
+          ;; Allocate black during GC.
+          ;; All slots hold nil so no scanning is needed.
+          ;; This may be racing with GC so do it atomically if there can be
+          ;; a race marking the bit.
+          (gcmarknewobject span (conv uintptr x))
+
+          ;; Track the last free index before the mark phase. This field
+          ;; is only used by the garbage collector. During the mark phase
+          ;; this is used by the conservative scanner to filter out objects
+          ;; that are both free and recently-allocated. It's safe to do that
+          ;; because we allocate-black if the GC is enabled. The conservative
+          ;; scanner produces pointers out of thin air, so without additional
+          ;; synchronization it might otherwise observe a partially-initialized
+          ;; object, which could crash the program.
+          (set! (.-freeIndexForScan span) (.-freeindex span)))
+
+
+        ;; Note cache c only valid while m acquired; see #47302
+        ;;
+        ;; N.B. Use the full size because that matches how the GC
+        ;; will update the mem profile on the "free" side.
+        ;;
+        ;; TODO(mknyszek): We should really count the header as part
+        ;; of gc_sys or something. The code below just pretends it is
+        ;; internal fragmentation and matches the GC's accounting by
+        ;; using the whole allocation slot.
+        (set! (.-nextSample c) - (conv int64 size))
+        (when (or (< (.-nextSample c) 0) (!= MemProfileRate (.-memProfRate c)))
+          (profilealloc mp x size))
+
+        (set! (.-mallocing mp) 0)
+        (releasem mp)
+
+        ;; Check to see if we need to trigger the GC.
+        (when [t (lit gcTrigger :kind gcTriggerHeap)] (.test t)
+          (gcStart t))
+
+
+        ;; Objects can be zeroed late in a context where preemption can occur.
+        ;;
+        ;; x will keep the memory alive.
+        (when (and needzero (!= (.-needzero span) 0))
+          ;; N.B. size == fullSize always in this case.
+          (memclrNoHeapPointersChunked size x)) ; This is a possible preemption point: see #47302
+
+
+        ;; Set the type and run the publication barrier while non-preemptible. We need to make
+        ;; sure that between heapSetTypeLarge and publicationBarrier we cannot get preempted,
+        ;; otherwise the GC could potentially observe non-zeroed memory but largeType set on weak
+        ;; memory architectures.
+        ;;
+        ;; The GC can also potentially observe non-zeroed memory if conservative scanning spuriously
+        ;; observes a partially-allocated object, see the freeIndexForScan update above. This case is
+        ;; handled by synchronization inside heapSetTypeLarge.
+        (set! mp (acquirem))
+        (when (and (!= typ nil) (.Pointers typ))
+          ;; Finish storing the type information, now that we're certain the memory is zeroed.
+          (set! (.-scanAlloc (getMCache mp)) + (heapSetTypeLarge (conv uintptr x) size typ span)))
+
+        ;; Publish the object again, now with zeroed memory and initialized type information.
+        ;;
+        ;; Even if we didn't update any type information, this is necessary to ensure that, for example,
+        ;; x written to a global without any synchronization still results in other goroutines observing
+        ;; zeroed memory.
+        (publicationBarrier)
+        (releasem mp)
+        (return x size)))))
+
+
+^{:go/breaks [[5 1831]] :go/end 1832} (go/func preMallocgcDebug ^unsafe/Pointer [^uintptr size ^{:tag (* _type)} typ]
+  (when (!= (.-sbrk debug) 0)
+    (let [align (conv uintptr 16)]
+      (when (!= typ nil)
+        ;; TODO(austin): This should be just
+        ;;   align = uintptr(typ.align)
+        ;; but that's only 4 on 32-bit platforms,
+        ;; even if there's a uint64 field in typ (see #599).
+        ;; This causes 64-bit atomic accesses to panic.
+        ;; Hence, we use stricter alignment that matches
+        ;; the normal allocator better.
+        (cond (== (bit-and size 7) 0)
+          (set! align 8)
+          (== (bit-and size 3) 0)
+          (set! align 4)
+          (== (bit-and size 1) 0)
+          (set! align 2) :else
+
+          (set! align 1)))
+
+
+      (return (persistentalloc size align (addr (.-other_sys memstats))))))
+
+  (when (and (.-active inittrace) (== (.-id inittrace) (.-goid (getg))))
+    ;; Init functions are executed sequentially in a single goroutine.
+    (set! (.-allocs inittrace) + 1))
+
+  nil)
+
+
+^{:go/end 1856} (go/func postMallocgcDebug [^unsafe/Pointer x ^uintptr elemsize ^{:tag (* _type)} typ]
+  (when (and (.-active inittrace) (== (.-id inittrace) (.-goid (getg))))
+    ;; Init functions are executed sequentially in a single goroutine.
+    (set! (.-bytes inittrace) + (conv uint64 elemsize)))
+
+
+  (when (traceAllocFreeEnabled)
+    (let [trace (traceAcquire)]
+      (when (.ok trace)
+        (.HeapObjectAlloc trace (conv uintptr x) typ)
+        (traceRelease trace))))
+
+
+
+  ;; N.B. elemsize == 0 indicates a tiny allocation, since no new slot was
+  ;; allocated to fulfill this call to mallocgc. This means checkfinalizer
+  ;; will only flag an error if there is actually any risk. If an allocation
+  ;; has the tiny block to itself, it will not get flagged, because we won't
+  ;; mark the block as a tiny block.
+  (when (and (!= (.-checkfinalizers debug) 0) (== elemsize 0))
+    (setTinyBlockContext (conv unsafe/Pointer (alignDown (conv uintptr x) maxTinySize)))))
+
+
+
+
+
+
+^{:go/end 1869} (go/func addAssistCredit "addAssistCredit is like deductAssistCredit,\nbut adds credit rather than removes,\nand never calls gcAssistAlloc.\n" [^uintptr size]
+  ;; Credit the current user G.
+  (let [assistG (getg)]
+    (when (!= (.-curg (.-m assistG)) nil) ; TODO(thepudds): do we need to do this?
+      (set! assistG (.-curg (.-m assistG))))
+
+    ;; Credit the size against the G.
+    (set! (.-gcAssistBytes assistG) + (conv int64 size))))
+
+
+(go/const
+
+
+
+  ^{:line 1875} [^{:val false :doc "doubleCheckReusable enables some additional invariant checks for the\nruntime.freegc and reusable objects. Note that some of these checks alter timing,\nand it is good to test changes with and without this enabled.\n"} doubleCheckReusable false]
+
+
+  ^{:line 1878} [^{:val false :doc "debugReusableLog enables some printlns for runtime.freegc and reusable objects.\n"} debugReusableLog false])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2033} (go/func freegc "freegc records that a heap object is reusable and available for\nimmediate reuse in a subsequent mallocgc allocation, without\nneeding to wait for the GC cycle to progress.\n\nThe information is recorded in a free list stored in the\ncurrent P's mcache. The caller must pass in the user size\nand whether the object has pointers, which allows a faster free\noperation.\n\nfreegc must be called by the effective owner of ptr who knows\nthe pointer is logically dead, with no possible aliases that might\nbe used past that moment. In other words, ptr must be the\nlast and only pointer to its referent.\n\nThe intended caller is the compiler.\n\nNote: please do not send changes that attempt to add freegc calls\nto the standard library.\n\nptr must point to a heap object or into the current g's stack,\nin which case freegc is a no-op. In particular, ptr must not point\nto memory in the data or bss sections, which is partially enforced.\nFor objects with a malloc header, ptr should point mallocHeaderSize bytes\npast the base; otherwise, ptr should point to the base of the heap object.\nIn other words, ptr should be the same pointer that was returned by mallocgc.\n\nIn addition, the caller must know that ptr's object has no specials, such\nas might have been created by a call to SetFinalizer or AddCleanup.\n(Internally, the runtime deals appropriately with internally-created\nspecials, such as specials for memory profiling).\n\nIf the size of ptr's object is less than 16 bytes or greater than\n32KiB - gc.MallocHeaderSize bytes, freegc is currently a no-op. It must only\nbe called in alloc-safe places. It currently throws if noscan is false\n(support for which is implemented in a later CL in our stack).\n\nNote that freegc accepts an unsafe.Pointer and hence keeps the pointer\nalive. It therefore could be a pessimization in some cases (such\nas a long-lived function) if the caller does not call freegc before\nor roughly when the liveness analysis of the compiler\nwould otherwise have determined ptr's object is reclaimable by the GC.\n" ^bool [^unsafe/Pointer ptr ^uintptr size ^bool noscan]
+  (when (or (not runtimeFreegcEnabled) (not (reusableSize size)))
+    (return false))
+
+  (when (and sizeSpecializedMallocEnabled (not noscan))
+    ;; TODO(thepudds): temporarily disable freegc with SizeSpecializedMalloc for pointer types
+    ;; until we finish integrating.
+    (return false))
+
+
+  (when (== ptr nil)
+    (throw "freegc nil"))
+
+
+  ;; Set mp.mallocing to keep from being preempted by GC.
+  ;; Otherwise, the GC could flush our mcache or otherwise cause problems.
+  (let [mp (acquirem)]
+    (when (!= (.-mallocing mp) 0)
+      (throw "freegc deadlock"))
+
+    (when (== (.-gsignal mp) (getg))
+      (throw "freegc during signal"))
+
+    (set! (.-mallocing mp) 1)
+
+    (when (and (<= (.-lo (.-stack (.-curg mp))) (conv uintptr ptr)) (< (conv uintptr ptr) (.-hi (.-stack (.-curg mp)))))
+      ;; This points into our stack, so free is a no-op.
+      (set! (.-mallocing mp) 0)
+      (releasem mp)
+      (return false))
+
+
+    (when doubleCheckReusable
+      ;; TODO(thepudds): we could enforce no free on globals in bss or data. Maybe by
+      ;; checking span via spanOf or spanOfHeap, or maybe walk from firstmoduledata
+      ;; like isGoPointerWithoutSpan, or activeModules, or something. If so, we might
+      ;; be able to delay checking until reuse (e.g., check span just before reusing,
+      ;; though currently we don't always need to lookup a span on reuse). If we think
+      ;; no usage patterns could result in globals, maybe enforcement for globals could
+      ;; be behind -d=checkptr=1 or similar. The compiler can have knowledge of where
+      ;; a variable is allocated, but stdlib does not, although there are certain
+      ;; usage patterns that cannot result in a global.
+      ;; TODO(thepudds): separately, consider a local debugReusableMcacheOnly here
+      ;; to ignore freed objects if not in mspan in mcache,  maybe when freeing and reading,
+      ;; by checking something like s.base() <= uintptr(v) && uintptr(v) < s.limit. Or
+      ;; maybe a GODEBUG or compiler debug flag.
+      (let [span (spanOf (conv uintptr ptr))]
+        (when (== span nil)
+          (throw "nextReusable: nil span for pointer in free list"))
+
+        (when [state (.get (.-state span))] (!= state mSpanInUse)
+          (throw "nextReusable: span is not in use"))))
+
+
+
+    (when (!= (.-clobberfree debug) 0)
+      (clobberfree ptr size))
+
+
+    ;; We first check if p is still in our per-P cache.
+    ;; Get our per-P cache for small objects.
+    (let [c (getMCache mp)]
+      (when (== c nil)
+        (throw "freegc called without a P or outside bootstrapping"))
+
+
+      (let [v (conv uintptr ptr)]
+        (when (and (not noscan) (not (heapBitsInSpan size)))
+          ;; mallocgcSmallScanHeader expects to get the base address of the object back
+          ;; from the findReusable funcs (as well as from nextFreeFast and nextFree), and
+          ;; not mallocHeaderSize bytes into a object, so adjust that here.
+          (set! v - mallocHeaderSize)
+
+          ;; The size class lookup wants size to be adjusted by mallocHeaderSize.
+          (set! size + mallocHeaderSize))
+
+
+        ;; TODO(thepudds): should verify (behind doubleCheckReusable constant) that our calculated
+        ;; sizeclass here matches what's in span found via spanOf(ptr) or findObject(ptr).
+        (let [^uint8 sizeclass (zero uint8)]
+          (if (<= size (- gc/SmallSizeMax 8))
+            (set! sizeclass (aget gc/SizeToSizeClass8 (divRoundUp size gc/SmallSizeDiv)))
+
+            (set! sizeclass (aget gc/SizeToSizeClass128 (divRoundUp (- size gc/SmallSizeMax) gc/LargeSizeDiv))))
+
+
+          ^{:go/breaks [[6 2032]]} (let [spc (makeSpanClass sizeclass noscan)
+              ^{:line 2009} s (aget (.-alloc c) spc)]
+
+            (when debugReusableLog
+              (if (and (<= (.base s) (conv uintptr v)) (< (conv uintptr v) (.-limit s)))
+                (println "freegc [in mcache]:" (conv hex (conv uintptr v)) "sweepgen:" (.-sweepgen mheap_) "writeBarrier.enabled:" (.-enabled writeBarrier))
+
+                (println "freegc [NOT in mcache]:" (conv hex (conv uintptr v)) "sweepgen:" (.-sweepgen mheap_) "writeBarrier.enabled:" (.-enabled writeBarrier))))
+
+
+
+            (if noscan
+              (.addReusableNoscan c spc (conv uintptr v))
+
+              ;; TODO(thepudds): implemented in later CL in our stack.
+              (throw "freegc called for object with pointers, not yet implemented"))
+
+
+            ;; For stats, for now we leave allocCount alone, roughly pretending to the rest
+            ;; of the system that this potential reuse never happened.
+
+            (set! (.-mallocing mp) 0)
+            (releasem mp)
+
+            true))))))
+
+
+
+
+^{:go/end 2075} (go/method nextReusableNoScan "nextReusableNoScan returns the next reusable object for a noscan span,\nor 0 if no reusable object is found.\n" [^{:tag (* mcache)} c ^{:tag (* mspan)} s ^spanClass spc] :results [gclinkptr (* mspan)]
+  (when (not runtimeFreegcEnabled)
+    (return 0 s))
+
+
+  ;; Pop a reusable pointer from the free list for this span class.
+  (let [v (aget (.-reusableNoscan c) spc)]
+    (when (== v 0)
+      (return 0 s))
+
+    (aset (.-reusableNoscan c) spc (.-next (.ptr v)))
+
+    (when debugReusableLog
+      (println "reusing from ptr free list:" (conv hex v) "sweepgen:" (.-sweepgen mheap_) "writeBarrier.enabled:" (.-enabled writeBarrier)))
+
+    (when doubleCheckReusable
+      (doubleCheckNextReusable v)) ; debug only sanity check
+
+
+    ;; For noscan spans, we only need the span if the write barrier is enabled (so that our caller
+    ;; can call gcmarknewobject to allocate black). If the write barrier is enabled, we can skip
+    ;; looking up the span when the pointer is in a span in the mcache.
+    (when (not (.-enabled writeBarrier))
+      (return v nil))
+
+    (when (and (<= (.base s) (conv uintptr v)) (< (conv uintptr v) (.-limit s)))
+      ;; Return the original span.
+      (return v s))
+
+
+    ;; We must find and return the span.
+    (let [span (spanOf (conv uintptr v))]
+      (when (== span nil)
+        ;; TODO(thepudds): construct a test that triggers this throw.
+        (throw "nextReusableNoScan: nil span for pointer in reusable object free list"))
+
+
+      (return v span))))
+
+
+
+
+^{:go/end 2109} (go/func doubleCheckNextReusable "doubleCheckNextReusable checks some invariants.\nTODO(thepudds): will probably delete some of this. Can mostly be ignored for review.\n" [^gclinkptr v]
+  ;; TODO(thepudds): should probably take the spanClass as well to confirm expected
+  ;; sizeclass match.
+  (let [(values _ span objIndex) (findObject (conv uintptr v) 0 0)]
+    (when (== span nil)
+      (throw "nextReusable: nil span for pointer in free list"))
+
+    (when [state (.get (.-state span))] (!= state mSpanInUse)
+      (throw "nextReusable: span is not in use"))
+
+    (when (or (< (conv uintptr v) (.base span)) (>= (conv uintptr v) (.-limit span)))
+      (throw "nextReusable: span is not in range"))
+
+    (when (!= (.objBase span (conv uintptr v)) (conv uintptr v))
+      (print "nextReusable: v=" (conv hex v) " base=" (conv hex (.objBase span (conv uintptr v))) "\n")
+      (throw "nextReusable: v is non-base-address for object found on pointer free list"))
+
+    (when (.isFree span objIndex)
+      (throw "nextReusable: pointer on free list is free"))
+
+
+    (let [^:const ^{:val false} debugReusableEnsureSwept false]
+      (when debugReusableEnsureSwept
+        ;; Currently disabled.
+        ;; Note: ensureSwept here alters behavior (not just an invariant check).
+        (.ensureSwept span)
+        (when (.isFree span objIndex)
+          (throw "nextReusable: pointer on free list is free after ensureSwept"))))))
+
+
+
+
+
+^{:go/breaks [[5 2116]] :go/end 2117} (go/func reusableSize "reusableSize reports if size is a currently supported size for a reusable object.\n" ^bool [^uintptr size]
+  (when (or (< size maxTinySize) (> size (- maxSmallSize mallocHeaderSize)))
+    (return false))
+
+  true)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2144} (go/func memclrNoHeapPointersChunked "memclrNoHeapPointersChunked repeatedly calls memclrNoHeapPointers\non chunks of the buffer to be zeroed, with opportunities for preemption\nalong the way.  memclrNoHeapPointers contains no safepoints and also\ncannot be preemptively scheduled, so this provides a still-efficient\nblock copy that can also be preempted on a reasonable granularity.\n\nUse this with care; if the data being cleared is tagged to contain\npointers, this allows the GC to run before it is all cleared.\n" [^uintptr size ^unsafe/Pointer x]
+  (let [v (conv uintptr x)
+      ;; got this from benchmarking. 128k is too small, 512k is too large.
+      ^:const ^{:line 2130 :val 262144} chunkBytes (* 256 1024)
+      ^{:line 2131} vsize (+ v size)]
+    (for [voff v] (< voff vsize) (set! voff (+ voff chunkBytes))
+      (when (.-preempt (getg))
+        ;; may hold locks, e.g., profiling
+        (goschedguarded))
+
+      ;; clear min(avail, lump) bytes
+      (let [n (- vsize voff)]
+        (when (> n chunkBytes)
+          (set! n chunkBytes))
+
+        (memclrNoHeapPointers (conv unsafe/Pointer voff) n)))))
+
+
+
+
+
+
+^{:go/end 2151} (go/func newobject "implementation of new builtin\ncompiler (both frontend and SSA backend) knows the signature\nof this function.\n" ^unsafe/Pointer [^{:tag (* _type)} typ]
+  (mallocgc (.-Size_ typ) typ true))
+
+
+
+^{:go/end 2156} (go/func ^{:go/linkname "maps_newobject internal/runtime/maps.newobject"} maps_newobject ^unsafe/Pointer [^{:tag (* _type)} typ]
+  (newobject typ))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2172} (go/func ^{:go/linkname "reflect_unsafe_New reflect.unsafe_New"} reflect_unsafe_New "reflect_unsafe_New is meant for package reflect,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - gitee.com/quant1x/gox\n  - github.com/goccy/json\n  - github.com/modern-go/reflect2\n  - github.com/v2pro/plz\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^unsafe/Pointer [^{:tag (* _type)} typ]
+  (mallocgc (.-Size_ typ) typ true))
+
+
+
+^{:go/end 2177} (go/func ^{:go/linkname "reflectlite_unsafe_New internal/reflectlite.unsafe_New"} reflectlite_unsafe_New ^unsafe/Pointer [^{:tag (* _type)} typ]
+  (mallocgc (.-Size_ typ) typ true))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2201} (go/func ^{:go/linkname "newarray"} newarray "newarray allocates an array of n elements of type typ.\n\nnewarray should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/RomiChan/protobuf\n  - github.com/segmentio/encoding\n  - github.com/ugorji/go/codec\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^unsafe/Pointer [^{:tag (* _type)} typ ^int n]
+  (when (== n 1)
+    (return (mallocgc (.-Size_ typ) typ true)))
+
+  (let [(values mem overflow) (math/MulUintptr (.-Size_ typ) (conv uintptr n))]
+    (when (or overflow (> mem maxAlloc) (< n 0))
+      (panic (conv plainError "runtime: allocation size out of range")))
+
+    (mallocgc mem typ true)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2220} (go/func ^{:go/linkname "reflect_unsafe_NewArray reflect.unsafe_NewArray"} reflect_unsafe_NewArray "reflect_unsafe_NewArray is meant for package reflect,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - gitee.com/quant1x/gox\n  - github.com/bytedance/sonic\n  - github.com/goccy/json\n  - github.com/modern-go/reflect2\n  - github.com/segmentio/encoding\n  - github.com/segmentio/kafka-go\n  - github.com/v2pro/plz\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^unsafe/Pointer [^{:tag (* _type)} typ ^int n]
+  (newarray typ n))
+
+
+
+^{:go/end 2225} (go/func ^{:go/linkname "maps_newarray internal/runtime/maps.newarray"} maps_newarray ^unsafe/Pointer [^{:tag (* _type)} typ ^int n]
+  (newarray typ n))
+
+
+
+
+
+
+^{:go/end 2239} (go/func profilealloc "profilealloc resets the current mcache's nextSample counter and\nrecords a memory profile sample.\n\nThe caller must be non-preemptible and have a P.\n" [^{:tag (* m)} mp ^unsafe/Pointer x ^uintptr size]
+  (let [c (getMCache mp)]
+    (when (== c nil)
+      (throw "profilealloc called without a P or outside bootstrapping"))
+
+    (set! (.-memProfRate c) MemProfileRate)
+    (set! (.-nextSample c) (nextSample))
+    (mProf_Malloc mp x size)))
+
+
+
+
+
+
+
+
+
+^{:go/end 2258} (go/func nextSample "nextSample returns the next sampling point for heap profiling. The goal is\nto sample allocations on average every MemProfileRate bytes, but with a\ncompletely random distribution over the allocation timeline; this\ncorresponds to a Poisson process with parameter MemProfileRate. In Poisson\nprocesses, the distance between two samples follows the exponential\ndistribution (exp(MemProfileRate)), so the best return value is a random\nnumber taken from an exponential distribution whose mean is MemProfileRate.\n" ^int64 []
+  (when (== MemProfileRate 0)
+    ;; Basically never sample.
+    (return math/MaxInt64))
+
+  (when (== MemProfileRate 1)
+    ;; Sample immediately.
+    (return 0))
+
+  (conv int64 (fastexprand MemProfileRate)))
+
+
+
+
+^{:go/end 2288} (go/func fastexprand "fastexprand returns a random number from an exponential distribution with\nthe specified mean.\n" ^int32 [^int mean]
+  ;; Avoid overflow. Maximum possible step is
+  ;; -ln(1/(1<<randomBitCount)) * mean, approximately 20 * mean.
+  (switch
+    (case [(> mean 0x7000000)]
+      (set! mean 0x7000000))
+    (case [(== mean 0)]
+      (return 0)))
+
+
+  ;; Take a random sample of the exponential distribution exp(-mean*x).
+  ;; The probability distribution function is mean*exp(-mean*x), so the CDF is
+  ;; p = 1 - exp(-mean*x), so
+  ;; q = 1 - p == exp(-mean*x)
+  ;; log_e(q) = -mean*x
+  ;; -log_e(q)/mean = x
+  ;; x = -log_e(q) * mean
+  ;; x = log_2(q) * (-log_e(2)) * mean    ; Using log_2 for efficiency
+  (let [^:const ^{:val 26} randomBitCount 26
+      ^{:line 2281} q (+ (cheaprandn (<< 1 randomBitCount)) 1)
+      ^{:line 2282} qlog (- (fastlog2 (conv float64 q)) randomBitCount)]
+    (when (> qlog 0)
+      (set! qlog 0))
+
+    (let [^:const ^{:val -0.6931471805599453} minusLog2 -0.6931471805599453] ; -ln(2)
+      (+ (conv int32 (* qlog (* minusLog2 (conv float64 mean)))) 1))))
+
+
+(go/type persistentAlloc (struct
+    ^{:line 2291 :tag (* notInHeap)} base
+    ^{:line 2292 :tag uintptr} off))
+
+
+(go/var ^{:tag (struct mutex persistentAlloc)} globalAlloc)
+
+
+
+
+
+
+(go/const ^{:val 262144 :doc "persistentChunkSize is the number of bytes we allocate when we grow\na persistentAlloc.\n"} persistentChunkSize (<< 256 10))
+
+
+
+
+(go/var ^{:tag (* notInHeap) :doc "persistentChunks is a list of all the persistent chunks we have\nallocated. The list is maintained through the first word in the\npersistent chunk. This is updated atomically.\n"} persistentChunks)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2328} (go/func ^:go/nosplit persistentalloc "Wrapper around sysAlloc that can allocate small chunks.\nThere is no associated free operation.\nIntended for things like function/type/debug-related persistent data.\nIf align is 0, uses default align (currently 8).\nThe returned memory will be zeroed.\nsysStat must be non-nil.\n\nConsider marking persistentalloc'd types not in heap by embedding\ninternal/runtime/sys.NotInHeap.\n\nnosplit because it is used during write barriers and must not be preempted.\n" ^unsafe/Pointer [^uintptr size ^uintptr align ^{:tag (* sysMemStat)} sysStat]
+  (let [^{:tag (* notInHeap)} p (zero (* notInHeap))]
+    (systemstack ^{:go/end 2326} (fn []
+        (set! p (persistentalloc1 size align sysStat))))
+
+    (conv unsafe/Pointer p)))
+
+
+
+
+
+
+^{:go/end 2397} (go/func ^:go/systemstack persistentalloc1 "Must run on system stack because stack growth can (re)invoke it.\nSee issue 9174.\n" ^{:tag (* notInHeap)} [^uintptr size ^uintptr align ^{:tag (* sysMemStat)} sysStat]
+  (let [
+      ^:const ^{:line 2336 :val 65536} maxBlock (<< 64 10)] ; VM reservation granularity is 64K on windows
+
+
+    (when (== size 0)
+      (throw "persistentalloc: size == 0"))
+
+    (if (!= align 0) (do
+        (when (!= (bit-and align (- align 1)) 0)
+          (throw "persistentalloc: align is not a power of 2"))
+
+        (when (> align pageSize)
+          (throw "persistentalloc: align is too large")))
+
+
+      (set! align 8))
+
+
+    (when (>= size maxBlock)
+      (return (conv (* notInHeap) (sysAlloc size sysStat "immortal metadata"))))
+
+
+    (let [mp (acquirem)
+        ^{:line 2358 :tag (* persistentAlloc)} persistent (zero (* persistentAlloc))]
+      (if (and (!= mp nil) (!= (.-p mp) 0))
+        (set! persistent (addr (.-palloc (.ptr (.-p mp)))))
+        (do
+          (lock (addr (.-mutex globalAlloc)))
+          (set! persistent (addr (.-persistentAlloc globalAlloc)))))
+
+      (set! (.-off persistent) (alignUp (.-off persistent) align))
+      (when (or (> (+ (.-off persistent) size) persistentChunkSize) (== (.-base persistent) nil))
+        (set! (.-base persistent) (conv (* notInHeap) (sysAlloc persistentChunkSize (addr (.-other_sys memstats)) "immortal metadata")))
+        (when (== (.-base persistent) nil)
+          (when (== persistent (addr (.-persistentAlloc globalAlloc)))
+            (unlock (addr (.-mutex globalAlloc))))
+
+          (throw "runtime: cannot allocate memory"))
+
+
+        ;; Add the new chunk to the persistentChunks list.
+        (while true
+          (let [chunks (conv uintptr (conv unsafe/Pointer persistentChunks))]
+            (set! @(conv (* uintptr) (conv unsafe/Pointer (.-base persistent))) chunks)
+            (when (atomic/Casuintptr (conv (* uintptr) (conv unsafe/Pointer (addr persistentChunks))) chunks (conv uintptr (conv unsafe/Pointer (.-base persistent))))
+              (break))))
+
+
+        (set! (.-off persistent) (alignUp goarch/PtrSize align)))
+
+      (let [p (.add (.-base persistent) (.-off persistent))]
+        (set! (.-off persistent) + size)
+        (releasem mp)
+        (when (== persistent (addr (.-persistentAlloc globalAlloc)))
+          (unlock (addr (.-mutex globalAlloc))))
+
+
+        (when (!= sysStat (addr (.-other_sys memstats)))
+          (.add sysStat (conv int64 size))
+          (.add (.-other_sys memstats) (- (conv int64 size))))
+
+        ^{:line 2396} p))))
+
+
+
+
+
+
+
+^{:go/end 2413} (go/func ^:go/nosplit inPersistentAlloc "inPersistentAlloc reports whether p points to memory allocated by\npersistentalloc. This must be nosplit because it is called by the\ncgo checker code, which is called by the write barrier code.\n" ^bool [^uintptr p]
+  ^{:go/breaks [[3 2412]]} (let [chunk (atomic/Loaduintptr (conv (* uintptr) (conv unsafe/Pointer (addr persistentChunks))))]
+    (while (!= chunk 0)
+      (when (and (>= p chunk) (< p (+ chunk persistentChunkSize)))
+        (return true))
+
+      (set! chunk @(conv (* uintptr) (conv unsafe/Pointer chunk))))
+
+    false))
+
+
+
+
+
+
+
+(go/type linearAlloc "linearAlloc is a simple linear allocator that pre-reserves a region\nof memory and then optionally maps that region into the Ready state\nas needed.\n\nThe caller is responsible for locking.\n" (struct
+    ^{:line 2421 :tag uintptr} next ; next free byte
+    ^{:line 2422 :tag uintptr} mapped ; one byte past end of mapped space
+    ^{:line 2423 :tag uintptr} end ; end of reserved space
+
+    ^{:line 2425 :tag bool} mapMemory)) ; transition memory from Reserved to Ready if true
+
+
+^{:go/end 2439} (go/method init [^{:tag (* linearAlloc)} l ^uintptr base ^uintptr size ^bool mapMemory]
+  (when (< (+ base size) base)
+    ;; Chop off the last byte. The runtime isn't prepared
+    ;; to deal with situations where the bounds could overflow.
+    ;; Leave that memory reserved, though, so we don't map it
+    ;; later.
+    (set! size - 1))
+
+  (set! (values (.-next l) (.-mapped l)) (values base base))
+  (set! (.-end l) (+ base size))
+  (set! (.-mapMemory l) mapMemory))
+
+
+^{:go/end 2457} (go/method alloc ^unsafe/Pointer [^{:tag (* linearAlloc)} l ^uintptr size ^uintptr align ^{:tag (* sysMemStat)} sysStat ^string vmaName]
+  (let [p (alignUp (.-next l) align)]
+    (when (> (+ p size) (.-end l))
+      (return nil))
+
+    (set! (.-next l) (+ p size))
+    (when [pEnd (alignUp (- (.-next l) 1) physPageSize)] (> pEnd (.-mapped l))
+      (when (.-mapMemory l)
+        ;; Transition from Reserved to Prepared to Ready.
+        (let [n (- pEnd (.-mapped l))]
+          (sysMap (conv unsafe/Pointer (.-mapped l)) n sysStat vmaName)
+          (sysUsed (conv unsafe/Pointer (.-mapped l)) n n)))
+
+      (set! (.-mapped l) pEnd))
+
+    (conv unsafe/Pointer p)))
+
+
+
+
+
+
+
+
+
+
+(go/type notInHeap "notInHeap is off-heap memory allocated by a lower-level allocator\nlike sysAlloc or persistentAlloc.\n\nIn general, it's better to use real types which embed\ninternal/runtime/sys.NotInHeap, but this serves as a generic type\nfor situations where that isn't possible (like in the allocators).\n\nTODO: Use this as the return type of sysAlloc, persistentAlloc, etc?\n" (struct ^sys/NotInHeap _))
+
+^{:go/end 2471} (go/method add ^{:tag (* notInHeap)} [^{:tag (* notInHeap)} p ^uintptr bytes]
+  (conv (* notInHeap) (conv unsafe/Pointer (+ (conv uintptr (conv unsafe/Pointer p)) bytes))))
+
+
+
+
+^{:go/end 2494} (go/func redZoneSize "redZoneSize computes the size of the redzone for a given allocation.\nRefer to the implementation of the compiler-rt.\n" ^uintptr [^uintptr userSize]
+  (switch
+    (case [(<= userSize (- 64 16))]
+      (return (<< 16 0)))
+    (case [(<= userSize (- 128 32))]
+      (return (<< 16 1)))
+    (case [(<= userSize (- 512 64))]
+      (return (<< 16 2)))
+    (case [(<= userSize (- 4096 128))]
+      (return (<< 16 3)))
+    (case [(<= userSize (- (<< 1 14) 256))]
+      (return (<< 16 4)))
+    (case [(<= userSize (- (<< 1 15) 512))]
+      (return (<< 16 5)))
+    (case [(<= userSize (- (<< 1 16) 1024))]
+      (return (<< 16 6)))
+    (default
+      (return (<< 16 7)))))

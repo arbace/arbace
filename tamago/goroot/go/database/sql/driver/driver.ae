@@ -1,0 +1,578 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package driver defines interfaces to be implemented by database
+;; drivers as used by package sql.
+;;
+;; Most code should use the [database/sql] package.
+;;
+;; The driver interface has evolved over time. Drivers should implement
+;; [Connector] and [DriverContext] interfaces.
+;; The Connector.Connect and Driver.Open methods should never return [ErrBadConn].
+;; [ErrBadConn] should only be returned from [Validator], [SessionResetter], or
+;; a query method if the connection is already in an invalid (e.g. closed) state.
+;;
+;; All [Conn] implementations should implement the following interfaces:
+;; [Pinger], [SessionResetter], and [Validator].
+;;
+;; If named parameters or context are supported, the driver's [Conn] should implement:
+;; [ExecerContext], [QueryerContext], [ConnPrepareContext], and [ConnBeginTx].
+;;
+;; To support custom data types, implement [NamedValueChecker]. [NamedValueChecker]
+;; also allows queries to accept per-query options as a parameter by returning
+;; [ErrRemoveArgument] from CheckNamedValue.
+;;
+;; If multiple result sets are supported, [Rows] should implement [RowsNextResultSet].
+;; If the driver knows how to describe the types present in the returned result
+;; it should implement the following interfaces: [RowsColumnTypeScanType],
+;; [RowsColumnTypeDatabaseTypeName], [RowsColumnTypeLength], [RowsColumnTypeNullable],
+;; and [RowsColumnTypePrecisionScale]. A given row value may also return a [Rows]
+;; type, which may represent a database cursor value.
+;;
+;; If a [Conn] implements [Validator], then the IsValid method is called
+;; before returning the connection to the connection pool. If an entry in the
+;; connection pool implements [SessionResetter], then ResetSession
+;; is called before reusing the connection for another query. If a connection is
+;; never returned to the connection pool but is immediately reused, then
+;; ResetSession is called prior to reuse but IsValid is not called.
+(in-ns 'go.database.sql.driver) (go/file "driver.go" :doc "Package driver defines interfaces to be implemented by database\ndrivers as used by package sql.\n\nMost code should use the [database/sql] package.\n\nThe driver interface has evolved over time. Drivers should implement\n[Connector] and [DriverContext] interfaces.\nThe Connector.Connect and Driver.Open methods should never return [ErrBadConn].\n[ErrBadConn] should only be returned from [Validator], [SessionResetter], or\na query method if the connection is already in an invalid (e.g. closed) state.\n\nAll [Conn] implementations should implement the following interfaces:\n[Pinger], [SessionResetter], and [Validator].\n\nIf named parameters or context are supported, the driver's [Conn] should implement:\n[ExecerContext], [QueryerContext], [ConnPrepareContext], and [ConnBeginTx].\n\nTo support custom data types, implement [NamedValueChecker]. [NamedValueChecker]\nalso allows queries to accept per-query options as a parameter by returning\n[ErrRemoveArgument] from CheckNamedValue.\n\nIf multiple result sets are supported, [Rows] should implement [RowsNextResultSet].\nIf the driver knows how to describe the types present in the returned result\nit should implement the following interfaces: [RowsColumnTypeScanType],\n[RowsColumnTypeDatabaseTypeName], [RowsColumnTypeLength], [RowsColumnTypeNullable],\nand [RowsColumnTypePrecisionScale]. A given row value may also return a [Rows]\ntype, which may represent a database cursor value.\n\nIf a [Conn] implements [Validator], then the IsValid method is called\nbefore returning the connection to the connection pool. If an entry in the\nconnection pool implements [SessionResetter], then ResetSession\nis called before reusing the connection for another query. If a connection is\nnever returned to the connection pool but is immediately reused, then\nResetSession is called prior to reuse but IsValid is not called.\n" :imports [
+
+
+    ^{:line 42} [context "context"]
+    ^{:line 43} [internal "database/sql/internal"]
+    ^{:line 44} [errors "errors"]
+    ^{:line 45} [reflect "reflect"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Value "Value is a value that drivers must be able to handle.\nIt is either nil, a type handled by a database driver's [NamedValueChecker]\ninterface, or an instance of one of these types:\n\n\tint64\n\tfloat64\n\tbool\n\t[]byte\n\tstring\n\ttime.Time\n\nIf the driver supports cursors, a returned Value may also implement the [Rows] interface\nin this package. This is used, for example, when a user selects a cursor\nsuch as \"select cursor(select * from my_table) from dual\". If the [Rows]\nfrom the select is closed, the cursor [Rows] will also be closed.\n" any)
+
+
+(go/type NamedValue "NamedValue holds both the value name and value.\n" (struct
+
+
+
+
+    ^{:line 71 :tag string :doc "If the Name is not empty it should be used for the parameter identifier and\nnot the ordinal position.\n\nName will not have a symbol prefix.\n"} Name
+
+
+    ^{:line 74 :tag int :doc "Ordinal position of the parameter starting from one and is always set.\n"} Ordinal
+
+
+    ^{:line 77 :tag Value :doc "Value is the parameter value.\n"} Value))
+
+
+
+
+
+
+
+
+(go/type Driver "Driver is the interface that must be implemented by a database\ndriver.\n\nDatabase drivers may implement [DriverContext] for access\nto contexts and to parse the name only once for a pool of connections,\ninstead of once per connection.\n" (interface
+
+
+
+
+
+
+
+
+
+    (^{:doc "Open returns a new connection to the database.\nThe name is a string in a driver-specific format.\n\nOpen may return a cached connection (one previously\nclosed), but doing so is unnecessary; the sql package\nmaintains a pool of idle connections for efficient re-use.\n\nThe returned connection is only used by one goroutine at a\ntime.\n"} Open [^string name] :results [Conn error])))
+
+
+
+
+
+
+
+
+(go/type DriverContext "If a [Driver] implements DriverContext, then [database/sql.DB] will call\nOpenConnector to obtain a [Connector] and then invoke\nthat [Connector]'s Connect method to obtain each needed connection,\ninstead of invoking the [Driver]'s Open method for each connection.\nThe two-step sequence allows drivers to parse the name just once\nand also provides access to per-[Conn] contexts.\n" (interface
+
+
+    (^{:doc "OpenConnector must parse the name in the same format that Driver.Open\nparses the name parameter.\n"} OpenConnector [^string name] :results [Connector error])))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Connector "A Connector represents a driver in a fixed configuration\nand can create any number of equivalent Conns for use\nby multiple goroutines.\n\nA Connector can be passed to [database/sql.OpenDB], to allow drivers\nto implement their own [database/sql.DB] constructors, or returned by\n[DriverContext]'s OpenConnector method, to allow drivers\naccess to context and to avoid repeated parsing of driver\nconfiguration.\n\nIf a Connector implements [io.Closer], the [database/sql.DB.Close]\nmethod will call the Close method and return error (if any).\n" (interface
+
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "Connect returns a connection to the database.\nConnect may return a cached connection (one previously\nclosed), but doing so is unnecessary; the sql package\nmaintains a pool of idle connections for efficient re-use.\n\nThe provided context.Context is for dialing purposes only\n(see net.DialContext) and should not be stored or used for\nother purposes. A default timeout should still be used\nwhen dialing as a connection pool may call Connect\nasynchronously to any query.\n\nThe returned connection is only used by one goroutine at a\ntime.\n"} Connect [context/Context] :results [Conn error])
+
+
+
+
+    (^{:doc "Driver returns the underlying Driver of the Connector,\nmainly to maintain compatibility with the Driver method\non sql.DB.\n"} Driver ^Driver [])))
+
+
+
+
+
+
+
+(go/var ^{:doc "ErrSkip may be returned by some optional interfaces' methods to\nindicate at runtime that the fast path is unavailable and the sql\npackage should continue as if the optional interface was not\nimplemented. ErrSkip is only supported where explicitly\ndocumented.\n"} ErrSkip (errors/New "driver: skip fast-path; continue as if unimplemented"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "ErrBadConn should be returned by a driver to signal to the [database/sql]\npackage that a driver.[Conn] is in a bad state (such as the server\nhaving earlier closed the connection) and the [database/sql] package should\nretry on a new connection.\n\nTo prevent duplicate operations, ErrBadConn should NOT be returned\nif there's a possibility that the database server might have\nperformed the operation. Even if the server sends back an error,\nyou shouldn't return ErrBadConn.\n\nErrors will be checked using [errors.Is]. An error may\nwrap ErrBadConn or implement the Is(error) bool method.\n"} ErrBadConn (errors/New "driver: bad connection"))
+
+
+
+
+
+
+
+
+(go/type Pinger "Pinger is an optional interface that may be implemented by a [Conn].\n\nIf a [Conn] does not implement Pinger, the [database/sql.DB.Ping] and\n[database/sql.DB.PingContext] will check if there is at least one [Conn] available.\n\nIf Conn.Ping returns [ErrBadConn], [database/sql.DB.Ping] and [database/sql.DB.PingContext] will remove\nthe [Conn] from pool.\n" (interface
+    (Ping ^error [^context/Context ctx])))
+
+
+
+
+
+
+
+
+
+
+
+(go/type Execer "Execer is an optional interface that may be implemented by a [Conn].\n\nIf a [Conn] implements neither [ExecerContext] nor [Execer],\nthe [database/sql.DB.Exec] will first prepare a query, execute the statement,\nand then close the statement.\n\nExec may return [ErrSkip].\n\nDeprecated: Drivers should implement [ExecerContext] instead.\n" (interface
+    (Exec [^string query ^{:tag (slice Value)} args] :results [Result error])))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type ExecerContext "ExecerContext is an optional interface that may be implemented by a [Conn].\n\nIf a [Conn] does not implement [ExecerContext], the [database/sql.DB.Exec]\nwill fall back to [Execer]; if the Conn does not implement Execer either,\n[database/sql.DB.Exec] will first prepare a query, execute the statement, and then\nclose the statement.\n\nExecContext may return [ErrSkip].\n\nExecContext must honor the context timeout and return when the context is canceled.\n" (interface
+    (ExecContext [^context/Context ctx ^string query ^{:tag (slice NamedValue)} args] :results [Result error])))
+
+
+
+
+
+
+
+
+
+
+
+(go/type Queryer "Queryer is an optional interface that may be implemented by a [Conn].\n\nIf a [Conn] implements neither [QueryerContext] nor [Queryer],\nthe [database/sql.DB.Query] will first prepare a query, execute the statement,\nand then close the statement.\n\nQuery may return [ErrSkip].\n\nDeprecated: Drivers should implement [QueryerContext] instead.\n" (interface
+    (Query [^string query ^{:tag (slice Value)} args] :results [Rows error])))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type QueryerContext "QueryerContext is an optional interface that may be implemented by a [Conn].\n\nIf a [Conn] does not implement QueryerContext, the [database/sql.DB.Query]\nwill fall back to [Queryer]; if the [Conn] does not implement [Queryer] either,\n[database/sql.DB.Query] will first prepare a query, execute the statement, and then\nclose the statement.\n\nQueryContext may return [ErrSkip].\n\nQueryContext must honor the context timeout and return when the context is canceled.\n" (interface
+    (QueryContext [^context/Context ctx ^string query ^{:tag (slice NamedValue)} args] :results [Rows error])))
+
+
+
+
+
+
+(go/type Conn "Conn is a connection to a database. It is not used concurrently\nby multiple goroutines.\n\nConn is assumed to be stateful.\n" (interface
+
+    (^{:doc "Prepare returns a prepared statement, bound to this connection.\n"} Prepare [^string query] :results [Stmt error])
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "Close invalidates and potentially stops any current\nprepared statements and transactions, marking this\nconnection as no longer in use.\n\nBecause the sql package maintains a free pool of\nconnections and only calls Close when there's a surplus of\nidle connections, it shouldn't be necessary for drivers to\ndo their own connection caching.\n\nDrivers must ensure all network calls made by Close\ndo not block indefinitely (e.g. apply a timeout).\n"} Close ^error [])
+
+
+
+
+    (^{:doc "Begin starts and returns a new transaction.\n\nDeprecated: Drivers should implement ConnBeginTx instead (or additionally).\n"} Begin [] :results [Tx error])))
+
+
+
+(go/type ConnPrepareContext "ConnPrepareContext enhances the [Conn] interface with context.\n" (interface
+
+
+
+    (^{:doc "PrepareContext returns a prepared statement, bound to this connection.\ncontext is for the preparation of the statement,\nit must not store the context within the statement itself.\n"} PrepareContext [^context/Context ctx ^string query] :results [Stmt error])))
+
+
+
+
+
+
+(go/type IsolationLevel "IsolationLevel is the transaction isolation level stored in [TxOptions].\n\nThis type should be considered identical to [database/sql.IsolationLevel] along\nwith any values defined on it.\n" int)
+
+
+
+
+(go/type TxOptions "TxOptions holds the transaction options.\n\nThis type should be considered identical to [database/sql.TxOptions].\n" (struct
+    ^{:line 276 :tag IsolationLevel} Isolation
+    ^{:line 277 :tag bool} ReadOnly))
+
+
+
+(go/type ConnBeginTx "ConnBeginTx enhances the [Conn] interface with context and [TxOptions].\n" (interface
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "BeginTx starts and returns a new transaction.\nIf the context is canceled by the user the sql package will\ncall Tx.Rollback before discarding and closing the connection.\n\nThis must check opts.Isolation to determine if there is a set\nisolation level. If the driver does not support a non-default\nlevel and one is set or if there is a non-default isolation level\nthat is not supported, an error must be returned.\n\nThis must also check opts.ReadOnly to determine if the read-only\nvalue is true to either set the read-only transaction property if supported\nor return an error if it is not supported.\n"} BeginTx [^context/Context ctx ^TxOptions opts] :results [Tx error])))
+
+
+
+
+(go/type SessionResetter "SessionResetter may be implemented by [Conn] to allow drivers to reset the\nsession state associated with the connection and to signal a bad connection.\n" (interface
+
+
+
+    (^{:doc "ResetSession is called prior to executing a query on the connection\nif the connection has been used before. If the driver returns ErrBadConn\nthe connection is discarded.\n"} ResetSession ^error [^context/Context ctx])))
+
+
+
+
+
+
+
+(go/type Validator "Validator may be implemented by [Conn] to allow drivers to\nsignal if a connection is valid or if it should be discarded.\n\nIf implemented, drivers may return the underlying error from queries,\neven if the connection should be discarded by the connection pool.\n" (interface
+
+
+    (^{:doc "IsValid is called prior to placing the connection into the\nconnection pool. The connection will be discarded if false is returned.\n"} IsValid ^bool [])))
+
+
+
+(go/type Result "Result is the result of a query execution.\n" (interface
+
+
+
+    (^{:doc "LastInsertId returns the database's auto-generated ID\nafter, for example, an INSERT into a table with primary\nkey.\n"} LastInsertId [] :results [int64 error])
+
+
+
+    (^{:doc "RowsAffected returns the number of rows affected by the\nquery.\n"} RowsAffected [] :results [int64 error])))
+
+
+
+
+(go/type Stmt "Stmt is a prepared statement. It is bound to a [Conn] and not\nused by multiple goroutines concurrently.\n" (interface
+
+
+
+
+
+
+
+    (^{:doc "Close closes the statement.\n\nAs of Go 1.1, a Stmt will not be closed if it's in use\nby any queries.\n\nDrivers must ensure all network calls made by Close\ndo not block indefinitely (e.g. apply a timeout).\n"} Close ^error [])
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "NumInput returns the number of placeholder parameters.\n\nIf NumInput returns >= 0, the sql package will sanity check\nargument counts from callers and return errors to the caller\nbefore the statement's Exec or Query methods are called.\n\nNumInput may also return -1, if the driver doesn't know\nits number of placeholders. In that case, the sql package\nwill not sanity check Exec or Query argument counts.\n"} NumInput ^int [])
+
+
+
+
+
+    (^{:doc "Exec executes a query that doesn't return rows, such\nas an INSERT or UPDATE.\n\nDeprecated: Drivers should implement StmtExecContext instead (or additionally).\n"} Exec [^{:tag (slice Value)} args] :results [Result error])
+
+
+
+
+
+    (^{:doc "Query executes a query that may return rows, such as a\nSELECT.\n\nDeprecated: Drivers should implement StmtQueryContext instead (or additionally).\n"} Query [^{:tag (slice Value)} args] :results [Rows error])))
+
+
+
+(go/type StmtExecContext "StmtExecContext enhances the [Stmt] interface by providing Exec with context.\n" (interface
+
+
+
+
+    (^{:doc "ExecContext executes a query that doesn't return rows, such\nas an INSERT or UPDATE.\n\nExecContext must honor the context timeout and return when it is canceled.\n"} ExecContext [^context/Context ctx ^{:tag (slice NamedValue)} args] :results [Result error])))
+
+
+
+(go/type StmtQueryContext "StmtQueryContext enhances the [Stmt] interface by providing Query with context.\n" (interface
+
+
+
+
+    (^{:doc "QueryContext executes a query that may return rows, such as a\nSELECT.\n\nQueryContext must honor the context timeout and return when it is canceled.\n"} QueryContext [^context/Context ctx ^{:tag (slice NamedValue)} args] :results [Rows error])))
+
+
+
+
+
+
+(go/var ^{:doc "ErrRemoveArgument may be returned from [NamedValueChecker] to instruct the\n[database/sql] package to not pass the argument to the driver query interface.\nReturn when accepting query specific options or structures that aren't\nSQL query arguments.\n"} ErrRemoveArgument (errors/New "driver: remove argument from query"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type NamedValueChecker "NamedValueChecker may be optionally implemented by [Conn] or [Stmt]. It provides\nthe driver more control to handle Go and database types beyond the default\n[Value] types allowed.\n\nThe [database/sql] package checks for value checkers in the following order,\nstopping at the first found match: Stmt.NamedValueChecker, Conn.NamedValueChecker,\nStmt.ColumnConverter, [DefaultParameterConverter].\n\nIf CheckNamedValue returns [ErrRemoveArgument], the [NamedValue] will not be included in\nthe final query arguments. This may be used to pass special options to\nthe query itself.\n\nIf [ErrSkip] is returned the column converter error checking\npath is used for the argument. Drivers may wish to return [ErrSkip] after\nthey have exhausted their own special cases.\n" (interface
+
+
+
+    (^{:doc "CheckNamedValue is called before passing arguments to the driver\nand is called in place of any ColumnConverter. CheckNamedValue must do type\nvalidation and conversion as appropriate for the driver.\n"} CheckNamedValue ^error [(* NamedValue)])))
+
+
+
+
+
+
+
+(go/type ColumnConverter "ColumnConverter may be optionally implemented by [Stmt] if the\nstatement is aware of its own columns' types and can convert from\nany type to a driver [Value].\n\nDeprecated: Drivers should implement [NamedValueChecker].\n" (interface
+
+
+
+
+    (^{:doc "ColumnConverter returns a ValueConverter for the provided\ncolumn index. If the type of a specific column isn't known\nor shouldn't be handled specially, [DefaultParameterConverter]\ncan be returned.\n"} ColumnConverter ^ValueConverter [^int idx])))
+
+
+
+(go/type Rows "Rows is an iterator over an executed query's results.\n" (interface
+
+
+
+
+    (^{:doc "Columns returns the names of the columns. The number of\ncolumns of the result is inferred from the length of the\nslice. If a particular column name isn't known, an empty\nstring should be returned for that entry.\n"} Columns ^{:tag (slice string)} [])
+
+
+    (^{:doc "Close closes the rows iterator.\n"} Close ^error [])
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "Next is called to populate the next row of data into\nthe provided slice. The provided slice will be the same\nsize as the Columns() are wide.\n\nNext should return io.EOF when there are no more rows.\n\nThe dest should not be written to outside of Next. Care\nshould be taken when closing Rows not to modify\na buffer held in dest.\n"} Next ^error [^{:tag (slice Value)} dest])))
+
+
+
+
+(go/type ScanContext "ScanContext carries state related to the current query\nthrough a [RowsColumnScanner.ScanColumn] function to [database/sql.ConvertAssign].\n" internal/ScanContext)
+
+
+
+
+
+
+
+
+(go/type RowsColumnScanner "RowsColumnScanner extends the [Rows] interface by providing a way for the driver\nto scan directly into the user-provided destination.\n\nRowsColumnScanner supersedes the [Rows.Next] method.\n\nAs of Go 1.27, database/sql will not call Next if a Rows implements RowsColumnScanner.\nRows implementations may still implement the Next method to support older versions of Go.\n" (interface
+    ^{:line 459} Rows
+
+
+
+    (^{:doc "NextRow advances to the next row of data.\nIt should return io.EOF when there are no more rows.\n"} NextRow ^error [])
+
+
+
+
+
+    (^{:doc "ScanColumn copies the column at the given index in the current row\ninto the value pointed to by dest.\n\nThe driver may assign a driver.Value to dest using [database/sql.ConvertAssign].\n"} ScanColumn ^error [^ScanContext scanCtx ^int index ^any dest])))
+
+
+
+
+(go/type RowsNextResultSet "RowsNextResultSet extends the [Rows] interface by providing a way to signal\nthe driver to advance to the next result set.\n" (interface
+    ^{:line 475} Rows
+
+
+
+    (^{:doc "HasNextResultSet is called at the end of the current result set and\nreports whether there is another result set after the current one.\n"} HasNextResultSet ^bool [])
+
+
+
+
+
+    (^{:doc "NextResultSet advances the driver to the next result set even\nif there are remaining rows in the current result set.\n\nNextResultSet should return io.EOF when there are no more result sets.\n"} NextResultSet ^error [])))
+
+
+
+
+
+(go/type RowsColumnTypeScanType "RowsColumnTypeScanType may be implemented by [Rows]. It should return\nthe value type that can be used to scan types into. For example, the database\ncolumn type \"bigint\" this should return \"[reflect.TypeOf](int64(0))\".\n" (interface
+    ^{:line 492} Rows
+    (ColumnTypeScanType ^reflect/Type [^int index])))
+
+
+
+
+
+
+
+(go/type RowsColumnTypeDatabaseTypeName "RowsColumnTypeDatabaseTypeName may be implemented by [Rows]. It should return the\ndatabase system type name without the length. Type names should be uppercase.\nExamples of returned types: \"VARCHAR\", \"NVARCHAR\", \"VARCHAR2\", \"CHAR\", \"TEXT\",\n\"DECIMAL\", \"SMALLINT\", \"INT\", \"BIGINT\", \"BOOL\", \"[]BIGINT\", \"JSONB\", \"XML\",\n\"TIMESTAMP\".\n" (interface
+    ^{:line 502} Rows
+    (ColumnTypeDatabaseTypeName ^string [^int index])))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type RowsColumnTypeLength "RowsColumnTypeLength may be implemented by [Rows]. It should return the length\nof the column type if the column is a variable length type. If the column is\nnot a variable length type ok should return false.\nIf length is not limited other than system limits, it should return [math.MaxInt64].\nThe following are examples of returned values for various types:\n\n\tTEXT          (math.MaxInt64, true)\n\tvarchar(10)   (10, true)\n\tnvarchar(10)  (10, true)\n\tdecimal       (0, false)\n\tint           (0, false)\n\tbytea(30)     (30, true)\n" (interface
+    ^{:line 519} Rows
+    (ColumnTypeLength [^int index] :results [^int64 length ^bool ok])))
+
+
+
+
+
+
+(go/type RowsColumnTypeNullable "RowsColumnTypeNullable may be implemented by [Rows]. The nullable value should\nbe true if it is known the column may be null, or false if the column is known\nto be not nullable.\nIf the column nullability is unknown, ok should be false.\n" (interface
+    ^{:line 528} Rows
+    (ColumnTypeNullable [^int index] :results [^bool nullable ^bool ok])))
+
+
+
+
+
+
+
+
+
+(go/type RowsColumnTypePrecisionScale "RowsColumnTypePrecisionScale may be implemented by [Rows]. It should return\nthe precision and scale for decimal types. If not applicable, ok should be false.\nThe following are examples of returned values for various types:\n\n\tdecimal(38, 4)    (38, 4, true)\n\tint               (0, 0, false)\n\tdecimal           (math.MaxInt64, math.MaxInt64, true)\n" (interface
+    ^{:line 540} Rows
+    (ColumnTypePrecisionScale [^int index] :results [^int64 precision ^int64 scale ^bool ok])))
+
+
+
+(go/type Tx "Tx is a transaction.\n" (interface
+    (Commit ^error [])
+    (Rollback ^error [])))
+
+
+
+
+(go/type RowsAffected "RowsAffected implements [Result] for an INSERT or UPDATE operation\nwhich mutates a number of rows.\n" int64)
+
+(go/var ^Result _ (conv RowsAffected 0))
+
+^{:go/end 558} (go/method LastInsertId [RowsAffected] :results [int64 error]
+  (return 0 (errors/New "LastInsertId is not supported by this driver")))
+
+
+^{:go/end 562} (go/method RowsAffected [^RowsAffected v] :results [int64 error]
+  (return (conv int64 v) nil))
+
+
+
+
+
+(go/var ^{:tag noRows :doc "ResultNoRows is a pre-defined [Result] for drivers to return when a DDL\ncommand (such as a CREATE TABLE) succeeds. It returns an error for both\nLastInsertId and [RowsAffected].\n"} ResultNoRows)
+
+(go/type noRows (struct))
+
+(go/var ^Result _ (lit noRows))
+
+^{:go/end 575} (go/method LastInsertId [noRows] :results [int64 error]
+  (return 0 (errors/New "no LastInsertId available after DDL statement")))
+
+
+^{:go/end 579} (go/method RowsAffected [noRows] :results [int64 error]
+  (return 0 (errors/New "no RowsAffected available after DDL statement")))

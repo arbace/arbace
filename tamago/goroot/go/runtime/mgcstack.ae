@@ -1,0 +1,346 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Garbage collector: stack objects and stack tracing
+;; See the design doc at https://docs.google.com/document/d/1un-Jn47yByHL7I0aVIP_uVCMxjdM5mpelJhiKlIqxkE/edit?usp=sharing
+;; Also see issue 22350.
+
+;; Stack tracing solves the problem of determining which parts of the
+;; stack are live and should be scanned. It runs as part of scanning
+;; a single goroutine stack.
+;;
+;; Normally determining which parts of the stack are live is easy to
+;; do statically, as user code has explicit references (reads and
+;; writes) to stack variables. The compiler can do a simple dataflow
+;; analysis to determine liveness of stack variables at every point in
+;; the code. See cmd/compile/internal/gc/plive.go for that analysis.
+;;
+;; However, when we take the address of a stack variable, determining
+;; whether that variable is still live is less clear. We can still
+;; look for static accesses, but accesses through a pointer to the
+;; variable are difficult in general to track statically. That pointer
+;; can be passed among functions on the stack, conditionally retained,
+;; etc.
+;;
+;; Instead, we will track pointers to stack variables dynamically.
+;; All pointers to stack-allocated variables will themselves be on the
+;; stack somewhere (or in associated locations, like defer records), so
+;; we can find them all efficiently.
+;;
+;; Stack tracing is organized as a mini garbage collection tracing
+;; pass. The objects in this garbage collection are all the variables
+;; on the stack whose address is taken, and which themselves contain a
+;; pointer. We call these variables "stack objects".
+;;
+;; We begin by determining all the stack objects on the stack and all
+;; the statically live pointers that may point into the stack. We then
+;; process each pointer to see if it points to a stack object. If it
+;; does, we scan that stack object. It may contain pointers into the
+;; heap, in which case those pointers are passed to the main garbage
+;; collection. It may also contain pointers into the stack, in which
+;; case we add them to our set of stack pointers.
+;;
+;; Once we're done processing all the pointers (including the ones we
+;; added during processing), we've found all the stack objects that
+;; are live. Any dead stack objects are not scanned and their contents
+;; will not keep heap objects live. Unlike the main garbage
+;; collection, we can't sweep the dead stack objects; they live on in
+;; a moribund state until the stack frame that contains them is
+;; popped.
+;;
+;; A stack can look like this:
+;;
+;; +----------+
+;; | foo()    |
+;; | +------+ |
+;; | |  A   | | <---\
+;; | +------+ |     |
+;; |          |     |
+;; | +------+ |     |
+;; | |  B   | |     |
+;; | +------+ |     |
+;; |          |     |
+;; +----------+     |
+;; | bar()    |     |
+;; | +------+ |     |
+;; | |  C   | | <-\ |
+;; | +----|-+ |   | |
+;; |      |   |   | |
+;; | +----v-+ |   | |
+;; | |  D  ---------/
+;; | +------+ |   |
+;; |          |   |
+;; +----------+   |
+;; | baz()    |   |
+;; | +------+ |   |
+;; | |  E  -------/
+;; | +------+ |
+;; |      ^   |
+;; | F: --/   |
+;; |          |
+;; +----------+
+;;
+;; foo() calls bar() calls baz(). Each has a frame on the stack.
+;; foo() has stack objects A and B.
+;; bar() has stack objects C and D, with C pointing to D and D pointing to A.
+;; baz() has a stack object E pointing to C, and a local variable F pointing to E.
+;;
+;; Starting from the pointer in local variable F, we will eventually
+;; scan all of E, C, D, and A (in that order). B is never scanned
+;; because there is no live pointer to it. If B is also statically
+;; dead (meaning that foo() never accesses B again after it calls
+;; bar()), then B's pointers into the heap are not considered live.
+
+(in-ns 'go.runtime) (go/file "mgcstack.go" :imports [
+
+
+    ^{:line 98} [goarch "internal/goarch"]
+    ^{:line 99} [sys "internal/runtime/sys"]
+    ^{:line 100} [unsafe "unsafe"]])
+
+
+(go/const ^{:val false} stackTraceDebug false)
+
+
+
+(go/type stackWorkBuf "Buffer for pointers found during stack tracing.\nMust be smaller than or equal to workbuf.\n" (struct
+    ^{:line 108 :tag sys/NotInHeap} _
+    ^{:line 109} stackWorkBufHdr
+    ^{:line 110 :tag (array (/ (- _WorkbufSize (unsafe/Sizeof (lit stackWorkBufHdr))) goarch/PtrSize) uintptr)} obj))
+
+
+
+(go/type stackWorkBufHdr "Header declaration must come after the buf declaration above, because of issue #14620.\n" (struct
+    ^{:line 115 :tag sys/NotInHeap} _
+    ^{:line 116} workbufhdr
+    ^{:line 117 :tag (* stackWorkBuf)} next)) ; linked list of workbufs
+;; Note: we could theoretically repurpose lfnode.next as this next pointer.
+;; It would save 1 word, but that probably isn't worth busting open
+;; the lfnode API.
+
+
+
+
+(go/type stackObjectBuf "Buffer for stack objects found on a goroutine stack.\nMust be smaller than or equal to workbuf.\n" (struct
+    ^{:line 126 :tag sys/NotInHeap} _
+    ^{:line 127} stackObjectBufHdr
+    ^{:line 128 :tag (array (/ (- _WorkbufSize (unsafe/Sizeof (lit stackObjectBufHdr))) (unsafe/Sizeof (lit stackObject))) stackObject)} obj))
+
+
+(go/type stackObjectBufHdr (struct
+    ^{:line 132 :tag sys/NotInHeap} _
+    ^{:line 133} workbufhdr
+    ^{:line 134 :tag (* stackObjectBuf)} next))
+
+
+^{:go/end 144} (go/func init []
+  (when (> (unsafe/Sizeof (lit stackWorkBuf)) (unsafe/Sizeof (lit workbuf)))
+    (panic "stackWorkBuf too big"))
+
+  (when (> (unsafe/Sizeof (lit stackObjectBuf)) (unsafe/Sizeof (lit workbuf)))
+    (panic "stackObjectBuf too big")))
+
+
+
+
+
+(go/type stackObject "A stackObject represents a variable on the stack that has had\nits address taken.\n" (struct
+    ^{:line 149 :tag sys/NotInHeap} _
+    ^{:line 150 :tag uint32} off ; offset above stack.lo
+    ^{:line 151 :tag uint32} size ; size of object
+    ^{:line 152 :tag (* stackObjectRecord)} r ; info of the object (for ptr/nonptr bits). nil if object has been scanned.
+    ^{:line 153 :tag (* stackObject)} left ; objects with lower addresses
+    ^{:line 154 :tag (* stackObject)} right)) ; objects with higher addresses
+
+
+
+
+
+^{:go/end 164} (go/method ^:go/nowritebarrier setRecord "obj.r = r, but with no write barrier.\n" [^{:tag (* stackObject)} obj ^{:tag (* stackObjectRecord)} r]
+  ;; Types of stack objects are always in read-only memory, not the heap.
+  ;; So not using a write barrier is ok.
+  (set! @(conv (* uintptr) (conv unsafe/Pointer (addr (.-r obj)))) (conv uintptr (conv unsafe/Pointer r))))
+
+
+
+
+(go/type stackScanState "A stackScanState keeps track of the state used during the GC walk\nof a goroutine.\n" (struct
+
+    ^{:line 170 :tag stack :doc "stack limits\n"} stack
+
+
+
+    ^{:line 174 :tag bool :doc "conservative indicates that the next frame must be scanned conservatively.\nThis applies only to the innermost frame at an async safe-point.\n"} conservative
+
+
+
+
+    ^{:line 179 :tag (* stackWorkBuf) :doc "buf contains the set of possible pointers to stack objects.\nOrganized as a LIFO linked list of buffers.\nAll buffers except possibly the head buffer are full.\n"} buf
+    ^{:line 180 :tag (* stackWorkBuf)} freeBuf ; keep around one free buffer for allocation hysteresis
+
+
+
+
+
+
+    ^{:line 187 :tag (* stackWorkBuf) :doc "cbuf contains conservative pointers to stack objects. If\nall pointers to a stack object are obtained via\nconservative scanning, then the stack object may be dead\nand may contain dead pointers, so it must be scanned\ndefensively.\n"} cbuf
+
+
+
+    ^{:line 191 :tag (* stackObjectBuf) :doc "list of stack objects\nObjects are in increasing address order.\n"} head
+    ^{:line 192 :tag (* stackObjectBuf)} tail
+    ^{:line 193 :tag int} nobjs
+
+
+
+    ^{:line 197 :tag (* stackObject) :doc "root of binary tree for fast object lookup by address\nInitialized by buildIndex.\n"} root))
+
+
+
+
+^{:go/end 230} (go/method putPtr "Add p as a potential pointer to a stack object.\np must be a stack address.\n" [^{:tag (* stackScanState)} s ^uintptr p ^bool conservative]
+  (when (or (< p (.-lo (.-stack s))) (>= p (.-hi (.-stack s))))
+    (throw "address not a stack address"))
+
+  (let [head (addr (.-buf s))]
+    (when conservative
+      (set! head (addr (.-cbuf s))))
+
+    (let [buf @head]
+      (cond (== buf nil) (do
+          ;; Initial setup.
+          (set! buf (conv (* stackWorkBuf) (conv unsafe/Pointer (getempty))))
+          (set! ^{:go/via [stackWorkBufHdr workbufhdr]} (.-nobj buf) 0)
+          (set! ^{:go/via [stackWorkBufHdr]} (.-next buf) nil)
+          (set! @head buf))
+        (== ^{:go/via [stackWorkBufHdr workbufhdr]} (.-nobj buf) (len (.-obj buf))) (do
+          (if (!= (.-freeBuf s) nil) (do
+              (set! buf (.-freeBuf s))
+              (set! (.-freeBuf s) nil))
+
+            (set! buf (conv (* stackWorkBuf) (conv unsafe/Pointer (getempty)))))
+
+          (set! ^{:go/via [stackWorkBufHdr workbufhdr]} (.-nobj buf) 0)
+          (set! ^{:go/via [stackWorkBufHdr]} (.-next buf) @head)
+          (set! @head buf)))
+
+      (aset (.-obj buf) ^{:go/via [stackWorkBufHdr workbufhdr]} (.-nobj buf) p)
+      (inc! ^{:go/via [stackWorkBufHdr workbufhdr]} (.-nobj buf)))))
+
+
+
+
+
+
+
+^{:go/end 267} (go/method getPtr "Remove and return a potential pointer to a stack object.\nReturns 0 if there are no more pointers available.\n\nThis prefers non-conservative pointers so we scan stack objects\nprecisely if there are any non-conservative pointers to them.\n" [^{:tag (* stackScanState)} s] :results [^uintptr p ^bool conservative]
+  (range [_ head (lit (slice (* (* stackWorkBuf))) (addr (.-buf s)) (addr (.-cbuf s)))]
+    (let [buf @head]
+      (when (== buf nil)
+        ;; Never had any data.
+        (continue))
+
+      (when (== ^{:go/via [stackWorkBufHdr workbufhdr]} (.-nobj buf) 0)
+        (when (!= (.-freeBuf s) nil)
+          ;; Free old freeBuf.
+          (putempty (conv (* workbuf) (conv unsafe/Pointer (.-freeBuf s)))))
+
+        ;; Move buf to the freeBuf.
+        (set! (.-freeBuf s) buf)
+        (set! buf ^{:go/via [stackWorkBufHdr]} (.-next buf))
+        (set! @head buf)
+        (when (== buf nil)
+          ;; No more data in this list.
+          (continue)))
+
+
+      (dec! ^{:go/via [stackWorkBufHdr workbufhdr]} (.-nobj buf))
+      (return (aget (.-obj buf) ^{:go/via [stackWorkBufHdr workbufhdr]} (.-nobj buf)) (== head (addr (.-cbuf s))))))
+
+  ;; No more data in either list.
+  (when (!= (.-freeBuf s) nil)
+    (putempty (conv (* workbuf) (conv unsafe/Pointer (.-freeBuf s))))
+    (set! (.-freeBuf s) nil))
+
+  (return 0 false))
+
+
+
+^{:go/end 297} (go/method addObject "addObject adds a stack object at addr of type typ to the set of stack objects.\n" [^{:tag (* stackScanState)} s ^uintptr addr ^{:tag (* stackObjectRecord)} r]
+  (let [x (.-tail s)]
+    (when (== x nil)
+      ;; initial setup
+      (set! x (conv (* stackObjectBuf) (conv unsafe/Pointer (getempty))))
+      (set! ^{:go/via [stackObjectBufHdr]} (.-next x) nil)
+      (set! (.-head s) x)
+      (set! (.-tail s) x))
+
+    (when (and (> ^{:go/via [stackObjectBufHdr workbufhdr]} (.-nobj x) 0) (< (conv uint32 (- addr (.-lo (.-stack s)))) (+ (.-off (aget (.-obj x) (- ^{:go/via [stackObjectBufHdr workbufhdr]} (.-nobj x) 1))) (.-size (aget (.-obj x) (- ^{:go/via [stackObjectBufHdr workbufhdr]} (.-nobj x) 1))))))
+      (throw "objects added out of order or overlapping"))
+
+    (when (== ^{:go/via [stackObjectBufHdr workbufhdr]} (.-nobj x) (len (.-obj x)))
+      ;; full buffer - allocate a new buffer, add to end of linked list
+      (let [y (conv (* stackObjectBuf) (conv unsafe/Pointer (getempty)))]
+        (set! ^{:go/via [stackObjectBufHdr]} (.-next y) nil)
+        (set! ^{:go/via [stackObjectBufHdr]} (.-next x) y)
+        (set! (.-tail s) y)
+        (set! x y)))
+
+    (let [obj (addr (aget (.-obj x) ^{:go/via [stackObjectBufHdr workbufhdr]} (.-nobj x)))]
+      (inc! ^{:go/via [stackObjectBufHdr workbufhdr]} (.-nobj x))
+      (set! (.-off obj) (conv uint32 (- addr (.-lo (.-stack s)))))
+      (set! (.-size obj) (conv uint32 (.-size r)))
+      (.setRecord obj r)
+      ;; obj.left and obj.right will be initialized by buildIndex before use.
+      (inc! (.-nobjs s)))))
+
+
+
+
+
+^{:go/end 304} (go/method buildIndex "buildIndex initializes s.root to a binary search tree.\nIt should be called after all addObject calls but before\nany call of findObject.\n" [^{:tag (* stackScanState)} s]
+  (set! (values (.-root s) _ _) (binarySearchTree (.-head s) 0 (.-nobjs s))))
+
+
+
+
+
+
+
+^{:go/end 327} (go/func binarySearchTree "Build a binary search tree with the n objects in the list\nx.obj[idx], x.obj[idx+1], ..., x.next.obj[0], ...\nReturns the root of that tree, and the buf+idx of the nth object after x.obj[idx].\n(The first object that was not included in the binary search tree.)\nIf n == 0, returns nil, x.\n" [^{:tag (* stackObjectBuf)} x ^int idx ^int n] :results [^{:tag (* stackObject)} root ^{:tag (* stackObjectBuf)} restBuf ^int restIdx]
+  (when (== n 0)
+    (return nil x idx))
+
+  (let [(values ^{:tag (* stackObject)} left ^{:tag (* stackObject)} right) (zero (* stackObject))]
+    (set! (values left x idx) (binarySearchTree x idx (/ n 2)))
+    (set! root (addr (aget (.-obj x) idx)))
+    (inc! idx)
+    (when (== idx (len (.-obj x)))
+      (set! x ^{:go/via [stackObjectBufHdr]} (.-next x))
+      (set! idx 0))
+
+    (set! (values right x idx) (binarySearchTree x idx (- n (/ n 2) 1)))
+    (set! (.-left root) left)
+    (set! (.-right root) right)
+    (return root x idx)))
+
+
+
+
+^{:go/end 348} (go/method findObject "findObject returns the stack object containing address a, if any.\nMust have called buildIndex previously.\n" ^{:tag (* stackObject)} [^{:tag (* stackScanState)} s ^uintptr a]
+  (let [off (conv uint32 (- a (.-lo (.-stack s))))
+      ^{:line 333} obj (.-root s)]
+    (while true
+      (when (== obj nil)
+        (return nil))
+
+      (when (< off (.-off obj))
+        (set! obj (.-left obj))
+        (continue))
+
+      (when (>= off (+ (.-off obj) (.-size obj)))
+        (set! obj (.-right obj))
+        (continue))
+
+      (return obj))))

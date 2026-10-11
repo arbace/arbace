@@ -1,0 +1,991 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; /*
+;; Package mail implements parsing of mail messages.
+;; 
+;; For the most part, this package follows the syntax as specified by RFC 5322 and
+;; extended by RFC 6532.
+;; Notable divergences:
+;; - Obsolete address formats are not parsed, including addresses with
+;; embedded route information.
+;; - The full range of spacing (the CFWS syntax element) is not supported,
+;; such as breaking addresses across lines.
+;; - No unicode normalization is performed.
+;; - A leading From line is permitted, as in mbox format (RFC 4155).
+;; */
+(in-ns 'go.net.mail) (go/file "message.go" :doc "Package mail implements parsing of mail messages.\n\nFor the most part, this package follows the syntax as specified by RFC 5322 and\nextended by RFC 6532.\nNotable divergences:\n  - Obsolete address formats are not parsed, including addresses with\n    embedded route information.\n  - The full range of spacing (the CFWS syntax element) is not supported,\n    such as breaking addresses across lines.\n  - No unicode normalization is performed.\n  - A leading From line is permitted, as in mbox format (RFC 4155).\n" :imports [
+
+
+    ^{:line 21} [bufio "bufio"]
+    ^{:line 22} [errors "errors"]
+    ^{:line 23} [fmt "fmt"]
+    ^{:line 24} [io "io"]
+    ^{:line 25} [log "log"]
+    ^{:line 26} [mime "mime"]
+    ^{:line 27} [net "net"]
+    ^{:line 28} [textproto "net/textproto"]
+    ^{:line 29} [strings "strings"]
+    ^{:line 30} [sync "sync"]
+    ^{:line 31} [time "time"]
+    ^{:line 32} [utf8 "unicode/utf8"]])
+
+
+(go/var debug (conv debugT false))
+
+(go/type debugT bool)
+
+^{:go/end 43} (go/method Printf [^debugT d ^string format & ^{:tag (slice any)} args]
+  (when d
+    (log/Printf format (spread args))))
+
+
+
+
+(go/type Message "A Message represents a parsed mail message.\n" (struct
+    ^{:line 47 :tag Header} Header
+    ^{:line 48 :tag io/Reader} Body))
+
+
+
+
+
+^{:go/end 66} (go/func ReadMessage "ReadMessage reads a message from r.\nThe headers are parsed, and the body of the message will be available\nfor reading from msg.Body.\n" [^io/Reader r] :results [^{:tag (* Message)} msg ^error err]
+  (let [tp (textproto/NewReader (bufio/NewReader r))
+
+      (values hdr ^:assign err) (readHeader tp)]
+    (when (and (!= err nil) ^:go/paren (or (!= err io/EOF) (== (len hdr) 0)))
+      (return nil err))
+
+
+    ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4]} (lit Message
+          :Header (conv Header hdr)
+          :Body (.-R tp)))
+      nil)))
+
+
+
+
+
+
+
+
+
+^{:go/end 114} (go/func readHeader "readHeader reads the message headers from r.\nThis is like textproto.ReadMIMEHeader, but doesn't validate.\nThe fix for issue #53188 tightened up net/textproto to enforce\nrestrictions of RFC 7230.\nThis package implements RFC 5322, which does not have those restrictions.\nThis function copies the relevant code from net/textproto,\nsimplified for RFC 5322.\n" [^{:tag (* textproto/Reader)} r] :results [(map string (slice string)) error]
+  (let [m (make (map string (slice string)))]
+
+    ;; The first line cannot start with a leading space.
+    (when [(values buf err) (.Peek (.-R r) 1)] (and (== err nil) ^:go/paren (or (== (aget buf 0) \space) (== (aget buf 0) \tab)))
+      (let [(values line err) (.ReadLine r)]
+        (when (!= err nil)
+          (return m err))
+
+        (return m (fmt/Errorf "malformed initial line: %q" line))))
+
+
+    (while true
+      (let [(values kv err) (.ReadContinuedLine r)]
+        (when (== kv "")
+          (return m err))
+
+
+        ;; Key ends at first colon.
+        (let [(values k v ok) (strings/Cut kv ":")]
+          (when (not ok)
+            (return m (fmt/Errorf "malformed header line: %q" kv)))
+
+          (let [key (textproto/CanonicalMIMEHeaderKey k)]
+
+            ;; Permit empty key, because that is what we did in the past.
+            (when (== key "")
+              (continue))
+
+
+            ;; Skip initial spaces in value.
+            (let [value (strings/TrimLeft v " \t")]
+
+              (aset m key (append (aget m key) value))
+
+              (when (!= err nil)
+                (return m err)))))))))
+
+
+
+
+
+
+(go/var ^{:doc "Layouts suitable for passing to time.Parse.\nThese are tried in order.\n"} dateLayouts (^{:inst [(slice string)]} sync/OnceValue ^{:go/end 145} (fn ^{:tag (slice string)} []
+      ;; Generate layouts based on RFC 5322, section 3.3.
+
+      (let [dows (lit (array ... string) "" "Mon, ") ; day-of-week
+          ^{:line 122} days (lit (array ... string) "2" "02") ; day = 1*2DIGIT
+          ^{:line 123} years (lit (array ... string) "2006" "06") ; year = 4*DIGIT / 2*DIGIT
+          ^{:line 124} seconds (lit (array ... string) ":05" "") ; second
+          ;; "-0700 (MST)" is not in RFC 5322, but is common.
+          ^{:line 126} zones (lit (array ... string) "-0700" "MST" "UT") ; zone = (("+" / "-") 4DIGIT) / "UT" / "GMT" / ...
+
+          ^{:line 128} total (* (len dows) (len days) (len years) (len seconds) (len zones))
+          ^{:line 129} layouts (make (slice string) 0 total)]
+
+        (range [_ dow dows]
+          (range [_ day days]
+            (range [_ year years]
+              (range [_ second seconds]
+                (range [_ zone zones]
+                  (let [s (+ dow day " Jan " year " 15:04" second " " zone)]
+                    (set! layouts (append layouts s))))))))
+
+
+
+
+
+
+        ^{:line 144} layouts))))
+
+
+
+^{:go/end 193} (go/func ParseDate "ParseDate parses an RFC 5322 date string.\n" [^string date] :results [time/Time error]
+  ;; CR and LF must match and are tolerated anywhere in the date field.
+  (set! date (strings/ReplaceAll date "\r\n" ""))
+  (when (strings/Contains date "\r")
+    (return (lit time/Time) (errors/New "mail: header has a CR without LF")))
+
+  ;; Re-using some addrParser methods which support obsolete text, i.e. non-printable ASCII
+  (let [p (lit addrParser date nil)]
+    (.skipSpace p)
+
+    ;; RFC 5322: zone = (FWS ( "+" / "-" ) 4DIGIT) / obs-zone
+    ;; zone length is always 5 chars unless obsolete (obs-zone)
+    (if [ind (strings/IndexAny (.-s p) "+-")] (and (!= ind -1) (>= (len (.-s p)) (+ ind 5))) (do
+        (set! date (subslice (.-s p) _ (+ ind 5)))
+        (set! (.-s p) (subslice (.-s p) (+ ind 5))))
+
+      (let [ind (strings/Index (.-s p) "T")]
+        (when (== ind 0)
+          ;; In this case we have the following date formats:
+          ;; * Thu, 20 Nov 1997 09:55:06 MDT
+          ;; * Thu, 20 Nov 1997 09:55:06 MDT (MDT)
+          ;; * Thu, 20 Nov 1997 09:55:06 MDT (This comment)
+          (set! ind (strings/Index (subslice (.-s p) 1) "T"))
+          (when (!= ind -1)
+            (inc! ind)))
+
+
+
+        (when (and (!= ind -1) (>= (len (.-s p)) (+ ind 5)))
+          ;; The last letter T of the obsolete time zone is checked when no standard time zone is found.
+          ;; If T is misplaced, the date to parse is garbage.
+          (set! date (subslice (.-s p) _ (+ ind 1)))
+          (set! (.-s p) (subslice (.-s p) (+ ind 1))))))
+
+
+    (when (not (.skipCFWS p))
+      (return (lit time/Time) (errors/New "mail: misformatted parenthetical comment")))
+
+    (range [_ layout (dateLayouts)]
+      (let [(values t err) (time/Parse layout date)]
+        (when (== err nil)
+          (return t nil))))
+
+
+    (return (lit time/Time) (errors/New "mail: header could not be parsed"))))
+
+
+
+(go/type Header "A Header represents the key-value pairs in a mail message header.\n" (map string (slice string)))
+
+
+
+
+
+
+
+^{:go/end 206} (go/method Get "Get gets the first value associated with the given key.\nIt is case insensitive; CanonicalMIMEHeaderKey is used\nto canonicalize the provided key.\nIf there are no values associated with the key, Get returns \"\".\nTo access multiple values of a key, or to use non-canonical keys,\naccess the map directly.\n" ^string [^Header h ^string key]
+  (.Get (conv textproto/MIMEHeader h) key))
+
+
+(go/var ErrHeaderNotPresent (errors/New "mail: header not in message"))
+
+
+^{:go/end 217} (go/method Date "Date parses the Date header field.\n" [^Header h] :results [time/Time error]
+  (let [hdr (.Get h "Date")]
+    (when (== hdr "")
+      (return (lit time/Time) ErrHeaderNotPresent))
+
+    (ParseDate hdr)))
+
+
+
+^{:go/end 226} (go/method AddressList "AddressList parses the named header field as a list of addresses.\n" [^Header h ^string key] :results [(slice (* Address)) error]
+  (let [hdr (.Get h key)]
+    (when (== hdr "")
+      (return nil ErrHeaderNotPresent))
+
+    (ParseAddressList hdr)))
+
+
+
+
+
+(go/type Address "Address represents a single mail address.\nAn address such as \"Barry Gibbs <bg@example.com>\" is represented\nas Address{Name: \"Barry Gibbs\", Address: \"bg@example.com\"}.\n" (struct
+    ^{:line 232 :tag string} Name ; Proper name; may be empty.
+    ^{:line 233 :tag string} Address)) ; user@domain
+
+
+
+^{:go/end 239} (go/func ParseAddress "ParseAddress parses a single RFC 5322 address, e.g. \"Barry Gibbs <bg@example.com>\"\n" [^string address] :results [(* Address) error]
+  (.parseSingleAddress (addr (lit addrParser :s address))))
+
+
+
+^{:go/end 244} (go/func ParseAddressList "ParseAddressList parses the given string as a list of addresses.\n" [^string list] :results [(slice (* Address)) error]
+  (.parseAddressList (addr (lit addrParser :s list))))
+
+
+
+(go/type AddressParser "An AddressParser is an RFC 5322 address parser.\n" (struct
+
+    ^{:line 249 :tag (* mime/WordDecoder) :doc "WordDecoder optionally specifies a decoder for RFC 2047 encoded-words.\n"} WordDecoder))
+
+
+
+
+^{:go/end 256} (go/method Parse "Parse parses a single RFC 5322 address of the\nform \"Gogh Fir <gf@example.com>\" or \"foo@example.com\".\n" [^{:tag (* AddressParser)} p ^string address] :results [(* Address) error]
+  (.parseSingleAddress (addr (lit addrParser :s address :dec (.-WordDecoder p)))))
+
+
+
+
+^{:go/end 262} (go/method ParseList "ParseList parses the given string as a list of comma-separated addresses\nof the form \"Gogh Fir <gf@example.com>\" or \"foo@example.com\".\n" [^{:tag (* AddressParser)} p ^string list] :results [(slice (* Address)) error]
+  (.parseAddressList (addr (lit addrParser :s list :dec (.-WordDecoder p)))))
+
+
+
+
+
+^{:go/end 328} (go/method String "String formats the address as a valid RFC 5322 address.\nIf the address's name contains non-ASCII characters\nthe name will be rendered according to RFC 2047.\n" ^string [^{:tag (* Address)} a]
+  ;; Format address local@domain
+  (let [at (strings/LastIndex (.-Address a) "@")
+      (values ^string local ^string domain) (zero string)]
+    (if (< at 0)
+      ;; This is a malformed address ("@" is required in addr-spec);
+      ;; treat the whole address as local-part.
+      (set! local (.-Address a))
+
+      (set! (values local domain) (values (subslice (.-Address a) _ at) (subslice (.-Address a) (+ at 1)))))
+
+
+    ;; Add quotes if needed
+    (let [quoteLocal false]
+      (range [i r local]
+        (when (isAtext r false)
+          (continue))
+
+        (when (== r \.)
+          ;; Dots are okay if they are surrounded by atext.
+          ;; We only need to check that the previous byte is
+          ;; not a dot, and this isn't the end of the string.
+          (when (and (> i 0) (!= (aget local (- i 1)) \.) (< i (- (len local) 1)))
+            (continue)))
+
+
+        (set! quoteLocal true)
+        (break))
+
+      (when quoteLocal
+        (set! local (quoteString local)))
+
+
+
+      (let [s (+ "<" local "@" domain ">")]
+
+        (when (== (.-Name a) "")
+          (return s))
+
+
+        ;; If every character is printable ASCII, quoting is simple.
+        (let [allPrintable true]
+          (range [_ r (.-Name a)]
+            ;; isWSP here should actually be isFWS,
+            ;; but we don't support folding yet.
+            (when (or (and (not (isVchar r)) (not (isWSP r))) (isMultibyte r))
+              (set! allPrintable false)
+              (break)))
+
+
+          (when allPrintable
+            (return (+ (quoteString (.-Name a)) " " s)))
+
+
+          ;; Text in an encoded-word in a display-name must not contain certain
+          ;; characters like quotes or parentheses (see RFC 2047 section 5.3).
+          ;; When this is the case encode the name using base64 encoding.
+          (when (strings/ContainsAny (.-Name a) "\"#$%&'(),.:;<>@[]^`{|}~")
+            (return (+ (.Encode mime/BEncoding "utf-8" (.-Name a)) " " s)))
+
+          (+ (.Encode mime/QEncoding "utf-8" (.-Name a)) " " s))))))
+
+
+(go/type addrParser (struct
+    ^{:line 331 :tag string} s
+    ^{:line 332 :tag (* mime/WordDecoder)} dec)) ; may be nil
+
+
+^{:go/end 370} (go/method parseAddressList [^{:tag (* addrParser)} p] :results [(slice (* Address)) error]
+  (let [^{:tag (slice (* Address))} list (zero (slice (* Address)))]
+    (while true
+      (.skipSpace p)
+
+      ;; allow skipping empty entries (RFC5322 obs-addr-list)
+      (when (.consume p \,)
+        (continue))
+
+
+      (let [(values addrs err) (.parseAddress p true)]
+        (when (!= err nil)
+          (return nil err))
+
+        (set! list (append list (spread addrs)))
+
+        (when (not (.skipCFWS p))
+          (return nil (errors/New "mail: misformatted parenthetical comment")))
+
+        (when (.empty p)
+          (break))
+
+        (when (!= (.peek p) \,)
+          (return nil (errors/New "mail: expected comma")))
+
+
+        ;; Skip empty entries for obs-addr-list.
+        (while (.consume p \,)
+          (.skipSpace p))
+
+        (when (.empty p)
+          (break))))
+
+
+    (return list nil)))
+
+
+^{:go/end 390} (go/method parseSingleAddress [^{:tag (* addrParser)} p] :results [(* Address) error]
+  (let [(values addrs err) (.parseAddress p true)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (not (.skipCFWS p))
+      (return nil (errors/New "mail: misformatted parenthetical comment")))
+
+    (when (not (.empty p))
+      (return nil (fmt/Errorf "mail: expected single address, got %q" (.-s p))))
+
+    (when (== (len addrs) 0)
+      (return nil (errors/New "mail: empty group")))
+
+    (when (> (len addrs) 1)
+      (return nil (errors/New "mail: group with multiple addresses")))
+
+    (return (aget addrs 0) nil)))
+
+
+
+^{:go/end 474} (go/method parseAddress "parseAddress parses a single RFC 5322 address at the start of p.\n" [^{:tag (* addrParser)} p ^bool handleGroup] :results [(slice (* Address)) error]
+  (.Printf debug "parseAddress: %q" (.-s p))
+  (.skipSpace p)
+  (when (.empty p)
+    (return nil (errors/New "mail: no address")))
+
+
+  ;; address = mailbox / group
+  ;; mailbox = name-addr / addr-spec
+  ;; group = display-name ":" [group-list] ";" [CFWS]
+
+  ;; addr-spec has a more restricted grammar than name-addr,
+  ;; so try parsing it first, and fallback to name-addr.
+  ;; TODO(dsymonds): Is this really correct?
+  (let [(values spec err) (.consumeAddrSpec p)]
+    (when (== err nil)
+      (let [^string displayName (zero string)]
+        (.skipSpace p)
+        (when (and (not (.empty p)) (== (.peek p) \())
+          (set! (values displayName err) (.consumeDisplayNameComment p))
+          (when (!= err nil)
+            (return nil err)))
+
+
+
+        (return (lit (slice (* Address)) ^{:go/breaks [2 4]} (lit _
+              :Name displayName
+              :Address spec))
+          ^{:line 421} err)))
+
+    (.Printf debug "parseAddress: not an addr-spec: %v" err)
+    (.Printf debug "parseAddress: state is now %q" (.-s p))
+
+    ;; display-name
+    (let [^string displayName (zero string)]
+      (when (!= (.peek p) \<)
+        (set! (values displayName err) (.consumePhrase p))
+        (when (!= err nil)
+          (return nil err)))
+
+
+      (.Printf debug "parseAddress: displayName=%q" displayName)
+
+      (.skipSpace p)
+      (when handleGroup
+        (when (.consume p \:)
+          (return (.consumeGroupList p))))
+
+
+      ;; angle-addr = "<" addr-spec ">"
+      (when (not (.consume p \<))
+        (let [atext true]
+          (range [_ r displayName]
+            (when (not (isAtext r true))
+              (set! atext false)
+              (break)))
+
+
+          (when atext
+            ;; The input is like "foo.bar"; it's possible the input
+            ;; meant to be "foo.bar@domain", or "foo.bar <...>".
+            (return nil (errors/New "mail: missing '@' or angle-addr")))
+
+          ;; The input is like "Full Name", which couldn't possibly be a
+          ;; valid email address if followed by "@domain"; the input
+          ;; likely meant to be "Full Name <...>".
+          (return nil (errors/New "mail: no angle-addr"))))
+
+      (set! (values spec err) (.consumeAddrSpec p))
+      (when (!= err nil)
+        (return nil err))
+
+      (when (not (.consume p \>))
+        (return nil (errors/New "mail: unclosed angle-addr")))
+
+      (.Printf debug "parseAddress: spec=%q" spec)
+
+      ^{:go/breaks [2]} (return (lit (slice (* Address)) ^{:go/breaks [2 4]} (lit _
+            :Name displayName
+            :Address spec))
+        nil))))
+
+
+^{:go/end 510} (go/method consumeGroupList [^{:tag (* addrParser)} p] :results [(slice (* Address)) error]
+  (let [^{:tag (slice (* Address))} group (zero (slice (* Address)))]
+    ;; handle empty group.
+    (.skipSpace p)
+    (when (.consume p \;)
+      (when (not (.skipCFWS p))
+        (return nil (errors/New "mail: misformatted parenthetical comment")))
+
+      (return group nil))
+
+
+    (while true
+      (.skipSpace p)
+      ;; embedded groups not allowed.
+      (let [(values addrs err) (.parseAddress p false)]
+        (when (!= err nil)
+          (return nil err))
+
+        (set! group (append group (spread addrs)))
+
+        (when (not (.skipCFWS p))
+          (return nil (errors/New "mail: misformatted parenthetical comment")))
+
+        (when (.consume p \;)
+          (when (not (.skipCFWS p))
+            (return nil (errors/New "mail: misformatted parenthetical comment")))
+
+          (break))
+
+        (when (not (.consume p \,))
+          (return nil (errors/New "mail: expected comma")))))
+
+
+    (return group nil)))
+
+
+
+^{:go/end 572} (go/method consumeAddrSpec "consumeAddrSpec parses a single RFC 5322 addr-spec at the start of p.\n" [^{:tag (* addrParser)} p] :results [^string spec ^error err]
+  (.Printf debug "consumeAddrSpec: %q" (.-s p))
+
+  (let [orig @p]
+    (defer (^{:go/end 521} (fn []
+          (when (!= err nil)
+            (set! @p orig)))))
+
+
+
+    ;; local-part = dot-atom / quoted-string
+    (let [^string localPart (zero string)]
+      (.skipSpace p)
+      (when (.empty p)
+        (return "" (errors/New "mail: no addr-spec")))
+
+      (if (== (.peek p) \") (do
+          ;; quoted-string
+          (.Printf debug "consumeAddrSpec: parsing quoted-string")
+          (set! (values localPart err) (.consumeQuotedString p))
+          (when (== localPart "")
+            (set! err (errors/New "mail: empty quoted string in addr-spec"))))
+
+        (do
+          ;; dot-atom
+          (.Printf debug "consumeAddrSpec: parsing dot-atom")
+          (set! (values localPart err) (.consumeAtom p true false))))
+
+      (when (!= err nil)
+        (.Printf debug "consumeAddrSpec: failed: %v" err)
+        (return "" err))
+
+
+      (when (not (.consume p \@))
+        (return "" (errors/New "mail: missing @ in addr-spec")))
+
+
+      ;; domain = dot-atom / domain-literal
+      (let [^string domain (zero string)]
+        (.skipSpace p)
+        (when (.empty p)
+          (return "" (errors/New "mail: no domain in addr-spec")))
+
+
+        (if (== (.peek p) \[) (do
+            ;; domain-literal
+            (set! (values domain err) (.consumeDomainLiteral p))
+            (when (!= err nil)
+              (return "" err)))
+
+          (do
+            ;; dot-atom
+            (set! (values domain err) (.consumeAtom p true false))
+            (when (!= err nil)
+              (return "" err))))
+
+
+
+        (return (+ localPart "@" domain) nil)))))
+
+
+
+^{:go/end 636} (go/method consumePhrase "consumePhrase parses the RFC 5322 phrase at the start of p.\n" [^{:tag (* addrParser)} p] :results [^string phrase ^error err]
+  (.Printf debug "consumePhrase: [%s]" (.-s p))
+  ;; phrase = 1*word
+  (let [
+      ^{:line 579 :tag (slice string)} words (zero (slice string))
+      ^{:line 580 :tag strings/Builder} sb (zero strings/Builder)]
+
+    (while true
+      ;; obs-phrase allows CFWS after one word
+      (when (> (len words) 0)
+        (when (not (.skipCFWS p))
+          (return "" (errors/New "mail: misformatted parenthetical comment"))))
+
+
+      ;; word = atom / quoted-string
+      (let [^string word (zero string)]
+        (.skipSpace p)
+        (when (.empty p)
+          (break))
+
+        (let [isEncoded false]
+          (if (== (.peek p) \")
+            ;; quoted-string
+            (set! (values word err) (.consumeQuotedString p))
+            (do
+              ;; atom
+              ;; We actually parse dot-atom here to be more permissive
+              ;; than what RFC 5322 specifies.
+              (set! (values word err) (.consumeAtom p true true))
+              (when (== err nil)
+                (set! (values word isEncoded err) (.decodeRFC2047Word p word)))))
+
+
+
+          (when (!= err nil)
+            (break))
+
+          (.Printf debug "consumePhrase: consumed %q" word)
+          (switch
+            (case [isEncoded]
+              (.WriteString sb word))
+            (case [(and (not isEncoded) (> (.Len sb) 0))]
+              (set! words (append words (.String sb)))
+              (.Reset sb)
+              (set! words (append words word)))
+            (default
+              (set! words (append words word)))))))
+
+
+
+    (when (> (.Len sb) 0)
+      (set! words (append words (.String sb))))
+
+
+    ;; Ignore any error if we got at least one word.
+    (when (and (!= err nil) (== (len words) 0))
+      (.Printf debug "consumePhrase: hit err: %v" err)
+      (return "" (fmt/Errorf "mail: missing word in phrase: %v" err)))
+
+    (set! phrase (strings/Join words " "))
+    (return phrase nil)))
+
+
+
+^{:go/end 687} (go/method consumeQuotedString "consumeQuotedString parses the quoted string at the start of p.\n" [^{:tag (* addrParser)} p] :results [^string qs ^error err]
+  ;; Assume first byte is '"'.
+  (let [i 1
+      ^{:line 642} qsb (make (slice rune) 0 10)
+
+      ^{:line 644} escaped false]
+
+    (label :Loop
+      (while true
+        (let [(values r size) (utf8/DecodeRuneInString (subslice (.-s p) i))]
+
+          (switch
+            (case [(== size 0)]
+              (return "" (errors/New "mail: unclosed quoted-string")))
+
+            (case [(and (== size 1) (== r utf8/RuneError))]
+              (return "" (fmt/Errorf "mail: invalid utf-8 in quoted-string: %q" (.-s p))))
+
+            (case [escaped]
+              ;;  quoted-pair = ("\" (VCHAR / WSP))
+
+              (when (and (not (isVchar r)) (not (isWSP r)))
+                (return "" (fmt/Errorf "mail: bad character in quoted-string: %q" r)))
+
+
+              (set! qsb (append qsb r))
+              (set! escaped false))
+
+            (case [(or (isQtext r) (isWSP r))]
+              ;; qtext (printable US-ASCII excluding " and \), or
+              ;; FWS (almost; we're ignoring CRLF)
+              (set! qsb (append qsb r)))
+
+            (case [(== r \")]
+              (break :Loop))
+
+            (case [(== r \\)]
+              (set! escaped true))
+
+            (default
+              (return "" (fmt/Errorf "mail: bad character in quoted-string: %q" r))))
+
+
+
+          (set! i + size))))
+
+    (set! (.-s p) (subslice (.-s p) (+ i 1)))
+    (return (conv string qsb) nil)))
+
+
+
+
+
+
+^{:go/end 728} (go/method consumeAtom "consumeAtom parses an RFC 5322 atom at the start of p.\nIf dot is true, consumeAtom parses an RFC 5322 dot-atom instead.\nIf permissive is true, consumeAtom will not fail on:\n- leading/trailing/double dots in the atom (see golang.org/issue/4938)\n" [^{:tag (* addrParser)} p ^bool dot ^bool permissive] :results [^string atom ^error err]
+  (let [i 0]
+
+    (label :Loop
+      (while true
+        (let [(values r size) (utf8/DecodeRuneInString (subslice (.-s p) i))]
+          (switch
+            (case [(and (== size 1) (== r utf8/RuneError))]
+              (return "" (fmt/Errorf "mail: invalid utf-8 in address: %q" (.-s p))))
+
+            (case [(or (== size 0) (not (isAtext r dot)))]
+              (break :Loop))
+
+            (default
+              (set! i + size))))))
+
+
+
+
+    (when (== i 0)
+      (return "" (errors/New "mail: invalid string")))
+
+    (set! (values atom (.-s p)) (values (subslice (.-s p) _ i) (subslice (.-s p) i)))
+    (when (not permissive)
+      (when (strings/HasPrefix atom ".")
+        (return "" (errors/New "mail: leading dot in atom")))
+
+      (when (strings/Contains atom "..")
+        (return "" (errors/New "mail: double dot in atom")))
+
+      (when (strings/HasSuffix atom ".")
+        (return "" (errors/New "mail: trailing dot in atom"))))
+
+
+    (return atom nil)))
+
+
+
+^{:go/end 777} (go/method consumeDomainLiteral "consumeDomainLiteral parses an RFC 5322 domain-literal at the start of p.\n" [^{:tag (* addrParser)} p] :results [string error]
+  ;; Skip the leading [
+  (when (not (.consume p \[))
+    (return "" (errors/New "mail: missing \"[\" in domain-literal")))
+
+
+  ;; Parse the dtext
+  (let [dtext (.-s p)
+      ^{:line 739} dtextLen 0]
+    (while true
+      (when (.empty p)
+        (return "" (errors/New "mail: unclosed domain-literal")))
+
+      (when (== (.peek p) \])
+        (break))
+
+
+      (let [(values r size) (utf8/DecodeRuneInString (.-s p))]
+        (when (and (== size 1) (== r utf8/RuneError))
+          (return "" (fmt/Errorf "mail: invalid utf-8 in domain-literal: %q" (.-s p))))
+
+        (when (not (isDtext r))
+          (return "" (fmt/Errorf "mail: bad character in domain-literal: %q" r)))
+
+
+        (set! dtextLen + size)
+        (set! (.-s p) (subslice (.-s p) size))))
+
+    (set! dtext (subslice dtext _ dtextLen))
+
+    ;; Skip the trailing ]
+    (when (not (.consume p \]))
+      (return "" (errors/New "mail: unclosed domain-literal")))
+
+
+    ;; Check if the domain literal is an IP address
+    (if [(values addr ok) (strings/CutPrefix dtext "IPv6:")] ok
+      (when (!= (len (net/ParseIP addr)) net/IPv6len)
+        (return "" (fmt/Errorf "mail: invalid IPv6 address in domain-literal: %q" dtext)))
+
+
+      (when (== (.To4 (net/ParseIP dtext)) nil)
+        (return "" (fmt/Errorf "mail: invalid IP address in domain-literal: %q" dtext))))
+
+
+    (return (+ "[" dtext "]") nil)))
+
+
+^{:go/end 801} (go/method consumeDisplayNameComment [^{:tag (* addrParser)} p] :results [string error]
+  (when (not (.consume p \())
+    (return "" (errors/New "mail: comment does not start with (")))
+
+  (let [(values comment ok) (.consumeComment p)]
+    (when (not ok)
+      (return "" (errors/New "mail: misformatted parenthetical comment")))
+
+
+    ;; TODO(stapelberg): parse quoted-string within comment
+    (let [words (strings/FieldsFunc comment ^{:go/end 789} (fn ^bool [^rune r] (or (== r \space) (== r \tab))))]
+      (range [idx word words]
+        (let [(values decoded isEncoded err) (.decodeRFC2047Word p word)]
+          (when (!= err nil)
+            (return "" err))
+
+          (when isEncoded
+            (aset words idx decoded))))
+
+
+
+      (return (strings/Join words " ") nil))))
+
+
+^{:go/breaks [5] :go/end 809} (go/method consume ^bool [^{:tag (* addrParser)} p ^byte c]
+  (when (or (.empty p) (!= (.peek p) c))
+    (return false))
+
+  (set! (.-s p) (subslice (.-s p) 1))
+  true)
+
+
+
+^{:go/end 814} (go/method skipSpace "skipSpace skips the leading space and tab characters.\n" [^{:tag (* addrParser)} p]
+  (set! (.-s p) (strings/TrimLeft (.-s p) " \t")))
+
+
+^{:go/end 818} (go/method peek ^byte [^{:tag (* addrParser)} p]
+  (aget (.-s p) 0))
+
+
+^{:go/end 822} (go/method empty ^bool [^{:tag (* addrParser)} p]
+  (== (.len p) 0))
+
+
+^{:go/end 826} (go/method len ^int [^{:tag (* addrParser)} p]
+  (len (.-s p)))
+
+
+
+^{:go/breaks [[6 844]] :go/end 845} (go/method skipCFWS "skipCFWS skips CFWS as defined in RFC5322.\n" ^bool [^{:tag (* addrParser)} p]
+  (.skipSpace p)
+
+  (while true
+    (when (not (.consume p \())
+      (break))
+
+
+    (when [(values _ ok) (.consumeComment p)] (not ok)
+      (return false))
+
+
+    (.skipSpace p))
+
+
+  true)
+
+
+^{:go/end 871} (go/method consumeComment [^{:tag (* addrParser)} p] :results [string bool]
+  ;; '(' already consumed.
+  (let [depth 1
+
+      ^{:line 851 :tag strings/Builder} comment (zero strings/Builder)]
+    (while true
+      (when (or (.empty p) (== depth 0))
+        (break))
+
+
+      (cond (and (== (.peek p) \\) (> (.len p) 1))
+        (set! (.-s p) (subslice (.-s p) 1))
+        (== (.peek p) \()
+        (inc! depth)
+        (== (.peek p) \))
+        (dec! depth))
+
+      (when (> depth 0)
+        (.WriteByte comment (aget (.-s p) 0)))
+
+      (set! (.-s p) (subslice (.-s p) 1)))
+
+
+    (return (.String comment) (== depth 0))))
+
+
+^{:go/end 914} (go/method decodeRFC2047Word [^{:tag (* addrParser)} p ^string s] :results [^string word ^bool isEncoded ^error err]
+  (let [dec (.-dec p)]
+    (when (== dec nil)
+      (set! dec (addr rfc2047Decoder)))
+
+
+    ;; Substitute our own CharsetReader function so that we can tell
+    ;; whether an error from the Decode method was due to the
+    ;; CharsetReader (meaning the charset is invalid).
+    ;; We used to look for the charsetError type in the error result,
+    ;; but that behaves badly with CharsetReaders other than the
+    ;; one in rfc2047Decoder.
+    (let [adec @dec
+        ^{:line 886} charsetReaderError false]
+      (set! (.-CharsetReader adec) ^{:go/end 897} (fn [^string charset ^io/Reader input] :results [io/Reader error]
+          (when (== (.-CharsetReader dec) nil)
+            (set! charsetReaderError true)
+            (return nil (conv charsetError charset)))
+
+          (let [(values r err) ((.-CharsetReader dec) charset input)]
+            (when (!= err nil)
+              (set! charsetReaderError true))
+
+            (return r err))))
+
+      (set! (values word err) (.Decode adec s))
+      (when (== err nil)
+        (return word true nil))
+
+
+      ;; If the error came from the character set reader
+      ;; (meaning the character set itself is invalid
+      ;; but the decoding worked fine until then),
+      ;; return the original text and the error,
+      ;; with isEncoded=true.
+      (when charsetReaderError
+        (return s true err))
+
+
+      ;; Ignore invalid RFC 2047 encoded-word errors.
+      (return s false nil))))
+
+
+(go/var rfc2047Decoder ^{:go/breaks [2]} (lit mime/WordDecoder
+    :CharsetReader ^{:go/end 919} (fn [^string charset ^io/Reader input] :results [io/Reader error]
+      (return nil (conv charsetError charset)))))
+
+
+
+(go/type charsetError string)
+
+^{:go/end 926} (go/method Error ^string [^charsetError e]
+  (fmt/Sprintf "charset not supported: %q" (conv string e)))
+
+
+
+
+^{:go/end 940} (go/func isAtext "isAtext reports whether r is an RFC 5322 atext character.\nIf dot is true, period is included.\n" ^bool [^rune r ^bool dot]
+  (switch r
+    (case [\.]
+      (return dot))
+
+    ;; RFC 5322 3.2.3. specials
+    (case [\( \) \< \> \[ \] \: \; \@ \\ \, \"] ; RFC 5322 3.2.3. specials
+      (return false)))
+
+  (isVchar r))
+
+
+
+^{:go/end 949} (go/func isQtext "isQtext reports whether r is an RFC 5322 qtext character.\n" ^bool [^rune r]
+  ;; Printable US-ASCII, excluding backslash or quote.
+  (when (or (== r \\) (== r \"))
+    (return false))
+
+  (isVchar r))
+
+
+
+^{:go/end 965} (go/func quoteString "quoteString renders a string as an RFC 5322 quoted-string.\n" ^string [^string s]
+  (let [^strings/Builder b (zero strings/Builder)]
+    (.WriteByte b \")
+    (range [_ r s]
+      (cond (or (isQtext r) (isWSP r))
+        (.WriteRune b r)
+        (isVchar r) (do
+          (.WriteByte b \\)
+          (.WriteRune b r))))
+
+
+    (.WriteByte b \")
+    (.String b)))
+
+
+
+^{:go/end 971} (go/func isVchar "isVchar reports whether r is an RFC 5322 VCHAR character.\n" ^bool [^rune r]
+  ;; Visible (printing) characters.
+  (or (and (<= \! r) (<= r \~)) (isMultibyte r)))
+
+
+
+
+^{:go/end 977} (go/func isMultibyte "isMultibyte reports whether r is a multi-byte UTF-8 character\nas supported by RFC 6532.\n" ^bool [^rune r]
+  (>= r utf8/RuneSelf))
+
+
+
+
+^{:go/end 983} (go/func isWSP "isWSP reports whether r is a WSP (white space).\nWSP is a space or horizontal tab (RFC 5234 Appendix B).\n" ^bool [^rune r]
+  (or (== r \space) (== r \tab)))
+
+
+
+^{:go/end 992} (go/func isDtext "isDtext reports whether r is an RFC 5322 dtext character.\n" ^bool [^rune r]
+  ;; Printable US-ASCII, excluding "[", "]", or "\".
+  (when (or (== r \[) (== r \]) (== r \\))
+    (return false))
+
+  (isVchar r))

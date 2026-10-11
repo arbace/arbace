@@ -1,0 +1,642 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; /*
+;; Package pe implements access to PE (Microsoft Windows Portable Executable) files.
+;; 
+;; # Security
+;; 
+;; This package is not designed to be hardened against adversarial inputs, and is
+;; outside the scope of https://go.dev/security/policy. In particular, only basic
+;; validation is done when parsing object files. As such, care should be taken when
+;; parsing untrusted inputs, as parsing malformed files may consume significant
+;; resources, or cause panics.
+;; */
+(in-ns 'go.debug.pe) (go/file "file.go" :doc "Package pe implements access to PE (Microsoft Windows Portable Executable) files.\n\n# Security\n\nThis package is not designed to be hardened against adversarial inputs, and is\noutside the scope of https://go.dev/security/policy. In particular, only basic\nvalidation is done when parsing object files. As such, care should be taken when\nparsing untrusted inputs, as parsing malformed files may consume significant\nresources, or cause panics.\n" :imports [
+
+
+    ^{:line 19} [bytes "bytes"]
+    ^{:line 20} [zlib "compress/zlib"]
+    ^{:line 21} [dwarf "debug/dwarf"]
+    ^{:line 22} [binary "encoding/binary"]
+    ^{:line 23} [errors "errors"]
+    ^{:line 24} [fmt "fmt"]
+    ^{:line 25} [saferio "internal/saferio"]
+    ^{:line 26} [io "io"]
+    ^{:line 27} [os "os"]
+    ^{:line 28} [strings "strings"]])
+
+
+
+(go/type File "A File represents an open PE file.\n" (struct
+    ^{:line 33} FileHeader
+    ^{:line 34 :tag any} OptionalHeader ; of type *OptionalHeader32 or *OptionalHeader64
+    ^{:line 35 :tag (slice (* Section))} Sections
+    ^{:line 36 :tag (slice (* Symbol))} Symbols ; COFF symbols with auxiliary symbol records removed
+    ^{:line 37 :tag (slice COFFSymbol)} COFFSymbols ; all COFF symbols (including auxiliary symbol records)
+    ^{:line 38 :tag StringTable} StringTable
+
+    ^{:line 40 :tag io/Closer} closer))
+
+
+
+^{:go/end 56} (go/func Open "Open opens the named file using [os.Open] and prepares it for use as a PE binary.\n" [^string name] :results [(* File) error]
+  (let [(values f err) (os/Open name)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values ff ^:assign err) (NewFile f)]
+      (when (!= err nil)
+        (.Close f)
+        (return nil err))
+
+      (set! (.-closer ff) f)
+      (return ff nil))))
+
+
+
+
+
+^{:go/end 68} (go/method Close "Close closes the [File].\nIf the [File] was created using [NewFile] directly instead of [Open],\nClose has no effect.\n" ^error [^{:tag (* File)} f]
+  (let [^error err (zero error)]
+    (when (!= (.-closer f) nil)
+      (set! err (.Close (.-closer f)))
+      (set! (.-closer f) nil))
+
+    ^{:line 67} err))
+
+
+;; TODO(brainman): add Load function, as a replacement for NewFile, that does not call removeAuxSymbols (for performance)
+
+
+^{:go/end 184} (go/func NewFile "NewFile creates a new [File] for accessing a PE binary in an underlying reader.\n" [^io/ReaderAt r] :results [(* File) error]
+  (let [f (new File)
+      ^{:line 75} sr (io/NewSectionReader r 0 (- (<< 1 63) 1))
+
+      ^{:line 77 :tag (array 96 byte)} dosheader (zero (array 96 byte))]
+    (when [(values _ err) (.ReadAt r (subslice dosheader 0) 0)] (!= err nil)
+      (return nil err))
+
+    (let [^int64 base (zero int64)]
+      (if (and (== (aget dosheader 0) \M) (== (aget dosheader 1) \Z))
+        (let [signoff (conv int64 (.Uint32 binary/LittleEndian (subslice dosheader 0x3c)))
+            ^{:line 84 :tag (array 4 byte)} sign (zero (array 4 byte))]
+          (when [(values _ err) (.ReadAt r (subslice sign) signoff)] (!= err nil)
+            (return nil err))
+
+          (when (not (and (== (aget sign 0) \P) (== (aget sign 1) \E) (== (aget sign 2) 0) (== (aget sign 3) 0)))
+            (return nil (fmt/Errorf "invalid PE file signature: % x" sign)))
+
+          (set! base (+ signoff 4)))
+
+        (set! base (conv int64 0)))
+
+      (.Seek sr base io/SeekStart)
+      (when [err (binary/Read sr binary/LittleEndian (addr (.-FileHeader f)))] (!= err nil)
+        (return nil err))
+
+      (switch (.-Machine (.-FileHeader f))
+        (case [IMAGE_FILE_MACHINE_AMD64
+            ^{:line 101} IMAGE_FILE_MACHINE_ARM64
+            ^{:line 102} IMAGE_FILE_MACHINE_ARMNT
+            ^{:line 103} IMAGE_FILE_MACHINE_I386
+            ^{:line 104} IMAGE_FILE_MACHINE_RISCV32
+            ^{:line 105} IMAGE_FILE_MACHINE_RISCV64
+            ^{:line 106} IMAGE_FILE_MACHINE_RISCV128
+            ^{:line 107} IMAGE_FILE_MACHINE_UNKNOWN])
+        ;; ok
+        (default
+          (return nil (fmt/Errorf "unrecognized PE machine: %#x" (.-Machine (.-FileHeader f))))))
+
+
+      (let [^error err (zero error)]
+
+        ;; Read string table.
+        (set! (values (.-StringTable f) err) (readStringTable (addr (.-FileHeader f)) sr))
+        (when (!= err nil)
+          (return nil err))
+
+
+        ;; Read symbol table.
+        (set! (values (.-COFFSymbols f) err) (readCOFFSymbols (addr (.-FileHeader f)) sr))
+        (when (!= err nil)
+          (return nil err))
+
+        (set! (values (.-Symbols f) err) (removeAuxSymbols (.-COFFSymbols f) (.-StringTable f)))
+        (when (!= err nil)
+          (return nil err))
+
+
+        ;; Seek past file header.
+        (set! (values _ err) (.Seek sr (+ base (conv int64 (binary/Size (.-FileHeader f)))) io/SeekStart))
+        (when (!= err nil)
+          (return nil err))
+
+
+        ;; Read optional header.
+        (set! (values (.-OptionalHeader f) err) (readOptionalHeader sr (.-SizeOfOptionalHeader (.-FileHeader f))))
+        (when (!= err nil)
+          (return nil err))
+
+
+        ;; Process sections.
+        (set! (.-Sections f) (make (slice (* Section)) (.-NumberOfSections (.-FileHeader f))))
+        (for [i 0] (< i (conv int (.-NumberOfSections (.-FileHeader f)))) (inc! i)
+          (let [sh (new SectionHeader32)]
+            (when [err (binary/Read sr binary/LittleEndian sh)] (!= err nil)
+              (return nil err))
+
+            (let [(values name err) (.fullName sh (.-StringTable f))]
+              (when (!= err nil)
+                (return nil err))
+
+              (let [s (new Section)]
+                (set! (.-SectionHeader s) ^{:go/breaks [2 4 6 8 10 12 14 16 18 20]} (lit SectionHeader
+                    :Name name
+                    :VirtualSize (.-VirtualSize sh)
+                    :VirtualAddress (.-VirtualAddress sh)
+                    :Size (.-SizeOfRawData sh)
+                    :Offset (.-PointerToRawData sh)
+                    :PointerToRelocations (.-PointerToRelocations sh)
+                    :PointerToLineNumbers (.-PointerToLineNumbers sh)
+                    :NumberOfRelocations (.-NumberOfRelocations sh)
+                    :NumberOfLineNumbers (.-NumberOfLineNumbers sh)
+                    :Characteristics (.-Characteristics sh)))
+
+                (let [r2 r]
+                  (when (== (.-PointerToRawData sh) 0) ; .bss must have all 0s
+                    (set! r2 (addr (lit nobitsSectionReader))))
+
+                  (set! (.-sr s) (io/NewSectionReader r2 (conv int64 (.-Offset (.-SectionHeader s))) (conv int64 (.-Size (.-SectionHeader s)))))
+                  (set! (.-ReaderAt s) (.-sr s))
+                  (aset (.-Sections f) i s))))))
+
+        (range [i (.-Sections f)]
+          (let [^error err (zero error)]
+            (set! (values (.-Relocs (aget (.-Sections f) i)) err) (readRelocs (addr (.-SectionHeader (aget (.-Sections f) i))) sr))
+            (when (!= err nil)
+              (return nil err))))
+
+
+
+        (return f nil)))))
+
+
+(go/type nobitsSectionReader (struct))
+
+^{:go/end 190} (go/method ReadAt [(* nobitsSectionReader) ^{:tag (slice byte)} p ^int64 off] :results [^int n ^error err]
+  (return 0 (errors/New "unexpected read from section with uninitialized data")))
+
+
+
+^{:go/end 204} (go/func getString "getString extracts a string from symbol string table.\n" [^{:tag (slice byte)} section ^int start] :results [string bool]
+  (when (or (< start 0) (>= start (len section)))
+    (return "" false))
+
+
+  (for [end start] (< end (len section)) (inc! end)
+    (when (== (aget section end) 0)
+      (return (conv string (subslice section start end)) true)))
+
+
+  (return "" false))
+
+
+
+
+^{:go/breaks [[5 214]] :go/end 215} (go/method Section "Section returns the first section with the given name, or nil if no such\nsection exists.\n" ^{:tag (* Section)} [^{:tag (* File)} f ^string name]
+  (range [_ s (.-Sections f)]
+    (when (== ^{:go/via [SectionHeader]} (.-Name s) name)
+      (return s)))
+
+
+  nil)
+
+
+^{:go/end 311} (go/method DWARF [^{:tag (* File)} f] :results [(* dwarf/Data) error]
+  (let [dwarfSuffix ^{:go/end 228} (fn ^string [^{:tag (* Section)} s]
+        (switch
+          (case [(strings/HasPrefix ^{:go/via [SectionHeader]} (.-Name s) ".debug_")]
+            (return (subslice ^{:go/via [SectionHeader]} (.-Name s) 7)))
+          (case [(strings/HasPrefix ^{:go/via [SectionHeader]} (.-Name s) ".zdebug_")]
+            (return (subslice ^{:go/via [SectionHeader]} (.-Name s) 8)))
+          (default
+            (return ""))))
+
+
+
+
+      ;; sectionData gets the data for s and checks its size.
+      ^{:line 231} sectionData ^{:go/end 257} (fn [^{:tag (* Section)} s] :results [(slice byte) error]
+        (let [(values b err) (.Data s)]
+          (when (and (!= err nil) (< (conv uint32 (len b)) ^{:go/via [SectionHeader]} (.-Size s)))
+            (return nil err))
+
+
+          (when (and (< 0 ^{:go/via [SectionHeader]} (.-VirtualSize s)) (< ^{:go/via [SectionHeader]} (.-VirtualSize s) ^{:go/via [SectionHeader]} (.-Size s)))
+            (set! b (subslice b _ ^{:go/via [SectionHeader]} (.-VirtualSize s))))
+
+
+          (when (and (>= (len b) 12) (== (conv string (subslice b _ 4)) "ZLIB"))
+            (let [dlen (.Uint64 binary/BigEndian (subslice b 4 12))
+                (values r err) (zlib/NewReader (bytes/NewBuffer (subslice b 12)))]
+              (when (!= err nil)
+                (return nil err))
+
+              (let [(values dbuf ^:assign err) (saferio/ReadData r dlen)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (when [err (.Close r)] (!= err nil)
+                  (return nil err))
+
+                (set! b dbuf))))
+
+          (return b nil)))
+
+
+      ;; There are many other DWARF sections, but these
+      ;; are the ones the debug/dwarf package uses.
+      ;; Don't bother loading others.
+      ^:var ^{:line 262} dat (lit (map string (slice byte)) ["abbrev" nil] ["info" nil] ["str" nil] ["line" nil] ["ranges" nil])]
+    (range [_ s (.-Sections f)]
+      (let [suffix (dwarfSuffix s)]
+        (when (== suffix "")
+          (continue))
+
+        (when [(values _ ok) (aget dat suffix)] (not ok)
+          (continue))
+
+
+        (let [(values b err) (sectionData s)]
+          (when (!= err nil)
+            (return nil err))
+
+          (aset dat suffix b))))
+
+
+    (let [(values d err) (dwarf/New (aget dat "abbrev") nil nil (aget dat "info") (aget dat "line") nil (aget dat "ranges") (aget dat "str"))]
+      (when (!= err nil)
+        (return nil err))
+
+
+      ;; Look for DWARF4 .debug_types sections and DWARF5 sections.
+      (range [i s (.-Sections f)]
+        (let [suffix (dwarfSuffix s)]
+          (when (== suffix "")
+            (continue))
+
+          (when [(values _ ok) (aget dat suffix)] ok
+            ;; Already handled.
+            (continue))
+
+
+          (let [(values b err) (sectionData s)]
+            (when (!= err nil)
+              (return nil err))
+
+
+            (if (== suffix "types")
+              (set! err (.AddTypes d (fmt/Sprintf "types-%d" i) b))
+
+              (set! err (.AddSection d (+ ".debug_" suffix) b)))
+
+            (when (!= err nil)
+              (return nil err)))))
+
+
+
+      (return d nil))))
+
+
+;; TODO(brainman): document ImportDirectory once we decide what to do with it.
+
+(go/type ImportDirectory (struct
+    ^{:line 316 :tag uint32} OriginalFirstThunk
+    ^{:line 317 :tag uint32} TimeDateStamp
+    ^{:line 318 :tag uint32} ForwarderChain
+    ^{:line 319 :tag uint32} Name
+    ^{:line 320 :tag uint32} FirstThunk
+
+    ^{:line 322 :tag string} dll))
+
+
+
+
+
+
+^{:go/end 460} (go/method ImportedSymbols "ImportedSymbols returns the names of all symbols\nreferred to by the binary f that are expected to be\nsatisfied by other libraries at dynamic load time.\nIt does not return weak symbols.\n" [^{:tag (* File)} f] :results [(slice string) error]
+  (when (== (.-OptionalHeader f) nil)
+    (return nil nil))
+
+
+  (let [(values _ pe64) (assert (* OptionalHeader64) (.-OptionalHeader f))
+
+      ;; grab the number of data directory entries
+      ^{:line 337 :tag uint32} dd_length (zero uint32)]
+    (if pe64
+      (set! dd_length (.-NumberOfRvaAndSizes (assert (* OptionalHeader64) (.-OptionalHeader f))))
+
+      (set! dd_length (.-NumberOfRvaAndSizes (assert (* OptionalHeader32) (.-OptionalHeader f)))))
+
+
+    ;; check that the length of data directory entries is large
+    ;; enough to include the imports directory.
+    (when (< dd_length (+ IMAGE_DIRECTORY_ENTRY_IMPORT 1))
+      (return nil nil))
+
+
+    ;; grab the import data directory entry
+    (let [^DataDirectory idd (zero DataDirectory)]
+      (if pe64
+        (set! idd (aget (.-DataDirectory (assert (* OptionalHeader64) (.-OptionalHeader f))) IMAGE_DIRECTORY_ENTRY_IMPORT))
+
+        (set! idd (aget (.-DataDirectory (assert (* OptionalHeader32) (.-OptionalHeader f))) IMAGE_DIRECTORY_ENTRY_IMPORT)))
+
+
+      ;; figure out which section contains the import directory table
+      (let [^{:tag (* Section)} ds (zero (* Section))]
+        (set! ds nil)
+        (range [_ s (.-Sections f)]
+          (when (== ^{:go/via [SectionHeader]} (.-Offset s) 0)
+            (continue))
+
+          ;; We are using distance between s.VirtualAddress and idd.VirtualAddress
+          ;; to avoid potential overflow of uint32 caused by addition of s.VirtualSize
+          ;; to s.VirtualAddress.
+          (when (and (<= ^{:go/via [SectionHeader]} (.-VirtualAddress s) (.-VirtualAddress idd)) (< (- (.-VirtualAddress idd) ^{:go/via [SectionHeader]} (.-VirtualAddress s)) ^{:go/via [SectionHeader]} (.-VirtualSize s)))
+            (set! ds s)
+            (break)))
+
+
+
+        ;; didn't find a section, so no import libraries were found
+        (when (== ds nil)
+          (return nil nil))
+
+
+        (let [(values d err) (.Data ds)]
+          (when (!= err nil)
+            (return nil err))
+
+
+          ;; seek to the virtual address specified in the import data directory
+          (let [seek (- (.-VirtualAddress idd) ^{:go/via [SectionHeader]} (.-VirtualAddress ds))]
+            (when (>= seek (conv uint32 (len d)))
+              (return nil (errors/New "optional header data directory virtual size doesn't fit within data seek")))
+
+            (set! d (subslice d seek))
+
+            ;; start decoding the import directory
+            (let [^{:tag (slice ImportDirectory)} ida (zero (slice ImportDirectory))]
+              (while (>= (len d) 20)
+                (let [^ImportDirectory dt (zero ImportDirectory)]
+                  (set! (.-OriginalFirstThunk dt) (.Uint32 binary/LittleEndian (subslice d 0 4)))
+                  (set! (.-TimeDateStamp dt) (.Uint32 binary/LittleEndian (subslice d 4 8)))
+                  (set! (.-ForwarderChain dt) (.Uint32 binary/LittleEndian (subslice d 8 12)))
+                  (set! (.-Name dt) (.Uint32 binary/LittleEndian (subslice d 12 16)))
+                  (set! (.-FirstThunk dt) (.Uint32 binary/LittleEndian (subslice d 16 20)))
+                  (set! d (subslice d 20))
+                  (when (== (.-OriginalFirstThunk dt) 0)
+                    (break))
+
+                  (set! ida (append ida dt))))
+
+              ;; TODO(brainman): this needs to be rewritten
+              ;;  ds.Data() returns contents of section containing import table. Why store in variable called "names"?
+              ;;  Why we are retrieving it second time? We already have it in "d", and it is not modified anywhere.
+              ;;  getString does not extracts a string from symbol string table (as getString doco says).
+              ;;  Why ds.Data() called again and again in the loop?
+              ;;  Needs test before rewrite.
+              (let [(values names _) (.Data ds)
+                  ^{:line 413 :tag (slice string)} all (zero (slice string))]
+                (range [_ dt ida]
+                  (set! (values (.-dll dt) _) (getString names (conv int (- (.-Name dt) ^{:go/via [SectionHeader]} (.-VirtualAddress ds)))))
+                  (set! (values d _) (.Data ds))
+                  ;; seek to OriginalFirstThunk
+                  (let [seek (- (.-OriginalFirstThunk dt) ^{:go/via [SectionHeader]} (.-VirtualAddress ds))]
+                    (when (>= seek (conv uint32 (len d)))
+                      (return nil (errors/New "import directory original first thunk doesn't fit within data seek")))
+
+                    (set! d (subslice d seek))
+                    (while (> (len d) 0)
+                      (if pe64 (do ; 64bit
+                          (when (< (len d) 8)
+                            (return nil (errors/New "thunk parsing needs at least 8-bytes")))
+
+                          (let [va (.Uint64 binary/LittleEndian (subslice d 0 8))]
+                            (set! d (subslice d 8))
+                            (when (== va 0)
+                              (break))
+
+                            (if (> (bit-and va 0x8000000000000000) 0) (do) ; is Ordinal
+                              ;; TODO add dynimport ordinal support.
+
+                              (let [(values fn _) (getString names (conv int (+ (- (conv uint32 va) ^{:go/via [SectionHeader]} (.-VirtualAddress ds)) 2)))]
+                                (set! all (append all (+ fn ":" (.-dll dt))))))))
+
+                        (do ; 32bit
+                          (when (<= (len d) 4)
+                            (return nil (errors/New "thunk parsing needs at least 5-bytes")))
+
+                          (let [va (.Uint32 binary/LittleEndian (subslice d 0 4))]
+                            (set! d (subslice d 4))
+                            (when (== va 0)
+                              (break))
+
+                            (if (> (bit-and va 0x80000000) 0) (do) ; is Ordinal
+                              ;; TODO add dynimport ordinal support.
+                              ;;ord := va&0x0000FFFF
+
+                              (let [(values fn _) (getString names (conv int (+ (- va ^{:go/via [SectionHeader]} (.-VirtualAddress ds)) 2)))]
+                                (set! all (append all (+ fn ":" (.-dll dt))))))))))))
+
+
+
+
+
+                (return all nil)))))))))
+
+
+
+
+
+^{:go/end 469} (go/method ImportedLibraries "ImportedLibraries returns the names of all libraries\nreferred to by the binary f that are expected to be\nlinked with the binary at dynamic link time.\n" [^{:tag (* File)} f] :results [(slice string) error]
+  ;; TODO
+  ;; cgo -dynimport don't use this for windows PE, so just return.
+  (return nil nil))
+
+
+
+
+(go/type FormatError "FormatError is unused.\nThe type is retained for compatibility.\n" (struct))
+
+
+^{:go/breaks [3] :go/end 478} (go/method Error ^string [^{:tag (* FormatError)} e]
+  "unknown error")
+
+
+
+
+
+
+^{:go/end 626} (go/func readOptionalHeader "readOptionalHeader accepts an io.ReadSeeker pointing to optional header in the PE file\nand its size as seen in the file header.\nIt parses the given size of bytes and returns optional header. It infers whether the\nbytes being parsed refer to 32 bit or 64 bit version of optional header.\n" [^io/ReadSeeker r ^uint16 sz] :results [any error]
+  ;; If optional header size is 0, return empty optional header.
+  (when (== sz 0)
+    (return nil nil))
+
+
+  (let [
+      ;; First couple of bytes in option header state its type.
+      ;; We need to read them first to determine the type and
+      ;; validity of optional header.
+      ^{:line 494 :tag uint16} ohMagic (zero uint16)
+      ^:var ^{:line 495} ohMagicSz (binary/Size ohMagic)]
+
+
+    ;; If optional header size is greater than 0 but less than its magic size, return error.
+    (when (< sz (conv uint16 ohMagicSz))
+      (return nil (fmt/Errorf "optional header size is less than optional header magic size")))
+
+
+    ;; read reads from io.ReadSeeke, r, into data.
+    (let [^error err (zero error)
+        ^{:line 505} read ^{:go/end 508} (fn ^bool [^any data]
+          (set! err (binary/Read r binary/LittleEndian data))
+          (== err nil))]
+
+
+      (when (not (read (addr ohMagic)))
+        (return nil (fmt/Errorf "failure to read optional header magic: %v" err)))
+
+
+
+      (switch ohMagic
+        (case [0x10b] ; PE32
+          (let [
+              ^{:line 518 :tag OptionalHeader32} oh32 (zero OptionalHeader32)
+              ;; There can be 0 or more data directories. So the minimum size of optional
+              ;; header is calculated by subtracting oh32.DataDirectory size from oh32 size.
+              ^:var ^{:line 521} oh32MinSz (- (binary/Size oh32) (binary/Size (.-DataDirectory oh32)))]
+
+
+            (when (< sz (conv uint16 oh32MinSz))
+              (return nil (fmt/Errorf "optional header size(%d) is less minimum size (%d) of PE32 optional header" sz oh32MinSz)))
+
+
+            ;; Init oh32 fields
+            (set! (.-Magic oh32) ohMagic)
+            (when (or (not (read (addr (.-MajorLinkerVersion oh32))))
+                (not (read (addr (.-MinorLinkerVersion oh32))))
+                (not (read (addr (.-SizeOfCode oh32))))
+                (not (read (addr (.-SizeOfInitializedData oh32))))
+                (not (read (addr (.-SizeOfUninitializedData oh32))))
+                (not (read (addr (.-AddressOfEntryPoint oh32))))
+                (not (read (addr (.-BaseOfCode oh32))))
+                (not (read (addr (.-BaseOfData oh32))))
+                (not (read (addr (.-ImageBase oh32))))
+                (not (read (addr (.-SectionAlignment oh32))))
+                (not (read (addr (.-FileAlignment oh32))))
+                (not (read (addr (.-MajorOperatingSystemVersion oh32))))
+                (not (read (addr (.-MinorOperatingSystemVersion oh32))))
+                (not (read (addr (.-MajorImageVersion oh32))))
+                (not (read (addr (.-MinorImageVersion oh32))))
+                (not (read (addr (.-MajorSubsystemVersion oh32))))
+                (not (read (addr (.-MinorSubsystemVersion oh32))))
+                (not (read (addr (.-Win32VersionValue oh32))))
+                (not (read (addr (.-SizeOfImage oh32))))
+                (not (read (addr (.-SizeOfHeaders oh32))))
+                (not (read (addr (.-CheckSum oh32))))
+                (not (read (addr (.-Subsystem oh32))))
+                (not (read (addr (.-DllCharacteristics oh32))))
+                (not (read (addr (.-SizeOfStackReserve oh32))))
+                (not (read (addr (.-SizeOfStackCommit oh32))))
+                (not (read (addr (.-SizeOfHeapReserve oh32))))
+                (not (read (addr (.-SizeOfHeapCommit oh32))))
+                (not (read (addr (.-LoaderFlags oh32))))
+                (not (read (addr (.-NumberOfRvaAndSizes oh32)))))
+              (return nil (fmt/Errorf "failure to read PE32 optional header: %v" err)))
+
+
+            (let [(values dd err) (readDataDirectories r (- sz (conv uint16 oh32MinSz)) (.-NumberOfRvaAndSizes oh32))]
+              (when (!= err nil)
+                (return nil err))
+
+
+              (copy (subslice (.-DataDirectory oh32)) dd)
+
+              (return (addr oh32) nil))))
+        (case [0x20b] ; PE32+
+          (let [
+              ^{:line 572 :tag OptionalHeader64} oh64 (zero OptionalHeader64)
+              ;; There can be 0 or more data directories. So the minimum size of optional
+              ;; header is calculated by subtracting oh64.DataDirectory size from oh64 size.
+              ^:var ^{:line 575} oh64MinSz (- (binary/Size oh64) (binary/Size (.-DataDirectory oh64)))]
+
+
+            (when (< sz (conv uint16 oh64MinSz))
+              (return nil (fmt/Errorf "optional header size(%d) is less minimum size (%d) for PE32+ optional header" sz oh64MinSz)))
+
+
+            ;; Init oh64 fields
+            (set! (.-Magic oh64) ohMagic)
+            (when (or (not (read (addr (.-MajorLinkerVersion oh64))))
+                (not (read (addr (.-MinorLinkerVersion oh64))))
+                (not (read (addr (.-SizeOfCode oh64))))
+                (not (read (addr (.-SizeOfInitializedData oh64))))
+                (not (read (addr (.-SizeOfUninitializedData oh64))))
+                (not (read (addr (.-AddressOfEntryPoint oh64))))
+                (not (read (addr (.-BaseOfCode oh64))))
+                (not (read (addr (.-ImageBase oh64))))
+                (not (read (addr (.-SectionAlignment oh64))))
+                (not (read (addr (.-FileAlignment oh64))))
+                (not (read (addr (.-MajorOperatingSystemVersion oh64))))
+                (not (read (addr (.-MinorOperatingSystemVersion oh64))))
+                (not (read (addr (.-MajorImageVersion oh64))))
+                (not (read (addr (.-MinorImageVersion oh64))))
+                (not (read (addr (.-MajorSubsystemVersion oh64))))
+                (not (read (addr (.-MinorSubsystemVersion oh64))))
+                (not (read (addr (.-Win32VersionValue oh64))))
+                (not (read (addr (.-SizeOfImage oh64))))
+                (not (read (addr (.-SizeOfHeaders oh64))))
+                (not (read (addr (.-CheckSum oh64))))
+                (not (read (addr (.-Subsystem oh64))))
+                (not (read (addr (.-DllCharacteristics oh64))))
+                (not (read (addr (.-SizeOfStackReserve oh64))))
+                (not (read (addr (.-SizeOfStackCommit oh64))))
+                (not (read (addr (.-SizeOfHeapReserve oh64))))
+                (not (read (addr (.-SizeOfHeapCommit oh64))))
+                (not (read (addr (.-LoaderFlags oh64))))
+                (not (read (addr (.-NumberOfRvaAndSizes oh64)))))
+              (return nil (fmt/Errorf "failure to read PE32+ optional header: %v" err)))
+
+
+            (let [(values dd err) (readDataDirectories r (- sz (conv uint16 oh64MinSz)) (.-NumberOfRvaAndSizes oh64))]
+              (when (!= err nil)
+                (return nil err))
+
+
+              (copy (subslice (.-DataDirectory oh64)) dd)
+
+              (return (addr oh64) nil))))
+        (default
+          (return nil (fmt/Errorf "optional header has unexpected Magic of 0x%x" ohMagic)))))))
+
+
+
+
+
+
+^{:go/end 643} (go/func readDataDirectories "readDataDirectories accepts an io.ReadSeeker pointing to data directories in the PE file,\nits size and number of data directories as seen in optional header.\nIt parses the given size of bytes and returns given number of data directories.\n" [^io/ReadSeeker r ^uint16 sz ^uint32 n] :results [(slice DataDirectory) error]
+  (let [ddSz (conv uint64 (binary/Size (lit DataDirectory)))]
+    (when (!= (conv uint64 sz) (* (conv uint64 n) ddSz))
+      (return nil (fmt/Errorf "size of data directories(%d) is inconsistent with number of data directories(%d)" sz n)))
+
+
+    (let [dd (make (slice DataDirectory) n)]
+      (when [err (binary/Read r binary/LittleEndian dd)] (!= err nil)
+        (return nil (fmt/Errorf "failure to read data directories: %v" err)))
+
+
+      (return dd nil))))

@@ -1,0 +1,97 @@
+;; Nuvoton CRYPTO PRNG driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package prng implements a driver for the pseudo random number generator
+;; found in the CRYPTO (Cryptographic Accelerator) engine of Nuvoton SoCs
+;; adopting the following reference specifications:
+;;   - NUC980 Series Datasheet - Rev 1.24
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=arm` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.nuvoton.prng) (go/file "prng.go" :doc "Package prng implements a driver for the pseudo random number generator\nfound in the CRYPTO (Cryptographic Accelerator) engine of Nuvoton SoCs\nadopting the following reference specifications:\n  - NUC980 Series Datasheet - Rev 1.24\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=arm` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 20} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 21} [reg "github.com/usbarmory/tamago/internal/reg"]
+    ^{:line 22} [rng "github.com/usbarmory/tamago/internal/rng"]])
+
+
+
+(go/const "CRYPTO PRNG register offsets (from PRNG.Base).\n"
+  ^{:line 27} [^{:val 8} PRNG_CTL 0x008]
+  ^{:line 28} [^{:val 0} CTL_START 0] ; start PRNG generation
+  ^{:line 29} [^{:val 1} CTL_SEEDRLD 1] ; reload seed before generation
+  ^{:line 30} [^{:val 2} CTL_KEYSZ 2] ; key size field [3:2]
+  ^{:line 31} [^{:val 8} CTL_BUSY 8] ; PRNG busy (read-only)
+
+  ^{:line 33} [^{:val 12} PRNG_SEED 0x00c]
+  ^{:line 34} [^{:val 16} PRNG_KEY0 0x010])
+
+
+
+(go/const ^{:val 3 :doc "KEYSZ_256 selects a 256-bit key size in the CTL_KEYSZ field.\n"} KEYSZ_256 2r11)
+
+
+(go/const ^{:val 8 :doc "keyRegs is the number of 32-bit output key registers (256-bit / 32).\n"} keyRegs 8)
+
+
+(go/type PRNG "PRNG represents a Nuvoton CRYPTO PRNG instance.\n" (struct
+
+    ^{:line 46 :tag uint32 :doc "Base register\n"} Base
+
+    ^{:line 48 :tag uint32} seed))
+
+
+
+
+
+^{:go/end 72} (go/method Seed "Seed sets the value used to seed the CRYPTO PRNG. The CRYPTO PRNG is\ndeterministic, so its output sequence is fully determined by this value.\nSeed can be called again at any time to re-seed a running PRNG.\n" [^{:tag (* PRNG)} hw ^uint32 seed]
+  (when (== seed 0)
+    (panic "RNG seed must not be 0"))
+
+
+  (let [^uint32 ctl (zero uint32)]
+    (bits/SetN (addr ctl) CTL_KEYSZ 2r11 KEYSZ_256)
+    (bits/Set (addr ctl) CTL_START)
+    (bits/Set (addr ctl) CTL_SEEDRLD)
+
+    (reg/Write (+ (.-Base hw) PRNG_SEED) seed)
+    (reg/Write (+ (.-Base hw) PRNG_CTL) ctl)
+
+    ;; wait for completion
+    (while (reg/Get (+ (.-Base hw) PRNG_CTL) CTL_BUSY))
+
+
+    (set! (.-seed hw) seed)))
+
+
+
+
+
+^{:go/end 100} (go/method GetRandomData "GetRandomData fills b with bytes from the CRYPTO PRNG. Each generation\nproduces 256 bits (8×32-bit); the generation is repeated as needed for\nrequests larger than 32 bytes.\n" [^{:tag (* PRNG)} hw ^{:tag (slice byte)} b]
+  (when (== (.-seed hw) 0)
+    (panic "RNG uninitialized"))
+
+
+  (let [read 0
+      ^{:line 83} need (len b)]
+
+    (while (< read need)
+      (let [^uint32 ctl (zero uint32)]
+        (bits/SetN (addr ctl) CTL_KEYSZ 2r11 KEYSZ_256)
+        (bits/Set (addr ctl) CTL_START)
+        (reg/Write (+ (.-Base hw) PRNG_CTL) ctl)
+
+        ;; wait for completion
+        (while (reg/Get (+ (.-Base hw) PRNG_CTL) CTL_BUSY))
+
+
+        ;; drain up to 32 bytes (8×32-bit key words)
+        (for [i 0] (and (< i keyRegs) (< read need)) (inc! i)
+          (set! read (rng/Fill b read (reg/Read (+ (.-Base hw) PRNG_KEY0 (conv uint32 (* i 4)))))))))))

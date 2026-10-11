@@ -1,0 +1,601 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package cfile implements management of coverage files.
+;; It provides functionality exported in runtime/coverage as well as
+;; additional functionality used directly by package testing
+;; through testing/internal/testdeps.
+(in-ns 'go.internal.coverage.cfile) (go/file "emit.go" :doc "Package cfile implements management of coverage files.\nIt provides functionality exported in runtime/coverage as well as\nadditional functionality used directly by package testing\nthrough testing/internal/testdeps.\n" :imports [
+
+
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [fnv "hash/fnv"]
+    ^{:line 14} [coverage "internal/coverage"]
+    ^{:line 15} [encodecounter "internal/coverage/encodecounter"]
+    ^{:line 16} [encodemeta "internal/coverage/encodemeta"]
+    ^{:line 17} [rtcov "internal/coverage/rtcov"]
+    ^{:line 18} [io "io"]
+    ^{:line 19} [os "os"]
+    ^{:line 20} [filepath "path/filepath"]
+    ^{:line 21} [runtime "runtime"]
+    ^{:line 22} [strconv "strconv"]
+    ^{:line 23} [atomic "sync/atomic"]
+    ^{:line 24} [time "time"]
+    ^{:line 25} [unsafe "unsafe"]])
+
+
+;; This file contains functions that support the writing of data files
+;; emitted at the end of code coverage testing runs, from instrumented
+;; executables.
+
+
+
+
+
+
+(go/func ^:extern ^{:go/linkname "getCovCounterList"} getCovCounterList "getCovCounterList returns a list of counter-data blobs registered\nfor the currently executing instrumented program. It is defined in the\nruntime.\n" ^{:tag (slice rtcov/CovCounterBlob)} [])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type emitState "emitState holds useful state information during the emit process.\n\nWhen an instrumented program finishes execution and starts the\nprocess of writing out coverage data, it's possible that an\nexisting meta-data file already exists in the output directory. In\nthis case openOutputFiles() below will leave the 'mf' field below\nas nil. If a new meta-data file is needed, field 'mfname' will be\nthe final desired path of the meta file, 'mftmp' will be a\ntemporary file, and 'mf' will be an open os.File pointer for\n'mftmp'. The meta-data file payload will be written to 'mf', the\ntemp file will be then closed and renamed (from 'mftmp' to\n'mfname'), so as to insure that the meta-data file is created\natomically; we want this so that things work smoothly in cases\nwhere there are several instances of a given instrumented program\nall terminating at the same time and trying to create meta-data\nfiles simultaneously.\n\nFor counter data files there is less chance of a collision, hence\nthe openOutputFiles() stores the counter data file in 'cfname' and\nthen places the *io.File into 'cf'.\n" (struct
+    ^{:line 60 :tag string} mfname ; path of final meta-data output file
+    ^{:line 61 :tag string} mftmp ; path to meta-data temp file (if needed)
+    ^{:line 62 :tag (* os/File)} mf ; open os.File for meta-data temp file
+    ^{:line 63 :tag string} cfname ; path of final counter data file
+    ^{:line 64 :tag string} cftmp ; path to counter data temp file
+    ^{:line 65 :tag (* os/File)} cf ; open os.File for counter data file
+    ^{:line 66 :tag string} outdir ; output directory
+
+
+    ^{:line 69 :tag (slice rtcov/CovMetaBlob) :doc "List of meta-data symbols obtained from the runtime\n"} metalist
+
+
+    ^{:line 72 :tag (slice rtcov/CovCounterBlob) :doc "List of counter-data symbols obtained from the runtime\n"} counterlist
+
+
+    ^{:line 75 :tag (map int int) :doc "Table to use for remapping hard-coded pkg ids.\n"} pkgmap
+
+
+    ^{:line 78 :tag bool :doc "emit debug trace output\n"} debug))
+
+
+(go/var
+
+
+
+  ^{:line 85} [^{:tag (array 16 byte) :doc "finalHash is computed at init time from the list of meta-data\nsymbols registered during init. It is used both for writing the\nmeta-data file and counter-data files.\n"} finalHash]
+
+  ^{:line 87} [^{:tag bool :doc "Set to true when we've computed finalHash + finalMetaLen.\n"} finalHashComputed]
+
+  ^{:line 89} [^{:tag uint64 :doc "Total meta-data length.\n"} finalMetaLen]
+
+  ^{:line 91} [^{:tag bool :doc "Records whether we've already attempted to write meta-data.\n"} metaDataEmitAttempted]
+
+  ^{:line 93} [^{:tag coverage/CounterMode :doc "Counter mode for this instrumented program run.\n"} cmode]
+
+  ^{:line 95} [^{:tag coverage/CounterGranularity :doc "Counter granularity for this instrumented program run.\n"} cgran]
+
+  ^{:line 97} [^{:tag string :doc "Cached value of GOCOVERDIR environment variable.\n"} goCoverDir]
+
+  ^{:line 99} [^{:tag (map string string) :doc "Copy of os.Args made at init time, converted into map format.\n"} capturedOsArgs]
+
+  ^{:line 101} [^{:tag bool :doc "Flag used in tests to signal that coverage data already written.\n"} covProfileAlreadyEmitted])
+
+
+
+
+(go/type fileType "fileType is used to select between counter-data files and\nmeta-data files.\n" int)
+
+(go/const
+  ^{:line 109} [^{:val 1} noFile (<< 1 iota)]
+  ^{:line 110} [^{:val 2} metaDataFile]
+  ^{:line 111} [^{:val 4} counterDataFile])
+
+
+
+
+
+^{:go/end 145} (go/func emitMetaData "emitMetaData emits the meta-data output file for this coverage run.\nThis entry point is intended to be invoked by the compiler from\nan instrumented program's main package init func.\n" []
+  (when covProfileAlreadyEmitted
+    (return))
+
+  (let [(values ml err) (prepareForMetaEmit)]
+    (when (!= err nil)
+      (fmt/Fprintf os/Stderr "error: coverage meta-data prep failed: %v\n" err)
+      (when (!= (os/Getenv "GOCOVERDEBUG") "")
+        (panic "meta-data write failure")))
+
+
+    (when (== (len ml) 0)
+      (fmt/Fprintf os/Stderr "program not built with -cover\n")
+      (return))
+
+
+    (set! goCoverDir (os/Getenv "GOCOVERDIR"))
+    (when (== goCoverDir "")
+      (fmt/Fprintf os/Stderr "warning: GOCOVERDIR not set, no coverage data emitted\n")
+      (return))
+
+
+    (when [err (emitMetaDataToDirectory goCoverDir ml)] (!= err nil)
+      (fmt/Fprintf os/Stderr "error: coverage meta-data emit failed: %v\n" err)
+      (when (!= (os/Getenv "GOCOVERDEBUG") "")
+        (panic "meta-data write failure")))))
+
+
+
+
+^{:go/end 156} (go/func modeClash ^bool [^coverage/CounterMode m]
+  (when (or (== m coverage/CtrModeRegOnly) (== m coverage/CtrModeTestMain))
+    (return false))
+
+  (when (== cmode coverage/CtrModeInvalid)
+    (set! cmode m)
+    (return false))
+
+  (!= cmode m))
+
+
+^{:go/end 164} (go/func granClash ^bool [^coverage/CounterGranularity g]
+  (when (== cgran coverage/CtrGranularityInvalid)
+    (set! cgran g)
+    (return false))
+
+  (!= cgran g))
+
+
+
+
+
+^{:go/end 237} (go/func prepareForMetaEmit "prepareForMetaEmit performs preparatory steps needed prior to\nemitting a meta-data file, notably computing a final hash of\nall meta-data blobs and capturing os args.\n" [] :results [(slice rtcov/CovMetaBlob) error]
+  ;; Ask the runtime for the list of coverage meta-data symbols.
+  (let [ml (.-List rtcov/Meta)]
+
+    ;; In the normal case (go build -o prog.exe ... ; ./prog.exe)
+    ;; len(ml) will always be non-zero, but we check here since at
+    ;; some point this function will be reachable via user-callable
+    ;; APIs (for example, to write out coverage data from a server
+    ;; program that doesn't ever call os.Exit).
+    (when (== (len ml) 0)
+      (return nil nil))
+
+
+    (let [s (addr ^{:go/breaks [2 4]} (lit emitState
+            :metalist ml
+            :debug (!= (os/Getenv "GOCOVERDEBUG") "")))]
+
+
+      ;; Capture os.Args() now so as to avoid issues if args
+      ;; are rewritten during program execution.
+      (set! capturedOsArgs (captureOsArgs))
+
+      (when (.-debug s)
+        (fmt/Fprintf os/Stderr "=+= GOCOVERDIR is %s\n" (os/Getenv "GOCOVERDIR"))
+        (fmt/Fprintf os/Stderr "=+= contents of covmetalist:\n")
+        (range [k b ml]
+          (fmt/Fprintf os/Stderr "=+= slot: %d path: %s " k (.-PkgPath b))
+          (when (!= (.-PkgID b) -1)
+            (fmt/Fprintf os/Stderr " hcid: %d" (.-PkgID b)))
+
+          (fmt/Fprintf os/Stderr "\n"))
+
+        (let [pm (.-PkgMap rtcov/Meta)]
+          (fmt/Fprintf os/Stderr "=+= remap table:\n")
+          (range [from to pm]
+            (fmt/Fprintf os/Stderr "=+= from %d to %d\n"
+              (conv uint32 from) (conv uint32 to)))))
+
+
+
+      (let [h (fnv/New128a)
+          ^{:line 210} tlen (conv uint64 (unsafe/Sizeof (lit coverage/MetaFileHeader)))]
+        (range [_ entry ml]
+          (when [(values _ err) (.Write h (subslice (.-Hash entry)))] (!= err nil)
+            (return nil err))
+
+          (set! tlen + (conv uint64 (.-Len entry)))
+          (let [ecm (conv coverage/CounterMode (.-CounterMode entry))]
+            (when (modeClash ecm)
+              (return nil (fmt/Errorf "coverage counter mode clash: package %s uses mode=%d, but package %s uses mode=%s\n" (.-PkgPath (aget ml 0)) cmode (.-PkgPath entry) ecm)))
+
+            (let [ecg (conv coverage/CounterGranularity (.-CounterGranularity entry))]
+              (when (granClash ecg)
+                (return nil (fmt/Errorf "coverage counter granularity clash: package %s uses gran=%d, but package %s uses gran=%s\n" (.-PkgPath (aget ml 0)) cgran (.-PkgPath entry) ecg))))))
+
+
+
+        ;; Hash mode and granularity as well.
+        (.Write h (conv (slice byte) (.String cmode)))
+        (.Write h (conv (slice byte) (.String cgran)))
+
+        ;; Compute final digest.
+        (let [fh (.Sum h nil)]
+          (copy (subslice finalHash) fh)
+          (set! finalHashComputed true)
+          (set! finalMetaLen tlen)
+
+          (return ml nil))))))
+
+
+
+
+^{:go/end 270} (go/func emitMetaDataToDirectory "emitMetaDataToDirectory emits the meta-data output file to the specified\ndirectory, returning an error if something went wrong.\n" ^error [^string outdir ^{:tag (slice rtcov/CovMetaBlob)} ml]
+  (let [(values ^:assign ml err) (prepareForMetaEmit)]
+    (when (!= err nil)
+      (return err))
+
+    (when (== (len ml) 0)
+      (return nil))
+
+
+    (set! metaDataEmitAttempted true)
+
+    ^{:go/breaks [[4 269]]} (let [s (addr ^{:go/breaks [2 4 6]} (lit emitState
+            :metalist ml
+            :debug (!= (os/Getenv "GOCOVERDEBUG") "")
+            :outdir outdir))]
+
+
+      ;; Open output files.
+      (when [err (.openOutputFiles s finalHash finalMetaLen metaDataFile)] (!= err nil)
+        (return err))
+
+
+      ;; Emit meta-data file only if needed (may already be present).
+      (when (.needMetaDataFile s)
+        (when [err (.emitMetaDataFile s finalHash finalMetaLen)] (!= err nil)
+          (return err)))
+
+
+      nil)))
+
+
+
+
+
+^{:go/end 285} (go/func emitCounterData "emitCounterData emits the counter data output file for this coverage run.\nThis entry point is intended to be invoked by the runtime when an\ninstrumented program is terminating or calling os.Exit().\n" []
+  (when (or (== goCoverDir "") (not finalHashComputed) covProfileAlreadyEmitted)
+    (return))
+
+  (when [err (emitCounterDataToDirectory goCoverDir)] (!= err nil)
+    (fmt/Fprintf os/Stderr "error: coverage counter data emit failed: %v\n" err)
+    (when (!= (os/Getenv "GOCOVERDEBUG") "")
+      (panic "counter-data write failure"))))
+
+
+
+
+
+^{:go/end 332} (go/func emitCounterDataToDirectory "emitCounterDataToDirectory emits the counter-data output file for this coverage run.\n" ^error [^string outdir]
+  ;; Ask the runtime for the list of coverage counter symbols.
+  (let [cl (getCovCounterList)]
+    (when (== (len cl) 0)
+      ;; no work to do here.
+      (return nil))
+
+
+    (when (not finalHashComputed)
+      (return (fmt/Errorf "error: meta-data not available (binary not built with -cover?)")))
+
+
+    ;; Ask the runtime for the list of coverage counter symbols.
+    ^{:go/breaks [[7 331]]} (let [pm (.-PkgMap rtcov/Meta)
+        ^{:line 302} s (addr ^{:go/breaks [2 4 6 8]} (lit emitState
+            :counterlist cl
+            :pkgmap pm
+            :outdir outdir
+            :debug (!= (os/Getenv "GOCOVERDEBUG") "")))]
+
+
+      ;; Open output file.
+      (when [err (.openOutputFiles s finalHash finalMetaLen counterDataFile)] (!= err nil)
+        (return err))
+
+      (when (== (.-cf s) nil)
+        (return (fmt/Errorf "counter data output file open failed (no additional info")))
+
+
+      ;; Emit counter data file.
+      (when [err (.emitCounterDataFile s finalHash (.-cf s))] (!= err nil)
+        (return err))
+
+      (when [err (.Close (.-cf s))] (!= err nil)
+        (return (fmt/Errorf "closing counter data file: %v" err)))
+
+
+      ;; Counter file has now been closed. Rename the temp to the
+      ;; final desired path.
+      (when [err (os/Rename (.-cftmp s) (.-cfname s))] (!= err nil)
+        (return (fmt/Errorf "writing %s: rename from %s failed: %v\n" (.-cfname s) (.-cftmp s) err)))
+
+
+      nil)))
+
+
+
+^{:go/breaks [[5 339]] :go/end 340} (go/method emitCounterDataToWriter "emitCounterDataToWriter emits counter data for this coverage run to an io.Writer.\n" ^error [^{:tag (* emitState)} s ^io/Writer w]
+  (when [err (.emitCounterDataFile s finalHash w)] (!= err nil)
+    (return err))
+
+  nil)
+
+
+
+
+
+
+
+^{:go/end 363} (go/method openMetaFile "openMetaFile determines whether we need to emit a meta-data output\nfile, or whether we can reuse the existing file in the coverage out\ndir. It updates mfname/mftmp/mf fields in 's', returning an error\nif something went wrong. See the comment on the emitState type\ndefinition above for more on how file opening is managed.\n" ^error [^{:tag (* emitState)} s ^{:tag (array 16 byte)} metaHash ^uint64 metaLen]
+
+  ;; Open meta-outfile for reading to see if it exists.
+  (let [fn (fmt/Sprintf "%s.%x" coverage/MetaFilePref metaHash)]
+    (set! (.-mfname s) (filepath/Join (.-outdir s) fn))
+    ^{:go/breaks [[3 362]]} (let [(values fi err) (os/Stat (.-mfname s))]
+      (when (or (!= err nil) (!= (.Size fi) (conv int64 metaLen)))
+        ;; We need a new meta-file.
+        (let [tname (+ "tmp." fn (strconv/FormatInt (.UnixNano (time/Now)) 10))]
+          (set! (.-mftmp s) (filepath/Join (.-outdir s) tname))
+          (set! (values (.-mf s) err) (os/Create (.-mftmp s)))
+          (when (!= err nil)
+            (return (fmt/Errorf "creating meta-data file %s: %v" (.-mftmp s) err)))))
+
+
+      nil)))
+
+
+
+
+
+^{:go/end 379} (go/method openCounterFile "openCounterFile opens an output file for the counter data portion\nof a test coverage run. If updates the 'cfname' and 'cf' fields in\n's', returning an error if something went wrong.\n" ^error [^{:tag (* emitState)} s ^{:tag (array 16 byte)} metaHash]
+  (let [processID (os/Getpid)
+      ^{:line 370} fn (fmt/Sprintf coverage/CounterFileTempl coverage/CounterFilePref metaHash processID (.UnixNano (time/Now)))]
+    (set! (.-cfname s) (filepath/Join (.-outdir s) fn))
+    (set! (.-cftmp s) (filepath/Join (.-outdir s) (+ "tmp." fn)))
+    ^{:go/breaks [[4 378]]} (let [^error err (zero error)]
+      (set! (values (.-cf s) err) (os/Create (.-cftmp s)))
+      (when (!= err nil)
+        (return (fmt/Errorf "creating counter data file %s: %v" (.-cftmp s) err)))
+
+      nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 412} (go/method openOutputFiles "openOutputFiles opens output files in preparation for emitting\ncoverage data. In the case of the meta-data file, openOutputFiles\nmay determine that we can reuse an existing meta-data file in the\noutdir, in which case it will leave the 'mf' field in the state\nstruct as nil. If a new meta-file is needed, the field 'mfname'\nwill be the final desired path of the meta file, 'mftmp' will be a\ntemporary file, and 'mf' will be an open os.File pointer for\n'mftmp'. The idea is that the client/caller will write content into\n'mf', close it, and then rename 'mftmp' to 'mfname'. This function\nalso opens the counter data output file, setting 'cf' and 'cfname'\nin the state struct.\n" ^error [^{:tag (* emitState)} s ^{:tag (array 16 byte)} metaHash ^uint64 metaLen ^fileType which]
+  ^{:go/breaks [[6 411]]} (let [(values fi err) (os/Stat (.-outdir s))]
+    (when (!= err nil)
+      (return (fmt/Errorf "output directory %q inaccessible (err: %v); no coverage data written" (.-outdir s) err)))
+
+    (when (not (.IsDir fi))
+      (return (fmt/Errorf "output directory %q not a directory; no coverage data written" (.-outdir s))))
+
+
+    (when (!= (bit-and which metaDataFile) 0)
+      (when [err (.openMetaFile s metaHash metaLen)] (!= err nil)
+        (return err)))
+
+
+    (when (!= (bit-and which counterDataFile) 0)
+      (when [err (.openCounterFile s metaHash)] (!= err nil)
+        (return err)))
+
+
+    nil))
+
+
+
+
+
+^{:go/breaks [[7 431]] :go/end 432} (go/method emitMetaDataFile "emitMetaDataFile emits coverage meta-data to a previously opened\ntemporary file (s.mftmp), then renames the generated file to the\nfinal path (s.mfname).\n" ^error [^{:tag (* emitState)} s ^{:tag (array 16 byte)} finalHash ^uint64 tlen]
+  (when [err (writeMetaData (.-mf s) (.-metalist s) cmode cgran finalHash)] (!= err nil)
+    (return (fmt/Errorf "writing %s: %v\n" (.-mftmp s) err)))
+
+  (when [err (.Close (.-mf s))] (!= err nil)
+    (return (fmt/Errorf "closing meta data temp file: %v" err)))
+
+
+  ;; Temp file has now been flushed and closed. Rename the temp to the
+  ;; final desired path.
+  (when [err (os/Rename (.-mftmp s) (.-mfname s))] (!= err nil)
+    (return (fmt/Errorf "writing %s: rename from %s failed: %v\n" (.-mfname s) (.-mftmp s) err)))
+
+
+  nil)
+
+
+
+
+
+^{:go/end 439} (go/method needMetaDataFile "needMetaDataFile returns TRUE if we need to emit a meta-data file\nfor this program run. It should be used only after\nopenOutputFiles() has been invoked.\n" ^bool [^{:tag (* emitState)} s]
+  (!= (.-mf s) nil))
+
+
+^{:go/end 450} (go/func writeMetaData ^error [^io/Writer w ^{:tag (slice rtcov/CovMetaBlob)} metalist ^coverage/CounterMode cmode ^coverage/CounterGranularity gran ^{:tag (array 16 byte)} finalHash]
+  (let [mfw (encodemeta/NewCoverageMetaFileWriter "<io.Writer>" w)
+
+      ^{:line 444 :tag (slice (slice byte))} blobs (zero (slice (slice byte)))]
+    (range [_ e metalist]
+      (let [sd (unsafe/Slice (.-P e) (conv int (.-Len e)))]
+        (set! blobs (append blobs sd))))
+
+    (.Write mfw finalHash blobs cmode gran)))
+
+
+^{:go/end 544} (go/method VisitFuncs ^error [^{:tag (* emitState)} s ^encodecounter/CounterVisitorFn f]
+  ^{:go/breaks [[3 543]]} (let [^{:tag (slice uint32)} tcounters (zero (slice uint32))
+
+      ^{:line 455} rdCounters ^{:go/end 461} (fn ^{:tag (slice uint32)} [^{:tag (slice atomic/Uint32)} actrs ^{:tag (slice uint32)} ctrs]
+        (set! ctrs (subslice ctrs _ 0))
+        (range [i actrs]
+          (set! ctrs (append ctrs (.Load (aget actrs i)))))
+
+        ^{:line 460} ctrs)
+
+
+      ^{:line 463} dpkg (conv uint32 0)]
+    (range [_ c (.-counterlist s)]
+      (let [sd (unsafe/Slice (conv (* atomic/Uint32) (conv unsafe/Pointer (.-Counters c))) (conv int (.-Len c)))]
+        (for [i 0] (< i (len sd)) (inc! i)
+          ;; Skip ahead until the next non-zero value.
+          (let [sdi (.Load (aget sd i))]
+            (when (== sdi 0)
+              (continue))
+
+
+            ;; We found a function that was executed.
+            (let [nCtrs (.Load (aget sd (+ i coverage/NumCtrsOffset)))
+                ^{:line 475} pkgId (.Load (aget sd (+ i coverage/PkgIdOffset)))
+                ^{:line 476} funcId (.Load (aget sd (+ i coverage/FuncIdOffset)))
+                ^{:line 477} cst (+ i coverage/FirstCtrOffset)
+                ^{:line 478} counters (subslice sd cst (+ cst (conv int nCtrs)))
+
+                ;; Check to make sure that we have at least one live
+                ;; counter. See the implementation note in ClearCoverageCounters
+                ;; for a description of why this is needed.
+                ^{:line 483} isLive false]
+              (for [i 0] (< i (len counters)) (inc! i)
+                (when (!= (.Load (aget counters i)) 0)
+                  (set! isLive true)
+                  (break)))
+
+
+              (when (not isLive)
+                ;; Skip this function.
+                (set! i + (- (+ coverage/FirstCtrOffset (conv int nCtrs)) 1))
+                (continue))
+
+
+              (when (.-debug s)
+                (when (!= pkgId dpkg)
+                  (set! dpkg pkgId)
+                  (fmt/Fprintf os/Stderr "\n=+= %d: pk=%d visit live fcn"
+                    ^{:line 500} i pkgId))
+
+                (fmt/Fprintf os/Stderr " {i=%d F%d NC%d}" i funcId nCtrs))
+
+
+              ;; Vet and/or fix up package ID. A package ID of zero
+              ;; indicates that there is some new package X that is a
+              ;; runtime dependency, and this package has code that
+              ;; executes before its corresponding init package runs.
+              ;; This is a fatal error that we should only see during
+              ;; Go development (e.g. tip).
+              (let [ipk (conv int32 pkgId)]
+                (cond (== ipk 0) (do
+                    (fmt/Fprintf os/Stderr "\n")
+                    (reportErrorInHardcodedList (conv int32 i) ipk funcId nCtrs))
+                  (< ipk 0)
+                  (if [(values newId ok) (aget (.-pkgmap s) (conv int ipk))] ok
+                    (set! pkgId (conv uint32 newId))
+                    (do
+                      (fmt/Fprintf os/Stderr "\n")
+                      (reportErrorInHardcodedList (conv int32 i) ipk funcId nCtrs))) :else
+
+
+                  ;; The package ID value stored in the counter array
+                  ;; has 1 added to it (so as to preclude the
+                  ;; possibility of a zero value ; see
+                  ;; runtime.addCovMeta), so subtract off 1 here to form
+                  ;; the real package ID.
+                  (dec! pkgId))
+
+
+                (set! tcounters (rdCounters counters tcounters))
+                (when [err (f pkgId funcId tcounters)] (!= err nil)
+                  (return err))
+
+
+                ;; Skip over this function.
+                (set! i + (- (+ coverage/FirstCtrOffset (conv int nCtrs)) 1))))))
+
+        (when (.-debug s)
+          (fmt/Fprintf os/Stderr "\n"))))
+
+
+    nil))
+
+
+
+
+
+
+
+^{:go/end 560} (go/func captureOsArgs "captureOsArgs converts os.Args() into the format we use to store\nthis info in the counter data file (counter data file \"args\"\nsection is a generic key-value collection). See the 'args' section\nin internal/coverage/defs.go for more info. The args map\nis also used to capture GOOS + GOARCH values as well.\n" ^{:tag (map string string)} []
+  (let [m (make (map string string))]
+    (aset m "argc" (strconv/Itoa (len os/Args)))
+    (range [k a os/Args]
+      (aset m (fmt/Sprintf "argv%d" k) a))
+
+    (aset m "GOOS" runtime/GOOS)
+    (aset m "GOARCH" runtime/GOARCH)
+    ^{:line 559} m))
+
+
+
+
+^{:go/end 570} (go/method emitCounterDataFile "emitCounterDataFile emits the counter data portion of a\ncoverage output file (to the file 's.cf').\n" ^error [^{:tag (* emitState)} s ^{:tag (array 16 byte)} finalHash ^io/Writer w]
+  ^{:go/breaks [[3 569]]} (let [cfw (encodecounter/NewCoverageDataWriter w coverage/CtrULeb128)]
+    (when [err (.Write cfw finalHash capturedOsArgs s)] (!= err nil)
+      (return err))
+
+    nil))
+
+
+
+
+
+
+
+^{:go/end 579} (go/func MarkProfileEmitted "MarkProfileEmitted signals the coverage machinery that\ncoverage data output files have already been written out, and there\nis no need to take any additional action at exit time. This\nfunction is called from the coverage-related boilerplate code in _testmain.go\nemitted for go unit tests.\n" [^bool val]
+  (set! covProfileAlreadyEmitted val))
+
+
+^{:go/end 603} (go/func reportErrorInHardcodedList [^int32 slot ^int32 pkgID ^uint32 fnID ^uint32 nCtrs]
+  (let [metaList (.-List rtcov/Meta)
+      ^{:line 583} pkgMap (.-PkgMap rtcov/Meta)]
+
+    (println "internal error in coverage meta-data tracking:")
+    ^{:go/breaks [5]} (println "encountered bad pkgID:" pkgID " at slot:" slot
+      " fnID:" fnID " numCtrs:" nCtrs)
+    (println "list of hard-coded runtime package IDs needs revising.")
+    (println "[see the comment on the 'rtPkgs' var in ")
+    (println " <goroot>/src/internal/coverage/pkid.go]")
+    (println "registered list:")
+    (range [k b metaList]
+      (print "slot: " k " path='" (.-PkgPath b) "' ")
+      (when (!= (.-PkgID b) -1)
+        (print " hard-coded id: " (.-PkgID b)))
+
+      (println ""))
+
+    (println "remap table:")
+    (range [from to pkgMap]
+      (println "from " from " to " to))))

@@ -1,0 +1,725 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; /*
+;; Package rpc provides access to the exported methods of an object across a
+;; network or other I/O connection.
+;; 
+;; The net/rpc package is frozen and is not accepting new features.
+;; 
+;; A server registers an object, making it visible
+;; as a service with the name of the type of the object.  After registration, exported
+;; methods of the object will be accessible remotely.  A server may register multiple
+;; objects (services) of different types but it is an error to register multiple
+;; objects of the same type.
+;; 
+;; Only methods that satisfy these criteria will be made available for remote access;
+;; other methods will be ignored:
+;; 
+;; - the method's type is exported.
+;; - the method is exported.
+;; - the method has two arguments, both exported (or builtin) types.
+;; - the method's second argument is a pointer.
+;; - the method has return type error.
+;; 
+;; In effect, the method must look schematically like
+;; 
+;; func (t *T) MethodName(argType T1, replyType *T2) error
+;; 
+;; where T1 and T2 can be marshaled by encoding/gob.
+;; These requirements apply even if a different codec is used.
+;; (In the future, these requirements may soften for custom codecs.)
+;; 
+;; The method's first argument represents the arguments provided by the caller; the
+;; second argument represents the result parameters to be returned to the caller.
+;; The method's return value, if non-nil, is passed back as a string that the client
+;; sees as if created by [errors.New].  If an error is returned, the reply parameter
+;; will not be sent back to the client.
+;; 
+;; The server may handle requests on a single connection by calling [ServeConn].  More
+;; typically it will create a network listener and call [Accept] or, for an HTTP
+;; listener, [HandleHTTP] and [http.Serve].
+;; 
+;; A client wishing to use the service establishes a connection and then invokes
+;; [NewClient] on the connection.  The convenience function [Dial] ([DialHTTP]) performs
+;; both steps for a raw network connection (an HTTP connection).  The resulting
+;; [Client] object has two methods, [Call] and Go, that specify the service and method to
+;; call, a pointer containing the arguments, and a pointer to receive the result
+;; parameters.
+;; 
+;; The Call method waits for the remote call to complete while the Go method
+;; launches the call asynchronously and signals completion using the Call
+;; structure's Done channel.
+;; 
+;; Unless an explicit codec is set up, package [encoding/gob] is used to
+;; transport the data.
+;; 
+;; Here is a simple example.  A server wishes to export an object of type Arith:
+;; 
+;; package server
+;; 
+;; import "errors"
+;; 
+;; type Args struct {
+;; A, B int
+;; }
+;; 
+;; type Quotient struct {
+;; Quo, Rem int
+;; }
+;; 
+;; type Arith int
+;; 
+;; func (t *Arith) Multiply(args *Args, reply *int) error {
+;; *reply = args.A * args.B
+;; return nil
+;; }
+;; 
+;; func (t *Arith) Divide(args *Args, quo *Quotient) error {
+;; if args.B == 0 {
+;; return errors.New("divide by zero")
+;; }
+;; quo.Quo = args.A / args.B
+;; quo.Rem = args.A % args.B
+;; return nil
+;; }
+;; 
+;; The server calls (for HTTP service):
+;; 
+;; arith := new(Arith)
+;; rpc.Register(arith)
+;; rpc.HandleHTTP()
+;; l, err := net.Listen("tcp", ":1234")
+;; if err != nil {
+;; log.Fatal("listen error:", err)
+;; }
+;; go http.Serve(l, nil)
+;; 
+;; At this point, clients can see a service "Arith" with methods "Arith.Multiply" and
+;; "Arith.Divide".  To invoke one, a client first dials the server:
+;; 
+;; client, err := rpc.DialHTTP("tcp", serverAddress + ":1234")
+;; if err != nil {
+;; log.Fatal("dialing:", err)
+;; }
+;; 
+;; Then it can make a remote call:
+;; 
+;; // Synchronous call
+;; args := &server.Args{7,8}
+;; var reply int
+;; err = client.Call("Arith.Multiply", args, &reply)
+;; if err != nil {
+;; log.Fatal("arith error:", err)
+;; }
+;; fmt.Printf("Arith: %d*%d=%d", args.A, args.B, reply)
+;; 
+;; or
+;; 
+;; // Asynchronous call
+;; quotient := new(Quotient)
+;; divCall := client.Go("Arith.Divide", args, quotient, nil)
+;; replyCall := <-divCall.Done	// will be equal to divCall
+;; // check errors, print, etc.
+;; 
+;; A server implementation will often provide a simple, type-safe wrapper for the
+;; client.
+;; */
+(in-ns 'go.net.rpc) (go/file "server.go" :doc "Package rpc provides access to the exported methods of an object across a\nnetwork or other I/O connection.\n\nThe net/rpc package is frozen and is not accepting new features.\n\nA server registers an object, making it visible\nas a service with the name of the type of the object.  After registration, exported\nmethods of the object will be accessible remotely.  A server may register multiple\nobjects (services) of different types but it is an error to register multiple\nobjects of the same type.\n\nOnly methods that satisfy these criteria will be made available for remote access;\nother methods will be ignored:\n\n  - the method's type is exported.\n  - the method is exported.\n  - the method has two arguments, both exported (or builtin) types.\n  - the method's second argument is a pointer.\n  - the method has return type error.\n\nIn effect, the method must look schematically like\n\n\tfunc (t *T) MethodName(argType T1, replyType *T2) error\n\nwhere T1 and T2 can be marshaled by encoding/gob.\nThese requirements apply even if a different codec is used.\n(In the future, these requirements may soften for custom codecs.)\n\nThe method's first argument represents the arguments provided by the caller; the\nsecond argument represents the result parameters to be returned to the caller.\nThe method's return value, if non-nil, is passed back as a string that the client\nsees as if created by [errors.New].  If an error is returned, the reply parameter\nwill not be sent back to the client.\n\nThe server may handle requests on a single connection by calling [ServeConn].  More\ntypically it will create a network listener and call [Accept] or, for an HTTP\nlistener, [HandleHTTP] and [http.Serve].\n\nA client wishing to use the service establishes a connection and then invokes\n[NewClient] on the connection.  The convenience function [Dial] ([DialHTTP]) performs\nboth steps for a raw network connection (an HTTP connection).  The resulting\n[Client] object has two methods, [Call] and Go, that specify the service and method to\ncall, a pointer containing the arguments, and a pointer to receive the result\nparameters.\n\nThe Call method waits for the remote call to complete while the Go method\nlaunches the call asynchronously and signals completion using the Call\nstructure's Done channel.\n\nUnless an explicit codec is set up, package [encoding/gob] is used to\ntransport the data.\n\nHere is a simple example.  A server wishes to export an object of type Arith:\n\n\tpackage server\n\n\timport \"errors\"\n\n\ttype Args struct {\n\t\tA, B int\n\t}\n\n\ttype Quotient struct {\n\t\tQuo, Rem int\n\t}\n\n\ttype Arith int\n\n\tfunc (t *Arith) Multiply(args *Args, reply *int) error {\n\t\t*reply = args.A * args.B\n\t\treturn nil\n\t}\n\n\tfunc (t *Arith) Divide(args *Args, quo *Quotient) error {\n\t\tif args.B == 0 {\n\t\t\treturn errors.New(\"divide by zero\")\n\t\t}\n\t\tquo.Quo = args.A / args.B\n\t\tquo.Rem = args.A % args.B\n\t\treturn nil\n\t}\n\nThe server calls (for HTTP service):\n\n\tarith := new(Arith)\n\trpc.Register(arith)\n\trpc.HandleHTTP()\n\tl, err := net.Listen(\"tcp\", \":1234\")\n\tif err != nil {\n\t\tlog.Fatal(\"listen error:\", err)\n\t}\n\tgo http.Serve(l, nil)\n\nAt this point, clients can see a service \"Arith\" with methods \"Arith.Multiply\" and\n\"Arith.Divide\".  To invoke one, a client first dials the server:\n\n\tclient, err := rpc.DialHTTP(\"tcp\", serverAddress + \":1234\")\n\tif err != nil {\n\t\tlog.Fatal(\"dialing:\", err)\n\t}\n\nThen it can make a remote call:\n\n\t// Synchronous call\n\targs := &server.Args{7,8}\n\tvar reply int\n\terr = client.Call(\"Arith.Multiply\", args, &reply)\n\tif err != nil {\n\t\tlog.Fatal(\"arith error:\", err)\n\t}\n\tfmt.Printf(\"Arith: %d*%d=%d\", args.A, args.B, reply)\n\nor\n\n\t// Asynchronous call\n\tquotient := new(Quotient)\n\tdivCall := client.Go(\"Arith.Divide\", args, quotient, nil)\n\treplyCall := <-divCall.Done\t// will be equal to divCall\n\t// check errors, print, etc.\n\nA server implementation will often provide a simple, type-safe wrapper for the\nclient.\n" :imports [
+
+
+    ^{:line 132} [bufio "bufio"]
+    ^{:line 133} [gob "encoding/gob"]
+    ^{:line 134} [errors "errors"]
+    ^{:line 135} [token "go/token"]
+    ^{:line 136} [io "io"]
+    ^{:line 137} [log "log"]
+    ^{:line 138} [net "net"]
+    ^{:line 139} [http "net/http"]
+    ^{:line 140} [reflect "reflect"]
+    ^{:line 141} [strings "strings"]
+    ^{:line 142} [sync "sync"]])
+
+
+(go/const
+
+  ^{:line 147} [^{:val "/_goRPC_" :doc "Defaults used by HandleHTTP\n"} DefaultRPCPath "/_goRPC_"]
+  ^{:line 148} [^{:val "/debug/rpc"} DefaultDebugPath "/debug/rpc"])
+
+
+
+(go/var ^{:doc "Precompute the reflect type for error.\n"} typeOfError ((inst reflect/TypeFor error)))
+
+(go/type methodType (struct
+    ^{:line 155} sync/Mutex ; protects counters
+    ^{:line 156 :tag reflect/Method} method
+    ^{:line 157 :tag reflect/Type} ArgType
+    ^{:line 158 :tag reflect/Type} ReplyType
+    ^{:line 159 :tag uint} numCalls))
+
+
+(go/type service (struct
+    ^{:line 163 :tag string} name ; name of service
+    ^{:line 164 :tag reflect/Value} rcvr ; receiver of methods for the service
+    ^{:line 165 :tag reflect/Type} typ ; type of the receiver
+    ^{:line 166 :tag (map string (* methodType))} method)) ; registered methods
+
+
+
+
+
+(go/type Request "Request is a header written before every RPC call. It is used internally\nbut documented here as an aid to debugging, such as when analyzing\nnetwork traffic.\n" (struct
+    ^{:line 173 :tag string} ServiceMethod ; format: "Service.Method"
+    ^{:line 174 :tag uint64} Seq ; sequence number chosen by client
+    ^{:line 175 :tag (* Request)} next)) ; for free list in Server
+
+
+
+
+
+(go/type Response "Response is a header written before every RPC return. It is used internally\nbut documented here as an aid to debugging, such as when analyzing\nnetwork traffic.\n" (struct
+    ^{:line 182 :tag string} ServiceMethod ; echoes that of the Request
+    ^{:line 183 :tag uint64} Seq ; echoes that of the request
+    ^{:line 184 :tag string} Error ; error, if any.
+    ^{:line 185 :tag (* Response)} next)) ; for free list in Server
+
+
+
+(go/type Server "Server represents an RPC Server.\n" (struct
+    ^{:line 190 :tag sync/Map} serviceMap ; map[string]*service
+    ^{:line 191 :tag sync/Mutex} reqLock ; protects freeReq
+    ^{:line 192 :tag (* Request)} freeReq
+    ^{:line 193 :tag sync/Mutex} respLock ; protects freeResp
+    ^{:line 194 :tag (* Response)} freeResp))
+
+
+
+^{:go/end 200} (go/func NewServer "NewServer returns a new [Server].\n" ^{:tag (* Server)} []
+  (addr (lit Server)))
+
+
+
+(go/var ^{:doc "DefaultServer is the default instance of [*Server].\n"} DefaultServer (NewServer))
+
+
+^{:go/end 213} (go/func isExportedOrBuiltinType "isExportedOrBuiltinType reports whether t is an exported or builtin type\n" ^bool [^reflect/Type t]
+  (while (== (.Kind t) reflect/Pointer)
+    (set! t (.Elem t)))
+
+  ;; PkgPath will be non-empty even for an exported type,
+  ;; so we need to check the type name as well.
+  (or (token/IsExported (.Name t)) (== (.PkgPath t) "")))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 228} (go/method Register "Register publishes in the server the set of methods of the\nreceiver value that satisfy the following conditions:\n  - exported method of exported type\n  - two arguments, both of exported type\n  - the second argument is a pointer\n  - one return value, of type error\n\nIt returns an error if the receiver is not an exported type or has\nno suitable methods. It also logs the error using package log.\nThe client accesses each method using a string of the form \"Type.Method\",\nwhere Type is the receiver's concrete type.\n" ^error [^{:tag (* Server)} server ^any rcvr]
+  (.register server rcvr "" false))
+
+
+
+
+^{:go/end 234} (go/method RegisterName "RegisterName is like [Register] but uses the provided name for the type\ninstead of the receiver's concrete type.\n" ^error [^{:tag (* Server)} server ^string name ^any rcvr]
+  (.register server rcvr name true))
+
+
+
+
+(go/const ^{:val false :doc "logRegisterError specifies whether to log problems during method registration.\nTo debug registration, recompile the package with this set to true.\n"} logRegisterError false)
+
+^{:go/end 281} (go/method register ^error [^{:tag (* Server)} server ^any rcvr ^string name ^bool useName]
+  (let [s (new service)]
+    (set! (.-typ s) (reflect/TypeOf rcvr))
+    (set! (.-rcvr s) (reflect/ValueOf rcvr))
+    ^{:go/breaks [[9 280]]} (let [sname name]
+      (when (not useName)
+        (set! sname (.Name (.Type (reflect/Indirect (.-rcvr s))))))
+
+      (when (== sname "")
+        (let [s (+ "rpc.Register: no service name for type " (.String (.-typ s)))]
+          (log/Print s)
+          (return (errors/New s))))
+
+      (when (and (not useName) (not (token/IsExported sname)))
+        (let [s (+ "rpc.Register: type " sname " is not exported")]
+          (log/Print s)
+          (return (errors/New s))))
+
+      (set! (.-name s) sname)
+
+      ;; Install the methods
+      (set! (.-method s) (suitableMethods (.-typ s) logRegisterError))
+
+      (when (== (len (.-method s)) 0)
+        (let [str ""
+
+            ;; To help the user, see if a pointer receiver would work.
+            ^{:line 267} method (suitableMethods (reflect/PointerTo (.-typ s)) false)]
+          (if (!= (len method) 0)
+            (set! str (+ "rpc.Register: type " sname " has no exported methods of suitable type (hint: pass a pointer to value of that type)"))
+
+            (set! str (+ "rpc.Register: type " sname " has no exported methods of suitable type")))
+
+          (log/Print str)
+          (return (errors/New str))))
+
+
+      (when [(values _ dup) (.LoadOrStore (.-serviceMap server) sname s)] dup
+        (return (errors/New (+ "rpc: service already defined: " sname))))
+
+      nil)))
+
+
+
+
+^{:go/end 342} (go/func suitableMethods "suitableMethods returns suitable Rpc methods of typ. It will log\nerrors if logErr is true.\n" ^{:tag (map string (* methodType))} [^reflect/Type typ ^bool logErr]
+  (let [methods (make (map string (* methodType)))]
+    (for [m 0] (< m (.NumMethod typ)) (inc! m)
+      (let [method (.Method typ m)
+          ^{:line 289} mtype (.-Type method)
+          ^{:line 290} mname (.-Name method)]
+        ;; Method must be exported.
+        (when (not (.IsExported method))
+          (continue))
+
+        ;; Method needs three ins: receiver, *args, *reply.
+        (when (!= (.NumIn mtype) 3)
+          (when logErr
+            (log/Printf "rpc.Register: method %q has %d input parameters; needs exactly three\n" mname (.NumIn mtype)))
+
+          (continue))
+
+        ;; First arg need not be a pointer.
+        (let [argType (.In mtype 1)]
+          (when (not (isExportedOrBuiltinType argType))
+            (when logErr
+              (log/Printf "rpc.Register: argument type of method %q is not exported: %q\n" mname argType))
+
+            (continue))
+
+          ;; Second arg must be a pointer.
+          (let [replyType (.In mtype 2)]
+            (when (!= (.Kind replyType) reflect/Pointer)
+              (when logErr
+                (log/Printf "rpc.Register: reply type of method %q is not a pointer: %q\n" mname replyType))
+
+              (continue))
+
+            ;; Reply type must be exported.
+            (when (not (isExportedOrBuiltinType replyType))
+              (when logErr
+                (log/Printf "rpc.Register: reply type of method %q is not exported: %q\n" mname replyType))
+
+              (continue))
+
+            ;; Method needs one out.
+            (when (!= (.NumOut mtype) 1)
+              (when logErr
+                (log/Printf "rpc.Register: method %q has %d output parameters; needs exactly one\n" mname (.NumOut mtype)))
+
+              (continue))
+
+            ;; The return type of the method must be error.
+            (when [returnType (.Out mtype 0)] (!= returnType typeOfError)
+              (when logErr
+                (log/Printf "rpc.Register: return type of method %q is %q, must be error\n" mname returnType))
+
+              (continue))
+
+            (aset methods mname (addr (lit methodType :method method :ArgType argType :ReplyType replyType)))))))
+
+    ^{:line 341} methods))
+
+
+
+
+
+(go/var ^{:doc "A value sent as a placeholder for the server's response value when the server\nreceives an invalid request. It is never decoded by the client since the Response\ncontains an error when it is used.\n"} invalidRequest (lit (struct)))
+
+^{:go/end 365} (go/method sendResponse [^{:tag (* Server)} server ^{:tag (* sync/Mutex)} sending ^{:tag (* Request)} req ^any reply ^ServerCodec codec ^string errmsg]
+  (let [resp (.getResponse server)]
+    ;; Encode the response header
+    (set! (.-ServiceMethod resp) (.-ServiceMethod req))
+    (when (!= errmsg "")
+      (set! (.-Error resp) errmsg)
+      (set! reply invalidRequest))
+
+    (set! (.-Seq resp) (.-Seq req))
+    (.Lock sending)
+    (let [err (.WriteResponse codec resp reply)]
+      (when (and debugLog (!= err nil))
+        (log/Println "rpc: writing response:" err))
+
+      (.Unlock sending)
+      (.freeResponse server resp))))
+
+
+^{:go/end 372} (go/method NumCalls [^{:tag (* methodType)} m] :results [^uint n]
+  ^{:go/via [Mutex]} (.Lock m)
+  (set! n (.-numCalls m))
+  ^{:go/via [Mutex]} (.Unlock m)
+  ^{:line 371} n)
+
+
+^{:go/end 392} (go/method call [^{:tag (* service)} s ^{:tag (* Server)} server ^{:tag (* sync/Mutex)} sending ^{:tag (* sync/WaitGroup)} wg ^{:tag (* methodType)} mtype ^{:tag (* Request)} req ^reflect/Value argv ^reflect/Value replyv ^ServerCodec codec]
+  (when (!= wg nil)
+    (defer (.Done wg)))
+
+  ^{:go/via [Mutex]} (.Lock mtype)
+  (inc! (.-numCalls mtype))
+  ^{:go/via [Mutex]} (.Unlock mtype)
+  (let [function (.-Func (.-method mtype))
+      ;; Invoke the method, providing a new value for the reply.
+      ^{:line 383} returnValues (.Call function (lit (slice reflect/Value) (.-rcvr s) argv replyv))
+      ;; The return value for the method is an error.
+      ^{:line 385} errInter (.Interface (aget returnValues 0))
+      ^{:line 386} errmsg ""]
+    (when (!= errInter nil)
+      (set! errmsg (.Error (assert error errInter))))
+
+    (.sendResponse server sending req (.Interface replyv) codec errmsg)
+    (.freeRequest server req)))
+
+
+(go/type gobServerCodec (struct
+    ^{:line 395 :tag io/ReadWriteCloser} rwc
+    ^{:line 396 :tag (* gob/Decoder)} dec
+    ^{:line 397 :tag (* gob/Encoder)} enc
+    ^{:line 398 :tag (* bufio/Writer)} encBuf
+    ^{:line 399 :tag bool} closed))
+
+
+^{:go/end 404} (go/method ReadRequestHeader ^error [^{:tag (* gobServerCodec)} c ^{:tag (* Request)} r]
+  (.Decode (.-dec c) r))
+
+
+^{:go/end 408} (go/method ReadRequestBody ^error [^{:tag (* gobServerCodec)} c ^any body]
+  (.Decode (.-dec c) body))
+
+
+^{:go/end 430} (go/method WriteResponse [^{:tag (* gobServerCodec)} c ^{:tag (* Response)} r ^any body] :results [^error err]
+  (when [(set! err (.Encode (.-enc c) r))] (!= err nil)
+    (when (== (.Flush (.-encBuf c)) nil)
+      ;; Gob couldn't encode the header. Should not happen, so if it does,
+      ;; shut down the connection to signal that the connection is broken.
+      (log/Println "rpc: gob error encoding response:" err)
+      (.Close c))
+
+    (return))
+
+  (when [(set! err (.Encode (.-enc c) body))] (!= err nil)
+    (when (== (.Flush (.-encBuf c)) nil)
+      ;; Was a gob problem encoding the body but the header has been written.
+      ;; Shut down the connection to signal that the connection is broken.
+      (log/Println "rpc: gob error encoding body:" err)
+      (.Close c))
+
+    (return))
+
+  (.Flush (.-encBuf c)))
+
+
+^{:go/end 439} (go/method Close ^error [^{:tag (* gobServerCodec)} c]
+  (when (.-closed c)
+    ;; Only call c.rwc.Close once; otherwise the semantics are undefined.
+    (return nil))
+
+  (set! (.-closed c) true)
+  (.Close (.-rwc c)))
+
+
+
+
+
+
+
+
+^{:go/end 456} (go/method ServeConn "ServeConn runs the server on a single connection.\nServeConn blocks, serving the connection until the client hangs up.\nThe caller typically invokes ServeConn in a go statement.\nServeConn uses the gob wire format (see package gob) on the\nconnection. To use an alternate codec, use [ServeCodec].\nSee [NewClient]'s comment for information about concurrent access.\n" [^{:tag (* Server)} server ^io/ReadWriteCloser conn]
+  (let [buf (bufio/NewWriter conn)
+      ^{:line 449} srv (addr ^{:go/breaks [2 4 6 8]} (lit gobServerCodec
+          :rwc conn
+          :dec (gob/NewDecoder conn)
+          :enc (gob/NewEncoder buf)
+          :encBuf buf))]
+
+    (.ServeCodec server srv)))
+
+
+
+
+^{:go/end 486} (go/method ServeCodec "ServeCodec is like [ServeConn] but uses the specified codec to\ndecode requests and encode responses.\n" [^{:tag (* Server)} server ^ServerCodec codec]
+  (let [sending (new sync/Mutex)
+      ^{:line 462} wg (new sync/WaitGroup)]
+    (while true
+      (let [(values service mtype req argv replyv keepReading err) (.readRequest server codec)]
+        (when (!= err nil)
+          (when (and debugLog (!= err io/EOF))
+            (log/Println "rpc:" err))
+
+          (when (not keepReading)
+            (break))
+
+          ;; send a response if we actually managed to read a header.
+          (when (!= req nil)
+            (.sendResponse server sending req invalidRequest codec (.Error err))
+            (.freeRequest server req))
+
+          (continue))
+
+        (.Add wg 1)
+        (go (.call service server sending wg mtype req argv replyv codec))))
+
+    ;; We've seen that there are no more requests.
+    ;; Wait for responses to be sent before closing codec.
+    (.Wait wg)
+    (.Close codec)))
+
+
+
+
+^{:go/end 506} (go/method ServeRequest "ServeRequest is like [ServeCodec] but synchronously serves a single request.\nIt does not close the codec upon completion.\n" ^error [^{:tag (* Server)} server ^ServerCodec codec]
+  ^{:go/breaks [4]} (let [sending (new sync/Mutex)
+      (values service mtype req argv replyv keepReading err) (.readRequest server codec)]
+    (when (!= err nil)
+      (when (not keepReading)
+        (return err))
+
+      ;; send a response if we actually managed to read a header.
+      (when (!= req nil)
+        (.sendResponse server sending req invalidRequest codec (.Error err))
+        (.freeRequest server req))
+
+      (return err))
+
+    (.call service server sending nil mtype req argv replyv codec)
+    nil))
+
+
+^{:go/end 519} (go/method getRequest ^{:tag (* Request)} [^{:tag (* Server)} server]
+  (.Lock (.-reqLock server))
+  (let [req (.-freeReq server)]
+    (if (== req nil)
+      (set! req (new Request))
+      (do
+        (set! (.-freeReq server) (.-next req))
+        (set! @req (lit Request))))
+
+    (.Unlock (.-reqLock server))
+    ^{:line 518} req))
+
+
+^{:go/end 526} (go/method freeRequest [^{:tag (* Server)} server ^{:tag (* Request)} req]
+  (.Lock (.-reqLock server))
+  (set! (.-next req) (.-freeReq server))
+  (set! (.-freeReq server) req)
+  (.Unlock (.-reqLock server)))
+
+
+^{:go/end 539} (go/method getResponse ^{:tag (* Response)} [^{:tag (* Server)} server]
+  (.Lock (.-respLock server))
+  (let [resp (.-freeResp server)]
+    (if (== resp nil)
+      (set! resp (new Response))
+      (do
+        (set! (.-freeResp server) (.-next resp))
+        (set! @resp (lit Response))))
+
+    (.Unlock (.-respLock server))
+    ^{:line 538} resp))
+
+
+^{:go/end 546} (go/method freeResponse [^{:tag (* Server)} server ^{:tag (* Response)} resp]
+  (.Lock (.-respLock server))
+  (set! (.-next resp) (.-freeResp server))
+  (set! (.-freeResp server) resp)
+  (.Unlock (.-respLock server)))
+
+
+^{:go/end 584} (go/method readRequest [^{:tag (* Server)} server ^ServerCodec codec] :results [^{:tag (* service)} service ^{:tag (* methodType)} mtype ^{:tag (* Request)} req ^reflect/Value argv ^reflect/Value replyv ^bool keepReading ^error err]
+  (set! (values service mtype req keepReading err) (.readRequestHeader server codec))
+  (when (!= err nil)
+    (when (not keepReading)
+      (return))
+
+    ;; discard body
+    (.ReadRequestBody codec nil)
+    (return))
+
+
+  ;; Decode the argument value.
+  (let [argIsValue false] ; if true, need to indirect before calling.
+    (if (== (.Kind (.-ArgType mtype)) reflect/Pointer)
+      (set! argv (reflect/New (.Elem (.-ArgType mtype))))
+      (do
+        (set! argv (reflect/New (.-ArgType mtype)))
+        (set! argIsValue true)))
+
+    ;; argv guaranteed to be a pointer now.
+    (when [(set! err (.ReadRequestBody codec (.Interface argv)))] (!= err nil)
+      (return))
+
+    (when argIsValue
+      (set! argv (.Elem argv)))
+
+
+    (set! replyv (reflect/New (.Elem (.-ReplyType mtype))))
+
+    (switch (.Kind (.Elem (.-ReplyType mtype)))
+      (case [reflect/Map]
+        (.Set (.Elem replyv) (reflect/MakeMap (.Elem (.-ReplyType mtype)))))
+      (case [reflect/Slice]
+        (.Set (.Elem replyv) (reflect/MakeSlice (.Elem (.-ReplyType mtype)) 0 0))))
+
+    (return)))
+
+
+^{:go/end 623} (go/method readRequestHeader [^{:tag (* Server)} server ^ServerCodec codec] :results [^{:tag (* service)} svc ^{:tag (* methodType)} mtype ^{:tag (* Request)} req ^bool keepReading ^error err]
+  ;; Grab the request header.
+  (set! req (.getRequest server))
+  (set! err (.ReadRequestHeader codec req))
+  (when (!= err nil)
+    (set! req nil)
+    (when (or (== err io/EOF) (== err io/ErrUnexpectedEOF))
+      (return))
+
+    (set! err (errors/New (+ "rpc: server cannot decode request: " (.Error err))))
+    (return))
+
+
+  ;; We read the header successfully. If we see an error now,
+  ;; we can still recover and move on to the next request.
+  (set! keepReading true)
+
+  (let [dot (strings/LastIndex (.-ServiceMethod req) ".")]
+    (when (< dot 0)
+      (set! err (errors/New (+ "rpc: service/method request ill-formed: " (.-ServiceMethod req))))
+      (return))
+
+    (let [serviceName (subslice (.-ServiceMethod req) _ dot)
+        ^{:line 609} methodName (subslice (.-ServiceMethod req) (+ dot 1))
+
+        ;; Look up the request.
+        (values svci ok) (.Load (.-serviceMap server) serviceName)]
+      (when (not ok)
+        (set! err (errors/New (+ "rpc: can't find service " (.-ServiceMethod req))))
+        (return))
+
+      (set! svc (assert (* service) svci))
+      (set! mtype (aget (.-method svc) methodName))
+      (when (== mtype nil)
+        (set! err (errors/New (+ "rpc: can't find method " (.-ServiceMethod req)))))
+
+      (return))))
+
+
+
+
+
+
+^{:go/end 638} (go/method Accept "Accept accepts connections on the listener and serves requests\nfor each incoming connection. Accept blocks until the listener\nreturns a non-nil error. The caller typically invokes Accept in a\ngo statement.\n" [^{:tag (* Server)} server ^net/Listener lis]
+  (while true
+    (let [(values conn err) (.Accept lis)]
+      (when (!= err nil)
+        (log/Print "rpc.Serve: accept:" (.Error err))
+        (return))
+
+      (go (.ServeConn server conn)))))
+
+
+
+
+^{:go/end 641} (go/func Register "Register publishes the receiver's methods in the [DefaultServer].\n" ^error [^any rcvr] (.Register DefaultServer rcvr))
+
+
+
+^{:go/end 647} (go/func RegisterName "RegisterName is like [Register] but uses the provided name for the type\ninstead of the receiver's concrete type.\n" ^error [^string name ^any rcvr]
+  (.RegisterName DefaultServer name rcvr))
+
+
+
+
+
+
+
+
+
+
+(go/type ServerCodec "A ServerCodec implements reading of RPC requests and writing of\nRPC responses for the server side of an RPC session.\nThe server calls [ServerCodec.ReadRequestHeader] and [ServerCodec.ReadRequestBody] in pairs\nto read requests from the connection, and it calls [ServerCodec.WriteResponse] to\nwrite a response back. The server calls [ServerCodec.Close] when finished with the\nconnection. ReadRequestBody may be called with a nil\nargument to force the body of the request to be read and discarded.\nSee [NewClient]'s comment for information about concurrent access.\n" (interface
+    (ReadRequestHeader ^error [(* Request)])
+    (ReadRequestBody ^error [any])
+    (WriteResponse ^error [(* Response) any])
+
+
+    (^{:doc "Close can be called multiple times and must be idempotent.\n"} Close ^error [])))
+
+
+
+
+
+
+
+
+^{:go/end 674} (go/func ServeConn "ServeConn runs the [DefaultServer] on a single connection.\nServeConn blocks, serving the connection until the client hangs up.\nThe caller typically invokes ServeConn in a go statement.\nServeConn uses the gob wire format (see package gob) on the\nconnection. To use an alternate codec, use [ServeCodec].\nSee [NewClient]'s comment for information about concurrent access.\n" [^io/ReadWriteCloser conn]
+  (.ServeConn DefaultServer conn))
+
+
+
+
+^{:go/end 680} (go/func ServeCodec "ServeCodec is like [ServeConn] but uses the specified codec to\ndecode requests and encode responses.\n" [^ServerCodec codec]
+  (.ServeCodec DefaultServer codec))
+
+
+
+
+^{:go/end 686} (go/func ServeRequest "ServeRequest is like [ServeCodec] but synchronously serves a single request.\nIt does not close the codec upon completion.\n" ^error [^ServerCodec codec]
+  (.ServeRequest DefaultServer codec))
+
+
+
+
+
+^{:go/end 691} (go/func Accept "Accept accepts connections on the listener and serves requests\nto [DefaultServer] for each incoming connection.\nAccept blocks; the caller typically invokes it in a go statement.\n" [^net/Listener lis] (.Accept DefaultServer lis))
+
+
+(go/var ^{:doc "Can connect to RPC service using HTTP CONNECT to rpcPath.\n"} connected "200 Connected to Go RPC")
+
+
+^{:go/end 711} (go/method ServeHTTP "ServeHTTP implements an [http.Handler] that answers RPC requests.\n" [^{:tag (* Server)} server ^http/ResponseWriter w ^{:tag (* http/Request)} req]
+  (when (!= (.-Method req) "CONNECT")
+    (.Set (.Header w) "Content-Type" "text/plain; charset=utf-8")
+    (.WriteHeader w http/StatusMethodNotAllowed)
+    (io/WriteString w "405 must CONNECT\n")
+    (return))
+
+  (let [(values conn _ err) (.Hijack (assert http/Hijacker w))]
+    (when (!= err nil)
+      (log/Print "rpc hijacking " (.-RemoteAddr req) ": " (.Error err))
+      (return))
+
+    (io/WriteString conn (+ "HTTP/1.0 " connected "\n\n"))
+    (.ServeConn server conn)))
+
+
+
+
+
+^{:go/end 719} (go/method HandleHTTP "HandleHTTP registers an HTTP handler for RPC messages on rpcPath,\nand a debugging handler on debugPath.\nIt is still necessary to invoke [http.Serve](), typically in a go statement.\n" [^{:tag (* Server)} server ^string rpcPath ^string debugPath]
+  (http/Handle rpcPath server)
+  (http/Handle debugPath (lit debugHTTP server)))
+
+
+
+
+
+^{:go/end 726} (go/func HandleHTTP "HandleHTTP registers an HTTP handler for RPC messages to [DefaultServer]\non [DefaultRPCPath] and a debugging handler on [DefaultDebugPath].\nIt is still necessary to invoke [http.Serve](), typically in a go statement.\n" []
+  (.HandleHTTP DefaultServer DefaultRPCPath DefaultDebugPath))

@@ -1,0 +1,767 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime.pprof) (go/file "proto.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [gzip "compress/gzip"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [abi "internal/abi"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [runtime "runtime"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [time "time"]
+    ^{:line 17} [unsafe "unsafe"]])
+
+
+
+
+
+^{:go/end 23} (go/func lostProfileEvent "lostProfileEvent is the function to which lost profiling\nevents are attributed.\n(The name shows up in the pprof graphs.)\n" [] (lostProfileEvent))
+
+
+
+(go/type profileBuilder "A profileBuilder writes a profile incrementally from a\nstream of profile samples delivered by the runtime.\n" (struct
+    ^{:line 28 :tag time/Time} start
+    ^{:line 29 :tag time/Time} end
+    ^{:line 30 :tag bool} havePeriod
+    ^{:line 31 :tag int64} period
+    ^{:line 32 :tag profMap} m
+
+
+    ^{:line 35 :tag io/Writer :doc "encoding state\n"} w
+    ^{:line 36 :tag (* gzip/Writer)} zw
+    ^{:line 37 :tag protobuf} pb
+    ^{:line 38 :tag (slice string)} strings
+    ^{:line 39 :tag (map string int)} stringMap
+    ^{:line 40 :tag (map uintptr locInfo)} locs ; list of locInfo starting with the given PC.
+    ^{:line 41 :tag (map string int)} funcs ; Package path-qualified function name to Function.ID
+    ^{:line 42 :tag (slice memMap)} mem
+    ^{:line 43 :tag pcDeck} deck))
+
+
+(go/type memMap (struct
+
+    ^{:line 48 :tag uintptr :doc "initialized as reading mapping\n"} start ; Address at which the binary (or DLL) is loaded into memory.
+    ^{:line 49 :tag uintptr} end ; The limit of the address range occupied by this mapping.
+    ^{:line 50 :tag uint64} offset ; Offset in the binary that corresponds to the first mapped address.
+    ^{:line 51 :tag string} file ; The object this entry is loaded from.
+    ^{:line 52 :tag string} buildID ; A string that uniquely identifies a particular program version with high probability.
+
+    ^{:line 54 :tag symbolizeFlag} funcs
+    ^{:line 55 :tag bool} fake)) ; map entry was faked; /proc/self/maps wasn't available
+
+
+
+
+
+
+
+(go/type symbolizeFlag "symbolizeFlag keeps track of symbolization result.\n\n\t0                  : no symbol lookup was performed\n\t1<<0 (lookupTried) : symbol lookup was performed\n\t1<<1 (lookupFailed): symbol lookup was performed but failed\n" uint8)
+
+(go/const
+  ^{:line 66} [^{:tag symbolizeFlag :val 1} lookupTried (<< 1 iota)]
+  ^{:line 67} [^{:tag symbolizeFlag :val 2} lookupFailed (<< 1 iota)])
+
+
+(go/const
+
+  ^{:line 72} [^{:val 1 :doc "message Profile\n"} tagProfile_SampleType 1] ; repeated ValueType
+  ^{:line 73} [^{:val 2} tagProfile_Sample 2] ; repeated Sample
+  ^{:line 74} [^{:val 3} tagProfile_Mapping 3] ; repeated Mapping
+  ^{:line 75} [^{:val 4} tagProfile_Location 4] ; repeated Location
+  ^{:line 76} [^{:val 5} tagProfile_Function 5] ; repeated Function
+  ^{:line 77} [^{:val 6} tagProfile_StringTable 6] ; repeated string
+  ^{:line 78} [^{:val 7} tagProfile_DropFrames 7] ; int64 (string table index)
+  ^{:line 79} [^{:val 8} tagProfile_KeepFrames 8] ; int64 (string table index)
+  ^{:line 80} [^{:val 9} tagProfile_TimeNanos 9] ; int64
+  ^{:line 81} [^{:val 10} tagProfile_DurationNanos 10] ; int64
+  ^{:line 82} [^{:val 11} tagProfile_PeriodType 11] ; ValueType (really optional string???)
+  ^{:line 83} [^{:val 12} tagProfile_Period 12] ; int64
+  ^{:line 84} [^{:val 13} tagProfile_Comment 13] ; repeated int64
+  ^{:line 85} [^{:val 14} tagProfile_DefaultSampleType 14] ; int64
+
+
+  ^{:line 88} [^{:val 1 :doc "message ValueType\n"} tagValueType_Type 1] ; int64 (string table index)
+  ^{:line 89} [^{:val 2} tagValueType_Unit 2] ; int64 (string table index)
+
+
+  ^{:line 92} [^{:val 1 :doc "message Sample\n"} tagSample_Location 1] ; repeated uint64
+  ^{:line 93} [^{:val 2} tagSample_Value 2] ; repeated int64
+  ^{:line 94} [^{:val 3} tagSample_Label 3] ; repeated Label
+
+
+  ^{:line 97} [^{:val 1 :doc "message Label\n"} tagLabel_Key 1] ; int64 (string table index)
+  ^{:line 98} [^{:val 2} tagLabel_Str 2] ; int64 (string table index)
+  ^{:line 99} [^{:val 3} tagLabel_Num 3] ; int64
+
+
+  ^{:line 102} [^{:val 1 :doc "message Mapping\n"} tagMapping_ID 1] ; uint64
+  ^{:line 103} [^{:val 2} tagMapping_Start 2] ; uint64
+  ^{:line 104} [^{:val 3} tagMapping_Limit 3] ; uint64
+  ^{:line 105} [^{:val 4} tagMapping_Offset 4] ; uint64
+  ^{:line 106} [^{:val 5} tagMapping_Filename 5] ; int64 (string table index)
+  ^{:line 107} [^{:val 6} tagMapping_BuildID 6] ; int64 (string table index)
+  ^{:line 108} [^{:val 7} tagMapping_HasFunctions 7] ; bool
+  ^{:line 109} [^{:val 8} tagMapping_HasFilenames 8] ; bool
+  ^{:line 110} [^{:val 9} tagMapping_HasLineNumbers 9] ; bool
+  ^{:line 111} [^{:val 10} tagMapping_HasInlineFrames 10] ; bool
+
+
+  ^{:line 114} [^{:val 1 :doc "message Location\n"} tagLocation_ID 1] ; uint64
+  ^{:line 115} [^{:val 2} tagLocation_MappingID 2] ; uint64
+  ^{:line 116} [^{:val 3} tagLocation_Address 3] ; uint64
+  ^{:line 117} [^{:val 4} tagLocation_Line 4] ; repeated Line
+
+
+  ^{:line 120} [^{:val 1 :doc "message Line\n"} tagLine_FunctionID 1] ; uint64
+  ^{:line 121} [^{:val 2} tagLine_Line 2] ; int64
+
+
+  ^{:line 124} [^{:val 1 :doc "message Function\n"} tagFunction_ID 1] ; uint64
+  ^{:line 125} [^{:val 2} tagFunction_Name 2] ; int64 (string table index)
+  ^{:line 126} [^{:val 3} tagFunction_SystemName 3] ; int64 (string table index)
+  ^{:line 127} [^{:val 4} tagFunction_Filename 4] ; int64 (string table index)
+  ^{:line 128} [^{:val 5} tagFunction_StartLine 5]) ; int64
+
+
+
+
+^{:go/end 141} (go/method stringIndex "stringIndex adds s to the string table if not already present\nand returns the index of s in the string table.\n" ^int64 [^{:tag (* profileBuilder)} b ^string s]
+  (let [(values id ok) (aget (.-stringMap b) s)]
+    (when (not ok)
+      (set! id (len (.-strings b)))
+      (set! (.-strings b) (append (.-strings b) s))
+      (aset (.-stringMap b) s id))
+
+    (conv int64 id)))
+
+
+^{:go/end 149} (go/method flush [^{:tag (* profileBuilder)} b]
+  (let [^:const ^{:val 4096} dataFlush 4096]
+    (when (and (== (.-nest (.-pb b)) 0) (> (len (.-data (.-pb b))) dataFlush))
+      (.Write (.-zw b) (.-data (.-pb b)))
+      (set! (.-data (.-pb b)) (subslice (.-data (.-pb b)) _ 0)))))
+
+
+
+
+^{:go/end 157} (go/method pbValueType "pbValueType encodes a ValueType message to b.pb.\n" [^{:tag (* profileBuilder)} b ^int tag ^string typ ^string unit]
+  (let [start (.startMessage (.-pb b))]
+    (.int64 (.-pb b) tagValueType_Type (.stringIndex b typ))
+    (.int64 (.-pb b) tagValueType_Unit (.stringIndex b unit))
+    (.endMessage (.-pb b) tag start)))
+
+
+
+^{:go/end 169} (go/method pbSample "pbSample encodes a Sample message to b.pb.\n" [^{:tag (* profileBuilder)} b ^{:tag (slice int64)} values ^{:tag (slice uint64)} locs ^{:tag (func [])} labels]
+  (let [start (.startMessage (.-pb b))]
+    (.int64s (.-pb b) tagSample_Value values)
+    (.uint64s (.-pb b) tagSample_Location locs)
+    (when (!= labels nil)
+      (labels))
+
+    (.endMessage (.-pb b) tagProfile_Sample start)
+    (.flush b)))
+
+
+
+^{:go/end 178} (go/method pbLabel "pbLabel encodes a Label message to b.pb.\n" [^{:tag (* profileBuilder)} b ^int tag ^string key ^string str ^int64 num]
+  (let [start (.startMessage (.-pb b))]
+    (.int64Opt (.-pb b) tagLabel_Key (.stringIndex b key))
+    (.int64Opt (.-pb b) tagLabel_Str (.stringIndex b str))
+    (.int64Opt (.-pb b) tagLabel_Num num)
+    (.endMessage (.-pb b) tag start)))
+
+
+
+^{:go/end 186} (go/method pbLine "pbLine encodes a Line message to b.pb.\n" [^{:tag (* profileBuilder)} b ^int tag ^uint64 funcID ^int64 line]
+  (let [start (.startMessage (.-pb b))]
+    (.uint64Opt (.-pb b) tagLine_FunctionID funcID)
+    (.int64Opt (.-pb b) tagLine_Line line)
+    (.endMessage (.-pb b) tag start)))
+
+
+
+^{:go/end 207} (go/method pbMapping "pbMapping encodes a Mapping message to b.pb.\n" [^{:tag (* profileBuilder)} b ^int tag ^uint64 id ^uint64 base ^uint64 limit ^uint64 offset ^string file ^string buildID ^bool hasFuncs]
+  (let [start (.startMessage (.-pb b))]
+    (.uint64Opt (.-pb b) tagMapping_ID id)
+    (.uint64Opt (.-pb b) tagMapping_Start base)
+    (.uint64Opt (.-pb b) tagMapping_Limit limit)
+    (.uint64Opt (.-pb b) tagMapping_Offset offset)
+    (.int64Opt (.-pb b) tagMapping_Filename (.stringIndex b file))
+    (.int64Opt (.-pb b) tagMapping_BuildID (.stringIndex b buildID))
+    ;; TODO: we set HasFunctions if all symbols from samples were symbolized (hasFuncs).
+    ;; Decide what to do about HasInlineFrames and HasLineNumbers.
+    ;; Also, another approach to handle the mapping entry with
+    ;; incomplete symbolization results is to duplicate the mapping
+    ;; entry (but with different Has* fields values) and use
+    ;; different entries for symbolized locations and unsymbolized locations.
+    (when hasFuncs
+      (.bool (.-pb b) tagMapping_HasFunctions true))
+
+    (.endMessage (.-pb b) tag start)))
+
+
+^{:go/end 238} (go/func allFrames [^uintptr addr] :results [(slice runtime/Frame) symbolizeFlag]
+  ;; Expand this one address using CallersFrames so we can cache
+  ;; each expansion. In general, CallersFrames takes a whole
+  ;; stack, but in this case we know there will be no skips in
+  ;; the stack and we have return PCs anyway.
+  (let [frames (runtime/CallersFrames (lit (slice uintptr) addr))
+      (values frame more) (.Next frames)]
+    (when (== (.-Function frame) "runtime.goexit")
+      ;; Short-circuit if we see runtime.goexit so the loop
+      ;; below doesn't allocate a useless empty location.
+      (return nil 0))
+
+
+    (let [symbolizeResult lookupTried]
+      (when (or (== (.-PC frame) 0) (== (.-Function frame) "") (== (.-File frame) "") (== (.-Line frame) 0))
+        (set! symbolizeResult bit-or lookupFailed))
+
+
+      (when (== (.-PC frame) 0)
+        ;; If we failed to resolve the frame, at least make up
+        ;; a reasonable call PC. This mostly happens in tests.
+        (set! (.-PC frame) (- addr 1)))
+
+      (let [ret (lit (slice runtime/Frame) frame)]
+        (while (and (!= (.-Function frame) "runtime.goexit") more)
+          (set! (values frame more) (.Next frames))
+          (set! ret (append ret frame)))
+
+        (return ret symbolizeResult)))))
+
+
+(go/type locInfo (struct
+
+    ^{:line 242 :tag uint64 :doc "location id assigned by the profileBuilder\n"} id
+
+
+
+
+    ^{:line 247 :tag (slice uintptr) :doc "sequence of PCs, including the fake PCs returned by the traceback\nto represent inlined functions\nhttps://github.com/golang/go/blob/d6f2f833c93a41ec1c68e49804b8387a06b131c5/src/runtime/traceback.go#L347-L368\n"} pcs
+
+
+
+    ^{:line 251 :tag (slice runtime/Frame) :doc "firstPCFrames and firstPCSymbolizeResult hold the results of the\nallFrames call for the first (leaf-most) PC this locInfo represents\n"} firstPCFrames
+    ^{:line 252 :tag symbolizeFlag} firstPCSymbolizeResult))
+
+
+
+
+
+
+^{:go/end 272} (go/func newProfileBuilder "newProfileBuilder returns a new profileBuilder.\nCPU profiling data obtained from the runtime can be added\nby calling b.addCPUData, and then the eventual profile\ncan be obtained by calling b.finish.\n" ^{:tag (* profileBuilder)} [^io/Writer w]
+  (let [(values zw _) (gzip/NewWriterLevel w gzip/BestSpeed)
+      ^{:line 261} b (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit profileBuilder
+          :w w
+          :zw zw
+          :start (time/Now)
+          :strings (lit (slice string) "")
+          :stringMap (lit (map string int) ["" 0])
+          :locs (lit (map uintptr locInfo))
+          :funcs (lit (map string int))))]
+
+    (.readMapping b)
+    ^{:line 271} b))
+
+
+
+
+
+
+^{:go/breaks [[7 344]] :go/end 345} (go/method addCPUData "addCPUData adds the CPU profiling data to the profile.\n\nThe data must be a whole number of records, as delivered by the runtime.\nlen(tags) must be equal to the number of records in data.\n" ^error [^{:tag (* profileBuilder)} b ^{:tag (slice uint64)} data ^{:tag (slice unsafe/Pointer)} tags]
+  (when (not (.-havePeriod b))
+    ;; first record is period
+    (when (< (len data) 3)
+      (return (fmt/Errorf "truncated profile")))
+
+    (when (or (!= (aget data 0) 3) (== (aget data 2) 0))
+      (return (fmt/Errorf "malformed profile")))
+
+    ;; data[2] is sampling rate in Hz. Convert to sampling
+    ;; period in nanoseconds.
+    (set! (.-period b) (/ 1.0E9 (conv int64 (aget data 2))))
+    (set! (.-havePeriod b) true)
+    (set! data (subslice data 3))
+    ;; Consume tag slot. Note that there isn't a meaningful tag
+    ;; value for this record.
+    (set! tags (subslice tags 1)))
+
+
+  ;; Parse CPU samples from the profile.
+  ;; Each sample is 3+n uint64s:
+  ;;	data[0] = 3+n
+  ;;	data[1] = time stamp (ignored)
+  ;;	data[2] = count
+  ;;	data[3:3+n] = stack
+  ;; If the count is 0 and the stack has length 1,
+  ;; that's an overflow record inserted by the runtime
+  ;; to indicate that stack[0] samples were lost.
+  ;; Otherwise the count is usually 1,
+  ;; but in a few special cases like lost non-Go samples
+  ;; there can be larger counts.
+  ;; Because many samples with the same stack arrive,
+  ;; we want to deduplicate immediately, which we do
+  ;; using the b.m profMap.
+  (while (> (len data) 0)
+    (when (or (< (len data) 3) (> (aget data 0) (conv uint64 (len data))))
+      (return (fmt/Errorf "truncated profile")))
+
+    (when (or (< (aget data 0) 3) (and (!= tags nil) (< (len tags) 1)))
+      (return (fmt/Errorf "malformed profile")))
+
+    (when (< (len tags) 1)
+      (return (fmt/Errorf "mismatched profile records and tags")))
+
+    (let [count (aget data 2)
+        ^{:line 323} stk (subslice data 3 (aget data 0))]
+      (set! data (subslice data (aget data 0)))
+      (let [tag (aget tags 0)]
+        (set! tags (subslice tags 1))
+
+        (when (and (== count 0) (== (len stk) 1))
+          ;; overflow record
+          (set! count (conv uint64 (aget stk 0)))
+          (set! stk (lit (slice uint64)
+              ;; gentraceback guarantees that PCs in the
+              ;; stack can be unconditionally decremented and
+              ;; still be valid, so we must do the same.
+              (conv uint64 (+ (abi/FuncPCABIInternal lostProfileEvent) 1)))))
+
+
+        (set! (.-count (.lookup (.-m b) stk tag)) + (conv int64 count)))))
+
+
+  (when (!= (len tags) 0)
+    (return (fmt/Errorf "mismatched profile records and tags")))
+
+  nil)
+
+
+
+^{:go/end 395} (go/method build "build completes and returns the constructed profile.\n" ^error [^{:tag (* profileBuilder)} b]
+  (set! (.-end b) (time/Now))
+
+  (.int64Opt (.-pb b) tagProfile_TimeNanos (.UnixNano (.-start b)))
+  (when (.-havePeriod b) ; must be CPU profile
+    (.pbValueType b tagProfile_SampleType "samples" "count")
+    (.pbValueType b tagProfile_SampleType "cpu" "nanoseconds")
+    (.int64Opt (.-pb b) tagProfile_DurationNanos (.Nanoseconds (.Sub (.-end b) (.-start b))))
+    (.pbValueType b tagProfile_PeriodType "cpu" "nanoseconds")
+    (.int64Opt (.-pb b) tagProfile_Period (.-period b)))
+
+
+  (let [values (lit (slice int64) 0 0)
+      ^{:line 361 :tag (slice uint64)} locs (zero (slice uint64))]
+
+    (for [e (.-all (.-m b))] (!= e nil) (set! e (.-nextAll e))
+      (aset values 0 (.-count e))
+      (aset values 1 (* (.-count e) (.-period b)))
+
+      (let [^{:tag (func [])} labels (zero (func []))]
+        (when (!= (.-tag e) nil)
+          (set! labels ^{:go/end 373} (fn []
+              (range [_ lbl (.-List (.-Set (conv (* labelMap) (.-tag e))))]
+                (.pbLabel b tagSample_Label (.-Key lbl) (.-Value lbl) 0)))))
+
+
+
+
+        (set! locs (.appendLocsForStack b (subslice locs _ 0) (.-stk e)))
+
+        (.pbSample b values locs labels)))
+
+
+    (range [i m (.-mem b)]
+      (let [hasFunctions (== (.-funcs m) lookupTried)] ; lookupTried but not lookupFailed
+        (.pbMapping b tagProfile_Mapping (conv uint64 (+ i 1)) (conv uint64 (.-start m)) (conv uint64 (.-end m)) (.-offset m) (.-file m) (.-buildID m) hasFunctions)))
+
+
+    ;; TODO: Anything for tagProfile_DropFrames?
+    ;; TODO: Anything for tagProfile_KeepFrames?
+
+    (.strings (.-pb b) tagProfile_StringTable (.-strings b))
+    (let [(values _ err) (.Write (.-zw b) (.-data (.-pb b)))]
+      (when (!= err nil)
+        (return err))
+
+      (.Close (.-zw b)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 487} (go/method appendLocsForStack "appendLocsForStack appends the location IDs for the given stack trace to the given\nlocation ID slice, locs. The addresses in the stack are return PCs or 1 + the PC of\nan inline marker as the runtime traceback function returns.\n\nIt may return an empty slice even if locs is non-empty, for example if locs consists\nsolely of runtime.goexit. We still count these empty stacks in profiles in order to\nget the right cumulative sample count.\n\nIt may emit to b.pb, so there must be no message encoding in progress.\n" [^{:tag (* profileBuilder)} b ^{:tag (slice uint64)} locs ^{:tag (slice uintptr)} stk] :results [^{:tag (slice uint64)} newLocs]
+  (.reset (.-deck b))
+
+  ;; The last frame might be truncated. Recover lost inline frames.
+  (let [origStk stk]
+    (set! stk (runtime_expandFinalInlineFrame stk))
+
+    (while (> (len stk) 0)
+      (let [addr (aget stk 0)]
+        (when [(values l ok) (aget (.-locs b) addr)] ok
+          ;; When generating code for an inlined function, the compiler adds
+          ;; NOP instructions to the outermost function as a placeholder for
+          ;; each layer of inlining. When the runtime generates tracebacks for
+          ;; stacks that include inlined functions, it uses the addresses of
+          ;; those NOPs as "fake" PCs on the stack as if they were regular
+          ;; function call sites. But if a profiling signal arrives while the
+          ;; CPU is executing one of those NOPs, its PC will show up as a leaf
+          ;; in the profile with its own Location entry. So, always check
+          ;; whether addr is a "fake" PC in the context of the current call
+          ;; stack by trying to add it to the inlining deck before assuming
+          ;; that the deck is complete.
+          (when (> (len (.-pcs (.-deck b))) 0)
+            (when [added (.tryAdd (.-deck b) addr (.-firstPCFrames l) (.-firstPCSymbolizeResult l))] added
+              (set! stk (subslice stk 1))
+              (continue)))
+
+
+
+          ;; first record the location if there is any pending accumulated info.
+          (when [id (.emitLocation b)] (> id 0)
+            (set! locs (append locs id)))
+
+
+          ;; then, record the cached location.
+          (set! locs (append locs (.-id l)))
+
+          ;; Skip the matching pcs.
+          ;;
+          ;; Even if stk was truncated due to the stack depth
+          ;; limit, expandFinalInlineFrame above has already
+          ;; fixed the truncation, ensuring it is long enough.
+          (when (> (len (.-pcs l)) (len stk))
+            (panic (fmt/Sprintf "stack too short to match cached location; stk = %#x, l.pcs = %#x, original stk = %#x" stk (.-pcs l) origStk)))
+
+          (set! stk (subslice stk (len (.-pcs l))))
+          (continue))
+
+
+        (let [(values frames symbolizeResult) (allFrames addr)]
+          (when (== (len frames) 0) ; runtime.goexit.
+            (when [id (.emitLocation b)] (> id 0)
+              (set! locs (append locs id)))
+
+            (set! stk (subslice stk 1))
+            (continue))
+
+
+          (when [added (.tryAdd (.-deck b) addr frames symbolizeResult)] added
+            (set! stk (subslice stk 1))
+            (continue))
+
+          ;; add failed because this addr is not inlined with the
+          ;; existing PCs in the deck. Flush the deck and retry handling
+          ;; this pc.
+          (when [id (.emitLocation b)] (> id 0)
+            (set! locs (append locs id)))
+
+
+          ;; check cache again - previous emitLocation added a new entry
+          (if [(values l ok) (aget (.-locs b) addr)] ok (do
+              (set! locs (append locs (.-id l)))
+              (set! stk (subslice stk (len (.-pcs l))))) ; skip the matching pcs.
+            (do
+              (.tryAdd (.-deck b) addr frames symbolizeResult) ; must succeed.
+              (set! stk (subslice stk 1)))))))
+
+
+    (when [id (.emitLocation b)] (> id 0) ; emit remaining location.
+      (set! locs (append locs id)))
+
+    ^{:line 486} locs))
+
+
+;; Here's an example of how Go 1.17 writes out inlined functions, compiled for
+;; linux/amd64. The disassembly of main.main shows two levels of inlining: main
+;; calls b, b calls a, a does some work.
+;;
+;;   inline.go:9   0x4553ec  90              NOPL                 // func main()    { b(v) }
+;;   inline.go:6   0x4553ed  90              NOPL                 // func b(v *int) { a(v) }
+;;   inline.go:5   0x4553ee  48c7002a000000  MOVQ $0x2a, 0(AX)    // func a(v *int) { *v = 42 }
+;;
+;; If a profiling signal arrives while executing the MOVQ at 0x4553ee (for line
+;; 5), the runtime will report the stack as the MOVQ frame being called by the
+;; NOPL at 0x4553ed (for line 6) being called by the NOPL at 0x4553ec (for line
+;; 9).
+;;
+;; The role of pcDeck is to collapse those three frames back into a single
+;; location at 0x4553ee, with file/line/function symbolization info representing
+;; the three layers of calls. It does that via sequential calls to pcDeck.tryAdd
+;; starting with the leaf-most address. The fourth call to pcDeck.tryAdd will be
+;; for the caller of main.main. Because main.main was not inlined in its caller,
+;; the deck will reject the addition, and the fourth PC on the stack will get
+;; its own location.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type pcDeck "pcDeck is a helper to detect a sequence of inlined functions from\na stack trace returned by the runtime.\n\nThe stack traces returned by runtime's trackback functions are fully\nexpanded (at least for Go functions) and include the fake pcs representing\ninlined functions. The profile proto expects the inlined functions to be\nencoded in one Location message.\nhttps://github.com/google/pprof/blob/5e965273ee43930341d897407202dd5e10e952cb/proto/profile.proto#L177-L184\n\nRuntime does not directly expose whether a frame is for an inlined function\nand looking up debug info is not ideal, so we use a heuristic to filter\nthe fake pcs and restore the inlined and entry functions. Inlined functions\nhave the following properties:\n\n\tFrame's Func is nil (note: also true for non-Go functions), and\n\tFrame's Entry matches its entry function frame's Entry (note: could also be true for recursive calls and non-Go functions), and\n\tFrame's Name does not match its entry function frame's name (note: inlined functions cannot be directly recursive).\n\nAs reading and processing the pcs in a stack trace one by one (from leaf to the root),\nwe use pcDeck to temporarily hold the observed pcs and their expanded frames\nuntil we observe the entry function frame.\n" (struct
+    ^{:line 532 :tag (slice uintptr)} pcs
+    ^{:line 533 :tag (slice runtime/Frame)} frames
+    ^{:line 534 :tag symbolizeFlag} symbolizeResult
+
+
+
+    ^{:line 538 :tag int :doc "firstPCFrames indicates the number of frames associated with the first\n(leaf-most) PC in the deck\n"} firstPCFrames
+
+
+    ^{:line 541 :tag symbolizeFlag :doc "firstPCSymbolizeResult holds the results of the allFrames call for the\nfirst (leaf-most) PC in the deck\n"} firstPCSymbolizeResult))
+
+
+^{:go/end 550} (go/method reset [^{:tag (* pcDeck)} d]
+  (set! (.-pcs d) (subslice (.-pcs d) _ 0))
+  (set! (.-frames d) (subslice (.-frames d) _ 0))
+  (set! (.-symbolizeResult d) 0)
+  (set! (.-firstPCFrames d) 0)
+  (set! (.-firstPCSymbolizeResult d) 0))
+
+
+
+
+
+^{:go/breaks [[11 582]] :go/end 583} (go/method tryAdd "tryAdd tries to add the pc and Frames expanded from it (most likely one,\nsince the stack trace is already fully expanded) and the symbolizeResult\nto the deck. If it fails the caller needs to flush the deck and retry.\n" [^{:tag (* pcDeck)} d ^uintptr pc ^{:tag (slice runtime/Frame)} frames ^symbolizeFlag symbolizeResult] :results [^bool success]
+  (when [existing (len (.-frames d))] (> existing 0)
+    ;; 'd.frames' are all expanded from one 'pc' and represent all
+    ;; inlined functions so we check only the last one.
+    (let [newFrame (aget frames 0)
+        ^{:line 560} last (aget (.-frames d) (- existing 1))]
+      (when (!= (.-Func last) nil) ; the last frame can't be inlined. Flush.
+        (return false))
+
+      (when (or (== (.-Entry last) 0) (== (.-Entry newFrame) 0)) ; Possibly not a Go function. Don't try to merge.
+        (return false))
+
+
+      (when (!= (.-Entry last) (.-Entry newFrame)) ; newFrame is for a different function.
+        (return false))
+
+      (when (== (runtime_FrameSymbolName (addr last)) (runtime_FrameSymbolName (addr newFrame))) ; maybe recursion.
+        (return false))))
+
+
+  (set! (.-pcs d) (append (.-pcs d) pc))
+  (set! (.-frames d) (append (.-frames d) (spread frames)))
+  (set! (.-symbolizeResult d) bit-or symbolizeResult)
+  (when (== (len (.-pcs d)) 1)
+    (set! (.-firstPCFrames d) (len (.-frames d)))
+    (set! (.-firstPCSymbolizeResult d) symbolizeResult))
+
+  true)
+
+
+
+
+
+
+^{:go/end 660} (go/method emitLocation "emitLocation emits the new location and function information recorded in the deck\nand returns the location ID encoded in the profile protobuf.\nIt emits to b.pb, so there must be no message encoding in progress.\nIt resets the deck.\n" ^uint64 [^{:tag (* profileBuilder)} b]
+  (when (== (len (.-pcs (.-deck b))) 0)
+    (return 0))
+
+  (defer (.reset (.-deck b)))
+
+  (let [addr (aget (.-pcs (.-deck b)) 0)
+      ^{:line 596} firstFrame (aget (.-frames (.-deck b)) 0)]
+
+    ;; We can't write out functions while in the middle of the
+    ;; Location message, so record new functions we encounter and
+    ;; write them out after the Location.
+    (let-type [newFunc (struct
+          ^{:line 602 :tag uint64} id
+          ^{:line 603 :tag string} name ^string file
+          ^{:line 604 :tag int64} startLine)]
+
+      (let [newFuncs (make (slice newFunc) 0 8)
+
+          ^{:line 608} id (+ (conv uint64 (len (.-locs b))) 1)]
+        (aset (.-locs b) addr ^{:go/breaks [2 4 6 8]} (lit locInfo
+            :id id
+            :pcs (append (lit (slice uintptr)) (spread (.-pcs (.-deck b))))
+            :firstPCSymbolizeResult (.-firstPCSymbolizeResult (.-deck b))
+            :firstPCFrames (append (lit (slice runtime/Frame)) (spread (subslice (.-frames (.-deck b)) _ (.-firstPCFrames (.-deck b)))))))
+
+
+        (let [start (.startMessage (.-pb b))]
+          (.uint64Opt (.-pb b) tagLocation_ID id)
+          (.uint64Opt (.-pb b) tagLocation_Address (conv uint64 (.-PC firstFrame)))
+          (range [_ frame (.-frames (.-deck b))]
+            ;; Write out each line in frame expansion.
+            (let [funcName (runtime_FrameSymbolName (addr frame))
+                ^{:line 622} funcID (conv uint64 (aget (.-funcs b) funcName))]
+              (when (== funcID 0)
+                (set! funcID (+ (conv uint64 (len (.-funcs b))) 1))
+                (aset (.-funcs b) funcName (conv int funcID))
+                (set! newFuncs (append newFuncs ^{:go/breaks [2 4 6 8]} (lit newFunc
+                      :id funcID
+                      :name funcName
+                      :file (.-File frame)
+                      :startLine (conv int64 (runtime_FrameStartLine (addr frame)))))))
+
+
+              (.pbLine b tagLocation_Line funcID (conv int64 (.-Line frame)))))
+
+          (range [i (.-mem b)]
+            (when (or (and (<= (.-start (aget (.-mem b) i)) addr) (< addr (.-end (aget (.-mem b) i)))) (.-fake (aget (.-mem b) i)))
+              (.uint64Opt (.-pb b) tagLocation_MappingID (conv uint64 (+ i 1)))
+
+              (let [m (aget (.-mem b) i)]
+                (set! (.-funcs m) bit-or (.-symbolizeResult (.-deck b)))
+                (aset (.-mem b) i m)
+                (break))))
+
+
+          (.endMessage (.-pb b) tagProfile_Location start)
+
+          ;; Write out functions we found during frame expansion.
+          (range [_ fn newFuncs]
+            (let [start (.startMessage (.-pb b))]
+              (.uint64Opt (.-pb b) tagFunction_ID (.-id fn))
+              (.int64Opt (.-pb b) tagFunction_Name (.stringIndex b (.-name fn)))
+              (.int64Opt (.-pb b) tagFunction_SystemName (.stringIndex b (.-name fn)))
+              (.int64Opt (.-pb b) tagFunction_Filename (.stringIndex b (.-file fn)))
+              (.int64Opt (.-pb b) tagFunction_StartLine (.-startLine fn))
+              (.endMessage (.-pb b) tagProfile_Function start)))
+
+
+          (.flush b)
+          ^{:line 659} id)))))
+
+
+(go/var space (conv (slice byte) " "))
+(go/var newline (conv (slice byte) "\n"))
+
+^{:go/end 754} (go/func parseProcSelfMaps [^{:tag (slice byte)} data ^{:tag (func [^uint64 lo ^uint64 hi ^uint64 offset ^string file ^string buildID])} addMapping]
+  ;; $ cat /proc/self/maps
+  ;; 00400000-0040b000 r-xp 00000000 fc:01 787766                             /bin/cat
+  ;; 0060a000-0060b000 r--p 0000a000 fc:01 787766                             /bin/cat
+  ;; 0060b000-0060c000 rw-p 0000b000 fc:01 787766                             /bin/cat
+  ;; 014ab000-014cc000 rw-p 00000000 00:00 0                                  [heap]
+  ;; 7f7d76af8000-7f7d7797c000 r--p 00000000 fc:01 1318064                    /usr/lib/locale/locale-archive
+  ;; 7f7d7797c000-7f7d77b36000 r-xp 00000000 fc:01 1180226                    /lib/x86_64-linux-gnu/libc-2.19.so
+  ;; 7f7d77b36000-7f7d77d36000 ---p 001ba000 fc:01 1180226                    /lib/x86_64-linux-gnu/libc-2.19.so
+  ;; 7f7d77d36000-7f7d77d3a000 r--p 001ba000 fc:01 1180226                    /lib/x86_64-linux-gnu/libc-2.19.so
+  ;; 7f7d77d3a000-7f7d77d3c000 rw-p 001be000 fc:01 1180226                    /lib/x86_64-linux-gnu/libc-2.19.so
+  ;; 7f7d77d3c000-7f7d77d41000 rw-p 00000000 00:00 0
+  ;; 7f7d77d41000-7f7d77d64000 r-xp 00000000 fc:01 1180217                    /lib/x86_64-linux-gnu/ld-2.19.so
+  ;; 7f7d77f3f000-7f7d77f42000 rw-p 00000000 00:00 0
+  ;; 7f7d77f61000-7f7d77f63000 rw-p 00000000 00:00 0
+  ;; 7f7d77f63000-7f7d77f64000 r--p 00022000 fc:01 1180217                    /lib/x86_64-linux-gnu/ld-2.19.so
+  ;; 7f7d77f64000-7f7d77f65000 rw-p 00023000 fc:01 1180217                    /lib/x86_64-linux-gnu/ld-2.19.so
+  ;; 7f7d77f65000-7f7d77f66000 rw-p 00000000 00:00 0
+  ;; 7ffc342a2000-7ffc342c3000 rw-p 00000000 00:00 0                          [stack]
+  ;; 7ffc34343000-7ffc34345000 r-xp 00000000 00:00 0                          [vdso]
+  ;; ffffffffff600000-ffffffffff601000 r-xp 00000000 00:00 0                  [vsyscall]
+
+  (let [^{:tag (slice byte)} line (zero (slice byte))
+      ;; next removes and returns the next field in the line.
+      ;; It also removes from line any spaces following the field.
+      ^{:line 690} next ^{:go/end 695} (fn ^{:tag (slice byte)} []
+        (let [^{:tag (slice byte)} f (zero (slice byte))]
+          (set! (values f line _) (bytes/Cut line space))
+          (set! line (bytes/TrimLeft line " "))
+          ^{:line 694} f))]
+
+
+    (while (> (len data) 0)
+      (set! (values line data _) (bytes/Cut data newline))
+      (let [addr (next)
+          (values loStr hiStr ok) (strings/Cut (conv string addr) "-")]
+        (when (not ok)
+          (continue))
+
+        (let [(values lo err) (strconv/ParseUint loStr 16 64)]
+          (when (!= err nil)
+            (continue))
+
+          (let [(values hi ^:assign err) (strconv/ParseUint hiStr 16 64)]
+            (when (!= err nil)
+              (continue))
+
+            (let [perm (next)]
+              (when (or (< (len perm) 4) (!= (aget perm 2) \x))
+                ;; Only interested in executable mappings.
+                (continue))
+
+              (let [(values offset ^:assign err) (strconv/ParseUint (conv string (next)) 16 64)]
+                (when (!= err nil)
+                  (continue))
+
+                (next) ; dev
+                (let [inode (next)] ; inode
+                  (when (== line nil)
+                    (continue))
+
+                  (let [file (conv string line)
+
+                      ;; Trim deleted file marker.
+                      ^{:line 729} deletedStr " (deleted)"
+                      ^{:line 730} deletedLen (len deletedStr)]
+                    (when (and (>= (len file) deletedLen) (== (subslice file (- (len file) deletedLen)) deletedStr))
+                      (set! file (subslice file _ (- (len file) deletedLen))))
+
+
+                    (when (and (== (len inode) 1) (== (aget inode 0) \0) (== file ""))
+                      ;; Huge-page text mappings list the initial fragment of
+                      ;; mapped but unpopulated memory as being inode 0.
+                      ;; Don't report that part.
+                      ;; But [vdso] and [vsyscall] are inode 0, so let non-empty file names through.
+                      (continue))
+
+
+                    ;; TODO: pprof's remapMappingIDs makes one adjustment:
+                    ;; 1. If there is an /anon_hugepage mapping first and it is
+                    ;; consecutive to a next mapping, drop the /anon_hugepage.
+                    ;; There's no indication why this is needed.
+                    ;; Let's try not doing this and see what breaks.
+                    ;; If we do need it, it would go here, before we
+                    ;; enter the mappings into b.mem in the first place.
+
+                    (let [(values buildID _) (elfBuildID file)]
+                      (addMapping lo hi offset file buildID))))))))))))
+
+
+
+^{:go/end 758} (go/method addMapping [^{:tag (* profileBuilder)} b ^uint64 lo ^uint64 hi ^uint64 offset ^string file ^string buildID]
+  (.addMappingEntry b lo hi offset file buildID false))
+
+
+^{:go/end 769} (go/method addMappingEntry [^{:tag (* profileBuilder)} b ^uint64 lo ^uint64 hi ^uint64 offset ^string file ^string buildID ^bool fake]
+  (set! (.-mem b) (append (.-mem b) ^{:go/breaks [2 4 6 8 10 12]} (lit memMap
+        :start (conv uintptr lo)
+        :end (conv uintptr hi)
+        :offset offset
+        :file file
+        :buildID buildID
+        :fake fake))))

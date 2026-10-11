@@ -1,0 +1,794 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.v2) (go/file "arshal_time.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [cmp "cmp"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [math "math"]
+    ^{:line 15} [bits "math/bits"]
+    ^{:line 16} [reflect "reflect"]
+    ^{:line 17} [strconv "strconv"]
+    ^{:line 18} [strings "strings"]
+    ^{:line 19} [time "time"]
+
+    ^{:line 21} [internal "encoding/json/internal"]
+    ^{:line 22} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 23} [jsonopts "encoding/json/internal/jsonopts"]
+    ^{:line 24} [jsonwire "encoding/json/internal/jsonwire"]
+    ^{:line 25} [jsontext "encoding/json/jsontext"]])
+
+
+(go/var
+  ^{:line 29} [timeDurationType ((inst reflect/TypeFor time/Duration))]
+  ^{:line 30} [timeTimeType ((inst reflect/TypeFor time/Time))])
+
+
+^{:go/end 218} (go/func makeTimeArshaler ^{:tag (* arshaler)} [^{:tag (* arshaler)} fncs ^reflect/Type t]
+  ;; Ideally, time types would implement MarshalerTo and UnmarshalerFrom,
+  ;; but that would incur a dependency on package json from package time.
+  ;; Given how widely used time is, it is more acceptable that we incur a
+  ;; dependency on time from json.
+  ;;
+  ;; Injecting the arshaling functionality like this will not be identical
+  ;; to actually declaring methods on the time types since embedding of the
+  ;; time types will not be able to forward this functionality.
+  (switch t
+    (case [timeDurationType]
+      (set! (.-nonDefault fncs) true)
+      (let [marshalNano (.-marshal fncs)]
+        (set! (.-marshal fncs) ^{:go/end 76} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+            (let [xe (.Encoder export enc)
+                ^{:line 48 :tag durationArshaler} m (zero durationArshaler)]
+              (cond (.Has (.-Flags mo) jsonflags/FormatTag)
+                (when (not (.initFormat m ^{:go/via [ArshalValues]} (.-Format mo)))
+                  (return (newInvalidFormatError enc t)))
+
+                (.Get (.-Flags mo) jsonflags/FormatDurationAsNano)
+                (return (marshalNano enc va mo)) :else
+
+                ;; TODO(https://go.dev/issue/71631): Decide on default duration representation.
+                (let [^string workaround (zero string)]
+                  (when (.Get (.-Flags mo) jsonflags/FormatTagSupported)
+                    (set! workaround "; specify an explicit format"))
+
+                  (return (newMarshalErrorBefore enc t (errors/New (+ "no default representation" workaround))))))
+
+              (when (and (.Get (.-Flags mo) jsonflags/StringTag) (not (.isNumeric m)) (not (.Get (.-Flags mo) jsonflags/ReportErrorsWithLegacySemantics)))
+                (return (newMarshalErrorBefore enc t errInvalidStringTag)))
+
+
+              (set! (values (.-td m) _) ((inst reflect/TypeAssert time/Duration) (.-Value va)))
+              ^{:go/breaks [[3 75]]} (let [k (stringOrNumberKind (or (not (.isNumeric m)) (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe))) (.Get (.-Flags mo) (bit-or jsonflags/StringifyNumbers jsonflags/StringTag))))]
+                (when [err (.AppendRaw xe k true (.-appendMarshal m))] (!= err nil)
+                  (when (and (not (isSyntacticError err)) (not (.IsIOError export err)))
+                    (set! err (newMarshalErrorBefore enc t err)))
+
+                  (return err))
+
+                nil))))
+
+        (let [unmarshalNano (.-unmarshal fncs)]
+          (set! (.-unmarshal fncs) ^{:go/end 133} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+              (let [xd (.Decoder export dec)
+                  ^{:line 80 :tag durationArshaler} u (zero durationArshaler)]
+                (cond (.Has (.-Flags uo) jsonflags/FormatTag)
+                  (when (not (.initFormat u ^{:go/via [ArshalValues]} (.-Format uo)))
+                    (return (newInvalidFormatError dec t)))
+
+                  (.Get (.-Flags uo) jsonflags/FormatDurationAsNano)
+                  (return (unmarshalNano dec va uo)) :else
+
+                  ;; TODO(https://go.dev/issue/71631): Decide on default duration representation.
+                  (let [^string workaround (zero string)]
+                    (when (.Get (.-Flags uo) jsonflags/FormatTagSupported)
+                      (set! workaround "; specify an explicit format"))
+
+                    (return (newUnmarshalErrorBeforeWithSkipping dec t (errors/New (+ "no default representation" workaround))))))
+
+                (when (and (.Get (.-Flags uo) jsonflags/StringTag) (not (.isNumeric u)) (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)))
+                  (return (newUnmarshalErrorBeforeWithSkipping dec t errInvalidStringTag)))
+
+
+                (let [stringify (or (not (.isNumeric u)) (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xd))) (.Get (.-Flags uo) (bit-or jsonflags/StringifyNumbers jsonflags/StringTag)))
+                    ^{:line 100 :tag jsonwire/ValueFlags} flags (zero jsonwire/ValueFlags)
+                    (values td _) ((inst reflect/TypeAssert (* time/Duration)) ^{:go/via [Value]} (.Addr va))
+                    (values val err) (.ReadValue xd (addr flags))]
+                  (when (!= err nil)
+                    (return err))
+
+                  (switch [k (.Kind val)] k
+                    (case [\n]
+                      (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                        (set! @td (conv time/Duration 0)))
+
+                      (return nil))
+                    (case [\"]
+                      (when (not stringify)
+                        (break))
+
+                      (set! val (jsonwire/UnquoteMayCopy val (.IsVerbatim flags)))
+                      (when [err (.unmarshal u val)] (!= err nil)
+                        (return (newUnmarshalErrorAfter dec t err)))
+
+                      (set! @td (.-td u))
+                      (return nil))
+                    (case [\0]
+                      (when stringify
+                        (break))
+
+                      (when [err (.unmarshal u val)] (!= err nil)
+                        (return (newUnmarshalErrorAfter dec t err)))
+
+                      (set! @td (.-td u))
+                      (return nil)))
+
+                  (newUnmarshalErrorAfter dec t nil))))))))
+
+    (case [timeTimeType]
+      (set! (.-nonDefault fncs) true)
+      (set! (.-marshal fncs) ^{:go/end 160} (fn [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo] :results [^error err]
+          (let [xe (.Encoder export enc)
+              ^{:line 138 :tag timeArshaler} m (zero timeArshaler)]
+            (when (.Has (.-Flags mo) jsonflags/FormatTag)
+              (when (not (.initFormat m ^{:go/via [ArshalValues]} (.-Format mo)))
+                (return (newInvalidFormatError enc t))))
+
+
+            (when (and (.Get (.-Flags mo) jsonflags/StringTag) (not (.isNumeric m)) (not (.Get (.-Flags mo) jsonflags/ReportErrorsWithLegacySemantics)))
+              (return (newMarshalErrorBefore enc t errInvalidStringTag)))
+
+
+            (set! (values (.-tt m) _) ((inst reflect/TypeAssert time/Time) (.-Value va)))
+            ^{:go/breaks [[3 159]]} (let [k (stringOrNumberKind (or (not (.isNumeric m)) (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe))) (.Get (.-Flags mo) (bit-or jsonflags/StringifyNumbers jsonflags/StringTag))))]
+              (when [err (.AppendRaw xe k (not (.hasCustomFormat m)) (.-appendMarshal m))] (!= err nil)
+                (when (.Get (.-Flags mo) jsonflags/ReportErrorsWithLegacySemantics)
+                  (return (internal/NewMarshalerError (.Interface ^{:go/via [Value]} (.Addr va)) err "MarshalJSON"))) ; unlike unmarshal, always wrapped
+
+                (when (and (not (isSyntacticError err)) (not (.IsIOError export err)))
+                  (set! err (newMarshalErrorBefore enc t err)))
+
+                (return err))
+
+              nil))))
+
+      (set! (.-unmarshal fncs) ^{:go/end 215} (fn [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo] :results [^error err]
+          (let [xd (.Decoder export dec)
+              ^{:line 163 :tag timeArshaler} u (zero timeArshaler)]
+            (cond (.Has (.-Flags uo) jsonflags/FormatTag)
+              (when (not (.initFormat u ^{:go/via [ArshalValues]} (.-Format uo)))
+                (return (newInvalidFormatError dec t)))
+
+              (.Get (.-Flags uo) jsonflags/ParseTimeWithLooseRFC3339)
+              (set! (.-looseRFC3339 u) true))
+
+            (when (and (.Get (.-Flags uo) jsonflags/StringTag) (not (.isNumeric u)) (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)))
+              (return (newUnmarshalErrorBeforeWithSkipping dec t errInvalidStringTag)))
+
+
+            (let [stringify (or (not (.isNumeric u)) (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xd))) (.Get (.-Flags uo) (bit-or jsonflags/StringifyNumbers jsonflags/StringTag)))
+                ^{:line 176 :tag jsonwire/ValueFlags} flags (zero jsonwire/ValueFlags)
+                (values tt _) ((inst reflect/TypeAssert (* time/Time)) ^{:go/via [Value]} (.Addr va))
+                (values val ^:assign err) (.ReadValue xd (addr flags))]
+              (when (!= err nil)
+                (return err))
+
+              (switch [k (.Kind val)] k
+                (case [\n]
+                  (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                    (set! @tt (lit time/Time)))
+
+                  (return nil))
+                (case [\"]
+                  (when (not stringify)
+                    (break))
+
+                  (set! val (jsonwire/UnquoteMayCopy val (.IsVerbatim flags)))
+                  (when [err (.unmarshal u val)] (!= err nil)
+                    (when (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)
+                      (return err)) ; unlike marshal, never wrapped
+
+                    (return (newUnmarshalErrorAfter dec t err)))
+
+                  (set! @tt (.-tt u))
+                  (return nil))
+                (case [\0]
+                  (when stringify
+                    (break))
+
+                  (when [err (.unmarshal u val)] (!= err nil)
+                    (when (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)
+                      (return err)) ; unlike marshal, never wrapped
+
+                    (return (newUnmarshalErrorAfter dec t err)))
+
+                  (set! @tt (.-tt u))
+                  (return nil)))
+
+              (newUnmarshalErrorAfter dec t nil)))))))
+
+
+  ^{:line 217} fncs)
+
+
+(go/type durationArshaler (struct
+    ^{:line 221 :tag time/Duration} td
+
+
+
+
+
+
+    ^{:line 228 :tag uint64 :doc "base records the representation where:\n  - 0 uses time.Duration.String\n  - 1e0, 1e3, 1e6, or 1e9 use a decimal encoding of the duration as\n    nanoseconds, microseconds, milliseconds, or seconds.\n  - 8601 uses ISO 8601\n"} base))
+
+
+^{:go/breaks [[6 248]] :go/end 249} (go/method initFormat [^{:tag (* durationArshaler)} a ^string format] :results [^bool ok]
+  (switch format
+    (case ["units"]
+      (set! (.-base a) 0))
+    (case ["sec"]
+      (set! (.-base a) 1.0E9))
+    (case ["milli"]
+      (set! (.-base a) 1000000.0))
+    (case ["micro"]
+      (set! (.-base a) 1000.0))
+    (case ["nano"]
+      (set! (.-base a) 1.0))
+    (case ["iso8601"]
+      (set! (.-base a) 8601))
+    (default
+      (return false)))
+
+  true)
+
+
+^{:go/end 253} (go/method isNumeric ^bool [^{:tag (* durationArshaler)} a]
+  (and (!= (.-base a) 0) (!= (.-base a) 8601)))
+
+
+^{:go/end 264} (go/method appendMarshal [^{:tag (* durationArshaler)} a ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (switch (.-base a)
+    (case [0]
+      (return (append b (spread (.String (.-td a)))) nil))
+    (case [8601]
+      (return (appendDurationISO8601 b (.-td a)) nil))
+    (default
+      (return (appendDurationBase10 b (.-td a) (.-base a)) nil))))
+
+
+
+^{:go/end 276} (go/method unmarshal [^{:tag (* durationArshaler)} a ^{:tag (slice byte)} b] :results [^error err]
+  (switch (.-base a)
+    (case [0]
+      (set! (values (.-td a) err) (time/ParseDuration (conv string b))))
+    (case [8601]
+      (set! (values (.-td a) err) (parseDurationISO8601 b)))
+    (default
+      (set! (values (.-td a) err) (parseDurationBase10 b (.-base a)))))
+
+  ^{:line 275} err)
+
+
+(go/type timeArshaler (struct
+    ^{:line 279 :tag time/Time} tt
+
+
+
+
+
+
+    ^{:line 286 :tag uint64 :doc "base records the representation where:\n  - 0 uses RFC 3339 encoding of the timestamp\n  - 1e0, 1e3, 1e6, or 1e9 use a decimal encoding of the timestamp as\n    seconds, milliseconds, microseconds, or nanoseconds since Unix epoch.\n  - math.MaxUint uses time.Time.Format to encode the timestamp\n"} base
+    ^{:line 287 :tag string} format ; time format passed to time.Parse
+
+    ^{:line 289 :tag bool} looseRFC3339))
+
+
+^{:go/breaks [[7 357]] :go/end 358} (go/method initFormat ^bool [^{:tag (* timeArshaler)} a ^string format]
+  ;; We assume that an exported constant in the time package will
+  ;; always start with an uppercase ASCII letter.
+  (when (== (len format) 0)
+    (return false))
+
+  (set! (.-base a) math/MaxUint) ; implies custom format
+  (when [c (aget format 0)] (and (not (and (<= \a c) (<= c \z))) (not (and (<= \A c) (<= c \Z))))
+    (set! (.-format a) format)
+    (return true))
+
+  (switch format
+    (case ["ANSIC"]
+      (set! (.-format a) time/ANSIC))
+    (case ["UnixDate"]
+      (set! (.-format a) time/UnixDate))
+    (case ["RubyDate"]
+      (set! (.-format a) time/RubyDate))
+    (case ["RFC822"]
+      (set! (.-format a) time/RFC822))
+    (case ["RFC822Z"]
+      (set! (.-format a) time/RFC822Z))
+    (case ["RFC850"]
+      (set! (.-format a) time/RFC850))
+    (case ["RFC1123"]
+      (set! (.-format a) time/RFC1123))
+    (case ["RFC1123Z"]
+      (set! (.-format a) time/RFC1123Z))
+    (case ["RFC3339"]
+      (set! (.-base a) 0)
+      (set! (.-format a) time/RFC3339))
+    (case ["RFC3339Nano"]
+      (set! (.-base a) 0)
+      (set! (.-format a) time/RFC3339Nano))
+    (case ["Kitchen"]
+      (set! (.-format a) time/Kitchen))
+    (case ["Stamp"]
+      (set! (.-format a) time/Stamp))
+    (case ["StampMilli"]
+      (set! (.-format a) time/StampMilli))
+    (case ["StampMicro"]
+      (set! (.-format a) time/StampMicro))
+    (case ["StampNano"]
+      (set! (.-format a) time/StampNano))
+    (case ["DateTime"]
+      (set! (.-format a) time/DateTime))
+    (case ["DateOnly"]
+      (set! (.-format a) time/DateOnly))
+    (case ["TimeOnly"]
+      (set! (.-format a) time/TimeOnly))
+    (case ["unix"]
+      (set! (.-base a) 1.0))
+    (case ["unixmilli"]
+      (set! (.-base a) 1000.0))
+    (case ["unixmicro"]
+      (set! (.-base a) 1000000.0))
+    (case ["unixnano"]
+      (set! (.-base a) 1.0E9))
+    (default
+      ;; Reject any Go identifier in case new constants are supported.
+      (when (== (strings/TrimFunc format isLetterOrDigit) "")
+        (return false))
+
+      (set! (.-format a) format)))
+
+  true)
+
+
+^{:go/end 362} (go/method isNumeric ^bool [^{:tag (* timeArshaler)} a]
+  (> (conv int (.-base a)) 0))
+
+
+^{:go/end 366} (go/method hasCustomFormat ^bool [^{:tag (* timeArshaler)} a]
+  (== (.-base a) math/MaxUint))
+
+
+^{:go/end 392} (go/method appendMarshal [^{:tag (* timeArshaler)} a ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (switch (.-base a)
+    (case [0]
+      (let [format (^{:inst [string]} cmp/Or (.-format a) time/RFC3339Nano)
+          ^{:line 372} n0 (len b)]
+        (set! b (.AppendFormat (.-tt a) b format))
+        ;; Not all Go timestamps can be represented as valid RFC 3339.
+        ;; Explicitly check for these edge cases.
+        ;; See https://go.dev/issue/4556 and https://go.dev/issue/54580.
+        (switch [b (subslice b n0)]
+          (case [(!= (aget b (len "9999")) \-)] ; year must be exactly 4 digits wide
+            (return b (errors/New "year outside of range [0,9999]")))
+          (case [(!= (aget b (- (len b) 1)) \Z)]
+            (let [c (aget b (- (len b) (len "Z07:00")))]
+              (when (or ^:go/paren (and (<= \0 c) (<= c \9)) (>= (parseDec2 (subslice b (- (len b) (len "07:00")))) 24))
+                (return b (errors/New "timezone hour outside of range [0,23]"))))))
+
+
+        (return b nil)))
+    (case [math/MaxUint]
+      (return (.AppendFormat (.-tt a) b (.-format a)) nil))
+    (default
+      (return (appendTimeUnix b (.-tt a) (.-base a)) nil))))
+
+
+
+^{:go/end 432} (go/method unmarshal [^{:tag (* timeArshaler)} a ^{:tag (slice byte)} b] :results [^error err]
+  (switch (.-base a)
+    (case [0]
+      ;; Use time.Time.UnmarshalText to avoid possible string allocation.
+      (when [err (.UnmarshalText (.-tt a) b)] (!= err nil)
+        (return err))
+
+      ;; TODO(https://go.dev/issue/57912):
+      ;; RFC 3339 specifies the grammar for a valid timestamp.
+      ;; However, the parsing functionality in "time" is too loose and
+      ;; incorrectly accepts invalid timestamps as valid.
+      ;; Remove these manual checks when "time" checks it for us.
+      (let [newParseError ^{:go/end 408} (fn ^error [^string layout ^string value ^string layoutElem ^string valueElem ^string message]
+            (addr (lit time/ParseError :Layout layout :Value value :LayoutElem layoutElem :ValueElem valueElem :Message message)))]
+
+        (switch
+          (case [(.-looseRFC3339 a)]
+            (return nil))
+          (case [(== (aget b (+ (len "2006-01-02T") 1)) \:)] ; hour must be two digits
+            (return (newParseError time/RFC3339 (conv string b) "15" (conv string (subslice (subslice b (len "2006-01-02T")) _ 1)) "")))
+          (case [(== (aget b (len "2006-01-02T15:04:05")) \,)] ; sub-second separator must be a period
+            (return (newParseError time/RFC3339 (conv string b) "." "," "")))
+          (case [(!= (aget b (- (len b) 1)) \Z)]
+            (switch
+              (case [(>= (parseDec2 (subslice b (- (len b) (len "07:00")))) 24)] ; timezone hour must be in range
+                (return (newParseError time/RFC3339 (conv string b) "Z07:00" (conv string (subslice b (- (len b) (len "Z07:00")))) ": timezone hour out of range")))
+              (case [(>= (parseDec2 (subslice b (- (len b) (len "00")))) 60)] ; timezone minute must be in range
+                (return (newParseError time/RFC3339 (conv string b) "Z07:00" (conv string (subslice b (- (len b) (len "Z07:00")))) ": timezone minute out of range"))))))
+
+
+        (return nil)))
+    (case [math/MaxUint]
+      (set! (values (.-tt a) err) (time/Parse (.-format a) (conv string b)))
+      (return err))
+    (default
+      (set! (values (.-tt a) err) (parseTimeUnix b (.-base a)))
+      (return err))))
+
+
+
+
+
+^{:go/end 441} (go/func appendDurationBase10 "appendDurationBase10 appends d formatted as a decimal fractional number,\nwhere pow10 is a power-of-10 used to scale down the number.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^time/Duration d ^uint64 pow10]
+  (let [(values ^:assign b n) (mayAppendDurationSign b d) ; append sign
+      (values whole frac) (bits/Div64 0 n (conv uint64 pow10))] ; compute whole and frac fields
+    (set! b (strconv/AppendUint b whole 10)) ; append whole field
+    (appendFracBase10 b frac pow10))) ; append frac field
+
+
+
+
+^{:go/end 460} (go/func parseDurationBase10 "parseDurationBase10 parses d from a decimal fractional number,\nwhere pow10 is a power-of-10 used to scale up the number.\n" [^{:tag (slice byte)} b ^uint64 pow10] :results [time/Duration error]
+  (let [(values suffix neg) (consumeSign b false) ; consume sign
+      (values wholeBytes fracBytes) (bytesCutByte suffix \. true) ; consume whole and frac fields
+      (values whole okWhole) (jsonwire/ParseUint wholeBytes) ; parse whole field; may overflow
+      (values frac okFrac) (parseFracBase10 fracBytes pow10) ; parse frac field
+      (values hi lo) (bits/Mul64 whole (conv uint64 pow10)) ; overflow if hi > 0
+      (values sum co) (bits/Add64 lo (conv uint64 frac) 0)] ; overflow if co > 0
+    (switch [d (mayApplyDurationSign sum neg)] ; overflow if neg != (d < 0)
+      (case [(or ^:go/paren (and (not okWhole) (!= whole math/MaxUint64)) (not okFrac))]
+        (return 0 (fmt/Errorf "invalid duration %q: %w" b strconv/ErrSyntax)))
+      (case [(or (not okWhole) (> hi 0) (> co 0) (!= neg (< d 0)))]
+        (return 0 (fmt/Errorf "invalid duration %q: %w" b strconv/ErrRange)))
+      (default
+        (return d nil)))))
+
+
+
+
+
+
+
+^{:go/end 485} (go/func appendDurationISO8601 "appendDurationISO8601 appends an ISO 8601 duration with a restricted grammar,\nwhere leading and trailing zeroes and zero-value designators are omitted.\nIt only uses hour, minute, and second designators since ISO 8601 defines\nthose as being \"accurate\", while year, month, week, and day are \"nominal\".\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^time/Duration d]
+  (when (== d 0)
+    (return (append b (spread "PT0S"))))
+
+  (let [(values ^:assign b n) (mayAppendDurationSign b d)]
+    (set! b (append b (spread "PT")))
+    (let [(values ^:assign n nsec) (bits/Div64 0 n 1.0E9) ; compute nsec field
+        (values ^:assign n sec) (bits/Div64 0 n 60) ; compute sec field
+        (values hour min) (bits/Div64 0 n 60)] ; compute hour and min fields
+      (when (> hour 0)
+        (set! b (append (strconv/AppendUint b hour 10) \H)))
+
+      (when (> min 0)
+        (set! b (append (strconv/AppendUint b min 10) \M)))
+
+      (when (or (> sec 0) (> nsec 0))
+        (set! b (append (appendFracBase10 (strconv/AppendUint b sec 10) nsec 1.0E9) \S)))
+
+      ^{:line 484} b)))
+
+
+
+
+
+
+(go/const ^{:val 365.2425 :doc "daysPerYear is the exact average number of days in a year according to\nthe Gregorian calendar, which has an extra day each year that is\na multiple of 4, unless it is evenly divisible by 100 but not by 400.\nThis does not take into account leap seconds, which are not deterministic.\n"} daysPerYear 365.2425)
+
+(go/var errInaccurateDateUnits (errors/New "inaccurate year, month, week, or day units"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 620} (go/func parseDurationISO8601 "parseDurationISO8601 parses a duration according to ISO 8601-1:2019,\nsection 5.5.2.2 and 5.5.2.3 with the following restrictions or extensions:\n\n  - A leading minus sign is permitted for negative duration according\n    to ISO 8601-2:2019, section 4.4.1.9. We do not permit negative values\n    for each \"time scale component\", which is permitted by section 4.4.1.1,\n    but rarely supported by parsers.\n\n  - A leading plus sign is permitted (and ignored).\n    This is not required by ISO 8601, but not forbidden either.\n    There is some precedent for this as it is supported by the principle of\n    duration arithmetic as specified in ISO 8601-2-2019, section 14.1.\n    Of note, the JavaScript grammar for ISO 8601 permits a leading plus sign.\n\n  - A fractional value is only permitted for accurate units\n    (i.e., hour, minute, and seconds) in the last time component,\n    which is permissible by ISO 8601-1:2019, section 5.5.2.3.\n\n  - Both periods ('.') and commas (',') are supported as the separator\n    between the integer part and fraction part of a number,\n    as specified in ISO 8601-1:2019, section 3.2.6.\n    While ISO 8601 recommends comma as the default separator,\n    most formatters use a period.\n\n  - Leading zeros are ignored. This is not required by ISO 8601,\n    but also not forbidden by the standard. Many parsers support this.\n\n  - Lowercase designators are supported. This is not required by ISO 8601,\n    but also not forbidden by the standard. Many parsers support this.\n\nIf the nominal units of year, month, week, or day are present,\nthis produces a best-effort value and also reports [errInaccurateDateUnits].\n\nThe accepted grammar is identical to JavaScript's Duration:\n\n\thttps://tc39.es/proposal-temporal/#prod-Duration\n\nWe follow JavaScript's grammar as JSON itself is derived from JavaScript.\nThe Temporal.Duration.toJSON method is guaranteed to produce an output\nthat can be parsed by this function so long as arithmetic in JavaScript\ndoes not use a largestUnit value higher than \"hours\" (which is the default).\nEven if it does, this will do a best-effort parsing with inaccurate units,\nbut report [errInaccurateDateUnits].\n" [^{:tag (slice byte)} b] :results [time/Duration error]
+  (let [(values ^bool invalid ^bool overflow ^bool inaccurate ^bool sawFrac) (zero bool)
+      (values ^uint64 sumNanos ^uint64 n ^uint64 co) (zero uint64)
+
+      ;; cutBytes is like [bytes.Cut], but uses either c0 or c1 as the separator.
+      ^{:line 543} cutBytes ^{:go/end 550} (fn [^{:tag (slice byte)} b ^byte c0 ^byte c1] :results [^{:tag (slice byte)} prefix ^{:tag (slice byte)} suffix ^bool ok]
+        (range [i c b]
+          (when (or (== c c0) (== c c1))
+            (return (subslice b _ i) (subslice b (+ i 1)) true)))
+
+
+        (return b nil false))
+
+
+      ;; mayParseUnit attempts to parse another date or time number
+      ;; identified by the desHi and desLo unit characters.
+      ;; If the part is absent for current unit, it returns b as is.
+      ^{:line 555} mayParseUnit ^{:go/end 588} (fn ^{:tag (slice byte)} [^{:tag (slice byte)} b ^byte desHi ^byte desLo ^time/Duration unit]
+        (let [(values number suffix ok) (cutBytes b desHi desLo)]
+          (when (or (not ok) sawFrac)
+            (return b)) ; designator is not present or already saw fraction, which can only be in the last component
+
+
+          ;; Parse the number.
+          ;; A fraction is allowed for the accurate units in the last part.
+          (let [(values whole frac ^:assign ok) (cutBytes number \. \,)]
+            (when ok
+              (set! sawFrac true)
+              (set! invalid (or invalid (== (len frac) (len "")) (> unit time/Hour)))
+              (if (== unit time/Second) (do
+                  (set! (values n ok) (parsePaddedBase10 frac (conv uint64 time/Second)))
+                  (set! invalid (or invalid (not ok))))
+
+                (let [(values f err) (strconv/ParseFloat (+ "0." (conv string frac)) 64)]
+                  (set! invalid (or invalid (!= err nil) (> (len (bytes/Trim (subslice frac (len ".")) "0123456789")) 0)))
+                  (set! n (conv uint64 (math/Round (* f (conv float64 unit))))))) ; never overflows since f is within [0..1]
+
+              (set! (values sumNanos co) (bits/Add64 sumNanos n 0)) ; overflow if co > 0
+              (set! overflow (or overflow (> co 0))))
+
+            (while (and (> (len whole) 1) (== (aget whole 0) \0))
+              (set! whole (subslice whole (len "0")))) ; trim leading zeros
+
+            (let [(values n ^:assign ok) (jsonwire/ParseUint whole) ; overflow if !ok && MaxUint64
+                (values hi lo) (bits/Mul64 n (conv uint64 unit))] ; overflow if hi > 0
+              (set! (values sumNanos co) (bits/Add64 sumNanos lo 0)) ; overflow if co > 0
+              (set! invalid (or invalid ^:go/paren (and (not ok) (!= n math/MaxUint64))))
+              (set! overflow (or overflow ^:go/paren (and (not ok) (== n math/MaxUint64)) (> hi 0) (> co 0)))
+              (set! inaccurate (or inaccurate (> unit time/Hour)))
+              ^{:line 587} suffix))))
+
+
+      (values suffix neg) (consumeSign b true)
+      (values prefix ^:assign suffix okP) (cutBytes suffix \P \p)
+      (values durDate durTime okT) (cutBytes suffix \T \t)]
+    (set! invalid (or invalid (> (len prefix) 0) (not okP) ^:go/paren (and okT (== (len durTime) 0)) (== (+ (len durDate) (len durTime)) 0)))
+    (when (> (len durDate) 0) ; nominal portion of the duration
+      (set! durDate (mayParseUnit durDate \Y \y (conv time/Duration (* daysPerYear 24 60 60 1.0E9))))
+      (set! durDate (mayParseUnit durDate \M \m (conv time/Duration (* (/ daysPerYear 12) 24 60 60 1.0E9))))
+      (set! durDate (mayParseUnit durDate \W \w (conv time/Duration (* 7 24 60 60 1.0E9))))
+      (set! durDate (mayParseUnit durDate \D \d (conv time/Duration (* 24 60 60 1.0E9))))
+      (set! invalid (or invalid (> (len durDate) 0)))) ; unknown elements
+
+    (when (> (len durTime) 0) ; accurate portion of the duration
+      (set! durTime (mayParseUnit durTime \H \h (conv time/Duration (* 60 60 1.0E9))))
+      (set! durTime (mayParseUnit durTime \M \m (conv time/Duration (* 60 1.0E9))))
+      (set! durTime (mayParseUnit durTime \S \s (conv time/Duration 1.0E9)))
+      (set! invalid (or invalid (> (len durTime) 0)))) ; unknown elements
+
+    (let [d (mayApplyDurationSign sumNanos neg)]
+      (set! overflow (or overflow ^:go/paren (and (!= neg (< d 0)) (!= d 0)))) ; overflows signed duration
+
+      (switch
+        (case [invalid]
+          (return 0 (fmt/Errorf "invalid ISO 8601 duration %q: %w" b strconv/ErrSyntax)))
+        (case [overflow]
+          (return 0 (fmt/Errorf "invalid ISO 8601 duration %q: %w" b strconv/ErrRange)))
+        (case [inaccurate]
+          (return d (fmt/Errorf "invalid ISO 8601 duration %q: %w" b errInaccurateDateUnits)))
+        (default
+          (return d nil))))))
+
+
+
+
+^{:go/end 629} (go/func mayAppendDurationSign "mayAppendDurationSign appends a negative sign if n is negative.\n" [^{:tag (slice byte)} b ^time/Duration d] :results [(slice byte) uint64]
+  (when (< d 0)
+    (set! b (append b \-))
+    (set! d * -1))
+
+  (return b (conv uint64 d)))
+
+
+
+^{:go/end 638} (go/func mayApplyDurationSign "mayApplyDurationSign inverts n if neg is specified.\n" ^time/Duration [^uint64 n ^bool neg]
+  (if neg
+    (return (* -1 (conv time/Duration n)))
+
+    (return (* (+ 1) (conv time/Duration n)))))
+
+
+
+
+
+^{:go/end 660} (go/func appendTimeUnix "appendTimeUnix appends t formatted as a decimal fractional number,\nwhere pow10 is a power-of-10 used to scale up the number.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^time/Time t ^uint64 pow10]
+  (let [(values sec nsec) (values (.Unix t) (conv int64 (.Nanosecond t)))]
+    (when (< sec 0)
+      (set! b (append b \-))
+      (set! (values sec nsec) (negateSecNano sec nsec)))
+
+    (switch
+      (case [(== pow10 1.0)] ; fast case where units is in seconds
+        (set! b (strconv/AppendUint b (conv uint64 sec) 10))
+        (return (appendFracBase10 b (conv uint64 nsec) 1.0E9)))
+      (case [(< (conv uint64 sec) 1.0E9)] ; intermediate case where units is not seconds, but no overflow
+        (set! b (strconv/AppendUint b (+ (* (conv uint64 sec) (conv uint64 pow10)) (conv uint64 (/ (conv uint64 nsec) (/ 1.0E9 pow10)))) 10))
+        (return (appendFracBase10 b (% (* (conv uint64 nsec) pow10) 1.0E9) 1.0E9)))
+      (default ; slow case where units is not seconds and overflow would occur
+        (set! b (strconv/AppendUint b (conv uint64 sec) 10))
+        (set! b (appendPaddedBase10 b (/ (conv uint64 nsec) (/ 1.0E9 pow10)) pow10))
+        (return (appendFracBase10 b (% (* (conv uint64 nsec) pow10) 1.0E9) 1.0E9))))))
+
+
+
+
+
+^{:go/end 695} (go/func parseTimeUnix "parseTimeUnix parses t formatted as a decimal fractional number,\nwhere pow10 is a power-of-10 used to scale down the number.\n" [^{:tag (slice byte)} b ^uint64 pow10] :results [time/Time error]
+  (let [(values suffix neg) (consumeSign b false) ; consume sign
+      (values wholeBytes fracBytes) (bytesCutByte suffix \. true) ; consume whole and frac fields
+      (values whole okWhole) (jsonwire/ParseUint wholeBytes) ; parse whole field; may overflow
+      (values frac okFrac) (parseFracBase10 fracBytes (/ 1.0E9 pow10)) ; parse frac field
+      (values ^int64 sec ^int64 nsec) (zero int64)]
+    (switch
+      (case [(== pow10 1.0)] ; fast case where units is in seconds
+        (set! sec (conv int64 whole)) ; check overflow later after negation
+        (set! nsec (conv int64 frac))) ; cannot overflow
+      (case [okWhole] ; intermediate case where units is not seconds, but no overflow
+        (set! sec (conv int64 (/ whole pow10))) ; check overflow later after negation
+        (set! nsec (conv int64 (+ (* (% whole pow10) (/ 1.0E9 pow10)) frac)))) ; cannot overflow
+      (case [(and (not okWhole) (== whole math/MaxUint64))] ; slow case where units is not seconds and overflow occurred
+        (let [width (conv int (math/Log10 (conv float64 pow10)))] ; compute len(strconv.Itoa(pow10-1))
+          (set! (values whole okWhole) (jsonwire/ParseUint (subslice wholeBytes _ (- (len wholeBytes) width)))) ; parse the upper whole field
+          (let [(values mid _) (parsePaddedBase10 (subslice wholeBytes (- (len wholeBytes) width)) pow10)] ; parse the lower whole field
+            (set! sec (conv int64 whole)) ; check overflow later after negation
+            (set! nsec (conv int64 (+ (* mid (/ 1.0E9 pow10)) frac))))))) ; cannot overflow
+
+    (when neg
+      (set! (values sec nsec) (negateSecNano sec nsec)))
+
+    (switch [t (.UTC (time/Unix sec nsec))]
+      (case [(or ^:go/paren (and (not okWhole) (!= whole math/MaxUint64)) (not okFrac))]
+        (return (lit time/Time) (fmt/Errorf "invalid time %q: %w" b strconv/ErrSyntax)))
+      (case [(or (not okWhole) (!= neg (< (.Unix t) 0)))]
+        (return (lit time/Time) (fmt/Errorf "invalid time %q: %w" b strconv/ErrRange)))
+      (default
+        (return t nil)))))
+
+
+
+
+^{:go/end 704} (go/func negateSecNano "negateSecNano negates a Unix timestamp, where nsec must be within [0, 1e9).\n" [^int64 sec ^int64 nsec] :results [int64 int64]
+  (set! sec (bit-not sec)) ; twos-complement negation (i.e., -1*sec + 1)
+  (set! nsec (+ (- nsec) 1.0E9)) ; negate nsec and add 1e9 (which is the extra +1 from sec negation)
+  (set! sec + (conv int64 (/ nsec 1.0E9))) ; handle possible overflow of nsec if it started as zero
+  (set! nsec % 1.0E9) ; ensure nsec stays within [0, 1e9)
+  (return sec nsec))
+
+
+
+
+^{:go/end 713} (go/func appendFracBase10 "appendFracBase10 appends the fraction of n/max10,\nwhere max10 is a power-of-10 that is larger than n.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^uint64 n ^uint64 max10]
+  (when (== n 0)
+    (return b))
+
+  (bytes/TrimRight (appendPaddedBase10 (append b \.) n max10) "0"))
+
+
+
+
+^{:go/end 725} (go/func parseFracBase10 "parseFracBase10 parses the fraction of n/max10,\nwhere max10 is a power-of-10 that is larger than n.\n" [^{:tag (slice byte)} b ^uint64 max10] :results [^uint64 n ^bool ok]
+  (switch
+    (case [(== (len b) 0)]
+      (return 0 true))
+    (case [(or (< (len b) (len ".0")) (!= (aget b 0) \.))]
+      (return 0 false)))
+
+  (parsePaddedBase10 (subslice b (len ".")) max10))
+
+
+
+
+^{:go/end 739} (go/func appendPaddedBase10 "appendPaddedBase10 appends a zero-padded encoding of n,\nwhere max10 is a power-of-10 that is larger than n.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^uint64 n ^uint64 max10]
+  (when (< n (/ max10 10))
+    ;; Formatting of n is shorter than log10(max10),
+    ;; so add max10/10 to ensure the length is equal to log10(max10).
+    (let [i (len b)]
+      (set! b (strconv/AppendUint b (+ n (/ max10 10)) 10))
+      (dec! (aget b i)) ; subtract the addition of max10/10
+      (return b)))
+
+  (strconv/AppendUint b n 10))
+
+
+
+
+
+
+^{:go/end 762} (go/func parsePaddedBase10 "parsePaddedBase10 parses b as the zero-padded encoding of n,\nwhere max10 is a power-of-10 that is larger than n.\nTruncated suffix is treated as implicit zeros.\nExtended suffix is ignored, but verified to contain only digits.\n" [^{:tag (slice byte)} b ^uint64 max10] :results [^uint64 n ^bool ok]
+  (let [pow10 (conv uint64 1)]
+    (while (< pow10 max10)
+      (set! n * 10)
+      (when (> (len b) 0)
+        (when (or (< (aget b 0) \0) (< \9 (aget b 0)))
+          (return n false))
+
+        (set! n + (conv uint64 (- (aget b 0) \0)))
+        (set! b (subslice b 1)))
+
+      (set! pow10 * 10))
+
+    (when (and (> (len b) 0) (> (len (bytes/TrimRight b "0123456789")) 0))
+      (return n false)) ; trailing characters are not digits
+
+    (return n true)))
+
+
+
+^{:go/end 774} (go/func consumeSign "consumeSign consumes an optional leading negative or positive sign.\n" [^{:tag (slice byte)} b ^bool allowPlus] :results [(slice byte) bool]
+  (when (> (len b) 0)
+    (cond (== (aget b 0) \-)
+      (return (subslice b (len "-")) true)
+      (and (== (aget b 0) \+) allowPlus)
+      (return (subslice b (len "+")) false)))
+
+
+  (return b false))
+
+
+
+
+^{:go/end 786} (go/func bytesCutByte "bytesCutByte is similar to bytes.Cut(b, []byte{c}),\nexcept c may optionally be included as part of the suffix.\n" [^{:tag (slice byte)} b ^byte c ^bool include] :results [(slice byte) (slice byte)]
+  (when [i (bytes/IndexByte b c)] (>= i 0)
+    (when include
+      (return (subslice b _ i) (subslice b i)))
+
+    (return (subslice b _ i) (subslice b (+ i 1))))
+
+  (return b nil))
+
+
+
+
+^{:go/end 795} (go/func parseDec2 "parseDec2 parses b as an unsigned, base-10, 2-digit number.\nThe result is undefined if digits are not base-10.\n" ^byte [^{:tag (slice byte)} b]
+  (when (< (len b) 2)
+    (return 0))
+
+  (+ (* 10 (- (aget b 0) \0)) (- (aget b 1) \0)))

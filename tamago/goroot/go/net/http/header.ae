@@ -1,0 +1,273 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http) (go/file "header.go" :imports [
+
+
+    ^{:line 8} [io "io"]
+    ^{:line 9} [httptrace "net/http/httptrace"]
+    ^{:line 10} [ascii "net/http/internal/ascii"]
+    ^{:line 11} [textproto "net/textproto"]
+    ^{:line 12} [slices "slices"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [sync "sync"]
+    ^{:line 15} [time "time"]
+
+    ^{:line 17} [httpguts "golang.org/x/net/http/httpguts"]])
+
+
+
+
+
+
+(go/type Header "A Header represents the key-value pairs in an HTTP header.\n\nThe keys should be in canonical form, as returned by\n[CanonicalHeaderKey].\n" (map string (slice string)))
+
+
+
+
+
+^{:go/end 32} (go/method Add "Add adds the key, value pair to the header.\nIt appends to any existing values associated with key.\nThe key is case insensitive; it is canonicalized by\n[CanonicalHeaderKey].\n" [^Header h ^string key ^string value]
+  (.Add (conv textproto/MIMEHeader h) key value))
+
+
+
+
+
+
+
+^{:go/end 41} (go/method Set "Set sets the header entries associated with key to the\nsingle element value. It replaces any existing values\nassociated with key. The key is case insensitive; it is\ncanonicalized by [textproto.CanonicalMIMEHeaderKey].\nTo use non-canonical keys, assign to the map directly.\n" [^Header h ^string key ^string value]
+  (.Set (conv textproto/MIMEHeader h) key value))
+
+
+
+
+
+
+
+
+^{:go/end 51} (go/method Get "Get gets the first value associated with the given key. If\nthere are no values associated with the key, Get returns \"\".\nIt is case insensitive; [textproto.CanonicalMIMEHeaderKey] is\nused to canonicalize the provided key. Get assumes that all\nkeys are stored in canonical form. To use non-canonical keys,\naccess the map directly.\n" ^string [^Header h ^string key]
+  (.Get (conv textproto/MIMEHeader h) key))
+
+
+
+
+
+
+
+^{:go/end 60} (go/method Values "Values returns all values associated with the given key.\nIt is case insensitive; [textproto.CanonicalMIMEHeaderKey] is\nused to canonicalize the provided key. To use non-canonical\nkeys, access the map directly.\nThe returned slice is not a copy.\n" ^{:tag (slice string)} [^Header h ^string key]
+  (.Values (conv textproto/MIMEHeader h) key))
+
+
+
+^{:go/breaks [[5 67]] :go/end 68} (go/method get "get is like Get, but key must already be in CanonicalHeaderKey form.\n" ^string [^Header h ^string key]
+  (when [v (aget h key)] (> (len v) 0)
+    (return (aget v 0)))
+
+  "")
+
+
+
+
+^{:go/end 75} (go/method has "has reports whether h has the provided key defined, even if it's\nset to 0-length slice.\n" ^bool [^Header h ^string key]
+  (let [(values _ ok) (aget h key)]
+    ^{:line 74} ok))
+
+
+
+
+
+^{:go/end 82} (go/method Del "Del deletes the values associated with key.\nThe key is case insensitive; it is canonicalized by\n[CanonicalHeaderKey].\n" [^Header h ^string key]
+  (.Del (conv textproto/MIMEHeader h) key))
+
+
+
+^{:go/end 87} (go/method Write "Write writes a header in wire format.\n" ^error [^Header h ^io/Writer w]
+  (.write h w nil))
+
+
+^{:go/end 91} (go/method write ^error [^Header h ^io/Writer w ^{:tag (* httptrace/ClientTrace)} trace]
+  (.writeSubset h w nil trace))
+
+
+
+^{:go/end 118} (go/method Clone "Clone returns a copy of h or nil if h is nil.\n" ^Header [^Header h]
+  (when (== h nil)
+    (return nil))
+
+
+  ;; Find total number of values.
+  (let [nv 0]
+    (range [_ vv h]
+      (set! nv + (len vv)))
+
+    (let [sv (make (slice string) nv) ; shared backing array for headers' values
+        ^{:line 105} h2 (make Header (len h))]
+      (range [k vv h]
+        (when (== vv nil)
+          ;; Preserve nil values. ReverseProxy distinguishes
+          ;; between nil and zero-length header values.
+          (aset h2 k nil)
+          (continue))
+
+        (let [n (copy sv vv)]
+          (aset h2 k (subslice sv _ n n))
+          (set! sv (subslice sv n))))
+
+      ^{:line 117} h2)))
+
+
+(go/var timeFormats (lit (slice string)
+    ^{:line 121} TimeFormat
+    ^{:line 122} time/RFC850
+    ^{:line 123} time/ANSIC))
+
+
+
+
+
+^{:go/end 137} (go/func ParseTime "ParseTime parses a time header (such as the Date: header),\ntrying each of the three formats allowed by HTTP/1.1:\n[TimeFormat], [time.RFC850], and [time.ANSIC].\n" [^string text] :results [^time/Time t ^error err]
+  (range [_ layout timeFormats]
+    (set! (values t err) (time/Parse layout text))
+    (when (== err nil)
+      (return)))
+
+
+  (return))
+
+
+(go/var headerNewlineToSpace (strings/NewReplacer "\n" " " "\r" " "))
+
+
+(go/type stringWriter "stringWriter implements WriteString on a Writer.\n" (struct
+    ^{:line 143 :tag io/Writer} w))
+
+
+^{:go/end 148} (go/method WriteString [^stringWriter w ^string s] :results [^int n ^error err]
+  (.Write (.-w w) (conv (slice byte) s)))
+
+
+(go/type keyValues (struct
+    ^{:line 151 :tag string} key
+    ^{:line 152 :tag (slice string)} values))
+
+
+
+(go/type headerSorter "headerSorter contains a slice of keyValues sorted by keyValues.key.\n" (struct
+    ^{:line 157 :tag (slice keyValues)} kvs))
+
+
+(go/var headerSorterPool ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 161} (fn ^any [] (new headerSorter))))
+
+
+
+
+
+^{:go/end 181} (go/method sortedKeyValues "sortedKeyValues returns h's keys sorted in the returned kvs\nslice. The headerSorter used to sort is also returned, for possible\nreturn to headerSorterCache.\n" [^Header h ^{:tag (map string bool)} exclude] :results [^{:tag (slice keyValues)} kvs ^{:tag (* headerSorter)} hs]
+  (set! hs (assert (* headerSorter) (.Get headerSorterPool)))
+  (when (< (cap (.-kvs hs)) (len h))
+    (set! (.-kvs hs) (make (slice keyValues) 0 (len h))))
+
+  (set! kvs (subslice (.-kvs hs) _ 0))
+  (range [k vv h]
+    (when (not (aget exclude k))
+      (set! kvs (append kvs (lit keyValues k vv)))))
+
+
+  (set! (.-kvs hs) kvs)
+  (^{:inst [(slice keyValues) keyValues]} slices/SortFunc (.-kvs hs) ^{:go/end 179} (fn ^int [^keyValues a ^keyValues b] (strings/Compare (.-key a) (.-key b))))
+  (return kvs hs))
+
+
+
+
+
+^{:go/end 188} (go/method WriteSubset "WriteSubset writes a header in wire format.\nIf exclude is not nil, keys where exclude[key] == true are not written.\nKeys are not canonicalized before checking the exclude map.\n" ^error [^Header h ^io/Writer w ^{:tag (map string bool)} exclude]
+  (.writeSubset h w exclude nil))
+
+
+^{:go/end 225} (go/method writeSubset ^error [^Header h ^io/Writer w ^{:tag (map string bool)} exclude ^{:tag (* httptrace/ClientTrace)} trace]
+  (let [(values ws ok) (assert io/StringWriter w)]
+    (when (not ok)
+      (set! ws (lit stringWriter w)))
+
+    ^{:go/breaks [4]} (let [(values kvs sorter) (.sortedKeyValues h exclude)
+        ^{:line 196 :tag (slice string)} formattedVals (zero (slice string))]
+      (range [_ kv kvs]
+        (when (not (httpguts/ValidHeaderFieldName (.-key kv)))
+          ;; This could be an error. In the common case of
+          ;; writing response headers, however, we have no good
+          ;; way to provide the error back to the server
+          ;; handler, so just drop invalid headers instead.
+          (continue))
+
+        (range [_ v (.-values kv)]
+          (set! v (.Replace headerNewlineToSpace v))
+          (set! v (textproto/TrimString v))
+          (range [_ s (lit (slice string) (.-key kv) ": " v "\r\n")]
+            (when [(values _ err) (.WriteString ws s)] (!= err nil)
+              (.Put headerSorterPool sorter)
+              (return err)))
+
+
+          (when (and (!= trace nil) (!= (.-WroteHeaderField trace) nil))
+            (set! formattedVals (append formattedVals v))))
+
+
+        (when (and (!= trace nil) (!= (.-WroteHeaderField trace) nil))
+          ((.-WroteHeaderField trace) (.-key kv) formattedVals)
+          (set! formattedVals nil)))
+
+
+      (.Put headerSorterPool sorter)
+      nil)))
+
+
+
+
+
+
+
+
+
+^{:go/end 234} (go/func CanonicalHeaderKey "CanonicalHeaderKey returns the canonical format of the\nheader key s. The canonicalization converts the first\nletter and any letter following a hyphen to upper case;\nthe rest are converted to lowercase. For example, the\ncanonical key for \"accept-encoding\" is \"Accept-Encoding\".\nIf s contains a space or invalid header field bytes, it is\nreturned without modifications.\n" ^string [^string s] (textproto/CanonicalMIMEHeaderKey s))
+
+
+
+
+
+^{:go/breaks [[7 269]] :go/end 270} (go/func hasToken "hasToken reports whether token appears with v, ASCII\ncase-insensitive, with space or comma boundaries.\ntoken must be all lowercase.\nv may contain mixed cased.\n" ^bool [^string v ^string token]
+  (when (or (> (len token) (len v)) (== token ""))
+    (return false))
+
+  (when (== v token)
+    (return true))
+
+  (for [sp 0] (<= sp (- (len v) (len token))) (inc! sp)
+    ;; Check that first character is good.
+    ;; The token is ASCII, so checking only a single byte
+    ;; is sufficient. We skip this potential starting
+    ;; position if both the first byte and its potential
+    ;; ASCII uppercase equivalent (b|0x20) don't match.
+    ;; False positives ('^' => '~') are caught by EqualFold.
+    (when [b (aget v sp)] (and (!= b (aget token 0)) (!= (bit-or b 0x20) (aget token 0)))
+      (continue))
+
+    ;; Check that start pos is on a valid token boundary.
+    (when (and (> sp 0) (not (isTokenBoundary (aget v (- sp 1)))))
+      (continue))
+
+    ;; Check that end pos is on a valid token boundary.
+    (when [endPos (+ sp (len token))] (and (!= endPos (len v)) (not (isTokenBoundary (aget v endPos))))
+      (continue))
+
+    (when (ascii/EqualFold (subslice v sp (+ sp (len token))) token)
+      (return true)))
+
+
+  false)
+
+
+^{:go/end 274} (go/func isTokenBoundary ^bool [^byte b]
+  (or (== b \space) (== b \,) (== b \tab)))

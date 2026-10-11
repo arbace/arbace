@@ -1,0 +1,136 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.io) (go/file "multi.go" :imports [])
+
+(go/type eofReader (struct))
+
+^{:go/end 11} (go/method Read [eofReader (slice byte)] :results [int error]
+  (return 0 EOF))
+
+
+(go/type multiReader (struct
+    ^{:line 14 :tag (slice Reader)} readers))
+
+
+^{:go/end 42} (go/method Read [^{:tag (* multiReader)} mr ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (while (> (len (.-readers mr)) 0)
+    ;; Optimization to flatten nested multiReaders (Issue 13558).
+    (when (== (len (.-readers mr)) 1)
+      (when [(values r ok) (assert (* multiReader) (aget (.-readers mr) 0))] ok
+        (set! (.-readers mr) (.-readers r))
+        (continue)))
+
+
+    (set! (values n err) (.Read (aget (.-readers mr) 0) p))
+    (when (== err EOF)
+      ;; Use eofReader instead of nil to avoid nil panic
+      ;; after performing flatten (Issue 18232).
+      (aset (.-readers mr) 0 (lit eofReader)) ; permit earlier GC
+      (set! (.-readers mr) (subslice (.-readers mr) 1)))
+
+    (when (or (> n 0) (!= err EOF))
+      (when (and (== err EOF) (> (len (.-readers mr)) 0))
+        ;; Don't return EOF yet. More readers remain.
+        (set! err nil))
+
+      (return)))
+
+
+  (return 0 EOF))
+
+
+^{:go/end 46} (go/method WriteTo [^{:tag (* multiReader)} mr ^Writer w] :results [^int64 sum ^error err]
+  (.writeToWithBuffer mr w (make (slice byte) (* 1024 32))))
+
+
+^{:go/end 65} (go/method writeToWithBuffer [^{:tag (* multiReader)} mr ^Writer w ^{:tag (slice byte)} buf] :results [^int64 sum ^error err]
+  (range [i r (.-readers mr)]
+    (let [^int64 n (zero int64)]
+      (if [(values subMr ok) (assert (* multiReader) r)] ok ; reuse buffer with nested multiReaders
+        (set! (values n err) (.writeToWithBuffer subMr w buf))
+
+        (set! (values n err) (copyBuffer w r buf)))
+
+      (set! sum + n)
+      (when (!= err nil)
+        (set! (.-readers mr) (subslice (.-readers mr) i)) ; permit resume / retry after error
+        (return sum err))
+
+      (aset (.-readers mr) i nil))) ; permit early GC
+
+  (set! (.-readers mr) nil)
+  (return sum nil))
+
+
+(go/var ^WriterTo _ (conv (* multiReader) nil))
+
+
+
+
+
+^{:go/end 77} (go/func MultiReader "MultiReader returns a Reader that's the logical concatenation of\nthe provided input readers. They're read sequentially. Once all\ninputs have returned EOF, Read will return EOF.  If any of the readers\nreturn a non-nil, non-EOF error, Read will return that error.\n" ^Reader [& ^{:tag (slice Reader)} readers]
+  (let [r (make (slice Reader) (len readers))]
+    (copy r readers)
+    (addr (lit multiReader r))))
+
+
+(go/type multiWriter (struct
+    ^{:line 80 :tag (slice Writer)} writers))
+
+
+^{:go/end 95} (go/method Write [^{:tag (* multiWriter)} t ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (range [_ w (.-writers t)]
+    (set! (values n err) (.Write w p))
+    (when (!= err nil)
+      (return))
+
+    (when (!= n (len p))
+      (set! err ErrShortWrite)
+      (return)))
+
+
+  (return (len p) nil))
+
+
+(go/var ^StringWriter _ (conv (* multiWriter) nil))
+
+^{:go/end 119} (go/method WriteString [^{:tag (* multiWriter)} t ^string s] :results [^int n ^error err]
+  (let [^{:tag (slice byte)} p (zero (slice byte))] ; lazily initialized if/when needed
+    (range [_ w (.-writers t)]
+      (if [(values sw ok) (assert StringWriter w)] ok
+        (set! (values n err) (.WriteString sw s))
+        (do
+          (when (== p nil)
+            (set! p (conv (slice byte) s)))
+
+          (set! (values n err) (.Write w p))))
+
+      (when (!= err nil)
+        (return))
+
+      (when (!= n (len s))
+        (set! err ErrShortWrite)
+        (return)))
+
+
+    (return (len s) nil)))
+
+
+
+
+
+
+
+
+^{:go/end 137} (go/func MultiWriter "MultiWriter creates a writer that duplicates its writes to all the\nprovided writers, similar to the Unix tee(1) command.\n\nEach write is written to each listed writer, one at a time.\nIf a listed writer returns an error, that overall write operation\nstops and returns the error; it does not continue down the list.\n" ^Writer [& ^{:tag (slice Writer)} writers]
+  (let [allWriters (make (slice Writer) 0 (len writers))]
+    (range [_ w writers]
+      (if [(values mw ok) (assert (* multiWriter) w)] ok
+        (set! allWriters (append allWriters (spread (.-writers mw))))
+
+        (set! allWriters (append allWriters w))))
+
+
+    (addr (lit multiWriter allWriters))))

@@ -1,0 +1,401 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.mime) (go/file "mediatype.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [maps "maps"]
+    ^{:line 11} [slices "slices"]
+    ^{:line 12} [strings "strings"]
+    ^{:line 13} [unicode "unicode"]])
+
+
+
+
+
+
+
+^{:go/end 96} (go/func FormatMediaType "FormatMediaType serializes mediatype t and the parameters\nparam as a media type conforming to RFC 2045 and RFC 2616.\nThe type and parameter names are written in lower-case.\nWhen any of the arguments result in a standard violation then\nFormatMediaType returns the empty string.\n" ^string [^string t ^{:tag (map string string)} param]
+  (let [^strings/Builder b (zero strings/Builder)]
+    (if [(values major sub ok) (strings/Cut t "/")] (not ok) (do
+        (when (not (isToken t))
+          (return ""))
+
+        (.WriteString b (strings/ToLower t)))
+      (do
+        (when (or (not (isToken major)) (not (isToken sub)))
+          (return ""))
+
+        (.WriteString b (strings/ToLower major))
+        (.WriteByte b \/)
+        (.WriteString b (strings/ToLower sub))))
+
+
+    (range [_ attribute (^{:inst [string]} slices/Sorted (^{:inst [(map string string) string string]} maps/Keys param))]
+      (let [value (aget param attribute)]
+        (.WriteByte b \;)
+        (.WriteByte b \space)
+        (when (not (isToken attribute))
+          (return ""))
+
+        (.WriteString b (strings/ToLower attribute))
+
+        (let [needEnc (needsEncoding value)]
+          (when needEnc
+            ;; RFC 2231 section 4
+            (.WriteByte b \*))
+
+          (.WriteByte b \=)
+
+          (when needEnc
+            (.WriteString b "utf-8''")
+
+            (let [offset 0]
+              (for [index 0] (< index (len value)) (inc! index)
+                (let [ch (aget value index)]
+                  ;; {RFC 2231 section 7}
+                  ;; attribute-char := <any (US-ASCII) CHAR except SPACE, CTLs, "*", "'", "%", or tspecials>
+                  (when (or (<= ch \space) (>= ch 0x7F)
+                      (== ch \*) (== ch \') (== ch \%)
+                      (isTSpecial ch))
+
+                    (.WriteString b (subslice value offset index))
+                    (set! offset (+ index 1))
+
+                    (.WriteByte b \%)
+                    (.WriteByte b (aget upperhex (>> ch 4)))
+                    (.WriteByte b (aget upperhex (bit-and ch 0x0F))))))
+
+
+              (.WriteString b (subslice value offset))
+              (continue)))
+
+
+          (when (isToken value)
+            (.WriteString b value)
+            (continue))
+
+
+          (.WriteByte b \")
+          (let [offset 0]
+            (for [index 0] (< index (len value)) (inc! index)
+              (let [character (aget value index)]
+                (when (or (== character \") (== character \\))
+                  (.WriteString b (subslice value offset index))
+                  (set! offset index)
+                  (.WriteByte b \\))))
+
+
+            (.WriteString b (subslice value offset))
+            (.WriteByte b \")))))
+
+    (.String b)))
+
+
+^{:go/end 118} (go/func checkMediaTypeDisposition ^error [^string s]
+  (let [(values typ rest) (consumeToken s)]
+    (when (== typ "")
+      (return errNoMediaType))
+
+    (when (== rest "")
+      (return nil))
+
+    (let [^bool ok (zero bool)]
+      (when [(set! (values rest ok) (strings/CutPrefix rest "/"))] (not ok)
+        (return errNoSlashAfterFirstToken))
+
+      ^{:go/breaks [[4 117]]} (let [(values subtype ^:assign rest) (consumeToken rest)]
+        (when (== subtype "")
+          (return errNoTokenAfterSlash))
+
+        (when (!= rest "")
+          (return errUnexpectedContentAfterMediaSubtype))
+
+        nil))))
+
+
+(go/var
+  ^{:line 121} [errNoMediaType (errors/New "mime: no media type")]
+  ^{:line 122} [errNoSlashAfterFirstToken (errors/New "mime: expected slash after first token")]
+  ^{:line 123} [errNoTokenAfterSlash (errors/New "mime: expected token after slash")]
+  ^{:line 124} [errUnexpectedContentAfterMediaSubtype (errors/New "mime: unexpected content after media subtype")])
+
+
+
+
+
+(go/var ^{:doc "ErrInvalidMediaParameter is returned by [ParseMediaType] if\nthe media type value was found but there was an error parsing\nthe optional parameters\n"} ErrInvalidMediaParameter (errors/New "mime: invalid media parameter"))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 235} (go/func ParseMediaType "ParseMediaType parses a media type value and any optional\nparameters, per RFC 1521.  Media types are the values in\nContent-Type and Content-Disposition headers (RFC 2183).\nOn success, ParseMediaType returns the media type converted\nto lowercase and trimmed of white space and a non-nil map.\nIf there is an error parsing the optional parameter,\nthe media type will be returned along with the error\n[ErrInvalidMediaParameter].\nThe returned map, params, maps from the lowercase\nattribute to the attribute value with its case preserved.\n" [^string v] :results [^string mediatype ^{:tag (map string string)} params ^error err]
+  (let [(values base _ _) (strings/Cut v ";")]
+    (set! mediatype (strings/TrimSpace (strings/ToLower base)))
+
+    (set! err (checkMediaTypeDisposition mediatype))
+    (when (!= err nil)
+      (return "" nil err))
+
+
+    (set! params (make (map string string)))
+
+    ;; Map of base parameter name -> parameter name -> value
+    ;; for parameters containing a '*' character.
+    ;; Lazily initialized.
+    (let [^{:tag (map string (map string string))} continuation (zero (map string (map string string)))]
+
+      (set! v (subslice v (len base)))
+      (while (> (len v) 0)
+        (set! v (strings/TrimLeftFunc v unicode/IsSpace))
+        (when (== (len v) 0)
+          (break))
+
+        (let [(values key value rest) (consumeMediaParam v)]
+          (when (== key "")
+            (when (== (strings/TrimSpace rest) ";")
+              ;; Ignore trailing semicolons.
+              ;; Not an error.
+              (break))
+
+            ;; Parse error.
+            (return mediatype nil ErrInvalidMediaParameter))
+
+
+          (let [pmap params]
+            (when [(values baseName _ ok) (strings/Cut key "*")] ok
+              (when (== continuation nil)
+                (set! continuation (make (map string (map string string)))))
+
+              (when [(set! (values pmap ok) (aget continuation baseName))] (not ok)
+                (aset continuation baseName (make (map string string)))
+                (set! pmap (aget continuation baseName))))
+
+
+            (when [(values v exists) (aget pmap key)] (and exists (!= v value))
+              ;; Duplicate parameter names are incorrect, but we allow them if they are equal.
+              (return "" nil errDuplicateParamName))
+
+            (aset pmap key value)
+            (set! v rest))))
+
+
+      ;; Stitch together any continuations or things with stars
+      ;; (i.e. RFC 2231 things with stars: "foo*0" or "foo*")
+      (let [^strings/Builder buf (zero strings/Builder)]
+        (range [key pieceMap continuation]
+          (let [singlePartKey (+ key "*")]
+            (when [(values v ok) (aget pieceMap singlePartKey)] ok
+              (when [(values decv ok) (decode2231Enc v)] ok
+                (aset params key decv))
+
+              (continue))
+
+
+            (.Reset buf)
+            (let [valid false]
+              (for [n 0] _ (inc! n)
+                (let [simplePart (fmt/Sprintf "%s*%d" key n)]
+                  (when [(values v ok) (aget pieceMap simplePart)] ok
+                    (set! valid true)
+                    (.WriteString buf v)
+                    (continue))
+
+                  (let [encodedPart (+ simplePart "*")
+                      (values v ok) (aget pieceMap encodedPart)]
+                    (when (not ok)
+                      (break))
+
+                    (set! valid true)
+                    (if (== n 0)
+                      (when [(values decv ok) (decode2231Enc v)] ok
+                        (.WriteString buf decv))
+
+
+                      (let [(values decv _) (percentHexUnescape v)]
+                        (.WriteString buf decv))))))
+
+
+              (when valid
+                (aset params key (.String buf))))))
+
+
+
+        (return)))))
+
+
+(go/var errDuplicateParamName (errors/New "mime: duplicate parameter name"))
+
+^{:go/end 259} (go/func decode2231Enc [^string v] :results [string bool]
+  (let [(values charset ^:assign v ok) (strings/Cut v "'")]
+    (when (not ok)
+      (return "" false))
+
+    ;; TODO: ignoring the language part for now. If anybody needs it, we'll
+    ;; need to decide how to expose it in the API. But I'm not sure
+    ;; anybody uses it in practice.
+    (let [(values _ extOtherVals ^:assign ok) (strings/Cut v "'")]
+      (when (not ok)
+        (return "" false))
+
+      (set! charset (strings/ToLower charset))
+      (switch charset
+        (case ["us-ascii" "utf-8"])
+        (default
+          ;; Empty or unsupported encoding.
+          (return "" false)))
+
+      (percentHexUnescape extOtherVals))))
+
+
+
+
+
+
+^{:go/end 272} (go/func consumeToken "consumeToken consumes a token from the beginning of provided\nstring, per RFC 2045 section 5.1 (referenced from 2183), and return\nthe token consumed and the rest of the string. Returns (\"\", v) on\nfailure to consume at least one character.\n" [^string v] :results [^string token ^string rest]
+  (range [i (len v)]
+    (when (not (isTokenChar (aget v i)))
+      (return (subslice v _ i) (subslice v i))))
+
+
+  (return v ""))
+
+
+
+
+
+
+
+^{:go/end 316} (go/func consumeValue "consumeValue consumes a \"value\" per RFC 2045, where a value is\neither a 'token' or a 'quoted-string'.  On success, consumeValue\nreturns the value consumed (and de-quoted/escaped, if a\nquoted-string) and the rest of the string. On failure, returns\n(\"\", v).\n" [^string v] :results [^string value ^string rest]
+  (when (== v "")
+    (return))
+
+  (when (!= (aget v 0) \")
+    (return (consumeToken v)))
+
+
+  ;; parse a quoted-string
+  (let [buffer (new strings/Builder)]
+    (for [i 1] (< i (len v)) (inc! i)
+      (let [r (aget v i)]
+        (when (== r \")
+          (return (.String buffer) (subslice v (+ i 1))))
+
+        ;; When MSIE sends a full file path (in "intranet mode"), it does not
+        ;; escape backslashes: "C:\dev\go\foo.txt", not "C:\\dev\\go\\foo.txt".
+        ;;
+        ;; No known MIME generators emit unnecessary backslash escapes
+        ;; for simple token characters like numbers and letters.
+        ;;
+        ;; If we see an unnecessary backslash escape, assume it is from MSIE
+        ;; and intended as a literal backslash. This makes Go servers deal better
+        ;; with MSIE without affecting the way they handle conforming MIME
+        ;; generators.
+        (when (and (== r \\) (< (+ i 1) (len v)) (isTSpecial (aget v (+ i 1))))
+          (.WriteByte buffer (aget v (+ i 1)))
+          (inc! i)
+          (continue))
+
+        (when (or (== r \return) (== r \newline))
+          (return "" v))
+
+        (.WriteByte buffer (aget v i))))
+
+    ;; Did not find end quote.
+    (return "" v)))
+
+
+^{:go/end 343} (go/func consumeMediaParam [^string v] :results [^string param ^string value ^string rest]
+  (set! rest (strings/TrimLeftFunc v unicode/IsSpace))
+  (let [^bool ok (zero bool)]
+    (when [(set! (values rest ok) (strings/CutPrefix rest ";"))] (not ok)
+      (return "" "" v))
+
+
+    (set! rest (strings/TrimLeftFunc rest unicode/IsSpace))
+    (set! (values param rest) (consumeToken rest))
+    (set! param (strings/ToLower param))
+    (when (== param "")
+      (return "" "" v))
+
+
+    (set! rest (strings/TrimLeftFunc rest unicode/IsSpace))
+    (when [(set! (values rest ok) (strings/CutPrefix rest "="))] (not ok)
+      (return "" "" v))
+
+    (set! rest (strings/TrimLeftFunc rest unicode/IsSpace))
+    (let [(values ^:assign value rest2) (consumeValue rest)]
+      (when (and (== value "") (== rest2 rest))
+        (return "" "" v))
+
+      (set! rest rest2)
+      (return param value rest))))
+
+
+^{:go/end 378} (go/func percentHexUnescape [^string s] :results [string bool]
+  ;; Count %, check that they're well-formed.
+  (let [percents 0]
+    (for [i 0] (< i (len s)) _
+      (when (!= (aget s i) \%)
+        (inc! i)
+        (continue))
+
+      (inc! percents)
+      (when (or (>= (+ i 2) (len s)) (not (ishex (aget s (+ i 1)))) (not (ishex (aget s (+ i 2)))))
+        (return "" false))
+
+      (set! i + 3))
+
+    (when (== percents 0)
+      (return s true))
+
+
+    (let [t (make (slice byte) (- (len s) (* 2 percents)))
+        ^{:line 364} j 0]
+      (for [i 0] (< i (len s)) _
+        (switch (aget s i)
+          (case [\%]
+            (aset t j (bit-or (<< (unhex (aget s (+ i 1))) 4) (unhex (aget s (+ i 2)))))
+            (inc! j)
+            (set! i + 3))
+          (default
+            (aset t j (aget s i))
+            (inc! j)
+            (inc! i))))
+
+
+      (return (conv string t) true))))
+
+
+^{:go/breaks [[4 389]] :go/end 390} (go/func ishex ^bool [^byte c]
+  (switch
+    (case [(and (<= \0 c) (<= c \9))]
+      (return true))
+    (case [(and (<= \a c) (<= c \f))]
+      (return true))
+    (case [(and (<= \A c) (<= c \F))]
+      (return true)))
+
+  false)
+
+
+^{:go/breaks [[4 401]] :go/end 402} (go/func unhex ^byte [^byte c]
+  (switch
+    (case [(and (<= \0 c) (<= c \9))]
+      (return (- c \0)))
+    (case [(and (<= \a c) (<= c \f))]
+      (return (+ (- c \a) 10)))
+    (case [(and (<= \A c) (<= c \F))]
+      (return (+ (- c \A) 10))))
+
+  0)

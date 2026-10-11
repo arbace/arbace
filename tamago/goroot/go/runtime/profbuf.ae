@@ -1,0 +1,582 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "profbuf.go" :imports [
+
+
+    ^{:line 8} [atomic "internal/runtime/atomic"]
+    ^{:line 9} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type profBuf "A profBuf is a lock-free buffer for profiling events,\nsafe for concurrent use by one reader and one writer.\nThe writer may be a signal handler running without a user g.\nThe reader is assumed to be a user g.\n\nEach logged event corresponds to a fixed size header, a list of\nuintptrs (typically a stack), and exactly one unsafe.Pointer tag.\nThe header and uintptrs are stored in the circular buffer data and the\ntag is stored in a circular buffer tags, running in parallel.\nIn the circular buffer data, each event takes 2+hdrsize+len(stk)\nwords: the value 2+hdrsize+len(stk), then the time of the event, then\nhdrsize words giving the fixed-size header, and then len(stk) words\nfor the stack.\n\nThe current effective offsets into the tags and data circular buffers\nfor reading and writing are stored in the high 30 and low 32 bits of r and w.\nThe bottom bits of the high 32 are additional flag bits in w, unused in r.\n\"Effective\" offsets means the total number of reads or writes, mod 2^length.\nThe offset in the buffer is the effective offset mod the length of the buffer.\nTo make wraparound mod 2^length match wraparound mod length of the buffer,\nthe length of the buffer must be a power of two.\n\nIf the reader catches up to the writer, a flag passed to read controls\nwhether the read blocks until more data is available. A read returns a\npointer to the buffer data itself; the caller is assumed to be done with\nthat data at the next read. The read offset rNext tracks the next offset to\nbe returned by read. By definition, r ≤ rNext ≤ w (before wraparound),\nand rNext is only used by the reader, so it can be accessed without atomics.\n\nIf the reader is blocked waiting for more data, the writer will wake it up if\neither the buffer is more than half full, or when the writer sets the eof\nmarker or writes overflow entries (described below.)\n\nIf the writer gets ahead of the reader, so that the buffer fills,\nfuture writes are discarded and replaced in the output stream by an\noverflow entry, which has size 2+hdrsize+1, time set to the time of\nthe first discarded write, a header of all zeroed words, and a \"stack\"\ncontaining one word, the number of discarded writes.\n\nBetween the time the buffer fills and the buffer becomes empty enough\nto hold more data, the overflow entry is stored as a pending overflow\nentry in the fields overflow and overflowTime. The pending overflow\nentry can be turned into a real record by either the writer or the\nreader. If the writer is called to write a new record and finds that\nthe output buffer has room for both the pending overflow entry and the\nnew record, the writer emits the pending overflow entry and the new\nrecord into the buffer. If the reader is called to read data and finds\nthat the output buffer is empty but that there is a pending overflow\nentry, the reader will return a synthesized record for the pending\noverflow entry.\n\nOnly the writer can create or add to a pending overflow entry, but\neither the reader or the writer can clear the pending overflow entry.\nA pending overflow entry is indicated by the low 32 bits of 'overflow'\nholding the number of discarded writes, and overflowTime holding the\ntime of the first discarded write. The high 32 bits of 'overflow'\nincrement each time the low 32 bits transition from zero to non-zero\nor vice versa. This sequence number avoids ABA problems in the use of\ncompare-and-swap to coordinate between reader and writer.\nThe overflowTime is only written when the low 32 bits of overflow are\nzero, that is, only when there is no pending overflow entry, in\npreparation for creating a new one. The reader can therefore fetch and\nclear the entry atomically using\n\n\tfor {\n\t\toverflow = load(&b.overflow)\n\t\tif uint32(overflow) == 0 {\n\t\t\t// no pending entry\n\t\t\tbreak\n\t\t}\n\t\ttime = load(&b.overflowTime)\n\t\tif cas(&b.overflow, overflow, ((overflow>>32)+1)<<32) {\n\t\t\t// pending entry cleared\n\t\t\tbreak\n\t\t}\n\t}\n\tif uint32(overflow) > 0 {\n\t\temit entry for uint32(overflow), time\n\t}\n" (struct
+
+    ^{:line 93 :tag profAtomic :doc "accessed atomically\n"} r ^{:tag profAtomic :doc "accessed atomically\n"} w
+    ^{:line 94 :tag atomic/Uint64} overflow
+    ^{:line 95 :tag atomic/Uint64} overflowTime
+    ^{:line 96 :tag atomic/Uint32} eof
+
+
+    ^{:line 99 :tag uintptr :doc "immutable (excluding slice content)\n"} hdrsize
+    ^{:line 100 :tag (slice uint64)} data
+    ^{:line 101 :tag (slice unsafe/Pointer)} tags
+
+
+    ^{:line 104 :tag profIndex :doc "owned by reader\n"} rNext
+    ^{:line 105 :tag (slice uint64)} overflowBuf ; for use by reader to return overflow record
+    ^{:line 106 :tag note} wait))
+
+
+
+(go/type profAtomic "A profAtomic is the atomically-accessed word holding a profIndex.\n" uint64)
+
+
+(go/type profIndex "A profIndex is the packet tag and data counts and flags bits, described above.\n" uint64)
+
+(go/const
+  ^{:line 116} [^{:tag profIndex :val 4294967296} profReaderSleeping (<< 1 32)] ; reader is sleeping and must be woken up
+  ^{:line 117} [^{:tag profIndex :val 8589934592} profWriteExtra (<< 1 33)]) ; overflow or eof waiting
+
+
+^{:go/end 122} (go/method load ^profIndex [^{:tag (* profAtomic)} x]
+  (conv profIndex (atomic/Load64 (conv (* uint64) x))))
+
+
+^{:go/end 126} (go/method store [^{:tag (* profAtomic)} x ^profIndex new]
+  (atomic/Store64 (conv (* uint64) x) (conv uint64 new)))
+
+
+^{:go/end 130} (go/method cas ^bool [^{:tag (* profAtomic)} x ^profIndex old ^profIndex new]
+  (atomic/Cas64 (conv (* uint64) x) (conv uint64 old) (conv uint64 new)))
+
+
+^{:go/end 134} (go/method dataCount ^uint32 [^profIndex x]
+  (conv uint32 x))
+
+
+^{:go/end 138} (go/method tagCount ^uint32 [^profIndex x]
+  (conv uint32 (>> x 34)))
+
+
+
+
+
+
+
+^{:go/end 148} (go/func countSub "countSub subtracts two counts obtained from profIndex.dataCount or profIndex.tagCount,\nassuming that they are no more than 2^29 apart (guaranteed since they are never more than\nlen(data) or len(tags) apart, respectively).\ntagCount wraps at 2^30, while dataCount wraps at 2^32.\nThis function works for both.\n" ^int [^uint32 x ^uint32 y]
+  ;; x-y is 32-bit signed or 30-bit signed; sign-extend to 32 bits and convert to int.
+  (conv int (>> (<< (conv int32 (- x y)) 2) 2)))
+
+
+
+^{:go/end 153} (go/method addCountsAndClearFlags "addCountsAndClearFlags returns the packed form of \"x + (data, tag) - all flags\".\n" ^profIndex [^profIndex x ^int data ^int tag]
+  (conv profIndex (bit-or (<< (+ (>> (conv uint64 x) 34) (conv uint64 (>> (<< (conv uint32 tag) 2) 2))) 34) (conv uint64 (+ (conv uint32 x) (conv uint32 data))))))
+
+
+
+^{:go/end 158} (go/method hasOverflow "hasOverflow reports whether b has any overflow records pending.\n" ^bool [^{:tag (* profBuf)} b]
+  (> (conv uint32 (.Load (.-overflow b))) 0))
+
+
+
+
+
+^{:go/end 180} (go/method takeOverflow "takeOverflow consumes the pending overflow records, returning the overflow count\nand the time of the first overflow.\nWhen called by the reader, it is racing against incrementOverflow.\n" [^{:tag (* profBuf)} b] :results [^uint32 count ^uint64 time]
+  (let [overflow (.Load (.-overflow b))]
+    (set! time (.Load (.-overflowTime b)))
+    (while true
+      (set! count (conv uint32 overflow))
+      (when (== count 0)
+        (set! time 0)
+        (break))
+
+      ;; Increment generation, clear overflow count in low bits.
+      (when (.CompareAndSwap (.-overflow b) overflow (<< (+ (>> overflow 32) 1) 32))
+        (break))
+
+      (set! overflow (.Load (.-overflow b)))
+      (set! time (.Load (.-overflowTime b))))
+
+    (return (conv uint32 overflow) time)))
+
+
+
+
+^{:go/end 207} (go/method incrementOverflow "incrementOverflow records a single overflow at time now.\nIt is racing against a possible takeOverflow in the reader.\n" [^{:tag (* profBuf)} b ^int64 now]
+  (while true
+    (let [overflow (.Load (.-overflow b))]
+
+      ;; Once we see b.overflow reach 0, it's stable: no one else is changing it underfoot.
+      ;; We need to set overflowTime if we're incrementing b.overflow from 0.
+      (when (== (conv uint32 overflow) 0)
+        ;; Store overflowTime first so it's always available when overflow != 0.
+        (.Store (.-overflowTime b) (conv uint64 now))
+        (.Store (.-overflow b) (+ (<< (+ (>> overflow 32) 1) 32) 1))
+        (break))
+
+      ;; Otherwise we're racing to increment against reader
+      ;; who wants to set b.overflow to 0.
+      ;; Out of paranoia, leave 2³²-1 a sticky overflow value,
+      ;; to avoid wrapping around. Extremely unlikely.
+      (when (== (conv int32 overflow) -1)
+        (break))
+
+      (when (.CompareAndSwap (.-overflow b) overflow (+ overflow 1))
+        (break)))))
+
+
+
+
+
+
+^{:go/end 237} (go/func newProfBuf "newProfBuf returns a new profiling buffer with room for\na header of hdrsize words and a buffer of at least bufwords words.\n" ^{:tag (* profBuf)} [^int hdrsize ^int bufwords ^int tags]
+  (when [min (+ 2 hdrsize 1)] (< bufwords min)
+    (set! bufwords min))
+
+
+  ;; Buffer sizes must be power of two, so that we don't have to
+  ;; worry about uint32 wraparound changing the effective position
+  ;; within the buffers. We store 30 bits of count; limiting to 28
+  ;; gives us some room for intermediate calculations.
+  (when (or (>= bufwords (<< 1 28)) (>= tags (<< 1 28)))
+    (throw "newProfBuf: buffer too large"))
+
+  (let [^int i (zero int)]
+    (for [(set! i 1)] (< i bufwords) (set! i << 1))
+
+    (set! bufwords i)
+    (for [(set! i 1)] (< i tags) (set! i << 1))
+
+    (set! tags i)
+
+    (let [b (new profBuf)]
+      (set! (.-hdrsize b) (conv uintptr hdrsize))
+      (set! (.-data b) (make (slice uint64) bufwords))
+      (set! (.-tags b) (make (slice unsafe/Pointer) tags))
+      (set! (.-overflowBuf b) (make (slice uint64) (+ 2 (.-hdrsize b) 1)))
+      ^{:line 236} b)))
+
+
+
+
+^{:go/end 260} (go/method canWriteRecord "canWriteRecord reports whether the buffer has room\nfor a single contiguous record with a stack of length nstk.\n" ^bool [^{:tag (* profBuf)} b ^int nstk]
+  (let [br (.load (.-r b))
+      ^{:line 243} bw (.load (.-w b))]
+
+    ;; room for tag?
+    (when (< (+ (countSub (.tagCount br) (.tagCount bw)) (len (.-tags b))) 1)
+      (return false))
+
+
+    ;; room for data?
+    (let [nd (+ (countSub (.dataCount br) (.dataCount bw)) (len (.-data b)))
+        ^{:line 252} want (+ 2 (conv int (.-hdrsize b)) nstk)
+        ^{:line 253} i (conv int (% (.dataCount bw) (conv uint32 (len (.-data b)))))]
+      (when (> (+ i want) (len (.-data b)))
+        ;; Can't fit in trailing fragment of slice.
+        ;; Skip over that and start over at beginning of slice.
+        (set! nd - (- (len (.-data b)) i)))
+
+      (>= nd want))))
+
+
+
+
+
+
+
+^{:go/end 300} (go/method canWriteTwoRecords "canWriteTwoRecords reports whether the buffer has room\nfor two records with stack lengths nstk1, nstk2, in that order.\nEach record must be contiguous on its own, but the two\nrecords need not be contiguous (one can be at the end of the buffer\nand the other can wrap around and start at the beginning of the buffer).\n" ^bool [^{:tag (* profBuf)} b ^int nstk1 ^int nstk2]
+  (let [br (.load (.-r b))
+      ^{:line 269} bw (.load (.-w b))]
+
+    ;; room for tag?
+    (when (< (+ (countSub (.tagCount br) (.tagCount bw)) (len (.-tags b))) 2)
+      (return false))
+
+
+    ;; room for data?
+    (let [nd (+ (countSub (.dataCount br) (.dataCount bw)) (len (.-data b)))
+
+        ;; first record
+        ^{:line 280} want (+ 2 (conv int (.-hdrsize b)) nstk1)
+        ^{:line 281} i (conv int (% (.dataCount bw) (conv uint32 (len (.-data b)))))]
+      (when (> (+ i want) (len (.-data b)))
+        ;; Can't fit in trailing fragment of slice.
+        ;; Skip over that and start over at beginning of slice.
+        (set! nd - (- (len (.-data b)) i))
+        (set! i 0))
+
+      (set! i + want)
+      (set! nd - want)
+
+      ;; second record
+      (set! want (+ 2 (conv int (.-hdrsize b)) nstk2))
+      (when (> (+ i want) (len (.-data b)))
+        ;; Can't fit in trailing fragment of slice.
+        ;; Skip over that and start over at beginning of slice.
+        (set! nd - (- (len (.-data b)) i))
+        (set! i 0))
+
+      (>= nd want))))
+
+
+
+
+
+
+
+^{:go/end 411} (go/method write "write writes an entry to the profiling buffer b.\nThe entry begins with a fixed hdr, which must have\nlength b.hdrsize, followed by a variable-sized stack\nand a single tag pointer *tagPtr (or nil if tagPtr is nil).\nNo write barriers allowed because this might be called from a signal handler.\n" [^{:tag (* profBuf)} b ^{:tag (* unsafe/Pointer)} tagPtr ^int64 now ^{:tag (slice uint64)} hdr ^{:tag (slice uintptr)} stk]
+  (when (== b nil)
+    (return))
+
+  (when (> (len hdr) (conv int (.-hdrsize b)))
+    (throw "misuse of profBuf.write"))
+
+
+  (if [hasOverflow (.hasOverflow b)] (and hasOverflow (.canWriteTwoRecords b 1 (len stk)))
+    ;; Room for both an overflow record and the one being written.
+    ;; Write the overflow record if the reader hasn't gotten to it yet.
+    ;; Only racing against reader, not other writers.
+    (let [(values count time) (.takeOverflow b)]
+      (when (> count 0)
+        (let [^{:tag (array 1 uintptr)} stk (zero (array 1 uintptr))]
+          (aset stk 0 (conv uintptr count))
+          (.write b nil (conv int64 time) nil (subslice stk)))))
+
+    (when (or hasOverflow (not (.canWriteRecord b (len stk))))
+      ;; Pending overflow without room to write overflow and new records
+      ;; or no overflow but also no room for new record.
+      (.incrementOverflow b now)
+      (.wakeupExtra b)
+      (return)))
+
+
+  ;; There's room: write the record.
+  (let [br (.load (.-r b))
+      ^{:line 335} bw (.load (.-w b))
+
+      ;; Profiling tag
+      ;;
+      ;; The tag is a pointer, but we can't run a write barrier here.
+      ;; We have interrupted the OS-level execution of gp, but the
+      ;; runtime still sees gp as executing. In effect, we are running
+      ;; in place of the real gp. Since gp is the only goroutine that
+      ;; can overwrite gp.labels, the value of gp.labels is stable during
+      ;; this signal handler: it will still be reachable from gp when
+      ;; we finish executing. If a GC is in progress right now, it must
+      ;; keep gp.labels alive, because gp.labels is reachable from gp.
+      ;; If gp were to overwrite gp.labels, the deletion barrier would
+      ;; still shade that pointer, which would preserve it for the
+      ;; in-progress GC, so all is well. Any future GC will see the
+      ;; value we copied when scanning b.tags (heap-allocated).
+      ;; We arrange that the store here is always overwriting a nil,
+      ;; so there is no need for a deletion barrier on b.tags[wt].
+      ^{:line 353} wt (conv int (% (.tagCount bw) (conv uint32 (len (.-tags b)))))]
+    (when (!= tagPtr nil)
+      (set! @(conv (* uintptr) (conv unsafe/Pointer (addr (aget (.-tags b) wt)))) (conv uintptr @tagPtr)))
+
+
+    ;; Main record.
+    ;; It has to fit in a contiguous section of the slice, so if it doesn't fit at the end,
+    ;; leave a rewind marker (0) and start over at the beginning of the slice.
+    (let [wd (conv int (% (.dataCount bw) (conv uint32 (len (.-data b)))))
+        ^{:line 362} nd (+ (countSub (.dataCount br) (.dataCount bw)) (len (.-data b)))
+        ^{:line 363} skip 0]
+      (when (> (+ wd 2 (conv int (.-hdrsize b)) (len stk)) (len (.-data b)))
+        (aset (.-data b) wd 0)
+        (set! skip (- (len (.-data b)) wd))
+        (set! nd - skip)
+        (set! wd 0))
+
+      (let [data (subslice (.-data b) wd)]
+        (aset data 0 (conv uint64 (+ 2 (.-hdrsize b) (conv uintptr (len stk))))) ; length
+        (aset data 1 (conv uint64 now)) ; time stamp
+        ;; header, zero-padded
+        (let [i (copy (subslice data 2 (+ 2 (.-hdrsize b))) hdr)]
+          (clear (subslice data (+ 2 i) (+ 2 (.-hdrsize b))))
+          (range [i pc stk]
+            (aset data (+ 2 (.-hdrsize b) (conv uintptr i)) (conv uint64 pc)))
+
+
+          (while true
+            ;; Commit write.
+            ;; Racing with reader setting flag bits in b.w, to avoid lost wakeups.
+            (let [old (.load (.-w b))
+                ^{:line 384} new (.addCountsAndClearFlags old (+ skip 2 (len stk) (conv int (.-hdrsize b))) 1)
+                ;; We re-load b.r here to reduce the likelihood of early wakeups
+                ;; if the reader already consumed some data between the last
+                ;; time we read b.r and now. This isn't strictly necessary.
+                ^{:line 388} unread (countSub (.dataCount new) (.dataCount (.load (.-r b))))]
+              (when (< unread 0)
+                ;; The new count overflowed and wrapped around.
+                (set! unread + (len (.-data b))))
+
+              (let [wakeupThreshold (/ (len (.-data b)) 2)]
+                (when (< unread wakeupThreshold)
+                  ;; Carry over the sleeping flag since we're not planning
+                  ;; to wake the reader yet
+                  (set! new bit-or (bit-and old profReaderSleeping)))
+
+                (when (not (.cas (.-w b) old new))
+                  (continue))
+
+                ;; If we've hit our high watermark for data in the buffer,
+                ;; and there is a reader, wake it up.
+                (when (and (>= unread wakeupThreshold) (!= (bit-and old profReaderSleeping) 0))
+                  ;; NB: if we reach this point, then the sleeping bit is
+                  ;; cleared in the new b.w value
+                  (notewakeup (addr (.-wait b))))
+
+                (break)))))))))
+
+
+
+
+
+^{:go/end 421} (go/method close "close signals that there will be no more writes on the buffer.\nOnce all the data has been read from the buffer, reads will return eof=true.\n" [^{:tag (* profBuf)} b]
+  (when (> (.Load (.-eof b)) 0)
+    (throw "runtime: profBuf already closed"))
+
+  (.Store (.-eof b) 1)
+  (.wakeupExtra b))
+
+
+
+
+
+^{:go/end 443} (go/method wakeupExtra "wakeupExtra must be called after setting one of the \"extra\"\natomic fields b.overflow or b.eof.\nIt records the change in b.w and wakes up the reader if needed.\n" [^{:tag (* profBuf)} b]
+  (while true
+    (let [old (.load (.-w b))
+        ^{:line 429} new (bit-or old profWriteExtra)]
+      ;; Clear profReaderSleeping. We're going to wake up the reader
+      ;; if it was sleeping and we don't want double wakeups in case
+      ;; we, for example, attempt to write into a full buffer multiple
+      ;; times before the reader wakes up.
+      (set! new bit-and-not profReaderSleeping)
+      (when (not (.cas (.-w b) old new))
+        (continue))
+
+      (when (!= (bit-and old profReaderSleeping) 0)
+        (notewakeup (addr (.-wait b))))
+
+      (break))))
+
+
+
+
+(go/type profBufReadMode "profBufReadMode specifies whether to block when no data is available to read.\n" int)
+
+(go/const
+  ^{:line 449} [^{:tag profBufReadMode :val 0} profBufBlocking iota]
+  ^{:line 450} [^{:val 1} profBufNonBlocking])
+
+
+(go/var ^{:tag (array 1 unsafe/Pointer)} overflowTag) ; always nil
+
+^{:go/end 583} (go/method read [^{:tag (* profBuf)} b ^profBufReadMode mode] :results [^{:tag (slice uint64)} data ^{:tag (slice unsafe/Pointer)} tags ^bool eof]
+  (when (== b nil)
+    (return nil nil true))
+
+
+  (let [br (.-rNext b)
+
+      ;; Commit previous read, returning that part of the ring to the writer.
+      ;; First clear tags that have now been read, both to avoid holding
+      ;; up the memory they point at for longer than necessary
+      ;; and so that b.write can assume it is always overwriting
+      ;; nil tag entries (see comment in b.write).
+      ^{:line 467} rPrev (.load (.-r b))]
+    (when (!= rPrev br)
+      (let [ntag (countSub (.tagCount br) (.tagCount rPrev))
+          ^{:line 470} ti (conv int (% (.tagCount rPrev) (conv uint32 (len (.-tags b)))))]
+        (for [i 0] (< i ntag) (inc! i)
+          (aset (.-tags b) ti nil)
+          (when [(inc! ti)] (== ti (len (.-tags b)))
+            (set! ti 0)))
+
+
+        (.store (.-r b) br)))
+
+
+    (let [
+        ^{:line 481 :go/label :Read} bw (.load (.-w b))
+        ^{:line 482} numData (countSub (.dataCount bw) (.dataCount br))]
+      (when (== numData 0)
+        (when (.hasOverflow b)
+          ;; No data to read, but there is overflow to report.
+          ;; Racing with writer flushing b.overflow into a real record.
+          (let [(values count time) (.takeOverflow b)]
+            (when (== count 0)
+              ;; Lost the race, go around again.
+              (goto :Read))
+
+            ;; Won the race, report overflow.
+            (let [dst (.-overflowBuf b)]
+              (aset dst 0 (conv uint64 (+ 2 (.-hdrsize b) 1)))
+              (aset dst 1 time)
+              (clear (subslice dst 2 (+ 2 (.-hdrsize b))))
+              (aset dst (+ 2 (.-hdrsize b)) (conv uint64 count))
+              (return (subslice dst _ (+ 2 (.-hdrsize b) 1)) (subslice overflowTag _ 1) false))))
+
+        (when (> (.Load (.-eof b)) 0)
+          ;; No data, no overflow, EOF set: done.
+          (return nil nil true))
+
+        (when (!= (bit-and bw profWriteExtra) 0)
+          ;; Writer claims to have published extra information (overflow or eof).
+          ;; Attempt to clear notification and then check again.
+          ;; If we fail to clear the notification it means b.w changed,
+          ;; so we still need to check again.
+          (.cas (.-w b) bw (bit-and-not bw profWriteExtra))
+          (goto :Read))
+
+
+        ;; Nothing to read right now.
+        ;; Return or sleep according to mode.
+        (when (== mode profBufNonBlocking)
+          ;; Necessary on Darwin, notetsleepg below does not work in signal handler, root cause of #61768.
+          (return nil nil false))
+
+        (when (not (.cas (.-w b) bw (bit-or bw profReaderSleeping)))
+          (goto :Read))
+
+        ;; Committed to sleeping.
+        (notetsleepg (addr (.-wait b)) -1)
+        (noteclear (addr (.-wait b)))
+        (goto :Read))
+
+      (set! data (subslice (.-data b) (% (.dataCount br) (conv uint32 (len (.-data b))))))
+      (if (> (len data) numData)
+        (set! data (subslice data _ numData))
+
+        (set! numData - (len data))) ; available in case of wraparound
+
+      (let [skip 0]
+        (when (== (aget data 0) 0)
+          ;; Wraparound record. Go back to the beginning of the ring.
+          (set! skip (len data))
+          (set! data (.-data b))
+          (when (> (len data) numData)
+            (set! data (subslice data _ numData))))
+
+
+
+        (let [ntag (countSub (.tagCount bw) (.tagCount br))]
+          (when (== ntag 0)
+            (throw "runtime: malformed profBuf buffer - tag and data out of sync"))
+
+          (set! tags (subslice (.-tags b) (% (.tagCount br) (conv uint32 (len (.-tags b))))))
+          (when (> (len tags) ntag)
+            (set! tags (subslice tags _ ntag)))
+
+
+          ;; Count out whole data records until either data or tags is done.
+          ;; They are always in sync in the buffer, but due to an end-of-slice
+          ;; wraparound we might need to stop early and return the rest
+          ;; in the next call.
+          (let [di 0
+              ^{:line 557} ti 0]
+            (while (and (< di (len data)) (!= (aget data di) 0) (< ti (len tags)))
+              (when (> (+ (conv uintptr di) (conv uintptr (aget data di))) (conv uintptr (len data)))
+                (throw "runtime: malformed profBuf buffer - invalid size"))
+
+              (set! di + (conv int (aget data di)))
+              (inc! ti))
+
+
+            ;; Remember how much we returned, to commit read on next call.
+            (set! (.-rNext b) (.addCountsAndClearFlags br (+ skip di) ti))
+
+            (when raceenabled
+              ;; Match racereleasemerge in runtime_setProfLabel,
+              ;; so that the setting of the labels in runtime_setProfLabel
+              ;; is treated as happening before any use of the labels
+              ;; by our caller. The synchronization on labelSync itself is a fiction
+              ;; for the race detector. The actual synchronization is handled
+              ;; by the fact that the signal handler only reads from the current
+              ;; goroutine and uses atomics to write the updated queue indices,
+              ;; and then the read-out from the signal handler buffer uses
+              ;; atomics to read those queue indices.
+              (raceacquire (conv unsafe/Pointer (addr labelSync))))
+
+
+            (return (subslice data _ di) (subslice tags _ ti) false)))))))

@@ -1,0 +1,998 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package scanner implements a scanner for Go source text.
+;; It takes a []byte as source which can then be tokenized
+;; through repeated calls to the Scan method.
+(in-ns 'go.go.scanner) (go/file "scanner.go" :doc "Package scanner implements a scanner for Go source text.\nIt takes a []byte as source which can then be tokenized\nthrough repeated calls to the Scan method.\n" :imports [
+
+
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [token "go/token"]
+    ^{:line 14} [filepath "path/filepath"]
+    ^{:line 15} [strconv "strconv"]
+    ^{:line 16} [unicode "unicode"]
+    ^{:line 17} [utf8 "unicode/utf8"]])
+
+
+
+
+
+
+(go/type ErrorHandler "An ErrorHandler may be provided to [Scanner.Init]. If a syntax error is\nencountered and a handler was installed, the handler is called with a\nposition and an error message. The position points to the beginning of\nthe offending token.\n" (func [^token/Position pos ^string msg]))
+
+
+
+
+(go/type Scanner "A Scanner holds the scanner's internal state while processing\na given text. It can be allocated as part of another data\nstructure but must be initialized via [Scanner.Init] before use.\n" (struct
+
+    ^{:line 31 :tag (* token/File) :doc "immutable state\n"} file ; source file handle
+    ^{:line 32 :tag string} dir ; directory portion of file.Name()
+    ^{:line 33 :tag (slice byte)} src ; source
+    ^{:line 34 :tag ErrorHandler} err ; error reporting; or nil
+    ^{:line 35 :tag Mode} mode ; scanning mode
+
+
+    ^{:line 38 :tag rune :doc "scanning state\n"} ch ; current character
+    ^{:line 39 :tag int} offset ; character offset
+    ^{:line 40 :tag int} rdOffset ; reading offset (position after current character)
+    ^{:line 41 :tag int} lineOffset ; current line offset
+    ^{:line 42 :tag bool} insertSemi ; insert a semicolon before next newline
+    ^{:line 43 :tag token/Pos} nlPos ; position of newline in preceding comment
+
+    ^{:line 45 :tag bool} endPosValid
+    ^{:line 46 :tag token/Pos} endPos ; overrides the offset as the default end position
+
+
+    ^{:line 49 :tag int :doc "public state - ok to modify\n"} ErrorCount)) ; number of errors encountered
+
+
+(go/const
+  ^{:line 53} [^{:val 65279} bom 0xFEFF] ; byte order mark, only permitted as very first character
+  ^{:line 54} [^{:val -1} eof -1]) ; end of file
+
+
+
+
+
+
+
+^{:go/end 102} (go/method next "Read the next Unicode char into s.ch.\ns.ch < 0 means end-of-file.\n\nFor optimization, there is some overlap between this method and\ns.scanIdentifier.\n" [^{:tag (* Scanner)} s]
+  (if (< (.-rdOffset s) (len (.-src s))) (do
+      (set! (.-offset s) (.-rdOffset s))
+      (when (== (.-ch s) \newline)
+        (set! (.-lineOffset s) (.-offset s))
+        (.AddLine (.-file s) (.-offset s)))
+
+      (let [(values r w) (values (conv rune (aget (.-src s) (.-rdOffset s))) 1)]
+        (switch
+          (case [(== r 0)]
+            (.error s (.-offset s) "illegal character NUL"))
+          (case [(>= r utf8/RuneSelf)]
+            ;; not ASCII
+            (set! (values r w) (utf8/DecodeRune (subslice (.-src s) (.-rdOffset s))))
+            (cond (and (== r utf8/RuneError) (== w 1))
+              (let [in (subslice (.-src s) (.-rdOffset s))]
+                (if (and (== (.-offset s) 0)
+                    (>= (len in) 2)
+                    ^:go/paren (or (and (== (aget in 0) 0xFF) (== (aget in 1) 0xFE)) (and (== (aget in 0) 0xFE) (== (aget in 1) 0xFF)))) (do
+                    ;; U+FEFF BOM at start of file, encoded as big- or little-endian
+                    ;; UCS-2 (i.e. 2-byte UTF-16). Give specific error (go.dev/issue/71950).
+                    (.error s (.-offset s) "illegal UTF-8 encoding (got UTF-16)")
+                    (set! (.-rdOffset s) + (len in))) ; consume all input to avoid error cascade
+
+                  (.error s (.-offset s) "illegal UTF-8 encoding")))
+
+              (and (== r bom) (> (.-offset s) 0))
+              (.error s (.-offset s) "illegal byte order mark"))))
+
+
+        (set! (.-rdOffset s) + w)
+        (set! (.-ch s) r)))
+    (do
+      (set! (.-offset s) (len (.-src s)))
+      (when (== (.-ch s) \newline)
+        (set! (.-lineOffset s) (.-offset s))
+        (.AddLine (.-file s) (.-offset s)))
+
+      (set! (.-ch s) eof))))
+
+
+
+
+
+^{:go/breaks [[5 110]] :go/end 111} (go/method peek "peek returns the byte following the most recently read character without\nadvancing the scanner. If the scanner is at EOF, peek returns 0.\n" ^byte [^{:tag (* Scanner)} s]
+  (when (< (.-rdOffset s) (len (.-src s)))
+    (return (aget (.-src s) (.-rdOffset s))))
+
+  0)
+
+
+
+
+(go/type Mode "A Mode value is a set of flags (or 0).\nThey control scanner behavior.\n" uint)
+
+(go/const
+  ^{:line 118} [^{:tag Mode :val 1} ScanComments (<< 1 iota)] ; return comments as COMMENT tokens
+  ^{:line 119} [^{:val 2} dontInsertSemis]) ; do not automatically insert semicolons - for testing only
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 160} (go/method Init "Init prepares the scanner s to tokenize the text src by setting the\nscanner at the beginning of src. The scanner uses the file set file\nfor position information and it adds line information for each line.\nIt is ok to re-use the same file when re-scanning the same file as\nline information which is already present is ignored. Init causes a\npanic if the file size does not match the src size.\n\nCalls to [Scanner.Scan] will invoke the error handler err if they encounter a\nsyntax error and err is not nil. Also, for each error encountered,\nthe [Scanner] field ErrorCount is incremented by one. The mode parameter\ndetermines how comments are handled.\n\nNote that Init may call err if there is an error in the first character\nof the file.\n" [^{:tag (* Scanner)} s ^{:tag (* token/File)} file ^{:tag (slice byte)} src ^ErrorHandler err ^Mode mode]
+  ;; Explicitly initialize all fields since a scanner may be reused.
+  (when (!= (.Size file) (len src))
+    (panic (fmt/Sprintf "file size (%d) does not match src len (%d)" (.Size file) (len src))))
+
+
+  (let [(values dir _) (filepath/Split (.Name file))]
+
+    (set! @s ^{:go/breaks [2 4 6 8 10 [12 151] 14 16]} (lit Scanner
+        :file file
+        :dir dir
+        :src src
+        :err err
+        :mode mode
+
+        :ch \space
+        :endPosValid true
+        :endPos token/NoPos))
+
+
+    (.next s)
+    (when (== (.-ch s) bom)
+      (.next s)))) ; ignore BOM at file beginning
+
+
+
+^{:go/end 167} (go/method error [^{:tag (* Scanner)} s ^int offs ^string msg]
+  (when (!= (.-err s) nil)
+    ((.-err s) (.Position (.-file s) (.Pos (.-file s) offs)) msg))
+
+  (inc! (.-ErrorCount s)))
+
+
+^{:go/end 171} (go/method errorf [^{:tag (* Scanner)} s ^int offs ^string format & ^{:tag (slice any)} args]
+  (.error s offs (fmt/Sprintf format (spread args))))
+
+
+
+
+
+^{:go/end 244} (go/method scanComment "scanComment returns the text of the comment and (if nonzero)\nthe offset of the first newline within it, which implies a\n/*...*/ comment.\n" [^{:tag (* Scanner)} s] :results [string int]
+  ;; initial '/' already consumed; s.ch == '/' || s.ch == '*'
+  (let [offs (- (.-offset s) 1) ; position of initial '/'
+      ^{:line 179} next -1 ; position immediately following the comment; < 0 means invalid comment
+      ^{:line 180} numCR 0
+      ^{:line 181} nlOffset 0] ; offset of first newline within /*...*/ comment
+
+    (when (== (.-ch s) \/)
+      ;;-style comment
+      ;; (the final '\n' is not considered part of the comment)
+      (.next s)
+      (while (and (!= (.-ch s) \newline) (>= (.-ch s) 0))
+        (when (== (.-ch s) \return)
+          (inc! numCR))
+
+        (.next s))
+
+      ;; if we are at '\n', the position following the comment is afterwards
+      (set! next (.-offset s))
+      (when (== (.-ch s) \newline)
+        (inc! next))
+
+      (goto :exit))
+
+
+    ;; /*-style comment */
+    (.next s)
+    (while (>= (.-ch s) 0)
+      (let [ch (.-ch s)]
+        (cond (== ch \return)
+          (inc! numCR)
+          (and (== ch \newline) (== nlOffset 0))
+          (set! nlOffset (.-offset s)))
+
+        (.next s)
+        (when (and (== ch \*) (== (.-ch s) \/))
+          (.next s)
+          (set! next (.-offset s))
+          (goto :exit))))
+
+
+
+    (.error s offs "comment not terminated")
+
+    (let [
+        ^{:line 221 :go/label :exit} lit (subslice (.-src s) offs (.-offset s))]
+
+      ;; On Windows, a (//-comment) line may end in "\r\n".
+      ;; Remove the final '\r' before analyzing the text for
+      ;; line directives (matching the compiler). Remove any
+      ;; other '\r' afterwards (matching the pre-existing be-
+      ;; havior of the scanner).
+      (when (and (> numCR 0) (>= (len lit) 2) (== (aget lit 1) \/) (== (aget lit (- (len lit) 1)) \return))
+        (set! lit (subslice lit _ (- (len lit) 1)))
+        (dec! numCR))
+
+
+      ;; interpret line directives
+      ;; (//line directives must start at the beginning of the current line)
+      (when (and (>= next 0) ^:go/paren (or (== (aget lit 1) \*) (== offs (.-lineOffset s))) (bytes/HasPrefix (subslice lit 2) prefix)) ; /* implies valid comment */
+        (.updateLineInfo s next offs lit))
+
+
+      (when (> numCR 0)
+        (set! lit (stripCR lit (== (aget lit 1) \*))))
+
+
+      (return (conv string lit) nlOffset))))
+
+
+(go/var prefix (conv (slice byte) "line "))
+
+
+
+
+^{:go/end 312} (go/method updateLineInfo "updateLineInfo parses the incoming comment text at offset offs\nas a line directive. If successful, it updates the line info table\nfor the position next per the line directive.\n" [^{:tag (* Scanner)} s ^int next ^int offs ^{:tag (slice byte)} text]
+  ;; extract comment text
+  (when (== (aget text 1) \*)
+    (set! text (subslice text _ (- (len text) 2)))) ; lop off trailing "*/"
+
+  (set! text (subslice text 7)) ; lop off leading "//line " or "/*line "
+  (set! offs + 7)
+
+  (let [(values i n ok) (trailingDigits text)]
+    (when (== i 0)
+      (return)) ; ignore (not a line directive)
+
+    ;; i > 0
+
+    (when (not ok)
+      ;; text has a suffix :xxx but xxx is not a number
+      (.error s (+ offs i) (+ "invalid line number: " (conv string (subslice text i))))
+      (return))
+
+
+    ;; Put a cap on the maximum size of line and column numbers.
+    ;; 30 bits allows for some additional space before wrapping an int32.
+    ;; Keep this consistent with cmd/compile/internal/syntax.PosMax.
+    (let [^:const ^{:val 1073741824} maxLineCol (<< 1 30)
+        (values ^int line ^int col) (zero int)
+        (values i2 n2 ok2) (trailingDigits (subslice text _ (- i 1)))]
+      (if ok2 (do
+          ;;line filename:line:col
+          (set! (values i i2) (values i2 i))
+          (set! (values line col) (values n2 n))
+          (when (or (== col 0) (> col maxLineCol))
+            (.error s (+ offs i2) (+ "invalid column number: " (conv string (subslice text i2))))
+            (return))
+
+          (set! text (subslice text _ (- i2 1)))) ; lop off ":col"
+
+        ;;line filename:line
+        (set! line n))
+
+
+      (when (or (== line 0) (> line maxLineCol))
+        (.error s (+ offs i) (+ "invalid line number: " (conv string (subslice text i))))
+        (return))
+
+
+      ;; If we have a column (//line filename:line:col form),
+      ;; an empty filename means to use the previous filename.
+      (let [filename (conv string (subslice text _ (- i 1)))] ; lop off ":line", and trim white space
+        (cond (and (== filename "") ok2)
+          (set! filename (.-Filename (.Position (.-file s) (.Pos (.-file s) offs))))
+          (!= filename "") (do
+            ;; Put a relative filename in the current directory.
+            ;; This is for compatibility with earlier releases.
+            ;; See issue 26671.
+            (set! filename (filepath/Clean filename))
+            (when (not (filepath/IsAbs filename))
+              (set! filename (filepath/Join (.-dir s) filename)))))
+
+
+
+        (.AddLineColumnInfo (.-file s) next filename line col)))))
+
+
+^{:go/end 322} (go/func trailingDigits [^{:tag (slice byte)} text] :results [int int bool]
+  (let [i (bytes/LastIndexByte text \:)] ; look from right (Windows filenames may contain ':')
+    (when (< i 0)
+      (return 0 0 false)) ; no ":"
+
+    ;; i >= 0
+    (let [(values n err) (strconv/ParseUint (conv string (subslice text (+ i 1))) 10 0)]
+      (return (+ i 1) (conv int n) (== err nil)))))
+
+
+^{:go/end 326} (go/func isLetter ^bool [^rune ch]
+  (or (and (<= \a (lower ch)) (<= (lower ch) \z)) (== ch \_) (and (>= ch utf8/RuneSelf) (unicode/IsLetter ch))))
+
+
+^{:go/end 330} (go/func isDigit ^bool [^rune ch]
+  (or (isDecimal ch) (and (>= ch utf8/RuneSelf) (unicode/IsDigit ch))))
+
+
+
+
+
+
+
+^{:go/end 380} (go/method scanIdentifier "scanIdentifier reads the string of valid identifier characters at s.offset.\nIt must only be called when s.ch is known to be a valid letter.\n\nBe careful when making changes to this function: it is optimized and affects\nscanning performance significantly.\n" ^string [^{:tag (* Scanner)} s]
+  (let [offs (.-offset s)]
+
+    ;; Optimize for the common case of an ASCII identifier.
+    ;;
+    ;; Ranging over s.src[s.rdOffset:] lets us avoid some bounds checks, and
+    ;; avoids conversions to runes.
+    ;;
+    ;; In case we encounter a non-ASCII character, fall back on the slower path
+    ;; of calling into s.next().
+    (range [rdOffset b (subslice (.-src s) (.-rdOffset s))]
+      (when (or (and (<= \a b) (<= b \z)) (and (<= \A b) (<= b \Z)) (== b \_) (and (<= \0 b) (<= b \9)))
+        ;; Avoid assigning a rune for the common case of an ascii character.
+        (continue))
+
+      (set! (.-rdOffset s) + rdOffset)
+      (when (and (< 0 b) (< b utf8/RuneSelf))
+        ;; Optimization: we've encountered an ASCII character that's not a letter
+        ;; or number. Avoid the call into s.next() and corresponding set up.
+        ;;
+        ;; Note that s.next() does some line accounting if s.ch is '\n', so this
+        ;; shortcut is only possible because we know that the preceding character
+        ;; is not '\n'.
+        (set! (.-ch s) (conv rune b))
+        (set! (.-offset s) (.-rdOffset s))
+        (inc! (.-rdOffset s))
+        (goto :exit))
+
+      ;; We know that the preceding character is valid for an identifier because
+      ;; scanIdentifier is only called when s.ch is a letter, so calling s.next()
+      ;; at s.rdOffset resets the scanner state.
+      (.next s)
+      (while (or (isLetter (.-ch s)) (isDigit (.-ch s)))
+        (.next s))
+
+      (goto :exit))
+
+    (set! (.-offset s) (len (.-src s)))
+    (set! (.-rdOffset s) (len (.-src s)))
+    (set! (.-ch s) eof)
+
+    (label :exit
+      (return (conv string (subslice (.-src s) offs (.-offset s)))))))
+
+
+^{:go/breaks [[4 389]] :go/end 390} (go/func digitVal ^int [^rune ch]
+  (switch
+    (case [(and (<= \0 ch) (<= ch \9))]
+      (return (conv int (- ch \0))))
+    (case [(and (<= \a (lower ch)) (<= (lower ch) \f))]
+      (return (conv int (+ (- (lower ch) \a) 10)))))
+
+  16) ; larger than any legal digit val
+
+
+^{:go/end 392} (go/func lower ^rune [^rune ch] (bit-or (- \a \A) ch)) ; returns lower-case ch iff ch is ASCII letter
+^{:go/end 393} (go/func isDecimal ^bool [^rune ch] (and (<= \0 ch) (<= ch \9)))
+^{:go/end 394} (go/func isHex ^bool [^rune ch] (or (and (<= \0 ch) (<= ch \9)) (and (<= \a (lower ch)) (<= (lower ch) \f))))
+
+
+
+
+
+
+
+^{:go/end 426} (go/method digits "digits accepts the sequence { digit | '_' }.\nIf base <= 10, digits accepts any decimal digit but records\nthe offset (relative to the source start) of a digit >= base\nin *invalid, if *invalid < 0.\ndigits returns a bitset describing whether the sequence contained\ndigits (bit 0 is set), or separators '_' (bit 1 is set).\n" [^{:tag (* Scanner)} s ^int base ^{:tag (* int)} invalid] :results [^int digsep]
+  (if (<= base 10)
+    (let [max (conv rune (+ \0 base))]
+      (while (or (isDecimal (.-ch s)) (== (.-ch s) \_))
+        (let [ds 1]
+          (cond (== (.-ch s) \_)
+            (set! ds 2)
+            (and (>= (.-ch s) max) (< @invalid 0))
+            (set! @invalid (.-offset s))) ; record invalid rune offset
+
+          (set! digsep bit-or ds)
+          (.next s))))
+
+
+    (while (or (isHex (.-ch s)) (== (.-ch s) \_))
+      (let [ds 1]
+        (when (== (.-ch s) \_)
+          (set! ds 2))
+
+        (set! digsep bit-or ds)
+        (.next s))))
+
+
+  (return))
+
+
+^{:go/end 513} (go/method scanNumber [^{:tag (* Scanner)} s] :results [token/Token string]
+  (let [offs (.-offset s)
+      ^{:line 430} tok token/ILLEGAL
+
+      ^{:line 432} base 10 ; number base
+      ^{:line 433} prefix (conv rune 0) ; one of 0 (decimal), '0' (0-octal), 'x', 'o', or 'b'
+      ^{:line 434} digsep 0 ; bit 0: digit present, bit 1: '_' present
+      ^{:line 435} invalid -1] ; index of invalid digit in literal, or < 0
+
+    ;; integer part
+    (when (!= (.-ch s) \.)
+      (set! tok token/INT)
+      (when (== (.-ch s) \0)
+        (.next s)
+        (switch (lower (.-ch s))
+          (case [\x]
+            (.next s)
+            (set! (values base prefix) (values 16 \x)))
+          (case [\o]
+            (.next s)
+            (set! (values base prefix) (values 8 \o)))
+          (case [\b]
+            (.next s)
+            (set! (values base prefix) (values 2 \b)))
+          (default
+            (set! (values base prefix) (values 8 \0))
+            (set! digsep 1)))) ; leading 0
+
+
+      (set! digsep bit-or (.digits s base (addr invalid))))
+
+
+    ;; fractional part
+    (when (== (.-ch s) \.)
+      (set! tok token/FLOAT)
+      (when (or (== prefix \o) (== prefix \b))
+        (.error s (.-offset s) (+ "invalid radix point in " (litname prefix))))
+
+      (.next s)
+      (set! digsep bit-or (.digits s base (addr invalid))))
+
+
+    (when (== (bit-and digsep 1) 0)
+      (.error s (.-offset s) (+ (litname prefix) " has no digits")))
+
+
+    ;; exponent
+    (if [e (lower (.-ch s))] (or (== e \e) (== e \p)) (do
+        (switch
+          (case [(and (== e \e) (!= prefix 0) (!= prefix \0))]
+            (.errorf s (.-offset s) "%q exponent requires decimal mantissa" (.-ch s)))
+          (case [(and (== e \p) (!= prefix \x))]
+            (.errorf s (.-offset s) "%q exponent requires hexadecimal mantissa" (.-ch s))))
+
+        (.next s)
+        (set! tok token/FLOAT)
+        (when (or (== (.-ch s) \+) (== (.-ch s) \-))
+          (.next s))
+
+        (let [ds (.digits s 10 nil)]
+          (set! digsep bit-or ds)
+          (when (== (bit-and ds 1) 0)
+            (.error s (.-offset s) "exponent has no digits"))))
+
+      (when (and (== prefix \x) (== tok token/FLOAT))
+        (.error s (.-offset s) "hexadecimal mantissa requires a 'p' exponent")))
+
+
+    ;; suffix 'i'
+    (when (== (.-ch s) \i)
+      (set! tok token/IMAG)
+      (.next s))
+
+
+    (let [lit (conv string (subslice (.-src s) offs (.-offset s)))]
+      (when (and (== tok token/INT) (>= invalid 0))
+        (.errorf s invalid "invalid digit %q in %s" (aget lit (- invalid offs)) (litname prefix)))
+
+      (when (!= (bit-and digsep 2) 0)
+        (when [i (invalidSep lit)] (>= i 0)
+          (.error s (+ offs i) "'_' must separate successive digits")))
+
+
+
+      (return tok lit))))
+
+
+^{:go/breaks [[4 524]] :go/end 525} (go/func litname ^string [^rune prefix]
+  (switch prefix
+    (case [\x]
+      (return "hexadecimal literal"))
+    (case [\o \0]
+      (return "octal literal"))
+    (case [\b]
+      (return "binary literal")))
+
+  "decimal literal")
+
+
+
+^{:go/end 565} (go/func invalidSep "invalidSep returns the index of the first invalid separator in x, or -1.\n" ^int [^string x]
+  ^{:go/breaks [[5 564]]} (let [x1 \space ; prefix char, we only care if it's 'x'
+      ^{:line 530} d \. ; digit, one of '_', '0' (a digit), or '.' (anything else)
+      ^{:line 531} i 0]
+
+    ;; a prefix counts as a digit
+    (when (and (>= (len x) 2) (== (aget x 0) \0))
+      (set! x1 (lower (conv rune (aget x 1))))
+      (when (or (== x1 \x) (== x1 \o) (== x1 \b))
+        (set! d \0)
+        (set! i 2)))
+
+
+
+    ;; mantissa and exponent
+    (for [] (< i (len x)) (inc! i)
+      (let [p d] ; previous digit
+        (set! d (conv rune (aget x i)))
+        (switch
+          (case [(== d \_)]
+            (when (!= p \0)
+              (return i)))
+
+          (case [(or (isDecimal d) (and (== x1 \x) (isHex d)))]
+            (set! d \0))
+          (default
+            (when (== p \_)
+              (return (- i 1)))
+
+            (set! d \.)))))
+
+
+    (when (== d \_)
+      (return (- (len x) 1)))
+
+
+    -1))
+
+
+
+
+
+
+^{:go/end 622} (go/method scanEscape "scanEscape parses an escape sequence where rune is the accepted\nescaped quote. In case of a syntax error, it stops at the offending\ncharacter (without consuming it) and returns false. Otherwise\nit returns true.\n" ^bool [^{:tag (* Scanner)} s ^rune quote]
+  (let [offs (.-offset s)
+
+      ^{:line 574 :tag int} n (zero int)
+      (values ^uint32 base ^uint32 max) (zero uint32)]
+    (switch (.-ch s)
+      (case [\a \b \f \n \r \t \v \\ quote]
+        (.next s)
+        (return true))
+      (case [\0 \1 \2 \3 \4 \5 \6 \7]
+        (set! (values n base max) (values 3 8 255)))
+      (case [\x]
+        (.next s)
+        (set! (values n base max) (values 2 16 255)))
+      (case [\u]
+        (.next s)
+        (set! (values n base max) (values 4 16 unicode/MaxRune)))
+      (case [\U]
+        (.next s)
+        (set! (values n base max) (values 8 16 unicode/MaxRune)))
+      (default
+        (let [msg "unknown escape sequence"]
+          (when (< (.-ch s) 0)
+            (set! msg "escape sequence not terminated"))
+
+          (.error s offs msg)
+          (return false))))
+
+
+    ^{:go/breaks [[4 621]]} (let [^uint32 x (zero uint32)]
+      (while (> n 0)
+        (let [d (conv uint32 (digitVal (.-ch s)))]
+          (when (>= d base)
+            (let [msg (fmt/Sprintf "illegal character %#U in escape sequence" (.-ch s))]
+              (when (< (.-ch s) 0)
+                (set! msg "escape sequence not terminated"))
+
+              (.error s (.-offset s) msg)
+              (return false)))
+
+          (set! x (+ (* x base) d))
+          (.next s)
+          (dec! n)))
+
+
+      (when (or (> x max) (and (<= 0xD800 x) (< x 0xE000)))
+        (.error s offs "escape sequence is invalid Unicode code point")
+        (return false))
+
+
+      true)))
+
+
+^{:go/end 658} (go/method scanRune ^string [^{:tag (* Scanner)} s]
+  ;; '\'' opening already consumed
+  (let [offs (- (.-offset s) 1)
+
+      ^{:line 628} valid true
+      ^{:line 629} n 0]
+    (while true
+      (let [ch (.-ch s)]
+        (when (or (== ch \newline) (< ch 0))
+          ;; only report error if we don't have one already
+          (when valid
+            (.error s offs "rune literal not terminated")
+            (set! valid false))
+
+          (break))
+
+        (.next s)
+        (when (== ch \')
+          (break))
+
+        (inc! n)
+        (when (== ch \\)
+          (when (not (.scanEscape s \'))
+            (set! valid false)))))
+
+    ;; continue to read to closing quote
+
+
+
+    (when (and valid (!= n 1))
+      (.error s offs "illegal rune literal"))
+
+
+    (conv string (subslice (.-src s) offs (.-offset s)))))
+
+
+^{:go/end 680} (go/method scanString ^string [^{:tag (* Scanner)} s]
+  ;; '"' opening already consumed
+  (let [offs (- (.-offset s) 1)]
+
+    (while true
+      (let [ch (.-ch s)]
+        (when (or (== ch \newline) (< ch 0))
+          (.error s offs "string literal not terminated")
+          (break))
+
+        (.next s)
+        (when (== ch \")
+          (break))
+
+        (when (== ch \\)
+          (.scanEscape s \"))))
+
+
+
+    (conv string (subslice (.-src s) offs (.-offset s)))))
+
+
+^{:go/end 697} (go/func stripCR ^{:tag (slice byte)} [^{:tag (slice byte)} b ^bool comment]
+  (let [c (make (slice byte) (len b))
+      ^{:line 684} i 0]
+    (range [j ch b]
+      ;; In a /*-style comment, don't strip \r from *\r/ (incl.
+      ;; sequences of \r from *\r\r...\r/) since the resulting
+      ;; */ would terminate the comment too early unless the \r
+      ;; is immediately following the opening /* in which case
+      ;; it's ok because /*/ is not closed yet (issue #11151).
+      (when (or (!= ch \return) (and comment (> i (len "/*")) (== (aget c (- i 1)) \*) (< (+ j 1) (len b)) (== (aget b (+ j 1)) \/)))
+        (aset c i ch)
+        (inc! i)))
+
+
+    (subslice c _ i)))
+
+
+^{:go/end 725} (go/method scanRawString ^string [^{:tag (* Scanner)} s]
+  ;; '`' opening already consumed
+  (let [offs (- (.-offset s) 1)
+
+      ^{:line 703} hasCR false]
+    (while true
+      (let [ch (.-ch s)]
+        (when (< ch 0)
+          (.error s offs "raw string literal not terminated")
+          (break))
+
+        (.next s)
+        (when (== ch \`)
+          (break))
+
+        (when (== ch \return)
+          (set! hasCR true))))
+
+
+
+    (let [lit (subslice (.-src s) offs (.-offset s))]
+      (when hasCR
+        (set! lit (stripCR lit false)))
+
+
+      (conv string lit))))
+
+
+^{:go/end 731} (go/method skipWhitespace [^{:tag (* Scanner)} s]
+  (while (or (== (.-ch s) \space) (== (.-ch s) \tab) (and (== (.-ch s) \newline) (not (.-insertSemi s))) (== (.-ch s) \return))
+    (.next s)))
+
+
+
+;; Helper functions for scanning multi-byte tokens such as >> += >>= .
+;; Different routines recognize different length tok_i based on matches
+;; of ch_i. If a token ends in '=', the result is tok1 or tok3
+;; respectively. Otherwise, the result is tok0 if there was no other
+;; matching character, or tok2 if the matching character was ch2.
+
+^{:go/end 745} (go/method switch2 ^token/Token [^{:tag (* Scanner)} s ^token/Token tok0 ^token/Token tok1]
+  (when (== (.-ch s) \=)
+    (.next s)
+    (return tok1))
+
+  ^{:line 744} tok0)
+
+
+^{:go/end 757} (go/method switch3 ^token/Token [^{:tag (* Scanner)} s ^token/Token tok0 ^token/Token tok1 ^rune ch2 ^token/Token tok2]
+  (when (== (.-ch s) \=)
+    (.next s)
+    (return tok1))
+
+  (when (== (.-ch s) ch2)
+    (.next s)
+    (return tok2))
+
+  ^{:line 756} tok0)
+
+
+^{:go/end 773} (go/method switch4 ^token/Token [^{:tag (* Scanner)} s ^token/Token tok0 ^token/Token tok1 ^rune ch2 ^token/Token tok2 ^token/Token tok3]
+  (when (== (.-ch s) \=)
+    (.next s)
+    (return tok1))
+
+  (when (== (.-ch s) ch2)
+    (.next s)
+    (when (== (.-ch s) \=)
+      (.next s)
+      (return tok3))
+
+    (return tok2))
+
+  ^{:line 772} tok0)
+
+
+
+
+^{:go/end 788} (go/method End "End returns the position immediately after the last scanned token.\nIf [Scanner.Scan] has not been called yet, End returns [token.NoPos].\n" ^token/Pos [^{:tag (* Scanner)} s]
+  ;; Handles special case:
+  ;; - Makes sure we return [token.NoPos], even when [Scanner.Init] has consumed a BOM.
+  ;; - When the previous token was a synthetic [token.SEMICOLON] inside a multi-line
+  ;;   comment, we make sure End returns its ending position (i.e. prevPos+len("\n")).
+  (when (.-endPosValid s)
+    (return (.-endPos s)))
+
+
+  ;; Normal case: s.file.Pos(s.offset) represents the end of the token
+  (.Pos (.-file s) (.-offset s)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 999} (go/method Scan "Scan scans the next token and returns the token position, the token,\nand its literal string if applicable. The source end is indicated by\n[token.EOF].\n\nIf the returned token is a literal ([token.IDENT], [token.INT], [token.FLOAT],\n[token.IMAG], [token.CHAR], [token.STRING]) or [token.COMMENT], the literal string\nhas the corresponding value.\n\nIf the returned token is a keyword, the literal string is the keyword.\n\nIf the returned token is [token.SEMICOLON], the corresponding\nliteral string is \";\" if the semicolon was present in the source,\nand \"\\n\" if the semicolon was inserted because of a newline or\nat EOF. If the newline is within a /*...*/ comment, the SEMICOLON token\nis synthesized immediately after the COMMENT token; its position is that\nof the actual newline within the comment.\n\nIf the returned token is [token.ILLEGAL], the literal string is the\noffending character.\n\nIn all other cases, Scan returns an empty literal string.\n\nFor more tolerant parsing, Scan will return a valid token if\npossible even if a syntax error was encountered. Thus, even\nif the resulting token sequence contains no illegal tokens,\na client may not assume that no error occurred. Instead it\nmust check the scanner's ErrorCount or the number of calls\nof the error handler, if there was one installed.\n\nScan adds line information to the file added to the file\nset with Init. Token positions are relative to that file\nand thus relative to the file set.\n" [^{:tag (* Scanner)} s] :results [^token/Pos pos ^token/Token tok ^string lit]
+  (label :scanAgain
+    (set! (.-endPosValid s) false))
+  (when (.IsValid (.-nlPos s))
+    ;; Return artificial ';' token after /*...*/ comment
+    ;; containing newline, at position of first newline.
+    (set! (values pos tok lit) (values (.-nlPos s) token/SEMICOLON "\n"))
+    (set! (.-endPos s) (+ pos 1))
+    (set! (.-endPosValid s) true)
+    (set! (.-nlPos s) token/NoPos)
+    (return))
+
+
+  (.skipWhitespace s)
+
+  ;; current token start
+  (set! pos (.Pos (.-file s) (.-offset s)))
+
+  ;; determine token value
+  (let [insertSemi false]
+    (switch [ch (.-ch s)]
+      (case [(isLetter ch)]
+        (set! lit (.scanIdentifier s))
+        (if (> (len lit) 1) (do
+            ;; keywords are longer than one letter - avoid lookup otherwise
+            (set! tok (token/Lookup lit))
+            (switch tok
+              (case [token/IDENT token/BREAK token/CONTINUE token/FALLTHROUGH token/RETURN]
+                (set! insertSemi true))))
+
+          (do
+            (set! insertSemi true)
+            (set! tok token/IDENT))))
+
+      (case [(or (isDecimal ch) (and (== ch \.) (isDecimal (conv rune (.peek s)))))]
+        (set! insertSemi true)
+        (set! (values tok lit) (.scanNumber s)))
+      (default
+        (.next s) ; always make progress
+        (switch ch
+          (case [eof]
+            (when (.-insertSemi s)
+              (set! (.-insertSemi s) false) ; EOF consumed
+              (return pos token/SEMICOLON "\n"))
+
+            (set! tok token/EOF))
+          (case [\newline]
+            ;; we only reach here if s.insertSemi was
+            ;; set in the first place and exited early
+            ;; from s.skipWhitespace()
+            (set! (.-insertSemi s) false) ; newline consumed
+            (return pos token/SEMICOLON "\n"))
+          (case [\"]
+            (set! insertSemi true)
+            (set! tok token/STRING)
+            (set! lit (.scanString s)))
+          (case [\']
+            (set! insertSemi true)
+            (set! tok token/CHAR)
+            (set! lit (.scanRune s)))
+          (case [\`]
+            (set! insertSemi true)
+            (set! tok token/STRING)
+            (set! lit (.scanRawString s)))
+          (case [\:]
+            (set! tok (.switch2 s token/COLON token/DEFINE)))
+          (case [\.]
+            ;; fractions starting with a '.' are handled by outer switch
+            (set! tok token/PERIOD)
+            (when (and (== (.-ch s) \.) (== (.peek s) \.))
+              (.next s)
+              (.next s) ; consume last '.'
+              (set! tok token/ELLIPSIS)))
+
+          (case [\,]
+            (set! tok token/COMMA))
+          (case [\;]
+            (set! tok token/SEMICOLON)
+            (set! lit ";"))
+          (case [\(]
+            (set! tok token/LPAREN))
+          (case [\)]
+            (set! insertSemi true)
+            (set! tok token/RPAREN))
+          (case [\[]
+            (set! tok token/LBRACK))
+          (case [\]]
+            (set! insertSemi true)
+            (set! tok token/RBRACK))
+          (case [\{]
+            (set! tok token/LBRACE))
+          (case [\}]
+            (set! insertSemi true)
+            (set! tok token/RBRACE))
+          (case [\+]
+            (set! tok (.switch3 s token/ADD token/ADD_ASSIGN \+ token/INC))
+            (when (== tok token/INC)
+              (set! insertSemi true)))
+
+          (case [\-]
+            (set! tok (.switch3 s token/SUB token/SUB_ASSIGN \- token/DEC))
+            (when (== tok token/DEC)
+              (set! insertSemi true)))
+
+          (case [\*]
+            (set! tok (.switch2 s token/MUL token/MUL_ASSIGN)))
+          (case [\/]
+            (if (or (== (.-ch s) \/) (== (.-ch s) \*))
+              ;; comment
+              (let [(values comment nlOffset) (.scanComment s)]
+                (if (and (.-insertSemi s) (!= nlOffset 0)) (do
+                    ;; For /*...*/ containing \n, return
+                    ;; COMMENT then artificial SEMICOLON.
+                    (set! (.-nlPos s) (.Pos (.-file s) nlOffset))
+                    (set! (.-insertSemi s) false))
+
+                  (set! insertSemi (.-insertSemi s))) ; preserve insertSemi info
+
+                (when (== (bit-and (.-mode s) ScanComments) 0)
+                  ;; skip comment
+                  (goto :scanAgain))
+
+                (set! tok token/COMMENT)
+                (set! lit comment))
+
+              ;; division
+              (set! tok (.switch2 s token/QUO token/QUO_ASSIGN))))
+
+          (case [\%]
+            (set! tok (.switch2 s token/REM token/REM_ASSIGN)))
+          (case [\^]
+            (set! tok (.switch2 s token/XOR token/XOR_ASSIGN)))
+          (case [\<]
+            (if (== (.-ch s) \-) (do
+                (.next s)
+                (set! tok token/ARROW))
+
+              (set! tok (.switch4 s token/LSS token/LEQ \< token/SHL token/SHL_ASSIGN))))
+
+          (case [\>]
+            (set! tok (.switch4 s token/GTR token/GEQ \> token/SHR token/SHR_ASSIGN)))
+          (case [\=]
+            (set! tok (.switch2 s token/ASSIGN token/EQL)))
+          (case [\!]
+            (set! tok (.switch2 s token/NOT token/NEQ)))
+          (case [\&]
+            (if (== (.-ch s) \^) (do
+                (.next s)
+                (set! tok (.switch2 s token/AND_NOT token/AND_NOT_ASSIGN)))
+
+              (set! tok (.switch3 s token/AND token/AND_ASSIGN \& token/LAND))))
+
+          (case [\|]
+            (set! tok (.switch3 s token/OR token/OR_ASSIGN \| token/LOR)))
+          (case [\~]
+            (set! tok token/TILDE))
+          (default
+            ;; next reports unexpected BOMs - don't repeat
+            (when (!= ch bom)
+              ;; Report an informative error for U+201[CD] quotation
+              ;; marks, which are easily introduced via copy and paste.
+              (if (or (== ch \“) (== ch \”))
+                (.errorf s (.Offset (.-file s) pos) "curly quotation mark %q (use neutral %q)" ch \")
+
+                (.errorf s (.Offset (.-file s) pos) "illegal character %#U" ch)))
+
+
+            (set! insertSemi (.-insertSemi s)) ; preserve insertSemi info
+            (set! tok token/ILLEGAL)
+            (set! lit (conv string ch))))))
+
+
+    (when (== (bit-and (.-mode s) dontInsertSemis) 0)
+      (set! (.-insertSemi s) insertSemi))
+
+
+    (return)))

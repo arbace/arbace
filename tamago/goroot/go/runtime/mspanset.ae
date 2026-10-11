@@ -1,0 +1,425 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "mspanset.go" :imports [
+
+
+    ^{:line 8} [cpu "internal/cpu"]
+    ^{:line 9} [goarch "internal/goarch"]
+    ^{:line 10} [atomic "internal/runtime/atomic"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+
+
+
+(go/type spanSet "A spanSet is a set of *mspans.\n\nspanSet is safe for concurrent push and pop operations.\n" (struct
+    ;; A spanSet is a two-level data structure consisting of a
+    ;; growable spine that points to fixed-sized blocks. The spine
+    ;; can be accessed without locks, but adding a block or
+    ;; growing it requires taking the spine lock.
+    ;;
+    ;; Because each mspan covers at least 8K of heap and takes at
+    ;; most 8 bytes in the spanSet, the growth of the spine is
+    ;; quite limited.
+    ;;
+    ;; The spine and all blocks are allocated off-heap, which
+    ;; allows this to be used in the memory manager and avoids the
+    ;; need for write barriers on all of these. spanSetBlocks are
+    ;; managed in a pool, though never freed back to the operating
+    ;; system. We never release spine memory because there could be
+    ;; concurrent lock-free access and we're likely to reuse it
+    ;; anyway. (In principle, we could do this during STW.)
+
+    ^{:line 35 :tag mutex} spineLock
+    ^{:line 36 :tag atomicSpanSetSpinePointer} spine ; *[N]atomic.Pointer[spanSetBlock]
+    ^{:line 37 :tag atomic/Uintptr} spineLen ; Spine array length
+    ^{:line 38 :tag uintptr} spineCap ; Spine array cap, accessed under spineLock
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 51 :tag atomicHeadTailIndex :doc "index is the head and tail of the spanSet in a single field.\nThe head and the tail both represent an index into the logical\nconcatenation of all blocks, with the head always behind or\nequal to the tail (indicating an empty set). This field is\nalways accessed atomically.\n\nThe head and the tail are only 32 bits wide, which means we\ncan only support up to 2^32 pushes before a reset. If every\nspan in the heap were stored in this set, and each span were\nthe minimum size (1 runtime page, 8 KiB), then roughly the\nsmallest heap which would be unrepresentable is 32 TiB in size.\n"} index))
+
+
+(go/const
+  ^{:line 55} [^{:val 512} spanSetBlockEntries 512] ; 4KB on 64-bit
+  ^{:line 56} [^{:val 256} spanSetInitSpineCap 256]) ; Enough for 1GB heap on 64-bit
+
+
+(go/type spanSetBlockHeader (struct
+
+    ^{:line 61 :doc "Free spanSetBlocks are managed via a lock-free stack.\n"} lfnode
+
+
+
+
+    ^{:line 66 :tag atomic/Uint32 :doc "popped is the number of pop operations that have occurred on\nthis block. This number is used to help determine when a block\nmay be safely recycled.\n"} popped))
+
+
+(go/type spanSetBlockHeader2 (struct
+    ^{:line 70} spanSetBlockHeader
+    ^{:line 71 :tag (array (- tagAlign (unsafe/Sizeof (lit spanSetBlockHeader))) byte)} pad))
+
+
+(go/type spanSetBlock (struct
+    ^{:line 75} spanSetBlockHeader2
+
+
+    ^{:line 78 :tag (array spanSetBlockEntries atomicMSpanPointer) :doc "spans is the set of spans in this block.\n"} spans))
+
+
+
+
+^{:go/end 146} (go/method push "push adds span s to buffer b. push is safe to call concurrently\nwith other push and pop operations.\n" [^{:tag (* spanSet)} b ^{:tag (* mspan)} s]
+  ;; Obtain our slot.
+  (let [cursor (conv uintptr (- (.tail (.incTail (.-index b))) 1))
+      (values top bottom) (values (/ cursor spanSetBlockEntries) (% cursor spanSetBlockEntries))
+
+      ;; Do we need to add a block?
+      ^{:line 89} spineLen (.Load (.-spineLen b))
+      ^{:line 90 :tag (* spanSetBlock)} block (zero (* spanSetBlock))]
+    (label :retry
+      (if (< top spineLen)
+        (set! block (.Load (.lookup (.Load (.-spine b)) top)))
+        (do
+          ;; Add a new block to the spine, potentially growing
+          ;; the spine.
+          (lock (addr (.-spineLock b)))
+          ;; spineLen cannot change until we release the lock,
+          ;; but may have changed while we were waiting.
+          (set! spineLen (.Load (.-spineLen b)))
+          (when (< top spineLen)
+            (unlock (addr (.-spineLock b)))
+            (goto :retry))
+
+
+          (let [spine (.Load (.-spine b))]
+            (when (== spineLen (.-spineCap b))
+              ;; Grow the spine.
+              (let [newCap (* (.-spineCap b) 2)]
+                (when (== newCap 0)
+                  (set! newCap spanSetInitSpineCap))
+
+                (let [newSpine (persistentalloc (* newCap goarch/PtrSize) cpu/CacheLineSize (addr (.-gcMiscSys memstats)))]
+                  (when (!= (.-spineCap b) 0)
+                    ;; Blocks are allocated off-heap, so
+                    ;; no write barriers.
+                    (memmove newSpine (.-p spine) (* (.-spineCap b) goarch/PtrSize)))
+
+                  (set! spine (lit spanSetSpinePointer newSpine))
+
+                  ;; Spine is allocated off-heap, so no write barrier.
+                  (.StoreNoWB (.-spine b) spine)
+                  (set! (.-spineCap b) newCap))))
+            ;; We can't immediately free the old spine
+            ;; since a concurrent push with a lower index
+            ;; could still be reading from it. We let it
+            ;; leak because even a 1TB heap would waste
+            ;; less than 2MB of memory on old spines. If
+            ;; this is a problem, we could free old spines
+            ;; during STW.
+
+
+            ;; Allocate a new block from the pool.
+            (set! block (.alloc spanSetBlockPool))
+
+            ;; Add it to the spine.
+            ;; Blocks are allocated off-heap, so no write barrier.
+            (.StoreNoWB (.lookup spine top) block)
+            (.Store (.-spineLen b) (+ spineLen 1))
+            (unlock (addr (.-spineLock b)))))))
+
+
+    ;; We have a block. Insert the span atomically, since there may be
+    ;; concurrent readers via the block API.
+    (.StoreNoWB (aget (.-spans block) bottom) s)))
+
+
+
+
+^{:go/end 243} (go/method pop "pop removes and returns a span from buffer b, or nil if b is empty.\npop is safe to call concurrently with other pop and push operations.\n" ^{:tag (* mspan)} [^{:tag (* spanSet)} b]
+  (let [(values ^uint32 head ^uint32 tail) (zero uint32)
+      ^{:line 152 :tag uint32} backoff (zero uint32)]
+    ;; TODO: tweak backoff parameters on other architectures.
+    (when (== GOARCH "arm64")
+      (set! backoff 128))
+
+    (label :claimLoop
+      (while true
+        (let [headtail (.load (.-index b))]
+          (set! (values head tail) (.split headtail))
+          (when (>= head tail)
+            ;; The buf is empty, as far as we can tell.
+            (return nil))
+
+          ;; Check if the head position we want to claim is actually
+          ;; backed by a block.
+          (let [spineLen (.Load (.-spineLen b))]
+            (when (<= spineLen (/ (conv uintptr head) spanSetBlockEntries))
+              ;; We're racing with a spine growth and the allocation of
+              ;; a new block (and maybe a new spine!), and trying to grab
+              ;; the span at the index which is currently being pushed.
+              ;; Instead of spinning, let's just notify the caller that
+              ;; there's nothing currently here. Spinning on this is
+              ;; almost definitely not worth it.
+              (return nil))
+
+            ;; Try to claim the current head by CASing in an updated head.
+            ;; This may fail transiently due to a push which modifies the
+            ;; tail, so keep trying while the head isn't changing.
+            (let [want head]
+              (while (== want head)
+                (when (.cas (.-index b) headtail (makeHeadTailIndex (+ want 1) tail))
+                  (break :claimLoop))
+
+                ;; Use a backoff approach to reduce demand to the shared memory location
+                ;; decreases memory contention and allows for other threads to make quicker
+                ;; progress.
+                ;; Read more in this Arm blog post:
+                ;; https://community.arm.com/arm-community-blogs/b/architectures-and-processors-blog/posts/multi-threaded-applications-arm
+                (procyield backoff)
+                ;; Increase backoff time.
+                (set! backoff + (/ backoff 2))
+                (set! headtail (.load (.-index b)))
+                (set! (values head tail) (.split headtail))))))))
+
+    ;; We failed to claim the spot we were after and the head changed,
+    ;; meaning a popper got ahead of us. Try again from the top because
+    ;; the buf may not be empty.
+
+    (let [(values top bottom) (values (/ head spanSetBlockEntries) (% head spanSetBlockEntries))
+
+        ;; We may be reading a stale spine pointer, but because the length
+        ;; grows monotonically and we've already verified it, we'll definitely
+        ;; be reading from a valid block.
+        ^{:line 205} blockp (.lookup (.Load (.-spine b)) (conv uintptr top))
+
+        ;; Given that the spine length is correct, we know we will never
+        ;; see a nil block here, since the length is always updated after
+        ;; the block is set.
+        ^{:line 210} block (.Load blockp)
+        ^{:line 211} s (.Load (aget (.-spans block) bottom))]
+      (while (== s nil)
+        ;; We raced with the span actually being set, but given that we
+        ;; know a block for this span exists, the race window here is
+        ;; extremely small. Try again.
+        (set! s (.Load (aget (.-spans block) bottom))))
+
+      ;; Clear the pointer. This isn't strictly necessary, but defensively
+      ;; avoids accidentally re-using blocks which could lead to memory
+      ;; corruption. This way, we'll get a nil pointer access instead.
+      (.StoreNoWB (aget (.-spans block) bottom) nil)
+
+      ;; Increase the popped count. If we are the last possible popper
+      ;; in the block (note that bottom need not equal spanSetBlockEntries-1
+      ;; due to races) then it's our responsibility to free the block.
+      ;;
+      ;; If we increment popped to spanSetBlockEntries, we can be sure that
+      ;; we're the last popper for this block, and it's thus safe to free it.
+      ;; Every other popper must have crossed this barrier (and thus finished
+      ;; popping its corresponding mspan) by the time we get here. Because
+      ;; we're the last popper, we also don't have to worry about concurrent
+      ;; pushers (there can't be any). Note that we may not be the popper
+      ;; which claimed the last slot in the block, we're just the last one
+      ;; to finish popping.
+      (when (== (.Add ^{:go/via [spanSetBlockHeader2 spanSetBlockHeader]} (.-popped block) 1) spanSetBlockEntries)
+        ;; Clear the block's pointer.
+        (.StoreNoWB blockp nil)
+
+        ;; Return the block to the block pool.
+        (.free spanSetBlockPool block))
+
+      ^{:line 242} s)))
+
+
+
+
+
+
+
+
+
+^{:go/end 291} (go/method reset "reset resets a spanSet which is empty. It will also clean up\nany left over blocks.\n\nThrows if the buf is not empty.\n\nreset may not be called concurrently with any other operations\non the span set.\n" [^{:tag (* spanSet)} b]
+  (let [(values head tail) (.split (.load (.-index b)))]
+    (when (< head tail)
+      (print "head = " head ", tail = " tail "\n")
+      (throw "attempt to clear non-empty span set"))
+
+    (let [top (/ head spanSetBlockEntries)]
+      (when (< (conv uintptr top) (.Load (.-spineLen b)))
+        ;; If the head catches up to the tail and the set is empty,
+        ;; we may not clean up the block containing the head and tail
+        ;; since it may be pushed into again. In order to avoid leaking
+        ;; memory since we're going to reset the head and tail, clean
+        ;; up such a block now, if it exists.
+        (let [blockp (.lookup (.Load (.-spine b)) (conv uintptr top))
+            ^{:line 266} block (.Load blockp)]
+          (when (!= block nil)
+            ;; Check the popped value.
+            (when (== (.Load ^{:go/via [spanSetBlockHeader2 spanSetBlockHeader]} (.-popped block)) 0)
+              ;; popped should never be zero because that means we have
+              ;; pushed at least one value but not yet popped if this
+              ;; block pointer is not nil.
+              (throw "span set block with unpopped elements found in reset"))
+
+            (when (== (.Load ^{:go/via [spanSetBlockHeader2 spanSetBlockHeader]} (.-popped block)) spanSetBlockEntries)
+              ;; popped should also never be equal to spanSetBlockEntries
+              ;; because the last popper should have made the block pointer
+              ;; in this slot nil.
+              (throw "fully empty unfreed span set block found in reset"))
+
+
+            ;; Clear the pointer to the block.
+            (.StoreNoWB blockp nil)
+
+            ;; Return the block to the block pool.
+            (.free spanSetBlockPool block))))
+
+
+      (.reset (.-index b))
+      (.Store (.-spineLen b) 0))))
+
+
+
+
+
+(go/type atomicSpanSetSpinePointer "atomicSpanSetSpinePointer is an atomically-accessed spanSetSpinePointer.\n\nIt has the same semantics as atomic.UnsafePointer.\n" (struct
+    ^{:line 297 :tag atomic/UnsafePointer} a))
+
+
+
+
+
+^{:go/end 305} (go/method Load "Loads the spanSetSpinePointer and returns it.\n\nIt has the same semantics as atomic.UnsafePointer.\n" ^spanSetSpinePointer [^{:tag (* atomicSpanSetSpinePointer)} s]
+  (lit spanSetSpinePointer (.Load (.-a s))))
+
+
+
+
+
+^{:go/end 312} (go/method StoreNoWB "Stores the spanSetSpinePointer.\n\nIt has the same semantics as [atomic.UnsafePointer].\n" [^{:tag (* atomicSpanSetSpinePointer)} s ^spanSetSpinePointer p]
+  (.StoreNoWB (.-a s) (.-p p)))
+
+
+
+(go/type spanSetSpinePointer "spanSetSpinePointer represents a pointer to a contiguous block of atomic.Pointer[spanSetBlock].\n" (struct
+    ^{:line 316 :tag unsafe/Pointer} p))
+
+
+
+^{:go/end 322} (go/method lookup "lookup returns &s[idx].\n" ^{:tag (* (atomic/Pointer spanSetBlock))} [^spanSetSpinePointer s ^uintptr idx]
+  (conv (* (atomic/Pointer spanSetBlock)) (add (.-p s) (* goarch/PtrSize idx))))
+
+
+
+(go/var ^{:tag spanSetBlockAlloc :doc "spanSetBlockPool is a global pool of spanSetBlocks.\n"} spanSetBlockPool)
+
+
+(go/type spanSetBlockAlloc "spanSetBlockAlloc represents a concurrent pool of spanSetBlocks.\n" (struct
+    ^{:line 329 :tag lfstack} stack))
+
+
+
+
+^{:go/end 339} (go/method alloc "alloc tries to grab a spanSetBlock out of the pool, and if it fails\npersistentallocs a new one and returns it.\n" ^{:tag (* spanSetBlock)} [^{:tag (* spanSetBlockAlloc)} p]
+  (when [s (conv (* spanSetBlock) (.pop (.-stack p)))] (!= s nil)
+    (return s))
+
+  (conv (* spanSetBlock) (persistentalloc (unsafe/Sizeof (lit spanSetBlock)) (max cpu/CacheLineSize tagAlign) (addr (.-gcMiscSys memstats)))))
+
+
+
+^{:go/end 345} (go/method free "free returns a spanSetBlock back to the pool.\n" [^{:tag (* spanSetBlockAlloc)} p ^{:tag (* spanSetBlock)} block]
+  (.Store ^{:go/via [spanSetBlockHeader2 spanSetBlockHeader]} (.-popped block) 0)
+  (.push (.-stack p) (addr ^{:go/via [spanSetBlockHeader2 spanSetBlockHeader]} (.-lfnode block))))
+
+
+
+
+(go/type headTailIndex "headTailIndex represents a combined 32-bit head and 32-bit tail\nof a queue into a single 64-bit value.\n" uint64)
+
+
+
+^{:go/end 355} (go/func makeHeadTailIndex "makeHeadTailIndex creates a headTailIndex value from a separate\nhead and tail.\n" ^headTailIndex [^uint32 head ^uint32 tail]
+  (conv headTailIndex (bit-or (<< (conv uint64 head) 32) (conv uint64 tail))))
+
+
+
+^{:go/end 360} (go/method head "head returns the head of a headTailIndex value.\n" ^uint32 [^headTailIndex h]
+  (conv uint32 (>> h 32)))
+
+
+
+^{:go/end 365} (go/method tail "tail returns the tail of a headTailIndex value.\n" ^uint32 [^headTailIndex h]
+  (conv uint32 h))
+
+
+
+^{:go/end 370} (go/method split "split splits the headTailIndex value into its parts.\n" [^headTailIndex h] :results [^uint32 head ^uint32 tail]
+  (return (.head h) (.tail h)))
+
+
+
+(go/type atomicHeadTailIndex "atomicHeadTailIndex is an atomically-accessed headTailIndex.\n" (struct
+    ^{:line 374 :tag atomic/Uint64} u))
+
+
+
+^{:go/end 380} (go/method load "load atomically reads a headTailIndex value.\n" ^headTailIndex [^{:tag (* atomicHeadTailIndex)} h]
+  (conv headTailIndex (.Load (.-u h))))
+
+
+
+^{:go/end 385} (go/method cas "cas atomically compares-and-swaps a headTailIndex value.\n" ^bool [^{:tag (* atomicHeadTailIndex)} h ^headTailIndex old ^headTailIndex new]
+  (.CompareAndSwap (.-u h) (conv uint64 old) (conv uint64 new)))
+
+
+
+^{:go/end 390} (go/method incHead "incHead atomically increments the head of a headTailIndex.\n" ^headTailIndex [^{:tag (* atomicHeadTailIndex)} h]
+  (conv headTailIndex (.Add (.-u h) (<< 1 32))))
+
+
+
+^{:go/end 395} (go/method decHead "decHead atomically decrements the head of a headTailIndex.\n" ^headTailIndex [^{:tag (* atomicHeadTailIndex)} h]
+  (conv headTailIndex (.Add (.-u h) (- (<< 1 32)))))
+
+
+
+^{:go/end 406} (go/method incTail "incTail atomically increments the tail of a headTailIndex.\n" ^headTailIndex [^{:tag (* atomicHeadTailIndex)} h]
+  (let [ht (conv headTailIndex (.Add (.-u h) 1))]
+    ;; Check for overflow.
+    (when (== (.tail ht) 0)
+      (print "runtime: head = " (.head ht) ", tail = " (.tail ht) "\n")
+      (throw "headTailIndex overflow"))
+
+    ^{:line 405} ht))
+
+
+
+^{:go/end 411} (go/method reset "reset clears the headTailIndex to (0, 0).\n" [^{:tag (* atomicHeadTailIndex)} h]
+  (.Store (.-u h) 0))
+
+
+
+(go/type atomicMSpanPointer "atomicMSpanPointer is an atomic.Pointer[mspan]. Can't use generics because it's NotInHeap.\n" (struct
+    ^{:line 415 :tag atomic/UnsafePointer} p))
+
+
+
+^{:go/end 421} (go/method Load "Load returns the *mspan.\n" ^{:tag (* mspan)} [^{:tag (* atomicMSpanPointer)} p]
+  (conv (* mspan) (.Load (.-p p))))
+
+
+
+^{:go/end 426} (go/method StoreNoWB "StoreNoWB stores an *mspan.\n" [^{:tag (* atomicMSpanPointer)} p ^{:tag (* mspan)} s]
+  (.StoreNoWB (.-p p) (conv unsafe/Pointer s)))

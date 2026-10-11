@@ -1,0 +1,138 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.coverage.stringtab) (go/file "stringtab.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [slicereader "internal/coverage/slicereader"]
+    ^{:line 10} [uleb128 "internal/coverage/uleb128"]
+    ^{:line 11} [io "io"]])
+
+
+;; This package implements string table writer and reader utilities,
+;; for use in emitting and reading/decoding coverage meta-data and
+;; counter-data files.
+
+
+(go/type Writer "Writer implements a string table writing utility.\n" (struct
+    ^{:line 20 :tag (map string uint32)} stab
+    ^{:line 21 :tag (slice string)} strs
+    ^{:line 22 :tag (slice byte)} tmp
+    ^{:line 23 :tag bool} frozen))
+
+
+
+^{:go/end 30} (go/method InitWriter "InitWriter initializes a stringtab.Writer.\n" [^{:tag (* Writer)} stw]
+  (set! (.-stab stw) (make (map string uint32)))
+  (set! (.-tmp stw) (make (slice byte) 64)))
+
+
+
+^{:go/end 35} (go/method Nentries "Nentries returns the number of strings interned so far.\n" ^uint32 [^{:tag (* Writer)} stw]
+  (conv uint32 (len (.-strs stw))))
+
+
+
+
+^{:go/end 50} (go/method Lookup "Lookup looks up string 's' in the writer's table, adding\na new entry if need be, and returning an index into the table.\n" ^uint32 [^{:tag (* Writer)} stw ^string s]
+  (when [(values idx ok) (aget (.-stab stw) s)] ok
+    (return idx))
+
+  (when (.-frozen stw)
+    (panic "internal error: string table previously frozen"))
+
+  (let [idx (conv uint32 (len (.-strs stw)))]
+    (aset (.-stab stw) s idx)
+    (set! (.-strs stw) (append (.-strs stw) s))
+    ^{:line 49} idx))
+
+
+
+
+^{:go/end 66} (go/method Size "Size computes the memory in bytes needed for the serialized\nversion of a stringtab.Writer.\n" ^uint32 [^{:tag (* Writer)} stw]
+  (let [rval (conv uint32 0)]
+    (set! (.-tmp stw) (subslice (.-tmp stw) _ 0))
+    (set! (.-tmp stw) (uleb128/AppendUleb128 (.-tmp stw) (conv uint (len (.-strs stw)))))
+    (set! rval + (conv uint32 (len (.-tmp stw))))
+    (range [_ s (.-strs stw)]
+      (set! (.-tmp stw) (subslice (.-tmp stw) _ 0))
+      (let [slen (conv uint (len s))]
+        (set! (.-tmp stw) (uleb128/AppendUleb128 (.-tmp stw) slen))
+        (set! rval + (+ (conv uint32 (len (.-tmp stw))) (conv uint32 slen)))))
+
+    ^{:line 65} rval))
+
+
+
+
+^{:go/end 95} (go/method Write "Write writes the string table in serialized form to the specified\nio.Writer.\n" ^error [^{:tag (* Writer)} stw ^io/Writer w]
+  ^{:go/breaks [[4 94]]} (let [wr128 ^{:go/breaks [[5 79]] :go/end 80} (fn ^error [^uint v]
+        (set! (.-tmp stw) (subslice (.-tmp stw) _ 0))
+        (set! (.-tmp stw) (uleb128/AppendUleb128 (.-tmp stw) v))
+        (if [(values nw err) (.Write w (.-tmp stw))] (!= err nil)
+          (return (fmt/Errorf "writing string table: %v" err))
+          (when (!= nw (len (.-tmp stw)))
+            (return (fmt/Errorf "short write emitting stringtab uleb"))))
+
+        nil)]
+
+    (when [err (wr128 (conv uint (len (.-strs stw))))] (!= err nil)
+      (return err))
+
+    (range [_ s (.-strs stw)]
+      (when [err (wr128 (conv uint (len s)))] (!= err nil)
+        (return err))
+
+      (if [(values nw err) (.Write w (conv (slice byte) s))] (!= err nil)
+        (return (fmt/Errorf "writing string table: %v" err))
+        (when (!= nw (len (conv (slice byte) s)))
+          (return (fmt/Errorf "short write emitting stringtab")))))
+
+
+    nil))
+
+
+
+
+
+
+^{:go/end 103} (go/method Freeze "Freeze sends a signal to the writer that no more additions are\nallowed, only lookups of existing strings (if a lookup triggers\naddition, a panic will result). Useful as a mechanism for\n\"finalizing\" a string table prior to writing it out.\n" [^{:tag (* Writer)} stw]
+  (set! (.-frozen stw) true))
+
+
+
+
+(go/type Reader "Reader is a helper for reading a string table previously\nserialized by a Writer.Write call.\n" (struct
+    ^{:line 108 :tag (* slicereader/Reader)} r
+    ^{:line 109 :tag (slice string)} strs))
+
+
+
+
+^{:go/end 119} (go/func NewReader "NewReader creates a stringtab.Reader to read the contents\nof a string table from 'r'.\n" ^{:tag (* Reader)} [^{:tag (* slicereader/Reader)} r]
+  (let [str (addr ^{:go/breaks [2]} (lit Reader
+          :r r))]
+
+    ^{:line 118} str))
+
+
+
+^{:go/end 129} (go/method Read "Read reads/decodes a string table using the reader provided.\n" [^{:tag (* Reader)} str]
+  (let [numEntries (conv int (.ReadULEB128 (.-r str)))]
+    (set! (.-strs str) (make (slice string) 0 numEntries))
+    (for [idx 0] (< idx numEntries) (inc! idx)
+      (let [slen (.ReadULEB128 (.-r str))]
+        (set! (.-strs str) (append (.-strs str) (.ReadString (.-r str) (conv int64 slen))))))))
+
+
+
+
+^{:go/end 134} (go/method Entries "Entries returns the number of decoded entries in a string table.\n" ^int [^{:tag (* Reader)} str]
+  (len (.-strs str)))
+
+
+
+^{:go/end 139} (go/method Get "Get returns string 'idx' within the string table.\n" ^string [^{:tag (* Reader)} str ^uint32 idx]
+  (aget (.-strs str) idx))

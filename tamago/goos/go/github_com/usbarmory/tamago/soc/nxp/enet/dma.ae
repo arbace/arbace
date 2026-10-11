@@ -1,0 +1,268 @@
+;; NXP 10/100-Mbps Ethernet MAC (ENET)
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.enet) (go/file "dma.go" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [binary "encoding/binary"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [fmt "fmt"]
+
+    ^{:line 17} [dma "github.com/usbarmory/tamago/dma"]
+    ^{:line 18} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+(go/const
+  ^{:line 22} [^{:val 1500} MTU 1500]
+  ^{:line 23} [^{:val 1518} maxFrameSize (+ MTU 18)]
+  ^{:line 24} [^{:val 42} minFrameSize 42]
+  ^{:line 25} [^{:val 16} defaultRingSize 16]
+
+
+
+
+  ^{:line 30} [^{:val 8 :doc "On arm64 Go `copy` built-in cannot be safely used on device memory\nas LDP/STP instructions require 8-byte alignment, for this reason\nall `copy` against DMA buffers are forced to 8-byte aligned slices.\n"} copyAlign 8]
+  ^{:line 31} [^{:val 64} bufferAlign 64])
+
+
+
+(go/const "Common buffer descriptor fields\n"
+  ^{:line 36} [^{:val 13} BD_ST_W 13] ; Wrap
+  ^{:line 37} [^{:val 11} BD_ST_L 11]) ; Last
+
+
+
+(go/const "p1014, Table 22-35. Receive buffer descriptor field definitions, IMX6ULLRM\n"
+  ^{:line 42} [^{:val 15} BD_RX_ST_E 15] ; Empty
+  ^{:line 43} [^{:val 5} BD_RX_ST_LG 5] ; Frame length violation
+  ^{:line 44} [^{:val 4} BD_RX_ST_NO 4] ; Non-octet aligned frame
+  ^{:line 45} [^{:val 2} BD_RX_ST_CR 2] ; CRC or frame error
+  ^{:line 46} [^{:val 1} BD_RX_ST_OV 1] ; Overrun
+  ^{:line 47} [^{:val 0} BD_RX_ST_TR 0] ; Frame truncated
+
+  ^{:line 49} [^{:val 55} frameErrorMask (bit-or (<< 1 BD_RX_ST_CR) (<< 1 BD_RX_ST_LG) (<< 1 BD_RX_ST_NO) (<< 1 BD_RX_ST_OV) (<< 1 BD_RX_ST_TR))])
+
+
+
+(go/const "p1017, Table 22-37. Enhanced transmit buffer descriptor field definitions, IMX6ULLRM\n"
+  ^{:line 54} [^{:val 15} BD_TX_ST_R 15] ; Ready
+  ^{:line 55} [^{:val 10} BD_TX_ST_TC 10]) ; Transmit CRC
+
+
+
+
+(go/type bufferDescriptor "bufferDescriptor represents a legacy FEC receive/transmit buffer descriptor\n(p1012, 22.6.13 Legacy buffer descriptors, IMX6ULLRM).\n" (struct
+    ^{:line 61 :tag uint16} Length
+    ^{:line 62 :tag uint16} Status
+    ^{:line 63 :tag uint32} Addr
+
+    ^{:line 65 :tag (* Stats)} stats
+
+
+    ^{:line 68 :tag (slice byte) :doc "DMA buffers\n"} desc
+    ^{:line 69 :tag (slice byte)} data))
+
+
+^{:go/end 80} (go/method Bytes ^{:tag (slice byte)} [^{:tag (* bufferDescriptor)} bd]
+  (let [buf (new bytes/Buffer)]
+
+    (binary/Write buf binary/LittleEndian (.-Length bd))
+    (binary/Write buf binary/LittleEndian (.-Status bd))
+    (binary/Write buf binary/LittleEndian (.-Addr bd))
+
+    (.Bytes buf)))
+
+
+^{:go/end 99} (go/method Read [^{:tag (* bufferDescriptor)} bd ^{:tag (slice byte)} buf] :results [^int n ^error err]
+  (set! n (- (conv int (.-Length bd)) 4))
+
+  (when (< (len buf) n)
+    (return 0 (fmt/Errorf "buffer too small (%d < %d)" (len buf) n)))
+
+
+  (let [r (% n copyAlign)]
+    (set! n - r)
+
+    (copy (subslice buf _ n) (subslice (.-data bd) _ n))
+
+    (range [i r]
+      (aset buf (+ n i) (aget (.-data bd) (+ n i))))
+
+
+    (return (+ n r) nil)))
+
+
+^{:go/end 111} (go/method Write [^{:tag (* bufferDescriptor)} bd ^{:tag (slice byte)} buf]
+  (let [n (len buf)
+      ^{:line 103} r (% n copyAlign)]
+    (set! n - r)
+
+    (copy (.-data bd) (subslice buf _ n))
+
+    (range [i r]
+      (aset (.-data bd) (+ n i) (aget buf (+ n i))))))
+
+
+
+^{:go/end 138} (go/method Valid ^bool [^{:tag (* bufferDescriptor)} bd]
+  ^{:go/breaks [[3 137]]} (let [s (conv uint32 (.-Status bd))]
+
+    (switch
+      (case [(== (bit-and s (<< 1 BD_ST_L)) 0)]
+        (return false))
+      (case [(!= (bit-and s frameErrorMask) 0)]
+        (if (== (bit-and (>> s BD_RX_ST_OV) 1) 1)
+          (set! (.-Overrun (.-stats bd)) + 1)
+          (do
+            (set! (.-FrameLengthViolation (.-stats bd)) + (bit-and (>> s BD_RX_ST_LG) 1))
+            (set! (.-NonOctetAlignedFrame (.-stats bd)) + (bit-and (>> s BD_RX_ST_NO) 1))
+            (set! (.-CRCOrFrameError (.-stats bd)) + (bit-and (>> s BD_RX_ST_CR) 1))))
+
+
+        (return false))
+      (case [(< (.-Length bd) minFrameSize)]
+        (set! (.-FrameTooSmall (.-stats bd)) + 1)
+        (return false))
+      (case [(> (.-Length bd) maxFrameSize)]
+        (set! (.-FrameTooLarge (.-stats bd)) + 1)
+        (return false)))
+
+
+    true))
+
+
+(go/type bufferDescriptorRing (struct
+    ^{:line 141 :tag (slice (* bufferDescriptor))} bds
+    ^{:line 142 :tag int} index
+    ^{:line 143 :tag int} size))
+
+
+^{:go/end 184} (go/method init ^uint32 [^{:tag (* bufferDescriptorRing)} ring ^bool rx ^int n ^{:tag (* Stats)} s]
+  (set! (.-bds ring) (make (slice (* bufferDescriptor)) n))
+  (set! (.-size ring) n)
+
+  ;; To avoid excessive DMA region fragmentation, a single allocation
+  ;; reserves all descriptors and data pointers.
+
+  (let [descSize (len (.Bytes (addr (lit bufferDescriptor))))
+      (values ptr desc) (dma/Reserve (* n descSize) bufferAlign)
+
+      ^{:line 156} dataSize (+ maxFrameSize (- bufferAlign (% maxFrameSize bufferAlign)))
+      (values addr data) (dma/Reserve (* n dataSize) bufferAlign)]
+
+    (range [i n]
+      (let [off (* dataSize i)
+
+          ^{:line 162} bd (addr ^{:go/breaks [2 4 6]} (lit bufferDescriptor
+              :Addr (+ (conv uint32 addr) (conv uint32 off))
+              :data (subslice data off (+ off dataSize))
+              :stats s))]
+
+
+        (when rx
+          (set! (.-Status bd) bit-or (<< 1 BD_RX_ST_E)))
+
+
+        (when (== i (- n 1))
+          (set! (.-Status bd) bit-or (<< 1 BD_ST_W)))
+
+
+        (set! off (* descSize i))
+        (set! (.-desc bd) (subslice desc off (+ off descSize)))
+        (copy (.-desc bd) (.Bytes bd))
+
+        (aset (.-bds ring) i bd)))
+
+
+    (conv uint32 ptr)))
+
+
+^{:go/end 196} (go/method next [^{:tag (* bufferDescriptorRing)} ring] :results [^bool wrap]
+  (set! wrap (== (.-index ring) (- (.-size ring) 1)))
+
+  (if wrap
+    (set! (.-index ring) 0)
+
+    (set! (.-index ring) + 1))
+
+
+  (return))
+
+
+^{:go/end 221} (go/method pop [^{:tag (* bufferDescriptorRing)} ring ^{:tag (slice byte)} buf] :results [^int n ^error err]
+  (let [bd (aget (.-bds ring) (.-index ring))]
+
+    (set! (.-Length bd) (conv uint16 (aget (.-desc bd) 0)))
+    (set! (.-Length bd) bit-or (<< (conv uint16 (aget (.-desc bd) 1)) 8))
+
+    (set! (.-Status bd) (conv uint16 (aget (.-desc bd) 2)))
+    (set! (.-Status bd) bit-or (<< (conv uint16 (aget (.-desc bd) 3)) 8))
+
+    (when (!= (bit-and (.-Status bd) (<< 1 BD_RX_ST_E)) 0)
+      (return))
+
+
+    (.next ring)
+
+    (when (.Valid bd)
+      (set! (values n err) (.Read bd buf)))
+
+
+    ;; set empty
+    (set! (aget (.-desc bd) 3) bit-or (>> (<< 1 BD_RX_ST_E) 8))
+
+    (return)))
+
+
+^{:go/end 249} (go/method push [^{:tag (* bufferDescriptorRing)} ring ^{:tag (slice byte)} buf] :results [^error err]
+  (let [bd (aget (.-bds ring) (.-index ring))]
+
+    (when (!= (bit-and (<< (conv uint16 (aget (.-desc bd) 3)) 8) (<< 1 BD_TX_ST_R)) 0)
+      (return (errors/New "frame not sent")))
+
+
+    (set! (.-Length bd) (conv uint16 (len buf)))
+    (set! (.-Status bd) (bit-or (<< 1 BD_ST_L) (<< 1 BD_TX_ST_TC)))
+
+    (aset (.-desc bd) 0 (conv byte (bit-and (.-Length bd) 0xff)))
+    (aset (.-desc bd) 1 (conv byte (>> (bit-and (.-Length bd) 0xff00) 8)))
+
+    (aset (.-desc bd) 2 (conv byte (bit-and (.-Status bd) 0xff)))
+    (aset (.-desc bd) 3 (conv byte (>> (bit-and (.-Status bd) 0xff00) 8)))
+
+    (.Write bd buf)
+
+    (when (.next ring)
+      (set! (aget (.-desc bd) 3) bit-or (>> (<< 1 BD_ST_W) 8)))
+
+
+    ;; set ready
+    (set! (aget (.-desc bd) 3) bit-or (>> (<< 1 BD_TX_ST_R) 8))
+
+    (return)))
+
+
+
+
+^{:go/end 257} (go/method Receive "Receive receives a single Ethernet frame, excluding the checksum, from the\nMAC controller ring buffer.\n" [^{:tag (* ENET)} hw ^{:tag (slice byte)} buf] :results [^int n ^error err]
+  (set! (values n err) (.pop (.-rx hw) buf))
+  (reg/Set (.-rdar hw) RDAR_ACTIVE)
+  (return))
+
+
+
+
+^{:go/end 269} (go/method Transmit "Transmit transmits a single Ethernet frame, the checksum is appended\nautomatically and must not be included.\n" [^{:tag (* ENET)} hw ^{:tag (slice byte)} buf] :results [^error err]
+  (when (> (len buf) maxFrameSize)
+    (return (errors/New "frame too large")))
+
+
+  (set! err (.push (.-tx hw) buf))
+  (reg/Set (.-tdar hw) TDAR_ACTIVE)
+  (return))

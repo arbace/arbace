@@ -1,0 +1,79 @@
+;; AMD Secure Encrypted Virtualization support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.sev) (go/file "ap.go" :imports [
+
+
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [fmt "fmt"]
+
+    ^{:line 15} [bits "github.com/usbarmory/tamago/bits"]])
+
+
+
+
+(go/const ^{:val 2147483667 :doc "SEV-ES Guest-Hypervisor Communication Block Standardization\nTable 7: List of Supported Non-Automatic Events.\n"} SNP_AP_CREATION 0x80000013)
+
+(go/const
+  ^{:line 23} [^{:val 0} add 0]
+  ^{:line 24} [^{:val 1} addAndRun 1]
+  ^{:line 25} [^{:val 2} stopAndRemove 2])
+
+
+
+
+
+^{:go/end 72} (go/method CreateAP "CreateAP creates a vCPU, using the provided Virtual Machine Save Area\ninformation (VMSA), to be used as Application Processor (AP) for SMP\noperation.\n" [^{:tag (* GHCB)} b ^int apicid ^{:tag (* VMSA)} v] :results [^error err]
+  (let [^uint64 features (zero uint64)
+      ^{:line 33 :tag uint64} attrs (zero uint64)]
+
+    (if [(set! (values features err) (.HypervisorFeatures b))] (!= err nil)
+      (return)
+      (do
+        (bits/Set64 (addr features) FeatureSNP)
+        (bits/Set64 (addr features) FeatureAPCreation)))
+
+
+    (when (== (.-VMSA b) nil)
+      (return (errors/New "invalid instance, nil VMSA Region")))
+
+
+    (let [(values addr buf) (.Reserve (.-VMSA b) pageSize 0)]
+      (copy buf (.Bytes v))
+      (let [gpa (conv uint64 addr)]
+
+        ;; ensure page is mapped as 4K
+        (when [ret (pvalidate gpa PAGE_SIZE_2M false)] (== ret 0)
+          (for [i (conv uint64 0)] (< i (<< 2 20)) (set! i + (<< 1 12))
+            (pvalidate (+ gpa i) PAGE_SIZE_4K true)))
+
+
+
+        (bits/Set64 (addr attrs) RMP_VMSA)
+        (bits/SetN64 (addr attrs) RMP_TARGET_VMPL 0xff 1)
+
+        (when [ret (rmpadjust gpa PAGE_SIZE_4K attrs)] (!= ret 0)
+          (return (fmt/Errorf "rmpadjust error, gpa:%#x attrs:%x ret:%d\n" gpa attrs ret)))
+
+
+        ;; match features
+        (.write b RAX (.-SEV_FEATURES v))
+
+        (let [info1 (conv uint64 add)]
+          (set! info1 bit-or (<< (conv uint64 (.-VMPL v)) 16))
+          (set! info1 bit-or (<< (conv uint64 apicid) 32))
+
+          (.Exit b SNP_AP_CREATION info1 gpa 0))))))
+
+
+
+^{:go/end 80} (go/method RemoveAP "RemoveAP removes a vCPU from runnable state.\n" [^{:tag (* GHCB)} b ^int apicid] :results [^error err]
+  (let [info1 (conv uint64 stopAndRemove)]
+    (set! info1 bit-or (<< (conv uint64 apicid) 32))
+
+    (.Exit b SNP_AP_CREATION info1 0 0)))

@@ -1,0 +1,97 @@
+;; AMD Secure Encrypted Virtualization support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.sev) (go/file "key.go" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [binary "encoding/binary"]
+    ^{:line 14} [fmt "fmt"]])
+
+
+(go/const
+  ^{:line 18} [^{:val 3} MSG_KEY_REQ 3]
+  ^{:line 19} [^{:val 4} MSG_KEY_RSP 4])
+
+
+
+(go/const "KeySelect masks\n"
+  ^{:line 24} [^{:val 4} KeySelVLEK (<< 2 1)] ; Versioned Loaded Endorsement Key
+  ^{:line 25} [^{:val 2} KeySelVCEK (<< 1 1)] ; Versioned Chip Endorsement Key (VCEK)
+  ^{:line 26} [^{:val 0} KeySelVLEKOrVCEK (<< 0 1)]
+  ^{:line 27} [^{:val 1} RootKeySelVMRK (<< 1 0)] ; VM root key
+  ^{:line 28} [^{:val 0} RootKeySelVCEK (<< 0 0)]) ; Versioned Chip Endorsement Key
+
+
+
+(go/const "GuestFieldSelect masks\n"
+  ^{:line 33} [^{:val 64} LaunchMitVector (<< 1 6)] ; Launch Mitigation Vector
+  ^{:line 34} [^{:val 32} TCBVersion (<< 1 5)] ; Trusted Computing Base Version
+  ^{:line 35} [^{:val 16} GuestSVN (<< 1 4)] ; Guest Security Version Number
+  ^{:line 36} [^{:val 8} Measurement (<< 1 3)]
+  ^{:line 37} [^{:val 4} FamilyID (<< 1 2)]
+  ^{:line 38} [^{:val 2} ImageID (<< 1 1)]
+  ^{:line 39} [^{:val 1} GuestPolicy (<< 1 0)])
+
+
+
+
+
+(go/type KeyRequest "KeyRequest represents an AMD SEV-SNP Key Request Message\n(SEV Secure Nested Paging Firmware ABI Specification\nTable 19: MSG_KEY_REQ Message Structure).\n" (struct
+    ^{:line 46 :tag uint32} KeySelect
+    ^{:line 47 :tag uint32} _
+    ^{:line 48 :tag uint64} GuestFieldSelect
+    ^{:line 49 :tag uint32} VMPL
+    ^{:line 50 :tag uint32} GuestSVN
+    ^{:line 51 :tag uint64} TCBVersion
+    ^{:line 52 :tag uint64} LaunchMitVector
+    ^{:line 53 :tag (array 24 byte)} _))
+
+
+
+^{:go/end 61} (go/method Bytes "Bytes converts the descriptor structure to byte array format.\n" ^{:tag (slice byte)} [^{:tag (* KeyRequest)} r]
+  (let [buf (new bytes/Buffer)]
+    (binary/Write buf binary/LittleEndian r)
+    (.Bytes buf)))
+
+
+
+
+
+(go/type KeyResponse "KeyResponse represents an AMD SEV-SNP Key Request Response\n(SEV Secure Nested Paging Firmware ABI Specification\nTable 21: MSG_KEY_RSP Message Structure).\n" (struct
+    ^{:line 67 :tag uint32} Status
+    ^{:line 68 :tag (array 28 byte)} _
+    ^{:line 69 :tag (array 32 byte)} DerivedKey))
+
+
+^{:go/end 75} (go/method unmarshal [^{:tag (* KeyResponse)} r ^{:tag (slice byte)} buf] :results [^error err]
+  (set! (values _ err) (binary/Decode buf binary/LittleEndian r))
+  (return))
+
+
+
+
+
+^{:go/end 98} (go/method DeriveKey "DeriveKey sends an AMD SEV-SNP guest request for key derivation. The\narguments represent guest provided request parameters, the VM Communication\nKey (see [SecretsPage.VMPCK]) payload and index for encrypting the request.\n" [^{:tag (* GHCB)} b ^{:tag (* KeyRequest)} req ^{:tag (slice byte)} key ^int index] :results [^{:tag (slice byte)} dk ^error err]
+  (let [^{:tag (slice byte)} buf (zero (slice byte))
+
+      ^{:line 83} res (addr (lit KeyResponse))]
+
+    (when [(set! (values buf err) (.GuestRequest b index key (.Bytes req) MSG_KEY_REQ))] (!= err nil)
+      (return))
+
+
+    (when [(set! err (.unmarshal res buf))] (!= err nil)
+      (return nil (fmt/Errorf "could not parse response, %v" err)))
+
+
+    (when (!= (.-Status res) 0)
+      (return nil (fmt/Errorf "request error, %#x" (.-Status res))))
+
+
+    (return (subslice (.-DerivedKey res)) nil)))

@@ -1,0 +1,323 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements export filtering of an AST.
+
+(in-ns 'go.go.doc) (go/file "exports.go" :imports [
+
+
+    ^{:line 10} [ast "go/ast"]
+    ^{:line 11} [token "go/token"]])
+
+
+
+
+^{:go/end 25} (go/func filterIdentList "filterIdentList removes unexported names from list in place\nand returns the resulting list.\n" ^{:tag (slice (* ast/Ident))} [^{:tag (slice (* ast/Ident))} list]
+  (let [j 0]
+    (range [_ x list]
+      (when (token/IsExported (.-Name x))
+        (aset list j x)
+        (inc! j)))
+
+
+    (subslice list 0 j)))
+
+
+(go/var underscore (ast/NewIdent "_"))
+
+^{:go/end 35} (go/func filterCompositeLit [^{:tag (* ast/CompositeLit)} lit ^Filter filter ^bool export]
+  (let [n (len (.-Elts lit))]
+    (set! (.-Elts lit) (filterExprList (.-Elts lit) filter export))
+    (when (< (len (.-Elts lit)) n)
+      (set! (.-Incomplete lit) true))))
+
+
+
+^{:go/end 55} (go/func filterExprList ^{:tag (slice ast/Expr)} [^{:tag (slice ast/Expr)} list ^Filter filter ^bool export]
+  (let [j 0]
+    (range [_ exp list]
+      (type-switch [x exp]
+        (case [(* ast/CompositeLit)]
+          (filterCompositeLit x filter export))
+        (case [(* ast/KeyValueExpr)]
+          (when [(values x ok) (assert (* ast/Ident) (.-Key x))] (and ok (not (filter (.-Name x))))
+            (continue))
+
+          (when [(values x ok) (assert (* ast/CompositeLit) (.-Value x))] ok
+            (filterCompositeLit x filter export))))
+
+
+      (aset list j exp)
+      (inc! j))
+
+    (subslice list 0 j)))
+
+
+
+
+^{:go/end 68} (go/func updateIdentList "updateIdentList replaces all unexported identifiers with underscore\nand reports whether at least one exported name exists.\n" [^{:tag (slice (* ast/Ident))} list] :results [^bool hasExported]
+  (range [i x list]
+    (if (token/IsExported (.-Name x))
+      (set! hasExported true)
+
+      (aset list i underscore)))
+
+
+  ^{:line 67} hasExported)
+
+
+
+^{:go/breaks [[5 77]] :go/end 78} (go/func hasExportedName "hasExportedName reports whether list contains any exported names.\n" ^bool [^{:tag (slice (* ast/Ident))} list]
+  (range [_ x list]
+    (when (.IsExported x)
+      (return true)))
+
+
+  false)
+
+
+
+^{:go/end 101} (go/func removeAnonymousField "removeAnonymousField removes anonymous fields named name from an interface.\n" [^string name ^{:tag (* ast/InterfaceType)} ityp]
+  (let [list (.-List (.-Methods ityp)) ; we know that ityp.Methods != nil
+      ^{:line 83} j 0]
+    (range [_ field list]
+      (let [keepField true]
+        (when [n (len (.-Names field))] (== n 0)
+          ;; anonymous field
+          (when [(values fname _) (baseTypeName (.-Type field))] (== fname name)
+            (set! keepField false)))
+
+
+        (when keepField
+          (aset list j field)
+          (inc! j))))
+
+
+    (when (< j (len list))
+      (set! (.-Incomplete ityp) true))
+
+    (set! (.-List (.-Methods ityp)) (subslice list 0 j))))
+
+
+
+
+
+
+^{:go/end 156} (go/method filterFieldList "filterFieldList removes unexported fields (field names) from the field list\nin place and reports whether fields were removed. Anonymous fields are\nrecorded with the parent type. filterType is called with the types of\nall remaining fields.\n" [^{:tag (* reader)} r ^{:tag (* namedType)} parent ^{:tag (* ast/FieldList)} fields ^{:tag (* ast/InterfaceType)} ityp] :results [^bool removedFields]
+  (when (== fields nil)
+    (return))
+
+  (let [list (.-List fields)
+      ^{:line 112} j 0]
+    (range [_ field list]
+      (let [keepField false]
+        (if [n (len (.-Names field))] (== n 0)
+          ;; anonymous field or embedded type or union element
+          (let [fname (.recordAnonymousField r parent (.-Type field))]
+            (if (!= fname "")
+              (cond (token/IsExported fname)
+                (set! keepField true)
+                (and (!= ityp nil) (aget predeclaredTypes fname)) (do
+                  ;; possibly an embedded predeclared type; keep it for now but
+                  ;; remember this interface so that it can be fixed if name is also
+                  ;; defined locally
+                  (set! keepField true)
+                  (.remember r fname ityp)))
+
+
+              ;; If we're operating on an interface, assume that this is an embedded
+              ;; type or union element.
+              ;;
+              ;; TODO(rfindley): consider traversing into approximation/unions
+              ;; elements to see if they are entirely unexported.
+              (set! keepField (!= ityp nil))))
+
+          (do
+            (set! (.-Names field) (filterIdentList (.-Names field)))
+            (when (< (len (.-Names field)) n)
+              (set! removedFields true))
+
+            (when (> (len (.-Names field)) 0)
+              (set! keepField true))))
+
+
+        (when keepField
+          (.filterType r nil (.-Type field))
+          (aset list j field)
+          (inc! j))))
+
+
+    (when (< j (len list))
+      (set! removedFields true))
+
+    (set! (.-List fields) (subslice list 0 j))
+    (return)))
+
+
+
+^{:go/end 165} (go/method filterParamList "filterParamList applies filterType to each parameter type in fields.\n" [^{:tag (* reader)} r ^{:tag (* ast/FieldList)} fields]
+  (when (!= fields nil)
+    (range [_ f (.-List fields)]
+      (.filterType r nil (.-Type f)))))
+
+
+
+
+
+
+
+^{:go/end 207} (go/method filterType "filterType strips any unexported struct fields or method types from typ\nin place. If fields (or methods) have been removed, the corresponding\nstruct or interface type has the Incomplete field set to true.\n" [^{:tag (* reader)} r ^{:tag (* namedType)} parent ^ast/Expr typ]
+  (type-switch [t typ]
+    (case [(* ast/Ident)])
+    ;; nothing to do
+    (case [(* ast/ParenExpr)]
+      (.filterType r nil (.-X t)))
+    (case [(* ast/StarExpr)] ; possibly an embedded type literal
+      (.filterType r nil (.-X t)))
+    (case [(* ast/UnaryExpr)]
+      (when (== (.-Op t) token/TILDE) ; approximation element
+        (.filterType r nil (.-X t))))
+
+    (case [(* ast/BinaryExpr)]
+      (when (== (.-Op t) token/OR) ; union
+        (.filterType r nil (.-X t))
+        (.filterType r nil (.-Y t))))
+
+    (case [(* ast/ArrayType)]
+      (.filterType r nil (.-Elt t)))
+    (case [(* ast/StructType)]
+      (when (.filterFieldList r parent (.-Fields t) nil)
+        (set! (.-Incomplete t) true)))
+
+    (case [(* ast/FuncType)]
+      (.filterParamList r (.-TypeParams t))
+      (.filterParamList r (.-Params t))
+      (.filterParamList r (.-Results t)))
+    (case [(* ast/InterfaceType)]
+      (when (.filterFieldList r parent (.-Methods t) t)
+        (set! (.-Incomplete t) true)))
+
+    (case [(* ast/MapType)]
+      (.filterType r nil (.-Key t))
+      (.filterType r nil (.-Value t)))
+    (case [(* ast/ChanType)]
+      (.filterType r nil (.-Value t)))))
+
+
+
+^{:go/breaks [[4 247]] :go/end 248} (go/method filterSpec ^bool [^{:tag (* reader)} r ^ast/Spec spec]
+  (type-switch [s spec]
+    (case [(* ast/ImportSpec)]
+      ;; always keep imports so we can collect them
+      (return true))
+    (case [(* ast/ValueSpec)]
+      (set! (.-Values s) (filterExprList (.-Values s) token/IsExported true))
+      (if (or (> (len (.-Values s)) 0) (and (== (.-Type s) nil) (== (len (.-Values s)) 0)))
+        ;; If there are values declared on RHS, just replace the unexported
+        ;; identifiers on the LHS with underscore, so that it matches
+        ;; the sequence of expression on the RHS.
+        ;;
+        ;; Similarly, if there are no type and values, then this expression
+        ;; must be following an iota expression, where order matters.
+        (when (updateIdentList (.-Names s))
+          (.filterType r nil (.-Type s))
+          (return true))
+
+        (do
+          (set! (.-Names s) (filterIdentList (.-Names s)))
+          (when (> (len (.-Names s)) 0)
+            (.filterType r nil (.-Type s))
+            (return true)))))
+
+
+    (case [(* ast/TypeSpec)]
+      ;; Don't filter type parameters here, by analogy with function parameters
+      ;; which are not filtered for top-level function declarations.
+      (if [name (.-Name (.-Name s))] (token/IsExported name) (do
+          (.filterType r (.lookupType r (.-Name (.-Name s))) (.-Type s))
+          (return true))
+        (when (IsPredeclared name)
+          (when (== (.-shadowedPredecl r) nil)
+            (set! (.-shadowedPredecl r) (make (map string bool))))
+
+          (aset (.-shadowedPredecl r) name true)))))
+
+
+  false)
+
+
+
+
+
+^{:go/breaks [[5 266]] :go/end 267} (go/func copyConstType "copyConstType returns a copy of typ with position pos.\ntyp must be a valid constant type.\nIn practice, only (possibly qualified) identifiers are possible.\n" ^ast/Expr [^ast/Expr typ ^token/Pos pos]
+  (type-switch [typ typ]
+    (case [(* ast/Ident)]
+      (return (addr (lit ast/Ident :Name (.-Name typ) :NamePos pos))))
+    (case [(* ast/SelectorExpr)]
+      (when [(values id ok) (assert (* ast/Ident) (.-X typ))] ok
+        ;; presumably a qualified identifier
+        (return (addr ^{:go/breaks [2 4]} (lit ast/SelectorExpr
+              :Sel (ast/NewIdent (.-Name (.-Sel typ)))
+              :X (addr (lit ast/Ident :Name (.-Name id) :NamePos pos))))))))
+
+
+
+  nil) ; shouldn't happen, but be conservative and don't panic
+
+
+^{:go/end 297} (go/method filterSpecList ^{:tag (slice ast/Spec)} [^{:tag (* reader)} r ^{:tag (slice ast/Spec)} list ^token/Token tok]
+  (when (== tok token/CONST)
+    ;; Propagate any type information that would get lost otherwise
+    ;; when unexported constants are filtered.
+    (let [^ast/Expr prevType (zero ast/Expr)]
+      (range [_ spec list]
+        (let [spec (assert (* ast/ValueSpec) spec)]
+          (when (and (== (.-Type spec) nil) (== (len (.-Values spec)) 0) (!= prevType nil))
+            ;; provide current spec with an explicit type
+            (set! (.-Type spec) (copyConstType prevType (.Pos spec))))
+
+          (if (hasExportedName (.-Names spec))
+            ;; exported names are preserved so there's no need to propagate the type
+            (set! prevType nil)
+
+            (set! prevType (.-Type spec)))))))
+
+
+
+
+  (let [j 0]
+    (range [_ s list]
+      (when (.filterSpec r s)
+        (aset list j s)
+        (inc! j)))
+
+
+    (subslice list 0 j)))
+
+
+^{:go/breaks [[4 311]] :go/end 312} (go/method filterDecl ^bool [^{:tag (* reader)} r ^ast/Decl decl]
+  (type-switch [d decl]
+    (case [(* ast/GenDecl)]
+      (set! (.-Specs d) (.filterSpecList r (.-Specs d) (.-Tok d)))
+      (return (> (len (.-Specs d)) 0)))
+    (case [(* ast/FuncDecl)]
+      ;; ok to filter these methods early because any
+      ;; conflicting method will be filtered here, too -
+      ;; thus, removing these methods early will not lead
+      ;; to the false removal of possible conflicts
+      (return (token/IsExported (.-Name (.-Name d))))))
+
+  false)
+
+
+
+^{:go/end 324} (go/method fileExports "fileExports removes unexported declarations from src in place.\n" [^{:tag (* reader)} r ^{:tag (* ast/File)} src]
+  (let [j 0]
+    (range [_ d (.-Decls src)]
+      (when (.filterDecl r d)
+        (aset (.-Decls src) j d)
+        (inc! j)))
+
+
+    (set! (.-Decls src) (subslice (.-Decls src) 0 j))))

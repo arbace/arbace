@@ -1,0 +1,1246 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.bigmod) (go/file "nat.go" :imports [
+
+
+    ^{:line 8} [_ "crypto/internal/fips140/check"]
+    ^{:line 9} [byteorder "crypto/internal/fips140deps/byteorder"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [bits "math/bits"]])
+
+
+(go/const
+
+  ^{:line 16} [^{:val 64 :doc "_W is the size in bits of our limbs.\n"} _W bits/UintSize]
+
+  ^{:line 18} [^{:val 8 :doc "_S is the size in bytes of our limbs.\n"} _S (/ _W 8)])
+
+
+;; Note: These functions make many loops over all the words in a Nat.
+;; These loops used to be in assembly, invisible to -race, -asan, and -msan,
+;; but now they are in Go and incur significant overhead in those modes.
+;; To bring the old performance back, we mark all functions that loop
+;; over Nat words with //go:norace. Because //go:norace does not
+;; propagate across inlining, we must also mark functions that inline
+;; //go:norace functions - specifically, those that inline add, addMulVVW,
+;; assign, cmpGeq, rshift1, and sub.
+
+
+
+
+(go/type choice "choice represents a constant-time boolean. The value of choice is always\neither 1 or 0. We use an int instead of bool in order to make decisions in\nconstant time by turning it into a mask.\n" uint)
+
+^{:go/end 35} (go/func not ^choice [^choice c] (bit-xor 1 c))
+
+(go/const ^{:val 1} yes (conv choice 1))
+(go/const ^{:val 0} no (conv choice 0))
+
+
+^{:go/end 41} (go/func ctMask "ctMask is all 1s if on is yes, and all 0s otherwise.\n" ^uint [^choice on] (- (conv uint on)))
+
+
+
+^{:go/end 50} (go/func ctEq "ctEq returns 1 if x == y, and 0 otherwise. The execution time of this\nfunction does not depend on its inputs.\n" ^choice [^uint x ^uint y]
+  ;; If x != y, then either x - y or y - x will generate a carry.
+  (let [(values _ c1) (bits/Sub x y 0)
+      (values _ c2) (bits/Sub y x 0)]
+    (go/call not (conv choice (bit-or c1 c2)))))
+
+
+
+
+
+
+
+(go/type Nat "Nat represents an arbitrary natural number\n\nEach Nat has an announced length, which is the number of limbs it has stored.\nOperations on this number are allowed to leak this length, but will not leak\nany information about the values contained in those limbs.\n" (struct
+
+    ^{:line 59 :tag (slice uint) :doc "limbs is little-endian in base 2^W with W = bits.UintSize.\n"} limbs))
+
+
+
+
+
+(go/const ^{:val 2048 :doc "preallocTarget is the size in bits of the numbers used to implement the most\ncommon and most performant RSA key size. It's also enough to cover some of\nthe operations of key sizes up to 4096.\n"} preallocTarget 2048)
+(go/const ^{:val 32} preallocLimbs (/ (- (+ preallocTarget _W) 1) _W))
+
+
+
+
+^{:go/end 74} (go/func NewNat "NewNat returns a new nat with a size of zero, just like new(Nat), but with\nthe preallocated capacity to hold a number of up to preallocTarget bits.\nNewNat inlines, so the allocation can live on the stack.\n" ^{:tag (* Nat)} []
+  (let [limbs (make (slice uint) 0 preallocLimbs)]
+    (addr (lit Nat limbs))))
+
+
+
+^{:go/end 91} (go/method expand "expand expands x to n limbs, leaving its value unchanged.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^int n]
+  (when (> (len (.-limbs x)) n)
+    (panic "bigmod: internal error: shrinking nat"))
+
+  (when (< (cap (.-limbs x)) n)
+    (let [newLimbs (make (slice uint) n)]
+      (copy newLimbs (.-limbs x))
+      (set! (.-limbs x) newLimbs)
+      (return x)))
+
+  (let [extraLimbs (subslice (.-limbs x) (len (.-limbs x)) n)]
+    (clear extraLimbs)
+    (set! (.-limbs x) (subslice (.-limbs x) _ n))
+    ^{:line 90} x))
+
+
+
+^{:go/end 103} (go/method reset "reset returns a zero nat of n limbs, reusing x's storage if n <= cap(x.limbs).\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^int n]
+  (when (< (cap (.-limbs x)) n)
+    (set! (.-limbs x) (make (slice uint) n))
+    (return x))
+
+  ;; Clear both the returned limbs and the previously used ones.
+  (clear (subslice (.-limbs x) _ (max n (len (.-limbs x)))))
+  (set! (.-limbs x) (subslice (.-limbs x) _ n))
+  ^{:line 102} x)
+
+
+
+
+
+
+
+^{:go/end 116} (go/method resetToBytes "resetToBytes assigns x = b, where b is a slice of big-endian bytes, resizing\nn to the appropriate size.\n\nThe announced length of x is set based on the actual bit size of the input,\nignoring leading zeroes.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^{:tag (slice byte)} b]
+  (.reset x (/ (- (+ (len b) _S) 1) _S))
+  (when [err (.setBytes x b)] (!= err nil)
+    (panic "bigmod: internal error: bad arithmetic"))
+
+  (.trim x))
+
+
+
+^{:go/end 129} (go/method trim "trim reduces the size of x to match its value.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x]
+  ;; Trim most significant (trailing in little-endian) zero limbs.
+  ;; We assume comparison with zero (but not the branch) is constant time.
+  (for [i (- (len (.-limbs x)) 1)] (>= i 0) (dec! i)
+    (when (!= (aget (.-limbs x) i) 0)
+      (break))
+
+    (set! (.-limbs x) (subslice (.-limbs x) _ i)))
+
+  ^{:line 128} x)
+
+
+
+^{:go/end 136} (go/method set "set assigns x = y, optionally resizing x to the appropriate size.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^{:tag (* Nat)} y]
+  (.reset x (len (.-limbs y)))
+  (copy (.-limbs x) (.-limbs y))
+  ^{:line 135} x)
+
+
+
+
+
+^{:go/end 143} (go/method Bits "Bits returns x as a little-endian slice of uint. The length of the slice\nmatches the announced length of x. The result and x share the same underlying\narray.\n" ^{:tag (slice uint)} [^{:tag (* Nat)} x]
+  (.-limbs x))
+
+
+
+
+^{:go/end 151} (go/method SetBits "SetBits assigns x = y, where y is a slice of little-endian uint. x is resized\nto the length of y.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^{:tag (slice uint)} y]
+  (.reset x (len y))
+  (copy (.-limbs x) y)
+  ^{:line 150} x)
+
+
+
+
+
+
+^{:go/end 174} (go/method Bytes "Bytes returns x as a zero-extended big-endian byte slice. The size of the\nslice will match the size of m.\n\nx must have the same size as m and it must be less than or equal to m.\n" ^{:tag (slice byte)} [^{:tag (* Nat)} x ^{:tag (* Modulus)} m]
+  (let [i (.Size m)
+      ^{:line 159} bytes (make (slice byte) i)]
+    (range [_ limb (.-limbs x)]
+      (for [j 0] (< j _S) (inc! j)
+        (dec! i)
+        (when (< i 0)
+          (when (== limb 0)
+            (break))
+
+          (panic "bigmod: modulus is smaller than nat"))
+
+        (aset bytes i (conv byte limb))
+        (set! limb >> 8)))
+
+
+    ^{:line 173} bytes))
+
+
+
+
+
+
+
+
+^{:go/end 191} (go/method ^:go/norace SetBytes "SetBytes assigns x = b, where b is a slice of big-endian bytes.\nSetBytes returns an error if b >= m.\n\nThe output will be resized to the size of m and overwritten.\n" [^{:tag (* Nat)} x ^{:tag (slice byte)} b ^{:tag (* Modulus)} m] :results [(* Nat) error]
+  (.resetFor x m)
+  (when [err (.setBytes x b)] (!= err nil)
+    (return nil err))
+
+  (when (== (.cmpGeq x (.-nat m)) yes)
+    (return nil (errors/New "input overflows the modulus")))
+
+  (return x nil))
+
+
+
+
+
+
+
+^{:go/end 211} (go/method SetOverflowingBytes "SetOverflowingBytes assigns x = b, where b is a slice of big-endian bytes.\nSetOverflowingBytes returns an error if b has a longer bit length than m, but\nreduces overflowing values up to 2^⌈log2(m)⌉ - 1.\n\nThe output will be resized to the size of m and overwritten.\n" [^{:tag (* Nat)} x ^{:tag (slice byte)} b ^{:tag (* Modulus)} m] :results [(* Nat) error]
+  (.resetFor x m)
+  (when [err (.setBytes x b)] (!= err nil)
+    (return nil err))
+
+  ;; setBytes would have returned an error if the input overflowed the limb
+  ;; size of the modulus, so now we only need to check if the most significant
+  ;; limb of x has more bits than the most significant limb of the modulus.
+  (when (> (bitLen (aget (.-limbs x) (- (len (.-limbs x)) 1))) (bitLen (aget (.-limbs (.-nat m)) (- (len (.-limbs (.-nat m))) 1))))
+    (return nil (errors/New "input overflows the modulus size")))
+
+  (.maybeSubtractModulus x no m)
+  (return x nil))
+
+
+
+
+^{:go/end 220} (go/func bigEndianUint "bigEndianUint returns the contents of buf interpreted as a\nbig-endian encoded uint value.\n" ^uint [^{:tag (slice byte)} buf]
+  (when (== _W 64)
+    (return (conv uint (byteorder/BEUint64 buf))))
+
+  (conv uint (byteorder/BEUint32 buf)))
+
+
+^{:go/end 237} (go/method setBytes ^error [^{:tag (* Nat)} x ^{:tag (slice byte)} b]
+  ^{:go/breaks [[5 236]]} (let [(values i k) (values (len b) 0)]
+    (while (and (< k (len (.-limbs x))) (>= i _S))
+      (aset (.-limbs x) k (bigEndianUint (subslice b (- i _S) i)))
+      (set! i - _S)
+      (inc! k))
+
+    (for [s 0] (and (< s _W) (< k (len (.-limbs x))) (> i 0)) (set! s + 8)
+      (set! (aget (.-limbs x) k) bit-or (<< (conv uint (aget b (- i 1))) s))
+      (dec! i))
+
+    (when (> i 0)
+      (return (errors/New "input overflows the modulus size")))
+
+    nil))
+
+
+
+
+
+^{:go/end 246} (go/method SetUint "SetUint assigns x = y.\n\nThe output will be resized to a single limb and overwritten.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^uint y]
+  (.reset x 1)
+  (aset (.-limbs x) 0 y)
+  ^{:line 245} x)
+
+
+
+
+
+
+
+^{:go/end 264} (go/method ^:go/norace Equal "Equal returns 1 if x == y, and 0 otherwise.\n\nBoth operands must have the same announced length.\n" ^choice [^{:tag (* Nat)} x ^{:tag (* Nat)} y]
+  ;; Eliminate bounds checks in the loop.
+  (let [size (len (.-limbs x))
+      ^{:line 256} xLimbs (subslice (.-limbs x) _ size)
+      ^{:line 257} yLimbs (subslice (.-limbs y) _ size)
+
+      ^{:line 259} equal yes]
+    (for [i 0] (< i size) (inc! i)
+      (set! equal bit-and (ctEq (aget xLimbs i) (aget yLimbs i))))
+
+    ^{:line 263} equal))
+
+
+
+
+
+^{:go/end 279} (go/method ^:go/norace IsZero "IsZero returns 1 if x == 0, and 0 otherwise.\n" ^choice [^{:tag (* Nat)} x]
+  ;; Eliminate bounds checks in the loop.
+  (let [size (len (.-limbs x))
+      ^{:line 272} xLimbs (subslice (.-limbs x) _ size)
+
+      ^{:line 274} zero yes]
+    (for [i 0] (< i size) (inc! i)
+      (set! zero bit-and (ctEq (aget xLimbs i) 0)))
+
+    ^{:line 278} zero))
+
+
+
+
+
+^{:go/end 298} (go/method ^:go/norace IsOne "IsOne returns 1 if x == 1, and 0 otherwise.\n" ^choice [^{:tag (* Nat)} x]
+  ;; Eliminate bounds checks in the loop.
+  (let [size (len (.-limbs x))
+      ^{:line 287} xLimbs (subslice (.-limbs x) _ size)]
+
+    (when (== (len xLimbs) 0)
+      (return no))
+
+
+    (let [one (ctEq (aget xLimbs 0) 1)]
+      (for [i 1] (< i size) (inc! i)
+        (set! one bit-and (ctEq (aget xLimbs i) 0)))
+
+      ^{:line 297} one)))
+
+
+
+
+
+
+
+
+^{:go/end 310} (go/method ^:go/norace IsMinusOne "IsMinusOne returns 1 if x == -1 mod m, and 0 otherwise.\n\nThe length of x must be the same as the modulus. x must already be reduced\nmodulo m.\n" ^choice [^{:tag (* Nat)} x ^{:tag (* Modulus)} m]
+  (let [minusOne (.Nat m)]
+    (.SubOne minusOne m)
+    (.Equal x minusOne)))
+
+
+
+^{:go/end 318} (go/method IsOdd "IsOdd returns 1 if x is odd, and 0 otherwise.\n" ^choice [^{:tag (* Nat)} x]
+  (when (== (len (.-limbs x)) 0)
+    (return no))
+
+  (conv choice (bit-and (aget (.-limbs x) 0) 1)))
+
+
+
+^{:go/end 333} (go/method TrailingZeroBitsVarTime "TrailingZeroBitsVarTime returns the number of trailing zero bits in x.\n" ^uint [^{:tag (* Nat)} x]
+  (let [^uint t (zero uint)
+      ^{:line 323} limbs (.-limbs x)]
+    (range [_ l limbs]
+      (when (== l 0)
+        (set! t + _W)
+        (continue))
+
+      (set! t + (conv uint (bits/TrailingZeros l)))
+      (break))
+
+    ^{:line 332} t))
+
+
+
+
+
+
+
+^{:go/end 353} (go/method ^:go/norace cmpGeq "cmpGeq returns 1 if x >= y, and 0 otherwise.\n\nBoth operands must have the same announced length.\n" ^choice [^{:tag (* Nat)} x ^{:tag (* Nat)} y]
+  ;; Eliminate bounds checks in the loop.
+  (let [size (len (.-limbs x))
+      ^{:line 343} xLimbs (subslice (.-limbs x) _ size)
+      ^{:line 344} yLimbs (subslice (.-limbs y) _ size)
+
+      ^{:line 346 :tag uint} c (zero uint)]
+    (for [i 0] (< i size) (inc! i)
+      (set! (values _ c) (bits/Sub (aget xLimbs i) (aget yLimbs i) c)))
+
+    ;; If there was a carry, then subtracting y underflowed, so
+    ;; x is not greater than or equal to y.
+    (go/call not (conv choice c))))
+
+
+
+
+
+
+
+^{:go/end 371} (go/method ^:go/norace assign "assign sets x <- y if on == 1, and does nothing otherwise.\n\nBoth operands must have the same announced length.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^choice on ^{:tag (* Nat)} y]
+  ;; Eliminate bounds checks in the loop.
+  (let [size (len (.-limbs x))
+      ^{:line 363} xLimbs (subslice (.-limbs x) _ size)
+      ^{:line 364} yLimbs (subslice (.-limbs y) _ size)
+
+      ^{:line 366} mask (ctMask on)]
+    (for [i 0] (< i size) (inc! i)
+      (set! (aget xLimbs i) bit-xor (bit-and mask (bit-xor (aget xLimbs i) (aget yLimbs i)))))
+
+    ^{:line 370} x))
+
+
+
+
+
+
+
+^{:go/end 388} (go/method ^:go/norace add "add computes x += y and returns the carry.\n\nBoth operands must have the same announced length.\n" [^{:tag (* Nat)} x ^{:tag (* Nat)} y] :results [^uint c]
+  ;; Eliminate bounds checks in the loop.
+  (let [size (len (.-limbs x))
+      ^{:line 381} xLimbs (subslice (.-limbs x) _ size)
+      ^{:line 382} yLimbs (subslice (.-limbs y) _ size)]
+
+    (for [i 0] (< i size) (inc! i)
+      (set! (values (aget xLimbs i) c) (bits/Add (aget xLimbs i) (aget yLimbs i) c)))
+
+    (return)))
+
+
+
+
+
+
+
+^{:go/end 405} (go/method ^:go/norace sub "sub computes x -= y. It returns the borrow of the subtraction.\n\nBoth operands must have the same announced length.\n" [^{:tag (* Nat)} x ^{:tag (* Nat)} y] :results [^uint c]
+  ;; Eliminate bounds checks in the loop.
+  (let [size (len (.-limbs x))
+      ^{:line 398} xLimbs (subslice (.-limbs x) _ size)
+      ^{:line 399} yLimbs (subslice (.-limbs y) _ size)]
+
+    (for [i 0] (< i size) (inc! i)
+      (set! (values (aget xLimbs i) c) (bits/Sub (aget xLimbs i) (aget yLimbs i) c)))
+
+    (return)))
+
+
+
+
+
+
+
+^{:go/end 438} (go/method ^:go/norace ShiftRightVarTime "ShiftRightVarTime sets x = x >> n.\n\nThe announced length of x is unchanged.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^uint n]
+  ;; Eliminate bounds checks in the loop.
+  (let [size (len (.-limbs x))
+      ^{:line 415} xLimbs (subslice (.-limbs x) _ size)
+
+      ^{:line 417} shift (conv int (% n _W))
+      ^{:line 418} shiftLimbs (conv int (/ n _W))
+
+      ^{:line 420 :tag (slice uint)} shiftedLimbs (zero (slice uint))]
+    (when (< shiftLimbs size)
+      (set! shiftedLimbs (subslice xLimbs shiftLimbs)))
+
+
+    (range [i xLimbs]
+      (when (>= i (len shiftedLimbs))
+        (aset xLimbs i 0)
+        (continue))
+
+
+      (aset xLimbs i (>> (aget shiftedLimbs i) shift))
+      (when (< (+ i 1) (len shiftedLimbs))
+        (set! (aget xLimbs i) bit-or (<< (aget shiftedLimbs (+ i 1)) (- _W shift)))))
+
+
+
+    ^{:line 437} x))
+
+
+
+
+
+
+^{:go/end 455} (go/method BitLenVarTime "BitLenVarTime returns the actual size of x in bits.\n\nThe actual size of x (but nothing more) leaks through timing side-channels.\nNote that this is ordinarily secret, as opposed to the announced size of x.\n" ^int [^{:tag (* Nat)} x]
+  ;; Eliminate bounds checks in the loop.
+  ^{:go/breaks [[3 454]]} (let [size (len (.-limbs x))
+      ^{:line 447} xLimbs (subslice (.-limbs x) _ size)]
+
+    (for [i (- size 1)] (>= i 0) (dec! i)
+      (when (!= (aget xLimbs i) 0)
+        (return (+ (* i _W) (bitLen (aget xLimbs i))))))
+
+
+    0))
+
+
+
+
+
+^{:go/end 469} (go/func bitLen "bitLen is a version of bits.Len that only leaks the bit length of n, but not\nits value. bits.Len and bits.LeadingZeros use a lookup table for the\nlow-order bits on some architectures.\n" ^int [^uint n]
+  (let [len 0]
+    ;; We assume, here and elsewhere, that comparison to zero is constant time
+    ;; with respect to different non-zero values.
+    (while (!= n 0)
+      (inc! len)
+      (set! n >> 1))
+
+    ^{:line 468} len))
+
+
+
+
+
+
+(go/type Modulus "Modulus is used for modular arithmetic, precomputing relevant constants.\n\nA Modulus can leak the exact number of bits needed to store its value\nand is stored without padding. Its actual value is still kept secret.\n" (struct
+
+
+
+
+    ^{:line 480 :tag (* Nat) :doc "The underlying natural number for this modulus.\n\nThis will be stored without any padding, and shouldn't alias with any\nother natural number being used.\n"} nat
+
+
+    ^{:line 483 :tag bool :doc "If m is even, the following fields are not set.\n"} odd
+    ^{:line 484 :tag uint} m0inv ; -nat.limbs[0]⁻¹ mod _W
+    ^{:line 485 :tag (* Nat)} rr)) ; R*R for montgomeryRepresentation
+
+
+
+^{:go/end 534} (go/func rr "rr returns R*R with R = 2^(_W * n) and n = len(m.nat.limbs).\n" ^{:tag (* Nat)} [^{:tag (* Modulus)} m]
+  (let [rr (.ExpandFor (NewNat) m)
+      ^{:line 491} n (conv uint (len (.-limbs rr)))
+      ^{:line 492} mLen (conv uint (.BitLen m))
+      ^{:line 493} logR (* _W n)]
+
+    ;; We start by computing R = 2^(_W * n) mod m. We can get pretty close, to
+    ;; 2^⌊log₂m⌋, by setting the highest bit we can without having to reduce.
+    (aset (.-limbs rr) (- n 1) ^uint (<< 1 (% (- mLen 1) _W)))
+    ;; Then we double until we reach 2^(_W * n).
+    (for [i (- mLen 1)] (< i logR) (inc! i)
+      (.Add rr rr m))
+
+
+    ;; Next we need to get from R to 2^(_W * n) R mod m (aka from one to R in
+    ;; the Montgomery domain, meaning we can use Montgomery multiplication now).
+    ;; We could do that by doubling _W * n times, or with a square-and-double
+    ;; chain log2(_W * n) long. Turns out the fastest thing is to start out with
+    ;; doublings, and switch to square-and-double once the exponent is large
+    ;; enough to justify the cost of the multiplications.
+
+    ;; The threshold is selected experimentally as a linear function of n.
+    (let [threshold (/ n 4)
+
+        ;; We calculate how many of the most-significant bits of the exponent we can
+        ;; compute before crossing the threshold, and we do it with doublings.
+        ^{:line 515} i bits/UintSize]
+      (while (<= (>> logR i) threshold)
+        (dec! i))
+
+      (for [k (conv uint 0)] (< k (>> logR i)) (inc! k)
+        (.Add rr rr m))
+
+
+      ;; Then we process the remaining bits of the exponent with a
+      ;; square-and-double chain.
+      (while (> i 0)
+        (.montgomeryMul rr rr rr m)
+        (dec! i)
+        (when (!= (bit-and (>> logR i) 1) 0)
+          (.Add rr rr m)))
+
+
+
+      ^{:line 533} rr)))
+
+
+
+
+
+
+^{:go/end 552} (go/func minusInverseModW "minusInverseModW computes -x⁻¹ mod _W with x odd.\n\nThis operation is used to precompute a constant involved in Montgomery\nmultiplication.\n" ^uint [^uint x]
+  ;; Every iteration of this loop doubles the least-significant bits of
+  ;; correct inverse in y. The first three bits are already correct (1⁻¹ = 1,
+  ;; 3⁻¹ = 3, 5⁻¹ = 5, and 7⁻¹ = 7 mod 8), so doubling five times is enough
+  ;; for 64 bits (and wastes only one iteration for 32 bits).
+  ;;
+  ;; See https://crypto.stackexchange.com/a/47496.
+  (let [y x]
+    (for [i 0] (< i 5) (inc! i)
+      (set! y (* y (- 2 (* x y)))))
+
+    (- y)))
+
+
+
+
+
+
+
+^{:go/end 562} (go/func NewModulus "NewModulus creates a new Modulus from a slice of big-endian bytes. The\nmodulus must be greater than one.\n\nThe number of significant bits and whether the modulus is even is leaked\nthrough timing side-channels.\n" [^{:tag (slice byte)} b] :results [(* Modulus) error]
+  (let [n (.resetToBytes (NewNat) b)]
+    (newModulus n)))
+
+
+
+
+
+
+^{:go/end 576} (go/func ^:go/norace NewModulusProduct "NewModulusProduct creates a new Modulus from the product of two numbers\nrepresented as big-endian byte slices. The result must be greater than one.\n" [^{:tag (slice byte)} a ^{:tag (slice byte)} b] :results [(* Modulus) error]
+  (let [x (.resetToBytes (NewNat) a)
+      ^{:line 570} y (.resetToBytes (NewNat) b)
+      ^{:line 571} n (.reset (NewNat) (+ (len (.-limbs x)) (len (.-limbs y))))]
+    (range [i (.-limbs y)]
+      (aset (.-limbs n) (+ i (len (.-limbs x))) (addMulVVW (subslice (.-limbs n) i (+ i (len (.-limbs x)))) (.-limbs x) (aget (.-limbs y) i))))
+
+    (newModulus (.trim n))))
+
+
+^{:go/end 589} (go/func newModulus [^{:tag (* Nat)} n] :results [(* Modulus) error]
+  (let [m (addr (lit Modulus :nat n))]
+    (when (or (== (.IsZero (.-nat m)) yes) (== (.IsOne (.-nat m)) yes))
+      (return nil (errors/New "modulus must be > 1")))
+
+    (when (== (.IsOdd (.-nat m)) 1)
+      (set! (.-odd m) true)
+      (set! (.-m0inv m) (minusInverseModW (aget (.-limbs (.-nat m)) 0)))
+      (set! (.-rr m) (rr m)))
+
+    (return m nil)))
+
+
+
+^{:go/end 594} (go/method Size "Size returns the size of m in bytes.\n" ^int [^{:tag (* Modulus)} m]
+  (/ (+ (.BitLen m) 7) 8))
+
+
+
+^{:go/end 599} (go/method BitLen "BitLen returns the size of m in bits.\n" ^int [^{:tag (* Modulus)} m]
+  (.BitLenVarTime (.-nat m)))
+
+
+
+^{:go/end 608} (go/method Nat "Nat returns m as a Nat.\n" ^{:tag (* Nat)} [^{:tag (* Modulus)} m]
+  ;; Make a copy so that the caller can't modify m.nat or alias it with
+  ;; another Nat in a modulus operation.
+  (let [n (NewNat)]
+    (.set n (.-nat m))
+    ^{:line 607} n))
+
+
+
+
+
+
+
+^{:go/end 647} (go/method ^:go/norace shiftIn "shiftIn calculates x = x << _W + y mod m.\n\nThis assumes that x is already reduced mod m.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^uint y ^{:tag (* Modulus)} m]
+  (let [d (.resetFor (NewNat) m)
+
+      ;; Eliminate bounds checks in the loop.
+      ^{:line 619} size (len (.-limbs (.-nat m)))
+      ^{:line 620} xLimbs (subslice (.-limbs x) _ size)
+      ^{:line 621} dLimbs (subslice (.-limbs d) _ size)
+      ^{:line 622} mLimbs (subslice (.-limbs (.-nat m)) _ size)
+
+      ;; Each iteration of this loop computes x = 2x + b mod m, where b is a bit
+      ;; from y. Effectively, it left-shifts x and adds y one bit at a time,
+      ;; reducing it every time.
+      ;;
+      ;; To do the reduction, each iteration computes both 2x + b and 2x + b - m.
+      ;; The next iteration (and finally the return line) will use either result
+      ;; based on whether 2x + b overflows m.
+      ^{:line 631} needSubtraction no]
+    (for [i (- _W 1)] (>= i 0) (dec! i)
+      (let [carry (bit-and (>> y i) 1)
+          ^{:line 634 :tag uint} borrow (zero uint)
+          ^{:line 635} mask (ctMask needSubtraction)]
+        (for [i 0] (< i size) (inc! i)
+          (let [l (bit-xor (aget xLimbs i) (bit-and mask (bit-xor (aget xLimbs i) (aget dLimbs i))))]
+            (set! (values (aget xLimbs i) carry) (bits/Add l l carry))
+            (set! (values (aget dLimbs i) borrow) (bits/Sub (aget xLimbs i) (aget mLimbs i) borrow))))
+
+        ;; Like in maybeSubtractModulus, we need the subtraction if either it
+        ;; didn't underflow (meaning 2x + b > m) or if computing 2x + b
+        ;; overflowed (meaning 2x + b > 2^_W*n > m).
+        (set! needSubtraction (bit-or (go/call not (conv choice borrow)) (conv choice carry)))))
+
+    (.assign x needSubtraction d)))
+
+
+
+
+
+
+
+
+
+^{:go/end 680} (go/method ^:go/norace Mod "Mod calculates out = x mod m.\n\nThis works regardless how large the value of x is.\n\nThe output will be resized to the size of m and overwritten.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} out ^{:tag (* Nat)} x ^{:tag (* Modulus)} m]
+  (.resetFor out m)
+  ;; Working our way from the most significant to the least significant limb,
+  ;; we can insert each limb at the least significant position, shifting all
+  ;; previous limbs left by _W. This way each limb will get shifted by the
+  ;; correct number of bits. We can insert at least N - 1 limbs without
+  ;; overflowing m. After that, we need to reduce every time we shift.
+  (let [i (- (len (.-limbs x)) 1)
+      ;; For the first N - 1 limbs we can skip the actual shifting and position
+      ;; them at the shifted position, which starts at min(N - 2, i).
+      ^{:line 666} start (- (len (.-limbs (.-nat m))) 2)]
+    (when (< i start)
+      (set! start i))
+
+    (for [j start] (>= j 0) (dec! j)
+      (aset (.-limbs out) j (aget (.-limbs x) i))
+      (dec! i))
+
+    ;; We shift in the remaining limbs, reducing modulo m each time.
+    (while (>= i 0)
+      (.shiftIn out (aget (.-limbs x) i) m)
+      (dec! i))
+
+    ^{:line 679} out))
+
+
+
+
+
+^{:go/end 687} (go/method ExpandFor "ExpandFor ensures x has the right size to work with operations modulo m.\n\nThe announced size of x must be smaller than or equal to that of m.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^{:tag (* Modulus)} m]
+  (.expand x (len (.-limbs (.-nat m)))))
+
+
+
+
+
+^{:go/end 694} (go/method resetFor "resetFor ensures out has the right size to work with operations modulo m.\n\nout is zeroed and may start at any size.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} out ^{:tag (* Modulus)} m]
+  (.reset out (len (.-limbs (.-nat m)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 714} (go/method ^:go/norace maybeSubtractModulus "maybeSubtractModulus computes x -= m if and only if x >= m or if \"always\" is yes.\n\nIt can be used to reduce modulo m a value up to 2m - 1, which is a common\nrange for results computed by higher level operations.\n\nalways is usually a carry that indicates that the operation that produced x\noverflowed its size, meaning abstractly x > 2^_W*n > m even if x < m.\n\nx and m operands must have the same announced length.\n" [^{:tag (* Nat)} x ^choice always ^{:tag (* Modulus)} m]
+  (let [t (.set (NewNat) x)
+      ^{:line 709} underflow (.sub t (.-nat m))
+      ;; We keep the result if x - m didn't underflow (meaning x >= m)
+      ;; or if always was set.
+      ^{:line 712} keep (bit-or (go/call not (conv choice underflow)) (conv choice always))]
+    (.assign x keep t)))
+
+
+
+
+
+
+
+
+^{:go/end 729} (go/method ^:go/norace Sub "Sub computes x = x - y mod m.\n\nThe length of both operands must be the same as the modulus. Both operands\nmust already be reduced modulo m.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^{:tag (* Nat)} y ^{:tag (* Modulus)} m]
+  (let [underflow (.sub x y)
+      ;; If the subtraction underflowed, add m.
+      ^{:line 725} t (.set (NewNat) x)]
+    (.add t (.-nat m))
+    (.assign x (conv choice underflow) t)
+    ^{:line 728} x))
+
+
+
+
+
+^{:go/end 740} (go/method SubOne "SubOne computes x = x - 1 mod m.\n\nThe length of x must be the same as the modulus.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^{:tag (* Modulus)} m]
+  (let [one (.ExpandFor (NewNat) m)]
+    (aset (.-limbs one) 0 1)
+    ;; Sub asks for x to be reduced modulo m, while SubOne doesn't, but when
+    ;; y = 1, it works, and this is an internal use.
+    (.Sub x one m)))
+
+
+
+
+
+
+
+
+^{:go/end 752} (go/method ^:go/norace Add "Add computes x = x + y mod m.\n\nThe length of both operands must be the same as the modulus. Both operands\nmust already be reduced modulo m.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^{:tag (* Nat)} y ^{:tag (* Modulus)} m]
+  (let [overflow (.add x y)]
+    (.maybeSubtractModulus x (conv choice overflow) m)
+    ^{:line 751} x))
+
+
+
+
+
+
+
+
+
+^{:go/end 765} (go/method montgomeryRepresentation "montgomeryRepresentation calculates x = x * R mod m, with R = 2^(_W * n) and\nn = len(m.nat.limbs).\n\nFaster Montgomery multiplication replaces standard modular multiplication for\nnumbers in this representation.\n\nThis assumes that x is already reduced mod m.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^{:tag (* Modulus)} m]
+  ;; A Montgomery multiplication (which computes a * b / R) by R * R works out
+  ;; to a multiplication by R, which takes the value out of the Montgomery domain.
+  (.montgomeryMul x x (.-rr m) m))
+
+
+
+
+
+
+^{:go/end 778} (go/method montgomeryReduction "montgomeryReduction calculates x = x / R mod m, with R = 2^(_W * n) and\nn = len(m.nat.limbs).\n\nThis assumes that x is already reduced mod m.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^{:tag (* Modulus)} m]
+  ;; By Montgomery multiplying with 1 not in Montgomery representation, we
+  ;; convert out back from Montgomery representation, because it works out to
+  ;; dividing by R.
+  (let [one (.ExpandFor (NewNat) m)]
+    (aset (.-limbs one) 0 1)
+    (.montgomeryMul x x one m)))
+
+
+
+
+
+
+
+
+
+^{:go/end 903} (go/method ^:go/norace montgomeryMul "montgomeryMul calculates x = a * b / R mod m, with R = 2^(_W * n) and\nn = len(m.nat.limbs), also known as a Montgomery multiplication.\n\nAll inputs should be the same length and already reduced modulo m.\nx will be resized to the size of m and overwritten.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^{:tag (* Nat)} a ^{:tag (* Nat)} b ^{:tag (* Modulus)} m]
+  (let [n (len (.-limbs (.-nat m)))
+      ^{:line 789} mLimbs (subslice (.-limbs (.-nat m)) _ n)
+      ^{:line 790} aLimbs (subslice (.-limbs a) _ n)
+      ^{:line 791} bLimbs (subslice (.-limbs b) _ n)]
+
+    (switch n
+      (default
+        ;; Attempt to use a stack-allocated backing array.
+        (let [T (make (slice uint) 0 (* preallocLimbs 2))]
+          (when (< (cap T) (* n 2))
+            (set! T (make (slice uint) 0 (* n 2))))
+
+          (set! T (subslice T _ (* n 2)))
+
+          ;; This loop implements Word-by-Word Montgomery Multiplication, as
+          ;; described in Algorithm 4 (Fig. 3) of "Efficient Software
+          ;; Implementations of Modular Exponentiation" by Shay Gueron
+          ;; [https://eprint.iacr.org/2011/239.pdf].
+          (let [^uint c (zero uint)]
+            (for [i 0] (< i n) (inc! i)
+              (set! _ (aget T (+ n i))) ; bounds check elimination hint
+
+              ;; Step 1 (T = a × b) is computed as a large pen-and-paper column
+              ;; multiplication of two numbers with n base-2^_W digits. If we just
+              ;; wanted to produce 2n-wide T, we would do
+              ;;
+              ;;   for i := 0; i < n; i++ {
+              ;;       d := bLimbs[i]
+              ;;       T[n+i] = addMulVVW(T[i:n+i], aLimbs, d)
+              ;;   }
+              ;;
+              ;; where d is a digit of the multiplier, T[i:n+i] is the shifted
+              ;; position of the product of that digit, and T[n+i] is the final carry.
+              ;; Note that T[i] isn't modified after processing the i-th digit.
+              ;;
+              ;; Instead of running two loops, one for Step 1 and one for Steps 2–6,
+              ;; the result of Step 1 is computed during the next loop. This is
+              ;; possible because each iteration only uses T[i] in Step 2 and then
+              ;; discards it in Step 6.
+              (let [d (aget bLimbs i)
+                  ^{:line 828} c1 (addMulVVW (subslice T i (+ n i)) aLimbs d)
+
+                  ;; Step 6 is replaced by shifting the virtual window we operate
+                  ;; over: T of the algorithm is T[i:] for us. That means that T1 in
+                  ;; Step 2 (T mod 2^_W) is simply T[i]. k0 in Step 3 is our m0inv.
+                  ^{:line 833} Y (* (aget T i) (.-m0inv m))
+
+                  ;; Step 4 and 5 add Y × m to T, which as mentioned above is stored
+                  ;; at T[i:]. The two carries (from a × d and Y × m) are added up in
+                  ;; the next word T[n+i], and the carry bit from that addition is
+                  ;; brought forward to the next iteration.
+                  ^{:line 839} c2 (addMulVVW (subslice T i (+ n i)) mLimbs Y)]
+                (set! (values (aget T (+ n i)) c) (bits/Add c1 c2 c))))
+
+
+            ;; Finally for Step 7 we copy the final T window into x, and subtract m
+            ;; if necessary (which as explained in maybeSubtractModulus can be the
+            ;; case both if x >= m, or if x overflowed).
+            ;;
+            ;; The paper suggests in Section 4 that we can do an "Almost Montgomery
+            ;; Multiplication" by subtracting only in the overflow case, but the
+            ;; cost is very similar since the constant time subtraction tells us if
+            ;; x >= m as a side effect, and taking care of the broken invariant is
+            ;; highly undesirable (see https://go.dev/issue/13907).
+            (copy (.-limbs (.reset x n)) (subslice T n))
+            (.maybeSubtractModulus x (conv choice c) m))))
+
+      ;; The following specialized cases follow the exact same algorithm, but
+      ;; optimized for the sizes most used in RSA. addMulVVW is implemented in
+      ;; assembly with loop unrolling depending on the architecture and bounds
+      ;; checks are removed by the compiler thanks to the constant size.
+      (case [(/ 1024 _W)]
+        (let [^:const ^{:val 16} n (/ 1024 _W) ; compiler hint
+            ^{:line 861} T (make (slice uint) (* n 2))
+            ^{:line 862 :tag uint} c (zero uint)]
+          (for [i 0] (< i n) (inc! i)
+            (let [d (aget bLimbs i)
+                ^{:line 865} c1 (addMulVVW1024 (addr (aget T i)) (addr (aget aLimbs 0)) d)
+                ^{:line 866} Y (* (aget T i) (.-m0inv m))
+                ^{:line 867} c2 (addMulVVW1024 (addr (aget T i)) (addr (aget mLimbs 0)) Y)]
+              (set! (values (aget T (+ n i)) c) (bits/Add c1 c2 c))))
+
+          (copy (.-limbs (.reset x n)) (subslice T n))
+          (.maybeSubtractModulus x (conv choice c) m)))
+
+      (case [(/ 1536 _W)]
+        (let [^:const ^{:val 24} n (/ 1536 _W) ; compiler hint
+            ^{:line 875} T (make (slice uint) (* n 2))
+            ^{:line 876 :tag uint} c (zero uint)]
+          (for [i 0] (< i n) (inc! i)
+            (let [d (aget bLimbs i)
+                ^{:line 879} c1 (addMulVVW1536 (addr (aget T i)) (addr (aget aLimbs 0)) d)
+                ^{:line 880} Y (* (aget T i) (.-m0inv m))
+                ^{:line 881} c2 (addMulVVW1536 (addr (aget T i)) (addr (aget mLimbs 0)) Y)]
+              (set! (values (aget T (+ n i)) c) (bits/Add c1 c2 c))))
+
+          (copy (.-limbs (.reset x n)) (subslice T n))
+          (.maybeSubtractModulus x (conv choice c) m)))
+
+      (case [(/ 2048 _W)]
+        (let [^:const ^{:val 32} n (/ 2048 _W) ; compiler hint
+            ^{:line 889} T (make (slice uint) (* n 2))
+            ^{:line 890 :tag uint} c (zero uint)]
+          (for [i 0] (< i n) (inc! i)
+            (let [d (aget bLimbs i)
+                ^{:line 893} c1 (addMulVVW2048 (addr (aget T i)) (addr (aget aLimbs 0)) d)
+                ^{:line 894} Y (* (aget T i) (.-m0inv m))
+                ^{:line 895} c2 (addMulVVW2048 (addr (aget T i)) (addr (aget mLimbs 0)) Y)]
+              (set! (values (aget T (+ n i)) c) (bits/Add c1 c2 c))))
+
+          (copy (.-limbs (.reset x n)) (subslice T n))
+          (.maybeSubtractModulus x (conv choice c) m))))
+
+
+    ^{:line 902} x))
+
+
+
+
+
+
+
+^{:go/end 924} (go/func ^:go/norace addMulVVW "addMulVVW multiplies the multi-word value x by the single-word value y,\nadding the result to the multi-word value z and returning the final carry.\nIt can be thought of as one row of a pen-and-paper column multiplication.\n" [^{:tag (slice uint)} z ^{:tag (slice uint)} x ^uint y] :results [^uint carry]
+  (set! _ (aget x (- (len z) 1))) ; bounds check elimination hint
+  (range [i z]
+    (let [(values hi lo) (bits/Mul (aget x i) y)
+        (values ^:assign lo c) (bits/Add lo (aget z i) 0)]
+      ;; We use bits.Add with zero to get an add-with-carry instruction that
+      ;; absorbs the carry from the previous bits.Add.
+      (set! (values hi _) (bits/Add hi 0 c))
+      (set! (values lo c) (bits/Add lo carry 0))
+      (set! (values hi _) (bits/Add hi 0 c))
+      (set! carry hi)
+      (aset z i lo)))
+
+  ^{:line 923} carry)
+
+
+
+
+
+
+
+
+^{:go/end 985} (go/method ^:go/norace Mul "Mul calculates x = x * y mod m.\n\nThe length of both operands must be the same as the modulus. Both operands\nmust already be reduced modulo m.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x ^{:tag (* Nat)} y ^{:tag (* Modulus)} m]
+  (when (.-odd m)
+    ;; A Montgomery multiplication by a value out of the Montgomery domain
+    ;; takes the result out of Montgomery representation.
+    (let [xR (.montgomeryRepresentation (.set (NewNat) x) m)] ; xR = x * R mod m
+      (return (.montgomeryMul x xR y m)))) ; x = xR * y / R mod m
+
+
+  (let [n (len (.-limbs (.-nat m)))
+      ^{:line 941} xLimbs (subslice (.-limbs x) _ n)
+      ^{:line 942} yLimbs (subslice (.-limbs y) _ n)]
+
+    (switch n
+      (default
+        ;; Attempt to use a stack-allocated backing array.
+        (let [T (make (slice uint) 0 (* preallocLimbs 2))]
+          (when (< (cap T) (* n 2))
+            (set! T (make (slice uint) 0 (* n 2))))
+
+          (set! T (subslice T _ (* n 2)))
+
+          ;; T = x * y
+          (for [i 0] (< i n) (inc! i)
+            (aset T (+ n i) (addMulVVW (subslice T i (+ n i)) xLimbs (aget yLimbs i))))
+
+
+          ;; x = T mod m
+          (return (.Mod x (addr (lit Nat :limbs T)) m))))
+
+      ;; The following specialized cases follow the exact same algorithm, but
+      ;; optimized for the sizes most used in RSA. See montgomeryMul for details.
+      (case [(/ 1024 _W)]
+        (let [^:const ^{:val 16} n (/ 1024 _W) ; compiler hint
+            ^{:line 965} T (make (slice uint) (* n 2))]
+          (for [i 0] (< i n) (inc! i)
+            (aset T (+ n i) (addMulVVW1024 (addr (aget T i)) (addr (aget xLimbs 0)) (aget yLimbs i))))
+
+          (return (.Mod x (addr (lit Nat :limbs T)) m))))
+      (case [(/ 1536 _W)]
+        (let [^:const ^{:val 24} n (/ 1536 _W) ; compiler hint
+            ^{:line 972} T (make (slice uint) (* n 2))]
+          (for [i 0] (< i n) (inc! i)
+            (aset T (+ n i) (addMulVVW1536 (addr (aget T i)) (addr (aget xLimbs 0)) (aget yLimbs i))))
+
+          (return (.Mod x (addr (lit Nat :limbs T)) m))))
+      (case [(/ 2048 _W)]
+        (let [^:const ^{:val 32} n (/ 2048 _W) ; compiler hint
+            ^{:line 979} T (make (slice uint) (* n 2))]
+          (for [i 0] (< i n) (inc! i)
+            (aset T (+ n i) (addMulVVW2048 (addr (aget T i)) (addr (aget xLimbs 0)) (aget yLimbs i))))
+
+          (return (.Mod x (addr (lit Nat :limbs T)) m)))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1042} (go/method ^:go/norace Exp "Exp calculates out = x^e mod m.\n\nThe exponent e is represented in big-endian order. The output will be resized\nto the size of m and overwritten. x must already be reduced modulo m.\n\nm must be odd, or Exp will panic.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} out ^{:tag (* Nat)} x ^{:tag (slice byte)} e ^{:tag (* Modulus)} m]
+  (when (not (.-odd m))
+    (panic "bigmod: modulus for Exp must be odd"))
+
+
+  ;; We use a 4 bit window. For our RSA workload, 4 bit windows are faster
+  ;; than 2 bit windows, but use an extra 12 nats worth of scratch space.
+  ;; Using bit sizes that don't divide 8 are more complex to implement, but
+  ;; are likely to be more efficient if necessary.
+
+  (let [table (lit (array (- (<< 1 4) 1) (* Nat)) ; table[i] = x ^ (i+1)
+        ;; newNat calls are unrolled so they are allocated on the stack.
+        (NewNat) (NewNat) (NewNat) (NewNat) (NewNat)
+        (NewNat) (NewNat) (NewNat) (NewNat) (NewNat)
+        (NewNat) (NewNat) (NewNat) (NewNat) (NewNat))]
+
+    (.montgomeryRepresentation (.set (aget table 0) x) m)
+    (for [i 1] (< i (len table)) (inc! i)
+      (.montgomeryMul (aget table i) (aget table (- i 1)) (aget table 0) m))
+
+
+    (.resetFor out m)
+    (aset (.-limbs out) 0 1)
+    (.montgomeryRepresentation out m)
+    (let [tmp (.ExpandFor (NewNat) m)]
+      (range [_ b e]
+        (range [_ j (lit (slice int) 4 0)]
+          ;; Square four times. Optimization note: this can be implemented
+          ;; more efficiently than with generic Montgomery multiplication.
+          (.montgomeryMul out out out m)
+          (.montgomeryMul out out out m)
+          (.montgomeryMul out out out m)
+          (.montgomeryMul out out out m)
+
+          ;; Select x^k in constant time from the table.
+          (let [k (conv uint (bit-and (>> b j) 2r1111))]
+            (range [i table]
+              (.assign tmp (ctEq k (conv uint (+ i 1))) (aget table i)))
+
+
+            ;; Multiply by x^k, discarding the result if k = 0.
+            (.montgomeryMul tmp out tmp m)
+            (.assign out (go/call not (ctEq k 0)) tmp))))
+
+
+
+      (.montgomeryReduction out m))))
+
+
+
+
+
+
+
+
+^{:go/end 1066} (go/method ExpShortVarTime "ExpShortVarTime calculates out = x^e mod m.\n\nThe output will be resized to the size of m and overwritten. x must already\nbe reduced modulo m. This leaks the exponent through timing side-channels.\n\nm must be odd, or ExpShortVarTime will panic.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} out ^{:tag (* Nat)} x ^uint e ^{:tag (* Modulus)} m]
+  (when (not (.-odd m))
+    (panic "bigmod: modulus for ExpShortVarTime must be odd"))
+
+  ;; For short exponents, precomputing a table and using a window like in Exp
+  ;; doesn't pay off. Instead, we do a simple conditional square-and-multiply
+  ;; chain, skipping the initial run of zeroes.
+  (let [xR (.montgomeryRepresentation (.set (NewNat) x) m)]
+    (.set out xR)
+    (for [i (+ (- bits/UintSize (bits/Len e)) 1)] (< i bits/UintSize) (inc! i)
+      (.montgomeryMul out out out m)
+      (when [k (bit-and (>> e (- bits/UintSize i 1)) 1)] (!= k 0)
+        (.montgomeryMul out out xR m)))
+
+
+    (.montgomeryReduction out m)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1085} (go/method ^:go/norace InverseVarTime "InverseVarTime calculates x = a⁻¹ mod m and returns (x, true) if a is\ninvertible. Otherwise, InverseVarTime returns (x, false) and x is not\nmodified.\n\na must be reduced modulo m, but doesn't need to have the same size. The\noutput will be resized to the size of m and overwritten.\n" [^{:tag (* Nat)} x ^{:tag (* Nat)} a ^{:tag (* Modulus)} m] :results [(* Nat) bool]
+  (let [(values u A err) (extendedGCD a (.-nat m))]
+    (when (!= err nil)
+      (return x false))
+
+    (when (== (.IsOne u) no)
+      (return x false))
+
+    (return (.set x A) true)))
+
+
+
+
+
+
+^{:go/end 1097} (go/method GCDVarTime "GCDVarTime calculates x = GCD(a, b) where at least one of a or b is odd, and\nboth are non-zero. If GCDVarTime returns an error, x is not modified.\n\nThe output will be resized to the size of the larger of a and b.\n" [^{:tag (* Nat)} x ^{:tag (* Nat)} a ^{:tag (* Nat)} b] :results [(* Nat) error]
+  (let [(values u _ err) (extendedGCD a b)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (.set x u) nil)))
+
+
+
+
+
+
+
+^{:go/end 1205} (go/func extendedGCD "extendedGCD computes u and A such that u = GCD(a, m) = A*a - B*m.\n\nu will have the size of the larger of a and m, and A will have the size of m.\n\nIt is an error if either a or m is zero, or if they are both even.\n" [^{:tag (* Nat)} a ^{:tag (* Nat)} m] :results [^{:tag (* Nat)} u ^{:tag (* Nat)} A ^error err]
+  ;; This is the extended binary GCD algorithm described in the Handbook of
+  ;; Applied Cryptography, Algorithm 14.61, adapted by BoringSSL to bound
+  ;; coefficients and avoid negative numbers. For more details and proof of
+  ;; correctness, see https://github.com/mit-plv/fiat-crypto/pull/333/files.
+  ;;
+  ;; Following the proof linked in the PR above, the changes are:
+  ;;
+  ;; 1. Negate [B] and [C] so they are positive. The invariant now involves a
+  ;;    subtraction.
+  ;; 2. If step 2 (both [x] and [y] are even) runs, abort immediately. This
+  ;;    case needs to be handled by the caller.
+  ;; 3. Subtract copies of [x] and [y] as needed in step 6 (both [u] and [v]
+  ;;    are odd) so coefficients stay in bounds.
+  ;; 4. Replace the [u >= v] check with [u > v]. This changes the end
+  ;;    condition to [v = 0] rather than [u = 0]. This saves an extra
+  ;;    subtraction due to which coefficients were negated.
+  ;; 5. Rename x and y to a and n, to capture that one is a modulus.
+  ;; 6. Rearrange steps 4 through 6 slightly. Merge the loops in steps 4 and
+  ;;    5 into the main loop (step 7's goto), and move step 6 to the start of
+  ;;    the loop iteration, ensuring each loop iteration halves at least one
+  ;;    value.
+  ;;
+  ;; Note this algorithm does not handle either input being zero.
+
+  (when (or (== (.IsZero a) yes) (== (.IsZero m) yes))
+    (return nil nil (errors/New "extendedGCD: a or m is zero")))
+
+  (when (and (== (.IsOdd a) no) (== (.IsOdd m) no))
+    (return nil nil (errors/New "extendedGCD: both a and m are even")))
+
+
+  (let [size (max (len (.-limbs a)) (len (.-limbs m)))]
+    (set! u (.expand (.set (NewNat) a) size))
+    (let [v (.expand (.set (NewNat) m) size)]
+
+      (set! A (.reset (NewNat) (len (.-limbs m))))
+      (aset (.-limbs A) 0 1)
+      (let [B (.reset (NewNat) (len (.-limbs a)))
+          ^{:line 1143} C (.reset (NewNat) (len (.-limbs m)))
+          ^{:line 1144} D (.reset (NewNat) (len (.-limbs a)))]
+        (aset (.-limbs D) 0 1)
+
+        ;; Before and after each loop iteration, the following hold:
+        ;;
+        ;;   u = A*a - B*m
+        ;;   v = D*m - C*a
+        ;;   0 < u <= a
+        ;;   0 <= v <= m
+        ;;   0 <= A < m
+        ;;   0 <= B <= a
+        ;;   0 <= C < m
+        ;;   0 <= D <= a
+        ;;
+        ;; After each loop iteration, u and v only get smaller, and at least one of
+        ;; them shrinks by at least a factor of two.
+        (while true
+          ;; If both u and v are odd, subtract the smaller from the larger.
+          ;; If u = v, we need to subtract from v to hit the modified exit condition.
+          (when (and (== (.IsOdd u) yes) (== (.IsOdd v) yes))
+            (if (== (.cmpGeq v u) no) (do
+                (.sub u v)
+                (.Add A C (addr (lit Modulus :nat m)))
+                (.Add B D (addr (lit Modulus :nat a))))
+              (do
+                (.sub v u)
+                (.Add C A (addr (lit Modulus :nat m)))
+                (.Add D B (addr (lit Modulus :nat a))))))
+
+
+
+          ;; Exactly one of u and v is now even.
+          (when (== (.IsOdd u) (.IsOdd v))
+            (panic "bigmod: internal error: u and v are not in the expected state"))
+
+
+          ;; Halve the even one and adjust the corresponding coefficient.
+          (if (== (.IsOdd u) no) (do
+              (rshift1 u 0)
+              (if (or (== (.IsOdd A) yes) (== (.IsOdd B) yes)) (do
+                  (rshift1 A (.add A m))
+                  (rshift1 B (.add B a)))
+                (do
+                  (rshift1 A 0)
+                  (rshift1 B 0))))
+
+            (do ; v.IsOdd() == no
+              (rshift1 v 0)
+              (if (or (== (.IsOdd C) yes) (== (.IsOdd D) yes)) (do
+                  (rshift1 C (.add C m))
+                  (rshift1 D (.add D a)))
+                (do
+                  (rshift1 C 0)
+                  (rshift1 D 0)))))
+
+
+
+          (when (== (.IsZero v) yes)
+            (return u A nil)))))))
+
+
+
+
+
+^{:go/end 1220} (go/func ^:go/norace rshift1 [^{:tag (* Nat)} a ^uint carry]
+  (let [size (len (.-limbs a))
+      ^{:line 1210} aLimbs (subslice (.-limbs a) _ size)]
+
+    (range [i size]
+      (set! (aget aLimbs i) >> 1)
+      (if (< (+ i 1) size)
+        (set! (aget aLimbs i) bit-or (<< (aget aLimbs (+ i 1)) (- _W 1)))
+
+        (set! (aget aLimbs i) bit-or (<< carry (- _W 1)))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1230} (go/method ^:go/norace ShiftRightByOne "ShiftRightByOne sets x = x >> 1.\n\nThe announced length of x is unchanged.\n" ^{:tag (* Nat)} [^{:tag (* Nat)} x]
+  (rshift1 x 0)
+  ^{:line 1229} x)
+
+
+
+
+
+
+
+^{:go/end 1247} (go/method ^:go/norace DivShortVarTime "DivShortVarTime calculates x = x / y and returns the remainder.\n\nIt panics if y is zero.\n" ^uint [^{:tag (* Nat)} x ^uint y]
+  (when (== y 0)
+    (panic "bigmod: division by zero"))
+
+
+  (let [^uint r (zero uint)]
+    (for [i (- (len (.-limbs x)) 1)] (>= i 0) (dec! i)
+      (set! (values (aget (.-limbs x) i) r) (bits/Div r (aget (.-limbs x) i) y)))
+
+    ^{:line 1246} r))

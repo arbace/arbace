@@ -1,0 +1,726 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.html.template) (go/file "transition.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [strings "strings"]])
+
+
+
+
+
+
+(go/var ^{:doc "transitionFunc is the array of context transition functions for text nodes.\nA transition function takes a context and template text input, and returns\nthe updated context and the number of bytes consumed from the front of the\ninput.\n"} transitionFunc (lit (array ... (func [context (slice byte)] [context int]))
+    ^{:line 17} [stateText tText]
+    ^{:line 18} [stateTag tTag]
+    ^{:line 19} [stateAttrName tAttrName]
+    ^{:line 20} [stateAfterName tAfterName]
+    ^{:line 21} [stateBeforeValue tBeforeValue]
+    ^{:line 22} [stateHTMLCmt tHTMLCmt]
+    ^{:line 23} [stateRCDATA tSpecialTagEnd]
+    ^{:line 24} [stateAttr tAttr]
+    ^{:line 25} [stateURL tURL]
+    ^{:line 26} [stateMetaContent tMetaContent]
+    ^{:line 27} [stateMetaContentURL tMetaContentURL]
+    ^{:line 28} [stateSrcset tURL]
+    ^{:line 29} [stateJS tJS]
+    ^{:line 30} [stateJSDqStr tJSDelimited]
+    ^{:line 31} [stateJSSqStr tJSDelimited]
+    ^{:line 32} [stateJSRegexp tJSDelimited]
+    ^{:line 33} [stateJSTmplLit tJSTmpl]
+    ^{:line 34} [stateJSBlockCmt tBlockCmt]
+    ^{:line 35} [stateJSLineCmt tLineCmt]
+    ^{:line 36} [stateJSHTMLOpenCmt tLineCmt]
+    ^{:line 37} [stateJSHTMLCloseCmt tLineCmt]
+    ^{:line 38} [stateCSS tCSS]
+    ^{:line 39} [stateCSSDqStr tCSSStr]
+    ^{:line 40} [stateCSSSqStr tCSSStr]
+    ^{:line 41} [stateCSSDqURL tCSSStr]
+    ^{:line 42} [stateCSSSqURL tCSSStr]
+    ^{:line 43} [stateCSSURL tCSSStr]
+    ^{:line 44} [stateCSSBlockCmt tBlockCmt]
+    ^{:line 45} [stateCSSLineCmt tLineCmt]
+    ^{:line 46} [stateError tError]))
+
+
+(go/var commentStart (conv (slice byte) "<!--"))
+(go/var commentEnd (conv (slice byte) "-->"))
+
+
+^{:go/end 80} (go/func tText "tText is the context transition function for the text state.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (let [k 0]
+    (while true
+      (let [i (+ k (bytes/IndexByte (subslice s k) \<))]
+        (cond (or (< i k) (== (+ i 1) (len s)))
+          (return c (len s))
+          (and (<= (+ i 4) (len s)) (bytes/Equal commentStart (subslice s i (+ i 4))))
+          (return (lit context :state stateHTMLCmt) (+ i 4)))
+
+        (inc! i)
+        (let [end false]
+          (when (== (aget s i) \/)
+            (when (== (+ i 1) (len s))
+              (return c (len s)))
+
+            (set! (values end i) (values true (+ i 1))))
+
+          (let [(values j e) (eatTagName s i)]
+            (when (!= j i)
+              (when end
+                (set! e elementNone))
+
+              ;; We've found an HTML tag.
+              (return (lit context :state stateTag :element e) j))
+
+            (set! k j)))))))
+
+
+
+(go/var elementContentType (lit (array ... state)
+    ^{:line 83} [elementNone stateText]
+    ^{:line 84} [elementScript stateJS]
+    ^{:line 85} [elementStyle stateCSS]
+    ^{:line 86} [elementTextarea stateRCDATA]
+    ^{:line 87} [elementTitle stateRCDATA]
+    ^{:line 88} [elementMeta stateText]))
+
+
+
+^{:go/end 145} (go/func tTag "tTag is the context transition function for the tag state.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  ;; Find the attribute name.
+  (let [i (eatWhiteSpace s 0)]
+    (when (== i (len s))
+      (return c (len s)))
+
+    (when (== (aget s i) \>)
+      ;; Treat <meta> specially, because it doesn't have an end tag, and we
+      ;; want to transition into the correct state/element for it.
+      (when (== (.-element c) elementMeta)
+        (return (lit context :state stateText :element elementNone) (+ i 1)))
+
+      (return ^{:go/breaks [2 4]} (lit context
+          :state (aget elementContentType (.-element c))
+          :element (.-element c))
+        (+ i 1)))
+
+    (let [(values j err) (eatAttrName s i)]
+      (when (!= err nil)
+        (return (lit context :state stateError :err err) (len s)))
+
+      (let [(values state attr) (values stateTag attrNone)]
+        (when (== i j)
+          (return ^{:go/breaks [2 4]} (lit context
+              :state stateError
+              :err (errorf ErrBadHTML nil 0 "expected space, attr name, or end of tag, but got %q" (subslice s i)))
+            (len s)))
+
+
+        (let [attrName (strings/ToLower (conv string (subslice s i j)))]
+          (cond (and (== (.-element c) elementScript) (== attrName "type"))
+            (set! attr attrScriptType)
+            (and (== (.-element c) elementMeta) (== attrName "content"))
+            (set! attr attrMetaContent) :else
+
+            (switch (attrType attrName)
+              (case [contentTypeURL]
+                (set! attr attrURL))
+              (case [contentTypeCSS]
+                (set! attr attrStyle))
+              (case [contentTypeJS]
+                (set! attr attrScript))
+              (case [contentTypeSrcset]
+                (set! attr attrSrcset))))
+
+
+
+          (if (== j (len s))
+            (set! state stateAttrName)
+
+            (set! state stateAfterName))
+
+          (return (lit context :state state :element (.-element c) :attr attr) j))))))
+
+
+
+^{:go/end 156} (go/func tAttrName "tAttrName is the context transition function for stateAttrName.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (let [(values i err) (eatAttrName s 0)]
+    (cond (!= err nil)
+      (return (lit context :state stateError :err err) (len s))
+      (!= i (len s))
+      (set! (.-state c) stateAfterName))
+
+    (return c i)))
+
+
+
+^{:go/end 172} (go/func tAfterName "tAfterName is the context transition function for stateAfterName.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  ;; Look for the start of the value.
+  (let [i (eatWhiteSpace s 0)]
+    (cond (== i (len s))
+      (return c (len s))
+      (!= (aget s i) \=) (do
+        ;; Occurs due to tag ending '>', and valueless attribute.
+        (set! (.-state c) stateTag)
+        (return c i)))
+
+    (set! (.-state c) stateBeforeValue)
+    ;; Consume the "=".
+    (return c (+ i 1))))
+
+
+(go/var attrStartStates (lit (array ... state)
+    ^{:line 175} [attrNone stateAttr]
+    ^{:line 176} [attrScript stateJS]
+    ^{:line 177} [attrScriptType stateAttr]
+    ^{:line 178} [attrStyle stateCSS]
+    ^{:line 179} [attrURL stateURL]
+    ^{:line 180} [attrSrcset stateSrcset]
+    ^{:line 181} [attrMetaContent stateMetaContent]))
+
+
+
+^{:go/end 200} (go/func tBeforeValue "tBeforeValue is the context transition function for stateBeforeValue.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (let [i (eatWhiteSpace s 0)]
+    (when (== i (len s))
+      (return c (len s)))
+
+    ;; Find the attribute delimiter.
+    (let [delim delimSpaceOrTagEnd]
+      (switch (aget s i)
+        (case [\']
+          (set! (values delim i) (values delimSingleQuote (+ i 1))))
+        (case [\"]
+          (set! (values delim i) (values delimDoubleQuote (+ i 1)))))
+
+      (set! (values (.-state c) (.-delim c)) (values (aget attrStartStates (.-attr c)) delim))
+      (return c i))))
+
+
+
+^{:go/end 208} (go/func tHTMLCmt "tHTMLCmt is the context transition function for stateHTMLCmt.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (when [i (bytes/Index s commentEnd)] (!= i -1)
+    (return (lit context) (+ i 3)))
+
+  (return c (len s)))
+
+
+
+
+(go/var ^{:doc "specialTagEndMarkers maps element types to the character sequence that\ncase-insensitively signals the end of the special tag body.\n"} specialTagEndMarkers (lit (array ... (slice byte))
+    ^{:line 213} [elementScript (conv (slice byte) "script")]
+    ^{:line 214} [elementStyle (conv (slice byte) "style")]
+    ^{:line 215} [elementTextarea (conv (slice byte) "textarea")]
+    ^{:line 216} [elementTitle (conv (slice byte) "title")]
+    ^{:line 217} [elementMeta (conv (slice byte) "")]))
+
+
+(go/var
+  ^{:line 221} [specialTagEndPrefix (conv (slice byte) "</")]
+  ^{:line 222} [tagEndSeparators (conv (slice byte) "> \t\n\f/")])
+
+
+
+
+^{:go/end 239} (go/func tSpecialTagEnd "tSpecialTagEnd is the context transition function for raw text and RCDATA\nelement states.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (when (!= (.-element c) elementNone)
+    ;; script end tags ("</script") within script literals are ignored, so that
+    ;; we can properly escape them.
+    (when (and (== (.-element c) elementScript) ^:go/paren (or (isInScriptLiteral (.-state c)) (isComment (.-state c))))
+      (return c (len s)))
+
+    (when [i (indexTagEnd s (aget specialTagEndMarkers (.-element c)))] (!= i -1)
+      (return (lit context) i)))
+
+
+  (return c (len s)))
+
+
+
+^{:go/end 264} (go/func indexTagEnd "indexTagEnd finds the index of a special tag end in a case insensitive way, or returns -1\n" ^int [^{:tag (slice byte)} s ^{:tag (slice byte)} tag]
+  ^{:go/breaks [[3 263]]} (let [res 0
+      ^{:line 244} plen (len specialTagEndPrefix)]
+    (while (> (len s) 0)
+      ;; Try to find the tag end prefix first
+      (let [i (bytes/Index s specialTagEndPrefix)]
+        (when (== i -1)
+          (return i))
+
+        (set! s (subslice s (+ i plen)))
+        ;; Try to match the actual tag if there is still space for it
+        (when (and (<= (len tag) (len s)) (bytes/EqualFold tag (subslice s _ (len tag))))
+          (set! s (subslice s (len tag)))
+          ;; Check the tag is followed by a proper separator
+          (when (and (> (len s) 0) (!= (bytes/IndexByte tagEndSeparators (aget s 0)) -1))
+            (return (+ res i)))
+
+          (set! res + (len tag)))
+
+        (set! res + (+ i plen))))
+
+    -1))
+
+
+
+^{:go/end 269} (go/func tAttr "tAttr is the context transition function for the attribute state.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (return c (len s)))
+
+
+
+^{:go/end 281} (go/func tURL "tURL is the context transition function for the URL state.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (cond (bytes/ContainsAny s "#?")
+    (set! (.-urlPart c) urlPartQueryOrFrag)
+    (and (!= (len s) (eatWhiteSpace s 0)) (== (.-urlPart c) urlPartNone))
+    ;; HTML5 uses "Valid URL potentially surrounded by spaces" for
+    ;; attrs: https://www.w3.org/TR/html5/index.html#attributes-1
+    (set! (.-urlPart c) urlPartPreQuery))
+
+  (return c (len s)))
+
+
+
+^{:go/end 364} (go/func tJS "tJS is the context transition function for the JS state.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (let [i (bytes/IndexAny s "\"`'/{}<-#")]
+    (when (== i -1)
+      ;; Entire input is non string, comment, regexp tokens.
+      (set! (.-jsCtx c) (nextJSCtx s (.-jsCtx c)))
+      (return c (len s)))
+
+    (set! (.-jsCtx c) (nextJSCtx (subslice s _ i) (.-jsCtx c)))
+    (switch (aget s i)
+      (case [\"]
+        (set! (values (.-state c) (.-jsCtx c)) (values stateJSDqStr jsCtxRegexp)))
+      (case [\']
+        (set! (values (.-state c) (.-jsCtx c)) (values stateJSSqStr jsCtxRegexp)))
+      (case [\`]
+        (set! (values (.-state c) (.-jsCtx c)) (values stateJSTmplLit jsCtxRegexp)))
+      (case [\/]
+        (switch
+          (case [(and (< (+ i 1) (len s)) (== (aget s (+ i 1)) \/))]
+            (set! (values (.-state c) i) (values stateJSLineCmt (+ i 1))))
+          (case [(and (< (+ i 1) (len s)) (== (aget s (+ i 1)) \*))]
+            (set! (values (.-state c) i) (values stateJSBlockCmt (+ i 1))))
+          (case [(== (.-jsCtx c) jsCtxRegexp)]
+            (set! (.-state c) stateJSRegexp))
+          (case [(== (.-jsCtx c) jsCtxDivOp)]
+            (set! (.-jsCtx c) jsCtxRegexp))
+          (default
+            (return ^{:go/breaks [2 4]} (lit context
+                :state stateError
+                :err (errorf ErrSlashAmbig nil 0 "'/' could start a division or regexp: %.32q" (subslice s i)))
+              (len s)))))
+
+      ;; ECMAScript supports HTML style comments for legacy reasons, see Appendix
+      ;; B.1.1 "HTML-like Comments". The handling of these comments is somewhat
+      ;; confusing. Multi-line comments are not supported, i.e. anything on lines
+      ;; between the opening and closing tokens is not considered a comment, but
+      ;; anything following the opening or closing token, on the same line, is
+      ;; ignored. As such we simply treat any line prefixed with "<!--" or "-->"
+      ;; as if it were actually prefixed with "//" and move on.
+      (case [\<]
+        (when (and (< (+ i 3) (len s)) (bytes/Equal commentStart (subslice s i (+ i 4))))
+          (set! (values (.-state c) i) (values stateJSHTMLOpenCmt (+ i 3)))))
+
+      (case [\-]
+        (when (and (< (+ i 2) (len s)) (bytes/Equal commentEnd (subslice s i (+ i 3))))
+          (set! (values (.-state c) i) (values stateJSHTMLCloseCmt (+ i 2)))))
+
+      ;; ECMAScript also supports "hashbang" comment lines, see Section 12.5.
+      (case [\#]
+        (when (and (< (+ i 1) (len s)) (== (aget s (+ i 1)) \!))
+          (set! (values (.-state c) i) (values stateJSLineCmt (+ i 1)))))
+
+      (case [\{]
+        ;; We only care about tracking brace depth if we are inside of a
+        ;; template literal.
+        (when (== (len (.-jsBraceDepth c)) 0)
+          (set! (.-jsCtx c) (nextJSCtx (subslice s i (+ i 1)) (.-jsCtx c)))
+          (return c (+ i 1)))
+
+        (inc! (aget (.-jsBraceDepth c) (- (len (.-jsBraceDepth c)) 1)))
+        (set! (.-jsCtx c) (nextJSCtx (subslice s i (+ i 1)) (.-jsCtx c))))
+      (case [\}]
+        (when (== (len (.-jsBraceDepth c)) 0)
+          (set! (.-jsCtx c) (nextJSCtx (subslice s i (+ i 1)) (.-jsCtx c)))
+          (return c (+ i 1)))
+
+        ;; There are no cases where a brace can be escaped in the JS context
+        ;; that are not syntax errors, it seems. Because of this we can just
+        ;; count "\}" as "}" and move on, the script is already broken as
+        ;; fully fledged parsers will just fail anyway.
+        (dec! (aget (.-jsBraceDepth c) (- (len (.-jsBraceDepth c)) 1)))
+        (when (>= (aget (.-jsBraceDepth c) (- (len (.-jsBraceDepth c)) 1)) 0)
+          (set! (.-jsCtx c) (nextJSCtx (subslice s i (+ i 1)) (.-jsCtx c)))
+          (return c (+ i 1)))
+
+        (set! (.-jsBraceDepth c) (subslice (.-jsBraceDepth c) _ (- (len (.-jsBraceDepth c)) 1)))
+        (set! (.-state c) stateJSTmplLit))
+      (default
+        (panic "unreachable")))
+
+    (return c (+ i 1))))
+
+
+^{:go/end 397} (go/func tJSTmpl [^context c ^{:tag (slice byte)} s] :results [context int]
+  (let [^int k (zero int)]
+    (while true
+      (let [i (+ k (bytes/IndexAny (subslice s k) "`\\$"))]
+        (when (< i k)
+          (break))
+
+        (switch (aget s i)
+          (case [\\]
+            (inc! i)
+            (when (== i (len s))
+              (return ^{:go/breaks [2 4]} (lit context
+                  :state stateError
+                  :err (errorf ErrPartialEscape nil 0 "unfinished escape sequence in JS string: %q" s))
+                (len s))))
+
+          (case [\$]
+            (when (and (>= (len s) (+ i 2)) (== (aget s (+ i 1)) \{))
+              (set! (.-jsBraceDepth c) (append (.-jsBraceDepth c) 0))
+              (set! (.-state c) stateJS)
+              (return c (+ i 2))))
+
+          (case [\`]
+            ;; end
+            (set! (.-state c) stateJS)
+            (return c (+ i 1))))
+
+        (set! k (+ i 1))))
+
+
+    (return c (len s))))
+
+
+
+
+^{:go/end 459} (go/func tJSDelimited "tJSDelimited is the context transition function for the JS string and regexp\nstates.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (let [specials "\\\""]
+    (switch (.-state c)
+      (case [stateJSSqStr]
+        (set! specials "\\'"))
+      (case [stateJSRegexp]
+        (set! specials "\\/[]")))
+
+
+    (let [(values k inCharset) (values 0 false)]
+      (while true
+        (let [i (+ k (bytes/IndexAny (subslice s k) specials))]
+          (when (< i k)
+            (break))
+
+          (switch (aget s i)
+            (case [\\]
+              (inc! i)
+              (when (== i (len s))
+                (return ^{:go/breaks [2 4]} (lit context
+                    :state stateError
+                    :err (errorf ErrPartialEscape nil 0 "unfinished escape sequence in JS string: %q" s))
+                  (len s))))
+
+            (case [\[]
+              (set! inCharset true))
+            (case [\]]
+              (set! inCharset false))
+            (case [\/]
+              ;; If "</script" appears in a regex literal, the '/' should not
+              ;; close the regex literal, and it will later be escaped to
+              ;; "\x3C/script" in escapeText.
+              (cond (and (> i 0) (<= (+ i 7) (len s)) (bytes/EqualFold (subslice s (- i 1) (+ i 7)) (conv (slice byte) "</script")))
+                (inc! i)
+                (not inCharset) (do
+                  (set! (values (.-state c) (.-jsCtx c)) (values stateJS jsCtxDivOp))
+                  (return c (+ i 1)))))
+
+            (default
+              ;; end delimiter
+              (when (not inCharset)
+                (set! (values (.-state c) (.-jsCtx c)) (values stateJS jsCtxDivOp))
+                (return c (+ i 1)))))
+
+
+          (set! k (+ i 1))))
+
+
+      (when inCharset
+        ;; This can be fixed by making context richer if interpolation
+        ;; into charsets is desired.
+        (return ^{:go/breaks [2 4]} (lit context
+            :state stateError
+            :err (errorf ErrPartialCharset nil 0 "unfinished JS regexp charset: %q" s))
+          (len s)))
+
+
+      (return c (len s)))))
+
+
+(go/var blockCommentEnd (conv (slice byte) "*/"))
+
+
+^{:go/end 478} (go/func tBlockCmt "tBlockCmt is the context transition function for /*comment*/ states.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (let [i (bytes/Index s blockCommentEnd)]
+    (when (== i -1)
+      (return c (len s)))
+
+    (switch (.-state c)
+      (case [stateJSBlockCmt]
+        (set! (.-state c) stateJS))
+      (case [stateCSSBlockCmt]
+        (set! (.-state c) stateCSS))
+      (default
+        (panic (.String (.-state c)))))
+
+    (return c (+ i 2))))
+
+
+
+^{:go/end 511} (go/func tLineCmt "tLineCmt is the context transition function for //comment states, and the JS HTML-like comment state.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (let [^string lineTerminators (zero string)
+      ^{:line 483 :tag state} endState (zero state)]
+    (switch (.-state c)
+      (case [stateJSLineCmt stateJSHTMLOpenCmt stateJSHTMLCloseCmt]
+        (set! (values lineTerminators endState) (values "\n\r\u2028\u2029" stateJS)))
+      (case [stateCSSLineCmt]
+        (set! (values lineTerminators endState) (values "\n\f\r" stateCSS)))
+      ;; Line comments are not part of any published CSS standard but
+      ;; are supported by the 4 major browsers.
+      ;; This defines line comments as
+      ;;     LINECOMMENT ::= "//" [^\n\f\d]*
+      ;; since https://www.w3.org/TR/css3-syntax/#SUBTOK-nl defines
+      ;; newlines:
+      ;;     nl ::= #xA | #xD #xA | #xD | #xC
+      (default
+        (panic (.String (.-state c)))))
+
+
+    (let [i (bytes/IndexAny s lineTerminators)]
+      (when (== i -1)
+        (return c (len s)))
+
+      (set! (.-state c) endState)
+      ;; Per section 7.4 of EcmaScript 5 : https://es5.github.io/#x7.4
+      ;; "However, the LineTerminator at the end of the line is not
+      ;; considered to be part of the single-line comment; it is
+      ;; recognized separately by the lexical grammar and becomes part
+      ;; of the stream of input elements for the syntactic grammar."
+      (return c i))))
+
+
+
+^{:go/end 584} (go/func tCSS "tCSS is the context transition function for the CSS state.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  ;; CSS quoted strings are almost never used except for:
+  ;; (1) URLs as in background: "/foo.png"
+  ;; (2) Multiword font-names as in font-family: "Times New Roman"
+  ;; (3) List separators in content values as in inline-lists:
+  ;;    <style>
+  ;;    ul.inlineList { list-style: none; padding:0 }
+  ;;    ul.inlineList > li { display: inline }
+  ;;    ul.inlineList > li:before { content: ", " }
+  ;;    ul.inlineList > li:first-child:before { content: "" }
+  ;;    </style>
+  ;;    <ul class=inlineList><li>One<li>Two<li>Three</ul>
+  ;; (4) Attribute value selectors as in a[href="http://example.com/"]
+  ;;
+  ;; We conservatively treat all strings as URLs, but make some
+  ;; allowances to avoid confusion.
+  ;;
+  ;; In (1), our conservative assumption is justified.
+  ;; In (2), valid font names do not contain ':', '?', or '#', so our
+  ;; conservative assumption is fine since we will never transition past
+  ;; urlPartPreQuery.
+  ;; In (3), our protocol heuristic should not be tripped, and there
+  ;; should not be non-space content after a '?' or '#', so as long as
+  ;; we only %-encode RFC 3986 reserved characters we are ok.
+  ;; In (4), we should URL escape for URL attributes, and for others we
+  ;; have the attribute name available if our conservative assumption
+  ;; proves problematic for real code.
+
+  (let [k 0]
+    (while true
+      (let [i (+ k (bytes/IndexAny (subslice s k) "(\"'/"))]
+        (when (< i k)
+          (return c (len s)))
+
+        (switch (aget s i)
+          (case [\(]
+            ;; Look for url to the left.
+            (let [p (bytes/TrimRight (subslice s _ i) "\t\n\f\r ")]
+              (when (endsWithCSSKeyword p "url")
+                (let [j (- (len s) (len (bytes/TrimLeft (subslice s (+ i 1)) "\t\n\f\r ")))]
+                  (switch
+                    (case [(and (!= j (len s)) (== (aget s j) \"))]
+                      (set! (values (.-state c) j) (values stateCSSDqURL (+ j 1))))
+                    (case [(and (!= j (len s)) (== (aget s j) \'))]
+                      (set! (values (.-state c) j) (values stateCSSSqURL (+ j 1))))
+                    (default
+                      (set! (.-state c) stateCSSURL)))
+
+                  (return c j)))))
+
+          (case [\/]
+            (when (< (+ i 1) (len s))
+              (switch (aget s (+ i 1))
+                (case [\/]
+                  (set! (.-state c) stateCSSLineCmt)
+                  (return c (+ i 2)))
+                (case [\*]
+                  (set! (.-state c) stateCSSBlockCmt)
+                  (return c (+ i 2))))))
+
+
+          (case [\"]
+            (set! (.-state c) stateCSSDqStr)
+            (return c (+ i 1)))
+          (case [\']
+            (set! (.-state c) stateCSSSqStr)
+            (return c (+ i 1))))
+
+        (set! k (+ i 1))))))
+
+
+
+
+^{:go/end 624} (go/func tCSSStr "tCSSStr is the context transition function for the CSS string and URL states.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (let [^string endAndEsc (zero string)]
+    (switch (.-state c)
+      (case [stateCSSDqStr stateCSSDqURL]
+        (set! endAndEsc "\\\""))
+      (case [stateCSSSqStr stateCSSSqURL]
+        (set! endAndEsc "\\'"))
+      (case [stateCSSURL]
+        ;; Unquoted URLs end with a newline or close parenthesis.
+        ;; The below includes the wc (whitespace character) and nl.
+        (set! endAndEsc "\\\t\n\f\r )"))
+      (default
+        (panic (.String (.-state c)))))
+
+
+    (let [k 0]
+      (while true
+        (let [i (+ k (bytes/IndexAny (subslice s k) endAndEsc))]
+          (when (< i k)
+            (let [(values c nread) (tURL c (decodeCSS (subslice s k)))]
+              (return c (+ k nread))))
+
+          (if (== (aget s i) \\) (do
+              (inc! i)
+              (when (== i (len s))
+                (return ^{:go/breaks [2 4]} (lit context
+                    :state stateError
+                    :err (errorf ErrPartialEscape nil 0 "unfinished escape sequence in CSS string: %q" s))
+                  (len s))))
+
+            (do
+              (set! (.-state c) stateCSS)
+              (return c (+ i 1))))
+
+          (set! (values c _) (tURL c (decodeCSS (subslice s _ (+ i 1)))))
+          (set! k (+ i 1)))))))
+
+
+
+
+^{:go/end 629} (go/func tError "tError is the context transition function for the error state.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (return c (len s)))
+
+
+
+^{:go/end 642} (go/func tMetaContent "tMetaContent is the context transition function for the meta content attribute state.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (range [i (len s)]
+    (when (and (<= (+ i 3) (- (len s) 1)) (bytes/EqualFold (subslice s i (+ i 3)) (conv (slice byte) "url")))
+      (when [j (eatWhiteSpace s (+ i 3))] (and (< j (len s)) (== (aget s j) \=))
+        (set! (.-state c) stateMetaContentURL)
+        (return c (+ j 1)))))
+
+
+
+  (return c (len s)))
+
+
+
+^{:go/end 653} (go/func tMetaContentURL "tMetaContentURL is the context transition function for the \"url=\" part of a meta content attribute state.\n" [^context c ^{:tag (slice byte)} s] :results [context int]
+  (range [i (len s)]
+    (when (== (aget s i) \;)
+      (set! (.-state c) stateMetaContent)
+      (return c (+ i 1))))
+
+
+  (return c (len s)))
+
+
+
+
+
+
+^{:go/end 674} (go/func eatAttrName "eatAttrName returns the largest j such that s[i:j] is an attribute name.\nIt returns an error if s[i:] does not look like it begins with an\nattribute name, such as encountering a quote mark without a preceding\nequals sign.\n" [^{:tag (slice byte)} s ^int i] :results [int (* Error)]
+  (for [j i] (< j (len s)) (inc! j)
+    (switch (aget s j)
+      (case [\space \tab \newline \formfeed \return \= \>]
+        (return j nil))
+      (case [\' \" \<]
+        ;; These result in a parse warning in HTML5 and are
+        ;; indicative of serious problems if seen in an attr
+        ;; name in a template.
+        (return -1 (errorf ErrBadHTML nil 0 "%q in attribute name: %.32q" (subslice s j (+ j 1)) s)))
+      (default)))
+  ;; No-op.
+
+
+  (return (len s) nil))
+
+
+(go/var elementNameMap (lit (map string element)
+    ^{:line 677} ["script" elementScript]
+    ^{:line 678} ["style" elementStyle]
+    ^{:line 679} ["textarea" elementTextarea]
+    ^{:line 680} ["title" elementTitle]
+    ^{:line 681} ["meta" elementMeta]))
+
+
+
+^{:go/end 687} (go/func asciiAlpha "asciiAlpha reports whether c is an ASCII letter.\n" ^bool [^byte c]
+  (or (and (<= \A c) (<= c \Z)) (and (<= \a c) (<= c \z))))
+
+
+
+^{:go/end 692} (go/func asciiAlphaNum "asciiAlphaNum reports whether c is an ASCII letter or digit.\n" ^bool [^byte c]
+  (or (asciiAlpha c) (and (<= \0 c) (<= c \9))))
+
+
+
+^{:go/end 714} (go/func eatTagName "eatTagName returns the largest j such that s[i:j] is a tag name and the tag type.\n" [^{:tag (slice byte)} s ^int i] :results [int element]
+  (when (or (== i (len s)) (not (asciiAlpha (aget s i))))
+    (return i elementNone))
+
+  (let [j (+ i 1)]
+    (while (< j (len s))
+      (let [x (aget s j)]
+        (when (asciiAlphaNum x)
+          (inc! j)
+          (continue))
+
+        ;; Allow "x-y" or "x:y" but not "x-", "-y", or "x--y".
+        (when (and ^:go/paren (or (== x \:) (== x \-)) (< (+ j 1) (len s)) (asciiAlphaNum (aget s (+ j 1))))
+          (set! j + 2)
+          (continue))
+
+        (break)))
+
+    (return j (aget elementNameMap (strings/ToLower (conv string (subslice s i j)))))))
+
+
+
+^{:go/end 727} (go/func eatWhiteSpace "eatWhiteSpace returns the largest j such that s[i:j] is white space.\n" ^int [^{:tag (slice byte)} s ^int i]
+  (for [j i] (< j (len s)) (inc! j)
+    (switch (aget s j)
+      (case [\space \tab \newline \formfeed \return])
+      ;; No-op.
+      (default
+        (return j))))
+
+
+  (len s))

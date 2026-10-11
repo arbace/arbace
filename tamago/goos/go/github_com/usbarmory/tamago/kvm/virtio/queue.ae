@@ -1,0 +1,345 @@
+;; VirtIO Virtual Queue support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.virtio) (go/file "queue.go" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [binary "encoding/binary"]
+    ^{:line 14} [fmt "fmt"]
+    ^{:line 15} [sync "sync"]
+
+    ^{:line 17} [dma "github.com/usbarmory/tamago/dma"]])
+
+
+
+(go/const "Descriptor Flags\n"
+  ^{:line 22} [^{:val 1} Next 1]
+  ^{:line 23} [^{:val 2} Write 2])
+
+
+
+
+
+
+(go/type Descriptor "Descriptor represents a VirtIO virtual queue descriptor.\n\nAll exported fields are used one-time at initialization, fields requiring\nDMA are accessible through functions.\n" (struct
+    ^{:line 31 :tag uint64} Address
+    ^{:line 32 :tag uint32} length
+    ^{:line 33 :tag uint16} Flags
+    ^{:line 34 :tag uint16} Next
+
+
+    ^{:line 37 :tag (slice byte) :doc "DMA buffer (addressed data)\n"} buf))
+
+
+
+^{:go/end 50} (go/method Bytes "Bytes converts the descriptor structure to byte array format.\n" ^{:tag (slice byte)} [^{:tag (* Descriptor)} d]
+  (let [buf (new bytes/Buffer)]
+
+    (binary/Write buf binary/LittleEndian (.-Address d))
+    (binary/Write buf binary/LittleEndian (.-length d))
+    (binary/Write buf binary/LittleEndian (.-Flags d))
+    (binary/Write buf binary/LittleEndian (.-Next d))
+
+    (.Bytes buf)))
+
+
+
+
+^{:go/end 66} (go/method Init "Init initializes a virtual queue descriptor for the given reserved DMA\nbuffer, which must have been prefiously created with dma.Reserve().\n" [^{:tag (* Descriptor)} d ^{:tag (slice byte)} buf ^uint16 flags]
+  (let [(values res addr) (dma/Reserved buf)]
+
+    (when (not res)
+      (return))
+
+
+    (set! (.-Address d) (conv uint64 addr))
+    (set! (.-length d) (conv uint32 (len buf)))
+    (set! (.-Flags d) flags)
+
+    (set! (.-buf d) buf)))
+
+
+
+^{:go/end 71} (go/method Destroy "Destroy removes a virtual queue descriptor from physical memory.\n" [^{:tag (* Descriptor)} d]
+  (dma/Release (conv uint (.-Address d))))
+
+
+
+^{:go/end 76} (go/method Read "Read copies the contents of the descriptor buffer to b.\n" [^{:tag (* Descriptor)} d ^{:tag (slice byte)} b]
+  (copy b (.-buf d)))
+
+
+
+^{:go/end 82} (go/method Write "Write copies the contents of b to the descriptor buffer.\n" [^{:tag (* Descriptor)} d ^{:tag (slice byte)} b]
+  (set! (.-length d) (conv uint32 (len b)))
+  (copy (.-buf d) b))
+
+
+
+
+
+
+(go/type Available "Available represents a VirtIO virtual queue Available ring buffer.\n\nAll exported fields are used one-time at initialization, fields requiring\nDMA are accessible through functions.\n" (struct
+    ^{:line 89 :tag uint16} Flags
+    ^{:line 90 :tag uint16} index
+    ^{:line 91 :tag (slice uint16)} ring
+    ^{:line 92 :tag uint16} EventIndex
+
+
+    ^{:line 95 :tag (slice byte) :doc "DMA buffer\n"} buf))
+
+
+
+^{:go/end 112} (go/method Bytes "Bytes converts the descriptor structure to byte array format.\n" ^{:tag (slice byte)} [^{:tag (* Available)} d]
+  (let [buf (new bytes/Buffer)]
+
+    (binary/Write buf binary/LittleEndian (.-Flags d))
+    (binary/Write buf binary/LittleEndian (.-index d))
+
+    (range [_ ring (.-ring d)]
+      (binary/Write buf binary/LittleEndian ring))
+
+
+    (binary/Write buf binary/LittleEndian (.-EventIndex d))
+
+    (.Bytes buf)))
+
+
+
+^{:go/end 120} (go/method SetIndex "SetIndex updates the descriptor index field.\n" [^{:tag (* Available)} d ^uint16 index]
+  (let [off 2]
+    (.PutUint16 binary/LittleEndian (subslice (.-buf d) off) index)
+
+    (set! (.-index d) index)))
+
+
+
+^{:go/end 128} (go/method Ring "Ring returns a ring buffer at the given position.\n" ^uint16 [^{:tag (* Available)} d ^uint16 n]
+  (let [off (+ 4 (* n 2))]
+    (aset (.-ring d) n (.Uint16 binary/LittleEndian (subslice (.-buf d) off)))
+
+    (aget (.-ring d) n)))
+
+
+
+^{:go/end 136} (go/method SetRingIndex "SetRingIndex updates the index value of a ring buffer.\n" [^{:tag (* Available)} d ^uint16 n ^uint16 index]
+  (let [off (+ 4 (* n 2))]
+    (.PutUint16 binary/LittleEndian (subslice (.-buf d) off) index)
+
+    (aset (.-ring d) n index)))
+
+
+
+(go/type Ring "Ring represents a VirtIO virtual queue buffer index\n" (struct
+    ^{:line 140 :tag uint32} Index
+    ^{:line 141 :tag uint32} Length))
+
+
+
+^{:go/end 149} (go/method Bytes "Bytes converts the descriptor structure to byte array format.\n" ^{:tag (slice byte)} [^{:tag (* Ring)} d]
+  (let [buf (new bytes/Buffer)]
+    (binary/Write buf binary/LittleEndian d)
+    (.Bytes buf)))
+
+
+
+
+
+
+(go/type Used "Used represents a VirtIO virtual queue Used ring buffer.\n\nAll exported fields are used one-time at initialization, fields requiring\nDMA are accessible through functions.\n" (struct
+    ^{:line 156 :tag uint16} Flags
+    ^{:line 157 :tag uint16} index
+    ^{:line 158 :tag (slice (* Ring))} ring
+    ^{:line 159 :tag uint16} AvailEvent
+
+
+    ^{:line 162 :tag (slice byte) :doc "DMA buffer\n"} buf
+
+    ^{:line 164 :tag uint16} last))
+
+
+
+^{:go/end 181} (go/method Bytes "Bytes converts the descriptor structure to byte array format.\n" ^{:tag (slice byte)} [^{:tag (* Used)} d]
+  (let [buf (new bytes/Buffer)]
+
+    (binary/Write buf binary/LittleEndian (.-Flags d))
+    (binary/Write buf binary/LittleEndian (.-index d))
+
+    (range [_ ring (.-ring d)]
+      (.Write buf (.Bytes ring)))
+
+
+    (binary/Write buf binary/LittleEndian (.-AvailEvent d))
+
+    (.Bytes buf)))
+
+
+
+^{:go/end 189} (go/method Index "Index returns the descriptor index field.\n" ^uint16 [^{:tag (* Used)} d]
+  (let [off 2]
+    (set! (.-index d) (.Uint16 binary/LittleEndian (subslice (.-buf d) off)))
+
+    (.-index d)))
+
+
+
+^{:go/end 197} (go/method Ring "Ring returns a ring buffer at the given position.\n" ^Ring [^{:tag (* Used)} d ^uint16 n]
+  (let [off (+ 4 (* n 8))]
+    (binary/Decode (subslice (.-buf d) off) binary/LittleEndian (aget (.-ring d) n))
+
+    ^{:line 196} @(aget (.-ring d) n)))
+
+
+
+(go/type VirtualQueue "VirtualQueue represents a VirtIO split virtual queue Descriptor\n" (struct
+    ^{:line 201} sync/Mutex
+
+    ^{:line 203 :tag (slice (* Descriptor))} Descriptors
+    ^{:line 204 :tag Available} Available
+    ^{:line 205 :tag Used} Used
+
+
+    ^{:line 208 :tag (slice byte) :doc "DMA buffer\n"} buf
+    ^{:line 209 :tag uint} desc ; physical address for QueueDesc
+    ^{:line 210 :tag uint} driver ; phusical address for QueueDriver
+    ^{:line 211 :tag uint} device ; physical address for QueueDevice
+
+    ^{:line 213 :tag uint16} size))
+
+
+
+
+^{:go/end 238} (go/method Bytes "Bytes converts the descriptor structure to byte array format, the device\narea and driver area location offsets are also returned.\n" [^{:tag (* VirtualQueue)} d] :results [(slice byte) int int]
+  (let [buf (new bytes/Buffer)]
+
+    (range [_ desc (.-Descriptors d)]
+      (.Write buf (.Bytes desc)))
+
+
+    (let [driver (.Len buf)]
+      (.Write buf (.Bytes (.-Available d)))
+
+      ;; Used ring requires 4 bytes alignment but we apply legacy values to
+      ;; support both *PCI and *LegacyPCI.
+      (when [r (% (.Len buf) pageSize)] (!= r 0)
+        (.Write buf (make (slice byte) (- pageSize r))))
+
+
+      (let [device (.Len buf)]
+        (.Write buf (.Bytes (.-Used d)))
+
+        (return (.Bytes buf) driver device)))))
+
+
+
+^{:go/end 280} (go/method Init "Init initializes a split virtual queue for the given size.\n" [^{:tag (* VirtualQueue)} d ^int size ^int length ^uint16 flags]
+  ^{:go/via [Mutex]} (.Lock d)
+  (defer ^{:go/via [Mutex]} (.Unlock d))
+
+  ;; To avoid excessive DMA region fragmentation a single allocation
+  ;; reserves all descriptor buffers.
+  (let [(values _ buf) (dma/Reserve (* size length) 0)]
+
+    (range [i size]
+      (let [off (* length i)
+
+          ^{:line 252} desc (addr (lit Descriptor))]
+        (.Init desc (subslice buf off (+ off length)) flags)
+
+        (let [ring (addr (lit Ring))]
+
+          (set! (.-Descriptors d) (append (.-Descriptors d) desc))
+          (set! (.-ring (.-Available d)) (append (.-ring (.-Available d)) (conv uint16 i)))
+          (set! (.-ring (.-Used d)) (append (.-ring (.-Used d)) ring)))))
+
+
+    (when (== flags Write)
+      ;; make all buffers immediately available
+      (set! (.-index (.-Available d)) (conv uint16 size)))
+
+
+    ;; allocate DMA buffer
+    (let [(values ^:assign buf driver device) (.Bytes d)]
+      (set! (values (.-desc d) (.-buf d)) (dma/Reserve (len buf) pageSize))
+      (copy (.-buf d) buf)
+
+      ;; calculate area pointers
+      (set! (.-driver d) (+ (.-desc d) (conv uint driver)))
+      (set! (.-device d) (+ (.-desc d) (conv uint device)))
+      (set! (.-size d) (conv uint16 size))
+
+      ;; assign DMA slices
+      (set! (.-buf (.-Available d)) (subslice (.-buf d) driver device))
+      (set! (.-buf (.-Used d)) (subslice (.-buf d) device)))))
+
+
+
+^{:go/end 292} (go/method Destroy "Destroy removes a split virtual queue from physical memory.\n" [^{:tag (* VirtualQueue)} d]
+  (range [_ d (.-Descriptors d)]
+    (.Destroy d))
+
+
+  (set! (.-buf (.-Available d)) nil)
+  (set! (.-buf (.-Used d)) nil)
+
+  (dma/Release (.-desc d)))
+
+
+
+^{:go/end 297} (go/method Address "Address returns the virtual queue physical address.\n" [^{:tag (* VirtualQueue)} d] :results [^uint desc ^uint driver ^uint device]
+  (return (.-desc d) (.-driver d) (.-device d)))
+
+
+
+
+^{:go/end 303} (go/method NeedsNotify "NeedsNotify reports whether [VirtIO.QueueNotify] should be invoked to notify\nthe device that the queue can be processed.\n" ^bool [^{:tag (* VirtualQueue)} d]
+  (== (% (.-index (.-Available d)) (.-size d)) (% (.Index (.-Used d)) (.-size d))))
+
+
+
+^{:go/end 329} (go/method Pop "Pop receives a single used buffer from the virtual queue,\n" [^{:tag (* VirtualQueue)} d ^{:tag (slice byte)} buf] :results [^int n ^error err]
+  ^{:go/via [Mutex]} (.Lock d)
+  (defer ^{:go/via [Mutex]} (.Unlock d))
+
+  (when (== (.Index (.-Used d)) (.-last (.-Used d)))
+    (return))
+
+
+  (let [avail (.Ring (.-Used d) (% (.-last (.-Used d)) (.-size d)))]
+    (set! n (conv int (.-Length avail)))
+
+    (when (< (len buf) n)
+      (return 0 (fmt/Errorf "buffer too small (%d < %d)" (len buf) n)))
+
+
+    (.Read (aget (.-Descriptors d) (.-Index avail)) buf)
+
+    (.SetRingIndex (.-Available d) (% (.-index (.-Available d)) (.-size d)) (conv uint16 (.-Index avail)))
+    (.SetIndex (.-Available d) (+ (.-index (.-Available d)) 1))
+
+    (set! (.-last (.-Used d)) + 1)
+
+    (return)))
+
+
+
+^{:go/end 346} (go/method Push "Push supplies a single available buffer to the virtual queue.\n" [^{:tag (* VirtualQueue)} d ^{:tag (slice byte)} buf]
+  ^{:go/via [Mutex]} (.Lock d)
+  (defer ^{:go/via [Mutex]} (.Unlock d))
+
+  (let [index (.Ring (.-Available d) (% (.-index (.-Available d)) (.-size d)))
+
+      ;; update Descriptor length
+      ^{:line 339} off (+ 8 (* index 16))]
+    (.PutUint32 binary/LittleEndian (subslice (.-buf d) off) (conv uint32 (len buf)))
+
+    (.Write (aget (.-Descriptors d) index) buf)
+    (.SetRingIndex (.-Available d) (% (.-index (.-Available d)) (.-size d)) index)
+
+    (.SetIndex (.-Available d) (+ (.-index (.-Available d)) 1))))

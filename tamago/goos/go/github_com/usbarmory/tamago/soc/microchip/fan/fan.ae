@@ -1,0 +1,153 @@
+;; Microchip LAN969x fan controller
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package fan implements the fan controller found on Microchip LAN969x SoCs
+;; under the following specification:
+;;   - Microchip - LAN9694/LAN9696/LAN9698 Datasheet - DS00005048E (02-27-25)
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=arm64` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.microchip.fan) (go/file "fan.go" :doc "Package fan implements the fan controller found on Microchip LAN969x SoCs\nunder the following specification:\n  - Microchip - LAN9694/LAN9696/LAN9698 Datasheet - DS00005048E (02-27-25)\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=arm64` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 19} [errors "errors"]
+    ^{:line 20} [sync "sync"]
+
+    ^{:line 22} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 23} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+(go/const
+  ^{:line 27} [^{:val 0} FAN_CFG 0x00]
+  ^{:line 28} [^{:val 0} CFG_FAN_STAT_CFG 0]
+  ^{:line 29} [^{:val 1} CFG_PWM_OPEN_COL_ENA 1]
+  ^{:line 30} [^{:val 2} CFG_GATE_ENA 2]
+  ^{:line 31} [^{:val 3} CFG_INV_POL 3]
+  ^{:line 32} [^{:val 16} CFG_DUTY_CYCLE 16]
+  ^{:line 33} [^{:val 255} CFG_DUTY_CYCLE_MASK 0xff]
+
+  ^{:line 35} [^{:val 4} PWM_FREQ 0x04]
+  ^{:line 36} [^{:val 0} FREQ_PWM_FREQ 0]
+  ^{:line 37} [^{:val 65535} FREQ_PWM_FREQ_MASK 0xffff]
+  ^{:line 38} [^{:val 16} FREQ_CLK_CYCLES_10US 16]
+  ^{:line 39} [^{:val 4095} FREQ_CLK_CYCLES_MASK 0xfff]
+
+  ^{:line 41} [^{:val 8} FAN_CNT 0x08]
+  ^{:line 42} [^{:val 0} CNT_FAN_CNT 0]
+  ^{:line 43} [^{:val 65535} CNT_FAN_CNT_MASK 0xffff]
+
+  ^{:line 45} [^{:val 328125000} FAN_CLOCK_HZ 328125000]
+  ^{:line 46} [^{:val 3281} FAN_CLOCK_CYCLES_10US (/ FAN_CLOCK_HZ 100000)])
+
+
+
+(go/type CounterMode "CounterMode controls how the tachometer counter is updated.\n" uint8)
+
+(go/const
+
+
+  ^{:line 55} [^{:tag CounterMode :val 0 :doc "PulsesPerSecond updates the counter once per second with the number of\ntachometer pulses received during the previous second.\n"} PulsesPerSecond iota]
+
+
+  ^{:line 58} [^{:val 1 :doc "TotalPulses configures the counter as a wrapping total of tachometer\npulses.\n"} TotalPulses])
+
+
+
+(go/type FAN "FAN represents a Microchip fan controller instance.\n" (struct
+    ^{:line 63} sync/Mutex
+
+
+    ^{:line 66 :tag uint32 :doc "Base register\n"} Base
+
+    ^{:line 68 :tag uint32 :doc "PWM must be configures with the output frequency in hertz.\n"} PWM
+
+    ^{:line 70 :tag bool :doc "Inverted configures the PWM output polarity.\n"} Inverted
+
+    ^{:line 72 :tag bool :doc "OpenCollector configures the PWM pin as an open-collector output.\n"} OpenCollector
+
+    ^{:line 74 :tag bool :doc "GateTacho counts tachometer pulses only while the PWM output is active.\n"} GateTacho
+
+    ^{:line 76 :tag CounterMode :doc "CounterMode selects how the tachometer counter is updated.\n"} CounterMode))
+
+
+
+
+^{:go/end 116} (go/method Init "Init initializes the fan controller with its output disabled. Pin routing is\nconfigured separately through the GPIO controller.\n" [^{:tag (* FAN)} hw] :results [^error err]
+  (when (== (.-Base hw) 0)
+    (return (errors/New "invalid fan controller instance")))
+
+
+  (when (== (.-PWM hw) 0)
+    (return (errors/New "invalid fan PWM frequency")))
+
+
+  (let [divider (/ FAN_CLOCK_HZ (.-PWM hw) 256)]
+
+    (when (or (== divider 0) (> divider FREQ_PWM_FREQ_MASK))
+      (return (errors/New "invalid fan PWM frequency")))
+
+
+    (when (> (.-CounterMode hw) TotalPulses)
+      (return (errors/New "invalid fan counter mode")))
+
+
+    ^{:go/via [Mutex]} (.Lock hw)
+    (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+    (let [^uint32 freq (zero uint32)]
+      (bits/SetN (addr freq) FREQ_PWM_FREQ FREQ_PWM_FREQ_MASK divider)
+      (bits/SetN (addr freq) FREQ_CLK_CYCLES_10US FREQ_CLK_CYCLES_MASK FAN_CLOCK_CYCLES_10US)
+      (reg/Write (+ (.-Base hw) PWM_FREQ) freq)
+
+      (let [^uint32 cfg (zero uint32)]
+        (bits/SetTo (addr cfg) CFG_INV_POL (.-Inverted hw))
+        (bits/SetTo (addr cfg) CFG_PWM_OPEN_COL_ENA (.-OpenCollector hw))
+        (bits/SetTo (addr cfg) CFG_GATE_ENA (.-GateTacho hw))
+        (bits/SetTo (addr cfg) CFG_FAN_STAT_CFG (== (.-CounterMode hw) TotalPulses))
+        (reg/Write (+ (.-Base hw) FAN_CFG) cfg)
+
+        (return)))))
+
+
+
+^{:go/end 121} (go/method SetDuty "SetDuty sets the PWM duty cycle, where 0 is always off and 255 is always on.\n" [^{:tag (* FAN)} hw ^uint8 duty]
+  (reg/SetN (+ (.-Base hw) FAN_CFG) CFG_DUTY_CYCLE CFG_DUTY_CYCLE_MASK (conv uint32 duty)))
+
+
+
+^{:go/end 130} (go/method Duty "Duty returns the configured PWM duty cycle.\n" [^{:tag (* FAN)} hw] :results [^uint8 duty]
+  (when (== (.-Base hw) 0)
+    (return))
+
+
+  (conv uint8 (reg/GetN (+ (.-Base hw) FAN_CFG) CFG_DUTY_CYCLE CFG_DUTY_CYCLE_MASK)))
+
+
+
+^{:go/end 145} (go/method Frequency "Frequency returns the configured PWM frequency.\n" [^{:tag (* FAN)} hw] :results [^uint32 freq]
+  (when (== (.-Base hw) 0)
+    (return))
+
+
+  (let [divider (reg/GetN (+ (.-Base hw) PWM_FREQ) FREQ_PWM_FREQ FREQ_PWM_FREQ_MASK)]
+
+    (when (== divider 0)
+      (return))
+
+
+    (/ FAN_CLOCK_HZ divider 256)))
+
+
+
+^{:go/end 154} (go/method TachoCount "TachoCount returns the raw 16-bit tachometer count.\n" [^{:tag (* FAN)} hw] :results [^uint16 count]
+  (when (== (.-Base hw) 0)
+    (return))
+
+
+  (conv uint16 (reg/GetN (+ (.-Base hw) FAN_CNT) CNT_FAN_CNT CNT_FAN_CNT_MASK)))

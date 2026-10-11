@@ -1,0 +1,92 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.fuzz) (go/file "minimize.go" :imports [
+
+
+    ^{:line 8} [reflect "reflect"]])
+
+
+^{:go/end 13} (go/func isMinimizable ^bool [^reflect/Type t]
+  (or (== t (reflect/TypeOf "")) (== t (reflect/TypeOf (conv (slice byte) nil)))))
+
+
+^{:go/end 95} (go/func minimizeBytes [^{:tag (slice byte)} v ^{:tag (func [(slice byte)] [bool])} try ^{:tag (func [] [bool])} shouldStop]
+  (let [tmp (make (slice byte) (len v))]
+    ;; If minimization was successful at any point during minimizeBytes,
+    ;; then the vals slice in (*workerServer).minimizeInput will point to
+    ;; tmp. Since tmp is altered while making new candidates, we need to
+    ;; make sure that it is equal to the correct value, v, before exiting
+    ;; this function.
+    (defer (copy tmp v))
+
+    ;; First, try to cut the tail.
+    (for [n 1024] (!= n 0) (set! n / 2)
+      (while (> (len v) n)
+        (when (shouldStop)
+          (return))
+
+        (let [candidate (subslice v _ (- (len v) n))]
+          (when (not (try candidate))
+            (break))
+
+          ;; Set v to the new value to continue iterating.
+          (set! v candidate))))
+
+
+
+    ;; Then, try to remove each individual byte.
+    (for [i 0] (< i (- (len v) 1)) (inc! i)
+      (when (shouldStop)
+        (return))
+
+      (let [candidate (subslice tmp _ (- (len v) 1))]
+        (copy (subslice candidate _ i) (subslice v _ i))
+        (copy (subslice candidate i) (subslice v (+ i 1)))
+        (when (not (try candidate))
+          (continue))
+
+        ;; Update v to delete the value at index i.
+        (copy (subslice v i) (subslice v (+ i 1)))
+        (set! v (subslice v _ (len candidate)))
+        ;; v[i] is now different, so decrement i to redo this iteration
+        ;; of the loop with the new value.
+        (dec! i)))
+
+
+    ;; Then, try to remove each possible subset of bytes.
+    (for [i 0] (< i (- (len v) 1)) (inc! i)
+      (copy tmp (subslice v _ i))
+      (for [j (len v)] (> j (+ i 1)) (dec! j)
+        (when (shouldStop)
+          (return))
+
+        (let [candidate (subslice tmp _ (+ (- (len v) j) i))]
+          (copy (subslice candidate i) (subslice v j))
+          (when (not (try candidate))
+            (continue))
+
+          ;; Update v and reset the loop with the new length.
+          (copy (subslice v i) (subslice v j))
+          (set! v (subslice v _ (len candidate)))
+          (set! j (len v)))))
+
+
+
+    ;; Then, try to make it more simplified and human-readable by trying to replace each
+    ;; byte with a printable character.
+    (let [printableChars (conv (slice byte) "012789ABCXYZabcxyz !\"#$%&'()*+,.")]
+      (range [i b v]
+        (when (shouldStop)
+          (return))
+
+
+        (range [_ pc printableChars]
+          (aset v i pc)
+          (when (try v)
+            ;; Successful. Move on to the next byte in v.
+            (break))
+
+          ;; Unsuccessful. Revert v[i] back to original value.
+          (aset v i b))))))

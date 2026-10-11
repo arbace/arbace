@@ -1,0 +1,251 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.runtime) (go/file "mpagealloc_64bit.go" :build ["//go:build amd64 || arm64 || loong64 || mips64 || mips64le || ppc64 || ppc64le || riscv64 || s390x"] :imports [
+
+
+    ^{:line 10} [unsafe "unsafe"]])
+
+
+(go/const
+
+  ^{:line 15} [^{:val 5 :doc "The number of levels in the radix tree.\n"} summaryLevels 5]
+
+
+  ^{:line 18} [^{:val 0 :doc "Constants for testing.\n"} pageAlloc32Bit 0]
+  ^{:line 19} [^{:val 1} pageAlloc64Bit 1]
+
+
+
+
+
+
+  ^{:line 26} [^{:val 13 :doc "Number of bits needed to represent all indices into the L1 of the\nchunks map.\n\nSee (*pageAlloc).chunks for more details. Update the documentation\nthere should this number change.\n"} pallocChunksL1Bits 13])
+
+
+
+
+
+
+(go/var ^{:doc "levelBits is the number of bits in the radix for a given level in the super summary\nstructure.\n\nThe sum of all the entries of levelBits should equal heapAddrBits.\n"} levelBits (lit (array summaryLevels uint)
+    ^{:line 34} summaryL0Bits
+    ^{:line 35} summaryLevelBits
+    ^{:line 36} summaryLevelBits
+    ^{:line 37} summaryLevelBits
+    ^{:line 38} summaryLevelBits))
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "levelShift is the number of bits to shift to acquire the radix for a given level\nin the super summary structure.\n\nWith levelShift, one can compute the index of the summary at level l related to a\npointer p by doing:\n\n\tp >> levelShift[l]\n"} levelShift (lit (array summaryLevels uint)
+    (- heapAddrBits summaryL0Bits)
+    (- heapAddrBits summaryL0Bits (* 1 summaryLevelBits))
+    (- heapAddrBits summaryL0Bits (* 2 summaryLevelBits))
+    (- heapAddrBits summaryL0Bits (* 3 summaryLevelBits))
+    (- heapAddrBits summaryL0Bits (* 4 summaryLevelBits))))
+
+
+
+
+
+
+(go/var ^{:doc "levelLogPages is log2 the maximum number of runtime pages in the address space\na summary in the given level represents.\n\nThe leaf level always represents exactly log2 of 1 chunk's worth of pages.\n"} levelLogPages (lit (array summaryLevels uint)
+    (+ logPallocChunkPages (* 4 summaryLevelBits))
+    (+ logPallocChunkPages (* 3 summaryLevelBits))
+    (+ logPallocChunkPages (* 2 summaryLevelBits))
+    (+ logPallocChunkPages (* 1 summaryLevelBits))
+    ^{:line 65} logPallocChunkPages))
+
+
+
+
+
+^{:go/end 88} (go/method sysInit "sysInit performs architecture-dependent initialization of fields\nin pageAlloc. pageAlloc should be uninitialized except for sysStat\nif any runtime statistic should be updated.\n" [^{:tag (* pageAlloc)} p ^bool test]
+  ;; Reserve memory for each level. This will get mapped in
+  ;; as R/W by setArenas.
+  (range [l shift levelShift]
+    (let [entries ^int (<< 1 (- heapAddrBits shift))
+
+        ;; Reserve b bytes of memory anywhere in the address space.
+        ^{:line 78} b (alignUp (* (conv uintptr entries) pallocSumBytes) physPageSize)
+        ^{:line 79} r (sysReserve nil b "page summary")]
+      (when (== r nil)
+        (throw "failed to reserve page summary memory"))
+
+
+      ;; Put this reservation into a slice.
+      (let [sl (lit notInHeapSlice (conv (* notInHeap) r) 0 entries)]
+        (aset (.-summary p) l @(conv (* (slice pallocSum)) (conv unsafe/Pointer (addr sl))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 183} (go/method sysGrow "sysGrow performs architecture-dependent operations on heap\ngrowth for the page allocator, such as mapping in new memory\nfor summaries. It also updates the length of the slices in\np.summary.\n\nbase is the base of the newly-added heap memory and limit is\nthe first address past the end of the newly-added heap memory.\nBoth must be aligned to pallocChunkBytes.\n\nThe caller must update p.start and p.end after calling sysGrow.\n" [^{:tag (* pageAlloc)} p ^uintptr base ^uintptr limit]
+  (when (or (!= (% base pallocChunkBytes) 0) (!= (% limit pallocChunkBytes) 0))
+    (print "runtime: base = " (conv hex base) ", limit = " (conv hex limit) "\n")
+    (throw "sysGrow bounds not aligned to pallocChunkBytes"))
+
+
+  ;; addrRangeToSummaryRange converts a range of addresses into a range
+  ;; of summary indices which must be mapped to support those addresses
+  ;; in the summary range.
+  (let [addrRangeToSummaryRange ^{:go/end 112} (fn [^int level ^addrRange r] :results [int int]
+        (let [(values sumIdxBase sumIdxLimit) (addrsToSummaryRange level (.addr (.-base r)) (.addr (.-limit r)))]
+          (blockAlignSummaryRange level sumIdxBase sumIdxLimit)))
+
+
+      ;; summaryRangeToSumAddrRange converts a range of indices in any
+      ;; level of p.summary into page-aligned addresses which cover that
+      ;; range of indices.
+      ^{:line 117} summaryRangeToSumAddrRange ^{:go/end 125} (fn ^addrRange [^int level ^int sumIdxBase ^int sumIdxLimit]
+        (let [baseOffset (alignDown (* (conv uintptr sumIdxBase) pallocSumBytes) physPageSize)
+            ^{:line 119} limitOffset (alignUp (* (conv uintptr sumIdxLimit) pallocSumBytes) physPageSize)
+            ^{:line 120} base (conv unsafe/Pointer (addr (aget (aget (.-summary p) level) 0)))]
+          (lit addrRange
+            (lit offAddr (conv uintptr (add base baseOffset)))
+            (lit offAddr (conv uintptr (add base limitOffset))))))
+
+
+
+      ;; addrRangeToSumAddrRange is a convenience function that converts
+      ;; an address range r to the address range of the given summary level
+      ;; that stores the summaries for r.
+      ^{:line 130} addrRangeToSumAddrRange ^{:go/end 133} (fn ^addrRange [^int level ^addrRange r]
+        (let [(values sumIdxBase sumIdxLimit) (addrRangeToSummaryRange level r)]
+          (summaryRangeToSumAddrRange level sumIdxBase sumIdxLimit)))
+
+
+      ;; Find the first inUse index which is strictly greater than base.
+      ;;
+      ;; Because this function will never be asked remap the same memory
+      ;; twice, this index is effectively the index at which we would insert
+      ;; this new growth, and base will never overlap/be contained within
+      ;; any existing range.
+      ;;
+      ;; This will be used to look at what memory in the summary array is already
+      ;; mapped before and after this new range.
+      ^{:line 144} inUseIndex (.findSucc (.-inUse p) base)]
+
+    ;; Walk up the radix tree and map summaries in as needed.
+    (range [l (.-summary p)]
+      ;; Figure out what part of the summary array this new address space needs.
+      (let [(values needIdxBase needIdxLimit) (addrRangeToSummaryRange l (makeAddrRange base limit))]
+
+        ;; Update the summary slices with a new upper-bound. This ensures
+        ;; we get tight bounds checks on at least the top bound.
+        ;;
+        ;; We must do this regardless of whether we map new memory.
+        (when (> needIdxLimit (len (aget (.-summary p) l)))
+          (aset (.-summary p) l (subslice (aget (.-summary p) l) _ needIdxLimit)))
+
+
+        ;; Compute the needed address range in the summary array for level l.
+        (let [need (summaryRangeToSumAddrRange l needIdxBase needIdxLimit)]
+
+          ;; Prune need down to what needs to be newly mapped. Some parts of it may
+          ;; already be mapped by what inUse describes due to page alignment requirements
+          ;; for mapping. Because this function will never be asked to remap the same
+          ;; memory twice, it should never be possible to prune in such a way that causes
+          ;; need to be split.
+          (when (> inUseIndex 0)
+            (set! need (.subtract need (addrRangeToSumAddrRange l (aget (.-ranges (.-inUse p)) (- inUseIndex 1))))))
+
+          (when (< inUseIndex (len (.-ranges (.-inUse p))))
+            (set! need (.subtract need (addrRangeToSumAddrRange l (aget (.-ranges (.-inUse p)) inUseIndex)))))
+
+          ;; It's possible that after our pruning above, there's nothing new to map.
+          (when (== (.size need) 0)
+            (continue))
+
+
+          ;; Map and commit need.
+          (sysMap (conv unsafe/Pointer (.addr (.-base need))) (.size need) (.-sysStat p) "page alloc")
+          (sysUsed (conv unsafe/Pointer (.addr (.-base need))) (.size need) (.size need))
+          (set! (.-summaryMappedReady p) + (.size need)))))))
+
+
+
+
+
+
+^{:go/end 240} (go/method sysGrow "sysGrow increases the index's backing store in response to a heap growth.\n\nReturns the amount of memory added to sysStat.\n" ^uintptr [^{:tag (* scavengeIndex)} s ^uintptr base ^uintptr limit ^{:tag (* sysMemStat)} sysStat]
+  (when (or (!= (% base pallocChunkBytes) 0) (!= (% limit pallocChunkBytes) 0))
+    (print "runtime: base = " (conv hex base) ", limit = " (conv hex limit) "\n")
+    (throw "sysGrow bounds not aligned to pallocChunkBytes"))
+
+  (let [scSize (unsafe/Sizeof (lit atomicScavChunkData))
+      ;; Map and commit the pieces of chunks that we need.
+      ;;
+      ;; We always map the full range of the minimum heap address to the
+      ;; maximum heap address. We don't do this for the summary structure
+      ;; because it's quite large and a discontiguous heap could cause a
+      ;; lot of memory to be used. In this situation, the worst case overhead
+      ;; is in the single-digit MiB if we map the whole thing.
+      ;;
+      ;; The base address of the backing store is always page-aligned,
+      ;; because it comes from the OS, so it's sufficient to align the
+      ;; index.
+      ^{:line 205} haveMin (.Load (.-min s))
+      ^{:line 206} haveMax (.Load (.-max s))
+      ^{:line 207} needMin (alignDown (conv uintptr (chunkIndex base)) (/ physPageSize scSize))
+      ^{:line 208} needMax (alignUp (conv uintptr (chunkIndex limit)) (/ physPageSize scSize))]
+
+    ;; We need a contiguous range, so extend the range if there's no overlap.
+    (when (< needMax haveMin)
+      (set! needMax haveMin))
+
+    (when (and (!= haveMax 0) (> needMin haveMax))
+      (set! needMin haveMax))
+
+
+    ;; Avoid a panic from indexing one past the last element.
+    (let [chunksBase (conv uintptr (conv unsafe/Pointer (addr (aget (.-chunks s) 0))))
+        ^{:line 220} have (makeAddrRange (+ chunksBase (* haveMin scSize)) (+ chunksBase (* haveMax scSize)))
+        ^{:line 221} need (makeAddrRange (+ chunksBase (* needMin scSize)) (+ chunksBase (* needMax scSize)))]
+
+      ;; Subtract any overlap from rounding. We can't re-map memory because
+      ;; it'll be zeroed.
+      (set! need (.subtract need have))
+
+      ;; If we've got something to map, map it, and update the slice bounds.
+      (when (!= (.size need) 0)
+        (sysMap (conv unsafe/Pointer (.addr (.-base need))) (.size need) sysStat "scavenge index")
+        (sysUsed (conv unsafe/Pointer (.addr (.-base need))) (.size need) (.size need))
+        ;; Update the indices only after the new memory is valid.
+        (when (or (== haveMax 0) (< needMin haveMin))
+          (.Store (.-min s) needMin))
+
+        (when (> needMax haveMax)
+          (.Store (.-max s) needMax)))
+
+
+      (.size need))))
+
+
+
+
+
+^{:go/end 252} (go/method sysInit "sysInit initializes the scavengeIndex' chunks array.\n\nReturns the amount of memory added to sysStat.\n" ^uintptr [^{:tag (* scavengeIndex)} s ^bool test ^{:tag (* sysMemStat)} sysStat]
+  ^{:go/breaks [3]} (let [n (/ (conv uintptr (<< 1 heapAddrBits)) pallocChunkBytes)
+      ^{:line 247} nbytes (* n (unsafe/Sizeof (lit atomicScavChunkData)))
+      ^{:line 248} r (sysReserve nil nbytes "scavenge index")
+      ^{:line 249} sl (lit notInHeapSlice (conv (* notInHeap) r) (conv int n) (conv int n))]
+    (set! (.-chunks s) @(conv (* (slice atomicScavChunkData)) (conv unsafe/Pointer (addr sl))))
+    0)) ; All memory above is mapped Reserved.

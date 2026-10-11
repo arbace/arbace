@@ -1,0 +1,523 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Patterns for ServeMux routing.
+
+(in-ns 'go.net.http) (go/file "pattern.go" :imports [
+
+
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [url "net/url"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [unicode "unicode"]])
+
+
+
+
+(go/type pattern "A pattern is something that can be matched against an HTTP request.\nIt has an optional method, an optional host, and a path.\n" (struct
+    ^{:line 20 :tag string} str ; original string
+    ^{:line 21 :tag string} method
+    ^{:line 22 :tag string} host
+
+
+
+
+
+
+
+
+
+
+    ^{:line 33 :tag (slice segment) :doc "The representation of a path differs from the surface syntax, which\nsimplifies most algorithms.\n\nPaths ending in '/' are represented with an anonymous \"...\" wildcard.\nFor example, the path \"a/\" is represented as a literal segment \"a\" followed\nby a segment with multi==true.\n\nPaths ending in \"{$}\" are represented with the literal segment \"/\".\nFor example, the path \"a/{$}\" is represented as a literal segment \"a\" followed\nby a literal segment \"/\".\n"} segments
+    ^{:line 34 :tag string} loc)) ; source location of registering call, for helpful messages
+
+
+^{:go/end 37} (go/method String ^string [^{:tag (* pattern)} p] (.-str p))
+
+^{:go/end 41} (go/method lastSegment ^segment [^{:tag (* pattern)} p]
+  (aget (.-segments p) (- (len (.-segments p)) 1)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type segment "A segment is a pattern piece that matches one or more path segments, or\na trailing slash.\n\nIf wild is false, it matches a literal segment, or, if s == \"/\", a trailing slash.\nExamples:\n\n\t\"a\" => segment{s: \"a\"}\n\t\"/{$}\" => segment{s: \"/\"}\n\nIf wild is true and multi is false, it matches a single path segment.\nExample:\n\n\t\"{x}\" => segment{s: \"x\", wild: true}\n\nIf both wild and multi are true, it matches all remaining path segments.\nExample:\n\n\t\"{rest...}\" => segment{s: \"rest\", wild: true, multi: true}\n" (struct
+    ^{:line 62 :tag string} s ; literal or wildcard name or "/" for "/{$}".
+    ^{:line 63 :tag bool} wild
+    ^{:line 64 :tag bool} multi)) ; "..." wildcard
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 184} (go/func parsePattern "parsePattern parses a string into a Pattern.\nThe string's syntax is\n\n\t[METHOD] [HOST]/[PATH]\n\nwhere:\n  - METHOD is an HTTP method\n  - HOST is a hostname\n  - PATH consists of slash-separated segments, where each segment is either\n    a literal or a wildcard of the form \"{name}\", \"{name...}\", or \"{$}\".\n\nMETHOD, HOST and PATH are all optional; that is, the string can be \"/\".\nIf METHOD is present, it must be followed by at least one space or tab.\nWildcard names must be valid Go identifiers.\nThe \"{$}\" and \"{name...}\" wildcard must occur at the end of PATH.\nPATH may end with a '/'.\nWildcard names in a path must be distinct.\n" [^string s] :results [^{:tag (* pattern)} _ ^error err]
+  (when (== (len s) 0)
+    (return nil (errors/New "empty pattern")))
+
+  (let [off 0] ; offset into string
+    (defer (^{:go/end 93} (fn []
+          (when (!= err nil)
+            (set! err (fmt/Errorf "at offset %d: %w" off err))))))
+
+
+
+    (let [(values method rest found) (values s "" false)]
+      (when [i (strings/IndexAny s " \t")] (>= i 0)
+        (set! (values method rest found) (values (subslice s _ i) (strings/TrimLeft (subslice s (+ i 1)) " \t") true)))
+
+      (when (not found)
+        (set! rest method)
+        (set! method ""))
+
+      (when (and (!= method "") (not (validMethod method)))
+        (return nil (fmt/Errorf "invalid method %q" method)))
+
+      (let [p (addr (lit pattern :str s :method method))]
+
+        (when found
+          (set! off (+ (len method) 1)))
+
+        (let [i (strings/IndexByte rest \/)]
+          (when (< i 0)
+            (return nil (errors/New "host/path missing /")))
+
+          (set! (.-host p) (subslice rest _ i))
+          (set! rest (subslice rest i))
+          (when [j (strings/IndexByte (.-host p) \{)] (>= j 0)
+            (set! off + j)
+            (return nil (errors/New "host contains '{' (missing initial '/'?)")))
+
+          ;; At this point, rest is the path.
+          (set! off + i)
+
+          ;; An unclean path with a method that is not CONNECT can never match,
+          ;; because paths are cleaned before matching.
+          (when (and (!= method "") (!= method "CONNECT") (!= rest (cleanPath rest)))
+            (return nil (errors/New "non-CONNECT pattern with unclean path can never match")))
+
+
+          (let [seenNames (lit (map string bool))] ; remember wildcard names to catch dups
+            (while (> (len rest) 0)
+              ;; Invariant: rest[0] == '/'.
+              (set! rest (subslice rest 1))
+              (set! off (- (len s) (len rest)))
+              (when (== (len rest) 0)
+                ;; Trailing slash.
+                (set! (.-segments p) (append (.-segments p) (lit segment :wild true :multi true)))
+                (break))
+
+              (let [i (strings/IndexByte rest \/)]
+                (when (< i 0)
+                  (set! i (len rest)))
+
+                (let [^string seg (zero string)]
+                  (set! (values seg rest) (values (subslice rest _ i) (subslice rest i)))
+                  (if [i (strings/IndexByte seg \{)] (< i 0) (do
+                      ;; Literal.
+                      (set! seg (pathUnescape seg))
+                      (set! (.-segments p) (append (.-segments p) (lit segment :s seg))))
+                    (do
+                      ;; Wildcard.
+                      (when (!= i 0)
+                        (return nil (errors/New "bad wildcard segment (must start with '{')")))
+
+                      (when (!= (aget seg (- (len seg) 1)) \})
+                        (return nil (errors/New "bad wildcard segment (must end with '}')")))
+
+                      (let [name (subslice seg 1 (- (len seg) 1))]
+                        (when (== name "$")
+                          (when (!= (len rest) 0)
+                            (return nil (errors/New "{$} not at end")))
+
+                          (set! (.-segments p) (append (.-segments p) (lit segment :s "/")))
+                          (break))
+
+                        (let [(values ^:assign name multi) (strings/CutSuffix name "...")]
+                          (when (and multi (!= (len rest) 0))
+                            (return nil (errors/New "{...} wildcard not at end")))
+
+                          (when (== name "")
+                            (return nil (errors/New "empty wildcard")))
+
+                          (when (not (isValidWildcardName name))
+                            (return nil (fmt/Errorf "bad wildcard name %q" name)))
+
+                          (when (aget seenNames name)
+                            (return nil (fmt/Errorf "duplicate wildcard name %q" name)))
+
+                          (aset seenNames name true)
+                          (set! (.-segments p) (append (.-segments p) (lit segment :s name :wild true :multi multi))))))))))
+
+
+            (return p nil)))))))
+
+
+^{:go/breaks [[5 196]] :go/end 197} (go/func isValidWildcardName ^bool [^string s]
+  (when (== s "")
+    (return false))
+
+  ;; Valid Go identifier.
+  (range [i c s]
+    (when (and (not (unicode/IsLetter c)) (!= c \_) ^:go/paren (or (== i 0) (not (unicode/IsDigit c))))
+      (return false)))
+
+
+  true)
+
+
+^{:go/end 206} (go/func pathUnescape ^string [^string path]
+  (let [(values u err) (url/PathUnescape path)]
+    (when (!= err nil)
+      ;; Invalidly escaped path; use the original
+      (return path))
+
+    ^{:line 205} u))
+
+
+
+(go/type relationship "relationship is a relationship between two patterns, p1 and p2.\n" string)
+
+(go/const
+  ^{:line 212} [^{:tag relationship :val "equivalent"} equivalent "equivalent"] ; both match the same requests
+  ^{:line 213} [^{:tag relationship :val "moreGeneral"} moreGeneral "moreGeneral"] ; p1 matches everything p2 does & more
+  ^{:line 214} [^{:tag relationship :val "moreSpecific"} moreSpecific "moreSpecific"] ; p2 matches everything p1 does & more
+  ^{:line 215} [^{:tag relationship :val "disjoint"} disjoint "disjoint"] ; there is no request that both match
+  ^{:line 216} [^{:tag relationship :val "overlaps"} overlaps "overlaps"]) ; there is a request that both match, but neither is more specific
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 241} (go/method conflictsWith "conflictsWith reports whether p1 conflicts with p2, that is, whether\nthere is a request that both match but where neither is higher precedence\nthan the other.\n\n\tPrecedence is defined by two rules:\n\t1. Patterns with a host win over patterns without a host.\n\t2. Patterns whose method and path is more specific win. One pattern is more\n\t   specific than another if the second matches all the (method, path) pairs\n\t   of the first and more.\n\nIf rule 1 doesn't apply, then two patterns conflict if their relationship\nis either equivalence (they match the same set of requests) or overlap\n(they both match some requests, but neither is more specific than the other).\n" ^bool [^{:tag (* pattern)} p1 ^{:tag (* pattern)} p2]
+  (when (!= (.-host p1) (.-host p2))
+    ;; Either one host is empty and the other isn't, in which case the
+    ;; one with the host wins by rule 1, or neither host is empty
+    ;; and they differ, so they won't match the same paths.
+    (return false))
+
+  (let [rel (.comparePathsAndMethods p1 p2)]
+    (or (== rel equivalent) (== rel overlaps))))
+
+
+^{:go/end 251} (go/method comparePathsAndMethods ^relationship [^{:tag (* pattern)} p1 ^{:tag (* pattern)} p2]
+  (let [mrel (.compareMethods p1 p2)]
+    ;; Optimization: avoid a call to comparePaths.
+    (when (== mrel disjoint)
+      (return disjoint))
+
+    (let [prel (.comparePaths p1 p2)]
+      (combineRelationships mrel prel))))
+
+
+
+
+
+
+
+
+
+^{:go/end 279} (go/method compareMethods "compareMethods determines the relationship between the method\npart of patterns p1 and p2.\n\nA method can either be empty, \"GET\", or something else.\nThe empty string matches any method, so it is the most general.\n\"GET\" matches both GET and HEAD.\nAnything else matches only itself.\n" ^relationship [^{:tag (* pattern)} p1 ^{:tag (* pattern)} p2]
+  (when (== (.-method p1) (.-method p2))
+    (return equivalent))
+
+  (when (== (.-method p1) "")
+    ;; p1 matches any method, but p2 does not, so p1 is more general.
+    (return moreGeneral))
+
+  (when (== (.-method p2) "")
+    (return moreSpecific))
+
+  (when (and (== (.-method p1) "GET") (== (.-method p2) "HEAD"))
+    ;; p1 matches GET and HEAD; p2 matches only HEAD.
+    (return moreGeneral))
+
+  (when (and (== (.-method p2) "GET") (== (.-method p1) "HEAD"))
+    (return moreSpecific))
+
+  ^{:line 278} disjoint)
+
+
+
+
+^{:go/end 315} (go/method comparePaths "comparePaths determines the relationship between the path\npart of two patterns.\n" ^relationship [^{:tag (* pattern)} p1 ^{:tag (* pattern)} p2]
+  ;; Optimization: if a path pattern doesn't end in a multi ("...") wildcard, then it
+  ;; can only match paths with the same number of segments.
+  (when (and (!= (len (.-segments p1)) (len (.-segments p2))) (not (.-multi (.lastSegment p1))) (not (.-multi (.lastSegment p2))))
+    (return disjoint))
+
+
+  ;; Consider corresponding segments in the two path patterns.
+  (let [(values ^{:tag (slice segment)} segs1 ^{:tag (slice segment)} segs2) (zero (slice segment))
+      ^{:line 292} rel equivalent]
+    (for [(set! (values segs1 segs2) (values (.-segments p1) (.-segments p2)))] (and (> (len segs1) 0) (> (len segs2) 0)) (set! (values segs1 segs2) (values (subslice segs1 1) (subslice segs2 1)))
+      (set! rel (combineRelationships rel (compareSegments (aget segs1 0) (aget segs2 0))))
+      (when (== rel disjoint)
+        (return rel)))
+
+
+    ;; We've reached the end of the corresponding segments of the patterns.
+    ;; If they have the same number of segments, then we've already determined
+    ;; their relationship.
+    (when (and (== (len segs1) 0) (== (len segs2) 0))
+      (return rel))
+
+    ;; Otherwise, the only way they could fail to be disjoint is if the shorter
+    ;; pattern ends in a multi. In that case, that multi is more general
+    ;; than the remainder of the longer pattern, so combine those two relationships.
+    (when (and (< (len segs1) (len segs2)) (.-multi (.lastSegment p1)))
+      (return (combineRelationships rel moreGeneral)))
+
+    (when (and (< (len segs2) (len segs1)) (.-multi (.lastSegment p2)))
+      (return (combineRelationships rel moreSpecific)))
+
+    ^{:line 314} disjoint))
+
+
+
+^{:go/end 349} (go/func compareSegments "compareSegments determines the relationship between two segments.\n" ^relationship [^segment s1 ^segment s2]
+  (when (and (.-multi s1) (.-multi s2))
+    (return equivalent))
+
+  (when (.-multi s1)
+    (return moreGeneral))
+
+  (when (.-multi s2)
+    (return moreSpecific))
+
+  (when (and (.-wild s1) (.-wild s2))
+    (return equivalent))
+
+  (when (.-wild s1)
+    (when (== (.-s s2) "/")
+      ;; A single wildcard doesn't match a trailing slash.
+      (return disjoint))
+
+    (return moreGeneral))
+
+  (when (.-wild s2)
+    (when (== (.-s s1) "/")
+      (return disjoint))
+
+    (return moreSpecific))
+
+  ;; Both literals.
+  (when (== (.-s s1) (.-s s2))
+    (return equivalent))
+
+  ^{:line 348} disjoint)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 382} (go/func combineRelationships "combineRelationships determines the overall relationship of two patterns\ngiven the relationships of a partition of the patterns into two parts.\n\nFor example, if p1 is more general than p2 in one way but equivalent\nin the other, then it is more general overall.\n\nOr if p1 is more general in one way and more specific in the other, then\nthey overlap.\n" ^relationship [^relationship r1 ^relationship r2]
+  (switch r1
+    (case [equivalent]
+      (return r2))
+    (case [disjoint]
+      (return disjoint))
+    (case [overlaps]
+      (when (== r2 disjoint)
+        (return disjoint))
+
+      (return overlaps))
+    (case [moreGeneral moreSpecific]
+      (switch r2
+        (case [equivalent]
+          (return r1))
+        (case [(inverseRelationship r1)]
+          (return overlaps))
+        (default
+          (return r2))))
+
+    (default
+      (panic (fmt/Sprintf "unknown relationship %q" r1)))))
+
+
+
+
+
+^{:go/end 395} (go/func inverseRelationship "If p1 has relationship `r` to p2, then\np2 has inverseRelationship(r) to p1.\n" ^relationship [^relationship r]
+  (switch r
+    (case [moreSpecific]
+      (return moreGeneral))
+    (case [moreGeneral]
+      (return moreSpecific))
+    (default
+      (return r))))
+
+
+
+
+^{:go/end 422} (go/func describeConflict "describeConflict returns an explanation of why two patterns conflict.\n" ^string [^{:tag (* pattern)} p1 ^{:tag (* pattern)} p2]
+  (let [mrel (.compareMethods p1 p2)
+      ^{:line 400} prel (.comparePaths p1 p2)
+      ^{:line 401} rel (combineRelationships mrel prel)]
+    (when (== rel equivalent)
+      (return (fmt/Sprintf "%s matches the same requests as %s" p1 p2)))
+
+    (when (!= rel overlaps)
+      (panic "describeConflict called with non-conflicting patterns"))
+
+    (when (== prel overlaps)
+      (return (fmt/Sprintf "%[1]s and %[2]s both match some paths, like %[3]q.\nBut neither is more specific than the other.\n%[1]s matches %[4]q, but %[2]s doesn't.\n%[2]s matches %[5]q, but %[1]s doesn't."
+
+
+
+          ^{:line 413} p1 p2 (commonPath p1 p2) (differencePath p1 p2) (differencePath p2 p1))))
+
+    (when (and (== mrel moreGeneral) (== prel moreSpecific))
+      (return (fmt/Sprintf "%s matches more methods than %s, but has a more specific path pattern" p1 p2)))
+
+    (when (and (== mrel moreSpecific) (== prel moreGeneral))
+      (return (fmt/Sprintf "%s matches fewer methods than %s, but has a more general path pattern" p1 p2)))
+
+    (fmt/Sprintf "bug: unexpected way for two patterns %s and %s to conflict: methods %s, paths %s" p1 p2 mrel prel)))
+
+
+
+^{:go/end 429} (go/func writeMatchingPath "writeMatchingPath writes to b a path that matches the segments.\n" [^{:tag (* strings/Builder)} b ^{:tag (slice segment)} segs]
+  (range [_ s segs]
+    (writeSegment b s)))
+
+
+
+^{:go/end 436} (go/func writeSegment [^{:tag (* strings/Builder)} b ^segment s]
+  (.WriteByte b \/)
+  (when (and (not (.-multi s)) (!= (.-s s) "/"))
+    (.WriteString b (.-s s))))
+
+
+
+
+
+^{:go/end 456} (go/func commonPath "commonPath returns a path that both p1 and p2 match.\nIt assumes there is such a path.\n" ^string [^{:tag (* pattern)} p1 ^{:tag (* pattern)} p2]
+  (let [^strings/Builder b (zero strings/Builder)
+      (values ^{:tag (slice segment)} segs1 ^{:tag (slice segment)} segs2) (zero (slice segment))]
+    (for [(set! (values segs1 segs2) (values (.-segments p1) (.-segments p2)))] (and (> (len segs1) 0) (> (len segs2) 0)) (set! (values segs1 segs2) (values (subslice segs1 1) (subslice segs2 1)))
+      (if [s1 (aget segs1 0)] (.-wild s1)
+        (writeSegment (addr b) (aget segs2 0))
+
+        (writeSegment (addr b) s1)))
+
+
+    (cond (> (len segs1) 0)
+      (writeMatchingPath (addr b) segs1)
+      (> (len segs2) 0)
+      (writeMatchingPath (addr b) segs2))
+
+    (.String b)))
+
+
+
+
+^{:go/end 524} (go/func differencePath "differencePath returns a path that p1 matches and p2 doesn't.\nIt assumes there is such a path.\n" ^string [^{:tag (* pattern)} p1 ^{:tag (* pattern)} p2]
+  (let [^strings/Builder b (zero strings/Builder)
+
+      (values ^{:tag (slice segment)} segs1 ^{:tag (slice segment)} segs2) (zero (slice segment))]
+    (for [(set! (values segs1 segs2) (values (.-segments p1) (.-segments p2)))] (and (> (len segs1) 0) (> (len segs2) 0)) (set! (values segs1 segs2) (values (subslice segs1 1) (subslice segs2 1)))
+      (let [s1 (aget segs1 0)
+          ^{:line 466} s2 (aget segs2 0)]
+        (when (and (.-multi s1) (.-multi s2))
+          ;; From here the patterns match the same paths, so we must have found a difference earlier.
+          (.WriteByte b \/)
+          (return (.String b)))
+
+
+        (when (and (.-multi s1) (not (.-multi s2)))
+          ;; s1 ends in a "..." wildcard but s2 does not.
+          ;; A trailing slash will distinguish them, unless s2 ends in "{$}",
+          ;; in which case any segment will do; prefer the wildcard name if
+          ;; it has one.
+          (.WriteByte b \/)
+          (when (== (.-s s2) "/")
+            (if (!= (.-s s1) "")
+              (.WriteString b (.-s s1))
+
+              (.WriteString b "x")))
+
+
+          (return (.String b)))
+
+        (cond (and (not (.-multi s1)) (.-multi s2))
+          (writeSegment (addr b) s1)
+          (and (.-wild s1) (.-wild s2))
+          ;; Both patterns will match whatever we put here; use
+          ;; the first wildcard name.
+          (writeSegment (addr b) s1)
+          (and (.-wild s1) (not (.-wild s2)))
+          ;; s1 is a wildcard, s2 is a literal.
+          ;; Any segment other than s2.s will work.
+          ;; Prefer the wildcard name, but if it's the same as the literal,
+          ;; tweak the literal.
+          (if (!= (.-s s1) (.-s s2))
+            (writeSegment (addr b) s1)
+            (do
+              (.WriteByte b \/)
+              (.WriteString b (+ (.-s s2) "x"))))
+
+          (and (not (.-wild s1)) (.-wild s2))
+          (writeSegment (addr b) s1) :else
+          (do
+            ;; Both are literals. A precondition of this function is that the
+            ;; patterns overlap, so they must be the same literal. Use it.
+            (when (!= (.-s s1) (.-s s2))
+              (panic (fmt/Sprintf "literals differ: %q and %q" (.-s s1) (.-s s2))))
+
+            (writeSegment (addr b) s1)))))
+
+
+    (cond (> (len segs1) 0)
+      ;; p1 is longer than p2, and p2 does not end in a multi.
+      ;; Anything that matches the rest of p1 will do.
+      (writeMatchingPath (addr b) segs1)
+      (> (len segs2) 0)
+      (writeMatchingPath (addr b) segs2))
+
+    (.String b)))

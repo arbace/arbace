@@ -1,0 +1,260 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.diff) (go/file "diff.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [sort "sort"]
+    ^{:line 11} [strings "strings"]])
+
+
+
+
+(go/type pair "A pair is a pair of values tracked for both the x and y side of a diff.\nIt is typically a pair of line indexes.\n" (struct ^int x ^int y))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 164} (go/func Diff "Diff returns an anchored diff of the two texts old and new\nin the “unified diff” format. If old and new are identical,\nDiff returns a nil slice (no output).\n\nUnix diff implementations typically look for a diff with\nthe smallest number of lines inserted and removed,\nwhich can in the worst case take time quadratic in the\nnumber of lines in the texts. As a result, many implementations\neither can be made to run for a long time or cut off the search\nafter a predetermined amount of work.\n\nIn contrast, this implementation looks for a diff with the\nsmallest number of “unique” lines inserted and removed,\nwhere unique means a line that appears just once in both old and new.\nWe call this an “anchored diff” because the unique lines anchor\nthe chosen matching regions. An anchored diff is usually clearer\nthan a standard diff, because the algorithm does not try to\nreuse unrelated blank lines or closing braces.\nThe algorithm also guarantees to run in O(n log n) time\ninstead of the standard O(n²) time.\n\nSome systems call this approach a “patience diff,” named for\nthe “patience sorting” algorithm, itself named for a solitaire card game.\nWe avoid that name for two reasons. First, the name has been used\nfor a few different variants of the algorithm, so it is imprecise.\nSecond, the name is frequently interpreted as meaning that you have\nto wait longer (to be patient) for the diff, meaning that it is a slower algorithm,\nwhen in fact the algorithm is faster than the standard one.\n" ^{:tag (slice byte)} [^string oldName ^{:tag (slice byte)} old ^string newName ^{:tag (slice byte)} new]
+  (when (bytes/Equal old new)
+    (return nil))
+
+  (let [x (lines old)
+      ^{:line 51} y (lines new)
+
+      ;; Print diff header.
+      ^{:line 54 :tag bytes/Buffer} out (zero bytes/Buffer)]
+    (fmt/Fprintf (addr out) "diff %s %s\n" oldName newName)
+    (fmt/Fprintf (addr out) "--- %s\n" oldName)
+    (fmt/Fprintf (addr out) "+++ %s\n" newName)
+
+    ;; Loop over matches to consider,
+    ;; expanding each match to include surrounding lines,
+    ;; and then printing diff chunks.
+    ;; To avoid setup/teardown cases outside the loop,
+    ;; tgs returns a leading {0,0} and trailing {len(x), len(y)} pair
+    ;; in the sequence of matches.
+    (let [
+        ^{:line 66 :tag pair} done (zero pair) ; printed up to x[:done.x] and y[:done.y]
+        ^{:line 67 :tag pair} chunk (zero pair) ; start lines of current chunk
+        ^{:line 68 :tag pair} count (zero pair) ; number of lines from each side in current chunk
+        ^{:line 69 :tag (slice string)} ctext (zero (slice string))] ; lines for current chunk
+
+      (range [_ m (tgs x y)]
+        (when (< (.-x m) (.-x done))
+          ;; Already handled scanning forward from earlier match.
+          (continue))
+
+
+        ;; Expand matching lines as far as possible,
+        ;; establishing that x[start.x:end.x] == y[start.y:end.y].
+        ;; Note that on the first (or last) iteration we may (or definitely do)
+        ;; have an empty match: start.x==end.x and start.y==end.y.
+        (let [start m]
+          (while (and (> (.-x start) (.-x done)) (> (.-y start) (.-y done)) (== (aget x (- (.-x start) 1)) (aget y (- (.-y start) 1))))
+            (dec! (.-x start))
+            (dec! (.-y start)))
+
+          (let [end m]
+            (while (and (< (.-x end) (len x)) (< (.-y end) (len y)) (== (aget x (.-x end)) (aget y (.-y end))))
+              (inc! (.-x end))
+              (inc! (.-y end)))
+
+
+            ;; Emit the mismatched lines before start into this chunk.
+            ;; (No effect on first sentinel iteration, when start = {0,0}.)
+            (range [_ s (subslice x (.-x done) (.-x start))]
+              (set! ctext (append ctext (+ "-" s)))
+              (inc! (.-x count)))
+
+            (range [_ s (subslice y (.-y done) (.-y start))]
+              (set! ctext (append ctext (+ "+" s)))
+              (inc! (.-y count)))
+
+
+            ;; If we're not at EOF and have too few common lines,
+            ;; the chunk includes all the common lines and continues.
+            (let [^:const ^{:val 3} C 3] ; number of context lines
+              (when (and ^:go/paren (or (< (.-x end) (len x)) (< (.-y end) (len y)))
+                  ^:go/paren (or (< (- (.-x end) (.-x start)) C) ^:go/paren (and (> (len ctext) 0) (< (- (.-x end) (.-x start)) (* 2 C)))))
+                (range [_ s (subslice x (.-x start) (.-x end))]
+                  (set! ctext (append ctext (+ " " s)))
+                  (inc! (.-x count))
+                  (inc! (.-y count)))
+
+                (set! done end)
+                (continue))
+
+
+              ;; End chunk with common lines for context.
+              (when (> (len ctext) 0)
+                (let [n (- (.-x end) (.-x start))]
+                  (when (> n C)
+                    (set! n C))
+
+                  (range [_ s (subslice x (.-x start) (+ (.-x start) n))]
+                    (set! ctext (append ctext (+ " " s)))
+                    (inc! (.-x count))
+                    (inc! (.-y count)))
+
+                  (set! done (lit pair (+ (.-x start) n) (+ (.-y start) n)))
+
+                  ;; Format and emit chunk.
+                  ;; Convert line numbers to 1-indexed.
+                  ;; Special case: empty file shows up as 0,0 not 1,0.
+                  (when (> (.-x count) 0)
+                    (inc! (.-x chunk)))
+
+                  (when (> (.-y count) 0)
+                    (inc! (.-y chunk)))
+
+                  (fmt/Fprintf (addr out) "@@ -%d,%d +%d,%d @@\n" (.-x chunk) (.-x count) (.-y chunk) (.-y count))
+                  (range [_ s ctext]
+                    (.WriteString out s))
+
+                  (set! (.-x count) 0)
+                  (set! (.-y count) 0)
+                  (set! ctext (subslice ctext _ 0))))
+
+
+              ;; If we reached EOF, we're done.
+              (when (and (>= (.-x end) (len x)) (>= (.-y end) (len y)))
+                (break))
+
+
+              ;; Otherwise start a new chunk.
+              (set! chunk (lit pair (- (.-x end) C) (- (.-y end) C)))
+              (range [_ s (subslice x (.-x chunk) (.-x end))]
+                (set! ctext (append ctext (+ " " s)))
+                (inc! (.-x count))
+                (inc! (.-y count)))
+
+              (set! done end)))))
+
+
+      (.Bytes out))))
+
+
+
+
+
+^{:go/end 179} (go/func lines "lines returns the lines in the file x, including newlines.\nIf the file does not end in a newline, one is supplied\nalong with a warning about the missing newline.\n" ^{:tag (slice string)} [^{:tag (slice byte)} x]
+  (let [l (strings/SplitAfter (conv string x) "\n")]
+    (if (== (aget l (- (len l) 1)) "")
+      (set! l (subslice l _ (- (len l) 1)))
+
+      ;; Treat last line as having a message about the missing newline attached,
+      ;; using the same text as BSD/GNU diff (including the leading backslash).
+      (set! (aget l (- (len l) 1)) + "\n\\ No newline at end of file\n"))
+
+    ^{:line 178} l))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 261} (go/func tgs "tgs returns the pairs of indexes of the longest common subsequence\nof unique lines in x and y, where a unique line is one that appears\nonce in x and once in y.\n\nThe longest common subsequence algorithm is as described in\nThomas G. Szymanski, “A Special Case of the Maximal Common\nSubsequence Problem,” Princeton TR #170 (January 1975),\navailable at https://research.swtch.com/tgs170.pdf.\n" ^{:tag (slice pair)} [^{:tag (slice string)} x ^{:tag (slice string)} y]
+  ;; Count the number of times each string appears in a and b.
+  ;; We only care about 0, 1, many, counted as 0, -1, -2
+  ;; for the x side and 0, -4, -8 for the y side.
+  ;; Using negative numbers now lets us distinguish positive line numbers later.
+  (let [m (make (map string int))]
+    (range [_ s x]
+      (when [c (aget m s)] (> c -2)
+        (aset m s (- c 1))))
+
+
+    (range [_ s y]
+      (when [c (aget m s)] (> c -8)
+        (aset m s (- c 4))))
+
+
+
+    ;; Now unique strings can be identified by m[s] = -1+-4.
+    ;;
+    ;; Gather the indexes of those strings in x and y, building:
+    ;;	xi[i] = increasing indexes of unique strings in x.
+    ;;	yi[i] = increasing indexes of unique strings in y.
+    ;;	inv[i] = index j such that x[xi[i]] = y[yi[j]].
+    (let [(values ^{:tag (slice int)} xi ^{:tag (slice int)} yi ^{:tag (slice int)} inv) (zero (slice int))]
+      (range [i s y]
+        (when (== (aget m s) (+ -1 -4))
+          (aset m s (len yi))
+          (set! yi (append yi i))))
+
+
+      (range [i s x]
+        (when [(values j ok) (aget m s)] (and ok (>= j 0))
+          (set! xi (append xi i))
+          (set! inv (append inv j))))
+
+
+
+      ;; Apply Algorithm A from Szymanski's paper.
+      ;; In those terms, A = J = inv and B = [0, n).
+      ;; We add sentinel pairs {0,0}, and {len(x),len(y)}
+      ;; to the returned sequence, to help the processing loop.
+      (let [J inv
+          ^{:line 231} n (len xi)
+          ^{:line 232} T (make (slice int) n)
+          ^{:line 233} L (make (slice int) n)]
+        (range [i T]
+          (aset T i (+ n 1)))
+
+        (for [i 0] (< i n) (inc! i)
+          (let [k (sort/Search n ^{:go/end 240} (fn ^bool [^int k]
+                  (>= (aget T k) (aget J i))))]
+
+            (aset T k (aget J i))
+            (aset L i (+ k 1))))
+
+        (let [k 0]
+          (range [_ v L]
+            (when (< k v)
+              (set! k v)))
+
+
+          (let [seq (make (slice pair) (+ 2 k))]
+            (aset seq (+ 1 k) (lit pair (len x) (len y))) ; sentinel at end
+            (let [lastj n]
+              (for [i (- n 1)] (>= i 0) (dec! i)
+                (when (and (== (aget L i) k) (< (aget J i) lastj))
+                  (aset seq k (lit pair (aget xi i) (aget yi (aget J i))))
+                  (dec! k)))
+
+
+              (aset seq 0 (lit pair 0 0)) ; sentinel at start
+              ^{:line 260} seq)))))))

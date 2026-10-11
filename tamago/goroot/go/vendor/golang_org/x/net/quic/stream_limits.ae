@@ -1,0 +1,137 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "stream_limits.go" :imports [
+
+
+    ^{:line 8} [context "context"]])
+
+
+;; Limits on the number of open streams.
+;; Every connection has separate limits for bidirectional and unidirectional streams.
+;;
+;; Note that the MAX_STREAMS limit includes closed as well as open streams.
+;; Closing a stream doesn't enable an endpoint to open a new one;
+;; only an increase in the MAX_STREAMS limit does.
+
+
+(go/type localStreamLimits "localStreamLimits are limits on the number of open streams created by us.\n" (struct
+    ^{:line 20 :tag gate} gate
+    ^{:line 21 :tag int64} max ; peer-provided MAX_STREAMS
+    ^{:line 22 :tag int64} opened)) ; number of streams opened by us, -1 when conn is closed
+
+
+^{:go/end 27} (go/method init [^{:tag (* localStreamLimits)} lim]
+  (set! (.-gate lim) (newGate)))
+
+
+
+^{:go/end 42} (go/method open "open creates a new local stream, blocking until MAX_STREAMS quota is available.\n" [^{:tag (* localStreamLimits)} lim ^context/Context ctx ^{:tag (* Conn)} c] :results [^int64 num ^error err]
+  ;; TODO: Send a STREAMS_BLOCKED when blocked.
+  (when [err (.waitAndLock (.-gate lim) ctx)] (!= err nil)
+    (return 0 err))
+
+  (defer (.unlock lim))
+  (when (< (.-opened lim) 0)
+    (return 0 errConnClosed))
+
+  (set! num (.-opened lim))
+  (inc! (.-opened lim))
+  (return num nil))
+
+
+
+
+
+^{:go/end 49} (go/method unlock "unlock is a wrapper around lim.gate.unlock. This should be used in lieu of\nlim.gate.unlock directly so that out gate-state-setting logic is consistent\nacross multiple calls.\n" [^{:tag (* localStreamLimits)} lim]
+  (.unlock (.-gate lim) (< (.-opened lim) (.-max lim))))
+
+
+
+^{:go/end 56} (go/method wasOpened "wasOpened reports whether the given stream was opened by us.\n" ^bool [^{:tag (* localStreamLimits)} lim ^int64 num]
+  (.lock (.-gate lim))
+  (defer (.unlock lim))
+  (< num (.-opened lim)))
+
+
+
+^{:go/end 63} (go/method connHasClosed "connHasClosed indicates the connection has been closed, locally or by the peer.\n" [^{:tag (* localStreamLimits)} lim]
+  (.lock (.-gate lim))
+  (set! (.-opened lim) -1)
+  (.unlock lim))
+
+
+
+^{:go/end 70} (go/method setMax "setMax sets the MAX_STREAMS provided by the peer.\n" [^{:tag (* localStreamLimits)} lim ^int64 maxStreams]
+  (.lock (.-gate lim))
+  (set! (.-max lim) (max (.-max lim) maxStreams))
+  (.unlock lim))
+
+
+
+(go/type remoteStreamLimits "remoteStreamLimits are limits on the number of open streams created by the peer.\n" (struct
+    ^{:line 74 :tag int64} max ; last MAX_STREAMS sent to the peer
+    ^{:line 75 :tag int64} opened ; number of streams opened by the peer (including subsequently closed ones)
+    ^{:line 76 :tag int64} closed ; number of peer streams in the "closed" state
+    ^{:line 77 :tag int64} maxOpen ; how many streams we want to let the peer simultaneously open
+    ^{:line 78 :tag sentVal} sendMax)) ; set when we should send MAX_STREAMS
+
+
+^{:go/end 85} (go/method init [^{:tag (* remoteStreamLimits)} lim ^int64 maxOpen]
+  (set! (.-maxOpen lim) maxOpen)
+  (set! (.-max lim) (min maxOpen implicitStreamLimit)) ; initial limit sent in transport parameters
+  (set! (.-opened lim) 0))
+
+
+
+^{:go/end 101} (go/method open "open handles the peer opening a new stream.\n" ^error [^{:tag (* remoteStreamLimits)} lim ^streamID id]
+  ^{:go/breaks [[4 100]]} (let [num (.num id)]
+    (when (>= num (.-max lim))
+      (return ^{:go/breaks [2 4]} (lit localTransportError
+          :code errStreamLimit
+          :reason "stream limit exceeded")))
+
+
+    (when (>= num (.-opened lim))
+      (set! (.-opened lim) (+ num 1))
+      (.maybeUpdateMax lim))
+
+    nil))
+
+
+
+^{:go/end 107} (go/method close "close handles the peer closing an open stream.\n" [^{:tag (* remoteStreamLimits)} lim]
+  (inc! (.-closed lim))
+  (.maybeUpdateMax lim))
+
+
+
+^{:go/end 124} (go/method maybeUpdateMax "maybeUpdateMax updates the MAX_STREAMS value we will send to the peer.\n" [^{:tag (* remoteStreamLimits)} lim]
+  (let [newMax (min
+        ;; Max streams the peer can have open at once.
+        (+ (.-closed lim) (.-maxOpen lim))
+        ;; Max streams the peer can open with a single frame.
+        (+ (.-opened lim) implicitStreamLimit))
+
+      ^{:line 117} avail (- (.-max lim) (.-opened lim))]
+    (when (and (> newMax (.-max lim)) ^:go/paren (or (< avail 8) (>= (- newMax (.-max lim)) (* 2 avail))))
+      ;; If the peer has less than 8 streams, or if increasing the peer's
+      ;; stream limit would double it, then send a MAX_STREAMS.
+      (set! (.-max lim) newMax)
+      (.setUnsent (.-sendMax lim)))))
+
+
+
+
+
+
+
+^{:go/breaks [[5 137]] :go/end 138} (go/method appendFrame "appendFrame appends a MAX_STREAMS frame to the current packet, if necessary.\n\nIt returns true if no more frames need appending,\nfalse if not everything fit in the current packet.\n" ^bool [^{:tag (* remoteStreamLimits)} lim ^{:tag (* packetWriter)} w ^streamType typ ^packetNumber pnum ^bool pto]
+  (when (.shouldSendPTO (.-sendMax lim) pto)
+    (when (not (.appendMaxStreamsFrame w typ (.-max lim)))
+      (return false))
+
+    (.setSent (.-sendMax lim) pnum))
+
+  true)

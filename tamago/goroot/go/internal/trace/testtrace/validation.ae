@@ -1,0 +1,422 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace.testtrace) (go/file "validation.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [trace "internal/trace"]
+    ^{:line 11} [version "internal/trace/version"]
+    ^{:line 12} [slices "slices"]
+    ^{:line 13} [strings "strings"]])
+
+
+
+(go/type Validator "Validator is a type used for validating a stream of trace.Events.\n" (struct
+    ^{:line 18 :tag trace/Time} lastTs
+    ^{:line 19 :tag (map trace/GoID (* goState))} gs
+    ^{:line 20 :tag (map trace/ProcID (* procState))} ps
+    ^{:line 21 :tag (map trace/ThreadID (* schedContext))} ms
+    ^{:line 22 :tag (map trace/ResourceID (slice string))} ranges
+    ^{:line 23 :tag (map trace/TaskID string)} tasks
+    ^{:line 24 :tag trace/Sync} lastSync
+    ^{:line 25 :tag version/Version} GoVersion
+
+
+    ^{:line 28 :tag bool :doc "Flags to modify validation behavior.\n"} skipClockSnapshotChecks)) ; Some platforms can't guarantee a monotonically increasing clock reading.
+
+
+(go/type schedContext (struct
+    ^{:line 32 :tag trace/ThreadID} M
+    ^{:line 33 :tag trace/ProcID} P
+    ^{:line 34 :tag trace/GoID} G))
+
+
+(go/type goState (struct
+    ^{:line 38 :tag trace/GoState} state
+    ^{:line 39 :tag (* schedContext)} binding))
+
+
+(go/type procState (struct
+    ^{:line 43 :tag trace/ProcState} state
+    ^{:line 44 :tag (* schedContext)} binding))
+
+
+
+^{:go/end 57} (go/func NewValidator "NewValidator creates a new Validator.\n" ^{:tag (* Validator)} []
+  (addr ^{:go/breaks [2 4 6 8 10 12]} (lit Validator
+      :gs (make (map trace/GoID (* goState)))
+      :ps (make (map trace/ProcID (* procState)))
+      :ms (make (map trace/ThreadID (* schedContext)))
+      :ranges (make (map trace/ResourceID (slice string)))
+      :tasks (make (map trace/TaskID string))
+      :GoVersion version/Current)))
+
+
+
+
+
+
+
+^{:go/end 65} (go/method SkipClockSnapshotChecks "SkipClockSnapshotChecks causes the validator to skip checks on the clock snapshots.\n\nSome platforms like Windows, with a small enough trace period, are unable to produce\nmonotonically increasing timestamps due to very coarse clock granularity.\n" [^{:tag (* Validator)} v]
+  (set! (.-skipClockSnapshotChecks v) true))
+
+
+
+
+
+^{:go/end 337} (go/method Event "Event validates ev as the next event in a stream of trace.Events.\n\nReturns an error if validation fails.\n" ^error [^{:tag (* Validator)} v ^trace/Event ev]
+  (let [e (new errAccumulator)]
+
+    ;; Validate timestamp order.
+    (if (!= (.-lastTs v) 0)
+      (if (<= (.Time ev) (.-lastTs v))
+        (.Errorf e "timestamp out-of-order (want > %v) for %+v" (.-lastTs v) ev)
+
+        (set! (.-lastTs v) (.Time ev)))
+
+
+      (set! (.-lastTs v) (.Time ev)))
+
+
+    ;; Validate event stack.
+    (checkStack e (.Stack ev))
+
+    (switch (.Kind ev)
+      (case [trace/EventSync]
+        (let [s (.Sync ev)]
+          (when (!= (.-N s) (+ (.-N (.-lastSync v)) 1))
+            (.Errorf e "sync count is not sequential: expected %d, got %d" (+ (.-N (.-lastSync v)) 1) (.-N s)))
+
+          ;; The trace reader currently emits synthetic sync events at the end of
+          ;; a trace. Those don't contain clock snapshots data, so we don't try
+          ;; to validate them.
+          ;;
+          ;; TODO(felixge): Drop the synthetic syncs as discussed in CL 653576.
+          (when (and (>= (.-GoVersion v) version/Go125) (not (and (> (.-N s) 1) (== (.-ClockSnapshot s) nil))))
+            (if (== (.-ClockSnapshot s) nil)
+              (.Errorf e "sync %d has no clock snapshot" (.-N s))
+              (do
+                (when (.IsZero (.-Wall (.-ClockSnapshot s)))
+                  (.Errorf e "sync %d has zero wall time" (.-N s)))
+
+                (when (== (.-Mono (.-ClockSnapshot s)) 0)
+                  (.Errorf e "sync %d has zero mono time" (.-N s)))
+
+                (when (== (.-Trace (.-ClockSnapshot s)) 0)
+                  (.Errorf e "sync %d has zero trace time" (.-N s)))
+
+                (when (not (.-skipClockSnapshotChecks v))
+                  (when (and (>= (.-N s) 2) (not (.After (.-Wall (.-ClockSnapshot s)) (.-Wall (.-ClockSnapshot (.-lastSync v))))))
+                    (.Errorf e "sync %d has non-increasing wall time: %v vs %v" (.-N s) (.-Wall (.-ClockSnapshot s)) (.-Wall (.-ClockSnapshot (.-lastSync v)))))
+
+                  (when (and (>= (.-N s) 2) (not (> (.-Mono (.-ClockSnapshot s)) (.-Mono (.-ClockSnapshot (.-lastSync v))))))
+                    (.Errorf e "sync %d has non-increasing mono time: %v vs %v" (.-N s) (.-Mono (.-ClockSnapshot s)) (.-Mono (.-ClockSnapshot (.-lastSync v)))))
+
+                  (when (and (>= (.-N s) 2) (not (> (.-Trace (.-ClockSnapshot s)) (.-Trace (.-ClockSnapshot (.-lastSync v))))))
+                    (.Errorf e "sync %d has non-increasing trace time: %v vs %v" (.-N s) (.-Trace (.-ClockSnapshot s)) (.-Trace (.-ClockSnapshot (.-lastSync v)))))))))
+
+
+
+
+          (set! (.-lastSync v) s)))
+      (case [trace/EventMetric]
+        (let [m (.Metric ev)]
+          (when (not (strings/Contains (.-Name m) ":"))
+            ;; Should have a ":" as per runtime/metrics convention.
+            (.Errorf e "invalid metric name %q" (.-Name m)))
+
+          ;; Make sure the value is OK.
+          (when (== (.Kind (.-Value m)) trace/ValueBad)
+            (.Errorf e "invalid value"))
+
+          (switch (.Kind (.-Value m))
+            (case [trace/ValueUint64]
+              ;; Just make sure it doesn't panic.
+              (set! _ (.Uint64 (.-Value m)))))))
+
+      (case [trace/EventLabel]
+        (let [l (.Label ev)]
+
+          ;; Check label.
+          (when (== (.-Label l) "")
+            (.Errorf e "invalid label %q" (.-Label l)))
+
+
+          ;; Check label resource.
+          (when (== (.-Kind (.-Resource l)) trace/ResourceNone)
+            (.Errorf e "label resource none"))
+
+          (switch (.-Kind (.-Resource l))
+            (case [trace/ResourceGoroutine]
+              (let [id (.Goroutine (.-Resource l))]
+                (when [(values _ ok) (aget (.-gs v) id)] (not ok)
+                  (.Errorf e "label for invalid goroutine %d" id))))
+
+            (case [trace/ResourceProc]
+              (let [id (.Proc (.-Resource l))]
+                (when [(values _ ok) (aget (.-ps v) id)] (not ok)
+                  (.Errorf e "label for invalid proc %d" id))))
+
+            (case [trace/ResourceThread]
+              (let [id (.Thread (.-Resource l))]
+                (when [(values _ ok) (aget (.-ms v) id)] (not ok)
+                  (.Errorf e "label for invalid thread %d" id)))))))
+
+
+      (case [trace/EventStackSample])
+      ;; Not much to check here. It's basically a sched context and a stack.
+      ;; The sched context is also not guaranteed to align with other events.
+      ;; We already checked the stack above.
+      (case [trace/EventStateTransition]
+        ;; Validate state transitions.
+        ;;
+        ;; TODO(mknyszek): A lot of logic is duplicated between goroutines and procs.
+        ;; The two are intentionally handled identically; from the perspective of the
+        ;; API, resources all have the same general properties. Consider making this
+        ;; code generic over resources and implementing validation just once.
+        (let [tr (.StateTransition ev)]
+          (checkStack e (.-Stack tr))
+          (switch (.-Kind (.-Resource tr))
+            (case [trace/ResourceGoroutine]
+              ;; Basic state transition validation.
+              (let [id (.Goroutine (.-Resource tr))
+                  (values old new) (.Goroutine tr)]
+                (when (== new trace/GoUndetermined)
+                  (.Errorf e "transition to undetermined state for goroutine %d" id))
+
+                (when (and (> (.-N (.-lastSync v)) 1) (== old trace/GoUndetermined))
+                  (.Errorf e "undetermined goroutine %d after first global sync" id))
+
+                (when (and (== new trace/GoNotExist) (.hasAnyRange v (^{:inst [trace/GoID]} trace/MakeResourceID id)))
+                  (.Errorf e "goroutine %d died with active ranges" id))
+
+                (let [(values state ok) (aget (.-gs v) id)]
+                  (if ok (do
+                      (when (!= old (.-state state))
+                        (.Errorf e "bad old state for goroutine %d: got %s, want %s" id old (.-state state)))
+
+                      (set! (.-state state) new))
+                    (do
+                      (when (and (!= old trace/GoUndetermined) (!= old trace/GoNotExist))
+                        (.Errorf e "bad old state for unregistered goroutine %d: %s" id old))
+
+                      (set! state (addr (lit goState :state new)))
+                      (aset (.-gs v) id state)))
+
+                  ;; Validate sched context.
+                  (cond (.Executing new)
+                    (let [ctx (.getOrCreateThread v e ev (.Thread ev))]
+                      (when (!= ctx nil)
+                        (when (and (!= (.-G ctx) trace/NoGoroutine) (!= (.-G ctx) id))
+                          (.Errorf e "tried to run goroutine %d when one was already executing (%d) on thread %d" id (.-G ctx) (.Thread ev)))
+
+                        (set! (.-G ctx) id)
+                        (set! (.-binding state) ctx)))
+
+                    (and (.Executing old) (not (.Executing new))) (do
+                      (when (!= (.-Stack tr) (.Stack ev))
+                        ;; This is a case where the transition is happening to a goroutine that is also executing, so
+                        ;; these two stacks should always match.
+                        (.Errorf e "StateTransition.Stack doesn't match Event.Stack"))
+
+                      (let [ctx (.-binding state)]
+                        (if (!= ctx nil) (do
+                            (when (!= (.-G ctx) id)
+                              (.Errorf e "tried to stop goroutine %d when it wasn't currently executing (currently executing %d) on thread %d" id (.-G ctx) (.Thread ev)))
+
+                            (set! (.-G ctx) trace/NoGoroutine)
+                            (set! (.-binding state) nil))
+
+                          (.Errorf e "stopping goroutine %d not bound to any active context" id))))))))
+
+
+            (case [trace/ResourceProc]
+              ;; Basic state transition validation.
+              (let [id (.Proc (.-Resource tr))
+                  (values old new) (.Proc tr)]
+                (when (== new trace/ProcUndetermined)
+                  (.Errorf e "transition to undetermined state for proc %d" id))
+
+                (when (and (> (.-N (.-lastSync v)) 1) (== old trace/ProcUndetermined))
+                  (.Errorf e "undetermined proc %d after first global sync" id))
+
+                (when (and (== new trace/ProcNotExist) (.hasAnyRange v (^{:inst [trace/ProcID]} trace/MakeResourceID id)))
+                  (.Errorf e "proc %d died with active ranges" id))
+
+                (let [(values state ok) (aget (.-ps v) id)]
+                  (if ok (do
+                      (when (!= old (.-state state))
+                        (.Errorf e "bad old state for proc %d: got %s, want %s" id old (.-state state)))
+
+                      (set! (.-state state) new))
+                    (do
+                      (when (and (!= old trace/ProcUndetermined) (!= old trace/ProcNotExist))
+                        (.Errorf e "bad old state for unregistered proc %d: %s" id old))
+
+                      (set! state (addr (lit procState :state new)))
+                      (aset (.-ps v) id state)))
+
+                  ;; Validate sched context.
+                  (cond (.Executing new)
+                    (let [ctx (.getOrCreateThread v e ev (.Thread ev))]
+                      (when (!= ctx nil)
+                        (when (and (!= (.-P ctx) trace/NoProc) (!= (.-P ctx) id))
+                          (.Errorf e "tried to run proc %d when one was already executing (%d) on thread %d" id (.-P ctx) (.Thread ev)))
+
+                        (set! (.-P ctx) id)
+                        (set! (.-binding state) ctx)))
+
+                    (and (.Executing old) (not (.Executing new)))
+                    (let [ctx (.-binding state)]
+                      (if (!= ctx nil) (do
+                          (when (!= (.-P ctx) id)
+                            (.Errorf e "tried to stop proc %d when it wasn't currently executing (currently executing %d) on thread %d" id (.-P ctx) (.-M ctx)))
+
+                          (set! (.-P ctx) trace/NoProc)
+                          (set! (.-binding state) nil))
+
+                        (.Errorf e "stopping proc %d not bound to any active context" id))))))))))
+
+
+
+      (case [trace/EventRangeBegin trace/EventRangeActive trace/EventRangeEnd]
+        ;; Validate ranges.
+        (let [r (.Range ev)]
+          (switch (.Kind ev)
+            (case [trace/EventRangeBegin]
+              (when (.hasRange v (.-Scope r) (.-Name r))
+                (.Errorf e "already active range %q on %v begun again" (.-Name r) (.-Scope r)))
+
+              (.addRange v (.-Scope r) (.-Name r)))
+            (case [trace/EventRangeActive]
+              (when (not (.hasRange v (.-Scope r) (.-Name r)))
+                (.addRange v (.-Scope r) (.-Name r))))
+
+            (case [trace/EventRangeEnd]
+              (when (not (.hasRange v (.-Scope r) (.-Name r)))
+                (.Errorf e "inactive range %q on %v ended" (.-Name r) (.-Scope r)))
+
+              (.deleteRange v (.-Scope r) (.-Name r))))))
+
+      (case [trace/EventTaskBegin]
+        ;; Validate task begin.
+        (let [t (.Task ev)]
+          (when (or (== (.-ID t) trace/NoTask) (== (.-ID t) trace/BackgroundTask))
+            ;; The background task should never have an event emitted for it.
+            (.Errorf e "found invalid task ID for task of type %s" (.-Type t)))
+
+          (when (== (.-Parent t) trace/BackgroundTask)
+            ;; It's not possible for a task to be a subtask of the background task.
+            (.Errorf e "found background task as the parent for task of type %s" (.-Type t)))
+
+          ;; N.B. Don't check the task type. Empty string is a valid task type.
+          (aset (.-tasks v) (.-ID t) (.-Type t))))
+      (case [trace/EventTaskEnd]
+        ;; Validate task end.
+        ;; We can see a task end without a begin, so ignore a task without information.
+        ;; Instead, if we've seen the task begin, just make sure the task end lines up.
+        (let [t (.Task ev)]
+          (when [(values typ ok) (aget (.-tasks v) (.-ID t))] ok
+            (when (!= (.-Type t) typ)
+              (.Errorf e "task end type %q doesn't match task start type %q for task %d" (.-Type t) typ (.-ID t)))
+
+            (delete (.-tasks v) (.-ID t)))))
+
+      (case [trace/EventLog]
+        ;; There's really not much here to check, except that we can
+        ;; generate a Log. The category and message are entirely user-created,
+        ;; so we can't make any assumptions as to what they are. We also
+        ;; can't validate the task, because proving the task's existence is very
+        ;; much best-effort.
+        (set! _ (.Log ev))))
+
+    (.Errors e)))
+
+
+^{:go/end 342} (go/method hasRange ^bool [^{:tag (* Validator)} v ^trace/ResourceID r ^string name]
+  (let [(values ranges ok) (aget (.-ranges v) r)]
+    (and ok (^{:inst [(slice string) string]} slices/Contains ranges name))))
+
+
+^{:go/end 348} (go/method addRange [^{:tag (* Validator)} v ^trace/ResourceID r ^string name]
+  (let [(values ranges _) (aget (.-ranges v) r)]
+    (set! ranges (append ranges name))
+    (aset (.-ranges v) r ranges)))
+
+
+^{:go/end 353} (go/method hasAnyRange ^bool [^{:tag (* Validator)} v ^trace/ResourceID r]
+  (let [(values ranges ok) (aget (.-ranges v) r)]
+    (and ok (!= (len ranges) 0))))
+
+
+^{:go/end 365} (go/method deleteRange [^{:tag (* Validator)} v ^trace/ResourceID r ^string name]
+  (let [(values ranges ok) (aget (.-ranges v) r)]
+    (when (not ok)
+      (return))
+
+    (let [i (^{:inst [(slice string) string]} slices/Index ranges name)]
+      (when (< i 0)
+        (return))
+
+      (aset (.-ranges v) r (^{:inst [(slice string) string]} slices/Delete ranges i (+ i 1))))))
+
+
+^{:go/end 396} (go/method getOrCreateThread ^{:tag (* schedContext)} [^{:tag (* Validator)} v ^{:tag (* errAccumulator)} e ^trace/Event ev ^trace/ThreadID m]
+  (let [lenient ^{:go/end 384} (fn ^bool []
+        ;; Be lenient about GoUndetermined -> GoSyscall transitions if they
+        ;; originate from an old trace. These transitions lack thread
+        ;; information in trace formats older than 1.22.
+        (when (>= (.-GoVersion v) version/Go122)
+          (return false))
+
+        (when (!= (.Kind ev) trace/EventStateTransition)
+          (return false))
+
+        (let [tr (.StateTransition ev)]
+          (when (!= (.-Kind (.-Resource tr)) trace/ResourceGoroutine)
+            (return false))
+
+          (let [(values from to) (.Goroutine tr)]
+            (and (== from trace/GoUndetermined) (== to trace/GoSyscall)))))]
+
+    (when (and (== m trace/NoThread) (not (lenient)))
+      (.Errorf e "must have thread, but thread ID is none")
+      (return nil))
+
+    (let [(values s ok) (aget (.-ms v) m)]
+      (when (not ok)
+        (set! s (addr (lit schedContext :M m :P trace/NoProc :G trace/NoGoroutine)))
+        (aset (.-ms v) m s)
+        (return s))
+
+      ^{:line 395} s)))
+
+
+^{:go/end 411} (go/func checkStack [^{:tag (* errAccumulator)} e ^trace/Stack stk]
+  ;; Check for non-empty values, but we also check for crashes due to incorrect validation.
+  (range [i f (^{:inst [trace/StackFrame]} slices/Collect (.Frames stk))]
+    (when (== i 0)
+      ;; Allow for one fully zero stack.
+      ;;
+      ;; TODO(mknyszek): Investigate why that happens.
+      (continue))
+
+    (when (or (== (.-Func f) "") (== (.-File f) "") (== (.-PC f) 0) (== (.-Line f) 0))
+      (.Errorf e "invalid stack frame %#v: missing information" f))))
+
+
+
+
+(go/type errAccumulator (struct
+    ^{:line 414 :tag (slice error)} errs))
+
+
+^{:go/end 419} (go/method Errorf [^{:tag (* errAccumulator)} e ^string f & ^{:tag (slice any)} args]
+  (set! (.-errs e) (append (.-errs e) (fmt/Errorf f (spread args)))))
+
+
+^{:go/end 423} (go/method Errors ^error [^{:tag (* errAccumulator)} e]
+  (errors/Join (spread (.-errs e))))

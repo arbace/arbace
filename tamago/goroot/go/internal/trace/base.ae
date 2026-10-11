@@ -1,0 +1,273 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file contains data types that all implementations of the trace format
+;; parser need to provide to the rest of the package.
+
+(in-ns 'go.internal.trace) (go/file "base.go" :imports [
+
+
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [math "math"]
+    ^{:line 13} [strings "strings"]
+
+    ^{:line 15} [tracev2 "internal/trace/tracev2"]
+    ^{:line 16} [version "internal/trace/version"]])
+
+
+
+
+(go/type timedEventArgs "timedEventArgs is an array that is able to hold the arguments for any\ntimed event.\n" (array (- tracev2/MaxTimedEventArgs 1) uint64))
+
+
+
+(go/type baseEvent "baseEvent is the basic unprocessed event. This serves as a common\nfundamental data structure across.\n" (struct
+    ^{:line 26 :tag tracev2/EventType} typ
+    ^{:line 27 :tag Time} time
+    ^{:line 28 :tag timedEventArgs} args))
+
+
+
+
+^{:go/end 39} (go/method extra "extra returns a slice representing extra available space in args\nthat the parser can use to pass data up into Event.\n" ^{:tag (slice uint64)} [^{:tag (* baseEvent)} e ^version/Version v]
+  (switch v
+    (case [version/Go122]
+      (return (subslice (.-args e) (- (len (.-Args (aget (tracev2/Specs) (.-typ e)))) 1)))))
+
+  (panic (fmt/Sprintf "unsupported version: go 1.%d" v)))
+
+
+
+
+(go/type evTable "evTable contains the per-generation data necessary to\ninterpret an individual event.\n" (struct
+    ^{:line 44} sync
+    ^{:line 45 :tag (dataTable stringID string)} strings
+    ^{:line 46 :tag (dataTable stackID stack)} stacks
+    ^{:line 47 :tag (map uint64 frame)} pcs
+
+
+
+
+    ^{:line 52 :tag (slice string) :doc "extraStrings are strings that get generated during\nparsing but haven't come directly from the trace, so\nthey don't appear in strings.\n"} extraStrings
+    ^{:line 53 :tag (map string extraStringID)} extraStringIDs
+    ^{:line 54 :tag extraStringID} nextExtra
+
+
+    ^{:line 57 :tag (map tracev2/Experiment (slice ExperimentalBatch)) :doc "expBatches contains extra unparsed data relevant to a specific experiment.\n"} expBatches))
+
+
+
+
+^{:go/end 77} (go/method addExtraString "addExtraString adds an extra string to the evTable and returns\na unique ID for the string in the table.\n" ^extraStringID [^{:tag (* evTable)} t ^string s]
+  (when (== s "")
+    (return 0))
+
+  (when (== (.-extraStringIDs t) nil)
+    (set! (.-extraStringIDs t) (make (map string extraStringID))))
+
+  (when [(values id ok) (aget (.-extraStringIDs t) s)] ok
+    (return id))
+
+  (inc! (.-nextExtra t))
+  (let [id (.-nextExtra t)]
+    (set! (.-extraStrings t) (append (.-extraStrings t) s))
+    (aset (.-extraStringIDs t) s id)
+    ^{:line 76} id))
+
+
+
+
+^{:go/end 86} (go/method getExtraString "getExtraString returns the extra string for the provided ID.\nThe ID must have been produced by addExtraString for this evTable.\n" ^string [^{:tag (* evTable)} t ^extraStringID id]
+  (when (== id 0)
+    (return ""))
+
+  (aget (.-extraStrings t) (- id 1)))
+
+
+
+(go/type dataTable "dataTable is a mapping from EIs to Es.\n" :type-params [^{:tag (tilde uint64)} EI E] (struct
+    ^{:line 90 :tag (slice uint8)} present
+    ^{:line 91 :tag (slice E)} dense
+    ^{:line 92 :tag (map EI E)} sparse))
+
+
+
+
+
+
+
+^{:go/breaks [7] :go/end 109} (go/method insert "insert tries to add a mapping from id to s.\n\nReturns an error if a mapping for id already exists, regardless\nof whether or not s is the same in content. This should be used\nfor validation during parsing.\n" ^error [^{:tag (* (dataTable EI E))} d ^EI id ^E data]
+  (when (== (.-sparse d) nil)
+    (set! (.-sparse d) (make (map EI E))))
+
+  (when [(values existing ok) (.get d id)] ok
+    (return (fmt/Errorf "multiple %Ts with the same ID: id=%d, new=%v, existing=%v" data id data existing)))
+
+  (aset (.-sparse d) id data)
+  nil)
+
+
+
+^{:go/end 119} (go/method append "append adds a new element to the data table and returns its ID.\n" ^EI [^{:tag (* (dataTable EI E))} d ^E data]
+  (when (== (.-sparse d) nil)
+    (set! (.-sparse d) (make (map EI E))))
+
+  (let [id (+ (conv EI (len (.-sparse d))) 1)]
+    (aset (.-sparse d) id data)
+    ^{:line 118} id))
+
+
+
+
+
+^{:go/end 159} (go/method compactify "compactify attempts to compact sparse into dense.\n\nThis is intended to be called only once after insertions are done.\n" [^{:tag (* (dataTable EI E))} d]
+  (when (or (== (.-sparse d) nil) (!= (len (.-dense d)) 0))
+    ;; Already compactified.
+    (return))
+
+  ;; Find the range of IDs.
+  (let [maxID (conv EI 0)
+      ^{:line 131} minID (bit-not (conv EI 0))]
+    (range [id (.-sparse d)]
+      (when (> id maxID)
+        (set! maxID id))
+
+      (when (< id minID)
+        (set! minID id)))
+
+
+    (when (>= maxID math/MaxInt)
+      ;; We can't create a slice big enough to hold maxID elements
+      (return))
+
+    ;; We're willing to waste at most 2x memory.
+    (when (> (conv int (- maxID minID)) (max (len (.-sparse d)) (* 2 (len (.-sparse d)))))
+      (return))
+
+    (when (> (conv int minID) (len (.-sparse d)))
+      (return))
+
+    (let [size (+ (conv int maxID) 1)]
+      (set! (.-present d) (make (slice uint8) (/ (+ size 7) 8)))
+      (set! (.-dense d) (make (slice E) size))
+      (range [id data (.-sparse d)]
+        (aset (.-dense d) id data)
+        (set! (aget (.-present d) (/ id 8)) bit-or (<< (conv uint8 1) (% id 8))))
+
+      (set! (.-sparse d) nil))))
+
+
+
+
+^{:go/end 177} (go/method get "get returns the E for id or false if it doesn't\nexist. This should be used for validation during parsing.\n" [^{:tag (* (dataTable EI E))} d ^EI id] :results [E bool]
+  (when (== id 0)
+    (return @(new E) true))
+
+  (cond (< (conv uint64 id) (conv uint64 (len (.-dense d))))
+    (when (!= (bit-and (aget (.-present d) (/ id 8)) (<< (conv uint8 1) (% id 8))) 0)
+      (return (aget (.-dense d) id) true))
+
+    (!= (.-sparse d) nil)
+    (when [(values data ok) (aget (.-sparse d) id)] ok
+      (return data true)))
+
+
+  (return @(new E) false))
+
+
+
+^{:go/breaks [[7 197]] :go/end 198} (go/method forEach "forEach iterates over all ID/value pairs in the data table.\n" ^bool [^{:tag (* (dataTable EI E))} d ^{:tag (func [EI E] [bool])} yield]
+  (range [id value (.-dense d)]
+    (when (== (bit-and (aget (.-present d) (/ id 8)) (<< (conv uint8 1) (% id 8))) 0)
+      (continue))
+
+    (when (not (yield (conv EI id) value))
+      (return false)))
+
+
+  (when (== (.-sparse d) nil)
+    (return true))
+
+  (range [id value (.-sparse d)]
+    (when (not (yield id value))
+      (return false)))
+
+
+  true)
+
+
+
+
+
+^{:go/end 209} (go/method mustGet "mustGet returns the E for id or panics if it fails.\n\nThis should only be used if id has already been validated.\n" ^E [^{:tag (* (dataTable EI E))} d ^EI id]
+  (let [(values data ok) (.get d id)]
+    (when (not ok)
+      (panic (fmt/Sprintf "expected id %d in %T table" id data)))
+
+    ^{:line 208} data))
+
+
+
+(go/type frequency "frequency is nanoseconds per timestamp unit.\n" float64)
+
+
+^{:go/end 217} (go/method mul "mul multiplies an unprocessed to produce a time in nanoseconds.\n" ^Time [^frequency f ^timestamp t]
+  (conv Time (* (conv float64 t) (conv float64 f))))
+
+
+
+(go/type stringID "stringID is an index into the string table for a generation.\n" uint64)
+
+
+(go/type extraStringID "extraStringID is an index into the extra string table for a generation.\n" uint64)
+
+
+(go/type stackID "stackID is an index into the stack table for a generation.\n" uint64)
+
+
+(go/type cpuSample "cpuSample represents a CPU profiling sample captured by the trace.\n" (struct
+    ^{:line 230} schedCtx
+    ^{:line 231 :tag Time} time
+    ^{:line 232 :tag stackID} stack))
+
+
+
+
+
+
+
+^{:go/end 253} (go/method asEvent "asEvent produces a complete Event from a cpuSample. It needs\nthe evTable from the generation that created it.\n\nWe don't just store it as an Event in generation to minimize\nthe amount of pointer data floating around.\n" ^Event [^cpuSample s ^{:tag (* evTable)} table]
+  ;; TODO(mknyszek): This is go122-specific, but shouldn't be.
+  ;; Generalize this in the future.
+  (let [e ^{:go/breaks [2 4 6]} (lit Event
+        :table table
+        :ctx (.-schedCtx s)
+        :base ^{:go/breaks [2 4]} (lit baseEvent
+          :typ tracev2/EvCPUSample
+          :time (.-time s)))]
+
+
+    (aset (.-args (.-base e)) 0 (conv uint64 (.-stack s)))
+    ^{:line 252} e))
+
+
+
+(go/type stack "stack represents a goroutine stack sample.\n" (struct
+    ^{:line 257 :tag (slice uint64)} pcs))
+
+
+^{:go/end 266} (go/method String ^string [^stack s]
+  (let [^strings/Builder sb (zero strings/Builder)]
+    (range [_ frame (.-pcs s)]
+      (fmt/Fprintf (addr sb) "\t%#v\n" frame))
+
+    (.String sb)))
+
+
+
+(go/type frame "frame represents a single stack frame.\n" (struct
+    ^{:line 270 :tag uint64} pc
+    ^{:line 271 :tag stringID} funcID
+    ^{:line 272 :tag stringID} fileID
+    ^{:line 273 :tag uint64} line))

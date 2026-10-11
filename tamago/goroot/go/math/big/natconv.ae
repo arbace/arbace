@@ -1,0 +1,547 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements nat-to-string conversion functions.
+
+(in-ns 'go.math.big) (go/file "natconv.go" :imports [
+
+
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [math "math"]
+    ^{:line 14} [bits "math/bits"]
+    ^{:line 15} [slices "slices"]
+    ^{:line 16} [sync "sync"]])
+
+
+(go/const ^{:val "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"} digits "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+;; Note: MaxBase = len(digits), but it must remain an untyped rune constant
+;;       for API compatibility.
+
+
+(go/const ^{:val \> :doc "MaxBase is the largest number base accepted for string conversions.\n"} MaxBase (+ 10 (+ (- \z \a) 1) (+ (- \Z \A) 1)))
+(go/const ^{:val \$} maxBaseSmall (+ 10 (+ (- \z \a) 1)))
+
+
+
+
+
+^{:go/end 41} (go/func maxPow "maxPow returns (b**n, n) such that b**n is the largest power b**n <= _M.\nFor instance maxPow(10) == (1e19, 19) for 19 decimal digits in a 64bit Word.\nIn other words, at most n digits in base b fit into a Word.\nTODO(gri) replace this with a table, generated at build time.\n" [^Word b] :results [^Word p ^int n]
+  (set! (values p n) (values b 1)) ; assuming b <= _M
+  (for [max (/ _M b)] (<= p max) _
+    ;; p == b**n && p <= max
+    (set! p * b)
+    (inc! n))
+
+  ;; p == b**n && p <= _M
+  (return))
+
+
+
+^{:go/end 57} (go/func pow "pow returns x**n for n > 0, and 1 otherwise.\n" [^Word x ^int n] :results [^Word p]
+  ;; n == sum of bi * 2**i, for 0 <= i < imax, and bi is 0 or 1
+  ;; thus x**n == product of x**(2**i) for all i where bi == 1
+  ;; (Russian Peasant Method for exponentiation)
+  (set! p 1)
+  (while (> n 0)
+    (when (!= (bit-and n 1) 0)
+      (set! p * x))
+
+    (set! x * x)
+    (set! n >> 1))
+
+  (return))
+
+
+
+(go/var "scan errors\n"
+  ^{:line 61} [errNoDigits (errors/New "number has no digits")]
+  ^{:line 62} [errInvalSep (errors/New "'_' must separate successive digits")])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 288} (go/method scan "scan scans the number corresponding to the longest possible prefix\nfrom r representing an unsigned number in a given conversion base.\nscan returns the corresponding natural number res, the actual base b,\na digit count, and a read or syntax error err, if any.\n\nFor base 0, an underscore character “_” may appear between a base\nprefix and an adjacent digit, and between successive digits; such\nunderscores do not change the value of the number, or the returned\ndigit count. Incorrect placement of underscores is reported as an\nerror if there are no other errors. If base != 0, underscores are\nnot recognized and thus terminate scanning like any other character\nthat is not a valid radix point or digit.\n\n\tnumber    = mantissa | prefix pmantissa .\n\tprefix    = \"0\" [ \"b\" | \"B\" | \"o\" | \"O\" | \"x\" | \"X\" ] .\n\tmantissa  = digits \".\" [ digits ] | digits | \".\" digits .\n\tpmantissa = [ \"_\" ] digits \".\" [ digits ] | [ \"_\" ] digits | \".\" digits .\n\tdigits    = digit { [ \"_\" ] digit } .\n\tdigit     = \"0\" ... \"9\" | \"a\" ... \"z\" | \"A\" ... \"Z\" .\n\nUnless fracOk is set, the base argument must be 0 or a value between\n2 and MaxBase. If fracOk is set, the base argument must be one of\n0, 2, 8, 10, or 16. Providing an invalid base argument leads to a run-\ntime panic.\n\nFor base 0, the number prefix determines the actual base: A prefix of\n“0b” or “0B” selects base 2, “0o” or “0O” selects base 8, and\n“0x” or “0X” selects base 16. If fracOk is false, a “0” prefix\n(immediately followed by digits) selects base 8 as well. Otherwise,\nthe selected base is 10 and no prefix is accepted.\n\nIf fracOk is set, a period followed by a fractional part is permitted.\nThe result value is computed as if there were no period present; and\nthe count value is used to determine the fractional part.\n\nFor bases <= 36, lower and upper case letters are considered the same:\nThe letters 'a' to 'z' and 'A' to 'Z' represent digit values 10 to 35.\nFor bases > 36, the upper case letters 'A' to 'Z' represent the digit\nvalues 36 to 61.\n\nA result digit count > 0 corresponds to the number of (non-prefix) digits\nparsed. A digit count <= 0 indicates the presence of a period (if fracOk\nis set, only), and -count is the number of fractional digits found.\nIn this case, the actual value of the scanned number is res * b**count.\n" [^nat z ^io/ByteScanner r ^int base ^bool fracOk] :results [^nat res ^int b ^int count ^error err]
+  ;; Reject invalid bases.
+  (let [baseOk (or (== base 0)
+        (and (not fracOk) (<= 2 base) (<= base MaxBase))
+        (and fracOk ^:go/paren (or (== base 2) (== base 8) (== base 10) (== base 16))))]
+    (when (not baseOk)
+      (panic (fmt/Sprintf "invalid number base %d" base)))
+
+
+    ;; prev encodes the previously seen char: it is one
+    ;; of '_', '0' (a digit), or '.' (anything else). A
+    ;; valid separator '_' may only occur after a digit
+    ;; and if base == 0.
+    (let [prev \.
+        ^{:line 123} invalSep false
+
+        ;; one char look-ahead
+        (values ch ^:assign err) (.ReadByte r)
+
+        ;; Determine actual base.
+        (values ^:assign b prefix) (values base 0)]
+      (when (== base 0)
+        ;; Actual base is 10 unless there's a base prefix.
+        (set! b 10)
+        (when (and (== err nil) (== ch \0))
+          (set! prev \0)
+          (set! count 1)
+          (set! (values ch err) (.ReadByte r))
+          (when (== err nil)
+            ;; possibly one of 0b, 0B, 0o, 0O, 0x, 0X
+            (switch ch
+              (case [\b \B]
+                (set! (values b prefix) (values 2 \b)))
+              (case [\o \O]
+                (set! (values b prefix) (values 8 \o)))
+              (case [\x \X]
+                (set! (values b prefix) (values 16 \x)))
+              (default
+                (when (not fracOk)
+                  (set! (values b prefix) (values 8 \0)))))
+
+
+            (when (!= prefix 0)
+              (set! count 0) ; prefix is not counted
+              (when (!= prefix \0)
+                (set! (values ch err) (.ReadByte r)))))))
+
+
+
+
+
+
+      ;; Convert string.
+      ;; Algorithm: Collect digits in groups of at most n digits in di.
+      ;; For bases that pack exactly into words (2, 4, 16), append di's
+      ;; directly to the int representation and then reverse at the end (bn==0 marks this case).
+      ;; For other bases, use mulAddWW for every such group to shift
+      ;; z up one group and add di to the result.
+      ;; With more cleverness we could also handle binary bases like 8 and 32
+      ;; (corresponding to 3-bit and 5-bit chunks) that don't pack nicely into
+      ;; words, but those are not too important.
+      (set! z (subslice z _ 0))
+      (let [b1 (conv Word b)
+          ^{:line 172 :tag Word} bn (zero Word) ; b1**n (or 0 for the special bit-packing cases b=2,4,16)
+          ^{:line 173 :tag int} n (zero int)] ; max digits that fit into Word
+        (switch b
+          (case [2] ; 1 bit per digit
+            (set! n _W))
+          (case [4] ; 2 bits per digit
+            (set! n (/ _W 2)))
+          (case [16] ; 4 bits per digit
+            (set! n (/ _W 4)))
+          (default
+            (set! (values bn n) (maxPow b1))))
+
+        (let [di (conv Word 0) ; 0 <= di < b1**i < bn
+            ^{:line 185} i 0 ; 0 <= i < n
+            ^{:line 186} dp -1] ; position of decimal point
+          (while (== err nil)
+            (cond (and (== ch \.) fracOk) (do
+                (set! fracOk false)
+                (when (== prev \_)
+                  (set! invalSep true))
+
+                (set! prev \.)
+                (set! dp count))
+              (and (== ch \_) (== base 0)) (do
+                (when (!= prev \0)
+                  (set! invalSep true))
+
+                (set! prev \_)) :else
+
+              ;; convert rune into digit value d1
+              (let [^Word d1 (zero Word)]
+                (switch
+                  (case [(and (<= \0 ch) (<= ch \9))]
+                    (set! d1 (conv Word (- ch \0))))
+                  (case [(and (<= \a ch) (<= ch \z))]
+                    (set! d1 (conv Word (+ (- ch \a) 10))))
+                  (case [(and (<= \A ch) (<= ch \Z))]
+                    (if (<= b maxBaseSmall)
+                      (set! d1 (conv Word (+ (- ch \A) 10)))
+
+                      (set! d1 (conv Word (+ (- ch \A) maxBaseSmall)))))
+
+                  (default
+                    (set! d1 (+ MaxBase 1))))
+
+                (when (>= d1 b1)
+                  (.UnreadByte r) ; ch does not belong to number anymore
+                  (break))
+
+                (set! prev \0)
+                (inc! count)
+
+                ;; collect d1 in di
+                (set! di (+ (* di b1) d1))
+                (inc! i)
+
+                ;; if di is "full", add it to the result
+                (when (== i n)
+                  (if (== bn 0)
+                    (set! z (append z di))
+
+                    (set! z (.mulAddWW z z bn di)))
+
+                  (set! di 0)
+                  (set! i 0))))
+
+
+
+            (set! (values ch err) (.ReadByte r)))
+
+
+          (when (== err io/EOF)
+            (set! err nil))
+
+
+          ;; other errors take precedence over invalid separators
+          (when (and (== err nil) ^:go/paren (or invalSep (== prev \_)))
+            (set! err errInvalSep))
+
+
+          (when (== count 0)
+            ;; no digits found
+            (when (== prefix \0)
+              ;; there was only the octal prefix 0 (possibly followed by separators and digits > 7);
+              ;; interpret as decimal 0
+              (return (subslice z _ 0) 10 1 err))
+
+            (set! err errNoDigits)) ; fall through; result will be 0
+
+
+          (if (== bn 0) (do
+              (when (> i 0)
+                ;; Add remaining digit chunk to result.
+                ;; Left-justify group's digits; will shift back down after reverse.
+                (set! z (append z (* di (pow b1 (- n i))))))
+
+              (^{:inst [nat Word]} slices/Reverse z)
+              (set! z (.norm z))
+              (when (> i 0)
+                (set! z (.rsh z z (* (conv uint (- n i)) (conv uint (/ _W n)))))))
+
+            (do
+              (when (> i 0)
+                ;; Add remaining digit chunk to result.
+                (set! z (.mulAddWW z z (pow b1 i) di)))))
+
+
+          (set! res z)
+
+          ;; adjust count for fraction, if any
+          (when (>= dp 0)
+            ;; 0 <= dp <= count
+            (set! count (- dp count)))
+
+
+          (return))))))
+
+
+
+
+^{:go/end 294} (go/method utoa "utoa converts x to an ASCII representation in the given base;\nbase must be between 2 and MaxBase, inclusive.\n" ^{:tag (slice byte)} [^nat x ^int base]
+  (.itoa x false base))
+
+
+
+^{:go/end 388} (go/method itoa "itoa is like utoa but it prepends a '-' if neg && x != 0.\n" ^{:tag (slice byte)} [^nat x ^bool neg ^int base]
+  (when (or (< base 2) (> base MaxBase))
+    (panic "invalid base"))
+
+
+  ;; x == 0
+  (when (== (len x) 0)
+    (return (conv (slice byte) "0")))
+
+  ;; len(x) > 0
+
+  ;; allocate buffer for conversion
+  (let [i (+ (conv int (/ (conv float64 (.bitLen x)) (math/Log2 (conv float64 base)))) 1)] ; off by 1 at most
+    (when neg
+      (inc! i))
+
+    (let [s (make (slice byte) i)]
+
+      ;; convert power of two and non power of two bases separately
+      (if [b (conv Word base)] (== b (bit-and b (- b)))
+        ;; shift is base b digit size in bits
+        (let [shift (conv uint (bits/TrailingZeros (conv uint b))) ; shift > 0 because b >= 2
+            ^{:line 319} mask (conv Word (- ^Word (<< 1 shift) 1))
+            ^{:line 320} w (aget x 0) ; current word
+            ^{:line 321} nbits (conv uint _W)] ; number of unprocessed bits in w
+
+          ;; convert less-significant words (include leading zeros)
+          (for [k 1] (< k (len x)) (inc! k)
+            ;; convert full digits
+            (while (>= nbits shift)
+              (dec! i)
+              (aset s i (aget digits (bit-and w mask)))
+              (set! w >> shift)
+              (set! nbits - shift))
+
+
+            ;; convert any partial leading digit and advance to next word
+            (if (== nbits 0) (do
+                ;; no partial digit remaining, just advance
+                (set! w (aget x k))
+                (set! nbits _W))
+              (do
+                ;; partial digit in current word w (== x[k-1]) and next word x[k]
+                (set! w bit-or (<< (aget x k) nbits))
+                (dec! i)
+                (aset s i (aget digits (bit-and w mask)))
+
+                ;; advance
+                (set! w (>> (aget x k) (- shift nbits)))
+                (set! nbits (- _W (- shift nbits))))))
+
+
+
+          ;; convert digits of most-significant word w (omit leading zeros)
+          (while (!= w 0)
+            (dec! i)
+            (aset s i (aget digits (bit-and w mask)))
+            (set! w >> shift)))
+
+
+
+        (let [stk (getStack)]
+          (defer (.free stk))
+
+          (let [(values bb ndigits) (maxPow b)
+
+              ;; construct table of successive squares of bb*leafSize to use in subdivisions
+              ;; result (table != nil) <=> (len(x) > leafSize > 0)
+              ^{:line 365} table (divisors stk (len x) b ndigits bb)
+
+              ;; preserve x, create local copy for use by convertWords
+              ^{:line 368} q (.set (conv nat nil) x)]
+
+            ;; convert q to string s in base b
+            (.convertWords q stk s b ndigits bb table)
+
+            ;; strip leading zeros
+            ;; (x != 0; thus s must contain at least one non-zero digit
+            ;; and the loop will terminate)
+            (set! i 0)
+            (while (== (aget s i) \0)
+              (inc! i)))))
+
+
+
+      (when neg
+        (dec! i)
+        (aset s i \-))
+
+
+      (subslice s i))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 470} (go/method convertWords "Convert words of q to base b digits in s. If q is large, it is recursively \"split in half\"\nby nat/nat division using tabulated divisors. Otherwise, it is converted iteratively using\nrepeated nat/Word division.\n\nThe iterative method processes n Words by n divW() calls, each of which visits every Word in the\nincrementally shortened q for a total of n + (n-1) + (n-2) ... + 2 + 1, or n(n+1)/2 divW()'s.\nRecursive conversion divides q by its approximate square root, yielding two parts, each half\nthe size of q. Using the iterative method on both halves means 2 * (n/2)(n/2 + 1)/2 divW()'s\nplus the expensive long div(). Asymptotically, the ratio is favorable at 1/2 the divW()'s, and\nis made better by splitting the subblocks recursively. Best is to split blocks until one more\nsplit would take longer (because of the nat/nat div()) than the twice as many divW()'s of the\niterative approach. This threshold is represented by leafSize. Benchmarking of leafSize in the\nrange 2..64 shows that values of 8 and 16 work well, with a 4x speedup at medium lengths and\n~30x for 20000 digits. Use nat_test.go's BenchmarkLeafSize tests to optimize leafSize for\nspecific hardware.\n" [^nat q ^{:tag (* stack)} stk ^{:tag (slice byte)} s ^Word b ^int ndigits ^Word bb ^{:tag (slice divisor)} table]
+  ;; split larger blocks recursively
+  (when (!= table nil)
+    ;; len(q) > leafSize > 0
+    (let [^nat r (zero nat)
+        ^{:line 410} index (- (len table) 1)]
+      (while (> (len q) leafSize)
+        ;; find divisor close to sqrt(q) if possible, but in any case < q
+        (let [maxLength (.bitLen q) ; ~= log2 q, or at of least largest possible q of this bit length
+            ^{:line 414} minLength (>> maxLength 1)] ; ~= log2 sqrt(q)
+          (while (and (> index 0) (> (.-nbits (aget table (- index 1))) minLength))
+            (dec! index)) ; desired
+
+          (when (and (>= (.-nbits (aget table index)) maxLength) (>= (.cmp (.-bbb (aget table index)) q) 0))
+            (dec! index)
+            (when (< index 0)
+              (panic "internal inconsistency")))
+
+
+
+          ;; split q into the two digit number (q'*bbb + r) to form independent subblocks
+          (set! (values q r) (.div q stk r q (.-bbb (aget table index))))
+
+          ;; convert subblocks and collect results in s[:h] and s[h:]
+          (let [h (- (len s) (.-ndigits (aget table index)))]
+            (.convertWords r stk (subslice s h) b ndigits bb (subslice table 0 index))
+            (set! s (subslice s _ h))))))) ; == q.convertWords(stk, s, b, ndigits, bb, table[0:index+1])
+
+
+
+  ;; having split any large blocks now process the remaining (small) block iteratively
+  (let [i (len s)
+      ^{:line 437 :tag Word} r (zero Word)]
+    (if (== b 10)
+      ;; hard-coding for 10 here speeds this up by 1.25x (allows for / and % by constants)
+      (while (> (len q) 0)
+        ;; extract least significant, base bb "digit"
+        (set! (values q r) (.divW q q bb))
+        (for [j 0] (and (< j ndigits) (> i 0)) (inc! j)
+          (dec! i)
+          ;; avoid % computation since r%10 == r - int(r/10)*10;
+          ;; this appears to be faster for BenchmarkString10000Base10
+          ;; and smaller strings (but a bit slower for larger ones)
+          (let [t (/ r 10)]
+            (aset s i (+ \0 (conv byte (- r (* t 10)))))
+            (set! r t))))
+
+
+
+      (while (> (len q) 0)
+        ;; extract least significant, base bb "digit"
+        (set! (values q r) (.divW q q bb))
+        (for [j 0] (and (< j ndigits) (> i 0)) (inc! j)
+          (dec! i)
+          (aset s i (aget digits (% r b)))
+          (set! r / b))))
+
+
+
+
+    ;; prepend high-order zeros
+    (while (> i 0) ; while need more leading zeros
+      (dec! i)
+      (aset s i \0))))
+
+
+
+
+
+
+
+
+(go/var ^{:tag int :doc "Split blocks greater than leafSize Words (or set to 0 to disable recursive conversion)\nBenchmark and configure leafSize using: go test -bench=\"Leaf\"\n\n\t8 and 16 effective on 3.0 GHz Xeon \"Clovertown\" CPU (128 byte cache lines)\n\t8 and 16 effective on 2.66 GHz Core 2 Duo \"Penryn\" CPU\n"} leafSize 8) ; number of Word-size binary values treat as a monolithic block
+
+(go/type divisor (struct
+    ^{:line 480 :tag nat} bbb ; divisor
+    ^{:line 481 :tag int} nbits ; bit length of divisor (discounting leading zeros) ~= log2(bbb)
+    ^{:line 482 :tag int} ndigits)) ; digit length of divisor in terms of output base digits
+
+
+(go/var ^{:tag (struct sync/Mutex ^{:tag (array 64 divisor)} table)} cacheBase10)
+
+;; cached divisors for base 10
+
+
+
+^{:go/end 493} (go/method expWW "expWW computes x**y\n" ^nat [^nat z ^{:tag (* stack)} stk ^Word x ^Word y]
+  (.expNN z stk (.setWord (conv nat nil) x) (.setWord (conv nat nil) y) nil false))
+
+
+
+^{:go/end 548} (go/func divisors "construct table of powers of bb*leafSize to use in subdivisions.\n" ^{:tag (slice divisor)} [^{:tag (* stack)} stk ^int m ^Word b ^int ndigits ^Word bb]
+  ;; only compute table when recursive conversion is enabled and x is large
+  (when (or (== leafSize 0) (<= m leafSize))
+    (return nil))
+
+
+  ;; determine k where (bb**leafSize)**(2**k) >= sqrt(x)
+  (let [k 1]
+    (for [words leafSize] (and (< words (>> m 1)) (< k (len (.-table cacheBase10)))) (set! words << 1)
+      (inc! k))
+
+
+    ;; reuse and extend existing table of divisors or create new table as appropriate
+    (let [^{:tag (slice divisor)} table (zero (slice divisor))] ; for b == 10, table overlaps with cacheBase10.table
+      (if (== b 10) (do
+          ^{:go/via [Mutex]} (.Lock cacheBase10)
+          (set! table (subslice (.-table cacheBase10) 0 k))) ; reuse old table for this conversion
+
+        (set! table (make (slice divisor) k))) ; create new table for this conversion
+
+
+      ;; extend table
+      (when (== (.-ndigits (aget table (- k 1))) 0)
+        ;; add new entries as needed
+        (let [^nat larger (zero nat)]
+          (for [i 0] (< i k) (inc! i)
+            (when (== (.-ndigits (aget table i)) 0)
+              (if (== i 0) (do
+                  (set! (.-bbb (aget table 0)) (.expWW (conv nat nil) stk bb (conv Word leafSize)))
+                  (set! (.-ndigits (aget table 0)) (* ndigits leafSize)))
+                (do
+                  (set! (.-bbb (aget table i)) (.sqr (conv nat nil) stk (.-bbb (aget table (- i 1)))))
+                  (set! (.-ndigits (aget table i)) (* 2 (.-ndigits (aget table (- i 1)))))))
+
+
+              ;; optimization: exploit aggregated extra bits in macro blocks
+              (set! larger (.set (conv nat nil) (.-bbb (aget table i))))
+              (while (== (mulAddVWW larger larger b 0) 0)
+                (set! (.-bbb (aget table i)) (.set (.-bbb (aget table i)) larger))
+                (inc! (.-ndigits (aget table i))))
+
+
+              (set! (.-nbits (aget table i)) (.bitLen (.-bbb (aget table i))))))))
+
+
+
+
+      (when (== b 10)
+        ^{:go/via [Mutex]} (.Unlock cacheBase10))
+
+
+      ^{:line 547} table)))

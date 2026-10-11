@@ -1,0 +1,130 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.crypto.internal.fips140.aes.gcm) (go/file "gcm_asm.go" :build ["//go:build (amd64 || arm64) && !purego"] :imports [
+
+
+    ^{:line 10} [aes "crypto/internal/fips140/aes"]
+    ^{:line 11} [subtle "crypto/internal/fips140/subtle"]
+    ^{:line 12} [cpu "crypto/internal/fips140deps/cpu"]
+    ^{:line 13} [impl "crypto/internal/impl"]])
+
+
+;; The following functions are defined in gcm_*.s.
+
+
+(go/func ^:extern ^:go/noescape gcmAesInit [^{:tag (* (array 256 byte))} productTable ^{:tag (slice uint32)} ks])
+
+
+(go/func ^:extern ^:go/noescape gcmAesData [^{:tag (* (array 256 byte))} productTable ^{:tag (slice byte)} data ^{:tag (* (array 16 byte))} T])
+
+
+(go/func ^:extern ^:go/noescape gcmAesEnc [^{:tag (* (array 256 byte))} productTable ^{:tag (slice byte)} dst ^{:tag (slice byte)} src ^{:tag (* (array 16 byte))} ctr ^{:tag (* (array 16 byte))} T ^{:tag (slice uint32)} ks])
+
+
+(go/func ^:extern ^:go/noescape gcmAesDec [^{:tag (* (array 256 byte))} productTable ^{:tag (slice byte)} dst ^{:tag (slice byte)} src ^{:tag (* (array 16 byte))} ctr ^{:tag (* (array 16 byte))} T ^{:tag (slice uint32)} ks])
+
+
+(go/func ^:extern ^:go/noescape gcmAesFinish [^{:tag (* (array 256 byte))} productTable ^{:tag (* (array 16 byte))} tagMask ^{:tag (* (array 16 byte))} T ^uint64 pLen ^uint64 dLen])
+
+
+(go/var ^{:doc "Keep in sync with crypto/tls.hasAESGCMHardwareSupport.\n"} supportsAESGCM (or (and cpu/X86HasAES cpu/X86HasPCLMULQDQ cpu/X86HasSSE41 cpu/X86HasSSSE3)
+    (and cpu/ARM64HasAES cpu/ARM64HasPMULL)))
+
+^{:go/end 44} (go/func init []
+  (when cpu/AMD64
+    (impl/Register "gcm" "AES-NI" (addr supportsAESGCM)))
+
+  (when cpu/ARM64
+    (impl/Register "gcm" "Armv8.0" (addr supportsAESGCM))))
+
+
+
+
+
+
+^{:go/end 53} (go/func checkGenericIsExpected "checkGenericIsExpected is called by the variable-time implementation to make\nsure it is not used when hardware support is available. It shouldn't happen,\nbut this way it's more evidently correct.\n" []
+  (when supportsAESGCM
+    (panic "gcm: internal error: using generic implementation despite hardware support")))
+
+
+
+(go/type gcmPlatformData (struct
+    ^{:line 56 :tag (array 256 byte)} productTable))
+
+
+^{:go/end 64} (go/func initGCM [^{:tag (* GCM)} g]
+  (when (not supportsAESGCM)
+    (return))
+
+  (gcmAesInit (addr ^{:go/via [gcmPlatformData]} (.-productTable g)) (aes/EncryptionKeySchedule (addr (.-cipher g)))))
+
+
+^{:go/end 94} (go/func seal [^{:tag (slice byte)} out ^{:tag (* GCM)} g ^{:tag (slice byte)} nonce ^{:tag (slice byte)} plaintext ^{:tag (slice byte)} data]
+  (when (not supportsAESGCM)
+    (sealGeneric out g nonce plaintext data)
+    (return))
+
+
+  (let [(values ^{:tag (array gcmBlockSize byte)} counter ^{:tag (array gcmBlockSize byte)} tagMask) (zero (array gcmBlockSize byte))]
+
+    (if (== (len nonce) gcmStandardNonceSize) (do
+        ;; Init counter to nonce||1
+        (copy (subslice counter) nonce)
+        (aset counter (- gcmBlockSize 1) 1))
+      (do
+        ;; Otherwise counter = GHASH(nonce)
+        (gcmAesData (addr ^{:go/via [gcmPlatformData]} (.-productTable g)) nonce (addr counter))
+        (gcmAesFinish (addr ^{:go/via [gcmPlatformData]} (.-productTable g)) (addr tagMask) (addr counter) (conv uint64 (len nonce)) (conv uint64 0))))
+
+
+    (aes/EncryptBlockInternal (addr (.-cipher g)) (subslice tagMask) (subslice counter))
+
+    (let [^{:tag (array gcmTagSize byte)} tagOut (zero (array gcmTagSize byte))]
+      (gcmAesData (addr ^{:go/via [gcmPlatformData]} (.-productTable g)) data (addr tagOut))
+
+      (when (> (len plaintext) 0)
+        (gcmAesEnc (addr ^{:go/via [gcmPlatformData]} (.-productTable g)) out plaintext (addr counter) (addr tagOut) (aes/EncryptionKeySchedule (addr (.-cipher g)))))
+
+      (gcmAesFinish (addr ^{:go/via [gcmPlatformData]} (.-productTable g)) (addr tagMask) (addr tagOut) (conv uint64 (len plaintext)) (conv uint64 (len data)))
+      (copy (subslice out (len plaintext)) (subslice tagOut)))))
+
+
+^{:go/end 131} (go/func open ^error [^{:tag (slice byte)} out ^{:tag (* GCM)} g ^{:tag (slice byte)} nonce ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} data]
+  (when (not supportsAESGCM)
+    (return (openGeneric out g nonce ciphertext data)))
+
+
+  (let [tag (subslice ciphertext (- (len ciphertext) (.-tagSize g)))]
+    (set! ciphertext (subslice ciphertext _ (- (len ciphertext) (.-tagSize g))))
+
+    ;; See GCM spec, section 7.1.
+    (let [(values ^{:tag (array gcmBlockSize byte)} counter ^{:tag (array gcmBlockSize byte)} tagMask) (zero (array gcmBlockSize byte))]
+
+      (if (== (len nonce) gcmStandardNonceSize) (do
+          ;; Init counter to nonce||1
+          (copy (subslice counter) nonce)
+          (aset counter (- gcmBlockSize 1) 1))
+        (do
+          ;; Otherwise counter = GHASH(nonce)
+          (gcmAesData (addr ^{:go/via [gcmPlatformData]} (.-productTable g)) nonce (addr counter))
+          (gcmAesFinish (addr ^{:go/via [gcmPlatformData]} (.-productTable g)) (addr tagMask) (addr counter) (conv uint64 (len nonce)) (conv uint64 0))))
+
+
+      (aes/EncryptBlockInternal (addr (.-cipher g)) (subslice tagMask) (subslice counter))
+
+      ^{:go/breaks [[6 130]]} (let [^{:tag (array gcmTagSize byte)} expectedTag (zero (array gcmTagSize byte))]
+        (gcmAesData (addr ^{:go/via [gcmPlatformData]} (.-productTable g)) data (addr expectedTag))
+
+        (when (> (len ciphertext) 0)
+          (gcmAesDec (addr ^{:go/via [gcmPlatformData]} (.-productTable g)) out ciphertext (addr counter) (addr expectedTag) (aes/EncryptionKeySchedule (addr (.-cipher g)))))
+
+        (gcmAesFinish (addr ^{:go/via [gcmPlatformData]} (.-productTable g)) (addr tagMask) (addr expectedTag) (conv uint64 (len ciphertext)) (conv uint64 (len data)))
+
+        (when (!= (subtle/ConstantTimeCompare (subslice expectedTag _ (.-tagSize g)) tag) 1)
+          (return errOpen))
+
+        nil))))

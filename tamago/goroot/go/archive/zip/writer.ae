@@ -1,0 +1,739 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.archive.zip) (go/file "writer.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [hash "hash"]
+    ^{:line 12} [crc32 "hash/crc32"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [fs "io/fs"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [utf8 "unicode/utf8"]])
+
+
+(go/var
+  ^{:line 20} [errLongName (errors/New "zip: FileHeader.Name too long")]
+  ^{:line 21} [errLongExtra (errors/New "zip: FileHeader.Extra too long")])
+
+
+
+(go/type Writer "Writer implements a zip file writer.\n" (struct
+    ^{:line 26 :tag (* countWriter)} cw
+    ^{:line 27 :tag (slice (* header))} dir
+    ^{:line 28 :tag (* fileWriter)} last
+    ^{:line 29 :tag bool} closed
+    ^{:line 30 :tag (map uint16 Compressor)} compressors
+    ^{:line 31 :tag string} comment
+
+
+
+    ^{:line 35 :tag (func [^uint64 size ^uint64 offset]) :doc "testHookCloseSizeOffset if non-nil is called with the size\nof offset of the central directory at Close.\n"} testHookCloseSizeOffset))
+
+
+(go/type header (struct
+    (* FileHeader)
+    ^{:line 40 :tag uint64} offset
+    ^{:line 41 :tag bool} raw))
+
+
+
+
+
+
+
+^{:go/end 51} (go/func NewWriter "NewWriter returns a new [Writer] writing a zip file to w.\n\nNote that the exact bytes written to w are not covered by the Go 1\ncompatibility promise. Callers, including tests, should not depend on the\nexact written bytes.\n" ^{:tag (* Writer)} [^io/Writer w]
+  (addr (lit Writer :cw (addr (lit countWriter :w (bufio/NewWriter w))))))
+
+
+
+
+
+
+^{:go/end 62} (go/method SetOffset "SetOffset sets the offset of the beginning of the zip data within the\nunderlying writer. It should be used when the zip data is appended to an\nexisting file, such as a binary executable.\nIt must be called before any data is written.\n" [^{:tag (* Writer)} w ^int64 n]
+  (when (!= (.-count (.-cw w)) 0)
+    (panic "zip: SetOffset called after data was written"))
+
+  (set! (.-count (.-cw w)) n))
+
+
+
+
+^{:go/end 68} (go/method Flush "Flush flushes any buffered data to the underlying writer.\nCalling Flush is not normally necessary; calling Close is sufficient.\n" ^error [^{:tag (* Writer)} w]
+  (.Flush (assert (* bufio/Writer) (.-w (.-cw w)))))
+
+
+
+
+^{:go/breaks [6] :go/end 78} (go/method SetComment "SetComment sets the end-of-central-directory comment field.\nIt can only be called before [Writer.Close].\n" ^error [^{:tag (* Writer)} w ^string comment]
+  (when (> (len comment) uint16max)
+    (return (errors/New "zip: Writer.Comment too long")))
+
+  (set! (.-comment w) comment)
+  nil)
+
+
+
+
+^{:go/end 227} (go/method Close "Close finishes writing the zip file by writing the central directory.\nIt does not close the underlying writer.\n" ^error [^{:tag (* Writer)} w]
+  (when (and (!= (.-last w) nil) (not (.-closed (.-last w))))
+    (when [err (.close (.-last w))] (!= err nil)
+      (return err))
+
+    (set! (.-last w) nil))
+
+  (when (.-closed w)
+    (return (errors/New "zip: writer closed twice")))
+
+  (set! (.-closed w) true)
+
+  ;; write central directory
+  (let [start (.-count (.-cw w))
+      ^{:line 96} usedZip64 false]
+    (range [_ h (.-dir w)]
+      ;; For the Central Directory, we always have the correct sizes.
+      ;;
+      ;; Implementations disagree on what triggers the inclusion of a Zip64
+      ;; extra field: Info-ZIP only writes it if any size or offset EXCEEDS
+      ;; 4GiB - 1, while libarchive writes it if any size REACHES OR EXCEEDS
+      ;; 4GiB - 1, or if the offset EXCEEDS 4GiB - 1. The spec is ambiguous.
+      ;;
+      ;; We conservatively write Zip64 extra fields if any size or offset
+      ;; REACHES OR EXCEEDS 4GiB - 1, to maximize compatibility with readers.
+      ;; There is no ambiguity in parsing, so there is no downside to it.
+      ;;
+      ;; The spec is clear though that all and only the fields that REACH OR
+      ;; EXCEED 4GiB - 1 are included in the Zip64 extra, once it's present.
+      (let [readerVersion ^{:go/via [FileHeader]} (.-ReaderVersion h)]
+        (when (or (>= ^{:go/via [FileHeader]} (.-CompressedSize64 h) uint32max) (>= ^{:go/via [FileHeader]} (.-UncompressedSize64 h) uint32max) (>= (.-offset h) uint32max))
+          (set! usedZip64 true)
+          (set! readerVersion (max readerVersion zipVersion45))
+          (let [^uint16 size (zero uint16)
+              ^{:line 116 :tag (array 28 byte)} buf (zero (array 28 byte)) ; 2x uint16 + up to 3x uint64
+              ^{:line 117} eb (conv writeBuf (subslice buf))]
+            (.uint16 eb zip64ExtraID)
+            (.uint16 eb 0) ; size to be filled out later
+            (when (>= ^{:go/via [FileHeader]} (.-UncompressedSize64 h) uint32max)
+              (.uint64 eb ^{:go/via [FileHeader]} (.-UncompressedSize64 h))
+              (set! size + 8))
+
+            (when (>= ^{:go/via [FileHeader]} (.-CompressedSize64 h) uint32max)
+              (.uint64 eb ^{:go/via [FileHeader]} (.-CompressedSize64 h))
+              (set! size + 8))
+
+            (when (>= (.-offset h) uint32max)
+              (.uint64 eb (.-offset h))
+              (set! size + 8))
+
+            (let [sb (conv writeBuf (subslice buf 2))]
+              (.uint16 sb size)
+              (set! ^{:go/via [FileHeader]} (.-Extra h) (append ^{:go/via [FileHeader]} (.-Extra h) (spread (subslice buf _ (+ 4 size))))))))
+
+
+        (let [^{:tag (array directoryHeaderLen byte)} buf (zero (array directoryHeaderLen byte))
+            ^{:line 138} b (conv writeBuf (subslice buf))]
+          (.uint32 b (conv uint32 directoryHeaderSignature))
+          (.uint16 b ^{:go/via [FileHeader]} (.-CreatorVersion h))
+          (.uint16 b readerVersion)
+          (.uint16 b ^{:go/via [FileHeader]} (.-Flags h))
+          (.uint16 b ^{:go/via [FileHeader]} (.-Method h))
+          (.uint16 b ^{:go/via [FileHeader]} (.-ModifiedTime h))
+          (.uint16 b ^{:go/via [FileHeader]} (.-ModifiedDate h))
+          (.uint32 b ^{:go/via [FileHeader]} (.-CRC32 h))
+          (.uint32 b (conv uint32 (min ^{:go/via [FileHeader]} (.-CompressedSize64 h) uint32max)))
+          (.uint32 b (conv uint32 (min ^{:go/via [FileHeader]} (.-UncompressedSize64 h) uint32max)))
+          (.uint16 b (conv uint16 (len ^{:go/via [FileHeader]} (.-Name h))))
+          (.uint16 b (conv uint16 (len ^{:go/via [FileHeader]} (.-Extra h))))
+          (.uint16 b (conv uint16 (len ^{:go/via [FileHeader]} (.-Comment h))))
+          (set! b (subslice b 4)) ; skip disk number start and internal file attr (2x uint16)
+          (.uint32 b ^{:go/via [FileHeader]} (.-ExternalAttrs h))
+          (.uint32 b (conv uint32 (min (.-offset h) uint32max)))
+          (when [(values _ err) (.Write (.-cw w) (subslice buf))] (!= err nil)
+            (return err))
+
+          (when [(values _ err) (io/WriteString (.-cw w) ^{:go/via [FileHeader]} (.-Name h))] (!= err nil)
+            (return err))
+
+          (when [(values _ err) (.Write (.-cw w) ^{:go/via [FileHeader]} (.-Extra h))] (!= err nil)
+            (return err))
+
+          (when [(values _ err) (io/WriteString (.-cw w) ^{:go/via [FileHeader]} (.-Comment h))] (!= err nil)
+            (return err)))))
+
+
+    (let [end (.-count (.-cw w))
+
+        ^{:line 170} records (conv uint64 (len (.-dir w)))
+        ^{:line 171} size (conv uint64 (- end start))
+        ^{:line 172} offset (conv uint64 start)]
+
+      (when [f (.-testHookCloseSizeOffset w)] (!= f nil)
+        (f size offset))
+
+
+      ;; Emit the Zip64 EOCD records whenever any individual entry needed a Zip64
+      ;; extra field, even if the EOCD's own fields fit in 32 bits, matching
+      ;; Info-ZIP (but not libarchive). See APPNOTE 4.3.9.2: "when Zip64
+      ;; extensions are in use, the EOCD64 record must be present."
+      (when (or usedZip64 (>= records uint16max) (>= size uint32max) (>= offset uint32max))
+        (let [^{:tag (array (+ directory64EndLen directory64LocLen) byte)} buf (zero (array (+ directory64EndLen directory64LocLen) byte))
+            ^{:line 184} b (conv writeBuf (subslice buf))]
+
+          ;; zip64 end of central directory record
+          (.uint32 b directory64EndSignature)
+          (.uint64 b (- directory64EndLen 12)) ; length minus signature (uint32) and length fields (uint64)
+          (.uint16 b zipVersion45) ; version made by
+          (.uint16 b zipVersion45) ; version needed to extract
+          (.uint32 b 0) ; number of this disk
+          (.uint32 b 0) ; number of the disk with the start of the central directory
+          (.uint64 b records) ; total number of entries in the central directory on this disk
+          (.uint64 b records) ; total number of entries in the central directory
+          (.uint64 b size) ; size of the central directory
+          (.uint64 b offset) ; offset of start of central directory with respect to the starting disk number
+
+          ;; zip64 end of central directory locator
+          (.uint32 b directory64LocSignature)
+          (.uint32 b 0) ; number of the disk with the start of the zip64 end of central directory
+          (.uint64 b (conv uint64 end)) ; relative offset of the zip64 end of central directory record
+          (.uint32 b 1) ; total number of disks
+
+          (when [(values _ err) (.Write (.-cw w) (subslice buf))] (!= err nil)
+            (return err))))
+
+
+
+      ;; write end record
+      (let [^{:tag (array directoryEndLen byte)} buf (zero (array directoryEndLen byte))
+          ^{:line 211} b (conv writeBuf (subslice buf))]
+        (.uint32 b (conv uint32 directoryEndSignature))
+        (set! b (subslice b 4)) ; skip over disk number and first disk number (2x uint16)
+        (.uint16 b (conv uint16 (min uint16max records))) ; number of entries this disk
+        (.uint16 b (conv uint16 (min uint16max records))) ; number of entries total
+        (.uint32 b (conv uint32 (min uint32max size))) ; size of directory
+        (.uint32 b (conv uint32 (min uint32max offset))) ; start of directory
+        (.uint16 b (conv uint16 (len (.-comment w)))) ; byte size of EOCD comment
+        (when [(values _ err) (.Write (.-cw w) (subslice buf))] (!= err nil)
+          (return err))
+
+        (when [(values _ err) (io/WriteString (.-cw w) (.-comment w))] (!= err nil)
+          (return err))
+
+
+        (.Flush (assert (* bufio/Writer) (.-w (.-cw w))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 245} (go/method Create "Create adds a file to the zip file using the provided name.\nIt returns a [Writer] to which the file contents should be written.\nThe file contents will be compressed using the [Deflate] method.\nThe name must be a relative path: it must not start with a drive\nletter (e.g. C:) or leading slash, and only forward slashes are\nallowed. To create a directory instead of a file, add a trailing\nslash to the name. Duplicate names will not overwrite previous entries\nand are appended to the zip file.\nThe file's contents must be written to the [io.Writer] before the next\ncall to [Writer.Create], [Writer.CreateHeader], or [Writer.Close].\n" [^{:tag (* Writer)} w ^string name] :results [io/Writer error]
+  (let [header (addr ^{:go/breaks [2 4]} (lit FileHeader
+          :Name name
+          :Method Deflate))]
+
+    (.CreateHeader w header)))
+
+
+
+
+
+^{:go/end 268} (go/func detectUTF8 "detectUTF8 reports whether s is a valid UTF-8 string, and whether the string\nmust be considered UTF-8 encoding (i.e., not compatible with CP-437, ASCII,\nor any other common encoding).\n" [^string s] :results [^bool valid ^bool require]
+  (for [i 0] (< i (len s)) _
+    (let [(values r size) (utf8/DecodeRuneInString (subslice s i))]
+      (set! i + size)
+      ;; Officially, ZIP uses CP-437, but many readers use the system's
+      ;; local character encoding. Most encoding are compatible with a large
+      ;; subset of CP-437, which itself is ASCII-like.
+      ;;
+      ;; Forbid 0x7e and 0x5c since EUC-KR and Shift-JIS replace those
+      ;; characters with localized currency and overline characters.
+      (when (or (< r 0x20) (> r 0x7d) (== r 0x5c))
+        (when (or (not (utf8/ValidRune r)) ^:go/paren (and (== r utf8/RuneError) (== size 1)))
+          (return false false))
+
+        (set! require true))))
+
+
+  (return true require))
+
+
+
+
+^{:go/breaks [[6 282]] :go/end 283} (go/method prepare "prepare performs the bookkeeping operations required at the start of\nCreateHeader and CreateRaw.\n" ^error [^{:tag (* Writer)} w ^{:tag (* FileHeader)} fh]
+  (when (and (!= (.-last w) nil) (not (.-closed (.-last w))))
+    (when [err (.close (.-last w))] (!= err nil)
+      (return err)))
+
+
+  (when (and (> (len (.-dir w)) 0) (== (.-FileHeader (aget (.-dir w) (- (len (.-dir w)) 1))) fh))
+    ;; See https://golang.org/issue/11144 confusion.
+    (return (errors/New "archive/zip: invalid duplicate FileHeader")))
+
+  nil)
+
+
+
+
+
+
+
+
+
+^{:go/end 405} (go/method CreateHeader "CreateHeader adds a file to the zip archive using the provided [FileHeader]\nfor the file metadata. [Writer] takes ownership of fh and may mutate\nits fields. The caller must not modify fh after calling [Writer.CreateHeader].\n\nThis returns a [Writer] to which the file contents should be written.\nThe file's contents must be written to the io.Writer before the next\ncall to [Writer.Create], [Writer.CreateHeader], [Writer.CreateRaw], or [Writer.Close].\n" [^{:tag (* Writer)} w ^{:tag (* FileHeader)} fh] :results [io/Writer error]
+  (when [err (.prepare w fh)] (!= err nil)
+    (return nil err))
+
+
+  ;; The ZIP format has a sad state of affairs regarding character encoding.
+  ;; Officially, the name and comment fields are supposed to be encoded
+  ;; in CP-437 (which is mostly compatible with ASCII), unless the UTF-8
+  ;; flag bit is set. However, there are several problems:
+  ;;
+  ;;	* Many ZIP readers still do not support UTF-8.
+  ;;	* If the UTF-8 flag is cleared, several readers simply interpret the
+  ;;	name and comment fields as whatever the local system encoding is.
+  ;;
+  ;; In order to avoid breaking readers without UTF-8 support,
+  ;; we avoid setting the UTF-8 flag if the strings are CP-437 compatible.
+  ;; However, if the strings require multibyte UTF-8 encoding and is a
+  ;; valid UTF-8 string, then we set the UTF-8 bit.
+  ;;
+  ;; For the case, where the user explicitly wants to specify the encoding
+  ;; as UTF-8, they will need to set the flag bit themselves.
+  (let [(values utf8Valid1 utf8Require1) (detectUTF8 (.-Name fh))
+      (values utf8Valid2 utf8Require2) (detectUTF8 (.-Comment fh))]
+    (switch
+      (case [(.-NonUTF8 fh)]
+        (set! (.-Flags fh) bit-and-not 0x800))
+      (case [(and ^:go/paren (or utf8Require1 utf8Require2) ^:go/paren (and utf8Valid1 utf8Valid2))]
+        (set! (.-Flags fh) bit-or 0x800)))
+
+
+    (set! (.-CreatorVersion fh) (bit-or (bit-and (.-CreatorVersion fh) 0xff00) zipVersion20)) ; preserve compatibility byte
+    (set! (.-ReaderVersion fh) zipVersion20)
+
+    ;; If Modified is set, this takes precedence over MS-DOS timestamp fields.
+    (when (not (.IsZero (.-Modified fh)))
+      ;; Contrary to the FileHeader.SetModTime method, we intentionally
+      ;; do not convert to UTC, because we assume the user intends to encode
+      ;; the date using the specified timezone. A user may want this control
+      ;; because many legacy ZIP readers interpret the timestamp according
+      ;; to the local timezone.
+      ;;
+      ;; The timezone is only non-UTC if a user directly sets the Modified
+      ;; field directly themselves. All other approaches sets UTC.
+      (set! (values (.-ModifiedDate fh) (.-ModifiedTime fh)) (timeToMsDosTime (.-Modified fh)))
+
+      ;; Use "extended timestamp" format since this is what Info-ZIP uses.
+      ;; Nearly every major ZIP implementation uses a different format,
+      ;; but at least most seem to be able to understand the other formats.
+      ;;
+      ;; This format happens to be identical for both local and central header
+      ;; if modification time is the only timestamp being encoded.
+      (let [^{:tag (array 9 byte)} mbuf (zero (array 9 byte)) ; 2*SizeOf(uint16) + SizeOf(uint8) + SizeOf(uint32)
+          ^{:line 344} mt (conv uint32 (.Unix (.-Modified fh)))
+          ^{:line 345} eb (conv writeBuf (subslice mbuf))]
+        (.uint16 eb extTimeExtraID)
+        (.uint16 eb 5) ; Size: SizeOf(uint8) + SizeOf(uint32)
+        (.uint8 eb 1) ; Flags: ModTime
+        (.uint32 eb mt) ; ModTime
+        (set! (.-Extra fh) (append (.-Extra fh) (spread (subslice mbuf))))))
+
+
+    (let [
+        ^{:line 354 :tag io/Writer} ow (zero io/Writer)
+        ^{:line 355 :tag (* fileWriter)} fw (zero (* fileWriter))
+
+        ^{:line 357} h (addr ^{:go/breaks [2 4]} (lit header
+            :FileHeader fh
+            :offset (conv uint64 (.-count (.-cw w)))))]
+
+
+      (if (strings/HasSuffix (.-Name fh) "/") (do
+          ;; Set the compression method to Store to ensure data length is truly zero,
+          ;; which the writeHeader method always encodes for the size fields.
+          ;; This is necessary as most compression formats have non-zero lengths
+          ;; even when compressing an empty string.
+          (set! (.-Method fh) Store)
+          (set! (.-Flags fh) bit-and-not 0x8) ; we will not write a data descriptor
+
+          ;; Explicitly clear sizes as they have no meaning for directories.
+          (set! (.-CompressedSize fh) 0)
+          (set! (.-CompressedSize64 fh) 0)
+          (set! (.-UncompressedSize fh) 0)
+          (set! (.-UncompressedSize64 fh) 0)
+
+          (set! ow (lit dirWriter)))
+        (do
+          (set! (.-Flags fh) bit-or 0x8) ; we will write a data descriptor
+
+          (set! fw (addr ^{:go/breaks [2 4 6]} (lit fileWriter
+                :zipw (.-cw w)
+                :compCount (addr (lit countWriter :w (.-cw w)))
+                :crc32 (crc32/NewIEEE))))
+
+          (let [comp (.compressor w (.-Method fh))]
+            (when (== comp nil)
+              (return nil ErrAlgorithm))
+
+            (let [^error err (zero error)]
+              (set! (values (.-comp fw) err) (comp (.-compCount fw)))
+              (when (!= err nil)
+                (return nil err))
+
+              (set! (.-rawCount fw) (addr (lit countWriter :w (.-comp fw))))
+              (set! (.-header fw) h)
+              (set! ow fw)))))
+
+      (set! (.-dir w) (append (.-dir w) h))
+      (when [err (writeHeader (.-cw w) h)] (!= err nil)
+        (return nil err))
+
+      ;; If we're creating a directory, fw is nil.
+      (set! (.-last w) fw)
+      (return ow nil))))
+
+
+^{:go/end 489} (go/func writeHeader ^error [^io/Writer w ^{:tag (* header)} h]
+  (let [^:const ^{:val 65535} maxUint16 (- (<< 1 16) 1)]
+    (when (> (len ^{:go/via [FileHeader]} (.-Name h)) maxUint16)
+      (return errLongName))
+
+    (when (> (len ^{:go/via [FileHeader]} (.-Extra h)) maxUint16)
+      (return errLongExtra))
+
+
+    ;; The correct behavior of a streaming writer, implemented by Info-ZIP 3.0,
+    ;; would be to write 0xFFFFFFFF in the size fields and then write a Zip64
+    ;; extra field with the sizes at zero (to signal they are stored in a ZIP64
+    ;; data descriptor, in case the file is > 4GiB).
+    ;;
+    ;; We don't do that, and instead write zeroes directly in the size fields,
+    ;; because that wastes 28 bytes for every file smaller than 4GiB, and
+    ;; because it would change the encoding of nearly every zip file created by
+    ;; archive/zip. (No one should rely on it being stable, but still.)
+    ;;
+    ;; Anyway, the Local File Header is not that important, as the Central
+    ;; Directory is authoritative, and there we always write the correct sizes.
+    ;;
+    ;; If we do know the sizes, because [Writer.CreateRaw] is used and the data
+    ;; descriptor flag is not set, then we write them to the header. If either
+    ;; size reaches 4GiB, we write 0xFFFFFFFF placeholders and a Zip64 extra
+    ;; field with BOTH sizes, per the spec and matching Info-ZIP. Note this is
+    ;; different from the Central Directory Zip64 extra field logic, somehow.
+    ;;
+    ;; (One final interesting case that doesn't apply to us: if the input is
+    ;; streaming but the output is seekable, Info-ZIP always writes Zip64 extra
+    ;; fields, and then goes back and patches in the sizes, even for files < 4GiB.)
+
+    (let [^{:tag (slice byte)} zip64ExtraInfo (zero (slice byte))
+        ^{:line 440} readerVersion ^{:go/via [FileHeader]} (.-ReaderVersion h)
+        ^{:line 441} noDataDescriptor (and (.-raw h) (not ^{:go/via [FileHeader]} (.hasDataDescriptor h)))]
+      (when (and noDataDescriptor ^:go/paren (or (> ^{:go/via [FileHeader]} (.-CompressedSize64 h) uint32max) (> ^{:go/via [FileHeader]} (.-UncompressedSize64 h) uint32max)))
+        (set! readerVersion (max readerVersion zipVersion45))
+        (set! zip64ExtraInfo (make (slice byte) 20)) ; 2x uint16 + 2x uint64
+        (let [b (conv writeBuf zip64ExtraInfo)]
+          (.uint16 b zip64ExtraID)
+          (.uint16 b 16) ; size of Zip64 extra field data
+          (.uint64 b ^{:go/via [FileHeader]} (.-UncompressedSize64 h))
+          (.uint64 b ^{:go/via [FileHeader]} (.-CompressedSize64 h))))
+
+
+      ^{:go/breaks [[15 488]]} (let [^{:tag (array fileHeaderLen byte)} buf (zero (array fileHeaderLen byte))
+          ^{:line 453} b (conv writeBuf (subslice buf))]
+        (.uint32 b (conv uint32 fileHeaderSignature))
+        (.uint16 b readerVersion)
+        (.uint16 b ^{:go/via [FileHeader]} (.-Flags h))
+        (.uint16 b ^{:go/via [FileHeader]} (.-Method h))
+        (.uint16 b ^{:go/via [FileHeader]} (.-ModifiedTime h))
+        (.uint16 b ^{:go/via [FileHeader]} (.-ModifiedDate h))
+        (if noDataDescriptor (do
+            (.uint32 b ^{:go/via [FileHeader]} (.-CRC32 h))
+            (if (!= zip64ExtraInfo nil) (do
+                (.uint32 b uint32max)
+                (.uint32 b uint32max))
+              (do
+                (.uint32 b (conv uint32 ^{:go/via [FileHeader]} (.-CompressedSize64 h)))
+                (.uint32 b (conv uint32 ^{:go/via [FileHeader]} (.-UncompressedSize64 h))))))
+
+          (do
+            (.uint32 b 0) ; crc32
+            (.uint32 b 0) ; compressed size
+            (.uint32 b 0))) ; uncompressed size
+
+        (.uint16 b (conv uint16 (len ^{:go/via [FileHeader]} (.-Name h))))
+        (.uint16 b (conv uint16 (+ (len ^{:go/via [FileHeader]} (.-Extra h)) (len zip64ExtraInfo))))
+        (when [(values _ err) (.Write w (subslice buf))] (!= err nil)
+          (return err))
+
+        (when [(values _ err) (io/WriteString w ^{:go/via [FileHeader]} (.-Name h))] (!= err nil)
+          (return err))
+
+        (when [(values _ err) (.Write w ^{:go/via [FileHeader]} (.-Extra h))] (!= err nil)
+          (return err))
+
+        (when [(values _ err) (.Write w zip64ExtraInfo)] (!= err nil)
+          (return err))
+
+        nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 530} (go/method CreateRaw "CreateRaw adds a file to the zip archive using the provided [FileHeader] and\nreturns a [Writer] to which the file contents should be written. The file's\ncontents must be written to the io.Writer before the next call to [Writer.Create],\n[Writer.CreateHeader], [Writer.CreateRaw], or [Writer.Close].\n\nIn contrast to [Writer.CreateHeader], the bytes passed to Writer are not compressed.\n\nCreateRaw's argument is stored in w. If the argument is a pointer to the embedded\n[FileHeader] in a [File] obtained from a [Reader] created from in-memory data,\nthen w will refer to all of that memory.\n" [^{:tag (* Writer)} w ^{:tag (* FileHeader)} fh] :results [io/Writer error]
+  (when [err (.prepare w fh)] (!= err nil)
+    (return nil err))
+
+
+  (set! (.-CompressedSize fh) (conv uint32 (min (.-CompressedSize64 fh) uint32max)))
+  (set! (.-UncompressedSize fh) (conv uint32 (min (.-UncompressedSize64 fh) uint32max)))
+
+  (let [h (addr ^{:go/breaks [2 4 6]} (lit header
+          :FileHeader fh
+          :offset (conv uint64 (.-count (.-cw w)))
+          :raw true))]
+
+    (set! (.-dir w) (append (.-dir w) h))
+    (when [err (writeHeader (.-cw w) h)] (!= err nil)
+      (return nil err))
+
+
+    (when (strings/HasSuffix (.-Name fh) "/")
+      (set! (.-last w) nil)
+      (return (lit dirWriter) nil))
+
+
+    (let [fw (addr ^{:go/breaks [2 4]} (lit fileWriter
+            :header h
+            :zipw (.-cw w)))]
+
+      (set! (.-last w) fw)
+      (return fw nil))))
+
+
+
+
+^{:go/end 548} (go/method Copy "Copy copies the file f (obtained from a [Reader]) into w. It copies the raw\nform directly bypassing decompression, compression, and validation.\n" ^error [^{:tag (* Writer)} w ^{:tag (* File)} f]
+  (let [(values r err) (.OpenRaw f)]
+    (when (!= err nil)
+      (return err))
+
+    ;; Copy the FileHeader so w doesn't store a pointer to the data
+    ;; of f's entire archive. See #65499.
+    (let [fh (.-FileHeader f)
+        (values fw ^:assign err) (.CreateRaw w (addr fh))]
+      (when (!= err nil)
+        (return err))
+
+      (set! (values _ err) (io/Copy fw r))
+      ^{:line 547} err)))
+
+
+
+
+
+^{:go/end 558} (go/method RegisterCompressor "RegisterCompressor registers or overrides a custom compressor for a specific\nmethod ID. If a compressor for a given method is not found, [Writer] will\ndefault to looking up the compressor at the package level.\n" [^{:tag (* Writer)} w ^uint16 method ^Compressor comp]
+  (when (== (.-compressors w) nil)
+    (set! (.-compressors w) (make (map uint16 Compressor))))
+
+  (aset (.-compressors w) method comp))
+
+
+
+
+
+^{:go/end 602} (go/method AddFS "AddFS adds the files from fs.FS to the archive.\nIt walks the directory tree starting at the root of the filesystem\nadding each file to the zip using deflate while maintaining the directory structure.\n" ^error [^{:tag (* Writer)} w ^fs/FS fsys]
+  (fs/WalkDir fsys "." ^{:go/end 601} (fn ^error [^string name ^fs/DirEntry d ^error err]
+      (when (!= err nil)
+        (return err))
+
+      (when (== name ".")
+        (return nil))
+
+      (let [(values info ^:assign err) (.Info d)]
+        (when (!= err nil)
+          (return err))
+
+        (when (and (not (.IsDir d)) (not (.IsRegular (.Mode info))))
+          (return (errors/New "zip: cannot add non-regular file")))
+
+        (let [(values h ^:assign err) (FileInfoHeader info)]
+          (when (!= err nil)
+            (return err))
+
+          (set! (.-Name h) name)
+          (when (.IsDir d)
+            (set! (.-Name h) + "/"))
+
+          (set! (.-Method h) Deflate)
+          (let [(values fw ^:assign err) (.CreateHeader w h)]
+            (when (!= err nil)
+              (return err))
+
+            (when (.IsDir d)
+              (return nil))
+
+            (let [(values f ^:assign err) (.Open fsys name)]
+              (when (!= err nil)
+                (return err))
+
+              (defer (.Close f))
+              (set! (values _ err) (io/Copy fw f))
+              ^{:line 600} err)))))))
+
+
+
+^{:go/end 610} (go/method compressor ^Compressor [^{:tag (* Writer)} w ^uint16 method]
+  (let [comp (aget (.-compressors w) method)]
+    (when (== comp nil)
+      (set! comp (compressor method)))
+
+    ^{:line 609} comp))
+
+
+(go/type dirWriter (struct))
+
+^{:go/end 619} (go/method Write [dirWriter ^{:tag (slice byte)} b] :results [int error]
+  (when (== (len b) 0)
+    (return 0 nil))
+
+  (return 0 (errors/New "zip: write to directory")))
+
+
+(go/type fileWriter (struct
+    (* header)
+    ^{:line 623 :tag io/Writer} zipw
+    ^{:line 624 :tag (* countWriter)} rawCount
+    ^{:line 625 :tag io/WriteCloser} comp
+    ^{:line 626 :tag (* countWriter)} compCount
+    ^{:line 627 :tag hash/Hash32} crc32
+    ^{:line 628 :tag bool} closed))
+
+
+^{:go/end 640} (go/method Write [^{:tag (* fileWriter)} w ^{:tag (slice byte)} p] :results [int error]
+  (when (.-closed w)
+    (return 0 (errors/New "zip: write to closed file")))
+
+  (when ^{:go/via [header]} (.-raw w)
+    (return (.Write (.-zipw w) p)))
+
+  (.Write (.-crc32 w) p)
+  (.Write (.-rawCount w) p))
+
+
+^{:go/end 670} (go/method close ^error [^{:tag (* fileWriter)} w]
+  (when (.-closed w)
+    (return (errors/New "zip: file closed twice")))
+
+  (set! (.-closed w) true)
+  (when ^{:go/via [header]} (.-raw w)
+    (return (.writeDataDescriptor w)))
+
+  (when [err (.Close (.-comp w))] (!= err nil)
+    (return err))
+
+
+  ;; update FileHeader
+  (let [fh (.-FileHeader (.-header w))]
+    (set! (.-CRC32 fh) (.Sum32 (.-crc32 w)))
+    (set! (.-CompressedSize64 fh) (conv uint64 (.-count (.-compCount w))))
+    (set! (.-UncompressedSize64 fh) (conv uint64 (.-count (.-rawCount w))))
+
+    (if (or (> ^{:go/via [header FileHeader]} (.-CompressedSize64 w) uint32max) (> ^{:go/via [header FileHeader]} (.-UncompressedSize64 w) uint32max)) (do
+        (set! (.-CompressedSize fh) uint32max)
+        (set! (.-UncompressedSize fh) uint32max)
+        (set! (.-ReaderVersion fh) zipVersion45)) ; requires 4.5 - File uses ZIP64 format extensions
+      (do
+        (set! (.-CompressedSize fh) (conv uint32 (.-CompressedSize64 fh)))
+        (set! (.-UncompressedSize fh) (conv uint32 (.-UncompressedSize64 fh)))))
+
+
+    (.writeDataDescriptor w)))
+
+
+^{:go/end 699} (go/method writeDataDescriptor ^error [^{:tag (* fileWriter)} w]
+  (when (not ^{:go/via [header FileHeader]} (.hasDataDescriptor w))
+    (return nil))
+
+  ;; See the comment in [writeHeader] about how and why we don't signal ZIP64
+  ;; mode in the local file header. If one of the sizes turns out to exceed
+  ;; 4GiB, we use the 64-bit sizes anyway, for lack of alternatives.
+  ;;
+  ;; See also https://bugs.openjdk.org/browse/JDK-7073588.
+  (let [^{:tag (slice byte)} buf (zero (slice byte))]
+    (if (or (> ^{:go/via [header FileHeader]} (.-CompressedSize64 w) uint32max) (> ^{:go/via [header FileHeader]} (.-UncompressedSize64 w) uint32max))
+      (set! buf (make (slice byte) dataDescriptor64Len))
+
+      (set! buf (make (slice byte) dataDescriptorLen)))
+
+    (let [b (conv writeBuf buf)]
+      (.uint32 b dataDescriptorSignature) ; de-facto standard, required by OS X
+      (.uint32 b ^{:go/via [header FileHeader]} (.-CRC32 w))
+      (if (or (> ^{:go/via [header FileHeader]} (.-CompressedSize64 w) uint32max) (> ^{:go/via [header FileHeader]} (.-UncompressedSize64 w) uint32max)) (do
+          (.uint64 b ^{:go/via [header FileHeader]} (.-CompressedSize64 w))
+          (.uint64 b ^{:go/via [header FileHeader]} (.-UncompressedSize64 w)))
+        (do
+          (.uint32 b ^{:go/via [header FileHeader]} (.-CompressedSize w))
+          (.uint32 b ^{:go/via [header FileHeader]} (.-UncompressedSize w))))
+
+      (let [(values _ err) (.Write (.-zipw w) buf)]
+        ^{:line 698} err))))
+
+
+(go/type countWriter (struct
+    ^{:line 702 :tag io/Writer} w
+    ^{:line 703 :tag int64} count))
+
+
+^{:go/end 710} (go/method Write [^{:tag (* countWriter)} w ^{:tag (slice byte)} p] :results [int error]
+  (let [(values n err) (.Write (.-w w) p)]
+    (set! (.-count w) + (conv int64 n))
+    (return n err)))
+
+
+(go/type nopCloser (struct
+    ^{:line 713} io/Writer))
+
+
+^{:go/breaks [3] :go/end 718} (go/method Close ^error [^nopCloser w]
+  nil)
+
+
+(go/type writeBuf (slice byte))
+
+^{:go/end 725} (go/method uint8 [^{:tag (* writeBuf)} b ^uint8 v]
+  (aset @b 0 v)
+  (set! @b (subslice @b 1)))
+
+
+^{:go/end 730} (go/method uint16 [^{:tag (* writeBuf)} b ^uint16 v]
+  (.PutUint16 binary/LittleEndian @b v)
+  (set! @b (subslice @b 2)))
+
+
+^{:go/end 735} (go/method uint32 [^{:tag (* writeBuf)} b ^uint32 v]
+  (.PutUint32 binary/LittleEndian @b v)
+  (set! @b (subslice @b 4)))
+
+
+^{:go/end 740} (go/method uint64 [^{:tag (* writeBuf)} b ^uint64 v]
+  (.PutUint64 binary/LittleEndian @b v)
+  (set! @b (subslice @b 8)))

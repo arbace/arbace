@@ -1,0 +1,340 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.testing.fstest) (go/file "mapfs.go" :imports [
+
+
+    ^{:line 8} [io "io"]
+    ^{:line 9} [fs "io/fs"]
+    ^{:line 10} [path "path"]
+    ^{:line 11} [slices "slices"]
+    ^{:line 12} [strings "strings"]
+    ^{:line 13} [time "time"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type MapFS "A MapFS is a simple in-memory file system for use in tests,\nrepresented as a map from path names (arguments to Open)\nto information about the files, directories, or symbolic links they represent.\n\nThe map need not include parent directories for files contained\nin the map; those will be synthesized if needed.\nBut a directory can still be included by setting the [MapFile.Mode]'s [fs.ModeDir] bit;\nthis may be necessary for detailed control over the directory's [fs.FileInfo]\nor to create an empty directory.\n\nFile system operations read directly from the map,\nso that the file system can be changed by editing the map as needed.\nAn implication is that file system operations must not run concurrently\nwith changes to the map, which would be a race.\nAnother implication is that opening or reading a directory requires\niterating over the entire map, so a MapFS should typically be used with not more\nthan a few hundred entries or directory reads.\n" (map string (* MapFile)))
+
+
+(go/type MapFile "A MapFile describes a single file in a [MapFS].\n" (struct
+    ^{:line 37 :tag (slice byte)} Data ; file content or symlink destination
+    ^{:line 38 :tag fs/FileMode} Mode ; fs.FileInfo.Mode
+    ^{:line 39 :tag time/Time} ModTime ; fs.FileInfo.ModTime
+    ^{:line 40 :tag any} Sys)) ; fs.FileInfo.Sys
+
+
+(go/var ^fs/FS _ (conv MapFS nil))
+(go/var ^fs/ReadLinkFS _ (conv MapFS nil))
+(go/var ^fs/File _ (conv (* openMapFile) nil))
+
+
+^{:go/end 120} (go/method Open "Open opens the named file after following any symbolic links.\n" [^MapFS fsys ^string name] :results [fs/File error]
+  (when (not (fs/ValidPath name))
+    (return nil (addr (lit fs/PathError :Op "open" :Path name :Err fs/ErrNotExist))))
+
+  (let [(values realName ok) (.resolveSymlinks fsys name)]
+    (when (not ok)
+      (return nil (addr (lit fs/PathError :Op "open" :Path name :Err fs/ErrNotExist))))
+
+
+    (let [file (aget fsys realName)]
+      (when (and (!= file nil) (== (bit-and (.-Mode file) fs/ModeDir) 0))
+        ;; Ordinary file
+        (return (addr (lit openMapFile name (lit mapFileInfo (path/Base name) file) 0)) nil))
+
+
+      ;; Directory, possibly synthesized.
+      ;; Note that file can be nil here: the map need not contain explicit parent directories for all its files.
+      ;; But file can also be non-nil, in case the user wants to set metadata for the directory explicitly.
+      ;; Either way, we need to construct the list of children of this directory.
+      (let [^{:tag (slice mapFileInfo)} list (zero (slice mapFileInfo))
+          ^:var ^{:line 68} need (make (map string bool))]
+        (if (== realName ".")
+          (range [fname f fsys]
+            (let [i (strings/Index fname "/")]
+              (if (< i 0)
+                (when (!= fname ".")
+                  (set! list (append list (lit mapFileInfo fname f))))
+
+
+                (aset need (subslice fname _ i) true))))
+
+
+
+          (let [prefix (+ realName "/")]
+            (range [fname f fsys]
+              (when (strings/HasPrefix fname prefix)
+                (let [felem (subslice fname (len prefix))
+                    ^{:line 85} i (strings/Index felem "/")]
+                  (if (< i 0)
+                    (set! list (append list (lit mapFileInfo felem f)))
+
+                    (aset need (subslice fname (len prefix) (+ (len prefix) i)) true)))))
+
+
+
+            ;; If the directory name is not in the map,
+            ;; and there are no children of the name in the map,
+            ;; then the directory is treated as not existing.
+            (when (and (== file nil) (== list nil) (== (len need) 0))
+              (return nil (addr (lit fs/PathError :Op "open" :Path name :Err fs/ErrNotExist))))))
+
+
+        (range [_ fi list]
+          (delete need (.-name fi)))
+
+        (range [name need]
+          (set! list (append list (lit mapFileInfo name (addr (lit MapFile :Mode (bit-or fs/ModeDir 0555)))))))
+
+        (^{:inst [(slice mapFileInfo) mapFileInfo]} slices/SortFunc list ^{:go/end 108} (fn ^int [^mapFileInfo a ^mapFileInfo b]
+            (strings/Compare (.-name a) (.-name b))))
+
+
+        (when (== file nil)
+          (set! file (addr (lit MapFile :Mode (bit-or fs/ModeDir 0555)))))
+
+        (let [^string elem (zero string)]
+          (if (== name ".")
+            (set! elem ".")
+
+            (set! elem (subslice name (+ (strings/LastIndex name "/") 1))))
+
+          (return (addr (lit mapDir name (lit mapFileInfo elem file) list 0)) nil))))))
+
+
+^{:go/end 153} (go/method resolveSymlinks [^MapFS fsys ^string name] :results [^string _ ^bool ok]
+  ;; Fast path: if a symlink is in the map, resolve it.
+  (when [file (aget fsys name)] (and (!= file nil) (== (.Type (.-Mode file)) fs/ModeSymlink))
+    (let [target (conv string (.-Data file))]
+      (when (path/IsAbs target)
+        (return "" false))
+
+      (return (.resolveSymlinks fsys (path/Join (path/Dir name) target)))))
+
+
+  ;; Check if each parent directory (starting at root) is a symlink.
+  (for [i 0] (< i (len name)) _
+    (let [j (strings/Index (subslice name i) "/")
+        ^{:line 135 :tag string} dir (zero string)]
+      (if (< j 0) (do
+          (set! dir name)
+          (set! i (len name)))
+        (do
+          (set! dir (subslice name _ (+ i j)))
+          (set! i + j)))
+
+      (when [file (aget fsys dir)] (and (!= file nil) (== (.Type (.-Mode file)) fs/ModeSymlink))
+        (let [target (conv string (.-Data file))]
+          (when (path/IsAbs target)
+            (return "" false))
+
+          (return (.resolveSymlinks fsys (+ (path/Join (path/Dir dir) target) (subslice name i))))))
+
+      (set! i + (len "/"))))
+
+  (return name (fs/ValidPath name)))
+
+
+
+^{:go/end 165} (go/method ReadLink "ReadLink returns the destination of the named symbolic link.\n" [^MapFS fsys ^string name] :results [string error]
+  (let [(values info err) (.lstat fsys name)]
+    (when (!= err nil)
+      (return "" (addr (lit fs/PathError :Op "readlink" :Path name :Err err))))
+
+    (when (!= (.Type (.-Mode (.-f info))) fs/ModeSymlink)
+      (return "" (addr (lit fs/PathError :Op "readlink" :Path name :Err fs/ErrInvalid))))
+
+    (return (conv string (.-Data (.-f info))) nil)))
+
+
+
+
+
+^{:go/end 176} (go/method Lstat "Lstat returns a FileInfo describing the named file.\nIf the file is a symbolic link, the returned FileInfo describes the symbolic link.\nLstat makes no attempt to follow the link.\n" [^MapFS fsys ^string name] :results [fs/FileInfo error]
+  (let [(values info err) (.lstat fsys name)]
+    (when (!= err nil)
+      (return nil (addr (lit fs/PathError :Op "lstat" :Path name :Err err))))
+
+    (return info nil)))
+
+
+^{:go/end 208} (go/method lstat [^MapFS fsys ^string name] :results [(* mapFileInfo) error]
+  (when (not (fs/ValidPath name))
+    (return nil fs/ErrNotExist))
+
+  (let [(values realDir ok) (.resolveSymlinks fsys (path/Dir name))]
+    (when (not ok)
+      (return nil fs/ErrNotExist))
+
+    (let [elem (path/Base name)
+        ^{:line 187} realName (path/Join realDir elem)
+
+        ^{:line 189} file (aget fsys realName)]
+      (when (!= file nil)
+        (return (addr (lit mapFileInfo elem file)) nil))
+
+
+      (when (== realName ".")
+        (return (addr (lit mapFileInfo elem (addr (lit MapFile :Mode (bit-or fs/ModeDir 0555))))) nil))
+
+      ;; Maybe a directory.
+      (let [prefix (+ realName "/")]
+        (range [fname fsys]
+          (when (strings/HasPrefix fname prefix)
+            (return (addr (lit mapFileInfo elem (addr (lit MapFile :Mode (bit-or fs/ModeDir 0555))))) nil)))
+
+
+        ;; If the directory name is not in the map,
+        ;; and there are no children of the name in the map,
+        ;; then the directory is treated as not existing.
+        (return nil fs/ErrNotExist)))))
+
+
+
+
+
+
+
+
+(go/type fsOnly "fsOnly is a wrapper that hides all but the fs.FS methods,\nto avoid an infinite recursion when implementing special\nmethods in terms of helpers that would use them.\n(In general, implementing these methods using the package fs helpers\nis redundant and unnecessary, but having the methods may make\nMapFS exercise more code paths when used in tests.)\n" (struct fs/FS))
+
+^{:go/end 220} (go/method ReadFile [^MapFS fsys ^string name] :results [(slice byte) error]
+  (fs/ReadFile (lit fsOnly fsys) name))
+
+
+^{:go/end 224} (go/method Stat [^MapFS fsys ^string name] :results [fs/FileInfo error]
+  (fs/Stat (lit fsOnly fsys) name))
+
+
+^{:go/end 228} (go/method ReadDir [^MapFS fsys ^string name] :results [(slice fs/DirEntry) error]
+  (fs/ReadDir (lit fsOnly fsys) name))
+
+
+^{:go/end 232} (go/method Glob [^MapFS fsys ^string pattern] :results [(slice string) error]
+  (fs/Glob (lit fsOnly fsys) pattern))
+
+
+(go/type noSub (struct
+    ^{:line 235} MapFS))
+
+
+^{:go/end 238} (go/method Sub [noSub]) ; not the fs.SubFS signature
+
+^{:go/end 242} (go/method Sub [^MapFS fsys ^string dir] :results [fs/FS error]
+  (fs/Sub (lit noSub fsys) dir))
+
+
+
+(go/type mapFileInfo "A mapFileInfo implements fs.FileInfo and fs.DirEntry for a given map file.\n" (struct
+    ^{:line 246 :tag string} name
+    ^{:line 247 :tag (* MapFile)} f))
+
+
+^{:go/end 250} (go/method Name ^string [^{:tag (* mapFileInfo)} i] (path/Base (.-name i)))
+^{:go/end 251} (go/method Size ^int64 [^{:tag (* mapFileInfo)} i] (conv int64 (len (.-Data (.-f i)))))
+^{:go/end 252} (go/method Mode ^fs/FileMode [^{:tag (* mapFileInfo)} i] (.-Mode (.-f i)))
+^{:go/end 253} (go/method Type ^fs/FileMode [^{:tag (* mapFileInfo)} i] (.Type (.-Mode (.-f i))))
+^{:go/end 254} (go/method ModTime ^time/Time [^{:tag (* mapFileInfo)} i] (.-ModTime (.-f i)))
+^{:go/end 255} (go/method IsDir ^bool [^{:tag (* mapFileInfo)} i] (!= (bit-and (.-Mode (.-f i)) fs/ModeDir) 0))
+^{:go/end 256} (go/method Sys ^any [^{:tag (* mapFileInfo)} i] (.-Sys (.-f i)))
+^{:go/end 257} (go/method Info [^{:tag (* mapFileInfo)} i] :results [fs/FileInfo error] (return i nil))
+
+^{:go/end 261} (go/method String ^string [^{:tag (* mapFileInfo)} i]
+  (fs/FormatFileInfo i))
+
+
+
+(go/type openMapFile "An openMapFile is a regular (non-directory) fs.File open for reading.\n" (struct
+    ^{:line 265 :tag string} path
+    ^{:line 266} mapFileInfo
+    ^{:line 267 :tag int64} offset))
+
+
+^{:go/end 270} (go/method Stat [^{:tag (* openMapFile)} f] :results [fs/FileInfo error] (return (addr (.-mapFileInfo f)) nil))
+
+^{:go/end 272} (go/method Close ^error [^{:tag (* openMapFile)} f] nil)
+
+^{:go/end 284} (go/method Read [^{:tag (* openMapFile)} f ^{:tag (slice byte)} b] :results [int error]
+  (when (>= (.-offset f) (conv int64 (len (.-Data ^{:go/via [mapFileInfo]} (.-f f)))))
+    (return 0 io/EOF))
+
+  (when (< (.-offset f) 0)
+    (return 0 (addr (lit fs/PathError :Op "read" :Path (.-path f) :Err fs/ErrInvalid))))
+
+  (let [n (copy b (subslice (.-Data ^{:go/via [mapFileInfo]} (.-f f)) (.-offset f)))]
+    (set! (.-offset f) + (conv int64 n))
+    (return n nil)))
+
+
+^{:go/end 300} (go/method Seek [^{:tag (* openMapFile)} f ^int64 offset ^int whence] :results [int64 error]
+  (switch whence
+    (case [0])
+    ;; offset += 0
+    (case [1]
+      (set! offset + (.-offset f)))
+    (case [2]
+      (set! offset + (conv int64 (len (.-Data ^{:go/via [mapFileInfo]} (.-f f)))))))
+
+  (when (or (< offset 0) (> offset (conv int64 (len (.-Data ^{:go/via [mapFileInfo]} (.-f f))))))
+    (return 0 (addr (lit fs/PathError :Op "seek" :Path (.-path f) :Err fs/ErrInvalid))))
+
+  (set! (.-offset f) offset)
+  (return offset nil))
+
+
+^{:go/end 311} (go/method ReadAt [^{:tag (* openMapFile)} f ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (when (or (< offset 0) (> offset (conv int64 (len (.-Data ^{:go/via [mapFileInfo]} (.-f f))))))
+    (return 0 (addr (lit fs/PathError :Op "read" :Path (.-path f) :Err fs/ErrInvalid))))
+
+  (let [n (copy b (subslice (.-Data ^{:go/via [mapFileInfo]} (.-f f)) offset))]
+    (when (< n (len b))
+      (return n io/EOF))
+
+    (return n nil)))
+
+
+
+(go/type mapDir "A mapDir is a directory fs.File (so also an fs.ReadDirFile) open for reading.\n" (struct
+    ^{:line 315 :tag string} path
+    ^{:line 316} mapFileInfo
+    ^{:line 317 :tag (slice mapFileInfo)} entry
+    ^{:line 318 :tag int} offset))
+
+
+^{:go/end 321} (go/method Stat [^{:tag (* mapDir)} d] :results [fs/FileInfo error] (return (addr (.-mapFileInfo d)) nil))
+^{:go/end 322} (go/method Close ^error [^{:tag (* mapDir)} d] nil)
+^{:go/end 325} (go/method Read [^{:tag (* mapDir)} d ^{:tag (slice byte)} b] :results [int error]
+  (return 0 (addr (lit fs/PathError :Op "read" :Path (.-path d) :Err fs/ErrInvalid))))
+
+
+^{:go/end 341} (go/method ReadDir [^{:tag (* mapDir)} d ^int count] :results [(slice fs/DirEntry) error]
+  (let [n (- (len (.-entry d)) (.-offset d))]
+    (when (and (== n 0) (> count 0))
+      (return nil io/EOF))
+
+    (when (and (> count 0) (> n count))
+      (set! n count))
+
+    (let [list (make (slice fs/DirEntry) n)]
+      (range [i list]
+        (aset list i (addr (aget (.-entry d) (+ (.-offset d) i)))))
+
+      (set! (.-offset d) + n)
+      (return list nil))))

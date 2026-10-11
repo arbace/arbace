@@ -1,0 +1,671 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.gob) (go/file "encode.go" :directives ["//go:generate go run encgen.go -output enc_helpers.go"] :imports [
+
+
+    ^{:line 10} [encoding "encoding"]
+    ^{:line 11} [binary "encoding/binary"]
+    ^{:line 12} [math "math"]
+    ^{:line 13} [bits "math/bits"]
+    ^{:line 14} [reflect "reflect"]
+    ^{:line 15} [sync "sync"]])
+
+
+(go/const ^{:val 8} uint64Size 8)
+
+(go/type encHelper (func [^{:tag (* encoderState)} state ^reflect/Value v] [bool]))
+
+
+
+
+
+(go/type encoderState "encoderState is the global execution state of an instance of the encoder.\nField numbers are delta encoded and always increase. The field\nnumber is initialized to -1 so 0 comes out as delta(1). A delta of\n0 terminates the structure.\n" (struct
+    ^{:line 27 :tag (* Encoder)} enc
+    ^{:line 28 :tag (* encBuffer)} b
+    ^{:line 29 :tag bool} sendZero ; encoding an array element or map key/value pair; send zero values
+    ^{:line 30 :tag int} fieldnum ; the last field number written.
+    ^{:line 31 :tag (array (+ 1 uint64Size) byte)} buf ; buffer used by the encoder; here to avoid allocation.
+    ^{:line 32 :tag (* encoderState)} next)) ; for free list
+
+
+
+
+(go/type encBuffer "encBuffer is an extremely simple, fast implementation of a write-only byte buffer.\nIt never returns a non-nil error, but Write returns an error value so it matches io.Writer.\n" (struct
+    ^{:line 38 :tag (slice byte)} data
+    ^{:line 39 :tag (array 64 byte)} scratch))
+
+
+(go/var encBufferPool ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 47} (fn ^any []
+      (let [e (new encBuffer)]
+        (set! (.-data e) (subslice (.-scratch e) 0 0))
+        ^{:line 46} e))))
+
+
+
+^{:go/end 52} (go/method writeByte [^{:tag (* encBuffer)} e ^byte c]
+  (set! (.-data e) (append (.-data e) c)))
+
+
+^{:go/end 57} (go/method Write [^{:tag (* encBuffer)} e ^{:tag (slice byte)} p] :results [int error]
+  (set! (.-data e) (append (.-data e) (spread p)))
+  (return (len p) nil))
+
+
+^{:go/end 61} (go/method WriteString [^{:tag (* encBuffer)} e ^string s]
+  (set! (.-data e) (append (.-data e) (spread s))))
+
+
+^{:go/end 65} (go/method Len ^int [^{:tag (* encBuffer)} e]
+  (len (.-data e)))
+
+
+^{:go/end 69} (go/method Bytes ^{:tag (slice byte)} [^{:tag (* encBuffer)} e]
+  (.-data e))
+
+
+^{:go/end 77} (go/method Reset [^{:tag (* encBuffer)} e]
+  (if (>= (len (.-data e)) tooBig)
+    (set! (.-data e) (subslice (.-scratch e) 0 0))
+
+    (set! (.-data e) (subslice (.-data e) 0 0))))
+
+
+
+^{:go/end 94} (go/method newEncoderState ^{:tag (* encoderState)} [^{:tag (* Encoder)} enc ^{:tag (* encBuffer)} b]
+  (let [e (.-freeList enc)]
+    (if (== e nil) (do
+        (set! e (new encoderState))
+        (set! (.-enc e) enc))
+
+      (set! (.-freeList enc) (.-next e)))
+
+    (set! (.-sendZero e) false)
+    (set! (.-fieldnum e) 0)
+    (set! (.-b e) b)
+    (when (== (len (.-data b)) 0)
+      (set! (.-data b) (subslice (.-scratch b) 0 0)))
+
+    ^{:line 93} e))
+
+
+^{:go/end 99} (go/method freeEncoderState [^{:tag (* Encoder)} enc ^{:tag (* encoderState)} e]
+  (set! (.-next e) (.-freeList enc))
+  (set! (.-freeList enc) e))
+
+
+;; Unsigned integers have a two-state encoding. If the number is less
+;; than 128 (0 through 0x7F), its value is written directly.
+;; Otherwise the value is written in big-endian byte order preceded
+;; by the byte length, negated.
+
+
+^{:go/end 118} (go/method encodeUint "encodeUint writes an encoded unsigned integer to state.b.\n" [^{:tag (* encoderState)} state ^uint64 x]
+  (when (<= x 0x7F)
+    (.writeByte (.-b state) (conv uint8 x))
+    (return))
+
+
+  (.PutUint64 binary/BigEndian (subslice (.-buf state) 1) x)
+  (let [bc (>> (bits/LeadingZeros64 x) 3)] ; 8 - bytelen(x)
+    (aset (.-buf state) bc (conv uint8 (- bc uint64Size))) ; and then we subtract 8 to get -bytelen(x)
+
+    (.Write (.-b state) (subslice (.-buf state) bc (+ uint64Size 1)))))
+
+
+
+
+
+^{:go/end 131} (go/method encodeInt "encodeInt writes an encoded signed integer to state.w.\nThe low bit of the encoding says whether to bit complement the (other bits of the)\nuint to recover the int.\n" [^{:tag (* encoderState)} state ^int64 i]
+  (let [^uint64 x (zero uint64)]
+    (if (< i 0)
+      (set! x (bit-or (conv uint64 (<< (bit-not i) 1)) 1))
+
+      (set! x (conv uint64 (<< i 1))))
+
+    (.encodeUint state x)))
+
+
+
+(go/type encOp "encOp is the signature of an encoding operator for a given type.\n" (func [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value v]))
+
+
+(go/type encInstr "The 'instructions' of the encoding machine\n" (struct
+    ^{:line 138 :tag encOp} op
+    ^{:line 139 :tag int} field ; field number in input
+    ^{:line 140 :tag (slice int)} index ; struct index
+    ^{:line 141 :tag int} indir)) ; how many pointer indirections to reach the value in the struct
+
+
+
+
+^{:go/end 151} (go/method update "update emits a field number and updates the state to record its value for delta encoding.\nIf the instruction pointer is nil, it does nothing\n" [^{:tag (* encoderState)} state ^{:tag (* encInstr)} instr]
+  (when (!= instr nil)
+    (.encodeUint state (conv uint64 (- (.-field instr) (.-fieldnum state))))
+    (set! (.-fieldnum state) (.-field instr))))
+
+
+
+;; Each encoder for a composite is responsible for handling any
+;; indirections associated with the elements of the data structure.
+;; If any pointer so reached is nil, no bytes are written. If the
+;; data item is zero, no bytes are written. Single values - ints,
+;; strings etc. - are indirected before calling their encoders.
+;; Otherwise, the output (for a scalar) is the field number, as an
+;; encoded integer, followed by the field data in its appropriate
+;; format.
+
+
+^{:go/end 171} (go/func encIndirect "encIndirect dereferences pv indir times and returns the result.\n" ^reflect/Value [^reflect/Value pv ^int indir]
+  (for [] (> indir 0) (dec! indir)
+    (when (.IsNil pv)
+      (break))
+
+    (set! pv (.Elem pv)))
+
+  ^{:line 170} pv)
+
+
+
+^{:go/end 184} (go/func encBool "encBool encodes the bool referenced by v as an unsigned 0 or 1.\n" [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value v]
+  (let [b (.Bool v)]
+    (when (or b (.-sendZero state))
+      (.update state i)
+      (if b
+        (.encodeUint state 1)
+
+        (.encodeUint state 0)))))
+
+
+
+
+
+^{:go/end 193} (go/func encInt "encInt encodes the signed integer (int int8 int16 int32 int64) referenced by v.\n" [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value v]
+  (let [value (.Int v)]
+    (when (or (!= value 0) (.-sendZero state))
+      (.update state i)
+      (.encodeInt state value))))
+
+
+
+
+^{:go/end 202} (go/func encUint "encUint encodes the unsigned integer (uint uint8 uint16 uint32 uint64 uintptr) referenced by v.\n" [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value v]
+  (let [value (.Uint v)]
+    (when (or (!= value 0) (.-sendZero state))
+      (.update state i)
+      (.encodeUint state value))))
+
+
+
+
+
+
+
+
+
+^{:go/end 213} (go/func floatBits "floatBits returns a uint64 holding the bits of a floating-point number.\nFloating-point numbers are transmitted as uint64s holding the bits\nof the underlying representation. They are sent byte-reversed, with\nthe exponent end coming out first, so integer floating point numbers\n(for example) transmit more compactly. This routine does the\nswizzling.\n" ^uint64 [^float64 f]
+  (let [u (math/Float64bits f)]
+    (bits/ReverseBytes64 u)))
+
+
+
+^{:go/end 223} (go/func encFloat "encFloat encodes the floating point value (float32 float64) referenced by v.\n" [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value v]
+  (let [f (.Float v)]
+    (when (or (!= f 0) (.-sendZero state))
+      (let [bits (floatBits f)]
+        (.update state i)
+        (.encodeUint state bits)))))
+
+
+
+
+
+^{:go/end 236} (go/func encComplex "encComplex encodes the complex value (complex64 complex128) referenced by v.\nComplex numbers are just a pair of floating-point numbers, real part first.\n" [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value v]
+  (let [c (.Complex v)]
+    (when (or (!= c (+ 0 (imaginary 0))) (.-sendZero state))
+      (let [rpart (floatBits (real c))
+          ^{:line 231} ipart (floatBits (imag c))]
+        (.update state i)
+        (.encodeUint state rpart)
+        (.encodeUint state ipart)))))
+
+
+
+
+
+^{:go/end 247} (go/func encUint8Array "encUint8Array encodes the byte array referenced by v.\nByte arrays are encoded as an unsigned count followed by the raw bytes.\n" [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value v]
+  (let [b (.Bytes v)]
+    (when (or (> (len b) 0) (.-sendZero state))
+      (.update state i)
+      (.encodeUint state (conv uint64 (len b)))
+      (.Write (.-b state) b))))
+
+
+
+
+
+^{:go/end 258} (go/func encString "encString encodes the string referenced by v.\nStrings are encoded as an unsigned count followed by the raw bytes.\n" [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value v]
+  (let [s (.String v)]
+    (when (or (> (len s) 0) (.-sendZero state))
+      (.update state i)
+      (.encodeUint state (conv uint64 (len s)))
+      (.WriteString (.-b state) s))))
+
+
+
+
+
+^{:go/end 264} (go/func encStructTerminator "encStructTerminator encodes the end of an encoded struct\nas delta field number of 0.\n" [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value v]
+  (.encodeUint state 0))
+
+
+;; Execution engine
+
+
+
+(go/type encEngine "encEngine an array of instructions indexed by field number of the encoding\ndata, typically a struct. It is executed top to bottom, walking the struct.\n" (struct
+    ^{:line 271 :tag (slice encInstr)} instr))
+
+
+(go/const ^{:val 0} singletonField 0)
+
+
+
+^{:go/breaks [[5 285]] :go/end 286} (go/func valid "valid reports whether the value is valid and a non-nil pointer.\n(Slices, maps, and chans take care of themselves.)\n" ^bool [^reflect/Value v]
+  (switch (.Kind v)
+    (case [reflect/Invalid]
+      (return false))
+    (case [reflect/Pointer]
+      (return (not (.IsNil v)))))
+
+  true)
+
+
+
+^{:go/end 303} (go/method encodeSingle "encodeSingle encodes a single top-level non-struct value.\n" [^{:tag (* Encoder)} enc ^{:tag (* encBuffer)} b ^{:tag (* encEngine)} engine ^reflect/Value value]
+  (let [state (.newEncoderState enc b)]
+    (defer (.freeEncoderState enc state))
+    (set! (.-fieldnum state) singletonField)
+    ;; There is no surrounding struct to frame the transmission, so we must
+    ;; generate data even if the item is zero. To do this, set sendZero.
+    (set! (.-sendZero state) true)
+    (let [instr (addr (aget (.-instr engine) singletonField))]
+      (when (> (.-indir instr) 0)
+        (set! value (encIndirect value (.-indir instr))))
+
+      (when (valid value)
+        ((.-op instr) instr state value)))))
+
+
+
+
+^{:go/end 330} (go/method encodeStruct "encodeStruct encodes a single struct value.\n" [^{:tag (* Encoder)} enc ^{:tag (* encBuffer)} b ^{:tag (* encEngine)} engine ^reflect/Value value]
+  (when (not (valid value))
+    (return))
+
+  (let [state (.newEncoderState enc b)]
+    (defer (.freeEncoderState enc state))
+    (set! (.-fieldnum state) -1)
+    (for [i 0] (< i (len (.-instr engine))) (inc! i)
+      (let [instr (addr (aget (.-instr engine) i))]
+        (when (>= i (.NumField value))
+          ;; encStructTerminator
+          ((.-op instr) instr state (lit reflect/Value))
+          (break))
+
+        (let [field (.FieldByIndex value (.-index instr))]
+          (when (> (.-indir instr) 0)
+            (set! field (encIndirect field (.-indir instr)))
+            ;; TODO: Is field guaranteed valid? If so we could avoid this check.
+            (when (not (valid field))
+              (continue)))
+
+
+          ((.-op instr) instr state field))))))
+
+
+
+
+^{:go/end 353} (go/method encodeArray "encodeArray encodes an array.\n" [^{:tag (* Encoder)} enc ^{:tag (* encBuffer)} b ^reflect/Value value ^encOp op ^int elemIndir ^int length ^encHelper helper]
+  (let [state (.newEncoderState enc b)]
+    (defer (.freeEncoderState enc state))
+    (set! (.-fieldnum state) -1)
+    (set! (.-sendZero state) true)
+    (.encodeUint state (conv uint64 length))
+    (when (and (!= helper nil) (helper state value))
+      (return))
+
+    (for [i 0] (< i length) (inc! i)
+      (let [elem (.Index value i)]
+        (when (> elemIndir 0)
+          (set! elem (encIndirect elem elemIndir))
+          ;; TODO: Is elem guaranteed valid? If so we could avoid this check.
+          (when (not (valid elem))
+            (errorf "encodeArray: nil element")))
+
+
+        (op nil state elem)))))
+
+
+
+
+^{:go/end 364} (go/func encodeReflectValue "encodeReflectValue is a helper for maps. It encodes the value v.\n" [^{:tag (* encoderState)} state ^reflect/Value v ^encOp op ^int indir]
+  (for [i 0] (and (< i indir) (.IsValid v)) (inc! i)
+    (set! v (reflect/Indirect v)))
+
+  (when (not (.IsValid v))
+    (errorf "encodeReflectValue: nil element"))
+
+  (op nil state v))
+
+
+
+^{:go/end 378} (go/method encodeMap "encodeMap encodes a map as unsigned count followed by key:value pairs.\n" [^{:tag (* Encoder)} enc ^{:tag (* encBuffer)} b ^reflect/Value mv ^encOp keyOp ^encOp elemOp ^int keyIndir ^int elemIndir]
+  (let [state (.newEncoderState enc b)]
+    (set! (.-fieldnum state) -1)
+    (set! (.-sendZero state) true)
+    (.encodeUint state (conv uint64 (.Len mv)))
+    (let [mi (.MapRange mv)]
+      (while (.Next mi)
+        (encodeReflectValue state (.Key mi) keyOp keyIndir)
+        (encodeReflectValue state (.Value mi) elemOp elemIndir))
+
+      (.freeEncoderState enc state))))
+
+
+
+
+
+
+
+^{:go/end 431} (go/method encodeInterface "encodeInterface encodes the interface value iv.\nTo send an interface, we send a string identifying the concrete type, followed\nby the type identifier (which might require defining that type right now), followed\nby the concrete value. A nil value gets sent as the empty string for the name,\nfollowed by no value.\n" [^{:tag (* Encoder)} enc ^{:tag (* encBuffer)} b ^reflect/Value iv]
+  ;; Gobs can encode nil interface values but not typed interface
+  ;; values holding nil pointers, since nil pointers point to no value.
+  (let [elem (.Elem iv)]
+    (when (and (== (.Kind elem) reflect/Pointer) (.IsNil elem))
+      (errorf "gob: cannot encode nil pointer of type %s inside interface" (.Type (.Elem iv))))
+
+    (let [state (.newEncoderState enc b)]
+      (set! (.-fieldnum state) -1)
+      (set! (.-sendZero state) true)
+      (when (.IsNil iv)
+        (.encodeUint state 0)
+        (return))
+
+
+      (let [ut (userType (.Type (.Elem iv)))
+          (values namei ok) (.Load concreteTypeToName (.-base ut))]
+        (when (not ok)
+          (errorf "type not registered for interface: %s" (.-base ut)))
+
+        (let [name (assert string namei)]
+
+          ;; Send the name.
+          (.encodeUint state (conv uint64 (len name)))
+          (.WriteString (.-b state) name)
+          ;; Define the type id if necessary.
+          (.sendTypeDescriptor enc (.writer enc) state ut)
+          ;; Send the type id.
+          (.sendTypeId enc state ut)
+          ;; Encode the value into a new buffer. Any nested type definitions
+          ;; should be written to b, before the encoded value.
+          (.pushWriter enc b)
+          (let [data (assert (* encBuffer) (.Get encBufferPool))]
+            (.Write data spaceForLength)
+            (.encode enc data elem ut)
+            (when (!= (.-err enc) nil)
+              (error_ (.-err enc)))
+
+            (.popWriter enc)
+            (.writeMessage enc b data)
+            (.Reset data)
+            (.Put encBufferPool data)
+            (when (!= (.-err enc) nil)
+              (error_ (.-err enc)))
+
+            (.freeEncoderState enc state)))))))
+
+
+
+
+^{:go/end 460} (go/method encodeGobEncoder "encodeGobEncoder encodes a value that implements the GobEncoder interface.\nThe data is sent as a byte array.\n" [^{:tag (* Encoder)} enc ^{:tag (* encBuffer)} b ^{:tag (* userTypeInfo)} ut ^reflect/Value v]
+  ;; TODO: should we catch panics from the called method?
+
+  (let [^{:tag (slice byte)} data (zero (slice byte))
+      ^{:line 439 :tag error} err (zero error)]
+    ;; We know it's one of these.
+    (switch (.-externalEnc ut)
+      (case [xGob]
+        (let [(values gobEncoder _) ((inst reflect/TypeAssert GobEncoder) v)]
+          (set! (values data err) (.GobEncode gobEncoder))))
+      (case [xBinary]
+        (let [(values binaryMarshaler _) ((inst reflect/TypeAssert encoding/BinaryMarshaler) v)]
+          (set! (values data err) (.MarshalBinary binaryMarshaler))))
+      (case [xText]
+        (let [(values textMarshaler _) ((inst reflect/TypeAssert encoding/TextMarshaler) v)]
+          (set! (values data err) (.MarshalText textMarshaler)))))
+
+    (when (!= err nil)
+      (error_ err))
+
+    (let [state (.newEncoderState enc b)]
+      (set! (.-fieldnum state) -1)
+      (.encodeUint state (conv uint64 (len data)))
+      (.Write (.-b state) data)
+      (.freeEncoderState enc state))))
+
+
+(go/var encOpTable (lit (array ... encOp)
+    ^{:line 463} [reflect/Bool encBool]
+    ^{:line 464} [reflect/Int encInt]
+    ^{:line 465} [reflect/Int8 encInt]
+    ^{:line 466} [reflect/Int16 encInt]
+    ^{:line 467} [reflect/Int32 encInt]
+    ^{:line 468} [reflect/Int64 encInt]
+    ^{:line 469} [reflect/Uint encUint]
+    ^{:line 470} [reflect/Uint8 encUint]
+    ^{:line 471} [reflect/Uint16 encUint]
+    ^{:line 472} [reflect/Uint32 encUint]
+    ^{:line 473} [reflect/Uint64 encUint]
+    ^{:line 474} [reflect/Uintptr encUint]
+    ^{:line 475} [reflect/Float32 encFloat]
+    ^{:line 476} [reflect/Float64 encFloat]
+    ^{:line 477} [reflect/Complex64 encComplex]
+    ^{:line 478} [reflect/Complex128 encComplex]
+    ^{:line 479} [reflect/String encString]))
+
+
+
+
+^{:go/end 565} (go/func encOpFor "encOpFor returns (a pointer to) the encoding op for the base type under rt and\nthe indirection count to reach it.\n" [^reflect/Type rt ^{:tag (map reflect/Type (* encOp))} inProgress ^{:tag (map (* typeInfo) bool)} building] :results [(* encOp) int]
+  (let [ut (userType rt)]
+    ;; If the type implements GobEncoder, we handle it without further processing.
+    (when (!= (.-externalEnc ut) 0)
+      (return (gobEncodeOpFor ut)))
+
+    ;; If this type is already in progress, it's a recursive type (e.g. map[string]*T).
+    ;; Return the pointer to the op we're already building.
+    (when [opPtr (aget inProgress rt)] (!= opPtr nil)
+      (return opPtr (.-indir ut)))
+
+    (let [typ (.-base ut)
+        ^{:line 496} indir (.-indir ut)
+        ^{:line 497} k (.Kind typ)
+        ^{:line 498 :tag encOp} op (zero encOp)]
+      (when (< (conv int k) (len encOpTable))
+        (set! op (aget encOpTable k)))
+
+      (when (== op nil)
+        (aset inProgress rt (addr op))
+        ;; Special cases
+        (switch [t typ] (.Kind t)
+          (case [reflect/Slice]
+            (when (== (.Kind (.Elem t)) reflect/Uint8)
+              (set! op encUint8Array)
+              (break))
+
+            ;; Slices have a header; we decode it to find the underlying array.
+            (let [(values elemOp elemIndir) (encOpFor (.Elem t) inProgress building)
+                ^{:line 513} helper (aget encSliceHelper (.Kind (.Elem t)))]
+              (set! op ^{:go/end 520} (fn [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value slice]
+                  (when (and (not (.-sendZero state)) (== (.Len slice) 0))
+                    (return))
+
+                  (.update state i)
+                  (.encodeArray (.-enc state) (.-b state) slice @elemOp elemIndir (.Len slice) helper)))))
+
+          (case [reflect/Array]
+            ;; True arrays have size in the type.
+            (let [(values elemOp elemIndir) (encOpFor (.Elem t) inProgress building)
+                ^{:line 524} helper (aget encArrayHelper (.Kind (.Elem t)))]
+              (set! op ^{:go/end 528} (fn [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value array]
+                  (.update state i)
+                  (.encodeArray (.-enc state) (.-b state) array @elemOp elemIndir (.Len array) helper)))))
+
+          (case [reflect/Map]
+            (let [(values keyOp keyIndir) (encOpFor (.Key t) inProgress building)
+                (values elemOp elemIndir) (encOpFor (.Elem t) inProgress building)]
+              (set! op ^{:go/end 540} (fn [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value mv]
+                  ;; We send zero-length (but non-nil) maps because the
+                  ;; receiver might want to use the map.  (Maps don't use append.)
+                  (when (and (not (.-sendZero state)) (.IsNil mv))
+                    (return))
+
+                  (.update state i)
+                  (.encodeMap (.-enc state) (.-b state) mv @keyOp @elemOp keyIndir elemIndir)))))
+
+          (case [reflect/Struct]
+            ;; Generate a closure that calls out to the engine for the nested type.
+            (getEncEngine (userType typ) building)
+            (let [info (mustGetTypeInfo typ)]
+              (set! op ^{:go/end 550} (fn [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value sv]
+                  (.update state i)
+                  ;; indirect through info to delay evaluation for recursive structs
+                  (let [enc (.Load (.-encoder info))]
+                    (.encodeStruct (.-enc state) (.-b state) enc sv))))))
+
+          (case [reflect/Interface]
+            (set! op ^{:go/end 558} (fn [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value iv]
+                (when (and (not (.-sendZero state)) ^:go/paren (or (not (.IsValid iv)) (.IsNil iv)))
+                  (return))
+
+                (.update state i)
+                (.encodeInterface (.-enc state) (.-b state) iv))))))
+
+
+
+      (when (== op nil)
+        (errorf "can't happen: encode type %s" rt))
+
+      (return (addr op) indir))))
+
+
+
+^{:go/end 593} (go/func gobEncodeOpFor "gobEncodeOpFor returns the op for a type that is known to implement GobEncoder.\n" [^{:tag (* userTypeInfo)} ut] :results [(* encOp) int]
+  (let [rt (.-user ut)]
+    (cond (== (.-encIndir ut) -1)
+      (set! rt (reflect/PointerTo rt))
+      (> (.-encIndir ut) 0)
+      (for [i (conv int8 0)] (< i (.-encIndir ut)) (inc! i)
+        (set! rt (.Elem rt))))
+
+
+    (let [^encOp op (zero encOp)]
+      (set! op ^{:go/end 591} (fn [^{:tag (* encInstr)} i ^{:tag (* encoderState)} state ^reflect/Value v]
+          (when (== (.-encIndir ut) -1)
+            ;; Need to climb up one level to turn value into pointer.
+            (when (not (.CanAddr v))
+              (errorf "unaddressable value of type %s" rt))
+
+            (set! v (.Addr v)))
+
+          (when (and (not (.-sendZero state)) (.IsZero v))
+            (return))
+
+          (.update state i)
+          (.encodeGobEncoder (.-enc state) (.-b state) ut v)))
+
+      (return (addr op) (conv int (.-encIndir ut)))))) ; encIndir: op will get called with p == address of receiver.
+
+
+
+^{:go/end 624} (go/func compileEnc "compileEnc returns the engine to compile the type.\n" ^{:tag (* encEngine)} [^{:tag (* userTypeInfo)} ut ^{:tag (map (* typeInfo) bool)} building]
+  (let [srt (.-base ut)
+      ^{:line 598} engine (new encEngine)
+      ^{:line 599} seen (make (map reflect/Type (* encOp)))
+      ^{:line 600} rt (.-base ut)]
+    (when (!= (.-externalEnc ut) 0)
+      (set! rt (.-user ut)))
+
+    (if (and (== (.-externalEnc ut) 0) (== (.Kind srt) reflect/Struct)) (do
+        (for [(values fieldNum wireFieldNum) (values 0 0)] (< fieldNum (.NumField srt)) (inc! fieldNum)
+          (let [f (.Field srt fieldNum)]
+            (when (not (isSent (addr f)))
+              (continue))
+
+            (let [(values op indir) (encOpFor (.-Type f) seen building)]
+              (set! (.-instr engine) (append (.-instr engine) (lit encInstr @op wireFieldNum (.-Index f) indir)))
+              (inc! wireFieldNum))))
+
+        (when (and (> (.NumField srt) 0) (== (len (.-instr engine)) 0))
+          (errorf "type %s has no exported fields" rt))
+
+        (set! (.-instr engine) (append (.-instr engine) (lit encInstr encStructTerminator 0 nil 0))))
+      (do
+        (set! (.-instr engine) (make (slice encInstr) 1))
+        (let [(values op indir) (encOpFor rt seen building)]
+          (aset (.-instr engine) 0 (lit encInstr @op singletonField nil indir)))))
+
+    ^{:line 623} engine))
+
+
+
+^{:go/end 637} (go/func getEncEngine "getEncEngine returns the engine to compile the type.\n" ^{:tag (* encEngine)} [^{:tag (* userTypeInfo)} ut ^{:tag (map (* typeInfo) bool)} building]
+  (let [(values info err) (getTypeInfo ut)]
+    (when (!= err nil)
+      (error_ err))
+
+    (let [enc (.Load (.-encoder info))]
+      (when (== enc nil)
+        (set! enc (buildEncEngine info ut building)))
+
+      ^{:line 636} enc)))
+
+
+^{:go/end 656} (go/func buildEncEngine ^{:tag (* encEngine)} [^{:tag (* typeInfo)} info ^{:tag (* userTypeInfo)} ut ^{:tag (map (* typeInfo) bool)} building]
+  ;; Check for recursive types.
+  (when (and (!= building nil) (aget building info))
+    (return nil))
+
+  (.Lock (.-encInit info))
+  (defer (.Unlock (.-encInit info)))
+  (let [enc (.Load (.-encoder info))]
+    (when (== enc nil)
+      (when (== building nil)
+        (set! building (make (map (* typeInfo) bool))))
+
+      (aset building info true)
+      (set! enc (compileEnc ut building))
+      (.Store (.-encoder info) enc))
+
+    ^{:line 655} enc))
+
+
+^{:go/end 673} (go/method encode [^{:tag (* Encoder)} enc ^{:tag (* encBuffer)} b ^reflect/Value value ^{:tag (* userTypeInfo)} ut]
+  (defer (catchError (addr (.-err enc))))
+  (let [engine (getEncEngine ut nil)
+      ^{:line 661} indir (.-indir ut)]
+    (when (!= (.-externalEnc ut) 0)
+      (set! indir (conv int (.-encIndir ut))))
+
+    (for [i 0] (< i indir) (inc! i)
+      (set! value (reflect/Indirect value)))
+
+    (if (and (== (.-externalEnc ut) 0) (== (.Kind value) reflect/Struct))
+      (.encodeStruct enc b engine value)
+
+      (.encodeSingle enc b engine value))))

@@ -1,0 +1,429 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package smtp implements the Simple Mail Transfer Protocol as defined in RFC 5321.
+;; It also implements the following extensions:
+;;
+;;	8BITMIME  RFC 1652
+;;	AUTH      RFC 2554
+;;	STARTTLS  RFC 3207
+;;
+;; Additional extensions may be handled by clients.
+;;
+;; The smtp package is frozen and is not accepting new features.
+;; Some external packages provide more functionality. See:
+;;
+;;	https://godoc.org/?q=smtp
+(in-ns 'go.net.smtp) (go/file "smtp.go" :doc "Package smtp implements the Simple Mail Transfer Protocol as defined in RFC 5321.\nIt also implements the following extensions:\n\n\t8BITMIME  RFC 1652\n\tAUTH      RFC 2554\n\tSTARTTLS  RFC 3207\n\nAdditional extensions may be handled by clients.\n\nThe smtp package is frozen and is not accepting new features.\nSome external packages provide more functionality. See:\n\n\thttps://godoc.org/?q=smtp\n" :imports [
+
+
+    ^{:line 21} [tls "crypto/tls"]
+    ^{:line 22} [base64 "encoding/base64"]
+    ^{:line 23} [errors "errors"]
+    ^{:line 24} [fmt "fmt"]
+    ^{:line 25} [io "io"]
+    ^{:line 26} [net "net"]
+    ^{:line 27} [textproto "net/textproto"]
+    ^{:line 28} [strings "strings"]])
+
+
+
+(go/type Client "A Client represents a client connection to an SMTP server.\n" (struct
+
+
+    ^{:line 35 :tag (* textproto/Conn) :doc "Text is the textproto.Conn used by the Client. It is exported to allow for\nclients to add extensions.\n"} Text
+
+
+    ^{:line 38 :tag net/Conn :doc "keep a reference to the connection so it can be used to create a TLS\nconnection later\n"} conn
+
+    ^{:line 40 :tag bool :doc "whether the Client is using TLS\n"} tls
+    ^{:line 41 :tag string} serverName
+
+    ^{:line 43 :tag (map string string) :doc "map of supported extensions\n"} ext
+
+    ^{:line 45 :tag (slice string) :doc "supported auth mechanisms\n"} auth
+    ^{:line 46 :tag string} localName ; the name to use in HELO/EHLO
+    ^{:line 47 :tag bool} didHello ; whether we've said HELO/EHLO
+    ^{:line 48 :tag error} helloError)) ; the error from the hello
+
+
+
+
+^{:go/end 60} (go/func Dial "Dial returns a new [Client] connected to an SMTP server at addr.\nThe addr must include a port, as in \"mail.example.com:smtp\".\n" [^string addr] :results [(* Client) error]
+  (let [(values conn err) (net/Dial "tcp" addr)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values host _ _) (net/SplitHostPort addr)]
+      (NewClient conn host))))
+
+
+
+
+^{:go/end 74} (go/func NewClient "NewClient returns a new [Client] using an existing connection and host as a\nserver name to be used when authenticating.\n" [^net/Conn conn ^string host] :results [(* Client) error]
+  (let [text (textproto/NewConn conn)
+      (values _ _ err) ^{:go/via [Reader]} (.ReadResponse text 220)]
+    (when (!= err nil)
+      (.Close text)
+      (return nil err))
+
+    (let [c (addr (lit Client :Text text :conn conn :serverName host :localName "localhost"))]
+      (set! (values _ (.-tls c)) (assert (* tls/Conn) conn))
+      (return c nil))))
+
+
+
+^{:go/end 79} (go/method Close "Close closes the connection.\n" ^error [^{:tag (* Client)} c]
+  (.Close (.-Text c)))
+
+
+
+^{:go/end 91} (go/method hello "hello runs a hello exchange if needed.\n" ^error [^{:tag (* Client)} c]
+  (when (not (.-didHello c))
+    (set! (.-didHello c) true)
+    (let [err (.ehlo c)]
+      (when (!= err nil)
+        (set! (.-helloError c) (.helo c)))))
+
+
+  (.-helloError c))
+
+
+
+
+
+
+
+^{:go/end 107} (go/method Hello "Hello sends a HELO or EHLO to the server as the given host name.\nCalling this method is only necessary if the client needs control\nover the host name used. The client will introduce itself as \"localhost\"\nautomatically otherwise. If Hello is called, it must be called before\nany of the other methods.\n" ^error [^{:tag (* Client)} c ^string localName]
+  (when [err (validateLine localName)] (!= err nil)
+    (return err))
+
+  (when (.-didHello c)
+    (return (errors/New "smtp: Hello called after other methods")))
+
+  (set! (.-localName c) localName)
+  (.hello c))
+
+
+
+^{:go/end 119} (go/method cmd "cmd is a convenience function that sends a command and returns the response\n" [^{:tag (* Client)} c ^int expectCode ^string format & ^{:tag (slice any)} args] :results [int string error]
+  (let [(values id err) (.Cmd (.-Text c) format (spread args))]
+    (when (!= err nil)
+      (return 0 "" err))
+
+    ^{:go/via [Pipeline]} (.StartResponse (.-Text c) id)
+    (defer ^{:go/via [Pipeline]} (.EndResponse (.-Text c) id))
+    (let [(values code msg ^:assign err) ^{:go/via [Reader]} (.ReadResponse (.-Text c) expectCode)]
+      (return code msg err))))
+
+
+
+
+^{:go/end 127} (go/method helo "helo sends the HELO greeting to the server. It should be used only when the\nserver does not support ehlo.\n" ^error [^{:tag (* Client)} c]
+  (set! (.-ext c) nil)
+  (let [(values _ _ err) (.cmd c 250 "HELO %s" (.-localName c))]
+    ^{:line 126} err))
+
+
+
+
+^{:go/end 150} (go/method ehlo "ehlo sends the EHLO (extended hello) greeting to the server. It\nshould be the preferred greeting for servers that support it.\n" ^error [^{:tag (* Client)} c]
+  (let [(values _ msg err) (.cmd c 250 "EHLO %s" (.-localName c))]
+    (when (!= err nil)
+      (return err))
+
+    (let [ext (make (map string string))
+        ^{:line 137} extList (strings/Split msg "\n")]
+      (when (> (len extList) 1)
+        (set! extList (subslice extList 1))
+        (range [_ line extList]
+          (let [(values k v _) (strings/Cut line " ")]
+            (aset ext k v))))
+
+
+      (when [(values mechs ok) (aget ext "AUTH")] ok
+        (set! (.-auth c) (strings/Split mechs " ")))
+
+      (set! (.-ext c) ext)
+      ^{:line 149} err)))
+
+
+
+
+^{:go/end 166} (go/method StartTLS "StartTLS sends the STARTTLS command and encrypts all further communication.\nOnly servers that advertise the STARTTLS extension support this function.\n" ^error [^{:tag (* Client)} c ^{:tag (* tls/Config)} config]
+  (when [err (.hello c)] (!= err nil)
+    (return err))
+
+  (let [(values _ _ err) (.cmd c 220 "STARTTLS")]
+    (when (!= err nil)
+      (return err))
+
+    (set! (.-conn c) (tls/Client (.-conn c) config))
+    (set! (.-Text c) (textproto/NewConn (.-conn c)))
+    (set! (.-tls c) true)
+    (.ehlo c)))
+
+
+
+
+
+^{:go/end 177} (go/method TLSConnectionState "TLSConnectionState returns the client's TLS connection state.\nThe return values are their zero values if [Client.StartTLS] did\nnot succeed.\n" [^{:tag (* Client)} c] :results [^tls/ConnectionState state ^bool ok]
+  (let [(values tc ^:assign ok) (assert (* tls/Conn) (.-conn c))]
+    (when (not ok)
+      (return))
+
+    (return (.ConnectionState tc) true)))
+
+
+
+
+
+
+^{:go/end 192} (go/method Verify "Verify checks the validity of an email address on the server.\nIf Verify returns nil, the address is valid. A non-nil return\ndoes not necessarily indicate an invalid address. Many servers\nwill not verify addresses for security reasons.\n" ^error [^{:tag (* Client)} c ^string addr]
+  (when [err (validateLine addr)] (!= err nil)
+    (return err))
+
+  (when [err (.hello c)] (!= err nil)
+    (return err))
+
+  (let [(values _ _ err) (.cmd c 250 "VRFY %s" addr)]
+    ^{:line 191} err))
+
+
+
+
+
+^{:go/end 238} (go/method Auth "Auth authenticates a client using the provided authentication mechanism.\nA failed authentication closes the connection.\nOnly servers that advertise the AUTH extension support this function.\n" ^error [^{:tag (* Client)} c ^Auth a]
+  (when [err (.hello c)] (!= err nil)
+    (return err))
+
+  (let [encoding base64/StdEncoding
+      (values mech resp err) (.Start a (addr (lit ServerInfo (.-serverName c) (.-tls c) (.-auth c))))]
+    (when (!= err nil)
+      (.Quit c)
+      (return err))
+
+    (let [resp64 (make (slice byte) (.EncodedLen encoding (len resp)))]
+      (.Encode encoding resp64 resp)
+      (let [(values code msg64 ^:assign err) (.cmd c 0 "%s" (strings/TrimSpace (fmt/Sprintf "AUTH %s %s" mech resp64)))]
+        (while (== err nil)
+          (let [^{:tag (slice byte)} msg (zero (slice byte))]
+            (switch code
+              (case [334]
+                (set! (values msg err) (.DecodeString encoding msg64)))
+              (case [235]
+                ;; the last message isn't base64 because it isn't a challenge
+                (set! msg (conv (slice byte) msg64)))
+              (default
+                (set! err (addr (lit textproto/Error :Code code :Msg msg64)))))
+
+            (when (== err nil)
+              (set! (values resp err) (.Next a msg (== code 334))))
+
+            (when (!= err nil)
+              ;; abort the AUTH
+              (.cmd c 501 "*")
+              (.Quit c)
+              (break))
+
+            (when (== resp nil)
+              (break))
+
+            (set! resp64 (make (slice byte) (.EncodedLen encoding (len resp))))
+            (.Encode encoding resp64 resp)
+            (set! (values code msg64 err) (.cmd c 0 "%s" resp64))))
+
+        ^{:line 237} err))))
+
+
+
+
+
+
+
+^{:go/end 263} (go/method Mail "Mail issues a MAIL command to the server using the provided email address.\nIf the server supports the 8BITMIME extension, Mail adds the BODY=8BITMIME\nparameter. If the server supports the SMTPUTF8 extension, Mail adds the\nSMTPUTF8 parameter.\nThis initiates a mail transaction and is followed by one or more [Client.Rcpt] calls.\n" ^error [^{:tag (* Client)} c ^string from]
+  (when [err (validateLine from)] (!= err nil)
+    (return err))
+
+  (when [err (.hello c)] (!= err nil)
+    (return err))
+
+  (let [cmdStr "MAIL FROM:<%s>"]
+    (when (!= (.-ext c) nil)
+      (when [(values _ ok) (aget (.-ext c) "8BITMIME")] ok
+        (set! cmdStr + " BODY=8BITMIME"))
+
+      (when [(values _ ok) (aget (.-ext c) "SMTPUTF8")] ok
+        (set! cmdStr + " SMTPUTF8")))
+
+
+    (let [(values _ _ err) (.cmd c 250 cmdStr from)]
+      ^{:line 262} err)))
+
+
+
+
+
+^{:go/end 274} (go/method Rcpt "Rcpt issues a RCPT command to the server using the provided email address.\nA call to Rcpt must be preceded by a call to [Client.Mail] and may be followed by\na [Client.Data] call or another Rcpt call.\n" ^error [^{:tag (* Client)} c ^string to]
+  (when [err (validateLine to)] (!= err nil)
+    (return err))
+
+  (let [(values _ _ err) (.cmd c 25 "RCPT TO:<%s>" to)]
+    ^{:line 273} err))
+
+
+(go/type dataCloser (struct
+    ^{:line 277 :tag (* Client)} c
+    ^{:line 278} io/WriteCloser))
+
+
+^{:go/end 285} (go/method Close ^error [^{:tag (* dataCloser)} d]
+  (.Close (.-WriteCloser d))
+  (let [(values _ _ err) ^{:go/via [Reader]} (.ReadResponse (.-Text (.-c d)) 250)]
+    ^{:line 284} err))
+
+
+
+
+
+
+^{:go/end 297} (go/method Data "Data issues a DATA command to the server and returns a writer that\ncan be used to write the mail headers and body. The caller should\nclose the writer before calling any more methods on c. A call to\nData must be preceded by one or more calls to [Client.Rcpt].\n" [^{:tag (* Client)} c] :results [io/WriteCloser error]
+  (let [(values _ _ err) (.cmd c 354 "DATA")]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (addr (lit dataCloser c ^{:go/via [Writer]} (.DotWriter (.-Text c)))) nil)))
+
+
+(go/var ^{:tag (func [(* tls/Config)])} testHookStartTLS) ; nil, except for tests
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 376} (go/func SendMail "SendMail connects to the server at addr, switches to TLS if\npossible, authenticates with the optional mechanism a if possible,\nand then sends an email from address from, to addresses to, with\nmessage msg.\nThe addr must include a port, as in \"mail.example.com:smtp\".\n\nThe addresses in the to parameter are the SMTP RCPT addresses.\n\nThe msg parameter should be an RFC 822-style email with headers\nfirst, a blank line, and then the message body. The lines of msg\nshould be CRLF terminated. The msg headers should usually include\nfields such as \"From\", \"To\", \"Subject\", and \"Cc\".  Sending \"Bcc\"\nmessages is accomplished by including an email address in the to\nparameter but not including it in the msg headers.\n\nThe SendMail function and the net/smtp package are low-level\nmechanisms and provide no support for DKIM signing, MIME\nattachments (see the mime/multipart package), or other mail\nfunctionality. Higher-level packages exist outside of the standard\nlibrary.\n" ^error [^string addr ^Auth a ^string from ^{:tag (slice string)} to ^{:tag (slice byte)} msg]
+  (when [err (validateLine from)] (!= err nil)
+    (return err))
+
+  (range [_ recp to]
+    (when [err (validateLine recp)] (!= err nil)
+      (return err)))
+
+
+  (let [(values c err) (Dial addr)]
+    (when (!= err nil)
+      (return err))
+
+    (defer (.Close c))
+    (when [(set! err (.hello c))] (!= err nil)
+      (return err))
+
+    (when [(values ok _) (.Extension c "STARTTLS")] ok
+      (let [config (addr (lit tls/Config :ServerName (.-serverName c)))]
+        (when (!= testHookStartTLS nil)
+          (testHookStartTLS config))
+
+        (when [(set! err (.StartTLS c config))] (!= err nil)
+          (return err))))
+
+
+    (when (and (!= a nil) (!= (.-ext c) nil))
+      (when [(values _ ok) (aget (.-ext c) "AUTH")] (not ok)
+        (return (errors/New "smtp: server doesn't support AUTH")))
+
+      (when [(set! err (.Auth c a))] (!= err nil)
+        (return err)))
+
+
+    (when [(set! err (.Mail c from))] (!= err nil)
+      (return err))
+
+    (range [_ addr to]
+      (when [(set! err (.Rcpt c addr))] (!= err nil)
+        (return err)))
+
+
+    (let [(values w ^:assign err) (.Data c)]
+      (when (!= err nil)
+        (return err))
+
+      (set! (values _ err) (.Write w msg))
+      (when (!= err nil)
+        (return err))
+
+      (set! err (.Close w))
+      (when (!= err nil)
+        (return err))
+
+      (.Quit c))))
+
+
+
+
+
+
+^{:go/end 392} (go/method Extension "Extension reports whether an extension is support by the server.\nThe extension name is case-insensitive. If the extension is supported,\nExtension also returns a string that contains any parameters the\nserver specifies for the extension.\n" [^{:tag (* Client)} c ^string ext] :results [bool string]
+  (when [err (.hello c)] (!= err nil)
+    (return false ""))
+
+  (when (== (.-ext c) nil)
+    (return false ""))
+
+  (set! ext (strings/ToUpper ext))
+  (let [(values param ok) (aget (.-ext c) ext)]
+    (return ok param)))
+
+
+
+
+^{:go/end 402} (go/method Reset "Reset sends the RSET command to the server, aborting the current mail\ntransaction.\n" ^error [^{:tag (* Client)} c]
+  (when [err (.hello c)] (!= err nil)
+    (return err))
+
+  (let [(values _ _ err) (.cmd c 250 "RSET")]
+    ^{:line 401} err))
+
+
+
+
+^{:go/end 412} (go/method Noop "Noop sends the NOOP command to the server. It does nothing but check\nthat the connection to the server is okay.\n" ^error [^{:tag (* Client)} c]
+  (when [err (.hello c)] (!= err nil)
+    (return err))
+
+  (let [(values _ _ err) (.cmd c 250 "NOOP")]
+    ^{:line 411} err))
+
+
+
+^{:go/end 422} (go/method Quit "Quit sends the QUIT command and closes the connection to the server.\n" ^error [^{:tag (* Client)} c]
+  (.hello c) ; ignore error; we're quitting anyhow
+  (let [(values _ _ err) (.cmd c 221 "QUIT")]
+    (when (!= err nil)
+      (return err))
+
+    (.Close (.-Text c))))
+
+
+
+^{:go/breaks [[5 429]] :go/end 430} (go/func validateLine "validateLine checks to see if a line has CR or LF as per RFC 5321.\n" ^error [^string line]
+  (when (strings/ContainsAny line "\n\r")
+    (return (errors/New "smtp: A line must not contain CR or LF")))
+
+  nil)

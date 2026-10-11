@@ -1,0 +1,551 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+;; Migrating to v2
+;;
+;; This package (i.e., [encoding/json]) is now formally known as the v1 package
+;; since a v2 package now exists at [encoding/json/v2].
+;; All the behavior of the v1 package is implemented in terms of
+;; the v2 package with the appropriate set of options specified that
+;; preserve the historical behavior of v1.
+;;
+;; The [jsonv2.Marshal] function is the newer equivalent of v1 [Marshal].
+;; The [jsonv2.Unmarshal] function is the newer equivalent of v1 [Unmarshal].
+;; The v2 functions have the same calling signature as the v1 equivalent
+;; except that they take in variadic [Options] arguments that can be specified
+;; to alter the behavior of marshal or unmarshal. Both v1 and v2 generally
+;; behave in similar ways, but there are some notable differences.
+;;
+;; The following is a list of differences between v1 and v2:
+;;
+;;   - In v1, JSON object members are unmarshaled into a Go struct using a
+;;     case-insensitive name match with the JSON name of the fields.
+;;     In contrast, v2 matches fields using an exact, case-sensitive match.
+;;     The [jsonv2.MatchCaseInsensitiveNames] and [MatchCaseSensitiveDelimiter]
+;;     options control this behavior difference. To explicitly specify a Go struct
+;;     field to use a particular name matching scheme, either the `case:ignore`
+;;     or the `case:strict` field option can be specified.
+;;     Field-specified options take precedence over caller-specified options.
+;;
+;;   - In v1, when marshaling a Go struct, a field marked as `omitempty`
+;;     is omitted if the field value is an "empty" Go value, which is defined as
+;;     false, 0, a nil pointer, a nil interface value, and
+;;     any empty array, slice, map, or string. In contrast, v2 redefines
+;;     `omitempty` to omit a field if it encodes as an "empty" JSON value,
+;;     which is defined as a JSON null, or an empty JSON string, object, or array.
+;;     The [OmitEmptyWithLegacySemantics] option controls this behavior difference.
+;;     Note that `omitempty` behaves identically in both v1 and v2 for a
+;;     Go array, slice, map, or string (assuming no user-defined MarshalJSON method
+;;     overrides the default representation). Existing usages of `omitempty` on a
+;;     Go bool, number, pointer, or interface value should migrate to specifying
+;;     `omitzero` instead (which is identically supported in both v1 and v2).
+;;
+;;   - In v1, a Go struct field marked as `string` can be used to quote a
+;;     Go string, bool, number, or pointer to such as a JSON string.
+;;     In contrast, v2 restricts the `string` option to only quote a value
+;;     that would normally be represented as a JSON number,
+;;     but also expands support for it to operate with any Go type
+;;     that would normally be represented as a JSON number.
+;;     The [StringifyWithLegacySemantics] option controls this behavior difference.
+;;
+;;   - In v1, a nil Go slice or Go map is marshaled as a JSON null.
+;;     In contrast, v2 marshals a nil Go slice or Go map as
+;;     an empty JSON array or JSON object, respectively.
+;;     The [jsonv2.FormatNilSliceAsNull] and [jsonv2.FormatNilMapAsNull] options
+;;     control this behavior difference.
+;;
+;;   - In v1, a Go array may be unmarshaled from a JSON array of any length.
+;;     In contrast, in v2 a Go array must be unmarshaled from a JSON array
+;;     of the same length, otherwise it results in an error.
+;;     The [UnmarshalArrayFromAnyLength] option controls this behavior difference.
+;;
+;;   - In v1, a Go byte array is represented as a JSON array of JSON numbers.
+;;     In contrast, in v2 a Go byte array is represented as a Base64-encoded JSON string.
+;;     The [FormatByteArrayAsArray] option controls this behavior difference.
+;;
+;;   - In v1, MarshalJSON methods declared on a pointer receiver are only called
+;;     if the Go value is addressable. In contrast, in v2 a MarshalJSON method
+;;     is always callable regardless of addressability.
+;;     The [CallMethodsWithLegacySemantics] option controls this behavior difference.
+;;
+;;   - In v1, MarshalJSON and UnmarshalJSON methods are never called for Go map keys.
+;;     In contrast, in v2 a MarshalJSON or UnmarshalJSON method is eligible for
+;;     being called for Go map keys.
+;;     The [CallMethodsWithLegacySemantics] option controls this behavior difference.
+;;
+;;   - In v1, a Go map is marshaled in a deterministic order.
+;;     In contrast, in v2 a Go map is marshaled in a non-deterministic order.
+;;     The [jsonv2.Deterministic] option controls this behavior difference.
+;;
+;;   - In v1, JSON strings are encoded with HTML-specific or JavaScript-specific
+;;     characters being escaped. In contrast, in v2 JSON strings use the minimal
+;;     encoding and only escape if required by the JSON grammar.
+;;     The [jsontext.EscapeForHTML] and [jsontext.EscapeForJS] options
+;;     control this behavior difference.
+;;
+;;   - In v1, bytes of invalid UTF-8 within a string are silently replaced with
+;;     the Unicode replacement character. In contrast, in v2 the presence of
+;;     invalid UTF-8 results in an error. The [jsontext.AllowInvalidUTF8] option
+;;     controls this behavior difference.
+;;
+;;   - In v1, a JSON object with duplicate names is permitted.
+;;     In contrast, in v2 a JSON object with duplicate names results in an error.
+;;     The [jsontext.AllowDuplicateNames] option controls this behavior difference.
+;;
+;;   - In v1, when unmarshaling a JSON null into a non-empty Go value it will
+;;     inconsistently either zero out the value or do nothing.
+;;     In contrast, in v2 unmarshaling a JSON null will consistently and always
+;;     zero out the underlying Go value. The [MergeWithLegacySemantics] option
+;;     controls this behavior difference.
+;;
+;;   - In v1, when unmarshaling a JSON value into a non-zero Go value,
+;;     it merges into the original Go value for array elements, slice elements,
+;;     struct fields (but not map values),
+;;     pointer values, and interface values (only if a non-nil pointer).
+;;     In contrast, in v2 unmarshal merges into the Go value
+;;     for struct fields, map values, pointer values, and interface values.
+;;     In general, the v2 semantic merges when unmarshaling a JSON object,
+;;     otherwise it replaces the value. The [MergeWithLegacySemantics] option
+;;     controls this behavior difference.
+;;
+;;   - In v1, a [time.Duration] is represented as a JSON number containing
+;;     the decimal number of nanoseconds. In contrast, in v2 a [time.Duration]
+;;     has no default representation and results in a runtime error.
+;;     The [FormatDurationAsNano] option controls this behavior difference.
+;;
+;;   - In v1, errors are never reported at runtime for Go struct types
+;;     that have some form of structural error (e.g., a malformed tag option).
+;;     In contrast, v2 reports a runtime error for Go types that are invalid
+;;     as they relate to JSON serialization. For example, a Go struct
+;;     with only unexported fields cannot be serialized.
+;;     The [ReportErrorsWithLegacySemantics] option controls this behavior difference.
+;;
+;; As mentioned, the entirety of v1 is implemented in terms of v2,
+;; where options are implicitly specified to opt into legacy behavior.
+;; For example, [Marshal] directly calls [jsonv2.Marshal] with [DefaultOptionsV1].
+;; Similarly, [Unmarshal] directly calls [jsonv2.Unmarshal] with [DefaultOptionsV1].
+;; The [DefaultOptionsV1] option represents the set of all options that specify
+;; default v1 behavior.
+;;
+;; For many of the behavior differences, there are Go struct field options
+;; that the author of a Go type can specify to control the behavior such that
+;; the type is represented identically in JSON under either v1 or v2 semantics.
+;;
+;; The availability of [DefaultOptionsV1] and [jsonv2.DefaultOptionsV2],
+;; where later options take precedence over former options allows for
+;; a gradual migration from v1 to v2. For example:
+;;
+;;   - jsonv1.Marshal(v)
+;;     uses default v1 semantics.
+;;
+;;   - jsonv2.Marshal(v, jsonv1.DefaultOptionsV1())
+;;     is semantically equivalent to jsonv1.Marshal
+;;     and thus uses default v1 semantics.
+;;
+;;   - jsonv2.Marshal(v, jsonv1.DefaultOptionsV1(), jsontext.AllowDuplicateNames(false))
+;;     uses mostly v1 semantics, but opts into one particular v2-specific behavior.
+;;
+;;   - jsonv2.Marshal(v, jsonv1.CallMethodsWithLegacySemantics(true))
+;;     uses mostly v2 semantics, but opts into one particular v1-specific behavior.
+;;
+;;   - jsonv2.Marshal(v, ..., jsonv2.DefaultOptionsV2())
+;;     is semantically equivalent to jsonv2.Marshal since
+;;     jsonv2.DefaultOptionsV2 overrides any options specified earlier
+;;     and thus uses default v2 semantics.
+;;
+;;   - jsonv2.Marshal(v)
+;;     uses default v2 semantics.
+;;
+;; All new usages of "json" in Go should use the v2 package,
+;; but the v1 package will forever remain supported.
+;;
+;; See the [encoding/json/v2 Migration Guide] for additional detail on migration approaches.
+;;
+;; [encoding/json/v2 Migration Guide]: https://go.dev/doc/jsonv2-migration
+(in-ns 'go.encoding.json) (go/file "v2_options.go" :build ["//go:build goexperiment.jsonv2"] :doc "Migrating to v2\n\nThis package (i.e., [encoding/json]) is now formally known as the v1 package\nsince a v2 package now exists at [encoding/json/v2].\nAll the behavior of the v1 package is implemented in terms of\nthe v2 package with the appropriate set of options specified that\npreserve the historical behavior of v1.\n\nThe [jsonv2.Marshal] function is the newer equivalent of v1 [Marshal].\nThe [jsonv2.Unmarshal] function is the newer equivalent of v1 [Unmarshal].\nThe v2 functions have the same calling signature as the v1 equivalent\nexcept that they take in variadic [Options] arguments that can be specified\nto alter the behavior of marshal or unmarshal. Both v1 and v2 generally\nbehave in similar ways, but there are some notable differences.\n\nThe following is a list of differences between v1 and v2:\n\n  - In v1, JSON object members are unmarshaled into a Go struct using a\n    case-insensitive name match with the JSON name of the fields.\n    In contrast, v2 matches fields using an exact, case-sensitive match.\n    The [jsonv2.MatchCaseInsensitiveNames] and [MatchCaseSensitiveDelimiter]\n    options control this behavior difference. To explicitly specify a Go struct\n    field to use a particular name matching scheme, either the `case:ignore`\n    or the `case:strict` field option can be specified.\n    Field-specified options take precedence over caller-specified options.\n\n  - In v1, when marshaling a Go struct, a field marked as `omitempty`\n    is omitted if the field value is an \"empty\" Go value, which is defined as\n    false, 0, a nil pointer, a nil interface value, and\n    any empty array, slice, map, or string. In contrast, v2 redefines\n    `omitempty` to omit a field if it encodes as an \"empty\" JSON value,\n    which is defined as a JSON null, or an empty JSON string, object, or array.\n    The [OmitEmptyWithLegacySemantics] option controls this behavior difference.\n    Note that `omitempty` behaves identically in both v1 and v2 for a\n    Go array, slice, map, or string (assuming no user-defined MarshalJSON method\n    overrides the default representation). Existing usages of `omitempty` on a\n    Go bool, number, pointer, or interface value should migrate to specifying\n    `omitzero` instead (which is identically supported in both v1 and v2).\n\n  - In v1, a Go struct field marked as `string` can be used to quote a\n    Go string, bool, number, or pointer to such as a JSON string.\n    In contrast, v2 restricts the `string` option to only quote a value\n    that would normally be represented as a JSON number,\n    but also expands support for it to operate with any Go type\n    that would normally be represented as a JSON number.\n    The [StringifyWithLegacySemantics] option controls this behavior difference.\n\n  - In v1, a nil Go slice or Go map is marshaled as a JSON null.\n    In contrast, v2 marshals a nil Go slice or Go map as\n    an empty JSON array or JSON object, respectively.\n    The [jsonv2.FormatNilSliceAsNull] and [jsonv2.FormatNilMapAsNull] options\n    control this behavior difference.\n\n  - In v1, a Go array may be unmarshaled from a JSON array of any length.\n    In contrast, in v2 a Go array must be unmarshaled from a JSON array\n    of the same length, otherwise it results in an error.\n    The [UnmarshalArrayFromAnyLength] option controls this behavior difference.\n\n  - In v1, a Go byte array is represented as a JSON array of JSON numbers.\n    In contrast, in v2 a Go byte array is represented as a Base64-encoded JSON string.\n    The [FormatByteArrayAsArray] option controls this behavior difference.\n\n  - In v1, MarshalJSON methods declared on a pointer receiver are only called\n    if the Go value is addressable. In contrast, in v2 a MarshalJSON method\n    is always callable regardless of addressability.\n    The [CallMethodsWithLegacySemantics] option controls this behavior difference.\n\n  - In v1, MarshalJSON and UnmarshalJSON methods are never called for Go map keys.\n    In contrast, in v2 a MarshalJSON or UnmarshalJSON method is eligible for\n    being called for Go map keys.\n    The [CallMethodsWithLegacySemantics] option controls this behavior difference.\n\n  - In v1, a Go map is marshaled in a deterministic order.\n    In contrast, in v2 a Go map is marshaled in a non-deterministic order.\n    The [jsonv2.Deterministic] option controls this behavior difference.\n\n  - In v1, JSON strings are encoded with HTML-specific or JavaScript-specific\n    characters being escaped. In contrast, in v2 JSON strings use the minimal\n    encoding and only escape if required by the JSON grammar.\n    The [jsontext.EscapeForHTML] and [jsontext.EscapeForJS] options\n    control this behavior difference.\n\n  - In v1, bytes of invalid UTF-8 within a string are silently replaced with\n    the Unicode replacement character. In contrast, in v2 the presence of\n    invalid UTF-8 results in an error. The [jsontext.AllowInvalidUTF8] option\n    controls this behavior difference.\n\n  - In v1, a JSON object with duplicate names is permitted.\n    In contrast, in v2 a JSON object with duplicate names results in an error.\n    The [jsontext.AllowDuplicateNames] option controls this behavior difference.\n\n  - In v1, when unmarshaling a JSON null into a non-empty Go value it will\n    inconsistently either zero out the value or do nothing.\n    In contrast, in v2 unmarshaling a JSON null will consistently and always\n    zero out the underlying Go value. The [MergeWithLegacySemantics] option\n    controls this behavior difference.\n\n  - In v1, when unmarshaling a JSON value into a non-zero Go value,\n    it merges into the original Go value for array elements, slice elements,\n    struct fields (but not map values),\n    pointer values, and interface values (only if a non-nil pointer).\n    In contrast, in v2 unmarshal merges into the Go value\n    for struct fields, map values, pointer values, and interface values.\n    In general, the v2 semantic merges when unmarshaling a JSON object,\n    otherwise it replaces the value. The [MergeWithLegacySemantics] option\n    controls this behavior difference.\n\n  - In v1, a [time.Duration] is represented as a JSON number containing\n    the decimal number of nanoseconds. In contrast, in v2 a [time.Duration]\n    has no default representation and results in a runtime error.\n    The [FormatDurationAsNano] option controls this behavior difference.\n\n  - In v1, errors are never reported at runtime for Go struct types\n    that have some form of structural error (e.g., a malformed tag option).\n    In contrast, v2 reports a runtime error for Go types that are invalid\n    as they relate to JSON serialization. For example, a Go struct\n    with only unexported fields cannot be serialized.\n    The [ReportErrorsWithLegacySemantics] option controls this behavior difference.\n\nAs mentioned, the entirety of v1 is implemented in terms of v2,\nwhere options are implicitly specified to opt into legacy behavior.\nFor example, [Marshal] directly calls [jsonv2.Marshal] with [DefaultOptionsV1].\nSimilarly, [Unmarshal] directly calls [jsonv2.Unmarshal] with [DefaultOptionsV1].\nThe [DefaultOptionsV1] option represents the set of all options that specify\ndefault v1 behavior.\n\nFor many of the behavior differences, there are Go struct field options\nthat the author of a Go type can specify to control the behavior such that\nthe type is represented identically in JSON under either v1 or v2 semantics.\n\nThe availability of [DefaultOptionsV1] and [jsonv2.DefaultOptionsV2],\nwhere later options take precedence over former options allows for\na gradual migration from v1 to v2. For example:\n\n  - jsonv1.Marshal(v)\n    uses default v1 semantics.\n\n  - jsonv2.Marshal(v, jsonv1.DefaultOptionsV1())\n    is semantically equivalent to jsonv1.Marshal\n    and thus uses default v1 semantics.\n\n  - jsonv2.Marshal(v, jsonv1.DefaultOptionsV1(), jsontext.AllowDuplicateNames(false))\n    uses mostly v1 semantics, but opts into one particular v2-specific behavior.\n\n  - jsonv2.Marshal(v, jsonv1.CallMethodsWithLegacySemantics(true))\n    uses mostly v2 semantics, but opts into one particular v1-specific behavior.\n\n  - jsonv2.Marshal(v, ..., jsonv2.DefaultOptionsV2())\n    is semantically equivalent to jsonv2.Marshal since\n    jsonv2.DefaultOptionsV2 overrides any options specified earlier\n    and thus uses default v2 semantics.\n\n  - jsonv2.Marshal(v)\n    uses default v2 semantics.\n\nAll new usages of \"json\" in Go should use the v2 package,\nbut the v1 package will forever remain supported.\n\nSee the [encoding/json/v2 Migration Guide] for additional detail on migration approaches.\n\n[encoding/json/v2 Migration Guide]: https://go.dev/doc/jsonv2-migration\n" :imports [
+
+    ;; TODO(https://go.dev/issue/71631): Update the "Migrating to v2" documentation
+    ;; with default v2 behavior for [time.Duration].
+
+
+    ^{:line 174} [encoding "encoding"]
+
+    ^{:line 176} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 177} [jsonopts "encoding/json/internal/jsonopts"]
+    ^{:line 178} [jsontext "encoding/json/jsontext"]
+    ^:alias ^{:line 179} [jsonv2 "encoding/json/v2"]])
+
+
+
+
+(go/var "Reference encoding, jsonv2, and jsontext packages to assist pkgsite\nin being able to hotlink references to those packages.\n"
+  ^{:line 185} [^encoding/TextMarshaler _]
+  ^{:line 186} [^encoding/TextUnmarshaler _]
+  ^{:line 187} [^jsonv2/Options _]
+  ^{:line 188} [^jsontext/Options _])
+
+
+
+
+
+
+
+
+
+
+(go/type ^:alias Options "Options are a set of options to configure the v2 \"json\" package\nto operate with v1 semantics for particular features.\nValues of this type can be passed to v2 functions like\n[jsonv2.Marshal] or [jsonv2.Unmarshal].\nInstead of referencing this type, use [jsonv2.Options].\n\nSee the \"Migrating to v2\" section for guidance on how to migrate usage\nof \"json\" from using v1 to using v2 instead.\n" jsonopts/Options)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 235} (go/func DefaultOptionsV1 "DefaultOptionsV1 is the full set of all options that define v1 semantics.\nIt is equivalent to the following boolean options being set to true:\n\n  - [CallMethodsWithLegacySemantics]\n  - [FormatByteArrayAsArray]\n  - [FormatBytesWithLegacySemantics]\n  - [FormatDurationAsNano]\n  - [MatchCaseSensitiveDelimiter]\n  - [MergeWithLegacySemantics]\n  - [OmitEmptyWithLegacySemantics]\n  - [ParseBytesWithLooseRFC4648]\n  - [ParseTimeWithLooseRFC3339]\n  - [ReportErrorsWithLegacySemantics]\n  - [StringifyWithLegacySemantics]\n  - [UnmarshalArrayFromAnyLength]\n  - [jsonv2.Deterministic]\n  - [jsonv2.FormatNilMapAsNull]\n  - [jsonv2.FormatNilSliceAsNull]\n  - [jsonv2.MatchCaseInsensitiveNames]\n  - [jsontext.AllowDuplicateNames]\n  - [jsontext.AllowInvalidUTF8]\n  - [jsontext.EscapeForHTML]\n  - [jsontext.EscapeForJS]\n  - [jsontext.PreserveRawStrings]\n\nAll other options are not present.\n\nThe [Marshal] and [Unmarshal] functions in this package are\nsemantically identical to calling the v2 equivalents with this option:\n\n\tjsonv2.Marshal(v, jsonv1.DefaultOptionsV1())\n\tjsonv2.Unmarshal(b, v, jsonv1.DefaultOptionsV1())\n" ^Options []
+  (addr jsonopts/DefaultOptionsV1))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 278} (go/func CallMethodsWithLegacySemantics "CallMethodsWithLegacySemantics specifies that calling of type-provided\nmarshal and unmarshal methods follow legacy semantics:\n\n  - When marshaling, a marshal method declared on a pointer receiver\n    is only called if the Go value is addressable.\n    Values obtained from an interface or map element are not addressable.\n    Values obtained from a pointer or slice element are addressable.\n    Values obtained from an array element or struct field inherit\n    the addressability of the parent. In contrast, the v2 semantic\n    is to always call marshal methods regardless of addressability.\n\n  - When marshaling or unmarshaling, the [Marshaler] or [Unmarshaler]\n    methods are ignored for map keys. However, [encoding.TextMarshaler]\n    or [encoding.TextUnmarshaler] are still callable.\n    In contrast, the v2 semantic is to serialize map keys\n    like any other value (with regard to calling methods),\n    which may include calling [Marshaler] or [Unmarshaler] methods,\n    where it is the implementation's responsibility to represent the\n    Go value as a JSON string (as required for JSON object names).\n\n  - When marshaling, if a map key value implements a marshal method\n    and is a nil pointer, then it is serialized as an empty JSON string.\n    In contrast, the v2 semantic is to report an error.\n\n  - When marshaling, if an interface type implements a marshal method\n    and the interface value is a nil pointer to a concrete type,\n    then the marshal method is always called.\n    In contrast, the v2 semantic is to never directly call methods\n    on interface values and to instead defer evaluation based upon\n    the underlying concrete value. Similar to non-interface values,\n    marshal methods are not called on nil pointers and\n    are instead serialized as a JSON null.\n\nThis affects either marshaling or unmarshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/CallMethodsWithLegacySemantics 1))
+
+    (return (bit-or jsonflags/CallMethodsWithLegacySemantics 0))))
+
+
+
+
+
+
+
+
+
+^{:go/end 292} (go/func FormatByteArrayAsArray "FormatByteArrayAsArray specifies that a Go [N]byte is\nformatted as a normal Go array in contrast to the v2 default of\nformatting [N]byte as using binary data encoding (RFC 4648).\n\nThis affects either marshaling or unmarshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/FormatByteArrayAsArray 1))
+
+    (return (bit-or jsonflags/FormatByteArrayAsArray 0))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 319} (go/func FormatBytesWithLegacySemantics "FormatBytesWithLegacySemantics specifies that handling of\n[]~byte and [N]~byte types follow legacy semantics:\n\n  - A Go []~byte is to be treated as using some form of\n    binary data encoding (RFC 4648) in contrast to the v2 default\n    of only treating []byte as such. In particular, v2 does not\n    treat slices of named byte types as representing binary data.\n\n  - When marshaling, if a named byte implements a marshal method,\n    then the slice is serialized as a JSON array of elements,\n    each of which call the marshal method.\n\n  - When unmarshaling, if the input is a JSON array,\n    then unmarshal into the []~byte as if it were a normal Go slice.\n    In contrast, the v2 default is to report an error unmarshaling\n    a JSON array when expecting some form of binary data encoding.\n\nThis affects either marshaling or unmarshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/FormatBytesWithLegacySemantics 1))
+
+    (return (bit-or jsonflags/FormatBytesWithLegacySemantics 0))))
+
+
+
+
+
+
+
+
+
+^{:go/end 334} (go/func FormatDurationAsNano "FormatDurationAsNano specifies that a [time.Duration] is\nformatted as a JSON number representing the number of nanoseconds\nin contrast to the v2 default of reporting an error.\n\nThis affects either marshaling or unmarshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  ;; TODO(https://go.dev/issue/71631): Update documentation with v2 behavior.
+  (if v
+    (return (bit-or jsonflags/FormatDurationAsNano 1))
+
+    (return (bit-or jsonflags/FormatDurationAsNano 0))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 351} (go/func MatchCaseSensitiveDelimiter "MatchCaseSensitiveDelimiter specifies that underscores and dashes are\nnot to be ignored when performing case-insensitive name matching which\noccurs under [jsonv2.MatchCaseInsensitiveNames] or the `case:ignore` tag option.\nThus, case-insensitive name matching is identical to [strings.EqualFold].\nUse of this option diminishes the ability of case-insensitive matching\nto be able to match common case variants (e.g., \"foo_bar\" with \"fooBar\").\n\nThis affects either marshaling or unmarshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/MatchCaseSensitiveDelimiter 1))
+
+    (return (bit-or jsonflags/MatchCaseSensitiveDelimiter 0))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 382} (go/func MergeWithLegacySemantics "MergeWithLegacySemantics specifies that unmarshaling into a non-zero\nGo value follows legacy semantics:\n\n  - When unmarshaling a JSON null, this preserves the original Go value\n    if the kind is a bool, int, uint, float, string, array, or struct.\n    Otherwise, it zeros the Go value.\n    In contrast, the default v2 behavior is to consistently and always\n    zero the Go value when unmarshaling a JSON null into it.\n\n  - When unmarshaling a JSON value other than null, this merges into\n    the original Go value for array elements, slice elements,\n    struct fields (but not map values),\n    pointer values, and interface values (only if a non-nil pointer).\n    For slices, it will merge into the pre-existing value of slice elements\n    even for those past the slice length. If the original slice length\n    was longer than the JSON array, then it is truncated to match.\n    In contrast, the default v2 behavior is to merge into the Go value\n    for struct fields, map values, pointer values, and interface values.\n    In general, the v2 semantic merges when unmarshaling a JSON object,\n    otherwise it replaces the original value.\n\nThis only affects unmarshaling and is ignored when marshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/MergeWithLegacySemantics 1))
+
+    (return (bit-or jsonflags/MergeWithLegacySemantics 0))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 404} (go/func OmitEmptyWithLegacySemantics "OmitEmptyWithLegacySemantics specifies that the `omitempty` tag option\nfollows a definition of empty where a field is omitted if the Go value is\nfalse, 0, a nil pointer, a nil interface value,\nor any empty array, slice, map, or string.\nThis overrides the v2 semantic where a field is empty if the value\nmarshals as a JSON null or an empty JSON string, object, or array.\n\nThe v1 and v2 definitions of `omitempty` are practically the same for\nGo strings, slices, arrays, and maps. Usages of `omitempty` on\nGo bools, ints, uints, floats, pointers, and interfaces should migrate to use\nthe `omitzero` tag option, which omits a field if it is the zero Go value.\n\nThis only affects marshaling and is ignored when unmarshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/OmitEmptyWithLegacySemantics 1))
+
+    (return (bit-or jsonflags/OmitEmptyWithLegacySemantics 0))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 421} (go/func ParseBytesWithLooseRFC4648 "ParseBytesWithLooseRFC4648 specifies that when parsing\nbinary data encoded as \"base32\" or \"base64\",\nto ignore the presence of '\\r' and '\\n' characters.\nIn contrast, the v2 default is to report an error in order to be\nstrictly compliant with RFC 4648, section 3.3,\nwhich specifies that non-alphabet characters must be rejected.\n\nThis only affects unmarshaling and is ignored when marshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/ParseBytesWithLooseRFC4648 1))
+
+    (return (bit-or jsonflags/ParseBytesWithLooseRFC4648 0))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 438} (go/func ParseTimeWithLooseRFC3339 "ParseTimeWithLooseRFC3339 specifies that a [time.Time]\nparses according to loose adherence to RFC 3339.\nIn particular, it permits historically incorrect representations,\nallowing for deviations in hour format, sub-second separator,\nand timezone representation. In contrast, the default v2 behavior\nis to strictly comply with the grammar specified in RFC 3339.\n\nThis only affects unmarshaling and is ignored when marshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/ParseTimeWithLooseRFC3339 1))
+
+    (return (bit-or jsonflags/ParseTimeWithLooseRFC3339 0))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 495} (go/func ReportErrorsWithLegacySemantics "ReportErrorsWithLegacySemantics specifies that Marshal and Unmarshal\nshould report errors with legacy semantics:\n\n  - When marshaling or unmarshaling, the returned error values are\n    usually of types such as [SyntaxError], [MarshalerError],\n    [UnsupportedTypeError], [UnsupportedValueError],\n    [InvalidUnmarshalError], or [UnmarshalTypeError].\n    In contrast, the v2 semantic is to always return errors as either\n    [jsonv2.SemanticError] or [jsontext.SyntacticError].\n\n  - When marshaling, if a user-defined marshal method reports an error,\n    it is always wrapped in a [MarshalerError], even if the error itself\n    is already a [MarshalerError], which may lead to multiple redundant\n    layers of wrapping. In contrast, the v2 semantic is to\n    always wrap an error within [jsonv2.SemanticError]\n    unless it is already a semantic error.\n\n  - When unmarshaling, if a user-defined unmarshal method reports an error,\n    it is never wrapped and reported verbatim. In contrast, the v2 semantic\n    is to always wrap an error within [jsonv2.SemanticError]\n    unless it is already a semantic error.\n\n  - When marshaling or unmarshaling, if a Go struct contains type errors\n    (e.g., conflicting names or malformed field tags), then such errors\n    are ignored and the Go struct uses a best-effort representation.\n    In contrast, the v2 semantic is to report a runtime error.\n\n  - When unmarshaling with [jsonv2.MatchCaseInsensitiveNames], if a JSON\n    object name has a non-exact match with multiple Go struct fields, then\n    an error is not reported and instead the first declared field is used.\n    In contrast, the v2 semantic is to report a runtime error.\n\n  - When unmarshaling, the syntactic structure of the JSON input\n    is fully validated before performing the semantic unmarshaling\n    of the JSON data into the Go value. Practically speaking,\n    this means that JSON input with syntactic errors do not result\n    in any mutations of the target Go value. In contrast, the v2 semantic\n    is to perform a streaming decode and gradually unmarshal the JSON input\n    into the target Go value, which means that the Go value may be\n    partially mutated when a syntactic error is encountered.\n\n  - When unmarshaling, a semantic error does not immediately terminate the\n    unmarshal procedure, but rather evaluation continues.\n    When unmarshal returns, only the first semantic error is reported.\n    In contrast, the v2 semantic is to terminate unmarshal the moment\n    an error is encountered.\n\nThis affects either marshaling or unmarshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/ReportErrorsWithLegacySemantics 1))
+
+    (return (bit-or jsonflags/ReportErrorsWithLegacySemantics 0))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 526} (go/func StringifyWithLegacySemantics "StringifyWithLegacySemantics specifies that the `string` tag option\nmay stringify bools and string values. It only takes effect on fields\nwhere the top-level type is a bool, string, numeric kind, or a pointer to\nsuch a kind. In contrast, the v2 default only allows the `string` tag option\non Go types that would have otherwise serialized as a JSON number,\nand stringifies the JSON number within a JSON string. In particular,\nthe v2 default does not stringify Go bools and strings.\nIf [ReportErrorsWithLegacySemantics] is false,\nthen incorrect usages of `string` result in a runtime error.\n\nWhen marshaling, such Go values are serialized as their usual JSON\nrepresentation, but quoted within a JSON string.\nWhen unmarshaling, such Go values must be deserialized from a JSON string\ncontaining their usual JSON representation or Go number representation for\nthat numeric kind.\nNote that the Go number grammar is a superset of the JSON number grammar.\nA JSON null quoted in a JSON string is a valid substitute for JSON null\nwhile unmarshaling into a Go value that `string` takes effect on.\nIn contrast, the v2 default rejects stringified numbers outside of the\ngrammar for a JSON number and also rejects a JSON null quoted in a JSON string.\n\nThis affects either marshaling or unmarshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/StringifyWithLegacySemantics 1))
+
+    (return (bit-or jsonflags/StringifyWithLegacySemantics 0))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 543} (go/func UnmarshalArrayFromAnyLength "UnmarshalArrayFromAnyLength specifies that Go arrays can be unmarshaled\nfrom input JSON arrays of any length. If the JSON array is too short,\nthen the remaining Go array elements are zeroed. If the JSON array\nis too long, then the excess JSON array elements are skipped over.\nIn contrast, the v2 default expects that Go arrays be unmarshaled\nfrom input JSON arrays of the exact same length.\n\nThis only affects unmarshaling and is ignored when marshaling.\nThe v1 default is true.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/UnmarshalArrayFromAnyLength 1))
+
+    (return (bit-or jsonflags/UnmarshalArrayFromAnyLength 0))))
+
+
+
+
+
+^{:go/end 553} (go/func unmarshalAnyWithRawNumber "unmarshalAnyWithRawNumber specifies that unmarshaling a JSON number into\nan empty Go interface should use the Number type instead of a float64.\n" ^Options [^bool v]
+  (if v
+    (return (bit-or jsonflags/UnmarshalAnyWithRawNumber 1))
+
+    (return (bit-or jsonflags/UnmarshalAnyWithRawNumber 0))))

@@ -1,0 +1,310 @@
+;; NXP 10/100-Mbps Ethernet MAC (ENET)
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package enet implements a driver for NXP Ethernet controllers adopting the
+;; following reference specifications:
+;;   - IMX6ULLRM - i.MX 6ULL Applications Processor Reference Manual - Rev 1 2017/11
+;;
+;; This package is only meant to be used with `GOOS=tamago` as supported by the
+;; TamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.enet) (go/file "enet.go" :doc "Package enet implements a driver for NXP Ethernet controllers adopting the\nfollowing reference specifications:\n  - IMX6ULLRM - i.MX 6ULL Applications Processor Reference Manual - Rev 1 2017/11\n\nThis package is only meant to be used with `GOOS=tamago` as supported by the\nTamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 18} [rand "crypto/rand"]
+    ^{:line 19} [binary "encoding/binary"]
+    ^{:line 20} [errors "errors"]
+    ^{:line 21} [net "net"]
+    ^{:line 22} [sync "sync"]
+    ^{:line 23} [time "time"]
+
+    ^{:line 25} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "ENET registers\n"
+  ;; p879, 22.5 Memory map/register definition, IMX6ULLRM
+
+  ^{:line 32} [^{:val 4} ENETx_EIR 0x0004]
+  ^{:line 33} [^{:val 8} ENETx_EIMR 0x0008]
+
+  ^{:line 35} [^{:val 16} ENETx_RDAR 0x0010]
+  ^{:line 36} [^{:val 24} RDAR_ACTIVE 24]
+
+  ^{:line 38} [^{:val 20} ENETx_TDAR 0x0014]
+  ^{:line 39} [^{:val 24} TDAR_ACTIVE 24]
+
+  ^{:line 41} [^{:val 36} ENETx_ECR 0x0024]
+  ^{:line 42} [^{:val 8} ECR_DBSWP 8]
+  ^{:line 43} [^{:val 5} ECR_EN1588 5]
+  ^{:line 44} [^{:val 1} ECR_ETHEREN 1]
+  ^{:line 45} [^{:val 0} ECR_RESET 0]
+
+  ^{:line 47} [^{:val 64} ENETx_MMFR 0x0040]
+
+  ^{:line 49} [^{:val 68} ENETx_MSCR 0x0044]
+  ^{:line 50} [^{:val 8} MSCR_HOLDTIME 8]
+  ^{:line 51} [^{:val 1} MSCR_MII_SPEED 1]
+
+  ^{:line 53} [^{:val 100} ENETx_MIB 0x0064]
+  ^{:line 54} [^{:val 31} MIB_DIS 31]
+
+  ^{:line 56} [^{:val 132} ENETx_RCR 0x0084]
+  ^{:line 57} [^{:val 16} RCR_MAX_FL 16]
+  ^{:line 58} [^{:val 8} RCR_RMII_MODE 8]
+  ^{:line 59} [^{:val 5} RCR_FCE 5]
+  ^{:line 60} [^{:val 2} RCR_MII_MODE 2]
+  ^{:line 61} [^{:val 0} RCR_LOOP 0]
+
+  ^{:line 63} [^{:val 196} ENETx_TCR 0x00c4]
+  ^{:line 64} [^{:val 2} TCR_FDEN 2]
+
+  ^{:line 66} [^{:val 228} ENETx_PALR 0x00e4]
+  ^{:line 67} [^{:val 232} ENETx_PAUR 0x00e8]
+  ^{:line 68} [^{:val 384} ENETx_RDSR 0x0180]
+  ^{:line 69} [^{:val 388} ENETx_TDSR 0x0184]
+  ^{:line 70} [^{:val 392} ENETx_MRBR 0x0188]
+  ^{:line 71} [^{:val 432} ENETx_FTRL 0x01b0]
+
+  ^{:line 73} [^{:val 452} ENETx_RACC 0x01c4]
+  ^{:line 74} [^{:val 6} RACC_LINEDIS 6])
+
+
+
+(go/const "ENET interrupt events\n"
+  ;; p889, 22.5.1 Interrupt Event Register (ENETx_EIR),  IMX6ULLRM
+  ;; p891, 22.5.2 Interrupt Mask  Register (ENETx_EIMR), IMX6ULLRM
+
+  ^{:line 82} [^{:val 30} IRQ_BABR 30]
+  ^{:line 83} [^{:val 29} IRQ_BABT 29]
+  ^{:line 84} [^{:val 28} IRQ_GRA 28]
+  ^{:line 85} [^{:val 27} IRQ_TXF 27]
+  ^{:line 86} [^{:val 26} IRQ_TXB 26]
+  ^{:line 87} [^{:val 25} IRQ_RXF 25]
+  ^{:line 88} [^{:val 24} IRQ_RXB 24]
+  ^{:line 89} [^{:val 23} IRQ_MII 23]
+  ^{:line 90} [^{:val 22} IRQ_EBERR 22]
+  ^{:line 91} [^{:val 21} IRQ_LC 21]
+  ^{:line 92} [^{:val 20} IRQ_RL 20]
+  ^{:line 93} [^{:val 19} IRQ_UN 19]
+  ^{:line 94} [^{:val 18} IRQ_PLR 18]
+  ^{:line 95} [^{:val 17} IRQ_WAKEUP 17]
+  ^{:line 96} [^{:val 16} IRQ_TS_AVAIL 16]
+  ^{:line 97} [^{:val 15} IRQ_TS_TIMER 15])
+
+
+(go/type Stats (struct
+
+
+    ^{:line 103 :tag uint32 :doc "The following MAC receive errors are tracked only if\nENET.DiscardErrors is false at its initialization.\n"} FrameLengthViolation
+    ^{:line 104 :tag uint32} NonOctetAlignedFrame
+    ^{:line 105 :tag uint32} CRCOrFrameError
+    ^{:line 106 :tag uint32} Overrun
+    ^{:line 107 :tag uint32} FrameTooSmall
+    ^{:line 108 :tag uint32} FrameTooLarge))
+
+
+
+(go/type ENET "ENET represents an Ethernet MAC instance.\n" (struct
+    ^{:line 113} sync/Mutex
+
+
+    ^{:line 116 :tag int :doc "Controller index\n"} Index
+
+    ^{:line 118 :tag uint32 :doc "Base register\n"} Base
+
+    ^{:line 120 :tag uint32 :doc "Clock gate register\n"} CCGR
+
+    ^{:line 122 :tag int :doc "Clock gate\n"} CG
+
+    ^{:line 124 :tag (func [] [uint32]) :doc "Clock retrieval function\n"} Clock
+
+    ^{:line 126 :tag int :doc "Interrupt ID\n"} IRQ
+
+    ^{:line 128 :tag (func [^int index] [error]) :doc "PLL enable function\n"} EnablePLL
+
+    ^{:line 130 :tag (func [^{:tag (* ENET)} eth] [error]) :doc "PHY enable function\n"} EnablePHY
+
+    ^{:line 132 :tag bool :doc "RMII mode\n"} RMII
+
+    ^{:line 134 :tag net/HardwareAddr :doc "MAC address (use SetMAC() for post Init() changes)\n"} MAC
+
+    ^{:line 136 :tag int :doc "Descriptor ring size\n"} RingSize
+
+
+    ^{:line 139 :tag bool :doc "Discard MAC layer errors\n"} DiscardErrors
+
+    ^{:line 141 :tag Stats :doc "Statistics about the MAC\n"} Stats
+
+
+    ^{:line 144 :tag time/Duration :doc "Timeout for MIIM operations\n"} Timeout
+
+
+    ^{:line 147 :tag uint32 :doc "control registers\n"} eir
+    ^{:line 148 :tag uint32} eimr
+    ^{:line 149 :tag uint32} rdar
+    ^{:line 150 :tag uint32} tdar
+    ^{:line 151 :tag uint32} ecr
+    ^{:line 152 :tag uint32} mmfr
+    ^{:line 153 :tag uint32} mscr
+    ^{:line 154 :tag uint32} mib
+    ^{:line 155 :tag uint32} rcr
+    ^{:line 156 :tag uint32} tcr
+    ^{:line 157 :tag uint32} palr
+    ^{:line 158 :tag uint32} paur
+    ^{:line 159 :tag uint32} rdsr
+    ^{:line 160 :tag uint32} tdsr
+    ^{:line 161 :tag uint32} mrbr
+    ^{:line 162 :tag uint32} ftrl
+    ^{:line 163 :tag uint32} racc
+
+
+    ^{:line 166 :tag bufferDescriptorRing :doc "receive data buffers\n"} rx
+
+    ^{:line 168 :tag bufferDescriptorRing :doc "transmit data buffers\n"} tx))
+
+
+
+
+^{:go/end 218} (go/method Init "Init initializes and enables the Ethernet MAC controller for 100 Mbps full\nduplex operation with Auto-Negotiation enabled.\n" [^{:tag (* ENET)} hw] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (or (== (.-Base hw) 0) (== (.-Clock hw) nil))
+    (return (errors/New "invalid ENET controller instance")))
+
+
+  (cond (== (.-MAC hw) nil) (do
+      (set! (.-MAC hw) (make (slice byte) 6))
+      (rand/Read (.-MAC hw))
+      ;; flag address as unicast and locally administered
+      (set! (aget (.-MAC hw) 0) bit-and 0xfe)
+      (set! (aget (.-MAC hw) 0) bit-or 0x02))
+    (!= (len (.-MAC hw)) 6)
+    (return (errors/New "invalid MAC")))
+
+
+  (when (== (.-RingSize hw) 0)
+    (set! (.-RingSize hw) defaultRingSize))
+
+
+  (when (== (.-Timeout hw) 0)
+    (set! (.-Timeout hw) Timeout))
+
+
+  (set! (.-eir hw) (+ (.-Base hw) ENETx_EIR))
+  (set! (.-eimr hw) (+ (.-Base hw) ENETx_EIMR))
+  (set! (.-rdar hw) (+ (.-Base hw) ENETx_RDAR))
+  (set! (.-tdar hw) (+ (.-Base hw) ENETx_TDAR))
+  (set! (.-ecr hw) (+ (.-Base hw) ENETx_ECR))
+  (set! (.-mmfr hw) (+ (.-Base hw) ENETx_MMFR))
+  (set! (.-mscr hw) (+ (.-Base hw) ENETx_MSCR))
+  (set! (.-mib hw) (+ (.-Base hw) ENETx_MIB))
+  (set! (.-rcr hw) (+ (.-Base hw) ENETx_RCR))
+  (set! (.-tcr hw) (+ (.-Base hw) ENETx_TCR))
+  (set! (.-palr hw) (+ (.-Base hw) ENETx_PALR))
+  (set! (.-paur hw) (+ (.-Base hw) ENETx_PAUR))
+  (set! (.-rdsr hw) (+ (.-Base hw) ENETx_RDSR))
+  (set! (.-tdsr hw) (+ (.-Base hw) ENETx_TDSR))
+  (set! (.-mrbr hw) (+ (.-Base hw) ENETx_MRBR))
+  (set! (.-ftrl hw) (+ (.-Base hw) ENETx_FTRL))
+  (set! (.-racc hw) (+ (.-Base hw) ENETx_RACC))
+
+  (.setup hw))
+
+
+^{:go/end 280} (go/method setup [^{:tag (* ENET)} hw] :results [^error err]
+  ;; enable clock
+  (reg/SetN (.-CCGR hw) (.-CG hw) 2r11 2r11)
+
+  (when (!= (.-EnablePLL hw) nil)
+    ((.-EnablePLL hw) (.-Index hw)))
+
+
+  ;; soft reset
+  (reg/Set (.-ecr hw) ECR_RESET)
+  (reg/Wait (.-ecr hw) ECR_RESET 1 0)
+  (reg/Set (.-ecr hw) ECR_DBSWP)
+
+  ;; clear all interrupts
+  (reg/Write (.-eir hw) 0xffffffff)
+  ;; mask all interrupts
+  (reg/Write (.-eimr hw) 0)
+
+  ;; enable Full-Duplex
+  (reg/Set (.-tcr hw) TCR_FDEN)
+  ;; disable Management Information Database
+  (reg/Set (.-mib hw) MIB_DIS)
+
+  ;; use legacy descriptors
+  (reg/Clear (.-ecr hw) ECR_EN1588)
+
+  ;; set receive buffer size and maximum frame length
+  (let [size (+ maxFrameSize (- bufferAlign (% maxFrameSize bufferAlign)))]
+    (reg/Write (.-mrbr hw) (conv uint32 size))
+    (reg/Write (.-ftrl hw) maxFrameSize)
+    (reg/SetN (.-rcr hw) RCR_MAX_FL 0x3fff maxFrameSize)
+
+    (when (.-DiscardErrors hw)
+      (reg/Set (.-racc hw) RACC_LINEDIS))
+
+
+    ;; set physical address
+    (.SetMAC hw (.-MAC hw))
+
+    ;; set Media Independent Interface Mode
+    (reg/Set (.-rcr hw) RCR_MII_MODE)
+    (reg/SetTo (.-rcr hw) RCR_RMII_MODE (.-RMII hw))
+    ;; enable Flow Control
+    (reg/Set (.-rcr hw) RCR_FCE)
+    ;; disable loopback
+    (reg/Clear (.-rcr hw) RCR_LOOP)
+
+    ;; set MII clock
+    (reg/SetN (.-mscr hw) MSCR_HOLDTIME 2r111 1)
+    (reg/SetN (.-mscr hw) MSCR_MII_SPEED 0x3f (/ ((.-Clock hw)) (* 2 2500000)))
+
+    ;; enable Ethernet MAC
+    (reg/Set (.-ecr hw) ECR_ETHEREN)
+
+    (when (!= (.-EnablePHY hw) nil)
+      ;; enable Ethernet PHY
+      (set! err ((.-EnablePHY hw) hw)))
+
+
+    (return)))
+
+
+
+
+^{:go/end 292} (go/method SetMAC "SetMAC allows to change the controller physical address register after\ninitialization.\n" [^{:tag (* ENET)} hw ^net/HardwareAddr mac]
+  (set! (.-MAC hw) mac)
+
+  (let [lower (.Uint32 binary/BigEndian (subslice (.-MAC hw) 0 4))
+      ^{:line 288} upper (.Uint16 binary/BigEndian (subslice (.-MAC hw) 4 6))]
+
+    (reg/Write (.-palr hw) lower)
+    (reg/Write (.-paur hw) (<< (conv uint32 upper) 16))))
+
+
+
+^{:go/end 301} (go/method Start "Start begins processing of incoming packets.\n" [^{:tag (* ENET)} hw]
+  ;; set receive and transmit descriptors
+  (reg/Write (.-rdsr hw) (.init (.-rx hw) true (.-RingSize hw) (addr (.-Stats hw))))
+  (reg/Write (.-tdsr hw) (.init (.-tx hw) false (.-RingSize hw) (addr (.-Stats hw))))
+
+  (reg/Set (.-rdar hw) RDAR_ACTIVE))
+
+
+
+^{:go/end 306} (go/method EnableInterrupt "EnableInterrupt enables interrupt generation for a specific event.\n" [^{:tag (* ENET)} hw ^int event]
+  (reg/Set (.-eimr hw) event))
+
+
+
+^{:go/end 311} (go/method ClearInterrupt "ClearInterrupt clears the interrupt corresponding to a specific event.\n" [^{:tag (* ENET)} hw ^int event]
+  (reg/Set (.-eir hw) event))

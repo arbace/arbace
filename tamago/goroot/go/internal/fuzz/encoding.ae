@@ -1,0 +1,359 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.fuzz) (go/file "encoding.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [ast "go/ast"]
+    ^{:line 11} [parser "go/parser"]
+    ^{:line 12} [token "go/token"]
+    ^{:line 13} [math "math"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [utf8 "unicode/utf8"]])
+
+
+
+(go/var ^{:doc "encVersion1 will be the first line of a file with version 1 encoding.\n"} encVersion1 "go test fuzz v1")
+
+
+
+^{:go/end 99} (go/func marshalCorpusFile "marshalCorpusFile encodes an arbitrary number of arguments into the file format for the\ncorpus.\n" ^{:tag (slice byte)} [& ^{:tag (slice any)} vals]
+  (when (== (len vals) 0)
+    (panic "must have at least one value to marshal"))
+
+  (let [b (bytes/NewBuffer (conv (slice byte) (+ encVersion1 "\n")))]
+    ;; TODO(katiehockman): keep uint8 and int32 encoding where applicable,
+    ;; instead of changing to byte and rune respectively.
+    (range [_ val vals]
+      (type-switch [t val]
+        (case [int int8 int16 int64 uint uint16 uint32 uint64 bool]
+          (fmt/Fprintf b "%T(%v)\n" t t))
+        (case [float32]
+          (if (and (math/IsNaN (conv float64 t)) (!= (math/Float32bits t) (math/Float32bits (conv float32 (math/NaN)))))
+            ;; We encode unusual NaNs as hex values, because that is how users are
+            ;; likely to encounter them in literature about floating-point encoding.
+            ;; This allows us to reproduce fuzz failures that depend on the specific
+            ;; NaN representation (for float32 there are about 2^24 possibilities!),
+            ;; not just the fact that the value is *a* NaN.
+            ;;
+            ;; Note that the specific value of float32(math.NaN()) can vary based on
+            ;; whether the architecture represents signaling NaNs using a low bit
+            ;; (as is common) or a high bit (as commonly implemented on MIPS
+            ;; hardware before around 2012). We believe that the increase in clarity
+            ;; from identifying "NaN" with math.NaN() is worth the slight ambiguity
+            ;; from a platform-dependent value.
+            (fmt/Fprintf b "math.Float32frombits(0x%x)\n" (math/Float32bits t))
+
+            ;; We encode all other values — including the NaN value that is
+            ;; bitwise-identical to float32(math.Nan()) — using the default
+            ;; formatting, which is equivalent to strconv.FormatFloat with format
+            ;; 'g' and can be parsed by strconv.ParseFloat.
+            ;;
+            ;; For an ordinary floating-point number this format includes
+            ;; sufficiently many digits to reconstruct the exact value. For positive
+            ;; or negative infinity it is the string "+Inf" or "-Inf". For positive
+            ;; or negative zero it is "0" or "-0". For NaN, it is the string "NaN".
+            (fmt/Fprintf b "%T(%v)\n" t t)))
+
+        (case [float64]
+          (if (and (math/IsNaN t) (!= (math/Float64bits t) (math/Float64bits (math/NaN))))
+            (fmt/Fprintf b "math.Float64frombits(0x%x)\n" (math/Float64bits t))
+
+            (fmt/Fprintf b "%T(%v)\n" t t)))
+
+        (case [string]
+          (fmt/Fprintf b "string(%q)\n" t))
+        (case [rune] ; int32
+          ;; Although rune and int32 are represented by the same type, only a subset
+          ;; of valid int32 values can be expressed as rune literals. Notably,
+          ;; negative numbers, surrogate halves, and values above unicode.MaxRune
+          ;; have no quoted representation.
+          ;;
+          ;; fmt with "%q" (and the corresponding functions in the strconv package)
+          ;; would quote out-of-range values to the Unicode replacement character
+          ;; instead of the original value (see https://go.dev/issue/51526), so
+          ;; they must be treated as int32 instead.
+          ;;
+          ;; We arbitrarily draw the line at UTF-8 validity, which biases toward the
+          ;; "rune" interpretation. (However, we accept either format as input.)
+          (if (utf8/ValidRune t)
+            (fmt/Fprintf b "rune(%q)\n" t)
+
+            (fmt/Fprintf b "int32(%v)\n" t)))
+
+        (case [byte] ; uint8
+          ;; For bytes, we arbitrarily prefer the character interpretation.
+          ;; (Every byte has a valid character encoding.)
+          (fmt/Fprintf b "byte(%q)\n" t))
+        (case [(slice byte)] ; []uint8
+          (fmt/Fprintf b "[]byte(%q)\n" t))
+        (default
+          (panic (fmt/Sprintf "unsupported type: %T" t)))))
+
+
+    (.Bytes b)))
+
+
+
+^{:go/end 127} (go/func unmarshalCorpusFile "unmarshalCorpusFile decodes corpus bytes into their respective values.\n" [^{:tag (slice byte)} b] :results [(slice any) error]
+  (when (== (len b) 0)
+    (return nil (fmt/Errorf "cannot unmarshal empty string")))
+
+  (let [lines (bytes/Split b (conv (slice byte) "\n"))]
+    (when (< (len lines) 2)
+      (return nil (fmt/Errorf "must include version and at least one value")))
+
+    (let [version (strings/TrimSuffix (conv string (aget lines 0)) "\r")]
+      (when (!= version encVersion1)
+        (return nil (fmt/Errorf "unknown encoding version: %s" version)))
+
+      (let [^{:tag (slice any)} vals (zero (slice any))]
+        (range [_ line (subslice lines 1)]
+          (set! line (bytes/TrimSpace line))
+          (when (== (len line) 0)
+            (continue))
+
+          (let [(values v err) (parseCorpusValue line)]
+            (when (!= err nil)
+              (return nil (fmt/Errorf "malformed line %q: %v" line err)))
+
+            (set! vals (append vals v))))
+
+        (return vals nil)))))
+
+
+^{:go/end 312} (go/func parseCorpusValue [^{:tag (slice byte)} line] :results [any error]
+  (let [fs (token/NewFileSet)
+      (values expr err) (parser/ParseExprFrom fs "(test)" line 0)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values call ok) (assert (* ast/CallExpr) expr)]
+      (when (not ok)
+        (return nil (fmt/Errorf "expected call expression")))
+
+      (when (!= (len (.-Args call)) 1)
+        (return nil (fmt/Errorf "expected call expression with 1 argument; got %d" (len (.-Args call)))))
+
+      (let [arg (aget (.-Args call) 0)]
+
+        (when [(values arrayType ok) (assert (* ast/ArrayType) (.-Fun call))] ok
+          (when (!= (.-Len arrayType) nil)
+            (return nil (fmt/Errorf "expected []byte or primitive type")))
+
+          (let [(values elt ok) (assert (* ast/Ident) (.-Elt arrayType))]
+            (when (or (not ok) (!= (.-Name elt) "byte"))
+              (return nil (fmt/Errorf "expected []byte")))
+
+            (let [(values lit ^:assign ok) (assert (* ast/BasicLit) arg)]
+              (when (or (not ok) (!= (.-Kind lit) token/STRING))
+                (return nil (fmt/Errorf "string literal required for type []byte")))
+
+              (let [(values s err) (strconv/Unquote (.-Value lit))]
+                (when (!= err nil)
+                  (return nil err))
+
+                (return (conv (slice byte) s) nil)))))
+
+
+        (let [^{:tag (* ast/Ident)} idType (zero (* ast/Ident))]
+          (if [(values selector ok) (assert (* ast/SelectorExpr) (.-Fun call))] ok
+            (let [(values xIdent ok) (assert (* ast/Ident) (.-X selector))]
+              (when (or (not ok) (!= (.-Name xIdent) "math"))
+                (return nil (fmt/Errorf "invalid selector type")))
+
+              (switch (.-Name (.-Sel selector))
+                (case ["Float64frombits"]
+                  (set! idType (addr (lit ast/Ident :Name "float64-bits"))))
+                (case ["Float32frombits"]
+                  (set! idType (addr (lit ast/Ident :Name "float32-bits"))))
+                (default
+                  (return nil (fmt/Errorf "invalid selector type")))))
+
+            (do
+              (set! (values idType ok) (assert (* ast/Ident) (.-Fun call)))
+              (when (not ok)
+                (return nil (fmt/Errorf "expected []byte or primitive type")))
+
+              (when (== (.-Name idType) "bool")
+                (let [(values id ok) (assert (* ast/Ident) arg)]
+                  (when (not ok)
+                    (return nil (fmt/Errorf "malformed bool")))
+
+                  (cond (== (.-Name id) "true")
+                    (return true nil)
+                    (== (.-Name id) "false")
+                    (return false nil) :else
+
+                    (return nil (fmt/Errorf "true or false required for type bool")))))))
+
+
+
+
+          (let [
+              ^{:line 198 :tag string} val (zero string)
+              ^{:line 199 :tag token/Token} kind (zero token/Token)]
+
+            (if [(values op ok) (assert (* ast/UnaryExpr) arg)] ok
+              (type-switch [lit (.-X op)]
+                (case [(* ast/BasicLit)]
+                  (when (!= (.-Op op) token/SUB)
+                    (return nil (fmt/Errorf "unsupported operation on int/float: %v" (.-Op op))))
+
+                  ;; Special case for negative numbers.
+                  (set! val (+ (.String (.-Op op)) (.-Value lit))) ; e.g. "-" + "124"
+                  (set! kind (.-Kind lit)))
+                (case [(* ast/Ident)]
+                  (when (!= (.-Name lit) "Inf")
+                    (return nil (fmt/Errorf "expected operation on int or float type")))
+
+                  (if (== (.-Op op) token/SUB)
+                    (set! val "-Inf")
+
+                    (set! val "+Inf"))
+
+                  (set! kind token/FLOAT))
+                (default
+                  (return nil (fmt/Errorf "expected operation on int or float type"))))
+
+
+              (type-switch [lit arg]
+                (case [(* ast/BasicLit)]
+                  (set! (values val kind) (values (.-Value lit) (.-Kind lit))))
+                (case [(* ast/Ident)]
+                  (when (!= (.-Name lit) "NaN")
+                    (return nil (fmt/Errorf "literal value required for primitive type")))
+
+                  (set! (values val kind) (values "NaN" token/FLOAT)))
+                (default
+                  (return nil (fmt/Errorf "literal value required for primitive type")))))
+
+
+
+            (switch [typ (.-Name idType)] typ
+              (case ["string"]
+                (when (!= kind token/STRING)
+                  (return nil (fmt/Errorf "string literal value required for type string")))
+
+                (return (strconv/Unquote val)))
+              (case ["byte" "rune"]
+                (when (== kind token/INT)
+                  (switch typ
+                    (case ["rune"]
+                      (return (parseInt val typ)))
+                    (case ["byte"]
+                      (return (parseUint val typ)))))
+
+
+                (when (!= kind token/CHAR)
+                  (return nil (fmt/Errorf "character literal required for byte/rune types")))
+
+                (let [n (len val)]
+                  (when (< n 2)
+                    (return nil (fmt/Errorf "malformed character literal, missing single quotes")))
+
+                  (let [(values code _ _ err) (strconv/UnquoteChar (subslice val 1 (- n 1)) \')]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (when (== typ "rune")
+                      (return code nil))
+
+                    (when (>= code 256)
+                      (return nil (fmt/Errorf "can only encode single byte to a byte type")))
+
+                    (return (conv byte code) nil))))
+              (case ["int" "int8" "int16" "int32" "int64"]
+                (when (!= kind token/INT)
+                  (return nil (fmt/Errorf "integer literal required for int types")))
+
+                (return (parseInt val typ)))
+              (case ["uint" "uint8" "uint16" "uint32" "uint64"]
+                (when (!= kind token/INT)
+                  (return nil (fmt/Errorf "integer literal required for uint types")))
+
+                (return (parseUint val typ)))
+              (case ["float32"]
+                (when (and (!= kind token/FLOAT) (!= kind token/INT))
+                  (return nil (fmt/Errorf "float or integer literal required for float32 type")))
+
+                (let [(values v err) (strconv/ParseFloat val 32)]
+                  (return (conv float32 v) err)))
+              (case ["float64"]
+                (when (and (!= kind token/FLOAT) (!= kind token/INT))
+                  (return nil (fmt/Errorf "float or integer literal required for float64 type")))
+
+                (return (strconv/ParseFloat val 64)))
+              (case ["float32-bits"]
+                (when (!= kind token/INT)
+                  (return nil (fmt/Errorf "integer literal required for math.Float32frombits type")))
+
+                (let [(values bits err) (parseUint val "uint32")]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (return (math/Float32frombits (assert uint32 bits)) nil)))
+              (case ["float64-bits"]
+                (when (and (!= kind token/FLOAT) (!= kind token/INT))
+                  (return nil (fmt/Errorf "integer literal required for math.Float64frombits type")))
+
+                (let [(values bits err) (parseUint val "uint64")]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (return (math/Float64frombits (assert uint64 bits)) nil)))
+              (default
+                (return nil (fmt/Errorf "expected []byte or primitive type"))))))))))
+
+
+
+
+^{:go/end 339} (go/func parseInt "parseInt returns an integer of value val and type typ.\n" [^string val ^string typ] :results [any error]
+  (switch typ
+    (case ["int"]
+      ;; The int type may be either 32 or 64 bits. If 32, the fuzz tests in the
+      ;; corpus may include 64-bit values produced by fuzzing runs on 64-bit
+      ;; architectures. When running those tests, we implicitly wrap the values to
+      ;; fit in a regular int. (The test case is still “interesting”, even if the
+      ;; specific values of its inputs are platform-dependent.)
+      (let [(values i err) (strconv/ParseInt val 0 64)]
+        (return (conv int i) err)))
+    (case ["int8"]
+      (let [(values i err) (strconv/ParseInt val 0 8)]
+        (return (conv int8 i) err)))
+    (case ["int16"]
+      (let [(values i err) (strconv/ParseInt val 0 16)]
+        (return (conv int16 i) err)))
+    (case ["int32" "rune"]
+      (let [(values i err) (strconv/ParseInt val 0 32)]
+        (return (conv int32 i) err)))
+    (case ["int64"]
+      (return (strconv/ParseInt val 0 64)))
+    (default
+      (panic "unreachable"))))
+
+
+
+
+^{:go/end 361} (go/func parseUint "parseUint returns an unsigned integer of value val and type typ.\n" [^string val ^string typ] :results [any error]
+  (switch typ
+    (case ["uint"]
+      (let [(values i err) (strconv/ParseUint val 0 64)]
+        (return (conv uint i) err)))
+    (case ["uint8" "byte"]
+      (let [(values i err) (strconv/ParseUint val 0 8)]
+        (return (conv uint8 i) err)))
+    (case ["uint16"]
+      (let [(values i err) (strconv/ParseUint val 0 16)]
+        (return (conv uint16 i) err)))
+    (case ["uint32"]
+      (let [(values i err) (strconv/ParseUint val 0 32)]
+        (return (conv uint32 i) err)))
+    (case ["uint64"]
+      (return (strconv/ParseUint val 0 64)))
+    (default
+      (panic "unreachable"))))

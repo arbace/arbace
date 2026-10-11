@@ -1,0 +1,372 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.cipher) (go/file "gcm.go" :imports [
+
+
+    ^{:line 8} [aes "crypto/internal/fips140/aes"]
+    ^{:line 9} [gcm "crypto/internal/fips140/aes/gcm"]
+    ^{:line 10} [alias "crypto/internal/fips140/alias"]
+    ^{:line 11} [fips140only "crypto/internal/fips140only"]
+    ^{:line 12} [subtle "crypto/subtle"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [byteorder "internal/byteorder"]])
+
+
+(go/const
+  ^{:line 18} [^{:val 16} gcmBlockSize 16]
+  ^{:line 19} [^{:val 12} gcmStandardNonceSize 12]
+  ^{:line 20} [^{:val 16} gcmTagSize 16]
+  ^{:line 21} [^{:val 12} gcmMinimumTagSize 12]) ; NIST SP 800-38D recommends tags with 12 or more bytes.
+
+
+
+
+^{:go/end 31} (go/func NewGCM "NewGCM returns the given 128-bit, block cipher wrapped in Galois Counter Mode\nwith the standard nonce length.\n" [^Block cipher] :results [AEAD error]
+  (when (fips140only/Enforced)
+    (return nil (errors/New "crypto/cipher: use of GCM with arbitrary IVs is not allowed in FIPS 140-only mode, use NewGCMWithRandomNonce")))
+
+  (newGCM cipher gcmStandardNonceSize gcmTagSize))
+
+
+
+
+
+
+
+
+
+^{:go/end 45} (go/func NewGCMWithNonceSize "NewGCMWithNonceSize returns the given 128-bit, block cipher wrapped in Galois\nCounter Mode, which accepts nonces of the given length. The length must not\nbe zero.\n\nOnly use this function if you require compatibility with an existing\ncryptosystem that uses non-standard nonce lengths. All other users should use\n[NewGCM], which is faster and more resistant to misuse.\n" [^Block cipher ^int size] :results [AEAD error]
+  (when (fips140only/Enforced)
+    (return nil (errors/New "crypto/cipher: use of GCM with arbitrary IVs is not allowed in FIPS 140-only mode, use NewGCMWithRandomNonce")))
+
+  (newGCM cipher size gcmTagSize))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 60} (go/func NewGCMWithTagSize "NewGCMWithTagSize returns the given 128-bit, block cipher wrapped in Galois\nCounter Mode, which generates tags with the given length.\n\nTag sizes between 12 and 16 bytes are allowed.\n\nOnly use this function if you require compatibility with an existing\ncryptosystem that uses non-standard tag lengths. All other users should use\n[NewGCM], which is more resistant to misuse.\n" [^Block cipher ^int tagSize] :results [AEAD error]
+  (when (fips140only/Enforced)
+    (return nil (errors/New "crypto/cipher: use of GCM with arbitrary IVs is not allowed in FIPS 140-only mode, use NewGCMWithRandomNonce")))
+
+  (newGCM cipher gcmStandardNonceSize tagSize))
+
+
+^{:go/end 77} (go/func newGCM [^Block cipher ^int nonceSize ^int tagSize] :results [AEAD error]
+  (let [(values c ok) (assert (* aes/Block) cipher)]
+    (when (not ok)
+      (when (fips140only/Enforced)
+        (return nil (errors/New "crypto/cipher: use of GCM with non-AES ciphers is not allowed in FIPS 140-only mode")))
+
+      (return (newGCMFallback cipher nonceSize tagSize)))
+
+    ;; We don't return gcm.New directly, because it would always return a non-nil
+    ;; AEAD interface value with type *gcm.GCM even if the *gcm.GCM is nil.
+    (let [(values g err) (gcm/New c nonceSize tagSize)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return g nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 99} (go/func NewGCMWithRandomNonce "NewGCMWithRandomNonce returns the given cipher wrapped in Galois Counter\nMode, with randomly-generated nonces. The cipher must have been created by\n[crypto/aes.NewCipher].\n\nIt generates a random 96-bit nonce, which is prepended to the ciphertext by Seal,\nand is extracted from the ciphertext by Open. The NonceSize of the AEAD is zero,\nwhile the Overhead is 28 bytes (the combination of nonce size and tag size).\n\nA given key MUST NOT be used to encrypt more than 2^32 messages, to limit the\nrisk of a random nonce collision to negligible levels.\n" [^Block cipher] :results [AEAD error]
+  (let [(values c ok) (assert (* aes/Block) cipher)]
+    (when (not ok)
+      (return nil (errors/New "cipher: NewGCMWithRandomNonce requires aes.Block")))
+
+    (let [(values g err) (gcm/New c gcmStandardNonceSize gcmTagSize)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return (lit gcmWithRandomNonce g) nil))))
+
+
+(go/type gcmWithRandomNonce (struct
+    (* gcm/GCM)))
+
+
+^{:go/breaks [3] :go/end 107} (go/method NonceSize ^int [^gcmWithRandomNonce g]
+  0)
+
+
+^{:go/end 111} (go/method Overhead ^int [^gcmWithRandomNonce g]
+  (+ gcmStandardNonceSize gcmTagSize))
+
+
+^{:go/end 158} (go/method Seal ^{:tag (slice byte)} [^gcmWithRandomNonce g ^{:tag (slice byte)} dst ^{:tag (slice byte)} nonce ^{:tag (slice byte)} plaintext ^{:tag (slice byte)} additionalData]
+  (when (!= (len nonce) 0)
+    (panic "crypto/cipher: non-empty nonce passed to GCMWithRandomNonce"))
+
+
+  (let [(values ret out) (sliceForAppend dst (+ gcmStandardNonceSize (len plaintext) gcmTagSize))]
+    (when (alias/InexactOverlap out plaintext)
+      (panic "crypto/cipher: invalid buffer overlap of output and input"))
+
+    (when (alias/AnyOverlap out additionalData)
+      (panic "crypto/cipher: invalid buffer overlap of output and additional data"))
+
+    (set! nonce (subslice out _ gcmStandardNonceSize))
+    (let [ciphertext (subslice out gcmStandardNonceSize)]
+
+      ;; The AEAD interface allows using plaintext[:0] or ciphertext[:0] as dst.
+      ;;
+      ;; This is kind of a problem when trying to prepend or trim a nonce, because the
+      ;; actual AES-GCTR blocks end up overlapping but not exactly.
+      ;;
+      ;; In Open, we write the output *before* the input, so unless we do something
+      ;; weird like working through a chunk of block backwards, it works out.
+      ;;
+      ;; In Seal, we could work through the input backwards or intentionally load
+      ;; ahead before writing.
+      ;;
+      ;; However, the crypto/internal/fips140/aes/gcm APIs also check for exact overlap,
+      ;; so for now we just do a memmove if we detect overlap.
+      ;;
+      ;;     ┌───────────────────────────┬ ─ ─
+      ;;     │PPPPPPPPPPPPPPPPPPPPPPPPPPP│    │
+      ;;     └▽─────────────────────────▲┴ ─ ─
+      ;;       ╲ Seal                    ╲
+      ;;        ╲                    Open ╲
+      ;;     ┌───▼─────────────────────────△──┐
+      ;;     │NN|CCCCCCCCCCCCCCCCCCCCCCCCCCC|T│
+      ;;     └────────────────────────────────┘
+      ;;
+      (when (alias/AnyOverlap out plaintext)
+        (copy ciphertext plaintext)
+        (set! plaintext (subslice ciphertext _ (len plaintext))))
+
+
+      (gcm/SealWithRandomNonce (.-GCM g) nonce ciphertext plaintext additionalData)
+      ^{:line 157} ret)))
+
+
+^{:go/end 194} (go/method Open [^gcmWithRandomNonce g ^{:tag (slice byte)} dst ^{:tag (slice byte)} nonce ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} additionalData] :results [(slice byte) error]
+  (when (!= (len nonce) 0)
+    (panic "crypto/cipher: non-empty nonce passed to GCMWithRandomNonce"))
+
+  (when (< (len ciphertext) (+ gcmStandardNonceSize gcmTagSize))
+    (return nil errOpen))
+
+
+  (let [(values ret out) (sliceForAppend dst (- (len ciphertext) gcmStandardNonceSize gcmTagSize))]
+    (when (alias/InexactOverlap out ciphertext)
+      (panic "crypto/cipher: invalid buffer overlap of output and input"))
+
+    (when (alias/AnyOverlap out additionalData)
+      (panic "crypto/cipher: invalid buffer overlap of output and additional data"))
+
+    ;; See the discussion in Seal. Note that if there is any overlap at this
+    ;; point, it's because out = ciphertext, so out must have enough capacity
+    ;; even if we sliced the tag off. Also note how [AEAD] specifies that "the
+    ;; contents of dst, up to its capacity, may be overwritten".
+    (if (alias/AnyOverlap out ciphertext) (do
+        (set! nonce (make (slice byte) gcmStandardNonceSize))
+        (copy nonce ciphertext)
+        (copy (subslice out _ (len ciphertext)) (subslice ciphertext gcmStandardNonceSize))
+        (set! ciphertext (subslice out _ (- (len ciphertext) gcmStandardNonceSize))))
+      (do
+        (set! nonce (subslice ciphertext _ gcmStandardNonceSize))
+        (set! ciphertext (subslice ciphertext gcmStandardNonceSize))))
+
+
+    (let [(values _ err) (.Open (.-GCM g) (subslice out _ 0) nonce ciphertext additionalData)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return ret nil))))
+
+
+
+
+
+(go/type gcmAble "gcmAble is an interface implemented by ciphers that have a specific optimized\nimplementation of GCM. crypto/aes doesn't use this anymore, and we'd like to\neventually remove it.\n" (interface
+    (NewGCM [^int nonceSize ^int tagSize] :results [AEAD error])))
+
+
+^{:go/end 217} (go/func newGCMFallback [^Block cipher ^int nonceSize ^int tagSize] :results [AEAD error]
+  (when (or (< tagSize gcmMinimumTagSize) (> tagSize gcmBlockSize))
+    (return nil (errors/New "cipher: incorrect tag size given to GCM")))
+
+  (when (<= nonceSize 0)
+    (return nil (errors/New "cipher: the nonce can't have zero length")))
+
+  (when [(values cipher ok) (assert gcmAble cipher)] ok
+    (return (.NewGCM cipher nonceSize tagSize)))
+
+  (when (!= (.BlockSize cipher) gcmBlockSize)
+    (return nil (errors/New "cipher: NewGCM requires 128-bit block cipher")))
+
+  (return (addr (lit gcmFallback :cipher cipher :nonceSize nonceSize :tagSize tagSize)) nil))
+
+
+
+
+
+(go/type gcmFallback "gcmFallback is only used for non-AES ciphers, which regrettably we\ntheoretically support. It's a copy of the generic implementation from\ncrypto/internal/fips140/aes/gcm/gcm_generic.go, refer to that file for more details.\n" (struct
+    ^{:line 223 :tag Block} cipher
+    ^{:line 224 :tag int} nonceSize
+    ^{:line 225 :tag int} tagSize))
+
+
+^{:go/end 230} (go/method NonceSize ^int [^{:tag (* gcmFallback)} g]
+  (.-nonceSize g))
+
+
+^{:go/end 234} (go/method Overhead ^int [^{:tag (* gcmFallback)} g]
+  (.-tagSize g))
+
+
+^{:go/end 267} (go/method Seal ^{:tag (slice byte)} [^{:tag (* gcmFallback)} g ^{:tag (slice byte)} dst ^{:tag (slice byte)} nonce ^{:tag (slice byte)} plaintext ^{:tag (slice byte)} additionalData]
+  (when (!= (len nonce) (.-nonceSize g))
+    (panic "crypto/cipher: incorrect nonce length given to GCM"))
+
+  (when (== (.-nonceSize g) 0)
+    (panic "crypto/cipher: incorrect GCM nonce size"))
+
+  (when (> (conv uint64 (len plaintext)) (* (conv uint64 (- (<< 1 32) 2)) gcmBlockSize))
+    (panic "crypto/cipher: message too large for GCM"))
+
+
+  (let [(values ret out) (sliceForAppend dst (+ (len plaintext) (.-tagSize g)))]
+    (when (alias/InexactOverlap out plaintext)
+      (panic "crypto/cipher: invalid buffer overlap of output and input"))
+
+    (when (alias/AnyOverlap out additionalData)
+      (panic "crypto/cipher: invalid buffer overlap of output and additional data"))
+
+
+    (let [(values ^{:tag (array gcmBlockSize byte)} H ^{:tag (array gcmBlockSize byte)} counter ^{:tag (array gcmBlockSize byte)} tagMask) (zero (array gcmBlockSize byte))]
+      (.Encrypt (.-cipher g) (subslice H) (subslice H))
+      (deriveCounter (addr H) (addr counter) nonce)
+      (gcmCounterCryptGeneric (.-cipher g) (subslice tagMask) (subslice tagMask) (addr counter))
+
+      (gcmCounterCryptGeneric (.-cipher g) out plaintext (addr counter))
+
+      (let [^{:tag (array gcmTagSize byte)} tag (zero (array gcmTagSize byte))]
+        (gcmAuth (subslice tag) (addr H) (addr tagMask) (subslice out _ (len plaintext)) additionalData)
+        (copy (subslice out (len plaintext)) (subslice tag))
+
+        ^{:line 266} ret))))
+
+
+(go/var errOpen (errors/New "cipher: message authentication failed"))
+
+^{:go/end 316} (go/method Open [^{:tag (* gcmFallback)} g ^{:tag (slice byte)} dst ^{:tag (slice byte)} nonce ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} additionalData] :results [(slice byte) error]
+  (when (!= (len nonce) (.-nonceSize g))
+    (panic "crypto/cipher: incorrect nonce length given to GCM"))
+
+  (when (< (.-tagSize g) gcmMinimumTagSize)
+    (panic "crypto/cipher: incorrect GCM tag size"))
+
+
+  (when (< (len ciphertext) (.-tagSize g))
+    (return nil errOpen))
+
+  (when (> (conv uint64 (len ciphertext)) (+ (* (conv uint64 (- (<< 1 32) 2)) gcmBlockSize) (conv uint64 (.-tagSize g))))
+    (return nil errOpen))
+
+
+  (let [(values ret out) (sliceForAppend dst (- (len ciphertext) (.-tagSize g)))]
+    (when (alias/InexactOverlap out ciphertext)
+      (panic "crypto/cipher: invalid buffer overlap of output and input"))
+
+    (when (alias/AnyOverlap out additionalData)
+      (panic "crypto/cipher: invalid buffer overlap of output and additional data"))
+
+
+    (let [(values ^{:tag (array gcmBlockSize byte)} H ^{:tag (array gcmBlockSize byte)} counter ^{:tag (array gcmBlockSize byte)} tagMask) (zero (array gcmBlockSize byte))]
+      (.Encrypt (.-cipher g) (subslice H) (subslice H))
+      (deriveCounter (addr H) (addr counter) nonce)
+      (gcmCounterCryptGeneric (.-cipher g) (subslice tagMask) (subslice tagMask) (addr counter))
+
+      (let [tag (subslice ciphertext (- (len ciphertext) (.-tagSize g)))]
+        (set! ciphertext (subslice ciphertext _ (- (len ciphertext) (.-tagSize g))))
+
+        (let [^{:tag (array gcmTagSize byte)} expectedTag (zero (array gcmTagSize byte))]
+          (gcmAuth (subslice expectedTag) (addr H) (addr tagMask) ciphertext additionalData)
+          (when (!= (subtle/ConstantTimeCompare (subslice expectedTag _ (.-tagSize g)) tag) 1)
+            ;; We sometimes decrypt and authenticate concurrently, so we overwrite
+            ;; dst in the event of a tag mismatch. To be consistent across platforms
+            ;; and to avoid releasing unauthenticated plaintext, we clear the buffer
+            ;; in the event of an error.
+            (clear out)
+            (return nil errOpen))
+
+
+          (gcmCounterCryptGeneric (.-cipher g) out ciphertext (addr counter))
+
+          (return ret nil))))))
+
+
+^{:go/end 328} (go/func deriveCounter [^{:tag (* (array gcmBlockSize byte))} H ^{:tag (* (array gcmBlockSize byte))} counter ^{:tag (slice byte)} nonce]
+  (if (== (len nonce) gcmStandardNonceSize) (do
+      (copy (subslice counter) nonce)
+      (aset counter (- gcmBlockSize 1) 1))
+
+    (let [lenBlock (make (slice byte) 16)]
+      (byteorder/BEPutUint64 (subslice lenBlock 8) (* (conv uint64 (len nonce)) 8))
+      (let [J (gcm/GHASH H nonce lenBlock)]
+        (copy (subslice counter) J)))))
+
+
+
+^{:go/end 345} (go/func gcmCounterCryptGeneric [^Block b ^{:tag (slice byte)} out ^{:tag (slice byte)} src ^{:tag (* (array gcmBlockSize byte))} counter]
+  (let [^{:tag (array gcmBlockSize byte)} mask (zero (array gcmBlockSize byte))]
+    (while (>= (len src) gcmBlockSize)
+      (.Encrypt b (subslice mask) (subslice counter))
+      (gcmInc32 counter)
+
+      (subtle/XORBytes out src (subslice mask))
+      (set! out (subslice out gcmBlockSize))
+      (set! src (subslice src gcmBlockSize)))
+
+    (when (> (len src) 0)
+      (.Encrypt b (subslice mask) (subslice counter))
+      (gcmInc32 counter)
+      (subtle/XORBytes out src (subslice mask)))))
+
+
+
+^{:go/end 350} (go/func gcmInc32 [^{:tag (* (array gcmBlockSize byte))} counterBlock]
+  (let [ctr (subslice counterBlock (- (len counterBlock) 4))]
+    (byteorder/BEPutUint32 ctr (+ (byteorder/BEUint32 ctr) 1))))
+
+
+^{:go/end 358} (go/func gcmAuth [^{:tag (slice byte)} out ^{:tag (* (array gcmBlockSize byte))} H ^{:tag (* (array gcmBlockSize byte))} tagMask ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} additionalData]
+  (let [lenBlock (make (slice byte) 16)]
+    (byteorder/BEPutUint64 (subslice lenBlock _ 8) (* (conv uint64 (len additionalData)) 8))
+    (byteorder/BEPutUint64 (subslice lenBlock 8) (* (conv uint64 (len ciphertext)) 8))
+    (let [S (gcm/GHASH H additionalData ciphertext lenBlock)]
+      (subtle/XORBytes out S (subslice tagMask)))))
+
+
+
+
+
+
+^{:go/end 373} (go/func sliceForAppend "sliceForAppend takes a slice and a requested number of bytes. It returns a\nslice with the contents of the given slice followed by that many bytes and a\nsecond slice that aliases into it and contains only the extra bytes. If the\noriginal slice has sufficient capacity then no allocation is performed.\n" [^{:tag (slice byte)} in ^int n] :results [^{:tag (slice byte)} head ^{:tag (slice byte)} tail]
+  (if [total (+ (len in) n)] (>= (cap in) total)
+    (set! head (subslice in _ total))
+    (do
+      (set! head (make (slice byte) total))
+      (copy head in)))
+
+  (set! tail (subslice head (len in)))
+  (return))

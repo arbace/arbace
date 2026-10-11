@@ -1,0 +1,108 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime.pprof) (go/file "elf.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [os "os"]])
+
+
+(go/var
+  ^{:line 15} [errBadELF (errors/New "malformed ELF binary")]
+  ^{:line 16} [errNoBuildID (errors/New "no NT_GNU_BUILD_ID found in ELF binary")])
+
+
+
+
+^{:go/end 109} (go/func elfBuildID "elfBuildID returns the GNU build ID of the named ELF binary,\nwithout introducing a dependency on debug/elf and its dependencies.\n" [^string file] :results [string error]
+  (let [buf (make (slice byte) 256)
+      (values f err) (os/Open file)]
+    (when (!= err nil)
+      (return "" err))
+
+    (defer (.Close f))
+
+    (when [(values _ err) (.ReadAt f (subslice buf _ 64) 0)] (!= err nil)
+      (return "" err))
+
+
+    ;; ELF file begins with \x7F E L F.
+    (when (or (!= (aget buf 0) 0x7F) (!= (aget buf 1) \E) (!= (aget buf 2) \L) (!= (aget buf 3) \F))
+      (return "" errBadELF))
+
+
+    (let [^binary/ByteOrder byteOrder (zero binary/ByteOrder)]
+      (switch (aget buf 5)
+        (default
+          (return "" errBadELF))
+        (case [1] ; little-endian
+          (set! byteOrder binary/LittleEndian))
+        (case [2] ; big-endian
+          (set! byteOrder binary/BigEndian)))
+
+
+      (let [^int shnum (zero int)
+          (values ^int64 shoff ^int64 shentsize) (zero int64)]
+        (switch (aget buf 4)
+          (default
+            (return "" errBadELF))
+          (case [1] ; 32-bit file header
+            (set! shoff (conv int64 (.Uint32 byteOrder (subslice buf 32))))
+            (set! shentsize (conv int64 (.Uint16 byteOrder (subslice buf 46))))
+            (when (!= shentsize 40)
+              (return "" errBadELF))
+
+            (set! shnum (conv int (.Uint16 byteOrder (subslice buf 48)))))
+          (case [2] ; 64-bit file header
+            (set! shoff (conv int64 (.Uint64 byteOrder (subslice buf 40))))
+            (set! shentsize (conv int64 (.Uint16 byteOrder (subslice buf 58))))
+            (when (!= shentsize 64)
+              (return "" errBadELF))
+
+            (set! shnum (conv int (.Uint16 byteOrder (subslice buf 60))))))
+
+
+        (for [i 0] (< i shnum) (inc! i)
+          (when [(values _ err) (.ReadAt f (subslice buf _ shentsize) (+ shoff (* (conv int64 i) shentsize)))] (!= err nil)
+            (return "" err))
+
+          (when [typ (.Uint32 byteOrder (subslice buf 4))] (!= typ 7) ; SHT_NOTE
+            (continue))
+
+          (let [(values ^int64 off ^int64 size) (zero int64)]
+            (if (== shentsize 40) (do
+                ;; 32-bit section header
+                (set! off (conv int64 (.Uint32 byteOrder (subslice buf 16))))
+                (set! size (conv int64 (.Uint32 byteOrder (subslice buf 20)))))
+              (do
+                ;; 64-bit section header
+                (set! off (conv int64 (.Uint64 byteOrder (subslice buf 24))))
+                (set! size (conv int64 (.Uint64 byteOrder (subslice buf 32))))))
+
+            (set! size + off)
+            (while (< off size)
+              (when [(values _ err) (.ReadAt f (subslice buf _ 16) off)] (!= err nil) ; room for header + name GNU\x00
+                (return "" err))
+
+              (let [nameSize (conv int (.Uint32 byteOrder (subslice buf 0)))
+                  ^{:line 92} descSize (conv int (.Uint32 byteOrder (subslice buf 4)))
+                  ^{:line 93} noteType (conv int (.Uint32 byteOrder (subslice buf 8)))
+                  ^{:line 94} descOff (+ off (conv int64 (+ 12 (bit-and-not (+ nameSize 3) 3))))]
+                (set! off (+ descOff (conv int64 (bit-and-not (+ descSize 3) 3))))
+                (when (or (!= nameSize 4) (!= noteType 3) (!= (aget buf 12) \G) (!= (aget buf 13) \N) (!= (aget buf 14) \U) (!= (aget buf 15) \u0000)) ; want name GNU\x00 type 3 (NT_GNU_BUILD_ID)
+                  (continue))
+
+                (when (> descSize (len buf))
+                  (return "" errBadELF))
+
+                (when [(values _ err) (.ReadAt f (subslice buf _ descSize) descOff)] (!= err nil)
+                  (return "" err))
+
+                (return (fmt/Sprintf "%x" (subslice buf _ descSize)) nil)))))
+
+
+        (return "" errNoBuildID)))))

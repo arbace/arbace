@@ -1,0 +1,114 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.math.rand.v2) (go/file "chacha8.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [byteorder "internal/byteorder"]
+    ^{:line 10} [chacha8rand "internal/chacha8rand"]])
+
+
+
+
+(go/type ChaCha8 "A ChaCha8 is a ChaCha8-based cryptographically strong\nrandom number generator.\n" (struct
+    ^{:line 16 :tag chacha8rand/State} state
+
+
+    ^{:line 19 :tag (array 8 byte) :doc "The last readLen bytes of readBuf are still to be consumed by Read.\n"} readBuf
+    ^{:line 20 :tag int} readLen)) ; 0 <= readLen <= 8
+
+
+
+^{:go/end 28} (go/func NewChaCha8 "NewChaCha8 returns a new ChaCha8 seeded with the given seed.\n" ^{:tag (* ChaCha8)} [^{:tag (array 32 byte)} seed]
+  (let [c (new ChaCha8)]
+    (.Init (.-state c) seed)
+    ^{:line 27} c))
+
+
+
+^{:go/end 35} (go/method Seed "Seed resets the ChaCha8 to behave the same way as NewChaCha8(seed).\n" [^{:tag (* ChaCha8)} c ^{:tag (array 32 byte)} seed]
+  (.Init (.-state c) seed)
+  (set! (.-readLen c) 0)
+  (set! (.-readBuf c) (lit (array 8 byte))))
+
+
+
+^{:go/end 46} (go/method Uint64 "Uint64 returns a uniformly distributed random uint64 value.\n" ^uint64 [^{:tag (* ChaCha8)} c]
+  (while true
+    (let [(values x ok) (.Next (.-state c))]
+      (when ok
+        (return x))
+
+      (.Refill (.-state c)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 71} (go/method Read "Read reads exactly len(p) bytes into p.\nIt always returns len(p) and a nil error.\n\nIf calls to Read and Uint64 are interleaved, the order in which bits are\nreturned by the two is undefined, and Read may return bits generated before\nthe last call to Uint64.\n" [^{:tag (* ChaCha8)} c ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (> (.-readLen c) 0)
+    (set! n (copy p (subslice (.-readBuf c) (- (len (.-readBuf c)) (.-readLen c)))))
+    (set! (.-readLen c) - n)
+    (set! p (subslice p n)))
+
+  (while (>= (len p) 8)
+    (byteorder/LEPutUint64 p (.Uint64 c))
+    (set! p (subslice p 8))
+    (set! n + 8))
+
+  (when (> (len p) 0)
+    (byteorder/LEPutUint64 (subslice (.-readBuf c)) (.Uint64 c))
+    (set! n + (copy p (subslice (.-readBuf c))))
+    (set! (.-readLen c) (- 8 (len p))))
+
+  (return))
+
+
+
+^{:go/end 85} (go/method UnmarshalBinary "UnmarshalBinary implements the [encoding.BinaryUnmarshaler] interface.\n" ^error [^{:tag (* ChaCha8)} c ^{:tag (slice byte)} data]
+  (let [(values ^:assign data ok) (cutPrefix data (conv (slice byte) "readbuf:"))]
+    (when ok
+      (let [^{:tag (slice byte)} buf (zero (slice byte))]
+        (set! (values buf data ok) (readUint8LengthPrefixed data))
+        (when (not ok)
+          (return (errors/New "invalid ChaCha8 Read buffer encoding")))
+
+        (set! (.-readLen c) (copy (subslice (.-readBuf c) (- (len (.-readBuf c)) (len buf))) buf))))
+
+    (chacha8rand/Unmarshal (addr (.-state c)) data)))
+
+
+^{:go/end 92} (go/func cutPrefix [^{:tag (slice byte)} s ^{:tag (slice byte)} prefix] :results [^{:tag (slice byte)} after ^bool found]
+  (when (or (< (len s) (len prefix)) (!= (conv string (subslice s _ (len prefix))) (conv string prefix)))
+    (return s false))
+
+  (return (subslice s (len prefix)) true))
+
+
+^{:go/end 99} (go/func readUint8LengthPrefixed [^{:tag (slice byte)} b] :results [^{:tag (slice byte)} buf ^{:tag (slice byte)} rest ^bool ok]
+  (when (or (== (len b) 0) (< (len b) (conv int (+ 1 (aget b 0)))))
+    (return nil nil false))
+
+  (return (subslice b 1 (+ 1 (aget b 0))) (subslice b (+ 1 (aget b 0))) true))
+
+
+
+^{:go/end 109} (go/method AppendBinary "AppendBinary implements the [encoding.BinaryAppender] interface.\n" [^{:tag (* ChaCha8)} c ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (when (> (.-readLen c) 0)
+    (set! b (append b (spread "readbuf:")))
+    (set! b (append b (conv uint8 (.-readLen c))))
+    (set! b (append b (spread (subslice (.-readBuf c) (- (len (.-readBuf c)) (.-readLen c)))))))
+
+  (return (append b (spread (chacha8rand/Marshal (addr (.-state c))))) nil))
+
+
+
+^{:go/end 115} (go/method MarshalBinary "MarshalBinary implements the [encoding.BinaryMarshaler] interface.\n" [^{:tag (* ChaCha8)} c] :results [(slice byte) error]
+  ;; the maximum length of (chacha8rand.Marshal + c.readBuf + "readbuf:") is 64
+  (.AppendBinary c (make (slice byte) 0 64)))

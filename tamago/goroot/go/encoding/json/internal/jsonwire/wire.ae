@@ -1,0 +1,208 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+;; Package jsonwire implements stateless functionality for handling JSON text.
+(in-ns 'go.encoding.json.internal.jsonwire) (go/file "wire.go" :build ["//go:build goexperiment.jsonv2"] :doc "Package jsonwire implements stateless functionality for handling JSON text.\n" :imports [
+
+
+    ^{:line 11} [cmp "cmp"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [strconv "strconv"]
+    ^{:line 14} [strings "strings"]
+    ^{:line 15} [unicode "unicode"]
+    ^{:line 16} [utf16 "unicode/utf16"]
+    ^{:line 17} [utf8 "unicode/utf8"]])
+
+
+
+^{:go/end 28} (go/func TrimSuffixWhitespace "TrimSuffixWhitespace trims JSON whitespace from the end of b.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  (let [n (- (len b) 1)]
+    (while (and (>= n 0) ^:go/paren (or (== (aget b n) \space) (== (aget b n) \tab) (== (aget b n) \return) (== (aget b n) \newline)))
+      (dec! n))
+
+    (subslice b _ (+ n 1))))
+
+
+
+
+^{:go/end 44} (go/func TrimSuffixString "TrimSuffixString trims a valid JSON string at the end of b.\nThe behavior is undefined if there is not a valid JSON string present.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  (when (and (> (len b) 0) (== (aget b (- (len b) 1)) \"))
+    (set! b (subslice b _ (- (len b) 1))))
+
+  (while (and (>= (len b) 2) (not (and (== (aget b (- (len b) 1)) \") (!= (aget b (- (len b) 2)) \\))))
+    (set! b (subslice b _ (- (len b) 1)))) ; trim all characters except an unescaped quote
+
+  (when (and (> (len b) 0) (== (aget b (- (len b) 1)) \"))
+    (set! b (subslice b _ (- (len b) 1))))
+
+  ^{:line 43} b)
+
+
+
+^{:go/end 50} (go/func HasSuffixByte "HasSuffixByte reports whether b ends with c.\n" ^bool [^{:tag (slice byte)} b ^byte c]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  (and (> (len b) 0) (== (aget b (- (len b) 1)) c)))
+
+
+
+^{:go/end 59} (go/func TrimSuffixByte "TrimSuffixByte removes c from the end of b if it is present.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^byte c]
+  ;; NOTE: The arguments and logic are kept simple to keep this inlinable.
+  (when (and (> (len b) 0) (== (aget b (- (len b) 1)) c))
+    (return (subslice b _ (- (len b) 1))))
+
+  ^{:line 58} b)
+
+
+
+^{:go/end 68} (go/func QuoteRune "QuoteRune quotes the first rune in the input.\n" ^string [^{:tag (slice byte)} b]
+  (let [(values r n) (utf8/DecodeRune b)]
+    (when (and (== r utf8/RuneError) (== n 1))
+      (return (+ "'\\x" (strconv/FormatUint (conv uint64 (aget b 0)) 16) "'")))
+
+    (strconv/QuoteRune r)))
+
+
+
+
+
+^{:go/end 124} (go/func CompareUTF16 "CompareUTF16 lexicographically compares x to y according\nto the UTF-16 codepoints of the UTF-8 encoded input strings.\nThis implements the ordering specified in RFC 8785, section 3.2.3.\n" ^int [^{:tag (slice byte)} x ^{:tag (slice byte)} y]
+  ;; NOTE: This is an optimized, mostly allocation-free implementation
+  ;; of CompareUTF16Simple in wire_test.go. FuzzCompareUTF16 verifies that the
+  ;; two implementations agree on the result of comparing any two strings.
+  (let [isUTF16Self ^{:go/end 79} (fn ^bool [^rune r]
+        (or ^:go/paren (and (<= \u0000 r) (<= r \ud7ff)) ^:go/paren (and (<= \ue000 r) (<= r \uffff))))]
+
+
+    (while true
+      (when (or (== (len x) 0) (== (len y) 0))
+        (return (^{:inst [int]} cmp/Compare (len x) (len y))))
+
+
+      ;; ASCII fast-path.
+      (when (or (< (aget x 0) utf8/RuneSelf) (< (aget y 0) utf8/RuneSelf))
+        (when (!= (aget x 0) (aget y 0))
+          (return (^{:inst [byte]} cmp/Compare (aget x 0) (aget y 0))))
+
+        (set! (values x y) (values (subslice x 1) (subslice y 1)))
+        (continue))
+
+
+      ;; Decode next pair of runes as UTF-8.
+      (let [(values rx nx) (utf8/DecodeRune x)
+          (values ry ny) (utf8/DecodeRune y)
+
+          ^{:line 99} selfx (isUTF16Self rx)
+          ^{:line 100} selfy (isUTF16Self ry)]
+        (switch
+          ;; The x rune is a single UTF-16 codepoint, while
+          ;; the y rune is a surrogate pair of UTF-16 codepoints.
+          (case [(and selfx (not selfy))]
+            (set! (values ry _) (utf16/EncodeRune ry)))
+          ;; The y rune is a single UTF-16 codepoint, while
+          ;; the x rune is a surrogate pair of UTF-16 codepoints.
+          (case [(and selfy (not selfx))]
+            (set! (values rx _) (utf16/EncodeRune rx))))
+
+        (when (!= rx ry)
+          (return (^{:inst [rune]} cmp/Compare rx ry)))
+
+
+        ;; Check for invalid UTF-8, in which case,
+        ;; we just perform a byte-for-byte comparison.
+        (when (or (isInvalidUTF8 rx nx) (isInvalidUTF8 ry ny))
+          (when (!= (aget x 0) (aget y 0))
+            (return (^{:inst [byte]} cmp/Compare (aget x 0) (aget y 0)))))
+
+
+        (set! (values x y) (values (subslice x nx) (subslice y ny)))))))
+
+
+
+
+(go/var ^{:doc "TODO(https://go.dev/issue/70547): Use utf8.ErrInvalid instead.\n"} ErrInvalidUTF8 (errors/New "invalid UTF-8"))
+
+^{:go/end 132} (go/func NewInvalidCharacterError :type-params [^{:tag (| (tilde (slice byte)) (tilde string))} Bytes] ^error [^Bytes prefix ^string where]
+  (let [(values _ n) (utf8/DecodeRune (conv (slice byte) prefix))]
+    (addr (lit InvalidTextError "character" (conv string (subslice prefix _ n)) where))))
+
+
+^{:go/end 139} (go/func NewInvalidEscapeSequenceError :type-params [^{:tag (| (tilde (slice byte)) (tilde string))} Bytes] ^error [^Bytes what]
+  (when (> (len what) 6)
+    (return (addr (lit InvalidTextError "surrogate pair" (conv string what) "in string"))))
+
+  (addr (lit InvalidTextError "escape sequence" (conv string what) "in string")))
+
+
+(go/type InvalidTextError (struct
+    ^{:line 142 :tag string} Label ; e.g., "character" | "escape sequence" | "surrogate pair"
+    ^{:line 143 :tag string} What ; raw invalid text
+    ^{:line 144 :tag string} Where)) ; e.g., "in string" | "at start of value"
+
+
+^{:go/end 161} (go/method Error ^string [^{:tag (* InvalidTextError)} e]
+  (let [^string what (zero string)
+      ^{:line 149} needEscape (strings/ContainsFunc (.-What e) ^{:go/end 151} (fn ^bool [^rune r]
+          (or (== r \`) (== r utf8/RuneError) (unicode/IsSpace r) (not (unicode/IsPrint r)))))]
+
+    (switch
+      (case [(== (utf8/RuneCount (conv (slice byte) (.-What e))) 1)]
+        (set! what (QuoteRune (conv (slice byte) (.-What e)))))
+      (case [needEscape]
+        (set! what (strconv/Quote (.-What e))))
+      (default
+        (set! what (+ "`" (.-What e) "`"))))
+
+    (strings/TrimSuffix (+ "invalid " (.-Label e) " " what " " (.-Where e)) " ")))
+
+
+
+
+^{:go/end 205} (go/func TruncatePointer "TruncatePointer optionally truncates the JSON pointer,\nenforcing that the length roughly does not exceed n.\n" ^string [^string s ^int n]
+  (when (<= (len s) n)
+    (return s))
+
+  (let [i (/ n 2)
+      ^{:line 170} j (- (len s) (/ n 2))]
+
+    ;; Avoid truncating a name if there are multiple names present.
+    (when [k (strings/LastIndexByte (subslice s _ i) \/)] (> k 0)
+      (set! i k))
+
+    (when [k (strings/IndexByte (subslice s j) \/)] (>= k 0)
+      (set! j + (+ k (len "/"))))
+
+
+    ;; Avoid truncation in the middle of a UTF-8 rune.
+    (while (and (> i 0) (isInvalidUTF8 (utf8/DecodeLastRuneInString (subslice s _ i))))
+      (dec! i))
+
+    (while (and (< j (len s)) (isInvalidUTF8 (utf8/DecodeRuneInString (subslice s j))))
+      (inc! j))
+
+
+    ;; Determine the right middle fragment to use.
+    (let [^string middle (zero string)]
+      (switch (strings/Count (subslice s i j) "/")
+        (case [0]
+          (set! middle "…"))
+        (case [1]
+          (set! middle "…/…"))
+        (default
+          (set! middle "…/…/…")))
+
+      (when (and (strings/HasPrefix (subslice s i j) "/") (!= middle "…"))
+        (set! middle (strings/TrimPrefix middle "…")))
+
+      (when (and (strings/HasSuffix (subslice s i j) "/") (!= middle "…"))
+        (set! middle (strings/TrimSuffix middle "…")))
+
+      (+ (subslice s _ i) middle (subslice s j)))))
+
+
+^{:go/end 209} (go/func isInvalidUTF8 ^bool [^rune r ^int rn]
+  (and (== r utf8/RuneError) (== rn 1)))

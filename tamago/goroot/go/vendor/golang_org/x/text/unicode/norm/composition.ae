@@ -1,0 +1,511 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.text.unicode.norm) (go/file "composition.go" :imports [
+
+    ^{:line 7} [utf8 "unicode/utf8"]])
+
+(go/const
+  ^{:line 10} [^{:val 30} maxNonStarters 30]
+
+
+  ^{:line 13} [^{:val 32 :doc "The maximum number of characters needed for a buffer is\nmaxNonStarters + 1 for the starter + 1 for the GCJ\n"} maxBufferSize (+ maxNonStarters 2)]
+  ^{:line 14} [^{:val 3} maxNFCExpansion 3] ; NFC(0x1D160)
+  ^{:line 15} [^{:val 18} maxNFKCExpansion 18] ; NFKC(0xFDFA)
+
+  ^{:line 17} [^{:val 128} maxByteBufferSize (* utf8/UTFMax maxBufferSize)]) ; 128
+
+
+
+
+(go/type ssState "ssState is used for reporting the segment state after inserting a rune.\nIt is returned by streamSafe.next.\n" int)
+
+(go/const
+
+  ^{:line 26} [^{:tag ssState :val 0 :doc "Indicates a rune was successfully added to the segment.\n"} ssSuccess iota]
+
+  ^{:line 28} [^{:val 1 :doc "Indicates a rune starts a new segment and should not be added.\n"} ssStarter]
+
+  ^{:line 30} [^{:val 2 :doc "Indicates a rune caused a segment overflow and a CGJ should be inserted.\n"} ssOverflow])
+
+
+
+(go/type streamSafe "streamSafe implements the policy of when a CGJ should be inserted.\n" uint8)
+
+
+
+^{:go/end 40} (go/method first "first inserts the first rune of a segment. It is a faster version of next if\nit is known p represents the first rune in a segment.\n" [^{:tag (* streamSafe)} ss ^Properties p]
+  (set! @ss (conv streamSafe (.nTrailingNonStarters p))))
+
+
+
+
+^{:go/end 65} (go/method next "insert returns a ssState value to indicate whether a rune represented by p\ncan be inserted.\n" ^ssState [^{:tag (* streamSafe)} ss ^Properties p]
+  (when (> @ss maxNonStarters)
+    (panic "streamSafe was not reset"))
+
+  (let [n (.nLeadingNonStarters p)]
+    (when [(set! @ss + (conv streamSafe n))] (> @ss maxNonStarters)
+      (set! @ss 0)
+      (return ssOverflow))
+
+    ;; The Stream-Safe Text Processing prescribes that the counting can stop
+    ;; as soon as a starter is encountered. However, there are some starters,
+    ;; like Jamo V and T, that can combine with other runes, leaving their
+    ;; successive non-starters appended to the previous, possibly causing an
+    ;; overflow. We will therefore consider any rune with a non-zero nLead to
+    ;; be a non-starter. Note that it always hold that if nLead > 0 then
+    ;; nLead == nTrail.
+    (when (== n 0)
+      (set! @ss (conv streamSafe (.nTrailingNonStarters p)))
+      (return ssStarter))
+
+    ^{:line 64} ssSuccess))
+
+
+
+
+
+
+^{:go/end 84} (go/method backwards "backwards is used for checking for overflow and segment starts\nwhen traversing a string backwards. Users do not need to call first\nfor the first rune. The state of the streamSafe retains the count of\nthe non-starters loaded.\n" ^ssState [^{:tag (* streamSafe)} ss ^Properties p]
+  (when (> @ss maxNonStarters)
+    (panic "streamSafe was not reset"))
+
+  (let [c (+ @ss (conv streamSafe (.nTrailingNonStarters p)))]
+    (when (> c maxNonStarters)
+      (return ssOverflow))
+
+    (set! @ss c)
+    (when (== (.nLeadingNonStarters p) 0)
+      (return ssStarter))
+
+    ^{:line 83} ssSuccess))
+
+
+^{:go/end 88} (go/method isMax ^bool [^streamSafe ss]
+  (== ss maxNonStarters))
+
+
+
+(go/const ^{:val "͏" :doc "GraphemeJoiner is inserted after maxNonStarters non-starter runes.\n"} GraphemeJoiner "͏")
+
+
+
+
+
+
+(go/type reorderBuffer "reorderBuffer is used to normalize a single segment.  Characters inserted with\ninsert are decomposed and reordered based on CCC. The compose method can\nbe used to recombine characters.  Note that the byte buffer does not hold\nthe UTF-8 characters in order.  Only the rune array is maintained in sorted\norder. flush writes the resulting segment to a byte array.\n" (struct
+    ^{:line 99 :tag (array maxBufferSize Properties)} rune ; Per character info.
+    ^{:line 100 :tag (array maxByteBufferSize byte)} byte ; UTF-8 buffer. Referenced by runeInfo.pos.
+    ^{:line 101 :tag uint8} nbyte ; Number or bytes.
+    ^{:line 102 :tag streamSafe} ss ; For limiting length of non-starter sequence.
+    ^{:line 103 :tag int} nrune ; Number of runeInfos.
+    ^{:line 104 :tag formInfo} f
+
+    ^{:line 106 :tag input} src
+    ^{:line 107 :tag int} nsrc
+    ^{:line 108 :tag input} tmpBytes
+
+    ^{:line 110 :tag (slice byte)} out
+    ^{:line 111 :tag (func [(* reorderBuffer)] [bool])} flushF))
+
+
+^{:go/end 119} (go/method init [^{:tag (* reorderBuffer)} rb ^Form f ^{:tag (slice byte)} src]
+  (set! (.-f rb) @(aget formTable f))
+  (.setBytes (.-src rb) src)
+  (set! (.-nsrc rb) (len src))
+  (set! (.-ss rb) 0))
+
+
+^{:go/end 126} (go/method initString [^{:tag (* reorderBuffer)} rb ^Form f ^string src]
+  (set! (.-f rb) @(aget formTable f))
+  (.setString (.-src rb) src)
+  (set! (.-nsrc rb) (len src))
+  (set! (.-ss rb) 0))
+
+
+^{:go/end 131} (go/method setFlusher [^{:tag (* reorderBuffer)} rb ^{:tag (slice byte)} out ^{:tag (func [(* reorderBuffer)] [bool])} f]
+  (set! (.-out rb) out)
+  (set! (.-flushF rb) f))
+
+
+
+^{:go/end 137} (go/method reset "reset discards all characters from the buffer.\n" [^{:tag (* reorderBuffer)} rb]
+  (set! (.-nrune rb) 0)
+  (set! (.-nbyte rb) 0))
+
+
+^{:go/end 146} (go/method doFlush ^bool [^{:tag (* reorderBuffer)} rb]
+  (when (.-composing (.-f rb))
+    (.compose rb))
+
+  (let [res ((.-flushF rb) rb)]
+    (.reset rb)
+    ^{:line 145} res))
+
+
+
+^{:go/breaks [[5 155]] :go/end 156} (go/func appendFlush "appendFlush appends the normalized segment to rb.out.\n" ^bool [^{:tag (* reorderBuffer)} rb]
+  (for [i 0] (< i (.-nrune rb)) (inc! i)
+    (let [start (.-pos (aget (.-rune rb) i))
+        ^{:line 152} end (+ start (.-size (aget (.-rune rb) i)))]
+      (set! (.-out rb) (append (.-out rb) (spread (subslice (.-byte rb) start end))))))
+
+  true)
+
+
+
+^{:go/end 167} (go/method flush "flush appends the normalized segment to out and resets rb.\n" ^{:tag (slice byte)} [^{:tag (* reorderBuffer)} rb ^{:tag (slice byte)} out]
+  (for [i 0] (< i (.-nrune rb)) (inc! i)
+    (let [start (.-pos (aget (.-rune rb) i))
+        ^{:line 162} end (+ start (.-size (aget (.-rune rb) i)))]
+      (set! out (append out (spread (subslice (.-byte rb) start end))))))
+
+  (.reset rb)
+  ^{:line 166} out)
+
+
+
+
+^{:go/end 179} (go/method flushCopy "flushCopy copies the normalized segment to buf and resets rb.\nIt returns the number of bytes written to buf.\n" ^int [^{:tag (* reorderBuffer)} rb ^{:tag (slice byte)} buf]
+  (let [p 0]
+    (for [i 0] (< i (.-nrune rb)) (inc! i)
+      (let [runep (aget (.-rune rb) i)]
+        (set! p + (copy (subslice buf p) (subslice (.-byte rb) (.-pos runep) (+ (.-pos runep) (.-size runep)))))))
+
+    (.reset rb)
+    ^{:line 178} p))
+
+
+
+
+
+^{:go/end 202} (go/method insertOrdered "insertOrdered inserts a rune in the buffer, ordered by Canonical Combining Class.\nIt returns false if the buffer is not large enough to hold the rune.\nIt is used internally by insert and insertString only.\n" [^{:tag (* reorderBuffer)} rb ^Properties info]
+  (let [n (.-nrune rb)
+      ^{:line 186} b (subslice (.-rune rb))
+      ^{:line 187} cc (.-ccc info)]
+    (when (> cc 0)
+      ;; Find insertion position + move elements to make room.
+      (for [] (> n 0) (dec! n)
+        (when (<= (.-ccc (aget b (- n 1))) cc)
+          (break))
+
+        (aset b n (aget b (- n 1)))))
+
+
+    (set! (.-nrune rb) + 1)
+    (let [pos (conv uint8 (.-nbyte rb))]
+      (set! (.-nbyte rb) + utf8/UTFMax)
+      (set! (.-pos info) pos)
+      (aset b n info))))
+
+
+
+
+(go/type insertErr "insertErr is an error code returned by insert. Using this type instead\nof error improves performance up to 20% for many of the benchmarks.\n" int)
+
+(go/const
+  ^{:line 209} [^{:tag insertErr :val 0} iSuccess (- iota)]
+  ^{:line 210} [^{:val -1} iShortDst]
+  ^{:line 211} [^{:val -2} iShortSrc])
+
+
+
+
+
+
+^{:go/end 228} (go/method insertFlush "insertFlush inserts the given rune in the buffer ordered by CCC.\nIf a decomposition with multiple segments are encountered, they leading\nones are flushed.\nIt returns a non-zero error code if the rune was not inserted.\n" ^insertErr [^{:tag (* reorderBuffer)} rb ^input src ^int i ^Properties info]
+  (when [rune (.hangul src i)] (!= rune 0)
+    (.decomposeHangul rb rune)
+    (return iSuccess))
+
+  (when (.hasDecomposition info)
+    (return (.insertDecomposed rb (.Decomposition info))))
+
+  (.insertSingle rb src i info)
+  ^{:line 227} iSuccess)
+
+
+
+
+
+
+^{:go/end 244} (go/method insertUnsafe "insertUnsafe inserts the given rune in the buffer ordered by CCC.\nIt is assumed there is sufficient space to hold the runes. It is the\nresponsibility of the caller to ensure this. This can be done by checking\nthe state returned by the streamSafe type.\n" [^{:tag (* reorderBuffer)} rb ^input src ^int i ^Properties info]
+  (when [rune (.hangul src i)] (!= rune 0)
+    (.decomposeHangul rb rune))
+
+  (if (.hasDecomposition info)
+    ;; TODO: inline.
+    (.insertDecomposed rb (.Decomposition info))
+
+    (.insertSingle rb src i info)))
+
+
+
+
+
+
+^{:go/end 263} (go/method insertDecomposed "insertDecomposed inserts an entry in to the reorderBuffer for each rune\nin dcomp. dcomp must be a sequence of decomposed UTF-8-encoded runes.\nIt flushes the buffer on each new segment start.\n" ^insertErr [^{:tag (* reorderBuffer)} rb ^{:tag (slice byte)} dcomp]
+  (.setBytes (.-tmpBytes rb) dcomp)
+  ;; As the streamSafe accounting already handles the counting for modifiers,
+  ;; we don't have to call next. However, we do need to keep the accounting
+  ;; intact when flushing the buffer.
+  (for [i 0] (< i (len dcomp)) _
+    (let [info ((.-info (.-f rb)) (.-tmpBytes rb) i)]
+      (when (and (.BoundaryBefore info) (> (.-nrune rb) 0) (not (.doFlush rb)))
+        (return iShortDst))
+
+      (set! i + (copy (subslice (.-byte rb) (.-nbyte rb)) (subslice dcomp i (+ i (conv int (.-size info))))))
+      (.insertOrdered rb info)))
+
+  ^{:line 262} iSuccess)
+
+
+
+
+^{:go/end 270} (go/method insertSingle "insertSingle inserts an entry in the reorderBuffer for the rune at\nposition i. info is the runeInfo for the rune at position i.\n" [^{:tag (* reorderBuffer)} rb ^input src ^int i ^Properties info]
+  (.copySlice src (subslice (.-byte rb) (.-nbyte rb)) i (+ i (conv int (.-size info))))
+  (.insertOrdered rb info))
+
+
+
+^{:go/end 275} (go/method insertCGJ "insertCGJ inserts a Combining Grapheme Joiner (0x034f) into rb.\n" [^{:tag (* reorderBuffer)} rb]
+  (.insertSingle rb (lit input :str GraphemeJoiner) 0 (lit Properties :size (conv uint8 (len GraphemeJoiner)))))
+
+
+
+^{:go/end 284} (go/method appendRune "appendRune inserts a rune at the end of the buffer. It is used for Hangul.\n" [^{:tag (* reorderBuffer)} rb ^rune r]
+  (let [bn (.-nbyte rb)
+      ^{:line 280} sz (utf8/EncodeRune (subslice (.-byte rb) bn) (conv rune r))]
+    (set! (.-nbyte rb) + utf8/UTFMax)
+    (aset (.-rune rb) (.-nrune rb) (lit Properties :pos bn :size (conv uint8 sz)))
+    (inc! (.-nrune rb))))
+
+
+
+^{:go/end 291} (go/method assignRune "assignRune sets a rune at position pos. It is used for Hangul and recomposition.\n" [^{:tag (* reorderBuffer)} rb ^int pos ^rune r]
+  (let [bn (.-pos (aget (.-rune rb) pos))
+      ^{:line 289} sz (utf8/EncodeRune (subslice (.-byte rb) bn) (conv rune r))]
+    (aset (.-rune rb) pos (lit Properties :pos bn :size (conv uint8 sz)))))
+
+
+
+^{:go/end 298} (go/method runeAt "runeAt returns the rune at position n. It is used for Hangul and recomposition.\n" ^rune [^{:tag (* reorderBuffer)} rb ^int n]
+  (let [inf (aget (.-rune rb) n)
+      (values r _) (utf8/DecodeRune (subslice (.-byte rb) (.-pos inf) (+ (.-pos inf) (.-size inf))))]
+    ^{:line 297} r))
+
+
+
+
+^{:go/end 305} (go/method bytesAt "bytesAt returns the UTF-8 encoding of the rune at position n.\nIt is used for Hangul and recomposition.\n" ^{:tag (slice byte)} [^{:tag (* reorderBuffer)} rb ^int n]
+  (let [inf (aget (.-rune rb) n)]
+    (subslice (.-byte rb) (.-pos inf) (+ (conv int (.-pos inf)) (conv int (.-size inf))))))
+
+
+
+(go/const "For Hangul we combine algorithmically, instead of using tables.\n"
+  ^{:line 309} [^{:val 44032} hangulBase 0xAC00] ; UTF-8(hangulBase) -> EA B0 80
+  ^{:line 310} [^{:val 234} hangulBase0 0xEA]
+  ^{:line 311} [^{:val 176} hangulBase1 0xB0]
+  ^{:line 312} [^{:val 128} hangulBase2 0x80]
+
+  ^{:line 314} [^{:val 55204} hangulEnd (+ hangulBase jamoLVTCount)] ; UTF-8(0xD7A4) -> ED 9E A4
+  ^{:line 315} [^{:val 237} hangulEnd0 0xED]
+  ^{:line 316} [^{:val 158} hangulEnd1 0x9E]
+  ^{:line 317} [^{:val 164} hangulEnd2 0xA4]
+
+  ^{:line 319} [^{:val 4352} jamoLBase 0x1100] ; UTF-8(jamoLBase) -> E1 84 00
+  ^{:line 320} [^{:val 225} jamoLBase0 0xE1]
+  ^{:line 321} [^{:val 132} jamoLBase1 0x84]
+  ^{:line 322} [^{:val 4371} jamoLEnd 0x1113]
+  ^{:line 323} [^{:val 4449} jamoVBase 0x1161]
+  ^{:line 324} [^{:val 4470} jamoVEnd 0x1176]
+  ^{:line 325} [^{:val 4519} jamoTBase 0x11A7]
+  ^{:line 326} [^{:val 4547} jamoTEnd 0x11C3]
+
+  ^{:line 328} [^{:val 28} jamoTCount 28]
+  ^{:line 329} [^{:val 21} jamoVCount 21]
+  ^{:line 330} [^{:val 588} jamoVTCount (* 21 28)]
+  ^{:line 331} [^{:val 11172} jamoLVTCount (* 19 21 28)])
+
+
+(go/const ^{:val 3} hangulUTF8Size 3)
+
+^{:go/end 356} (go/func isHangul ^bool [^{:tag (slice byte)} b]
+  (when (< (len b) hangulUTF8Size)
+    (return false))
+
+  (let [b0 (aget b 0)]
+    (when (< b0 hangulBase0)
+      (return false))
+
+    (let [b1 (aget b 1)]
+      (switch
+        (case [(== b0 hangulBase0)]
+          (return (>= b1 hangulBase1)))
+        (case [(< b0 hangulEnd0)]
+          (return true))
+        (case [(> b0 hangulEnd0)]
+          (return false))
+        (case [(< b1 hangulEnd1)]
+          (return true)))
+
+      (and (== b1 hangulEnd1) (< (aget b 2) hangulEnd2)))))
+
+
+^{:go/end 378} (go/func isHangulString ^bool [^string b]
+  (when (< (len b) hangulUTF8Size)
+    (return false))
+
+  (let [b0 (aget b 0)]
+    (when (< b0 hangulBase0)
+      (return false))
+
+    (let [b1 (aget b 1)]
+      (switch
+        (case [(== b0 hangulBase0)]
+          (return (>= b1 hangulBase1)))
+        (case [(< b0 hangulEnd0)]
+          (return true))
+        (case [(> b0 hangulEnd0)]
+          (return false))
+        (case [(< b1 hangulEnd1)]
+          (return true)))
+
+      (and (== b1 hangulEnd1) (< (aget b 2) hangulEnd2)))))
+
+
+
+^{:go/end 384} (go/func isJamoVT "Caller must ensure len(b) >= 2.\n" ^bool [^{:tag (slice byte)} b]
+  ;; True if (rune & 0xff00) == jamoLBase
+  (and (== (aget b 0) jamoLBase0) (== (bit-and (aget b 1) 0xFC) jamoLBase1)))
+
+
+^{:go/end 390} (go/func isHangulWithoutJamoT ^bool [^{:tag (slice byte)} b]
+  (let [(values c _) (utf8/DecodeRune b)]
+    (set! c - hangulBase)
+    (and (< c jamoLVTCount) (== (% c jamoTCount) 0))))
+
+
+
+
+^{:go/end 406} (go/func decomposeHangul "decomposeHangul writes the decomposed Hangul to buf and returns the number\nof bytes written.  len(buf) should be at least 9.\n" ^int [^{:tag (slice byte)} buf ^rune r]
+  (let [^:const ^{:val 3} JamoUTF8Len 3]
+    (set! r - hangulBase)
+    (let [x (% r jamoTCount)]
+      (set! r / jamoTCount)
+      (utf8/EncodeRune buf (+ jamoLBase (/ r jamoVCount)))
+      (utf8/EncodeRune (subslice buf JamoUTF8Len) (+ jamoVBase (% r jamoVCount)))
+      (when (!= x 0)
+        (utf8/EncodeRune (subslice buf (* 2 JamoUTF8Len)) (+ jamoTBase x))
+        (return (* 3 JamoUTF8Len)))
+
+      (* 2 JamoUTF8Len))))
+
+
+
+
+
+^{:go/end 420} (go/method decomposeHangul "decomposeHangul algorithmically decomposes a Hangul rune into\nits Jamo components.\nSee https://unicode.org/reports/tr15/#Hangul for details on decomposing Hangul.\n" [^{:tag (* reorderBuffer)} rb ^rune r]
+  (set! r - hangulBase)
+  (let [x (% r jamoTCount)]
+    (set! r / jamoTCount)
+    (.appendRune rb (+ jamoLBase (/ r jamoVCount)))
+    (.appendRune rb (+ jamoVBase (% r jamoVCount)))
+    (when (!= x 0)
+      (.appendRune rb (+ jamoTBase x)))))
+
+
+
+
+
+^{:go/end 458} (go/method combineHangul "combineHangul algorithmically combines Jamo character components into Hangul.\nSee https://unicode.org/reports/tr15/#Hangul for details on combining Hangul.\n" [^{:tag (* reorderBuffer)} rb ^int s ^int i ^int k]
+  (let [b (subslice (.-rune rb))
+      ^{:line 426} bn (.-nrune rb)]
+    (for [] (< i bn) (inc! i)
+      (let [cccB (.-ccc (aget b (- k 1)))
+          ^{:line 429} cccC (.-ccc (aget b i))]
+        (when (== cccB 0)
+          (set! s (- k 1)))
+
+        (if (and (!= s (- k 1)) (>= cccB cccC)) (do
+            ;; b[i] is blocked by greater-equal cccX below it
+            (aset b k (aget b i))
+            (inc! k))
+
+          (let [l (.runeAt rb s) ; also used to compare to hangulBase
+              ^{:line 439} v (.runeAt rb i)] ; also used to compare to jamoT
+            (switch
+              (case [(and (<= jamoLBase l) (< l jamoLEnd)
+                    (<= jamoVBase v) (< v jamoVEnd))]
+                ;; 11xx plus 116x to LV
+                (.assignRune rb s (+ hangulBase
+                    (* (- l jamoLBase) jamoVTCount) (* (- v jamoVBase) jamoTCount))))
+              (case [(and (<= hangulBase l) (< l hangulEnd)
+                    (< jamoTBase v) (< v jamoTEnd)
+                    (== (% (- l hangulBase) jamoTCount) 0))]
+                ;; ACxx plus 11Ax to LVT
+                (.assignRune rb s (- (+ l v) jamoTBase)))
+              (default
+                (aset b k (aget b i))
+                (inc! k)))))))
+
+
+
+    (set! (.-nrune rb) k)))
+
+
+
+
+
+^{:go/end 512} (go/method compose "compose recombines the runes in the buffer.\nIt should only be used to recompose a single segment, as it will not\nhandle alternations between Hangul and non-Hangul characters correctly.\n" [^{:tag (* reorderBuffer)} rb]
+  ;; Lazily load the map used by the combine func below, but do
+  ;; it outside of the loop.
+  (.Do recompMapOnce buildRecompMap)
+
+  ;; UAX #15, section X5 , including Corrigendum #5
+  ;; "In any character sequence beginning with starter S, a character C is
+  ;;  blocked from S if and only if there is some character B between S
+  ;;  and C, and either B is a starter or it has the same or higher
+  ;;  combining class as C."
+  (let [bn (.-nrune rb)]
+    (when (== bn 0)
+      (return))
+
+    (let [k 1
+        ^{:line 478} b (subslice (.-rune rb))]
+      (for [(values s i) (values 0 1)] (< i bn) (inc! i)
+        (when (isJamoVT (.bytesAt rb i))
+          ;; Redo from start in Hangul mode. Necessary to support
+          ;; U+320E..U+321E in NFKC mode.
+          (.combineHangul rb s i k)
+          (return))
+
+        (let [ii (aget b i)]
+          ;; We can only use combineForward as a filter if we later
+          ;; get the info for the combined character. This is more
+          ;; expensive than using the filter. Using combinesBackward()
+          ;; is safe.
+          (when (.combinesBackward ii)
+            (let [cccB (.-ccc (aget b (- k 1)))
+                ^{:line 493} cccC (.-ccc ii)
+                ^{:line 494} blocked false] ; b[i] blocked by starter or greater or equal CCC?
+              (if (== cccB 0)
+                (set! s (- k 1))
+
+                (set! blocked (and (!= s (- k 1)) (>= cccB cccC))))
+
+              (when (not blocked)
+                (let [combined (combine (.runeAt rb s) (.runeAt rb i))]
+                  (when (!= combined 0)
+                    (.assignRune rb s combined)
+                    (continue))))))
+
+
+
+          (aset b k (aget b i))
+          (inc! k)))
+
+      (set! (.-nrune rb) k))))

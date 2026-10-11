@@ -1,0 +1,288 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.v2) (go/file "arshal_any.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [cmp "cmp"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [math "math"]
+    ^{:line 13} [reflect "reflect"]
+    ^{:line 14} [slices "slices"]
+    ^{:line 15} [strconv "strconv"]
+
+    ^{:line 17} [internal "encoding/json/internal"]
+    ^{:line 18} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 19} [jsonopts "encoding/json/internal/jsonopts"]
+    ^{:line 20} [jsonwire "encoding/json/internal/jsonwire"]
+    ^{:line 21} [jsontext "encoding/json/jsontext"]])
+
+
+;; This file contains an optimized marshal and unmarshal implementation
+;; for the any type. This type is often used when the Go program has
+;; no knowledge of the JSON schema. This is a common enough occurrence
+;; to justify the complexity of adding logic for this.
+
+
+
+
+^{:go/end 58} (go/func marshalValueAny "marshalValueAny marshals a Go any as a JSON value.\nThis assumes that there are no special formatting directives\nfor any possible nested value.\n" ^error [^{:tag (* jsontext/Encoder)} enc ^any val ^{:tag (* jsonopts/Struct)} mo]
+  (type-switch [val val]
+    (case [nil]
+      (return (.WriteToken enc jsontext/Null)))
+    (case [bool]
+      (return (.WriteToken enc (jsontext/Bool val))))
+    (case [string]
+      (return (.WriteToken enc (jsontext/String val))))
+    (case [float64]
+      (when (or (math/IsNaN val) (math/IsInf val 0))
+        (break)) ; use default logic below
+
+      (return (.WriteToken enc (jsontext/Float val))))
+    (case [(map string any)]
+      (return (marshalObjectAny enc val mo)))
+    (case [(slice any)]
+      (return (marshalArrayAny enc val mo))))
+
+
+  (let [v (newAddressableValue (reflect/TypeOf val))]
+    ^{:go/via [Value]} (.Set v (reflect/ValueOf val))
+    (let [marshal (.-marshal (lookupArshaler ^{:go/via [Value]} (.Type v)))]
+      (when (!= ^{:go/via [ArshalValues]} (.-Marshalers mo) nil)
+        (set! (values marshal _) (.lookup (assert (* Marshalers) ^{:go/via [ArshalValues]} (.-Marshalers mo)) marshal ^{:go/via [Value]} (.Type v))))
+
+      (marshal enc v mo))))
+
+
+
+
+
+
+^{:go/end 103} (go/func unmarshalValueAny "unmarshalValueAny unmarshals a JSON value as a Go any.\nThis assumes that there are no special formatting directives\nfor any possible nested value.\nDuplicate names must be rejected since this does not implement merging.\n" [^{:tag (* jsontext/Decoder)} dec ^{:tag (* jsonopts/Struct)} uo] :results [any error]
+  (switch [k (.PeekKind dec)] k
+    (case [\{]
+      (return (unmarshalObjectAny dec uo)))
+    (case [\[]
+      (return (unmarshalArrayAny dec uo)))
+    (default
+      (let [xd (.Decoder export dec)
+          ^{:line 72 :tag jsonwire/ValueFlags} flags (zero jsonwire/ValueFlags)
+          (values val err) (.ReadValue xd (addr flags))]
+        (when (!= err nil)
+          (return nil err))
+
+        (switch (.Kind val)
+          (case [\n]
+            (return nil nil))
+          (case [\f]
+            (return false nil))
+          (case [\t]
+            (return true nil))
+          (case [\"]
+            (set! val (jsonwire/UnquoteMayCopy val (.IsVerbatim flags)))
+            (when (== (.-StringCache xd) nil)
+              (set! (.-StringCache xd) (new stringCache)))
+
+            (return (makeString (.-StringCache xd) val) nil))
+          (case [\0]
+            (when (.Get (.-Flags uo) jsonflags/UnmarshalAnyWithRawNumber)
+              (return (internal/RawNumberOf val) nil))
+
+            (let [(values fv err) (strconv/ParseFloat (conv string val) 64)]
+              (when (!= err nil)
+                (return fv (newUnmarshalErrorAfterWithValue dec float64Type (errors/Unwrap err))))
+
+              (return fv nil)))
+          (default
+            (panic (+ "BUG: invalid kind: " (.String k)))))))))
+
+
+
+
+
+
+^{:go/end 173} (go/func marshalObjectAny "marshalObjectAny marshals a Go map[string]any as a JSON object\n(or as a JSON null if nil and [jsonflags.FormatNilMapAsNull]).\n" ^error [^{:tag (* jsontext/Encoder)} enc ^{:tag (map string any)} obj ^{:tag (* jsonopts/Struct)} mo]
+  ;; Check for cycles.
+  ^{:go/breaks [[8 172]]} (let [xe (.Encoder export enc)]
+    (when (> (.Depth ^{:go/via [state]} (.-Tokens xe)) startDetectingCyclesAfter)
+      (let [v (reflect/ValueOf obj)]
+        (when [err (visitPointer (addr (.-SeenPointers xe)) v)] (!= err nil)
+          (return (newMarshalErrorBefore enc mapStringAnyType err)))
+
+        (defer (leavePointer (addr (.-SeenPointers xe)) v))))
+
+
+    ;; Handle empty maps.
+    (when (== (len obj) 0)
+      (when (and (.Get (.-Flags mo) jsonflags/FormatNilMapAsNull) (== obj nil))
+        (return (.WriteToken enc jsontext/Null)))
+
+      ;; Optimize for marshaling an empty map without any preceding whitespace.
+      (when (and (not (.Get (.-Flags mo) jsonflags/AnyWhitespace)) (not (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe)))))
+        (set! ^{:go/via [encodeBuffer]} (.-Buf xe) (append (.MayAppendDelim ^{:go/via [state]} (.-Tokens xe) ^{:go/via [encodeBuffer]} (.-Buf xe) \{) (spread "{}")))
+        (.Increment (.-Last ^{:go/via [state]} (.-Tokens xe)))
+        (when (.NeedFlush xe)
+          (return (.Flush xe)))
+
+        (return nil)))
+
+
+
+    (when [err (.WriteToken enc jsontext/BeginObject)] (!= err nil)
+      (return err))
+
+    ;; A Go map guarantees that each entry has a unique key.
+    ;; The only possibility of duplicates is due to invalid UTF-8.
+    (when (not (.Get (.-Flags mo) jsonflags/AllowInvalidUTF8))
+      (.DisableNamespace (.-Last ^{:go/via [state]} (.-Tokens xe))))
+
+    (if (or (not (.Get (.-Flags mo) jsonflags/Deterministic)) (<= (len obj) 1))
+      (range [name val obj]
+        (when [err (.WriteToken enc (jsontext/String name))] (!= err nil)
+          (return err))
+
+        (when [err (marshalValueAny enc val mo)] (!= err nil)
+          (return err)))
+
+
+
+      (let [names (getStrings (len obj))
+          ^{:line 153 :tag int} i (zero int)]
+        (range [name obj]
+          (aset @names i name)
+          (inc! i))
+
+        (^{:inst [stringSlice string]} slices/Sort @names)
+        (range [_ name @names]
+          (when [err (.WriteToken enc (jsontext/String name))] (!= err nil)
+            (return err))
+
+          (when [err (marshalValueAny enc (aget obj name) mo)] (!= err nil)
+            (return err)))
+
+
+        (putStrings names)))
+
+    (when [err (.WriteToken enc jsontext/EndObject)] (!= err nil)
+      (return err))
+
+    nil))
+
+
+
+
+^{:go/end 219} (go/func unmarshalObjectAny "unmarshalObjectAny unmarshals a JSON object as a Go map[string]any.\nIt panics if not decoding a JSON object.\n" [^{:tag (* jsontext/Decoder)} dec ^{:tag (* jsonopts/Struct)} uo] :results [(map string any) error]
+  (switch [(values tok err) (.ReadToken dec)]
+    (case [(!= err nil)]
+      (return nil err))
+    (case [(!= (.Kind tok) \{)]
+      (panic (+ "BUG: invalid kind: " (.String (.Kind tok))))))
+
+  (let [obj (make (map string any))]
+    ;; A Go map guarantees that each entry has a unique key.
+    ;; The only possibility of duplicates is due to invalid UTF-8.
+    (when (not (.Get (.-Flags uo) jsonflags/AllowInvalidUTF8))
+      (.DisableNamespace (.-Last ^{:go/via [state]} (.-Tokens (.Decoder export dec)))))
+
+    (let [^error errUnmarshal (zero error)]
+      (while (!= (.PeekKind dec) \})
+        (let [(values tok err) (.ReadToken dec)]
+          (when (!= err nil)
+            (return obj err))
+
+          (let [name (.String tok)]
+
+            ;; Manually check for duplicate names.
+            (when [(values _ ok) (aget obj name)] ok
+              ;; TODO: Unread the object name.
+              (let [name ^{:go/via [decodeBuffer]} (.PreviousTokenOrValue (.Decoder export dec))
+                  ^{:line 202} err (newDuplicateNameError (.StackPointer dec) nil (- (.InputOffset dec) (^{:inst [(slice byte)]} len64 name)))]
+                (return obj err)))
+
+
+            (let [(values val ^:assign err) (unmarshalValueAny dec uo)]
+              (aset obj name val)
+              (when (!= err nil)
+                (when (isFatalError err (.-Flags uo))
+                  (return obj err))
+
+                (set! errUnmarshal (^{:inst [error]} cmp/Or err errUnmarshal)))))))
+
+
+      (when [(values _ err) (.ReadToken dec)] (!= err nil)
+        (return obj err))
+
+      (return obj errUnmarshal))))
+
+
+
+
+^{:go/end 262} (go/func marshalArrayAny "marshalArrayAny marshals a Go []any as a JSON array\n(or as a JSON null if nil and [jsonflags.FormatNilSliceAsNull]).\n" ^error [^{:tag (* jsontext/Encoder)} enc ^{:tag (slice any)} arr ^{:tag (* jsonopts/Struct)} mo]
+  ;; Check for cycles.
+  ^{:go/breaks [[7 261]]} (let [xe (.Encoder export enc)]
+    (when (> (.Depth ^{:go/via [state]} (.-Tokens xe)) startDetectingCyclesAfter)
+      (let [v (reflect/ValueOf arr)]
+        (when [err (visitPointer (addr (.-SeenPointers xe)) v)] (!= err nil)
+          (return (newMarshalErrorBefore enc sliceAnyType err)))
+
+        (defer (leavePointer (addr (.-SeenPointers xe)) v))))
+
+
+    ;; Handle empty slices.
+    (when (== (len arr) 0)
+      (when (and (.Get (.-Flags mo) jsonflags/FormatNilSliceAsNull) (== arr nil))
+        (return (.WriteToken enc jsontext/Null)))
+
+      ;; Optimize for marshaling an empty slice without any preceding whitespace.
+      (when (and (not (.Get (.-Flags mo) jsonflags/AnyWhitespace)) (not (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe)))))
+        (set! ^{:go/via [encodeBuffer]} (.-Buf xe) (append (.MayAppendDelim ^{:go/via [state]} (.-Tokens xe) ^{:go/via [encodeBuffer]} (.-Buf xe) \[) (spread "[]")))
+        (.Increment (.-Last ^{:go/via [state]} (.-Tokens xe)))
+        (when (.NeedFlush xe)
+          (return (.Flush xe)))
+
+        (return nil)))
+
+
+
+    (when [err (.WriteToken enc jsontext/BeginArray)] (!= err nil)
+      (return err))
+
+    (range [_ val arr]
+      (when [err (marshalValueAny enc val mo)] (!= err nil)
+        (return err)))
+
+
+    (when [err (.WriteToken enc jsontext/EndArray)] (!= err nil)
+      (return err))
+
+    nil))
+
+
+
+
+^{:go/end 289} (go/func unmarshalArrayAny "unmarshalArrayAny unmarshals a JSON array as a Go []any.\nIt panics if not decoding a JSON array.\n" [^{:tag (* jsontext/Decoder)} dec ^{:tag (* jsonopts/Struct)} uo] :results [(slice any) error]
+  (switch [(values tok err) (.ReadToken dec)]
+    (case [(!= err nil)]
+      (return nil err))
+    (case [(!= (.Kind tok) \[)]
+      (panic (+ "BUG: invalid kind: " (.String (.Kind tok))))))
+
+  (let [arr (lit (slice any))
+      ^{:line 274 :tag error} errUnmarshal (zero error)]
+    (while (!= (.PeekKind dec) \])
+      (let [(values val err) (unmarshalValueAny dec uo)]
+        (set! arr (append arr val))
+        (when (!= err nil)
+          (when (isFatalError err (.-Flags uo))
+            (return arr err))
+
+          (set! errUnmarshal (^{:inst [error]} cmp/Or errUnmarshal err)))))
+
+
+    (when [(values _ err) (.ReadToken dec)] (!= err nil)
+      (return arr err))
+
+    (return arr errUnmarshal)))

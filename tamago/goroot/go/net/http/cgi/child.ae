@@ -1,0 +1,224 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements CGI from the perspective of a child
+;; process.
+
+(in-ns 'go.net.http.cgi) (go/file "child.go" :imports [
+
+
+    ^{:line 11} [bufio "bufio"]
+    ^{:line 12} [tls "crypto/tls"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [fmt "fmt"]
+    ^{:line 15} [io "io"]
+    ^{:line 16} [net "net"]
+    ^{:line 17} [http "net/http"]
+    ^{:line 18} [url "net/url"]
+    ^{:line 19} [os "os"]
+    ^{:line 20} [strconv "strconv"]
+    ^{:line 21} [strings "strings"]])
+
+
+
+
+
+
+^{:go/end 37} (go/func Request "Request returns the HTTP request as represented in the current\nenvironment. This assumes the current program is being run\nby a web server in a CGI environment.\nThe returned Request's Body is populated, if applicable.\n" [] :results [(* http/Request) error]
+  (let [(values r err) (RequestFromMap (envMap (os/Environ)))]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (> (.-ContentLength r) 0)
+      (set! (.-Body r) (io/NopCloser (io/LimitReader os/Stdin (.-ContentLength r)))))
+
+    (return r nil)))
+
+
+^{:go/end 47} (go/func envMap ^{:tag (map string string)} [^{:tag (slice string)} env]
+  (let [m (make (map string string))]
+    (range [_ kv env]
+      (when [(values k v ok) (strings/Cut kv "=")] ok
+        (aset m k v)))
+
+
+    ^{:line 46} m))
+
+
+
+
+^{:go/end 142} (go/func RequestFromMap "RequestFromMap creates an [http.Request] from CGI variables.\nThe returned Request's Body field is not populated.\n" [^{:tag (map string string)} params] :results [(* http/Request) error]
+  (let [r (new http/Request)]
+    (set! (.-Method r) (aget params "REQUEST_METHOD"))
+    (when (== (.-Method r) "")
+      (return nil (errors/New "cgi: no REQUEST_METHOD in environment")))
+
+
+    (set! (.-Proto r) (aget params "SERVER_PROTOCOL"))
+    (let [^bool ok (zero bool)]
+      (if (== (.-Proto r) "INCLUDED")
+        ;; SSI (Server Side Include) use case
+        ;; CGI Specification RFC 3875 - section 4.1.16
+        (set! (values (.-ProtoMajor r) (.-ProtoMinor r)) (values 1 0))
+        (when [(set! (values (.-ProtoMajor r) (.-ProtoMinor r) ok) (http/ParseHTTPVersion (.-Proto r)))] (not ok)
+          (return nil (errors/New "cgi: invalid SERVER_PROTOCOL version"))))
+
+
+      (set! (.-Close r) true)
+      (set! (.-Trailer r) (lit http/Header))
+      (set! (.-Header r) (lit http/Header))
+
+      (set! (.-Host r) (aget params "HTTP_HOST"))
+
+      (when [lenstr (aget params "CONTENT_LENGTH")] (!= lenstr "")
+        (let [(values clen err) (strconv/ParseInt lenstr 10 64)]
+          (when (!= err nil)
+            (return nil (errors/New (+ "cgi: bad CONTENT_LENGTH in environment: " lenstr))))
+
+          (set! (.-ContentLength r) clen)))
+
+
+      (when [ct (aget params "CONTENT_TYPE")] (!= ct "")
+        (.Set (.-Header r) "Content-Type" ct))
+
+
+      ;; Copy "HTTP_FOO_BAR" variables to "Foo-Bar" Headers
+      (range [k v params]
+        (when (== k "HTTP_HOST")
+          (continue))
+
+        (when [(values after found) (strings/CutPrefix k "HTTP_")] found
+          (.Add (.-Header r) (strings/ReplaceAll after "_" "-") v)))
+
+
+
+      (let [uriStr (aget params "REQUEST_URI")]
+        (when (== uriStr "")
+          ;; Fallback to SCRIPT_NAME, PATH_INFO and QUERY_STRING.
+          (set! uriStr (+ (aget params "SCRIPT_NAME") (aget params "PATH_INFO")))
+          (let [s (aget params "QUERY_STRING")]
+            (when (!= s "")
+              (set! uriStr + (+ "?" s)))))
+
+
+
+        ;; There's apparently a de-facto standard for this.
+        ;; https://web.archive.org/web/20170105004655/http://docstore.mik.ua/orelly/linux/cgi/ch03_02.htm#ch03-35636
+        (when [s (aget params "HTTPS")] (or (== s "on") (== s "ON") (== s "1"))
+          (set! (.-TLS r) (addr (lit tls/ConnectionState :HandshakeComplete true))))
+
+
+        (when (!= (.-Host r) "")
+          ;; Hostname is provided, so we can reasonably construct a URL.
+          (let [rawurl (+ (.-Host r) uriStr)]
+            (if (== (.-TLS r) nil)
+              (set! rawurl (+ "http://" rawurl))
+
+              (set! rawurl (+ "https://" rawurl)))
+
+            (let [(values url err) (url/Parse rawurl)]
+              (when (!= err nil)
+                (return nil (errors/New (+ "cgi: failed to parse host and REQUEST_URI into a URL: " rawurl))))
+
+              (set! (.-URL r) url))))
+
+        ;; Fallback logic if we don't have a Host header or the URL
+        ;; failed to parse
+        (when (== (.-URL r) nil)
+          (let [(values url err) (url/Parse uriStr)]
+            (when (!= err nil)
+              (return nil (errors/New (+ "cgi: failed to parse REQUEST_URI into a URL: " uriStr))))
+
+            (set! (.-URL r) url)))
+
+
+        ;; Request.RemoteAddr has its port set by Go's standard http
+        ;; server, so we do here too.
+        (let [(values remotePort _) (strconv/Atoi (aget params "REMOTE_PORT"))] ; zero if unset or invalid
+          (set! (.-RemoteAddr r) (net/JoinHostPort (aget params "REMOTE_ADDR") (strconv/Itoa remotePort)))
+
+          (return r nil))))))
+
+
+
+
+
+
+^{:go/end 170} (go/func Serve "Serve executes the provided [Handler] on the currently active CGI\nrequest, if any. If there's no current CGI environment\nan error is returned. The provided handler may be nil to use\n[http.DefaultServeMux].\n" ^error [^http/Handler handler]
+  (let [(values req err) (Request)]
+    (when (!= err nil)
+      (return err))
+
+    (when (== (.-Body req) nil)
+      (set! (.-Body req) http/NoBody))
+
+    (when (== handler nil)
+      (set! handler http/DefaultServeMux))
+
+    ^{:go/breaks [[5 169]]} (let [rw (addr ^{:go/breaks [2 4 6]} (lit response
+            :req req
+            :header (make http/Header)
+            :bufw (bufio/NewWriter os/Stdout)))]
+
+      (.ServeHTTP handler rw req)
+      (.Write rw nil) ; make sure a response is sent
+      (when [(set! err (.Flush (.-bufw rw)))] (!= err nil)
+        (return err))
+
+      nil)))
+
+
+(go/type response (struct
+    ^{:line 173 :tag (* http/Request)} req
+    ^{:line 174 :tag http/Header} header
+    ^{:line 175 :tag int} code
+    ^{:line 176 :tag bool} wroteHeader
+    ^{:line 177 :tag bool} wroteCGIHeader
+    ^{:line 178 :tag (* bufio/Writer)} bufw))
+
+
+^{:go/end 183} (go/method Flush [^{:tag (* response)} r]
+  (.Flush (.-bufw r)))
+
+
+^{:go/end 187} (go/method Header ^http/Header [^{:tag (* response)} r]
+  (.-header r))
+
+
+^{:go/end 197} (go/method Write [^{:tag (* response)} r ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (not (.-wroteHeader r))
+    (.WriteHeader r http/StatusOK))
+
+  (when (not (.-wroteCGIHeader r))
+    (.writeCGIHeader r p))
+
+  (.Write (.-bufw r) p))
+
+
+^{:go/end 207} (go/method WriteHeader [^{:tag (* response)} r ^int code]
+  (when (.-wroteHeader r)
+    ;; Note: explicitly using Stderr, as Stdout is our HTTP output.
+    (fmt/Fprintf os/Stderr "CGI attempted to write header twice on request for %s" (.-URL (.-req r)))
+    (return))
+
+  (set! (.-wroteHeader r) true)
+  (set! (.-code r) code))
+
+
+
+
+
+
+^{:go/end 225} (go/method writeCGIHeader "writeCGIHeader finalizes the header sent to the client and writes it to the output.\np is not written by writeHeader, but is the first chunk of the body\nthat will be written. It is sniffed for a Content-Type if none is\nset explicitly.\n" [^{:tag (* response)} r ^{:tag (slice byte)} p]
+  (when (.-wroteCGIHeader r)
+    (return))
+
+  (set! (.-wroteCGIHeader r) true)
+  (fmt/Fprintf (.-bufw r) "Status: %d %s\r\n" (.-code r) (http/StatusText (.-code r)))
+  (when [(values _ hasType) (aget (.-header r) "Content-Type")] (not hasType)
+    (.Set (.-header r) "Content-Type" (http/DetectContentType p)))
+
+  (.Write (.-header r) (.-bufw r))
+  (.WriteString (.-bufw r) "\r\n")
+  (.Flush (.-bufw r)))

@@ -1,0 +1,1493 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Time-related runtime and pieces of package time.
+
+(in-ns 'go.runtime) (go/file "time.go" :imports [
+
+
+    ^{:line 10} [abi "internal/abi"]
+    ^{:line 11} [atomic "internal/runtime/atomic"]
+    ^{:line 12} [sys "internal/runtime/sys"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+
+^{:go/end 30} (go/func ^{:go/linkname "time_runtimeNow time.runtimeNow"} time_runtimeNow [] :results [^int64 sec ^int32 nsec ^int64 mono]
+  (when [bubble (.-bubble (getg))] (!= bubble nil)
+    (set! sec (/ (.-now bubble) (* 1000 1000 1000)))
+    (set! nsec (conv int32 (% (.-now bubble) (* 1000 1000 1000))))
+    ;; Don't return a monotonic time inside a synctest bubble.
+    ;; If we return a monotonic time based on the fake clock,
+    ;; arithmetic on times created inside/outside bubbles is confusing.
+    ;; If we return a monotonic time based on the real monotonic clock,
+    ;; arithmetic on times created in the same bubble is confusing.
+    ;; Simplest is to omit the monotonic time within a bubble.
+    (return sec nsec 0))
+
+  (time_now))
+
+
+
+^{:go/end 36} (go/func ^{:go/linkname "crypto_internal_fips140deps_time_monoTime crypto/internal/fips140deps/time.monoTime"} crypto_internal_fips140deps_time_monoTime [] :results [^int64 mono]
+  (set! (values _ _ mono) (time_now))
+  ^{:line 35} mono)
+
+
+
+^{:go/end 45} (go/func ^{:go/linkname "time_runtimeNano time.runtimeNano"} time_runtimeNano ^int64 []
+  (let [gp (getg)]
+    (when (!= (.-bubble gp) nil)
+      (return (.-now (.-bubble gp))))
+
+    (nanotime)))
+
+
+
+^{:go/end 50} (go/func ^{:go/linkname "time_runtimeIsBubbled time.runtimeIsBubbled"} time_runtimeIsBubbled ^bool []
+  (!= (.-bubble (getg)) nil))
+
+
+
+
+
+
+
+
+
+
+
+(go/type timer "A timer is a potentially repeating trigger for calling t.f(t.arg, t.seq).\nTimers are allocated by client code, often as part of other data structures.\nEach P has a heap of pointers to timers that it manages.\n\nA timer is expected to be used by only one client goroutine at a time,\nbut there will be concurrent access by the P managing that timer.\nTimer accesses are protected by the lock t.mu, with a snapshot of\nt's state bits published in t.astate to enable certain fast paths to make\ndecisions about a timer without acquiring the lock.\n" (struct
+
+    ^{:line 63 :tag mutex :doc "mu protects reads and writes to all fields, with exceptions noted below.\n"} mu
+
+    ^{:line 65 :tag atomic/Uint8} astate ; atomic copy of state bits at last unlock
+    ^{:line 66 :tag uint8} state ; state bits
+    ^{:line 67 :tag bool} isChan ; timer has a channel; immutable; can be read without lock
+    ^{:line 68 :tag bool} isFake ; timer is using fake time; immutable; can be read without lock
+
+    ^{:line 70 :tag uint32} blocked ; number of goroutines blocked on timer's channel
+    ^{:line 71 :tag uint32} rand ; randomizes order of timers at same instant; only set when isFake
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 98 :tag int64 :doc "Timer wakes up at when, and then at when+period, ... (period > 0 only)\neach time calling f(arg, seq, delay) in the timer goroutine, so f must be\na well-behaved function and not block.\n\nThe arg and seq are client-specified opaque arguments passed back to f.\nWhen used from netpoll, arg and seq have meanings defined by netpoll\nand are completely opaque to this code; in that context, seq is a sequence\nnumber to recognize and squelch stale function invocations.\nWhen used from package time, arg is a channel (for After, NewTicker)\nor the function to call (for AfterFunc) and seq is unused (0).\n\nPackage time does not know about seq, but if this is a channel timer (t.isChan == true),\nthis file uses t.seq as a sequence number to recognize and squelch\nsends that correspond to an earlier (stale) timer configuration,\nsimilar to its use in netpoll. In this usage (that is, when t.isChan == true),\nwrites to seq are protected by both t.mu and t.sendLock,\nso reads are allowed when holding either of the two mutexes.\n\nThe delay argument is nanotime() - t.when, meaning the delay in ns between\nwhen the timer should have gone off and now. Normally that amount is\nsmall enough not to matter, but for channel timers that are fed lazily,\nthe delay can be arbitrarily long; package time subtracts it out to make\nit look like the send happened earlier than it actually did.\n(No one looked at the channel since then, or the send would have\nnot happened so late, so no one can tell the difference.)\n"} when
+    ^{:line 99 :tag int64} period
+    ^{:line 100 :tag (func [^any arg ^uintptr seq ^int64 delay])} f
+    ^{:line 101 :tag any} arg
+    ^{:line 102 :tag uintptr} seq
+
+
+    ^{:line 105 :tag (* timers) :doc "If non-nil, the timers containing t.\n"} ts
+
+
+    ^{:line 108 :tag mutex :doc "sendLock protects sends on the timer's channel.\n"} sendLock
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 122 :tag atomic/Int32 :doc "isSending is used to handle races between running a\nchannel timer and stopping or resetting the timer.\nIt is used only for channel timers (t.isChan == true).\nIt is not used for tickers.\nThe value is incremented when about to send a value on the channel,\nand decremented after sending the value.\nThe stop/reset code uses this to detect whether it\nstopped the channel send.\n\nisSending is incremented only when t.mu is held.\nisSending is decremented only when t.sendLock is held.\nisSending is read only when both t.mu and t.sendLock are held.\n"} isSending))
+
+
+
+
+
+
+^{:go/end 133} (go/method init "init initializes a newly allocated timer t.\nAny code that allocates a timer must call t.init before using it.\nThe arg and f can be set during init, or they can be nil in init\nand set by a future call to t.modify.\n" [^{:tag (* timer)} t ^{:tag (func [^any arg ^uintptr seq ^int64 delay])} f ^any arg]
+  (lockInit (addr (.-mu t)) lockRankTimer)
+  (set! (.-f t) f)
+  (set! (.-arg t) arg))
+
+
+
+(go/type timers "A timers is a per-P set of timers.\n" (struct
+
+
+    ^{:line 139 :tag mutex :doc "mu protects timers; timers are per-P, but the scheduler can\naccess the timers of another P, so we have to lock.\n"} mu
+
+
+
+    ^{:line 143 :tag (slice timerWhen) :doc "heap is the set of timers, ordered by heap[i].when.\nMust hold lock to access.\n"} heap
+
+
+    ^{:line 146 :tag atomic/Uint32 :doc "len is an atomic copy of len(heap).\n"} len
+
+
+
+    ^{:line 150 :tag atomic/Int32 :doc "zombies is the number of timers in the heap\nthat are marked for removal.\n"} zombies
+
+
+    ^{:line 153 :tag uintptr :doc "raceCtx is the race context used while executing timer functions.\n"} raceCtx
+
+
+
+
+
+    ^{:line 159 :tag atomic/Int64 :doc "minWhenHeap is the minimum heap[i].when value (= heap[0].when).\nThe wakeTime method uses minWhenHeap and minWhenModified\nto determine the next wake time.\nIf minWhenHeap = 0, it means there are no timers in the heap.\n"} minWhenHeap
+
+
+
+
+    ^{:line 164 :tag atomic/Int64 :doc "minWhenModified is a lower bound on the minimum\nheap[i].when over timers with the timerModified bit set.\nIf minWhenModified = 0, it means there are no timerModified timers in the heap.\n"} minWhenModified))
+
+
+(go/type timerWhen (struct
+    ^{:line 168 :tag (* timer)} timer
+    ^{:line 169 :tag int64} when))
+
+
+
+^{:go/end 185} (go/method less "less reports whether tw is less than other.\n" ^bool [^timerWhen tw ^timerWhen other]
+  (switch
+    (case [(< (.-when tw) (.-when other))]
+      (return true))
+    (case [(> (.-when tw) (.-when other))]
+      (return false))
+    (default
+      ;; When timers wake at the same time, use a per-timer random value to order them.
+      ;; We only set the random value for timers using fake time, since there's
+      ;; no practical way to schedule real-time timers for the same instant.
+      (return (< (.-rand (.-timer tw)) (.-rand (.-timer other)))))))
+
+
+
+^{:go/end 189} (go/method lock [^{:tag (* timers)} ts]
+  (lock (addr (.-mu ts))))
+
+
+^{:go/end 202} (go/method unlock [^{:tag (* timers)} ts]
+  ;; Update atomic copy of len(ts.heap).
+  ;; We only update at unlock so that the len is always
+  ;; the most recent unlocked length, not an ephemeral length.
+  ;; This matters if we lock ts, delete the only timer from the heap,
+  ;; add it back, and unlock. We want ts.len.Load to return 1 the
+  ;; entire time, never 0. This is important for pidleput deciding
+  ;; whether ts is empty.
+  (.Store (.-len ts) (conv uint32 (len (.-heap ts))))
+
+  (unlock (addr (.-mu ts))))
+
+
+
+(go/const "Timer state field.\n"
+
+  ^{:line 207} [^{:tag uint8 :val 1 :doc "timerHeaped is set when the timer is stored in some P's heap.\n"} timerHeaped (<< 1 iota)]
+
+
+
+
+
+
+  ^{:line 214} [^{:val 2 :doc "timerModified is set when t.when has been modified\nbut the heap's heap[i].when entry still needs to be updated.\nThat change waits until the heap in which\nthe timer appears can be locked and rearranged.\ntimerModified is only set when timerHeaped is also set.\n"} timerModified]
+
+
+
+
+
+
+
+
+
+  ^{:line 224} [^{:val 4 :doc "timerZombie is set when the timer has been stopped\nbut is still present in some P's heap.\nOnly set when timerHeaped is also set.\nIt is possible for timerModified and timerZombie to both\nbe set, meaning that the timer was modified and then stopped.\nA timer sending to a channel may be placed in timerZombie\nto take it out of the heap even though the timer is not stopped,\nas long as nothing is reading from the channel.\n"} timerZombie])
+
+
+
+(go/const ^{:val false :doc "timerDebug enables printing a textual debug trace of all timer operations to stderr.\n"} timerDebug false)
+
+^{:go/end 234} (go/method trace [^{:tag (* timer)} t ^string op]
+  (when timerDebug
+    (.trace1 t op)))
+
+
+
+^{:go/end 250} (go/method trace1 [^{:tag (* timer)} t ^string op]
+  (when (not timerDebug)
+    (return))
+
+  (let [bits (lit (array 4 string) "h" "m" "z" "c")]
+    (range [i 3]
+      (when (== (bit-and (.-state t) ^uint8 (<< 1 i)) 0)
+        (aset bits i "-")))
+
+
+    (when (not (.-isChan t))
+      (aset bits 3 "-"))
+
+    (print "T " t " " (aget bits 0) (aget bits 1) (aget bits 2) (aget bits 3) " b=" (.-blocked t) " " op "\n")))
+
+
+^{:go/end 256} (go/method trace [^{:tag (* timers)} ts ^string op]
+  (when timerDebug
+    (println "TS" ts op)))
+
+
+
+
+^{:go/end 262} (go/method lock "lock locks the timer, allowing reading or writing any of the timer fields.\n" [^{:tag (* timer)} t]
+  (lock (addr (.-mu t)))
+  (.trace t "lock"))
+
+
+
+^{:go/end 271} (go/method unlock "unlock updates t.astate and unlocks the timer.\n" [^{:tag (* timer)} t]
+  (.trace t "unlock")
+  ;; Let heap fast paths know whether heap[i].when is accurate.
+  ;; Also let maybeRunChan know whether channel is in heap.
+  (.Store (.-astate t) (.-state t))
+  (unlock (addr (.-mu t))))
+
+
+
+
+^{:go/end 283} (go/method hchan "hchan returns the channel in t.arg.\nt must be a timer with a channel.\n" ^{:tag (* hchan)} [^{:tag (* timer)} t]
+  (when (not (.-isChan t))
+    (badTimer))
+
+  ;; Note: t.arg is a chan time.Time,
+  ;; and runtime cannot refer to that type,
+  ;; so we cannot use a type assertion.
+  (conv (* hchan) (.-data (efaceOf (addr (.-arg t))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 318} (go/method updateHeap "updateHeap updates t as directed by t.state, updating t.state\nand returning a bool indicating whether the state (and ts.heap[0].when) changed.\nThe caller must hold t's lock, or the world can be stopped instead.\nThe timer set t.ts must be non-nil and locked, t must be t.ts.heap[0], and updateHeap\ntakes care of moving t within the timers heap to preserve the heap invariants.\nIf ts == nil, then t must not be in a heap (or is in a heap that is\ntemporarily not maintaining its invariant, such as during timers.adjust).\n" [^{:tag (* timer)} t] :results [^bool updated]
+  (assertWorldStoppedOrLockHeld (addr (.-mu t)))
+  (.trace t "updateHeap")
+  ^{:go/breaks [[6 317]]} (let [ts (.-ts t)]
+    (when (or (== ts nil) (!= t (.-timer (aget (.-heap ts) 0))))
+      (badTimer))
+
+    (assertLockHeld (addr (.-mu ts)))
+    (when (!= (bit-and (.-state t) timerZombie) 0)
+      ;; Take timer out of heap.
+      (set! (.-state t) bit-and-not (bit-or timerHeaped timerZombie timerModified))
+      (.Add (.-zombies ts) -1)
+      (.deleteMin ts)
+      (return true))
+
+
+    (when (!= (bit-and (.-state t) timerModified) 0)
+      ;; Update ts.heap[0].when and move within heap.
+      (set! (.-state t) bit-and-not timerModified)
+      (set! (.-when (aget (.-heap ts) 0)) (.-when t))
+      (.siftDown ts 0)
+      (.updateMinWhenHeap ts)
+      (return true))
+
+
+    false))
+
+
+
+(go/const ^{:val 9223372036854775807 :doc "maxWhen is the maximum value for timer's when field.\n"} maxWhen (- (<< 1 63) 1))
+
+
+
+(go/const ^{:val false :doc "verifyTimers can be set to true to add debugging checks that the\ntimer heaps are valid.\n"} verifyTimers false)
+
+;; Package time APIs.
+;; Godoc uses the comments in package time, not these.
+
+;; time.now is implemented in assembly.
+
+
+
+
+^{:go/end 370} (go/func ^{:go/linkname "timeSleep time.Sleep"} timeSleep "timeSleep puts the current goroutine to sleep for at least ns nanoseconds.\n" [^int64 ns]
+  (when (<= ns 0)
+    (return))
+
+
+  (let [gp (getg)
+      ^{:line 341} t (.-timer gp)]
+    (when (== t nil)
+      (set! t (new timer))
+      (.init t goroutineReady gp)
+      (when (!= (.-bubble gp) nil)
+        (set! (.-isFake t) true))
+
+      (set! (.-timer gp) t))
+
+    (let [^int64 now (zero int64)]
+      (if [bubble (.-bubble gp)] (!= bubble nil)
+        (set! now (.-now bubble))
+
+        (set! now (nanotime)))
+
+      (let [when (+ now ns)]
+        (when (< when 0) ; check for overflow.
+          (set! when maxWhen))
+
+        (set! (.-sleepWhen gp) when)
+        (if (.-isFake t) (do
+            ;; Call timer.reset in this goroutine, since it's the one in a bubble.
+            ;; We don't need to worry about the timer function running before the goroutine
+            ;; is parked, because time won't advance until we park.
+            (resetForSleep gp nil)
+            (gopark nil nil waitReasonSleep traceBlockSleep 1))
+
+          (gopark resetForSleep nil waitReasonSleep traceBlockSleep 1))))))
+
+
+
+
+
+
+
+^{:go/breaks [5] :go/end 379} (go/func resetForSleep "resetForSleep is called after the goroutine is parked for timeSleep.\nWe can't call timer.reset in timeSleep itself because if this is a short\nsleep and there are many goroutines then the P can wind up running the\ntimer function, goroutineReady, before the goroutine has been parked.\n" ^bool [^{:tag (* g)} gp ^unsafe/Pointer _]
+  (.reset (.-timer gp) (.-sleepWhen gp) 0)
+  true)
+
+
+
+
+
+(go/type timeTimer "A timeTimer is a runtime-allocated time.Timer or time.Ticker\nwith the additional runtime state following it.\nThe runtime state is inaccessible to package time.\n" (struct
+    ^{:line 385 :tag unsafe/Pointer} c ; <-chan time.Time
+    ^{:line 386 :tag bool} init
+    ^{:line 387} timer))
+
+
+
+
+
+
+^{:go/end 415} (go/func ^{:go/linkname "newTimer time.newTimer"} newTimer "newTimer allocates and returns a new time.Timer or time.Ticker (same layout)\nwith the given parameters.\n" ^{:tag (* timeTimer)} [^int64 when ^int64 period ^{:tag (func [^any arg ^uintptr seq ^int64 delay])} f ^any arg ^{:tag (* hchan)} c]
+  (let [t (new timeTimer)]
+    (.init (.-timer t) nil nil)
+    ^{:go/via [timer]} (.trace t "new")
+    (when raceenabled
+      (racerelease (conv unsafe/Pointer (addr (.-timer t)))))
+
+    (when (!= c nil)
+      (lockInit (addr ^{:go/via [timer]} (.-sendLock t)) lockRankTimerSend)
+      (set! ^{:go/via [timer]} (.-isChan t) true)
+      (set! (.-timer c) (addr (.-timer t)))
+      (when (== (.-dataqsiz c) 0)
+        (throw "invalid timer channel: no capacity")))
+
+
+    (when [bubble (.-bubble (getg))] (!= bubble nil)
+      (set! ^{:go/via [timer]} (.-isFake t) true))
+
+    ^{:go/via [timer]} (.modify t when period f arg 0)
+    (set! (.-init t) true)
+    ^{:line 414} t))
+
+
+
+
+
+
+^{:go/end 426} (go/func ^{:go/linkname "stopTimer time.stopTimer"} stopTimer "stopTimer stops a timer.\nIt reports whether t was stopped before being run.\n" ^bool [^{:tag (* timeTimer)} t]
+  (when (and ^{:go/via [timer]} (.-isFake t) (== (.-bubble (getg)) nil))
+    (fatal "stop of synctest timer from outside bubble"))
+
+  ^{:go/via [timer]} (.stop t))
+
+
+
+
+
+
+
+^{:go/end 441} (go/func ^{:go/linkname "resetTimer time.resetTimer"} resetTimer "resetTimer resets an inactive timer, adding it to the timer heap.\n\nReports whether the timer was modified before it was run.\n" ^bool [^{:tag (* timeTimer)} t ^int64 when ^int64 period]
+  (when raceenabled
+    (racerelease (conv unsafe/Pointer (addr (.-timer t)))))
+
+  (when (and ^{:go/via [timer]} (.-isFake t) (== (.-bubble (getg)) nil))
+    (fatal "reset of synctest timer from outside bubble"))
+
+  ^{:go/via [timer]} (.reset t when period))
+
+
+;; Go runtime.
+
+
+^{:go/end 448} (go/func goroutineReady "Ready the goroutine arg.\n" [^any arg ^uintptr _ ^int64 _]
+  (goready (assert (* g) arg) 0))
+
+
+
+
+
+
+
+^{:go/end 472} (go/method addHeap "addHeap adds t to the timers heap.\nThe caller must hold ts.lock or the world must be stopped.\nThe caller must also have checked that t belongs in the heap.\nCallers that are not sure can call t.maybeAdd instead,\nbut note that maybeAdd has different locking requirements.\n" [^{:tag (* timers)} ts ^{:tag (* timer)} t]
+  (assertWorldStoppedOrLockHeld (addr (.-mu ts)))
+  ;; Timers rely on the network poller, so make sure the poller
+  ;; has started.
+  (when (== (.Load netpollInited) 0)
+    (netpollGenericInit))
+
+
+  (when (!= (.-ts t) nil)
+    (throw "ts set in timer"))
+
+  (set! (.-ts t) ts)
+  (set! (.-heap ts) (append (.-heap ts) (lit timerWhen t (.-when t))))
+  (.siftUp ts (- (len (.-heap ts)) 1))
+  (when (== t (.-timer (aget (.-heap ts) 0)))
+    (.updateMinWhenHeap ts)))
+
+
+
+
+
+
+
+^{:go/end 518} (go/method stop "stop stops the timer t. It may be on some other P, so we can't\nactually remove it from the timers heap. We can only mark it as stopped.\nIt will be removed in due course by the P whose heap it is on.\nReports whether the timer was stopped before it was run.\n" ^bool [^{:tag (* timer)} t]
+  (when (.-isChan t)
+    (lock (addr (.-sendLock t))))
+
+
+  (.lock t)
+  (.trace t "stop")
+  (when (!= (bit-and (.-state t) timerHeaped) 0)
+    (set! (.-state t) bit-or timerModified)
+    (when (== (bit-and (.-state t) timerZombie) 0)
+      (set! (.-state t) bit-or timerZombie)
+      (.Add (.-zombies (.-ts t)) 1)))
+
+
+  (let [pending (> (.-when t) 0)]
+    (set! (.-when t) 0)
+
+    (when (.-isChan t)
+      ;; Stop any future sends with stale values.
+      ;; See timer.unlockAndRun.
+      (inc! (.-seq t))
+
+      ;; If there is currently a send in progress,
+      ;; incrementing seq is going to prevent that
+      ;; send from actually happening. That means
+      ;; that we should return true: the timer was
+      ;; stopped, even though t.when may be zero.
+      (when (and (== (.-period t) 0) (> (.Load (.-isSending t)) 0))
+        (set! pending true)))
+
+
+    (.unlock t)
+    (when (.-isChan t)
+      (unlock (addr (.-sendLock t)))
+      (when (timerchandrain (.hchan t))
+        (set! pending true)))
+
+
+
+    ^{:line 517} pending))
+
+
+
+
+^{:go/end 543} (go/method deleteMin "deleteMin removes timer 0 from ts.\nts must be locked.\n" [^{:tag (* timers)} ts]
+  (assertLockHeld (addr (.-mu ts)))
+  (let [t (.-timer (aget (.-heap ts) 0))]
+    (when (!= (.-ts t) ts)
+      (throw "wrong timers"))
+
+    (set! (.-ts t) nil)
+    (let [last (- (len (.-heap ts)) 1)]
+      (when (> last 0)
+        (aset (.-heap ts) 0 (aget (.-heap ts) last)))
+
+      (aset (.-heap ts) last (lit timerWhen))
+      (set! (.-heap ts) (subslice (.-heap ts) _ last))
+      (when (> last 0)
+        (.siftDown ts 0))
+
+      (.updateMinWhenHeap ts)
+      (when (== last 0)
+        ;; If there are no timers, then clearly there are no timerModified timers.
+        (.Store (.-minWhenModified ts) 0)))))
+
+
+
+
+
+
+
+^{:go/end 651} (go/method modify "modify modifies an existing timer.\nThis is called by the netpoll code or time.Ticker.Reset or time.Timer.Reset.\nReports whether the timer was modified before it was run.\nIf f == nil, then t.f, t.arg, and t.seq are not modified.\n" ^bool [^{:tag (* timer)} t ^int64 when ^int64 period ^{:tag (func [^any arg ^uintptr seq ^int64 delay])} f ^any arg ^uintptr seq]
+  (when (<= when 0)
+    (throw "timer when must be positive"))
+
+  (when (< period 0)
+    (throw "timer period must be non-negative"))
+
+
+  (when (.-isChan t)
+    (lock (addr (.-sendLock t))))
+
+
+  (.lock t)
+  (.trace t "modify")
+  (let [oldPeriod (.-period t)]
+    (set! (.-period t) period)
+    (when (!= f nil)
+      (set! (.-f t) f)
+      (set! (.-arg t) arg)
+      (set! (.-seq t) seq))
+
+
+    (let [wake false
+        ^{:line 572} pending (> (.-when t) 0)]
+      (set! (.-when t) when)
+      (when (!= (bit-and (.-state t) timerHeaped) 0)
+        (set! (.-state t) bit-or timerModified)
+        (when (!= (bit-and (.-state t) timerZombie) 0)
+          ;; In the heap but marked for removal (by a Stop).
+          ;; Unmark it, since it has been Reset and will be running again.
+          (.Add (.-zombies (.-ts t)) -1)
+          (set! (.-state t) bit-and-not timerZombie))
+
+        ;; The corresponding heap[i].when is updated later.
+        ;; See comment in type timer above and in timers.adjust below.
+        (when [min (.Load (.-minWhenModified (.-ts t)))] (or (== min 0) (< when min))
+          (set! wake true)
+          ;; Force timerModified bit out to t.astate before updating t.minWhenModified,
+          ;; to synchronize with t.ts.adjust. See comment in adjust.
+          (.Store (.-astate t) (.-state t))
+          (.updateMinWhenModified (.-ts t) when)))
+
+
+
+      (let [add (.needsAdd t)]
+
+        (when (and add (.-isFake t))
+          ;; If this is a bubbled timer scheduled to fire immediately,
+          ;; run it now rather than waiting for the bubble's timer scheduler.
+          ;; This avoids deferring timer execution until after the bubble
+          ;; becomes durably blocked.
+          ;;
+          ;; Don't do this for non-bubbled timers: It isn't necessary,
+          ;; and there may be cases where the runtime executes timers with
+          ;; the expectation the timer func will not run in the current goroutine.
+          ;; Bubbled timers are always created by the time package, and are
+          ;; safe to run in the current goroutine.
+          (let [bubble (.-bubble (getg))]
+            (when (== bubble nil)
+              (throw "fake timer executing with no bubble"))
+
+            (when (and (== (bit-and (.-state t) timerHeaped) 0) (<= when (.-now bubble)))
+              (systemstack ^{:go/end 616} (fn []
+                  (when (.-isChan t)
+                    (unlock (addr (.-sendLock t))))
+
+                  (.unlockAndRun t (.-now bubble) bubble)))
+
+              (return pending))))
+
+
+
+        (when (.-isChan t)
+          ;; Stop any future sends with stale values.
+          ;; See timer.unlockAndRun.
+          (inc! (.-seq t))
+
+          ;; If there is currently a send in progress,
+          ;; incrementing seq is going to prevent that
+          ;; send from actually happening. That means
+          ;; that we should return true: the timer was
+          ;; stopped, even though t.when may be zero.
+          (when (and (== oldPeriod 0) (> (.Load (.-isSending t)) 0))
+            (set! pending true)))
+
+
+        (.unlock t)
+        (when (.-isChan t)
+          (when (timerchandrain (.hchan t))
+            (set! pending true))
+
+          (unlock (addr (.-sendLock t))))
+
+
+        (when add
+          (.maybeAdd t))
+
+        (when wake
+          (wakeNetPoller when))
+
+
+        ^{:line 650} pending))))
+
+
+
+
+^{:go/end 664} (go/method needsAdd "needsAdd reports whether t needs to be added to a timers heap.\nt must be locked.\n" ^bool [^{:tag (* timer)} t]
+  (assertLockHeld (addr (.-mu t)))
+  (let [need (and (== (bit-and (.-state t) timerHeaped) 0) (> (.-when t) 0) ^:go/paren (or (not (.-isChan t)) (> (.-blocked t) 0)))]
+    (if need
+      (.trace t "needsAdd+")
+
+      (.trace t "needsAdd-"))
+
+    ^{:line 663} need))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 730} (go/method maybeAdd "maybeAdd adds t to the local timers heap if it needs to be in a heap.\nThe caller must not hold t's lock nor any timers heap lock.\nThe caller probably just unlocked t, but that lock must be dropped\nin order to acquire a ts.lock, to avoid lock inversions.\n(timers.adjust holds ts.lock while acquiring each t's lock,\nso we cannot hold any t's lock while acquiring ts.lock).\n\nStrictly speaking it *might* be okay to hold t.lock and\nacquire ts.lock at the same time, because we know that\nt is not in any ts.heap, so nothing holding a ts.lock would\nbe acquiring the t.lock at the same time, meaning there\nisn't a possible deadlock. But it is easier and safer not to be\ntoo clever and respect the static ordering.\n(If we don't, we have to change the static lock checking of t and ts.)\n\nConcurrent calls to time.Timer.Reset or blockTimerChan\nmay result in concurrent calls to t.maybeAdd,\nso we cannot assume that t is not in a heap on entry to t.maybeAdd.\n" [^{:tag (* timer)} t]
+  ;; Note: Not holding any locks on entry to t.maybeAdd,
+  ;; so the current g can be rescheduled to a different M and P
+  ;; at any time, including between the ts := assignment and the
+  ;; call to ts.lock. If a reschedule happened then, we would be
+  ;; adding t to some other P's timers, perhaps even a P that the scheduler
+  ;; has marked as idle with no timers, in which case the timer could
+  ;; go unnoticed until long after t.when.
+  ;; Calling acquirem instead of using getg().m makes sure that
+  ;; we end up locking and inserting into the current P's timers.
+  (let [mp (acquirem)
+      ^{:line 695 :tag (* timers)} ts (zero (* timers))]
+    (if (.-isFake t)
+      (let [bubble (.-bubble (getg))]
+        (when (== bubble nil)
+          (throw "invalid timer: fake time but no syncgroup"))
+
+        (set! ts (addr (.-timers bubble))))
+
+      (set! ts (addr (.-timers (.ptr (.-p mp))))))
+
+    (.lock ts)
+    (.cleanHead ts)
+    (.lock t)
+    (.trace t "maybeAdd")
+    (let [when (conv int64 0)
+        ^{:line 710} wake false]
+      (when (.needsAdd t)
+        (when (.-isFake t)
+          ;; Re-randomize timer order.
+          ;; We could do this for all timers, but unbubbled timers are highly
+          ;; unlikely to have the same when.
+          (set! (.-rand t) (cheaprand)))
+
+        (set! (.-state t) bit-or timerHeaped)
+        (set! when (.-when t))
+        (let [wakeTime (.wakeTime ts)]
+          (set! wake (or (== wakeTime 0) (< when wakeTime)))
+          (.addHeap ts t)))
+
+      (.unlock t)
+      (.unlock ts)
+      (releasem mp)
+      (when wake
+        (wakeNetPoller when)))))
+
+
+
+
+
+
+^{:go/end 737} (go/method reset "reset resets the time when a timer should fire.\nIf used for an inactive timer, the timer will become active.\nReports whether the timer was active and was stopped.\n" ^bool [^{:tag (* timer)} t ^int64 when ^int64 period]
+  (.modify t when period nil nil 0))
+
+
+
+
+
+
+^{:go/end 796} (go/method cleanHead "cleanHead cleans up the head of the timer queue. This speeds up\nprograms that create and delete timers; leaving them in the heap\nslows down heap operations.\nThe caller must have locked ts.\n" [^{:tag (* timers)} ts]
+  (.trace ts "cleanHead")
+  (assertLockHeld (addr (.-mu ts)))
+  (let [gp (getg)]
+    (while true
+      (when (== (len (.-heap ts)) 0)
+        (return))
+
+
+      ;; This loop can theoretically run for a while, and because
+      ;; it is holding timersLock it cannot be preempted.
+      ;; If someone is trying to preempt us, just return.
+      ;; We can clean the timers later.
+      (when (.-preemptStop gp)
+        (return))
+
+
+      ;; Delete zombies from tail of heap. It requires no heap adjustments at all,
+      ;; and doing so increases the chances that when we swap out a zombie
+      ;; in heap[0] for the tail of the heap, we'll get a non-zombie timer,
+      ;; shortening this loop.
+      (let [n (len (.-heap ts))]
+        (when [t (.-timer (aget (.-heap ts) (- n 1)))] (!= (bit-and (.Load (.-astate t)) timerZombie) 0)
+          (.lock t)
+          (when (!= (bit-and (.-state t) timerZombie) 0)
+            (set! (.-state t) bit-and-not (bit-or timerHeaped timerZombie timerModified))
+            (set! (.-ts t) nil)
+            (.Add (.-zombies ts) -1)
+            (aset (.-heap ts) (- n 1) (lit timerWhen))
+            (set! (.-heap ts) (subslice (.-heap ts) _ (- n 1))))
+
+          (.unlock t)
+          (continue))
+
+
+        (let [t (.-timer (aget (.-heap ts) 0))]
+          (when (!= (.-ts t) ts)
+            (throw "bad ts"))
+
+
+          (when (== (bit-and (.Load (.-astate t)) (bit-or timerModified timerZombie)) 0)
+            ;; Fast path: head of timers does not need adjustment.
+            (return))
+
+
+          (.lock t)
+          (let [updated (.updateHeap t)]
+            (.unlock t)
+            (when (not updated)
+              ;; Head of timers does not need adjustment.
+              (return))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 827} (go/method take "take moves any timers from src into ts\nand then clears the timer state from src,\nbecause src is being destroyed.\nThe caller must not have locked either timers.\nFor now this is only called when the world is stopped.\n" [^{:tag (* timers)} ts ^{:tag (* timers)} src]
+  (.trace ts "take")
+  (assertWorldStopped)
+  (when (> (len (.-heap src)) 0)
+    ;; The world is stopped, so we ignore the locking of ts and src here.
+    ;; That would introduce a sched < timers lock ordering,
+    ;; which we'd rather avoid in the static ranking.
+    (range [_ tw (.-heap src)]
+      (let [t (.-timer tw)]
+        (set! (.-ts t) nil)
+        (if (!= (bit-and (.-state t) timerZombie) 0)
+          (set! (.-state t) bit-and-not (bit-or timerHeaped timerZombie timerModified))
+          (do
+            (set! (.-state t) bit-and-not timerModified)
+            (.addHeap ts t)))))
+
+
+    (set! (.-heap src) nil)
+    (.Store (.-zombies src) 0)
+    (.Store (.-minWhenHeap src) 0)
+    (.Store (.-minWhenModified src) 0)
+    (.Store (.-len src) 0)
+    (.Store (.-len ts) (conv uint32 (len (.-heap ts))))))
+
+
+
+
+
+
+
+
+^{:go/end 950} (go/method adjust "adjust looks through the timers in ts.heap for\nany timers that have been modified to run earlier, and puts them in\nthe correct place in the heap. While looking for those timers,\nit also moves timers that have been modified to run later,\nand removes deleted timers. The caller must have locked ts.\n" [^{:tag (* timers)} ts ^int64 now ^bool force]
+  (.trace ts "adjust")
+  (assertLockHeld (addr (.-mu ts)))
+  ;; If we haven't yet reached the time of the earliest modified
+  ;; timer, don't do anything. This speeds up programs that adjust
+  ;; a lot of timers back and forth if the timers rarely expire.
+  ;; We'll postpone looking through all the adjusted timers until
+  ;; one would actually expire.
+  (when (not force)
+    (let [first (.Load (.-minWhenModified ts))]
+      (when (or (== first 0) (> first now))
+        (when verifyTimers
+          (.verify ts))
+
+        (return))))
+
+
+
+  ;; minWhenModified is a lower bound on the earliest t.when
+  ;; among the timerModified timers. We want to make it more precise:
+  ;; we are going to scan the heap and clean out all the timerModified bits,
+  ;; at which point minWhenModified can be set to 0 (indicating none at all).
+  ;;
+  ;; Other P's can be calling ts.wakeTime concurrently, and we'd like to
+  ;; keep ts.wakeTime returning an accurate value throughout this entire process.
+  ;;
+  ;; Setting minWhenModified = 0 *before* the scan could make wakeTime
+  ;; return an incorrect value: if minWhenModified < minWhenHeap, then clearing
+  ;; it to 0 will make wakeTime return minWhenHeap (too late) until the scan finishes.
+  ;; To avoid that, we want to set minWhenModified to 0 *after* the scan.
+  ;;
+  ;; Setting minWhenModified = 0 *after* the scan could result in missing
+  ;; concurrent timer modifications in other goroutines; those will lock
+  ;; the specific timer, set the timerModified bit, and set t.when.
+  ;; To avoid that, we want to set minWhenModified to 0 *before* the scan.
+  ;;
+  ;; The way out of this dilemma is to preserve wakeTime a different way.
+  ;; wakeTime is min(minWhenHeap, minWhenModified), and minWhenHeap
+  ;; is protected by ts.lock, which we hold, so we can modify it however we like
+  ;; in service of keeping wakeTime accurate.
+  ;;
+  ;; So we can:
+  ;;
+  ;;	1. Set minWhenHeap = min(minWhenHeap, minWhenModified)
+  ;;	2. Set minWhenModified = 0
+  ;;	   (Other goroutines may modify timers and update minWhenModified now.)
+  ;;	3. Scan timers
+  ;;	4. Set minWhenHeap = heap[0].when
+  ;;
+  ;; That order preserves a correct value of wakeTime throughout the entire
+  ;; operation:
+  ;; Step 1 “locks in” an accurate wakeTime even with minWhenModified cleared.
+  ;; Step 2 makes sure concurrent t.when updates are not lost during the scan.
+  ;; Step 3 processes all modified timer values, justifying minWhenModified = 0.
+  ;; Step 4 corrects minWhenHeap to a precise value.
+  ;;
+  ;; The wakeTime method implementation reads minWhenModified *before* minWhenHeap,
+  ;; so that if the minWhenModified is observed to be 0, that means the minWhenHeap that
+  ;; follows will include the information that was zeroed out of it.
+  ;;
+  ;; Originally Step 3 locked every timer, which made sure any timer update that was
+  ;; already in progress during Steps 1+2 completed and was observed by Step 3.
+  ;; All that locking was too expensive, so now we do an atomic load of t.astate to
+  ;; decide whether we need to do a full lock. To make sure that we still observe any
+  ;; timer update already in progress during Steps 1+2, t.modify sets timerModified
+  ;; in t.astate *before* calling t.updateMinWhenModified. That ensures that the
+  ;; overwrite in Step 2 cannot lose an update: if it does overwrite an update, Step 3
+  ;; will see the timerModified and do a full lock.
+  (.Store (.-minWhenHeap ts) (.wakeTime ts))
+  (.Store (.-minWhenModified ts) 0)
+
+  (let [changed false]
+    (for [i 0] (< i (len (.-heap ts))) (inc! i)
+      (let [tw (addr (aget (.-heap ts) i))
+          ^{:line 908} t (.-timer tw)]
+        (when (!= (.-ts t) ts)
+          (throw "bad ts"))
+
+
+        (when (== (bit-and (.Load (.-astate t)) (bit-or timerModified timerZombie)) 0)
+          ;; Does not need adjustment.
+          (continue))
+
+
+        (.lock t)
+        (switch
+          (case [(== (bit-and (.-state t) timerHeaped) 0)]
+            (badTimer))
+
+          (case [(!= (bit-and (.-state t) timerZombie) 0)]
+            (.Add (.-zombies ts) -1)
+            (set! (.-state t) bit-and-not (bit-or timerHeaped timerZombie timerModified))
+            (let [n (len (.-heap ts))]
+              (aset (.-heap ts) i (aget (.-heap ts) (- n 1)))
+              (aset (.-heap ts) (- n 1) (lit timerWhen))
+              (set! (.-heap ts) (subslice (.-heap ts) _ (- n 1)))
+              (set! (.-ts t) nil)
+              (dec! i)
+              (set! changed true)))
+
+          (case [(!= (bit-and (.-state t) timerModified) 0)]
+            (set! (.-when tw) (.-when t))
+            (set! (.-state t) bit-and-not timerModified)
+            (set! changed true)))
+
+        (.unlock t)))
+
+
+    (when changed
+      (.initHeap ts))
+
+    (.updateMinWhenHeap ts)
+
+    (when verifyTimers
+      (.verify ts))))
+
+
+
+
+
+
+
+
+
+^{:go/end 970} (go/method ^:go/nowritebarrierrec wakeTime "wakeTime looks at ts's timers and returns the time when we\nshould wake up the netpoller. It returns 0 if there are no timers.\nThis function is invoked when dropping a P, so it must run without\nany write barriers.\n" ^int64 [^{:tag (* timers)} ts]
+  ;; Note that the order of these two loads matters:
+  ;; adjust updates minWhen to make it safe to clear minNextWhen.
+  ;; We read minWhen after reading minNextWhen so that
+  ;; if we see a cleared minNextWhen, we are guaranteed to see
+  ;; the updated minWhen.
+  (let [nextWhen (.Load (.-minWhenModified ts))
+      ^{:line 965} when (.Load (.-minWhenHeap ts))]
+    (when (or (== when 0) ^:go/paren (and (!= nextWhen 0) (< nextWhen when)))
+      (set! when nextWhen))
+
+    ^{:line 969} when))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1037} (go/method ^:go/yeswritebarrierrec check "check runs any timers in ts that are ready.\nIf now is not 0 it is the current time.\nIt returns the passed time or the current time if now was passed as 0.\nand the time when the next timer should run or 0 if there is no next timer,\nand reports whether it ran any timers.\nIf the time when the next timer should run is not 0,\nit is always larger than the returned time.\nWe pass now in and out to avoid extra calls of nanotime.\n" [^{:tag (* timers)} ts ^int64 now ^{:tag (* synctestBubble)} bubble] :results [^int64 rnow ^int64 pollUntil ^bool ran]
+  (.trace ts "check")
+  ;; If it's not yet time for the first timer, or the first adjusted
+  ;; timer, then there is nothing to do.
+  (let [next (.wakeTime ts)]
+    (when (== next 0)
+      ;; No timers to run or adjust.
+      (return now 0 false))
+
+
+    (when (== now 0)
+      (set! now (nanotime)))
+
+
+    ;; If this is the local P, and there are a lot of deleted timers,
+    ;; clear them out. We only do this for the local P to reduce
+    ;; lock contention on timersLock.
+    (let [zombies (.Load (.-zombies ts))]
+      (when (< zombies 0)
+        (badTimer))
+
+      (let [force (and (== ts (addr (.-timers (.ptr (.-p (.-m (getg))))))) (> (conv int zombies) (/ (conv int (.Load (.-len ts))) 4)))]
+
+        (when (and (< now next) (not force))
+          ;; Next timer is not ready to run, and we don't need to clear deleted timers.
+          (return now next false))
+
+
+        (.lock ts)
+        (when (> (len (.-heap ts)) 0)
+          (.adjust ts now false)
+          (while (> (len (.-heap ts)) 0)
+            ;; Note that runtimer may temporarily unlock ts.
+            (when [tw (.run ts now bubble)] (!= tw 0)
+              (when (> tw 0)
+                (set! pollUntil tw))
+
+              (break))
+
+            (set! ran true))
+
+
+          ;; Note: Delaying the forced adjustment until after the ts.run
+          ;; (as opposed to calling ts.adjust(now, force) above)
+          ;; is significantly faster under contention, such as in
+          ;; package time's BenchmarkTimerAdjust10000,
+          ;; though we do not fully understand why.
+          (set! force (and (== ts (addr (.-timers (.ptr (.-p (.-m (getg))))))) (> (conv int (.Load (.-zombies ts))) (/ (conv int (.Load (.-len ts))) 4))))
+          (when force
+            (.adjust ts now true)))
+
+
+        (.unlock ts)
+
+        (return now pollUntil ran)))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1084} (go/method ^:go/systemstack run "run examines the first timer in ts. If it is ready based on now,\nit runs the timer and removes or updates it.\nReturns 0 if it ran a timer, -1 if there are no more timers, or the time\nwhen the first timer should run.\nThe caller must have locked ts.\nIf a timer is run, this will temporarily unlock ts.\n" ^int64 [^{:tag (* timers)} ts ^int64 now ^{:tag (* synctestBubble)} bubble]
+  (.trace ts "run")
+  (assertLockHeld (addr (.-mu ts)))
+  (label :Redo
+    (when (== (len (.-heap ts)) 0)
+      (return -1)))
+
+  ^{:go/breaks [10]} (let [tw (aget (.-heap ts) 0)
+      ^{:line 1055} t (.-timer tw)]
+    (when (!= (.-ts t) ts)
+      (throw "bad ts"))
+
+
+    (when (and (== (bit-and (.Load (.-astate t)) (bit-or timerModified timerZombie)) 0) (> (.-when tw) now))
+      ;; Fast path: not ready to run.
+      (return (.-when tw)))
+
+
+    (.lock t)
+    (when (.updateHeap t)
+      (.unlock t)
+      (goto :Redo))
+
+
+    (when (or (== (bit-and (.-state t) timerHeaped) 0) (!= (bit-and (.-state t) timerModified) 0))
+      (badTimer))
+
+
+    (when (> (.-when t) now)
+      ;; Not ready to run.
+      (.unlock t)
+      (return (.-when t)))
+
+
+    (.unlockAndRun t now bubble)
+    (assertLockHeld (addr (.-mu ts))) ; t is unlocked now, but not ts
+    0))
+
+
+
+
+
+
+
+
+^{:go/end 1230} (go/method ^:go/systemstack unlockAndRun "unlockAndRun unlocks and runs the timer t (which must be locked).\nIf t is in a timer set (t.ts != nil), the caller must also have locked the timer set,\nand this call will temporarily unlock the timer set while running the timer function.\nunlockAndRun returns with t unlocked and t.ts (re-)locked.\n" [^{:tag (* timer)} t ^int64 now ^{:tag (* synctestBubble)} bubble]
+  (.trace t "unlockAndRun")
+  (assertLockHeld (addr (.-mu t)))
+  (when (!= (.-ts t) nil)
+    (assertLockHeld (addr (.-mu (.-ts t)))))
+
+  (when raceenabled
+    ;; Note that we are running on a system stack,
+    ;; so there is no chance of getg().m being reassigned
+    ;; out from under us while this function executes.
+    (let [tsLocal (addr (.-timers (.ptr (.-p (.-m (getg))))))]
+      (when (== (.-raceCtx tsLocal) 0)
+        (set! (.-raceCtx tsLocal) (racegostart (+ (abi/FuncPCABIInternal (method-expr (* timers) run)) sys/PCQuantum))))
+
+      (raceacquirectx (.-raceCtx tsLocal) (conv unsafe/Pointer t))))
+
+
+  (when (!= (bit-and (.-state t) (bit-or timerModified timerZombie)) 0)
+    (badTimer))
+
+
+  (let [f (.-f t)
+      ^{:line 1114} arg (.-arg t)
+      ^{:line 1115} seq (.-seq t)
+      ^{:line 1116 :tag int64} next (zero int64)
+      ^{:line 1117} delay (- now (.-when t))]
+    (if (> (.-period t) 0) (do
+        ;; Leave in heap but adjust next time to fire.
+        (set! next (+ (.-when t) (* (.-period t) (+ 1 (/ delay (.-period t))))))
+        (when (< next 0) ; check for overflow.
+          (set! next maxWhen)))
+
+
+      (set! next 0))
+
+    (let [ts (.-ts t)]
+      (set! (.-when t) next)
+      (when (!= (bit-and (.-state t) timerHeaped) 0)
+        (set! (.-state t) bit-or timerModified)
+        (when (== next 0)
+          (set! (.-state t) bit-or timerZombie)
+          (.Add (.-zombies (.-ts t)) 1))
+
+        (.updateHeap t))
+
+
+      (when (and (.-isChan t) (== (.-period t) 0))
+        ;; Tell Stop/Reset that we are sending a value.
+        (when (< (.Add (.-isSending t) 1) 0)
+          (throw "too many concurrent timer firings")))
+
+
+
+      (.unlock t)
+
+      (when raceenabled
+        ;; Temporarily use the current P's racectx for g0.
+        (let [gp (getg)]
+          (when (!= (.-racectx gp) 0)
+            (throw "unexpected racectx"))
+
+          (set! (.-racectx gp) (.-raceCtx (.-timers (.ptr (.-p (.-m gp))))))))
+
+
+      (when (!= ts nil)
+        (.unlock ts))
+
+
+      (when (!= bubble nil)
+        ;; Temporarily use the timer's synctest group for the G running this timer.
+        (let [gp (getg)]
+          (when (!= (.-bubble gp) nil)
+            (throw "unexpected syncgroup set"))
+
+          (set! (.-bubble gp) bubble)
+          (.changegstatus bubble gp _Gdead _Grunning)))
+
+
+      (when (.-isChan t)
+        ;; For a timer channel, we want to make sure that no stale sends
+        ;; happen after a t.stop or t.modify, but we cannot hold t.mu
+        ;; during the actual send (which f does) due to lock ordering.
+        ;; It can happen that we are holding t's lock above, we decide
+        ;; it's time to send a time value (by calling f), grab the parameters,
+        ;; unlock above, and then a t.stop or t.modify changes the timer
+        ;; and returns. At that point, the send needs not to happen after all.
+        ;; The way we arrange for it not to happen is that t.stop and t.modify
+        ;; both increment t.seq while holding both t.mu and t.sendLock.
+        ;; We copied the seq value above while holding t.mu.
+        ;; Now we can acquire t.sendLock (which will be held across the send)
+        ;; and double-check that t.seq is still the seq value we saw above.
+        ;; If not, the timer has been updated and we should skip the send.
+        ;; We skip the send by reassigning f to a no-op function.
+        ;;
+        ;; The isSending field tells t.stop or t.modify that we have
+        ;; started to send the value. That lets them correctly return
+        ;; true meaning that no value was sent.
+        (lock (addr (.-sendLock t)))
+
+        (when (== (.-period t) 0)
+          ;; We are committed to possibly sending a value
+          ;; based on seq, so no need to keep telling
+          ;; stop/modify that we are sending.
+          (when (< (.Add (.-isSending t) -1) 0)
+            (throw "mismatched isSending updates")))
+
+
+
+        (when (!= (.-seq t) seq)
+          (set! f ^{:go/end 1201} (fn [any uintptr int64]))))
+
+
+
+      (f arg seq delay)
+
+      (when (.-isChan t)
+        (unlock (addr (.-sendLock t))))
+
+
+      (when (!= bubble nil)
+        (let [gp (getg)]
+          (.changegstatus bubble gp _Grunning _Gdead)
+          (when raceenabled
+            ;; Establish a happens-before between this timer event and
+            ;; the next synctest.Wait call.
+            (racereleasemergeg gp (.raceaddr bubble)))
+
+          (set! (.-bubble gp) nil)))
+
+
+      (when (!= ts nil)
+        (.lock ts))
+
+
+      (when raceenabled
+        (let [gp (getg)]
+          (set! (.-racectx gp) 0))))))
+
+
+
+
+
+
+^{:go/end 1254} (go/method verify "verify verifies that the timer heap is in a valid state.\nThis is only for debugging, and is only called if verifyTimers is true.\nThe caller must have locked ts.\n" [^{:tag (* timers)} ts]
+  (assertLockHeld (addr (.-mu ts)))
+  (range [i tw (.-heap ts)]
+    (when (== i 0)
+      ;; First timer has no parent.
+      (continue))
+
+
+    ;; The heap is timerHeapN-ary. See siftupTimer and siftdownTimer.
+    (let [p (conv int (/ (conv uint (- i 1)) timerHeapN))]
+      (when (.less tw (aget (.-heap ts) p))
+        (print "bad timer heap at " i ": " p ": " (.-when (aget (.-heap ts) p)) ", " i ": " (.-when tw) "\n")
+        (throw "bad timer heap"))))
+
+
+  (when [n (conv int (.Load (.-len ts)))] (!= (len (.-heap ts)) n)
+    (println "timer heap len" (len (.-heap ts)) "!= atomic len" n)
+    (throw "bad timer heap len")))
+
+
+
+
+
+^{:go/end 1265} (go/method updateMinWhenHeap "updateMinWhenHeap sets ts.minWhenHeap to ts.heap[0].when.\nThe caller must have locked ts or the world must be stopped.\n" [^{:tag (* timers)} ts]
+  (assertWorldStoppedOrLockHeld (addr (.-mu ts)))
+  (if (== (len (.-heap ts)) 0)
+    (.Store (.-minWhenHeap ts) 0)
+
+    (.Store (.-minWhenHeap ts) (.-when (aget (.-heap ts) 0)))))
+
+
+
+
+
+^{:go/end 1279} (go/method updateMinWhenModified "updateMinWhenModified updates ts.minWhenModified to be <= when.\nts need not be (and usually is not) locked.\n" [^{:tag (* timers)} ts ^int64 when]
+  (while true
+    (let [old (.Load (.-minWhenModified ts))]
+      (when (and (!= old 0) (< old when))
+        (return))
+
+      (when (.CompareAndSwap (.-minWhenModified ts) old when)
+        (return)))))
+
+
+
+
+
+
+
+^{:go/end 1303} (go/func timeSleepUntil "timeSleepUntil returns the time when the next timer should fire. Returns\nmaxWhen if there are no timers.\nThis is only called by sysmon and checkdead.\n" ^int64 []
+  (let [next (conv int64 maxWhen)]
+
+    ;; Prevent allp slice changes. This is like retake.
+    (lock (addr allpLock))
+    (range [_ pp allp]
+      (when (== pp nil)
+        ;; This can happen if procresize has grown
+        ;; allp but not yet created new Ps.
+        (continue))
+
+
+      (when [w (.wakeTime (.-timers pp))] (!= w 0)
+        (set! next (min next w))))
+
+
+    (unlock (addr allpLock))
+
+    ^{:line 1302} next))
+
+
+(go/const ^{:val 4} timerHeapN 4)
+
+;; Heap maintenance algorithms.
+;; These algorithms check for slice index errors manually.
+;; Slice index error can happen if the program is using racy
+;; access to timers. We don't want to panic here, because
+;; it will cause the program to crash with a mysterious
+;; "panic holding locks" message. Instead, we panic while not
+;; holding a lock.
+
+
+
+^{:go/end 1337} (go/method siftUp "siftUp puts the timer at position i in the right place\nin the heap by moving it up toward the top of the heap.\n" [^{:tag (* timers)} ts ^int i]
+  (let [heap (.-heap ts)]
+    (when (>= i (len heap))
+      (badTimer))
+
+    (let [tw (aget heap i)]
+      (when (<= (.-when tw) 0)
+        (badTimer))
+
+      (while (> i 0)
+        (let [p (conv int (/ (conv uint (- i 1)) timerHeapN))] ; parent
+          (when (not (.less tw (aget heap p)))
+            (break))
+
+          (aset heap i (aget heap p))
+          (set! i p)))
+
+      (when (!= (.-timer (aget heap i)) (.-timer tw))
+        (aset heap i tw)))))
+
+
+
+
+
+^{:go/end 1376} (go/method siftDown "siftDown puts the timer at position i in the right place\nin the heap by moving it down toward the bottom of the heap.\n" [^{:tag (* timers)} ts ^int i]
+  (let [heap (.-heap ts)
+      ^{:line 1343} n (len heap)]
+    (when (>= i n)
+      (badTimer))
+
+    (when (>= (+ (* i timerHeapN) 1) n)
+      (return))
+
+    (let [tw (aget heap i)]
+      (when (<= (.-when tw) 0)
+        (badTimer))
+
+      (while true
+        (let [leftChild (+ (* i timerHeapN) 1)]
+          (when (>= leftChild n)
+            (break))
+
+          (let [w tw
+              ^{:line 1360} c -1]
+            (range [j tw (subslice heap leftChild (min (+ leftChild timerHeapN) n))]
+              (when (.less tw w)
+                (set! w tw)
+                (set! c (+ leftChild j))))
+
+
+            (when (< c 0)
+              (break))
+
+            (aset heap i (aget heap c))
+            (set! i c))))
+
+      (when (!= (.-timer (aget heap i)) (.-timer tw))
+        (aset heap i tw)))))
+
+
+
+
+
+^{:go/end 1389} (go/method initHeap "initHeap reestablishes the heap order in the slice ts.heap.\nIt takes O(n) time for n=len(ts.heap), not the O(n log n) of n repeated add operations.\n" [^{:tag (* timers)} ts]
+  ;; Last possible element that needs sifting down is parent of last element;
+  ;; last element is len(t)-1; parent of last element is (len(t)-1-1)/timerHeapN.
+  (when (<= (len (.-heap ts)) 1)
+    (return))
+
+  (for [i (conv int (/ (conv uint (- (len (.-heap ts)) 1 1)) timerHeapN))] (>= i 0) (dec! i)
+    (.siftDown ts i)))
+
+
+
+
+
+
+
+^{:go/end 1397} (go/func badTimer "badTimer is called if the timer data structures have been corrupted,\npresumably due to racy use by the program. We panic here rather than\npanicking due to invalid slice access while holding locks.\nSee issue #25686.\n" []
+  (throw "timer data corruption"))
+
+
+;; Timer channels.
+
+
+
+
+^{:go/end 1430} (go/method maybeRunChan "maybeRunChan checks whether the timer needs to run\nto send a value to its associated channel. If so, it does.\nThe timer must not be locked.\n" [^{:tag (* timer)} t ^{:tag (* hchan)} c]
+  (when (and (.-isFake t) (!= (.-bubble (getg)) (.-bubble c)))
+    ;; This should have been checked by the caller, but check just in case.
+    (fatal "synctest timer accessed from outside bubble"))
+
+  (when (!= (bit-and (.Load (.-astate t)) timerHeaped) 0)
+    ;; If the timer is in the heap, the ordinary timer code
+    ;; is in charge of sending when appropriate.
+    (return))
+
+
+  (.lock t)
+  (let [now (nanotime)]
+    (when (.-isFake t)
+      (set! now (.-now (.-bubble (getg)))))
+
+    (when (or (!= (bit-and (.-state t) timerHeaped) 0) (== (.-when t) 0) (> (.-when t) now))
+      (.trace t "maybeRunChan-")
+      ;; Timer in the heap, or not running at all, or not triggered.
+      (.unlock t)
+      (return))
+
+    (.trace t "maybeRunChan+")
+    (systemstack ^{:go/end 1429} (fn []
+        (.unlockAndRun t now (.-bubble c))))))
+
+
+
+
+
+
+
+^{:go/end 1470} (go/func blockTimerChan "blockTimerChan is called when a channel op has decided to block on c.\nThe caller holds the channel lock for c and possibly other channels.\nblockTimerChan makes sure that c is in a timer heap,\nadding it if needed.\n" [^{:tag (* hchan)} c]
+  (let [t (.-timer c)]
+    (when (and (.-isFake t) (!= (.-bubble c) (.-bubble (getg))))
+      ;; This should have been checked by the caller, but check just in case.
+      (fatal "synctest timer accessed from outside bubble"))
+
+
+    (.lock t)
+    (.trace t "blockTimerChan")
+    (when (not (.-isChan t))
+      (badTimer))
+
+
+    (inc! (.-blocked t))
+
+    ;; If this is the first enqueue after a recent dequeue,
+    ;; the timer may still be in the heap but marked as a zombie.
+    ;; Unmark it in this case, if the timer is still pending.
+    (when (and (!= (bit-and (.-state t) timerHeaped) 0) (!= (bit-and (.-state t) timerZombie) 0) (> (.-when t) 0))
+      (set! (.-state t) bit-and-not timerZombie)
+      (.Add (.-zombies (.-ts t)) -1))
+
+
+    ;; t.maybeAdd must be called with t unlocked,
+    ;; because it needs to lock t.ts before t.
+    ;; Then it will do nothing if t.needsAdd(state) is false.
+    ;; Check that now before the unlock,
+    ;; avoiding the extra lock-lock-unlock-unlock
+    ;; inside maybeAdd when t does not need to be added.
+    (let [add (.needsAdd t)]
+      (.unlock t)
+      (when add
+        (.maybeAdd t)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1494} (go/func unblockTimerChan "unblockTimerChan is called when a channel op that was blocked on c\nis no longer blocked. Every call to blockTimerChan must be paired with\na call to unblockTimerChan.\nThe caller holds the channel lock for c and possibly other channels.\nunblockTimerChan removes c from the timer heap when nothing is\nblocked on it anymore.\n" [^{:tag (* hchan)} c]
+  (let [t (.-timer c)]
+    (.lock t)
+    (.trace t "unblockTimerChan")
+    (when (or (not (.-isChan t)) (== (.-blocked t) 0))
+      (badTimer))
+
+    (dec! (.-blocked t))
+    (when (and (== (.-blocked t) 0) (!= (bit-and (.-state t) timerHeaped) 0) (== (bit-and (.-state t) timerZombie) 0))
+      ;; Last goroutine that was blocked on this timer.
+      ;; Mark for removal from heap but do not clear t.when,
+      ;; so that we know what time it is still meant to trigger.
+      (set! (.-state t) bit-or timerZombie)
+      (.Add (.-zombies (.-ts t)) 1))
+
+    (.unlock t)))

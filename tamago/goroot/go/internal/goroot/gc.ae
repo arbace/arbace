@@ -1,0 +1,138 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.internal.goroot) (go/file "gc.go" :build ["//go:build gc"] :imports [
+
+
+    ^{:line 10} [os "os"]
+    ^{:line 11} [exec "os/exec"]
+    ^{:line 12} [filepath "path/filepath"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [sync "sync"]])
+
+
+
+
+^{:go/end 38} (go/func IsStandardPackage "IsStandardPackage reports whether path is a standard package,\ngiven goroot and compiler. readDir accepts OS filesystem paths.\n" ^bool [^{:tag (func [string] [(slice os/DirEntry) error])} readDir ^string goroot ^string compiler ^string path]
+  (switch compiler
+    (case ["gc"]
+      (let [dir (filepath/Join goroot "src" path)
+          (values dirents err) (readDir dir)]
+        (when (!= err nil)
+          (return false))
+
+        (range [_ dirent dirents]
+          (when (strings/HasSuffix (.Name dirent) ".go")
+            (return true)))
+
+
+        (return false)))
+    (case ["gccgo"]
+      (return (.isStandard gccgoSearch path)))
+    (default
+      (panic (+ "unknown compiler " compiler)))))
+
+
+
+
+(go/type gccgoDirs "gccgoDirs holds the gccgo search directories.\n" (struct
+    ^{:line 42 :tag sync/Once} once
+    ^{:line 43 :tag (slice string)} dirs))
+
+
+
+
+(go/var ^{:tag gccgoDirs :doc "gccgoSearch is used to check whether a gccgo package exists in the\nstandard library.\n"} gccgoSearch)
+
+
+^{:go/end 104} (go/method init "init finds the gccgo search directories. If this fails it leaves dirs == nil.\n" [^{:tag (* gccgoDirs)} gd]
+  (let [gccgo (os/Getenv "GCCGO")]
+    (when (== gccgo "")
+      (set! gccgo "gccgo"))
+
+    (let [(values bin err) (exec/LookPath gccgo)]
+      (when (!= err nil)
+        (return))
+
+
+      (let [(values allDirs ^:assign err) (.Output (exec/Command bin "-print-search-dirs"))]
+        (when (!= err nil)
+          (return))
+
+        (let [(values versionB ^:assign err) (.Output (exec/Command bin "-dumpversion"))]
+          (when (!= err nil)
+            (return))
+
+          (let [version (strings/TrimSpace (conv string versionB))
+              (values machineB ^:assign err) (.Output (exec/Command bin "-dumpmachine"))]
+            (when (!= err nil)
+              (return))
+
+            (let [machine (strings/TrimSpace (conv string machineB))
+
+                ^{:line 76} dirsEntries (strings/Split (conv string allDirs) "\n")
+                ^:const ^{:line 77 :val "libraries: ="} prefix "libraries: ="
+                ^{:line 78 :tag (slice string)} dirs (zero (slice string))]
+              (range [_ dirEntry dirsEntries]
+                (when [(values after ok) (strings/CutPrefix dirEntry prefix)] ok
+                  (set! dirs (filepath/SplitList after))
+                  (break)))
+
+
+              (when (== (len dirs) 0)
+                (return))
+
+
+              (let [^{:tag (slice string)} lastDirs (zero (slice string))]
+                (range [_ dir dirs]
+                  (let [goDir (filepath/Join dir "go" version)]
+                    (when [(values fi err) (os/Stat goDir)] (and (== err nil) (.IsDir fi))
+                      (set! (.-dirs gd) (append (.-dirs gd) goDir))
+                      (set! goDir (filepath/Join goDir machine))
+                      (when [(set! (values fi err) (os/Stat goDir))] (and (== err nil) (.IsDir fi))
+                        (set! (.-dirs gd) (append (.-dirs gd) goDir))))
+
+
+                    (when [(values fi err) (os/Stat dir)] (and (== err nil) (.IsDir fi))
+                      (set! lastDirs (append lastDirs dir)))))
+
+
+                (set! (.-dirs gd) (append (.-dirs gd) (spread lastDirs)))))))))))
+
+
+
+^{:go/end 139} (go/method isStandard "isStandard reports whether path is a standard library for gccgo.\n" ^bool [^{:tag (* gccgoDirs)} gd ^string path]
+  ;; Quick check: if the first path component has a '.', it's not
+  ;; in the standard library. This skips most GOPATH directories.
+  ^{:go/breaks [[8 138]]} (let [i (strings/Index path "/")]
+    (when (< i 0)
+      (set! i (len path)))
+
+    (when (strings/Contains (subslice path _ i) ".")
+      (return false))
+
+
+    (when (== path "unsafe")
+      ;; Special case.
+      (return true))
+
+
+    (.Do (.-once gd) (.-init gd))
+    (when (== (.-dirs gd) nil)
+      ;; We couldn't find the gccgo search directories.
+      ;; Best guess, since the first component did not contain
+      ;; '.', is that this is a standard library package.
+      (return true))
+
+
+    (range [_ dir (.-dirs gd)]
+      (let [full (+ (filepath/Join dir path) ".gox")]
+        (when [(values fi err) (os/Stat full)] (and (== err nil) (not (.IsDir fi)))
+          (return true))))
+
+
+
+    false))

@@ -1,0 +1,1163 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements unsigned multi-precision integers (natural
+;; numbers). They are the building blocks for the implementation
+;; of signed integers, rationals, and floating-point numbers.
+;;
+;; Caution: This implementation relies on the function "alias"
+;;          which assumes that (nat) slice capacities are never
+;;          changed (no 3-operand slice expressions). If that
+;;          changes, alias needs to be updated for correctness.
+
+(in-ns 'go.math.big) (go/file "nat.go" :imports [
+
+
+    ^{:line 17} [byteorder "internal/byteorder"]
+    ^{:line 18} [bits "math/bits"]
+    ^{:line 19} [rand "math/rand"]
+    ^{:line 20} [slices "slices"]
+    ^{:line 21} [sync "sync"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type nat "An unsigned integer x of the form\n\n\tx = x[n-1]*_B^(n-1) + x[n-2]*_B^(n-2) + ... + x[1]*_B + x[0]\n\nwith 0 <= x[i] < _B and 0 <= i < n is stored in a slice of length n,\nwith the digits x[i] as the slice elements.\n\nA number is normalized if the slice contains no leading 0 digits.\nDuring arithmetic operations, denormalized values may occur but are\nalways normalized before returning the final result. The normalized\nrepresentation of 0 is the empty or nil slice (length = 0).\n" (slice Word))
+
+(go/var
+  ^{:line 38} [natOne (lit nat 1)]
+  ^{:line 39} [natTwo (lit nat 2)]
+  ^{:line 40} [natFive (lit nat 5)]
+  ^{:line 41} [natTen (lit nat 10)])
+
+
+^{:go/end 46} (go/method String ^string [^nat z]
+  (+ "0x" (conv string (.itoa z false 16))))
+
+
+^{:go/end 54} (go/method norm ^nat [^nat z]
+  (let [i (len z)]
+    (while (and (> i 0) (== (aget z (- i 1)) 0))
+      (dec! i))
+
+    (subslice z 0 i)))
+
+
+^{:go/end 68} (go/method make ^nat [^nat z ^int n]
+  (when (<= n (cap z))
+    (return (subslice z _ n))) ; reuse z
+
+  (when (== n 1)
+    ;; Most nats start small and stay that way; don't over-allocate.
+    (return (make nat 1)))
+
+  ;; Choosing a good value for e has significant performance impact
+  ;; because it increases the chance that a value can be reused.
+  (let [^:const ^{:val 4} e 4] ; extra capacity
+    (make nat n (+ n e))))
+
+
+^{:go/end 77} (go/method setWord ^nat [^nat z ^Word x]
+  (when (== x 0)
+    (return (subslice z _ 0)))
+
+  (set! z (.make z 1))
+  (aset z 0 x)
+  ^{:line 76} z)
+
+
+^{:go/end 89} (go/method setUint64 ^nat [^nat z ^uint64 x]
+  ;; single-word value
+  (when [w (conv Word x)] (== (conv uint64 w) x)
+    (return (.setWord z w)))
+
+  ;; 2-word value
+  (set! z (.make z 2))
+  (aset z 1 (conv Word (>> x 32)))
+  (aset z 0 (conv Word x))
+  ^{:line 88} z)
+
+
+^{:go/end 95} (go/method set ^nat [^nat z ^nat x]
+  (set! z (.make z (len x)))
+  (copy z x)
+  ^{:line 94} z)
+
+
+^{:go/end 121} (go/method add ^nat [^nat z ^nat x ^nat y]
+  (let [m (len x)
+      ^{:line 99} n (len y)]
+
+    (switch
+      (case [(< m n)]
+        (return (.add z y x)))
+      (case [(== m 0)]
+        ;; n == 0 because m >= n; result is 0
+        (return (subslice z _ 0)))
+      (case [(== n 0)]
+        ;; result is x
+        (return (.set z x))))
+
+    ;; m > 0
+
+    (set! z (.make z (+ m 1)))
+    (let [c (addVV (subslice z _ n) (subslice x _ n) (subslice y _ n))]
+      (when (> m n)
+        (set! c (addVW (subslice z n m) (subslice x n) c)))
+
+      (aset z m c)
+
+      (.norm z))))
+
+
+^{:go/end 149} (go/method sub ^nat [^nat z ^nat x ^nat y]
+  (let [m (len x)
+      ^{:line 125} n (len y)]
+
+    (switch
+      (case [(< m n)]
+        (panic "underflow"))
+      (case [(== m 0)]
+        ;; n == 0 because m >= n; result is 0
+        (return (subslice z _ 0)))
+      (case [(== n 0)]
+        ;; result is x
+        (return (.set z x))))
+
+    ;; m > 0
+
+    (set! z (.make z m))
+    (let [c (subVV (subslice z _ n) (subslice x _ n) (subslice y _ n))]
+      (when (> m n)
+        (set! c (subVW (subslice z n) (subslice x n) c)))
+
+      (when (!= c 0)
+        (panic "underflow"))
+
+
+      (.norm z))))
+
+
+^{:go/end 176} (go/method cmp [^nat x ^nat y] :results [^int r]
+  (let [m (len x)
+      ^{:line 153} n (len y)]
+    (when (or (!= m n) (== m 0))
+      (switch
+        (case [(< m n)]
+          (set! r -1))
+        (case [(> m n)]
+          (set! r 1)))
+
+      (return))
+
+
+    (let [i (- m 1)]
+      (while (and (> i 0) (== (aget x i) (aget y i)))
+        (dec! i))
+
+
+      (switch
+        (case [(< (aget x i) (aget y i))]
+          (set! r -1))
+        (case [(> (aget x i) (aget y i))]
+          (set! r 1)))
+
+      (return))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 218} (go/method montgomery "montgomery computes z mod m = x*y*2**(-n*_W) mod m,\nassuming k = -1/m mod 2**_W.\nz is used for storing the result which is returned;\nz must not alias x, y or m.\nSee Gueron, \"Efficient Software Implementations of Modular Exponentiation\".\nhttps://eprint.iacr.org/2011/239.pdf\nIn the terminology of that paper, this is an \"Almost Montgomery Multiplication\":\nx and y are required to satisfy 0 <= z < 2**(n*_W) and then the result\nz is guaranteed to satisfy 0 <= z < 2**(n*_W), but it may not be < m.\n" ^nat [^nat z ^nat x ^nat y ^nat m ^Word k ^int n]
+  ;; This code assumes x, y, m are all the same length, n.
+  ;; (required by addMulVVW and the for loop).
+  ;; It also assumes that x, y are already reduced mod m,
+  ;; or else the result will not be properly reduced.
+  (when (or (!= (len x) n) (!= (len y) n) (!= (len m) n))
+    (panic "math/big: mismatched montgomery number lengths"))
+
+  (set! z (.make z (* n 2)))
+  (clear z)
+  (let [^Word c (zero Word)]
+    (for [i 0] (< i n) (inc! i)
+      (let [d (aget y i)
+          ^{:line 200} c2 (addMulVVWW (subslice z i (+ n i)) (subslice z i (+ n i)) x d 0)
+          ^{:line 201} t (* (aget z i) k)
+          ^{:line 202} c3 (addMulVVWW (subslice z i (+ n i)) (subslice z i (+ n i)) m t 0)
+          ^{:line 203} cx (+ c c2)
+          ^{:line 204} cy (+ cx c3)]
+        (aset z (+ n i) cy)
+        (if (or (< cx c2) (< cy c3))
+          (set! c 1)
+
+          (set! c 0))))
+
+
+    (if (!= c 0)
+      (subVV (subslice z _ n) (subslice z n) m)
+
+      (copy (subslice z _ n) (subslice z n)))
+
+    (subslice z _ n)))
+
+
+
+
+
+
+
+
+^{:go/end 228} (go/func alias "alias reports whether x and y share the same base array.\n\nNote: alias assumes that the capacity of underlying arrays\nis never changed for nat values; i.e. that there are\nno 3-operand slice expressions in this code (or worse,\nreflect-based operations to the same effect).\n" ^bool [^nat x ^nat y]
+  (and (> (cap x) 0) (> (cap y) 0) (== (addr (aget (subslice x 0 (cap x)) (- (cap x) 1))) (addr (aget (subslice y 0 (cap y)) (- (cap y) 1))))))
+
+
+
+
+
+^{:go/end 241} (go/func addTo "addTo implements z += x; z must be long enough.\n(we don't use nat.add because we need z to stay the same\nslice, and we don't need to normalize z after each addition)\n" [^nat z ^nat x]
+  (when [n (len x)] (> n 0)
+    (when [c (addVV (subslice z _ n) (subslice z _ n) (subslice x _ n))] (!= c 0)
+      (when (< n (len z))
+        (addVW (subslice z n) (subslice z n) c)))))
+
+
+
+
+
+
+
+
+^{:go/end 266} (go/method mulRange "mulRange computes the product of all the unsigned integers in the\nrange [a, b] inclusively. If a > b (empty range), the result is 1.\nThe caller may pass stk == nil to request that mulRange obtain and release one itself.\n" ^nat [^nat z ^{:tag (* stack)} stk ^uint64 a ^uint64 b]
+  (switch
+    (case [(== a 0)]
+      ;; cut long ranges short (optimization)
+      (return (.setUint64 z 0)))
+    (case [(> a b)]
+      (return (.setUint64 z 1)))
+    (case [(== a b)]
+      (return (.setUint64 z a)))
+    (case [(== (+ a 1) b)]
+      (return (.mul z stk (.setUint64 (conv nat nil) a) (.setUint64 (conv nat nil) b)))))
+
+
+  (when (== stk nil)
+    (set! stk (getStack))
+    (defer (.free stk)))
+
+
+  (let [m (+ a (/ (- b a) 2))] ; avoid overflow
+    (.mul z stk (.mulRange (conv nat nil) stk a m) (.mulRange (conv nat nil) stk (+ m 1) b))))
+
+
+
+
+
+(go/type stackInner "A stackInner provides temporary storage for complex calculations\nsuch as multiplication and division.\nIt should only be used by [stack], below.\n" (struct
+    ^{:line 272 :tag (slice Word)} w))
+
+
+(go/var ^sync/Pool stackPool) ; pool of *stackInner
+
+
+
+^{:go/end 285} (go/func getStackInner "getStack returns a temporary stack.\nThe caller must call [stack.free] to give up use of the stack when finished.\n" ^{:tag (* stackInner)} []
+  (let [(values s _) (assert (* stackInner) (.Get stackPool))]
+    (when (== s nil)
+      (set! s (new stackInner)))
+
+    ^{:line 284} s))
+
+
+
+^{:go/end 291} (go/method free "free returns the stack for use by another calculation.\n" [^{:tag (* stackInner)} s]
+  (set! (.-w s) (subslice (.-w s) _ 0))
+  (.Put stackPool s))
+
+
+
+
+
+^{:go/end 298} (go/method save "save returns the current stack pointer.\nA future call to restore with the same value\nfrees any temporaries allocated on the stack after the call to save.\n" ^int [^{:tag (* stackInner)} s]
+  (len (.-w s)))
+
+
+
+
+
+
+
+
+
+^{:go/end 309} (go/method restore "restore restores the stack pointer to n.\nIt is almost always invoked as\n\n\tdefer stk.restore(stk.save())\n\nwhich makes sure to pop any temporaries allocated in the current function\nfrom the stack before returning.\n" [^{:tag (* stackInner)} s ^int n]
+  (set! (.-w s) (subslice (.-w s) _ n)))
+
+
+
+^{:go/end 322} (go/method nat "nat returns a nat of n words, allocated on the stack.\n" ^nat [^{:tag (* stackInner)} s ^int n]
+  (let [nr (bit-and-not (+ n 3) 3) ; round up to multiple of 4
+      ^{:line 314} off (len (.-w s))]
+    (set! (.-w s) (^{:inst [(slice Word) Word]} slices/Grow (.-w s) nr))
+    (set! (.-w s) (subslice (.-w s) _ (+ off nr)))
+    (let [x (subslice (.-w s) off (+ off n) (+ off n))]
+      (when (> n 0)
+        (aset x 0 0xfedcb))
+
+      ^{:line 321} x)))
+
+
+
+
+
+
+
+
+
+(go/type stack "A stack provides temporary storage for complex calculations\nsuch as multiplication and division.\nIn general, if a function takes a *stack, it expects a non-nil *stack.\nHowever, certain functions may allow passing a nil *stack instead,\nso that they can handle trivial stack-free cases without forcing the\ncaller to obtain and free a stack that will be unused. These functions\ndocument that they accept a nil *stack in their doc comments.\n" (struct
+    ^{:line 332 :tag (* stackInner)} si))
+
+
+^{:go/end 337} (go/func getStack ^{:tag (* stack)} []
+  (addr (lit stack)))
+
+^{:go/end 343} (go/method free [^{:tag (* stack)} s]
+  (let [si (.-si s)]
+    (when (!= si nil)
+      (.free si))))
+
+
+^{:go/end 350} (go/method save ^int [^{:tag (* stack)} s]
+  (let [si (.-si s)]
+    (when (== si nil)
+      (return 0))
+
+    (.save si)))
+
+^{:go/end 357} (go/method restore [^{:tag (* stack)} s ^int n]
+  (let [si (.-si s)]
+    (when (== si nil)
+      (return))
+
+    (.restore si n)))
+
+^{:go/end 379} (go/method nat ^nat [^{:tag (* stack)} s ^int n]
+  (let [si (.-si s)]
+    (when (== si nil)
+      (when (<= n 4)
+        ;; For small allocations, just ask the allocator.
+        ;; It isn't worth pooling these allocations.
+        ;; See issue 73999.
+        (let [r (^{:inst [nat Word]} slices/Grow (conv nat nil) n)]
+          (set! r (subslice r _ n))
+          (when (> n 0)
+            (aset r 0 0xabcdef))
+
+          (return r)))
+
+      (set! (values si _) (assert (* stackInner) (.Get stackPool)))
+      (when (== si nil)
+        (set! si (new stackInner)))
+
+      (set! (.-si s) si))
+
+    (.nat si n)))
+
+
+
+
+^{:go/breaks [[5 400]] :go/end 401} (go/method bitLen "bitLen returns the length of x in bits.\nUnlike most methods, it works even if x is not normalized.\n" ^int [^nat x]
+  ;; This function is used in cryptographic operations. It must not leak
+  ;; anything but the Int's sign and bit size through side-channels. Any
+  ;; changes must be reviewed by a security expert.
+  (when [i (- (len x) 1)] (>= i 0)
+    ;; bits.Len uses a lookup table for the low-order bits on some
+    ;; architectures. Neutralize any input-dependent behavior by setting all
+    ;; bits after the first one bit.
+    (let [top (conv uint (aget x i))]
+      (set! top bit-or (>> top 1))
+      (set! top bit-or (>> top 2))
+      (set! top bit-or (>> top 4))
+      (set! top bit-or (>> top 8))
+      (set! top bit-or (>> top 16))
+      (set! top bit-or (>> (>> top 16) 16)) ; ">> 32" doesn't compile on 32-bit architectures
+      (return (+ (* i _W) (bits/Len top)))))
+
+  0)
+
+
+
+
+^{:go/end 415} (go/method trailingZeroBits "trailingZeroBits returns the number of consecutive least significant zero\nbits of x.\n" ^uint [^nat x]
+  (when (== (len x) 0)
+    (return 0))
+
+  (let [^uint i (zero uint)]
+    (while (== (aget x i) 0)
+      (inc! i))
+
+    ;; x[i] != 0
+    (+ (* i _W) (conv uint (bits/TrailingZeros (conv uint (aget x i)))))))
+
+
+
+^{:go/end 427} (go/method isPow2 "isPow2 returns i, true when x == 2**i and 0, false otherwise.\n" [^nat x] :results [uint bool]
+  (let [^uint i (zero uint)]
+    (while (== (aget x i) 0)
+      (inc! i))
+
+    (when (and (== i (- (conv uint (len x)) 1)) (== (bit-and (aget x i) (- (aget x i) 1)) 0))
+      (return (+ (* i _W) (conv uint (bits/TrailingZeros (conv uint (aget x i))))) true))
+
+    (return 0 false)))
+
+
+^{:go/end 431} (go/func same ^bool [^nat x ^nat y]
+  (and (== (len x) (len y)) (> (len x) 0) (== (addr (aget x 0)) (addr (aget y 0)))))
+
+
+
+^{:go/end 461} (go/method lsh "z = x << s\n" ^nat [^nat z ^nat x ^uint s]
+  (when (== s 0)
+    (when (same z x)
+      (return z))
+
+    (when (not (alias z x))
+      (return (.set z x))))
+
+
+
+  (let [m (len x)]
+    (when (== m 0)
+      (return (subslice z _ 0)))
+
+    ;; m > 0
+
+    (let [n (+ m (conv int (/ s _W)))]
+      (set! z (.make z (+ n 1)))
+      (if [(set! s % _W)] (== s 0) (do
+          (copy (subslice z (- n m) n) x)
+          (aset z n 0))
+
+        (aset z n (lshVU (subslice z (- n m) n) x s)))
+
+      (clear (subslice z 0 (- n m)))
+
+      (.norm z))))
+
+
+
+^{:go/end 489} (go/method rsh "z = x >> s\n" ^nat [^nat z ^nat x ^uint s]
+  (when (== s 0)
+    (when (same z x)
+      (return z))
+
+    (when (not (alias z x))
+      (return (.set z x))))
+
+
+
+  (let [m (len x)
+      ^{:line 475} n (- m (conv int (/ s _W)))]
+    (when (<= n 0)
+      (return (subslice z _ 0)))
+
+    ;; n > 0
+
+    (set! z (.make z n))
+    (if [(set! s % _W)] (== s 0)
+      (copy z (subslice x (- m n)))
+
+      (rshVU z (subslice x (- m n)) s))
+
+
+    (.norm z)))
+
+
+^{:go/end 518} (go/method setBit ^nat [^nat z ^nat x ^uint i ^uint b]
+  (let [j (conv int (/ i _W))
+      ^{:line 493} m (<< (conv Word 1) (% i _W))
+      ^{:line 494} n (len x)]
+    (switch b
+      (case [0]
+        (set! z (.make z n))
+        (copy z x)
+        (when (>= j n)
+          ;; no need to grow
+          (return z))
+
+        (set! (aget z j) bit-and-not m)
+        (return (.norm z)))
+      (case [1]
+        (if (>= j n) (do
+            (set! z (.make z (+ j 1)))
+            (clear (subslice z n)))
+
+          (set! z (.make z n)))
+
+        (copy z x)
+        (set! (aget z j) bit-or m)
+        ;; no need to normalize
+        (return z)))
+
+    (panic "set bit is not 0 or 1")))
+
+
+
+^{:go/end 528} (go/method bit "bit returns the value of the i'th bit, with lsb == bit 0.\n" ^uint [^nat x ^uint i]
+  (let [j (/ i _W)]
+    (when (>= j (conv uint (len x)))
+      (return 0))
+
+    ;; 0 <= j < len(x)
+    (conv uint (bit-and (>> (aget x j) (% i _W)) 1))))
+
+
+
+
+^{:go/end 550} (go/method sticky "sticky returns 1 if there's a 1 bit within the\ni least significant bits, otherwise it returns 0.\n" ^uint [^nat x ^uint i]
+  ^{:go/breaks [[5 549]]} (let [j (/ i _W)]
+    (when (>= j (conv uint (len x)))
+      (when (== (len x) 0)
+        (return 0))
+
+      (return 1))
+
+    ;; 0 <= j < len(x)
+    (range [_ x (subslice x _ j)]
+      (when (!= x 0)
+        (return 1)))
+
+
+    (when (!= (<< (aget x j) (- _W (% i _W))) 0)
+      (return 1))
+
+    0))
+
+
+^{:go/end 566} (go/method and ^nat [^nat z ^nat x ^nat y]
+  (let [m (len x)
+      ^{:line 554} n (len y)]
+    (when (> m n)
+      (set! m n))
+
+    ;; m <= n
+
+    (set! z (.make z m))
+    (for [i 0] (< i m) (inc! i)
+      (aset z i (bit-and (aget x i) (aget y i))))
+
+
+    (.norm z)))
+
+
+
+^{:go/end 580} (go/method trunc "trunc returns z = x mod 2ⁿ.\n" ^nat [^nat z ^nat x ^uint n]
+  (let [w (/ (- (+ n _W) 1) _W)]
+    (when (< (conv uint (len x)) w)
+      (return (.set z x)))
+
+    (set! z (.make z (conv int w)))
+    (copy z x)
+    (when (!= (% n _W) 0)
+      (set! (aget z (- (len z) 1)) bit-and (- ^Word (<< 1 (% n _W)) 1)))
+
+    (.norm z)))
+
+
+^{:go/end 597} (go/method andNot ^nat [^nat z ^nat x ^nat y]
+  (let [m (len x)
+      ^{:line 584} n (len y)]
+    (when (> n m)
+      (set! n m))
+
+    ;; m >= n
+
+    (set! z (.make z m))
+    (for [i 0] (< i n) (inc! i)
+      (aset z i (bit-and-not (aget x i) (aget y i))))
+
+    (copy (subslice z n m) (subslice x n m))
+
+    (.norm z)))
+
+
+^{:go/end 616} (go/method or ^nat [^nat z ^nat x ^nat y]
+  (let [m (len x)
+      ^{:line 601} n (len y)
+      ^{:line 602} s x]
+    (when (< m n)
+      (set! (values n m) (values m n))
+      (set! s y))
+
+    ;; m >= n
+
+    (set! z (.make z m))
+    (for [i 0] (< i n) (inc! i)
+      (aset z i (bit-or (aget x i) (aget y i))))
+
+    (copy (subslice z n m) (subslice s n m))
+
+    (.norm z)))
+
+
+^{:go/end 635} (go/method xor ^nat [^nat z ^nat x ^nat y]
+  (let [m (len x)
+      ^{:line 620} n (len y)
+      ^{:line 621} s x]
+    (when (< m n)
+      (set! (values n m) (values m n))
+      (set! s y))
+
+    ;; m >= n
+
+    (set! z (.make z m))
+    (for [i 0] (< i n) (inc! i)
+      (aset z i (bit-xor (aget x i) (aget y i))))
+
+    (copy (subslice z n m) (subslice s n m))
+
+    (.norm z)))
+
+
+
+
+^{:go/end 671} (go/method random "random creates a random integer in [0..limit), using the space in z if\npossible. n is the bit length of limit.\n" ^nat [^nat z ^{:tag (* rand/Rand)} rand ^nat limit ^int n]
+  (when (alias z limit)
+    (set! z nil)) ; z is an alias for limit - cannot reuse
+
+  (set! z (.make z (len limit)))
+
+  (let [bitLengthOfMSW (conv uint (% n _W))]
+    (when (== bitLengthOfMSW 0)
+      (set! bitLengthOfMSW _W))
+
+    (let [mask (conv Word (- ^Word (<< 1 bitLengthOfMSW) 1))]
+
+      (while true
+        (switch _W
+          (case [32]
+            (range [i z]
+              (aset z i (conv Word (.Uint32 rand)))))
+
+          (case [64]
+            (range [i z]
+              (aset z i (bit-or (conv Word (.Uint32 rand)) (<< (conv Word (.Uint32 rand)) 32)))))
+
+          (default
+            (panic "unknown word size")))
+
+        (set! (aget z (- (len limit) 1)) bit-and mask)
+        (when (< (.cmp z limit) 0)
+          (break)))
+
+
+
+      (.norm z))))
+
+
+
+
+
+^{:go/end 795} (go/method expNN "If m != 0 (i.e., len(m) != 0), expNN sets z to x**y mod m;\notherwise it sets z to x**y. The result is the value of z.\nThe caller may pass stk == nil to request that expNN obtain and release one itself.\n" ^nat [^nat z ^{:tag (* stack)} stk ^nat x ^nat y ^nat m ^bool slow]
+  (when (or (alias z x) (alias z y))
+    ;; We cannot allow in-place modification of x or y.
+    (set! z nil))
+
+
+  ;; x**y mod 1 == 0
+  (when (and (== (len m) 1) (== (aget m 0) 1))
+    (return (.setWord z 0)))
+
+  ;; m == 0 || m > 1
+
+  ;; x**0 == 1
+  (when (== (len y) 0)
+    (return (.setWord z 1)))
+
+  ;; y > 0
+
+  ;; 0**y = 0
+  (when (== (len x) 0)
+    (return (.setWord z 0)))
+
+  ;; x > 0
+
+  ;; 1**y = 1
+  (when (and (== (len x) 1) (== (aget x 0) 1))
+    (return (.setWord z 1)))
+
+  ;; x > 1
+
+  ;; x**1 == x
+  (when (and (== (len y) 1) (== (aget y 0) 1) (== (len m) 0))
+    (return (.set z x)))
+
+  (when (== stk nil)
+    (set! stk (getStack))
+    (defer (.free stk)))
+
+  (when (and (== (len y) 1) (== (aget y 0) 1)) ; len(m) > 0
+    (return (.rem z stk x m)))
+
+
+  ;; y > 1
+
+  (when (!= (len m) 0)
+    ;; We likely end up being as long as the modulus.
+    (set! z (.make z (len m)))
+
+    ;; If the exponent is large, we use the Montgomery method for odd values,
+    ;; and a 4-bit, windowed exponentiation for powers of two,
+    ;; and a CRT-decomposed Montgomery method for the remaining values
+    ;; (even values times non-trivial odd values, which decompose into one
+    ;; instance of each of the first two cases).
+    (when (and (> (len y) 1) (not slow))
+      (when (== (bit-and (aget m 0) 1) 1)
+        (return (.expNNMontgomery z stk x y m)))
+
+      (when [(values logM ok) (.isPow2 m)] ok
+        (return (.expNNWindowed z stk x y logM)))
+
+      (return (.expNNMontgomeryEven z stk x y m))))
+
+
+
+  (set! z (.set z x))
+  (let [v (aget y (- (len y) 1)) ; v > 0 because y is normalized and y > 0
+      ^{:line 742} shift (+ (nlz v) 1)]
+    (set! v << shift)
+    (let [^nat q (zero nat)
+
+        ^:const ^{:line 746 :val 9223372036854775808N} mask (<< 1 (- _W 1))
+
+        ;; We walk through the bits of the exponent one by one. Each time we
+        ;; see a bit, we square, thus doubling the power. If the bit is a one,
+        ;; we also multiply by x, thus adding one to the power.
+
+        ^{:line 752} w (- _W (conv int shift))
+        ;; zz and r are used to avoid allocating in mul and div as
+        ;; otherwise the arguments would alias.
+        (values ^nat zz ^nat r) (zero nat)]
+      (for [j 0] (< j w) (inc! j)
+        (set! zz (.sqr zz stk z))
+        (set! (values zz z) (values z zz))
+
+        (when (!= (bit-and v mask) 0)
+          (set! zz (.mul zz stk z x))
+          (set! (values zz z) (values z zz)))
+
+
+        (when (!= (len m) 0)
+          (set! (values zz r) (.div zz stk r z m))
+          (set! (values zz r q z) (values q z zz r)))
+
+
+        (set! v << 1))
+
+
+      (for [i (- (len y) 2)] (>= i 0) (dec! i)
+        (set! v (aget y i))
+
+        (for [j 0] (< j _W) (inc! j)
+          (set! zz (.sqr zz stk z))
+          (set! (values zz z) (values z zz))
+
+          (when (!= (bit-and v mask) 0)
+            (set! zz (.mul zz stk z x))
+            (set! (values zz z) (values z zz)))
+
+
+          (when (!= (len m) 0)
+            (set! (values zz r) (.div zz stk r z m))
+            (set! (values zz r q z) (values q z zz r)))
+
+
+          (set! v << 1)))
+
+
+
+      (.norm z))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 844} (go/method expNNMontgomeryEven "expNNMontgomeryEven calculates x**y mod m where m = m1 × m2 for m1 = 2ⁿ and m2 odd.\nIt uses two recursive calls to expNN for x**y mod m1 and x**y mod m2\nand then uses the Chinese Remainder Theorem to combine the results.\nThe recursive call using m1 will use expNNWindowed,\nwhile the recursive call using m2 will use expNNMontgomery.\nFor more details, see Ç. K. Koç, “Montgomery Reduction with Even Modulus”,\nIEE Proceedings: Computers and Digital Techniques, 141(5) 314-316, September 1994.\nhttp://www.people.vcu.edu/~jwang3/CMSC691/j34monex.pdf\n" ^nat [^nat z ^{:tag (* stack)} stk ^nat x ^nat y ^nat m]
+  ;; Split m = m₁ × m₂ where m₁ = 2ⁿ
+  (let [n (.trailingZeroBits m)
+      ^{:line 808} m1 (.lsh (conv nat nil) natOne n)
+      ^{:line 809} m2 (.rsh (conv nat nil) m n)
+
+      ;; We want z = x**y mod m.
+      ;; z₁ = x**y mod m1 = (x**y mod m) mod m1 = z mod m1
+      ;; z₂ = x**y mod m2 = (x**y mod m) mod m2 = z mod m2
+      ;; (We are using the math/big convention for names here,
+      ;; where the computation is z = x**y mod m, so its parts are z1 and z2.
+      ;; The paper is computing x = a**e mod n; it refers to these as x2 and z1.)
+      ^{:line 817} z1 (.expNN (conv nat nil) stk x y m1 false)
+      ^{:line 818} z2 (.expNN (conv nat nil) stk x y m2 false)]
+
+    ;; Reconstruct z from z₁, z₂ using CRT, using algorithm from paper,
+    ;; which uses only a single modInverse (and an easy one at that).
+    ;;	p = (z₁ - z₂) × m₂⁻¹ (mod m₁)
+    ;;	z = z₂ + p × m₂
+    ;; The final addition is in range because:
+    ;;	z = z₂ + p × m₂
+    ;;	  ≤ z₂ + (m₁-1) × m₂
+    ;;	  < m₂ + (m₁-1) × m₂
+    ;;	  = m₁ × m₂
+    ;;	  = m.
+    (set! z (.set z z2))
+
+    ;; Compute (z₁ - z₂) mod m1 [m1 == 2**n] into z1.
+    (set! z1 (.subMod2N z1 z1 z2 n))
+
+    ;; Reuse z2 for p = (z₁ - z₂) [in z1] * m2⁻¹ (mod m₁ [= 2ⁿ]).
+    (let [m2inv (.modInverse (conv nat nil) m2 m1)]
+      (set! z2 (.mul z2 stk z1 m2inv))
+      (set! z2 (.trunc z2 z2 n))
+
+      ;; Reuse z1 for p * m2.
+      (set! z (.add z z (.mul z1 stk z2 m2)))
+
+      ^{:line 843} z)))
+
+
+
+
+^{:go/end 937} (go/method expNNWindowed "expNNWindowed calculates x**y mod m using a fixed, 4-bit window,\nwhere m = 2**logM.\n" ^nat [^nat z ^{:tag (* stack)} stk ^nat x ^nat y ^uint logM]
+  (when (<= (len y) 1)
+    (panic "big: misuse of expNNWindowed"))
+
+  (when (== (bit-and (aget x 0) 1) 0)
+    ;; len(y) > 1, so y  > logM.
+    ;; x is even, so x**y is a multiple of 2**y which is a multiple of 2**logM.
+    (return (.setWord z 0)))
+
+  (when (== logM 1)
+    (return (.setWord z 1)))
+
+
+  ;; zz is used to avoid allocating in mul as otherwise
+  ;; the arguments would alias.
+  (defer (.restore stk (.save stk)))
+  (let [w (conv int (/ (- (+ logM _W) 1) _W))
+      ^{:line 865} zz (.nat stk w)
+
+      ^:const ^{:line 867 :val 4} n 4
+      ;; powers[i] contains x^i.
+      ^{:line 869 :tag (array (<< 1 n) nat)} powers (zero (array (<< 1 n) nat))]
+    (range [i powers]
+      (aset powers i (.nat stk w)))
+
+    (aset powers 0 (.set (aget powers 0) natOne))
+    (aset powers 1 (.trunc (aget powers 1) x logM))
+    (for [i 2] (< i (<< 1 n)) (set! i + 2)
+      (let [(values p2 p p1) (values (addr (aget powers (/ i 2))) (addr (aget powers i)) (addr (aget powers (+ i 1))))]
+        (set! @p (.sqr p stk @p2))
+        (set! @p (.trunc p @p logM))
+        (set! @p1 (.mul p1 stk @p x))
+        (set! @p1 (.trunc p1 @p1 logM))))
+
+
+    ;; Because phi(2**logM) = 2**(logM-1), x**(2**(logM-1)) = 1,
+    ;; so we can compute x**(y mod 2**(logM-1)) instead of x**y.
+    ;; That is, we can throw away all but the bottom logM-1 bits of y.
+    ;; Instead of allocating a new y, we start reading y at the right word
+    ;; and truncate it appropriately at the start of the loop.
+    (let [i (- (len y) 1)
+        ^{:line 889} mtop (conv int (/ (- logM 2) _W)) ; -2 because the top word of N bits is the (N-1)/W'th word.
+        ^{:line 890} mmask (bit-not (conv Word 0))]
+      (when [mbits (bit-and (- logM 1) (- _W 1))] (!= mbits 0)
+        (set! mmask (- ^Word (<< 1 mbits) 1)))
+
+      (when (> i mtop)
+        (set! i mtop))
+
+      (let [advance false]
+        (set! z (.setWord z 1))
+        (for [] (>= i 0) (dec! i)
+          (let [yi (aget y i)]
+            (when (== i mtop)
+              (set! yi bit-and mmask))
+
+            (for [j 0] (< j _W) (set! j + n)
+              (when advance
+                ;; Account for use of 4 bits in previous iteration.
+                ;; Unrolled loop for significant performance
+                ;; gain. Use go test -bench=".*" in crypto/rsa
+                ;; to check performance before making changes.
+                (set! zz (.sqr zz stk z))
+                (set! (values zz z) (values z zz))
+                (set! z (.trunc z z logM))
+
+                (set! zz (.sqr zz stk z))
+                (set! (values zz z) (values z zz))
+                (set! z (.trunc z z logM))
+
+                (set! zz (.sqr zz stk z))
+                (set! (values zz z) (values z zz))
+                (set! z (.trunc z z logM))
+
+                (set! zz (.sqr zz stk z))
+                (set! (values zz z) (values z zz))
+                (set! z (.trunc z z logM)))
+
+
+              (set! zz (.mul zz stk z (aget powers (>> yi (- _W n)))))
+              (set! (values zz z) (values z zz))
+              (set! z (.trunc z z logM))
+
+              (set! yi << n)
+              (set! advance true))))
+
+
+
+        (.norm z)))))
+
+
+
+
+^{:go/end 1030} (go/method expNNMontgomery "expNNMontgomery calculates x**y mod m using a fixed, 4-bit window.\nUses Montgomery representation.\n" ^nat [^nat z ^{:tag (* stack)} stk ^nat x ^nat y ^nat m]
+  (let [numWords (len m)]
+
+    ;; We want the lengths of x and m to be equal.
+    ;; It is OK if x >= m as long as len(x) == len(m).
+    (when (> (len x) numWords)
+      (set! (values _ x) (.div (conv nat nil) stk nil x m)))
+    ;; Note: now len(x) <= numWords, not guaranteed ==.
+
+    (when (< (len x) numWords)
+      (let [rr (make nat numWords)]
+        (copy rr x)
+        (set! x rr)))
+
+
+    ;; Ideally the precomputations would be performed outside, and reused
+    ;; k0 = -m**-1 mod 2**_W. Algorithm from: Dumas, J.G. "On Newton–Raphson
+    ;; Iteration for Multiplicative Inverses Modulo Prime Powers".
+    (let [k0 (- 2 (aget m 0))
+        ^{:line 960} t (- (aget m 0) 1)]
+      (for [i 1] (< i _W) (set! i << 1)
+        (set! t * t)
+        (set! k0 * (+ t 1)))
+
+      (set! k0 (- k0))
+
+      ;; RR = 2**(2*_W*len(m)) mod m
+      (let [RR (.setWord (conv nat nil) 1)
+          ^{:line 969} zz (.lsh (conv nat nil) RR (conv uint (* 2 numWords _W)))]
+        (set! (values _ RR) (.div (conv nat nil) stk RR zz m))
+        (when (< (len RR) numWords)
+          (set! zz (.make zz numWords))
+          (copy zz RR)
+          (set! RR zz))
+
+        ;; one = 1, with equal length to that of m
+        (let [one (make nat numWords)]
+          (aset one 0 1)
+
+          (let [^:const ^{:val 4} n 4
+              ;; powers[i] contains x^i
+              ^{:line 982 :tag (array (<< 1 n) nat)} powers (zero (array (<< 1 n) nat))]
+            (aset powers 0 (.montgomery (aget powers 0) one RR m k0 numWords))
+            (aset powers 1 (.montgomery (aget powers 1) x RR m k0 numWords))
+            (for [i 2] (< i (<< 1 n)) (inc! i)
+              (aset powers i (.montgomery (aget powers i) (aget powers (- i 1)) (aget powers 1) m k0 numWords)))
+
+
+            ;; initialize z = 1 (Montgomery 1)
+            (set! z (.make z numWords))
+            (copy z (aget powers 0))
+
+            (set! zz (.make zz numWords))
+
+            ;; same windowed exponent, but with Montgomery multiplications
+            (for [i (- (len y) 1)] (>= i 0) (dec! i)
+              (let [yi (aget y i)]
+                (for [j 0] (< j _W) (set! j + n)
+                  (when (or (!= i (- (len y) 1)) (!= j 0))
+                    (set! zz (.montgomery zz z z m k0 numWords))
+                    (set! z (.montgomery z zz zz m k0 numWords))
+                    (set! zz (.montgomery zz z z m k0 numWords))
+                    (set! z (.montgomery z zz zz m k0 numWords)))
+
+                  (set! zz (.montgomery zz z (aget powers (>> yi (- _W n))) m k0 numWords))
+                  (set! (values z zz) (values zz z))
+                  (set! yi << n))))
+
+
+            ;; convert to regular number
+            (set! zz (.montgomery zz z one m k0 numWords))
+
+            ;; One last reduction, just in case.
+            ;; See golang.org/issue/13907.
+            (when (>= (.cmp zz m) 0)
+              ;; Common case is m has high bit set; in that case,
+              ;; since zz is the same length as m, there can be just
+              ;; one multiple of m to remove. Just subtract.
+              ;; We think that the subtract should be sufficient in general,
+              ;; so do that unconditionally, but double-check,
+              ;; in case our beliefs are wrong.
+              ;; The div is not expected to be reached.
+              (set! zz (.sub zz zz m))
+              (when (>= (.cmp zz m) 0)
+                (set! (values _ zz) (.div (conv nat nil) stk nil zz m))))
+
+
+
+            (.norm zz)))))))
+
+
+
+
+
+
+^{:go/end 1061} (go/method bytes "bytes writes the value of z into buf using big-endian encoding.\nThe value of z is encoded in the slice buf[i:]. If the value of z\ncannot be represented in buf, bytes panics. The number i of unused\nbytes at the beginning of buf is returned as result.\n" [^nat z ^{:tag (slice byte)} buf] :results [^int i]
+  ;; This function is used in cryptographic operations. It must not leak
+  ;; anything but the Int's sign and bit size through side-channels. Any
+  ;; changes must be reviewed by a security expert.
+  (set! i (len buf))
+  (range [_ d z]
+    (for [j 0] (< j _S) (inc! j)
+      (dec! i)
+      (cond (>= i 0)
+        (aset buf i (conv byte d))
+        (!= (conv byte d) 0)
+        (panic "math/big: buffer too small to fit value"))
+
+      (set! d >> 8)))
+
+
+
+  (when (< i 0)
+    (set! i 0))
+
+  (while (and (< i (len buf)) (== (aget buf i) 0))
+    (inc! i))
+
+
+  (return))
+
+
+
+^{:go/end 1069} (go/func bigEndianWord "bigEndianWord returns the contents of buf interpreted as a big-endian encoded Word value.\n" ^Word [^{:tag (slice byte)} buf]
+  (when (== _W 64)
+    (return (conv Word (byteorder/BEUint64 buf))))
+
+  (conv Word (byteorder/BEUint32 buf)))
+
+
+
+
+^{:go/end 1091} (go/method setBytes "setBytes interprets buf as the bytes of a big-endian unsigned\ninteger, sets z to that value, and returns z.\n" ^nat [^nat z ^{:tag (slice byte)} buf]
+  (set! z (.make z (/ (- (+ (len buf) _S) 1) _S)))
+
+  (let [i (len buf)]
+    (for [k 0] (>= i _S) (inc! k)
+      (aset z k (bigEndianWord (subslice buf (- i _S) i)))
+      (set! i - _S))
+
+    (when (> i 0)
+      (let [^Word d (zero Word)]
+        (for [s (conv uint 0)] (> i 0) (set! s + 8)
+          (set! d bit-or (<< (conv Word (aget buf (- i 1))) s))
+          (dec! i))
+
+        (aset z (- (len z) 1) d)))
+
+
+    (.norm z)))
+
+
+
+
+^{:go/end 1131} (go/method sqrt "sqrt sets z = ⌊√x⌋\nThe caller may pass stk == nil to request that sqrt obtain and release one itself.\n" ^nat [^nat z ^{:tag (* stack)} stk ^nat x]
+  (when (<= (.cmp x natOne) 0)
+    (return (.set z x)))
+
+  (when (alias z x)
+    (set! z nil))
+
+
+  (when (== stk nil)
+    (set! stk (getStack))
+    (defer (.free stk)))
+
+
+  ;; Start with value known to be too large and repeat "z = ⌊(z + ⌊x/z⌋)/2⌋" until it stops getting smaller.
+  ;; See Brent and Zimmermann, Modern Computer Arithmetic, Algorithm 1.13 (SqrtInt).
+  ;; https://members.loria.fr/PZimmermann/mca/pub226.html
+  ;; If x is one less than a perfect square, the sequence oscillates between the correct z and z+1;
+  ;; otherwise it converges to the correct z and stays there.
+  (let [(values ^nat z1 ^nat z2) (zero nat)]
+    (set! z1 z)
+    (set! z1 (.setUint64 z1 1))
+    (set! z1 (.lsh z1 z1 (/ (conv uint (+ (.bitLen x) 1)) 2))) ; must be ≥ √x
+    (for [n 0] _ (inc! n)
+      (set! (values z2 _) (.div z2 stk nil x z1))
+      (set! z2 (.add z2 z2 z1))
+      (set! z2 (.rsh z2 z2 1))
+      (when (>= (.cmp z2 z1) 0)
+        ;; z1 is answer.
+        ;; Figure out whether z1 or z2 is currently aliased to z by looking at loop count.
+        (when (== (bit-and n 1) 0)
+          (return z1))
+
+        (return (.set z z1)))
+
+      (set! (values z1 z2) (values z2 z1)))))
+
+
+
+
+^{:go/end 1164} (go/method subMod2N "subMod2N returns z = (x - y) mod 2ⁿ.\n" ^nat [^nat z ^nat x ^nat y ^uint n]
+  (when (> (conv uint (.bitLen x)) n)
+    (if (alias z x)
+      ;; ok to overwrite x in place
+      (set! x (.trunc x x n))
+
+      (set! x (.trunc (conv nat nil) x n))))
+
+
+  (when (> (conv uint (.bitLen y)) n)
+    (if (alias z y)
+      ;; ok to overwrite y in place
+      (set! y (.trunc y y n))
+
+      (set! y (.trunc (conv nat nil) y n))))
+
+
+  (when (>= (.cmp x y) 0)
+    (return (.sub z x y)))
+
+  ;; x - y < 0; x - y mod 2ⁿ = x - y + 2ⁿ = 2ⁿ - (y - x) = 1 + 2ⁿ-1 - (y - x) = 1 + ^(y - x).
+  (set! z (.sub z y x))
+  (while (< (* (conv uint (len z)) _W) n)
+    (set! z (append z 0)))
+
+  (range [i z]
+    (aset z i (bit-not (aget z i))))
+
+  (set! z (.trunc z z n))
+  (.add z z natOne))

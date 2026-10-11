@@ -1,0 +1,142 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "list_manual.go" :imports [
+
+
+    ^{:line 8} [unsafe "unsafe"]])
+
+
+;; The types in this file are exact copies of the types in list.go, but with
+;; unsafe.Pointer replaced with uintptr for use where write barriers must be
+;; avoided, such as uses of muintptr, puintptr, guintptr.
+;;
+;; Objects in these lists must be kept alive via another real reference.
+
+
+
+
+
+
+
+(go/type listHeadManual "listHeadManual points to the head of an intrusive doubly-linked list of\nobjects.\n\nPrior to use, you must call init to store the offset of listNodeManual fields.\n\nEvery object in the list should be the same type.\n" (struct
+    ^{:line 24 :tag uintptr} obj
+
+    ^{:line 26 :tag bool} initialized
+    ^{:line 27 :tag uintptr} nodeOffset))
+
+
+
+
+^{:go/end 35} (go/method init "init initializes the list head. off is the offset (via unsafe.Offsetof) of\nthe listNodeManual field in the objects in the list.\n" [^{:tag (* listHeadManual)} head ^uintptr off]
+  (set! (.-initialized head) true)
+  (set! (.-nodeOffset head) off))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type listNodeManual "listNodeManual is the linked list node for objects in a listHeadManual list.\n\nlistNodeManual must be stored as a field in objects placed in the linked list.\nThe offset of the field is registered via listHeadManual.init.\n\nFor example:\n\n\ttype foo struct {\n\t\tval int\n\n\t\tnode listNodeManual\n\t}\n\nvar fooHead listHeadManual\nfooHead.init(unsafe.Offsetof(foo{}.node))\n" (struct
+    ^{:line 53 :tag uintptr} prev
+    ^{:line 54 :tag uintptr} next))
+
+
+^{:go/end 66} (go/method getNode ^{:tag (* listNodeManual)} [^{:tag (* listHeadManual)} head ^unsafe/Pointer p]
+  (when (not (.-initialized head))
+    (throw "runtime: uninitialized listHead"))
+
+
+  (when (== p nil)
+    (return nil))
+
+  (conv (* listNodeManual) (unsafe/Add p (.-nodeOffset head))))
+
+
+
+^{:go/end 71} (go/method empty "Returns true if the list is empty.\n" ^bool [^{:tag (* listHeadManual)} head]
+  (== (.-obj head) 0))
+
+
+
+^{:go/end 76} (go/method head "Returns the head of the list without removing it.\n" ^unsafe/Pointer [^{:tag (* listHeadManual)} head]
+  (conv unsafe/Pointer (.-obj head)))
+
+
+
+^{:go/end 93} (go/method push "Push p onto the front of the list.\n" [^{:tag (* listHeadManual)} head ^unsafe/Pointer p]
+  ;; p becomes the head of the list.
+
+  ;; ... so p's next is the current head.
+  (let [pNode (.getNode head p)]
+    (set! (.-next pNode) (.-obj head))
+
+    ;; ... and the current head's prev is p.
+    (when (!= (.-obj head) 0)
+      (let [headNode (.getNode head (conv unsafe/Pointer (.-obj head)))]
+        (set! (.-prev headNode) (conv uintptr p))))
+
+
+    (set! (.-obj head) (conv uintptr p))))
+
+
+
+^{:go/end 118} (go/method pop "Pop removes the head of the list.\n" ^unsafe/Pointer [^{:tag (* listHeadManual)} head]
+  (when (== (.-obj head) 0)
+    (return nil))
+
+
+  ;; Return the head of the list.
+  (let [p (conv unsafe/Pointer (.-obj head))
+
+      ;; ... so the new head is p's next.
+      ^{:line 105} pNode (.getNode head p)]
+    (set! (.-obj head) (.-next pNode))
+    ;; p is no longer on the list. Clear next to remove unused references.
+    ;; N.B. as the head, prev must already be nil.
+    (set! (.-next pNode) 0)
+
+    ;; ... and the new head no longer has a prev.
+    (when (!= (.-obj head) 0)
+      (let [headNode (.getNode head (conv unsafe/Pointer (.-obj head)))]
+        (set! (.-prev headNode) 0)))
+
+
+    ^{:line 117} p))
+
+
+
+^{:go/end 143} (go/method remove "Remove p from the middle of the list.\n" [^{:tag (* listHeadManual)} head ^unsafe/Pointer p]
+  (when (== (conv unsafe/Pointer (.-obj head)) p)
+    ;; Use pop to ensure head is updated when removing the head.
+    (.pop head)
+    (return))
+
+
+  (let [pNode (.getNode head p)
+      ^{:line 129} prevNode (.getNode head (conv unsafe/Pointer (.-prev pNode)))
+      ^{:line 130} nextNode (.getNode head (conv unsafe/Pointer (.-next pNode)))]
+
+    ;; Link prev to next.
+    (when (!= prevNode nil)
+      (set! (.-next prevNode) (.-next pNode)))
+
+    ;; Link next to prev.
+    (when (!= nextNode nil)
+      (set! (.-prev nextNode) (.-prev pNode)))
+
+
+    (set! (.-prev pNode) 0)
+    (set! (.-next pNode) 0)))

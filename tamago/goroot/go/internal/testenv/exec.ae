@@ -1,0 +1,241 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.testenv) (go/file "exec.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [exec "os/exec"]
+    ^{:line 13} [runtime "runtime"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [sync "sync"]
+    ^{:line 17} [testing "testing"]
+    ^{:line 18} [time "time"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 42} (go/func MustHaveExec "MustHaveExec checks that the current system can start new processes\nusing os.StartProcess or (more commonly) exec.Command.\nIf not, MustHaveExec calls t.Skip with an explanation.\n\nOn some platforms MustHaveExec checks for exec support by re-executing the\ncurrent executable, which must be a binary built by 'go test'.\nWe intentionally do not provide a HasExec function because of the risk of\ninappropriate recursion in TestMain functions.\n\nTo check for exec support outside of a test, just try to exec the command.\nIf exec is not supported, testenv.SyscallIsNotSupported will return true\nfor the resulting error.\n" [^testing/TB t]
+  (when [err (tryExec)] (!= err nil)
+    (let [msg (fmt/Sprintf "cannot exec subprocess on %s/%s: %v" runtime/GOOS runtime/GOARCH err)]
+      (when (== t nil)
+        (panic msg))
+
+      (.Helper t)
+      (.Skip t "skipping test:" msg))))
+
+
+
+(go/var tryExec (^{:inst [error]} sync/OnceValue ^{:go/end 77} (fn ^error []
+      (switch runtime/GOOS
+        (case ["wasip1" "js" "ios" "tamago"])
+        (default
+          ;; Assume that exec always works on non-mobile platforms and Android.
+          (return nil)))
+
+
+      ;; ios has an exec syscall but on real iOS devices it might return a
+      ;; permission error. In an emulated environment (such as a Corellium host)
+      ;; it might succeed, so if we need to exec we'll just have to try it and
+      ;; find out.
+      ;;
+      ;; As of 2023-04-19 wasip1 and js don't have exec syscalls at all, but we
+      ;; may as well use the same path so that this branch can be tested without
+      ;; an ios environment.
+
+      (when (not (testing/Testing))
+        ;; This isn't a standard 'go test' binary, so we don't know how to
+        ;; self-exec in a way that should succeed without side effects.
+        ;; Just forget it.
+        (return (errors/New "can't probe for exec support with a non-test executable")))
+
+
+      ;; We know that this is a test executable. We should be able to run it with a
+      ;; no-op flag to check for overall exec support.
+      (let [(values exe err) (exePath)]
+        (when (!= err nil)
+          (return (fmt/Errorf "can't probe for exec support: %w" err)))
+
+        (let [cmd (exec/Command exe "-test.list=^$")]
+          (set! (.-Env cmd) origEnv)
+          (.Run cmd))))))
+
+
+
+
+
+
+^{:go/end 95} (go/func Executable "Executable is a wrapper around [MustHaveExec] and [os.Executable].\nIt returns the path name for the executable that started the current process,\nor skips the test if the current system can't start new processes,\nor fails the test if the path can not be obtained.\n" ^string [^testing/TB t]
+  (MustHaveExec t)
+
+  (let [(values exe err) (exePath)]
+    (when (!= err nil)
+      (let [msg (fmt/Sprintf "os.Executable error: %v" err)]
+        (when (== t nil)
+          (panic msg))
+
+        (.Fatal t msg)))
+
+    ^{:line 94} exe))
+
+
+(go/var exePath (^{:inst [string error]} sync/OnceValues ^{:go/end 99} (fn [] :results [string error]
+      (os/Executable))))
+
+
+(go/var ^sync/Map execPaths) ; path -> error
+
+
+
+
+^{:go/end 118} (go/func MustHaveExecPath "MustHaveExecPath checks that the current system can start the named executable\nusing os.StartProcess or (more commonly) exec.Command.\nIf not, MustHaveExecPath calls t.Skip with an explanation.\n" [^testing/TB t ^string path]
+  (MustHaveExec t)
+
+  (let [(values err found) (.Load execPaths path)]
+    (when (not found)
+      (set! (values _ err) (exec/LookPath path))
+      (set! (values err _) (.LoadOrStore execPaths path err)))
+
+    (when (!= err nil)
+      (.Helper t)
+      (.Skipf t "skipping test: %s: %s" path err))))
+
+
+
+
+
+
+
+
+
+^{:go/end 143} (go/func CleanCmdEnv "CleanCmdEnv will fill cmd.Env with the environment, excluding certain\nvariables that could modify the behavior of the Go tools such as\nGODEBUG and GOTRACEBACK.\n\nIf the caller wants to set cmd.Dir, set it before calling this function,\nso PWD will be set correctly in the environment.\n" ^{:tag (* exec/Cmd)} [^{:tag (* exec/Cmd)} cmd]
+  (when (!= (.-Env cmd) nil)
+    (panic "environment already set"))
+
+  (range [_ env (.Environ cmd)]
+    ;; Exclude GODEBUG from the environment to prevent its output
+    ;; from breaking tests that are trying to parse other command output.
+    (when (strings/HasPrefix env "GODEBUG=")
+      (continue))
+
+    ;; Exclude GOTRACEBACK for the same reason.
+    (when (strings/HasPrefix env "GOTRACEBACK=")
+      (continue))
+
+    (set! (.-Env cmd) (append (.-Env cmd) env)))
+
+  ^{:line 142} cmd)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 235} (go/func CommandContext "CommandContext is like exec.CommandContext, but:\n  - skips t if the platform does not support os/exec,\n  - sends SIGQUIT (if supported by the platform) instead of SIGKILL\n    in its Cancel function\n  - if the test has a deadline, adds a Context timeout and WaitDelay\n    for an arbitrary grace period before the test's deadline expires,\n  - fails the test if the command does not complete before the test's deadline, and\n  - sets a Cleanup function that verifies that the test did not leak a subprocess.\n" ^{:tag (* exec/Cmd)} [^testing/TB t ^context/Context ctx ^string name & ^{:tag (slice string)} args]
+  (.Helper t)
+  (MustHaveExec t)
+
+  (let [
+      ^{:line 158 :tag context/CancelFunc} cancelCtx (zero context/CancelFunc)
+      ^{:line 159 :tag time/Duration} gracePeriod (zero time/Duration)] ; unlimited unless the test has a deadline (to allow for interactive debugging)
+
+
+    (when [(values t ok) (assert (interface
+            ^{:line 163} testing/TB
+            (Deadline [] :results [time/Time bool])) t)]
+      ^{:line 165} ok
+      (when [(values td ok) (.Deadline t)] ok
+        ;; Start with a minimum grace period, just long enough to consume the
+        ;; output of a reasonable program after it terminates.
+        (set! gracePeriod (* 100 time/Millisecond))
+        (when [s (os/Getenv "GO_TEST_TIMEOUT_SCALE")] (!= s "")
+          (let [(values scale err) (strconv/Atoi s)]
+            (when (!= err nil)
+              (.Fatalf t "invalid GO_TEST_TIMEOUT_SCALE: %v" err))
+
+            (set! gracePeriod * (conv time/Duration scale))))
+
+
+        ;; If time allows, increase the termination grace period to 5% of the
+        ;; test's remaining time.
+        (let [testTimeout (time/Until td)]
+          (when [gp (/ testTimeout 20)] (> gp gracePeriod)
+            (set! gracePeriod gp))
+
+
+          ;; When we run commands that execute subprocesses, we want to reserve two
+          ;; grace periods to clean up: one for the delay between the first
+          ;; termination signal being sent (via the Cancel callback when the Context
+          ;; expires) and the process being forcibly terminated (via the WaitDelay
+          ;; field), and a second one for the delay between the process being
+          ;; terminated and the test logging its output for debugging.
+          ;;
+          ;; (We want to ensure that the test process itself has enough time to
+          ;; log the output before it is also terminated.)
+          (let [cmdTimeout (- testTimeout (* 2 gracePeriod))]
+
+            (when [(values cd ok) (.Deadline ctx)] (or (not ok) (> (time/Until cd) cmdTimeout))
+              ;; Either ctx doesn't have a deadline, or its deadline would expire
+              ;; after (or too close before) the test has already timed out.
+              ;; Add a shorter timeout so that the test will produce useful output.
+              (set! (values ctx cancelCtx) (context/WithTimeout ctx cmdTimeout)))))))
+
+
+
+
+    (let [cmd (exec/CommandContext ctx name (spread args))]
+      (set! (.-Cancel cmd) ^{:go/end 222} (fn ^error []
+          (if (and (!= cancelCtx nil) (== (.Err ctx) context/DeadlineExceeded))
+            ;; The command timed out due to running too close to the test's deadline.
+            ;; There is no way the test did that intentionally — it's too close to the
+            ;; wire! — so mark it as a test failure. That way, if the test expects the
+            ;; command to fail for some other reason, it doesn't have to distinguish
+            ;; between that reason and a timeout.
+            (.Errorf t "test timed out while running command: %v" cmd)
+
+            ;; The command is being terminated due to ctx being canceled, but
+            ;; apparently not due to an explicit test deadline that we added.
+            ;; Log that information in case it is useful for diagnosing a failure,
+            ;; but don't actually fail the test because of it.
+            (.Logf t "%v: terminating command: %v" (.Err ctx) cmd))
+
+          (.Signal (.-Process cmd) Sigquit)))
+
+      (set! (.-WaitDelay cmd) gracePeriod)
+
+      (.Cleanup t ^{:go/end 232} (fn []
+          (when (!= cancelCtx nil)
+            (cancelCtx))
+
+          (when (and (!= (.-Process cmd) nil) (== (.-ProcessState cmd) nil))
+            (.Errorf t "command was started, but test did not wait for it to complete: %v" cmd))))
+
+
+
+      ^{:line 234} cmd)))
+
+
+
+
+^{:go/end 242} (go/func Command "Command is like exec.Command, but applies the same changes as\ntestenv.CommandContext (with a default Context).\n" ^{:tag (* exec/Cmd)} [^testing/TB t ^string name & ^{:tag (slice string)} args]
+  (.Helper t)
+  (CommandContext t (context/Background) name (spread args)))

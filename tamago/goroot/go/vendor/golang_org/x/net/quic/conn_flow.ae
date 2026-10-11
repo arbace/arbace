@@ -1,0 +1,141 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "conn_flow.go" :imports [
+
+
+    ^{:line 8} [atomic "sync/atomic"]
+    ^{:line 9} [time "time"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type connInflow "connInflow tracks connection-level flow control for data sent by the peer to us.\n\nThere are four byte offsets of significance in the stream of data received from the peer,\neach >= to the previous:\n\n  - bytes read by the user\n  - bytes received from the peer\n  - limit sent to the peer in a MAX_DATA frame\n  - potential new limit to sent to the peer\n\nWe maintain a flow control window, so as bytes are read by the user\nthe potential limit is extended correspondingly.\n\nWe keep an atomic counter of bytes read by the user and not yet applied to the\npotential limit (credit). When this count grows large enough, we update the\nnew limit to send and mark that we need to send a new MAX_DATA frame.\n" (struct
+    ^{:line 29 :tag sentVal} sent ; set when we need to send a MAX_DATA update to the peer
+    ^{:line 30 :tag int64} usedLimit ; total bytes sent by the peer, must be less than sentLimit
+    ^{:line 31 :tag int64} sentLimit ; last MAX_DATA sent to the peer
+    ^{:line 32 :tag int64} newLimit ; new MAX_DATA to send
+
+    ^{:line 34 :tag atomic/Int64} credit)) ; bytes read but not yet applied to extending the flow-control window
+
+
+^{:go/end 41} (go/method inflowInit [^{:tag (* Conn)} c]
+  ;; The initial MAX_DATA limit is sent as a transport parameter.
+  (set! (.-sentLimit (.-inflow (.-streams c))) (.maxConnReadBufferSize (.-config c)))
+  (set! (.-newLimit (.-inflow (.-streams c))) (.-sentLimit (.-inflow (.-streams c)))))
+
+
+
+
+
+
+^{:go/end 61} (go/method handleStreamBytesReadOffLoop "handleStreamBytesReadOffLoop records that the user has consumed bytes from a stream.\nWe may extend the peer's flow control window.\n\nThis is called indirectly by the user, via Read or CloseRead.\n" [^{:tag (* Conn)} c ^int64 n]
+  (when (== n 0)
+    (return))
+
+  (when (.shouldUpdateFlowControl c (.Add (.-credit (.-inflow (.-streams c))) n))
+    ;; We should send a MAX_DATA update to the peer.
+    ;; Record this on the Conn's main loop.
+    (.sendMsg c ^{:go/end 59} (fn [^time/Time now ^{:tag (* Conn)} c]
+        ;; A MAX_DATA update may have already happened, so check again.
+        (when (.shouldUpdateFlowControl c (.Load (.-credit (.-inflow (.-streams c)))))
+          (.sendMaxDataUpdate c))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 71} (go/method handleStreamBytesReadOnLoop "handleStreamBytesReadOnLoop extends the peer's flow control window after\ndata has been discarded due to a RESET_STREAM frame.\n\nThis is called on the conn's loop.\n" [^{:tag (* Conn)} c ^int64 n]
+  (when (.shouldUpdateFlowControl c (.Add (.-credit (.-inflow (.-streams c))) n))
+    (.sendMaxDataUpdate c)))
+
+
+
+^{:go/end 81} (go/method sendMaxDataUpdate [^{:tag (* Conn)} c]
+  (.setUnsent (.-sent (.-inflow (.-streams c))))
+  ;; Apply current credit to the limit.
+  ;; We don't strictly need to do this here
+  ;; since appendMaxDataFrame will do so as well,
+  ;; but this avoids redundant trips down this path
+  ;; if the MAX_DATA frame doesn't go out right away.
+  (set! (.-newLimit (.-inflow (.-streams c))) + (.Swap (.-credit (.-inflow (.-streams c))) 0)))
+
+
+^{:go/end 85} (go/method shouldUpdateFlowControl ^bool [^{:tag (* Conn)} c ^int64 credit]
+  (shouldUpdateFlowControl (.maxConnReadBufferSize (.-config c)) credit))
+
+
+
+^{:go/breaks [[6 96]] :go/end 97} (go/method handleStreamBytesReceived "handleStreamBytesReceived records that the peer has sent us stream data.\n" ^error [^{:tag (* Conn)} c ^int64 n]
+  (set! (.-usedLimit (.-inflow (.-streams c))) + n)
+  (when (> (.-usedLimit (.-inflow (.-streams c))) (.-sentLimit (.-inflow (.-streams c))))
+    (return ^{:go/breaks [2 4]} (lit localTransportError
+        :code errFlowControl
+        :reason "stream exceeded flow control limit")))
+
+
+  nil)
+
+
+
+
+
+
+^{:go/breaks [[5 113]] :go/end 114} (go/method appendMaxDataFrame "appendMaxDataFrame appends a MAX_DATA frame to the current packet.\n\nIt returns true if no more frames need appending,\nfalse if it could not fit a frame in the current packet.\n" ^bool [^{:tag (* Conn)} c ^{:tag (* packetWriter)} w ^packetNumber pnum ^bool pto]
+  (when (.shouldSendPTO (.-sent (.-inflow (.-streams c))) pto)
+    ;; Add any unapplied credit to the new limit now.
+    (set! (.-newLimit (.-inflow (.-streams c))) + (.Swap (.-credit (.-inflow (.-streams c))) 0))
+    (when (not (.appendMaxDataFrame w (.-newLimit (.-inflow (.-streams c)))))
+      (return false))
+
+    (set! (.-sentLimit (.-inflow (.-streams c))) (.-newLimit (.-inflow (.-streams c))))
+    (.setSent (.-sent (.-inflow (.-streams c))) pnum))
+
+  true)
+
+
+
+^{:go/end 119} (go/method ackOrLossMaxData "ackOrLossMaxData records the fate of a MAX_DATA frame.\n" [^{:tag (* Conn)} c ^packetNumber pnum ^packetFate fate]
+  (.ackLatestOrLoss (.-sent (.-inflow (.-streams c))) pnum fate))
+
+
+
+(go/type connOutflow "connOutflow tracks connection-level flow control for data sent by us to the peer.\n" (struct
+    ^{:line 123 :tag int64} max ; largest MAX_DATA received from peer
+    ^{:line 124 :tag int64} used)) ; total bytes of STREAM data sent to peer
+
+
+
+
+
+^{:go/end 132} (go/method setMaxData "setMaxData updates the connection-level flow control limit\nwith the initial limit conveyed in transport parameters\nor an update from a MAX_DATA frame.\n" [^{:tag (* connOutflow)} f ^int64 maxData]
+  (set! (.-max f) (max (.-max f) maxData)))
+
+
+
+^{:go/end 137} (go/method avail "avail returns the number of connection-level flow control bytes available.\n" ^int64 [^{:tag (* connOutflow)} f]
+  (- (.-max f) (.-used f)))
+
+
+
+^{:go/end 142} (go/method consume "consume records consumption of n bytes of flow.\n" [^{:tag (* connOutflow)} f ^int64 n]
+  (set! (.-used f) + n))

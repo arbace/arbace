@@ -1,0 +1,79 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package exithook provides limited support for on-exit cleanup.
+;;
+;; CAREFUL! The expectation is that Add should only be called
+;; from a safe context (e.g. not an error/panic path or signal
+;; handler, preemption enabled, allocation allowed, write barriers
+;; allowed, etc), and that the exit function F will be invoked under
+;; similar circumstances. That is to say, we are expecting that F
+;; uses normal / high-level Go code as opposed to one of the more
+;; restricted dialects used for the trickier parts of the runtime.
+(in-ns 'go.internal.runtime.exithook) (go/file "hooks.go" :doc "Package exithook provides limited support for on-exit cleanup.\n\nCAREFUL! The expectation is that Add should only be called\nfrom a safe context (e.g. not an error/panic path or signal\nhandler, preemption enabled, allocation allowed, write barriers\nallowed, etc), and that the exit function F will be invoked under\nsimilar circumstances. That is to say, we are expecting that F\nuses normal / high-level Go code as opposed to one of the more\nrestricted dialects used for the trickier parts of the runtime.\n" :imports [
+
+
+    ^{:line 17} [atomic "internal/runtime/atomic"]
+    ^{:line 18} [_ "unsafe"]]) ; for linkname
+
+
+
+
+
+
+(go/type Hook "A Hook is a function to be run at program termination\n(when someone invokes os.Exit, or when main.main returns).\nHooks are run in reverse order of registration:\nthe first hook added is the last one run.\n" (struct
+    ^{:line 26 :tag (func [])} F ; func to run
+    ^{:line 27 :tag bool} RunOnFailure)) ; whether to run on non-zero exit code
+
+
+(go/var
+  ^{:line 31} [^atomic/Int32 locked]
+  ^{:line 32} [^atomic/Uint64 runGoid]
+  ^{:line 33} [^{:tag (slice Hook)} hooks]
+  ^{:line 34} [^bool running]
+
+
+  ^{:line 37} [^{:tag (func []) :doc "runtime sets these for us\n"} Gosched]
+  ^{:line 38} [^{:tag (func [] [uint64])} Goid]
+  ^{:line 39} [^{:tag (func [string])} Throw])
+
+
+
+^{:go/end 49} (go/func Add "Add adds a new exit hook.\n" [^Hook h]
+  (while (not (.CompareAndSwap locked 0 1))
+    (Gosched))
+
+  (set! hooks (append hooks h))
+  (.Store locked 0))
+
+
+
+
+
+
+
+^{:go/end 81} (go/func Run "Run runs the exit hooks.\n\nIf an exit hook panics, Run will throw with the panic on the stack.\nIf an exit hook invokes exit in the same goroutine, the goroutine will throw.\nIf an exit hook invokes exit in another goroutine, that exit will block.\n" [^int code]
+  (while (not (.CompareAndSwap locked 0 1))
+    (when (== (Goid) (.Load runGoid))
+      (Throw "exit hook invoked exit"))
+
+    (Gosched))
+
+  (defer (.Store locked 0))
+  (.Store runGoid (Goid))
+  (defer (.Store runGoid 0))
+
+  (defer (^{:go/end 71} (fn []
+        (when [e (recover)] (!= e nil)
+          (Throw "exit hook invoked panic")))))
+
+
+
+  (while (> (len hooks) 0)
+    (let [h (aget hooks (- (len hooks) 1))]
+      (set! hooks (subslice hooks _ (- (len hooks) 1)))
+      (when (and (!= code 0) (not (.-RunOnFailure h)))
+        (continue))
+
+      ((.-F h)))))

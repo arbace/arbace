@@ -1,0 +1,486 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package types declares the data types and implements
+;; the algorithms for type-checking of Go packages. Use
+;; [Config.Check] to invoke the type checker for a package.
+;; Alternatively, create a new type checker with [NewChecker]
+;; and invoke it incrementally by calling [Checker.Files].
+;;
+;; Type-checking consists of several interdependent phases:
+;;
+;; Name resolution maps each identifier ([ast.Ident]) in the program
+;; to the symbol ([Object]) it denotes. Use the Defs and Uses fields
+;; of [Info] or the [Info.ObjectOf] method to find the symbol for an
+;; identifier, and use the Implicits field of [Info] to find the
+;; symbol for certain other kinds of syntax node.
+;;
+;; Constant folding computes the exact constant value
+;; ([constant.Value]) of every expression ([ast.Expr]) that is a
+;; compile-time constant. Use the Types field of [Info] to find the
+;; results of constant folding for an expression.
+;;
+;; Type deduction computes the type ([Type]) of every expression
+;; ([ast.Expr]) and checks for compliance with the language
+;; specification. Use the Types field of [Info] for the results of
+;; type deduction.
+;;
+;; Applications that need to type-check one or more complete packages
+;; of Go source code may find it more convenient not to invoke the
+;; type checker directly but instead to use the Load function in
+;; package [golang.org/x/tools/go/packages].
+;;
+;; For a tutorial, see https://go.dev/s/types-tutorial.
+(in-ns 'go.go.types) (go/file "api.go" :doc "Package types declares the data types and implements\nthe algorithms for type-checking of Go packages. Use\n[Config.Check] to invoke the type checker for a package.\nAlternatively, create a new type checker with [NewChecker]\nand invoke it incrementally by calling [Checker.Files].\n\nType-checking consists of several interdependent phases:\n\nName resolution maps each identifier ([ast.Ident]) in the program\nto the symbol ([Object]) it denotes. Use the Defs and Uses fields\nof [Info] or the [Info.ObjectOf] method to find the symbol for an\nidentifier, and use the Implicits field of [Info] to find the\nsymbol for certain other kinds of syntax node.\n\nConstant folding computes the exact constant value\n([constant.Value]) of every expression ([ast.Expr]) that is a\ncompile-time constant. Use the Types field of [Info] to find the\nresults of constant folding for an expression.\n\nType deduction computes the type ([Type]) of every expression\n([ast.Expr]) and checks for compliance with the language\nspecification. Use the Types field of [Info] for the results of\ntype deduction.\n\nApplications that need to type-check one or more complete packages\nof Go source code may find it more convenient not to invoke the\ntype checker directly but instead to use the Load function in\npackage [golang.org/x/tools/go/packages].\n\nFor a tutorial, see https://go.dev/s/types-tutorial.\n" :imports [
+
+
+    ^{:line 38} [bytes "bytes"]
+    ^{:line 39} [fmt "fmt"]
+    ^{:line 40} [ast "go/ast"]
+    ^{:line 41} [constant "go/constant"]
+    ^{:line 42} [token "go/token"]
+    ^{:line 43} [. "internal/types/errors"]
+    ^{:line 44} [_ "unsafe"]]) ; for linkname
+
+
+
+
+
+
+(go/type Error "An Error describes a type-checking error; it implements the error interface.\nA \"soft\" error is an error that still permits a valid interpretation of a\npackage (such as \"unused variable\"); \"hard\" errors may lead to unpredictable\nbehavior if ignored.\n" (struct
+    ^{:line 52 :tag (* token/FileSet)} Fset ; file set for interpretation of Pos
+    ^{:line 53 :tag token/Pos} Pos ; error position
+    ^{:line 54 :tag string} Msg ; error message
+    ^{:line 55 :tag bool} Soft ; if set, error is "soft"
+
+
+
+
+
+
+    ^{:line 62 :tag Code :doc "go116code is a future API, unexported as the set of error codes is large\nand likely to change significantly during experimentation. Tools wishing\nto preview this feature may read go116code using reflection (see\nerrorcodes_test.go), but beware that there is no guarantee of future\ncompatibility.\n"} go116code
+    ^{:line 63 :tag token/Pos} go116start
+    ^{:line 64 :tag token/Pos} go116end))
+
+
+
+
+^{:go/end 71} (go/method Error "Error returns an error string formatted as follows:\nfilename:line:column: message\n" ^string [^Error err]
+  (fmt/Sprintf "%s: %s" (.Position (.-Fset err) (.-Pos err)) (.-Msg err)))
+
+
+
+(go/type ArgumentError "An ArgumentError holds an error associated with an argument index.\n" (struct
+    ^{:line 75 :tag int} Index
+    ^{:line 76 :tag error} Err))
+
+
+^{:go/end 79} (go/method Error ^string [^{:tag (* ArgumentError)} e] (.Error (.-Err e)))
+^{:go/end 80} (go/method Unwrap ^error [^{:tag (* ArgumentError)} e] (.-Err e))
+
+
+
+
+
+
+(go/type Importer "An Importer resolves import paths to Packages.\n\nCAUTION: This interface does not support the import of locally\nvendored packages. See https://golang.org/s/go15vendor.\nIf possible, external implementations should implement [ImporterFrom].\n" (interface
+
+
+
+    (^{:doc "Import returns the imported package for the given import path.\nThe semantics is like for ImporterFrom.ImportFrom except that\ndir and mode are ignored (since they are not present).\n"} Import [^string path] :results [(* Package) error])))
+
+
+
+(go/type ImportMode "ImportMode is reserved for future use.\n" int)
+
+
+
+
+(go/type ImporterFrom "An ImporterFrom resolves import paths to packages; it\nsupports vendoring per https://golang.org/s/go15vendor.\nUse go/importer to obtain an ImporterFrom implementation.\n" (interface
+
+
+
+
+
+    ^{:line 106 :doc "Importer is present for backward-compatibility. Calling\nImport(path) is the same as calling ImportFrom(path, \"\", 0);\ni.e., locally vendored packages may not be found.\nThe types package does not call Import if an ImporterFrom\nis present.\n"} Importer
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "ImportFrom returns the imported package for the given import\npath when imported by a package file located in dir.\nIf the import failed, besides returning an error, ImportFrom\nis encouraged to cache and return a package anyway, if one\nwas created. This will reduce package inconsistencies and\nfollow-on type checker errors due to the missing package.\nThe mode value must be 0; it is reserved for future use.\nTwo calls to ImportFrom with the same path and dir must\nreturn the same package.\n"} ImportFrom [^string path ^string dir ^ImportMode mode] :results [(* Package) error])))
+
+
+
+
+(go/type Config "A Config specifies the configuration for type checking.\nThe zero value for Config is a ready-to-use default configuration.\n" (struct
+
+
+    ^{:line 125 :tag (* Context) :doc "Context is the context used for resolving global identifiers. If nil, the\ntype checker will initialize this field with a newly created context.\n"} Context
+
+
+
+
+
+
+    ^{:line 132 :tag string :doc "GoVersion describes the accepted Go language version. The string must\nstart with a prefix of the form \"go%d.%d\" (e.g. \"go1.20\", \"go1.21rc1\", or\n\"go1.21.0\") or it must be empty; an empty string disables Go language\nversion checks. If the format is invalid, invoking the type checker will\nresult in an error.\n"} GoVersion
+
+
+
+    ^{:line 136 :tag bool :doc "If IgnoreFuncBodies is set, function bodies are not\ntype-checked.\n"} IgnoreFuncBodies
+
+
+
+
+
+
+
+
+    ^{:line 145 :tag bool :doc "If FakeImportC is set, `import \"C\"` (for packages requiring Cgo)\ndeclares an empty \"C\" package and errors are omitted for qualified\nidentifiers referring to package C (which won't find an object).\nThis feature is intended for the standard library cmd/api tool.\n\nCaution: Effects may be unpredictable due to follow-on errors.\n         Do not use casually!\n"} FakeImportC
+
+
+
+
+
+
+
+
+    ^{:line 154 :tag bool :doc "If go115UsesCgo is set, the type checker expects the\n_cgo_gotypes.go file generated by running cmd/cgo to be\nprovided as a package source file. Qualified identifiers\nreferring to package C will be resolved to cgo-provided\ndeclarations within _cgo_gotypes.go.\n\nIt is an error to set both FakeImportC and go115UsesCgo.\n"} go115UsesCgo
+
+
+    ^{:line 157 :tag bool :doc "If _Trace is set, a debug trace is printed to stdout.\n"} _Trace
+
+
+
+
+
+
+
+
+    ^{:line 166 :tag (func [^error err]) :doc "If Error != nil, it is called with each error found\nduring type checking; err has dynamic type Error.\nSecondary errors (for instance, to enumerate all types\ninvolved in an invalid recursive type declaration) have\nerror strings that start with a '\\t' character.\nIf Error == nil, type-checking stops with the first\nerror found.\n"} Error
+
+
+
+
+
+
+
+    ^{:line 174 :tag Importer :doc "An importer is used to import packages referred to from\nimport declarations.\nIf the installed importer implements ImporterFrom, the type\nchecker calls ImportFrom instead of Import.\nThe type checker reports an error if an importer is needed\nbut none was installed.\n"} Importer
+
+
+
+    ^{:line 178 :tag Sizes :doc "If Sizes != nil, it provides the sizing functions for package unsafe.\nOtherwise SizesFor(\"gc\", \"amd64\") is used instead.\n"} Sizes
+
+
+
+    ^{:line 182 :tag bool :doc "If DisableUnusedImportCheck is set, packages are not checked\nfor unused imports.\n"} DisableUnusedImportCheck
+
+
+
+
+
+    ^{:line 188 :tag string :doc "If a non-empty _ErrorURL format string is provided, it is used\nto format an error URL link that is appended to the first line\nof an error message. ErrorURL must be a format string containing\nexactly one \"%s\" format, e.g. \"[go.dev/e/%s]\".\n"} _ErrorURL))
+
+
+;; Linkname for use from srcimporter.
+
+
+^{:go/end 196} (go/func ^{:go/linkname "srcimporter_setUsesCgo"} srcimporter_setUsesCgo [^{:tag (* Config)} conf]
+  (set! (.-go115UsesCgo conf) true))
+
+
+
+
+
+
+(go/type Info "Info holds result type information for a type-checked package.\nOnly the information for which a map is provided is collected.\nIf the package has type errors, the collected information may\nbe incomplete.\n" (struct
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 228 :tag (map ast/Expr TypeAndValue) :doc "Types maps expressions to their types, and for constant\nexpressions, also their values. Invalid expressions are\nomitted.\n\nFor (possibly parenthesized) identifiers denoting built-in\nfunctions, the recorded signatures are call-site specific:\nif the call result is not a constant, the recorded type is\nan argument-specific signature. Otherwise, the recorded type\nis invalid.\n\nThe Types map does not record the type of every identifier,\nonly those that appear where an arbitrary expression is\npermitted. For instance:\n- an identifier f in a selector expression x.f is found\n  only in the Selections map;\n- an identifier z in a variable declaration 'var z int'\n  is found only in the Defs map;\n- an identifier p denoting a package in a qualified\n  identifier p.X is found only in the Uses map.\n\nSimilarly, no type is recorded for the (synthetic) FuncType\nnode in a FuncDecl.Type field, since there is no corresponding\nsyntactic function type expression in the source in this case\nInstead, the function type is found in the Defs map entry for\nthe corresponding function declaration.\n"} Types
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 242 :tag (map (* ast/Ident) Instance) :doc "Instances maps identifiers denoting generic types or functions to their\ntype arguments and instantiated type.\n\nFor example, Instances will map the identifier for 'T' in the type\ninstantiation T[int, string] to the type arguments [int, string] and\nresulting instantiated *Named type. Given a generic function\nfunc F[A any](A), Instances will map the identifier for 'F' in the call\nexpression F(int(1)) to the inferred type arguments [int], and resulting\ninstantiated *Signature.\n\nInvariant: Instantiating Uses[id].Type() with Instances[id].TypeArgs\nresults in an equivalent of Instances[id].Type.\n"} Instances
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 256 :tag (map (* ast/Ident) Object) :doc "Defs maps identifiers to the objects they define (including\npackage names, dots \".\" of dot-imports, and blank \"_\" identifiers).\nFor identifiers that do not denote objects (e.g., the package name\nin package clauses, or symbolic variables t in t := x.(type) of\ntype switch headers), the corresponding objects are nil.\n\nFor an embedded field, Defs returns the field *Var it defines.\n\nIn ill-typed code, such as a duplicate declaration of the\nsame name, Defs may lack an entry for a declaring identifier.\n\nInvariant: Defs[id] == nil || Defs[id].Pos() == id.Pos()\n"} Defs
+
+
+
+
+
+
+    ^{:line 263 :tag (map (* ast/Ident) Object) :doc "Uses maps identifiers to the objects they denote.\n\nFor an embedded field, Uses returns the *TypeName it denotes.\n\nInvariant: Uses[id].Pos() != id.Pos()\n"} Uses
+
+
+
+
+
+
+
+
+
+
+    ^{:line 274 :tag (map ast/Node Object) :doc "Implicits maps nodes to their implicitly declared objects, if any.\nThe following node and object types may appear:\n\n    node               declared object\n\n    *ast.ImportSpec    *PkgName for imports without renames\n    *ast.CaseClause    type-specific *Var for each type switch case clause (incl. default)\n    *ast.Field         anonymous parameter *Var (incl. unnamed results)\n"} Implicits
+
+
+
+    ^{:line 278 :tag (map (* ast/SelectorExpr) (* Selection)) :doc "Selections maps selector expressions (excluding qualified identifiers)\nto their corresponding selections.\n"} Selections
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 313 :tag (map ast/Node (* Scope)) :doc "Scopes maps ast.Nodes to the scopes they define. Package scopes are not\nassociated with a specific node but with all files belonging to a package.\nThus, the package scope can be found in the type-checked Package object.\nScopes nest, with the Universe scope being the outermost scope, enclosing\nthe package scope, which contains (one or more) files scopes, which enclose\nfunction scopes which in turn enclose statement and function literal scopes.\nNote that even though package-level functions are declared in the package\nscope, the function scopes are embedded in the file scope of the file\ncontaining the function declaration.\n\nThe Scope of a function contains the declarations of any\ntype parameters, parameters, and named results, plus any\nlocal declarations in the body block.\nIt is coextensive with the complete extent of the\nfunction's syntax ([*ast.FuncDecl] or [*ast.FuncLit]).\nThe Scopes mapping does not contain an entry for the\nfunction body ([*ast.BlockStmt]); the function's scope is\nassociated with the [*ast.FuncType].\n\nThe following node types may appear in Scopes:\n\n    *ast.File\n    *ast.FuncType\n    *ast.TypeSpec\n    *ast.BlockStmt\n    *ast.IfStmt\n    *ast.SwitchStmt\n    *ast.TypeSwitchStmt\n    *ast.CaseClause\n    *ast.CommClause\n    *ast.ForStmt\n    *ast.RangeStmt\n"} Scopes
+
+
+
+
+
+
+    ^{:line 320 :tag (slice (* Initializer)) :doc "InitOrder is the list of package-level initializers in the order in which\nthey must be executed. Initializers referring to variables related by an\ninitialization dependency appear in topological order, the others appear\nin source order. Variables without an initialization expression do not\nappear in this list.\n"} InitOrder
+
+
+
+
+
+
+    ^{:line 327 :tag (map (* ast/File) string) :doc "FileVersions maps a file to its Go version string.\nIf the file doesn't specify a version, the reported\nstring is Config.GoVersion.\nVersion strings begin with “go”, like “go1.21”, and\nare suitable for use with the [go/version] package.\n"} FileVersions))
+
+
+^{:go/end 332} (go/method recordTypes ^bool [^{:tag (* Info)} info]
+  (!= (.-Types info) nil))
+
+
+
+
+^{:go/breaks [[6 345]] :go/end 346} (go/method TypeOf "TypeOf returns the type of expression e, or nil if not found.\nPrecondition: the Types, Uses and Defs maps are populated.\n" ^Type [^{:tag (* Info)} info ^ast/Expr e]
+  (when [(values t ok) (aget (.-Types info) e)] ok
+    (return (.-Type t)))
+
+  (when [(values id _) (assert (* ast/Ident) e)] (!= id nil)
+    (when [obj (.ObjectOf info id)] (!= obj nil)
+      (return (.Type obj))))
+
+
+  nil)
+
+
+
+
+
+
+
+
+
+^{:go/end 360} (go/method ObjectOf "ObjectOf returns the object denoted by the specified id,\nor nil if not found.\n\nIf id is an embedded struct field, [Info.ObjectOf] returns the field (*[Var])\nit defines, not the type (*[TypeName]) it uses.\n\nPrecondition: the Uses and Defs maps are populated.\n" ^Object [^{:tag (* Info)} info ^{:tag (* ast/Ident)} id]
+  (when [obj (aget (.-Defs info) id)] (!= obj nil)
+    (return obj))
+
+  (aget (.-Uses info) id))
+
+
+
+
+
+
+
+
+^{:go/end 377} (go/method PkgNameOf "PkgNameOf returns the local package name defined by the import,\nor nil if not found.\n\nFor dot-imports, the package name is \".\".\n\nPrecondition: the Defs and Implicts maps are populated.\n" ^{:tag (* PkgName)} [^{:tag (* Info)} info ^{:tag (* ast/ImportSpec)} imp]
+  (let [^Object obj (zero Object)]
+    (if (!= (.-Name imp) nil)
+      (set! obj (aget (.-Defs info) (.-Name imp)))
+
+      (set! obj (aget (.-Implicits info) imp)))
+
+    (let [(values pkgname _) (assert (* PkgName) obj)]
+      ^{:line 376} pkgname)))
+
+
+
+
+(go/type TypeAndValue "TypeAndValue reports the type and value (for constants)\nof the corresponding expression.\n" (struct
+    ^{:line 382 :tag operandMode} mode
+    ^{:line 383 :tag Type} Type
+    ^{:line 384 :tag constant/Value} Value))
+
+
+
+
+^{:go/end 391} (go/method IsVoid "IsVoid reports whether the corresponding expression\nis a function call without results.\n" ^bool [^TypeAndValue tv]
+  (== (.-mode tv) novalue))
+
+
+
+^{:go/end 396} (go/method IsType "IsType reports whether the corresponding expression specifies a type.\n" ^bool [^TypeAndValue tv]
+  (== (.-mode tv) typexpr))
+
+
+
+
+^{:go/end 402} (go/method IsBuiltin "IsBuiltin reports whether the corresponding expression denotes\na (possibly parenthesized) built-in function.\n" ^bool [^TypeAndValue tv]
+  (== (.-mode tv) builtin))
+
+
+
+
+
+^{:go/breaks [[5 412]] :go/end 413} (go/method IsValue "IsValue reports whether the corresponding expression is a value.\nBuiltins are not considered values. Constant values have a non-\nnil Value.\n" ^bool [^TypeAndValue tv]
+  (switch (.-mode tv)
+    (case [constant_ variable mapindex value commaok commaerr]
+      (return true)))
+
+  false)
+
+
+
+
+^{:go/end 419} (go/method IsNil "IsNil reports whether the corresponding expression denotes the\npredeclared value nil.\n" ^bool [^TypeAndValue tv]
+  (and (== (.-mode tv) value) (== (.-Type tv) (aget Typ UntypedNil))))
+
+
+
+
+^{:go/end 425} (go/method Addressable "Addressable reports whether the corresponding expression\nis addressable (https://golang.org/ref/spec#Address_operators).\n" ^bool [^TypeAndValue tv]
+  (== (.-mode tv) variable))
+
+
+
+
+^{:go/end 431} (go/method Assignable "Assignable reports whether the corresponding expression\nis assignable to (provided a value of the right type).\n" ^bool [^TypeAndValue tv]
+  (or (== (.-mode tv) variable) (== (.-mode tv) mapindex)))
+
+
+
+
+^{:go/end 437} (go/method HasOk "HasOk reports whether the corresponding expression may be\nused on the rhs of a comma-ok assignment.\n" ^bool [^TypeAndValue tv]
+  (or (== (.-mode tv) commaok) (== (.-mode tv) mapindex)))
+
+
+
+
+
+
+(go/type Instance "Instance reports the type arguments and instantiated type for type and\nfunction instantiations. For type instantiations, [Type] will be of dynamic\ntype *[Named]. For function instantiations, [Type] will be of dynamic type\n*Signature.\n" (struct
+    ^{:line 444 :tag (* TypeList)} TypeArgs
+    ^{:line 445 :tag Type} Type))
+
+
+^{:go/end 450} (go/method String ^string [^Instance inst]
+  (fmt/Sprintf "%s%s" (.-TypeArgs inst) (.-Type inst)))
+
+
+
+
+
+(go/type Initializer "An Initializer describes a package-level variable, or a list of variables in case\nof a multi-valued initialization expression, and the corresponding initialization\nexpression.\n" (struct
+    ^{:line 456 :tag (slice (* Var))} Lhs ; var Lhs = Rhs
+    ^{:line 457 :tag ast/Expr} Rhs))
+
+
+^{:go/end 471} (go/method String ^string [^{:tag (* Initializer)} init]
+  (let [^bytes/Buffer buf (zero bytes/Buffer)]
+    (range [i lhs (.-Lhs init)]
+      (when (> i 0)
+        (.WriteString buf ", "))
+
+      (.WriteString buf ^{:go/via [object]} (.Name lhs)))
+
+    (.WriteString buf " = ")
+    (WriteExpr (addr buf) (.-Rhs init))
+    (.String buf)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 487} (go/method Check "Check type-checks a package and returns the resulting package object and\nthe first error if any. Additionally, if info != nil, Check populates each\nof the non-nil maps in the [Info] struct.\n\nThe package is marked as complete if no errors occurred, otherwise it is\nincomplete. See [Config.Error] for controlling behavior in the presence of\nerrors.\n\nThe package is specified by a list of *ast.Files and corresponding\nfile set, and the package path the package is identified with.\nThe clean path must not be empty or dot (\".\").\n" [^{:tag (* Config)} conf ^string path ^{:tag (* token/FileSet)} fset ^{:tag (slice (* ast/File))} files ^{:tag (* Info)} info] :results [(* Package) error]
+  (let [pkg (NewPackage path "")]
+    (return pkg (.Files (NewChecker conf fset pkg info) files))))

@@ -1,0 +1,139 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.fuzz) (go/file "pcg.go" :imports [
+
+
+    ^{:line 8} [bits "math/bits"]
+    ^{:line 9} [os "os"]
+    ^{:line 10} [strconv "strconv"]
+    ^{:line 11} [strings "strings"]
+    ^{:line 12} [atomic "sync/atomic"]
+    ^{:line 13} [time "time"]])
+
+
+(go/type mutatorRand (interface
+    (uint32 ^uint32 [])
+    (intn ^int [int])
+    (uint32n ^uint32 [uint32])
+    (bool ^bool [])
+
+    (save [^{:tag (* uint64)} randState ^{:tag (* uint64)} randInc])
+    (restore [^uint64 randState ^uint64 randInc])))
+
+
+;; The functions in pcg implement a 32 bit PRNG with a 64 bit period: pcg xsh rr
+;; 64 32. See https://www.pcg-random.org/ for more information. This
+;; implementation is geared specifically towards the needs of fuzzing: Simple
+;; creation and use, no reproducibility, no concurrency safety, just the
+;; necessary methods, optimized for speed.
+
+(go/var ^atomic/Uint64 globalInc) ; PCG stream
+
+(go/const ^{:tag uint64 :val 6364136223846793005} multiplier 6364136223846793005)
+
+
+
+(go/type pcgRand "pcgRand is a PRNG. It should not be copied or shared. No Rand methods are\nconcurrency safe.\n" (struct
+    ^{:line 39 :tag noCopy} noCopy ; help avoid mistakes: ask vet to ensure that we don't make a copy
+    ^{:line 40 :tag uint64} state
+    ^{:line 41 :tag uint64} inc))
+
+
+^{:go/end 56} (go/func godebugSeed ^{:tag (* int)} []
+  ^{:go/breaks [[3 55]]} (let [debug (strings/Split (os/Getenv "GODEBUG") ",")]
+    (range [_ f debug]
+      (when (strings/HasPrefix f "fuzzseed=")
+        (let [(values seed err) (strconv/Atoi (strings/TrimPrefix f "fuzzseed="))]
+          (when (!= err nil)
+            (panic "malformed fuzzseed"))
+
+          (return (addr seed)))))
+
+
+    nil))
+
+
+
+^{:go/end 72} (go/func newPcgRand "newPcgRand generates a new, seeded Rand, ready for use.\n" ^{:tag (* pcgRand)} []
+  (let [r (new pcgRand)
+      ^{:line 61} now (conv uint64 (.UnixNano (time/Now)))]
+    (when [seed (godebugSeed)] (!= seed nil)
+      (set! now (conv uint64 @seed)))
+
+    (let [inc (.Add globalInc 1)]
+      (set! (.-state r) now)
+      (set! (.-inc r) (bit-or (<< inc 1) 1))
+      (.step r)
+      (set! (.-state r) + now)
+      (.step r)
+      ^{:line 71} r)))
+
+
+^{:go/end 77} (go/method step [^{:tag (* pcgRand)} r]
+  (set! (.-state r) * multiplier)
+  (set! (.-state r) + (.-inc r)))
+
+
+^{:go/end 82} (go/method save [^{:tag (* pcgRand)} r ^{:tag (* uint64)} randState ^{:tag (* uint64)} randInc]
+  (set! @randState (.-state r))
+  (set! @randInc (.-inc r)))
+
+
+^{:go/end 87} (go/method restore [^{:tag (* pcgRand)} r ^uint64 randState ^uint64 randInc]
+  (set! (.-state r) randState)
+  (set! (.-inc r) randInc))
+
+
+
+^{:go/end 94} (go/method uint32 "uint32 returns a pseudo-random uint32.\n" ^uint32 [^{:tag (* pcgRand)} r]
+  (let [x (.-state r)]
+    (.step r)
+    (bits/RotateLeft32 (conv uint32 (>> (bit-xor (>> x 18) x) 27)) (- (conv int (>> x 59))))))
+
+
+
+
+^{:go/end 103} (go/method intn "intn returns a pseudo-random number in [0, n).\nn must fit in a uint32.\n" ^int [^{:tag (* pcgRand)} r ^int n]
+  (when (!= (conv int (conv uint32 n)) n)
+    (panic "large Intn"))
+
+  (conv int (.uint32n r (conv uint32 n))))
+
+
+
+
+
+
+
+^{:go/end 123} (go/method uint32n "uint32n returns a pseudo-random number in [0, n).\n\nFor implementation details, see:\nhttps://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction\nhttps://lemire.me/blog/2016/06/30/fast-random-shuffling\n" ^uint32 [^{:tag (* pcgRand)} r ^uint32 n]
+  (let [v (.uint32 r)
+      ^{:line 112} prod (* (conv uint64 v) (conv uint64 n))
+      ^{:line 113} low (conv uint32 prod)]
+    (when (< low n)
+      (let [thresh (% (conv uint32 (- (conv int32 n))) n)]
+        (while (< low thresh)
+          (set! v (.uint32 r))
+          (set! prod (* (conv uint64 v) (conv uint64 n)))
+          (set! low (conv uint32 prod)))))
+
+
+    (conv uint32 (>> prod 32))))
+
+
+
+^{:go/end 128} (go/method bool "bool generates a random bool.\n" ^bool [^{:tag (* pcgRand)} r]
+  (== (bit-and (.uint32 r) 1) 0))
+
+
+
+
+
+
+
+(go/type noCopy "noCopy may be embedded into structs which must not be copied\nafter the first use.\n\nSee https://golang.org/issues/8005#issuecomment-190753527\nfor details.\n" (struct))
+
+
+^{:go/end 138} (go/method Lock "Lock is a no-op used by -copylocks checker from `go vet`.\n" [(* noCopy)])
+^{:go/end 139} (go/method Unlock [(* noCopy)])

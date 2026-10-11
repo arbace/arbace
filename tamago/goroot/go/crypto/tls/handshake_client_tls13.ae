@@ -1,0 +1,891 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.tls) (go/file "handshake_client_tls13.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [context "context"]
+    ^{:line 10} [crypto "crypto"]
+    ^{:line 11} [hkdf "crypto/hkdf"]
+    ^{:line 12} [hmac "crypto/hmac"]
+    ^{:line 13} [tls13 "crypto/internal/fips140/tls13"]
+    ^{:line 14} [rsa "crypto/rsa"]
+    ^{:line 15} [subtle "crypto/subtle"]
+    ^{:line 16} [errors "errors"]
+    ^{:line 17} [hash "hash"]
+    ^{:line 18} [slices "slices"]
+    ^{:line 19} [time "time"]])
+
+
+(go/type clientHandshakeStateTLS13 (struct
+    ^{:line 23 :tag (* Conn)} c
+    ^{:line 24 :tag context/Context} ctx
+    ^{:line 25 :tag (* serverHelloMsg)} serverHello
+    ^{:line 26 :tag (* clientHelloMsg)} hello
+    ^{:line 27 :tag (* keySharePrivateKeys)} keyShareKeys
+
+    ^{:line 29 :tag (* SessionState)} session
+    ^{:line 30 :tag (* tls13/EarlySecret)} earlySecret
+    ^{:line 31 :tag (slice byte)} binderKey
+
+    ^{:line 33 :tag (* certificateRequestMsgTLS13)} certReq
+    ^{:line 34 :tag bool} usingPSK
+    ^{:line 35 :tag bool} sentDummyCCS
+    ^{:line 36 :tag (* cipherSuiteTLS13)} suite
+    ^{:line 37 :tag hash/Hash} transcript
+    ^{:line 38 :tag (* tls13/MasterSecret)} masterSecret
+    ^{:line 39 :tag (slice byte)} trafficSecret ; client_application_traffic_secret_0
+
+    ^{:line 41 :tag (* echClientContext)} echContext))
+
+
+
+
+^{:go/end 161} (go/method handshake "handshake requires hs.c, hs.hello, hs.serverHello, hs.keyShareKeys, and,\noptionally, hs.session, hs.earlySecret and hs.binderKey to be set.\n" ^error [^{:tag (* clientHandshakeStateTLS13)} hs]
+  ^{:go/breaks [[23 160]]} (let [c (.-c hs)]
+
+    ;; The server must not select TLS 1.3 in a renegotiation. See RFC 8446,
+    ;; sections 4.1.2 and 4.1.3.
+    (when (> (.-handshakes c) 0)
+      (.sendAlert c alertProtocolVersion)
+      (return (errors/New "tls: server selected TLS 1.3 in a renegotiation")))
+
+
+    ;; Consistency check on the presence of a keyShare and its parameters.
+    (when (or (== (.-keyShareKeys hs) nil) ^:go/paren (and (== (.-ecdhe (.-keyShareKeys hs)) nil) (== (.-mlkem (.-keyShareKeys hs)) nil))
+        (== (len (.-keyShares (.-hello hs))) 0))
+      (return (.sendAlert c alertInternalError)))
+
+
+    (when [err (.checkServerHelloOrHRR hs)] (!= err nil)
+      (return err))
+
+
+    (set! (.-transcript hs) (.New (.-hash (.-suite hs))))
+
+    (when [err (transcriptMsg (.-hello hs) (.-transcript hs))] (!= err nil)
+      (return err))
+
+
+    (when (!= (.-echContext hs) nil)
+      (set! (.-innerTranscript (.-echContext hs)) (.New (.-hash (.-suite hs))))
+      (when [err (transcriptMsg (.-innerHello (.-echContext hs)) (.-innerTranscript (.-echContext hs)))] (!= err nil)
+        (return err)))
+
+
+
+    (when (bytes/Equal (.-random (.-serverHello hs)) helloRetryRequestRandom)
+      (when [err (.sendDummyChangeCipherSpec hs)] (!= err nil)
+        (return err))
+
+      (when [err (.processHelloRetryRequest hs)] (!= err nil)
+        (return err)))
+
+
+
+    (when (!= (.-echContext hs) nil)
+      (let [confTranscript (cloneHash (.-innerTranscript (.-echContext hs)) (.-hash (.-suite hs)))]
+        (.Write confTranscript (subslice (.-original (.-serverHello hs)) _ 30))
+        (.Write confTranscript (make (slice byte) 8))
+        (.Write confTranscript (subslice (.-original (.-serverHello hs)) 38))
+        (let [h (.-New (.-hash (.-suite hs)))
+            (values prk err) (^{:inst [hash/Hash]} hkdf/Extract h (.-random (.-innerHello (.-echContext hs))) nil)]
+          (when (!= err nil)
+            (.sendAlert c alertInternalError)
+            (return err))
+
+          (let [acceptConfirmation (^{:inst [hash/Hash]} tls13/ExpandLabel h prk "ech accept confirmation" (.Sum confTranscript nil) 8)]
+            (if (== (subtle/ConstantTimeCompare acceptConfirmation (subslice (.-random (.-serverHello hs)) (- (len (.-random (.-serverHello hs))) 8))) 1) (do
+                (set! (.-hello hs) (.-innerHello (.-echContext hs)))
+                (set! (.-serverName c) (.-ServerName (.-config c)))
+                (set! (.-transcript hs) (.-innerTranscript (.-echContext hs)))
+                (set! (.-echAccepted c) true)
+
+                (when (!= (.-encryptedClientHello (.-serverHello hs)) nil)
+                  (.sendAlert c alertUnsupportedExtension)
+                  (return (errors/New "tls: unexpected encrypted client hello extension in server hello despite ECH being accepted")))
+
+
+                (when (and (== (.-serverName (.-hello hs)) "") (.-serverNameAck (.-serverHello hs)))
+                  (.sendAlert c alertUnsupportedExtension)
+                  (return (errors/New "tls: unexpected server_name extension in server hello"))))
+
+
+              (set! (.-echRejected (.-echContext hs)) true))))))
+
+
+
+    (when [err (transcriptMsg (.-serverHello hs) (.-transcript hs))] (!= err nil)
+      (return err))
+
+
+    (set! (.-buffering c) true)
+    (when [err (.processServerHello hs)] (!= err nil)
+      (return err))
+
+    (when [err (.sendDummyChangeCipherSpec hs)] (!= err nil)
+      (return err))
+
+    (when [err (.establishHandshakeKeys hs)] (!= err nil)
+      (return err))
+
+    (when [err (.readServerParameters hs)] (!= err nil)
+      (return err))
+
+    (when [err (.readServerCertificate hs)] (!= err nil)
+      (return err))
+
+    (when [err (.readServerFinished hs)] (!= err nil)
+      (return err))
+
+    (when [err (.sendClientCertificate hs)] (!= err nil)
+      (return err))
+
+    (when [err (.sendClientFinished hs)] (!= err nil)
+      (return err))
+
+    (when [(values _ err) (.flush c)] (!= err nil)
+      (return err))
+
+
+    (when (and (!= (.-echContext hs) nil) (.-echRejected (.-echContext hs)))
+      (.sendAlert c alertECHRequired)
+      (return (addr (lit ECHRejectionError (.-retryConfigs (.-echContext hs))))))
+
+
+    (.Store (.-isHandshakeComplete c) true)
+
+    nil))
+
+
+
+
+^{:go/end 217} (go/method checkServerHelloOrHRR "checkServerHelloOrHRR does validity checks that apply to both ServerHello and\nHelloRetryRequest messages. It sets hs.suite.\n" ^error [^{:tag (* clientHandshakeStateTLS13)} hs]
+  (let [c (.-c hs)]
+
+    (when (== (.-supportedVersion (.-serverHello hs)) 0)
+      (.sendAlert c alertMissingExtension)
+      (return (errors/New "tls: server selected TLS 1.3 using the legacy version field")))
+
+
+    (when (!= (.-supportedVersion (.-serverHello hs)) VersionTLS13)
+      (.sendAlert c alertIllegalParameter)
+      (return (errors/New "tls: server selected an invalid version after a HelloRetryRequest")))
+
+
+    (when (!= (.-vers (.-serverHello hs)) VersionTLS12)
+      (.sendAlert c alertIllegalParameter)
+      (return (errors/New "tls: server sent an incorrect legacy version")))
+
+
+    (when (or (.-ocspStapling (.-serverHello hs))
+        (.-ticketSupported (.-serverHello hs))
+        (.-extendedMasterSecret (.-serverHello hs))
+        (.-secureRenegotiationSupported (.-serverHello hs))
+        (!= (len (.-secureRenegotiation (.-serverHello hs))) 0)
+        (!= (len (.-alpnProtocol (.-serverHello hs))) 0)
+        (!= (len (.-scts (.-serverHello hs))) 0))
+      (.sendAlert c alertUnsupportedExtension)
+      (return (errors/New "tls: server sent a ServerHello extension forbidden in TLS 1.3")))
+
+
+    (when (not (bytes/Equal (.-sessionId (.-hello hs)) (.-sessionId (.-serverHello hs))))
+      (.sendAlert c alertIllegalParameter)
+      (return (errors/New "tls: server did not echo the legacy session ID")))
+
+
+    (when (!= (.-compressionMethod (.-serverHello hs)) compressionNone)
+      (.sendAlert c alertDecodeError)
+      (return (errors/New "tls: server sent non-zero legacy TLS compression method")))
+
+
+    ^{:go/breaks [[6 216]]} (let [selectedSuite (mutualCipherSuiteTLS13 (.-cipherSuites (.-hello hs)) (.-cipherSuite (.-serverHello hs)))]
+      (when (and (!= (.-suite hs) nil) (!= selectedSuite (.-suite hs)))
+        (.sendAlert c alertIllegalParameter)
+        (return (errors/New "tls: server changed cipher suite after a HelloRetryRequest")))
+
+      (when (== selectedSuite nil)
+        (.sendAlert c alertIllegalParameter)
+        (return (errors/New "tls: server chose an unconfigured cipher suite")))
+
+      (set! (.-suite hs) selectedSuite)
+      (set! (.-cipherSuite c) (.-id (.-suite hs)))
+
+      nil)))
+
+
+
+
+^{:go/end 231} (go/method sendDummyChangeCipherSpec "sendDummyChangeCipherSpec sends a ChangeCipherSpec record for compatibility\nwith middleboxes that didn't implement TLS correctly. See RFC 8446, Appendix D.4.\n" ^error [^{:tag (* clientHandshakeStateTLS13)} hs]
+  (when (!= (.-quic (.-c hs)) nil)
+    (return nil))
+
+  (when (.-sentDummyCCS hs)
+    (return nil))
+
+  (set! (.-sentDummyCCS hs) true)
+
+  (.writeChangeCipherRecord (.-c hs)))
+
+
+
+
+^{:go/end 410} (go/method processHelloRetryRequest "processHelloRetryRequest handles the HRR in hs.serverHello, modifies and\nresends hs.hello, and reads the new ServerHello into hs.serverHello.\n" ^error [^{:tag (* clientHandshakeStateTLS13)} hs]
+  (let [c (.-c hs)
+
+      ;; The first ClientHello gets double-hashed into the transcript upon a
+      ;; HelloRetryRequest. (The idea is that the server might offload transcript
+      ;; storage to the client in the cookie.) See RFC 8446, Section 4.4.1.
+      ^{:line 241} chHash (.Sum (.-transcript hs) nil)]
+    (.Reset (.-transcript hs))
+    (.Write (.-transcript hs) (lit (slice byte) typeMessageHash 0 0 (conv uint8 (len chHash))))
+    (.Write (.-transcript hs) chHash)
+    (when [err (transcriptMsg (.-serverHello hs) (.-transcript hs))] (!= err nil)
+      (return err))
+
+
+    (let [^bool isInnerHello (zero bool)
+        ^{:line 250} hello (.-hello hs)]
+      (cond (!= (.-echContext hs) nil) (do
+          (set! chHash (.Sum (.-innerTranscript (.-echContext hs)) nil))
+          (.Reset (.-innerTranscript (.-echContext hs)))
+          (.Write (.-innerTranscript (.-echContext hs)) (lit (slice byte) typeMessageHash 0 0 (conv uint8 (len chHash))))
+          (.Write (.-innerTranscript (.-echContext hs)) chHash)
+
+          (when (!= (.-encryptedClientHello (.-serverHello hs)) nil)
+            (when (!= (len (.-encryptedClientHello (.-serverHello hs))) 8)
+              (.sendAlert (.-c hs) alertDecodeError)
+              (return (errors/New "tls: malformed encrypted client hello extension")))
+
+
+            (let [confTranscript (cloneHash (.-innerTranscript (.-echContext hs)) (.-hash (.-suite hs)))
+                ^{:line 264} hrrHello (make (slice byte) (len (.-original (.-serverHello hs))))]
+              (copy hrrHello (.-original (.-serverHello hs)))
+              (set! hrrHello (bytes/Replace hrrHello (.-encryptedClientHello (.-serverHello hs)) (make (slice byte) 8) 1))
+              (.Write confTranscript hrrHello)
+              (let [h (.-New (.-hash (.-suite hs)))
+                  (values prk err) (^{:inst [hash/Hash]} hkdf/Extract h (.-random (.-innerHello (.-echContext hs))) nil)]
+                (when (!= err nil)
+                  (.sendAlert c alertInternalError)
+                  (return err))
+
+                (let [acceptConfirmation (^{:inst [hash/Hash]} tls13/ExpandLabel h prk "hrr ech accept confirmation" (.Sum confTranscript nil) 8)]
+                  (when (== (subtle/ConstantTimeCompare acceptConfirmation (.-encryptedClientHello (.-serverHello hs))) 1)
+                    (set! hello (.-innerHello (.-echContext hs)))
+                    (set! (.-serverName c) (.-ServerName (.-config c)))
+                    (set! isInnerHello true)
+                    (set! (.-echAccepted c) true))))))
+
+
+
+          (when [err (transcriptMsg (.-serverHello hs) (.-innerTranscript (.-echContext hs)))] (!= err nil)
+            (return err)))
+
+        (!= (.-encryptedClientHello (.-serverHello hs)) nil) (do
+          ;; Unsolicited ECH extension should be rejected
+          (.sendAlert c alertUnsupportedExtension)
+          (return (errors/New "tls: unexpected encrypted client hello extension in serverHello"))))
+
+
+      ;; The only HelloRetryRequest extensions we support are key_share and
+      ;; cookie, and clients must abort the handshake if the HRR would not result
+      ;; in any change in the ClientHello.
+      (when (and (== (.-selectedGroup (.-serverHello hs)) 0) (== (.-cookie (.-serverHello hs)) nil))
+        (.sendAlert c alertIllegalParameter)
+        (return (errors/New "tls: server sent an unnecessary HelloRetryRequest message")))
+
+
+      (when (!= (.-cookie (.-serverHello hs)) nil)
+        (set! (.-cookie hello) (.-cookie (.-serverHello hs))))
+
+
+      (when (!= (.-group (.-serverShare (.-serverHello hs))) 0)
+        (.sendAlert c alertDecodeError)
+        (return (errors/New "tls: received malformed key_share extension")))
+
+
+      ;; If the server sent a key_share extension selecting a group, ensure it's
+      ;; a group we advertised but did not send a key share for, and send a key
+      ;; share for it this time.
+      (when [curveID (.-selectedGroup (.-serverHello hs))] (!= curveID 0)
+        (when (not (^{:inst [(slice CurveID) CurveID]} slices/Contains (.-supportedCurves hello) curveID))
+          (.sendAlert c alertIllegalParameter)
+          (return (errors/New "tls: server selected unsupported group")))
+
+        (when (^{:inst [(slice keyShare) keyShare]} slices/ContainsFunc (.-keyShares (.-hello hs)) ^{:go/end 319} (fn ^bool [^keyShare ks]
+              (== (.-group ks) curveID)))
+
+          (.sendAlert c alertIllegalParameter)
+          (return (errors/New "tls: server sent an unnecessary HelloRetryRequest key_share")))
+
+        (let [(values ke err) (keyExchangeForCurveID curveID)]
+          (when (!= err nil)
+            (.sendAlert c alertInternalError)
+            (return (errors/New "tls: internal error: supportsCurve accepted unimplemented curve")))
+
+          (set! (values (.-keyShareKeys hs) (.-keyShares hello) err) (.keyShares ke (.rand (.-config c))))
+          (when (!= err nil)
+            (.sendAlert c alertInternalError)
+            (return err))
+
+          ;; Do not send the fallback ECDH key share in a HRR response.
+          (set! (.-keyShares hello) (subslice (.-keyShares hello) _ 1))))
+
+
+      (when (> (len (.-pskIdentities hello)) 0)
+        (let [pskSuite (cipherSuiteTLS13ByID (.-cipherSuite (.-session hs)))]
+          (when (== pskSuite nil)
+            (return (.sendAlert c alertInternalError)))
+
+          (if (== (.-hash pskSuite) (.-hash (.-suite hs)))
+            ;; Update binders and obfuscated_ticket_age.
+            (let [ticketAge (.Sub (.time (.-config c)) (time/Unix (conv int64 (.-createdAt (.-session hs))) 0))]
+              (set! (.-obfuscatedTicketAge (aget (.-pskIdentities hello) 0)) (+ (conv uint32 (/ ticketAge time/Millisecond)) (.-ageAdd (.-session hs))))
+
+              (let [transcript (.New (.-hash (.-suite hs)))]
+                (.Write transcript (lit (slice byte) typeMessageHash 0 0 (conv uint8 (len chHash))))
+                (.Write transcript chHash)
+                (when [err (transcriptMsg (.-serverHello hs) transcript)] (!= err nil)
+                  (return err))
+
+
+                (when [err (computeAndUpdatePSK hello (.-binderKey hs) transcript (.-finishedHash (.-suite hs)))] (!= err nil)
+                  (return err))))
+
+            (do
+              ;; Server selected a cipher suite incompatible with the PSK.
+              (set! (.-pskIdentities hello) nil)
+              (set! (.-pskBinders hello) nil)))))
+
+
+
+      (when (.-earlyData hello)
+        (set! (.-earlyData hello) false)
+        (.quicRejectedEarlyData c))
+
+
+      (if isInnerHello (do
+          ;; Any extensions which have changed in hello, but are mirrored in the
+          ;; outer hello and compressed, need to be copied to the outer hello, so
+          ;; they can be properly decompressed by the server. For now, the only
+          ;; extension which may have changed is keyShares.
+          (set! (.-keyShares (.-hello hs)) (.-keyShares hello))
+          (set! (.-innerHello (.-echContext hs)) hello)
+          (when [err (transcriptMsg (.-innerHello (.-echContext hs)) (.-innerTranscript (.-echContext hs)))] (!= err nil)
+            (return err))
+
+
+          (when [err (computeAndUpdateOuterECHExtension (.-hello hs) (.-innerHello (.-echContext hs)) (.-echContext hs) false)] (!= err nil)
+            (return err)))
+
+
+        (set! (.-hello hs) hello))
+
+
+      (when [(values _ err) (.writeHandshakeRecord (.-c hs) (.-hello hs) (.-transcript hs))] (!= err nil)
+        (return err))
+
+
+      ;; serverHelloMsg is not included in the transcript
+      (let [(values msg err) (.readHandshake c nil)]
+        (when (!= err nil)
+          (return err))
+
+
+        ^{:go/breaks [6]} (let [(values serverHello ok) (assert (* serverHelloMsg) msg)]
+          (when (not ok)
+            (.sendAlert c alertUnexpectedMessage)
+            (return (unexpectedMessageError serverHello msg)))
+
+          (set! (.-serverHello hs) serverHello)
+
+          (when [err (.checkServerHelloOrHRR hs)] (!= err nil)
+            (return err))
+
+
+          (set! (.-didHRR c) true)
+          nil)))))
+
+
+^{:go/end 469} (go/method processServerHello ^error [^{:tag (* clientHandshakeStateTLS13)} hs]
+  (let [c (.-c hs)]
+
+    (when (bytes/Equal (.-random (.-serverHello hs)) helloRetryRequestRandom)
+      (.sendAlert c alertUnexpectedMessage)
+      (return (errors/New "tls: server sent two HelloRetryRequest messages")))
+
+
+    (when (!= (len (.-cookie (.-serverHello hs))) 0)
+      (.sendAlert c alertUnsupportedExtension)
+      (return (errors/New "tls: server sent a cookie in a normal ServerHello")))
+
+
+    (when (!= (.-selectedGroup (.-serverHello hs)) 0)
+      (.sendAlert c alertDecodeError)
+      (return (errors/New "tls: malformed key_share extension")))
+
+
+    (when (== (.-group (.-serverShare (.-serverHello hs))) 0)
+      (.sendAlert c alertIllegalParameter)
+      (return (errors/New "tls: server did not send a key share")))
+
+    (when (not (^{:inst [(slice keyShare) keyShare]} slices/ContainsFunc (.-keyShares (.-hello hs)) ^{:go/end 436} (fn ^bool [^keyShare ks]
+            (== (.-group ks) (.-group (.-serverShare (.-serverHello hs)))))))
+
+      (.sendAlert c alertIllegalParameter)
+      (return (errors/New "tls: server selected unsupported group")))
+
+
+    (when (not (.-selectedIdentityPresent (.-serverHello hs)))
+      (return nil))
+
+
+    (when (>= (conv int (.-selectedIdentity (.-serverHello hs))) (len (.-pskIdentities (.-hello hs))))
+      (.sendAlert c alertIllegalParameter)
+      (return (errors/New "tls: server selected an invalid PSK")))
+
+
+    (when (or (!= (len (.-pskIdentities (.-hello hs))) 1) (== (.-session hs) nil))
+      (return (.sendAlert c alertInternalError)))
+
+    ^{:go/breaks [10]} (let [pskSuite (cipherSuiteTLS13ByID (.-cipherSuite (.-session hs)))]
+      (when (== pskSuite nil)
+        (return (.sendAlert c alertInternalError)))
+
+      (when (!= (.-hash pskSuite) (.-hash (.-suite hs)))
+        (.sendAlert c alertIllegalParameter)
+        (return (errors/New "tls: server selected an invalid PSK and cipher suite pair")))
+
+
+      (set! (.-usingPSK hs) true)
+      (set! (.-didResume c) true)
+      (set! (.-peerCertificates c) (.-peerCertificates (.-session hs)))
+      (set! (.-verifiedChains c) (.-verifiedChains (.-session hs)))
+      (set! (.-ocspResponse c) (.-ocspResponse (.-session hs)))
+      (set! (.-scts c) (.-scts (.-session hs)))
+      nil)))
+
+
+^{:go/end 521} (go/method establishHandshakeKeys ^error [^{:tag (* clientHandshakeStateTLS13)} hs]
+  (let [c (.-c hs)
+
+      (values ke err) (keyExchangeForCurveID (.-group (.-serverShare (.-serverHello hs))))]
+    (when (!= err nil)
+      (.sendAlert c alertInternalError)
+      (return err))
+
+    (let [(values sharedKey ^:assign err) (.clientSharedSecret ke (.-keyShareKeys hs) (.-data (.-serverShare (.-serverHello hs))))]
+      (when (!= err nil)
+        (.sendAlert c alertIllegalParameter)
+        (return (errors/New "tls: invalid server key share")))
+
+      (set! (.-curveID c) (.-group (.-serverShare (.-serverHello hs))))
+
+      (let [earlySecret (.-earlySecret hs)]
+        (when (not (.-usingPSK hs))
+          (set! earlySecret (^{:inst [hash/Hash]} tls13/NewEarlySecret (.-New (.-hash (.-suite hs))) nil)))
+
+
+        (let [handshakeSecret (.HandshakeSecret earlySecret sharedKey)
+
+            ^{:line 493} clientSecret (.ClientHandshakeTrafficSecret handshakeSecret (.-transcript hs))]
+          (.setWriteTrafficSecret c (.-suite hs) QUICEncryptionLevelHandshake clientSecret)
+          ^{:go/breaks [[9 520]]} (let [serverSecret (.ServerHandshakeTrafficSecret handshakeSecret (.-transcript hs))]
+            (when [err (.setReadTrafficSecret c (.-suite hs) QUICEncryptionLevelHandshake serverSecret false)] (!= err nil)
+              (return err))
+
+
+            (when (!= (.-quic c) nil)
+              (.quicSetWriteSecret c QUICEncryptionLevelHandshake (.-id (.-suite hs)) clientSecret)
+              (when [err (.quicSetReadSecret c QUICEncryptionLevelHandshake (.-id (.-suite hs)) serverSecret)] (!= err nil)
+                (return err)))
+
+
+
+            (set! err (.writeKeyLog (.-config c) keyLogLabelClientHandshake (.-random (.-hello hs)) clientSecret))
+            (when (!= err nil)
+              (.sendAlert c alertInternalError)
+              (return err))
+
+            (set! err (.writeKeyLog (.-config c) keyLogLabelServerHandshake (.-random (.-hello hs)) serverSecret))
+            (when (!= err nil)
+              (.sendAlert c alertInternalError)
+              (return err))
+
+
+            (set! (.-masterSecret hs) (.MasterSecret handshakeSecret))
+
+            nil))))))
+
+
+^{:go/end 588} (go/method readServerParameters ^error [^{:tag (* clientHandshakeStateTLS13)} hs]
+  (let [c (.-c hs)
+
+      (values msg err) (.readHandshake c (.-transcript hs))]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[10 587]]} (let [(values encryptedExtensions ok) (assert (* encryptedExtensionsMsg) msg)]
+      (when (not ok)
+        (.sendAlert c alertUnexpectedMessage)
+        (return (unexpectedMessageError encryptedExtensions msg)))
+
+
+      (when [err (checkALPN (.-alpnProtocols (.-hello hs)) (.-alpnProtocol encryptedExtensions) (!= (.-quic c) nil))] (!= err nil)
+        ;; RFC 8446 specifies that no_application_protocol is sent by servers, but
+        ;; does not specify how clients handle the selection of an incompatible protocol.
+        ;; RFC 9001 Section 8.1 specifies that QUIC clients send no_application_protocol
+        ;; in this case. Always sending no_application_protocol seems reasonable.
+        (.sendAlert c alertNoApplicationProtocol)
+        (return err))
+
+      (set! (.-clientProtocol c) (.-alpnProtocol encryptedExtensions))
+
+      (if (!= (.-quic c) nil) (do
+          (when (== (.-quicTransportParameters encryptedExtensions) nil)
+            ;; RFC 9001 Section 8.2.
+            (.sendAlert c alertMissingExtension)
+            (return (errors/New "tls: server did not send a quic_transport_parameters extension")))
+
+          (.quicSetTransportParameters c (.-quicTransportParameters encryptedExtensions)))
+        (do
+          (when (!= (.-quicTransportParameters encryptedExtensions) nil)
+            (.sendAlert c alertUnsupportedExtension)
+            (return (errors/New "tls: server sent an unexpected quic_transport_parameters extension")))))
+
+
+
+      (when (and (not (.-earlyData (.-hello hs))) (.-earlyData encryptedExtensions))
+        (.sendAlert c alertUnsupportedExtension)
+        (return (errors/New "tls: server sent an unexpected early_data extension")))
+
+      (when (and (.-earlyData (.-hello hs)) (not (.-earlyData encryptedExtensions)))
+        (.quicRejectedEarlyData c))
+
+      (when (.-earlyData encryptedExtensions)
+        (when (!= (.-cipherSuite (.-session hs)) (.-cipherSuite c))
+          (.sendAlert c alertHandshakeFailure)
+          (return (errors/New "tls: server accepted 0-RTT with the wrong cipher suite")))
+
+        (when (!= (.-alpnProtocol (.-session hs)) (.-clientProtocol c))
+          (.sendAlert c alertHandshakeFailure)
+          (return (errors/New "tls: server accepted 0-RTT with the wrong ALPN"))))
+
+
+      (when (!= (.-echContext hs) nil)
+        (cond (.-echRejected (.-echContext hs))
+          (set! (.-retryConfigs (.-echContext hs)) (.-echRetryConfigs encryptedExtensions))
+          (!= (.-echRetryConfigs encryptedExtensions) nil) (do
+            (.sendAlert c alertUnsupportedExtension)
+            (return (errors/New "tls: server sent encrypted client hello retry configs after accepting encrypted client hello")))))
+
+
+
+      nil)))
+
+
+^{:go/end 682} (go/method readServerCertificate ^error [^{:tag (* clientHandshakeStateTLS13)} hs]
+  (let [c (.-c hs)]
+
+    ;; Either a PSK or a certificate is always used, but not both.
+    ;; See RFC 8446, Section 4.1.1.
+    (when (.-usingPSK hs)
+      ;; Make sure the connection is still being verified whether or not this
+      ;; is a resumption. Resumptions currently don't reverify certificates so
+      ;; they don't call verifyServerCertificate. See Issue 31641.
+      (when (!= (.-VerifyConnection (.-config c)) nil)
+        (when [err ((.-VerifyConnection (.-config c)) (.connectionStateLocked c))] (!= err nil)
+          (.sendAlert c alertBadCertificate)
+          (return err)))
+
+
+      (return nil))
+
+
+    (let [(values msg err) (.readHandshake c (.-transcript hs))]
+      (when (!= err nil)
+        (return err))
+
+
+      (let [(values certReq ok) (assert (* certificateRequestMsgTLS13) msg)]
+        (when ok
+          (set! (.-certReq hs) certReq)
+
+          (set! (values msg err) (.readHandshake c (.-transcript hs)))
+          (when (!= err nil)
+            (return err)))
+
+
+
+        (let [(values certMsg ^:assign ok) (assert (* certificateMsgTLS13) msg)]
+          (when (not ok)
+            (.sendAlert c alertUnexpectedMessage)
+            (return (unexpectedMessageError certMsg msg)))
+
+          (when (== (len (.-Certificate (.-certificate certMsg))) 0)
+            (.sendAlert c alertDecodeError)
+            (return (errors/New "tls: received empty certificates message")))
+
+
+          (set! (.-scts c) (.-SignedCertificateTimestamps (.-certificate certMsg)))
+          (set! (.-ocspResponse c) (.-OCSPStaple (.-certificate certMsg)))
+
+          (when [err (.verifyServerCertificate c (.-Certificate (.-certificate certMsg)))] (!= err nil)
+            (return err))
+
+
+          ;; certificateVerifyMsg is included in the transcript, but not until
+          ;; after we verify the handshake signature, since the state before
+          ;; this message was sent is used.
+          (set! (values msg err) (.readHandshake c nil))
+          (when (!= err nil)
+            (return err))
+
+
+          (let [(values certVerify ^:assign ok) (assert (* certificateVerifyMsg) msg)]
+            (when (not ok)
+              (.sendAlert c alertUnexpectedMessage)
+              (return (unexpectedMessageError certVerify msg)))
+
+
+            ;; See RFC 8446, Section 4.4.3.
+            ;; We don't use hs.hello.supportedSignatureAlgorithms because it might
+            ;; include PKCS#1 v1.5 and SHA-1 if the ClientHello also supported TLS 1.2.
+            (when (or (not (isSupportedSignatureAlgorithm (.-signatureAlgorithm certVerify) (supportedSignatureAlgorithms (.-vers c) (.-vers c))))
+                (not (isSupportedSignatureAlgorithm (.-signatureAlgorithm certVerify) (signatureSchemesForPublicKey (.-vers c) (.-PublicKey (aget (.-peerCertificates c) 0))))))
+              (.sendAlert c alertIllegalParameter)
+              (return (errors/New "tls: certificate used with invalid signature algorithm")))
+
+            (let [(values sigType sigHash ^:assign err) (typeAndHashFromSignatureScheme (.-signatureAlgorithm certVerify))]
+              (when (!= err nil)
+                (return (.sendAlert c alertInternalError)))
+
+              (when (or (== sigType signaturePKCS1v15) (== sigHash crypto/SHA1))
+                (return (.sendAlert c alertInternalError)))
+
+              ^{:go/breaks [[5 681]]} (let [signed (signedMessage serverSignatureContext (.-transcript hs))]
+                (when [err (verifyHandshakeSignature sigType (.-PublicKey (aget (.-peerCertificates c) 0))
+                      ^{:line 671} sigHash signed (.-signature certVerify))] (!= err nil)
+                  (.sendAlert c alertDecryptError)
+                  (return (errors/New (+ "tls: invalid signature by the server certificate: " (.Error err)))))
+
+                (set! (.-peerSigAlg c) (.-signatureAlgorithm certVerify))
+
+                (when [err (transcriptMsg certVerify (.-transcript hs))] (!= err nil)
+                  (return err))
+
+
+                nil))))))))
+
+
+^{:go/end 733} (go/method readServerFinished ^error [^{:tag (* clientHandshakeStateTLS13)} hs]
+  (let [c (.-c hs)
+
+      ;; finishedMsg is included in the transcript, but not until after we
+      ;; check the client version, since the state before this message was
+      ;; sent is used during verification.
+      (values msg err) (.readHandshake c nil)]
+    (when (!= err nil)
+      (return err))
+
+
+    (let [(values finished ok) (assert (* finishedMsg) msg)]
+      (when (not ok)
+        (.sendAlert c alertUnexpectedMessage)
+        (return (unexpectedMessageError finished msg)))
+
+
+      (let [expectedMAC (.finishedHash (.-suite hs) (.-trafficSecret (.-in c)) (.-transcript hs))]
+        (when (not (hmac/Equal expectedMAC (.-verifyData finished)))
+          (.sendAlert c alertDecryptError)
+          (return (errors/New "tls: invalid server finished hash")))
+
+
+        (when [err (transcriptMsg finished (.-transcript hs))] (!= err nil)
+          (return err))
+
+
+        ;; Derive secrets that take context through the server Finished.
+
+        (set! (.-trafficSecret hs) (.ClientApplicationTrafficSecret (.-masterSecret hs) (.-transcript hs)))
+        ^{:go/breaks [[8 732]]} (let [serverSecret (.ServerApplicationTrafficSecret (.-masterSecret hs) (.-transcript hs))]
+          (when [err (.setReadTrafficSecret c (.-suite hs) QUICEncryptionLevelApplication serverSecret false)] (!= err nil)
+            (return err))
+
+
+          (set! err (.writeKeyLog (.-config c) keyLogLabelClientTraffic (.-random (.-hello hs)) (.-trafficSecret hs)))
+          (when (!= err nil)
+            (.sendAlert c alertInternalError)
+            (return err))
+
+          (set! err (.writeKeyLog (.-config c) keyLogLabelServerTraffic (.-random (.-hello hs)) serverSecret))
+          (when (!= err nil)
+            (.sendAlert c alertInternalError)
+            (return err))
+
+
+          (set! (.-ekm c) (.exportKeyingMaterial (.-suite hs) (.-masterSecret hs) (.-transcript hs)))
+
+          nil)))))
+
+
+^{:go/end 811} (go/method sendClientCertificate ^error [^{:tag (* clientHandshakeStateTLS13)} hs]
+  (let [c (.-c hs)]
+
+    (when (== (.-certReq hs) nil)
+      (return nil))
+
+
+    (when (and (!= (.-echContext hs) nil) (.-echRejected (.-echContext hs)))
+      (when [(values _ err) (.writeHandshakeRecord (.-c hs) (addr (lit certificateMsgTLS13)) (.-transcript hs))] (!= err nil)
+        (return err))
+
+      (return nil))
+
+
+    (let [(values cert err) (.getClientCertificate c (addr ^{:go/breaks [2 4 6 8]} (lit CertificateRequestInfo
+              :AcceptableCAs (.-certificateAuthorities (.-certReq hs))
+              :SignatureSchemes (.-supportedSignatureAlgorithms (.-certReq hs))
+              :Version (.-vers c)
+              :ctx (.-ctx hs))))]
+
+      (when (!= err nil)
+        (return err))
+
+
+      (when (!= cert nil)
+        (set! (.-localCertificate (.-c hs)) (.-Certificate cert)))
+
+
+      (let [certMsg (new certificateMsgTLS13)]
+
+        (set! (.-certificate certMsg) @cert)
+        (set! (.-scts certMsg) (and (.-scts (.-certReq hs)) (> (len (.-SignedCertificateTimestamps cert)) 0)))
+        (set! (.-ocspStapling certMsg) (and (.-ocspStapling (.-certReq hs)) (> (len (.-OCSPStaple cert)) 0)))
+
+        (when [(values _ err) (.writeHandshakeRecord (.-c hs) certMsg (.-transcript hs))] (!= err nil)
+          (return err))
+
+
+        ;; If we sent an empty certificate message, skip the CertificateVerify.
+        (when (== (len (.-Certificate cert)) 0)
+          (return nil))
+
+
+        (let [certVerifyMsg (new certificateVerifyMsg)]
+          (set! (.-hasSignatureAlgorithm certVerifyMsg) true)
+
+          (set! (values (.-signatureAlgorithm certVerifyMsg) err) (selectSignatureScheme (.-vers c) cert (.-supportedSignatureAlgorithms (.-certReq hs))))
+          (when (!= err nil)
+            ;; getClientCertificate returned a certificate incompatible with the
+            ;; CertificateRequestInfo supported signature algorithms.
+            (.sendAlert c alertHandshakeFailure)
+            (return err))
+
+
+          (let [(values sigType sigHash ^:assign err) (typeAndHashFromSignatureScheme (.-signatureAlgorithm certVerifyMsg))]
+            (when (!= err nil)
+              (return (.sendAlert c alertInternalError)))
+
+
+            (let [signed (signedMessage clientSignatureContext (.-transcript hs))
+                ^{:line 795} signOpts (conv crypto/SignerOpts sigHash)]
+              (when (== sigType signatureRSAPSS)
+                (set! signOpts (addr (lit rsa/PSSOptions :SaltLength rsa/PSSSaltLengthEqualsHash :Hash sigHash))))
+
+              ^{:go/breaks [[5 810]]} (let [(values sig ^:assign err) (crypto/SignMessage (assert crypto/Signer (.-PrivateKey cert)) (.rand (.-config c)) signed signOpts)]
+                (when (!= err nil)
+                  (.sendAlert c alertInternalError)
+                  (return (errors/New (+ "tls: failed to sign handshake: " (.Error err)))))
+
+                (set! (.-signature certVerifyMsg) sig)
+
+                (when [(values _ err) (.writeHandshakeRecord (.-c hs) certVerifyMsg (.-transcript hs))] (!= err nil)
+                  (return err))
+
+
+                nil))))))))
+
+
+^{:go/end 835} (go/method sendClientFinished ^error [^{:tag (* clientHandshakeStateTLS13)} hs]
+  ^{:go/breaks [[6 834]]} (let [c (.-c hs)
+
+      ^{:line 816} finished (addr ^{:go/breaks [2]} (lit finishedMsg
+          :verifyData (.finishedHash (.-suite hs) (.-trafficSecret (.-out c)) (.-transcript hs))))]
+
+
+    (when [(values _ err) (.writeHandshakeRecord (.-c hs) finished (.-transcript hs))] (!= err nil)
+      (return err))
+
+
+    (.setWriteTrafficSecret c (.-suite hs) QUICEncryptionLevelApplication (.-trafficSecret hs))
+
+    (when (and (not (.-SessionTicketsDisabled (.-config c))) (!= (.-ClientSessionCache (.-config c)) nil))
+      (set! (.-resumptionSecret c) (.ResumptionMasterSecret (.-masterSecret hs) (.-transcript hs))))
+
+
+    (when (!= (.-quic c) nil)
+      (.quicSetWriteSecret c QUICEncryptionLevelApplication (.-id (.-suite hs)) (.-trafficSecret hs)))
+
+
+    nil))
+
+
+^{:go/end 892} (go/method handleNewSessionTicket ^error [^{:tag (* Conn)} c ^{:tag (* newSessionTicketMsgTLS13)} msg]
+  (when (not (.-isClient c))
+    (.sendAlert c alertUnexpectedMessage)
+    (return (errors/New "tls: received new session ticket from a client")))
+
+
+  (when (or (.-SessionTicketsDisabled (.-config c)) (== (.-ClientSessionCache (.-config c)) nil))
+    (return nil))
+
+
+  ;; See RFC 8446, Section 4.6.1.
+  (when (== (.-lifetime msg) 0)
+    (return nil))
+
+  (let [lifetime (* (conv time/Duration (.-lifetime msg)) time/Second)]
+    (when (> lifetime maxSessionTicketLifetime)
+      (.sendAlert c alertIllegalParameter)
+      (return (errors/New "tls: received a session ticket with invalid lifetime")))
+
+
+    (when (== (len (.-label msg)) 0)
+      (.sendAlert c alertDecodeError)
+      (return (errors/New "tls: received a session ticket with empty opaque ticket label")))
+
+
+    ;; RFC 9001, Section 4.6.1
+    (when (and (!= (.-quic c) nil) (!= (.-maxEarlyData msg) 0) (!= (.-maxEarlyData msg) 0xffffffff))
+      (.sendAlert c alertIllegalParameter)
+      (return (errors/New "tls: invalid early data for QUIC connection")))
+
+
+    (let [cipherSuite (cipherSuiteTLS13ByID (.-cipherSuite c))]
+      (when (or (== cipherSuite nil) (== (.-resumptionSecret c) nil))
+        (return (.sendAlert c alertInternalError)))
+
+
+      (let [psk (^{:inst [hash/Hash]} tls13/ExpandLabel (.-New (.-hash cipherSuite)) (.-resumptionSecret c) "resumption"
+            (.-nonce msg) (.Size (.-hash cipherSuite)))
+
+          ^{:line 876} session (.sessionState c)]
+        (set! (.-secret session) psk)
+        (set! (.-useBy session) (conv uint64 (.Unix (.Add (.time (.-config c)) lifetime))))
+        (set! (.-ageAdd session) (.-ageAdd msg))
+        (set! (.-EarlyData session) (and (!= (.-quic c) nil) (== (.-maxEarlyData msg) 0xffffffff))) ; RFC 9001, Section 4.6.1
+        (set! (.-ticket session) (.-label msg))
+        (when (and (!= (.-quic c) nil) (.-enableSessionEvents (.-quic c)))
+          (.quicStoreSession c session)
+          (return nil))
+
+        ^{:go/breaks [[3 891]]} (let [cs (addr (lit ClientSessionState :session session))]
+          (when [cacheKey (.clientSessionCacheKey c)] (!= cacheKey "")
+            (.Put (.-ClientSessionCache (.-config c)) cacheKey cs))
+
+
+          nil)))))

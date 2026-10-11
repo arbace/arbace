@@ -1,0 +1,201 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.x509) (go/file "pkcs1.go" :imports [
+
+
+    ^{:line 8} [rsa "crypto/rsa"]
+    ^{:line 9} [asn1 "encoding/asn1"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [godebug "internal/godebug"]
+    ^{:line 12} [big "math/big"]])
+
+
+
+(go/type pkcs1PrivateKey "pkcs1PrivateKey is a structure which mirrors the PKCS #1 ASN.1 for an RSA private key.\n" (struct
+    ^{:line 17 :tag int} Version
+    ^{:line 18 :tag (* big/Int)} N
+    ^{:line 19 :tag int} E
+    ^{:line 20 :tag (* big/Int)} D
+    ^{:line 21 :tag (* big/Int)} P
+    ^{:line 22 :tag (* big/Int)} Q
+    ^{:line 23 :tag (* big/Int) :go/tag "asn1:\"optional\""} Dp
+    ^{:line 24 :tag (* big/Int) :go/tag "asn1:\"optional\""} Dq
+    ^{:line 25 :tag (* big/Int) :go/tag "asn1:\"optional\""} Qinv
+
+    ^{:line 27 :tag (slice pkcs1AdditionalRSAPrime) :go/tag "asn1:\"optional,omitempty\""} AdditionalPrimes))
+
+
+(go/type pkcs1AdditionalRSAPrime (struct
+    ^{:line 31 :tag (* big/Int)} Prime
+
+
+    ^{:line 34 :tag (* big/Int) :doc "We ignore these values because rsa will calculate them.\n"} Exp
+    ^{:line 35 :tag (* big/Int)} Coeff))
+
+
+
+(go/type pkcs1PublicKey "pkcs1PublicKey reflects the ASN.1 structure of a PKCS #1 public key.\n" (struct
+    ^{:line 40 :tag (* big/Int)} N
+    ^{:line 41 :tag int} E))
+
+
+
+
+(go/var ^{:doc "x509rsacrt, if zero, makes ParsePKCS1PrivateKey ignore and recompute invalid\nCRT values in the RSA private key.\n"} x509rsacrt (godebug/New "x509rsacrt"))
+
+
+
+
+
+
+
+^{:go/end 122} (go/func ParsePKCS1PrivateKey "ParsePKCS1PrivateKey parses an [RSA] private key in PKCS #1, ASN.1 DER form.\n\nThis kind of key is commonly encoded in PEM blocks of type \"RSA PRIVATE KEY\".\n\nBefore Go 1.24, the CRT parameters were ignored and recomputed. To restore\nthe old behavior, use the GODEBUG=x509rsacrt=0 environment variable.\n" [^{:tag (slice byte)} der] :results [(* rsa/PrivateKey) error]
+  (let [^pkcs1PrivateKey priv (zero pkcs1PrivateKey)
+      (values rest err) (asn1/Unmarshal der (addr priv))]
+    (when (> (len rest) 0)
+      (return nil (lit asn1/SyntaxError :Msg "trailing data")))
+
+    (when (!= err nil)
+      (when [(values _ err) (asn1/Unmarshal der (addr (lit ecPrivateKey)))] (== err nil)
+        (return nil (errors/New "x509: failed to parse private key (use ParseECPrivateKey instead for this key format)")))
+
+      (when [(values _ err) (asn1/Unmarshal der (addr (lit pkcs8)))] (== err nil)
+        (return nil (errors/New "x509: failed to parse private key (use ParsePKCS8PrivateKey instead for this key format)")))
+
+      (return nil err))
+
+
+    (when (> (.-Version priv) 1)
+      (return nil (errors/New "x509: unsupported private key version")))
+
+
+    (when (or (<= (.Sign (.-N priv)) 0) (<= (.Sign (.-D priv)) 0) (<= (.Sign (.-P priv)) 0) (<= (.Sign (.-Q priv)) 0)
+        (and (!= (.-Dp priv) nil) (<= (.Sign (.-Dp priv)) 0))
+        (and (!= (.-Dq priv) nil) (<= (.Sign (.-Dq priv)) 0))
+        (and (!= (.-Qinv priv) nil) (<= (.Sign (.-Qinv priv)) 0)))
+      (return nil (errors/New "x509: private key contains zero or negative value")))
+
+
+    (let [key (new rsa/PrivateKey)]
+      (set! (.-PublicKey key) ^{:go/breaks [2 4]} (lit rsa/PublicKey
+          :E (.-E priv)
+          :N (.-N priv)))
+
+
+      (set! (.-D key) (.-D priv))
+      (set! (.-Primes key) (make (slice (* big/Int)) (+ 2 (len (.-AdditionalPrimes priv)))))
+      (aset (.-Primes key) 0 (.-P priv))
+      (aset (.-Primes key) 1 (.-Q priv))
+      (set! (.-Dp (.-Precomputed key)) (.-Dp priv))
+      (set! (.-Dq (.-Precomputed key)) (.-Dq priv))
+      (set! (.-Qinv (.-Precomputed key)) (.-Qinv priv))
+      (range [i a (.-AdditionalPrimes priv)]
+        (when (<= (.Sign (.-Prime a)) 0)
+          (return nil (errors/New "x509: private key contains zero or negative prime")))
+
+        (aset (.-Primes key) (+ i 2) (.-Prime a)))
+      ;; We ignore the other two values because rsa will calculate
+      ;; them as needed.
+
+
+      (.Precompute key)
+      (when [err (.Validate key)] (!= err nil)
+        ;; If x509rsacrt=0 is set, try dropping the CRT values and
+        ;; rerunning precomputation and key validation.
+        (when (== (.Value x509rsacrt) "0")
+          (set! (.-Dp (.-Precomputed key)) nil)
+          (set! (.-Dq (.-Precomputed key)) nil)
+          (set! (.-Qinv (.-Precomputed key)) nil)
+          (.Precompute key)
+          (when [err (.Validate key)] (== err nil)
+            (.IncNonDefault x509rsacrt)
+            (return key nil)))
+
+
+
+        (return nil err))
+
+
+      (return key nil))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 162} (go/func MarshalPKCS1PrivateKey "MarshalPKCS1PrivateKey converts an [RSA] private key to PKCS #1, ASN.1 DER form.\n\nThis kind of key is commonly encoded in PEM blocks of type \"RSA PRIVATE KEY\".\nFor a more flexible key format which is not [RSA] specific, use\n[MarshalPKCS8PrivateKey].\n\nThe key must have passed validation by calling [rsa.PrivateKey.Validate]\nfirst. MarshalPKCS1PrivateKey calls [rsa.PrivateKey.Precompute], which may\nmodify the key if not already precomputed.\n" ^{:tag (slice byte)} [^{:tag (* rsa/PrivateKey)} key]
+  (.Precompute key)
+
+  (let [version 0]
+    (when (> (len (.-Primes key)) 2)
+      (set! version 1))
+
+
+    (let [priv ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit pkcs1PrivateKey
+          :Version version
+          :N ^{:go/via [PublicKey]} (.-N key)
+          :E (.-E (.-PublicKey key))
+          :D (.-D key)
+          :P (aget (.-Primes key) 0)
+          :Q (aget (.-Primes key) 1)
+          :Dp (.-Dp (.-Precomputed key))
+          :Dq (.-Dq (.-Precomputed key))
+          :Qinv (.-Qinv (.-Precomputed key)))]
+
+
+      (set! (.-AdditionalPrimes priv) (make (slice pkcs1AdditionalRSAPrime) (len (.-CRTValues (.-Precomputed key)))))
+      (range [i values (.-CRTValues (.-Precomputed key))]
+        (set! (.-Prime (aget (.-AdditionalPrimes priv) i)) (aget (.-Primes key) (+ 2 i)))
+        (set! (.-Exp (aget (.-AdditionalPrimes priv) i)) (.-Exp values))
+        (set! (.-Coeff (aget (.-AdditionalPrimes priv) i)) (.-Coeff values)))
+
+
+      (let [(values b _) (asn1/Marshal priv)]
+        ^{:line 161} b))))
+
+
+
+
+
+^{:go/end 191} (go/func ParsePKCS1PublicKey "ParsePKCS1PublicKey parses an [RSA] public key in PKCS #1, ASN.1 DER form.\n\nThis kind of key is commonly encoded in PEM blocks of type \"RSA PUBLIC KEY\".\n" [^{:tag (slice byte)} der] :results [(* rsa/PublicKey) error]
+  (let [^pkcs1PublicKey pub (zero pkcs1PublicKey)
+      (values rest err) (asn1/Unmarshal der (addr pub))]
+    (when (!= err nil)
+      (when [(values _ err) (asn1/Unmarshal der (addr (lit publicKeyInfo)))] (== err nil)
+        (return nil (errors/New "x509: failed to parse public key (use ParsePKIXPublicKey instead for this key format)")))
+
+      (return nil err))
+
+    (when (> (len rest) 0)
+      (return nil (lit asn1/SyntaxError :Msg "trailing data")))
+
+
+    (when (or (<= (.Sign (.-N pub)) 0) (<= (.-E pub) 0))
+      (return nil (errors/New "x509: public key contains zero or negative value")))
+
+    (when (> (.-E pub) (- (<< 1 31) 1))
+      (return nil (errors/New "x509: public key contains large public exponent")))
+
+
+    ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4]} (lit rsa/PublicKey
+          :E (.-E pub)
+          :N (.-N pub)))
+      nil)))
+
+
+
+
+
+^{:go/end 202} (go/func MarshalPKCS1PublicKey "MarshalPKCS1PublicKey converts an [RSA] public key to PKCS #1, ASN.1 DER form.\n\nThis kind of key is commonly encoded in PEM blocks of type \"RSA PUBLIC KEY\".\n" ^{:tag (slice byte)} [^{:tag (* rsa/PublicKey)} key]
+  (let [(values derBytes _) (asn1/Marshal ^{:go/breaks [2 4]} (lit pkcs1PublicKey
+          :N (.-N key)
+          :E (.-E key)))]
+
+    ^{:line 201} derBytes))

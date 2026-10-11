@@ -1,0 +1,295 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.regexp.syntax) (go/file "compile.go" :imports [
+
+    ^{:line 7} [unicode "unicode"]])
+
+
+
+
+
+
+
+
+
+
+
+(go/type patchList "A patchList is a list of instruction pointers that need to be filled in (patched).\nBecause the pointers haven't been filled in yet, we can reuse their storage\nto hold the list. It's kind of sleazy, but works well in practice.\nSee https://swtch.com/~rsc/regexp/regexp1.html for inspiration.\n\nThese aren't really pointers: they're integers, so we can reinterpret them\nthis way without using package unsafe. A value l.head denotes\np.inst[l.head>>1].Out (l.head&1==0) or .Arg (l.head&1==1).\nhead == 0 denotes the empty list, okay because we start every program\nwith a fail instruction, so we'll never want to point at its output link.\n" (struct
+    ^{:line 20 :tag uint32} head ^uint32 tail))
+
+
+^{:go/end 25} (go/func makePatchList ^patchList [^uint32 n]
+  (lit patchList n n))
+
+
+^{:go/end 39} (go/method patch [^patchList l ^{:tag (* Prog)} p ^uint32 val]
+  (let [head (.-head l)]
+    (while (!= head 0)
+      (let [i (addr (aget (.-Inst p) (>> head 1)))]
+        (if (== (bit-and head 1) 0) (do
+            (set! head (.-Out i))
+            (set! (.-Out i) val))
+          (do
+            (set! head (.-Arg i))
+            (set! (.-Arg i) val)))))))
+
+
+
+
+^{:go/end 56} (go/method append ^patchList [^patchList l1 ^{:tag (* Prog)} p ^patchList l2]
+  (when (== (.-head l1) 0)
+    (return l2))
+
+  (when (== (.-head l2) 0)
+    (return l1))
+
+
+  (let [i (addr (aget (.-Inst p) (>> (.-tail l1) 1)))]
+    (if (== (bit-and (.-tail l1) 1) 0)
+      (set! (.-Out i) (.-head l2))
+
+      (set! (.-Arg i) (.-head l2)))
+
+    (lit patchList (.-head l1) (.-tail l2))))
+
+
+
+(go/type frag "A frag represents a compiled program fragment.\n" (struct
+    ^{:line 60 :tag uint32} i ; index of first instruction
+    ^{:line 61 :tag patchList} out ; where to record end instruction
+    ^{:line 62 :tag bool} nullable)) ; whether fragment can match empty string
+
+
+(go/type compiler (struct
+    ^{:line 66 :tag (* Prog)} p))
+
+
+
+
+^{:go/end 78} (go/func Compile "Compile compiles the regexp into a program to be executed.\nThe regexp should have been simplified already (returned from re.Simplify).\n" [^{:tag (* Regexp)} re] :results [(* Prog) error]
+  (let [^compiler c (zero compiler)]
+    (.init c)
+    (let [f (.compile c re)]
+      (.patch (.-out f) (.-p c) (.-i (.inst c InstMatch)))
+      (set! (.-Start (.-p c)) (conv int (.-i f)))
+      (return (.-p c) nil))))
+
+
+^{:go/end 84} (go/method init [^{:tag (* compiler)} c]
+  (set! (.-p c) (new Prog))
+  (set! (.-NumCap (.-p c)) 2) ; implicit ( and ) for whole match $0
+  (.inst c InstFail))
+
+
+(go/var anyRuneNotNL (lit (slice rune) 0 (- \newline 1) (+ \newline 1) unicode/MaxRune))
+(go/var anyRune (lit (slice rune) 0 unicode/MaxRune))
+
+^{:go/end 159} (go/method compile ^frag [^{:tag (* compiler)} c ^{:tag (* Regexp)} re]
+  (switch (.-Op re)
+    (case [OpNoMatch]
+      (return (.fail c)))
+    (case [OpEmptyMatch]
+      (return (.nop c)))
+    (case [OpLiteral]
+      (when (== (len (.-Rune re)) 0)
+        (return (.nop c)))
+
+      (let [^frag f (zero frag)]
+        (range [j (.-Rune re)]
+          (let [f1 (.rune c (subslice (.-Rune re) j (+ j 1)) (.-Flags re))]
+            (if (== j 0)
+              (set! f f1)
+
+              (set! f (.cat c f f1)))))
+
+
+        (return f)))
+    (case [OpCharClass]
+      (return (.rune c (.-Rune re) (.-Flags re))))
+    (case [OpAnyCharNotNL]
+      (return (.rune c anyRuneNotNL 0)))
+    (case [OpAnyChar]
+      (return (.rune c anyRune 0)))
+    (case [OpBeginLine]
+      (return (.empty c EmptyBeginLine)))
+    (case [OpEndLine]
+      (return (.empty c EmptyEndLine)))
+    (case [OpBeginText]
+      (return (.empty c EmptyBeginText)))
+    (case [OpEndText]
+      (return (.empty c EmptyEndText)))
+    (case [OpWordBoundary]
+      (return (.empty c EmptyWordBoundary)))
+    (case [OpNoWordBoundary]
+      (return (.empty c EmptyNoWordBoundary)))
+    (case [OpCapture]
+      (let [bra (.cap c (conv uint32 (<< (.-Cap re) 1)))
+          ^{:line 129} sub (.compile c (aget (.-Sub re) 0))
+          ^{:line 130} ket (.cap c (conv uint32 (bit-or (<< (.-Cap re) 1) 1)))]
+        (return (.cat c (.cat c bra sub) ket))))
+    (case [OpStar]
+      (return (.star c (.compile c (aget (.-Sub re) 0)) (!= (bit-and (.-Flags re) NonGreedy) 0))))
+    (case [OpPlus]
+      (return (.plus c (.compile c (aget (.-Sub re) 0)) (!= (bit-and (.-Flags re) NonGreedy) 0))))
+    (case [OpQuest]
+      (return (.quest c (.compile c (aget (.-Sub re) 0)) (!= (bit-and (.-Flags re) NonGreedy) 0))))
+    (case [OpConcat]
+      (when (== (len (.-Sub re)) 0)
+        (return (.nop c)))
+
+      (let [^frag f (zero frag)]
+        (range [i sub (.-Sub re)]
+          (if (== i 0)
+            (set! f (.compile c sub))
+
+            (set! f (.cat c f (.compile c sub)))))
+
+
+        (return f)))
+    (case [OpAlternate]
+      (let [^frag f (zero frag)]
+        (range [_ sub (.-Sub re)]
+          (set! f (.alt c f (.compile c sub))))
+
+        (return f))))
+
+  (panic "regexp: unhandled case in compile"))
+
+
+^{:go/end 166} (go/method inst ^frag [^{:tag (* compiler)} c ^InstOp op]
+  ;; TODO: impose length limit
+  (let [f (lit frag :i (conv uint32 (len (.-Inst (.-p c)))) :nullable true)]
+    (set! (.-Inst (.-p c)) (append (.-Inst (.-p c)) (lit Inst :Op op)))
+    ^{:line 165} f))
+
+
+^{:go/end 172} (go/method nop ^frag [^{:tag (* compiler)} c]
+  (let [f (.inst c InstNop)]
+    (set! (.-out f) (makePatchList (<< (.-i f) 1)))
+    ^{:line 171} f))
+
+
+^{:go/end 176} (go/method fail ^frag [^{:tag (* compiler)} c]
+  (lit frag))
+
+
+^{:go/end 187} (go/method cap ^frag [^{:tag (* compiler)} c ^uint32 arg]
+  (let [f (.inst c InstCapture)]
+    (set! (.-out f) (makePatchList (<< (.-i f) 1)))
+    (set! (.-Arg (aget (.-Inst (.-p c)) (.-i f))) arg)
+
+    (when (< (.-NumCap (.-p c)) (+ (conv int arg) 1))
+      (set! (.-NumCap (.-p c)) (+ (conv int arg) 1)))
+
+    ^{:line 186} f))
+
+
+^{:go/end 199} (go/method cat ^frag [^{:tag (* compiler)} c ^frag f1 ^frag f2]
+  ;; concat of failure is failure
+  (when (or (== (.-i f1) 0) (== (.-i f2) 0))
+    (return (lit frag)))
+
+
+  ;; TODO: elide nop
+
+  (.patch (.-out f1) (.-p c) (.-i f2))
+  (lit frag (.-i f1) (.-out f2) (and (.-nullable f1) (.-nullable f2))))
+
+
+^{:go/end 217} (go/method alt ^frag [^{:tag (* compiler)} c ^frag f1 ^frag f2]
+  ;; alt of failure is other
+  (when (== (.-i f1) 0)
+    (return f2))
+
+  (when (== (.-i f2) 0)
+    (return f1))
+
+
+  (let [f (.inst c InstAlt)
+      ^{:line 211} i (addr (aget (.-Inst (.-p c)) (.-i f)))]
+    (set! (.-Out i) (.-i f1))
+    (set! (.-Arg i) (.-i f2))
+    (set! (.-out f) (.append (.-out f1) (.-p c) (.-out f2)))
+    (set! (.-nullable f) (or (.-nullable f1) (.-nullable f2)))
+    ^{:line 216} f))
+
+
+^{:go/end 231} (go/method quest ^frag [^{:tag (* compiler)} c ^frag f1 ^bool nongreedy]
+  (let [f (.inst c InstAlt)
+      ^{:line 221} i (addr (aget (.-Inst (.-p c)) (.-i f)))]
+    (if nongreedy (do
+        (set! (.-Arg i) (.-i f1))
+        (set! (.-out f) (makePatchList (<< (.-i f) 1))))
+      (do
+        (set! (.-Out i) (.-i f1))
+        (set! (.-out f) (makePatchList (bit-or (<< (.-i f) 1) 1)))))
+
+    (set! (.-out f) (.append (.-out f) (.-p c) (.-out f1)))
+    ^{:line 230} f))
+
+
+
+
+
+
+
+^{:go/end 250} (go/method loop "loop returns the fragment for the main loop of a plus or star.\nFor plus, it can be used after changing the entry to f1.i.\nFor star, it can be used directly when f1 can't match an empty string.\n(When f1 can match an empty string, f1* must be implemented as (f1+)?\nto get the priority match order correct.)\n" ^frag [^{:tag (* compiler)} c ^frag f1 ^bool nongreedy]
+  (let [f (.inst c InstAlt)
+      ^{:line 240} i (addr (aget (.-Inst (.-p c)) (.-i f)))]
+    (if nongreedy (do
+        (set! (.-Arg i) (.-i f1))
+        (set! (.-out f) (makePatchList (<< (.-i f) 1))))
+      (do
+        (set! (.-Out i) (.-i f1))
+        (set! (.-out f) (makePatchList (bit-or (<< (.-i f) 1) 1)))))
+
+    (.patch (.-out f1) (.-p c) (.-i f))
+    ^{:line 249} f))
+
+
+^{:go/end 259} (go/method star ^frag [^{:tag (* compiler)} c ^frag f1 ^bool nongreedy]
+  (when (.-nullable f1)
+    ;; Use (f1+)? to get priority match order correct.
+    ;; See golang.org/issue/46123.
+    (return (.quest c (.plus c f1 nongreedy) nongreedy)))
+
+  (.loop c f1 nongreedy))
+
+
+^{:go/end 263} (go/method plus ^frag [^{:tag (* compiler)} c ^frag f1 ^bool nongreedy]
+  (lit frag (.-i f1) (.-out (.loop c f1 nongreedy)) (.-nullable f1)))
+
+
+^{:go/end 270} (go/method empty ^frag [^{:tag (* compiler)} c ^EmptyOp op]
+  (let [f (.inst c InstEmptyWidth)]
+    (set! (.-Arg (aget (.-Inst (.-p c)) (.-i f))) (conv uint32 op))
+    (set! (.-out f) (makePatchList (<< (.-i f) 1)))
+    ^{:line 269} f))
+
+
+^{:go/end 296} (go/method rune ^frag [^{:tag (* compiler)} c ^{:tag (slice rune)} r ^Flags flags]
+  (let [f (.inst c InstRune)]
+    (set! (.-nullable f) false)
+    (let [i (addr (aget (.-Inst (.-p c)) (.-i f)))]
+      (set! (.-Rune i) r)
+      (set! flags bit-and FoldCase) ; only relevant flag is FoldCase
+      (when (or (!= (len r) 1) (== (unicode/SimpleFold (aget r 0)) (aget r 0)))
+        ;; and sometimes not even that
+        (set! flags bit-and-not FoldCase))
+
+      (set! (.-Arg i) (conv uint32 flags))
+      (set! (.-out f) (makePatchList (<< (.-i f) 1)))
+
+      ;; Special cases for exec machine.
+      (switch
+        (case [(and (== (bit-and flags FoldCase) 0) ^:go/paren (or (== (len r) 1) (and (== (len r) 2) (== (aget r 0) (aget r 1)))))]
+          (set! (.-Op i) InstRune1))
+        (case [(and (== (len r) 2) (== (aget r 0) 0) (== (aget r 1) unicode/MaxRune))]
+          (set! (.-Op i) InstRuneAny))
+        (case [(and (== (len r) 4) (== (aget r 0) 0) (== (aget r 1) (- \newline 1)) (== (aget r 2) (+ \newline 1)) (== (aget r 3) unicode/MaxRune))]
+          (set! (.-Op i) InstRuneAnyNotNL)))
+
+
+      ^{:line 295} f)))

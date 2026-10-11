@@ -1,0 +1,85 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime.pprof) (go/file "protomem.go" :imports [
+
+
+    ^{:line 8} [profilerecord "internal/profilerecord"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [math "math"]
+    ^{:line 11} [runtime "runtime"]
+    ^{:line 12} [strings "strings"]])
+
+
+
+^{:go/end 61} (go/func writeHeapProto "writeHeapProto writes the current heap profile in protobuf format to w.\n" ^error [^io/Writer w ^{:tag (slice profilerecord/MemProfileRecord)} p ^int64 rate ^string defaultSampleType]
+  (let [b (newProfileBuilder w)]
+    (.pbValueType b tagProfile_PeriodType "space" "bytes")
+    (.int64Opt (.-pb b) tagProfile_Period rate)
+    (.pbValueType b tagProfile_SampleType "alloc_objects" "count")
+    (.pbValueType b tagProfile_SampleType "alloc_space" "bytes")
+    (.pbValueType b tagProfile_SampleType "inuse_objects" "count")
+    (.pbValueType b tagProfile_SampleType "inuse_space" "bytes")
+    (when (!= defaultSampleType "")
+      (.int64Opt (.-pb b) tagProfile_DefaultSampleType (.stringIndex b defaultSampleType)))
+
+
+    (let [values (lit (slice int64) 0 0 0 0)
+        ^{:line 29 :tag (slice uint64)} locs (zero (slice uint64))]
+      (range [_ r p]
+        (let [hideRuntime true]
+          (for [tries 0] (< tries 2) (inc! tries)
+            (let [stk (.-Stack r)]
+              ;; For heap profiles, all stack
+              ;; addresses are return PCs, which is
+              ;; what appendLocsForStack expects.
+              (when hideRuntime
+                (range [i addr stk]
+                  (when [f (runtime/FuncForPC addr)] (and (!= f nil) ^:go/paren (or (strings/HasPrefix (.Name f) "runtime.") (strings/HasPrefix (.Name f) "internal/runtime/")))
+                    (continue))
+
+                  ;; Found non-runtime. Show any runtime uses above it.
+                  (set! stk (subslice stk i))
+                  (break)))
+
+
+              (set! locs (.appendLocsForStack b (subslice locs _ 0) stk))
+              (when (> (len locs) 0)
+                (break))
+
+              (set! hideRuntime false))) ; try again, and show all frames next time.
+
+
+          (set! (values (aget values 0) (aget values 1)) (scaleHeapSample (.-AllocObjects r) (.-ObjectSize r) rate))
+          (set! (values (aget values 2) (aget values 3)) (scaleHeapSample (.InUseObjects r) (.-ObjectSize r) rate))
+          (.pbSample b values locs ^{:go/end 58} (fn []
+              (.pbLabel b tagSample_Label "bytes" "" (.-ObjectSize r))))))
+
+
+      (.build b))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 86} (go/func scaleHeapSample "scaleHeapSample adjusts the data from a heap Sample to\naccount for its probability of appearing in the collected\ndata. heap profiles are a sampling of the memory allocations\nrequests in a program. We estimate the unsampled value by dividing\neach collected sample by its probability of appearing in the\nprofile. heap profiles rely on a poisson process to determine\nwhich samples to collect, based on the desired average collection\nrate R. The probability of a sample of size S to appear in that\nprofile is 1-exp(-S/R).\n" [^int64 count ^int64 avgSize ^int64 rate] :results [int64 int64]
+  (when (or (== count 0) (== avgSize 0))
+    (return 0 0))
+
+
+  (when (<= rate 1)
+    ;; if rate==1 all samples were collected so no adjustment is needed.
+    ;; if rate<1 treat as unknown and skip scaling.
+    (return count (* count avgSize)))
+
+
+  (let [scale (/ 1 (- 1 (math/Exp (/ (- (conv float64 avgSize)) (conv float64 rate)))))]
+
+    (return (conv int64 (* (conv float64 count) scale)) (conv int64 (* (conv float64 (* count avgSize)) scale)))))

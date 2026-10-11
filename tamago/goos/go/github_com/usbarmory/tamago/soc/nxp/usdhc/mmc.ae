@@ -1,0 +1,405 @@
+;; NXP Ultra Secured Digital Host Controller (uSDHC) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; IP: https://www.mobiveil.com/esdhc/
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.usdhc) (go/file "mmc.go" :imports [
+
+
+    ^{:line 14} [binary "encoding/binary"]
+    ^{:line 15} [errors "errors"]
+    ^{:line 16} [fmt "fmt"]
+    ^{:line 17} [time "time"]
+
+    ^{:line 19} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 20} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "MMC registers\n"
+
+  ^{:line 26} [^{:val 31 :doc "p181, 7.1 OCR register, JESD84-B51\n"} MMC_OCR_BUSY 31]
+  ^{:line 27} [^{:val 29} MMC_OCR_ACCESS_MODE 29]
+  ^{:line 28} [^{:val 23} MMC_OCR_VDD_HV_MAX 23]
+  ^{:line 29} [^{:val 15} MMC_OCR_VDD_HV_MIN 15]
+  ^{:line 30} [^{:val 7} MMC_OCR_VDD_LV 7]
+
+  ^{:line 32} [^{:val 0} ACCESS_MODE_BYTE 2r00]
+  ^{:line 33} [^{:val 2} ACCESS_MODE_SECTOR 2r10]
+
+
+  ^{:line 36} [^{:val 24 :doc "p62, 6.6.1 Command sets and extended settings, JESD84-B51\n"} MMC_SWITCH_ACCESS 24]
+  ^{:line 37} [^{:val 16} MMC_SWITCH_INDEX 16]
+  ^{:line 38} [^{:val 8} MMC_SWITCH_VALUE 8]
+  ^{:line 39} [^{:val 0} MMC_SWITCH_CMD_SET 0]
+
+  ^{:line 41} [^{:val 3} ACCESS_WRITE_BYTE 2r11]
+
+
+  ^{:line 44} [^{:val 114 :doc "p184 7.3 CSD register, JESD84-B51\n"} MMC_CSD_SPEC_VERS (+ 122 CSD_RSP_OFF)]
+  ^{:line 45} [^{:val 88} MMC_CSD_TRAN_SPEED (+ 96 CSD_RSP_OFF)]
+  ^{:line 46} [^{:val 72} MMC_CSD_READ_BL_LEN (+ 80 CSD_RSP_OFF)]
+  ^{:line 47} [^{:val 54} MMC_CSD_C_SIZE (+ 62 CSD_RSP_OFF)]
+  ^{:line 48} [^{:val 39} MMC_CSD_C_SIZE_MULT (+ 47 CSD_RSP_OFF)]
+
+
+  ^{:line 51} [^{:val 50 :doc "p186 TRAN_SPEED [103:96], JESD84-B51\n"} TRAN_SPEED_26MHZ 0x32]
+
+
+  ^{:line 54} [^{:val 212 :doc "p193, 7.4 Extended CSD register, JESD84-B51\n"} EXT_CSD_SEC_COUNT 212]
+  ^{:line 55} [^{:val 196} EXT_CSD_DEVICE_TYPE 196]
+  ^{:line 56} [^{:val 185} EXT_CSD_HS_TIMING 185]
+  ^{:line 57} [^{:val 183} EXT_CSD_BUS_WIDTH 183]
+  ^{:line 58} [^{:val 179} EXT_CSD_PARTITION_CONFIG 179]
+
+
+  ^{:line 61} [^{:val 0 :doc "p224, PARTITION_CONFIG, JESD84-B51\n"} PARTITION_ACCESS_NONE 0x0]
+  ^{:line 62} [^{:val 3} PARTITION_ACCESS_RPMB 0x3]
+
+
+  ^{:line 65} [^{:val 1 :doc "p222, 7.4.65 HS_TIMING [185], JESD84-B51\n"} HS_TIMING_HS 0x1]
+  ^{:line 66} [^{:val 2} HS_TIMING_HS200 0x2]
+
+
+  ^{:line 69} [^{:val 52 :doc "p35, 5.3.2 Bus Speed Modes, JESD84-B51\n"} HSSDR_MBPS 52]
+  ^{:line 70} [^{:val 104} HSDDR_MBPS 104]
+  ^{:line 71} [^{:val 150} HS200_MBPS 150] ; instead of 200 due to NXP ERR010450
+
+
+  ^{:line 74} [^{:val 1 :doc "PLL2 PFD2 clock divided by 2\n"} ROOTCLK_HS_DDR 1]
+  ;; Root clock frequency: 396 MHz / (1 + 1) = 198 MHz
+
+
+  ^{:line 78} [^{:val 2 :doc "PLL2 PFD2 clock divided by 3\n"} ROOTCLK_HS200 2] ; instead of 1 due to NXP ERR010450
+  ;; Root clock frequency: 396 MHz / (1 + 2) = 132 MHz
+
+
+  ^{:line 82} [^{:val 0 :doc "Root clock divided by 1 (Single Data Rate mode)\n"} SDCLKFS_HS200 0])
+;; HS200 frequency: 132 / (1 * 1) == 132 MHz
+
+
+
+
+(go/const "MMC constants\n"
+  ^{:line 89} [^{:val 1000000000} MMC_DETECT_TIMEOUT (* 1 time/Second)]
+  ^{:line 90} [^{:val 512} MMC_DEFAULT_BLOCK_SIZE 512])
+
+
+
+^{:go/end 132} (go/method voltageValidationMMC "p352, 35.4.6 MMC voltage validation flow chart, IMX6FG\n" ^bool [^{:tag (* USDHC)} hw]
+  (let [^uint32 arg (zero uint32)]
+
+    ;; CMD1 - SEND_OP_COND
+    ;; p57, 6.4.2 Access mode validation, JESD84-B51
+
+    ;; sector mode supported
+    (bits/SetN (addr arg) MMC_OCR_ACCESS_MODE 2r11 ACCESS_MODE_SECTOR)
+    ;; set HV range
+    (bits/SetN (addr arg) MMC_OCR_VDD_HV_MIN 0x1ff 0x1ff)
+
+    ;; p46, 6.3.1 Device reset to Pre-idle state, JESD84-B51
+    (time/Sleep (* 1 time/Millisecond))
+
+    (let [start (time/Now)]
+
+      (while (<= (time/Since start) MMC_DETECT_TIMEOUT)
+        ;; CMD1 - SEND_OP_COND - send operating conditions
+        (when [err (.cmd hw 1 arg 0 0)] (!= err nil)
+          (break))
+
+
+        (let [rsp (.rsp hw 0)]
+
+          (when (== (bits/GetN (addr rsp) MMC_OCR_BUSY 1) 0)
+            (continue))
+
+
+          (when (== (bits/GetN (addr rsp) MMC_OCR_ACCESS_MODE 2r11) ACCESS_MODE_SECTOR)
+            (set! (.-HC (.-card hw)) true))
+
+
+          (set! (.-MMC (.-card hw)) true)
+
+          (break)))
+
+
+      (.-MMC (.-card hw)))))
+
+
+^{:go/end 165} (go/method writeCardRegisterMMC [^{:tag (* USDHC)} hw ^uint32 reg ^uint32 val] :results [^error err]
+  (let [^uint32 arg (zero uint32)]
+
+    ;; write MMC_SWITCH_VALUE in register pointed in MMC_SWITCH_INDEX
+    (bits/SetN (addr arg) MMC_SWITCH_ACCESS 2r11 ACCESS_WRITE_BYTE)
+    ;; set MMC_SWITCH_INDEX to desired register
+    (bits/SetN (addr arg) MMC_SWITCH_INDEX 0xff reg)
+    ;; set register value
+    (bits/SetN (addr arg) MMC_SWITCH_VALUE 0xff val)
+
+    ;; CMD6 - SWITCH - switch mode of operation
+    (set! err (.cmd hw 6 arg 0 0))
+
+    (when (!= err nil)
+      (return))
+
+
+    ;; We could use EXT_CSD[GENERIC_CMD6_TIME] for a better tran state
+    ;; timeout, we rather choose to apply a generic timeout for now (as
+    ;; most drivers do).
+    (set! err (.waitState hw CURRENT_STATE_TRAN (* 500 time/Millisecond)))
+
+    (when (!= err nil)
+      (return))
+
+
+    (when (!= (bit-and (>> (.rsp hw 0) STATUS_SWITCH_ERROR) 1) 0)
+      (set! err (errors/New "switch error")))
+
+
+    (return)))
+
+
+^{:go/end 199} (go/method detectCapabilitiesMMC [^{:tag (* USDHC)} hw ^uint32 c_size_mult ^uint32 c_size ^uint32 read_bl_len] :results [^error err]
+  (let [extCSD (make (slice byte) MMC_DEFAULT_BLOCK_SIZE)]
+
+    ;; CMD8 - SEND_EXT_CSD - read extended device data
+    (when [(set! err (.transfer hw 8 READ 0 1 MMC_DEFAULT_BLOCK_SIZE extCSD))] (!= err nil)
+      (return))
+
+
+    ;; p128, Table 39 — e•MMC internal sizes and related Units / Granularities, JESD84-B51
+
+    ;; density greater than 2GB (emulation mode is always assumed)
+    (if (> c_size 0xff) (do
+        (set! (.-BlockSize (.-card hw)) MMC_DEFAULT_BLOCK_SIZE)
+        (set! (.-Blocks (.-card hw)) (conv int (.Uint32 binary/LittleEndian (subslice extCSD EXT_CSD_SEC_COUNT)))))
+      (do
+        ;; p188, 7.3.12 C_SIZE [73:62], JESD84-B51
+        (set! (.-BlockSize (.-card hw)) ^int (<< 2 (- read_bl_len 1)))
+        (set! (.-Blocks (.-card hw)) (conv int (* (+ c_size 1) ^uint32 (<< 2 (+ c_size_mult 2)))))))
+
+
+    ;; p220, Table 137 — Device types, JESD84-B51
+    (let [deviceType (aget extCSD EXT_CSD_DEVICE_TYPE)]
+
+      (cond (and (> (bit-and (>> deviceType 4) 2r11) 0) (!= (.-LowVoltage hw) nil) ((.-LowVoltage hw) false))
+        (set! (.-Rate (.-card hw)) HS200_MBPS)
+        (> (bit-and (>> deviceType 2) 2r11) 0)
+        (set! (.-Rate (.-card hw)) HSDDR_MBPS)
+        (> (bit-and deviceType 2r11) 0)
+        (set! (.-Rate (.-card hw)) HSSDR_MBPS))
+
+
+      (return))))
+
+
+^{:go/end 204} (go/method executeTuningMMC ^error [^{:tag (* USDHC)} hw]
+  (reg/SetN (.-vend_spec2 hw) VEND_SPEC2_TUNING_8bit_EN 1 1)
+  (.executeTuning hw 21 128))
+
+
+
+
+^{:go/end 352} (go/method initMMC "p352, 35.4.7 MMC card initialization flow chart, IMX6FG\np58, 6.4.4 Device identification process, JESD84-B51\n" [^{:tag (* USDHC)} hw] :results [^error err]
+  (let [^uint32 arg (zero uint32)
+      ^{:line 210 :tag uint32} bus_width (zero uint32)
+      ^{:line 211 :tag uint32} timing (zero uint32)
+      ^{:line 212 :tag uint32} root_clk (zero uint32)
+      ^{:line 213 :tag int} clk (zero int)
+      ^{:line 214 :tag bool} ddr (zero bool)
+      ^{:line 215 :tag bool} tune (zero bool)]
+
+    ;; CMD2 - ALL_SEND_CID - get unique card identification
+    (when [(set! err (.cmd hw 2 arg 0 0))] (!= err nil)
+      (return))
+
+
+    (for [i 0] (< i (len (.-CID (.-card hw)))) (set! i + 4)
+      (.PutUint32 binary/LittleEndian (subslice (.-CID (.-card hw)) i) (.rsp hw (/ i 4))))
+
+
+    ;; Send CMD3 with a chosen RCA, with value greater than 1,
+    ;; p301, A.6.1 Bus initialization , JESD84-B51.
+    (set! (.-rca hw) (<< (+ (conv uint32 (.-Index hw)) 1) RCA_ADDR))
+
+    ;; CMD3 - SET_RELATIVE_ADDR - set relative card address (RCA),
+    (when [(set! err (.cmd hw 3 (.-rca hw) 0 0))] (!= err nil)
+      (return))
+
+
+    (when [state (bit-and (>> (.rsp hw 0) STATUS_CURRENT_STATE) 2r1111)] (!= state CURRENT_STATE_IDENT)
+      (return (fmt/Errorf "card not in ident state (%d)" state)))
+
+
+    ;; CMD9 - SEND_CSD - read device data
+    (when [(set! err (.cmd hw 9 (.-rca hw) 0 0))] (!= err nil)
+      (return))
+
+
+    ;; block count multiplier
+    (let [c_size_mult (.rspVal hw MMC_CSD_C_SIZE_MULT 2r111)
+        ;; block count
+        ^{:line 247} c_size (.rspVal hw MMC_CSD_C_SIZE 0xfff)
+        ;; block size
+        ^{:line 249} read_bl_len (.rspVal hw MMC_CSD_READ_BL_LEN 0xf)
+        ;; operating frequency
+        ^{:line 251} mhz (.rspVal hw MMC_CSD_TRAN_SPEED 0xff)
+        ;; e•MMC specification version
+        ^{:line 253} ver (.rspVal hw MMC_CSD_SPEC_VERS 0xf)]
+
+      (if (== mhz TRAN_SPEED_26MHZ) (do
+          ;; clear clock
+          (.setFreq hw -1 -1)
+          ;; set operating frequency
+          (.setFreq hw DVS_OP SDCLKFS_OP))
+
+        (return (fmt/Errorf "unexpected TRAN_SPEED %#x" mhz)))
+
+
+      ;; CMD7 - SELECT/DESELECT CARD - enter transfer state
+      (when [(set! err (.cmd hw 7 (.-rca hw) 0 0))] (!= err nil)
+        (return))
+
+
+      (set! err (.waitState hw CURRENT_STATE_TRAN (* 1 time/Millisecond)))
+
+      (when (!= err nil)
+        (return))
+
+
+      ;; p223, 7.4.67 BUS_WIDTH [183], JESD84-B51
+      (switch (.-width hw)
+        (case [4]
+          (set! bus_width 1))
+        (case [8]
+          (set! bus_width 2))
+        (default
+          (return (errors/New "unsupported MMC bus width"))))
+
+
+      (set! err (.writeCardRegisterMMC hw EXT_CSD_BUS_WIDTH bus_width))
+
+      (when (!= err nil)
+        (return))
+
+
+      (set! err (.detectCapabilitiesMMC hw c_size_mult c_size read_bl_len))
+
+      (when (!= err nil)
+        (return))
+
+
+      ;; Enable High Speed DDR mode only on Version 4.1 or above eMMC cards
+      ;; with supported rate.
+      (when (or (< ver 4) (<= (.-Rate (.-card hw)) HSSDR_MBPS))
+        (return))
+
+
+      (switch (.-Rate (.-card hw))
+        (case [HSDDR_MBPS]
+          (set! timing HS_TIMING_HS)
+          (set! root_clk ROOTCLK_HS_DDR)
+          (set! clk SDCLKFS_HS_DDR)
+          (set! ddr true)
+
+          ;; p223, 7.4.67 BUS_WIDTH [183], JESD84-B51
+          (switch (.-width hw)
+            (case [4]
+              (set! bus_width 5))
+            (case [8]
+              (set! bus_width 6))))
+
+        (case [HS200_MBPS]
+          (set! timing HS_TIMING_HS200)
+          (set! root_clk ROOTCLK_HS200)
+          (set! clk SDCLKFS_HS200)
+          (set! tune true))
+        (default
+          (return)))
+
+
+      ;; p112, Dual Data Rate mode operation, JESD84-B51
+      (set! err (.writeCardRegisterMMC hw EXT_CSD_HS_TIMING timing))
+
+      (when (!= err nil)
+        (return))
+
+
+      (set! err (.writeCardRegisterMMC hw EXT_CSD_BUS_WIDTH bus_width))
+
+      (when (!= err nil)
+        (return))
+
+
+      (.setFreq hw -1 -1)
+      ((.-SetClock hw) (.-Index hw) root_clk 0)
+      (.setFreq hw DVS_HS clk)
+
+      (when tune)
+      ;; FIXME: Use fixed sampling clock as eMMC tuning fails for unknown reasons.
+      ;; err = hw.executeTuningMMC()
+
+
+      (set! (.-DDR (.-card hw)) ddr)
+      (set! (.-HS (.-card hw)) true)
+
+      (return))))
+
+
+
+^{:go/end 357} (go/method partitionAccessMMC "p224, 7.4.69 PARTITION_CONFIG [179], JESD84-B51\n" [^{:tag (* USDHC)} hw ^uint32 access] :results [^error err]
+  (.writeCardRegisterMMC hw EXT_CSD_PARTITION_CONFIG access))
+
+
+
+
+^{:go/end 393} (go/method transferRPMB "p106, 6.6.22.4.3 Authenticated Data Write, JESD84-B51\np108, 6.6.22.4.4 Authenticated Data Read,  JESD84-B51\n" [^{:tag (* USDHC)} hw ^int dtd ^{:tag (slice byte)} buf ^bool rel] :results [^error err]
+  (when (not (.-MMC (.-card hw)))
+    (return (fmt/Errorf "no MMC card detected on uSDHC%d" (.-Index hw))))
+
+
+  (when (!= (len buf) 512)
+    (return (errors/New "transfer size must be 512")))
+
+
+  (let [blocks (conv uint32 1)]
+
+    ^{:go/via [Mutex]} (.Lock hw)
+    (set! (.-rpmb hw) true)
+
+    (defer (^{:go/end 379} (fn []
+          (set! (.-rpmb hw) false)
+          (set! (.-rel hw) false)
+          ^{:go/via [Mutex]} (.Unlock hw))))
+
+
+    (if (== dtd WRITE) (do
+        ;; reliable write request
+        (set! (.-rel hw) rel)
+
+        ;; CMD25 - WRITE_MULTIPLE_BLOCK - write consecutive blocks
+        (set! err (.transfer hw 25 WRITE 0 blocks 512 buf)))
+
+      ;; CMD18 - READ_MULTIPLE_BLOCK - read consecutive blocks
+      (set! err (.transfer hw 18 READ 0 blocks 512 buf)))
+
+
+    (return)))
+
+
+
+
+
+^{:go/end 400} (go/method WriteRPMB "WriteRPMB transfers a single Replay Protected Memory Block (RPMB) data frame\nto the card. The `rel` boolean indicates whether a reliable write should be\nrequested (required for some RPMB transfer).\n" [^{:tag (* USDHC)} hw ^{:tag (slice byte)} buf ^bool rel] :results [^error err]
+  (.transferRPMB hw WRITE buf rel))
+
+
+
+
+^{:go/end 406} (go/method ReadRPMB "ReadRPMB transfers a single Replay Protected Memory Block (RPMB) data\nframe from the card.\n" [^{:tag (* USDHC)} hw ^{:tag (slice byte)} buf] :results [^error err]
+  (.transferRPMB hw READ buf false))

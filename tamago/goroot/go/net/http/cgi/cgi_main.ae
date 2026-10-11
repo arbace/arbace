@@ -1,0 +1,135 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.cgi) (go/file "cgi_main.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [maps "maps"]
+    ^{:line 11} [http "net/http"]
+    ^{:line 12} [os "os"]
+    ^{:line 13} [path "path"]
+    ^{:line 14} [slices "slices"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [time "time"]])
+
+
+^{:go/end 26} (go/func cgiMain []
+  (switch (path/Join (os/Getenv "SCRIPT_NAME") (os/Getenv "PATH_INFO"))
+    (case ["/bar" "/test.cgi" "/myscript/bar" "/test.cgi/extrapath"]
+      (testCGI)
+      (return)))
+
+  (childCGIProcess))
+
+
+
+
+^{:go/end 78} (go/func testCGI "testCGI is a CGI program translated from a Perl program to complete host_test.\ntest cases in host_test should be provided by testCGI.\n" []
+  (let [(values req err) (Request)]
+    (when (!= err nil)
+      (panic err))
+
+
+    (set! err (.ParseForm req))
+    (when (!= err nil)
+      (panic err))
+
+
+    (let [params (.-Form req)]
+      (when (!= (.Get params "loc") "")
+        (fmt/Printf "Location: %s\r\n\r\n" (.Get params "loc"))
+        (return))
+
+
+      (fmt/Printf "Content-Type: text/html\r\n")
+      (fmt/Printf "X-CGI-Pid: %d\r\n" (os/Getpid))
+      (fmt/Printf "X-Test-Header: X-Test-Value\r\n")
+      (fmt/Printf "\r\n")
+
+      (when (!= (.Get params "writestderr") "")
+        (fmt/Fprintf os/Stderr "Hello, stderr!\n"))
+
+
+      (when (!= (.Get params "bigresponse") "")
+        ;; 17 MB, for OS X: golang.org/issue/4958
+        (let [line (strings/Repeat "A" 1024)]
+          (for [i 0] (< i (* 17 1024)) (inc! i)
+            (fmt/Printf "%s\r\n" line))
+
+          (return)))
+
+
+      (fmt/Printf "test=Hello CGI\r\n")
+
+      (range [_ key (^{:inst [string]} slices/Sorted (^{:inst [go.net.url/Values string (slice string)]} maps/Keys params))]
+        (fmt/Printf "param-%s=%s\r\n" key (.Get params key)))
+
+
+      (let [envs (envMap (os/Environ))]
+        (range [_ key (^{:inst [string]} slices/Sorted (^{:inst [(map string string) string string]} maps/Keys envs))]
+          (fmt/Printf "env-%s=%s\r\n" key (aget envs key)))
+
+
+        (let [(values cwd _) (os/Getwd)]
+          (fmt/Printf "cwd=%s\r\n" cwd))))))
+
+
+(go/type neverEnding byte)
+
+^{:go/end 87} (go/method Read [^neverEnding b ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (range [i p]
+    (aset p i (conv byte b)))
+
+  (return (len p) nil))
+
+
+
+^{:go/end 136} (go/func childCGIProcess "childCGIProcess is used by integration_test to complete unit tests.\n" []
+  (when (== (os/Getenv "REQUEST_METHOD") "")
+    ;; Not in a CGI environment; skipping test.
+    (return))
+
+  (switch (os/Getenv "REQUEST_URI")
+    (case ["/immediate-disconnect"]
+      (os/Exit 0))
+    (case ["/no-content-type"]
+      (fmt/Printf "Content-Length: 6\n\nHello\n")
+      (os/Exit 0))
+    (case ["/empty-headers"]
+      (fmt/Printf "\nHello")
+      (os/Exit 0)))
+
+  (Serve (conv http/HandlerFunc ^{:go/end 134} (fn [^http/ResponseWriter rw ^{:tag (* http/Request)} req]
+        (when (== (.FormValue req "nil-request-body") "1")
+          (fmt/Fprintf rw "nil-request-body=%v\n" (== (.-Body req) nil))
+          (return))
+
+        (.Set (.Header rw) "X-Test-Header" "X-Test-Value")
+        (.ParseForm req)
+        (when (== (.FormValue req "no-body") "1")
+          (return))
+
+        (when [(values eb ok) (aget (.-Form req) "exact-body")] ok
+          (io/WriteString rw (aget eb 0))
+          (return))
+
+        (when (== (.FormValue req "write-forever") "1")
+          (io/Copy rw (conv neverEnding \a))
+          (while true
+            (time/Sleep (* 5 time/Second)))) ; hang forever, until killed
+
+
+        (fmt/Fprintf rw "test=Hello CGI-in-CGI\n")
+        (range [k vv (.-Form req)]
+          (range [_ v vv]
+            (fmt/Fprintf rw "param-%s=%s\n" k v)))
+
+
+        (range [_ kv (os/Environ)]
+          (fmt/Fprintf rw "env-%s\n" kv)))))
+
+
+  (os/Exit 0))

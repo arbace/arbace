@@ -1,0 +1,1026 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.testing) (go/file "benchmark.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [flag "flag"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [sysinfo "internal/sysinfo"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [math "math"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [runtime "runtime"]
+    ^{:line 16} [slices "slices"]
+    ^{:line 17} [strconv "strconv"]
+    ^{:line 18} [strings "strings"]
+    ^{:line 19} [sync "sync"]
+    ^{:line 20} [atomic "sync/atomic"]
+    ^{:line 21} [time "time"]
+    ^{:line 22} [unicode "unicode"]])
+
+
+^{:go/end 29} (go/func initBenchmarkFlags []
+  (set! matchBenchmarks (flag/String "test.bench" "" "run only benchmarks matching `regexp`"))
+  (set! benchmarkMemory (flag/Bool "test.benchmem" false "print memory allocations for benchmarks"))
+  (flag/Var (addr benchTime) "test.benchtime" "run each benchmark for duration `d` or N times if `d` is of the form Nx"))
+
+
+(go/var
+  ^{:line 32} [^{:tag (* string)} matchBenchmarks]
+  ^{:line 33} [^{:tag (* bool)} benchmarkMemory]
+
+  ^{:line 35} [benchTime (lit durationOrCountFlag :d (* 1 time/Second))]) ; changed during test of testing package
+
+
+(go/type durationOrCountFlag (struct
+    ^{:line 39 :tag time/Duration} d
+    ^{:line 40 :tag int} n
+    ^{:line 41 :tag bool} allowZero))
+
+
+^{:go/end 49} (go/method String ^string [^{:tag (* durationOrCountFlag)} f]
+  (when (> (.-n f) 0)
+    (return (fmt/Sprintf "%dx" (.-n f))))
+
+  (.String (.-d f)))
+
+
+^{:go/end 66} (go/method Set ^error [^{:tag (* durationOrCountFlag)} f ^string s]
+  (when (strings/HasSuffix s "x")
+    (let [(values n err) (strconv/ParseInt (subslice s _ (- (len s) 1)) 10 0)]
+      (when (or (!= err nil) (< n 0) ^:go/paren (and (not (.-allowZero f)) (== n 0)))
+        (return (fmt/Errorf "invalid count")))
+
+      (set! @f (lit durationOrCountFlag :n (conv int n)))
+      (return nil)))
+
+  ^{:go/breaks [4]} (let [(values d err) (time/ParseDuration s)]
+    (when (or (!= err nil) (< d 0) ^:go/paren (and (not (.-allowZero f)) (== d 0)))
+      (return (fmt/Errorf "invalid duration")))
+
+    (set! @f (lit durationOrCountFlag :d d))
+    nil))
+
+
+
+(go/var ^{:tag sync/Mutex :doc "Global lock to ensure only one benchmark runs at a time.\n"} benchmarkLock)
+
+
+(go/var ^{:tag runtime/MemStats :doc "Used for every benchmark for measuring memory.\n"} memStats)
+
+
+
+(go/type InternalBenchmark "InternalBenchmark is an internal type but exported because it is cross-package;\nit is part of the implementation of the \"go test\" command.\n" (struct
+    ^{:line 77 :tag string} Name
+    ^{:line 78 :tag (func [^{:tag (* B)} b])} F))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type B "B is a type passed to [Benchmark] functions to manage benchmark\ntiming and control the number of iterations.\n\nA benchmark ends when its Benchmark function returns or calls any of the methods\n[B.FailNow], [B.Fatal], [B.Fatalf], [B.SkipNow], [B.Skip], or [B.Skipf].\nThose methods must be called only from the goroutine running the Benchmark function.\nThe other reporting methods, such as the variations of [B.Log] and [B.Error],\nmay be called simultaneously from multiple goroutines.\n\nLike in tests, benchmark logs are accumulated during execution\nand dumped to standard output when done. Unlike in tests, benchmark logs\nare always printed, so as not to hide output whose existence may be\naffecting benchmark results.\n" (struct
+    ^{:line 95} common
+    ^{:line 96 :tag string} importPath ; import path of the package containing the benchmark
+    ^{:line 97 :tag (* benchState)} bstate
+    ^{:line 98 :tag int} N
+    ^{:line 99 :tag int} previousN ; number of iterations in the previous run
+    ^{:line 100 :tag time/Duration} previousDuration ; total duration of the previous run
+    ^{:line 101 :tag (func [^{:tag (* B)} b])} benchFunc
+    ^{:line 102 :tag durationOrCountFlag} benchTime
+    ^{:line 103 :tag int64} bytes
+    ^{:line 104 :tag bool} missingBytes ; one of the subbenchmarks does not have bytes set.
+    ^{:line 105 :tag bool} timerOn
+    ^{:line 106 :tag bool} showAllocResult
+    ^{:line 107 :tag BenchmarkResult} result
+    ^{:line 108 :tag int} parallelism ; RunParallel creates parallelism*GOMAXPROCS goroutines
+
+    ^{:line 110 :tag uint64 :doc "The initial states of memStats.Mallocs and memStats.TotalAlloc.\n"} startAllocs
+    ^{:line 111 :tag uint64} startBytes
+
+    ^{:line 113 :tag uint64 :doc "The net total of this test after being run.\n"} netAllocs
+    ^{:line 114 :tag uint64} netBytes
+
+    ^{:line 116 :tag (map string float64) :doc "Extra metrics collected by ReportMetric.\n"} extra
+
+
+    ^{:line 119 :tag (struct ^{:tag uint64 :doc "n is the target number of iterations. It gets bumped up as we go.\nWhen the benchmark loop is done, we commit this to b.N so users can\ndo reporting based on it, but we avoid exposing it until then.\n"} n ^{:tag uint64 :doc "i is the current Loop iteration. It's strictly monotonically\nincreasing toward n.\n\nThe high bit is used to poison the Loop fast path and fall back to\nthe slow path.\n"} i ^bool done) :doc "loop tracks the state of B.Loop\n"} loop))
+
+
+
+
+
+
+
+
+
+
+
+;; set when B.Loop return false
+
+
+
+
+
+
+^{:go/end 147} (go/method StartTimer "StartTimer starts timing a test. This function is called automatically\nbefore a benchmark starts, but it can also be used to resume timing after\na call to [B.StopTimer].\n" [^{:tag (* B)} b]
+  (when (not (.-timerOn b))
+    (runtime/ReadMemStats (addr memStats))
+    (set! (.-startAllocs b) (.-Mallocs memStats))
+    (set! (.-startBytes b) (.-TotalAlloc memStats))
+    (set! ^{:go/via [common]} (.-start b) (highPrecisionTimeNow))
+    (set! (.-timerOn b) true)
+    (set! (.-i (.-loop b)) bit-and-not loopPoisonTimer)))
+
+
+
+
+
+^{:go/end 161} (go/method StopTimer "StopTimer stops timing a test. This can be used to pause the timer\nwhile performing steps that you don't want to measure.\n" [^{:tag (* B)} b]
+  (when (.-timerOn b)
+    (set! ^{:go/via [common]} (.-duration b) + (highPrecisionTimeSince ^{:go/via [common]} (.-start b)))
+    (runtime/ReadMemStats (addr memStats))
+    (set! (.-netAllocs b) + (- (.-Mallocs memStats) (.-startAllocs b)))
+    (set! (.-netBytes b) + (- (.-TotalAlloc memStats) (.-startBytes b)))
+    (set! (.-timerOn b) false)
+    ;; If we hit B.Loop with the timer stopped, fail.
+    (set! (.-i (.-loop b)) bit-or loopPoisonTimer)))
+
+
+
+
+
+
+^{:go/end 183} (go/method ResetTimer "ResetTimer zeroes the elapsed benchmark time and memory allocation counters\nand deletes user-reported metrics.\nIt does not affect whether the timer is running.\n" [^{:tag (* B)} b]
+  (if (== (.-extra b) nil)
+    ;; Allocate the extra map before reading memory stats.
+    ;; Pre-size it to make more allocation unlikely.
+    (set! (.-extra b) (make (map string float64) 16))
+
+    (clear (.-extra b)))
+
+  (when (.-timerOn b)
+    (runtime/ReadMemStats (addr memStats))
+    (set! (.-startAllocs b) (.-Mallocs memStats))
+    (set! (.-startBytes b) (.-TotalAlloc memStats))
+    (set! ^{:go/via [common]} (.-start b) (highPrecisionTimeNow)))
+
+  (set! ^{:go/via [common]} (.-duration b) 0)
+  (set! (.-netAllocs b) 0)
+  (set! (.-netBytes b) 0))
+
+
+
+
+^{:go/end 187} (go/method SetBytes "SetBytes records the number of bytes processed in a single operation.\nIf this is called, the benchmark will report ns/op and MB/s.\n" [^{:tag (* B)} b ^int64 n] (set! (.-bytes b) n))
+
+
+
+
+^{:go/end 194} (go/method ReportAllocs "ReportAllocs enables malloc statistics for this benchmark.\nIt is equivalent to setting -test.benchmem, but it only affects the\nbenchmark function that calls ReportAllocs.\n" [^{:tag (* B)} b]
+  (set! (.-showAllocResult b) true))
+
+
+
+^{:go/end 227} (go/method runN "runN runs a single benchmark for the specified number of iterations.\n" [^{:tag (* B)} b ^int n]
+  (.Lock benchmarkLock)
+  (defer (.Unlock benchmarkLock))
+  (let [(values ctx cancelCtx) (context/WithCancel (context/Background))]
+    (defer (^{:go/end 204} (fn []
+          ^{:go/via [common]} (.runCleanup b normalPanic)
+          ^{:go/via [common]} (.checkRaces b))))
+
+    ;; Try to get a comparable environment for each run
+    ;; by clearing garbage from previous runs.
+    (runtime/GC)
+    ^{:go/via [common]} (.resetRaces b)
+    (set! (.-N b) n)
+    (set! (.-n (.-loop b)) 0)
+    (set! (.-i (.-loop b)) 0)
+    (set! (.-done (.-loop b)) false)
+    (set! ^{:go/via [common]} (.-ctx b) ctx)
+    (set! ^{:go/via [common]} (.-cancelCtx b) cancelCtx)
+
+    (set! (.-parallelism b) 1)
+    (.ResetTimer b)
+    (.StartTimer b)
+    ((.-benchFunc b) b)
+    (.StopTimer b)
+    (set! (.-previousN b) n)
+    (set! (.-previousDuration b) ^{:go/via [common]} (.-duration b))
+
+    (when (and (> (.-n (.-loop b)) 0) (not (.-done (.-loop b))) (not ^{:go/via [common]} (.-failed b)))
+      ^{:go/via [common]} (.Error b "benchmark function returned without B.Loop() == false (break or return in loop?)"))))
+
+
+
+
+
+^{:go/end 269} (go/method run1 "run1 runs the first iteration of benchFunc. It reports whether more\niterations of this benchmarks should be run.\n" ^bool [^{:tag (* B)} b]
+  (when [bstate (.-bstate b)] (!= bstate nil)
+    ;; Extend maxLen, if needed.
+    (when [n (+ (len ^{:go/via [common]} (.-name b)) (.-extLen bstate) 1)] (> n (.-maxLen bstate))
+      (set! (.-maxLen bstate) (+ n 8)))) ; Add additional slack to avoid too many jumps in size.
+
+
+  (go (^{:go/end 246} (fn []
+        ;; Signal that we're done whether we return normally
+        ;; or by FailNow's runtime.Goexit.
+        (defer (^{:go/end 243} (fn []
+              (>! ^{:go/via [common]} (.-signal b) true))))
+
+
+        (.runN b 1))))
+
+  (<! ^{:go/via [common]} (.-signal b))
+  (when ^{:go/via [common]} (.-failed b)
+    (fmt/Fprintf ^{:go/via [common]} (.-w b) "%s--- FAIL: %s\n%s" (.prefix ^{:go/via [common]} (.-chatty b)) ^{:go/via [common]} (.-name b) ^{:go/via [common]} (.-output b))
+    (return false))
+
+  ;; Only print the output if we know we are not going to proceed.
+  ;; Otherwise it is printed in processBench.
+  (.RLock ^{:go/via [common]} (.-mu b))
+  ^{:go/breaks [[4 268]]} (let [finished ^{:go/via [common]} (.-finished b)]
+    (.RUnlock ^{:go/via [common]} (.-mu b))
+    (when (or (.Load ^{:go/via [common]} (.-hasSub b)) finished)
+      (let [tag "BENCH"]
+        (when ^{:go/via [common]} (.-skipped b)
+          (set! tag "SKIP"))
+
+        (when (and (!= ^{:go/via [common]} (.-chatty b) nil) ^:go/paren (or (> (len ^{:go/via [common]} (.-output b)) 0) finished))
+          (.trimOutput b)
+          (fmt/Fprintf ^{:go/via [common]} (.-w b) "%s--- %s: %s\n%s" (.prefix ^{:go/via [common]} (.-chatty b)) tag ^{:go/via [common]} (.-name b) ^{:go/via [common]} (.-output b)))
+
+        (return false)))
+
+    true))
+
+
+(go/var ^sync/Once labelsOnce)
+
+
+
+^{:go/end 293} (go/method run "run executes the benchmark in a separate goroutine, including all of its\nsubbenchmarks. b must not have subbenchmarks.\n" [^{:tag (* B)} b]
+  (.Do labelsOnce ^{:go/end 285} (fn []
+      (fmt/Fprintf ^{:go/via [common]} (.-w b) "goos: %s\n" runtime/GOOS)
+      (fmt/Fprintf ^{:go/via [common]} (.-w b) "goarch: %s\n" runtime/GOARCH)
+      (when (!= (.-importPath b) "")
+        (fmt/Fprintf ^{:go/via [common]} (.-w b) "pkg: %s\n" (.-importPath b)))
+
+      (when [cpu (sysinfo/CPUName)] (!= cpu "")
+        (fmt/Fprintf ^{:go/via [common]} (.-w b) "cpu: %s\n" cpu))))
+
+
+  (if (!= (.-bstate b) nil)
+    ;; Running go test --test.bench
+    (.processBench (.-bstate b) b) ; Must call doBench.
+
+    ;; Running func Benchmark.
+    (.doBench b)))
+
+
+
+^{:go/end 299} (go/method doBench ^BenchmarkResult [^{:tag (* B)} b]
+  (go (.launch b))
+  (<! ^{:go/via [common]} (.-signal b))
+  (.-result b))
+
+
+
+(go/const ^{:val 1000000000 :doc "Don't run more than 1e9 times. (This also keeps n in int range on 32 bit platforms.)\n"} maxBenchPredictIters 1000000000)
+
+^{:go/end 325} (go/func predictN ^int [^int64 goalns ^int64 prevIters ^int64 prevns ^int64 last]
+  (when (== prevns 0)
+    ;; Round up to dodge divide by zero. See https://go.dev/issue/70709.
+    (set! prevns 1))
+
+
+  ;; Order of operations matters.
+  ;; For very fast benchmarks, prevIters ~= prevns.
+  ;; If you divide first, you get 0 or 1,
+  ;; which can hide an order of magnitude in execution time.
+  ;; So multiply first, then divide.
+  (let [n (/ (* goalns prevIters) prevns)]
+    ;; Run more iterations than we think we'll need (1.2x).
+    (set! n + (/ n 5))
+    ;; Don't grow too fast in case we had timing errors previously.
+    (set! n (min n (* 100 last)))
+    ;; Be sure to run at least one more than last time.
+    (set! n (max n (+ last 1)))
+    ;; Don't run more than 1e9 times. (This also keeps n in int range on 32 bit platforms.)
+    (set! n (min n maxBenchPredictIters))
+    (conv int n)))
+
+
+
+
+
+
+^{:go/end 362} (go/method launch "launch launches the benchmark function. It gradually increases the number\nof benchmark iterations until the benchmark runs for the requested benchtime.\nlaunch is run by the doBench function as a separate goroutine.\nrun1 must have been called on b.\n" [^{:tag (* B)} b]
+  ;; Signal that we're done whether we return normally
+  ;; or by FailNow's runtime.Goexit.
+  (defer (^{:go/end 336} (fn []
+        (>! ^{:go/via [common]} (.-signal b) true))))
+
+
+  ;; b.Loop does its own ramp-up logic so we just need to run it once.
+  ;; If b.loop.n is non zero, it means b.Loop has already run.
+  (when (== (.-n (.-loop b)) 0)
+    ;; Run the benchmark for at least the specified amount of time.
+    (if (> (.-n (.-benchTime b)) 0)
+      ;; We already ran a single iteration in run1.
+      ;; If -benchtime=1x was requested, use that result.
+      ;; See https://golang.org/issue/32051.
+      (when (> (.-n (.-benchTime b)) 1)
+        (.runN b (.-n (.-benchTime b))))
+
+
+      (let [d (.-d (.-benchTime b))]
+        (for [n (conv int64 1)] (and (not ^{:go/via [common]} (.-failed b)) (< ^{:go/via [common]} (.-duration b) d) (< n 1.0E9)) _
+          (let [last n
+              ;; Predict required iterations.
+              ^{:line 354} goalns (.Nanoseconds d)
+              ^{:line 355} prevIters (conv int64 (.-N b))]
+            (set! n (conv int64 (predictN goalns prevIters (.Nanoseconds ^{:go/via [common]} (.-duration b)) last)))
+            (.runN b (conv int n)))))))
+
+
+
+  (set! (.-result b) (lit BenchmarkResult (.-N b) ^{:go/via [common]} (.-duration b) (.-bytes b) (.-netAllocs b) (.-netBytes b) (.-extra b))))
+
+
+
+
+
+^{:go/end 373} (go/method Elapsed "Elapsed returns the measured elapsed time of the benchmark.\nThe duration reported by Elapsed matches the one measured by\n[B.StartTimer], [B.StopTimer], and [B.ResetTimer].\n" ^time/Duration [^{:tag (* B)} b]
+  (let [d ^{:go/via [common]} (.-duration b)]
+    (when (.-timerOn b)
+      (set! d + (highPrecisionTimeSince ^{:go/via [common]} (.-start b))))
+
+    ^{:line 372} d))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 392} (go/method ReportMetric "ReportMetric adds \"n unit\" to the reported benchmark results.\nIf the metric is per-iteration, the caller should divide by b.N,\nand by convention units should end in \"/op\".\nReportMetric overrides any previously reported value for the same unit.\nReportMetric panics if unit is the empty string or if unit contains\nany whitespace.\nIf unit is a unit normally reported by the benchmark framework itself\n(such as \"allocs/op\"), ReportMetric will override that metric.\nSetting \"ns/op\" to 0 will suppress that built-in metric.\n" [^{:tag (* B)} b ^float64 n ^string unit]
+  (when (== unit "")
+    (panic "metric unit must not be empty"))
+
+  (when (>= (strings/IndexFunc unit unicode/IsSpace) 0)
+    (panic "metric unit must not contain whitespace"))
+
+  (aset (.-extra b) unit n))
+
+
+^{:go/end 412} (go/method stopOrScaleBLoop ^bool [^{:tag (* B)} b]
+  (let [t (.Elapsed b)]
+    (when (>= t (.-d (.-benchTime b)))
+      ;; We've reached the target
+      (return false))
+
+    ;; Loop scaling
+    (let [goalns (.Nanoseconds (.-d (.-benchTime b)))
+        ^{:line 402} prevIters (conv int64 (.-n (.-loop b)))]
+      (set! (.-n (.-loop b)) (conv uint64 (predictN goalns prevIters (.Nanoseconds t) prevIters)))
+      (when (!= (bit-and (.-n (.-loop b)) loopPoisonMask) 0)
+        ;; The iteration count should never get this high, but if it did we'd be
+        ;; in big trouble.
+        (panic "loop iteration target overflow"))
+
+      ;; predictN may have capped the number of iterations; make sure to
+      ;; terminate if we've already hit that cap.
+      (< (conv uint64 prevIters) (.-n (.-loop b))))))
+
+
+^{:go/end 466} (go/method loopSlowPath ^bool [^{:tag (* B)} b]
+  ;; Consistency checks
+  (when (not (.-timerOn b))
+    ^{:go/via [common]} (.Fatal b "B.Loop called with timer stopped"))
+
+  (when (!= (bit-and (.-i (.-loop b)) loopPoisonMask) 0)
+    (panic (fmt/Sprintf "unknown loop stop condition: %#x" (.-i (.-loop b)))))
+
+
+  (when (== (.-n (.-loop b)) 0)
+    ;; It's the first call to b.Loop() in the benchmark function.
+    (if (> (.-n (.-benchTime b)) 0)
+      ;; Fixed iteration count.
+      (set! (.-n (.-loop b)) (conv uint64 (.-n (.-benchTime b))))
+
+      ;; Initialize target to 1 to kick start loop scaling.
+      (set! (.-n (.-loop b)) 1))
+
+    ;; Within a b.Loop loop, we don't use b.N (to avoid confusion).
+    (set! (.-N b) 0)
+    (.ResetTimer b)
+
+    ;; Start the next iteration.
+    (inc! (.-i (.-loop b)))
+    (return true))
+
+
+  ;; Should we keep iterating?
+  ^{:go/breaks [5]} (let [^bool more (zero bool)]
+    (if (> (.-n (.-benchTime b)) 0) (do
+        ;; The iteration count is fixed, so we should have run this many and now
+        ;; be done.
+        (when (!= (.-i (.-loop b)) (conv uint64 (.-n (.-benchTime b))))
+          ;; We shouldn't be able to reach the slow path in this case.
+          (panic (fmt/Sprintf "iteration count %d < fixed target %d" (.-i (.-loop b)) (.-n (.-benchTime b)))))
+
+        (set! more false))
+
+      ;; Handle fixed time case
+      (set! more (.stopOrScaleBLoop b)))
+
+    (when (not more)
+      (.StopTimer b)
+      ;; Commit iteration count
+      (set! (.-N b) (conv int (.-n (.-loop b))))
+      (set! (.-done (.-loop b)) true)
+      (return false))
+
+
+    ;; Start the next iteration.
+    (inc! (.-i (.-loop b)))
+    true))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 520} (go/method Loop "Loop returns true as long as the benchmark should continue running.\n\nA typical benchmark is structured like:\n\n\tfunc Benchmark(b *testing.B) {\n\t\t... setup ...\n\t\tfor b.Loop() {\n\t\t\t... code to measure ...\n\t\t}\n\t\t... cleanup ...\n\t}\n\nLoop resets the benchmark timer the first time it is called in a benchmark,\nso any setup performed prior to starting the benchmark loop does not count\ntoward the benchmark measurement. Likewise, when it returns false, it stops\nthe timer so cleanup code is not measured.\n\nWithin the body of a \"for b.Loop() { ... }\" loop, arguments to and\nresults from function calls and assigned variables within the loop are kept\nalive, preventing the compiler from fully optimizing away the loop body.\nCurrently, this is implemented as a compiler transformation that wraps such\nvariables with a runtime.KeepAlive intrinsic call. This applies only to\nstatements syntactically between the curly braces of the loop, and the loop\ncondition must be written exactly as \"b.Loop()\".\n\nAfter Loop returns false, b.N contains the total number of iterations that\nran, so the benchmark may use b.N to compute other average metrics.\n\nPrior to the introduction of Loop, benchmarks were expected to contain an\nexplicit loop from 0 to b.N. Benchmarks should either use Loop or contain a\nloop to b.N, but not both. Loop offers more automatic management of the\nbenchmark timer, and runs each benchmark function only once per measurement,\nwhereas b.N-based benchmarks must run the benchmark function (and any\nassociated setup and cleanup) several times.\n" ^bool [^{:tag (* B)} b]
+  ;; This is written such that the fast path is as fast as possible and can be
+  ;; inlined.
+  ;;
+  ;; There are three cases where we'll fall out of the fast path:
+  ;;
+  ;; - On the first call, both i and n are 0.
+  ;;
+  ;; - If the loop reaches the n'th iteration, then i == n and we need
+  ;;   to figure out the new target iteration count or if we're done.
+  ;;
+  ;; - If the timer is stopped, it poisons the top bit of i so the slow
+  ;;   path can do consistency checks and fail.
+  (when (< (.-i (.-loop b)) (.-n (.-loop b)))
+    (inc! (.-i (.-loop b)))
+    (return true))
+
+  (.loopSlowPath b))
+
+
+
+
+(go/const "The loopPoison constants can be OR'd into B.loop.i to cause it to fall back\nto the slow path.\n"
+  ^{:line 525} [^{:val 9223372036854775808N} loopPoisonTimer (conv uint64 (<< 1 (- 63 iota)))]
+  ;; If necessary, add more poison bits here.
+
+
+
+
+
+  ^{:line 532} [^{:val 9223372036854775808N :doc "loopPoisonMask is the set of all loop poison bits. (iota-1) is the index\nof the bit we just set, from which we recreate that bit mask. We subtract\n1 to set all of the bits below that bit, then complement the result to\nget the mask. Sorry, not sorry.\n"} loopPoisonMask (bit-not (conv uint64 (- (<< 1 (- 63 (- iota 1))) 1)))])
+
+
+
+(go/type BenchmarkResult "BenchmarkResult contains the results of a benchmark run.\n" (struct
+    ^{:line 537 :tag int} N ; The number of iterations.
+    ^{:line 538 :tag time/Duration} T ; The total time taken.
+    ^{:line 539 :tag int64} Bytes ; Bytes processed in one iteration.
+    ^{:line 540 :tag uint64} MemAllocs ; The total number of memory allocations.
+    ^{:line 541 :tag uint64} MemBytes ; The total number of bytes allocated.
+
+
+    ^{:line 544 :tag (map string float64) :doc "Extra records additional metrics reported by ReportMetric.\n"} Extra))
+
+
+
+^{:go/end 556} (go/method NsPerOp "NsPerOp returns the \"ns/op\" metric.\n" ^int64 [^BenchmarkResult r]
+  (when [(values v ok) (aget (.-Extra r) "ns/op")] ok
+    (return (conv int64 v)))
+
+  (when (<= (.-N r) 0)
+    (return 0))
+
+  (/ (.Nanoseconds (.-T r)) (conv int64 (.-N r))))
+
+
+
+^{:go/end 567} (go/method mbPerSec "mbPerSec returns the \"MB/s\" metric.\n" ^float64 [^BenchmarkResult r]
+  (when [(values v ok) (aget (.-Extra r) "MB/s")] ok
+    (return v))
+
+  (when (or (<= (.-Bytes r) 0) (<= (.-T r) 0) (<= (.-N r) 0))
+    (return 0))
+
+  (/ (* (conv float64 (.-Bytes r)) (conv float64 (.-N r))) 1000000.0 (.Seconds (.-T r))))
+
+
+
+
+^{:go/end 579} (go/method AllocsPerOp "AllocsPerOp returns the \"allocs/op\" metric,\nwhich is calculated as r.MemAllocs / r.N.\n" ^int64 [^BenchmarkResult r]
+  (when [(values v ok) (aget (.-Extra r) "allocs/op")] ok
+    (return (conv int64 v)))
+
+  (when (<= (.-N r) 0)
+    (return 0))
+
+  (/ (conv int64 (.-MemAllocs r)) (conv int64 (.-N r))))
+
+
+
+
+^{:go/end 591} (go/method AllocedBytesPerOp "AllocedBytesPerOp returns the \"B/op\" metric,\nwhich is calculated as r.MemBytes / r.N.\n" ^int64 [^BenchmarkResult r]
+  (when [(values v ok) (aget (.-Extra r) "B/op")] ok
+    (return (conv int64 v)))
+
+  (when (<= (.-N r) 0)
+    (return 0))
+
+  (/ (conv int64 (.-MemBytes r)) (conv int64 (.-N r))))
+
+
+
+
+
+
+
+
+
+^{:go/end 635} (go/method String "String returns a summary of the benchmark results.\nIt follows the benchmark result line format from\nhttps://golang.org/design/14313-benchmark-format, not including the\nbenchmark name.\nExtra metrics override built-in metrics of the same name.\nString does not include allocs/op or B/op, since those are reported\nby [BenchmarkResult.MemString].\n" ^string [^BenchmarkResult r]
+  (let [buf (new strings/Builder)]
+    (fmt/Fprintf buf "%8d" (.-N r))
+
+    ;; Get ns/op as a float.
+    (let [(values ns ok) (aget (.-Extra r) "ns/op")]
+      (when (not ok)
+        (set! ns (/ (conv float64 (.Nanoseconds (.-T r))) (conv float64 (.-N r)))))
+
+      (when (!= ns 0)
+        (.WriteByte buf \tab)
+        (prettyPrint buf ns "ns/op"))
+
+
+      (when [mbs (.mbPerSec r)] (!= mbs 0)
+        (fmt/Fprintf buf "\t%7.2f MB/s" mbs))
+
+
+      ;; Print extra metrics that aren't represented in the standard
+      ;; metrics.
+      (let [^{:tag (slice string)} extraKeys (zero (slice string))]
+        (range [k (.-Extra r)]
+          (switch k
+            (case ["ns/op" "MB/s" "B/op" "allocs/op"]
+              ;; Built-in metrics reported elsewhere.
+              (continue)))
+
+          (set! extraKeys (append extraKeys k)))
+
+        (^{:inst [(slice string) string]} slices/Sort extraKeys)
+        (range [_ k extraKeys]
+          (.WriteByte buf \tab)
+          (prettyPrint buf (aget (.-Extra r) k) k))
+
+        (.String buf)))))
+
+
+^{:go/end 662} (go/func prettyPrint [^io/Writer w ^float64 x ^string unit]
+  ;; Print all numbers with 10 places before the decimal point
+  ;; and small numbers with four sig figs. Field widths are
+  ;; chosen to fit the whole part in 10 places while aligning
+  ;; the decimal point of all fractional formats.
+  (let [^string format (zero string)]
+    (switch [y (math/Abs x)]
+      (case [(or (== y 0) (>= y 999.95))]
+        (set! format "%10.0f %s"))
+      (case [(>= y 99.995)]
+        (set! format "%12.1f %s"))
+      (case [(>= y 9.9995)]
+        (set! format "%13.2f %s"))
+      (case [(>= y 0.99995)]
+        (set! format "%14.3f %s"))
+      (case [(>= y 0.099995)]
+        (set! format "%15.4f %s"))
+      (case [(>= y 0.0099995)]
+        (set! format "%16.5f %s"))
+      (case [(>= y 9.9995E-4)]
+        (set! format "%17.6f %s"))
+      (default
+        (set! format "%18.7f %s")))
+
+    (fmt/Fprintf w format x unit)))
+
+
+
+^{:go/end 668} (go/method MemString "MemString returns r.AllocedBytesPerOp and r.AllocsPerOp in the same format as 'go test'.\n" ^string [^BenchmarkResult r]
+  (fmt/Sprintf "%8d B/op\t%8d allocs/op"
+    (.AllocedBytesPerOp r) (.AllocsPerOp r)))
+
+
+
+^{:go/end 676} (go/func benchmarkName "benchmarkName returns full name of benchmark including procs suffix.\n" ^string [^string name ^int n]
+  (when (!= n 1)
+    (return (fmt/Sprintf "%s-%d" name n)))
+
+  ^{:line 675} name)
+
+
+(go/type benchState (struct
+    ^{:line 679 :tag (* matcher)} match
+
+    ^{:line 681 :tag int} maxLen ; The largest recorded benchmark name.
+    ^{:line 682 :tag int} extLen)) ; Maximum extension length.
+
+
+
+
+^{:go/end 689} (go/func RunBenchmarks "RunBenchmarks is an internal function but exported because it is cross-package;\nit is part of the implementation of the \"go test\" command.\n" [^{:tag (func [^string pat ^string str] [bool error])} matchString ^{:tag (slice InternalBenchmark)} benchmarks]
+  (runBenchmarks "" matchString benchmarks))
+
+
+^{:go/end 737} (go/func runBenchmarks ^bool [^string importPath ^{:tag (func [^string pat ^string str] [bool error])} matchString ^{:tag (slice InternalBenchmark)} benchmarks]
+  ;; If no flag was specified, don't run benchmarks.
+  (when (== (len @matchBenchmarks) 0)
+    (return true))
+
+  ;; Collect matching benchmarks and determine longest name.
+  (let [maxprocs 1]
+    (range [_ procs cpuList]
+      (when (> procs maxprocs)
+        (set! maxprocs procs)))
+
+
+    (let [bstate (addr ^{:go/breaks [2 4]} (lit benchState
+            :match (newMatcher matchString @matchBenchmarks "-test.bench" @skip)
+            :extLen (len (benchmarkName "" maxprocs))))
+
+        ^{:line 707 :tag (slice InternalBenchmark)} bs (zero (slice InternalBenchmark))]
+      (range [_ Benchmark benchmarks]
+        (when [(values _ matched _) (.fullName (.-match bstate) nil (.-Name Benchmark))] matched
+          (set! bs (append bs Benchmark))
+          (let [benchName (benchmarkName (.-Name Benchmark) maxprocs)]
+            (when [l (+ (len benchName) (.-extLen bstate) 1)] (> l (.-maxLen bstate))
+              (set! (.-maxLen bstate) l)))))
+
+
+
+      (let [main (addr ^{:go/breaks [2 [4 723] 6 [8 729] 10]} (lit B
+              :common ^{:go/breaks [2 4 6]} (lit common
+                :name "Main"
+                :w os/Stdout
+                :bench true)
+
+              :importPath importPath
+              :benchFunc ^{:go/end 728} (fn [^{:tag (* B)} b]
+                (range [_ Benchmark bs]
+                  (.Run b (.-Name Benchmark) (.-F Benchmark))))
+
+
+              :benchTime benchTime
+              :bstate bstate))]
+
+        (when (Verbose)
+          (set! ^{:go/via [common]} (.-chatty main) (newChattyPrinter ^{:go/via [common]} (.-w main))))
+
+        (.runN main 1)
+        (not ^{:go/via [common]} (.-failed main))))))
+
+
+
+^{:go/end 796} (go/method processBench "processBench runs bench b for the configured CPU counts and prints the results.\n" [^{:tag (* benchState)} s ^{:tag (* B)} b]
+  (range [i procs cpuList]
+    (for [j (conv uint 0)] (< j @count) (inc! j)
+      (runtime/GOMAXPROCS procs)
+      (let [benchName (benchmarkName ^{:go/via [common]} (.-name b) procs)]
+
+        ;; If it's chatty, we've already printed this information.
+        (when (== ^{:go/via [common]} (.-chatty b) nil)
+          (fmt/Fprintf ^{:go/via [common]} (.-w b) "%-*s\t" (.-maxLen s) benchName))
+
+        ;; Recompute the running time for all but the first iteration.
+        (when (or (> i 0) (> j 0))
+          (set! b (addr ^{:go/breaks [2 [4 760] 6]} (lit B
+                :common ^{:go/breaks [2 4 6 8 10]} (lit common
+                  :signal (make (chan bool))
+                  :name ^{:go/via [common]} (.-name b)
+                  :w ^{:go/via [common]} (.-w b)
+                  :chatty ^{:go/via [common]} (.-chatty b)
+                  :bench true)
+
+                :benchFunc (.-benchFunc b)
+                :benchTime (.-benchTime b))))
+
+          ^{:go/via [common]} (.setOutputWriter b)
+          (.run1 b))
+
+        (let [r (.doBench b)]
+          (when ^{:go/via [common]} (.-failed b)
+            ;; The output could be very long here, but probably isn't.
+            ;; We print it all, regardless, because we don't want to trim the reason
+            ;; the benchmark failed.
+            (fmt/Fprintf ^{:go/via [common]} (.-w b) "%s--- FAIL: %s\n%s" (.prefix ^{:go/via [common]} (.-chatty b)) benchName ^{:go/via [common]} (.-output b))
+            (continue))
+
+          (let [results (.String r)]
+            (when (!= ^{:go/via [common]} (.-chatty b) nil)
+              (fmt/Fprintf ^{:go/via [common]} (.-w b) "%-*s\t" (.-maxLen s) benchName))
+
+            (when (or @benchmarkMemory (.-showAllocResult b))
+              (set! results + (+ "\t" (.MemString r))))
+
+            (fmt/Fprintln ^{:go/via [common]} (.-w b) results)
+            ;; Unlike with tests, we ignore the -chatty flag and always print output for
+            ;; benchmarks since the output generation time will skew the results.
+            (when (> (len ^{:go/via [common]} (.-output b)) 0)
+              (.trimOutput b)
+              (fmt/Fprintf ^{:go/via [common]} (.-w b) "%s--- BENCH: %s\n%s" (.prefix ^{:go/via [common]} (.-chatty b)) benchName ^{:go/via [common]} (.-output b)))
+
+            (when [p (runtime/GOMAXPROCS -1)] (!= p procs)
+              (fmt/Fprintf os/Stderr "testing: %s left GOMAXPROCS set to %d\n" benchName p))
+
+            (when (and (!= ^{:go/via [common]} (.-chatty b) nil) (.-json ^{:go/via [common]} (.-chatty b)))
+              (.Updatef ^{:go/via [common]} (.-chatty b) "" "=== NAME  %s\n" ""))))))))
+
+
+
+
+
+
+
+
+(go/var ^{:doc "If hideStdoutForTesting is true, Run does not print the benchName.\nThis avoids a spurious print during 'go test' on package testing itself,\nwhich invokes b.Run in its own tests (see sub_test.go).\n"} hideStdoutForTesting false)
+
+
+
+
+
+
+^{:go/end 872} (go/method Run "Run benchmarks f as a subbenchmark with the given name. It reports\nwhether there were any failures.\n\nA subbenchmark is like any other benchmark. A benchmark that calls Run at\nleast once will not be measured itself and will be called once with N=1.\n" ^bool [^{:tag (* B)} b ^string name ^{:tag (func [^{:tag (* B)} b])} f]
+  ;; Since b has subbenchmarks, we will no longer run it as a benchmark itself.
+  ;; Release the lock and acquire it on exit to ensure locks stay paired.
+  (.Store ^{:go/via [common]} (.-hasSub b) true)
+  (.Unlock benchmarkLock)
+  (defer (.Lock benchmarkLock))
+
+  (let [(values benchName ok partial) (values ^{:go/via [common]} (.-name b) true false)]
+    (when (!= (.-bstate b) nil)
+      (set! (values benchName ok partial) (.fullName (.-match (.-bstate b)) (addr (.-common b)) name)))
+
+    (when (not ok)
+      (return true))
+
+    (let [^{:tag (array maxStackLen uintptr)} pc (zero (array maxStackLen uintptr))
+        ^{:line 823} n (runtime/Callers 2 (subslice pc))
+        ^{:line 824} sub (addr ^{:go/breaks [2 [4 835] 6 8 10]} (lit B
+            :common ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit common
+              :signal (make (chan bool))
+              :name benchName
+              :parent (addr (.-common b))
+              :level (+ ^{:go/via [common]} (.-level b) 1)
+              :creator (subslice pc _ n)
+              :w ^{:go/via [common]} (.-w b)
+              :chatty ^{:go/via [common]} (.-chatty b)
+              :bench true)
+
+            :importPath (.-importPath b)
+            :benchFunc f
+            :benchTime (.-benchTime b)
+            :bstate (.-bstate b)))]
+
+      ^{:go/via [common]} (.setOutputWriter sub)
+      (when partial
+        ;; Partial name match, like -bench=X/Y matching BenchmarkX.
+        ;; Only process sub-benchmarks, if any.
+        (.Store ^{:go/via [common]} (.-hasSub sub) true))
+
+
+      (when (!= ^{:go/via [common]} (.-chatty b) nil)
+        (.Do labelsOnce ^{:go/end 857} (fn []
+            (fmt/Printf "goos: %s\n" runtime/GOOS)
+            (fmt/Printf "goarch: %s\n" runtime/GOARCH)
+            (when (!= (.-importPath b) "")
+              (fmt/Printf "pkg: %s\n" (.-importPath b)))
+
+            (when [cpu (sysinfo/CPUName)] (!= cpu "")
+              (fmt/Printf "cpu: %s\n" cpu))))
+
+
+
+        (when (not hideStdoutForTesting)
+          (when (.-json ^{:go/via [common]} (.-chatty b))
+            (.Updatef ^{:go/via [common]} (.-chatty b) benchName "=== RUN   %s\n" benchName))
+
+          (fmt/Println benchName)))
+
+
+
+      (when (.run1 sub)
+        (.run sub))
+
+      (.add b (.-result sub))
+      (not ^{:go/via [common]} (.-failed sub)))))
+
+
+
+
+
+^{:go/end 894} (go/method add "add simulates running benchmarks in sequence in a single iteration. It is\nused to give some meaningful results in case func Benchmark is used in\ncombination with Run.\n" [^{:tag (* B)} b ^BenchmarkResult other]
+  (let [r (addr (.-result b))]
+    ;; The aggregated BenchmarkResults resemble running all subbenchmarks as
+    ;; in sequence in a single benchmark.
+    (set! (.-N r) 1)
+    (set! (.-T r) + (conv time/Duration (.NsPerOp other)))
+    (when (== (.-Bytes other) 0)
+      ;; Summing Bytes is meaningless in aggregate if not all subbenchmarks
+      ;; set it.
+      (set! (.-missingBytes b) true)
+      (set! (.-Bytes r) 0))
+
+    (when (not (.-missingBytes b))
+      (set! (.-Bytes r) + (.-Bytes other)))
+
+    (set! (.-MemAllocs r) + (conv uint64 (.AllocsPerOp other)))
+    (set! (.-MemBytes r) + (conv uint64 (.AllocedBytesPerOp other)))))
+
+
+
+^{:go/end 911} (go/method trimOutput "trimOutput shortens the output from a benchmark, which can be very long.\n" [^{:tag (* B)} b]
+  ;; The output is likely to appear multiple times because the benchmark
+  ;; is run multiple times, but at least it will be seen. This is not a big deal
+  ;; because benchmarks rarely print, but just in case, we trim it if it's too long.
+  (let [^:const ^{:val 10} maxNewlines 10]
+    (for [(values nlCount j) (values 0 0)] (< j (len ^{:go/via [common]} (.-output b))) (inc! j)
+      (when (== (aget ^{:go/via [common]} (.-output b) j) \newline)
+        (inc! nlCount)
+        (when (>= nlCount maxNewlines)
+          (set! ^{:go/via [common]} (.-output b) (append (subslice ^{:go/via [common]} (.-output b) _ j) (spread "\n\t... [output truncated]\n")))
+          (break))))))
+
+
+
+
+
+
+(go/type PB "A PB is used by RunParallel for running parallel benchmarks.\n" (struct
+    ^{:line 915 :tag (* atomic/Uint64)} globalN ; shared between all worker goroutines iteration counter
+    ^{:line 916 :tag uint64} grain ; acquire that many iterations from globalN at once
+    ^{:line 917 :tag uint64} cache ; local cache of acquired iterations
+    ^{:line 918 :tag uint64} bN)) ; total number of iterations to execute (b.N)
+
+
+
+^{:go/breaks [6] :go/end 935} (go/method Next "Next reports whether there are more iterations to execute.\n" ^bool [^{:tag (* PB)} pb]
+  (when (== (.-cache pb) 0)
+    (let [n (.Add (.-globalN pb) (.-grain pb))]
+      (cond (<= n (.-bN pb))
+        (set! (.-cache pb) (.-grain pb))
+        (< n (+ (.-bN pb) (.-grain pb)))
+        (set! (.-cache pb) (- (+ (.-bN pb) (.-grain pb)) n)) :else
+
+        (return false))))
+
+
+  (dec! (.-cache pb))
+  true)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 989} (go/method RunParallel "RunParallel runs a benchmark in parallel.\nIt creates multiple goroutines and distributes b.N iterations among them.\nThe number of goroutines defaults to GOMAXPROCS. To increase parallelism for\nnon-CPU-bound benchmarks, call [B.SetParallelism] before RunParallel.\nRunParallel is usually used with the go test -cpu flag.\n\nThe body function will be run in each goroutine. It should set up any\ngoroutine-local state and then iterate until pb.Next returns false.\nIt should not use the [B.StartTimer], [B.StopTimer], or [B.ResetTimer] functions,\nbecause they have global effect. It should also not call [B.Run].\n\nRunParallel reports ns/op values as wall time for the benchmark as a whole,\nnot the sum of wall time or CPU time over each parallel goroutine.\n" [^{:tag (* B)} b ^{:tag (func [(* PB)])} body]
+  (when (== (.-N b) 0)
+    (return)) ; Nothing to do when probing.
+
+  ;; Calculate grain size as number of iterations that take ~100µs.
+  ;; 100µs is enough to amortize the overhead and provide sufficient
+  ;; dynamic load balancing.
+  (let [grain (conv uint64 0)]
+    (when (and (> (.-previousN b) 0) (> (.-previousDuration b) 0))
+      (set! grain (/ (* 100000.0 (conv uint64 (.-previousN b))) (conv uint64 (.-previousDuration b)))))
+
+    (when (< grain 1)
+      (set! grain 1))
+
+    ;; We expect the inner loop and function call to take at least 10ns,
+    ;; so do not do more than 100µs/10ns=1e4 iterations.
+    (when (> grain 10000.0)
+      (set! grain 10000.0))
+
+
+    (let [^atomic/Uint64 n (zero atomic/Uint64)
+        ^{:line 971} numProcs (* (.-parallelism b) (runtime/GOMAXPROCS 0))
+        ^{:line 972 :tag sync/WaitGroup} wg (zero sync/WaitGroup)]
+      (.Add wg numProcs)
+      (for [p 0] (< p numProcs) (inc! p)
+        (go (^{:go/end 983} (fn []
+              (defer (.Done wg))
+              (let [pb (addr ^{:go/breaks [2 4 6]} (lit PB
+                      :globalN (addr n)
+                      :grain grain
+                      :bN (conv uint64 (.-N b))))]
+
+                (body pb))))))
+
+
+      (.Wait wg)
+      (when (and (<= (.Load n) (conv uint64 (.-N b))) (not ^{:go/via [common]} (.Failed b)))
+        ^{:go/via [common]} (.Fatal b "RunParallel: body exited without pb.Next() == false")))))
+
+
+
+
+
+
+^{:go/end 998} (go/method SetParallelism "SetParallelism sets the number of goroutines used by [B.RunParallel] to p*GOMAXPROCS.\nThere is usually no need to call SetParallelism for CPU-bound benchmarks.\nIf p is less than 1, this call will have no effect.\n" [^{:tag (* B)} b ^int p]
+  (when (>= p 1)
+    (set! (.-parallelism b) p)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1022} (go/func Benchmark "Benchmark benchmarks a single function. It is useful for creating\ncustom benchmarks that do not use the \"go test\" command.\n\nIf f depends on testing flags, then [Init] must be used to register\nthose flags before calling Benchmark and before calling [flag.Parse].\n\nIf f calls Run, the result will be an estimate of running all its\nsubbenchmarks that don't call Run in sequence in a single benchmark.\n" ^BenchmarkResult [^{:tag (func [^{:tag (* B)} b])} f]
+  (let [b (addr ^{:go/breaks [2 [4 1014] 6]} (lit B
+          :common ^{:go/breaks [2 4]} (lit common
+            :signal (make (chan bool))
+            :w (lit discard))
+
+          :benchFunc f
+          :benchTime benchTime))]
+
+    ^{:go/via [common]} (.setOutputWriter b)
+    (when (.run1 b)
+      (.run b))
+
+    (.-result b)))
+
+
+(go/type discard (struct))
+
+^{:go/end 1026} (go/method Write [discard ^{:tag (slice byte)} b] :results [^int n ^error err] (return (len b) nil))

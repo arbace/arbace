@@ -1,0 +1,137 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "plugin.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [unsafe "unsafe"]])
+
+
+
+^{:go/end 95} (go/func ^{:go/linkname "plugin_lastmoduleinit plugin.lastmoduleinit"} plugin_lastmoduleinit [] :results [^string path ^{:tag (map string any)} syms ^{:tag (slice (* initTask))} initTasks ^string errstr]
+  (let [^{:tag (* moduledata)} md (zero (* moduledata))]
+    (for [pmd (.-next firstmoduledata)] (!= pmd nil) (set! pmd (.-next pmd))
+      (when (.-bad pmd)
+        (set! md nil) ; we only want the last module
+        (continue))
+
+      (set! md pmd))
+
+    (when (== md nil)
+      (throw "runtime: no plugin module data"))
+
+    (when (== (.-pluginpath md) "")
+      (throw "runtime: plugin has empty pluginpath"))
+
+    (when (!= (.-typemap md) nil)
+      (return "" nil nil "plugin already loaded"))
+
+
+    (range [_ pmd (activeModules)]
+      (when (== (.-pluginpath pmd) (.-pluginpath md))
+        (set! (.-bad md) true)
+        (return "" nil nil "plugin already loaded"))
+
+
+      (when (or (inRange (.-text pmd) (.-etext pmd) (.-text md) (.-etext md))
+          (inRange (.-bss pmd) (.-ebss pmd) (.-bss md) (.-ebss md))
+          (inRange (.-data pmd) (.-edata pmd) (.-data md) (.-edata md))
+          (inRange (.-types pmd) (.-etypes pmd) (.-types md) (.-etypes md)))
+        (println "plugin: new module data overlaps with previous moduledata")
+        (println "\tpmd.text-etext=" (conv hex (.-text pmd)) "-" (conv hex (.-etext pmd)))
+        (println "\tpmd.bss-ebss=" (conv hex (.-bss pmd)) "-" (conv hex (.-ebss pmd)))
+        (println "\tpmd.data-edata=" (conv hex (.-data pmd)) "-" (conv hex (.-edata pmd)))
+        (println "\tpmd.types-etypes=" (conv hex (.-types pmd)) "-" (conv hex (.-etypes pmd)))
+        (println "\tmd.text-etext=" (conv hex (.-text md)) "-" (conv hex (.-etext md)))
+        (println "\tmd.bss-ebss=" (conv hex (.-bss md)) "-" (conv hex (.-ebss md)))
+        (println "\tmd.data-edata=" (conv hex (.-data md)) "-" (conv hex (.-edata md)))
+        (println "\tmd.types-etypes=" (conv hex (.-types md)) "-" (conv hex (.-etypes md)))
+        (throw "plugin: new module data overlaps with previous moduledata")))
+
+
+    (range [_ pkghash (.-pkghashes md)]
+      (when (!= (.-linktimehash pkghash) @(.-runtimehash pkghash))
+        (set! (.-bad md) true)
+        (return "" nil nil (+ "plugin was built with a different version of package " (.-modulename pkghash)))))
+
+
+
+    ;; Initialize the freshly loaded module.
+    (modulesinit)
+    (typelinksinit)
+
+    (pluginftabverify md)
+    (moduledataverify1 md)
+
+    (lock (addr itabLock))
+    (addModuleItabs md)
+    (unlock (addr itabLock))
+
+    ;; Build a map of symbol names to symbols. Here in the runtime
+    ;; we fill out the first word of the interface, the type. We
+    ;; pass these zero value interfaces to the plugin package,
+    ;; where the symbol value is filled in (usually via cgo).
+    ;;
+    ;; Because functions are handled specially in the plugin package,
+    ;; function symbol names are prefixed here with '.' to avoid
+    ;; a dependency on the reflect package.
+    (set! syms (make (map string any) (len (.-ptab md))))
+    (range [_ ptab (.-ptab md)]
+      (let [symName (resolveNameOff (conv unsafe/Pointer (.-types md)) (.-name ptab))
+          ^{:line 83} t (.typeOff (toRType (conv (* _type) (conv unsafe/Pointer (.-types md)))) (.-typ ptab)) ; TODO can this stack of conversions be simpler?
+          ^{:line 84 :tag any} val (zero any)
+          ^{:line 85} valp (conv (* (array 2 unsafe/Pointer)) (conv unsafe/Pointer (addr val)))]
+        (aset @valp 0 (conv unsafe/Pointer t))
+
+        (let [name (.Name symName)]
+          (when (== (.Kind t) abi/Func)
+            (set! name (+ "." name)))
+
+          (aset syms name val))))
+
+    (return (.-pluginpath md) syms (.-inittasks md) "")))
+
+
+^{:go/end 125} (go/func pluginftabverify [^{:tag (* moduledata)} md]
+  (let [badtable false]
+    (for [i 0] (< i (len (.-ftab md))) (inc! i)
+      (let [entry (.textAddr md (.-entryoff (aget (.-ftab md) i)))]
+        (when (and (<= (.-minpc md) entry) (<= entry (.-maxpc md)))
+          (continue))
+
+
+        (let [f (lit funcInfo (conv (* _func) (conv unsafe/Pointer (addr (aget (.-pclntable md) (.-funcoff (aget (.-ftab md) i)))))) md)
+            ^{:line 106} name (funcname f)
+
+            ;; A common bug is f.entry has a relocation to a duplicate
+            ;; function symbol, meaning if we search for its PC we get
+            ;; a valid entry with a name that is useful for debugging.
+            ^{:line 111} name2 "none"
+            ^{:line 112} entry2 (conv uintptr 0)
+            ^{:line 113} f2 (findfunc entry)]
+          (when (.valid f2)
+            (set! name2 (funcname f2))
+            (set! entry2 (.entry f2)))
+
+          (set! badtable true)
+          (println "ftab entry" (conv hex entry) "/" (conv hex entry2) ": "
+            ^{:line 120} name "/" name2 "outside pc range:[" (conv hex (.-minpc md)) "," (conv hex (.-maxpc md)) "], modulename=" (.-modulename md) ", pluginpath=" (.-pluginpath md)))))
+
+    (when badtable
+      (throw "runtime: plugin has bad symbol table"))))
+
+
+
+
+^{:go/end 130} (go/func inRange "inRange reports whether v0 or v1 are in the range [r0, r1].\n" ^bool [^uintptr r0 ^uintptr r1 ^uintptr v0 ^uintptr v1]
+  (or ^:go/paren (and (>= v0 r0) (<= v0 r1)) ^:go/paren (and (>= v1 r0) (<= v1 r1))))
+
+
+
+
+
+(go/type ptabEntry "A ptabEntry is generated by the compiler for each exported function\nand global variable in the main package of a plugin. It is used to\ninitialize the plugin module's symbol map.\n" (struct
+    ^{:line 136 :tag nameOff} name
+    ^{:line 137 :tag typeOff} typ))

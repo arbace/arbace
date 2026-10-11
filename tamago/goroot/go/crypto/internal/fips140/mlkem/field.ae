@@ -1,0 +1,547 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.mlkem) (go/file "field.go" :imports [
+
+
+    ^{:line 8} [sha3 "crypto/internal/fips140/sha3"]
+    ^{:line 9} [byteorder "crypto/internal/fips140deps/byteorder"]
+    ^{:line 10} [errors "errors"]])
+
+
+
+(go/type fieldElement "fieldElement is an integer modulo q, an element of ℤ_q. It is always reduced.\n" uint16)
+
+
+^{:go/end 22} (go/func fieldCheckReduced "fieldCheckReduced checks that a value a is < q.\n" [^uint16 a] :results [fieldElement error]
+  (when (>= a q)
+    (return 0 (errors/New "unreduced field element")))
+
+  (return (conv fieldElement a) nil))
+
+
+
+^{:go/end 30} (go/func fieldReduceOnce "fieldReduceOnce reduces a value a < 2q.\n" ^fieldElement [^uint16 a]
+  (let [x (- a q)]
+    ;; If x underflowed, then x >= 2¹⁶ - q > 2¹⁵, so the top bit is set.
+    (set! x + (* (>> x 15) q))
+    (conv fieldElement x)))
+
+
+^{:go/end 35} (go/func fieldAdd ^fieldElement [^fieldElement a ^fieldElement b]
+  (let [x (conv uint16 (+ a b))]
+    (fieldReduceOnce x)))
+
+
+^{:go/end 40} (go/func fieldSub ^fieldElement [^fieldElement a ^fieldElement b]
+  (let [x (conv uint16 (+ (- a b) q))]
+    (fieldReduceOnce x)))
+
+
+(go/const
+  ^{:line 43} [^{:val 5039} barrettMultiplier 5039] ; 2¹² * 2¹² / q
+  ^{:line 44} [^{:val 24} barrettShift 24]) ; log₂(2¹² * 2¹²)
+
+
+
+
+^{:go/end 52} (go/func fieldReduce "fieldReduce reduces a value a < 2q² using Barrett reduction, to avoid\npotentially variable-time division.\n" ^fieldElement [^uint32 a]
+  (let [quotient (conv uint32 (>> (* (conv uint64 a) barrettMultiplier) barrettShift))]
+    (fieldReduceOnce (conv uint16 (- a (* quotient q))))))
+
+
+^{:go/end 57} (go/func fieldMul ^fieldElement [^fieldElement a ^fieldElement b]
+  (let [x (* (conv uint32 a) (conv uint32 b))]
+    (fieldReduce x)))
+
+
+
+
+^{:go/end 64} (go/func fieldMulSub "fieldMulSub returns a * (b - c). This operation is fused to save a\nfieldReduceOnce after the subtraction.\n" ^fieldElement [^fieldElement a ^fieldElement b ^fieldElement c]
+  (let [x (* (conv uint32 a) (conv uint32 (+ (- b c) q)))]
+    (fieldReduce x)))
+
+
+
+
+^{:go/end 72} (go/func fieldAddMul "fieldAddMul returns a * b + c * d. This operation is fused to save a\nfieldReduceOnce and a fieldReduce.\n" ^fieldElement [^fieldElement a ^fieldElement b ^fieldElement c ^fieldElement d]
+  (let [x (* (conv uint32 a) (conv uint32 b))]
+    (set! x + (* (conv uint32 c) (conv uint32 d)))
+    (fieldReduce x)))
+
+
+
+
+^{:go/end 104} (go/func compress "compress maps a field element uniformly to the range 0 to 2ᵈ-1, according to\nFIPS 203, Definition 4.7.\n" ^uint16 [^fieldElement x ^uint8 d]
+  ;; We want to compute (x * 2ᵈ) / q, rounded to nearest integer, with 1/2
+  ;; rounding up (see FIPS 203, Section 2.3).
+
+  ;; Barrett reduction produces a quotient and a remainder in the range [0, 2q),
+  ;; such that dividend = quotient * q + remainder.
+  (let [dividend (<< (conv uint32 x) d) ; x * 2ᵈ
+      ^{:line 83} quotient (conv uint32 (>> (* (conv uint64 dividend) barrettMultiplier) barrettShift))
+      ^{:line 84} remainder (- dividend (* quotient q))]
+
+    ;; Since the remainder is in the range [0, 2q), not [0, q), we need to
+    ;; portion it into three spans for rounding.
+    ;;
+    ;;     [ 0,       q/2     ) -> round to 0
+    ;;     [ q/2,     q + q/2 ) -> round to 1
+    ;;     [ q + q/2, 2q      ) -> round to 2
+    ;;
+    ;; We can convert that to the following logic: add 1 if remainder > q/2,
+    ;; then add 1 again if remainder > q + q/2.
+    ;;
+    ;; Note that if remainder > x, then ⌊x⌋ - remainder underflows, and the top
+    ;; bit of the difference will be set.
+    (set! quotient + (bit-and (>> (- (/ q 2) remainder) 31) 1))
+    (set! quotient + (bit-and (>> (- (+ q (/ q 2)) remainder) 31) 1))
+
+    ;; quotient might have overflowed at this point, so reduce it by masking.
+    (let [^uint32 mask (- ^uint32 (<< 1 d) 1)]
+      (conv uint16 (bit-and quotient mask)))))
+
+
+
+
+^{:go/end 122} (go/func decompress "decompress maps a number x between 0 and 2ᵈ-1 uniformly to the full range of\nfield elements, according to FIPS 203, Definition 4.8.\n" ^fieldElement [^uint16 y ^uint8 d]
+  ;; We want to compute (y * q) / 2ᵈ, rounded to nearest integer, with 1/2
+  ;; rounding up (see FIPS 203, Section 2.3).
+
+  (let [dividend (* (conv uint32 y) q)
+      ^{:line 113} quotient (>> dividend d)] ; (y * q) / 2ᵈ
+
+    ;; The d'th least-significant bit of the dividend (the most significant bit
+    ;; of the remainder) is 1 for the top half of the values that divide to the
+    ;; same quotient, which are the ones that round up.
+    (set! quotient + (bit-and (>> dividend (- d 1)) 1))
+
+    ;; quotient is at most (2¹¹-1) * q / 2¹¹ + 1 = 3328, so it didn't overflow.
+    (conv fieldElement quotient)))
+
+
+
+
+(go/type ringElement "ringElement is a polynomial, an element of R_q, represented as an array\naccording to FIPS 203, Section 2.4.4.\n" (array n fieldElement))
+
+
+^{:go/end 134} (go/func polyAdd "polyAdd adds two ringElements or nttElements.\n" :type-params [^{:tag (tilde (array n fieldElement))} T] [^T a ^:go/grouped ^T b] :results [^T s]
+  (range [i s]
+    (aset s i (fieldAdd (aget a i) (aget b i))))
+
+  ^{:line 133} s)
+
+
+
+^{:go/end 142} (go/func polySub "polySub subtracts two ringElements or nttElements.\n" :type-params [^{:tag (tilde (array n fieldElement))} T] [^T a ^:go/grouped ^T b] :results [^T s]
+  (range [i s]
+    (aset s i (fieldSub (aget a i) (aget b i))))
+
+  ^{:line 141} s)
+
+
+
+
+
+^{:go/end 157} (go/func polyByteEncode "polyByteEncode appends the 384-byte encoding of f to b.\n\nIt implements ByteEncode₁₂, according to FIPS 203, Algorithm 5.\n" :type-params [^{:tag (tilde (array n fieldElement))} T] ^{:tag (slice byte)} [^{:tag (slice byte)} b ^T f]
+  (let [(values out B) (sliceForAppend b encodingSize12)]
+    (for [i 0] (< i n) (set! i + 2)
+      (let [x (bit-or (conv uint32 (aget f i)) (<< (conv uint32 (aget f (+ i 1))) 12))]
+        (aset B 0 (conv uint8 x))
+        (aset B 1 (conv uint8 (>> x 8)))
+        (aset B 2 (conv uint8 (>> x 16)))
+        (set! B (subslice B 3))))
+
+    ^{:line 156} out))
+
+
+
+
+
+
+
+^{:go/end 182} (go/func polyByteDecode "polyByteDecode decodes the 384-byte encoding of a polynomial, checking that\nall the coefficients are properly reduced. This fulfills the \"Modulus check\"\nstep of ML-KEM Encapsulation.\n\nIt implements ByteDecode₁₂, according to FIPS 203, Algorithm 6.\n" :type-params [^{:tag (tilde (array n fieldElement))} T] [^{:tag (slice byte)} b] :results [T error]
+  (when (!= (len b) encodingSize12)
+    (return (lit T) (errors/New "mlkem: invalid encoding length")))
+
+  (let [^T f (zero T)]
+    (for [i 0] (< i n) (set! i + 2)
+      (let [d (bit-or (conv uint32 (aget b 0)) (<< (conv uint32 (aget b 1)) 8) (<< (conv uint32 (aget b 2)) 16))
+          ^:const ^{:line 171 :val 4095} mask12 2r111111111111
+          ^{:line 172 :tag error} err (zero error)]
+        (when [(set! (values (aget f i) err) (fieldCheckReduced (conv uint16 (bit-and d mask12))))] (!= err nil)
+          (return (lit T) (errors/New "mlkem: invalid polynomial encoding")))
+
+        (when [(set! (values (aget f (+ i 1)) err) (fieldCheckReduced (conv uint16 (>> d 12))))] (!= err nil)
+          (return (lit T) (errors/New "mlkem: invalid polynomial encoding")))
+
+        (set! b (subslice b 3))))
+
+    (return f nil)))
+
+
+
+
+
+
+^{:go/end 197} (go/func sliceForAppend "sliceForAppend takes a slice and a requested number of bytes. It returns a\nslice with the contents of the given slice followed by that many bytes and a\nsecond slice that aliases into it and contains only the extra bytes. If the\noriginal slice has sufficient capacity then no allocation is performed.\n" [^{:tag (slice byte)} in ^int n] :results [^{:tag (slice byte)} head ^{:tag (slice byte)} tail]
+  (if [total (+ (len in) n)] (>= (cap in) total)
+    (set! head (subslice in _ total))
+    (do
+      (set! head (make (slice byte) total))
+      (copy head in)))
+
+  (set! tail (subslice head (len in)))
+  (return))
+
+
+
+
+
+
+
+^{:go/end 211} (go/func ringCompressAndEncode1 "ringCompressAndEncode1 appends a 32-byte encoding of a ring element to s,\ncompressing one coefficients per bit.\n\nIt implements Compress₁, according to FIPS 203, Definition 4.7,\nfollowed by ByteEncode₁, according to FIPS 203, Algorithm 5.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^ringElement f]
+  (let [(values ^:assign s b) (sliceForAppend s encodingSize1)]
+    (clear b)
+    (range [i f]
+      (set! (aget b (/ i 8)) bit-or (conv uint8 (<< (compress (aget f i) 1) (% i 8)))))
+
+    ^{:line 210} s))
+
+
+
+
+
+
+
+^{:go/end 226} (go/func ringDecodeAndDecompress1 "ringDecodeAndDecompress1 decodes a 32-byte slice to a ring element where each\nbit is mapped to 0 or ⌈q/2⌋.\n\nIt implements ByteDecode₁, according to FIPS 203, Algorithm 6,\nfollowed by Decompress₁, according to FIPS 203, Definition 4.8.\n" ^ringElement [^{:tag (* (array encodingSize1 byte))} b]
+  (let [^ringElement f (zero ringElement)]
+    (range [i f]
+      (let [b_i (bit-and (>> (aget b (/ i 8)) (% i 8)) 1)
+          ^:const ^{:line 222 :val 1665} halfQ (/ (+ q 1) 2)] ; ⌈q/2⌋, rounded up per FIPS 203, Section 2.3
+        (aset f i (* (conv fieldElement b_i) halfQ)))) ; 0 decompresses to 0, and 1 to ⌈q/2⌋
+
+    ^{:line 225} f))
+
+
+
+
+
+
+
+^{:go/end 239} (go/func ringCompressAndEncode4 "ringCompressAndEncode4 appends a 128-byte encoding of a ring element to s,\ncompressing two coefficients per byte.\n\nIt implements Compress₄, according to FIPS 203, Definition 4.7,\nfollowed by ByteEncode₄, according to FIPS 203, Algorithm 5.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^ringElement f]
+  (let [(values ^:assign s b) (sliceForAppend s encodingSize4)]
+    (for [i 0] (< i n) (set! i + 2)
+      (aset b (/ i 2) (conv uint8 (bit-or (compress (aget f i) 4) (<< (compress (aget f (+ i 1)) 4) 4)))))
+
+    ^{:line 238} s))
+
+
+
+
+
+
+
+^{:go/end 253} (go/func ringDecodeAndDecompress4 "ringDecodeAndDecompress4 decodes a 128-byte encoding of a ring element where\neach four bits are mapped to an equidistant distribution.\n\nIt implements ByteDecode₄, according to FIPS 203, Algorithm 6,\nfollowed by Decompress₄, according to FIPS 203, Definition 4.8.\n" ^ringElement [^{:tag (* (array encodingSize4 byte))} b]
+  (let [^ringElement f (zero ringElement)]
+    (for [i 0] (< i n) (set! i + 2)
+      (aset f i (conv fieldElement (decompress (conv uint16 (bit-and (aget b (/ i 2)) 2r1111)) 4)))
+      (aset f (+ i 1) (conv fieldElement (decompress (conv uint16 (>> (aget b (/ i 2)) 4)) 4))))
+
+    ^{:line 252} f))
+
+
+
+
+
+
+
+^{:go/end 276} (go/func ringCompressAndEncode10 "ringCompressAndEncode10 appends a 320-byte encoding of a ring element to s,\ncompressing four coefficients per five bytes.\n\nIt implements Compress₁₀, according to FIPS 203, Definition 4.7,\nfollowed by ByteEncode₁₀, according to FIPS 203, Algorithm 5.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^ringElement f]
+  (let [(values ^:assign s b) (sliceForAppend s encodingSize10)]
+    (for [i 0] (< i n) (set! i + 4)
+      (let [^uint64 x (zero uint64)]
+        (set! x bit-or (conv uint64 (compress (aget f i) 10)))
+        (set! x bit-or (<< (conv uint64 (compress (aget f (+ i 1)) 10)) 10))
+        (set! x bit-or (<< (conv uint64 (compress (aget f (+ i 2)) 10)) 20))
+        (set! x bit-or (<< (conv uint64 (compress (aget f (+ i 3)) 10)) 30))
+        (aset b 0 (conv uint8 x))
+        (aset b 1 (conv uint8 (>> x 8)))
+        (aset b 2 (conv uint8 (>> x 16)))
+        (aset b 3 (conv uint8 (>> x 24)))
+        (aset b 4 (conv uint8 (>> x 32)))
+        (set! b (subslice b 5))))
+
+    ^{:line 275} s))
+
+
+
+
+
+
+
+^{:go/end 295} (go/func ringDecodeAndDecompress10 "ringDecodeAndDecompress10 decodes a 320-byte encoding of a ring element where\neach ten bits are mapped to an equidistant distribution.\n\nIt implements ByteDecode₁₀, according to FIPS 203, Algorithm 6,\nfollowed by Decompress₁₀, according to FIPS 203, Definition 4.8.\n" ^ringElement [^{:tag (* (array encodingSize10 byte))} bb]
+  (let [b (subslice bb)
+      ^{:line 285 :tag ringElement} f (zero ringElement)]
+    (for [i 0] (< i n) (set! i + 4)
+      (let [x (bit-or (conv uint64 (aget b 0)) (<< (conv uint64 (aget b 1)) 8) (<< (conv uint64 (aget b 2)) 16) (<< (conv uint64 (aget b 3)) 24) (<< (conv uint64 (aget b 4)) 32))]
+        (set! b (subslice b 5))
+        (aset f i (conv fieldElement (decompress (conv uint16 (bit-and (>> x 0) 2r1111111111)) 10)))
+        (aset f (+ i 1) (conv fieldElement (decompress (conv uint16 (bit-and (>> x 10) 2r1111111111)) 10)))
+        (aset f (+ i 2) (conv fieldElement (decompress (conv uint16 (bit-and (>> x 20) 2r1111111111)) 10)))
+        (aset f (+ i 3) (conv fieldElement (decompress (conv uint16 (bit-and (>> x 30) 2r1111111111)) 10)))))
+
+    ^{:line 294} f))
+
+
+
+
+
+
+
+^{:go/end 324} (go/func ringCompressAndEncode "ringCompressAndEncode appends an encoding of a ring element to s,\ncompressing each coefficient to d bits.\n\nIt implements Compress, according to FIPS 203, Definition 4.7,\nfollowed by ByteEncode, according to FIPS 203, Algorithm 5.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^ringElement f ^uint8 d]
+  (let [^byte b (zero byte)
+      ^{:line 304 :tag uint8} bIdx (zero uint8)]
+    (for [i 0] (< i n) (inc! i)
+      (let [c (compress (aget f i) d)
+          ^{:line 307 :tag uint8} cIdx (zero uint8)]
+        (while (< cIdx d)
+          (set! b bit-or (<< (conv byte (>> c cIdx)) bIdx))
+          (let [bits (min (- 8 bIdx) (- d cIdx))]
+            (set! bIdx + bits)
+            (set! cIdx + bits)
+            (when (== bIdx 8)
+              (set! s (append s b))
+              (set! b 0)
+              (set! bIdx 0))))))
+
+
+
+    (when (!= bIdx 0)
+      (panic "mlkem: internal error: bitsFilled != 0"))
+
+    ^{:line 323} s))
+
+
+
+
+
+
+
+^{:go/end 354} (go/func ringDecodeAndDecompress "ringDecodeAndDecompress decodes an encoding of a ring element where\neach d bits are mapped to an equidistant distribution.\n\nIt implements ByteDecode, according to FIPS 203, Algorithm 6,\nfollowed by Decompress, according to FIPS 203, Definition 4.8.\n" ^ringElement [^{:tag (slice byte)} b ^uint8 d]
+  (let [^ringElement f (zero ringElement)
+      ^{:line 333 :tag uint8} bIdx (zero uint8)]
+    (for [i 0] (< i n) (inc! i)
+      (let [^uint16 c (zero uint16)
+          ^{:line 336 :tag uint8} cIdx (zero uint8)]
+        (while (< cIdx d)
+          (set! c bit-or (<< (conv uint16 (>> (aget b 0) bIdx)) cIdx))
+          (set! c bit-and (- ^uint16 (<< 1 d) 1))
+          (let [bits (min (- 8 bIdx) (- d cIdx))]
+            (set! bIdx + bits)
+            (set! cIdx + bits)
+            (when (== bIdx 8)
+              (set! b (subslice b 1))
+              (set! bIdx 0))))
+
+
+        (aset f i (conv fieldElement (decompress c d)))))
+
+    (when (!= (len b) 0)
+      (panic "mlkem: internal error: leftover bytes"))
+
+    ^{:line 353} f))
+
+
+
+
+
+
+
+^{:go/end 363} (go/func ringCompressAndEncode5 "ringCompressAndEncode5 appends a 160-byte encoding of a ring element to s,\ncompressing eight coefficients per five bytes.\n\nIt implements Compress₅, according to FIPS 203, Definition 4.7,\nfollowed by ByteEncode₅, according to FIPS 203, Algorithm 5.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^ringElement f]
+  (ringCompressAndEncode s f 5))
+
+
+
+
+
+
+
+^{:go/end 372} (go/func ringDecodeAndDecompress5 "ringDecodeAndDecompress5 decodes a 160-byte encoding of a ring element where\neach five bits are mapped to an equidistant distribution.\n\nIt implements ByteDecode₅, according to FIPS 203, Algorithm 6,\nfollowed by Decompress₅, according to FIPS 203, Definition 4.8.\n" ^ringElement [^{:tag (* (array encodingSize5 byte))} bb]
+  (ringDecodeAndDecompress (subslice bb) 5))
+
+
+
+
+
+
+
+^{:go/end 381} (go/func ringCompressAndEncode11 "ringCompressAndEncode11 appends a 352-byte encoding of a ring element to s,\ncompressing eight coefficients per eleven bytes.\n\nIt implements Compress₁₁, according to FIPS 203, Definition 4.7,\nfollowed by ByteEncode₁₁, according to FIPS 203, Algorithm 5.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s ^ringElement f]
+  (ringCompressAndEncode s f 11))
+
+
+
+
+
+
+
+^{:go/end 390} (go/func ringDecodeAndDecompress11 "ringDecodeAndDecompress11 decodes a 352-byte encoding of a ring element where\neach eleven bits are mapped to an equidistant distribution.\n\nIt implements ByteDecode₁₁, according to FIPS 203, Algorithm 6,\nfollowed by Decompress₁₁, according to FIPS 203, Definition 4.8.\n" ^ringElement [^{:tag (* (array encodingSize11 byte))} bb]
+  (ringDecodeAndDecompress (subslice bb) 11))
+
+
+
+
+
+^{:go/end 414} (go/func samplePolyCBD "samplePolyCBD draws a ringElement from the special Dη distribution given a\nstream of random bytes generated by the PRF function, according to FIPS 203,\nAlgorithm 8 and Definition 4.3.\n" ^ringElement [^{:tag (slice byte)} s ^byte b]
+  (let [prf (sha3/NewShake256)]
+    (.Write prf s)
+    (.Write prf (lit (slice byte) b))
+    (let [B (make (slice byte) (* 64 2))] ; η = 2
+      (.Read prf B)
+
+      ;; SamplePolyCBD simply draws four (2η) bits for each coefficient, and adds
+      ;; the first two and subtracts the last two.
+
+      (let [^ringElement f (zero ringElement)]
+        (for [i 0] (< i n) (set! i + 2)
+          (let [b (aget B (/ i 2))
+              (values b_7 b_6 b_5 b_4) (values (>> b 7) (bit-and (>> b 6) 1) (bit-and (>> b 5) 1) (bit-and (>> b 4) 1))
+              (values b_3 b_2 b_1 b_0) (values (bit-and (>> b 3) 1) (bit-and (>> b 2) 1) (bit-and (>> b 1) 1) (bit-and b 1))]
+            (aset f i (fieldSub (conv fieldElement (+ b_0 b_1)) (conv fieldElement (+ b_2 b_3))))
+            (aset f (+ i 1) (fieldSub (conv fieldElement (+ b_4 b_5)) (conv fieldElement (+ b_6 b_7))))))
+
+        ^{:line 413} f))))
+
+
+
+
+(go/type nttElement "nttElement is an NTT representation, an element of T_q, represented as an\narray according to FIPS 203, Section 2.4.4.\n" (array n fieldElement))
+
+
+
+(go/var ^{:doc "gammas are the values ζ^2BitRev7(i)+1 mod q for each index i, according to\nFIPS 203, Appendix A (with negative values reduced to positive).\n"} gammas (lit (array 128 fieldElement) 17 3312 2761 568 583 2746 2649 680 1637 1692 723 2606 2288 1041 1100 2229 1409 1920 2662 667 3281 48 233 3096 756 2573 2156 1173 3015 314 3050 279 1703 1626 1651 1678 2789 540 1789 1540 1847 1482 952 2377 1461 1868 2687 642 939 2390 2308 1021 2437 892 2388 941 733 2596 2337 992 268 3061 641 2688 1584 1745 2298 1031 2037 1292 3220 109 375 2954 2549 780 2090 1239 1645 1684 1063 2266 319 3010 2773 556 757 2572 2099 1230 561 2768 2466 863 2594 735 2804 525 1092 2237 403 2926 1026 2303 1143 2186 2150 1179 2775 554 886 2443 1722 1607 1212 2117 1874 1455 1029 2300 2110 1219 2935 394 885 2444 2154 1175))
+
+
+
+
+^{:go/end 437} (go/func nttMul "nttMul multiplies two nttElements.\n\nIt implements MultiplyNTTs, according to FIPS 203, Algorithm 11.\n" ^nttElement [^nttElement f ^nttElement g]
+  (let [^nttElement h (zero nttElement)]
+    ;; We use i += 2 for bounds check elimination. See https://go.dev/issue/66826.
+    (for [i 0] (< i 256) (set! i + 2)
+      (let [(values a0 a1) (values (aget f i) (aget f (+ i 1)))
+          (values b0 b1) (values (aget g i) (aget g (+ i 1)))]
+        (aset h i (fieldAddMul a0 b0 (fieldMul a1 b1) (aget gammas (/ i 2))))
+        (aset h (+ i 1) (fieldAddMul a0 b1 a1 b0))))
+
+    ^{:line 436} h))
+
+
+
+
+(go/var ^{:doc "zetas are the values ζ^BitRev7(k) mod q for each index k, according to FIPS\n203, Appendix A.\n"} zetas (lit (array 128 fieldElement) 1 1729 2580 3289 2642 630 1897 848 1062 1919 193 797 2786 3260 569 1746 296 2447 1339 1476 3046 56 2240 1333 1426 2094 535 2882 2393 2879 1974 821 289 331 3253 1756 1197 2304 2277 2055 650 1977 2513 632 2865 33 1320 1915 2319 1435 807 452 1438 2868 1534 2402 2647 2617 1481 648 2474 3110 1227 910 17 2761 583 2649 1637 723 2288 1100 1409 2662 3281 233 756 2156 3015 3050 1703 1651 2789 1789 1847 952 1461 2687 939 2308 2437 2388 733 2337 268 641 1584 2298 2037 3220 375 2549 2090 1645 1063 319 2773 757 2099 561 2466 2594 2804 1092 403 1026 1143 2150 2775 886 1722 1212 1874 1029 2110 2935 885 2154))
+
+
+
+
+^{:go/end 462} (go/func ntt "ntt maps a ringElement to its nttElement representation.\n\nIt implements NTT, according to FIPS 203, Algorithm 9.\n" ^nttElement [^ringElement f]
+  (let [k 1]
+    (for [len 128] (>= len 2) (set! len / 2)
+      (for [start 0] (< start 256) (set! start + (* 2 len))
+        (let [zeta (aget zetas k)]
+          (inc! k)
+          ;; Bounds check elimination hint.
+          (let [(values f flen) (values (subslice f start (+ start len)) (subslice f (+ start len) (+ start len len)))]
+            (for [j 0] (< j len) (inc! j)
+              (let [t (fieldMul zeta (aget flen j))]
+                (aset flen j (fieldSub (aget f j) t))
+                (aset f j (fieldAdd (aget f j) t))))))))
+
+
+
+    (conv nttElement f)))
+
+
+
+
+
+^{:go/end 486} (go/func inverseNTT "inverseNTT maps a nttElement back to the ringElement it represents.\n\nIt implements NTT⁻¹, according to FIPS 203, Algorithm 10.\n" ^ringElement [^nttElement f]
+  (let [k 127]
+    (for [len 2] (<= len 128) (set! len * 2)
+      (for [start 0] (< start 256) (set! start + (* 2 len))
+        (let [zeta (aget zetas k)]
+          (dec! k)
+          ;; Bounds check elimination hint.
+          (let [(values f flen) (values (subslice f start (+ start len)) (subslice f (+ start len) (+ start len len)))]
+            (for [j 0] (< j len) (inc! j)
+              (let [t (aget f j)]
+                (aset f j (fieldAdd t (aget flen j)))
+                (aset flen j (fieldMulSub zeta (aget flen j) t))))))))
+
+
+
+    (range [i f]
+      (aset f i (fieldMul (aget f i) 3303))) ; 3303 = 128⁻¹ mod q
+
+    (conv ringElement f)))
+
+
+
+
+
+^{:go/end 548} (go/func sampleNTT "sampleNTT draws a uniformly random nttElement from a stream of uniformly\nrandom bytes generated by the XOF function, according to FIPS 203,\nAlgorithm 7.\n" ^nttElement [^{:tag (slice byte)} rho ^byte ii ^byte jj]
+  (let [B (sha3/NewShake128)]
+    (.Write B rho)
+    (.Write B (lit (slice byte) ii jj))
+
+    ;; SampleNTT essentially draws 12 bits at a time from r, interprets them in
+    ;; little-endian, and rejects values higher than q, until it drew 256
+    ;; values. (The rejection rate is approximately 19%.)
+    ;;
+    ;; To do this from a bytes stream, it draws three bytes at a time, and
+    ;; splits them into two uint16 appropriately masked.
+    ;;
+    ;;               r₀              r₁              r₂
+    ;;       |- - - - - - - -|- - - - - - - -|- - - - - - - -|
+    ;;
+    ;;               Uint16(r₀ || r₁)
+    ;;       |- - - - - - - - - - - - - - - -|
+    ;;       |- - - - - - - - - - - -|
+    ;;                   d₁
+    ;;
+    ;;                                Uint16(r₁ || r₂)
+    ;;                       |- - - - - - - - - - - - - - - -|
+    ;;                               |- - - - - - - - - - - -|
+    ;;                                           d₂
+    ;;
+    ;; Note that in little-endian, the rightmost bits are the most significant
+    ;; bits (dropped with a mask) and the leftmost bits are the least
+    ;; significant bits (dropped with a right shift).
+
+    (let [^nttElement a (zero nttElement)
+        ^{:line 521 :tag int} j (zero int) ; index into a
+        ^{:line 522 :tag (array 24 byte)} buf (zero (array 24 byte)) ; buffered reads from B
+        ^{:line 523} off (len buf)] ; index into buf, starts in a "buffer fully consumed" state
+      (while true
+        (when (>= off (len buf))
+          (.Read B (subslice buf))
+          (set! off 0))
+
+        (let [d1 (bit-and (byteorder/LEUint16 (subslice buf off)) 2r111111111111)
+            ^{:line 530} d2 (>> (byteorder/LEUint16 (subslice buf (+ off 1))) 4)]
+          (set! off + 3)
+          (when (< d1 q)
+            (aset a j (conv fieldElement d1))
+            (inc! j))
+
+          (when (>= j (len a))
+            (break))
+
+          (when (< d2 q)
+            (aset a j (conv fieldElement d2))
+            (inc! j))
+
+          (when (>= j (len a))
+            (break))))
+
+
+      ^{:line 547} a)))

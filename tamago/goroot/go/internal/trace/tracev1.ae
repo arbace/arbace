@@ -1,0 +1,566 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements conversion from v1 (Go 1.11–Go 1.21) traces to the v2
+;; format (Go 1.22+).
+;;
+;; Most events have direct equivalents in v2, at worst requiring arguments to
+;; be reordered. Some events, such as GoWaiting need to look ahead for follow-up
+;; events to determine the correct translation. GoSyscall, which is an
+;; instantaneous event, gets turned into a 1 ns long pair of
+;; GoSyscallStart+GoSyscallEnd, unless we observe a GoSysBlock, in which case we
+;; emit a GoSyscallStart+GoSyscallEndBlocked pair with the correct duration
+;; (i.e. starting at the original GoSyscall).
+;;
+;; The resulting trace treats the trace v1 as a single, large generation,
+;; sharing a single evTable for all events.
+;;
+;; We use a new (compared to what was used for 'go tool trace' in earlier
+;; versions of Go) parser for v1 traces that is optimized for speed, low memory
+;; usage, and minimal GC pressure. It allocates events in batches so that even
+;; though we have to load the entire trace into memory, the conversion process
+;; shouldn't result in a doubling of memory usage, even if all converted events
+;; are kept alive, as we free batches once we're done with them.
+;;
+;; The conversion process is lossless.
+
+(in-ns 'go.internal.trace) (go/file "tracev1.go" :imports [
+
+
+    ^{:line 31} [errors "errors"]
+    ^{:line 32} [fmt "fmt"]
+    ^{:line 33} [tracev1 "internal/trace/internal/tracev1"]
+    ^{:line 34} [tracev2 "internal/trace/tracev2"]
+    ^{:line 35} [io "io"]])
+
+
+(go/type traceV1Converter (struct
+    ^{:line 39 :tag tracev1/Trace} trace
+    ^{:line 40 :tag (* evTable)} evt
+    ^{:line 41 :tag bool} preInit
+    ^{:line 42 :tag (map GoID (struct))} createdPreInit
+    ^{:line 43 :tag tracev1/Events} events
+    ^{:line 44 :tag (slice Event)} extra
+    ^{:line 45 :tag (array 3 Event)} extraArr
+    ^{:line 46 :tag (map TaskID taskState)} tasks
+    ^{:line 47 :tag (map ProcID (struct))} seenProcs
+    ^{:line 48 :tag Time} lastTs
+    ^{:line 49 :tag (map ProcID ThreadID)} procMs
+    ^{:line 50 :tag uint64} lastStwReason
+
+    ^{:line 52 :tag (slice uint64)} inlineToStringID
+    ^{:line 53 :tag (slice uint64)} builtinToStringID))
+
+
+(go/const
+
+  ^{:line 58} [^{:val 0 :doc "Block reasons\n"} sForever iota]
+  ^{:line 59} [^{:val 1} sPreempted]
+  ^{:line 60} [^{:val 2} sGosched]
+  ^{:line 61} [^{:val 3} sSleep]
+  ^{:line 62} [^{:val 4} sChanSend]
+  ^{:line 63} [^{:val 5} sChanRecv]
+  ^{:line 64} [^{:val 6} sNetwork]
+  ^{:line 65} [^{:val 7} sSync]
+  ^{:line 66} [^{:val 8} sSyncCond]
+  ^{:line 67} [^{:val 9} sSelect]
+  ^{:line 68} [^{:val 10} sEmpty]
+  ^{:line 69} [^{:val 11} sMarkAssistWait]
+
+
+  ^{:line 72} [^{:val 12 :doc "STW kinds\n"} sSTWUnknown]
+  ^{:line 73} [^{:val 13} sSTWGCMarkTermination]
+  ^{:line 74} [^{:val 14} sSTWGCSweepTermination]
+  ^{:line 75} [^{:val 15} sSTWWriteHeapDump]
+  ^{:line 76} [^{:val 16} sSTWGoroutineProfile]
+  ^{:line 77} [^{:val 17} sSTWGoroutineProfileCleanup]
+  ^{:line 78} [^{:val 18} sSTWAllGoroutinesStackTrace]
+  ^{:line 79} [^{:val 19} sSTWReadMemStats]
+  ^{:line 80} [^{:val 20} sSTWAllThreadsSyscall]
+  ^{:line 81} [^{:val 21} sSTWGOMAXPROCS]
+  ^{:line 82} [^{:val 22} sSTWStartTrace]
+  ^{:line 83} [^{:val 23} sSTWStopTrace]
+  ^{:line 84} [^{:val 24} sSTWCountPagesInUse]
+  ^{:line 85} [^{:val 25} sSTWReadMetricsSlow]
+  ^{:line 86} [^{:val 26} sSTWReadMemStatsSlow]
+  ^{:line 87} [^{:val 27} sSTWPageCachePagesLeaked]
+  ^{:line 88} [^{:val 28} sSTWResetDebugLog]
+
+  ^{:line 90} [^{:val 29} sLast])
+
+
+^{:go/end 202} (go/method init ^error [^{:tag (* traceV1Converter)} it ^tracev1/Trace pr]
+  (set! (.-trace it) pr)
+  (set! (.-preInit it) true)
+  (set! (.-createdPreInit it) (make (map GoID (struct))))
+  (set! (.-evt it) (addr (lit evTable :pcs (make (map uint64 frame)))))
+  (set! (.-events it) (.-Events pr))
+  (set! (.-extra it) (subslice (.-extraArr it) _ 0))
+  (set! (.-tasks it) (make (map TaskID taskState)))
+  (set! (.-seenProcs it) (make (map ProcID (struct))))
+  (set! (.-procMs it) (make (map ProcID ThreadID)))
+  (set! (.-lastTs it) -1)
+
+  (let [evt (.-evt it)
+
+      ;; Convert from trace v1's Strings map to our dataTable.
+      ^{:line 108 :tag uint64} max (zero uint64)]
+    (range [id s (.-Strings pr)]
+      (.insert (.-strings evt) (conv stringID id) s)
+      (when (> id max)
+        (set! max id)))
+
+
+    (set! (.-Strings pr) nil)
+
+    ;; Add all strings used for UserLog. In the trace v1 format, these were
+    ;; stored inline and didn't have IDs. We generate IDs for them.
+    (when (< (+ max (conv uint64 (len (.-InlineStrings pr)))) max)
+      (return (errors/New "trace contains too many strings")))
+
+    (let [^error addErr (zero error)
+        ^{:line 123} add ^{:go/end 127} (fn [^stringID id ^string s]
+          (when [err (.insert (.-strings evt) id s)] (and (!= err nil) (== addErr nil))
+            (set! addErr err)))]
+
+
+      (range [id s (.-InlineStrings pr)]
+        (let [nid (+ max 1 (conv uint64 id))]
+          (set! (.-inlineToStringID it) (append (.-inlineToStringID it) nid))
+          (add (conv stringID nid) s)))
+
+      (set! max + (conv uint64 (len (.-InlineStrings pr))))
+      (set! (.-InlineStrings pr) nil)
+
+      ;; Add strings that the converter emits explicitly.
+      (when (< (+ max (conv uint64 sLast)) max)
+        (return (errors/New "trace contains too many strings")))
+
+      (set! (.-builtinToStringID it) (make (slice uint64) sLast))
+      ^{:go/breaks [38]} (let [addBuiltin ^{:go/end 145} (fn [^int c ^string s]
+            (let [nid (+ max 1 (conv uint64 c))]
+              (aset (.-builtinToStringID it) c nid)
+              (add (conv stringID nid) s)))]
+
+        (addBuiltin sForever "forever")
+        (addBuiltin sPreempted "preempted")
+        (addBuiltin sGosched "runtime.Gosched")
+        (addBuiltin sSleep "sleep")
+        (addBuiltin sChanSend "chan send")
+        (addBuiltin sChanRecv "chan receive")
+        (addBuiltin sNetwork "network")
+        (addBuiltin sSync "sync")
+        (addBuiltin sSyncCond "sync.(*Cond).Wait")
+        (addBuiltin sSelect "select")
+        (addBuiltin sEmpty "")
+        (addBuiltin sMarkAssistWait "GC mark assist wait for work")
+        (addBuiltin sSTWUnknown "")
+        (addBuiltin sSTWGCMarkTermination "GC mark termination")
+        (addBuiltin sSTWGCSweepTermination "GC sweep termination")
+        (addBuiltin sSTWWriteHeapDump "write heap dump")
+        (addBuiltin sSTWGoroutineProfile "goroutine profile")
+        (addBuiltin sSTWGoroutineProfileCleanup "goroutine profile cleanup")
+        (addBuiltin sSTWAllGoroutinesStackTrace "all goroutine stack trace")
+        (addBuiltin sSTWReadMemStats "read mem stats")
+        (addBuiltin sSTWAllThreadsSyscall "AllThreadsSyscall")
+        (addBuiltin sSTWGOMAXPROCS "GOMAXPROCS")
+        (addBuiltin sSTWStartTrace "start trace")
+        (addBuiltin sSTWStopTrace "stop trace")
+        (addBuiltin sSTWCountPagesInUse "CountPagesInUse (test)")
+        (addBuiltin sSTWReadMetricsSlow "ReadMetricsSlow (test)")
+        (addBuiltin sSTWReadMemStatsSlow "ReadMemStatsSlow (test)")
+        (addBuiltin sSTWPageCachePagesLeaked "PageCachePagesLeaked (test)")
+        (addBuiltin sSTWResetDebugLog "ResetDebugLog (test)")
+
+        (when (!= addErr nil)
+          ;; This should be impossible but let's be safe.
+          (return (fmt/Errorf "couldn't add strings: %w" addErr)))
+
+
+        (.compactify (.-strings (.-evt it)))
+
+        ;; Convert stacks.
+        (range [id stk (.-Stacks pr)]
+          (.insert (.-stacks evt) (conv stackID id) (lit stack :pcs stk)))
+
+
+        ;; OPT(dh): if we could share the frame type between this package and
+        ;; tracev1 we wouldn't have to copy the map.
+        (range [pc f (.-PCs pr)]
+          (aset (.-pcs evt) pc ^{:go/breaks [2 4 6 8]} (lit frame
+              :pc pc
+              :funcID (conv stringID (.-Fn f))
+              :fileID (conv stringID (.-File f))
+              :line (conv uint64 (.-Line f)))))
+
+
+        (set! (.-Stacks pr) nil)
+        (set! (.-PCs pr) nil)
+        (.compactify (.-stacks evt))
+        nil))))
+
+
+
+
+^{:go/end 243} (go/method next "next returns the next event, io.EOF if there are no more events, or a\ndescriptive error for invalid events.\n" [^{:tag (* traceV1Converter)} it] :results [Event error]
+  (when (> (len (.-extra it)) 0)
+    (let [ev (aget (.-extra it) 0)]
+      (set! (.-extra it) (subslice (.-extra it) 1))
+
+      (when (== (len (.-extra it)) 0)
+        (set! (.-extra it) (subslice (.-extraArr it) _ 0)))
+
+      ;; Two events aren't allowed to fall on the same timestamp in the new API,
+      ;; but this may happen when we produce EvGoStatus events
+      (when (<= (.-time (.-base ev)) (.-lastTs it))
+        (set! (.-time (.-base ev)) (+ (.-lastTs it) 1)))
+
+      (set! (.-lastTs it) (.-time (.-base ev)))
+      (return ev nil)))
+
+
+  (let [(values oev ok) (.Pop (.-events it))]
+    (when (not ok)
+      (return (lit Event) io/EOF))
+
+
+    (let [(values ev err) (.convertEvent it oev)]
+
+      (cond (== err errSkip)
+        (return (.next it))
+        (!= err nil)
+        (return (lit Event) err))
+
+
+      ;; Two events aren't allowed to fall on the same timestamp in the new API,
+      ;; but this may happen when we produce EvGoStatus events
+      (when (<= (.-time (.-base ev)) (.-lastTs it))
+        (set! (.-time (.-base ev)) (+ (.-lastTs it) 1)))
+
+      (set! (.-lastTs it) (.-time (.-base ev)))
+      (return ev nil))))
+
+
+(go/var errSkip (errors/New "skip event"))
+
+
+
+
+
+
+
+
+^{:go/end 559} (go/method convertEvent "convertEvent converts an event from the trace v1 format to zero or more\nevents in the new format. Most events translate 1 to 1. Some events don't\nresult in an event right away, in which case convertEvent returns errSkip.\nSome events result in more than one new event; in this case, convertEvent\nreturns the first event and stores additional events in it.extra. When\nencountering events that tracev1 shouldn't be able to emit, ocnvertEvent\nreturns a descriptive error.\n" [^{:tag (* traceV1Converter)} it ^{:tag (* tracev1/Event)} ev] :results [^Event OUT ^error ERR]
+  (let [^tracev2/EventType mappedType (zero tracev2/EventType)
+      ^{:line 256 :tag timedEventArgs} mappedArgs (zero timedEventArgs)]
+    (copy (subslice mappedArgs) (subslice (.-Args ev)))
+
+    (switch (.-Type ev)
+      (case [tracev1/EvGomaxprocs]
+        (set! mappedType tracev2/EvProcsChange)
+        (when (.-preInit it)
+          ;; The first EvGomaxprocs signals the end of trace initialization. At this point we've seen
+          ;; all goroutines that already existed at trace begin.
+          (set! (.-preInit it) false)
+          (range [gid (.-createdPreInit it)]
+            ;; These are goroutines that already existed when tracing started but for which we
+            ;; received neither GoWaiting, GoInSyscall, or GoStart. These are goroutines that are in
+            ;; the states _Gidle or _Grunnable.
+            (set! (.-extra it) (append (.-extra it) ^{:go/breaks [2 [4 277] 6]} (lit Event
+                  :ctx ^{:go/breaks [[2 273] 4 6]} (lit schedCtx
+                    ;; G: GoID(gid),
+                    :G NoGoroutine
+                    :P NoProc
+                    :M NoThread)
+
+                  :table (.-evt it)
+                  :base ^{:go/breaks [2 4 6]} (lit baseEvent
+                    :typ tracev2/EvGoStatus
+                    :time (conv Time (.-Ts ev))
+                    :args (lit timedEventArgs (conv uint64 gid) (bit-not (conv uint64 0)) (conv uint64 tracev2/GoRunnable)))))))
+
+
+
+          (set! (.-createdPreInit it) nil)
+          (return (lit Event) errSkip)))
+
+      (case [tracev1/EvProcStart]
+        (aset (.-procMs it) (conv ProcID (.-P ev)) (conv ThreadID (aget (.-Args ev) 0)))
+        (if [(values _ ok) (aget (.-seenProcs it) (conv ProcID (.-P ev)))] ok (do
+            (set! mappedType tracev2/EvProcStart)
+            (set! mappedArgs (lit timedEventArgs (conv uint64 (.-P ev)))))
+          (do
+            (aset (.-seenProcs it) (conv ProcID (.-P ev)) (lit (struct)))
+            (set! mappedType tracev2/EvProcStatus)
+            (set! mappedArgs (lit timedEventArgs (conv uint64 (.-P ev)) (conv uint64 tracev2/ProcRunning))))))
+
+      (case [tracev1/EvProcStop]
+        (if [(values _ ok) (aget (.-seenProcs it) (conv ProcID (.-P ev)))] ok (do
+            (set! mappedType tracev2/EvProcStop)
+            (set! mappedArgs (lit timedEventArgs (conv uint64 (.-P ev)))))
+          (do
+            (aset (.-seenProcs it) (conv ProcID (.-P ev)) (lit (struct)))
+            (set! mappedType tracev2/EvProcStatus)
+            (set! mappedArgs (lit timedEventArgs (conv uint64 (.-P ev)) (conv uint64 tracev2/ProcIdle))))))
+
+      (case [tracev1/EvGCStart]
+        (set! mappedType tracev2/EvGCBegin))
+      (case [tracev1/EvGCDone]
+        (set! mappedType tracev2/EvGCEnd))
+      (case [tracev1/EvSTWStart]
+        (let [sid (aget (.-builtinToStringID it) (+ sSTWUnknown (.STWReason (.-trace it) (aget (.-Args ev) 0))))]
+          (set! (.-lastStwReason it) sid)
+          (set! mappedType tracev2/EvSTWBegin)
+          (set! mappedArgs (lit timedEventArgs (conv uint64 sid)))))
+      (case [tracev1/EvSTWDone]
+        (set! mappedType tracev2/EvSTWEnd)
+        (set! mappedArgs (lit timedEventArgs (.-lastStwReason it))))
+      (case [tracev1/EvGCSweepStart]
+        (set! mappedType tracev2/EvGCSweepBegin))
+      (case [tracev1/EvGCSweepDone]
+        (set! mappedType tracev2/EvGCSweepEnd))
+      (case [tracev1/EvGoCreate]
+        (when (.-preInit it)
+          (aset (.-createdPreInit it) (conv GoID (aget (.-Args ev) 0)) (lit (struct)))
+          (return (lit Event) errSkip))
+
+        (set! mappedType tracev2/EvGoCreate))
+      (case [tracev1/EvGoStart]
+        (if (.-preInit it) (do
+            (set! mappedType tracev2/EvGoStatus)
+            (set! mappedArgs (lit timedEventArgs (aget (.-Args ev) 0) (bit-not (conv uint64 0)) (conv uint64 tracev2/GoRunning)))
+            (delete (.-createdPreInit it) (conv GoID (aget (.-Args ev) 0))))
+
+          (set! mappedType tracev2/EvGoStart)))
+
+      (case [tracev1/EvGoStartLabel]
+        (set! (.-extra it) (lit (slice Event) ^{:go/breaks [2 [4 344] 6]} (lit _
+              :ctx ^{:go/breaks [2 4 6]} (lit schedCtx
+                :G (conv GoID (.-G ev))
+                :P (conv ProcID (.-P ev))
+                :M (aget (.-procMs it) (conv ProcID (.-P ev))))
+
+              :table (.-evt it)
+              :base ^{:go/breaks [2 4 6]} (lit baseEvent
+                :typ tracev2/EvGoLabel
+                :time (conv Time (.-Ts ev))
+                :args (lit timedEventArgs (aget (.-Args ev) 2))))))
+
+
+        ^{:go/breaks [[2 363]]} (return ^{:go/breaks [2 [4 357] 6]} (lit Event
+            :ctx ^{:go/breaks [2 4 6]} (lit schedCtx
+              :G (conv GoID (.-G ev))
+              :P (conv ProcID (.-P ev))
+              :M (aget (.-procMs it) (conv ProcID (.-P ev))))
+
+            :table (.-evt it)
+            :base ^{:go/breaks [2 4 6]} (lit baseEvent
+              :typ tracev2/EvGoStart
+              :time (conv Time (.-Ts ev))
+              :args mappedArgs))
+
+          nil))
+      (case [tracev1/EvGoEnd]
+        (set! mappedType tracev2/EvGoDestroy))
+      (case [tracev1/EvGoStop]
+        (set! mappedType tracev2/EvGoBlock)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sForever)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoSched]
+        (set! mappedType tracev2/EvGoStop)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sGosched)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoPreempt]
+        (set! mappedType tracev2/EvGoStop)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sPreempted)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoSleep]
+        (set! mappedType tracev2/EvGoBlock)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sSleep)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoBlock]
+        (set! mappedType tracev2/EvGoBlock)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sEmpty)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoUnblock]
+        (set! mappedType tracev2/EvGoUnblock))
+      (case [tracev1/EvGoBlockSend]
+        (set! mappedType tracev2/EvGoBlock)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sChanSend)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoBlockRecv]
+        (set! mappedType tracev2/EvGoBlock)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sChanRecv)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoBlockSelect]
+        (set! mappedType tracev2/EvGoBlock)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sSelect)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoBlockSync]
+        (set! mappedType tracev2/EvGoBlock)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sSync)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoBlockCond]
+        (set! mappedType tracev2/EvGoBlock)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sSyncCond)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoBlockNet]
+        (set! mappedType tracev2/EvGoBlock)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sNetwork)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoBlockGC]
+        (set! mappedType tracev2/EvGoBlock)
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (aget (.-builtinToStringID it) sMarkAssistWait)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvGoSysCall]
+        ;; Look for the next event for the same G to determine if the syscall
+        ;; blocked.
+        (let [blocked false]
+          ((.All (.-events it)) ^{:go/breaks [[4 418]] :go/end 419} (fn ^bool [^{:tag (* tracev1/Event)} nev]
+              (when (!= (.-G nev) (.-G ev))
+                (return true))
+
+              ;; After an EvGoSysCall, the next event on the same G will either be
+              ;; EvGoSysBlock to denote a blocking syscall, or some other event
+              ;; (or the end of the trace) if the syscall didn't block.
+              (when (== (.-Type nev) tracev1/EvGoSysBlock)
+                (set! blocked true))
+
+              false))
+
+          (if blocked (do
+              (set! mappedType tracev2/EvGoSyscallBegin)
+              (set! mappedArgs (lit timedEventArgs [1 (conv uint64 (.-StkID ev))])))
+
+            ;; Convert the old instantaneous syscall event to a pair of syscall
+            ;; begin and syscall end and give it the shortest possible duration,
+            ;; 1ns.
+            (let [out1 ^{:go/breaks [2 [4 433] 6]} (lit Event
+                  :ctx ^{:go/breaks [2 4 6]} (lit schedCtx
+                    :G (conv GoID (.-G ev))
+                    :P (conv ProcID (.-P ev))
+                    :M (aget (.-procMs it) (conv ProcID (.-P ev))))
+
+                  :table (.-evt it)
+                  :base ^{:go/breaks [2 4 6]} (lit baseEvent
+                    :typ tracev2/EvGoSyscallBegin
+                    :time (conv Time (.-Ts ev))
+                    :args (lit timedEventArgs [1 (conv uint64 (.-StkID ev))])))
+
+
+
+                ^{:line 441} out2 ^{:go/breaks [2 4 6]} (lit Event
+                  :ctx (.-ctx out1)
+                  :table (.-evt it)
+                  :base ^{:go/breaks [2 4 6]} (lit baseEvent
+                    :typ tracev2/EvGoSyscallEnd
+                    :time (conv Time (+ (.-Ts ev) 1))
+                    :args (lit timedEventArgs)))]
+
+
+
+              (set! (.-extra it) (append (.-extra it) out2))
+              (return out1 nil)))))
+
+
+      (case [tracev1/EvGoSysExit]
+        (set! mappedType tracev2/EvGoSyscallEndBlocked))
+      (case [tracev1/EvGoSysBlock]
+        (return (lit Event) errSkip))
+      (case [tracev1/EvGoWaiting]
+        (set! mappedType tracev2/EvGoStatus)
+        (set! mappedArgs (lit timedEventArgs (aget (.-Args ev) 0) (bit-not (conv uint64 0)) (conv uint64 tracev2/GoWaiting)))
+        (delete (.-createdPreInit it) (conv GoID (aget (.-Args ev) 0))))
+      (case [tracev1/EvGoInSyscall]
+        (set! mappedType tracev2/EvGoStatus)
+        ;; In the new tracer, GoStatus with GoSyscall knows what thread the
+        ;; syscall is on. In trace v1, EvGoInSyscall doesn't contain that
+        ;; information and all we can do here is specify NoThread.
+        (set! mappedArgs (lit timedEventArgs (aget (.-Args ev) 0) (bit-not (conv uint64 0)) (conv uint64 tracev2/GoSyscall)))
+        (delete (.-createdPreInit it) (conv GoID (aget (.-Args ev) 0))))
+      (case [tracev1/EvHeapAlloc]
+        (set! mappedType tracev2/EvHeapAlloc))
+      (case [tracev1/EvHeapGoal]
+        (set! mappedType tracev2/EvHeapGoal))
+      (case [tracev1/EvGCMarkAssistStart]
+        (set! mappedType tracev2/EvGCMarkAssistBegin))
+      (case [tracev1/EvGCMarkAssistDone]
+        (set! mappedType tracev2/EvGCMarkAssistEnd))
+      (case [tracev1/EvUserTaskCreate]
+        (set! mappedType tracev2/EvUserTaskBegin)
+        (let [parent (aget (.-Args ev) 1)]
+          (when (== parent 0)
+            (set! parent (conv uint64 NoTask)))
+
+          (set! mappedArgs (lit timedEventArgs (aget (.-Args ev) 0) parent (aget (.-Args ev) 2) (conv uint64 (.-StkID ev))))
+          (let [(values name _) (.get (.-strings (.-evt it)) (conv stringID (aget (.-Args ev) 2)))]
+            (aset (.-tasks it) (conv TaskID (aget (.-Args ev) 0)) (lit taskState :name name :parentID (conv TaskID (aget (.-Args ev) 1)))))))
+      (case [tracev1/EvUserTaskEnd]
+        (set! mappedType tracev2/EvUserTaskEnd)
+        ;; Event.Task expects the parent and name to be smuggled in extra args
+        ;; and as extra strings.
+        (let [(values ts ok) (aget (.-tasks it) (conv TaskID (aget (.-Args ev) 0)))]
+          (if ok (do
+              (delete (.-tasks it) (conv TaskID (aget (.-Args ev) 0)))
+              (set! mappedArgs (lit timedEventArgs
+                  (aget (.-Args ev) 0)
+                  (aget (.-Args ev) 1)
+                  (conv uint64 (.-parentID ts))
+                  (conv uint64 (.addExtraString (.-evt it) (.-name ts))))))
+
+
+            (set! mappedArgs (lit timedEventArgs (aget (.-Args ev) 0) (aget (.-Args ev) 1) (conv uint64 NoTask) (conv uint64 (.addExtraString (.-evt it) "")))))))
+
+      (case [tracev1/EvUserRegion]
+        (switch (aget (.-Args ev) 1)
+          (case [0] ; start
+            (set! mappedType tracev2/EvUserRegionBegin))
+          (case [1] ; end
+            (set! mappedType tracev2/EvUserRegionEnd)))
+
+        (set! mappedArgs (lit timedEventArgs (aget (.-Args ev) 0) (aget (.-Args ev) 2) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvUserLog]
+        (set! mappedType tracev2/EvUserLog)
+        (set! mappedArgs (lit timedEventArgs (aget (.-Args ev) 0) (aget (.-Args ev) 1) (aget (.-inlineToStringID it) (aget (.-Args ev) 3)) (conv uint64 (.-StkID ev)))))
+      (case [tracev1/EvCPUSample]
+        (set! mappedType tracev2/EvCPUSample)
+        ;; When emitted by the Go 1.22 tracer, CPU samples have 5 arguments:
+        ;; timestamp, M, P, G, stack. However, after they get turned into Event,
+        ;; they have the arguments stack, M, P, G.
+        ;;
+        ;; In Go 1.21, CPU samples did not have Ms.
+        (set! mappedArgs (lit timedEventArgs (conv uint64 (.-StkID ev)) (bit-not (conv uint64 0)) (conv uint64 (.-P ev)) (.-G ev))))
+      (default
+        (return (lit Event) (fmt/Errorf "unexpected event type %v" (.-Type ev)))))
+
+
+    (when (.-Stack (aget tracev1/EventDescriptions (.-Type ev)))
+      (when [stackIDs (.-StackIDs (aget (tracev2/Specs) mappedType))] (> (len stackIDs) 0)
+        (aset mappedArgs (- (aget stackIDs 0) 1) (conv uint64 (.-StkID ev)))))
+
+
+
+    (let [m NoThread]
+      (when (and (!= (.-P ev) -1) (!= (.-Type ev) tracev1/EvCPUSample))
+        (when [(values t ok) (aget (.-procMs it) (conv ProcID (.-P ev)))] ok
+          (set! m (conv ThreadID t))))
+
+
+      (when (== (.-Type ev) tracev1/EvProcStop)
+        (delete (.-procMs it) (conv ProcID (.-P ev))))
+
+      (let [g (conv GoID (.-G ev))]
+        (when (== g 0)
+          (set! g NoGoroutine))
+
+        (let [out ^{:go/breaks [2 [4 551] 6]} (lit Event
+              :ctx ^{:go/breaks [2 4 6]} (lit schedCtx
+                :G (conv GoID g)
+                :P (conv ProcID (.-P ev))
+                :M m)
+
+              :table (.-evt it)
+              :base ^{:go/breaks [2 4 6]} (lit baseEvent
+                :typ mappedType
+                :time (conv Time (.-Ts ev))
+                :args mappedArgs))]
+
+
+          (return out nil))))))
+
+
+
+
+^{:go/end 567} (go/func convertV1Trace "convertV1Trace takes a fully loaded trace in the v1 trace format and\nreturns an iterator over events in the new format.\n" ^{:tag (* traceV1Converter)} [^tracev1/Trace pr]
+  (let [it (addr (lit traceV1Converter))]
+    (.init it pr)
+    ^{:line 566} it))

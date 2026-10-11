@@ -1,0 +1,395 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.pkgbits) (go/file "encoder.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [sha256 "crypto/sha256"]
+    ^{:line 10} [binary "encoding/binary"]
+    ^{:line 11} [constant "go/constant"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [big "math/big"]
+    ^{:line 14} [runtime "runtime"]
+    ^{:line 15} [strings "strings"]])
+
+
+
+
+(go/type PkgEncoder "A PkgEncoder provides methods for encoding a package's Unified IR\nexport data.\n" (struct
+
+    ^{:line 22 :tag Version :doc "version of the bitstream.\n"} version
+
+
+    ^{:line 25 :tag (array numRelocs (slice string)) :doc "elems holds the bitstream for previously encoded elements.\n"} elems
+
+
+
+
+    ^{:line 30 :tag (map string RelElemIdx) :doc "stringsIdx maps previously encoded strings to their index within\nthe RelocString section, to allow deduplication. That is,\nelems[RelocString][stringsIdx[s]] == s (if present).\n"} stringsIdx
+
+
+
+    ^{:line 34 :tag int :doc "syncFrames is the number of frames to write at each sync\nmarker. A negative value means sync markers are omitted.\n"} syncFrames))
+
+
+
+^{:go/end 38} (go/method SyncMarkers "SyncMarkers reports whether pw uses sync markers.\n" ^bool [^{:tag (* PkgEncoder)} pw] (>= (.-syncFrames pw) 0))
+
+
+
+
+
+
+
+
+^{:go/end 53} (go/func NewPkgEncoder "NewPkgEncoder returns an initialized PkgEncoder.\n\nsyncFrames is the number of caller frames that should be serialized\nat Sync points. Serializing additional frames results in larger\nexport data files, but can help diagnosing desync errors in\nhigher-level Unified IR reader/writer code. If syncFrames is\nnegative, then sync markers are omitted entirely.\n" ^PkgEncoder [^Version version ^int syncFrames]
+  ^{:go/breaks [2 4 6]} (lit PkgEncoder
+    :version version
+    :stringsIdx (make (map string RelElemIdx))
+    :syncFrames syncFrames))
+
+
+
+
+
+^{:go/end 108} (go/method DumpTo "DumpTo writes the package's encoded data to out0 and returns the\npackage fingerprint.\n" [^{:tag (* PkgEncoder)} pw ^io/Writer out0] :results [^{:tag (array 8 byte)} fingerprint]
+  (let [h (sha256/New)
+      ^{:line 59} out (io/MultiWriter out0 h)
+
+      ^{:line 61} writeUint32 ^{:go/end 63} (fn [^uint32 x]
+        (go/call assert (== (binary/Write out binary/LittleEndian x) nil)))]
+
+
+    (writeUint32 (conv uint32 (.-version pw)))
+
+    (when (.Has (.-version pw) Flags)
+      (let [^uint32 flags (zero uint32)]
+        (when (.SyncMarkers pw)
+          (set! flags bit-or flagSyncMarkers))
+
+        (writeUint32 flags)))
+
+
+    ;; TODO(markfreeman): Also can use delta encoding to write section ends,
+    ;; but not as impactful.
+    (let [^uint32 sum (zero uint32)]
+      (range [_ elems (addr (.-elems pw))]
+        (set! sum + (conv uint32 (len elems)))
+        (writeUint32 sum))
+
+
+      ;; TODO(markfreeman): Use delta encoding to store element ends and inflate
+      ;; back to this representation during decoding; the numbers will be much
+      ;; smaller.
+      (set! sum 0)
+      (range [_ elems (addr (.-elems pw))]
+        (range [_ elem elems]
+          (set! sum + (conv uint32 (len elem)))
+          (writeUint32 sum)))
+
+
+
+      ;; Write elemData.
+      (range [_ elems (addr (.-elems pw))]
+        (range [_ elem elems]
+          (let [(values _ err) (io/WriteString out elem)]
+            (go/call assert (== err nil)))))
+
+
+
+      ;; Write fingerprint.
+      (copy (subslice fingerprint) (.Sum h nil))
+      (let [(values _ err) (.Write out0 (subslice fingerprint))]
+        (go/call assert (== err nil))
+
+        (return)))))
+
+
+
+
+^{:go/end 122} (go/method StringIdx "StringIdx adds a string value to the strings section, if not\nalready present, and returns its index.\n" ^RelElemIdx [^{:tag (* PkgEncoder)} pw ^string s]
+  (when [(values idx ok) (aget (.-stringsIdx pw) s)] ok
+    (go/call assert (== (aget (aget (.-elems pw) SectionString) idx) s))
+    (return idx))
+
+
+  (let [idx (conv RelElemIdx (len (aget (.-elems pw) SectionString)))]
+    (aset (.-elems pw) SectionString (append (aget (.-elems pw) SectionString) s))
+    (aset (.-stringsIdx pw) s idx)
+    ^{:line 121} idx))
+
+
+
+
+
+^{:go/end 131} (go/method NewEncoder "NewEncoder returns an Encoder for a new element within the given\nsection, and encodes the given SyncMarker as the start of the\nelement bitstream.\n" ^{:tag (* Encoder)} [^{:tag (* PkgEncoder)} pw ^SectionKind k ^SyncMarker marker]
+  (let [e (.NewEncoderRaw pw k)]
+    (.Sync e marker)
+    ^{:line 130} e))
+
+
+
+
+
+
+^{:go/end 146} (go/method NewEncoderRaw "NewEncoderRaw returns an Encoder for a new element within the given\nsection.\n\nMost callers should use NewEncoder instead.\n" ^{:tag (* Encoder)} [^{:tag (* PkgEncoder)} pw ^SectionKind k]
+  (let [idx (conv RelElemIdx (len (aget (.-elems pw) k)))]
+    (aset (.-elems pw) k (append (aget (.-elems pw) k) "")) ; placeholder
+
+    (addr ^{:go/breaks [2 4 6]} (lit Encoder
+        :p pw
+        :k k
+        :Idx idx))))
+
+
+
+
+
+(go/type Encoder "An Encoder provides methods for encoding an individual element's\nbitstream data.\n" (struct
+    ^{:line 151 :tag (* PkgEncoder)} p
+
+    ^{:line 153 :tag (slice RefTableEntry)} Relocs
+    ^{:line 154 :tag (map RefTableEntry uint32)} RelocMap
+    ^{:line 155 :tag bytes/Buffer} Data ; accumulated element bitstream data
+
+    ^{:line 157 :tag bool} encodingRelocHeader
+
+    ^{:line 159 :tag SectionKind} k
+    ^{:line 160 :tag RelElemIdx} Idx)) ; index within relocation section
+
+
+
+^{:go/end 191} (go/method Flush "Flush finalizes the element's bitstream and returns its [RelElemIdx].\n" ^RelElemIdx [^{:tag (* Encoder)} w]
+  (let [^strings/Builder sb (zero strings/Builder)
+
+      ;; Backup the data so we write the relocations at the front.
+      ^{:line 168 :tag bytes/Buffer} tmp (zero bytes/Buffer)]
+    (io/Copy (addr tmp) (addr (.-Data w)))
+
+    ;; TODO(mdempsky): Consider writing these out separately so they're
+    ;; easier to strip, along with function bodies, so that we can prune
+    ;; down to just the data that's relevant to go/types.
+    (when (.-encodingRelocHeader w)
+      (panic "encodingRelocHeader already true; recursive flush?"))
+
+    (set! (.-encodingRelocHeader w) true)
+    (.Sync w SyncRelocs)
+    (.Len w (len (.-Relocs w)))
+    (range [_ rEnt (.-Relocs w)]
+      (.Sync w SyncReloc)
+      (.Len w (conv int (.-Kind rEnt)))
+      (.Len w (conv int (.-Idx rEnt))))
+
+
+    (io/Copy (addr sb) (addr (.-Data w)))
+    (io/Copy (addr sb) (addr tmp))
+    (aset (aget (.-elems (.-p w)) (.-k w)) (.-Idx w) (.String sb))
+
+    (.-Idx w)))
+
+
+^{:go/end 197} (go/method checkErr [^{:tag (* Encoder)} w ^error err]
+  (when (!= err nil)
+    (panicf "unexpected encoding error: %v" err)))
+
+
+
+^{:go/end 204} (go/method rawUvarint [^{:tag (* Encoder)} w ^uint64 x]
+  (let [^{:tag (array binary/MaxVarintLen64 byte)} buf (zero (array binary/MaxVarintLen64 byte))
+      ^{:line 201} n (binary/PutUvarint (subslice buf) x)
+      (values _ err) (.Write (.-Data w) (subslice buf _ n))]
+    (.checkErr w err)))
+
+
+^{:go/end 214} (go/method rawVarint [^{:tag (* Encoder)} w ^int64 x]
+  ;; Zig-zag encode.
+  (let [ux (<< (conv uint64 x) 1)]
+    (when (< x 0)
+      (set! ux (bit-not ux)))
+
+
+    (.rawUvarint w ux)))
+
+
+^{:go/end 230} (go/method rawReloc ^int [^{:tag (* Encoder)} w ^SectionKind k ^RelElemIdx idx]
+  (let [e (lit RefTableEntry k idx)]
+    (if (!= (.-RelocMap w) nil)
+      (when [(values i ok) (aget (.-RelocMap w) e)] ok
+        (return (conv int i)))
+
+
+      (set! (.-RelocMap w) (make (map RefTableEntry uint32))))
+
+
+    (let [i (len (.-Relocs w))]
+      (aset (.-RelocMap w) e (conv uint32 i))
+      (set! (.-Relocs w) (append (.-Relocs w) e))
+      ^{:line 229} i)))
+
+
+^{:go/end 255} (go/method Sync [^{:tag (* Encoder)} w ^SyncMarker m]
+  (when (not (.SyncMarkers (.-p w)))
+    (return))
+
+
+  ;; Writing out stack frame string references requires working
+  ;; relocations, but writing out the relocations themselves involves
+  ;; sync markers. To prevent infinite recursion, we simply trim the
+  ;; stack frame for sync markers within the relocation header.
+  (let [^{:tag (slice string)} frames (zero (slice string))]
+    (when (and (not (.-encodingRelocHeader w)) (> (.-syncFrames (.-p w)) 0))
+      (let [pcs (make (slice uintptr) (.-syncFrames (.-p w)))
+          ^{:line 244} n (runtime/Callers 2 pcs)]
+        (set! frames (fmtFrames (spread (subslice pcs _ n))))))
+
+
+    ;; TODO(mdempsky): Save space by writing out stack frames as a
+    ;; linked list so we can share common stack frames.
+    (.rawUvarint w (conv uint64 m))
+    (.rawUvarint w (conv uint64 (len frames)))
+    (range [_ frame frames]
+      (.rawUvarint w (conv uint64 (.rawReloc w SectionString (.StringIdx (.-p w) frame)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 279} (go/method Bool "Bool encodes and writes a bool value into the element bitstream,\nand then returns the bool value.\n\nFor simple, 2-alternative encodings, the idiomatic way to call Bool\nis something like:\n\n\tif w.Bool(x != 0) {\n\t\t// alternative #1\n\t} else {\n\t\t// alternative #2\n\t}\n\nFor multi-alternative encodings, use Code instead.\n" ^bool [^{:tag (* Encoder)} w ^bool b]
+  (.Sync w SyncBool)
+  (let [^byte x (zero byte)]
+    (when b
+      (set! x 1))
+
+    (let [err (.WriteByte (.-Data w) x)]
+      (.checkErr w err)
+      ^{:line 278} b)))
+
+
+
+^{:go/end 285} (go/method Int64 "Int64 encodes and writes an int64 value into the element bitstream.\n" [^{:tag (* Encoder)} w ^int64 x]
+  (.Sync w SyncInt64)
+  (.rawVarint w x))
+
+
+
+^{:go/end 291} (go/method Uint64 "Uint64 encodes and writes a uint64 value into the element bitstream.\n" [^{:tag (* Encoder)} w ^uint64 x]
+  (.Sync w SyncUint64)
+  (.rawUvarint w x))
+
+
+
+^{:go/end 294} (go/method Len "Len encodes and writes a non-negative int value into the element bitstream.\n" [^{:tag (* Encoder)} w ^int x] (go/call assert (>= x 0)) (.Uint64 w (conv uint64 x)))
+
+
+^{:go/end 297} (go/method Int "Int encodes and writes an int value into the element bitstream.\n" [^{:tag (* Encoder)} w ^int x] (.Int64 w (conv int64 x)))
+
+
+^{:go/end 300} (go/method Uint "Uint encodes and writes a uint value into the element bitstream.\n" [^{:tag (* Encoder)} w ^uint x] (.Uint64 w (conv uint64 x)))
+
+
+
+
+
+
+
+^{:go/end 311} (go/method Reloc "Reloc encodes and writes a relocation for the given (section,\nindex) pair into the element bitstream.\n\nNote: Only the index is formally written into the element\nbitstream, so bitstream decoders must know from context which\nsection an encoded relocation refers to.\n" [^{:tag (* Encoder)} w ^SectionKind k ^RelElemIdx idx]
+  (.Sync w SyncUseReloc)
+  (.Len w (.rawReloc w k idx)))
+
+
+
+^{:go/end 317} (go/method Code "Code encodes and writes a Code value into the element bitstream.\n" [^{:tag (* Encoder)} w ^Code c]
+  (.Sync w (.Marker c))
+  (.Len w (.Value c)))
+
+
+
+
+
+
+
+
+^{:go/end 327} (go/method String "String encodes and writes a string value into the element\nbitstream.\n\nInternally, strings are deduplicated by adding them to the strings\nsection (if not already present), and then writing a relocation\ninto the element bitstream.\n" [^{:tag (* Encoder)} w ^string s]
+  (.StringRef w (.StringIdx (.-p w) s)))
+
+
+
+
+^{:go/end 334} (go/method StringRef "StringRef writes a reference to the given index, which must be a\npreviously encoded string value.\n" [^{:tag (* Encoder)} w ^RelElemIdx idx]
+  (.Sync w SyncString)
+  (.Reloc w SectionString idx))
+
+
+
+
+^{:go/end 343} (go/method Strings "Strings encodes and writes a variable-length slice of strings into\nthe element bitstream.\n" [^{:tag (* Encoder)} w ^{:tag (slice string)} ss]
+  (.Len w (len ss))
+  (range [_ s ss]
+    (.String w s)))
+
+
+
+
+
+^{:go/end 355} (go/method Value "Value encodes and writes a constant.Value into the element\nbitstream.\n" [^{:tag (* Encoder)} w ^constant/Value val]
+  (.Sync w SyncValue)
+  (if (.Bool w (== (.Kind val) constant/Complex)) (do
+      (.scalar w (constant/Real val))
+      (.scalar w (constant/Imag val)))
+
+    (.scalar w val)))
+
+
+
+^{:go/end 381} (go/method scalar [^{:tag (* Encoder)} w ^constant/Value val]
+  (type-switch [v (constant/Val val)]
+    (default
+      (panicf "unhandled %v (%v)" val (.Kind val)))
+    (case [bool]
+      (.Code w ValBool)
+      (.Bool w v))
+    (case [string]
+      (.Code w ValString)
+      (.String w v))
+    (case [int64]
+      (.Code w ValInt64)
+      (.Int64 w v))
+    (case [(* big/Int)]
+      (.Code w ValBigInt)
+      (.bigInt w v))
+    (case [(* big/Rat)]
+      (.Code w ValBigRat)
+      (.bigInt w (.Num v))
+      (.bigInt w (.Denom v)))
+    (case [(* big/Float)]
+      (.Code w ValBigFloat)
+      (.bigFloat w v))))
+
+
+
+^{:go/end 387} (go/method bigInt [^{:tag (* Encoder)} w ^{:tag (* big/Int)} v]
+  (let [b (.Bytes v)]
+    (.String w (conv string b)) ; TODO: More efficient encoding.
+    (.Bool w (< (.Sign v) 0))))
+
+
+^{:go/end 392} (go/method bigFloat [^{:tag (* Encoder)} w ^{:tag (* big/Float)} v]
+  (let [b (.Append v nil \p -1)]
+    (.String w (conv string b)))) ; TODO: More efficient encoding.
+
+
+
+^{:go/end 395} (go/method Version "Version reports the version of the bitstream.\n" ^Version [^{:tag (* Encoder)} w] (.-version (.-p w)))

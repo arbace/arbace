@@ -1,0 +1,477 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "endpoint.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [rand "crypto/rand"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [net "net"]
+    ^{:line 12} [netip "net/netip"]
+    ^{:line 13} [sync "sync"]
+    ^{:line 14} [atomic "sync/atomic"]
+    ^{:line 15} [time "time"]])
+
+
+
+
+
+
+(go/type Endpoint "An Endpoint handles QUIC traffic on a network address.\nIt can accept inbound connections or create outbound ones.\n\nMultiple goroutines may invoke methods on an Endpoint simultaneously.\n" (struct
+    ^{:line 23 :tag (* Config)} listenConfig
+    ^{:line 24 :tag packetConn} packetConn
+    ^{:line 25 :tag endpointTestHooks} testHooks
+    ^{:line 26 :tag statelessResetTokenGenerator} resetGen
+    ^{:line 27 :tag retryState} retry
+
+    ^{:line 29 :tag (queue (* Conn))} acceptQueue ; new inbound connections
+    ^{:line 30 :tag connsMap} connsMap ; only accessed by the listen loop
+
+    ^{:line 32 :tag sync/Mutex} connsMu
+    ^{:line 33 :tag (map (* Conn) (struct))} conns
+    ^{:line 34 :tag bool} closing ; set when Close is called
+    ^{:line 35 :tag (chan (struct))} closec)) ; closed when the listen loop exits
+
+
+(go/type endpointTestHooks (interface
+    (newConn [^{:tag (* Conn)} c ^newServerConnIDs cids])))
+
+
+
+(go/type packetConn "A packetConn is the interface to sending and receiving UDP packets.\n" (interface
+    (Close ^error [])
+    (LocalAddr ^netip/AddrPort [])
+    (Read [^{:tag (func [(* datagram)])} f])
+    (Write ^error [datagram])))
+
+
+
+
+
+
+^{:go/end 71} (go/func Listen "Listen listens on a local network address.\n\nThe config is used to for connections accepted by the endpoint.\nIf the config is nil, the endpoint will not accept connections.\n" [^string network ^string address ^{:tag (* Config)} listenConfig] :results [(* Endpoint) error]
+  (when (and (!= listenConfig nil) (== (.-TLSConfig listenConfig) nil))
+    (return nil (errors/New "TLSConfig is not set")))
+
+  (let [(values a err) (net/ResolveUDPAddr network address)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values udpConn ^:assign err) (net/ListenUDP network a)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [(values pc ^:assign err) (newNetUDPConn udpConn)]
+        (when (!= err nil)
+          (return nil err))
+
+        (newEndpoint pc listenConfig nil)))))
+
+
+
+
+
+
+^{:go/end 90} (go/func NewEndpoint "NewEndpoint creates an endpoint using a net.PacketConn as the underlying transport.\n\nIf the PacketConn is not a *net.UDPConn, the endpoint may be slower and lack\naccess to some features of the network.\n" [^net/PacketConn conn ^{:tag (* Config)} config] :results [(* Endpoint) error]
+  (let [^packetConn pc (zero packetConn)
+      ^{:line 79 :tag error} err (zero error)]
+    (type-switch [conn conn]
+      (case [(* net/UDPConn)]
+        (set! (values pc err) (newNetUDPConn conn)))
+      (default
+        (set! (values pc err) (newNetPacketConn conn))))
+
+    (when (!= err nil)
+      (return nil err))
+
+    (newEndpoint pc config nil)))
+
+
+^{:go/end 114} (go/func newEndpoint [^packetConn pc ^{:tag (* Config)} config ^endpointTestHooks hooks] :results [(* Endpoint) error]
+  (let [e (addr ^{:go/breaks [2 4 6 8 10 12]} (lit Endpoint
+          :listenConfig config
+          :packetConn pc
+          :testHooks hooks
+          :conns (make (map (* Conn) (struct)))
+          :acceptQueue ((inst newQueue (* Conn)))
+          :closec (make (chan (struct)))))
+
+      ^{:line 101 :tag (array 32 byte)} statelessResetKey (zero (array 32 byte))]
+    (when (!= config nil)
+      (set! statelessResetKey (.-StatelessResetKey config)))
+
+    (.init (.-resetGen e) statelessResetKey)
+    (.init (.-connsMap e))
+    (when (and (!= config nil) (.-RequireAddressValidation config))
+      (when [err (.init (.-retry e))] (!= err nil)
+        (return nil err)))
+
+
+    (go (.listen e))
+    (return e nil)))
+
+
+
+^{:go/end 119} (go/method LocalAddr "LocalAddr returns the local network address.\n" ^netip/AddrPort [^{:tag (* Endpoint)} e]
+  (.LocalAddr (.-packetConn e)))
+
+
+
+
+
+
+
+
+
+^{:go/end 158} (go/method Close "Close closes the Endpoint.\nAny blocked operations on the Endpoint or associated Conns and Stream will be unblocked\nand return errors.\n\nClose aborts every open connection.\nData in stream read and write buffers is discarded.\nIt waits for the peers of any open connection to acknowledge the connection has been closed.\n" ^error [^{:tag (* Endpoint)} e ^context/Context ctx]
+  (.close (.-acceptQueue e) (errors/New "endpoint closed"))
+
+  ;; It isn't safe to call Conn.Abort or conn.exit with connsMu held,
+  ;; so copy the list of conns.
+  ^{:go/breaks [[7 157]]} (let [^{:tag (slice (* Conn))} conns (zero (slice (* Conn)))]
+    (.Lock (.-connsMu e))
+    (when (not (.-closing e))
+      (set! (.-closing e) true) ; setting e.closing prevents new conns from being created
+      (range [c (.-conns e)]
+        (set! conns (append conns c)))
+
+      (when (== (len (.-conns e)) 0)
+        (.Close (.-packetConn e))))
+
+
+    (.Unlock (.-connsMu e))
+
+    (range [_ c conns]
+      (.Abort c (lit localTransportError :code errNo)))
+
+    (select
+      (case (<! (.-closec e)))
+      (case (<! (.Done ctx))
+        (range [_ c conns]
+          (.exit c))
+
+        (return (.Err ctx))))
+
+    nil))
+
+
+
+^{:go/end 163} (go/method Accept "Accept waits for and returns the next connection.\n" [^{:tag (* Endpoint)} e ^context/Context ctx] :results [(* Conn) error]
+  (.get (.-acceptQueue e) ctx))
+
+
+
+
+^{:go/end 183} (go/method Dial "Dial creates and returns a connection to a network address.\nThe config cannot be nil.\n" [^{:tag (* Endpoint)} e ^context/Context ctx ^string network ^string address ^{:tag (* Config)} config] :results [(* Conn) error]
+  (let [(values u err) (net/ResolveUDPAddr network address)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [addr (.AddrPort u)]
+      (set! addr (netip/AddrPortFrom (.Unmap (.Addr addr)) (.Port addr)))
+      (let [(values c ^:assign err) (.newConn e (time/Now) config clientSide (lit newServerConnIDs) address addr)]
+        (when (!= err nil)
+          (return nil err))
+
+        (when [err (.waitReady c ctx)] (!= err nil)
+          (.Abort c nil)
+          (return nil err))
+
+        (return c nil)))))
+
+
+^{:go/end 197} (go/method newConn [^{:tag (* Endpoint)} e ^time/Time now ^{:tag (* Config)} config ^connSide side ^newServerConnIDs cids ^string peerHostname ^netip/AddrPort peerAddr] :results [(* Conn) error]
+  (.Lock (.-connsMu e))
+  (defer (.Unlock (.-connsMu e)))
+  (when (.-closing e)
+    (return nil (errors/New "endpoint closed")))
+
+  (let [(values c err) (newConn now side cids peerHostname peerAddr config e)]
+    (when (!= err nil)
+      (return nil err))
+
+    (aset (.-conns e) c (lit (struct)))
+    (return c nil)))
+
+
+
+
+^{:go/end 203} (go/method serverConnEstablished "serverConnEstablished is called by a conn when the handshake completes\nfor an inbound (serverSide) connection.\n" [^{:tag (* Endpoint)} e ^{:tag (* Conn)} c]
+  (.put (.-acceptQueue e) c))
+
+
+
+
+^{:go/end 230} (go/method connDrained "connDrained is called by a conn when it leaves the draining state,\neither when the peer acknowledges connection closure or the drain timeout expires.\n" [^{:tag (* Endpoint)} e ^{:tag (* Conn)} c]
+  (let [^{:tag (slice (slice byte))} cids (zero (slice (slice byte)))]
+    (range [i (.-local (.-connIDState c))]
+      (set! cids (append cids (.-cid (aget (.-local (.-connIDState c)) i)))))
+
+    (let [^{:tag (slice statelessResetToken)} tokens (zero (slice statelessResetToken))]
+      (range [i (.-remote (.-connIDState c))]
+        (set! tokens (append tokens (.-resetToken (aget (.-remote (.-connIDState c)) i)))))
+
+      (.updateConnIDs (.-connsMap e) ^{:go/end 223} (fn [^{:tag (* connsMap)} conns]
+          (range [_ cid cids]
+            (.retireConnID conns c cid))
+
+          (range [_ token tokens]
+            (.retireResetToken conns c token))))
+
+
+      (.Lock (.-connsMu e))
+      (defer (.Unlock (.-connsMu e)))
+      (delete (.-conns e) c)
+      (when (and (.-closing e) (== (len (.-conns e)) 0))
+        (.Close (.-packetConn e))))))
+
+
+
+^{:go/end 240} (go/method listen [^{:tag (* Endpoint)} e]
+  (defer (close (.-closec e)))
+  (.Read (.-packetConn e) ^{:go/end 239} (fn [^{:tag (* datagram)} m]
+      (when (.Load (.-updateNeeded (.-connsMap e)))
+        (.applyUpdates (.-connsMap e)))
+
+      (.handleDatagram e m))))
+
+
+
+^{:go/end 259} (go/method handleDatagram [^{:tag (* Endpoint)} e ^{:tag (* datagram)} m]
+  (let [(values dstConnID ok) (dstConnIDForDatagram (.-b m))]
+    (when (not ok)
+      (.recycle m)
+      (return))
+
+    (let [c (aget (.-byConnID (.-connsMap e)) (conv string dstConnID))]
+      (when (== c nil)
+        ;; TODO: Move this branch into a separate goroutine to avoid blocking
+        ;; the endpoint while processing packets.
+        (.handleUnknownDestinationDatagram e m)
+        (return))
+
+
+      ;; TODO: This can block the endpoint while waiting for the conn to accept the dgram.
+      ;; Think about buffering between the receive loop and the conn.
+      (.sendMsg c m))))
+
+
+^{:go/end 344} (go/method handleUnknownDestinationDatagram [^{:tag (* Endpoint)} e ^{:tag (* datagram)} m]
+  (defer (^{:go/end 266} (fn []
+        (when (!= m nil)
+          (.recycle m)))))
+
+
+  (let [^:const ^{:val 21} minimumValidPacketSize 21]
+    (when (< (len (.-b m)) minimumValidPacketSize)
+      (return))
+
+    (let [now (time/Now)
+        ;; Check to see if this is a stateless reset.
+        ^{:line 273 :tag statelessResetToken} token (zero statelessResetToken)]
+      (copy (subslice token) (subslice (.-b m) (- (len (.-b m)) (len token))))
+      (when [c (aget (.-byResetToken (.-connsMap e)) token)] (!= c nil)
+        (.sendMsg c ^{:go/end 278} (fn [^time/Time now ^{:tag (* Conn)} c]
+            (.handleStatelessReset c now token)))
+
+        (return))
+
+      ;; If this is a 1-RTT packet, there's nothing productive we can do with it.
+      ;; Send a stateless reset if possible.
+      (when (not (isLongHeader (aget (.-b m) 0)))
+        (.maybeSendStatelessReset e (.-b m) (.-peerAddr m))
+        (return))
+
+      (let [(values p ok) (parseGenericLongHeaderPacket (.-b m))]
+        (when (or (not ok) (< (len (.-b m)) paddedInitialDatagramSize))
+          (return))
+
+        (switch (.-version p)
+          (case [quicVersion1])
+          (case [0]
+            ;; Version Negotiation for an unknown connection.
+            (return))
+          (default
+            ;; Unknown version.
+            (.sendVersionNegotiation e p (.-peerAddr m))
+            (return)))
+
+        (when (!= (getPacketType (.-b m)) packetTypeInitial)
+          ;; This packet isn't trying to create a new connection.
+          ;; It might be associated with some connection we've lost state for.
+          ;; We are technically permitted to send a stateless reset for
+          ;; a long-header packet, but this isn't generally useful. See:
+          ;; https://www.rfc-editor.org/rfc/rfc9000#section-10.3-16
+          (return))
+
+        (when (== (.-listenConfig e) nil)
+          ;; We are not configured to accept connections.
+          (return))
+
+        (when (or (> (len (.-srcConnID p)) maxConnIDLen) (> (len (.-dstConnID p)) maxConnIDLen))
+          ;; Enforce QUICv1 connection ID length limits.
+          ;; https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2-3.12.1
+          ;; https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2-3.16.1
+          (return))
+
+        (let [cids ^{:go/breaks [2 4]} (lit newServerConnIDs
+              :srcConnID (.-srcConnID p)
+              :dstConnID (.-dstConnID p))]
+
+          (if (.-RequireAddressValidation (.-listenConfig e))
+            (let [^bool ok (zero bool)]
+              (set! (.-retrySrcConnID cids) (.-dstConnID p))
+              (set! (values (.-originalDstConnID cids) ok) (.validateInitialAddress e now p (.-peerAddr m)))
+              (when (not ok)
+                (return)))
+
+
+            (set! (.-originalDstConnID cids) (.-dstConnID p)))
+
+          (let [^error err (zero error)
+              (values c ^:assign err) (.newConn e now (.-listenConfig e) serverSide cids "" (.-peerAddr m))]
+            (when (!= err nil)
+              ;; The accept queue is probably full.
+              ;; We could send a CONNECTION_CLOSE to the peer to reject the connection.
+              ;; Currently, we just drop the datagram.
+              ;; https://www.rfc-editor.org/rfc/rfc9000.html#section-5.2.2-5
+              (return))
+
+            (.sendMsg c m)
+            (set! m nil))))))) ; don't recycle, sendMsg takes ownership
+
+
+^{:go/end 391} (go/method maybeSendStatelessReset [^{:tag (* Endpoint)} e ^{:tag (slice byte)} b ^netip/AddrPort peerAddr]
+  (when (not (.-canReset (.-resetGen e)))
+    ;; Config.StatelessResetKey isn't set, so we don't send stateless resets.
+    (return))
+
+  ;; The smallest possible valid packet a peer can send us is:
+  ;;   1 byte of header
+  ;;   connIDLen bytes of destination connection ID
+  ;;   1 byte of packet number
+  ;;   1 byte of payload
+  ;;   16 bytes AEAD expansion
+  (when (< (len b) (+ 1 connIDLen 1 1 16))
+    (return))
+
+  ;; TODO: Rate limit stateless resets.
+  (let [cid (subslice (subslice b 1) _ connIDLen)
+      ^{:line 362} token (.tokenForConnID (.-resetGen e) cid)
+      ;; We want to generate a stateless reset that is as short as possible,
+      ;; but long enough to be difficult to distinguish from a 1-RTT packet.
+      ;;
+      ;; The minimal 1-RTT packet is:
+      ;;   1 byte of header
+      ;;   0-20 bytes of destination connection ID
+      ;;   1-4 bytes of packet number
+      ;;   1 byte of payload
+      ;;   16 bytes AEAD expansion
+      ;;
+      ;; Assuming the maximum possible connection ID and packet number size,
+      ;; this gives 1 + 20 + 4 + 1 + 16 = 42 bytes.
+      ;;
+      ;; We also must generate a stateless reset that is shorter than the datagram
+      ;; we are responding to, in order to ensure that reset loops terminate.
+      ;;
+      ;; See: https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+      ^{:line 380} size (min (- (len b) 1) 42)]
+    ;; Reuse the input buffer for generating the stateless reset.
+    (set! b (subslice b _ size))
+    (rand/Read (subslice b _ (- (len b) statelessResetTokenLen)))
+    (set! (aget b 0) bit-and-not headerFormLong) ; clear long header bit
+    (set! (aget b 0) bit-or fixedBit) ; set fixed bit
+    (copy (subslice b (- (len b) statelessResetTokenLen)) (subslice token))
+    (.sendDatagram e ^{:go/breaks [2 4]} (lit datagram
+        :b b
+        :peerAddr peerAddr))))
+
+
+
+^{:go/end 399} (go/method sendVersionNegotiation [^{:tag (* Endpoint)} e ^genericLongPacket p ^netip/AddrPort peerAddr]
+  (let [m (newDatagram)]
+    (set! (.-b m) (appendVersionNegotiation (subslice (.-b m) _ 0) (.-srcConnID p) (.-dstConnID p) quicVersion1))
+    (set! (.-peerAddr m) peerAddr)
+    (.sendDatagram e @m)
+    (.recycle m)))
+
+
+^{:go/end 424} (go/method sendConnectionClose [^{:tag (* Endpoint)} e ^genericLongPacket in ^netip/AddrPort peerAddr ^transportError code]
+  (let [keys (initialKeys (.-dstConnID in) serverSide)
+      ^{:line 403 :tag packetWriter} w (zero packetWriter)
+      ^{:line 404} p ^{:go/breaks [2 4 6 8 10]} (lit longPacket
+        :ptype packetTypeInitial
+        :version quicVersion1
+        :num 0
+        :dstConnID (.-srcConnID in)
+        :srcConnID (.-dstConnID in))
+
+      ^:const ^{:line 411 :val 0} pnumMaxAcked 0]
+    (.reset w paddedInitialDatagramSize)
+    (.startProtectedLongHeaderPacket w pnumMaxAcked p)
+    (.appendConnectionCloseTransportFrame w code 0 "")
+    (.finishProtectedLongHeaderPacket w pnumMaxAcked (.-w keys) p)
+    (let [buf (.datagram w)]
+      (when (== (len buf) 0)
+        (return))
+
+      (.sendDatagram e ^{:go/breaks [2 4]} (lit datagram
+          :b buf
+          :peerAddr peerAddr)))))
+
+
+
+^{:go/end 428} (go/method sendDatagram ^error [^{:tag (* Endpoint)} e ^datagram dgram]
+  (.Write (.-packetConn e) dgram))
+
+
+
+(go/type connsMap "A connsMap is an endpoint's mapping of conn ids and reset tokens to conns.\n" (struct
+    ^{:line 432 :tag (map string (* Conn))} byConnID
+    ^{:line 433 :tag (map statelessResetToken (* Conn))} byResetToken
+
+    ^{:line 435 :tag sync/Mutex} updateMu
+    ^{:line 436 :tag atomic/Bool} updateNeeded
+    ^{:line 437 :tag (slice (func [(* connsMap)]))} updates))
+
+
+^{:go/end 443} (go/method init [^{:tag (* connsMap)} m]
+  (set! (.-byConnID m) (lit (map string (* Conn))))
+  (set! (.-byResetToken m) (lit (map statelessResetToken (* Conn)))))
+
+
+^{:go/end 447} (go/method addConnID [^{:tag (* connsMap)} m ^{:tag (* Conn)} c ^{:tag (slice byte)} cid]
+  (aset (.-byConnID m) (conv string cid) c))
+
+
+^{:go/end 451} (go/method retireConnID [^{:tag (* connsMap)} m ^{:tag (* Conn)} c ^{:tag (slice byte)} cid]
+  (delete (.-byConnID m) (conv string cid)))
+
+
+^{:go/end 455} (go/method addResetToken [^{:tag (* connsMap)} m ^{:tag (* Conn)} c ^statelessResetToken token]
+  (aset (.-byResetToken m) token c))
+
+
+^{:go/end 459} (go/method retireResetToken [^{:tag (* connsMap)} m ^{:tag (* Conn)} c ^statelessResetToken token]
+  (delete (.-byResetToken m) token))
+
+
+^{:go/end 466} (go/method updateConnIDs [^{:tag (* connsMap)} m ^{:tag (func [(* connsMap)])} f]
+  (.Lock (.-updateMu m))
+  (defer (.Unlock (.-updateMu m)))
+  (set! (.-updates m) (append (.-updates m) f))
+  (.Store (.-updateNeeded m) true))
+
+
+
+^{:go/end 478} (go/method applyUpdates "applyUpdates is called by the datagram receive loop to update its connection ID map.\n" [^{:tag (* connsMap)} m]
+  (.Lock (.-updateMu m))
+  (defer (.Unlock (.-updateMu m)))
+  (range [_ f (.-updates m)]
+    (f m))
+
+  (clear (.-updates m))
+  (set! (.-updates m) (subslice (.-updates m) _ 0))
+  (.Store (.-updateNeeded m) false))

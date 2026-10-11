@@ -1,0 +1,86 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace.testtrace) (go/file "helpers.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [testenv "internal/testenv"]
+    ^{:line 11} [raw "internal/trace/raw"]
+    ^{:line 12} [version "internal/trace/version"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [testing "testing"]])
+
+
+
+^{:go/end 45} (go/func Dump "Dump saves the trace to a file or the test log.\n" [^{:tag (* testing/T)} t ^string testName ^{:tag (slice byte)} traceBytes ^bool forceToFile]
+  (let [onBuilder (!= (testenv/Builder) "")
+      ^{:line 22} onOldBuilder (and (not (strings/Contains (testenv/Builder) "gotip")) (not (strings/Contains (testenv/Builder) "go1")))]
+
+    (if (and onBuilder (not forceToFile))
+      ;; Dump directly to the test log on the builder, since this
+      ;; data is critical for debugging and this is the only way
+      ;; we can currently make sure it's retained.
+      (let [s (dumpTraceToText t traceBytes)]
+        (if (and onOldBuilder (> (len s) (+ (<< 1 20) (<< 512 10))))
+          ;; The old build infrastructure truncates logs at ~2 MiB.
+          ;; Let's assume we're the only failure and give ourselves
+          ;; up to 1.5 MiB to dump the trace.
+          ;;
+          ;; TODO(mknyszek): Remove this when we've migrated off of
+          ;; the old infrastructure.
+          ^{:go/via [common]} (.Logf t "text trace too large to dump (%d bytes)" (len s))
+          (do
+            ^{:go/via [common]} (.Log t s)
+            ^{:go/via [common]} (.Log t "Convert this to a raw trace with `go test internal/trace/testtrace -convert in.tracetxt -out out.trace`"))))
+
+
+      ;; We asked to dump the trace or failed. Write the trace to a file.
+      ^{:go/via [common]} (.Logf t "wrote trace to file: %s" (dumpTraceToFile t testName traceBytes)))))
+
+
+
+^{:go/end 72} (go/func dumpTraceToText ^string [^{:tag (* testing/T)} t ^{:tag (slice byte)} b]
+  ^{:go/via [common]} (.Helper t)
+
+  (let [(values br err) (raw/NewReader (bytes/NewReader b))]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatalf t "dumping trace: %v" err))
+
+    (let [^strings/Builder sb (zero strings/Builder)
+        (values tw ^:assign err) (raw/NewTextWriter (addr sb) version/Current)]
+      (when (!= err nil)
+        ^{:go/via [common]} (.Fatalf t "dumping trace: %v" err))
+
+      (while true
+        (let [(values ev err) (.ReadEvent br)]
+          (when (== err io/EOF)
+            (break))
+
+          (when (!= err nil)
+            ^{:go/via [common]} (.Fatalf t "dumping trace: %v" err))
+
+          (when [err (.WriteEvent tw ev)] (!= err nil)
+            ^{:go/via [common]} (.Fatalf t "dumping trace: %v" err))))
+
+
+      (.String sb))))
+
+
+^{:go/end 87} (go/func dumpTraceToFile ^string [^{:tag (* testing/T)} t ^string testName ^{:tag (slice byte)} b]
+  ^{:go/via [common]} (.Helper t)
+
+  (let [name (fmt/Sprintf "%s.trace." testName)
+      (values f err) (os/CreateTemp ^{:go/via [common]} (.ArtifactDir t) name)]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatalf t "creating temp file: %v" err))
+
+    (defer (.Close f))
+    (when [(values _ err) (io/Copy f (bytes/NewReader b))] (!= err nil)
+      ^{:go/via [common]} (.Fatalf t "writing trace dump to %q: %v" (.Name f) err))
+
+    (.Name f)))

@@ -1,0 +1,577 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package utf8 implements functions and constants to support text encoded in
+;; UTF-8. It includes functions to translate between runes and UTF-8 byte sequences.
+;; See https://en.wikipedia.org/wiki/UTF-8
+(in-ns 'go.unicode.utf8) (go/file "utf8.go" :doc "Package utf8 implements functions and constants to support text encoded in\nUTF-8. It includes functions to translate between runes and UTF-8 byte sequences.\nSee https://en.wikipedia.org/wiki/UTF-8\n" :imports [])
+
+;; The conditions RuneError==unicode.ReplacementChar and
+;; MaxRune==unicode.MaxRune are verified in the tests.
+;; Defining them locally avoids this package depending on package unicode.
+
+
+(go/const "Numbers fundamental to the encoding.\n"
+  ^{:line 16} [^{:val \ufffd} RuneError \ufffd] ; the "error" Rune or "Unicode replacement character"
+  ^{:line 17} [^{:val 128} RuneSelf 0x80] ; characters below RuneSelf are represented as themselves in a single byte.
+  ^{:line 18} [^{:val (rune 0x10FFFF)} MaxRune (rune 0x10FFFF)] ; Maximum valid Unicode code point.
+  ^{:line 19} [^{:val 4} UTFMax 4]) ; maximum number of bytes of a UTF-8 encoded Unicode character.
+
+
+
+(go/const "Code points in the surrogate range are not valid for UTF-8.\n"
+  ^{:line 24} [^{:val 55296} surrogateMin 0xD800]
+  ^{:line 25} [^{:val 57343} surrogateMax 0xDFFF])
+
+
+(go/const
+  ^{:line 29} [^{:val 0} t1 2r00000000]
+  ^{:line 30} [^{:val 128} tx 2r10000000]
+  ^{:line 31} [^{:val 192} t2 2r11000000]
+  ^{:line 32} [^{:val 224} t3 2r11100000]
+  ^{:line 33} [^{:val 240} t4 2r11110000]
+  ^{:line 34} [^{:val 248} t5 2r11111000]
+
+  ^{:line 36} [^{:val 63} maskx 2r00111111]
+  ^{:line 37} [^{:val 31} mask2 2r00011111]
+  ^{:line 38} [^{:val 15} mask3 2r00001111]
+  ^{:line 39} [^{:val 7} mask4 2r00000111]
+
+  ^{:line 41} [^{:val 127} rune1Max (- (<< 1 7) 1)]
+  ^{:line 42} [^{:val 2047} rune2Max (- (<< 1 11) 1)]
+  ^{:line 43} [^{:val 65535} rune3Max (- (<< 1 16) 1)]
+
+
+  ^{:line 46} [^{:val 128 :doc "The default lowest and highest continuation byte.\n"} locb 2r10000000]
+  ^{:line 47} [^{:val 191} hicb 2r10111111]
+
+
+
+
+
+  ^{:line 53} [^{:val 241 :doc "These names of these constants are chosen to give nice alignment in the\ntable below. The first nibble is an index into acceptRanges or F for\nspecial one-byte cases. The second nibble is the Rune length or the\nStatus for the special one-byte case.\n"} xx 0xF1] ; invalid: size 1
+  ^{:line 54} [^{:val 240} as 0xF0] ; ASCII: size 1
+  ^{:line 55} [^{:val 2} s1 0x02] ; accept 0, size 2
+  ^{:line 56} [^{:val 19} s2 0x13] ; accept 1, size 3
+  ^{:line 57} [^{:val 3} s3 0x03] ; accept 0, size 3
+  ^{:line 58} [^{:val 35} s4 0x23] ; accept 2, size 3
+  ^{:line 59} [^{:val 52} s5 0x34] ; accept 3, size 4
+  ^{:line 60} [^{:val 4} s6 0x04] ; accept 0, size 4
+  ^{:line 61} [^{:val 68} s7 0x44]) ; accept 4, size 4
+
+
+(go/const
+  ^{:line 65} [^{:val \ï} runeErrorByte0 (bit-or t3 (>> RuneError 12))]
+  ^{:line 66} [^{:val \¿} runeErrorByte1 (bit-or tx (bit-and (>> RuneError 6) maskx))]
+  ^{:line 67} [^{:val \½} runeErrorByte2 (bit-or tx (bit-and RuneError maskx))])
+
+
+
+(go/var ^{:doc "first is information about the first byte in a UTF-8 sequence.\n"} first (lit (array 256 uint8)
+    ;;   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
+    ^{:line 73} as as as as as as as as as as as as as as as as ; 0x00-0x0F
+    ^{:line 74} as as as as as as as as as as as as as as as as ; 0x10-0x1F
+    ^{:line 75} as as as as as as as as as as as as as as as as ; 0x20-0x2F
+    ^{:line 76} as as as as as as as as as as as as as as as as ; 0x30-0x3F
+    ^{:line 77} as as as as as as as as as as as as as as as as ; 0x40-0x4F
+    ^{:line 78} as as as as as as as as as as as as as as as as ; 0x50-0x5F
+    ^{:line 79} as as as as as as as as as as as as as as as as ; 0x60-0x6F
+    ^{:line 80} as as as as as as as as as as as as as as as as ; 0x70-0x7F
+    ;;   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
+    ^{:line 82} xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx ; 0x80-0x8F
+    ^{:line 83} xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx ; 0x90-0x9F
+    ^{:line 84} xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx ; 0xA0-0xAF
+    ^{:line 85} xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx ; 0xB0-0xBF
+    ^{:line 86} xx xx s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 ; 0xC0-0xCF
+    ^{:line 87} s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 s1 ; 0xD0-0xDF
+    ^{:line 88} s2 s3 s3 s3 s3 s3 s3 s3 s3 s3 s3 s3 s3 s4 s3 s3 ; 0xE0-0xEF
+    ^{:line 89} s5 s6 s6 s6 s7 xx xx xx xx xx xx xx xx xx xx xx)) ; 0xF0-0xFF
+
+
+
+
+(go/type acceptRange "acceptRange gives the range of valid values for the second byte in a UTF-8\nsequence.\n" (struct
+    ^{:line 95 :tag uint8} lo ; lowest value for second byte.
+    ^{:line 96 :tag uint8} hi)) ; highest value for second byte.
+
+
+
+(go/var ^{:doc "acceptRanges has size 16 to avoid bounds checks in the code that uses it.\n"} acceptRanges (lit (array 16 acceptRange)
+    ^{:line 101} [0 (lit _ locb hicb)]
+    ^{:line 102} [1 (lit _ 0xA0 hicb)]
+    ^{:line 103} [2 (lit _ locb 0x9F)]
+    ^{:line 104} [3 (lit _ 0x90 hicb)]
+    ^{:line 105} [4 (lit _ locb 0x8F)]))
+
+
+
+
+^{:go/end 127} (go/func FullRune "FullRune reports whether the bytes in p begin with a full UTF-8 encoding of a rune.\nAn invalid encoding is considered a full Rune since it will convert as a width-1 error rune.\n" ^bool [^{:tag (slice byte)} p]
+  (let [n (len p)]
+    (when (== n 0)
+      (return false))
+
+    (let [x (aget first (aget p 0))]
+      (when (>= n (conv int (bit-and x 7)))
+        (return true)) ; ASCII, invalid or valid.
+
+      ;; Must be short or invalid.
+      ^{:go/breaks [[3 126]]} (let [accept (aget acceptRanges (>> x 4))]
+        (cond (and (> n 1) ^:go/paren (or (< (aget p 1) (.-lo accept)) (< (.-hi accept) (aget p 1))))
+          (return true)
+          (and (> n 2) ^:go/paren (or (< (aget p 2) locb) (< hicb (aget p 2))))
+          (return true))
+
+        false))))
+
+
+
+^{:go/end 147} (go/func FullRuneInString "FullRuneInString is like FullRune but its input is a string.\n" ^bool [^string s]
+  (let [n (len s)]
+    (when (== n 0)
+      (return false))
+
+    (let [x (aget first (aget s 0))]
+      (when (>= n (conv int (bit-and x 7)))
+        (return true)) ; ASCII, invalid, or valid.
+
+      ;; Must be short or invalid.
+      ^{:go/breaks [[3 146]]} (let [accept (aget acceptRanges (>> x 4))]
+        (cond (and (> n 1) ^:go/paren (or (< (aget s 1) (.-lo accept)) (< (.-hi accept) (aget s 1))))
+          (return true)
+          (and (> n 2) ^:go/paren (or (< (aget s 2) locb) (< hicb (aget s 2))))
+          (return true))
+
+        false))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 169} (go/func DecodeRune "DecodeRune unpacks the first UTF-8 encoding in p and returns the rune and\nits width in bytes. If p is empty it returns ([RuneError], 0). Otherwise, if\nthe encoding is invalid, it returns (RuneError, 1). Both are impossible\nresults for correct, non-empty UTF-8.\n\nAn encoding is invalid if it is incorrect UTF-8, encodes a rune that is\nout of range, or is not the shortest possible UTF-8 encoding for the\nvalue. No other validation is performed.\n" [^{:tag (slice byte)} p] :results [^rune r ^int size]
+  ;; Inlineable fast path for ASCII characters; see #48195.
+  ;; This implementation is weird but effective at rendering the
+  ;; function inlineable.
+  (range [_ b p]
+    (when (< b RuneSelf)
+      (return (conv rune b) 1))
+
+    (break))
+
+  (set! (values r size) (decodeRuneSlow p))
+  (return))
+
+
+^{:go/end 209} (go/func decodeRuneSlow [^{:tag (slice byte)} p] :results [^rune r ^int size]
+  (let [n (len p)]
+    (when (< n 1)
+      (return RuneError 0))
+
+    (let [p0 (aget p 0)
+        ^{:line 177} x (aget first p0)]
+      (when (>= x as)
+        ;; The following code simulates an additional check for x == xx and
+        ;; handling the ASCII and invalid cases accordingly. This mask-and-or
+        ;; approach prevents an additional branch.
+        (let [mask (>> (<< (conv rune x) 31) 31)] ; Create 0x0000 or 0xFFFF.
+          (return (bit-or (bit-and-not (conv rune (aget p 0)) mask) (bit-and RuneError mask)) 1)))
+
+      (let [sz (conv int (bit-and x 7))
+          ^{:line 186} accept (aget acceptRanges (>> x 4))]
+        (when (< n sz)
+          (return RuneError 1))
+
+        (let [b1 (aget p 1)]
+          (when (or (< b1 (.-lo accept)) (< (.-hi accept) b1))
+            (return RuneError 1))
+
+          (when (<= sz 2) ; <= instead of == to help the compiler eliminate some bounds checks
+            (return (bit-or (<< (conv rune (bit-and p0 mask2)) 6) (conv rune (bit-and b1 maskx))) 2))
+
+          (let [b2 (aget p 2)]
+            (when (or (< b2 locb) (< hicb b2))
+              (return RuneError 1))
+
+            (when (<= sz 3)
+              (return (bit-or (<< (conv rune (bit-and p0 mask3)) 12) (<< (conv rune (bit-and b1 maskx)) 6) (conv rune (bit-and b2 maskx))) 3))
+
+            (let [b3 (aget p 3)]
+              (when (or (< b3 locb) (< hicb b3))
+                (return RuneError 1))
+
+              (return (bit-or (<< (conv rune (bit-and p0 mask4)) 18) (<< (conv rune (bit-and b1 maskx)) 12) (<< (conv rune (bit-and b2 maskx)) 6) (conv rune (bit-and b3 maskx))) 4))))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 229} (go/func DecodeRuneInString "DecodeRuneInString is like [DecodeRune] but its input is a string. If s is\nempty it returns ([RuneError], 0). Otherwise, if the encoding is invalid, it\nreturns (RuneError, 1). Both are impossible results for correct, non-empty\nUTF-8.\n\nAn encoding is invalid if it is incorrect UTF-8, encodes a rune that is\nout of range, or is not the shortest possible UTF-8 encoding for the\nvalue. No other validation is performed.\n" [^string s] :results [^rune r ^int size]
+  ;; Inlineable fast path for ASCII characters; see #48195.
+  ;; This implementation is a bit weird but effective at rendering the
+  ;; function inlineable.
+  (if (and (!= s "") (< (aget s 0) RuneSelf))
+    (return (conv rune (aget s 0)) 1)
+
+    (set! (values r size) (decodeRuneInStringSlow s)))
+
+  (return))
+
+
+^{:go/end 269} (go/func decodeRuneInStringSlow [^string s] :results [rune int]
+  (let [n (len s)]
+    (when (< n 1)
+      (return RuneError 0))
+
+    (let [s0 (aget s 0)
+        ^{:line 237} x (aget first s0)]
+      (when (>= x as)
+        ;; The following code simulates an additional check for x == xx and
+        ;; handling the ASCII and invalid cases accordingly. This mask-and-or
+        ;; approach prevents an additional branch.
+        (let [mask (>> (<< (conv rune x) 31) 31)] ; Create 0x0000 or 0xFFFF.
+          (return (bit-or (bit-and-not (conv rune (aget s 0)) mask) (bit-and RuneError mask)) 1)))
+
+      (let [sz (conv int (bit-and x 7))
+          ^{:line 246} accept (aget acceptRanges (>> x 4))]
+        (when (< n sz)
+          (return RuneError 1))
+
+        (let [s1 (aget s 1)]
+          (when (or (< s1 (.-lo accept)) (< (.-hi accept) s1))
+            (return RuneError 1))
+
+          (when (<= sz 2) ; <= instead of == to help the compiler eliminate some bounds checks
+            (return (bit-or (<< (conv rune (bit-and s0 mask2)) 6) (conv rune (bit-and s1 maskx))) 2))
+
+          (let [s2 (aget s 2)]
+            (when (or (< s2 locb) (< hicb s2))
+              (return RuneError 1))
+
+            (when (<= sz 3)
+              (return (bit-or (<< (conv rune (bit-and s0 mask3)) 12) (<< (conv rune (bit-and s1 maskx)) 6) (conv rune (bit-and s2 maskx))) 3))
+
+            (let [s3 (aget s 3)]
+              (when (or (< s3 locb) (< hicb s3))
+                (return RuneError 1))
+
+              (return (bit-or (<< (conv rune (bit-and s0 mask4)) 18) (<< (conv rune (bit-and s1 maskx)) 12) (<< (conv rune (bit-and s2 maskx)) 6) (conv rune (bit-and s3 maskx))) 4))))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 306} (go/func DecodeLastRune "DecodeLastRune unpacks the last UTF-8 encoding in p and returns the rune and\nits width in bytes. If p is empty it returns ([RuneError], 0). Otherwise, if\nthe encoding is invalid, it returns (RuneError, 1). Both are impossible\nresults for correct, non-empty UTF-8.\n\nAn encoding is invalid if it is incorrect UTF-8, encodes a rune that is\nout of range, or is not the shortest possible UTF-8 encoding for the\nvalue. No other validation is performed.\n" [^{:tag (slice byte)} p] :results [^rune r ^int size]
+  (let [end (len p)]
+    (when (== end 0)
+      (return RuneError 0))
+
+    (let [start (- end 1)]
+      (set! r (conv rune (aget p start)))
+      (when (< r RuneSelf)
+        (return r 1))
+
+      ;; guard against O(n^2) behavior when traversing
+      ;; backwards through strings with long sequences of
+      ;; invalid UTF-8.
+      (let [lim (max (- end UTFMax) 0)]
+        (for [(dec! start)] (>= start lim) (dec! start)
+          (when (RuneStart (aget p start))
+            (break)))
+
+
+        (when (< start 0)
+          (set! start 0))
+
+        (set! (values r size) (DecodeRune (subslice p start end)))
+        (when (!= (+ start size) end)
+          (return RuneError 1))
+
+        (return r size)))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 343} (go/func DecodeLastRuneInString "DecodeLastRuneInString is like [DecodeLastRune] but its input is a string. If\ns is empty it returns ([RuneError], 0). Otherwise, if the encoding is invalid,\nit returns (RuneError, 1). Both are impossible results for correct,\nnon-empty UTF-8.\n\nAn encoding is invalid if it is incorrect UTF-8, encodes a rune that is\nout of range, or is not the shortest possible UTF-8 encoding for the\nvalue. No other validation is performed.\n" [^string s] :results [^rune r ^int size]
+  (let [end (len s)]
+    (when (== end 0)
+      (return RuneError 0))
+
+    (let [start (- end 1)]
+      (set! r (conv rune (aget s start)))
+      (when (< r RuneSelf)
+        (return r 1))
+
+      ;; guard against O(n^2) behavior when traversing
+      ;; backwards through strings with long sequences of
+      ;; invalid UTF-8.
+      (let [lim (max (- end UTFMax) 0)]
+        (for [(dec! start)] (>= start lim) (dec! start)
+          (when (RuneStart (aget s start))
+            (break)))
+
+
+        (when (< start 0)
+          (set! start 0))
+
+        (set! (values r size) (DecodeRuneInString (subslice s start end)))
+        (when (!= (+ start size) end)
+          (return RuneError 1))
+
+        (return r size)))))
+
+
+
+
+^{:go/breaks [[5 362]] :go/end 363} (go/func RuneLen "RuneLen returns the number of bytes in the UTF-8 encoding of the rune.\nIt returns -1 if the rune is not a valid value to encode in UTF-8.\n" ^int [^rune r]
+  (switch
+    (case [(< r 0)]
+      (return -1))
+    (case [(<= r rune1Max)]
+      (return 1))
+    (case [(<= r rune2Max)]
+      (return 2))
+    (case [(and (<= surrogateMin r) (<= r surrogateMax))]
+      (return -1))
+    (case [(<= r rune3Max)]
+      (return 3))
+    (case [(<= r MaxRune)]
+      (return 4)))
+
+  -1)
+
+
+
+
+
+^{:go/end 375} (go/func EncodeRune "EncodeRune writes into p (which must be large enough) the UTF-8 encoding of the rune.\nIf the rune is out of range, it writes the encoding of [RuneError].\nIt returns the number of bytes written.\n" ^int [^{:tag (slice byte)} p ^rune r]
+  ;; This function is inlineable for fast handling of ASCII.
+  (when (<= (conv uint32 r) rune1Max)
+    (aset p 0 (conv byte r))
+    (return 1))
+
+  (encodeRuneNonASCII p r))
+
+
+^{:go/end 405} (go/func encodeRuneNonASCII ^int [^{:tag (slice byte)} p ^rune r]
+  ;; Negative values are erroneous. Making it unsigned addresses the problem.
+  (switch [i (conv uint32 r)]
+    (case [(<= i rune2Max)]
+      (set! _ (aget p 1)) ; eliminate bounds checks
+      (aset p 0 (bit-or t2 (conv byte (>> r 6))))
+      (aset p 1 (bit-or tx (bit-and (conv byte r) maskx)))
+      (return 2))
+    (case [(< i surrogateMin) (and (< surrogateMax i) (<= i rune3Max))]
+      (set! _ (aget p 2)) ; eliminate bounds checks
+      (aset p 0 (bit-or t3 (conv byte (>> r 12))))
+      (aset p 1 (bit-or tx (bit-and (conv byte (>> r 6)) maskx)))
+      (aset p 2 (bit-or tx (bit-and (conv byte r) maskx)))
+      (return 3))
+    (case [(and (> i rune3Max) (<= i MaxRune))]
+      (set! _ (aget p 3)) ; eliminate bounds checks
+      (aset p 0 (bit-or t4 (conv byte (>> r 18))))
+      (aset p 1 (bit-or tx (bit-and (conv byte (>> r 12)) maskx)))
+      (aset p 2 (bit-or tx (bit-and (conv byte (>> r 6)) maskx)))
+      (aset p 3 (bit-or tx (bit-and (conv byte r) maskx)))
+      (return 4))
+    (default
+      (set! _ (aget p 2)) ; eliminate bounds checks
+      (aset p 0 runeErrorByte0)
+      (aset p 1 runeErrorByte1)
+      (aset p 2 runeErrorByte2)
+      (return 3))))
+
+
+
+
+
+
+^{:go/end 416} (go/func AppendRune "AppendRune appends the UTF-8 encoding of r to the end of p and\nreturns the extended buffer. If the rune is out of range,\nit appends the encoding of [RuneError].\n" ^{:tag (slice byte)} [^{:tag (slice byte)} p ^rune r]
+  ;; This function is inlineable for fast handling of ASCII.
+  (when (<= (conv uint32 r) rune1Max)
+    (return (append p (conv byte r))))
+
+  (appendRuneNonASCII p r))
+
+
+^{:go/end 430} (go/func appendRuneNonASCII ^{:tag (slice byte)} [^{:tag (slice byte)} p ^rune r]
+  ;; Negative values are erroneous. Making it unsigned addresses the problem.
+  (switch [i (conv uint32 r)]
+    (case [(<= i rune2Max)]
+      (return (append p (bit-or t2 (conv byte (>> r 6))) (bit-or tx (bit-and (conv byte r) maskx)))))
+    (case [(< i surrogateMin) (and (< surrogateMax i) (<= i rune3Max))]
+      (return (append p (bit-or t3 (conv byte (>> r 12))) (bit-or tx (bit-and (conv byte (>> r 6)) maskx)) (bit-or tx (bit-and (conv byte r) maskx)))))
+    (case [(and (> i rune3Max) (<= i MaxRune))]
+      (return (append p (bit-or t4 (conv byte (>> r 18))) (bit-or tx (bit-and (conv byte (>> r 12)) maskx)) (bit-or tx (bit-and (conv byte (>> r 6)) maskx)) (bit-or tx (bit-and (conv byte r) maskx)))))
+    (default
+      (return (append p runeErrorByte0 runeErrorByte1 runeErrorByte2)))))
+
+
+
+
+
+^{:go/end 444} (go/func RuneCount "RuneCount returns the number of runes in p. Erroneous and short\nencodings are treated as single runes of width 1 byte.\n" ^int [^{:tag (slice byte)} p]
+  (let [np (len p)
+      ^{:line 436 :tag int} n (zero int)]
+    (for [] (< n np) (inc! n)
+      (when [c (aget p n)] (>= c RuneSelf)
+        ;; non-ASCII slow path
+        (return (+ n (RuneCountInString (conv string (subslice p n)))))))
+
+
+    ^{:line 443} n))
+
+
+
+^{:go/end 452} (go/func RuneCountInString "RuneCountInString is like [RuneCount] but its input is a string.\n" [^string s] :results [^int n]
+  (range [s]
+    (inc! n))
+
+  ^{:line 451} n)
+
+
+
+
+
+^{:go/end 457} (go/func RuneStart "RuneStart reports whether the byte could be the first byte of an encoded,\npossibly invalid rune. Second and subsequent bytes always have the top two\nbits set to 10.\n" ^bool [^byte b] (!= (bit-and b 0xC0) 0x80))
+
+(go/const ^{:val 8} ptrSize (<< 4 (>> (bit-not (conv uintptr 0)) 63)))
+(go/const ^{:val 9259542123273814144N} hiBits (>> 0x8080808080808080 (- 64 (* 8 ptrSize))))
+
+^{:go/end 467} (go/func word :type-params [^{:tag (| string (slice byte))} T] ^uintptr [^T s]
+  (when (== ptrSize 4)
+    (return (bit-or (conv uintptr (aget s 0)) (<< (conv uintptr (aget s 1)) 8) (<< (conv uintptr (aget s 2)) 16) (<< (conv uintptr (aget s 3)) 24))))
+
+  (conv uintptr (bit-or (conv uint64 (aget s 0)) (<< (conv uint64 (aget s 1)) 8) (<< (conv uint64 (aget s 2)) 16) (<< (conv uint64 (aget s 3)) 24) (<< (conv uint64 (aget s 4)) 32) (<< (conv uint64 (aget s 5)) 40) (<< (conv uint64 (aget s 6)) 48) (<< (conv uint64 (aget s 7)) 56))))
+
+
+
+^{:go/breaks [[6 518]] :go/end 519} (go/func Valid "Valid reports whether p consists entirely of valid UTF-8-encoded runes.\n" ^bool [^{:tag (slice byte)} p]
+  ;; This optimization avoids the need to recompute the capacity
+  ;; when generating code for slicing p, bringing it to parity with
+  ;; ValidString, which was 20% faster on long ASCII strings.
+  (set! p (subslice p _ (len p) (len p)))
+
+  (while (> (len p) 0)
+    (let [p0 (aget p 0)]
+      (when (< p0 RuneSelf)
+        (set! p (subslice p 1))
+        ;; If there's one ASCII byte, there are probably more.
+        ;; Advance quickly through ASCII-only data.
+        ;; Note: using > instead of >= here is intentional. That avoids
+        ;; needing pointing-past-the-end fixup on the slice operations.
+        (when (and (> (len p) ptrSize) (== (bit-and (^{:inst [(slice byte)]} word p) hiBits) 0))
+          (set! p (subslice p ptrSize))
+          (when (and (> (len p) (* 2 ptrSize)) (== (bit-and (bit-or (^{:inst [(slice byte)]} word p) (^{:inst [(slice byte)]} word (subslice p ptrSize))) hiBits) 0))
+            (set! p (subslice p (* 2 ptrSize)))
+            (while (and (> (len p) (* 4 ptrSize)) (== (bit-and (bit-or (^{:inst [(slice byte)]} word p) (^{:inst [(slice byte)]} word (subslice p ptrSize)) (bit-or (^{:inst [(slice byte)]} word (subslice p (* 2 ptrSize))) (^{:inst [(slice byte)]} word (subslice p (* 3 ptrSize))))) hiBits) 0))
+              (set! p (subslice p (* 4 ptrSize))))))
+
+
+
+        (continue))
+
+      (let [x (aget first p0)
+          ^{:line 496} size (conv int (bit-and x 7))
+          ^{:line 497} accept (aget acceptRanges (>> x 4))]
+        (switch size
+          (case [2]
+            (when (or (< (len p) 2) (< (aget p 1) (.-lo accept)) (< (.-hi accept) (aget p 1)))
+              (return false))
+
+            (set! p (subslice p 2)))
+          (case [3]
+            (when (or (< (len p) 3) (< (aget p 1) (.-lo accept)) (< (.-hi accept) (aget p 1)) (< (aget p 2) locb) (< hicb (aget p 2)))
+              (return false))
+
+            (set! p (subslice p 3)))
+          (case [4]
+            (when (or (< (len p) 4) (< (aget p 1) (.-lo accept)) (< (.-hi accept) (aget p 1)) (< (aget p 2) locb) (< hicb (aget p 2)) (< (aget p 3) locb) (< hicb (aget p 3)))
+              (return false))
+
+            (set! p (subslice p 4)))
+          (default
+            (return false)))))) ; illegal starter byte
+
+
+  true)
+
+
+
+^{:go/breaks [[5 565]] :go/end 566} (go/func ValidString "ValidString reports whether s consists entirely of valid UTF-8-encoded runes.\n" ^bool [^string s]
+  (while (> (len s) 0)
+    (let [s0 (aget s 0)]
+      (when (< s0 RuneSelf)
+        (set! s (subslice s 1))
+        ;; If there's one ASCII byte, there are probably more.
+        ;; Advance quickly through ASCII-only data.
+        ;; Note: using > instead of >= here is intentional. That avoids
+        ;; needing pointing-past-the-end fixup on the slice operations.
+        (when (and (> (len s) ptrSize) (== (bit-and (^{:inst [string]} word s) hiBits) 0))
+          (set! s (subslice s ptrSize))
+          (when (and (> (len s) (* 2 ptrSize)) (== (bit-and (bit-or (^{:inst [string]} word s) (^{:inst [string]} word (subslice s ptrSize))) hiBits) 0))
+            (set! s (subslice s (* 2 ptrSize)))
+            (while (and (> (len s) (* 4 ptrSize)) (== (bit-and (bit-or (^{:inst [string]} word s) (^{:inst [string]} word (subslice s ptrSize)) (bit-or (^{:inst [string]} word (subslice s (* 2 ptrSize))) (^{:inst [string]} word (subslice s (* 3 ptrSize))))) hiBits) 0))
+              (set! s (subslice s (* 4 ptrSize))))))
+
+
+
+        (continue))
+
+      (let [x (aget first s0)
+          ^{:line 543} size (conv int (bit-and x 7))
+          ^{:line 544} accept (aget acceptRanges (>> x 4))]
+        (switch size
+          (case [2]
+            (when (or (< (len s) 2) (< (aget s 1) (.-lo accept)) (< (.-hi accept) (aget s 1)))
+              (return false))
+
+            (set! s (subslice s 2)))
+          (case [3]
+            (when (or (< (len s) 3) (< (aget s 1) (.-lo accept)) (< (.-hi accept) (aget s 1)) (< (aget s 2) locb) (< hicb (aget s 2)))
+              (return false))
+
+            (set! s (subslice s 3)))
+          (case [4]
+            (when (or (< (len s) 4) (< (aget s 1) (.-lo accept)) (< (.-hi accept) (aget s 1)) (< (aget s 2) locb) (< hicb (aget s 2)) (< (aget s 3) locb) (< hicb (aget s 3)))
+              (return false))
+
+            (set! s (subslice s 4)))
+          (default
+            (return false)))))) ; illegal starter byte
+
+
+  true)
+
+
+
+
+^{:go/breaks [[5 577]] :go/end 578} (go/func ValidRune "ValidRune reports whether r can be legally encoded as UTF-8.\nCode points that are out of range or a surrogate half are illegal.\n" ^bool [^rune r]
+  (switch
+    (case [(and (<= 0 r) (< r surrogateMin))]
+      (return true))
+    (case [(and (< surrogateMax r) (<= r MaxRune))]
+      (return true)))
+
+  false)

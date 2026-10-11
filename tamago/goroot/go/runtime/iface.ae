@@ -1,0 +1,729 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "iface.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [goarch "internal/goarch"]
+    ^{:line 10} [atomic "internal/runtime/atomic"]
+    ^{:line 11} [sys "internal/runtime/sys"]
+    ^{:line 12} [unsafe "unsafe"]])
+
+
+(go/const ^{:val 512} itabInitSize 512)
+
+(go/var
+  ^{:line 18} [^mutex itabLock] ; lock for accessing itab table
+  ^{:line 19} [itabTable (addr itabTableInit)] ; pointer to current table
+  ^{:line 20} [itabTableInit (lit itabTableType :size itabInitSize)]) ; starter table
+
+
+
+(go/type itabTableType "Note: change the formula in the mallocgc call in itabAdd if you change these fields.\n" (struct
+    ^{:line 25 :tag uintptr} size ; length of entries array. Always a power of 2.
+    ^{:line 26 :tag uintptr} count ; current number of filled entries.
+    ^{:line 27 :tag (array itabInitSize (* itab))} entries)) ; really [size] large
+
+
+^{:go/end 33} (go/func itabHashFunc ^uintptr [^{:tag (* interfacetype)} inter ^{:tag (* _type)} typ]
+  ;; compiler has provided some good hash codes for us.
+  (conv uintptr (bit-xor (.-Hash (.-Type inter)) (.-Hash typ))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 103} (go/func ^{:go/linkname "getitab"} getitab "getitab should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/bytedance/sonic\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^{:tag (* itab)} [^{:tag (* interfacetype)} inter ^{:tag (* _type)} typ ^bool canfail]
+  (when (== (len (.-Methods inter)) 0)
+    (throw "internal error - misuse of itab"))
+
+
+  ;; easy case
+  (when (== (bit-and (.-TFlag typ) abi/TFlagUncommon) 0)
+    (when canfail
+      (return nil))
+
+    (let [name (.nameOff (toRType (addr (.-Type inter))) (.-Name (aget (.-Methods inter) 0)))]
+      (panic (addr (lit TypeAssertionError nil typ (addr (.-Type inter)) (.Name name))))))
+
+
+  (let [^{:tag (* itab)} m (zero (* itab))
+
+      ;; First, look in the existing table to see if we can find the itab we need.
+      ;; This is by far the most common case, so do it without locks.
+      ;; Use atomic to ensure we see any previous writes done by the thread
+      ;; that updates the itabTable field (with atomic.Storep in itabAdd).
+      ^{:line 64} t (conv (* itabTableType) (atomic/Loadp (conv unsafe/Pointer (addr itabTable))))]
+    (when [(set! m (.find t inter typ))] (!= m nil)
+      (goto :finish))
+
+
+    ;; Not found.  Grab the lock and try again.
+    (lock (addr itabLock))
+    (when [(set! m (.find itabTable inter typ))] (!= m nil)
+      (unlock (addr itabLock))
+      (goto :finish))
+
+
+    ;; Entry doesn't exist yet. Make a new entry & add it.
+    (set! m (conv (* itab) (persistentalloc (+ (unsafe/Sizeof (lit itab)) (* (conv uintptr (- (len (.-Methods inter)) 1)) goarch/PtrSize)) 0 (addr (.-other_sys memstats)))))
+    (set! (.-Inter m) inter)
+    (set! (.-Type m) typ)
+    ;; The hash is used in type switches. However, compiler statically generates itab's
+    ;; for all interface/type pairs used in switches (which are added to itabTable
+    ;; in itabsinit). The dynamically-generated itab's never participate in type switches,
+    ;; and thus the hash is irrelevant.
+    ;; Note: m.Hash is _not_ the hash used for the runtime itabTable hash table.
+    (set! (.-Hash m) 0)
+    (itabInit m true)
+    (itabAdd m)
+    (unlock (addr itabLock))
+    (label :finish
+      (when (!= (aget (.-Fun m) 0) 0)
+        (return m)))
+
+    (when canfail
+      (return nil))
+
+    ;; this can only happen if the conversion
+    ;; was already done once using the , ok form
+    ;; and we have a cached negative result.
+    ;; The cached result doesn't record which
+    ;; interface function was missing, so initialize
+    ;; the itab again to get the missing function name.
+    (panic (addr (lit TypeAssertionError :concrete typ :asserted (addr (.-Type inter)) :missingMethod (itabInit m false))))))
+
+
+
+
+^{:go/end 128} (go/method find "find finds the given interface/type pair in t.\nReturns nil if the given interface/type pair isn't present.\n" ^{:tag (* itab)} [^{:tag (* itabTableType)} t ^{:tag (* interfacetype)} inter ^{:tag (* _type)} typ]
+  ;; Implemented using quadratic probing.
+  ;; Probe sequence is h(i) = h0 + i*(i+1)/2 mod 2^k.
+  ;; We're guaranteed to hit all table entries using this probe sequence.
+  (let [mask (- (.-size t) 1)
+      ^{:line 112} h (bit-and (itabHashFunc inter typ) mask)]
+    (for [i (conv uintptr 1)] _ (inc! i)
+      (let [p (conv (* (* itab)) (add (conv unsafe/Pointer (addr (.-entries t))) (* h goarch/PtrSize)))
+          ;; Use atomic read here so if we see m != nil, we also see
+          ;; the initializations of the fields of m.
+          ;; m := *p
+          ^{:line 118} m (conv (* itab) (atomic/Loadp (conv unsafe/Pointer p)))]
+        (when (== m nil)
+          (return nil))
+
+        (when (and (== (.-Inter m) inter) (== (.-Type m) typ))
+          (return m))
+
+        (set! h + i)
+        (set! h bit-and mask)))))
+
+
+
+
+
+^{:go/end 165} (go/func itabAdd "itabAdd adds the given itab to the itab hash table.\nitabLock must be held.\n" [^{:tag (* itab)} m]
+  ;; Bugs can lead to calling this while mallocing is set,
+  ;; typically because this is called while panicking.
+  ;; Crash reliably, rather than only when we need to grow
+  ;; the hash table.
+  (when (!= (.-mallocing (.-m (getg))) 0)
+    (throw "malloc deadlock"))
+
+
+  (let [t itabTable]
+    (when (>= (.-count t) (* 3 (/ (.-size t) 4))) ; 75% load factor
+      ;; Grow hash table.
+      ;; t2 = new(itabTableType) + some additional entries
+      ;; We lie and tell malloc we want pointer-free memory because
+      ;; all the pointed-to values are not in the heap.
+      (let [t2 (conv (* itabTableType) (mallocgc (* (+ 2 (* 2 (.-size t))) goarch/PtrSize) nil true))]
+        (set! (.-size t2) (* (.-size t) 2))
+
+        ;; Copy over entries.
+        ;; Note: while copying, other threads may look for an itab and
+        ;; fail to find it. That's ok, they will then try to get the itab lock
+        ;; and as a consequence wait until this copying is complete.
+        (iterate_itabs (.-add t2))
+        (when (!= (.-count t2) (.-count t))
+          (throw "mismatched count during itab table copy"))
+
+        ;; Publish new hash table. Use an atomic write: see comment in getitab.
+        (atomicstorep (conv unsafe/Pointer (addr itabTable)) (conv unsafe/Pointer t2))
+        ;; Adopt the new table as our own.
+        (set! t itabTable)))
+    ;; Note: the old table can be GC'ed here.
+
+    (.add t m)))
+
+
+
+
+^{:go/end 196} (go/method add "add adds the given itab to itab table t.\nitabLock must be held.\n" [^{:tag (* itabTableType)} t ^{:tag (* itab)} m]
+  ;; See comment in find about the probe sequence.
+  ;; Insert new itab in the first empty spot in the probe sequence.
+  (let [mask (- (.-size t) 1)
+      ^{:line 173} h (bit-and (itabHashFunc (.-Inter m) (.-Type m)) mask)]
+    (for [i (conv uintptr 1)] _ (inc! i)
+      (let [p (conv (* (* itab)) (add (conv unsafe/Pointer (addr (.-entries t))) (* h goarch/PtrSize)))
+          ^{:line 176} m2 @p]
+        (when (== m2 m)
+          ;; A given itab may be used in more than one module
+          ;; and thanks to the way global symbol resolution works, the
+          ;; pointed-to itab may already have been inserted into the
+          ;; global 'hash'.
+          (return))
+
+        (when (== m2 nil)
+          ;; Use atomic write here so if a reader sees m, it also
+          ;; sees the correctly initialized fields of m.
+          ;; NoWB is ok because m is not in heap memory.
+          ;; *p = m
+          (atomic/StorepNoWB (conv unsafe/Pointer p) (conv unsafe/Pointer m))
+          (inc! (.-count t))
+          (return))
+
+        (set! h + i)
+        (set! h bit-and mask)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 265} (go/func ^:go/nowritebarrier itabInit "itabInit fills in the m.Fun array with all the code pointers for\nthe m.Inter/m.Type pair. If the type does not implement the interface,\nit sets m.Fun[0] to 0 and returns the name of an interface function that is missing.\nIf !firstTime, itabInit will not write anything to m.Fun (see issue 65962).\nIt is ok to call this multiple times on the same m, even concurrently\n(although it will only be called once with firstTime==true).\n\nitabInit stores only code pointers, so it must not emit a write barrier;\n//go:nowritebarrier enforces that (see the methods store below).\n" ^string [^{:tag (* itab)} m ^bool firstTime]
+  ^{:go/breaks [[4 264]]} (let [inter (.-Inter m)
+      ^{:line 211} typ (.-Type m)
+      ^{:line 212} x (.Uncommon typ)
+
+      ;; both inter and typ have method sorted by name,
+      ;; and interface names are unique,
+      ;; so can iterate over both in lock step;
+      ;; the loop is O(ni+nt) not O(ni*nt).
+      ^{:line 218} ni (len (.-Methods inter))
+      ^{:line 219} nt (conv int (.-Mcount x))
+      ^{:line 220} xmhdr (unsafe/Slice (conv (* abi/Method) (add (conv unsafe/Pointer x) (conv uintptr (.-Moff x)))) nt)
+      ^{:line 221} j 0
+      ;; These are code pointers, not heap pointers. Use a uintptr slice so the
+      ;; store emits no write barrier: on wasm a code pointer can look like a
+      ;; heap pointer and make the GC crash (see issue 80472).
+      ^{:line 225} methods (unsafe/Slice (addr (aget (.-Fun m) 0)) ni)
+      ^{:line 226 :tag unsafe/Pointer} fun0 (zero unsafe/Pointer)]
+    (label :imethods
+      (for [k 0] (< k ni) (inc! k)
+        (let [i (addr (aget (.-Methods inter) k))
+            ^{:line 230} itype (.typeOff (toRType (addr (.-Type inter))) (.-Typ i))
+            ^{:line 231} name (.nameOff (toRType (addr (.-Type inter))) (.-Name i))
+            ^{:line 232} iname (.Name name)
+            ^{:line 233} ipkg (pkgPath name)]
+          (when (== ipkg "")
+            (set! ipkg (.Name (.-PkgPath inter))))
+
+          (for [] (< j nt) (inc! j)
+            (let [t (addr (aget xmhdr j))
+                ^{:line 239} rtyp (toRType typ)
+                ^{:line 240} tname (.nameOff rtyp (.-Name t))]
+              (when (and (== (.typeOff rtyp (.-Mtyp t)) itype) (== (.Name tname) iname))
+                (let [pkgPath (pkgPath tname)]
+                  (when (== pkgPath "")
+                    (set! pkgPath (.Name (.nameOff rtyp (.-PkgPath x)))))
+
+                  (when (or (.IsExported tname) (== pkgPath ipkg))
+                    (let [ifn (.textOff rtyp (.-Ifn t))]
+                      (cond (== k 0)
+                        (set! fun0 ifn) ; we'll set m.Fun[0] at the end
+                        ^{:line 250} firstTime
+                        (aset methods k (conv uintptr ifn)))
+
+                      (continue :imethods)))))))
+
+
+
+          ;; didn't find method
+          ;; Leaves m.Fun[0] set to 0.
+          (return iname))))
+
+    (when firstTime
+      (aset (.-Fun m) 0 (conv uintptr fun0)))
+
+    ""))
+
+
+^{:go/end 274} (go/func itabsinit []
+  (lockInit (addr itabLock) lockRankItab)
+  (lock (addr itabLock))
+  (range [_ md (activeModules)]
+    (addModuleItabs md))
+
+  (unlock (addr itabLock)))
+
+
+
+
+^{:go/end 286} (go/func addModuleItabs "addModuleItabs adds the pre-compiled itabs from md to the itab hash table.\nThis is an optimization to let us skip creating itabs we already have.\n" [^{:tag (* moduledata)} md]
+  (let [p (+ (.-types md) (.-itaboffset md))
+      ^{:line 280} end (+ p (.-itabsize md))]
+    (while (< p end)
+      (let [itab (conv (* itab) (conv unsafe/Pointer p))]
+        (itabAdd itab)
+        (set! p + (conv uintptr (.Size itab)))))))
+
+
+
+
+
+
+
+^{:go/end 294} (go/func panicdottypeE "panicdottypeE is called when doing an e.(T) conversion and the conversion fails.\nhave = the dynamic type we have.\nwant = the static type we're trying to convert to.\niface = the static type we're converting from.\n" [^{:tag (* _type)} have ^{:tag (* _type)} want ^{:tag (* _type)} iface]
+  (panic (addr (lit TypeAssertionError iface have want ""))))
+
+
+
+
+^{:go/end 304} (go/func panicdottypeI "panicdottypeI is called when doing an i.(T) conversion and the conversion fails.\nSame args as panicdottypeE, but \"have\" is the dynamic itab we have.\n" [^{:tag (* itab)} have ^{:tag (* _type)} want ^{:tag (* _type)} iface]
+  (let [^{:tag (* _type)} t (zero (* _type))]
+    (when (!= have nil)
+      (set! t (.-Type have)))
+
+    (panicdottypeE t want iface)))
+
+
+
+
+^{:go/end 313} (go/func panicnildottype "panicnildottype is called when doing an i.(T) conversion and the interface i is nil.\nwant = the static type we're trying to convert to.\n" [^{:tag (* _type)} want]
+  (panic (addr (lit TypeAssertionError nil nil want ""))))
+;; TODO: Add the static type we're converting from as well.
+;; It might generate a better error message.
+;; Just to match other nil conversion errors, we don't for now.
+
+
+
+
+
+
+
+
+(go/type "The specialized convTx routines need a type descriptor to use when calling mallocgc.\nWe don't need the type to be exact, just to have the correct size, alignment, and pointer-ness.\nHowever, when debugging, it'd be nice to have some indication in mallocgc where the types came from,\nso we use named types here.\nWe then construct interface values of these types,\nand then extract the type word to use as needed.\n"
+  ^{:line 322} [uint16InterfacePtr uint16]
+  ^{:line 323} [uint32InterfacePtr uint32]
+  ^{:line 324} [uint64InterfacePtr uint64]
+  ^{:line 325} [stringInterfacePtr string]
+  ^{:line 326} [sliceInterfacePtr (slice byte)])
+
+
+(go/var
+  ^{:line 330} [^any uint16Eface (conv uint16InterfacePtr 0)]
+  ^{:line 331} [^any uint32Eface (conv uint32InterfacePtr 0)]
+  ^{:line 332} [^any uint64Eface (conv uint64InterfacePtr 0)]
+  ^{:line 333} [^any stringEface (conv stringInterfacePtr "")]
+  ^{:line 334} [^any sliceEface (conv sliceInterfacePtr nil)]
+
+  ^{:line 336} [^{:tag (* _type)} uint16Type (.-_type (efaceOf (addr uint16Eface)))]
+  ^{:line 337} [^{:tag (* _type)} uint32Type (.-_type (efaceOf (addr uint32Eface)))]
+  ^{:line 338} [^{:tag (* _type)} uint64Type (.-_type (efaceOf (addr uint64Eface)))]
+  ^{:line 339} [^{:tag (* _type)} stringType (.-_type (efaceOf (addr stringEface)))]
+  ^{:line 340} [^{:tag (* _type)} sliceType (.-_type (efaceOf (addr sliceEface)))])
+
+
+;; The conv and assert functions below do very similar things.
+;; The convXXX functions are guaranteed by the compiler to succeed.
+;; The assertXXX functions may fail (either panicking or returning false,
+;; depending on whether they are 1-result or 2-result).
+;; The convXXX functions succeed on a nil input, whereas the assertXXX
+;; functions fail on a nil input.
+
+
+
+^{:go/end 365} (go/func convT "convT converts a value of type t, which is pointed to by v, to a pointer that can\nbe used as the second word of an interface value.\n" ^unsafe/Pointer [^{:tag (* _type)} t ^unsafe/Pointer v]
+  (when raceenabled
+    (raceReadObjectPC t v (sys/GetCallerPC) (abi/FuncPCABIInternal convT)))
+
+  (when msanenabled
+    (msanread v (.-Size_ t)))
+
+  (when asanenabled
+    (asanread v (.-Size_ t)))
+
+  (let [x (mallocgc (.-Size_ t) t true)]
+    (typedmemmove t x v)
+    ^{:line 364} x))
+
+^{:go/end 381} (go/func convTnoptr ^unsafe/Pointer [^{:tag (* _type)} t ^unsafe/Pointer v]
+  ;; TODO: maybe take size instead of type?
+  (when raceenabled
+    (raceReadObjectPC t v (sys/GetCallerPC) (abi/FuncPCABIInternal convTnoptr)))
+
+  (when msanenabled
+    (msanread v (.-Size_ t)))
+
+  (when asanenabled
+    (asanread v (.-Size_ t)))
+
+
+  (let [x (mallocgc (.-Size_ t) t false)]
+    (memmove x v (.-Size_ t))
+    ^{:line 380} x))
+
+
+^{:go/end 394} (go/func convT16 [^uint16 val] :results [^unsafe/Pointer x]
+  (if (< val (conv uint16 (len staticuint64s))) (do
+      (set! x (conv unsafe/Pointer (addr (aget staticuint64s val))))
+      (when goarch/BigEndian
+        (set! x (add x 6))))
+
+    (do
+      (set! x (mallocgc 2 uint16Type false))
+      (set! @(conv (* uint16) x) val)))
+
+  (return))
+
+
+^{:go/end 407} (go/func convT32 [^uint32 val] :results [^unsafe/Pointer x]
+  (if (< val (conv uint32 (len staticuint64s))) (do
+      (set! x (conv unsafe/Pointer (addr (aget staticuint64s val))))
+      (when goarch/BigEndian
+        (set! x (add x 4))))
+
+    (do
+      (set! x (mallocgc 4 uint32Type false))
+      (set! @(conv (* uint32) x) val)))
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 426} (go/func ^{:go/linkname "convT64"} convT64 "convT64 should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/bytedance/sonic\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^uint64 val] :results [^unsafe/Pointer x]
+  (if (< val (conv uint64 (len staticuint64s)))
+    (set! x (conv unsafe/Pointer (addr (aget staticuint64s val))))
+    (do
+      (set! x (mallocgc 8 uint64Type false))
+      (set! @(conv (* uint64) x) val)))
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 445} (go/func ^{:go/linkname "convTstring"} convTstring "convTstring should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/bytedance/sonic\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^string val] :results [^unsafe/Pointer x]
+  (if (== val "")
+    (set! x (conv unsafe/Pointer (addr (aget zeroVal 0))))
+    (do
+      (set! x (mallocgc (unsafe/Sizeof val) stringType true))
+      (set! @(conv (* string) x) val)))
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 465} (go/func ^{:go/linkname "convTslice"} convTslice "convTslice should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/bytedance/sonic\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^{:tag (slice byte)} val] :results [^unsafe/Pointer x]
+  ;; Note: this must work for any element type, not just byte.
+  (if (== (.-array (conv (* slice) (conv unsafe/Pointer (addr val)))) nil)
+    (set! x (conv unsafe/Pointer (addr (aget zeroVal 0))))
+    (do
+      (set! x (mallocgc (unsafe/Sizeof val) sliceType true))
+      (set! @(conv (* (slice byte)) x) val)))
+
+  (return))
+
+
+^{:go/end 473} (go/func assertE2I ^{:tag (* itab)} [^{:tag (* interfacetype)} inter ^{:tag (* _type)} t]
+  (when (== t nil)
+    ;; explicit conversions require non-nil interface value.
+    (panic (addr (lit TypeAssertionError nil nil (addr (.-Type inter)) ""))))
+
+  (getitab inter t false))
+
+
+^{:go/end 480} (go/func assertE2I2 ^{:tag (* itab)} [^{:tag (* interfacetype)} inter ^{:tag (* _type)} t]
+  (when (== t nil)
+    (return nil))
+
+  (getitab inter t true))
+
+
+
+
+
+^{:go/end 523} (go/func typeAssert "typeAssert builds an itab for the concrete type t and the\ninterface type s.Inter. If the conversion is not possible it\npanics if s.CanFail is false and returns nil if s.CanFail is true.\n" ^{:tag (* itab)} [^{:tag (* abi/TypeAssert)} s ^{:tag (* _type)} t]
+  (let [^{:tag (* itab)} tab (zero (* itab))]
+    (if (== t nil)
+      (when (not (.-CanFail s))
+        (panic (addr (lit TypeAssertionError nil nil (addr (.-Type (.-Inter s))) ""))))
+
+
+      (set! tab (getitab (.-Inter s) t (.-CanFail s))))
+
+
+    (when (not (abi/UseInterfaceSwitchCache goarch/ArchFamily))
+      (return tab))
+
+
+    ;; Maybe update the cache, so the next time the generated code
+    ;; doesn't need to call into the runtime.
+    (when (!= (bit-and (cheaprand) 1023) 0)
+      ;; Only bother updating the cache ~1 in 1000 times.
+      (return tab))
+
+    ;; Load the current cache.
+    (let [oldC (conv (* abi/TypeAssertCache) (atomic/Loadp (conv unsafe/Pointer (addr (.-Cache s)))))]
+
+      (when (!= (bit-and (cheaprand) (conv uint32 (.-Mask oldC))) 0)
+        ;; As cache gets larger, choose to update it less often
+        ;; so we can amortize the cost of building a new cache.
+        (return tab))
+
+
+      ;; Make a new cache.
+      (let [newC (buildTypeAssertCache oldC t tab)]
+
+        ;; Update cache. Use compare-and-swap so if multiple threads
+        ;; are fighting to update the cache, at least one of their
+        ;; updates will stick.
+        (atomic_casPointer (conv (* unsafe/Pointer) (conv unsafe/Pointer (addr (.-Cache s)))) (conv unsafe/Pointer oldC) (conv unsafe/Pointer newC))
+
+        ^{:line 522} tab))))
+
+
+^{:go/end 568} (go/func buildTypeAssertCache ^{:tag (* abi/TypeAssertCache)} [^{:tag (* abi/TypeAssertCache)} oldC ^{:tag (* _type)} typ ^{:tag (* itab)} tab]
+  (let [oldEntries (unsafe/Slice (addr (aget (.-Entries oldC) 0)) (+ (.-Mask oldC) 1))
+
+      ;; Count the number of entries we need.
+      ^{:line 529} n 1]
+    (range [_ e oldEntries]
+      (when (!= (.-Typ e) 0)
+        (inc! n)))
+
+
+
+    ;; Figure out how big a table we need.
+    ;; We need at least one more slot than the number of entries
+    ;; so that we are guaranteed an empty slot (for termination).
+    (let [newN (* n 2)] ; make it at most 50% full
+      (set! newN ^int (<< 1 (sys/Len64 (conv uint64 (- newN 1))))) ; round up to a power of 2
+
+      ;; Allocate the new table.
+      (let [newSize (+ (unsafe/Sizeof (lit abi/TypeAssertCache)) (* (conv uintptr (- newN 1)) (unsafe/Sizeof (lit abi/TypeAssertCacheEntry))))
+          ^{:line 544} newC (conv (* abi/TypeAssertCache) (mallocgc newSize nil true))]
+        (set! (.-Mask newC) (conv uintptr (- newN 1)))
+        (let [newEntries (unsafe/Slice (addr (aget (.-Entries newC) 0)) newN)
+
+            ;; Fill the new table.
+            ^{:line 549} addEntry ^{:go/end 559} (fn [^{:tag (* _type)} typ ^{:tag (* itab)} tab]
+              (let [h (bit-and (conv int (.-Hash typ)) (- newN 1))]
+                (while true
+                  (when (== (.-Typ (aget newEntries h)) 0)
+                    (set! (.-Typ (aget newEntries h)) (conv uintptr (conv unsafe/Pointer typ)))
+                    (set! (.-Itab (aget newEntries h)) (conv uintptr (conv unsafe/Pointer tab)))
+                    (return))
+
+                  (set! h (bit-and (+ h 1) (- newN 1))))))]
+
+
+          (range [_ e oldEntries]
+            (when (!= (.-Typ e) 0)
+              (addEntry (conv (* _type) (conv unsafe/Pointer (.-Typ e))) (conv (* itab) (conv unsafe/Pointer (.-Itab e))))))
+
+
+          (addEntry typ tab)
+
+          ^{:line 567} newC)))))
+
+
+
+
+(go/var ^{:doc "Empty type assert cache. Contains one entry with a nil Typ (which\ncauses a cache lookup to fail immediately.)\n"} emptyTypeAssertCache (lit abi/TypeAssertCache :Mask 0))
+
+
+
+
+
+
+^{:go/end 626} (go/func interfaceSwitch "interfaceSwitch compares t against the list of cases in s.\nIf t matches case i, interfaceSwitch returns the case index i and\nan itab for the pair <t, s.Cases[i]>.\nIf there is no match, return N,nil, where N is the number\nof cases.\n" [^{:tag (* abi/InterfaceSwitch)} s ^{:tag (* _type)} t] :results [int (* itab)]
+  (let [cases (unsafe/Slice (addr (aget (.-Cases s) 0)) (.-NCases s))
+
+      ;; Results if we don't find a match.
+      ^{:line 583} case_ (len cases)
+      ^{:line 584 :tag (* itab)} tab (zero (* itab))]
+
+    ;; Look through each case in order.
+    (range [i c cases]
+      (set! tab (getitab c t true))
+      (when (!= tab nil)
+        (set! case_ i)
+        (break)))
+
+
+
+    (when (not (abi/UseInterfaceSwitchCache goarch/ArchFamily))
+      (return case_ tab))
+
+
+    ;; Maybe update the cache, so the next time the generated code
+    ;; doesn't need to call into the runtime.
+    (when (!= (bit-and (cheaprand) 1023) 0)
+      ;; Only bother updating the cache ~1 in 1000 times.
+      ;; This ensures we don't waste memory on switches, or
+      ;; switch arguments, that only happen a few times.
+      (return case_ tab))
+
+    ;; Load the current cache.
+    (let [oldC (conv (* abi/InterfaceSwitchCache) (atomic/Loadp (conv unsafe/Pointer (addr (.-Cache s)))))]
+
+      (when (!= (bit-and (cheaprand) (conv uint32 (.-Mask oldC))) 0)
+        ;; As cache gets larger, choose to update it less often
+        ;; so we can amortize the cost of building a new cache
+        ;; (that cost is linear in oldc.Mask).
+        (return case_ tab))
+
+
+      ;; Make a new cache.
+      (let [newC (buildInterfaceSwitchCache oldC t case_ tab)]
+
+        ;; Update cache. Use compare-and-swap so if multiple threads
+        ;; are fighting to update the cache, at least one of their
+        ;; updates will stick.
+        (atomic_casPointer (conv (* unsafe/Pointer) (conv unsafe/Pointer (addr (.-Cache s)))) (conv unsafe/Pointer oldC) (conv unsafe/Pointer newC))
+
+        (return case_ tab)))))
+
+
+
+
+
+^{:go/end 675} (go/func buildInterfaceSwitchCache "buildInterfaceSwitchCache constructs an interface switch cache\ncontaining all the entries from oldC plus the new entry\n(typ,case_,tab).\n" ^{:tag (* abi/InterfaceSwitchCache)} [^{:tag (* abi/InterfaceSwitchCache)} oldC ^{:tag (* _type)} typ ^int case_ ^{:tag (* itab)} tab]
+  (let [oldEntries (unsafe/Slice (addr (aget (.-Entries oldC) 0)) (+ (.-Mask oldC) 1))
+
+      ;; Count the number of entries we need.
+      ^{:line 635} n 1]
+    (range [_ e oldEntries]
+      (when (!= (.-Typ e) 0)
+        (inc! n)))
+
+
+
+    ;; Figure out how big a table we need.
+    ;; We need at least one more slot than the number of entries
+    ;; so that we are guaranteed an empty slot (for termination).
+    (let [newN (* n 2)] ; make it at most 50% full
+      (set! newN ^int (<< 1 (sys/Len64 (conv uint64 (- newN 1))))) ; round up to a power of 2
+
+      ;; Allocate the new table.
+      (let [newSize (+ (unsafe/Sizeof (lit abi/InterfaceSwitchCache)) (* (conv uintptr (- newN 1)) (unsafe/Sizeof (lit abi/InterfaceSwitchCacheEntry))))
+          ^{:line 650} newC (conv (* abi/InterfaceSwitchCache) (mallocgc newSize nil true))]
+        (set! (.-Mask newC) (conv uintptr (- newN 1)))
+        (let [newEntries (unsafe/Slice (addr (aget (.-Entries newC) 0)) newN)
+
+            ;; Fill the new table.
+            ^{:line 655} addEntry ^{:go/end 666} (fn [^{:tag (* _type)} typ ^int case_ ^{:tag (* itab)} tab]
+              (let [h (bit-and (conv int (.-Hash typ)) (- newN 1))]
+                (while true
+                  (when (== (.-Typ (aget newEntries h)) 0)
+                    (set! (.-Typ (aget newEntries h)) (conv uintptr (conv unsafe/Pointer typ)))
+                    (set! (.-Case (aget newEntries h)) case_)
+                    (set! (.-Itab (aget newEntries h)) (conv uintptr (conv unsafe/Pointer tab)))
+                    (return))
+
+                  (set! h (bit-and (+ h 1) (- newN 1))))))]
+
+
+          (range [_ e oldEntries]
+            (when (!= (.-Typ e) 0)
+              (addEntry (conv (* _type) (conv unsafe/Pointer (.-Typ e))) (.-Case e) (conv (* itab) (conv unsafe/Pointer (.-Itab e))))))
+
+
+          (addEntry typ case_ tab)
+
+          ^{:line 674} newC)))))
+
+
+
+
+(go/var ^{:doc "Empty interface switch cache. Contains one entry with a nil Typ (which\ncauses a cache lookup to fail immediately.)\n"} emptyInterfaceSwitchCache (lit abi/InterfaceSwitchCache :Mask 0))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 693} (go/func ^{:go/linkname "reflect_ifaceE2I reflect.ifaceE2I"} reflect_ifaceE2I "reflect_ifaceE2I is for package reflect,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - gitee.com/quant1x/gox\n  - github.com/modern-go/reflect2\n  - github.com/v2pro/plz\n\nDo not remove or change the type signature.\n" [^{:tag (* interfacetype)} inter ^eface e ^{:tag (* iface)} dst]
+  (set! @dst (lit iface (assertE2I inter (.-_type e)) (.-data e))))
+
+
+
+^{:go/end 698} (go/func ^{:go/linkname "reflectlite_ifaceE2I internal/reflectlite.ifaceE2I"} reflectlite_ifaceE2I [^{:tag (* interfacetype)} inter ^eface e ^{:tag (* iface)} dst]
+  (set! @dst (lit iface (assertE2I inter (.-_type e)) (.-data e))))
+
+
+^{:go/end 710} (go/func iterate_itabs [^{:tag (func [(* itab)])} fn]
+  ;; Note: only runs during stop the world or with itabLock held,
+  ;; so no other locks/atomics needed.
+  (let [t itabTable]
+    (for [i (conv uintptr 0)] (< i (.-size t)) (inc! i)
+      (let [m @(conv (* (* itab)) (add (conv unsafe/Pointer (addr (.-entries t))) (* i goarch/PtrSize)))]
+        (when (!= m nil)
+          (go/call fn m))))))
+
+
+
+
+
+
+
+(go/var ^{:tag (array 256 uint64) :doc "staticuint64s is used to avoid allocating in convTx for small integer values.\nstaticuint64s[0] == 0, staticuint64s[1] == 1, and so forth.\nIt is defined in assembler code so that it is read-only.\n"} staticuint64s)
+
+
+
+
+
+^{:go/end 723} (go/func ^{:go/linkname "getStaticuint64s"} getStaticuint64s "getStaticuint64s is called by the reflect package to get a pointer\nto the read-only array.\n" ^{:tag (* (array 256 uint64))} []
+  (addr staticuint64s))
+
+
+
+
+
+^{:go/end 730} (go/func unreachableMethod "The linker redirects a reference of a method that it determined\nunreachable to a reference to this function, so it will throw if\never called.\n" []
+  (throw "unreachable method called. linker bug?"))

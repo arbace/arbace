@@ -1,0 +1,448 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.rsa) (go/file "rsa.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fips140 "crypto/internal/fips140"]
+    ^{:line 10} [bigmod "crypto/internal/fips140/bigmod"]
+    ^{:line 11} [errors "errors"]])
+
+
+(go/type PublicKey (struct
+    ^{:line 15 :tag (* bigmod/Modulus)} N
+    ^{:line 16 :tag int} E))
+
+
+
+
+^{:go/end 23} (go/method Size "Size returns the modulus size in bytes. Raw signatures and ciphertexts\nfor or by this public key will have the same size.\n" ^int [^{:tag (* PublicKey)} pub]
+  (/ (+ (.BitLen (.-N pub)) 7) 8))
+
+
+(go/type PrivateKey (struct
+
+    ^{:line 27 :tag PublicKey :doc "pub has already been checked with checkPublicKey.\n"} pub
+    ^{:line 28 :tag (* bigmod/Nat)} d
+
+
+
+
+    ^{:line 33 :tag (* bigmod/Modulus) :doc "The following values are not set for deprecated multi-prime keys.\n\nSince they are always set for keys in FIPS mode, for SP 800-56B Rev. 2\npurposes we always use the Chinese Remainder Theorem (CRT) format.\n"} p ^{:tag (* bigmod/Modulus) :doc "The following values are not set for deprecated multi-prime keys.\n\nSince they are always set for keys in FIPS mode, for SP 800-56B Rev. 2\npurposes we always use the Chinese Remainder Theorem (CRT) format.\n"} q ; p × q = n
+
+
+    ^{:line 36 :tag (slice byte) :doc "dP and dQ are used as exponents, so we store them as big-endian byte\nslices to be passed to [bigmod.Nat.Exp].\n"} dP ; d mod (p - 1)
+    ^{:line 37 :tag (slice byte)} dQ ; d mod (q - 1)
+    ^{:line 38 :tag (* bigmod/Nat)} qInv ; qInv = q⁻¹ mod p
+
+
+    ^{:line 41 :tag bool :doc "fipsApproved is false if this key does not comply with FIPS 186-5 or\nSP 800-56B Rev. 2.\n"} fipsApproved))
+
+
+^{:go/end 46} (go/method PublicKey ^{:tag (* PublicKey)} [^{:tag (* PrivateKey)} priv]
+  (addr (.-pub priv)))
+
+
+
+
+
+
+^{:go/end 70} (go/func NewPrivateKey "NewPrivateKey creates a new RSA private key from the given parameters.\n\nAll values are in big-endian byte slice format, and may have leading zeros\nor be shorter if leading zeroes were trimmed.\n" [^{:tag (slice byte)} N ^int e ^{:tag (slice byte)} d ^{:tag (slice byte)} P ^{:tag (slice byte)} Q] :results [(* PrivateKey) error]
+  (let [(values n err) (bigmod/NewModulus N)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values p ^:assign err) (bigmod/NewModulus P)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [(values q ^:assign err) (bigmod/NewModulus Q)]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [(values dN ^:assign err) (.SetBytes (bigmod/NewNat) d n)]
+          (when (!= err nil)
+            (return nil err))
+
+          (newPrivateKey n e dN p q))))))
+
+
+^{:go/end 108} (go/func newPrivateKey [^{:tag (* bigmod/Modulus)} n ^int e ^{:tag (* bigmod/Nat)} d ^{:tag (* bigmod/Modulus)} p ^{:tag (* bigmod/Modulus)} q] :results [(* PrivateKey) error]
+  (let [pMinusOne (.SubOne (.Nat p) p)
+      (values pMinusOneMod err) (bigmod/NewModulus (.Bytes pMinusOne p))]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [dP (.Bytes (.Mod (bigmod/NewNat) d pMinusOneMod) pMinusOneMod)
+
+        ^{:line 80} qMinusOne (.SubOne (.Nat q) q)
+        (values qMinusOneMod ^:assign err) (bigmod/NewModulus (.Bytes qMinusOne q))]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [dQ (.Bytes (.Mod (bigmod/NewNat) d qMinusOneMod) qMinusOneMod)]
+
+        ;; Constant-time modular inversion with prime modulus by Fermat's Little
+        ;; Theorem: qInv = q⁻¹ mod p = q^(p-2) mod p.
+        (when (== (.IsOdd (.Nat p)) 0)
+          ;; [bigmod.Nat.Exp] requires an odd modulus.
+          (return nil (errors/New "crypto/rsa: p is even")))
+
+        (let [pMinusTwo (.Bytes (.SubOne (.SubOne (.Nat p) p) p) p)
+            ^{:line 94} qInv (.Mod (bigmod/NewNat) (.Nat q) p)]
+          (.Exp qInv qInv pMinusTwo p)
+
+          (let [pk (addr ^{:go/breaks [2 [4 101] 10]} (lit PrivateKey
+                  :pub ^{:go/breaks [2]} (lit PublicKey
+                    :N n :E e)
+
+                  :d d :p p :q q
+                  :dP dP :dQ dQ :qInv qInv))]
+
+            (when [err (checkPrivateKey pk)] (!= err nil)
+              (return nil err))
+
+            (return pk nil)))))))
+
+
+
+
+^{:go/end 145} (go/func NewPrivateKeyWithPrecomputation "NewPrivateKeyWithPrecomputation creates a new RSA private key from the given\nparameters, which include precomputed CRT values.\n" [^{:tag (slice byte)} N ^int e ^{:tag (slice byte)} d ^{:tag (slice byte)} P ^{:tag (slice byte)} Q ^{:tag (slice byte)} dP ^{:tag (slice byte)} dQ ^{:tag (slice byte)} qInv] :results [(* PrivateKey) error]
+  (let [(values n err) (bigmod/NewModulus N)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values p ^:assign err) (bigmod/NewModulus P)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [(values q ^:assign err) (bigmod/NewModulus Q)]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [(values dN ^:assign err) (.SetBytes (bigmod/NewNat) d n)]
+          (when (!= err nil)
+            (return nil err))
+
+          (let [(values qInvNat ^:assign err) (.SetBytes (bigmod/NewNat) qInv p)]
+            (when (!= err nil)
+              (return nil err))
+
+
+            (let [pk (addr ^{:go/breaks [2 [4 138] 10]} (lit PrivateKey
+                    :pub ^{:go/breaks [2]} (lit PublicKey
+                      :N n :E e)
+
+                    :d dN :p p :q q
+                    :dP dP :dQ dQ :qInv qInvNat))]
+
+              (when [err (checkPrivateKey pk)] (!= err nil)
+                (return nil err))
+
+              (return pk nil))))))))
+
+
+
+
+
+^{:go/end 169} (go/func NewPrivateKeyWithoutCRT "NewPrivateKeyWithoutCRT creates a new RSA private key from the given parameters.\n\nThis is meant for deprecated multi-prime keys, and is not FIPS 140 compliant.\n" [^{:tag (slice byte)} N ^int e ^{:tag (slice byte)} d] :results [(* PrivateKey) error]
+  (let [(values n err) (bigmod/NewModulus N)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values dN ^:assign err) (.SetBytes (bigmod/NewNat) d n)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [pk (addr ^{:go/breaks [2 [4 163]]} (lit PrivateKey
+              :pub ^{:go/breaks [2]} (lit PublicKey
+                :N n :E e)
+
+              :d dN))]
+
+        (when [err (checkPrivateKey pk)] (!= err nil)
+          (return nil err))
+
+        (return pk nil)))))
+
+
+
+
+
+
+^{:go/end 188} (go/method Export "Export returns the key parameters in big-endian byte slice format.\n\nP, Q, dP, dQ, and qInv may be nil if the key was created with\nNewPrivateKeyWithoutCRT.\n" [^{:tag (* PrivateKey)} priv] :results [^{:tag (slice byte)} N ^int e ^{:tag (slice byte)} d ^{:tag (slice byte)} P ^{:tag (slice byte)} Q ^{:tag (slice byte)} dP ^{:tag (slice byte)} dQ ^{:tag (slice byte)} qInv]
+  (set! N (.Bytes (.Nat (.-N (.-pub priv))) (.-N (.-pub priv))))
+  (set! e (.-E (.-pub priv)))
+  (set! d (.Bytes (.-d priv) (.-N (.-pub priv))))
+  (when (== (.-dP priv) nil)
+    (return))
+
+  (set! P (.Bytes (.Nat (.-p priv)) (.-p priv)))
+  (set! Q (.Bytes (.Nat (.-q priv)) (.-q priv)))
+  (set! dP (bytes/Clone (.-dP priv)))
+  (set! dQ (bytes/Clone (.-dQ priv)))
+  (set! qInv (.Bytes (.-qInv priv) (.-p priv)))
+  (return))
+
+
+
+
+^{:go/end 324} (go/func checkPrivateKey "checkPrivateKey is called by the NewPrivateKey and GenerateKey functions, and\nis allowed to modify priv.fipsApproved.\n" ^error [^{:tag (* PrivateKey)} priv]
+  (set! (.-fipsApproved priv) true)
+
+  (if [(values fipsApproved err) (checkPublicKey (addr (.-pub priv)))] (!= err nil)
+    (return err)
+    (when (not fipsApproved)
+      (set! (.-fipsApproved priv) false)))
+
+
+  (when (== (.-dP priv) nil)
+    ;; Legacy and deprecated multi-prime keys.
+    (set! (.-fipsApproved priv) false)
+    (return nil))
+
+
+  (let [N (.-N (.-pub priv))
+      ^{:line 208} p (.-p priv)
+      ^{:line 209} q (.-q priv)]
+
+    ;; FIPS 186-5, Section 5.1 requires "that p and q be of the same bit length."
+    (when (!= (.BitLen p) (.BitLen q))
+      (set! (.-fipsApproved priv) false))
+
+
+    ;; Check that pq ≡ 1 mod N (and that p < N and q < N).
+    (let [pN (.ExpandFor (bigmod/NewNat) N)]
+      (when [(values _ err) (.SetBytes pN (.Bytes (.Nat p) p) N)] (!= err nil)
+        (return (errors/New "crypto/rsa: invalid prime")))
+
+      (let [qN (.ExpandFor (bigmod/NewNat) N)]
+        (when [(values _ err) (.SetBytes qN (.Bytes (.Nat q) q) N)] (!= err nil)
+          (return (errors/New "crypto/rsa: invalid prime")))
+
+        (when (!= (.IsZero (.Mul pN qN N)) 1)
+          (return (errors/New "crypto/rsa: p * q != n")))
+
+
+        ;; Check that de ≡ 1 mod p-1, and de ≡ 1 mod q-1.
+        ;;
+        ;; This implies that e is coprime to each p-1 as e has a multiplicative
+        ;; inverse. Therefore e is coprime to lcm(p-1,q-1) = λ(N).
+        ;; It also implies that a^de ≡ a mod p as a^(p-1) ≡ 1 mod p. Thus a^de ≡ a
+        ;; mod n for all a coprime to n, as required.
+        ;;
+        ;; This checks dP, dQ, and e.
+        (let [(values pMinus1 err) (bigmod/NewModulus (.Bytes (.SubOne (.Nat p) p) p))]
+          (when (!= err nil)
+            (return (errors/New "crypto/rsa: invalid prime")))
+
+          (let [(values dP ^:assign err) (.SetBytes (bigmod/NewNat) (.-dP priv) pMinus1)]
+            (when (!= err nil)
+              (return (errors/New "crypto/rsa: invalid CRT exponent")))
+
+            (let [de (bigmod/NewNat)]
+              (.ExpandFor (.SetUint de (conv uint (.-E (.-pub priv)))) pMinus1)
+              (.Mul de dP pMinus1)
+              (when (!= (.IsOne de) 1)
+                (return (errors/New "crypto/rsa: invalid CRT exponent")))
+
+
+              (let [(values qMinus1 ^:assign err) (bigmod/NewModulus (.Bytes (.SubOne (.Nat q) q) q))]
+                (when (!= err nil)
+                  (return (errors/New "crypto/rsa: invalid prime")))
+
+                (let [(values dQ ^:assign err) (.SetBytes (bigmod/NewNat) (.-dQ priv) qMinus1)]
+                  (when (!= err nil)
+                    (return (errors/New "crypto/rsa: invalid CRT exponent")))
+
+                  (.ExpandFor (.SetUint de (conv uint (.-E (.-pub priv)))) qMinus1)
+                  (.Mul de dQ qMinus1)
+                  (when (!= (.IsOne de) 1)
+                    (return (errors/New "crypto/rsa: invalid CRT exponent")))
+
+
+                  ;; Check that qInv * q ≡ 1 mod p.
+                  (let [(values qP ^:assign err) (.SetOverflowingBytes (bigmod/NewNat) (.Bytes (.Nat q) q) p)]
+                    (when (!= err nil)
+                      ;; q >= 2^⌈log2(p)⌉
+                      (set! qP (.Mod (bigmod/NewNat) (.Nat q) p)))
+
+                    (when (!= (.IsOne (.Mul qP (.-qInv priv) p)) 1)
+                      (return (errors/New "crypto/rsa: invalid CRT coefficient")))
+
+
+                    ;; Check d against dP and dQ, even though we never actually use d,
+                    ;; to make sure the key is consistent.
+                    (let [dP1 (.Mod (bigmod/NewNat) (.-d priv) pMinus1)]
+                      (when (!= (.Equal dP1 dP) 1)
+                        (return (errors/New "crypto/rsa: d does not match dP")))
+
+                      (let [dQ1 (.Mod (bigmod/NewNat) (.-d priv) qMinus1)]
+                        (when (!= (.Equal dQ1 dQ) 1)
+                          (return (errors/New "crypto/rsa: d does not match dQ")))
+
+
+                        ;; Check that |p - q| > 2^(nlen/2 - 100).
+                        ;;
+                        ;; If p and q are very close to each other, then N=pq can be trivially
+                        ;; factored using Fermat's factorization method. Broken RSA implementations
+                        ;; do generate such keys. See Hanno Böck, Fermat Factorization in the Wild,
+                        ;; https://eprint.iacr.org/2023/026.pdf.
+                        ^{:go/breaks [[5 323]]} (let [diff (bigmod/NewNat)]
+                          (if [(values qP err) (.SetBytes (bigmod/NewNat) (.Bytes (.Nat q) q) p)] (!= err nil)
+                            ;; q > p
+                            (let [(values pQ err) (.SetBytes (bigmod/NewNat) (.Bytes (.Nat p) p) q)]
+                              (when (!= err nil)
+                                (return (errors/New "crypto/rsa: p == q")))
+
+                              ;; diff = 0 - p mod q = q - p
+                              (.Sub (.ExpandFor diff q) pQ q))
+
+                            ;; p > q
+                            ;; diff = 0 - q mod p = p - q
+                            (.Sub (.ExpandFor diff p) qP p))
+
+                          ;; A tiny bit of leakage is acceptable because it's not adaptive, an
+                          ;; attacker only learns the magnitude of p - q.
+                          (when (<= (.BitLenVarTime diff) (- (/ (.BitLen N) 2) 100))
+                            (return (errors/New "crypto/rsa: |p - q| too small")))
+
+
+                          ;; Check that d > 2^(nlen/2).
+                          ;;
+                          ;; See section 3 of https://crypto.stanford.edu/~dabo/papers/RSA-survey.pdf
+                          ;; for more details about attacks on small d values.
+                          ;;
+                          ;; Likewise, the leakage of the magnitude of d is not adaptive.
+                          (when (<= (.BitLenVarTime (.-d priv)) (/ (.BitLen N) 2))
+                            (return (errors/New "crypto/rsa: d too small")))
+
+
+                          nil)))))))))))))
+
+
+^{:go/end 364} (go/func checkPublicKey [^{:tag (* PublicKey)} pub] :results [^bool fipsApproved ^error err]
+  (set! fipsApproved true)
+  (when (== (.-N pub) nil)
+    (return false (errors/New "crypto/rsa: missing public modulus")))
+
+  (when (== (.IsOdd (.Nat (.-N pub))) 0)
+    (return false (errors/New "crypto/rsa: public modulus is even")))
+
+  ;; FIPS 186-5, Section 5.1: "This standard specifies the use of a modulus
+  ;; whose bit length is an even integer and greater than or equal to 2048
+  ;; bits."
+  (when (< (.BitLen (.-N pub)) 2048)
+    (set! fipsApproved false))
+
+  (when (== (% (.BitLen (.-N pub)) 2) 1)
+    (set! fipsApproved false))
+
+  (when (< (.-E pub) 2)
+    (return false (errors/New "crypto/rsa: public exponent too small or negative")))
+
+  ;; e needs to be coprime with p-1 and q-1, since it must be invertible
+  ;; modulo λ(pq). Since p and q are prime, this means e needs to be odd.
+  (when (== (bit-and (.-E pub) 1) 0)
+    (return false (errors/New "crypto/rsa: public exponent is even")))
+
+  ;; FIPS 186-5, Section 5.5(e): "The exponent e shall be an odd, positive
+  ;; integer such that 2¹⁶ < e < 2²⁵⁶."
+  (when (<= (.-E pub) (<< 1 16))
+    (set! fipsApproved false))
+
+  ;; We require pub.E to fit into a 32-bit integer so that we
+  ;; do not have different behavior depending on whether
+  ;; int is 32 or 64 bits. See also
+  ;; https://www.imperialviolet.org/2012/03/16/rsae.html.
+  (when (> (.-E pub) (- (<< 1 31) 1))
+    (return false (errors/New "crypto/rsa: public exponent too large")))
+
+  (return fipsApproved nil))
+
+
+
+^{:go/end 373} (go/func Encrypt "Encrypt performs the RSA public key operation.\n" [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} plaintext] :results [(slice byte) error]
+  (fips140/RecordNonApproved)
+  (when [(values _ err) (checkPublicKey pub)] (!= err nil)
+    (return nil err))
+
+  (encrypt pub plaintext))
+
+
+^{:go/end 381} (go/func encrypt [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} plaintext] :results [(slice byte) error]
+  (let [(values m err) (.SetBytes (bigmod/NewNat) plaintext (.-N pub))]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (.Bytes (.ExpShortVarTime (bigmod/NewNat) m (conv uint (.-E pub)) (.-N pub)) (.-N pub)) nil)))
+
+
+(go/var ErrMessageTooLong (errors/New "crypto/rsa: message too long for RSA key size"))
+(go/var ErrDecryption (errors/New "crypto/rsa: decryption error"))
+(go/var ErrVerification (errors/New "crypto/rsa: verification error"))
+
+(go/const ^{:val true} withCheck true)
+(go/const ^{:val false} noCheck false)
+
+
+^{:go/end 394} (go/func DecryptWithoutCheck "DecryptWithoutCheck performs the RSA private key operation.\n" [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} ciphertext] :results [(slice byte) error]
+  (fips140/RecordNonApproved)
+  (decrypt priv ciphertext noCheck))
+
+
+
+
+^{:go/end 401} (go/func DecryptWithCheck "DecryptWithCheck performs the RSA private key operation and checks the\nresult to defend against errors in the CRT computation.\n" [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} ciphertext] :results [(slice byte) error]
+  (fips140/RecordNonApproved)
+  (decrypt priv ciphertext withCheck))
+
+
+
+
+
+^{:go/end 449} (go/func decrypt "decrypt performs an RSA decryption of ciphertext into out. If check is true,\nm^e is calculated and compared with ciphertext, in order to defend against\nerrors in the CRT computation.\n" [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} ciphertext ^bool check] :results [(slice byte) error]
+  (when (not (.-fipsApproved priv))
+    (fips140/RecordNonApproved))
+
+
+  (let [^{:tag (* bigmod/Nat)} m (zero (* bigmod/Nat))
+      (values N E) (values (.-N (.-pub priv)) (.-E (.-pub priv)))
+
+      (values c err) (.SetBytes (bigmod/NewNat) ciphertext N)]
+    (when (!= err nil)
+      (return nil ErrDecryption))
+
+
+    (if (== (.-dP priv) nil) (do
+        ;; Legacy codepath for deprecated multi-prime keys.
+        (fips140/RecordNonApproved)
+        (set! m (.Exp (bigmod/NewNat) c (.Bytes (.-d priv) N) N)))
+
+
+      (let [(values P Q) (values (.-p priv) (.-q priv))
+          ^{:line 426} t0 (bigmod/NewNat)]
+        ;; m = c ^ Dp mod p
+        (set! m (.Exp (bigmod/NewNat) (.Mod t0 c P) (.-dP priv) P))
+        ;; m2 = c ^ Dq mod q
+        (let [m2 (.Exp (bigmod/NewNat) (.Mod t0 c Q) (.-dQ priv) Q)]
+          ;; m = m - m2 mod p
+          (.Sub m (.Mod t0 m2 P) P)
+          ;; m = m * Qinv mod p
+          (.Mul m (.-qInv priv) P)
+          ;; m = m * q mod N
+          (.Mul (.ExpandFor m N) (.Mod t0 (.Nat Q) N) N)
+          ;; m = m + m2 mod N
+          (.Add m (.ExpandFor m2 N) N))))
+
+
+    (when check
+      (let [c1 (.ExpShortVarTime (bigmod/NewNat) m (conv uint E) N)]
+        (when (!= (.Equal c1 c) 1)
+          (return nil ErrDecryption))))
+
+
+
+    (return (.Bytes m N) nil)))

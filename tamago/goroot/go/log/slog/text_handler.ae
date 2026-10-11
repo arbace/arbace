@@ -1,0 +1,169 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.log.slog) (go/file "text_handler.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [encoding "encoding"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [reflect "reflect"]
+    ^{:line 13} [strconv "strconv"]
+    ^{:line 14} [sync "sync"]
+    ^{:line 15} [unicode "unicode"]
+    ^{:line 16} [utf8 "unicode/utf8"]])
+
+
+
+
+(go/type TextHandler "TextHandler is a [Handler] that writes Records to an [io.Writer] as a\nsequence of key=value pairs separated by spaces and followed by a newline.\n" (struct
+    (* commonHandler)))
+
+
+
+
+
+^{:go/end 40} (go/func NewTextHandler "NewTextHandler creates a [TextHandler] that writes to w,\nusing the given options.\nIf opts is nil, the default options are used.\n" ^{:tag (* TextHandler)} [^io/Writer w ^{:tag (* HandlerOptions)} opts]
+  (when (== opts nil)
+    (set! opts (addr (lit HandlerOptions))))
+
+  (addr (lit TextHandler
+      (addr ^{:go/breaks [2 4 6 8]} (lit commonHandler
+          :json false
+          :w w
+          :opts @opts
+          :mu (addr (lit sync/Mutex)))))))
+
+
+
+
+
+
+^{:go/end 46} (go/method Enabled "Enabled reports whether the handler handles records at the given level.\nThe handler ignores records whose level is lower.\n" ^bool [^{:tag (* TextHandler)} h ^context/Context _ ^Level level]
+  (.enabled (.-commonHandler h) level))
+
+
+
+
+^{:go/end 52} (go/method WithAttrs "WithAttrs returns a new [TextHandler] whose attributes consists\nof h's attributes followed by attrs.\n" ^Handler [^{:tag (* TextHandler)} h ^{:tag (slice Attr)} attrs]
+  (addr (lit TextHandler :commonHandler (.withAttrs (.-commonHandler h) attrs))))
+
+
+^{:go/end 56} (go/method WithGroup ^Handler [^{:tag (* TextHandler)} h ^string name]
+  (addr (lit TextHandler :commonHandler (.withGroup (.-commonHandler h) name))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 94} (go/method Handle "Handle formats its argument [Record] as a single line of space-separated\nkey=value items.\n\nIf the Record's time is zero, the time is omitted.\nOtherwise, the key is \"time\"\nand the value is output in RFC3339 format with millisecond precision.\n\nThe level's key is \"level\" and its value is the result of calling [Level.String].\n\nIf the AddSource option is set and source information is available,\nthe key is \"source\" and the value is output as FILE:LINE.\n\nThe message's key is \"msg\".\n\nTo modify these or other attributes, or remove them from the output, use\n[HandlerOptions.ReplaceAttr].\n\nIf a value implements [encoding.TextMarshaler], the result of MarshalText is\nwritten. Otherwise, the result of [fmt.Sprint] is written.\n\nKeys and values are quoted with [strconv.Quote] if they contain Unicode space\ncharacters, non-printing characters, '\"' or '='.\n\nKeys inside groups consist of components (keys or group names) separated by\ndots. No further escaping is performed.\nThus there is no way to determine from the key \"a.b.c\" whether there\nare two groups \"a\" and \"b\" and a key \"c\", or a single group \"a.b\" and a key \"c\",\nor single group \"a\" and a key \"b.c\".\nIf it is necessary to reconstruct the group structure of a key\neven in the presence of dots inside components, use\n[HandlerOptions.ReplaceAttr] to encode that information in the key.\n\nEach call to Handle results in a single serialized call to\nio.Writer.Write.\n" ^error [^{:tag (* TextHandler)} h ^context/Context _ ^Record r]
+  (.handle (.-commonHandler h) r))
+
+
+^{:go/breaks [[4 130]] :go/end 131} (go/func appendTextValue ^error [^{:tag (* handleState)} s ^Value v]
+  (switch (.Kind v)
+    (case [KindString]
+      (.appendString s (.str v)))
+    (case [KindTime]
+      (.appendTime s (.time v)))
+    (case [KindAny]
+      (if [(values ta ok) (assert encoding/TextAppender (.-any v))] ok
+        (let [^{:tag (slice byte)} buf (zero (slice byte))
+            (values ^:assign buf err) (.AppendText ta buf)]
+          (when (!= err nil)
+            (return err))
+
+          ;; TODO: append directly to buffer when possible
+          (.appendString s (conv string buf))
+          (return nil))
+        (when [(values tm ok) (assert encoding/TextMarshaler (.-any v))] ok
+          (let [(values data err) (.MarshalText tm)]
+            (when (!= err nil)
+              (return err))
+
+            ;; TODO: avoid the conversion to string.
+            (.appendString s (conv string data))
+            (return nil))))
+
+      (when [(values bs ok) (byteSlice (.-any v))] ok
+        ;; As of Go 1.19, this only allocates for strings longer than 32 bytes.
+        (.WriteString (.-buf s) (strconv/Quote (conv string bs)))
+        (return nil))
+
+      (.appendString s (fmt/Sprintf "%+v" (.Any v))))
+    (default
+      (set! @(.-buf s) (.append v @(.-buf s)))))
+
+  nil)
+
+
+
+
+
+^{:go/end 146} (go/func byteSlice "byteSlice returns its argument as a []byte if the argument's\nunderlying type is []byte, along with a second return value of true.\nOtherwise it returns nil, false.\n" [^any a] :results [(slice byte) bool]
+  (when [(values bs ok) (assert (slice byte) a)] ok
+    (return bs true))
+
+  ;; Like Printf's %s, we allow both the slice type and the byte element type to be named.
+  (let [t (reflect/TypeOf a)]
+    (when (and (!= t nil) (== (.Kind t) reflect/Slice) (== (.Kind (.Elem t)) reflect/Uint8))
+      (return (.Bytes (reflect/ValueOf a)) true))
+
+    (return nil false)))
+
+
+^{:go/breaks [[5 169]] :go/end 170} (go/func needsQuoting ^bool [^string s]
+  (when (== (len s) 0)
+    (return true))
+
+  (for [i 0] (< i (len s)) _
+    (let [b (aget s i)]
+      (when (< b utf8/RuneSelf)
+        ;; Quote anything except a backslash that would need quoting in a
+        ;; JSON string, as well as space and '='
+        (when (and (!= b \\) ^:go/paren (or (== b \space) (== b \=) (not (aget safeSet b))))
+          (return true))
+
+        (inc! i)
+        (continue))
+
+      (let [(values r size) (utf8/DecodeRuneInString (subslice s i))]
+        (when (or (== r utf8/RuneError) (unicode/IsSpace r) (not (unicode/IsPrint r)))
+          (return true))
+
+        (set! i + size))))
+
+  false)

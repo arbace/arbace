@@ -1,0 +1,853 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.textproto) (go/file "reader.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [bytes "bytes"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [math "math"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [sync "sync"]
+    ^{:line 17} [_ "unsafe"]]) ; for linkname
+
+
+
+
+(go/var ^{:doc "TODO: This should be a distinguishable error (ErrMessageTooLarge)\nto allow mime/multipart and net/http to detect it.\n"} errMessageTooLarge (errors/New "message too large"))
+
+
+
+(go/type Reader "A Reader implements convenience methods for reading requests\nor responses from a text protocol network connection.\n" (struct
+    ^{:line 27 :tag (* bufio/Reader)} R
+    ^{:line 28 :tag (* dotReader)} dot
+    ^{:line 29 :tag (slice byte)} buf)) ; a re-usable buffer for readContinuedLineSlice
+
+
+
+
+
+
+
+^{:go/end 39} (go/func NewReader "NewReader returns a new [Reader] reading from r.\n\nTo avoid denial of service attacks, the provided [bufio.Reader]\nshould be reading from an [io.LimitReader] or similar Reader to bound\nthe size of responses.\n" ^{:tag (* Reader)} [^{:tag (* bufio/Reader)} r]
+  (addr (lit Reader :R r)))
+
+
+
+
+^{:go/end 46} (go/method ReadLine "ReadLine reads a single line from r,\neliding the final \\n or \\r\\n from the returned string.\n" [^{:tag (* Reader)} r] :results [string error]
+  (let [(values line err) (.readLineSlice r -1)]
+    (return (conv string line) err)))
+
+
+
+^{:go/end 55} (go/method ReadLineBytes "ReadLineBytes is like [Reader.ReadLine] but returns a []byte instead of a string.\n" [^{:tag (* Reader)} r] :results [(slice byte) error]
+  (let [(values line err) (.readLineSlice r -1)]
+    (when (!= line nil)
+      (set! line (bytes/Clone line)))
+
+    (return line err)))
+
+
+
+
+
+^{:go/end 81} (go/method readLineSlice "readLineSlice reads a single line from r,\nup to lim bytes long (or unlimited if lim is less than 0),\neliding the final \\r or \\r\\n from the returned string.\n" [^{:tag (* Reader)} r ^int64 lim] :results [(slice byte) error]
+  (.closeDot r)
+  (let [^{:tag (slice byte)} line (zero (slice byte))]
+    (while true
+      (let [(values l more err) (.ReadLine (.-R r))]
+        (when (!= err nil)
+          (return nil err))
+
+        (when (and (>= lim 0) (> (+ (conv int64 (len line)) (conv int64 (len l))) lim))
+          (return nil errMessageTooLarge))
+
+        ;; Avoid the copy if the first call produced a full line.
+        (when (and (== line nil) (not more))
+          (return l nil))
+
+        (set! line (append line (spread l)))
+        (when (not more)
+          (break))))
+
+
+    (return line nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 104} (go/method ReadContinuedLine "ReadContinuedLine reads a possibly continued line from r,\neliding the final trailing ASCII white space.\nLines after the first are considered continuations if they\nbegin with a space or tab character. In the returned data,\ncontinuation lines are separated from the previous line\nonly by a single space: the newline and leading white space\nare removed.\n\nFor example, consider this input:\n\n\tLine 1\n\t  continued...\n\tLine 2\n\nThe first call to ReadContinuedLine will return \"Line 1 continued...\"\nand the second will return \"Line 2\".\n\nEmpty lines are never continued.\n" [^{:tag (* Reader)} r] :results [string error]
+  (let [(values line err) (.readContinuedLineSlice r -1 noValidation)]
+    (return (conv string line) err)))
+
+
+
+
+^{:go/end 119} (go/func trim "trim returns s with leading and trailing spaces and tabs removed.\nIt does not assume Unicode or UTF-8.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s]
+  (let [i 0]
+    (while (and (< i (len s)) ^:go/paren (or (== (aget s i) \space) (== (aget s i) \tab)))
+      (inc! i))
+
+    (set! s (subslice s i))
+    (let [n (- (len s) 1)]
+      (while (and (>= n 0) ^:go/paren (or (== (aget s n) \space) (== (aget s n) \tab)))
+        (dec! n))
+
+      (subslice s _ (+ n 1)))))
+
+
+
+
+^{:go/end 129} (go/method ReadContinuedLineBytes "ReadContinuedLineBytes is like [Reader.ReadContinuedLine] but\nreturns a []byte instead of a string.\n" [^{:tag (* Reader)} r] :results [(slice byte) error]
+  (let [(values line err) (.readContinuedLineSlice r -1 noValidation)]
+    (when (!= line nil)
+      (set! line (bytes/Clone line)))
+
+    (return line err)))
+
+
+
+
+
+
+
+^{:go/end 188} (go/method readContinuedLineSlice "readContinuedLineSlice reads continued lines from the reader buffer,\nreturning a byte slice with all lines. The validateFirstLine function\nis run on the first read line, and if it returns an error then this\nerror is returned from readContinuedLineSlice.\nIt reads up to lim bytes of data (or unlimited if lim is less than 0).\n" [^{:tag (* Reader)} r ^int64 lim ^{:tag (func [(slice byte)] [error])} validateFirstLine] :results [(slice byte) error]
+  (when (== validateFirstLine nil)
+    (return nil (fmt/Errorf "missing validateFirstLine func")))
+
+
+  ;; Read the first line.
+  (let [(values line err) (.readLineSlice r lim)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (== (len line) 0) ; blank line - no continuation
+      (return line nil))
+
+
+    (when [err (validateFirstLine line)] (!= err nil)
+      (return nil err))
+
+
+    ;; Optimistically assume that we have started to buffer the next line
+    ;; and it starts with an ASCII letter (the next header key), or a blank
+    ;; line, so we can avoid copying that buffered data around in memory
+    ;; and skipping over non-existent whitespace.
+    (when (> (.Buffered (.-R r)) 1)
+      (let [(values peek _) (.Peek (.-R r) 2)]
+        (when (or (and (> (len peek) 0) ^:go/paren (or (isASCIILetter (aget peek 0)) (== (aget peek 0) \newline)))
+            (and (== (len peek) 2) (== (aget peek 0) \return) (== (aget peek 1) \newline)))
+          (return (trim line) nil))))
+
+
+
+    ;; ReadByte or the next readLineSlice will flush the read buffer;
+    ;; copy the slice into buf.
+    (set! (.-buf r) (append (subslice (.-buf r) _ 0) (spread (trim line))))
+
+    (when (< lim 0)
+      (set! lim math/MaxInt64))
+
+    (set! lim - (conv int64 (len (.-buf r))))
+
+    ;; Read continuation lines.
+    (while (> (.skipSpace r) 0)
+      (set! (.-buf r) (append (.-buf r) \space))
+      (when (>= (conv int64 (len (.-buf r))) lim)
+        (return nil errMessageTooLarge))
+
+      (let [(values line err) (.readLineSlice r (- lim (conv int64 (len (.-buf r)))))]
+        (when (!= err nil)
+          (break))
+
+        (set! (.-buf r) (append (.-buf r) (spread (trim line))))))
+
+    (return (.-buf r) nil)))
+
+
+
+^{:go/end 206} (go/method skipSpace "skipSpace skips R over all spaces and returns the number of bytes skipped.\n" ^int [^{:tag (* Reader)} r]
+  (let [n 0]
+    (while true
+      (let [(values c err) (.ReadByte (.-R r))]
+        (when (!= err nil)
+          ;; Bufio will keep err until next read.
+          (break))
+
+        (when (and (!= c \space) (!= c \tab))
+          (.UnreadByte (.-R r))
+          (break))
+
+        (inc! n)))
+
+    ^{:line 205} n))
+
+
+^{:go/end 214} (go/method readCodeLine [^{:tag (* Reader)} r ^int expectCode] :results [^int code ^bool continued ^string message ^error err]
+  (let [(values line ^:assign err) (.ReadLine r)]
+    (when (!= err nil)
+      (return))
+
+    (parseCodeLine line expectCode)))
+
+
+^{:go/end 234} (go/func parseCodeLine [^string line ^int expectCode] :results [^int code ^bool continued ^string message ^error err]
+  (when (or (< (len line) 4) (and (!= (aget line 3) \space) (!= (aget line 3) \-)))
+    (set! err (conv ProtocolError (fmt/Sprintf "short response: %q" line)))
+    (return))
+
+  (set! continued (== (aget line 3) \-))
+  (set! (values code err) (strconv/Atoi (subslice line 0 3)))
+  (when (or (!= err nil) (< code 100))
+    (set! err (conv ProtocolError (fmt/Sprintf "invalid response code: %q" line)))
+    (return))
+
+  (set! message (subslice line 4))
+  (when (or (and (<= 1 expectCode) (< expectCode 10) (!= (/ code 100) expectCode))
+      (and (<= 10 expectCode) (< expectCode 100) (!= (/ code 10) expectCode))
+      (and (<= 100 expectCode) (< expectCode 1000) (!= code expectCode)))
+    (set! err (addr (lit Error code message))))
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 259} (go/method ReadCodeLine "ReadCodeLine reads a response code line of the form\n\n\tcode message\n\nwhere code is a three-digit status code and the message\nextends to the rest of the line. An example of such a line is:\n\n\t220 plan9.bell-labs.com ESMTP\n\nIf the prefix of the status does not match the digits in expectCode,\nReadCodeLine returns with err set to &Error{code, message}.\nFor example, if expectCode is 31, an error will be returned if\nthe status is not in the range [310,319].\n\nIf the response is multi-line, ReadCodeLine returns an error.\n\nAn expectCode <= 0 disables the check of the status code.\n" [^{:tag (* Reader)} r ^int expectCode] :results [^int code ^string message ^error err]
+  (let [(values ^:assign code continued ^:assign message ^:assign err) (.readCodeLine r expectCode)]
+    (when (and (== err nil) continued)
+      (set! err (conv ProtocolError (fmt/Sprintf "unexpected multi-line response: %q" message))))
+
+    (return)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 316} (go/method ReadResponse "ReadResponse reads a multi-line response of the form:\n\n\tcode-message line 1\n\tcode-message line 2\n\t...\n\tcode message line n\n\nwhere code is a three-digit status code. The first line starts with the\ncode and a hyphen. The response is terminated by a line that starts\nwith the same code followed by a space. Each line in message is\nseparated by a newline (\\n).\n\nSee page 36 of RFC 959 (https://www.ietf.org/rfc/rfc959.txt) for\ndetails of another form of response accepted:\n\n\tcode-message line 1\n\tmessage line 2\n\t...\n\tcode message line n\n\nIf the prefix of the status does not match the digits in expectCode,\nReadResponse returns with err set to &Error{code, message}.\nFor example, if expectCode is 31, an error will be returned if\nthe status is not in the range [310,319].\n\nAn expectCode <= 0 disables the check of the status code.\n" [^{:tag (* Reader)} r ^int expectCode] :results [^int code ^string message ^error err]
+  (let [(values ^:assign code continued first ^:assign err) (.readCodeLine r expectCode)
+      ^{:line 289} multi continued
+      ^{:line 290 :tag strings/Builder} messageBuilder (zero strings/Builder)]
+    (.WriteString messageBuilder first)
+    (while continued
+      (let [(values line err) (.ReadLine r)]
+        (when (!= err nil)
+          (return 0 "" err))
+
+
+        (let [^int code2 (zero int)
+            ^{:line 299 :tag string} moreMessage (zero string)]
+          (set! (values code2 continued moreMessage err) (parseCodeLine line 0))
+          (when (or (!= err nil) (!= code2 code))
+            (.WriteByte messageBuilder \newline)
+            (.WriteString messageBuilder (strings/TrimRight line "\r\n"))
+            (set! continued true)
+            (continue))
+
+          (.WriteByte messageBuilder \newline)
+          (.WriteString messageBuilder moreMessage))))
+
+    (set! message (.String messageBuilder))
+    (when (and (!= err nil) multi (!= message ""))
+      ;; replace one line error message with all lines (full message)
+      (set! err (addr (lit Error code message))))
+
+    (return)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 338} (go/method DotReader "DotReader returns a new [Reader] that satisfies Reads using the\ndecoded text of a dot-encoded block read from r.\nThe returned Reader is only valid until the next call\nto a method on r.\n\nDot encoding is a common framing used for data blocks\nin text protocols such as SMTP.  The data consists of a sequence\nof lines, each of which ends in \"\\r\\n\".  The sequence itself\nends at a line containing just a dot: \".\\r\\n\".  Lines beginning\nwith a dot are escaped with an additional dot to avoid\nlooking like the end of the sequence.\n\nThe decoded form returned by the Reader's Read method\nrewrites the \"\\r\\n\" line endings into the simpler \"\\n\",\nremoves leading dot escapes if present, and stops with error [io.EOF]\nafter consuming (and discarding) the end-of-sequence line.\n" ^io/Reader [^{:tag (* Reader)} r]
+  (.closeDot r)
+  (set! (.-dot r) (addr (lit dotReader :r r)))
+  (.-dot r))
+
+
+(go/type dotReader (struct
+    ^{:line 341 :tag (* Reader)} r
+    ^{:line 342 :tag int} state))
+
+
+
+^{:go/end 431} (go/method Read "Read satisfies reads by decoding dot-encoded data read from d.r.\n" [^{:tag (* dotReader)} d ^{:tag (slice byte)} b] :results [^int n ^error err]
+  ;; Run data through a simple state machine to
+  ;; elide leading dots, rewrite trailing \r\n into \n,
+  ;; and detect ending .\r\n line.
+  (let [
+      ^:const ^{:line 351 :val 0} stateBeginLine iota ; beginning of line; initial state; must be zero
+      ^:const ^:go/grouped ^:go/implicit ^{:line 352 :val 1} stateDot iota ; read . at beginning of line
+      ^:const ^:go/grouped ^:go/implicit ^{:line 353 :val 2} stateDotCR iota ; read .\r at beginning of line
+      ^:const ^:go/grouped ^:go/implicit ^{:line 354 :val 3} stateCR iota ; read \r (possibly at end of line)
+      ^:const ^:go/grouped ^:go/implicit ^{:line 355 :val 4} stateData iota ; reading data in middle of line
+      ^:const ^:go/grouped ^:go/implicit ^{:line 356 :val 5} stateEOF iota ; reached .\r\n end marker line
+
+      ^{:line 358} br (.-R (.-r d))]
+    (while (and (< n (len b)) (!= (.-state d) stateEOF))
+      (let [^byte c (zero byte)]
+        (set! (values c err) (.ReadByte br))
+        (when (!= err nil)
+          (when (== err io/EOF)
+            (set! err io/ErrUnexpectedEOF))
+
+          (break))
+
+        (switch (.-state d)
+          (case [stateBeginLine]
+            (when (== c \.)
+              (set! (.-state d) stateDot)
+              (continue))
+
+            (when (== c \return)
+              (set! (.-state d) stateCR)
+              (continue))
+
+            (set! (.-state d) stateData))
+
+          (case [stateDot]
+            (when (== c \return)
+              (set! (.-state d) stateDotCR)
+              (continue))
+
+            (when (== c \newline)
+              (set! (.-state d) stateEOF)
+              (continue))
+
+            (set! (.-state d) stateData))
+
+          (case [stateDotCR]
+            (when (== c \newline)
+              (set! (.-state d) stateEOF)
+              (continue))
+
+            ;; Not part of .\r\n.
+            ;; Consume leading dot and emit saved \r.
+            (.UnreadByte br)
+            (set! c \return)
+            (set! (.-state d) stateData))
+
+          (case [stateCR]
+            (when (== c \newline)
+              (set! (.-state d) stateBeginLine)
+              (break))
+
+            ;; Not part of \r\n. Emit saved \r
+            (.UnreadByte br)
+            (set! c \return)
+            (set! (.-state d) stateData))
+
+          (case [stateData]
+            (when (== c \return)
+              (set! (.-state d) stateCR)
+              (continue))
+
+            (when (== c \newline)
+              (set! (.-state d) stateBeginLine))))
+
+
+        (aset b n c)
+        (inc! n)))
+
+    (when (and (== err nil) (== (.-state d) stateEOF))
+      (set! err io/EOF))
+
+    (when (and (!= err nil) (== (.-dot (.-r d)) d))
+      (set! (.-dot (.-r d)) nil))
+
+    (return)))
+
+
+
+
+^{:go/end 445} (go/method closeDot "closeDot drains the current DotReader if any,\nmaking sure that it reads until the ending dot line.\n" [^{:tag (* Reader)} r]
+  (when (== (.-dot r) nil)
+    (return))
+
+  (let [buf (make (slice byte) 128)]
+    (while (!= (.-dot r) nil)
+      ;; When Read reaches EOF or an error,
+      ;; it will set r.dot == nil.
+      (.Read (.-dot r) buf))))
+
+
+
+
+
+
+^{:go/end 452} (go/method ReadDotBytes "ReadDotBytes reads a dot-encoding and returns the decoded data.\n\nSee the documentation for the [Reader.DotReader] method for details about dot-encoding.\n" [^{:tag (* Reader)} r] :results [(slice byte) error]
+  (io/ReadAll (.DotReader r)))
+
+
+
+
+
+
+^{:go/end 484} (go/method ReadDotLines "ReadDotLines reads a dot-encoding and returns a slice\ncontaining the decoded lines, with the final \\r\\n or \\n elided from each.\n\nSee the documentation for the [Reader.DotReader] method for details about dot-encoding.\n" [^{:tag (* Reader)} r] :results [(slice string) error]
+  ;; We could use ReadDotBytes and then Split it,
+  ;; but reading a line at a time avoids needing a
+  ;; large contiguous block of memory and is simpler.
+  (let [^{:tag (slice string)} v (zero (slice string))
+      ^{:line 463 :tag error} err (zero error)]
+    (while true
+      (let [^string line (zero string)]
+        (set! (values line err) (.ReadLine r))
+        (when (!= err nil)
+          (when (== err io/EOF)
+            (set! err io/ErrUnexpectedEOF))
+
+          (break))
+
+
+        ;; Dot by itself marks end; otherwise cut one dot.
+        (when (and (> (len line) 0) (== (aget line 0) \.))
+          (when (== (len line) 1)
+            (break))
+
+          (set! line (subslice line 1)))
+
+        (set! v (append v line))))
+
+    (return v err)))
+
+
+(go/var colon (conv (slice byte) ":"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 509} (go/method ReadMIMEHeader "ReadMIMEHeader reads a MIME-style header from r.\nThe header is a sequence of possibly continued Key: Value lines\nending in a blank line.\nThe returned map m maps [CanonicalMIMEHeaderKey](key) to a\nsequence of values in the same order encountered in the input.\n\nFor example, consider this input:\n\n\tMy-Key: Value 1\n\tLong-Key: Even\n\t       Longer Value\n\tMy-Key: Value 2\n\nGiven that input, ReadMIMEHeader returns the map:\n\n\tmap[string][]string{\n\t\t\"My-Key\": {\"Value 1\", \"Value 2\"},\n\t\t\"Long-Key\": {\"Even Longer Value\"},\n\t}\n" [^{:tag (* Reader)} r] :results [MIMEHeader error]
+  (readMIMEHeader r math/MaxInt64 math/MaxInt64))
+
+
+;; readMIMEHeader should be an internal detail,
+;; but widely used packages access it using linkname.
+;; Notable members of the hall of shame include:
+;;   - github.com/qtgolang/SunnyNet
+;;
+;; Do not remove or change the type signature.
+;; See go.dev/issue/67401.
+;;
+
+
+
+
+^{:go/end 608} (go/func ^{:go/linkname "readMIMEHeader"} readMIMEHeader "readMIMEHeader is a version of ReadMIMEHeader which takes a limit on the header size.\nIt is called by the mime/multipart and net/http package.\n" [^{:tag (* Reader)} r ^int64 maxMemory ^int64 maxHeaders] :results [MIMEHeader error]
+  ;; Avoid lots of small slice allocations later by allocating one
+  ;; large one ahead of time which we'll cut up into smaller
+  ;; slices. If this isn't big enough later, we allocate small ones.
+  (let [^{:tag (slice string)} strs (zero (slice string))
+      ^{:line 528} hint (.upcomingHeaderKeys r)]
+    (when (> hint 0)
+      (when (> hint 1000)
+        (set! hint 1000)) ; set a cap to avoid overallocation
+
+      (set! strs (make (slice string) hint)))
+
+
+    (let [m (make MIMEHeader hint)]
+
+      ;; Account for 400 bytes of overhead for the MIMEHeader, plus 200 bytes per entry.
+      ;; Benchmarking map creation as of go1.20, a one-entry MIMEHeader is 416 bytes and large
+      ;; MIMEHeaders average about 200 bytes per entry.
+      (set! maxMemory - 400)
+      (let [^:const ^{:val 200} mapEntryOverhead 200]
+
+        ;; The first line cannot start with a leading space.
+        (when [(values buf err) (.Peek (.-R r) 1)] (and (== err nil) ^:go/paren (or (== (aget buf 0) \space) (== (aget buf 0) \tab)))
+          (let [^:const ^{:val 80} errorLimit 80 ; arbitrary limit on how much of the line we'll quote
+              (values line err) (.readLineSlice r errorLimit)]
+            (when (!= err nil)
+              (return m err))
+
+            (return m (conv ProtocolError (fmt/Sprintf "malformed MIME header initial line: %q" line)))))
+
+
+        (while true
+          (let [(values kv err) (.readContinuedLineSlice r maxMemory mustHaveFieldNameColon)]
+            (when (== (len kv) 0)
+              (return m err))
+
+
+            ;; Key ends at first colon.
+            (let [(values k v ok) (bytes/Cut kv colon)]
+              (when (not ok)
+                (return m (conv ProtocolError (fmt/Sprintf "malformed MIME header line: %q" kv))))
+
+              (let [(values key ^:assign ok) (canonicalMIMEHeaderKey k)]
+                (when (not ok)
+                  (return m (conv ProtocolError (fmt/Sprintf "malformed MIME header line: %q" kv))))
+
+                (range [_ c v]
+                  (when (not (validHeaderValueByte c))
+                    (return m (conv ProtocolError (fmt/Sprintf "malformed MIME header line: %q" kv)))))
+
+
+
+                (dec! maxHeaders)
+                (when (< maxHeaders 0)
+                  (return nil errMessageTooLarge))
+
+
+                ;; Skip initial spaces in value.
+                (let [value (conv string (bytes/TrimLeft v " \t"))
+
+                    ^{:line 583} vv (aget m key)]
+                  (when (== vv nil)
+                    (set! maxMemory - (conv int64 (len key)))
+                    (set! maxMemory - mapEntryOverhead))
+
+                  (set! maxMemory - (conv int64 (len value)))
+                  (when (< maxMemory 0)
+                    (return m errMessageTooLarge))
+
+                  (if (and (== vv nil) (> (len strs) 0)) (do
+                      ;; More than likely this will be a single-element key.
+                      ;; Most headers aren't multi-valued.
+                      ;; Set the capacity on strs[0] to 1, so any future append
+                      ;; won't extend the slice into the other strings.
+                      (set! (values vv strs) (values (subslice strs _ 1 1) (subslice strs 1)))
+                      (aset vv 0 value)
+                      (aset m key vv))
+
+                    (aset m key (append vv value)))
+
+
+                  (when (!= err nil)
+                    (return m err)))))))))))
+
+
+
+
+
+
+^{:go/end 612} (go/func noValidation "noValidation is a no-op validation func for readContinuedLineSlice\nthat permits any lines.\n" ^error [^{:tag (slice byte)} _] nil)
+
+
+
+
+^{:go/breaks [[5 621]] :go/end 622} (go/func mustHaveFieldNameColon "mustHaveFieldNameColon ensures that, per RFC 7230, the\nfield-name is on a single line, so the first line must\ncontain a colon.\n" ^error [^{:tag (slice byte)} line]
+  (when (< (bytes/IndexByte line \:) 0)
+    (return (conv ProtocolError (fmt/Sprintf "malformed MIME header: missing colon: %q" line))))
+
+  nil)
+
+
+(go/var nl (conv (slice byte) "\n"))
+
+
+
+^{:go/end 650} (go/method upcomingHeaderKeys "upcomingHeaderKeys returns an approximation of the number of keys\nthat will be in this header. If it gets confused, it returns 0.\n" [^{:tag (* Reader)} r] :results [^int n]
+  ;; Try to determine the 'hint' size.
+  (.Peek (.-R r) 1) ; force a buffer load if empty
+  (let [s (.Buffered (.-R r))]
+    (when (== s 0)
+      (return))
+
+    (let [(values peek _) (.Peek (.-R r) s)]
+      (while (and (> (len peek) 0) (< n 1000))
+        (let [^{:tag (slice byte)} line (zero (slice byte))]
+          (set! (values line peek _) (bytes/Cut peek nl))
+          (when (or (== (len line) 0) ^:go/paren (and (== (len line) 1) (== (aget line 0) \return)))
+            ;; Blank line separating headers from the body.
+            (break))
+
+          (when (or (== (aget line 0) \space) (== (aget line 0) \tab))
+            ;; Folded continuation of the previous line.
+            (continue))
+
+          (inc! n)))
+
+      ^{:line 649} n)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 679} (go/func CanonicalMIMEHeaderKey "CanonicalMIMEHeaderKey returns the canonical format of the\nMIME header key s. The canonicalization converts the first\nletter and any letter following a hyphen to upper case;\nthe rest are converted to lowercase. For example, the\ncanonical key for \"accept-encoding\" is \"Accept-Encoding\".\nMIME header keys are assumed to be ASCII only.\nIf s contains a space or invalid header field bytes as\ndefined by RFC 9112, it is returned without modifications.\n" ^string [^string s]
+  ;; Quick check for canonical encoding.
+  (let [upper true]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [c (aget s i)]
+        (when (not (validHeaderFieldByte c))
+          (return s))
+
+        (when (and upper (<= \a c) (<= c \z))
+          (set! (values s _) (canonicalMIMEHeaderKey (conv (slice byte) s)))
+          (return s))
+
+        (when (and (not upper) (<= \A c) (<= c \Z))
+          (set! (values s _) (canonicalMIMEHeaderKey (conv (slice byte) s)))
+          (return s))
+
+        (set! upper (== c \-))))
+
+    ^{:line 678} s))
+
+
+(go/const ^{:val \space} toLower (- \a \A))
+
+
+
+
+
+
+
+
+
+^{:go/end 717} (go/func validHeaderFieldByte "validHeaderFieldByte reports whether c is a valid byte in a header\nfield name. RFC 7230 says:\n\n\theader-field   = field-name \":\" OWS field-value OWS\n\tfield-name     = token\n\ttchar = \"!\" / \"#\" / \"$\" / \"%\" / \"&\" / \"'\" / \"*\" / \"+\" / \"-\" / \".\" /\n\t        \"^\" / \"_\" / \"`\" / \"|\" / \"~\" / DIGIT / ALPHA\n\ttoken = 1*tchar\n" ^bool [^byte c]
+  ;; mask is a 128-bit bitmap with 1s for allowed bytes,
+  ;; so that the byte c can be tested with a shift and an and.
+  ;; If c >= 128, then 1<<c and 1<<(c-64) will both be zero,
+  ;; and this function will return false.
+  (let [^:const ^{:val 116972063611741436228934278030836105216N} mask (bit-or 0
+        (<< (- (<< 1 10) 1) \0)
+        (<< (- (<< 1 26) 1) \a)
+        (<< (- (<< 1 26) 1) \A)
+        (<< 1 \!)
+        (<< 1 \#)
+        (<< 1 \$)
+        (<< 1 \%)
+        (<< 1 \&)
+        (<< 1 \')
+        (<< 1 \*)
+        (<< 1 \+)
+        (<< 1 \-)
+        (<< 1 \.)
+        (<< 1 \^)
+        (<< 1 \_)
+        (<< 1 \`)
+        (<< 1 \|)
+        (<< 1 \~))]
+    (!= (bit-or (bit-and (<< (conv uint64 1) c) (bit-and mask (- (<< 1 64) 1)))
+        (bit-and (<< (conv uint64 1) (- c 64)) (>> mask 64))) 0)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 743} (go/func validHeaderValueByte "validHeaderValueByte reports whether c is a valid byte in a header\nfield value. RFC 7230 says:\n\n\tfield-content  = field-vchar [ 1*( SP / HTAB ) field-vchar ]\n\tfield-vchar    = VCHAR / obs-text\n\tobs-text       = %x80-FF\n\nRFC 5234 says:\n\n\tHTAB           =  %x09\n\tSP             =  %x20\n\tVCHAR          =  %x21-7E\n" ^bool [^byte c]
+  ;; mask is a 128-bit bitmap with 1s for allowed bytes,
+  ;; so that the byte c can be tested with a shift and an and.
+  ;; If c >= 128, then 1<<c and 1<<(c-64) will both be zero.
+  ;; Since this is the obs-text range, we invert the mask to
+  ;; create a bitmap with 1s for disallowed bytes.
+  (let [^:const ^{:val 170141183460469231731687303711589138944N} mask (bit-or 0
+        (<< (- (<< 1 (- 0x7f 0x21)) 1) 0x21) ; VCHAR: %x21-7E
+        (<< 1 0x20) ; SP: %x20
+        (<< 1 0x09))] ; HTAB: %x09
+    (== (bit-or (bit-and-not (<< (conv uint64 1) c) (bit-and mask (- (<< 1 64) 1)))
+        (bit-and-not (<< (conv uint64 1) (- c 64)) (>> mask 64))) 0)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 802} (go/func canonicalMIMEHeaderKey "canonicalMIMEHeaderKey is like CanonicalMIMEHeaderKey but is\nallowed to mutate the provided byte slice before returning the\nstring.\n\nFor invalid inputs (if a contains spaces or non-token bytes), a\nis unchanged and a string copy is returned.\n\nok is true if the header key contains only valid characters and spaces.\nReadMIMEHeader accepts header keys containing spaces, but does not\ncanonicalize them.\n" [^{:tag (slice byte)} a] :results [^string _ ^bool ok]
+  (when (== (len a) 0)
+    (return "" false))
+
+
+  ;; See if a looks like a header key. If not, return it unchanged.
+  (let [noCanon false]
+    (range [_ c a]
+      (when (validHeaderFieldByte c)
+        (continue))
+
+      ;; Don't canonicalize.
+      (when (== c \space)
+        ;; We accept invalid headers with a space before the
+        ;; colon, but must not canonicalize them.
+        ;; See https://go.dev/issue/34540.
+        (set! noCanon true)
+        (continue))
+
+      (return (conv string a) false))
+
+    (when noCanon
+      (return (conv string a) true))
+
+
+    (let [upper true]
+      (range [i c a]
+        ;; Canonicalize: first letter upper case
+        ;; and upper case after each dash.
+        ;; (Host, User-Agent, If-Modified-Since).
+        ;; MIME headers are ASCII only, so no Unicode issues.
+        (cond (and upper (<= \a c) (<= c \z))
+          (set! c - toLower)
+          (and (not upper) (<= \A c) (<= c \Z))
+          (set! c + toLower))
+
+        (aset a i c)
+        (set! upper (== c \-))) ; for next time
+
+      (.Do commonHeaderOnce initCommonHeader)
+      ;; The compiler recognizes m[string(byteSlice)] as a special
+      ;; case, so a copy of a's bytes into a new string does not
+      ;; happen in this map lookup:
+      (when [v (aget commonHeader (conv string a))] (!= v "")
+        (return v true))
+
+      (return (conv string a) true))))
+
+
+
+(go/var ^{:tag (map string string) :doc "commonHeader interns common header strings.\n"} commonHeader)
+
+(go/var ^sync/Once commonHeaderOnce)
+
+^{:go/end 855} (go/func initCommonHeader []
+  (set! commonHeader (make (map string string)))
+  (range [_ v ^{:go/breaks [2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41]} (lit (slice string)
+        "Accept"
+        "Accept-Charset"
+        "Accept-Encoding"
+        "Accept-Language"
+        "Accept-Ranges"
+        "Cache-Control"
+        "Cc"
+        "Connection"
+        "Content-Id"
+        "Content-Language"
+        "Content-Length"
+        "Content-Transfer-Encoding"
+        "Content-Type"
+        "Cookie"
+        "Date"
+        "Dkim-Signature"
+        "Etag"
+        "Expires"
+        "From"
+        "Host"
+        "If-Modified-Since"
+        "If-None-Match"
+        "In-Reply-To"
+        "Last-Modified"
+        "Location"
+        "Message-Id"
+        "Mime-Version"
+        "Pragma"
+        "Received"
+        "Referer"
+        "Return-Path"
+        "Server"
+        "Set-Cookie"
+        "Subject"
+        "To"
+        "User-Agent"
+        "Via"
+        "X-Forwarded-For"
+        "X-Imforwards"
+        "X-Powered-By")]
+
+    (aset commonHeader v v)))

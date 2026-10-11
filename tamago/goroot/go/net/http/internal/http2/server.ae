@@ -1,0 +1,3220 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; TODO: turn off the serve goroutine when idle, so
+;; an idle conn only has the readFrames goroutine active. (which could
+;; also be optimized probably to pin less memory in crypto/tls). This
+;; would involve tracking when the serve goroutine is active (atomic
+;; int32 read/CAS probably?) and starting it up when frames arrive,
+;; and shutting it down when all handlers exit. the occasional PING
+;; packets could use time.AfterFunc to call sc.wakeStartServeLoop()
+;; (which is a no-op if already running) and then queue the PING write
+;; as normal. The serve loop would then exit in most cases (if no
+;; Handlers running) and not be woken up again until the PING packet
+;; returns.
+
+;; TODO (maybe): add a mechanism for Handlers to going into
+;; half-closed-local mode (rw.(io.Closer) test?) but not exit their
+;; handler, and continue to be able to read from the
+;; Request.Body. This would be a somewhat semantic change from HTTP/1
+;; (or at least what we expose in net/http), so I'd probably want to
+;; add it there too. For now, this package says that returning from
+;; the Handler ServeHTTP function means you're both done reading and
+;; done writing, without a way to stop just one or the other.
+
+(in-ns 'go.net.http.internal.http2) (go/file "server.go" :imports [
+
+
+    ^{:line 29} [bufio "bufio"]
+    ^{:line 30} [bytes "bytes"]
+    ^{:line 31} [context "context"]
+    ^{:line 32} [rand "crypto/rand"]
+    ^{:line 33} [tls "crypto/tls"]
+    ^{:line 34} [errors "errors"]
+    ^{:line 35} [fmt "fmt"]
+    ^{:line 36} [io "io"]
+    ^{:line 37} [log "log"]
+    ^{:line 38} [math "math"]
+    ^{:line 39} [net "net"]
+    ^{:line 40} [internal "net/http/internal"]
+    ^{:line 41} [httpcommon "net/http/internal/httpcommon"]
+    ^{:line 42} [textproto "net/textproto"]
+    ^{:line 43} [url "net/url"]
+    ^{:line 44} [os "os"]
+    ^{:line 45} [reflect "reflect"]
+    ^{:line 46} [runtime "runtime"]
+    ^{:line 47} [slices "slices"]
+    ^{:line 48} [strconv "strconv"]
+    ^{:line 49} [strings "strings"]
+    ^{:line 50} [sync "sync"]
+    ^{:line 51} [time "time"]
+
+    ^{:line 53} [httpguts "golang.org/x/net/http/httpguts"]
+    ^{:line 54} [hpack "golang.org/x/net/http2/hpack"]])
+
+
+(go/const
+  ^{:line 58} [^{:val 10000000000} prefaceTimeout (* 10 time/Second)]
+  ^{:line 59} [^{:val 2000000000} firstSettingsTimeout (* 2 time/Second)] ; should be in-flight with preface anyway
+  ^{:line 60} [^{:val 4096} handlerChunkWriteSize (<< 4 10)]
+  ^{:line 61} [^{:val 250} defaultMaxStreams 250] ; TODO: make this 100 as the GFE seems to?
+
+
+
+
+  ^{:line 66} [^{:val 10000 :doc "maxQueuedControlFrames is the maximum number of control frames like\nSETTINGS, PING and RST_STREAM that will be queued for writing before\nthe connection is closed to prevent memory exhaustion attacks.\n"} maxQueuedControlFrames 10000])
+
+
+(go/var
+  ^{:line 70} [errClientDisconnected (errors/New "client disconnected")]
+  ^{:line 71} [errClosedBody (errors/New "body closed by handler")]
+  ^{:line 72} [errHandlerComplete (errors/New "http2: request body closed due to handler exiting")]
+  ^{:line 73} [errStreamClosed (errors/New "http2: stream closed")])
+
+
+(go/var responseWriterStatePool ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 81} (fn ^any []
+      (let [rws (addr (lit responseWriterState))]
+        (set! (.-bw rws) (bufio/NewWriterSize (lit chunkWriter rws) handlerChunkWriteSize))
+        ^{:line 80} rws))))
+
+
+
+
+(go/var "Test hooks.\n"
+  ^{:line 86} [^{:tag (func [])} testHookOnConn]
+  ^{:line 87} [^{:tag (* sync/Mutex)} testHookOnPanicMu] ; nil except in tests
+  ^{:line 88} [^{:tag (func [^{:tag (* serverConn)} sc ^any panicVal] [^bool rePanic])} testHookOnPanic])
+
+
+
+(go/type Server "Server is an HTTP/2 server.\n" (struct
+    ^{:line 93 :tag sync/Mutex} mu
+    ^{:line 94 :tag (map (* serverConn) (struct))} activeConns
+
+
+
+    ^{:line 98 :tag sync/Pool :doc "Pool of error channels. This is per-Server rather than global\nbecause channels can't be reused across synctest bubbles.\n"} errChanPool))
+
+
+^{:go/end 108} (go/method registerConn [^{:tag (* Server)} s ^{:tag (* serverConn)} sc]
+  (when (== s nil)
+    (return)) ; if the Server was used without calling ConfigureServer
+
+  (.Lock (.-mu s))
+  (aset (.-activeConns s) sc (lit (struct)))
+  (.Unlock (.-mu s)))
+
+
+^{:go/end 117} (go/method unregisterConn [^{:tag (* Server)} s ^{:tag (* serverConn)} sc]
+  (when (== s nil)
+    (return)) ; if the Server was used without calling ConfigureServer
+
+  (.Lock (.-mu s))
+  (delete (.-activeConns s) sc)
+  (.Unlock (.-mu s)))
+
+
+^{:go/end 128} (go/method startGracefulShutdown [^{:tag (* Server)} s]
+  (when (== s nil)
+    (return)) ; if the Server was used without calling ConfigureServer
+
+  (.Lock (.-mu s))
+  (range [sc (.-activeConns s)]
+    (.startGracefulShutdown sc))
+
+  (.Unlock (.-mu s)))
+
+
+
+
+(go/var ^{:doc "Global error channel pool used for uninitialized Servers.\nWe use a per-Server pool when possible to avoid using channels across synctest bubbles.\n"} errChanPool ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 133} (fn ^any [] (make (chan error) 1))))
+
+
+^{:go/end 141} (go/method getErrChan ^{:tag (chan error)} [^{:tag (* Server)} s]
+  (when (== s nil)
+    (return (assert (chan error) (.Get errChanPool)))) ; Server used without calling ConfigureServer
+
+  (assert (chan error) (.Get (.-errChanPool s))))
+
+
+^{:go/end 149} (go/method putErrChan [^{:tag (* Server)} s ^{:tag (chan error)} ch]
+  (when (== s nil)
+    (.Put errChanPool ch) ; Server used without calling ConfigureServer
+    (return))
+
+  (.Put (.-errChanPool s) ch))
+
+
+^{:go/breaks [[6 181]] :go/end 182} (go/method Configure ^error [^{:tag (* Server)} s ^ServerConfig conf ^{:tag (* tls/Config)} tcfg]
+  (set! (.-activeConns s) (make (map (* serverConn) (struct))))
+  (set! (.-errChanPool s) (lit sync/Pool :New ^{:go/end 153} (fn ^any [] (make (chan error) 1))))
+
+  (when (and (!= (.-CipherSuites tcfg) nil) (< (.-MinVersion tcfg) tls/VersionTLS13))
+    ;; If they already provided a TLS 1.0–1.2 CipherSuite list, return an
+    ;; error if it is missing ECDHE_RSA_WITH_AES_128_GCM_SHA256 or
+    ;; ECDHE_ECDSA_WITH_AES_128_GCM_SHA256.
+    (let [haveRequired false]
+      (range [_ cs (.-CipherSuites tcfg)]
+        (switch cs
+          (case [tls/TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+              ;; Alternative MTI cipher to not discourage ECDSA-only servers.
+              ;; See http://golang.org/cl/30721 for further information.
+              ^{:line 165} tls/TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256]
+            (set! haveRequired true))))
+
+
+      (when (not haveRequired)
+        (return (fmt/Errorf "http2: TLSConfig.CipherSuites is missing an HTTP/2-required AES_128_GCM_SHA256 cipher (need at least one of TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 or TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)")))))
+
+
+
+  ;; Note: not setting MinVersion to tls.VersionTLS12,
+  ;; as we don't want to interfere with HTTP/1.1 traffic
+  ;; on the user's server. We enforce TLS 1.2 later once
+  ;; we accept a connection. Ideally this should be done
+  ;; during next-proto selection, but using TLS <1.2 with
+  ;; HTTP/2 is still the client's bug.
+
+  nil)
+
+
+^{:go/end 186} (go/method GracefulShutdown [^{:tag (* Server)} s]
+  (.startGracefulShutdown s))
+
+
+
+(go/type ServeConnOpts "ServeConnOpts are options for the Server.ServeConn method.\n" (struct
+
+
+    ^{:line 192 :tag context/Context :doc "Context is the base context to use.\nIf nil, context.Background is used.\n"} Context
+
+
+
+    ^{:line 196 :tag ServerConfig :doc "BaseConfig optionally sets the base configuration\nfor values. If nil, defaults are used.\n"} BaseConfig
+
+
+
+
+    ^{:line 201 :tag Handler :doc "Handler specifies which handler to use for processing\nrequests. If nil, BaseConfig.Handler is used. If BaseConfig\nor BaseConfig.Handler is nil, http.DefaultServeMux is used.\n"} Handler
+
+
+
+    ^{:line 205 :tag (slice byte) :doc "Settings is the decoded contents of the HTTP2-Settings header\nin an h2c upgrade request.\n"} Settings
+
+    ^{:line 207 :tag (* ServerRequest)} UpgradeRequest
+
+
+
+    ^{:line 211 :tag bool :doc "SawClientPreface is set if the HTTP/2 connection preface\nhas already been read from the connection.\n"} SawClientPreface))
+
+
+^{:go/end 219} (go/method context ^context/Context [^{:tag (* ServeConnOpts)} o]
+  (when (and (!= o nil) (!= (.-Context o) nil))
+    (return (.-Context o)))
+
+  (context/Background))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 247} (go/method ServeConn "ServeConn serves HTTP/2 requests on the provided connection and\nblocks until the connection is no longer readable.\n\nServeConn starts speaking HTTP/2 assuming that c has not had any\nreads or writes. It writes its initial settings frame and expects\nto be able to read the preface and settings frame from the\nclient. If c has a ConnectionState method like a *tls.Conn, the\nConnectionState is used to verify the TLS ciphersuite and to set\nthe Request.TLS field in Handlers.\n\nServeConn does not support h2c by itself. Any h2c support must be\nimplemented in terms of providing a suitably-behaving net.Conn.\n\nThe opts parameter is optional. If nil, default values are used.\n" [^{:tag (* Server)} s ^net/Conn c ^{:tag (* ServeConnOpts)} opts]
+  (when (== opts nil)
+    (set! opts (addr (lit ServeConnOpts))))
+
+
+  (let [^{:tag (func [(* serverConn)])} newf (zero (func [(* serverConn)]))]
+    (when inTests
+      ;; Fetch NewConnContextKey if set, leave newf as nil otherwise.
+      (set! (values newf _) (assert (func [(* serverConn)]) (.Value (.-Context opts) NewConnContextKey))))
+
+
+    (.serveConn s c opts newf)))
+
+
+(go/type contextKey string)
+
+(go/var
+  ^{:line 252} [NewConnContextKey (new "NewConnContextKey")]
+  ^{:line 253} [ConnectionStateContextKey (new "ConnectionStateContextKey")])
+
+
+^{:go/end 392} (go/method serveConn [^{:tag (* Server)} s ^net/Conn c ^{:tag (* ServeConnOpts)} opts ^{:tag (func [(* serverConn)])} newf]
+  (let [(values baseCtx cancel) (serverConnBaseContext c opts)]
+    (defer (cancel))
+
+    (let [conf (configFromServer (.-BaseConfig opts))
+        ^{:line 261} sc (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26 28 30 32 34 36 38 40 42 44 46 48]} (lit serverConn
+            :srv s
+            :hs (.-BaseConfig opts)
+            :conn c
+            :baseCtx baseCtx
+            :remoteAddrStr (.String (.RemoteAddr c))
+            :bw (newBufferedWriter c (.-WriteByteTimeout conf))
+            :handler (.-Handler opts)
+            :streams (make (map uint32 (* stream)))
+            :readFrameCh (make (chan readFrameResult))
+            :wantWriteFrameCh (make (chan FrameWriteRequest) 8)
+            :serveMsgCh (make (chan any) 8)
+            :wroteFrameCh (make (chan frameWriteResult) 1) ; buffered; one send in writeFrameAsync
+            :bodyReadCh (make (chan bodyReadMsg)) ; buffering doesn't matter either way
+            :doneServing (make (chan (struct)))
+            :clientMaxStreams math/MaxUint32 ; Section 6.5.2: "Initially, there is no limit to this value"
+            :advMaxStreams (conv uint32 (.-MaxConcurrentStreams conf))
+            :initialStreamSendWindowSize initialWindowSize
+            :initialStreamRecvWindowSize (conv int32 (.-MaxReceiveBufferPerStream conf))
+            :maxFrameSize initialMaxFrameSize
+            :pingTimeout (.-PingTimeout conf)
+            :countErrorFunc (.-CountError conf)
+            :serveG (newGoroutineLock)
+            :pushEnabled true
+            :sawClientPreface (.-SawClientPreface opts)))]
+
+      (when (!= newf nil)
+        (newf sc))
+
+
+      (.registerConn s sc)
+      (defer (.unregisterConn s sc))
+
+      (switch
+        (case [(.DisableClientPriority (.-hs sc))]
+          (set! (.-writeSched sc) (newRoundRobinWriteScheduler)))
+        (default
+          (set! (.-writeSched sc) (newPriorityWriteSchedulerRFC9218))))
+
+
+      ;; These start at the RFC-specified defaults. If there is a higher
+      ;; configured value for inflow, that will be updated when we send a
+      ;; WINDOW_UPDATE shortly after sending SETTINGS.
+      (.add (.-flow sc) initialWindowSize)
+      (.init (.-inflow sc) initialWindowSize)
+      (set! (.-hpackEncoder sc) (hpack/NewEncoder (addr (.-headerWriteBuf sc))))
+      (.SetMaxDynamicTableSizeLimit (.-hpackEncoder sc) (conv uint32 (.-MaxEncoderHeaderTableSize conf)))
+
+      (let [fr (NewFramer (.-bw sc) c)]
+        (when (!= (.-CountError conf) nil)
+          (set! (.-countError fr) (.-CountError conf)))
+
+        (set! (.-ReadMetaHeaders fr) (hpack/NewDecoder (conv uint32 (.-MaxDecoderHeaderTableSize conf)) nil))
+        (set! (.-MaxHeaderListSize fr) (.maxHeaderListSize sc))
+        (set! (.-MaxHeaderValueCount fr) (.MaxHeaderValueCount (.-hs sc)))
+        (.SetMaxReadFrameSize fr (conv uint32 (.-MaxReadFrameSize conf)))
+        (set! (.-framer sc) fr)
+
+        (when [(values tc ok) (assert connectionStater c)] ok
+          (set! (.-tlsState sc) (new tls/ConnectionState))
+          (set! @(.-tlsState sc) (.ConnectionState tc))
+
+          ;; Optionally override the ConnectionState in tests.
+          (when inTests
+            (let [(values f ok) (assert (func [] [tls/ConnectionState]) (.Value (.-Context opts) ConnectionStateContextKey))]
+              (when ok
+                (set! @(.-tlsState sc) (f)))))
+
+
+
+          ;; 9.2 Use of TLS Features
+          ;; An implementation of HTTP/2 over TLS MUST use TLS
+          ;; 1.2 or higher with the restrictions on feature set
+          ;; and cipher suite described in this section. Due to
+          ;; implementation limitations, it might not be
+          ;; possible to fail TLS negotiation. An endpoint MUST
+          ;; immediately terminate an HTTP/2 connection that
+          ;; does not meet the TLS requirements described in
+          ;; this section with a connection error (Section
+          ;; 5.4.1) of type INADEQUATE_SECURITY.
+          (when (< (.-Version (.-tlsState sc)) tls/VersionTLS12)
+            (.rejectConn sc ErrCodeInadequateSecurity "TLS version too low")
+            (return))
+
+
+          (when (== (.-ServerName (.-tlsState sc)) ""))
+          ;; Client must use SNI, but we don't enforce that anymore,
+          ;; since it was causing problems when connecting to bare IP
+          ;; addresses during development.
+          ;;
+          ;; TODO: optionally enforce? Or enforce at the time we receive
+          ;; a new request, and verify the ServerName matches the :authority?
+          ;; But that precludes proxy situations, perhaps.
+          ;;
+          ;; So for now, do nothing here again.
+
+
+          (when (and (not (.-PermitProhibitedCipherSuites conf)) (isBadCipher (.-CipherSuite (.-tlsState sc))))
+            ;; "Endpoints MAY choose to generate a connection error
+            ;; (Section 5.4.1) of type INADEQUATE_SECURITY if one of
+            ;; the prohibited cipher suites are negotiated."
+            ;;
+            ;; We choose that. In my opinion, the spec is weak
+            ;; here. It also says both parties must support at least
+            ;; TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 so there's no
+            ;; excuses here. If we really must, we could allow an
+            ;; "AllowInsecureWeakCiphers" option on the server later.
+            ;; Let's see how it plays out first.
+            (.rejectConn sc ErrCodeInadequateSecurity (fmt/Sprintf "Prohibited TLS 1.2 Cipher Suite: %x" (.-CipherSuite (.-tlsState sc))))
+            (return)))
+
+
+
+        (when (!= (.-Settings opts) nil)
+          (let [fr (addr ^{:go/breaks [2 4]} (lit SettingsFrame
+                  :FrameHeader (lit FrameHeader :valid true)
+                  :p (.-Settings opts)))]
+
+            (when [err (.ForeachSetting fr (.-processSetting sc))] (!= err nil)
+              (.rejectConn sc ErrCodeProtocol "invalid settings")
+              (return))
+
+            (set! (.-Settings opts) nil)))
+
+
+        (when (!= (.-UpgradeRequest opts) nil)
+          (.upgradeRequest sc (.-UpgradeRequest opts))
+          (set! (.-UpgradeRequest opts) nil))
+
+
+        (.serve sc conf)))))
+
+
+^{:go/end 396} (go/func serverConnBaseContext [^net/Conn c ^{:tag (* ServeConnOpts)} opts] :results [^context/Context ctx ^{:tag (func [])} cancel]
+  (context/WithCancel (.context opts)))
+
+
+^{:go/end 404} (go/method rejectConn [^{:tag (* serverConn)} sc ^ErrCode err ^string debug]
+  (.vlogf sc "http2: server rejecting conn: %v, %s" err debug)
+  ;; ignoring errors. hanging up anyway.
+  (.WriteGoAway (.-framer sc) 0 err (conv (slice byte) debug))
+  (.Flush (.-bw sc))
+  (.Close (.-conn sc)))
+
+
+(go/type serverConn (struct
+
+    ^{:line 408 :tag (* Server) :doc "Immutable:\n"} srv
+    ^{:line 409 :tag ServerConfig} hs
+    ^{:line 410 :tag net/Conn} conn
+    ^{:line 411 :tag (* bufferedWriter)} bw ; writing to conn
+    ^{:line 412 :tag Handler} handler
+    ^{:line 413 :tag context/Context} baseCtx
+    ^{:line 414 :tag (* Framer)} framer
+    ^{:line 415 :tag (chan (struct))} doneServing ; closed when serverConn.serve ends
+    ^{:line 416 :tag (chan readFrameResult)} readFrameCh ; written by serverConn.readFrames
+    ^{:line 417 :tag (chan FrameWriteRequest)} wantWriteFrameCh ; from handlers -> serve
+    ^{:line 418 :tag (chan frameWriteResult)} wroteFrameCh ; from writeFrameAsync -> serve, tickles more frame writes
+    ^{:line 419 :tag (chan bodyReadMsg)} bodyReadCh ; from handlers -> serve
+    ^{:line 420 :tag (chan any)} serveMsgCh ; misc messages & code to send to / run on the serve loop
+    ^{:line 421 :tag outflow} flow ; conn-wide (not stream-specific) outbound flow control
+    ^{:line 422 :tag inflow} inflow ; conn-wide inbound flow control
+    ^{:line 423 :tag (* tls/ConnectionState)} tlsState ; shared by all handlers, like net/http
+    ^{:line 424 :tag string} remoteAddrStr
+    ^{:line 425 :tag WriteScheduler} writeSched
+    ^{:line 426 :tag (func [^string errType])} countErrorFunc
+
+
+    ^{:line 429 :tag goroutineLock :doc "Everything following is owned by the serve loop; use serveG.check():\n"} serveG ; used to verify funcs are on serve()
+    ^{:line 430 :tag bool} pushEnabled
+    ^{:line 431 :tag bool} sawClientPreface ; preface has already been read, used in h2c upgrade
+    ^{:line 432 :tag bool} sawFirstSettings ; got the initial SETTINGS frame after the preface
+    ^{:line 433 :tag bool} needToSendSettingsAck
+    ^{:line 434 :tag int} unackedSettings ; how many SETTINGS have we sent without ACKs?
+    ^{:line 435 :tag int} queuedControlFrames ; control frames in the writeSched queue
+    ^{:line 436 :tag uint32} clientMaxStreams ; SETTINGS_MAX_CONCURRENT_STREAMS from client (our PUSH_PROMISE limit)
+    ^{:line 437 :tag uint32} advMaxStreams ; our SETTINGS_MAX_CONCURRENT_STREAMS advertised the client
+    ^{:line 438 :tag uint32} curClientStreams ; number of open streams initiated by the client
+    ^{:line 439 :tag uint32} curPushedStreams ; number of open streams initiated by server push
+    ^{:line 440 :tag uint32} curHandlers ; number of running handler goroutines
+    ^{:line 441 :tag uint32} maxClientStreamID ; max ever seen from client (odd), or 0 if there have been no client requests
+    ^{:line 442 :tag uint32} maxPushPromiseID ; ID of the last push promise (even), or 0 if there have been no pushes
+    ^{:line 443 :tag (map uint32 (* stream))} streams
+    ^{:line 444 :tag (slice unstartedHandler)} unstartedHandlers
+    ^{:line 445 :tag int32} initialStreamSendWindowSize
+    ^{:line 446 :tag int32} initialStreamRecvWindowSize
+    ^{:line 447 :tag int32} maxFrameSize
+    ^{:line 448 :tag uint32} peerMaxHeaderListSize ; zero means unknown (default)
+    ^{:line 449 :tag (map string string)} canonHeader ; http2-lower-case -> Go-Canonical-Case
+    ^{:line 450 :tag int} canonHeaderKeysSize ; canonHeader keys size in bytes
+    ^{:line 451 :tag bool} writingFrame ; started writing a frame (on serve goroutine or separate)
+    ^{:line 452 :tag bool} writingFrameAsync ; started a frame on its own goroutine but haven't heard back on wroteFrameCh
+    ^{:line 453 :tag bool} needsFrameFlush ; last frame write wasn't a flush
+    ^{:line 454 :tag bool} inGoAway ; we've started to or sent GOAWAY
+    ^{:line 455 :tag bool} inFrameScheduleLoop ; whether we're in the scheduleFrameWrite loop
+    ^{:line 456 :tag bool} needToSendGoAway ; we need to schedule a GOAWAY frame write
+    ^{:line 457 :tag bool} pingSent
+    ^{:line 458 :tag (array 8 byte)} sentPingData
+    ^{:line 459 :tag ErrCode} goAwayCode
+    ^{:line 460 :tag (* time/Timer)} shutdownTimer ; nil until used
+    ^{:line 461 :tag (* time/Timer)} idleTimer ; nil if unused
+    ^{:line 462 :tag time/Duration} readIdleTimeout
+    ^{:line 463 :tag time/Duration} pingTimeout
+    ^{:line 464 :tag (* time/Timer)} readIdleTimer ; nil if unused
+
+
+    ^{:line 467 :tag bytes/Buffer :doc "Owned by the writeFrameAsync goroutine:\n"} headerWriteBuf
+    ^{:line 468 :tag (* hpack/Encoder)} hpackEncoder
+
+
+    ^{:line 471 :tag sync/Once :doc "Used by startGracefulShutdown.\n"} shutdownOnce
+
+
+    ^{:line 474 :tag bool :doc "Used for RFC 9218 prioritization.\n"} hasIntermediary ; connection is done via an intermediary / proxy
+    ^{:line 475 :tag bool} priorityAware)) ; the client has sent priority signal, meaning that it is aware of it.
+
+
+^{:go/end 487} (go/method writeSchedIgnoresRFC7540 ^bool [^{:tag (* serverConn)} sc]
+  (type-switch (.-writeSched sc)
+    (case [(* priorityWriteSchedulerRFC9218)]
+      (return true))
+    (case [(* roundRobinWriteScheduler)]
+      (return true))
+    (default
+      (return false))))
+
+
+
+(go/const ^{:val 1048576} DefaultMaxHeaderBytes (<< 1 20)) ; keep this in sync with net/http
+
+^{:go/end 497} (go/method maxHeaderListSize ^uint32 [^{:tag (* serverConn)} sc]
+  (let [n (.MaxHeaderBytes (.-hs sc))]
+    (when (<= n 0)
+      (set! n DefaultMaxHeaderBytes))
+
+    (conv uint32 (adjustHTTP1MaxHeaderSize (conv int64 n)))))
+
+
+^{:go/end 502} (go/method curOpenStreams ^uint32 [^{:tag (* serverConn)} sc]
+  (.check (.-serveG sc))
+  (+ (.-curClientStreams sc) (.-curPushedStreams sc)))
+
+
+
+
+
+
+
+
+
+(go/type stream "stream represents a stream. This is the minimal metadata needed by\nthe serve goroutine. Most of the actual stream state is owned by\nthe http.Handler's goroutine in the responseWriter. Because the\nresponseWriter's responseWriterState is recycled at the end of a\nhandler, this struct intentionally has no pointer to the\n*responseWriter{,State} itself, as the Handler ending nils out the\nresponseWriter's state field.\n" (struct
+
+    ^{:line 513 :tag (* serverConn) :doc "immutable:\n"} sc
+    ^{:line 514 :tag uint32} id
+    ^{:line 515 :tag (* pipe)} body ; non-nil if expecting DATA frames
+    ^{:line 516 :tag closeWaiter} cw ; closed wait stream transitions to closed state
+    ^{:line 517 :tag context/Context} ctx
+    ^{:line 518 :tag (func [])} cancelCtx
+
+
+    ^{:line 521 :tag int64 :doc "owned by serverConn's serve loop:\n"} bodyBytes ; body bytes seen so far
+    ^{:line 522 :tag int64} declBodyBytes ; or -1 if undeclared
+    ^{:line 523 :tag outflow} flow ; limits writing from Handler to client
+    ^{:line 524 :tag inflow} inflow ; what the client is allowed to POST/etc to us
+    ^{:line 525 :tag streamState} state
+    ^{:line 526 :tag bool} resetQueued ; RST_STREAM queued for write; set by sc.resetStream
+    ^{:line 527 :tag bool} gotTrailerHeader ; HEADER frame for trailers was seen
+    ^{:line 528 :tag bool} wroteHeaders ; whether we wrote headers (not status 100)
+    ^{:line 529 :tag (* time/Timer)} readDeadline ; nil if unused
+    ^{:line 530 :tag (* time/Timer)} writeDeadline ; nil if unused
+    ^{:line 531 :tag error} closeErr ; set before cw is closed
+
+    ^{:line 533 :tag Header} trailer ; accumulated trailers
+    ^{:line 534 :tag Header} reqTrailer)) ; handler's Request.Trailer
+
+
+^{:go/end 537} (go/method Framer ^{:tag (* Framer)} [^{:tag (* serverConn)} sc] (.-framer sc))
+^{:go/end 538} (go/method CloseConn ^error [^{:tag (* serverConn)} sc] (.Close (.-conn sc)))
+^{:go/end 539} (go/method Flush ^error [^{:tag (* serverConn)} sc] (.Flush (.-bw sc)))
+^{:go/end 542} (go/method HeaderEncoder [^{:tag (* serverConn)} sc] :results [(* hpack/Encoder) (* bytes/Buffer)]
+  (return (.-hpackEncoder sc) (addr (.-headerWriteBuf sc))))
+
+
+^{:go/end 566} (go/method state [^{:tag (* serverConn)} sc ^uint32 streamID] :results [streamState (* stream)]
+  (.check (.-serveG sc))
+  ;; http://tools.ietf.org/html/rfc7540#section-5.1
+  (when [(values st ok) (aget (.-streams sc) streamID)] ok
+    (return (.-state st) st))
+
+  ;; "The first use of a new stream identifier implicitly closes all
+  ;; streams in the "idle" state that might have been initiated by
+  ;; that peer with a lower-valued stream identifier. For example, if
+  ;; a client sends a HEADERS frame on stream 7 without ever sending a
+  ;; frame on stream 5, then stream 5 transitions to the "closed"
+  ;; state when the first frame for stream 7 is sent or received."
+  (if (== (% streamID 2) 1)
+    (when (<= streamID (.-maxClientStreamID sc))
+      (return stateClosed nil))
+
+    (do
+      (when (<= streamID (.-maxPushPromiseID sc))
+        (return stateClosed nil))))
+
+
+  (return stateIdle nil))
+
+
+
+
+
+^{:go/end 573} (go/method setConnState "setConnState calls the net/http ConnState hook for this connection, if configured.\nNote that the net/http package does StateNew and StateClosed for us.\nThere is currently no plan for StateHijacked or hijacking HTTP/2 connections.\n" [^{:tag (* serverConn)} sc ^ConnState state]
+  (.ConnState (.-hs sc) (.-conn sc) state))
+
+
+^{:go/end 579} (go/method vlogf [^{:tag (* serverConn)} sc ^string format & ^{:tag (slice any)} args]
+  (when VerboseLogs
+    (.logf sc format (spread args))))
+
+
+
+^{:go/end 587} (go/method logf [^{:tag (* serverConn)} sc ^string format & ^{:tag (slice any)} args]
+  (if [lg (.ErrorLog (.-hs sc))] (!= lg nil)
+    (.Printf lg format (spread args))
+
+    (log/Printf format (spread args))))
+
+
+
+
+
+
+
+^{:go/breaks [[5 597]] :go/end 598} (go/func errno "errno returns v's underlying uintptr, else 0.\n\nTODO: remove this helper function once http2 can use build\ntags. See comment in isClosedConnError.\n" ^uintptr [^error v]
+  (when [rv (reflect/ValueOf v)] (== (.Kind rv) reflect/Uintptr)
+    (return (conv uintptr (.Uint rv))))
+
+  0)
+
+
+
+
+^{:go/breaks [[7 626]] :go/end 627} (go/func isClosedConnError "isClosedConnError reports whether err is an error from use of a closed\nnetwork connection.\n" ^bool [^error err]
+  (when (== err nil)
+    (return false))
+
+
+  (when (errors/Is err net/ErrClosed)
+    (return true))
+
+
+  ;; TODO(bradfitz): x/tools/cmd/bundle doesn't really support
+  ;; build tags, so I can't make an http2_windows.go file with
+  ;; Windows-specific stuff. Fix that and move this, once we
+  ;; have a way to bundle this into std's net/http somehow.
+  (when (== runtime/GOOS "windows")
+    (when [(values oe ok) (assert (* net/OpError) err)] (and ok (== (.-Op oe) "read"))
+      (when [(values se ok) (assert (* os/SyscallError) (.-Err oe))] (and ok (== (.-Syscall se) "wsarecv"))
+        (let [^:const ^{:val 10053} WSAECONNABORTED 10053
+            ^:const ^{:line 619 :val 10054} WSAECONNRESET 10054]
+          (when [n (errno (.-Err se))] (or (== n WSAECONNRESET) (== n WSAECONNABORTED))
+            (return true))))))
+
+
+
+
+  false)
+
+
+^{:go/end 639} (go/method condlogf [^{:tag (* serverConn)} sc ^error err ^string format & ^{:tag (slice any)} args]
+  (when (== err nil)
+    (return))
+
+  (if (or (== err io/EOF) (== err io/ErrUnexpectedEOF) (isClosedConnError err) (== err errPrefaceTimeout))
+    ;; Boring, expected errors.
+    (.vlogf sc format (spread args))
+
+    (.logf sc format (spread args))))
+
+
+
+
+
+
+
+
+(go/const ^{:val 2048 :doc "maxCachedCanonicalHeadersKeysSize is an arbitrarily-chosen limit on the size\nof the entries in the canonHeader cache.\nThis should be larger than the size of unique, uncommon header keys likely to\nbe sent by the peer, while not so high as to permit unreasonable memory usage\nif the peer sends an unbounded number of unique header keys.\n"} maxCachedCanonicalHeadersKeysSize 2048)
+
+^{:go/end 668} (go/method canonicalHeader ^string [^{:tag (* serverConn)} sc ^string v]
+  (.check (.-serveG sc))
+  (let [(values cv ok) (httpcommon/CachedCanonicalHeader v)]
+    (when ok
+      (return cv))
+
+    (set! (values cv ok) (aget (.-canonHeader sc) v))
+    (when ok
+      (return cv))
+
+    (when (== (.-canonHeader sc) nil)
+      (set! (.-canonHeader sc) (make (map string string))))
+
+    (set! cv (textproto/CanonicalMIMEHeaderKey v))
+    (let [size (+ 100 (* (len v) 2))] ; 100 bytes of map overhead + key + value
+      (when (<= (+ (.-canonHeaderKeysSize sc) size) maxCachedCanonicalHeadersKeysSize)
+        (aset (.-canonHeader sc) v cv)
+        (set! (.-canonHeaderKeysSize sc) + size))
+
+      ^{:line 667} cv)))
+
+
+(go/type readFrameResult (struct
+    ^{:line 671 :tag Frame} f ; valid until readMore is called
+    ^{:line 672 :tag error} err
+
+
+
+
+    ^{:line 677 :tag (func []) :doc "readMore should be called once the consumer no longer needs or\nretains f. After readMore, f is invalid and more frames can be\nread.\n"} readMore))
+
+
+
+
+
+
+^{:go/end 703} (go/method readFrames "readFrames is the loop that reads incoming frames.\nIt takes care to only read one frame at a time, blocking until the\nconsumer is done with the frame.\nIt's run on its own goroutine.\n" [^{:tag (* serverConn)} sc]
+  (let [gate (make (chan (struct)))
+      ^{:line 686} gateDone ^{:go/end 686} (fn [] (>! gate (lit (struct))))]
+    (while true
+      (let [(values f err) (.ReadFrame (.-framer sc))]
+        (select
+          (case (>! (.-readFrameCh sc) (lit readFrameResult f err gateDone)))
+          (case (<! (.-doneServing sc))
+            (return)))
+
+        (select
+          (case (<! gate))
+          (case (<! (.-doneServing sc))
+            (return)))
+
+        (when (terminalReadFrameError err)
+          (return))))))
+
+
+
+
+
+(go/type frameWriteResult "frameWriteResult is the message passed from writeFrameAsync to the serve goroutine.\n" (struct
+    ^{:line 707 :tag incomparable} _
+    ^{:line 708 :tag FrameWriteRequest} wr ; what was written (or attempted)
+    ^{:line 709 :tag error} err)) ; result of the writeFrame call
+
+
+
+
+
+
+^{:go/end 724} (go/method writeFrameAsync "writeFrameAsync runs in its own goroutine and writes a single frame\nand then reports when it's done.\nAt most one goroutine can be running writeFrameAsync at a time per\nserverConn.\n" [^{:tag (* serverConn)} sc ^FrameWriteRequest wr ^{:tag (* writeData)} wd]
+  (let [^error err (zero error)]
+    (if (== wd nil)
+      (set! err (.writeFrame (.-write wr) sc))
+
+      (set! err (.endWrite (.-framer sc))))
+
+    (>! (.-wroteFrameCh sc) (lit frameWriteResult :wr wr :err err))))
+
+
+^{:go/end 731} (go/method closeAllStreamsOnConnClose [^{:tag (* serverConn)} sc]
+  (.check (.-serveG sc))
+  (range [_ st (.-streams sc)]
+    (.closeStream sc st errClientDisconnected)))
+
+
+
+^{:go/end 738} (go/method stopShutdownTimer [^{:tag (* serverConn)} sc]
+  (.check (.-serveG sc))
+  (when [t (.-shutdownTimer sc)] (!= t nil)
+    (.Stop t)))
+
+
+
+^{:go/end 753} (go/method notePanic [^{:tag (* serverConn)} sc]
+  ;; Note: this is for serverConn.serve panicking, not http.Handler code.
+  (when (!= testHookOnPanicMu nil)
+    (.Lock testHookOnPanicMu)
+    (defer (.Unlock testHookOnPanicMu)))
+
+  (when (!= testHookOnPanic nil)
+    (when [e (recover)] (!= e nil)
+      (when (testHookOnPanic sc e)
+        (panic e)))))
+
+
+
+
+
+^{:go/end 902} (go/method serve [^{:tag (* serverConn)} sc ^Config conf]
+  (.check (.-serveG sc))
+  (defer (.notePanic sc))
+  (defer (.Close (.-conn sc)))
+  (defer (.closeAllStreamsOnConnClose sc))
+  (defer (.stopShutdownTimer sc))
+  (defer (close (.-doneServing sc))) ; unblocks handlers trying to send
+
+  (when VerboseLogs
+    (.vlogf sc "http2: server connection from %v on %p" (.RemoteAddr (.-conn sc)) (.-hs sc)))
+
+
+  (let [settings (lit writeSettings
+        (lit _ SettingMaxFrameSize (conv uint32 (.-MaxReadFrameSize conf)))
+        (lit _ SettingMaxConcurrentStreams (.-advMaxStreams sc))
+        (lit _ SettingMaxHeaderListSize (.maxHeaderListSize sc))
+        (lit _ SettingHeaderTableSize (conv uint32 (.-MaxDecoderHeaderTableSize conf)))
+        (lit _ SettingInitialWindowSize (conv uint32 (.-initialStreamRecvWindowSize sc))))]
+
+    (when (not disableExtendedConnectProtocol)
+      (set! settings (append settings (lit Setting SettingEnableConnectProtocol 1))))
+
+    (when (.writeSchedIgnoresRFC7540 sc)
+      (set! settings (append settings (lit Setting SettingNoRFC7540Priorities 1))))
+
+    (.writeFrame sc ^{:go/breaks [2]} (lit FrameWriteRequest
+        :write settings))
+
+    (inc! (.-unackedSettings sc))
+
+    ;; Each connection starts with initialWindowSize inflow tokens.
+    ;; If a higher value is configured, we add more tokens.
+    (when [diff (- (.-MaxReceiveBufferPerConnection conf) initialWindowSize)] (> diff 0)
+      (.sendWindowUpdate sc nil (conv int diff)))
+
+
+    (when [err (.readPreface sc)] (!= err nil)
+      (.condlogf sc err "http2: server: error reading preface from client %v: %v" (.RemoteAddr (.-conn sc)) err)
+      (return))
+
+    ;; Now that we've got the preface, get us out of the
+    ;; "StateNew" state. We can't go directly to idle, though.
+    ;; Active means we read some data and anticipate a request. We'll
+    ;; do another Active when we get a HEADERS frame.
+    (.setConnState sc ConnStateActive)
+    (.setConnState sc ConnStateIdle)
+
+    (when [idle (.IdleTimeout (.-hs sc))] (> idle 0)
+      (set! (.-idleTimer sc) (time/AfterFunc idle (.-onIdleTimer sc)))
+      (defer (.Stop (.-idleTimer sc))))
+
+
+    (when (> (.-SendPingTimeout conf) 0)
+      (set! (.-readIdleTimeout sc) (.-SendPingTimeout conf))
+      (set! (.-readIdleTimer sc) (time/AfterFunc (.-SendPingTimeout conf) (.-onReadIdleTimer sc)))
+      (defer (.Stop (.-readIdleTimer sc))))
+
+
+    (go (.readFrames sc)) ; closed by defer sc.conn.Close above
+
+    (let [settingsTimer (time/AfterFunc firstSettingsTimeout (.-onSettingsTimer sc))]
+      (defer (.Stop settingsTimer))
+
+      (let [lastFrameTime (time/Now)
+          ^{:line 819} loopNum 0]
+        (while true
+          (inc! loopNum)
+          (select
+            (case [wr (<! (.-wantWriteFrameCh sc))]
+              (when [(values se ok) (assert StreamError (.-write wr))] ok
+                (.resetStream sc se)
+                (break))
+
+              (.writeFrame sc wr))
+            (case [res (<! (.-wroteFrameCh sc))]
+              (.wroteFrame sc res))
+            (case [res (<! (.-readFrameCh sc))]
+              (set! lastFrameTime (time/Now))
+              ;; Process any written frames before reading new frames from the client since a
+              ;; written frame could have triggered a new stream to be started.
+              (when (.-writingFrameAsync sc)
+                (select
+                  (case [wroteRes (<! (.-wroteFrameCh sc))]
+                    (.wroteFrame sc wroteRes))
+                  (default)))
+
+
+              (when (not (.processFrameFromReader sc res))
+                (return))
+
+              ((.-readMore res))
+              (when (!= settingsTimer nil)
+                (.Stop settingsTimer)
+                (set! settingsTimer nil)))
+
+            (case [m (<! (.-bodyReadCh sc))]
+              (.noteBodyRead sc (.-st m) (.-n m)))
+            (case [msg (<! (.-serveMsgCh sc))]
+              (type-switch [v msg]
+                (case [(func [int])]
+                  (v loopNum)) ; for testing
+                (case [(* serverMessage)]
+                  (switch v
+                    (case [settingsTimerMsg]
+                      (.logf sc "timeout waiting for SETTINGS frames from %v" (.RemoteAddr (.-conn sc)))
+                      (return))
+                    (case [idleTimerMsg]
+                      (.vlogf sc "connection is idle")
+                      (.goAway sc ErrCodeNo))
+                    (case [readIdleTimerMsg]
+                      (.handlePingTimer sc lastFrameTime))
+                    (case [shutdownTimerMsg]
+                      (.vlogf sc "GOAWAY close timer fired; closing conn from %v" (.RemoteAddr (.-conn sc)))
+                      (return))
+                    (case [gracefulShutdownMsg]
+                      (.startGracefulShutdownInternal sc))
+                    (case [handlerDoneMsg]
+                      (.handlerDone sc))
+                    (default
+                      (panic "unknown timer"))))
+
+                (case [(* startPushRequest)]
+                  (.startPush sc v))
+                (case [(func [(* serverConn)])]
+                  (v sc))
+                (default
+                  (panic (fmt/Sprintf "unexpected type %T" v))))))
+
+
+
+          ;; If the peer is causing us to generate a lot of control frames,
+          ;; but not reading them from us, assume they are trying to make us
+          ;; run out of memory.
+          (when (> (.-queuedControlFrames sc) maxQueuedControlFrames)
+            (.vlogf sc "http2: too many control frames in send queue, closing connection")
+            (return))
+
+
+          ;; Start the shutdown timer after sending a GOAWAY. When sending GOAWAY
+          ;; with no error code (graceful shutdown), don't start the timer until
+          ;; all open streams have been completed.
+          (let [sentGoAway (and (.-inGoAway sc) (not (.-needToSendGoAway sc)) (not (.-writingFrame sc)))
+              ^{:line 897} gracefulShutdownComplete (and (== (.-goAwayCode sc) ErrCodeNo) (== (.curOpenStreams sc) 0))]
+            (when (and sentGoAway (== (.-shutdownTimer sc) nil) ^:go/paren (or (!= (.-goAwayCode sc) ErrCodeNo) gracefulShutdownComplete))
+              (.shutDownIn sc goAwayTimeout))))))))
+
+
+
+
+^{:go/end 931} (go/method handlePingTimer [^{:tag (* serverConn)} sc ^time/Time lastFrameReadTime]
+  (when (.-pingSent sc)
+    (.logf sc "timeout waiting for PING response")
+    (when [f (.-countErrorFunc sc)] (!= f nil)
+      (f "conn_close_lost_ping"))
+
+    (.Close (.-conn sc))
+    (return))
+
+
+  (let [pingAt (.Add lastFrameReadTime (.-readIdleTimeout sc))
+      ^{:line 915} now (time/Now)]
+    (when (.After pingAt now)
+      ;; We received frames since arming the ping timer.
+      ;; Reset it for the next possible timeout.
+      (.Reset (.-readIdleTimer sc) (.Sub pingAt now))
+      (return))
+
+
+    (set! (.-pingSent sc) true)
+    ;; Ignore crypto/rand.Read errors: It generally can't fail, and worse case if it does
+    ;; is we send a PING frame containing 0s.
+    (set! (values _ _) (rand/Read (subslice (.-sentPingData sc))))
+    (.writeFrame sc ^{:go/breaks [2]} (lit FrameWriteRequest
+        :write (addr (lit writePing :data (.-sentPingData sc)))))
+
+    (.Reset (.-readIdleTimer sc) (.-pingTimeout sc))))
+
+
+(go/type serverMessage int)
+
+
+(go/var "Message values sent to serveMsgCh.\n"
+  ^{:line 937} [settingsTimerMsg (new serverMessage)]
+  ^{:line 938} [idleTimerMsg (new serverMessage)]
+  ^{:line 939} [readIdleTimerMsg (new serverMessage)]
+  ^{:line 940} [shutdownTimerMsg (new serverMessage)]
+  ^{:line 941} [gracefulShutdownMsg (new serverMessage)]
+  ^{:line 942} [handlerDoneMsg (new serverMessage)])
+
+
+^{:go/end 945} (go/method onSettingsTimer [^{:tag (* serverConn)} sc] (.sendServeMsg sc settingsTimerMsg))
+^{:go/end 946} (go/method onIdleTimer [^{:tag (* serverConn)} sc] (.sendServeMsg sc idleTimerMsg))
+^{:go/end 947} (go/method onReadIdleTimer [^{:tag (* serverConn)} sc] (.sendServeMsg sc readIdleTimerMsg))
+^{:go/end 948} (go/method onShutdownTimer [^{:tag (* serverConn)} sc] (.sendServeMsg sc shutdownTimerMsg))
+
+^{:go/end 956} (go/method sendServeMsg [^{:tag (* serverConn)} sc ^any msg]
+  (.checkNotOn (.-serveG sc)) ; NOT
+  (select
+    (case (>! (.-serveMsgCh sc) msg))
+    (case (<! (.-doneServing sc)))))
+
+
+
+(go/var errPrefaceTimeout (errors/New "timeout waiting for client preface"))
+
+
+
+
+^{:go/end 992} (go/method readPreface "readPreface reads the ClientPreface greeting from the peer or\nreturns errPrefaceTimeout on timeout, or an error if the greeting\nis invalid.\n" ^error [^{:tag (* serverConn)} sc]
+  (when (.-sawClientPreface sc)
+    (return nil))
+
+  (let [errc (make (chan error) 1)]
+    (go (^{:go/end 978} (fn []
+          ;; Read the client preface
+          (let [buf (make (slice byte) (len ClientPreface))]
+            (if [(values _ err) (io/ReadFull (.-conn sc) buf)] (!= err nil)
+              (>! errc err)
+              (if (not (bytes/Equal buf clientPreface))
+                (>! errc (fmt/Errorf "bogus greeting %q" buf))
+
+                (>! errc nil)))))))
+
+
+    (let [timer (time/NewTimer prefaceTimeout)] ; TODO: configurable on *Server?
+      (defer (.Stop timer))
+      (select
+        (case (<! (.-C timer))
+          (return errPrefaceTimeout))
+        (case [err (<! errc)]
+          (when (== err nil)
+            (when VerboseLogs
+              (.vlogf sc "http2: server: client %v said hello" (.RemoteAddr (.-conn sc)))))
+
+
+          (return err))))))
+
+
+
+(go/var writeDataPool ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 995} (fn ^any [] (new writeData))))
+
+
+
+
+^{:go/end 1038} (go/method writeDataFromHandler "writeDataFromHandler writes DATA response frames from a handler on\nthe given stream.\n" ^error [^{:tag (* serverConn)} sc ^{:tag (* stream)} stream ^{:tag (slice byte)} data ^bool endStream]
+  (let [ch (.getErrChan (.-srv sc))
+      ^{:line 1002} writeArg (assert (* writeData) (.Get writeDataPool))]
+    (set! @writeArg (lit writeData (.-id stream) data endStream))
+    (let [err (.writeFrameFromHandler sc ^{:go/breaks [2 4 6]} (lit FrameWriteRequest
+            :write writeArg
+            :stream stream
+            :done ch))]
+
+      (when (!= err nil)
+        (return err))
+
+      (let [^bool frameWriteDone (zero bool)] ; the frame write is done (successfully or not)
+        (select
+          (case (set! err (<! ch))
+            (set! frameWriteDone true))
+          (case (<! (.-doneServing sc))
+            (return errClientDisconnected))
+          (case (<! (.-cw stream))
+            ;; If both ch and stream.cw were ready (as might
+            ;; happen on the final Write after an http.Handler
+            ;; ends), prefer the write result. Otherwise this
+            ;; might just be us successfully closing the stream.
+            ;; The writeFrameAsync and serve goroutines guarantee
+            ;; that the ch send will happen before the stream.cw
+            ;; close.
+            (select
+              (case (set! err (<! ch))
+                (set! frameWriteDone true))
+              (default
+                (return errStreamClosed)))))
+
+
+        (.putErrChan (.-srv sc) ch)
+        (when frameWriteDone
+          (.Put writeDataPool writeArg))
+
+        ^{:line 1037} err))))
+
+
+
+
+
+
+
+
+
+^{:go/end 1057} (go/method writeFrameFromHandler "writeFrameFromHandler sends wr to sc.wantWriteFrameCh, but aborts\nif the connection has gone away.\n\nThis must not be run from the serve goroutine itself, else it might\ndeadlock writing to sc.wantWriteFrameCh (which is only mildly\nbuffered and is read by serve itself). If you're on the serve\ngoroutine, call writeFrame instead.\n" ^error [^{:tag (* serverConn)} sc ^FrameWriteRequest wr]
+  (.checkNotOn (.-serveG sc)) ; NOT
+  (select
+    (case (>! (.-wantWriteFrameCh sc) wr)
+      (return nil))
+    (case (<! (.-doneServing sc))
+      ;; Serve loop is gone.
+      ;; Client has closed their connection to the server.
+      (return errClientDisconnected))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1126} (go/method writeFrame "writeFrame schedules a frame to write and sends it if there's nothing\nalready being written.\n\nThere is no pushback here (the serve goroutine never blocks). It's\nthe http.Handlers that block, waiting for their previous frames to\nmake it onto the wire\n\nIf you're not on the serve goroutine, use writeFrameFromHandler instead.\n" [^{:tag (* serverConn)} sc ^FrameWriteRequest wr]
+  (.check (.-serveG sc))
+
+  ;; If true, wr will not be written and wr.done will not be signaled.
+  (let [^bool ignoreWrite (zero bool)]
+
+    ;; We are not allowed to write frames on closed streams. RFC 7540 Section
+    ;; 5.1.1 says: "An endpoint MUST NOT send frames other than PRIORITY on
+    ;; a closed stream." Our server never sends PRIORITY, so that exception
+    ;; does not apply.
+    ;;
+    ;; The serverConn might close an open stream while the stream's handler
+    ;; is still running. For example, the server might close a stream when it
+    ;; receives bad data from the client. If this happens, the handler might
+    ;; attempt to write a frame after the stream has been closed (since the
+    ;; handler hasn't yet been notified of the close). In this case, we simply
+    ;; ignore the frame. The handler will notice that the stream is closed when
+    ;; it waits for the frame to be written.
+    ;;
+    ;; As an exception to this rule, we allow sending RST_STREAM after close.
+    ;; This allows us to immediately reject new streams without tracking any
+    ;; state for those streams (except for the queued RST_STREAM frame). This
+    ;; may result in duplicate RST_STREAMs in some cases, but the client should
+    ;; ignore those.
+    (when (!= (.StreamID wr) 0)
+      (let [(values _ isReset) (assert StreamError (.-write wr))]
+        (when [(values state _) (.state sc (.StreamID wr))] (and (== state stateClosed) (not isReset))
+          (set! ignoreWrite true))))
+
+
+
+    ;; Don't send a 100-continue response if we've already sent headers.
+    ;; See golang.org/issue/14030.
+    (type-switch (.-write wr)
+      (case [(* writeResHeaders)]
+        (set! (.-wroteHeaders (.-stream wr)) true))
+      (case [write100ContinueHeadersFrame]
+        (when (.-wroteHeaders (.-stream wr))
+          ;; We do not need to notify wr.done because this frame is
+          ;; never written with wr.done != nil.
+          (when (!= (.-done wr) nil)
+            (panic "wr.done != nil for write100ContinueHeadersFrame"))
+
+          (set! ignoreWrite true))))
+
+
+
+    (when (not ignoreWrite)
+      (when (.isControl wr)
+        (inc! (.-queuedControlFrames sc))
+        ;; For extra safety, detect wraparounds, which should not happen,
+        ;; and pull the plug.
+        (when (< (.-queuedControlFrames sc) 0)
+          (.Close (.-conn sc))))
+
+
+      (.Push (.-writeSched sc) wr))
+
+    (.scheduleFrameWrite sc)))
+
+
+
+
+
+^{:go/end 1179} (go/method startFrameWrite "startFrameWrite starts a goroutine to write wr (in a separate\ngoroutine since that might block on the network), and updates the\nserve goroutine's state about the world, updated from info in wr.\n" [^{:tag (* serverConn)} sc ^FrameWriteRequest wr]
+  (.check (.-serveG sc))
+  (when (.-writingFrame sc)
+    (panic "internal error: can only be writing one frame at a time"))
+
+
+  (let [st (.-stream wr)]
+    (when (!= st nil)
+      (switch (.-state st)
+        (case [stateHalfClosedLocal]
+          (type-switch (.-write wr)
+            (case [StreamError handlerPanicRST writeWindowUpdate])
+            ;; RFC 7540 Section 5.1 allows sending RST_STREAM, PRIORITY, and WINDOW_UPDATE
+            ;; in this state. (We never send PRIORITY from the server, so that is not checked.)
+            (default
+              (panic (fmt/Sprintf "internal error: attempt to send frame on a half-closed-local stream: %v" wr)))))
+
+        (case [stateClosed]
+          (panic (fmt/Sprintf "internal error: attempt to send frame on a closed stream: %v" wr)))))
+
+
+    (when [(values wpp ok) (assert (* writePushPromise) (.-write wr))] ok
+      (let [^error err (zero error)]
+        (set! (values (.-promisedID wpp) err) ((.-allocatePromisedID wpp)))
+        (when (!= err nil)
+          (set! (.-writingFrameAsync sc) false)
+          (.replyToWriter wr err)
+          (return))))
+
+
+
+    (set! (.-writingFrame sc) true)
+    (set! (.-needsFrameFlush sc) true)
+    (if (.staysWithinBuffer (.-write wr) (.Available (.-bw sc))) (do
+        (set! (.-writingFrameAsync sc) false)
+        (let [err (.writeFrame (.-write wr) sc)]
+          (.wroteFrame sc (lit frameWriteResult :wr wr :err err))))
+      (if [(values wd ok) (assert (* writeData) (.-write wr))] ok (do
+          ;; Encode the frame in the serve goroutine, to ensure we don't have
+          ;; any lingering asynchronous references to data passed to Write.
+          ;; See https://go.dev/issue/58446.
+          (.startWriteDataPadded (.-framer sc) (.-streamID wd) (.-endStream wd) (.-p wd) nil)
+          (set! (.-writingFrameAsync sc) true)
+          (go (.writeFrameAsync sc wr wd)))
+        (do
+          (set! (.-writingFrameAsync sc) true)
+          (go (.writeFrameAsync sc wr nil)))))))
+
+
+
+
+
+
+(go/var ^{:doc "errHandlerPanicked is the error given to any callers blocked in a read from\nRequest.Body when the main goroutine panics. Since most handlers read in the\nmain ServeHTTP goroutine, this will show up rarely.\n"} errHandlerPanicked (errors/New "http2: handler panicked"))
+
+
+
+^{:go/end 1244} (go/method wroteFrame "wroteFrame is called on the serve goroutine with the result of\nwhatever happened on writeFrameAsync.\n" [^{:tag (* serverConn)} sc ^frameWriteResult res]
+  (.check (.-serveG sc))
+  (when (not (.-writingFrame sc))
+    (panic "internal error: expected to be already writing a frame"))
+
+  (set! (.-writingFrame sc) false)
+  (set! (.-writingFrameAsync sc) false)
+
+  (when (!= (.-err res) nil)
+    (.Close (.-conn sc)))
+
+
+  (let [wr (.-wr res)]
+
+    (if (writeEndsStream (.-write wr))
+      (let [st (.-stream wr)]
+        (when (== st nil)
+          (panic "internal error: expecting non-nil stream"))
+
+        (switch (.-state st)
+          (case [stateOpen]
+            ;; Here we would go to stateHalfClosedLocal in
+            ;; theory, but since our handler is done and
+            ;; the net/http package provides no mechanism
+            ;; for closing a ResponseWriter while still
+            ;; reading data (see possible TODO at top of
+            ;; this file), we go into closed state here
+            ;; anyway, after telling the peer we're
+            ;; hanging up on them. We'll transition to
+            ;; stateClosed after the RST_STREAM frame is
+            ;; written.
+            (set! (.-state st) stateHalfClosedLocal)
+            ;; Section 8.1: a server MAY request that the client abort
+            ;; transmission of a request without error by sending a
+            ;; RST_STREAM with an error code of NO_ERROR after sending
+            ;; a complete response.
+            (.resetStream sc (streamError (.-id st) ErrCodeNo)))
+          (case [stateHalfClosedRemote]
+            (.closeStream sc st errHandlerComplete))))
+
+
+      (type-switch [v (.-write wr)]
+        (case [StreamError]
+          ;; st may be unknown if the RST_STREAM was generated to reject bad input.
+          (when [(values st ok) (aget (.-streams sc) (.-StreamID v))] ok
+            (.closeStream sc st v)))
+
+        (case [handlerPanicRST]
+          (.closeStream sc (.-stream wr) errHandlerPanicked))))
+
+
+
+    ;; Reply (if requested) to unblock the ServeHTTP goroutine.
+    (.replyToWriter wr (.-err res))
+
+    (.scheduleFrameWrite sc)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1295} (go/method scheduleFrameWrite "scheduleFrameWrite tickles the frame writing scheduler.\n\nIf a frame is already being written, nothing happens. This will be called again\nwhen the frame is done being written.\n\nIf a frame isn't being written and we need to send one, the best frame\nto send is selected by writeSched.\n\nIf a frame isn't being written and there's nothing else to send, we\nflush the write buffer.\n" [^{:tag (* serverConn)} sc]
+  (.check (.-serveG sc))
+  (when (or (.-writingFrame sc) (.-inFrameScheduleLoop sc))
+    (return))
+
+  (set! (.-inFrameScheduleLoop sc) true)
+  (while (not (.-writingFrameAsync sc))
+    (when (.-needToSendGoAway sc)
+      (set! (.-needToSendGoAway sc) false)
+      (.startFrameWrite sc ^{:go/breaks [2]} (lit FrameWriteRequest
+          :write (addr ^{:go/breaks [2 4]} (lit writeGoAway
+              :maxStreamID (.-maxClientStreamID sc)
+              :code (.-goAwayCode sc)))))
+
+
+      (continue))
+
+    (when (.-needToSendSettingsAck sc)
+      (set! (.-needToSendSettingsAck sc) false)
+      (.startFrameWrite sc (lit FrameWriteRequest :write (lit writeSettingsAck)))
+      (continue))
+
+    (when (or (not (.-inGoAway sc)) (== (.-goAwayCode sc) ErrCodeNo))
+      (when [(values wr ok) (.Pop (.-writeSched sc))] ok
+        (when (.isControl wr)
+          (dec! (.-queuedControlFrames sc)))
+
+        (.startFrameWrite sc wr)
+        (continue)))
+
+
+    (when (.-needsFrameFlush sc)
+      (.startFrameWrite sc (lit FrameWriteRequest :write (lit flushFrameWriter)))
+      (set! (.-needsFrameFlush sc) false) ; after startFrameWrite, since it sets this true
+      (continue))
+
+    (break))
+
+  (set! (.-inFrameScheduleLoop sc) false))
+
+
+
+
+
+
+
+
+
+^{:go/end 1307} (go/method startGracefulShutdown "startGracefulShutdown gracefully shuts down a connection. This\nsends GOAWAY with ErrCodeNo to tell the client we're gracefully\nshutting down. The connection isn't closed until all current\nstreams are done.\n\nstartGracefulShutdown returns immediately; it does not wait until\nthe connection has shut down.\n" [^{:tag (* serverConn)} sc]
+  (.checkNotOn (.-serveG sc)) ; NOT
+  (.Do (.-shutdownOnce sc) ^{:go/end 1306} (fn [] (.sendServeMsg sc gracefulShutdownMsg))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "After sending GOAWAY with an error code (non-graceful shutdown), the\nconnection will close after goAwayTimeout.\n\nIf we close the connection immediately after sending GOAWAY, there may\nbe unsent data in our kernel receive buffer, which will cause the kernel\nto send a TCP RST on close() instead of a FIN. This RST will abort the\nconnection immediately, whether or not the client had received the GOAWAY.\n\nIdeally we should delay for at least 1 RTT + epsilon so the client has\na chance to read the GOAWAY and stop sending messages. Measuring RTT\nis hard, so we approximate with 1 second. See golang.org/issue/18701.\n\nThis is a var so it can be shorter in tests, where all requests uses the\nloopback interface making the expected RTT very small.\n\nTODO: configurable?\n"} goAwayTimeout (* 1 time/Second))
+
+^{:go/end 1329} (go/method startGracefulShutdownInternal [^{:tag (* serverConn)} sc]
+  (.goAway sc ErrCodeNo))
+
+
+^{:go/end 1343} (go/method goAway [^{:tag (* serverConn)} sc ^ErrCode code]
+  (.check (.-serveG sc))
+  (when (.-inGoAway sc)
+    (when (== (.-goAwayCode sc) ErrCodeNo)
+      (set! (.-goAwayCode sc) code))
+
+    (return))
+
+  (set! (.-inGoAway sc) true)
+  (set! (.-needToSendGoAway sc) true)
+  (set! (.-goAwayCode sc) code)
+  (.scheduleFrameWrite sc))
+
+
+^{:go/end 1348} (go/method shutDownIn [^{:tag (* serverConn)} sc ^time/Duration d]
+  (.check (.-serveG sc))
+  (set! (.-shutdownTimer sc) (time/AfterFunc d (.-onShutdownTimer sc))))
+
+
+^{:go/end 1356} (go/method resetStream [^{:tag (* serverConn)} sc ^StreamError se]
+  (.check (.-serveG sc))
+  (.writeFrame sc (lit FrameWriteRequest :write se))
+  (when [(values st ok) (aget (.-streams sc) (.-StreamID se))] ok
+    (set! (.-resetQueued st) true)))
+
+
+
+
+
+
+^{:go/end 1416} (go/method processFrameFromReader "processFrameFromReader processes the serve loop's read from readFrameCh from the\nframe-reading goroutine.\nprocessFrameFromReader returns whether the connection should be kept open.\n" ^bool [^{:tag (* serverConn)} sc ^readFrameResult res]
+  (.check (.-serveG sc))
+  (let [err (.-err res)]
+    (if (!= err nil) (do
+        (when (== err ErrFrameTooLarge)
+          (.goAway sc ErrCodeFrameSize)
+          (return true)) ; goAway will close the loop
+
+        (let [clientGone (or (== err io/EOF) (== err io/ErrUnexpectedEOF) (isClosedConnError err))]
+          (when clientGone
+            ;; TODO: could we also get into this state if
+            ;; the peer does a half close
+            ;; (e.g. CloseWrite) because they're done
+            ;; sending frames but they're still wanting
+            ;; our open replies?  Investigate.
+            ;; TODO: add CloseWrite to crypto/tls.Conn first
+            ;; so we have a way to test this? I suppose
+            ;; just for testing we could have a non-TLS mode.
+            (return false))))
+
+
+      (let [f (.-f res)]
+        (when VerboseLogs
+          (.vlogf sc "http2: server read frame %v" (summarizeFrame f)))
+
+        (set! err (.processFrame sc f))
+        (when (== err nil)
+          (return true))))
+
+
+
+    (type-switch [ev err]
+      (case [StreamError]
+        (.resetStream sc ev)
+        (return true))
+      (case [goAwayFlowError]
+        (.goAway sc ErrCodeFlowControl)
+        (return true))
+      (case [ConnectionError]
+        (when (!= (.-f res) nil)
+          (when [id (.-StreamID (.Header (.-f res)))] (> id (.-maxClientStreamID sc))
+            (set! (.-maxClientStreamID sc) id)))
+
+
+        (.logf sc "http2: server connection error from %v: %v" (.RemoteAddr (.-conn sc)) ev)
+        (.goAway sc (conv ErrCode ev))
+        (return true)) ; goAway will handle shutdown
+      (default
+        (if (!= (.-err res) nil)
+          (.vlogf sc "http2: server closing client connection; error reading frame from client %s: %v" (.RemoteAddr (.-conn sc)) err)
+
+          (.logf sc "http2: server closing client connection: %v" err))
+
+        (return false)))))
+
+
+
+^{:go/end 1471} (go/method processFrame ^error [^{:tag (* serverConn)} sc ^Frame f]
+  (.check (.-serveG sc))
+
+  ;; First frame received must be SETTINGS.
+  (when (not (.-sawFirstSettings sc))
+    (when [(values _ ok) (assert (* SettingsFrame) f)] (not ok)
+      (return (.countError sc "first_settings" (conv ConnectionError ErrCodeProtocol))))
+
+    (set! (.-sawFirstSettings sc) true))
+
+
+  ;; Discard frames for streams initiated after the identified last
+  ;; stream sent in a GOAWAY, or all frames after sending an error.
+  ;; We still need to return connection-level flow control for DATA frames.
+  ;; RFC 9113 Section 6.8.
+  (when (and (.-inGoAway sc) ^:go/paren (or (!= (.-goAwayCode sc) ErrCodeNo) (> (.-StreamID (.Header f)) (.-maxClientStreamID sc))))
+
+    (when [(values f ok) (assert (* DataFrame) f)] ok
+      (when (not (.take (.-inflow sc) ^{:go/via [FrameHeader]} (.-Length f)))
+        (return (.countError sc "data_flow" (streamError (.-StreamID ^{:go/via [FrameHeader]} (.Header f)) ErrCodeFlowControl))))
+
+      (.sendWindowUpdate sc nil (conv int ^{:go/via [FrameHeader]} (.-Length f)))) ; conn-level
+
+    (return nil))
+
+
+  (type-switch [f f]
+    (case [(* SettingsFrame)]
+      (return (.processSettings sc f)))
+    (case [(* MetaHeadersFrame)]
+      (return (.processHeaders sc f)))
+    (case [(* WindowUpdateFrame)]
+      (return (.processWindowUpdate sc f)))
+    (case [(* PingFrame)]
+      (return (.processPing sc f)))
+    (case [(* DataFrame)]
+      (return (.processData sc f)))
+    (case [(* RSTStreamFrame)]
+      (return (.processResetStream sc f)))
+    (case [(* PriorityFrame)]
+      (return (.processPriority sc f)))
+    (case [(* GoAwayFrame)]
+      (return (.processGoAway sc f)))
+    (case [(* PushPromiseFrame)]
+      ;; A client cannot push. Thus, servers MUST treat the receipt of a PUSH_PROMISE
+      ;; frame as a connection error (Section 5.4.1) of type PROTOCOL_ERROR.
+      (return (.countError sc "push_promise" (conv ConnectionError ErrCodeProtocol))))
+    (case [(* PriorityUpdateFrame)]
+      (return (.processPriorityUpdate sc f)))
+    (default
+      (.vlogf sc "http2: server ignoring frame: %v" (.Header f))
+      (return nil))))
+
+
+
+^{:go/breaks [7] :go/end 1495} (go/method processPing ^error [^{:tag (* serverConn)} sc ^{:tag (* PingFrame)} f]
+  (.check (.-serveG sc))
+  (when (.IsAck f)
+    (when (and (.-pingSent sc) (== (.-sentPingData sc) (.-Data f)))
+      ;; This is a response to a PING we sent.
+      (set! (.-pingSent sc) false)
+      (.Reset (.-readIdleTimer sc) (.-readIdleTimeout sc)))
+
+    ;; 6.7 PING: " An endpoint MUST NOT respond to PING frames
+    ;; containing this flag."
+    (return nil))
+
+  (when (!= ^{:go/via [FrameHeader]} (.-StreamID f) 0)
+    ;; "PING frames are not associated with any individual
+    ;; stream. If a PING frame is received with a stream
+    ;; identifier field value other than 0x0, the recipient MUST
+    ;; respond with a connection error (Section 5.4.1) of type
+    ;; PROTOCOL_ERROR."
+    (return (.countError sc "ping_on_stream" (conv ConnectionError ErrCodeProtocol))))
+
+  (.writeFrame sc (lit FrameWriteRequest :write (lit writePingAck f)))
+  nil)
+
+
+^{:go/breaks [6] :go/end 1527} (go/method processWindowUpdate ^error [^{:tag (* serverConn)} sc ^{:tag (* WindowUpdateFrame)} f]
+  (.check (.-serveG sc))
+  (switch
+    (case [(!= ^{:go/via [FrameHeader]} (.-StreamID f) 0)] ; stream-level flow control
+      (let [(values state st) (.state sc ^{:go/via [FrameHeader]} (.-StreamID f))]
+        (when (== state stateIdle)
+          ;; Section 5.1: "Receiving any frame other than HEADERS
+          ;; or PRIORITY on a stream in this state MUST be
+          ;; treated as a connection error (Section 5.4.1) of
+          ;; type PROTOCOL_ERROR."
+          (return (.countError sc "stream_idle" (conv ConnectionError ErrCodeProtocol))))
+
+        (when (== st nil)
+          ;; "WINDOW_UPDATE can be sent by a peer that has sent a
+          ;; frame bearing the END_STREAM flag. This means that a
+          ;; receiver could receive a WINDOW_UPDATE frame on a "half
+          ;; closed (remote)" or "closed" stream. A receiver MUST
+          ;; NOT treat this as an error, see Section 5.1."
+          (return nil))
+
+        (when (not (.add (.-flow st) (conv int32 (.-Increment f))))
+          (return (.countError sc "bad_flow" (streamError ^{:go/via [FrameHeader]} (.-StreamID f) ErrCodeFlowControl))))))
+
+    (default ; connection-level flow control
+      (when (not (.add (.-flow sc) (conv int32 (.-Increment f))))
+        (return (lit goAwayFlowError)))))
+
+
+  (.scheduleFrameWrite sc)
+  nil)
+
+
+^{:go/end 1546} (go/method processResetStream ^error [^{:tag (* serverConn)} sc ^{:tag (* RSTStreamFrame)} f]
+  (.check (.-serveG sc))
+
+  ^{:go/breaks [[4 1545]]} (let [(values state st) (.state sc ^{:go/via [FrameHeader]} (.-StreamID f))]
+    (when (== state stateIdle)
+      ;; 6.4 "RST_STREAM frames MUST NOT be sent for a
+      ;; stream in the "idle" state. If a RST_STREAM frame
+      ;; identifying an idle stream is received, the
+      ;; recipient MUST treat this as a connection error
+      ;; (Section 5.4.1) of type PROTOCOL_ERROR.
+      (return (.countError sc "reset_idle_stream" (conv ConnectionError ErrCodeProtocol))))
+
+    (when (!= st nil)
+      ((.-cancelCtx st))
+      (.closeStream sc st (streamError ^{:go/via [FrameHeader]} (.-StreamID f) (.-ErrCode f))))
+
+    nil))
+
+
+^{:go/end 1594} (go/method closeStream [^{:tag (* serverConn)} sc ^{:tag (* stream)} st ^error err]
+  (.check (.-serveG sc))
+  (when (or (== (.-state st) stateIdle) (== (.-state st) stateClosed))
+    (panic (fmt/Sprintf "invariant; can't close stream in state %v" (.-state st))))
+
+  (set! (.-state st) stateClosed)
+  (when (!= (.-readDeadline st) nil)
+    (.Stop (.-readDeadline st)))
+
+  (when (!= (.-writeDeadline st) nil)
+    (.Stop (.-writeDeadline st)))
+
+  (if (.isPushed st)
+    (dec! (.-curPushedStreams sc))
+
+    (dec! (.-curClientStreams sc)))
+
+  (delete (.-streams sc) (.-id st))
+  (when (== (len (.-streams sc)) 0)
+    (.setConnState sc ConnStateIdle)
+    (let [idleTimeout (.IdleTimeout (.-hs sc))]
+      (when (and (> idleTimeout 0) (!= (.-idleTimer sc) nil))
+        (.Reset (.-idleTimer sc) idleTimeout))
+
+      (when (h1ServerKeepAlivesDisabled (.-hs sc))
+        (.startGracefulShutdownInternal sc))))
+
+
+  (when [p (.-body st)] (!= p nil)
+    ;; Return any buffered unread bytes worth of conn-level flow control.
+    ;; See golang.org/issue/16481
+    (.sendWindowUpdate sc nil (.Len p))
+
+    (.CloseWithError p err))
+
+  (when [(values e ok) (assert StreamError err)] ok
+    (if (!= (.-Cause e) nil)
+      (set! err (.-Cause e))
+
+      (set! err errStreamClosed)))
+
+
+  (set! (.-closeErr st) err)
+  ((.-cancelCtx st))
+  (.Close (.-cw st)) ; signals Handler's CloseNotifier, unblocks writes, etc
+  (.CloseStream (.-writeSched sc) (.-id st)))
+
+
+^{:go/breaks [9] :go/end 1622} (go/method processSettings ^error [^{:tag (* serverConn)} sc ^{:tag (* SettingsFrame)} f]
+  (.check (.-serveG sc))
+  (when (.IsAck f)
+    (dec! (.-unackedSettings sc))
+    (when (< (.-unackedSettings sc) 0)
+      ;; Why is the peer ACKing settings we never sent?
+      ;; The spec doesn't mention this case, but
+      ;; hang up on them anyway.
+      (return (.countError sc "ack_mystery" (conv ConnectionError ErrCodeProtocol))))
+
+    (return nil))
+
+  (when (or (> (.NumSettings f) 100) (.HasDuplicates f))
+    ;; This isn't actually in the spec, but hang up on
+    ;; suspiciously large settings frames or those with
+    ;; duplicate entries.
+    (return (.countError sc "settings_big_or_dups" (conv ConnectionError ErrCodeProtocol))))
+
+  (when [err (.ForeachSetting f (.-processSetting sc))] (!= err nil)
+    (return err))
+
+  ;; TODO: judging by RFC 7540, Section 6.5.3 each SETTINGS frame should be
+  ;; acknowledged individually, even if multiple are received before the ACK.
+  (set! (.-needToSendSettingsAck sc) true)
+  (.scheduleFrameWrite sc)
+  nil)
+
+
+^{:go/breaks [[7 1660]] :go/end 1661} (go/method processSetting ^error [^{:tag (* serverConn)} sc ^Setting s]
+  (.check (.-serveG sc))
+  (when [err (.Valid s)] (!= err nil)
+    (return err))
+
+  (when VerboseLogs
+    (.vlogf sc "http2: server processing setting %v" s))
+
+  (switch (.-ID s)
+    (case [SettingHeaderTableSize]
+      (.SetMaxDynamicTableSize (.-hpackEncoder sc) (.-Val s)))
+    (case [SettingEnablePush]
+      (set! (.-pushEnabled sc) (!= (.-Val s) 0)))
+    (case [SettingMaxConcurrentStreams]
+      (set! (.-clientMaxStreams sc) (.-Val s)))
+    (case [SettingInitialWindowSize]
+      (return (.processSettingInitialWindowSize sc (.-Val s))))
+    (case [SettingMaxFrameSize]
+      (set! (.-maxFrameSize sc) (conv int32 (.-Val s)))) ; the maximum valid s.Val is < 2^31
+    (case [SettingMaxHeaderListSize]
+      (set! (.-peerMaxHeaderListSize sc) (.-Val s)))
+    (case [SettingEnableConnectProtocol])
+    ;; Receipt of this parameter by a server does not
+    ;; have any impact
+    (case [SettingNoRFC7540Priorities]
+      (when (> (.-Val s) 1)
+        (return (conv ConnectionError ErrCodeProtocol))))
+
+    (default
+      ;; Unknown setting: "An endpoint that receives a SETTINGS
+      ;; frame with any unknown or unsupported identifier MUST
+      ;; ignore that setting."
+      (when VerboseLogs
+        (.vlogf sc "http2: server ignoring unknown setting %v" s))))
+
+
+  nil)
+
+
+^{:go/end 1689} (go/method processSettingInitialWindowSize ^error [^{:tag (* serverConn)} sc ^uint32 val]
+  (.check (.-serveG sc))
+  ;; Note: val already validated to be within range by
+  ;; processSetting's Valid call.
+
+  ;; "A SETTINGS frame can alter the initial flow control window
+  ;; size for all current streams. When the value of
+  ;; SETTINGS_INITIAL_WINDOW_SIZE changes, a receiver MUST
+  ;; adjust the size of all stream flow control windows that it
+  ;; maintains by the difference between the new value and the
+  ;; old value."
+  (let [old (.-initialStreamSendWindowSize sc)]
+    (set! (.-initialStreamSendWindowSize sc) (conv int32 val))
+    ^{:go/breaks [[3 1688]]} (let [growth (- (conv int32 val) old)] ; may be negative
+      (range [_ st (.-streams sc)]
+        (when (not (.add (.-flow st) growth))
+          ;; 6.9.2 Initial Flow Control Window Size
+          ;; "An endpoint MUST treat a change to
+          ;; SETTINGS_INITIAL_WINDOW_SIZE that causes any flow
+          ;; control window to exceed the maximum size as a
+          ;; connection error (Section 5.4.1) of type
+          ;; FLOW_CONTROL_ERROR."
+          (return (.countError sc "setting_win_size" (conv ConnectionError ErrCodeFlowControl)))))
+
+
+      nil)))
+
+
+^{:go/end 1786} (go/method processData ^error [^{:tag (* serverConn)} sc ^{:tag (* DataFrame)} f]
+  (.check (.-serveG sc))
+  ^{:go/breaks [[8 1785]]} (let [id (.-StreamID ^{:go/via [FrameHeader]} (.Header f))
+
+      ^{:line 1695} data (.Data f)
+      (values state st) (.state sc id)]
+    (when (or (== id 0) (== state stateIdle))
+      ;; Section 6.1: "DATA frames MUST be associated with a
+      ;; stream. If a DATA frame is received whose stream
+      ;; identifier field is 0x0, the recipient MUST respond
+      ;; with a connection error (Section 5.4.1) of type
+      ;; PROTOCOL_ERROR."
+      ;;
+      ;; Section 5.1: "Receiving any frame other than HEADERS
+      ;; or PRIORITY on a stream in this state MUST be
+      ;; treated as a connection error (Section 5.4.1) of
+      ;; type PROTOCOL_ERROR."
+      (return (.countError sc "data_on_idle" (conv ConnectionError ErrCodeProtocol))))
+
+
+    ;; "If a DATA frame is received whose stream is not in "open"
+    ;; or "half closed (local)" state, the recipient MUST respond
+    ;; with a stream error (Section 5.4.2) of type STREAM_CLOSED."
+    (when (or (== st nil) (!= state stateOpen) (.-gotTrailerHeader st) (.-resetQueued st))
+      ;; This includes sending a RST_STREAM if the stream is
+      ;; in stateHalfClosedLocal (which currently means that
+      ;; the http.Handler returned, so it's done reading &
+      ;; done writing). Try to stop the client from sending
+      ;; more DATA.
+
+      ;; But still enforce their connection-level flow control,
+      ;; and return any flow control bytes since we're not going
+      ;; to consume them.
+      (when (not (.take (.-inflow sc) ^{:go/via [FrameHeader]} (.-Length f)))
+        (return (.countError sc "data_flow" (streamError id ErrCodeFlowControl))))
+
+      (.sendWindowUpdate sc nil (conv int ^{:go/via [FrameHeader]} (.-Length f))) ; conn-level
+
+      (when (and (!= st nil) (.-resetQueued st))
+        ;; Already have a stream error in flight. Don't send another.
+        (return nil))
+
+      (return (.countError sc "closed" (streamError id ErrCodeStreamClosed))))
+
+    (when (== (.-body st) nil)
+      (panic "internal error: should have a body in this state"))
+
+
+    ;; Sender sending more than they'd declared?
+    (when (and (!= (.-declBodyBytes st) -1) (> (+ (.-bodyBytes st) (conv int64 (len data))) (.-declBodyBytes st)))
+      (when (not (.take (.-inflow sc) ^{:go/via [FrameHeader]} (.-Length f)))
+        (return (.countError sc "data_flow" (streamError id ErrCodeFlowControl))))
+
+      (.sendWindowUpdate sc nil (conv int ^{:go/via [FrameHeader]} (.-Length f))) ; conn-level
+
+      (.CloseWithError (.-body st) (fmt/Errorf "sender tried to send more than declared Content-Length of %d bytes" (.-declBodyBytes st)))
+      ;; RFC 7540, sec 8.1.2.6: A request or response is also malformed if the
+      ;; value of a content-length header field does not equal the sum of the
+      ;; DATA frame payload lengths that form the body.
+      (return (.countError sc "send_too_much" (streamError id ErrCodeProtocol))))
+
+    (when (> ^{:go/via [FrameHeader]} (.-Length f) 0)
+      ;; Check whether the client has flow control quota.
+      (when (not (takeInflows (addr (.-inflow sc)) (addr (.-inflow st)) ^{:go/via [FrameHeader]} (.-Length f)))
+        (return (.countError sc "flow_on_data_length" (streamError id ErrCodeFlowControl))))
+
+
+      (when (> (len data) 0)
+        (set! (.-bodyBytes st) + (conv int64 (len data)))
+        (let [(values wrote err) (.Write (.-body st) data)]
+          (when (!= err nil)
+            ;; The handler has closed the request body.
+            ;; Return the connection-level flow control for the discarded data,
+            ;; but not the stream-level flow control.
+            (.sendWindowUpdate sc nil (- (conv int ^{:go/via [FrameHeader]} (.-Length f)) wrote))
+            (return nil))
+
+          (when (!= wrote (len data))
+            (panic "internal error: bad Writer"))))
+
+
+
+      ;; Return any padded flow control now, since we won't
+      ;; refund it later on body reads.
+      ;; Call sendWindowUpdate even if there is no padding,
+      ;; to return buffered flow control credit if the sent
+      ;; window has shrunk.
+      (let [pad (- (conv int32 ^{:go/via [FrameHeader]} (.-Length f)) (conv int32 (len data)))]
+        (.sendWindowUpdate32 sc nil pad)
+        (.sendWindowUpdate32 sc st pad)))
+
+    (when (.StreamEnded f)
+      (.endStream st))
+
+    nil))
+
+
+^{:go/breaks [7] :go/end 1800} (go/method processGoAway ^error [^{:tag (* serverConn)} sc ^{:tag (* GoAwayFrame)} f]
+  (.check (.-serveG sc))
+  (if (!= (.-ErrCode f) ErrCodeNo)
+    (.logf sc "http2: received GOAWAY %+v, starting graceful shutdown" f)
+
+    (.vlogf sc "http2: received GOAWAY %+v, starting graceful shutdown" f))
+
+  (.startGracefulShutdownInternal sc)
+  ;; http://tools.ietf.org/html/rfc7540#section-6.8
+  ;; We should not create any new streams, which means we should disable push.
+  (set! (.-pushEnabled sc) false)
+  nil)
+
+
+
+^{:go/end 1805} (go/method isPushed "isPushed reports whether the stream is server-initiated.\n" ^bool [^{:tag (* stream)} st]
+  (== (% (.-id st) 2) 0))
+
+
+
+
+^{:go/end 1821} (go/method endStream "endStream closes a Request.Body's pipe. It is called when a DATA\nframe says a request body is over (or after trailers).\n" [^{:tag (* stream)} st]
+  (let [sc (.-sc st)]
+    (.check (.-serveG sc))
+
+    (if (and (!= (.-declBodyBytes st) -1) (!= (.-declBodyBytes st) (.-bodyBytes st)))
+      (.CloseWithError (.-body st) (fmt/Errorf "request declared a Content-Length of %d but only wrote %d bytes"
+          (.-declBodyBytes st) (.-bodyBytes st)))
+      (do
+        (.closeWithErrorAndCode (.-body st) io/EOF (.-copyTrailersToHandlerRequest st))
+        (.CloseWithError (.-body st) io/EOF)))
+
+    (set! (.-state st) stateHalfClosedRemote)))
+
+
+
+
+^{:go/end 1832} (go/method copyTrailersToHandlerRequest "copyTrailersToHandlerRequest is run in the Handler's goroutine in\nits Request.Body.Read just before it gets io.EOF.\n" [^{:tag (* stream)} st]
+  (range [k vv (.-trailer st)]
+    (when [(values _ ok) (aget (.-reqTrailer st) k)] ok
+      ;; Only copy it over it was pre-declared.
+      (aset (.-reqTrailer st) k vv))))
+
+
+
+
+
+
+^{:go/end 1842} (go/method onReadTimeout "onReadTimeout is run on its own goroutine (from time.AfterFunc)\nwhen the stream's ReadTimeout has fired.\n" [^{:tag (* stream)} st]
+  (when (!= (.-body st) nil)
+    ;; Wrap the ErrDeadlineExceeded to avoid callers depending on us
+    ;; returning the bare error.
+    (.CloseWithError (.-body st) (fmt/Errorf "%w" os/ErrDeadlineExceeded))))
+
+
+
+
+
+^{:go/end 1852} (go/method onWriteTimeout "onWriteTimeout is run on its own goroutine (from time.AfterFunc)\nwhen the stream's WriteTimeout has fired.\n" [^{:tag (* stream)} st]
+  (.writeFrameFromHandler (.-sc st) (lit FrameWriteRequest :write ^{:go/breaks [2 4 6]} (lit StreamError
+        :StreamID (.-id st)
+        :Code ErrCodeInternal
+        :Cause os/ErrDeadlineExceeded))))
+
+
+
+^{:go/end 1975} (go/method processHeaders ^error [^{:tag (* serverConn)} sc ^{:tag (* MetaHeadersFrame)} f]
+  (.check (.-serveG sc))
+  (let [id ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f)]
+    ;; http://tools.ietf.org/html/rfc7540#section-5.1.1
+    ;; Streams initiated by a client MUST use odd-numbered stream
+    ;; identifiers. [...] An endpoint that receives an unexpected
+    ;; stream identifier MUST respond with a connection error
+    ;; (Section 5.4.1) of type PROTOCOL_ERROR.
+    (when (!= (% id 2) 1)
+      (return (.countError sc "headers_even" (conv ConnectionError ErrCodeProtocol))))
+
+    ;; A HEADERS frame can be used to create a new stream or
+    ;; send a trailer for an open one. If we already have a stream
+    ;; open, let it process its own HEADERS frame (trailers at this
+    ;; point, if it's valid).
+    (when [st (aget (.-streams sc) ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f))] (!= st nil)
+      (when (.-resetQueued st)
+        ;; We're sending RST_STREAM to close the stream, so don't bother
+        ;; processing this frame.
+        (return nil))
+
+      ;; RFC 7540, sec 5.1: If an endpoint receives additional frames, other than
+      ;; WINDOW_UPDATE, PRIORITY, or RST_STREAM, for a stream that is in
+      ;; this state, it MUST respond with a stream error (Section 5.4.2) of
+      ;; type STREAM_CLOSED.
+      (when (== (.-state st) stateHalfClosedRemote)
+        (return (.countError sc "headers_half_closed" (streamError id ErrCodeStreamClosed))))
+
+      (return (.processTrailerHeaders st f)))
+
+
+    ;; [...] The identifier of a newly established stream MUST be
+    ;; numerically greater than all streams that the initiating
+    ;; endpoint has opened or reserved. [...]  An endpoint that
+    ;; receives an unexpected stream identifier MUST respond with
+    ;; a connection error (Section 5.4.1) of type PROTOCOL_ERROR.
+    (when (<= id (.-maxClientStreamID sc))
+      (return (.countError sc "stream_went_down" (conv ConnectionError ErrCodeProtocol))))
+
+    (set! (.-maxClientStreamID sc) id)
+
+    (when (!= (.-idleTimer sc) nil)
+      (.Stop (.-idleTimer sc)))
+
+
+    ;; http://tools.ietf.org/html/rfc7540#section-5.1.2
+    ;; [...] Endpoints MUST NOT exceed the limit set by their peer. An
+    ;; endpoint that receives a HEADERS frame that causes their
+    ;; advertised concurrent stream limit to be exceeded MUST treat
+    ;; this as a stream error (Section 5.4.2) of type PROTOCOL_ERROR
+    ;; or REFUSED_STREAM.
+    (when (> (+ (.-curClientStreams sc) 1) (.-advMaxStreams sc))
+      (when (== (.-unackedSettings sc) 0)
+        ;; They should know better.
+        (return (.countError sc "over_max_streams" (streamError id ErrCodeProtocol))))
+
+      ;; Assume it's a network race, where they just haven't
+      ;; received our last SETTINGS update. But actually
+      ;; this can't happen yet, because we don't yet provide
+      ;; a way for users to adjust server parameters at
+      ;; runtime.
+      (return (.countError sc "over_max_streams_race" (streamError id ErrCodeRefusedStream))))
+
+
+    (let [initialState stateOpen]
+      (when ^{:go/via [HeadersFrame]} (.StreamEnded f)
+        (set! initialState stateHalfClosedRemote))
+
+
+      ;; We are handling two special cases here:
+      ;; 1. When a request is sent via an intermediary, we force priority to be
+      ;; u=3,i. This is essentially a round-robin behavior, and is done to ensure
+      ;; fairness between, for example, multiple clients using the same proxy.
+      ;; 2. Until a client has shown that it is aware of RFC 9218, we make its
+      ;; streams non-incremental by default. This is done to preserve the
+      ;; historical behavior of handling streams in a round-robin manner, rather
+      ;; than one-by-one to completion.
+      (let [initialPriority (defaultRFC9218Priority (and (.-priorityAware sc) (not (.-hasIntermediary sc))))]
+        (when [(values _ ok) (assert (* priorityWriteSchedulerRFC9218) (.-writeSched sc))] (and ok (not (.-hasIntermediary sc)))
+          (let [(values headerPriority priorityAware hasIntermediary) (.rfc9218Priority f (.-priorityAware sc))]
+            (set! initialPriority headerPriority)
+            (set! (.-hasIntermediary sc) hasIntermediary)
+            (when priorityAware
+              (set! (.-priorityAware sc) true))))
+
+
+        (let [st (.newStream sc id 0 initialState initialPriority)]
+
+          (when ^{:go/via [HeadersFrame]} (.HasPriority f)
+            (when [err (.checkPriority sc ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f) ^{:go/via [HeadersFrame]} (.-Priority f))] (!= err nil)
+              (return err))
+
+            (when (not (.writeSchedIgnoresRFC7540 sc))
+              (.AdjustStream (.-writeSched sc) (.-id st) ^{:go/via [HeadersFrame]} (.-Priority f))))
+
+
+
+          (let [(values rw req err) (.newWriterAndRequest sc st f)]
+            (when (!= err nil)
+              (return err))
+
+            (set! (.-reqTrailer st) (.-Trailer req))
+            (when (!= (.-reqTrailer st) nil)
+              (set! (.-trailer st) (make Header)))
+
+            (set! (.-body st) (.-pipe (assert (* requestBody) (.-Body req)))) ; may be nil
+            (set! (.-declBodyBytes st) (.-ContentLength req))
+
+            (let [handler (.-ServeHTTP (.-handler sc))]
+              (if (.-Truncated f)
+                ;; Their header list was too long. Send a 431 error.
+                (set! handler handleHeaderListTooLong)
+                (when [err (checkValidHTTP2RequestHeaders (.-Header req))] (!= err nil)
+                  (set! handler (.-ServeHTTP (lit serve400Handler err)))))
+
+
+              (when (> (.ReadTimeout (.-hs sc)) 0)
+                (set! (.-readDeadline st) (time/AfterFunc (.ReadTimeout (.-hs sc)) (.-onReadTimeout st))))
+
+
+              (.scheduleHandler sc id rw req handler))))))))
+
+
+^{:go/end 1995} (go/method upgradeRequest [^{:tag (* serverConn)} sc ^{:tag (* ServerRequest)} req]
+  (.check (.-serveG sc))
+  (let [id (conv uint32 1)]
+    (set! (.-maxClientStreamID sc) id)
+    (let [st (.newStream sc id 0 stateHalfClosedRemote (defaultRFC9218Priority (and (.-priorityAware sc) (not (.-hasIntermediary sc)))))]
+      (set! (.-reqTrailer st) (.-Trailer req))
+      (when (!= (.-reqTrailer st) nil)
+        (set! (.-trailer st) (make Header)))
+
+      (let [rw (.newResponseWriter sc st)]
+        (set! (.-req (.-rws rw)) @req)
+        (set! req (addr (.-req (.-rws rw))))
+
+        ;; This is the first request on the connection,
+        ;; so start the handler directly rather than going
+        ;; through scheduleHandler.
+        (inc! (.-curHandlers sc))
+        (go (.runHandler sc rw req (.-ServeHTTP (.-handler sc))))))))
+
+
+^{:go/end 2028} (go/method processTrailerHeaders ^error [^{:tag (* stream)} st ^{:tag (* MetaHeadersFrame)} f]
+  ^{:go/breaks [10]} (let [sc (.-sc st)]
+    (.check (.-serveG sc))
+    (when (.-gotTrailerHeader st)
+      (return (.countError sc "dup_trailers" (conv ConnectionError ErrCodeProtocol))))
+
+    (set! (.-gotTrailerHeader st) true)
+    (when (not ^{:go/via [HeadersFrame]} (.StreamEnded f))
+      (return (.countError sc "trailers_not_ended" (streamError (.-id st) ErrCodeProtocol))))
+
+
+    (when (> (len (.PseudoFields f)) 0)
+      (return (.countError sc "trailers_pseudo" (streamError (.-id st) ErrCodeProtocol))))
+
+    (when (.-Truncated f)
+      (return (.countError sc "trailers_too_large" (streamError (.-id st) ErrCodeProtocol))))
+
+    (when (!= (.-trailer st) nil)
+      (range [_ hf (.RegularFields f)]
+        (let [key (.canonicalHeader sc (.-Name hf))]
+          (when (not (httpguts/ValidTrailerHeader key))
+            ;; TODO: send more details to the peer somehow. But http2 has
+            ;; no way to send debug data at a stream level. Discuss with
+            ;; HTTP folk.
+            (return (.countError sc "trailers_bogus" (streamError (.-id st) ErrCodeProtocol))))
+
+          (aset (.-trailer st) key (append (aget (.-trailer st) key) (.-Value hf))))))
+
+
+    (.endStream st)
+    nil))
+
+
+^{:go/breaks [[4 2038]] :go/end 2039} (go/method checkPriority ^error [^{:tag (* serverConn)} sc ^uint32 streamID ^PriorityParam p]
+  (when (== streamID (.-StreamDep p))
+    ;; Section 5.3.1: "A stream cannot depend on itself. An endpoint MUST treat
+    ;; this as a stream error (Section 5.4.2) of type PROTOCOL_ERROR."
+    ;; Section 5.3.3 says that a stream can depend on one of its dependencies,
+    ;; so it's only self-dependencies that are forbidden.
+    (return (.countError sc "priority" (streamError streamID ErrCodeProtocol))))
+
+  nil)
+
+
+^{:go/breaks [6] :go/end 2055} (go/method processPriority ^error [^{:tag (* serverConn)} sc ^{:tag (* PriorityFrame)} f]
+  (when [err (.checkPriority sc ^{:go/via [FrameHeader]} (.-StreamID f) (.-PriorityParam f))] (!= err nil)
+    (return err))
+
+  ;; We need to avoid calling AdjustStream when using the RFC 9218 write
+  ;; scheduler. Otherwise, incremental's zero value in PriorityParam will
+  ;; unexpectedly make all streams non-incremental. This causes us to process
+  ;; streams one-by-one to completion rather than doing it in a round-robin
+  ;; manner (the historical behavior), which might be unexpected to users.
+  (when (.writeSchedIgnoresRFC7540 sc)
+    (return nil))
+
+  (.AdjustStream (.-writeSched sc) ^{:go/via [FrameHeader]} (.-StreamID f) (.-PriorityParam f))
+  nil)
+
+
+^{:go/end 2068} (go/method processPriorityUpdate ^error [^{:tag (* serverConn)} sc ^{:tag (* PriorityUpdateFrame)} f]
+  (set! (.-priorityAware sc) true)
+  (when [(values _ ok) (assert (* priorityWriteSchedulerRFC9218) (.-writeSched sc))] (not ok)
+    (return nil))
+
+  ^{:go/breaks [4]} (let [(values p ok) (parseRFC9218Priority (.-Priority f) (.-priorityAware sc))]
+    (when (not ok)
+      (return (.countError sc "unparsable_priority_update" (streamError (.-PrioritizedStreamID f) ErrCodeProtocol))))
+
+    (.AdjustStream (.-writeSched sc) (.-PrioritizedStreamID f) p)
+    nil))
+
+
+^{:go/end 2104} (go/method newStream ^{:tag (* stream)} [^{:tag (* serverConn)} sc ^uint32 id ^uint32 pusherID ^streamState state ^PriorityParam priority]
+  (.check (.-serveG sc))
+  (when (== id 0)
+    (panic "internal error: cannot create stream with id 0"))
+
+
+  (let [(values ctx cancelCtx) (context/WithCancel (.-baseCtx sc))
+      ^{:line 2077} st (addr ^{:go/breaks [2 4 6 8 10]} (lit stream
+          :sc sc
+          :id id
+          :state state
+          :ctx ctx
+          :cancelCtx cancelCtx))]
+
+    (.Init (.-cw st))
+    (set! (.-conn (.-flow st)) (addr (.-flow sc))) ; link to conn-level counter
+    (.add (.-flow st) (.-initialStreamSendWindowSize sc))
+    (.init (.-inflow st) (.-initialStreamRecvWindowSize sc))
+    (when [writeTimeout (.WriteTimeout (.-hs sc))] (> writeTimeout 0)
+      (set! (.-writeDeadline st) (time/AfterFunc writeTimeout (.-onWriteTimeout st))))
+
+
+    (aset (.-streams sc) id st)
+    (.OpenStream (.-writeSched sc) (.-id st) (lit OpenStreamOptions :PusherID pusherID :priority priority))
+    (if (.isPushed st)
+      (inc! (.-curPushedStreams sc))
+
+      (inc! (.-curClientStreams sc)))
+
+    (when (== (.curOpenStreams sc) 1)
+      (.setConnState sc ConnStateActive))
+
+
+    ^{:line 2103} st))
+
+
+^{:go/end 2185} (go/method newWriterAndRequest [^{:tag (* serverConn)} sc ^{:tag (* stream)} st ^{:tag (* MetaHeadersFrame)} f] :results [(* responseWriter) (* ServerRequest) error]
+  (.check (.-serveG sc))
+
+  (let [rp ^{:go/breaks [2 4 6 8 10]} (lit httpcommon/ServerRequestParam
+        :Method (.PseudoValue f "method")
+        :Scheme (.PseudoValue f "scheme")
+        :Authority (.PseudoValue f "authority")
+        :Path (.PseudoValue f "path")
+        :Protocol (.PseudoValue f "protocol"))]
+
+
+    ;; extended connect is disabled, so we should not see :protocol
+    (when (and disableExtendedConnectProtocol (!= (.-Protocol rp) ""))
+      (return nil nil (.countError sc "bad_connect" (streamError ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f) ErrCodeProtocol))))
+
+
+    (let [isConnect (== (.-Method rp) "CONNECT")]
+      (cond isConnect
+        (when (and (== (.-Protocol rp) "") ^:go/paren (or (!= (.-Path rp) "") (!= (.-Scheme rp) "") (== (.-Authority rp) "")))
+          (return nil nil (.countError sc "bad_connect" (streamError ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f) ErrCodeProtocol))))
+
+        (or (== (.-Method rp) "") (== (.-Path rp) "") ^:go/paren (and (!= (.-Scheme rp) "https") (!= (.-Scheme rp) "http")))
+        ;; See 8.1.2.6 Malformed Requests and Responses:
+        ;;
+        ;; Malformed requests or responses that are detected
+        ;; MUST be treated as a stream error (Section 5.4.2)
+        ;; of type PROTOCOL_ERROR."
+        ;;
+        ;; 8.1.2.3 Request Pseudo-Header Fields
+        ;; "All HTTP/2 requests MUST include exactly one valid
+        ;; value for the :method, :scheme, and :path
+        ;; pseudo-header fields"
+        (return nil nil (.countError sc "bad_path_method" (streamError ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f) ErrCodeProtocol))))
+
+
+      (let [header (make Header)]
+        (set! (.-Header rp) header)
+        (range [_ hf (.RegularFields f)]
+          (.Add header (.canonicalHeader sc (.-Name hf)) (.-Value hf)))
+
+        (when (== (.-Authority rp) "")
+          (set! (.-Authority rp) (.Get header "Host")))
+
+        (when (!= (.-Protocol rp) "")
+          (.Set header ":protocol" (.-Protocol rp)))
+
+
+        (let [(values rw req err) (.newWriterAndRequestNoBody sc st rp)]
+          (when (!= err nil)
+            (return nil nil err))
+
+          (let [bodyOpen (not ^{:go/via [HeadersFrame]} (.StreamEnded f))]
+            (when [(values clens ok) (aget (.-Header rp) "Content-Length")] ok
+              (if [(values cl err) (strconv/ParseUint (aget clens 0) 10 63)] (== err nil)
+                (set! (.-ContentLength req) (conv int64 cl))
+
+                (set! (.-ContentLength req) 0))
+
+              (when (and (not bodyOpen) (!= (.-ContentLength req) 0))
+                (return nil nil (.countError sc "bodyless_content_length" (streamError ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f) ErrCodeProtocol))))
+
+              (when (> (len clens) 1)
+                (range [_ dup (subslice clens 1)]
+                  (when (!= (aget clens 0) dup)
+                    (return nil nil (.countError sc "duplicate_content_length" (streamError ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f) ErrCodeProtocol)))))
+
+
+                (aset (.-Header rp) "Content-Length" (subslice clens _ 1))))
+
+
+            (when bodyOpen
+              (when [(values _ ok) (aget (.-Header rp) "Content-Length")] (not ok)
+                (set! (.-ContentLength req) -1))
+
+              (set! (.-pipe (assert (* requestBody) (.-Body req))) (addr ^{:go/breaks [2]} (lit pipe
+                    :b (addr (lit dataBuffer :expected (.-ContentLength req)))))))
+
+
+            (return rw req nil)))))))
+
+
+^{:go/end 2222} (go/method newWriterAndRequestNoBody [^{:tag (* serverConn)} sc ^{:tag (* stream)} st ^httpcommon/ServerRequestParam rp] :results [(* responseWriter) (* ServerRequest) error]
+  (.check (.-serveG sc))
+
+  (let [^{:tag (* tls/ConnectionState)} tlsState (zero (* tls/ConnectionState))] ; nil if not scheme https
+    (when (== (.-Scheme rp) "https")
+      (set! tlsState (.-tlsState sc)))
+
+
+    (let [res (httpcommon/NewServerRequest rp)]
+      (when (!= (.-InvalidReason res) "")
+        (return nil nil (.countError sc (.-InvalidReason res) (streamError (.-id st) ErrCodeProtocol))))
+
+
+      (let [body (addr ^{:go/breaks [2 4 6]} (lit requestBody
+              :conn sc
+              :stream st
+              :needsContinue (.-NeedsContinue res)))
+
+          ^{:line 2205} rw (.newResponseWriter sc st)]
+        (set! (.-req (.-rws rw)) ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26]} (lit ServerRequest
+            :Context (.-ctx st)
+            :Method (.-Method rp)
+            :URL (.-URL res)
+            :RemoteAddr (.-remoteAddrStr sc)
+            :Header (.-Header rp)
+            :RequestURI (.-RequestURI res)
+            :Proto "HTTP/2.0"
+            :ProtoMajor 2
+            :ProtoMinor 0
+            :TLS tlsState
+            :Host (.-Authority rp)
+            :Body body
+            :Trailer (.-Trailer res)))
+
+        (return rw (addr (.-req (.-rws rw))) nil)))))
+
+
+^{:go/end 2233} (go/method newResponseWriter ^{:tag (* responseWriter)} [^{:tag (* serverConn)} sc ^{:tag (* stream)} st]
+  (let [rws (assert (* responseWriterState) (.Get responseWriterStatePool))
+      ^{:line 2226} bwSave (.-bw rws)]
+    (set! @rws (lit responseWriterState)) ; zero all the fields
+    (set! (.-conn rws) sc)
+    (set! (.-bw rws) bwSave)
+    (.Reset (.-bw rws) (lit chunkWriter rws))
+    (set! (.-stream rws) st)
+    (addr (lit responseWriter :rws rws))))
+
+
+(go/type unstartedHandler (struct
+    ^{:line 2236 :tag uint32} streamID
+    ^{:line 2237 :tag (* responseWriter)} rw
+    ^{:line 2238 :tag (* ServerRequest)} req
+    ^{:line 2239 :tag (func [(* ResponseWriter) (* ServerRequest)])} handler))
+
+
+
+
+^{:go/end 2262} (go/method scheduleHandler "scheduleHandler starts a handler goroutine,\nor schedules one to start as soon as an existing handler finishes.\n" ^error [^{:tag (* serverConn)} sc ^uint32 streamID ^{:tag (* responseWriter)} rw ^{:tag (* ServerRequest)} req ^{:tag (func [(* ResponseWriter) (* ServerRequest)])} handler]
+  (.check (.-serveG sc))
+  ^{:go/breaks [[5 2261]]} (let [maxHandlers (.-advMaxStreams sc)]
+    (when (< (.-curHandlers sc) maxHandlers)
+      (inc! (.-curHandlers sc))
+      (go (.runHandler sc rw req handler))
+      (return nil))
+
+    (when (> (len (.-unstartedHandlers sc)) (conv int (* 4 (.-advMaxStreams sc))))
+      (return (.countError sc "too_many_early_resets" (conv ConnectionError ErrCodeEnhanceYourCalm))))
+
+    (set! (.-unstartedHandlers sc) (append (.-unstartedHandlers sc) ^{:go/breaks [2 4 6 8]} (lit unstartedHandler
+          :streamID streamID
+          :rw rw
+          :req req
+          :handler handler)))
+
+    nil))
+
+
+^{:go/end 2286} (go/method handlerDone [^{:tag (* serverConn)} sc]
+  (.check (.-serveG sc))
+  (dec! (.-curHandlers sc))
+  (let [i 0
+      ^{:line 2268} maxHandlers (.-advMaxStreams sc)]
+    (for [] (< i (len (.-unstartedHandlers sc))) (inc! i)
+      (let [u (aget (.-unstartedHandlers sc) i)]
+        (when (== (aget (.-streams sc) (.-streamID u)) nil)
+          ;; This stream was reset before its goroutine had a chance to start.
+          (continue))
+
+        (when (>= (.-curHandlers sc) maxHandlers)
+          (break))
+
+        (inc! (.-curHandlers sc))
+        (go (.runHandler sc (.-rw u) (.-req u) (.-handler u)))
+        (aset (.-unstartedHandlers sc) i (lit unstartedHandler)))) ; don't retain references
+
+    (set! (.-unstartedHandlers sc) (subslice (.-unstartedHandlers sc) i))
+    (when (== (len (.-unstartedHandlers sc)) 0)
+      (set! (.-unstartedHandlers sc) nil))))
+
+
+
+
+^{:go/end 2316} (go/method runHandler "Run on its own goroutine.\n" [^{:tag (* serverConn)} sc ^{:tag (* responseWriter)} rw ^{:tag (* ServerRequest)} req ^{:tag (func [(* ResponseWriter) (* ServerRequest)])} handler]
+  (defer (.sendServeMsg sc handlerDoneMsg))
+  (let [didPanic true]
+    (defer (^{:go/end 2313} (fn []
+          ((.-cancelCtx (.-stream (.-rws rw))))
+          (when (!= (.-MultipartForm req) nil)
+            (.RemoveAll (.-MultipartForm req)))
+
+          (when didPanic
+            (let [e (recover)]
+              (.writeFrameFromHandler sc ^{:go/breaks [2 4]} (lit FrameWriteRequest
+                  :write (lit handlerPanicRST (.-id (.-stream (.-rws rw))))
+                  :stream (.-stream (.-rws rw))))
+
+              ;; Same as net/http:
+              (when (and (!= e nil) (!= e ErrAbortHandler))
+                (let [^:const ^{:val 65536} size (<< 64 10)
+                    ^{:line 2306} buf (make (slice byte) size)]
+                  (set! buf (subslice buf _ (runtime/Stack buf false)))
+                  (.logf sc "http2: panic serving %v: %v\n%s" (.RemoteAddr (.-conn sc)) e buf)))
+
+              (return)))
+
+          (.handlerDone rw))))
+
+    (handler rw req)
+    (set! didPanic false)))
+
+
+^{:go/end 2326} (go/func handleHeaderListTooLong [^{:tag (* ResponseWriter)} w ^{:tag (* ServerRequest)} r]
+  ;; 10.5.1 Limits on Header Block Size:
+  ;; .. "A server that receives a larger header block than it is
+  ;; willing to handle can send an HTTP 431 (Request Header Fields Too
+  ;; Large) status code"
+  (let [^:const ^{:val 431} statusRequestHeaderFieldsTooLarge 431] ; only in Go 1.6+
+    (.WriteHeader w statusRequestHeaderFieldsTooLarge)
+    (io/WriteString w "<h1>HTTP Error 431</h1><p>Request Header Field(s) Too Large</p>")))
+
+
+
+
+^{:go/end 2359} (go/method writeHeaders "called from handler goroutines.\nh may be nil.\n" ^error [^{:tag (* serverConn)} sc ^{:tag (* stream)} st ^{:tag (* writeResHeaders)} headerData]
+  (.checkNotOn (.-serveG sc)) ; NOT on
+  ^{:go/breaks [[5 2358]]} (let [^{:tag (chan error)} errc (zero (chan error))]
+    (when (!= (.-h headerData) nil)
+      ;; If there's a header map (which we don't own), so we have to block on
+      ;; waiting for this frame to be written, so an http.Flush mid-handler
+      ;; writes out the correct value of keys, before a handler later potentially
+      ;; mutates it.
+      (set! errc (.getErrChan (.-srv sc))))
+
+    (when [err (.writeFrameFromHandler sc ^{:go/breaks [2 4 6]} (lit FrameWriteRequest
+            :write headerData
+            :stream st
+            :done errc))]
+      (!= err nil)
+      (return err))
+
+    (when (!= errc nil)
+      (select
+        (case [err (<! errc)]
+          (.putErrChan (.-srv sc) errc)
+          (return err))
+        (case (<! (.-doneServing sc))
+          (return errClientDisconnected))
+        (case (<! (.-cw st))
+          (return errStreamClosed))))
+
+
+    nil))
+
+
+
+^{:go/end 2367} (go/method write100ContinueHeaders "called from handler goroutines.\n" [^{:tag (* serverConn)} sc ^{:tag (* stream)} st]
+  (.writeFrameFromHandler sc ^{:go/breaks [2 4]} (lit FrameWriteRequest
+      :write (lit write100ContinueHeadersFrame (.-id st))
+      :stream st)))
+
+
+
+
+
+(go/type bodyReadMsg "A bodyReadMsg tells the server loop that the http.Handler read n\nbytes of the DATA from the client on the given stream.\n" (struct
+    ^{:line 2372 :tag (* stream)} st
+    ^{:line 2373 :tag int} n))
+
+
+
+
+
+^{:go/end 2387} (go/method noteBodyReadFromHandler "called from handler goroutines.\nNotes that the handler for the given stream ID read n bytes of its body\nand schedules flow control tokens to be sent.\n" [^{:tag (* serverConn)} sc ^{:tag (* stream)} st ^int n ^error err]
+  (.checkNotOn (.-serveG sc)) ; NOT on
+  (when (> n 0)
+    (select
+      (case (>! (.-bodyReadCh sc) (lit bodyReadMsg st n)))
+      (case (<! (.-doneServing sc))))))
+
+
+
+
+^{:go/end 2397} (go/method noteBodyRead [^{:tag (* serverConn)} sc ^{:tag (* stream)} st ^int n]
+  (.check (.-serveG sc))
+  (.sendWindowUpdate sc nil n) ; conn-level
+  (when (and (!= (.-state st) stateHalfClosedRemote) (!= (.-state st) stateClosed))
+    ;; Don't send this WINDOW_UPDATE if the stream is closed
+    ;; remotely.
+    (.sendWindowUpdate sc st n)))
+
+
+
+
+^{:go/end 2402} (go/method sendWindowUpdate32 "st may be nil for conn-level\n" [^{:tag (* serverConn)} sc ^{:tag (* stream)} st ^int32 n]
+  (.sendWindowUpdate sc st (conv int n)))
+
+
+
+^{:go/end 2422} (go/method sendWindowUpdate "st may be nil for conn-level\n" [^{:tag (* serverConn)} sc ^{:tag (* stream)} st ^int n]
+  (.check (.-serveG sc))
+  (let [^uint32 streamID (zero uint32)
+      ^{:line 2408 :tag int32} send (zero int32)]
+    (if (== st nil)
+      (set! send (.add (.-inflow sc) n))
+      (do
+        (set! streamID (.-id st))
+        (set! send (.add (.-inflow st) n))))
+
+    (when (== send 0)
+      (return))
+
+    (.writeFrame sc ^{:go/breaks [2 4]} (lit FrameWriteRequest
+        :write (lit writeWindowUpdate :streamID streamID :n (conv uint32 send))
+        :stream st))))
+
+
+
+
+
+(go/type requestBody "requestBody is the Handler's Request.Body type.\nRead and Close may be called concurrently.\n" (struct
+    ^{:line 2427 :tag incomparable} _
+    ^{:line 2428 :tag (* stream)} stream
+    ^{:line 2429 :tag (* serverConn)} conn
+    ^{:line 2430 :tag sync/Once} closeOnce ; for use by Close only
+    ^{:line 2431 :tag bool} sawEOF ; for use by Read only
+    ^{:line 2432 :tag (* pipe)} pipe ; non-nil if we have an HTTP entity message body
+    ^{:line 2433 :tag bool} needsContinue)) ; need to send a 100-continue
+
+
+^{:go/breaks [[4 2442]] :go/end 2443} (go/method Close ^error [^{:tag (* requestBody)} b]
+  (.Do (.-closeOnce b) ^{:go/end 2441} (fn []
+      (when (!= (.-pipe b) nil)
+        (.BreakWithError (.-pipe b) errClosedBody))))
+
+
+  nil)
+
+
+^{:go/end 2462} (go/method Read [^{:tag (* requestBody)} b ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (.-needsContinue b)
+    (set! (.-needsContinue b) false)
+    (.write100ContinueHeaders (.-conn b) (.-stream b)))
+
+  (when (or (== (.-pipe b) nil) (.-sawEOF b))
+    (return 0 io/EOF))
+
+  (set! (values n err) (.Read (.-pipe b) p))
+  (when (== err io/EOF)
+    (set! (.-sawEOF b) true))
+
+  (when (== (.-conn b) nil)
+    (return))
+
+  (.noteBodyReadFromHandler (.-conn b) (.-stream b) n err)
+  (return))
+
+
+
+
+
+
+
+
+(go/type responseWriter "responseWriter is the http.ResponseWriter implementation. It's\nintentionally small (1 pointer wide) to minimize garbage. The\nresponseWriterState pointer inside is zeroed at the end of a\nrequest (in handlerDone) and calls on the responseWriter thereafter\nsimply crash (caller's mistake), but the much larger responseWriterState\nand buffers are reused between multiple requests.\n" (struct
+    ^{:line 2471 :tag (* responseWriterState)} rws))
+
+
+(go/type responseWriterState (struct
+
+    ^{:line 2476 :tag (* stream) :doc "immutable within a request:\n"} stream
+    ^{:line 2477 :tag ServerRequest} req
+    ^{:line 2478 :tag (* serverConn)} conn
+
+
+    ^{:line 2481 :tag (* bufio/Writer) :doc "TODO: adjust buffer writing sizes based on server config, frame size updates from peer, etc\n"} bw ; writing to a chunkWriter{this *responseWriterState}
+
+
+    ^{:line 2484 :tag Header :doc "mutated by http.Handler goroutine:\n"} handlerHeader ; nil until called
+    ^{:line 2485 :tag Header} snapHeader ; snapshot of handlerHeader at WriteHeader time
+    ^{:line 2486 :tag (slice string)} trailers ; set in writeChunk
+    ^{:line 2487 :tag int} status ; status code passed to WriteHeader
+    ^{:line 2488 :tag bool} wroteHeader ; WriteHeader called (explicitly or implicitly). Not necessarily sent to user yet.
+    ^{:line 2489 :tag bool} sentHeader ; have we sent the header frame?
+    ^{:line 2490 :tag bool} handlerDone ; handler has finished
+
+    ^{:line 2492 :tag int64} sentContentLen ; non-zero if handler set a Content-Length header
+    ^{:line 2493 :tag int64} wroteBytes
+
+    ^{:line 2495 :tag sync/Mutex} closeNotifierMu ; guards closeNotifierCh
+    ^{:line 2496 :tag (chan bool)} closeNotifierCh)) ; nil until first used
+
+
+(go/type chunkWriter (struct ^{:tag (* responseWriterState)} rws))
+
+^{:go/end 2509} (go/method Write [^chunkWriter cw ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (set! (values n err) (.writeChunk (.-rws cw) p))
+  (when (== err errStreamClosed)
+    ;; If writing failed because the stream has been closed,
+    ;; return the reason it was closed.
+    (set! err (.-closeErr (.-stream (.-rws cw)))))
+
+  (return n err))
+
+
+^{:go/end 2511} (go/method hasTrailers ^bool [^{:tag (* responseWriterState)} rws] (> (len (.-trailers rws)) 0))
+
+^{:go/breaks [[4 2519]] :go/end 2520} (go/method hasNonemptyTrailers ^bool [^{:tag (* responseWriterState)} rws]
+  (range [_ trailer (.-trailers rws)]
+    (when [(values _ ok) (aget (.-handlerHeader rws) trailer)] ok
+      (return true)))
+
+
+  false)
+
+
+
+
+
+^{:go/end 2535} (go/method declareTrailer "declareTrailer is called for each Trailer header when the\nresponse header is written. It notes that a header will need to be\nwritten in the trailers at the end of the response.\n" [^{:tag (* responseWriterState)} rws ^string k]
+  (set! k (textproto/CanonicalMIMEHeaderKey k))
+  (when (not (httpguts/ValidTrailerHeader k))
+    ;; Forbidden by RFC 7230, section 4.1.2.
+    (.logf (.-conn rws) "ignoring invalid trailer %q" k)
+    (return))
+
+  (when (not (^{:inst [(slice string) string]} slices/Contains (.-trailers rws) k))
+    (set! (.-trailers rws) (append (.-trailers rws) k))))
+
+
+
+(go/const ^{:val "Mon, 02 Jan 2006 15:04:05 GMT"} TimeFormat "Mon, 02 Jan 2006 15:04:05 GMT") ; keep in sync with net/http
+
+
+
+
+
+
+
+^{:go/end 2646} (go/method writeChunk "writeChunk writes chunks from the bufio.Writer. But because\nbufio.Writer may bypass its chunking, sometimes p may be\narbitrarily large.\n\nwriteChunk is also responsible (on the first chunk) for sending the\nHEADER response.\n" [^{:tag (* responseWriterState)} rws ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (not (.-wroteHeader rws))
+    (.writeHeader rws 200))
+
+
+  (when (.-handlerDone rws)
+    (.promoteUndeclaredTrailers rws))
+
+
+  (let [isHeadResp (== (.-Method (.-req rws)) "HEAD")]
+    (when (not (.-sentHeader rws))
+      (set! (.-sentHeader rws) true)
+      (let [(values ^string ctype ^string clen) (zero string)]
+        (when [(set! clen (.Get (.-snapHeader rws) "Content-Length"))] (!= clen "")
+          (.Del (.-snapHeader rws) "Content-Length")
+          (if [(values cl err) (strconv/ParseUint clen 10 63)] (== err nil)
+            (set! (.-sentContentLen rws) (conv int64 cl))
+
+            (set! clen "")))
+
+
+        (let [(values _ hasContentLength) (aget (.-snapHeader rws) "Content-Length")]
+          (when (and (not hasContentLength) (== clen "") (.-handlerDone rws) (bodyAllowedForStatus (.-status rws)) ^:go/paren (or (> (len p) 0) (not isHeadResp)))
+            (set! clen (strconv/Itoa (len p))))
+
+          (let [(values _ hasContentType) (aget (.-snapHeader rws) "Content-Type")
+              ;; If the Content-Encoding is non-blank, we shouldn't
+              ;; sniff the body. See Issue golang.org/issue/31753.
+              ^{:line 2573} ce (.Get (.-snapHeader rws) "Content-Encoding")
+              ^{:line 2574} hasCE (> (len ce) 0)]
+            (when (and (not hasCE) (not hasContentType) (bodyAllowedForStatus (.-status rws)) (> (len p) 0))
+              (set! ctype (internal/DetectContentType p)))
+
+            (let [^string date (zero string)]
+              (when [(values _ ok) (aget (.-snapHeader rws) "Date")] (not ok)
+                ;; TODO(bradfitz): be faster here, like net/http? measure.
+                (set! date (.Format (.UTC (time/Now)) TimeFormat)))
+
+
+              (range [_ v (aget (.-snapHeader rws) "Trailer")]
+                (foreachHeaderElement v (.-declareTrailer rws)))
+
+
+              ;; "Connection" headers aren't allowed in HTTP/2 (RFC 7540, 8.1.2.2),
+              ;; but respect "Connection" == "close" to mean sending a GOAWAY and tearing
+              ;; down the TCP connection when idle, like we do for HTTP/1.
+              ;; TODO: remove more Connection-specific header fields here, in addition
+              ;; to "Connection".
+              (when [(values _ ok) (aget (.-snapHeader rws) "Connection")] ok
+                (let [v (.Get (.-snapHeader rws) "Connection")]
+                  (delete (.-snapHeader rws) "Connection")
+                  (when (== v "close")
+                    (.startGracefulShutdown (.-conn rws)))))
+
+
+
+              (let [endStream (or ^:go/paren (and (.-handlerDone rws) (not (.hasTrailers rws)) (== (len p) 0)) isHeadResp)]
+                (set! err (.writeHeaders (.-conn rws) (.-stream rws) (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit writeResHeaders
+                        :streamID (.-id (.-stream rws))
+                        :httpResCode (.-status rws)
+                        :h (.-snapHeader rws)
+                        :endStream endStream
+                        :contentType ctype
+                        :contentLength clen
+                        :date date))))
+
+                (when (!= err nil)
+                  (return 0 err))
+
+                (when endStream
+                  (return 0 nil))))))))
+
+
+    (when isHeadResp
+      (return (len p) nil))
+
+    (when (and (== (len p) 0) (not (.-handlerDone rws)))
+      (return 0 nil))
+
+
+    ;; only send trailers if they have actually been defined by the
+    ;; server handler.
+    (let [hasNonemptyTrailers (.hasNonemptyTrailers rws)
+        ^{:line 2628} endStream (and (.-handlerDone rws) (not hasNonemptyTrailers))]
+      (when (or (> (len p) 0) endStream)
+        ;; only send a 0 byte DATA frame if we're ending the stream.
+        (when [err (.writeDataFromHandler (.-conn rws) (.-stream rws) p endStream)] (!= err nil)
+          (return 0 err)))
+
+
+
+      (when (and (.-handlerDone rws) hasNonemptyTrailers)
+        (set! err (.writeHeaders (.-conn rws) (.-stream rws) (addr ^{:go/breaks [2 4 6 8]} (lit writeResHeaders
+                :streamID (.-id (.-stream rws))
+                :h (.-handlerHeader rws)
+                :trailers (.-trailers rws)
+                :endStream true))))
+
+        (return (len p) err))
+
+      (return (len p) nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const ^{:val "Trailer:" :doc "TrailerPrefix is a magic prefix for ResponseWriter.Header map keys\nthat, if present, signals that the map entry is actually for\nthe response trailers, and not the response headers. The prefix\nis stripped after the ServeHTTP call finishes and the values are\nsent in the trailers.\n\nThis mechanism is intended only for trailers that are not known\nprior to the headers being written. If the set of trailers is fixed\nor known before the header is written, the normal Go trailers mechanism\nis preferred:\n\n\thttps://golang.org/pkg/net/http/#ResponseWriter\n\thttps://golang.org/pkg/net/http/#example_ResponseWriter_trailers\n"} TrailerPrefix "Trailer:")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2697} (go/method promoteUndeclaredTrailers "promoteUndeclaredTrailers permits http.Handlers to set trailers\nafter the header has already been flushed. Because the Go\nResponseWriter interface has no way to set Trailers (only the\nHeader), and because we didn't want to expand the ResponseWriter\ninterface, and because nobody used trailers, and because RFC 7230\nsays you SHOULD (but not must) predeclare any trailers in the\nheader, the official ResponseWriter rules said trailers in Go must\nbe predeclared, and then we reuse the same ResponseWriter.Header()\nmap to mean both Headers and Trailers. When it's time to write the\nTrailers, we pick out the fields of Headers that were declared as\ntrailers. That worked for a while, until we found the first major\nuser of Trailers in the wild: gRPC (using them only over http2),\nand gRPC libraries permit setting trailers mid-stream without\npredeclaring them. So: change of plans. We still permit the old\nway, but we also permit this hack: if a Header() key begins with\n\"Trailer:\", the suffix of that key is a Trailer. Because ':' is an\ninvalid token byte anyway, there is no ambiguity. (And it's already\nfiltered out) It's mildly hacky, but not terrible.\n\nThis method runs after the Handler is done and promotes any Header\nfields to be trailers.\n" [^{:tag (* responseWriterState)} rws]
+  (range [k vv (.-handlerHeader rws)]
+    (when (not (strings/HasPrefix k TrailerPrefix))
+      (continue))
+
+    (let [trailerKey (strings/TrimPrefix k TrailerPrefix)]
+      (.declareTrailer rws trailerKey)
+      (aset (.-handlerHeader rws) (textproto/CanonicalMIMEHeaderKey trailerKey) vv)))
+
+
+  (when (> (len (.-trailers rws)) 1)
+    (^{:inst [(slice string) string]} slices/Sort (.-trailers rws))))
+
+
+
+^{:go/end 2723} (go/method SetReadDeadline ^error [^{:tag (* responseWriter)} w ^time/Time deadline]
+  ^{:go/breaks [[4 2722]]} (let [st (.-stream (.-rws w))]
+    (when (and (not (.IsZero deadline)) (.Before deadline (time/Now)))
+      ;; If we're setting a deadline in the past, reset the stream immediately
+      ;; so writes after SetWriteDeadline returns will fail.
+      (.onReadTimeout st)
+      (return nil))
+
+    (.sendServeMsg (.-conn (.-rws w)) ^{:go/end 2721} (fn [^{:tag (* serverConn)} sc]
+        (when (!= (.-readDeadline st) nil)
+          (when (not (.Stop (.-readDeadline st)))
+            ;; Deadline already exceeded, or stream has been closed.
+            (return)))
+
+
+        (cond (.IsZero deadline)
+          (set! (.-readDeadline st) nil)
+          (== (.-readDeadline st) nil)
+          (set! (.-readDeadline st) (time/AfterFunc (.Sub deadline (time/Now)) (.-onReadTimeout st))) :else
+
+          (.Reset (.-readDeadline st) (.Sub deadline (time/Now))))))
+
+
+    nil))
+
+
+^{:go/end 2749} (go/method SetWriteDeadline ^error [^{:tag (* responseWriter)} w ^time/Time deadline]
+  ^{:go/breaks [[4 2748]]} (let [st (.-stream (.-rws w))]
+    (when (and (not (.IsZero deadline)) (.Before deadline (time/Now)))
+      ;; If we're setting a deadline in the past, reset the stream immediately
+      ;; so writes after SetWriteDeadline returns will fail.
+      (.onWriteTimeout st)
+      (return nil))
+
+    (.sendServeMsg (.-conn (.-rws w)) ^{:go/end 2747} (fn [^{:tag (* serverConn)} sc]
+        (when (!= (.-writeDeadline st) nil)
+          (when (not (.Stop (.-writeDeadline st)))
+            ;; Deadline already exceeded, or stream has been closed.
+            (return)))
+
+
+        (cond (.IsZero deadline)
+          (set! (.-writeDeadline st) nil)
+          (== (.-writeDeadline st) nil)
+          (set! (.-writeDeadline st) (time/AfterFunc (.Sub deadline (time/Now)) (.-onWriteTimeout st))) :else
+
+          (.Reset (.-writeDeadline st) (.Sub deadline (time/Now))))))
+
+
+    nil))
+
+
+^{:go/breaks [[3 2753]] :go/end 2754} (go/method EnableFullDuplex ^error [^{:tag (* responseWriter)} w]
+  ;; We always support full duplex responses, so this is a no-op.
+  nil)
+
+
+^{:go/end 2758} (go/method Flush [^{:tag (* responseWriter)} w]
+  (.FlushError w))
+
+
+^{:go/end 2783} (go/method FlushError ^error [^{:tag (* responseWriter)} w]
+  (let [rws (.-rws w)]
+    (when (== rws nil)
+      (panic "Header called after Handler finished"))
+
+    (let [^error err (zero error)]
+      (if (> (.Buffered (.-bw rws)) 0)
+        (set! err (.Flush (.-bw rws)))
+        (do
+          ;; The bufio.Writer won't call chunkWriter.Write
+          ;; (writeChunk with zero bytes), so we have to do it
+          ;; ourselves to force the HTTP response header and/or
+          ;; final DATA frame (with END_STREAM) to be sent.
+          (set! (values _ err) (.Write (lit chunkWriter rws) nil))
+          (when (== err nil)
+            (select
+              (case (<! (.-cw (.-stream rws)))
+                (set! err (.-closeErr (.-stream rws))))
+              (default)))))
+
+
+
+      ^{:line 2782} err)))
+
+
+^{:go/end 2803} (go/method CloseNotify ^{:tag (chan :recv bool)} [^{:tag (* responseWriter)} w]
+  (let [rws (.-rws w)]
+    (when (== rws nil)
+      (panic "CloseNotify called after Handler finished"))
+
+    (.Lock (.-closeNotifierMu rws))
+    (let [ch (.-closeNotifierCh rws)]
+      (when (== ch nil)
+        (set! ch (make (chan bool) 1))
+        (set! (.-closeNotifierCh rws) ch)
+        (let [cw (.-cw (.-stream rws))]
+          (go (^{:go/end 2799} (fn []
+                (.Wait cw) ; wait for close
+                (>! ch true))))))
+
+
+      (.Unlock (.-closeNotifierMu rws))
+      ^{:line 2802} ch)))
+
+
+^{:go/end 2814} (go/method Header ^Header [^{:tag (* responseWriter)} w]
+  (let [rws (.-rws w)]
+    (when (== rws nil)
+      (panic "Header called after Handler finished"))
+
+    (when (== (.-handlerHeader rws) nil)
+      (set! (.-handlerHeader rws) (make Header)))
+
+    (.-handlerHeader rws)))
+
+
+
+^{:go/end 2831} (go/func checkWriteHeaderCode "checkWriteHeaderCode is a copy of net/http's checkWriteHeaderCode.\n" [^int code]
+  ;; Issue 22880: require valid WriteHeader status codes.
+  ;; For now we only enforce that it's three digits.
+  ;; In the future we might block things over 599 (600 and above aren't defined
+  ;; at http://httpwg.org/specs/rfc7231.html#status.codes).
+  ;; But for now any three digits.
+  ;;
+  ;; We used to send "HTTP/1.1 000 0" on the wire in responses but there's
+  ;; no equivalent bogus thing we can realistically send in HTTP/2,
+  ;; so we'll consistently panic instead and help people find their bugs
+  ;; early. (We can't return an error from WriteHeader even if we wanted to.)
+  (when (or (< code 100) (> code 999))
+    (panic (fmt/Sprintf "invalid WriteHeader code %v" code))))
+
+
+
+^{:go/end 2839} (go/method WriteHeader [^{:tag (* responseWriter)} w ^int code]
+  (let [rws (.-rws w)]
+    (when (== rws nil)
+      (panic "WriteHeader called after Handler finished"))
+
+    (.writeHeader rws code)))
+
+
+^{:go/end 2876} (go/method writeHeader [^{:tag (* responseWriterState)} rws ^int code]
+  (when (.-wroteHeader rws)
+    (return))
+
+
+  (checkWriteHeaderCode code)
+
+  ;; Handle informational headers
+  (when (and (>= code 100) (<= code 199))
+    ;; Per RFC 8297 we must not clear the current header map
+    (let [h (.-handlerHeader rws)
+
+        (values _ cl) (aget h "Content-Length")
+        (values _ te) (aget h "Transfer-Encoding")]
+      (when (or cl te)
+        (set! h (cloneHeader h))
+        (.Del h "Content-Length")
+        (.Del h "Transfer-Encoding"))
+
+
+      (.writeHeaders (.-conn rws) (.-stream rws) (addr ^{:go/breaks [2 4 6 8]} (lit writeResHeaders
+            :streamID (.-id (.-stream rws))
+            :httpResCode code
+            :h h
+            :endStream (and (.-handlerDone rws) (not (.hasTrailers rws))))))
+
+
+      (return)))
+
+
+  (set! (.-wroteHeader rws) true)
+  (set! (.-status rws) code)
+  (when (> (len (.-handlerHeader rws)) 0)
+    (set! (.-snapHeader rws) (cloneHeader (.-handlerHeader rws)))))
+
+
+
+^{:go/end 2886} (go/func cloneHeader ^Header [^Header h]
+  (let [h2 (make Header (len h))]
+    (range [k vv h]
+      (let [vv2 (make (slice string) (len vv))]
+        (copy vv2 vv)
+        (aset h2 k vv2)))
+
+    ^{:line 2885} h2))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2898} (go/method Write "The Life Of A Write is like this:\n\n* Handler calls w.Write or w.WriteString ->\n* -> rws.bw (*bufio.Writer) ->\n* (Handler might call Flush)\n* -> chunkWriter{rws}\n* -> responseWriterState.writeChunk(p []byte)\n* -> responseWriterState.writeChunk (most of the magic; see comment there)\n" [^{:tag (* responseWriter)} w ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (.write w (len p) p ""))
+
+
+^{:go/end 2902} (go/method WriteString [^{:tag (* responseWriter)} w ^string s] :results [^int n ^error err]
+  (.write w (len s) nil s))
+
+
+
+^{:go/end 2927} (go/method write "either dataB or dataS is non-zero.\n" [^{:tag (* responseWriter)} w ^int lenData ^{:tag (slice byte)} dataB ^string dataS] :results [^int n ^error err]
+  (let [rws (.-rws w)]
+    (when (== rws nil)
+      (panic "Write called after Handler finished"))
+
+    (when (not (.-wroteHeader rws))
+      (.WriteHeader w 200))
+
+    (when (not (bodyAllowedForStatus (.-status rws)))
+      (return 0 ErrBodyNotAllowed))
+
+    (set! (.-wroteBytes rws) + (+ (conv int64 (len dataB)) (conv int64 (len dataS)))) ; only one can be set
+    (when (and (!= (.-sentContentLen rws) 0) (> (.-wroteBytes rws) (.-sentContentLen rws)))
+      ;; TODO: send a RST_STREAM
+      (return 0 (errors/New "http2: handler wrote more than declared Content-Length")))
+
+
+    (if (!= dataB nil)
+      (return (.Write (.-bw rws) dataB))
+
+      (return (.WriteString (.-bw rws) dataS)))))
+
+
+
+^{:go/end 2935} (go/method handlerDone [^{:tag (* responseWriter)} w]
+  (let [rws (.-rws w)]
+    (set! (.-handlerDone rws) true)
+    (.Flush w)
+    (set! (.-rws w) nil)
+    (.Put responseWriterStatePool rws)))
+
+
+
+(go/var "Push errors.\n"
+  ^{:line 2939} [ErrRecursivePush (errors/New "http2: recursive push not allowed")]
+  ^{:line 2940} [ErrPushLimitReached (errors/New "http2: push would exceed peer's SETTINGS_MAX_CONCURRENT_STREAMS")])
+
+
+^{:go/end 3038} (go/method Push ^error [^{:tag (* responseWriter)} w ^string target ^string method ^Header header]
+  (let [st (.-stream (.-rws w))
+      ^{:line 2945} sc (.-sc st)]
+    (.checkNotOn (.-serveG sc))
+
+    ;; No recursive pushes: "PUSH_PROMISE frames MUST only be sent on a peer-initiated stream."
+    ;; http://tools.ietf.org/html/rfc7540#section-6.6
+    (when (.isPushed st)
+      (return ErrRecursivePush))
+
+
+    ;; Default options.
+    (when (== method "")
+      (set! method "GET"))
+
+    (when (== header nil)
+      (set! header (lit Header)))
+
+    (let [wantScheme "http"]
+      (when (!= (.-TLS (.-req (.-rws w))) nil)
+        (set! wantScheme "https"))
+
+
+      ;; Validate the request.
+      (let [(values u err) (url/Parse target)]
+        (when (!= err nil)
+          (return err))
+
+        (if (== (.-Scheme u) "") (do
+            (when (not (strings/HasPrefix target "/"))
+              (return (fmt/Errorf "target must be an absolute URL or an absolute path: %q" target)))
+
+            (set! (.-Scheme u) wantScheme)
+            (set! (.-Host u) (.-Host (.-req (.-rws w)))))
+          (do
+            (when (!= (.-Scheme u) wantScheme)
+              (return (fmt/Errorf "cannot push URL with scheme %q from request with scheme %q" (.-Scheme u) wantScheme)))
+
+            (when (== (.-Host u) "")
+              (return (errors/New "URL must have a host")))))
+
+
+        (range [k header]
+          (when (strings/HasPrefix k ":")
+            (return (fmt/Errorf "promised request headers cannot include pseudo header %q" k)))
+
+          ;; These headers are meaningful only if the request has a body,
+          ;; but PUSH_PROMISE requests cannot have a body.
+          ;; http://tools.ietf.org/html/rfc7540#section-8.2
+          ;; Also disallow Host, since the promised URL must be absolute.
+          (when (or (asciiEqualFold k "content-length")
+              (asciiEqualFold k "content-encoding")
+              (asciiEqualFold k "trailer")
+              (asciiEqualFold k "te")
+              (asciiEqualFold k "expect")
+              (asciiEqualFold k "host"))
+            (return (fmt/Errorf "promised request headers cannot include %q" k))))
+
+
+        (when [err (checkValidHTTP2RequestHeaders header)] (!= err nil)
+          (return err))
+
+
+        ;; The RFC effectively limits promised requests to GET and HEAD:
+        ;; "Promised requests MUST be cacheable [GET, HEAD, or POST], and MUST be safe [GET or HEAD]"
+        ;; http://tools.ietf.org/html/rfc7540#section-8.2
+        (when (and (!= method "GET") (!= method "HEAD"))
+          (return (fmt/Errorf "method %q must be GET or HEAD" method)))
+
+
+        (let [msg (addr ^{:go/breaks [2 4 6 8 10]} (lit startPushRequest
+                :parent st
+                :method method
+                :url u
+                :header (cloneHeader header)
+                :done (.getErrChan (.-srv sc))))]
+
+
+          (select
+            (case (<! (.-doneServing sc))
+              (return errClientDisconnected))
+            (case (<! (.-cw st))
+              (return errStreamClosed))
+            (case (>! (.-serveMsgCh sc) msg)))
+
+
+          (select
+            (case (<! (.-doneServing sc))
+              (return errClientDisconnected))
+            (case (<! (.-cw st))
+              (return errStreamClosed))
+            (case [err (<! (.-done msg))]
+              (.putErrChan (.-srv sc) (.-done msg))
+              (return err))))))))
+
+
+
+(go/type startPushRequest (struct
+    ^{:line 3041 :tag (* stream)} parent
+    ^{:line 3042 :tag string} method
+    ^{:line 3043 :tag (* url/URL)} url
+    ^{:line 3044 :tag Header} header
+    ^{:line 3045 :tag (chan error)} done))
+
+
+^{:go/end 3127} (go/method startPush [^{:tag (* serverConn)} sc ^{:tag (* startPushRequest)} msg]
+  (.check (.-serveG sc))
+
+  ;; http://tools.ietf.org/html/rfc7540#section-6.6.
+  ;; PUSH_PROMISE frames MUST only be sent on a peer-initiated stream that
+  ;; is in either the "open" or "half-closed (remote)" state.
+  (when (and (!= (.-state (.-parent msg)) stateOpen) (!= (.-state (.-parent msg)) stateHalfClosedRemote))
+    ;; responseWriter.Push checks that the stream is peer-initiated.
+    (>! (.-done msg) errStreamClosed)
+    (return))
+
+
+  ;; http://tools.ietf.org/html/rfc7540#section-6.6.
+  (when (not (.-pushEnabled sc))
+    (>! (.-done msg) ErrNotSupported)
+    (return))
+
+
+  ;; PUSH_PROMISE frames must be sent in increasing order by stream ID, so
+  ;; we allocate an ID for the promised stream lazily, when the PUSH_PROMISE
+  ;; is written. Once the ID is allocated, we start the request handler.
+  (let [allocatePromisedID ^{:go/end 3114} (fn [] :results [uint32 error]
+        (.check (.-serveG sc))
+
+        ;; Check this again, just in case. Technically, we might have received
+        ;; an updated SETTINGS by the time we got around to writing this frame.
+        (when (not (.-pushEnabled sc))
+          (return 0 ErrNotSupported))
+
+        ;; http://tools.ietf.org/html/rfc7540#section-6.5.2.
+        (when (> (+ (.-curPushedStreams sc) 1) (.-clientMaxStreams sc))
+          (return 0 ErrPushLimitReached))
+
+
+        ;; http://tools.ietf.org/html/rfc7540#section-5.1.1.
+        ;; Streams initiated by the server MUST use even-numbered identifiers.
+        ;; A server that is unable to establish a new stream identifier can send a GOAWAY
+        ;; frame so that the client is forced to open a new connection for new streams.
+        (when (>= (+ (.-maxPushPromiseID sc) 2) (<< 1 31))
+          (.startGracefulShutdownInternal sc)
+          (return 0 ErrPushLimitReached))
+
+        (set! (.-maxPushPromiseID sc) + 2)
+        (let [promisedID (.-maxPushPromiseID sc)
+
+            ;; http://tools.ietf.org/html/rfc7540#section-8.2.
+            ;; Strictly speaking, the new stream should start in "reserved (local)", then
+            ;; transition to "half closed (remote)" after sending the initial HEADERS, but
+            ;; we start in "half closed (remote)" for simplicity.
+            ;; See further comments at the definition of stateHalfClosedRemote.
+            ^{:line 3098} promised (.newStream sc promisedID (.-id (.-parent msg)) stateHalfClosedRemote (defaultRFC9218Priority (and (.-priorityAware sc) (not (.-hasIntermediary sc)))))
+            (values rw req err) (.newWriterAndRequestNoBody sc promised ^{:go/breaks [2 4 6 8 10]} (lit httpcommon/ServerRequestParam
+                :Method (.-method msg)
+                :Scheme (.-Scheme (.-url msg))
+                :Authority (.-Host (.-url msg))
+                :Path (.RequestURI (.-url msg))
+                :Header (cloneHeader (.-header msg))))] ; clone since handler runs concurrently with writing the PUSH_PROMISE
+
+          (when (!= err nil)
+            ;; Should not happen, since we've already validated msg.url.
+            (panic (fmt/Sprintf "newWriterAndRequestNoBody(%+v): %v" (.-url msg) err)))
+
+
+          (inc! (.-curHandlers sc))
+          (go (.runHandler sc rw req (.-ServeHTTP (.-handler sc))))
+          (return promisedID nil)))]
+
+
+    (.writeFrame sc ^{:go/breaks [2 [4 3124] 6]} (lit FrameWriteRequest
+        :write (addr ^{:go/breaks [2 4 6 8 10]} (lit writePushPromise
+            :streamID (.-id (.-parent msg))
+            :method (.-method msg)
+            :url (.-url msg)
+            :h (.-header msg)
+            :allocatePromisedID allocatePromisedID))
+
+        :stream (.-parent msg)
+        :done (.-done msg)))))
+
+
+
+
+
+^{:go/end 3145} (go/func foreachHeaderElement "foreachHeaderElement splits v according to the \"#rule\" construction\nin RFC 7230 section 7 and calls fn for each non-empty element.\n" [^string v ^{:tag (func [string])} fn]
+  (set! v (textproto/TrimString v))
+  (when (== v "")
+    (return))
+
+  (when (not (strings/Contains v ","))
+    (go/call fn v)
+    (return))
+
+  (range [f (strings/SplitSeq v ",")]
+    (when [(set! f (textproto/TrimString f))] (!= f "")
+      (go/call fn f))))
+
+
+
+
+
+(go/var ^{:doc "From http://httpwg.org/specs/rfc7540.html#rfc.section.8.1.2.2\n"} connHeaders ^{:go/breaks [2 3 4 5 6]} (lit (slice string)
+    "Connection"
+    "Keep-Alive"
+    "Proxy-Connection"
+    "Transfer-Encoding"
+    "Upgrade"))
+
+
+
+
+
+^{:go/end 3170} (go/func checkValidHTTP2RequestHeaders "checkValidHTTP2RequestHeaders checks whether h is a valid HTTP/2 request,\nper RFC 7540 Section 8.1.2.2.\nThe returned error is reported to users.\n" ^error [^Header h]
+  (range [_ k connHeaders]
+    (when [(values _ ok) (aget h k)] ok
+      (return (fmt/Errorf "request header %q is not valid in HTTP/2" k))))
+
+
+  ^{:go/breaks [[3 3169]]} (let [te (aget h "Te")]
+    (when (and (> (len te) 0) ^:go/paren (or (> (len te) 1) ^:go/paren (and (!= (aget te 0) "trailers") (!= (aget te 0) ""))))
+      (return (errors/New "request header \"TE\" may only be \"trailers\" in HTTP/2")))
+
+    nil))
+
+
+(go/type serve400Handler (struct
+    ^{:line 3173 :tag error} err))
+
+
+^{:go/end 3186} (go/method ServeHTTP [^serve400Handler handler ^{:tag (* ResponseWriter)} w ^{:tag (* ServerRequest)} r]
+  (let [^:const ^{:val 400} statusBadRequest 400
+
+      ;; TODO: Dedup with http.Error?
+      ^{:line 3180} h (.Header w)]
+    (.Del h "Content-Length")
+    (.Set h "Content-Type" "text/plain; charset=utf-8")
+    (.Set h "X-Content-Type-Options" "nosniff")
+    (.WriteHeader w statusBadRequest)
+    (fmt/Fprintln w (.Error (.-err handler)))))
+
+
+
+
+
+^{:go/end 3193} (go/func h1ServerKeepAlivesDisabled "h1ServerKeepAlivesDisabled reports whether hs has its keep-alives\ndisabled. See comments on h1ServerShutdownChan above for why\nthe code is written this way.\n" ^bool [^ServerConfig hs]
+  (not (.DoKeepAlives hs)))
+
+
+^{:go/end 3221} (go/method countError ^error [^{:tag (* serverConn)} sc ^string name ^error err]
+  (when (or (== sc nil) (== (.-srv sc) nil))
+    (return err))
+
+  (let [f (.-countErrorFunc sc)]
+    (when (== f nil)
+      (return err))
+
+    (let [^string typ (zero string)
+        ^{:line 3204 :tag ErrCode} code (zero ErrCode)]
+      (type-switch [e err]
+        (case [ConnectionError]
+          (set! typ "conn")
+          (set! code (conv ErrCode e)))
+        (case [StreamError]
+          (set! typ "stream")
+          (set! code (conv ErrCode (.-Code e))))
+        (default
+          (return err)))
+
+      (let [codeStr (aget errCodeName code)]
+        (when (== codeStr "")
+          (set! codeStr (strconv/Itoa (conv int code))))
+
+        (f (fmt/Sprintf "%s_%s_%s" typ codeStr name))
+        ^{:line 3220} err))))

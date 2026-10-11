@@ -1,0 +1,497 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.runtime.cgroup) (go/file "cgroup.go" :imports [
+
+
+    ^{:line 8} [bytealg "internal/bytealg"]
+    ^{:line 9} [strconv "internal/strconv"]])
+
+
+(go/var
+  ^{:line 13} [^error ErrNoCgroup (conv stringError "not in a cgroup")]
+
+  ^{:line 15} [^error errMalformedFile (conv stringError "malformed file")])
+
+
+(go/const ^{:val 4096} _PATH_MAX 4096)
+
+(go/const
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 32} [^{:val 69632 :doc "Required amount of scratch space for CPULimit.\n\nTODO(prattmic): This is shockingly large (~70KiB) due to the (very\nunlikely) combination of extremely long paths consisting mostly\nescaped characters. The scratch buffer ends up in .bss in package\nruntime, so it doesn't contribute to binary size and generally won't\nbe faulted in, but it would still be nice to shrink this. A more\ncomplex parser that did not need to keep entire lines in memory\ncould get away with much less. Alternatively, we could do a one-off\nmmap allocation for this buffer, which is only mapped larger if we\nactually need the extra space.\n"} ScratchSize (+ PathSize ParseSize)]
+
+
+  ^{:line 35} [^{:val 4096 :doc "Required space to store a path of the cgroup in the filesystem.\n"} PathSize _PATH_MAX]
+
+
+
+
+  ^{:line 40} [^{:val 16384 :doc "/proc/self/mountinfo path escape sequences are 4 characters long, so\na path consisting entirely of escaped characters could be 4 times\nlarger.\n"} escapedPathMax (* 4 _PATH_MAX)]
+
+
+
+  ^{:line 44} [^{:val 65536 :doc "Required space to parse /proc/self/mountinfo and /proc/self/cgroup.\nSee findCPUMount and findCPURelativePath.\n"} ParseSize (* 4 escapedPathMax)])
+
+
+
+(go/type Version "Version indicates the cgroup version.\n" int)
+
+(go/const
+  ^{:line 51} [^{:tag Version :val 0} VersionUnknown iota]
+  ^{:line 52} [^{:val 1} V1]
+  ^{:line 53} [^{:val 2} V2])
+
+
+^{:go/end 70} (go/func parseV1Number [^{:tag (slice byte)} buf] :results [int64 error]
+  ;; Ignore trailing newline.
+  (let [i (bytealg/IndexByte buf \newline)]
+    (when (< i 0)
+      (return 0 errMalformedFile))
+
+    (set! buf (subslice buf _ i))
+
+    (let [(values val err) (strconv/ParseInt (conv string buf) 10 64)]
+      (when (!= err nil)
+        (return 0 errMalformedFile))
+
+
+      (return val nil))))
+
+
+^{:go/end 103} (go/func parseV2Limit [^{:tag (slice byte)} buf] :results [float64 bool error]
+  (let [i (bytealg/IndexByte buf \space)]
+    (when (< i 0)
+      (return 0 false errMalformedFile))
+
+
+    (let [quotaStr (subslice buf _ i)]
+      (when (== (bytealg/Compare quotaStr (conv (slice byte) "max")) 0)
+        ;; No limit.
+        (return 0 false nil))
+
+
+      (let [periodStr (subslice buf (+ i 1))]
+        ;; Ignore trailing newline, if any.
+        (set! i (bytealg/IndexByte periodStr \newline))
+        (when (< i 0)
+          (return 0 false errMalformedFile))
+
+        (set! periodStr (subslice periodStr _ i))
+
+        (let [(values quota err) (strconv/ParseInt (conv string quotaStr) 10 64)]
+          (when (!= err nil)
+            (return 0 false errMalformedFile))
+
+
+          (let [(values period ^:assign err) (strconv/ParseInt (conv string periodStr) 10 64)]
+            (when (!= err nil)
+              (return 0 false errMalformedFile))
+
+
+            (return (/ (conv float64 quota) (conv float64 period)) true nil)))))))
+
+
+
+
+
+
+^{:go/end 204} (go/func parseCPUCgroup "Finds the path of the current process's CPU cgroup and writes it to out.\n\nfd is a file descriptor for /proc/self/cgroup.\nReturns the number of bytes written and the cgroup version (1 or 2).\n" [^int fd ^{:tag (func [^int fd ^{:tag (slice byte)} b] [int uintptr])} read ^{:tag (slice byte)} out ^{:tag (slice byte)} scratch] :results [int Version error]
+  ;; The format of each line is
+  ;;
+  ;;   hierarchy-ID:controller-list:cgroup-path
+  ;;
+  ;; controller-list is comma-separated.
+  ;;
+  ;; cgroup v2 has hierarchy-ID 0. If a v1 hierarchy contains "cpu", that
+  ;; is the CPU controller. Otherwise the v2 hierarchy (if any) is the
+  ;; CPU controller. It is not possible to mount the same controller
+  ;; simultaneously under both the v1 and the v2 hierarchies.
+  ;;
+  ;; See man 7 cgroups for more details.
+  ;;
+  ;; hierarchy-ID and controller-list have relatively small maximum
+  ;; sizes, and the path can be up to _PATH_MAX, so we need a bit more
+  ;; than 1 _PATH_MAX of scratch space.
+
+  (let [l (newLineReader fd scratch read)
+
+      ;; Bytes written to out.
+      ^{:line 130} n 0]
+
+    (while true
+      (let [err (.next l)]
+        (cond (== err errIncompleteLine)
+          ;; Don't allow incomplete lines. While in theory the
+          ;; incomplete line may be for a controller we don't
+          ;; care about, in practice all lines should be of
+          ;; similar length, so we should just have a buffer big
+          ;; enough for any.
+          (return 0 0 err)
+          (== err errEOF)
+          (break)
+          (!= err nil)
+          (return 0 0 err))
+
+
+        (let [line (.line l)
+
+            ;; The format of each line is
+            ;;
+            ;;   hierarchy-ID:controller-list:cgroup-path
+            ;;
+            ;; controller-list is comma-separated.
+            ;; See man 7 cgroups for more details.
+            ^{:line 155} i (bytealg/IndexByte line \:)]
+          (when (< i 0)
+            (return 0 0 errMalformedFile))
+
+
+          (let [hierarchy (subslice line _ i)]
+            (set! line (subslice line (+ i 1)))
+
+            (set! i (bytealg/IndexByte line \:))
+            (when (< i 0)
+              (return 0 0 errMalformedFile))
+
+
+            (let [controllers (subslice line _ i)]
+              (set! line (subslice line (+ i 1)))
+
+              (let [path line]
+                (when (or (== (len path) 0) (!= (aget path 0) \/))
+                  ;; We rely on this when composing the full path.
+                  (return 0 0 errMalformedFile))
+
+                (when (> (len path) (len out))
+                  ;; Should not be possible. If we really get a very long cgroup path,
+                  ;; read /proc/self/cgroup will fail with ENAMETOOLONG.
+                  (return 0 0 errPathTooLong))
+
+
+                (if (== (conv string hierarchy) "0")
+                  ;; v2 hierarchy.
+                  (set! n (copy out path))
+                  ;; Keep searching, we might find a v1 hierarchy with a
+                  ;; CPU controller, which takes precedence.
+                  (do
+                    ;; v1 hierarchy
+                    (when (containsCPU controllers)
+                      ;; Found a v1 CPU controller. This must be the
+                      ;; only one, so we're done.
+                      (return (copy out path) V1 nil))))))))))
+
+
+
+
+    (when (== n 0)
+      ;; Found nothing.
+      (return 0 0 ErrNoCgroup))
+
+
+    ;; Must be v2, v1 returns above.
+    (return n V2 nil)))
+
+
+
+^{:go/breaks [[5 225]] :go/end 226} (go/func containsCPU "Returns true if comma-separated list b contains \"cpu\".\n" ^bool [^{:tag (slice byte)} b]
+  (while (> (len b) 0)
+    (let [i (bytealg/IndexByte b \,)]
+      (when (< i 0)
+        ;; Neither cmd/compile nor gccgo allocates for these string conversions.
+        (return (== (conv string b) "cpu")))
+
+
+      (let [curr (subslice b _ i)
+          ^{:line 216} rest (subslice b (+ i 1))]
+
+        (when (== (conv string curr) "cpu")
+          (return true))
+
+
+        (set! b rest))))
+
+
+  false)
+
+
+
+
+
+
+^{:go/end 418} (go/func parseCPUMount "Returns the path to the specified cgroup and version with cpu controller\n\nfd is a file descriptor for /proc/self/mountinfo.\nReturns the number of bytes written.\n" [^int fd ^{:tag (func [^int fd ^{:tag (slice byte)} b] [int uintptr])} read ^{:tag (slice byte)} out ^{:tag (slice byte)} cgroup ^Version version ^{:tag (slice byte)} scratch] :results [int error]
+  ;; The format of each line is:
+  ;;
+  ;; 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
+  ;; (1)(2)(3)   (4)   (5)      (6)      (7)   (8) (9)   (10)         (11)
+  ;;
+  ;; (1) mount ID:  unique identifier of the mount (may be reused after umount)
+  ;; (2) parent ID:  ID of parent (or of self for the top of the mount tree)
+  ;; (3) major:minor:  value of st_dev for files on filesystem
+  ;; (4) root:  root of the mount within the filesystem
+  ;; (5) mount point:  mount point relative to the process's root
+  ;; (6) mount options:  per mount options
+  ;; (7) optional fields:  zero or more fields of the form "tag[:value]"
+  ;; (8) separator:  marks the end of the optional fields
+  ;; (9) filesystem type:  name of filesystem of the form "type[.subtype]"
+  ;; (10) mount source:  filesystem specific information or "none"
+  ;; (11) super options:  per super block options
+  ;;
+  ;; See man 5 proc_pid_mountinfo for more details.
+  ;;
+  ;; Note that emitted paths will not contain space, tab, newline, or
+  ;; carriage return. Those are escaped. See Linux show_mountinfo ->
+  ;; show_path. We must unescape before returning.
+  ;;
+  ;; A mount point matches if the filesystem type (9) is cgroup2,
+  ;; or cgroup with "cpu" in the super options (11),
+  ;; and the cgroup is in the root (4). If there are multiple matches,
+  ;; the first one is selected.
+  ;;
+  ;; We return full cgroup path, which is the mount point (5) +
+  ;; cgroup parameter without the root (4) prefix.
+  ;;
+  ;; (4), (5), and (10) are up to _PATH_MAX. The remaining fields have a
+  ;; small fixed maximum size, so 4*_PATH_MAX is plenty of scratch space.
+  ;; Note that non-cgroup mounts may have arbitrarily long (11), but we
+  ;; can skip those when parsing.
+
+  (let [l (newLineReader fd scratch read)]
+
+    (while true
+      (let [err (.next l)]
+        (cond (== err errIncompleteLine) (do)
+          ;; An incomplete line is fine as long as it doesn't
+          ;; impede parsing the fields we need. It shouldn't be
+          ;; possible for any mount to use more than 3*PATH_MAX
+          ;; before (9) because there are two paths and all other
+          ;; earlier fields have bounded options. Only (11) has
+          ;; unbounded options.
+          (== err errEOF)
+          (break)
+          (!= err nil)
+          (return 0 err))
+
+
+        (let [line (.line l)]
+
+          ;; Skip first three fields.
+          (range [3]
+            (let [i (bytealg/IndexByte line \space)]
+              (when (< i 0)
+                (return 0 errMalformedFile))
+
+              (set! line (subslice line (+ i 1)))))
+
+
+          ;; (4) root:  root of the mount within the filesystem
+          (let [i (bytealg/IndexByte line \space)]
+            (when (< i 0)
+              (return 0 errMalformedFile))
+
+            (let [root (subslice line _ i)]
+              (when (or (== (len root) 0) (!= (aget root 0) \/))
+                ;; We rely on this in hasPathPrefix.
+                (return 0 errMalformedFile))
+
+              (set! line (subslice line (+ i 1)))
+
+              ;; (5) mount point:  mount point relative to the process's root
+              (set! i (bytealg/IndexByte line \space))
+              (when (< i 0)
+                (return 0 errMalformedFile))
+
+              (let [mnt (subslice line _ i)]
+                (set! line (subslice line (+ i 1)))
+
+                ;; Skip ahead past optional fields, delimited by " - ".
+                (while true
+                  (set! i (bytealg/IndexByte line \space))
+                  (when (< i 0)
+                    (return 0 errMalformedFile))
+
+                  (when (>= (+ i 3) (len line))
+                    (return 0 errMalformedFile))
+
+                  (let [delim (subslice line i (+ i 3))]
+                    (when (== (conv string delim) " - ")
+                      (set! line (subslice line (+ i 3)))
+                      (break))
+
+                    (set! line (subslice line (+ i 1)))))
+
+
+                ;; (9) filesystem type:  name of filesystem of the form "type[.subtype]"
+                (set! i (bytealg/IndexByte line \space))
+                (when (< i 0)
+                  (return 0 errMalformedFile))
+
+                (let [ftype (subslice line _ i)]
+                  (set! line (subslice line (+ i 1)))
+
+                  (switch version
+                    (case [V1]
+                      (when (!= (conv string ftype) "cgroup")
+                        (continue))
+
+                      ;; (10) mount source:  filesystem specific information or "none"
+                      (set! i (bytealg/IndexByte line \space))
+                      (when (< i 0)
+                        (return 0 errMalformedFile))
+
+                      ;; Don't care about mount source.
+                      (set! line (subslice line (+ i 1)))
+
+                      ;; (11) super options:  per super block options
+                      (when (not (containsCPU line))
+                        (continue)))
+
+                    (case [V2]
+                      (when (!= (conv string ftype) "cgroup2")
+                        (continue)))
+
+                    (default
+                      (throw "impossible cgroup version")
+                      (panic "unreachable")))
+
+
+                  ;; Check cgroup is in the root.
+                  ;; If the cgroup is /sandbox/container, the matching mount point root could be
+                  ;; /sandbox/container, /sandbox, or /
+                  (let [(values rootLen ^:assign err) (unescapePath root root)]
+                    (when (!= err nil)
+                      (return 0 err))
+
+                    (set! root (subslice root _ rootLen))
+                    (when (not (hasPathPrefix cgroup root))
+                      (continue)) ; not matched, this is not the mount point we're looking for
+
+
+                    ;; Cutoff the root from cgroup, ensure rel starts with '/' or is empty.
+                    (let [rel (subslice cgroup rootLen)]
+                      (when (and (== rootLen 1) (> (len cgroup) 1))
+                        ;; root is "/", but cgroup is not. Keep full cgroup path.
+                        (set! rel cgroup))
+
+                      (when (hasPathPrefix rel (conv (slice byte) "/.."))
+                        ;; the cgroup is out of current cgroup namespace, and this mount point
+                        ;; cannot reach that cgroup.
+                        ;;
+                        ;; e.g. If the process is in cgroup /init, but in a cgroup namespace
+                        ;; rooted at /sandbox/container, /proc/self/cgroup will show /../../init.
+                        ;; we can reach it if the mount point root is
+                        ;; /../.. or /../../init, but not if it is /.. or /
+                        ;; While mount point with root /../../.. should able to reach the cgroup,
+                        ;; we don't know the path to the cgroup within that mount point.
+                        (continue))
+
+
+                      ;; All conditions met, compose the full path.
+                      ;; Copy rel to the correct place first, it may overlap with out.
+                      (let [n (unescapedLen mnt)]
+                        (when (> (+ n (len rel)) (len out))
+                          (return 0 errPathTooLong))
+
+                        (copy (subslice out n) rel)
+                        (let [(values n2 ^:assign err) (unescapePath (subslice out _ n) mnt)]
+                          (when (!= err nil)
+                            (return 0 err))
+
+                          (when (!= n2 n)
+                            (throw "wrong unescaped len"))
+
+                          (return (+ n (len rel)) nil))))))))))))
+
+
+    ;; Found nothing.
+    (return 0 ErrNoCgroup)))
+
+
+^{:go/end 429} (go/func hasPathPrefix ^bool [^{:tag (slice byte)} p ^{:tag (slice byte)} prefix]
+  (let [i (len prefix)]
+    (when (== i 1)
+      (return true)) ; root contains everything
+
+    (when (or (< (len p) i) (not (bytealg/Equal prefix (subslice p _ i))))
+      (return false))
+
+    (or (== (len p) i) (== (aget p i) \/)))) ; must match at path boundary
+
+
+(go/var
+  ^{:line 432} [^error errInvalidEscape (conv stringError "invalid path escape sequence")]
+  ^{:line 433} [^error errPathTooLong (conv stringError "path too long")])
+
+
+^{:go/end 438} (go/func unescapedLen ^int [^{:tag (slice byte)} in]
+  (- (len in) (* (bytealg/Count in (conv byte \\)) 3)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 498} (go/func unescapePath "unescapePath copies in to out, unescaping escape sequences generated by\nLinux's show_path.\n\nThat is, '\\', ' ', '\\t', and '\\n' are converted to octal escape sequences,\nlike '\\040' for space.\n\nCaller must ensure that out at least has unescapedLen(in) bytes.\nin and out may alias; in-place unescaping is supported.\n\nReturns the number of bytes written to out.\n\nAlso see escapePath in cgroup_linux_test.go.\n" [^{:tag (slice byte)} out ^{:tag (slice byte)} in] :results [int error]
+  (let [(values ^int outi ^int ini) (zero int)]
+    (while (< ini (len in))
+      (when (>= outi (len out))
+        ;; given that caller already ensured out is long enough, this
+        ;; is only possible if there are malformed escape sequences
+        ;; we have not parsed yet.
+        (return outi errInvalidEscape))
+
+      (let [c (aget in ini)]
+        (when (!= c \\)
+          (aset out outi c)
+          (inc! outi)
+          (inc! ini)
+          (continue))
+
+
+        ;; Start of escape sequence.
+
+        ;; Escape sequence is always 4 characters: one slash and three
+        ;; digits.
+        (when (>= (+ ini 3) (len in))
+          (return outi errInvalidEscape))
+
+
+        (let [^int outc (zero int)]
+          (range [i 3]
+            (let [c (aget in (+ ini 1 i))]
+              (when (or (< c \0) (> c \7))
+                (return outi errInvalidEscape))
+
+
+              (set! outc * 8)
+              (set! outc + (conv int (- c \0)))))
+
+
+          (when (> outc 0xFF)
+            (return outi errInvalidEscape))
+
+          (aset out outi (conv byte outc))
+          (inc! outi)
+
+          (set! ini + 4))))
+
+
+    (return outi nil)))

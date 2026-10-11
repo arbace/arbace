@@ -1,0 +1,598 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Parse "zoneinfo" time zone file.
+;; This is a fairly standard file format used on OS X, Linux, BSD, Sun, and others.
+;; See tzfile(5), https://en.wikipedia.org/wiki/Zoneinfo,
+;; and ftp://munnari.oz.au/pub/oldtz/
+
+(in-ns 'go.time) (go/file "zoneinfo_read.go" :imports [
+
+
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [bytealg "internal/bytealg"]
+    ^{:line 15} [runtime "runtime"]
+    ^{:line 16} [syscall "syscall"]
+    ^{:line 17} [_ "unsafe"]]) ; for linkname
+
+
+
+
+
+
+^{:go/end 26} (go/func ^{:go/linkname "registerLoadFromEmbeddedTZData"} registerLoadFromEmbeddedTZData "registerLoadFromEmbeddedTZData is called by the time/tzdata package,\nif it is imported.\n" [^{:tag (func [string] [string error])} f]
+  (set! loadFromEmbeddedTZData f))
+
+
+
+
+
+
+(go/var ^{:tag (func [^string zipname] [string error]) :doc "loadFromEmbeddedTZData is used to load a specific tzdata file\nfrom tzdata information embedded in the binary itself.\nThis is set when the time/tzdata package is imported,\nvia registerLoadFromEmbeddedTzdata.\n"} loadFromEmbeddedTZData)
+
+
+
+
+(go/const ^{:val 10485760 :doc "maxFileSize is the max permitted size of files read by readFile.\nAs reference, the zoneinfo.zip distributed by Go is ~350 KB,\nso 10MB is overkill.\n"} maxFileSize (<< 10 20))
+
+(go/type fileSizeError string)
+
+^{:go/end 43} (go/method Error ^string [^fileSizeError f]
+  (+ "time: file " (conv string f) " is too large"))
+
+
+
+(go/const "Copies of io.Seek* constants to avoid importing \"io\":\n"
+  ^{:line 47} [^{:val 0} seekStart 0]
+  ^{:line 48} [^{:val 1} seekCurrent 1]
+  ^{:line 49} [^{:val 2} seekEnd 2])
+
+
+
+(go/type dataIO "Simple I/O interface to binary blob of data.\n" (struct
+    ^{:line 54 :tag (slice byte)} p
+    ^{:line 55 :tag bool} error))
+
+
+^{:go/end 67} (go/method read ^{:tag (slice byte)} [^{:tag (* dataIO)} d ^int n]
+  (when (< (len (.-p d)) n)
+    (set! (.-p d) nil)
+    (set! (.-error d) true)
+    (return nil))
+
+  (let [p (subslice (.-p d) 0 n)]
+    (set! (.-p d) (subslice (.-p d) n))
+    ^{:line 66} p))
+
+
+^{:go/end 76} (go/method big4 [^{:tag (* dataIO)} d] :results [^uint32 n ^bool ok]
+  (let [p (.read d 4)]
+    (when (< (len p) 4)
+      (set! (.-error d) true)
+      (return 0 false))
+
+    (return (bit-or (conv uint32 (aget p 3)) (<< (conv uint32 (aget p 2)) 8) (<< (conv uint32 (aget p 1)) 16) (<< (conv uint32 (aget p 0)) 24)) true)))
+
+
+^{:go/end 86} (go/method big8 [^{:tag (* dataIO)} d] :results [^uint64 n ^bool ok]
+  (let [(values n1 ok1) (.big4 d)
+      (values n2 ok2) (.big4 d)]
+    (when (or (not ok1) (not ok2))
+      (set! (.-error d) true)
+      (return 0 false))
+
+    (return (bit-or (<< (conv uint64 n1) 32) (conv uint64 n2)) true)))
+
+
+^{:go/end 95} (go/method byte [^{:tag (* dataIO)} d] :results [^byte n ^bool ok]
+  (let [p (.read d 1)]
+    (when (< (len p) 1)
+      (set! (.-error d) true)
+      (return 0 false))
+
+    (return (aget p 0) true)))
+
+
+
+^{:go/end 102} (go/method rest "rest returns the rest of the data in the buffer.\n" ^{:tag (slice byte)} [^{:tag (* dataIO)} d]
+  (let [r (.-p d)]
+    (set! (.-p d) nil)
+    ^{:line 101} r))
+
+
+
+^{:go/end 110} (go/func byteString "Make a string by stopping at the first NUL\n" ^string [^{:tag (slice byte)} p]
+  (when [i (bytealg/IndexByte p 0)] (!= i -1)
+    (set! p (subslice p _ i)))
+
+  (conv string p))
+
+
+(go/var errBadData (errors/New "malformed time zone information"))
+
+
+
+
+
+^{:go/end 354} (go/func LoadLocationFromTZData "LoadLocationFromTZData returns a new [Location] with the given name\ninitialized from the IANA Time Zone database-formatted data.\nThe data should be in the format of a standard IANA time zone file\n(for example, the content of /etc/localtime on Unix systems).\n" [^string name ^{:tag (slice byte)} data] :results [(* Location) error]
+  (let [d (lit dataIO data false)]
+
+    ;; 4-byte magic "TZif"
+    (when [magic (.read d 4)] (!= (conv string magic) "TZif")
+      (return nil errBadData))
+
+
+    ;; 1-byte version, then 15 bytes of padding
+    (let [^int version (zero int)
+        ^{:line 128 :tag (slice byte)} p (zero (slice byte))]
+      (if [(set! p (.read d 16))] (!= (len p) 16)
+        (return nil errBadData)
+
+        (switch (aget p 0)
+          (case [0]
+            (set! version 1))
+          (case [\2]
+            (set! version 2))
+          (case [\3]
+            (set! version 3))
+          (default
+            (return nil errBadData))))
+
+
+
+      ;; six big-endian 32-bit integers:
+      ;;	number of UTC/local indicators
+      ;;	number of standard/wall indicators
+      ;;	number of leap seconds
+      ;;	number of transition times
+      ;;	number of local time zones
+      ;;	number of characters of time zone abbrev strings
+      (let [
+          ^:const ^{:line 152 :val 0} NUTCLocal iota
+          ^:const ^:go/grouped ^:go/implicit ^{:line 153 :val 1} NStdWall iota
+          ^:const ^:go/grouped ^:go/implicit ^{:line 154 :val 2} NLeap iota
+          ^:const ^:go/grouped ^:go/implicit ^{:line 155 :val 3} NTime iota
+          ^:const ^:go/grouped ^:go/implicit ^{:line 156 :val 4} NZone iota
+          ^:const ^:go/grouped ^:go/implicit ^{:line 157 :val 5} NChar iota
+
+          ^{:line 159 :tag (array 6 int)} n (zero (array 6 int))]
+        (for [i 0] (< i 6) (inc! i)
+          (let [(values nn ok) (.big4 d)]
+            (when (not ok)
+              (return nil errBadData))
+
+            (when (!= (conv uint32 (conv int nn)) nn)
+              (return nil errBadData))
+
+            (aset n i (conv int nn))))
+
+
+        ;; If we have version 2 or 3, then the data is first written out
+        ;; in a 32-bit format, then written out again in a 64-bit format.
+        ;; Skip the 32-bit format and read the 64-bit one, as it can
+        ;; describe a broader range of dates.
+
+        (let [is64 false]
+          (when (> version 1)
+            ;; Skip the 32-bit data.
+            (let [skip (+ (* (aget n NTime) 4)
+                  (aget n NTime)
+                  (* (aget n NZone) 6)
+                  (aget n NChar)
+                  (* (aget n NLeap) 8)
+                  (aget n NStdWall)
+                  (aget n NUTCLocal))]
+              ;; Skip the version 2 header that we just read.
+              (set! skip + (+ 4 16))
+              (.read d skip)
+
+              (set! is64 true)
+
+              ;; Read the counts again, they can differ.
+              (for [i 0] (< i 6) (inc! i)
+                (let [(values nn ok) (.big4 d)]
+                  (when (not ok)
+                    (return nil errBadData))
+
+                  (when (!= (conv uint32 (conv int nn)) nn)
+                    (return nil errBadData))
+
+                  (aset n i (conv int nn))))))
+
+
+
+          (let [size 4]
+            (when is64
+              (set! size 8))
+
+
+            ;; Transition times.
+            (let [txtimes (lit dataIO (.read d (* (aget n NTime) size)) false)
+
+                ;; Time zone indices for transition times.
+                ^{:line 214} txzones (.read d (aget n NTime))
+
+                ;; Zone info structures
+                ^{:line 217} zonedata (lit dataIO (.read d (* (aget n NZone) 6)) false)
+
+                ;; Time zone abbreviations.
+                ^{:line 220} abbrev (.read d (aget n NChar))]
+
+              ;; Leap-second time pairs
+              (.read d (* (aget n NLeap) (+ size 4)))
+
+              ;; Whether tx times associated with local time types
+              ;; are specified as standard time or wall time.
+              (let [isstd (.read d (aget n NStdWall))
+
+                  ;; Whether tx times associated with local time types
+                  ;; are specified as UTC or local time.
+                  ^{:line 231} isutc (.read d (aget n NUTCLocal))]
+
+                (when (.-error d) ; ran out of data
+                  (return nil errBadData))
+
+
+                (let [^string extend (zero string)
+                    ^{:line 238} rest (.rest d)]
+                  (when (and (> (len rest) 2) (== (aget rest 0) \newline) (== (aget rest (- (len rest) 1)) \newline))
+                    (set! extend (conv string (subslice rest 1 (- (len rest) 1)))))
+
+
+                  ;; Now we can build up a useful data structure.
+                  ;; First the zone information.
+                  ;;	utcoff[4] isdst[1] nameindex[1]
+                  (let [nzone (aget n NZone)]
+                    (when (== nzone 0)
+                      ;; Reject tzdata files with no zones. There's nothing useful in them.
+                      ;; This also avoids a panic later when we add and then use a fake transition (golang.org/issue/29437).
+                      (return nil errBadData))
+
+                    (let [zones (make (slice zone) nzone)]
+                      (range [i zones]
+                        (let [^bool ok (zero bool)
+                            ^{:line 255 :tag uint32} n (zero uint32)]
+                          (when [(set! (values n ok) (.big4 zonedata))] (not ok)
+                            (return nil errBadData))
+
+                          (when (!= (conv uint32 (conv int n)) n)
+                            (return nil errBadData))
+
+                          (set! (.-offset (aget zones i)) (conv int (conv int32 n)))
+                          (let [^byte b (zero byte)]
+                            (when [(set! (values b ok) (.byte zonedata))] (not ok)
+                              (return nil errBadData))
+
+                            (set! (.-isDST (aget zones i)) (!= b 0))
+                            (when [(set! (values b ok) (.byte zonedata))] (or (not ok) (>= (conv int b) (len abbrev)))
+                              (return nil errBadData))
+
+                            (set! (.-name (aget zones i)) (byteString (subslice abbrev b)))
+                            (when (and (== runtime/GOOS "aix") (> (len name) 8) ^:go/paren (or (== (subslice name _ 8) "Etc/GMT+") (== (subslice name _ 8) "Etc/GMT-")))
+                              ;; There is a bug with AIX 7.2 TL 0 with files in Etc,
+                              ;; GMT+1 will return GMT-1 instead of GMT+1 or -01.
+                              (when (!= name "Etc/GMT+0")
+                                ;; GMT+0 is OK
+                                (set! (.-name (aget zones i)) (subslice name 4)))))))
+
+
+
+
+                      ;; Now the transition time info.
+                      (let [tx (make (slice zoneTrans) (aget n NTime))]
+                        (range [i tx]
+                          (let [^int64 n (zero int64)]
+                            (if (not is64)
+                              (if [(values n4 ok) (.big4 txtimes)] (not ok)
+                                (return nil errBadData)
+
+                                (set! n (conv int64 (conv int32 n4))))
+
+                              (do
+                                (if [(values n8 ok) (.big8 txtimes)] (not ok)
+                                  (return nil errBadData)
+
+                                  (set! n (conv int64 n8)))))
+
+
+                            (set! (.-when (aget tx i)) n)
+                            (when (>= (conv int (aget txzones i)) (len zones))
+                              (return nil errBadData))
+
+                            (set! (.-index (aget tx i)) (aget txzones i))
+                            (when (< i (len isstd))
+                              (set! (.-isstd (aget tx i)) (!= (aget isstd i) 0)))
+
+                            (when (< i (len isutc))
+                              (set! (.-isutc (aget tx i)) (!= (aget isutc i) 0)))))
+
+
+
+                        (when (== (len tx) 0)
+                          ;; Build fake transition to cover all time.
+                          ;; This happens in fixed locations like "Etc/GMT0".
+                          (set! tx (append tx (lit zoneTrans :when alpha :index 0))))
+
+
+                        ;; Committed to succeed.
+                        (let [l (addr (lit Location :zone zones :tx tx :name name :extend extend))
+
+                            ;; Fill in the cache with information about right now,
+                            ;; since that will be the most common lookup.
+                            (values sec _ _) (runtimeNow)]
+                          (range [i tx]
+                            (when (and (<= (.-when (aget tx i)) sec) ^:go/paren (or (== (+ i 1) (len tx)) (< sec (.-when (aget tx (+ i 1))))))
+                              (set! (.-cacheStart l) (.-when (aget tx i)))
+                              (set! (.-cacheEnd l) omega)
+                              (set! (.-cacheZone l) (addr (aget (.-zone l) (.-index (aget tx i)))))
+                              (cond (< (+ i 1) (len tx))
+                                (set! (.-cacheEnd l) (.-when (aget tx (+ i 1))))
+                                (!= (.-extend l) "")
+                                ;; If we're at the end of the known zone transitions,
+                                ;; try the extend string.
+                                (when [(values name offset estart eend isDST ok) (tzset (.-extend l) (.-cacheStart l) sec)] ok
+                                  (set! (.-cacheStart l) estart)
+                                  (set! (.-cacheEnd l) eend)
+                                  ;; Find the zone that is returned by tzset to avoid allocation if possible.
+                                  (if [zoneIdx (findZone (.-zone l) name offset isDST)] (!= zoneIdx -1)
+                                    (set! (.-cacheZone l) (addr (aget (.-zone l) zoneIdx)))
+
+                                    (set! (.-cacheZone l) (addr ^{:go/breaks [2 4 6]} (lit zone
+                                          :name name
+                                          :offset offset
+                                          :isDST isDST))))))
+
+
+
+
+                              (break)))
+
+
+
+                          (return l nil))))))))))))))
+
+
+^{:go/breaks [[4 362]] :go/end 363} (go/func findZone ^int [^{:tag (slice zone)} zones ^string name ^int offset ^bool isDST]
+  (range [i z zones]
+    (when (and (== (.-name z) name) (== (.-offset z) offset) (== (.-isDST z) isDST))
+      (return i)))
+
+
+  -1)
+
+
+
+
+^{:go/end 375} (go/func loadTzinfoFromDirOrZip "loadTzinfoFromDirOrZip returns the contents of the file with the given name\nin dir. dir can either be an uncompressed zip file, or a directory.\n" [^string dir ^string name] :results [(slice byte) error]
+  (when (and (> (len dir) 4) (== (subslice dir (- (len dir) 4)) ".zip"))
+    (return (loadTzinfoFromZip dir name)))
+
+  (when (!= dir "")
+    (set! name (+ dir "/" name)))
+
+  (readFile name))
+
+
+;; There are 500+ zoneinfo files. Rather than distribute them all
+;; individually, we ship them in an uncompressed zip file.
+;; Used this way, the zip file format serves as a commonly readable
+;; container for the individual small files. We choose zip over tar
+;; because zip files have a contiguous table of contents, making
+;; individual file lookups faster, and because the per-file overhead
+;; in a zip file is considerably less than tar's 512 bytes.
+
+
+^{:go/end 391} (go/func get4 "get4 returns the little-endian 32-bit value in b.\n" ^int [^{:tag (slice byte)} b]
+  (when (< (len b) 4)
+    (return 0))
+
+  (bit-or (conv int (aget b 0)) (<< (conv int (aget b 1)) 8) (<< (conv int (aget b 2)) 16) (<< (conv int (aget b 3)) 24)))
+
+
+
+^{:go/end 399} (go/func get2 "get2 returns the little-endian 16-bit value in b.\n" ^int [^{:tag (slice byte)} b]
+  (when (< (len b) 2)
+    (return 0))
+
+  (bit-or (conv int (aget b 0)) (<< (conv int (aget b 1)) 8)))
+
+
+
+
+^{:go/end 509} (go/func loadTzinfoFromZip "loadTzinfoFromZip returns the contents of the file with the given name\nin the given uncompressed zip file.\n" [^string zipfile ^string name] :results [(slice byte) error]
+  (let [(values fd err) (open zipfile)]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (closefd fd))
+
+    (let [
+        ^:const ^{:line 411 :val 101010256} zecheader 0x06054b50
+        ^:const ^:go/grouped ^{:line 412 :val 33639248} zcheader 0x02014b50
+        ^:const ^:go/grouped ^{:line 413 :val 22} ztailsize 22
+
+        ^:const ^:go/grouped ^{:line 415 :val 30} zheadersize 30
+        ^:const ^:go/grouped ^{:line 416 :val 67324752} zheader 0x04034b50
+
+
+        ^{:line 419} buf (make (slice byte) ztailsize)]
+      (when [err (preadn fd buf (- ztailsize))] (or (!= err nil) (!= (get4 buf) zecheader))
+        (return nil (errors/New (+ "corrupt zip file " zipfile))))
+
+      (let [n (get2 (subslice buf 10))
+          ^{:line 424} size (get4 (subslice buf 12))
+          ^{:line 425} off (get4 (subslice buf 16))]
+
+        (set! buf (make (slice byte) size))
+        (when [err (preadn fd buf off)] (!= err nil)
+          (return nil (errors/New (+ "corrupt zip file " zipfile))))
+
+
+        (for [i 0] (< i n) (inc! i)
+          ;; zip entry layout:
+          ;;	0	magic[4]
+          ;;	4	madevers[1]
+          ;;	5	madeos[1]
+          ;;	6	extvers[1]
+          ;;	7	extos[1]
+          ;;	8	flags[2]
+          ;;	10	meth[2]
+          ;;	12	modtime[2]
+          ;;	14	moddate[2]
+          ;;	16	crc[4]
+          ;;	20	csize[4]
+          ;;	24	uncsize[4]
+          ;;	28	namelen[2]
+          ;;	30	xlen[2]
+          ;;	32	fclen[2]
+          ;;	34	disknum[2]
+          ;;	36	iattr[2]
+          ;;	38	eattr[4]
+          ;;	42	off[4]
+          ;;	46	name[namelen]
+          ;;	46+namelen+xlen+fclen - next header
+          ;;
+          (when (!= (get4 buf) zcheader)
+            (break))
+
+          (let [meth (get2 (subslice buf 10))
+              ^{:line 460} size (get4 (subslice buf 24))
+              ^{:line 461} namelen (get2 (subslice buf 28))
+              ^{:line 462} xlen (get2 (subslice buf 30))
+              ^{:line 463} fclen (get2 (subslice buf 32))
+              ^{:line 464} off (get4 (subslice buf 42))
+              ^{:line 465} zname (subslice buf 46 (+ 46 namelen))]
+            (set! buf (subslice buf (+ 46 namelen xlen fclen)))
+            (when (!= (conv string zname) name)
+              (continue))
+
+            (when (!= meth 0)
+              (return nil (errors/New (+ "unsupported compression for " name " in " zipfile))))
+
+
+            ;; zip per-file header layout:
+            ;;	0	magic[4]
+            ;;	4	extvers[1]
+            ;;	5	extos[1]
+            ;;	6	flags[2]
+            ;;	8	meth[2]
+            ;;	10	modtime[2]
+            ;;	12	moddate[2]
+            ;;	14	crc[4]
+            ;;	18	csize[4]
+            ;;	22	uncsize[4]
+            ;;	26	namelen[2]
+            ;;	28	xlen[2]
+            ;;	30	name[namelen]
+            ;;	30+namelen+xlen - file data
+            ;;
+            (set! buf (make (slice byte) (+ zheadersize namelen)))
+            (when [err (preadn fd buf off)] (or (!= err nil)
+                (!= (get4 buf) zheader)
+                (!= (get2 (subslice buf 8)) meth)
+                (!= (get2 (subslice buf 26)) namelen)
+                (!= (conv string (subslice buf 30 (+ 30 namelen))) name))
+              (return nil (errors/New (+ "corrupt zip file " zipfile))))
+
+            (set! xlen (get2 (subslice buf 28)))
+
+            (set! buf (make (slice byte) size))
+            (when [err (preadn fd buf (+ off 30 namelen xlen))] (!= err nil)
+              (return nil (errors/New (+ "corrupt zip file " zipfile))))
+
+
+            (return buf nil)))
+
+
+        (return nil syscall/ENOENT)))))
+
+
+
+
+
+(go/var ^{:tag (func [^string file ^string name] [(slice byte) error]) :doc "loadTzinfoFromTzdata returns the time zone information of the time zone\nwith the given name, from a tzdata database file as they are typically\nfound on android.\n"} loadTzinfoFromTzdata)
+
+
+
+
+
+^{:go/end 525} (go/func loadTzinfo "loadTzinfo returns the time zone information of the time zone\nwith the given name, from a given source. A source may be a\ntimezone database directory, tzdata database file or an uncompressed\nzip file, containing the contents of such a directory.\n" [^string name ^string source] :results [(slice byte) error]
+  (when (and (>= (len source) 6) (== (subslice source (- (len source) 6)) "tzdata"))
+    (return (loadTzinfoFromTzdata source name)))
+
+  (loadTzinfoFromDirOrZip source name))
+
+
+
+
+
+
+^{:go/end 569} (go/func loadLocation "loadLocation returns the Location with the given name from one of\nthe specified sources. See loadTzinfo for a list of supported sources.\nThe first timezone data matching the given name that is successfully loaded\nand parsed is returned as a Location.\n" [^string name ^{:tag (slice string)} sources] :results [^{:tag (* Location)} z ^error firstErr]
+  (range [_ source sources]
+    (let [(values zoneData err) (loadTzinfo name source)]
+      (when (== err nil)
+        (when [(set! (values z err) (LoadLocationFromTZData name zoneData))] (== err nil)
+          (return z nil)))
+
+
+      (when (and (== firstErr nil) (!= err syscall/ENOENT))
+        (set! firstErr err))))
+
+
+  (when (!= loadFromEmbeddedTZData nil)
+    (let [(values zoneData err) (loadFromEmbeddedTZData name)]
+      (when (== err nil)
+        (when [(set! (values z err) (LoadLocationFromTZData name (conv (slice byte) zoneData)))] (== err nil)
+          (return z nil)))
+
+
+      (when (and (== firstErr nil) (!= err syscall/ENOENT))
+        (set! firstErr err))))
+
+
+  (when [(values source ok) (gorootZoneSource (runtime/GOROOT))] ok
+    (let [(values zoneData err) (loadTzinfo name source)]
+      (when (== err nil)
+        (when [(set! (values z err) (LoadLocationFromTZData name zoneData))] (== err nil)
+          (return z nil)))
+
+
+      (when (and (== firstErr nil) (!= err syscall/ENOENT))
+        (set! firstErr err))))
+
+
+  (when (!= firstErr nil)
+    (return nil firstErr))
+
+  (return nil (errors/New (+ "unknown time zone " name))))
+
+
+
+
+
+
+^{:go/end 599} (go/func readFile "readFile reads and returns the content of the named file.\nIt is a trivial implementation of os.ReadFile, reimplemented\nhere to avoid depending on io/ioutil or os.\nIt returns an error if name exceeds maxFileSize bytes.\n" [^string name] :results [(slice byte) error]
+  (let [(values f err) (open name)]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (closefd f))
+    (let [
+        ^{:line 582 :tag (array 4096 byte)} buf (zero (array 4096 byte))
+        ^{:line 583 :tag (slice byte)} ret (zero (slice byte))
+        ^{:line 584 :tag int} n (zero int)]
+
+      (while true
+        (set! (values n err) (read f (subslice buf)))
+        (when (> n 0)
+          (set! ret (append ret (spread (subslice buf _ n)))))
+
+        (when (or (== n 0) (!= err nil))
+          (break))
+
+        (when (> (len ret) maxFileSize)
+          (return nil (conv fileSizeError name))))
+
+
+      (return ret err))))

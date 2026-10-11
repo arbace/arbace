@@ -1,0 +1,420 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.rsa) (go/file "keygen.go" :imports [
+
+
+    ^{:line 8} [fips140 "crypto/internal/fips140"]
+    ^{:line 9} [bigmod "crypto/internal/fips140/bigmod"]
+    ^{:line 10} [drbg "crypto/internal/fips140/drbg"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [io "io"]])
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 138} (go/func GenerateKey "GenerateKey generates a new RSA key pair of the given bit size.\nbits must be at least 32.\n\nIt follows the process described at c2sp.org/det-keygen, which is compliant\nwith FIPS 186-5, Appendix A.1, IFC Key Pair Generation and FIPS 186-5,\nAppendix A.1.3, Generation of Random Primes that are Probably Prime.\nThe prime candidates are drawn from rand, which in production will be the\nglobal DRBG, while in tests can be an HMAC_DRBG as specified in\nc2sp.org/det-keygen, to allow using its tests vectors.\n" [^io/Reader rand ^int bits] :results [(* PrivateKey) error]
+  (when (< bits 32)
+    (return nil (errors/New "rsa: key too small")))
+
+  (fips140/RecordApproved)
+  (when (or (< bits 2048) (== (% bits 2) 1))
+    (fips140/RecordNonApproved))
+
+
+  (while true
+    (let [(values p err) (randomPrime rand (/ (+ bits 1) 2))]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [(values q ^:assign err) (randomPrime rand (/ bits 2))]
+        (when (!= err nil)
+          (return nil err))
+
+
+        (let [(values P ^:assign err) (bigmod/NewModulus p)]
+          (when (!= err nil)
+            (return nil err))
+
+          (let [(values Q ^:assign err) (bigmod/NewModulus q)]
+            (when (!= err nil)
+              (return nil err))
+
+
+            (when (== (.Equal (.ExpandFor (.Nat Q) P) (.Nat P)) 1)
+              (return nil (errors/New "rsa: generated p == q, random source is broken")))
+
+
+            (let [(values N ^:assign err) (bigmod/NewModulusProduct p q)]
+              (when (!= err nil)
+                (return nil err))
+
+              (when (!= (.BitLen N) bits)
+                (return nil (errors/New "rsa: internal error: modulus size incorrect")))
+
+
+              ;; d can be safely computed as e⁻¹ mod φ(N) where φ(N) = (p-1)(q-1), and
+              ;; indeed that's what both the original RSA paper and the pre-FIPS
+              ;; crypto/rsa implementation did.
+              ;;
+              ;; However, FIPS 186-5, A.1.1(3) requires computing it as e⁻¹ mod λ(N)
+              ;; where λ(N) = lcm(p-1, q-1).
+              ;;
+              ;; This makes d smaller by 1.82 bits on average, which is irrelevant both
+              ;; because we exclusively use the CRT for private operations and because
+              ;; we use constant time windowed exponentiation. On the other hand, it
+              ;; requires computing a GCD of two even numbers, and then a division,
+              ;; both complex variable-time operations.
+              (let [(values λ ^:assign err) (totient P Q)]
+                (when (== err errDivisorTooLarge)
+                  ;; The divisor is too large, try again with different primes.
+                  (continue))
+
+                (when (!= err nil)
+                  (return nil err))
+
+
+                (let [e (.SetUint (bigmod/NewNat) 65537)
+                    (values d ok) (.InverseVarTime (bigmod/NewNat) e λ)]
+                  (when (not ok)
+                    ;; This checks that GCD(e, lcm(p-1, q-1)) = 1, which is equivalent
+                    ;; to checking GCD(e, p-1) = 1 and GCD(e, q-1) = 1 separately in
+                    ;; FIPS 186-5, Appendix A.1.3, steps 4.5 and 5.6.
+                    ;;
+                    ;; We waste a prime by retrying the whole process, since 65537 is
+                    ;; probably only a factor of one of p-1 or q-1, but the probability
+                    ;; of this check failing is ≈ 2⁻¹⁵, so it doesn't matter.
+                    (continue))
+
+
+                  (when (== (.IsOne (.Mul (.ExpandFor e λ) d λ)) 0)
+                    (return nil (errors/New "rsa: internal error: e*d != 1 mod λ(N)")))
+
+
+                  ;; FIPS 186-5, A.1.1(3) requires checking that d > 2^(nlen / 2).
+                  ;;
+                  ;; The probability of this check failing when d is derived from
+                  ;; (e, p, q) is roughly
+                  ;;
+                  ;;   2^(nlen/2) / λ(N) ≈ 2^(-nlen/2 + 1.82)
+                  ;;
+                  ;; so less than 2⁻¹²⁶ for keys larger than 256 bits.
+                  ;;
+                  ;; We still need to check to comply with FIPS 186-5, but knowing it has
+                  ;; negligible chance of failure we can defer the check to the end of key
+                  ;; generation and return an error if it fails. See [checkPrivateKey].
+
+                  (let [(values k ^:assign err) (newPrivateKey N 65537 d P Q)]
+                    (when (!= err nil)
+                      (return nil err))
+
+
+                    (when (.-fipsApproved k)
+                      (fips140/PCT "RSA sign and verify PCT" ^{:go/end 133} (fn ^error []
+                          (let [hash ^{:go/breaks [2 10 18 26]} (lit (slice byte)
+                                0x01 0x02 0x03 0x04 0x05 0x06 0x07 0x08
+                                0x09 0x0a 0x0b 0x0c 0x0d 0x0e 0x0f 0x10
+                                0x11 0x12 0x13 0x14 0x15 0x16 0x17 0x18
+                                0x19 0x1a 0x1b 0x1c 0x1d 0x1e 0x1f 0x20)
+
+                              (values sig err) (signPKCS1v15 k "SHA-256" hash)]
+                            (when (!= err nil)
+                              (return err))
+
+                            (verifyPKCS1v15 (.PublicKey k) "SHA-256" hash sig)))))
+
+
+
+                    (return k nil)))))))))))
+
+
+
+
+(go/var ^{:doc "errDivisorTooLarge is returned by [totient] when gcd(p-1, q-1) is too large.\n"} errDivisorTooLarge (errors/New "divisor too large"))
+
+
+
+
+
+
+
+^{:go/end 192} (go/func totient "totient computes the Carmichael totient function λ(N) = lcm(p-1, q-1).\n\np and q must be primes congruent to 7 mod 8, so that p-1 and q-1 are both\neven but not divisible by 4.\n\ntotient returns errDivisorTooLarge if GCD(p-1, q-1) is larger than 2³²-1.\n" [^{:tag (* bigmod/Modulus)} p ^{:tag (* bigmod/Modulus)} q] :results [(* bigmod/Modulus) error]
+  (let [(values a b) (values (.SubOne (.Nat p) p) (.SubOne (.Nat q) q))]
+    (when (or (== (.IsOdd a) 1) (== (.IsOdd b) 1))
+      (return nil (errors/New "rsa: internal error: p and q must be 7 mod 8")))
+
+
+    ;; lcm(a, b) = a×b / gcd(a, b) = a × (b / gcd(a, b))
+
+    ;; Our GCD requires at least one of the numbers to be odd.
+    ;; We know that a / 2 and b / 2 are odd because p and q are 7 mod 8.
+    ;; For LCM we only need to preserve the larger prime power of each
+    ;; prime factor, so we can shift out 2 from either of them.
+    ;; For odd x, y and m >= n, lcm(x×2, y×2) = lcm(x×2, y).
+    (set! b (.ShiftRightByOne b))
+    (when (== (.IsOdd b) 0)
+      (return nil (errors/New "rsa: internal error: p and q must be 7 mod 8")))
+
+
+    (let [(values gcd err) (.GCDVarTime (bigmod/NewNat) a b)]
+      (when (!= err nil)
+        (return nil err))
+
+      (when (== (.IsOdd gcd) 0)
+        (return nil (errors/New "rsa: internal error: gcd(a, b) is even")))
+
+
+      ;; To avoid implementing multiple-precision division, we just try again if
+      ;; the divisor doesn't fit in a single word. This would have a chance of
+      ;; ~2⁻⁶⁴ on 64-bit platforms, and ~2⁻³² on 32-bit platforms, but testing
+      ;; 2⁻⁶⁴ edge cases is impractical, and we'd rather not behave differently on
+      ;; different platforms, so we reject divisors above 2³²-1. Note that we also
+      ;; add back the factor of 2 we shifted out above.
+      (when (> (+ (.BitLenVarTime gcd) 1) 32)
+        (return nil errDivisorTooLarge))
+
+      (when (or (== (.IsZero gcd) 1) (== (aget (.Bits gcd) 0) 0))
+        (return nil (errors/New "rsa: internal error: gcd(a, b) is zero")))
+
+      (when [rem (.DivShortVarTime b (aget (.Bits gcd) 0))] (!= rem 0)
+        (return nil (errors/New "rsa: internal error: b is not divisible by gcd(a, b)")))
+
+
+      (bigmod/NewModulusProduct (.Bytes a p) (.Bytes b q)))))
+
+
+
+
+^{:go/end 248} (go/func randomPrime "randomPrime returns a random prime number of the given bit size following\nthe process in FIPS 186-5, Appendix A.1.3.\n" [^io/Reader rand ^int bits] :results [(slice byte) error]
+  (when (< bits 16)
+    (return nil (errors/New "rsa: prime size must be at least 16 bits")))
+
+
+  (let [b (make (slice byte) (/ (+ bits 7) 8))]
+    (while true
+      (when [err (drbg/ReadWithReader rand b)] (!= err nil)
+        (return nil err))
+
+      ;; Clear the most significant bits to reach the desired size. We use a
+      ;; mask rather than right-shifting b[0] to make it easier to inject test
+      ;; candidates, which can be represented as simple big-endian integers.
+      (let [excess (- (* (len b) 8) bits)]
+        (set! (aget b 0) bit-and ^byte (>> 2r11111111 excess))
+
+        ;; Don't let the value be too small: set the most significant two bits.
+        ;; Setting the top two bits, rather than just the top bit, means that
+        ;; when two of these values are multiplied together, the result isn't
+        ;; ever one bit short.
+        (if (< excess 7)
+          (set! (aget b 0) bit-or ^byte (>> 2r11000000 excess))
+          (do
+            (set! (aget b 0) bit-or 2r00000001)
+            (set! (aget b 1) bit-or 2r10000000)))
+
+
+        ;; Set the three least significant bits, which makes the value 7 mod 8
+        ;; (steps 4.3 and 5.3). Even numbers are not prime, and an odd
+        ;; (p - 1) / 2 simplifies [millerRabinIteration] and the GCD in [totient].
+        (set! (aget b (- (len b) 1)) bit-or 2r00000111)
+
+        ;; We don't need to check for p >= √2 × 2^(bits-1) (steps 4.4 and 5.4)
+        ;; because we set the top two bits above, so
+        ;;
+        ;;   p > 2^(bits-1) + 2^(bits-2) = 3⁄2 × 2^(bits-1) > √2 × 2^(bits-1)
+        ;;
+
+        ;; Step 5.5 requires checking that |p - q| > 2^(nlen/2 - 100).
+        ;;
+        ;; The probability of |p - q| ≤ k where p and q are uniformly random in
+        ;; the range (a, b) is 1 - (b-a-k)^2 / (b-a)^2, so the probability of
+        ;; this check failing during key generation is 2⁻⁹⁷.
+        ;;
+        ;; We still need to check to comply with FIPS 186-5, but knowing it has
+        ;; negligible chance of failure we can defer the check to the end of key
+        ;; generation and return an error if it fails. See [checkPrivateKey].
+
+        (when (isPrime b)
+          (return b nil))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 325} (go/func isPrime "isPrime runs the Miller-Rabin Probabilistic Primality Test from\nFIPS 186-5, Appendix B.3.1.\n\nw must be a random integer equal to 3 mod 4 in big-endian order.\nisPrime might return false positives for adversarially chosen values.\n\nisPrime is not constant-time.\n" ^bool [^{:tag (slice byte)} w]
+  (let [(values mr err) (millerRabinSetup w)]
+    (when (!= err nil)
+      ;; w is zero, one, or even.
+      (return false))
+
+
+    ;; Before Miller-Rabin, rule out most composites with trial divisions.
+    (for [i 0] (< i (len primes)) (set! i + 3)
+      (let [(values p1 p2 p3) (values (aget primes i) (aget primes (+ i 1)) (aget primes (+ i 2)))
+          ^{:line 267} r (.DivShortVarTime (.Nat (.-w mr)) (* p1 p2 p3))]
+        (when (or (== (% r p1) 0) (== (% r p2) 0) (== (% r p3) 0))
+          (return false))))
+
+
+
+    ;; iterations is the number of Miller-Rabin rounds, each with a
+    ;; randomly-selected base.
+    ;;
+    ;; The worst case false positive rate for a single iteration is 1/4 per
+    ;; https://eprint.iacr.org/2018/749, so if w were selected adversarially, we
+    ;; would need up to 64 iterations to get to a negligible (2⁻¹²⁸) chance of
+    ;; false positive.
+    ;;
+    ;; However, since this function is only used for randomly-selected w in the
+    ;; context of RSA key generation, we can use a smaller number of iterations.
+    ;; The exact number depends on the size of the prime (and the implied
+    ;; security level). See BoringSSL for the full formula.
+    ;; https://cs.opensource.google/boringssl/boringssl/+/master:crypto/fipsmodule/bn/prime.c.inc;l=208-283;drc=3a138e43
+    (let [bits (.BitLen (.-w mr))
+        ^{:line 287 :tag int} iterations (zero int)]
+      (switch
+        (case [(>= bits 3747)]
+          (set! iterations 3))
+        (case [(>= bits 1345)]
+          (set! iterations 4))
+        (case [(>= bits 476)]
+          (set! iterations 5))
+        (case [(>= bits 400)]
+          (set! iterations 6))
+        (case [(>= bits 347)]
+          (set! iterations 7))
+        (case [(>= bits 308)]
+          (set! iterations 8))
+        (case [(>= bits 55)]
+          (set! iterations 27))
+        (default
+          (set! iterations 34)))
+
+
+      (let [b (make (slice byte) (/ (+ bits 7) 8))]
+        (while true
+          (drbg/Read b)
+          (let [excess (- (* (len b) 8) bits)]
+            (set! (aget b 0) bit-and ^byte (>> 2r11111111 excess))
+            (let [(values result err) (millerRabinIteration mr b)]
+              (when (!= err nil)
+                ;; b was rejected.
+                (continue))
+
+              (when (== result millerRabinCOMPOSITE)
+                (return false))
+
+              (dec! iterations)
+              (when (== iterations 0)
+                (return true)))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "primes are the first prime numbers (except 2), such that the product of any\nthree primes fits in a uint32.\n\nMore primes cause fewer Miller-Rabin tests of composites (nothing can help\nwith the final test on the actual prime) but have diminishing returns: these\n255 primes catch 84.9% of composites, the next 255 would catch 1.5% more.\nAdding primes can still be marginally useful since they only compete with the\n(much more expensive) first Miller-Rabin round for candidates that were not\nrejected by the previous primes.\n"} primes ^{:go/breaks [2 17 32 47 62 77 92 107 122 137 152 167 181 195 209 223 237 251]} (lit (slice uint)
+    3 5 7 11 13 17 19 23 29 31 37 41 43 47 53
+    59 61 67 71 73 79 83 89 97 101 103 107 109 113 127
+    131 137 139 149 151 157 163 167 173 179 181 191 193 197 199
+    211 223 227 229 233 239 241 251 257 263 269 271 277 281 283
+    293 307 311 313 317 331 337 347 349 353 359 367 373 379 383
+    389 397 401 409 419 421 431 433 439 443 449 457 461 463 467
+    479 487 491 499 503 509 521 523 541 547 557 563 569 571 577
+    587 593 599 601 607 613 617 619 631 641 643 647 653 659 661
+    673 677 683 691 701 709 719 727 733 739 743 751 757 761 769
+    773 787 797 809 811 821 823 827 829 839 853 857 859 863 877
+    881 883 887 907 911 919 929 937 941 947 953 967 971 977 983
+    991 997 1009 1013 1019 1021 1031 1033 1039 1049 1051 1061 1063 1069
+    1087 1091 1093 1097 1103 1109 1117 1123 1129 1151 1153 1163 1171 1181
+    1187 1193 1201 1213 1217 1223 1229 1231 1237 1249 1259 1277 1279 1283
+    1289 1291 1297 1301 1303 1307 1319 1321 1327 1361 1367 1373 1381 1399
+    1409 1423 1427 1429 1433 1439 1447 1451 1453 1459 1471 1481 1483 1487
+    1489 1493 1499 1511 1523 1531 1543 1549 1553 1559 1567 1571 1579 1583
+    1597 1601 1607 1609 1613 1619))
+
+
+(go/type millerRabin (struct
+    ^{:line 358 :tag (* bigmod/Modulus)} w
+    ^{:line 359 :tag (slice byte)} m))
+
+
+
+
+
+
+^{:go/end 391} (go/func millerRabinSetup "millerRabinSetup prepares state that's reused across multiple iterations of\nthe Miller-Rabin test.\n\nw must be a random integer equal to 3 mod 4 in big-endian order.\n" [^{:tag (slice byte)} w] :results [(* millerRabin) error]
+  (let [mr (addr (lit millerRabin))]
+
+    ;; Check that w is 3 mod 4, and precompute Montgomery parameters.
+    (when (or (== (len w) 0) (!= (bit-and (aget w (- (len w) 1)) 2r11) 2r11))
+      (return nil (errors/New "candidate is not 3 mod 4")))
+
+    (let [(values wm err) (bigmod/NewModulus w)]
+      (when (!= err nil)
+        (return nil err))
+
+      (set! (.-w mr) wm)
+
+      ;; Compute m = (w-1)/2^a, where m is odd.
+      ;; Since w is 3 mod 4, a is always 1, so m = (w-1)/2.
+      (let [m (.ShiftRightByOne (.SubOne (.Nat (.-w mr)) (.-w mr)))]
+
+        ;; Store mr.m as a big-endian byte slice with leading zero bytes removed,
+        ;; for use with [bigmod.Nat.Exp].
+        (set! (.-m mr) (.Bytes m (.-w mr)))
+        (while (== (aget (.-m mr) 0) 0)
+          (set! (.-m mr) (subslice (.-m mr) 1)))
+
+
+        (return mr nil)))))
+
+
+(go/const ^{:val false} millerRabinCOMPOSITE false)
+(go/const ^{:val true} millerRabinPOSSIBLYPRIME true)
+
+^{:go/end 421} (go/func millerRabinIteration [^{:tag (* millerRabin)} mr ^{:tag (slice byte)} bb] :results [bool error]
+  ;; Reject b ≤ 1 or b ≥ w − 1.
+  (when (!= (len bb) (/ (+ (.BitLen (.-w mr)) 7) 8))
+    (return false (errors/New "incorrect length")))
+
+  (let [b (bigmod/NewNat)]
+    (when [(values _ err) (.SetBytes b bb (.-w mr))] (!= err nil)
+      (return false err))
+
+    (when (or (== (.IsZero b) 1) (== (.IsOne b) 1) (== (.IsMinusOne b (.-w mr)) 1))
+      (return false (errors/New "out-of-range candidate")))
+
+
+    ;; Compute b^(m*2^i) mod w for successive i.
+    ;; If b^m mod w = 1, b is a possible prime.
+    ;; If b^(m*2^i) mod w = -1 for some 0 <= i < a, b is a possible prime.
+    ;; Otherwise b is composite.
+
+    ;; Since a = 1 for our w, we only need to check b^m mod w = +/-1.
+    (let [z (.Exp (bigmod/NewNat) b (.-m mr) (.-w mr))]
+      (when (or (== (.IsOne z) 1) (== (.IsMinusOne z (.-w mr)) 1))
+        (return millerRabinPOSSIBLYPRIME nil))
+
+
+      (return millerRabinCOMPOSITE nil))))

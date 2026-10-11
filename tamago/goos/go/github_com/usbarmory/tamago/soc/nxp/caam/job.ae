@@ -1,0 +1,157 @@
+;; NXP Cryptographic Acceleration and Assurance Module (CAAM) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.caam) (go/file "job.go" :imports [
+
+
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [sync "sync"]
+
+    ^{:line 15} [dma "github.com/usbarmory/tamago/dma"]
+    ^{:line 16} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "CAAM Job Ring registers\n"
+  ^{:line 21} [^{:val 16} CAAM_JR0_MIDR_MS 0x10]
+  ^{:line 22} [^{:val 24} CAAM_JR1_MIDR_MS 0x18]
+  ^{:line 23} [^{:val 32} CAAM_JR2_MIDR_MS 0x20]
+
+  ^{:line 25} [^{:val 3} JRxMIDR_MS_JROWN_NS 3]
+
+  ^{:line 27} [^{:val 92} CAAM_JRSTART 0x5c]
+
+  ^{:line 29} [^{:val 4096} CAAM_JR0_BASE 0x1000]
+  ^{:line 30} [^{:val 8192} CAAM_JR1_BASE 0x2000]
+  ^{:line 31} [^{:val 12288} CAAM_JR2_BASE 0x3000]
+
+  ^{:line 33} [^{:val 4} CAAM_IRBAR_JRx 0x04]
+  ^{:line 34} [^{:val 12} CAAM_IRSR_JRx 0x0c]
+  ^{:line 35} [^{:val 28} CAAM_IRJAR_JRx 0x1c]
+  ^{:line 36} [^{:val 36} CAAM_ORBAR_JRx 0x24]
+  ^{:line 37} [^{:val 44} CAAM_ORSR_JRx 0x2c]
+  ^{:line 38} [^{:val 52} CAAM_ORJRR_JRx 0x34]
+  ^{:line 39} [^{:val 60} CAAM_ORSFR_JRx 0x3c])
+
+
+(go/const
+  ^{:line 43} [^{:val 4096} jobRingInterface CAAM_JR0_BASE]
+  ^{:line 44} [^{:val 1} jobRingSize 1]
+  ^{:line 45} [^{:val 1} jobWords 1]
+  ^{:line 46} [^{:val 2} jobResultWords 2])
+
+
+(go/type jobRing (struct
+    ^{:line 50} sync/Mutex
+
+
+    ^{:line 53 :tag uint32 :doc "base register\n"} base
+
+
+    ^{:line 56 :tag uint32 :doc "control registers\n"} irjar
+    ^{:line 57 :tag uint32} orjrr
+    ^{:line 58 :tag uint32} orsfr
+
+
+    ^{:line 61 :tag int :doc "input/output ring size\n"} size
+
+    ^{:line 63 :tag uint32 :doc "job queue\n"} input
+
+    ^{:line 65 :tag uint32 :doc "results queue\n"} output
+
+    ^{:line 67 :tag sync/Once} once))
+
+
+^{:go/end 73} (go/method initQueue ^uint32 [^{:tag (* jobRing)} ring ^int words ^int size]
+  (let [buf (make (slice byte) (* size words 4))]
+    (conv uint32 (dma/Alloc buf 4))))
+
+
+^{:go/end 90} (go/method init [^{:tag (* jobRing)} ring ^uint32 base ^int size]
+  (set! (.-base ring) base)
+  (set! (.-irjar ring) (+ (.-base ring) CAAM_IRJAR_JRx))
+  (set! (.-orjrr ring) (+ (.-base ring) CAAM_ORJRR_JRx))
+  (set! (.-orsfr ring) (+ (.-base ring) CAAM_ORSFR_JRx))
+
+  (set! (.-size ring) size)
+  (set! (.-input ring) (.initQueue ring jobWords (.-size ring)))
+  (set! (.-output ring) (.initQueue ring jobResultWords (.-size ring)))
+
+  (reg/Write (+ (.-base ring) CAAM_IRBAR_JRx) (.-input ring))
+  (reg/Write (+ (.-base ring) CAAM_IRSR_JRx) (conv uint32 (.-size ring)))
+
+  (reg/Write (+ (.-base ring) CAAM_ORBAR_JRx) (.-output ring))
+  (reg/Write (+ (.-base ring) CAAM_ORSFR_JRx) (conv uint32 (.-size ring))))
+
+
+^{:go/end 126} (go/method add [^{:tag (* jobRing)} ring ^{:tag (* Header)} hdr ^{:tag (slice byte)} jd] :results [^error err]
+  (when (== hdr nil)
+    (set! hdr (addr (lit Header)))
+    (.SetDefaults hdr)
+    (.Length hdr (+ 1 (/ (len jd) 4))))
+
+
+  (set! jd (append ^{:go/via [Command]} (.Bytes hdr) (spread jd)))
+
+  (let [ptr (dma/Alloc jd 4)]
+    (defer (dma/Free ptr))
+
+    ^{:go/via [Mutex]} (.Lock ring)
+    (defer ^{:go/via [Mutex]} (.Unlock ring))
+
+    ;; add job descriptor to input ring
+    (reg/Write (.-input ring) (conv uint32 ptr))
+
+    ;; signal job addition
+    (reg/Write (.-irjar ring) 1)
+    (defer (reg/Write (.-orjrr ring) 1))
+
+    ;; wait for job completion
+    (reg/Wait (.-orsfr ring) 0 0x3ff 1)
+
+    (when [res (reg/Read (.-output ring))] (!= res (conv uint32 ptr))
+      (return (fmt/Errorf "CAAM job error, invalid output descriptor")))
+
+
+    (when [status (reg/Read (+ (.-output ring) 4))] (!= status 0)
+      (return (fmt/Errorf "CAAM job error, status:%#x" status)))
+
+
+    (return)))
+
+
+^{:go/end 144} (go/method initJobRing [^{:tag (* CAAM)} hw]
+  ;; start is required to enable access to job ring registers
+  (let [startJRx (- (>> jobRingInterface 12) 1)
+
+      ^{:line 132} jrstart (+ (.-Base hw) CAAM_JRSTART)]
+    (reg/Clear jrstart startJRx)
+    (reg/Set jrstart startJRx)
+
+    (when (== (.-jr hw) nil)
+      (set! (.-jr hw) (addr (lit jobRing))))
+
+
+    (.init (.-jr hw) (+ (.-Base hw) jobRingInterface) jobRingSize)
+
+    ;; initialize internal RNG access, required for certain CAAM commands
+    (.initRNG hw)))
+
+
+
+^{:go/end 150} (go/method Job "Job adds a job descriptor to the CAAM job input ring.\n" [^{:tag (* CAAM)} hw ^{:tag (* Header)} hdr ^{:tag (slice byte)} jd] :results [^error err]
+  (.Do (.-once (.-jr hw)) (.-initJobRing hw))
+  (.add (.-jr hw) hdr jd))
+
+
+
+
+
+^{:go/end 158} (go/method SetOwner "SetOwner defines the bus master that is permitted to access CAAM job ring\nregisters. The argument defines either secure (e.g. TrustZone Secure World)\nor non-secure (e.g. TrustZone Normal World) ownership.\n" [^{:tag (* CAAM)} hw ^bool secure]
+  (reg/SetTo (+ (.-Base hw) CAAM_JR0_MIDR_MS) JRxMIDR_MS_JROWN_NS (not secure))
+  (.initJobRing hw))

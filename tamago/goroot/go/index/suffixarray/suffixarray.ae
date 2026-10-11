@@ -1,0 +1,389 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package suffixarray implements substring search in logarithmic time using
+;; an in-memory suffix array.
+;;
+;; Example use:
+;;
+;;	// create index for some data
+;;	index := suffixarray.New(data)
+;;
+;;	// lookup byte slice s
+;;	offsets1 := index.Lookup(s, -1) // the list of all indices where s occurs in data
+;;	offsets2 := index.Lookup(s, 3)  // the list of at most 3 indices where s occurs in data
+(in-ns 'go.index.suffixarray) (go/file "suffixarray.go" :doc "Package suffixarray implements substring search in logarithmic time using\nan in-memory suffix array.\n\nExample use:\n\n\t// create index for some data\n\tindex := suffixarray.New(data)\n\n\t// lookup byte slice s\n\toffsets1 := index.Lookup(s, -1) // the list of all indices where s occurs in data\n\toffsets2 := index.Lookup(s, 3)  // the list of at most 3 indices where s occurs in data\n" :imports [
+
+
+    ^{:line 19} [bytes "bytes"]
+    ^{:line 20} [binary "encoding/binary"]
+    ^{:line 21} [errors "errors"]
+    ^{:line 22} [io "io"]
+    ^{:line 23} [math "math"]
+    ^{:line 24} [regexp "regexp"]
+    ^{:line 25} [slices "slices"]
+    ^{:line 26} [sort "sort"]])
+
+
+
+(go/var ^{:tag int :doc "Can change for testing\n"} maxData32 realMaxData32)
+
+(go/const ^{:val 2147483647} realMaxData32 math/MaxInt32)
+
+
+(go/type Index "Index implements a suffix array for fast substring search.\n" (struct
+    ^{:line 36 :tag (slice byte)} data
+    ^{:line 37 :tag ints} sa)) ; suffix array for data; sa.len() == len(data)
+
+
+
+
+
+(go/type ints "An ints is either an []int32 or an []int64.\nThat is, one of them is empty, and one is the real data.\nThe int64 form is used when len(data) > maxData32\n" (struct
+    ^{:line 44 :tag (slice int32)} int32
+    ^{:line 45 :tag (slice int64)} int64))
+
+
+^{:go/end 50} (go/method len ^int [^{:tag (* ints)} a]
+  (+ (len (.-int32 a)) (len (.-int64 a))))
+
+
+^{:go/end 57} (go/method get ^int64 [^{:tag (* ints)} a ^int i]
+  (when (!= (.-int32 a) nil)
+    (return (conv int64 (aget (.-int32 a) i))))
+
+  (aget (.-int64 a) i))
+
+
+^{:go/end 65} (go/method set [^{:tag (* ints)} a ^int i ^int64 v]
+  (if (!= (.-int32 a) nil)
+    (aset (.-int32 a) i (conv int32 v))
+
+    (aset (.-int64 a) i v)))
+
+
+
+^{:go/end 72} (go/method slice ^ints [^{:tag (* ints)} a ^int i ^int j]
+  (when (!= (.-int32 a) nil)
+    (return (lit ints (subslice (.-int32 a) i j) nil)))
+
+  (lit ints nil (subslice (.-int64 a) i j)))
+
+
+
+
+^{:go/end 86} (go/func New "New creates a new [Index] for data.\n[Index] creation time is O(N) for N = len(data).\n" ^{:tag (* Index)} [^{:tag (slice byte)} data]
+  (let [ix (addr (lit Index :data data))]
+    (if (<= (len data) maxData32) (do
+        (set! (.-int32 (.-sa ix)) (make (slice int32) (len data)))
+        (text_32 data (.-int32 (.-sa ix))))
+      (do
+        (set! (.-int64 (.-sa ix)) (make (slice int64) (len data)))
+        (text_64 data (.-int64 (.-sa ix)))))
+
+    ^{:line 85} ix))
+
+
+
+^{:go/end 93} (go/func writeInt "writeInt writes an int x to w using buf to buffer the write.\n" ^error [^io/Writer w ^{:tag (slice byte)} buf ^int x]
+  (binary/PutVarint buf (conv int64 x))
+  (let [(values _ err) (.Write w (subslice buf 0 binary/MaxVarintLen64))]
+    ^{:line 92} err))
+
+
+
+^{:go/end 100} (go/func readInt "readInt reads an int x from r using buf to buffer the read and returns x.\n" [^io/Reader r ^{:tag (slice byte)} buf] :results [int64 error]
+  (let [(values _ err) (io/ReadFull r (subslice buf 0 binary/MaxVarintLen64)) ; ok to continue with error
+      (values x _) (binary/Varint buf)]
+    (return x err)))
+
+
+
+
+^{:go/end 118} (go/func writeSlice "writeSlice writes data[:n] to w and returns n.\nIt uses buf to buffer the write.\n" [^io/Writer w ^{:tag (slice byte)} buf ^ints data] :results [^int n ^error err]
+  ;; encode as many elements as fit into buf
+  (let [p binary/MaxVarintLen64
+      ^{:line 107} m (.len data)]
+    (for [] (and (< n m) (<= (+ p binary/MaxVarintLen64) (len buf))) (inc! n)
+      (set! p + (binary/PutUvarint (subslice buf p) (conv uint64 (.get data n)))))
+
+
+    ;; update buffer size
+    (binary/PutVarint buf (conv int64 p))
+
+    ;; write buffer
+    (set! (values _ err) (.Write w (subslice buf 0 p)))
+    (return)))
+
+
+(go/var errCorrupted (errors/New "suffixarray: data corrupted"))
+
+
+
+^{:go/end 158} (go/func readSlice "readSlice reads data[:n] from r and returns n; maxIndex is the length of the suffix array.\nIt uses buf to buffer the read.\n" [^io/Reader r ^{:tag (slice byte)} buf ^ints data ^uint64 maxIndex] :results [^int n ^error err]
+  ;; read buffer size
+  (let [^int64 size64 (zero int64)]
+    (set! (values size64 err) (readInt r buf))
+    (when (!= err nil)
+      (return))
+
+    (when (or (!= (conv int64 (conv int size64)) size64) (< (conv int size64) 0))
+      ;; We never write chunks this big anyway.
+      (return 0 errCorrupted))
+
+    (let [size (conv int size64)]
+
+      ;; read buffer w/o the size
+      (when [(set! (values _ err) (io/ReadFull r (subslice buf binary/MaxVarintLen64 size)))] (!= err nil)
+        (return))
+
+
+      ;; decode as many elements as present in buf
+      (let [len (.len data)]
+        (for [p binary/MaxVarintLen64] (< p size) (inc! n)
+          (let [(values x w) (binary/Uvarint (subslice buf p))]
+            ;; - prevent index-out-of-bounds panic if there are more indices than expected
+            ;; (was go.dev/issue/53352)
+            ;; - prevent index-out-of-bounds panic in a future Lookup
+            ;; by ensuring all indices x satisfy x < maxIndex
+            (when (or (>= n len) (>= x maxIndex))
+              (return n errCorrupted))
+
+            (.set data n (conv int64 x))
+            (set! p + w)))
+
+
+        (return)))))
+
+
+(go/const ^{:val 16384} bufSize (<< 16 10)) ; reasonable for BenchmarkSaveRestore
+
+
+^{:go/end 210} (go/method Read "Read reads the index from r into x; x must not be nil.\n" ^error [^{:tag (* Index)} x ^io/Reader r]
+  ;; buffer for all reads
+  (let [buf (make (slice byte) bufSize)
+
+      ;; read length
+      (values n64 err) (readInt r buf)]
+    (when (!= err nil)
+      (return err))
+
+    (when (or (!= (conv int64 (conv int n64)) n64) (< (conv int n64) 0))
+      (return errCorrupted))
+
+    (let [n (conv int n64)]
+
+      ;; allocate space
+      (if (or (< (* 2 n) (cap (.-data x))) (< (cap (.-data x)) n) (and (!= (.-int32 (.-sa x)) nil) (> n maxData32)) (and (!= (.-int64 (.-sa x)) nil) (<= n maxData32))) (do
+          ;; new data is significantly smaller or larger than
+          ;; existing buffers - allocate new ones
+          (set! (.-data x) (make (slice byte) n))
+          (set! (.-int32 (.-sa x)) nil)
+          (set! (.-int64 (.-sa x)) nil)
+          (if (<= n maxData32)
+            (set! (.-int32 (.-sa x)) (make (slice int32) n))
+
+            (set! (.-int64 (.-sa x)) (make (slice int64) n))))
+
+        (do
+          ;; re-use existing buffers
+          (set! (.-data x) (subslice (.-data x) 0 n))
+          (set! (.-sa x) (.slice (.-sa x) 0 n))))
+
+
+      ;; read data
+      (when [(values _ err) (io/ReadFull r (.-data x))] (!= err nil)
+        (return err))
+
+
+      ;; read index
+      ^{:go/breaks [[3 209]]} (let [sa (.-sa x)]
+        (while (> (.len sa) 0)
+          (let [(values n err) (readSlice r buf sa (conv uint64 n))]
+            (when (!= err nil)
+              (return err))
+
+            (set! sa (.slice sa n (.len sa)))))
+
+        nil))))
+
+
+
+^{:go/end 237} (go/method Write "Write writes the index x to w.\n" ^error [^{:tag (* Index)} x ^io/Writer w]
+  ;; buffer for all writes
+  (let [buf (make (slice byte) bufSize)]
+
+    ;; write length
+    (when [err (writeInt w buf (len (.-data x)))] (!= err nil)
+      (return err))
+
+
+    ;; write data
+    (when [(values _ err) (.Write w (.-data x))] (!= err nil)
+      (return err))
+
+
+    ;; write index
+    ^{:go/breaks [[3 236]]} (let [sa (.-sa x)]
+      (while (> (.len sa) 0)
+        (let [(values n err) (writeSlice w buf sa)]
+          (when (!= err nil)
+            (return err))
+
+          (set! sa (.slice sa n (.len sa)))))
+
+      nil)))
+
+
+
+
+^{:go/end 243} (go/method Bytes "Bytes returns the data over which the index was created.\nIt must not be modified.\n" ^{:tag (slice byte)} [^{:tag (* Index)} x]
+  (.-data x))
+
+
+^{:go/end 247} (go/method at ^{:tag (slice byte)} [^{:tag (* Index)} x ^int i]
+  (subslice (.-data x) (.get (.-sa x) i)))
+
+
+
+
+^{:go/end 258} (go/method lookupAll "lookupAll returns a slice into the matching region of the index.\nThe runtime is O(log(N)*len(s)).\n" ^ints [^{:tag (* Index)} x ^{:tag (slice byte)} s]
+  ;; find matching suffix index range [i:j]
+  ;; find the first index where s would be the prefix
+  (let [i (sort/Search (.len (.-sa x)) ^{:go/end 254} (fn ^bool [^int i] (>= (bytes/Compare (.at x i) s) 0)))
+      ;; starting at i, find the first index at which s is not a prefix
+      ^{:line 256} j (+ i (sort/Search (- (.len (.-sa x)) i) ^{:go/end 256} (fn ^bool [^int j] (not (bytes/HasPrefix (.at x (+ j i)) s)))))]
+    (.slice (.-sa x) i j)))
+
+
+
+
+
+
+
+^{:go/end 287} (go/method Lookup "Lookup returns an unsorted list of at most n indices where the byte string s\noccurs in the indexed data. If n < 0, all occurrences are returned.\nThe result is nil if s is empty, s is not found, or n == 0.\nLookup time is O(log(N)*len(s) + len(result)) where N is the\nsize of the indexed data.\n" [^{:tag (* Index)} x ^{:tag (slice byte)} s ^int n] :results [^{:tag (slice int)} result]
+  (when (and (> (len s) 0) (!= n 0))
+    (let [matches (.lookupAll x s)
+        ^{:line 268} count (.len matches)]
+      (when (or (< n 0) (< count n))
+        (set! n count))
+
+      ;; 0 <= n <= count
+      (when (> n 0)
+        (set! result (make (slice int) n))
+        (if (!= (.-int32 matches) nil)
+          (range [i result]
+            (aset result i (conv int (aget (.-int32 matches) i))))
+
+
+          (range [i result]
+            (aset result i (conv int (aget (.-int64 matches) i))))))))
+
+
+
+
+  (return))
+
+
+
+
+
+
+
+
+^{:go/end 390} (go/method FindAllIndex "FindAllIndex returns a sorted list of non-overlapping matches of the\nregular expression r, where a match is a pair of indices specifying\nthe matched slice of x.Bytes(). If n < 0, all matches are returned\nin successive order. Otherwise, at most n matches are returned and\nthey may not be successive. The result is nil if there are no matches,\nor if n == 0.\n" [^{:tag (* Index)} x ^{:tag (* regexp/Regexp)} r ^int n] :results [^{:tag (slice (slice int))} result]
+  ;; a non-empty literal prefix is used to determine possible
+  ;; match start indices with Lookup
+  (let [(values prefix complete) (.LiteralPrefix r)
+      ^{:line 299} lit (conv (slice byte) prefix)]
+
+    ;; worst-case scenario: no literal prefix
+    (when (== prefix "")
+      (return (.FindAllIndex r (.-data x) n)))
+
+
+    ;; if regexp is a literal just use Lookup and convert its
+    ;; result into match pairs
+    (when complete
+      ;; Lookup returns indices that may belong to overlapping matches.
+      ;; After eliminating them, we may end up with fewer than n matches.
+      ;; If we don't have enough at the end, redo the search with an
+      ;; increased value n1, but only if Lookup returned all the requested
+      ;; indices in the first place (if it returned fewer than that then
+      ;; there cannot be more).
+      (for [n1 n] _ (set! n1 + (* 2 (- n (len result)))) ; /* overflow ok */
+        (let [indices (.Lookup x lit n1)]
+          (when (== (len indices) 0)
+            (return))
+
+          (^{:inst [(slice int) int]} slices/Sort indices)
+          (let [pairs (make (slice int) (* 2 (len indices)))]
+            (set! result (make (slice (slice int)) (len indices)))
+            (let [count 0
+                ^{:line 324} prev 0]
+              (range [_ i indices]
+                (when (== count n)
+                  (break))
+
+                ;; ignore indices leading to overlapping matches
+                (when (<= prev i)
+                  (let [j (* 2 count)]
+                    (aset pairs (+ j 0) i)
+                    (aset pairs (+ j 1) (+ i (len lit)))
+                    (aset result count (subslice pairs j (+ j 2)))
+                    (inc! count)
+                    (set! prev (+ i (len lit))))))
+
+
+              (set! result (subslice result 0 count))
+              (when (or (>= (len result) n) (!= (len indices) n1))
+                ;; found all matches or there's no chance to find more
+                ;; (n and n1 can be negative)
+                (break))))))
+
+
+      (when (== (len result) 0)
+        (set! result nil))
+
+      (return))
+
+
+    ;; regexp has a non-empty literal prefix; Lookup(lit) computes
+    ;; the indices of possible complete matches; use these as starting
+    ;; points for anchored searches
+    ;; (regexp "^" matches beginning of input, not beginning of line)
+    (set! r (regexp/MustCompile (+ "^" (.String r)))) ; compiles because r compiled
+
+    ;; same comment about Lookup applies here as in the loop above
+    (for [n1 n] _ (set! n1 + (* 2 (- n (len result)))) ; /* overflow ok */
+      (let [indices (.Lookup x lit n1)]
+        (when (== (len indices) 0)
+          (return))
+
+        (^{:inst [(slice int) int]} slices/Sort indices)
+        (set! result (subslice result 0 0))
+        (let [prev 0]
+          (range [_ i indices]
+            (when (== (len result) n)
+              (break))
+
+            (let [m (.FindIndex r (subslice (.-data x) i))] ; anchored search - will not run off
+              ;; ignore indices leading to overlapping matches
+              (when (and (!= m nil) (<= prev i))
+                (aset m 0 i) ; correct m
+                (set! (aget m 1) + i)
+                (set! result (append result m))
+                (set! prev (aget m 1)))))
+
+
+          (when (or (>= (len result) n) (!= (len indices) n1))
+            ;; found all matches or there's no chance to find more
+            ;; (n and n1 can be negative)
+            (break)))))
+
+
+    (when (== (len result) 0)
+      (set! result nil))
+
+    (return)))

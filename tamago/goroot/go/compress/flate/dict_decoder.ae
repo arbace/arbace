@@ -1,0 +1,178 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.compress.flate) (go/file "dict_decoder.go" :imports [])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type dictDecoder "dictDecoder implements the LZ77 sliding dictionary as used in decompression.\nLZ77 decompresses data through sequences of two forms of commands:\n\n  - Literal insertions: Runs of one or more symbols are inserted into the data\n    stream as is. This is accomplished through the writeByte method for a\n    single symbol, or combinations of writeSlice/writeMark for multiple symbols.\n    Any valid stream must start with a literal insertion if no preset dictionary\n    is used.\n\n  - Backward copies: Runs of one or more symbols are copied from previously\n    emitted data. Backward copies come as the tuple (dist, length) where dist\n    determines how far back in the stream to copy from and length determines how\n    many bytes to copy. Note that it is valid for the length to be greater than\n    the distance. Since LZ77 uses forward copies, that situation is used to\n    perform a form of run-length encoding on repeated runs of symbols.\n    The writeCopy and tryWriteCopy are used to implement this command.\n\nFor performance reasons, this implementation performs little to no sanity\nchecks about the arguments. As such, the invariants documented for each\nmethod call must be respected.\n" (struct
+    ^{:line 28 :tag (slice byte)} hist ; Sliding window history
+
+
+    ^{:line 31 :tag int :doc "Invariant: 0 <= rdPos <= wrPos <= len(hist)\n"} wrPos ; Current output position in buffer
+    ^{:line 32 :tag int} rdPos ; Have emitted hist[:rdPos] already
+    ^{:line 33 :tag bool} full)) ; Has a full window length been written yet?
+
+
+
+
+
+^{:go/end 56} (go/method init "init initializes dictDecoder to have a sliding window dictionary of the given\nsize. If a preset dict is provided, it will initialize the dictionary with\nthe contents of dict.\n" [^{:tag (* dictDecoder)} dd ^int size ^{:tag (slice byte)} dict]
+  (set! @dd (lit dictDecoder :hist (.-hist dd)))
+
+  (when (< (cap (.-hist dd)) size)
+    (set! (.-hist dd) (make (slice byte) size)))
+
+  (set! (.-hist dd) (subslice (.-hist dd) _ size))
+
+  (when (> (len dict) (len (.-hist dd)))
+    (set! dict (subslice dict (- (len dict) (len (.-hist dd))))))
+
+  (set! (.-wrPos dd) (copy (.-hist dd) dict))
+  (when (== (.-wrPos dd) (len (.-hist dd)))
+    (set! (.-wrPos dd) 0)
+    (set! (.-full dd) true))
+
+  (set! (.-rdPos dd) (.-wrPos dd)))
+
+
+
+^{:go/end 64} (go/method histSize "histSize reports the total amount of historical data in the dictionary.\n" ^int [^{:tag (* dictDecoder)} dd]
+  (when (.-full dd)
+    (return (len (.-hist dd))))
+
+  (.-wrPos dd))
+
+
+
+^{:go/end 69} (go/method availRead "availRead reports the number of bytes that can be flushed by readFlush.\n" ^int [^{:tag (* dictDecoder)} dd]
+  (- (.-wrPos dd) (.-rdPos dd)))
+
+
+
+^{:go/end 74} (go/method availWrite "availWrite reports the available amount of output buffer space.\n" ^int [^{:tag (* dictDecoder)} dd]
+  (- (len (.-hist dd)) (.-wrPos dd)))
+
+
+
+
+
+^{:go/end 81} (go/method writeSlice "writeSlice returns a slice of the available buffer to write data to.\n\nThis invariant will be kept: len(s) <= availWrite()\n" ^{:tag (slice byte)} [^{:tag (* dictDecoder)} dd]
+  (subslice (.-hist dd) (.-wrPos dd)))
+
+
+
+
+
+^{:go/end 88} (go/method writeMark "writeMark advances the writer pointer by cnt.\n\nThis invariant must be kept: 0 <= cnt <= availWrite()\n" [^{:tag (* dictDecoder)} dd ^int cnt]
+  (set! (.-wrPos dd) + cnt))
+
+
+
+
+
+^{:go/end 96} (go/method writeByte "writeByte writes a single byte to the dictionary.\n\nThis invariant must be kept: 0 < availWrite()\n" [^{:tag (* dictDecoder)} dd ^byte c]
+  (aset (.-hist dd) (.-wrPos dd) c)
+  (inc! (.-wrPos dd)))
+
+
+
+
+
+
+
+^{:go/end 142} (go/method writeCopy "writeCopy copies a string at a given (dist, length) to the output.\nThis returns the number of bytes copied and may be less than the requested\nlength if the available space in the output buffer is too small.\n\nThis invariant must be kept: 0 < dist <= histSize()\n" ^int [^{:tag (* dictDecoder)} dd ^int dist ^int length]
+  (let [dstBase (.-wrPos dd)
+      ^{:line 105} dstPos dstBase
+      ^{:line 106} srcPos (- dstPos dist)
+      ^{:line 107} endPos (min (+ dstPos length) (len (.-hist dd)))]
+
+    ;; Copy non-overlapping section after destination position.
+    ;;
+    ;; This section is non-overlapping in that the copy length for this section
+    ;; is always less than or equal to the backwards distance. This can occur
+    ;; if a distance refers to data that wraps-around in the buffer.
+    ;; Thus, a backwards copy is performed here; that is, the exact bytes in
+    ;; the source prior to the copy is placed in the destination.
+    (when (< srcPos 0)
+      (set! srcPos + (len (.-hist dd)))
+      (set! dstPos + (copy (subslice (.-hist dd) dstPos endPos) (subslice (.-hist dd) srcPos)))
+      (set! srcPos 0))
+
+
+    ;; Copy possibly overlapping section before destination position.
+    ;;
+    ;; This section can overlap if the copy length for this section is larger
+    ;; than the backwards distance. This is allowed by LZ77 so that repeated
+    ;; strings can be succinctly represented using (dist, length) pairs.
+    ;; Thus, a forwards copy is performed here; that is, the bytes copied is
+    ;; possibly dependent on the resulting bytes in the destination as the copy
+    ;; progresses along. This is functionally equivalent to the following:
+    ;;
+    ;;	for i := 0; i < endPos-dstPos; i++ {
+    ;;		dd.hist[dstPos+i] = dd.hist[srcPos+i]
+    ;;	}
+    ;;	dstPos = endPos
+    ;;
+    (while (< dstPos endPos)
+      (set! dstPos + (copy (subslice (.-hist dd) dstPos endPos) (subslice (.-hist dd) srcPos dstPos))))
+
+
+    (set! (.-wrPos dd) dstPos)
+    (- dstPos dstBase)))
+
+
+
+
+
+
+
+
+^{:go/end 166} (go/method tryWriteCopy "tryWriteCopy tries to copy a string at a given (distance, length) to the\noutput. This specialized version is optimized for short distances.\n\nThis method is designed to be inlined for performance reasons.\n\nThis invariant must be kept: 0 < dist <= histSize()\n" ^int [^{:tag (* dictDecoder)} dd ^int dist ^int length]
+  (let [dstPos (.-wrPos dd)
+      ^{:line 152} endPos (+ dstPos length)]
+    (when (or (< dstPos dist) (> endPos (len (.-hist dd))))
+      (return 0))
+
+    (let [dstBase dstPos
+        ^{:line 157} srcPos (- dstPos dist)]
+
+      ;; Copy possibly overlapping section before destination position.
+      (while (< dstPos endPos)
+        (set! dstPos + (copy (subslice (.-hist dd) dstPos endPos) (subslice (.-hist dd) srcPos dstPos))))
+
+
+      (set! (.-wrPos dd) dstPos)
+      (- dstPos dstBase))))
+
+
+
+
+
+^{:go/end 179} (go/method readFlush "readFlush returns a slice of the historical buffer that is ready to be\nemitted to the user. The data returned by readFlush must be fully consumed\nbefore calling any other dictDecoder methods.\n" ^{:tag (slice byte)} [^{:tag (* dictDecoder)} dd]
+  (let [toRead (subslice (.-hist dd) (.-rdPos dd) (.-wrPos dd))]
+    (set! (.-rdPos dd) (.-wrPos dd))
+    (when (== (.-wrPos dd) (len (.-hist dd)))
+      (set! (values (.-wrPos dd) (.-rdPos dd)) (values 0 0))
+      (set! (.-full dd) true))
+
+    ^{:line 178} toRead))

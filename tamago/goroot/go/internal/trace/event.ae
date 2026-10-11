@@ -1,0 +1,1392 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace) (go/file "event.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [iter "iter"]
+    ^{:line 12} [math "math"]
+    ^{:line 13} [regexp "regexp"]
+    ^{:line 14} [slices "slices"]
+    ^{:line 15} [strconv "strconv"]
+    ^{:line 16} [strings "strings"]
+    ^{:line 17} [time "time"]
+
+    ^{:line 19} [tracev2 "internal/trace/tracev2"]
+    ^{:line 20} [version "internal/trace/version"]])
+
+
+
+
+
+
+(go/type EventKind "EventKind indicates the kind of event this is.\n\nUse this information to obtain a more specific event that\nallows access to more detailed information.\n" uint16)
+
+(go/const
+  ^{:line 30} [^{:tag EventKind :val 0} EventBad iota]
+
+
+
+
+
+  ^{:line 36} [^{:val 1 :doc "EventKindSync is an event that indicates a global synchronization\npoint in the trace. At the point of a sync event, the\ntrace reader can be certain that all resources (e.g. threads,\ngoroutines) that have existed until that point have been enumerated.\n"} EventSync]
+
+
+
+  ^{:line 40} [^{:val 2 :doc "EventMetric is an event that represents the value of a metric at\na particular point in time.\n"} EventMetric]
+
+
+  ^{:line 43} [^{:val 3 :doc "EventLabel attaches a label to a resource.\n"} EventLabel]
+
+
+
+
+
+
+
+
+
+  ^{:line 53} [^{:val 4 :doc "EventStackSample represents an execution sample, indicating what a\nthread/proc/goroutine was doing at a particular point in time via\nits backtrace.\n\nNote: Samples should be considered a close approximation of\nwhat a thread/proc/goroutine was executing at a given point in time.\nThese events may slightly contradict the situation StateTransitions\ndescribe, so they should only be treated as a best-effort annotation.\n"} EventStackSample]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 69} [^{:val 5 :doc "EventRangeBegin and EventRangeEnd are a pair of generic events representing\na special range of time. Ranges are named and scoped to some resource\n(identified via ResourceKind). A range that has begun but has not ended\nis considered active.\n\nEvRangeBegin and EvRangeEnd will share the same name, and an End will always\nfollow a Begin on the same instance of the resource. The associated\nresource ID can be obtained from the Event. ResourceNone indicates the\nrange is globally scoped. That is, any goroutine/proc/thread can start or\nstop, but only one such range may be active at any given time.\n\nEventRangeActive is like EventRangeBegin, but indicates that the range was\nalready active. In this case, the resource referenced may not be in the current\ncontext.\n"} EventRangeBegin]
+  ^{:line 70} [^{:val 6} EventRangeActive]
+  ^{:line 71} [^{:val 7} EventRangeEnd]
+
+
+  ^{:line 74} [^{:val 8 :doc "EvTaskBegin and EvTaskEnd are a pair of events representing a runtime/trace.Task.\n"} EventTaskBegin]
+  ^{:line 75} [^{:val 9} EventTaskEnd]
+
+
+  ^{:line 78} [^{:val 10 :doc "EventRegionBegin and EventRegionEnd are a pair of events represent a runtime/trace.Region.\n"} EventRegionBegin]
+  ^{:line 79} [^{:val 11} EventRegionEnd]
+
+
+  ^{:line 82} [^{:val 12 :doc "EventLog represents a runtime/trace.Log call.\n"} EventLog]
+
+
+  ^{:line 85} [^{:val 13 :doc "EventStateTransition represents a state change for some resource.\n"} EventStateTransition]
+
+
+
+
+  ^{:line 90} [^{:val 14 :doc "EventExperimental is an experimental event that is unvalidated and exposed in a raw form.\nUsers are expected to understand the format and perform their own validation. These events\nmay always be safely ignored.\n"} EventExperimental])
+
+
+
+^{:go/end 99} (go/method String "String returns a string form of the EventKind.\n" ^string [^EventKind e]
+  (when (>= (conv int e) (len eventKindStrings))
+    (return (aget eventKindStrings 0)))
+
+  (aget eventKindStrings e))
+
+
+(go/var eventKindStrings (lit (array ... string)
+    ^{:line 102} [EventBad "Bad"]
+    ^{:line 103} [EventSync "Sync"]
+    ^{:line 104} [EventMetric "Metric"]
+    ^{:line 105} [EventLabel "Label"]
+    ^{:line 106} [EventStackSample "StackSample"]
+    ^{:line 107} [EventRangeBegin "RangeBegin"]
+    ^{:line 108} [EventRangeActive "RangeActive"]
+    ^{:line 109} [EventRangeEnd "RangeEnd"]
+    ^{:line 110} [EventTaskBegin "TaskBegin"]
+    ^{:line 111} [EventTaskEnd "TaskEnd"]
+    ^{:line 112} [EventRegionBegin "RegionBegin"]
+    ^{:line 113} [EventRegionEnd "RegionEnd"]
+    ^{:line 114} [EventLog "Log"]
+    ^{:line 115} [EventStateTransition "StateTransition"]
+    ^{:line 116} [EventExperimental "Experimental"]))
+
+
+(go/const ^{:val 9223372036854775807} maxTime (conv Time math/MaxInt64))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Time "Time is a timestamp in nanoseconds.\n\nIt corresponds to the monotonic clock on the platform that the\ntrace was taken, and so is possible to correlate with timestamps\nfor other traces taken on the same machine using the same clock\n(i.e. no reboots in between).\n\nThe actual absolute value of the timestamp is only meaningful in\nrelation to other timestamps from the same clock.\n\nBUG: Timestamps coming from traces on Windows platforms are\nonly comparable with timestamps from the same trace. Timestamps\nacross traces cannot be compared, because the system clock is\nnot used as of Go 1.22.\n\nBUG: Traces produced by Go versions 1.21 and earlier cannot be\ncompared with timestamps from other traces taken on the same\nmachine. This is because the system clock was not used at all\nto collect those timestamps.\n" int64)
+
+
+^{:go/end 145} (go/method Sub "Sub subtracts t0 from t, returning the duration in nanoseconds.\n" ^time/Duration [^Time t ^Time t0]
+  (conv time/Duration (- (conv int64 t) (conv int64 t0))))
+
+
+
+(go/type Metric "Metric provides details about a Metric event.\n" (struct
+
+
+
+
+
+
+
+
+    ^{:line 157 :tag string :doc "Name is the name of the sampled metric.\n\nNames follow the same convention as metric names in the\nruntime/metrics package, meaning they include the unit.\nNames that match with the runtime/metrics package represent\nthe same quantity. Note that this corresponds to the\nruntime/metrics package for the Go version this trace was\ncollected for.\n"} Name
+
+
+
+
+
+    ^{:line 163 :tag Value :doc "Value is the sampled value of the metric.\n\nThe Value's Kind is tied to the name of the metric, and so is\nguaranteed to be the same for metric samples for the same metric.\n"} Value))
+
+
+
+(go/type Label "Label provides details about a Label event.\n" (struct
+
+    ^{:line 169 :tag string :doc "Label is the label applied to some resource.\n"} Label
+
+
+    ^{:line 172 :tag ResourceID :doc "Resource is the resource to which this label should be applied.\n"} Resource))
+
+
+
+(go/type Range "Range provides details about a Range event.\n" (struct
+
+
+
+
+
+
+
+    ^{:line 184 :tag string :doc "Name is a human-readable name for the range.\n\nThis name can be used to identify the end of the range for the resource\nits scoped to, because only one of each type of range may be active on\na particular resource. The relevant resource should be obtained from the\nEvent that produced these details. The corresponding RangeEnd will have\nan identical name.\n"} Name
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 201 :tag ResourceID :doc "Scope is the resource that the range is scoped to.\n\nFor example, a ResourceGoroutine scope means that the same goroutine\nmust have a start and end for the range, and that goroutine can only\nhave one range of a particular name active at any given time. The\nID that this range is scoped to may be obtained via Event.Goroutine.\n\nThe ResourceNone scope means that the range is globally scoped. As a\nresult, any goroutine/proc/thread may start or end the range, and only\none such named range may be active globally at any given time.\n\nFor RangeBegin and RangeEnd events, this will always reference some\nresource ID in the current execution context. For RangeActive events,\nthis may reference a resource not in the current context. Prefer Scope\nover the current execution context.\n"} Scope))
+
+
+
+(go/type RangeAttribute "RangeAttribute provides attributes about a completed Range.\n" (struct
+
+    ^{:line 207 :tag string :doc "Name is the human-readable name for the range.\n"} Name
+
+
+    ^{:line 210 :tag Value :doc "Value is the value of the attribute.\n"} Value))
+
+
+
+
+(go/type TaskID "TaskID is the internal ID of a task used to disambiguate tasks (even if they\nare of the same type).\n" uint64)
+
+(go/const
+
+  ^{:line 219} [^{:val 18446744073709551615N :doc "NoTask indicates the lack of a task.\n"} NoTask (conv TaskID (bit-not (conv uint64 0)))]
+
+
+
+  ^{:line 223} [^{:val 0 :doc "BackgroundTask is the global task that events are attached to if there was\nno other task in the context at the point the event was emitted.\n"} BackgroundTask (conv TaskID 0)])
+
+
+
+(go/type Task "Task provides details about a Task event.\n" (struct
+
+
+
+    ^{:line 231 :tag TaskID :doc "ID is a unique identifier for the task.\n\nThis can be used to associate the beginning of a task with its end.\n"} ID
+
+
+    ^{:line 234 :tag TaskID :doc "ParentID is the ID of the parent task.\n"} Parent
+
+
+
+
+    ^{:line 239 :tag string :doc "Type is the taskType that was passed to runtime/trace.NewTask.\n\nMay be \"\" if a task's TaskBegin event isn't present in the trace.\n"} Type))
+
+
+
+(go/type Region "Region provides details about a Region event.\n" (struct
+
+    ^{:line 245 :tag TaskID :doc "Task is the ID of the task this region is associated with.\n"} Task
+
+
+    ^{:line 248 :tag string :doc "Type is the regionType that was passed to runtime/trace.StartRegion or runtime/trace.WithRegion.\n"} Type))
+
+
+
+(go/type Log "Log provides details about a Log event.\n" (struct
+
+    ^{:line 254 :tag TaskID :doc "Task is the ID of the task this region is associated with.\n"} Task
+
+
+    ^{:line 257 :tag string :doc "Category is the category that was passed to runtime/trace.Log or runtime/trace.Logf.\n"} Category
+
+
+    ^{:line 260 :tag string :doc "Message is the message that was passed to runtime/trace.Log or runtime/trace.Logf.\n"} Message))
+
+
+
+
+(go/type StackSample "StackSample is used to construct StackSample events via MakeEvent. There are\nno details associated with it, use EventConfig.Stack instead.\n" (struct))
+
+
+^{:go/end 274} (go/func MakeStack "MakeStack create a stack from a list of stack frames.\n" ^Stack [^{:tag (slice StackFrame)} frames]
+  ;; TODO(felixge): support evTable reuse.
+  (let [tbl (addr (lit evTable :pcs (make (map uint64 frame))))]
+    (.compactify (.-strings tbl))
+    (.compactify (.-stacks tbl))
+    (lit Stack :table tbl :id (addStack tbl frames))))
+
+
+
+
+
+
+(go/type Stack "Stack represents a stack. It's really a handle to a stack and it's trivially comparable.\n\nIf two Stacks are equal then their Frames are guaranteed to be identical. If they are not\nequal, however, their Frames may still be equal.\n" (struct
+    ^{:line 281 :tag (* evTable)} table
+    ^{:line 282 :tag stackID} id))
+
+
+
+^{:go/end 305} (go/method Frames "Frames is an iterator over the frames in a Stack.\n" ^{:tag (iter/Seq StackFrame)} [^Stack s]
+  ^{:go/end 304} (fn [^{:tag (func [StackFrame] [bool])} yield]
+    (when (== (.-id s) 0)
+      (return))
+
+    (let [stk (.mustGet (.-stacks (.-table s)) (.-id s))]
+      (range [_ pc (.-pcs stk)]
+        (let [f (aget (.-pcs (.-table s)) pc)
+            ^{:line 294} sf ^{:go/breaks [2 4 6 8]} (lit StackFrame
+              :PC (.-pc f)
+              :Func (.mustGet (.-strings (.-table s)) (.-funcID f))
+              :File (.mustGet (.-strings (.-table s)) (.-fileID f))
+              :Line (.-line f))]
+
+          (when (not (yield sf))
+            (return)))))))
+
+
+
+
+
+
+
+
+^{:go/end 314} (go/method String "String returns the stack as a human-readable string.\n\nThe format of the string is intended for debugging and is subject to change.\n" ^string [^Stack s]
+  (let [^strings/Builder sb (zero strings/Builder)]
+    (printStack (addr sb) "" (.Frames s))
+    (.String sb)))
+
+
+^{:go/end 321} (go/func printStack [^io/Writer w ^string prefix ^{:tag (iter/Seq StackFrame)} frames]
+  (range [f frames]
+    (fmt/Fprintf w "%s%s @ 0x%x\n" prefix (.-Func f) (.-PC f))
+    (fmt/Fprintf w "%s\t%s:%d\n" prefix (.-File f) (.-Line f))))
+
+
+
+
+
+(go/var ^{:doc "NoStack is a sentinel value that can be compared against any Stack value, indicating\na lack of a stack trace.\n"} NoStack (lit Stack))
+
+
+(go/type StackFrame "StackFrame represents a single frame of a stack.\n" (struct
+
+
+
+    ^{:line 332 :tag uint64 :doc "PC is the program counter of the function call if this\nis not a leaf frame. If it's a leaf frame, it's the point\nat which the stack trace was taken.\n"} PC
+
+
+    ^{:line 335 :tag string :doc "Func is the name of the function this frame maps to.\n"} Func
+
+
+    ^{:line 338 :tag string :doc "File is the file which contains the source code of Func.\n"} File
+
+
+    ^{:line 341 :tag uint64 :doc "Line is the line number within File which maps to PC.\n"} Line))
+
+
+
+(go/type ExperimentalEvent "ExperimentalEvent presents a raw view of an experimental event's arguments and their names.\n" (struct
+
+    ^{:line 347 :tag string :doc "Name is the name of the event.\n"} Name
+
+
+    ^{:line 350 :tag string :doc "Experiment is the name of the experiment this event is a part of.\n"} Experiment
+
+
+    ^{:line 353 :tag (slice string) :doc "Args lists the names of the event's arguments in order.\n"} Args
+
+
+
+    ^{:line 357 :tag (* evTable) :doc "argValues contains the raw integer arguments which are interpreted\nby ArgValue using table.\n"} table
+    ^{:line 358 :tag (slice uint64)} argValues))
+
+
+
+^{:go/end 371} (go/method ArgValue "ArgValue returns a typed Value for the i'th argument in the experimental event.\n" ^Value [^ExperimentalEvent e ^int i]
+  (when (or (< i 0) (>= i (len (.-Args e))))
+    (panic (fmt/Sprintf "experimental event argument index %d out of bounds [0, %d)" i (len (.-Args e)))))
+
+  (when (strings/HasSuffix (aget (.-Args e) i) "string")
+    (let [s (.mustGet (.-strings (.-table e)) (conv stringID (aget (.-argValues e) i)))]
+      (return (StringValue s))))
+
+  (Uint64Value (aget (.-argValues e) i)))
+
+
+
+(go/type ExperimentalBatch "ExperimentalBatch represents a packet of unparsed data along with metadata about that packet.\n" (struct
+
+    ^{:line 376 :tag ThreadID :doc "Thread is the ID of the thread that produced a packet of data.\n"} Thread
+
+
+    ^{:line 379 :tag (slice byte) :doc "Data is a packet of unparsed data all produced by one thread.\n"} Data))
+
+
+(go/type EventDetails (interface
+    (| Metric Label Range StateTransition Sync Task Region Log StackSample)))
+
+
+
+(go/type EventConfig "EventConfig holds the data for constructing a trace event.\n" :type-params [^EventDetails T] (struct
+
+    ^{:line 389 :tag Time :doc "Time is the timestamp of the event.\n"} Time
+
+
+    ^{:line 392 :tag EventKind :doc "Kind is the kind of the event.\n"} Kind
+
+
+    ^{:line 395 :tag GoID :doc "Goroutine is the goroutine ID of the event.\n"} Goroutine
+
+
+    ^{:line 398 :tag ProcID :doc "Proc is the proc ID of the event.\n"} Proc
+
+
+    ^{:line 401 :tag ThreadID :doc "Thread is the thread ID of the event.\n"} Thread
+
+
+    ^{:line 404 :tag Stack :doc "Stack is the stack of the event.\n"} Stack
+
+
+    ^{:line 407 :tag T :doc "Details is the kind specific details of the event.\n"} Details))
+
+
+
+^{:go/end 476} (go/func MakeEvent "MakeEvent creates a new trace event from the given configuration.\n" :type-params [^EventDetails T] [^{:tag (EventConfig T)} c] :results [^Event e ^error err]
+  ;; TODO(felixge): make the evTable reusable.
+  (set! e ^{:go/breaks [2 4 6]} (lit Event
+      :table (addr (lit evTable :pcs (make (map uint64 frame)) :sync (lit sync :freq 1)))
+      :base (lit baseEvent :time (.-Time c))
+      :ctx (lit schedCtx :G (.-Goroutine c) :P (.-Proc c) :M (.-Thread c))))
+
+  (defer (^{:go/end 433} (fn []
+        ;; N.b. evSync is not in tracev2.Specs()
+        (when (or (!= err nil) (== (.-typ (.-base e)) evSync))
+          (return))
+
+        (let [spec (aget (tracev2/Specs) (.-typ (.-base e)))]
+          (when (and (> (len (.-StackIDs spec)) 0) (!= (.-Stack c) NoStack))
+            ;; The stack for the main execution context is always the
+            ;; first stack listed in StackIDs. Subtract one from this
+            ;; because we've peeled away the timestamp argument.
+            (aset (.-args (.-base e)) (- (aget (.-StackIDs spec) 0) 1) (conv uint64 (addStack (.-table e) (^{:inst [StackFrame]} slices/Collect (.Frames (.-Stack c)))))))
+
+
+          (.compactify (.-strings (.-table e)))
+          (.compactify (.-stacks (.-table e)))))))
+
+  (let [^EventKind defaultKind (zero EventKind)]
+    (switch (.-Kind c)
+      (case [defaultKind]
+        (return (lit Event) (fmt/Errorf "the Kind field must be provided")))
+      (case [EventMetric]
+        (when [(values m ok) (assert Metric (conv any (.-Details c)))] ok
+          (return (makeMetricEvent e m))))
+
+      (case [EventLabel]
+        (when [(values l ok) (assert Label (conv any (.-Details c)))] ok
+          (return (makeLabelEvent e l))))
+
+      (case [EventRangeBegin EventRangeActive EventRangeEnd]
+        (when [(values r ok) (assert Range (conv any (.-Details c)))] ok
+          (return (makeRangeEvent e (.-Kind c) r))))
+
+      (case [EventStateTransition]
+        (when [(values t ok) (assert StateTransition (conv any (.-Details c)))] ok
+          (return (makeStateTransitionEvent e t))))
+
+      (case [EventSync]
+        (when [(values s ok) (assert Sync (conv any (.-Details c)))] ok
+          (return (makeSyncEvent e s))))
+
+      (case [EventTaskBegin EventTaskEnd]
+        (when [(values t ok) (assert Task (conv any (.-Details c)))] ok
+          (return (makeTaskEvent e (.-Kind c) t))))
+
+      (case [EventRegionBegin EventRegionEnd]
+        (when [(values r ok) (assert Region (conv any (.-Details c)))] ok
+          (return (makeRegionEvent e (.-Kind c) r))))
+
+      (case [EventLog]
+        (when [(values l ok) (assert Log (conv any (.-Details c)))] ok
+          (return (makeLogEvent e l))))
+
+      (case [EventStackSample]
+        (when [(values _ ok) (assert StackSample (conv any (.-Details c)))] ok
+          (return (makeStackSampleEvent e (.-Stack c))))))
+
+
+    (return (lit Event) (fmt/Errorf "the Kind field %s is incompatible with Details type %T" (.-Kind c) (.-Details c)))))
+
+
+^{:go/end 494} (go/func makeMetricEvent [^Event e ^Metric m] :results [Event error]
+  (when (!= (.Kind (.-Value m)) ValueUint64)
+    (return (lit Event) (fmt/Errorf "metric value must be a uint64, got: %s" (.String (.-Value m)))))
+
+  (switch (.-Name m)
+    (case ["/sched/gomaxprocs:threads"]
+      (set! (.-typ (.-base e)) tracev2/EvProcsChange))
+    (case ["/memory/classes/heap/objects:bytes"]
+      (set! (.-typ (.-base e)) tracev2/EvHeapAlloc))
+    (case ["/gc/heap/goal:bytes"]
+      (set! (.-typ (.-base e)) tracev2/EvHeapGoal))
+    (default
+      (return (lit Event) (fmt/Errorf "unknown metric name: %s" (.-Name m)))))
+
+  (aset (.-args (.-base e)) 0 (conv uint64 (.Uint64 (.-Value m))))
+  (return e nil))
+
+
+^{:go/end 505} (go/func makeLabelEvent [^Event e ^Label l] :results [Event error]
+  (when (!= (.-Kind (.-Resource l)) ResourceGoroutine)
+    (return (lit Event) (fmt/Errorf "resource must be a goroutine: %s" (.-Resource l))))
+
+  (set! (.-typ (.-base e)) tracev2/EvGoLabel)
+  (aset (.-args (.-base e)) 0 (conv uint64 (.append (.-strings (.-table e)) (.-Label l))))
+  ;; TODO(felixge): check against sched ctx and return error on mismatch
+  (set! (.-G (.-ctx e)) (.Goroutine (.-Resource l)))
+  (return e nil))
+
+
+(go/var stwRangeRegexp (regexp/MustCompile "^stop-the-world \\((.*)\\)$"))
+
+
+^{:go/end 587} (go/func makeRangeEvent "TODO(felixge): should this ever manipulate the e ctx? Or just report mismatches?\n" [^Event e ^EventKind kind ^Range r] :results [Event error]
+  ;; TODO(felixge): Should we add dedicated range kinds rather than using
+  ;; string names?
+  (switch (.-Name r)
+    (case ["GC concurrent mark phase"]
+      (when (!= (.-Kind (.-Scope r)) ResourceNone)
+        (return (lit Event) (fmt/Errorf "unexpected scope: %s" (.-Scope r))))
+
+      (switch kind
+        (case [EventRangeBegin]
+          (set! (.-typ (.-base e)) tracev2/EvGCBegin))
+        (case [EventRangeActive]
+          (set! (.-typ (.-base e)) tracev2/EvGCActive))
+        (case [EventRangeEnd]
+          (set! (.-typ (.-base e)) tracev2/EvGCEnd))
+        (default
+          (return (lit Event) (fmt/Errorf "unexpected range kind: %s" kind)))))
+
+    (case ["GC incremental sweep"]
+      (when (!= (.-Kind (.-Scope r)) ResourceProc)
+        (return (lit Event) (fmt/Errorf "unexpected scope: %s" (.-Scope r))))
+
+      (switch kind
+        (case [EventRangeBegin]
+          (set! (.-typ (.-base e)) tracev2/EvGCSweepBegin)
+          (set! (.-P (.-ctx e)) (.Proc (.-Scope r))))
+        (case [EventRangeActive]
+          (set! (.-typ (.-base e)) tracev2/EvGCSweepActive)
+          (aset (.-args (.-base e)) 0 (conv uint64 (.Proc (.-Scope r)))))
+        (case [EventRangeEnd]
+          (set! (.-typ (.-base e)) tracev2/EvGCSweepEnd)
+          ;; TODO(felixge): check against sched ctx and return error on mismatch
+          (set! (.-P (.-ctx e)) (.Proc (.-Scope r))))
+        (default
+          (return (lit Event) (fmt/Errorf "unexpected range kind: %s" kind)))))
+
+    (case ["GC mark assist"]
+      (when (!= (.-Kind (.-Scope r)) ResourceGoroutine)
+        (return (lit Event) (fmt/Errorf "unexpected scope: %s" (.-Scope r))))
+
+      (switch kind
+        (case [EventRangeBegin]
+          (set! (.-typ (.-base e)) tracev2/EvGCMarkAssistBegin)
+          (set! (.-G (.-ctx e)) (.Goroutine (.-Scope r))))
+        (case [EventRangeActive]
+          (set! (.-typ (.-base e)) tracev2/EvGCMarkAssistActive)
+          (aset (.-args (.-base e)) 0 (conv uint64 (.Goroutine (.-Scope r)))))
+        (case [EventRangeEnd]
+          (set! (.-typ (.-base e)) tracev2/EvGCMarkAssistEnd)
+          ;; TODO(felixge): check against sched ctx and return error on mismatch
+          (set! (.-G (.-ctx e)) (.Goroutine (.-Scope r))))
+        (default
+          (return (lit Event) (fmt/Errorf "unexpected range kind: %s" kind)))))
+
+    (default
+      (let [match (.FindStringSubmatch stwRangeRegexp (.-Name r))]
+        (when (!= (len match) 2)
+          (return (lit Event) (fmt/Errorf "unexpected range name: %s" (.-Name r))))
+
+        (when (!= (.-Kind (.-Scope r)) ResourceGoroutine)
+          (return (lit Event) (fmt/Errorf "unexpected scope: %s" (.-Scope r))))
+
+        (switch kind
+          (case [EventRangeBegin]
+            (set! (.-typ (.-base e)) tracev2/EvSTWBegin)
+            ;; TODO(felixge): check against sched ctx and return error on mismatch
+            (set! (.-G (.-ctx e)) (.Goroutine (.-Scope r))))
+          (case [EventRangeEnd]
+            (set! (.-typ (.-base e)) tracev2/EvSTWEnd)
+            ;; TODO(felixge): check against sched ctx and return error on mismatch
+            (set! (.-G (.-ctx e)) (.Goroutine (.-Scope r))))
+          (default
+            (return (lit Event) (fmt/Errorf "unexpected range kind: %s" kind))))
+
+        (aset (.-args (.-base e)) 0 (conv uint64 (.append (.-strings (.-table e)) (aget match 1)))))))
+
+  (return e nil))
+
+
+^{:go/end 697} (go/func makeStateTransitionEvent [^Event e ^StateTransition t] :results [Event error]
+  (switch (.-Kind (.-Resource t))
+    (case [ResourceProc]
+      (let [(values from to) (values (conv ProcState (.-oldState t)) (conv ProcState (.-newState t)))]
+        (switch
+          (case [(and (== from ProcIdle) (== to ProcIdle))]
+            ;; TODO(felixge): Could this also be a ProcStatus event?
+            (set! (.-typ (.-base e)) tracev2/EvProcSteal)
+            (aset (.-args (.-base e)) 0 (conv uint64 (.Proc (.-Resource t))))
+            (aset (.extra (.-base e) version/Go122) 0 (conv uint64 tracev2/ProcSyscallAbandoned)))
+          (case [(and (== from ProcIdle) (== to ProcRunning))]
+            (set! (.-typ (.-base e)) tracev2/EvProcStart)
+            (aset (.-args (.-base e)) 0 (conv uint64 (.Proc (.-Resource t)))))
+          (case [(and (== from ProcRunning) (== to ProcIdle))]
+            (set! (.-typ (.-base e)) tracev2/EvProcStop)
+            (when (!= (.Proc (.-Resource t)) (.-P (.-ctx e)))
+              (set! (.-typ (.-base e)) tracev2/EvProcSteal)
+              (aset (.-args (.-base e)) 0 (conv uint64 (.Proc (.-Resource t))))))
+
+          (default
+            (set! (.-typ (.-base e)) tracev2/EvProcStatus)
+            (aset (.-args (.-base e)) 0 (conv uint64 (.Proc (.-Resource t))))
+            (aset (.-args (.-base e)) 1 (conv uint64 (aget procState2Tracev2ProcStatus to)))
+            (aset (.extra (.-base e) version/Go122) 0 (conv uint64 (aget procState2Tracev2ProcStatus from)))
+            (return e nil)))))
+
+    (case [ResourceGoroutine]
+      (let [(values from to) (values (conv GoState (.-oldState t)) (conv GoState (.-newState t)))
+          ^{:line 617} stack (^{:inst [StackFrame]} slices/Collect (.Frames (.-Stack t)))
+          ^{:line 618} goroutine (.Goroutine (.-Resource t))]
+
+        (if (and ^:go/paren (or (== from GoUndetermined) (== from to)) (!= from GoNotExist)) (do
+            (set! (.-typ (.-base e)) tracev2/EvGoStatus)
+            (when (> (len stack) 0)
+              (set! (.-typ (.-base e)) tracev2/EvGoStatusStack))
+
+            (aset (.-args (.-base e)) 0 (conv uint64 goroutine))
+            (aset (.-args (.-base e)) 2 (bit-or (<< (conv uint64 from) 32) (conv uint64 (aget goState2Tracev2GoStatus to)))))
+
+          (switch from
+            (case [GoNotExist]
+              (switch to
+                (case [GoWaiting]
+                  (set! (.-typ (.-base e)) tracev2/EvGoCreateBlocked)
+                  (aset (.-args (.-base e)) 0 (conv uint64 goroutine))
+                  (aset (.-args (.-base e)) 1 (conv uint64 (addStack (.-table e) stack))))
+                (case [GoRunnable]
+                  (set! (.-typ (.-base e)) tracev2/EvGoCreate)
+                  (aset (.-args (.-base e)) 0 (conv uint64 goroutine))
+                  (aset (.-args (.-base e)) 1 (conv uint64 (addStack (.-table e) stack))))
+                (case [GoSyscall]
+                  (set! (.-typ (.-base e)) tracev2/EvGoCreateSyscall)
+                  (aset (.-args (.-base e)) 0 (conv uint64 goroutine)))
+                (default
+                  (return (lit Event) (fmt/Errorf "unexpected transition: %s -> %s" from to)))))
+
+            (case [GoRunnable]
+              (set! (.-typ (.-base e)) tracev2/EvGoStart)
+              (aset (.-args (.-base e)) 0 (conv uint64 goroutine)))
+            (case [GoRunning]
+              (switch to
+                (case [GoNotExist]
+                  (set! (.-typ (.-base e)) tracev2/EvGoDestroy)
+                  (set! (.-G (.-ctx e)) goroutine))
+                (case [GoRunnable]
+                  (set! (.-typ (.-base e)) tracev2/EvGoStop)
+                  (set! (.-G (.-ctx e)) goroutine)
+                  (aset (.-args (.-base e)) 0 (conv uint64 (.append (.-strings (.-table e)) (.-Reason t)))))
+                (case [GoWaiting]
+                  (set! (.-typ (.-base e)) tracev2/EvGoBlock)
+                  (set! (.-G (.-ctx e)) goroutine)
+                  (aset (.-args (.-base e)) 0 (conv uint64 (.append (.-strings (.-table e)) (.-Reason t)))))
+                (case [GoSyscall]
+                  (set! (.-typ (.-base e)) tracev2/EvGoSyscallBegin)
+                  (set! (.-G (.-ctx e)) goroutine))
+                (default
+                  (return (lit Event) (fmt/Errorf "unexpected transition: %s -> %s" from to)))))
+
+            (case [GoSyscall]
+              (switch to
+                (case [GoNotExist]
+                  (set! (.-typ (.-base e)) tracev2/EvGoDestroySyscall)
+                  (set! (.-G (.-ctx e)) goroutine))
+                (case [GoRunning]
+                  (set! (.-typ (.-base e)) tracev2/EvGoSyscallEnd)
+                  (set! (.-G (.-ctx e)) goroutine))
+                (case [GoRunnable]
+                  (set! (.-typ (.-base e)) tracev2/EvGoSyscallEndBlocked)
+                  (set! (.-G (.-ctx e)) goroutine))
+                (default
+                  (return (lit Event) (fmt/Errorf "unexpected transition: %s -> %s" from to)))))
+
+            (case [GoWaiting]
+              (switch to
+                (case [GoRunnable]
+                  (set! (.-typ (.-base e)) tracev2/EvGoUnblock)
+                  (aset (.-args (.-base e)) 0 (conv uint64 goroutine)))
+                (default
+                  (return (lit Event) (fmt/Errorf "unexpected transition: %s -> %s" from to)))))
+
+            (default
+              (return (lit Event) (fmt/Errorf "unexpected transition: %s -> %s" from to)))))))
+
+
+    (default
+      (return (lit Event) (fmt/Errorf "unsupported state transition resource: %s" (.-Resource t)))))
+
+  (return e nil))
+
+
+^{:go/end 726} (go/func makeSyncEvent [^Event e ^Sync s] :results [Event error]
+  (set! (.-typ (.-base e)) evSync)
+  (aset (.-args (.-base e)) 0 (conv uint64 (.-N s)))
+  (when (== (.-expBatches (.-table e)) nil)
+    (set! (.-expBatches (.-table e)) (make (map tracev2/Experiment (slice ExperimentalBatch)))))
+
+  (range [name batches (.-ExperimentalBatches s)]
+    (let [^bool found (zero bool)]
+      (range [id exp (tracev2/Experiments)]
+        (when (== exp name)
+          (set! found true)
+          (aset (.-expBatches (.-table e)) (conv tracev2/Experiment id) batches)
+          (break)))
+
+
+      (when (not found)
+        (return (lit Event) (fmt/Errorf "unknown experiment: %s" name)))))
+
+
+  (when (!= (.-ClockSnapshot s) nil)
+    (set! ^{:go/via [sync]} (.-hasClockSnapshot (.-table e)) true)
+    (set! ^{:go/via [sync]} (.-snapWall (.-table e)) (.-Wall (.-ClockSnapshot s)))
+    (set! ^{:go/via [sync]} (.-snapMono (.-table e)) (.-Mono (.-ClockSnapshot s)))
+    ;; N.b. MakeEvent sets e.table.freq to 1.
+    (set! ^{:go/via [sync]} (.-snapTime (.-table e)) (conv timestamp (.-Trace (.-ClockSnapshot s)))))
+
+  (return e nil))
+
+
+^{:go/end 747} (go/func makeTaskEvent [^Event e ^EventKind kind ^Task t] :results [Event error]
+  (when (== (.-ID t) NoTask)
+    (return (lit Event) (errors/New "task ID cannot be NoTask")))
+
+  (aset (.-args (.-base e)) 0 (conv uint64 (.-ID t)))
+  (switch kind
+    (case [EventTaskBegin]
+      (set! (.-typ (.-base e)) tracev2/EvUserTaskBegin)
+      (aset (.-args (.-base e)) 1 (conv uint64 (.-Parent t)))
+      (aset (.-args (.-base e)) 2 (conv uint64 (.append (.-strings (.-table e)) (.-Type t)))))
+    (case [EventTaskEnd]
+      (set! (.-typ (.-base e)) tracev2/EvUserTaskEnd)
+      (aset (.extra (.-base e) version/Go122) 0 (conv uint64 (.-Parent t)))
+      (aset (.extra (.-base e) version/Go122) 1 (conv uint64 (.addExtraString (.-table e) (.-Type t)))))
+    (default
+      ;; TODO(felixge): also do this for ranges?
+      (panic "unexpected task kind")))
+
+  (return e nil))
+
+
+^{:go/end 761} (go/func makeRegionEvent [^Event e ^EventKind kind ^Region r] :results [Event error]
+  (aset (.-args (.-base e)) 0 (conv uint64 (.-Task r)))
+  (aset (.-args (.-base e)) 1 (conv uint64 (.append (.-strings (.-table e)) (.-Type r))))
+  (switch kind
+    (case [EventRegionBegin]
+      (set! (.-typ (.-base e)) tracev2/EvUserRegionBegin))
+    (case [EventRegionEnd]
+      (set! (.-typ (.-base e)) tracev2/EvUserRegionEnd))
+    (default
+      (panic "unexpected region kind")))
+
+  (return e nil))
+
+
+^{:go/end 769} (go/func makeLogEvent [^Event e ^Log l] :results [Event error]
+  (set! (.-typ (.-base e)) tracev2/EvUserLog)
+  (aset (.-args (.-base e)) 0 (conv uint64 (.-Task l)))
+  (aset (.-args (.-base e)) 1 (conv uint64 (.append (.-strings (.-table e)) (.-Category l))))
+  (aset (.-args (.-base e)) 2 (conv uint64 (.append (.-strings (.-table e)) (.-Message l))))
+  (return e nil))
+
+
+^{:go/end 776} (go/func makeStackSampleEvent [^Event e ^Stack s] :results [Event error]
+  (set! (.-typ (.-base e)) tracev2/EvCPUSample)
+  (let [frames (^{:inst [StackFrame]} slices/Collect (.Frames s))]
+    (aset (.-args (.-base e)) 0 (conv uint64 (addStack (.-table e) frames)))
+    (return e nil)))
+
+
+^{:go/end 790} (go/func addStack ^stackID [^{:tag (* evTable)} table ^{:tag (slice StackFrame)} frames]
+  (let [pcs (make (slice uint64) 0 (len frames))]
+    (range [_ f frames]
+      (aset (.-pcs table) (.-PC f) ^{:go/breaks [2 4 6 8]} (lit frame
+          :pc (.-PC f)
+          :funcID (.append (.-strings table) (.-Func f))
+          :fileID (.append (.-strings table) (.-File f))
+          :line (.-Line f)))
+
+      (set! pcs (append pcs (.-PC f))))
+
+    (.append (.-stacks table) (lit stack :pcs pcs))))
+
+
+
+(go/type Event "Event represents a single event in the trace.\n" (struct
+    ^{:line 794 :tag (* evTable)} table
+    ^{:line 795 :tag schedCtx} ctx
+    ^{:line 796 :tag baseEvent} base))
+
+
+
+^{:go/end 802} (go/method Kind "Kind returns the kind of event that this is.\n" ^EventKind [^Event e]
+  (aget tracev2Type2Kind (.-typ (.-base e))))
+
+
+
+^{:go/end 807} (go/method Time "Time returns the timestamp of the event.\n" ^Time [^Event e]
+  (.-time (.-base e)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 820} (go/method Goroutine "Goroutine returns the ID of the goroutine that was executing when\nthis event happened. It describes part of the execution context\nfor this event.\n\nNote that for goroutine state transitions this always refers to the\nstate before the transition. For example, if a goroutine is just\nstarting to run on this thread and/or proc, then this will return\nNoGoroutine. In this case, the goroutine starting to run will be\ncan be found at Event.StateTransition().Resource.\n" ^GoID [^Event e]
+  (.-G (.-ctx e)))
+
+
+
+
+
+
+
+^{:go/end 829} (go/method Proc "Proc returns the ID of the proc this event event pertains to.\n\nNote that for proc state transitions this always refers to the\nstate before the transition. For example, if a proc is just\nstarting to run on this thread, then this will return NoProc.\n" ^ProcID [^Event e]
+  (.-P (.-ctx e)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 843} (go/method Thread "Thread returns the ID of the thread this event pertains to.\n\nNote that for thread state transitions this always refers to the\nstate before the transition. For example, if a thread is just\nstarting to run, then this will return NoThread.\n\nNote: tracking thread state is not currently supported, so this\nwill always return a valid thread ID. However thread state transitions\nmay be tracked in the future, and callers must be robust to this\npossibility.\n" ^ThreadID [^Event e]
+  (.-M (.-ctx e)))
+
+
+
+
+
+
+^{:go/end 868} (go/method Stack "Stack returns a handle to a stack associated with the event.\n\nThis represents a stack trace at the current moment in time for\nthe current execution context.\n" ^Stack [^Event e]
+  (when (== (.-typ (.-base e)) evSync)
+    (return NoStack))
+
+  (when (== (.-typ (.-base e)) tracev2/EvCPUSample)
+    (return (lit Stack :table (.-table e) :id (conv stackID (aget (.-args (.-base e)) 0)))))
+
+  (let [spec (aget (tracev2/Specs) (.-typ (.-base e)))]
+    (when (== (len (.-StackIDs spec)) 0)
+      (return NoStack))
+
+    ;; The stack for the main execution context is always the
+    ;; first stack listed in StackIDs. Subtract one from this
+    ;; because we've peeled away the timestamp argument.
+    (let [id (conv stackID (aget (.-args (.-base e)) (- (aget (.-StackIDs spec) 0) 1)))]
+      (when (== id 0)
+        (return NoStack))
+
+      (lit Stack :table (.-table e) :id id))))
+
+
+
+
+
+^{:go/end 892} (go/method Metric "Metric returns details about a Metric event.\n\nPanics if Kind != EventMetric.\n" ^Metric [^Event e]
+  (when (!= (.Kind e) EventMetric)
+    (panic "Metric called on non-Metric event"))
+
+  (let [^Metric m (zero Metric)]
+    (switch (.-typ (.-base e))
+      (case [tracev2/EvProcsChange]
+        (set! (.-Name m) "/sched/gomaxprocs:threads")
+        (set! (.-Value m) (Uint64Value (aget (.-args (.-base e)) 0))))
+      (case [tracev2/EvHeapAlloc]
+        (set! (.-Name m) "/memory/classes/heap/objects:bytes")
+        (set! (.-Value m) (Uint64Value (aget (.-args (.-base e)) 0))))
+      (case [tracev2/EvHeapGoal]
+        (set! (.-Name m) "/gc/heap/goal:bytes")
+        (set! (.-Value m) (Uint64Value (aget (.-args (.-base e)) 0))))
+      (default
+        (panic (fmt/Sprintf "internal error: unexpected wire-format event type for Metric kind: %d" (.-typ (.-base e))))))
+
+    ^{:line 891} m))
+
+
+
+
+
+^{:go/end 908} (go/method Label "Label returns details about a Label event.\n\nPanics if Kind != EventLabel.\n" ^Label [^Event e]
+  (when (!= (.Kind e) EventLabel)
+    (panic "Label called on non-Label event"))
+
+  (when (!= (.-typ (.-base e)) tracev2/EvGoLabel)
+    (panic (fmt/Sprintf "internal error: unexpected wire-format event type for Label kind: %d" (.-typ (.-base e)))))
+
+  ^{:go/breaks [2 4]} (lit Label
+    :Label (.mustGet (.-strings (.-table e)) (conv stringID (aget (.-args (.-base e)) 0)))
+    :Resource (lit ResourceID :Kind ResourceGoroutine :id (conv int64 (.-G (.-ctx e))))))
+
+
+
+
+
+
+^{:go/end 947} (go/method Range "Range returns details about an EventRangeBegin, EventRangeActive, or EventRangeEnd event.\n\nPanics if Kind != EventRangeBegin, Kind != EventRangeActive, and Kind != EventRangeEnd.\n" ^Range [^Event e]
+  (when [kind (.Kind e)] (and (!= kind EventRangeBegin) (!= kind EventRangeActive) (!= kind EventRangeEnd))
+    (panic "Range called on non-Range event"))
+
+  (let [^Range r (zero Range)]
+    (switch (.-typ (.-base e))
+      (case [tracev2/EvSTWBegin tracev2/EvSTWEnd]
+        ;; N.B. ordering.advance smuggles in the STW reason as e.base.args[0]
+        ;; for tracev2.EvSTWEnd (it's already there for Begin).
+        (set! (.-Name r) (+ "stop-the-world (" (.mustGet (.-strings (.-table e)) (conv stringID (aget (.-args (.-base e)) 0))) ")"))
+        (set! (.-Scope r) (lit ResourceID :Kind ResourceGoroutine :id (conv int64 (.Goroutine e)))))
+      (case [tracev2/EvGCBegin tracev2/EvGCActive tracev2/EvGCEnd]
+        (set! (.-Name r) "GC concurrent mark phase")
+        (set! (.-Scope r) (lit ResourceID :Kind ResourceNone)))
+      (case [tracev2/EvGCSweepBegin tracev2/EvGCSweepActive tracev2/EvGCSweepEnd]
+        (set! (.-Name r) "GC incremental sweep")
+        (set! (.-Scope r) (lit ResourceID :Kind ResourceProc))
+        (if (== (.-typ (.-base e)) tracev2/EvGCSweepActive)
+          (set! (.-id (.-Scope r)) (conv int64 (aget (.-args (.-base e)) 0)))
+
+          (set! (.-id (.-Scope r)) (conv int64 (.Proc e)))))
+
+      (case [tracev2/EvGCMarkAssistBegin tracev2/EvGCMarkAssistActive tracev2/EvGCMarkAssistEnd]
+        (set! (.-Name r) "GC mark assist")
+        (set! (.-Scope r) (lit ResourceID :Kind ResourceGoroutine))
+        (if (== (.-typ (.-base e)) tracev2/EvGCMarkAssistActive)
+          (set! (.-id (.-Scope r)) (conv int64 (aget (.-args (.-base e)) 0)))
+
+          (set! (.-id (.-Scope r)) (conv int64 (.Goroutine e)))))
+
+      (default
+        (panic (fmt/Sprintf "internal error: unexpected wire-event type for Range kind: %d" (.-typ (.-base e))))))
+
+    ^{:line 946} r))
+
+
+
+
+
+^{:go/end 969} (go/method RangeAttributes "RangeAttributes returns attributes for a completed range.\n\nPanics if Kind != EventRangeEnd.\n" ^{:tag (slice RangeAttribute)} [^Event e]
+  (when (!= (.Kind e) EventRangeEnd)
+    (panic "Range called on non-Range event"))
+
+  (when (!= (.-typ (.-base e)) tracev2/EvGCSweepEnd)
+    (return nil))
+
+  (lit (slice RangeAttribute)
+    ^{:go/breaks [2 4]} (lit _
+      :Name "bytes swept"
+      :Value (Uint64Value (aget (.-args (.-base e)) 0)))
+
+    ^{:go/breaks [2 4]} (lit _
+      :Name "bytes reclaimed"
+      :Value (Uint64Value (aget (.-args (.-base e)) 1)))))
+
+
+
+
+
+
+
+^{:go/end 995} (go/method Task "Task returns details about a TaskBegin or TaskEnd event.\n\nPanics if Kind != EventTaskBegin and Kind != EventTaskEnd.\n" ^Task [^Event e]
+  (when [kind (.Kind e)] (and (!= kind EventTaskBegin) (!= kind EventTaskEnd))
+    (panic "Task called on non-Task event"))
+
+  (let [parentID NoTask
+      ^{:line 979 :tag string} typ (zero string)]
+    (switch (.-typ (.-base e))
+      (case [tracev2/EvUserTaskBegin]
+        (set! parentID (conv TaskID (aget (.-args (.-base e)) 1)))
+        (set! typ (.mustGet (.-strings (.-table e)) (conv stringID (aget (.-args (.-base e)) 2)))))
+      (case [tracev2/EvUserTaskEnd]
+        (set! parentID (conv TaskID (aget (.extra (.-base e) version/Go122) 0)))
+        (set! typ (.getExtraString (.-table e) (conv extraStringID (aget (.extra (.-base e) version/Go122) 1)))))
+      (default
+        (panic (fmt/Sprintf "internal error: unexpected wire-format event type for Task kind: %d" (.-typ (.-base e))))))
+
+    ^{:go/breaks [2 4 6]} (lit Task
+      :ID (conv TaskID (aget (.-args (.-base e)) 0))
+      :Parent parentID
+      :Type typ)))
+
+
+
+
+
+
+^{:go/end 1011} (go/method Region "Region returns details about a RegionBegin or RegionEnd event.\n\nPanics if Kind != EventRegionBegin and Kind != EventRegionEnd.\n" ^Region [^Event e]
+  (when [kind (.Kind e)] (and (!= kind EventRegionBegin) (!= kind EventRegionEnd))
+    (panic "Region called on non-Region event"))
+
+  (when (and (!= (.-typ (.-base e)) tracev2/EvUserRegionBegin) (!= (.-typ (.-base e)) tracev2/EvUserRegionEnd))
+    (panic (fmt/Sprintf "internal error: unexpected wire-format event type for Region kind: %d" (.-typ (.-base e)))))
+
+  ^{:go/breaks [2 4]} (lit Region
+    :Task (conv TaskID (aget (.-args (.-base e)) 0))
+    :Type (.mustGet (.-strings (.-table e)) (conv stringID (aget (.-args (.-base e)) 1)))))
+
+
+
+
+
+
+^{:go/end 1028} (go/method Log "Log returns details about a Log event.\n\nPanics if Kind != EventLog.\n" ^Log [^Event e]
+  (when (!= (.Kind e) EventLog)
+    (panic "Log called on non-Log event"))
+
+  (when (!= (.-typ (.-base e)) tracev2/EvUserLog)
+    (panic (fmt/Sprintf "internal error: unexpected wire-format event type for Log kind: %d" (.-typ (.-base e)))))
+
+  ^{:go/breaks [2 4 6]} (lit Log
+    :Task (conv TaskID (aget (.-args (.-base e)) 0))
+    :Category (.mustGet (.-strings (.-table e)) (conv stringID (aget (.-args (.-base e)) 1)))
+    :Message (.mustGet (.-strings (.-table e)) (conv stringID (aget (.-args (.-base e)) 2)))))
+
+
+
+
+
+
+^{:go/end 1101} (go/method StateTransition "StateTransition returns details about a StateTransition event.\n\nPanics if Kind != EventStateTransition.\n" ^StateTransition [^Event e]
+  (when (!= (.Kind e) EventStateTransition)
+    (panic "StateTransition called on non-StateTransition event"))
+
+  (let [^StateTransition s (zero StateTransition)]
+    (switch (.-typ (.-base e))
+      (case [tracev2/EvProcStart]
+        (set! s (MakeProcStateTransition (conv ProcID (aget (.-args (.-base e)) 0)) ProcIdle ProcRunning)))
+      (case [tracev2/EvProcStop]
+        (set! s (MakeProcStateTransition (.-P (.-ctx e)) ProcRunning ProcIdle)))
+      (case [tracev2/EvProcSteal]
+        ;; N.B. ordering.advance populates e.base.extra.
+        (let [beforeState ProcRunning]
+          (when (== (conv tracev2/ProcStatus (aget (.extra (.-base e) version/Go122) 0)) tracev2/ProcSyscallAbandoned)
+            ;; We've lost information because this ProcSteal advanced on a
+            ;; SyscallAbandoned state. Treat the P as idle because ProcStatus
+            ;; treats SyscallAbandoned as Idle. Otherwise we'll have an invalid
+            ;; transition.
+            (set! beforeState ProcIdle))
+
+          (set! s (MakeProcStateTransition (conv ProcID (aget (.-args (.-base e)) 0)) beforeState ProcIdle))))
+      (case [tracev2/EvProcStatus]
+        ;; N.B. ordering.advance populates e.base.extra.
+        (set! s (MakeProcStateTransition (conv ProcID (aget (.-args (.-base e)) 0)) (conv ProcState (aget (.extra (.-base e) version/Go122) 0)) (aget tracev2ProcStatus2ProcState (aget (.-args (.-base e)) 1)))))
+      (case [tracev2/EvGoCreate tracev2/EvGoCreateBlocked]
+        (let [status GoRunnable]
+          (when (== (.-typ (.-base e)) tracev2/EvGoCreateBlocked)
+            (set! status GoWaiting))
+
+          (set! s (MakeGoStateTransition (conv GoID (aget (.-args (.-base e)) 0)) GoNotExist status))
+          (set! (.-Stack s) (lit Stack :table (.-table e) :id (conv stackID (aget (.-args (.-base e)) 1))))))
+      (case [tracev2/EvGoCreateSyscall]
+        (set! s (MakeGoStateTransition (conv GoID (aget (.-args (.-base e)) 0)) GoNotExist GoSyscall)))
+      (case [tracev2/EvGoStart]
+        (set! s (MakeGoStateTransition (conv GoID (aget (.-args (.-base e)) 0)) GoRunnable GoRunning)))
+      (case [tracev2/EvGoDestroy]
+        (set! s (MakeGoStateTransition (.-G (.-ctx e)) GoRunning GoNotExist)))
+      (case [tracev2/EvGoDestroySyscall]
+        (set! s (MakeGoStateTransition (.-G (.-ctx e)) GoSyscall GoNotExist)))
+      (case [tracev2/EvGoStop]
+        (set! s (MakeGoStateTransition (.-G (.-ctx e)) GoRunning GoRunnable))
+        (set! (.-Reason s) (.mustGet (.-strings (.-table e)) (conv stringID (aget (.-args (.-base e)) 0))))
+        (set! (.-Stack s) (.Stack e))) ; This event references the resource the event happened on.
+      (case [tracev2/EvGoBlock]
+        (set! s (MakeGoStateTransition (.-G (.-ctx e)) GoRunning GoWaiting))
+        (set! (.-Reason s) (.mustGet (.-strings (.-table e)) (conv stringID (aget (.-args (.-base e)) 0))))
+        (set! (.-Stack s) (.Stack e))) ; This event references the resource the event happened on.
+      (case [tracev2/EvGoUnblock tracev2/EvGoSwitch tracev2/EvGoSwitchDestroy]
+        ;; N.B. GoSwitch and GoSwitchDestroy both emit additional events, but
+        ;; the first thing they both do is unblock the goroutine they name,
+        ;; identically to an unblock event (even their arguments match).
+        (set! s (MakeGoStateTransition (conv GoID (aget (.-args (.-base e)) 0)) GoWaiting GoRunnable)))
+      (case [tracev2/EvGoSyscallBegin]
+        (set! s (MakeGoStateTransition (.-G (.-ctx e)) GoRunning GoSyscall))
+        (set! (.-Stack s) (.Stack e))) ; This event references the resource the event happened on.
+      (case [tracev2/EvGoSyscallEnd]
+        (set! s (MakeGoStateTransition (.-G (.-ctx e)) GoSyscall GoRunning)))
+      (case [tracev2/EvGoSyscallEndBlocked]
+        (set! s (MakeGoStateTransition (.-G (.-ctx e)) GoSyscall GoRunnable)))
+      (case [tracev2/EvGoStatus tracev2/EvGoStatusStack]
+        (let [packedStatus (aget (.-args (.-base e)) 2)
+            (values from to) (values (>> packedStatus 32) (bit-and packedStatus (- (<< 1 32) 1)))]
+          (set! s (MakeGoStateTransition (conv GoID (aget (.-args (.-base e)) 0)) (conv GoState from) (aget tracev2GoStatus2GoState to)))
+          (set! (.-Stack s) (.Stack e)))) ; This event references the resource the event happened on.
+      (default
+        (panic (fmt/Sprintf "internal error: unexpected wire-format event type for StateTransition kind: %d" (.-typ (.-base e))))))
+
+    ^{:line 1100} s))
+
+
+
+
+^{:go/end 1125} (go/method Sync "Sync returns details that are relevant for the following events, up to but excluding the\nnext EventSync event.\n" ^Sync [^Event e]
+  (when (!= (.Kind e) EventSync)
+    (panic "Sync called on non-Sync event"))
+
+  (let [s (lit Sync :N (conv int (aget (.-args (.-base e)) 0)))]
+    (when (!= (.-table e) nil)
+      (let [expBatches (make (map string (slice ExperimentalBatch)))]
+        (range [exp batches (.-expBatches (.-table e))]
+          (aset expBatches (aget (tracev2/Experiments) exp) batches))
+
+        (set! (.-ExperimentalBatches s) expBatches)
+        (when ^{:go/via [sync]} (.-hasClockSnapshot (.-table e))
+          (set! (.-ClockSnapshot s) (addr ^{:go/breaks [2 4 6]} (lit ClockSnapshot
+                :Trace (.mul ^{:go/via [sync]} (.-freq (.-table e)) ^{:go/via [sync]} (.-snapTime (.-table e)))
+                :Wall ^{:go/via [sync]} (.-snapWall (.-table e))
+                :Mono ^{:go/via [sync]} (.-snapMono (.-table e))))))))
+
+
+
+    ^{:line 1124} s))
+
+
+
+
+(go/type Sync "Sync contains details potentially relevant to all the following events, up to but excluding\nthe next EventSync event.\n" (struct
+
+    ^{:line 1131 :tag int :doc "N indicates that this is the Nth sync event in the trace.\n"} N
+
+
+
+
+
+
+    ^{:line 1138 :tag (* ClockSnapshot) :doc "ClockSnapshot represents a near-simultaneous clock reading of several\ndifferent system clocks. The snapshot can be used as a reference to\nconvert timestamps to different clocks, which is helpful for correlating\ntimestamps with data captured by other tools. The value is nil for traces\nbefore go1.25.\n"} ClockSnapshot
+
+
+    ^{:line 1141 :tag (map string (slice ExperimentalBatch)) :doc "ExperimentalBatches contain all the unparsed batches of data for a given experiment.\n"} ExperimentalBatches))
+
+
+
+
+
+
+(go/type ClockSnapshot "ClockSnapshot represents a near-simultaneous clock reading of several\ndifferent system clocks. The snapshot can be used as a reference to convert\ntimestamps to different clocks, which is helpful for correlating timestamps\nwith data captured by other tools.\n" (struct
+
+    ^{:line 1150 :tag Time :doc "Trace is a snapshot of the trace clock.\n"} Trace
+
+
+    ^{:line 1153 :tag time/Time :doc "Wall is a snapshot of the system's wall clock.\n"} Wall
+
+
+    ^{:line 1156 :tag uint64 :doc "Mono is a snapshot of the system's monotonic clock.\n"} Mono))
+
+
+
+
+
+^{:go/end 1175} (go/method Experimental "Experimental returns a view of the raw event for an experimental event.\n\nPanics if Kind != EventExperimental.\n" ^ExperimentalEvent [^Event e]
+  (when (!= (.Kind e) EventExperimental)
+    (panic "Experimental called on non-Experimental event"))
+
+  (let [spec (aget (tracev2/Specs) (.-typ (.-base e)))
+      ^{:line 1167} argNames (subslice (.-Args spec) 1)] ; Skip timestamp; already handled.
+    ^{:go/breaks [2 4 6 8 10]} (lit ExperimentalEvent
+      :Name (.-Name spec)
+      :Experiment (aget (tracev2/Experiments) (.-Experiment spec))
+      :Args argNames
+      :table (.-table e)
+      :argValues (subslice (.-args (.-base e)) _ (len argNames)))))
+
+
+
+(go/const ^{:val 255} evSync (bit-not (conv tracev2/EventType 0)))
+
+(go/var tracev2Type2Kind (lit (array ... EventKind)
+    ^{:line 1180} [tracev2/EvCPUSample EventStackSample]
+    ^{:line 1181} [tracev2/EvProcsChange EventMetric]
+    ^{:line 1182} [tracev2/EvProcStart EventStateTransition]
+    ^{:line 1183} [tracev2/EvProcStop EventStateTransition]
+    ^{:line 1184} [tracev2/EvProcSteal EventStateTransition]
+    ^{:line 1185} [tracev2/EvProcStatus EventStateTransition]
+    ^{:line 1186} [tracev2/EvGoCreate EventStateTransition]
+    ^{:line 1187} [tracev2/EvGoCreateSyscall EventStateTransition]
+    ^{:line 1188} [tracev2/EvGoStart EventStateTransition]
+    ^{:line 1189} [tracev2/EvGoDestroy EventStateTransition]
+    ^{:line 1190} [tracev2/EvGoDestroySyscall EventStateTransition]
+    ^{:line 1191} [tracev2/EvGoStop EventStateTransition]
+    ^{:line 1192} [tracev2/EvGoBlock EventStateTransition]
+    ^{:line 1193} [tracev2/EvGoUnblock EventStateTransition]
+    ^{:line 1194} [tracev2/EvGoSyscallBegin EventStateTransition]
+    ^{:line 1195} [tracev2/EvGoSyscallEnd EventStateTransition]
+    ^{:line 1196} [tracev2/EvGoSyscallEndBlocked EventStateTransition]
+    ^{:line 1197} [tracev2/EvGoStatus EventStateTransition]
+    ^{:line 1198} [tracev2/EvSTWBegin EventRangeBegin]
+    ^{:line 1199} [tracev2/EvSTWEnd EventRangeEnd]
+    ^{:line 1200} [tracev2/EvGCActive EventRangeActive]
+    ^{:line 1201} [tracev2/EvGCBegin EventRangeBegin]
+    ^{:line 1202} [tracev2/EvGCEnd EventRangeEnd]
+    ^{:line 1203} [tracev2/EvGCSweepActive EventRangeActive]
+    ^{:line 1204} [tracev2/EvGCSweepBegin EventRangeBegin]
+    ^{:line 1205} [tracev2/EvGCSweepEnd EventRangeEnd]
+    ^{:line 1206} [tracev2/EvGCMarkAssistActive EventRangeActive]
+    ^{:line 1207} [tracev2/EvGCMarkAssistBegin EventRangeBegin]
+    ^{:line 1208} [tracev2/EvGCMarkAssistEnd EventRangeEnd]
+    ^{:line 1209} [tracev2/EvHeapAlloc EventMetric]
+    ^{:line 1210} [tracev2/EvHeapGoal EventMetric]
+    ^{:line 1211} [tracev2/EvGoLabel EventLabel]
+    ^{:line 1212} [tracev2/EvUserTaskBegin EventTaskBegin]
+    ^{:line 1213} [tracev2/EvUserTaskEnd EventTaskEnd]
+    ^{:line 1214} [tracev2/EvUserRegionBegin EventRegionBegin]
+    ^{:line 1215} [tracev2/EvUserRegionEnd EventRegionEnd]
+    ^{:line 1216} [tracev2/EvUserLog EventLog]
+    ^{:line 1217} [tracev2/EvGoSwitch EventStateTransition]
+    ^{:line 1218} [tracev2/EvGoSwitchDestroy EventStateTransition]
+    ^{:line 1219} [tracev2/EvGoCreateBlocked EventStateTransition]
+    ^{:line 1220} [tracev2/EvGoStatusStack EventStateTransition]
+    ^{:line 1221} [tracev2/EvSpan EventExperimental]
+    ^{:line 1222} [tracev2/EvSpanAlloc EventExperimental]
+    ^{:line 1223} [tracev2/EvSpanFree EventExperimental]
+    ^{:line 1224} [tracev2/EvHeapObject EventExperimental]
+    ^{:line 1225} [tracev2/EvHeapObjectAlloc EventExperimental]
+    ^{:line 1226} [tracev2/EvHeapObjectFree EventExperimental]
+    ^{:line 1227} [tracev2/EvGoroutineStack EventExperimental]
+    ^{:line 1228} [tracev2/EvGoroutineStackAlloc EventExperimental]
+    ^{:line 1229} [tracev2/EvGoroutineStackFree EventExperimental]
+    ^{:line 1230} [evSync EventSync]))
+
+
+(go/var tracev2GoStatus2GoState (lit (array ... GoState)
+    ^{:line 1234} [tracev2/GoRunnable GoRunnable]
+    ^{:line 1235} [tracev2/GoRunning GoRunning]
+    ^{:line 1236} [tracev2/GoWaiting GoWaiting]
+    ^{:line 1237} [tracev2/GoSyscall GoSyscall]))
+
+
+(go/var goState2Tracev2GoStatus (lit (array ... tracev2/GoStatus)
+    ^{:line 1241} [GoRunnable tracev2/GoRunnable]
+    ^{:line 1242} [GoRunning tracev2/GoRunning]
+    ^{:line 1243} [GoWaiting tracev2/GoWaiting]
+    ^{:line 1244} [GoSyscall tracev2/GoSyscall]))
+
+
+(go/var tracev2ProcStatus2ProcState (lit (array ... ProcState)
+    ^{:line 1248} [tracev2/ProcRunning ProcRunning]
+    ^{:line 1249} [tracev2/ProcIdle ProcIdle]
+    ^{:line 1250} [tracev2/ProcSyscall ProcRunning]
+    ^{:line 1251} [tracev2/ProcSyscallAbandoned ProcIdle]))
+
+
+(go/var procState2Tracev2ProcStatus (lit (array ... tracev2/ProcStatus)
+    ^{:line 1255} [ProcRunning tracev2/ProcRunning]
+    ^{:line 1256} [ProcIdle tracev2/ProcIdle]))
+;; TODO(felixge): how to map ProcSyscall and ProcSyscallAbandoned?
+
+
+
+
+
+^{:go/end 1346} (go/method String "String returns the event as a human-readable string.\n\nThe format of the string is intended for debugging and is subject to change.\n" ^string [^Event e]
+  (let [^strings/Builder sb (zero strings/Builder)]
+    (fmt/Fprintf (addr sb) "M=%d P=%d G=%d" (.Thread e) (.Proc e) (.Goroutine e))
+    (fmt/Fprintf (addr sb) " %s Time=%d" (.Kind e) (.Time e))
+    ;; Kind-specific fields.
+    (switch [kind (.Kind e)] kind
+      (case [EventMetric]
+        (let [m (.Metric e)
+            ^{:line 1271} v (.String (.-Value m))]
+          (when (== (.Kind (.-Value m)) ValueString)
+            (set! v (strconv/Quote v)))
+
+          (fmt/Fprintf (addr sb) " Name=%q Value=%s" (.-Name m) (.-Value m))))
+      (case [EventLabel]
+        (let [l (.Label e)]
+          (fmt/Fprintf (addr sb) " Label=%q Resource=%s" (.-Label l) (.-Resource l))))
+      (case [EventRangeBegin EventRangeActive EventRangeEnd]
+        (let [r (.Range e)]
+          (fmt/Fprintf (addr sb) " Name=%q Scope=%s" (.-Name r) (.-Scope r))
+          (when (== kind EventRangeEnd)
+            (fmt/Fprintf (addr sb) " Attributes=[")
+            (range [i attr (.RangeAttributes e)]
+              (when (!= i 0)
+                (fmt/Fprintf (addr sb) " "))
+
+              (fmt/Fprintf (addr sb) "%q=%s" (.-Name attr) (.-Value attr)))
+
+            (fmt/Fprintf (addr sb) "]"))))
+
+      (case [EventTaskBegin EventTaskEnd]
+        (let [t (.Task e)]
+          (fmt/Fprintf (addr sb) " ID=%d Parent=%d Type=%q" (.-ID t) (.-Parent t) (.-Type t))))
+      (case [EventRegionBegin EventRegionEnd]
+        (let [r (.Region e)]
+          (fmt/Fprintf (addr sb) " Task=%d Type=%q" (.-Task r) (.-Type r))))
+      (case [EventLog]
+        (let [l (.Log e)]
+          (fmt/Fprintf (addr sb) " Task=%d Category=%q Message=%q" (.-Task l) (.-Category l) (.-Message l))))
+      (case [EventStateTransition]
+        (let [s (.StateTransition e)]
+          (switch (.-Kind (.-Resource s))
+            (case [ResourceGoroutine]
+              (let [id (.Goroutine (.-Resource s))
+                  (values old new) (.Goroutine s)]
+                (fmt/Fprintf (addr sb) " GoID=%d %s->%s" id old new)))
+            (case [ResourceProc]
+              (let [id (.Proc (.-Resource s))
+                  (values old new) (.Proc s)]
+                (fmt/Fprintf (addr sb) " ProcID=%d %s->%s" id old new))))
+
+          (fmt/Fprintf (addr sb) " Reason=%q" (.-Reason s))
+          (when (!= (.-Stack s) NoStack)
+            (fmt/Fprintln (addr sb))
+            (fmt/Fprintln (addr sb) "TransitionStack=")
+            (printStack (addr sb) "\t" (.Frames (.-Stack s))))))
+
+      (case [EventExperimental]
+        (let [r (.Experimental e)]
+          (fmt/Fprintf (addr sb) " Name=%s Args=[" (.-Name r))
+          (range [i arg (.-Args r)]
+            (when (!= i 0)
+              (fmt/Fprintf (addr sb) ", "))
+
+            (fmt/Fprintf (addr sb) "%s=%s" arg (.String (.ArgValue r i))))
+
+          (fmt/Fprintf (addr sb) "]")))
+      (case [EventSync]
+        (let [s (.Sync e)]
+          (fmt/Fprintf (addr sb) " N=%d" (.-N s))
+          (when (!= (.-ClockSnapshot s) nil)
+            (fmt/Fprintf (addr sb) " Trace=%d Mono=%d Wall=%s"
+              (.-Trace (.-ClockSnapshot s))
+              (.-Mono (.-ClockSnapshot s))
+              (.Format (.-Wall (.-ClockSnapshot s)) time/RFC3339Nano))))))
+
+
+
+    (when [stk (.Stack e)] (!= stk NoStack)
+      (fmt/Fprintln (addr sb))
+      (fmt/Fprintln (addr sb) "Stack=")
+      (printStack (addr sb) "\t" (.Frames stk)))
+
+    (.String sb)))
+
+
+
+
+^{:go/end 1376} (go/method validateTableIDs "validateTableIDs checks to make sure lookups in e.table\nwill work.\n" ^error [^Event e]
+  (when (== (.-typ (.-base e)) evSync)
+    (return nil))
+
+  ^{:go/breaks [[4 1375]]} (let [spec (aget (tracev2/Specs) (.-typ (.-base e)))]
+
+    ;; Check stacks.
+    (range [_ i (.-StackIDs spec)]
+      (let [id (conv stackID (aget (.-args (.-base e)) (- i 1)))
+          (values _ ok) (.get (.-stacks (.-table e)) id)]
+        (when (not ok)
+          (return (fmt/Errorf "found invalid stack ID %d for event %s" id (.-Name spec))))))
+
+
+    ;; N.B. Strings referenced by stack frames are validated
+    ;; early on, when reading the stacks in to begin with.
+
+    ;; Check strings.
+    (range [_ i (.-StringIDs spec)]
+      (let [id (conv stringID (aget (.-args (.-base e)) (- i 1)))
+          (values _ ok) (.get (.-strings (.-table e)) id)]
+        (when (not ok)
+          (return (fmt/Errorf "found invalid string ID %d for event %s" id (.-Name spec))))))
+
+
+    nil))
+
+
+^{:go/end 1393} (go/func syncEvent ^Event [^{:tag (* evTable)} table ^Time ts ^int n]
+  (let [ev ^{:go/breaks [2 4 [6 1386]]} (lit Event
+        :table table
+        :ctx ^{:go/breaks [2 4 6]} (lit schedCtx
+          :G NoGoroutine
+          :P NoProc
+          :M NoThread)
+
+        :base ^{:go/breaks [2 4]} (lit baseEvent
+          :typ evSync
+          :time ts))]
+
+
+    (aset (.-args (.-base ev)) 0 (conv uint64 n))
+    ^{:line 1392} ev))

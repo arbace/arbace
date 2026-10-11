@@ -1,0 +1,654 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.tls) (go/file "ech.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [hpke "crypto/hpke"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [strings "strings"]
+
+    ^{:line 14} [cryptobyte "golang.org/x/crypto/cryptobyte"]])
+
+
+(go/type echCipher (struct
+    ^{:line 18 :tag uint16} KDFID
+    ^{:line 19 :tag uint16} AEADID))
+
+
+(go/type echExtension (struct
+    ^{:line 23 :tag uint16} Type
+    ^{:line 24 :tag (slice byte)} Data))
+
+
+(go/type echConfig (struct
+    ^{:line 28 :tag (slice byte)} raw
+
+    ^{:line 30 :tag uint16} Version
+    ^{:line 31 :tag uint16} Length
+
+    ^{:line 33 :tag uint8} ConfigID
+    ^{:line 34 :tag uint16} KemID
+    ^{:line 35 :tag (slice byte)} PublicKey
+    ^{:line 36 :tag (slice echCipher)} SymmetricCipherSuite
+
+    ^{:line 38 :tag uint8} MaxNameLength
+    ^{:line 39 :tag (slice byte)} PublicName
+    ^{:line 40 :tag (slice echExtension)} Extensions))
+
+
+(go/var errMalformedECHConfigList (errors/New "tls: malformed ECHConfigList"))
+
+(go/type echConfigErr (struct
+    ^{:line 46 :tag string} field))
+
+
+^{:go/end 54} (go/method Error ^string [^{:tag (* echConfigErr)} e]
+  (when (== (.-field e) "")
+    (return "tls: malformed ECHConfig"))
+
+  (fmt/Sprintf "tls: malformed ECHConfig, invalid %s field" (.-field e)))
+
+
+^{:go/end 120} (go/func parseECHConfig [^{:tag (slice byte)} enc] :results [^bool skip ^echConfig ec ^error err]
+  (let [s (conv cryptobyte/String enc)]
+    (set! (.-raw ec) enc)
+    (when (not (.ReadUint16 s (addr (.-Version ec))))
+      (return false (lit echConfig) (addr (lit echConfigErr "version"))))
+
+    (when (not (.ReadUint16 s (addr (.-Length ec))))
+      (return false (lit echConfig) (addr (lit echConfigErr "length"))))
+
+    (when (< (len (.-raw ec)) (+ (conv int (.-Length ec)) 4))
+      (return false (lit echConfig) (addr (lit echConfigErr "length"))))
+
+    (set! (.-raw ec) (subslice (.-raw ec) _ (+ (.-Length ec) 4)))
+    (when (!= (.-Version ec) extensionEncryptedClientHello)
+      (.Skip s (conv int (.-Length ec)))
+      (return true (lit echConfig) nil))
+
+    (when (not (.ReadUint8 s (addr (.-ConfigID ec))))
+      (return false (lit echConfig) (addr (lit echConfigErr "config_id"))))
+
+    (when (not (.ReadUint16 s (addr (.-KemID ec))))
+      (return false (lit echConfig) (addr (lit echConfigErr "kem_id"))))
+
+    (when (not (readUint16LengthPrefixed (addr s) (addr (.-PublicKey ec))))
+      (return false (lit echConfig) (addr (lit echConfigErr "public_key"))))
+
+    (let [^cryptobyte/String cipherSuites (zero cryptobyte/String)]
+      (when (not (.ReadUint16LengthPrefixed s (addr cipherSuites)))
+        (return false (lit echConfig) (addr (lit echConfigErr "cipher_suites"))))
+
+      (while (not (.Empty cipherSuites))
+        (let [^echCipher c (zero echCipher)]
+          (when (not (.ReadUint16 cipherSuites (addr (.-KDFID c))))
+            (return false (lit echConfig) (addr (lit echConfigErr "cipher_suites kdf_id"))))
+
+          (when (not (.ReadUint16 cipherSuites (addr (.-AEADID c))))
+            (return false (lit echConfig) (addr (lit echConfigErr "cipher_suites aead_id"))))
+
+          (set! (.-SymmetricCipherSuite ec) (append (.-SymmetricCipherSuite ec) c))))
+
+      (when (not (.ReadUint8 s (addr (.-MaxNameLength ec))))
+        (return false (lit echConfig) (addr (lit echConfigErr "maximum_name_length"))))
+
+      (let [^cryptobyte/String publicName (zero cryptobyte/String)]
+        (when (not (.ReadUint8LengthPrefixed s (addr publicName)))
+          (return false (lit echConfig) (addr (lit echConfigErr "public_name"))))
+
+        (set! (.-PublicName ec) publicName)
+        (let [^cryptobyte/String extensions (zero cryptobyte/String)]
+          (when (not (.ReadUint16LengthPrefixed s (addr extensions)))
+            (return false (lit echConfig) (addr (lit echConfigErr "extensions"))))
+
+          (while (not (.Empty extensions))
+            (let [^echExtension e (zero echExtension)]
+              (when (not (.ReadUint16 extensions (addr (.-Type e))))
+                (return false (lit echConfig) (addr (lit echConfigErr "extensions type"))))
+
+              (when (not (.ReadUint16LengthPrefixed extensions (conv (* cryptobyte/String) (addr (.-Data e)))))
+                (return false (lit echConfig) (addr (lit echConfigErr "extensions data"))))
+
+              (set! (.-Extensions ec) (append (.-Extensions ec) e))))
+
+
+          (return false ec nil))))))
+
+
+
+
+
+^{:go/end 150} (go/func parseECHConfigList "parseECHConfigList parses a RFC 9849 ECHConfigList, returning a\nslice of parsed ECHConfigs, in the same order they were parsed, or an error\nif the list is malformed.\n" [^{:tag (slice byte)} data] :results [(slice echConfig) error]
+  (let [s (conv cryptobyte/String data)
+      ^{:line 127 :tag uint16} length (zero uint16)]
+    (when (not (.ReadUint16 s (addr length)))
+      (return nil errMalformedECHConfigList))
+
+    (when (!= length (conv uint16 (- (len data) 2)))
+      (return nil errMalformedECHConfigList))
+
+    (let [^{:tag (slice echConfig)} configs (zero (slice echConfig))]
+      (while (> (len s) 0)
+        (when (< (len s) 4)
+          (return nil (errors/New "tls: malformed ECHConfig")))
+
+        (let [configLen (bit-or (<< (conv uint16 (aget s 2)) 8) (conv uint16 (aget s 3)))
+            (values skip ec err) (parseECHConfig s)]
+          (when (!= err nil)
+            (return nil err))
+
+          (set! s (subslice s (+ configLen 4)))
+          (when (not skip)
+            (set! configs (append configs ec)))))
+
+
+      (return configs nil))))
+
+
+^{:go/end 200} (go/func pickECHConfig [^{:tag (slice echConfig)} list] :results [(* echConfig) hpke/PublicKey hpke/KDF hpke/AEAD]
+  (range [_ ec list]
+    (when (not (validDNSName (conv string (.-PublicName ec))))
+      (continue))
+
+    (let [^bool unsupportedExt (zero bool)]
+      (range [_ ext (.-Extensions ec)]
+        ;; If high order bit is set to 1 the extension is mandatory.
+        ;; Since we don't support any extensions, if we see a mandatory
+        ;; bit, we skip the config.
+        (when (!= (bit-and (.-Type ext) (conv uint16 (<< 1 15))) 0)
+          (set! unsupportedExt true)))
+
+
+      (when unsupportedExt
+        (continue))
+
+      (let [(values kem err) (hpke/NewKEM (.-KemID ec))]
+        (when (!= err nil)
+          (continue))
+
+        (let [(values pub ^:assign err) (.NewPublicKey kem (.-PublicKey ec))]
+          (when (!= err nil)
+            ;; This is an error in the config, but killing the connection feels
+            ;; excessive.
+            (continue))
+
+          (range [_ cs (.-SymmetricCipherSuite ec)]
+            ;; All of the supported AEADs and KDFs are fine, rather than
+            ;; imposing some sort of preference here, we just pick the first
+            ;; valid suite.
+            (let [(values kdf err) (hpke/NewKDF (.-KDFID cs))]
+              (when (!= err nil)
+                (continue))
+
+              ;; 0xFFFF is an export-only AEAD that cannot seal/open, making
+              ;; it an invalid choice for encrypting ClientHelloInner.
+              (when (== (.-AEADID cs) 0xFFFF)
+                (continue))
+
+              (let [(values aead ^:assign err) (hpke/NewAEAD (.-AEADID cs))]
+                (when (!= err nil)
+                  (continue))
+
+                (return (addr ec) pub kdf aead))))))))
+
+
+  (return nil nil nil nil))
+
+
+^{:go/end 218} (go/func encodeInnerClientHello [^{:tag (* clientHelloMsg)} inner ^int maxNameLength] :results [(slice byte) error]
+  (let [(values h err) (.marshalMsg inner true)]
+    (when (!= err nil)
+      (return nil err))
+
+    (set! h (subslice h 4)) ; strip four byte prefix
+
+    (let [^int paddingLen (zero int)]
+      (if (!= (.-serverName inner) "")
+        (set! paddingLen (max 0 (- maxNameLength (len (.-serverName inner)))))
+
+        (set! paddingLen (+ maxNameLength 9)))
+
+      (set! paddingLen + (- 31 (% (- (+ (len h) paddingLen) 1) 32)))
+
+      (return (append h (spread (make (slice byte) paddingLen))) nil))))
+
+
+^{:go/end 226} (go/func skipUint8LengthPrefixed ^bool [^{:tag (* cryptobyte/String)} s]
+  (let [^uint8 skip (zero uint8)]
+    (when (not (.ReadUint8 s (addr skip)))
+      (return false))
+
+    (.Skip s (conv int skip))))
+
+
+^{:go/end 234} (go/func skipUint16LengthPrefixed ^bool [^{:tag (* cryptobyte/String)} s]
+  (let [^uint16 skip (zero uint16)]
+    (when (not (.ReadUint16 s (addr skip)))
+      (return false))
+
+    (.Skip s (conv int skip))))
+
+
+(go/type rawExtension (struct
+    ^{:line 237 :tag uint16} extType
+    ^{:line 238 :tag (slice byte)} data))
+
+
+^{:go/end 265} (go/func extractRawExtensions [^{:tag (* clientHelloMsg)} hello] :results [(slice rawExtension) error]
+  (let [s (conv cryptobyte/String (.-original hello))]
+    (when (or (not (.Skip s (+ 4 2 32))) ; header, version, random
+        (not (skipUint8LengthPrefixed (addr s))) ; session ID
+        (not (skipUint16LengthPrefixed (addr s))) ; cipher suites
+        (not (skipUint8LengthPrefixed (addr s)))) ; compression methods
+      (return nil (errors/New "tls: malformed outer client hello")))
+
+    (let [^{:tag (slice rawExtension)} rawExtensions (zero (slice rawExtension))
+        ^{:line 250 :tag cryptobyte/String} extensions (zero cryptobyte/String)]
+      (when (not (.ReadUint16LengthPrefixed s (addr extensions)))
+        (return nil (errors/New "tls: malformed outer client hello")))
+
+
+      (while (not (.Empty extensions))
+        (let [^uint16 extension (zero uint16)
+            ^{:line 257 :tag cryptobyte/String} extData (zero cryptobyte/String)]
+          (when (or (not (.ReadUint16 extensions (addr extension)))
+              (not (.ReadUint16LengthPrefixed extensions (addr extData))))
+            (return nil (errors/New "tls: invalid inner client hello")))
+
+          (set! rawExtensions (append rawExtensions (lit rawExtension extension extData)))))
+
+      (return rawExtensions nil))))
+
+
+^{:go/end 402} (go/func decodeInnerClientHello [^{:tag (* clientHelloMsg)} outer ^{:tag (slice byte)} encoded] :results [(* clientHelloMsg) error]
+  ;; Reconstructing the inner client hello from its encoded form is somewhat
+  ;; complicated. It is missing its header (message type and length), session
+  ;; ID, and the extensions may be compressed. Since we need to put the
+  ;; extensions back in the same order as they were in the raw outer hello,
+  ;; and since we don't store the raw extensions, or the order we parsed them
+  ;; in, we need to reparse the raw extensions from the outer hello in order
+  ;; to properly insert them into the inner hello. This _should_ result in raw
+  ;; bytes which match the hello as it was generated by the client.
+  (let [innerReader (conv cryptobyte/String encoded)
+      (values ^{:tag (slice byte)} versionAndRandom ^{:tag (slice byte)} sessionID ^{:tag (slice byte)} cipherSuites ^{:tag (slice byte)} compressionMethods) (zero (slice byte))
+      ^{:line 278 :tag cryptobyte/String} extensions (zero cryptobyte/String)]
+    (when (or (not (.ReadBytes innerReader (addr versionAndRandom) (+ 2 32)))
+        (not (readUint8LengthPrefixed (addr innerReader) (addr sessionID)))
+        (!= (len sessionID) 0)
+        (not (readUint16LengthPrefixed (addr innerReader) (addr cipherSuites)))
+        (not (readUint8LengthPrefixed (addr innerReader) (addr compressionMethods)))
+        (not (.ReadUint16LengthPrefixed innerReader (addr extensions))))
+      (return nil (errors/New "tls: invalid inner client hello")))
+
+
+    ;; The specification says we must verify that the trailing padding is all
+    ;; zeros. This is kind of weird for TLS messages, where we generally just
+    ;; throw away any trailing garbage.
+    (range [_ p innerReader]
+      (when (!= p 0)
+        (return nil (errors/New "tls: invalid inner client hello"))))
+
+
+
+    (let [(values rawOuterExts err) (extractRawExtensions outer)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (let [recon (cryptobyte/NewBuilder nil)]
+        (.AddUint8 recon typeClientHello)
+        (.AddUint24LengthPrefixed recon ^{:go/end 362} (fn [^{:tag (* cryptobyte/Builder)} recon]
+            (.AddBytes recon versionAndRandom)
+            (.AddUint8LengthPrefixed recon ^{:go/end 308} (fn [^{:tag (* cryptobyte/Builder)} recon]
+                (.AddBytes recon (.-sessionId outer))))
+
+            (.AddUint16LengthPrefixed recon ^{:go/end 311} (fn [^{:tag (* cryptobyte/Builder)} recon]
+                (.AddBytes recon cipherSuites)))
+
+            (.AddUint8LengthPrefixed recon ^{:go/end 314} (fn [^{:tag (* cryptobyte/Builder)} recon]
+                (.AddBytes recon compressionMethods)))
+
+            (.AddUint16LengthPrefixed recon ^{:go/end 361} (fn [^{:tag (* cryptobyte/Builder)} recon]
+                (while (not (.Empty extensions))
+                  (let [^uint16 extension (zero uint16)
+                      ^{:line 318 :tag cryptobyte/String} extData (zero cryptobyte/String)]
+                    (when (or (not (.ReadUint16 extensions (addr extension)))
+                        (not (.ReadUint16LengthPrefixed extensions (addr extData))))
+                      (.SetError recon (errors/New "tls: invalid inner client hello"))
+                      (return))
+
+                    (if (== extension extensionECHOuterExtensions) (do
+                        (when (not (.ReadUint8LengthPrefixed extData (addr extData)))
+                          (.SetError recon (errors/New "tls: invalid inner client hello"))
+                          (return))
+
+                        (let [^int i (zero int)]
+                          (while (not (.Empty extData))
+                            (let [^uint16 extType (zero uint16)]
+                              (when (not (.ReadUint16 extData (addr extType)))
+                                (.SetError recon (errors/New "tls: invalid inner client hello"))
+                                (return))
+
+                              (when (== extType extensionEncryptedClientHello)
+                                (.SetError recon (errors/New "tls: invalid outer extensions"))
+                                (return))
+
+                              (for [] (<= i (len rawOuterExts)) (inc! i)
+                                (when (== i (len rawOuterExts))
+                                  (.SetError recon (errors/New "tls: invalid outer extensions"))
+                                  (return))
+
+                                (when (== (.-extType (aget rawOuterExts i)) extType)
+                                  (break)))
+
+
+                              (.AddUint16 recon (.-extType (aget rawOuterExts i)))
+                              (.AddUint16LengthPrefixed recon ^{:go/end 352} (fn [^{:tag (* cryptobyte/Builder)} recon]
+                                  (.AddBytes recon (.-data (aget rawOuterExts i)))))))))
+
+
+                      (do
+                        (.AddUint16 recon extension)
+                        (.AddUint16LengthPrefixed recon ^{:go/end 358} (fn [^{:tag (* cryptobyte/Builder)} recon]
+                            (.AddBytes recon extData)))))))))))
+
+
+
+
+
+
+        (let [(values reconBytes ^:assign err) (.Bytes recon)]
+          (when (!= err nil)
+            (return nil err))
+
+          (let [inner (addr (lit clientHelloMsg))]
+            (when (not (.unmarshal inner reconBytes))
+              (return nil (errors/New "tls: invalid reconstructed inner client hello")))
+
+
+            (when (not (bytes/Equal (.-encryptedClientHello inner) (lit (slice byte) (conv uint8 innerECHExt))))
+              (return nil errInvalidECHExt))
+
+
+            (let [hasTLS13 false]
+              (range [_ v (.-supportedVersions inner)]
+                ;; Skip GREASE values (values of the form 0x?A0A).
+                ;; GREASE (Generate Random Extensions And Sustain Extensibility) is a mechanism used by
+                ;; browsers like Chrome to ensure TLS implementations correctly ignore unknown values.
+                ;; GREASE values follow a specific pattern: 0x?A0A, where ? can be any hex digit.
+                ;; These values should be ignored when processing supported TLS versions.
+                (when (and (== (bit-and v 0x0F0F) 0x0A0A) (== (bit-and v 0xff) (>> v 8)))
+                  (continue))
+
+
+                ;; Ensure at least TLS 1.3 is offered.
+                (cond (== v VersionTLS13)
+                  (set! hasTLS13 true)
+                  (< v VersionTLS13)
+                  ;; Reject if any non-GREASE value is below TLS 1.3, as ECH requires TLS 1.3+.
+                  (return nil (errors/New "tls: client sent encrypted_client_hello extension with unsupported versions"))))
+
+
+
+              (when (not hasTLS13)
+                (return nil (errors/New "tls: client sent encrypted_client_hello extension but did not offer TLS 1.3")))
+
+
+              (return inner nil))))))))
+
+
+^{:go/end 407} (go/func decryptECHPayload [^{:tag (* hpke/Recipient)} context ^{:tag (slice byte)} hello ^{:tag (slice byte)} payload] :results [(slice byte) error]
+  (let [outerAAD (bytes/Replace (subslice hello 4) payload (make (slice byte) (len payload)) 1)]
+    (.Open context outerAAD payload)))
+
+
+^{:go/end 418} (go/func generateOuterECHExt [^uint8 id ^uint16 kdfID ^uint16 aeadID ^{:tag (slice byte)} encodedKey ^{:tag (slice byte)} payload] :results [(slice byte) error]
+  (let [^cryptobyte/Builder b (zero cryptobyte/Builder)]
+    (.AddUint8 b 0) ; outer
+    (.AddUint16 b kdfID)
+    (.AddUint16 b aeadID)
+    (.AddUint8 b id)
+    (.AddUint16LengthPrefixed b ^{:go/end 415} (fn [^{:tag (* cryptobyte/Builder)} b] (.AddBytes b encodedKey)))
+    (.AddUint16LengthPrefixed b ^{:go/end 416} (fn [^{:tag (* cryptobyte/Builder)} b] (.AddBytes b payload)))
+    (.Bytes b)))
+
+
+^{:go/end 451} (go/func computeAndUpdateOuterECHExtension ^error [^{:tag (* clientHelloMsg)} outer ^{:tag (* clientHelloMsg)} inner ^{:tag (* echClientContext)} ech ^bool useKey]
+  (let [^{:tag (slice byte)} encapKey (zero (slice byte))]
+    (when useKey
+      (set! encapKey (.-encapsulatedKey ech)))
+
+    (let [(values encodedInner err) (encodeInnerClientHello inner (conv int (.-MaxNameLength (.-config ech))))]
+      (when (!= err nil)
+        (return err))
+
+      ;; NOTE: the tag lengths for all of the supported AEADs are the same (16
+      ;; bytes), so we have hardcoded it here. If we add support for another AEAD
+      ;; with a different tag length, we will need to change this.
+      (let [encryptedLen (+ (len encodedInner) 16)] ; AEAD tag length
+        (set! (values (.-encryptedClientHello outer) err) (generateOuterECHExt (.-ConfigID (.-config ech)) (.-kdfID ech) (.-aeadID ech) encapKey (make (slice byte) encryptedLen)))
+        (when (!= err nil)
+          (return err))
+
+        (let [(values serializedOuter ^:assign err) (.marshal outer)]
+          (when (!= err nil)
+            (return err))
+
+          (set! serializedOuter (subslice serializedOuter 4)) ; strip the four byte prefix
+          ^{:go/breaks [[5 450]]} (let [(values encryptedInner ^:assign err) (.Seal (.-hpkeContext ech) serializedOuter encodedInner)]
+            (when (!= err nil)
+              (return err))
+
+            (set! (values (.-encryptedClientHello outer) err) (generateOuterECHExt (.-ConfigID (.-config ech)) (.-kdfID ech) (.-aeadID ech) encapKey encryptedInner))
+            (when (!= err nil)
+              (return err))
+
+            nil))))))
+
+
+
+
+
+
+^{:go/end 480} (go/func validDNSName "validDNSName is a rather rudimentary check for the validity of a DNS name.\nThis is used to check if the public_name in a ECHConfig is valid when we are\npicking a config. This can be somewhat lax because even if we pick a\nvalid-looking name, the DNS layer will later reject it anyway.\n" ^bool [^string name]
+  (when (> (len name) 253)
+    (return false))
+
+  ^{:go/breaks [[4 479]]} (let [labels (strings/Split name ".")]
+    (when (<= (len labels) 1)
+      (return false))
+
+    (range [_ l labels]
+      (let [labelLen (len l)]
+        (when (== labelLen 0)
+          (return false))
+
+        (range [i r l]
+          (when (and (== r \-) ^:go/paren (or (== i 0) (== i (- labelLen 1))))
+            (return false))
+
+          (when (and ^:go/paren (or (< r \0) (> r \9)) ^:go/paren (or (< r \a) (> r \z)) ^:go/paren (or (< r \A) (> r \Z)) (!= r \-))
+            (return false)))))
+
+
+
+    true))
+
+
+
+
+
+
+
+
+(go/type ECHRejectionError "ECHRejectionError is the error type returned when ECH is rejected by a remote\nserver. If the server offered a ECHConfigList to use for retries, the\nRetryConfigList field will contain this list.\n\nThe client may treat an ECHRejectionError with an empty set of RetryConfigs\nas a secure signal from the server.\n" (struct
+    ^{:line 489 :tag (slice byte)} RetryConfigList))
+
+
+^{:go/breaks [3] :go/end 494} (go/method Error ^string [^{:tag (* ECHRejectionError)} e]
+  "tls: server rejected ECH")
+
+
+(go/var errMalformedECHExt (errors/New "tls: malformed encrypted_client_hello extension"))
+(go/var errInvalidECHExt (errors/New "tls: client sent invalid encrypted_client_hello extension"))
+
+(go/type echExtType uint8)
+
+(go/const
+  ^{:line 502} [^{:tag echExtType :val 1} innerECHExt 1]
+  ^{:line 503} [^{:tag echExtType :val 0} outerECHExt 0])
+
+
+^{:go/end 551} (go/func parseECHExt [^{:tag (slice byte)} ext] :results [^echExtType echType ^echCipher cs ^uint8 configID ^{:tag (slice byte)} encap ^{:tag (slice byte)} payload ^error err]
+  (let [data (make (slice byte) (len ext))]
+    (copy data ext)
+    (let [s (conv cryptobyte/String data)
+        ^{:line 510 :tag uint8} echInt (zero uint8)]
+      (when (not (.ReadUint8 s (addr echInt)))
+        (set! err errMalformedECHExt)
+        (return))
+
+      (set! echType (conv echExtType echInt))
+      (when (== echType innerECHExt)
+        (when (not (.Empty s))
+          (set! err errMalformedECHExt)
+          (return))
+
+        (return echType cs 0 nil nil nil))
+
+      (when (!= echType outerECHExt)
+        (set! err errInvalidECHExt)
+        (return))
+
+      (when (not (.ReadUint16 s (addr (.-KDFID cs))))
+        (set! err errMalformedECHExt)
+        (return))
+
+      (when (not (.ReadUint16 s (addr (.-AEADID cs))))
+        (set! err errMalformedECHExt)
+        (return))
+
+      (when (not (.ReadUint8 s (addr configID)))
+        (set! err errMalformedECHExt)
+        (return))
+
+      (when (not (readUint16LengthPrefixed (addr s) (addr encap)))
+        (set! err errMalformedECHExt)
+        (return))
+
+      (when (not (readUint16LengthPrefixed (addr s) (addr payload)))
+        (set! err errMalformedECHExt)
+        (return))
+
+
+      ;; NOTE: clone encap and payload so that mutating them does not mutate the
+      ;; raw extension bytes.
+      (return echType cs configID (bytes/Clone encap) (bytes/Clone payload) nil))))
+
+
+^{:go/end 637} (go/method processECHClientHello [^{:tag (* Conn)} c ^{:tag (* clientHelloMsg)} outer ^{:tag (slice EncryptedClientHelloKey)} echKeys] :results [(* clientHelloMsg) (* echServerContext) error]
+  (let [(values echType echCiphersuite configID encap payload err) (parseECHExt (.-encryptedClientHello outer))]
+    (when (!= err nil)
+      (if (errors/Is err errInvalidECHExt)
+        (.sendAlert c alertIllegalParameter)
+
+        (.sendAlert c alertDecodeError))
+
+
+      (return nil nil errInvalidECHExt))
+
+
+    (when (== echType innerECHExt)
+      (return outer (addr (lit echServerContext :inner true)) nil))
+
+
+    (when (== (len echKeys) 0)
+      (return outer nil nil))
+
+
+    (range [_ echKey echKeys]
+      (let [(values skip config err) (parseECHConfig (.-Config echKey))]
+        (when (!= err nil)
+          (.sendAlert c alertInternalError)
+          (return nil nil (fmt/Errorf "tls: invalid EncryptedClientHelloKey Config: %s" err)))
+
+        (when skip
+          (continue))
+
+        (let [(values kem ^:assign err) (hpke/NewKEM (.-KemID config))]
+          (when (!= err nil)
+            (.sendAlert c alertInternalError)
+            (return nil nil (fmt/Errorf "tls: invalid EncryptedClientHelloKey Config KEM: %s" err)))
+
+          (let [(values echPriv ^:assign err) (.NewPrivateKey kem (.-PrivateKey echKey))]
+            (when (!= err nil)
+              (.sendAlert c alertInternalError)
+              (return nil nil (fmt/Errorf "tls: invalid EncryptedClientHelloKey PrivateKey: %s" err)))
+
+            (let [(values kdf ^:assign err) (hpke/NewKDF (.-KDFID echCiphersuite))]
+              (when (!= err nil)
+                (.sendAlert c alertInternalError)
+                (return nil nil (fmt/Errorf "tls: invalid EncryptedClientHelloKey Config KDF: %s" err)))
+
+              (let [(values aead ^:assign err) (hpke/NewAEAD (.-AEADID echCiphersuite))]
+                (when (!= err nil)
+                  (.sendAlert c alertInternalError)
+                  (return nil nil (fmt/Errorf "tls: invalid EncryptedClientHelloKey Config AEAD: %s" err)))
+
+                (let [info (append (conv (slice byte) "tls ech\u0000") (spread (.-Config echKey)))
+                    (values hpkeContext ^:assign err) (hpke/NewRecipient encap echPriv kdf aead info)]
+                  (when (!= err nil)
+                    ;; attempt next trial decryption
+                    (continue))
+
+
+                  (let [(values encodedInner ^:assign err) (decryptECHPayload hpkeContext (.-original outer) payload)]
+                    (when (!= err nil)
+                      ;; attempt next trial decryption
+                      (continue))
+
+
+                    ;; NOTE: we do not enforce that the sent server_name matches the ECH
+                    ;; configs PublicName, since this is not particularly important, and
+                    ;; the client already had to know what it was in order to properly
+                    ;; encrypt the payload. This is only a MAY in the spec, so we're not
+                    ;; doing anything revolutionary.
+
+                    (let [(values echInner ^:assign err) (decodeInnerClientHello outer encodedInner)]
+                      (when (!= err nil)
+                        (.sendAlert c alertIllegalParameter)
+                        (return nil nil errInvalidECHExt))
+
+
+                      (set! (.-echAccepted c) true)
+
+                      ^{:go/breaks [3]} (return echInner (addr ^{:go/breaks [2 4 6]} (lit echServerContext
+                            :hpkeContext hpkeContext
+                            :configID configID
+                            :ciphersuite echCiphersuite))
+                        nil))))))))))
+
+
+    (return outer nil nil)))
+
+
+^{:go/end 655} (go/func buildRetryConfigList [^{:tag (slice EncryptedClientHelloKey)} keys] :results [(slice byte) error]
+  (let [^bool atLeastOneRetryConfig (zero bool)
+      ^{:line 641 :tag cryptobyte/Builder} retryBuilder (zero cryptobyte/Builder)]
+    (.AddUint16LengthPrefixed retryBuilder ^{:go/end 650} (fn [^{:tag (* cryptobyte/Builder)} b]
+        (range [_ c keys]
+          (when (not (.-SendAsRetry c))
+            (continue))
+
+          (set! atLeastOneRetryConfig true)
+          (.AddBytes b (.-Config c)))))
+
+
+    (when (not atLeastOneRetryConfig)
+      (return nil nil))
+
+    (.Bytes retryBuilder)))

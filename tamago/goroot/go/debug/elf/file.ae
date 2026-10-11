@@ -1,0 +1,1887 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; /*
+;; Package elf implements access to ELF object files.
+;; 
+;; # Security
+;; 
+;; This package is not designed to be hardened against adversarial inputs, and is
+;; outside the scope of https://go.dev/security/policy. In particular, only basic
+;; validation is done when parsing object files. As such, care should be taken when
+;; parsing untrusted inputs, as parsing malformed files may consume significant
+;; resources, or cause panics.
+;; */
+(in-ns 'go.debug.elf) (go/file "file.go" :doc "Package elf implements access to ELF object files.\n\n# Security\n\nThis package is not designed to be hardened against adversarial inputs, and is\noutside the scope of https://go.dev/security/policy. In particular, only basic\nvalidation is done when parsing object files. As such, care should be taken when\nparsing untrusted inputs, as parsing malformed files may consume significant\nresources, or cause panics.\n" :imports [
+
+
+    ^{:line 19} [bytes "bytes"]
+    ^{:line 20} [zlib "compress/zlib"]
+    ^{:line 21} [dwarf "debug/dwarf"]
+    ^{:line 22} [binary "encoding/binary"]
+    ^{:line 23} [errors "errors"]
+    ^{:line 24} [fmt "fmt"]
+    ^{:line 25} [saferio "internal/saferio"]
+    ^{:line 26} [zstd "internal/zstd"]
+    ^{:line 27} [io "io"]
+    ^{:line 28} [math "math"]
+    ^{:line 29} [os "os"]
+    ^{:line 30} [strings "strings"]
+    ^{:line 31} [unsafe "unsafe"]])
+
+
+;; TODO: error reporting detail
+
+;; /*
+;; * Internal ELF representation
+;; */
+
+
+(go/type FileHeader "A FileHeader represents an ELF file header.\n" (struct
+    ^{:line 42 :tag Class} Class
+    ^{:line 43 :tag Data} Data
+    ^{:line 44 :tag Version} Version
+    ^{:line 45 :tag OSABI} OSABI
+    ^{:line 46 :tag uint8} ABIVersion
+    ^{:line 47 :tag binary/ByteOrder} ByteOrder
+    ^{:line 48 :tag Type} Type
+    ^{:line 49 :tag Machine} Machine
+    ^{:line 50 :tag uint64} Entry))
+
+
+
+(go/type File "A File represents an open ELF file.\n" (struct
+    ^{:line 55} FileHeader
+    ^{:line 56 :tag (slice (* Section))} Sections
+    ^{:line 57 :tag (slice (* Prog))} Progs
+    ^{:line 58 :tag io/Closer} closer
+    ^{:line 59 :tag (slice DynamicVersion)} dynVers
+    ^{:line 60 :tag (slice DynamicVersionNeed)} dynVerNeeds
+    ^{:line 61 :tag (slice byte)} gnuVersym))
+
+
+
+(go/type SectionHeader "A SectionHeader represents a single ELF section header.\n" (struct
+    ^{:line 66 :tag string} Name
+    ^{:line 67 :tag SectionType} Type
+    ^{:line 68 :tag SectionFlag} Flags
+    ^{:line 69 :tag uint64} Addr
+    ^{:line 70 :tag uint64} Offset
+    ^{:line 71 :tag uint64} Size
+    ^{:line 72 :tag uint32} Link
+    ^{:line 73 :tag uint32} Info
+    ^{:line 74 :tag uint64} Addralign
+    ^{:line 75 :tag uint64} Entsize
+
+
+
+
+
+    ^{:line 81 :tag uint64 :doc "FileSize is the size of this section in the file in bytes.\nIf a section is compressed, FileSize is the size of the\ncompressed data, while Size (above) is the size of the\nuncompressed data.\n"} FileSize))
+
+
+
+(go/type Section "A Section represents a single section in an ELF file.\n" (struct
+    ^{:line 86} SectionHeader
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 98 :doc "Embed ReaderAt for ReadAt method.\nDo not embed SectionReader directly\nto avoid having Read and Seek.\nIf a client wants Read and Seek it must use\nOpen() to avoid fighting over the seek offset\nwith other clients.\n\nReaderAt may be nil if the section is not easily available\nin a random-access form. For example, a compressed section\nmay have a nil ReaderAt.\n"} io/ReaderAt
+    ^{:line 99 :tag (* io/SectionReader)} sr
+
+    ^{:line 101 :tag CompressionType} compressionType
+    ^{:line 102 :tag int64} compressionOffset))
+
+
+
+
+
+
+
+^{:go/end 112} (go/method Data "Data reads and returns the contents of the ELF section.\nEven if the section is stored compressed in the ELF file,\nData returns uncompressed data.\n\nFor an [SHT_NOBITS] section, Data always returns a non-nil error.\n" [^{:tag (* Section)} s] :results [(slice byte) error]
+  (saferio/ReadData (.Open s) ^{:go/via [SectionHeader]} (.-Size s)))
+
+
+
+
+^{:go/end 121} (go/method stringTable "stringTable reads and returns the string table given by the\nspecified link value.\n" [^{:tag (* File)} f ^uint32 link] :results [(slice byte) error]
+  (when (or (<= link 0) (>= link (conv uint32 (len (.-Sections f)))))
+    (return nil (errors/New "section has invalid string table link")))
+
+  (.Data (aget (.-Sections f) link)))
+
+
+
+
+
+
+
+
+^{:go/end 177} (go/method Open "Open returns a new ReadSeeker reading the ELF section.\nEven if the section is stored compressed in the ELF file,\nthe ReadSeeker reads uncompressed data.\n\nFor an [SHT_NOBITS] section, all calls to the opened reader\nwill return a non-nil error.\n" ^io/ReadSeeker [^{:tag (* Section)} s]
+  (when (== ^{:go/via [SectionHeader]} (.-Type s) SHT_NOBITS)
+    (return (io/NewSectionReader (addr (lit nobitsSectionReader)) 0 (conv int64 ^{:go/via [SectionHeader]} (.-Size s)))))
+
+
+  (let [^{:tag (func [io/Reader] [io/ReadCloser error])} zrd (zero (func [io/Reader] [io/ReadCloser error]))]
+    (cond (== (bit-and ^{:go/via [SectionHeader]} (.-Flags s) SHF_COMPRESSED) 0) (do
+
+        (when (not (strings/HasPrefix ^{:go/via [SectionHeader]} (.-Name s) ".zdebug"))
+          (return (io/NewSectionReader (.-sr s) 0 (- (<< 1 63) 1))))
+
+
+        (let [b (make (slice byte) 12)
+            (values n _) (.ReadAt (.-sr s) b 0)]
+          (when (or (!= n 12) (!= (conv string (subslice b _ 4)) "ZLIB"))
+            (return (io/NewSectionReader (.-sr s) 0 (- (<< 1 63) 1))))
+
+
+          (set! (.-compressionOffset s) 12)
+          (set! (.-compressionType s) COMPRESS_ZLIB)
+          (set! ^{:go/via [SectionHeader]} (.-Size s) (.Uint64 binary/BigEndian (subslice b 4 12)))
+          (set! zrd zlib/NewReader)))
+
+      (!= (bit-and ^{:go/via [SectionHeader]} (.-Flags s) SHF_ALLOC) 0)
+      (return (lit errorReader (addr ^{:go/breaks [3]} (lit FormatError (conv int64 ^{:go/via [SectionHeader]} (.-Offset s))
+              "SHF_COMPRESSED applies only to non-allocable sections" (.-compressionType s))))))
+
+
+    (switch (.-compressionType s)
+      (case [COMPRESS_ZLIB]
+        (set! zrd zlib/NewReader))
+      (case [COMPRESS_ZSTD]
+        (set! zrd ^{:go/end 163} (fn [^io/Reader r] :results [io/ReadCloser error]
+            (return (io/NopCloser (zstd/NewReader r)) nil)))))
+
+
+
+    (when (== zrd nil)
+      (return (lit errorReader (addr (lit FormatError (conv int64 ^{:go/via [SectionHeader]} (.-Offset s)) "unknown compression type" (.-compressionType s))))))
+
+
+    (addr ^{:go/breaks [2 [4 175]]} (lit readSeekerFromReader
+        :reset ^{:go/end 174} (fn [] :results [io/Reader error]
+          (let [fr (io/NewSectionReader (.-sr s) (.-compressionOffset s) (- (conv int64 ^{:go/via [SectionHeader]} (.-FileSize s)) (.-compressionOffset s)))]
+            (zrd fr)))
+
+        :size (conv int64 ^{:go/via [SectionHeader]} (.-Size s))))))
+
+
+
+
+(go/type ProgHeader "A ProgHeader represents a single ELF program header.\n" (struct
+    ^{:line 181 :tag ProgType} Type
+    ^{:line 182 :tag ProgFlag} Flags
+    ^{:line 183 :tag uint64} Off
+    ^{:line 184 :tag uint64} Vaddr
+    ^{:line 185 :tag uint64} Paddr
+    ^{:line 186 :tag uint64} Filesz
+    ^{:line 187 :tag uint64} Memsz
+    ^{:line 188 :tag uint64} Align))
+
+
+
+(go/type Prog "A Prog represents a single ELF program header in an ELF binary.\n" (struct
+    ^{:line 193} ProgHeader
+
+
+
+
+
+
+
+    ^{:line 201 :doc "Embed ReaderAt for ReadAt method.\nDo not embed SectionReader directly\nto avoid having Read and Seek.\nIf a client wants Read and Seek it must use\nOpen() to avoid fighting over the seek offset\nwith other clients.\n"} io/ReaderAt
+    ^{:line 202 :tag (* io/SectionReader)} sr))
+
+
+
+^{:go/end 206} (go/method Open "Open returns a new ReadSeeker reading the ELF program body.\n" ^io/ReadSeeker [^{:tag (* Prog)} p] (io/NewSectionReader (.-sr p) 0 (- (<< 1 63) 1)))
+
+
+(go/type Symbol "A Symbol represents an entry in an ELF symbol table section.\n" (struct
+    ^{:line 210 :tag string} Name
+    ^{:line 211 :tag byte} Info ^byte Other
+
+
+
+    ^{:line 215 :tag bool :doc "HasVersion reports whether the symbol has any version information.\nThis will only be true for the dynamic symbol table.\n"} HasVersion
+
+
+
+    ^{:line 219 :tag VersionIndex :doc "VersionIndex is the symbol's version index.\nUse the methods of the [VersionIndex] type to access it.\nThis field is only meaningful if HasVersion is true.\n"} VersionIndex
+
+    ^{:line 221 :tag SectionIndex} Section
+    ^{:line 222 :tag uint64} Value ^uint64 Size
+
+
+    ^{:line 225 :tag string :doc "These fields are present only for the dynamic symbol table.\n"} Version
+    ^{:line 226 :tag string} Library))
+
+
+;; /*
+;; * ELF reader
+;; */
+
+(go/type FormatError (struct
+    ^{:line 234 :tag int64} off
+    ^{:line 235 :tag string} msg
+    ^{:line 236 :tag any} val))
+
+
+^{:go/end 246} (go/method Error ^string [^{:tag (* FormatError)} e]
+  (let [msg (.-msg e)]
+    (when (!= (.-val e) nil)
+      (set! msg + (fmt/Sprintf " '%v' " (.-val e))))
+
+    (set! msg + (fmt/Sprintf "in record at byte %#x" (.-off e)))
+    ^{:line 245} msg))
+
+
+
+^{:go/end 261} (go/func Open "Open opens the named file using [os.Open] and prepares it for use as an ELF binary.\n" [^string name] :results [(* File) error]
+  (let [(values f err) (os/Open name)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values ff ^:assign err) (NewFile f)]
+      (when (!= err nil)
+        (.Close f)
+        (return nil err))
+
+      (set! (.-closer ff) f)
+      (return ff nil))))
+
+
+
+
+
+^{:go/end 273} (go/method Close "Close closes the [File].\nIf the [File] was created using [NewFile] directly instead of [Open],\nClose has no effect.\n" ^error [^{:tag (* File)} f]
+  (let [^error err (zero error)]
+    (when (!= (.-closer f) nil)
+      (set! err (.Close (.-closer f)))
+      (set! (.-closer f) nil))
+
+    ^{:line 272} err))
+
+
+
+
+^{:go/breaks [[5 283]] :go/end 284} (go/method SectionByType "SectionByType returns the first section in f with the\ngiven type, or nil if there is no such section.\n" ^{:tag (* Section)} [^{:tag (* File)} f ^SectionType typ]
+  (range [_ s (.-Sections f)]
+    (when (== ^{:go/via [SectionHeader]} (.-Type s) typ)
+      (return s)))
+
+
+  nil)
+
+
+
+
+^{:go/end 640} (go/func NewFile "NewFile creates a new [File] for accessing an ELF binary in an underlying reader.\nThe ELF binary is expected to start at position 0 in the ReaderAt.\n" [^io/ReaderAt r] :results [(* File) error]
+  (let [sr (io/NewSectionReader r 0 (- (<< 1 63) 1))
+      ;; Read and decode ELF identifier
+      ^{:line 291 :tag (array 16 uint8)} ident (zero (array 16 uint8))]
+    (when [(values _ err) (.ReadAt r (subslice ident 0) 0)] (!= err nil)
+      (return nil (addr (lit FormatError 0 "cannot read ELF identifier" err))))
+
+    (when (or (!= (aget ident 0) \u007f) (!= (aget ident 1) \E) (!= (aget ident 2) \L) (!= (aget ident 3) \F))
+      (return nil (addr (lit FormatError 0 "bad magic number" (subslice ident 0 4)))))
+
+
+    (let [f (new File)]
+      (set! ^{:go/via [FileHeader]} (.-Class f) (conv Class (aget ident EI_CLASS)))
+      (switch ^{:go/via [FileHeader]} (.-Class f)
+        (case [ELFCLASS32])
+        (case [ELFCLASS64])
+        ;; ok
+        (default
+          (return nil (addr (lit FormatError 0 "unknown ELF class" ^{:go/via [FileHeader]} (.-Class f))))))
+
+
+      (set! ^{:go/via [FileHeader]} (.-Data f) (conv Data (aget ident EI_DATA)))
+      (let [^binary/ByteOrder bo (zero binary/ByteOrder)]
+        (switch ^{:go/via [FileHeader]} (.-Data f)
+          (case [ELFDATA2LSB]
+            (set! bo binary/LittleEndian))
+          (case [ELFDATA2MSB]
+            (set! bo binary/BigEndian))
+          (default
+            (return nil (addr (lit FormatError 0 "unknown ELF data encoding" ^{:go/via [FileHeader]} (.-Data f))))))
+
+        (set! ^{:go/via [FileHeader]} (.-ByteOrder f) bo)
+
+        (set! ^{:go/via [FileHeader]} (.-Version f) (conv Version (aget ident EI_VERSION)))
+        (when (!= ^{:go/via [FileHeader]} (.-Version f) EV_CURRENT)
+          (return nil (addr (lit FormatError 0 "unknown ELF version" ^{:go/via [FileHeader]} (.-Version f)))))
+
+
+        (set! ^{:go/via [FileHeader]} (.-OSABI f) (conv OSABI (aget ident EI_OSABI)))
+        (set! ^{:go/via [FileHeader]} (.-ABIVersion f) (aget ident EI_ABIVERSION))
+
+        ;; Read ELF file header
+        (let [^int64 phoff (zero int64)
+            (values ^int phentsize ^int phnum) (zero int)
+            ^{:line 332 :tag int64} shoff (zero int64)
+            (values ^int shentsize ^int shnum ^int shstrndx) (zero int)]
+          (switch ^{:go/via [FileHeader]} (.-Class f)
+            (case [ELFCLASS32]
+              (let [^Header32 hdr (zero Header32)
+                  ^{:line 337} data (make (slice byte) (unsafe/Sizeof hdr))]
+                (when [(values _ err) (.ReadAt sr data 0)] (!= err nil)
+                  (return nil err))
+
+                (set! ^{:go/via [FileHeader]} (.-Type f) (conv Type (.Uint16 bo (subslice data (unsafe/Offsetof (.-Type hdr))))))
+                (set! ^{:go/via [FileHeader]} (.-Machine f) (conv Machine (.Uint16 bo (subslice data (unsafe/Offsetof (.-Machine hdr))))))
+                (set! ^{:go/via [FileHeader]} (.-Entry f) (conv uint64 (.Uint32 bo (subslice data (unsafe/Offsetof (.-Entry hdr))))))
+                (when [v (conv Version (.Uint32 bo (subslice data (unsafe/Offsetof (.-Version hdr)))))] (!= v ^{:go/via [FileHeader]} (.-Version f))
+                  (return nil (addr (lit FormatError 0 "mismatched ELF version" v))))
+
+                (set! phoff (conv int64 (.Uint32 bo (subslice data (unsafe/Offsetof (.-Phoff hdr))))))
+                (set! phentsize (conv int (.Uint16 bo (subslice data (unsafe/Offsetof (.-Phentsize hdr))))))
+                (set! phnum (conv int (.Uint16 bo (subslice data (unsafe/Offsetof (.-Phnum hdr))))))
+                (set! shoff (conv int64 (.Uint32 bo (subslice data (unsafe/Offsetof (.-Shoff hdr))))))
+                (set! shentsize (conv int (.Uint16 bo (subslice data (unsafe/Offsetof (.-Shentsize hdr))))))
+                (set! shnum (conv int (.Uint16 bo (subslice data (unsafe/Offsetof (.-Shnum hdr))))))
+                (set! shstrndx (conv int (.Uint16 bo (subslice data (unsafe/Offsetof (.-Shstrndx hdr))))))))
+            (case [ELFCLASS64]
+              (let [^Header64 hdr (zero Header64)
+                  ^{:line 356} data (make (slice byte) (unsafe/Sizeof hdr))]
+                (when [(values _ err) (.ReadAt sr data 0)] (!= err nil)
+                  (return nil err))
+
+                (set! ^{:go/via [FileHeader]} (.-Type f) (conv Type (.Uint16 bo (subslice data (unsafe/Offsetof (.-Type hdr))))))
+                (set! ^{:go/via [FileHeader]} (.-Machine f) (conv Machine (.Uint16 bo (subslice data (unsafe/Offsetof (.-Machine hdr))))))
+                (set! ^{:go/via [FileHeader]} (.-Entry f) (.Uint64 bo (subslice data (unsafe/Offsetof (.-Entry hdr)))))
+                (when [v (conv Version (.Uint32 bo (subslice data (unsafe/Offsetof (.-Version hdr)))))] (!= v ^{:go/via [FileHeader]} (.-Version f))
+                  (return nil (addr (lit FormatError 0 "mismatched ELF version" v))))
+
+                (set! phoff (conv int64 (.Uint64 bo (subslice data (unsafe/Offsetof (.-Phoff hdr))))))
+                (set! phentsize (conv int (.Uint16 bo (subslice data (unsafe/Offsetof (.-Phentsize hdr))))))
+                (set! phnum (conv int (.Uint16 bo (subslice data (unsafe/Offsetof (.-Phnum hdr))))))
+                (set! shoff (conv int64 (.Uint64 bo (subslice data (unsafe/Offsetof (.-Shoff hdr))))))
+                (set! shentsize (conv int (.Uint16 bo (subslice data (unsafe/Offsetof (.-Shentsize hdr))))))
+                (set! shnum (conv int (.Uint16 bo (subslice data (unsafe/Offsetof (.-Shnum hdr))))))
+                (set! shstrndx (conv int (.Uint16 bo (subslice data (unsafe/Offsetof (.-Shstrndx hdr)))))))))
+
+
+          (when (< shoff 0)
+            (return nil (addr (lit FormatError 0 "invalid shoff" shoff))))
+
+          (when (< phoff 0)
+            (return nil (addr (lit FormatError 0 "invalid phoff" phoff))))
+
+
+          (when (and (== shoff 0) (!= shnum 0))
+            (return nil (addr (lit FormatError 0 "invalid ELF shnum for shoff=0" shnum))))
+
+
+          (when (and (> shnum 0) (>= shstrndx shnum))
+            (return nil (addr (lit FormatError 0 "invalid ELF shstrndx" shstrndx))))
+
+
+          (let [(values ^int wantPhentsize ^int wantShentsize) (zero int)]
+            (switch ^{:go/via [FileHeader]} (.-Class f)
+              (case [ELFCLASS32]
+                (set! wantPhentsize (* 8 4))
+                (set! wantShentsize (* 10 4)))
+              (case [ELFCLASS64]
+                (set! wantPhentsize (+ (* 2 4) (* 6 8)))
+                (set! wantShentsize (+ (* 4 4) (* 6 8)))))
+
+            (when (and (> phnum 0) (< phentsize wantPhentsize))
+              (return nil (addr (lit FormatError 0 "invalid ELF phentsize" phentsize))))
+
+
+            ;; If the number of sections is greater than or equal to SHN_LORESERVE
+            ;; (0xff00), shnum has the value zero and the actual number of section
+            ;; header table entries is contained in the sh_size field of the section
+            ;; header at index 0.
+            ;;
+            ;; If the number of segments is greater than or equal to 0xffff,
+            ;; phnum has the value 0xffff, and the actual number of segments
+            ;; is contained in the sh_info field of the section header at
+            ;; index 0.
+            (let [^:const ^{:val 65535} pnXnum 0xffff]
+              (when (and (> shoff 0) ^:go/paren (or (== shnum 0) (== phnum pnXnum)))
+                (let [(values ^uint32 typ ^uint32 link ^uint32 info) (zero uint32)
+                    ^{:line 415 :tag uint64} size (zero uint64)]
+                  (.Seek sr shoff io/SeekStart)
+                  (switch ^{:go/via [FileHeader]} (.-Class f)
+                    (case [ELFCLASS32]
+                      (let [sh (new Section32)]
+                        (when [err (binary/Read sr bo sh)] (!= err nil)
+                          (return nil err))
+
+                        (set! size (conv uint64 (.-Size sh)))
+                        (set! typ (.-Type sh))
+                        (set! link (.-Link sh))
+                        (set! info (.-Info sh))))
+                    (case [ELFCLASS64]
+                      (let [sh (new Section64)]
+                        (when [err (binary/Read sr bo sh)] (!= err nil)
+                          (return nil err))
+
+                        (set! size (.-Size sh))
+                        (set! typ (.-Type sh))
+                        (set! link (.-Link sh))
+                        (set! info (.-Info sh)))))
+
+
+                  (when (!= (conv SectionType typ) SHT_NULL)
+                    (return nil (addr (lit FormatError shoff "invalid type of the initial section" (conv SectionType typ)))))
+
+
+                  (when (== shnum 0)
+                    (when (< size (conv uint64 SHN_LORESERVE))
+                      (return nil (addr (lit FormatError shoff "invalid ELF shnum contained in sh_size" shnum))))
+
+                    (set! shnum (conv int size)))
+
+
+                  (when (== phnum pnXnum)
+                    (when (< info 0xffff)
+                      (return nil (addr (lit FormatError shoff "invalid ELF phnum contained in sh_info" info))))
+
+                    (set! phnum (conv int info)))
+
+
+                  ;; If the section name string table section index is greater than or
+                  ;; equal to SHN_LORESERVE (0xff00), this member has the value
+                  ;; SHN_XINDEX (0xffff) and the actual index of the section name
+                  ;; string table section is contained in the sh_link field of the
+                  ;; section header at index 0.
+                  (when (== shstrndx (conv int SHN_XINDEX))
+                    (set! shstrndx (conv int link))
+                    (when (or (< shstrndx (conv int SHN_LORESERVE)) (>= shstrndx shnum))
+                      (return nil (addr (lit FormatError shoff "invalid ELF shstrndx contained in sh_link" shstrndx)))))))
+
+
+
+
+              ;; Read program headers
+              (let [c ((inst saferio/SliceCap (* Prog)) (conv uint64 phnum))]
+                (when (< c 0)
+                  (return nil (addr (lit FormatError 0 "too many segments" phnum))))
+
+                (when (and (> phnum 0) (< (/ (- (<< 1 64) 1) (conv uint64 phnum)) (conv uint64 phentsize)))
+                  (return nil (addr (lit FormatError 0 "segment header overflow" phnum))))
+
+                (set! (.-Progs f) (make (slice (* Prog)) 0 c))
+                (let [(values phdata err) (saferio/ReadDataAt sr (* (conv uint64 phnum) (conv uint64 phentsize)) phoff)]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (for [i 0] (< i phnum) (inc! i)
+                    (let [off (* (conv uintptr i) (conv uintptr phentsize))
+                        ^{:line 484} p (new Prog)]
+                      (switch ^{:go/via [FileHeader]} (.-Class f)
+                        (case [ELFCLASS32]
+                          (let [^Prog32 ph (zero Prog32)]
+                            (set! (.-ProgHeader p) ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit ProgHeader
+                                :Type (conv ProgType (.Uint32 bo (subslice phdata (+ off (unsafe/Offsetof (.-Type ph))))))
+                                :Flags (conv ProgFlag (.Uint32 bo (subslice phdata (+ off (unsafe/Offsetof (.-Flags ph))))))
+                                :Off (conv uint64 (.Uint32 bo (subslice phdata (+ off (unsafe/Offsetof (.-Off ph))))))
+                                :Vaddr (conv uint64 (.Uint32 bo (subslice phdata (+ off (unsafe/Offsetof (.-Vaddr ph))))))
+                                :Paddr (conv uint64 (.Uint32 bo (subslice phdata (+ off (unsafe/Offsetof (.-Paddr ph))))))
+                                :Filesz (conv uint64 (.Uint32 bo (subslice phdata (+ off (unsafe/Offsetof (.-Filesz ph))))))
+                                :Memsz (conv uint64 (.Uint32 bo (subslice phdata (+ off (unsafe/Offsetof (.-Memsz ph))))))
+                                :Align (conv uint64 (.Uint32 bo (subslice phdata (+ off (unsafe/Offsetof (.-Align ph))))))))))
+
+                        (case [ELFCLASS64]
+                          (let [^Prog64 ph (zero Prog64)]
+                            (set! (.-ProgHeader p) ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit ProgHeader
+                                :Type (conv ProgType (.Uint32 bo (subslice phdata (+ off (unsafe/Offsetof (.-Type ph))))))
+                                :Flags (conv ProgFlag (.Uint32 bo (subslice phdata (+ off (unsafe/Offsetof (.-Flags ph))))))
+                                :Off (.Uint64 bo (subslice phdata (+ off (unsafe/Offsetof (.-Off ph)))))
+                                :Vaddr (.Uint64 bo (subslice phdata (+ off (unsafe/Offsetof (.-Vaddr ph)))))
+                                :Paddr (.Uint64 bo (subslice phdata (+ off (unsafe/Offsetof (.-Paddr ph)))))
+                                :Filesz (.Uint64 bo (subslice phdata (+ off (unsafe/Offsetof (.-Filesz ph)))))
+                                :Memsz (.Uint64 bo (subslice phdata (+ off (unsafe/Offsetof (.-Memsz ph)))))
+                                :Align (.Uint64 bo (subslice phdata (+ off (unsafe/Offsetof (.-Align ph))))))))))
+
+
+                      (when (< (conv int64 ^{:go/via [ProgHeader]} (.-Off p)) 0)
+                        (return nil (addr (lit FormatError (+ phoff (conv int64 off)) "invalid program header offset" ^{:go/via [ProgHeader]} (.-Off p)))))
+
+                      (when (< (conv int64 ^{:go/via [ProgHeader]} (.-Filesz p)) 0)
+                        (return nil (addr (lit FormatError (+ phoff (conv int64 off)) "invalid program header file size" ^{:go/via [ProgHeader]} (.-Filesz p)))))
+
+                      (set! (.-sr p) (io/NewSectionReader r (conv int64 ^{:go/via [ProgHeader]} (.-Off p)) (conv int64 ^{:go/via [ProgHeader]} (.-Filesz p))))
+                      (set! (.-ReaderAt p) (.-sr p))
+                      (set! (.-Progs f) (append (.-Progs f) p))))
+
+
+                  (when (and (> shnum 0) (< shentsize wantShentsize))
+                    (return nil (addr (lit FormatError 0 "invalid ELF shentsize" shentsize))))
+
+
+                  ;; Read section headers
+                  (set! c ((inst saferio/SliceCap Section) (conv uint64 shnum)))
+                  (when (< c 0)
+                    (return nil (addr (lit FormatError 0 "too many sections" shnum))))
+
+                  (when (and (> shnum 0) (< (/ (- (<< 1 64) 1) (conv uint64 shnum)) (conv uint64 shentsize)))
+                    (return nil (addr (lit FormatError 0 "section header overflow" shnum))))
+
+                  (set! (.-Sections f) (make (slice (* Section)) 0 c))
+                  (let [names (make (slice uint32) 0 c)
+                      (values shdata ^:assign err) (saferio/ReadDataAt sr (* (conv uint64 shnum) (conv uint64 shentsize)) shoff)]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (for [i 0] (< i shnum) (inc! i)
+                      (let [off (* (conv uintptr i) (conv uintptr shentsize))
+                          ^{:line 542} s (new Section)]
+                        (switch ^{:go/via [FileHeader]} (.-Class f)
+                          (case [ELFCLASS32]
+                            (let [^Section32 sh (zero Section32)]
+                              (set! names (append names (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Name sh)))))))
+                              (set! (.-SectionHeader s) ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit SectionHeader
+                                  :Type (conv SectionType (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Type sh))))))
+                                  :Flags (conv SectionFlag (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Flags sh))))))
+                                  :Addr (conv uint64 (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Addr sh))))))
+                                  :Offset (conv uint64 (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Off sh))))))
+                                  :FileSize (conv uint64 (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Size sh))))))
+                                  :Link (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Link sh)))))
+                                  :Info (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Info sh)))))
+                                  :Addralign (conv uint64 (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Addralign sh))))))
+                                  :Entsize (conv uint64 (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Entsize sh))))))))))
+
+                          (case [ELFCLASS64]
+                            (let [^Section64 sh (zero Section64)]
+                              (set! names (append names (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Name sh)))))))
+                              (set! (.-SectionHeader s) ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit SectionHeader
+                                  :Type (conv SectionType (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Type sh))))))
+                                  :Flags (conv SectionFlag (.Uint64 bo (subslice shdata (+ off (unsafe/Offsetof (.-Flags sh))))))
+                                  :Offset (.Uint64 bo (subslice shdata (+ off (unsafe/Offsetof (.-Off sh)))))
+                                  :FileSize (.Uint64 bo (subslice shdata (+ off (unsafe/Offsetof (.-Size sh)))))
+                                  :Addr (.Uint64 bo (subslice shdata (+ off (unsafe/Offsetof (.-Addr sh)))))
+                                  :Link (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Link sh)))))
+                                  :Info (.Uint32 bo (subslice shdata (+ off (unsafe/Offsetof (.-Info sh)))))
+                                  :Addralign (.Uint64 bo (subslice shdata (+ off (unsafe/Offsetof (.-Addralign sh)))))
+                                  :Entsize (.Uint64 bo (subslice shdata (+ off (unsafe/Offsetof (.-Entsize sh))))))))))
+
+
+                        (when (< (conv int64 ^{:go/via [SectionHeader]} (.-Offset s)) 0)
+                          (return nil (addr (lit FormatError (+ shoff (conv int64 off)) "invalid section offset" (conv int64 ^{:go/via [SectionHeader]} (.-Offset s))))))
+
+                        (when (< (conv int64 ^{:go/via [SectionHeader]} (.-FileSize s)) 0)
+                          (return nil (addr (lit FormatError (+ shoff (conv int64 off)) "invalid section size" (conv int64 ^{:go/via [SectionHeader]} (.-FileSize s))))))
+
+                        (set! (.-sr s) (io/NewSectionReader r (conv int64 ^{:go/via [SectionHeader]} (.-Offset s)) (conv int64 ^{:go/via [SectionHeader]} (.-FileSize s))))
+
+                        (if (== (bit-and ^{:go/via [SectionHeader]} (.-Flags s) SHF_COMPRESSED) 0) (do
+                            (set! (.-ReaderAt s) (.-sr s))
+                            (set! ^{:go/via [SectionHeader]} (.-Size s) ^{:go/via [SectionHeader]} (.-FileSize s)))
+
+                          ;; Read the compression header.
+                          (switch ^{:go/via [FileHeader]} (.-Class f)
+                            (case [ELFCLASS32]
+                              (let [^Chdr32 ch (zero Chdr32)
+                                  ^{:line 589} chdata (make (slice byte) (unsafe/Sizeof ch))]
+                                (when [(values _ err) (.ReadAt (.-sr s) chdata 0)] (!= err nil)
+                                  (return nil err))
+
+                                (set! (.-compressionType s) (conv CompressionType (.Uint32 bo (subslice chdata (unsafe/Offsetof (.-Type ch))))))
+                                (set! ^{:go/via [SectionHeader]} (.-Size s) (conv uint64 (.Uint32 bo (subslice chdata (unsafe/Offsetof (.-Size ch))))))
+                                (set! ^{:go/via [SectionHeader]} (.-Addralign s) (conv uint64 (.Uint32 bo (subslice chdata (unsafe/Offsetof (.-Addralign ch))))))
+                                (set! (.-compressionOffset s) (conv int64 (unsafe/Sizeof ch)))))
+                            (case [ELFCLASS64]
+                              (let [^Chdr64 ch (zero Chdr64)
+                                  ^{:line 599} chdata (make (slice byte) (unsafe/Sizeof ch))]
+                                (when [(values _ err) (.ReadAt (.-sr s) chdata 0)] (!= err nil)
+                                  (return nil err))
+
+                                (set! (.-compressionType s) (conv CompressionType (.Uint32 bo (subslice chdata (unsafe/Offsetof (.-Type ch))))))
+                                (set! ^{:go/via [SectionHeader]} (.-Size s) (.Uint64 bo (subslice chdata (unsafe/Offsetof (.-Size ch)))))
+                                (set! ^{:go/via [SectionHeader]} (.-Addralign s) (.Uint64 bo (subslice chdata (unsafe/Offsetof (.-Addralign ch)))))
+                                (set! (.-compressionOffset s) (conv int64 (unsafe/Sizeof ch)))))))
+
+
+
+                        (set! (.-Sections f) (append (.-Sections f) s))))
+
+
+                    (when (== (len (.-Sections f)) 0)
+                      (return f nil))
+
+
+                    ;; Load section header string table.
+                    (when (== shstrndx 0)
+                      ;; If the file has no section name string table,
+                      ;; shstrndx holds the value SHN_UNDEF (0).
+                      (return f nil))
+
+                    (let [shstr (aget (.-Sections f) shstrndx)]
+                      (when (!= ^{:go/via [SectionHeader]} (.-Type shstr) SHT_STRTAB)
+                        (return nil (addr (lit FormatError (+ shoff (conv int64 (* shstrndx shentsize))) "invalid ELF section name string table type" ^{:go/via [SectionHeader]} (.-Type shstr)))))
+
+                      (let [(values shstrtab ^:assign err) (.Data shstr)]
+                        (when (!= err nil)
+                          (return nil err))
+
+                        (range [i s (.-Sections f)]
+                          (let [^bool ok (zero bool)]
+                            (set! (values ^{:go/via [SectionHeader]} (.-Name s) ok) (getString shstrtab (conv int (aget names i))))
+                            (when (not ok)
+                              (return nil (addr (lit FormatError (+ shoff (conv int64 (* i shentsize))) "bad section name index" (aget names i)))))))
+
+
+
+                        (return f nil)))))))))))))
+
+
+
+
+^{:go/end 654} (go/method getSymbols "getSymbols returns a slice of Symbols from parsing the symbol table\nwith the given type, along with the associated string table.\n" [^{:tag (* File)} f ^SectionType typ] :results [(slice Symbol) (slice byte) error]
+  (switch ^{:go/via [FileHeader]} (.-Class f)
+    (case [ELFCLASS64]
+      (return (.getSymbols64 f typ)))
+
+    (case [ELFCLASS32]
+      (return (.getSymbols32 f typ))))
+
+
+  (return nil nil (errors/New "not implemented")))
+
+
+
+
+(go/var ^{:doc "ErrNoSymbols is returned by [File.Symbols] and [File.DynamicSymbols]\nif there is no such section in the File.\n"} ErrNoSymbols (errors/New "no symbol section"))
+
+^{:go/end 708} (go/method getSymbols32 [^{:tag (* File)} f ^SectionType typ] :results [(slice Symbol) (slice byte) error]
+  (let [symtabSection (.SectionByType f typ)]
+    (when (== symtabSection nil)
+      (return nil nil ErrNoSymbols))
+
+
+    (let [(values data err) (.Data symtabSection)]
+      (when (!= err nil)
+        (return nil nil (fmt/Errorf "cannot load symbol section: %w" err)))
+
+      (when (== (len data) 0)
+        (return nil nil ErrNoSymbols))
+
+      (when (!= (% (len data) Sym32Size) 0)
+        (return nil nil (errors/New "length of symbol section is not a multiple of SymSize")))
+
+
+      (let [(values strdata ^:assign err) (.stringTable f ^{:go/via [SectionHeader]} (.-Link symtabSection))]
+        (when (!= err nil)
+          (return nil nil (fmt/Errorf "cannot load string table section: %w" err)))
+
+
+        ;; The first entry is all zeros.
+        (set! data (subslice data Sym32Size))
+
+        (let [symbols (make (slice Symbol) (/ (len data) Sym32Size))
+
+            ^{:line 687} i 0
+            ^{:line 688 :tag Sym32} sym (zero Sym32)]
+          (while (> (len data) 0)
+            (set! (.-Name sym) (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice data 0 4)))
+            (set! (.-Value sym) (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice data 4 8)))
+            (set! (.-Size sym) (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice data 8 12)))
+            (set! (.-Info sym) (aget data 12))
+            (set! (.-Other sym) (aget data 13))
+            (set! (.-Shndx sym) (.Uint16 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice data 14 16)))
+            (let [(values str _) (getString strdata (conv int (.-Name sym)))]
+              (set! (.-Name (aget symbols i)) str)
+              (set! (.-Info (aget symbols i)) (.-Info sym))
+              (set! (.-Other (aget symbols i)) (.-Other sym))
+              (set! (.-Section (aget symbols i)) (conv SectionIndex (.-Shndx sym)))
+              (set! (.-Value (aget symbols i)) (conv uint64 (.-Value sym)))
+              (set! (.-Size (aget symbols i)) (conv uint64 (.-Size sym)))
+              (inc! i)
+              (set! data (subslice data Sym32Size))))
+
+
+          (return symbols strdata nil))))))
+
+
+^{:go/end 758} (go/method getSymbols64 [^{:tag (* File)} f ^SectionType typ] :results [(slice Symbol) (slice byte) error]
+  (let [symtabSection (.SectionByType f typ)]
+    (when (== symtabSection nil)
+      (return nil nil ErrNoSymbols))
+
+
+    (let [(values data err) (.Data symtabSection)]
+      (when (!= err nil)
+        (return nil nil (fmt/Errorf "cannot load symbol section: %w" err)))
+
+      (when (== (len data) 0)
+        (return nil nil ErrNoSymbols))
+
+      (when (!= (% (len data) Sym64Size) 0)
+        (return nil nil (errors/New "length of symbol section is not a multiple of Sym64Size")))
+
+
+      (let [(values strdata ^:assign err) (.stringTable f ^{:go/via [SectionHeader]} (.-Link symtabSection))]
+        (when (!= err nil)
+          (return nil nil (fmt/Errorf "cannot load string table section: %w" err)))
+
+
+        ;; The first entry is all zeros.
+        (set! data (subslice data Sym64Size))
+
+        (let [symbols (make (slice Symbol) (/ (len data) Sym64Size))
+
+            ^{:line 737} i 0
+            ^{:line 738 :tag Sym64} sym (zero Sym64)]
+          (while (> (len data) 0)
+            (set! (.-Name sym) (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice data 0 4)))
+            (set! (.-Info sym) (aget data 4))
+            (set! (.-Other sym) (aget data 5))
+            (set! (.-Shndx sym) (.Uint16 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice data 6 8)))
+            (set! (.-Value sym) (.Uint64 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice data 8 16)))
+            (set! (.-Size sym) (.Uint64 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice data 16 24)))
+            (let [(values str _) (getString strdata (conv int (.-Name sym)))]
+              (set! (.-Name (aget symbols i)) str)
+              (set! (.-Info (aget symbols i)) (.-Info sym))
+              (set! (.-Other (aget symbols i)) (.-Other sym))
+              (set! (.-Section (aget symbols i)) (conv SectionIndex (.-Shndx sym)))
+              (set! (.-Value (aget symbols i)) (.-Value sym))
+              (set! (.-Size (aget symbols i)) (.-Size sym))
+              (inc! i)
+              (set! data (subslice data Sym64Size))))
+
+
+          (return symbols strdata nil))))))
+
+
+
+^{:go/end 772} (go/func getString "getString extracts a string from an ELF string table.\n" [^{:tag (slice byte)} section ^int start] :results [string bool]
+  (when (or (< start 0) (>= start (len section)))
+    (return "" false))
+
+
+  (for [end start] (< end (len section)) (inc! end)
+    (when (== (aget section end) 0)
+      (return (conv string (subslice section start end)) true)))
+
+
+  (return "" false))
+
+
+
+
+^{:go/breaks [[5 782]] :go/end 783} (go/method Section "Section returns a section with the given name, or nil if no such\nsection exists.\n" ^{:tag (* Section)} [^{:tag (* File)} f ^string name]
+  (range [_ s (.-Sections f)]
+    (when (== ^{:go/via [SectionHeader]} (.-Name s) name)
+      (return s)))
+
+
+  nil)
+
+
+
+
+^{:go/end 816} (go/method applyRelocations "applyRelocations applies relocations to dst. rels is a relocations section\nin REL or RELA format.\n" ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  (switch
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS64) (== ^{:go/via [FileHeader]} (.-Machine f) EM_X86_64))]
+      (return (.applyRelocationsAMD64 f dst rels)))
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS32) (== ^{:go/via [FileHeader]} (.-Machine f) EM_386))]
+      (return (.applyRelocations386 f dst rels)))
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS32) (== ^{:go/via [FileHeader]} (.-Machine f) EM_ARM))]
+      (return (.applyRelocationsARM f dst rels)))
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS64) (== ^{:go/via [FileHeader]} (.-Machine f) EM_AARCH64))]
+      (return (.applyRelocationsARM64 f dst rels)))
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS32) (== ^{:go/via [FileHeader]} (.-Machine f) EM_PPC))]
+      (return (.applyRelocationsPPC f dst rels)))
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS64) (== ^{:go/via [FileHeader]} (.-Machine f) EM_PPC64))]
+      (return (.applyRelocationsPPC64 f dst rels)))
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS32) (== ^{:go/via [FileHeader]} (.-Machine f) EM_MIPS))]
+      (return (.applyRelocationsMIPS f dst rels)))
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS64) (== ^{:go/via [FileHeader]} (.-Machine f) EM_MIPS))]
+      (return (.applyRelocationsMIPS64 f dst rels)))
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS64) (== ^{:go/via [FileHeader]} (.-Machine f) EM_LOONGARCH))]
+      (return (.applyRelocationsLOONG64 f dst rels)))
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS64) (== ^{:go/via [FileHeader]} (.-Machine f) EM_RISCV))]
+      (return (.applyRelocationsRISCV64 f dst rels)))
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS64) (== ^{:go/via [FileHeader]} (.-Machine f) EM_S390))]
+      (return (.applyRelocationss390x f dst rels)))
+    (case [(and (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS64) (== ^{:go/via [FileHeader]} (.-Machine f) EM_SPARCV9))]
+      (return (.applyRelocationsSPARC64 f dst rels)))
+    (default
+      (return (errors/New "applyRelocations: not implemented")))))
+
+
+
+
+
+
+
+
+
+^{:go/end 826} (go/func canApplyRelocation "canApplyRelocation reports whether we should try to apply a\nrelocation to a DWARF data section, given a pointer to the symbol\ntargeted by the relocation.\nMost relocations in DWARF data tend to be section-relative, but\nsome target non-section symbols (for example, low_PC attrs on\nsubprogram or compilation unit DIEs that target function symbols).\n" ^bool [^{:tag (* Symbol)} sym]
+  (and (!= (.-Section sym) SHN_UNDEF) (< (.-Section sym) SHN_LORESERVE)))
+
+
+^{:go/end 868} (go/method applyRelocationsAMD64 ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 24 is the size of Rela64.
+  (when (!= (% (len rels) 24) 0)
+    (return (errors/New "length of relocation section is not a multiple of 24")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 867]]} (let [b (bytes/NewReader rels)
+        ^{:line 840 :tag Rela64} rela (zero Rela64)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rela))
+        (let [symNo (>> (.-Info rela) 32)
+            ^{:line 845} t (conv R_X86_64 (bit-and (.-Info rela) 0xffff))]
+
+          (when (or (== symNo 0) (> symNo (conv uint64 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+            (when (not (canApplyRelocation sym))
+              (continue))
+
+
+            ;; There are relocations, so this must be a normal
+            ;; object file.  The code below handles only basic relocations
+            ;; of the form S + A (symbol plus addend).
+
+            (switch t
+              (case [R_X86_64_64]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 8 (.-Value sym) (.-Addend rela) false))
+              (case [R_X86_64_32]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 4 (.-Value sym) (.-Addend rela) false))))))
+
+
+
+      nil)))
+
+
+^{:go/end 900} (go/method applyRelocations386 ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 8 is the size of Rel32.
+  (when (!= (% (len rels) 8) 0)
+    (return (errors/New "length of relocation section is not a multiple of 8")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 899]]} (let [b (bytes/NewReader rels)
+        ^{:line 882 :tag Rel32} rel (zero Rel32)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rel))
+        (let [symNo (>> (.-Info rel) 8)
+            ^{:line 887} t (conv R_386 (bit-and (.-Info rel) 0xff))]
+
+          (when (or (== symNo 0) (> symNo (conv uint32 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+
+            (when (== t R_386_32)
+              (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (conv uint64 (.-Off rel)) 4 (.-Value sym) 0 true)))))
+
+
+
+      nil)))
+
+
+^{:go/end 933} (go/method applyRelocationsARM ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 8 is the size of Rel32.
+  (when (!= (% (len rels) 8) 0)
+    (return (errors/New "length of relocation section is not a multiple of 8")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 932]]} (let [b (bytes/NewReader rels)
+        ^{:line 914 :tag Rel32} rel (zero Rel32)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rel))
+        (let [symNo (>> (.-Info rel) 8)
+            ^{:line 919} t (conv R_ARM (bit-and (.-Info rel) 0xff))]
+
+          (when (or (== symNo 0) (> symNo (conv uint32 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+
+            (switch t
+              (case [R_ARM_ABS32]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (conv uint64 (.-Off rel)) 4 (.-Value sym) 0 true))))))
+
+
+
+      nil)))
+
+
+^{:go/end 975} (go/method applyRelocationsARM64 ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 24 is the size of Rela64.
+  (when (!= (% (len rels) 24) 0)
+    (return (errors/New "length of relocation section is not a multiple of 24")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 974]]} (let [b (bytes/NewReader rels)
+        ^{:line 947 :tag Rela64} rela (zero Rela64)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rela))
+        (let [symNo (>> (.-Info rela) 32)
+            ^{:line 952} t (conv R_AARCH64 (bit-and (.-Info rela) 0xffff))]
+
+          (when (or (== symNo 0) (> symNo (conv uint64 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+            (when (not (canApplyRelocation sym))
+              (continue))
+
+
+            ;; There are relocations, so this must be a normal
+            ;; object file.  The code below handles only basic relocations
+            ;; of the form S + A (symbol plus addend).
+
+            (switch t
+              (case [R_AARCH64_ABS64]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 8 (.-Value sym) (.-Addend rela) false))
+              (case [R_AARCH64_ABS32]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 4 (.-Value sym) (.-Addend rela) false))))))
+
+
+
+      nil)))
+
+
+^{:go/end 1011} (go/method applyRelocationsPPC ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 12 is the size of Rela32.
+  (when (!= (% (len rels) 12) 0)
+    (return (errors/New "length of relocation section is not a multiple of 12")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 1010]]} (let [b (bytes/NewReader rels)
+        ^{:line 989 :tag Rela32} rela (zero Rela32)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rela))
+        (let [symNo (>> (.-Info rela) 8)
+            ^{:line 994} t (conv R_PPC (bit-and (.-Info rela) 0xff))]
+
+          (when (or (== symNo 0) (> symNo (conv uint32 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+            (when (not (canApplyRelocation sym))
+              (continue))
+
+
+            (switch t
+              (case [R_PPC_ADDR32]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (conv uint64 (.-Off rela)) 4 (.-Value sym) (conv int64 (.-Addend rela)) false))))))
+
+
+
+      nil)))
+
+
+^{:go/end 1049} (go/method applyRelocationsPPC64 ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 24 is the size of Rela64.
+  (when (!= (% (len rels) 24) 0)
+    (return (errors/New "length of relocation section is not a multiple of 24")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 1048]]} (let [b (bytes/NewReader rels)
+        ^{:line 1025 :tag Rela64} rela (zero Rela64)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rela))
+        (let [symNo (>> (.-Info rela) 32)
+            ^{:line 1030} t (conv R_PPC64 (bit-and (.-Info rela) 0xffff))]
+
+          (when (or (== symNo 0) (> symNo (conv uint64 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+            (when (not (canApplyRelocation sym))
+              (continue))
+
+
+            (switch t
+              (case [R_PPC64_ADDR64]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 8 (.-Value sym) (.-Addend rela) false))
+              (case [R_PPC64_ADDR32]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 4 (.-Value sym) (.-Addend rela) false))))))
+
+
+
+      nil)))
+
+
+^{:go/end 1082} (go/method applyRelocationsMIPS ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 8 is the size of Rel32.
+  (when (!= (% (len rels) 8) 0)
+    (return (errors/New "length of relocation section is not a multiple of 8")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 1081]]} (let [b (bytes/NewReader rels)
+        ^{:line 1063 :tag Rel32} rel (zero Rel32)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rel))
+        (let [symNo (>> (.-Info rel) 8)
+            ^{:line 1068} t (conv R_MIPS (bit-and (.-Info rel) 0xff))]
+
+          (when (or (== symNo 0) (> symNo (conv uint32 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+
+            (switch t
+              (case [R_MIPS_32]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (conv uint64 (.-Off rel)) 4 (.-Value sym) 0 true))))))
+
+
+
+      nil)))
+
+
+^{:go/end 1127} (go/method applyRelocationsMIPS64 ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 24 is the size of Rela64.
+  (when (!= (% (len rels) 24) 0)
+    (return (errors/New "length of relocation section is not a multiple of 24")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 1126]]} (let [b (bytes/NewReader rels)
+        ^{:line 1096 :tag Rela64} rela (zero Rela64)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rela))
+        (let [^uint64 symNo (zero uint64)
+            ^{:line 1101 :tag R_MIPS} t (zero R_MIPS)]
+          (if (== ^{:go/via [FileHeader]} (.-ByteOrder f) binary/BigEndian) (do
+              (set! symNo (>> (.-Info rela) 32))
+              (set! t (conv R_MIPS (bit-and (.-Info rela) 0xff))))
+            (do
+              (set! symNo (bit-and (.-Info rela) 0xffffffff))
+              (set! t (conv R_MIPS (>> (.-Info rela) 56)))))
+
+
+          (when (or (== symNo 0) (> symNo (conv uint64 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+            (when (not (canApplyRelocation sym))
+              (continue))
+
+
+            (switch t
+              (case [R_MIPS_64]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 8 (.-Value sym) (.-Addend rela) false))
+              (case [R_MIPS_32]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 4 (.-Value sym) (.-Addend rela) false))))))
+
+
+
+      nil)))
+
+
+^{:go/end 1167} (go/method applyRelocationsLOONG64 ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 24 is the size of Rela64.
+  (when (!= (% (len rels) 24) 0)
+    (return (errors/New "length of relocation section is not a multiple of 24")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 1166]]} (let [b (bytes/NewReader rels)
+        ^{:line 1141 :tag Rela64} rela (zero Rela64)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rela))
+        (let [^uint64 symNo (zero uint64)
+            ^{:line 1146 :tag R_LARCH} t (zero R_LARCH)]
+          (set! symNo (>> (.-Info rela) 32))
+          (set! t (conv R_LARCH (bit-and (.-Info rela) 0xffff)))
+
+          (when (or (== symNo 0) (> symNo (conv uint64 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+            (when (not (canApplyRelocation sym))
+              (continue))
+
+
+            (switch t
+              (case [R_LARCH_64]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 8 (.-Value sym) (.-Addend rela) false))
+              (case [R_LARCH_32]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 4 (.-Value sym) (.-Addend rela) false))))))
+
+
+
+      nil)))
+
+
+^{:go/end 1205} (go/method applyRelocationsRISCV64 ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 24 is the size of Rela64.
+  (when (!= (% (len rels) 24) 0)
+    (return (errors/New "length of relocation section is not a multiple of 24")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 1204]]} (let [b (bytes/NewReader rels)
+        ^{:line 1181 :tag Rela64} rela (zero Rela64)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rela))
+        (let [symNo (>> (.-Info rela) 32)
+            ^{:line 1186} t (conv R_RISCV (bit-and (.-Info rela) 0xffff))]
+
+          (when (or (== symNo 0) (> symNo (conv uint64 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+            (when (not (canApplyRelocation sym))
+              (continue))
+
+
+            (switch t
+              (case [R_RISCV_64]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 8 (.-Value sym) (.-Addend rela) false))
+              (case [R_RISCV_32]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 4 (.-Value sym) (.-Addend rela) false))))))
+
+
+
+      nil)))
+
+
+^{:go/end 1243} (go/method applyRelocationss390x ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 24 is the size of Rela64.
+  (when (!= (% (len rels) 24) 0)
+    (return (errors/New "length of relocation section is not a multiple of 24")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 1242]]} (let [b (bytes/NewReader rels)
+        ^{:line 1219 :tag Rela64} rela (zero Rela64)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rela))
+        (let [symNo (>> (.-Info rela) 32)
+            ^{:line 1224} t (conv R_390 (bit-and (.-Info rela) 0xffff))]
+
+          (when (or (== symNo 0) (> symNo (conv uint64 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+            (when (not (canApplyRelocation sym))
+              (continue))
+
+
+            (switch t
+              (case [R_390_64]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 8 (.-Value sym) (.-Addend rela) false))
+              (case [R_390_32]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 4 (.-Value sym) (.-Addend rela) false))))))
+
+
+
+      nil)))
+
+
+^{:go/end 1282} (go/method applyRelocationsSPARC64 ^error [^{:tag (* File)} f ^{:tag (slice byte)} dst ^{:tag (slice byte)} rels]
+  ;; 24 is the size of Rela64.
+  (when (!= (% (len rels) 24) 0)
+    (return (errors/New "length of relocation section is not a multiple of 24")))
+
+
+  (let [(values symbols _ err) (.getSymbols f SHT_SYMTAB)]
+    (when (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [[3 1281]]} (let [b (bytes/NewReader rels)
+        ^{:line 1257 :tag Rela64} rela (zero Rela64)]
+
+      (while (> (.Len b) 0)
+        (binary/Read b ^{:go/via [FileHeader]} (.-ByteOrder f) (addr rela))
+        (let [symNo (>> (.-Info rela) 32)
+            ^{:line 1262} t (conv R_SPARC (bit-and (.-Info rela) 0xff))]
+
+          (when (or (== symNo 0) (> symNo (conv uint64 (len symbols))))
+            (continue))
+
+          (let [sym (addr (aget symbols (- symNo 1)))]
+            (when (not (canApplyRelocation sym))
+              (continue))
+
+
+            (switch t
+              (case [R_SPARC_64 R_SPARC_UA64]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 8 (.-Value sym) (.-Addend rela) false))
+
+              (case [R_SPARC_32 R_SPARC_UA32]
+                (putUint ^{:go/via [FileHeader]} (.-ByteOrder f) dst (.-Off rela) 4 (.-Value sym) (.-Addend rela) false))))))
+
+
+
+      nil)))
+
+
+^{:go/end 1381} (go/method DWARF [^{:tag (* File)} f] :results [(* dwarf/Data) error]
+  (let [dwarfSuffix ^{:go/end 1295} (fn ^string [^{:tag (* Section)} s]
+        (switch
+          (case [(strings/HasPrefix ^{:go/via [SectionHeader]} (.-Name s) ".debug_")]
+            (return (subslice ^{:go/via [SectionHeader]} (.-Name s) 7)))
+          (case [(strings/HasPrefix ^{:go/via [SectionHeader]} (.-Name s) ".zdebug_")]
+            (return (subslice ^{:go/via [SectionHeader]} (.-Name s) 8)))
+          (default
+            (return ""))))
+
+
+
+      ;; sectionData gets the data for s, checks its size, and
+      ;; applies any applicable relations.
+      ^{:line 1298} sectionData ^{:go/end 1328} (fn [^int i ^{:tag (* Section)} s] :results [(slice byte) error]
+        (let [(values b err) (.Data s)]
+          (when (and (!= err nil) (< (conv uint64 (len b)) ^{:go/via [SectionHeader]} (.-Size s)))
+            (return nil err))
+
+
+          (when (== ^{:go/via [FileHeader]} (.-Type f) ET_EXEC)
+            ;; Do not apply relocations to DWARF sections for ET_EXEC binaries.
+            ;; Relocations should already be applied, and .rela sections may
+            ;; contain incorrect data.
+            (return b nil))
+
+
+          (range [_ r (.-Sections f)]
+            (when (and (!= ^{:go/via [SectionHeader]} (.-Type r) SHT_RELA) (!= ^{:go/via [SectionHeader]} (.-Type r) SHT_REL))
+              (continue))
+
+            (when (!= (conv int ^{:go/via [SectionHeader]} (.-Info r)) i)
+              (continue))
+
+            (let [(values rd err) (.Data r)]
+              (when (!= err nil)
+                (return nil err))
+
+              (set! err (.applyRelocations f b rd))
+              (when (!= err nil)
+                (return nil err))))
+
+
+          (return b nil)))
+
+
+      ;; There are many DWARF sections, but these are the ones
+      ;; the debug/dwarf package started with.
+      ^:var ^{:line 1332} dat (lit (map string (slice byte)) ["abbrev" nil] ["info" nil] ["str" nil] ["line" nil] ["ranges" nil])]
+    (range [i s (.-Sections f)]
+      (let [suffix (dwarfSuffix s)]
+        (when (== suffix "")
+          (continue))
+
+        (when [(values _ ok) (aget dat suffix)] (not ok)
+          (continue))
+
+        (let [(values b err) (sectionData i s)]
+          (when (!= err nil)
+            (return nil err))
+
+          (aset dat suffix b))))
+
+
+    (let [(values d err) (dwarf/New (aget dat "abbrev") nil nil (aget dat "info") (aget dat "line") nil (aget dat "ranges") (aget dat "str"))]
+      (when (!= err nil)
+        (return nil err))
+
+
+      ;; Look for DWARF4 .debug_types sections and DWARF5 sections.
+      (range [i s (.-Sections f)]
+        (let [suffix (dwarfSuffix s)]
+          (when (== suffix "")
+            (continue))
+
+          (when [(values _ ok) (aget dat suffix)] ok
+            ;; Already handled.
+            (continue))
+
+
+          (let [(values b err) (sectionData i s)]
+            (when (!= err nil)
+              (return nil err))
+
+
+            (if (== suffix "types")
+              (when [err (.AddTypes d (fmt/Sprintf "types-%d" i) b)] (!= err nil)
+                (return nil err))
+
+              (do
+                (when [err (.AddSection d (+ ".debug_" suffix) b)] (!= err nil)
+                  (return nil err)))))))
+
+
+
+
+      (return d nil))))
+
+
+
+
+
+
+
+
+^{:go/end 1392} (go/method Symbols "Symbols returns the symbol table for f. The symbols will be listed in the order\nthey appear in f.\n\nFor compatibility with Go 1.0, Symbols omits the null symbol at index 0.\nAfter retrieving the symbols as symtab, an externally supplied index x\ncorresponds to symtab[x-1], not symtab[x].\n" [^{:tag (* File)} f] :results [(slice Symbol) error]
+  (let [(values sym _ err) (.getSymbols f SHT_SYMTAB)]
+    (return sym err)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1418} (go/method DynamicSymbols "DynamicSymbols returns the dynamic symbol table for f. The symbols\nwill be listed in the order they appear in f.\n\nIf f has a symbol version table, the returned [File.Symbols] will have\ninitialized Version and Library fields.\n\nFor compatibility with [File.Symbols], [File.DynamicSymbols] omits the null symbol at index 0.\nAfter retrieving the symbols as symtab, an externally supplied index x\ncorresponds to symtab[x-1], not symtab[x].\n" [^{:tag (* File)} f] :results [(slice Symbol) error]
+  (let [(values sym str err) (.getSymbols f SHT_DYNSYM)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values hasVersions ^:assign err) (.gnuVersionInit f str)]
+      (when (!= err nil)
+        (return nil err))
+
+      (when hasVersions
+        (range [i sym]
+          (set! (values (.-HasVersion (aget sym i)) (.-VersionIndex (aget sym i)) (.-Version (aget sym i)) (.-Library (aget sym i))) (.gnuVersion f i))))
+
+
+      (return sym nil))))
+
+
+(go/type ImportedSymbol (struct
+    ^{:line 1421 :tag string} Name
+    ^{:line 1422 :tag string} Version
+    ^{:line 1423 :tag string} Library))
+
+
+
+
+
+
+^{:go/end 1447} (go/method ImportedSymbols "ImportedSymbols returns the names of all symbols\nreferred to by the binary f that are expected to be\nsatisfied by other libraries at dynamic load time.\nIt does not return weak symbols.\n" [^{:tag (* File)} f] :results [(slice ImportedSymbol) error]
+  (let [(values sym str err) (.getSymbols f SHT_DYNSYM)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when [(values _ err) (.gnuVersionInit f str)] (!= err nil)
+      (return nil err))
+
+    (let [^{:tag (slice ImportedSymbol)} all (zero (slice ImportedSymbol))]
+      (range [i s sym]
+        (when (and (== (ST_BIND (.-Info s)) STB_GLOBAL) (== (.-Section s) SHN_UNDEF))
+          (set! all (append all (lit ImportedSymbol :Name (.-Name s))))
+          (let [sym (addr (aget all (- (len all) 1)))]
+            (set! (values _ _ (.-Version sym) (.-Library sym)) (.gnuVersion f i)))))
+
+
+      (return all nil))))
+
+
+
+(go/type VersionIndex "VersionIndex is the type of a [Symbol] version index.\n" uint16)
+
+
+
+^{:go/end 1456} (go/method IsHidden "IsHidden reports whether the symbol is hidden within the version.\nThis means that the symbol can only be seen by specifying the exact version.\n" ^bool [^VersionIndex vi]
+  (!= (bit-and vi 0x8000) 0))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1473} (go/method Index "Index returns the version index.\nIf this is the value 0, it means that the symbol is local,\nand is not visible externally.\nIf this is the value 1, it means that the symbol is in the base version,\nand has no specific version; it may or may not match a\n[DynamicVersion.Index] in the slice returned by [File.DynamicVersions].\nOther values will match either [DynamicVersion.Index]\nin the slice returned by [File.DynamicVersions],\nor [DynamicVersionDep.Index] in the Needs field\nof the elements of the slice returned by [File.DynamicVersionNeeds].\nIn general, a defined symbol will have an index referring\nto DynamicVersions, and an undefined symbol will have an index\nreferring to some version in DynamicVersionNeeds.\n" ^uint16 [^VersionIndex vi]
+  (conv uint16 (bit-and vi 0x7fff)))
+
+
+
+
+
+
+
+(go/type DynamicVersion "DynamicVersion is a version defined by a dynamic object.\nThis describes entries in the ELF SHT_GNU_verdef section.\nWe assume that the vd_version field is 1.\nNote that the name of the version appears here;\nit is not in the first Deps entry as it is in the ELF file.\n" (struct
+    ^{:line 1481 :tag string} Name ; Name of version defined by this index.
+    ^{:line 1482 :tag uint16} Index ; Version index.
+    ^{:line 1483 :tag DynamicVersionFlag} Flags
+    ^{:line 1484 :tag (slice string)} Deps)) ; Names of versions that this version depends upon.
+
+
+
+
+
+
+(go/type DynamicVersionNeed "DynamicVersionNeed describes a shared library needed by a dynamic object,\nwith a list of the versions needed from that shared library.\nThis describes entries in the ELF SHT_GNU_verneed section.\nWe assume that the vn_version field is 1.\n" (struct
+    ^{:line 1492 :tag string} Name ; Shared library name.
+    ^{:line 1493 :tag (slice DynamicVersionDep)} Needs)) ; Dependencies.
+
+
+
+(go/type DynamicVersionDep "DynamicVersionDep is a version needed from some shared library.\n" (struct
+    ^{:line 1498 :tag DynamicVersionFlag} Flags
+    ^{:line 1499 :tag uint16} Index ; Version index.
+    ^{:line 1500 :tag string} Dep)) ; Name of required version.
+
+
+
+^{:go/end 1577} (go/method dynamicVersions "dynamicVersions returns version information for a dynamic object.\n" ^error [^{:tag (* File)} f ^{:tag (slice byte)} str]
+  (when (!= (.-dynVers f) nil)
+    ;; Already initialized.
+    (return nil))
+
+
+  ;; Accumulate verdef information.
+  (let [vd (.SectionByType f SHT_GNU_VERDEF)]
+    (when (== vd nil)
+      (return nil))
+
+    ^{:go/breaks [[4 1576]]} (let [(values d _) (.Data vd)
+
+        ^{:line 1517 :tag (slice DynamicVersion)} dynVers (zero (slice DynamicVersion))
+        ^{:line 1518} i 0]
+      (while true
+        (when (> (+ i 20) (len d))
+          (break))
+
+        (let [version (.Uint16 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d i (+ i 2)))]
+          (when (!= version 1)
+            (return (addr (lit FormatError (conv int64 (+ ^{:go/via [SectionHeader]} (.-Offset vd) (conv uint64 i))) "unexpected dynamic version" version))))
+
+          (let [flags (conv DynamicVersionFlag (.Uint16 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ i 2) (+ i 4))))
+              ^{:line 1528} ndx (.Uint16 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ i 4) (+ i 6)))
+              ^{:line 1529} cnt (.Uint16 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ i 6) (+ i 8)))
+              ^{:line 1530} aux (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ i 12) (+ i 16)))
+              ^{:line 1531} next (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ i 16) (+ i 20)))]
+
+            (when (== cnt 0)
+              (return (addr (lit FormatError (conv int64 (+ ^{:go/via [SectionHeader]} (.-Offset vd) (conv uint64 i))) "dynamic version has no name" nil))))
+
+
+            (let [^string name (zero string)
+                ^{:line 1538 :tag string} depName (zero string)
+                ^{:line 1539 :tag (slice string)} deps (zero (slice string))
+                ^{:line 1540} j (+ i (conv int aux))]
+              (for [c 0] (< c (conv int cnt)) (inc! c)
+                (when (> (+ j 8) (len d))
+                  (break))
+
+                (let [vname (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d j (+ j 4)))
+                    ^{:line 1546} vnext (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ j 4) (+ j 8)))]
+                  (set! (values depName _) (getString str (conv int vname)))
+
+                  (if (== c 0)
+                    (set! name depName)
+
+                    (set! deps (append deps depName)))
+
+
+                  (when (== vnext 0)
+                    (break))
+
+                  (set! j + (conv int vnext))))
+
+
+              (set! dynVers (append dynVers ^{:go/breaks [2 4 6 8]} (lit DynamicVersion
+                    :Name name
+                    :Index ndx
+                    :Flags flags
+                    :Deps deps)))
+
+
+              (when (== next 0)
+                (break))
+
+              (set! i + (conv int next))))))
+
+
+      (set! (.-dynVers f) dynVers)
+
+      nil)))
+
+
+
+^{:go/end 1596} (go/method DynamicVersions "DynamicVersions returns version information for a dynamic object.\n" [^{:tag (* File)} f] :results [(slice DynamicVersion) error]
+  (when (== (.-dynVers f) nil)
+    (let [(values _ str err) (.getSymbols f SHT_DYNSYM)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [(values hasVersions ^:assign err) (.gnuVersionInit f str)]
+        (when (!= err nil)
+          (return nil err))
+
+        (when (not hasVersions)
+          (return nil (errors/New "DynamicVersions: missing version table"))))))
+
+
+
+  (return (.-dynVers f) nil))
+
+
+
+^{:go/end 1666} (go/method dynamicVersionNeeds "dynamicVersionNeeds returns version dependencies for a dynamic object.\n" ^error [^{:tag (* File)} f ^{:tag (slice byte)} str]
+  (when (!= (.-dynVerNeeds f) nil)
+    ;; Already initialized.
+    (return nil))
+
+
+  ;; Accumulate verneed information.
+  (let [vn (.SectionByType f SHT_GNU_VERNEED)]
+    (when (== vn nil)
+      (return nil))
+
+    ^{:go/breaks [[4 1665]]} (let [(values d _) (.Data vn)
+
+        ^{:line 1612 :tag (slice DynamicVersionNeed)} dynVerNeeds (zero (slice DynamicVersionNeed))
+        ^{:line 1613} i 0]
+      (while true
+        (when (> (+ i 16) (len d))
+          (break))
+
+        (let [vers (.Uint16 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d i (+ i 2)))]
+          (when (!= vers 1)
+            (return (addr (lit FormatError (conv int64 (+ ^{:go/via [SectionHeader]} (.-Offset vn) (conv uint64 i))) "unexpected dynamic need version" vers))))
+
+          (let [cnt (.Uint16 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ i 2) (+ i 4)))
+              ^{:line 1623} fileoff (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ i 4) (+ i 8)))
+              ^{:line 1624} aux (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ i 8) (+ i 12)))
+              ^{:line 1625} next (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ i 12) (+ i 16)))
+              (values file _) (getString str (conv int fileoff))
+
+              ^{:line 1628 :tag (slice DynamicVersionDep)} deps (zero (slice DynamicVersionDep))
+              ^{:line 1629} j (+ i (conv int aux))]
+            (for [c 0] (< c (conv int cnt)) (inc! c)
+              (when (> (+ j 16) (len d))
+                (break))
+
+              (let [flags (conv DynamicVersionFlag (.Uint16 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ j 4) (+ j 6))))
+                  ^{:line 1635} index (.Uint16 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ j 6) (+ j 8)))
+                  ^{:line 1636} nameoff (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ j 8) (+ j 12)))
+                  ^{:line 1637} next (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d (+ j 12) (+ j 16)))
+                  (values depName _) (getString str (conv int nameoff))]
+
+                (set! deps (append deps ^{:go/breaks [2 4 6]} (lit DynamicVersionDep
+                      :Flags flags
+                      :Index index
+                      :Dep depName)))
+
+
+                (when (== next 0)
+                  (break))
+
+                (set! j + (conv int next))))
+
+
+            (set! dynVerNeeds (append dynVerNeeds ^{:go/breaks [2 4]} (lit DynamicVersionNeed
+                  :Name file
+                  :Needs deps)))
+
+
+            (when (== next 0)
+              (break))
+
+            (set! i + (conv int next)))))
+
+
+      (set! (.-dynVerNeeds f) dynVerNeeds)
+
+      nil)))
+
+
+
+^{:go/end 1685} (go/method DynamicVersionNeeds "DynamicVersionNeeds returns version dependencies for a dynamic object.\n" [^{:tag (* File)} f] :results [(slice DynamicVersionNeed) error]
+  (when (== (.-dynVerNeeds f) nil)
+    (let [(values _ str err) (.getSymbols f SHT_DYNSYM)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [(values hasVersions ^:assign err) (.gnuVersionInit f str)]
+        (when (!= err nil)
+          (return nil err))
+
+        (when (not hasVersions)
+          (return nil (errors/New "DynamicVersionNeeds: missing version table"))))))
+
+
+
+  (return (.-dynVerNeeds f) nil))
+
+
+
+
+
+^{:go/end 1706} (go/method gnuVersionInit "gnuVersionInit parses the GNU version tables\nfor use by calls to gnuVersion.\nIt reports whether any version tables were found.\n" [^{:tag (* File)} f ^{:tag (slice byte)} str] :results [bool error]
+  ;; Versym parallels symbol table, indexing into verneed.
+  (let [vs (.SectionByType f SHT_GNU_VERSYM)]
+    (when (== vs nil)
+      (return false nil))
+
+    (let [(values d _) (.Data vs)]
+
+      (set! (.-gnuVersym f) d)
+      (when [err (.dynamicVersions f str)] (!= err nil)
+        (return false err))
+
+      (when [err (.dynamicVersionNeeds f str)] (!= err nil)
+        (return false err))
+
+      (return true nil))))
+
+
+
+
+^{:go/end 1742} (go/method gnuVersion "gnuVersion adds Library and Version information to sym,\nwhich came from offset i of the symbol table.\n" [^{:tag (* File)} f ^int i] :results [^bool hasVersion ^VersionIndex versionIndex ^string version ^string library]
+  ;; Each entry is two bytes; skip undef entry at beginning.
+  (set! i (* (+ i 1) 2))
+  (when (>= i (len (.-gnuVersym f)))
+    (return false 0 "" ""))
+
+  (let [s (subslice (.-gnuVersym f) i)]
+    (when (< (len s) 2)
+      (return false 0 "" ""))
+
+    (let [vi (conv VersionIndex (.Uint16 ^{:go/via [FileHeader]} (.-ByteOrder f) s))
+        ^{:line 1721} ndx (.Index vi)]
+
+      (when (or (== ndx 0) (== ndx 1))
+        (return true vi "" ""))
+
+
+      (range [_ v (.-dynVerNeeds f)]
+        (range [_ n (.-Needs v)]
+          (when (== ndx (.-Index n))
+            (return true vi (.-Dep n) (.-Name v)))))
+
+
+
+
+      (range [_ v (.-dynVers f)]
+        (when (== ndx (.-Index v))
+          (return true vi (.-Name v) "")))
+
+
+
+      (return false 0 "" ""))))
+
+
+
+
+
+^{:go/end 1749} (go/method ImportedLibraries "ImportedLibraries returns the names of all libraries\nreferred to by the binary f that are expected to be\nlinked with the binary at dynamic link time.\n" [^{:tag (* File)} f] :results [(slice string) error]
+  (.DynString f DT_NEEDED))
+
+
+
+
+
+
+
+^{:go/end 1806} (go/method DynString "DynString returns the strings listed for the given tag in the file's dynamic\nsection.\n\nThe tag must be one that takes string values: [DT_NEEDED], [DT_SONAME], [DT_RPATH], or\n[DT_RUNPATH].\n" [^{:tag (* File)} f ^DynTag tag] :results [(slice string) error]
+  (switch tag
+    (case [DT_NEEDED DT_SONAME DT_RPATH DT_RUNPATH])
+    (default
+      (return nil (fmt/Errorf "non-string-valued tag %v" tag))))
+
+  (let [ds (.SectionByType f SHT_DYNAMIC)]
+    (when (== ds nil)
+      ;; not dynamic, so no libraries
+      (return nil nil))
+
+    (let [(values d err) (.Data ds)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (let [dynSize 8]
+        (when (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS64)
+          (set! dynSize 16))
+
+        (when (!= (% (len d) dynSize) 0)
+          (return nil (errors/New "length of dynamic section is not a multiple of dynamic entry size")))
+
+
+        (let [(values str ^:assign err) (.stringTable f ^{:go/via [SectionHeader]} (.-Link ds))]
+          (when (!= err nil)
+            (return nil err))
+
+          (let [^{:tag (slice string)} all (zero (slice string))]
+            (while (> (len d) 0)
+              (let [^DynTag t (zero DynTag)
+                  ^{:line 1787 :tag uint64} v (zero uint64)]
+                (switch ^{:go/via [FileHeader]} (.-Class f)
+                  (case [ELFCLASS32]
+                    (set! t (conv DynTag (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d 0 4))))
+                    (set! v (conv uint64 (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d 4 8))))
+                    (set! d (subslice d 8)))
+                  (case [ELFCLASS64]
+                    (set! t (conv DynTag (.Uint64 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d 0 8))))
+                    (set! v (.Uint64 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d 8 16)))
+                    (set! d (subslice d 16))))
+
+                (when (== t tag)
+                  (let [(values s ok) (getString str (conv int v))]
+                    (when ok
+                      (set! all (append all s)))))))
+
+
+
+            (return all nil)))))))
+
+
+
+
+^{:go/end 1848} (go/method DynValue "DynValue returns the values listed for the given tag in the file's dynamic\nsection.\n" [^{:tag (* File)} f ^DynTag tag] :results [(slice uint64) error]
+  (let [ds (.SectionByType f SHT_DYNAMIC)]
+    (when (== ds nil)
+      (return nil nil))
+
+    (let [(values d err) (.Data ds)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (let [dynSize 8]
+        (when (== ^{:go/via [FileHeader]} (.-Class f) ELFCLASS64)
+          (set! dynSize 16))
+
+        (when (!= (% (len d) dynSize) 0)
+          (return nil (errors/New "length of dynamic section is not a multiple of dynamic entry size")))
+
+
+        ;; Parse the .dynamic section as a string of bytes.
+        (let [^{:tag (slice uint64)} vals (zero (slice uint64))]
+          (while (> (len d) 0)
+            (let [^DynTag t (zero DynTag)
+                ^{:line 1832 :tag uint64} v (zero uint64)]
+              (switch ^{:go/via [FileHeader]} (.-Class f)
+                (case [ELFCLASS32]
+                  (set! t (conv DynTag (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d 0 4))))
+                  (set! v (conv uint64 (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d 4 8))))
+                  (set! d (subslice d 8)))
+                (case [ELFCLASS64]
+                  (set! t (conv DynTag (.Uint64 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d 0 8))))
+                  (set! v (.Uint64 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice d 8 16)))
+                  (set! d (subslice d 16))))
+
+              (when (== t tag)
+                (set! vals (append vals v)))))
+
+
+          (return vals nil))))))
+
+
+(go/type nobitsSectionReader (struct))
+
+^{:go/end 1854} (go/method ReadAt [(* nobitsSectionReader) ^{:tag (slice byte)} p ^int64 off] :results [^int n ^error err]
+  (return 0 (errors/New "unexpected read from SHT_NOBITS section")))
+
+
+
+
+
+
+
+
+
+^{:go/end 1889} (go/func putUint "putUint writes a relocation to slice\nat offset start of length length (4 or 8 bytes),\nadding sym+addend to the existing value if readUint is true,\nor just writing sym+addend if readUint is false.\nIf the write would extend beyond the end of slice, putUint does nothing.\nIf the addend is negative, putUint does nothing.\nIf the addition would overflow, putUint does nothing.\n" [^binary/ByteOrder byteOrder ^{:tag (slice byte)} slice ^uint64 start ^uint64 length ^uint64 sym ^int64 addend ^bool readUint]
+  (when (or (> (+ start length) (conv uint64 (len slice))) (< (- math/MaxUint64 start) length))
+    (return))
+
+  (when (< addend 0)
+    (return))
+
+
+  (let [s (subslice slice start (+ start length))]
+
+    (switch length
+      (case [4]
+        (let [ae (conv uint32 addend)]
+          (when readUint
+            (set! ae + (.Uint32 byteOrder s)))
+
+          (.PutUint32 byteOrder s (+ (conv uint32 sym) ae))))
+      (case [8]
+        (let [ae (conv uint64 addend)]
+          (when readUint
+            (set! ae + (.Uint64 byteOrder s)))
+
+          (.PutUint64 byteOrder s (+ sym ae))))
+      (default
+        (panic "can't happen")))))

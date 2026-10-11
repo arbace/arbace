@@ -1,0 +1,522 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package hpack implements HPACK, a compression format for
+;; efficiently representing HTTP header fields in the context of HTTP/2.
+;;
+;; See http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-09
+(in-ns 'go.vendor.golang_org.x.net.http2.hpack) (go/file "hpack.go" :doc "Package hpack implements HPACK, a compression format for\nefficiently representing HTTP header fields in the context of HTTP/2.\n\nSee http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-09\n" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [fmt "fmt"]])
+
+
+
+(go/type DecodingError "A DecodingError is something the spec defines as a decoding error.\n" (struct
+    ^{:line 19 :tag error} Err))
+
+
+^{:go/end 24} (go/method Error ^string [^DecodingError de]
+  (fmt/Sprintf "decoding error: %v" (.-Err de)))
+
+
+
+
+(go/type InvalidIndexError "An InvalidIndexError is returned when an encoder references a table\nentry before the static table or after the end of the dynamic table.\n" int)
+
+^{:go/end 32} (go/method Error ^string [^InvalidIndexError e]
+  (fmt/Sprintf "invalid indexed representation index %d" (conv int e)))
+
+
+
+
+(go/type HeaderField "A HeaderField is a name-value pair. Both the name and value are\ntreated as opaque sequences of octets.\n" (struct
+    ^{:line 37 :tag string} Name ^string Value
+
+
+
+    ^{:line 41 :tag bool :doc "Sensitive means that this header field should never be\nindexed.\n"} Sensitive))
+
+
+
+
+
+
+^{:go/end 50} (go/method IsPseudo "IsPseudo reports whether the header field is an http2 pseudo header.\nThat is, it reports whether it starts with a colon.\nIt is not otherwise guaranteed to be a valid pseudo header field,\nthough.\n" ^bool [^HeaderField hf]
+  (and (!= (len (.-Name hf)) 0) (== (aget (.-Name hf) 0) \:)))
+
+
+^{:go/end 58} (go/method String ^string [^HeaderField hf]
+  (let [^string suffix (zero string)]
+    (when (.-Sensitive hf)
+      (set! suffix " (sensitive)"))
+
+    (fmt/Sprintf "header field %q = %q%s" (.-Name hf) (.-Value hf) suffix)))
+
+
+
+^{:go/end 75} (go/method Size "Size returns the size of an entry per RFC 7541 section 4.1.\n" ^uint32 [^HeaderField hf]
+  ;; https://httpwg.org/specs/rfc7541.html#rfc.section.4.1
+  ;; "The size of the dynamic table is the sum of the size of
+  ;; its entries. The size of an entry is the sum of its name's
+  ;; length in octets (as defined in Section 5.2), its value's
+  ;; length in octets (see Section 5.2), plus 32.  The size of
+  ;; an entry is calculated using the length of the name and
+  ;; value without any Huffman encoding applied."
+
+  ;; This can overflow if somebody makes a large HeaderField
+  ;; Name and/or Value by hand, but we don't care, because that
+  ;; won't happen on the wire because the encoding doesn't allow
+  ;; it.
+  (conv uint32 (+ (len (.-Name hf)) (len (.-Value hf)) 32)))
+
+
+
+
+(go/type Decoder "A Decoder is the decoding context for incremental processing of\nheader blocks.\n" (struct
+    ^{:line 80 :tag dynamicTable} dynTab
+    ^{:line 81 :tag (func [^HeaderField f])} emit
+
+    ^{:line 83 :tag bool} emitEnabled ; whether calls to emit are enabled
+    ^{:line 84 :tag int} maxStrLen ; 0 means unlimited
+
+
+
+
+
+    ^{:line 90 :tag (slice byte) :doc "buf is the unparsed buffer. It's only written to\nsaveBuf if it was truncated in the middle of a header\nblock. Because it's usually not owned, we can only\nprocess it under Write.\n"} buf ; not owned; only valid during Write
+
+
+
+    ^{:line 94 :tag bytes/Buffer :doc "saveBuf is previous data passed to Write which we weren't able\nto fully parse before. Unlike buf, we own this data.\n"} saveBuf
+
+    ^{:line 96 :tag bool} firstField)) ; processing the first field of the header block
+
+
+
+
+
+^{:go/end 112} (go/func NewDecoder "NewDecoder returns a new decoder with the provided maximum dynamic\ntable size. The emitFunc will be called for each valid field\nparsed, in the same goroutine as calls to Write, before Write returns.\n" ^{:tag (* Decoder)} [^uint32 maxDynamicTableSize ^{:tag (func [^HeaderField f])} emitFunc]
+  (let [d (addr ^{:go/breaks [2 4 6]} (lit Decoder
+          :emit emitFunc
+          :emitEnabled true
+          :firstField true))]
+
+    (.init (.-table (.-dynTab d)))
+    (set! (.-allowedMaxSize (.-dynTab d)) maxDynamicTableSize)
+    (.setMaxSize (.-dynTab d) maxDynamicTableSize)
+    ^{:line 111} d))
+
+
+
+
+(go/var ^{:doc "ErrStringLength is returned by Decoder.Write when the max string length\n(as configured by Decoder.SetMaxStringLength) would be violated.\n"} ErrStringLength (errors/New "hpack: string too long"))
+
+
+
+
+
+^{:go/end 124} (go/method SetMaxStringLength "SetMaxStringLength sets the maximum size of a HeaderField name or\nvalue string. If a string exceeds this length (even after any\ndecompression), Write will return ErrStringLength.\nA value of 0 means unlimited and is the default from NewDecoder.\n" [^{:tag (* Decoder)} d ^int n]
+  (set! (.-maxStrLen d) n))
+
+
+
+
+
+^{:go/end 131} (go/method SetEmitFunc "SetEmitFunc changes the callback used when new header fields\nare decoded.\nIt must be non-nil. It does not affect EmitEnabled.\n" [^{:tag (* Decoder)} d ^{:tag (func [^HeaderField f])} emitFunc]
+  (set! (.-emit d) emitFunc))
+
+
+
+
+
+
+
+
+
+^{:go/end 140} (go/method SetEmitEnabled "SetEmitEnabled controls whether the emitFunc provided to NewDecoder\nshould be called. The default is true.\n\nThis facility exists to let servers enforce MAX_HEADER_LIST_SIZE\nwhile still decoding and keeping in-sync with decoder state, but\nwithout doing unnecessary decompression or generating unnecessary\ngarbage for header fields past the limit.\n" [^{:tag (* Decoder)} d ^bool v] (set! (.-emitEnabled d) v))
+
+
+
+^{:go/end 144} (go/method EmitEnabled "EmitEnabled reports whether calls to the emitFunc provided to NewDecoder\nare currently enabled. The default is true.\n" ^bool [^{:tag (* Decoder)} d] (.-emitEnabled d))
+
+;; TODO: add method *Decoder.Reset(maxSize, emitFunc) to let callers re-use Decoders and their
+;; underlying buffers for garbage reasons.
+
+^{:go/end 151} (go/method SetMaxDynamicTableSize [^{:tag (* Decoder)} d ^uint32 v]
+  (.setMaxSize (.-dynTab d) v))
+
+
+
+
+
+^{:go/end 158} (go/method SetAllowedMaxDynamicTableSize "SetAllowedMaxDynamicTableSize sets the upper bound that the encoded\nstream (via dynamic table size updates) may set the maximum size\nto.\n" [^{:tag (* Decoder)} d ^uint32 v]
+  (set! (.-allowedMaxSize (.-dynTab d)) v))
+
+
+(go/type dynamicTable (struct
+
+    ^{:line 162 :tag headerFieldTable :doc "https://httpwg.org/specs/rfc7541.html#rfc.section.2.3.2\n"} table
+    ^{:line 163 :tag uint32} size ; in bytes
+    ^{:line 164 :tag uint32} maxSize ; current maxSize
+    ^{:line 165 :tag uint32} allowedMaxSize)) ; maxSize may go up to this, inclusive
+
+
+^{:go/end 171} (go/method setMaxSize [^{:tag (* dynamicTable)} dt ^uint32 v]
+  (set! (.-maxSize dt) v)
+  (.evict dt))
+
+
+^{:go/end 177} (go/method add [^{:tag (* dynamicTable)} dt ^HeaderField f]
+  (.addEntry (.-table dt) f)
+  (set! (.-size dt) + (.Size f))
+  (.evict dt))
+
+
+
+^{:go/end 187} (go/method evict "If we're too big, evict old stuff.\n" [^{:tag (* dynamicTable)} dt]
+  (let [^int n (zero int)]
+    (while (and (> (.-size dt) (.-maxSize dt)) (< n (.len (.-table dt))))
+      (set! (.-size dt) - (.Size (aget (.-ents (.-table dt)) n)))
+      (inc! n))
+
+    (.evictOldest (.-table dt) n)))
+
+
+^{:go/end 194} (go/method maxTableIndex ^int [^{:tag (* Decoder)} d]
+  ;; This should never overflow. RFC 7540 Section 6.5.2 limits the size of
+  ;; the dynamic table to 2^32 bytes, where each entry will occupy more than
+  ;; one byte. Further, the staticTable has a fixed, small length.
+  (+ (.len (.-table (.-dynTab d))) (.len staticTable)))
+
+
+^{:go/end 212} (go/method at [^{:tag (* Decoder)} d ^uint64 i] :results [^HeaderField hf ^bool ok]
+  ;; See Section 2.3.3.
+  (when (== i 0)
+    (return))
+
+  (when (<= i (conv uint64 (.len staticTable)))
+    (return (aget (.-ents staticTable) (- i 1)) true))
+
+  (when (> i (conv uint64 (.maxTableIndex d)))
+    (return))
+
+  ;; In the dynamic table, newer entries have lower indices.
+  ;; However, dt.ents[0] is the oldest entry. Hence, dt.ents is
+  ;; the reversed dynamic table.
+  (let [dt (.-table (.-dynTab d))]
+    (return (aget (.-ents dt) (- (.len dt) (- (conv int i) (.len staticTable)))) true)))
+
+
+
+
+
+
+^{:go/end 230} (go/method DecodeFull "DecodeFull decodes an entire block.\n\nTODO: remove this method and make it incremental later? This is\neasier for debugging now.\n" [^{:tag (* Decoder)} d ^{:tag (slice byte)} p] :results [(slice HeaderField) error]
+  (let [^{:tag (slice HeaderField)} hf (zero (slice HeaderField))
+      ^{:line 220} saveFunc (.-emit d)]
+    (defer (^{:go/end 221} (fn [] (set! (.-emit d) saveFunc))))
+    (set! (.-emit d) ^{:go/end 222} (fn [^HeaderField f] (set! hf (append hf f))))
+    (when [(values _ err) (.Write d p)] (!= err nil)
+      (return nil err))
+
+    (when [err (.Close d)] (!= err nil)
+      (return nil err))
+
+    (return hf nil)))
+
+
+
+
+
+^{:go/breaks [6] :go/end 242} (go/method Close "Close declares that the decoding is complete and resets the Decoder\nto be reused again for a new header block. If there is any remaining\ndata in the decoder's buffer, Close returns an error.\n" ^error [^{:tag (* Decoder)} d]
+  (when (> (.Len (.-saveBuf d)) 0)
+    (.Reset (.-saveBuf d))
+    (return (lit DecodingError (errors/New "truncated headers"))))
+
+  (set! (.-firstField d) true)
+  nil)
+
+
+^{:go/end 282} (go/method Write [^{:tag (* Decoder)} d ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (== (len p) 0)
+    ;; Prevent state machine CPU attacks (making us redo
+    ;; work up to the point of finding out we don't have
+    ;; enough data)
+    (return))
+
+  ;; Only copy the data if we have to. Optimistically assume
+  ;; that p will contain a complete header block.
+  (if (== (.Len (.-saveBuf d)) 0)
+    (set! (.-buf d) p)
+    (do
+      (.Write (.-saveBuf d) p)
+      (set! (.-buf d) (.Bytes (.-saveBuf d)))
+      (.Reset (.-saveBuf d))))
+
+
+  (while (> (len (.-buf d)) 0)
+    (set! err (.parseHeaderFieldRepr d))
+    (when (== err errNeedMore)
+      ;; Extra paranoia, making sure saveBuf won't
+      ;; get too large. All the varint and string
+      ;; reading code earlier should already catch
+      ;; overlong things and return ErrStringLength,
+      ;; but keep this as a last resort.
+      (let [^:const ^{:val 8} varIntOverhead 8] ; conservative
+        (when (and (!= (.-maxStrLen d) 0) (> (conv int64 (len (.-buf d))) (* 2 (+ (conv int64 (.-maxStrLen d)) varIntOverhead))))
+          (return 0 ErrStringLength))
+
+        (.Write (.-saveBuf d) (.-buf d))
+        (return (len p) nil)))
+
+    (set! (.-firstField d) false)
+    (when (!= err nil)
+      (break)))
+
+
+  (return (len p) err))
+
+
+
+
+
+(go/var ^{:doc "errNeedMore is an internal sentinel error value that means the\nbuffer is truncated and we need to read more data before we can\ncontinue parsing.\n"} errNeedMore (errors/New "need more data"))
+
+(go/type indexType int)
+
+(go/const
+  ^{:line 292} [^{:tag indexType :val 0} indexedTrue iota]
+  ^{:line 293} [^{:val 1} indexedFalse]
+  ^{:line 294} [^{:val 2} indexedNever])
+
+
+^{:go/end 297} (go/method indexed ^bool [^indexType v] (== v indexedTrue))
+^{:go/end 298} (go/method sensitive ^bool [^indexType v] (== v indexedNever))
+
+
+
+
+
+^{:go/end 335} (go/method parseHeaderFieldRepr "returns errNeedMore if there isn't enough data available.\nany other error is fatal.\nconsumes d.buf iff it returns nil.\nprecondition: must be called with len(d.buf) > 0\n" ^error [^{:tag (* Decoder)} d]
+  (let [b (aget (.-buf d) 0)]
+    (switch
+      (case [(!= (bit-and b 128) 0)]
+        ;; Indexed representation.
+        ;; High bit set?
+        ;; https://httpwg.org/specs/rfc7541.html#rfc.section.6.1
+        (return (.parseFieldIndexed d)))
+      (case [(== (bit-and b 192) 64)]
+        ;; 6.2.1 Literal Header Field with Incremental Indexing
+        ;; 0b10xxxxxx: top two bits are 10
+        ;; https://httpwg.org/specs/rfc7541.html#rfc.section.6.2.1
+        (return (.parseFieldLiteral d 6 indexedTrue)))
+      (case [(== (bit-and b 240) 0)]
+        ;; 6.2.2 Literal Header Field without Indexing
+        ;; 0b0000xxxx: top four bits are 0000
+        ;; https://httpwg.org/specs/rfc7541.html#rfc.section.6.2.2
+        (return (.parseFieldLiteral d 4 indexedFalse)))
+      (case [(== (bit-and b 240) 16)]
+        ;; 6.2.3 Literal Header Field never Indexed
+        ;; 0b0001xxxx: top four bits are 0001
+        ;; https://httpwg.org/specs/rfc7541.html#rfc.section.6.2.3
+        (return (.parseFieldLiteral d 4 indexedNever)))
+      (case [(== (bit-and b 224) 32)]
+        ;; 6.3 Dynamic Table Size Update
+        ;; Top three bits are '001'.
+        ;; https://httpwg.org/specs/rfc7541.html#rfc.section.6.3
+        (return (.parseDynamicTableSizeUpdate d))))
+
+
+    (lit DecodingError (errors/New "invalid encoding"))))
+
+
+
+^{:go/end 350} (go/method parseFieldIndexed "(same invariants and behavior as parseHeaderFieldRepr)\n" ^error [^{:tag (* Decoder)} d]
+  (let [buf (.-buf d)
+      (values idx ^:assign buf err) (readVarInt 7 buf)]
+    (when (!= err nil)
+      (return err))
+
+    (let [(values hf ok) (.at d idx)]
+      (when (not ok)
+        (return (lit DecodingError (conv InvalidIndexError idx))))
+
+      (set! (.-buf d) buf)
+      (.callEmit d (lit HeaderField :Name (.-Name hf) :Value (.-Value hf))))))
+
+
+
+^{:go/end 397} (go/method parseFieldLiteral "(same invariants and behavior as parseHeaderFieldRepr)\n" ^error [^{:tag (* Decoder)} d ^uint8 n ^indexType it]
+  (let [buf (.-buf d)
+      (values nameIdx ^:assign buf err) (readVarInt n buf)]
+    (when (!= err nil)
+      (return err))
+
+
+    (let [^HeaderField hf (zero HeaderField)
+        ^{:line 361} wantStr (or (.-emitEnabled d) (.indexed it))
+        ^{:line 362 :tag undecodedString} undecodedName (zero undecodedString)]
+      (if (> nameIdx 0)
+        (let [(values ihf ok) (.at d nameIdx)]
+          (when (not ok)
+            (return (lit DecodingError (conv InvalidIndexError nameIdx))))
+
+          (set! (.-Name hf) (.-Name ihf)))
+        (do
+          (set! (values undecodedName buf err) (.readString d buf))
+          (when (!= err nil)
+            (return err))))
+
+
+      (let [(values undecodedValue ^:assign buf ^:assign err) (.readString d buf)]
+        (when (!= err nil)
+          (return err))
+
+        (when wantStr
+          (when (<= nameIdx 0)
+            (set! (values (.-Name hf) err) (.decodeString d undecodedName))
+            (when (!= err nil)
+              (return err)))
+
+
+          (set! (values (.-Value hf) err) (.decodeString d undecodedValue))
+          (when (!= err nil)
+            (return err)))
+
+
+        (set! (.-buf d) buf)
+        (when (.indexed it)
+          (.add (.-dynTab d) hf))
+
+        (set! (.-Sensitive hf) (.sensitive it))
+        (.callEmit d hf)))))
+
+
+^{:go/breaks [[5 408]] :go/end 409} (go/method callEmit ^error [^{:tag (* Decoder)} d ^HeaderField hf]
+  (when (!= (.-maxStrLen d) 0)
+    (when (or (> (len (.-Name hf)) (.-maxStrLen d)) (> (len (.-Value hf)) (.-maxStrLen d)))
+      (return ErrStringLength)))
+
+
+  (when (.-emitEnabled d)
+    ((.-emit d) hf))
+
+  nil)
+
+
+
+^{:go/end 430} (go/method parseDynamicTableSizeUpdate "(same invariants and behavior as parseHeaderFieldRepr)\n" ^error [^{:tag (* Decoder)} d]
+  ;; RFC 7541, sec 4.2: This dynamic table size update MUST occur at the
+  ;; beginning of the first header block following the change to the dynamic table size.
+  (when (and (not (.-firstField d)) (> (.-size (.-dynTab d)) 0))
+    (return (lit DecodingError (errors/New "dynamic table size update MUST occur at the beginning of a header block"))))
+
+
+  ^{:go/breaks [6]} (let [buf (.-buf d)
+      (values size ^:assign buf err) (readVarInt 5 buf)]
+    (when (!= err nil)
+      (return err))
+
+    (when (> size (conv uint64 (.-allowedMaxSize (.-dynTab d))))
+      (return (lit DecodingError (errors/New "dynamic table size update too large"))))
+
+    (.setMaxSize (.-dynTab d) (conv uint32 size))
+    (set! (.-buf d) buf)
+    nil))
+
+
+(go/var errVarintOverflow (lit DecodingError (errors/New "varint integer overflow")))
+
+
+
+
+
+
+
+
+
+^{:go/end 473} (go/func readVarInt "readVarInt reads an unsigned variable length integer off the\nbeginning of p. n is the parameter as described in\nhttps://httpwg.org/specs/rfc7541.html#rfc.section.5.1.\n\nn must always be between 1 and 8.\n\nThe returned remain buffer is either a smaller suffix of p, or err != nil.\nThe error is errNeedMore if p doesn't contain a complete integer.\n" [^byte n ^{:tag (slice byte)} p] :results [^uint64 i ^{:tag (slice byte)} remain ^error err]
+  (when (or (< n 1) (> n 8))
+    (panic "bad n"))
+
+  (when (== (len p) 0)
+    (return 0 p errNeedMore))
+
+  (set! i (conv uint64 (aget p 0)))
+  (when (< n 8)
+    (set! i bit-and (- ^uint64 (<< 1 (conv uint64 n)) 1)))
+
+  (when (< i (- ^uint64 (<< 1 (conv uint64 n)) 1))
+    (return i (subslice p 1) nil))
+
+
+  (let [origP p]
+    (set! p (subslice p 1))
+    (let [^uint64 m (zero uint64)]
+      (while (> (len p) 0)
+        (let [b (aget p 0)]
+          (set! p (subslice p 1))
+          (set! i + (<< (conv uint64 (bit-and b 127)) m))
+          (when (== (bit-and b 128) 0)
+            (return i p nil))
+
+          (set! m + 7)
+          (when (>= m 63) ; TODO: proper overflow check. making this up.
+            (return 0 origP errVarintOverflow))))
+
+
+      (return 0 origP errNeedMore))))
+
+
+
+
+
+
+^{:go/end 502} (go/method readString "readString reads an hpack string from p.\n\nIt returns a reference to the encoded string data to permit deferring decode costs\nuntil after the caller verifies all data is present.\n" [^{:tag (* Decoder)} d ^{:tag (slice byte)} p] :results [^undecodedString u ^{:tag (slice byte)} remain ^error err]
+  (when (== (len p) 0)
+    (return u p errNeedMore))
+
+  (let [isHuff (!= (bit-and (aget p 0) 128) 0)
+      (values strLen ^:assign p ^:assign err) (readVarInt 7 p)]
+    (when (!= err nil)
+      (return u p err))
+
+    (when (and (!= (.-maxStrLen d) 0) (> strLen (conv uint64 (.-maxStrLen d))))
+      ;; Returning an error here means Huffman decoding errors
+      ;; for non-indexed strings past the maximum string length
+      ;; are ignored, but the server is returning an error anyway
+      ;; and because the string is not indexed the error will not
+      ;; affect the decoding state.
+      (return u nil ErrStringLength))
+
+    (when (< (conv uint64 (len p)) strLen)
+      (return u p errNeedMore))
+
+    (set! (.-isHuff u) isHuff)
+    (set! (.-b u) (subslice p _ strLen))
+    (return u (subslice p strLen) nil)))
+
+
+(go/type undecodedString (struct
+    ^{:line 505 :tag bool} isHuff
+    ^{:line 506 :tag (slice byte)} b))
+
+
+^{:go/end 523} (go/method decodeString [^{:tag (* Decoder)} d ^undecodedString u] :results [string error]
+  (when (not (.-isHuff u))
+    (return (conv string (.-b u)) nil))
+
+  (let [buf (assert (* bytes/Buffer) (.Get bufPool))]
+    (.Reset buf) ; don't trust others
+    (let [^string s (zero string)
+        ^{:line 516} err (huffmanDecode buf (.-maxStrLen d) (.-b u))]
+      (when (== err nil)
+        (set! s (.String buf)))
+
+      (.Reset buf) ; be nice to GC
+      (.Put bufPool buf)
+      (return s err))))

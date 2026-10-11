@@ -1,0 +1,177 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.aes.gcm) (go/file "ghash.go" :imports [
+
+
+    ^{:line 8} [fips140 "crypto/internal/fips140"]
+    ^{:line 9} [byteorder "crypto/internal/fips140deps/byteorder"]])
+
+
+
+
+
+^{:go/end 20} (go/func GHASH "GHASH is exposed to allow crypto/cipher to implement non-AES GCM modes.\nIt is not allowed as a stand-alone operation in FIPS mode because it\nis not ACVP tested.\n" ^{:tag (slice byte)} [^{:tag (* (array 16 byte))} key & ^{:tag (slice (slice byte))} inputs]
+  (fips140/RecordNonApproved)
+  (let [^{:tag (array gcmBlockSize byte)} out (zero (array gcmBlockSize byte))]
+    (ghash (addr out) key (spread inputs))
+    (subslice out)))
+
+
+
+
+^{:go/end 71} (go/func ghashMul "ghashMul does constant-time carry-less multiplication of two 32-bit integers,\nreturning the 64-bit product.\n" ^uint64 [^uint32 x ^uint32 y]
+  ;; This function implements carryless multiplication using a technique first
+  ;; described by Thomas Pornin in the BearSSL documentation [0]. This
+  ;; technique uses generic integer multiplication, but ignores the carrys by
+  ;; masking all but 8 bits of the inputs, creating three bit holes between
+  ;; each unmasked bit. If the multiplications of any of the unmasked bits
+  ;; then cause a carry, the resulting carry bit spills into one of the three
+  ;; bit holes.
+  ;;
+  ;; Each 32-bit input is split into four 32-bit masked values, each
+  ;; containing 8 unmasked bits. The mask is shifted by one bit for each of
+  ;; the four values, such that the four values cover the full 32 bits of the
+  ;; input.
+  ;;
+  ;; In order to compute the bits at position z_k, z_k+4, z_k+8, ..., z_k+60
+  ;; for k = 0, 1, 2, 3, we compute the sum of the products x_i*y_j for all i,
+  ;; j such that i+j = k mod 4.
+  ;;
+  ;; We then mask the sum of each of the four products with the same mask used
+  ;; for the input values, which zeros out any spilled carry bits, and OR the
+  ;; masked values to get the final product.
+  ;;
+  ;; [0] https://www.bearssl.org/constanttime.html#ghash-for-gcm
+
+  (let [(values ^{:tag (array 4 uint32)} xm ^{:tag (array 4 uint32)} ym) (zero (array 4 uint32))
+      ^{:line 49 :tag (array 4 uint64)} z (zero (array 4 uint64))]
+
+    (range [i 4]
+      ;; Mask off the three bit holes in each input, creating four masked
+      ;; values for each input.
+      (aset xm i (bit-and x ^uint32 (<< 0x11111111 i)))
+      (aset ym i (bit-and y ^uint32 (<< 0x11111111 i))))
+
+
+    (range [i 4]
+      ;; Compute the multiplication of x by the circulant matrix of y, using
+      ;; XOR to get carryless addition of the products:
+      ;;
+      ;;  | z[0] |   | ym[0] ym[3] ym[2] ym[1] |   | xm[0] |
+      ;;  | z[1] | = | ym[1] ym[0] ym[3] ym[2] | x | xm[1] |
+      ;;  | z[2] |   | ym[2] ym[1] ym[0] ym[3] |   | xm[2] |
+      ;;  | z[3] |   | ym[3] ym[2] ym[1] ym[0] |   | xm[3] |
+      (aset z i (bit-xor (* (conv uint64 (aget xm 0)) (conv uint64 (aget ym i))) (* (conv uint64 (aget xm 1)) (conv uint64 (aget ym (% (+ i 3) 4)))) (* (conv uint64 (aget xm 2)) (conv uint64 (aget ym (% (+ i 2) 4)))) (* (conv uint64 (aget xm 3)) (conv uint64 (aget ym (% (+ i 1) 4))))))
+      (set! (aget z i) bit-and ^uint64 (<< 0x1111111111111111 i)))
+
+
+    (bit-or (aget z 0) (aget z 1) (aget z 2) (aget z 3))))
+
+
+^{:go/end 179} (go/func ghash [^{:tag (* (array gcmBlockSize byte))} out ^{:tag (* (array gcmBlockSize byte))} H & ^{:tag (slice (slice byte))} inputs]
+  ;; The GHASH algorithm computes the sum of the products of two 128 bit
+  ;; integers Y and H (the input block and the key, respectively) in the field
+  ;; GF(2^128), modulo the field polynomial.
+  ;;
+  ;; We use the Karatsuba algorithm to decompose the 128-bit multiplication
+  ;; into three 64-bit multiplications, which we further decompose into 9
+  ;; 32-bit multiplications with 64-bit products.
+
+  ;; Make sure out is zeroed before we use it.
+  (clear (subslice out))
+
+  (let [(values ^{:tag (array 4 uint32)} y ^{:tag (array 4 uint32)} h) (zero (array 4 uint32))]
+    (range [i 4]
+      (aset h (- 3 i) (byteorder/BEUint32 (subslice H (* i 4) (+ (* i 4) 4)))))
+
+
+    (let [blockIterator ^{:go/end 106} (fn [^{:tag (func [(slice byte)] [bool])} yield]
+          (range [_ input inputs]
+            (while (>= (len input) 16)
+              (when (not (yield (subslice input _ 16)))
+                (return))
+
+              (set! input (subslice input 16)))
+
+            (when (> (len input) 0)
+              (let [^{:tag (array gcmBlockSize byte)} partialBlock (zero (array gcmBlockSize byte))]
+                (copy (subslice partialBlock) input)
+                (when (not (yield (subslice partialBlock)))
+                  (return))))))]
+
+
+
+
+
+      ;; Compute the GHASH of the inputs by iterating over 16-byte blocks of the
+      ;; inputs, XORing each block into the current state, and multiplying the
+      ;; result by the key.
+      (range [block blockIterator]
+        (range [i 4]
+          (set! (aget y (- 3 i)) bit-xor (byteorder/BEUint32 (subslice block (* i 4) (+ (* i 4) 4)))))
+
+
+        ;; Split y*h into nine products:
+        ;;
+        ;;  zLo = y0*h0, y2*h2, (y0^y2) * (h0^h2)
+        ;;  zHi = y1*h1, y3*h3, (y1^y3) * (h1^h3)
+        ;;  zSum = (y0^y1) * (h0^h1), (y2^y3) * (h2^h3), ((y0^y2) ^ (y1^y3)) * ((h0^h2) ^ (h1^h3))
+        (let [(values ^{:tag (array 3 uint64)} zLo ^{:tag (array 3 uint64)} zHi ^{:tag (array 3 uint64)} zSum) (zero (array 3 uint64))]
+
+          (aset zLo 0 (ghashMul (aget y 0) (aget h 0)))
+          (aset zHi 0 (ghashMul (aget y 1) (aget h 1)))
+          (aset zSum 0 (ghashMul (bit-xor (aget y 0) (aget y 1)) (bit-xor (aget h 0) (aget h 1))))
+
+          (aset zLo 1 (ghashMul (aget y 2) (aget h 2)))
+          (aset zHi 1 (ghashMul (aget y 3) (aget h 3)))
+          (aset zSum 1 (ghashMul (bit-xor (aget y 2) (aget y 3)) (bit-xor (aget h 2) (aget h 3))))
+
+          (aset zLo 2 (ghashMul (bit-xor (aget y 0) (aget y 2)) (bit-xor (aget h 0) (aget h 2))))
+          (aset zHi 2 (ghashMul (bit-xor (aget y 1) (aget y 3)) (bit-xor (aget h 1) (aget h 3))))
+          (aset zSum 2 (ghashMul (bit-xor (aget y 0) (aget y 2) (bit-xor (aget y 1) (aget y 3))) (bit-xor (aget h 0) (aget h 2) (bit-xor (aget h 1) (aget h 3)))))
+
+          ;; Reconstruct the 128-bit terms zLo, zHi, and zSum from their constituent 64-bit products
+          (let [^{:tag (array 3 (array 2 uint64))} result (zero (array 3 (array 2 uint64)))]
+            (range [i 3]
+              (let [mid (bit-xor (aget zSum i) (aget zLo i) (aget zHi i))]
+                ;; Add the lower 32 bits of the middle term to the low term
+                (aset (aget result i) 0 (bit-xor (aget zLo i) (<< mid 32)))
+                ;; Add the upper 32 bits of the middle term to the high term
+                (aset (aget result i) 1 (bit-xor (aget zHi i) (>> mid 32)))))
+
+
+            ;; Compute the middle term by adding the high and low terms to the sum term
+            (set! (aget (aget result 2) 0) bit-xor (bit-xor (aget (aget result 0) 0) (aget (aget result 1) 0)))
+            (set! (aget (aget result 2) 1) bit-xor (bit-xor (aget (aget result 0) 1) (aget (aget result 1) 1)))
+
+            ;; Add the lower bits of the middle term to the higher bits of the low term
+            (set! (aget (aget result 0) 1) bit-xor (aget (aget result 2) 0))
+            ;; Add the higher bits of the middle term to the lower bits of the high term
+            (set! (aget (aget result 1) 0) bit-xor (aget (aget result 2) 1))
+
+            ;; Reconstruct the 256-bit product from the low and high terms, shifted
+            ;; by one bit to satisfy the GHASH construction.
+            (let [^{:tag (array 4 uint64)} z (zero (array 4 uint64))]
+              (aset z 0 (<< (aget (aget result 0) 0) 1))
+              (aset z 1 (bit-or (<< (aget (aget result 0) 1) 1) (>> (aget (aget result 0) 0) 63)))
+              (aset z 2 (bit-or (<< (aget (aget result 1) 0) 1) (>> (aget (aget result 0) 1) 63)))
+              (aset z 3 (bit-or (<< (aget (aget result 1) 1) 1) (>> (aget (aget result 1) 0) 63)))
+
+              ;; Reduce the 256-bit product modulo the field polynomial. z0 and z1 contain
+              ;; the high-degree terms (255 to 128), and z2 and z3 contain the low-degree terms (127 to 0).
+              (range [i 2]
+                (let [lw (aget z i)]
+                  ;; Add the remainders of the high-degree terms to the low-degree terms
+                  (set! (aget z (+ i 2)) bit-xor (bit-xor lw (>> lw 1) (>> lw 2) (>> lw 7)))
+                  ;; Add the carrys from the reduction
+                  (set! (aget z (+ i 1)) bit-xor (bit-xor (<< lw 63) (<< lw 62) (<< lw 57)))))
+
+
+              ;; Write the reduced 128-bit product back into y
+              (set! (values (aget y 0) (aget y 1) (aget y 2) (aget y 3)) (values (conv uint32 (aget z 2)) (conv uint32 (>> (aget z 2) 32)) (conv uint32 (aget z 3)) (conv uint32 (>> (aget z 3) 32))))))))
+
+
+      (range [i 4]
+        (byteorder/BEPutUint32 (subslice out (* i 4) (+ (* i 4) 4)) (aget y (- 3 i)))))))

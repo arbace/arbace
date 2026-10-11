@@ -1,0 +1,671 @@
+;; NXP Ultra Secured Digital Host Controller (uSDHC) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; IP: https://www.mobiveil.com/esdhc/
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package usdhc implements a driver for the Freescale Enhanced Secure Digital
+;; Host Controller (eSDHC) interface, also known as NXP Ultra Secured Digital
+;; Host Controller (uSDHC).
+;;
+;; The following specifications are adopted:
+;;   - IMX6ULLRM  - i.MX 6ULL Applications Processor Reference Manual                - Rev 1      2017/11
+;;   - IMX6FG     - i.MX 6 Series Firmware Guide                                     - Rev 0      2012/11
+;;   - SD-PL-7.10 - SD Specifications Part 1 Physical Layer Simplified Specification - 7.10       2020/03/25
+;;   - JESD84-B51 - Embedded Multi-Media Card (e•MMC) Electrical Standard (5.1)      - JESD84-B51 2015/02
+;;
+;; The driver currently supports interfacing with SD/MMC cards up to High Speed
+;; mode and Dual Data Rate.
+;;
+;; Higher speed modes for eMMC cards are HS200 (controller supported and driver
+;; supported) and HS400 mode (unsupported at controller level) [p35, Table 4,
+;; JESD84-B51].
+;;
+;; Higher speed modes for SD cards are SDR50/SDR104 (controller and driver
+;; supported), DDR50 (controller supported, unimplemented in this driver) and
+;; UHS-II modes (unsupported at controller level) [p37-38, Figure 3-14 and
+;; 3-15, SD-PL-7.10].
+;;
+;; The highest speed supported by the driver, card and controller is
+;; automatically selected by Detect().
+;;
+;; For eMMC cards, speed mode HS200 requires the target board to have eMMC I/O
+;; signaling to 1.8V, this must be advertised by the board package by defining
+;; LowVoltage() on the relevant USDHC instance.
+;;
+;; For SD cards, speed modes SDR50/SDR104 require the target board to switch SD
+;; I/O signaling to 1.8V, the switching procedure must be implemented by the
+;; board package by defining LowVoltage() on the relevant USDHC instance.
+;;
+;; Note that due to NXP errata ERR010450 the following maximum theoretical
+;; limits apply:
+;;   - eMMC  HS200: 150MB/s - 150MHz (instead of 200MB/s - 200MHz), supported
+;;   - eMMC  DDR52:  90MB/s -  45MHz (instead of 104MB/s -  52MHz), supported
+;;   - SD   SDR104:  75MB/s - 150MHz (instead of 104MB/s - 208MHz), supported
+;;   - SD    DDR50:  45MB/s -  45MHz (instead of  50MB/s -  50MHz), unsupported
+;;
+;; This package is only meant to be used with `GOOS=tamago` as supported by the
+;; TamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.usdhc) (go/file "usdhc.go" :doc "Package usdhc implements a driver for the Freescale Enhanced Secure Digital\nHost Controller (eSDHC) interface, also known as NXP Ultra Secured Digital\nHost Controller (uSDHC).\n\nThe following specifications are adopted:\n  - IMX6ULLRM  - i.MX 6ULL Applications Processor Reference Manual                - Rev 1      2017/11\n  - IMX6FG     - i.MX 6 Series Firmware Guide                                     - Rev 0      2012/11\n  - SD-PL-7.10 - SD Specifications Part 1 Physical Layer Simplified Specification - 7.10       2020/03/25\n  - JESD84-B51 - Embedded Multi-Media Card (e•MMC) Electrical Standard (5.1)      - JESD84-B51 2015/02\n\nThe driver currently supports interfacing with SD/MMC cards up to High Speed\nmode and Dual Data Rate.\n\nHigher speed modes for eMMC cards are HS200 (controller supported and driver\nsupported) and HS400 mode (unsupported at controller level) [p35, Table 4,\nJESD84-B51].\n\nHigher speed modes for SD cards are SDR50/SDR104 (controller and driver\nsupported), DDR50 (controller supported, unimplemented in this driver) and\nUHS-II modes (unsupported at controller level) [p37-38, Figure 3-14 and\n3-15, SD-PL-7.10].\n\nThe highest speed supported by the driver, card and controller is\nautomatically selected by Detect().\n\nFor eMMC cards, speed mode HS200 requires the target board to have eMMC I/O\nsignaling to 1.8V, this must be advertised by the board package by defining\nLowVoltage() on the relevant USDHC instance.\n\nFor SD cards, speed modes SDR50/SDR104 require the target board to switch SD\nI/O signaling to 1.8V, the switching procedure must be implemented by the\nboard package by defining LowVoltage() on the relevant USDHC instance.\n\nNote that due to NXP errata ERR010450 the following maximum theoretical\nlimits apply:\n  - eMMC  HS200: 150MB/s - 150MHz (instead of 200MB/s - 200MHz), supported\n  - eMMC  DDR52:  90MB/s -  45MHz (instead of 104MB/s -  52MHz), supported\n  - SD   SDR104:  75MB/s - 150MHz (instead of 104MB/s - 208MHz), supported\n  - SD    DDR50:  45MB/s -  45MHz (instead of  50MB/s -  50MHz), unsupported\n\nThis package is only meant to be used with `GOOS=tamago` as supported by the\nTamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 56} [errors "errors"]
+    ^{:line 57} [fmt "fmt"]
+    ^{:line 58} [sync "sync"]
+    ^{:line 59} [time "time"]
+
+    ^{:line 61} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 62} [dma "github.com/usbarmory/tamago/dma"]
+    ^{:line 63} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "USDHC registers (p4012, 58.8 uSDHC Memory Map/Register Definition, IMX6ULLRM).\n"
+  ^{:line 68} [^{:val 4} USDHCx_BLK_ATT 0x04]
+  ^{:line 69} [^{:val 16} BLK_ATT_BLKCNT 16]
+  ^{:line 70} [^{:val 0} BLK_ATT_BLKSIZE 0]
+
+  ^{:line 72} [^{:val 8} USDHCx_CMD_ARG 0x08]
+
+  ^{:line 74} [^{:val 12} USDHCx_CMD_XFR_TYP 0x0c]
+  ^{:line 75} [^{:val 24} CMD_XFR_TYP_CMDINX 24]
+  ^{:line 76} [^{:val 22} CMD_XFR_TYP_CMDTYP 22]
+  ^{:line 77} [^{:val 21} CMD_XFR_TYP_DPSEL 21]
+  ^{:line 78} [^{:val 20} CMD_XFR_TYP_CICEN 20]
+  ^{:line 79} [^{:val 19} CMD_XFR_TYP_CCCEN 19]
+  ^{:line 80} [^{:val 16} CMD_XFR_TYP_RSPTYP 16]
+
+  ^{:line 82} [^{:val 16} USDHCx_CMD_RSP0 0x10]
+  ^{:line 83} [^{:val 20} USDHCx_CMD_RSP1 0x14]
+  ^{:line 84} [^{:val 24} USDHCx_CMD_RSP2 0x18]
+  ^{:line 85} [^{:val 28} USDHCx_CMD_RSP3 0x1c]
+
+  ^{:line 87} [^{:val 36} USDHCx_PRES_STATE 0x24]
+  ^{:line 88} [^{:val 24} PRES_STATE_DLSL 24]
+  ^{:line 89} [^{:val 19} PRES_STATE_WPSPL 19]
+  ^{:line 90} [^{:val 11} PRES_STATE_BREN 11]
+  ^{:line 91} [^{:val 3} PRES_STATE_SDSTB 3]
+  ^{:line 92} [^{:val 1} PRES_STATE_CDIHB 1]
+  ^{:line 93} [^{:val 0} PRES_STATE_CIHB 0]
+
+  ^{:line 95} [^{:val 40} USDHCx_PROT_CTRL 0x28]
+  ^{:line 96} [^{:val 8} PROT_CTRL_DMASEL 8]
+  ^{:line 97} [^{:val 4} PROT_CTRL_EMODE 4]
+  ^{:line 98} [^{:val 1} PROT_CTRL_DTW 1]
+
+  ^{:line 100} [^{:val 44} USDHCx_SYS_CTRL 0x2c]
+  ^{:line 101} [^{:val 27} SYS_CTRL_INITA 27]
+  ^{:line 102} [^{:val 26} SYS_CTRL_RSTD 26]
+  ^{:line 103} [^{:val 25} SYS_CTRL_RSTC 25]
+  ^{:line 104} [^{:val 24} SYS_CTRL_RSTA 24]
+  ^{:line 105} [^{:val 16} SYS_CTRL_DTOCV 16]
+  ^{:line 106} [^{:val 8} SYS_CTRL_SDCLKFS 8]
+  ^{:line 107} [^{:val 4} SYS_CTRL_DVS 4]
+
+  ^{:line 109} [^{:val 48} USDHCx_INT_STATUS 0x30]
+  ^{:line 110} [^{:val 28} INT_STATUS_DMAE 28]
+  ^{:line 111} [^{:val 26} INT_STATUS_TNE 26]
+  ^{:line 112} [^{:val 24} INT_STATUS_AC12E 24]
+  ^{:line 113} [^{:val 19} INT_STATUS_CIE 19]
+  ^{:line 114} [^{:val 18} INT_STATUS_CEBE 18]
+  ^{:line 115} [^{:val 17} INT_STATUS_CCE 17]
+  ^{:line 116} [^{:val 16} INT_STATUS_CTOE 16]
+  ^{:line 117} [^{:val 7} INT_STATUS_CRM 7]
+  ^{:line 118} [^{:val 5} INT_STATUS_BRR 5]
+  ^{:line 119} [^{:val 1} INT_STATUS_TC 1]
+  ^{:line 120} [^{:val 0} INT_STATUS_CC 0]
+
+  ^{:line 122} [^{:val 52} USDHCx_INT_STATUS_EN 0x34]
+  ^{:line 123} [^{:val 20} INT_STATUS_EN_DTOESEN 20]
+  ^{:line 124} [^{:val 4} INT_STATUS_EN_BWRSEN 4]
+
+  ^{:line 126} [^{:val 56} USDHCx_INT_SIGNAL_EN 0x38]
+  ^{:line 127} [^{:val 4} INT_SIGNAL_EN_BWRIEN 4]
+
+  ^{:line 129} [^{:val 60} USDHCx_AUTOCMD12_ERR_STATUS 0x3c]
+  ^{:line 130} [^{:val 23} AUTOCMD12_ERR_STATUS_SMP_CLK_SEL 23]
+  ^{:line 131} [^{:val 22} AUTOCMD12_ERR_STATUS_EXE_TUNE 22]
+
+  ^{:line 133} [^{:val 68} USDHCx_WTMK_LVL 0x44]
+  ^{:line 134} [^{:val 16} WTMK_LVL_WR_WML 16]
+  ^{:line 135} [^{:val 0} WTMK_LVL_RD_WML 0]
+
+  ^{:line 137} [^{:val 72} USDHCx_MIX_CTRL 0x48]
+  ^{:line 138} [^{:val 25} MIX_CTRL_FBCLK_SEL 25]
+  ^{:line 139} [^{:val 24} MIX_CTRL_AUTO_TUNE_EN 24]
+  ^{:line 140} [^{:val 23} MIX_CTRL_SMP_CLK_SEL 23]
+  ^{:line 141} [^{:val 22} MIX_CTRL_EXE_TUNE 22]
+  ^{:line 142} [^{:val 5} MIX_CTRL_MSBSEL 5]
+  ^{:line 143} [^{:val 4} MIX_CTRL_DTDSEL 4]
+  ^{:line 144} [^{:val 3} MIX_CTRL_DDR_EN 3]
+  ^{:line 145} [^{:val 2} MIX_CTRL_AC12EN 2]
+  ^{:line 146} [^{:val 1} MIX_CTRL_BCEN 1]
+  ^{:line 147} [^{:val 0} MIX_CTRL_DMAEN 0]
+
+  ^{:line 149} [^{:val 84} USDHCx_ADMA_ERR_STATUS 0x54]
+  ^{:line 150} [^{:val 88} USDHCx_ADMA_SYS_ADDR 0x58]
+
+  ^{:line 152} [^{:val 192} USDHCx_VEND_SPEC 0xc0]
+  ^{:line 153} [^{:val 8} VEND_SPEC_FRC_SDCLK_ON 8]
+  ^{:line 154} [^{:val 1} VEND_SPEC_VSELECT 1]
+
+  ^{:line 156} [^{:val 200} USDHCx_VEND_SPEC2 0xc8]
+  ^{:line 157} [^{:val 5} VEND_SPEC2_TUNING_1bit_EN 5]
+  ^{:line 158} [^{:val 4} VEND_SPEC2_TUNING_8bit_EN 4]
+
+  ^{:line 160} [^{:val 204} USDHCx_TUNING_CTRL 0xcc]
+  ^{:line 161} [^{:val 24} TUNING_CTRL_STD_TUNING_EN 24]
+  ^{:line 162} [^{:val 16} TUNING_CTRL_TUNING_STEP 16]
+  ^{:line 163} [^{:val 0} TUNING_CTRL_TUNING_START_TAP 0])
+
+
+
+
+
+
+
+(go/const "Configuration constants (p348, 35.4.2 Frequency divider configuration,\nIMX6FG) to support the following frequencies:\n  - Identification frequency ≤ 400 KHz\n  - Operating frequency ≤ 25 MHz\n  - High frequency ≤ 50 MHz\n"
+  ;; p346, 35.2 Clocks, IMX6FG.
+  ;;
+  ;; The root clock is derived by default from PLL2 PFD2 (396MHz) with divide
+  ;; by 2, therefore 198MHz.
+
+
+  ^{:line 178} [^{:val 15 :doc "Data Timeout Counter Value: SDCLK x 2** 29\n"} DTOCV 0xf]
+
+
+  ^{:line 181} [^{:val 7 :doc "Divide-by-8\n"} DVS_ID 7]
+
+  ^{:line 183} [^{:val 32 :doc "Root clock divided by 64\n"} SDCLKFS_ID 0x20]
+  ;; Identification frequency: 198 / (8 * 64) == ~400 KHz
+
+
+  ^{:line 187} [^{:val 1 :doc "Divide-by-2\n"} DVS_OP 1]
+
+  ^{:line 189} [^{:val 2 :doc "Root clock divided by 4\n"} SDCLKFS_OP 0x02]
+  ;; Operating frequency: 198 / (2 * 4) == 24.75 MHz
+
+
+  ^{:line 193} [^{:val 1 :doc "PLL2 PFD2 clock divided by 2\n"} ROOTCLK_HS_SDR 1]
+  ;; Root clock frequency: 396 MHz / (1 + 1) = 198 MHz
+
+
+  ^{:line 197} [^{:val 0 :doc "Divide-by-1\n"} DVS_HS 0]
+
+  ^{:line 199} [^{:val 2 :doc "Root clock divided by 4 (Single Data Rate mode)\n"} SDCLKFS_HS_SDR 0x02]
+
+  ^{:line 201} [^{:val 1 :doc "Root clock divided by 4 (Dual Data Rate mode)\n"} SDCLKFS_HS_DDR 0x01])
+;; High Speed frequency: 198 / (1 * 4) == 49.5 MHz
+
+
+
+(go/type CardInfo "CardInfo holds detected card information.\n" (struct
+
+    ^{:line 208 :tag bool :doc "eMMC card\n"} MMC
+
+    ^{:line 210 :tag bool :doc "SD card\n"} SD
+
+    ^{:line 212 :tag bool :doc "High Capacity\n"} HC
+
+    ^{:line 214 :tag bool :doc "High Speed\n"} HS
+
+    ^{:line 216 :tag bool :doc "Dual Data Rate\n"} DDR
+
+    ^{:line 218 :tag int :doc "Maximum throughput (on this controller)\n"} Rate
+
+
+    ^{:line 221 :tag int :doc "Block Size\n"} BlockSize
+
+    ^{:line 223 :tag int :doc "Capacity\n"} Blocks
+
+
+    ^{:line 226 :tag (array 16 byte) :doc "device identification number\n"} CID))
+
+
+
+(go/type USDHC "USDHC represents an SD/MMC controller instance.\n" (struct
+    ^{:line 231} sync/Mutex
+
+
+    ^{:line 234 :tag int :doc "Controller index\n"} Index
+
+    ^{:line 236 :tag uint32 :doc "Base register\n"} Base
+
+    ^{:line 238 :tag uint32 :doc "Clock gate register\n"} CCGR
+
+    ^{:line 240 :tag int :doc "Clock gate\n"} CG
+
+    ^{:line 242 :tag (func [^int index ^uint32 podf ^uint32 clksel] [error]) :doc "Clock setup function\n"} SetClock
+
+
+
+
+
+
+    ^{:line 249 :tag (func [^bool enable] [bool]) :doc "LowVoltage is the board specific function responsible for voltage\nswitching (SD) or low voltage indication (eMMC).\n\nThe return value reflects whether the voltage switch (SD) or\nlow voltage indication (MMC) is successful.\n"} LowVoltage
+
+
+    ^{:line 252 :tag int :doc "bus width\n"} width
+
+    ^{:line 254 :tag uint32 :doc "Relative Card Address\n"} rca
+
+
+    ^{:line 257 :tag uint32 :doc "control registers\n"} blk_att
+    ^{:line 258 :tag uint32} wtmk_lvl
+    ^{:line 259 :tag uint32} cmd_arg
+    ^{:line 260 :tag uint32} cmd_xfr
+    ^{:line 261 :tag uint32} cmd_rsp
+    ^{:line 262 :tag uint32} prot_ctrl
+    ^{:line 263 :tag uint32} sys_ctrl
+    ^{:line 264 :tag uint32} mix_ctrl
+    ^{:line 265 :tag uint32} pres_state
+    ^{:line 266 :tag uint32} int_status
+    ^{:line 267 :tag uint32} int_status_en
+    ^{:line 268 :tag uint32} int_signal_en
+    ^{:line 269 :tag uint32} adma_sys_addr
+    ^{:line 270 :tag uint32} adma_err_status
+    ^{:line 271 :tag uint32} ac12_err_status
+    ^{:line 272 :tag uint32} vend_spec
+    ^{:line 273 :tag uint32} vend_spec2
+    ^{:line 274 :tag uint32} tuning_ctrl
+
+
+    ^{:line 277 :tag CardInfo :doc "detected card properties\n"} card
+
+
+    ^{:line 280 :tag bool :doc "eMMC Replay Protected Memory Block (RPMB) operation\n"} rpmb
+
+    ^{:line 282 :tag bool :doc "eMMC RPMB reliable write request\n"} rel
+
+    ^{:line 284 :tag time/Duration} readTimeout
+    ^{:line 285 :tag time/Duration} writeTimeout))
+
+
+
+
+
+^{:go/end 314} (go/method setFreq "setFreq controls the clock of USDHCx_CLK line by setting\nthe SDCLKFS and DVS fields of USDHCx_SYS_CTRL register\np4035, 58.8.12 System Control (uSDHCx_SYS_CTRL), IMX6ULLRM.\n" [^{:tag (* USDHC)} hw ^int dvs ^int sdclkfs]
+  ;; Prevent possible glitch on the card clock as noted in
+  ;; p4011, 58.7.7 Change Clock Frequency, IMX6ULLRM.
+  (reg/Clear (.-vend_spec hw) VEND_SPEC_FRC_SDCLK_ON)
+
+  (when (and (< dvs 0) (< sdclkfs 0))
+    (return))
+
+
+  ;; Wait for stable clock as noted in
+  ;; p4038, DVS[3:0], IMX6ULLRM.
+  (reg/Wait (.-pres_state hw) PRES_STATE_SDSTB 1 1)
+
+  (let [sys (reg/Read (.-sys_ctrl hw))]
+
+    ;; p348, 35.4.2 Frequency divider configuration, IMX6FG
+    (bits/SetN (addr sys) SYS_CTRL_DVS 0xf (conv uint32 dvs))
+    (bits/SetN (addr sys) SYS_CTRL_SDCLKFS 0xff (conv uint32 sdclkfs))
+
+    (reg/Write (.-sys_ctrl hw) sys)
+    (reg/Wait (.-pres_state hw) PRES_STATE_SDSTB 1 1)
+
+    (reg/SetTo (.-vend_spec hw) VEND_SPEC_FRC_SDCLK_ON (.-SD (.-card hw)))))
+
+
+
+
+
+^{:go/end 357} (go/method executeTuning "executeTuning performs the bus tuning, `cmd` should be set to the relevant\nsend tuning block command index, `blocks` represents the number of tuning\nblocks.\n" ^error [^{:tag (* USDHC)} hw ^uint32 index ^uint32 blocks]
+  (reg/SetN (.-tuning_ctrl hw) TUNING_CTRL_TUNING_STEP 2r111 TUNING_STEP)
+  (reg/SetN (.-tuning_ctrl hw) TUNING_CTRL_TUNING_START_TAP 0xff TUNING_START_TAP)
+  (reg/Set (.-tuning_ctrl hw) TUNING_CTRL_STD_TUNING_EN)
+
+  (reg/Clear (.-ac12_err_status hw) AUTOCMD12_ERR_STATUS_SMP_CLK_SEL)
+  (reg/Set (.-ac12_err_status hw) AUTOCMD12_ERR_STATUS_EXE_TUNE)
+
+  (reg/Set (.-mix_ctrl hw) MIX_CTRL_FBCLK_SEL)
+  (reg/Set (.-mix_ctrl hw) MIX_CTRL_AUTO_TUNE_EN)
+
+  ;; temporarily disable all interrupts other than Buffer Read Ready
+  (defer (reg/Write (.-int_signal_en hw) (reg/Read (.-int_signal_en hw))))
+  (defer (reg/Write (.-int_status_en hw) (reg/Read (.-int_status_en hw))))
+  (reg/Write (.-int_signal_en hw) INT_SIGNAL_EN_BWRIEN)
+  (reg/Write (.-int_status_en hw) INT_STATUS_EN_BWRSEN)
+
+  ;; temporarily lower read timeout for faster tuning
+  (defer (^{:go/end 339} (fn [^time/Duration d]
+        (set! (.-readTimeout hw) d))
+      (.-readTimeout hw)))
+  (set! (.-readTimeout hw) (* 1 time/Millisecond))
+
+  (let [tuning_block (make (slice byte) blocks)]
+
+    (range [TUNING_MAX_LOOP_COUNT]
+      ;; send tuning block command, ignore responses
+      (.transfer hw index READ 0 1 blocks tuning_block)
+
+      (let [ac12_err_status (reg/Read (.-ac12_err_status hw))]
+
+        (when (and (== (bits/GetN (addr ac12_err_status) AUTOCMD12_ERR_STATUS_EXE_TUNE 1) 0)
+            (== (bits/GetN (addr ac12_err_status) AUTOCMD12_ERR_STATUS_SMP_CLK_SEL 1) 1))
+          (return nil))))
+
+
+
+    (errors/New "tuning failed")))
+
+
+
+^{:go/end 362} (go/method Info "Info returns detected card information.\n" ^CardInfo [^{:tag (* USDHC)} hw]
+  (.-card hw))
+
+
+
+^{:go/end 403} (go/method Init "Init initializes the uSDHC controller instance.\n" [^{:tag (* USDHC)} hw ^int width]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (or (== (.-Index hw) 0) (== (.-Base hw) 0) (== (.-SetClock hw) nil) (== (.-CCGR hw) 0))
+    (panic "invalid uSDHC controller instance"))
+
+
+  (set! (.-width hw) width)
+  (set! (.-blk_att hw) (+ (.-Base hw) USDHCx_BLK_ATT))
+  (set! (.-wtmk_lvl hw) (+ (.-Base hw) USDHCx_WTMK_LVL))
+  (set! (.-cmd_arg hw) (+ (.-Base hw) USDHCx_CMD_ARG))
+  (set! (.-cmd_xfr hw) (+ (.-Base hw) USDHCx_CMD_XFR_TYP))
+  (set! (.-cmd_rsp hw) (+ (.-Base hw) USDHCx_CMD_RSP0))
+  (set! (.-prot_ctrl hw) (+ (.-Base hw) USDHCx_PROT_CTRL))
+  (set! (.-sys_ctrl hw) (+ (.-Base hw) USDHCx_SYS_CTRL))
+  (set! (.-mix_ctrl hw) (+ (.-Base hw) USDHCx_MIX_CTRL))
+  (set! (.-pres_state hw) (+ (.-Base hw) USDHCx_PRES_STATE))
+  (set! (.-int_status hw) (+ (.-Base hw) USDHCx_INT_STATUS))
+  (set! (.-int_status_en hw) (+ (.-Base hw) USDHCx_INT_STATUS_EN))
+  (set! (.-int_signal_en hw) (+ (.-Base hw) USDHCx_INT_SIGNAL_EN))
+  (set! (.-adma_sys_addr hw) (+ (.-Base hw) USDHCx_ADMA_SYS_ADDR))
+  (set! (.-adma_err_status hw) (+ (.-Base hw) USDHCx_ADMA_ERR_STATUS))
+  (set! (.-ac12_err_status hw) (+ (.-Base hw) USDHCx_AUTOCMD12_ERR_STATUS))
+  (set! (.-vend_spec hw) (+ (.-Base hw) USDHCx_VEND_SPEC))
+  (set! (.-vend_spec2 hw) (+ (.-Base hw) USDHCx_VEND_SPEC2))
+  (set! (.-tuning_ctrl hw) (+ (.-Base hw) USDHCx_TUNING_CTRL))
+
+  ;; Generic SD specs read/write timeout rules (applied also to MMC by
+  ;; this driver).
+  ;;
+  ;; p106, 4.6.2.1 Read, SD-PL-7.10
+  (set! (.-readTimeout hw) (* 100 time/Millisecond))
+  ;; p106, 4.6.2.2 Write, SD-PL-7.10
+  (set! (.-writeTimeout hw) (* 500 time/Millisecond))
+
+  ;; enable clock
+  (reg/SetN (.-CCGR hw) (.-CG hw) 2r11 2r11))
+
+
+
+
+
+
+^{:go/end 495} (go/method Detect "Detect initializes an SD/MMC card. The highest speed supported by the\ndriver, card and controller is automatically selected. Speed modes that\nrequire voltage switching require definition of function VoltageSelect on\nthe USDHC instance, which is up to board packages.\n" [^{:tag (* USDHC)} hw] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (== (.-sys_ctrl hw) 0)
+    (return (errors/New "controller is not initialized")))
+
+
+  ;; check if a card has already been detected and not removed since
+  (when (and (== (reg/GetN (.-int_status hw) INT_STATUS_CRM 1) 0) ^:go/paren (or (.-MMC (.-card hw)) (.-SD (.-card hw))))
+    (return))
+
+
+  ;; clear card information
+  (set! (.-card hw) (lit CardInfo))
+
+  ;; soft reset uSDHC
+  (reg/Set (.-sys_ctrl hw) SYS_CTRL_RSTA)
+  (reg/Wait (.-sys_ctrl hw) SYS_CTRL_RSTA 1 0)
+
+  ;; A soft reset fails to clear MIX_CTRL register, clear it all except
+  ;; tuning bits.
+  (let [mix (reg/Read (.-mix_ctrl hw))]
+    (bits/Clear (addr mix) MIX_CTRL_FBCLK_SEL)
+    (bits/Clear (addr mix) MIX_CTRL_AUTO_TUNE_EN)
+    (bits/Clear (addr mix) MIX_CTRL_SMP_CLK_SEL)
+    (bits/Clear (addr mix) MIX_CTRL_EXE_TUNE)
+    (reg/Write (.-mix_ctrl hw) mix)
+
+    ;; data transfer width, default to 1-bit mode
+    (let [dtw 2r00]
+
+      (switch (.-width hw)
+        (case [1]
+          (set! dtw 2r00))
+        (case [4]
+          (set! dtw 2r01))
+        (case [8]
+          (set! dtw 2r10))
+        (default
+          (return (errors/New "unsupported controller data transfer width"))))
+
+
+      ;; set data transfer width
+      (reg/SetN (.-prot_ctrl hw) PROT_CTRL_DTW 2r11 (conv uint32 dtw))
+      ;; set little endian mode
+      (reg/SetN (.-prot_ctrl hw) PROT_CTRL_EMODE 2r11 2r10)
+
+      ;; clear clock
+      (.setFreq hw -1 -1)
+      ;; set identification frequency
+      (.setFreq hw DVS_ID SDCLKFS_ID)
+
+      ;; set data timeout counter to SDCLK x 2^28
+      (reg/Clear (.-int_status_en hw) INT_STATUS_EN_DTOESEN)
+      (reg/SetN (.-sys_ctrl hw) SYS_CTRL_DTOCV 0xf DTOCV)
+      (reg/Set (.-int_status_en hw) INT_STATUS_EN_DTOESEN)
+
+      ;; initialize
+      (reg/Set (.-sys_ctrl hw) SYS_CTRL_INITA)
+      (reg/Wait (.-sys_ctrl hw) SYS_CTRL_INITA 1 0)
+
+      ;; CMD0 - GO_IDLE_STATE - reset card
+      (when [(set! err (.cmd hw 0 GO_IDLE_STATE 0 0))] (!= err nil)
+        (return))
+
+
+      (cond (.voltageValidationSD hw)
+        (set! err (.initSD hw))
+        (.voltageValidationMMC hw)
+        (set! err (.initMMC hw)) :else
+
+        (return (fmt/Errorf "no card detected on uSDHC%d" (.-Index hw))))
+
+
+      (when (!= err nil)
+        (return))
+
+
+      (when (not (.-DDR (.-card hw)))
+        ;; CMD16 - SET_BLOCKLEN - define the block length,
+        ;; only legal In single data rate mode.
+        (set! err (.cmd hw 16 (conv uint32 (.-BlockSize (.-card hw))) 0 0)))
+
+
+      (return))))
+
+
+
+
+
+
+^{:go/end 594} (go/method transfer "transfer data from/to the card as specified in:\n\n\tp347, 35.5.1 Reading data from the card, IMX6FG,\n\tp354, 35.5.2 Writing data to the card, IMX6FG.\n" [^{:tag (* USDHC)} hw ^uint32 index ^uint32 dtd ^uint64 arg ^uint32 blocks ^uint32 blockSize ^{:tag (slice byte)} buf] :results [^error err]
+  (let [^time/Duration timeout (zero time/Duration)]
+
+    (when (== (.-blk_att hw) 0)
+      (return (errors/New "controller is not initialized")))
+
+
+    (when (or (== blocks 0) (== blockSize 0))
+      (return))
+
+
+    (when (> blocks 0xffff)
+      (return (errors/New "transfer size cannot exceed 65535 blocks")))
+
+
+    ;; State polling cannot be issued while tuning (CMD19 and CMD21).
+    (when (not (or (== index 19) (== index 21)))
+      (when [(set! err (.waitState hw CURRENT_STATE_TRAN (* 1 time/Millisecond)))] (!= err nil)
+        (return)))
+
+
+
+    ;; set block size
+    (reg/SetN (.-blk_att hw) BLK_ATT_BLKSIZE 0x1fff blockSize)
+    ;; set block count
+    (reg/SetN (.-blk_att hw) BLK_ATT_BLKCNT 0xffff blocks)
+
+    (let [bufAddress (dma/Alloc buf 32)]
+      (defer (dma/Free bufAddress))
+
+      ;; ADMA2 descriptor
+      (let [bd (addr (lit ADMABufferDescriptor))]
+        (.Init bd bufAddress (len buf))
+
+        (let [bdAddress (dma/Alloc (.Bytes bd) 4)]
+          (defer (dma/Free bdAddress))
+
+          (reg/Write (.-adma_sys_addr hw) (conv uint32 bdAddress))
+
+          (when (and (.-HC (.-card hw)) ^:go/paren (or (== index 18) (== index 25)))
+            ;; p102, 4.3.14 Command Functional Difference in Card Capacity Types, SD-PL-7.10
+            (set! arg (/ arg (conv uint64 blockSize))))
+
+
+          (when (.-rpmb hw)
+            (set! err (.partitionAccessMMC hw PARTITION_ACCESS_RPMB))
+
+            (when (!= err nil)
+              (return))
+
+
+            (let [cmd23Arg blocks]
+
+              (when (.-rel hw)
+                ;; reliable write request
+                (bits/Set (addr cmd23Arg) 31))
+
+
+              ;; CMD23 - SET_BLOCK_COUNT - define read/write block count
+              (when [(set! err (.cmd hw 23 cmd23Arg 0 0))] (!= err nil)
+                (return))
+
+
+              (defer (.partitionAccessMMC hw PARTITION_ACCESS_NONE))))
+
+
+          (switch dtd
+            (case [WRITE]
+              (set! timeout (* (.-writeTimeout hw) (conv time/Duration blocks)))
+              ;; set write watermark level
+              (reg/SetN (.-wtmk_lvl hw) WTMK_LVL_WR_WML 0xff (/ blockSize 4)))
+            (case [READ]
+              (set! timeout (* (.-readTimeout hw) (conv time/Duration blocks)))
+              ;; set read watermark level
+              (reg/SetN (.-wtmk_lvl hw) WTMK_LVL_RD_WML 0xff (/ blockSize 4))))
+
+
+          (set! err (.cmd hw index (conv uint32 arg) blocks timeout))
+          (let [adma_err (reg/Read (.-adma_err_status hw))]
+
+            (when (!= err nil)
+              (return (fmt/Errorf "len:%d arg:%#x timeout:%v ADMA:%#x, %v" (len buf) arg timeout adma_err err)))
+
+
+            (when (> adma_err 0)
+              (return (fmt/Errorf "len:%d arg:%#x timeout:%v ADMA:%#x" (len buf) arg timeout adma_err)))
+
+
+            (when (== dtd READ)
+              (dma/Read bufAddress 0 buf))
+
+
+            (return)))))))
+
+
+^{:go/end 615} (go/method transferBlocks [^{:tag (* USDHC)} hw ^uint32 index ^uint32 dtd ^int lba ^{:tag (slice byte)} buf] :results [^error err]
+  (let [blockSize (.-BlockSize (.-card hw))
+      ^{:line 598} offset (* (conv uint64 lba) (conv uint64 blockSize))
+      ^{:line 599} size (len buf)]
+
+    (when (or (== size 0) (== blockSize 0))
+      (return))
+
+
+    (when (!= (% size blockSize) 0)
+      (return (fmt/Errorf "write size must be %d bytes aligned" blockSize)))
+
+
+    (let [blocks (/ size blockSize)]
+
+      ^{:go/via [Mutex]} (.Lock hw)
+      (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+      (.transfer hw index dtd offset (conv uint32 blocks) (conv uint32 blockSize) buf))))
+
+
+
+^{:go/end 621} (go/method WriteBlocks "WriteBlocks transfers full blocks of data to the card.\n" [^{:tag (* USDHC)} hw ^int lba ^{:tag (slice byte)} buf] :results [^error err]
+  ;; CMD25 - WRITE_MULTIPLE_BLOCK - write consecutive blocks
+  (.transferBlocks hw 25 WRITE lba buf))
+
+
+
+^{:go/end 627} (go/method ReadBlocks "ReadBlocks transfers full blocks of data from the card.\n" [^{:tag (* USDHC)} hw ^int lba ^{:tag (slice byte)} buf] :results [^error err]
+  ;; CMD18 - READ_MULTIPLE_BLOCK - read consecutive blocks
+  (.transferBlocks hw 18 READ lba buf))
+
+
+
+^{:go/end 672} (go/method Read "Read transfers data from the card.\n" [^{:tag (* USDHC)} hw ^int64 offset ^int64 size] :results [^{:tag (slice byte)} buf ^error err]
+  (let [blockSize (conv int64 (.-BlockSize (.-card hw)))]
+
+    (when (or (== size 0) (== blockSize 0))
+      (return))
+
+
+    (let [blockOffset (% offset blockSize)
+        ^{:line 638} blocks (/ (+ blockOffset size) blockSize)]
+
+      (cond (== blocks 0)
+        (set! blocks 1)
+        (!= (% (+ offset size) blockSize) 0)
+        (set! blocks + 1))
+
+
+      (let [bufSize (conv int (* blocks blockSize))]
+
+        ;; data buffer
+        (set! buf (make (slice byte) bufSize))
+
+        ^{:go/via [Mutex]} (.Lock hw)
+        (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+        ;; CMD18 - READ_MULTIPLE_BLOCK - read consecutive blocks
+        (set! err (.transfer hw 18 READ (conv uint64 offset) (conv uint32 blocks) (conv uint32 blockSize) buf))
+
+        (when (!= err nil)
+          (return))
+
+
+        (let [trim (% size blockSize)]
+
+          (cond (.-HC (.-card hw))
+            (when (or (!= blockOffset 0) (> trim 0))
+              (set! buf (subslice buf blockOffset (+ blockOffset size))))
+
+            (> trim 0)
+            (set! buf (subslice buf _ (+ offset size))))
+
+
+          (return))))))

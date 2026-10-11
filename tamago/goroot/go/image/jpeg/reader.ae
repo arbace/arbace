@@ -1,0 +1,836 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package jpeg implements a JPEG image decoder and encoder.
+;;
+;; JPEG is defined in ITU-T T.81: https://www.w3.org/Graphics/JPEG/itu-t81.pdf.
+(in-ns 'go.image.jpeg) (go/file "reader.go" :doc "Package jpeg implements a JPEG image decoder and encoder.\n\nJPEG is defined in ITU-T T.81: https://www.w3.org/Graphics/JPEG/itu-t81.pdf.\n" :imports [
+
+
+    ^{:line 11} [image "image"]
+    ^{:line 12} [color "image/color"]
+    ^{:line 13} [imageutil "image/internal/imageutil"]
+    ^{:line 14} [io "io"]])
+
+
+
+(go/type FormatError "A FormatError reports that the input is not a valid JPEG.\n" string)
+
+^{:go/end 20} (go/method Error ^string [^FormatError e] (+ "invalid JPEG format: " (conv string e)))
+
+
+(go/type UnsupportedError "An UnsupportedError reports that the input uses a valid but unimplemented JPEG feature.\n" string)
+
+^{:go/end 25} (go/method Error ^string [^UnsupportedError e] (+ "unsupported JPEG feature: " (conv string e)))
+
+(go/var errUnsupportedSubsamplingRatio (conv UnsupportedError "luma/chroma subsampling ratio"))
+
+
+(go/type component "Component specification, specified in section B.2.2.\n" (struct
+    ^{:line 31 :tag int} h ; Horizontal sampling factor.
+    ^{:line 32 :tag int} v ; Vertical sampling factor.
+    ^{:line 33 :tag uint8} c ; Component identifier.
+    ^{:line 34 :tag uint8} tq ; Quantization table destination selector.
+    ^{:line 35 :tag int} expandH ; Horizontal expansion factor for non-standard subsampling.
+    ^{:line 36 :tag int} expandV)) ; Vertical expansion factor for non-standard subsampling.
+
+
+(go/const
+  ^{:line 40} [^{:val 0} dcTable 0]
+  ^{:line 41} [^{:val 1} acTable 1]
+  ^{:line 42} [^{:val 1} maxTc 1]
+  ^{:line 43} [^{:val 3} maxTh 3]
+  ^{:line 44} [^{:val 3} maxTq 3]
+
+  ^{:line 46} [^{:val 4} maxComponents 4])
+
+
+(go/const
+  ^{:line 50} [^{:val 192} sof0Marker 0xc0] ; Start Of Frame (Baseline Sequential).
+  ^{:line 51} [^{:val 193} sof1Marker 0xc1] ; Start Of Frame (Extended Sequential).
+  ^{:line 52} [^{:val 194} sof2Marker 0xc2] ; Start Of Frame (Progressive).
+  ^{:line 53} [^{:val 196} dhtMarker 0xc4] ; Define Huffman Table.
+  ^{:line 54} [^{:val 208} rst0Marker 0xd0] ; ReSTart (0).
+  ^{:line 55} [^{:val 215} rst7Marker 0xd7] ; ReSTart (7).
+  ^{:line 56} [^{:val 216} soiMarker 0xd8] ; Start Of Image.
+  ^{:line 57} [^{:val 217} eoiMarker 0xd9] ; End Of Image.
+  ^{:line 58} [^{:val 218} sosMarker 0xda] ; Start Of Scan.
+  ^{:line 59} [^{:val 219} dqtMarker 0xdb] ; Define Quantization Table.
+  ^{:line 60} [^{:val 221} driMarker 0xdd] ; Define Restart Interval.
+  ^{:line 61} [^{:val 254} comMarker 0xfe] ; COMment.
+
+
+
+  ^{:line 65} [^{:val 224 :doc "\"APPlication specific\" markers aren't part of the JPEG spec per se,\nbut in practice, their use is described at\nhttps://www.sno.phy.queensu.ca/~phil/exiftool/TagNames/JPEG.html\n"} app0Marker 0xe0]
+  ^{:line 66} [^{:val 238} app14Marker 0xee]
+  ^{:line 67} [^{:val 239} app15Marker 0xef])
+
+
+
+(go/const "See https://www.sno.phy.queensu.ca/~phil/exiftool/TagNames/JPEG.html#Adobe\n"
+  ^{:line 72} [^{:val 0} adobeTransformUnknown 0]
+  ^{:line 73} [^{:val 1} adobeTransformYCbCr 1]
+  ^{:line 74} [^{:val 2} adobeTransformYCbCrK 2])
+
+
+
+
+
+(go/var ^{:doc "unzig maps from the zig-zag ordering to the natural ordering. For example,\nunzig[3] is the column and row of the fourth element in zig-zag order. The\nvalue is 16, which means first column (16%8 == 0) and third row (16/8 == 2).\n"} unzig ^{:go/breaks [2 10 18 26 34 42 50 58]} (lit (array blockSize int)
+    0 1 8 16 9 2 3 10
+    17 24 32 25 18 11 4 5
+    12 19 26 33 40 48 41 34
+    27 20 13 6 7 14 21 28
+    35 42 49 56 57 50 43 36
+    29 22 15 23 30 37 44 51
+    58 59 52 45 38 31 39 46
+    53 60 61 54 47 55 62 63))
+
+
+
+
+(go/type Reader "Deprecated: Reader is not used by the [image/jpeg] package and should\nnot be used by others. It is kept for compatibility.\n" (interface
+    ^{:line 94} io/ByteReader
+    ^{:line 95} io/Reader))
+
+
+
+
+
+(go/type bits "bits holds the unprocessed bits that have been taken from the byte-stream.\nThe n least significant bits of a form the unread bits, to be read in MSB to\nLSB order.\n" (struct
+    ^{:line 102 :tag uint32} a ; accumulator.
+    ^{:line 103 :tag uint32} m ; mask. m==1<<(n-1) when n>0, with m==0 when n==0.
+    ^{:line 104 :tag int32} n)) ; the number of unread bits in a.
+
+
+(go/type decoder (struct
+    ^{:line 108 :tag io/Reader} r
+    ^{:line 109 :tag bits} bits
+
+
+
+    ^{:line 113 :tag (struct ^{:tag (array 4096 byte) :doc "buf[i:j] are the buffered bytes read from the underlying\nio.Reader that haven't yet been passed further on.\n"} buf ^int i ^int j ^{:tag int :doc "nUnreadable is the number of bytes to back up i after\novershooting. It can be 0, 1 or 2.\n"} nUnreadable) :doc "bytes is a byte buffer, similar to a bufio.Reader, except that it\nhas to be able to unread more than 1 byte, due to byte stuffing.\nByte stuffing is specified in section F.1.2.3.\n"} bytes
+
+
+
+
+
+
+
+
+    ^{:line 122 :tag int} width ^int height
+
+    ^{:line 124 :tag (* image/Gray)} img1
+    ^{:line 125 :tag (* image/YCbCr)} img3
+    ^{:line 126 :tag (slice byte)} blackPix
+    ^{:line 127 :tag int} blackStride
+
+
+    ^{:line 130 :tag bool :doc "For non-standard subsampling ratios (flex mode).\n"} flex ; True if using non-standard subsampling that requires manual pixel expansion.
+    ^{:line 131 :tag int} maxH ^int maxV ; Maximum horizontal and vertical sampling factors across all components.
+
+    ^{:line 133 :tag int} ri ; Restart Interval.
+    ^{:line 134 :tag int} nComp
+
+
+
+
+
+
+    ^{:line 141 :tag bool :doc "As per section 4.5, there are four modes of operation (selected by the\nSOF? markers): sequential DCT, progressive DCT, lossless and\nhierarchical, although this implementation does not support the latter\ntwo non-DCT modes. Sequential DCT is further split into baseline and\nextended, as per section 4.11.\n"} baseline
+    ^{:line 142 :tag bool} progressive
+
+    ^{:line 144 :tag bool} jfif
+    ^{:line 145 :tag bool} adobeTransformValid
+    ^{:line 146 :tag uint8} adobeTransform
+    ^{:line 147 :tag uint16} eobRun ; End-of-Band run, specified in section G.1.2.2.
+
+    ^{:line 149 :tag (array maxComponents component)} comp
+    ^{:line 150 :tag (array maxComponents (slice block))} progCoeffs ; Saved state between progressive-mode scans.
+    ^{:line 151 :tag (array (+ maxTc 1) (array (+ maxTh 1) huffman))} huff
+    ^{:line 152 :tag (array (+ maxTq 1) block)} quant ; Quantization tables, in zig-zag order.
+    ^{:line 153 :tag (array (* 2 blockSize) byte)} tmp))
+
+
+
+
+^{:go/end 179} (go/method fill "fill fills up the d.bytes.buf buffer from the underlying io.Reader. It\nshould only be called when there are no unread bytes in d.bytes.\n" ^error [^{:tag (* decoder)} d]
+  (when (!= (.-i (.-bytes d)) (.-j (.-bytes d)))
+    (panic "jpeg: fill called when unread bytes exist"))
+
+  ;; Move the last 2 bytes to the start of the buffer, in case we need
+  ;; to call unreadByteStuffedByte.
+  (when (> (.-j (.-bytes d)) 2)
+    (aset (.-buf (.-bytes d)) 0 (aget (.-buf (.-bytes d)) (- (.-j (.-bytes d)) 2)))
+    (aset (.-buf (.-bytes d)) 1 (aget (.-buf (.-bytes d)) (- (.-j (.-bytes d)) 1)))
+    (set! (values (.-i (.-bytes d)) (.-j (.-bytes d))) (values 2 2)))
+
+  ;; Fill in the rest of the buffer.
+  (let [(values n err) (.Read (.-r d) (subslice (.-buf (.-bytes d)) (.-j (.-bytes d))))]
+    (set! (.-j (.-bytes d)) + n)
+    (when (> n 0)
+      (return nil))
+
+    (when (== err io/EOF)
+      (set! err io/ErrUnexpectedEOF))
+
+    ^{:line 178} err))
+
+
+
+
+
+
+
+^{:go/end 194} (go/method unreadByteStuffedByte "unreadByteStuffedByte undoes the most recent readByteStuffedByte call,\ngiving a byte of data back from d.bits to d.bytes. The Huffman look-up table\nrequires at least 8 bits for look-up, which means that Huffman decoding can\nsometimes overshoot and read one or two too many bytes. Two-byte overshoot\ncan happen when expecting to read a 0xff 0x00 byte-stuffed byte.\n" [^{:tag (* decoder)} d]
+  (set! (.-i (.-bytes d)) - (.-nUnreadable (.-bytes d)))
+  (set! (.-nUnreadable (.-bytes d)) 0)
+  (when (>= (.-n (.-bits d)) 8)
+    (set! (.-a (.-bits d)) >> 8)
+    (set! (.-n (.-bits d)) - 8)
+    (set! (.-m (.-bits d)) >> 8)))
+
+
+
+
+
+^{:go/end 208} (go/method readByte "readByte returns the next byte, whether buffered or not buffered. It does\nnot care about byte stuffing.\n" [^{:tag (* decoder)} d] :results [^byte x ^error err]
+  (while (== (.-i (.-bytes d)) (.-j (.-bytes d)))
+    (when [(set! err (.fill d))] (!= err nil)
+      (return 0 err)))
+
+
+  (set! x (aget (.-buf (.-bytes d)) (.-i (.-bytes d))))
+  (inc! (.-i (.-bytes d)))
+  (set! (.-nUnreadable (.-bytes d)) 0)
+  (return x nil))
+
+
+
+
+(go/var ^{:doc "errMissingFF00 means that readByteStuffedByte encountered an 0xff byte (a\nmarker byte) that wasn't the expected byte-stuffed sequence 0xff, 0x00.\n"} errMissingFF00 (conv FormatError "missing 0xff00 sequence"))
+
+
+^{:go/end 252} (go/method readByteStuffedByte "readByteStuffedByte is like readByte but is for byte-stuffed Huffman data.\n" [^{:tag (* decoder)} d] :results [^byte x ^error err]
+  ;; Take the fast path if d.bytes.buf contains at least two bytes.
+  (when (<= (+ (.-i (.-bytes d)) 2) (.-j (.-bytes d)))
+    (set! x (aget (.-buf (.-bytes d)) (.-i (.-bytes d))))
+    (inc! (.-i (.-bytes d)))
+    (set! (.-nUnreadable (.-bytes d)) 1)
+    (when (!= x 0xff)
+      (return x err))
+
+    (when (!= (aget (.-buf (.-bytes d)) (.-i (.-bytes d))) 0x00)
+      (return 0 errMissingFF00))
+
+    (inc! (.-i (.-bytes d)))
+    (set! (.-nUnreadable (.-bytes d)) 2)
+    (return 0xff nil))
+
+
+  (set! (.-nUnreadable (.-bytes d)) 0)
+
+  (set! (values x err) (.readByte d))
+  (when (!= err nil)
+    (return 0 err))
+
+  (set! (.-nUnreadable (.-bytes d)) 1)
+  (when (!= x 0xff)
+    (return x nil))
+
+
+  (set! (values x err) (.readByte d))
+  (when (!= err nil)
+    (return 0 err))
+
+  (set! (.-nUnreadable (.-bytes d)) 2)
+  (when (!= x 0x00)
+    (return 0 errMissingFF00))
+
+  (return 0xff nil))
+
+
+
+
+^{:go/breaks [[6 276]] :go/end 277} (go/method readFull "readFull reads exactly len(p) bytes into p. It does not care about byte\nstuffing.\n" ^error [^{:tag (* decoder)} d ^{:tag (slice byte)} p]
+  ;; Unread the overshot bytes, if any.
+  (when (!= (.-nUnreadable (.-bytes d)) 0)
+    (when (>= (.-n (.-bits d)) 8)
+      (.unreadByteStuffedByte d))
+
+    (set! (.-nUnreadable (.-bytes d)) 0))
+
+
+  (while true
+    (let [n (copy p (subslice (.-buf (.-bytes d)) (.-i (.-bytes d)) (.-j (.-bytes d))))]
+      (set! p (subslice p n))
+      (set! (.-i (.-bytes d)) + n)
+      (when (== (len p) 0)
+        (break))
+
+      (when [err (.fill d)] (!= err nil)
+        (return err))))
+
+
+  nil)
+
+
+
+^{:go/breaks [[6 303]] :go/end 304} (go/method ignore "ignore ignores the next n bytes.\n" ^error [^{:tag (* decoder)} d ^int n]
+  ;; Unread the overshot bytes, if any.
+  (when (!= (.-nUnreadable (.-bytes d)) 0)
+    (when (>= (.-n (.-bits d)) 8)
+      (.unreadByteStuffedByte d))
+
+    (set! (.-nUnreadable (.-bytes d)) 0))
+
+
+  (while true
+    (let [m (- (.-j (.-bytes d)) (.-i (.-bytes d)))]
+      (when (> m n)
+        (set! m n))
+
+      (set! (.-i (.-bytes d)) + m)
+      (set! n - m)
+      (when (== n 0)
+        (break))
+
+      (when [err (.fill d)] (!= err nil)
+        (return err))))
+
+
+  nil)
+
+
+
+^{:go/breaks [[14 426]] :go/end 427} (go/method processSOF "Specified in section B.2.2.\n" ^error [^{:tag (* decoder)} d ^int n]
+  (when (!= (.-nComp d) 0)
+    (return (conv FormatError "multiple SOF markers")))
+
+  (switch n
+    (case [(+ 6 (* 3 1))] ; Grayscale image.
+      (set! (.-nComp d) 1))
+    (case [(+ 6 (* 3 3))] ; YCbCr or RGB image.
+      (set! (.-nComp d) 3))
+    (case [(+ 6 (* 3 4))] ; YCbCrK or CMYK image.
+      (set! (.-nComp d) 4))
+    (default
+      (return (conv UnsupportedError "number of components"))))
+
+  (when [err (.readFull d (subslice (.-tmp d) _ n))] (!= err nil)
+    (return err))
+
+  ;; We only support 8-bit precision.
+  (when (!= (aget (.-tmp d) 0) 8)
+    (return (conv UnsupportedError "precision")))
+
+  (set! (.-height d) (+ (<< (conv int (aget (.-tmp d) 1)) 8) (conv int (aget (.-tmp d) 2))))
+  (set! (.-width d) (+ (<< (conv int (aget (.-tmp d) 3)) 8) (conv int (aget (.-tmp d) 4))))
+  (when (!= (conv int (aget (.-tmp d) 5)) (.-nComp d))
+    (return (conv FormatError "SOF has wrong length")))
+
+
+  (for [i 0] (< i (.-nComp d)) (inc! i)
+    (set! (.-c (aget (.-comp d) i)) (aget (.-tmp d) (+ 6 (* 3 i))))
+    ;; Section B.2.2 states that "the value of C_i shall be different from
+    ;; the values of C_1 through C_(i-1)".
+    (for [j 0] (< j i) (inc! j)
+      (when (== (.-c (aget (.-comp d) i)) (.-c (aget (.-comp d) j)))
+        (return (conv FormatError "repeated component identifier"))))
+
+
+
+    (set! (.-tq (aget (.-comp d) i)) (aget (.-tmp d) (+ 8 (* 3 i))))
+    (when (> (.-tq (aget (.-comp d) i)) maxTq)
+      (return (conv FormatError "bad Tq value")))
+
+
+    (let [hv (aget (.-tmp d) (+ 7 (* 3 i)))
+        (values h v) (values (conv int (>> hv 4)) (conv int (bit-and hv 0x0f)))]
+      (when (or (< h 1) (< 4 h) (< v 1) (< 4 v))
+        (return (conv FormatError "luma/chroma subsampling ratio")))
+
+      (when (or (== h 3) (== v 3))
+        (return errUnsupportedSubsamplingRatio))
+
+      (switch (.-nComp d)
+        (case [1]
+          ;; If a JPEG image has only one component, section A.2 says "this data
+          ;; is non-interleaved by definition" and section A.2.2 says "[in this
+          ;; case...] the order of data units within a scan shall be left-to-right
+          ;; and top-to-bottom... regardless of the values of H_1 and V_1". Section
+          ;; 4.8.2 also says "[for non-interleaved data], the MCU is defined to be
+          ;; one data unit". Similarly, section A.1.1 explains that it is the ratio
+          ;; of H_i to max_j(H_j) that matters, and similarly for V. For grayscale
+          ;; images, H_1 is the maximum H_j for all components j, so that ratio is
+          ;; always 1. The component's (h, v) is effectively always (1, 1): even if
+          ;; the nominal (h, v) is (2, 1), a 20x5 image is encoded in three 8x8
+          ;; MCUs, not two 16x8 MCUs.
+          (set! (values h v) (values 1 1)))
+
+        (case [3])
+        ;; For YCbCr images, we support both standard subsampling ratios
+        ;; (4:4:4, 4:4:0, 4:2:2, 4:2:0, 4:1:1, 4:1:0) and non-standard ratios
+        ;; where components may have different sampling factors. The only
+        ;; restriction is that each component's sampling factors must evenly
+        ;; divide the maximum factors (validated after the loop).
+
+        (case [4]
+          ;; For 4-component images (either CMYK or YCbCrK), we only support two
+          ;; hv vectors: [0x11 0x11 0x11 0x11] and [0x22 0x11 0x11 0x22].
+          ;; Theoretically, 4-component JPEG images could mix and match hv values
+          ;; but in practice, those two combinations are the only ones in use,
+          ;; and it simplifies the applyBlack code below if we can assume that:
+          ;;	- for CMYK, the C and K channels have full samples, and if the M
+          ;;	  and Y channels subsample, they subsample both horizontally and
+          ;;	  vertically.
+          ;;	- for YCbCrK, the Y and K channels have full samples.
+          (switch i
+            (case [0]
+              (when (and (!= hv 0x11) (!= hv 0x22))
+                (return errUnsupportedSubsamplingRatio)))
+
+            (case [1 2]
+              (when (!= hv 0x11)
+                (return errUnsupportedSubsamplingRatio)))
+
+            (case [3]
+              (when (or (!= (.-h (aget (.-comp d) 0)) h) (!= (.-v (aget (.-comp d) 0)) v))
+                (return errUnsupportedSubsamplingRatio))))))
+
+
+
+
+      (set! (values (.-maxH d) (.-maxV d)) (values (max (.-maxH d) h) (max (.-maxV d) v)))
+      (set! (.-h (aget (.-comp d) i)) h)
+      (set! (.-v (aget (.-comp d) i)) v)))
+
+
+  ;; For 3-component images, validate that maxH and maxV are evenly divisible
+  ;; by each component's sampling factors.
+  (when (== (.-nComp d) 3)
+    (for [i 0] (< i 3) (inc! i)
+      (when (or (!= (% (.-maxH d) (.-h (aget (.-comp d) i))) 0) (!= (% (.-maxV d) (.-v (aget (.-comp d) i))) 0))
+        (return errUnsupportedSubsamplingRatio))))
+
+
+
+
+  ;; Compute expansion factors for each component.
+  (for [i 0] (< i (.-nComp d)) (inc! i)
+    (set! (.-expandH (aget (.-comp d) i)) (/ (.-maxH d) (.-h (aget (.-comp d) i))))
+    (set! (.-expandV (aget (.-comp d) i)) (/ (.-maxV d) (.-v (aget (.-comp d) i)))))
+
+
+  nil)
+
+
+
+^{:go/breaks [[6 472]] :go/end 473} (go/method processDQT "Specified in section B.2.4.1.\n" ^error [^{:tag (* decoder)} d ^int n]
+  (label :loop
+    (while (> n 0)
+      (dec! n)
+      (let [(values x err) (.readByte d)]
+        (when (!= err nil)
+          (return err))
+
+        (let [tq (bit-and x 0x0f)]
+          (when (> tq maxTq)
+            (return (conv FormatError "bad Tq value")))
+
+          (switch (>> x 4)
+            (default
+              (return (conv FormatError "bad Pq value")))
+            (case [0]
+              (when (< n blockSize)
+                (break :loop))
+
+              (set! n - blockSize)
+              (when [err (.readFull d (subslice (.-tmp d) _ blockSize))] (!= err nil)
+                (return err))
+
+              (range [i (aget (.-quant d) tq)]
+                (aset (aget (.-quant d) tq) i (conv int32 (aget (.-tmp d) i)))))
+
+            (case [1]
+              (when (< n (* 2 blockSize))
+                (break :loop))
+
+              (set! n - (* 2 blockSize))
+              (when [err (.readFull d (subslice (.-tmp d) _ (* 2 blockSize)))] (!= err nil)
+                (return err))
+
+              (range [i (aget (.-quant d) tq)]
+                (aset (aget (.-quant d) tq) i (bit-or (<< (conv int32 (aget (.-tmp d) (* 2 i))) 8) (conv int32 (aget (.-tmp d) (+ (* 2 i) 1))))))))))))
+
+
+
+  (when (!= n 0)
+    (return (conv FormatError "DQT has wrong length")))
+
+  nil)
+
+
+
+^{:go/breaks [7] :go/end 485} (go/method processDRI "Specified in section B.2.4.4.\n" ^error [^{:tag (* decoder)} d ^int n]
+  (when (!= n 2)
+    (return (conv FormatError "DRI has wrong length")))
+
+  (when [err (.readFull d (subslice (.-tmp d) _ 2))] (!= err nil)
+    (return err))
+
+  (set! (.-ri d) (+ (<< (conv int (aget (.-tmp d) 0)) 8) (conv int (aget (.-tmp d) 1))))
+  nil)
+
+
+^{:go/breaks [[8 501]] :go/end 502} (go/method processApp0Marker ^error [^{:tag (* decoder)} d ^int n]
+  (when (< n 5)
+    (return (.ignore d n)))
+
+  (when [err (.readFull d (subslice (.-tmp d) _ 5))] (!= err nil)
+    (return err))
+
+  (set! n - 5)
+
+  (set! (.-jfif d) (and (== (aget (.-tmp d) 0) \J) (== (aget (.-tmp d) 1) \F) (== (aget (.-tmp d) 2) \I) (== (aget (.-tmp d) 3) \F) (== (aget (.-tmp d) 4) \u0000)))
+
+  (when (> n 0)
+    (return (.ignore d n)))
+
+  nil)
+
+
+^{:go/breaks [[8 521]] :go/end 522} (go/method processApp14Marker ^error [^{:tag (* decoder)} d ^int n]
+  (when (< n 12)
+    (return (.ignore d n)))
+
+  (when [err (.readFull d (subslice (.-tmp d) _ 12))] (!= err nil)
+    (return err))
+
+  (set! n - 12)
+
+  (when (and (== (aget (.-tmp d) 0) \A) (== (aget (.-tmp d) 1) \d) (== (aget (.-tmp d) 2) \o) (== (aget (.-tmp d) 3) \b) (== (aget (.-tmp d) 4) \e))
+    (set! (.-adobeTransformValid d) true)
+    (set! (.-adobeTransform d) (aget (.-tmp d) 11)))
+
+
+  (when (> n 0)
+    (return (.ignore d n)))
+
+  nil)
+
+
+
+^{:go/end 671} (go/method decode "decode reads a JPEG image from r and returns it as an image.Image.\n" [^{:tag (* decoder)} d ^io/Reader r ^bool configOnly] :results [image/Image error]
+  (set! (.-r d) r)
+
+  ;; Check for the Start Of Image marker.
+  (when [err (.readFull d (subslice (.-tmp d) _ 2))] (!= err nil)
+    (return nil err))
+
+  (when (or (!= (aget (.-tmp d) 0) 0xff) (!= (aget (.-tmp d) 1) soiMarker))
+    (return nil (conv FormatError "missing SOI marker")))
+
+
+  ;; Process the remaining segments until the End Of Image marker.
+  (while true
+    (let [err (.readFull d (subslice (.-tmp d) _ 2))]
+      (when (!= err nil)
+        (return nil err))
+
+      (while (!= (aget (.-tmp d) 0) 0xff)
+        ;; Strictly speaking, this is a format error. However, libjpeg is
+        ;; liberal in what it accepts. As of version 9, next_marker in
+        ;; jdmarker.c treats this as a warning (JWRN_EXTRANEOUS_DATA) and
+        ;; continues to decode the stream. Even before next_marker sees
+        ;; extraneous data, jpeg_fill_bit_buffer in jdhuff.c reads as many
+        ;; bytes as it can, possibly past the end of a scan's data. It
+        ;; effectively puts back any markers that it overscanned (e.g. an
+        ;; "\xff\xd9" EOI marker), but it does not put back non-marker data,
+        ;; and thus it can silently ignore a small number of extraneous
+        ;; non-marker bytes before next_marker has a chance to see them (and
+        ;; print a warning).
+        ;;
+        ;; We are therefore also liberal in what we accept. Extraneous data
+        ;; is silently ignored.
+        ;;
+        ;; This is similar to, but not exactly the same as, the restart
+        ;; mechanism within a scan (the RST[0-7] markers).
+        ;;
+        ;; Note that extraneous 0xff bytes in e.g. SOS data are escaped as
+        ;; "\xff\x00", and so are detected a little further down below.
+        (aset (.-tmp d) 0 (aget (.-tmp d) 1))
+        (set! (values (aget (.-tmp d) 1) err) (.readByte d))
+        (when (!= err nil)
+          (return nil err)))
+
+
+      (let [marker (aget (.-tmp d) 1)]
+        (when (== marker 0)
+          ;; Treat "\xff\x00" as extraneous data.
+          (continue))
+
+        (while (== marker 0xff)
+          ;; Section B.1.1.2 says, "Any marker may optionally be preceded by any
+          ;; number of fill bytes, which are bytes assigned code X'FF'".
+          (set! (values marker err) (.readByte d))
+          (when (!= err nil)
+            (return nil err)))
+
+
+        (when (== marker eoiMarker) ; End Of Image.
+          (break))
+
+        (when (and (<= rst0Marker marker) (<= marker rst7Marker))
+          ;; Figures B.2 and B.16 of the specification suggest that restart markers should
+          ;; only occur between Entropy Coded Segments and not after the final ECS.
+          ;; However, some encoders may generate incorrect JPEGs with a final restart
+          ;; marker. That restart marker will be seen here instead of inside the processSOS
+          ;; method, and is ignored as a harmless error. Restart markers have no extra data,
+          ;; so we check for this before we read the 16-bit length of the segment.
+          (continue))
+
+
+        ;; Read the 16-bit length of the segment. The value includes the 2 bytes for the
+        ;; length itself, so we subtract 2 to get the number of remaining bytes.
+        (when [(set! err (.readFull d (subslice (.-tmp d) _ 2)))] (!= err nil)
+          (return nil err))
+
+        (let [n (- (+ (<< (conv int (aget (.-tmp d) 0)) 8) (conv int (aget (.-tmp d) 1))) 2)]
+          (when (< n 0)
+            (return nil (conv FormatError "short segment length")))
+
+
+          (switch marker
+            (case [sof0Marker sof1Marker sof2Marker]
+              (set! (.-baseline d) (== marker sof0Marker))
+              (set! (.-progressive d) (== marker sof2Marker))
+              (set! err (.processSOF d n))
+              (when (and configOnly (.-jfif d))
+                (return nil err)))
+
+            (case [dhtMarker]
+              (if configOnly
+                (set! err (.ignore d n))
+
+                (set! err (.processDHT d n))))
+
+            (case [dqtMarker]
+              (if configOnly
+                (set! err (.ignore d n))
+
+                (set! err (.processDQT d n))))
+
+            (case [sosMarker]
+              (when configOnly
+                (return nil nil))
+
+              (set! err (.processSOS d n)))
+            (case [driMarker]
+              (if configOnly
+                (set! err (.ignore d n))
+
+                (set! err (.processDRI d n))))
+
+            (case [app0Marker]
+              (set! err (.processApp0Marker d n)))
+            (case [app14Marker]
+              (set! err (.processApp14Marker d n)))
+            (default
+              (cond (or (and (<= app0Marker marker) (<= marker app15Marker)) (== marker comMarker))
+                (set! err (.ignore d n))
+                (< marker 0xc0) ; See Table B.1 "Marker code assignments".
+                (set! err (conv FormatError "unknown marker")) :else
+
+                (set! err (conv UnsupportedError "unknown marker")))))
+
+
+          (when (!= err nil)
+            (return nil err))))))
+
+
+
+  (when (.-progressive d)
+    (when [err (.reconstructProgressiveImage d)] (!= err nil)
+      (return nil err)))
+
+
+  (when (!= (.-img1 d) nil)
+    (return (.-img1 d) nil))
+
+  (when (!= (.-img3 d) nil)
+    (cond (!= (.-blackPix d) nil)
+      (return (.applyBlack d))
+      (.isRGB d)
+      (return (.convertToRGB d)))
+
+    (return (.-img3 d) nil))
+
+  (return nil (conv FormatError "missing SOS marker")))
+
+
+
+
+
+
+
+
+
+^{:go/end 743} (go/method applyBlack "applyBlack combines d.img3 and d.blackPix into a CMYK image. The formula\nused depends on whether the JPEG image is stored as CMYK or YCbCrK,\nindicated by the APP14 (Adobe) metadata.\n\nAdobe CMYK JPEG images are inverted, where 255 means no ink instead of full\nink, so we apply \"v = 255 - v\" at various points. Note that a double\ninversion is a no-op, so inversions might be implicit in the code below.\n" [^{:tag (* decoder)} d] :results [image/Image error]
+  (when (not (.-adobeTransformValid d))
+    (return nil (conv UnsupportedError "unknown color model: 4-component JPEG doesn't have Adobe APP14 metadata")))
+
+
+  ;; If the 4-component JPEG image isn't explicitly marked as "Unknown (RGB
+  ;; or CMYK)" as per
+  ;; https://www.sno.phy.queensu.ca/~phil/exiftool/TagNames/JPEG.html#Adobe
+  ;; we assume that it is YCbCrK. This matches libjpeg's jdapimin.c.
+  (when (!= (.-adobeTransform d) adobeTransformUnknown)
+    ;; Convert the YCbCr part of the YCbCrK to RGB, invert the RGB to get
+    ;; CMY, and patch in the original K. The RGB to CMY inversion cancels
+    ;; out the 'Adobe inversion' described in the applyBlack doc comment
+    ;; above, so in practice, only the fourth channel (black) is inverted.
+    (let [bounds (.Bounds (.-img3 d))
+        ^{:line 695} img (image/NewRGBA bounds)]
+      (imageutil/DrawYCbCr img bounds (.-img3 d) (.-Min bounds))
+      (for [(values iBase y) (values 0 (.-Y (.-Min bounds)))] (< y (.-Y (.-Max bounds))) (set! (values iBase y) (values (+ iBase (.-Stride img)) (+ y 1)))
+        (for [(values i x) (values (+ iBase 3) (.-X (.-Min bounds)))] (< x (.-X (.-Max bounds))) (set! (values i x) (values (+ i 4) (+ x 1)))
+          (aset (.-Pix img) i (- 255 (aget (.-blackPix d) (+ (* (- y (.-Y (.-Min bounds))) (.-blackStride d)) (- x (.-X (.-Min bounds)))))))))
+
+
+      ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4 6]} (lit image/CMYK
+            :Pix (.-Pix img)
+            :Stride (.-Stride img)
+            :Rect (.-Rect img)))
+        nil)))
+
+
+  ;; The first three channels (cyan, magenta, yellow) of the CMYK
+  ;; were decoded into d.img3, but each channel was decoded into a separate
+  ;; []byte slice, and some channels may be subsampled. We interleave the
+  ;; separate channels into an image.CMYK's single []byte slice containing 4
+  ;; contiguous bytes per pixel.
+  (let [bounds (.Bounds (.-img3 d))
+      ^{:line 715} img (image/NewCMYK bounds)
+
+      ^{:line 717} translations (lit (array 4 (struct
+            ^{:line 718 :tag (slice byte)} src
+            ^{:line 719 :tag int} stride))
+
+        (lit _ (.-Y (.-img3 d)) (.-YStride (.-img3 d)))
+        (lit _ (.-Cb (.-img3 d)) (.-CStride (.-img3 d)))
+        (lit _ (.-Cr (.-img3 d)) (.-CStride (.-img3 d)))
+        (lit _ (.-blackPix d) (.-blackStride d)))]
+
+    (range [t translation translations]
+      (let [subsample (or (!= (.-h (aget (.-comp d) t)) (.-h (aget (.-comp d) 0))) (!= (.-v (aget (.-comp d) t)) (.-v (aget (.-comp d) 0))))]
+        (for [(values iBase y) (values 0 (.-Y (.-Min bounds)))] (< y (.-Y (.-Max bounds))) (set! (values iBase y) (values (+ iBase (.-Stride img)) (+ y 1)))
+          (let [sy (- y (.-Y (.-Min bounds)))]
+            (when subsample
+              (set! sy / 2))
+
+            (for [(values i x) (values (+ iBase t) (.-X (.-Min bounds)))] (< x (.-X (.-Max bounds))) (set! (values i x) (values (+ i 4) (+ x 1)))
+              (let [sx (- x (.-X (.-Min bounds)))]
+                (when subsample
+                  (set! sx / 2))
+
+                (aset (.-Pix img) i (- 255 (aget (.-src translation) (+ (* sy (.-stride translation)) sx))))))))))
+
+
+
+    (return img nil)))
+
+
+^{:go/end 755} (go/method isRGB ^bool [^{:tag (* decoder)} d]
+  (when (.-jfif d)
+    (return false))
+
+  (when (and (.-adobeTransformValid d) (== (.-adobeTransform d) adobeTransformUnknown))
+    ;; https://www.sno.phy.queensu.ca/~phil/exiftool/TagNames/JPEG.html#Adobe
+    ;; says that 0 means Unknown (and in practice RGB) and 1 means YCbCr.
+    (return true))
+
+  (and (== (.-c (aget (.-comp d) 0)) \R) (== (.-c (aget (.-comp d) 1)) \G) (== (.-c (aget (.-comp d) 2)) \B)))
+
+
+^{:go/end 793} (go/method convertToRGB [^{:tag (* decoder)} d] :results [image/Image error]
+  ;; Historically, we only supported 4:4:4, 4:4:0, 4:2:2, 4:2:0, 4:1:1 or
+  ;; 4:1:0 chroma subsampling ratios. Other configurations (including situations
+  ;; where Chroma-Blue and Chroma-Red have different subsampling) are very rare,
+  ;; but not impossible. That restriction was relaxed in Go 1.27 (2026).
+  ;;
+  ;; It's also very rare but not impossible for 3-channel JPEG images to be
+  ;; RGB instead of YCbCr, in which case this convertToRGB function will be
+  ;; called. Note that RGB-instead-of-YCbCr is a property of the JPEG file
+  ;; itself (in the SOF marker), not of the Go code decoding the image.
+  ;;
+  ;; convertToRGB still makes those historical assumptions and does not
+  ;; support the intersection of (1) atypical chroma subsampling and (2)
+  ;; RGB-instead-of-YCbCr. Both of those are very rare and the intersection
+  ;; is even more so.
+  (let [(values h0 h1 h2) (values (.-h (aget (.-comp d) 0)) (.-h (aget (.-comp d) 1)) (.-h (aget (.-comp d) 2)))
+      (values v0 v1 v2) (values (.-v (aget (.-comp d) 0)) (.-v (aget (.-comp d) 1)) (.-v (aget (.-comp d) 2)))]
+    (when (or ^:go/paren (!= h1 h2) ^:go/paren (!= (% h0 h1) 0) ^:go/paren (!= v1 v2) ^:go/paren (!= (% v0 v1) 0))
+      (return nil errUnsupportedSubsamplingRatio))
+
+
+    (let [cScale (/ h0 h1)
+        ^{:line 779} bounds (.Bounds (.-img3 d))
+        ^{:line 780} img (image/NewRGBA bounds)]
+      (for [y (.-Y (.-Min bounds))] (< y (.-Y (.-Max bounds))) (inc! y)
+        (let [po (.PixOffset img (.-X (.-Min bounds)) y)
+            ^{:line 783} yo (.YOffset (.-img3 d) (.-X (.-Min bounds)) y)
+            ^{:line 784} co (.COffset (.-img3 d) (.-X (.-Min bounds)) y)]
+          (for [(values i iMax) (values 0 (- (.-X (.-Max bounds)) (.-X (.-Min bounds))))] (< i iMax) (inc! i)
+            (aset (.-Pix img) (+ po (* 4 i) 0) (aget (.-Y (.-img3 d)) (+ yo i)))
+            (aset (.-Pix img) (+ po (* 4 i) 1) (aget (.-Cb (.-img3 d)) (+ co (/ i cScale))))
+            (aset (.-Pix img) (+ po (* 4 i) 2) (aget (.-Cr (.-img3 d)) (+ co (/ i cScale))))
+            (aset (.-Pix img) (+ po (* 4 i) 3) 255))))
+
+
+      (return img nil))))
+
+
+
+^{:go/end 799} (go/func Decode "Decode reads a JPEG image from r and returns it as an [image.Image].\n" [^io/Reader r] :results [image/Image error]
+  (let [^decoder d (zero decoder)]
+    (.decode d r false)))
+
+
+
+
+^{:go/end 833} (go/func DecodeConfig "DecodeConfig returns the color model and dimensions of a JPEG image without\ndecoding the entire image.\n" [^io/Reader r] :results [image/Config error]
+  (let [^decoder d (zero decoder)]
+    (when [(values _ err) (.decode d r true)] (!= err nil)
+      (return (lit image/Config) err))
+
+    (switch (.-nComp d)
+      (case [1]
+        ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6]} (lit image/Config
+            :ColorModel color/GrayModel
+            :Width (.-width d)
+            :Height (.-height d))
+          nil))
+      (case [3]
+        (let [cm color/YCbCrModel]
+          (when (.isRGB d)
+            (set! cm color/RGBAModel))
+
+          ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6]} (lit image/Config
+              :ColorModel cm
+              :Width (.-width d)
+              :Height (.-height d))
+            nil)))
+      (case [4]
+        ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6]} (lit image/Config
+            :ColorModel color/CMYKModel
+            :Width (.-width d)
+            :Height (.-height d))
+          nil)))
+
+    (return (lit image/Config) (conv FormatError "missing SOF marker"))))
+
+
+^{:go/end 837} (go/func init []
+  (image/RegisterFormat "jpeg" (byte-string 0xff 0xd8) Decode DecodeConfig))

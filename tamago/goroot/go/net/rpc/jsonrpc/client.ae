@@ -1,0 +1,123 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package jsonrpc implements a JSON-RPC 1.0 ClientCodec and ServerCodec
+;; for the rpc package.
+;; For JSON-RPC 2.0 support, see https://godoc.org/?q=json-rpc+2.0
+(in-ns 'go.net.rpc.jsonrpc) (go/file "client.go" :doc "Package jsonrpc implements a JSON-RPC 1.0 ClientCodec and ServerCodec\nfor the rpc package.\nFor JSON-RPC 2.0 support, see https://godoc.org/?q=json-rpc+2.0\n" :imports [
+
+
+    ^{:line 11} [json "encoding/json"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [net "net"]
+    ^{:line 15} [rpc "net/rpc"]
+    ^{:line 16} [sync "sync"]])
+
+
+(go/type clientCodec (struct
+    ^{:line 20 :tag (* json/Decoder)} dec ; for reading JSON values
+    ^{:line 21 :tag (* json/Encoder)} enc ; for writing JSON values
+    ^{:line 22 :tag io/Closer} c
+
+
+    ^{:line 25 :tag clientRequest :doc "temporary work space\n"} req
+    ^{:line 26 :tag clientResponse} resp
+
+
+
+
+
+    ^{:line 32 :tag sync/Mutex :doc "JSON-RPC responses include the request id but not the request method.\nPackage rpc expects both.\nWe save the request method in pending when sending a request\nand then look it up by request ID when filling out the rpc Response.\n"} mutex ; protects pending
+    ^{:line 33 :tag (map uint64 string)} pending)) ; map request id to method name
+
+
+
+^{:go/end 44} (go/func NewClientCodec "NewClientCodec returns a new [rpc.ClientCodec] using JSON-RPC on conn.\n" ^rpc/ClientCodec [^io/ReadWriteCloser conn]
+  (addr ^{:go/breaks [2 4 6 8]} (lit clientCodec
+      :dec (json/NewDecoder conn)
+      :enc (json/NewEncoder conn)
+      :c conn
+      :pending (make (map uint64 string)))))
+
+
+
+(go/type clientRequest (struct
+    ^{:line 47 :tag string :go/tag "json:\"method\""} Method
+    ^{:line 48 :tag (array 1 any) :go/tag "json:\"params\""} Params
+    ^{:line 49 :tag uint64 :go/tag "json:\"id\""} Id))
+
+
+^{:go/end 60} (go/method WriteRequest ^error [^{:tag (* clientCodec)} c ^{:tag (* rpc/Request)} r ^any param]
+  (.Lock (.-mutex c))
+  (aset (.-pending c) (.-Seq r) (.-ServiceMethod r))
+  (.Unlock (.-mutex c))
+  (set! (.-Method (.-req c)) (.-ServiceMethod r))
+  (aset (.-Params (.-req c)) 0 param)
+  (set! (.-Id (.-req c)) (.-Seq r))
+  (.Encode (.-enc c) (addr (.-req c))))
+
+
+(go/type clientResponse (struct
+    ^{:line 63 :tag uint64 :go/tag "json:\"id\""} Id
+    ^{:line 64 :tag (* json/RawMessage) :go/tag "json:\"result\""} Result
+    ^{:line 65 :tag any :go/tag "json:\"error\""} Error))
+
+
+^{:go/end 72} (go/method reset [^{:tag (* clientResponse)} r]
+  (set! (.-Id r) 0)
+  (set! (.-Result r) nil)
+  (set! (.-Error r) nil))
+
+
+^{:go/breaks [[12 97]] :go/end 98} (go/method ReadResponseHeader ^error [^{:tag (* clientCodec)} c ^{:tag (* rpc/Response)} r]
+  (.reset (.-resp c))
+  (when [err (.Decode (.-dec c) (addr (.-resp c)))] (!= err nil)
+    (return err))
+
+
+  (.Lock (.-mutex c))
+  (set! (.-ServiceMethod r) (aget (.-pending c) (.-Id (.-resp c))))
+  (delete (.-pending c) (.-Id (.-resp c)))
+  (.Unlock (.-mutex c))
+
+  (set! (.-Error r) "")
+  (set! (.-Seq r) (.-Id (.-resp c)))
+  (when (or (!= (.-Error (.-resp c)) nil) (== (.-Result (.-resp c)) nil))
+    (let [(values x ok) (assert string (.-Error (.-resp c)))]
+      (when (not ok)
+        (return (fmt/Errorf "invalid error %v" (.-Error (.-resp c)))))
+
+      (when (== x "")
+        (set! x "unspecified error"))
+
+      (set! (.-Error r) x)))
+
+  nil)
+
+
+^{:go/end 105} (go/method ReadResponseBody ^error [^{:tag (* clientCodec)} c ^any x]
+  (when (== x nil)
+    (return nil))
+
+  (json/Unmarshal @(.-Result (.-resp c)) x))
+
+
+^{:go/end 109} (go/method Close ^error [^{:tag (* clientCodec)} c]
+  (.Close (.-c c)))
+
+
+
+
+^{:go/end 115} (go/func NewClient "NewClient returns a new [rpc.Client] to handle requests to the\nset of services at the other end of the connection.\n" ^{:tag (* rpc/Client)} [^io/ReadWriteCloser conn]
+  (rpc/NewClientWithCodec (NewClientCodec conn)))
+
+
+
+^{:go/end 124} (go/func Dial "Dial connects to a JSON-RPC server at the specified network address.\n" [^string network ^string address] :results [(* rpc/Client) error]
+  (let [(values conn err) (net/Dial network address)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (NewClient conn) nil)))

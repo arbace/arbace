@@ -1,0 +1,518 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "packet_parser.go" :imports [
+
+
+    ^{:line 8} [quicwire "golang.org/x/net/internal/quic/quicwire"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 104} (go/func parseLongHeaderPacket "parseLongHeaderPacket parses a QUIC long header packet.\n\nIt does not parse Version Negotiation packets.\n\nOn input, pkt contains a long header packet (possibly followed by more packets),\nk the decryption keys for the packet, and pnumMax the largest packet number seen\nin the number space of this packet.\n\nparseLongHeaderPacket returns the parsed packet with protection removed\nand its length in bytes.\n\nIt returns an empty packet and -1 if the packet could not be parsed.\n" [^{:tag (slice byte)} pkt ^fixedKeys k ^packetNumber pnumMax] :results [^longPacket p ^int n]
+  (when (or (< (len pkt) 5) (not (isLongHeader (aget pkt 0))))
+    (return (lit longPacket) -1))
+
+
+  ;; Header Form (1) = 1,
+  ;; Fixed Bit (1) = 1,
+  ;; Long Packet Type (2),
+  ;; Type-Specific Bits (4),
+  (let [b pkt]
+    (set! (.-ptype p) (getPacketType b))
+    (when (== (.-ptype p) packetTypeInvalid)
+      (return (lit longPacket) -1))
+
+    (set! b (subslice b 1))
+    ;; Version (32),
+    (set! (values (.-version p) n) (quicwire/ConsumeUint32 b))
+    (when (< n 0)
+      (return (lit longPacket) -1))
+
+    (set! b (subslice b n))
+    (when (== (.-version p) 0)
+      ;; Version Negotiation packet; not handled here.
+      (return (lit longPacket) -1))
+
+
+    ;; Destination Connection ID Length (8),
+    ;; Destination Connection ID (0..160),
+    (set! (values (.-dstConnID p) n) (quicwire/ConsumeUint8Bytes b))
+    (when (or (< n 0) (> (len (.-dstConnID p)) maxConnIDLen))
+      (return (lit longPacket) -1))
+
+    (set! b (subslice b n))
+
+    ;; Source Connection ID Length (8),
+    ;; Source Connection ID (0..160),
+    (set! (values (.-srcConnID p) n) (quicwire/ConsumeUint8Bytes b))
+    (when (or (< n 0) (> (len (.-srcConnID p)) maxConnIDLen))
+      (return (lit longPacket) -1))
+
+    (set! b (subslice b n))
+
+    (switch (.-ptype p)
+      (case [packetTypeInitial]
+        ;; Token Length (i),
+        ;; Token (..),
+        (set! (values (.-extra p) n) (quicwire/ConsumeVarintBytes b))
+        (when (< n 0)
+          (return (lit longPacket) -1))
+
+        (set! b (subslice b n)))
+      (case [packetTypeRetry]
+        ;; Retry Token (..),
+        ;; Retry Integrity Tag (128),
+        (set! (.-extra p) b)
+        (return p (len pkt))))
+
+
+    ;; Length (i),
+    (let [(values payLen ^:assign n) (quicwire/ConsumeVarint b)]
+      (when (< n 0)
+        (return (lit longPacket) -1))
+
+      (set! b (subslice b n))
+      (when (< (conv uint64 (len b)) payLen)
+        (return (lit longPacket) -1))
+
+
+      ;; Packet Number (8..32),
+      ;; Packet Payload (..),
+      (let [pnumOff (- (len pkt) (len b))]
+        (set! pkt (subslice pkt _ (+ pnumOff (conv int payLen))))
+
+        (when (.isSet k)
+          (let [^error err (zero error)]
+            (set! (values (.-payload p) (.-num p) err) (.unprotect k pkt pnumOff pnumMax))
+            (when (!= err nil)
+              (return (lit longPacket) -1))))
+
+
+        (return p (len pkt))))))
+
+
+
+
+^{:go/end 142} (go/func skipLongHeaderPacket "skipLongHeaderPacket returns the length of the long header packet at the start of pkt,\nor -1 if the buffer does not contain a valid packet.\n" ^int [^{:tag (slice byte)} pkt]
+  ;; Header byte, 4 bytes of version.
+  (let [n 5]
+    (when (<= (len pkt) n)
+      (return -1))
+
+    ;; Destination connection ID length, destination connection ID.
+    (set! n + (+ 1 (conv int (aget pkt n))))
+    (when (<= (len pkt) n)
+      (return -1))
+
+    ;; Source connection ID length, source connection ID.
+    (set! n + (+ 1 (conv int (aget pkt n))))
+    (when (<= (len pkt) n)
+      (return -1))
+
+    (when (== (getPacketType pkt) packetTypeInitial)
+      ;; Token length, token.
+      (let [(values _ nn) (quicwire/ConsumeVarintBytes (subslice pkt n))]
+        (when (< nn 0)
+          (return -1))
+
+        (set! n + nn)))
+
+    ;; Length, packet number, payload.
+    (let [(values _ nn) (quicwire/ConsumeVarintBytes (subslice pkt n))]
+      (when (< nn 0)
+        (return -1))
+
+      (set! n + nn)
+      (when (< (len pkt) n)
+        (return -1))
+
+      ^{:line 141} n)))
+
+
+
+
+
+
+^{:go/end 156} (go/func parse1RTTPacket "parse1RTTPacket parses a QUIC 1-RTT (short header) packet.\n\nOn input, pkt contains a short header packet, k the decryption keys for the packet,\nand pnumMax the largest packet number seen in the number space of this packet.\n" [^{:tag (slice byte)} pkt ^{:tag (* updatingKeyPair)} k ^int dstConnIDLen ^packetNumber pnumMax] :results [^shortPacket p ^error err]
+  (let [(values pay pnum ^:assign err) (.unprotect k pkt (+ 1 dstConnIDLen) pnumMax)]
+    (when (!= err nil)
+      (return (lit shortPacket) err))
+
+    (set! (.-num p) pnum)
+    (set! (.-payload p) pay)
+    (return p nil)))
+
+
+;; Consume functions return n=-1 on conditions which result in FRAME_ENCODING_ERROR,
+;; which includes both general parse failures and specific violations of frame
+;; constraints.
+
+^{:go/end 235} (go/func consumeAckFrame [^{:tag (slice byte)} frame ^{:tag (func [^int rangeIndex ^packetNumber start ^packetNumber end])} f] :results [^packetNumber largest ^unscaledAckDelay ackDelay ^ecnCounts ecn ^int n]
+  (let [b (subslice frame 1) ; type
+
+      (values largestAck ^:assign n) (quicwire/ConsumeVarint b)]
+    (when (< n 0)
+      (return 0 0 (lit ecnCounts) -1))
+
+    (set! b (subslice b n))
+
+    (let [(values v ^:assign n) (quicwire/ConsumeVarintInt64 b)]
+      (when (< n 0)
+        (return 0 0 (lit ecnCounts) -1))
+
+      (set! b (subslice b n))
+      (set! ackDelay (conv unscaledAckDelay v))
+
+      (let [(values ackRangeCount ^:assign n) (quicwire/ConsumeVarint b)]
+        (when (< n 0)
+          (return 0 0 (lit ecnCounts) -1))
+
+        (set! b (subslice b n))
+
+        (let [rangeMax (conv packetNumber largestAck)]
+          (for [i (conv uint64 0)] _ (inc! i)
+            (let [(values rangeLen n) (quicwire/ConsumeVarint b)]
+              (when (< n 0)
+                (return 0 0 (lit ecnCounts) -1))
+
+              (set! b (subslice b n))
+              (let [rangeMin (- rangeMax (conv packetNumber rangeLen))]
+                (when (or (< rangeMin 0) (> rangeMin rangeMax))
+                  (return 0 0 (lit ecnCounts) -1))
+
+                (f (conv int i) rangeMin (+ rangeMax 1))
+
+                (when (== i ackRangeCount)
+                  (break))
+
+
+                (let [(values gap ^:assign n) (quicwire/ConsumeVarint b)]
+                  (when (< n 0)
+                    (return 0 0 (lit ecnCounts) -1))
+
+                  (set! b (subslice b n))
+
+                  (set! rangeMax (- rangeMin (conv packetNumber gap) 2))))))
+
+
+          (when (!= (aget frame 0) frameTypeAckECN)
+            (return (conv packetNumber largestAck) ackDelay (lit ecnCounts) (- (len frame) (len b))))
+
+
+          (let [(values ect0Count ^:assign n) (quicwire/ConsumeVarint b)]
+            (when (< n 0)
+              (return 0 0 (lit ecnCounts) -1))
+
+            (set! b (subslice b n))
+            (let [(values ect1Count ^:assign n) (quicwire/ConsumeVarint b)]
+              (when (< n 0)
+                (return 0 0 (lit ecnCounts) -1))
+
+              (set! b (subslice b n))
+              (let [(values ecnCECount ^:assign n) (quicwire/ConsumeVarint b)]
+                (when (< n 0)
+                  (return 0 0 (lit ecnCounts) -1))
+
+                (set! b (subslice b n))
+
+                (set! (.-t0 ecn) (conv int ect0Count))
+                (set! (.-t1 ecn) (conv int ect1Count))
+                (set! (.-ce ecn) (conv int ecnCECount))
+
+                (return (conv packetNumber largestAck) ackDelay ecn (- (len frame) (len b)))))))))))
+
+
+^{:go/end 256} (go/func consumeResetStreamFrame [^{:tag (slice byte)} b] :results [^streamID id ^uint64 code ^int64 finalSize ^int n]
+  (set! n 1)
+  (let [(values idInt nn) (quicwire/ConsumeVarint (subslice b n))]
+    (when (< nn 0)
+      (return 0 0 0 -1))
+
+    (set! n + nn)
+    (set! (values code nn) (quicwire/ConsumeVarint (subslice b n)))
+    (when (< nn 0)
+      (return 0 0 0 -1))
+
+    (set! n + nn)
+    (let [(values v ^:assign nn) (quicwire/ConsumeVarint (subslice b n))]
+      (when (< nn 0)
+        (return 0 0 0 -1))
+
+      (set! n + nn)
+      (set! finalSize (conv int64 v))
+      (return (conv streamID idInt) code finalSize n))))
+
+
+^{:go/end 271} (go/func consumeStopSendingFrame [^{:tag (slice byte)} b] :results [^streamID id ^uint64 code ^int n]
+  (set! n 1)
+  (let [(values idInt nn) (quicwire/ConsumeVarint (subslice b n))]
+    (when (< nn 0)
+      (return 0 0 -1))
+
+    (set! n + nn)
+    (set! (values code nn) (quicwire/ConsumeVarint (subslice b n)))
+    (when (< nn 0)
+      (return 0 0 -1))
+
+    (set! n + nn)
+    (return (conv streamID idInt) code n)))
+
+
+^{:go/end 287} (go/func consumeCryptoFrame [^{:tag (slice byte)} b] :results [^int64 off ^{:tag (slice byte)} data ^int n]
+  (set! n 1)
+  (let [(values v nn) (quicwire/ConsumeVarint (subslice b n))]
+    (when (< nn 0)
+      (return 0 nil -1))
+
+    (set! off (conv int64 v))
+    (set! n + nn)
+    (set! (values data nn) (quicwire/ConsumeVarintBytes (subslice b n)))
+    (when (< nn 0)
+      (return 0 nil -1))
+
+    (set! n + nn)
+    (return off data n)))
+
+
+^{:go/end 300} (go/func consumeNewTokenFrame [^{:tag (slice byte)} b] :results [^{:tag (slice byte)} token ^int n]
+  (set! n 1)
+  (let [(values data nn) (quicwire/ConsumeVarintBytes (subslice b n))]
+    (when (< nn 0)
+      (return nil -1))
+
+    (when (== (len data) 0)
+      (return nil -1))
+
+    (set! n + nn)
+    (return data n)))
+
+
+^{:go/end 332} (go/func consumeStreamFrame [^{:tag (slice byte)} b] :results [^streamID id ^int64 off ^bool fin ^{:tag (slice byte)} data ^int n]
+  (set! fin (!= (bit-and (aget b 0) 0x01) 0))
+  (set! n 1)
+  (let [(values idInt nn) (quicwire/ConsumeVarint (subslice b n))]
+    (when (< nn 0)
+      (return 0 0 false nil -1))
+
+    (set! n + nn)
+    (when (!= (bit-and (aget b 0) 0x04) 0)
+      (let [(values v nn) (quicwire/ConsumeVarint (subslice b n))]
+        (when (< nn 0)
+          (return 0 0 false nil -1))
+
+        (set! n + nn)
+        (set! off (conv int64 v))))
+
+    (if (!= (bit-and (aget b 0) 0x02) 0) (do
+        (set! (values data nn) (quicwire/ConsumeVarintBytes (subslice b n)))
+        (when (< nn 0)
+          (return 0 0 false nil -1))
+
+        (set! n + nn))
+      (do
+        (set! data (subslice b n))
+        (set! n + (len data))))
+
+    (when (>= (+ off (conv int64 (len data))) (<< 1 62))
+      (return 0 0 false nil -1))
+
+    (return (conv streamID idInt) off fin data n)))
+
+
+^{:go/end 342} (go/func consumeMaxDataFrame [^{:tag (slice byte)} b] :results [^int64 max ^int n]
+  (set! n 1)
+  (let [(values v nn) (quicwire/ConsumeVarint (subslice b n))]
+    (when (< nn 0)
+      (return 0 -1))
+
+    (set! n + nn)
+    (return (conv int64 v) n)))
+
+
+^{:go/end 359} (go/func consumeMaxStreamDataFrame [^{:tag (slice byte)} b] :results [^streamID id ^int64 max ^int n]
+  (set! n 1)
+  (let [(values v nn) (quicwire/ConsumeVarint (subslice b n))]
+    (when (< nn 0)
+      (return 0 0 -1))
+
+    (set! n + nn)
+    (set! id (conv streamID v))
+    (set! (values v nn) (quicwire/ConsumeVarint (subslice b n)))
+    (when (< nn 0)
+      (return 0 0 -1))
+
+    (set! n + nn)
+    (set! max (conv int64 v))
+    (return id max n)))
+
+
+^{:go/end 380} (go/func consumeMaxStreamsFrame [^{:tag (slice byte)} b] :results [^streamType typ ^int64 max ^int n]
+  (switch (aget b 0)
+    (case [frameTypeMaxStreamsBidi]
+      (set! typ bidiStream))
+    (case [frameTypeMaxStreamsUni]
+      (set! typ uniStream))
+    (default
+      (return 0 0 -1)))
+
+  (set! n 1)
+  (let [(values v nn) (quicwire/ConsumeVarint (subslice b n))]
+    (when (< nn 0)
+      (return 0 0 -1))
+
+    (set! n + nn)
+    (when (> v maxStreamsLimit)
+      (return 0 0 -1))
+
+    (return typ (conv int64 v) n)))
+
+
+^{:go/end 396} (go/func consumeStreamDataBlockedFrame [^{:tag (slice byte)} b] :results [^streamID id ^int64 max ^int n]
+  (set! n 1)
+  (let [(values v nn) (quicwire/ConsumeVarint (subslice b n))]
+    (when (< nn 0)
+      (return 0 0 -1))
+
+    (set! n + nn)
+    (set! id (conv streamID v))
+    (set! (values max nn) (quicwire/ConsumeVarintInt64 (subslice b n)))
+    (when (< nn 0)
+      (return 0 0 -1))
+
+    (set! n + nn)
+    (return id max n)))
+
+
+^{:go/end 406} (go/func consumeDataBlockedFrame [^{:tag (slice byte)} b] :results [^int64 max ^int n]
+  (set! n 1)
+  (let [(values ^:assign max nn) (quicwire/ConsumeVarintInt64 (subslice b n))]
+    (when (< nn 0)
+      (return 0 -1))
+
+    (set! n + nn)
+    (return max n)))
+
+
+^{:go/end 421} (go/func consumeStreamsBlockedFrame [^{:tag (slice byte)} b] :results [^streamType typ ^int64 max ^int n]
+  (if (== (aget b 0) frameTypeStreamsBlockedBidi)
+    (set! typ bidiStream)
+
+    (set! typ uniStream))
+
+  (set! n 1)
+  (let [(values ^:assign max nn) (quicwire/ConsumeVarintInt64 (subslice b n))]
+    (when (< nn 0)
+      (return 0 0 -1))
+
+    (set! n + nn)
+    (return typ max n)))
+
+
+^{:go/end 453} (go/func consumeNewConnectionIDFrame [^{:tag (slice byte)} b] :results [^int64 seq ^int64 retire ^{:tag (slice byte)} connID ^statelessResetToken resetToken ^int n]
+  (set! n 1)
+  (let [^int nn (zero int)]
+    (set! (values seq nn) (quicwire/ConsumeVarintInt64 (subslice b n)))
+    (when (< nn 0)
+      (return 0 0 nil (lit statelessResetToken) -1))
+
+    (set! n + nn)
+    (set! (values retire nn) (quicwire/ConsumeVarintInt64 (subslice b n)))
+    (when (< nn 0)
+      (return 0 0 nil (lit statelessResetToken) -1))
+
+    (set! n + nn)
+    (when (< seq retire)
+      (return 0 0 nil (lit statelessResetToken) -1))
+
+    (set! (values connID nn) (quicwire/ConsumeVarintBytes (subslice b n)))
+    (when (< nn 0)
+      (return 0 0 nil (lit statelessResetToken) -1))
+
+    (when (or (< (len connID) 1) (> (len connID) 20))
+      (return 0 0 nil (lit statelessResetToken) -1))
+
+    (set! n + nn)
+    (when (< (len (subslice b n)) (len resetToken))
+      (return 0 0 nil (lit statelessResetToken) -1))
+
+    (copy (subslice resetToken) (subslice b n))
+    (set! n + (len resetToken))
+    (return seq retire connID resetToken n)))
+
+
+^{:go/end 464} (go/func consumeRetireConnectionIDFrame [^{:tag (slice byte)} b] :results [^int64 seq ^int n]
+  (set! n 1)
+  (let [^int nn (zero int)]
+    (set! (values seq nn) (quicwire/ConsumeVarintInt64 (subslice b n)))
+    (when (< nn 0)
+      (return 0 -1))
+
+    (set! n + nn)
+    (return seq n)))
+
+
+^{:go/end 474} (go/func consumePathChallengeFrame [^{:tag (slice byte)} b] :results [^pathChallengeData data ^int n]
+  (set! n 1)
+  (let [nn (copy (subslice data) (subslice b n))]
+    (when (!= nn (len data))
+      (return data -1))
+
+    (set! n + nn)
+    (return data n)))
+
+
+^{:go/end 478} (go/func consumePathResponseFrame [^{:tag (slice byte)} b] :results [^pathChallengeData data ^int n]
+  (consumePathChallengeFrame b)) ; identical frame format
+
+
+^{:go/end 502} (go/func consumeConnectionCloseTransportFrame [^{:tag (slice byte)} b] :results [^transportError code ^uint64 frameType ^string reason ^int n]
+  (set! n 1)
+  (let [^int nn (zero int)
+      ^{:line 483 :tag uint64} codeInt (zero uint64)]
+    (set! (values codeInt nn) (quicwire/ConsumeVarint (subslice b n)))
+    (when (< nn 0)
+      (return 0 0 "" -1))
+
+    (set! code (conv transportError codeInt))
+    (set! n + nn)
+    (set! (values frameType nn) (quicwire/ConsumeVarint (subslice b n)))
+    (when (< nn 0)
+      (return 0 0 "" -1))
+
+    (set! n + nn)
+    (let [(values reasonb ^:assign nn) (quicwire/ConsumeVarintBytes (subslice b n))]
+      (when (< nn 0)
+        (return 0 0 "" -1))
+
+      (set! n + nn)
+      (set! reason (conv string reasonb))
+      (return code frameType reason n))))
+
+
+^{:go/end 519} (go/func consumeConnectionCloseApplicationFrame [^{:tag (slice byte)} b] :results [^uint64 code ^string reason ^int n]
+  (set! n 1)
+  (let [^int nn (zero int)]
+    (set! (values code nn) (quicwire/ConsumeVarint (subslice b n)))
+    (when (< nn 0)
+      (return 0 "" -1))
+
+    (set! n + nn)
+    (let [(values reasonb ^:assign nn) (quicwire/ConsumeVarintBytes (subslice b n))]
+      (when (< nn 0)
+        (return 0 "" -1))
+
+      (set! n + nn)
+      (set! reason (conv string reasonb))
+      (return code reason n))))

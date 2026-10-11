@@ -1,0 +1,1120 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Page allocator.
+;;
+;; The page allocator manages mapped pages (defined by pageSize, NOT
+;; physPageSize) for allocation and re-use. It is embedded into mheap.
+;;
+;; Pages are managed using a bitmap that is sharded into chunks.
+;; In the bitmap, 1 means in-use, and 0 means free. The bitmap spans the
+;; process's address space. Chunks are managed in a sparse-array-style structure
+;; similar to mheap.arenas, since the bitmap may be large on some systems.
+;;
+;; The bitmap is efficiently searched by using a radix tree in combination
+;; with fast bit-wise intrinsics. Allocation is performed using an address-ordered
+;; first-fit approach.
+;;
+;; Each entry in the radix tree is a summary that describes three properties of
+;; a particular region of the address space: the number of contiguous free pages
+;; at the start and end of the region it represents, and the maximum number of
+;; contiguous free pages found anywhere in that region.
+;;
+;; Each level of the radix tree is stored as one contiguous array, which represents
+;; a different granularity of subdivision of the processes' address space. Thus, this
+;; radix tree is actually implicit in these large arrays, as opposed to having explicit
+;; dynamically-allocated pointer-based node structures. Naturally, these arrays may be
+;; quite large for system with large address spaces, so in these cases they are mapped
+;; into memory as needed. The leaf summaries of the tree correspond to a bitmap chunk.
+;;
+;; The root level (referred to as L0 and index 0 in pageAlloc.summary) has each
+;; summary represent the largest section of address space (16 GiB on 64-bit systems),
+;; with each subsequent level representing successively smaller subsections until we
+;; reach the finest granularity at the leaves, a chunk.
+;;
+;; More specifically, each summary in each level (except for leaf summaries)
+;; represents some number of entries in the following level. For example, each
+;; summary in the root level may represent a 16 GiB region of address space,
+;; and in the next level there could be 8 corresponding entries which represent 2
+;; GiB subsections of that 16 GiB region, each of which could correspond to 8
+;; entries in the next level which each represent 256 MiB regions, and so on.
+;;
+;; Thus, this design only scales to heaps so large, but can always be extended to
+;; larger heaps by simply adding levels to the radix tree, which mostly costs
+;; additional virtual address space. The choice of managing large arrays also means
+;; that a large amount of virtual address space may be reserved by the runtime.
+
+(in-ns 'go.runtime) (go/file "mpagealloc.go" :imports [
+
+
+    ^{:line 51} [goarch "internal/goarch"]
+    ^{:line 52} [goos "internal/goos"]
+    ^{:line 53} [atomic "internal/runtime/atomic"]
+    ^{:line 54} [gc "internal/runtime/gc"]
+    ^:alias ^{:line 55} [goos_overlay "runtime/goos"]
+    ^{:line 56} [unsafe "unsafe"]])
+
+
+(go/const
+
+
+
+
+  ^{:line 64} [^{:val 512 :doc "The size of a bitmap chunk, i.e. the amount of bits (that is, pages) to consider\nin the bitmap at once. It is 4MB on most platforms, except on Wasm it is 512KB.\nWe use a smaller chuck size on Wasm for the same reason as the smaller arena\nsize (see heapArenaBytes).\n"} pallocChunkPages (<< 1 logPallocChunkPages)]
+  ^{:line 65} [^{:val 4194304} pallocChunkBytes (* pallocChunkPages pageSize)]
+  ^{:line 66} [^{:val 9} logPallocChunkPages (+ (* 9 (- 1 goarch/IsWasm) (- 1 goos/IsTamago)) (* 6 goarch/IsWasm) (* goos/IsTamago goos_overlay/LogPallocChunkPages))]
+  ^{:line 67} [^{:val 22} logPallocChunkBytes (+ logPallocChunkPages gc/PageShift)]
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 80} [^{:val 3 :doc "The number of radix bits for each level.\n\nThe value of 3 is chosen such that the block of summaries we need to scan at\neach level fits in 64 bytes (2^3 summaries * 8 bytes per summary), which is\nclose to the L1 cache line width on many systems. Also, a value of 3 fits 4 tree\nlevels perfectly into the 21-bit pallocBits summary field at the root level.\n\nThe following equation explains how each of the constants relate:\nsummaryL0Bits + (summaryLevels-1)*summaryLevelBits + logPallocChunkBytes = heapAddrBits\n\nsummaryLevels is an architecture-dependent value defined in mpagealloc_*.go.\n"} summaryLevelBits 3]
+  ^{:line 81} [^{:val 6} summaryL0Bits (- heapAddrBits logPallocChunkBytes (* (- summaryLevels 1) summaryLevelBits))]
+
+
+
+
+
+
+  ^{:line 88} [^{:val 5 :doc "pallocChunksL2Bits is the number of bits of the chunk index number\ncovered by the second level of the chunks map.\n\nSee (*pageAlloc).chunks for more details. Update the documentation\nthere should this change.\n"} pallocChunksL2Bits (- heapAddrBits logPallocChunkBytes pallocChunksL1Bits)]
+  ^{:line 89} [^{:val 5} pallocChunksL1Shift pallocChunksL2Bits]
+
+  ^{:line 91} [^{:val "page alloc index"} vmaNamePageAllocIndex "page alloc index"])
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 103} (go/func maxSearchAddr "maxSearchAddr returns the maximum searchAddr value, which indicates\nthat the heap has no free space.\n\nThis function exists just to make it clear that this is the maximum address\nfor the page allocator's search space. See maxOffAddr for details.\n\nIt's a function (rather than a variable) because it needs to be\nusable before package runtime's dynamic initialization is complete.\nSee #51913 for details.\n" ^offAddr [] maxOffAddr)
+
+
+
+
+
+
+(go/type chunkIdx "Global chunk index.\n\nRepresents an index into the leaf level of the radix tree.\nSimilar to arenaIndex, except instead of arenas, it divides the address\nspace into chunks.\n" uint)
+
+
+
+^{:go/end 116} (go/func chunkIndex "chunkIndex returns the global index of the palloc chunk containing the\npointer p.\n" ^chunkIdx [^uintptr p]
+  (conv chunkIdx (/ (- p arenaBaseOffset) pallocChunkBytes)))
+
+
+
+^{:go/end 121} (go/func chunkBase "chunkBase returns the base address of the palloc chunk at index ci.\n" ^uintptr [^chunkIdx ci]
+  (+ (* (conv uintptr ci) pallocChunkBytes) arenaBaseOffset))
+
+
+
+
+^{:go/end 127} (go/func chunkPageIndex "chunkPageIndex computes the index of the page that contains p,\nrelative to the chunk which contains p.\n" ^uint [^uintptr p]
+  (conv uint (/ (% p pallocChunkBytes) pageSize)))
+
+
+
+^{:go/end 138} (go/method l1 "l1 returns the index into the first level of (*pageAlloc).chunks.\n" ^uint [^chunkIdx i]
+  (if (== pallocChunksL1Bits 0)
+    ;; Let the compiler optimize this away if there's no
+    ;; L1 map.
+    (return 0)
+
+    (return (>> (conv uint i) pallocChunksL1Shift))))
+
+
+
+
+^{:go/end 147} (go/method l2 "l2 returns the index into the second level of (*pageAlloc).chunks.\n" ^uint [^chunkIdx i]
+  (if (== pallocChunksL1Bits 0)
+    (return (conv uint i))
+
+    (return (bit-and (conv uint i) (- (<< 1 pallocChunksL2Bits) 1)))))
+
+
+
+
+
+^{:go/end 153} (go/func offAddrToLevelIndex "offAddrToLevelIndex converts an address in the offset address space\nto the index into summary[level] containing addr.\n" ^int [^int level ^offAddr addr]
+  (conv int (>> (- (.-a addr) arenaBaseOffset) (aget levelShift level))))
+
+
+
+
+^{:go/end 159} (go/func levelIndexToOffAddr "levelIndexToOffAddr converts an index into summary[level] into\nthe corresponding address in the offset address space.\n" ^offAddr [^int level ^int idx]
+  (lit offAddr (+ (<< (conv uintptr idx) (aget levelShift level)) arenaBaseOffset)))
+
+
+
+
+
+
+
+^{:go/end 178} (go/func addrsToSummaryRange "addrsToSummaryRange converts base and limit pointers into a range\nof entries for the given summary level.\n\nThe returned range is inclusive on the lower bound and exclusive on\nthe upper bound.\n" [^int level ^uintptr base ^uintptr limit] :results [^int lo ^int hi]
+  ;; This is slightly more nuanced than just a shift for the exclusive
+  ;; upper-bound. Note that the exclusive upper bound may be within a
+  ;; summary at this level, meaning if we just do the obvious computation
+  ;; hi will end up being an inclusive upper bound. Unfortunately, just
+  ;; adding 1 to that is too broad since we might be on the very edge
+  ;; of a summary's max page count boundary for this level
+  ;; (1 << levelLogPages[level]). So, make limit an inclusive upper bound
+  ;; then shift, then add 1, so we get an exclusive upper bound at the end.
+  (set! lo (conv int (>> (- base arenaBaseOffset) (aget levelShift level))))
+  (set! hi (+ (conv int (>> (- limit 1 arenaBaseOffset) (aget levelShift level))) 1))
+  (return))
+
+
+
+
+
+^{:go/end 186} (go/func blockAlignSummaryRange "blockAlignSummaryRange aligns indices into the given level to that\nlevel's block width (1 << levelBits[level]). It assumes lo is inclusive\nand hi is exclusive, and so aligns them down and up respectively.\n" [^int level ^int lo ^int hi] :results [int int]
+  (let [e (<< (conv uintptr 1) (aget levelBits level))]
+    (return (conv int (alignDown (conv uintptr lo) e)) (conv int (alignUp (conv uintptr hi) e)))))
+
+
+(go/type pageAlloc (struct
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 210 :tag (array summaryLevels (slice pallocSum)) :doc "Radix tree of summaries.\n\nEach slice's cap represents the whole memory reservation.\nEach slice's len reflects the allocator's maximum known\nmapped heap address for that level.\n\nThe backing store of each summary level is reserved in init\nand may or may not be committed in grow (small address spaces\nmay commit all the memory in init).\n\nThe purpose of keeping len <= cap is to enforce bounds checks\non the top end of the slice so that instead of an unknown\nruntime segmentation fault, we get a much friendlier out-of-bounds\nerror.\n\nTo iterate over a summary level, use inUse to determine which ranges\nare currently available. Otherwise one might try to access\nmemory which is only Reserved which may result in a hard fault.\n\nWe may still get segmentation faults < len since some of that\nmemory may not be committed yet.\n"} summary
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 248 :tag (array (<< 1 pallocChunksL1Bits) (* (array (<< 1 pallocChunksL2Bits) pallocData))) :doc "chunks is a slice of bitmap chunks.\n\nThe total size of chunks is quite large on most 64-bit platforms\n(O(GiB) or more) if flattened, so rather than making one large mapping\n(which has problems on some platforms, even when PROT_NONE) we use a\ntwo-level sparse array approach similar to the arena index in mheap.\n\nTo find the chunk containing a memory address `a`, do:\n  chunkOf(chunkIndex(a))\n\nBelow is a table describing the configuration for chunks for various\nheapAddrBits supported by the runtime.\n\nheapAddrBits | L1 Bits | L2 Bits | L2 Entry Size\n------------------------------------------------\n32           | 0       | 10      | 128 KiB\n32 (wasm)    | 0       | 13      | 128 KiB\n33 (iOS)     | 0       | 11      | 256 KiB\n48           | 13      | 13      | 1 MiB\n\nThere's no reason to use the L1 part of chunks on 32-bit, the\naddress space is small so the L2 is small. For platforms with a\n48-bit address space, we pick the L1 such that the L2 is 1 MiB\nin size, which is a good balance between low granularity without\nmaking the impact on BSS too high (note the L1 is stored directly\nin pageAlloc).\n\nTo iterate over the bitmap, use inUse to determine which ranges\nare currently available. Otherwise one might iterate over unused\nranges.\n\nProtected by mheapLock.\n\nTODO(mknyszek): Consider changing the definition of the bitmap\nsuch that 1 means free and 0 means in-use so that summaries and\nthe bitmaps align better on zero-values.\n"} chunks
+
+
+
+
+
+
+
+
+
+    ^{:line 258 :tag offAddr :doc "The address to start an allocation search with. It must never\npoint to any memory that is not contained in inUse, i.e.\ninUse.contains(searchAddr.addr()) must always be true. The one\nexception to this rule is that it may take on the value of\nmaxOffAddr to indicate that the heap is exhausted.\n\nWe guarantee that all valid heap addresses below this value\nare allocated and not worth searching.\n"} searchAddr
+
+
+
+
+
+    ^{:line 264 :tag chunkIdx :doc "start and end represent the chunk indices\nwhich pageAlloc knows about. It assumes\nchunks in the range [start, end) are\ncurrently ready to use.\n"} start ^{:tag chunkIdx :doc "start and end represent the chunk indices\nwhich pageAlloc knows about. It assumes\nchunks in the range [start, end) are\ncurrently ready to use.\n"} end
+
+
+
+
+
+
+
+
+
+
+    ^{:line 275 :tag addrRanges :doc "inUse is a slice of ranges of address space which are\nknown by the page allocator to be currently in-use (passed\nto grow).\n\nWe care much more about having a contiguous heap in these cases\nand take additional measures to ensure that, so in nearly all\ncases this should have just 1 element.\n\nAll access is protected by the mheapLock.\n"} inUse
+
+
+    ^{:line 278 :tag (struct ^{:tag scavengeIndex :doc "index is an efficient index of chunks that have pages available to\nscavenge.\n"} index ^{:tag atomic/Uintptr :doc "releasedBg is the amount of memory released in the background this\nscavenge cycle.\n"} releasedBg ^{:tag atomic/Uintptr :doc "releasedEager is the amount of memory released eagerly this scavenge\ncycle.\n"} releasedEager) :doc "scav stores the scavenger state.\n"} scav
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 294 :tag (* mutex) :doc "mheap_.lock. This level of indirection makes it possible\nto test pageAlloc independently of the runtime allocator.\n"} mheapLock
+
+
+
+    ^{:line 298 :tag (* sysMemStat) :doc "sysStat is the runtime memstat to update when new system\nmemory is committed by the pageAlloc for allocation metadata.\n"} sysStat
+
+
+
+
+
+    ^{:line 304 :tag uintptr :doc "summaryMappedReady is the number of bytes mapped in the Ready state\nin the summary structure. Used only for testing currently.\n\nProtected by mheapLock.\n"} summaryMappedReady
+
+
+
+    ^{:line 308 :tag bool :doc "chunkHugePages indicates whether page bitmap chunks should be backed\nby huge pages.\n"} chunkHugePages
+
+
+    ^{:line 311 :tag bool :doc "Whether or not this struct is being used in tests.\n"} test))
+
+
+^{:go/end 342} (go/method init [^{:tag (* pageAlloc)} p ^{:tag (* mutex)} mheapLock ^{:tag (* sysMemStat)} sysStat ^bool test]
+  (when (> (aget levelLogPages 0) logMaxPackedValue)
+    ;; We can't represent 1<<levelLogPages[0] pages, the maximum number
+    ;; of pages we need to represent at the root level, in a summary, which
+    ;; is a big problem. Throw.
+    (print "runtime: root level max pages = " ^int (<< 1 (aget levelLogPages 0)) "\n")
+    (print "runtime: summary max pages = " maxPackedValue "\n")
+    (throw "root level max pages doesn't fit in summary"))
+
+  (set! (.-sysStat p) sysStat)
+
+  ;; Initialize p.inUse.
+  (.init (.-inUse p) sysStat)
+
+  ;; System-dependent initialization.
+  (.sysInit p test)
+
+  ;; Start with the searchAddr in a state indicating there's no free memory.
+  (set! (.-searchAddr p) (maxSearchAddr))
+
+  ;; Set the mheapLock.
+  (set! (.-mheapLock p) mheapLock)
+
+  ;; Initialize the scavenge index.
+  (set! (.-summaryMappedReady p) + (.init (.-index (.-scav p)) test sysStat))
+
+  ;; Set if we're in a test.
+  (set! (.-test p) test))
+
+
+
+
+
+^{:go/end 353} (go/method tryChunkOf "tryChunkOf returns the bitmap data for the given chunk.\n\nReturns nil if the chunk data has not been mapped.\n" ^{:tag (* pallocData)} [^{:tag (* pageAlloc)} p ^chunkIdx ci]
+  (let [l2 (aget (.-chunks p) (.l1 ci))]
+    (when (== l2 nil)
+      (return nil))
+
+    (addr (aget l2 (.l2 ci)))))
+
+
+
+
+
+^{:go/end 360} (go/method chunkOf "chunkOf returns the chunk at the given chunk index.\n\nThe chunk index must be valid or this method may throw.\n" ^{:tag (* pallocData)} [^{:tag (* pageAlloc)} p ^chunkIdx ci]
+  (addr (aget (aget (.-chunks p) (.l1 ci)) (.l2 ci))))
+
+
+
+
+
+
+^{:go/end 438} (go/method grow "grow sets up the metadata for the address range [base, base+size).\nIt may allocate metadata, in which case *p.sysStat will be updated.\n\np.mheapLock must be held.\n" [^{:tag (* pageAlloc)} p ^uintptr base ^uintptr size]
+  (assertLockHeld (.-mheapLock p))
+
+  ;; Round up to chunks, since we can't deal with increments smaller
+  ;; than chunks. Also, sysGrow expects aligned values.
+  (let [limit (alignUp (+ base size) pallocChunkBytes)]
+    (set! base (alignDown base pallocChunkBytes))
+
+    ;; Grow the summary levels in a system-dependent manner.
+    ;; We just update a bunch of additional metadata here.
+    (.sysGrow p base limit)
+
+    ;; Grow the scavenge index.
+    (set! (.-summaryMappedReady p) + (.grow (.-index (.-scav p)) base limit (.-sysStat p)))
+
+    ;; Update p.start and p.end.
+    ;; If no growth happened yet, start == 0. This is generally
+    ;; safe since the zero page is unmapped.
+    (let [firstGrowth (== (.-start p) 0)
+        (values start end) (values (chunkIndex base) (chunkIndex limit))]
+      (when (or firstGrowth (< start (.-start p)))
+        (set! (.-start p) start))
+
+      (when (> end (.-end p))
+        (set! (.-end p) end))
+
+      ;; Note that [base, limit) will never overlap with any existing
+      ;; range inUse because grow only ever adds never-used memory
+      ;; regions to the page allocator.
+      (.add (.-inUse p) (makeAddrRange base limit))
+
+      ;; A grow operation is a lot like a free operation, so if our
+      ;; chunk ends up below p.searchAddr, update p.searchAddr to the
+      ;; new address, just like in free.
+      (when [b (lit offAddr base)] (.lessThan b (.-searchAddr p))
+        (set! (.-searchAddr p) b))
+
+
+      ;; Add entries into chunks, which is sparse, if needed. Then,
+      ;; initialize the bitmap.
+      ;;
+      ;; Newly-grown memory is always considered scavenged.
+      ;; Set all the bits in the scavenged bitmaps high.
+      (for [c (chunkIndex base)] (< c (chunkIndex limit)) (inc! c)
+        (when (== (aget (.-chunks p) (.l1 c)) nil)
+          ;; Create the necessary l2 entry.
+          (let [^:const ^{:val 4096} l2Size (unsafe/Sizeof @(aget (.-chunks p) 0))
+              ^{:line 413} r (sysAlloc l2Size (.-sysStat p) vmaNamePageAllocIndex)]
+            (when (== r nil)
+              (throw "pageAlloc: out of memory"))
+
+            (when (not (.-test p))
+              ;; Make the chunk mapping eligible or ineligible
+              ;; for huge pages, depending on what our current
+              ;; state is.
+              (if (.-chunkHugePages p)
+                (sysHugePage r l2Size)
+
+                (sysNoHugePage r l2Size)))
+
+
+            ;; Store the new chunk block but avoid a write barrier.
+            ;; grow is used in call chains that disallow write barriers.
+            (set! @(conv (* uintptr) (conv unsafe/Pointer (addr (aget (.-chunks p) (.l1 c))))) (conv uintptr r))))
+
+        (.setRange (.-scavenged (.chunkOf p c)) 0 pallocChunkPages))
+
+
+      ;; Update summaries accordingly. The grow acts like a free, so
+      ;; we need to ensure this newly-free memory is visible in the
+      ;; summaries.
+      (.update p base (/ size pageSize) true false))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 484} (go/method ^:go/systemstack enableChunkHugePages "enableChunkHugePages enables huge pages for the chunk bitmap mappings (disabled by default).\n\nThis function is idempotent.\n\nA note on latency: for sufficiently small heaps (<10s of GiB) this function will take constant\ntime, but may take time proportional to the size of the mapped heap beyond that.\n\nThe heap lock must not be held over this operation, since it will briefly acquire\nthe heap lock.\n\nMust be called on the system stack because it acquires the heap lock.\n" [^{:tag (* pageAlloc)} p]
+  ;; Grab the heap lock to turn on huge pages for new chunks and clone the current
+  ;; heap address space ranges.
+  ;;
+  ;; After the lock is released, we can be sure that bitmaps for any new chunks may
+  ;; be backed with huge pages, and we have the address space for the rest of the
+  ;; chunks. At the end of this function, all chunk metadata should be backed by huge
+  ;; pages.
+  (lock (addr (.-lock mheap_)))
+  (when (.-chunkHugePages p)
+    (unlock (addr (.-lock mheap_)))
+    (return))
+
+  (set! (.-chunkHugePages p) true)
+  (let [^addrRanges inUse (zero addrRanges)]
+    (set! (.-sysStat inUse) (.-sysStat p))
+    (.cloneInto (.-inUse p) (addr inUse))
+    (unlock (addr (.-lock mheap_)))
+
+    ;; This might seem like a lot of work, but all these loops are for generality.
+    ;;
+    ;; For a 1 GiB contiguous heap, a 48-bit address space, 13 L1 bits, a palloc chunk size
+    ;; of 4 MiB, and adherence to the default set of heap address hints, this will result in
+    ;; exactly 1 call to sysHugePage.
+    (range [_ r (.-ranges (.-inUse p))]
+      (for [i (.l1 (chunkIndex (.addr (.-base r))))] (< i (.l1 (chunkIndex (- (.addr (.-limit r)) 1)))) (inc! i)
+        ;; N.B. We can assume that p.chunks[i] is non-nil and in a mapped part of p.chunks
+        ;; because it's derived from inUse, which never shrinks.
+        (sysHugePage (conv unsafe/Pointer (aget (.-chunks p) i)) (unsafe/Sizeof @(aget (.-chunks p) 0)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 569} (go/method update "update updates heap metadata. It must be called each time the bitmap\nis updated.\n\nIf contig is true, update does some optimizations assuming that there was\na contiguous allocation or free between addr and addr+npages. alloc indicates\nwhether the operation performed was an allocation or a free.\n\np.mheapLock must be held.\n" [^{:tag (* pageAlloc)} p ^uintptr base ^uintptr npages ^bool contig ^bool alloc]
+  (assertLockHeld (.-mheapLock p))
+
+  ;; base, limit, start, and end are inclusive.
+  (let [limit (- (+ base (* npages pageSize)) 1)
+      (values sc ec) (values (chunkIndex base) (chunkIndex limit))]
+
+    ;; Handle updating the lowest level first.
+    (cond (== sc ec)
+      ;; Fast path: the allocation doesn't span more than one chunk,
+      ;; so update this one and if the summary didn't change, return.
+      (let [x (aget (aget (.-summary p) (- (len (.-summary p)) 1)) sc)
+          ^{:line 506} y ^{:go/via [pallocBits]} (.summarize (.chunkOf p sc))]
+        (when (== x y)
+          (return))
+
+        (aset (aget (.-summary p) (- (len (.-summary p)) 1)) sc y))
+      ^{:line 511} contig
+      ;; Slow contiguous path: the allocation spans more than one chunk
+      ;; and at least one summary is guaranteed to change.
+      (let [summary (aget (.-summary p) (- (len (.-summary p)) 1))]
+
+        ;; Update the summary for chunk sc.
+        (aset summary sc ^{:go/via [pallocBits]} (.summarize (.chunkOf p sc)))
+
+        ;; Update the summaries for chunks in between, which are
+        ;; either totally allocated or freed.
+        (let [whole (subslice (aget (.-summary p) (- (len (.-summary p)) 1)) (+ sc 1) ec)]
+          (if alloc
+            (clear whole)
+
+            (range [i whole]
+              (aset whole i freeChunkSum)))
+
+
+
+          ;; Update the summary for chunk ec.
+          (aset summary ec ^{:go/via [pallocBits]} (.summarize (.chunkOf p ec))))) :else
+
+      ;; Slow general path: the allocation spans more than one chunk
+      ;; and at least one summary is guaranteed to change.
+      ;;
+      ;; We can't assume a contiguous allocation happened, so walk over
+      ;; every chunk in the range and manually recompute the summary.
+      (let [summary (aget (.-summary p) (- (len (.-summary p)) 1))]
+        (for [c sc] (<= c ec) (inc! c)
+          (aset summary c ^{:go/via [pallocBits]} (.summarize (.chunkOf p c))))))
+
+
+
+    ;; Walk up the radix tree and update the summaries appropriately.
+    (let [changed true]
+      (for [l (- (len (.-summary p)) 2)] (and (>= l 0) changed) (dec! l)
+        ;; Update summaries at level l from summaries at level l+1.
+        (set! changed false)
+
+        ;; "Constants" for the previous level which we
+        ;; need to compute the summary from that level.
+        (let [logEntriesPerBlock (aget levelBits (+ l 1))
+            ^{:line 553} logMaxPages (aget levelLogPages (+ l 1))
+
+            ;; lo and hi describe all the parts of the level we need to look at.
+            (values lo hi) (addrsToSummaryRange l base (+ limit 1))]
+
+          ;; Iterate over each block, updating the corresponding summary in the less-granular level.
+          (for [i lo] (< i hi) (inc! i)
+            (let [children (subslice (aget (.-summary p) (+ l 1)) (<< i logEntriesPerBlock) (<< (+ i 1) logEntriesPerBlock))
+                ^{:line 561} sum (mergeSummaries children logMaxPages)
+                ^{:line 562} old (aget (aget (.-summary p) l) i)]
+              (when (!= old sum)
+                (set! changed true)
+                (aset (aget (.-summary p) l) i sum)))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 612} (go/method allocRange "allocRange marks the range of memory [base, base+npages*pageSize) as\nallocated. It also updates the summaries to reflect the newly-updated\nbitmap.\n\nReturns the amount of scavenged memory in bytes present in the\nallocated range.\n\np.mheapLock must be held.\n" ^uintptr [^{:tag (* pageAlloc)} p ^uintptr base ^uintptr npages]
+  (assertLockHeld (.-mheapLock p))
+
+  (let [limit (- (+ base (* npages pageSize)) 1)
+      (values sc ec) (values (chunkIndex base) (chunkIndex limit))
+      (values si ei) (values (chunkPageIndex base) (chunkPageIndex limit))
+
+      ^{:line 586} scav (conv uint 0)]
+    (if (== sc ec)
+      ;; The range doesn't cross any chunk boundaries.
+      (let [chunk (.chunkOf p sc)]
+        (set! scav + (.popcntRange (.-scavenged chunk) si (- (+ ei 1) si)))
+        (.allocRange chunk si (- (+ ei 1) si))
+        (.alloc (.-index (.-scav p)) sc (- (+ ei 1) si)))
+
+      ;; The range crosses at least one chunk boundary.
+      (let [chunk (.chunkOf p sc)]
+        (set! scav + (.popcntRange (.-scavenged chunk) si (- pallocChunkPages si)))
+        (.allocRange chunk si (- pallocChunkPages si))
+        (.alloc (.-index (.-scav p)) sc (- pallocChunkPages si))
+        (for [c (+ sc 1)] (< c ec) (inc! c)
+          (let [chunk (.chunkOf p c)]
+            (set! scav + (.popcntRange (.-scavenged chunk) 0 pallocChunkPages))
+            (.allocAll chunk)
+            (.alloc (.-index (.-scav p)) c pallocChunkPages)))
+
+        (set! chunk (.chunkOf p ec))
+        (set! scav + (.popcntRange (.-scavenged chunk) 0 (+ ei 1)))
+        (.allocRange chunk 0 (+ ei 1))
+        (.alloc (.-index (.-scav p)) ec (+ ei 1))))
+
+    (.update p base npages true true)
+    (* (conv uintptr scav) pageSize)))
+
+
+
+
+
+
+
+
+^{:go/end 638} (go/method findMappedAddr "findMappedAddr returns the smallest mapped offAddr that is\n>= addr. That is, if addr refers to mapped memory, then it is\nreturned. If addr is higher than any mapped region, then\nit returns maxOffAddr.\n\np.mheapLock must be held.\n" ^offAddr [^{:tag (* pageAlloc)} p ^offAddr addr]
+  (assertLockHeld (.-mheapLock p))
+
+  ;; If we're not in a test, validate first by checking mheap_.arenas.
+  ;; This is a fast path which is only safe to use outside of testing.
+  (let [ai (arenaIndex (.addr addr))]
+    (when (or (.-test p) (== (aget (.-arenas mheap_) (.l1 ai)) nil) (== (aget (aget (.-arenas mheap_) (.l1 ai)) (.l2 ai)) nil))
+      (let [(values vAddr ok) (.findAddrGreaterEqual (.-inUse p) (.addr addr))]
+        (if ok
+          (return (lit offAddr vAddr))
+
+          ;; The candidate search address is greater than any
+          ;; known address, which means we definitely have no
+          ;; free memory left.
+          (return maxOffAddr))))
+
+
+    ^{:line 637} addr))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 867} (go/method find "find searches for the first (address-ordered) contiguous free region of\nnpages in size and returns a base address for that region.\n\nIt uses p.searchAddr to prune its search and assumes that no palloc chunks\nbelow chunkIndex(p.searchAddr) contain any free memory at all.\n\nfind also computes and returns a candidate p.searchAddr, which may or\nmay not prune more of the address space than p.searchAddr already does.\nThis candidate is always a valid p.searchAddr.\n\nfind represents the slow path and the full radix tree search.\n\nReturns a base address of 0 on failure, in which case the candidate\nsearchAddr returned is invalid and must be ignored.\n\np.mheapLock must be held.\n" [^{:tag (* pageAlloc)} p ^uintptr npages] :results [uintptr offAddr]
+  (assertLockHeld (.-mheapLock p))
+
+  ;; Search algorithm.
+  ;;
+  ;; This algorithm walks each level l of the radix tree from the root level
+  ;; to the leaf level. It iterates over at most 1 << levelBits[l] of entries
+  ;; in a given level in the radix tree, and uses the summary information to
+  ;; find either:
+  ;;  1) That a given subtree contains a large enough contiguous region, at
+  ;;     which point it continues iterating on the next level, or
+  ;;  2) That there are enough contiguous boundary-crossing bits to satisfy
+  ;;     the allocation, at which point it knows exactly where to start
+  ;;     allocating from.
+  ;;
+  ;; i tracks the index into the current level l's structure for the
+  ;; contiguous 1 << levelBits[l] entries we're actually interested in.
+  ;;
+  ;; NOTE: Technically this search could allocate a region which crosses
+  ;; the arenaBaseOffset boundary, which when arenaBaseOffset != 0, is
+  ;; a discontinuity. However, the only way this could happen is if the
+  ;; page at the zero address is mapped, and this is impossible on
+  ;; every system we support where arenaBaseOffset != 0. So, the
+  ;; discontinuity is already encoded in the fact that the OS will never
+  ;; map the zero page for us, and this function doesn't try to handle
+  ;; this case in any way.
+
+  ;; i is the beginning of the block of entries we're searching at the
+  ;; current level.
+  (let [i 0
+
+      ;; firstFree is the region of address space that we are certain to
+      ;; find the first free page in the heap. base and bound are the inclusive
+      ;; bounds of this window, and both are addresses in the linearized, contiguous
+      ;; view of the address space (with arenaBaseOffset pre-added). At each level,
+      ;; this window is narrowed as we find the memory region containing the
+      ;; first free page of memory. To begin with, the range reflects the
+      ;; full process address space.
+      ;;
+      ;; firstFree is updated by calling foundFree each time free space in the
+      ;; heap is discovered.
+      ;;
+      ;; At the end of the search, base.addr() is the best new
+      ;; searchAddr we could deduce in this search.
+      ^{:line 700} firstFree ^{:go/breaks [[2 703] 4]} (lit (struct
+          ^{:line 701 :tag offAddr} base ^offAddr bound)
+
+        :base minOffAddr
+        :bound maxOffAddr)
+
+      ;; foundFree takes the given address range [addr, addr+size) and
+      ;; updates firstFree if it is a narrower range. The input range must
+      ;; either be fully contained within firstFree or not overlap with it
+      ;; at all.
+      ;;
+      ;; This way, we'll record the first summary we find with any free
+      ;; pages on the root level and narrow that down if we descend into
+      ;; that summary. But as soon as we need to iterate beyond that summary
+      ;; in a level to find a large enough range, we'll stop narrowing.
+      ^{:line 715} foundFree ^{:go/end 728} (fn [^offAddr addr ^uintptr size]
+        (cond (and (.lessEqual (.-base firstFree) addr) (.lessEqual (.add addr (- size 1)) (.-bound firstFree))) (do
+            ;; This range fits within the current firstFree window, so narrow
+            ;; down the firstFree window to the base and bound of this range.
+            (set! (.-base firstFree) addr)
+            (set! (.-bound firstFree) (.add addr (- size 1))))
+          (not (or (.lessThan (.add addr (- size 1)) (.-base firstFree)) (.lessThan (.-bound firstFree) addr))) (do
+            ;; This range only partially overlaps with the firstFree range,
+            ;; so throw.
+            (print "runtime: addr = " (conv hex (.addr addr)) ", size = " size "\n")
+            (print "runtime: base = " (conv hex (.addr (.-base firstFree))) ", bound = " (conv hex (.addr (.-bound firstFree))) "\n")
+            (throw "range partially overlaps"))))
+
+
+
+      ;; lastSum is the summary which we saw on the previous level that made us
+      ;; move on to the next level. Used to print additional information in the
+      ;; case of a catastrophic failure.
+      ;; lastSumIdx is that summary's index in the previous level.
+      ^{:line 734} lastSum (packPallocSum 0 0 0)
+      ^{:line 735} lastSumIdx -1]
+
+    (label :nextLevel
+      (for [l 0] (< l (len (.-summary p))) (inc! l)
+        ;; For the root level, entriesPerBlock is the whole level.
+        (let [entriesPerBlock ^int (<< 1 (aget levelBits l))
+            ^{:line 741} logMaxPages (aget levelLogPages l)]
+
+          ;; We've moved into a new level, so let's update i to our new
+          ;; starting index. This is a no-op for level 0.
+          (set! i << (aget levelBits l))
+
+          ;; Slice out the block of entries we care about.
+          (let [entries (subslice (aget (.-summary p) l) i (+ i entriesPerBlock))
+
+              ;; Determine j0, the first index we should start iterating from.
+              ;; The searchAddr may help us eliminate iterations if we followed the
+              ;; searchAddr on the previous level or we're on the root level, in which
+              ;; case the searchAddr should be the same as i after levelShift.
+              ^{:line 754} j0 0]
+            (when [searchIdx (offAddrToLevelIndex l (.-searchAddr p))] (== (bit-and-not searchIdx (- entriesPerBlock 1)) i)
+              (set! j0 (bit-and searchIdx (- entriesPerBlock 1))))
+
+
+            ;; Run over the level entries looking for
+            ;; a contiguous run of at least npages either
+            ;; within an entry or across entries.
+            ;;
+            ;; base contains the page index (relative to
+            ;; the first entry's first page) of the currently
+            ;; considered run of consecutive pages.
+            ;;
+            ;; size contains the size of the currently considered
+            ;; run of consecutive pages.
+            (let [(values ^uint base ^uint size) (zero uint)]
+              (for [j j0] (< j (len entries)) (inc! j)
+                (let [sum (aget entries j)]
+                  (when (== sum 0)
+                    ;; A full entry means we broke any streak and
+                    ;; that we should skip it altogether.
+                    (set! size 0)
+                    (continue))
+
+
+                  ;; We've encountered a non-zero summary which means
+                  ;; free memory, so update firstFree.
+                  (foundFree (levelIndexToOffAddr l (+ i j)) (* (<< (conv uintptr 1) logMaxPages) pageSize))
+
+                  (let [s (.start sum)]
+                    (when (>= (+ size s) (conv uint npages))
+                      ;; If size == 0 we don't have a run yet,
+                      ;; which means base isn't valid. So, set
+                      ;; base to the first page in this block.
+                      (when (== size 0)
+                        (set! base (<< (conv uint j) logMaxPages)))
+
+                      ;; We hit npages; we're done!
+                      (set! size + s)
+                      (break))
+
+                    (when (>= (.max sum) (conv uint npages))
+                      ;; The entry itself contains npages contiguous
+                      ;; free pages, so continue on the next level
+                      ;; to find that run.
+                      (set! i + j)
+                      (set! lastSumIdx i)
+                      (set! lastSum sum)
+                      (continue :nextLevel))
+
+                    (when (or (== size 0) (< s ^uint (<< 1 logMaxPages)))
+                      ;; We either don't have a current run started, or this entry
+                      ;; isn't totally free (meaning we can't continue the current
+                      ;; one), so try to begin a new run by setting size and base
+                      ;; based on sum.end.
+                      (set! size (.end sum))
+                      (set! base (- (<< (conv uint (+ j 1)) logMaxPages) size))
+                      (continue))
+
+                    ;; The entry is completely free, so continue the run.
+                    (set! size + ^uint (<< 1 logMaxPages)))))
+
+              (when (>= size (conv uint npages))
+                ;; We found a sufficiently large run of free pages straddling
+                ;; some boundary, so compute the address and return it.
+                (let [addr (.addr (.add (levelIndexToOffAddr l i) (* (conv uintptr base) pageSize)))]
+                  (return addr (.findMappedAddr p (.-base firstFree)))))
+
+              (when (== l 0)
+                ;; We're at level zero, so that means we've exhausted our search.
+                (return 0 (maxSearchAddr)))
+
+
+              ;; We're not at level zero, and we exhausted the level we were looking in.
+              ;; This means that either our calculations were wrong or the level above
+              ;; lied to us. In either case, dump some useful state and throw.
+              (print "runtime: summary[" (- l 1) "][" lastSumIdx "] = " (.start lastSum) ", " (.max lastSum) ", " (.end lastSum) "\n")
+              (print "runtime: level = " l ", npages = " npages ", j0 = " j0 "\n")
+              (print "runtime: p.searchAddr = " (conv hex (.addr (.-searchAddr p))) ", i = " i "\n")
+              (print "runtime: levelShift[level] = " (aget levelShift l) ", levelBits[level] = " (aget levelBits l) "\n")
+              (for [j 0] (< j (len entries)) (inc! j)
+                (let [sum (aget entries j)]
+                  (print "runtime: summary[" l "][" (+ i j) "] = (" (.start sum) ", " (.max sum) ", " (.end sum) ")\n")))
+
+              (throw "bad summary data"))))))
+
+
+    ;; Since we've gotten to this point, that means we haven't found a
+    ;; sufficiently-sized free region straddling some boundary (chunk or larger).
+    ;; This means the last summary we inspected must have had a large enough "max"
+    ;; value, so look inside the chunk to find a suitable run.
+    ;;
+    ;; After iterating over all levels, i must contain a chunk index which
+    ;; is what the final level represents.
+    (let [ci (conv chunkIdx i)
+        (values j searchIdx) ^{:go/via [pallocBits]} (.find (.chunkOf p ci) npages 0)]
+      (when (== j (bit-not (conv uint 0)))
+        ;; We couldn't find any space in this chunk despite the summaries telling
+        ;; us it should be there. There's likely a bug, so dump some state and throw.
+        (let [sum (aget (aget (.-summary p) (- (len (.-summary p)) 1)) i)]
+          (print "runtime: summary[" (- (len (.-summary p)) 1) "][" i "] = (" (.start sum) ", " (.max sum) ", " (.end sum) ")\n")
+          (print "runtime: npages = " npages "\n")
+          (throw "bad summary data")))
+
+
+      ;; Compute the address at which the free space starts.
+      (let [addr (+ (chunkBase ci) (* (conv uintptr j) pageSize))
+
+          ;; Since we actually searched the chunk, we may have
+          ;; found an even narrower free window.
+          ^{:line 864} searchAddr (+ (chunkBase ci) (* (conv uintptr searchIdx) pageSize))]
+        (foundFree (lit offAddr searchAddr) (- (chunkBase (+ ci 1)) searchAddr))
+        (return addr (.findMappedAddr p (.-base firstFree)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 933} (go/method ^:go/systemstack alloc "alloc allocates npages worth of memory from the page heap, returning the base\naddress for the allocation and the amount of scavenged memory in bytes\ncontained in the region [base address, base address + npages*pageSize).\n\nReturns a 0 base address on failure, in which case other returned values\nshould be ignored.\n\np.mheapLock must be held.\n\nMust run on the system stack because p.mheapLock must be held.\n" [^{:tag (* pageAlloc)} p ^uintptr npages] :results [^uintptr addr ^uintptr scav]
+  (assertLockHeld (.-mheapLock p))
+
+  ;; If the searchAddr refers to a region which has a higher address than
+  ;; any known chunk, then we know we're out of memory.
+  (when (>= (chunkIndex (.addr (.-searchAddr p))) (.-end p))
+    (return 0 0))
+
+
+  ;; If npages has a chance of fitting in the chunk where the searchAddr is,
+  ;; search it directly.
+  (let [searchAddr minOffAddr]
+    (when (>= (- pallocChunkPages (chunkPageIndex (.addr (.-searchAddr p)))) (conv uint npages))
+      ;; npages is guaranteed to be no greater than pallocChunkPages here.
+      (let [i (chunkIndex (.addr (.-searchAddr p)))]
+        (when [max (.max (aget (aget (.-summary p) (- (len (.-summary p)) 1)) i))] (>= max (conv uint npages))
+          (let [(values j searchIdx) ^{:go/via [pallocBits]} (.find (.chunkOf p i) npages (chunkPageIndex (.addr (.-searchAddr p))))]
+            (when (== j (bit-not (conv uint 0)))
+              (print "runtime: max = " max ", npages = " npages "\n")
+              (print "runtime: searchIdx = " (chunkPageIndex (.addr (.-searchAddr p))) ", p.searchAddr = " (conv hex (.addr (.-searchAddr p))) "\n")
+              (throw "bad summary data"))
+
+            (set! addr (+ (chunkBase i) (* (conv uintptr j) pageSize)))
+            (set! searchAddr (lit offAddr (+ (chunkBase i) (* (conv uintptr searchIdx) pageSize))))
+            (goto :Found)))))
+
+
+    ;; We failed to use a searchAddr for one reason or another, so try
+    ;; the slow path.
+    (set! (values addr searchAddr) (.find p npages))
+    (when (== addr 0)
+      (when (== npages 1)
+        ;; We failed to find a single free page, the smallest unit
+        ;; of allocation. This means we know the heap is completely
+        ;; exhausted. Otherwise, the heap still might have free
+        ;; space in it, just not enough contiguous space to
+        ;; accommodate npages.
+        (set! (.-searchAddr p) (maxSearchAddr)))
+
+      (return 0 0))
+
+    (label :Found
+      ;; Go ahead and actually mark the bits now that we have an address.
+      (set! scav (.allocRange p addr npages)))
+
+    ;; If we found a higher searchAddr, we know that all the
+    ;; heap memory before that searchAddr in an offset address space is
+    ;; allocated, so bump p.searchAddr up to the new one.
+    (when (.lessThan (.-searchAddr p) searchAddr)
+      (set! (.-searchAddr p) searchAddr))
+
+    (return addr scav)))
+
+
+
+
+
+
+
+
+
+^{:go/end 979} (go/method ^:go/systemstack free "free returns npages worth of memory starting at base back to the page heap.\n\np.mheapLock must be held.\n\nMust run on the system stack because p.mheapLock must be held.\n" [^{:tag (* pageAlloc)} p ^uintptr base ^uintptr npages]
+  (assertLockHeld (.-mheapLock p))
+
+  ;; If we're freeing pages below the p.searchAddr, update searchAddr.
+  (when [b (lit offAddr base)] (.lessThan b (.-searchAddr p))
+    (set! (.-searchAddr p) b))
+
+  (let [limit (- (+ base (* npages pageSize)) 1)]
+    (if (== npages 1)
+      ;; Fast path: we're clearing a single bit, and we know exactly
+      ;; where it is, so mark it directly.
+      (let [i (chunkIndex base)
+          ^{:line 954} pi (chunkPageIndex base)]
+        ^{:go/via [pallocBits]} (.free1 (.chunkOf p i) pi)
+        (.free (.-index (.-scav p)) i pi 1))
+
+      ;; Slow path: we're clearing more bits so we may need to iterate.
+      (let [(values sc ec) (values (chunkIndex base) (chunkIndex limit))
+          (values si ei) (values (chunkPageIndex base) (chunkPageIndex limit))]
+
+        (if (== sc ec) (do
+            ;; The range doesn't cross any chunk boundaries.
+            ^{:go/via [pallocBits]} (.free (.chunkOf p sc) si (- (+ ei 1) si))
+            (.free (.-index (.-scav p)) sc si (- (+ ei 1) si)))
+          (do
+            ;; The range crosses at least one chunk boundary.
+            ^{:go/via [pallocBits]} (.free (.chunkOf p sc) si (- pallocChunkPages si))
+            (.free (.-index (.-scav p)) sc si (- pallocChunkPages si))
+            (for [c (+ sc 1)] (< c ec) (inc! c)
+              ^{:go/via [pallocBits]} (.freeAll (.chunkOf p c))
+              (.free (.-index (.-scav p)) c 0 pallocChunkPages))
+
+            ^{:go/via [pallocBits]} (.free (.chunkOf p ec) 0 (+ ei 1))
+            (.free (.-index (.-scav p)) ec 0 (+ ei 1))))))
+
+
+    (.update p base npages true false)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1018} (go/method markRandomPaddingPages "markRandomPaddingPages marks the range of memory [base, base+npages*pageSize]\nas both allocated and scavenged. This is used for randomizing the base heap\naddress. Both the alloc and scav bits are set so that the pages are not used\nand so the memory accounting stats are correctly calculated.\n\nSimilar to allocRange, it also updates the summaries to reflect the\nnewly-updated bitmap.\n\np.mheapLock must be held.\n" [^{:tag (* pageAlloc)} p ^uintptr base ^uintptr npages]
+  (assertLockHeld (.-mheapLock p))
+
+  (let [limit (- (+ base (* npages pageSize)) 1)
+      (values sc ec) (values (chunkIndex base) (chunkIndex limit))
+      (values si ei) (values (chunkPageIndex base) (chunkPageIndex limit))]
+    (if (== sc ec)
+      (let [chunk (.chunkOf p sc)]
+        (.allocRange chunk si (- (+ ei 1) si))
+        (.alloc (.-index (.-scav p)) sc (- (+ ei 1) si))
+        (.setRange (.-scavenged chunk) si (- (+ ei 1) si)))
+
+      (let [chunk (.chunkOf p sc)]
+        (.allocRange chunk si (- pallocChunkPages si))
+        (.alloc (.-index (.-scav p)) sc (- pallocChunkPages si))
+        (.setRange (.-scavenged chunk) si (- pallocChunkPages si))
+        (for [c (+ sc 1)] (< c ec) (inc! c)
+          (let [chunk (.chunkOf p c)]
+            (.allocAll chunk)
+            (.alloc (.-index (.-scav p)) c pallocChunkPages)
+            (.setAll (.-scavenged chunk))))
+
+        (set! chunk (.chunkOf p ec))
+        (.allocRange chunk 0 (+ ei 1))
+        (.alloc (.-index (.-scav p)) ec (+ ei 1))
+        (.setRange (.-scavenged chunk) 0 (+ ei 1))))
+
+    (.update p base npages true true)))
+
+
+(go/const
+  ^{:line 1021} [^{:val 8} pallocSumBytes (unsafe/Sizeof (conv pallocSum 0))]
+
+
+
+  ^{:line 1025} [^{:val 2097152 :doc "maxPackedValue is the maximum value that any of the three fields in\nthe pallocSum may take on.\n"} maxPackedValue (<< 1 logMaxPackedValue)]
+  ^{:line 1026} [^{:val 21} logMaxPackedValue (+ logPallocChunkPages (* (- summaryLevels 1) summaryLevelBits))]
+
+  ^{:line 1028} [^{:val 2251800887427584} freeChunkSum (conv pallocSum (bit-or (conv uint64 pallocChunkPages)
+        (conv uint64 (<< pallocChunkPages logMaxPackedValue))
+        (conv uint64 (<< pallocChunkPages (* 2 logMaxPackedValue)))))])
+
+
+
+
+
+
+
+(go/type pallocSum "pallocSum is a packed summary type which packs three numbers: start, max,\nand end into a single 8-byte value. Each of these values are a summary of\na bitmap and are thus counts, each of which may have a maximum value of\n2^21 - 1, or all three may be equal to 2^21. The latter case is represented\nby just setting the 64th bit.\n" uint64)
+
+
+^{:go/end 1048} (go/func packPallocSum "packPallocSum takes a start, max, and end value and produces a pallocSum.\n" ^pallocSum [^uint start ^uint max ^uint end]
+  (when (== max maxPackedValue)
+    (return (conv pallocSum (conv uint64 (<< 1 63)))))
+
+  (conv pallocSum (bit-or (bit-and (conv uint64 start) (- maxPackedValue 1))
+      (<< (bit-and (conv uint64 max) (- maxPackedValue 1)) logMaxPackedValue)
+      (<< (bit-and (conv uint64 end) (- maxPackedValue 1)) (* 2 logMaxPackedValue)))))
+
+
+
+^{:go/end 1056} (go/method start "start extracts the start value from a packed sum.\n" ^uint [^pallocSum p]
+  (when (!= (bit-and (conv uint64 p) (conv uint64 (<< 1 63))) 0)
+    (return maxPackedValue))
+
+  (conv uint (bit-and (conv uint64 p) (- maxPackedValue 1))))
+
+
+
+^{:go/end 1064} (go/method max "max extracts the max value from a packed sum.\n" ^uint [^pallocSum p]
+  (when (!= (bit-and (conv uint64 p) (conv uint64 (<< 1 63))) 0)
+    (return maxPackedValue))
+
+  (conv uint (bit-and (>> (conv uint64 p) logMaxPackedValue) (- maxPackedValue 1))))
+
+
+
+^{:go/end 1072} (go/method end "end extracts the end value from a packed sum.\n" ^uint [^pallocSum p]
+  (when (!= (bit-and (conv uint64 p) (conv uint64 (<< 1 63))) 0)
+    (return maxPackedValue))
+
+  (conv uint (bit-and (>> (conv uint64 p) (* 2 logMaxPackedValue)) (- maxPackedValue 1))))
+
+
+
+^{:go/end 1082} (go/method unpack "unpack unpacks all three values from the summary.\n" [^pallocSum p] :results [uint uint uint]
+  (when (!= (bit-and (conv uint64 p) (conv uint64 (<< 1 63))) 0)
+    (return maxPackedValue maxPackedValue maxPackedValue))
+
+  (return (conv uint (bit-and (conv uint64 p) (- maxPackedValue 1)))
+    (conv uint (bit-and (>> (conv uint64 p) logMaxPackedValue) (- maxPackedValue 1)))
+    (conv uint (bit-and (>> (conv uint64 p) (* 2 logMaxPackedValue)) (- maxPackedValue 1)))))
+
+
+
+
+^{:go/end 1121} (go/func mergeSummaries "mergeSummaries merges consecutive summaries which may each represent at\nmost 1 << logMaxPagesPerSum pages each together into one.\n" ^pallocSum [^{:tag (slice pallocSum)} sums ^uint logMaxPagesPerSum]
+  ;; Merge the summaries in sums into one.
+  ;;
+  ;; We do this by keeping a running summary representing the merged
+  ;; summaries of sums[:i] in start, most, and end.
+  (let [(values start most end) (.unpack (aget sums 0))]
+    (for [i 1] (< i (len sums)) (inc! i)
+      ;; Merge in sums[i].
+      (let [(values si mi ei) (.unpack (aget sums i))]
+
+        ;; Merge in sums[i].start only if the running summary is
+        ;; completely free, otherwise this summary's start
+        ;; plays no role in the combined sum.
+        (when (== start (<< (conv uint i) logMaxPagesPerSum))
+          (set! start + si))
+
+
+        ;; Recompute the max value of the running sum by looking
+        ;; across the boundary between the running sum and sums[i]
+        ;; and at the max sums[i], taking the greatest of those two
+        ;; and the max of the running sum.
+        (set! most (max most (+ end si) mi))
+
+        ;; Merge in end by checking if this new summary is totally
+        ;; free. If it is, then we want to extend the running sum's
+        ;; end by the new summary. If not, then we have some alloc'd
+        ;; pages in there and we just want to take the end value in
+        ;; sums[i].
+        (if (== ei ^uint (<< 1 logMaxPagesPerSum))
+          (set! end + ^uint (<< 1 logMaxPagesPerSum))
+
+          (set! end ei))))
+
+
+    (packPallocSum start most end)))

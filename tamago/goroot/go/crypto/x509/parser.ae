@@ -1,0 +1,1432 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.x509) (go/file "parser.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [dsa "crypto/dsa"]
+    ^{:line 10} [ecdh "crypto/ecdh"]
+    ^{:line 11} [ecdsa "crypto/ecdsa"]
+    ^{:line 12} [ed25519 "crypto/ed25519"]
+    ^{:line 13} [mldsa "crypto/mldsa"]
+    ^{:line 14} [rsa "crypto/rsa"]
+    ^{:line 15} [pkix "crypto/x509/pkix"]
+    ^{:line 16} [asn1 "encoding/asn1"]
+    ^{:line 17} [errors "errors"]
+    ^{:line 18} [fmt "fmt"]
+    ^{:line 19} [godebug "internal/godebug"]
+    ^{:line 20} [math "math"]
+    ^{:line 21} [big "math/big"]
+    ^{:line 22} [net "net"]
+    ^{:line 23} [url "net/url"]
+    ^{:line 24} [strconv "strconv"]
+    ^{:line 25} [strings "strings"]
+    ^{:line 26} [time "time"]
+    ^{:line 27} [utf16 "unicode/utf16"]
+    ^{:line 28} [utf8 "unicode/utf8"]
+
+    ^{:line 30} [cryptobyte "golang.org/x/crypto/cryptobyte"]
+    ^:alias ^{:line 31} [cryptobyte_asn1 "golang.org/x/crypto/cryptobyte/asn1"]])
+
+
+
+
+^{:go/end 55} (go/func isPrintable "isPrintable reports whether the given b is in the ASN.1 PrintableString set.\nThis is a simplified version of encoding/asn1.isPrintable.\n" ^bool [^byte b]
+  (or (and (<= \a b) (<= b \z))
+    (and (<= \A b) (<= b \Z))
+    (and (<= \0 b) (<= b \9))
+    (and (<= \' b) (<= b \)))
+    (and (<= \+ b) (<= b \/))
+    (== b \space)
+    (== b \:)
+    (== b \=)
+    (== b \?)
+    ;; This is technically not allowed in a PrintableString.
+    ;; However, x509 certificates with wildcard strings don't
+    ;; always use the correct string type so we permit it.
+    (== b \*)
+    ;; This is not technically allowed either. However, not
+    ;; only is it relatively common, but there are also a
+    ;; handful of CA certificates that contain it. At least
+    ;; one of which will not expire until 2027.
+    (== b \&)))
+
+
+
+
+
+
+^{:go/end 140} (go/func parseASN1String "parseASN1String parses the ASN.1 string types T61String, PrintableString,\nUTF8String, BMPString, IA5String, and NumericString. This is mostly copied\nfrom the respective encoding/asn1.parse... methods, rather than just\nincreasing the API surface of that package.\n" [^cryptobyte_asn1/Tag tag ^{:tag (slice byte)} value] :results [string error]
+  (switch tag
+    (case [cryptobyte_asn1/T61String]
+      ;; T.61 is a defunct ITU 8-bit character encoding which preceded Unicode.
+      ;; T.61 uses a code page layout that _almost_ exactly maps to the code
+      ;; page layout of the ISO 8859-1 (Latin-1) character encoding, with the
+      ;; exception that a number of characters in Latin-1 are not present
+      ;; in T.61.
+      ;;
+      ;; Instead of mapping which characters are present in Latin-1 but not T.61,
+      ;; we just treat these strings as being encoded using Latin-1. This matches
+      ;; what most of the world does, including BoringSSL.
+      (let [buf (make (slice byte) 0 (len value))]
+        (range [_ v value]
+          ;; All the 1-byte UTF-8 runes map 1-1 with Latin-1.
+          (set! buf (utf8/AppendRune buf (conv rune v))))
+
+        (return (conv string buf) nil)))
+    (case [cryptobyte_asn1/PrintableString]
+      (range [_ b value]
+        (when (not (isPrintable b))
+          (return "" (errors/New "invalid PrintableString"))))
+
+
+      (return (conv string value) nil))
+    (case [cryptobyte_asn1/UTF8String]
+      (when (not (utf8/Valid value))
+        (return "" (errors/New "invalid UTF-8 string")))
+
+      (return (conv string value) nil))
+    (case [(conv cryptobyte_asn1/Tag asn1/TagBMPString)]
+      ;; BMPString uses the defunct UCS-2 16-bit character encoding, which
+      ;; covers the Basic Multilingual Plane (BMP). UTF-16 was an extension of
+      ;; UCS-2, containing all of the same code points, but also including
+      ;; multi-code point characters (by using surrogate code points). We can
+      ;; treat a UCS-2 encoded string as a UTF-16 encoded string, as long as
+      ;; we reject out the UTF-16 specific code points. This matches the
+      ;; BoringSSL behavior.
+
+      (when (!= (% (len value) 2) 0)
+        (return "" (errors/New "invalid BMPString")))
+
+
+      ;; Strip terminator if present.
+      (when [l (len value)] (and (>= l 2) (== (aget value (- l 1)) 0) (== (aget value (- l 2)) 0))
+        (set! value (subslice value _ (- l 2))))
+
+
+      (let [s (make (slice uint16) 0 (/ (len value) 2))]
+        (while (> (len value) 0)
+          (let [point (+ (<< (conv uint16 (aget value 0)) 8) (conv uint16 (aget value 1)))]
+            ;; Reject UTF-16 code points that are permanently reserved
+            ;; noncharacters (0xfffe, 0xffff, and 0xfdd0-0xfdef) and surrogates
+            ;; (0xd800-0xdfff).
+            (when (or (== point 0xfffe) (== point 0xffff)
+                ^:go/paren (and (>= point 0xfdd0) (<= point 0xfdef))
+                ^:go/paren (and (>= point 0xd800) (<= point 0xdfff)))
+              (return "" (errors/New "invalid BMPString")))
+
+            (set! s (append s point))
+            (set! value (subslice value 2))))
+
+
+        (return (conv string (utf16/Decode s)) nil)))
+    (case [cryptobyte_asn1/IA5String]
+      (let [s (conv string value)]
+        (when (!= (isIA5String s) nil)
+          (return "" (errors/New "invalid IA5String")))
+
+        (return s nil)))
+    (case [(conv cryptobyte_asn1/Tag asn1/TagNumericString)]
+      (range [_ b value]
+        (when (not (or (and (<= \0 b) (<= b \9)) (== b \space)))
+          (return "" (errors/New "invalid NumericString"))))
+
+
+      (return (conv string value) nil)))
+
+  (return "" (fmt/Errorf "unsupported string type: %v" tag)))
+
+
+
+^{:go/end 204} (go/func readASN1Any "readASN1Any parses types documented at [pkix.AttributeTypeAndValue].\n" [^{:tag (* cryptobyte/String)} der] :results [any error]
+  (let [^cryptobyte/String fullValue (zero cryptobyte/String)
+      ^{:line 145 :tag cryptobyte_asn1/Tag} valueTag (zero cryptobyte_asn1/Tag)]
+    (when (not (.ReadAnyASN1Element der (addr fullValue) (addr valueTag)))
+      (return nil (errors/New "invalid ASN.1 element")))
+
+    (switch valueTag
+      (case [cryptobyte_asn1/T61String cryptobyte_asn1/PrintableString
+          ^{:line 151} cryptobyte_asn1/UTF8String (conv cryptobyte_asn1/Tag asn1/TagBMPString)
+          ^{:line 152} cryptobyte_asn1/IA5String (conv cryptobyte_asn1/Tag asn1/TagNumericString)]
+        (let [^{:tag (slice byte)} rawValue (zero (slice byte))]
+          (when (not (.ReadASN1 fullValue (conv (* cryptobyte/String) (addr rawValue)) valueTag))
+            (return nil (errors/New "invalid ASN.1 element")))
+
+          (return (parseASN1String valueTag rawValue))))
+      (case [cryptobyte_asn1/INTEGER]
+        (let [^int64 i (zero int64)]
+          (when (not (.ReadASN1Integer fullValue (addr i)))
+            (return nil (errors/New "invalid ASN.1 integer")))
+
+          (return i nil)))
+      (case [cryptobyte_asn1/BIT_STRING]
+        (let [^asn1/BitString bs (zero asn1/BitString)]
+          (when (not (.ReadASN1BitString fullValue (addr bs)))
+            (return nil (errors/New "invalid ASN.1 BIT STRING")))
+
+          (return bs nil)))
+      (case [cryptobyte_asn1/OCTET_STRING]
+        (let [^{:tag (slice byte)} s (zero (slice byte))]
+          (when (not (.ReadASN1 fullValue (conv (* cryptobyte/String) (addr s)) cryptobyte_asn1/OCTET_STRING))
+            (return nil (errors/New "invalid ASN.1 OCTET STRING")))
+
+          (return s nil)))
+      (case [cryptobyte_asn1/OBJECT_IDENTIFIER]
+        (let [^asn1/ObjectIdentifier oid (zero asn1/ObjectIdentifier)]
+          (when (not (.ReadASN1ObjectIdentifier fullValue (addr oid)))
+            (return nil (errors/New "invalid ASN.1 OBJECT IDENTIFIER")))
+
+          (return oid nil)))
+      (case [cryptobyte_asn1/UTCTime cryptobyte_asn1/GeneralizedTime]
+        (let [(values out err) (readASN1Time (addr fullValue))]
+          (return out err)))
+      (case [cryptobyte_asn1/BOOLEAN]
+        (let [^bool b (zero bool)]
+          (when (not (.ReadASN1Boolean fullValue (addr b)))
+            (return nil (errors/New "invalid ASN.1 BOOLEAN")))
+
+          (return b nil)))
+      (case [cryptobyte_asn1/NULL]
+        (return nil nil))
+      (default
+        (let [^asn1/RawValue v (zero asn1/RawValue)]
+          (set! (.-Class v) (conv int (>> valueTag 6)))
+          (set! (.-IsCompound v) (== (bit-and valueTag 0x20) 0x20))
+          (set! (.-Tag v) (conv int (bit-and valueTag 0x1f)))
+          (set! (.-FullBytes v) fullValue)
+          (when (not (.ReadAnyASN1 fullValue (conv (* cryptobyte/String) (addr (.-Bytes v))) (addr valueTag)))
+            (return nil (errors/New "invalid ASN.1 element")))
+
+          (return v nil))))))
+
+
+
+
+
+^{:go/end 241} (go/func parseName "parseName parses a DER encoded Name as defined in RFC 5280. We may\nwant to export this function in the future for use in crypto/tls.\n" [^cryptobyte/String raw] :results [(* pkix/RDNSequence) error]
+  (when (not (.ReadASN1 raw (addr raw) cryptobyte_asn1/SEQUENCE))
+    (return nil (errors/New "x509: invalid RDNSequence")))
+
+
+  (let [^pkix/RDNSequence rdnSeq (zero pkix/RDNSequence)]
+    (while (not (.Empty raw))
+      (let [^pkix/RelativeDistinguishedNameSET rdnSet (zero pkix/RelativeDistinguishedNameSET)
+          ^{:line 216 :tag cryptobyte/String} set (zero cryptobyte/String)]
+        (when (not (.ReadASN1 raw (addr set) cryptobyte_asn1/SET))
+          (return nil (errors/New "x509: invalid RDNSequence")))
+
+        (while (not (.Empty set))
+          (let [^cryptobyte/String atav (zero cryptobyte/String)]
+            (when (not (.ReadASN1 set (addr atav) cryptobyte_asn1/SEQUENCE))
+              (return nil (errors/New "x509: invalid RDNSequence: invalid attribute")))
+
+            (let [^pkix/AttributeTypeAndValue attr (zero pkix/AttributeTypeAndValue)]
+              (when (not (.ReadASN1ObjectIdentifier atav (addr (.-Type attr))))
+                (return nil (errors/New "x509: invalid RDNSequence: invalid attribute type")))
+
+              (let [^error err (zero error)]
+                (set! (values (.-Value attr) err) (readASN1Any (addr atav)))
+                (when (!= err nil)
+                  (return nil (fmt/Errorf "x509: invalid RDNSequence: invalid attribute value: %s" err)))
+
+                (set! rdnSet (append rdnSet attr))))))
+
+
+        (set! rdnSeq (append rdnSeq rdnSet))))
+
+
+    (return (addr rdnSeq) nil)))
+
+
+^{:go/end 259} (go/func parseAI [^cryptobyte/String der] :results [pkix/AlgorithmIdentifier error]
+  (let [ai (lit pkix/AlgorithmIdentifier)]
+    (when (not (.ReadASN1ObjectIdentifier der (addr (.-Algorithm ai))))
+      (return ai (errors/New "x509: malformed OID")))
+
+    (when (.Empty der)
+      (return ai nil))
+
+    (let [^cryptobyte/String params (zero cryptobyte/String)
+        ^{:line 252 :tag cryptobyte_asn1/Tag} tag (zero cryptobyte_asn1/Tag)]
+      (when (not (.ReadAnyASN1Element der (addr params) (addr tag)))
+        (return ai (errors/New "x509: malformed parameters")))
+
+      (set! (.-Tag (.-Parameters ai)) (conv int tag))
+      (set! (.-FullBytes (.-Parameters ai)) params)
+      (return ai nil))))
+
+
+^{:go/end 276} (go/func readASN1Time [^{:tag (* cryptobyte/String)} der] :results [time/Time error]
+  (let [^time/Time t (zero time/Time)]
+    (switch
+      (case [(.PeekASN1Tag der cryptobyte_asn1/UTCTime)]
+        (when (not (.ReadASN1UTCTime der (addr t)))
+          (return t (errors/New "x509: malformed UTCTime"))))
+
+      (case [(.PeekASN1Tag der cryptobyte_asn1/GeneralizedTime)]
+        (when (not (.ReadASN1GeneralizedTime der (addr t)))
+          (return t (errors/New "x509: malformed GeneralizedTime"))))
+
+      (default
+        (return t (errors/New "x509: unsupported time format"))))
+
+    (return t nil)))
+
+
+^{:go/end 289} (go/func parseValidity [^cryptobyte/String der] :results [time/Time time/Time error]
+  (let [(values notBefore err) (readASN1Time (addr der))]
+    (when (!= err nil)
+      (return (lit time/Time) (lit time/Time) err))
+
+    (let [(values notAfter ^:assign err) (readASN1Time (addr der))]
+      (when (!= err nil)
+        (return (lit time/Time) (lit time/Time) err))
+
+
+      (return notBefore notAfter nil))))
+
+
+^{:go/end 307} (go/func parseExtension [^cryptobyte/String der] :results [pkix/Extension error]
+  (let [^pkix/Extension ext (zero pkix/Extension)]
+    (when (not (.ReadASN1ObjectIdentifier der (addr (.-Id ext))))
+      (return ext (errors/New "x509: malformed extension OID field")))
+
+    (when (.PeekASN1Tag der cryptobyte_asn1/BOOLEAN)
+      (when (not (.ReadASN1Boolean der (addr (.-Critical ext))))
+        (return ext (errors/New "x509: malformed extension critical field"))))
+
+
+    (let [^cryptobyte/String val (zero cryptobyte/String)]
+      (when (not (.ReadASN1 der (addr val) cryptobyte_asn1/OCTET_STRING))
+        (return ext (errors/New "x509: malformed extension value field")))
+
+      (set! (.-Value ext) val)
+      (return ext nil))))
+
+
+^{:go/end 411} (go/func parsePublicKey [^{:tag (* publicKeyInfo)} keyData] :results [any error]
+  (let [oid (.-Algorithm (.-Algorithm keyData))
+      ^{:line 311} params (.-Parameters (.-Algorithm keyData))
+      ^{:line 312} data (.RightAlign (.-PublicKey keyData))]
+    (switch
+      (case [(.Equal oid oidPublicKeyRSA)]
+        ;; RSA public keys must have a NULL in the parameters.
+        ;; See RFC 3279, Section 2.3.1.
+        (when (not (bytes/Equal (.-FullBytes params) asn1/NullBytes))
+          (return nil (errors/New "x509: RSA key missing NULL parameters")))
+
+
+        (let [der (conv cryptobyte/String data)
+            ^{:line 322} p (addr (lit pkcs1PublicKey :N (new big/Int)))]
+          (when (not (.ReadASN1 der (addr der) cryptobyte_asn1/SEQUENCE))
+            (return nil (errors/New "x509: invalid RSA public key")))
+
+          (when (not (.ReadASN1Integer der (.-N p)))
+            (return nil (errors/New "x509: invalid RSA modulus")))
+
+          (when (not (.ReadASN1Integer der (addr (.-E p))))
+            (return nil (errors/New "x509: invalid RSA public exponent")))
+
+
+          (when (<= (.Sign (.-N p)) 0)
+            (return nil (errors/New "x509: RSA modulus is not a positive number")))
+
+          (when (<= (.-E p) 0)
+            (return nil (errors/New "x509: RSA public exponent is not a positive number")))
+
+
+          (let [pub (addr ^{:go/breaks [2 4]} (lit rsa/PublicKey
+                  :E (.-E p)
+                  :N (.-N p)))]
+
+            (return pub nil))))
+      (case [(.Equal oid oidPublicKeyECDSA)]
+        (let [paramsDer (conv cryptobyte/String (.-FullBytes params))
+            ^{:line 347} namedCurveOID (new asn1/ObjectIdentifier)]
+          (when (not (.ReadASN1ObjectIdentifier paramsDer namedCurveOID))
+            (return nil (errors/New "x509: invalid ECDSA parameters")))
+
+          (let [namedCurve (namedCurveFromOID @namedCurveOID)]
+            (when (== namedCurve nil)
+              (return nil (errors/New "x509: unsupported elliptic curve")))
+
+            (return (ecdsa/ParseUncompressedPublicKey namedCurve data)))))
+      (case [(.Equal oid oidPublicKeyEd25519)]
+        ;; RFC 8410, Section 3
+        ;; > For all of the OIDs, the parameters MUST be absent.
+        (when (!= (len (.-FullBytes params)) 0)
+          (return nil (errors/New "x509: Ed25519 key encoded with illegal parameters")))
+
+        (when (!= (len data) ed25519/PublicKeySize)
+          (return nil (errors/New "x509: wrong Ed25519 public key size")))
+
+        (return (conv ed25519/PublicKey data) nil))
+      (case [(.Equal oid oidPublicKeyMLDSA44) (.Equal oid oidPublicKeyMLDSA65) (.Equal oid oidPublicKeyMLDSA87)]
+        (when (!= (len (.-FullBytes params)) 0)
+          (return nil (errors/New "x509: ML-DSA key encoded with illegal parameters")))
+
+        (let [(values params ok) (mldsaParametersFromOID oid)]
+          (when (not ok)
+            (return nil (errors/New "x509: unsupported ML-DSA parameters")))
+
+          (return (mldsa/NewPublicKey params data))))
+      (case [(.Equal oid oidPublicKeyX25519)]
+        ;; RFC 8410, Section 3
+        ;; > For all of the OIDs, the parameters MUST be absent.
+        (when (!= (len (.-FullBytes params)) 0)
+          (return nil (errors/New "x509: X25519 key encoded with illegal parameters")))
+
+        (return (.NewPublicKey (ecdh/X25519) data)))
+      (case [(.Equal oid oidPublicKeyDSA)]
+        (let [der (conv cryptobyte/String data)
+            ^{:line 384} y (new big/Int)]
+          (when (not (.ReadASN1Integer der y))
+            (return nil (errors/New "x509: invalid DSA public key")))
+
+          (let [pub (addr ^{:go/breaks [2 4]} (lit dsa/PublicKey
+                  :Y y
+                  :Parameters ^{:go/breaks [2 4 6]} (lit dsa/Parameters
+                    :P (new big/Int)
+                    :Q (new big/Int)
+                    :G (new big/Int))))
+
+
+              ^{:line 396} paramsDer (conv cryptobyte/String (.-FullBytes params))]
+            (when (or (not (.ReadASN1 paramsDer (addr paramsDer) cryptobyte_asn1/SEQUENCE))
+                (not (.ReadASN1Integer paramsDer (.-P (.-Parameters pub))))
+                (not (.ReadASN1Integer paramsDer (.-Q (.-Parameters pub))))
+                (not (.ReadASN1Integer paramsDer (.-G (.-Parameters pub)))))
+              (return nil (errors/New "x509: invalid DSA parameters")))
+
+            (when (or (<= (.Sign (.-Y pub)) 0) (<= (.Sign (.-P (.-Parameters pub))) 0)
+                (<= (.Sign (.-Q (.-Parameters pub))) 0) (<= (.Sign (.-G (.-Parameters pub))) 0))
+              (return nil (errors/New "x509: zero or negative DSA parameter")))
+
+            (return pub nil))))
+      (default
+        (return nil (errors/New "x509: unknown public key algorithm"))))))
+
+
+
+^{:go/end 426} (go/func parseKeyUsageExtension [^cryptobyte/String der] :results [KeyUsage error]
+  (let [^asn1/BitString usageBits (zero asn1/BitString)]
+    (when (not (.ReadASN1BitString der (addr usageBits)))
+      (return 0 (errors/New "x509: invalid key usage")))
+
+
+    (let [^int usage (zero int)]
+      (for [i 0] (< i 9) (inc! i)
+        (when (!= (.At usageBits i) 0)
+          (set! usage bit-or ^int (<< 1 (conv uint i)))))
+
+
+      (return (conv KeyUsage usage) nil))))
+
+
+^{:go/end 449} (go/func parseBasicConstraintsExtension [^cryptobyte/String der] :results [bool int error]
+  (let [^bool isCA (zero bool)]
+    (when (not (.ReadASN1 der (addr der) cryptobyte_asn1/SEQUENCE))
+      (return false 0 (errors/New "x509: invalid basic constraints")))
+
+    (when (.PeekASN1Tag der cryptobyte_asn1/BOOLEAN)
+      (when (not (.ReadASN1Boolean der (addr isCA)))
+        (return false 0 (errors/New "x509: invalid basic constraints"))))
+
+
+
+    (let [maxPathLen -1]
+      (when (.PeekASN1Tag der cryptobyte_asn1/INTEGER)
+        (let [^uint mpl (zero uint)]
+          (when (or (not (.ReadASN1Integer der (addr mpl))) (> mpl math/MaxInt))
+            (return false 0 (errors/New "x509: invalid basic constraints")))
+
+          (set! maxPathLen (conv int mpl))))
+
+
+      (return isCA maxPathLen nil))))
+
+
+^{:go/breaks [[5 466]] :go/end 467} (go/func forEachSAN ^error [^cryptobyte/String der ^{:tag (func [^int tag ^{:tag (slice byte)} data] [error])} callback]
+  (when (not (.ReadASN1 der (addr der) cryptobyte_asn1/SEQUENCE))
+    (return (errors/New "x509: invalid subject alternative names")))
+
+  (while (not (.Empty der))
+    (let [^cryptobyte/String san (zero cryptobyte/String)
+        ^{:line 457 :tag cryptobyte_asn1/Tag} tag (zero cryptobyte_asn1/Tag)]
+      (when (not (.ReadAnyASN1 der (addr san) (addr tag)))
+        (return (errors/New "x509: invalid subject alternative name")))
+
+      (when [err (callback (conv int (bit-xor tag 0x80)) san)] (!= err nil)
+        (return err))))
+
+
+
+  nil)
+
+
+^{:go/end 515} (go/func parseSANExtension [^cryptobyte/String der] :results [^{:tag (slice string)} dnsNames ^{:tag (slice string)} emailAddresses ^{:tag (slice net/IP)} ipAddresses ^{:tag (slice (* url/URL))} uris ^error err]
+  (set! err (forEachSAN der ^{:go/breaks [[3 511]] :go/end 512} (fn ^error [^int tag ^{:tag (slice byte)} data]
+        (switch tag
+          (case [nameTypeEmail]
+            (let [email (conv string data)]
+              (when [err (isIA5String email)] (!= err nil)
+                (return (errors/New "x509: SAN rfc822Name is malformed")))
+
+              (set! emailAddresses (append emailAddresses email))))
+          (case [nameTypeDNS]
+            (let [name (conv string data)]
+              (when [err (isIA5String name)] (!= err nil)
+                (return (errors/New "x509: SAN dNSName is malformed")))
+
+              (set! dnsNames (append dnsNames (conv string name)))))
+          (case [nameTypeURI]
+            (let [uriStr (conv string data)]
+              (when [err (isIA5String uriStr)] (!= err nil)
+                (return (errors/New "x509: SAN uniformResourceIdentifier is malformed")))
+
+              (let [(values uri err) (url/Parse uriStr)]
+                (when (!= err nil)
+                  (return (fmt/Errorf "x509: cannot parse URI %q: %s" uriStr err)))
+
+                (when (and (> (len (.-Host uri)) 0) (not (domainNameValid (.-Host uri) false)))
+                  (return (fmt/Errorf "x509: cannot parse URI %q: invalid domain" uriStr)))
+
+                (set! uris (append uris uri)))))
+          (case [nameTypeIP]
+            (switch (len data)
+              (case [net/IPv6len]
+                (when (!= (.To4 (conv net/IP data)) nil)
+                  (return (errors/New "x509: SAN iPAddress contains IPv4-mapped IPv6 address")))
+
+                (set! ipAddresses (append ipAddresses data)))
+              (case [net/IPv4len]
+                (set! ipAddresses (append ipAddresses data)))
+              (default
+                (return (errors/New (+ "x509: cannot parse IP address of length " (strconv/Itoa (len data)))))))))
+
+
+
+        nil)))
+
+
+  (return))
+
+
+^{:go/end 535} (go/func parseAuthorityKeyIdentifier [^pkix/Extension e] :results [(slice byte) error]
+  ;; RFC 5280, Section 4.2.1.1
+  (when (.-Critical e)
+    ;; Conforming CAs MUST mark this extension as non-critical
+    (return nil (errors/New "x509: authority key identifier incorrectly marked critical")))
+
+  (let [val (conv cryptobyte/String (.-Value e))
+      ^{:line 524 :tag cryptobyte/String} akid (zero cryptobyte/String)]
+    (when (not (.ReadASN1 val (addr akid) cryptobyte_asn1/SEQUENCE))
+      (return nil (errors/New "x509: invalid authority key identifier")))
+
+    (when (.PeekASN1Tag akid (.ContextSpecific (conv cryptobyte_asn1/Tag 0)))
+      (when (not (.ReadASN1 akid (addr akid) (.ContextSpecific (conv cryptobyte_asn1/Tag 0))))
+        (return nil (errors/New "x509: invalid authority key identifier")))
+
+      (return akid nil))
+
+    (return nil nil)))
+
+
+^{:go/end 555} (go/func parseExtKeyUsageExtension [^cryptobyte/String der] :results [(slice ExtKeyUsage) (slice asn1/ObjectIdentifier) error]
+  (let [^{:tag (slice ExtKeyUsage)} extKeyUsages (zero (slice ExtKeyUsage))
+      ^{:line 539 :tag (slice asn1/ObjectIdentifier)} unknownUsages (zero (slice asn1/ObjectIdentifier))]
+    (when (not (.ReadASN1 der (addr der) cryptobyte_asn1/SEQUENCE))
+      (return nil nil (errors/New "x509: invalid extended key usages")))
+
+    (while (not (.Empty der))
+      (let [^asn1/ObjectIdentifier eku (zero asn1/ObjectIdentifier)]
+        (when (not (.ReadASN1ObjectIdentifier der (addr eku)))
+          (return nil nil (errors/New "x509: invalid extended key usages")))
+
+        (if [(values extKeyUsage ok) (extKeyUsageFromOID eku)] ok
+          (set! extKeyUsages (append extKeyUsages extKeyUsage))
+
+          (set! unknownUsages (append unknownUsages eku)))))
+
+
+    (return extKeyUsages unknownUsages nil)))
+
+
+^{:go/end 580} (go/func parseCertificatePoliciesExtension [^cryptobyte/String der] :results [(slice OID) error]
+  (let [^{:tag (slice OID)} oids (zero (slice OID))
+      ^{:line 559} seenOIDs (lit (map string bool))]
+    (when (not (.ReadASN1 der (addr der) cryptobyte_asn1/SEQUENCE))
+      (return nil (errors/New "x509: invalid certificate policies")))
+
+    (while (not (.Empty der))
+      (let [^cryptobyte/String cp (zero cryptobyte/String)
+          ^{:line 565 :tag cryptobyte/String} OIDBytes (zero cryptobyte/String)]
+        (when (or (not (.ReadASN1 der (addr cp) cryptobyte_asn1/SEQUENCE)) (not (.ReadASN1 cp (addr OIDBytes) cryptobyte_asn1/OBJECT_IDENTIFIER)))
+          (return nil (errors/New "x509: invalid certificate policies")))
+
+        (when (aget seenOIDs (conv string OIDBytes))
+          (return nil (errors/New "x509: invalid certificate policies")))
+
+        (aset seenOIDs (conv string OIDBytes) true)
+        (let [(values oid ok) (newOIDFromDER OIDBytes)]
+          (when (not ok)
+            (return nil (errors/New "x509: invalid certificate policies")))
+
+          (set! oids (append oids oid)))))
+
+    (return oids nil)))
+
+
+
+^{:go/end 605} (go/func isValidIPMask "isValidIPMask reports whether mask consists of zero or more 1 bits, followed by zero bits.\n" ^bool [^{:tag (slice byte)} mask]
+  ^{:go/breaks [[3 604]]} (let [seenZero false]
+
+    (range [_ b mask]
+      (when seenZero
+        (when (!= b 0)
+          (return false))
+
+
+        (continue))
+
+
+      (switch b
+        (case [0x00 0x80 0xc0 0xe0 0xf0 0xf8 0xfc 0xfe]
+          (set! seenZero true))
+        (case [0xff])
+        (default
+          (return false))))
+
+
+
+    true))
+
+
+^{:go/end 748} (go/func parseNameConstraintsExtension [^{:tag (* Certificate)} out ^pkix/Extension e] :results [^bool unhandled ^error err]
+  ;; RFC 5280, 4.2.1.10
+
+  ;; NameConstraints ::= SEQUENCE {
+  ;;      permittedSubtrees       [0]     GeneralSubtrees OPTIONAL,
+  ;;      excludedSubtrees        [1]     GeneralSubtrees OPTIONAL }
+  ;;
+  ;; GeneralSubtrees ::= SEQUENCE SIZE (1..MAX) OF GeneralSubtree
+  ;;
+  ;; GeneralSubtree ::= SEQUENCE {
+  ;;      base                    GeneralName,
+  ;;      minimum         [0]     BaseDistance DEFAULT 0,
+  ;;      maximum         [1]     BaseDistance OPTIONAL }
+  ;;
+  ;; BaseDistance ::= INTEGER (0..MAX)
+
+  (let [outer (conv cryptobyte/String (.-Value e))
+      (values ^cryptobyte/String toplevel ^cryptobyte/String permitted ^cryptobyte/String excluded) (zero cryptobyte/String)
+      (values ^bool havePermitted ^bool haveExcluded) (zero bool)]
+    (when (or (not (.ReadASN1 outer (addr toplevel) cryptobyte_asn1/SEQUENCE))
+        (not (.Empty outer))
+        (not (.ReadOptionalASN1 toplevel (addr permitted) (addr havePermitted) (.Constructed (.ContextSpecific (conv cryptobyte_asn1/Tag 0)))))
+        (not (.ReadOptionalASN1 toplevel (addr excluded) (addr haveExcluded) (.Constructed (.ContextSpecific (conv cryptobyte_asn1/Tag 1)))))
+        (not (.Empty toplevel)))
+      (return false (errors/New "x509: invalid NameConstraints extension")))
+
+
+    (when (or (and (not havePermitted) (not haveExcluded)) (and (== (len permitted) 0) (== (len excluded) 0)))
+      ;; From RFC 5280, Section 4.2.1.10:
+      ;;   “either the permittedSubtrees field
+      ;;   or the excludedSubtrees MUST be
+      ;;   present”
+      (return false (errors/New "x509: empty name constraints extension")))
+
+
+    (let [getValues ^{:go/end 737} (fn [^cryptobyte/String subtrees] :results [^{:tag (slice string)} dnsNames ^{:tag (slice (* net/IPNet))} ips ^{:tag (slice string)} emails ^{:tag (slice string)} uriDomains ^error err]
+          (while (not (.Empty subtrees))
+            (let [(values ^cryptobyte/String seq ^cryptobyte/String value) (zero cryptobyte/String)
+                ^{:line 645 :tag cryptobyte_asn1/Tag} tag (zero cryptobyte_asn1/Tag)]
+              (when (or (not (.ReadASN1 subtrees (addr seq) cryptobyte_asn1/SEQUENCE))
+                  (not (.ReadAnyASN1 seq (addr value) (addr tag))))
+                (return nil nil nil nil (fmt/Errorf "x509: invalid NameConstraints extension")))
+
+
+              (let [
+                  ^:var ^{:line 652} dnsTag (.ContextSpecific (conv cryptobyte_asn1/Tag 2))
+                  ^:var ^{:line 653} emailTag (.ContextSpecific (conv cryptobyte_asn1/Tag 1))
+                  ^:var ^{:line 654} ipTag (.ContextSpecific (conv cryptobyte_asn1/Tag 7))
+                  ^:var ^{:line 655} uriTag (.ContextSpecific (conv cryptobyte_asn1/Tag 6))]
+
+
+                (switch tag
+                  (case [dnsTag]
+                    (let [domain (conv string value)]
+                      (when [err (isIA5String domain)] (!= err nil)
+                        (return nil nil nil nil (errors/New (+ "x509: invalid constraint value: " (.Error err)))))
+
+
+                      (when (not (domainNameValid domain true))
+                        (return nil nil nil nil (fmt/Errorf "x509: failed to parse dnsName constraint %q" domain)))
+
+                      (set! dnsNames (append dnsNames domain))))
+
+                  (case [ipTag]
+                    (let [l (len value)
+                        (values ^{:tag (slice byte)} ip ^{:tag (slice byte)} mask) (zero (slice byte))]
+
+                      (switch l
+                        (case [8]
+                          (set! ip (subslice value _ 4))
+                          (set! mask (subslice value 4)))
+
+                        (case [32]
+                          (set! ip (subslice value _ 16))
+                          (set! mask (subslice value 16)))
+
+                        (default
+                          (return nil nil nil nil (fmt/Errorf "x509: IP constraint contained value of length %d" l))))
+
+
+                      (when (not (isValidIPMask mask))
+                        (return nil nil nil nil (fmt/Errorf "x509: IP constraint contained invalid mask %x" mask)))
+
+
+                      (when (and (== (len ip) net/IPv6len) (!= (.To4 (conv net/IP ip)) nil))
+                        (return nil nil nil nil (errors/New "x509: IP constraint contained IPv4-mapped IPv6 address")))
+
+
+                      (set! ips (append ips (addr (lit net/IPNet :IP (conv net/IP ip) :Mask (conv net/IPMask mask)))))))
+
+                  (case [emailTag]
+                    (let [constraint (conv string value)]
+                      (when [err (isIA5String constraint)] (!= err nil)
+                        (return nil nil nil nil (errors/New (+ "x509: invalid constraint value: " (.Error err)))))
+
+
+                      ;; If the constraint contains an @ then
+                      ;; it specifies an exact mailbox name.
+                      (if (strings/Contains constraint "@")
+                        (when [(values _ ok) (parseRFC2821Mailbox constraint)] (not ok)
+                          (return nil nil nil nil (fmt/Errorf "x509: failed to parse rfc822Name constraint %q" constraint)))
+
+                        (do
+                          (when (not (domainNameValid constraint true))
+                            (return nil nil nil nil (fmt/Errorf "x509: failed to parse rfc822Name constraint %q" constraint)))))
+
+
+                      (set! emails (append emails constraint))))
+
+                  (case [uriTag]
+                    (let [domain (conv string value)]
+                      (when [err (isIA5String domain)] (!= err nil)
+                        (return nil nil nil nil (errors/New (+ "x509: invalid constraint value: " (.Error err)))))
+
+
+                      (when (!= (net/ParseIP domain) nil)
+                        (return nil nil nil nil (fmt/Errorf "x509: failed to parse URI constraint %q: cannot be IP address" domain)))
+
+
+                      (when (not (domainNameValid domain true))
+                        (return nil nil nil nil (fmt/Errorf "x509: failed to parse URI constraint %q" domain)))
+
+                      (set! uriDomains (append uriDomains domain))))
+
+                  (default
+                    (set! unhandled true))))))
+
+
+
+          (return dnsNames ips emails uriDomains nil))]
+
+
+      (when [(set! (values (.-PermittedDNSDomains out) (.-PermittedIPRanges out) (.-PermittedEmailAddresses out) (.-PermittedURIDomains out) err) (getValues permitted))] (!= err nil)
+        (return false err))
+
+      (when [(set! (values (.-ExcludedDNSDomains out) (.-ExcludedIPRanges out) (.-ExcludedEmailAddresses out) (.-ExcludedURIDomains out) err) (getValues excluded))] (!= err nil)
+        (return false err))
+
+      (set! (.-PermittedDNSDomainsCritical out) (.-Critical e))
+
+      (return unhandled nil))))
+
+
+^{:go/end 960} (go/func processExtensions ^error [^{:tag (* Certificate)} out]
+  ^{:go/breaks [[3 959]]} (let [^error err (zero error)]
+    (range [_ e (.-Extensions out)]
+      (let [unhandled false]
+
+        (cond (and (== (len (.-Id e)) 4) (== (aget (.-Id e) 0) 2) (== (aget (.-Id e) 1) 5) (== (aget (.-Id e) 2) 29))
+          (switch (aget (.-Id e) 3)
+            (case [15]
+              (set! (values (.-KeyUsage out) err) (parseKeyUsageExtension (.-Value e)))
+              (when (!= err nil)
+                (return err)))
+
+            (case [19]
+              (set! (values (.-IsCA out) (.-MaxPathLen out) err) (parseBasicConstraintsExtension (.-Value e)))
+              (when (!= err nil)
+                (return err))
+
+              (set! (.-BasicConstraintsValid out) true)
+              (set! (.-MaxPathLenZero out) (== (.-MaxPathLen out) 0)))
+            (case [17]
+              (set! (values (.-DNSNames out) (.-EmailAddresses out) (.-IPAddresses out) (.-URIs out) err) (parseSANExtension (.-Value e)))
+              (when (!= err nil)
+                (return err))
+
+
+              (when (and (== (len (.-DNSNames out)) 0) (== (len (.-EmailAddresses out)) 0) (== (len (.-IPAddresses out)) 0) (== (len (.-URIs out)) 0))
+                ;; If we didn't parse anything then we do the critical check, below.
+                (set! unhandled true)))
+
+
+            (case [30]
+              (set! (values unhandled err) (parseNameConstraintsExtension out e))
+              (when (!= err nil)
+                (return err)))
+
+
+            (case [31]
+              ;; RFC 5280, 4.2.1.13
+
+              ;; CRLDistributionPoints ::= SEQUENCE SIZE (1..MAX) OF DistributionPoint
+              ;;
+              ;; DistributionPoint ::= SEQUENCE {
+              ;;     distributionPoint       [0]     DistributionPointName OPTIONAL,
+              ;;     reasons                 [1]     ReasonFlags OPTIONAL,
+              ;;     cRLIssuer               [2]     GeneralNames OPTIONAL }
+              ;;
+              ;; DistributionPointName ::= CHOICE {
+              ;;     fullName                [0]     GeneralNames,
+              ;;     nameRelativeToCRLIssuer [1]     RelativeDistinguishedName }
+              (let [val (conv cryptobyte/String (.-Value e))]
+                (when (not (.ReadASN1 val (addr val) cryptobyte_asn1/SEQUENCE))
+                  (return (errors/New "x509: invalid CRL distribution points")))
+
+                (while (not (.Empty val))
+                  (let [^cryptobyte/String dpDER (zero cryptobyte/String)]
+                    (when (not (.ReadASN1 val (addr dpDER) cryptobyte_asn1/SEQUENCE))
+                      (return (errors/New "x509: invalid CRL distribution point")))
+
+                    (let [^cryptobyte/String dpNameDER (zero cryptobyte/String)
+                        ^{:line 809 :tag bool} dpNamePresent (zero bool)]
+                      (when (not (.ReadOptionalASN1 dpDER (addr dpNameDER) (addr dpNamePresent) (.ContextSpecific (.Constructed (conv cryptobyte_asn1/Tag 0)))))
+                        (return (errors/New "x509: invalid CRL distribution point")))
+
+                      (when (not dpNamePresent)
+                        (continue))
+
+                      (when (not (.ReadASN1 dpNameDER (addr dpNameDER) (.ContextSpecific (.Constructed (conv cryptobyte_asn1/Tag 0)))))
+                        (return (errors/New "x509: invalid CRL distribution point")))
+
+                      (while (not (.Empty dpNameDER))
+                        (when (not (.PeekASN1Tag dpNameDER (.ContextSpecific (conv cryptobyte_asn1/Tag 6))))
+                          (break))
+
+                        (let [^cryptobyte/String uri (zero cryptobyte/String)]
+                          (when (not (.ReadASN1 dpNameDER (addr uri) (.ContextSpecific (conv cryptobyte_asn1/Tag 6))))
+                            (return (errors/New "x509: invalid CRL distribution point")))
+
+                          (set! (.-CRLDistributionPoints out) (append (.-CRLDistributionPoints out) (conv string uri))))))))))
+
+
+
+            (case [35]
+              (set! (values (.-AuthorityKeyId out) err) (parseAuthorityKeyIdentifier e))
+              (when (!= err nil)
+                (return err)))
+
+            (case [36]
+              (let [val (conv cryptobyte/String (.-Value e))]
+                (when (not (.ReadASN1 val (addr val) cryptobyte_asn1/SEQUENCE))
+                  (return (errors/New "x509: invalid policy constraints extension")))
+
+                (when (.PeekASN1Tag val (.ContextSpecific (conv cryptobyte_asn1/Tag 0)))
+                  (let [^int64 v (zero int64)]
+                    (when (not (.ReadASN1Int64WithTag val (addr v) (.ContextSpecific (conv cryptobyte_asn1/Tag 0))))
+                      (return (errors/New "x509: invalid policy constraints extension")))
+
+                    (set! (.-RequireExplicitPolicy out) (conv int v))
+                    ;; Check for overflow.
+                    (when (!= (conv int64 (.-RequireExplicitPolicy out)) v)
+                      (return (errors/New "x509: policy constraints requireExplicitPolicy field overflows int")))
+
+                    (set! (.-RequireExplicitPolicyZero out) (== (.-RequireExplicitPolicy out) 0))))
+
+                (when (.PeekASN1Tag val (.ContextSpecific (conv cryptobyte_asn1/Tag 1)))
+                  (let [^int64 v (zero int64)]
+                    (when (not (.ReadASN1Int64WithTag val (addr v) (.ContextSpecific (conv cryptobyte_asn1/Tag 1))))
+                      (return (errors/New "x509: invalid policy constraints extension")))
+
+                    (set! (.-InhibitPolicyMapping out) (conv int v))
+                    ;; Check for overflow.
+                    (when (!= (conv int64 (.-InhibitPolicyMapping out)) v)
+                      (return (errors/New "x509: policy constraints inhibitPolicyMapping field overflows int")))
+
+                    (set! (.-InhibitPolicyMappingZero out) (== (.-InhibitPolicyMapping out) 0))))))
+
+            (case [37]
+              (set! (values (.-ExtKeyUsage out) (.-UnknownExtKeyUsage out) err) (parseExtKeyUsageExtension (.-Value e)))
+              (when (!= err nil)
+                (return err)))
+
+            (case [14] ; RFC 5280, 4.2.1.2
+              (when (.-Critical e)
+                ;; Conforming CAs MUST mark this extension as non-critical
+                (return (errors/New "x509: subject key identifier incorrectly marked critical")))
+
+              (let [val (conv cryptobyte/String (.-Value e))
+                  ^{:line 876 :tag cryptobyte/String} skid (zero cryptobyte/String)]
+                (when (not (.ReadASN1 val (addr skid) cryptobyte_asn1/OCTET_STRING))
+                  (return (errors/New "x509: invalid subject key identifier")))
+
+                (set! (.-SubjectKeyId out) skid)))
+            (case [32]
+              (set! (values (.-Policies out) err) (parseCertificatePoliciesExtension (.-Value e)))
+              (when (!= err nil)
+                (return err))
+
+              (set! (.-PolicyIdentifiers out) (make (slice asn1/ObjectIdentifier) 0 (len (.-Policies out))))
+              (range [_ oid (.-Policies out)]
+                (when [(values oid ok) (.toASN1OID oid)] ok
+                  (set! (.-PolicyIdentifiers out) (append (.-PolicyIdentifiers out) oid)))))
+
+
+            (case [33]
+              (let [val (conv cryptobyte/String (.-Value e))]
+                (when (not (.ReadASN1 val (addr val) cryptobyte_asn1/SEQUENCE))
+                  (return (errors/New "x509: invalid policy mappings extension")))
+
+                (while (not (.Empty val))
+                  (let [^cryptobyte/String s (zero cryptobyte/String)
+                      (values ^cryptobyte/String issuer ^cryptobyte/String subject) (zero cryptobyte/String)]
+                    (when (or (not (.ReadASN1 val (addr s) cryptobyte_asn1/SEQUENCE))
+                        (not (.ReadASN1 s (addr issuer) cryptobyte_asn1/OBJECT_IDENTIFIER))
+                        (not (.ReadASN1 s (addr subject) cryptobyte_asn1/OBJECT_IDENTIFIER)))
+                      (return (errors/New "x509: invalid policy mappings extension")))
+
+                    (set! (.-PolicyMappings out) (append (.-PolicyMappings out) (lit PolicyMapping (lit OID issuer) (lit OID subject))))))))
+
+            (case [54]
+              (let [val (conv cryptobyte/String (.-Value e))]
+                (when (not (.ReadASN1Integer val (addr (.-InhibitAnyPolicy out))))
+                  (return (errors/New "x509: invalid inhibit any policy extension")))
+
+                (set! (.-InhibitAnyPolicyZero out) (== (.-InhibitAnyPolicy out) 0))))
+            (default
+              ;; Unknown extensions are recorded if critical.
+              (set! unhandled true)))
+
+          (.Equal (.-Id e) oidExtensionAuthorityInfoAccess) (do
+            ;; RFC 5280 4.2.2.1: Authority Information Access
+            (when (.-Critical e)
+              ;; Conforming CAs MUST mark this extension as non-critical
+              (return (errors/New "x509: authority info access incorrectly marked critical")))
+
+            (let [val (conv cryptobyte/String (.-Value e))]
+              (when (not (.ReadASN1 val (addr val) cryptobyte_asn1/SEQUENCE))
+                (return (errors/New "x509: invalid authority info access")))
+
+              (while (not (.Empty val))
+                (let [^cryptobyte/String aiaDER (zero cryptobyte/String)]
+                  (when (not (.ReadASN1 val (addr aiaDER) cryptobyte_asn1/SEQUENCE))
+                    (return (errors/New "x509: invalid authority info access")))
+
+                  (let [^asn1/ObjectIdentifier method (zero asn1/ObjectIdentifier)]
+                    (when (not (.ReadASN1ObjectIdentifier aiaDER (addr method)))
+                      (return (errors/New "x509: invalid authority info access")))
+
+                    (when (not (.PeekASN1Tag aiaDER (.ContextSpecific (conv cryptobyte_asn1/Tag 6))))
+                      (continue))
+
+                    (when (not (.ReadASN1 aiaDER (addr aiaDER) (.ContextSpecific (conv cryptobyte_asn1/Tag 6))))
+                      (return (errors/New "x509: invalid authority info access")))
+
+                    (switch
+                      (case [(.Equal method oidAuthorityInfoAccessOcsp)]
+                        (set! (.-OCSPServer out) (append (.-OCSPServer out) (conv string aiaDER))))
+                      (case [(.Equal method oidAuthorityInfoAccessIssuers)]
+                        (set! (.-IssuingCertificateURL out) (append (.-IssuingCertificateURL out) (conv string aiaDER)))))))))) :else
+
+
+
+          ;; Unknown extensions are recorded if critical.
+          (set! unhandled true))
+
+
+        (when (and (.-Critical e) unhandled)
+          (set! (.-UnhandledCriticalExtensions out) (append (.-UnhandledCriticalExtensions out) (.-Id e))))))
+
+
+
+    nil))
+
+
+(go/var x509negativeserial (godebug/New "x509negativeserial"))
+
+^{:go/end 1151} (go/func parseCertificate [^{:tag (slice byte)} der] :results [(* Certificate) error]
+  (let [cert (addr (lit Certificate))
+
+      ^{:line 967} input (conv cryptobyte/String der)]
+    ;; we read the SEQUENCE including length and tag bytes so that
+    ;; we can populate Certificate.Raw, before unwrapping the
+    ;; SEQUENCE so it can be operated on
+    (when (not (.ReadASN1Element input (addr input) cryptobyte_asn1/SEQUENCE))
+      (return nil (errors/New "x509: malformed certificate")))
+
+    (set! (.-Raw cert) input)
+    (when (not (.ReadASN1 input (addr input) cryptobyte_asn1/SEQUENCE))
+      (return nil (errors/New "x509: malformed certificate")))
+
+
+    (let [^cryptobyte/String tbs (zero cryptobyte/String)]
+      ;; do the same trick again as above to extract the raw
+      ;; bytes for Certificate.RawTBSCertificate
+      (when (not (.ReadASN1Element input (addr tbs) cryptobyte_asn1/SEQUENCE))
+        (return nil (errors/New "x509: malformed tbs certificate")))
+
+      (set! (.-RawTBSCertificate cert) tbs)
+      (when (not (.ReadASN1 tbs (addr tbs) cryptobyte_asn1/SEQUENCE))
+        (return nil (errors/New "x509: malformed tbs certificate")))
+
+
+      (when (not (.ReadOptionalASN1Integer tbs (addr (.-Version cert)) (.ContextSpecific (.Constructed (conv cryptobyte_asn1/Tag 0))) 0))
+        (return nil (errors/New "x509: malformed version")))
+
+      (when (< (.-Version cert) 0)
+        (return nil (errors/New "x509: malformed version")))
+
+      ;; for backwards compat reasons Version is one-indexed,
+      ;; rather than zero-indexed as defined in 5280
+      (inc! (.-Version cert))
+      (when (> (.-Version cert) 3)
+        (return nil (errors/New "x509: invalid version")))
+
+
+      (let [serial (new big/Int)]
+        (when (not (.ReadASN1Integer tbs serial))
+          (return nil (errors/New "x509: malformed serial number")))
+
+        (when (== (.Sign serial) -1)
+          (if (!= (.Value x509negativeserial) "1")
+            (return nil (errors/New "x509: negative serial number"))
+
+            (.IncNonDefault x509negativeserial)))
+
+
+        (set! (.-SerialNumber cert) serial)
+
+        (let [^cryptobyte/String sigAISeq (zero cryptobyte/String)]
+          (when (not (.ReadASN1Element tbs (addr sigAISeq) cryptobyte_asn1/SEQUENCE))
+            (return nil (errors/New "x509: malformed signature algorithm identifier")))
+
+          (set! (.-RawSignatureAlgorithm cert) sigAISeq)
+          (when (not (.ReadASN1 sigAISeq (addr sigAISeq) cryptobyte_asn1/SEQUENCE))
+            (return nil (errors/New "x509: malformed signature algorithm identifier")))
+
+          ;; Before parsing the inner algorithm identifier, extract
+          ;; the outer algorithm identifier and make sure that they
+          ;; match.
+          (let [^cryptobyte/String outerSigAISeq (zero cryptobyte/String)]
+            (when (not (.ReadASN1 input (addr outerSigAISeq) cryptobyte_asn1/SEQUENCE))
+              (return nil (errors/New "x509: malformed algorithm identifier")))
+
+            (when (not (bytes/Equal outerSigAISeq sigAISeq))
+              (return nil (errors/New "x509: inner and outer signature algorithm identifiers don't match")))
+
+            (let [(values sigAI err) (parseAI sigAISeq)]
+              (when (!= err nil)
+                (return nil err))
+
+              (set! (.-SignatureAlgorithm cert) (getSignatureAlgorithmFromAI sigAI))
+
+              (let [^cryptobyte/String issuerSeq (zero cryptobyte/String)]
+                (when (not (.ReadASN1Element tbs (addr issuerSeq) cryptobyte_asn1/SEQUENCE))
+                  (return nil (errors/New "x509: malformed issuer")))
+
+                (set! (.-RawIssuer cert) issuerSeq)
+                (let [(values issuerRDNs ^:assign err) (parseName issuerSeq)]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (.FillFromRDNSequence (.-Issuer cert) issuerRDNs)
+
+                  (let [^cryptobyte/String validity (zero cryptobyte/String)]
+                    (when (not (.ReadASN1 tbs (addr validity) cryptobyte_asn1/SEQUENCE))
+                      (return nil (errors/New "x509: malformed validity")))
+
+                    (set! (values (.-NotBefore cert) (.-NotAfter cert) err) (parseValidity validity))
+                    (when (!= err nil)
+                      (return nil err))
+
+
+                    (let [^cryptobyte/String subjectSeq (zero cryptobyte/String)]
+                      (when (not (.ReadASN1Element tbs (addr subjectSeq) cryptobyte_asn1/SEQUENCE))
+                        (return nil (errors/New "x509: malformed issuer")))
+
+                      (set! (.-RawSubject cert) subjectSeq)
+                      (let [(values subjectRDNs ^:assign err) (parseName subjectSeq)]
+                        (when (!= err nil)
+                          (return nil err))
+
+                        (.FillFromRDNSequence (.-Subject cert) subjectRDNs)
+
+                        (let [^cryptobyte/String spki (zero cryptobyte/String)]
+                          (when (not (.ReadASN1Element tbs (addr spki) cryptobyte_asn1/SEQUENCE))
+                            (return nil (errors/New "x509: malformed spki")))
+
+                          (set! (.-RawSubjectPublicKeyInfo cert) spki)
+                          (when (not (.ReadASN1 spki (addr spki) cryptobyte_asn1/SEQUENCE))
+                            (return nil (errors/New "x509: malformed spki")))
+
+                          (let [^cryptobyte/String pkAISeq (zero cryptobyte/String)]
+                            (when (not (.ReadASN1 spki (addr pkAISeq) cryptobyte_asn1/SEQUENCE))
+                              (return nil (errors/New "x509: malformed public key algorithm identifier")))
+
+                            (let [(values pkAI ^:assign err) (parseAI pkAISeq)]
+                              (when (!= err nil)
+                                (return nil err))
+
+                              (set! (.-PublicKeyAlgorithm cert) (getPublicKeyAlgorithmFromOID (.-Algorithm pkAI)))
+                              (let [^asn1/BitString spk (zero asn1/BitString)]
+                                (when (not (.ReadASN1BitString spki (addr spk)))
+                                  (return nil (errors/New "x509: malformed subjectPublicKey")))
+
+                                (when (!= (.-PublicKeyAlgorithm cert) UnknownPublicKeyAlgorithm)
+                                  (set! (values (.-PublicKey cert) err) (parsePublicKey (addr ^{:go/breaks [2 4]} (lit publicKeyInfo
+                                          :Algorithm pkAI
+                                          :PublicKey spk))))
+
+                                  (when (!= err nil)
+                                    (return nil err)))
+
+
+
+                                (when (> (.-Version cert) 1)
+                                  (when (not (.SkipOptionalASN1 tbs (.ContextSpecific (conv cryptobyte_asn1/Tag 1))))
+                                    (return nil (errors/New "x509: malformed issuerUniqueID")))
+
+                                  (when (not (.SkipOptionalASN1 tbs (.ContextSpecific (conv cryptobyte_asn1/Tag 2))))
+                                    (return nil (errors/New "x509: malformed subjectUniqueID")))
+
+                                  (when (== (.-Version cert) 3)
+                                    (let [^cryptobyte/String extensions (zero cryptobyte/String)
+                                        ^{:line 1111 :tag bool} present (zero bool)]
+                                      (when (not (.ReadOptionalASN1 tbs (addr extensions) (addr present) (.ContextSpecific (.Constructed (conv cryptobyte_asn1/Tag 3)))))
+                                        (return nil (errors/New "x509: malformed extensions")))
+
+                                      (when present
+                                        (let [seenExts (make (map string bool))]
+                                          (when (not (.ReadASN1 extensions (addr extensions) cryptobyte_asn1/SEQUENCE))
+                                            (return nil (errors/New "x509: malformed extensions")))
+
+                                          (while (not (.Empty extensions))
+                                            (let [^cryptobyte/String extension (zero cryptobyte/String)]
+                                              (when (not (.ReadASN1 extensions (addr extension) cryptobyte_asn1/SEQUENCE))
+                                                (return nil (errors/New "x509: malformed extension")))
+
+                                              (let [(values ext err) (parseExtension extension)]
+                                                (when (!= err nil)
+                                                  (return nil err))
+
+                                                (let [oidStr (.String (.-Id ext))]
+                                                  (when (aget seenExts oidStr)
+                                                    (return nil (fmt/Errorf "x509: certificate contains duplicate extension with OID %q" oidStr)))
+
+                                                  (aset seenExts oidStr true)
+                                                  (set! (.-Extensions cert) (append (.-Extensions cert) ext))))))
+
+                                          (set! err (processExtensions cert))
+                                          (when (!= err nil)
+                                            (return nil err)))))))
+
+
+
+
+
+                                (let [^asn1/BitString signature (zero asn1/BitString)]
+                                  (when (not (.ReadASN1BitString input (addr signature)))
+                                    (return nil (errors/New "x509: malformed signature")))
+
+                                  (set! (.-Signature cert) (.RightAlign signature))
+
+                                  (return cert nil))))))))))))))))))
+
+
+
+
+
+
+
+^{:go/end 1167} (go/func ParseCertificate "ParseCertificate parses a single certificate from the given ASN.1 DER data.\n\nBefore Go 1.23, ParseCertificate accepted certificates with negative serial\nnumbers. This behavior can be restored by including \"x509negativeserial=1\" in\nthe GODEBUG environment variable.\n" [^{:tag (slice byte)} der] :results [(* Certificate) error]
+  (let [(values cert err) (parseCertificate der)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (!= (len der) (len (.-Raw cert)))
+      (return nil (errors/New "x509: trailing data")))
+
+    (return cert nil)))
+
+
+
+
+^{:go/end 1182} (go/func ParseCertificates "ParseCertificates parses one or more certificates from the given ASN.1 DER\ndata. The certificates must be concatenated with no intermediate padding.\n" [^{:tag (slice byte)} der] :results [(slice (* Certificate)) error]
+  (let [^{:tag (slice (* Certificate))} certs (zero (slice (* Certificate)))]
+    (while (> (len der) 0)
+      (let [(values cert err) (parseCertificate der)]
+        (when (!= err nil)
+          (return nil err))
+
+        (set! certs (append certs cert))
+        (set! der (subslice der (len (.-Raw cert))))))
+
+    (return certs nil)))
+
+
+
+
+(go/const ^{:val 1 :doc "The X.509 standards confusingly 1-indexed the version names, but 0-indexed\nthe actual encoded version, so the version for X.509v2 is 1.\n"} x509v2Version 1)
+
+
+
+^{:go/end 1374} (go/func ParseRevocationList "ParseRevocationList parses a X509 v2 [Certificate] Revocation List from the given\nASN.1 DER data.\n" [^{:tag (slice byte)} der] :results [(* RevocationList) error]
+  (let [rl (addr (lit RevocationList))
+
+      ^{:line 1193} input (conv cryptobyte/String der)]
+    ;; we read the SEQUENCE including length and tag bytes so that
+    ;; we can populate RevocationList.Raw, before unwrapping the
+    ;; SEQUENCE so it can be operated on
+    (when (not (.ReadASN1Element input (addr input) cryptobyte_asn1/SEQUENCE))
+      (return nil (errors/New "x509: malformed crl")))
+
+    (set! (.-Raw rl) input)
+    (when (not (.ReadASN1 input (addr input) cryptobyte_asn1/SEQUENCE))
+      (return nil (errors/New "x509: malformed crl")))
+
+
+    (let [^cryptobyte/String tbs (zero cryptobyte/String)]
+      ;; do the same trick again as above to extract the raw
+      ;; bytes for Certificate.RawTBSCertificate
+      (when (not (.ReadASN1Element input (addr tbs) cryptobyte_asn1/SEQUENCE))
+        (return nil (errors/New "x509: malformed tbs crl")))
+
+      (set! (.-RawTBSRevocationList rl) tbs)
+      (when (not (.ReadASN1 tbs (addr tbs) cryptobyte_asn1/SEQUENCE))
+        (return nil (errors/New "x509: malformed tbs crl")))
+
+
+      (let [^int version (zero int)]
+        (when (not (.PeekASN1Tag tbs cryptobyte_asn1/INTEGER))
+          (return nil (errors/New "x509: unsupported crl version")))
+
+        (when (not (.ReadASN1Integer tbs (addr version)))
+          (return nil (errors/New "x509: malformed crl")))
+
+        (when (!= version x509v2Version)
+          (return nil (fmt/Errorf "x509: unsupported crl version: %d" version)))
+
+
+        (let [^cryptobyte/String sigAISeq (zero cryptobyte/String)]
+          (when (not (.ReadASN1Element tbs (addr sigAISeq) cryptobyte_asn1/SEQUENCE))
+            (return nil (errors/New "x509: malformed signature algorithm identifier")))
+
+          (set! (.-RawSignatureAlgorithm rl) sigAISeq)
+          (when (not (.ReadASN1 sigAISeq (addr sigAISeq) cryptobyte_asn1/SEQUENCE))
+            (return nil (errors/New "x509: malformed signature algorithm identifier")))
+
+          ;; Before parsing the inner algorithm identifier, extract
+          ;; the outer algorithm identifier and make sure that they
+          ;; match.
+          (let [^cryptobyte/String outerSigAISeq (zero cryptobyte/String)]
+            (when (not (.ReadASN1 input (addr outerSigAISeq) cryptobyte_asn1/SEQUENCE))
+              (return nil (errors/New "x509: malformed algorithm identifier")))
+
+            (when (not (bytes/Equal outerSigAISeq sigAISeq))
+              (return nil (errors/New "x509: inner and outer signature algorithm identifiers don't match")))
+
+            (let [(values sigAI err) (parseAI sigAISeq)]
+              (when (!= err nil)
+                (return nil err))
+
+              (set! (.-SignatureAlgorithm rl) (getSignatureAlgorithmFromAI sigAI))
+
+              (let [^asn1/BitString signature (zero asn1/BitString)]
+                (when (not (.ReadASN1BitString input (addr signature)))
+                  (return nil (errors/New "x509: malformed signature")))
+
+                (set! (.-Signature rl) (.RightAlign signature))
+
+                (let [^cryptobyte/String issuerSeq (zero cryptobyte/String)]
+                  (when (not (.ReadASN1Element tbs (addr issuerSeq) cryptobyte_asn1/SEQUENCE))
+                    (return nil (errors/New "x509: malformed issuer")))
+
+                  (set! (.-RawIssuer rl) issuerSeq)
+                  (let [(values issuerRDNs ^:assign err) (parseName issuerSeq)]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (.FillFromRDNSequence (.-Issuer rl) issuerRDNs)
+
+                    (set! (values (.-ThisUpdate rl) err) (readASN1Time (addr tbs)))
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (when (or (.PeekASN1Tag tbs cryptobyte_asn1/GeneralizedTime) (.PeekASN1Tag tbs cryptobyte_asn1/UTCTime))
+                      (set! (values (.-NextUpdate rl) err) (readASN1Time (addr tbs)))
+                      (when (!= err nil)
+                        (return nil err)))
+
+
+
+                    (when (.PeekASN1Tag tbs cryptobyte_asn1/SEQUENCE)
+                      (let [^cryptobyte/String revokedSeq (zero cryptobyte/String)]
+                        (when (not (.ReadASN1 tbs (addr revokedSeq) cryptobyte_asn1/SEQUENCE))
+                          (return nil (errors/New "x509: malformed crl")))
+
+                        (while (not (.Empty revokedSeq))
+                          (let [rce (lit RevocationListEntry)
+
+                              ^{:line 1287 :tag cryptobyte/String} certSeq (zero cryptobyte/String)]
+                            (when (not (.ReadASN1Element revokedSeq (addr certSeq) cryptobyte_asn1/SEQUENCE))
+                              (return nil (errors/New "x509: malformed crl")))
+
+                            (set! (.-Raw rce) certSeq)
+                            (when (not (.ReadASN1 certSeq (addr certSeq) cryptobyte_asn1/SEQUENCE))
+                              (return nil (errors/New "x509: malformed crl")))
+
+
+                            (set! (.-SerialNumber rce) (new big/Int))
+                            (when (not (.ReadASN1Integer certSeq (.-SerialNumber rce)))
+                              (return nil (errors/New "x509: malformed serial number")))
+
+                            (set! (values (.-RevocationTime rce) err) (readASN1Time (addr certSeq)))
+                            (when (!= err nil)
+                              (return nil err))
+
+                            (let [^cryptobyte/String extensions (zero cryptobyte/String)
+                                ^{:line 1305 :tag bool} present (zero bool)]
+                              (when (not (.ReadOptionalASN1 certSeq (addr extensions) (addr present) cryptobyte_asn1/SEQUENCE))
+                                (return nil (errors/New "x509: malformed extensions")))
+
+                              (when present
+                                (while (not (.Empty extensions))
+                                  (let [^cryptobyte/String extension (zero cryptobyte/String)]
+                                    (when (not (.ReadASN1 extensions (addr extension) cryptobyte_asn1/SEQUENCE))
+                                      (return nil (errors/New "x509: malformed extension")))
+
+                                    (let [(values ext err) (parseExtension extension)]
+                                      (when (!= err nil)
+                                        (return nil err))
+
+                                      (when (.Equal (.-Id ext) oidExtensionReasonCode)
+                                        (let [val (conv cryptobyte/String (.-Value ext))]
+                                          (when (not (.ReadASN1Enum val (addr (.-ReasonCode rce))))
+                                            (return nil (fmt/Errorf "x509: malformed reasonCode extension")))))
+
+
+                                      (set! (.-Extensions rce) (append (.-Extensions rce) ext))))))
+
+
+
+                              (set! (.-RevokedCertificateEntries rl) (append (.-RevokedCertificateEntries rl) rce))
+                              (let [rcDeprecated ^{:go/breaks [2 4 6]} (lit pkix/RevokedCertificate
+                                    :SerialNumber (.-SerialNumber rce)
+                                    :RevocationTime (.-RevocationTime rce)
+                                    :Extensions (.-Extensions rce))]
+
+                                (set! (.-RevokedCertificates rl) (append (.-RevokedCertificates rl) rcDeprecated))))))))
+
+
+
+                    (let [^cryptobyte/String extensions (zero cryptobyte/String)
+                        ^{:line 1340 :tag bool} present (zero bool)]
+                      (when (not (.ReadOptionalASN1 tbs (addr extensions) (addr present) (.ContextSpecific (.Constructed (conv cryptobyte_asn1/Tag 0)))))
+                        (return nil (errors/New "x509: malformed extensions")))
+
+                      (when present
+                        (when (not (.ReadASN1 extensions (addr extensions) cryptobyte_asn1/SEQUENCE))
+                          (return nil (errors/New "x509: malformed extensions")))
+
+                        (while (not (.Empty extensions))
+                          (let [^cryptobyte/String extension (zero cryptobyte/String)]
+                            (when (not (.ReadASN1 extensions (addr extension) cryptobyte_asn1/SEQUENCE))
+                              (return nil (errors/New "x509: malformed extension")))
+
+                            (let [(values ext err) (parseExtension extension)]
+                              (when (!= err nil)
+                                (return nil err))
+
+                              (cond (.Equal (.-Id ext) oidExtensionAuthorityKeyId) (do
+                                  (set! (values (.-AuthorityKeyId rl) err) (parseAuthorityKeyIdentifier ext))
+                                  (when (!= err nil)
+                                    (return nil err)))
+
+                                (.Equal (.-Id ext) oidExtensionCRLNumber)
+                                (let [value (conv cryptobyte/String (.-Value ext))]
+                                  (set! (.-Number rl) (new big/Int))
+                                  (when (not (.ReadASN1Integer value (.-Number rl)))
+                                    (return nil (errors/New "x509: malformed crl number")))))
+
+
+                              (set! (.-Extensions rl) (append (.-Extensions rl) ext))))))
+
+
+
+                      (return rl nil))))))))))))
+
+
+
+
+^{:go/end 1433} (go/func domainNameValid "domainNameValid is an alloc-less version of the checks that\ndomainToReverseLabels does.\n" ^bool [^string s ^bool constraint]
+  ;; TODO(#75835): This function omits a number of checks which we
+  ;; really should be doing to enforce that domain names are valid names per
+  ;; RFC 1034. We previously enabled these checks, but this broke a
+  ;; significant number of certificates we previously considered valid, and we
+  ;; happily create via CreateCertificate (et al). We should enable these
+  ;; checks, but will need to gate them behind a GODEBUG.
+  ;;
+  ;; I have left the checks we previously enabled, noted with "TODO(#75835)" so
+  ;; that we can easily re-enable them once we unbreak everyone.
+
+  ;; TODO(#75835): this should only be true for constraints.
+  (when (== (len s) 0)
+    (return true))
+
+
+  ;; Do not allow trailing period (FQDN format is not allowed in SANs or
+  ;; constraints).
+  (when (== (aget s (- (len s) 1)) \.)
+    (return false))
+
+
+  ;; TODO(#75835): domains must have at least one label, cannot have
+  ;; a leading empty label, and cannot be longer than 253 characters.
+  ;; if len(s) == 0 || (!constraint && s[0] == '.') || len(s) > 253 {
+  ;; 	return false
+  ;; }
+
+  ^{:go/breaks [[4 1432]]} (let [lastDot -1]
+    (when (and constraint (== (aget s 0) \.))
+      (set! s (subslice s 1)))
+
+
+    (for [i 0] (<= i (len s)) (inc! i)
+      (when (and (< i (len s)) ^:go/paren (or (< (aget s i) 33) (> (aget s i) 126)))
+        ;; Invalid character.
+        (return false))
+
+      (when (or (== i (len s)) (== (aget s i) \.))
+        (let [labelLen i]
+          (when (>= lastDot 0)
+            (set! labelLen - (+ lastDot 1)))
+
+          (when (== labelLen 0)
+            (return false))
+
+          ;; TODO(#75835): labels cannot be longer than 63 characters.
+          ;; if labelLen > 63 {
+          ;; 	return false
+          ;; }
+          (set! lastDot i))))
+
+
+
+    true))

@@ -1,0 +1,335 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.httputil) (go/file "dump.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [bytes "bytes"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [net "net"]
+    ^{:line 14} [http "net/http"]
+    ^{:line 15} [url "net/url"]
+    ^{:line 16} [strings "strings"]
+    ^{:line 17} [time "time"]])
+
+
+
+
+
+
+
+^{:go/end 38} (go/func drainBody "drainBody reads all of b to memory and then returns two equivalent\nReadClosers yielding the same bytes.\n\nIt returns an error if the initial slurp of all bytes fails. It does not attempt\nto make the returned ReadClosers have identical error-matching behavior.\n" [^io/ReadCloser b] :results [^io/ReadCloser r1 ^io/ReadCloser r2 ^error err]
+  (when (or (== b nil) (== b http/NoBody))
+    ;; No copying needed. Preserve the magic sentinel meaning of NoBody.
+    (return http/NoBody http/NoBody nil))
+
+  (let [^bytes/Buffer buf (zero bytes/Buffer)]
+    (when [(set! (values _ err) (.ReadFrom buf b))] (!= err nil)
+      (return nil b err))
+
+    (when [(set! err (.Close b))] (!= err nil)
+      (return nil b err))
+
+    (return (io/NopCloser (addr buf)) (io/NopCloser (bytes/NewReader (.Bytes buf))) nil)))
+
+
+
+(go/type dumpConn "dumpConn is a net.Conn which writes to Writer and reads from Reader\n" (struct
+    ^{:line 42} io/Writer
+    ^{:line 43} io/Reader))
+
+
+^{:go/end 46} (go/method Close ^error [^{:tag (* dumpConn)} c] nil)
+^{:go/end 47} (go/method LocalAddr ^net/Addr [^{:tag (* dumpConn)} c] nil)
+^{:go/end 48} (go/method RemoteAddr ^net/Addr [^{:tag (* dumpConn)} c] nil)
+^{:go/end 49} (go/method SetDeadline ^error [^{:tag (* dumpConn)} c ^time/Time t] nil)
+^{:go/end 50} (go/method SetReadDeadline ^error [^{:tag (* dumpConn)} c ^time/Time t] nil)
+^{:go/end 51} (go/method SetWriteDeadline ^error [^{:tag (* dumpConn)} c ^time/Time t] nil)
+
+(go/type neverEnding byte)
+
+^{:go/end 60} (go/method Read [^neverEnding b ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (range [i p]
+    (aset p i (conv byte b)))
+
+  (return (len p) nil))
+
+
+
+
+^{:go/breaks [[6 71]] :go/end 72} (go/func outgoingLength "outgoingLength is a copy of the unexported\n(*http.Request).outgoingLength method.\n" ^int64 [^{:tag (* http/Request)} req]
+  (when (or (== (.-Body req) nil) (== (.-Body req) http/NoBody))
+    (return 0))
+
+  (when (!= (.-ContentLength req) 0)
+    (return (.-ContentLength req)))
+
+  -1)
+
+
+
+
+
+^{:go/end 167} (go/func DumpRequestOut "DumpRequestOut is like [DumpRequest] but for outgoing client requests. It\nincludes any headers that the standard [http.Transport] adds, such as\nUser-Agent.\n" [^{:tag (* http/Request)} req ^bool body] :results [(slice byte) error]
+  (let [save (.-Body req)
+      ^{:line 79} dummyBody false]
+    (if (not body)
+      (let [contentLength (outgoingLength req)]
+        (when (!= contentLength 0)
+          (set! (.-Body req) (io/NopCloser (io/LimitReader (conv neverEnding \x) contentLength)))
+          (set! dummyBody true)))
+
+
+      (let [^error err (zero error)]
+        (set! (values save (.-Body req) err) (drainBody (.-Body req)))
+        (when (!= err nil)
+          (return nil err))))
+
+
+
+    ;; Since we're using the actual Transport code to write the request,
+    ;; switch to http so the Transport doesn't try to do an SSL
+    ;; negotiation with our dumpConn and its bytes.Buffer & pipe.
+    ;; The wire format for https and http are the same, anyway.
+    (let [reqSend req]
+      (when (== (.-Scheme (.-URL req)) "https")
+        (set! reqSend (new http/Request))
+        (set! @reqSend @req)
+        (set! (.-URL reqSend) (new url/URL))
+        (set! @(.-URL reqSend) @(.-URL req))
+        (set! (.-Scheme (.-URL reqSend)) "http"))
+
+
+      ;; Use the actual Transport code to record what we would send
+      ;; on the wire, but not using TCP.  Use a Transport with a
+      ;; custom dialer that returns a fake net.Conn that waits
+      ;; for the full input (and recording it), and then responds
+      ;; with a dummy response.
+      (let [^bytes/Buffer buf (zero bytes/Buffer) ; records the output
+          (values pr pw) (io/Pipe)]
+        (defer (.Close pr))
+        (defer (.Close pw))
+        (let [dr (addr (lit delegateReader :c (make (chan io/Reader))))
+
+            ^{:line 118} t (addr ^{:go/breaks [2]} (lit http/Transport
+                :Dial ^{:go/end 121} (fn [^string net ^string addr] :results [net/Conn error]
+                  (return (addr (lit dumpConn (io/MultiWriter (addr buf) pw) dr)) nil))))]
+
+
+          (defer (.CloseIdleConnections t))
+
+          ;; We need this channel to ensure that the reader
+          ;; goroutine exits if t.RoundTrip returns an error.
+          ;; See golang.org/issue/32571.
+          (let [quitReadCh (make (chan (struct)))]
+            ;; Wait for the request before replying with a dummy response:
+            (go (^{:go/end 144} (fn []
+                  (let [(values req err) (http/ReadRequest (bufio/NewReader pr))]
+                    (when (== err nil)
+                      ;; Ensure all the body is read; otherwise
+                      ;; we'll get a partial dump.
+                      (io/Copy io/Discard (.-Body req))
+                      (.Close (.-Body req)))
+
+                    (select
+                      (case (>! (.-c dr) (strings/NewReader "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")))
+                      (case (<! quitReadCh)
+                        ;; Ensure delegateReader.Read doesn't block forever if we get an error.
+                        (close (.-c dr))))))))
+
+
+
+            (let [(values _ err) (.RoundTrip t reqSend)]
+
+              (set! (.-Body req) save)
+              (when (!= err nil)
+                (set! (.-err dr) err)
+                (close quitReadCh)
+                (return nil err))
+
+              (let [dump (.Bytes buf)]
+
+                ;; If we used a dummy body above, remove it now.
+                ;; TODO: if the req.ContentLength is large, we allocate memory
+                ;; unnecessarily just to slice it off here. But this is just
+                ;; a debug function, so this is acceptable for now. We could
+                ;; discard the body earlier if this matters.
+                (when dummyBody
+                  (when [i (bytes/Index dump (conv (slice byte) "\r\n\r\n"))] (>= i 0)
+                    (set! dump (subslice dump _ (+ i 4)))))
+
+
+                (return dump nil)))))))))
+
+
+
+
+(go/type delegateReader "delegateReader is a reader that delegates to another reader,\nonce it arrives on a channel.\n" (struct
+    ^{:line 172 :tag (chan io/Reader)} c
+    ^{:line 173 :tag error} err ; only used if r is nil and c is closed.
+    ^{:line 174 :tag io/Reader} r)) ; nil until received from c
+
+
+^{:go/end 185} (go/method Read [^{:tag (* delegateReader)} r ^{:tag (slice byte)} p] :results [int error]
+  (when (== (.-r r) nil)
+    (let [^bool ok (zero bool)]
+      (when [(set! (values (.-r r) ok) (<! (.-c r)))] (not ok)
+        (return 0 (.-err r)))))
+
+
+  (.Read (.-r r) p))
+
+
+
+^{:go/end 193} (go/func valueOrDefault "Return value if nonempty, def otherwise.\n" ^string [^string value ^string def]
+  (when (!= value "")
+    (return value))
+
+  ^{:line 192} def)
+
+
+(go/var reqWriteExcludeHeaderDump (lit (map string bool)
+    ^{:line 196} ["Host" true] ; not in Header map anyway
+    ^{:line 197} ["Transfer-Encoding" true]
+    ^{:line 198} ["Trailer" true]))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 285} (go/func DumpRequest "DumpRequest returns the given request in its HTTP/1.x wire\nrepresentation. It should only be used by servers to debug client\nrequests. The returned representation is an approximation only;\nsome details of the initial request are lost while parsing it into\nan [http.Request]. In particular, the order and case of header field\nnames are lost. The order of values in multi-valued headers is kept\nintact. HTTP/2 requests are dumped in HTTP/1.x form, not in their\noriginal binary representations.\n\nIf body is true, DumpRequest also returns the body. To do so, it\nconsumes req.Body and then replaces it with a new [io.ReadCloser]\nthat yields the same bytes. If DumpRequest returns an error,\nthe state of req is undefined.\n\nThe documentation for [http.Request.Write] details which fields\nof req are included in the dump.\n" [^{:tag (* http/Request)} req ^bool body] :results [(slice byte) error]
+  (let [^error err (zero error)
+      ^{:line 219} save (.-Body req)]
+    (if (or (not body) (== (.-Body req) nil))
+      (set! (.-Body req) nil)
+      (do
+        (set! (values save (.-Body req) err) (drainBody (.-Body req)))
+        (when (!= err nil)
+          (return nil err))))
+
+
+
+    (let [^bytes/Buffer b (zero bytes/Buffer)
+
+        ;; By default, print out the unmodified req.RequestURI, which
+        ;; is always set for incoming server requests. But because we
+        ;; previously used req.URL.RequestURI and the docs weren't
+        ;; always so clear about when to use DumpRequest vs
+        ;; DumpRequestOut, fall back to the old way if the caller
+        ;; provides a non-server Request.
+        ^{:line 237} reqURI (.-RequestURI req)]
+      (when (== reqURI "")
+        (set! reqURI (.RequestURI (.-URL req))))
+
+
+      (fmt/Fprintf (addr b) "%s %s HTTP/%d.%d\r\n" (valueOrDefault (.-Method req) "GET")
+        ^{:line 243} reqURI (.-ProtoMajor req) (.-ProtoMinor req))
+
+      (let [absRequestURI (or (strings/HasPrefix (.-RequestURI req) "http://") (strings/HasPrefix (.-RequestURI req) "https://"))]
+        (when (not absRequestURI)
+          (let [host (.-Host req)]
+            (when (and (== host "") (!= (.-URL req) nil))
+              (set! host (.-Host (.-URL req))))
+
+            (when (!= host "")
+              (fmt/Fprintf (addr b) "Host: %s\r\n" host))))
+
+
+
+        (let [chunked (and (> (len (.-TransferEncoding req)) 0) (== (aget (.-TransferEncoding req) 0) "chunked"))]
+          (when (> (len (.-TransferEncoding req)) 0)
+            (fmt/Fprintf (addr b) "Transfer-Encoding: %s\r\n" (strings/Join (.-TransferEncoding req) ",")))
+
+
+          (set! err (.WriteSubset (.-Header req) (addr b) reqWriteExcludeHeaderDump))
+          (when (!= err nil)
+            (return nil err))
+
+
+          (io/WriteString (addr b) "\r\n")
+
+          (when (!= (.-Body req) nil)
+            (let [^io/Writer dest (addr b)]
+              (when chunked
+                (set! dest (NewChunkedWriter dest)))
+
+              (set! (values _ err) (io/Copy dest (.-Body req)))
+              (when chunked
+                (.Close (assert io/Closer dest))
+                (io/WriteString (addr b) "\r\n"))))
+
+
+
+          (set! (.-Body req) save)
+          (when (!= err nil)
+            (return nil err))
+
+          (return (.Bytes b) nil))))))
+
+
+
+
+(go/var ^{:doc "errNoBody is a sentinel error value used by failureToReadBody so we\ncan detect that the lack of body was intentional.\n"} errNoBody (errors/New "sentinel error value"))
+
+
+
+
+
+(go/type failureToReadBody "failureToReadBody is an io.ReadCloser that just returns errNoBody on\nRead. It's swapped in when we don't actually want to consume\nthe body, but need a non-nil one, and want to distinguish the\nerror from reading the dummy body.\n" (struct))
+
+^{:go/end 297} (go/method Read [failureToReadBody (slice byte)] :results [int error] (return 0 errNoBody))
+^{:go/end 298} (go/method Close ^error [failureToReadBody] nil)
+
+
+(go/var ^{:doc "emptyBody is an instance of empty reader.\n"} emptyBody (io/NopCloser (strings/NewReader "")))
+
+
+^{:go/end 336} (go/func DumpResponse "DumpResponse is like DumpRequest but dumps a response.\n" [^{:tag (* http/Response)} resp ^bool body] :results [(slice byte) error]
+  (let [^bytes/Buffer b (zero bytes/Buffer)
+      ^{:line 306 :tag error} err (zero error)
+      ^{:line 307} save (.-Body resp)
+      ^{:line 308} savecl (.-ContentLength resp)]
+
+    (cond (not body)
+      ;; For content length of zero. Make sure the body is an empty
+      ;; reader, instead of returning error through failureToReadBody{}.
+      (if (== (.-ContentLength resp) 0)
+        (set! (.-Body resp) emptyBody)
+
+        (set! (.-Body resp) (lit failureToReadBody)))
+
+      (== (.-Body resp) nil)
+      (set! (.-Body resp) emptyBody) :else
+      (do
+        (set! (values save (.-Body resp) err) (drainBody (.-Body resp)))
+        (when (!= err nil)
+          (return nil err))))
+
+
+    (set! err (.Write resp (addr b)))
+    (when (== err errNoBody)
+      (set! err nil))
+
+    (set! (.-Body resp) save)
+    (set! (.-ContentLength resp) savecl)
+    (when (!= err nil)
+      (return nil err))
+
+    (return (.Bytes b) nil)))

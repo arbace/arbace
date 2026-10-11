@@ -1,0 +1,1002 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net) (go/file "dial.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [bytealg "internal/bytealg"]
+    ^{:line 10} [godebug "internal/godebug"]
+    ^{:line 11} [nettrace "internal/nettrace"]
+    ^{:line 12} [netip "net/netip"]
+    ^{:line 13} [syscall "syscall"]
+    ^{:line 14} [time "time"]])
+
+
+(go/const
+
+
+  ^{:line 20} [^{:val 15000000000 :doc "defaultTCPKeepAliveIdle is a default constant value for TCP_KEEPIDLE.\nSee go.dev/issue/31510 for details.\n"} defaultTCPKeepAliveIdle (* 15 time/Second)]
+
+
+
+  ^{:line 24} [^{:val 15000000000 :doc "defaultTCPKeepAliveInterval is a default constant value for TCP_KEEPINTVL.\nIt is the same as defaultTCPKeepAliveIdle, see go.dev/issue/31510 for details.\n"} defaultTCPKeepAliveInterval (* 15 time/Second)]
+
+
+  ^{:line 27} [^{:val 9 :doc "defaultTCPKeepAliveCount is a default constant value for TCP_KEEPCNT.\n"} defaultTCPKeepAliveCount 9]
+
+
+
+
+  ^{:line 32} [^{:val true :doc "For the moment, MultiPath TCP is used by default with listeners, if\navailable, but not with dialers.\nSee go.dev/issue/56539\n"} defaultMPTCPEnabledListen true]
+  ^{:line 33} [^{:val false} defaultMPTCPEnabledDial false])
+
+
+
+
+
+
+
+
+(go/var ^{:doc "The type of service offered\n\n\t0 == MPTCP disabled\n\t1 == MPTCP enabled\n\t2 == MPTCP enabled on listeners only\n\t3 == MPTCP enabled on dialers only\n"} multipathtcp (godebug/New "multipathtcp"))
+
+
+
+(go/type mptcpStatusDial "mptcpStatusDial is a tristate for Multipath TCP on clients,\nsee go.dev/issue/56539\n" uint8)
+
+(go/const
+
+  ^{:line 50} [^{:tag mptcpStatusDial :val 0 :doc "The value 0 is the system default, linked to defaultMPTCPEnabledDial\n"} mptcpUseDefaultDial iota]
+  ^{:line 51} [^{:val 1} mptcpEnabledDial]
+  ^{:line 52} [^{:val 2} mptcpDisabledDial])
+
+
+^{:go/end 71} (go/method get ^bool [^{:tag (* mptcpStatusDial)} m]
+  (switch @m
+    (case [mptcpEnabledDial]
+      (return true))
+    (case [mptcpDisabledDial]
+      (return false)))
+
+
+  ;; If MPTCP is forced via GODEBUG=multipathtcp=1
+  (when (or (== (.Value multipathtcp) "1") (== (.Value multipathtcp) "3"))
+    (.IncNonDefault multipathtcp)
+
+    (return true))
+
+
+  ^{:line 70} defaultMPTCPEnabledDial)
+
+
+^{:go/end 79} (go/method set [^{:tag (* mptcpStatusDial)} m ^bool use]
+  (if use
+    (set! @m mptcpEnabledDial)
+
+    (set! @m mptcpDisabledDial)))
+
+
+
+
+
+(go/type mptcpStatusListen "mptcpStatusListen is a tristate for Multipath TCP on servers,\nsee go.dev/issue/56539\n" uint8)
+
+(go/const
+
+  ^{:line 87} [^{:tag mptcpStatusListen :val 0 :doc "The value 0 is the system default, linked to defaultMPTCPEnabledListen\n"} mptcpUseDefaultListen iota]
+  ^{:line 88} [^{:val 1} mptcpEnabledListen]
+  ^{:line 89} [^{:val 2} mptcpDisabledListen])
+
+
+^{:go/end 109} (go/method get ^bool [^{:tag (* mptcpStatusListen)} m]
+  (switch @m
+    (case [mptcpEnabledListen]
+      (return true))
+    (case [mptcpDisabledListen]
+      (return false)))
+
+
+  ;; If MPTCP is disabled via GODEBUG=multipathtcp=0 or only
+  ;; enabled on dialers, but not on listeners.
+  (when (or (== (.Value multipathtcp) "0") (== (.Value multipathtcp) "3"))
+    (.IncNonDefault multipathtcp)
+
+    (return false))
+
+
+  ^{:line 108} defaultMPTCPEnabledListen)
+
+
+^{:go/end 117} (go/method set [^{:tag (* mptcpStatusListen)} m ^bool use]
+  (if use
+    (set! @m mptcpEnabledListen)
+
+    (set! @m mptcpDisabledListen)))
+
+
+
+
+
+
+
+
+
+
+(go/type Dialer "A Dialer contains options for connecting to an address.\n\nThe zero value for each field is equivalent to dialing\nwithout that option. Dialing with the zero value of Dialer\nis therefore equivalent to just calling the [Dial] function.\n\nIt is safe to call Dialer's methods concurrently.\n" (struct
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 139 :tag time/Duration :doc "Timeout is the maximum amount of time a dial will wait for\na connect to complete. If Deadline is also set, it may fail\nearlier.\n\nThe default is no timeout.\n\nWhen using TCP and dialing a host name with multiple IP\naddresses, the timeout may be divided between them.\n\nWith or without a timeout, the operating system may impose\nits own earlier timeout. For instance, TCP timeouts are\noften around 3 minutes.\n"} Timeout
+
+
+
+
+
+    ^{:line 145 :tag time/Time :doc "Deadline is the absolute point in time after which dials\nwill fail. If Timeout is set, it may fail earlier.\nZero means no deadline, or dependent on the operating system\nas with the Timeout option.\n"} Deadline
+
+
+
+
+
+    ^{:line 151 :tag Addr :doc "LocalAddr is the local address to use when dialing an\naddress. The address must be of a compatible type for the\nnetwork being dialed.\nIf nil, a local address is automatically chosen.\n"} LocalAddr
+
+
+
+
+
+
+
+
+    ^{:line 160 :tag bool :doc "DualStack previously enabled RFC 6555 Fast Fallback\nsupport, also known as \"Happy Eyeballs\", in which IPv4 is\ntried soon if IPv6 appears to be misconfigured and\nhanging.\n\nDeprecated: Fast Fallback is enabled by default. To\ndisable, set FallbackDelay to a negative value.\n"} DualStack
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 173 :tag time/Duration :doc "FallbackDelay specifies the length of time to wait before\nspawning a RFC 6555 Fast Fallback connection.\n\nWhen dialing \"tcp\" and both IPv6 and IPv4 addresses are\navailable, the address family of the first resolved address\nis treated as the primary. After FallbackDelay, a connection\nattempt to the other address family is started if the primary\nconnection has not yet succeeded.\n\nIf zero, a default delay of 300ms is used.\nA negative value disables Fast Fallback support.\n"} FallbackDelay
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 185 :tag time/Duration :doc "KeepAlive specifies the interval between keep-alive\nprobes for an active network connection.\n\nKeepAlive is ignored if KeepAliveConfig.Enable is true.\n\nIf zero, keep-alive probes are sent with a default value\n(currently 15 seconds), if supported by the protocol and operating\nsystem. Network protocols or operating systems that do\nnot support keep-alive ignore this field.\nIf negative, keep-alive probes are disabled.\n"} KeepAlive
+
+
+
+
+
+
+
+
+    ^{:line 194 :tag KeepAliveConfig :doc "KeepAliveConfig specifies the keep-alive probe configuration\nfor an active network connection, when supported by the\nprotocol and operating system.\n\nIf KeepAliveConfig.Enable is true, keep-alive probes are enabled.\nIf KeepAliveConfig.Enable is false and KeepAlive is negative,\nkeep-alive probes are disabled.\n"} KeepAliveConfig
+
+
+    ^{:line 197 :tag (* Resolver) :doc "Resolver optionally specifies an alternate resolver to use.\n"} Resolver
+
+
+
+
+
+
+    ^{:line 204 :tag (chan :recv (struct)) :doc "Cancel is an optional channel whose closure indicates that\nthe dial should be canceled. Not all types of dials support\ncancellation.\n\nDeprecated: Use DialContext instead.\n"} Cancel
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 216 :tag (func [^string network ^string address ^syscall/RawConn c] [error]) :doc "If Control is not nil, it is called after creating the network\nconnection but before actually dialing.\n\nNetwork and address parameters passed to Control function are not\nnecessarily the ones passed to Dial. Calling Dial with TCP networks\nwill cause the Control function to be called with \"tcp4\" or \"tcp6\",\nUDP networks become \"udp4\" or \"udp6\", IP networks become \"ip4\" or \"ip6\",\nand other known networks are passed as-is.\n\nControl is ignored if ControlContext is not nil.\n"} Control
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 228 :tag (func [^context/Context ctx ^string network ^string address ^syscall/RawConn c] [error]) :doc "If ControlContext is not nil, it is called after creating the network\nconnection but before actually dialing.\n\nNetwork and address parameters passed to ControlContext function are not\nnecessarily the ones passed to Dial. Calling Dial with TCP networks\nwill cause the ControlContext function to be called with \"tcp4\" or \"tcp6\",\nUDP networks become \"udp4\" or \"udp6\", IP networks become \"ip4\" or \"ip6\",\nand other known networks are passed as-is.\n\nIf ControlContext is not nil, Control is ignored.\n"} ControlContext
+
+
+
+
+    ^{:line 233 :tag mptcpStatusDial :doc "If mptcpStatus is set to a value allowing Multipath TCP (MPTCP) to be\nused, any call to Dial with \"tcp(4|6)\" as network will use MPTCP if\nsupported by the operating system.\n"} mptcpStatus))
+
+
+^{:go/end 236} (go/method dualStack ^bool [^{:tag (* Dialer)} d] (>= (.-FallbackDelay d) 0))
+
+^{:go/end 246} (go/func minNonzeroTime ^time/Time [^time/Time a ^time/Time b]
+  (when (.IsZero a)
+    (return b))
+
+  (when (or (.IsZero b) (.Before a b))
+    (return a))
+
+  ^{:line 245} b)
+
+
+
+
+
+
+
+
+^{:go/end 262} (go/method deadline "deadline returns the earliest of:\n  - now+Timeout\n  - d.Deadline\n  - the context's deadline\n\nOr zero, if none of Timeout, Deadline, or context's deadline is set.\n" [^{:tag (* Dialer)} d ^context/Context ctx ^time/Time now] :results [^time/Time earliest]
+  (when (!= (.-Timeout d) 0) ; including negative, for historical reasons
+    (set! earliest (.Add now (.-Timeout d))))
+
+  (when [(values d ok) (.Deadline ctx)] ok
+    (set! earliest (minNonzeroTime earliest d)))
+
+  (minNonzeroTime earliest (.-Deadline d)))
+
+
+^{:go/end 269} (go/method resolver ^{:tag (* Resolver)} [^{:tag (* Dialer)} d]
+  (when (!= (.-Resolver d) nil)
+    (return (.-Resolver d)))
+
+  ^{:line 268} DefaultResolver)
+
+
+
+
+^{:go/end 293} (go/func partialDeadline "partialDeadline returns the deadline to use for a single address,\nwhen multiple addresses are pending.\n" [^time/Time now ^time/Time deadline ^int addrsRemaining] :results [time/Time error]
+  (when (.IsZero deadline)
+    (return deadline nil))
+
+  (let [timeRemaining (.Sub deadline now)]
+    (when (<= timeRemaining 0)
+      (return (lit time/Time) errTimeout))
+
+    ;; Tentatively allocate equal time to each remaining address.
+    (let [timeout (/ timeRemaining (conv time/Duration addrsRemaining))
+        ;; If the time per address is too short, steal from the end of the list.
+        ^:const ^{:line 284 :val 2000000000} saneMinimum (* 2 time/Second)]
+      (when (< timeout saneMinimum)
+        (if (< timeRemaining saneMinimum)
+          (set! timeout timeRemaining)
+
+          (set! timeout saneMinimum)))
+
+
+      (return (.Add now timeout) nil))))
+
+
+^{:go/end 301} (go/method fallbackDelay ^time/Duration [^{:tag (* Dialer)} d]
+  (if (> (.-FallbackDelay d) 0)
+    (return (.-FallbackDelay d))
+
+    (return (* 300 time/Millisecond))))
+
+
+
+^{:go/end 333} (go/func parseNetwork [^context/Context ctx ^string network ^bool needsProto] :results [^string afnet ^int proto ^error err]
+  (let [i (bytealg/LastIndexByteString network \:)]
+    (when (< i 0) ; no colon
+      (switch network
+        (case ["tcp" "tcp4" "tcp6"])
+        (case ["udp" "udp4" "udp6"])
+        (case ["ip" "ip4" "ip6"]
+          (when needsProto
+            (return "" 0 (conv UnknownNetworkError network))))
+
+        (case ["unix" "unixgram" "unixpacket"])
+        (default
+          (return "" 0 (conv UnknownNetworkError network))))
+
+      (return network 0 nil))
+
+    (set! afnet (subslice network _ i))
+    (switch afnet
+      (case ["ip" "ip4" "ip6"]
+        (let [protostr (subslice network (+ i 1))
+            (values proto i ok) (dtoi protostr)]
+          (when (or (not ok) (!= i (len protostr)))
+            (set! (values proto err) (lookupProtocol ctx protostr))
+            (when (!= err nil)
+              (return "" 0 err)))
+
+
+          (return afnet proto nil))))
+
+    (return "" 0 (conv UnknownNetworkError network))))
+
+
+
+
+
+^{:go/end 405} (go/method resolveAddrList "resolveAddrList resolves addr using hint and returns a list of\naddresses. The result contains at least one address when error is\nnil.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string op ^string network ^string addr ^Addr hint] :results [addrList error]
+  (let [(values afnet _ err) (parseNetwork ctx network true)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (and (== op "dial") (== addr ""))
+      (return nil errMissingAddress))
+
+    (switch afnet
+      (case ["unix" "unixgram" "unixpacket"]
+        (let [(values addr err) (ResolveUnixAddr afnet addr)]
+          (when (!= err nil)
+            (return nil err))
+
+          (when (and (== op "dial") (!= hint nil) (!= (.Network addr) (.Network hint)))
+            (return nil (addr (lit AddrError :Err "mismatched local address type" :Addr (.String hint)))))
+
+          (return (lit addrList addr) nil))))
+
+    (let [(values addrs ^:assign err) (.internetAddrList r ctx afnet addr)]
+      (when (or (!= err nil) (!= op "dial") (== hint nil))
+        (return addrs err))
+
+      (let [
+          ^{:line 362 :tag (* TCPAddr)} tcp (zero (* TCPAddr))
+          ^{:line 363 :tag (* UDPAddr)} udp (zero (* UDPAddr))
+          ^{:line 364 :tag (* IPAddr)} ip (zero (* IPAddr))
+          ^{:line 365 :tag bool} wildcard (zero bool)]
+
+        (type-switch [hint hint]
+          (case [(* TCPAddr)]
+            (set! tcp hint)
+            (set! wildcard (.isWildcard tcp)))
+          (case [(* UDPAddr)]
+            (set! udp hint)
+            (set! wildcard (.isWildcard udp)))
+          (case [(* IPAddr)]
+            (set! ip hint)
+            (set! wildcard (.isWildcard ip))))
+
+        (let [naddrs (subslice addrs _ 0)]
+          (range [_ addr addrs]
+            (when (!= (.Network addr) (.Network hint))
+              (return nil (addr (lit AddrError :Err "mismatched local address type" :Addr (.String hint)))))
+
+            (type-switch [addr addr]
+              (case [(* TCPAddr)]
+                (when (and (not wildcard) (not (.isWildcard addr)) (not (.matchAddrFamily (.-IP addr) (.-IP tcp))))
+                  (continue))
+
+                (set! naddrs (append naddrs addr)))
+              (case [(* UDPAddr)]
+                (when (and (not wildcard) (not (.isWildcard addr)) (not (.matchAddrFamily (.-IP addr) (.-IP udp))))
+                  (continue))
+
+                (set! naddrs (append naddrs addr)))
+              (case [(* IPAddr)]
+                (when (and (not wildcard) (not (.isWildcard addr)) (not (.matchAddrFamily (.-IP addr) (.-IP ip))))
+                  (continue))
+
+                (set! naddrs (append naddrs addr)))))
+
+
+          (when (== (len naddrs) 0)
+            (return nil (addr (lit AddrError :Err (.Error errNoSuitableAddress) :Addr (.String hint)))))
+
+          (return naddrs nil))))))
+
+
+
+
+
+
+^{:go/end 413} (go/method MultipathTCP "MultipathTCP reports whether MPTCP will be used.\n\nThis method doesn't check if MPTCP is supported by the operating\nsystem or not.\n" ^bool [^{:tag (* Dialer)} d]
+  (.get (.-mptcpStatus d)))
+
+
+
+
+
+
+
+
+^{:go/end 423} (go/method SetMultipathTCP "SetMultipathTCP directs the [Dial] methods to use, or not use, MPTCP,\nif supported by the operating system. This method overrides the\nsystem default and the GODEBUG=multipathtcp=... setting if any.\n\nIf MPTCP is not available on the host or not supported by the server,\nthe Dial methods will fall back to TCP.\n" [^{:tag (* Dialer)} d ^bool use]
+  (.set (.-mptcpStatus d) use))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 476} (go/func Dial "Dial connects to the address on the named network.\n\nKnown networks are \"tcp\", \"tcp4\" (IPv4-only), \"tcp6\" (IPv6-only),\n\"udp\", \"udp4\" (IPv4-only), \"udp6\" (IPv6-only), \"ip\", \"ip4\"\n(IPv4-only), \"ip6\" (IPv6-only), \"unix\", \"unixgram\" and\n\"unixpacket\".\n\nFor TCP and UDP networks, the address has the form \"host:port\".\nThe host must be a literal IP address, or a host name that can be\nresolved to IP addresses.\nThe port must be a literal port number or a service name.\nIf the host is a literal IPv6 address it must be enclosed in square\nbrackets, as in \"[2001:db8::1]:80\" or \"[fe80::1%zone]:80\".\nThe zone specifies the scope of the literal IPv6 address as defined\nin RFC 4007.\nThe functions [JoinHostPort] and [SplitHostPort] manipulate a pair of\nhost and port in this form.\nWhen using TCP, and the host resolves to multiple IP addresses,\nDial will try each IP address in order until one succeeds.\n\nExamples:\n\n\tDial(\"tcp\", \"golang.org:http\")\n\tDial(\"tcp\", \"192.0.2.1:http\")\n\tDial(\"tcp\", \"198.51.100.1:80\")\n\tDial(\"udp\", \"[2001:db8::1]:domain\")\n\tDial(\"udp\", \"[fe80::1%lo0]:53\")\n\tDial(\"tcp\", \":80\")\n\nFor IP networks, the network must be \"ip\", \"ip4\" or \"ip6\" followed\nby a colon and a literal protocol number or a protocol name, and\nthe address has the form \"host\". The host must be a literal IP\naddress or a literal IPv6 address with zone.\nIt depends on each operating system how the operating system\nbehaves with a non-well known protocol number such as \"0\" or \"255\".\n\nExamples:\n\n\tDial(\"ip4:1\", \"192.0.2.1\")\n\tDial(\"ip6:ipv6-icmp\", \"2001:db8::1\")\n\tDial(\"ip6:58\", \"fe80::1%lo0\")\n\nFor TCP, UDP and IP networks, if the host is empty or a literal\nunspecified IP address, as in \":80\", \"0.0.0.0:80\" or \"[::]:80\" for\nTCP and UDP, \"\", \"0.0.0.0\" or \"::\" for IP, the local system is\nassumed.\n\nFor Unix networks, the address must be a file system path.\n" [^string network ^string address] :results [Conn error]
+  (let [^Dialer d (zero Dialer)]
+    (.Dial d network address)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 491} (go/func DialTimeout "DialTimeout acts like [Dial] but takes a timeout.\n\nThe timeout includes name resolution, if required.\nWhen using TCP, and the host in the address parameter resolves to\nmultiple IP addresses, the timeout is spread over each consecutive\ndial, such that each is given an appropriate fraction of the time\nto connect.\n\nSee func Dial for a description of the network and address\nparameters.\n" [^string network ^string address ^time/Duration timeout] :results [Conn error]
+  (let [d (lit Dialer :Timeout timeout)]
+    (.Dial d network address)))
+
+
+
+(go/type sysDialer "sysDialer contains a Dial's parameters and configuration.\n" (struct
+    ^{:line 495} Dialer
+    ^{:line 496 :tag string} network ^string address
+    ^{:line 497 :tag (func [^context/Context ctx ^string net ^{:tag (* TCPAddr)} laddr ^{:tag (* TCPAddr)} raddr] [(* TCPConn) error])} testHookDialTCP))
+
+
+
+
+
+
+
+
+
+^{:go/end 509} (go/method Dial "Dial connects to the address on the named network.\n\nSee func Dial for a description of the network and address\nparameters.\n\nDial uses [context.Background] internally; to specify the context, use\n[Dialer.DialContext].\n" [^{:tag (* Dialer)} d ^string network ^string address] :results [Conn error]
+  (.DialContext d (context/Background) network address))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 561} (go/method DialContext "DialContext connects to the address on the named network using\nthe provided context.\n\nThe provided Context must be non-nil. If the context expires before\nthe connection is complete, an error is returned. Once successfully\nconnected, any expiration of the context will not affect the\nconnection.\n\nWhen using TCP, and the host in the address parameter resolves to multiple\nnetwork addresses, any dial timeout (from d.Timeout or ctx) is spread\nover each consecutive dial, such that each is given an appropriate\nfraction of the time to connect.\nFor example, if a host has 4 IP addresses and the timeout is 1 minute,\nthe connect to each single address will be given 15 seconds to complete\nbefore trying the next one.\n\nSee func [Dial] for a description of the network and address\nparameters.\n" [^{:tag (* Dialer)} d ^context/Context ctx ^string network ^string address] :results [Conn error]
+  (let [(values ^:assign ctx cancel) (.dialCtx d ctx)]
+    (defer (cancel))
+
+    ;; Shadow the nettrace (if any) during resolve so Connect events don't fire for DNS lookups.
+    (let [resolveCtx ctx]
+      (when [(values trace _) (assert (* nettrace/Trace) (.Value ctx (lit nettrace/TraceKey)))] (!= trace nil)
+        (let [shadow @trace]
+          (set! (.-ConnectStart shadow) nil)
+          (set! (.-ConnectDone shadow) nil)
+          (set! resolveCtx (context/WithValue resolveCtx (lit nettrace/TraceKey) (addr shadow)))))
+
+
+      (let [(values addrs err) (.resolveAddrList (.resolver d) resolveCtx "dial" network address (.-LocalAddr d))]
+        (when (!= err nil)
+          (return nil (addr (lit OpError :Op "dial" :Net network :Source nil :Addr nil :Err err))))
+
+
+        (let [sd (addr ^{:go/breaks [2 4 6]} (lit sysDialer
+                :Dialer @d
+                :network network
+                :address address))
+
+
+            (values ^addrList primaries ^addrList fallbacks) (zero addrList)]
+          (if (and (.dualStack d) (== network "tcp"))
+            (set! (values primaries fallbacks) (.partition addrs isIPv4))
+
+            (set! primaries addrs))
+
+
+          (.dialParallel sd ctx primaries fallbacks))))))
+
+
+^{:go/end 597} (go/method dialCtx [^{:tag (* Dialer)} d ^context/Context ctx] :results [context/Context context/CancelFunc]
+  (when (== ctx nil)
+    (panic "nil context"))
+
+  (let [deadline (.deadline d ctx (time/Now))
+      (values ^context/CancelFunc cancel1 ^context/CancelFunc cancel2) (zero context/CancelFunc)]
+    (when (not (.IsZero deadline))
+      (testHookStepTime)
+      (when [(values d ok) (.Deadline ctx)] (or (not ok) (.Before deadline d))
+        (let [^context/Context subCtx (zero context/Context)]
+          (set! (values subCtx cancel1) (context/WithDeadline ctx deadline))
+          (set! ctx subCtx))))
+
+
+    (when [oldCancel (.-Cancel d)] (!= oldCancel nil)
+      (let [^context/Context subCtx (zero context/Context)]
+        (set! (values subCtx cancel2) (context/WithCancel ctx))
+        (go (^{:go/end 586} (fn []
+              (select
+                (case (<! oldCancel)
+                  (cancel2))
+                (case (<! (.Done subCtx)))))))
+
+
+        (set! ctx subCtx)))
+
+    (return ctx ^{:go/end 596} (fn []
+        (when (!= cancel1 nil)
+          (cancel1))
+
+        (when (!= cancel2 nil)
+          (cancel2))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 611} (go/method DialTCP "DialTCP acts like Dial for TCP networks using the provided context.\n\nThe provided Context must be non-nil. If the context expires before\nthe connection is complete, an error is returned. Once successfully\nconnected, any expiration of the context will not affect the\nconnection.\n\nThe network must be a TCP network name; see func Dial for details.\n" [^{:tag (* Dialer)} d ^context/Context ctx ^string network ^netip/AddrPort laddr ^netip/AddrPort raddr] :results [(* TCPConn) error]
+  (let [(values ^:assign ctx cancel) (.dialCtx d ctx)]
+    (defer (cancel))
+    (dialTCP ctx d network (TCPAddrFromAddrPort laddr) (TCPAddrFromAddrPort raddr))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 625} (go/method DialUDP "DialUDP acts like Dial for UDP networks using the provided context.\n\nThe provided Context must be non-nil. If the context expires before\nthe connection is complete, an error is returned. Once successfully\nconnected, any expiration of the context will not affect the\nconnection.\n\nThe network must be a UDP network name; see func Dial for details.\n" [^{:tag (* Dialer)} d ^context/Context ctx ^string network ^netip/AddrPort laddr ^netip/AddrPort raddr] :results [(* UDPConn) error]
+  (let [(values ^:assign ctx cancel) (.dialCtx d ctx)]
+    (defer (cancel))
+    (dialUDP ctx d network (UDPAddrFromAddrPort laddr) (UDPAddrFromAddrPort raddr))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 639} (go/method DialIP "DialIP acts like Dial for IP networks using the provided context.\n\nThe provided Context must be non-nil. If the context expires before\nthe connection is complete, an error is returned. Once successfully\nconnected, any expiration of the context will not affect the\nconnection.\n\nThe network must be an IP network name; see func Dial for details.\n" [^{:tag (* Dialer)} d ^context/Context ctx ^string network ^netip/Addr laddr ^netip/Addr raddr] :results [(* IPConn) error]
+  (let [(values ^:assign ctx cancel) (.dialCtx d ctx)]
+    (defer (cancel))
+    (dialIP ctx d network (ipAddrFromAddr laddr) (ipAddrFromAddr raddr))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 653} (go/method DialUnix "DialUnix acts like Dial for Unix networks using the provided context.\n\nThe provided Context must be non-nil. If the context expires before\nthe connection is complete, an error is returned. Once successfully\nconnected, any expiration of the context will not affect the\nconnection.\n\nThe network must be a Unix network name; see func Dial for details.\n" [^{:tag (* Dialer)} d ^context/Context ctx ^string network ^{:tag (* UnixAddr)} laddr ^{:tag (* UnixAddr)} raddr] :results [(* UnixConn) error]
+  (let [(values ^:assign ctx cancel) (.dialCtx d ctx)]
+    (defer (cancel))
+    (dialUnix ctx d network laddr raddr)))
+
+
+
+
+
+
+^{:go/end 729} (go/method dialParallel "dialParallel races two copies of dialSerial, giving the first a\nhead start. It returns the first established connection and\ncloses the others. Otherwise it returns an error from the first\nprimary address.\n" [^{:tag (* sysDialer)} sd ^context/Context ctx ^addrList primaries ^addrList fallbacks] :results [Conn error]
+  (when (== (len fallbacks) 0)
+    (return (.dialSerial sd ctx primaries)))
+
+
+  (let [returned (make (chan (struct)))]
+    (defer (close returned))
+
+    (let-type [dialResult (struct
+          ^{:line 668} Conn
+          ^{:line 669 :tag error} error
+          ^{:line 670 :tag bool} primary
+          ^{:line 671 :tag bool} done)]
+
+      (let [results (make (chan dialResult)) ; unbuffered
+
+          ^{:line 675} startRacer ^{:go/end 688} (fn [^context/Context ctx ^bool primary]
+            (let [ras primaries]
+              (when (not primary)
+                (set! ras fallbacks))
+
+              (let [(values c err) (.dialSerial sd ctx ras)]
+                (select
+                  (case (>! results (lit dialResult :Conn c :error err :primary primary :done true)))
+                  (case (<! returned)
+                    (when (!= c nil)
+                      (.Close c)))))))
+
+
+
+
+          (values ^dialResult primary ^dialResult fallback) (zero dialResult)
+
+          ;; Start the main racer.
+          (values primaryCtx primaryCancel) (context/WithCancel ctx)]
+        (defer (primaryCancel))
+        (go (startRacer primaryCtx true))
+
+        ;; Start the timer for the fallback racer.
+        (let [fallbackTimer (time/NewTimer ^{:go/via [Dialer]} (.fallbackDelay sd))]
+          (defer (.Stop fallbackTimer))
+
+          (while true
+            (select
+              (case (<! (.-C fallbackTimer))
+                (let [(values fallbackCtx fallbackCancel) (context/WithCancel ctx)]
+                  (defer (fallbackCancel))
+                  (go (startRacer fallbackCtx false))))
+
+              (case [res (<! results)]
+                (when (== (.-error res) nil)
+                  (return (.-Conn res) nil))
+
+                (if (.-primary res)
+                  (set! primary res)
+
+                  (set! fallback res))
+
+                (when (and (.-done primary) (.-done fallback))
+                  (return nil (.-error primary)))
+
+                (when (and (.-primary res) (.Stop fallbackTimer))
+                  ;; If we were able to stop the timer, that means it
+                  ;; was running (hadn't yet started the fallback), but
+                  ;; we just got an error on the primary path, so start
+                  ;; the fallback immediately (in 0 nanoseconds).
+                  (.Reset fallbackTimer 0))))))))))
+
+
+
+
+
+
+
+^{:go/end 773} (go/method dialSerial "dialSerial connects to a list of addresses in sequence, returning\neither the first successful connection, or the first error.\n" [^{:tag (* sysDialer)} sd ^context/Context ctx ^addrList ras] :results [Conn error]
+  (let [^error firstErr (zero error)] ; The error from the first address is most relevant.
+
+    (range [i ra ras]
+      (select
+        (case (<! (.Done ctx))
+          (return nil (addr (lit OpError :Op "dial" :Net (.-network sd) :Source ^{:go/via [Dialer]} (.-LocalAddr sd) :Addr ra :Err (mapErr (.Err ctx))))))
+        (default))
+
+
+      (let [dialCtx ctx]
+        (when [(values deadline hasDeadline) (.Deadline ctx)] hasDeadline
+          (let [(values partialDeadline err) (partialDeadline (time/Now) deadline (- (len ras) i))]
+            (when (!= err nil)
+              ;; Ran out of time.
+              (when (== firstErr nil)
+                (set! firstErr (addr (lit OpError :Op "dial" :Net (.-network sd) :Source ^{:go/via [Dialer]} (.-LocalAddr sd) :Addr ra :Err err))))
+
+              (break))
+
+            (when (.Before partialDeadline deadline)
+              (let [^context/CancelFunc cancel (zero context/CancelFunc)]
+                (set! (values dialCtx cancel) (context/WithDeadline ctx partialDeadline))
+                (defer (cancel))))))
+
+
+
+        (let [(values c err) (.dialSingle sd dialCtx ra)]
+          (when (== err nil)
+            (return c nil))
+
+          (when (== firstErr nil)
+            (set! firstErr err)))))
+
+
+
+    (when (== firstErr nil)
+      (set! firstErr (addr (lit OpError :Op "dial" :Net (.-network sd) :Source nil :Addr nil :Err errMissingAddress))))
+
+    (return nil firstErr)))
+
+
+
+
+^{:go/end 813} (go/method dialSingle "dialSingle attempts to establish and returns a single connection to\nthe destination address.\n" [^{:tag (* sysDialer)} sd ^context/Context ctx ^Addr ra] :results [^Conn c ^error err]
+  (let [(values trace _) (assert (* nettrace/Trace) (.Value ctx (lit nettrace/TraceKey)))]
+    (when (!= trace nil)
+      (let [raStr (.String ra)]
+        (when (!= (.-ConnectStart trace) nil)
+          ((.-ConnectStart trace) (.-network sd) raStr))
+
+        (when (!= (.-ConnectDone trace) nil)
+          (defer (^{:go/end 785} (fn [] ((.-ConnectDone trace) (.-network sd) raStr err)))))))
+
+
+    (let [la ^{:go/via [Dialer]} (.-LocalAddr sd)]
+      (type-switch [ra ra]
+        (case [(* TCPAddr)]
+          (let [(values la _) (assert (* TCPAddr) la)]
+            (if ^{:go/via [Dialer]} (.MultipathTCP sd)
+              (set! (values c err) (.dialMPTCP sd ctx la ra))
+
+              (set! (values c err) (.dialTCP sd ctx la ra)))))
+
+        (case [(* UDPAddr)]
+          (let [(values la _) (assert (* UDPAddr) la)]
+            (set! (values c err) (.dialUDP sd ctx la ra))))
+        (case [(* IPAddr)]
+          (let [(values la _) (assert (* IPAddr) la)]
+            (set! (values c err) (.dialIP sd ctx la ra))))
+        (case [(* UnixAddr)]
+          (let [(values la _) (assert (* UnixAddr) la)]
+            (set! (values c err) (.dialUnix sd ctx la ra))))
+        (default
+          (return nil (addr (lit OpError :Op "dial" :Net (.-network sd) :Source la :Addr ra :Err (addr (lit AddrError :Err "unexpected address type" :Addr (.-address sd))))))))
+
+      (when (!= err nil)
+        (return nil (addr (lit OpError :Op "dial" :Net (.-network sd) :Source la :Addr ra :Err err)))) ; c is non-nil interface containing nil pointer
+
+      (return c nil))))
+
+
+
+(go/type ListenConfig "ListenConfig contains options for listening to an address.\n" (struct
+
+
+
+
+
+
+
+
+    ^{:line 825 :tag (func [^string network ^string address ^syscall/RawConn c] [error]) :doc "If Control is not nil, it is called after creating the network\nconnection but before binding it to the operating system.\n\nNetwork and address parameters passed to Control function are not\nnecessarily the ones passed to Listen. Calling Listen with TCP networks\nwill cause the Control function to be called with \"tcp4\" or \"tcp6\",\nUDP networks become \"udp4\" or \"udp6\", IP networks become \"ip4\" or \"ip6\",\nand other known networks are passed as-is.\n"} Control
+
+
+
+
+
+
+
+
+
+
+    ^{:line 836 :tag time/Duration :doc "KeepAlive specifies the keep-alive period for network\nconnections accepted by this listener.\n\nKeepAlive is ignored if KeepAliveConfig.Enable is true.\n\nIf zero, keep-alive are enabled if supported by the protocol\nand operating system. Network protocols or operating systems\nthat do not support keep-alive ignore this field.\nIf negative, keep-alive are disabled.\n"} KeepAlive
+
+
+
+
+
+
+
+
+    ^{:line 845 :tag KeepAliveConfig :doc "KeepAliveConfig specifies the keep-alive probe configuration\nfor an active network connection, when supported by the\nprotocol and operating system.\n\nIf KeepAliveConfig.Enable is true, keep-alive probes are enabled.\nIf KeepAliveConfig.Enable is false and KeepAlive is negative,\nkeep-alive probes are disabled.\n"} KeepAliveConfig
+
+
+
+
+    ^{:line 850 :tag mptcpStatusListen :doc "If mptcpStatus is set to a value allowing Multipath TCP (MPTCP) to be\nused, any call to Listen with \"tcp(4|6)\" as network will use MPTCP if\nsupported by the operating system.\n"} mptcpStatus))
+
+
+
+
+
+
+^{:go/end 859} (go/method MultipathTCP "MultipathTCP reports whether MPTCP will be used.\n\nThis method doesn't check if MPTCP is supported by the operating\nsystem or not.\n" ^bool [^{:tag (* ListenConfig)} lc]
+  (.get (.-mptcpStatus lc)))
+
+
+
+
+
+
+
+
+^{:go/end 869} (go/method SetMultipathTCP "SetMultipathTCP directs the [Listen] method to use, or not use, MPTCP,\nif supported by the operating system. This method overrides the\nsystem default and the GODEBUG=multipathtcp=... setting if any.\n\nIf MPTCP is not available on the host or not supported by the client,\nthe Listen method will fall back to TCP.\n" [^{:tag (* ListenConfig)} lc ^bool use]
+  (.set (.-mptcpStatus lc) use))
+
+
+
+
+
+
+
+
+
+^{:go/end 906} (go/method Listen "Listen announces on the local network address.\n\nSee func Listen for a description of the network and address\nparameters.\n\nThe ctx argument is used while resolving the address on which to listen;\nit does not affect the returned Listener.\n" [^{:tag (* ListenConfig)} lc ^context/Context ctx ^string network ^string address] :results [Listener error]
+  (let [(values addrs err) (.resolveAddrList DefaultResolver ctx "listen" network address nil)]
+    (when (!= err nil)
+      (return nil (addr (lit OpError :Op "listen" :Net network :Source nil :Addr nil :Err err))))
+
+    (let [sl (addr ^{:go/breaks [2 4 6]} (lit sysListener
+            :ListenConfig @lc
+            :network network
+            :address address))
+
+        ^{:line 888 :tag Listener} l (zero Listener)
+        ^{:line 889} la (.first addrs isIPv4)]
+      (type-switch [la la]
+        (case [(* TCPAddr)]
+          (if ^{:go/via [ListenConfig]} (.MultipathTCP sl)
+            (set! (values l err) (.listenMPTCP sl ctx la))
+
+            (set! (values l err) (.listenTCP sl ctx la))))
+
+        (case [(* UnixAddr)]
+          (set! (values l err) (.listenUnix sl ctx la)))
+        (default
+          (return nil (addr (lit OpError :Op "listen" :Net (.-network sl) :Source nil :Addr la :Err (addr (lit AddrError :Err "unexpected address type" :Addr address)))))))
+
+      (when (!= err nil)
+        (return nil (addr (lit OpError :Op "listen" :Net (.-network sl) :Source nil :Addr la :Err err)))) ; l is non-nil interface containing nil pointer
+
+      (return l nil))))
+
+
+
+
+
+
+
+
+
+^{:go/end 941} (go/method ListenPacket "ListenPacket announces on the local network address.\n\nSee func ListenPacket for a description of the network and address\nparameters.\n\nThe ctx argument is used while resolving the address on which to listen;\nit does not affect the returned PacketConn.\n" [^{:tag (* ListenConfig)} lc ^context/Context ctx ^string network ^string address] :results [PacketConn error]
+  (let [(values addrs err) (.resolveAddrList DefaultResolver ctx "listen" network address nil)]
+    (when (!= err nil)
+      (return nil (addr (lit OpError :Op "listen" :Net network :Source nil :Addr nil :Err err))))
+
+    (let [sl (addr ^{:go/breaks [2 4 6]} (lit sysListener
+            :ListenConfig @lc
+            :network network
+            :address address))
+
+        ^{:line 925 :tag PacketConn} c (zero PacketConn)
+        ^{:line 926} la (.first addrs isIPv4)]
+      (type-switch [la la]
+        (case [(* UDPAddr)]
+          (set! (values c err) (.listenUDP sl ctx la)))
+        (case [(* IPAddr)]
+          (set! (values c err) (.listenIP sl ctx la)))
+        (case [(* UnixAddr)]
+          (set! (values c err) (.listenUnixgram sl ctx la)))
+        (default
+          (return nil (addr (lit OpError :Op "listen" :Net (.-network sl) :Source nil :Addr la :Err (addr (lit AddrError :Err "unexpected address type" :Addr address)))))))
+
+      (when (!= err nil)
+        (return nil (addr (lit OpError :Op "listen" :Net (.-network sl) :Source nil :Addr la :Err err)))) ; c is non-nil interface containing nil pointer
+
+      (return c nil))))
+
+
+
+(go/type sysListener "sysListener contains a Listen's parameters and configuration.\n" (struct
+    ^{:line 945} ListenConfig
+    ^{:line 946 :tag string} network ^string address))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 973} (go/func Listen "Listen announces on the local network address.\n\nThe network must be \"tcp\", \"tcp4\", \"tcp6\", \"unix\" or \"unixpacket\".\n\nFor TCP networks, if the host in the address parameter is empty or\na literal unspecified IP address, Listen listens on all available\nunicast and anycast IP addresses of the local system.\nTo only use IPv4, use network \"tcp4\".\nThe address can use a host name, but this is not recommended,\nbecause it will create a listener for at most one of the host's IP\naddresses.\nIf the port in the address parameter is empty or \"0\", as in\n\"127.0.0.1:\" or \"[::1]:0\", a port number is automatically chosen.\nThe [Addr] method of [Listener] can be used to discover the chosen\nport.\n\nSee func [Dial] for a description of the network and address\nparameters.\n\nListen uses context.Background internally; to specify the context, use\n[ListenConfig.Listen].\n" [^string network ^string address] :results [Listener error]
+  (let [^ListenConfig lc (zero ListenConfig)]
+    (.Listen lc (context/Background) network address)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1003} (go/func ListenPacket "ListenPacket announces on the local network address.\n\nThe network must be \"udp\", \"udp4\", \"udp6\", \"unixgram\", or an IP\ntransport. The IP transports are \"ip\", \"ip4\", or \"ip6\" followed by\na colon and a literal protocol number or a protocol name, as in\n\"ip:1\" or \"ip:icmp\".\n\nFor UDP and IP networks, if the host in the address parameter is\nempty or a literal unspecified IP address, ListenPacket listens on\nall available IP addresses of the local system except multicast IP\naddresses.\nTo only use IPv4, use network \"udp4\" or \"ip4:proto\".\nThe address can use a host name, but this is not recommended,\nbecause it will create a listener for at most one of the host's IP\naddresses.\nIf the port in the address parameter is empty or \"0\", as in\n\"127.0.0.1:\" or \"[::1]:0\", a port number is automatically chosen.\nThe LocalAddr method of [PacketConn] can be used to discover the\nchosen port.\n\nSee func [Dial] for a description of the network and address\nparameters.\n\nListenPacket uses context.Background internally; to specify the context, use\n[ListenConfig.ListenPacket].\n" [^string network ^string address] :results [PacketConn error]
+  (let [^ListenConfig lc (zero ListenConfig)]
+    (.ListenPacket lc (context/Background) network address)))

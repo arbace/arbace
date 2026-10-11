@@ -1,0 +1,229 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; AMD64-specific hardware-assisted CRC32 algorithms. See crc32.go for a
+;; description of the interface that each architecture-specific file
+;; implements.
+
+(in-ns 'go.hash.crc32) (go/file "crc32_amd64.go" :imports [
+
+
+    ^{:line 12} [cpu "internal/cpu"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+
+(go/const "Offset into internal/cpu records for use in assembly.\n"
+  ^{:line 18} [^{:val 82} offsetX86HasAVX512VPCLMULQDQL (unsafe/Offsetof (.-HasAVX512VPCLMULQDQ cpu/X86))])
+
+
+;; This file contains the code to call the SSE 4.2 version of the Castagnoli
+;; and IEEE CRC.
+
+
+
+
+
+(go/func ^:extern ^:go/noescape castagnoliSSE42 "castagnoliSSE42 is defined in crc32_amd64.s and uses the SSE 4.2 CRC32\ninstruction.\n" ^uint32 [^uint32 crc ^{:tag (slice byte)} p])
+
+
+
+
+
+(go/func ^:extern ^:go/noescape castagnoliSSE42Triple "castagnoliSSE42Triple is defined in crc32_amd64.s and uses the SSE 4.2 CRC32\ninstruction.\n" [
+    ^{:line 35 :tag uint32} crcA ^uint32 crcB ^uint32 crcC
+    ^{:line 36 :tag (slice byte)} a ^{:tag (slice byte)} b ^{:tag (slice byte)} c
+    ^{:line 37 :tag uint32} rounds] :results [
+    ^{:line 38 :tag uint32} retA ^uint32 retB ^uint32 retC])
+
+
+
+
+
+(go/func ^:extern ^:go/noescape ieeeCLMUL "ieeeCLMUL is defined in crc_amd64.s and uses the PCLMULQDQ\ninstruction as well as SSE 4.1.\n" ^uint32 [^uint32 crc ^{:tag (slice byte)} p])
+
+(go/const ^{:val 168} castagnoliK1 168)
+(go/const ^{:val 1344} castagnoliK2 1344)
+
+(go/type sse42Table (array 4 Table))
+
+(go/var ^{:tag (* sse42Table)} castagnoliSSE42TableK1)
+(go/var ^{:tag (* sse42Table)} castagnoliSSE42TableK2)
+
+^{:go/end 56} (go/func archAvailableCastagnoli ^bool []
+  (.-HasSSE42 cpu/X86))
+
+
+^{:go/end 78} (go/func archInitCastagnoli []
+  (when (not (.-HasSSE42 cpu/X86))
+    (panic "arch-specific Castagnoli not available"))
+
+  (set! castagnoliSSE42TableK1 (new sse42Table))
+  (set! castagnoliSSE42TableK2 (new sse42Table))
+  ;; See description in updateCastagnoli.
+  ;;    t[0][i] = CRC(i000, O)
+  ;;    t[1][i] = CRC(0i00, O)
+  ;;    t[2][i] = CRC(00i0, O)
+  ;;    t[3][i] = CRC(000i, O)
+  ;; where O is a sequence of K zeros.
+  (let [^{:tag (array castagnoliK2 byte)} tmp (zero (array castagnoliK2 byte))]
+    (for [b 0] (< b 4) (inc! b)
+      (for [i 0] (< i 256) (inc! i)
+        (let [val (<< (conv uint32 i) (conv uint32 (* b 8)))]
+          (aset (aget castagnoliSSE42TableK1 b) i (castagnoliSSE42 val (subslice tmp _ castagnoliK1)))
+          (aset (aget castagnoliSSE42TableK2 b) i (castagnoliSSE42 val (subslice tmp))))))))
+
+
+
+
+
+
+
+^{:go/end 88} (go/func castagnoliShift "castagnoliShift computes the CRC32-C of K1 or K2 zeroes (depending on the\ntable given) with the given initial crc value. This corresponds to\nCRC(crc, O) in the description in updateCastagnoli.\n" ^uint32 [^{:tag (* sse42Table)} table ^uint32 crc]
+  (bit-xor (aget (aget table 3) (>> crc 24))
+    (aget (aget table 2) (bit-and (>> crc 16) 0xFF))
+    (aget (aget table 1) (bit-and (>> crc 8) 0xFF))
+    (aget (aget table 0) (bit-and crc 0xFF))))
+
+
+^{:go/end 199} (go/func archUpdateCastagnoli ^uint32 [^uint32 crc ^{:tag (slice byte)} p]
+  (when (not (.-HasSSE42 cpu/X86))
+    (panic "not available"))
+
+
+  ;; This method is inspired from the algorithm in Intel's white paper:
+  ;;    "Fast CRC Computation for iSCSI Polynomial Using CRC32 Instruction"
+  ;; The same strategy of splitting the buffer in three is used but the
+  ;; combining calculation is different; the complete derivation is explained
+  ;; below.
+  ;;
+  ;; -- The basic idea --
+  ;;
+  ;; The CRC32 instruction (available in SSE4.2) can process 8 bytes at a
+  ;; time. In recent Intel architectures the instruction takes 3 cycles;
+  ;; however the processor can pipeline up to three instructions if they
+  ;; don't depend on each other.
+  ;;
+  ;; Roughly this means that we can process three buffers in about the same
+  ;; time we can process one buffer.
+  ;;
+  ;; The idea is then to split the buffer in three, CRC the three pieces
+  ;; separately and then combine the results.
+  ;;
+  ;; Combining the results requires precomputed tables, so we must choose a
+  ;; fixed buffer length to optimize. The longer the length, the faster; but
+  ;; only buffers longer than this length will use the optimization. We choose
+  ;; two cutoffs and compute tables for both:
+  ;;  - one around 512: 168*3=504
+  ;;  - one around 4KB: 1344*3=4032
+  ;;
+  ;; -- The nitty gritty --
+  ;;
+  ;; Let CRC(I, X) be the non-inverted CRC32-C of the sequence X (with
+  ;; initial non-inverted CRC I). This function has the following properties:
+  ;;   (a) CRC(I, AB) = CRC(CRC(I, A), B)
+  ;;   (b) CRC(I, A xor B) = CRC(I, A) xor CRC(0, B)
+  ;;
+  ;; Say we want to compute CRC(I, ABC) where A, B, C are three sequences of
+  ;; K bytes each, where K is a fixed constant. Let O be the sequence of K zero
+  ;; bytes.
+  ;;
+  ;; CRC(I, ABC) = CRC(I, ABO xor C)
+  ;;             = CRC(I, ABO) xor CRC(0, C)
+  ;;             = CRC(CRC(I, AB), O) xor CRC(0, C)
+  ;;             = CRC(CRC(I, AO xor B), O) xor CRC(0, C)
+  ;;             = CRC(CRC(I, AO) xor CRC(0, B), O) xor CRC(0, C)
+  ;;             = CRC(CRC(CRC(I, A), O) xor CRC(0, B), O) xor CRC(0, C)
+  ;;
+  ;; The castagnoliSSE42Triple function can compute CRC(I, A), CRC(0, B),
+  ;; and CRC(0, C) efficiently.  We just need to find a way to quickly compute
+  ;; CRC(uvwx, O) given a 4-byte initial value uvwx. We can precompute these
+  ;; values; since we can't have a 32-bit table, we break it up into four
+  ;; 8-bit tables:
+  ;;
+  ;;    CRC(uvwx, O) = CRC(u000, O) xor
+  ;;                   CRC(0v00, O) xor
+  ;;                   CRC(00w0, O) xor
+  ;;                   CRC(000x, O)
+  ;;
+  ;; We can compute tables corresponding to the four terms for all 8-bit
+  ;; values.
+
+  (set! crc (bit-not crc))
+
+  ;; If a buffer is long enough to use the optimization, process the first few
+  ;; bytes to align the buffer to an 8 byte boundary (if necessary).
+  (when (>= (len p) (* castagnoliK1 3))
+    (let [delta (conv int (bit-and (conv uintptr (conv unsafe/Pointer (addr (aget p 0)))) 7))]
+      (when (!= delta 0)
+        (set! delta (- 8 delta))
+        (set! crc (castagnoliSSE42 crc (subslice p _ delta)))
+        (set! p (subslice p delta)))))
+
+
+
+  ;; Process 3*K2 at a time.
+  (while (>= (len p) (* castagnoliK2 3))
+    ;; Compute CRC(I, A), CRC(0, B), and CRC(0, C).
+    (let [(values crcA crcB crcC) (castagnoliSSE42Triple
+          ^{:line 170} crc 0 0
+          ^{:line 171} p (subslice p castagnoliK2) (subslice p (* castagnoliK2 2))
+          (/ castagnoliK2 24))
+
+        ;; CRC(I, AB) = CRC(CRC(I, A), O) xor CRC(0, B)
+        ^{:line 175} crcAB (bit-xor (castagnoliShift castagnoliSSE42TableK2 crcA) crcB)]
+      ;; CRC(I, ABC) = CRC(CRC(I, AB), O) xor CRC(0, C)
+      (set! crc (bit-xor (castagnoliShift castagnoliSSE42TableK2 crcAB) crcC))
+      (set! p (subslice p (* castagnoliK2 3)))))
+
+
+  ;; Process 3*K1 at a time.
+  (while (>= (len p) (* castagnoliK1 3))
+    ;; Compute CRC(I, A), CRC(0, B), and CRC(0, C).
+    (let [(values crcA crcB crcC) (castagnoliSSE42Triple
+          ^{:line 185} crc 0 0
+          ^{:line 186} p (subslice p castagnoliK1) (subslice p (* castagnoliK1 2))
+          (/ castagnoliK1 24))
+
+        ;; CRC(I, AB) = CRC(CRC(I, A), O) xor CRC(0, B)
+        ^{:line 190} crcAB (bit-xor (castagnoliShift castagnoliSSE42TableK1 crcA) crcB)]
+      ;; CRC(I, ABC) = CRC(CRC(I, AB), O) xor CRC(0, C)
+      (set! crc (bit-xor (castagnoliShift castagnoliSSE42TableK1 crcAB) crcC))
+      (set! p (subslice p (* castagnoliK1 3)))))
+
+
+  ;; Use the simple implementation for what's left.
+  (set! crc (castagnoliSSE42 crc p))
+  (bit-not crc))
+
+
+^{:go/end 203} (go/func archAvailableIEEE ^bool []
+  (and (.-HasPCLMULQDQ cpu/X86) (.-HasSSE41 cpu/X86)))
+
+
+(go/var ^{:tag (* slicing8Table)} archIeeeTable8)
+
+^{:go/end 213} (go/func archInitIEEE []
+  (when (or (not (.-HasPCLMULQDQ cpu/X86)) (not (.-HasSSE41 cpu/X86)))
+    (panic "not available"))
+
+  ;; We still use slicing-by-8 for small buffers.
+  (set! archIeeeTable8 (slicingMakeTable IEEE)))
+
+
+^{:go/end 230} (go/func archUpdateIEEE ^uint32 [^uint32 crc ^{:tag (slice byte)} p]
+  (when (or (not (.-HasPCLMULQDQ cpu/X86)) (not (.-HasSSE41 cpu/X86)))
+    (panic "not available"))
+
+
+  (when (>= (len p) 64)
+    (let [left (bit-and (len p) 15)
+        ^{:line 222} do (- (len p) left)]
+      (set! crc (bit-not (ieeeCLMUL (bit-not crc) (subslice p _ do))))
+      (set! p (subslice p do))))
+
+  (when (== (len p) 0)
+    (return crc))
+
+  (slicingUpdate crc archIeeeTable8 p))

@@ -1,0 +1,698 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; /*
+;; * Line tables
+;; */
+
+(in-ns 'go.debug.gosym) (go/file "pclntab.go" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [binary "encoding/binary"]
+    ^{:line 14} [abi "internal/abi"]
+    ^{:line 15} [sort "sort"]
+    ^{:line 16} [sync "sync"]])
+
+
+
+(go/type version "version of the pclntab\n" int)
+
+(go/const
+  ^{:line 23} [^{:tag version :val 0} verUnknown iota]
+  ^{:line 24} [^{:val 1} ver11]
+  ^{:line 25} [^{:val 2} ver12]
+  ^{:line 26} [^{:val 3} ver116]
+  ^{:line 27} [^{:val 4} ver118]
+  ^{:line 28} [^{:val 5} ver120])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type LineTable "A LineTable is a data structure mapping program counters to line numbers.\n\nIn Go 1.1 and earlier, each function (represented by a [Func]) had its own LineTable,\nand the line number corresponded to a numbering of all source lines in the\nprogram, across all files. That absolute line number would then have to be\nconverted separately to a file name and line number within the file.\n\nIn Go 1.2, the format of the data changed so that there is a single LineTable\nfor the entire program, shared by all Funcs, and there are no absolute line\nnumbers, just line numbers within specific files.\n\nFor the most part, LineTable's methods should be treated as an internal\ndetail of the package; callers should use the methods on [Table] instead.\n" (struct
+    ^{:line 45 :tag (slice byte)} Data
+    ^{:line 46 :tag uint64} PC
+    ^{:line 47 :tag int} Line
+
+
+    ^{:line 50 :tag sync/Mutex :doc "This mutex is used to keep parsing of pclntab synchronous.\n"} mu
+
+
+    ^{:line 53 :tag version :doc "Contains the version of the pclntab section.\n"} version
+
+
+    ^{:line 56 :tag binary/ByteOrder :doc "Go 1.2/1.16/1.18 state\n"} binary
+    ^{:line 57 :tag uint32} quantum
+    ^{:line 58 :tag uint32} ptrsize
+    ^{:line 59 :tag uint64} textStart ; address of runtime.text symbol (1.18+)
+    ^{:line 60 :tag (slice byte)} funcnametab
+    ^{:line 61 :tag (slice byte)} cutab
+    ^{:line 62 :tag (slice byte)} funcdata
+    ^{:line 63 :tag (slice byte)} functab
+    ^{:line 64 :tag uint32} nfunctab
+    ^{:line 65 :tag (slice byte)} filetab
+    ^{:line 66 :tag (slice byte)} pctab ; points to the pctables.
+    ^{:line 67 :tag uint32} nfiletab
+    ^{:line 68 :tag (map uint32 string)} funcNames ; cache the function names
+    ^{:line 69 :tag (map uint32 string)} strings ; interned substrings of Data, keyed by offset
+
+
+
+    ^{:line 73 :tag (map string uint32) :doc "fileMap varies depending on the version of the object file.\nFor ver12, it maps the name to the index in the file table.\nFor ver116, it maps the name to the offset in filetab.\n"} fileMap))
+
+
+
+
+
+
+(go/const ^{:val 1 :doc "NOTE(rsc): This is wrong for GOARCH=arm, which uses a quantum of 4,\nbut we have no idea whether we're using arm or not. This only\nmatters in the old (pre-Go 1.2) symbol table format, so it's not worth\nfixing.\n"} oldQuantum 1)
+
+^{:go/end 115} (go/method parse [^{:tag (* LineTable)} t ^uint64 targetPC ^int targetLine] :results [^{:tag (slice byte)} b ^uint64 pc ^int line]
+  ;; The PC/line table can be thought of as a sequence of
+  ;;  <pc update>* <line update>
+  ;; batches. Each update batch results in a (pc, line) pair,
+  ;; where line applies to every PC from pc up to but not
+  ;; including the pc of the next pair.
+  ;;
+  ;; Here we process each update individually, which simplifies
+  ;; the code, but makes the corner cases more confusing.
+  (set! (values b pc line) (values (.-Data t) (.-PC t) (.-Line t)))
+  (while (and (<= pc targetPC) (!= line targetLine) (> (len b) 0))
+    (let [code (aget b 0)]
+      (set! b (subslice b 1))
+      (switch
+        (case [(== code 0)]
+          (when (< (len b) 4)
+            (set! b (subslice b 0 0))
+            (break))
+
+          (let [val (.Uint32 binary/BigEndian b)]
+            (set! b (subslice b 4))
+            (set! line + (conv int val))))
+        (case [(<= code 64)]
+          (set! line + (conv int code)))
+        (case [(<= code 128)]
+          (set! line - (conv int (- code 64))))
+        (default
+          (set! pc + (* oldQuantum (conv uint64 (- code 128))))
+          (continue)))
+
+      (set! pc + oldQuantum)))
+
+  (return b pc line))
+
+
+^{:go/end 120} (go/method slice ^{:tag (* LineTable)} [^{:tag (* LineTable)} t ^uint64 pc]
+  (let [(values data ^:assign pc line) (.parse t pc -1)]
+    (addr (lit LineTable :Data data :PC pc :Line line))))
+
+
+
+
+
+^{:go/end 131} (go/method PCToLine "PCToLine returns the line number for the given program counter.\n\nDeprecated: Use Table's PCToLine method instead.\n" ^int [^{:tag (* LineTable)} t ^uint64 pc]
+  (when (.isGo12 t)
+    (return (.go12PCToLine t pc)))
+
+  (let [(values _ _ line) (.parse t pc -1)]
+    ^{:line 130} line))
+
+
+
+
+
+
+^{:go/end 147} (go/method LineToPC "LineToPC returns the program counter for the given line number,\nconsidering only program counters before maxpc.\n\nDeprecated: Use Table's LineToPC method instead.\n" ^uint64 [^{:tag (* LineTable)} t ^int line ^uint64 maxpc]
+  (when (.isGo12 t)
+    (return 0))
+
+  (let [(values _ pc line1) (.parse t maxpc line)]
+    (when (!= line1 line)
+      (return 0))
+
+    ;; Subtract quantum from PC to account for post-line increment
+    (- pc oldQuantum)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 159} (go/func NewLineTable "NewLineTable returns a new PC/line table\ncorresponding to the encoded data.\nText must be the start address of the\ncorresponding text segment, with the exact\nvalue stored in the 'runtime.text' symbol.\nThis value may differ from the start\naddress of the text segment if\nbinary was built with cgo enabled.\n" ^{:tag (* LineTable)} [^{:tag (slice byte)} data ^uint64 text]
+  (addr (lit LineTable :Data data :PC text :Line 0 :funcNames (make (map uint32 string)) :strings (make (map uint32 string)))))
+
+
+;; Go 1.2 symbol table format.
+;; See golang.org/s/go12symtab.
+;;
+;; A general note about the methods here: rather than try to avoid
+;; index out of bounds errors, we trust Go to detect them, and then
+;; we recover from the panics and treat them as indicative of a malformed
+;; or incomplete table.
+;;
+;; The methods called by symtab.go, which begin with "go12" prefixes,
+;; are expected to have that recovery logic.
+
+
+^{:go/end 176} (go/method isGo12 "isGo12 reports whether this is a Go 1.2 (or later) symbol table.\n" ^bool [^{:tag (* LineTable)} t]
+  (.parsePclnTab t)
+  (>= (.-version t) ver12))
+
+
+
+
+^{:go/end 185} (go/method uintptr "uintptr returns the pointer-sized value encoded at b.\nThe pointer size is dictated by the table being read.\n" ^uint64 [^{:tag (* LineTable)} t ^{:tag (slice byte)} b]
+  (when (== (.-ptrsize t) 4)
+    (return (conv uint64 (.Uint32 (.-binary t) b))))
+
+  (.Uint64 (.-binary t) b))
+
+
+
+^{:go/end 296} (go/method parsePclnTab "parsePclnTab parses the pclntab, setting the version.\n" [^{:tag (* LineTable)} t]
+  (.Lock (.-mu t))
+  (defer (.Unlock (.-mu t)))
+  (when (!= (.-version t) verUnknown)
+    (return))
+
+
+  ;; Note that during this function, setting the version is the last thing we do.
+  ;; If we set the version too early, and parsing failed (likely as a panic on
+  ;; slice lookups), we'd have a mistaken version.
+  ;;
+  ;; Error paths through this code will default the version to 1.1.
+  (set! (.-version t) ver11)
+
+  (when (not disableRecover)
+    (defer (^{:go/end 206} (fn []
+          ;; If we panic parsing, assume it's a Go 1.1 pclntab.
+          (recover)))))
+
+
+
+  ;; Check header: 4-byte magic, two zeros, pc quantum, pointer size.
+  (when (or (< (len (.-Data t)) 16) (!= (aget (.-Data t) 4) 0) (!= (aget (.-Data t) 5) 0)
+      ^:go/paren (and (!= (aget (.-Data t) 6) 1) (!= (aget (.-Data t) 6) 2) (!= (aget (.-Data t) 6) 4)) ; pc quantum
+      ^:go/paren (and (!= (aget (.-Data t) 7) 4) (!= (aget (.-Data t) 7) 8))) ; pointer size
+    (return))
+
+
+  (let [^version possibleVersion (zero version)
+
+      ;; The magic numbers are chosen such that reading the value with
+      ;; a different endianness does not result in the same value.
+      ;; That lets us the magic number to determine the endianness.
+      ^{:line 221} leMagic (conv abi/PCLnTabMagic (.Uint32 binary/LittleEndian (.-Data t)))
+      ^{:line 222} beMagic (conv abi/PCLnTabMagic (.Uint32 binary/BigEndian (.-Data t)))]
+
+    (switch
+      (case [(== leMagic abi/Go12PCLnTabMagic)]
+        (set! (values (.-binary t) possibleVersion) (values binary/LittleEndian ver12)))
+      (case [(== beMagic abi/Go12PCLnTabMagic)]
+        (set! (values (.-binary t) possibleVersion) (values binary/BigEndian ver12)))
+      (case [(== leMagic abi/Go116PCLnTabMagic)]
+        (set! (values (.-binary t) possibleVersion) (values binary/LittleEndian ver116)))
+      (case [(== beMagic abi/Go116PCLnTabMagic)]
+        (set! (values (.-binary t) possibleVersion) (values binary/BigEndian ver116)))
+      (case [(== leMagic abi/Go118PCLnTabMagic)]
+        (set! (values (.-binary t) possibleVersion) (values binary/LittleEndian ver118)))
+      (case [(== beMagic abi/Go118PCLnTabMagic)]
+        (set! (values (.-binary t) possibleVersion) (values binary/BigEndian ver118)))
+      (case [(== leMagic abi/Go120PCLnTabMagic)]
+        (set! (values (.-binary t) possibleVersion) (values binary/LittleEndian ver120)))
+      (case [(== beMagic abi/Go120PCLnTabMagic)]
+        (set! (values (.-binary t) possibleVersion) (values binary/BigEndian ver120)))
+      (default
+        (return)))
+
+    (set! (.-version t) possibleVersion)
+
+    ;; quantum and ptrSize are the same between 1.2, 1.16, and 1.18
+    (set! (.-quantum t) (conv uint32 (aget (.-Data t) 6)))
+    (set! (.-ptrsize t) (conv uint32 (aget (.-Data t) 7)))
+
+    (let [offset ^{:go/end 252} (fn ^uint64 [^uint32 word]
+          (.uintptr t (subslice (.-Data t) (+ 8 (* word (.-ptrsize t))))))
+
+        ^{:line 253} data ^{:go/end 255} (fn ^{:tag (slice byte)} [^uint32 word]
+          (subslice (.-Data t) (offset word)))]
+
+
+      (switch possibleVersion
+        (case [ver118 ver120]
+          (set! (.-nfunctab t) (conv uint32 (offset 0)))
+          (set! (.-nfiletab t) (conv uint32 (offset 1)))
+          (set! (.-textStart t) (.-PC t)) ; use the start PC instead of reading from the table, which may be unrelocated
+          (set! (.-funcnametab t) (data 3))
+          (set! (.-cutab t) (data 4))
+          (set! (.-filetab t) (data 5))
+          (set! (.-pctab t) (data 6))
+          (set! (.-funcdata t) (data 7))
+          (set! (.-functab t) (data 7))
+          (let [functabsize (* (+ (* (conv int (.-nfunctab t)) 2) 1) (.functabFieldSize t))]
+            (set! (.-functab t) (subslice (.-functab t) _ functabsize))))
+        (case [ver116]
+          (set! (.-nfunctab t) (conv uint32 (offset 0)))
+          (set! (.-nfiletab t) (conv uint32 (offset 1)))
+          (set! (.-funcnametab t) (data 2))
+          (set! (.-cutab t) (data 3))
+          (set! (.-filetab t) (data 4))
+          (set! (.-pctab t) (data 5))
+          (set! (.-funcdata t) (data 6))
+          (set! (.-functab t) (data 6))
+          (let [functabsize (* (+ (* (conv int (.-nfunctab t)) 2) 1) (.functabFieldSize t))]
+            (set! (.-functab t) (subslice (.-functab t) _ functabsize))))
+        (case [ver12]
+          (set! (.-nfunctab t) (conv uint32 (.uintptr t (subslice (.-Data t) 8))))
+          (set! (.-funcdata t) (.-Data t))
+          (set! (.-funcnametab t) (.-Data t))
+          (set! (.-functab t) (subslice (.-Data t) (+ 8 (.-ptrsize t))))
+          (set! (.-pctab t) (.-Data t))
+          (let [functabsize (* (+ (* (conv int (.-nfunctab t)) 2) 1) (.functabFieldSize t))
+              ^{:line 288} fileoff (.Uint32 (.-binary t) (subslice (.-functab t) functabsize))]
+            (set! (.-functab t) (subslice (.-functab t) _ functabsize))
+            (set! (.-filetab t) (subslice (.-Data t) fileoff))
+            (set! (.-nfiletab t) (.Uint32 (.-binary t) (.-filetab t)))
+            (set! (.-filetab t) (subslice (.-filetab t) _ (* (.-nfiletab t) 4)))))
+        (default
+          (panic "unreachable"))))))
+
+
+
+
+^{:go/end 328} (go/method go12Funcs "go12Funcs returns a slice of Funcs derived from the Go 1.2+ pcln table.\n" ^{:tag (slice Func)} [^{:tag (* LineTable)} t]
+  ;; Assume it is malformed and return nil on error.
+  (when (not disableRecover)
+    (defer (^{:go/end 304} (fn []
+          (recover)))))
+
+
+
+  (let [ft (.funcTab t)
+      ^{:line 308} funcs (make (slice Func) (.Count ft))
+      ^{:line 309} syms (make (slice Sym) (len funcs))]
+    (range [i funcs]
+      (let [f (addr (aget funcs i))]
+        (set! (.-Entry f) (.pc ft i))
+        (set! (.-End f) (.pc ft (+ i 1)))
+        (let [info (.funcData t (conv uint32 i))]
+          (set! (.-LineTable f) t)
+          (set! (.-FrameSize f) (conv int (.deferreturn info)))
+          (aset syms i ^{:go/breaks [2 4 6 8 10 12]} (lit Sym
+              :Value (.-Entry f)
+              :Type \T
+              :Name (.funcName t (.nameOff info))
+              :GoType 0
+              :Func f
+              :goVersion (.-version t)))
+
+          (set! (.-Sym f) (addr (aget syms i))))))
+
+    ^{:line 327} funcs))
+
+
+
+^{:go/end 341} (go/method findFunc "findFunc returns the funcData corresponding to the given program counter.\n" ^funcData [^{:tag (* LineTable)} t ^uint64 pc]
+  (let [ft (.funcTab t)]
+    (when (or (< pc (.pc ft 0)) (>= pc (.pc ft (.Count ft))))
+      (return (lit funcData)))
+
+    (let [idx (sort/Search (conv int (.-nfunctab t)) ^{:go/end 338} (fn ^bool [^int i]
+            (> (.pc ft i) pc)))]
+
+      (dec! idx)
+      (.funcData t (conv uint32 idx)))))
+
+
+
+^{:go/end 357} (go/method readvarint "readvarint reads, removes, and returns a varint from *pp.\n" ^uint32 [^{:tag (* LineTable)} t ^{:tag (* (slice byte))} pp]
+  (let [(values ^uint32 v ^uint32 shift) (zero uint32)
+      ^{:line 346} p @pp]
+    (for [(set! shift 0)] _ (set! shift + 7)
+      (let [b (aget p 0)]
+        (set! p (subslice p 1))
+        (set! v bit-or (<< (bit-and (conv uint32 b) 0x7F) shift))
+        (when (== (bit-and b 0x80) 0)
+          (break))))
+
+
+    (set! @pp p)
+    ^{:line 356} v))
+
+
+
+^{:go/end 368} (go/method funcName "funcName returns the name of the function found at off.\n" ^string [^{:tag (* LineTable)} t ^uint32 off]
+  (when [(values s ok) (aget (.-funcNames t) off)] ok
+    (return s))
+
+  (let [i (bytes/IndexByte (subslice (.-funcnametab t) off) 0)
+      ^{:line 365} s (conv string (subslice (.-funcnametab t) off (+ off (conv uint32 i))))]
+    (aset (.-funcNames t) off s)
+    ^{:line 367} s))
+
+
+
+^{:go/end 379} (go/method stringFrom "stringFrom returns a Go string found at off from a position.\n" ^string [^{:tag (* LineTable)} t ^{:tag (slice byte)} arr ^uint32 off]
+  (when [(values s ok) (aget (.-strings t) off)] ok
+    (return s))
+
+  (let [i (bytes/IndexByte (subslice arr off) 0)
+      ^{:line 376} s (conv string (subslice arr off (+ off (conv uint32 i))))]
+    (aset (.-strings t) off s)
+    ^{:line 378} s))
+
+
+
+^{:go/end 384} (go/method string "string returns a Go string found at off.\n" ^string [^{:tag (* LineTable)} t ^uint32 off]
+  (.stringFrom t (.-funcdata t) off))
+
+
+
+^{:go/end 392} (go/method functabFieldSize "functabFieldSize returns the size in bytes of a single functab field.\n" ^int [^{:tag (* LineTable)} t]
+  (when (>= (.-version t) ver118)
+    (return 4))
+
+  (conv int (.-ptrsize t)))
+
+
+
+^{:go/end 397} (go/method funcTab "funcTab returns t's funcTab.\n" ^funcTab [^{:tag (* LineTable)} t]
+  (lit funcTab :LineTable t :sz (.functabFieldSize t)))
+
+
+
+
+(go/type funcTab "funcTab is memory corresponding to a slice of functab structs, followed by an invalid PC.\nA functab struct is a PC and a func offset.\n" (struct
+    (* LineTable)
+    ^{:line 403 :tag int} sz)) ; cached result of t.functabFieldSize
+
+
+
+^{:go/end 409} (go/method Count "Count returns the number of func entries in f.\n" ^int [^funcTab f]
+  (conv int ^{:go/via [LineTable]} (.-nfunctab f)))
+
+
+
+^{:go/end 418} (go/method pc "pc returns the PC of the i'th func in f.\n" ^uint64 [^funcTab f ^int i]
+  (let [u (.uint f (subslice ^{:go/via [LineTable]} (.-functab f) (* 2 i (.-sz f))))]
+    (when (>= ^{:go/via [LineTable]} (.-version f) ver118)
+      (set! u + ^{:go/via [LineTable]} (.-textStart f)))
+
+    ^{:line 417} u))
+
+
+
+^{:go/end 423} (go/method funcOff "funcOff returns the funcdata offset of the i'th func in f.\n" ^uint64 [^funcTab f ^int i]
+  (.uint f (subslice ^{:go/via [LineTable]} (.-functab f) (* (+ (* 2 i) 1) (.-sz f)))))
+
+
+
+^{:go/end 431} (go/method uint "uint returns the uint stored at b.\n" ^uint64 [^funcTab f ^{:tag (slice byte)} b]
+  (when (== (.-sz f) 4)
+    (return (conv uint64 (.Uint32 ^{:go/via [LineTable]} (.-binary f) b))))
+
+  (.Uint64 ^{:go/via [LineTable]} (.-binary f) b))
+
+
+
+(go/type funcData "funcData is memory corresponding to an _func struct.\n" (struct
+    ^{:line 435 :tag (* LineTable)} t ; LineTable this data is a part of
+    ^{:line 436 :tag (slice byte)} data)) ; raw memory for the function
+
+
+
+^{:go/end 443} (go/method funcData "funcData returns the ith funcData in t.functab.\n" ^funcData [^{:tag (* LineTable)} t ^uint32 i]
+  (let [data (subslice (.-funcdata t) (.funcOff (.funcTab t) (conv int i)))]
+    (lit funcData :t t :data data)))
+
+
+
+^{:go/end 448} (go/method IsZero "IsZero reports whether f is the zero value.\n" ^bool [^funcData f]
+  (and (== (.-t f) nil) (== (.-data f) nil)))
+
+
+
+^{:go/end 460} (go/method entryPC "entryPC returns the func's entry PC.\n" ^uint64 [^{:tag (* funcData)} f]
+  ;; In Go 1.18, the first field of _func changed
+  ;; from a uintptr entry PC to a uint32 entry offset.
+  (when (>= (.-version (.-t f)) ver118)
+    ;; TODO: support multiple text sections.
+    ;; See runtime/symtab.go:(*moduledata).textAddr.
+    (return (+ (conv uint64 (.Uint32 (.-binary (.-t f)) (.-data f))) (.-textStart (.-t f)))))
+
+  (.uintptr (.-t f) (.-data f)))
+
+
+^{:go/end 462} (go/method nameOff ^uint32 [^funcData f] (.field f 1))
+^{:go/end 463} (go/method deferreturn ^uint32 [^funcData f] (.field f 3))
+^{:go/end 464} (go/method pcfile ^uint32 [^funcData f] (.field f 5))
+^{:go/end 465} (go/method pcln ^uint32 [^funcData f] (.field f 6))
+^{:go/end 466} (go/method cuOffset ^uint32 [^funcData f] (.field f 8))
+
+
+
+
+^{:go/end 484} (go/method field "field returns the nth field of the _func struct.\nIt panics if n == 0 or n > 9; for n == 0, call f.entryPC.\nMost callers should use a named field accessor (just above).\n" ^uint32 [^funcData f ^uint32 n]
+  (when (or (== n 0) (> n 9))
+    (panic "bad funcdata field"))
+
+  ;; In Go 1.18, the first field of _func changed
+  ;; from a uintptr entry PC to a uint32 entry offset.
+  (let [sz0 (.-ptrsize (.-t f))]
+    (when (>= (.-version (.-t f)) ver118)
+      (set! sz0 4))
+
+    (let [off (+ sz0 (* (- n 1) 4)) ; subsequent fields are 4 bytes each
+        ^{:line 482} data (subslice (.-data f) off)]
+      (.Uint32 (.-binary (.-t f)) data))))
+
+
+
+^{:go/end 502} (go/method step "step advances to the next pc, value pair in the encoded table.\n" ^bool [^{:tag (* LineTable)} t ^{:tag (* (slice byte))} p ^{:tag (* uint64)} pc ^{:tag (* int32)} val ^bool first]
+  (let [uvdelta (.readvarint t p)]
+    (when (and (== uvdelta 0) (not first))
+      (return false))
+
+    (if (!= (bit-and uvdelta 1) 0)
+      (set! uvdelta (bit-not (>> uvdelta 1)))
+
+      (set! uvdelta >> 1))
+
+    ^{:go/breaks [4]} (let [vdelta (conv int32 uvdelta)
+        ^{:line 498} pcdelta (* (.readvarint t p) (.-quantum t))]
+      (set! @pc + (conv uint64 pcdelta))
+      (set! @val + vdelta)
+      true)))
+
+
+
+
+
+^{:go/end 518} (go/method pcvalue "pcvalue reports the value associated with the target pc.\noff is the offset to the beginning of the pc-value table,\nand entry is the start PC for the corresponding function.\n" ^int32 [^{:tag (* LineTable)} t ^uint32 off ^uint64 entry ^uint64 targetpc]
+  ^{:go/breaks [[3 517]]} (let [p (subslice (.-pctab t) off)
+
+      ^{:line 510} val (conv int32 -1)
+      ^{:line 511} pc entry]
+    (while (.step t (addr p) (addr pc) (addr val) (== pc entry))
+      (when (< targetpc pc)
+        (return val)))
+
+
+    -1))
+
+
+
+
+
+
+
+
+^{:go/end 565} (go/method findFileLine "findFileLine scans one function in the binary looking for a\nprogram counter in the given file on the given line.\nIt does so by running the pc-value tables mapping program counter\nto file number. Since most functions come from a single file, these\nare usually short and quick to scan. If a file match is found, then the\ncode goes to the expense of looking for a simultaneous line number match.\n" ^uint64 [^{:tag (* LineTable)} t ^uint64 entry ^uint32 filetab ^uint32 linetab ^int32 filenum ^int32 line ^{:tag (slice byte)} cutab]
+  (when (or (== filetab 0) (== linetab 0))
+    (return 0))
+
+
+  ^{:go/breaks [[3 564]]} (let [fp (subslice (.-pctab t) filetab)
+      ^{:line 532} fl (subslice (.-pctab t) linetab)
+      ^{:line 533} fileVal (conv int32 -1)
+      ^{:line 534} filePC entry
+      ^{:line 535} lineVal (conv int32 -1)
+      ^{:line 536} linePC entry
+      ^{:line 537} fileStartPC filePC]
+    (while (.step t (addr fp) (addr filePC) (addr fileVal) (== filePC entry))
+      (let [fileIndex fileVal]
+        (when (or (== (.-version t) ver116) (== (.-version t) ver118) (== (.-version t) ver120))
+          (set! fileIndex (conv int32 (.Uint32 (.-binary t) (subslice cutab (* fileVal 4))))))
+
+        (when (and (== fileIndex filenum) (< fileStartPC filePC))
+          ;; fileIndex is in effect starting at fileStartPC up to
+          ;; but not including filePC, and it's the file we want.
+          ;; Run the PC table looking for a matching line number
+          ;; or until we reach filePC.
+          (let [lineStartPC linePC]
+            (while (and (< linePC filePC) (.step t (addr fl) (addr linePC) (addr lineVal) (== linePC entry)))
+              ;; lineVal is in effect until linePC, and lineStartPC < filePC.
+              (when (== lineVal line)
+                (when (<= fileStartPC lineStartPC)
+                  (return lineStartPC))
+
+                (when (< fileStartPC linePC)
+                  (return fileStartPC)))
+
+
+              (set! lineStartPC linePC))))
+
+
+        (set! fileStartPC filePC)))
+
+    0))
+
+
+
+^{:go/end 582} (go/method go12PCToLine "go12PCToLine maps program counter to line number for the Go 1.2+ pcln table.\n" [^{:tag (* LineTable)} t ^uint64 pc] :results [^int line]
+  (defer (^{:go/end 573} (fn []
+        (when (and (not disableRecover) (!= (recover) nil))
+          (set! line -1)))))
+
+
+
+  (let [f (.findFunc t pc)]
+    (when (.IsZero f)
+      (return -1))
+
+    (let [entry (.entryPC f)
+        ^{:line 580} linetab (.pcln f)]
+      (conv int (.pcvalue t linetab entry pc)))))
+
+
+
+^{:go/end 614} (go/method go12PCToFile "go12PCToFile maps program counter to file name for the Go 1.2+ pcln table.\n" [^{:tag (* LineTable)} t ^uint64 pc] :results [^string file]
+  (defer (^{:go/end 590} (fn []
+        (when (and (not disableRecover) (!= (recover) nil))
+          (set! file "")))))
+
+
+
+  (let [f (.findFunc t pc)]
+    (when (.IsZero f)
+      (return ""))
+
+    (let [entry (.entryPC f)
+        ^{:line 597} filetab (.pcfile f)
+        ^{:line 598} fno (.pcvalue t filetab entry pc)]
+      (when (== (.-version t) ver12)
+        (when (<= fno 0)
+          (return ""))
+
+        (return (.string t (.Uint32 (.-binary t) (subslice (.-filetab t) (* 4 fno))))))
+
+      ;; Go ≥ 1.16
+      (when (< fno 0) ; 0 is valid for ≥ 1.16
+        (return ""))
+
+      ^{:go/breaks [[3 613]]} (let [cuoff (.cuOffset f)]
+        (when [fnoff (.Uint32 (.-binary t) (subslice (.-cutab t) (* (+ cuoff (conv uint32 fno)) 4)))] (!= fnoff (bit-not (conv uint32 0)))
+          (return (.stringFrom t (.-filetab t) fnoff)))
+
+        ""))))
+
+
+
+^{:go/end 652} (go/method go12LineToPC "go12LineToPC maps a (file, line) pair to a program counter for the Go 1.2+ pcln table.\n" [^{:tag (* LineTable)} t ^string file ^int line] :results [^uint64 pc]
+  (defer (^{:go/end 622} (fn []
+        (when (and (not disableRecover) (!= (recover) nil))
+          (set! pc 0)))))
+
+
+
+  (.initFileMap t)
+  (let [(values filenum ok) (aget (.-fileMap t) file)]
+    (when (not ok)
+      (return 0))
+
+
+    ;; Scan all functions.
+    ;; If this turns out to be a bottleneck, we could build a map[int32][]int32
+    ;; mapping file number to a list of functions with code from that file.
+    ^{:go/breaks [[3 651]]} (let [^{:tag (slice byte)} cutab (zero (slice byte))]
+      (for [i (conv uint32 0)] (< i (.-nfunctab t)) (inc! i)
+        (let [f (.funcData t i)
+            ^{:line 636} entry (.entryPC f)
+            ^{:line 637} filetab (.pcfile f)
+            ^{:line 638} linetab (.pcln f)]
+          (when (or (== (.-version t) ver116) (== (.-version t) ver118) (== (.-version t) ver120))
+            (when (== (.cuOffset f) (bit-not (conv uint32 0)))
+              ;; skip functions without compilation unit (not real function, or linker generated)
+              (continue))
+
+            (set! cutab (subslice (.-cutab t) (* (.cuOffset f) 4))))
+
+          (let [pc (.findFileLine t entry filetab linetab (conv int32 filenum) (conv int32 line) cutab)]
+            (when (!= pc 0)
+              (return pc)))))
+
+
+      0)))
+
+
+
+^{:go/end 678} (go/method initFileMap "initFileMap initializes the map from file name to file number.\n" [^{:tag (* LineTable)} t]
+  (.Lock (.-mu t))
+  (defer (.Unlock (.-mu t)))
+
+  (when (!= (.-fileMap t) nil)
+    (return))
+
+  (let [m (make (map string uint32))]
+
+    (if (== (.-version t) ver12)
+      (for [i (conv uint32 1)] (< i (.-nfiletab t)) (inc! i)
+        (let [s (.string t (.Uint32 (.-binary t) (subslice (.-filetab t) (* 4 i))))]
+          (aset m s i)))
+
+
+      (let [^uint32 pos (zero uint32)]
+        (for [i (conv uint32 0)] (< i (.-nfiletab t)) (inc! i)
+          (let [s (.stringFrom t (.-filetab t) pos)]
+            (aset m s pos)
+            (set! pos + (conv uint32 (+ (len s) 1)))))))
+
+
+    (set! (.-fileMap t) m)))
+
+
+
+
+
+^{:go/end 694} (go/method go12MapFiles "go12MapFiles adds to m a key for every file in the Go 1.2 LineTable.\nEvery key maps to obj. That's not a very interesting map, but it provides\na way for callers to obtain the list of files in the program.\n" [^{:tag (* LineTable)} t ^{:tag (map string (* Obj))} m ^{:tag (* Obj)} obj]
+  (when (not disableRecover)
+    (defer (^{:go/end 687} (fn []
+          (recover)))))
+
+
+
+  (.initFileMap t)
+  (range [file (.-fileMap t)]
+    (aset m file obj)))
+
+
+
+
+
+(go/const ^{:val false :doc "disableRecover causes this package not to swallow panics.\nThis is useful when making changes.\n"} disableRecover false)

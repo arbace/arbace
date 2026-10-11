@@ -1,0 +1,319 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.runtime.maps) (go/file "runtime.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [asan "internal/asan"]
+    ^{:line 10} [goexperiment "internal/goexperiment"]
+    ^{:line 11} [msan "internal/msan"]
+    ^{:line 12} [race "internal/race"]
+    ^{:line 13} [sys "internal/runtime/sys"]
+    ^{:line 14} [unsafe "unsafe"]])
+
+
+
+
+
+(go/func ^:extern ^{:go/linkname "fatal"} fatal "Functions below pushed from runtime.\n" [^string s])
+
+(go/directive "//go:linknamestd bootstrapRand runtime.bootstrapRand")
+(go/func ^:extern bootstrapRand ^uint64 [])
+
+
+(go/func ^:extern ^{:go/linkname "rand"} rand ^uint64 [])
+
+
+(go/func ^:extern ^{:go/linkname "typedmemmove"} typedmemmove [^{:tag (* abi/Type)} typ ^unsafe/Pointer dst ^unsafe/Pointer src])
+
+
+(go/func ^:extern ^{:go/linkname "typedmemclr"} typedmemclr [^{:tag (* abi/Type)} typ ^unsafe/Pointer ptr])
+
+
+(go/func ^:extern ^{:go/linkname "newarray"} newarray ^unsafe/Pointer [^{:tag (* abi/Type)} typ ^int n])
+
+
+(go/func ^:extern ^{:go/linkname "newobject"} newobject ^unsafe/Pointer [^{:tag (* abi/Type)} typ])
+
+
+
+
+(go/var ^{:tag error :doc "Pushed from runtime in order to use runtime.plainError\n" :go/linkname "errNilAssign"} errNilAssign)
+
+
+
+
+(go/var ^{:tag (array abi/ZeroValSize byte) :doc "TODO: move zeroVal to internal/abi?\n" :go/linkname "zeroVal runtime.zeroVal"} zeroVal)
+
+
+
+
+
+
+
+
+^{:go/end 60} (go/func ^{:go/linkname "runtime_mapaccess1 runtime.mapaccess1"} runtime_mapaccess1 "mapaccess1 returns a pointer to h[key].  Never returns nil, instead\nit will return a reference to the zero object for the elem type if\nthe key is not in the map.\nNOTE: The returned pointer may keep the whole map live, so don't\nhold onto it for very long.\n" ^unsafe/Pointer [^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m ^unsafe/Pointer key]
+  (let [(values p _) (runtime_mapaccess2 typ m key)]
+    ^{:line 59} p))
+
+
+
+^{:go/end 140} (go/func ^{:go/linkname "runtime_mapaccess2 runtime.mapaccess2"} runtime_mapaccess2 [^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m ^unsafe/Pointer key] :results [unsafe/Pointer bool]
+  (when (and race/Enabled (!= m nil))
+    (let [callerpc (sys/GetCallerPC)
+        ^{:line 66} pc (abi/FuncPCABIInternal runtime_mapaccess2)]
+      (race/ReadPC (conv unsafe/Pointer m) callerpc pc)
+      (race/ReadObjectPC (.-Key typ) key callerpc pc)))
+
+  (when (and msan/Enabled (!= m nil))
+    (msan/Read key (.-Size_ (.-Key typ))))
+
+  (when (and asan/Enabled (!= m nil))
+    (asan/Read key (.-Size_ (.-Key typ))))
+
+
+  (when (or (== m nil) (== (.Used m) 0))
+    (when [err (mapKeyError typ key)] (!= err nil)
+      (panic err)) ; see issue 23734
+
+    (return (conv unsafe/Pointer (addr (aget zeroVal 0))) false))
+
+
+  (when (!= (.-writing m) 0)
+    (fatal "concurrent map read and map write"))
+
+
+  (let [hash ((.-Hasher typ) key (.-seed m))]
+
+    (when (== (.-dirLen m) 0)
+      (let [(values _ elem ok) (.getWithKeySmall m typ hash key)]
+        (when (not ok)
+          (return (conv unsafe/Pointer (addr (aget zeroVal 0))) false))
+
+        (return elem true)))
+
+
+    ;; Select table.
+    (let [idx (.directoryIndex m hash)
+        ^{:line 100} t (.directoryAt m idx)
+
+        ;; Probe table.
+        ^{:line 103} seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))
+        ^{:line 104} h2Hash (h2 hash)]
+      (for [] _ (set! seq (.next seq))
+        (let [g (.group (.-groups t) typ (.-offset seq))
+
+            ^{:line 108} match (.matchH2 (.ctrls g) h2Hash)]
+
+          (while (!= match 0)
+            (let [i (.first match)
+
+                ^{:line 113} slotKey (.key g typ i)
+                ^{:line 114} slotKeyOrig slotKey]
+              (when (.IndirectKey typ)
+                (set! slotKey @(conv (* unsafe/Pointer) slotKey)))
+
+              (when ((.-Equal (.-Key typ)) key slotKey)
+                (let [^unsafe/Pointer slotElem (zero unsafe/Pointer)]
+                  (if goexperiment/MapSplitGroup
+                    (set! slotElem (.elem g typ i))
+
+                    (set! slotElem (conv unsafe/Pointer (+ (conv uintptr slotKeyOrig) (.-ElemOff typ)))))
+
+                  (when (.IndirectElem typ)
+                    (set! slotElem @(conv (* unsafe/Pointer) slotElem)))
+
+                  (return slotElem true)))
+
+              (set! match (.removeFirst match))))
+
+
+          (set! match (.matchEmpty (.ctrls g)))
+          (when (!= match 0)
+            ;; Finding an empty slot means we've reached the end of
+            ;; the probe sequence.
+            (return (conv unsafe/Pointer (addr (aget zeroVal 0))) false)))))))
+
+
+
+
+
+^{:go/end 320} (go/func ^{:go/linkname "runtime_mapassign runtime.mapassign"} runtime_mapassign ^unsafe/Pointer [^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m ^unsafe/Pointer key]
+  (when (== m nil)
+    (panic errNilAssign))
+
+  (when race/Enabled
+    (let [callerpc (sys/GetCallerPC)
+        ^{:line 149} pc (abi/FuncPCABIInternal runtime_mapassign)]
+      (race/WritePC (conv unsafe/Pointer m) callerpc pc)
+      (race/ReadObjectPC (.-Key typ) key callerpc pc)))
+
+  (when msan/Enabled
+    (msan/Read key (.-Size_ (.-Key typ))))
+
+  (when asan/Enabled
+    (asan/Read key (.-Size_ (.-Key typ))))
+
+  (when (!= (.-writing m) 0)
+    (fatal "concurrent map writes"))
+
+
+  (let [hash ((.-Hasher typ) key (.-seed m))]
+
+    ;; Set writing after calling Hasher, since Hasher may panic, in which
+    ;; case we have not actually done a write.
+    (set! (.-writing m) bit-xor 1) ; toggle, see comment on writing
+
+    (when (== (.-dirPtr m) nil)
+      (.growToSmall m typ))
+
+
+    (when (== (.-dirLen m) 0)
+      (let [elem (.putSlotSmall m typ hash key)]
+        (when (== elem nil)
+          ;; Can't fit another entry, grow to full size map.
+          (let [tab (.growToTable m typ)]
+
+            (set! elem (.uncheckedPutSlotForAssign tab typ hash key))
+            (inc! (.-used m))
+
+            (.checkInvariants tab typ m)))
+
+
+        (when (== (.-writing m) 0)
+          (fatal "concurrent map writes"))
+
+        (set! (.-writing m) bit-xor 1)
+
+        (return elem)))
+
+
+    (let [^unsafe/Pointer slotElem (zero unsafe/Pointer)]
+      (label :outer
+        (while true
+          ;; Select table.
+          (let [idx (.directoryIndex m hash)
+              ^{:line 198} t (.directoryAt m idx)
+
+              ^{:line 200} seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))
+
+              ;; As we look for a match, keep track of the first deleted slot
+              ;; we find, which we'll use to insert the new entry if
+              ;; necessary.
+              ^{:line 205 :tag groupReference} firstDeletedGroup (zero groupReference)
+              ^{:line 206 :tag uintptr} firstDeletedSlot (zero uintptr)
+
+              ^{:line 208} h2Hash (h2 hash)]
+            (for [] _ (set! seq (.next seq))
+              (let [g (.group (.-groups t) typ (.-offset seq))
+                  ^{:line 211} match (.matchH2 (.ctrls g) h2Hash)]
+
+                ;; Look for an existing slot containing this key.
+                (while (!= match 0)
+                  (let [i (.first match)
+
+                      ^{:line 217} slotKey (.key g typ i)
+                      ^{:line 218} slotKeyOrig slotKey]
+                    (when (.IndirectKey typ)
+                      (set! slotKey @(conv (* unsafe/Pointer) slotKey)))
+
+                    (when ((.-Equal (.-Key typ)) key slotKey)
+                      (when (.NeedKeyUpdate typ)
+                        (typedmemmove (.-Key typ) slotKey key))
+
+
+                      (if goexperiment/MapSplitGroup
+                        (set! slotElem (.elem g typ i))
+
+                        (set! slotElem (conv unsafe/Pointer (+ (conv uintptr slotKeyOrig) (.-ElemOff typ)))))
+
+                      (when (.IndirectElem typ)
+                        (set! slotElem @(conv (* unsafe/Pointer) slotElem)))
+
+
+                      (.checkInvariants t typ m)
+                      (break :outer))
+
+                    (set! match (.removeFirst match))))
+
+
+                ;; No existing slot for this key in this group. Is this the end
+                ;; of the probe sequence?
+                (set! match (.matchEmpty (.ctrls g)))
+                (when (!= match 0)
+                  ;; Finding an empty slot means we've reached the end of
+                  ;; the probe sequence.
+
+                  (let [^uintptr i (zero uintptr)]
+
+                    ;; If we found a deleted slot along the way, we
+                    ;; can replace it without consuming growthLeft.
+                    (if (!= (.-data firstDeletedGroup) nil) (do
+                        (set! g firstDeletedGroup)
+                        (set! i firstDeletedSlot)
+                        (inc! (.-growthLeft t))) ; will be decremented below to become a no-op.
+
+                      ;; Otherwise, use the empty slot.
+                      (set! i (.first match)))
+
+
+                    ;; If there is room left to grow, just insert the new entry.
+                    (when (> (.-growthLeft t) 0)
+                      (let [slotKey (.key g typ i)
+                          ^{:line 265} slotKeyOrig slotKey]
+                        (when (.IndirectKey typ)
+                          (let [kmem (newobject (.-Key typ))]
+                            (set! @(conv (* unsafe/Pointer) slotKey) kmem)
+                            (set! slotKey kmem)))
+
+                        (typedmemmove (.-Key typ) slotKey key)
+
+                        (if goexperiment/MapSplitGroup
+                          (set! slotElem (.elem g typ i))
+
+                          (set! slotElem (conv unsafe/Pointer (+ (conv uintptr slotKeyOrig) (.-ElemOff typ)))))
+
+                        (when (.IndirectElem typ)
+                          (let [emem (newobject (.-Elem typ))]
+                            (set! @(conv (* unsafe/Pointer) slotElem) emem)
+                            (set! slotElem emem)))
+
+
+                        (.set (.ctrls g) i (conv ctrl h2Hash))
+                        (dec! (.-growthLeft t))
+                        (inc! (.-used t))
+                        (inc! (.-used m))
+
+                        (.checkInvariants t typ m)
+                        (break :outer)))
+
+
+                    (.rehash t typ m)
+                    (continue :outer)))
+
+
+                ;; No empty slots in this group. Check for a deleted
+                ;; slot, which we'll use if we don't find a match later
+                ;; in the probe sequence.
+                ;;
+                ;; We only need to remember a single deleted slot.
+                (when (== (.-data firstDeletedGroup) nil)
+                  ;; Since we already checked for empty slots
+                  ;; above, matches here must be deleted slots.
+                  (set! match (.matchEmptyOrDeleted (.ctrls g)))
+                  (when (!= match 0)
+                    (set! firstDeletedGroup g)
+                    (set! firstDeletedSlot (.first match)))))))))
+
+
+
+
+
+      (when (== (.-writing m) 0)
+        (fatal "concurrent map writes"))
+
+      (set! (.-writing m) bit-xor 1)
+
+      ^{:line 319} slotElem)))

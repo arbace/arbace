@@ -1,0 +1,744 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.testing) (go/file "fuzz.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [flag "flag"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [os "os"]
+    ^{:line 14} [filepath "path/filepath"]
+    ^{:line 15} [reflect "reflect"]
+    ^{:line 16} [runtime "runtime"]
+    ^{:line 17} [strings "strings"]
+    ^{:line 18} [time "time"]])
+
+
+^{:go/end 28} (go/func initFuzzFlags []
+  (set! matchFuzz (flag/String "test.fuzz" "" "run the fuzz test matching `regexp`"))
+  (flag/Var (addr fuzzDuration) "test.fuzztime" "time to spend fuzzing; default is to run indefinitely")
+  (flag/Var (addr minimizeDuration) "test.fuzzminimizetime" "time to spend minimizing a value after finding a failing input")
+
+  (set! fuzzCacheDir (flag/String "test.fuzzcachedir" "" "directory where interesting fuzzing inputs are stored (for use only by cmd/go)"))
+  (set! isFuzzWorker (flag/Bool "test.fuzzworker" false "coordinate with the parent process to fuzz random values (for use only by cmd/go)")))
+
+
+(go/var
+  ^{:line 31} [^{:tag (* string)} matchFuzz]
+  ^{:line 32} [^durationOrCountFlag fuzzDuration]
+  ^{:line 33} [minimizeDuration (lit durationOrCountFlag :d (* 60 time/Second) :allowZero true)]
+  ^{:line 34} [^{:tag (* string)} fuzzCacheDir]
+  ^{:line 35} [^{:tag (* bool)} isFuzzWorker]
+
+
+
+  ^{:line 39} [^{:doc "corpusDir is the parent directory of the fuzz test's seed corpus within\nthe package.\n"} corpusDir "testdata/fuzz"])
+
+
+
+
+
+(go/const ^{:val 70 :doc "fuzzWorkerExitCode is used as an exit code by fuzz worker processes after an\ninternal error. This distinguishes internal errors from uncontrolled panics\nand other failures. Keep in sync with internal/fuzz.workerExitCode.\n"} fuzzWorkerExitCode 70)
+
+
+
+(go/type InternalFuzzTarget "InternalFuzzTarget is an internal type but exported because it is\ncross-package; it is part of the implementation of the \"go test\" command.\n" (struct
+    ^{:line 50 :tag string} Name
+    ^{:line 51 :tag (func [^{:tag (* F)} f])} Fn))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type F "F is a type passed to fuzz tests.\n\nFuzz tests run generated inputs against a provided fuzz target, which can\nfind and report potential bugs in the code being tested.\n\nA fuzz test runs the seed corpus by default, which includes entries provided\nby [F.Add] and entries in the testdata/fuzz/<FuzzTestName> directory. After\nany necessary setup and calls to [F.Add], the fuzz test must then call\n[F.Fuzz] to provide the fuzz target. See the testing package documentation\nfor an example, and see the [F.Fuzz] and [F.Add] method documentation for\ndetails.\n\n*F methods can only be called before [F.Fuzz]. Once the test is\nexecuting the fuzz target, only [*T] methods can be used. The only *F methods\nthat are allowed in the [F.Fuzz] function are [F.Failed] and [F.Name].\n" (struct
+    ^{:line 70} common
+    ^{:line 71 :tag (* fuzzState)} fstate
+    ^{:line 72 :tag (* testState)} tstate
+
+
+
+    ^{:line 76 :tag bool :doc "inFuzzFn is true when the fuzz function is running. Most F methods cannot\nbe called when inFuzzFn is true.\n"} inFuzzFn
+
+
+
+    ^{:line 80 :tag (slice corpusEntry) :doc "corpus is a set of seed corpus entries, added with F.Add and loaded\nfrom testdata.\n"} corpus
+
+    ^{:line 82 :tag fuzzResult} result
+    ^{:line 83 :tag bool} fuzzCalled))
+
+
+(go/var ^TB _ (conv (* F) nil))
+
+
+
+
+(go/type ^:alias corpusEntry "corpusEntry is an alias to the same type as internal/fuzz.CorpusEntry.\nWe use a type alias because we don't want to export this type, and we can't\nimport internal/fuzz from testing.\n" (struct
+    ^{:line 92 :tag string} Parent
+    ^{:line 93 :tag string} Path
+    ^{:line 94 :tag (slice byte)} Data
+    ^{:line 95 :tag (slice any)} Values
+    ^{:line 96 :tag int} Generation
+    ^{:line 97 :tag bool} IsSeed))
+
+
+
+
+
+^{:go/end 126} (go/method Helper "Helper marks the calling function as a test helper function.\nWhen printing file and line information, that function will be skipped.\nHelper may be called simultaneously from multiple goroutines.\n" [^{:tag (* F)} f]
+  (when (.-inFuzzFn f)
+    (panic "testing: f.Helper was called inside the fuzz target, use t.Helper instead"))
+
+
+  ;; common.Helper is inlined here.
+  ;; If we called it, it would mark F.Helper as the helper
+  ;; instead of the caller.
+  (.Lock ^{:go/via [common]} (.-mu f))
+  (defer (.Unlock ^{:go/via [common]} (.-mu f)))
+  (when (== ^{:go/via [common]} (.-helperPCs f) nil)
+    (set! ^{:go/via [common]} (.-helperPCs f) (make (map uintptr (struct)))))
+
+  ;; repeating code from callerName here to save walking a stack frame
+  (let [^{:tag (array 1 uintptr)} pc (zero (array 1 uintptr))
+      ^{:line 118} n (runtime/Callers 2 (subslice pc))] ; skip runtime.Callers + Helper
+    (when (== n 0)
+      (panic "testing: zero callers found"))
+
+    (when [(values _ found) (aget ^{:go/via [common]} (.-helperPCs f) (aget pc 0))] (not found)
+      (aset ^{:go/via [common]} (.-helperPCs f) (aget pc 0) (lit (struct)))
+      (set! ^{:go/via [common]} (.-helperNames f) nil)))) ; map will be recreated next time it is needed
+
+
+
+
+^{:go/end 137} (go/method Fail "Fail marks the function as having failed but continues execution.\n" [^{:tag (* F)} f]
+  ;; (*F).Fail may be called by (*T).Fail, which we should allow. However, we
+  ;; shouldn't allow direct (*F).Fail calls from inside the (*F).Fuzz function.
+  (when (.-inFuzzFn f)
+    (panic "testing: f.Fail was called inside the fuzz target, use t.Fail instead"))
+
+  (.Helper (.-common f))
+  (.Fail (.-common f)))
+
+
+
+^{:go/end 148} (go/method Skipped "Skipped reports whether the test was skipped.\n" ^bool [^{:tag (* F)} f]
+  ;; (*F).Skipped may be called by tRunner, which we should allow. However, we
+  ;; shouldn't allow direct (*F).Skipped calls from inside the (*F).Fuzz function.
+  (when (.-inFuzzFn f)
+    (panic "testing: f.Skipped was called inside the fuzz target, use t.Skipped instead"))
+
+  (.Helper (.-common f))
+  (.Skipped (.-common f)))
+
+
+
+
+
+^{:go/end 162} (go/method Add "Add will add the arguments to the seed corpus for the fuzz test. This will be\na no-op if called after or within the fuzz target, and args must match the\narguments for the fuzz target.\n" [^{:tag (* F)} f & ^{:tag (slice any)} args]
+  (let [^{:tag (slice any)} values (zero (slice any))]
+    (range [i args]
+      (when [t (reflect/TypeOf (aget args i))] (not (aget supportedTypes t))
+        (panic (fmt/Sprintf "testing: unsupported type to Add %v" t)))
+
+      (set! values (append values (aget args i))))
+
+    (set! (.-corpus f) (append (.-corpus f) (lit corpusEntry :Values values :IsSeed true :Path (fmt/Sprintf "seed#%d" (len (.-corpus f))))))))
+
+
+
+(go/var ^{:doc "supportedTypes represents all of the supported types which can be fuzzed.\n"} supportedTypes (lit (map reflect/Type bool)
+    ^{:line 166} [((inst reflect/TypeFor (slice byte))) true]
+    ^{:line 167} [((inst reflect/TypeFor string)) true]
+    ^{:line 168} [((inst reflect/TypeFor bool)) true]
+    ^{:line 169} [((inst reflect/TypeFor byte)) true]
+    ^{:line 170} [((inst reflect/TypeFor rune)) true]
+    ^{:line 171} [((inst reflect/TypeFor float32)) true]
+    ^{:line 172} [((inst reflect/TypeFor float64)) true]
+    ^{:line 173} [((inst reflect/TypeFor int)) true]
+    ^{:line 174} [((inst reflect/TypeFor int8)) true]
+    ^{:line 175} [((inst reflect/TypeFor int16)) true]
+    ^{:line 176} [((inst reflect/TypeFor int32)) true]
+    ^{:line 177} [((inst reflect/TypeFor int64)) true]
+    ^{:line 178} [((inst reflect/TypeFor uint)) true]
+    ^{:line 179} [((inst reflect/TypeFor uint8)) true]
+    ^{:line 180} [((inst reflect/TypeFor uint16)) true]
+    ^{:line 181} [((inst reflect/TypeFor uint32)) true]
+    ^{:line 182} [((inst reflect/TypeFor uint64)) true]))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 412} (go/method Fuzz "Fuzz runs the fuzz function, ff, for fuzz testing. If ff fails for a set of\narguments, those arguments will be added to the seed corpus.\n\nff must be a function with no return value whose first argument is [*T] and\nwhose remaining arguments are the types to be fuzzed.\nFor example:\n\n\tf.Fuzz(func(t *testing.T, b []byte, i int) { ... })\n\nThe following types are allowed: []byte, string, bool, byte, rune, float32,\nfloat64, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64.\nMore types may be supported in the future.\n\nff must not call any [*F] methods, e.g. [F.Log], [F.Error], [F.Skip]. Use\nthe corresponding [*T] method instead. The only [*F] methods that are allowed in\nthe F.Fuzz function are [F.Failed] and [F.Name].\n\nThis function should be fast and deterministic, and its behavior should not\ndepend on shared state. No mutable input arguments, or pointers to them,\nshould be retained between executions of the fuzz function, as the memory\nbacking them may be mutated during a subsequent invocation. ff must not\nmodify the underlying data of the arguments provided by the fuzzing engine.\n\nWhen fuzzing, F.Fuzz does not return until a problem is found, time runs out\n(set with -fuzztime), or the test process is interrupted by a signal. F.Fuzz\nshould be called exactly once, unless [F.Skip] or [F.Fail] is called beforehand.\n" [^{:tag (* F)} f ^any ff]
+  (when (.-fuzzCalled f)
+    (panic "testing: F.Fuzz called more than once"))
+
+  (set! (.-fuzzCalled f) true)
+  (when ^{:go/via [common]} (.-failed f)
+    (return))
+
+  (.Helper f)
+
+  ;; ff should be in the form func(*testing.T, ...interface{})
+  (let [fn (reflect/ValueOf ff)
+      ^{:line 223} fnType (.Type fn)]
+    (when (!= (.Kind fnType) reflect/Func)
+      (panic "testing: F.Fuzz must receive a function"))
+
+    (when (or (< (.NumIn fnType) 2) (!= (.In fnType 0) ((inst reflect/TypeFor (* T)))))
+      (panic "testing: fuzz target must receive at least two arguments, where the first argument is a *T"))
+
+    (when (!= (.NumOut fnType) 0)
+      (panic "testing: fuzz target must not return a value"))
+
+
+    ;; Save the types of the function to compare against the corpus.
+    (let [^{:tag (slice reflect/Type)} types (zero (slice reflect/Type))]
+      (for [i 1] (< i (.NumIn fnType)) (inc! i)
+        (let [t (.In fnType i)]
+          (when (not (aget supportedTypes t))
+            (panic (fmt/Sprintf "testing: unsupported type for fuzzing %v" t)))
+
+          (set! types (append types t))))
+
+
+      ;; Load the testdata seed corpus. Check types of entries in the testdata
+      ;; corpus and entries declared with F.Add.
+      ;;
+      ;; Don't load the seed corpus if this is a worker process; we won't use it.
+      (when (!= (.-mode (.-fstate f)) fuzzWorker)
+        (range [_ c (.-corpus f)]
+          (when [err (.CheckCorpus (.-deps (.-fstate f)) (.-Values c) types)] (!= err nil)
+            ;; TODO(#48302): Report the source location of the F.Add call.
+            ^{:go/via [common]} (.Fatal f err)))
+
+
+
+        ;; Load seed corpus
+        (let [(values c err) (.ReadCorpus (.-deps (.-fstate f)) (filepath/Join corpusDir ^{:go/via [common]} (.-name f)) types)]
+          (when (!= err nil)
+            ^{:go/via [common]} (.Fatal f err))
+
+          (range [i c]
+            (set! (.-IsSeed (aget c i)) true) ; these are all seed corpus values
+            (when (== (.-mode (.-fstate f)) fuzzCoordinator)
+              ;; If this is the coordinator process, zero the values, since we don't need
+              ;; to hold onto them.
+              (set! (.-Values (aget c i)) nil)))
+
+
+
+          (set! (.-corpus f) (append (.-corpus f) (spread c)))))
+
+
+      ;; run calls fn on a given input, as a subtest with its own T.
+      ;; run is analogous to T.Run. The test filtering and cleanup works similarly.
+      ;; fn is called in its own goroutine.
+      (let [run ^{:go/end 349} (fn [^io/Writer captureOut ^corpusEntry e] :results [^bool ok]
+            (when (== (.-Values e) nil)
+              ;; The corpusEntry must have non-nil Values in order to run the
+              ;; test. If Values is nil, it is a bug in our code.
+              (panic (fmt/Sprintf "corpus file %q was not unmarshaled" (.-Path e))))
+
+            (when (shouldFailFast)
+              (return true))
+
+            (let [testName ^{:go/via [common]} (.-name f)]
+              (when (!= (.-Path e) "")
+                (set! testName (fmt/Sprintf "%s/%s" testName (filepath/Base (.-Path e)))))
+
+              (when (.-isFuzzing (.-tstate f))
+                ;; Don't preserve subtest names while fuzzing. If fn calls T.Run,
+                ;; there will be a very large number of subtests with duplicate names,
+                ;; which will use a large amount of memory. The subtest names aren't
+                ;; useful since there's no way to re-run them deterministically.
+                (.clearSubNames (.-match (.-tstate f))))
+
+
+              (let [(values ctx cancelCtx) (context/WithCancel ^{:go/via [common]} (.-ctx f))
+
+                  ;; Record the stack trace at the point of this call so that if the subtest
+                  ;; function - which runs in a separate stack - is marked as a helper, we can
+                  ;; continue walking the stack into the parent test.
+                  ^{:line 302 :tag (array maxStackLen uintptr)} pc (zero (array maxStackLen uintptr))
+                  ^{:line 303} n (runtime/Callers 2 (subslice pc))
+                  ^{:line 304} t (addr ^{:go/breaks [2 [4 316]]} (lit T
+                      :common ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit common
+                        :barrier (make (chan bool))
+                        :signal (make (chan bool))
+                        :name testName
+                        :parent (addr (.-common f))
+                        :level (+ ^{:go/via [common]} (.-level f) 1)
+                        :creator (subslice pc _ n)
+                        :chatty ^{:go/via [common]} (.-chatty f)
+                        :ctx ctx
+                        :cancelCtx cancelCtx)
+
+                      :tstate (.-tstate f)))]
+
+                (when (!= captureOut nil)
+                  ;; t.parent aliases f.common.
+                  (set! (.-w ^{:go/via [common]} (.-parent t)) captureOut))
+
+                (set! ^{:go/via [common]} (.-w t) (lit indenter (addr (.-common t))))
+                ^{:go/via [common]} (.setOutputWriter t)
+                (when (!= ^{:go/via [common]} (.-chatty t) nil)
+                  (.Updatef ^{:go/via [common]} (.-chatty t) ^{:go/via [common]} (.-name t) "=== RUN   %s\n" ^{:go/via [common]} (.-name t)))
+
+                (set! (values (.-inFuzzFn (.-common f)) (.-inFuzzFn f)) (values true true))
+                (go (tRunner t ^{:go/end 342} (fn [^{:tag (* T)} t]
+                      (let [args (lit (slice reflect/Value) (reflect/ValueOf t))]
+                        (range [_ v (.-Values e)]
+                          (set! args (append args (reflect/ValueOf v))))
+
+                        ;; Before resetting the current coverage, defer the snapshot so that
+                        ;; we make sure it is called right before the tRunner function
+                        ;; exits, regardless of whether it was executed cleanly, panicked,
+                        ;; or if the fuzzFn called t.Fatal.
+                        (when (.-isFuzzing (.-tstate f))
+                          (defer (.SnapshotCoverage (.-deps (.-fstate f))))
+                          (.ResetCoverage (.-deps (.-fstate f))))
+
+                        (.Call fn args)))))
+
+                (<! ^{:go/via [common]} (.-signal t))
+                (when (and (!= ^{:go/via [common]} (.-chatty t) nil) (.-json ^{:go/via [common]} (.-chatty t)))
+                  (.Updatef ^{:go/via [common]} (.-chatty t) (.-name ^{:go/via [common]} (.-parent t)) "=== NAME  %s\n" (.-name ^{:go/via [common]} (.-parent t))))
+
+                (set! (values (.-inFuzzFn (.-common f)) (.-inFuzzFn f)) (values false false))
+                (not ^{:go/via [common]} (.Failed t)))))]
+
+
+        (switch (.-mode (.-fstate f))
+          (case [fuzzCoordinator]
+            ;; Fuzzing is enabled, and this is the test process started by 'go test'.
+            ;; Act as the coordinator process, and coordinate workers to perform the
+            ;; actual fuzzing.
+            (let [corpusTargetDir (filepath/Join corpusDir ^{:go/via [common]} (.-name f))
+                ^{:line 357} cacheTargetDir (filepath/Join @fuzzCacheDir ^{:go/via [common]} (.-name f))
+                ^{:line 358} err (.CoordinateFuzzing (.-deps (.-fstate f))
+                  (.-d fuzzDuration)
+                  (conv int64 (.-n fuzzDuration))
+                  (.-d minimizeDuration)
+                  (conv int64 (.-n minimizeDuration))
+                  ^{:line 363} @parallel
+                  (.-corpus f)
+                  ^{:line 365} types
+                  ^{:line 366} corpusTargetDir
+                  ^{:line 367} cacheTargetDir)]
+              (when (!= err nil)
+                (set! (.-result f) (lit fuzzResult :Error err))
+                (.Fail f)
+                (fmt/Fprintf ^{:go/via [common]} (.-w f) "%v\n" err)
+                (when [(values crashErr ok) (assert fuzzCrashError err)] ok
+                  (let [crashPath (.CrashPath crashErr)]
+                    (fmt/Fprintf ^{:go/via [common]} (.-w f) "Failing input written to %s\n" crashPath)
+                    (let [testName (filepath/Base crashPath)]
+                      (fmt/Fprintf ^{:go/via [common]} (.-w f) "To re-run:\ngo test -run=%s/%s\n" ^{:go/via [common]} (.-name f) testName)))))))
+
+
+          ;; TODO(jayconrod,katiehockman): Aggregate statistics across workers
+          ;; and add to FuzzResult (ie. time taken, num iterations)
+
+          (case [fuzzWorker]
+            ;; Fuzzing is enabled, and this is a worker process. Follow instructions
+            ;; from the coordinator.
+            (when [err (.RunFuzzWorker (.-deps (.-fstate f)) ^{:go/end 395} (fn ^error [^corpusEntry e]
+                    ;; Don't write to f.w (which points to Stdout) if running from a
+                    ;; fuzz worker. This would become very verbose, particularly during
+                    ;; minimization. Return the error instead, and let the caller deal
+                    ;; with the output.
+                    ^{:go/breaks [[3 394]]} (let [^strings/Builder buf (zero strings/Builder)]
+                      (when [ok (run (addr buf) e)] (not ok)
+                        (return (errors/New (.String buf))))
+
+                      nil)))]
+              (!= err nil)
+              ;; Internal errors are marked with f.Fail; user code may call this too, before F.Fuzz.
+              ;; The worker will exit with fuzzWorkerExitCode, indicating this is a failure
+              ;; (and 'go test' should exit non-zero) but a failing input should not be recorded.
+              ^{:go/via [common]} (.Errorf f "communicating with fuzzing coordinator: %v" err)))
+
+
+          (default
+            ;; Fuzzing is not enabled, or will be done later. Only run the seed
+            ;; corpus now.
+            (range [_ e (.-corpus f)]
+              (let [name (fmt/Sprintf "%s/%s" ^{:go/via [common]} (.-name f) (filepath/Base (.-Path e)))]
+                (when [(values _ ok _) (.fullName (.-match (.-tstate f)) nil name)] ok
+                  (run ^{:go/via [common]} (.-w f) e))))))))))
+
+
+
+
+
+^{:go/end 429} (go/method report [^{:tag (* F)} f]
+  (when (or @isFuzzWorker (== ^{:go/via [common]} (.-parent f) nil))
+    (return))
+
+  (let [dstr (fmtDuration ^{:go/via [common]} (.-duration f))
+      ^{:line 419} format "--- %s: %s (%s)\n"]
+    (cond ^{:go/via [common]} (.Failed f)
+      ^{:go/via [common]} (.flushToParent f ^{:go/via [common]} (.-name f) format "FAIL" ^{:go/via [common]} (.-name f) dstr)
+      (!= ^{:go/via [common]} (.-chatty f) nil)
+      (if (.Skipped f)
+        ^{:go/via [common]} (.flushToParent f ^{:go/via [common]} (.-name f) format "SKIP" ^{:go/via [common]} (.-name f) dstr)
+
+        ^{:go/via [common]} (.flushToParent f ^{:go/via [common]} (.-name f) format "PASS" ^{:go/via [common]} (.-name f) dstr)))))
+
+
+
+
+
+(go/type fuzzResult "fuzzResult contains the results of a fuzz run.\n" (struct
+    ^{:line 433 :tag int} N ; The number of iterations.
+    ^{:line 434 :tag time/Duration} T ; The total time taken.
+    ^{:line 435 :tag error} Error)) ; Error is the error from the failing input
+
+
+^{:go/end 443} (go/method String ^string [^fuzzResult r]
+  (when (== (.-Error r) nil)
+    (return ""))
+
+  (.Error (.-Error r)))
+
+
+
+
+
+
+(go/type fuzzCrashError "fuzzCrashError is satisfied by a failing input detected while fuzzing.\nThese errors are written to the seed corpus and can be re-run with 'go test'.\nErrors within the fuzzing framework (like I/O errors between coordinator\nand worker processes) don't satisfy this interface.\n" (interface
+    ^{:line 450} error
+    (Unwrap ^error [])
+
+
+
+
+
+    (^{:doc "CrashPath returns the path of the subtest that corresponds to the saved\ncrash input file in the seed corpus. The test can be re-run with go test\n-run=$test/$name $test is the fuzz test name, and $name is the\nfilepath.Base of the string returned here.\n"} CrashPath ^string [])))
+
+
+
+(go/type fuzzState "fuzzState holds fields common to all fuzz tests.\n" (struct
+    ^{:line 462 :tag testDeps} deps
+    ^{:line 463 :tag fuzzMode} mode))
+
+
+(go/type fuzzMode uint8)
+
+(go/const
+  ^{:line 469} [^{:tag fuzzMode :val 0} seedCorpusOnly iota]
+  ^{:line 470} [^{:val 1} fuzzCoordinator]
+  ^{:line 471} [^{:val 2} fuzzWorker])
+
+
+
+
+
+^{:go/end 554} (go/func runFuzzTests "runFuzzTests runs the fuzz tests matching the pattern for -run. This will\nonly run the (*F).Fuzz function for each seed corpus without using the\nfuzzing engine to generate or mutate inputs.\n" [^testDeps deps ^{:tag (slice InternalFuzzTarget)} fuzzTests ^time/Time deadline] :results [^bool ran ^bool ok]
+  (set! ok true)
+  (when (or (== (len fuzzTests) 0) @isFuzzWorker)
+    (return ran ok))
+
+  (let [m (newMatcher (.-MatchString deps) @match "-test.run" @skip)
+      ^{:line 483 :tag (* matcher)} mFuzz (zero (* matcher))]
+    (when (!= @matchFuzz "")
+      (set! mFuzz (newMatcher (.-MatchString deps) @matchFuzz "-test.fuzz" @skip)))
+
+
+    (range [_ procs cpuList]
+      (runtime/GOMAXPROCS procs)
+      (for [i (conv uint 0)] (< i @count) (inc! i)
+        (when (shouldFailFast)
+          (break))
+
+
+        (let [tstate (newTestState @parallel m)]
+          (set! (.-deadline tstate) deadline)
+          (let [fstate (addr (lit fuzzState :deps deps :mode seedCorpusOnly))
+              ^{:line 498} root (lit common :w os/Stdout)] ; gather output in one place
+            (when (Verbose)
+              (set! (.-chatty root) (newChattyPrinter (.-w root))))
+
+            (range [_ ft fuzzTests]
+              (when (shouldFailFast)
+                (break))
+
+              (let [(values testName matched _) (.fullName (.-match tstate) nil (.-Name ft))]
+                (when (not matched)
+                  (continue))
+
+                (when (!= mFuzz nil)
+                  (when [(values _ fuzzMatched _) (.fullName mFuzz nil (.-Name ft))] fuzzMatched
+                    ;; If this will be fuzzed, then don't run the seed corpus
+                    ;; right now. That will happen later.
+                    (continue)))
+
+
+                (let [(values ctx cancelCtx) (context/WithCancel (context/Background))
+                    ^{:line 518} f (addr ^{:go/breaks [2 [4 529] 6]} (lit F
+                        :common ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit common
+                          :signal (make (chan bool))
+                          :barrier (make (chan bool))
+                          :name testName
+                          :parent (addr root)
+                          :level (+ (.-level root) 1)
+                          :chatty (.-chatty root)
+                          :ctx ctx
+                          :cancelCtx cancelCtx)
+
+                        :tstate tstate
+                        :fstate fstate))]
+
+                  (set! ^{:go/via [common]} (.-w f) (lit indenter (addr (.-common f))))
+                  ^{:go/via [common]} (.setOutputWriter f)
+                  (when (!= ^{:go/via [common]} (.-chatty f) nil)
+                    (.Updatef ^{:go/via [common]} (.-chatty f) ^{:go/via [common]} (.-name f) "=== RUN   %s\n" ^{:go/via [common]} (.-name f)))
+
+                  (go (fRunner f (.-Fn ft)))
+                  (<! ^{:go/via [common]} (.-signal f))
+                  (when (and (!= ^{:go/via [common]} (.-chatty f) nil) (.-json ^{:go/via [common]} (.-chatty f)))
+                    (.Updatef ^{:go/via [common]} (.-chatty f) (.-name ^{:go/via [common]} (.-parent f)) "=== NAME  %s\n" (.-name ^{:go/via [common]} (.-parent f))))
+
+                  (set! ok (and ok (not ^{:go/via [common]} (.Failed f))))
+                  (set! ran (or ran ^{:go/via [common]} (.-ran f))))))
+
+            (when (not ran)
+              ;; There were no tests to run on this iteration.
+              ;; This won't change, so no reason to keep trying.
+              (break))))))
+
+
+
+
+    (return ran ok)))
+
+
+
+
+
+
+
+
+^{:go/end 629} (go/func runFuzzing "runFuzzing runs the fuzz test matching the pattern for -fuzz. Only one such\nfuzz test must match. This will run the fuzzing engine to generate and\nmutate new inputs against the fuzz target.\n\nIf fuzzing is disabled (-test.fuzz is not set), runFuzzing\nreturns immediately.\n" [^testDeps deps ^{:tag (slice InternalFuzzTarget)} fuzzTests] :results [^bool ok]
+  (when (or (== (len fuzzTests) 0) (== @matchFuzz ""))
+    (return true))
+
+  (let [m (newMatcher (.-MatchString deps) @matchFuzz "-test.fuzz" @skip)
+      ^{:line 567} tstate (newTestState 1 m)]
+    (set! (.-isFuzzing tstate) true)
+    (let [fstate (addr ^{:go/breaks [2]} (lit fuzzState
+            :deps deps))
+
+        ^{:line 572} root (lit common :w os/Stdout)]
+      (if @isFuzzWorker (do
+          (set! (.-w root) io/Discard)
+          (set! (.-mode fstate) fuzzWorker))
+
+        (set! (.-mode fstate) fuzzCoordinator))
+
+      (when (and (Verbose) (not @isFuzzWorker))
+        (set! (.-chatty root) (newChattyPrinter (.-w root))))
+
+      (let [^{:tag (* InternalFuzzTarget)} fuzzTest (zero (* InternalFuzzTarget))
+          ^{:line 583 :tag string} testName (zero string)
+          ^{:line 584 :tag (slice string)} matched (zero (slice string))]
+        (range [i fuzzTests]
+          (let [(values name ok _) (.fullName (.-match tstate) nil (.-Name (aget fuzzTests i)))]
+            (when (not ok)
+              (continue))
+
+            (set! matched (append matched name))
+            (set! fuzzTest (addr (aget fuzzTests i)))
+            (set! testName name)))
+
+        (when (== (len matched) 0)
+          (fmt/Fprintln os/Stderr "testing: warning: no fuzz tests to fuzz")
+          (return true))
+
+        (when (> (len matched) 1)
+          (fmt/Fprintf os/Stderr "testing: will not fuzz, -fuzz matches more than one fuzz test: %v\n" matched)
+          (return false))
+
+
+        (let [(values ctx cancelCtx) (context/WithCancel (context/Background))
+            ^{:line 604} f (addr ^{:go/breaks [2 [4 615] 6]} (lit F
+                :common ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit common
+                  :signal (make (chan bool))
+                  :barrier nil ; T.Parallel has no effect when fuzzing.
+                  :name testName
+                  :parent (addr root)
+                  :level (+ (.-level root) 1)
+                  :chatty (.-chatty root)
+                  :ctx ctx
+                  :cancelCtx cancelCtx)
+
+                :fstate fstate
+                :tstate tstate))]
+
+          (set! ^{:go/via [common]} (.-w f) (lit indenter (addr (.-common f))))
+          ^{:go/via [common]} (.setOutputWriter f)
+          (when (!= ^{:go/via [common]} (.-chatty f) nil)
+            (.Updatef ^{:go/via [common]} (.-chatty f) ^{:go/via [common]} (.-name f) "=== RUN   %s\n" ^{:go/via [common]} (.-name f)))
+
+          (go (fRunner f (.-Fn fuzzTest)))
+          (<! ^{:go/via [common]} (.-signal f))
+          (when (!= ^{:go/via [common]} (.-chatty f) nil)
+            (.Updatef ^{:go/via [common]} (.-chatty f) (.-name ^{:go/via [common]} (.-parent f)) "=== NAME  %s\n" (.-name ^{:go/via [common]} (.-parent f))))
+
+          (not ^{:go/via [common]} (.-failed f)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 745} (go/func fRunner "fRunner wraps a call to a fuzz test and ensures that cleanup functions are\ncalled and status flags are set. fRunner should be called in its own\ngoroutine. To wait for its completion, receive from f.signal.\n\nfRunner is analogous to tRunner, which wraps subtests started with T.Run.\nUnit tests and fuzz tests work a little differently, so for now, these\nfunctions aren't consolidated. In particular, because there are no F.Run and\nF.Parallel methods, i.e., no fuzz sub-tests or parallel fuzz tests, a few\nsimplifications are made. We also require that F.Fuzz, F.Skip, or F.Fail is\ncalled.\n" [^{:tag (* F)} f ^{:tag (func [(* F)])} fn]
+  ;; When this goroutine is done, either because runtime.Goexit was called, a
+  ;; panic started, or fn returned normally, record the duration and send
+  ;; t.signal, indicating the fuzz test is done.
+  (defer (^{:go/end 729} (fn []
+        ;; Detect whether the fuzz test panicked or called runtime.Goexit
+        ;; without calling F.Fuzz, F.Fail, or F.Skip. If it did, panic (possibly
+        ;; replacing a nil panic value). Nothing should recover after fRunner
+        ;; unwinds, so this should crash the process and print stack.
+        ;; Unfortunately, recovering here adds stack frames, but the location of
+        ;; the original panic should still be
+        ;; clear.
+        ^{:go/via [common]} (.checkRaces f)
+        (when ^{:go/via [common]} (.Failed f)
+          (.Add numFailed 1))
+
+        (let [err (recover)]
+          (when (== err nil)
+            (.RLock ^{:go/via [common]} (.-mu f))
+            (let [fuzzNotCalled (and (not (.-fuzzCalled f)) (not ^{:go/via [common]} (.-skipped f)) (not ^{:go/via [common]} (.-failed f)))]
+              (when (and (not ^{:go/via [common]} (.-finished f)) (not ^{:go/via [common]} (.-skipped f)) (not ^{:go/via [common]} (.-failed f)))
+                (set! err errNilPanicOrGoexit))
+
+              (.RUnlock ^{:go/via [common]} (.-mu f))
+              (when (and fuzzNotCalled (== err nil))
+                ^{:go/via [common]} (.Error f "returned without calling F.Fuzz, F.Fail, or F.Skip"))))
+
+
+
+          ;; Use a deferred call to ensure that we report that the test is
+          ;; complete even if a cleanup function calls F.FailNow. See issue 41355.
+          (let [didPanic false]
+            (defer (^{:go/end 680} (fn []
+                  (when (not didPanic)
+                    ;; Only report that the test is complete if it doesn't panic,
+                    ;; as otherwise the test binary can exit before the panic is
+                    ;; reported to the user. See issue 41479.
+                    (>! ^{:go/via [common]} (.-signal f) true)))))
+
+
+
+            ;; If we recovered a panic or inappropriate runtime.Goexit, fail the test,
+            ;; flush the output log up to the root, then panic.
+            (let [doPanic ^{:go/end 698} (fn [^any err]
+                  (.Fail f)
+                  (when [r ^{:go/via [common]} (.runCleanup f recoverAndReturnPanic)] (!= r nil)
+                    ^{:go/via [common]} (.Logf f "cleanup panicked with %v" r))
+
+                  (for [root (addr (.-common f))] (!= (.-parent root) nil) (set! root (.-parent root))
+                    (.Lock (.-mu root))
+                    (set! (.-duration root) + (highPrecisionTimeSince (.-start root)))
+                    (let [d (.-duration root)]
+                      (.Unlock (.-mu root))
+                      (.flushToParent root (.-name root) "--- FAIL: %s (%s)\n" (.-name root) (fmtDuration d))))
+
+                  (set! didPanic true)
+                  (panic err))]
+
+              (when (!= err nil)
+                (doPanic err))
+
+
+              ;; No panic or inappropriate Goexit.
+              (set! ^{:go/via [common]} (.-duration f) + (highPrecisionTimeSince ^{:go/via [common]} (.-start f)))
+
+              (when (> (len ^{:go/via [common]} (.-sub f)) 0)
+                ;; Unblock inputs that called T.Parallel while running the seed corpus.
+                ;; This only affects fuzz tests run as normal tests.
+                ;; While fuzzing, T.Parallel has no effect, so f.sub is empty, and this
+                ;; branch is not taken. f.barrier is nil in that case.
+                (.release (.-tstate f))
+                (close ^{:go/via [common]} (.-barrier f))
+                ;; Wait for the subtests to complete.
+                (range [_ sub ^{:go/via [common]} (.-sub f)]
+                  (<! ^{:go/via [common]} (.-signal sub)))
+
+                (let [cleanupStart (highPrecisionTimeNow)
+                    ^{:line 718} err ^{:go/via [common]} (.runCleanup f recoverAndReturnPanic)]
+                  (set! ^{:go/via [common]} (.-duration f) + (highPrecisionTimeSince cleanupStart))
+                  (when (!= err nil)
+                    (doPanic err))))
+
+
+
+              ;; Report after all subtests have finished.
+              (.report f)
+              (set! ^{:go/via [common]} (.-done f) true)
+              ^{:go/via [common]} (.setRan f)))))))
+
+  (defer (^{:go/end 734} (fn []
+        (when (== (len ^{:go/via [common]} (.-sub f)) 0)
+          ^{:go/via [common]} (.runCleanup f normalPanic)))))
+
+
+
+  (set! ^{:go/via [common]} (.-start f) (highPrecisionTimeNow))
+  ^{:go/via [common]} (.resetRaces f)
+  (go/call fn f)
+
+  ;; Code beyond this point will not be executed when FailNow or SkipNow
+  ;; is invoked.
+  (.Lock ^{:go/via [common]} (.-mu f))
+  (set! ^{:go/via [common]} (.-finished f) true)
+  (.Unlock ^{:go/via [common]} (.-mu f)))

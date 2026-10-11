@@ -1,0 +1,713 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Runtime -> tracer API.
+
+(in-ns 'go.runtime) (go/file "traceruntime.go" :imports [
+
+
+    ^{:line 10} [atomic "internal/runtime/atomic"]
+    ^{:line 11} [tracev2 "internal/trace/tracev2"]
+    ^{:line 12} [_ "unsafe"]]) ; for go:linkname
+
+
+
+(go/type gTraceState "gTraceState is per-G state for the tracer.\n" (struct
+    ^{:line 17} traceSchedResourceState))
+
+
+
+^{:go/end 24} (go/method reset "reset resets the gTraceState for a new goroutine.\n" [^{:tag (* gTraceState)} s]
+  (set! ^{:go/via [traceSchedResourceState]} (.-seq s) (lit (array 2 uint64))))
+;; N.B. s.statusTraced is managed and cleared separately.
+
+
+
+(go/type mTraceState "mTraceState is per-M state for the tracer.\n" (struct
+    ^{:line 28 :tag atomic/Bool} writing ; flag indicating that this M is writing to a trace buffer.
+    ^{:line 29 :tag (array 2 (array tracev2/NumExperiments (* traceBuf)))} buf ; Per-M traceBuf for writing. Indexed by trace.gen%2.
+    ^{:line 30 :tag (* m)} link ; Snapshot of alllink or freelink.
+    ^{:line 31 :tag uint32} reentered ; Whether we've reentered tracing from within tracing.
+    ^{:line 32 :tag uintptr} entryGen ; The generation value on first entry.
+    ^{:line 33 :tag bool} oldthrowsplit)) ; gp.throwsplit upon calling traceLocker.writer. For debugging.
+
+
+
+(go/type pTraceState "pTraceState is per-P state for the tracer.\n" (struct
+    ^{:line 38} traceSchedResourceState
+
+
+    ^{:line 41 :tag int64 :doc "mSyscallID is the ID of the M this was bound to before entering a syscall.\n"} mSyscallID
+
+
+
+
+    ^{:line 46 :tag bool :doc "maySweep indicates the sweep events should be traced.\nThis is used to defer the sweep start event until a span\nhas actually been swept.\n"} maySweep
+
+
+    ^{:line 49 :tag bool :doc "inSweep indicates that at least one sweep event has been traced.\n"} inSweep
+
+
+
+    ^{:line 53 :tag uintptr :doc "swept and reclaimed track the number of bytes swept and reclaimed\nby sweeping in the current sweep loop (while maySweep was true).\n"} swept ^{:tag uintptr :doc "swept and reclaimed track the number of bytes swept and reclaimed\nby sweeping in the current sweep loop (while maySweep was true).\n"} reclaimed))
+
+
+
+^{:go/end 69} (go/func traceLockInit "traceLockInit initializes global trace locks.\n" []
+  ;; Sharing a lock rank here is fine because they should never be accessed
+  ;; together. If they are, we want to find out immediately.
+  (lockInit (addr (.-lock (aget (.-stringTab trace) 0))) lockRankTraceStrings)
+  (lockInit (addr (.-lock (.-mem (.-tab (aget (.-stringTab trace) 0))))) lockRankTraceStrings)
+  (lockInit (addr (.-lock (aget (.-stringTab trace) 1))) lockRankTraceStrings)
+  (lockInit (addr (.-lock (.-mem (.-tab (aget (.-stringTab trace) 1))))) lockRankTraceStrings)
+  (lockInit (addr (.-lock (.-mem (.-tab (aget (.-stackTab trace) 0))))) lockRankTraceStackTab)
+  (lockInit (addr (.-lock (.-mem (.-tab (aget (.-stackTab trace) 1))))) lockRankTraceStackTab)
+  (lockInit (addr (.-lock (.-mem (.-tab (aget (.-typeTab trace) 0))))) lockRankTraceTypeTab)
+  (lockInit (addr (.-lock (.-mem (.-tab (aget (.-typeTab trace) 1))))) lockRankTraceTypeTab)
+  (lockInit (addr (.-lock trace)) lockRankTrace))
+
+
+
+
+
+
+
+
+^{:go/end 79} (go/func ^:go/nosplit lockRankMayTraceFlush "lockRankMayTraceFlush records the lock ranking effects of a\npotential call to traceFlush.\n\nnosplit because traceAcquire is nosplit.\n" []
+  (lockWithRankMayAcquire (addr (.-lock trace)) (getLockRank (addr (.-lock trace)))))
+
+
+
+
+
+
+
+
+
+(go/type traceBlockReason "traceBlockReason is an enumeration of reasons a goroutine might block.\nThis is the interface the rest of the runtime uses to tell the\ntracer why a goroutine blocked. The tracer then propagates this information\ninto the trace however it sees fit.\n\nNote that traceBlockReasons should not be compared, since reasons that are\ndistinct by name may *not* be distinct by value.\n" uint8)
+
+(go/const
+  ^{:line 91} [^{:tag traceBlockReason :val 0} traceBlockGeneric iota]
+  ^{:line 92} [^{:val 1} traceBlockForever]
+  ^{:line 93} [^{:val 2} traceBlockNet]
+  ^{:line 94} [^{:val 3} traceBlockSelect]
+  ^{:line 95} [^{:val 4} traceBlockCondWait]
+  ^{:line 96} [^{:val 5} traceBlockSync]
+  ^{:line 97} [^{:val 6} traceBlockChanSend]
+  ^{:line 98} [^{:val 7} traceBlockChanRecv]
+  ^{:line 99} [^{:val 8} traceBlockGCMarkAssist]
+  ^{:line 100} [^{:val 9} traceBlockGCSweep]
+  ^{:line 101} [^{:val 10} traceBlockSystemGoroutine]
+  ^{:line 102} [^{:val 11} traceBlockPreempted]
+  ^{:line 103} [^{:val 12} traceBlockDebugCall]
+  ^{:line 104} [^{:val 13} traceBlockUntilGCEnds]
+  ^{:line 105} [^{:val 14} traceBlockSleep]
+  ^{:line 106} [^{:val 15} traceBlockGCWeakToStrongWait]
+  ^{:line 107} [^{:val 16} traceBlockSynctest])
+
+
+(go/var traceBlockReasonStrings (lit (array ... string)
+    ^{:line 111} [traceBlockGeneric "unspecified"]
+    ^{:line 112} [traceBlockForever "forever"]
+    ^{:line 113} [traceBlockNet "network"]
+    ^{:line 114} [traceBlockSelect "select"]
+    ^{:line 115} [traceBlockCondWait "sync.(*Cond).Wait"]
+    ^{:line 116} [traceBlockSync "sync"]
+    ^{:line 117} [traceBlockChanSend "chan send"]
+    ^{:line 118} [traceBlockChanRecv "chan receive"]
+    ^{:line 119} [traceBlockGCMarkAssist "GC mark assist wait for work"]
+    ^{:line 120} [traceBlockGCSweep "GC background sweeper wait"]
+    ^{:line 121} [traceBlockSystemGoroutine "system goroutine wait"]
+    ^{:line 122} [traceBlockPreempted "preempted"]
+    ^{:line 123} [traceBlockDebugCall "wait for debug call"]
+    ^{:line 124} [traceBlockUntilGCEnds "wait until GC ends"]
+    ^{:line 125} [traceBlockSleep "sleep"]
+    ^{:line 126} [traceBlockGCWeakToStrongWait "GC weak to strong wait"]
+    ^{:line 127} [traceBlockSynctest "synctest"]))
+
+
+
+
+
+
+(go/type traceGoStopReason "traceGoStopReason is an enumeration of reasons a goroutine might yield.\n\nNote that traceGoStopReasons should not be compared, since reasons that are\ndistinct by name may *not* be distinct by value.\n" uint8)
+
+(go/const
+  ^{:line 137} [^{:tag traceGoStopReason :val 0} traceGoStopGeneric iota]
+  ^{:line 138} [^{:val 1} traceGoStopGoSched]
+  ^{:line 139} [^{:val 2} traceGoStopPreempted])
+
+
+(go/var traceGoStopReasonStrings (lit (array ... string)
+    ^{:line 143} [traceGoStopGeneric "unspecified"]
+    ^{:line 144} [traceGoStopGoSched "runtime.Gosched"]
+    ^{:line 145} [traceGoStopPreempted "preempted"]))
+
+
+
+
+
+^{:go/end 153} (go/func ^:go/nosplit traceEnabled "traceEnabled returns true if the trace is currently enabled.\n" ^bool []
+  (.-enabled trace))
+
+
+
+
+
+
+^{:go/end 161} (go/func ^:go/nosplit traceAllocFreeEnabled "traceAllocFreeEnabled returns true if the trace is currently enabled\nand alloc/free events are also enabled.\n" ^bool []
+  (.-enabledWithAllocFree trace))
+
+
+
+^{:go/end 166} (go/func traceShuttingDown "traceShuttingDown returns true if the trace is currently shutting down.\n" ^bool []
+  (.Load (.-shutdown trace)))
+
+
+
+
+
+(go/type traceLocker "traceLocker represents an M writing trace events. While a traceLocker value\nis valid, the tracer observes all operations on the G/M/P or trace events being\nwritten as happening atomically.\n" (struct
+    ^{:line 172 :tag (* m)} mp
+    ^{:line 173 :tag uintptr} gen))
+
+
+
+
+
+
+
+(go/const ^{:val false :doc "debugTraceReentrancy checks if the trace is reentrant.\n\nThis is optional because throwing in a function makes it instantly\nnot inlineable, and we want traceAcquire to be inlineable for\nlow overhead when the trace is disabled.\n"} debugTraceReentrancy false)
+
+
+
+
+
+
+^{:go/end 193} (go/func ^:go/nosplit traceAcquire "traceAcquire prepares this M for writing one or more trace events.\n\nnosplit because it's called on the syscall path when stack movement is forbidden.\n" ^traceLocker []
+  (when (not (traceEnabled))
+    (return (lit traceLocker)))
+
+  (traceAcquireEnabled))
+
+
+
+
+
+
+
+
+
+^{:go/end 243} (go/func ^:go/nosplit traceAcquireEnabled "traceAcquireEnabled is the traceEnabled path for traceAcquire. It's explicitly\nbroken out to make traceAcquire inlineable to keep the overhead of the tracer\nwhen it's disabled low.\n\nnosplit because it's called by traceAcquire, which is nosplit.\n" ^traceLocker []
+  ;; Any time we acquire a traceLocker, we may flush a trace buffer. But
+  ;; buffer flushes are rare. Record the lock edge even if it doesn't happen
+  ;; this time.
+  (lockRankMayTraceFlush)
+
+  ;; Prevent preemption.
+  (let [mp (acquirem)]
+
+    ;; Check if we're already tracing. It's safe to be reentrant in general,
+    ;; because this function (and the invariants of traceLocker.writer) ensure
+    ;; that it is.
+    (when (.Load (.-writing (.-trace mp)))
+      (inc! (.-reentered (.-trace mp)))
+      (return (lit traceLocker mp (.-entryGen (.-trace mp)))))
+
+
+    ;; Set the write flag. This prevents traceAdvance from moving forward
+    ;; until all Ms are observed to be outside of a write critical section.
+    ;;
+    ;; Note: The write flag is mutated here and also in traceCPUSample. If you update
+    ;; usage of the write flag here, make sure to also look at what traceCPUSample is
+    ;; doing.
+    (.Store (.-writing (.-trace mp)) true)
+
+    ;; N.B. This load of gen appears redundant with the one in traceEnabled.
+    ;; However, it's very important that the gen we use for writing to the trace
+    ;; is acquired under a traceLocker so traceAdvance can make sure no stale
+    ;; gen values are being used.
+    ;;
+    ;; Because we're doing this load again, it also means that the trace
+    ;; might end up being disabled when we load it. In that case we need to undo
+    ;; what we did and bail.
+    (let [gen (.Load (.-gen trace))]
+      (when (== gen 0)
+        (.Store (.-writing (.-trace mp)) false)
+        (releasem mp)
+        (return (lit traceLocker)))
+
+      (set! (.-entryGen (.-trace mp)) gen)
+      (lit traceLocker mp gen))))
+
+
+
+
+
+
+
+^{:go/end 252} (go/method ^:go/nosplit ok "ok returns true if the traceLocker is valid (i.e. tracing is enabled).\n\nnosplit because it's called on the syscall path when stack movement is forbidden.\n" ^bool [^traceLocker tl]
+  (!= (.-gen tl) 0))
+
+
+
+
+
+
+
+^{:go/end 266} (go/func ^:go/nosplit traceRelease "traceRelease indicates that this M is done writing trace events.\n\nnosplit because it's called on the syscall path when stack movement is forbidden.\n" [^traceLocker tl]
+  (if (> (.-reentered (.-trace (.-mp tl))) 0)
+    (dec! (.-reentered (.-trace (.-mp tl))))
+
+    (.Store (.-writing (.-trace (.-mp tl))) false))
+
+  (releasem (.-mp tl)))
+
+
+
+
+
+^{:go/end 273} (go/func traceExitingSyscall "traceExitingSyscall marks a goroutine as exiting the syscall slow path.\n\nMust be paired with a traceExitedSyscall call.\n" []
+  (.Add (.-exitingSyscall trace) 1))
+
+
+
+^{:go/end 278} (go/func traceExitedSyscall "traceExitedSyscall marks a goroutine as having exited the syscall slow path.\n" []
+  (.Add (.-exitingSyscall trace) -1))
+
+
+
+^{:go/end 283} (go/method Gomaxprocs "Gomaxprocs emits a ProcsChange event.\n" [^traceLocker tl ^int32 procs]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvProcsChange (conv traceArg procs) (.stack tl 1)))
+
+
+
+
+
+^{:go/end 294} (go/method ProcStart "ProcStart traces a ProcStart event.\n\nMust be called with a valid P.\n" [^traceLocker tl]
+  (let [pp (.ptr (.-p (.-mp tl)))]
+    ;; Procs are typically started within the scheduler when there is no user goroutine. If there is a user goroutine,
+    ;; it must be in _Gsyscall because the only time a goroutine is allowed to have its Proc moved around from under it
+    ;; is during a syscall.
+    (.event (.eventWriter tl tracev2/GoSyscall tracev2/ProcIdle) tracev2/EvProcStart (conv traceArg (.-id pp)) ^{:go/via [traceSchedResourceState]} (.nextSeq (.-trace pp) (.-gen tl)))))
+
+
+
+^{:go/end 301} (go/method ProcStop "ProcStop traces a ProcStop event.\n" [^traceLocker tl ^{:tag (* p)} pp]
+  ;; The only time a goroutine is allowed to have its Proc moved around
+  ;; from under it is during a syscall.
+  (.event (.eventWriter tl tracev2/GoSyscall tracev2/ProcRunning) tracev2/EvProcStop))
+
+
+
+
+
+
+^{:go/end 312} (go/method GCActive "GCActive traces a GCActive event.\n\nMust be emitted by an actively running goroutine on an active P. This restriction can be changed\neasily and only depends on where it's currently called.\n" [^traceLocker tl]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGCActive (conv traceArg (.-seqGC trace)))
+  ;; N.B. Only one GC can be running at a time, so this is naturally
+  ;; serialized by the caller.
+  (inc! (.-seqGC trace)))
+
+
+
+
+
+
+^{:go/end 323} (go/method GCStart "GCStart traces a GCBegin event.\n\nMust be emitted by an actively running goroutine on an active P. This restriction can be changed\neasily and only depends on where it's currently called.\n" [^traceLocker tl]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGCBegin (conv traceArg (.-seqGC trace)) (.stack tl 3))
+  ;; N.B. Only one GC can be running at a time, so this is naturally
+  ;; serialized by the caller.
+  (inc! (.-seqGC trace)))
+
+
+
+
+
+
+^{:go/end 334} (go/method GCDone "GCDone traces a GCEnd event.\n\nMust be emitted by an actively running goroutine on an active P. This restriction can be changed\neasily and only depends on where it's currently called.\n" [^traceLocker tl]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGCEnd (conv traceArg (.-seqGC trace)))
+  ;; N.B. Only one GC can be running at a time, so this is naturally
+  ;; serialized by the caller.
+  (inc! (.-seqGC trace)))
+
+
+
+^{:go/end 341} (go/method STWStart "STWStart traces a STWBegin event.\n" [^traceLocker tl ^stwReason reason]
+  ;; Although the current P may be in _Pgcstop here, we model the P as running during the STW. This deviates from the
+  ;; runtime's state tracking, but it's more accurate and doesn't result in any loss of information.
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvSTWBegin (.string tl (.String reason)) (.stack tl 2)))
+
+
+
+^{:go/end 348} (go/method STWDone "STWDone traces a STWEnd event.\n" [^traceLocker tl]
+  ;; Although the current P may be in _Pgcstop here, we model the P as running during the STW. This deviates from the
+  ;; runtime's state tracking, but it's more accurate and doesn't result in any loss of information.
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvSTWEnd))
+
+
+
+
+
+
+
+
+
+^{:go/end 365} (go/method GCSweepStart "GCSweepStart prepares to trace a sweep loop. This does not\nemit any events until traceGCSweepSpan is called.\n\nGCSweepStart must be paired with traceGCSweepDone and there\nmust be no preemption points between these two calls.\n\nMust be called with a valid P.\n" [^traceLocker tl]
+  ;; Delay the actual GCSweepBegin event until the first span
+  ;; sweep. If we don't sweep anything, don't emit any events.
+  (let [pp (.ptr (.-p (.-mp tl)))]
+    (when (.-maySweep (.-trace pp))
+      (throw "double traceGCSweepStart"))
+
+    (set! (values (.-maySweep (.-trace pp)) (.-swept (.-trace pp)) (.-reclaimed (.-trace pp))) (values true 0 0))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 384} (go/method GCSweepSpan "GCSweepSpan traces the sweep of a single span. If this is\nthe first span swept since traceGCSweepStart was called, this\nwill emit a GCSweepBegin event.\n\nThis may be called outside a traceGCSweepStart/traceGCSweepDone\npair; however, it will not emit any trace events in this case.\n\nMust be called with a valid P.\n" [^traceLocker tl ^uintptr bytesSwept]
+  (let [pp (.ptr (.-p (.-mp tl)))]
+    (when (.-maySweep (.-trace pp))
+      (when (== (.-swept (.-trace pp)) 0)
+        (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGCSweepBegin (.stack tl 1))
+        (set! (.-inSweep (.-trace pp)) true))
+
+      (set! (.-swept (.-trace pp)) + bytesSwept))))
+
+
+
+
+
+
+
+
+^{:go/end 401} (go/method GCSweepDone "GCSweepDone finishes tracing a sweep loop. If any memory was\nswept (i.e. traceGCSweepSpan emitted an event) then this will emit\na GCSweepEnd event.\n\nMust be called with a valid P.\n" [^traceLocker tl]
+  (let [pp (.ptr (.-p (.-mp tl)))]
+    (when (not (.-maySweep (.-trace pp)))
+      (throw "missing traceGCSweepStart"))
+
+    (when (.-inSweep (.-trace pp))
+      (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGCSweepEnd (conv traceArg (.-swept (.-trace pp))) (conv traceArg (.-reclaimed (.-trace pp))))
+      (set! (.-inSweep (.-trace pp)) false))
+
+    (set! (.-maySweep (.-trace pp)) false)))
+
+
+
+^{:go/end 406} (go/method GCMarkAssistStart "GCMarkAssistStart emits a MarkAssistBegin event.\n" [^traceLocker tl]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGCMarkAssistBegin (.stack tl 1)))
+
+
+
+^{:go/end 411} (go/method GCMarkAssistDone "GCMarkAssistDone emits a MarkAssistEnd event.\n" [^traceLocker tl]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGCMarkAssistEnd))
+
+
+
+^{:go/end 421} (go/method GoCreate "GoCreate emits a GoCreate event.\n" [^traceLocker tl ^{:tag (* g)} newg ^uintptr pc ^bool blocked]
+  ^{:go/via [traceSchedResourceState]} (.setStatusTraced (.-trace newg) (.-gen tl))
+  (let [ev tracev2/EvGoCreate]
+    (when blocked
+      (set! ev tracev2/EvGoCreateBlocked))
+
+    (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) ev (conv traceArg (.-goid newg)) (.startPC tl pc) (.stack tl 2))))
+
+
+
+
+
+^{:go/end 434} (go/method GoStart "GoStart emits a GoStart event.\n\nMust be called with a valid P.\n" [^traceLocker tl]
+  (let [gp (.-curg (.-m (getg)))
+      ^{:line 428} pp (.-p (.-m gp))
+      ^{:line 429} w (.eventWriter tl tracev2/GoRunnable tracev2/ProcRunning)]
+    (.event w tracev2/EvGoStart (conv traceArg (.-goid gp)) ^{:go/via [traceSchedResourceState]} (.nextSeq (.-trace gp) (.-gen tl)))
+    (when (!= (.-gcMarkWorkerMode (.ptr pp)) gcMarkWorkerNotWorker)
+      (.event w tracev2/EvGoLabel (aget (aget (.-markWorkerLabels trace) (% (.-gen tl) 2)) (.-gcMarkWorkerMode (.ptr pp)))))))
+
+
+
+
+
+
+^{:go/end 441} (go/method GoEnd "GoEnd emits a GoDestroy event.\n\nTODO(mknyszek): Rename this to GoDestroy.\n" [^traceLocker tl]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGoDestroy))
+
+
+
+^{:go/end 446} (go/method GoSched "GoSched emits a GoStop event with a GoSched reason.\n" [^traceLocker tl]
+  (.GoStop tl traceGoStopGoSched))
+
+
+
+^{:go/end 451} (go/method GoPreempt "GoPreempt emits a GoStop event with a GoPreempted reason.\n" [^traceLocker tl]
+  (.GoStop tl traceGoStopPreempted))
+
+
+
+^{:go/end 456} (go/method GoStop "GoStop emits a GoStop event with the provided reason.\n" [^traceLocker tl ^traceGoStopReason reason]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGoStop (aget (aget (.-goStopReasons trace) (% (.-gen tl) 2)) reason) (.stack tl 0)))
+
+
+
+
+
+
+^{:go/end 464} (go/method GoPark "GoPark emits a GoBlock event with the provided reason.\n\nTODO(mknyszek): Replace traceBlockReason with waitReason. It's silly\nthat we have both, and waitReason is way more descriptive.\n" [^traceLocker tl ^traceBlockReason reason ^int skip]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGoBlock (aget (aget (.-goBlockReasons trace) (% (.-gen tl) 2)) reason) (.stack tl skip)))
+
+
+
+^{:go/end 471} (go/method GoUnpark "GoUnpark emits a GoUnblock event.\n" [^traceLocker tl ^{:tag (* g)} gp ^int skip]
+  ;; Emit a GoWaiting status if necessary for the unblocked goroutine.
+  (.emitUnblockStatus tl gp (.-gen tl))
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGoUnblock (conv traceArg (.-goid gp)) ^{:go/via [traceSchedResourceState]} (.nextSeq (.-trace gp) (.-gen tl)) (.stack tl skip)))
+
+
+
+
+^{:go/end 484} (go/method GoSwitch "GoSwitch emits a GoSwitch event. If destroy is true, the calling goroutine\nis simultaneously being destroyed.\n" [^traceLocker tl ^{:tag (* g)} nextg ^bool destroy]
+  ;; Emit a GoWaiting status if necessary for the unblocked goroutine.
+  (.emitUnblockStatus tl nextg (.-gen tl))
+  (let [w (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning)
+      ^{:line 479} ev tracev2/EvGoSwitch]
+    (when destroy
+      (set! ev tracev2/EvGoSwitchDestroy))
+
+    (.event w ev (conv traceArg (.-goid nextg)) ^{:go/via [traceSchedResourceState]} (.nextSeq (.-trace nextg) (.-gen tl)))))
+
+
+
+
+^{:go/end 495} (go/method emitUnblockStatus "emitUnblockStatus emits a GoStatus GoWaiting event for a goroutine about to be\nunblocked to the trace writer.\n" [^traceLocker tl ^{:tag (* g)} gp ^uintptr gen]
+  (when (and (not ^{:go/via [traceSchedResourceState]} (.statusWasTraced (.-trace gp) gen)) ^{:go/via [traceSchedResourceState]} (.acquireStatus (.-trace gp) gen))
+    ;; TODO(go.dev/issue/65634): Although it would be nice to add a stack trace here of gp,
+    ;; we cannot safely do so. gp is in _Gwaiting and so we don't have ownership of its stack.
+    ;; We can fix this by acquiring the goroutine's scan bit.
+    (.end (.writeGoStatus (.writer tl) (.-goid gp) -1 tracev2/GoWaiting (.-inMarkAssist gp) 0))))
+
+
+
+
+
+
+^{:go/end 505} (go/method GoSysCall "GoSysCall emits a GoSyscallBegin event.\n\nMust be called with a valid P.\n" [^traceLocker tl]
+  ;; Scribble down the M that the P is currently attached to.
+  (let [pp (.ptr (.-p (.-mp tl)))]
+    (set! (.-mSyscallID (.-trace pp)) (conv int64 (.-procid (.-mp tl))))
+    (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGoSyscallBegin ^{:go/via [traceSchedResourceState]} (.nextSeq (.-trace pp) (.-gen tl)) (.stack tl 1))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 526} (go/method GoSysExit "GoSysExit emits a GoSyscallEnd event, possibly along with a GoSyscallBlocked event\nif lostP is true.\n\nlostP must be true in all cases that a goroutine loses its P during a syscall.\nThis means it's not sufficient to check if it has no P. In particular, it needs to be\ntrue in the following cases:\n- The goroutine lost its P, it ran some other code, and then got it back. It's now running with that P.\n- The goroutine lost its P and was unable to reacquire it, and is now running without a P.\n- The goroutine lost its P and acquired a different one, and is now running with that P.\n" [^traceLocker tl ^bool lostP]
+  (let [ev tracev2/EvGoSyscallEnd
+      ^{:line 518} procStatus tracev2/ProcSyscall] ; Procs implicitly enter tracev2.ProcSyscall on GoSyscallBegin.
+    (if lostP (do
+        (set! ev tracev2/EvGoSyscallEndBlocked)
+        (set! procStatus tracev2/ProcRunning)) ; If a G has a P when emitting this event, it reacquired a P and is indeed running.
+
+      (set! (.-mSyscallID (.-trace (.ptr (.-p (.-mp tl))))) -1))
+
+    (.event (.eventWriter tl tracev2/GoSyscall procStatus) ev)))
+
+
+
+
+
+^{:go/end 560} (go/method ProcSteal "ProcSteal indicates that our current M stole a P from another M.\n\nThe caller must have ownership of pp.\n" [^traceLocker tl ^{:tag (* p)} pp]
+  ;; Grab the M ID we stole from.
+  (let [mStolenFrom (.-mSyscallID (.-trace pp))]
+    (set! (.-mSyscallID (.-trace pp)) -1)
+
+    ;; Emit the status of the P we're stealing. We may be just about to do this when creating the event
+    ;; writer but it's not guaranteed, even if we're stealing from a syscall. Although it might seem like
+    ;; from a syscall context we're always stealing a P for ourselves, we may have not wired it up yet (so
+    ;; it wouldn't be visible to eventWriter) or we may not even intend to wire it up to ourselves
+    ;; at all and plan to hand it back to the runtime.
+    (when (and (not ^{:go/via [traceSchedResourceState]} (.statusWasTraced (.-trace pp) (.-gen tl))) ^{:go/via [traceSchedResourceState]} (.acquireStatus (.-trace pp) (.-gen tl)))
+      ;; Careful: don't use the event writer. We never want status or in-progress events
+      ;; to trigger more in-progress events.
+      (.end (.writeProcStatus (.writer tl) (conv uint64 (.-id pp)) tracev2/ProcSyscallAbandoned (.-inSweep (.-trace pp)))))
+
+
+    ;; The status of the proc and goroutine, if we need to emit one here, is not evident from the
+    ;; context of just emitting this event alone. There are two cases. Either we're trying to steal
+    ;; the P just to get its attention (e.g. STW or sysmon retake) or we're trying to steal a P for
+    ;; ourselves specifically to keep running. The two contexts look different, but can be summarized
+    ;; fairly succinctly. In the former, we're a regular running goroutine and proc, if we have either.
+    ;; In the latter, we're a goroutine in a syscall.
+    (let [goStatus tracev2/GoRunning
+        ^{:line 554} procStatus tracev2/ProcRunning]
+      (when (and (!= (.-curg (.-mp tl)) nil) (!= (.-syscallsp (.-curg (.-mp tl))) 0))
+        (set! goStatus tracev2/GoSyscall)
+        (set! procStatus tracev2/ProcSyscallAbandoned))
+
+      (.event (.eventWriter tl goStatus procStatus) tracev2/EvProcSteal (conv traceArg (.-id pp)) ^{:go/via [traceSchedResourceState]} (.nextSeq (.-trace pp) (.-gen tl)) (conv traceArg mStolenFrom)))))
+
+
+
+^{:go/end 565} (go/method HeapAlloc "HeapAlloc emits a HeapAlloc event.\n" [^traceLocker tl ^uint64 live]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvHeapAlloc (conv traceArg live)))
+
+
+
+^{:go/end 577} (go/method HeapGoal "HeapGoal reads the current heap goal and emits a HeapGoal event.\n" [^traceLocker tl]
+  (let [heapGoal (.heapGoal gcController)]
+    ;; The heapGoal calculations will result in strange numbers if the GC if off. See go.dev/issue/63864.
+    ;; Check gcPercent before using the heapGoal in the trace.
+    (when (or (== heapGoal (bit-not (conv uint64 0))) (< (.Load (.-gcPercent gcController)) 0))
+      ;; Heap-based triggering is disabled.
+      (set! heapGoal 0))
+
+    (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvHeapGoal (conv traceArg heapGoal))))
+
+
+
+
+
+
+
+
+^{:go/end 594} (go/method GoCreateSyscall "GoCreateSyscall indicates that a goroutine has transitioned from dead to GoSyscall.\n\nUnlike GoCreate, the caller must be running on gp.\n\nThis occurs when C code calls into Go. On pthread platforms it occurs only when\na C thread calls into Go code for the first time.\n" [^traceLocker tl ^{:tag (* g)} gp]
+  ;; N.B. We should never trace a status for this goroutine (which we're currently running on),
+  ;; since we want this to appear like goroutine creation.
+  ^{:go/via [traceSchedResourceState]} (.setStatusTraced (.-trace gp) (.-gen tl))
+
+  ;; We might have a P left over on the thread from the last cgo callback,
+  ;; but in a syscall context, it is NOT ours. Act as if we do not have a P,
+  ;; and don't record a status.
+  (.event (.rawEventWriter tl) tracev2/EvGoCreateSyscall (conv traceArg (.-goid gp))))
+
+
+
+
+
+
+^{:go/end 610} (go/method GoDestroySyscall "GoDestroySyscall indicates that a goroutine has transitioned from GoSyscall to dead.\n\nThis occurs when Go code returns back to C. On pthread platforms it occurs only when\nthe C thread is destroyed.\n" [^traceLocker tl]
+  ;; Write the status for the goroutine if necessary.
+  (when [gp (.-curg (.-mp tl))] (and (!= gp nil) (not ^{:go/via [traceSchedResourceState]} (.statusWasTraced (.-trace gp) (.-gen tl))) ^{:go/via [traceSchedResourceState]} (.acquireStatus (.-trace gp) (.-gen tl)))
+    (.end (.writeGoStatus (.writer tl) (.-goid gp) (conv int64 (.-procid (.-mp tl))) tracev2/GoSyscall false 0))) ; /* no stack */
+
+
+  ;; We might have a P left over on the thread from the last cgo callback,
+  ;; but in a syscall context, it is NOT ours. Act as if we do not have a P,
+  ;; and don't record a status.
+  (.event (.rawEventWriter tl) tracev2/EvGoDestroySyscall))
+
+
+;; To access runtime functions from runtime/trace.
+;; See runtime/trace/annotation.go
+
+
+
+
+^{:go/end 626} (go/func ^{:go/linkname "trace_userTaskCreate runtime/trace.userTaskCreate"} trace_userTaskCreate "trace_userTaskCreate emits a UserTaskCreate event.\n" [^uint64 id ^uint64 parentID ^string taskType]
+  (let [tl (traceAcquire)]
+    (when (not (.ok tl))
+      ;; Need to do this check because the caller won't have it.
+      (return))
+
+    (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvUserTaskBegin (conv traceArg id) (conv traceArg parentID) (.string tl taskType) (.stack tl 3))
+    (traceRelease tl)))
+
+
+
+
+
+^{:go/end 639} (go/func ^{:go/linkname "trace_userTaskEnd runtime/trace.userTaskEnd"} trace_userTaskEnd "trace_userTaskEnd emits a UserTaskEnd event.\n" [^uint64 id]
+  (let [tl (traceAcquire)]
+    (when (not (.ok tl))
+      ;; Need to do this check because the caller won't have it.
+      (return))
+
+    (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvUserTaskEnd (conv traceArg id) (.stack tl 2))
+    (traceRelease tl)))
+
+
+
+
+
+
+
+
+^{:go/end 664} (go/func ^{:go/linkname "trace_userRegion runtime/trace.userRegion"} trace_userRegion "trace_userRegion emits a UserRegionBegin or UserRegionEnd event,\ndepending on mode (0 == Begin, 1 == End).\n\nTODO(mknyszek): Just make this two functions.\n" [^uint64 id ^uint64 mode ^string name]
+  (let [tl (traceAcquire)]
+    (when (not (.ok tl))
+      ;; Need to do this check because the caller won't have it.
+      (return))
+
+    (let [^tracev2/EventType ev (zero tracev2/EventType)]
+      (switch mode
+        (case [0]
+          (set! ev tracev2/EvUserRegionBegin))
+        (case [1]
+          (set! ev tracev2/EvUserRegionEnd))
+        (default
+          (return)))
+
+      (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) ev (conv traceArg id) (.string tl name) (.stack tl 3))
+      (traceRelease tl))))
+
+
+
+
+
+^{:go/end 677} (go/func ^{:go/linkname "trace_userLog runtime/trace.userLog"} trace_userLog "trace_userLog emits a UserRegionBegin or UserRegionEnd event.\n" [^uint64 id ^string category ^string message]
+  (let [tl (traceAcquire)]
+    (when (not (.ok tl))
+      ;; Need to do this check because the caller won't have it.
+      (return))
+
+    (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvUserLog (conv traceArg id) (.string tl category) (.uniqueString tl message) (.stack tl 3))
+    (traceRelease tl)))
+
+
+
+
+
+
+
+
+^{:go/end 714} (go/func traceThreadDestroy "traceThreadDestroy is called when a thread is removed from\nsched.freem.\n\nmp must not be able to emit trace events anymore.\n\nsched.lock must be held to synchronize with traceAdvance.\n" [^{:tag (* m)} mp]
+  (assertLockHeld (addr (.-lock sched)))
+
+  ;; Flush all outstanding buffers to maintain the invariant
+  ;; that an M only has active buffers while on sched.freem
+  ;; or allm.
+  ;;
+  ;; Perform a traceAcquire/traceRelease on behalf of mp to
+  ;; synchronize with the tracer trying to flush our buffer
+  ;; as well.
+  (when (and debugTraceReentrancy (.Load (.-writing (.-trace mp))))
+    (throw "bad use of trace.writing"))
+
+  (.Store (.-writing (.-trace mp)) true)
+  (systemstack ^{:go/end 712} (fn []
+      (lock (addr (.-lock trace)))
+      (range [i (.-buf (.-trace mp))]
+        (range [exp buf (aget (.-buf (.-trace mp)) i)]
+          (when (!= buf nil)
+            ;; N.B. traceBufFlush accepts a generation, but it
+            ;; really just cares about gen%2.
+            (traceBufFlush buf (conv uintptr i))
+            (aset (aget (.-buf (.-trace mp)) i) exp nil))))
+
+
+
+      (unlock (addr (.-lock trace)))))
+
+  (.Store (.-writing (.-trace mp)) false))

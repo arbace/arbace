@@ -1,0 +1,1104 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "stream.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [math "math"]
+    ^{:line 13} [sync "sync"]
+
+    ^{:line 15} [quicwire "golang.org/x/net/internal/quic/quicwire"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Stream "A Stream is an ordered byte stream.\n\nStreams may be bidirectional, read-only, or write-only.\nMethods inappropriate for a stream's direction\n(for example, [Write] to a read-only stream)\nreturn errors.\n\nIt is not safe to perform concurrent reads from or writes to a stream.\nIt is safe, however, to read and write at the same time.\n\nReads and writes are buffered.\nIt is generally not necessary to wrap a stream in a [bufio.ReadWriter]\nor otherwise apply additional buffering.\n\nTo cancel reads or writes, use the [SetReadContext] and [SetWriteContext] methods.\n" (struct
+    ^{:line 34 :tag streamID} id
+    ^{:line 35 :tag (* Conn)} conn
+
+
+
+    ^{:line 39 :tag context/Context :doc "Contexts used for read/write operations.\nIntentionally not mutex-guarded, to allow the race detector to catch concurrent access.\n"} inctx
+    ^{:line 40 :tag context/Context} outctx
+
+
+
+
+
+    ^{:line 46 :tag gate :doc "ingate's lock guards receive-related state.\n\nThe gate condition is set if a read from the stream will not block,\neither because the stream has available data or because the read will fail.\n"} ingate
+    ^{:line 47 :tag pipe} in ; received data
+    ^{:line 48 :tag int64} inwin ; last MAX_STREAM_DATA sent to the peer
+    ^{:line 49 :tag sentVal} insendmax ; set when we should send MAX_STREAM_DATA to the peer
+    ^{:line 50 :tag int64} inmaxbuf ; maximum amount of data we will buffer
+    ^{:line 51 :tag int64} insize ; stream final size; -1 before this is known
+    ^{:line 52 :tag (rangeset int64)} inset ; received ranges
+    ^{:line 53 :tag sentVal} inclosed ; set by CloseRead
+    ^{:line 54 :tag int64} inresetcode ; RESET_STREAM code received from the peer; -1 if not reset
+
+
+
+
+
+
+    ^{:line 61 :tag gate :doc "outgate's lock guards send-related state.\n\nThe gate condition is set if a write to the stream will not block,\neither because the stream has available flow control or because\nthe write will fail.\n"} outgate
+    ^{:line 62 :tag pipe} out ; buffered data to send
+    ^{:line 63 :tag int64} outflushed ; offset of last flush call
+    ^{:line 64 :tag int64} outwin ; maximum MAX_STREAM_DATA received from the peer
+    ^{:line 65 :tag int64} outmaxsent ; maximum data offset we've sent to the peer
+    ^{:line 66 :tag int64} outmaxbuf ; maximum amount of data we will buffer
+    ^{:line 67 :tag (rangeset int64)} outunsent ; ranges buffered but not yet sent (only flushed data)
+    ^{:line 68 :tag (rangeset int64)} outacked ; ranges sent and acknowledged
+    ^{:line 69 :tag sentVal} outopened ; set if we should open the stream
+    ^{:line 70 :tag sentVal} outclosed ; set by CloseWrite
+    ^{:line 71 :tag sentVal} outblocked ; set when a write to the stream is blocked by flow control
+    ^{:line 72 :tag sentVal} outreset ; set by Reset
+    ^{:line 73 :tag uint64} outresetcode ; reset code to send in RESET_STREAM
+    ^{:line 74 :tag (chan (struct))} outdone ; closed when all data sent
+
+
+    ^{:line 77 :tag sync/Mutex :doc "Buffers used for fast path; mutex-guarded, but uncontended in normal operations.\n"} inbufmu
+    ^{:line 78 :tag (slice byte)} inbuf ; received data
+    ^{:line 79 :tag int} inbufoff ; bytes of inbuf which have been consumed
+
+    ^{:line 81 :tag sync/Mutex} outbufmu
+    ^{:line 82 :tag (slice byte)} outbuf ; written data
+    ^{:line 83 :tag int} outbufoff ; bytes of outbuf which contain data to write
+
+
+
+
+
+
+
+
+
+
+    ^{:line 94 :tag (atomicBits streamState) :doc "Atomic stream state bits.\n\nThese bits provide a fast way to coordinate between the\nsend and receive sides of the stream, and the conn's loop.\n\nstreamIn* bits must be set with ingate held.\nstreamOut* bits must be set with outgate held.\nstreamConn* bits are set by the conn's loop.\nstreamQueue* bits must be set with streamsState.sendMu held.\n"} state
+
+    ^{:line 96 :tag (* Stream)} prev ^{:tag (* Stream)} next)) ; guarded by streamsState.sendMu
+
+
+(go/type streamState uint32)
+
+(go/const
+
+
+
+  ^{:line 105} [^{:val 1 :doc "streamInSendMeta is set when there are frames to send for the\ninbound side of the stream. For example, MAX_STREAM_DATA.\nInbound frames are never flow-controlled.\n"} streamInSendMeta (conv streamState (<< 1 iota))]
+
+
+
+
+
+
+
+  ^{:line 113} [^{:val 2 :doc "streamOutSendMeta is set when there are non-flow-controlled frames\nto send for the outbound side of the stream. For example, STREAM_DATA_BLOCKED.\nstreamOutSendData is set when there are no non-flow-controlled outbound frames\nand the stream has data to send.\n\nAt most one of streamOutSendMeta and streamOutSendData is set at any time.\n"} streamOutSendMeta]
+  ^{:line 114} [^{:val 4} streamOutSendData]
+
+
+
+
+  ^{:line 119} [^{:val 8 :doc "streamInDone and streamOutDone are set when the inbound or outbound\nsides of the stream are finished. When both are set, the stream\ncan be removed from the Conn and forgotten.\n"} streamInDone]
+  ^{:line 120} [^{:val 16} streamOutDone]
+
+
+  ^{:line 123} [^{:val 32 :doc "streamConnRemoved is set when the stream has been removed from the conn.\n"} streamConnRemoved]
+
+
+
+  ^{:line 127} [^{:val 64 :doc "streamQueueMeta and streamQueueData indicate which of the streamsState\nsend queues the conn is currently on.\n"} streamQueueMeta]
+  ^{:line 128} [^{:val 128} streamQueueData])
+
+
+(go/type streamQueue int)
+
+(go/const
+  ^{:line 134} [^{:val 0} noQueue (conv streamQueue iota)]
+  ^{:line 135} [^{:val 1} metaQueue] ; streamsState.queueMeta
+  ^{:line 136} [^{:val 2} dataQueue]) ; streamsState.queueData
+
+
+
+
+
+(go/const ^{:val 9223372036854775807 :doc "streamResetByConnClose is assigned to Stream.inresetcode to indicate that a stream\nwas implicitly reset when the connection closed. It's out of the range of\npossible reset codes the peer can send.\n"} streamResetByConnClose math/MaxInt64)
+
+
+^{:go/end 158} (go/method wantQueue "wantQueue returns the send queue the stream should be on.\n" ^streamQueue [^streamState s]
+  (switch
+    (case [(!= (bit-and s (bit-or streamInSendMeta streamOutSendMeta)) 0)]
+      (return metaQueue))
+    (case [(== (bit-and s (bit-or streamInDone streamOutDone streamConnRemoved)) (bit-or streamInDone streamOutDone))]
+      (return metaQueue))
+    (case [(!= (bit-and s streamOutSendData) 0)]
+      ;; The stream has no non-flow-controlled frames to send,
+      ;; but does have data. Put it on the data queue, which is only
+      ;; processed when flow control is available.
+      (return dataQueue)))
+
+  ^{:line 157} noQueue)
+
+
+
+^{:go/end 169} (go/method inQueue "inQueue returns the send queue the stream is currently on.\n" ^streamQueue [^streamState s]
+  (switch
+    (case [(!= (bit-and s streamQueueMeta) 0)]
+      (return metaQueue))
+    (case [(!= (bit-and s streamQueueData) 0)]
+      (return dataQueue)))
+
+  ^{:line 168} noQueue)
+
+
+
+
+
+
+
+
+^{:go/end 192} (go/func newStream "newStream returns a new stream.\n\nThe stream's ingate and outgate are locked.\n(We create the stream with locked gates so after the caller\ninitializes the flow control window,\nunlocking outgate will set the stream writability state.)\n" ^{:tag (* Stream)} [^{:tag (* Conn)} c ^streamID id]
+  (let [s (addr ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit Stream
+          :conn c
+          :id id
+          :insize -1 ; -1 indicates the stream size is unknown
+          :inresetcode -1 ; -1 indicates no RESET_STREAM received
+          :ingate (newLockedGate)
+          :outgate (newLockedGate)
+          :inctx (context/Background)
+          :outctx (context/Background)))]
+
+    (when (not (.IsReadOnly s))
+      (set! (.-outdone s) (make (chan (struct)))))
+
+    ^{:line 191} s))
+
+
+
+
+
+
+
+^{:go/end 201} (go/method ID "ID returns the QUIC stream ID of s.\n\nAs specified in RFC 9000, the two least significant bits of a stream ID\nindicate the initiator and directionality of the stream. The upper bits are\nthe stream number.\n" ^int64 [^{:tag (* Stream)} s]
+  (conv int64 (.-id s)))
+
+
+
+
+
+^{:go/end 208} (go/method SetReadContext "SetReadContext sets the context used for reads from the stream.\n\nIt is not safe to call SetReadContext concurrently.\n" [^{:tag (* Stream)} s ^context/Context ctx]
+  (set! (.-inctx s) ctx))
+
+
+
+
+
+
+
+^{:go/end 217} (go/method SetWriteContext "SetWriteContext sets the context used for writes to the stream.\nThe write context is also used by Close when waiting for writes to be\nreceived by the peer.\n\nIt is not safe to call SetWriteContext concurrently.\n" [^{:tag (* Stream)} s ^context/Context ctx]
+  (set! (.-outctx s) ctx))
+
+
+
+
+^{:go/end 223} (go/method IsReadOnly "IsReadOnly reports whether the stream is read-only\n(a unidirectional stream created by the peer).\n" ^bool [^{:tag (* Stream)} s]
+  (and (== (.streamType (.-id s)) uniStream) (!= (.initiator (.-id s)) (.-side (.-conn s)))))
+
+
+
+
+^{:go/end 229} (go/method IsWriteOnly "IsWriteOnly reports whether the stream is write-only\n(a unidirectional stream created locally).\n" ^bool [^{:tag (* Stream)} s]
+  (and (== (.streamType (.-id s)) uniStream) (== (.initiator (.-id s)) (.-side (.-conn s)))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 332} (go/method Read "Read reads data from the stream.\n\nRead returns as soon as at least one byte of data is available.\n\nIf the peer closes the stream cleanly, Read returns io.EOF after\nreturning all data sent by the peer.\nIf the peer aborts reads on the stream, Read returns\nan error wrapping StreamResetCode.\n\nIt is not safe to call Read concurrently.\n" [^{:tag (* Stream)} s ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (when (.IsWriteOnly s)
+    (return 0 (errors/New "read from write-only stream")))
+
+
+  (let [fastPath false]
+    (.Lock (.-inbufmu s))
+    (when (> (len (.-inbuf s)) (.-inbufoff s))
+      ;; Fast path: If s.inbuf contains unread bytes, return them
+      ;; immediately.
+      (set! n (copy b (subslice (.-inbuf s) (.-inbufoff s))))
+      (set! (.-inbufoff s) + n)
+      (set! fastPath true))
+
+    (.Unlock (.-inbufmu s))
+    (when fastPath
+      (return n nil))
+
+
+    (when [err (.waitAndLock (.-ingate s) (.-inctx s))] (!= err nil)
+      (return 0 err))
+
+
+    (when (> (.-inbufoff s) 0)
+      ;; Discard bytes consumed by the fast path above.
+      (.discardBefore (.-in s) (+ (.-start (.-in s)) (conv int64 (.-inbufoff s))))
+      (.Lock (.-inbufmu s))
+      (set! (.-inbufoff s) 0)
+      (set! (.-inbuf s) nil)
+      (.Unlock (.-inbufmu s)))
+
+
+    ;; bytesRead contains the number of bytes of connection-level flow control to return.
+    ;; We return flow control for bytes read by this Read call, as well as bytes moved
+    ;; to the fast-path read buffer (s.inbuf).
+    (let [^int64 bytesRead (zero int64)]
+      (defer (^{:go/end 280} (fn []
+            (.inUnlock s)
+            (.handleStreamBytesReadOffLoop (.-conn s) bytesRead)))) ; must be done with ingate unlocked
+
+      (when (!= (.-inresetcode s) -1)
+        (when (== (.-inresetcode s) streamResetByConnClose)
+          (when [err (.finalError (.-conn s))] (!= err nil)
+            (return 0 err)))
+
+
+        (return 0 (fmt/Errorf "stream reset by peer: %w" (conv StreamErrorCode (.-inresetcode s)))))
+
+      (when (.isSet (.-inclosed s))
+        (return 0 (errors/New "read from closed stream")))
+
+      (when (== (.-insize s) (.-start (.-in s)))
+        (return 0 io/EOF))
+
+      ;; Getting here indicates the stream contains data to be read.
+      (when (or (< (len (.-inset s)) 1) (!= (.-start (aget (.-inset s) 0)) 0) (<= (.-end (aget (.-inset s) 0)) (.-start (.-in s))))
+        (panic "BUG: inconsistent input stream state"))
+
+      (when [size (conv int (- (.-end (aget (.-inset s) 0)) (.-start (.-in s))))] (< size (len b))
+        (set! b (subslice b _ size)))
+
+      (set! bytesRead (conv int64 (len b)))
+      (let [start (.-start (.-in s))
+          ^{:line 304} end (+ start (conv int64 (len b)))]
+        (raceAcquire)
+        (.copy (.-in s) start b)
+        (.discardBefore (.-in s) end)
+        (when (== end (.-insize s))
+          ;; We have read up to the end of the stream.
+          ;; No need to update stream flow control.
+          (return (len b) io/EOF))
+
+
+        (when (and (> (len (.-inset s)) 0) (<= (.-start (aget (.-inset s) 0)) (.-start (.-in s))) (> (.-end (aget (.-inset s) 0)) (.-start (.-in s))))
+          ;; If we have more readable bytes available, put the next chunk of data
+          ;; in s.inbuf for lock-free reads.
+          (.Lock (.-inbufmu s))
+          (set! (.-inbuf s) (.peek (.-in s) (- (.-end (aget (.-inset s) 0)) (.-start (.-in s)))))
+          (.Unlock (.-inbufmu s))
+          (set! bytesRead + (conv int64 (len (.-inbuf s)))))
+
+        (when (or (== (.-insize s) -1) (> (.-insize s) (.-inwin s)))
+          (let [newWindow (+ (.-start (.-in s)) (conv int64 (len (.-inbuf s))) (.-inmaxbuf s))
+              ^{:line 324} addedWindow (- newWindow (.-inwin s))]
+            (when (shouldUpdateFlowControl (.-inmaxbuf s) addedWindow)
+              ;; Update stream flow control with a STREAM_MAX_DATA frame.
+              (.setUnsent (.-insendmax s)))))
+
+
+
+        (return (len b) nil)))))
+
+
+
+
+
+^{:go/end 357} (go/method ReadByte "ReadByte reads and returns a single byte from the stream.\n\nIt is not safe to call ReadByte concurrently.\n" [^{:tag (* Stream)} s] :results [byte error]
+  (let [fastPath false]
+    (.Lock (.-inbufmu s))
+    (let [^byte readByte (zero byte)]
+      (when (> (len (.-inbuf s)) (.-inbufoff s))
+        (set! readByte (aget (.-inbuf s) (.-inbufoff s)))
+        (inc! (.-inbufoff s))
+        (set! fastPath true))
+
+      (.Unlock (.-inbufmu s))
+      (when fastPath
+        (return readByte nil))
+
+
+      (let [^{:tag (array 1 byte)} b (zero (array 1 byte))
+          (values n err) (.Read s (subslice b))]
+        (when (> n 0)
+          (return (aget b 0) nil))
+
+        (return 0 err)))))
+
+
+
+
+
+
+^{:go/end 365} (go/func shouldUpdateFlowControl "shouldUpdateFlowControl determines whether to send a flow control window update.\n\nWe want to balance keeping the peer well-supplied with flow control with not sending\nmany small updates.\n" ^bool [^int64 maxWindow ^int64 addedWindow]
+  (>= addedWindow (/ maxWindow 8)))
+
+
+
+
+
+
+
+^{:go/end 469} (go/method Write "Write writes data to the stream.\n\nWrite writes data to the stream write buffer.\nBuffered data is only sent when the buffer is sufficiently full.\nCall the Flush method to ensure buffered data is sent.\n" [^{:tag (* Stream)} s ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (when (.IsReadOnly s)
+    (return 0 (errors/New "write to read-only stream")))
+
+
+  (let [fastPath false]
+    (.Lock (.-outbufmu s))
+    (when (and (> (len b) 0) (>= (- (len (.-outbuf s)) (.-outbufoff s)) (len b)))
+      ;; Fast path: The data to write fits in s.outbuf.
+      (copy (subslice (.-outbuf s) (.-outbufoff s)) b)
+      (set! (.-outbufoff s) + (len b))
+      (set! fastPath true))
+
+    (.Unlock (.-outbufmu s))
+    (when fastPath
+      (return (len b) nil))
+
+
+    (let [canWrite (.lock (.-outgate s))]
+      (.flushFastOutputBuffer s)
+      (while true
+        ;; The first time through this loop, we may or may not be write blocked.
+        ;; We exit the loop after writing all data, so on subsequent passes through
+        ;; the loop we are always write blocked.
+        (when (and (> (len b) 0) (not canWrite))
+          ;; Our send buffer is full. Wait for the peer to ack some data.
+          (.outUnlock s)
+          (when [err (.waitAndLock (.-outgate s) (.-outctx s))] (!= err nil)
+            (return n err)))
+
+        ;; Successfully returning from waitAndLockGate means we are no longer
+        ;; write blocked. (Unlike traditional condition variables, gates do not
+        ;; have spurious wakeups.)
+
+        (when [err (.writeErrorLocked s)] (!= err nil)
+          (.outUnlock s)
+          (return n err))
+
+        (when (== (len b) 0)
+          (break))
+
+        ;; Write limit is our send buffer limit.
+        ;; This is a stream offset.
+        (let [lim (+ (.-start (.-out s)) (.-outmaxbuf s))
+            ;; Amount to write is min(the full buffer, data up to the write limit).
+            ;; This is a number of bytes.
+            ^{:line 418} nn (min (conv int64 (len b)) (- lim (.-end (.-out s))))]
+          ;; Copy the data into the output buffer.
+          (.writeAt (.-out s) (subslice b _ nn) (.-end (.-out s)))
+          (set! b (subslice b nn))
+          (set! n + (conv int nn))
+          ;; Possibly flush the output buffer.
+          ;; We automatically flush if:
+          ;;   - We have enough data to consume the send window.
+          ;;     Sending this data may cause the peer to extend the window.
+          ;;   - We have buffered as much data as we're willing do.
+          ;;     We need to send data to clear out buffer space.
+          ;;   - We have enough data to fill a 1-RTT packet using the smallest
+          ;;     possible maximum datagram size (1200 bytes, less header byte,
+          ;;     connection ID, packet number, and AEAD overhead).
+          (let [^:const ^{:val 1174} autoFlushSize (- smallestMaxDatagramSize 1 connIDLen 1 aeadOverhead)
+              ^{:line 433} shouldFlush (or (>= (.-end (.-out s)) (.-outwin s)) ; peer send window is full
+                (>= (.-end (.-out s)) lim) ; local send buffer is full
+                (>= (- (.-end (.-out s)) (.-outflushed s)) autoFlushSize))] ; enough data buffered
+            (when shouldFlush
+              (.flushLocked s))
+
+            (when (> (.-end (.-out s)) (.-outwin s))
+              ;; We're blocked by flow control.
+              ;; Send a STREAM_DATA_BLOCKED frame to let the peer know.
+              (.set (.-outblocked s)))
+
+            ;; If we have bytes left to send, we're blocked.
+            (set! canWrite false))))
+
+      (when [lim (- (+ (.-start (.-out s)) (.-outmaxbuf s)) (.-end (.-out s)) 1)] (> lim 0)
+        ;; If s.out has space allocated and available to be written into,
+        ;; then reference it in s.outbuf for fast-path writes.
+        ;;
+        ;; It's perhaps a bit pointless to limit s.outbuf to the send buffer limit.
+        ;; We've already allocated this buffer so we aren't saving any memory
+        ;; by not using it.
+        ;; For now, we limit it anyway to make it easier to reason about limits.
+        ;;
+        ;; We set the limit to one less than the send buffer limit (the -1 above)
+        ;; so that a write which completely fills the buffer will overflow
+        ;; s.outbuf and trigger a flush.
+        (.Lock (.-outbufmu s))
+        (set! (.-outbuf s) (.availableBuffer (.-out s)))
+        (when (> (conv int64 (len (.-outbuf s))) lim)
+          (set! (.-outbuf s) (subslice (.-outbuf s) _ lim)))
+
+        (.Unlock (.-outbufmu s)))
+
+      (raceReleaseMerge)
+      (.outUnlock s)
+      (return n nil))))
+
+
+
+^{:go/end 488} (go/method WriteByte "WriteByte writes a single byte to the stream.\n" ^error [^{:tag (* Stream)} s ^byte c]
+  (let [fastPath false]
+    (.Lock (.-outbufmu s))
+    (when (< (.-outbufoff s) (len (.-outbuf s)))
+      (aset (.-outbuf s) (.-outbufoff s) c)
+      (inc! (.-outbufoff s))
+      (set! fastPath true))
+
+    (.Unlock (.-outbufmu s))
+    (when fastPath
+      (return nil))
+
+
+    (let [b (lit (array 1 byte) c)
+        (values _ err) (.Write s (subslice b))]
+      ^{:line 487} err)))
+
+
+^{:go/end 502} (go/method flushFastOutputBuffer [^{:tag (* Stream)} s]
+  (.Lock (.-outbufmu s))
+  (defer (.Unlock (.-outbufmu s)))
+  (when (== (.-outbuf s) nil)
+    (return))
+
+  ;; Commit data previously written to s.outbuf.
+  ;; s.outbuf is a reference to a buffer in s.out, so we just need to record
+  ;; that the output buffer has been extended.
+  (set! (.-end (.-out s)) + (conv int64 (.-outbufoff s)))
+  (set! (.-outbuf s) nil)
+  (set! (.-outbufoff s) 0))
+
+
+
+
+
+^{:go/breaks [9] :go/end 518} (go/method Flush "Flush flushes data written to the stream.\nIt does not wait for the peer to acknowledge receipt of the data.\nUse Close to wait for the peer's acknowledgement.\n" ^error [^{:tag (* Stream)} s]
+  (when (.IsReadOnly s)
+    (return (errors/New "flush of read-only stream")))
+
+  (.lock (.-outgate s))
+  (defer (.outUnlock s))
+  (when [err (.writeErrorLocked s)] (!= err nil)
+    (return err))
+
+  (.flushLocked s)
+  nil)
+
+
+
+
+^{:go/breaks [[6 534]] :go/end 535} (go/method writeErrorLocked "writeErrorLocked returns the error (if any) which should be returned by write operations\ndue to the stream being reset or closed.\n" ^error [^{:tag (* Stream)} s]
+  (when (.isSet (.-outreset s))
+    (when (== (.-outresetcode s) streamResetByConnClose)
+      (when [err (.finalError (.-conn s))] (!= err nil)
+        (return err)))
+
+
+    (return (errors/New "write to reset stream")))
+
+  (when (.isSet (.-outclosed s))
+    (return (errors/New "write to closed stream")))
+
+  nil)
+
+
+^{:go/end 544} (go/method flushLocked [^{:tag (* Stream)} s]
+  (.flushFastOutputBuffer s)
+  (.set (.-outopened s))
+  (when (< (.-outflushed s) (.-outwin s))
+    (.add (.-outunsent s) (.-outflushed s) (min (.-outwin s) (.-end (.-out s)))))
+
+  (set! (.-outflushed s) (.-end (.-out s))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 570} (go/method Close "Close closes the stream.\nAny blocked stream operations will be unblocked and return errors.\n\nClose flushes any data in the stream write buffer and waits for the peer to\nacknowledge receipt of the data.\nIf the stream has been reset, it waits for the peer to acknowledge the reset.\nIf the context expires before the peer receives the stream's data,\nClose discards the buffer and returns the context error.\n" ^error [^{:tag (* Stream)} s]
+  (.CloseRead s)
+  (when (.IsReadOnly s)
+    (return nil))
+
+  (.CloseWrite s)
+  ;; TODO: Return code from peer's RESET_STREAM frame?
+  (when [err (.waitOnDone (.-conn s) (.-outctx s) (.-outdone s))] (!= err nil)
+    (return err))
+
+  (.lock (.-outgate s))
+  (defer (.outUnlock s))
+  (when (and (.isReceived (.-outclosed s)) (.isrange (.-outacked s) 0 (.-end (.-out s))))
+    (return nil))
+
+  (errors/New "stream reset"))
+
+
+
+
+
+
+
+
+^{:go/end 595} (go/method CloseRead "CloseRead aborts reads on the stream.\nAny blocked reads will be unblocked and return errors.\n\nCloseRead notifies the peer that the stream has been closed for reading.\nIt does not wait for the peer to acknowledge the closure.\nUse Close to wait for the peer's acknowledgement.\n" [^{:tag (* Stream)} s]
+  (when (.IsWriteOnly s)
+    (return))
+
+  (.lock (.-ingate s))
+  (if (or (.isrange (.-inset s) 0 (.-insize s)) (!= (.-inresetcode s) -1))
+    ;; We've already received all data from the peer,
+    ;; so there's no need to send STOP_SENDING.
+    ;; This is the same as saying we sent one and they got it.
+    (.setReceived (.-inclosed s))
+
+    (.set (.-inclosed s)))
+
+  (let [discarded (- (.-end (.-in s)) (.-start (.-in s)))]
+    (.discardBefore (.-in s) (.-end (.-in s)))
+    (.inUnlock s)
+    (.handleStreamBytesReadOffLoop (.-conn s) discarded))) ; must be done with ingate unlocked
+
+
+
+
+
+
+
+
+^{:go/end 611} (go/method CloseWrite "CloseWrite aborts writes on the stream.\nAny blocked writes will be unblocked and return errors.\n\nCloseWrite sends any data in the stream write buffer to the peer.\nIt does not wait for the peer to acknowledge receipt of the data.\nUse Close to wait for the peer's acknowledgement.\n" [^{:tag (* Stream)} s]
+  (when (.IsReadOnly s)
+    (return))
+
+  (.lock (.-outgate s))
+  (defer (.outUnlock s))
+  (.set (.-outclosed s))
+  (.flushLocked s))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 627} (go/method Reset "Reset aborts writes on the stream and notifies the peer\nthat the stream was terminated abruptly.\nAny blocked writes will be unblocked and return errors.\n\nReset sends the application protocol error code, which must be\nless than 2^62, to the peer.\nIt does not wait for the peer to acknowledge receipt of the error.\nUse Close to wait for the peer's acknowledgement.\n\nReset does not affect reads.\nUse CloseRead to abort reads on the stream.\n" [^{:tag (* Stream)} s ^uint64 code]
+  (let [^:const ^{:val true} userClosed true]
+    (.resetInternal s code userClosed)))
+
+
+
+
+
+
+^{:go/end 661} (go/method resetInternal "resetInternal resets the send side of the stream.\n\nIf userClosed is true, this is s.Reset.\nIf userClosed is false, this is a reaction to a STOP_SENDING frame.\n" [^{:tag (* Stream)} s ^uint64 code ^bool userClosed]
+  (.lock (.-outgate s))
+  (defer (.outUnlock s))
+  (when (.IsReadOnly s)
+    (return))
+
+  (when userClosed
+    ;; Mark that the user closed the stream.
+    (.set (.-outclosed s)))
+
+  (when (.isSet (.-outreset s))
+    (return))
+
+  (when (> code quicwire/MaxVarint)
+    (set! code quicwire/MaxVarint))
+
+  ;; We could check here to see if the stream is closed and the
+  ;; peer has acked all the data and the FIN, but sending an
+  ;; extra RESET_STREAM in this case is harmless.
+  (.set (.-outreset s))
+  (set! (.-outresetcode s) code)
+  (.Lock (.-outbufmu s))
+  (set! (.-outbuf s) nil)
+  (set! (.-outbufoff s) 0)
+  (.Unlock (.-outbufmu s))
+  (.discardBefore (.-out s) (.-end (.-out s)))
+  (set! (.-outunsent s) (lit (rangeset int64)))
+  (.clear (.-outblocked s)))
+
+
+
+^{:go/end 689} (go/method connHasClosed "connHasClosed indicates the stream's conn has closed.\n" [^{:tag (* Stream)} s]
+  ;; If we're in the closing state, the user closed the conn.
+  ;; Otherwise, we the peer initiated the close.
+  ;; This only matters for the error we're going to return from stream operations.
+  (let [localClose (== (.-state (.-lifetime (.-conn s))) connStateClosing)]
+
+    (.lock (.-ingate s))
+    (when (and (not (.isrange (.-inset s) 0 (.-insize s))) (== (.-inresetcode s) -1))
+      (if localClose
+        (.set (.-inclosed s))
+
+        (set! (.-inresetcode s) streamResetByConnClose)))
+
+
+    (.inUnlock s)
+
+    (.lock (.-outgate s))
+    (if localClose (do
+        (.set (.-outclosed s))
+        (.set (.-outreset s)))
+      (do
+        (set! (.-outresetcode s) streamResetByConnClose)
+        (.setReceived (.-outreset s))))
+
+    (.outUnlock s)))
+
+
+
+
+
+
+^{:go/end 698} (go/method inUnlock "inUnlock unlocks s.ingate.\nIt sets the gate condition if reads from s will not block.\nIf s has receive-related frames to write or if both directions\nare done and the stream should be removed, it notifies the Conn.\n" [^{:tag (* Stream)} s]
+  (let [state (.inUnlockNoQueue s)]
+    (.maybeQueueStreamForSend (.-conn s) s state)))
+
+
+
+
+^{:go/end 728} (go/method inUnlockNoQueue "inUnlockNoQueue is inUnlock,\nbut reports whether s has frames to write rather than notifying the Conn.\n" ^streamState [^{:tag (* Stream)} s]
+  (let [nextByte (+ (.-start (.-in s)) (conv int64 (len (.-inbuf s))))
+      ^{:line 704} canRead (or (.contains (.-inset s) nextByte) ; data available to read
+        (== (.-insize s) (+ (.-start (.-in s)) (conv int64 (len (.-inbuf s))))) ; at EOF
+        (!= (.-inresetcode s) -1) ; reset by peer
+        (.isSet (.-inclosed s)))] ; closed locally
+    (defer (.unlock (.-ingate s) canRead))
+    (let [^streamState state (zero streamState)]
+      (switch
+        (case [(.IsWriteOnly s)]
+          (set! state streamInDone))
+        (case [(!= (.-inresetcode s) -1)] ; reset by peer
+          (fallthrough))
+        (case [(== (.-start (.-in s)) (.-insize s))] ; all data received and read
+          ;; We don't increase MAX_STREAMS until the user calls ReadClose or Close,
+          ;; so the receive side is not finished until inclosed is set.
+          (when (.isSet (.-inclosed s))
+            (set! state streamInDone)))
+
+        (case [(.shouldSend (.-insendmax s))] ; STREAM_MAX_DATA
+          (set! state streamInSendMeta))
+        (case [(.shouldSend (.-inclosed s))] ; STOP_SENDING
+          (set! state streamInSendMeta)))
+
+      (let [^:const ^{:val 9} mask (bit-or streamInDone streamInSendMeta)]
+        (.set (.-state s) state mask)))))
+
+
+
+
+
+
+^{:go/end 737} (go/method outUnlock "outUnlock unlocks s.outgate.\nIt sets the gate condition if writes to s will not block.\nIf s has send-related frames to write or if both directions\nare done and the stream should be removed, it notifies the Conn.\n" [^{:tag (* Stream)} s]
+  (let [state (.outUnlockNoQueue s)]
+    (.maybeQueueStreamForSend (.-conn s) s state)))
+
+
+
+
+^{:go/end 788} (go/method outUnlockNoQueue "outUnlockNoQueue is outUnlock,\nbut reports whether s has frames to write rather than notifying the Conn.\n" ^streamState [^{:tag (* Stream)} s]
+  (let [isDone (or (and (.isReceived (.-outclosed s)) (.isrange (.-outacked s) 0 (.-end (.-out s)))) ; all data acked
+        (.isSet (.-outreset s)))] ; reset locally
+    (when isDone
+      (select
+        (case (<! (.-outdone s)))
+        (default
+          (when (not (.IsReadOnly s))
+            (close (.-outdone s))))))
+
+
+
+    (let [lim (+ (.-start (.-out s)) (.-outmaxbuf s))
+        ^{:line 754} canWrite (or (> lim (.-end (.-out s))) ; available send buffer
+          (.isSet (.-outclosed s)) ; closed locally
+          (.isSet (.-outreset s)))] ; reset locally
+      (defer (.unlock (.-outgate s) canWrite))
+      (let [^streamState state (zero streamState)]
+        (switch
+          (case [(.IsReadOnly s)]
+            (set! state streamOutDone))
+          (case [(and (.isReceived (.-outclosed s)) (.isrange (.-outacked s) 0 (.-end (.-out s))))] ; all data sent and acked
+            (fallthrough))
+          (case [(.isReceived (.-outreset s))] ; RESET_STREAM sent and acked
+            ;; We don't increase MAX_STREAMS until the user calls WriteClose or Close,
+            ;; so the send side is not finished until outclosed is set.
+            (when (.isSet (.-outclosed s))
+              (set! state streamOutDone)))
+
+          (case [(.shouldSend (.-outreset s))] ; RESET_STREAM
+            (set! state streamOutSendMeta))
+          (case [(.isSet (.-outreset s))]) ; RESET_STREAM sent but not acknowledged
+          (case [(.shouldSend (.-outblocked s))] ; STREAM_DATA_BLOCKED
+            (set! state streamOutSendMeta))
+          (case [(> (len (.-outunsent s)) 0)] ; STREAM frame with data
+            (if (< (.min (.-outunsent s)) (.-outmaxsent s))
+              (set! state streamOutSendMeta) ; resent data, will not consume flow control
+
+              (set! state streamOutSendData))) ; new data, requires flow control
+
+          (case [(and (.shouldSend (.-outclosed s)) (== (.-end (.-out s)) (.-outmaxsent s)))] ; empty STREAM frame with FIN bit
+            (set! state streamOutSendMeta))
+          (case [(.shouldSend (.-outopened s))] ; STREAM frame with no data
+            (set! state streamOutSendMeta)))
+
+        (let [^:const ^{:val 22} mask (bit-or streamOutDone streamOutSendMeta streamOutSendData)]
+          (.set (.-state s) state mask))))))
+
+
+
+^{:go/end 831} (go/method handleData "handleData handles data received in a STREAM frame.\n" ^error [^{:tag (* Stream)} s ^int64 off ^{:tag (slice byte)} b ^bool fin]
+  (.lock (.-ingate s))
+  (defer (.inUnlock s))
+  ^{:go/breaks [[9 830]]} (let [end (+ off (conv int64 (len b)))]
+    (when [err (.checkStreamBounds s end fin)] (!= err nil)
+      (return err))
+
+    (when (or (.isSet (.-inclosed s)) (!= (.-inresetcode s) -1))
+      ;; The user read-closed the stream, or the peer reset it.
+      ;; Either way, we can discard this frame.
+      (return nil))
+
+    (when (and (== (.-insize s) -1) (> end (.-end (.-in s))))
+      (let [added (- end (.-end (.-in s)))]
+        (when [err (.handleStreamBytesReceived (.-conn s) added)] (!= err nil)
+          (return err))))
+
+
+    (when (and (> (len (.-inset s)) 0) (.contains (aget (.-inset s) 0) off))
+      ;; We've received at least some of this data,
+      ;; and potentially moved it into s.inbuf
+      ;; (since it's part of the first range of received data).
+      ;; Avoid rewriting this data into s.in, since doing so could race
+      ;; with a reader reading the same data.
+      ;;
+      ;; (Note: We could apply additional checks here, to detect the peer
+      ;; sending us different data than we received the first time.
+      ;; We currently don't bother.)
+      (let [newOff (min end (.-end (aget (.-inset s) 0)))]
+        (set! b (subslice b (- newOff off)))
+        (set! off newOff)))
+
+    (.writeAt (.-in s) b off)
+    (.add (.-inset s) off end)
+    (when fin
+      (set! (.-insize s) end)
+      ;; The peer has enough flow control window to send the entire stream.
+      (.clear (.-insendmax s)))
+
+    nil))
+
+
+
+^{:go/end 856} (go/method handleReset "handleReset handles a RESET_STREAM frame.\n" ^error [^{:tag (* Stream)} s ^uint64 code ^int64 finalSize]
+  (.lock (.-ingate s))
+  (defer (.inUnlock s))
+  ^{:go/breaks [9]} (let [^:const ^{:val true} fin true]
+    (when [err (.checkStreamBounds s finalSize fin)] (!= err nil)
+      (return err))
+
+    (when (!= (.-inresetcode s) -1)
+      ;; The stream was already reset.
+      (return nil))
+
+    (when (== (.-insize s) -1)
+      (let [added (- finalSize (.-end (.-in s)))]
+        (when [err (.handleStreamBytesReceived (.-conn s) added)] (!= err nil)
+          (return err))))
+
+
+    (.handleStreamBytesReadOnLoop (.-conn s) (- finalSize (.-start (.-in s))))
+    (.discardBefore (.-in s) (.-end (.-in s)))
+    (set! (.-inresetcode s) (conv int64 code))
+    (set! (.-insize s) finalSize)
+    nil))
+
+
+
+^{:go/breaks [[8 888]] :go/end 889} (go/method checkStreamBounds "checkStreamBounds validates the stream offset in a STREAM or RESET_STREAM frame.\n" ^error [^{:tag (* Stream)} s ^int64 end ^bool fin]
+  (when (> end (.-inwin s))
+    ;; The peer sent us data past the maximum flow control window we gave them.
+    (return ^{:go/breaks [2 4]} (lit localTransportError
+        :code errFlowControl
+        :reason "stream flow control window exceeded")))
+
+
+  (when (and (!= (.-insize s) -1) (> end (.-insize s)))
+    ;; The peer sent us data past the final size of the stream they previously gave us.
+    (return ^{:go/breaks [2 4]} (lit localTransportError
+        :code errFinalSize
+        :reason "data received past end of stream")))
+
+
+  (when (and fin (!= (.-insize s) -1) (!= end (.-insize s)))
+    ;; The peer changed the final size of the stream.
+    (return ^{:go/breaks [2 4]} (lit localTransportError
+        :code errFinalSize
+        :reason "final size of stream changed")))
+
+
+  (when (and fin (< end (.-end (.-in s))))
+    ;; The peer has previously sent us data past the final size.
+    (return ^{:go/breaks [2 4]} (lit localTransportError
+        :code errFinalSize
+        :reason "end of stream occurs before prior data")))
+
+
+  nil)
+
+
+
+^{:go/end 898} (go/method handleStopSending "handleStopSending handles a STOP_SENDING frame.\n" ^error [^{:tag (* Stream)} s ^uint64 code]
+  ;; Peer requests that we reset this stream.
+  ;; https://www.rfc-editor.org/rfc/rfc9000#section-3.5-4
+  ^{:go/breaks [3]} (let [^:const ^{:val false} userReset false]
+    (.resetInternal s code userReset)
+    nil))
+
+
+
+^{:go/breaks [[10 917]] :go/end 918} (go/method handleMaxStreamData "handleMaxStreamData handles an update received in a MAX_STREAM_DATA frame.\n" ^error [^{:tag (* Stream)} s ^int64 maxStreamData]
+  (.lock (.-outgate s))
+  (defer (.outUnlock s))
+  (when (<= maxStreamData (.-outwin s))
+    (return nil))
+
+  (when (> (.-outflushed s) (.-outwin s))
+    (.add (.-outunsent s) (.-outwin s) (min maxStreamData (.-outflushed s))))
+
+  (set! (.-outwin s) maxStreamData)
+  (if (> (.-end (.-out s)) (.-outwin s))
+    ;; We've still got more data than flow control window.
+    (.setUnsent (.-outblocked s))
+
+    (.clear (.-outblocked s)))
+
+  nil)
+
+
+
+^{:go/end 948} (go/method ackOrLoss "ackOrLoss handles the fate of stream frames other than STREAM.\n" [^{:tag (* Stream)} s ^packetNumber pnum ^byte ftype ^packetFate fate]
+  ;; Frames which carry new information each time they are sent
+  ;; (MAX_STREAM_DATA, STREAM_DATA_BLOCKED) must only be marked
+  ;; as received if the most recent packet carrying this frame is acked.
+  ;;
+  ;; Frames which are always the same (STOP_SENDING, RESET_STREAM)
+  ;; can be marked as received if any packet carrying this frame is acked.
+  (switch ftype
+    (case [frameTypeResetStream]
+      (.lock (.-outgate s))
+      (.ackOrLoss (.-outreset s) pnum fate)
+      (.outUnlock s))
+    (case [frameTypeStopSending]
+      (.lock (.-ingate s))
+      (.ackOrLoss (.-inclosed s) pnum fate)
+      (.inUnlock s))
+    (case [frameTypeMaxStreamData]
+      (.lock (.-ingate s))
+      (.ackLatestOrLoss (.-insendmax s) pnum fate)
+      (.inUnlock s))
+    (case [frameTypeStreamDataBlocked]
+      (.lock (.-outgate s))
+      (.ackLatestOrLoss (.-outblocked s) pnum fate)
+      (.outUnlock s))
+    (default
+      (panic "unhandled frame type"))))
+
+
+
+
+^{:go/end 979} (go/method ackOrLossData "ackOrLossData handles the fate of a STREAM frame.\n" [^{:tag (* Stream)} s ^packetNumber pnum ^int64 start ^int64 end ^bool fin ^packetFate fate]
+  (.lock (.-outgate s))
+  (defer (.outUnlock s))
+  (.ackOrLoss (.-outopened s) pnum fate)
+  (when fin
+    (.ackOrLoss (.-outclosed s) pnum fate))
+
+  (when (.isSet (.-outreset s))
+    ;; If the stream has been reset, we don't care any more.
+    (return))
+
+  (switch fate
+    (case [packetAcked]
+      (.add (.-outacked s) start end)
+      (.sub (.-outunsent s) start end)
+      ;; If this ack is for data at the start of the send buffer, we can now discard it.
+      (when (.contains (.-outacked s) (.-start (.-out s)))
+        (.discardBefore (.-out s) (.-end (aget (.-outacked s) 0)))))
+
+    (case [packetLost]
+      ;; Mark everything lost, but not previously acked, as needing retransmission.
+      ;; We do this by adding all the lost bytes to outunsent, and then
+      ;; removing everything already acked.
+      (.add (.-outunsent s) start end)
+      (range [_ a (.-outacked s)]
+        (.sub (.-outunsent s) (.-start a) (.-end a))))))
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[6 1006]] :go/end 1007} (go/method appendInFramesLocked "appendInFramesLocked appends STOP_SENDING and MAX_STREAM_DATA frames\nto the current packet.\n\nIt returns true if no more frames need appending,\nfalse if not everything fit in the current packet.\n" ^bool [^{:tag (* Stream)} s ^{:tag (* packetWriter)} w ^packetNumber pnum ^bool pto]
+  (when (.shouldSendPTO (.-inclosed s) pto)
+    ;; We don't currently have an API for setting the error code.
+    ;; Just send zero.
+    (let [code (conv uint64 0)]
+      (when (not (.appendStopSendingFrame w (.-id s) code))
+        (return false))
+
+      (.setSent (.-inclosed s) pnum)))
+
+  ;; TODO: STOP_SENDING
+  (when (.shouldSendPTO (.-insendmax s) pto)
+    ;; MAX_STREAM_DATA
+    (let [maxStreamData (+ (.-start (.-in s)) (.-inmaxbuf s))]
+      (when (not (.appendMaxStreamDataFrame w (.-id s) maxStreamData))
+        (return false))
+
+      (set! (.-inwin s) maxStreamData)
+      (.setSent (.-insendmax s) pnum)))
+
+  true)
+
+
+
+
+
+
+
+^{:go/end 1072} (go/method appendOutFramesLocked "appendOutFramesLocked appends RESET_STREAM, STREAM_DATA_BLOCKED, and STREAM frames\nto the current packet.\n\nIt returns true if no more frames need appending,\nfalse if not everything fit in the current packet.\n" ^bool [^{:tag (* Stream)} s ^{:tag (* packetWriter)} w ^packetNumber pnum ^bool pto]
+  (when (.isSet (.-outreset s))
+    ;; RESET_STREAM
+    (when (.shouldSendPTO (.-outreset s) pto)
+      (when (not (.appendResetStreamFrame w (.-id s) (.-outresetcode s) (.-outmaxsent s)))
+        (return false))
+
+      (.setSent (.-outreset s) pnum)
+      (.frameOpensStream s pnum))
+
+    (return true))
+
+  (when (.shouldSendPTO (.-outblocked s) pto)
+    ;; STREAM_DATA_BLOCKED
+    (when (not (.appendStreamDataBlockedFrame w (.-id s) (.-outwin s)))
+      (return false))
+
+    (.setSent (.-outblocked s) pnum)
+    (.frameOpensStream s pnum))
+
+  (while true
+    ;; STREAM
+    (let [(values off size) (dataToSend (min (.-start (.-out s)) (.-outwin s)) (min (.-outflushed s) (.-outwin s)) (.-outunsent s) (.-outacked s) pto)]
+      (when [end (+ off size)] (> end (.-outmaxsent s))
+        ;; This will require connection-level flow control to send.
+        (set! end (min end (+ (.-outmaxsent s) (.avail (.-outflow (.-streams (.-conn s)))))))
+        (set! end (max end off))
+        (set! size (- end off)))
+
+      (let [fin (and (.isSet (.-outclosed s)) (== (+ off size) (.-end (.-out s))))
+          ^{:line 1044} shouldSend (or (> size 0) ; have data to send
+            (.shouldSendPTO (.-outopened s) pto) ; should open the stream
+            ^:go/paren (and fin (.shouldSendPTO (.-outclosed s) pto)))] ; should close the stream
+        (when (not shouldSend)
+          (return true))
+
+        (let [(values b added) (.appendStreamFrame w (.-id s) off (conv int size) fin)]
+          (when (not added)
+            (return false))
+
+          (.copy (.-out s) off b)
+          (let [end (+ off (conv int64 (len b)))]
+            (when (> end (.-outmaxsent s))
+              (.consume (.-outflow (.-streams (.-conn s))) (- end (.-outmaxsent s)))
+              (set! (.-outmaxsent s) end))
+
+            (.sub (.-outunsent s) off end)
+            (.frameOpensStream s pnum)
+            (when fin
+              (.setSent (.-outclosed s) pnum))
+
+            (when pto
+              (return true))
+
+            (when (< (conv int64 (len b)) size)
+              (return false))))))))
+
+
+
+
+
+
+
+
+^{:go/end 1082} (go/method frameOpensStream "frameOpensStream records that we're sending a frame that will open the stream.\n\nIf we don't have an acknowledgement from the peer for a previous frame opening the stream,\nrecord this packet as being the latest one to open it.\n" [^{:tag (* Stream)} s ^packetNumber pnum]
+  (when (not (.isReceived (.-outopened s)))
+    (.setSent (.-outopened s) pnum)))
+
+
+
+
+^{:go/end 1106} (go/func dataToSend "dataToSend returns the next range of data to send in a STREAM or CRYPTO_STREAM.\n" [^int64 start ^int64 end ^{:tag (rangeset int64)} outunsent ^{:tag (rangeset int64)} outacked ^bool pto] :results [^int64 sendStart ^int64 size]
+  (switch
+    (case [pto]
+      ;; On PTO, resend unacked data that fits in the probe packet.
+      ;; For simplicity, we send the range starting at s.out.start
+      ;; (which is definitely unacked, or else we would have discarded it)
+      ;; up to the next acked byte (if any).
+      ;;
+      ;; This may miss unacked data starting after that acked byte,
+      ;; but avoids resending data the peer has acked.
+      (range [_ r outacked]
+        (when (> (.-start r) start)
+          (return start (- (.-start r) start))))
+
+
+      (return start (- end start)))
+    (case [(> (.numRanges outunsent) 0)]
+      (return (.min outunsent) (.size (aget outunsent 0))))
+    (default
+      (return end 0))))

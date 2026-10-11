@@ -1,0 +1,164 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.des) (go/file "cipher.go" :imports [
+
+
+    ^{:line 8} [cipher "crypto/cipher"]
+    ^{:line 9} [alias "crypto/internal/fips140/alias"]
+    ^{:line 10} [fips140only "crypto/internal/fips140only"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [byteorder "internal/byteorder"]
+    ^{:line 13} [strconv "strconv"]])
+
+
+
+(go/const ^{:val 8 :doc "The DES block size in bytes.\n"} BlockSize 8)
+
+(go/type KeySizeError int)
+
+^{:go/end 23} (go/method Error ^string [^KeySizeError k]
+  (+ "crypto/des: invalid key size " (strconv/Itoa (conv int k))))
+
+
+
+(go/type desCipher "desCipher is an instance of DES encryption.\n" (struct
+    ^{:line 27 :tag (array 16 uint64)} subkeys))
+
+
+
+^{:go/end 43} (go/func NewCipher "NewCipher creates and returns a new [cipher.Block].\n" [^{:tag (slice byte)} key] :results [cipher/Block error]
+  (when (fips140only/Enforced)
+    (return nil (errors/New "crypto/des: use of DES is not allowed in FIPS 140-only mode")))
+
+
+  (when (!= (len key) 8)
+    (return nil (conv KeySizeError (len key))))
+
+
+  (let [c (new desCipher)]
+    (.generateSubkeys c key)
+    (return c nil)))
+
+
+^{:go/end 45} (go/method BlockSize ^int [^{:tag (* desCipher)} c] BlockSize)
+
+^{:go/end 58} (go/method Encrypt [^{:tag (* desCipher)} c ^{:tag (slice byte)} dst ^{:tag (slice byte)} src]
+  (when (< (len src) BlockSize)
+    (panic "crypto/des: input not full block"))
+
+  (when (< (len dst) BlockSize)
+    (panic "crypto/des: output not full block"))
+
+  (when (alias/InexactOverlap (subslice dst _ BlockSize) (subslice src _ BlockSize))
+    (panic "crypto/des: invalid buffer overlap"))
+
+  (cryptBlock (subslice (.-subkeys c)) dst src false))
+
+
+^{:go/end 71} (go/method Decrypt [^{:tag (* desCipher)} c ^{:tag (slice byte)} dst ^{:tag (slice byte)} src]
+  (when (< (len src) BlockSize)
+    (panic "crypto/des: input not full block"))
+
+  (when (< (len dst) BlockSize)
+    (panic "crypto/des: output not full block"))
+
+  (when (alias/InexactOverlap (subslice dst _ BlockSize) (subslice src _ BlockSize))
+    (panic "crypto/des: invalid buffer overlap"))
+
+  (cryptBlock (subslice (.-subkeys c)) dst src true))
+
+
+
+(go/type tripleDESCipher "A tripleDESCipher is an instance of TripleDES encryption.\n" (struct
+    ^{:line 75 :tag desCipher} cipher1 ^desCipher cipher2 ^desCipher cipher3))
+
+
+
+^{:go/end 93} (go/func NewTripleDESCipher "NewTripleDESCipher creates and returns a new [cipher.Block].\n" [^{:tag (slice byte)} key] :results [cipher/Block error]
+  (when (fips140only/Enforced)
+    (return nil (errors/New "crypto/des: use of TripleDES is not allowed in FIPS 140-only mode")))
+
+
+  (when (!= (len key) 24)
+    (return nil (conv KeySizeError (len key))))
+
+
+  (let [c (new tripleDESCipher)]
+    (.generateSubkeys (.-cipher1 c) (subslice key _ 8))
+    (.generateSubkeys (.-cipher2 c) (subslice key 8 16))
+    (.generateSubkeys (.-cipher3 c) (subslice key 16))
+    (return c nil)))
+
+
+^{:go/end 95} (go/method BlockSize ^int [^{:tag (* tripleDESCipher)} c] BlockSize)
+
+^{:go/end 130} (go/method Encrypt [^{:tag (* tripleDESCipher)} c ^{:tag (slice byte)} dst ^{:tag (slice byte)} src]
+  (when (< (len src) BlockSize)
+    (panic "crypto/des: input not full block"))
+
+  (when (< (len dst) BlockSize)
+    (panic "crypto/des: output not full block"))
+
+  (when (alias/InexactOverlap (subslice dst _ BlockSize) (subslice src _ BlockSize))
+    (panic "crypto/des: invalid buffer overlap"))
+
+
+  (let [b (byteorder/BEUint64 src)]
+    (set! b (permuteInitialBlock b))
+    (let [(values left right) (values (conv uint32 (>> b 32)) (conv uint32 b))]
+
+      (set! left (bit-or (<< left 1) (>> left 31)))
+      (set! right (bit-or (<< right 1) (>> right 31)))
+
+      (for [i 0] (< i 8) (inc! i)
+        (set! (values left right) (feistel left right (aget (.-subkeys (.-cipher1 c)) (* 2 i)) (aget (.-subkeys (.-cipher1 c)) (+ (* 2 i) 1)))))
+
+      (for [i 0] (< i 8) (inc! i)
+        (set! (values right left) (feistel right left (aget (.-subkeys (.-cipher2 c)) (- 15 (* 2 i))) (aget (.-subkeys (.-cipher2 c)) (- 15 (+ (* 2 i) 1))))))
+
+      (for [i 0] (< i 8) (inc! i)
+        (set! (values left right) (feistel left right (aget (.-subkeys (.-cipher3 c)) (* 2 i)) (aget (.-subkeys (.-cipher3 c)) (+ (* 2 i) 1)))))
+
+
+      (set! left (bit-or (<< left 31) (>> left 1)))
+      (set! right (bit-or (<< right 31) (>> right 1)))
+
+      (let [preOutput (bit-or (<< (conv uint64 right) 32) (conv uint64 left))]
+        (byteorder/BEPutUint64 dst (permuteFinalBlock preOutput))))))
+
+
+^{:go/end 165} (go/method Decrypt [^{:tag (* tripleDESCipher)} c ^{:tag (slice byte)} dst ^{:tag (slice byte)} src]
+  (when (< (len src) BlockSize)
+    (panic "crypto/des: input not full block"))
+
+  (when (< (len dst) BlockSize)
+    (panic "crypto/des: output not full block"))
+
+  (when (alias/InexactOverlap (subslice dst _ BlockSize) (subslice src _ BlockSize))
+    (panic "crypto/des: invalid buffer overlap"))
+
+
+  (let [b (byteorder/BEUint64 src)]
+    (set! b (permuteInitialBlock b))
+    (let [(values left right) (values (conv uint32 (>> b 32)) (conv uint32 b))]
+
+      (set! left (bit-or (<< left 1) (>> left 31)))
+      (set! right (bit-or (<< right 1) (>> right 31)))
+
+      (for [i 0] (< i 8) (inc! i)
+        (set! (values left right) (feistel left right (aget (.-subkeys (.-cipher3 c)) (- 15 (* 2 i))) (aget (.-subkeys (.-cipher3 c)) (- 15 (+ (* 2 i) 1))))))
+
+      (for [i 0] (< i 8) (inc! i)
+        (set! (values right left) (feistel right left (aget (.-subkeys (.-cipher2 c)) (* 2 i)) (aget (.-subkeys (.-cipher2 c)) (+ (* 2 i) 1)))))
+
+      (for [i 0] (< i 8) (inc! i)
+        (set! (values left right) (feistel left right (aget (.-subkeys (.-cipher1 c)) (- 15 (* 2 i))) (aget (.-subkeys (.-cipher1 c)) (- 15 (+ (* 2 i) 1))))))
+
+
+      (set! left (bit-or (<< left 31) (>> left 1)))
+      (set! right (bit-or (<< right 31) (>> right 1)))
+
+      (let [preOutput (bit-or (<< (conv uint64 right) 32) (conv uint64 left))]
+        (byteorder/BEPutUint64 dst (permuteFinalBlock preOutput))))))

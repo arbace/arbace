@@ -1,0 +1,1552 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package tracev1 implements a parser for Go execution traces from versions
+;; 1.11–1.21.
+;;
+;; The package started as a copy of Go 1.19's internal/trace, but has been
+;; optimized to be faster while using less memory and fewer allocations. It has
+;; been further modified for the specific purpose of converting traces to the
+;; new 1.22+ format.
+(in-ns 'go.internal.trace.internal.tracev1) (go/file "parser.go" :doc "Package tracev1 implements a parser for Go execution traces from versions\n1.11–1.21.\n\nThe package started as a copy of Go 1.19's internal/trace, but has been\noptimized to be faster while using less memory and fewer allocations. It has\nbeen further modified for the specific purpose of converting traces to the\nnew 1.22+ format.\n" :imports [
+
+
+    ^{:line 15} [bytes "bytes"]
+    ^{:line 16} [cmp "cmp"]
+    ^{:line 17} [binary "encoding/binary"]
+    ^{:line 18} [errors "errors"]
+    ^{:line 19} [fmt "fmt"]
+    ^{:line 20} [version "internal/trace/version"]
+    ^{:line 21} [io "io"]
+    ^{:line 22} [math "math"]
+    ^{:line 23} [slices "slices"]
+    ^{:line 24} [sort "sort"]])
+
+
+
+
+
+(go/type Timestamp "Timestamp represents a count of nanoseconds since the beginning of the trace.\nThey can only be meaningfully compared with other timestamps from the same\ntrace.\n" int64)
+
+
+(go/type Event "Event describes one event in the trace.\n" (struct
+    ;; The Event type is carefully laid out to optimize its size and to avoid
+    ;; pointers, the latter so that the garbage collector won't have to scan any
+    ;; memory of our millions of events.
+
+    ^{:line 38 :tag Timestamp} Ts ; timestamp in nanoseconds
+    ^{:line 39 :tag uint64} G ; G on which the event happened
+    ^{:line 40 :tag (array 4 uint64)} Args ; event-type-specific arguments
+    ^{:line 41 :tag uint32} StkID ; unique stack ID
+    ^{:line 42 :tag int32} P ; P on which the event happened (can be a real P or one of TimerP, NetpollP, SyscallP)
+    ^{:line 43 :tag EventType} Type)) ; one of Ev*
+
+
+
+(go/type Frame "Frame is a frame in stack traces.\n" (struct
+    ^{:line 48 :tag uint64} PC
+
+    ^{:line 50 :tag uint64 :doc "string ID of the function name\n"} Fn
+
+    ^{:line 52 :tag uint64 :doc "string ID of the file name\n"} File
+    ^{:line 53 :tag int} Line))
+
+
+(go/const
+
+  ^{:line 58} [^{:val 1000000 :doc "Special P identifiers:\n"} FakeP (+ 1000000 iota)]
+  ^{:line 59} [^{:val 1000001} TimerP] ; contains timer unblocks
+  ^{:line 60} [^{:val 1000002} NetpollP] ; contains network unblocks
+  ^{:line 61} [^{:val 1000003} SyscallP] ; contains returns from syscalls
+  ^{:line 62} [^{:val 1000004} GCP] ; contains GC state
+  ^{:line 63} [^{:val 1000005} ProfileP]) ; contains recording of CPU profile samples
+
+
+
+(go/type Trace "Trace is the result of Parse.\n" (struct
+    ^{:line 68 :tag version/Version} Version
+
+
+    ^{:line 71 :tag Events :doc "Events is the sorted list of Events in the trace.\n"} Events
+
+
+    ^{:line 74 :tag (map uint32 (slice uint64)) :doc "Stacks is the stack traces (stored as slices of PCs), keyed by stack IDs\nfrom the trace.\n"} Stacks
+    ^{:line 75 :tag (map uint64 Frame)} PCs
+    ^{:line 76 :tag (map uint64 string)} Strings
+    ^{:line 77 :tag (slice string)} InlineStrings))
+
+
+
+
+
+(go/type batchOffset "batchOffset records the byte offset of, and number of events in, a batch. A\nbatch is a sequence of events emitted by a P. Events within a single batch\nare sorted by time.\n" (struct
+    ^{:line 84 :tag int} offset
+    ^{:line 85 :tag int} numEvents))
+
+
+(go/type parser (struct
+    ^{:line 89 :tag version/Version} ver
+    ^{:line 90 :tag (slice byte)} data
+    ^{:line 91 :tag int} off
+
+    ^{:line 93 :tag (map uint64 string)} strings
+    ^{:line 94 :tag (slice string)} inlineStrings
+    ^{:line 95 :tag (map string int)} inlineStringsMapping
+
+    ^{:line 97 :tag (map int32 (slice batchOffset)) :doc "map from Ps to their batch offsets\n"} batchOffsets
+    ^{:line 98 :tag (map uint32 (slice uint64))} stacks
+    ^{:line 99 :tag (slice uint64)} stacksData
+    ^{:line 100 :tag int64} ticksPerSec
+    ^{:line 101 :tag (map uint64 Frame)} pcs
+    ^{:line 102 :tag (slice Event)} cpuSamples
+    ^{:line 103 :tag (map uint64 bool)} timerGoids
+
+
+    ^{:line 106 :tag (slice uint64) :doc "state for readRawEvent\n"} args
+
+
+    ^{:line 109 :tag Timestamp :doc "state for parseEvent\n"} lastTs
+    ^{:line 110 :tag uint64} lastG
+
+    ^{:line 112 :tag (map int32 uint64) :doc "map from Ps to the last Gs that ran on them\n"} lastGs
+    ^{:line 113 :tag int32} lastP))
+
+
+^{:go/breaks [[5 125]] :go/end 126} (go/method discard ^bool [^{:tag (* parser)} p ^uint64 n]
+  (when (> n math/MaxInt)
+    (return false))
+
+  (if [noff (+ (.-off p) (conv int n))] (or (< noff (.-off p)) (> noff (len (.-data p))))
+    (return false)
+
+    (set! (.-off p) noff))
+
+  true)
+
+
+^{:go/end 159} (go/func newParser [^io/Reader r ^version/Version ver] :results [(* parser) error]
+  (let [^{:tag (slice byte)} buf (zero (slice byte))]
+    (if [(values seeker ok) (assert io/Seeker r)] ok
+      ;; Determine the size of the reader so that we can allocate a buffer
+      ;; without having to grow it later.
+      (let [(values cur err) (.Seek seeker 0 io/SeekCurrent)]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [(values end ^:assign err) (.Seek seeker 0 io/SeekEnd)]
+          (when (!= err nil)
+            (return nil err))
+
+          (set! (values _ err) (.Seek seeker cur io/SeekStart))
+          (when (!= err nil)
+            (return nil err))
+
+
+          (set! buf (make (slice byte) (- end cur)))
+          (set! (values _ err) (io/ReadFull r buf))
+          (when (!= err nil)
+            (return nil err))))
+
+
+      (let [^error err (zero error)]
+        (set! (values buf err) (io/ReadAll r))
+        (when (!= err nil)
+          (return nil err))))
+
+
+    (return (addr (lit parser :data buf :ver ver :timerGoids (make (map uint64 bool)))) nil)))
+
+
+
+
+
+
+
+
+
+^{:go/end 176} (go/func Parse "Parse parses Go execution traces from versions 1.11–1.21. The provided reader\nwill be read to completion and the entire trace will be materialized in\nmemory. That is, this function does not allow incremental parsing.\n\nThe reader has to be positioned just after the trace header and vers needs to\nbe the version of the trace. This can be achieved by using\nversion.ReadHeader.\n" [^io/Reader r ^version/Version vers] :results [Trace error]
+  ;; We accept the version as an argument because internal/trace will have
+  ;; already read the version to determine which parser to use.
+  (let [(values p err) (newParser r vers)]
+    (when (!= err nil)
+      (return (lit Trace) err))
+
+    (.parse p)))
+
+
+
+^{:go/end 251} (go/method parse "parse parses, post-processes and verifies the trace.\n" [^{:tag (* parser)} p] :results [Trace error]
+  (defer (^{:go/end 182} (fn []
+        (set! (.-data p) nil))))
+
+
+  ;; We parse a trace by running the following steps in order:
+  ;;
+  ;; 1. In the initial pass we collect information about batches (their
+  ;;    locations and sizes.) We also parse CPU profiling samples in this
+  ;;    step, simply to reduce the number of full passes that we need.
+  ;;
+  ;; 2. In the second pass we parse batches and merge them into a globally
+  ;;    ordered event stream. This uses the batch information from the first
+  ;;    pass to quickly find batches.
+  ;;
+  ;; 3. After all events have been parsed we convert their timestamps from CPU
+  ;;    ticks to wall time. Furthermore we move timers and syscalls to
+  ;;    dedicated, fake Ps.
+  ;;
+  ;; 4. Finally, we validate the trace.
+
+  (set! (.-strings p) (make (map uint64 string)))
+  (set! (.-batchOffsets p) (make (map int32 (slice batchOffset))))
+  (set! (.-lastGs p) (make (map int32 uint64)))
+  (set! (.-stacks p) (make (map uint32 (slice uint64))))
+  (set! (.-pcs p) (make (map uint64 Frame)))
+  (set! (.-inlineStringsMapping p) (make (map string int)))
+
+  (when [err (.collectBatchesAndCPUSamples p)] (!= err nil)
+    (return (lit Trace) err))
+
+
+  (let [(values events err) (.parseEventBatches p)]
+    (when (!= err nil)
+      (return (lit Trace) err))
+
+
+    (when (== (.-ticksPerSec p) 0)
+      (return (lit Trace) (errors/New "no EvFrequency event")))
+
+
+    (when (> (.Len events) 0)
+      ;; Translate cpu ticks to real time.
+      (let [minTs (.-Ts (.Ptr events 0))
+          ;; Use floating point to avoid integer overflows.
+          ^{:line 224} freq (/ 1.0E9 (conv float64 (.-ticksPerSec p)))]
+        (for [i 0] (< i (.Len events)) (inc! i)
+          (let [ev (.Ptr events i)]
+            (set! (.-Ts ev) (conv Timestamp (* (conv float64 (- (.-Ts ev) minTs)) freq)))
+            ;; Move timers and syscalls to separate fake Ps.
+            (when (and (aget (.-timerGoids p) (.-G ev)) (== (.-Type ev) EvGoUnblock))
+              (set! (.-P ev) TimerP))
+
+            (when (== (.-Type ev) EvGoSysExit)
+              (set! (.-P ev) SyscallP))))))
+
+
+
+
+    (when [err (.postProcessTrace p events)] (!= err nil)
+      (return (lit Trace) err))
+
+
+    (let [res ^{:go/breaks [2 4 6 8 10 12]} (lit Trace
+          :Version (.-ver p)
+          :Events events
+          :Stacks (.-stacks p)
+          :Strings (.-strings p)
+          :InlineStrings (.-inlineStrings p)
+          :PCs (.-pcs p))]
+
+      (return res nil))))
+
+
+
+(go/type rawEvent "rawEvent is a helper type used during parsing.\n" (struct
+    ^{:line 255 :tag EventType} typ
+    ^{:line 256 :tag (slice uint64)} args
+    ^{:line 257 :tag (slice string)} sargs
+
+
+    ^{:line 260 :tag int32 :doc "if typ == EvBatch, these fields describe the batch.\n"} batchPid
+    ^{:line 261 :tag int} batchOffset))
+
+
+(go/type proc (struct
+    ^{:line 265 :tag int32} pid
+
+    ^{:line 267 :tag (slice Event) :doc "the remaining events in the current batch\n"} events
+
+    ^{:line 269 :tag (slice Event) :doc "buffer for reading batches into, aliased by proc.events\n"} buf
+
+
+    ^{:line 272 :tag bool :doc "there are no more batches left\n"} done))
+
+
+(go/const ^{:val 524288} eventsBucketSize 524288) ; 32 MiB of events
+
+(go/type Events (struct
+
+
+
+
+    ^{:line 282 :tag int :doc "Events is a slice of slices that grows one slice of size eventsBucketSize\nat a time. This avoids the O(n) cost of slice growth in append, and\nadditionally allows consumers to drop references to parts of the data,\nfreeing memory piecewise.\n"} n
+    ^{:line 283 :tag (slice (* (array eventsBucketSize Event)))} buckets
+    ^{:line 284 :tag int} off))
+
+
+
+
+^{:go/end 297} (go/method grow "grow grows the slice by one and returns a pointer to the new element, without\noverwriting it.\n" ^{:tag (* Event)} [^{:tag (* Events)} l]
+  (let [(values a b) (.index l (.-n l))]
+    (when (>= a (len (.-buckets l)))
+      (set! (.-buckets l) (append (.-buckets l) (new (array eventsBucketSize Event)))))
+
+    (let [ptr (addr (aget (aget (.-buckets l) a) b))]
+      (inc! (.-n l))
+      ^{:line 296} ptr)))
+
+
+
+^{:go/end 304} (go/method append "append appends v to the slice and returns a pointer to the new element.\n" ^{:tag (* Event)} [^{:tag (* Events)} l ^Event v]
+  (let [ptr (.grow l)]
+    (set! @ptr v)
+    ^{:line 303} ptr))
+
+
+^{:go/end 309} (go/method Ptr ^{:tag (* Event)} [^{:tag (* Events)} l ^int i]
+  (let [(values a b) (.index l (+ i (.-off l)))]
+    (addr (aget (aget (.-buckets l) a) b))))
+
+
+^{:go/end 316} (go/method index [^{:tag (* Events)} l ^int i] :results [int int]
+  ;; Doing the division on uint instead of int compiles this function to a
+  ;; shift and an AND (for power of 2 bucket sizes), versus a whole bunch of
+  ;; instructions for int.
+  (return (conv int (/ (conv uint i) eventsBucketSize)) (conv int (% (conv uint i) eventsBucketSize))))
+
+
+^{:go/end 320} (go/method Len ^int [^{:tag (* Events)} l]
+  (- (.-n l) (.-off l)))
+
+
+^{:go/end 324} (go/method Less ^bool [^{:tag (* Events)} l ^int i ^int j]
+  (< (.-Ts (.Ptr l i)) (.-Ts (.Ptr l j))))
+
+
+^{:go/end 328} (go/method Swap [^{:tag (* Events)} l ^int i ^int j]
+  (set! (values @(.Ptr l i) @(.Ptr l j)) (values @(.Ptr l j) @(.Ptr l i))))
+
+
+^{:go/end 343} (go/method Pop [^{:tag (* Events)} l] :results [(* Event) bool]
+  (when (== (.-off l) (.-n l))
+    (return nil false))
+
+  (let [(values a b) (.index l (.-off l))
+      ^{:line 335} ptr (addr (aget (aget (.-buckets l) a) b))]
+    (inc! (.-off l))
+    (when (or (== b (- eventsBucketSize 1)) (== (.-off l) (.-n l)))
+      ;; We've consumed the last event from the bucket, so drop the bucket and
+      ;; allow GC to collect it.
+      (aset (.-buckets l) a nil))
+
+    (return ptr true)))
+
+
+^{:go/end 351} (go/method Peek [^{:tag (* Events)} l] :results [(* Event) bool]
+  (when (== (.-off l) (.-n l))
+    (return nil false))
+
+  (let [(values a b) (.index l (.-off l))]
+    (return (addr (aget (aget (.-buckets l) a) b)) true)))
+
+
+^{:go/end 363} (go/method All ^{:tag (func [^{:tag (func [^{:tag (* Event)} ev] [bool])} yield])} [^{:tag (* Events)} l]
+  ^{:go/end 362} (fn [^{:tag (func [^{:tag (* Event)} ev] [bool])} yield]
+    (for [i 0] (< i (.Len l)) (inc! i)
+      (let [(values a b) (.index l (+ i (.-off l)))
+          ^{:line 357} ptr (addr (aget (aget (.-buckets l) a) b))]
+        (when (not (yield ptr))
+          (return))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 531} (go/method parseEventBatches "parseEventBatches reads per-P event batches and merges them into a single, consistent\nstream. The high level idea is as follows. Events within an individual batch\nare in correct order, because they are emitted by a single P. So we need to\nproduce a correct interleaving of the batches. To do this we take first\nunmerged event from each batch (frontier). Then choose subset that is \"ready\"\nto be merged, that is, events for which all dependencies are already merged.\nThen we choose event with the lowest timestamp from the subset, merge it and\nrepeat. This approach ensures that we form a consistent stream even if\ntimestamps are incorrect (condition observed on some machines).\n" [^{:tag (* parser)} p] :results [Events error]
+  ;; The ordering of CPU profile sample events in the data stream is based on
+  ;; when each run of the signal handler was able to acquire the spinlock,
+  ;; with original timestamps corresponding to when ReadTrace pulled the data
+  ;; off of the profBuf queue. Re-sort them by the timestamp we captured
+  ;; inside the signal handler.
+  (^{:inst [(slice Event) Event]} slices/SortFunc (.-cpuSamples p) ^{:go/end 382} (fn ^int [^Event a ^Event b]
+      (^{:inst [Timestamp]} cmp/Compare (.-Ts a) (.-Ts b))))
+
+
+  (let [allProcs (make (slice proc) 0 (len (.-batchOffsets p)))]
+    (range [pid (.-batchOffsets p)]
+      (set! allProcs (append allProcs (lit proc :pid pid))))
+
+    (set! allProcs (append allProcs (lit proc :pid ProfileP :events (.-cpuSamples p))))
+
+    (let [events (lit Events)
+
+        ;; Merge events as long as at least one P has more events
+        ^{:line 393} gs (make (map uint64 gState))
+        ;; Note: technically we don't need a priority queue here. We're only ever
+        ;; interested in the earliest eligible event, which means we just have to
+        ;; track the smallest element. However, in practice, the priority queue
+        ;; performs better, because for each event we only have to compute its state
+        ;; transition once, not on each iteration. If it was eligible before, it'll
+        ;; already be in the queue. Furthermore, on average, we only have one P to
+        ;; look at in each iteration, because all other Ps are already in the queue.
+        ^{:line 401 :tag orderEventList} frontier (zero orderEventList)
+
+        ^{:line 403} availableProcs (make (slice (* proc)) (len allProcs))]
+      (range [i allProcs]
+        (aset availableProcs i (addr (aget allProcs i))))
+
+      (while true
+        (label :pidLoop
+          (for [i 0] (< i (len availableProcs)) (inc! i)
+            (let [proc (aget availableProcs i)]
+
+              (while (== (len (.-events proc)) 0)
+                ;; Call loadBatch in a loop because sometimes batches are empty
+                (let [(values evs err) (.loadBatch p (.-pid proc) (subslice (.-buf proc) _ 0))]
+                  (set! (.-buf proc) (subslice evs _ 0))
+                  (cond (== err io/EOF) (do
+                      ;; This P has no more events
+                      (set! (.-done proc) true)
+                      (set! (values (aget availableProcs i) (aget availableProcs (- (len availableProcs) 1))) (values (aget availableProcs (- (len availableProcs) 1)) (aget availableProcs i)))
+                      (set! availableProcs (subslice availableProcs _ (- (len availableProcs) 1)))
+                      ;; We swapped the element at i with another proc, so look at
+                      ;; the index again
+                      (dec! i)
+                      (continue :pidLoop))
+                    (!= err nil)
+                    (return (lit Events) err) :else
+
+                    (set! (.-events proc) evs))))
+
+
+
+              (let [ev (addr (aget (.-events proc) 0))
+                  (values g init _) (stateTransition ev)]
+
+                ;; TODO(dh): This implementation matches the behavior of the
+                ;; upstream 'go tool trace', and works in practice, but has run into
+                ;; the following inconsistency during fuzzing: what happens if
+                ;; multiple Ps have events for the same G? While building the
+                ;; frontier we will check all of the events against the current
+                ;; state of the G. However, when we process the frontier, the state
+                ;; of the G changes, and a transition that was valid while building
+                ;; the frontier may no longer be valid when processing the frontier.
+                ;; Is this something that can happen for real, valid traces, or is
+                ;; this only possible with corrupt data?
+                (when (not (transitionReady g (aget gs g) init))
+                  (continue))
+
+                (set! (.-events proc) (subslice (.-events proc) 1))
+                (set! (values (aget availableProcs i) (aget availableProcs (- (len availableProcs) 1))) (values (aget availableProcs (- (len availableProcs) 1)) (aget availableProcs i)))
+                (set! availableProcs (subslice availableProcs _ (- (len availableProcs) 1)))
+                (.Push frontier (lit orderEvent @ev proc))
+
+                ;; We swapped the element at i with another proc, so look at the
+                ;; index again
+                (dec! i)))))
+
+
+        (when (== (len frontier) 0)
+          (range [i allProcs]
+            (when (not (.-done (aget allProcs i)))
+              (return (lit Events) (fmt/Errorf "no consistent ordering of events possible"))))
+
+
+          (break))
+
+        (let [f (.Pop frontier)
+
+            ;; We're computing the state transition twice, once when computing the
+            ;; frontier, and now to apply the transition. This is fine because
+            ;; stateTransition is a pure function. Computing it again is cheaper
+            ;; than storing large items in the frontier.
+            (values g init next) (stateTransition (addr (.-ev f)))]
+
+          ;; Get rid of "Local" events, they are intended merely for ordering.
+          (switch (.-Type (.-ev f))
+            (case [EvGoStartLocal]
+              (set! (.-Type (.-ev f)) EvGoStart))
+            (case [EvGoUnblockLocal]
+              (set! (.-Type (.-ev f)) EvGoUnblock))
+            (case [EvGoSysExitLocal]
+              (set! (.-Type (.-ev f)) EvGoSysExit)))
+
+          (.append events (.-ev f))
+
+          (when [err (transition gs g init next)] (!= err nil)
+            (return (lit Events) err))
+
+          (set! availableProcs (append availableProcs (.-proc f)))))
+
+
+      ;; At this point we have a consistent stream of events. Make sure time
+      ;; stamps respect the ordering. The tests will skip (not fail) the test case
+      ;; if they see this error.
+      (when (not (sort/IsSorted (addr events)))
+        (return (lit Events) ErrTimeOrder))
+
+
+      ;; The last part is giving correct timestamps to EvGoSysExit events. The
+      ;; problem with EvGoSysExit is that actual syscall exit timestamp
+      ;; (ev.Args[2]) is potentially acquired long before event emission. So far
+      ;; we've used timestamp of event emission (ev.Ts). We could not set ev.Ts =
+      ;; ev.Args[2] earlier, because it would produce seemingly broken timestamps
+      ;; (misplaced event). We also can't simply update the timestamp and resort
+      ;; events, because if timestamps are broken we will misplace the event and
+      ;; later report logically broken trace (instead of reporting broken
+      ;; timestamps).
+      (let [lastSysBlock (make (map uint64 Timestamp))]
+        (for [i 0] (< i (.Len events)) (inc! i)
+          (let [ev (.Ptr events i)]
+            (switch (.-Type ev)
+              (case [EvGoSysBlock EvGoInSyscall]
+                (aset lastSysBlock (.-G ev) (.-Ts ev)))
+              (case [EvGoSysExit]
+                (let [ts (conv Timestamp (aget (.-Args ev) 2))]
+                  (when (== ts 0)
+                    (continue))
+
+                  (let [block (aget lastSysBlock (.-G ev))]
+                    (when (== block 0)
+                      (return (lit Events) (fmt/Errorf "stray syscall exit")))
+
+                    (when (< ts block)
+                      (return (lit Events) ErrTimeOrder))
+
+                    (set! (.-Ts ev) ts)))))))
+
+
+        (sort/Stable (addr events))
+
+        (return events nil)))))
+
+
+
+^{:go/end 602} (go/method collectBatchesAndCPUSamples "collectBatchesAndCPUSamples records the offsets of batches and parses CPU samples.\n" ^error [^{:tag (* parser)} p]
+  ;; Read events.
+  ^{:go/breaks [[3 601]]} (let [^rawEvent raw (zero rawEvent)
+      ^{:line 537 :tag int32} curP (zero int32)]
+    (for [n (conv uint64 0)] _ (inc! n)
+      (let [err (.readRawEvent p (bit-or skipArgs skipStrings) (addr raw))]
+        (when (== err io/EOF)
+          (break))
+
+        (when (!= err nil)
+          (return err))
+
+        (when (== (.-typ raw) EvNone)
+          (continue))
+
+
+        (when (== (.-typ raw) EvBatch)
+          (let [bo (lit batchOffset :offset (.-batchOffset raw))]
+            (aset (.-batchOffsets p) (.-batchPid raw) (append (aget (.-batchOffsets p) (.-batchPid raw)) bo))
+            (set! curP (.-batchPid raw))))
+
+
+        (let [batches (aget (.-batchOffsets p) curP)]
+          (when (== (len batches) 0)
+            (return (fmt/Errorf "read event %d with current P of %d, but P has no batches yet"
+                (.-typ raw) curP)))
+
+          (inc! (.-numEvents (aget batches (- (len batches) 1))))
+
+          (when (== (.-typ raw) EvCPUSample)
+            (let [e (lit Event :Type (.-typ raw))
+
+                ^{:line 566} argOffset 1
+                ^{:line 567} narg (.argNum raw)]
+              (when (!= (len (.-args raw)) narg)
+                (return (fmt/Errorf "CPU sample has wrong number of arguments: want %d, got %d" narg (len (.-args raw)))))
+
+              (for [i argOffset] (< i narg) (inc! i)
+                (if (== i (- narg 1))
+                  (set! (.-StkID e) (conv uint32 (aget (.-args raw) i)))
+
+                  (aset (.-Args e) (- i argOffset) (aget (.-args raw) i))))
+
+
+
+              (set! (.-Ts e) (conv Timestamp (aget (.-Args e) 0)))
+              (set! (.-P e) (conv int32 (aget (.-Args e) 1)))
+              (set! (.-G e) (aget (.-Args e) 2))
+              (aset (.-Args e) 0 0)
+
+              ;; Most events are written out by the active P at the exact moment
+              ;; they describe. CPU profile samples are different because they're
+              ;; written to the tracing log after some delay, by a separate worker
+              ;; goroutine, into a separate buffer.
+              ;;
+              ;; We keep these in their own batch until all of the batches are
+              ;; merged in timestamp order. We also (right before the merge)
+              ;; re-sort these events by the timestamp captured in the profiling
+              ;; signal handler.
+              ;;
+              ;; Note that we're not concerned about the memory usage of storing
+              ;; all CPU samples during the indexing phase. There are orders of
+              ;; magnitude fewer CPU samples than runtime events.
+              (set! (.-cpuSamples p) (append (.-cpuSamples p) e)))))))
+
+
+
+    nil))
+
+
+(go/const
+  ^{:line 605} [^{:val 1} skipArgs (<< 1 iota)]
+  ^{:line 606} [^{:val 2} skipStrings])
+
+
+^{:go/end 617} (go/method readByte [^{:tag (* parser)} p] :results [byte bool]
+  (if (and (< (.-off p) (len (.-data p))) (>= (.-off p) 0))
+    (let [b (aget (.-data p) (.-off p))]
+      (inc! (.-off p))
+      (return b true))
+
+    (return 0 false)))
+
+
+
+^{:go/end 630} (go/method readFull [^{:tag (* parser)} p ^int n] :results [(slice byte) error]
+  (when (or (>= (.-off p) (len (.-data p))) (< (.-off p) 0) (> (+ (.-off p) n) (len (.-data p))))
+    ;; p.off < 0 is impossible but makes BCE happy.
+    ;;
+    ;; We do fail outright if there's not enough data, we don't care about
+    ;; partial results.
+    (return nil io/ErrUnexpectedEOF))
+
+  (let [buf (subslice (.-data p) (.-off p) (+ (.-off p) n))]
+    (set! (.-off p) + n)
+    (return buf nil)))
+
+
+
+
+^{:go/end 821} (go/method readRawEvent "readRawEvent reads a raw event into ev. The slices in ev are only valid until\nthe next call to readRawEvent, even when storing to a different location.\n" ^error [^{:tag (* parser)} p ^uint flags ^{:tag (* rawEvent)} ev]
+  ;; The number of arguments is encoded using two bits and can thus only
+  ;; represent the values 0–3. The value 3 (on the wire) indicates that
+  ;; arguments are prefixed by their byte length, to encode >=3 arguments.
+  (let [^:const ^{:val 3} inlineArgs 3
+
+      ;; Read event type and number of arguments (1 byte).
+      (values b ok) (.readByte p)]
+    (when (not ok)
+      (return io/EOF))
+
+    (let [typ (conv EventType (>> (<< b 2) 2))
+        ;; Most events have a timestamp before the actual arguments, so we add 1 and
+        ;; parse it like it's the first argument. EvString has a special format and
+        ;; the number of arguments doesn't matter. EvBatch writes '1' as the number
+        ;; of arguments, but actually has two: a pid and a timestamp, but here the
+        ;; timestamp is the second argument, not the first; adding 1 happens to come
+        ;; up with the correct number, but it doesn't matter, because EvBatch has
+        ;; custom logic for parsing.
+        ;;
+        ;; Note that because we're adding 1, inlineArgs == 3 describes the largest
+        ;; number of logical arguments that isn't length-prefixed, even though the
+        ;; value 3 on the wire indicates length-prefixing. For us, that becomes narg
+        ;; == 4.
+        ^{:line 658} narg (+ (>> b 6) 1)]
+      (when (or (== typ EvNone) (>= typ EvCount) (> (.-minVersion (aget EventDescriptions typ)) (.-ver p)))
+        (return (fmt/Errorf "unknown event type %d" typ)))
+
+
+      (switch typ
+        (case [EvString]
+          (if (!= (bit-and flags skipStrings) 0) (do
+              ;; String dictionary entry [ID, length, string].
+              (when [(values _ err) (.readVal p)] (!= err nil)
+                (return errMalformedVarint))
+
+              (let [(values ln err) (.readVal p)]
+                (when (!= err nil)
+                  (return err))
+
+                (when (not (.discard p ln))
+                  (return (fmt/Errorf "failed to read trace: %w" io/EOF)))))
+
+
+            ;; String dictionary entry [ID, length, string].
+            (let [(values id err) (.readVal p)]
+              (when (!= err nil)
+                (return err))
+
+              (when (== id 0)
+                (return (errors/New "string has invalid id 0")))
+
+              (when (!= (aget (.-strings p) id) "")
+                (return (fmt/Errorf "string has duplicate id %d" id)))
+
+              (let [^uint64 ln (zero uint64)]
+                (set! (values ln err) (.readVal p))
+                (when (!= err nil)
+                  (return err))
+
+                (when (== ln 0)
+                  (return (errors/New "string has invalid length 0")))
+
+                (when (> ln 1000000.0)
+                  (return (fmt/Errorf "string has too large length %d" ln)))
+
+                (let [(values buf ^:assign err) (.readFull p (conv int ln))]
+                  (when (!= err nil)
+                    (return (fmt/Errorf "failed to read trace: %w" err)))
+
+                  (aset (.-strings p) id (conv string buf))))))
+
+
+          (set! (.-typ ev) EvNone)
+          (return nil))
+        (case [EvBatch]
+          (when [want (conv byte 2)] (!= narg want)
+            (return (fmt/Errorf "EvBatch has wrong number of arguments: got %d, want %d" narg want)))
+
+
+          ;; -1 because we've already read the first byte of the batch
+          (let [off (- (.-off p) 1)
+
+              (values pid err) (.readVal p)]
+            (when (!= err nil)
+              (return err))
+
+            (when (and (!= pid math/MaxUint64) (> pid math/MaxInt32))
+              (return (fmt/Errorf "processor ID %d is larger than maximum of %d" pid (conv uint64 math/MaxUint))))
+
+
+            (let [^int32 pid32 (zero int32)]
+              (if (== pid math/MaxUint64)
+                (set! pid32 -1)
+
+                (set! pid32 (conv int32 pid)))
+
+
+              (let [(values v ^:assign err) (.readVal p)]
+                (when (!= err nil)
+                  (return err))
+
+
+                (set! @ev ^{:go/breaks [2 4 6 8]} (lit rawEvent
+                    :typ EvBatch
+                    :args (subslice (.-args p) _ 0)
+                    :batchPid pid32
+                    :batchOffset off))
+
+                (set! (.-args ev) (append (.-args ev) pid v))
+                (return nil)))))
+        (default
+          (set! @ev (lit rawEvent :typ typ :args (subslice (.-args p) _ 0)))
+          (if (<= narg inlineArgs)
+            (if (== (bit-and flags skipArgs) 0)
+              (for [i 0] (< i (conv int narg)) (inc! i)
+                (let [(values v err) (.readVal p)]
+                  (when (!= err nil)
+                    (return (fmt/Errorf "failed to read event %d argument: %w" typ err)))
+
+                  (set! (.-args ev) (append (.-args ev) v))))
+
+
+              (for [i 0] (< i (conv int narg)) (inc! i)
+                (when [(values _ err) (.readVal p)] (!= err nil)
+                  (return (fmt/Errorf "failed to read event %d argument: %w" typ errMalformedVarint)))))
+
+
+
+
+            ;; More than inlineArgs args, the first value is length of the event
+            ;; in bytes.
+            (let [(values v err) (.readVal p)]
+              (when (!= err nil)
+                (return (fmt/Errorf "failed to read event %d argument: %w" typ err)))
+
+
+              (when [limit (conv uint64 2048)] (> v limit)
+                ;; At the time of Go 1.19, v seems to be at most 128. Set 2048
+                ;; as a generous upper limit and guard against malformed traces.
+                (return (fmt/Errorf "failed to read event %d argument: length-prefixed argument too big: %d bytes, limit is %d" typ v limit)))
+
+
+              (if (or (== (bit-and flags skipArgs) 0) (== typ EvCPUSample))
+                (let [(values buf err) (.readFull p (conv int v))]
+                  (when (!= err nil)
+                    (return (fmt/Errorf "failed to read trace: %w" err)))
+
+                  (while (> (len buf) 0)
+                    (let [^uint64 v (zero uint64)]
+                      (set! (values v buf err) (readValFrom buf))
+                      (when (!= err nil)
+                        (return err))
+
+                      (set! (.-args ev) (append (.-args ev) v)))))
+
+                (do
+                  ;; Skip over arguments
+                  (when (not (.discard p v))
+                    (return (fmt/Errorf "failed to read trace: %w" io/EOF)))))
+
+
+              (when (== typ EvUserLog)
+                ;; EvUserLog records are followed by a value string
+                (if (== (bit-and flags skipArgs) 0)
+                  ;; Read string
+                  (let [(values s err) (.readStr p)]
+                    (when (!= err nil)
+                      (return err))
+
+                    (set! (.-sargs ev) (append (.-sargs ev) s)))
+
+                  ;; Skip string
+                  (let [(values v err) (.readVal p)]
+                    (when (!= err nil)
+                      (return err))
+
+                    (when (not (.discard p v))
+                      (return io/EOF)))))))
+
+
+
+
+
+          (set! (.-args p) (subslice (.-args ev) _ 0))
+          (return nil))))))
+
+
+
+
+^{:go/end 872} (go/method loadBatch "loadBatch loads the next batch for pid and appends its contents to events.\n" [^{:tag (* parser)} p ^int32 pid ^{:tag (slice Event)} events] :results [(slice Event) error]
+  (let [offsets (aget (.-batchOffsets p) pid)]
+    (when (== (len offsets) 0)
+      (return nil io/EOF))
+
+    (let [n (.-numEvents (aget offsets 0))
+        ^{:line 830} offset (.-offset (aget offsets 0))]
+      (set! offsets (subslice offsets 1))
+      (aset (.-batchOffsets p) pid offsets)
+
+      (set! (.-off p) offset)
+
+      (when (< (cap events) n)
+        (set! events (make (slice Event) 0 n)))
+
+
+      (let [gotHeader false
+          ^{:line 841 :tag rawEvent} raw (zero rawEvent)
+          ^{:line 842 :tag Event} ev (zero Event)]
+        (while true
+          (let [err (.readRawEvent p 0 (addr raw))]
+            (when (== err io/EOF)
+              (break))
+
+            (when (!= err nil)
+              (return nil err))
+
+            (when (or (== (.-typ raw) EvNone) (== (.-typ raw) EvCPUSample))
+              (continue))
+
+            (when (== (.-typ raw) EvBatch)
+              (if gotHeader
+                (break)
+
+                (set! gotHeader true)))
+
+
+
+            (set! err (.parseEvent p (addr raw) (addr ev)))
+            (when (!= err nil)
+              (return nil err))
+
+            (when (!= (.-Type ev) EvNone)
+              (set! events (append events ev)))))
+
+
+
+        (return events nil)))))
+
+
+^{:go/end 890} (go/method readStr [^{:tag (* parser)} p] :results [^string s ^error err]
+  (let [(values sz ^:assign err) (.readVal p)]
+    (when (!= err nil)
+      (return "" err))
+
+    (when (== sz 0)
+      (return "" nil))
+
+    (when (> sz 1000000.0)
+      (return "" (fmt/Errorf "string is too large (len=%d)" sz)))
+
+    (let [(values buf ^:assign err) (.readFull p (conv int sz))]
+      (when (!= err nil)
+        (return "" (fmt/Errorf "failed to read trace: %w" err)))
+
+      (return (conv string buf) nil))))
+
+
+
+
+^{:go/end 1004} (go/method parseEvent "parseEvent transforms raw events into events.\nIt does analyze and verify per-event-type arguments.\n" ^error [^{:tag (* parser)} p ^{:tag (* rawEvent)} raw ^{:tag (* Event)} ev]
+  (let [desc (addr (aget EventDescriptions (.-typ raw)))]
+    (when (== (.-Name desc) "")
+      (return (fmt/Errorf "missing description for event type %d" (.-typ raw))))
+
+    ^{:go/breaks [5]} (let [narg (.argNum raw)]
+      (when (!= (len (.-args raw)) narg)
+        (return (fmt/Errorf "%s has wrong number of arguments: want %d, got %d" (.-Name desc) narg (len (.-args raw)))))
+
+      (switch (.-typ raw)
+        (case [EvBatch]
+          (aset (.-lastGs p) (.-lastP p) (.-lastG p))
+          (when (and (!= (aget (.-args raw) 0) math/MaxUint64) (> (aget (.-args raw) 0) math/MaxInt32))
+            (return (fmt/Errorf "processor ID %d is larger than maximum of %d" (aget (.-args raw) 0) (conv uint64 math/MaxInt32))))
+
+          (if (== (aget (.-args raw) 0) math/MaxUint64)
+            (set! (.-lastP p) -1)
+
+            (set! (.-lastP p) (conv int32 (aget (.-args raw) 0))))
+
+          (set! (.-lastG p) (aget (.-lastGs p) (.-lastP p)))
+          (set! (.-lastTs p) (conv Timestamp (aget (.-args raw) 1))))
+        (case [EvFrequency]
+          (set! (.-ticksPerSec p) (conv int64 (aget (.-args raw) 0)))
+          (when (<= (.-ticksPerSec p) 0)
+            ;; The most likely cause for this is tick skew on different CPUs.
+            ;; For example, solaris/amd64 seems to have wildly different
+            ;; ticks on different CPUs.
+            (return ErrTimeOrder)))
+
+        (case [EvTimerGoroutine]
+          (aset (.-timerGoids p) (aget (.-args raw) 0) true))
+        (case [EvStack]
+          (when (< (len (.-args raw)) 2)
+            (return (fmt/Errorf "EvStack has wrong number of arguments: want at least 2, got %d" (len (.-args raw)))))
+
+          (let [size (aget (.-args raw) 1)]
+            (when (> size 1000)
+              (return (fmt/Errorf "EvStack has bad number of frames: %d" size)))
+
+            (let [want (+ 2 (* 4 size))]
+              (when (!= (conv uint64 (len (.-args raw))) want)
+                (return (fmt/Errorf "EvStack has wrong number of arguments: want %d, got %d" want (len (.-args raw)))))
+
+              (let [id (conv uint32 (aget (.-args raw) 0))]
+                (when (and (!= id 0) (> size 0))
+                  (let [stk (.allocateStack p size)]
+                    (for [i 0] (< i (conv int size)) (inc! i)
+                      (let [pc (aget (.-args raw) (+ 2 (* i 4) 0))
+                          ^{:line 943} fn (aget (.-args raw) (+ 2 (* i 4) 1))
+                          ^{:line 944} file (aget (.-args raw) (+ 2 (* i 4) 2))
+                          ^{:line 945} line (aget (.-args raw) (+ 2 (* i 4) 3))]
+                        (aset stk i pc)
+
+                        (when [(values _ ok) (aget (.-pcs p) pc)] (not ok)
+                          (aset (.-pcs p) pc (lit Frame :PC pc :Fn fn :File file :Line (conv int line))))))
+
+
+                    (aset (.-stacks p) id stk)))))))
+
+        (case [EvCPUSample])
+        ;; These events get parsed during the indexing step and don't strictly
+        ;; belong to the batch.
+        (default
+          (set! @ev (lit Event :Type (.-typ raw) :P (.-lastP p) :G (.-lastG p)))
+          (let [^int argOffset (zero int)]
+            (set! (.-Ts ev) (+ (.-lastTs p) (conv Timestamp (aget (.-args raw) 0))))
+            (set! argOffset 1)
+            (set! (.-lastTs p) (.-Ts ev))
+            (for [i argOffset] (< i narg) (inc! i)
+              (if (and (== i (- narg 1)) (.-Stack desc))
+                (set! (.-StkID ev) (conv uint32 (aget (.-args raw) i)))
+
+                (aset (.-Args ev) (- i argOffset) (aget (.-args raw) i))))
+
+
+            (switch (.-typ raw)
+              (case [EvGoStart EvGoStartLocal EvGoStartLabel]
+                (set! (.-lastG p) (aget (.-Args ev) 0))
+                (set! (.-G ev) (.-lastG p)))
+              (case [EvGoEnd EvGoStop EvGoSched EvGoPreempt
+                  ^{:line 975} EvGoSleep EvGoBlock EvGoBlockSend EvGoBlockRecv
+                  ^{:line 976} EvGoBlockSelect EvGoBlockSync EvGoBlockCond EvGoBlockNet
+                  ^{:line 977} EvGoSysBlock EvGoBlockGC]
+                (set! (.-lastG p) 0))
+              (case [EvGoSysExit EvGoWaiting EvGoInSyscall]
+                (set! (.-G ev) (aget (.-Args ev) 0)))
+              (case [EvUserTaskCreate])
+              ;; e.Args 0: taskID, 1:parentID, 2:nameID
+              (case [EvUserRegion])
+              ;; e.Args 0: taskID, 1: mode, 2:nameID
+              (case [EvUserLog]
+                ;; e.Args 0: taskID, 1:keyID, 2: stackID, 3: messageID
+                ;; raw.sargs 0: message
+
+                (if [(values id ok) (aget (.-inlineStringsMapping p) (aget (.-sargs raw) 0))] ok
+                  (aset (.-Args ev) 3 (conv uint64 id))
+
+                  (let [id (len (.-inlineStrings p))]
+                    (aset (.-inlineStringsMapping p) (aget (.-sargs raw) 0) id)
+                    (set! (.-inlineStrings p) (append (.-inlineStrings p) (aget (.-sargs raw) 0)))
+                    (aset (.-Args ev) 3 (conv uint64 id))))))
+
+
+
+            (return nil))))
+
+
+      (set! (.-Type ev) EvNone)
+      nil)))
+
+
+
+
+(go/var ^{:doc "ErrTimeOrder is returned by Parse when the trace contains\ntime stamps that do not respect actual event ordering.\n"} ErrTimeOrder (errors/New "time stamps out of order"))
+
+
+
+
+
+^{:go/end 1327} (go/method postProcessTrace "postProcessTrace does inter-event verification and information restoration.\nThe resulting trace is guaranteed to be consistent\n(for example, a P does not run two Gs at the same time, or a G is indeed\nblocked before an unblock event).\n" ^error [^{:tag (* parser)} p ^Events events]
+  (let [
+      ^:const ^{:line 1016 :val 0} gDead iota
+      ^:const ^:go/grouped ^:go/implicit ^{:line 1017 :val 1} gRunnable iota
+      ^:const ^:go/grouped ^:go/implicit ^{:line 1018 :val 2} gRunning iota
+      ^:const ^:go/grouped ^:go/implicit ^{:line 1019 :val 3} gWaiting iota]
+
+    (let-type [gdesc (struct
+          ^{:line 1022 :tag int} state
+          ^{:line 1023 :tag (* Event)} ev
+          ^{:line 1024 :tag (* Event)} evStart
+          ^{:line 1025 :tag (* Event)} evCreate
+          ^{:line 1026 :tag (* Event)} evMarkAssist)
+
+        ^{:line 1028} pdesc (struct
+          ^{:line 1029 :tag bool} running
+          ^{:line 1030 :tag uint64} g
+          ^{:line 1031 :tag (* Event)} evSweep)]
+
+
+      (let [gs (make (map uint64 gdesc))
+          ^{:line 1035} ps (make (map int32 pdesc))
+          ^{:line 1036} tasks (make (map uint64 (* Event))) ; task id to task creation events
+          ^{:line 1037} activeRegions (make (map uint64 (slice (* Event))))] ; goroutine id to stack of regions
+        (aset gs 0 (lit gdesc :state gRunning))
+        ^{:go/breaks [[3 1326]]} (let [(values ^{:tag (* Event)} evGC ^{:tag (* Event)} evSTW) (zero (* Event))
+
+            ^{:line 1041} checkRunning ^{:go/end 1053} (fn ^error [^pdesc p ^gdesc g ^{:tag (* Event)} ev ^bool allowG0]
+              ^{:go/breaks [[5 1052]]} (let [name (.-Name (aget EventDescriptions (.-Type ev)))]
+                (when (!= (.-state g) gRunning)
+                  (return (fmt/Errorf "g %d is not running while %s (time %d)" (.-G ev) name (.-Ts ev))))
+
+                (when (!= (.-g p) (.-G ev))
+                  (return (fmt/Errorf "p %d is not running g %d while %s (time %d)" (.-P ev) (.-G ev) name (.-Ts ev))))
+
+                (when (and (not allowG0) (== (.-G ev) 0))
+                  (return (fmt/Errorf "g 0 did %s (time %d)" name (.-Ts ev))))
+
+                nil))]
+
+
+          (for [evIdx 0] (< evIdx (.Len events)) (inc! evIdx)
+            (let [ev (.Ptr events evIdx)]
+
+              (switch (.-Type ev)
+                (case [EvProcStart]
+                  (let [p (aget ps (.-P ev))]
+                    (when (.-running p)
+                      (return (fmt/Errorf "p %d is running before start (time %d)" (.-P ev) (.-Ts ev))))
+
+                    (set! (.-running p) true)
+
+                    (aset ps (.-P ev) p)))
+                (case [EvProcStop]
+                  (let [p (aget ps (.-P ev))]
+                    (when (not (.-running p))
+                      (return (fmt/Errorf "p %d is not running before stop (time %d)" (.-P ev) (.-Ts ev))))
+
+                    (when (!= (.-g p) 0)
+                      (return (fmt/Errorf "p %d is running a goroutine %d during stop (time %d)" (.-P ev) (.-g p) (.-Ts ev))))
+
+                    (set! (.-running p) false)
+
+                    (aset ps (.-P ev) p)))
+                (case [EvGCStart]
+                  (when (!= evGC nil)
+                    (return (fmt/Errorf "previous GC is not ended before a new one (time %d)" (.-Ts ev))))
+
+                  (set! evGC ev)
+                  ;; Attribute this to the global GC state.
+                  (set! (.-P ev) GCP))
+                (case [EvGCDone]
+                  (when (== evGC nil)
+                    (return (fmt/Errorf "bogus GC end (time %d)" (.-Ts ev))))
+
+                  (set! evGC nil))
+                (case [EvSTWStart]
+                  (let [evp (addr evSTW)]
+                    (when (!= @evp nil)
+                      (return (fmt/Errorf "previous STW is not ended before a new one (time %d)" (.-Ts ev))))
+
+                    (set! @evp ev)))
+                (case [EvSTWDone]
+                  (let [evp (addr evSTW)]
+                    (when (== @evp nil)
+                      (return (fmt/Errorf "bogus STW end (time %d)" (.-Ts ev))))
+
+                    (set! @evp nil)))
+                (case [EvGCSweepStart]
+                  (let [p (aget ps (.-P ev))]
+                    (when (!= (.-evSweep p) nil)
+                      (return (fmt/Errorf "previous sweeping is not ended before a new one (time %d)" (.-Ts ev))))
+
+                    (set! (.-evSweep p) ev)
+
+                    (aset ps (.-P ev) p)))
+                (case [EvGCMarkAssistStart]
+                  (let [g (aget gs (.-G ev))]
+                    (when (!= (.-evMarkAssist g) nil)
+                      (return (fmt/Errorf "previous mark assist is not ended before a new one (time %d)" (.-Ts ev))))
+
+                    (set! (.-evMarkAssist g) ev)
+
+                    (aset gs (.-G ev) g)))
+                (case [EvGCMarkAssistDone]
+                  ;; Unlike most events, mark assists can be in progress when a
+                  ;; goroutine starts tracing, so we can't report an error here.
+                  (let [g (aget gs (.-G ev))]
+                    (when (!= (.-evMarkAssist g) nil)
+                      (set! (.-evMarkAssist g) nil))
+
+
+                    (aset gs (.-G ev) g)))
+                (case [EvGCSweepDone]
+                  (let [p (aget ps (.-P ev))]
+                    (when (== (.-evSweep p) nil)
+                      (return (fmt/Errorf "bogus sweeping end (time %d)" (.-Ts ev))))
+
+                    (set! (.-evSweep p) nil)
+
+                    (aset ps (.-P ev) p)))
+                (case [EvGoWaiting]
+                  (let [g (aget gs (.-G ev))]
+                    (when (!= (.-state g) gRunnable)
+                      (return (fmt/Errorf "g %d is not runnable before EvGoWaiting (time %d)" (.-G ev) (.-Ts ev))))
+
+                    (set! (.-state g) gWaiting)
+                    (set! (.-ev g) ev)
+
+                    (aset gs (.-G ev) g)))
+                (case [EvGoInSyscall]
+                  (let [g (aget gs (.-G ev))]
+                    (when (!= (.-state g) gRunnable)
+                      (return (fmt/Errorf "g %d is not runnable before EvGoInSyscall (time %d)" (.-G ev) (.-Ts ev))))
+
+                    (set! (.-state g) gWaiting)
+                    (set! (.-ev g) ev)
+
+                    (aset gs (.-G ev) g)))
+                (case [EvGoCreate]
+                  (let [g (aget gs (.-G ev))
+                      ^{:line 1155} p (aget ps (.-P ev))]
+                    (when [err (checkRunning p g ev true)] (!= err nil)
+                      (return err))
+
+                    (when [(values _ ok) (aget gs (aget (.-Args ev) 0))] ok
+                      (return (fmt/Errorf "g %d already exists (time %d)" (aget (.-Args ev) 0) (.-Ts ev))))
+
+                    (aset gs (aget (.-Args ev) 0) (lit gdesc :state gRunnable :ev ev :evCreate ev))))
+
+                (case [EvGoStart EvGoStartLabel]
+                  (let [g (aget gs (.-G ev))
+                      ^{:line 1166} p (aget ps (.-P ev))]
+                    (when (!= (.-state g) gRunnable)
+                      (return (fmt/Errorf "g %d is not runnable before start (time %d)" (.-G ev) (.-Ts ev))))
+
+                    (when (!= (.-g p) 0)
+                      (return (fmt/Errorf "p %d is already running g %d while start g %d (time %d)" (.-P ev) (.-g p) (.-G ev) (.-Ts ev))))
+
+                    (set! (.-state g) gRunning)
+                    (set! (.-evStart g) ev)
+                    (set! (.-g p) (.-G ev))
+                    (when (!= (.-evCreate g) nil)
+                      (set! (.-StkID ev) (conv uint32 (aget (.-Args (.-evCreate g)) 1)))
+                      (set! (.-evCreate g) nil))
+
+
+                    (when (!= (.-ev g) nil)
+                      (set! (.-ev g) nil))
+
+
+                    (aset gs (.-G ev) g)
+                    (aset ps (.-P ev) p)))
+                (case [EvGoEnd EvGoStop]
+                  (let [g (aget gs (.-G ev))
+                      ^{:line 1189} p (aget ps (.-P ev))]
+                    (when [err (checkRunning p g ev false)] (!= err nil)
+                      (return err))
+
+                    (set! (.-evStart g) nil)
+                    (set! (.-state g) gDead)
+                    (set! (.-g p) 0)
+
+                    (when (== (.-Type ev) EvGoEnd) ; flush all active regions
+                      (delete activeRegions (.-G ev)))
+
+
+                    (aset gs (.-G ev) g)
+                    (aset ps (.-P ev) p)))
+                (case [EvGoSched EvGoPreempt]
+                  (let [g (aget gs (.-G ev))
+                      ^{:line 1205} p (aget ps (.-P ev))]
+                    (when [err (checkRunning p g ev false)] (!= err nil)
+                      (return err))
+
+                    (set! (.-state g) gRunnable)
+                    (set! (.-evStart g) nil)
+                    (set! (.-g p) 0)
+                    (set! (.-ev g) ev)
+
+                    (aset gs (.-G ev) g)
+                    (aset ps (.-P ev) p)))
+                (case [EvGoUnblock]
+                  (let [g (aget gs (.-G ev))
+                      ^{:line 1218} p (aget ps (.-P ev))]
+                    (when (!= (.-state g) gRunning)
+                      (return (fmt/Errorf "g %d is not running while unpark (time %d)" (.-G ev) (.-Ts ev))))
+
+                    (when (and (!= (.-P ev) TimerP) (!= (.-g p) (.-G ev)))
+                      (return (fmt/Errorf "p %d is not running g %d while unpark (time %d)" (.-P ev) (.-G ev) (.-Ts ev))))
+
+                    (let [g1 (aget gs (aget (.-Args ev) 0))]
+                      (when (!= (.-state g1) gWaiting)
+                        (return (fmt/Errorf "g %d is not waiting before unpark (time %d)" (aget (.-Args ev) 0) (.-Ts ev))))
+
+                      (when (and (!= (.-ev g1) nil) (== (.-Type (.-ev g1)) EvGoBlockNet))
+                        (set! (.-P ev) NetpollP))
+
+                      (set! (.-state g1) gRunnable)
+                      (set! (.-ev g1) ev)
+                      (aset gs (aget (.-Args ev) 0) g1))))
+
+                (case [EvGoSysCall]
+                  (let [g (aget gs (.-G ev))
+                      ^{:line 1238} p (aget ps (.-P ev))]
+                    (when [err (checkRunning p g ev false)] (!= err nil)
+                      (return err))
+
+                    (set! (.-ev g) ev)
+
+                    (aset gs (.-G ev) g)))
+                (case [EvGoSysBlock]
+                  (let [g (aget gs (.-G ev))
+                      ^{:line 1247} p (aget ps (.-P ev))]
+                    (when [err (checkRunning p g ev false)] (!= err nil)
+                      (return err))
+
+                    (set! (.-state g) gWaiting)
+                    (set! (.-evStart g) nil)
+                    (set! (.-g p) 0)
+
+                    (aset gs (.-G ev) g)
+                    (aset ps (.-P ev) p)))
+                (case [EvGoSysExit]
+                  (let [g (aget gs (.-G ev))]
+                    (when (!= (.-state g) gWaiting)
+                      (return (fmt/Errorf "g %d is not waiting during syscall exit (time %d)" (.-G ev) (.-Ts ev))))
+
+                    (set! (.-state g) gRunnable)
+                    (set! (.-ev g) ev)
+
+                    (aset gs (.-G ev) g)))
+                (case [EvGoSleep EvGoBlock EvGoBlockSend EvGoBlockRecv
+                    ^{:line 1267} EvGoBlockSelect EvGoBlockSync EvGoBlockCond EvGoBlockNet EvGoBlockGC]
+                  (let [g (aget gs (.-G ev))
+                      ^{:line 1269} p (aget ps (.-P ev))]
+                    (when [err (checkRunning p g ev false)] (!= err nil)
+                      (return err))
+
+                    (set! (.-state g) gWaiting)
+                    (set! (.-ev g) ev)
+                    (set! (.-evStart g) nil)
+                    (set! (.-g p) 0)
+
+                    (aset gs (.-G ev) g)
+                    (aset ps (.-P ev) p)))
+                (case [EvUserTaskCreate]
+                  (let [taskid (aget (.-Args ev) 0)]
+                    (when [(values prevEv ok) (aget tasks taskid)] ok
+                      (return (fmt/Errorf "task id conflicts (id:%d), %q vs %q" taskid ev prevEv)))
+
+                    (aset tasks (aget (.-Args ev) 0) ev)))
+
+                (case [EvUserTaskEnd]
+                  (let [taskid (aget (.-Args ev) 0)]
+                    (delete tasks taskid)))
+
+                (case [EvUserRegion]
+                  (let [mode (aget (.-Args ev) 1)
+                      ^{:line 1293} regions (aget activeRegions (.-G ev))]
+                    (cond (== mode 0) ; region start
+                      (aset activeRegions (.-G ev) (append regions ev)) ; push
+                      (== mode 1) ; region end
+                      (let [n (len regions)]
+                        (when (> n 0) ; matching region start event is in the trace.
+                          (let [s (aget regions (- n 1))]
+                            (when (or (!= (aget (.-Args s) 0) (aget (.-Args ev) 0)) (!= (aget (.-Args s) 2) (aget (.-Args ev) 2))) ; task id, region name mismatch
+                              (return (fmt/Errorf "misuse of region in goroutine %d: span end %q when the inner-most active span start event is %q" (.-G ev) ev s)))
+
+
+                            (if (> n 1)
+                              (aset activeRegions (.-G ev) (subslice regions _ (- n 1)))
+
+                              (delete activeRegions (.-G ev)))))) :else
+
+
+
+                      (return (fmt/Errorf "invalid user region mode: %q" ev))))))
+
+
+
+              (when (and (!= (.-StkID ev) 0) (== (len (aget (.-stacks p) (.-StkID ev))) 0))
+                ;; Make sure events don't refer to stacks that don't exist or to
+                ;; stacks with zero frames. Neither of these should be possible, but
+                ;; better be safe than sorry.
+
+                (set! (.-StkID ev) 0))))
+
+
+
+
+          ;; TODO(mknyszek): restore stacks for EvGoStart events.
+          nil)))))
+
+
+(go/var errMalformedVarint (errors/New "malformatted base-128 varint"))
+
+
+^{:go/end 1339} (go/method readVal "readVal reads unsigned base-128 value from r.\n" [^{:tag (* parser)} p] :results [uint64 error]
+  (let [(values v n) (binary/Uvarint (subslice (.-data p) (.-off p)))]
+    (when (<= n 0)
+      (return 0 errMalformedVarint))
+
+    (set! (.-off p) + n)
+    (return v nil)))
+
+
+^{:go/end 1347} (go/func readValFrom [^{:tag (slice byte)} buf] :results [^uint64 v ^{:tag (slice byte)} rem ^error err]
+  (let [(values ^:assign v n) (binary/Uvarint buf)]
+    (when (<= n 0)
+      (return 0 nil errMalformedVarint))
+
+    (return v (subslice buf n) nil)))
+
+
+^{:go/end 1357} (go/method String ^string [^{:tag (* Event)} ev]
+  (let [desc (addr (aget EventDescriptions (.-Type ev)))
+      ^{:line 1351} w (new bytes/Buffer)]
+    (fmt/Fprintf w "%d %s p=%d g=%d stk=%d" (.-Ts ev) (.-Name desc) (.-P ev) (.-G ev) (.-StkID ev))
+    (range [i a (.-Args desc)]
+      (fmt/Fprintf w " %s=%d" a (aget (.-Args ev) i)))
+
+    (.String w)))
+
+
+
+
+^{:go/end 1376} (go/method argNum "argNum returns total number of args for the event accounting for timestamps,\nsequence numbers and differences between trace format versions.\n" ^int [^{:tag (* rawEvent)} raw]
+  (let [desc (addr (aget EventDescriptions (.-typ raw)))]
+    (when (== (.-typ raw) EvStack)
+      (return (len (.-args raw))))
+
+    (let [narg (len (.-Args desc))]
+      (when (.-Stack desc)
+        (inc! narg))
+
+      (switch (.-typ raw)
+        (case [EvBatch EvFrequency EvTimerGoroutine]
+          (return narg)))
+
+      (inc! narg) ; timestamp
+      ^{:line 1375} narg)))
+
+
+(go/type EventType uint8)
+
+
+
+(go/const "Event types in the trace.\nVerbatim copy from src/runtime/trace.go with the \"trace\" prefix removed.\n"
+  ^{:line 1383} [^{:tag EventType :val 0} EvNone 0] ; unused
+  ^{:line 1384} [^{:tag EventType :val 1} EvBatch 1] ; start of per-P batch of events [pid, timestamp]
+  ^{:line 1385} [^{:tag EventType :val 2} EvFrequency 2] ; contains tracer timer frequency [frequency (ticks per second)]
+  ^{:line 1386} [^{:tag EventType :val 3} EvStack 3] ; stack [stack id, number of PCs, array of {PC, func string ID, file string ID, line}]
+  ^{:line 1387} [^{:tag EventType :val 4} EvGomaxprocs 4] ; current value of GOMAXPROCS [timestamp, GOMAXPROCS, stack id]
+  ^{:line 1388} [^{:tag EventType :val 5} EvProcStart 5] ; start of P [timestamp, thread id]
+  ^{:line 1389} [^{:tag EventType :val 6} EvProcStop 6] ; stop of P [timestamp]
+  ^{:line 1390} [^{:tag EventType :val 7} EvGCStart 7] ; GC start [timestamp, seq, stack id]
+  ^{:line 1391} [^{:tag EventType :val 8} EvGCDone 8] ; GC done [timestamp]
+  ^{:line 1392} [^{:tag EventType :val 9} EvSTWStart 9] ; GC mark termination start [timestamp, kind]
+  ^{:line 1393} [^{:tag EventType :val 10} EvSTWDone 10] ; GC mark termination done [timestamp]
+  ^{:line 1394} [^{:tag EventType :val 11} EvGCSweepStart 11] ; GC sweep start [timestamp, stack id]
+  ^{:line 1395} [^{:tag EventType :val 12} EvGCSweepDone 12] ; GC sweep done [timestamp, swept, reclaimed]
+  ^{:line 1396} [^{:tag EventType :val 13} EvGoCreate 13] ; goroutine creation [timestamp, new goroutine id, new stack id, stack id]
+  ^{:line 1397} [^{:tag EventType :val 14} EvGoStart 14] ; goroutine starts running [timestamp, goroutine id, seq]
+  ^{:line 1398} [^{:tag EventType :val 15} EvGoEnd 15] ; goroutine ends [timestamp]
+  ^{:line 1399} [^{:tag EventType :val 16} EvGoStop 16] ; goroutine stops (like in select{}) [timestamp, stack]
+  ^{:line 1400} [^{:tag EventType :val 17} EvGoSched 17] ; goroutine calls Gosched [timestamp, stack]
+  ^{:line 1401} [^{:tag EventType :val 18} EvGoPreempt 18] ; goroutine is preempted [timestamp, stack]
+  ^{:line 1402} [^{:tag EventType :val 19} EvGoSleep 19] ; goroutine calls Sleep [timestamp, stack]
+  ^{:line 1403} [^{:tag EventType :val 20} EvGoBlock 20] ; goroutine blocks [timestamp, stack]
+  ^{:line 1404} [^{:tag EventType :val 21} EvGoUnblock 21] ; goroutine is unblocked [timestamp, goroutine id, seq, stack]
+  ^{:line 1405} [^{:tag EventType :val 22} EvGoBlockSend 22] ; goroutine blocks on chan send [timestamp, stack]
+  ^{:line 1406} [^{:tag EventType :val 23} EvGoBlockRecv 23] ; goroutine blocks on chan recv [timestamp, stack]
+  ^{:line 1407} [^{:tag EventType :val 24} EvGoBlockSelect 24] ; goroutine blocks on select [timestamp, stack]
+  ^{:line 1408} [^{:tag EventType :val 25} EvGoBlockSync 25] ; goroutine blocks on Mutex/RWMutex [timestamp, stack]
+  ^{:line 1409} [^{:tag EventType :val 26} EvGoBlockCond 26] ; goroutine blocks on Cond [timestamp, stack]
+  ^{:line 1410} [^{:tag EventType :val 27} EvGoBlockNet 27] ; goroutine blocks on network [timestamp, stack]
+  ^{:line 1411} [^{:tag EventType :val 28} EvGoSysCall 28] ; syscall enter [timestamp, stack]
+  ^{:line 1412} [^{:tag EventType :val 29} EvGoSysExit 29] ; syscall exit [timestamp, goroutine id, seq, real timestamp]
+  ^{:line 1413} [^{:tag EventType :val 30} EvGoSysBlock 30] ; syscall blocks [timestamp]
+  ^{:line 1414} [^{:tag EventType :val 31} EvGoWaiting 31] ; denotes that goroutine is blocked when tracing starts [timestamp, goroutine id]
+  ^{:line 1415} [^{:tag EventType :val 32} EvGoInSyscall 32] ; denotes that goroutine is in syscall when tracing starts [timestamp, goroutine id]
+  ^{:line 1416} [^{:tag EventType :val 33} EvHeapAlloc 33] ; gcController.heapLive change [timestamp, heap live bytes]
+  ^{:line 1417} [^{:tag EventType :val 34} EvHeapGoal 34] ; gcController.heapGoal change [timestamp, heap goal bytes]
+  ^{:line 1418} [^{:tag EventType :val 35} EvTimerGoroutine 35] ; denotes timer goroutine [timer goroutine id]
+  ^{:line 1419} [^{:tag EventType :val 36} EvFutileWakeup 36] ; denotes that the previous wakeup of this goroutine was futile [timestamp]
+  ^{:line 1420} [^{:tag EventType :val 37} EvString 37] ; string dictionary entry [ID, length, string]
+  ^{:line 1421} [^{:tag EventType :val 38} EvGoStartLocal 38] ; goroutine starts running on the same P as the last event [timestamp, goroutine id]
+  ^{:line 1422} [^{:tag EventType :val 39} EvGoUnblockLocal 39] ; goroutine is unblocked on the same P as the last event [timestamp, goroutine id, stack]
+  ^{:line 1423} [^{:tag EventType :val 40} EvGoSysExitLocal 40] ; syscall exit on the same P as the last event [timestamp, goroutine id, real timestamp]
+  ^{:line 1424} [^{:tag EventType :val 41} EvGoStartLabel 41] ; goroutine starts running with label [timestamp, goroutine id, seq, label string id]
+  ^{:line 1425} [^{:tag EventType :val 42} EvGoBlockGC 42] ; goroutine blocks on GC assist [timestamp, stack]
+  ^{:line 1426} [^{:tag EventType :val 43} EvGCMarkAssistStart 43] ; GC mark assist start [timestamp, stack]
+  ^{:line 1427} [^{:tag EventType :val 44} EvGCMarkAssistDone 44] ; GC mark assist done [timestamp]
+  ^{:line 1428} [^{:tag EventType :val 45} EvUserTaskCreate 45] ; trace.NewTask [timestamp, internal task id, internal parent id, stack, name string]
+  ^{:line 1429} [^{:tag EventType :val 46} EvUserTaskEnd 46] ; end of task [timestamp, internal task id, stack]
+  ^{:line 1430} [^{:tag EventType :val 47} EvUserRegion 47] ; trace.WithRegion [timestamp, internal task id, mode(0:start, 1:end), name string]
+  ^{:line 1431} [^{:tag EventType :val 48} EvUserLog 48] ; trace.Log [timestamp, internal id, key string id, stack, value string]
+  ^{:line 1432} [^{:tag EventType :val 49} EvCPUSample 49] ; CPU profiling sample [timestamp, stack, real timestamp, real P id (-1 when absent), goroutine id]
+  ^{:line 1433} [^{:tag EventType :val 50} EvCount 50])
+
+
+(go/var EventDescriptions (lit (array 256 (struct
+        ^{:line 1437 :tag string} Name
+        ^{:line 1438 :tag version/Version} minVersion
+        ^{:line 1439 :tag bool} Stack
+        ^{:line 1440 :tag (slice string)} Args
+        ^{:line 1441 :tag (slice string)} SArgs)) ; string arguments
+
+    ^{:line 1443} [EvNone (lit _ "None" 5 false (lit (slice string)) nil)]
+    ^{:line 1444} [EvBatch (lit _ "Batch" 5 false (lit (slice string) "p" "ticks") nil)] ; in 1.5 format it was {"p", "seq", "ticks"}
+    ^{:line 1445} [EvFrequency (lit _ "Frequency" 5 false (lit (slice string) "freq") nil)] ; in 1.5 format it was {"freq", "unused"}
+    ^{:line 1446} [EvStack (lit _ "Stack" 5 false (lit (slice string) "id" "siz") nil)]
+    ^{:line 1447} [EvGomaxprocs (lit _ "Gomaxprocs" 5 true (lit (slice string) "procs") nil)]
+    ^{:line 1448} [EvProcStart (lit _ "ProcStart" 5 false (lit (slice string) "thread") nil)]
+    ^{:line 1449} [EvProcStop (lit _ "ProcStop" 5 false (lit (slice string)) nil)]
+    ^{:line 1450} [EvGCStart (lit _ "GCStart" 5 true (lit (slice string) "seq") nil)] ; in 1.5 format it was {}
+    ^{:line 1451} [EvGCDone (lit _ "GCDone" 5 false (lit (slice string)) nil)]
+    ^{:line 1452} [EvSTWStart (lit _ "GCSTWStart" 5 false (lit (slice string) "kindid") (lit (slice string) "kind"))] ; <= 1.9, args was {} (implicitly {0})
+    ^{:line 1453} [EvSTWDone (lit _ "GCSTWDone" 5 false (lit (slice string)) nil)]
+    ^{:line 1454} [EvGCSweepStart (lit _ "GCSweepStart" 5 true (lit (slice string)) nil)]
+    ^{:line 1455} [EvGCSweepDone (lit _ "GCSweepDone" 5 false (lit (slice string) "swept" "reclaimed") nil)] ; before 1.9, format was {}
+    ^{:line 1456} [EvGoCreate (lit _ "GoCreate" 5 true (lit (slice string) "g" "stack") nil)]
+    ^{:line 1457} [EvGoStart (lit _ "GoStart" 5 false (lit (slice string) "g" "seq") nil)] ; in 1.5 format it was {"g"}
+    ^{:line 1458} [EvGoEnd (lit _ "GoEnd" 5 false (lit (slice string)) nil)]
+    ^{:line 1459} [EvGoStop (lit _ "GoStop" 5 true (lit (slice string)) nil)]
+    ^{:line 1460} [EvGoSched (lit _ "GoSched" 5 true (lit (slice string)) nil)]
+    ^{:line 1461} [EvGoPreempt (lit _ "GoPreempt" 5 true (lit (slice string)) nil)]
+    ^{:line 1462} [EvGoSleep (lit _ "GoSleep" 5 true (lit (slice string)) nil)]
+    ^{:line 1463} [EvGoBlock (lit _ "GoBlock" 5 true (lit (slice string)) nil)]
+    ^{:line 1464} [EvGoUnblock (lit _ "GoUnblock" 5 true (lit (slice string) "g" "seq") nil)] ; in 1.5 format it was {"g"}
+    ^{:line 1465} [EvGoBlockSend (lit _ "GoBlockSend" 5 true (lit (slice string)) nil)]
+    ^{:line 1466} [EvGoBlockRecv (lit _ "GoBlockRecv" 5 true (lit (slice string)) nil)]
+    ^{:line 1467} [EvGoBlockSelect (lit _ "GoBlockSelect" 5 true (lit (slice string)) nil)]
+    ^{:line 1468} [EvGoBlockSync (lit _ "GoBlockSync" 5 true (lit (slice string)) nil)]
+    ^{:line 1469} [EvGoBlockCond (lit _ "GoBlockCond" 5 true (lit (slice string)) nil)]
+    ^{:line 1470} [EvGoBlockNet (lit _ "GoBlockNet" 5 true (lit (slice string)) nil)]
+    ^{:line 1471} [EvGoSysCall (lit _ "GoSysCall" 5 true (lit (slice string)) nil)]
+    ^{:line 1472} [EvGoSysExit (lit _ "GoSysExit" 5 false (lit (slice string) "g" "seq" "ts") nil)]
+    ^{:line 1473} [EvGoSysBlock (lit _ "GoSysBlock" 5 false (lit (slice string)) nil)]
+    ^{:line 1474} [EvGoWaiting (lit _ "GoWaiting" 5 false (lit (slice string) "g") nil)]
+    ^{:line 1475} [EvGoInSyscall (lit _ "GoInSyscall" 5 false (lit (slice string) "g") nil)]
+    ^{:line 1476} [EvHeapAlloc (lit _ "HeapAlloc" 5 false (lit (slice string) "mem") nil)]
+    ^{:line 1477} [EvHeapGoal (lit _ "HeapGoal" 5 false (lit (slice string) "mem") nil)]
+    ^{:line 1478} [EvTimerGoroutine (lit _ "TimerGoroutine" 5 false (lit (slice string) "g") nil)] ; in 1.5 format it was {"g", "unused"}
+    ^{:line 1479} [EvFutileWakeup (lit _ "FutileWakeup" 5 false (lit (slice string)) nil)]
+    ^{:line 1480} [EvString (lit _ "String" 7 false (lit (slice string)) nil)]
+    ^{:line 1481} [EvGoStartLocal (lit _ "GoStartLocal" 7 false (lit (slice string) "g") nil)]
+    ^{:line 1482} [EvGoUnblockLocal (lit _ "GoUnblockLocal" 7 true (lit (slice string) "g") nil)]
+    ^{:line 1483} [EvGoSysExitLocal (lit _ "GoSysExitLocal" 7 false (lit (slice string) "g" "ts") nil)]
+    ^{:line 1484} [EvGoStartLabel (lit _ "GoStartLabel" 8 false (lit (slice string) "g" "seq" "labelid") (lit (slice string) "label"))]
+    ^{:line 1485} [EvGoBlockGC (lit _ "GoBlockGC" 8 true (lit (slice string)) nil)]
+    ^{:line 1486} [EvGCMarkAssistStart (lit _ "GCMarkAssistStart" 9 true (lit (slice string)) nil)]
+    ^{:line 1487} [EvGCMarkAssistDone (lit _ "GCMarkAssistDone" 9 false (lit (slice string)) nil)]
+    ^{:line 1488} [EvUserTaskCreate (lit _ "UserTaskCreate" 11 true (lit (slice string) "taskid" "pid" "typeid") (lit (slice string) "name"))]
+    ^{:line 1489} [EvUserTaskEnd (lit _ "UserTaskEnd" 11 true (lit (slice string) "taskid") nil)]
+    ^{:line 1490} [EvUserRegion (lit _ "UserRegion" 11 true (lit (slice string) "taskid" "mode" "typeid") (lit (slice string) "name"))]
+    ^{:line 1491} [EvUserLog (lit _ "UserLog" 11 true (lit (slice string) "id" "keyid") (lit (slice string) "category" "message"))]
+    ^{:line 1492} [EvCPUSample (lit _ "CPUSample" 19 true (lit (slice string) "ts" "p" "g") nil)]))
+
+
+(go/directive "//gcassert:inline")
+^{:go/end 1511} (go/method allocateStack ^{:tag (slice uint64)} [^{:tag (* parser)} p ^uint64 size]
+  (when (== size 0)
+    (return nil))
+
+
+  ;; Stacks are plentiful but small. For our "Staticcheck on std" trace with
+  ;; 11e6 events, we have roughly 500,000 stacks, using 200 MiB of memory. To
+  ;; avoid making 500,000 small allocations we allocate backing arrays 1 MiB
+  ;; at a time.
+  (let [out (.-stacksData p)]
+    (when (< (conv uint64 (len out)) size)
+      (set! out (make (slice uint64) (* 1024 128))))
+
+    (set! (.-stacksData p) (subslice out size))
+    (subslice out _ size size)))
+
+
+^{:go/end 1529} (go/method STWReason ^STWReason [^{:tag (* Trace)} tr ^uint64 kindID]
+  (cond (< (.-Version tr) 21)
+    (if (or (== kindID 0) (== kindID 1))
+      (return (conv STWReason (+ kindID 1)))
+
+      (return STWUnknown))
+
+    (== (.-Version tr) 21)
+    (if (< kindID NumSTWReasons)
+      (return (conv STWReason kindID))
+
+      (return STWUnknown)) :else
+
+
+    (return STWUnknown)))
+
+
+
+(go/type STWReason int)
+
+(go/const
+  ^{:line 1534} [^{:tag STWReason :val 0} STWUnknown 0]
+  ^{:line 1535} [^{:tag STWReason :val 1} STWGCMarkTermination 1]
+  ^{:line 1536} [^{:tag STWReason :val 2} STWGCSweepTermination 2]
+  ^{:line 1537} [^{:tag STWReason :val 3} STWWriteHeapDump 3]
+  ^{:line 1538} [^{:tag STWReason :val 4} STWGoroutineProfile 4]
+  ^{:line 1539} [^{:tag STWReason :val 5} STWGoroutineProfileCleanup 5]
+  ^{:line 1540} [^{:tag STWReason :val 6} STWAllGoroutinesStackTrace 6]
+  ^{:line 1541} [^{:tag STWReason :val 7} STWReadMemStats 7]
+  ^{:line 1542} [^{:tag STWReason :val 8} STWAllThreadsSyscall 8]
+  ^{:line 1543} [^{:tag STWReason :val 9} STWGOMAXPROCS 9]
+  ^{:line 1544} [^{:tag STWReason :val 10} STWStartTrace 10]
+  ^{:line 1545} [^{:tag STWReason :val 11} STWStopTrace 11]
+  ^{:line 1546} [^{:tag STWReason :val 12} STWCountPagesInUse 12]
+  ^{:line 1547} [^{:tag STWReason :val 13} STWReadMetricsSlow 13]
+  ^{:line 1548} [^{:tag STWReason :val 14} STWReadMemStatsSlow 14]
+  ^{:line 1549} [^{:tag STWReason :val 15} STWPageCachePagesLeaked 15]
+  ^{:line 1550} [^{:tag STWReason :val 16} STWResetDebugLog 16]
+
+  ^{:line 1552} [^{:val 17} NumSTWReasons 17])

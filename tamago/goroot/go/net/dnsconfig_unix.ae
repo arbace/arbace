@@ -1,0 +1,163 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+;; Read system DNS config from /etc/resolv.conf
+
+(in-ns 'go.net) (go/file "dnsconfig_unix.go" :build ["//go:build !windows"] :imports [
+
+
+    ^{:line 12} [bytealg "internal/bytealg"]
+    ^{:line 13} [stringslite "internal/stringslite"]
+    ^{:line 14} [netip "net/netip"]
+    ^{:line 15} [time "time"]])
+
+
+
+^{:go/end 145} (go/func dnsReadConfig "See resolv.conf(5) on a Linux machine.\n" ^{:tag (* dnsConfig)} [^string filename]
+  (let [conf (addr ^{:go/breaks [2 4 6]} (lit dnsConfig
+          :ndots 1
+          :timeout (* 5 time/Second)
+          :attempts 2))
+
+      (values file err) (open filename)]
+    (when (!= err nil)
+      (set! (.-servers conf) defaultNS)
+      (set! (.-search conf) (dnsDefaultSearch))
+      (set! (.-err conf) err)
+      (return conf))
+
+    (defer (.close file))
+    (if [(values fi err) (.Stat (.-file file))] (== err nil)
+      (set! (.-mtime conf) (.ModTime fi))
+      (do
+        (set! (.-servers conf) defaultNS)
+        (set! (.-search conf) (dnsDefaultSearch))
+        (set! (.-err conf) err)
+        (return conf)))
+
+    (for [(values line ok) (.readLine file)] ok (set! (values line ok) (.readLine file))
+      (when (and (> (len line) 0) ^:go/paren (or (== (aget line 0) \;) (== (aget line 0) \#)))
+        ;; comment.
+        (continue))
+
+      (let [f (getFields line)]
+        (when (< (len f) 1)
+          (continue))
+
+        (switch (aget f 0)
+          (case ["nameserver"] ; add one name server
+            (when (and (> (len f) 1) (< (len (.-servers conf)) 3)) ; small, but the standard limit
+              ;; One more check: make sure server name is
+              ;; just an IP address. Otherwise we need DNS
+              ;; to look it up.
+              (when [(values _ err) (netip/ParseAddr (aget f 1))] (== err nil)
+                (set! (.-servers conf) (append (.-servers conf) (JoinHostPort (aget f 1) "53"))))))
+
+
+
+          (case ["domain"] ; set search path to just this domain
+            (when (> (len f) 1)
+              (set! (.-search conf) (lit (slice string) (ensureRooted (aget f 1))))))
+
+
+          (case ["search"] ; set search path to given servers
+            (set! (.-search conf) (make (slice string) 0 (- (len f) 1)))
+            (for [i 1] (< i (len f)) (inc! i)
+              (let [name (ensureRooted (aget f i))]
+                (when (== name ".")
+                  (continue))
+
+                (set! (.-search conf) (append (.-search conf) name)))))
+
+
+          (case ["options"] ; magic options
+            (range [_ s (subslice f 1)]
+              (switch
+                (case [(stringslite/HasPrefix s "ndots:")]
+                  (let [(values n _ _) (dtoi (subslice s 6))]
+                    (cond (< n 0)
+                      (set! n 0)
+                      (> n 15)
+                      (set! n 15))
+
+                    (set! (.-ndots conf) n)))
+                (case [(stringslite/HasPrefix s "timeout:")]
+                  (let [(values n _ _) (dtoi (subslice s 8))]
+                    (when (< n 1)
+                      (set! n 1))
+
+                    (set! (.-timeout conf) (* (conv time/Duration n) time/Second))))
+                (case [(stringslite/HasPrefix s "attempts:")]
+                  (let [(values n _ _) (dtoi (subslice s 9))]
+                    (when (< n 1)
+                      (set! n 1))
+
+                    (set! (.-attempts conf) n)))
+                (case [(== s "rotate")]
+                  (set! (.-rotate conf) true))
+                (case [(or (== s "single-request") (== s "single-request-reopen"))]
+                  ;; Linux option:
+                  ;; http://man7.org/linux/man-pages/man5/resolv.conf.5.html
+                  ;; "By default, glibc performs IPv4 and IPv6 lookups in parallel [...]
+                  ;;  This option disables the behavior and makes glibc
+                  ;;  perform the IPv6 and IPv4 requests sequentially."
+                  (set! (.-singleRequest conf) true))
+                (case [(or (== s "use-vc") (== s "usevc") (== s "tcp"))]
+                  ;; Linux (use-vc), FreeBSD (usevc) and OpenBSD (tcp) option:
+                  ;; http://man7.org/linux/man-pages/man5/resolv.conf.5.html
+                  ;; "Sets RES_USEVC in _res.options.
+                  ;;  This option forces the use of TCP for DNS resolutions."
+                  ;; https://www.freebsd.org/cgi/man.cgi?query=resolv.conf&sektion=5&manpath=freebsd-release-ports
+                  ;; https://man.openbsd.org/resolv.conf.5
+                  (set! (.-useTCP conf) true))
+                (case [(== s "trust-ad")]
+                  (set! (.-trustAD conf) true))
+                (case [(== s "edns0")])
+                ;; We use EDNS by default.
+                ;; Ignore this option.
+                (case [(== s "no-reload")]
+                  (set! (.-noReload conf) true))
+                (default
+                  (set! (.-unknownOpt conf) true)))))
+
+
+
+          (case ["lookup"]
+            ;; OpenBSD option:
+            ;; https://www.openbsd.org/cgi-bin/man.cgi/OpenBSD-current/man5/resolv.conf.5
+            ;; "the legal space-separated values are: bind, file, yp"
+            (set! (.-lookup conf) (subslice f 1)))
+
+          (default
+            (set! (.-unknownOpt conf) true)))))
+
+
+    (when (== (len (.-servers conf)) 0)
+      (set! (.-servers conf) defaultNS))
+
+    (when (== (len (.-search conf)) 0)
+      (set! (.-search conf) (dnsDefaultSearch)))
+
+    ^{:line 144} conf))
+
+
+^{:go/end 157} (go/func dnsDefaultSearch ^{:tag (slice string)} []
+  ^{:go/breaks [[4 156]]} (let [(values hn err) (getHostname)]
+    (when (!= err nil)
+      ;; best effort
+      (return nil))
+
+    (when [i (bytealg/IndexByteString hn \.)] (and (>= i 0) (< i (- (len hn) 1)))
+      (return (lit (slice string) (ensureRooted (subslice hn (+ i 1))))))
+
+    nil))
+
+
+^{:go/end 164} (go/func ensureRooted ^string [^string s]
+  (when (and (> (len s) 0) (== (aget s (- (len s) 1)) \.))
+    (return s))
+
+  (+ s "."))

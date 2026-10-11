@@ -1,0 +1,210 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package crc64 implements the 64-bit cyclic redundancy check, or CRC-64,
+;; checksum. See https://en.wikipedia.org/wiki/Cyclic_redundancy_check for
+;; information.
+(in-ns 'go.hash.crc64) (go/file "crc64.go" :doc "Package crc64 implements the 64-bit cyclic redundancy check, or CRC-64,\nchecksum. See https://en.wikipedia.org/wiki/Cyclic_redundancy_check for\ninformation.\n" :imports [
+
+
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [hash "hash"]
+    ^{:line 13} [byteorder "internal/byteorder"]
+    ^{:line 14} [sync "sync"]])
+
+
+
+(go/const ^{:val 8 :doc "The size of a CRC-64 checksum in bytes.\n"} Size 8)
+
+
+(go/const "Predefined polynomials.\n"
+
+  ^{:line 23} [^{:val 15564440312192434176N :doc "The ISO polynomial, defined in ISO 3309 and used in HDLC.\n"} ISO 0xD800000000000000]
+
+
+  ^{:line 26} [^{:val 14514072000185962306N :doc "The ECMA polynomial, defined in ECMA 182.\n"} ECMA 0xC96C5795D7870F42])
+
+
+
+(go/type Table "Table is a 256-word table representing the polynomial for efficient processing.\n" (array 256 uint64))
+
+(go/var
+  ^{:line 33} [^{:tag (* (array 8 Table))} slicing8TableISO]
+  ^{:line 34} [^{:tag (* (array 8 Table))} slicing8TableECMA])
+
+
+(go/var buildSlicing8TablesOnce (sync/OnceFunc buildSlicing8Tables))
+
+^{:go/end 42} (go/func buildSlicing8Tables []
+  (set! slicing8TableISO (makeSlicingBy8Table (makeTable ISO)))
+  (set! slicing8TableECMA (makeSlicingBy8Table (makeTable ECMA))))
+
+
+
+
+^{:go/end 56} (go/func MakeTable "MakeTable returns a [Table] constructed from the specified polynomial.\nThe contents of this [Table] must not be modified.\n" ^{:tag (* Table)} [^uint64 poly]
+  (buildSlicing8TablesOnce)
+  (switch poly
+    (case [ISO]
+      (return (addr (aget slicing8TableISO 0))))
+    (case [ECMA]
+      (return (addr (aget slicing8TableECMA 0))))
+    (default
+      (return (makeTable poly)))))
+
+
+
+^{:go/end 72} (go/func makeTable ^{:tag (* Table)} [^uint64 poly]
+  (let [t (new Table)]
+    (for [i 0] (< i 256) (inc! i)
+      (let [crc (conv uint64 i)]
+        (for [j 0] (< j 8) (inc! j)
+          (if (== (bit-and crc 1) 1)
+            (set! crc (bit-xor (>> crc 1) poly))
+
+            (set! crc >> 1)))
+
+
+        (aset t i crc)))
+
+    ^{:line 71} t))
+
+
+^{:go/end 85} (go/func makeSlicingBy8Table ^{:tag (* (array 8 Table))} [^{:tag (* Table)} t]
+  (let [^{:tag (array 8 Table)} helperTable (zero (array 8 Table))]
+    (aset helperTable 0 @t)
+    (for [i 0] (< i 256) (inc! i)
+      (let [crc (aget t i)]
+        (for [j 1] (< j 8) (inc! j)
+          (set! crc (bit-xor (aget t (bit-and crc 0xff)) (>> crc 8)))
+          (aset (aget helperTable j) i crc))))
+
+
+    (addr helperTable)))
+
+
+
+(go/type digest "digest represents the partial evaluation of a checksum.\n" (struct
+    ^{:line 89 :tag uint64} crc
+    ^{:line 90 :tag (* Table)} tab))
+
+
+
+
+
+
+
+^{:go/end 98} (go/func New "New creates a new hash.Hash64 computing the CRC-64 checksum using the\npolynomial represented by the [Table]. Its Sum method will lay the\nvalue out in big-endian byte order. The returned Hash64 also\nimplements [encoding.BinaryMarshaler] and [encoding.BinaryUnmarshaler] to\nmarshal and unmarshal the internal state of the hash.\n" ^hash/Hash64 [^{:tag (* Table)} tab] (addr (lit digest 0 tab)))
+
+^{:go/end 100} (go/method Size ^int [^{:tag (* digest)} d] Size)
+
+^{:go/end 102} (go/method BlockSize ^int [^{:tag (* digest)} d] 1)
+
+^{:go/end 104} (go/method Reset [^{:tag (* digest)} d] (set! (.-crc d) 0))
+
+(go/const
+  ^{:line 107} [^{:val "crc\u0002"} magic "crc\u0002"]
+  ^{:line 108} [^{:val 20} marshaledSize (+ (len magic) 8 8)])
+
+
+^{:go/end 116} (go/method AppendBinary [^{:tag (* digest)} d ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (set! b (append b (spread magic)))
+  (set! b (byteorder/BEAppendUint64 b (tableSum (.-tab d))))
+  (set! b (byteorder/BEAppendUint64 b (.-crc d)))
+  (return b nil))
+
+
+^{:go/end 120} (go/method MarshalBinary [^{:tag (* digest)} d] :results [(slice byte) error]
+  (.AppendBinary d (make (slice byte) 0 marshaledSize)))
+
+
+^{:go/breaks [7] :go/end 134} (go/method UnmarshalBinary ^error [^{:tag (* digest)} d ^{:tag (slice byte)} b]
+  (when (or (< (len b) (len magic)) (!= (conv string (subslice b _ (len magic))) magic))
+    (return (errors/New "hash/crc64: invalid hash state identifier")))
+
+  (when (!= (len b) marshaledSize)
+    (return (errors/New "hash/crc64: invalid hash state size")))
+
+  (when (!= (tableSum (.-tab d)) (byteorder/BEUint64 (subslice b 4)))
+    (return (errors/New "hash/crc64: tables do not match")))
+
+  (set! (.-crc d) (byteorder/BEUint64 (subslice b 12)))
+  nil)
+
+
+^{:go/end 139} (go/method Clone [^{:tag (* digest)} d] :results [hash/Cloner error]
+  (let [r @d]
+    (return (addr r) nil)))
+
+
+^{:go/end 178} (go/func update ^uint64 [^uint64 crc ^{:tag (* Table)} tab ^{:tag (slice byte)} p]
+  (buildSlicing8TablesOnce)
+  (set! crc (bit-not crc))
+  ;; Table comparison is somewhat expensive, so avoid it for small sizes
+  (while (>= (len p) 64)
+    (let [^{:tag (* (array 8 Table))} helperTable (zero (* (array 8 Table)))]
+      (cond (== @tab (aget slicing8TableECMA 0))
+        (set! helperTable slicing8TableECMA)
+        (== @tab (aget slicing8TableISO 0))
+        (set! helperTable slicing8TableISO)
+        ;; For smaller sizes creating extended table takes too much time
+        (>= (len p) 2048)
+        ;; According to the tests between various x86 and arm CPUs, 2k is a reasonable
+        ;; threshold for now. This may change in the future.
+        (set! helperTable (makeSlicingBy8Table tab)) :else
+
+        (break))
+
+      ;; Update using slicing-by-8
+      (while (> (len p) 8)
+        (set! crc bit-xor (byteorder/LEUint64 p))
+        (set! crc (bit-xor (aget (aget helperTable 7) (bit-and crc 0xff))
+            (aget (aget helperTable 6) (bit-and (>> crc 8) 0xff))
+            (aget (aget helperTable 5) (bit-and (>> crc 16) 0xff))
+            (aget (aget helperTable 4) (bit-and (>> crc 24) 0xff))
+            (aget (aget helperTable 3) (bit-and (>> crc 32) 0xff))
+            (aget (aget helperTable 2) (bit-and (>> crc 40) 0xff))
+            (aget (aget helperTable 1) (bit-and (>> crc 48) 0xff))
+            (aget (aget helperTable 0) (>> crc 56))))
+        (set! p (subslice p 8)))))
+
+
+  ;; For reminders or small sizes
+  (range [_ v p]
+    (set! crc (bit-xor (aget tab (bit-xor (conv byte crc) v)) (>> crc 8))))
+
+  (bit-not crc))
+
+
+
+^{:go/end 183} (go/func Update "Update returns the result of adding the bytes in p to the crc.\n" ^uint64 [^uint64 crc ^{:tag (* Table)} tab ^{:tag (slice byte)} p]
+  (update crc tab p))
+
+
+^{:go/end 188} (go/method Write [^{:tag (* digest)} d ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (set! (.-crc d) (update (.-crc d) (.-tab d) p))
+  (return (len p) nil))
+
+
+^{:go/end 190} (go/method Sum64 ^uint64 [^{:tag (* digest)} d] (.-crc d))
+
+^{:go/end 195} (go/method Sum ^{:tag (slice byte)} [^{:tag (* digest)} d ^{:tag (slice byte)} in]
+  (let [s (.Sum64 d)]
+    (append in (conv byte (>> s 56)) (conv byte (>> s 48)) (conv byte (>> s 40)) (conv byte (>> s 32)) (conv byte (>> s 24)) (conv byte (>> s 16)) (conv byte (>> s 8)) (conv byte s))))
+
+
+
+
+^{:go/end 199} (go/func Checksum "Checksum returns the CRC-64 checksum of data\nusing the polynomial represented by the [Table].\n" ^uint64 [^{:tag (slice byte)} data ^{:tag (* Table)} tab] (update 0 tab data))
+
+
+^{:go/end 211} (go/func tableSum "tableSum returns the ISO checksum of table t.\n" ^uint64 [^{:tag (* Table)} t]
+  (let [^{:tag (array 2048 byte)} a (zero (array 2048 byte))
+      ^{:line 204} b (subslice a _ 0)]
+    (when (!= t nil)
+      (range [_ x t]
+        (set! b (byteorder/BEAppendUint64 b x))))
+
+
+    (Checksum b (MakeTable ISO))))

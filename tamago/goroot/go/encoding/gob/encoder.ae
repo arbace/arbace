@@ -1,0 +1,257 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.encoding.gob) (go/file "encoder.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [reflect "reflect"]
+    ^{:line 11} [sync "sync"]])
+
+
+
+
+
+(go/type Encoder "An Encoder manages the transmission of type and data information to the\nother side of a connection.  It is safe for concurrent use by multiple\ngoroutines.\n" (struct
+    ^{:line 18 :tag sync/Mutex} mutex ; each item must be sent atomically
+    ^{:line 19 :tag (slice io/Writer)} w ; where to send the data
+    ^{:line 20 :tag (map reflect/Type typeId)} sent ; which types we've already sent
+    ^{:line 21 :tag (* encoderState)} countState ; stage for writing counts
+    ^{:line 22 :tag (* encoderState)} freeList ; list of free encoderStates; avoids reallocation
+    ^{:line 23 :tag encBuffer} byteBuf ; buffer for top-level encoderState
+    ^{:line 24 :tag error} err))
+
+
+
+
+
+(go/const ^{:val 9 :doc "Before we encode a message, we reserve space at the head of the\nbuffer in which to encode its length. This means we can use the\nbuffer to assemble the message without another allocation.\n"} maxLength 9) ; Maximum size of an encoded length.
+(go/var spaceForLength (make (slice byte) maxLength))
+
+
+^{:go/end 40} (go/func NewEncoder "NewEncoder returns a new encoder that will transmit on the [io.Writer].\n" ^{:tag (* Encoder)} [^io/Writer w]
+  (let [enc (new Encoder)]
+    (set! (.-w enc) (lit (slice io/Writer) w))
+    (set! (.-sent enc) (make (map reflect/Type typeId)))
+    (set! (.-countState enc) (.newEncoderState enc (new encBuffer)))
+    ^{:line 39} enc))
+
+
+
+^{:go/end 45} (go/method writer "writer returns the innermost writer the encoder is using.\n" ^io/Writer [^{:tag (* Encoder)} enc]
+  (aget (.-w enc) (- (len (.-w enc)) 1)))
+
+
+
+^{:go/end 50} (go/method pushWriter "pushWriter adds a writer to the encoder.\n" [^{:tag (* Encoder)} enc ^io/Writer w]
+  (set! (.-w enc) (append (.-w enc) w)))
+
+
+
+^{:go/end 55} (go/method popWriter "popWriter pops the innermost writer.\n" [^{:tag (* Encoder)} enc]
+  (set! (.-w enc) (subslice (.-w enc) 0 (- (len (.-w enc)) 1))))
+
+
+^{:go/end 61} (go/method setError [^{:tag (* Encoder)} enc ^error err]
+  (when (== (.-err enc) nil) ; remember the first.
+    (set! (.-err enc) err)))
+
+
+
+
+^{:go/end 89} (go/method writeMessage "writeMessage sends the data item preceded by an unsigned count of its length.\n" [^{:tag (* Encoder)} enc ^io/Writer w ^{:tag (* encBuffer)} b]
+  ;; Space has been reserved for the length at the head of the message.
+  ;; This is a little dirty: we grab the slice from the bytes.Buffer and massage
+  ;; it by hand.
+  (let [message (.Bytes b)
+      ^{:line 69} messageLen (- (len message) maxLength)]
+    ;; Length cannot be bigger than the decoder can handle.
+    (when (>= messageLen tooBig)
+      (.setError enc (errors/New "gob: encoder: message too big"))
+      (return))
+
+    ;; Encode the length.
+    (.Reset (.-b (.-countState enc)))
+    (.encodeUint (.-countState enc) (conv uint64 messageLen))
+    ;; Copy the length to be a prefix of the message.
+    (let [offset (- maxLength (.Len (.-b (.-countState enc))))]
+      (copy (subslice message offset) (.Bytes (.-b (.-countState enc))))
+      ;; Write the data.
+      (let [(values _ err) (.Write w (subslice message offset))]
+        ;; Drain the buffer and restore the space at the front for the count of the next message.
+        (.Reset b)
+        (.Write b spaceForLength)
+        (when (!= err nil)
+          (.setError enc err))))))
+
+
+
+
+
+^{:go/end 132} (go/method sendActualType "sendActualType sends the requested type, without further investigation, unless\nit's been sent before.\n" [^{:tag (* Encoder)} enc ^io/Writer w ^{:tag (* encoderState)} state ^{:tag (* userTypeInfo)} ut ^reflect/Type actual] :results [^bool sent]
+  (when [(values _ alreadySent) (aget (.-sent enc) actual)] alreadySent
+    (return false))
+
+  ^{:go/breaks [[10 131]]} (let [(values info err) (getTypeInfo ut)]
+    (when (!= err nil)
+      (.setError enc err)
+      (return))
+
+    ;; Send the pair (-id, type)
+    ;; Id:
+    (.encodeInt state (- (conv int64 (.-id info))))
+    ;; Type:
+    (.encode enc (.-b state) (reflect/ValueOf (.-wire info)) wireTypeUserInfo)
+    (.writeMessage enc w (.-b state))
+    (when (!= (.-err enc) nil)
+      (return))
+
+
+    ;; Remember we've sent this type, both what the user gave us and the base type.
+    (aset (.-sent enc) (.-base ut) (.-id info))
+    (when (!= (.-user ut) (.-base ut))
+      (aset (.-sent enc) (.-user ut) (.-id info)))
+
+    ;; Now send the inner types
+    (switch [st actual] (.Kind st)
+      (case [reflect/Struct]
+        (for [i 0] (< i (.NumField st)) (inc! i)
+          (when (isExported (.-Name (.Field st i)))
+            (.sendType enc w state (.-Type (.Field st i))))))
+
+
+      (case [reflect/Array reflect/Slice]
+        (.sendType enc w state (.Elem st)))
+      (case [reflect/Map]
+        (.sendType enc w state (.Key st))
+        (.sendType enc w state (.Elem st))))
+
+    true))
+
+
+
+^{:go/end 170} (go/method sendType "sendType sends the type info to the other side, if necessary.\n" [^{:tag (* Encoder)} enc ^io/Writer w ^{:tag (* encoderState)} state ^reflect/Type origt] :results [^bool sent]
+  (let [ut (userType origt)]
+    (when (!= (.-externalEnc ut) 0)
+      ;; The rules are different: regardless of the underlying type's representation,
+      ;; we need to tell the other side that the base type is a GobEncoder.
+      (return (.sendActualType enc w state ut (.-base ut))))
+
+
+    ;; It's a concrete value, so drill down to the base type.
+    (switch [rt (.-base ut)] (.Kind rt)
+      (default
+        ;; Basic types and interfaces do not need to be described.
+        (return))
+      (case [reflect/Slice]
+        ;; If it's []uint8, don't send; it's considered basic.
+        (when (== (.Kind (.Elem rt)) reflect/Uint8)
+          (return))
+
+        ;; Otherwise we do send.
+        (break))
+      (case [reflect/Array]
+        ;; arrays must be sent so we know their lengths and element types.
+        (break))
+      (case [reflect/Map]
+        ;; maps must be sent so we know their lengths and key/value types.
+        (break))
+      (case [reflect/Struct]
+        ;; structs must be sent so we know their fields.
+        (break))
+      (case [reflect/Chan reflect/Func]
+        ;; If we get here, it's a field of a struct; ignore it.
+        (return)))
+
+
+    (.sendActualType enc w state ut (.-base ut))))
+
+
+
+
+
+^{:go/end 177} (go/method Encode "Encode transmits the data item represented by the empty interface value,\nguaranteeing that all necessary type information has been transmitted first.\nPassing a nil pointer to Encoder will panic, as they cannot be transmitted by gob.\n" ^error [^{:tag (* Encoder)} enc ^any e]
+  (.EncodeValue enc (reflect/ValueOf e)))
+
+
+
+
+
+^{:go/end 207} (go/method sendTypeDescriptor "sendTypeDescriptor makes sure the remote side knows about this type.\nIt will send a descriptor if this is the first time the type has been\nsent.\n" [^{:tag (* Encoder)} enc ^io/Writer w ^{:tag (* encoderState)} state ^{:tag (* userTypeInfo)} ut]
+  ;; Make sure the type is known to the other side.
+  ;; First, have we already sent this type?
+  (let [rt (.-base ut)]
+    (when (!= (.-externalEnc ut) 0)
+      (set! rt (.-user ut)))
+
+    (when [(values _ alreadySent) (aget (.-sent enc) rt)] (not alreadySent)
+      ;; No, so send it.
+      (let [sent (.sendType enc w state rt)]
+        (when (!= (.-err enc) nil)
+          (return))
+
+        ;; If the type info has still not been transmitted, it means we have
+        ;; a singleton basic type (int, []byte etc.) at top level. We don't
+        ;; need to send the type info but we do need to update enc.sent.
+        (when (not sent)
+          (let [(values info err) (getTypeInfo ut)]
+            (when (!= err nil)
+              (.setError enc err)
+              (return))
+
+            (aset (.-sent enc) rt (.-id info))))))))
+
+
+
+
+
+^{:go/end 213} (go/method sendTypeId "sendTypeId sends the id, which must have already been defined.\n" [^{:tag (* Encoder)} enc ^{:tag (* encoderState)} state ^{:tag (* userTypeInfo)} ut]
+  ;; Identify the type of this top-level value.
+  (.encodeInt state (conv int64 (aget (.-sent enc) (.-base ut)))))
+
+
+
+
+
+^{:go/end 258} (go/method EncodeValue "EncodeValue transmits the data item represented by the reflection value,\nguaranteeing that all necessary type information has been transmitted first.\nPassing a nil pointer to EncodeValue will panic, as they cannot be transmitted by gob.\n" ^error [^{:tag (* Encoder)} enc ^reflect/Value value]
+  (when (== (.Kind value) reflect/Invalid)
+    (return (errors/New "gob: cannot encode nil value")))
+
+  (when (and (== (.Kind value) reflect/Pointer) (.IsNil value))
+    (panic (+ "gob: cannot encode nil pointer of type " (.String (.Type value)))))
+
+
+  ;; Make sure we're single-threaded through here, so multiple
+  ;; goroutines can share an encoder.
+  (.Lock (.-mutex enc))
+  (defer (.Unlock (.-mutex enc)))
+
+  ;; Remove any nested writers remaining due to previous errors.
+  (set! (.-w enc) (subslice (.-w enc) 0 1))
+
+  (let [(values ut err) (validUserType (.Type value))]
+    (when (!= err nil)
+      (return err))
+
+
+    (set! (.-err enc) nil)
+    (.Reset (.-byteBuf enc))
+    (.Write (.-byteBuf enc) spaceForLength)
+    (let [state (.newEncoderState enc (addr (.-byteBuf enc)))]
+
+      (.sendTypeDescriptor enc (.writer enc) state ut)
+      (.sendTypeId enc state ut)
+      (when (!= (.-err enc) nil)
+        (return (.-err enc)))
+
+
+      ;; Encode the object.
+      (.encode enc (.-b state) value ut)
+      (when (== (.-err enc) nil)
+        (.writeMessage enc (.writer enc) (.-b state)))
+
+
+      (.freeEncoderState enc state)
+      (.-err enc))))

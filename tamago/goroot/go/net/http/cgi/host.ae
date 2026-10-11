@@ -1,0 +1,409 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements the host side of CGI (being the webserver
+;; parent process).
+
+;; Package cgi implements CGI (Common Gateway Interface) as specified
+;; in RFC 3875.
+;;
+;; Note that using CGI means starting a new process to handle each
+;; request, which is typically less efficient than using a
+;; long-running server. This package is intended primarily for
+;; compatibility with existing systems.
+(in-ns 'go.net.http.cgi) (go/file "host.go" :doc "Package cgi implements CGI (Common Gateway Interface) as specified\nin RFC 3875.\n\nNote that using CGI means starting a new process to handle each\nrequest, which is typically less efficient than using a\nlong-running server. This package is intended primarily for\ncompatibility with existing systems.\n" :imports [
+
+
+    ^{:line 18} [bufio "bufio"]
+    ^{:line 19} [fmt "fmt"]
+    ^{:line 20} [io "io"]
+    ^{:line 21} [log "log"]
+    ^{:line 22} [net "net"]
+    ^{:line 23} [http "net/http"]
+    ^{:line 24} [textproto "net/textproto"]
+    ^{:line 25} [os "os"]
+    ^{:line 26} [exec "os/exec"]
+    ^{:line 27} [filepath "path/filepath"]
+    ^{:line 28} [regexp "regexp"]
+    ^{:line 29} [runtime "runtime"]
+    ^{:line 30} [strconv "strconv"]
+    ^{:line 31} [strings "strings"]
+
+    ^{:line 33} [httpguts "golang.org/x/net/http/httpguts"]])
+
+
+(go/var trailingPort (regexp/MustCompile ":([0-9]+)$"))
+
+(go/var osDefaultInheritEnv (^{:go/breaks [[3 53]] :go/end 54} (fn ^{:tag (slice string)} []
+      (switch runtime/GOOS
+        (case ["darwin" "ios"]
+          (return (lit (slice string) "DYLD_LIBRARY_PATH")))
+        (case ["android" "linux" "freebsd" "netbsd" "openbsd"]
+          (return (lit (slice string) "LD_LIBRARY_PATH")))
+        (case ["hpux"]
+          (return (lit (slice string) "LD_LIBRARY_PATH" "SHLIB_PATH")))
+        (case ["irix"]
+          (return (lit (slice string) "LD_LIBRARY_PATH" "LD_LIBRARYN32_PATH" "LD_LIBRARY64_PATH")))
+        (case ["illumos" "solaris"]
+          (return (lit (slice string) "LD_LIBRARY_PATH" "LD_LIBRARY_PATH_32" "LD_LIBRARY_PATH_64")))
+        (case ["windows"]
+          (return (lit (slice string) "SystemRoot" "COMSPEC" "PATHEXT" "WINDIR"))))
+
+      nil)))
+
+
+
+(go/type Handler "Handler runs an executable in a subprocess with a CGI environment.\n" (struct
+    ^{:line 58 :tag string} Path ; path to the CGI executable
+    ^{:line 59 :tag string} Root ; root URI prefix of handler or empty for "/"
+
+
+
+
+
+    ^{:line 65 :tag string :doc "Dir specifies the CGI executable's working directory.\nIf Dir is empty, the base directory of Path is used.\nIf Path has no base directory, the current working\ndirectory is used.\n"} Dir
+
+    ^{:line 67 :tag (slice string)} Env ; extra environment variables to set, if any, as "key=value"
+    ^{:line 68 :tag (slice string)} InheritEnv ; environment variables to inherit from host, as "key"
+    ^{:line 69 :tag (* log/Logger)} Logger ; optional log for errors or nil to use log.Print
+    ^{:line 70 :tag (slice string)} Args ; optional arguments to pass to child process
+    ^{:line 71 :tag io/Writer} Stderr ; optional stderr for the child process; nil means os.Stderr
+
+
+
+
+
+
+
+
+
+    ^{:line 81 :tag http/Handler :doc "PathLocationHandler specifies the root http Handler that\nshould handle internal redirects when the CGI process\nreturns a Location header value starting with a \"/\", as\nspecified in RFC 3875 § 6.3.2. This will likely be\nhttp.DefaultServeMux.\n\nIf nil, a CGI response with a local URI path is instead sent\nback to the client and not redirected internally.\n"} PathLocationHandler))
+
+
+^{:go/end 89} (go/method stderr ^io/Writer [^{:tag (* Handler)} h]
+  (when (!= (.-Stderr h) nil)
+    (return (.-Stderr h)))
+
+  ^{:line 88} os/Stderr)
+
+
+
+
+
+
+
+
+
+^{:go/end 115} (go/func removeLeadingDuplicates "removeLeadingDuplicates remove leading duplicate in environments.\nIt's possible to override environment like following.\n\n\tcgi.Handler{\n\t  ...\n\t  Env: []string{\"SCRIPT_FILENAME=foo.php\"},\n\t}\n" [^{:tag (slice string)} env] :results [^{:tag (slice string)} ret]
+  (range [i e env]
+    (let [found false]
+      (when [eq (strings/IndexByte e \=)] (!= eq -1)
+        (let [keq (subslice e _ (+ eq 1))] ; "key="
+          (range [_ e2 (subslice env (+ i 1))]
+            (when (strings/HasPrefix e2 keq)
+              (set! found true)
+              (break)))))
+
+
+
+      (when (not found)
+        (set! ret (append ret e)))))
+
+
+  (return))
+
+
+^{:go/end 353} (go/method ServeHTTP [^{:tag (* Handler)} h ^http/ResponseWriter rw ^{:tag (* http/Request)} req]
+  (when (and (> (len (.-TransferEncoding req)) 0) (== (aget (.-TransferEncoding req) 0) "chunked"))
+    (.WriteHeader rw http/StatusBadRequest)
+    (.Write rw (conv (slice byte) "Chunked request bodies are not supported by CGI."))
+    (return))
+
+
+  (let [root (strings/TrimRight (.-Root h) "/")
+      ^{:line 125} pathInfo (strings/TrimPrefix (.-Path (.-URL req)) root)
+
+      ^{:line 127} port "80"]
+    (when (!= (.-TLS req) nil)
+      (set! port "443"))
+
+    (when [matches (.FindStringSubmatch trailingPort (.-Host req))] (!= (len matches) 0)
+      (set! port (aget matches 1)))
+
+
+    (let [env ^{:go/breaks [2 3 5]} (lit (slice string)
+          "SERVER_SOFTWARE=go"
+          "SERVER_PROTOCOL=HTTP/1.1"
+          (+ "HTTP_HOST=" (.-Host req))
+          "GATEWAY_INTERFACE=CGI/1.1"
+          (+ "REQUEST_METHOD=" (.-Method req))
+          (+ "QUERY_STRING=" (.-RawQuery (.-URL req)))
+          (+ "REQUEST_URI=" (.RequestURI (.-URL req)))
+          (+ "PATH_INFO=" pathInfo)
+          (+ "SCRIPT_NAME=" root)
+          (+ "SCRIPT_FILENAME=" (.-Path h))
+          (+ "SERVER_PORT=" port))]
+
+
+      (if [(values remoteIP remotePort err) (net/SplitHostPort (.-RemoteAddr req))] (== err nil)
+        (set! env (append env (+ "REMOTE_ADDR=" remoteIP) (+ "REMOTE_HOST=" remoteIP) (+ "REMOTE_PORT=" remotePort)))
+
+        ;; could not parse ip:port, let's use whole RemoteAddr and leave REMOTE_PORT undefined
+        (set! env (append env (+ "REMOTE_ADDR=" (.-RemoteAddr req)) (+ "REMOTE_HOST=" (.-RemoteAddr req)))))
+
+
+      (if [(values hostDomain _ err) (net/SplitHostPort (.-Host req))] (== err nil)
+        (set! env (append env (+ "SERVER_NAME=" hostDomain)))
+
+        (set! env (append env (+ "SERVER_NAME=" (.-Host req)))))
+
+
+      (when (!= (.-TLS req) nil)
+        (set! env (append env "HTTPS=on")))
+
+
+      (range [k v (.-Header req)]
+        (set! k (strings/Map upperCaseAndUnderscore k))
+        (when (== k "PROXY")
+          ;; See Issue 16405
+          (continue))
+
+        (let [joinStr ", "]
+          (when (== k "COOKIE")
+            (set! joinStr "; "))
+
+          (set! env (append env (+ "HTTP_" k "=" (strings/Join v joinStr))))))
+
+
+      (when (> (.-ContentLength req) 0)
+        (set! env (append env (fmt/Sprintf "CONTENT_LENGTH=%d" (.-ContentLength req)))))
+
+      (when [ctype (.Get (.-Header req) "Content-Type")] (!= ctype "")
+        (set! env (append env (+ "CONTENT_TYPE=" ctype))))
+
+
+      (let [envPath (os/Getenv "PATH")]
+        (when (== envPath "")
+          (set! envPath "/bin:/usr/bin:/usr/ucb:/usr/bsd:/usr/local/bin"))
+
+        (set! env (append env (+ "PATH=" envPath)))
+
+        (range [_ e (.-InheritEnv h)]
+          (when [v (os/Getenv e)] (!= v "")
+            (set! env (append env (+ e "=" v)))))
+
+
+
+        (range [_ e osDefaultInheritEnv]
+          (when [v (os/Getenv e)] (!= v "")
+            (set! env (append env (+ e "=" v)))))
+
+
+
+        (when (!= (.-Env h) nil)
+          (set! env (append env (spread (.-Env h)))))
+
+
+        (set! env (removeLeadingDuplicates env))
+
+        (let [(values ^string cwd ^string path) (zero string)]
+          (if (!= (.-Dir h) "") (do
+              (set! path (.-Path h))
+              (set! cwd (.-Dir h)))
+
+            (set! (values cwd path) (filepath/Split (.-Path h))))
+
+          (when (== cwd "")
+            (set! cwd "."))
+
+
+          (let [internalError ^{:go/end 224} (fn [^error err]
+                (.WriteHeader rw http/StatusInternalServerError)
+                (.printf h "CGI error: %v" err))
+
+
+              ^{:line 226} cmd (addr ^{:go/breaks [2 4 6 8 10]} (lit exec/Cmd
+                  :Path path
+                  :Args (append (lit (slice string) (.-Path h)) (spread (.-Args h)))
+                  :Dir cwd
+                  :Env env
+                  :Stderr (.stderr h)))]
+
+            (when (!= (.-ContentLength req) 0)
+              (set! (.-Stdin cmd) (.-Body req)))
+
+            (let [(values stdoutRead err) (.StdoutPipe cmd)]
+              (when (!= err nil)
+                (internalError err)
+                (return))
+
+
+              (set! err (.Start cmd))
+              (when (!= err nil)
+                (internalError err)
+                (return))
+
+              (when [hook testHookStartProcess] (!= hook nil)
+                (hook (.-Process cmd)))
+
+              (defer (.Wait cmd))
+              (defer (.Close stdoutRead))
+
+              (let [linebody (bufio/NewReaderSize stdoutRead 1024)
+                  ^{:line 254} headers (make http/Header)
+                  ^{:line 255} statusCode 0
+                  ^{:line 256} headerLines 0
+                  ^{:line 257} sawBlankLine false]
+                (while true
+                  (let [(values line isPrefix err) (.ReadLine linebody)]
+                    (when isPrefix
+                      (.WriteHeader rw http/StatusInternalServerError)
+                      (.printf h "cgi: long header line from subprocess.")
+                      (return))
+
+                    (when (== err io/EOF)
+                      (break))
+
+                    (when (!= err nil)
+                      (.WriteHeader rw http/StatusInternalServerError)
+                      (.printf h "cgi: error reading headers: %v" err)
+                      (return))
+
+                    (when (== (len line) 0)
+                      (set! sawBlankLine true)
+                      (break))
+
+                    (inc! headerLines)
+                    (let [(values header val ok) (strings/Cut (conv string line) ":")]
+                      (when (not ok)
+                        (.printf h "cgi: bogus header line: %s" line)
+                        (continue))
+
+                      (when (not (httpguts/ValidHeaderFieldName header))
+                        (.printf h "cgi: invalid header name: %q" header)
+                        (continue))
+
+                      (set! val (textproto/TrimString val))
+                      (switch
+                        (case [(== header "Status")]
+                          (when (< (len val) 3)
+                            (.printf h "cgi: bogus status (short): %q" val)
+                            (return))
+
+                          (let [(values code err) (strconv/Atoi (subslice val 0 3))]
+                            (when (!= err nil)
+                              (.printf h "cgi: bogus status: %q" val)
+                              (.printf h "cgi: line was %q" line)
+                              (return))
+
+                            (set! statusCode code)))
+                        (default
+                          (.Add headers header val))))))
+
+
+                (when (or (== headerLines 0) (not sawBlankLine))
+                  (.WriteHeader rw http/StatusInternalServerError)
+                  (.printf h "cgi: no headers")
+                  (return))
+
+
+                (when [loc (.Get headers "Location")] (!= loc "")
+                  (when (and (strings/HasPrefix loc "/") (!= (.-PathLocationHandler h) nil))
+                    (.handleInternalRedirect h rw req loc)
+                    (return))
+
+                  (when (== statusCode 0)
+                    (set! statusCode http/StatusFound)))
+
+
+
+                (when (and (== statusCode 0) (== (.Get headers "Content-Type") ""))
+                  (.WriteHeader rw http/StatusInternalServerError)
+                  (.printf h "cgi: missing required Content-Type in headers")
+                  (return))
+
+
+                (when (== statusCode 0)
+                  (set! statusCode http/StatusOK))
+
+
+                ;; Copy headers to rw's headers, after we've decided not to
+                ;; go into handleInternalRedirect, which won't want its rw
+                ;; headers to have been touched.
+                (range [k vv headers]
+                  (range [_ v vv]
+                    (.Add (.Header rw) k v)))
+
+
+
+                (.WriteHeader rw statusCode)
+
+                (set! (values _ err) (io/Copy rw linebody))
+                (when (!= err nil)
+                  (.printf h "cgi: copy error: %v" err)
+                  ;; And kill the child CGI process so we don't hang on
+                  ;; the deferred cmd.Wait above if the error was just
+                  ;; the client (rw) going away. If it was a read error
+                  ;; (because the child died itself), then the extra
+                  ;; kill of an already-dead process is harmless (the PID
+                  ;; won't be reused until the Wait above).
+                  (.Kill (.-Process cmd)))))))))))
+
+
+
+^{:go/end 361} (go/method printf [^{:tag (* Handler)} h ^string format & ^{:tag (slice any)} v]
+  (if (!= (.-Logger h) nil)
+    (.Printf (.-Logger h) format (spread v))
+
+    (log/Printf format (spread v))))
+
+
+
+^{:go/end 391} (go/method handleInternalRedirect [^{:tag (* Handler)} h ^http/ResponseWriter rw ^{:tag (* http/Request)} req ^string path]
+  (let [(values url err) (.Parse (.-URL req) path)]
+    (when (!= err nil)
+      (.WriteHeader rw http/StatusInternalServerError)
+      (.printf h "cgi: error resolving local URI path %q: %v" path err)
+      (return))
+
+    ;; TODO: RFC 3875 isn't clear if only GET is supported, but it
+    ;; suggests so: "Note that any message-body attached to the
+    ;; request (such as for a POST request) may not be available
+    ;; to the resource that is the target of the redirect."  We
+    ;; should do some tests against Apache to see how it handles
+    ;; POST, HEAD, etc. Does the internal redirect get the same
+    ;; method or just GET? What about incoming headers?
+    ;; (e.g. Cookies) Which headers, if any, are copied into the
+    ;; second request?
+    (let [newReq (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit http/Request
+            :Method "GET"
+            :URL url
+            :Proto "HTTP/1.1"
+            :ProtoMajor 1
+            :ProtoMinor 1
+            :Header (make http/Header)
+            :Host (.-Host url)
+            :RemoteAddr (.-RemoteAddr req)
+            :TLS (.-TLS req)))]
+
+      (.ServeHTTP (.-PathLocationHandler h) rw newReq))))
+
+
+^{:go/end 407} (go/func upperCaseAndUnderscore ^rune [^rune r]
+  (switch
+    (case [(and (>= r \a) (<= r \z))]
+      (return (- r (- \a \A))))
+    (case [(== r \-)]
+      (return \_))
+    (case [(== r \=)]
+      ;; Maybe not part of the CGI 'spec' but would mess up
+      ;; the environment in any case, as Go represents the
+      ;; environment as a slice of "key=value" strings.
+      (return \_)))
+
+  ;; TODO: other transformations in spec or practice?
+  ^{:line 406} r)
+
+
+(go/var ^{:tag (func [(* os/Process)])} testHookStartProcess) ; nil except for some tests

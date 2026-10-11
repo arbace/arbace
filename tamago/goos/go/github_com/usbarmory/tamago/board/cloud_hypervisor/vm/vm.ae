@@ -1,0 +1,114 @@
+;; Cloud Hypervisor support for tamago/amd64
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package vm provides hardware initialization, automatically on import, for a
+;; Cloud Hypervisor virtual machine configured with one or more x86_64 cores.
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=amd64` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.board.cloud_hypervisor.vm) (go/file "vm.go" :doc "Package vm provides hardware initialization, automatically on import, for a\nCloud Hypervisor virtual machine configured with one or more x86_64 cores.\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=amd64` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 18} [goos "runtime/goos"]
+    ^{:line 19} [_ "unsafe"]
+
+    ^{:line 21} [amd64 "github.com/usbarmory/tamago/amd64"]
+    ^{:line 22} [dma "github.com/usbarmory/tamago/dma"]
+    ^{:line 23} [reg "github.com/usbarmory/tamago/internal/reg"]
+    ^{:line 24} [pvclock "github.com/usbarmory/tamago/kvm/pvclock"]
+    ^{:line 25} [ioapic "github.com/usbarmory/tamago/soc/intel/ioapic"]
+    ^{:line 26} [pci "github.com/usbarmory/tamago/soc/intel/pci"]
+    ^{:line 27} [uart "github.com/usbarmory/tamago/soc/intel/uart"]])
+
+
+(go/const
+  ^{:line 31} [^{:val 268435456} dmaSize 0x10000000] ; 256MB
+  ^{:line 32} [^{:val 2952790016} dmaStart (- 0xc0000000 dmaSize)])
+
+
+
+(go/const "Peripheral registers\n"
+
+  ^{:line 38} [^{:val 1016 :doc "Communication port\n"} COM1 0x3f8]
+
+
+  ^{:line 41} [^{:val 4273995776 :doc "Intel I/O Programmable Interrupt Controller\n"} IOAPIC0_BASE 0xfec00000]
+
+
+  ^{:line 44} [^{:val 3892314112 :doc "VirtIO Memory-mapped I/O\n"} VIRTIO_MMIO_BASE 0xe8000000]
+
+
+  ^{:line 47} [^{:val 6900 :doc "VirtIO Networking\n"} VIRTIO_NET_PCI_VENDOR 0x1af4] ; Red Hat, Inc.
+  ^{:line 48} [^{:val 4161} VIRTIO_NET_PCI_DEVICE 0x1041]) ; Virtio 1.0 network device
+
+
+
+(go/var "Peripheral instances\n"
+
+  ^{:line 54} [^{:doc "CPU instance(s)\n"} AMD64 (addr ^{:go/breaks [[2 56]]} (lit amd64/CPU
+        ;; required before Init()
+        :TimerMultiplier 1))]
+
+
+
+  ^{:line 60} [^{:doc "I/O APIC\n"} IOAPIC0 (addr ^{:go/breaks [2]} (lit ioapic/IOAPIC
+        :Base IOAPIC0_BASE))]
+
+
+
+  ^{:line 65} [^{:doc "Serial port\n"} UART0 (addr ^{:go/breaks [2 4]} (lit uart/UART
+        :Index 1
+        :Base COM1))])
+
+
+
+
+^{:go/end 74} (go/func ^{:go/linkname "nanotime runtime/goos.Nanotime"} nanotime ^int64 []
+  (.GetTime AMD64))
+
+
+
+
+
+
+^{:go/end 94} (go/func ^{:go/linkname "Init runtime/goos.Hwinit1"} Init "Init takes care of the lower level initialization triggered early in runtime\nsetup (post World start).\n" []
+  ;; initialize CPU
+  (.Init AMD64)
+
+  ;; initialize I/O APIC
+  (.Init IOAPIC0)
+
+  ;; initialize serial console
+  (.Init UART0)
+
+  (set! goos/Exit ^{:go/end 93} (fn [^int32 _]
+      ;; shutdown_pio_address
+      (reg/Out8 0x600 0x34))))
+
+
+
+^{:go/end 116} (go/func init []
+  ;; trap CPU exceptions
+  (.EnableExceptions AMD64)
+
+  ;; initialize APs
+  (.InitSMP AMD64 -1)
+
+  ;; allocate global DMA region
+  (dma/Init dmaStart dmaSize)
+
+  ;; initialize KVM pvclock as needed
+  (pvclock/Init AMD64)
+
+  (when [dev (pci/Probe 0 VIRTIO_NET_PCI_VENDOR VIRTIO_NET_PCI_DEVICE)] (!= dev nil)
+    ;; set Memory Space Enable (MSE)
+    (.Write dev 0 pci/Command (<< 1 1))
+    ;; reconfigure BAR to mapped memory region
+    (.Write dev 0 pci/Bar0 0x40000000)
+    (.Write dev 0 (+ pci/Bar0 4) 0x1)))

@@ -1,0 +1,150 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.regexp.syntax) (go/file "simplify.go" :imports [])
+
+
+
+
+
+
+
+
+^{:go/end 117} (go/method Simplify "Simplify returns a regexp equivalent to re but without counted repetitions\nand with various other simplifications, such as rewriting /(?:a+)+/ to /a+/.\nThe resulting regexp will execute correctly but its string representation\nwill not produce the same parse tree, because capturing parentheses\nmay have been duplicated or removed. For example, the simplified form\nfor /(x){1,2}/ is /(x)(x)?/ but both parentheses capture as $1.\nThe returned regexp may share structure with or be the original.\n" ^{:tag (* Regexp)} [^{:tag (* Regexp)} re]
+  (when (== re nil)
+    (return nil))
+
+  (switch (.-Op re)
+    (case [OpCapture OpConcat OpAlternate]
+      ;; Simplify children, building new Regexp if children change.
+      (let [nre re]
+        (range [i sub (.-Sub re)]
+          (let [nsub (.Simplify sub)]
+            (when (and (== nre re) (!= nsub sub))
+              ;; Start a copy.
+              (set! nre (new Regexp))
+              (set! @nre @re)
+              (set! (.-Rune nre) nil)
+              (set! (.-Sub nre) (append (subslice (.-Sub0 nre) _ 0) (spread (subslice (.-Sub re) _ i)))))
+
+            (when (!= nre re)
+              (set! (.-Sub nre) (append (.-Sub nre) nsub)))))
+
+
+        (return nre)))
+
+    (case [OpStar OpPlus OpQuest]
+      (let [sub (.Simplify (aget (.-Sub re) 0))]
+        (return (simplify1 (.-Op re) (.-Flags re) sub re))))
+
+    (case [OpRepeat]
+      ;; Special special case: x{0} matches the empty string
+      ;; and doesn't even need to consider x.
+      (when (and (== (.-Min re) 0) (== (.-Max re) 0))
+        (return (addr (lit Regexp :Op OpEmptyMatch))))
+
+
+      ;; The fun begins.
+      (let [sub (.Simplify (aget (.-Sub re) 0))]
+
+        ;; x{n,} means at least n matches of x.
+        (when (== (.-Max re) -1)
+          ;; Special case: x{0,} is x*.
+          (when (== (.-Min re) 0)
+            (return (simplify1 OpStar (.-Flags re) sub nil)))
+
+
+          ;; Special case: x{1,} is x+.
+          (when (== (.-Min re) 1)
+            (return (simplify1 OpPlus (.-Flags re) sub nil)))
+
+
+          ;; General case: x{4,} is xxxx+.
+          (let [nre (addr (lit Regexp :Op OpConcat))]
+            (set! (.-Sub nre) (subslice (.-Sub0 nre) _ 0))
+            (for [i 0] (< i (- (.-Min re) 1)) (inc! i)
+              (set! (.-Sub nre) (append (.-Sub nre) sub)))
+
+            (set! (.-Sub nre) (append (.-Sub nre) (simplify1 OpPlus (.-Flags re) sub nil)))
+            (return nre)))
+
+
+        ;; Special case x{0} handled above.
+
+        ;; Special case: x{1} is just x.
+        (when (and (== (.-Min re) 1) (== (.-Max re) 1))
+          (return sub))
+
+
+        ;; General case: x{n,m} means n copies of x and m copies of x?
+        ;; The machine will do less work if we nest the final m copies,
+        ;; so that x{2,5} = xx(x(x(x)?)?)?
+
+        ;; Build leading prefix: xx.
+        (let [^{:tag (* Regexp)} prefix (zero (* Regexp))]
+          (when (> (.-Min re) 0)
+            (set! prefix (addr (lit Regexp :Op OpConcat)))
+            (set! (.-Sub prefix) (subslice (.-Sub0 prefix) _ 0))
+            (for [i 0] (< i (.-Min re)) (inc! i)
+              (set! (.-Sub prefix) (append (.-Sub prefix) sub))))
+
+
+
+          ;; Build and attach suffix: (x(x(x)?)?)?
+          (when (> (.-Max re) (.-Min re))
+            (let [suffix (simplify1 OpQuest (.-Flags re) sub nil)]
+              (for [i (+ (.-Min re) 1)] (< i (.-Max re)) (inc! i)
+                (let [nre2 (addr (lit Regexp :Op OpConcat))]
+                  (set! (.-Sub nre2) (append (subslice (.-Sub0 nre2) _ 0) sub suffix))
+                  (set! suffix (simplify1 OpQuest (.-Flags re) nre2 nil))))
+
+              (when (== prefix nil)
+                (return suffix))
+
+              (set! (.-Sub prefix) (append (.-Sub prefix) suffix))))
+
+          (when (!= prefix nil)
+            (return prefix))
+
+
+          ;; Some degenerate case like min > max or min < max < 0.
+          ;; Handle as impossible match.
+          (return (addr (lit Regexp :Op OpNoMatch)))))))
+
+
+  ^{:line 116} re)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 151} (go/func simplify1 "simplify1 implements Simplify for the unary OpStar,\nOpPlus, and OpQuest operators. It returns the simple regexp\nequivalent to\n\n\tRegexp{Op: op, Flags: flags, Sub: {sub}}\n\nunder the assumption that sub is already simple, and\nwithout first allocating that structure. If the regexp\nto be returned turns out to be equivalent to re, simplify1\nreturns re instead.\n\nsimplify1 is factored out of Simplify because the implementation\nfor other operators generates these unary expressions.\nLetting them call simplify1 makes sure the expressions they\ngenerate are simple.\n" ^{:tag (* Regexp)} [^Op op ^Flags flags ^{:tag (* Regexp)} sub ^{:tag (* Regexp)} re]
+  ;; Special case: repeat the empty string as much as
+  ;; you want, but it's still the empty string.
+  (when (== (.-Op sub) OpEmptyMatch)
+    (return sub))
+
+  ;; The operators are idempotent if the flags match.
+  (when (and (== op (.-Op sub)) (== (bit-and flags NonGreedy) (bit-and (.-Flags sub) NonGreedy)))
+    (return sub))
+
+  (when (and (!= re nil) (== (.-Op re) op) (== (bit-and (.-Flags re) NonGreedy) (bit-and flags NonGreedy)) (== sub (aget (.-Sub re) 0)))
+    (return re))
+
+
+  (set! re (addr (lit Regexp :Op op :Flags flags)))
+  (set! (.-Sub re) (append (subslice (.-Sub0 re) _ 0) sub))
+  ^{:line 150} re)

@@ -1,0 +1,696 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.jsontext) (go/file "token.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [math "math"]
+    ^{:line 13} [strconv "strconv"]
+
+    ^{:line 15} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 16} [jsonwire "encoding/json/internal/jsonwire"]])
+
+
+;; NOTE: Token is analogous to v1 json.Token.
+
+(go/const
+  ^{:line 22} [^{:val 9223372036854775807} maxInt64 math/MaxInt64]
+  ^{:line 23} [^{:val -9223372036854775808} minInt64 math/MinInt64]
+  ^{:line 24} [^{:val 18446744073709551615N} maxUint64 math/MaxUint64]
+  ^{:line 25} [^{:val 0} minUint64 0] ; for consistency and readability purposes
+
+  ^{:line 27} [^{:val "invalid jsontext.Token; it has been voided by a subsequent json.Decoder call"} invalidTokenPanic "invalid jsontext.Token; it has been voided by a subsequent json.Decoder call"])
+
+
+(go/var errInvalidToken (errors/New "invalid jsontext.Token"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Token "Token represents a lexical JSON token, which may be one of the following:\n  - a JSON literal (i.e., null, true, or false)\n  - a JSON string (e.g., \"hello, world!\")\n  - a JSON number (e.g., 123.456)\n  - a begin or end delimiter for a JSON object (i.e., { or } )\n  - a begin or end delimiter for a JSON array (i.e., [ or ] )\n\nA Token cannot represent entire array or object values, while a [Value] can.\nThere is no Token to represent commas and colons since\nthese structural tokens can be inferred from the surrounding context.\n\nA Token stores data in one of two forms:\n\n  - As raw JSON text: backed by the internal buffer of the [Decoder]\n    and only ever produced by [Decoder.ReadToken].\n    Such a token is only valid until the next call to any method on that\n    [Decoder] (e.g., [Decoder.PeekKind], [Decoder.ReadToken],\n    [Decoder.ReadValue], or [Decoder.SkipValue]).\n    Call [Token.Clone] to copy the raw text into an independent allocation\n    that persists beyond subsequent [Decoder] calls.\n\n  - As a typed Go value: a self-contained representation produced by\n    the constructor functions (e.g., [String], [Int], [Uint], [Float]).\n    Such tokens are valid indefinitely and do not need to be cloned.\n" (struct
+    ^{:line 57} nonComparable
+
+    ;; Tokens can exist in either a "raw" or an "exact" form.
+    ;; Tokens produced by the Decoder are in the "raw" form.
+    ;; Tokens returned by constructors are usually in the "exact" form.
+    ;; The Encoder accepts Tokens in either the "raw" or "exact" form.
+    ;;
+    ;; The following chart shows the possible values for each Token type:
+    ;;	╔══════════════════╦════════════╤════════════╤════════════╗
+    ;;	║ Token type       ║ raw field  │ str field  │ num field  ║
+    ;;	╠══════════════════╬════════════╪════════════╪════════════╣
+    ;;	║ null   (raw)     ║ "null"     │ ""         │ 0          ║
+    ;;	║ false  (raw)     ║ "false"    │ ""         │ 0          ║
+    ;;	║ true   (raw)     ║ "true"     │ ""         │ 0          ║
+    ;;	║ string (raw)     ║ non-empty  │ ""         │ offset     ║
+    ;;	║ string (string)  ║ nil        │ non-empty  │ 0          ║
+    ;;	║ number (raw)     ║ non-empty  │ ""         │ offset     ║
+    ;;	║ number (float32) ║ nil        │ "F"        │ non-zero   ║
+    ;;	║ number (float64) ║ nil        │ "f"        │ non-zero   ║
+    ;;	║ number (int64)   ║ nil        │ "i"        │ non-zero   ║
+    ;;	║ number (uint64)  ║ nil        │ "u"        │ non-zero   ║
+    ;;	║ object (delim)   ║ "{" or "}" │ ""         │ 0          ║
+    ;;	║ array  (delim)   ║ "[" or "]" │ ""         │ 0          ║
+    ;;	╚══════════════════╩════════════╧════════════╧════════════╝
+    ;;
+    ;; Notes:
+    ;;   - For tokens stored in "raw" form, the num field contains the
+    ;;     absolute offset determined by raw.previousOffsetStart().
+    ;;     The buffer itself is stored in raw.previousBuffer().
+    ;;   - JSON literals and structural characters are always in the "raw" form.
+    ;;   - JSON strings and numbers can be in either "raw" or "exact" forms.
+    ;;   - The exact zero value of JSON strings and numbers in the "exact" forms
+    ;;     have ambiguous representation. Thus, they are always represented
+    ;;     in the "raw" form.
+
+
+
+
+    ^{:line 95 :tag (* decodeBuffer) :doc "raw contains a reference to the raw decode buffer.\nIf non-nil, then its value takes precedence over str and num.\nIt is only valid if num == raw.previousOffsetStart().\n"} raw
+
+
+
+
+    ^{:line 100 :tag string :doc "str is the unescaped JSON string if num is zero.\nOtherwise, it is \"F\", \"f\", \"i\", or \"u\" if num should be interpreted\nas a float32, float64, int64, or uint64, respectively.\n"} str
+
+
+
+
+    ^{:line 105 :tag uint64 :doc "num is a float32, float64, int64, or uint64 stored as a uint64 value.\nFor floating-point values, it stores the raw IEEE-754 bit-pattern.\nIt is non-zero for any JSON number in the \"exact\" form.\n"} num))
+
+
+;; TODO: Does representing 1-byte delimiters as *decodeBuffer cause performance issues?
+
+(go/var
+  ^{:line 111} [^Token Null (rawToken "null")]
+  ^{:line 112} [^Token False (rawToken "false")]
+  ^{:line 113} [^Token True (rawToken "true")]
+
+  ^{:line 115} [^Token BeginObject (rawToken "{")]
+  ^{:line 116} [^Token EndObject (rawToken "}")]
+  ^{:line 117} [^Token BeginArray (rawToken "[")]
+  ^{:line 118} [^Token EndArray (rawToken "]")]
+
+  ^{:line 120} [^Token zeroString (rawToken "\"\"")]
+  ^{:line 121} [^Token zeroNumber (rawToken "0")]
+
+  ^{:line 123} [^Token nanString (String "NaN")]
+  ^{:line 124} [^Token pinfString (String "Infinity")]
+  ^{:line 125} [^Token ninfString (String "-Infinity")])
+
+
+^{:go/end 130} (go/func rawToken ^Token [^string s]
+  (lit Token :raw (addr (lit decodeBuffer :buf (conv (slice byte) s) :prevStart 0 :prevEnd (len s)))))
+
+
+
+^{:go/end 138} (go/func Bool "Bool constructs a Token representing a JSON boolean.\n" ^Token [^bool b]
+  (when b
+    (return True))
+
+  ^{:line 137} False)
+
+
+
+
+
+^{:go/end 148} (go/func String "String constructs a Token representing a JSON string.\nThe provided string should contain valid UTF-8, otherwise invalid characters\nmay be mangled as the Unicode replacement character.\n" ^Token [^string s]
+  (when (== (len s) 0)
+    (return zeroString))
+
+  (lit Token :str s))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 167} (go/func Float32 "Float32 constructs a Token representing a JSON number as\na 32-bit floating-point number formatted according to\nECMA-262, 10th edition, section 7.1.12.1,\nwith the exception that -0 is still formatted as -0.\nThe values NaN, +Inf, and -Inf will be represented\nas a JSON string with the values \"NaN\", \"Infinity\", and \"-Infinity\".\n\nNote that most JSON libraries and standards assume that JSON numbers\nare 64-bit floating-point numbers. Use of 32-bit precision should\nonly be used if the corresponding decoder knows that\nthis JSON number token is expected to only have 32-bit precision.\nFor all other situations, prefer using the [Float] constructor instead.\n" ^Token [^float32 n]
+  (when (and (!= n 0) (not (math/IsNaN (conv float64 n))) (not (math/IsInf (conv float64 n) 0)))
+    (return (lit Token :str "F" :num (conv uint64 (math/Float32bits n)))))
+
+  (Float (conv float64 n))) ; handles ±0, NaN, and ±Inf
+
+
+
+
+
+
+
+
+^{:go/end 187} (go/func Float "Float constructs a Token representing a JSON number as\na 64-bit floating-point number formatted according to\nECMA-262, 10th edition, section 7.1.12.1 and RFC 8785, section 3.2.2.3.\nwith the exception that -0 is still formatted as -0.\nThe values NaN, +Inf, and -Inf will be represented\nas a JSON string with the values \"NaN\", \"Infinity\", and \"-Infinity\".\n" ^Token [^float64 n]
+  (switch
+    (case [(== (math/Float64bits n) 0)]
+      (return zeroNumber))
+    (case [(math/IsNaN n)]
+      (return nanString))
+    (case [(math/IsInf n (+ 1))]
+      (return pinfString))
+    (case [(math/IsInf n -1)]
+      (return ninfString)))
+
+  (lit Token :str "f" :num (math/Float64bits n)))
+
+
+
+^{:go/end 195} (go/func Int "Int constructs a Token representing a JSON number from an int64.\n" ^Token [^int64 n]
+  (when (== n 0)
+    (return zeroNumber))
+
+  (lit Token :str "i" :num (conv uint64 n)))
+
+
+
+^{:go/end 203} (go/func Uint "Uint constructs a Token representing a JSON number from a uint64.\n" ^Token [^uint64 n]
+  (when (== n 0)
+    (return zeroNumber))
+
+  (lit Token :str "u" :num (conv uint64 n)))
+
+
+
+
+
+
+^{:go/end 240} (go/method Clone "Clone returns a copy of the token with a value that is not backed by the\n[Decoder] buffer and therefore remains valid past subsequent [Decoder] calls.\nIt has no effect on tokens produced by constructor functions,\nsince those are already self-contained.\n" ^Token [^Token t]
+  ;; TODO: Allow caller to avoid any allocations?
+  (when [raw (.-raw t)] (!= raw nil)
+    ;; Avoid copying globals.
+    (when (== (.-prevStart (.-raw t)) 0)
+      (switch (.-raw t)
+        (case [(.-raw Null)]
+          (return Null))
+        (case [(.-raw False)]
+          (return False))
+        (case [(.-raw True)]
+          (return True))
+        (case [(.-raw BeginObject)]
+          (return BeginObject))
+        (case [(.-raw EndObject)]
+          (return EndObject))
+        (case [(.-raw BeginArray)]
+          (return BeginArray))
+        (case [(.-raw EndArray)]
+          (return EndArray))))
+
+
+
+    ;; This only ever needs to clone strings and numbers.
+    (when (!= (conv uint64 (.previousOffsetStart raw)) (.-num t))
+      (panic invalidTokenPanic))
+
+    (let [buf (bytes/Clone (.previousBuffer raw))]
+      (return (lit Token :raw (addr (lit decodeBuffer :buf buf :prevStart 0 :prevEnd (len buf)))))))
+
+  ^{:line 239} t)
+
+
+
+
+^{:go/end 253} (go/method Bool "Bool returns the value for a JSON boolean.\nIt panics if the token kind is not a JSON boolean.\n" ^bool [^Token t]
+  (switch (.-raw t)
+    (case [(.-raw True)]
+      (return true))
+    (case [(.-raw False)]
+      (return false))
+    (default
+      (panic (+ "invalid JSON token kind: " (.String (.Kind t)))))))
+
+
+
+
+
+^{:go/end 274} (go/method appendString "appendString appends a JSON string to dst and returns it.\nIt panics if t is not a JSON string.\n" [^Token t ^{:tag (slice byte)} dst ^{:tag (* jsonflags/Flags)} flags] :results [(slice byte) error]
+  (if [raw (.-raw t)] (!= raw nil)
+    ;; Handle raw string value.
+    (let [buf (.previousBuffer raw)]
+      (when (== (conv Kind (aget buf 0)) \")
+        (when (== (jsonwire/ConsumeSimpleString buf) (len buf))
+          (return (append dst (spread buf)) nil))
+
+        (let [(values dst _ err) (jsonwire/ReformatString dst buf flags)]
+          (return dst err))))
+
+    (when (and (!= (len (.-str t)) 0) (== (.-num t) 0))
+      ;; Handle exact string value.
+      (return (jsonwire/AppendQuote dst (conv (slice byte) (.-str t)) flags))))
+
+
+  (panic (+ "invalid JSON token kind: " (.String (.Kind t)))))
+
+
+
+
+^{:go/end 288} (go/method String "String returns the unescaped string value for a JSON string.\nFor other JSON kinds, this returns the raw JSON representation.\n" ^string [^Token t]
+  ;; This is inlinable to take advantage of "function outlining".
+  ;; This avoids an allocation for the string(b) conversion
+  ;; if the caller does not use the string in an escaping manner.
+  ;; See https://blog.filippo.io/efficient-go-apis-with-the-inliner/
+  (let [(values s b) (.string t)]
+    (when (> (len b) 0)
+      (return (conv string b)))
+
+    ^{:line 287} s))
+
+^{:go/end 320} (go/method string [^Token t] :results [string (slice byte)]
+  (when [raw (.-raw t)] (!= raw nil)
+    (when (!= (conv uint64 (.previousOffsetStart raw)) (.-num t))
+      (panic invalidTokenPanic))
+
+    (let [buf (.previousBuffer raw)]
+      (when (== (aget buf 0) \")
+        ;; TODO: Preserve ValueFlags in Token?
+        (let [isVerbatim (== (jsonwire/ConsumeSimpleString buf) (len buf))]
+          (return "" (jsonwire/UnquoteMayCopy buf isVerbatim))))
+
+      ;; Handle tokens that are not JSON strings for fmt.Stringer.
+      (return "" buf)))
+
+  (when (and (!= (len (.-str t)) 0) (== (.-num t) 0))
+    (return (.-str t) nil))
+
+  ;; Handle tokens that are not JSON strings for fmt.Stringer.
+  (when (> (.-num t) 0)
+    (switch (aget (.-str t) 0)
+      (case [\F]
+        (return (conv string (jsonwire/AppendFloat nil (conv float64 (math/Float32frombits (conv uint32 (.-num t)))) 32)) nil))
+      (case [\f]
+        (return (conv string (jsonwire/AppendFloat nil (conv float64 (math/Float64frombits (conv uint64 (.-num t)))) 64)) nil))
+      (case [\i]
+        (return (strconv/FormatInt (conv int64 (.-num t)) 10) nil))
+      (case [\u]
+        (return (strconv/FormatUint (conv uint64 (.-num t)) 10) nil))))
+
+
+  (return "<invalid jsontext.Token>" nil))
+
+
+
+
+^{:go/end 347} (go/method appendNumber "appendNumber appends a JSON number to dst and returns it.\nIt panics if t is not a JSON number.\n" [^Token t ^{:tag (slice byte)} dst ^{:tag (* jsonflags/Flags)} flags] :results [(slice byte) error]
+  (if [raw (.-raw t)] (!= raw nil)
+    ;; Handle raw number value.
+    (let [buf (.previousBuffer raw)]
+      (when (== (.normalize (conv Kind (aget buf 0))) \0)
+        (let [(values dst _ err) (jsonwire/ReformatNumber dst buf flags)]
+          (return dst err))))
+
+    (when (!= (.-num t) 0)
+      ;; Handle exact number value.
+      (switch (aget (.-str t) 0)
+        (case [\F]
+          (return (jsonwire/AppendFloat dst (conv float64 (math/Float32frombits (conv uint32 (.-num t)))) 32) nil))
+        (case [\f]
+          (return (jsonwire/AppendFloat dst (conv float64 (math/Float64frombits (conv uint64 (.-num t)))) 64) nil))
+        (case [\i]
+          (return (strconv/AppendInt dst (conv int64 (.-num t)) 10) nil))
+        (case [\u]
+          (return (strconv/AppendUint dst (conv uint64 (.-num t)) 10) nil)))))
+
+
+
+  (panic (+ "invalid JSON token kind: " (.String (.Kind t)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 372} (go/method Float32 "Float32 returns the floating-point value for a JSON number\nparsed according to 32 bits of precision.\n\nIf the JSON number is outside the representable range of a float32,\nit returns +Inf or -Inf along with an error\nthat matches [strconv.ErrRange] according to [errors.Is].\n\nIt returns a NaN, +Inf, or -Inf value for any JSON string\nwith the values \"NaN\", \"Infinity\", or \"-Infinity\".\n\nIt panics if the token kind is not a JSON number\nor a JSON string with the aforementioned values.\n\nNote that most JSON libraries and standards assume that JSON numbers\nare 64-bit floating-point numbers.\nThis method should only be used if the caller knows\nfrom other context that this token is a JSON number\nformatted only to 32 bits of precision (such as being encoded\nusing the [Float32] constructor). For all other situations,\nprefer using the [Token.Float] accessor instead.\n" [^Token t] :results [float32 error]
+  (let [(values f err) (.float t 32)]
+    (return (conv float32 f) err)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 389} (go/method Float "Float returns the floating-point value for a JSON number\nparsed according to 64 bits of precision.\n\nIf the JSON number is outside the representable range of a float64,\nit returns +Inf or -Inf along with an error\nthat matches [strconv.ErrRange] according to [errors.Is].\n\nIt returns a NaN, +Inf, or -Inf value for any JSON string\nwith the values \"NaN\", \"Infinity\", or \"-Infinity\".\n\nIt panics if the token kind is not a JSON number\nor a JSON string with the aforementioned values.\n" [^Token t] :results [float64 error]
+  (let [(values f err) (.float t 64)]
+    (return (conv float64 f) err)))
+
+
+^{:go/end 438} (go/method float [^Token t ^int bits] :results [float64 error]
+  (if [raw (.-raw t)] (!= raw nil) (do
+      ;; Handle raw JSON number value.
+      (when (!= (conv uint64 (.previousOffsetStart raw)) (.-num t))
+        (panic invalidTokenPanic))
+
+      (let [buf (.previousBuffer raw)]
+        (when (== (.normalize (conv Kind (aget buf 0))) \0)
+          (let [(values fv err) (strconv/ParseFloat (conv string buf) bits)]
+            (when (!= err nil)
+              (set! err (addr (lit numError :accessor "Float" :value (.String t) :err (errors/Unwrap err))))) ; only ever ErrRange
+
+            (return fv err)))))
+
+    (when (!= (.-num t) 0)
+      ;; Handle typed Go number value.
+      (switch (aget (.-str t) 0)
+        (case [\F]
+          (return (conv float64 (math/Float32frombits (conv uint32 (.-num t)))) nil))
+        (case [\f]
+          (let [f64 (conv float64 (math/Float64frombits (conv uint64 (.-num t))))]
+            (when (and (== bits 32) (not (math/IsInf f64 0)) (math/IsInf (conv float64 (conv float32 f64)) 0))
+              (return f64 (addr (lit numError :accessor "Float" :value (.String t) :err strconv/ErrRange))))
+
+            (return f64 nil)))
+        (case [\i]
+          (return (conv float64 (conv int64 (.-num t))) nil)) ; NOTE: This may lead to loss of precision.
+        (case [\u]
+          (return (conv float64 (conv uint64 (.-num t))) nil))))) ; NOTE: This may lead to loss of precision.
+
+
+
+  ;; Handle string values with "NaN", "Infinity", or "-Infinity".
+  (when (== (.Kind t) \")
+    (switch (.String t)
+      (case ["NaN"]
+        (return (math/NaN) nil))
+      (case ["Infinity"]
+        (return (math/Inf (+ 1)) nil))
+      (case ["-Infinity"]
+        (return (math/Inf -1) nil))))
+
+  ;; TODO: Should this be an error instead of a panic?
+  ;; We can safely switch from a panic to an error in the future.
+
+
+  (panic (+ "invalid JSON token kind: " (.String (.Kind t)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 508} (go/method Int "Int returns the signed integer value for a JSON number.\n\nIt reports an error that matches [strconv.ErrSyntax] according to [errors.Is]\nif the JSON number does not match the restricted grammar of just a signed integer.\nIt reports an error that matches [strconv.ErrRange] according to [errors.Is]\nif the JSON number is a signed integer, but outside the range of an int64.\nEven if an error is reported, a reasonable value is still returned.\nThe fractional component of any number is ignored (truncation toward zero).\nAny number beyond the representation of an int64 will be saturated\nto the closest representable value.\n\nIt panics if the token kind is not a JSON number.\n" [^Token t] :results [int64 error]
+  (if [raw (.-raw t)] (!= raw nil) (do
+      ;; Handle raw JSON number value.
+      (when (!= (conv uint64 (.previousOffsetStart raw)) (.-num t))
+        (panic invalidTokenPanic))
+
+      (let [buf (.previousBuffer raw)]
+        (if (and (> (len buf) 0) (== (aget buf 0) \-))
+          ;; Prospectively parse a negative integer.
+          (switch [(values abs ok) (jsonwire/ParseUint (subslice buf (len "-")))]
+            (case [(> abs (- minInt64))]
+              (return minInt64 (addr (lit numError :accessor "Int" :value (.String t) :err strconv/ErrRange))))
+            (case [ok]
+              (return (* -1 (conv int64 abs)) nil)))
+
+
+          ;; Prospectively parse a non-negative integer.
+          (switch [(values abs ok) (jsonwire/ParseUint buf)]
+            (case [(> abs (+ maxInt64))]
+              (return maxInt64 (addr (lit numError :accessor "Int" :value (.String t) :err strconv/ErrRange))))
+            (case [ok]
+              (return (* (+ 1) (conv int64 abs)) nil))))
+
+
+        ;; This is not a signed integer, which implies ErrSyntax.
+        (when (== (.normalize (conv Kind (aget buf 0))) \0)
+          (let [(values f64 _) (strconv/ParseFloat (conv string buf) 64)]
+            (return (f64toi64 f64) (addr (lit numError :accessor "Int" :value (.String t) :err strconv/ErrSyntax)))))))
+
+    (when (!= (.-num t) 0)
+      ;; Handle typed Go number value.
+      (switch (aget (.-str t) 0)
+        (case [\i]
+          (return (conv int64 (.-num t)) nil))
+        (case [\u]
+          (when (> (.-num t) maxInt64)
+            (return maxInt64 (addr (lit numError :accessor "Int" :value (.String t) :err strconv/ErrRange))))
+
+          (return (conv int64 (.-num t)) nil))
+        (case [\f \F]
+          (let [f64 (conv float64 (math/Float64frombits (conv uint64 (.-num t))))]
+            (when (== (aget (.-str t) 0) \F)
+              (set! f64 (conv float64 (math/Float32frombits (conv uint32 (.-num t))))))
+
+            (switch [i64 (f64toi64 f64)]
+              (case [(math/IsNaN f64) (!= (math/Trunc f64) f64)]
+                (return i64 (addr (lit numError :accessor "Int" :value (.String t) :err strconv/ErrSyntax))))
+              (case [(or ^:go/paren (and (== i64 minInt64) (< f64 minInt64)) ^:go/paren (and (== i64 maxInt64) (> f64 maxInt64)))]
+                (return i64 (addr (lit numError :accessor "Int" :value (.String t) :err strconv/ErrRange))))
+              (default
+                (return i64 nil))))))))
+
+
+
+
+  (panic (+ "invalid JSON token kind: " (.String (.Kind t)))))
+
+
+^{:go/end 521} (go/func f64toi64 ^int64 [^float64 f64]
+  (switch
+    (case [(math/IsNaN f64)]
+      (return 0))
+    (case [(>= f64 (+ maxInt64 1))]
+      (return maxInt64))
+    (case [(< f64 minInt64)]
+      (return minInt64))
+    (default
+      (return (conv int64 f64))))) ; NOTE: This may lead to loss of precision.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 587} (go/method Uint "Uint returns the unsigned integer value for a JSON number.\n\nIt reports an error that matches [strconv.ErrSyntax] if the JSON number\ndoes not match the restricted grammar of just an unsigned integer.\nIt reports an error that matches [strconv.ErrRange] if the JSON number\nis an unsigned integer, but outside the representable range of a uint64.\nEven if an error is reported, a reasonable value is still returned.\nThe fractional component of any number is ignored (truncation toward zero).\nAny number beyond the representation of a uint64 will be saturated\nto the closest representable value.\n\nIt panics if the token kind is not a JSON number.\n" [^Token t] :results [uint64 error]
+  ;; NOTE: This accessor returns 0 for any negative JSON number,
+  ;; which might be surprising, but is at least consistent with the behavior
+  ;; of saturating out-of-bounds numbers to the closest representable number.
+  ;; We report ErrSyntax instead of ErrRange since the grammar for
+  ;; an unsigned integer does not permit a negative sign.
+
+  (if [raw (.-raw t)] (!= raw nil) (do
+      ;; Handle raw JSON number value.
+      (when (!= (conv uint64 (.previousOffsetStart raw)) (.-num t))
+        (panic invalidTokenPanic))
+
+      (let [buf (.previousBuffer raw)]
+        ;; Prospectively parse an unsigned integer.
+        (switch [(values abs ok) (jsonwire/ParseUint buf)]
+          (case [ok]
+            (return abs nil))
+          (case [(== abs maxUint64)] ; implies overflows
+            (return maxUint64 (addr (lit numError :accessor "Uint" :value (.String t) :err strconv/ErrRange)))))
+
+        ;; This is not an unsigned integer, which implies ErrSyntax.
+        (when (== (.normalize (conv Kind (aget buf 0))) \0)
+          (let [(values f64 _) (strconv/ParseFloat (conv string buf) 64)]
+            (return (f64tou64 f64) (addr (lit numError :accessor "Uint" :value (.String t) :err strconv/ErrSyntax)))))))
+
+    (when (!= (.-num t) 0)
+      ;; Handle typed Go number value.
+      (switch (aget (.-str t) 0)
+        (case [\u]
+          (return (.-num t) nil))
+        (case [\i]
+          (when (< (conv int64 (.-num t)) minUint64)
+            (return minUint64 (addr (lit numError :accessor "Uint" :value (.String t) :err strconv/ErrSyntax))))
+
+          (return (conv uint64 (conv int64 (.-num t))) nil))
+        (case [\f \F]
+          (let [f64 (conv float64 (math/Float64frombits (conv uint64 (.-num t))))]
+            (when (== (aget (.-str t) 0) \F)
+              (set! f64 (conv float64 (math/Float32frombits (conv uint32 (.-num t))))))
+
+            (switch [u64 (f64tou64 f64)]
+              (case [(math/IsNaN f64) (!= (math/Trunc f64) f64) (math/Signbit f64)]
+                (return u64 (addr (lit numError :accessor "Uint" :value (.String t) :err strconv/ErrSyntax))))
+              (case [(or ^:go/paren (and (== u64 minUint64) (< f64 minUint64)) ^:go/paren (and (== u64 maxUint64) (> f64 maxUint64)))]
+                (return u64 (addr (lit numError :accessor "Uint" :value (.String t) :err strconv/ErrRange))))
+              (default
+                (return u64 nil))))))))
+
+
+
+
+  (panic (+ "invalid JSON token kind: " (.String (.Kind t)))))
+
+
+^{:go/end 600} (go/func f64tou64 ^uint64 [^float64 f64]
+  (switch
+    (case [(math/IsNaN f64)]
+      (return 0))
+    (case [(>= f64 (+ maxUint64 1))]
+      (return maxUint64))
+    (case [(< f64 minUint64)]
+      (return minUint64))
+    (default
+      (return (conv uint64 f64))))) ; NOTE: This may lead to loss of precision.
+
+
+
+
+^{:go/end 618} (go/method Kind "Kind returns the token kind.\n" ^Kind [^Token t]
+  (switch
+    (case [(!= (.-raw t) nil)]
+      (let [raw (.-raw t)]
+        (when (!= (conv uint64 (.previousOffsetStart raw)) (.-num t))
+          (panic invalidTokenPanic))
+
+        (return (.normalize (conv Kind (aget (.-buf (.-raw t)) (.-prevStart raw)))))))
+    (case [(!= (.-num t) 0)]
+      (return \0))
+    (case [(!= (len (.-str t)) 0)]
+      (return \"))
+    (default
+      (return invalidKind))))
+
+
+
+
+
+
+
+
+(go/type Kind "A Kind represents the kind of a JSON token.\n\nA Kind is a single byte, which is conveniently the first byte of that\nkind's symbol in the grammar (except for numbers, which are always represented\nwith '0').\n" byte)
+
+(go/const
+  ^{:line 628} [^{:tag Kind :val 0} KindInvalid 0] ; invalid kind
+  ^{:line 629} [^{:tag Kind :val 110} KindNull \n] ; null
+  ^{:line 630} [^{:tag Kind :val 102} KindFalse \f] ; false
+  ^{:line 631} [^{:tag Kind :val 116} KindTrue \t] ; true
+  ^{:line 632} [^{:tag Kind :val 34} KindString \"] ; string
+  ^{:line 633} [^{:tag Kind :val 48} KindNumber \0] ; number
+  ^{:line 634} [^{:tag Kind :val 123} KindBeginObject \{] ; begin object
+  ^{:line 635} [^{:tag Kind :val 125} KindEndObject \}] ; end object
+  ^{:line 636} [^{:tag Kind :val 91} KindBeginArray \[] ; begin array
+  ^{:line 637} [^{:tag Kind :val 93} KindEndArray \]]) ; end array
+
+
+(go/const ^{:tag Kind :val 0} invalidKind 0)
+
+
+^{:go/end 668} (go/method String "String returns a string representation of k.\n" ^string [^Kind k]
+  (switch k
+    (case [0]
+      (return "invalid"))
+    (case [\n]
+      (return "null"))
+    (case [\f]
+      (return "false"))
+    (case [\t]
+      (return "true"))
+    (case [\"]
+      (return "string"))
+    (case [\0]
+      (return "number"))
+    (case [\{]
+      (return "{"))
+    (case [\}]
+      (return "}"))
+    (case [\[]
+      (return "["))
+    (case [\]]
+      (return "]"))
+    (default
+      (return (+ "<invalid jsontext.Kind: " (jsonwire/QuoteRune (lit (slice byte) (conv byte k))) ">")))))
+
+
+
+(go/var normKind (lit (array 256 Kind)
+    ^{:line 671} [\n \n]
+    ^{:line 672} [\f \f]
+    ^{:line 673} [\t \t]
+    ^{:line 674} [\" \"]
+    ^{:line 675} [\{ \{]
+    ^{:line 676} [\} \}]
+    ^{:line 677} [\[ \[]
+    ^{:line 678} [\] \]]
+    ^{:line 679} [\- \0]
+    ^{:line 680} [\0 \0]
+    ^{:line 681} [\1 \0]
+    ^{:line 682} [\2 \0]
+    ^{:line 683} [\3 \0]
+    ^{:line 684} [\4 \0]
+    ^{:line 685} [\5 \0]
+    ^{:line 686} [\6 \0]
+    ^{:line 687} [\7 \0]
+    ^{:line 688} [\8 \0]
+    ^{:line 689} [\9 \0]))
+
+
+
+
+^{:go/end 697} (go/method normalize "normalize coalesces all possible starting characters of a number as just '0',\nand converts all invalid kinds to 0.\n" ^Kind [^Kind k]
+  ;; A lookup table keeps the inlining cost as low as possible.
+  (aget normKind k))

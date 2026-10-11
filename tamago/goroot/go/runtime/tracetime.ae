@@ -1,0 +1,110 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Trace time and clock.
+
+(in-ns 'go.runtime) (go/file "tracetime.go" :imports [
+
+
+    ^{:line 10} [goarch "internal/goarch"]
+    ^{:line 11} [tracev2 "internal/trace/tracev2"]
+    ^{:line 12} [_ "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const ^{:val 64 :doc "Timestamps in trace are produced through either nanotime or cputicks\nand divided by traceTimeDiv. nanotime is used everywhere except on\nplatforms where osHasLowResClock is true, because the system clock\nisn't granular enough to get useful information out of a trace in\nmany cases.\n\nThis makes absolute values of timestamp diffs smaller, and so they are\nencoded in fewer bytes.\n\nThe target resolution in all cases is 64 nanoseconds.\nThis is based on the fact that fundamentally the execution tracer won't emit\nevents more frequently than roughly every 200 ns or so, because that's roughly\nhow long it takes to call through the scheduler.\nWe could be more aggressive and bump this up to 128 ns while still getting\nuseful data, but the extra bit doesn't save us that much and the headroom is\nnice to have.\n\nHitting this target resolution is easy in the nanotime case: just pick a\ndivision of 64. In the cputicks case it's a bit more complex.\n\nFor x86, on a 3 GHz machine, we'd want to divide by 3*64 to hit our target.\nTo keep the division operation efficient, we round that up to 4*64, or 256.\nGiven what cputicks represents, we use this on all other platforms except\nfor PowerPC.\nThe suggested increment frequency for PowerPC's time base register is\n512 MHz according to Power ISA v2.07 section 6.2, so we use 32 on ppc64\nand ppc64le.\n"} traceTimeDiv (+ (* (- 1 osHasLowResClockInt) 64) (* osHasLowResClockInt (- 256 (* 224 (bit-or goarch/IsPpc64 goarch/IsPpc64le))))))
+
+
+(go/type traceTime "traceTime represents a timestamp for the trace.\n" uint64)
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 63} (go/func ^:go/nosplit ^{:go/linkname "traceClockNow"} traceClockNow "traceClockNow returns a monotonic timestamp. The clock this function gets\nthe timestamp from is specific to tracing, and shouldn't be mixed with other\nclock sources.\n\nnosplit because it's called from exitsyscall and various trace writing functions,\nwhich are nosplit.\n\ntraceClockNow is called by runtime/trace and golang.org/x/exp/trace using linkname.\n" ^traceTime []
+  (when osHasLowResClock
+    (return (conv traceTime (/ (cputicks) traceTimeDiv))))
+
+  (conv traceTime (/ (nanotime) traceTimeDiv)))
+
+
+
+
+
+
+^{:go/end 77} (go/func ^{:go/linkname "traceClockUnitsPerSecond runtime/trace.runtime_traceClockUnitsPerSecond"} traceClockUnitsPerSecond "traceClockUnitsPerSecond estimates the number of trace clock units per\nsecond that elapse.\n" ^uint64 []
+  (when osHasLowResClock
+    ;; We're using cputicks as our clock, so we need a real estimate.
+    (return (conv uint64 (/ (ticksPerSecond) traceTimeDiv))))
+
+  ;; Our clock is nanotime, so it's just the constant time division.
+  ;; (trace clock units / nanoseconds) * (1e9 nanoseconds / 1 second)
+  (conv uint64 (* (/ 1.0 (conv float64 traceTimeDiv)) 1.0E9)))
+
+
+^{:go/end 112} (go/func traceSyncBatch [^uintptr gen ^uint64 frequency]
+  (let [w (unsafeTraceWriter gen nil)]
+
+    ;; Ensure we have a place to write to.
+    (set! (values w _) (.ensure w (+ 3 (* 5 traceBytesPerNumber)))) ; /* EvSync + EvFrequency + EvClockSnapshot */ ; /* frequency, timestamp, mono, sec, nsec */
+
+    ;; Write out the sync batch event.
+    ^{:go/via [traceBuf]} (.byte w (conv byte tracev2/EvSync))
+
+    ;; Write out the frequency event.
+    ^{:go/via [traceBuf]} (.byte w (conv byte tracev2/EvFrequency))
+    ^{:go/via [traceBuf]} (.varint w frequency)
+
+    ;; Write out the clock snapshot event.
+    (let [(values sec nsec mono) (time_now)
+        ^{:line 94} ts (traceClockNow)]
+      (when (<= ts ^{:go/via [traceBufHeader]} (.-lastTime (.-traceBuf w)))
+        (set! ts (+ ^{:go/via [traceBufHeader]} (.-lastTime (.-traceBuf w)) 1)))
+
+      (let [tsDiff (conv uint64 (- ts ^{:go/via [traceBufHeader]} (.-lastTime (.-traceBuf w))))]
+        (set! ^{:go/via [traceBufHeader]} (.-lastTime (.-traceBuf w)) ts)
+        ^{:go/via [traceBuf]} (.byte w (conv byte tracev2/EvClockSnapshot))
+        ^{:go/via [traceBuf]} (.varint w tsDiff)
+        ^{:go/via [traceBuf]} (.varint w (conv uint64 mono))
+        ^{:go/via [traceBuf]} (.varint w (conv uint64 sec))
+        ^{:go/via [traceBuf]} (.varint w (conv uint64 nsec))
+
+        ;; Immediately flush the buffer.
+        (systemstack ^{:go/end 111} (fn []
+            (lock (addr (.-lock trace)))
+            (traceBufFlush (.-traceBuf w) gen)
+            (unlock (addr (.-lock trace)))))))))

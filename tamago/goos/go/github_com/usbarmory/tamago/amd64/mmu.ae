@@ -1,0 +1,122 @@
+;; AMD64 processor support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.amd64) (go/file "mmu.go" :imports [
+
+
+    ^{:line 12} [fmt "fmt"]
+
+    ^{:line 14} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 15} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+(go/const ^{:val 16} CR0_WP 16)
+
+
+(go/const "Memory region attributes\n"
+  ^{:line 22} [^{:tag uint64 :val 1} TTE_P (<< 1 0)]
+  ^{:line 23} [^{:tag uint64 :val 128} TTE_PS (<< 1 7)])
+
+
+
+(go/const "Page levels\n"
+  ^{:line 28} [^{:val 4} PML4 4]
+  ^{:line 29} [^{:val 3} PDPT 3]
+  ^{:line 30} [^{:val 2} PD 2]
+  ^{:line 31} [^{:val 1} PT 1]
+
+
+
+  ^{:line 35} [^{:val 39 :doc "AMD64 Architecture Programmer’s Manual\nFigure 5-17. 4-Kbyte Page Translation—Long Mode 4-Level Paging\n"} indexPML4 39]
+  ^{:line 36} [^{:val 30} indexPDPT 30]
+  ^{:line 37} [^{:val 21} indexPD 21]
+  ^{:line 38} [^{:val 12} indexPT 12]
+  ^{:line 39} [^{:val 512} tableEntries 512]
+  ^{:line 40} [^{:val 511} indexMask 0x1ff]
+  ^{:line 41} [^{:val 4503599627366400} addrMask 0x000ffffffffff000])
+
+
+
+(go/func ^:extern read_cr0 "defined in mmu.s\n" ^uint64 [])
+(go/func ^:extern write_cr0 [^uint64 val])
+(go/func ^:extern read_cr3 ^uint64 [])
+
+
+
+^{:go/end 55} (go/method SetWriteProtect "SetWriteProtect configures the Write Protect (WP) bit in Control Register 0\n(CR0).\n" [^{:tag (* CPU)} cpu ^bool enable]
+  (let [cr0 (read_cr0)]
+    (bits/SetTo64 (addr cr0) CR0_WP enable)
+    (write_cr0 cr0)))
+
+
+
+
+
+^{:go/end 98} (go/method FindPTE "FindPTE returns the Page Table Entry (PTE) offset, level and base address\nfor a given address. A non-zero address bit length can override the default\nvalue to support implementation specific limitations (e.g. C-Bit).\n" [^{:tag (* CPU)} cpu ^uint64 addr ^int bitLen] :results [^uint64 pte ^int level ^uint64 page]
+  (let [indices (lit (array 4 uint64)
+        (bit-and (>> addr indexPML4) indexMask)
+        (bit-and (>> addr indexPDPT) indexMask)
+        (bit-and (>> addr indexPD) indexMask)
+        (bit-and (>> addr indexPT) indexMask))
+
+
+      ^{:line 68} mask (conv uint64 addrMask)]
+
+    (when (> bitLen 0)
+      (set! mask bit-and (- (conv uint64 ^uint64 (<< 1 bitLen)) 1)))
+
+
+    (let [pml4 (read_cr3)
+        ^{:line 75} tableAddr (bit-and pml4 mask)]
+
+      (range [i 4]
+        (set! level (- 4 i))
+        (let [off (+ tableAddr (* (aget indices i) 8))
+            ^{:line 80} entry (reg/Read64 off)]
+
+          (when (== (bit-and entry TTE_P) 0)
+            (return 0 level (bit-and entry mask)))
+
+
+          (when (and ^:go/paren (or (== level PDPT) (== level PD)) ^:go/paren (!= (bit-and entry TTE_PS) 0))
+            (return off level (bit-and entry mask)))
+
+
+          (when (== level PT)
+            (return off PT (bit-and entry mask)))
+
+
+          (set! tableAddr (bit-and entry mask))))
+
+
+      (return 0 0 0))))
+
+
+
+
+
+^{:go/end 123} (go/method SetEncryptedBit "SetEncryptedBit (re)configures the page encryption attribute bit (C-bit) for\na given memory range, an error is raised if the argument range spawns across\nmultiple translation levels or is not page aligned.\n" [^{:tag (* CPU)} cpu ^uint64 start ^uint64 end ^int cbit ^bool private] :results [^error err]
+  (let [(values startPTE startLevel startPage) (.FindPTE cpu start cbit)
+      (values endPTE endLevel _) (.FindPTE cpu end cbit)]
+
+    (when (!= startLevel endLevel)
+      (return (fmt/Errorf "changing C-bit on multiple translation levels is unsupported")))
+
+
+    (when (!= start startPage)
+      (return (fmt/Errorf "start address (%#x) does not match PTE base address (%#x)" start startPage)))
+
+
+    (.SetWriteProtect cpu false)
+    (defer (.SetWriteProtect cpu true))
+
+    (for [pte startPTE] (< pte endPTE) (set! pte + 8)
+      (reg/SetTo64 pte cbit private))
+
+
+    (return)))

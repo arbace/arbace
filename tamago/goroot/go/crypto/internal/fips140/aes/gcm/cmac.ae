@@ -1,0 +1,76 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.aes.gcm) (go/file "cmac.go" :imports [
+
+
+    ^{:line 8} [fips140 "crypto/internal/fips140"]
+    ^{:line 9} [aes "crypto/internal/fips140/aes"]
+    ^{:line 10} [subtle "crypto/internal/fips140/subtle"]])
+
+
+
+
+
+
+
+(go/type CMAC "CMAC implements the CMAC mode from NIST SP 800-38B.\n\nIt is optimized for use in Counter KDF (SP 800-108r1) and XAES-256-GCM\n(https://c2sp.org/XAES-256-GCM), rather than for exposing it to applications\nas a stand-alone MAC.\n" (struct
+    ^{:line 19 :tag aes/Block} b
+    ^{:line 20 :tag (array aes/BlockSize byte)} k1
+    ^{:line 21 :tag (array aes/BlockSize byte)} k2))
+
+
+^{:go/end 28} (go/func NewCMAC ^{:tag (* CMAC)} [^{:tag (* aes/Block)} b]
+  (let [c (addr (lit CMAC :b @b))]
+    (.deriveSubkeys c)
+    ^{:line 27} c))
+
+
+^{:go/end 38} (go/method deriveSubkeys [^{:tag (* CMAC)} c]
+  (aes/EncryptBlockInternal (addr (.-b c)) (subslice (.-k1 c)) (subslice (.-k1 c)))
+  (let [msb (shiftLeft (addr (.-k1 c)))]
+    (set! (aget (.-k1 c) (- (len (.-k1 c)) 1)) bit-xor (* msb 2r10000111))
+
+    (set! (.-k2 c) (.-k1 c))
+    (set! msb (shiftLeft (addr (.-k2 c))))
+    (set! (aget (.-k2 c) (- (len (.-k2 c)) 1)) bit-xor (* msb 2r10000111))))
+
+
+^{:go/end 68} (go/method MAC ^{:tag (array aes/BlockSize byte)} [^{:tag (* CMAC)} c ^{:tag (slice byte)} m]
+  (fips140/RecordApproved)
+  (set! _ (.-b c)) ; Hoist the nil check out of the loop.
+  (let [^{:tag (array aes/BlockSize byte)} x (zero (array aes/BlockSize byte))]
+    (when (== (len m) 0)
+      ;; Special-cased as a single empty partial final block.
+      (set! x (.-k2 c))
+      (set! (aget x (len m)) bit-xor 2r10000000)
+      (aes/EncryptBlockInternal (addr (.-b c)) (subslice x) (subslice x))
+      (return x))
+
+    (while (>= (len m) aes/BlockSize)
+      (subtle/XORBytes (subslice x) (subslice m _ aes/BlockSize) (subslice x))
+      (when (== (len m) aes/BlockSize)
+        ;; Final complete block.
+        (subtle/XORBytes (subslice x) (subslice (.-k1 c)) (subslice x)))
+
+      (aes/EncryptBlockInternal (addr (.-b c)) (subslice x) (subslice x))
+      (set! m (subslice m aes/BlockSize)))
+
+    (when (> (len m) 0)
+      ;; Final incomplete block.
+      (subtle/XORBytes (subslice x) m (subslice x))
+      (subtle/XORBytes (subslice x) (subslice (.-k2 c)) (subslice x))
+      (set! (aget x (len m)) bit-xor 2r10000000)
+      (aes/EncryptBlockInternal (addr (.-b c)) (subslice x) (subslice x)))
+
+    ^{:line 67} x))
+
+
+
+^{:go/end 77} (go/func shiftLeft "shiftLeft sets x to x << 1, and returns MSB₁(x).\n" ^byte [^{:tag (* (array aes/BlockSize byte))} x]
+  (let [^byte msb (zero byte)]
+    (for [i (- (len x) 1)] (>= i 0) (dec! i)
+      (set! (values msb (aget x i)) (values (>> (aget x i) 7) (bit-or (<< (aget x i) 1) msb))))
+
+    ^{:line 76} msb))

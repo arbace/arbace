@@ -1,0 +1,865 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package parse builds parse trees for templates as defined by text/template
+;; and html/template. Clients should use those packages to construct templates
+;; rather than this one, which provides shared internal data structures not
+;; intended for general use.
+(in-ns 'go.text.template.parse) (go/file "parse.go" :doc "Package parse builds parse trees for templates as defined by text/template\nand html/template. Clients should use those packages to construct templates\nrather than this one, which provides shared internal data structures not\nintended for general use.\n" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [runtime "runtime"]
+    ^{:line 15} [strconv "strconv"]
+    ^{:line 16} [strings "strings"]])
+
+
+
+(go/type Tree "Tree is the representation of a single parsed template.\n" (struct
+    ^{:line 21 :tag string} Name ; name of the template represented by the tree.
+    ^{:line 22 :tag string} ParseName ; name of the top-level template during parsing, for error messages.
+    ^{:line 23 :tag (* ListNode)} Root ; top-level root of the tree.
+    ^{:line 24 :tag Mode} Mode ; parsing mode.
+    ^{:line 25 :tag string} text ; text parsed to create the template (or its parent)
+
+    ^{:line 27 :tag (slice (map string any)) :doc "Parsing only; cleared after parse.\n"} funcs
+    ^{:line 28 :tag (* lexer)} lex
+    ^{:line 29 :tag (array 3 item)} token ; three-token lookahead for parser.
+    ^{:line 30 :tag int} peekCount
+    ^{:line 31 :tag (slice string)} vars ; variables defined at the moment.
+    ^{:line 32 :tag (map string (* Tree))} treeSet
+    ^{:line 33 :tag int} actionLine ; line of left delim starting action
+    ^{:line 34 :tag int} rangeDepth
+    ^{:line 35 :tag int} stackDepth ; depth of nested parenthesized expressions
+
+    ^{:line 37 :tag string} leftDelim
+    ^{:line 38 :tag string} rightDelim))
+
+
+
+(go/type Mode "A Mode value is a set of flags (or 0). Modes control parser behavior.\n" uint)
+
+(go/const
+  ^{:line 45} [^{:tag Mode :val 1} ParseComments (<< 1 iota)] ; parse comments and add them to AST
+  ^{:line 46} [^{:val 2} SkipFuncCheck]) ; do not check that functions are defined
+
+
+
+
+(go/var ^{:doc "maxStackDepth is the maximum depth permitted for nested\nparenthesized expressions.\n"} maxStackDepth 10000)
+
+
+^{:go/end 58} (go/func init "init reduces maxStackDepth for WebAssembly due to its smaller stack size.\n" []
+  (when (== runtime/GOARCH "wasm")
+    (set! maxStackDepth 1000)))
+
+
+
+
+^{:go/end 73} (go/method Copy "Copy returns a copy of the [Tree]. Any parsing state is discarded.\n" ^{:tag (* Tree)} [^{:tag (* Tree)} t]
+  (when (== t nil)
+    (return nil))
+
+  (addr ^{:go/breaks [2 4 6 8 10 12]} (lit Tree
+      :Name (.-Name t)
+      :ParseName (.-ParseName t)
+      :Root (.CopyList (.-Root t))
+      :text (.-text t)
+      :leftDelim (.-leftDelim t)
+      :rightDelim (.-rightDelim t))))
+
+
+
+
+
+
+
+^{:go/end 85} (go/func Parse "Parse returns a map from template name to [Tree], created by parsing the\ntemplates described in the argument string. The top-level template will be\ngiven the specified name. If an error is encountered, parsing stops and an\nempty map is returned with the error.\n" [^string name ^string text ^string leftDelim ^string rightDelim & ^{:tag (slice (map string any))} funcs] :results [(map string (* Tree)) error]
+  (let [treeSet (make (map string (* Tree)))
+      ^{:line 81} t (New name)]
+    (set! (.-text t) text)
+    (let [(values _ err) (.Parse t text leftDelim rightDelim treeSet (spread funcs))]
+      (return treeSet err))))
+
+
+
+^{:go/end 95} (go/method next "next returns the next token.\n" ^item [^{:tag (* Tree)} t]
+  (if (> (.-peekCount t) 0)
+    (dec! (.-peekCount t))
+
+    (aset (.-token t) 0 (.nextItem (.-lex t))))
+
+  (aget (.-token t) (.-peekCount t)))
+
+
+
+^{:go/end 100} (go/method backup "backup backs the input stream up one token.\n" [^{:tag (* Tree)} t]
+  (inc! (.-peekCount t)))
+
+
+
+
+^{:go/end 107} (go/method backup2 "backup2 backs the input stream up two tokens.\nThe zeroth token is already there.\n" [^{:tag (* Tree)} t ^item t1]
+  (aset (.-token t) 1 t1)
+  (set! (.-peekCount t) 2))
+
+
+
+
+^{:go/end 115} (go/method backup3 "backup3 backs the input stream up three tokens\nThe zeroth token is already there.\n" [^{:tag (* Tree)} t ^item t2 ^item t1] ; Reverse order: we're pushing back.
+  (aset (.-token t) 1 t1)
+  (aset (.-token t) 2 t2)
+  (set! (.-peekCount t) 3))
+
+
+
+^{:go/end 125} (go/method peek "peek returns but does not consume the next token.\n" ^item [^{:tag (* Tree)} t]
+  (when (> (.-peekCount t) 0)
+    (return (aget (.-token t) (- (.-peekCount t) 1))))
+
+  (set! (.-peekCount t) 1)
+  (aset (.-token t) 0 (.nextItem (.-lex t)))
+  (aget (.-token t) 0))
+
+
+
+^{:go/end 136} (go/method nextNonSpace "nextNonSpace returns the next non-space token.\n" [^{:tag (* Tree)} t] :results [^item token]
+  (while true
+    (set! token (.next t))
+    (when (!= (.-typ token) itemSpace)
+      (break)))
+
+
+  ^{:line 135} token)
+
+
+
+^{:go/end 143} (go/method peekNonSpace "peekNonSpace returns but does not consume the next non-space token.\n" ^item [^{:tag (* Tree)} t]
+  (let [token (.nextNonSpace t)]
+    (.backup t)
+    ^{:line 142} token))
+
+
+;; Parsing.
+
+
+^{:go/end 153} (go/func New "New allocates a new parse tree with the given name.\n" ^{:tag (* Tree)} [^string name & ^{:tag (slice (map string any))} funcs]
+  (addr ^{:go/breaks [2 4]} (lit Tree
+      :Name name
+      :funcs funcs)))
+
+
+
+
+
+
+^{:go/end 175} (go/method ErrorContext "ErrorContext returns a textual representation of the location of the node in the input text.\nThe receiver is only used when the node does not have a pointer to the tree inside,\nwhich can occur in old code.\n" [^{:tag (* Tree)} t ^Node n] :results [^string location ^string context]
+  (let [pos (conv int (.Position n))
+      ^{:line 160} tree (.tree n)]
+    (when (== tree nil)
+      (set! tree t))
+
+    (let [text (subslice (.-text tree) _ pos)
+        ^{:line 165} byteNum (strings/LastIndex text "\n")]
+      (if (== byteNum -1)
+        (set! byteNum pos) ; On first line.
+        (do
+          (inc! byteNum) ; After the newline.
+          (set! byteNum (- pos byteNum))))
+
+      (let [lineNum (+ 1 (strings/Count text "\n"))]
+        (set! context (.String n))
+        (return (fmt/Sprintf "%s:%d:%d" (.-ParseName tree) lineNum byteNum) context)))))
+
+
+
+^{:go/end 182} (go/method errorf "errorf formats the error and terminates processing.\n" [^{:tag (* Tree)} t ^string format & ^{:tag (slice any)} args]
+  (set! (.-Root t) nil)
+  (set! format (fmt/Sprintf "template: %s:%d: %s" (.-ParseName t) (.-line (aget (.-token t) 0)) format))
+  (panic (fmt/Errorf format (spread args))))
+
+
+
+^{:go/end 187} (go/method error "error terminates processing.\n" [^{:tag (* Tree)} t ^error err]
+  (.errorf t "%s" err))
+
+
+
+^{:go/end 196} (go/method expect "expect consumes the next token and guarantees it has the required type.\n" ^item [^{:tag (* Tree)} t ^itemType expected ^string context]
+  (let [token (.nextNonSpace t)]
+    (when (!= (.-typ token) expected)
+      (.unexpected t token context))
+
+    ^{:line 195} token))
+
+
+
+^{:go/end 205} (go/method expectOneOf "expectOneOf consumes the next token and guarantees it has one of the required types.\n" ^item [^{:tag (* Tree)} t ^itemType expected1 ^itemType expected2 ^string context]
+  (let [token (.nextNonSpace t)]
+    (when (and (!= (.-typ token) expected1) (!= (.-typ token) expected2))
+      (.unexpected t token context))
+
+    ^{:line 204} token))
+
+
+
+^{:go/end 220} (go/method unexpected "unexpected complains about the token and terminates processing.\n" [^{:tag (* Tree)} t ^item token ^string context]
+  (when (== (.-typ token) itemError)
+    (let [extra ""]
+      (when (and (!= (.-actionLine t) 0) (!= (.-actionLine t) (.-line token)))
+        (set! extra (fmt/Sprintf " in action started at %s:%d" (.-ParseName t) (.-actionLine t)))
+        (when (strings/HasSuffix (.-val token) " action")
+          (set! extra (subslice extra (len " in action"))))) ; avoid "action in action"
+
+
+      (.errorf t "%s%s" token extra)))
+
+  (.errorf t "unexpected %s in %s" token context))
+
+
+
+^{:go/end 234} (go/method recover "recover is the handler that turns panics into returns from the top level of Parse.\n" [^{:tag (* Tree)} t ^{:tag (* error)} errp]
+  (let [e (recover)]
+    (when (!= e nil)
+      (when [(values _ ok) (assert runtime/Error e)] ok
+        (panic e))
+
+      (when (!= t nil)
+        (.stopParse t))
+
+      (set! @errp (assert error e)))))
+
+
+
+
+^{:go/end 249} (go/method startParse "startParse initializes the parser, using the lexer.\n" [^{:tag (* Tree)} t ^{:tag (slice (map string any))} funcs ^{:tag (* lexer)} lex ^{:tag (map string (* Tree))} treeSet]
+  (set! (.-Root t) nil)
+  (set! (.-lex t) lex)
+  (set! (.-vars t) (lit (slice string) "$"))
+  (set! (.-funcs t) funcs)
+  (set! (.-treeSet t) treeSet)
+  (set! (.-stackDepth t) 0)
+  (set! (.-options lex) ^{:go/breaks [2 4 6]} (lit lexOptions
+      :emitComment (!= (bit-and (.-Mode t) ParseComments) 0)
+      :breakOK (not (.hasFunction t "break"))
+      :continueOK (not (.hasFunction t "continue")))))
+
+
+
+
+^{:go/end 257} (go/method stopParse "stopParse terminates parsing.\n" [^{:tag (* Tree)} t]
+  (set! (.-lex t) nil)
+  (set! (.-vars t) nil)
+  (set! (.-funcs t) nil)
+  (set! (.-treeSet t) nil))
+
+
+
+
+
+
+^{:go/end 281} (go/method Parse "Parse parses the template definition string to construct a representation of\nthe template for execution. If either action delimiter string is empty, the\ndefault (\"{{\" or \"}}\") is used. Embedded template definitions are added to\nthe treeSet map.\n" [^{:tag (* Tree)} t ^string text ^string leftDelim ^string rightDelim ^{:tag (map string (* Tree))} treeSet & ^{:tag (slice (map string any))} funcs] :results [^{:tag (* Tree)} tree ^error err]
+  (defer (.recover t (addr err)))
+  (set! (.-ParseName t) (.-Name t))
+  (set! (.-leftDelim t) leftDelim)
+  (when (== (.-leftDelim t) "")
+    (set! (.-leftDelim t) defaultLeftDelim))
+
+  (set! (.-rightDelim t) rightDelim)
+  (when (== (.-rightDelim t) "")
+    (set! (.-rightDelim t) defaultRightDelim))
+
+  (let [lexer (lex (.-Name t) text (.-leftDelim t) (.-rightDelim t))]
+    (.startParse t funcs lexer treeSet)
+    (set! (.-text t) text)
+    (.parse t)
+    (.add t)
+    (.stopParse t)
+    (return t nil)))
+
+
+
+^{:go/end 293} (go/method add "add adds tree to t.treeSet.\n" [^{:tag (* Tree)} t]
+  (let [tree (aget (.-treeSet t) (.-Name t))]
+    (when (or (== tree nil) (IsEmptyTree (.-Root tree)))
+      (aset (.-treeSet t) (.-Name t) t)
+      (return))
+
+    (when (not (IsEmptyTree (.-Root t)))
+      (.errorf t "template: multiple definition of template %q" (.-Name t)))))
+
+
+
+
+^{:go/breaks [[5 319]] :go/end 320} (go/func IsEmptyTree "IsEmptyTree reports whether this tree (node) is empty of everything but space or comments.\n" ^bool [^Node n]
+  (type-switch [n n]
+    (case [nil]
+      (return true))
+    (case [(* ActionNode)])
+    (case [(* CommentNode)]
+      (return true))
+    (case [(* IfNode)])
+    (case [(* ListNode)]
+      (range [_ node (.-Nodes n)]
+        (when (not (IsEmptyTree node))
+          (return false)))
+
+
+      (return true))
+    (case [(* RangeNode)])
+    (case [(* TemplateNode)])
+    (case [(* TextNode)]
+      (return (== (len (bytes/TrimSpace (.-Text n))) 0)))
+    (case [(* WithNode)])
+    (default
+      (panic (+ "unknown node: " (.String n)))))
+
+  false)
+
+
+
+
+
+^{:go/end 350} (go/method parse "parse is the top-level parser for a template, essentially the same\nas itemList except it also parses {{define}} actions.\nIt runs to EOF.\n" [^{:tag (* Tree)} t]
+  (set! (.-Root t) (.newList t (.-pos (.peek t))))
+  (while (!= (.-typ (.peek t)) itemEOF)
+    (when (== (.-typ (.peek t)) itemLeftDelim)
+      (let [delim (.next t)]
+        (when (== (.-typ (.nextNonSpace t)) itemDefine)
+          (let [newT (New "definition")] ; name will be updated once we know it.
+            (set! (.-text newT) (.-text t))
+            (set! (.-Mode newT) (.-Mode t))
+            (set! (.-leftDelim newT) (.-leftDelim t))
+            (set! (.-rightDelim newT) (.-rightDelim t))
+            (set! (.-ParseName newT) (.-ParseName t))
+            (.startParse newT (.-funcs t) (.-lex t) (.-treeSet t))
+            (.parseDefinition newT)
+            (continue)))
+
+        (.backup2 t delim)))
+
+    (switch [n (.textOrAction t)] (.Type n)
+      (case [nodeEnd nodeElse]
+        (.errorf t "unexpected %s" n))
+      (default
+        (.append (.-Root t) n)))))
+
+
+
+
+
+
+
+^{:go/end 371} (go/method parseDefinition "parseDefinition parses a {{define}} ...  {{end}} template definition and\ninstalls the definition in t.treeSet. The \"define\" keyword has already\nbeen scanned.\n" [^{:tag (* Tree)} t]
+  (let [^:const ^{:val "define clause"} context "define clause"
+      ^{:line 357} name (.expectOneOf t itemString itemRawString context)
+      ^{:line 358 :tag error} err (zero error)]
+    (set! (values (.-Name t) err) (strconv/Unquote (.-val name)))
+    (when (!= err nil)
+      (.error t err))
+
+    (.expect t itemRightDelim context)
+    (let [^Node end (zero Node)]
+      (set! (values (.-Root t) end) (.itemList t))
+      (when (!= (.Type end) nodeEnd)
+        (.errorf t "unexpected %s in %s" end context))
+
+      (.add t)
+      (.stopParse t))))
+
+
+
+
+
+
+
+^{:go/end 390} (go/method itemList "itemList:\n\n\ttextOrAction*\n\nTerminates at {{end}} or {{else}}, returned separately.\n" [^{:tag (* Tree)} t] :results [^{:tag (* ListNode)} list ^Node next]
+  (set! list (.newList t (.-pos (.peekNonSpace t))))
+  (while (!= (.-typ (.peekNonSpace t)) itemEOF)
+    (let [n (.textOrAction t)]
+      (switch (.Type n)
+        (case [nodeEnd nodeElse]
+          (return list n)))
+
+      (.append list n)))
+
+  (.errorf t "unexpected EOF")
+  (return))
+
+
+
+
+
+^{:go/breaks [[5 408]] :go/end 409} (go/method textOrAction "textOrAction:\n\n\ttext | comment | action\n" ^Node [^{:tag (* Tree)} t]
+  (switch [token (.nextNonSpace t)] (.-typ token)
+    (case [itemText]
+      (return (.newText t (.-pos token) (.-val token))))
+    (case [itemLeftDelim]
+      (set! (.-actionLine t) (.-line token))
+      (defer (.clearActionLine t))
+      (return (.action t)))
+    (case [itemComment]
+      (return (.newComment t (.-pos token) (.-val token))))
+    (default
+      (.unexpected t token "input")))
+
+  nil)
+
+
+^{:go/end 413} (go/method clearActionLine [^{:tag (* Tree)} t]
+  (set! (.-actionLine t) 0))
+
+
+
+
+
+
+
+
+
+^{:go/end 447} (go/method action "Action:\n\n\tcontrol\n\tcommand (\"|\" command)*\n\nLeft delim is past. Now get actions.\nFirst word could be a keyword such as range.\n" [^{:tag (* Tree)} t] :results [^Node n]
+  (switch [token (.nextNonSpace t)] (.-typ token)
+    (case [itemBlock]
+      (return (.blockControl t)))
+    (case [itemBreak]
+      (return (.breakControl t (.-pos token) (.-line token))))
+    (case [itemContinue]
+      (return (.continueControl t (.-pos token) (.-line token))))
+    (case [itemElse]
+      (return (.elseControl t)))
+    (case [itemEnd]
+      (return (.endControl t)))
+    (case [itemIf]
+      (return (.ifControl t)))
+    (case [itemRange]
+      (return (.rangeControl t)))
+    (case [itemTemplate]
+      (return (.templateControl t)))
+    (case [itemWith]
+      (return (.withControl t))))
+
+  (.backup t)
+  (let [token (.peek t)]
+    ;; Do not pop variables; they persist until "end".
+    (.newAction t (.-pos token) (.-line token) (.pipeline t "command" itemRightDelim))))
+
+
+
+
+
+
+
+^{:go/end 462} (go/method breakControl "Break:\n\n\t{{break}}\n\nBreak keyword is past.\n" ^Node [^{:tag (* Tree)} t ^Pos pos ^int line]
+  (when [token (.nextNonSpace t)] (!= (.-typ token) itemRightDelim)
+    (.unexpected t token "{{break}}"))
+
+  (when (== (.-rangeDepth t) 0)
+    (.errorf t "{{break}} outside {{range}}"))
+
+  (.newBreak t pos line))
+
+
+
+
+
+
+
+^{:go/end 477} (go/method continueControl "Continue:\n\n\t{{continue}}\n\nContinue keyword is past.\n" ^Node [^{:tag (* Tree)} t ^Pos pos ^int line]
+  (when [token (.nextNonSpace t)] (!= (.-typ token) itemRightDelim)
+    (.unexpected t token "{{continue}}"))
+
+  (when (== (.-rangeDepth t) 0)
+    (.errorf t "{{continue}} outside {{range}}"))
+
+  (.newContinue t pos line))
+
+
+
+
+
+^{:go/end 535} (go/method pipeline "Pipeline:\n\n\tdeclarations? command ('|' command)*\n" [^{:tag (* Tree)} t ^string context ^itemType end] :results [^{:tag (* PipeNode)} pipe]
+  (let [token (.peekNonSpace t)]
+    (set! pipe (.newPipeline t (.-pos token) (.-line token) nil))
+    ;; Are there declarations or assignments?
+    (label :decls
+      (when [v (.peekNonSpace t)] (== (.-typ v) itemVariable)
+        (.next t)
+        ;; Since space is a token, we need 3-token look-ahead here in the worst case:
+        ;; in "$x foo" we need to read "foo" (as opposed to ":=") to know that $x is an
+        ;; argument variable rather than a declaration. So remember the token
+        ;; adjacent to the variable so we can push it back if necessary.
+        (let [tokenAfterVariable (.peek t)
+            ^{:line 494} next (.peekNonSpace t)]
+          (switch
+            (case [(== (.-typ next) itemAssign) (== (.-typ next) itemDeclare)]
+              (set! (.-IsAssign pipe) (== (.-typ next) itemAssign))
+              (.nextNonSpace t)
+              (set! (.-Decl pipe) (append (.-Decl pipe) (.newVariable t (.-pos v) (.-val v))))
+              (set! (.-vars t) (append (.-vars t) (.-val v))))
+            (case [(and (== (.-typ next) itemChar) (== (.-val next) ","))]
+              (.nextNonSpace t)
+              (set! (.-Decl pipe) (append (.-Decl pipe) (.newVariable t (.-pos v) (.-val v))))
+              (set! (.-vars t) (append (.-vars t) (.-val v)))
+              (when (and (== context "range") (< (len (.-Decl pipe)) 2))
+                (switch (.-typ (.peekNonSpace t))
+                  (case [itemVariable itemRightDelim itemRightParen]
+                    ;; second initialized variable in a range pipeline
+                    (goto :decls))
+                  (default
+                    (.errorf t "range can only initialize variables"))))
+
+
+              (.errorf t "too many declarations in %s" context))
+            (case [(== (.-typ tokenAfterVariable) itemSpace)]
+              (.backup3 t v tokenAfterVariable))
+            (default
+              (.backup2 t v))))))
+
+
+    (while true
+      (switch [token (.nextNonSpace t)] (.-typ token)
+        (case [end]
+          ;; At this point, the pipeline is complete
+          (.checkPipeline t pipe context)
+          (return))
+        (case [itemBool itemCharConstant itemComplex itemDot itemField itemIdentifier
+            ^{:line 528} itemNumber itemNil itemRawString itemString itemVariable itemLeftParen]
+          (.backup t)
+          (.append pipe (.command t)))
+        (default
+          (.unexpected t token context))))))
+
+
+
+
+^{:go/end 550} (go/method checkPipeline [^{:tag (* Tree)} t ^{:tag (* PipeNode)} pipe ^string context]
+  ;; Reject empty pipelines
+  (when (== (len (.-Cmds pipe)) 0)
+    (.errorf t "missing value for %s" context))
+
+  ;; Only the first command of a pipeline can start with a non executable operand
+  (range [i c (subslice (.-Cmds pipe) 1)]
+    (switch (.Type (aget (.-Args c) 0))
+      (case [NodeBool NodeDot NodeNil NodeNumber NodeString]
+        ;; With A|B|C, pipeline stage 2 is B
+        (.errorf t "non executable command in pipeline stage %d" (+ i 2))))))
+
+
+
+
+^{:go/end 592} (go/method parseControl [^{:tag (* Tree)} t ^string context] :results [^Pos pos ^int line ^{:tag (* PipeNode)} pipe ^{:tag (* ListNode)} list ^{:tag (* ListNode)} elseList]
+  (defer (.popVars t (len (.-vars t))))
+  (set! pipe (.pipeline t context itemRightDelim))
+  (when (== context "range")
+    (inc! (.-rangeDepth t)))
+
+  (let [^Node next (zero Node)]
+    (set! (values list next) (.itemList t))
+    (when (== context "range")
+      (dec! (.-rangeDepth t)))
+
+    (switch (.Type next)
+      (case [nodeEnd]) ; done
+      (case [nodeElse]
+        ;; Special case for "else if" and "else with".
+        ;; If the "else" is followed immediately by an "if" or "with",
+        ;; the elseControl will have left the "if" or "with" token pending. Treat
+        ;;	{{if a}}_{{else if b}}_{{end}}
+        ;;  {{with a}}_{{else with b}}_{{end}}
+        ;; as
+        ;;	{{if a}}_{{else}}{{if b}}_{{end}}{{end}}
+        ;;  {{with a}}_{{else}}{{with b}}_{{end}}{{end}}.
+        ;; To do this, parse the "if" or "with" as usual and stop at it {{end}};
+        ;; the subsequent{{end}} is assumed. This technique works even for long if-else-if chains.
+        (cond (and (== context "if") (== (.-typ (.peek t)) itemIf)) (do
+            (.next t) ; Consume the "if" token.
+            (set! elseList (.newList t (.Position next)))
+            (.append elseList (.ifControl t)))
+          (and (== context "with") (== (.-typ (.peek t)) itemWith)) (do
+            (.next t)
+            (set! elseList (.newList t (.Position next)))
+            (.append elseList (.withControl t))) :else
+          (do
+            (set! (values elseList next) (.itemList t))
+            (when (!= (.Type next) nodeEnd)
+              (.errorf t "expected end; found %s" next))))))
+
+
+
+    (return ^{:go/via [Pos]} (.Position pipe) (.-Line pipe) pipe list elseList)))
+
+
+
+
+
+
+
+
+^{:go/end 602} (go/method ifControl "If:\n\n\t{{if pipeline}} itemList {{end}}\n\t{{if pipeline}} itemList {{else}} itemList {{end}}\n\nIf keyword is past.\n" ^Node [^{:tag (* Tree)} t]
+  (.newIf t (.parseControl t "if")))
+
+
+
+
+
+
+
+
+^{:go/end 613} (go/method rangeControl "Range:\n\n\t{{range pipeline}} itemList {{end}}\n\t{{range pipeline}} itemList {{else}} itemList {{end}}\n\nRange keyword is past.\n" ^Node [^{:tag (* Tree)} t]
+  (let [r (.newRange t (.parseControl t "range"))]
+    ^{:line 612} r))
+
+
+
+
+
+
+
+
+^{:go/end 623} (go/method withControl "With:\n\n\t{{with pipeline}} itemList {{end}}\n\t{{with pipeline}} itemList {{else}} itemList {{end}}\n\nIf keyword is past.\n" ^Node [^{:tag (* Tree)} t]
+  (.newWith t (.parseControl t "with")))
+
+
+
+
+
+
+
+^{:go/end 632} (go/method endControl "End:\n\n\t{{end}}\n\nEnd keyword is past.\n" ^Node [^{:tag (* Tree)} t]
+  (.newEnd t (.-pos (.expect t itemRightDelim "end"))))
+
+
+
+
+
+
+
+^{:go/end 649} (go/method elseControl "Else:\n\n\t{{else}}\n\nElse keyword is past.\n" ^Node [^{:tag (* Tree)} t]
+  (let [peek (.peekNonSpace t)]
+    ;; The "{{else if ... " and "{{else with ..." will be
+    ;; treated as "{{else}}{{if ..." and "{{else}}{{with ...".
+    ;; So return the else node here.
+    (when (or (== (.-typ peek) itemIf) (== (.-typ peek) itemWith))
+      (return (.newElse t (.-pos peek) (.-line peek))))
+
+    (let [token (.expect t itemRightDelim "else")]
+      (.newElse t (.-pos token) (.-line token)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 681} (go/method blockControl "Block:\n\n\t{{block stringValue pipeline}}\n\nBlock keyword is past.\nThe name must be something that can evaluate to a string.\nThe pipeline is mandatory.\n" ^Node [^{:tag (* Tree)} t]
+  (let [^:const ^{:val "block clause"} context "block clause"
+
+      ^{:line 661} token (.nextNonSpace t)
+      ^{:line 662} name (.parseTemplateName t token context)
+      ^{:line 663} pipe (.pipeline t context itemRightDelim)
+
+      ^{:line 665} block (New name)] ; name will be updated once we know it.
+    (set! (.-text block) (.-text t))
+    (set! (.-Mode block) (.-Mode t))
+    (set! (.-leftDelim block) (.-leftDelim t))
+    (set! (.-rightDelim block) (.-rightDelim t))
+    (set! (.-ParseName block) (.-ParseName t))
+    (.startParse block (.-funcs t) (.-lex t) (.-treeSet t))
+    (let [^Node end (zero Node)]
+      (set! (values (.-Root block) end) (.itemList block))
+      (when (!= (.Type end) nodeEnd)
+        (.errorf t "unexpected %s in %s" end context))
+
+      (.add block)
+      (.stopParse block)
+
+      (.newTemplate t (.-pos token) (.-line token) name pipe))))
+
+
+
+
+
+
+
+
+^{:go/end 700} (go/method templateControl "Template:\n\n\t{{template stringValue pipeline}}\n\nTemplate keyword is past. The name must be something that can evaluate\nto a string.\n" ^Node [^{:tag (* Tree)} t]
+  (let [^:const ^{:val "template clause"} context "template clause"
+      ^{:line 691} token (.nextNonSpace t)
+      ^{:line 692} name (.parseTemplateName t token context)
+      ^{:line 693 :tag (* PipeNode)} pipe (zero (* PipeNode))]
+    (when (!= (.-typ (.nextNonSpace t)) itemRightDelim)
+      (.backup t)
+      ;; Do not pop variables; they persist until "end".
+      (set! pipe (.pipeline t context itemRightDelim)))
+
+    (.newTemplate t (.-pos token) (.-line token) name pipe)))
+
+
+^{:go/end 714} (go/method parseTemplateName [^{:tag (* Tree)} t ^item token ^string context] :results [^string name]
+  (switch (.-typ token)
+    (case [itemString itemRawString]
+      (let [(values s err) (strconv/Unquote (.-val token))]
+        (when (!= err nil)
+          (.error t err))
+
+        (set! name s)))
+    (default
+      (.unexpected t token context)))
+
+  (return))
+
+
+
+
+
+
+
+
+^{:go/end 746} (go/method command "command:\n\n\toperand (space operand)*\n\nspace-separated arguments up to a pipeline character or right delimiter.\nwe consume the pipe character but leave the right delim to terminate the action.\n" ^{:tag (* CommandNode)} [^{:tag (* Tree)} t]
+  (let [cmd (.newCommand t (.-pos (.peekNonSpace t)))]
+    (while true
+      (.peekNonSpace t) ; skip leading spaces.
+      (let [operand (.operand t)]
+        (when (!= operand nil)
+          (.append cmd operand))
+
+        (switch [token (.next t)] (.-typ token)
+          (case [itemSpace]
+            (continue))
+          (case [itemRightDelim itemRightParen]
+            (.backup t))
+          (case [itemPipe])
+          ;; nothing here; break loop below
+          (default
+            (.unexpected t token "operand")))
+
+        (break)))
+
+    (when (== (len (.-Args cmd)) 0)
+      (.errorf t "empty command"))
+
+    ^{:line 745} cmd))
+
+
+
+
+
+
+
+
+
+^{:go/end 782} (go/method operand "operand:\n\n\tterm .Field*\n\nAn operand is a space-separated component of a command,\na term possibly followed by field accesses.\nA nil return means the next item is not an operand.\n" ^Node [^{:tag (* Tree)} t]
+  (let [node (.term t)]
+    (when (== node nil)
+      (return nil))
+
+    (when (== (.-typ (.peek t)) itemField)
+      (let [chain (.newChain t (.-pos (.peek t)) node)]
+        (while (== (.-typ (.peek t)) itemField)
+          (.Add chain (.-val (.next t))))
+
+        ;; Compatibility with original API: If the term is of type NodeField
+        ;; or NodeVariable, just put more fields on the original.
+        ;; Otherwise, keep the Chain node.
+        ;; Obvious parsing errors involving literal values are detected here.
+        ;; More complex error cases will have to be handled at execution time.
+        (switch (.Type node)
+          (case [NodeField]
+            (set! node (.newField t ^{:go/via [Pos]} (.Position chain) (.String chain))))
+          (case [NodeVariable]
+            (set! node (.newVariable t ^{:go/via [Pos]} (.Position chain) (.String chain))))
+          (case [NodeBool NodeString NodeNumber NodeNil NodeDot]
+            (.errorf t "unexpected . after term %q" (.String node)))
+          (default
+            (set! node chain)))))
+
+
+    ^{:line 781} node))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [6] :go/end 835} (go/method term "term:\n\n\tliteral (number, string, nil, boolean)\n\tfunction (identifier)\n\t.\n\t.Field\n\t$\n\t'(' pipeline ')'\n\nA term is a simple \"expression\".\nA nil return means the next item is not a term.\n" ^Node [^{:tag (* Tree)} t]
+  (switch [token (.nextNonSpace t)] (.-typ token)
+    (case [itemIdentifier]
+      (let [checkFunc (== (bit-and (.-Mode t) SkipFuncCheck) 0)]
+        (when (and checkFunc (not (.hasFunction t (.-val token))))
+          (.errorf t "function %q not defined" (.-val token)))
+
+        (return (.SetPos (.SetTree (NewIdentifier (.-val token)) t) (.-pos token)))))
+    (case [itemDot]
+      (return (.newDot t (.-pos token))))
+    (case [itemNil]
+      (return (.newNil t (.-pos token))))
+    (case [itemVariable]
+      (return (.useVar t (.-pos token) (.-val token))))
+    (case [itemField]
+      (return (.newField t (.-pos token) (.-val token))))
+    (case [itemBool]
+      (return (.newBool t (.-pos token) (== (.-val token) "true"))))
+    (case [itemCharConstant itemComplex itemNumber]
+      (let [(values number err) (.newNumber t (.-pos token) (.-val token) (.-typ token))]
+        (when (!= err nil)
+          (.error t err))
+
+        (return number)))
+    (case [itemLeftParen]
+      (when (>= (.-stackDepth t) maxStackDepth)
+        (.errorf t "max expression depth exceeded"))
+
+      (inc! (.-stackDepth t))
+      (defer (^{:go/end 824} (fn [] (dec! (.-stackDepth t)))))
+      (return (.pipeline t "parenthesized pipeline" itemRightParen)))
+    (case [itemString itemRawString]
+      (let [(values s err) (strconv/Unquote (.-val token))]
+        (when (!= err nil)
+          (.error t err))
+
+        (return (.newString t (.-pos token) (.-val token) s)))))
+
+  (.backup t)
+  nil)
+
+
+
+^{:go/breaks [[5 847]] :go/end 848} (go/method hasFunction "hasFunction reports if a function name exists in the Tree's maps.\n" ^bool [^{:tag (* Tree)} t ^string name]
+  (range [_ funcMap (.-funcs t)]
+    (when (== funcMap nil)
+      (continue))
+
+    (when (!= (aget funcMap name) nil)
+      (return true)))
+
+
+  false)
+
+
+
+^{:go/end 853} (go/method popVars "popVars trims the variable list to the specified length\n" [^{:tag (* Tree)} t ^int n]
+  (set! (.-vars t) (subslice (.-vars t) _ n)))
+
+
+
+
+^{:go/end 866} (go/method useVar "useVar returns a node for a variable reference. It errors if the\nvariable is not defined.\n" ^Node [^{:tag (* Tree)} t ^Pos pos ^string name]
+  ^{:go/breaks [4]} (let [v (.newVariable t pos name)]
+    (range [_ varName (.-vars t)]
+      (when (== varName (aget (.-Ident v) 0))
+        (return v)))
+
+
+    (.errorf t "undefined variable %q" (aget (.-Ident v) 0))
+    nil))

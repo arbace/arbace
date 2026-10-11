@@ -1,0 +1,926 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net) (go/file "lookup.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [nettrace "internal/nettrace"]
+    ^{:line 11} [singleflight "internal/singleflight"]
+    ^{:line 12} [stringslite "internal/stringslite"]
+    ^{:line 13} [netip "net/netip"]
+    ^{:line 14} [sync "sync"]
+
+    ^{:line 16} [dnsmessage "golang.org/x/net/dns/dnsmessage"]])
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "protocols contains minimal mappings between internet protocol\nnames and numbers for platforms that don't have a complete list of\nprotocol numbers.\n\nSee https://www.iana.org/assignments/protocol-numbers\n\nOn Unix, this map is augmented by readProtocols via lookupProtocol.\n"} protocols (lit (map string int)
+    ^{:line 27} ["icmp" 1]
+    ^{:line 28} ["igmp" 2]
+    ^{:line 29} ["tcp" 6]
+    ^{:line 30} ["udp" 17]
+    ^{:line 31} ["ipv6-icmp" 58]))
+
+
+
+
+
+
+
+
+(go/var ^{:doc "services contains minimal mappings between services names and port\nnumbers for platforms that don't have a complete list of port numbers.\n\nSee https://www.iana.org/assignments/service-names-port-numbers\n\nOn Unix, this map is augmented by readServices via goLookupPort.\n"} services (lit (map string (map string int))
+    ^{:line 41} ["udp" (lit _
+        ^{:line 42} ["domain" 53])]
+
+    ^{:line 44} ["tcp" (lit _
+        ^{:line 45} ["ftp" 21]
+        ^{:line 46} ["ftps" 990]
+        ^{:line 47} ["gopher" 70] ; ʕ◔ϖ◔ʔ
+        ^{:line 48} ["http" 80]
+        ^{:line 49} ["https" 443]
+        ^{:line 50} ["imap2" 143]
+        ^{:line 51} ["imap3" 220]
+        ^{:line 52} ["imaps" 993]
+        ^{:line 53} ["pop3" 110]
+        ^{:line 54} ["pop3s" 995]
+        ^{:line 55} ["smtp" 25]
+        ^{:line 56} ["submissions" 465]
+        ^{:line 57} ["ssh" 22]
+        ^{:line 58} ["telnet" 23])]))
+
+
+
+
+
+(go/var ^{:tag sync/WaitGroup :doc "dnsWaitGroup can be used by tests to wait for all DNS goroutines to\ncomplete. This avoids races on the test hooks.\n"} dnsWaitGroup)
+
+(go/const ^{:val 25} maxProtoLength (+ (len "RSVP-E2E-IGNORE") 10)) ; with room to grow
+
+^{:go/end 77} (go/func lookupProtocolMap [^string name] :results [int error]
+  (let [^{:tag (array maxProtoLength byte)} lowerProtocol (zero (array maxProtoLength byte))
+      ^{:line 70} n (copy (subslice lowerProtocol) name)]
+    (lowerASCIIBytes (subslice lowerProtocol _ n))
+    (let [(values proto found) (aget protocols (conv string (subslice lowerProtocol _ n)))]
+      (when (or (not found) (!= n (len name)))
+        (return 0 (addr (lit AddrError :Err "unknown IP protocol specified" :Addr name))))
+
+      (return proto nil))))
+
+
+
+
+
+
+
+(go/const ^{:val 25 :doc "maxPortBufSize is the longest reasonable name of a service\n(non-numeric port).\nCurrently the longest known IANA-unregistered name is\n\"mobility-header\", so we use that length, plus some slop in case\nsomething longer is added in the future.\n"} maxPortBufSize (+ (len "mobility-header") 10))
+
+^{:go/end 99} (go/func lookupPortMap [^string network ^string service] :results [^int port ^error error]
+  (switch network
+    (case ["ip"] ; no hints
+      (when [(values p err) (lookupPortMapWithNetwork "tcp" "ip" service)] (== err nil)
+        (return p nil))
+
+      (return (lookupPortMapWithNetwork "udp" "ip" service)))
+    (case ["tcp" "tcp4" "tcp6"]
+      (return (lookupPortMapWithNetwork "tcp" "tcp" service)))
+    (case ["udp" "udp4" "udp6"]
+      (return (lookupPortMapWithNetwork "udp" "udp" service))))
+
+  (return 0 (addr (lit DNSError :Err "unknown network" :Name (+ network "/" service)))))
+
+
+^{:go/end 112} (go/func lookupPortMapWithNetwork [^string network ^string errNetwork ^string service] :results [^int port ^error error]
+  (when [(values m ok) (aget services network)] ok
+    (let [^{:tag (array maxPortBufSize byte)} lowerService (zero (array maxPortBufSize byte))
+        ^{:line 104} n (copy (subslice lowerService) service)]
+      (lowerASCIIBytes (subslice lowerService _ n))
+      (when [(values port ok) (aget m (conv string (subslice lowerService _ n)))] (and ok (== n (len service)))
+        (return port nil))
+
+      (return 0 (newDNSError errUnknownPort (+ errNetwork "/" service) ""))))
+
+  (return 0 (addr (lit DNSError :Err "unknown network" :Name (+ errNetwork "/" service)))))
+
+
+
+
+^{:go/end 125} (go/func ipVersion "ipVersion returns the provided network's IP version: '4', '6' or 0\nif network does not end in a '4' or '6' byte.\n" ^byte [^string network]
+  (when (== network "")
+    (return 0))
+
+  (let [n (aget network (- (len network) 1))]
+    (when (and (!= n \4) (!= n \6))
+      (set! n 0))
+
+    ^{:line 124} n))
+
+
+
+
+(go/var ^{:doc "DefaultResolver is the resolver used by the package-level Lookup\nfunctions and by Dialers without a specified Resolver.\n"} DefaultResolver (addr (lit Resolver)))
+
+
+
+
+(go/type Resolver "A Resolver looks up names and numbers.\n\nA nil *Resolver is equivalent to a zero Resolver.\n" (struct
+
+
+
+    ^{:line 138 :tag bool :doc "PreferGo controls whether Go's built-in DNS resolver is preferred\non platforms where it's available. It is equivalent to setting\nGODEBUG=netdns=go, but scoped to just this resolver.\n"} PreferGo
+
+
+
+
+
+
+
+
+
+    ^{:line 148 :tag bool :doc "StrictErrors controls the behavior of temporary errors\n(including timeout, socket errors, and SERVFAIL) when using\nGo's built-in resolver. For a query composed of multiple\nsub-queries (such as an A+AAAA address lookup, or walking the\nDNS search list), this option causes such errors to abort the\nwhole query instead of returning a partial result. This is\nnot enabled by default because it may affect compatibility\nwith resolvers that process AAAA queries incorrectly.\n"} StrictErrors
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 161 :tag (func [^context/Context ctx ^string network ^string address] [Conn error]) :doc "Dial optionally specifies an alternate dialer for use by\nGo's built-in DNS resolver to make TCP and UDP connections\nto DNS services. The host in the address parameter will\nalways be a literal IP address and not a host name, and the\nport in the address parameter will be a literal port number\nand not a service name.\nIf the Conn returned is also a PacketConn, sent and received DNS\nmessages must adhere to RFC 1035 section 4.2.1, \"UDP usage\".\nOtherwise, DNS messages transmitted over Conn must adhere\nto RFC 7766 section 5, \"Transport Protocol Selection\".\nIf nil, the default dialer is used.\n"} Dial
+
+
+
+
+    ^{:line 166 :tag singleflight/Group :doc "lookupGroup merges LookupIPAddr calls together for lookups for the same\nhost. The lookupGroup key is the LookupIPAddr.host argument.\nThe return values are ([]IPAddr, error).\n"} lookupGroup))
+
+;; TODO(bradfitz): optional interface impl override hook
+;; TODO(bradfitz): Timeout time.Duration?
+
+
+^{:go/end 172} (go/method preferGo ^bool [^{:tag (* Resolver)} r] (and (!= r nil) (.-PreferGo r)))
+^{:go/end 173} (go/method strictErrors ^bool [^{:tag (* Resolver)} r] (and (!= r nil) (.-StrictErrors r)))
+
+^{:go/end 180} (go/method getLookupGroup ^{:tag (* singleflight/Group)} [^{:tag (* Resolver)} r]
+  (when (== r nil)
+    (return (addr (.-lookupGroup DefaultResolver))))
+
+  (addr (.-lookupGroup r)))
+
+
+
+
+
+
+
+^{:go/end 189} (go/func LookupHost "LookupHost looks up the given host using the local resolver.\nIt returns a slice of that host's addresses.\n\nLookupHost uses [context.Background] internally; to specify the context, use\n[Resolver.LookupHost].\n" [^string host] :results [^{:tag (slice string)} addrs ^error err]
+  (.LookupHost DefaultResolver (context/Background) host))
+
+
+
+
+^{:go/end 202} (go/method LookupHost "LookupHost looks up the given host using the local resolver.\nIt returns a slice of that host's addresses.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string host] :results [^{:tag (slice string)} addrs ^error err]
+  ;; Make sure that no matter what we do later, host=="" is rejected.
+  (when (== host "")
+    (return nil (newDNSError errNoSuchHost host "")))
+
+  (when [(values _ err) (netip/ParseAddr host)] (== err nil)
+    (return (lit (slice string) host) nil))
+
+  (.lookupHost r ctx host))
+
+
+
+
+^{:go/end 216} (go/func LookupIP "LookupIP looks up host using the local resolver.\nIt returns a slice of that host's IPv4 and IPv6 addresses.\n" [^string host] :results [(slice IP) error]
+  (let [(values addrs err) (.LookupIPAddr DefaultResolver (context/Background) host)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [ips (make (slice IP) (len addrs))]
+      (range [i ia addrs]
+        (aset ips i (.-IP ia)))
+
+      (return ips nil))))
+
+
+
+
+^{:go/end 222} (go/method LookupIPAddr "LookupIPAddr looks up host using the local resolver.\nIt returns a slice of that host's IPv4 and IPv6 addresses.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string host] :results [(slice IPAddr) error]
+  (.lookupIPAddr r ctx "ip" host))
+
+
+
+
+
+
+^{:go/end 252} (go/method LookupIP "LookupIP looks up host for the given network using the local resolver.\nIt returns a slice of that host's IP addresses of the type specified by\nnetwork.\nnetwork must be one of \"ip\", \"ip4\" or \"ip6\".\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string network ^string host] :results [(slice IP) error]
+  (let [(values afnet _ err) (parseNetwork ctx network false)]
+    (when (!= err nil)
+      (return nil err))
+
+    (switch afnet
+      (case ["ip" "ip4" "ip6"])
+      (default
+        (return nil (conv UnknownNetworkError network))))
+
+
+    (when (== host "")
+      (return nil (newDNSError errNoSuchHost host "")))
+
+    (let [(values addrs ^:assign err) (.internetAddrList r ctx afnet host)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (let [ips (make (slice IP) 0 (len addrs))]
+        (range [_ addr addrs]
+          (set! ips (append ips (.-IP (assert (* IPAddr) addr)))))
+
+        (return ips nil)))))
+
+
+
+
+
+
+^{:go/end 274} (go/method LookupNetIP "LookupNetIP looks up host using the local resolver.\nIt returns a slice of that host's IP addresses of the type specified by\nnetwork.\nThe network must be one of \"ip\", \"ip4\" or \"ip6\".\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string network ^string host] :results [(slice netip/Addr) error]
+  ;; TODO(bradfitz): make this efficient, making the internal net package
+  ;; type throughout be netip.Addr and only converting to the net.IP slice
+  ;; version at the edge. But for now (2021-10-20), this is a wrapper around
+  ;; the old way.
+  (let [(values ips err) (.LookupIP r ctx network host)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [ret (make (slice netip/Addr) 0 (len ips))]
+      (range [_ ip ips]
+        (when [(values a ok) (netip/AddrFromSlice ip)] ok
+          (set! ret (append ret a))))
+
+
+      (return ret nil))))
+
+
+
+
+(go/type onlyValuesCtx "onlyValuesCtx is a context that uses an underlying context\nfor value lookup if the underlying context hasn't yet expired.\n" (struct
+    ^{:line 279} context/Context
+    ^{:line 280 :tag context/Context} lookupValues))
+
+
+(go/var ^context/Context _ (conv (* onlyValuesCtx) nil))
+
+
+^{:go/end 293} (go/method Value "Value performs a lookup if the original context hasn't expired.\n" ^any [^{:tag (* onlyValuesCtx)} ovc ^any key]
+  (select
+    (case (<! (.Done (.-lookupValues ovc)))
+      (return nil))
+    (default
+      (return (.Value (.-lookupValues ovc) key)))))
+
+
+
+
+
+
+
+^{:go/end 301} (go/func withUnexpiredValuesPreserved "withUnexpiredValuesPreserved returns a context.Context that only uses lookupCtx\nfor its values, otherwise it is never canceled and has no deadline.\nIf the lookup context expires, any looked up values will return nil.\nSee Issue 28600.\n" ^context/Context [^context/Context lookupCtx]
+  (addr (lit onlyValuesCtx :Context (context/Background) :lookupValues lookupCtx)))
+
+
+
+
+^{:go/end 378} (go/method lookupIPAddr "lookupIPAddr looks up host using the local resolver and particular network.\nIt returns a slice of that host's IPv4 and IPv6 addresses.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string network ^string host] :results [(slice IPAddr) error]
+  ;; Make sure that no matter what we do later, host=="" is rejected.
+  (when (== host "")
+    (return nil (newDNSError errNoSuchHost host "")))
+
+  (when [(values ip err) (netip/ParseAddr host)] (== err nil)
+    (return (lit (slice IPAddr) (lit _ :IP (.To16 (conv IP (.AsSlice ip))) :Zone (.Zone ip))) nil))
+
+  (let [(values trace _) (assert (* nettrace/Trace) (.Value ctx (lit nettrace/TraceKey)))]
+    (when (and (!= trace nil) (!= (.-DNSStart trace) nil))
+      ((.-DNSStart trace) host))
+
+    ;; The underlying resolver func is lookupIP by default but it
+    ;; can be overridden by tests. This is needed by net/http, so it
+    ;; uses a context key instead of unexported variables.
+    (let [resolverFunc (.-lookupIP r)]
+      (when [(values alt _) (assert (func [context/Context string string] [(slice IPAddr) error]) (.Value ctx (lit nettrace/LookupIPAltResolverKey)))] (!= alt nil)
+        (set! resolverFunc alt))
+
+
+      ;; We don't want a cancellation of ctx to affect the
+      ;; lookupGroup operation. Otherwise if our context gets
+      ;; canceled it might cause an error to be returned to a lookup
+      ;; using a completely different context. However we need to preserve
+      ;; only the values in context. See Issue 28600.
+      (let [(values lookupGroupCtx lookupGroupCancel) (context/WithCancel (withUnexpiredValuesPreserved ctx))
+
+          ^{:line 332} lookupKey (+ network "\u0000" host)]
+        (.Add dnsWaitGroup 1)
+        (let [ch (.DoChan (.getLookupGroup r) lookupKey ^{:go/end 336} (fn [] :results [any error]
+                (testHookLookupIP lookupGroupCtx resolverFunc network host)))
+
+
+            ^{:line 338} dnsWaitGroupDone ^{:go/end 342} (fn [^{:tag (chan :recv singleflight/Result)} ch ^context/CancelFunc cancelFn]
+              (<! ch)
+              (.Done dnsWaitGroup)
+              (cancelFn))]
+
+          (select
+            (case (<! (.Done ctx))
+              ;; Our context was canceled. If we are the only
+              ;; goroutine looking up this key, then drop the key
+              ;; from the lookupGroup and cancel the lookup.
+              ;; If there are other goroutines looking up this key,
+              ;; let the lookup continue uncanceled, and let later
+              ;; lookups with the same key share the result.
+              ;; See issues 8602, 20703, 22724.
+              (if (.ForgetUnshared (.getLookupGroup r) lookupKey) (do
+                  (lookupGroupCancel)
+                  (go (dnsWaitGroupDone ch ^{:go/end 354} (fn []))))
+
+                (go (dnsWaitGroupDone ch lookupGroupCancel)))
+
+              (let [err (newDNSError (mapErr (.Err ctx)) host "")]
+                (when (and (!= trace nil) (!= (.-DNSDone trace) nil))
+                  ((.-DNSDone trace) nil false err))
+
+                (return nil err)))
+            (case [r (<! ch)]
+              (.Done dnsWaitGroup)
+              (lookupGroupCancel)
+              (let [err (.-Err r)]
+                (when (!= err nil)
+                  (when [(values _ ok) (assert (* DNSError) err)] (not ok)
+                    (set! err (newDNSError (mapErr err) host ""))))
+
+
+                (when (and (!= trace nil) (!= (.-DNSDone trace) nil))
+                  (let [(values addrs _) (assert (slice IPAddr) (.-Val r))]
+                    ((.-DNSDone trace) (ipAddrsEface addrs) (.-Shared r) err)))
+
+                (return (lookupIPReturn (.-Val r) err (.-Shared r)))))))))))
+
+
+
+
+
+^{:go/end 393} (go/func lookupIPReturn "lookupIPReturn turns the return values from singleflight.Do into\nthe return values from LookupIP.\n" [^any addrsi ^error err ^bool shared] :results [(slice IPAddr) error]
+  (when (!= err nil)
+    (return nil err))
+
+  (let [addrs (assert (slice IPAddr) addrsi)]
+    (when shared
+      (let [clone (make (slice IPAddr) (len addrs))]
+        (copy clone addrs)
+        (set! addrs clone)))
+
+    (return addrs nil)))
+
+
+
+^{:go/end 402} (go/func ipAddrsEface "ipAddrsEface returns an empty interface slice of addrs.\n" ^{:tag (slice any)} [^{:tag (slice IPAddr)} addrs]
+  (let [s (make (slice any) (len addrs))]
+    (range [i v addrs]
+      (aset s i v))
+
+    ^{:line 401} s))
+
+
+
+
+
+
+^{:go/end 410} (go/func LookupPort "LookupPort looks up the port for the given network and service.\n\nLookupPort uses [context.Background] internally; to specify the context, use\n[Resolver.LookupPort].\n" [^string network ^string service] :results [^int port ^error err]
+  (.LookupPort DefaultResolver (context/Background) network service))
+
+
+
+
+
+^{:go/end 434} (go/method LookupPort "LookupPort looks up the port for the given network and service.\n\nThe network must be one of \"tcp\", \"tcp4\", \"tcp6\", \"udp\", \"udp4\", \"udp6\" or \"ip\".\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string network ^string service] :results [^int port ^error err]
+  (let [(values ^:assign port needsLookup) (parsePort service)]
+    (when needsLookup
+      (switch network
+        (case ["tcp" "tcp4" "tcp6" "udp" "udp4" "udp6" "ip"])
+        (case [""] ; a hint wildcard for Go 1.0 undocumented behavior
+          (set! network "ip"))
+        (default
+          (return 0 (addr (lit AddrError :Err "unknown network" :Addr network)))))
+
+      (set! (values port err) (.lookupPort r ctx network service))
+      (when (!= err nil)
+        (return 0 err)))
+
+
+    (when (or (> 0 port) (> port 65535))
+      (return 0 (addr (lit AddrError :Err "invalid port" :Addr service))))
+
+    (return port nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 454} (go/func LookupCNAME "LookupCNAME returns the canonical name for the given host.\nCallers that do not care about the canonical name can call\n[LookupHost] or [LookupIP] directly; both take care of resolving\nthe canonical name as part of the lookup.\n\nA canonical name is the final name after following zero\nor more CNAME records.\nLookupCNAME does not return an error if host does not\ncontain DNS \"CNAME\" records, as long as host resolves to\naddress records.\n\nThe returned canonical name is validated to be a properly\nformatted presentation-format domain name.\n\nLookupCNAME uses [context.Background] internally; to specify the context, use\n[Resolver.LookupCNAME].\n" [^string host] :results [^string cname ^error err]
+  (.LookupCNAME DefaultResolver (context/Background) host))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 478} (go/method LookupCNAME "LookupCNAME returns the canonical name for the given host.\nCallers that do not care about the canonical name can call\n[LookupHost] or [LookupIP] directly; both take care of resolving\nthe canonical name as part of the lookup.\n\nA canonical name is the final name after following zero\nor more CNAME records.\nLookupCNAME does not return an error if host does not\ncontain DNS \"CNAME\" records, as long as host resolves to\naddress records.\n\nThe returned canonical name is validated to be a properly\nformatted presentation-format domain name.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string host] :results [string error]
+  (let [(values cname err) (.lookupCNAME r ctx host)]
+    (when (!= err nil)
+      (return "" err))
+
+    (when (not (isDomainName cname))
+      (return "" (addr (lit DNSError :Err errMalformedDNSRecordsDetail :Name host))))
+
+    (return cname nil)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 501} (go/func LookupSRV "LookupSRV tries to resolve an [SRV] query of the given service,\nprotocol, and domain name. The proto is \"tcp\" or \"udp\".\nThe returned records are sorted by priority and randomized\nby weight within a priority.\n\nLookupSRV constructs the DNS name to look up following RFC 2782.\nThat is, it looks up _service._proto.name. To accommodate services\npublishing SRV records under non-standard names, if both service\nand proto are empty strings, LookupSRV looks up name directly.\n\nThe returned cname is the owner name from the first SRV answer\nrecord, which is typically the constructed DNS name\n(_service._proto.name) but may differ if CNAME records redirect\nthe query to another name.\n\nThe returned service names are validated to be properly\nformatted presentation-format domain names. If the response contains\ninvalid names, those records are filtered out and an error\nwill be returned alongside the remaining results, if any.\n" [^string service ^string proto ^string name] :results [^string cname ^{:tag (slice (* SRV))} addrs ^error err]
+  (.LookupSRV DefaultResolver (context/Background) service proto name))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 544} (go/method LookupSRV "LookupSRV tries to resolve an [SRV] query of the given service,\nprotocol, and domain name. The proto is \"tcp\" or \"udp\".\nThe returned records are sorted by priority and randomized\nby weight within a priority.\n\nLookupSRV constructs the DNS name to look up following RFC 2782.\nThat is, it looks up _service._proto.name. To accommodate services\npublishing SRV records under non-standard names, if both service\nand proto are empty strings, LookupSRV looks up name directly.\n\nThe returned cname is the owner name from the first SRV answer\nrecord, which is typically the constructed DNS name\n(_service._proto.name) but may differ if CNAME records redirect\nthe query to another name.\n\nThe returned service names are validated to be properly\nformatted presentation-format domain names. If the response contains\ninvalid names, those records are filtered out and an error\nwill be returned alongside the remaining results, if any.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string service ^string proto ^string name] :results [string (slice (* SRV)) error]
+  (let [(values cname addrs err) (.lookupSRV r ctx service proto name)]
+    (when (!= err nil)
+      (return "" nil err))
+
+    (when (and (!= cname "") (not (isDomainName cname)))
+      (return "" nil (addr (lit DNSError :Err "SRV header name is invalid" :Name name))))
+
+    (let [filteredAddrs (make (slice (* SRV)) 0 (len addrs))]
+      (range [_ addr addrs]
+        (when (== addr nil)
+          (continue))
+
+        (when (not (isDomainName (.-Target addr)))
+          (continue))
+
+        (set! filteredAddrs (append filteredAddrs addr)))
+
+      (when (!= (len addrs) (len filteredAddrs))
+        (return cname filteredAddrs (addr (lit DNSError :Err errMalformedDNSRecordsDetail :Name name))))
+
+      (return cname filteredAddrs nil))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 557} (go/func LookupMX "LookupMX returns the DNS MX records for the given domain name sorted by preference.\n\nThe returned mail server names are validated to be properly\nformatted presentation-format domain names, or numeric IP addresses.\nIf the response contains invalid names, those records are filtered out\nand an error will be returned alongside the remaining results, if any.\n\nLookupMX uses [context.Background] internally; to specify the context, use\n[Resolver.LookupMX].\n" [^string name] :results [(slice (* MX)) error]
+  (.LookupMX DefaultResolver (context/Background) name))
+
+
+
+
+
+
+
+
+^{:go/end 589} (go/method LookupMX "LookupMX returns the DNS MX records for the given domain name sorted by preference.\n\nThe returned mail server names are validated to be properly\nformatted presentation-format domain names, or numeric IP addresses.\nIf the response contains invalid names, those records are filtered out\nand an error will be returned alongside the remaining results, if any.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string name] :results [(slice (* MX)) error]
+  (let [(values records err) (.lookupMX r ctx name)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [filteredMX (make (slice (* MX)) 0 (len records))]
+      (range [_ mx records]
+        (when (== mx nil)
+          (continue))
+
+        (when (not (isDomainName (.-Host mx)))
+          ;; Check for IP address. In practice we observe
+          ;; these with a trailing dot, so strip that.
+          (let [(values ip err) (netip/ParseAddr (stringslite/TrimSuffix (.-Host mx) "."))]
+            (when (or (!= err nil) (!= (.Zone ip) ""))
+              (continue))))
+
+
+        (set! filteredMX (append filteredMX mx)))
+
+      (when (!= (len records) (len filteredMX))
+        (return filteredMX (addr (lit DNSError :Err errMalformedDNSRecordsDetail :Name name))))
+
+      (return filteredMX nil))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 602} (go/func LookupNS "LookupNS returns the DNS NS records for the given domain name.\n\nThe returned name server names are validated to be properly\nformatted presentation-format domain names. If the response contains\ninvalid names, those records are filtered out and an error\nwill be returned alongside the remaining results, if any.\n\nLookupNS uses [context.Background] internally; to specify the context, use\n[Resolver.LookupNS].\n" [^string name] :results [(slice (* NS)) error]
+  (.LookupNS DefaultResolver (context/Background) name))
+
+
+
+
+
+
+
+
+^{:go/end 629} (go/method LookupNS "LookupNS returns the DNS NS records for the given domain name.\n\nThe returned name server names are validated to be properly\nformatted presentation-format domain names. If the response contains\ninvalid names, those records are filtered out and an error\nwill be returned alongside the remaining results, if any.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string name] :results [(slice (* NS)) error]
+  (let [(values records err) (.lookupNS r ctx name)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [filteredNS (make (slice (* NS)) 0 (len records))]
+      (range [_ ns records]
+        (when (== ns nil)
+          (continue))
+
+        (when (not (isDomainName (.-Host ns)))
+          (continue))
+
+        (set! filteredNS (append filteredNS ns)))
+
+      (when (!= (len records) (len filteredNS))
+        (return filteredNS (addr (lit DNSError :Err errMalformedDNSRecordsDetail :Name name))))
+
+      (return filteredNS nil))))
+
+
+
+
+
+
+
+
+
+^{:go/end 640} (go/func LookupTXT "LookupTXT returns the DNS TXT records for the given domain name.\n\nIf a DNS TXT record holds multiple strings, they are concatenated as a\nsingle string.\n\nLookupTXT uses [context.Background] internally; to specify the context, use\n[Resolver.LookupTXT].\n" [^string name] :results [(slice string) error]
+  (.lookupTXT DefaultResolver (context/Background) name))
+
+
+
+
+
+
+^{:go/end 648} (go/method LookupTXT "LookupTXT returns the DNS TXT records for the given domain name.\n\nIf a DNS TXT record holds multiple strings, they are concatenated as a\nsingle string.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string name] :results [(slice string) error]
+  (.lookupTXT r ctx name))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 664} (go/func LookupAddr "LookupAddr performs a reverse lookup for the given address, returning a list\nof names mapping to that address.\n\nThe returned names are validated to be properly formatted presentation-format\ndomain names. If the response contains invalid names, those records are filtered\nout and an error will be returned alongside the remaining results, if any.\n\nWhen using the host C library resolver, at most one result will be\nreturned. To bypass the host resolver, use a custom [Resolver].\n\nLookupAddr uses [context.Background] internally; to specify the context, use\n[Resolver.LookupAddr].\n" [^string addr] :results [^{:tag (slice string)} names ^error err]
+  (.LookupAddr DefaultResolver (context/Background) addr))
+
+
+
+
+
+
+
+
+^{:go/end 687} (go/method LookupAddr "LookupAddr performs a reverse lookup for the given address, returning a list\nof names mapping to that address.\n\nThe returned names are validated to be properly formatted presentation-format\ndomain names. If the response contains invalid names, those records are filtered\nout and an error will be returned alongside the remaining results, if any.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string addr] :results [(slice string) error]
+  (let [(values names err) (.lookupAddr r ctx addr)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [filteredNames (make (slice string) 0 (len names))]
+      (range [_ name names]
+        (when (isDomainName name)
+          (set! filteredNames (append filteredNames name))))
+
+
+      (when (!= (len names) (len filteredNames))
+        (return filteredNames (addr (lit DNSError :Err errMalformedDNSRecordsDetail :Name addr))))
+
+      (return filteredNames nil))))
+
+
+
+
+
+(go/var ^{:doc "errMalformedDNSRecordsDetail is the DNSError detail which is returned when a Resolver.Lookup...\nmethod receives DNS records which contain invalid DNS names. This may be returned alongside\nresults which have had the malformed records filtered out.\n"} errMalformedDNSRecordsDetail "DNS response contained records which contain invalid names")
+
+
+
+
+^{:go/end 715} (go/method dial "dial makes a new connection to the provided server (which must be\nan IP address) with the provided network type, using either r.Dial\n(if both r and r.Dial are non-nil) or else Dialer.DialContext.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string network ^string server] :results [Conn error]
+  ;; Calling Dial here is scary -- we have to be sure not to
+  ;; dial a name that will require a DNS lookup, or Dial will
+  ;; call back here to translate it. The DNS config parser has
+  ;; already checked that all the cfg.servers are IP
+  ;; addresses, which Dial will use without a DNS lookup.
+  (let [^Conn c (zero Conn)
+      ^{:line 704 :tag error} err (zero error)]
+    (if (and (!= r nil) (!= (.-Dial r) nil))
+      (set! (values c err) ((.-Dial r) ctx network server))
+
+      (let [^Dialer d (zero Dialer)]
+        (set! (values c err) (.DialContext d ctx network server))))
+
+    (when (!= err nil)
+      (return nil (mapErr err)))
+
+    (return c nil)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 774} (go/method goLookupSRV "goLookupSRV returns the SRV records for a target name, built either\nfrom its component service (\"sip\"), protocol (\"tcp\"), and name\n(\"example.com.\"), or from name directly (if service and proto are\nboth empty).\n\nIn either case, the returned target name (\"_sip._tcp.example.com.\")\nis also returned on success.\n\nThe records are sorted by weight.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string service ^string proto ^string name] :results [^string target ^{:tag (slice (* SRV))} srvs ^error err]
+  (if (and (== service "") (== proto ""))
+    (set! target name)
+
+    (set! target (+ "_" service "._" proto "." name)))
+
+  (let [(values p server ^:assign err) (.lookup r ctx target dnsmessage/TypeSRV nil)]
+    (when (!= err nil)
+      (return "" nil err))
+
+    (let [^dnsmessage/Name cname (zero dnsmessage/Name)]
+      (while true
+        (let [(values h err) (.AnswerHeader p)]
+          (when (== err dnsmessage/ErrSectionDone)
+            (break))
+
+          (when (!= err nil)
+            (return "" nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                  :Err "cannot unmarshal DNS message"
+                  :Name name
+                  :Server server))))
+
+
+          (when (!= (.-Type h) dnsmessage/TypeSRV)
+            (when [err (.SkipAnswer p)] (!= err nil)
+              (return "" nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                    :Err "cannot unmarshal DNS message"
+                    :Name name
+                    :Server server))))
+
+
+            (continue))
+
+          (when (and (== (.-Length cname) 0) (!= (.-Length (.-Name h)) 0))
+            (set! cname (.-Name h)))
+
+          (let [(values srv ^:assign err) (.SRVResource p)]
+            (when (!= err nil)
+              (return "" nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                    :Err "cannot unmarshal DNS message"
+                    :Name name
+                    :Server server))))
+
+
+            (set! srvs (append srvs (addr (lit SRV :Target (.String (.-Target srv)) :Port (.-Port srv) :Priority (.-Priority srv) :Weight (.-Weight srv))))))))
+
+      (.sort (conv byPriorityWeight srvs))
+      (return (.String cname) srvs nil))))
+
+
+
+^{:go/end 818} (go/method goLookupMX "goLookupMX returns the MX records for name.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string name] :results [(slice (* MX)) error]
+  (let [(values p server err) (.lookup r ctx name dnsmessage/TypeMX nil)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [^{:tag (slice (* MX))} mxs (zero (slice (* MX)))]
+      (while true
+        (let [(values h err) (.AnswerHeader p)]
+          (when (== err dnsmessage/ErrSectionDone)
+            (break))
+
+          (when (!= err nil)
+            (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                  :Err "cannot unmarshal DNS message"
+                  :Name name
+                  :Server server))))
+
+
+          (when (!= (.-Type h) dnsmessage/TypeMX)
+            (when [err (.SkipAnswer p)] (!= err nil)
+              (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                    :Err "cannot unmarshal DNS message"
+                    :Name name
+                    :Server server))))
+
+
+            (continue))
+
+          (let [(values mx ^:assign err) (.MXResource p)]
+            (when (!= err nil)
+              (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                    :Err "cannot unmarshal DNS message"
+                    :Name name
+                    :Server server))))
+
+
+            (set! mxs (append mxs (addr (lit MX :Host (.String (.-MX mx)) :Pref (.-Pref mx))))))))
+
+
+      (.sort (conv byPref mxs))
+      (return mxs nil))))
+
+
+
+^{:go/end 860} (go/method goLookupNS "goLookupNS returns the NS records for name.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string name] :results [(slice (* NS)) error]
+  (let [(values p server err) (.lookup r ctx name dnsmessage/TypeNS nil)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [^{:tag (slice (* NS))} nss (zero (slice (* NS)))]
+      (while true
+        (let [(values h err) (.AnswerHeader p)]
+          (when (== err dnsmessage/ErrSectionDone)
+            (break))
+
+          (when (!= err nil)
+            (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                  :Err "cannot unmarshal DNS message"
+                  :Name name
+                  :Server server))))
+
+
+          (when (!= (.-Type h) dnsmessage/TypeNS)
+            (when [err (.SkipAnswer p)] (!= err nil)
+              (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                    :Err "cannot unmarshal DNS message"
+                    :Name name
+                    :Server server))))
+
+
+            (continue))
+
+          (let [(values ns ^:assign err) (.NSResource p)]
+            (when (!= err nil)
+              (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                    :Err "cannot unmarshal DNS message"
+                    :Name name
+                    :Server server))))
+
+
+            (set! nss (append nss (addr (lit NS :Host (.String (.-NS ns)))))))))
+
+      (return nss nil))))
+
+
+
+^{:go/end 916} (go/method goLookupTXT "goLookupTXT returns the TXT records from name.\n" [^{:tag (* Resolver)} r ^context/Context ctx ^string name] :results [(slice string) error]
+  (let [(values p server err) (.lookup r ctx name dnsmessage/TypeTXT nil)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [^{:tag (slice string)} txts (zero (slice string))]
+      (while true
+        (let [(values h err) (.AnswerHeader p)]
+          (when (== err dnsmessage/ErrSectionDone)
+            (break))
+
+          (when (!= err nil)
+            (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                  :Err "cannot unmarshal DNS message"
+                  :Name name
+                  :Server server))))
+
+
+          (when (!= (.-Type h) dnsmessage/TypeTXT)
+            (when [err (.SkipAnswer p)] (!= err nil)
+              (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                    :Err "cannot unmarshal DNS message"
+                    :Name name
+                    :Server server))))
+
+
+            (continue))
+
+          (let [(values txt ^:assign err) (.TXTResource p)]
+            (when (!= err nil)
+              (return nil (addr ^{:go/breaks [2 4 6]} (lit DNSError
+                    :Err "cannot unmarshal DNS message"
+                    :Name name
+                    :Server server))))
+
+
+            ;; Multiple strings in one TXT record need to be
+            ;; concatenated without separator to be consistent
+            ;; with previous Go resolver.
+            (let [n 0]
+              (range [_ s (.-TXT txt)]
+                (set! n + (len s)))
+
+              (let [txtJoin (make (slice byte) 0 n)]
+                (range [_ s (.-TXT txt)]
+                  (set! txtJoin (append txtJoin (spread s))))
+
+                (when (== (len txts) 0)
+                  (set! txts (make (slice string) 0 1)))
+
+                (set! txts (append txts (conv string txtJoin))))))))
+
+      (return txts nil))))
+
+
+^{:go/end 927} (go/func parseCNAMEFromResources [^{:tag (slice dnsmessage/Resource)} resources] :results [string error]
+  (when (== (len resources) 0)
+    (return "" (errors/New "no CNAME record received")))
+
+  (let [(values c ok) (assert (* dnsmessage/CNAMEResource) (.-Body (aget resources 0)))]
+    (when (not ok)
+      (return "" (errors/New "could not parse CNAME record")))
+
+    (return (.String (.-CNAME c)) nil)))

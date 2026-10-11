@@ -1,0 +1,269 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "qlog.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [hex "encoding/hex"]
+    ^{:line 10} [slog "log/slog"]
+    ^{:line 11} [netip "net/netip"]
+    ^{:line 12} [time "time"]])
+
+
+
+(go/const "Log levels for qlog events.\n"
+
+
+
+  ^{:line 20} [^{:val -6 :doc "QLogLevelFrame includes per-frame information.\nWhen this level is enabled, packet_sent and packet_received events will\ncontain information on individual frames sent/received.\n"} QLogLevelFrame (conv slog/Level -6)]
+
+
+
+
+  ^{:line 25} [^{:val -4 :doc "QLogLevelPacket events occur at most once per packet sent or received.\n\nFor example: packet_sent, packet_received.\n"} QLogLevelPacket (conv slog/Level -4)]
+
+
+
+
+
+  ^{:line 31} [^{:val -2 :doc "QLogLevelConn events occur multiple times over a connection's lifetime,\nbut less often than the frequency of individual packets.\n\nFor example: connection_state_updated.\n"} QLogLevelConn (conv slog/Level -2)]
+
+
+
+
+  ^{:line 36} [^{:val 0 :doc "QLogLevelEndpoint events occur at most once per connection.\n\nFor example: connection_started, connection_closed.\n"} QLogLevelEndpoint (conv slog/Level 0)])
+
+
+^{:go/end 41} (go/method logEnabled ^bool [^{:tag (* Conn)} c ^slog/Level level]
+  (logEnabled (.-log c) level))
+
+
+^{:go/end 45} (go/func logEnabled ^bool [^{:tag (* slog/Logger)} log ^slog/Level level]
+  (and (!= log nil) (.Enabled log (context/Background) level)))
+
+
+
+
+
+^{:go/end 52} (go/func slogHexstring "slogHexstring returns a slog.Attr for a value of the hexstring type.\n\nhttps://www.ietf.org/archive/id/draft-ietf-quic-qlog-main-schema-04.html#section-1.1.1\n" ^slog/Attr [^string key ^{:tag (slice byte)} value]
+  (slog/String key (hex/EncodeToString value)))
+
+
+^{:go/end 56} (go/func slogAddr ^slog/Attr [^string key ^netip/Addr value]
+  (slog/String key (.String value)))
+
+
+^{:go/end 112} (go/method logConnectionStarted [^{:tag (* Conn)} c ^{:tag (slice byte)} originalDstConnID ^netip/AddrPort peerAddr]
+  (when (or (== (.-QLogLogger (.-config c)) nil)
+      (not (.Enabled (.-QLogLogger (.-config c)) (context/Background) QLogLevelEndpoint)))
+    (return))
+
+  (let [^string vantage (zero string)]
+    (if (== (.-side c) clientSide) (do
+        (set! vantage "client")
+        (set! originalDstConnID (.-originalDstConnID (.-connIDState c))))
+
+      (set! vantage "server"))
+
+    ;; A qlog Trace container includes some metadata (title, description, vantage_point)
+    ;; and a list of Events. The Trace also includes a common_fields field setting field
+    ;; values common to all events in the trace.
+    ;;
+    ;;	Trace = {
+    ;;	    ? title: text
+    ;;	    ? description: text
+    ;;	    ? configuration: Configuration
+    ;;	    ? common_fields: CommonFields
+    ;;	    ? vantage_point: VantagePoint
+    ;;	    events: [* Event]
+    ;;	}
+    ;;
+    ;; To map this into slog's data model, we start each per-connection trace with a With
+    ;; call that includes both the trace metadata and the common fields.
+    ;;
+    ;; This means that in slog's model, each trace event will also include
+    ;; the Trace metadata fields (vantage_point), which is a divergence from the qlog model.
+    (set! (.-log c) (.With (.-QLogLogger (.-config c))
+        ;; The group_id permits associating traces taken from different vantage points
+        ;; for the same connection.
+        ;;
+        ;; We use the original destination connection ID as the group ID.
+        ;;
+        ;; https://www.ietf.org/archive/id/draft-ietf-quic-qlog-main-schema-04.html#section-3.4.6
+        (slogHexstring "group_id" originalDstConnID)
+        (slog/Group "vantage_point"
+          (slog/String "name" "go quic")
+          (slog/String "type" vantage))))
+
+
+    (let [localAddr (.LocalAddr (.-endpoint c))]
+      ;; https://www.ietf.org/archive/id/draft-ietf-quic-qlog-quic-events-03.html#section-4.2
+      ^{:go/breaks [4]} (.LogAttrs (.-log c) (context/Background) QLogLevelEndpoint
+        "connectivity:connection_started"
+        (slogAddr "src_ip" (.Addr localAddr))
+        (slog/Int "src_port" (conv int (.Port localAddr)))
+        (slogHexstring "src_cid" (.-cid (aget (.-local (.-connIDState c)) 0)))
+        (slogAddr "dst_ip" (.Addr peerAddr))
+        (slog/Int "dst_port" (conv int (.Port peerAddr)))
+        (slogHexstring "dst_cid" ^{:go/via [connID]} (.-cid (aget (.-remote (.-connIDState c)) 0)))))))
+
+
+
+^{:go/end 150} (go/method logConnectionClosed [^{:tag (* Conn)} c]
+  (when (not (.logEnabled c QLogLevelEndpoint))
+    (return))
+
+  (let [err (.-finalErr (.-lifetime c))
+      ^{:line 119} trigger "error"]
+    (type-switch [e err]
+      (case [(* ApplicationError)]
+        ;; TODO: Distinguish between peer and locally-initiated close.
+        (set! trigger "application"))
+      (case [localTransportError]
+        (switch err
+          (case [errHandshakeTimeout]
+            (set! trigger "handshake_timeout"))
+          (default
+            (when (== (.-code e) errNo)
+              (set! trigger "clean")))))
+
+
+      (case [peerTransportError]
+        (when (== (.-code e) errNo)
+          (set! trigger "clean")))
+
+      (default
+        (switch err
+          (case [errIdleTimeout]
+            (set! trigger "idle_timeout"))
+          (case [errStatelessReset]
+            (set! trigger "stateless_reset")))))
+
+
+    ;; https://www.ietf.org/archive/id/draft-ietf-quic-qlog-quic-events-03.html#section-4.3
+    ^{:go/breaks [4]} (.LogAttrs (.-log c) (context/Background) QLogLevelEndpoint
+      "connectivity:connection_closed"
+      (slog/String "trigger" trigger))))
+
+
+
+^{:go/end 156} (go/method logPacketDropped [^{:tag (* Conn)} c ^{:tag (* datagram)} dgram]
+  ^{:go/breaks [4]} (.LogAttrs (.-log c) (context/Background) QLogLevelPacket
+    "connectivity:packet_dropped"))
+
+
+
+^{:go/end 177} (go/method logLongPacketReceived [^{:tag (* Conn)} c ^longPacket p ^{:tag (slice byte)} pkt]
+  (let [^slog/Attr frames (zero slog/Attr)]
+    (when (.logEnabled c QLogLevelFrame)
+      (set! frames (.packetFramesAttr c (.-payload p))))
+
+    ^{:go/breaks [4]} (.LogAttrs (.-log c) (context/Background) QLogLevelPacket
+      "transport:packet_received"
+      (slog/Group "header"
+        (slog/String "packet_type" (.qlogString (.-ptype p)))
+        (slog/Uint64 "packet_number" (conv uint64 (.-num p)))
+        (slog/Uint64 "flags" (conv uint64 (aget pkt 0)))
+        (slogHexstring "scid" (.-srcConnID p))
+        (slogHexstring "dcid" (.-dstConnID p)))
+
+      (slog/Group "raw"
+        (slog/Int "length" (len pkt)))
+
+      ^{:line 175} frames)))
+
+
+
+^{:go/end 198} (go/method log1RTTPacketReceived [^{:tag (* Conn)} c ^shortPacket p ^{:tag (slice byte)} pkt]
+  (let [^slog/Attr frames (zero slog/Attr)]
+    (when (.logEnabled c QLogLevelFrame)
+      (set! frames (.packetFramesAttr c (.-payload p))))
+
+    (let [(values dstConnID _) (dstConnIDForDatagram pkt)]
+      ^{:go/breaks [4]} (.LogAttrs (.-log c) (context/Background) QLogLevelPacket
+        "transport:packet_received"
+        (slog/Group "header"
+          (slog/String "packet_type" (.qlogString packetType1RTT))
+          (slog/Uint64 "packet_number" (conv uint64 (.-num p)))
+          (slog/Uint64 "flags" (conv uint64 (aget pkt 0)))
+          (slogHexstring "dcid" dstConnID))
+
+        (slog/Group "raw"
+          (slog/Int "length" (len pkt)))
+
+        ^{:line 196} frames))))
+
+
+
+^{:go/end 222} (go/method logPacketSent [^{:tag (* Conn)} c ^packetType ptype ^packetNumber pnum ^{:tag (slice byte)} src ^{:tag (slice byte)} dst ^int pktLen ^{:tag (slice byte)} payload]
+  (let [^slog/Attr frames (zero slog/Attr)]
+    (when (.logEnabled c QLogLevelFrame)
+      (set! frames (.packetFramesAttr c payload)))
+
+    (let [^slog/Attr scid (zero slog/Attr)]
+      (when (> (len src) 0)
+        (set! scid (slogHexstring "scid" src)))
+
+      ^{:go/breaks [4]} (.LogAttrs (.-log c) (context/Background) QLogLevelPacket
+        "transport:packet_sent"
+        (slog/Group "header"
+          (slog/String "packet_type" (.qlogString ptype))
+          (slog/Uint64 "packet_number" (conv uint64 pnum))
+          ^{:line 214} scid
+          (slogHexstring "dcid" dst))
+
+        (slog/Group "raw"
+          (slog/Int "length" pktLen))
+
+        ^{:line 220} frames))))
+
+
+
+
+
+
+
+
+
+^{:go/end 262} (go/method packetFramesAttr "packetFramesAttr returns the \"frames\" attribute containing the frames in a packet.\nWe currently pass this as a slog Any containing a []slog.Value,\nwhere each Value is a debugFrame that implements slog.LogValuer.\n\nThis isn't tremendously efficient, but avoids the need to put a JSON encoder\nin the quic package or a frame parser in the qlog package.\n" ^slog/Attr [^{:tag (* Conn)} c ^{:tag (slice byte)} payload]
+  (let [^{:tag (slice slog/Value)} frames (zero (slice slog/Value))]
+    (while (> (len payload) 0)
+      (let [(values f n) (parseDebugFrame payload)]
+        (when (< n 0)
+          (break))
+
+        (set! payload (subslice payload n))
+        (type-switch [f f]
+          (case [debugFrameAck]
+            ;; The qlog ACK frame contains the ACK Delay field as a duration.
+            ;; Interpreting the contents of this field as a duration requires
+            ;; knowing the peer's ack_delay_exponent transport parameter,
+            ;; and it's possible for us to parse an ACK frame before we've
+            ;; received that parameter.
+            ;;
+            ;; We could plumb connection state down into the frame parser,
+            ;; but for now let's minimize the amount of code that needs to
+            ;; deal with this and convert the unscaled value into a scaled one here.
+            (let [ackDelay (conv time/Duration -1)]
+              (when (>= (.-peerAckDelayExponent c) 0)
+                (set! ackDelay (.Duration (.-ackDelay f) (conv uint8 (.-peerAckDelayExponent c)))))
+
+              (set! frames (append frames (slog/AnyValue ^{:go/breaks [2 4]} (lit debugFrameScaledAck
+                      :ranges (.-ranges f)
+                      :ackDelay ackDelay))))))
+
+          (default
+            (set! frames (append frames (slog/AnyValue f)))))))
+
+
+    (slog/Any "frames" frames)))
+
+
+^{:go/end 272} (go/method logPacketLost [^{:tag (* Conn)} c ^numberSpace space ^{:tag (* sentPacket)} sent]
+  ^{:go/breaks [4]} (.LogAttrs (.-log c) (context/Background) QLogLevelPacket
+    "recovery:packet_lost"
+    (slog/Group "header"
+      (slog/String "packet_type" (.qlogString (.-ptype sent)))
+      (slog/Uint64 "packet_number" (conv uint64 (.-num sent))))))

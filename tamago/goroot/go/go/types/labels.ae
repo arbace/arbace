@@ -1,0 +1,270 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.types) (go/file "labels.go" :imports [
+
+
+    ^{:line 8} [ast "go/ast"]
+    ^{:line 9} [token "go/token"]
+    ^{:line 10} [. "internal/types/errors"]
+    ^{:line 11} [slices "slices"]])
+
+
+
+^{:go/end 47} (go/method labels "labels checks correct label use in body.\n" [^{:tag (* Checker)} check ^{:tag (* ast/BlockStmt)} body]
+  ;; set of all labels in this body
+  (let [all (NewScope nil (.Pos body) (.End body) "label")
+
+      ^{:line 19} fwdJumps (.blockBranches check all nil nil (.-List body))]
+
+    ;; If there are any forward jumps left, no label was found for
+    ;; the corresponding goto statements. Either those labels were
+    ;; never defined, or they are inside blocks and not reachable
+    ;; for the respective gotos.
+    (range [_ jmp fwdJumps]
+      (let [^string msg (zero string)
+          ^{:line 27 :tag Code} code (zero Code)
+          ^{:line 28} name (.-Name (.-Label jmp))]
+        (if [alt (.Lookup all name)] (!= alt nil) (do
+            (set! msg "goto %s jumps into block")
+            (set! code JumpIntoBlock)
+            (set! (.-used (assert (* Label) alt)) true)) ; avoid another error
+          (do
+            (set! msg "label %s not declared")
+            (set! code UndeclaredLabel)))
+
+        (.errorf check (.-Label jmp) code msg name)))
+
+
+    ;; spec: "It is illegal to define a label that is never used."
+    (range [name obj (.-elems all)]
+      (set! obj (resolve name obj))
+      (when [lbl (assert (* Label) obj)] (not (.-used lbl))
+        (.softErrorf check lbl UnusedLabel "label %s declared and not used" ^{:go/via [object]} (.-name lbl))))))
+
+
+
+
+
+(go/type block "A block tracks label declarations in a block and its enclosing blocks.\n" (struct
+    ^{:line 51 :tag (* block)} parent ; enclosing block
+    ^{:line 52 :tag (* ast/LabeledStmt)} lstmt ; labeled statement to which this block belongs, or nil
+    ^{:line 53 :tag (map string (* ast/LabeledStmt))} labels)) ; allocated lazily
+
+
+
+
+^{:go/end 69} (go/method insert "insert records a new label declaration for the current block.\nThe label must not have been declared before in any block.\n" [^{:tag (* block)} b ^{:tag (* ast/LabeledStmt)} s]
+  (let [name (.-Name (.-Label s))]
+    (when debug
+      (go/call assert (== (.gotoTarget b name) nil)))
+
+    (let [labels (.-labels b)]
+      (when (== labels nil)
+        (set! labels (make (map string (* ast/LabeledStmt))))
+        (set! (.-labels b) labels))
+
+      (aset labels name s))))
+
+
+
+
+^{:go/breaks [[5 79]] :go/end 80} (go/method gotoTarget "gotoTarget returns the labeled statement in the current\nor an enclosing block with the given label name, or nil.\n" ^{:tag (* ast/LabeledStmt)} [^{:tag (* block)} b ^string name]
+  (for [s b] (!= s nil) (set! s (.-parent s))
+    (when [t (aget (.-labels s) name)] (!= t nil)
+      (return t)))
+
+
+  nil)
+
+
+
+
+^{:go/breaks [[5 90]] :go/end 91} (go/method enclosingTarget "enclosingTarget returns the innermost enclosing labeled\nstatement with the given label name, or nil.\n" ^{:tag (* ast/LabeledStmt)} [^{:tag (* block)} b ^string name]
+  (for [s b] (!= s nil) (set! s (.-parent s))
+    (when [t (.-lstmt s)] (and (!= t nil) (== (.-Name (.-Label t)) name))
+      (return t)))
+
+
+  nil)
+
+
+
+
+
+^{:go/end 271} (go/method blockBranches "blockBranches processes a block's statement list and returns the set of outgoing forward jumps.\nall is the scope of all declared labels, parent the set of labels declared in the immediately\nenclosing block, and lstmt is the labeled statement this block is associated with (or nil).\n" ^{:tag (slice (* ast/BranchStmt))} [^{:tag (* Checker)} check ^{:tag (* Scope)} all ^{:tag (* block)} parent ^{:tag (* ast/LabeledStmt)} lstmt ^{:tag (slice ast/Stmt)} list]
+  (let [b (addr (lit block :parent parent :lstmt lstmt))
+
+
+      ^{:line 100 :tag token/Pos} varDeclPos (zero token/Pos)
+      (values ^{:tag (slice (* ast/BranchStmt))} fwdJumps ^{:tag (slice (* ast/BranchStmt))} badJumps) (zero (slice (* ast/BranchStmt)))
+
+
+      ;; All forward jumps jumping over a variable declaration are possibly
+      ;; invalid (they may still jump out of the block and be ok).
+      ;; recordVarDecl records them for the given position.
+      ^{:line 107} recordVarDecl ^{:go/end 110} (fn [^token/Pos pos]
+        (set! varDeclPos pos)
+        (set! badJumps (append (subslice badJumps _ 0) (spread fwdJumps)))) ; copy fwdJumps to badJumps
+
+
+      ^{:line 112} jumpsOverVarDecl ^{:go/end 114} (fn ^bool [^{:tag (* ast/BranchStmt)} jmp]
+        (and (.IsValid varDeclPos) (^{:inst [(slice (* ast/BranchStmt)) (* ast/BranchStmt)]} slices/Contains badJumps jmp)))
+
+
+      ^{:line 116} blockBranches ^{:go/end 120} (fn [^{:tag (* ast/LabeledStmt)} lstmt ^{:tag (slice ast/Stmt)} list]
+        ;; Unresolved forward jumps inside the nested block
+        ;; become forward jumps in the current block.
+        (set! fwdJumps (append fwdJumps (spread (.blockBranches check all b lstmt list)))))
+
+
+      ^{:line 122 :tag (func [(* ast/LabeledStmt) ast/Stmt])} stmtBranches (zero (func [(* ast/LabeledStmt) ast/Stmt]))]
+    (set! stmtBranches ^{:go/end 264} (fn [^{:tag (* ast/LabeledStmt)} lstmt ^ast/Stmt s]
+        (type-switch [s s]
+          (case [(* ast/DeclStmt)]
+            (when [(values d _) (assert (* ast/GenDecl) (.-Decl s))] (and (!= d nil) (== (.-Tok d) token/VAR))
+              (recordVarDecl (.Pos d))))
+
+
+          (case [(* ast/LabeledStmt)]
+            ;; declare non-blank label
+            (when [name (.-Name (.-Label s))] (!= name "_")
+              (let [lbl (NewLabel (.Pos (.-Label s)) (.-pkg check) name)]
+                (if [alt (.Insert all lbl)] (!= alt nil)
+                  (let [err (.newError check DuplicateLabel)]
+                    (set! (.-soft err) true)
+                    (.addf err lbl "label %s already declared" name)
+                    (.addAltDecl err alt)
+                    (.report err))
+                  ;; ok to continue
+                  (do
+                    (.insert b s)
+                    (.recordDef check (.-Label s) lbl)))
+
+                ;; resolve matching forward jumps and remove them from fwdJumps
+                (let [i 0]
+                  (range [_ jmp fwdJumps]
+                    (if (== (.-Name (.-Label jmp)) name) (do
+                        ;; match
+                        (set! (.-used lbl) true)
+                        (.recordUse check (.-Label jmp) lbl)
+                        (when (jumpsOverVarDecl jmp)
+                          ^{:go/breaks [4]} (.softErrorf check
+                            (.-Label jmp)
+                            ^{:line 155} JumpOverDecl
+                            "goto %s jumps over variable declaration at line %d"
+                            ^{:line 157} name
+                            (.-Line (.Position (.-fset check) varDeclPos)))))
+
+                      ;; ok to continue
+
+                      (do
+                        ;; no match - record new forward jump
+                        (aset fwdJumps i jmp)
+                        (inc! i))))
+
+
+                  (set! fwdJumps (subslice fwdJumps _ i))
+                  (set! lstmt s))))
+
+            (stmtBranches lstmt (.-Stmt s)))
+
+          (case [(* ast/BranchStmt)]
+            (when (== (.-Label s) nil)
+              (return)) ; checked in 1st pass (check.stmt)
+
+
+            ;; determine and validate target
+            (let [name (.-Name (.-Label s))]
+              (switch (.-Tok s)
+                (case [token/BREAK]
+                  ;; spec: "If there is a label, it must be that of an enclosing
+                  ;; "for", "switch", or "select" statement, and that is the one
+                  ;; whose execution terminates."
+                  (let [valid false]
+                    (when [t (.enclosingTarget b name)] (!= t nil)
+                      (type-switch (.-Stmt t)
+                        (case [(* ast/SwitchStmt) (* ast/TypeSwitchStmt) (* ast/SelectStmt) (* ast/ForStmt) (* ast/RangeStmt)]
+                          (set! valid true))))
+
+
+                    (when (not valid)
+                      (.errorf check (.-Label s) MisplacedLabel "invalid break label %s" name)
+                      (return))))
+
+
+                (case [token/CONTINUE]
+                  ;; spec: "If there is a label, it must be that of an enclosing
+                  ;; "for" statement, and that is the one whose execution advances."
+                  (let [valid false]
+                    (when [t (.enclosingTarget b name)] (!= t nil)
+                      (type-switch (.-Stmt t)
+                        (case [(* ast/ForStmt) (* ast/RangeStmt)]
+                          (set! valid true))))
+
+
+                    (when (not valid)
+                      (.errorf check (.-Label s) MisplacedLabel "invalid continue label %s" name)
+                      (return))))
+
+
+                (case [token/GOTO]
+                  (when (== (.gotoTarget b name) nil)
+                    ;; label may be declared later - add branch to forward jumps
+                    (set! fwdJumps (append fwdJumps s))
+                    (return)))
+
+
+                (default
+                  (.errorf check s InvalidSyntaxTree "branch statement: %s %s" (.-Tok s) name)
+                  (return)))
+
+
+              ;; record label use
+              (let [obj (.Lookup all name)]
+                (set! (.-used (assert (* Label) obj)) true)
+                (.recordUse check (.-Label s) obj))))
+
+          (case [(* ast/AssignStmt)]
+            (when (== (.-Tok s) token/DEFINE)
+              (recordVarDecl (.Pos s))))
+
+
+          (case [(* ast/BlockStmt)]
+            (blockBranches lstmt (.-List s)))
+
+          (case [(* ast/IfStmt)]
+            (stmtBranches lstmt (.-Body s))
+            (when (!= (.-Else s) nil)
+              (stmtBranches lstmt (.-Else s))))
+
+
+          (case [(* ast/CaseClause)]
+            (blockBranches nil (.-Body s)))
+
+          (case [(* ast/SwitchStmt)]
+            (stmtBranches lstmt (.-Body s)))
+
+          (case [(* ast/TypeSwitchStmt)]
+            (stmtBranches lstmt (.-Body s)))
+
+          (case [(* ast/CommClause)]
+            (blockBranches nil (.-Body s)))
+
+          (case [(* ast/SelectStmt)]
+            (stmtBranches lstmt (.-Body s)))
+
+          (case [(* ast/ForStmt)]
+            (stmtBranches lstmt (.-Body s)))
+
+          (case [(* ast/RangeStmt)]
+            (stmtBranches lstmt (.-Body s))))))
+
+
+
+    (range [_ s list]
+      (stmtBranches nil s))
+
+
+    ^{:line 270} fwdJumps))

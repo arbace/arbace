@@ -1,0 +1,2015 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements printing of AST nodes; specifically
+;; expressions, statements, declarations, and files. It uses
+;; the print functionality implemented in printer.go.
+
+(in-ns 'go.go.printer) (go/file "nodes.go" :imports [
+
+
+    ^{:line 12} [ast "go/ast"]
+    ^{:line 13} [token "go/token"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [unicode "unicode"]
+    ^{:line 17} [utf8 "unicode/utf8"]])
+
+
+;; Formatting issues:
+;; - better comment formatting for /*-style comments at the end of a line (e.g. a declaration)
+;;   when the comment spans multiple lines; if such a comment is just two lines, formatting is
+;;   not idempotent
+;; - formatting of expression lists
+;; - should use blank instead of tab to separate one-line function bodies from
+;;   the function header unless there is a group of consecutive one-liners
+
+;; ----------------------------------------------------------------------------
+;; Common AST nodes.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 60} (go/method linebreak "Print as many newlines as necessary (but at least min newlines) to get to\nthe current line. ws is printed before the first line break. If newSection\nis set, the first line break is printed as formfeed. Returns 0 if no line\nbreaks were printed, returns 1 if there was exactly one newline printed,\nand returns a value > 1 if there was a formfeed or more than one newline\nprinted.\n\nTODO(gri): linebreak may add too many lines if the next statement at \"line\"\nis preceded by comments because the computation of n assumes\nthe current position before the comment and the target position\nafter the comment. Thus, after interspersing such comments, the\nspace taken up by them is not considered to reduce the number of\nlinebreaks. At the moment there is no easy way to know about\nfuture (not yet interspersed) comments in this function.\n" [^{:tag (* printer)} p ^int line ^int min ^whiteSpace ws ^bool newSection] :results [^int nbreaks]
+  (let [n (max (nlimit (- line (.-Line (.-pos p)))) min)]
+    (when (> n 0)
+      (.print p ws)
+      (when newSection
+        (.print p formfeed)
+        (dec! n)
+        (set! nbreaks 2))
+
+      (set! nbreaks + n)
+      (for [] (> n 0) (dec! n)
+        (.print p newline)))
+
+
+    (return)))
+
+
+
+
+
+
+^{:go/end 91} (go/method setComment "setComment sets g as the next comment if g != nil and if node comments\nare enabled - this mode is used when printing source code fragments such\nas exports only. It assumes that there is no pending comment in p.comments\nand at most one pending comment in the p.comment cache.\n" [^{:tag (* printer)} p ^{:tag (* ast/CommentGroup)} g]
+  (when (or (== g nil) (not (.-useNodeComments p)))
+    (return))
+
+  (cond (== (.-comments p) nil)
+    ;; initialize p.comments lazily
+    (set! (.-comments p) (make (slice (* ast/CommentGroup)) 1))
+    (< ^{:go/via [commentInfo]} (.-cindex p) (len (.-comments p))) (do
+      ;; for some reason there are pending comments; this
+      ;; should never happen - handle gracefully and flush
+      ;; all comments up to g, ignore anything after that
+      (.flush p (.posFor p (.Pos (aget (.-List g) 0))) token/ILLEGAL)
+      (set! (.-comments p) (subslice (.-comments p) 0 1))
+      ;; in debug mode, report error
+      (.internalError p "setComment found pending comments")))
+
+  (aset (.-comments p) 0 g)
+  (set! ^{:go/via [commentInfo]} (.-cindex p) 0)
+  ;; don't overwrite any pending comment in the p.comment cache
+  ;; (there may be a pending comment when a line comment is
+  ;; immediately followed by a lead comment with no other
+  ;; tokens between)
+  (when (== ^{:go/via [commentInfo]} (.-commentOffset p) infinity)
+    (.nextComment p))) ; get comment ready for use
+
+
+
+(go/type exprListMode uint)
+
+(go/const
+  ^{:line 96} [^{:tag exprListMode :val 1} commaTerm (<< 1 iota)] ; list is optionally terminated by a comma
+  ^{:line 97} [^{:val 2} noIndent]) ; no extra indentation in multi-line lists
+
+
+
+
+^{:go/end 113} (go/method identList "If indent is set, a multi-line identifier list is indented after the\nfirst linebreak encountered.\n" [^{:tag (* printer)} p ^{:tag (slice (* ast/Ident))} list ^bool indent]
+  ;; convert into an expression list so we can re-use exprList formatting
+  (let [xlist (make (slice ast/Expr) (len list))]
+    (range [i x list]
+      (aset xlist i x))
+
+    (let [^exprListMode mode (zero exprListMode)]
+      (when (not indent)
+        (set! mode noIndent))
+
+      (.exprList p token/NoPos xlist 1 mode token/NoPos false))))
+
+
+(go/const ^{:val "contains filtered or unexported fields"} filteredMsg "contains filtered or unexported fields")
+
+
+
+
+
+
+
+
+
+^{:go/end 317} (go/method exprList "Print a list of expressions. If the list spans multiple\nsource lines, the original line breaks are respected between\nexpressions.\n\nTODO(gri) Consider rewriting this to be independent of []ast.Expr\nso that we can use the algorithm for any kind of list\n\n\t(e.g., pass list via a channel over which to range).\n" [^{:tag (* printer)} p ^token/Pos prev0 ^{:tag (slice ast/Expr)} list ^int depth ^exprListMode mode ^token/Pos next0 ^bool isIncomplete]
+  (when (== (len list) 0)
+    (when isIncomplete
+      (let [prev (.posFor p prev0)
+          ^{:line 129} next (.posFor p next0)]
+        (if (and (.IsValid prev) (== (.-Line prev) (.-Line next)))
+          (.print p (+ "/* " filteredMsg " */"))
+          (do
+            (.print p newline)
+            (.print p indent (+ "// " filteredMsg) unindent newline)))))
+
+
+    (return))
+
+
+  (let [prev (.posFor p prev0)
+      ^{:line 141} next (.posFor p next0)
+      ^{:line 142} line (.lineFor p (.Pos (aget list 0)))
+      ^{:line 143} endLine (.lineFor p (.End (aget list (- (len list) 1))))]
+
+    (when (and (.IsValid prev) (== (.-Line prev) line) (== line endLine))
+      ;; all list entries on a single line
+      (range [i x list]
+        (when (> i 0)
+          ;; use position of expression following the comma as
+          ;; comma position for correct comment placement
+          (.setPos p (.Pos x))
+          (.print p token/COMMA blank))
+
+        (.expr0 p x depth))
+
+      (when isIncomplete
+        (.print p token/COMMA blank (+ "/* " filteredMsg " */")))
+
+      (return))
+
+
+    ;; list entries span multiple lines;
+    ;; use source code positions to guide line breaks
+
+    ;; Don't add extra indentation if noIndent is set;
+    ;; i.e., pretend that the first line is already indented.
+    (let [ws ignore]
+      (when (== (bit-and mode noIndent) 0)
+        (set! ws indent))
+
+
+      ;; The first linebreak is always a formfeed since this section must not
+      ;; depend on any previous formatting.
+      (let [prevBreak -1] ; index of last expression that was followed by a linebreak
+        (when (and (.IsValid prev) (< (.-Line prev) line) (> (.linebreak p line 0 ws true) 0))
+          (set! ws ignore)
+          (set! prevBreak 0))
+
+
+        ;; initialize expression/key size: a zero value indicates expr/key doesn't fit on a single line
+        (let [size 0
+
+            ;; We use the ratio between the geometric mean of the previous key sizes and
+            ;; the current size to determine if there should be a break in the alignment.
+            ;; To compute the geometric mean we accumulate the log₂(size) values (log2sum)
+            ;; and the number of sizes included (count).
+            ^{:line 187} log2sum 0.0
+            ^{:line 188} count 0
+
+            ;; print all list elements
+            ^{:line 191} prevLine (.-Line prev)]
+          (range [i x list]
+            (set! line (.lineFor p (.Pos x)))
+
+            ;; Determine if the next linebreak, if any, needs to use formfeed:
+            ;; in general, use the entire node size to make the decision; for
+            ;; key:value expressions, use the key size.
+            ;; TODO(gri) for a better result, should probably incorporate both
+            ;;           the key and the node size into the decision process
+            (let [useFF true
+
+                ;; Determine element size: All bets are off if we don't have
+                ;; position information for the previous and next token (likely
+                ;; generated code - simply ignore the size in this case by setting
+                ;; it to 0).
+                ^{:line 206} prevSize size
+                ^:const ^{:line 207 :val 1000000.0} infinity 1000000.0] ; larger than any source line
+              (set! size (.nodeSize p x infinity))
+              (let [(values pair isPair) (assert (* ast/KeyValueExpr) x)]
+                (if (and (<= size infinity) (.IsValid prev) (.IsValid next))
+                  ;; x fits on a single line
+                  (when isPair
+                    (set! size (.nodeSize p (.-Key pair) infinity))) ; size <= infinity
+
+
+                  ;; size too large or we don't have good layout information
+                  (set! size 0))
+
+
+                ;; If the previous line and the current line had single-
+                ;; line-expressions and the key sizes are small or the
+                ;; ratio between the current key and the geometric mean
+                ;; if the previous key sizes does not exceed a threshold,
+                ;; align columns and do not use formfeed.
+                (when (and (> prevSize 0) (> size 0))
+                  (let [^:const ^{:val 40} smallSize 40]
+                    (if (or (== count 0) (and (<= prevSize smallSize) (<= size smallSize)))
+                      (set! useFF false)
+
+                      (let [^:const ^{:val 2.5} r 2.5 ; threshold
+                          ^{:line 231} geomean (exp2ish (/ log2sum (conv float64 count))) ; count > 0
+                          ^{:line 232} ratio (/ (conv float64 size) geomean)]
+                        (set! useFF (or (<= (* r ratio) 1) (<= r ratio)))))))
+
+
+
+                (let [needsLinebreak (and (< 0 prevLine) (< prevLine line))]
+                  (when (> i 0)
+                    ;; Use position of expression following the comma as
+                    ;; comma position for correct comment placement, but
+                    ;; only if the expression is on the same line.
+                    (when (not needsLinebreak)
+                      (.setPos p (.Pos x)))
+
+                    (.print p token/COMMA)
+                    (let [needsBlank true]
+                      (when needsLinebreak
+                        ;; Lines are broken using newlines so comments remain aligned
+                        ;; unless useFF is set or there are multiple expressions on
+                        ;; the same line in which case formfeed is used.
+                        (let [nbreaks (.linebreak p line 0 ws (or useFF (< (+ prevBreak 1) i)))]
+                          (when (> nbreaks 0)
+                            (set! ws ignore)
+                            (set! prevBreak i)
+                            (set! needsBlank false)) ; we got a line break instead
+
+                          ;; If there was a new section or more than one new line
+                          ;; (which means that the tabwriter will implicitly break
+                          ;; the section), reset the geomean variables since we are
+                          ;; starting a new group of elements with the next element.
+                          (when (> nbreaks 1)
+                            (set! log2sum 0)
+                            (set! count 0))))
+
+
+                      (when needsBlank
+                        (.print p blank))))
+
+
+
+                  (if (and (> (len list) 1) isPair (> size 0) needsLinebreak) (do
+                      ;; We have a key:value expression that fits onto one line
+                      ;; and it's not on the same line as the prior expression:
+                      ;; Use a column for the key such that consecutive entries
+                      ;; can align if possible.
+                      ;; (needsLinebreak is set if we started a new line before)
+                      (.expr p (.-Key pair))
+                      (.setPos p (.-Colon pair))
+                      (.print p token/COLON vtab)
+                      (.expr p (.-Value pair)))
+
+                    (.expr0 p x depth))
+
+
+                  (when (> size 0)
+                    (set! log2sum + (log2ish (conv float64 size)))
+                    (inc! count))
+
+
+                  (set! prevLine line)))))
+
+
+          (when (and (!= (bit-and mode commaTerm) 0) (.IsValid next) (< (.-Line (.-pos p)) (.-Line next)))
+            ;; Print a terminating comma if the next token is on a new line.
+            (.print p token/COMMA)
+            (when isIncomplete
+              (.print p newline)
+              (.print p (+ "// " filteredMsg)))
+
+            (when (and (== ws ignore) (== (bit-and mode noIndent) 0))
+              ;; unindent if we indented
+              (.print p unindent))
+
+            (.print p formfeed) ; terminating comma needs a line break to look good
+            (return))
+
+
+          (when isIncomplete
+            (.print p token/COMMA newline)
+            (.print p (+ "// " filteredMsg) newline))
+
+
+          (when (and (== ws ignore) (== (bit-and mode noIndent) 0))
+            ;; unindent if we indented
+            (.print p unindent)))))))
+
+
+
+(go/type paramMode int)
+
+(go/const
+  ^{:line 322} [^{:tag paramMode :val 0} funcParam iota]
+  ^{:line 323} [^{:val 1} funcTParam]
+  ^{:line 324} [^{:val 2} typeTParam])
+
+
+^{:go/end 398} (go/method parameters [^{:tag (* printer)} p ^{:tag (* ast/FieldList)} fields ^paramMode mode]
+  (let [(values openTok closeTok) (values token/LPAREN token/RPAREN)]
+    (when (!= mode funcParam)
+      (set! (values openTok closeTok) (values token/LBRACK token/RBRACK)))
+
+    (.setPos p (.-Opening fields))
+    (.print p openTok)
+    (when (> (len (.-List fields)) 0)
+      (let [prevLine (.lineFor p (.-Opening fields))
+          ^{:line 336} ws indent]
+        (range [i par (.-List fields)]
+          ;; determine par begin and end line (may be different
+          ;; if there are multiple parameter names for this par
+          ;; or the type is on a separate line)
+          (let [parLineBeg (.lineFor p (.Pos par))
+              ^{:line 342} parLineEnd (.lineFor p (.End par))
+              ;; separating "," if needed
+              ^{:line 344} needsLinebreak (and (< 0 prevLine) (< prevLine parLineBeg))]
+            (when (> i 0)
+              ;; use position of parameter following the comma as
+              ;; comma position for correct comma placement, but
+              ;; only if the next parameter is on the same line
+              (when (not needsLinebreak)
+                (.setPos p (.Pos par)))
+
+              (.print p token/COMMA))
+
+            ;; separator if needed (linebreak or blank)
+            (cond (and needsLinebreak (> (.linebreak p parLineBeg 0 ws true) 0))
+              ;; break line if the opening "(" or previous parameter ended on a different line
+              (set! ws ignore)
+              (> i 0)
+              (.print p blank))
+
+            ;; parameter names
+            (when (> (len (.-Names par)) 0)
+              ;; Very subtle: If we indented before (ws == ignore), identList
+              ;; won't indent again. If we didn't (ws == indent), identList will
+              ;; indent if the identList spans multiple lines, and it will outdent
+              ;; again at the end (and still ws == indent). Thus, a subsequent indent
+              ;; by a linebreak call after a type, or in the next multi-line identList
+              ;; will do the right thing.
+              (.identList p (.-Names par) (== ws indent))
+              (.print p blank))
+
+            ;; parameter type
+            (.expr p (stripParensAlways (.-Type par)))
+            (set! prevLine parLineEnd)))
+
+
+        ;; if the closing ")" is on a separate line from the last parameter,
+        ;; print an additional "," and line break
+        (if [closing (.lineFor p (.-Closing fields))] (and (< 0 prevLine) (< prevLine closing)) (do
+            (.print p token/COMMA)
+            (.linebreak p closing 0 ignore true))
+          (when (and (== mode typeTParam) (== (.NumFields fields) 1) (combinesWithName (stripParensAlways (.-Type (aget (.-List fields) 0)))))
+            ;; A type parameter list [P T] where the name P and the type expression T syntactically
+            ;; combine to another valid (value) expression requires a trailing comma, as in [P *T,]
+            ;; (or an enclosing interface as in [P interface(*T)]), so that the type parameter list
+            ;; is not parsed as an array length [P*T].
+            (.print p token/COMMA)))
+
+
+        ;; unindent if we indented
+        (when (== ws ignore)
+          (.print p unindent))))
+
+
+
+    (.setPos p (.-Closing fields))
+    (.print p closeTok)))
+
+
+
+
+
+
+
+^{:go/breaks [[5 415]] :go/end 416} (go/func combinesWithName "combinesWithName reports whether a name followed by the expression x\nsyntactically combines to another valid (value) expression. For instance\nusing *T for x, \"name *T\" syntactically appears as the expression x*T.\nOn the other hand, using  P|Q or *P|~Q for x, \"name P|Q\" or \"name *P|~Q\"\ncannot be combined into a valid (value) expression.\n" ^bool [^ast/Expr x]
+  (type-switch [x x]
+    (case [(* ast/StarExpr)]
+      ;; name *x.X combines to name*x.X if x.X is not a type element
+      (return (not (isTypeElem (.-X x)))))
+    (case [(* ast/BinaryExpr)]
+      (return (and (combinesWithName (.-X x)) (not (isTypeElem (.-Y x))))))
+    (case [(* ast/ParenExpr)]
+      (return (not (isTypeElem (.-X x))))))
+
+  false)
+
+
+
+
+^{:go/breaks [[5 431]] :go/end 432} (go/func isTypeElem "isTypeElem reports whether x is a (possibly parenthesized) type element expression.\nThe result is false if x could be a type element OR an ordinary (value) expression.\n" ^bool [^ast/Expr x]
+  (type-switch [x x]
+    (case [(* ast/ArrayType) (* ast/StructType) (* ast/FuncType) (* ast/InterfaceType) (* ast/MapType) (* ast/ChanType)]
+      (return true))
+    (case [(* ast/UnaryExpr)]
+      (return (== (.-Op x) token/TILDE)))
+    (case [(* ast/BinaryExpr)]
+      (return (or (isTypeElem (.-X x)) (isTypeElem (.-Y x)))))
+    (case [(* ast/ParenExpr)]
+      (return (isTypeElem (.-X x)))))
+
+  false)
+
+
+^{:go/end 455} (go/method signature [^{:tag (* printer)} p ^{:tag (* ast/FuncType)} sig]
+  (when (!= (.-TypeParams sig) nil)
+    (.parameters p (.-TypeParams sig) funcTParam))
+
+  (if (!= (.-Params sig) nil)
+    (.parameters p (.-Params sig) funcParam)
+
+    (.print p token/LPAREN token/RPAREN))
+
+  (let [res (.-Results sig)
+      ^{:line 444} n (.NumFields res)]
+    (when (> n 0)
+      ;; res != nil
+      (.print p blank)
+      (when (and (== n 1) (== (.-Names (aget (.-List res) 0)) nil))
+        ;; single anonymous res; no ()'s
+        (.expr p (stripParensAlways (.-Type (aget (.-List res) 0))))
+        (return))
+
+      (.parameters p res funcParam))))
+
+
+
+^{:go/end 468} (go/func identListSize [^{:tag (slice (* ast/Ident))} list ^int maxSize] :results [^int size]
+  (range [i x list]
+    (when (> i 0)
+      (set! size + (len ", ")))
+
+    (set! size + (utf8/RuneCountInString (.-Name x)))
+    (when (>= size maxSize)
+      (break)))
+
+
+  (return))
+
+
+^{:go/end 486} (go/method isOneLineFieldList ^bool [^{:tag (* printer)} p ^{:tag (slice (* ast/Field))} list]
+  (when (!= (len list) 1)
+    (return false)) ; allow only one field
+
+  (let [f (aget list 0)]
+    (when (or (!= (.-Tag f) nil) (!= (.-Comment f) nil))
+      (return false)) ; don't allow tags or comments
+
+    ;; only name(s) and type
+    (let [^:const ^{:val 30} maxSize 30 ; adjust as appropriate, this is an approximate value
+        ^{:line 480} namesSize (identListSize (.-Names f) maxSize)]
+      (when (> namesSize 0)
+        (set! namesSize 1)) ; blank between names and types
+
+      (let [typeSize (.nodeSize p (.-Type f) maxSize)]
+        (<= (+ namesSize typeSize) maxSize)))))
+
+
+^{:go/end 490} (go/method setLineComment [^{:tag (* printer)} p ^string text]
+  (.setComment p (addr (lit ast/CommentGroup :List (lit (slice (* ast/Comment)) (lit _ :Slash token/NoPos :Text text))))))
+
+
+^{:go/end 644} (go/method fieldList [^{:tag (* printer)} p ^{:tag (* ast/FieldList)} fields ^bool isStruct ^bool isIncomplete]
+  (let [lbrace (.-Opening fields)
+      ^{:line 494} list (.-List fields)
+      ^{:line 495} rbrace (.-Closing fields)
+      ^{:line 496} hasComments (or isIncomplete (.commentBefore p (.posFor p rbrace)))
+      ^{:line 497} srcIsOneLine (and (.IsValid lbrace) (.IsValid rbrace) (== (.lineFor p lbrace) (.lineFor p rbrace)))]
+
+    (when (and (not hasComments) srcIsOneLine)
+      ;; possibly a one-line struct/interface
+      (cond (== (len list) 0) (do
+          ;; no blank between keyword and {} in this case
+          (.setPos p lbrace)
+          (.print p token/LBRACE)
+          (.setPos p rbrace)
+          (.print p token/RBRACE)
+          (return))
+        (.isOneLineFieldList p list) (do
+          ;; small enough - print on one line
+          ;; (don't use identList and ignore source line breaks)
+          (.setPos p lbrace)
+          (.print p token/LBRACE blank)
+          (let [f (aget list 0)]
+            (if isStruct (do
+                (range [i x (.-Names f)]
+                  (when (> i 0)
+                    ;; no comments so no need for comma position
+                    (.print p token/COMMA blank))
+
+                  (.expr p x))
+
+                (when (> (len (.-Names f)) 0)
+                  (.print p blank))
+
+                (.expr p (.-Type f)))
+              (do ; interface
+                (if (> (len (.-Names f)) 0)
+                  (let [name (aget (.-Names f) 0)] ; method name
+                    (.expr p name)
+                    (.signature p (assert (* ast/FuncType) (.-Type f)))) ; don't print "func"
+
+                  ;; embedded interface
+                  (.expr p (.-Type f)))))
+
+
+            (.print p blank)
+            (.setPos p rbrace)
+            (.print p token/RBRACE)
+            (return)))))
+
+
+    ;; hasComments || !srcIsOneLine
+
+    (.print p blank)
+    (.setPos p lbrace)
+    (.print p token/LBRACE indent)
+    (when (or hasComments (> (len list) 0))
+      (.print p formfeed))
+
+
+    (if isStruct
+
+      (let [sep vtab]
+        (when (== (len list) 1)
+          (set! sep blank))
+
+        (let [^int line (zero int)]
+          (range [i f list]
+            (when (> i 0)
+              (.linebreak p (.lineFor p (.Pos f)) 1 ignore (> (.linesFrom p line) 0)))
+
+            (let [extraTabs 0]
+              (.setComment p (.-Doc f))
+              (.recordLine p (addr line))
+              (if (> (len (.-Names f)) 0) (do
+                  ;; named fields
+                  (.identList p (.-Names f) false)
+                  (.print p sep)
+                  (.expr p (.-Type f))
+                  (set! extraTabs 1))
+                (do
+                  ;; anonymous field
+                  (.expr p (.-Type f))
+                  (set! extraTabs 2)))
+
+              (when (!= (.-Tag f) nil)
+                (when (and (> (len (.-Names f)) 0) (== sep vtab))
+                  (.print p sep))
+
+                (.print p sep)
+                (.expr p (.-Tag f))
+                (set! extraTabs 0))
+
+              (when (!= (.-Comment f) nil)
+                (for [] (> extraTabs 0) (dec! extraTabs)
+                  (.print p sep))
+
+                (.setComment p (.-Comment f)))))
+
+
+          (when isIncomplete
+            (when (> (len list) 0)
+              (.print p formfeed))
+
+            (.flush p (.posFor p rbrace) token/RBRACE) ; make sure we don't lose the last line comment
+            (.setLineComment p (+ "// " filteredMsg)))))
+
+
+      ;; interface
+
+      (let [^int line (zero int)
+          ^{:line 602 :tag (* ast/Ident)} prev (zero (* ast/Ident))] ; previous "type" identifier
+        (range [i f list]
+          (let [^{:tag (* ast/Ident)} name (zero (* ast/Ident))] ; first name, or nil
+            (when (> (len (.-Names f)) 0)
+              (set! name (aget (.-Names f) 0)))
+
+            (when (> i 0)
+              ;; don't do a line break (min == 0) if we are printing a list of types
+              ;; TODO(gri) this doesn't work quite right if the list of types is
+              ;;           spread across multiple lines
+              (let [min 1]
+                (when (and (!= prev nil) (== name prev))
+                  (set! min 0))
+
+                (.linebreak p (.lineFor p (.Pos f)) min ignore (> (.linesFrom p line) 0))))
+
+            (.setComment p (.-Doc f))
+            (.recordLine p (addr line))
+            (if (!= name nil) (do
+                ;; method
+                (.expr p name)
+                (.signature p (assert (* ast/FuncType) (.-Type f))) ; don't print "func"
+                (set! prev nil))
+              (do
+                ;; embedded interface
+                (.expr p (.-Type f))
+                (set! prev nil)))
+
+            (.setComment p (.-Comment f))))
+
+        (when isIncomplete
+          (when (> (len list) 0)
+            (.print p formfeed))
+
+          (.flush p (.posFor p rbrace) token/RBRACE) ; make sure we don't lose the last line comment
+          (.setLineComment p "// contains filtered or unexported methods"))))
+
+
+
+    (.print p unindent formfeed)
+    (.setPos p rbrace)
+    (.print p token/RBRACE)))
+
+
+;; ----------------------------------------------------------------------------
+;; Expressions
+
+^{:go/end 696} (go/func walkBinary [^{:tag (* ast/BinaryExpr)} e] :results [^bool has4 ^bool has5 ^int maxProblem]
+  (switch (.Precedence (.-Op e))
+    (case [4]
+      (set! has4 true))
+    (case [5]
+      (set! has5 true)))
+
+
+  (type-switch [l (.-X e)]
+    (case [(* ast/BinaryExpr)]
+      (when (< (.Precedence (.-Op l)) (.Precedence (.-Op e)))
+        ;; parens will be inserted.
+        ;; pretend this is an *ast.ParenExpr and do nothing.
+        (break))
+
+      (let [(values h4 h5 mp) (walkBinary l)]
+        (set! has4 (or has4 h4))
+        (set! has5 (or has5 h5))
+        (set! maxProblem (max maxProblem mp)))))
+
+
+  (type-switch [r (.-Y e)]
+    (case [(* ast/BinaryExpr)]
+      (when (<= (.Precedence (.-Op r)) (.Precedence (.-Op e)))
+        ;; parens will be inserted.
+        ;; pretend this is an *ast.ParenExpr and do nothing.
+        (break))
+
+      (let [(values h4 h5 mp) (walkBinary r)]
+        (set! has4 (or has4 h4))
+        (set! has5 (or has5 h5))
+        (set! maxProblem (max maxProblem mp))))
+
+    (case [(* ast/StarExpr)]
+      (when (== (.-Op e) token/QUO) ; `*/`
+        (set! maxProblem 5)))
+
+
+    (case [(* ast/UnaryExpr)]
+      (switch (+ (.String (.-Op e)) (.String (.-Op r)))
+        (case ["/*" "&&" "&^"]
+          (set! maxProblem 5))
+        (case ["++" "--"]
+          (set! maxProblem (max maxProblem 4))))))
+
+
+  (return))
+
+
+^{:go/end 713} (go/func cutoff ^int [^{:tag (* ast/BinaryExpr)} e ^int depth]
+  ^{:go/breaks [[5 712]]} (let [(values has4 has5 maxProblem) (walkBinary e)]
+    (when (> maxProblem 0)
+      (return (+ maxProblem 1)))
+
+    (when (and has4 has5)
+      (when (== depth 1)
+        (return 5))
+
+      (return 4))
+
+    (when (== depth 1)
+      (return 6))
+
+    4))
+
+
+^{:go/end 721} (go/func diffPrec ^int [^ast/Expr expr ^int prec]
+  ^{:go/breaks [[3 720]]} (let [(values x ok) (assert (* ast/BinaryExpr) expr)]
+    (when (or (not ok) (!= prec (.Precedence (.-Op x))))
+      (return 1))
+
+    0))
+
+
+^{:go/end 729} (go/func reduceDepth ^int [^int depth]
+  (dec! depth)
+  (when (< depth 1)
+    (set! depth 1))
+
+  ^{:line 728} depth)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 805} (go/method binaryExpr "Format the binary expression: decide the cutoff and then format.\nLet's call depth == 1 Normal mode, and depth > 1 Compact mode.\n(Algorithm suggestion by Russ Cox.)\n\nThe precedences are:\n\n\t5             *  /  %  <<  >>  &  &^\n\t4             +  -  |  ^\n\t3             ==  !=  <  <=  >  >=\n\t2             &&\n\t1             ||\n\nThe only decision is whether there will be spaces around levels 4 and 5.\nThere are never spaces at level 6 (unary), and always spaces at levels 3 and below.\n\nTo choose the cutoff, look at the whole expression but excluding primary\nexpressions (function calls, parenthesized exprs), and apply these rules:\n\n 1. If there is a binary operator with a right side unary operand\n    that would clash without a space, the cutoff must be (in order):\n\n    /*\t6\n    &&\t6\n    &^\t6\n    ++\t5\n    --\t5\n\n    (Comparison operators always have spaces around them.)\n\n 2. If there is a mix of level 5 and level 4 operators, then the cutoff\n    is 5 (use spaces to distinguish precedence) in Normal mode\n    and 4 (never use spaces) in Compact mode.\n\n 3. If there are no level 4 operators or no level 5 operators, then the\n    cutoff is 6 (always use spaces) in Normal mode\n    and 4 (never use spaces) in Compact mode.\n" [^{:tag (* printer)} p ^{:tag (* ast/BinaryExpr)} x ^int prec1 ^int cutoff ^int depth]
+  (let [prec (.Precedence (.-Op x))]
+    (when (< prec prec1)
+      ;; parenthesis needed
+      ;; Note: The parser inserts an ast.ParenExpr node; thus this case
+      ;;       can only occur if the AST is created in a different way.
+      (.print p token/LPAREN)
+      (.expr0 p x (reduceDepth depth)) ; parentheses undo one level of depth
+      (.print p token/RPAREN)
+      (return))
+
+
+    (let [printBlank (< prec cutoff)
+
+        ^{:line 781} ws indent]
+      (.expr1 p (.-X x) prec (+ depth (diffPrec (.-X x) prec)))
+      (when printBlank
+        (.print p blank))
+
+      (let [xline (.-Line (.-pos p)) ; before the operator (it may be on the next line!)
+          ^{:line 787} yline (.lineFor p (.Pos (.-Y x)))]
+        (.setPos p (.-OpPos x))
+        (.print p (.-Op x))
+        (when (and (!= xline yline) (> xline 0) (> yline 0))
+          ;; at least one line break, but respect an extra empty line
+          ;; in the source
+          (when (> (.linebreak p yline 1 ws true) 0)
+            (set! ws ignore)
+            (set! printBlank false))) ; no blank after line break
+
+
+        (when printBlank
+          (.print p blank))
+
+        (.expr1 p (.-Y x) (+ prec 1) (+ depth 1))
+        (when (== ws ignore)
+          (.print p unindent))))))
+
+
+
+^{:go/end 810} (go/func isBinary ^bool [^ast/Expr expr]
+  (let [(values _ ok) (assert (* ast/BinaryExpr) expr)]
+    ^{:line 809} ok))
+
+
+^{:go/end 1084} (go/method expr1 [^{:tag (* printer)} p ^ast/Expr expr ^int prec1 ^int depth]
+  (.setPos p (.Pos expr))
+
+  (type-switch [x expr]
+    (case [(* ast/BadExpr)]
+      (.print p "BadExpr"))
+
+    (case [(* ast/Ident)]
+      (.print p x))
+
+    (case [(* ast/BinaryExpr)]
+      (when (< depth 1)
+        (.internalError p "depth < 1:" depth)
+        (set! depth 1))
+
+      (.binaryExpr p x prec1 (cutoff x depth) depth))
+
+    (case [(* ast/KeyValueExpr)]
+      (.expr p (.-Key x))
+      (.setPos p (.-Colon x))
+      (.print p token/COLON blank)
+      (.expr p (.-Value x)))
+
+    (case [(* ast/StarExpr)]
+      (let [^:const ^{:val 6} prec token/UnaryPrec]
+        (if (< prec prec1) (do
+            ;; parenthesis needed
+            (.print p token/LPAREN)
+            (.print p token/MUL)
+            (.expr p (.-X x))
+            (.print p token/RPAREN))
+          (do
+            ;; no parenthesis needed
+            (.print p token/MUL)
+            (.expr p (.-X x))))))
+
+
+    (case [(* ast/UnaryExpr)]
+      (let [^:const ^{:val 6} prec token/UnaryPrec]
+        (if (< prec prec1) (do
+            ;; parenthesis needed
+            (.print p token/LPAREN)
+            (.expr p x)
+            (.print p token/RPAREN))
+          (do
+            ;; no parenthesis needed
+            (.print p (.-Op x))
+            (when (== (.-Op x) token/RANGE)
+              ;; TODO(gri) Remove this code if it cannot be reached.
+              (.print p blank))
+
+            (.expr1 p (.-X x) prec depth)))))
+
+
+    (case [(* ast/BasicLit)]
+      (when (!= (bit-and (.-Mode (.-Config p)) normalizeNumbers) 0)
+        (set! x (normalizedNumber x)))
+
+      (.print p x))
+
+    (case [(* ast/FuncLit)]
+      (.setPos p (.Pos (.-Type x)))
+      (.print p token/FUNC)
+      ;; See the comment in funcDecl about how the header size is computed.
+      (let [startCol (- (.-Column (.-out p)) (len "func"))]
+        (.signature p (.-Type x))
+        (.funcBody p (.distanceFrom p (.Pos (.-Type x)) startCol) blank (.-Body x))))
+
+    (case [(* ast/ParenExpr)]
+      (if [(values _ hasParens) (assert (* ast/ParenExpr) (.-X x))] hasParens
+        ;; don't print parentheses around an already parenthesized expression
+        ;; TODO(gri) consider making this more general and incorporate precedence levels
+        (.expr0 p (.-X x) depth)
+        (do
+          (.print p token/LPAREN)
+          (.expr0 p (.-X x) (reduceDepth depth)) ; parentheses undo one level of depth
+          (.setPos p (.-Rparen x))
+          (.print p token/RPAREN))))
+
+
+    (case [(* ast/SelectorExpr)]
+      (.selectorExpr p x depth false))
+
+    (case [(* ast/TypeAssertExpr)]
+      (.expr1 p (.-X x) token/HighestPrec depth)
+      (.print p token/PERIOD)
+      (.setPos p (.-Lparen x))
+      (.print p token/LPAREN)
+      (if (!= (.-Type x) nil)
+        (.expr p (.-Type x))
+
+        (.print p token/TYPE))
+
+      (.setPos p (.-Rparen x))
+      (.print p token/RPAREN))
+
+    (case [(* ast/IndexExpr)]
+      ;; TODO(gri): should treat[] like parentheses and undo one level of depth
+      (.expr1 p (.-X x) token/HighestPrec 1)
+      (.setPos p (.-Lbrack x))
+      (.print p token/LBRACK)
+      (.expr0 p (.-Index x) (+ depth 1))
+      (.setPos p (.-Rbrack x))
+      (.print p token/RBRACK))
+
+    (case [(* ast/IndexListExpr)]
+      ;; TODO(gri): as for IndexExpr, should treat [] like parentheses and undo
+      ;; one level of depth
+      (.expr1 p (.-X x) token/HighestPrec 1)
+      (.setPos p (.-Lbrack x))
+      (.print p token/LBRACK)
+      (.exprList p (.-Lbrack x) (.-Indices x) (+ depth 1) commaTerm (.-Rbrack x) false)
+      (.setPos p (.-Rbrack x))
+      (.print p token/RBRACK))
+
+    (case [(* ast/SliceExpr)]
+      ;; TODO(gri): should treat[] like parentheses and undo one level of depth
+      (.expr1 p (.-X x) token/HighestPrec 1)
+      (.setPos p (.-Lbrack x))
+      (.print p token/LBRACK)
+      (let [indices (lit (slice ast/Expr) (.-Low x) (.-High x))]
+        (when (!= (.-Max x) nil)
+          (set! indices (append indices (.-Max x))))
+
+        ;; determine if we need extra blanks around ':'
+        (let [^bool needsBlanks (zero bool)]
+          (when (<= depth 1)
+            (let [^int indexCount (zero int)
+                ^{:line 940 :tag bool} hasBinaries (zero bool)]
+              (range [_ x indices]
+                (when (!= x nil)
+                  (inc! indexCount)
+                  (when (isBinary x)
+                    (set! hasBinaries true))))
+
+
+
+              (when (and (> indexCount 1) hasBinaries)
+                (set! needsBlanks true))))
+
+
+          (range [i x indices]
+            (when (> i 0)
+              (when (and (!= (aget indices (- i 1)) nil) needsBlanks)
+                (.print p blank))
+
+              (.print p token/COLON)
+              (when (and (!= x nil) needsBlanks)
+                (.print p blank)))
+
+
+            (when (!= x nil)
+              (.expr0 p x (+ depth 1))))
+
+
+          (.setPos p (.-Rbrack x))
+          (.print p token/RBRACK))))
+
+    (case [(* ast/CallExpr)]
+      (when (> (len (.-Args x)) 1)
+        (inc! depth))
+
+
+      ;; Conversions to literal function types or <-chan
+      ;; types require parentheses around the type.
+      (let [paren false]
+        (type-switch [t (.-Fun x)]
+          (case [(* ast/FuncType)]
+            (set! paren true))
+          (case [(* ast/ChanType)]
+            (set! paren (== (.-Dir t) ast/RECV))))
+
+        (when paren
+          (.print p token/LPAREN))
+
+        (let [wasIndented (.possibleSelectorExpr p (.-Fun x) token/HighestPrec depth)]
+          (when paren
+            (.print p token/RPAREN))
+
+
+          (.setPos p (.-Lparen x))
+          (.print p token/LPAREN)
+          (if (.IsValid (.-Ellipsis x)) (do
+              (.exprList p (.-Lparen x) (.-Args x) depth 0 (.-Ellipsis x) false)
+              (.setPos p (.-Ellipsis x))
+              (.print p token/ELLIPSIS)
+              (when (and (.IsValid (.-Rparen x)) (< (.lineFor p (.-Ellipsis x)) (.lineFor p (.-Rparen x))))
+                (.print p token/COMMA formfeed)))
+
+
+            (.exprList p (.-Lparen x) (.-Args x) depth commaTerm (.-Rparen x) false))
+
+          (.setPos p (.-Rparen x))
+          (.print p token/RPAREN)
+          (when wasIndented
+            (.print p unindent)))))
+
+
+    (case [(* ast/CompositeLit)]
+      ;; composite literal elements that are composite literals themselves may have the type omitted
+      (when (!= (.-Type x) nil)
+        (.expr1 p (.-Type x) token/HighestPrec depth))
+
+      (inc! (.-level p))
+      (.setPos p (.-Lbrace x))
+      (.print p token/LBRACE)
+      (.exprList p (.-Lbrace x) (.-Elts x) 1 commaTerm (.-Rbrace x) (.-Incomplete x))
+      ;; do not insert extra line break following a /*-style comment
+      ;; before the closing '}' as it might break the code if there
+      ;; is no trailing ','
+      (let [mode noExtraLinebreak]
+        ;; do not insert extra blank following a /*-style comment
+        ;; before the closing '}' unless the literal is empty
+        (when (> (len (.-Elts x)) 0)
+          (set! mode bit-or noExtraBlank))
+
+        ;; need the initial indent to print lone comments with
+        ;; the proper level of indentation
+        (.print p indent unindent mode)
+        (.setPos p (.-Rbrace x))
+        (.print p token/RBRACE mode)
+        (dec! (.-level p))))
+
+    (case [(* ast/Ellipsis)]
+      (.print p token/ELLIPSIS)
+      (when (!= (.-Elt x) nil)
+        (.expr p (.-Elt x))))
+
+
+    (case [(* ast/ArrayType)]
+      (.print p token/LBRACK)
+      (when (!= (.-Len x) nil)
+        (.expr p (.-Len x)))
+
+      (.print p token/RBRACK)
+      (.expr p (.-Elt x)))
+
+    (case [(* ast/StructType)]
+      (.print p token/STRUCT)
+      (.fieldList p (.-Fields x) true (.-Incomplete x)))
+
+    (case [(* ast/FuncType)]
+      (.print p token/FUNC)
+      (.signature p x))
+
+    (case [(* ast/InterfaceType)]
+      (.print p token/INTERFACE)
+      (.fieldList p (.-Methods x) false (.-Incomplete x)))
+
+    (case [(* ast/MapType)]
+      (.print p token/MAP token/LBRACK)
+      (.expr p (.-Key x))
+      (.print p token/RBRACK)
+      (.expr p (.-Value x)))
+
+    (case [(* ast/ChanType)]
+      (switch (.-Dir x)
+        (case [(bit-or ast/SEND ast/RECV)]
+          (.print p token/CHAN))
+        (case [ast/RECV]
+          (.print p token/ARROW token/CHAN)) ; x.Arrow and x.Pos() are the same
+        (case [ast/SEND]
+          (.print p token/CHAN)
+          (.setPos p (.-Arrow x))
+          (.print p token/ARROW)))
+
+      (.print p blank)
+      (.expr p (.-Value x)))
+
+    (default
+      (panic "unreachable"))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1144} (go/func normalizedNumber "normalizedNumber rewrites base prefixes and exponents\nof numbers to use lower-case letters (0X123 to 0x123 and 1.2E3 to 1.2e3),\nand removes leading 0's from integer imaginary literals (0765i to 765i).\nIt leaves hexadecimal digits alone.\n\nnormalizedNumber doesn't modify the ast.BasicLit value lit points to.\nIf lit is not a number or a number in canonical format already,\nlit is returned as is. Otherwise a new ast.BasicLit is created.\n" ^{:tag (* ast/BasicLit)} [^{:tag (* ast/BasicLit)} lit]
+  (when (and (!= (.-Kind lit) token/INT) (!= (.-Kind lit) token/FLOAT) (!= (.-Kind lit) token/IMAG))
+    (return lit)) ; not a number - nothing to do
+
+  (when (< (len (.-Value lit)) 2)
+    (return lit)) ; only one digit (common case) - nothing to do
+
+  ;; len(lit.Value) >= 2
+
+  ;; We ignore lit.Kind because for lit.Kind == token.IMAG the literal may be an integer
+  ;; or floating-point value, decimal or not. Instead, just consider the literal pattern.
+  (let [x (.-Value lit)]
+    (switch (subslice x _ 2)
+      (default
+        ;; 0-prefix octal, decimal int, or float (possibly with 'i' suffix)
+        (when [i (strings/LastIndexByte x \E)] (>= i 0)
+          (set! x (+ (subslice x _ i) "e" (subslice x (+ i 1))))
+          (break))
+
+        ;; remove leading 0's from integer (but not floating-point) imaginary literals
+        (when (and (== (aget x (- (len x) 1)) \i) (not (strings/ContainsAny x ".e")))
+          (set! x (strings/TrimLeft x "0_"))
+          (when (== x "i")
+            (set! x "0i"))))
+
+
+      (case ["0X"]
+        (set! x (+ "0x" (subslice x 2)))
+        ;; possibly a hexadecimal float
+        (when [i (strings/LastIndexByte x \P)] (>= i 0)
+          (set! x (+ (subslice x _ i) "p" (subslice x (+ i 1))))))
+
+      (case ["0x"]
+        ;; possibly a hexadecimal float
+        (let [i (strings/LastIndexByte x \P)]
+          (when (== i -1)
+            (return lit)) ; nothing to do
+
+          (set! x (+ (subslice x _ i) "p" (subslice x (+ i 1))))))
+      (case ["0O"]
+        (set! x (+ "0o" (subslice x 2))))
+      (case ["0o"]
+        (return lit)) ; nothing to do
+      (case ["0B"]
+        (set! x (+ "0b" (subslice x 2))))
+      (case ["0b"]
+        (return lit))) ; nothing to do
+
+
+    (addr (lit ast/BasicLit :ValuePos (.-ValuePos lit) :Kind (.-Kind lit) :Value x))))
+
+
+^{:go/breaks [5] :go/end 1152} (go/method possibleSelectorExpr ^bool [^{:tag (* printer)} p ^ast/Expr expr ^int prec1 ^int depth]
+  (when [(values x ok) (assert (* ast/SelectorExpr) expr)] ok
+    (return (.selectorExpr p x depth true)))
+
+  (.expr1 p expr prec1 depth)
+  false)
+
+
+
+
+^{:go/breaks [9] :go/end 1171} (go/method selectorExpr "selectorExpr handles an *ast.SelectorExpr node and reports whether x spans\nmultiple lines.\n" ^bool [^{:tag (* printer)} p ^{:tag (* ast/SelectorExpr)} x ^int depth ^bool isMethod]
+  (.expr1 p (.-X x) token/HighestPrec depth)
+  (.print p token/PERIOD)
+  (when [line (.lineFor p (.Pos (.-Sel x)))] (and (.IsValid (.-pos p)) (< (.-Line (.-pos p)) line))
+    (.print p indent newline)
+    (.setPos p (.Pos (.-Sel x)))
+    (.print p (.-Sel x))
+    (when (not isMethod)
+      (.print p unindent))
+
+    (return true))
+
+  (.setPos p (.Pos (.-Sel x)))
+  (.print p (.-Sel x))
+  false)
+
+
+^{:go/end 1175} (go/method expr0 [^{:tag (* printer)} p ^ast/Expr x ^int depth]
+  (.expr1 p x token/LowestPrec depth))
+
+
+^{:go/end 1180} (go/method expr [^{:tag (* printer)} p ^ast/Expr x]
+  (let [^:const ^{:val 1} depth 1]
+    (.expr1 p x token/LowestPrec depth)))
+
+
+;; ----------------------------------------------------------------------------
+;; Statements
+
+
+
+
+^{:go/end 1223} (go/method stmtList "Print the statement list indented, but without a newline after the last statement.\nExtra line breaks between statements in the source are respected but at most one\nempty line is printed between statements.\n" [^{:tag (* printer)} p ^{:tag (slice ast/Stmt)} list ^int nindent ^bool nextIsRBrace]
+  (when (> nindent 0)
+    (.print p indent))
+
+  (let [^int line (zero int)
+      ^{:line 1193} i 0]
+    (range [_ s list]
+      ;; ignore empty statements (was issue 3466)
+      (when [(values _ isEmpty) (assert (* ast/EmptyStmt) s)] (not isEmpty)
+        ;; nindent == 0 only for lists of switch/select case clauses;
+        ;; in those cases each clause is a new section
+        (when (> (len (.-output p)) 0)
+          ;; only print line break if we are not at the beginning of the output
+          ;; (i.e., we are not printing only a partial program)
+          (.linebreak p (.lineFor p (.Pos s)) 1 ignore (or (== i 0) (== nindent 0) (> (.linesFrom p line) 0))))
+
+        (.recordLine p (addr line))
+        (.stmt p s (and nextIsRBrace (== i (- (len list) 1))))
+        ;; labeled statements put labels on a separate line, but here
+        ;; we only care about the start line of the actual statement
+        ;; without label - correct line for each label
+        (for [t s] _ _
+          (let [(values lt _) (assert (* ast/LabeledStmt) t)]
+            (when (== lt nil)
+              (break))
+
+            (inc! line)
+            (set! t (.-Stmt lt))))
+
+        (inc! i)))
+
+
+    (when (> nindent 0)
+      (.print p unindent))))
+
+
+
+
+^{:go/end 1233} (go/method block "block prints an *ast.BlockStmt; it always spans at least two lines.\n" [^{:tag (* printer)} p ^{:tag (* ast/BlockStmt)} b ^int nindent]
+  (.setPos p (.-Lbrace b))
+  (.print p token/LBRACE)
+  (.stmtList p (.-List b) nindent true)
+  (.linebreak p (.lineFor p (.-Rbrace b)) 1 ignore true)
+  (.setPos p (.-Rbrace b))
+  (.print p token/RBRACE))
+
+
+^{:go/breaks [[4 1242]] :go/end 1243} (go/func isTypeName ^bool [^ast/Expr x]
+  (type-switch [t x]
+    (case [(* ast/Ident)]
+      (return true))
+    (case [(* ast/SelectorExpr)]
+      (return (isTypeName (.-X t)))))
+
+  false)
+
+
+^{:go/end 1269} (go/func stripParens ^ast/Expr [^ast/Expr x]
+  (when [(values px strip) (assert (* ast/ParenExpr) x)] strip
+    ;; parentheses must not be stripped if there are any
+    ;; unparenthesized composite literals starting with
+    ;; a type name
+    (ast/Inspect (.-X px) ^{:go/breaks [[3 1262]] :go/end 1263} (fn ^bool [^ast/Node node]
+        (type-switch [x node]
+          (case [(* ast/ParenExpr)]
+            ;; parentheses protect enclosed composite literals
+            (return false))
+          (case [(* ast/CompositeLit)]
+            (when (isTypeName (.-Type x))
+              (set! strip false)) ; do not strip parentheses
+
+            (return false)))
+
+        ;; in all other cases, keep inspecting
+        true))
+
+    (when strip
+      (return (stripParens (.-X px)))))
+
+
+  ^{:line 1268} x)
+
+
+^{:go/end 1276} (go/func stripParensAlways ^ast/Expr [^ast/Expr x]
+  (when [(values x ok) (assert (* ast/ParenExpr) x)] ok
+    (return (stripParensAlways (.-X x))))
+
+  ^{:line 1275} x)
+
+
+^{:go/end 1310} (go/method controlClause [^{:tag (* printer)} p ^bool isForStmt ^ast/Stmt init ^ast/Expr expr ^ast/Stmt post]
+  (.print p blank)
+  (let [needsBlank false]
+    (if (and (== init nil) (== post nil))
+      ;; no semicolons required
+      (when (!= expr nil)
+        (.expr p (stripParens expr))
+        (set! needsBlank true))
+
+      (do
+        ;; all semicolons required
+        ;; (they are not separators, print them explicitly)
+        (when (!= init nil)
+          (.stmt p init false))
+
+        (.print p token/SEMICOLON blank)
+        (when (!= expr nil)
+          (.expr p (stripParens expr))
+          (set! needsBlank true))
+
+        (when isForStmt
+          (.print p token/SEMICOLON blank)
+          (set! needsBlank false)
+          (when (!= post nil)
+            (.stmt p post false)
+            (set! needsBlank true)))))
+
+
+
+    (when needsBlank
+      (.print p blank))))
+
+
+
+
+
+^{:go/breaks [[5 1322]] :go/end 1323} (go/func isCompositeLitLike "isCompositeLitLike reports whether x is a composite literal or an expression\nwhose core is a composite literal (e.g. &T{...}), ignoring parentheses.\n" ^bool [^ast/Expr x]
+  (type-switch [x (stripParensAlways x)]
+    (case [(* ast/CompositeLit)]
+      (return true))
+    (case [(* ast/UnaryExpr)]
+      (let [(values _ ok) (assert (* ast/CompositeLit) (stripParensAlways (.-X x)))]
+        (return (and (== (.-Op x) token/AND) ok)))))
+
+  false)
+
+
+
+
+
+
+
+^{:go/breaks [[5 1361]] :go/end 1362} (go/method indentList "indentList reports whether an expression list would look better if it\nwere indented wholesale (starting with the very first element, rather\nthan starting at the first line break).\nCurrently this function is only used to improve formatting of return\nstatements.\n" ^bool [^{:tag (* printer)} p ^{:tag (slice ast/Expr)} list]
+  ;; Heuristic: indentList reports whether there are more than one multi-
+  ;; line element (such as a complex expression, but excluding composite
+  ;; literals) in the list, or if there is any element that is not starting
+  ;; on the same line as the previous one ends.
+  (when (>= (len list) 2)
+    (let [^:var b (.lineFor p (.Pos (aget list 0)))
+        ^:var ^{:line 1337} e (.lineFor p (.End (aget list (- (len list) 1))))]
+      (when (and (< 0 b) (< b e))
+        ;; list spans multiple lines
+        (let [n 0 ; multi-line element count
+            ^{:line 1341} line b]
+          (range [_ x list]
+            (let [xb (.lineFor p (.Pos x))
+                ^{:line 1344} xe (.lineFor p (.End x))]
+              (when (< line xb)
+                ;; x is not starting on the same
+                ;; line as the previous one ended
+                (return true))
+
+              (when (and (< xb xe) (not (isCompositeLitLike x)))
+                ;; x is a multi-line element but not a composite literal
+                ;; (composite literals have their own field indentation
+                ;; already, see go.dev/issue/7195)
+                (inc! n))
+
+              (set! line xe)))
+
+          (return (> n 1))))))
+
+
+  false)
+
+
+^{:go/end 1563} (go/method stmt [^{:tag (* printer)} p ^ast/Stmt stmt ^bool nextIsRBrace]
+  (.setPos p (.Pos stmt))
+
+  (type-switch [s stmt]
+    (case [(* ast/BadStmt)]
+      (.print p "BadStmt"))
+
+    (case [(* ast/DeclStmt)]
+      (.decl p (.-Decl s)))
+
+    (case [(* ast/EmptyStmt)])
+    ;; nothing to do
+
+    (case [(* ast/LabeledStmt)]
+      ;; a "correcting" unindent immediately following a line break
+      ;; is applied before the line break if there is no comment
+      ;; between (see writeWhitespace)
+      (.print p unindent)
+      (.expr p (.-Label s))
+      (.setPos p (.-Colon s))
+      (.print p token/COLON indent)
+      (if [(values e isEmpty) (assert (* ast/EmptyStmt) (.-Stmt s))] isEmpty
+        (when (not nextIsRBrace)
+          (.print p newline)
+          (.setPos p (.Pos e))
+          (.print p token/SEMICOLON)
+          (break))
+
+
+        (.linebreak p (.lineFor p (.Pos (.-Stmt s))) 1 ignore true))
+
+      (.stmt p (.-Stmt s) nextIsRBrace))
+
+    (case [(* ast/ExprStmt)]
+      (let [^:const ^{:val 1} depth 1]
+        (.expr0 p (.-X s) depth)))
+
+    (case [(* ast/SendStmt)]
+      (let [^:const ^{:val 1} depth 1]
+        (.expr0 p (.-Chan s) depth)
+        (.print p blank)
+        (.setPos p (.-Arrow s))
+        (.print p token/ARROW blank)
+        (.expr0 p (.-Value s) depth)))
+
+    (case [(* ast/IncDecStmt)]
+      (let [^:const ^{:val 1} depth 1]
+        (.expr0 p (.-X s) (+ depth 1))
+        (.setPos p (.-TokPos s))
+        (.print p (.-Tok s))))
+
+    (case [(* ast/AssignStmt)]
+      (let [^:var depth 1]
+        (when (and (> (len (.-Lhs s)) 1) (> (len (.-Rhs s)) 1))
+          (inc! depth))
+
+        (.exprList p (.Pos s) (.-Lhs s) depth 0 (.-TokPos s) false)
+        (.print p blank)
+        (.setPos p (.-TokPos s))
+        (.print p (.-Tok s) blank)
+        (.exprList p (.-TokPos s) (.-Rhs s) depth 0 token/NoPos false)))
+
+    (case [(* ast/GoStmt)]
+      (.print p token/GO blank)
+      (.expr p (.-Call s)))
+
+    (case [(* ast/DeferStmt)]
+      (.print p token/DEFER blank)
+      (.expr p (.-Call s)))
+
+    (case [(* ast/ReturnStmt)]
+      (.print p token/RETURN)
+      (when (!= (.-Results s) nil)
+        (.print p blank)
+        ;; Use indentList heuristic to make corner cases look
+        ;; better (issue 1207). A more systematic approach would
+        ;; always indent, but this would cause significant
+        ;; reformatting of the code base and not necessarily
+        ;; lead to more nicely formatted code in general.
+        (if (.indentList p (.-Results s)) (do
+            (.print p indent)
+            ;; Use NoPos so that a newline never goes before
+            ;; the results (see issue #32854).
+            (.exprList p token/NoPos (.-Results s) 1 noIndent token/NoPos false)
+            (.print p unindent))
+
+          (.exprList p token/NoPos (.-Results s) 1 0 token/NoPos false))))
+
+
+
+    (case [(* ast/BranchStmt)]
+      (.print p (.-Tok s))
+      (when (!= (.-Label s) nil)
+        (.print p blank)
+        (.expr p (.-Label s))))
+
+
+    (case [(* ast/BlockStmt)]
+      (.block p s 1))
+
+    (case [(* ast/IfStmt)]
+      (.print p token/IF)
+      (.controlClause p false (.-Init s) (.-Cond s) nil)
+      (.block p (.-Body s) 1)
+      (when (!= (.-Else s) nil)
+        (.print p blank token/ELSE blank)
+        (type-switch (.-Else s)
+          (case [(* ast/BlockStmt) (* ast/IfStmt)]
+            (.stmt p (.-Else s) nextIsRBrace))
+          (default
+            ;; This can only happen with an incorrectly
+            ;; constructed AST. Permit it but print so
+            ;; that it can be parsed without errors.
+            (.print p token/LBRACE indent formfeed)
+            (.stmt p (.-Else s) true)
+            (.print p unindent formfeed token/RBRACE)))))
+
+
+
+    (case [(* ast/CaseClause)]
+      (if (!= (.-List s) nil) (do
+          (.print p token/CASE blank)
+          (.exprList p (.Pos s) (.-List s) 1 0 (.-Colon s) false))
+
+        (.print p token/DEFAULT))
+
+      (.setPos p (.-Colon s))
+      (.print p token/COLON)
+      (.stmtList p (.-Body s) 1 nextIsRBrace))
+
+    (case [(* ast/SwitchStmt)]
+      (.print p token/SWITCH)
+      (.controlClause p false (.-Init s) (.-Tag s) nil)
+      (.block p (.-Body s) 0))
+
+    (case [(* ast/TypeSwitchStmt)]
+      (.print p token/SWITCH)
+      (when (!= (.-Init s) nil)
+        (.print p blank)
+        (.stmt p (.-Init s) false)
+        (.print p token/SEMICOLON))
+
+      (.print p blank)
+      (.stmt p (.-Assign s) false)
+      (.print p blank)
+      (.block p (.-Body s) 0))
+
+    (case [(* ast/CommClause)]
+      (if (!= (.-Comm s) nil) (do
+          (.print p token/CASE blank)
+          (.stmt p (.-Comm s) false))
+
+        (.print p token/DEFAULT))
+
+      (.setPos p (.-Colon s))
+      (.print p token/COLON)
+      (.stmtList p (.-Body s) 1 nextIsRBrace))
+
+    (case [(* ast/SelectStmt)]
+      (.print p token/SELECT blank)
+      (let [body (.-Body s)]
+        (if (and (== (len (.-List body)) 0) (not (.commentBefore p (.posFor p (.-Rbrace body))))) (do
+            ;; print empty select statement w/o comments on one line
+            (.setPos p (.-Lbrace body))
+            (.print p token/LBRACE)
+            (.setPos p (.-Rbrace body))
+            (.print p token/RBRACE))
+
+          (.block p body 0))))
+
+
+    (case [(* ast/ForStmt)]
+      (.print p token/FOR)
+      (.controlClause p true (.-Init s) (.-Cond s) (.-Post s))
+      (.block p (.-Body s) 1))
+
+    (case [(* ast/RangeStmt)]
+      (.print p token/FOR blank)
+      (when (!= (.-Key s) nil)
+        (.expr p (.-Key s))
+        (when (!= (.-Value s) nil)
+          ;; use position of value following the comma as
+          ;; comma position for correct comment placement
+          (.setPos p (.Pos (.-Value s)))
+          (.print p token/COMMA blank)
+          (.expr p (.-Value s)))
+
+        (.print p blank)
+        (.setPos p (.-TokPos s))
+        (.print p (.-Tok s) blank))
+
+      (.print p token/RANGE blank)
+      (.expr p (stripParens (.-X s)))
+      (.print p blank)
+      (.block p (.-Body s) 1))
+
+    (default
+      (panic "unreachable"))))
+
+
+
+;; ----------------------------------------------------------------------------
+;; Declarations
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1630} (go/func keepTypeColumn "The keepTypeColumn function determines if the type column of a series of\nconsecutive const or var declarations must be kept, or if initialization\nvalues (V) can be placed in the type column (T) instead. The i'th entry\nin the result slice is true if the type column in spec[i] must be kept.\n\nFor example, the declaration:\n\n\t\tconst (\n\t\t\tfoobar int = 42 // comment\n\t\t\tx          = 7  // comment\n\t\t\tfoo\n\t             bar = 991\n\t\t)\n\nleads to the type/values matrix below. A run of value columns (V) can\nbe moved into the type column if there is no type for any of the values\nin that column (we only move entire columns so that they align properly).\n\n\t\tmatrix        formatted     result\n\t                   matrix\n\t\tT  V    ->    T  V     ->   true      there is a T and so the type\n\t\t-  V          -  V          true      column must be kept\n\t\t-  -          -  -          false\n\t\t-  V          V  -          false     V is moved into T column\n" ^{:tag (slice bool)} [^{:tag (slice ast/Spec)} specs]
+  (let [m (make (slice bool) (len specs))
+
+      ^{:line 1595} populate ^{:go/end 1601} (fn [^int i ^int j ^bool keepType]
+        (when keepType
+          (for [] (< i j) (inc! i)
+            (aset m i true))))
+
+
+
+
+      ^{:line 1603} i0 -1 ; if i0 >= 0 we are in a run and i0 is the start of the run
+      ^{:line 1604 :tag bool} keepType (zero bool)]
+    (range [i s specs]
+      (let [t (assert (* ast/ValueSpec) s)]
+        (if (!= (.-Values t) nil)
+          (when (< i0 0)
+            ;; start of a run of ValueSpecs with non-nil Values
+            (set! i0 i)
+            (set! keepType false))
+
+          (do
+            (when (>= i0 0)
+              ;; end of a run
+              (populate i0 i keepType)
+              (set! i0 -1))))
+
+
+        (when (!= (.-Type t) nil)
+          (set! keepType true))))
+
+
+    (when (>= i0 0)
+      ;; end of a run
+      (populate i0 (len specs) keepType))
+
+
+    ^{:line 1629} m))
+
+
+^{:go/end 1654} (go/method valueSpec [^{:tag (* printer)} p ^{:tag (* ast/ValueSpec)} s ^bool keepType]
+  (.setComment p (.-Doc s))
+  (.identList p (.-Names s) false) ; always present
+  (let [extraTabs 3]
+    (when (or (!= (.-Type s) nil) keepType)
+      (.print p vtab)
+      (dec! extraTabs))
+
+    (when (!= (.-Type s) nil)
+      (.expr p (.-Type s)))
+
+    (when (!= (.-Values s) nil)
+      (.print p vtab token/ASSIGN blank)
+      (.exprList p token/NoPos (.-Values s) 1 0 token/NoPos false)
+      (dec! extraTabs))
+
+    (when (!= (.-Comment s) nil)
+      (for [] (> extraTabs 0) (dec! extraTabs)
+        (.print p vtab))
+
+      (.setComment p (.-Comment s)))))
+
+
+
+^{:go/end 1697} (go/func sanitizeImportPath ^{:tag (* ast/BasicLit)} [^{:tag (* ast/BasicLit)} lit]
+  ;; Note: An unmodified AST generated by go/parser will already
+  ;; contain a backward- or double-quoted path string that does
+  ;; not contain any invalid characters, and most of the work
+  ;; here is not needed. However, a modified or generated AST
+  ;; may possibly contain non-canonical paths. Do the work in
+  ;; all cases since it's not too hard and not speed-critical.
+
+  ;; if we don't have a proper string, be conservative and return whatever we have
+  (when (!= (.-Kind lit) token/STRING)
+    (return lit))
+
+  (let [(values s err) (strconv/Unquote (.-Value lit))]
+    (when (!= err nil)
+      (return lit))
+
+
+    ;; if the string is an invalid path, return whatever we have
+    ;;
+    ;; spec: "Implementation restriction: A compiler may restrict
+    ;; ImportPaths to non-empty strings using only characters belonging
+    ;; to Unicode's L, M, N, P, and S general categories (the Graphic
+    ;; characters without spaces) and may also exclude the characters
+    ;; !"#$%&'()*,:;<=>?[\]^`{|} and the Unicode replacement character
+    ;; U+FFFD."
+    (when (== s "")
+      (return lit))
+
+    (let [^:const ^{:val "!\"#$%&'()*,:;<=>?[\\]^{|}`\ufffd"} illegalChars (+ "!\"#$%&'()*,:;<=>?[\\]^{|}" "`\ufffd")]
+      (range [_ r s]
+        (when (or (not (unicode/IsGraphic r)) (unicode/IsSpace r) (strings/ContainsRune illegalChars r))
+          (return lit)))
+
+
+
+      ;; otherwise, return the double-quoted path
+      (set! s (strconv/Quote s))
+      (when (== s (.-Value lit))
+        (return lit)) ; nothing wrong with lit
+
+      (addr (lit ast/BasicLit :ValuePos (.-ValuePos lit) :Kind token/STRING :Value s)))))
+
+
+
+
+
+^{:go/end 1750} (go/method spec "The parameter n is the number of specs in the group. If doIndent is set,\nmulti-line identifier lists in the spec are indented when the first\nlinebreak is encountered.\n" [^{:tag (* printer)} p ^ast/Spec spec ^int n ^bool doIndent]
+  (type-switch [s spec]
+    (case [(* ast/ImportSpec)]
+      (.setComment p (.-Doc s))
+      (when (!= (.-Name s) nil)
+        (.expr p (.-Name s))
+        (.print p blank))
+
+      (.expr p (sanitizeImportPath (.-Path s)))
+      (.setComment p (.-Comment s))
+      (.setPos p (.-EndPos s)))
+
+    (case [(* ast/ValueSpec)]
+      (when (!= n 1)
+        (.internalError p "expected n = 1; got" n))
+
+      (.setComment p (.-Doc s))
+      (.identList p (.-Names s) doIndent) ; always present
+      (when (!= (.-Type s) nil)
+        (.print p blank)
+        (.expr p (.-Type s)))
+
+      (when (!= (.-Values s) nil)
+        (.print p blank token/ASSIGN blank)
+        (.exprList p token/NoPos (.-Values s) 1 0 token/NoPos false))
+
+      (.setComment p (.-Comment s)))
+
+    (case [(* ast/TypeSpec)]
+      (.setComment p (.-Doc s))
+      (.expr p (.-Name s))
+      (when (!= (.-TypeParams s) nil)
+        (.parameters p (.-TypeParams s) typeTParam))
+
+      (if (== n 1)
+        (.print p blank)
+
+        (.print p vtab))
+
+      (when (.IsValid (.-Assign s))
+        (.print p token/ASSIGN blank))
+
+      (.expr p (.-Type s))
+      (.setComment p (.-Comment s)))
+
+    (default
+      (panic "unreachable"))))
+
+
+
+^{:go/end 1794} (go/method genDecl [^{:tag (* printer)} p ^{:tag (* ast/GenDecl)} d]
+  (.setComment p (.-Doc d))
+  (.setPos p (.Pos d))
+  (.print p (.-Tok d) blank)
+
+  (cond (or (.IsValid (.-Lparen d)) (!= (len (.-Specs d)) 1)) (do
+      ;; group of parenthesized declarations
+      (.setPos p (.-Lparen d))
+      (.print p token/LPAREN)
+      (when [n (len (.-Specs d))] (> n 0)
+        (.print p indent formfeed)
+        (if (and (> n 1) ^:go/paren (or (== (.-Tok d) token/CONST) (== (.-Tok d) token/VAR)))
+          ;; two or more grouped const/var declarations:
+          ;; determine if the type column must be kept
+          (let [keepType (keepTypeColumn (.-Specs d))
+              ^{:line 1767 :tag int} line (zero int)]
+            (range [i s (.-Specs d)]
+              (when (> i 0)
+                (.linebreak p (.lineFor p (.Pos s)) 1 ignore (> (.linesFrom p line) 0)))
+
+              (.recordLine p (addr line))
+              (.valueSpec p (assert (* ast/ValueSpec) s) (aget keepType i))))
+
+
+          (let [^int line (zero int)]
+            (range [i s (.-Specs d)]
+              (when (> i 0)
+                (.linebreak p (.lineFor p (.Pos s)) 1 ignore (> (.linesFrom p line) 0)))
+
+              (.recordLine p (addr line))
+              (.spec p s n false))))
+
+
+        (.print p unindent formfeed))
+
+      (.setPos p (.-Rparen d))
+      (.print p token/RPAREN))
+
+    (> (len (.-Specs d)) 0)
+    ;; single declaration
+    (.spec p (aget (.-Specs d) 0) 1 true)))
+
+
+
+
+
+(go/type sizeCounter "sizeCounter is an io.Writer which counts the number of bytes written,\nas well as whether a newline character was seen.\n" (struct
+    ^{:line 1799 :tag bool} hasNewline
+    ^{:line 1800 :tag int} size))
+
+
+^{:go/end 1814} (go/method Write [^{:tag (* sizeCounter)} c ^{:tag (slice byte)} p] :results [int error]
+  (when (not (.-hasNewline c))
+    (range [_ b p]
+      (when (or (== b \newline) (== b \formfeed))
+        (set! (.-hasNewline c) true)
+        (break))))
+
+
+
+  (set! (.-size c) + (len p))
+  (return (len p) nil))
+
+
+
+
+
+
+^{:go/end 1846} (go/method nodeSize "nodeSize determines the size of n in chars after formatting.\nThe result is <= maxSize if the node fits on one line with at\nmost maxSize chars and the formatted output doesn't contain\nany control chars. Otherwise, the result is > maxSize.\n" [^{:tag (* printer)} p ^ast/Node n ^int maxSize] :results [^int size]
+  ;; nodeSize invokes the printer, which may invoke nodeSize
+  ;; recursively. For deep composite literal nests, this can
+  ;; lead to an exponential algorithm. Remember previous
+  ;; results to prune the recursion (was issue 1628).
+  (when [(values size found) (aget (.-nodeSizes p) n)] found
+    (return size))
+
+
+  (set! size (+ maxSize 1)) ; assume n doesn't fit
+  (aset (.-nodeSizes p) n size)
+
+  ;; nodeSize computation must be independent of particular
+  ;; style so that we always get the same decision; print
+  ;; in RawFormat
+  (let [cfg (lit Config :Mode RawFormat)
+      ^{:line 1836 :tag sizeCounter} counter (zero sizeCounter)]
+    (when [err (.fprint cfg (addr counter) (.-fset p) n (.-nodeSizes p))] (!= err nil)
+      (return))
+
+    (when (and (<= (.-size counter) maxSize) (not (.-hasNewline counter)))
+      ;; n fits in a single line
+      (set! size (.-size counter))
+      (aset (.-nodeSizes p) n size))
+
+    (return)))
+
+
+
+^{:go/end 1856} (go/method numLines "numLines returns the number of lines spanned by node n in the original source.\n" ^int [^{:tag (* printer)} p ^ast/Node n]
+  (when [from (.Pos n)] (.IsValid from)
+    (when [to (.End n)] (.IsValid to)
+      (return (+ (- (.lineFor p to) (.lineFor p from)) 1))))
+
+
+  ^{:line 1855} infinity)
+
+
+
+^{:go/end 1882} (go/method bodySize "bodySize is like nodeSize but it is specialized for *ast.BlockStmt's.\n" ^int [^{:tag (* printer)} p ^{:tag (* ast/BlockStmt)} b ^int maxSize]
+  (let [pos1 (.Pos b)
+      ^{:line 1861} pos2 (.-Rbrace b)]
+    (when (and (.IsValid pos1) (.IsValid pos2) (!= (.lineFor p pos1) (.lineFor p pos2)))
+      ;; opening and closing brace are on different lines - don't make it a one-liner
+      (return (+ maxSize 1)))
+
+    (when (> (len (.-List b)) 5)
+      ;; too many statements - don't make it a one-liner
+      (return (+ maxSize 1)))
+
+    ;; otherwise, estimate body size
+    (let [bodySize (.commentSizeBefore p (.posFor p pos2))]
+      (range [i s (.-List b)]
+        (when (> bodySize maxSize)
+          (break)) ; no need to continue
+
+        (when (> i 0)
+          (set! bodySize + 2)) ; space for a semicolon and blank
+
+        (set! bodySize + (.nodeSize p s maxSize)))
+
+      ^{:line 1881} bodySize)))
+
+
+
+
+
+
+
+^{:go/end 1925} (go/method funcBody "funcBody prints a function body following a function header of given headerSize.\nIf the header's and block's size are \"small enough\" and the block is \"simple enough\",\nthe block is printed on the current line, without line breaks, spaced from the header\nby sep. Otherwise the block's opening \"{\" is printed on the current line, followed by\nlines for the block's statements and its closing \"}\".\n" [^{:tag (* printer)} p ^int headerSize ^whiteSpace sep ^{:tag (* ast/BlockStmt)} b]
+  (when (== b nil)
+    (return))
+
+
+  ;; save/restore composite literal nesting level
+  (defer (^{:go/end 1897} (fn [^int level]
+        (set! (.-level p) level))
+      (.-level p)))
+  (set! (.-level p) 0)
+
+  (let [^:const ^{:val 100} maxSize 100]
+    (when (<= (+ headerSize (.bodySize p b maxSize)) maxSize)
+      (.print p sep)
+      (.setPos p (.-Lbrace b))
+      (.print p token/LBRACE)
+      (when (> (len (.-List b)) 0)
+        (.print p blank)
+        (range [i s (.-List b)]
+          (when (> i 0)
+            (.print p token/SEMICOLON blank))
+
+          (.stmt p s (== i (- (len (.-List b)) 1))))
+
+        (.print p blank))
+
+      (.print p noExtraLinebreak)
+      (.setPos p (.-Rbrace b))
+      (.print p token/RBRACE noExtraLinebreak)
+      (return))
+
+
+    (when (!= sep ignore)
+      (.print p blank)) ; always use blank
+
+    (.block p b 1)))
+
+
+
+
+
+^{:go/end 1935} (go/method distanceFrom "distanceFrom returns the column difference between p.out (the current output\nposition) and startOutCol. If the start position is on a different line from\nthe current position (or either is unknown), the result is infinity.\n" ^int [^{:tag (* printer)} p ^token/Pos startPos ^int startOutCol]
+  (when (and (.IsValid startPos) (.IsValid (.-pos p)) (== (.-Line (.posFor p startPos)) (.-Line (.-pos p))))
+    (return (- (.-Column (.-out p)) startOutCol)))
+
+  ^{:line 1934} infinity)
+
+
+^{:go/end 1952} (go/method funcDecl [^{:tag (* printer)} p ^{:tag (* ast/FuncDecl)} d]
+  (.setComment p (.-Doc d))
+  (.setPos p (.Pos d))
+  (.print p token/FUNC blank)
+  ;; We have to save startCol only after emitting FUNC; otherwise it can be on a
+  ;; different line (all whitespace preceding the FUNC is emitted only when the
+  ;; FUNC is emitted).
+  (let [startCol (- (.-Column (.-out p)) (len "func "))]
+    (when (!= (.-Recv d) nil)
+      (.parameters p (.-Recv d) funcParam) ; method: print receiver
+      (.print p blank))
+
+    (.expr p (.-Name d))
+    (.signature p (.-Type d))
+    (.funcBody p (.distanceFrom p (.Pos d) startCol) vtab (.-Body d))))
+
+
+^{:go/end 1966} (go/method decl [^{:tag (* printer)} p ^ast/Decl decl]
+  (type-switch [d decl]
+    (case [(* ast/BadDecl)]
+      (.setPos p (.Pos d))
+      (.print p "BadDecl"))
+    (case [(* ast/GenDecl)]
+      (.genDecl p d))
+    (case [(* ast/FuncDecl)]
+      (.funcDecl p d))
+    (default
+      (panic "unreachable"))))
+
+
+
+;; ----------------------------------------------------------------------------
+;; Files
+
+^{:go/end 1980} (go/func declToken [^ast/Decl decl] :results [^token/Token tok]
+  (set! tok token/ILLEGAL)
+  (type-switch [d decl]
+    (case [(* ast/GenDecl)]
+      (set! tok (.-Tok d)))
+    (case [(* ast/FuncDecl)]
+      (set! tok token/FUNC)))
+
+  (return))
+
+
+^{:go/end 2007} (go/method declList [^{:tag (* printer)} p ^{:tag (slice ast/Decl)} list]
+  (let [tok token/ILLEGAL]
+    (range [_ d list]
+      (let [prev tok]
+        (set! tok (declToken d))
+        ;; If the declaration token changed (e.g., from CONST to TYPE)
+        ;; or the next declaration has documentation associated with it,
+        ;; print an empty line between top-level declarations.
+        ;; (because p.linebreak is called with the position of d, which
+        ;; is past any documentation, the minimum requirement is satisfied
+        ;; even w/o the extra getDoc(d) nil-check - leave it in case the
+        ;; linebreak logic improves - there's already a TODO).
+        (when (> (len (.-output p)) 0)
+          ;; only print line break if we are not at the beginning of the output
+          ;; (i.e., we are not printing only a partial program)
+          (let [min 1]
+            (when (or (!= prev tok) (!= (getDoc d) nil))
+              (set! min 2))
+
+            ;; start a new section if the next declaration is a function
+            ;; that spans multiple lines (see also issue #19544)
+            (.linebreak p (.lineFor p (.Pos d)) min ignore (and (== tok token/FUNC) (> (.numLines p d) 1)))))
+
+        (.decl p d)))))
+
+
+
+^{:go/end 2016} (go/method file [^{:tag (* printer)} p ^{:tag (* ast/File)} src]
+  (.setComment p (.-Doc src))
+  (.setPos p (.Pos src))
+  (.print p token/PACKAGE blank)
+  (.expr p (.-Name src))
+  (.declList p (.-Decls src))
+  (.print p newline))

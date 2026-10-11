@@ -1,0 +1,601 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace) (go/file "generation.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [bytes "bytes"]
+    ^{:line 10} [cmp "cmp"]
+    ^{:line 11} [binary "encoding/binary"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [io "io"]
+    ^{:line 15} [slices "slices"]
+    ^{:line 16} [strings "strings"]
+    ^{:line 17} [time "time"]
+
+    ^{:line 19} [tracev2 "internal/trace/tracev2"]
+    ^{:line 20} [version "internal/trace/version"]])
+
+
+
+
+
+
+(go/type generation "generation contains all the trace data for a single\ntrace generation. It is purely data: it does not\ntrack any parse state nor does it contain a cursor\ninto the generation.\n" (struct
+    ^{:line 28 :tag uint64} gen
+    ^{:line 29 :tag (map ThreadID (slice batch))} batches
+    ^{:line 30 :tag (slice ThreadID)} batchMs
+    ^{:line 31 :tag (slice cpuSample)} cpuSamples
+    ^{:line 32 :tag timestamp} minTs
+    (* evTable)))
+
+
+
+
+^{:go/end 109} (go/func readGeneration "readGeneration buffers and decodes the structural elements of a trace generation\nout of r.\n" [^{:tag (* bufio/Reader)} r ^version/Version ver] :results [(* generation) error]
+  (when (< ver version/Go126)
+    (return nil (errors/New "internal error: readGeneration called for <1.26 trace")))
+
+  (let [g (addr ^{:go/breaks [2 [4 46]]} (lit generation
+          :evTable (addr ^{:go/breaks [2]} (lit evTable
+              :pcs (make (map uint64 frame))))
+
+          :batches (make (map ThreadID (slice batch)))))]
+
+
+    ;; Read batches one at a time until we either hit the next generation.
+    (while true
+      (let [(values b gen err) (readBatch r)]
+        (when (== err io/EOF)
+          (when (!= (len (.-batches g)) 0)
+            (return nil (errors/New "incomplete generation found; trace likely truncated")))
+
+          (return nil nil)) ; All done.
+
+        (when (!= err nil)
+          (return nil err))
+
+        (when (== (.-gen g) 0)
+          ;; Initialize gen.
+          (set! (.-gen g) gen))
+
+        (when (.isEndOfGeneration b)
+          (break))
+
+        (when (== gen 0)
+          ;; 0 is a sentinel used by the runtime, so we'll never see it.
+          (return nil (fmt/Errorf "invalid generation number %d" gen)))
+
+        (when (!= gen (.-gen g))
+          (return nil (fmt/Errorf "broken trace: missing end-of-generation event, or generations are interleaved")))
+
+        (when (or (== (.-minTs g) 0) (< (.-time b) (.-minTs g)))
+          (set! (.-minTs g) (.-time b)))
+
+        (when [err (processBatch g b ver)] (!= err nil)
+          (return nil err))))
+
+
+
+    ;; Check some invariants.
+    (when (== ^{:go/via [evTable sync]} (.-freq g) 0)
+      (return nil (fmt/Errorf "no frequency event found")))
+
+    (when (not ^{:go/via [evTable sync]} (.-hasClockSnapshot g))
+      (return nil (fmt/Errorf "no clock snapshot event found")))
+
+
+    ;; N.B. Trust that the batch order is correct. We can't validate the batch order
+    ;; by timestamp because the timestamps could just be plain wrong. The source of
+    ;; truth is the order things appear in the trace and the partial order sequence
+    ;; numbers on certain events. If it turns out the batch order is actually incorrect
+    ;; we'll very likely fail to advance a partial order from the frontier.
+
+    ;; Compactify stacks and strings for better lookup performance later.
+    (.compactify ^{:go/via [evTable]} (.-stacks g))
+    (.compactify ^{:go/via [evTable]} (.-strings g))
+
+    ;; Validate stacks.
+    (when [err (validateStackStrings (addr ^{:go/via [evTable]} (.-stacks g)) (addr ^{:go/via [evTable]} (.-strings g)) ^{:go/via [evTable]} (.-pcs g))] (!= err nil)
+      (return nil err))
+
+
+    ;; Now that we have the frequency, fix up CPU samples.
+    (fixUpCPUSamples (.-cpuSamples g) ^{:go/via [evTable sync]} (.-freq g))
+    (return g nil)))
+
+
+
+
+
+
+
+(go/type spilledBatch "spilledBatch represents a batch that was read out for the next generation,\nwhile reading the previous one. It's passed on when parsing the next\ngeneration.\n\nUsed only for trace versions < Go126.\n" (struct
+    ^{:line 117 :tag uint64} gen
+    (* batch)))
+
+
+
+
+
+
+
+
+
+^{:go/end 222} (go/func readGenerationWithSpill "readGenerationWithSpill buffers and decodes the structural elements of a trace generation\nout of r. spill is the first batch of the new generation (already buffered and\nparsed from reading the last generation). Returns the generation and the first\nbatch read of the next generation, if any.\n\nIf gen is non-nil, it is valid and must be processed before handling the returned\nerror.\n" [^{:tag (* bufio/Reader)} r ^{:tag (* spilledBatch)} spill ^version/Version ver] :results [(* generation) (* spilledBatch) error]
+  (when (>= ver version/Go126)
+    (return nil nil (errors/New "internal error: readGenerationWithSpill called for Go 1.26+ trace")))
+
+  (let [g (addr ^{:go/breaks [2 [4 136]]} (lit generation
+          :evTable (addr ^{:go/breaks [2]} (lit evTable
+              :pcs (make (map uint64 frame))))
+
+          :batches (make (map ThreadID (slice batch)))))]
+
+    ;; Process the spilled batch.
+    (when (!= spill nil)
+      ;; Process the spilled batch, which contains real data.
+      (set! (.-gen g) (.-gen spill))
+      (set! (.-minTs g) (.-time (.-batch spill)))
+      (when [err (processBatch g @(.-batch spill) ver)] (!= err nil)
+        (return nil nil err))
+
+      (set! spill nil))
+
+    ;; Read batches one at a time until we either hit the next generation.
+    (let [^error spillErr (zero error)]
+      (while true
+        (let [(values b gen err) (readBatch r)]
+          (when (== err io/EOF)
+            (break))
+
+          (when (!= err nil)
+            (when (!= (.-gen g) 0)
+              ;; This may be an error reading the first batch of the next generation.
+              ;; This is fine. Let's forge ahead assuming that what we've got so
+              ;; far is fine.
+              (set! spillErr err)
+              (break))
+
+            (return nil nil err))
+
+          (when (== gen 0)
+            ;; 0 is a sentinel used by the runtime, so we'll never see it.
+            (return nil nil (fmt/Errorf "invalid generation number %d" gen)))
+
+          (when (== (.-gen g) 0)
+            ;; Initialize gen.
+            (set! (.-gen g) gen))
+
+          (when (== gen (+ (.-gen g) 1))
+            ;; TODO: Increment the generation with wraparound the same way the runtime does.
+            (set! spill (addr (lit spilledBatch :gen gen :batch (addr b))))
+            (break))
+
+          (when (!= gen (.-gen g))
+            ;; N.B. Fail as fast as possible if we see this. At first it
+            ;; may seem prudent to be fault-tolerant and assume we have a
+            ;; complete generation, parsing and returning that first. However,
+            ;; if the batches are mixed across generations then it's likely
+            ;; we won't be able to parse this generation correctly at all.
+            ;; Rather than return a cryptic error in that case, indicate the
+            ;; problem as soon as we see it.
+            (return nil nil (fmt/Errorf "generations out of order")))
+
+          (when (or (== (.-minTs g) 0) (< (.-time b) (.-minTs g)))
+            (set! (.-minTs g) (.-time b)))
+
+          (when [err (processBatch g b ver)] (!= err nil)
+            (return nil nil err))))
+
+
+
+      ;; Check some invariants.
+      (when (== ^{:go/via [evTable sync]} (.-freq g) 0)
+        (return nil nil (fmt/Errorf "no frequency event found")))
+
+      (when (and (>= ver version/Go125) (not ^{:go/via [evTable sync]} (.-hasClockSnapshot g)))
+        (return nil nil (fmt/Errorf "no clock snapshot event found")))
+
+
+      ;; N.B. Trust that the batch order is correct. We can't validate the batch order
+      ;; by timestamp because the timestamps could just be plain wrong. The source of
+      ;; truth is the order things appear in the trace and the partial order sequence
+      ;; numbers on certain events. If it turns out the batch order is actually incorrect
+      ;; we'll very likely fail to advance a partial order from the frontier.
+
+      ;; Compactify stacks and strings for better lookup performance later.
+      (.compactify ^{:go/via [evTable]} (.-stacks g))
+      (.compactify ^{:go/via [evTable]} (.-strings g))
+
+      ;; Validate stacks.
+      (when [err (validateStackStrings (addr ^{:go/via [evTable]} (.-stacks g)) (addr ^{:go/via [evTable]} (.-strings g)) ^{:go/via [evTable]} (.-pcs g))] (!= err nil)
+        (return nil nil err))
+
+
+      ;; Now that we have the frequency, fix up CPU samples.
+      (fixUpCPUSamples (.-cpuSamples g) ^{:go/via [evTable sync]} (.-freq g))
+      (return g spill spillErr))))
+
+
+
+^{:go/breaks [[5 260]] :go/end 261} (go/func processBatch "processBatch adds the batch to the generation.\n" ^error [^{:tag (* generation)} g ^batch b ^version/Version ver]
+  (switch
+    (case [(.isStringsBatch b)]
+      (when [err (addStrings (addr ^{:go/via [evTable]} (.-strings g)) b)] (!= err nil)
+        (return err)))
+
+    (case [(.isStacksBatch b)]
+      (when [err (addStacks (addr ^{:go/via [evTable]} (.-stacks g)) ^{:go/via [evTable]} (.-pcs g) b)] (!= err nil)
+        (return err)))
+
+    (case [(.isCPUSamplesBatch b)]
+      (let [(values samples err) (addCPUSamples (.-cpuSamples g) b)]
+        (when (!= err nil)
+          (return err))
+
+        (set! (.-cpuSamples g) samples)))
+    (case [(.isSyncBatch b ver)]
+      (when [err (setSyncBatch (addr ^{:go/via [evTable]} (.-sync g)) b ver)] (!= err nil)
+        (return err)))
+
+    (case [(!= (.-exp b) tracev2/NoExperiment)]
+      (when (== ^{:go/via [evTable]} (.-expBatches g) nil)
+        (set! ^{:go/via [evTable]} (.-expBatches g) (make (map tracev2/Experiment (slice ExperimentalBatch)))))
+
+      (when [err (addExperimentalBatch ^{:go/via [evTable]} (.-expBatches g) b)] (!= err nil)
+        (return err)))
+
+    (case [(.isEndOfGeneration b)]
+      (return (errors/New "internal error: unexpectedly processing EndOfGeneration; broken trace?")))
+    (default
+      (when [(values _ ok) (aget (.-batches g) (.-m b))] (not ok)
+        (set! (.-batchMs g) (append (.-batchMs g) (.-m b))))
+
+      (aset (.-batches g) (.-m b) (append (aget (.-batches g) (.-m b)) b))))
+
+  nil)
+
+
+
+
+^{:go/end 292} (go/func validateStackStrings "validateStackStrings makes sure all the string references in\nthe stack table are present in the string table.\n" ^error [
+    ^{:line 266 :tag (* (dataTable stackID stack))} stacks
+    ^{:line 267 :tag (* (dataTable stringID string))} strings
+    ^{:line 268 :tag (map uint64 frame)} frames]
+
+  (let [^error err (zero error)]
+    (.forEach stacks ^{:go/breaks [[3 289]] :go/end 290} (fn ^bool [^stackID id ^stack stk]
+        (range [_ pc (.-pcs stk)]
+          (let [(values frame ok) (aget frames pc)]
+            (when (not ok)
+              (set! err (fmt/Errorf "found unknown pc %x for stack %d" pc id))
+              (return false))
+
+            (set! (values _ ok) (.get strings (.-funcID frame)))
+            (when (not ok)
+              (set! err (fmt/Errorf "found invalid func string ID %d for stack %d" (.-funcID frame) id))
+              (return false))
+
+            (set! (values _ ok) (.get strings (.-fileID frame)))
+            (when (not ok)
+              (set! err (fmt/Errorf "found invalid file string ID %d for stack %d" (.-fileID frame) id))
+              (return false))))
+
+
+        true))
+
+    ^{:line 291} err))
+
+
+
+
+
+^{:go/end 350} (go/func addStrings "addStrings takes a batch whose first byte is an EvStrings event\n(indicating that the batch contains only strings) and adds each\nstring contained therein to the provided strings map.\n" ^error [^{:tag (* (dataTable stringID string))} stringTable ^batch b]
+  (when (not (.isStringsBatch b))
+    (return (fmt/Errorf "internal error: addStrings called on non-string batch")))
+
+  (let [r (bytes/NewReader (.-data b))
+      (values hdr err) (.ReadByte r)] ; Consume the EvStrings byte.
+    (when (or (!= err nil) (!= (conv tracev2/EventType hdr) tracev2/EvStrings))
+      (return (fmt/Errorf "missing strings batch header")))
+
+
+    ^{:go/breaks [[3 349]]} (let [^strings/Builder sb (zero strings/Builder)]
+      (while (!= (.Len r) 0)
+        ;; Read the header.
+        (let [(values ev err) (.ReadByte r)]
+          (when (!= err nil)
+            (return err))
+
+          (when (!= (conv tracev2/EventType ev) tracev2/EvString)
+            (return (fmt/Errorf "expected string event, got %d" ev)))
+
+
+          ;; Read the string's ID.
+          (let [(values id ^:assign err) (binary/ReadUvarint r)]
+            (when (!= err nil)
+              (return err))
+
+
+            ;; Read the string's length.
+            (let [(values len ^:assign err) (binary/ReadUvarint r)]
+              (when (!= err nil)
+                (return err))
+
+              (when (> len tracev2/MaxEventTrailerDataSize)
+                (return (fmt/Errorf "invalid string size %d, maximum is %d" len tracev2/MaxEventTrailerDataSize)))
+
+
+              ;; Copy out the string.
+              (let [(values n ^:assign err) (io/CopyN (addr sb) r (conv int64 len))]
+                (when (!= n (conv int64 len))
+                  (return (fmt/Errorf "failed to read full string: read %d but wanted %d" n len)))
+
+                (when (!= err nil)
+                  (return (fmt/Errorf "copying string data: %w" err)))
+
+
+                ;; Add the string to the map.
+                (let [s (.String sb)]
+                  (.Reset sb)
+                  (when [err (.insert stringTable (conv stringID id) s)] (!= err nil)
+                    (return err))))))))
+
+
+      nil)))
+
+
+
+
+
+^{:go/end 428} (go/func addStacks "addStacks takes a batch whose first byte is an EvStacks event\n(indicating that the batch contains only stacks) and adds each\nstring contained therein to the provided stacks map.\n" ^error [^{:tag (* (dataTable stackID stack))} stackTable ^{:tag (map uint64 frame)} pcs ^batch b]
+  (when (not (.isStacksBatch b))
+    (return (fmt/Errorf "internal error: addStacks called on non-stacks batch")))
+
+  ^{:go/breaks [[4 427]]} (let [r (bytes/NewReader (.-data b))
+      (values hdr err) (.ReadByte r)] ; Consume the EvStacks byte.
+    (when (or (!= err nil) (!= (conv tracev2/EventType hdr) tracev2/EvStacks))
+      (return (fmt/Errorf "missing stacks batch header")))
+
+
+    (while (!= (.Len r) 0)
+      ;; Read the header.
+      (let [(values ev err) (.ReadByte r)]
+        (when (!= err nil)
+          (return err))
+
+        (when (!= (conv tracev2/EventType ev) tracev2/EvStack)
+          (return (fmt/Errorf "expected stack event, got %d" ev)))
+
+
+        ;; Read the stack's ID.
+        (let [(values id ^:assign err) (binary/ReadUvarint r)]
+          (when (!= err nil)
+            (return err))
+
+
+          ;; Read how many frames are in each stack.
+          (let [(values nFrames ^:assign err) (binary/ReadUvarint r)]
+            (when (!= err nil)
+              (return err))
+
+            (when (> nFrames tracev2/MaxFramesPerStack)
+              (return (fmt/Errorf "invalid stack size %d, maximum is %d" nFrames tracev2/MaxFramesPerStack)))
+
+
+            ;; Each frame consists of 4 fields: pc, funcID (string), fileID (string), line.
+            (let [frames (make (slice uint64) 0 nFrames)]
+              (for [i (conv uint64 0)] (< i nFrames) (inc! i)
+                ;; Read the frame data.
+                (let [(values pc err) (binary/ReadUvarint r)]
+                  (when (!= err nil)
+                    (return (fmt/Errorf "reading frame %d's PC for stack %d: %w" (+ i 1) id err)))
+
+                  (let [(values funcID ^:assign err) (binary/ReadUvarint r)]
+                    (when (!= err nil)
+                      (return (fmt/Errorf "reading frame %d's funcID for stack %d: %w" (+ i 1) id err)))
+
+                    (let [(values fileID ^:assign err) (binary/ReadUvarint r)]
+                      (when (!= err nil)
+                        (return (fmt/Errorf "reading frame %d's fileID for stack %d: %w" (+ i 1) id err)))
+
+                      (let [(values line ^:assign err) (binary/ReadUvarint r)]
+                        (when (!= err nil)
+                          (return (fmt/Errorf "reading frame %d's line for stack %d: %w" (+ i 1) id err)))
+
+                        (set! frames (append frames pc))
+
+                        (when [(values _ ok) (aget pcs pc)] (not ok)
+                          (aset pcs pc ^{:go/breaks [2 4 6 8]} (lit frame
+                              :pc pc
+                              :funcID (conv stringID funcID)
+                              :fileID (conv stringID fileID)
+                              :line line))))))))
+
+
+
+
+              ;; Add the stack to the map.
+              (when [err (.insert stackTable (conv stackID id) (lit stack :pcs frames))] (!= err nil)
+                (return err)))))))
+
+
+    nil))
+
+
+
+
+
+^{:go/end 501} (go/func addCPUSamples "addCPUSamples takes a batch whose first byte is an EvCPUSamples event\n(indicating that the batch contains only CPU samples) and adds each\nsample contained therein to the provided samples list.\n" [^{:tag (slice cpuSample)} samples ^batch b] :results [(slice cpuSample) error]
+  (when (not (.isCPUSamplesBatch b))
+    (return nil (fmt/Errorf "internal error: addCPUSamples called on non-CPU-sample batch")))
+
+  (let [r (bytes/NewReader (.-data b))
+      (values hdr err) (.ReadByte r)] ; Consume the EvCPUSamples byte.
+    (when (or (!= err nil) (!= (conv tracev2/EventType hdr) tracev2/EvCPUSamples))
+      (return nil (fmt/Errorf "missing CPU samples batch header")))
+
+
+    (while (!= (.Len r) 0)
+      ;; Read the header.
+      (let [(values ev err) (.ReadByte r)]
+        (when (!= err nil)
+          (return nil err))
+
+        (when (!= (conv tracev2/EventType ev) tracev2/EvCPUSample)
+          (return nil (fmt/Errorf "expected CPU sample event, got %d" ev)))
+
+
+        ;; Read the sample's timestamp.
+        (let [(values ts ^:assign err) (binary/ReadUvarint r)]
+          (when (!= err nil)
+            (return nil err))
+
+
+          ;; Read the sample's M.
+          (let [(values m ^:assign err) (binary/ReadUvarint r)]
+            (when (!= err nil)
+              (return nil err))
+
+            (let [mid (conv ThreadID m)
+
+                ;; Read the sample's P.
+                (values p ^:assign err) (binary/ReadUvarint r)]
+              (when (!= err nil)
+                (return nil err))
+
+              (let [pid (conv ProcID p)
+
+                  ;; Read the sample's G.
+                  (values g ^:assign err) (binary/ReadUvarint r)]
+                (when (!= err nil)
+                  (return nil err))
+
+                (let [goid (conv GoID g)]
+                  (when (== g 0)
+                    (set! goid NoGoroutine))
+
+
+                  ;; Read the sample's stack.
+                  (let [(values s ^:assign err) (binary/ReadUvarint r)]
+                    (when (!= err nil)
+                      (return nil err))
+
+
+                    ;; Add the sample to the slice.
+                    (set! samples (append samples ^{:go/breaks [2 [4 496] 6]} (lit cpuSample
+                          :schedCtx ^{:go/breaks [2 4 6]} (lit schedCtx
+                            :M mid
+                            :P pid
+                            :G goid)
+
+                          :time (conv Time ts) ; N.B. this is really a "timestamp," not a Time.
+                          :stack (conv stackID s))))))))))))
+
+
+    (return samples nil)))
+
+
+
+(go/type sync "sync holds the per-generation sync data.\n" (struct
+    ^{:line 505 :tag frequency} freq
+    ^{:line 506 :tag bool} hasClockSnapshot
+    ^{:line 507 :tag timestamp} snapTime
+    ^{:line 508 :tag uint64} snapMono
+    ^{:line 509 :tag time/Time} snapWall))
+
+
+^{:go/end 578} (go/func setSyncBatch ^error [^{:tag (* sync)} s ^batch b ^version/Version ver]
+  (when (not (.isSyncBatch b ver))
+    (return (fmt/Errorf "internal error: setSyncBatch called on non-sync batch")))
+
+  (let [r (bytes/NewReader (.-data b))]
+    (when (>= ver version/Go125)
+      (let [(values hdr err) (.ReadByte r)] ; Consume the EvSync byte.
+        (when (or (!= err nil) (!= (conv tracev2/EventType hdr) tracev2/EvSync))
+          (return (fmt/Errorf "missing sync batch header")))))
+
+
+
+    ^{:go/breaks [[3 577]]} (let [lastTs (.-time b)]
+      (while (!= (.Len r) 0)
+        ;; Read the header
+        (let [(values ev err) (.ReadByte r)]
+          (when (!= err nil)
+            (return err))
+
+          (let [et (conv tracev2/EventType ev)]
+            (switch
+              (case [(== et tracev2/EvFrequency)]
+                (when (!= (.-freq s) 0)
+                  (return (fmt/Errorf "found multiple frequency events")))
+
+                ;; Read the frequency. It'll come out as timestamp units per second.
+                (let [(values f err) (binary/ReadUvarint r)]
+                  (when (!= err nil)
+                    (return err))
+
+                  ;; Convert to nanoseconds per timestamp unit.
+                  (set! (.-freq s) (conv frequency (/ 1.0 (/ (conv float64 f) 1.0E9))))))
+              (case [(and (== et tracev2/EvClockSnapshot) (>= ver version/Go125))]
+                (when (.-hasClockSnapshot s)
+                  (return (fmt/Errorf "found multiple clock snapshot events")))
+
+                (set! (.-hasClockSnapshot s) true)
+                ;; Read the EvClockSnapshot arguments.
+                (let [(values tdiff err) (binary/ReadUvarint r)]
+                  (when (!= err nil)
+                    (return err))
+
+                  (set! lastTs + (conv timestamp tdiff))
+                  (set! (.-snapTime s) lastTs)
+                  (let [(values mono ^:assign err) (binary/ReadUvarint r)]
+                    (when (!= err nil)
+                      (return err))
+
+                    (set! (.-snapMono s) mono)
+                    (let [(values sec ^:assign err) (binary/ReadUvarint r)]
+                      (when (!= err nil)
+                        (return err))
+
+                      (let [(values nsec ^:assign err) (binary/ReadUvarint r)]
+                        (when (!= err nil)
+                          (return err))
+
+                        ;; TODO(felixge): In theory we could inject s.snapMono into the time
+                        ;; value below to make it comparable. But there is no API for this
+                        ;; in the time package right now.
+                        (set! (.-snapWall s) (time/Unix (conv int64 sec) (conv int64 nsec))))))))
+              (default
+                (return (fmt/Errorf "expected frequency or clock snapshot event, got %d" ev)))))))
+
+
+      nil)))
+
+
+
+
+^{:go/breaks [[6 590]] :go/end 591} (go/func addExperimentalBatch "addExperimentalBatch takes an experimental batch and adds it to the list of experimental\nbatches for the experiment its a part of.\n" ^error [^{:tag (map tracev2/Experiment (slice ExperimentalBatch))} expBatches ^batch b]
+  (when (== (.-exp b) tracev2/NoExperiment)
+    (return (fmt/Errorf "internal error: addExperimentalBatch called on non-experimental batch")))
+
+  (aset expBatches (.-exp b) (append (aget expBatches (.-exp b)) ^{:go/breaks [2 4]} (lit ExperimentalBatch
+        :Thread (.-m b)
+        :Data (.-data b))))
+
+  nil)
+
+
+^{:go/end 603} (go/func fixUpCPUSamples [^{:tag (slice cpuSample)} samples ^frequency freq]
+  ;; Fix up the CPU sample timestamps.
+  (range [i samples]
+    (let [s (addr (aget samples i))]
+      (set! (.-time s) (.mul freq (conv timestamp (.-time s))))))
+
+  ;; Sort the CPU samples.
+  (^{:inst [(slice cpuSample) cpuSample]} slices/SortFunc samples ^{:go/end 602} (fn ^int [^cpuSample a ^cpuSample b]
+      (^{:inst [Time]} cmp/Compare (.-time a) (.-time b)))))

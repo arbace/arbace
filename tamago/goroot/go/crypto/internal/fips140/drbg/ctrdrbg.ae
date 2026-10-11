@@ -1,0 +1,142 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.drbg) (go/file "ctrdrbg.go" :imports [
+
+
+    ^{:line 8} [fips140 "crypto/internal/fips140"]
+    ^{:line 9} [aes "crypto/internal/fips140/aes"]
+    ^{:line 10} [subtle "crypto/internal/fips140/subtle"]
+    ^{:line 11} [byteorder "crypto/internal/fips140deps/byteorder"]
+    ^{:line 12} [bits "math/bits"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Counter "Counter is an SP 800-90A Rev. 1 CTR_DRBG instantiated with AES-256.\n\nPer Table 3, it has a security strength of 256 bits, a seed size of 384 bits,\na counter length of 128 bits, a reseed interval of 2^48 requests, and a\nmaximum request size of 2^19 bits (2^16 bytes, 64 KiB).\n\nWe support a narrow range of parameters that fit the needs of our RNG:\nAES-256, no derivation function, no personalization string, no prediction\nresistance, and 384-bit additional input.\n\nWARNING: this type provides tightly scoped support for the DRBG\nfunctionality we need for FIPS 140-3 _only_. This type _should not_ be used\noutside of the FIPS 140-3 module for any other use.\n\nIn particular, as documented, Counter does not support the derivation\nfunction, or personalization strings which are necessary for safely using\nthis DRBG for generic purposes without leaking sensitive values.\n" (struct
+
+    ^{:line 34 :tag aes/CTR :doc "c is instantiated with K as the key and V as the counter.\n"} c
+
+    ^{:line 36 :tag uint64} reseedCounter))
+
+
+(go/const
+  ^{:line 40} [^{:val 32} keySize (/ 256 8)]
+  ^{:line 41} [^{:val 48} SeedSize (+ keySize aes/BlockSize)]
+  ^{:line 42} [^{:val 281474976710656} reseedInterval (<< 1 48)]
+  ^{:line 43} [^{:val 65536} maxRequestSize (/ (<< 1 19) 8)])
+
+
+^{:go/end 67} (go/func NewCounter ^{:tag (* Counter)} [^{:tag (* (array SeedSize byte))} entropy]
+  ;; CTR_DRBG_Instantiate_algorithm, per Section 10.2.1.3.1.
+  (fips140/RecordApproved)
+
+  (let [K (make (slice byte) keySize)
+      ^{:line 51} V (make (slice byte) aes/BlockSize)]
+
+    ;; V starts at 0, but is incremented in CTR_DRBG_Update before each use,
+    ;; unlike AES-CTR where it is incremented after each use.
+    (aset V (- (len V) 1) 1)
+
+    (let [(values cipher err) (aes/New K)]
+      (when (!= err nil)
+        (panic err))
+
+
+      (let [c (addr (lit Counter))]
+        (set! (.-c c) @(aes/NewCTR cipher V))
+        (.update c entropy)
+        (set! (.-reseedCounter c) 1)
+        ^{:line 66} c))))
+
+
+^{:go/end 85} (go/method update [^{:tag (* Counter)} c ^{:tag (* (array SeedSize byte))} seed]
+  ;; CTR_DRBG_Update, per Section 10.2.1.2.
+
+  (let [temp (make (slice byte) SeedSize)]
+    (.XORKeyStream (.-c c) temp (subslice seed))
+    (let [K (subslice temp _ keySize)
+        ^{:line 75} V (subslice temp keySize)]
+
+      ;; Again, we pre-increment V, like in NewCounter.
+      (increment (conv (* (array aes/BlockSize byte)) V))
+
+      (let [(values cipher err) (aes/New K)]
+        (when (!= err nil)
+          (panic err))
+
+        (set! (.-c c) @(aes/NewCTR cipher V))))))
+
+
+^{:go/end 94} (go/func increment [^{:tag (* (array aes/BlockSize byte))} v]
+  (let [hi (byteorder/BEUint64 (subslice v _ 8))
+      ^{:line 89} lo (byteorder/BEUint64 (subslice v 8))
+      (values ^:assign lo c) (bits/Add64 lo 1 0)]
+    (set! (values hi _) (bits/Add64 hi 0 c))
+    (byteorder/BEPutUint64 (subslice v _ 8) hi)
+    (byteorder/BEPutUint64 (subslice v 8) lo)))
+
+
+^{:go/end 104} (go/method Reseed [^{:tag (* Counter)} c ^{:tag (* (array SeedSize byte))} entropy ^{:tag (* (array SeedSize byte))} additionalInput]
+  ;; CTR_DRBG_Reseed_algorithm, per Section 10.2.1.4.1.
+  (fips140/RecordApproved)
+
+  (let [^{:tag (array SeedSize byte)} seed (zero (array SeedSize byte))]
+    (subtle/XORBytes (subslice seed) (subslice entropy) (subslice additionalInput))
+    (.update c (addr seed))
+    (set! (.-reseedCounter c) 1)))
+
+
+
+^{:go/breaks [[15 142]] :go/end 143} (go/method Generate "Generate produces at most maxRequestSize bytes of random data in out.\n" [^{:tag (* Counter)} c ^{:tag (slice byte)} out ^{:tag (* (array SeedSize byte))} additionalInput] :results [^bool reseedRequired]
+  ;; CTR_DRBG_Generate_algorithm, per Section 10.2.1.5.1.
+  (fips140/RecordApproved)
+
+  (when (> (len out) maxRequestSize)
+    (panic "crypto/drbg: internal error: request size exceeds maximum"))
+
+
+  ;; Step 1.
+  (when (> (.-reseedCounter c) reseedInterval)
+    (return true))
+
+
+  ;; Step 2.
+  (if (!= additionalInput nil)
+    (.update c additionalInput)
+
+    ;; If the additional input is null, the first CTR_DRBG_Update is
+    ;; skipped, but the additional input is replaced with an all-zero string
+    ;; for the second CTR_DRBG_Update.
+    (set! additionalInput (new (array SeedSize byte))))
+
+
+  ;; Steps 3-5.
+  (clear out)
+  (.XORKeyStream (.-c c) out out)
+  (aes/RoundToBlock (addr (.-c c)))
+
+  ;; Step 6.
+  (.update c additionalInput)
+
+  ;; Step 7.
+  (inc! (.-reseedCounter c))
+
+  ;; Step 8.
+  false)

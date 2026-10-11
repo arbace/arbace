@@ -1,0 +1,217 @@
+;; USB device mode support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.usb) (go/file "setup.go" :imports [
+
+
+    ^{:line 12} [binary "encoding/binary"]
+    ^{:line 13} [fmt "fmt"]
+
+    ^{:line 15} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "Format of Setup Data (p276, Table 9-2, USB2.0)\n"
+  ^{:line 20} [^{:val 7} REQUEST_TYPE_DIR 7])
+
+
+
+(go/const "Standard request codes (p279, Table 9-4, USB2.0)\n"
+  ^{:line 25} [^{:val 0} GET_STATUS 0]
+  ^{:line 26} [^{:val 1} CLEAR_FEATURE 1]
+  ^{:line 27} [^{:val 3} SET_FEATURE 3]
+  ^{:line 28} [^{:val 5} SET_ADDRESS 5]
+  ^{:line 29} [^{:val 6} GET_DESCRIPTOR 6]
+  ^{:line 30} [^{:val 7} SET_DESCRIPTOR 7]
+  ^{:line 31} [^{:val 8} GET_CONFIGURATION 8]
+  ^{:line 32} [^{:val 9} SET_CONFIGURATION 9]
+  ^{:line 33} [^{:val 10} GET_INTERFACE 10]
+  ^{:line 34} [^{:val 11} SET_INTERFACE 11]
+  ^{:line 35} [^{:val 12} SYNCH_FRAME 12])
+
+
+
+(go/const "Descriptor types (p279, Table 9-5, USB2.0)\n"
+  ^{:line 40} [^{:val 1} DEVICE 1]
+  ^{:line 41} [^{:val 2} CONFIGURATION 2]
+  ^{:line 42} [^{:val 3} STRING 3]
+  ^{:line 43} [^{:val 4} INTERFACE 4]
+  ^{:line 44} [^{:val 5} ENDPOINT 5]
+  ^{:line 45} [^{:val 6} DEVICE_QUALIFIER 6]
+  ^{:line 46} [^{:val 7} OTHER_SPEED_CONFIGURATION 7]
+  ^{:line 47} [^{:val 8} INTERFACE_POWER 8]
+
+
+  ^{:line 50} [^{:val 9 :doc "Engineering Change Notices (ECN)\n"} OTG 9]
+  ^{:line 51} [^{:val 10} DEBUG 10]
+  ^{:line 52} [^{:val 11} INTERFACE_ASSOCIATION 11])
+
+
+
+(go/const "Standard feature selectors (p280, Table 9-6, USB2.0)\n"
+  ^{:line 57} [^{:val 0} ENDPOINT_HALT 0]
+  ^{:line 58} [^{:val 1} DEVICE_REMOTE_WAKEUP 1]
+  ^{:line 59} [^{:val 2} TEST_MODE 2])
+
+
+
+
+(go/type SetupData "SetupData implements\np276, Table 9-2. Format of Setup Data, USB2.0.\n" (struct
+    ^{:line 65 :tag uint8} RequestType
+    ^{:line 66 :tag uint8} Request
+    ^{:line 67 :tag uint16} Value
+    ^{:line 68 :tag uint16} Index
+    ^{:line 69 :tag uint16} Length))
+
+
+
+
+^{:go/end 79} (go/method swap "swap adjusts the endianness of values written in memory by the hardware, as\nthey do not match the expected one by Go.\n" [^{:tag (* SetupData)} s]
+  (let [b (make (slice byte) 2)]
+
+    (.PutUint16 binary/BigEndian b (.-Value s))
+    (set! (.-Value s) (.Uint16 binary/LittleEndian b))))
+
+
+^{:go/end 97} (go/method getSetup [^{:tag (* USB)} hw] :results [^{:tag (* SetupData)} setup]
+  (set! setup (addr (lit SetupData)))
+
+  ;; p3801, 56.4.6.4.2.1 Setup Phase, IMX6ULLRM
+
+  (set! @setup (.-Setup (.qh hw 0 OUT)))
+  (.swap setup)
+
+  ;; clear setup status
+  (reg/WriteBack (.-setup hw))
+  ;; flush EP0 IN
+  (reg/Set (.-flush hw) (+ ENDPTFLUSH_FETB 0))
+  ;; flush EP0 OUT
+  (reg/Set (.-flush hw) (+ ENDPTFLUSH_FERB 0))
+
+  (return))
+
+
+^{:go/end 129} (go/method getDescriptor [^{:tag (* USB)} hw ^{:tag (* SetupData)} setup] :results [^error err]
+  (let [bDescriptorType (bit-and (.-Value setup) 0xff)
+      ^{:line 101} index (>> (.-Value setup) 8)]
+
+    (switch bDescriptorType
+      (case [DEVICE]
+        (set! err (.tx hw 0 (trim (.Bytes (.-Descriptor (.-Device hw))) (.-Length setup)))))
+      (case [CONFIGURATION OTHER_SPEED_CONFIGURATION]
+        (when [(values conf err) (.Configuration (.-Device hw) index)] (== err nil)
+          (when (== bDescriptorType OTHER_SPEED_CONFIGURATION)
+            (aset conf 1 (conv byte bDescriptorType)))
+
+
+          (set! err (.tx hw 0 (trim conf (.-Length setup))))))
+
+      (case [STRING]
+        (if (> (conv int (+ index 1)) (len (.-Strings (.-Device hw)))) (do
+            (.stall hw 0 IN)
+            (set! err (fmt/Errorf "invalid string descriptor index %d" index)))
+
+          (set! err (.tx hw 0 (trim (aget (.-Strings (.-Device hw)) index) (.-Length setup))))))
+
+      (case [DEVICE_QUALIFIER]
+        (set! err (.tx hw 0 (.Bytes (.-Qualifier (.-Device hw))))))
+      (default
+        (.stall hw 0 IN)
+        (set! err (fmt/Errorf "unsupported descriptor type: %#x" bDescriptorType))))
+
+
+    (return)))
+
+
+^{:go/end 210} (go/method handleSetup [^{:tag (* USB)} hw] :results [^uint8 conf ^error err]
+  (let [setup (.getSetup hw)]
+
+    (when (== setup nil)
+      (return))
+
+
+    (when (!= (.-Setup (.-Device hw)) nil)
+      (let [(values in ack done err) ((.-Setup (.-Device hw)) setup)]
+
+        (cond (!= err nil) (do
+            (.stall hw 0 IN)
+            (return 0 err))
+          (!= (len in) 0)
+          (set! err (.tx hw 0 in))
+          ^{:line 146} ack
+          (set! err (.ack hw 0)))
+
+
+        (when (or done (!= err nil))
+          (return 0 err))))
+
+
+
+    (switch (.-Request setup)
+      (case [GET_STATUS]
+        ;; no meaningful status to report for now
+        (set! err (.tx hw 0 (lit (slice byte) 0x00 0x00))))
+      (case [CLEAR_FEATURE]
+        (switch (.-Value setup)
+          (case [ENDPOINT_HALT]
+            (let [n (conv int (bit-and (.-Index setup) 0xf))
+                ^{:line 163} dir (/ (conv int (bit-and (.-Index setup) 0x80)) 0x80)]
+
+              (.reset hw n dir)
+              (set! err (.ack hw 0))))
+          (default
+            (.stall hw 0 IN))))
+
+      (case [SET_ADDRESS]
+        (let [addr (conv uint32 (bit-or (bit-and (<< (.-Value setup) 8) 0xff00) (>> (.-Value setup) 8)))]
+
+          (reg/Set (.-addr hw) DEVICEADDR_USBADRA)
+          (reg/SetN (.-addr hw) DEVICEADDR_USBADR 0x7f addr)
+
+          (set! err (.ack hw 0))))
+      (case [GET_DESCRIPTOR]
+        (set! err (.getDescriptor hw setup)))
+      (case [GET_CONFIGURATION]
+        (set! err (.tx hw 0 (lit (slice byte) (.-ConfigurationValue (.-Device hw))))))
+      (case [SET_CONFIGURATION]
+        (set! conf (conv uint8 (>> (.-Value setup) 8)))
+
+        (if (!= (.-ConfigurationValue (.-Device hw)) conf)
+          (set! (.-ConfigurationValue (.-Device hw)) conf)
+
+          (set! conf 0))
+
+
+        (set! err (.ack hw 0)))
+      (case [GET_INTERFACE]
+        (set! err (.tx hw 0 (lit (slice byte) (.-AlternateSetting (.-Device hw))))))
+      (case [SET_INTERFACE]
+        (set! (.-AlternateSetting (.-Device hw)) (conv uint8 (>> (.-Value setup) 8)))
+        (set! err (.ack hw 0)))
+      (case [SET_ETHERNET_PACKET_FILTER]
+        ;; no meaningful action for now
+        (set! err (.ack hw 0)))
+      (default
+        (when (== (bit-and (>> (.-RequestType setup) REQUEST_TYPE_DIR) 1) OUT)
+          (.stall hw 0 OUT))
+
+
+        (.stall hw 0 IN)
+
+        (set! err (fmt/Errorf "unsupported request code: %#x" (.-Request setup)))))
+
+
+    (return)))
+
+
+^{:go/end 218} (go/func trim ^{:tag (slice byte)} [^{:tag (slice byte)} buf ^uint16 wLength]
+  (when (< (conv int wLength) (len buf))
+    (set! buf (subslice buf 0 wLength)))
+
+
+  ^{:line 217} buf)

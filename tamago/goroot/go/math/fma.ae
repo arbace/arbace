@@ -1,0 +1,181 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.math) (go/file "fma.go" :imports [
+
+    ^{:line 7} [bits "math/bits"]])
+
+^{:go/breaks [[4 13]] :go/end 16} (go/func zero ^uint64 [^uint64 x]
+  (when (== x 0)
+    (return 1))
+
+  0)
+;; branchless:
+;; return ((x>>1 | x&1) - 1) >> 63
+
+
+^{:go/breaks [[4 22]] :go/end 25} (go/func nonzero ^uint64 [^uint64 x]
+  (when (!= x 0)
+    (return 1))
+
+  0)
+;; branchless:
+;; return 1 - ((x>>1|x&1)-1)>>63
+
+
+^{:go/end 31} (go/func shl [^uint64 u1 ^uint64 u2 ^uint n] :results [^uint64 r1 ^uint64 r2]
+  (set! r1 (bit-or (<< u1 n) (>> u2 (- 64 n)) (<< u2 (- n 64))))
+  (set! r2 (<< u2 n))
+  (return))
+
+
+^{:go/end 37} (go/func shr [^uint64 u1 ^uint64 u2 ^uint n] :results [^uint64 r1 ^uint64 r2]
+  (set! r2 (bit-or (>> u2 n) (<< u1 (- 64 n)) (>> u1 (- n 64))))
+  (set! r1 (>> u1 n))
+  (return))
+
+
+
+
+
+
+^{:go/end 63} (go/func shrcompress "shrcompress compresses the bottom n+1 bits of the two-word\nvalue into a single bit. the result is equal to the value\nshifted to the right by n, except the result's 0th bit is\nset to the bitwise OR of the bottom n+1 bits.\n" [^uint64 u1 ^uint64 u2 ^uint n] :results [^uint64 r1 ^uint64 r2]
+  ;; TODO: Performance here is really sensitive to the
+  ;; order/placement of these branches. n == 0 is common
+  ;; enough to be in the fast path. Perhaps more measurement
+  ;; needs to be done to find the optimal order/placement?
+  (switch
+    (case [(== n 0)]
+      (return u1 u2))
+    (case [(== n 64)]
+      (return 0 (bit-or u1 (nonzero u2))))
+    (case [(>= n 128)]
+      (return 0 (nonzero (bit-or u1 u2))))
+    (case [(< n 64)]
+      (set! (values r1 r2) (shr u1 u2 n))
+      (set! r2 bit-or (nonzero (bit-and u2 (- ^uint64 (<< 1 n) 1)))))
+    (case [(< n 128)]
+      (set! (values r1 r2) (shr u1 u2 n))
+      (set! r2 bit-or (nonzero (bit-or (bit-and u1 (- ^uint64 (<< 1 (- n 64)) 1)) u2)))))
+
+  (return))
+
+
+^{:go/end 71} (go/func lz [^uint64 u1 ^uint64 u2] :results [^int32 l]
+  (set! l (conv int32 (bits/LeadingZeros64 u1)))
+  (when (== l 64)
+    (set! l + (conv int32 (bits/LeadingZeros64 u2))))
+
+  ^{:line 70} l)
+
+
+
+
+
+^{:go/end 91} (go/func split "split splits b into sign, biased exponent, and mantissa.\nIt adds the implicit 1 bit to the mantissa for normal values,\nand normalizes subnormal values.\n" [^uint64 b] :results [^uint32 sign ^int32 exp ^uint64 mantissa]
+  (set! sign (conv uint32 (>> b 63)))
+  (set! exp (bit-and (conv int32 (>> b 52)) mask))
+  (set! mantissa (bit-and b fracMask))
+
+  (if (== exp 0)
+    ;; Normalize value if subnormal.
+    (let [shift (conv uint (- (bits/LeadingZeros64 mantissa) 11))]
+      (set! mantissa << shift)
+      (set! exp (- 1 (conv int32 shift))))
+
+    ;; Add implicit 1 bit
+    (set! mantissa bit-or (<< 1 52)))
+
+  (return))
+
+
+
+
+^{:go/end 182} (go/func FMA "FMA returns x * y + z, computed with only one rounding.\n(That is, FMA returns the fused multiply-add of x, y, and z.)\n" ^float64 [^float64 x ^float64 y ^float64 z]
+  (let [(values bx by bz) (values (Float64bits x) (Float64bits y) (Float64bits z))]
+
+    ;; Inf or NaN or zero involved. At most one rounding will occur.
+    (when (or (== x 0.0) (== y 0.0) (== (bit-and bx uvinf) uvinf) (== (bit-and by uvinf) uvinf))
+      (return (+ (* x y) z)))
+
+    ;; Handle z == 0.0 separately.
+    ;; Adding zero usually does not change the original value.
+    ;; However, there is an exception with negative zero. (e.g. (-0) + (+0) = (+0))
+    ;; This applies when x * y is negative and underflows.
+    (when (== z 0.0)
+      (return (* x y)))
+
+    ;; Handle non-finite z separately. Evaluating x*y+z where
+    ;; x and y are finite, but z is infinite, should always result in z.
+    (when (== (bit-and bz uvinf) uvinf)
+      (return z))
+
+
+    ;; Inputs are (sub)normal.
+    ;; Split x, y, z into sign, exponent, mantissa.
+    (let [(values xs xe xm) (split bx)
+        (values ys ye ym) (split by)
+        (values zs ze zm) (split bz)
+
+        ;; Compute product p = x*y as sign, exponent, two-word mantissa.
+        ;; Start with exponent. "is normal" bit isn't subtracted yet.
+        ^{:line 123} pe (+ (- (+ xe ye) bias) 1)
+
+        ;; pm1:pm2 is the double-word mantissa for the product p.
+        ;; Shift left to leave top bit in product. Effectively
+        ;; shifts the 106-bit product to the left by 21.
+        (values pm1 pm2) (bits/Mul64 (<< xm 10) (<< ym 11))
+        (values zm1 zm2) (values (<< zm 10) (conv uint64 0))
+        ^{:line 130} ps (bit-xor xs ys) ; product sign
+
+        ;; normalize to 62nd bit
+        ^{:line 133} is62zero (conv uint (bit-and (>> (bit-not pm1) 62) 1))]
+      (set! (values pm1 pm2) (shl pm1 pm2 is62zero))
+      (set! pe - (conv int32 is62zero))
+
+      ;; Swap addition operands so |p| >= |z|
+      (when (or (< pe ze) (and (== pe ze) (< pm1 zm1)))
+        (set! (values ps pe pm1 pm2 zs ze zm1 zm2) (values zs ze zm1 zm2 ps pe pm1 pm2)))
+
+
+      ;; Special case: if p == -z the result is always +0 since neither operand is zero.
+      (when (and (!= ps zs) (== pe ze) (== pm1 zm1) (== pm2 zm2))
+        (return 0))
+
+
+      ;; Align significands
+      (set! (values zm1 zm2) (shrcompress zm1 zm2 (conv uint (- pe ze))))
+
+      ;; Compute resulting significands, normalizing if necessary.
+      (let [(values ^uint64 m ^uint64 c) (zero uint64)]
+        (if (== ps zs) (do
+            ;; Adding (pm1:pm2) + (zm1:zm2)
+            (set! (values pm2 c) (bits/Add64 pm2 zm2 0))
+            (set! (values pm1 _) (bits/Add64 pm1 zm1 c))
+            (set! pe - (conv int32 (>> (bit-not pm1) 63)))
+            (set! (values pm1 m) (shrcompress pm1 pm2 (conv uint (+ 64 (>> pm1 63))))))
+          (do
+            ;; Subtracting (pm1:pm2) - (zm1:zm2)
+            ;; TODO: should we special-case cancellation?
+            (set! (values pm2 c) (bits/Sub64 pm2 zm2 0))
+            (set! (values pm1 _) (bits/Sub64 pm1 zm1 c))
+            (let [nz (lz pm1 pm2)]
+              (set! pe - nz)
+              (set! (values m pm2) (shl pm1 pm2 (conv uint (- nz 1))))
+              (set! m bit-or (nonzero pm2)))))
+
+
+        ;; Round and break ties to even
+        (when (or (> pe (+ 1022 bias)) (and (== pe (+ 1022 bias)) (== (>> (+ m (<< 1 9)) 63) 1)))
+          ;; rounded value overflows exponent range
+          (return (Float64frombits (bit-or (<< (conv uint64 ps) 63) uvinf))))
+
+        (when (< pe 0)
+          (let [n (conv uint (- pe))]
+            (set! m (bit-or (>> m n) (nonzero (bit-and m (- ^uint64 (<< 1 n) 1)))))
+            (set! pe 0)))
+
+        (set! m (bit-and (>> (+ m (<< 1 9)) 10) (bit-not (go/call zero (bit-xor (bit-and m (- (<< 1 10) 1)) (<< 1 9))))))
+        (set! pe bit-and (- (conv int32 (nonzero m))))
+        (Float64frombits (+ (<< (conv uint64 ps) 63) (<< (conv uint64 pe) 52) m))))))

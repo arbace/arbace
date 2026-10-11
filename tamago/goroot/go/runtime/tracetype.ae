@@ -1,0 +1,82 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Trace type table.
+
+(in-ns 'go.runtime) (go/file "tracetype.go" :imports [
+
+
+    ^{:line 10} [abi "internal/abi"]
+    ^{:line 11} [goarch "internal/goarch"]
+    ^{:line 12} [tracev2 "internal/trace/tracev2"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+
+
+(go/type traceTypeTable "traceTypeTable maps types to unique uint32 ids.\nIt is lock-free for reading.\n" (struct
+    ^{:line 19 :tag traceMap} tab))
+
+
+
+
+
+
+^{:go/end 33} (go/method put "put returns a unique id for the type typ and caches it in the table,\nif it's seeing it for the first time.\n\nN.B. typ must be kept alive forever for this to work correctly.\n" ^uint64 [^{:tag (* traceTypeTable)} t ^{:tag (* abi/Type)} typ]
+  (when (== typ nil)
+    (return 0))
+
+  ;; Insert the pointer to the type itself.
+  (let [(values id _) (.put (.-tab t) (noescape (conv unsafe/Pointer (addr typ))) goarch/PtrSize)]
+    ^{:line 32} id))
+
+
+
+
+
+^{:go/end 45} (go/method dump "dump writes all previously cached types to trace buffers and\nreleases all memory and resets state. It must only be called once the caller\ncan guarantee that there are no more writers to the table.\n" [^{:tag (* traceTypeTable)} t ^uintptr gen]
+  (let [w (unsafeTraceExpWriter gen nil tracev2/AllocFree)]
+    (when [root (conv (* traceMapNode) (.Load (.-root (.-tab t))))] (!= root nil)
+      (set! w (dumpTypesRec root w)))
+
+    (.end (.flush w))
+    (.reset (.-tab t))))
+
+
+^{:go/end 83} (go/func dumpTypesRec ^traceWriter [^{:tag (* traceMapNode)} node ^traceWriter w]
+  (let [typ (conv (* abi/Type) @(conv (* unsafe/Pointer) (conv unsafe/Pointer (addr (aget (.-data node) 0)))))
+      ^{:line 49} typName (.string (toRType typ))
+
+      ;; The maximum number of bytes required to hold the encoded type.
+      ^{:line 52} maxBytes (+ 1 (* 5 traceBytesPerNumber) (len typName))
+
+      ;; Estimate the size of this record. This
+      ;; bound is pretty loose, but avoids counting
+      ;; lots of varint sizes.
+      ;;
+      ;; Add 1 because we might also write a traceAllocFreeTypesBatch byte.
+      ^{:line 59 :tag bool} flushed (zero bool)]
+    (set! (values w flushed) (.ensure w (+ 1 maxBytes)))
+    (when flushed
+      ;; Annotate the batch as containing types.
+      ^{:go/via [traceBuf]} (.byte w (conv byte traceAllocFreeTypesBatch)))
+
+
+    ;; Emit type.
+    ^{:go/via [traceBuf]} (.varint w (.-id node))
+    ^{:go/via [traceBuf]} (.varint w (conv uint64 (conv uintptr (conv unsafe/Pointer typ))))
+    ^{:go/via [traceBuf]} (.varint w (conv uint64 (.Size typ)))
+    ^{:go/via [traceBuf]} (.varint w (conv uint64 (.-PtrBytes typ)))
+    ^{:go/via [traceBuf]} (.varint w (conv uint64 (len typName)))
+    ^{:go/via [traceBuf]} (.stringData w typName)
+
+    ;; Recursively walk all child nodes.
+    (range [i (.-children node)]
+      (let [child (.Load (aget (.-children node) i))]
+        (when (== child nil)
+          (continue))
+
+        (set! w (dumpTypesRec (conv (* traceMapNode) child) w))))
+
+    ^{:line 82} w))

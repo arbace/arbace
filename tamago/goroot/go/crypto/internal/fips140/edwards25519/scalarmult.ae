@@ -1,0 +1,214 @@
+;; Copyright (c) 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.edwards25519) (go/file "scalarmult.go" :imports [
+
+    ^{:line 7} [sync "sync"]])
+
+
+
+^{:go/end 22} (go/func basepointTable "basepointTable is a set of 32 affineLookupTables, where table i is generated\nfrom 256i * basepoint. It is precomputed the first time it's used.\n" ^{:tag (* (array 32 affineLookupTable))} []
+  (.Do (.-initOnce basepointTablePrecomp) ^{:go/end 20} (fn []
+      (let [p (NewGeneratorPoint)]
+        (for [i 0] (< i 32) (inc! i)
+          (.FromP3 (aget (.-table basepointTablePrecomp) i) p)
+          (for [j 0] (< j 8) (inc! j)
+            (.Add p p p))))))
+
+
+
+  (addr (.-table basepointTablePrecomp)))
+
+
+(go/var ^{:tag (struct ^{:tag (array 32 affineLookupTable)} table ^sync/Once initOnce)} basepointTablePrecomp)
+
+
+
+
+
+
+
+
+^{:go/end 80} (go/method ScalarBaseMult "ScalarBaseMult sets v = x * B, where B is the canonical generator, and\nreturns v.\n\nThe scalar multiplication is done in constant time.\n" ^{:tag (* Point)} [^{:tag (* Point)} v ^{:tag (* Scalar)} x]
+  (let [basepointTable (basepointTable)
+
+      ;; Write x = sum(x_i * 16^i) so  x*B = sum( B*x_i*16^i )
+      ;; as described in the Ed25519 paper
+      ;;
+      ;; Group even and odd coefficients
+      ;; x*B     = x_0*16^0*B + x_2*16^2*B + ... + x_62*16^62*B
+      ;;         + x_1*16^1*B + x_3*16^3*B + ... + x_63*16^63*B
+      ;; x*B     = x_0*16^0*B + x_2*16^2*B + ... + x_62*16^62*B
+      ;;    + 16*( x_1*16^0*B + x_3*16^2*B + ... + x_63*16^62*B)
+      ;;
+      ;; We use a lookup table for each i to get x_i*16^(2*i)*B
+      ;; and do four doublings to multiply by 16.
+      ^{:line 47} digits (.signedRadix16 x)
+
+      ^{:line 49} multiple (addr (lit affineCached))
+      ^{:line 50} tmp1 (addr (lit projP1xP1))
+      ^{:line 51} tmp2 (addr (lit projP2))]
+
+    ;; Accumulate the odd components first
+    (.Set v (NewIdentityPoint))
+    (for [i 1] (< i 64) (set! i + 2)
+      (.SelectInto (aget basepointTable (/ i 2)) multiple (aget digits i))
+      (.AddAffine tmp1 v multiple)
+      (.fromP1xP1 v tmp1))
+
+
+    ;; Multiply by 16
+    (.FromP3 tmp2 v) ; tmp2 =    v in P2 coords
+    (.Double tmp1 tmp2) ; tmp1 =  2*v in P1xP1 coords
+    (.FromP1xP1 tmp2 tmp1) ; tmp2 =  2*v in P2 coords
+    (.Double tmp1 tmp2) ; tmp1 =  4*v in P1xP1 coords
+    (.FromP1xP1 tmp2 tmp1) ; tmp2 =  4*v in P2 coords
+    (.Double tmp1 tmp2) ; tmp1 =  8*v in P1xP1 coords
+    (.FromP1xP1 tmp2 tmp1) ; tmp2 =  8*v in P2 coords
+    (.Double tmp1 tmp2) ; tmp1 = 16*v in P1xP1 coords
+    (.fromP1xP1 v tmp1) ; now v = 16*(odd components)
+
+    ;; Accumulate the even components
+    (for [i 0] (< i 64) (set! i + 2)
+      (.SelectInto (aget basepointTable (/ i 2)) multiple (aget digits i))
+      (.AddAffine tmp1 v multiple)
+      (.fromP1xP1 v tmp1))
+
+
+    ^{:line 79} v))
+
+
+
+
+
+^{:go/end 123} (go/method ScalarMult "ScalarMult sets v = x * q, and returns v.\n\nThe scalar multiplication is done in constant time.\n" ^{:tag (* Point)} [^{:tag (* Point)} v ^{:tag (* Scalar)} x ^{:tag (* Point)} q]
+  (checkInitialized q)
+
+  (let [^projLookupTable table (zero projLookupTable)]
+    (.FromP3 table q)
+
+    ;; Write x = sum(x_i * 16^i)
+    ;; so  x*Q = sum( Q*x_i*16^i )
+    ;;         = Q*x_0 + 16*(Q*x_1 + 16*( ... + Q*x_63) ... )
+    ;;           <------compute inside out---------
+    ;;
+    ;; We use the lookup table to get the x_i*Q values
+    ;; and do four doublings to compute 16*Q
+    (let [digits (.signedRadix16 x)
+
+        ;; Unwrap first loop iteration to save computing 16*identity
+        ^{:line 101} multiple (addr (lit projCached))
+        ^{:line 102} tmp1 (addr (lit projP1xP1))
+        ^{:line 103} tmp2 (addr (lit projP2))]
+      (.SelectInto table multiple (aget digits 63))
+
+      (.Set v (NewIdentityPoint))
+      (.Add tmp1 v multiple) ; tmp1 = x_63*Q in P1xP1 coords
+      (for [i 62] (>= i 0) (dec! i)
+        (.FromP1xP1 tmp2 tmp1) ; tmp2 =    (prev) in P2 coords
+        (.Double tmp1 tmp2) ; tmp1 =  2*(prev) in P1xP1 coords
+        (.FromP1xP1 tmp2 tmp1) ; tmp2 =  2*(prev) in P2 coords
+        (.Double tmp1 tmp2) ; tmp1 =  4*(prev) in P1xP1 coords
+        (.FromP1xP1 tmp2 tmp1) ; tmp2 =  4*(prev) in P2 coords
+        (.Double tmp1 tmp2) ; tmp1 =  8*(prev) in P1xP1 coords
+        (.FromP1xP1 tmp2 tmp1) ; tmp2 =  8*(prev) in P2 coords
+        (.Double tmp1 tmp2) ; tmp1 = 16*(prev) in P1xP1 coords
+        (.fromP1xP1 v tmp1) ;    v = 16*(prev) in P3 coords
+        (.SelectInto table multiple (aget digits i))
+        (.Add tmp1 v multiple)) ; tmp1 = x_i*Q + 16*(prev) in P1xP1 coords
+
+      (.fromP1xP1 v tmp1)
+      ^{:line 122} v)))
+
+
+
+
+^{:go/end 132} (go/func basepointNafTable "basepointNafTable is the nafLookupTable8 for the basepoint.\nIt is precomputed the first time it's used.\n" ^{:tag (* nafLookupTable8)} []
+  (.Do (.-initOnce basepointNafTablePrecomp) ^{:go/end 130} (fn []
+      (.FromP3 (.-table basepointNafTablePrecomp) (NewGeneratorPoint))))
+
+  (addr (.-table basepointNafTablePrecomp)))
+
+
+(go/var ^{:tag (struct ^nafLookupTable8 table ^sync/Once initOnce)} basepointNafTablePrecomp)
+
+
+
+
+
+
+
+
+^{:go/end 215} (go/method VarTimeDoubleScalarBaseMult "VarTimeDoubleScalarBaseMult sets v = a * A + b * B, where B is the canonical\ngenerator, and returns v.\n\nExecution time depends on the inputs.\n" ^{:tag (* Point)} [^{:tag (* Point)} v ^{:tag (* Scalar)} a ^{:tag (* Point)} A ^{:tag (* Scalar)} b]
+  (checkInitialized A)
+
+  ;; Similarly to the single variable-base approach, we compute
+  ;; digits and use them with a lookup table.  However, because
+  ;; we are allowed to do variable-time operations, we don't
+  ;; need constant-time lookups or constant-time digit
+  ;; computations.
+  ;;
+  ;; So we use a non-adjacent form of some width w instead of
+  ;; radix 16.  This is like a binary representation (one digit
+  ;; for each binary place) but we allow the digits to grow in
+  ;; magnitude up to 2^{w-1} so that the nonzero digits are as
+  ;; sparse as possible.  Intuitively, this "condenses" the
+  ;; "mass" of the scalar onto sparse coefficients (meaning
+  ;; fewer additions).
+
+  (let [basepointNafTable (basepointNafTable)
+      ^{:line 161 :tag nafLookupTable5} aTable (zero nafLookupTable5)]
+    (.FromP3 aTable A)
+    ;; Because the basepoint is fixed, we can use a wider NAF
+    ;; corresponding to a bigger table.
+    (let [aNaf (.nonAdjacentForm a 5)
+        ^{:line 166} bNaf (.nonAdjacentForm b 8)
+
+        ;; Find the first nonzero coefficient.
+        ^{:line 169} i 255]
+      (while (>= i 0)
+        (when (or (!= (aget aNaf i) 0) (!= (aget bNaf i) 0))
+          (break))
+
+        (dec! i))
+
+
+      (let [multA (addr (lit projCached))
+          ^{:line 178} multB (addr (lit affineCached))
+          ^{:line 179} tmp1 (addr (lit projP1xP1))
+          ^{:line 180} tmp2 (addr (lit projP2))]
+        (.Zero tmp2)
+
+        ;; Move from high to low bits, doubling the accumulator
+        ;; at each iteration and checking whether there is a nonzero
+        ;; coefficient to look up a multiple of.
+        (for [] (>= i 0) (dec! i)
+          (.Double tmp1 tmp2)
+
+          ;; Only update v if we have a nonzero coeff to add in.
+          (cond (> (aget aNaf i) 0) (do
+              (.fromP1xP1 v tmp1)
+              (.SelectInto aTable multA (aget aNaf i))
+              (.Add tmp1 v multA))
+            (< (aget aNaf i) 0) (do
+              (.fromP1xP1 v tmp1)
+              (.SelectInto aTable multA (- (aget aNaf i)))
+              (.Sub tmp1 v multA)))
+
+
+          (cond (> (aget bNaf i) 0) (do
+              (.fromP1xP1 v tmp1)
+              (.SelectInto basepointNafTable multB (aget bNaf i))
+              (.AddAffine tmp1 v multB))
+            (< (aget bNaf i) 0) (do
+              (.fromP1xP1 v tmp1)
+              (.SelectInto basepointNafTable multB (- (aget bNaf i)))
+              (.SubAffine tmp1 v multB)))
+
+
+          (.FromP1xP1 tmp2 tmp1))
+
+
+        (.fromP2 v tmp2)
+        ^{:line 214} v))))

@@ -1,0 +1,637 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package fstest implements support for testing implementations and users of file systems.
+(in-ns 'go.testing.fstest) (go/file "testfs.go" :doc "Package fstest implements support for testing implementations and users of file systems.\n" :imports [
+
+
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [fs "io/fs"]
+    ^{:line 13} [maps "maps"]
+    ^{:line 14} [path "path"]
+    ^{:line 15} [slices "slices"]
+    ^{:line 16} [strings "strings"]
+    ^{:line 17} [iotest "testing/iotest"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[6 62]] :go/end 63} (go/func TestFS "TestFS tests a file system implementation.\nIt walks the entire tree of files in fsys,\nopening and checking that each file behaves correctly.\nSymbolic links are not followed,\nbut their Lstat values are checked\nif the file system implements [fs.ReadLinkFS].\nIt also checks that the file system contains at least the expected files.\nAs a special case, if no expected files are listed, fsys must be empty.\nOtherwise, fsys must contain at least the listed files; it can also contain others.\nThe contents of fsys must not change concurrently with TestFS.\n\nIf TestFS finds any misbehaviors, it returns either the first error or a\nlist of errors. Use [errors.Is] or [errors.AsType] to inspect.\n\nTypical usage inside a test is:\n\n\tif err := fstest.TestFS(myFS, \"file/that/should/be/present\"); err != nil {\n\t\tt.Fatal(err)\n\t}\n" ^error [^fs/FS fsys & ^{:tag (slice string)} expected]
+  (when [err (testFS fsys (spread expected))] (!= err nil)
+    (return err))
+
+  (range [_ name expected]
+    (when [i (strings/Index name "/")] (>= i 0)
+      (let [(values dir dirSlash) (values (subslice name _ i) (subslice name _ (+ i 1)))
+          ^{:line 46 :tag (slice string)} subExpected (zero (slice string))]
+        (range [_ name expected]
+          (when (strings/HasPrefix name dirSlash)
+            (set! subExpected (append subExpected (subslice name (len dirSlash))))))
+
+
+        (let [(values sub err) (fs/Sub fsys dir)]
+          (when (!= err nil)
+            (return err))
+
+          (when [err (testFS sub (spread subExpected))] (!= err nil)
+            (return (fmt/Errorf "testing fs.Sub(fsys, %s): %w" dir err)))
+
+          (break))))) ; one sub-test is enough
+
+
+  nil)
+
+
+^{:go/end 93} (go/func testFS ^error [^fs/FS fsys & ^{:tag (slice string)} expected]
+  (let [t (lit fsTester :fsys fsys)]
+    (.checkDir t ".")
+    (.checkOpen t ".")
+    (let [found (make (map string bool))]
+      (range [_ dir (.-dirs t)]
+        (aset found dir true))
+
+      (range [_ file (.-files t)]
+        (aset found file true))
+
+      (delete found ".")
+      (when (and (== (len expected) 0) (> (len found) 0))
+        (let [list (^{:inst [string]} slices/Sorted (^{:inst [(map string bool) string bool]} maps/Keys found))]
+          (when (> (len list) 15)
+            (set! list (append (subslice list _ 10) "...")))
+
+          (.errorf t "expected empty file system but found files:\n%s" (strings/Join list "\n"))))
+
+      (range [_ name expected]
+        (when (not (aget found name))
+          (.errorf t "expected but not found: %s" name)))
+
+
+      (when (== (len (.-errors t)) 0)
+        (return nil))
+
+      (fmt/Errorf "TestFS found errors:\n%w" (errors/Join (spread (.-errors t)))))))
+
+
+
+(go/type fsTester "An fsTester holds state for running the test.\n" (struct
+    ^{:line 97 :tag fs/FS} fsys
+    ^{:line 98 :tag (slice error)} errors
+    ^{:line 99 :tag (slice string)} dirs
+    ^{:line 100 :tag (slice string)} files))
+
+
+
+^{:go/end 106} (go/method errorf "errorf adds an error to the list of errors.\n" [^{:tag (* fsTester)} t ^string format & ^{:tag (slice any)} args]
+  (set! (.-errors t) (append (.-errors t) (fmt/Errorf format (spread args)))))
+
+
+^{:go/end 121} (go/method openDir ^fs/ReadDirFile [^{:tag (* fsTester)} t ^string dir]
+  (let [(values f err) (.Open (.-fsys t) dir)]
+    (when (!= err nil)
+      (.errorf t "%s: Open: %w" dir err)
+      (return nil))
+
+    (let [(values d ok) (assert fs/ReadDirFile f)]
+      (when (not ok)
+        (.Close f)
+        (.errorf t "%s: Open returned File type %T, not a fs.ReadDirFile" dir f)
+        (return nil))
+
+      ^{:line 120} d)))
+
+
+
+
+^{:go/end 273} (go/method checkDir "checkDir checks the directory dir, which is expected to exist\n(it is either the root or was found in a directory listing with IsDir true).\n" [^{:tag (* fsTester)} t ^string dir]
+  ;; Read entire directory.
+  (set! (.-dirs t) (append (.-dirs t) dir))
+  (let [d (.openDir t dir)]
+    (when (== d nil)
+      (return))
+
+    (let [(values list err) (.ReadDir d -1)]
+      (when (!= err nil)
+        (.Close d)
+        (.errorf t "%s: ReadDir(-1): %w" dir err)
+        (return))
+
+
+      ;; Check all children.
+      (let [^string prefix (zero string)]
+        (if (== dir ".")
+          (set! prefix "")
+
+          (set! prefix (+ dir "/")))
+
+        (range [_ info list]
+          (let [name (.Name info)]
+            (switch
+              (case [(== name ".") (== name "..") (== name "")]
+                (.errorf t "%s: ReadDir: child has invalid name: %#q" dir name)
+                (continue))
+              (case [(strings/Contains name "/")]
+                (.errorf t "%s: ReadDir: child name contains slash: %#q" dir name)
+                (continue))
+              (case [(strings/Contains name "\\")]
+                (.errorf t "%s: ReadDir: child name contains backslash: %#q" dir name)
+                (continue)))
+
+            (let [path (+ prefix name)]
+              (.checkStat t path info)
+              (.checkOpen t path)
+              (switch (.Type info)
+                (case [fs/ModeDir]
+                  (.checkDir t path))
+                (case [fs/ModeSymlink]
+                  ;; No further processing.
+                  ;; Avoid following symlinks to avoid potentially unbounded recursion.
+                  (set! (.-files t) (append (.-files t) path)))
+                (default
+                  (.checkFile t path))))))
+
+
+
+        ;; Check ReadDir(-1) at EOF.
+        (let [(values list2 ^:assign err) (.ReadDir d -1)]
+          (when (or (> (len list2) 0) (!= err nil))
+            (.Close d)
+            (.errorf t "%s: ReadDir(-1) at EOF = %d entries, %w, wanted 0 entries, nil" dir (len list2) err)
+            (return))
+
+
+          ;; Check ReadDir(1) at EOF (different results).
+          (set! (values list2 err) (.ReadDir d 1))
+          (when (or (> (len list2) 0) (!= err io/EOF))
+            (.Close d)
+            (.errorf t "%s: ReadDir(1) at EOF = %d entries, %w, wanted 0 entries, EOF" dir (len list2) err)
+            (return))
+
+
+          ;; Check that close does not report an error.
+          (when [err (.Close d)] (!= err nil)
+            (.errorf t "%s: Close: %w" dir err))
+
+
+          ;; Check that closing twice doesn't crash.
+          ;; The return value doesn't matter.
+          (.Close d)
+
+          ;; Reopen directory, read a second time, make sure contents match.
+          (when [(set! d (.openDir t dir))] (== d nil)
+            (return))
+
+          (defer (.Close d))
+          (set! (values list2 err) (.ReadDir d -1))
+          (when (!= err nil)
+            (.errorf t "%s: second Open+ReadDir(-1): %w" dir err)
+            (return))
+
+          (.checkDirList t dir "first Open+ReadDir(-1) vs second Open+ReadDir(-1)" list list2)
+
+          ;; Reopen directory, read a third time in pieces, make sure contents match.
+          (when [(set! d (.openDir t dir))] (== d nil)
+            (return))
+
+          (defer (.Close d))
+          (set! list2 nil)
+          (while true
+            (let [n 1]
+              (when (> (len list2) 0)
+                (set! n 2))
+
+              (let [(values frag err) (.ReadDir d n)]
+                (when (> (len frag) n)
+                  (.errorf t "%s: third Open: ReadDir(%d) after %d: %d entries (too many)" dir n (len list2) (len frag))
+                  (return))
+
+                (set! list2 (append list2 (spread frag)))
+                (when (== err io/EOF)
+                  (break))
+
+                (when (!= err nil)
+                  (.errorf t "%s: third Open: ReadDir(%d) after %d: %w" dir n (len list2) err)
+                  (return))
+
+                (when (== n 0)
+                  (.errorf t "%s: third Open: ReadDir(%d) after %d: 0 entries but nil error" dir n (len list2))
+                  (return)))))
+
+
+          (.checkDirList t dir "first Open+ReadDir(-1) vs third Open+ReadDir(1,2) loop" list list2)
+
+          ;; If fsys has ReadDir, check that it matches and is sorted.
+          (when [(values fsys ok) (assert fs/ReadDirFS (.-fsys t))] ok
+            (let [(values list2 err) (.ReadDir fsys dir)]
+              (when (!= err nil)
+                (.errorf t "%s: fsys.ReadDir: %w" dir err)
+                (return))
+
+              (.checkDirList t dir "first Open+ReadDir(-1) vs fsys.ReadDir" list list2)
+
+              (for [i 0] (< (+ i 1) (len list2)) (inc! i)
+                (when (>= (.Name (aget list2 i)) (.Name (aget list2 (+ i 1))))
+                  (.errorf t "%s: fsys.ReadDir: list not sorted: %s before %s" dir (.Name (aget list2 i)) (.Name (aget list2 (+ i 1))))))))
+
+
+
+
+          ;; Check fs.ReadDir as well.
+          (set! (values list2 err) (fs/ReadDir (.-fsys t) dir))
+          (when (!= err nil)
+            (.errorf t "%s: fs.ReadDir: %w" dir err)
+            (return))
+
+          (.checkDirList t dir "first Open+ReadDir(-1) vs fs.ReadDir" list list2)
+
+          (for [i 0] (< (+ i 1) (len list2)) (inc! i)
+            (when (>= (.Name (aget list2 i)) (.Name (aget list2 (+ i 1))))
+              (.errorf t "%s: fs.ReadDir: list not sorted: %s before %s" dir (.Name (aget list2 i)) (.Name (aget list2 (+ i 1))))))
+
+
+
+          (.checkGlob t dir list2))))))
+
+
+
+^{:go/end 278} (go/func formatEntry "formatEntry formats an fs.DirEntry into a string for error messages and comparison.\n" ^string [^fs/DirEntry entry]
+  (fmt/Sprintf "%s IsDir=%v Type=%v" (.Name entry) (.IsDir entry) (.Type entry)))
+
+
+
+^{:go/end 283} (go/func formatInfoEntry "formatInfoEntry formats an fs.FileInfo into a string like the result of formatEntry, for error messages and comparison.\n" ^string [^fs/FileInfo info]
+  (fmt/Sprintf "%s IsDir=%v Type=%v" (.Name info) (.IsDir info) (.Type (.Mode info))))
+
+
+
+^{:go/end 288} (go/func formatInfo "formatInfo formats an fs.FileInfo into a string for error messages and comparison.\n" ^string [^fs/FileInfo info]
+  (fmt/Sprintf "%s IsDir=%v Mode=%v Size=%d ModTime=%v" (.Name info) (.IsDir info) (.Mode info) (.Size info) (.ModTime info)))
+
+
+
+^{:go/end 386} (go/method checkGlob "checkGlob checks that various glob patterns work if the file system implements GlobFS.\n" [^{:tag (* fsTester)} t ^string dir ^{:tag (slice fs/DirEntry)} list]
+  (when [(values _ ok) (assert fs/GlobFS (.-fsys t))] (not ok)
+    (return))
+
+
+  ;; Make a complex glob pattern prefix that only matches dir.
+  (let [^string glob (zero string)]
+    (when (!= dir ".")
+      (let [elem (strings/Split dir "/")]
+        (range [i e elem]
+          (let [^{:tag (slice rune)} pattern (zero (slice rune))]
+            (range [j r e]
+              (when (or (== r \*) (== r \?) (== r \\) (== r \[) (== r \-))
+                (set! pattern (append pattern \\ r))
+                (continue))
+
+              (switch (% (+ i j) 5)
+                (case [0]
+                  (set! pattern (append pattern r)))
+                (case [1]
+                  (set! pattern (append pattern \[ r \])))
+                (case [2]
+                  (set! pattern (append pattern \[ r \- r \])))
+                (case [3]
+                  (set! pattern (append pattern \[ \\ r \])))
+                (case [4]
+                  (set! pattern (append pattern \[ \\ r \- \\ r \])))))
+
+
+            (aset elem i (conv string pattern))))
+
+        (set! glob (+ (strings/Join elem "/") "/"))))
+
+
+    ;; Test that malformed patterns are detected.
+    ;; The error is likely path.ErrBadPattern but need not be.
+    (when [(values _ err) (.Glob (assert fs/GlobFS (.-fsys t)) (+ glob "nonexist/[]"))] (== err nil)
+      (.errorf t "%s: Glob(%#q): bad pattern not detected" dir (+ glob "nonexist/[]")))
+
+
+    ;; Try to find a letter that appears in only some of the final names.
+    (let [c (conv rune \a)]
+      (for [] (<= c \z) (inc! c)
+        (let [(values have haveNot) (values false false)]
+          (range [_ d list]
+            (if (strings/ContainsRune (.Name d) c)
+              (set! have true)
+
+              (set! haveNot true)))
+
+
+          (when (and have haveNot)
+            (break))))
+
+
+      (when (> c \z)
+        (set! c \a))
+
+      (set! glob + (+ "*" (conv string c) "*"))
+
+      (let [^{:tag (slice string)} want (zero (slice string))]
+        (range [_ d list]
+          (when (strings/ContainsRune (.Name d) c)
+            (set! want (append want (path/Join dir (.Name d))))))
+
+
+
+        (let [(values names err) (.Glob (assert fs/GlobFS (.-fsys t)) glob)]
+          (when (!= err nil)
+            (.errorf t "%s: Glob(%#q): %w" dir glob err)
+            (return))
+
+          (when (^{:inst [(slice string) string]} slices/Equal want names)
+            (return))
+
+
+          (when (not (^{:inst [(slice string) string]} slices/IsSorted names))
+            (.errorf t "%s: Glob(%#q): unsorted output:\n%s" dir glob (strings/Join names "\n"))
+            (^{:inst [(slice string) string]} slices/Sort names))
+
+
+          (let [^{:tag (slice string)} problems (zero (slice string))]
+            (while (or (> (len want) 0) (> (len names) 0))
+              (switch
+                (case [(and (> (len want) 0) (> (len names) 0) (== (aget want 0) (aget names 0)))]
+                  (set! (values want names) (values (subslice want 1) (subslice names 1))))
+                (case [(and (> (len want) 0) ^:go/paren (or (== (len names) 0) (< (aget want 0) (aget names 0))))]
+                  (set! problems (append problems (+ "missing: " (aget want 0))))
+                  (set! want (subslice want 1)))
+                (default
+                  (set! problems (append problems (+ "extra: " (aget names 0))))
+                  (set! names (subslice names 1)))))
+
+
+            (.errorf t "%s: Glob(%#q): wrong output:\n%s" dir glob (strings/Join problems "\n"))))))))
+
+
+
+
+^{:go/end 468} (go/method checkStat "checkStat checks that a direct stat of path matches entry,\nwhich was found in the parent's directory listing.\n" [^{:tag (* fsTester)} t ^string path ^fs/DirEntry entry]
+  (let [(values file err) (.Open (.-fsys t) path)]
+    (when (!= err nil)
+      (.errorf t "%s: Open: %w" path err)
+      (return))
+
+    (let [(values info ^:assign err) (.Stat file)]
+      (.Close file)
+      (when (!= err nil)
+        (.errorf t "%s: Stat: %w" path err)
+        (return))
+
+      (let [fentry (formatEntry entry)
+          ^{:line 403} fientry (formatInfoEntry info)]
+        ;; Note: mismatch here is OK for symlink, because Open dereferences symlink.
+        (when (and (!= fentry fientry) (== (bit-and (.Type entry) fs/ModeSymlink) 0))
+          (.errorf t "%s: mismatch:\n\tentry = %s\n\tfile.Stat() = %s" path fentry fientry))
+
+
+        (let [(values einfo ^:assign err) (.Info entry)]
+          (when (!= err nil)
+            (.errorf t "%s: entry.Info: %w" path err)
+            (return))
+
+          (let [finfo (formatInfo info)]
+            (if (!= (bit-and (.Type entry) fs/ModeSymlink) 0)
+              ;; For symlink, just check that entry.Info matches entry on common fields.
+              ;; Open deferences symlink, so info itself may differ.
+              (let [feentry (formatInfoEntry einfo)]
+                (when (!= fentry feentry)
+                  (.errorf t "%s: mismatch\n\tentry = %s\n\tentry.Info() = %s\n" path fentry feentry)))
+
+
+              (let [feinfo (formatInfo einfo)]
+                (when (!= feinfo finfo)
+                  (.errorf t "%s: mismatch:\n\tentry.Info() = %s\n\tfile.Stat() = %s\n" path feinfo finfo))))
+
+
+
+            ;; Stat should be the same as Open+Stat, even for symlinks.
+            (let [(values info2 ^:assign err) (fs/Stat (.-fsys t) path)]
+              (when (!= err nil)
+                (.errorf t "%s: fs.Stat: %w" path err)
+                (return))
+
+              (let [finfo2 (formatInfo info2)]
+                (when (!= finfo2 finfo)
+                  (.errorf t "%s: fs.Stat(...) = %s\n\twant %s" path finfo2 finfo))
+
+
+                (when [(values fsys ok) (assert fs/StatFS (.-fsys t))] ok
+                  (let [(values info2 err) (.Stat fsys path)]
+                    (when (!= err nil)
+                      (.errorf t "%s: fsys.Stat: %w" path err)
+                      (return))
+
+                    (let [finfo2 (formatInfo info2)]
+                      (when (!= finfo2 finfo)
+                        (.errorf t "%s: fsys.Stat(...) = %s\n\twant %s" path finfo2 finfo)))))
+
+
+
+                (when [(values fsys ok) (assert fs/ReadLinkFS (.-fsys t))] ok
+                  (let [(values info2 err) (.Lstat fsys path)]
+                    (when (!= err nil)
+                      (.errorf t "%s: fsys.Lstat: %v" path err)
+                      (return))
+
+                    (let [fientry2 (formatInfoEntry info2)]
+                      (when (!= fentry fientry2)
+                        (.errorf t "%s: mismatch:\n\tentry = %s\n\tfsys.Lstat(...) = %s" path fentry fientry2))
+
+                      (let [feinfo (formatInfo einfo)
+                          ^{:line 463} finfo2 (formatInfo info2)]
+                        (when (!= feinfo finfo2)
+                          (.errorf t "%s: mismatch:\n\tentry.Info() = %s\n\tfsys.Lstat(...) = %s\n" path feinfo finfo2))))))))))))))
+
+
+
+
+
+
+^{:go/end 518} (go/method checkDirList "checkDirList checks that two directory lists contain the same files and file info.\nThe order of the lists need not match.\n" [^{:tag (* fsTester)} t ^string dir ^string desc ^{:tag (slice fs/DirEntry)} list1 ^{:tag (slice fs/DirEntry)} list2]
+  (let [old (make (map string fs/DirEntry))
+      ^{:line 474} checkMode ^{:go/end 482} (fn [^fs/DirEntry entry]
+        (when (!= (.IsDir entry) (!= (bit-and (.Type entry) fs/ModeDir) 0))
+          (if (.IsDir entry)
+            (.errorf t "%s: ReadDir returned %s with IsDir() = true, Type() & ModeDir = 0" dir (.Name entry))
+
+            (.errorf t "%s: ReadDir returned %s with IsDir() = false, Type() & ModeDir = ModeDir" dir (.Name entry)))))]
+
+
+
+
+    (range [_ entry1 list1]
+      (aset old (.Name entry1) entry1)
+      (checkMode entry1))
+
+
+    (let [^{:tag (slice string)} diffs (zero (slice string))]
+      (range [_ entry2 list2]
+        (let [entry1 (aget old (.Name entry2))]
+          (when (== entry1 nil)
+            (checkMode entry2)
+            (set! diffs (append diffs (+ "+ " (formatEntry entry2))))
+            (continue))
+
+          (when (!= (formatEntry entry1) (formatEntry entry2))
+            (set! diffs (append diffs (+ "- " (formatEntry entry1)) (+ "+ " (formatEntry entry2)))))
+
+          (delete old (.Name entry2))))
+
+      (range [_ entry1 old]
+        (set! diffs (append diffs (+ "- " (formatEntry entry1)))))
+
+
+      (when (== (len diffs) 0)
+        (return))
+
+
+      (^{:inst [(slice string) string]} slices/SortFunc diffs ^{:go/end 515} (fn ^int [^string a ^string b]
+          (let [fa (strings/Fields a)
+              ^{:line 512} fb (strings/Fields b)]
+            ;; sort by name (i < j) and then +/- (j < i, because + < -)
+            (strings/Compare (+ (aget fa 1) " " (aget fb 0)) (+ (aget fb 1) " " (aget fa 0))))))
+
+
+      (.errorf t "%s: diff %s:\n\t%s" dir desc (strings/Join diffs "\n\t")))))
+
+
+
+^{:go/end 589} (go/method checkFile "checkFile checks that basic file reading works correctly.\n" [^{:tag (* fsTester)} t ^string file]
+  (set! (.-files t) (append (.-files t) file))
+
+  ;; Read entire file.
+  (let [(values f err) (.Open (.-fsys t) file)]
+    (when (!= err nil)
+      (.errorf t "%s: Open: %w" file err)
+      (return))
+
+
+    (let [(values data ^:assign err) (io/ReadAll f)]
+      (when (!= err nil)
+        (.Close f)
+        (.errorf t "%s: Open+ReadAll: %w" file err)
+        (return))
+
+
+      (when [err (.Close f)] (!= err nil)
+        (.errorf t "%s: Close: %w" file err))
+
+
+      ;; Check that closing twice doesn't crash.
+      ;; The return value doesn't matter.
+      (.Close f)
+
+      ;; Check that ReadFile works if present.
+      (when [(values fsys ok) (assert fs/ReadFileFS (.-fsys t))] ok
+        (let [(values data2 err) (.ReadFile fsys file)]
+          (when (!= err nil)
+            (.errorf t "%s: fsys.ReadFile: %w" file err)
+            (return))
+
+          (.checkFileRead t file "ReadAll vs fsys.ReadFile" data data2)
+
+          ;; Modify the data and check it again. Modifying the
+          ;; returned byte slice should not affect the next call.
+          (range [i data2]
+            (inc! (aget data2 i)))
+
+          (set! (values data2 err) (.ReadFile fsys file))
+          (when (!= err nil)
+            (.errorf t "%s: second call to fsys.ReadFile: %w" file err)
+            (return))
+
+          (.checkFileRead t file "Readall vs second fsys.ReadFile" data data2)
+
+          (.checkBadPath t file "ReadFile"
+            ^{:go/end 568} (fn ^error [^string name] (let [(values _ err) (.ReadFile fsys name)] err)))))
+
+
+      ;; Check that fs.ReadFile works with t.fsys.
+      (let [(values data2 ^:assign err) (fs/ReadFile (.-fsys t) file)]
+        (when (!= err nil)
+          (.errorf t "%s: fs.ReadFile: %w" file err)
+          (return))
+
+        (.checkFileRead t file "ReadAll vs fs.ReadFile" data data2)
+
+        ;; Use iotest.TestReader to check small reads, Seek, ReadAt.
+        (set! (values f err) (.Open (.-fsys t) file))
+        (when (!= err nil)
+          (.errorf t "%s: second Open: %w" file err)
+          (return))
+
+        (defer (.Close f))
+        (when [err (iotest/TestReader f data)] (!= err nil)
+          (.errorf t "%s: failed TestReader:\n\t%s" file (strings/ReplaceAll (.Error err) "\n" "\n\t")))))))
+
+
+
+^{:go/end 596} (go/method checkFileRead [^{:tag (* fsTester)} t ^string file ^string desc ^{:tag (slice byte)} data1 ^{:tag (slice byte)} data2]
+  (when (!= (conv string data1) (conv string data2))
+    (.errorf t "%s: %s: different data returned\n\t%q\n\t%q" file desc data1 data2)
+    (return)))
+
+
+
+
+^{:go/end 607} (go/method checkOpen "checkOpen validates file opening behavior by attempting to open and then close the given file path.\n" [^{:tag (* fsTester)} t ^string file]
+  (.checkBadPath t file "Open" ^{:go/end 606} (fn ^error [^string file]
+      (let [(values f err) (.Open (.-fsys t) file)]
+        (when (== err nil)
+          (.Close f))
+
+        ^{:line 605} err))))
+
+
+
+
+^{:go/end 640} (go/method checkBadPath "checkBadPath checks that various invalid forms of file's name cannot be opened using open.\n" [^{:tag (* fsTester)} t ^string file ^string desc ^{:tag (func [string] [error])} open]
+  (let [bad (lit (slice string)
+        (+ "/" file)
+        (+ file "/."))]
+
+    (when (== file ".")
+      (set! bad (append bad "/")))
+
+    (when [i (strings/Index file "/")] (>= i 0)
+      (set! bad (append bad
+          (+ (subslice file _ i) "//" (subslice file (+ i 1)))
+          (+ (subslice file _ i) "/./" (subslice file (+ i 1)))
+          (+ (subslice file _ i) "\\" (subslice file (+ i 1)))
+          (+ (subslice file _ i) "/../" file))))
+
+
+    (when [i (strings/LastIndex file "/")] (>= i 0)
+      (set! bad (append bad
+          (+ (subslice file _ i) "//" (subslice file (+ i 1)))
+          (+ (subslice file _ i) "/./" (subslice file (+ i 1)))
+          (+ (subslice file _ i) "\\" (subslice file (+ i 1)))
+          (+ file "/../" (subslice file (+ i 1))))))
+
+
+
+    (range [_ b bad]
+      (when [err (open b)] (== err nil)
+        (.errorf t "%s: %s(%s) succeeded, want error" file desc b)))))

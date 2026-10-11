@@ -1,0 +1,241 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements a decision tree for fast matching of requests to
+;; patterns.
+;;
+;; The root of the tree branches on the host of the request.
+;; The next level branches on the method.
+;; The remaining levels branch on consecutive segments of the path.
+;;
+;; The "more specific wins" precedence rule can result in backtracking.
+;; For example, given the patterns
+;;     /a/b/z
+;;     /a/{x}/c
+;; we will first try to match the path "/a/b/c" with /a/b/z, and
+;; when that fails we will try against /a/{x}/c.
+
+(in-ns 'go.net.http) (go/file "routing_tree.go" :imports [
+
+
+    ^{:line 22} [strings "strings"]])
+
+
+
+
+(go/type routingNode "A routingNode is a node in the decision tree.\nThe same struct is used for leaf and interior nodes.\n" (struct
+
+
+    ^{:line 30 :tag (* pattern) :doc "A leaf node holds a single pattern and the Handler it was registered\nwith.\n"} pattern
+    ^{:line 31 :tag Handler} handler
+
+
+
+
+
+    ^{:line 37 :tag (mapping string (* routingNode)) :doc "An interior node maps parts of the incoming request to child nodes.\nspecial children keys:\n    \"/\"\ttrailing slash (resulting from {$})\n\t   \"\"   single wildcard\n"} children
+    ^{:line 38 :tag (* routingNode)} multiChild ; child with multi wildcard
+    ^{:line 39 :tag (* routingNode)} emptyChild)) ; optimization: child with key ""
+
+
+
+
+^{:go/end 51} (go/method addPattern "addPattern adds a pattern and its associated Handler to the tree\nat root.\n" [^{:tag (* routingNode)} root ^{:tag (* pattern)} p ^Handler h]
+  ;; First level of tree is host.
+  (let [n (.addChild root (.-host p))]
+    ;; Second level of tree is method.
+    (set! n (.addChild n (.-method p)))
+    ;; Remaining levels are path.
+    (.addSegments n (.-segments p) p h)))
+
+
+
+
+
+^{:go/end 74} (go/method addSegments "addSegments adds the given segments to the tree rooted at n.\nIf there are no segments, then n is a leaf node that holds\nthe given pattern and handler.\n" [^{:tag (* routingNode)} n ^{:tag (slice segment)} segs ^{:tag (* pattern)} p ^Handler h]
+  (when (== (len segs) 0)
+    (.set n p h)
+    (return))
+
+  (let [seg (aget segs 0)]
+    (cond (.-multi seg) (do
+        (when (!= (len segs) 1)
+          (panic "multi wildcard not last"))
+
+        (let [c (addr (lit routingNode))]
+          (set! (.-multiChild n) c)
+          (.set c p h)))
+      (.-wild seg)
+      (.addSegments (.addChild n "") (subslice segs 1) p h) :else
+
+      (.addSegments (.addChild n (.-s seg)) (subslice segs 1) p h))))
+
+
+
+
+
+^{:go/end 84} (go/method set "set sets the pattern and handler for n, which\nmust be a leaf node.\n" [^{:tag (* routingNode)} n ^{:tag (* pattern)} p ^Handler h]
+  (when (or (!= (.-pattern n) nil) (!= (.-handler n) nil))
+    (panic "non-nil leaf fields"))
+
+  (set! (.-pattern n) p)
+  (set! (.-handler n) h))
+
+
+
+
+^{:go/end 101} (go/method addChild "addChild adds a child node with the given key to n\nif one does not exist, and returns the child.\n" ^{:tag (* routingNode)} [^{:tag (* routingNode)} n ^string key]
+  (when (== key "")
+    (when (== (.-emptyChild n) nil)
+      (set! (.-emptyChild n) (addr (lit routingNode))))
+
+    (return (.-emptyChild n)))
+
+  (when [c (.findChild n key)] (!= c nil)
+    (return c))
+
+  (let [c (addr (lit routingNode))]
+    (.add (.-children n) key c)
+    ^{:line 100} c))
+
+
+
+
+^{:go/end 111} (go/method findChild "findChild returns the child of n with the given key, or nil\nif there is no child with that key.\n" ^{:tag (* routingNode)} [^{:tag (* routingNode)} n ^string key]
+  (when (== key "")
+    (return (.-emptyChild n)))
+
+  (let [(values r _) (.find (.-children n) key)]
+    ^{:line 110} r))
+
+
+
+
+
+
+^{:go/end 127} (go/method match "match returns the leaf node under root that matches the arguments, and a list\nof values for pattern wildcards in the order that the wildcards appear.\nFor example, if the request path is \"/a/b/c\" and the pattern is \"/{x}/b/{y}\",\nthen the second return value will be []string{\"a\", \"c\"}.\n" [^{:tag (* routingNode)} root ^string host ^string method ^string path] :results [(* routingNode) (slice string)]
+  (when (!= host "")
+    ;; There is a host. If there is a pattern that specifies that host and it
+    ;; matches, we are done. If the pattern doesn't match, fall through to
+    ;; try patterns with no host.
+    (when [(values l m) (.matchMethodAndPath (.findChild root host) method path)] (!= l nil)
+      (return l m)))
+
+
+  (.matchMethodAndPath (.-emptyChild root) method path))
+
+
+
+
+
+^{:go/end 148} (go/method matchMethodAndPath "matchMethodAndPath matches the method and path.\nIts return values are the same as [routingNode.match].\nThe receiver should be a child of the root.\n" [^{:tag (* routingNode)} n ^string method ^string path] :results [(* routingNode) (slice string)]
+  (when (== n nil)
+    (return nil nil))
+
+  (when [(values l m) (.matchPath (.findChild n method) path nil)] (!= l nil)
+    ;; Exact match of method name.
+    (return l m))
+
+  (when (== method "HEAD")
+    ;; GET matches HEAD too.
+    (when [(values l m) (.matchPath (.findChild n "GET") path nil)] (!= l nil)
+      (return l m)))
+
+
+  ;; No exact match; try patterns with no method.
+  (.matchPath (.-emptyChild n) path nil))
+
+
+
+
+
+
+^{:go/end 199} (go/method matchPath "matchPath matches a path.\nIts return values are the same as [routingNode.match].\nmatchPath calls itself recursively. The matches argument holds the wildcard matches\nfound so far.\n" [^{:tag (* routingNode)} n ^string path ^{:tag (slice string)} matches] :results [(* routingNode) (slice string)]
+  (when (== n nil)
+    (return nil nil))
+
+  ;; If path is empty, then we are done.
+  ;; If n is a leaf node, we found a match; return it.
+  ;; If n is an interior node (which means it has a nil pattern),
+  ;; then we failed to match.
+  (when (== path "")
+    (when (== (.-pattern n) nil)
+      (return nil nil))
+
+    (return n matches))
+
+  ;; Get the first segment of path.
+  (let [(values seg rest) (firstSegment path)]
+    ;; First try matching against patterns that have a literal for this position.
+    ;; We know by construction that such patterns are more specific than those
+    ;; with a wildcard at this position (they are either more specific, equivalent,
+    ;; or overlap, and we ruled out the first two when the patterns were registered).
+    (when [(values n m) (.matchPath (.findChild n seg) rest matches)] (!= n nil)
+      (return n m))
+
+    ;; If matching a literal fails, try again with patterns that have a single
+    ;; wildcard (represented by an empty string in the child mapping).
+    ;; Again, by construction, patterns with a single wildcard must be more specific than
+    ;; those with a multi wildcard.
+    ;; We skip this step if the segment is a trailing slash, because single wildcards
+    ;; don't match trailing slashes.
+    (when (!= seg "/")
+      (when [(values n m) (.matchPath (.-emptyChild n) rest (append matches seg))] (!= n nil)
+        (return n m)))
+
+
+    ;; Lastly, match the pattern (there can be at most one) that has a multi
+    ;; wildcard in this position to the rest of the path.
+    (when [c (.-multiChild n)] (!= c nil)
+      ;; Don't record a match for a nameless wildcard (which arises from a
+      ;; trailing slash in the pattern).
+      (when (!= (.-s (.lastSegment (.-pattern c))) "")
+        (set! matches (append matches (pathUnescape (subslice path 1))))) ; remove initial slash
+
+      (return c matches))
+
+    (return nil nil)))
+
+
+
+
+
+
+^{:go/end 215} (go/func firstSegment "firstSegment splits path into its first segment, and the rest.\nThe path must begin with \"/\".\nIf path consists of only a slash, firstSegment returns (\"/\", \"\").\nThe segment is returned unescaped, if possible.\n" [^string path] :results [^string seg ^string rest]
+  (when (== path "/")
+    (return "/" ""))
+
+  (set! path (subslice path 1)) ; drop initial slash
+  (let [i (strings/IndexByte path \/)]
+    (when (< i 0)
+      (set! i (len path)))
+
+    (return (pathUnescape (subslice path _ i)) (subslice path i))))
+
+
+
+
+^{:go/end 227} (go/method matchingMethods "matchingMethods adds to methodSet all the methods that would result in a\nmatch if passed to routingNode.match with the given host and path.\n" [^{:tag (* routingNode)} root ^string host ^string path ^{:tag (map string bool)} methodSet]
+  (when (!= host "")
+    (.matchingMethodsPath (.findChild root host) path methodSet))
+
+  (.matchingMethodsPath (.-emptyChild root) path methodSet)
+  (when (aget methodSet "GET")
+    (aset methodSet "HEAD" true)))
+
+
+
+^{:go/end 242} (go/method matchingMethodsPath [^{:tag (* routingNode)} n ^string path ^{:tag (map string bool)} set]
+  (when (== n nil)
+    (return))
+
+  (.eachPair (.-children n) ^{:go/breaks [[3 237]] :go/end 238} (fn ^bool [^string method ^{:tag (* routingNode)} c]
+      (when [(values p _) (.matchPath c path nil)] (!= p nil)
+        (aset set method true))
+
+      true)))
+
+;; Don't look at the empty child. If there were an empty
+;; child, it would match on any method, but we only
+;; call this when we fail to match on a method.

@@ -1,0 +1,356 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Trace stack table and acquisition.
+
+(in-ns 'go.runtime) (go/file "tracestack.go" :imports [
+
+
+    ^{:line 10} [abi "internal/abi"]
+    ^{:line 11} [goarch "internal/goarch"]
+    ^{:line 12} [tracev2 "internal/trace/tracev2"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+(go/const
+
+
+
+
+  ^{:line 21} [^{:val 18446744073709551615N :doc "logicalStackSentinel is a sentinel value at pcBuf[0] signifying that\npcBuf[1:] holds a logical stack requiring no further processing. Any other\nvalue at pcBuf[0] represents a skip value to apply to the physical stack in\npcBuf[1:] after inline expansion.\n"} logicalStackSentinel (bit-not (conv uintptr 0))])
+
+
+
+
+
+
+
+
+
+
+^{:go/end 137} (go/func traceStack "traceStack captures a stack trace from a goroutine and registers it in the trace\nstack table. It then returns its unique ID. If gp == nil, then traceStack will\nattempt to use the current execution context.\n\nskip controls the number of leaf frames to omit in order to hide tracer internals\nfrom stack traces, see CL 5523.\n\nAvoid calling this function directly. Prefer traceEventWriter.stack.\n" ^uint64 [^int skip ^{:tag (* g)} gp ^{:tag (* traceStackTable)} tab]
+  (let [pcBuf (.-profStack (.-m (getg)))
+
+      ;; Figure out gp and mp for the backtrace.
+      ^{:line 36 :tag (* m)} mp (zero (* m))]
+    (when (== gp nil)
+      (set! mp (.-m (getg)))
+      (set! gp (.-curg mp)))
+
+
+    ;; Double-check that we own the stack we're about to trace.
+    (when (and (!= (.-traceCheckStackOwnership debug) 0) (!= gp nil))
+      (let [status (readgstatus gp)]
+        ;; If the scan bit is set, assume we're the ones that acquired it.
+        (when (== (bit-and status _Gscan) 0)
+          ;; Use the trace status to check this. There are a number of cases
+          ;; where a running goroutine might be in _Gwaiting, and these cases
+          ;; are totally fine for taking a stack trace. They're captured
+          ;; correctly in goStatusToTraceGoStatus.
+          (switch (goStatusToTraceGoStatus status (.-waitreason gp))
+            (case [tracev2/GoRunning tracev2/GoSyscall]
+              (when (or (== (getg) gp) (== (.-curg mp) gp))
+                (break))
+
+              (fallthrough))
+            (default
+              (print "runtime: gp=" (conv unsafe/Pointer gp) " gp.goid=" (.-goid gp) " status=" (aget gStatusStrings status) "\n")
+              (throw "attempted to trace stack of a goroutine this thread does not own"))))))
+
+
+
+
+    (when (and (!= gp nil) (== mp nil))
+      ;; We're getting the backtrace for a G that's not currently executing.
+      ;; It may still have an M, if it's locked to some M.
+      (set! mp (.ptr (.-lockedm gp))))
+
+    (let [nstk 1]
+      (if (or (tracefpunwindoff) ^:go/paren (and (!= mp nil) (.hasCgoOnStack mp))) (do
+          ;; Slow path: Unwind using default unwinder. Used when frame pointer
+          ;; unwinding is unavailable or disabled (tracefpunwindoff), or might
+          ;; produce incomplete results or crashes (hasCgoOnStack). Note that no
+          ;; cgo callback related crashes have been observed yet. The main
+          ;; motivation is to take advantage of a potentially registered cgo
+          ;; symbolizer.
+          (aset pcBuf 0 logicalStackSentinel)
+          (cond (== (getg) gp)
+            (set! nstk + (callers (+ skip 1) (subslice pcBuf 1)))
+            (!= gp nil)
+            (set! nstk + (gcallers gp skip (subslice pcBuf 1)))))
+
+        (do
+          ;; Fast path: Unwind using frame pointers.
+          (aset pcBuf 0 (conv uintptr skip))
+          (cond (== (getg) gp)
+            (set! nstk + (fpTracebackPCs (conv unsafe/Pointer (getfp)) (subslice pcBuf 1)))
+            (!= gp nil)
+            ;; Three cases:
+            ;;
+            ;; (1) We're called on the g0 stack through mcall(fn) or systemstack(fn). To
+            ;; behave like gcallers above, we start unwinding from sched.bp, which
+            ;; points to the caller frame of the leaf frame on g's stack. The return
+            ;; address of the leaf frame is stored in sched.pc, which we manually
+            ;; capture here.
+            ;;
+            ;; (2) We're called against a gp that we're not currently executing on, but that isn't
+            ;; in a syscall, in which case it's currently not executing. gp.sched contains the most
+            ;; up-to-date information about where it stopped, and like case (1), we match gcallers
+            ;; here.
+            ;;
+            ;; (3) We're called against a gp that we're not currently executing on, but that is in
+            ;; a syscall, in which case gp.syscallsp != 0. gp.syscall* contains the most up-to-date
+            ;; information about where it stopped, and like case (1), we match gcallers here.
+            (if (!= (.-syscallsp gp) 0) (do
+                (aset pcBuf 1 (.-syscallpc gp))
+                (set! nstk + (+ 1 (fpTracebackPCs (conv unsafe/Pointer (.-syscallbp gp)) (subslice pcBuf 2)))))
+              (do
+                (aset pcBuf 1 (.-pc (.-sched gp)))
+                (if (.-syncSafePoint gp) (do
+                    ;; We're stopped in morestack, which is an odd state because gp.sched.bp
+                    ;; refers to our parent frame, since we haven't had the chance to push our
+                    ;; frame pointer to the stack yet. If we just start walking from gp.sched.bp,
+                    ;; we'll skip a frame as a result. Luckily, we can find the PC we want right
+                    ;; at gp.sched.sp on non-LR platforms, and we have it directly on LR platforms.
+                    ;; See issue go.dev/issue/68090.
+                    (if usesLR
+                      (aset pcBuf 2 (.-lr (.-sched gp)))
+
+                      (aset pcBuf 2 @(conv (* uintptr) (conv unsafe/Pointer (.-sp (.-sched gp))))))
+
+                    (set! nstk + (+ 2 (fpTracebackPCs (conv unsafe/Pointer (.-bp (.-sched gp))) (subslice pcBuf 3)))))
+
+                  (set! nstk + (+ 1 (fpTracebackPCs (conv unsafe/Pointer (.-bp (.-sched gp))) (subslice pcBuf 2))))))))))
+
+
+
+
+      (when (> nstk 0)
+        (dec! nstk)) ; skip runtime.goexit
+
+      (when (and (> nstk 0) (== (.-goid gp) 1))
+        (dec! nstk)) ; skip runtime.main
+
+      (let [id (.put tab (subslice pcBuf _ nstk))]
+        ^{:line 136} id))))
+
+
+
+
+
+(go/type traceStackTable "traceStackTable maps stack traces (arrays of PC's) to unique IDs.\n\nID 0 is reserved for a zero-length stack.\n" (struct
+    ^{:line 143 :tag traceMap} tab))
+
+
+
+
+^{:go/end 156} (go/method put "put returns a unique id for the stack trace pcs and caches it in the table,\nif it sees the trace for the first time.\n" ^uint64 [^{:tag (* traceStackTable)} t ^{:tag (slice uintptr)} pcs]
+  ;; Even though put will handle this for us, taking the address of pcs forces a bounds check
+  ;; that will fail if len(pcs) == 0.
+  (when (== (len pcs) 0)
+    (return 0)) ; ID 0 is reserved for zero-length stacks.
+
+  (let [(values id _) (.put (.-tab t) (noescape (conv unsafe/Pointer (addr (aget pcs 0)))) (* (conv uintptr (len pcs)) (unsafe/Sizeof (conv uintptr 0))))]
+    ^{:line 155} id))
+
+
+
+
+
+^{:go/end 169} (go/method dump "dump writes all previously cached stacks to trace buffers,\nreleases all memory and resets state. It must only be called once the caller\ncan guarantee that there are no more writers to the table.\n" [^{:tag (* traceStackTable)} t ^uintptr gen]
+  (let [stackBuf (make (slice uintptr) tracev2/MaxFramesPerStack)
+      ^{:line 163} w (unsafeTraceWriter gen nil)]
+    (when [root (conv (* traceMapNode) (.Load (.-root (.-tab t))))] (!= root nil)
+      (set! w (dumpStacksRec root w stackBuf)))
+
+    (.end (.flush w))
+    (.reset (.-tab t))))
+
+
+^{:go/end 214} (go/func dumpStacksRec ^traceWriter [^{:tag (* traceMapNode)} node ^traceWriter w ^{:tag (slice uintptr)} stackBuf]
+  (let [stack (unsafe/Slice (conv (* uintptr) (conv unsafe/Pointer (addr (aget (.-data node) 0)))) (/ (conv uintptr (len (.-data node))) (unsafe/Sizeof (conv uintptr 0))))
+
+      ;; N.B. This might allocate, but that's OK because we're not writing to the M's buffer,
+      ;; but one we're about to create (with ensure).
+      ^{:line 176} n (fpunwindExpand stackBuf stack)
+      ^{:line 177} frames (makeTraceFrames ^{:go/via [traceLocker]} (.-gen w) (subslice stackBuf _ n))
+
+      ;; The maximum number of bytes required to hold the encoded stack, given that
+      ;; it contains N frames.
+      ^{:line 181} maxBytes (+ 1 (* (+ 2 (* 4 (len frames))) traceBytesPerNumber))
+
+      ;; Estimate the size of this record. This
+      ;; bound is pretty loose, but avoids counting
+      ;; lots of varint sizes.
+      ;;
+      ;; Add 1 because we might also write tracev2.EvStacks.
+      ^{:line 188 :tag bool} flushed (zero bool)]
+    (set! (values w flushed) (.ensure w (+ 1 maxBytes)))
+    (when flushed
+      ^{:go/via [traceBuf]} (.byte w (conv byte tracev2/EvStacks)))
+
+
+    ;; Emit stack event.
+    ^{:go/via [traceBuf]} (.byte w (conv byte tracev2/EvStack))
+    ^{:go/via [traceBuf]} (.varint w (.-id node))
+    ^{:go/via [traceBuf]} (.varint w (conv uint64 (len frames)))
+    (range [_ frame frames]
+      ^{:go/via [traceBuf]} (.varint w (conv uint64 (.-PC frame)))
+      ^{:go/via [traceBuf]} (.varint w (.-funcID frame))
+      ^{:go/via [traceBuf]} (.varint w (.-fileID frame))
+      ^{:go/via [traceBuf]} (.varint w (.-line frame)))
+
+
+    ;; Recursively walk all child nodes.
+    (range [i (.-children node)]
+      (let [child (.Load (aget (.-children node) i))]
+        (when (== child nil)
+          (continue))
+
+        (set! w (dumpStacksRec (conv (* traceMapNode) child) w stackBuf))))
+
+    ^{:line 213} w))
+
+
+
+
+^{:go/end 228} (go/func makeTraceFrames "makeTraceFrames returns the frames corresponding to pcs. It may\nallocate and may emit trace events.\n" ^{:tag (slice traceFrame)} [^uintptr gen ^{:tag (slice uintptr)} pcs]
+  (let [frames (make (slice traceFrame) 0 (len pcs))
+      ^{:line 220} ci (CallersFrames pcs)]
+    (while true
+      (let [(values f more) (.Next ci)]
+        (set! frames (append frames (makeTraceFrame gen f)))
+        (when (not more)
+          (return frames))))))
+
+
+
+
+(go/type traceFrame (struct
+    ^{:line 231 :tag uintptr} PC
+    ^{:line 232 :tag uint64} funcID
+    ^{:line 233 :tag uint64} fileID
+    ^{:line 234 :tag uint64} line))
+
+
+
+^{:go/end 255} (go/func makeTraceFrame "makeTraceFrame sets up a traceFrame for a frame.\n" ^traceFrame [^uintptr gen ^Frame f]
+  (let [^traceFrame frame (zero traceFrame)]
+    (set! (.-PC frame) (.-PC f))
+
+    (let [fn (.-Function f)
+        ^:const ^{:line 243 :val 1024} maxLen (<< 1 10)]
+      (when (> (len fn) maxLen)
+        (set! fn (subslice fn (- (len fn) maxLen))))
+
+      (set! (.-funcID frame) (.put (aget (.-stringTab trace) (% gen 2)) gen fn))
+      (set! (.-line frame) (conv uint64 (.-Line f)))
+      (let [file (.-File f)]
+        (when (> (len file) maxLen)
+          (set! file (subslice file (- (len file) maxLen))))
+
+        (set! (.-fileID frame) (.put (aget (.-stringTab trace) (% gen 2)) gen file))
+        ^{:line 254} frame))))
+
+
+
+
+^{:go/end 261} (go/func tracefpunwindoff "tracefpunwindoff returns true if frame pointer unwinding for the tracer is\ndisabled via GODEBUG or not supported by the architecture.\n" ^bool []
+  (or (!= (.-tracefpunwindoff debug) 0) ^:go/paren (and (!= goarch/ArchFamily goarch/AMD64) (!= goarch/ArchFamily goarch/ARM64))))
+
+
+
+
+
+
+^{:go/end 275} (go/func fpTracebackPCs "fpTracebackPCs populates pcBuf with the return addresses for each frame and\nreturns the number of PCs written to pcBuf. The returned PCs correspond to\n\"physical frames\" rather than \"logical frames\"; that is if A is inlined into\nB, this will return a PC for only B.\n" [^unsafe/Pointer fp ^{:tag (slice uintptr)} pcBuf] :results [^int i]
+  (for [(set! i 0)] (and (< i (len pcBuf)) (!= fp nil)) (inc! i)
+    ;; return addr sits one word above the frame pointer
+    (aset pcBuf i @(conv (* uintptr) (conv unsafe/Pointer (+ (conv uintptr fp) goarch/PtrSize))))
+    ;; follow the frame pointer to the next one
+    (set! fp (conv unsafe/Pointer @(conv (* uintptr) fp))))
+
+  ^{:line 274} i)
+
+
+
+^{:go/end 280} (go/func ^{:go/linkname "pprof_fpunwindExpand"} pprof_fpunwindExpand ^int [^{:tag (slice uintptr)} dst ^{:tag (slice uintptr)} src]
+  (fpunwindExpand dst src))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 342} (go/func fpunwindExpand "fpunwindExpand expands a call stack from pcBuf into dst,\nreturning the number of PCs written to dst.\npcBuf and dst should not overlap.\n\nfpunwindExpand checks if pcBuf contains logical frames (which include inlined\nframes) or physical frames (produced by frame pointer unwinding) using a\nsentinel value in pcBuf[0]. Logical frames are simply returned without the\nsentinel. Physical frames are turned into logical frames via inline unwinding\nand by applying the skip value that's stored in pcBuf[0].\n" ^int [^{:tag (slice uintptr)} dst ^{:tag (slice uintptr)} pcBuf]
+  (cond (== (len pcBuf) 0)
+    (return 0)
+    (and (> (len pcBuf) 0) (== (aget pcBuf 0) logicalStackSentinel))
+    ;; pcBuf contains logical rather than inlined frames, skip has already been
+    ;; applied, just return it without the sentinel value in pcBuf[0].
+    (return (copy dst (subslice pcBuf 1))))
+
+
+  (let [
+      ^{:line 301 :tag int} n (zero int)
+      ^:var ^{:line 302} lastFuncID abi/FuncIDNormal
+      ^:var ^{:line 303} skip (aget pcBuf 0)
+      ;; skipOrAdd skips or appends retPC to newPCBuf and returns true if more
+      ;; pcs can be added.
+      ^:var ^{:line 306} skipOrAdd ^{:go/end 314} (fn ^bool [^uintptr retPC]
+        (cond (> skip 0)
+          (dec! skip)
+          (< n (len dst)) (do
+            (aset dst n retPC)
+            (inc! n)))
+
+        (< n (len dst)))]
+
+
+
+    (label :outer
+      (range [_ retPC (subslice pcBuf 1)]
+        (let [callPC (- retPC 1)
+            ^{:line 320} fi (findfunc callPC)]
+          (when (not (.valid fi))
+            ;; There is no funcInfo if callPC belongs to a C function. In this case
+            ;; we still keep the pc, but don't attempt to expand inlined frames.
+            (when [more (skipOrAdd retPC)] (not more)
+              (break :outer))
+
+            (continue))
+
+
+          (let [(values u uf) (newInlineUnwinder fi callPC)]
+            (for [] (.valid uf) (set! uf (.next u uf))
+              (let [sf (.srcFunc u uf)]
+                (if (and (== (.-funcID sf) abi/FuncIDWrapper) (elideWrapperCalling lastFuncID)) (do)
+                  ;; ignore wrappers
+                  (when [more (skipOrAdd (+ (.-pc uf) 1))] (not more)
+                    (break :outer)))
+
+                (set! lastFuncID (.-funcID sf))))))))
+
+
+    ^{:line 341} n))
+
+
+
+
+
+^{:go/end 357} (go/func startPCForTrace "startPCForTrace returns the start PC of a goroutine for tracing purposes.\nIf pc is a wrapper, it returns the PC of the wrapped function. Otherwise it\nreturns pc.\n" ^uintptr [^uintptr pc]
+  (let [f (findfunc pc)]
+    (when (not (.valid f))
+      (return pc)) ; may happen for locked g in extra M since its pc is 0.
+
+    (let [w (funcdata f abi/FUNCDATA_WrapInfo)]
+      (when (== w nil)
+        (return pc)) ; not a wrapper
+
+      (.textAddr (.-datap f) @(conv (* uint32) w)))))

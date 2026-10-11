@@ -1,0 +1,568 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.math.big.internal.asmgen) (go/file "pipe.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [bits "math/bits"]
+    ^{:line 10} [slices "slices"]])
+
+
+;; Note: Exported fields and methods are expected to be used
+;; by function generators (like the ones in add.go and so on).
+;; Unexported fields and methods should not be.
+
+
+
+
+
+
+
+
+(go/type Pipe "A Pipe manages the input and output data pipelines for a function's\nmemory operations.\n\nThe input is one or more equal-length slices of words, so collectively\nit can be viewed as a matrix, in which each slice is a row and each column\nis a set of corresponding words from the different slices.\nThe output can be viewed the same way, although it is often just one row.\n" (struct
+    ^{:line 25 :tag (* Func)} f ; function being generated
+    ^{:line 26 :tag string} label ; prefix for loop labels (default "loop")
+    ^{:line 27 :tag bool} backward ; processing columns in reverse
+    ^{:line 28 :tag bool} started ; Start has been called
+    ^{:line 29 :tag bool} loaded ; LoadPtrs has been called
+    ^{:line 30 :tag (slice RegPtr)} inPtr ; input slice pointers
+    ^{:line 31 :tag (slice Hint)} hints ; for each inPtr, a register hint to use for its data
+    ^{:line 32 :tag (slice RegPtr)} outPtr ; output slice pointers
+    ^{:line 33 :tag Reg} index ; index register, if in use
+    ^{:line 34 :tag bool} useIndexCounter ; index counter requested
+    ^{:line 35 :tag int} indexCounter ; index is also counter (386); 0 no, -1 negative counter, +1 positive counter
+    ^{:line 36 :tag int} readOff ; read offset not yet added to index
+    ^{:line 37 :tag int} writeOff ; write offset not yet added to index
+    ^{:line 38 :tag (slice int)} factors ; unrolling factors
+    ^{:line 39 :tag (slice Reg)} counts ; iterations for each factor
+    ^{:line 40 :tag bool} needWrite ; need a write call during Loop1/LoopN
+    ^{:line 41 :tag int} maxColumns ; maximum columns during unrolled loop
+    ^{:line 42 :tag (func [])} unrollStart ; emit code at start of unrolled body
+    ^{:line 43 :tag (func [])} unrollEnd)) ; emit code end of unrolled body
+
+
+
+^{:go/end 58} (go/method Pipe "Pipe creates and returns a new pipe for use in the function f.\n" ^{:tag (* Pipe)} [^{:tag (* Func)} f]
+  (let [a (.-Asm f)
+      ^{:line 49} p (addr ^{:go/breaks [2 4 6]} (lit Pipe
+          :f f
+          :label "loop"
+          :maxColumns 10000000))]
+
+    (when [m (.-maxColumns (.-Arch a))] (!= m 0)
+      (set! (.-maxColumns p) m))
+
+    ^{:line 57} p))
+
+
+
+
+^{:go/end 67} (go/method SetBackward "SetBackward sets the pipe to process the input and output columns in reverse order.\nThis is needed for left shifts, which might otherwise overwrite data they will read later.\n" [^{:tag (* Pipe)} p]
+  (when (.-loaded p)
+    (.Fatalf (.-Asm (.-f p)) "SetBackward after Start/LoadPtrs"))
+
+  (set! (.-backward p) true))
+
+
+
+
+
+
+^{:go/end 78} (go/method SetUseIndexCounter "SetUseIndexCounter sets the pipe to use an index counter if possible,\nmeaning the loop counter is also used as an index for accessing the slice data.\nThis clever trick is slower on modern processors, but it is still necessary on 386.\nOn non-386 systems, SetUseIndexCounter is a no-op.\n" [^{:tag (* Pipe)} p]
+  (when (== (.-memIndex (.-Arch (.-Asm (.-f p)))) nil) ; need memIndex (only 386 provides it)
+    (return))
+
+  (set! (.-useIndexCounter p) true))
+
+
+
+
+^{:go/end 84} (go/method SetLabel "SetLabel sets the label prefix for the loops emitted by the pipe.\nThe default prefix is \"loop\".\n" [^{:tag (* Pipe)} p ^string label]
+  (set! (.-label p) label))
+
+
+
+
+^{:go/end 90} (go/method SetMaxColumns "SetMaxColumns sets the maximum number of\ncolumns processed in a single loop body call.\n" [^{:tag (* Pipe)} p ^int m]
+  (set! (.-maxColumns p) m))
+
+
+
+
+
+
+
+
+^{:go/end 113} (go/method SetHint "SetHint records that the inputs from the named vector\nshould be allocated with the given register hint.\n\nIf the hint indicates a single register on the target architecture,\nthen SetHint calls SetMaxColumns(1), since the hinted register\ncan only be used for one value at a time.\n" [^{:tag (* Pipe)} p ^string name ^Hint hint]
+  (when (and (== hint HintMemOK) (not (.-memOK (.-Arch (.-Asm (.-f p))))))
+    (return))
+
+  (let [i (^{:inst [(slice string) string]} slices/Index (.-inputs (.-f p)) name)]
+    (when (< i 0)
+      (.Fatalf (.-Asm (.-f p)) "unknown input name %s" name))
+
+    (when (!= (.hint (.-Asm (.-f p)) hint) "")
+      (.SetMaxColumns p 1))
+
+    (while (<= (len (.-hints p)) i)
+      (set! (.-hints p) (append (.-hints p) HintNone)))
+
+    (aset (.-hints p) i hint)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 193} (go/method LoadPtrs "LoadPtrs loads the slice pointer arguments into registers,\nassuming that the slice length n has already been loaded\ninto the register n.\n\nStart will call LoadPtrs if it has not been called already.\nLoadPtrs only needs to be called explicitly when code needs\nto use LoadN before Start, like when the shift.go generators\nread an initial word before the loop.\n" [^{:tag (* Pipe)} p ^Reg n]
+  (let [a (.-Asm (.-f p))]
+    (when (.-loaded p)
+      (.Fatalf a "pointers already loaded"))
+
+
+    ;; Load the actual pointers.
+    (set! (.-loaded p) true)
+    (range [_ name (.-inputs (.-f p))]
+      (set! (.-inPtr p) (append (.-inPtr p) (conv RegPtr (.Arg (.-f p) (+ name "_base"))))))
+
+    (range [_ name (.-outputs (.-f p))]
+      (set! (.-outPtr p) (append (.-outPtr p) (conv RegPtr (.Arg (.-f p) (+ name "_base"))))))
+
+
+    ;; Decide the memory access strategy for LoadN and StoreN.
+    (switch
+      (case [(and (.-backward p) (.-useIndexCounter p))]
+        ;; Generator wants an index counter, meaning when the iteration counter
+        ;; is AX, we will access the slice with pointer BX using (BX)(AX*WordBytes).
+        ;; The loop is moving backward through the slice, but the counter
+        ;; is also moving backward, so not much to do.
+        (.Comment a "run loop backward, using counter as positive index")
+        (set! (.-indexCounter p) (+ 1))
+        (set! (.-index p) n))
+
+      (case [(and (not (.-backward p)) (.-useIndexCounter p))]
+        ;; Generator wants an index counter, but the loop is moving forward.
+        ;; To make the counter move in the direction of data access,
+        ;; we negate the counter, counting up from -len(z) to -1.
+        ;; To make the index access the right words, we add len(z)*WordBytes
+        ;; to each of the pointers.
+        ;; See comment below about the garbage collector (non-)implications
+        ;; of pointing beyond the slice bounds.
+        (.Comment a "use counter as negative index")
+        (set! (.-indexCounter p) -1)
+        (set! (.-index p) n)
+        (range [_ ptr (.-inPtr p)]
+          (.AddWords a n ptr ptr))
+
+        (range [_ ptr (.-outPtr p)]
+          (.AddWords a n ptr ptr))
+
+        (.Neg a n n))
+
+      (case [(.-backward p)]
+        ;; Generator wants to run the loop backward.
+        ;; We'll decrement the pointers before using them,
+        ;; so position them at the very end of the slices.
+        ;; If we had precise pointer information for assembly,
+        ;; these pointers would cause problems with the garbage collector,
+        ;; since they no longer point into the allocated slice,
+        ;; but the garbage collector ignores unexpected values in assembly stacks,
+        ;; and the actual slice pointers are still in the argument stack slots,
+        ;; so the slices won't be collected early.
+        ;; If we switched to the register ABI, we might have to rethink this.
+        ;; (The same thing happens by the end of forward loops,
+        ;; but it's less important since once the pointers go off the slice
+        ;; in a forward loop, the loop is over and the slice won't be accessed anymore.)
+        (.Comment a "run loop backward")
+        (range [_ ptr (.-inPtr p)]
+          (.AddWords a n ptr ptr))
+
+        (range [_ ptr (.-outPtr p)]
+          (.AddWords a n ptr ptr)))
+
+
+      (case [(not (.-backward p))]))))
+;; Nothing to do!
+
+
+
+
+
+
+^{:go/end 245} (go/method LoadN "LoadN returns the next n columns of input words as a slice of rows.\nRegs for inputs that have been marked using p.SetMemOK will be direct memory references.\nRegs for other inputs will be newly allocated registers and must be freed.\n" ^{:tag (slice (slice Reg))} [^{:tag (* Pipe)} p ^int n]
+  (let [a (.-Asm (.-f p))
+      ^{:line 200} regs (make (slice (slice Reg)) (len (.-inPtr p)))]
+    (range [i ptr (.-inPtr p)]
+      (aset regs i (make (slice Reg) n))
+      (switch
+        (case [(!= (.-loadIncN (.-Arch a)) nil)]
+          ;; Load from memory and advance pointers at the same time.
+          (range [j (aget regs i)]
+            (aset (aget regs i) j (.Reg (.-Asm (.-f p)))))
+
+          (if (.-backward p)
+            ((.-loadDecN (.-Arch a)) a ptr (aget regs i))
+
+            ((.-loadIncN (.-Arch a)) a ptr (aget regs i))))
+
+
+        (default
+          ;; Load from memory using offsets.
+          ;; We'll advance the pointers or the index counter later.
+          (range [j n]
+            (let [off (+ (.-readOff p) j)]
+              (when (.-backward p)
+                (set! off (- (+ off 1))))
+
+              (let [^Reg mem (zero Reg)]
+                (if (!= (.-indexCounter p) 0)
+                  (set! mem ((.-memIndex (.-Arch a)) a (* off (.-WordBytes (.-Arch a))) (.-index p) ptr))
+
+                  (set! mem (.mem ptr (* off (.-WordBytes (.-Arch a))))))
+
+                (let [h HintNone]
+                  (when (< i (len (.-hints p)))
+                    (set! h (aget (.-hints p) i)))
+
+                  (if (== h HintMemOK)
+                    (aset (aget regs i) j mem)
+
+                    (let [r (.RegHint (.-Asm (.-f p)) h)]
+                      (.Mov a mem r)
+                      (aset (aget regs i) j r))))))))))
+
+
+
+
+    (set! (.-readOff p) + n)
+    ^{:line 244} regs))
+
+
+
+^{:go/end 284} (go/method StoreN "StoreN writes regs (a slice of rows) to the next n columns of output, where n = len(regs[0]).\n" [^{:tag (* Pipe)} p ^{:tag (slice (slice Reg))} regs]
+  (set! (.-needWrite p) false)
+  (let [a (.-Asm (.-f p))]
+    (when (!= (len regs) (len (.-outPtr p)))
+      (.Fatalf (.-Asm (.-f p)) "wrong number of output rows"))
+
+    (let [n (len (aget regs 0))]
+      (range [i ptr (.-outPtr p)]
+        (switch
+          (case [(!= (.-storeIncN (.-Arch a)) nil)]
+            ;; Store to memory and advance pointers at the same time.
+            (if (.-backward p)
+              ((.-storeDecN (.-Arch a)) a ptr (aget regs i))
+
+              ((.-storeIncN (.-Arch a)) a ptr (aget regs i))))
+
+
+          (default
+            ;; Store to memory using offsets.
+            ;; We'll advance the pointers or the index counter later.
+            (range [j r (aget regs i)]
+              (let [off (+ (.-writeOff p) j)]
+                (when (.-backward p)
+                  (set! off (- (+ off 1))))
+
+                (let [^Reg mem (zero Reg)]
+                  (if (!= (.-indexCounter p) 0)
+                    (set! mem ((.-memIndex (.-Arch a)) a (* off (.-WordBytes (.-Arch a))) (.-index p) ptr))
+
+                    (set! mem (.mem ptr (* off (.-WordBytes (.-Arch a))))))
+
+                  (.Mov a r mem)))))))
+
+
+
+      (set! (.-writeOff p) + n))))
+
+
+
+
+
+^{:go/end 313} (go/method advancePtrs "advancePtrs advances the pointers by step\nor handles bookkeeping for an imminent index advance by step\nthat the caller will do.\n" [^{:tag (* Pipe)} p ^int step]
+  (let [a (.-Asm (.-f p))]
+    (switch
+      (case [(!= (.-loadIncN (.-Arch a)) nil)])
+      ;; nothing to do
+
+      (default
+        ;; Adjust read/write offsets for pointer advance (or imminent index advance).
+        (set! (.-readOff p) - step)
+        (set! (.-writeOff p) - step)
+
+        (when (== (.-indexCounter p) 0)
+          ;; Advance pointers.
+          (when (.-backward p)
+            (set! step (- step)))
+
+          (range [_ ptr (.-inPtr p)]
+            (.Add a (.Imm a (* step (.-WordBytes (.-Arch a)))) (conv Reg ptr) (conv Reg ptr) KeepCarry))
+
+          (range [_ ptr (.-outPtr p)]
+            (.Add a (.Imm a (* step (.-WordBytes (.-Arch a)))) (conv Reg ptr) (conv Reg ptr) KeepCarry)))))))
+
+
+
+
+
+
+
+
+^{:go/end 330} (go/method DropInput "DropInput deletes the named input from the pipe,\nusually because it has been exhausted.\n(This is not used yet but will be used in a future generator.)\n" [^{:tag (* Pipe)} p ^string name]
+  (let [i (^{:inst [(slice string) string]} slices/Index (.-inputs (.-f p)) name)]
+    (when (< i 0)
+      (.Fatalf (.-Asm (.-f p)) "unknown input %s" name))
+
+    (let [ptr (aget (.-inPtr p) i)]
+      (.Free (.-Asm (.-f p)) (conv Reg ptr))
+      (set! (.-inPtr p) (^{:inst [(slice RegPtr) RegPtr]} slices/Delete (.-inPtr p) i (+ i 1)))
+      (set! (.-inputs (.-f p)) (^{:inst [(slice string) string]} slices/Delete (.-inputs (.-f p)) i (+ i 1)))
+      (when (> (len (.-hints p)) i)
+        (set! (.-hints p) (^{:inst [(slice Hint) Hint]} slices/Delete (.-hints p) i (+ i 1)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 388} (go/method Start "Start prepares to loop over n columns.\nThe factors give a sequence of unrolling factors to use,\nwhich must be either strictly increasing or strictly decreasing\nand must include 1.\nFor example, 4, 1 means to process 4 elements at a time\nand then 1 at a time for the final 0-3; specifying 1,4 instead\nhandles 0-3 elements first and then 4 at a time.\nSimilarly, 32, 4, 1 means to process 32 at a time,\nthen 4 at a time, then 1 at a time.\n\nOne benefit of using 1, 4 instead of 4, 1 is that the body\nprocessing 4 at a time needs more registers, and if it is\nthe final body, the register holding the fragment count (0-3)\nhas been freed and is available for use.\n\nStart may modify the carry flag.\n\nStart must be followed by a call to Loop1 or LoopN,\nbut it is permitted to emit other instructions first,\nfor example to set an initial carry flag.\n" [^{:tag (* Pipe)} p ^Reg n & ^{:tag (slice int)} factors]
+  (let [a (.-Asm (.-f p))]
+    (when (.-started p)
+      (.Fatalf a "loop already started"))
+
+    (when (and (.-useIndexCounter p) (> (len factors) 1))
+      (.Fatalf a "cannot call SetUseIndexCounter and then use Start with factors != [1]; have factors = %v" factors))
+
+    (set! (.-started p) true)
+    (when (not (.-loaded p))
+      (when (== (len factors) 1)
+        (.SetUseIndexCounter p))
+
+      (.LoadPtrs p n))
+
+
+    ;; If there were calls to LoadN between LoadPtrs and Start,
+    ;; adjust the loop not to scan those columns, assuming that
+    ;; either the code already called an equivalent StoreN or else
+    ;; that it will do so after the loop.
+    (when [off (.-readOff p)] (!= off 0)
+      (if (< (.-indexCounter p) 0)
+        ;; Index is negated, so add off instead of subtracting.
+        (.Add a (.Imm a off) n n SmashCarry)
+
+        (.Sub a (.Imm a off) n n SmashCarry))
+
+      (when (!= (.-indexCounter p) 0)
+        ;; n is also the index we are using, so adjust readOff and writeOff
+        ;; to continue to point at the same positions as before we changed n.
+        (set! (.-readOff p) - off)
+        (set! (.-writeOff p) - off)))
+
+
+
+    (.Restart p n (spread factors))))
+
+
+
+
+^{:go/end 448} (go/method Restart "Restart prepares to loop over an additional n columns,\nbeyond a previous loop run by p.Start/p.Loop.\n" [^{:tag (* Pipe)} p ^Reg n & ^{:tag (slice int)} factors]
+  (let [a (.-Asm (.-f p))]
+    (when (not (.-started p))
+      (.Fatalf a "pipe not started"))
+
+    (set! (.-factors p) factors)
+    (set! (.-counts p) (make (slice Reg) (len factors)))
+    (when (== (len factors) 0)
+      (set! factors (lit (slice int) 1)))
+
+
+    ;; Compute the loop lengths for each unrolled section into separate registers.
+    ;; We compute them all ahead of time in case the computation would smash
+    ;; a carry flag that the loop bodies need preserved.
+    (when (> (len factors) 1)
+      (.Comment a "compute unrolled loop lengths"))
+
+    (switch
+      (default
+        (.Fatalf a "invalid factors %v" factors))
+
+      (case [(== (aget factors 0) 1)]
+        ;; increasing loop factors
+        (let [div 1]
+          (range [i f (subslice factors 1)]
+            (when (<= f (aget factors i))
+              (.Fatalf a "non-increasing factors %v" factors))
+
+            (when (!= (bit-and f (- f 1)) 0)
+              (.Fatalf a "non-power-of-two factors %v" factors))
+
+            (let [t (.Reg (.-Asm (.-f p)))]
+              (set! f / div)
+              (.And a (.Imm a (- f 1)) n t)
+              (.Rsh a (.Imm a (bits/TrailingZeros (conv uint f))) n n)
+              (set! div * f)
+              (aset (.-counts p) i t)))
+
+          (aset (.-counts p) (- (len (.-counts p)) 1) n)))
+
+      (case [(== (aget factors (- (len factors) 1)) 1)]
+        ;; decreasing loop factors
+        (range [i f (subslice factors _ (- (len factors) 1))]
+          (when (<= f (aget factors (+ i 1)))
+            (.Fatalf a "non-decreasing factors %v" factors))
+
+          (when (!= (bit-and f (- f 1)) 0)
+            (.Fatalf a "non-power-of-two factors %v" factors))
+
+          (let [t (.Reg (.-Asm (.-f p)))]
+            (.Rsh a (.Imm a (bits/TrailingZeros (conv uint f))) n t)
+            (.And a (.Imm a (- f 1)) n n)
+            (aset (.-counts p) i t)))
+
+        (aset (.-counts p) (- (len (.-counts p)) 1) n)))))
+
+
+
+
+^{:go/end 461} (go/method Done "Done frees all the registers allocated by the pipe.\n" [^{:tag (* Pipe)} p]
+  (range [_ ptr (.-inPtr p)]
+    (.Free (.-Asm (.-f p)) (conv Reg ptr)))
+
+  (set! (.-inPtr p) nil)
+  (range [_ ptr (.-outPtr p)]
+    (.Free (.-Asm (.-f p)) (conv Reg ptr)))
+
+  (set! (.-outPtr p) nil)
+  (set! (.-index p) (lit Reg)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 495} (go/method Loop "Loop emits code for the loop, calling block repeatedly to emit code that\nhandles a block of N input columns (for arbitrary N = len(in[0]) chosen by p).\nblock must call p.StoreN(out) to write N output columns.\nThe out slice is a pre-allocated matrix of uninitialized Reg values.\nblock is expected to set each entry to the Reg that should be written\nbefore calling p.StoreN(out).\n\nFor example, if the loop is to be unrolled 4x in blocks of 2 columns each,\nthe sequence of calls to emit the unrolled loop body is:\n\n\tstart()  // set by pAtUnrollStart\n\t... reads for 2 columns ...\n\tblock()\n\t... writes for 2 columns ...\n\t... reads for 2 columns ...\n\tblock()\n\t... writes for 2 columns ...\n\tend()  // set by p.AtUnrollEnd\n\nAny registers allocated during block are freed automatically when block returns.\n" [^{:tag (* Pipe)} p ^{:tag (func [^{:tag (slice (slice Reg))} in ^{:tag (slice (slice Reg))} out])} block]
+  (when (== (.-factors p) nil)
+    (.Fatalf (.-Asm (.-f p)) "Pipe.Start not called"))
+
+  (range [i factor (.-factors p)]
+    (let [n (aget (.-counts p) i)]
+      (.unroll p n factor block)
+      (when (< i (- (len (.-factors p)) 1))
+        (.Free (.-Asm (.-f p)) n))))
+
+
+  (set! (.-factors p) nil))
+
+
+
+
+^{:go/end 501} (go/method AtUnrollStart "AtUnrollStart sets a function to call at the start of an unrolled sequence.\nSee [Pipe.Loop] for details.\n" [^{:tag (* Pipe)} p ^{:tag (func [])} start]
+  (set! (.-unrollStart p) start))
+
+
+
+
+^{:go/end 507} (go/method AtUnrollEnd "AtUnrollEnd sets a function to call at the end of an unrolled sequence.\nSee [Pipe.Loop] for details.\n" [^{:tag (* Pipe)} p ^{:tag (func [])} end]
+  (set! (.-unrollEnd p) end))
+
+
+
+^{:go/end 569} (go/method unroll "unroll emits a single unrolled loop for the given factor, iterating n times.\n" [^{:tag (* Pipe)} p ^Reg n ^int factor ^{:tag (func [^{:tag (slice (slice Reg))} in ^{:tag (slice (slice Reg))} out])} block]
+  (let [a (.-Asm (.-f p))
+      ^{:line 512} label (fmt/Sprintf "%s%d" (.-label p) factor)]
+
+    ;; Top of loop control flow.
+    (.Label a label)
+    (if (!= (.-loopTop (.-Arch a)) "")
+      (.Printf a (+ "\t" (.-loopTop (.-Arch a)) "\n") n (+ label "done"))
+
+      (.JmpZero a n (+ label "done")))
+
+    (.Label a (+ label "cont"))
+
+    ;; Unrolled loop body.
+    (if (< factor (.-maxColumns p))
+      (.Comment a "unroll %dX" factor)
+
+      (.Comment a "unroll %dX in batches of %d" factor (.-maxColumns p)))
+
+    (when (!= (.-unrollStart p) nil)
+      ((.-unrollStart p)))
+
+    (for [done 0] (< done factor) _
+      (let [batch (min (- factor done) (.-maxColumns p))
+          ^{:line 534} regs (.RegsUsed a)
+          ^{:line 535} out (make (slice (slice Reg)) (len (.-outPtr p)))]
+        (range [i out]
+          (aset out i (make (slice Reg) batch)))
+
+        (let [in (.LoadN p batch)]
+          (set! (.-needWrite p) true)
+          (block in out)
+          (when (and (.-needWrite p) (> (len (.-outPtr p)) 0))
+            (.Fatalf a "missing p.Write1 or p.StoreN"))
+
+          (.SetRegsUsed a regs) ; free anything block allocated
+          (set! done + batch))))
+
+    (when (!= (.-unrollEnd p) nil)
+      ((.-unrollEnd p)))
+
+    (.advancePtrs p factor)
+
+    ;; Bottom of loop control flow.
+    (switch
+      (case [(and (>= (.-indexCounter p) 0) (!= (.-loopBottom (.-Arch a)) ""))]
+        (.Printf a (+ "\t" (.-loopBottom (.-Arch a)) "\n") n (+ label "cont")))
+
+      (case [(>= (.-indexCounter p) 0)]
+        (.Sub a (.Imm a 1) n n KeepCarry)
+        (.JmpNonZero a n (+ label "cont")))
+
+      (case [(and (< (.-indexCounter p) 0) (!= (.-loopBottomNeg (.-Arch a)) ""))]
+        (.Printf a (+ "\t" (.-loopBottomNeg (.-Arch a)) "\n") n (+ label "cont")))
+
+      (case [(< (.-indexCounter p) 0)]
+        (.Add a (.Imm a 1) n n KeepCarry)))
+
+    (.Label a (+ label "done"))))

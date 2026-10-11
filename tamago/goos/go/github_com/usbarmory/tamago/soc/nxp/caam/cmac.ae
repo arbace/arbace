@@ -1,0 +1,84 @@
+;; NXP Cryptographic Acceleration and Assurance Module (CAAM) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.caam) (go/file "cmac.go" :imports [
+
+
+    ^{:line 12} [aes "crypto/aes"]
+    ^{:line 13} [errors "errors"]
+
+    ^{:line 15} [dma "github.com/usbarmory/tamago/dma"]])
+
+
+^{:go/end 74} (go/method cmac [^{:tag (* CAAM)} hw ^{:tag (slice byte)} msg ^{:tag (slice byte)} key ^{:tag (slice byte)} mac] :results [^error err]
+  (switch (len key)
+    (case [16 24 32]
+      (break))
+    (default
+      (return (conv aes/KeySizeError (len key)))))
+
+
+  (when (!= (len mac) aes/BlockSize)
+    (return (errors/New "invalid mac size")))
+
+
+  (let [keyBufferAddress (dma/Alloc key 4)]
+    (defer (dma/Free keyBufferAddress))
+
+    (let [loadKey (lit Key)]
+      (.SetDefaults loadKey)
+      ^{:go/via [LengthCommand Command]} (.Class loadKey 1)
+      ^{:go/via [LengthCommand]} (.Pointer loadKey keyBufferAddress (len key))
+
+      (let [op (lit Operation)]
+        (.SetDefaults op)
+        (.OpType op OPTYPE_ALG_CLASS1)
+        (.Algorithm op ALG_AES AAI_AES_CMAC)
+        (.State op (bit-or AS_INITIALIZE AS_FINALIZE))
+
+        (let [sourceBufferAddress (dma/Alloc msg 4)]
+          (defer (dma/Free sourceBufferAddress))
+
+          (let [src (lit FIFOLoad)]
+            (.SetDefaults src)
+            ^{:go/via [ExtendedLengthCommand Command]} (.Class src 1)
+            (.DataType src (bit-or INPUT_DATA_TYPE_MESSAGE_DATA INPUT_DATA_TYPE_LC1))
+            ^{:go/via [ExtendedLengthCommand]} (.Pointer src sourceBufferAddress (len msg))
+
+            (let [destinationBufferAddress (dma/Alloc mac 4)]
+              (defer (dma/Free destinationBufferAddress))
+
+              (let [dst (lit Store)]
+                (.SetDefaults dst)
+                ^{:go/via [LengthCommand Command]} (.Class dst 1)
+                (.Source dst CTX)
+                ^{:go/via [LengthCommand]} (.Pointer dst destinationBufferAddress (len mac))
+
+                (let [jd ^{:go/via [LengthCommand Command]} (.Bytes loadKey)]
+                  (set! jd (append jd (spread ^{:go/via [Command]} (.Bytes op))))
+                  (set! jd (append jd (spread ^{:go/via [ExtendedLengthCommand Command]} (.Bytes src))))
+                  (set! jd (append jd (spread ^{:go/via [LengthCommand Command]} (.Bytes dst))))
+
+                  (when [(set! err (.Job hw nil jd))] (!= err nil)
+                    (return))
+
+
+                  (dma/Read destinationBufferAddress 0 mac)
+
+                  (return))))))))))
+
+
+
+
+
+
+
+
+^{:go/end 85} (go/method SumAES "SumAES returns the AES Cipher-based message authentication code (CMAC) of\nthe input message, the key argument should be the AES key, either 16, 24, or\n32 bytes to select AES-128, AES-192, or AES-256.\n\nThere must be sufficient DMA memory allocated to hold the message, otherwise\nthe function will panic.\n" [^{:tag (* CAAM)} hw ^{:tag (slice byte)} msg ^{:tag (slice byte)} key] :results [^{:tag (array 16 byte)} sum ^error err]
+  (set! err (.cmac hw msg key (subslice sum)))
+  (return))

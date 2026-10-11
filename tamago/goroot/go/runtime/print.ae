@@ -1,0 +1,279 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "print.go" :imports [
+
+
+    ^{:line 8} [strconv "internal/strconv"]
+    ^{:line 9} [unsafe "unsafe"]])
+
+
+
+
+(go/type hex "The compiler knows that a print of a value of this type\nshould use printhex instead of printuint (decimal).\n" uint64)
+
+
+
+(go/type quoted "The compiler knows that a print of a value of this type should use\nprintquoted instead of printstring.\n" string)
+
+^{:go/end 27} (go/func bytes [^string s] :results [^{:tag (slice byte)} ret]
+  (let [rp (conv (* slice) (conv unsafe/Pointer (addr ret)))
+      ^{:line 22} sp (stringStructOf (addr s))]
+    (set! (.-array rp) (.-str sp))
+    (set! (.-len rp) (.-len sp))
+    (set! (.-cap rp) (.-len sp))
+    (return)))
+
+
+(go/var
+
+
+  ^{:line 32} [^{:tag (array 512 byte) :doc "printBacklog is a circular buffer of messages written with the builtin\nprint* functions, for use in postmortem analysis of core dumps.\n"} printBacklog]
+  ^{:line 33} [^int printBacklogIndex])
+
+
+
+
+
+
+
+
+
+^{:go/end 57} (go/func recordForPanic "recordForPanic maintains a circular buffer of messages written by the\nruntime leading up to a process crash, allowing the messages to be\nextracted from a core dump.\n\nThe text written during a process crash (following \"panic\" or \"fatal\nerror\") is not saved, since the goroutine stacks will generally be readable\nfrom the runtime data structures in the core file.\n" [^{:tag (slice byte)} b]
+  (printlock)
+
+  (when (== (.Load panicking) 0)
+    ;; Not actively crashing: maintain circular buffer of print output.
+    (for [i 0] (< i (len b)) _
+      (let [n (copy (subslice printBacklog printBacklogIndex) (subslice b i))]
+        (set! i + n)
+        (set! printBacklogIndex + n)
+        (set! printBacklogIndex % (len printBacklog)))))
+
+
+
+  (printunlock))
+
+
+(go/var ^mutex debuglock)
+
+;; The compiler emits calls to printlock and printunlock around
+;; the multiple calls that implement a single Go print or println
+;; statement. Some of the print helpers (printslice, for example)
+;; call print recursively. There is also the problem of a crash
+;; happening during the print routines and needing to acquire
+;; the print lock to print information about the crash.
+;; For both these reasons, let a thread acquire the printlock 'recursively'.
+
+^{:go/end 77} (go/func printlock []
+  (let [mp (.-m (getg))]
+    (inc! (.-locks mp)) ; do not reschedule between printlock++ and lock(&debuglock).
+    (inc! (.-printlock mp))
+    (when (== (.-printlock mp) 1)
+      (lock (addr debuglock)))
+
+    (dec! (.-locks mp)))) ; now we know debuglock is held and holding up mp.locks for us.
+
+
+^{:go/end 85} (go/func printunlock []
+  (let [mp (.-m (getg))]
+    (dec! (.-printlock mp))
+    (when (== (.-printlock mp) 0)
+      (unlock (addr debuglock)))))
+
+
+
+
+
+^{:go/end 107} (go/func gwrite "write to goroutine-local buffer if diverting output,\nor else standard error.\n" [^{:tag (slice byte)} b]
+  (when (== (len b) 0)
+    (return))
+
+  (recordForPanic b)
+  (let [gp (getg)]
+    ;; Don't use the writebuf if gp.m is dying. We want anything
+    ;; written through gwrite to appear in the terminal rather
+    ;; than be written to in some buffer, if we're in a panicking state.
+    ;; Note that we can't just clear writebuf in the gp.m.dying case
+    ;; because a panic isn't allowed to have any write barriers.
+    (when (or (== gp nil) (== (.-writebuf gp) nil) (> (.-dying (.-m gp)) 0))
+      (writeErr b)
+      (return))
+
+
+    (let [n (copy (subslice (.-writebuf gp) (len (.-writebuf gp)) (cap (.-writebuf gp))) b)]
+      (set! (.-writebuf gp) (subslice (.-writebuf gp) _ (+ (len (.-writebuf gp)) n))))))
+
+
+^{:go/end 111} (go/func printsp []
+  (printstring " "))
+
+
+^{:go/end 115} (go/func printnl []
+  (printstring "\n"))
+
+
+^{:go/end 123} (go/func printbool [^bool v]
+  (if v
+    (printstring "true")
+
+    (printstring "false")))
+
+
+
+
+(go/const ^{:val 24 :doc "float64 requires 1+17+1+1+1+3 = 24 bytes max (sign+digits+decimal point+e+sign+exponent digits).\n"} float64Bytes 24)
+
+^{:go/end 131} (go/func printfloat64 [^float64 v]
+  (let [^{:tag (array float64Bytes byte)} buf (zero (array float64Bytes byte))]
+    (gwrite (strconv/AppendFloat (subslice buf _ 0) v \g -1 64))))
+
+
+
+(go/const ^{:val 15 :doc "float32 requires 1+9+1+1+1+2 = 15 bytes max (sign+digits+decimal point+e+sign+exponent digits).\n"} float32Bytes 15)
+
+^{:go/end 139} (go/func printfloat32 [^float32 v]
+  (let [^{:tag (array float32Bytes byte)} buf (zero (array float32Bytes byte))]
+    (gwrite (strconv/AppendFloat (subslice buf _ 0) (conv float64 v) \g -1 32))))
+
+
+
+(go/const ^{:val 51 :doc "complex128 requires 24+24+1+1+1 = 51 bytes max (paren+float64+float64+i+paren).\n"} complex128Bytes (+ (* 2 float64Bytes) 3))
+
+^{:go/end 147} (go/func printcomplex128 [^complex128 c]
+  (let [^{:tag (array complex128Bytes byte)} buf (zero (array complex128Bytes byte))]
+    (gwrite (strconv/AppendComplex (subslice buf _ 0) c \g -1 128))))
+
+
+
+(go/const ^{:val 33 :doc "complex64 requires 15+15+1+1+1 = 33 bytes max (paren+float32+float32+i+paren).\n"} complex64Bytes (+ (* 2 float32Bytes) 3))
+
+^{:go/end 155} (go/func printcomplex64 [^complex64 c]
+  (let [^{:tag (array complex64Bytes byte)} buf (zero (array complex64Bytes byte))]
+    (gwrite (strconv/AppendComplex (subslice buf _ 0) (conv complex128 c) \g -1 64))))
+
+
+^{:go/end 165} (go/func printuint [^uint64 v]
+  ;; Note: Avoiding strconv.AppendUint so that it's clearer
+  ;; that there are no allocations in this routine.
+  ;; cmd/link/internal/ld.TestAbstractOriginSanity
+  ;; sees the append and doesn't realize it doesn't allocate.
+  (let [^{:tag (array 20 byte)} buf (zero (array 20 byte))
+      ^{:line 163} i (strconv/RuntimeFormatBase10 (subslice buf) v)]
+    (gwrite (subslice buf i))))
+
+
+^{:go/end 184} (go/func printint [^int64 v]
+  ;; Note: Avoiding strconv.AppendUint so that it's clearer
+  ;; that there are no allocations in this routine.
+  ;; cmd/link/internal/ld.TestAbstractOriginSanity
+  ;; sees the append and doesn't realize it doesn't allocate.
+  (let [neg (< v 0)
+      ^{:line 173} u (conv uint64 v)]
+    (when neg
+      (set! u (- u)))
+
+    (let [^{:tag (array 20 byte)} buf (zero (array 20 byte))
+        ^{:line 178} i (strconv/RuntimeFormatBase10 (subslice buf) u)]
+      (when neg
+        (dec! i)
+        (aset buf i \-))
+
+      (gwrite (subslice buf i)))))
+
+
+(go/var minhexdigits 0) ; protected by printlock
+
+^{:go/end 206} (go/func printhexopts [^bool include0x ^int mindigits ^uint64 v]
+  (let [^:const ^{:val "0123456789abcdef"} dig "0123456789abcdef"
+      ^{:line 190 :tag (array 100 byte)} buf (zero (array 100 byte))
+      ^{:line 191} i (len buf)]
+    (for [(dec! i)] (> i 0) (dec! i)
+      (aset buf i (aget dig (% v 16)))
+      (when (and (< v 16) (>= (- (len buf) i) mindigits))
+        (break))
+
+      (set! v / 16))
+
+    (when include0x
+      (dec! i)
+      (aset buf i \x)
+      (dec! i)
+      (aset buf i \0))
+
+    (gwrite (subslice buf i))))
+
+
+^{:go/end 210} (go/func printhex [^uint64 v]
+  (printhexopts true minhexdigits v))
+
+
+^{:go/end 255} (go/func printquoted [^string s]
+  (printlock)
+  (gwrite (conv (slice byte) "\""))
+  (range [i r s]
+    (switch r
+      (case [\newline]
+        (gwrite (conv (slice byte) "\\n"))
+        (continue))
+      (case [\return]
+        (gwrite (conv (slice byte) "\\r"))
+        (continue))
+      (case [\tab]
+        (gwrite (conv (slice byte) "\\t"))
+        (print)
+        (continue))
+      (case [\\ \"]
+        (gwrite (lit (slice byte) (conv byte \\) (conv byte r)))
+        (continue))
+      (case [runeError]
+        ;; Distinguish errors from a valid encoding of U+FFFD.
+        (when [(values _ j) (decoderune s (conv uint i))] (== j (conv uint (+ i 1)))
+          (gwrite (bytes "\\x"))
+          (printhexopts false 2 (conv uint64 (aget s i)))
+          (continue))))
+
+    ;; Fall through to quoting.
+
+    ;; For now, only allow basic printable ascii through unescaped
+    (cond (and (>= r \space) (<= r \~))
+      (gwrite (lit (slice byte) (conv byte r)))
+      (< r 127) (do
+        (gwrite (bytes "\\x"))
+        (printhexopts false 2 (conv uint64 r)))
+      (< r 0x10000) (do
+        (gwrite (bytes "\\u"))
+        (printhexopts false 4 (conv uint64 r))) :else
+      (do
+        (gwrite (bytes "\\U"))
+        (printhexopts false 8 (conv uint64 r)))))
+
+
+  (gwrite (lit (slice byte) (conv byte \")))
+  (printunlock))
+
+
+^{:go/end 259} (go/func printpointer [^unsafe/Pointer p]
+  (printhex (conv uint64 (conv uintptr p))))
+
+^{:go/end 262} (go/func printuintptr [^uintptr p]
+  (printhex (conv uint64 p)))
+
+
+^{:go/end 266} (go/func printstring [^string s]
+  (gwrite (bytes s)))
+
+
+^{:go/end 272} (go/func printslice [^{:tag (slice byte)} s]
+  (let [sp (conv (* slice) (conv unsafe/Pointer (addr s)))]
+    (print "[" (len s) "/" (cap s) "]")
+    (printpointer (.-array sp))))
+
+
+^{:go/end 276} (go/func printeface [^eface e]
+  (print "(" (.-_type e) "," (.-data e) ")"))
+
+
+^{:go/end 280} (go/func printiface [^iface i]
+  (print "(" (.-tab i) "," (.-data i) ")"))

@@ -1,0 +1,436 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.nettest) (go/file "conn.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [math "math"]
+    ^{:line 12} [net "net"]
+    ^{:line 13} [netip "net/netip"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [time "time"]])
+
+
+
+(go/type Conn "Conn is an in-memory test implementation of net.Conn.\n" (struct
+
+
+
+
+
+
+
+
+    ^{:line 28 :tag (* connHalf) :doc "Conns come in pairs.\nWrites to one Conn are read by its peer, and vice-versa.\n\nA connHalf handles one direction of data flow.\nA Conn consists of read and write halves.\nA Conn's peer has the same halves, only swapped.\n\nA Conn reads from r and writes to w.\n"} r ^{:tag (* connHalf) :doc "Conns come in pairs.\nWrites to one Conn are read by its peer, and vice-versa.\n\nA connHalf handles one direction of data flow.\nA Conn consists of read and write halves.\nA Conn's peer has the same halves, only swapped.\n\nA Conn reads from r and writes to w.\n"} w
+
+
+    ^{:line 31 :tag (* Conn) :doc "peer is the other endpoint.\n"} peer))
+
+
+
+^{:go/end 40} (go/func NewConnPair "NewConnPair returns a pair of connected Conns.\n" [] :results [(* Conn) (* Conn)]
+  (newConnPair
+    (net/TCPAddrFromAddrPort (netip/MustParseAddrPort "192.0.2.1:10000"))
+    (net/TCPAddrFromAddrPort (netip/MustParseAddrPort "192.0.2.1:10001"))))
+
+
+
+^{:go/end 52} (go/func newConnPair [^net/Addr addr1 ^net/Addr addr2] :results [(* Conn) (* Conn)]
+  (let [h1 (newConnHalf addr1)
+      ^{:line 44} h2 (newConnHalf addr2)
+      ^{:line 45} c1 (addr (lit Conn :r h1 :w h2))
+      ^{:line 46} c2 (addr (lit Conn :r h2 :w h1))]
+    (set! (.-peer c1) c2)
+    (set! (.-peer c2) c1)
+    (.SetReadBufferSize c1 -1)
+    (.SetReadBufferSize c2 -1)
+    (return c1 c2)))
+
+
+
+^{:go/end 57} (go/method Peer "Peer returns the other end of the connection.\n" ^{:tag (* Conn)} [^{:tag (* Conn)} c]
+  (.-peer c))
+
+
+
+^{:go/end 72} (go/method Read "Read reads data from the connection.\n" [^{:tag (* Conn)} c ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (set! (values n err) (.read (.-r c) b))
+  (when (and (!= err nil) (!= err io/EOF))
+    (set! err (addr ^{:go/breaks [2 4 6 8 10]} (lit net/OpError
+          :Op "read"
+          :Net "tcp"
+          :Source (.RemoteAddr c)
+          :Addr (.LocalAddr c)
+          :Err err))))
+
+
+  (return n err))
+
+
+
+^{:go/end 77} (go/method CanRead "CanRead reports whether Read can proceed without blocking.\n" ^bool [^{:tag (* Conn)} c]
+  (.canRead (.-r c)))
+
+
+
+^{:go/end 92} (go/method Write "Write writes data to the connection.\n" [^{:tag (* Conn)} c ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (set! (values n err) (.write (.-w c) b))
+  (when (!= err nil)
+    (set! err (addr ^{:go/breaks [2 4 6 8 10]} (lit net/OpError
+          :Op "write"
+          :Net "tcp"
+          :Source (.LocalAddr c)
+          :Addr (.RemoteAddr c)
+          :Err err))))
+
+
+  (return n err))
+
+
+
+
+
+
+
+
+^{:go/end 108} (go/method IsClosed "IsClosed reports whether the connection has been closed.\nA connection is closed if [CloseRead] and [CloseWrite] are both called,\nor if [Close] is called.\n\nTo identify when the other side of the Conn has been closed,\nuse Conn.Peer().IsClosed().\n" ^bool [^{:tag (* Conn)} c]
+  (.lock (.-r c))
+  (let [readClosed (.-readClosed (.-r c))]
+    (.unlock (.-r c))
+    (.lock (.-w c))
+    (let [writeClosed (.-writeClosed (.-w c))]
+      (.unlock (.-w c))
+      (and readClosed writeClosed))))
+
+
+(go/var errClosedByPeer (errors/New "connection closed by peer"))
+
+
+^{:go/breaks [8] :go/end 119} (go/method CloseRead "CloseRead shuts down the reading side of the connection.\n" ^error [^{:tag (* Conn)} c]
+  (.lock (.-r c))
+  (defer (.unlock (.-r c)))
+  (.Reset (.-buf (.-r c))) ; discard unread data
+  (set! (.-readClosed (.-r c)) true)
+  nil)
+
+
+
+^{:go/breaks [7] :go/end 127} (go/method CloseWrite "CloseWrite shuts down the writing side of the connection.\n" ^error [^{:tag (* Conn)} c]
+  (.lock (.-w c))
+  (defer (.unlock (.-w c)))
+  (set! (.-writeClosed (.-w c)) true)
+  nil)
+
+
+
+^{:go/end 155} (go/method Close "Close closes the connection.\n" ^error [^{:tag (* Conn)} c]
+  (.lock (.-r c))
+  (let [readClosed (.-readClosed (.-r c))]
+    (.Reset (.-buf (.-r c))) ; discard unread data
+    (set! (.-readClosed (.-r c)) true)
+    (let [err (.-closeErr (.-r c))]
+      (.unlock (.-r c))
+
+      (.lock (.-w c))
+      (let [writeClosed (.-writeClosed (.-w c))]
+        (set! (.-writeClosed (.-w c)) true)
+        (.unlock (.-w c))
+
+        (when (and readClosed writeClosed)
+          (set! err net/ErrClosed))
+
+        (when (!= err nil)
+          (set! err (addr ^{:go/breaks [2 4 6 8]} (lit net/OpError
+                :Op "close"
+                :Net "tcp"
+                :Addr (.LocalAddr c)
+                :Err err))))
+
+
+        ^{:line 154} err))))
+
+
+
+
+
+^{:go/end 164} (go/method SetCloseError "SetCloseError sets the error returned by Close.\nClose still closes the connection.\nA nil error restores the usual behavior.\n" [^{:tag (* Conn)} c ^error err]
+  (.lock (.-r c))
+  (set! (.-closeErr (.-r c)) err)
+  (.unlock (.-r c)))
+
+
+
+^{:go/end 171} (go/method LocalAddr "LocalAddr returns the (fake) local network address.\n" ^net/Addr [^{:tag (* Conn)} c]
+  (.lock (.-r c))
+  (defer (.unlock (.-r c)))
+  (.-addr (.-r c)))
+
+
+
+
+
+^{:go/end 180} (go/method SetLocalAddr "SetLocalAddr sets the local address.\n\nTo set the remote address, set the local address of Conn's peer.\n" [^{:tag (* Conn)} c ^net/Addr addr]
+  (.lock (.-r c))
+  (defer (.unlock (.-r c)))
+  (set! (.-addr (.-r c)) addr))
+
+
+
+^{:go/end 187} (go/method RemoteAddr "LocalAddr returns the (fake) remote network address.\n" ^net/Addr [^{:tag (* Conn)} c]
+  (.lock (.-r c))
+  (defer (.unlock (.-r c)))
+  (.-addr (.-w c)))
+
+
+
+^{:go/breaks [6] :go/end 194} (go/method SetDeadline "SetDeadline sets the read and write deadlines for the connection.\n" ^error [^{:tag (* Conn)} c ^time/Time t]
+  (.SetReadDeadline c t)
+  (.SetWriteDeadline c t)
+  nil)
+
+
+
+^{:go/breaks [5] :go/end 200} (go/method SetReadDeadline "SetReadDeadline sets the read deadline for the connection.\n" ^error [^{:tag (* Conn)} c ^time/Time t]
+  (.setDeadline (.-readDeadline (.-r c)) (.-r c) t)
+  nil)
+
+
+
+^{:go/breaks [5] :go/end 206} (go/method SetWriteDeadline "SetWriteDeadline sets the write deadline for the connection.\n" ^error [^{:tag (* Conn)} c ^time/Time t]
+  (.setDeadline (.-writeDeadline (.-w c)) (.-w c) t)
+  nil)
+
+
+
+
+
+^{:go/end 216} (go/method SetReadBufferSize "SetReadBufferSize sets the connection's read buffer.\nWrites to the other end of the connection will block so long as the buffer is full.\nSetting the size to 0 blocks all writes until the size is increased.\n" [^{:tag (* Conn)} c ^int size]
+  (when (< size 0)
+    (set! size math/MaxInt))
+
+  (.setBufferSize (.-r c) size))
+
+
+
+
+
+
+
+^{:go/end 227} (go/method SetReadError "SetReadError causes any currently blocked and future Read calls to return\na net.OpError wrapping err. It does not affect the other half of the connection.\nReads will return any buffered data before returning the error,\nincluding data written after the error is set and io.EOF after the other end is closed.\nA nil error restores the usual behavior.\n" [^{:tag (* Conn)} c ^error err]
+  (.lock (.-r c))
+  (defer (.unlock (.-r c)))
+  (set! (.-readErr (.-r c)) err))
+
+
+
+
+
+
+^{:go/end 237} (go/method SetWriteError "SetWriteError causes any currently blocked and future Write calls to return\na net.OpError wrapping err. It does not affect the other half of the connection.\nWrites will not write data to the connection buffer while an error is set.\nA nil error restores the usual behavior.\n" [^{:tag (* Conn)} c ^error err]
+  (.lock (.-w c))
+  (defer (.unlock (.-w c)))
+  (set! (.-writeErr (.-w c)) err))
+
+
+
+
+
+(go/type connHalf "connHalf is one direction data flow in a Conn.\nThe connHalf contains a buffer.\nWrites to the connHalf push to the buffer and reads pull from it.\n" (struct
+    ^{:line 243 :tag net/Addr} addr
+
+
+
+
+
+
+
+    ^{:line 251 :tag (chan (struct)) :doc "A half can be readable and/or writable.\n\nThese four channels act as a lock,\nand allow waiting for readability/writability.\nWhen the half is unlocked, exactly one channel contains a value.\nWhen the half is locked, all channels are empty.\n"} lockr ; readable
+    ^{:line 252 :tag (chan (struct))} lockw ; writable
+    ^{:line 253 :tag (chan (struct))} lockrw ; readable and writable
+    ^{:line 254 :tag (chan (struct))} lockc ; neither readable nor writable
+
+
+    ^{:line 257 :tag connDeadline :doc "Read and write timeouts.\n"} readDeadline ^{:tag connDeadline :doc "Read and write timeouts.\n"} writeDeadline
+
+    ^{:line 259 :tag int} bufMax ; maximum buffer size
+    ^{:line 260 :tag bytes/Buffer} buf
+
+    ^{:line 262 :tag bool} readClosed ^bool writeClosed
+    ^{:line 263 :tag error} readErr ^error writeErr ; errors returned by reads/writes
+    ^{:line 264 :tag error} closeErr)) ; error returned by closing the conn reading from this half
+
+
+^{:go/end 278} (go/func newConnHalf ^{:tag (* connHalf)} [^net/Addr addr]
+  (let [h (addr ^{:go/breaks [2 4 6 8 10 12]} (lit connHalf
+          :addr addr
+          :lockw (make (chan (struct)) 1)
+          :lockr (make (chan (struct)) 1)
+          :lockrw (make (chan (struct)) 1)
+          :lockc (make (chan (struct)) 1)
+          :bufMax math/MaxInt))] ; unlimited
+
+    (.unlock h)
+    ^{:line 277} h))
+
+
+
+^{:go/end 288} (go/method lock "lock locks h.\n" [^{:tag (* connHalf)} h]
+  (select
+    (case (<! (.-lockw h))) ; writable
+    (case (<! (.-lockr h))) ; readable
+    (case (<! (.-lockrw h))) ; readable and writable
+    (case (<! (.-lockc h))))) ; neither readable nor writable
+
+
+
+
+^{:go/end 304} (go/method unlock "unlock unlocks h.\n" [^{:tag (* connHalf)} h]
+  (let [canRead (.canReadLocked h)
+      ^{:line 293} canWrite (.canWriteLocked h)]
+    (switch
+      (case [(and canRead canWrite)]
+        (>! (.-lockrw h) (lit (struct)))) ; readable and writable
+      (case [canRead]
+        (>! (.-lockr h) (lit (struct)))) ; readable
+      (case [canWrite]
+        (>! (.-lockw h) (lit (struct)))) ; writable
+      (default
+        (>! (.-lockc h) (lit (struct))))))) ; neither readable nor writable
+
+
+
+^{:go/end 310} (go/method canRead ^bool [^{:tag (* connHalf)} h]
+  (.lock h)
+  (defer (.unlock h))
+  (.canReadLocked h))
+
+
+^{:go/end 314} (go/method canReadLocked ^bool [^{:tag (* connHalf)} h]
+  (or (!= (.-readErr h) nil) (.-expired (.-readDeadline h)) (> (.Len (.-buf h)) 0) (.-readClosed h) (.-writeClosed h)))
+
+
+^{:go/end 318} (go/method canWriteLocked ^bool [^{:tag (* connHalf)} h]
+  (or (!= (.-writeErr h) nil) (.-expired (.-writeDeadline h)) (> (.-bufMax h) (.Len (.-buf h))) (.-readClosed h) (.-writeClosed h)))
+
+
+
+^{:go/end 328} (go/method waitAndLockForRead "waitAndLockForRead waits until h is readable and locks it.\n" [^{:tag (* connHalf)} h]
+  (select
+    (case (<! (.-lockr h)))
+    ;; readable
+    (case (<! (.-lockrw h)))))
+;; readable and writable
+
+
+
+
+^{:go/end 338} (go/method waitAndLockForWrite "waitAndLockForWrite waits until h is writable and locks it.\n" [^{:tag (* connHalf)} h]
+  (select
+    (case (<! (.-lockw h)))
+    ;; writable
+    (case (<! (.-lockrw h)))))
+;; readable and writable
+
+
+
+^{:go/end 356} (go/method read [^{:tag (* connHalf)} h ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (.waitAndLockForRead h)
+  (defer (.unlock h))
+  (when (.-readClosed h)
+    (return 0 net/ErrClosed))
+
+  (when (.-expired (.-readDeadline h))
+    (return 0 os/ErrDeadlineExceeded))
+
+  (when (> (.Len (.-buf h)) 0)
+    (return (.Read (.-buf h) b)))
+
+  (when (.-writeClosed h)
+    (return 0 io/EOF))
+
+  (return 0 (.-readErr h)))
+
+
+^{:go/end 362} (go/method setBufferSize [^{:tag (* connHalf)} h ^int size]
+  (.lock h)
+  (defer (.unlock h))
+  (set! (.-bufMax h) size))
+
+
+^{:go/end 373} (go/method write [^{:tag (* connHalf)} h ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (while (< n (len b))
+    (let [(values nn err) (.writePartial h (subslice b n))]
+      (set! n + nn)
+      (when (!= err nil)
+        (return n err))))
+
+
+  (return n nil))
+
+
+^{:go/end 395} (go/method writePartial [^{:tag (* connHalf)} h ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (.waitAndLockForWrite h)
+  (defer (.unlock h))
+  (when (.-writeClosed h)
+    (return 0 net/ErrClosed))
+
+  (when (.-expired (.-writeDeadline h))
+    (return 0 os/ErrDeadlineExceeded))
+
+  (when (.-readClosed h)
+    (return 0 errClosedByPeer))
+
+  (when (!= (.-writeErr h) nil)
+    (return 0 (.-writeErr h)))
+
+  (let [writeMax (- (.-bufMax h) (.Len (.-buf h)))]
+    (when (< writeMax (len b))
+      (set! b (subslice b _ writeMax)))
+
+    (.Write (.-buf h) b)))
+
+
+(go/type connDeadline (struct
+    ^{:line 398 :tag (* time/Timer)} timer
+    ^{:line 399 :tag bool} expired))
+
+
+(go/type locker (interface
+    (lock [])
+    (unlock [])))
+
+
+^{:go/end 437} (go/method setDeadline [^{:tag (* connDeadline)} d ^locker mu ^time/Time t]
+  (.lock mu)
+  (defer (.unlock mu))
+  (when (!= (.-timer d) nil)
+    (.Stop (.-timer d))
+    (set! (.-timer d) nil))
+
+  (when (.IsZero t)
+    ;; No deadline.
+    (set! (.-expired d) false)
+    (return))
+
+  (let [expiry (time/Until t)]
+    (when (<= expiry 0)
+      ;; Deadline has already passed.
+      (set! (.-expired d) true)
+      (return))
+
+    ;; Deadline is in the future.
+    (set! (.-expired d) false)
+    (let [^{:tag (* time/Timer)} timer (zero (* time/Timer))]
+      (set! timer (time/AfterFunc expiry ^{:go/end 435} (fn []
+            (.lock mu)
+            (defer (.unlock mu))
+            (when (== (.-timer d) timer)
+              (set! (.-timer d) nil)
+              (set! (.-expired d) true)))))
+
+
+      (set! (.-timer d) timer))))

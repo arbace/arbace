@@ -1,0 +1,161 @@
+;; NXP Cryptographic Acceleration and Assurance Module (CAAM) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.caam) (go/file "ecdsa.go" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [ecdsa "crypto/ecdsa"]
+    ^{:line 14} [binary "encoding/binary"]
+    ^{:line 15} [errors "errors"]
+    ^{:line 16} [fmt "fmt"]
+    ^{:line 17} [big "math/big"]
+
+    ^{:line 19} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 20} [dma "github.com/usbarmory/tamago/dma"]])
+
+
+
+(go/const "p451, Table 8-112, IMX7DSSRM\n"
+  ^{:line 25} [^{:val 22} DSA_SIG_PDB_PD 22]
+  ^{:line 26} [^{:val 7} DSA_SIG_PDB_ECDSEL 7])
+
+
+
+(go/const "p443, Table 8-101, IMX7DSSRM\n"
+
+  ^{:line 32} [^{:val 2 :doc "Table 8-101\n"} ECDSEL_P256 0x02]
+  ^{:line 33} [^{:val 32} ECDSEL_P256K1 0x20])
+
+
+
+(go/type SignPDB "SignPDB represents an ECDSA sign protocol data block (PDB).\n" (struct
+
+    ^{:line 39 :tag int :doc "size of the group\n"} n
+
+    ^{:line 41 :tag int :doc "elliptic curve domain selection\n"} ecdsel
+
+    ^{:line 43 :tag uint :doc "private key\n"} s
+
+    ^{:line 45 :tag uint :doc "message hash\n"} f
+
+    ^{:line 47 :tag uint :doc "signature buffer\n"} c
+
+    ^{:line 49 :tag uint :doc "signature buffer (2nd part, n length)\n"} d
+
+
+    ^{:line 52 :tag (slice byte) :doc "DMA buffer\n"} sig))
+
+
+
+^{:go/end 81} (go/method Init "Init initializes a PDB for ECDSA signing.\n" [^{:tag (* SignPDB)} pdb ^{:tag (* ecdsa/PrivateKey)} priv] :results [^error err]
+  (let [name (.-Name (.Params (.-Curve (.-PublicKey priv))))]
+
+    (switch name
+      (case ["P-256"]
+        (set! (.-n pdb) 32)
+        (set! (.-ecdsel pdb) ECDSEL_P256))
+      (case ["P-256k1"]
+        (set! (.-n pdb) 32)
+        (set! (.-ecdsel pdb) ECDSEL_P256K1))
+      (default
+        (return (fmt/Errorf "unsupported curve %s" name))))
+
+
+    (set! (.-n pdb) (/ (.-BitSize (.Params (.-Curve (.-PublicKey priv)))) 8))
+
+    (set! (.-s pdb) (dma/Alloc (make (slice byte) (.-n pdb)) 4))
+    (dma/Write (.-s pdb) 0 (.Bytes (.-D priv)))
+
+    (set! (values (.-f pdb) _) (dma/Reserve (.-n pdb) 4))
+
+    (set! (values (.-c pdb) (.-sig pdb)) (dma/Reserve (* (.-n pdb) 2) 4))
+    (set! (.-d pdb) (+ (.-c pdb) (conv uint (.-n pdb))))
+
+    (return)))
+
+
+^{:go/end 85} (go/method Hash [^{:tag (* SignPDB)} pdb ^{:tag (slice byte)} hash]
+  (dma/Write (.-f pdb) 0 (subslice hash 0 (.-n pdb))))
+
+
+
+^{:go/end 104} (go/method Bytes "Bytes converts the PDB to byte array format.\n" ^{:tag (slice byte)} [^{:tag (* SignPDB)} pdb]
+  (let [^uint32 word0 (zero uint32)]
+
+    ;; p451, Table 8-112, IMX7DSSRM
+
+    (bits/Set (addr word0) DSA_SIG_PDB_PD)
+    (bits/SetN (addr word0) DSA_SIG_PDB_ECDSEL 0x7f (conv uint32 (.-ecdsel pdb)))
+
+    (let [buf (new bytes/Buffer)]
+      (binary/Write buf binary/LittleEndian (conv uint32 word0))
+      (binary/Write buf binary/LittleEndian (conv uint32 (.-s pdb)))
+      (binary/Write buf binary/LittleEndian (conv uint32 (.-f pdb)))
+      (binary/Write buf binary/LittleEndian (conv uint32 (.-c pdb)))
+      (binary/Write buf binary/LittleEndian (conv uint32 (.-d pdb)))
+
+      (.Bytes buf))))
+
+
+
+^{:go/end 111} (go/method Free "Free frees the memory allocated by the PDB.\n" [^{:tag (* SignPDB)} pdb]
+  (dma/Release (.-c pdb))
+  (dma/Release (.-f pdb))
+  (dma/Free (.-s pdb)))
+
+
+
+
+
+
+
+
+
+^{:go/end 162} (go/method Sign "Sign signs a hash (which should be the result of hashing a larger message)\nusing the private key, priv. If the hash is longer than the bit-length of\nthe private key's curve order, the hash will be truncated to that length. It\nreturns the signature as a pair of integers.\n\nA previously initialized sign protocol data block (see SignPDB.Init()) may\nbe passed to cache private key initialization, in this case priv is ignored.\n" [^{:tag (* CAAM)} hw ^{:tag (* ecdsa/PrivateKey)} priv ^{:tag (slice byte)} hash ^{:tag (* SignPDB)} pdb] :results [^{:tag (* big/Int)} r ^{:tag (* big/Int)} s ^error err]
+  (cond (== pdb nil) (do
+      (set! pdb (addr (lit SignPDB)))
+      (defer (.Free pdb))
+
+      (when [(set! err (.Init pdb priv))] (!= err nil)
+        (return)))
+
+    (== (.-n pdb) 0)
+    (return nil nil (errors/New "pdb is not initialized")))
+
+
+  (.Hash pdb hash)
+  (let [jd (.Bytes pdb)
+
+      ^{:line 135 :tag uint32} info (zero uint32)]
+    (bits/Set (addr info) PROTINFO_ECC)
+    (bits/SetTo (addr info) PROTINFO_SIGN_NO_TEQ (.-DisableTimingEqualization hw))
+
+    (let [op (lit Operation)]
+      (.SetDefaults op)
+      (.OpType op OPTYPE_PROT_UNI)
+      (.Protocol op PROTID_ECDSA_SIGN info)
+
+      (let [hdr (addr (lit Header))]
+        (.SetDefaults hdr)
+        (.StartIndex hdr (+ 1 (/ (len jd) 4)))
+
+        (set! jd (append jd (spread ^{:go/via [Command]} (.Bytes op))))
+        (.Length hdr (+ 1 (/ (len jd) 4)))
+
+        (when [(set! err (.Job hw hdr jd))] (!= err nil)
+          (return))
+
+
+        (set! r (addr (lit big/Int)))
+        (.SetBytes r (subslice (.-sig pdb) 0 (.-n pdb)))
+
+        (set! s (addr (lit big/Int)))
+        (.SetBytes s (subslice (.-sig pdb) (.-n pdb)))
+
+        (return)))))

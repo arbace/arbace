@@ -1,0 +1,577 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.image.jpeg) (go/file "scan.go" :imports [
+
+
+    ^{:line 8} [image "image"]])
+
+
+
+^{:go/end 57} (go/method makeImg "makeImg allocates and initializes the destination image.\n" [^{:tag (* decoder)} d ^int mxx ^int myy]
+  (when (== (.-nComp d) 1)
+    (let [m (image/NewGray (image/Rect 0 0 (* 8 mxx) (* 8 myy)))]
+      (set! (.-img1 d) (assert (* image/Gray) (.SubImage m (image/Rect 0 0 (.-width d) (.-height d)))))
+      (return)))
+
+
+  ;; Determine if we need flex mode for non-standard subsampling.
+  ;; Flex mode is needed when:
+  ;; - Cb and Cr have different sampling factors, or
+  ;; - The Y component doesn't have the maximum sampling factors, or
+  ;; - The ratio doesn't match any standard YCbCrSubsampleRatio.
+  (let [subsampleRatio image/YCbCrSubsampleRatio444]
+    (if (or (!= (.-h (aget (.-comp d) 1)) (.-h (aget (.-comp d) 2))) (!= (.-v (aget (.-comp d) 1)) (.-v (aget (.-comp d) 2)))
+        (!= (.-maxH d) (.-h (aget (.-comp d) 0))) (!= (.-maxV d) (.-v (aget (.-comp d) 0))))
+      (set! (.-flex d) true)
+
+      (let [hRatio (/ (.-maxH d) (.-h (aget (.-comp d) 1)))
+          ^{:line 30} vRatio (/ (.-maxV d) (.-v (aget (.-comp d) 1)))]
+        (switch (bit-or (<< hRatio 4) vRatio)
+          (case [0x11]
+            (set! subsampleRatio image/YCbCrSubsampleRatio444))
+          (case [0x12]
+            (set! subsampleRatio image/YCbCrSubsampleRatio440))
+          (case [0x21]
+            (set! subsampleRatio image/YCbCrSubsampleRatio422))
+          (case [0x22]
+            (set! subsampleRatio image/YCbCrSubsampleRatio420))
+          (case [0x41]
+            (set! subsampleRatio image/YCbCrSubsampleRatio411))
+          (case [0x42]
+            (set! subsampleRatio image/YCbCrSubsampleRatio410))
+          (default
+            (set! (.-flex d) true)))))
+
+
+
+    (let [m (image/NewYCbCr (image/Rect 0 0 (* 8 (.-maxH d) mxx) (* 8 (.-maxV d) myy)) subsampleRatio)]
+      (set! (.-img3 d) (assert (* image/YCbCr) (.SubImage m (image/Rect 0 0 (.-width d) (.-height d)))))
+
+      (when (== (.-nComp d) 4)
+        (let [(values h3 v3) (values (.-h (aget (.-comp d) 3)) (.-v (aget (.-comp d) 3)))]
+          (set! (.-blackPix d) (make (slice byte) (* 8 h3 mxx 8 v3 myy)))
+          (set! (.-blackStride d) (* 8 h3 mxx)))))))
+
+
+
+
+^{:go/end 344} (go/method processSOS "Specified in section B.2.3.\n" ^error [^{:tag (* decoder)} d ^int n]
+  (when (== (.-nComp d) 0)
+    (return (conv FormatError "missing SOF marker")))
+
+  (when (or (< n 6) (< (+ 4 (* 2 (.-nComp d))) n) (!= (% n 2) 0))
+    (return (conv FormatError "SOS has wrong length")))
+
+  (when [err (.readFull d (subslice (.-tmp d) _ n))] (!= err nil)
+    (return err))
+
+  (let [nComp (conv int (aget (.-tmp d) 0))]
+    (when (!= n (+ 4 (* 2 nComp)))
+      (return (conv FormatError "SOS length inconsistent with number of components")))
+
+    (let [^{:tag (array maxComponents (struct ^uint8 compIndex ^uint8 td ^uint8 ta))} scan (zero (array maxComponents (struct
+              ^{:line 75 :tag uint8} compIndex
+              ^{:line 76 :tag uint8} td ; DC table selector.
+              ^{:line 77 :tag uint8} ta))) ; AC table selector.
+
+        ^{:line 79} totalHV 0]
+      (for [i 0] (< i nComp) (inc! i)
+        (let [cs (aget (.-tmp d) (+ 1 (* 2 i))) ; Component selector.
+            ^{:line 82} compIndex -1]
+          (range [j comp (subslice (.-comp d) _ (.-nComp d))]
+            (when (== cs (.-c comp))
+              (set! compIndex j)))
+
+
+          (when (< compIndex 0)
+            (return (conv FormatError "unknown component selector")))
+
+          (set! (.-compIndex (aget scan i)) (conv uint8 compIndex))
+          ;; Section B.2.3 states that "the value of Cs_j shall be different from
+          ;; the values of Cs_1 through Cs_(j-1)". Since we have previously
+          ;; verified that a frame's component identifiers (C_i values in section
+          ;; B.2.2) are unique, it suffices to check that the implicit indexes
+          ;; into d.comp are unique.
+          (for [j 0] (< j i) (inc! j)
+            (when (== (.-compIndex (aget scan i)) (.-compIndex (aget scan j)))
+              (return (conv FormatError "repeated component selector"))))
+
+
+          (set! totalHV + (* (.-h (aget (.-comp d) compIndex)) (.-v (aget (.-comp d) compIndex))))
+
+          ;; The baseline t <= 1 restriction is specified in table B.3.
+          (set! (.-td (aget scan i)) (>> (aget (.-tmp d) (+ 2 (* 2 i))) 4))
+          (when [t (.-td (aget scan i))] (or (> t maxTh) ^:go/paren (and (.-baseline d) (> t 1)))
+            (return (conv FormatError "bad Td value")))
+
+          (set! (.-ta (aget scan i)) (bit-and (aget (.-tmp d) (+ 2 (* 2 i))) 0x0f))
+          (when [t (.-ta (aget scan i))] (or (> t maxTh) ^:go/paren (and (.-baseline d) (> t 1)))
+            (return (conv FormatError "bad Ta value")))))
+
+
+      ;; Section B.2.3 states that if there is more than one component then the
+      ;; total H*V values in a scan must be <= 10.
+      (when (and (> (.-nComp d) 1) (> totalHV 10))
+        (return (conv FormatError "total sampling factors too large")))
+
+
+      ;; zigStart and zigEnd are the spectral selection bounds.
+      ;; ah and al are the successive approximation high and low values.
+      ;; The spec calls these values Ss, Se, Ah and Al.
+      ;;
+      ;; For progressive JPEGs, these are the two more-or-less independent
+      ;; aspects of progression. Spectral selection progression is when not
+      ;; all of a block's 64 DCT coefficients are transmitted in one pass.
+      ;; For example, three passes could transmit coefficient 0 (the DC
+      ;; component), coefficients 1-5, and coefficients 6-63, in zig-zag
+      ;; order. Successive approximation is when not all of the bits of a
+      ;; band of coefficients are transmitted in one pass. For example,
+      ;; three passes could transmit the 6 most significant bits, followed
+      ;; by the second-least significant bit, followed by the least
+      ;; significant bit.
+      ;;
+      ;; For sequential JPEGs, these parameters are hard-coded to 0/63/0/0, as
+      ;; per table B.3.
+      (let [(values zigStart zigEnd ah al) (values (conv int32 0) (conv int32 (- blockSize 1)) (conv uint32 0) (conv uint32 0))]
+        (when (.-progressive d)
+          (set! zigStart (conv int32 (aget (.-tmp d) (+ 1 (* 2 nComp)))))
+          (set! zigEnd (conv int32 (aget (.-tmp d) (+ 2 (* 2 nComp)))))
+          (set! ah (conv uint32 (>> (aget (.-tmp d) (+ 3 (* 2 nComp))) 4)))
+          (set! al (conv uint32 (bit-and (aget (.-tmp d) (+ 3 (* 2 nComp))) 0x0f)))
+          (when (or ^:go/paren (and (== zigStart 0) (!= zigEnd 0)) (> zigStart zigEnd) (<= blockSize zigEnd))
+            (return (conv FormatError "bad spectral selection bounds")))
+
+          (when (and (!= zigStart 0) (!= nComp 1))
+            (return (conv FormatError "progressive AC coefficients for more than one component")))
+
+          (when (and (!= ah 0) (!= ah (+ al 1)))
+            (return (conv FormatError "bad successive approximation values"))))
+
+
+
+        ;; mxx and myy are the number of MCUs (Minimum Coded Units) in the image.
+        ;; The MCU dimensions are based on the maximum sampling factors.
+        ;; For standard subsampling, maxH/maxV equals h0/v0 (Y's factors).
+        ;; For flex mode, Y may not have the maximum factors.
+        (let [mxx (/ (- (+ (.-width d) (* 8 (.-maxH d))) 1) (* 8 (.-maxH d)))
+            ^{:line 159} myy (/ (- (+ (.-height d) (* 8 (.-maxV d))) 1) (* 8 (.-maxV d)))]
+          (when (and (== (.-img1 d) nil) (== (.-img3 d) nil))
+            (.makeImg d mxx myy))
+
+          (when (.-progressive d)
+            (for [i 0] (< i nComp) (inc! i)
+              (let [compIndex (.-compIndex (aget scan i))]
+                (when (== (aget (.-progCoeffs d) compIndex) nil)
+                  (aset (.-progCoeffs d) compIndex (make (slice block) (* mxx myy (.-h (aget (.-comp d) compIndex)) (.-v (aget (.-comp d) compIndex)))))))))
+
+
+
+
+          (set! (.-bits d) (lit bits))
+          ^{:go/breaks [[3 343]]} (let [(values mcu expectedRST) (values 0 (conv uint8 rst0Marker))
+
+              ;; b is the decoded coefficients, in natural (not zig-zag) order.
+              ^{:line 176 :tag block} b (zero block)
+              ^{:line 177 :tag (array maxComponents int32)} dc (zero (array maxComponents int32))
+              ;; bx and by are the location of the current block, in units of 8x8
+              ;; blocks: the third block in the first row has (bx, by) = (2, 0).
+              (values ^int bx ^int by) (zero int)
+              ^{:line 181 :tag int} blockCount (zero int)]
+
+            (for [my 0] (< my myy) (inc! my)
+              (for [mx 0] (< mx mxx) (inc! mx)
+                (for [i 0] (< i nComp) (inc! i)
+                  (let [compIndex (.-compIndex (aget scan i))
+                      ^{:line 187} hi (.-h (aget (.-comp d) compIndex))
+                      ^{:line 188} vi (.-v (aget (.-comp d) compIndex))]
+                    (for [j 0] (< j (* hi vi)) (inc! j)
+                      ;; The blocks are traversed one MCU at a time. For 4:2:0 chroma
+                      ;; subsampling, there are four Y 8x8 blocks in every 16x16 MCU.
+                      ;;
+                      ;; For a sequential 32x16 pixel image, the Y blocks visiting order is:
+                      ;;	0 1 4 5
+                      ;;	2 3 6 7
+                      ;;
+                      ;; For progressive images, the interleaved scans (those with nComp > 1)
+                      ;; are traversed as above, but non-interleaved scans are traversed left
+                      ;; to right, top to bottom:
+                      ;;	0 1 2 3
+                      ;;	4 5 6 7
+                      ;; Only DC scans (zigStart == 0) can be interleaved. AC scans must have
+                      ;; only one component.
+                      ;;
+                      ;; To further complicate matters, for non-interleaved scans, there is no
+                      ;; data for any blocks that are inside the image at the MCU level but
+                      ;; outside the image at the pixel level. For example, a 24x16 pixel 4:2:0
+                      ;; progressive image consists of two 16x16 MCUs. The interleaved scans
+                      ;; will process 8 Y blocks:
+                      ;;	0 1 4 5
+                      ;;	2 3 6 7
+                      ;; The non-interleaved scans will process only 6 Y blocks:
+                      ;;	0 1 2
+                      ;;	3 4 5
+                      (if (!= nComp 1) (do
+                          (set! bx (+ (* hi mx) (% j hi)))
+                          (set! by (+ (* vi my) (/ j hi))))
+
+                        (let [q (* mxx hi)]
+                          (set! bx (% blockCount q))
+                          (set! by (/ blockCount q))
+                          (inc! blockCount)
+                          (when (or (>= (* bx 8) (.-width d)) (>= (* by 8) (.-height d)))
+                            (continue))))
+
+
+
+                      ;; Load the previous partially decoded coefficients, if applicable.
+                      (if (.-progressive d)
+                        (set! b (aget (aget (.-progCoeffs d) compIndex) (+ (* by mxx hi) bx)))
+
+                        (set! b (lit block)))
+
+
+                      (if (!= ah 0)
+                        (when [err (.refine d (addr b) (addr (aget (aget (.-huff d) acTable) (.-ta (aget scan i)))) zigStart zigEnd ^int32 (<< 1 al))] (!= err nil)
+                          (return err))
+
+
+                        (let [zig zigStart]
+                          (when (== zig 0)
+                            (inc! zig)
+                            ;; Decode the DC coefficient, as specified in section F.2.2.1.
+                            (let [(values value err) (.decodeHuffman d (addr (aget (aget (.-huff d) dcTable) (.-td (aget scan i)))))]
+                              (when (!= err nil)
+                                (return err))
+
+                              (when (> value 16)
+                                (return (conv UnsupportedError "excessive DC component")))
+
+                              (let [(values dcDelta ^:assign err) (.receiveExtend d value)]
+                                (when (!= err nil)
+                                  (return err))
+
+                                (set! (aget dc compIndex) + dcDelta)
+                                (aset b 0 (<< (aget dc compIndex) al)))))
+
+
+                          (if (and (<= zig zigEnd) (> (.-eobRun d) 0))
+                            (dec! (.-eobRun d))
+
+                            ;; Decode the AC coefficients, as specified in section F.2.2.2.
+                            (let [huff (addr (aget (aget (.-huff d) acTable) (.-ta (aget scan i))))]
+                              (for [] (<= zig zigEnd) (inc! zig)
+                                (let [(values value err) (.decodeHuffman d huff)]
+                                  (when (!= err nil)
+                                    (return err))
+
+                                  (let [val0 (>> value 4)
+                                      ^{:line 270} val1 (bit-and value 0x0f)]
+                                    (if (!= val1 0) (do
+                                        (set! zig + (conv int32 val0))
+                                        (when (> zig zigEnd)
+                                          (break))
+
+                                        (let [(values ac err) (.receiveExtend d val1)]
+                                          (when (!= err nil)
+                                            (return err))
+
+                                          (aset b (aget unzig zig) (<< ac al))))
+                                      (do
+                                        (when (!= val0 0x0f)
+                                          (set! (.-eobRun d) (conv uint16 ^uint16 (<< 1 val0)))
+                                          (when (!= val0 0)
+                                            (let [(values bits err) (.decodeBits d (conv int32 val0))]
+                                              (when (!= err nil)
+                                                (return err))
+
+                                              (set! (.-eobRun d) bit-or (conv uint16 bits))))
+
+                                          (dec! (.-eobRun d))
+                                          (break))
+
+                                        (set! zig + 0x0f))))))))))
+
+
+
+
+
+                      (when (.-progressive d)
+                        ;; Save the coefficients.
+                        (aset (aget (.-progCoeffs d) compIndex) (+ (* by mxx hi) bx) b)
+                        ;; At this point, we could call reconstructBlock to dequantize and perform the
+                        ;; inverse DCT, to save early stages of a progressive image to the *image.YCbCr
+                        ;; buffers (the whole point of progressive encoding), but in Go, the jpeg.Decode
+                        ;; function does not return until the entire image is decoded, so we "continue"
+                        ;; here to avoid wasted computation. Instead, reconstructBlock is called on each
+                        ;; accumulated block by the reconstructProgressiveImage method after all of the
+                        ;; SOS markers are processed.
+                        (continue))
+
+                      (when [err (.reconstructBlock d (addr b) bx by (conv int compIndex))] (!= err nil)
+                        (return err)))))
+
+                ;; for j
+                ;; for i
+                (inc! mcu)
+                (when (and (> (.-ri d) 0) (== (% mcu (.-ri d)) 0) (< mcu (* mxx myy)))
+                  ;; For well-formed input, the RST[0-7] restart marker follows
+                  ;; immediately. For corrupt input, call findRST to try to
+                  ;; resynchronize.
+                  (if [err (.readFull d (subslice (.-tmp d) _ 2))] (!= err nil)
+                    (return err)
+                    (when (or (!= (aget (.-tmp d) 0) 0xff) (!= (aget (.-tmp d) 1) expectedRST))
+                      (when [err (.findRST d expectedRST)] (!= err nil)
+                        (return err))))
+
+
+                  (inc! expectedRST)
+                  (when (== expectedRST (+ rst7Marker 1))
+                    (set! expectedRST rst0Marker))
+
+                  ;; Reset the Huffman decoder.
+                  (set! (.-bits d) (lit bits))
+                  ;; Reset the DC components, as per section F.2.1.3.1.
+                  (set! dc (lit (array maxComponents int32)))
+                  ;; Reset the progressive decoder state, as per section G.1.2.2.
+                  (set! (.-eobRun d) 0))))
+
+            ;; for mx
+            ;; for my
+
+            nil))))))
+
+
+
+
+^{:go/end 422} (go/method refine "refine decodes a successive approximation refinement block, as specified in\nsection G.1.2.\n" ^error [^{:tag (* decoder)} d ^{:tag (* block)} b ^{:tag (* huffman)} h ^int32 zigStart ^int32 zigEnd ^int32 delta]
+  ;; Refining a DC component is trivial.
+  (when (== zigStart 0)
+    (when (!= zigEnd 0)
+      (panic "unreachable"))
+
+    (let [(values bit err) (.decodeBit d)]
+      (when (!= err nil)
+        (return err))
+
+      (when bit
+        (set! (aget b 0) bit-or delta))
+
+      (return nil)))
+
+
+  ;; Refining AC components is more complicated; see sections G.1.2.2 and G.1.2.3.
+  ^{:go/breaks [[4 421]]} (let [zig zigStart]
+    (when (== (.-eobRun d) 0)
+      (label :loop
+        (for [] (<= zig zigEnd) (inc! zig)
+          (let [z (conv int32 0)
+              (values value err) (.decodeHuffman d h)]
+            (when (!= err nil)
+              (return err))
+
+            (let [val0 (>> value 4)
+                ^{:line 375} val1 (bit-and value 0x0f)]
+
+              (switch val1
+                (case [0]
+                  (when (!= val0 0x0f)
+                    (set! (.-eobRun d) (conv uint16 ^uint16 (<< 1 val0)))
+                    (when (!= val0 0)
+                      (let [(values bits err) (.decodeBits d (conv int32 val0))]
+                        (when (!= err nil)
+                          (return err))
+
+                        (set! (.-eobRun d) bit-or (conv uint16 bits))))
+
+                    (break :loop)))
+
+                (case [1]
+                  (set! z delta)
+                  (let [(values bit err) (.decodeBit d)]
+                    (when (!= err nil)
+                      (return err))
+
+                    (when (not bit)
+                      (set! z (- z)))))
+
+                (default
+                  (return (conv FormatError "unexpected Huffman code"))))
+
+
+              (set! (values zig err) (.refineNonZeroes d b zig zigEnd (conv int32 val0) delta))
+              (when (!= err nil)
+                (return err))
+
+              (when (> zig zigEnd)
+                (return (conv FormatError "too many coefficients")))
+
+              (when (!= z 0)
+                (aset b (aget unzig zig) z)))))))
+
+
+
+    (when (> (.-eobRun d) 0)
+      (dec! (.-eobRun d))
+      (when [(values _ err) (.refineNonZeroes d b zig zigEnd -1 delta)] (!= err nil)
+        (return err)))
+
+
+    nil))
+
+
+
+
+^{:go/end 450} (go/method refineNonZeroes "refineNonZeroes refines non-zero entries of b in zig-zag order. If nz >= 0,\nthe first nz zero entries are skipped over.\n" [^{:tag (* decoder)} d ^{:tag (* block)} b ^int32 zig ^int32 zigEnd ^int32 nz ^int32 delta] :results [int32 error]
+  (for [] (<= zig zigEnd) (inc! zig)
+    (let [u (aget unzig zig)]
+      (when (== (aget b u) 0)
+        (when (== nz 0)
+          (break))
+
+        (dec! nz)
+        (continue))
+
+      (let [(values bit err) (.decodeBit d)]
+        (when (!= err nil)
+          (return 0 err))
+
+        (when (not bit)
+          (continue))
+
+        (if (>= (aget b u) 0)
+          (set! (aget b u) + delta)
+
+          (set! (aget b u) - delta)))))
+
+
+  (return zig nil))
+
+
+^{:go/end 472} (go/method reconstructProgressiveImage ^error [^{:tag (* decoder)} d]
+  ;; The mxx, by and bx variables have the same meaning as in the
+  ;; processSOS method.
+  ^{:go/breaks [[3 471]]} (let [mxx (/ (- (+ (.-width d) (* 8 (.-maxH d))) 1) (* 8 (.-maxH d)))]
+    (for [i 0] (< i (.-nComp d)) (inc! i)
+      (when (== (aget (.-progCoeffs d) i) nil)
+        (continue))
+
+      (let [v (/ (* 8 (.-maxV d)) (.-v (aget (.-comp d) i)))
+          ^{:line 461} h (/ (* 8 (.-maxH d)) (.-h (aget (.-comp d) i)))
+          ^{:line 462} stride (* mxx (.-h (aget (.-comp d) i)))]
+        (for [by 0] (< (* by v) (.-height d)) (inc! by)
+          (for [bx 0] (< (* bx h) (.-width d)) (inc! bx)
+            (when [err (.reconstructBlock d (addr (aget (aget (.-progCoeffs d) i) (+ (* by stride) bx))) bx by i)] (!= err nil)
+              (return err))))))
+
+
+
+
+    nil))
+
+
+
+
+^{:go/end 536} (go/method reconstructBlock "reconstructBlock dequantizes, performs the inverse DCT and stores the block\nto the image.\n" ^error [^{:tag (* decoder)} d ^{:tag (* block)} b ^int bx ^int by ^int compIndex]
+  (let [qt (addr (aget (.-quant d) (.-tq (aget (.-comp d) compIndex))))]
+    (for [zig 0] (< zig blockSize) (inc! zig)
+      (set! (aget b (aget unzig zig)) * (aget qt zig)))
+
+    (idct b)
+
+    (let [(values ^int h ^int v) (zero int)]
+      (when (.-flex d)
+        ;; Flex mode: scale bx and by according to the component's sampling factors.
+        (set! h (.-expandH (aget (.-comp d) compIndex)))
+        (set! v (.-expandV (aget (.-comp d) compIndex)))
+        (set! (values bx by) (values (* bx h) (* by v))))
+
+
+      ^{:go/breaks [[5 535]]} (let [(values dst stride) (values (conv (slice byte) nil) 0)]
+        (if (== (.-nComp d) 1)
+          (set! (values dst stride) (values (subslice (.-Pix (.-img1 d)) (* 8 (+ (* by (.-Stride (.-img1 d))) bx))) (.-Stride (.-img1 d))))
+
+          (switch compIndex
+            (case [0]
+              (set! (values dst stride) (values (subslice (.-Y (.-img3 d)) (* 8 (+ (* by (.-YStride (.-img3 d))) bx))) (.-YStride (.-img3 d)))))
+            (case [1]
+              (set! (values dst stride) (values (subslice (.-Cb (.-img3 d)) (* 8 (+ (* by (.-CStride (.-img3 d))) bx))) (.-CStride (.-img3 d)))))
+            (case [2]
+              (set! (values dst stride) (values (subslice (.-Cr (.-img3 d)) (* 8 (+ (* by (.-CStride (.-img3 d))) bx))) (.-CStride (.-img3 d)))))
+            (case [3]
+              (set! (values dst stride) (values (subslice (.-blackPix d) (* 8 (+ (* by (.-blackStride d)) bx))) (.-blackStride d))))
+            (default
+              (return (conv UnsupportedError "too many components")))))
+
+
+
+        (when (.-flex d)
+          ;; Flex mode: expand each source pixel to h×v destination pixels.
+          (for [y 0] (< y 8) (inc! y)
+            (let [y8 (* y 8)
+                ^{:line 513} yv (* y v)]
+              (for [x 0] (< x 8) (inc! x)
+                (let [val (conv uint8 (max 0 (min 255 (+ (aget b (+ y8 x)) 128))))
+                    ^{:line 516} xh (* x h)]
+                  (for [yy 0] (< yy v) (inc! yy)
+                    (for [xx 0] (< xx h) (inc! xx)
+                      (aset dst (+ (* (+ yv yy) stride) xh xx) val)))))))
+
+
+
+
+          (return nil))
+
+
+        ;; Level shift by +128, clip to [0, 255], and write to dst.
+        (for [y 0] (< y 8) (inc! y)
+          (let [y8 (* y 8)
+              ^{:line 530} yStride (* y stride)]
+            (for [x 0] (< x 8) (inc! x)
+              (aset dst (+ yStride x) (conv uint8 (max 0 (min 255 (+ (aget b (+ y8 x)) 128))))))))
+
+
+        nil))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 580} (go/method findRST "findRST advances past the next RST restart marker that matches expectedRST.\nOther than I/O errors, it is also an error if we encounter an {0xFF, M}\ntwo-byte marker sequence where M is not 0x00, 0xFF or the expectedRST.\n\nThis is similar to libjpeg's jdmarker.c's next_marker function.\nhttps://github.com/libjpeg-turbo/libjpeg-turbo/blob/2dfe6c0fe9e18671105e94f7cbf044d4a1d157e6/jdmarker.c#L892-L935\n\nPrecondition: d.tmp[:2] holds the next two bytes of JPEG-encoded input\n(input in the d.readFull sense).\n" ^error [^{:tag (* decoder)} d ^uint8 expectedRST]
+  (while true
+    ;; i is the index such that, at the bottom of the loop, we read 2-i
+    ;; bytes into d.tmp[i:2], maintaining the invariant that d.tmp[:2]
+    ;; holds the next two bytes of JPEG-encoded input. It is either 0 or 1,
+    ;; so that each iteration advances by 1 or 2 bytes (or returns).
+    (let [i 0]
+
+      (cond (== (aget (.-tmp d) 0) 0xff)
+        (cond (== (aget (.-tmp d) 1) expectedRST)
+          (return nil)
+          (== (aget (.-tmp d) 1) 0xff)
+          (set! i 1)
+          (!= (aget (.-tmp d) 1) 0x00)
+          ;; libjpeg's jdmarker.c's jpeg_resync_to_restart does something
+          ;; fancy here, treating RST markers within two (modulo 8) of
+          ;; expectedRST differently from RST markers that are 'more
+          ;; distant'. Until we see evidence that recovering from such
+          ;; cases is frequent enough to be worth the complexity, we take
+          ;; a simpler approach for now. Any marker that's not 0x00, 0xff
+          ;; or expectedRST is a fatal FormatError.
+          (return (conv FormatError "bad RST marker")))
+
+
+        (== (aget (.-tmp d) 1) 0xff) (do
+          (aset (.-tmp d) 0 0xff)
+          (set! i 1)))
+
+
+      (when [err (.readFull d (subslice (.-tmp d) i 2))] (!= err nil)
+        (return err)))))

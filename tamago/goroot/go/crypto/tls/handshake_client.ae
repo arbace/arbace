@@ -1,0 +1,1329 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.tls) (go/file "handshake_client.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [context "context"]
+    ^{:line 10} [crypto "crypto"]
+    ^{:line 11} [ecdsa "crypto/ecdsa"]
+    ^{:line 12} [ed25519 "crypto/ed25519"]
+    ^{:line 13} [hpke "crypto/hpke"]
+    ^{:line 14} [tls13 "crypto/internal/fips140/tls13"]
+    ^{:line 15} [mldsa "crypto/mldsa"]
+    ^{:line 16} [rsa "crypto/rsa"]
+    ^{:line 17} [subtle "crypto/subtle"]
+    ^{:line 18} [fips140tls "crypto/tls/internal/fips140tls"]
+    ^{:line 19} [x509 "crypto/x509"]
+    ^{:line 20} [errors "errors"]
+    ^{:line 21} [fmt "fmt"]
+    ^{:line 22} [hash "hash"]
+    ^{:line 23} [godebug "internal/godebug"]
+    ^{:line 24} [io "io"]
+    ^{:line 25} [net "net"]
+    ^{:line 26} [slices "slices"]
+    ^{:line 27} [strconv "strconv"]
+    ^{:line 28} [strings "strings"]
+    ^{:line 29} [time "time"]])
+
+
+(go/type clientHandshakeState (struct
+    ^{:line 33 :tag (* Conn)} c
+    ^{:line 34 :tag context/Context} ctx
+    ^{:line 35 :tag (* serverHelloMsg)} serverHello
+    ^{:line 36 :tag (* clientHelloMsg)} hello
+    ^{:line 37 :tag (* cipherSuite)} suite
+    ^{:line 38 :tag finishedHash} finishedHash
+    ^{:line 39 :tag (slice byte)} masterSecret
+    ^{:line 40 :tag (* SessionState)} session ; the session being resumed
+    ^{:line 41 :tag (slice byte)} ticket)) ; a fresh ticket received during this handshake
+
+
+^{:go/end 208} (go/method makeClientHello [^{:tag (* Conn)} c] :results [(* clientHelloMsg) (* keySharePrivateKeys) (* echClientContext) error]
+  (let [config (.-config c)]
+    (when (and (== (len (.-ServerName config)) 0) (not (.-InsecureSkipVerify config)))
+      (return nil nil nil (errors/New "tls: either ServerName or InsecureSkipVerify must be specified in the tls.Config")))
+
+
+    (let [nextProtosLength 0]
+      (range [_ proto (.-NextProtos config)]
+        (if [l (len proto)] (or (== l 0) (> l 255))
+          (return nil nil nil (errors/New "tls: invalid NextProtos value"))
+
+          (set! nextProtosLength + (+ 1 l))))
+
+
+      (when (> nextProtosLength 0xffff)
+        (return nil nil nil (errors/New "tls: NextProtos values too large")))
+
+
+      (let [supportedVersions (.supportedVersions config roleClient (!= (.-quic c) nil))]
+        (when (== (len supportedVersions) 0)
+          (return nil nil nil (errors/New "tls: no supported versions satisfy MinVersion and MaxVersion")))
+
+        ;; Since supportedVersions is sorted in descending order, the first element
+        ;; is the maximum version and the last element is the minimum version.
+        (let [maxVersion (aget supportedVersions 0)
+            ^{:line 69} minVersion (aget supportedVersions (- (len supportedVersions) 1))
+
+            ^{:line 71} hello (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24]} (lit clientHelloMsg
+                :vers maxVersion
+                :compressionMethods (lit (slice uint8) compressionNone)
+                :random (make (slice byte) 32)
+                :extendedMasterSecret true
+                :ocspStapling true
+                :scts true
+                :serverName (hostnameInSNI (.-ServerName config))
+                :supportedCurves (.curvePreferences config maxVersion)
+                :supportedPoints (lit (slice uint8) pointFormatUncompressed)
+                :secureRenegotiationSupported true
+                :alpnProtocols (.-NextProtos config)
+                :supportedVersions supportedVersions))]
+
+
+          ;; The version at the beginning of the ClientHello was capped at TLS 1.2
+          ;; for compatibility reasons. The supported_versions extension is used
+          ;; to negotiate versions now. See RFC 8446, Section 4.2.1.
+          (when (> (.-vers hello) VersionTLS12)
+            (set! (.-vers hello) VersionTLS12))
+
+
+          (when (> (.-handshakes c) 0)
+            (set! (.-secureRenegotiation hello) (subslice (.-clientFinished c))))
+
+
+          (set! (.-cipherSuites hello) (.cipherSuites config hasAESGCMHardwareSupport))
+          ;; Don't advertise TLS 1.2-only cipher suites unless we're attempting TLS 1.2.
+          (when (< maxVersion VersionTLS12)
+            (set! (.-cipherSuites hello) (^{:inst [(slice uint16) uint16]} slices/DeleteFunc (.-cipherSuites hello) ^{:go/end 102} (fn ^bool [^uint16 id]
+                  (!= (bit-and (.-flags (cipherSuiteByID id)) suiteTLS12) 0)))))
+
+
+
+          (let [(values _ err) (io/ReadFull (.rand config) (.-random hello))]
+            (when (!= err nil)
+              (return nil nil nil (errors/New (+ "tls: short read from Rand: " (.Error err)))))
+
+
+            ;; A random session ID is used to detect when the server accepted a ticket
+            ;; and is resuming a session (see RFC 5077). In TLS 1.3, it's always set as
+            ;; a compatibility measure (see RFC 8446, Section 4.1.2).
+            ;;
+            ;; The session ID is not set for QUIC connections (see RFC 9001, Section 8.4).
+            (when (== (.-quic c) nil)
+              (set! (.-sessionId hello) (make (slice byte) 32))
+              (when [(values _ err) (io/ReadFull (.rand config) (.-sessionId hello))] (!= err nil)
+                (return nil nil nil (errors/New (+ "tls: short read from Rand: " (.Error err))))))
+
+
+
+            (when (>= maxVersion VersionTLS12)
+              (set! (.-supportedSignatureAlgorithms hello) (supportedSignatureAlgorithms minVersion maxVersion))
+              (set! (.-supportedSignatureAlgorithmsCert hello) (supportedSignatureAlgorithmsCert minVersion maxVersion)))
+
+
+            (let [^{:tag (* keySharePrivateKeys)} keyShareKeys (zero (* keySharePrivateKeys))]
+              (when (>= maxVersion VersionTLS13)
+                ;; Reset the list of ciphers when the client only supports TLS 1.3.
+                (when (>= minVersion VersionTLS13)
+                  (set! (.-cipherSuites hello) nil))
+
+
+                (cond (fips140tls/Required)
+                  (set! (.-cipherSuites hello) (append (.-cipherSuites hello) (spread allowedCipherSuitesTLS13FIPS)))
+                  ^{:line 136} hasAESGCMHardwareSupport
+                  (set! (.-cipherSuites hello) (append (.-cipherSuites hello) (spread defaultCipherSuitesTLS13))) :else
+
+                  (set! (.-cipherSuites hello) (append (.-cipherSuites hello) (spread defaultCipherSuitesTLS13NoAES))))
+
+
+                (when (== (len (.-supportedCurves hello)) 0)
+                  (return nil nil nil (errors/New "tls: no supported key exchange methods (CurveIDs)")))
+
+                ;; Since the order is fixed, the first one is always the one to send a
+                ;; key share for. All the PQ hybrids sort first, and produce a fallback
+                ;; ECDH share.
+                (let [curveID (aget (.-supportedCurves hello) 0)
+                    (values ke err) (keyExchangeForCurveID curveID)]
+                  (when (!= err nil)
+                    (return nil nil nil (errors/New "tls: internal error: supportsCurve accepted unimplemented curve")))
+
+                  (set! (values keyShareKeys (.-keyShares hello) err) (.keyShares ke (.rand config)))
+                  (when (!= err nil)
+                    (return nil nil nil err))
+
+                  ;; Only send the fallback ECDH share if the corresponding CurveID is enabled.
+                  (when (and (== (len (.-keyShares hello)) 2) (not (^{:inst [(slice CurveID) CurveID]} slices/Contains (.-supportedCurves hello) (.-group (aget (.-keyShares hello) 1)))))
+                    (set! (.-keyShares hello) (subslice (.-keyShares hello) _ 1)))))
+
+
+
+              (when (!= (.-quic c) nil)
+                (let [(values p err) (.quicGetTransportParameters c)]
+                  (when (!= err nil)
+                    (return nil nil nil err))
+
+                  (when (== p nil)
+                    (set! p (lit (slice byte))))
+
+                  (set! (.-quicTransportParameters hello) p)))
+
+
+              (let [^{:tag (* echClientContext)} ech (zero (* echClientContext))]
+                (when (!= (.-EncryptedClientHelloConfigList (.-config c)) nil)
+                  (when (and (!= (.-MinVersion (.-config c)) 0) (< (.-MinVersion (.-config c)) VersionTLS13))
+                    (return nil nil nil (errors/New "tls: MinVersion must be >= VersionTLS13 if EncryptedClientHelloConfigList is populated")))
+
+                  (when (and (!= (.-MaxVersion (.-config c)) 0) (<= (.-MaxVersion (.-config c)) VersionTLS12))
+                    (return nil nil nil (errors/New "tls: MaxVersion must be >= VersionTLS13 if EncryptedClientHelloConfigList is populated")))
+
+                  (let [(values echConfigs err) (parseECHConfigList (.-EncryptedClientHelloConfigList (.-config c)))]
+                    (when (!= err nil)
+                      (return nil nil nil err))
+
+                    (let [(values echConfig echPK kdf aead) (pickECHConfig echConfigs)]
+                      (when (== echConfig nil)
+                        (return nil nil nil (errors/New "tls: EncryptedClientHelloConfigList contains no valid configs")))
+
+                      (set! ech (addr (lit echClientContext :config echConfig :kdfID (.ID kdf) :aeadID (.ID aead))))
+                      (set! (.-encryptedClientHello hello) (lit (slice byte) 1)) ; indicate inner hello
+                      ;; We need to explicitly set these 1.2 fields to nil, as we do not
+                      ;; marshal them when encoding the inner hello, otherwise transcripts
+                      ;; will later mismatch.
+                      (set! (.-supportedPoints hello) nil)
+                      (set! (.-ticketSupported hello) false)
+                      (set! (.-secureRenegotiationSupported hello) false)
+                      (set! (.-extendedMasterSecret hello) false)
+
+                      (let [info (append (conv (slice byte) "tls ech\u0000") (spread (.-raw (.-config ech))))]
+                        (set! (values (.-encapsulatedKey ech) (.-hpkeContext ech) err) (hpke/NewSender echPK kdf aead info))
+                        (when (!= err nil)
+                          (return nil nil nil err))))))
+
+
+
+                (return hello keyShareKeys ech nil)))))))))
+
+
+(go/type echClientContext (struct
+    ^{:line 211 :tag (* echConfig)} config
+    ^{:line 212 :tag (* hpke/Sender)} hpkeContext
+    ^{:line 213 :tag (slice byte)} encapsulatedKey
+    ^{:line 214 :tag (* clientHelloMsg)} innerHello
+    ^{:line 215 :tag hash/Hash} innerTranscript
+    ^{:line 216 :tag uint16} kdfID
+    ^{:line 217 :tag uint16} aeadID
+    ^{:line 218 :tag bool} echRejected
+    ^{:line 219 :tag (slice byte)} retryConfigs))
+
+
+^{:go/end 351} (go/method clientHandshake [^{:tag (* Conn)} c ^context/Context ctx] :results [^error err]
+  (when (== (.-config c) nil)
+    (set! (.-config c) (defaultConfig)))
+
+
+  ;; This may be a renegotiation handshake, in which case some fields
+  ;; need to be reset.
+  (set! (.-didResume c) false)
+  (set! (.-curveID c) 0)
+
+  (let [(values hello keyShareKeys ech ^:assign err) (.makeClientHello c)]
+    (when (!= err nil)
+      (return err))
+
+
+    (let [(values session earlySecret binderKey ^:assign err) (.loadSession c hello)]
+      (when (!= err nil)
+        (return err))
+
+      (when (!= session nil)
+        (defer (^{:go/end 254} (fn []
+              ;; If we got a handshake failure when resuming a session, throw away
+              ;; the session ticket. See RFC 5077, Section 3.2.
+              ;;
+              ;; RFC 8446 makes no mention of dropping tickets on failure, but it
+              ;; does require servers to abort on invalid binders, so we need to
+              ;; delete tickets to recover from a corrupted PSK.
+              (when (!= err nil)
+                (when [cacheKey (.clientSessionCacheKey c)] (!= cacheKey "")
+                  (.Put (.-ClientSessionCache (.-config c)) cacheKey nil)))))))
+
+
+
+
+
+      (when (!= ech nil)
+        ;; Split hello into inner and outer
+        (set! (.-innerHello ech) (.clone hello))
+
+        ;; Overwrite the server name in the outer hello with the public facing
+        ;; name.
+        (set! (.-serverName hello) (conv string (.-PublicName (.-config ech))))
+        ;; Generate a new random for the outer hello.
+        (set! (.-random hello) (make (slice byte) 32))
+        (set! (values _ err) (io/ReadFull (.rand (.-config c)) (.-random hello)))
+        (when (!= err nil)
+          (return (errors/New (+ "tls: short read from Rand: " (.Error err)))))
+
+
+        ;; NOTE: we don't do PSK GREASE, in line with boringssl, it's meant to
+        ;; work around _possibly_ broken middleboxes, but there is little-to-no
+        ;; evidence that this is actually a problem.
+
+        (when [err (computeAndUpdateOuterECHExtension hello (.-innerHello ech) ech true)] (!= err nil)
+          (return err)))
+
+
+
+      (set! (.-serverName c) (.-serverName hello))
+
+      (when [(values _ err) (.writeHandshakeRecord c hello nil)] (!= err nil)
+        (return err))
+
+
+      (when (.-earlyData hello)
+        (let [suite (cipherSuiteTLS13ByID (.-cipherSuite session))
+            ^{:line 288} transcript (.New (.-hash suite))
+            ^{:line 289} transcriptHello hello]
+          (when (!= ech nil)
+            (set! transcriptHello (.-innerHello ech)))
+
+          (when [err (transcriptMsg transcriptHello transcript)] (!= err nil)
+            (return err))
+
+          (let [earlyTrafficSecret (.ClientEarlyTrafficSecret earlySecret transcript)]
+            (.quicSetWriteSecret c QUICEncryptionLevelEarly (.-id suite) earlyTrafficSecret))))
+
+
+      ;; serverHelloMsg is not included in the transcript
+      (let [(values msg ^:assign err) (.readHandshake c nil)]
+        (when (!= err nil)
+          (return err))
+
+
+        (let [(values serverHello ok) (assert (* serverHelloMsg) msg)]
+          (when (not ok)
+            (.sendAlert c alertUnexpectedMessage)
+            (return (unexpectedMessageError serverHello msg)))
+
+
+          (when [err (.pickTLSVersion c serverHello)] (!= err nil)
+            (return err))
+
+
+          ;; If we are negotiating a protocol version that's lower than what we
+          ;; support, check for the server downgrade canaries.
+          ;; See RFC 8446, Section 4.1.3.
+          (let [maxVers (.maxSupportedVersion (.-config c) roleClient (!= (.-quic c) nil))
+              ^{:line 320} tls12Downgrade (== (conv string (subslice (.-random serverHello) 24)) downgradeCanaryTLS12)
+              ^{:line 321} tls11Downgrade (== (conv string (subslice (.-random serverHello) 24)) downgradeCanaryTLS11)]
+            (when (or (and (== maxVers VersionTLS13) (<= (.-vers c) VersionTLS12) ^:go/paren (or tls12Downgrade tls11Downgrade))
+                (and (== maxVers VersionTLS12) (<= (.-vers c) VersionTLS11) tls11Downgrade))
+              (.sendAlert c alertIllegalParameter)
+              (return (errors/New "tls: downgrade attempt detected, possibly due to a MitM attack or a broken middlebox")))
+
+
+            (when (== (.-vers c) VersionTLS13)
+              (let [hs (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit clientHandshakeStateTLS13
+                      :c c
+                      :ctx ctx
+                      :serverHello serverHello
+                      :hello hello
+                      :keyShareKeys keyShareKeys
+                      :session session
+                      :earlySecret earlySecret
+                      :binderKey binderKey
+                      :echContext ech))]
+
+                (return (.handshake hs))))
+
+
+            (let [hs (addr ^{:go/breaks [2 4 6 8 10]} (lit clientHandshakeState
+                    :c c
+                    :ctx ctx
+                    :serverHello serverHello
+                    :hello hello
+                    :session session))]
+
+              (.handshake hs))))))))
+
+
+
+
+(go/var ^{:doc "fips140ems is a GODEBUG variable that can be set to 0 to disable the\nenforcement of Extended Master Secret in FIPS 140-3 mode.\n"} fips140ems (godebug/New "fips140ems"))
+
+^{:go/end 510} (go/method loadSession [^{:tag (* Conn)} c ^{:tag (* clientHelloMsg)} hello] :results [
+    ^{:line 358 :tag (* SessionState)} session ^{:tag (* tls13/EarlySecret)} earlySecret ^{:tag (slice byte)} binderKey ^error err]
+  (when (or (.-SessionTicketsDisabled (.-config c)) (== (.-ClientSessionCache (.-config c)) nil))
+    (return nil nil nil nil))
+
+
+  (let [echInner (bytes/Equal (.-encryptedClientHello hello) (lit (slice byte) 1))]
+
+    ;; ticketSupported is a TLS 1.2 extension (as TLS 1.3 replaced tickets with PSK
+    ;; identities) and ECH requires and forces TLS 1.3.
+    (set! (.-ticketSupported hello) (and true (not echInner)))
+
+    (when (== (aget (.-supportedVersions hello) 0) VersionTLS13)
+      ;; Require DHE on resumption as it guarantees forward secrecy against
+      ;; compromise of the session ticket key. See RFC 8446, Section 4.2.9.
+      (set! (.-pskModes hello) (lit (slice uint8) pskModeDHE)))
+
+
+    ;; Session resumption is not allowed if renegotiating because
+    ;; renegotiation is primarily used to allow a client to send a client
+    ;; certificate, which would be skipped if session resumption occurred.
+    (when (!= (.-handshakes c) 0)
+      (return nil nil nil nil))
+
+
+    ;; Try to resume a previously negotiated TLS session, if available.
+    (let [cacheKey (.clientSessionCacheKey c)]
+      (when (== cacheKey "")
+        (return nil nil nil nil))
+
+      (let [(values cs ok) (.Get (.-ClientSessionCache (.-config c)) cacheKey)]
+        (when (or (not ok) (== cs nil))
+          (return nil nil nil nil))
+
+        (set! session (.-session cs))
+
+        ;; Check that version used for the previous session is still valid.
+        (let [versOk false]
+          (range [_ v (.-supportedVersions hello)]
+            (when (== v (.-version session))
+              (set! versOk true)
+              (break)))
+
+
+          (when (not versOk)
+            (return nil nil nil nil))
+
+
+          (when (.After (.time (.-config c)) (.-NotAfter (aget (.-peerCertificates session) 0)))
+            ;; Expired certificate, delete the entry.
+            (.Put (.-ClientSessionCache (.-config c)) cacheKey nil)
+            (return nil nil nil nil))
+
+          (when (not (.-InsecureSkipVerify (.-config c)))
+            (when (== (len (.-verifiedChains session)) 0)
+              ;; The original connection had InsecureSkipVerify, while this doesn't.
+              (return nil nil nil nil))
+
+            (when [err (.VerifyHostname (aget (.-peerCertificates session) 0) (.-ServerName (.-config c)))] (!= err nil)
+              ;; This should be ensured by the cache key, but protect the
+              ;; application from a faulty ClientSessionCache implementation.
+              (return nil nil nil nil))
+
+            (let [opts ^{:go/breaks [2 4 6]} (lit x509/VerifyOptions
+                  :CurrentTime (.time (.-config c))
+                  :Roots (.-RootCAs (.-config c))
+                  :KeyUsages (lit (slice x509/ExtKeyUsage) x509/ExtKeyUsageServerAuth))]
+
+              (when (not (anyValidVerifiedChain (.-verifiedChains session) opts))
+                ;; No valid chains, delete the entry.
+                (.Put (.-ClientSessionCache (.-config c)) cacheKey nil)
+                (return nil nil nil nil))))
+
+
+
+          (when (!= (.-version session) VersionTLS13)
+            ;; In TLS 1.2 the cipher suite must match the resumed session. Ensure we
+            ;; are still offering it.
+            (when (== (mutualCipherSuite (.-cipherSuites hello) (.-cipherSuite session)) nil)
+              (return nil nil nil nil))
+
+
+            ;; FIPS 140-3 requires the use of Extended Master Secret.
+            (when (and (not (.-extMasterSecret session)) (fips140tls/Required))
+              (when (!= (.Value fips140ems) "0")
+                (return nil nil nil nil))
+
+              (.IncNonDefault fips140ems))
+
+
+            (set! (.-sessionTicket hello) (.-ticket session))
+            (return))
+
+
+          ;; Check that the session ticket is not expired.
+          (when (.After (.time (.-config c)) (time/Unix (conv int64 (.-useBy session)) 0))
+            (.Put (.-ClientSessionCache (.-config c)) cacheKey nil)
+            (return nil nil nil nil))
+
+
+          ;; In TLS 1.3 the KDF hash must match the resumed session. Ensure we
+          ;; offer at least one cipher suite with that hash.
+          (let [cipherSuite (cipherSuiteTLS13ByID (.-cipherSuite session))]
+            (when (== cipherSuite nil)
+              (return nil nil nil nil))
+
+            (let [cipherSuiteOk false]
+              (range [_ offeredID (.-cipherSuites hello)]
+                (let [offeredSuite (cipherSuiteTLS13ByID offeredID)]
+                  (when (and (!= offeredSuite nil) (== (.-hash offeredSuite) (.-hash cipherSuite)))
+                    (set! cipherSuiteOk true)
+                    (break))))
+
+
+              (when (not cipherSuiteOk)
+                (return nil nil nil nil))
+
+
+              (when (!= (.-quic c) nil)
+                (when (.-enableSessionEvents (.-quic c))
+                  (.quicResumeSession c session))
+
+
+                ;; For 0-RTT, the cipher suite has to match exactly, and we need to be
+                ;; offering the same ALPN.
+                (when (and (.-EarlyData session) (!= (mutualCipherSuiteTLS13 (.-cipherSuites hello) (.-cipherSuite session)) nil))
+                  (range [_ alpn (.-alpnProtocols hello)]
+                    (when (== alpn (.-alpnProtocol session))
+                      (set! (.-earlyData hello) true)
+                      (break)))))
+
+
+
+
+
+              ;; Set the pre_shared_key extension. See RFC 8446, Section 4.2.11.1.
+              (let [ticketAge (.Sub (.time (.-config c)) (time/Unix (conv int64 (.-createdAt session)) 0))
+                  ^{:line 494} identity ^{:go/breaks [2 4]} (lit pskIdentity
+                    :label (.-ticket session)
+                    :obfuscatedTicketAge (+ (conv uint32 (/ ticketAge time/Millisecond)) (.-ageAdd session)))]
+
+                (set! (.-pskIdentities hello) (lit (slice pskIdentity) identity))
+                (set! (.-pskBinders hello) (lit (slice (slice byte)) (make (slice byte) (.Size (.-hash cipherSuite)))))
+
+                ;; Compute the PSK binders. See RFC 8446, Section 4.2.11.2.
+                (set! earlySecret (^{:inst [hash/Hash]} tls13/NewEarlySecret (.-New (.-hash cipherSuite)) (.-secret session)))
+                (set! binderKey (.ResumptionBinderKey earlySecret))
+                (let [transcript (.New (.-hash cipherSuite))]
+                  (when [err (computeAndUpdatePSK hello binderKey transcript (.-finishedHash cipherSuite))] (!= err nil)
+                    (return nil nil nil err))
+
+
+                  (return))))))))))
+
+
+^{:go/end 530} (go/method pickTLSVersion ^error [^{:tag (* Conn)} c ^{:tag (* serverHelloMsg)} serverHello]
+  (let [peerVersion (.-vers serverHello)]
+    (when (!= (.-supportedVersion serverHello) 0)
+      (set! peerVersion (.-supportedVersion serverHello)))
+
+
+    ^{:go/breaks [[7 529]]} (let [(values vers ok) (.mutualVersion (.-config c) roleClient (!= (.-quic c) nil) (lit (slice uint16) peerVersion))]
+      (when (not ok)
+        (.sendAlert c alertProtocolVersion)
+        (return (fmt/Errorf "tls: server selected unsupported protocol version %x" peerVersion)))
+
+
+      (set! (.-vers c) vers)
+      (set! (.-haveVers c) true)
+      (set! (.-version (.-in c)) vers)
+      (set! (.-version (.-out c)) vers)
+
+      nil)))
+
+
+
+
+^{:go/end 629} (go/method handshake "Does the handshake, either a full one or resumes old session. Requires hs.c,\nhs.hello, hs.serverHello, and, optionally, hs.session to be set.\n" ^error [^{:tag (* clientHandshakeState)} hs]
+  (let [c (.-c hs)]
+
+    ;; If we did not load a session (hs.session == nil), but we did set a
+    ;; session ID in the transmitted client hello (hs.hello.sessionId != nil),
+    ;; it means we tried to negotiate TLS 1.3 and sent a random session ID as a
+    ;; compatibility measure (see RFC 8446, Section 4.1.2).
+    ;;
+    ;; Since we're now handshaking for TLS 1.2, if the server echoed the
+    ;; transmitted ID back to us, we know mischief is afoot: the session ID
+    ;; was random and can't possibly be recognized by the server.
+    (when (and (== (.-session hs) nil) (!= (.-sessionId (.-hello hs)) nil) (bytes/Equal (.-sessionId (.-hello hs)) (.-sessionId (.-serverHello hs))))
+      (.sendAlert c alertIllegalParameter)
+      (return (errors/New "tls: server echoed TLS 1.3 compatibility session ID in TLS 1.2")))
+
+
+    ^{:go/breaks [[13 628]]} (let [(values isResume err) (.processServerHello hs)]
+      (when (!= err nil)
+        (return err))
+
+
+      (set! (.-finishedHash hs) (newFinishedHash (.-vers c) (.-suite hs)))
+
+      ;; No signatures of the handshake are needed in a resumption.
+      ;; Otherwise, in a full handshake, if we don't have any certificates
+      ;; configured then we will never send a CertificateVerify message and
+      ;; thus no signatures are needed in that case either.
+      (when (or isResume ^:go/paren (and (== (len (.-Certificates (.-config c))) 0) (== (.-GetClientCertificate (.-config c)) nil)))
+        (.discardHandshakeBuffer (.-finishedHash hs)))
+
+
+      (when [err (transcriptMsg (.-hello hs) (addr (.-finishedHash hs)))] (!= err nil)
+        (return err))
+
+      (when [err (transcriptMsg (.-serverHello hs) (addr (.-finishedHash hs)))] (!= err nil)
+        (return err))
+
+
+      (set! (.-buffering c) true)
+      (set! (.-didResume c) isResume)
+      (if isResume (do
+          (when [err (.establishKeys hs)] (!= err nil)
+            (return err))
+
+          (when [err (.readSessionTicket hs)] (!= err nil)
+            (return err))
+
+          (when [err (.readFinished hs (subslice (.-serverFinished c)))] (!= err nil)
+            (return err))
+
+          (set! (.-clientFinishedIsFirst c) false)
+          ;; Make sure the connection is still being verified whether or not this
+          ;; is a resumption. Resumptions currently don't reverify certificates so
+          ;; they don't call verifyServerCertificate. See Issue 31641.
+          (when (!= (.-VerifyConnection (.-config c)) nil)
+            (when [err ((.-VerifyConnection (.-config c)) (.connectionStateLocked c))] (!= err nil)
+              (.sendAlert c alertBadCertificate)
+              (return err)))
+
+
+          (when [err (.sendFinished hs (subslice (.-clientFinished c)))] (!= err nil)
+            (return err))
+
+          (when [(values _ err) (.flush c)] (!= err nil)
+            (return err)))
+
+        (do
+          (when [err (.doFullHandshake hs)] (!= err nil)
+            (return err))
+
+          (when [err (.establishKeys hs)] (!= err nil)
+            (return err))
+
+          (when [err (.sendFinished hs (subslice (.-clientFinished c)))] (!= err nil)
+            (return err))
+
+          (when [(values _ err) (.flush c)] (!= err nil)
+            (return err))
+
+          (set! (.-clientFinishedIsFirst c) true)
+          (when [err (.readSessionTicket hs)] (!= err nil)
+            (return err))
+
+          (when [err (.readFinished hs (subslice (.-serverFinished c)))] (!= err nil)
+            (return err))))
+
+
+      (when [err (.saveSessionTicket hs)] (!= err nil)
+        (return err))
+
+
+      (set! (.-ekm c) (ekmFromMasterSecret (.-vers c) (.-suite hs) (.-masterSecret hs) (.-random (.-hello hs)) (.-random (.-serverHello hs))))
+      (.Store (.-isHandshakeComplete c) true)
+
+      nil)))
+
+
+^{:go/breaks [5] :go/end 639} (go/method pickCipherSuite ^error [^{:tag (* clientHandshakeState)} hs]
+  (when [(set! (.-suite hs) (mutualCipherSuite (.-cipherSuites (.-hello hs)) (.-cipherSuite (.-serverHello hs))))] (== (.-suite hs) nil)
+    (.sendAlert (.-c hs) alertHandshakeFailure)
+    (return (errors/New "tls: server chose an unconfigured cipher suite")))
+
+
+  (set! (.-cipherSuite (.-c hs)) (.-id (.-suite hs)))
+  nil)
+
+
+^{:go/end 850} (go/method doFullHandshake ^error [^{:tag (* clientHandshakeState)} hs]
+  (let [c (.-c hs)
+
+      (values msg err) (.readHandshake c (addr (.-finishedHash hs)))]
+    (when (!= err nil)
+      (return err))
+
+    (let [(values certMsg ok) (assert (* certificateMsg) msg)]
+      (when (or (not ok) (== (len (.-certificates certMsg)) 0))
+        (.sendAlert c alertUnexpectedMessage)
+        (return (unexpectedMessageError certMsg msg)))
+
+
+      (set! (values msg err) (.readHandshake c (addr (.-finishedHash hs))))
+      (when (!= err nil)
+        (return err))
+
+
+      (let [(values cs ^:assign ok) (assert (* certificateStatusMsg) msg)]
+        (when ok
+          ;; RFC4366 on Certificate Status Request:
+          ;; The server MAY return a "certificate_status" message.
+
+          (when (not (.-ocspStapling (.-serverHello hs)))
+            ;; If a server returns a "CertificateStatus" message, then the
+            ;; server MUST have included an extension of type "status_request"
+            ;; with empty "extension_data" in the extended server hello.
+
+            (.sendAlert c alertUnexpectedMessage)
+            (return (errors/New "tls: received unexpected CertificateStatus message")))
+
+
+          (set! (.-ocspResponse c) (.-response cs))
+
+          (set! (values msg err) (.readHandshake c (addr (.-finishedHash hs))))
+          (when (!= err nil)
+            (return err)))
+
+
+
+        (if (== (.-handshakes c) 0)
+          ;; If this is the first handshake on a connection, process and
+          ;; (optionally) verify the server's certificates.
+          (when [err (.verifyServerCertificate c (.-certificates certMsg))] (!= err nil)
+            (return err))
+
+          (do
+            ;; This is a renegotiation handshake. We require that the
+            ;; server's identity (i.e. leaf certificate) is unchanged and
+            ;; thus any previous trust decision is still valid.
+            ;;
+            ;; See https://mitls.org/pages/attacks/3SHAKE for the
+            ;; motivation behind this requirement.
+            (when (not (bytes/Equal (.-Raw (aget (.-peerCertificates c) 0)) (aget (.-certificates certMsg) 0)))
+              (.sendAlert c alertBadCertificate)
+              (return (errors/New "tls: server's identity changed during renegotiation")))))
+
+
+
+        (let [keyAgreement ((.-ka (.-suite hs)) (.-vers c))
+
+            (values skx ^:assign ok) (assert (* serverKeyExchangeMsg) msg)]
+          (when ok
+            (set! err (.processServerKeyExchange keyAgreement (.-config c) (.-hello hs) (.-serverHello hs) (aget (.-peerCertificates c) 0) skx))
+            (when (!= err nil)
+              (.sendAlert c alertIllegalParameter)
+              (return err))
+
+            (when [(values keyAgreement ok) (assert (* ecdheKeyAgreement) keyAgreement)] ok
+              (set! (.-curveID c) (.-curveID keyAgreement))
+              (set! (.-peerSigAlg c) (.-signatureAlgorithm keyAgreement)))
+
+
+            (set! (values msg err) (.readHandshake c (addr (.-finishedHash hs))))
+            (when (!= err nil)
+              (return err)))
+
+
+
+          (let [^{:tag (* Certificate)} chainToSend (zero (* Certificate))
+              ^{:line 721 :tag bool} certRequested (zero bool)
+              (values certReq ^:assign ok) (assert (* certificateRequestMsg) msg)]
+            (when ok
+              (set! certRequested true)
+
+              (let [cri (certificateRequestInfoFromMsg (.-ctx hs) (.-vers c) certReq)]
+                (when [(set! (values chainToSend err) (.getClientCertificate c cri))] (!= err nil)
+                  (.sendAlert c alertInternalError)
+                  (return err))
+
+
+                (set! (values msg err) (.readHandshake c (addr (.-finishedHash hs))))
+                (when (!= err nil)
+                  (return err))))
+
+
+
+            (when (!= chainToSend nil)
+              (set! (.-localCertificate (.-c hs)) (.-Certificate chainToSend)))
+
+
+            (let [(values shd ^:assign ok) (assert (* serverHelloDoneMsg) msg)]
+              (when (not ok)
+                (.sendAlert c alertUnexpectedMessage)
+                (return (unexpectedMessageError shd msg)))
+
+
+              ;; If the server requested a certificate then we have to send a
+              ;; Certificate message, even if it's empty because we don't have a
+              ;; certificate to send.
+              (when certRequested
+                (set! certMsg (new certificateMsg))
+                (set! (.-certificates certMsg) (.-Certificate chainToSend))
+                (when [(values _ err) (.writeHandshakeRecord (.-c hs) certMsg (addr (.-finishedHash hs)))] (!= err nil)
+                  (return err)))
+
+
+
+              ^{:go/breaks [[8 849]]} (let [(values preMasterSecret ckx ^:assign err) (.generateClientKeyExchange keyAgreement (.-config c) (.-hello hs) (aget (.-peerCertificates c) 0))]
+                (when (!= err nil)
+                  (.sendAlert c alertInternalError)
+                  (return err))
+
+                (when (!= ckx nil)
+                  (when [(values _ err) (.writeHandshakeRecord (.-c hs) ckx (addr (.-finishedHash hs)))] (!= err nil)
+                    (return err)))
+
+
+
+                (if (.-extendedMasterSecret (.-serverHello hs)) (do
+                    (set! (.-extMasterSecret c) true)
+                    (set! (.-masterSecret hs) (extMasterFromPreMasterSecret (.-vers c) (.-suite hs) preMasterSecret
+                        (.Sum (.-finishedHash hs)))))
+                  (do
+                    (when (fips140tls/Required)
+                      (when (!= (.Value fips140ems) "0")
+                        (.sendAlert c alertHandshakeFailure)
+                        (return (errors/New "tls: FIPS 140-3 requires the use of Extended Master Secret")))
+
+                      (.IncNonDefault fips140ems))
+
+                    (set! (.-masterSecret hs) (masterFromPreMasterSecret (.-vers c) (.-suite hs) preMasterSecret
+                        (.-random (.-hello hs)) (.-random (.-serverHello hs))))))
+
+                (when [err (.writeKeyLog (.-config c) keyLogLabelTLS12 (.-random (.-hello hs)) (.-masterSecret hs))] (!= err nil)
+                  (.sendAlert c alertInternalError)
+                  (return (errors/New (+ "tls: failed to write to key log: " (.Error err)))))
+
+
+                (when (and (!= chainToSend nil) (> (len (.-Certificate chainToSend)) 0))
+                  (let [certVerify (addr (lit certificateVerifyMsg))
+
+                      (values key ok) (assert crypto/Signer (.-PrivateKey chainToSend))]
+                    (when (not ok)
+                      (.sendAlert c alertInternalError)
+                      (return (fmt/Errorf "tls: client certificate private key of type %T does not implement crypto.Signer" (.-PrivateKey chainToSend))))
+
+
+                    (if (>= (.-vers c) VersionTLS12)
+                      (let [(values signatureAlgorithm err) (selectSignatureScheme (.-vers c) chainToSend (.-supportedSignatureAlgorithms certReq))]
+                        (when (!= err nil)
+                          (.sendAlert c alertHandshakeFailure)
+                          (return err))
+
+                        (let [(values sigType sigHash ^:assign err) (typeAndHashFromSignatureScheme signatureAlgorithm)]
+                          (when (!= err nil)
+                            (return (.sendAlert c alertInternalError)))
+
+                          (set! (.-hasSignatureAlgorithm certVerify) true)
+                          (set! (.-signatureAlgorithm certVerify) signatureAlgorithm)
+                          (when (== sigHash crypto/SHA1)
+                            (.Value tlssha1) ; ensure godebug is initialized
+                            (.IncNonDefault tlssha1))
+
+                          (when (== (.-buffer (.-finishedHash hs)) nil)
+                            (.sendAlert c alertInternalError)
+                            (return (errors/New "tls: internal error: did not keep handshake transcript for TLS 1.2")))
+
+                          (let [signOpts (conv crypto/SignerOpts sigHash)]
+                            (when (== sigType signatureRSAPSS)
+                              (set! signOpts (addr (lit rsa/PSSOptions :SaltLength rsa/PSSSaltLengthEqualsHash :Hash sigHash))))
+
+                            (set! (values (.-signature certVerify) err) (crypto/SignMessage key (.rand (.-config c)) (.-buffer (.-finishedHash hs)) signOpts))
+                            (when (!= err nil)
+                              (.sendAlert c alertInternalError)
+                              (return err)))))
+
+
+                      (let [(values sigType sigHash err) (legacyTypeAndHashFromPublicKey (.Public key))]
+                        (when (!= err nil)
+                          (.sendAlert c alertIllegalParameter)
+                          (return err))
+
+                        (let [signed (.hashForClientCertificate (.-finishedHash hs) sigType)]
+                          (set! (values (.-signature certVerify) err) (.Sign key (.rand (.-config c)) signed sigHash))
+                          (when (!= err nil)
+                            (.sendAlert c alertInternalError)
+                            (return err)))))
+
+
+
+                    (when [(values _ err) (.writeHandshakeRecord (.-c hs) certVerify (addr (.-finishedHash hs)))] (!= err nil)
+                      (return err))))
+
+
+
+                (.discardHandshakeBuffer (.-finishedHash hs))
+
+                nil))))))))
+
+
+^{:go/end 872} (go/method establishKeys ^error [^{:tag (* clientHandshakeState)} hs]
+  ^{:go/breaks [5]} (let [c (.-c hs)
+
+      (values clientMAC serverMAC clientKey serverKey clientIV serverIV)
+      (keysFromMasterSecret (.-vers c) (.-suite hs) (.-masterSecret hs) (.-random (.-hello hs)) (.-random (.-serverHello hs)) (.-macLen (.-suite hs)) (.-keyLen (.-suite hs)) (.-ivLen (.-suite hs)))
+      (values ^any clientCipher ^any serverCipher) (zero any)
+      (values ^hash/Hash clientHash ^hash/Hash serverHash) (zero hash/Hash)]
+    (if (!= (.-cipher (.-suite hs)) nil) (do
+        (set! clientCipher ((.-cipher (.-suite hs)) clientKey clientIV false)) ; /* not for reading */
+        (set! clientHash ((.-mac (.-suite hs)) clientMAC))
+        (set! serverCipher ((.-cipher (.-suite hs)) serverKey serverIV true)) ; /* for reading */
+        (set! serverHash ((.-mac (.-suite hs)) serverMAC)))
+      (do
+        (set! clientCipher ((.-aead (.-suite hs)) clientKey clientIV))
+        (set! serverCipher ((.-aead (.-suite hs)) serverKey serverIV))))
+
+
+    (.prepareCipherSpec (.-in c) (.-vers c) serverCipher serverHash)
+    (.prepareCipherSpec (.-out c) (.-vers c) clientCipher clientHash)
+    nil))
+
+
+^{:go/end 879} (go/method serverResumedSession ^bool [^{:tag (* clientHandshakeState)} hs]
+  ;; If the server responded with the same sessionId then it means the
+  ;; sessionTicket is being used to resume a TLS session.
+  (and (!= (.-session hs) nil) (!= (.-sessionId (.-hello hs)) nil)
+    (bytes/Equal (.-sessionId (.-serverHello hs)) (.-sessionId (.-hello hs)))))
+
+
+^{:go/end 966} (go/method processServerHello [^{:tag (* clientHandshakeState)} hs] :results [bool error]
+  (let [c (.-c hs)]
+
+    (when [err (.pickCipherSuite hs)] (!= err nil)
+      (return false err))
+
+
+    (when (!= (.-compressionMethod (.-serverHello hs)) compressionNone)
+      (.sendAlert c alertIllegalParameter)
+      (return false (errors/New "tls: server selected unsupported compression format")))
+
+
+    (let [supportsPointFormat false
+        ^{:line 894} offeredNonCompressedFormat false]
+      (range [_ format (.-supportedPoints (.-serverHello hs))]
+        (if (== format pointFormatUncompressed)
+          (set! supportsPointFormat true)
+
+          (set! offeredNonCompressedFormat true)))
+
+
+      (when (and (not supportsPointFormat) offeredNonCompressedFormat)
+        (return false (errors/New "tls: server offered only incompatible point formats")))
+
+
+      (when (and (== (.-handshakes c) 0) (.-secureRenegotiationSupported (.-serverHello hs)))
+        (set! (.-secureRenegotiation c) true)
+        (when (!= (len (.-secureRenegotiation (.-serverHello hs))) 0)
+          (.sendAlert c alertHandshakeFailure)
+          (return false (errors/New "tls: initial handshake had non-empty renegotiation extension"))))
+
+
+
+      (when (and (> (.-handshakes c) 0) (.-secureRenegotiation c))
+        (let [^{:tag (array 24 byte)} expectedSecureRenegotiation (zero (array 24 byte))]
+          (copy (subslice expectedSecureRenegotiation) (subslice (.-clientFinished c)))
+          (copy (subslice expectedSecureRenegotiation 12) (subslice (.-serverFinished c)))
+          (when (not (bytes/Equal (.-secureRenegotiation (.-serverHello hs)) (subslice expectedSecureRenegotiation)))
+            (.sendAlert c alertHandshakeFailure)
+            (return false (errors/New "tls: incorrect renegotiation extension contents")))))
+
+
+
+      (when [err (checkALPN (.-alpnProtocols (.-hello hs)) (.-alpnProtocol (.-serverHello hs)) false)] (!= err nil)
+        (.sendAlert c alertUnsupportedExtension)
+        (return false err))
+
+      (set! (.-clientProtocol c) (.-alpnProtocol (.-serverHello hs)))
+
+      (set! (.-scts c) (.-scts (.-serverHello hs)))
+
+      (when (not (.serverResumedSession hs))
+        (return false nil))
+
+
+      (when (!= (.-version (.-session hs)) (.-vers c))
+        (.sendAlert c alertHandshakeFailure)
+        (return false (errors/New "tls: server resumed a session with a different version")))
+
+
+      (when (!= (.-cipherSuite (.-session hs)) (.-id (.-suite hs)))
+        (.sendAlert c alertHandshakeFailure)
+        (return false (errors/New "tls: server resumed a session with a different cipher suite")))
+
+
+      ;; RFC 7627, Section 5.3
+      (when (!= (.-extMasterSecret (.-session hs)) (.-extendedMasterSecret (.-serverHello hs)))
+        (.sendAlert c alertHandshakeFailure)
+        (return false (errors/New "tls: server resumed a session with a different EMS extension")))
+
+
+      ;; Restore master secret and certificates from previous state
+      (set! (.-masterSecret hs) (.-secret (.-session hs)))
+      (set! (.-extMasterSecret c) (.-extMasterSecret (.-session hs)))
+      (set! (.-peerCertificates c) (.-peerCertificates (.-session hs)))
+      (set! (.-verifiedChains c) (.-verifiedChains (.-session hs)))
+      (set! (.-ocspResponse c) (.-ocspResponse (.-session hs)))
+      ;; Let the ServerHello SCTs override the session SCTs from the original
+      ;; connection, if any are provided.
+      (when (and (== (len (.-scts c)) 0) (!= (len (.-scts (.-session hs))) 0))
+        (set! (.-scts c) (.-scts (.-session hs))))
+
+      (set! (.-curveID c) (.-curveID (.-session hs)))
+
+      (return true nil))))
+
+
+
+
+^{:go/end 987} (go/func checkALPN "checkALPN ensure that the server's choice of ALPN protocol is compatible with\nthe protocols that we advertised in the ClientHello.\n" ^error [^{:tag (slice string)} clientProtos ^string serverProto ^bool quic]
+  (when (== serverProto "")
+    (when (and quic (> (len clientProtos) 0))
+      ;; RFC 9001, Section 8.1
+      (return (errors/New "tls: server did not select an ALPN protocol")))
+
+    (return nil))
+
+  (when (== (len clientProtos) 0)
+    (return (errors/New "tls: server advertised unrequested ALPN extension")))
+
+  (range [_ proto clientProtos]
+    (when (== proto serverProto)
+      (return nil)))
+
+
+  (errors/New "tls: server selected unadvertised ALPN protocol"))
+
+
+^{:go/end 1022} (go/method readFinished ^error [^{:tag (* clientHandshakeState)} hs ^{:tag (slice byte)} out]
+  (let [c (.-c hs)]
+
+    (when [err (.readChangeCipherSpec c)] (!= err nil)
+      (return err))
+
+
+    ;; finishedMsg is included in the transcript, but not until after we
+    ;; check the client version, since the state before this message was
+    ;; sent is used during verification.
+    (let [(values msg err) (.readHandshake c nil)]
+      (when (!= err nil)
+        (return err))
+
+      (let [(values serverFinished ok) (assert (* finishedMsg) msg)]
+        (when (not ok)
+          (.sendAlert c alertUnexpectedMessage)
+          (return (unexpectedMessageError serverFinished msg)))
+
+
+        ^{:go/breaks [5]} (let [verify (.serverSum (.-finishedHash hs) (.-masterSecret hs))]
+          (when (or (!= (len verify) (len (.-verifyData serverFinished)))
+              (!= (subtle/ConstantTimeCompare verify (.-verifyData serverFinished)) 1))
+            (.sendAlert c alertHandshakeFailure)
+            (return (errors/New "tls: server's Finished message was incorrect")))
+
+
+          (when [err (transcriptMsg serverFinished (addr (.-finishedHash hs)))] (!= err nil)
+            (return err))
+
+
+          (copy out verify)
+          nil)))))
+
+
+^{:go/end 1047} (go/method readSessionTicket ^error [^{:tag (* clientHandshakeState)} hs]
+  (when (not (.-ticketSupported (.-serverHello hs)))
+    (return nil))
+
+  (let [c (.-c hs)]
+
+    (when (not (.-ticketSupported (.-hello hs)))
+      (.sendAlert c alertIllegalParameter)
+      (return (errors/New "tls: server sent unrequested session ticket")))
+
+
+    (let [(values msg err) (.readHandshake c (addr (.-finishedHash hs)))]
+      (when (!= err nil)
+        (return err))
+
+      ^{:go/breaks [4]} (let [(values sessionTicketMsg ok) (assert (* newSessionTicketMsg) msg)]
+        (when (not ok)
+          (.sendAlert c alertUnexpectedMessage)
+          (return (unexpectedMessageError sessionTicketMsg msg)))
+
+
+        (set! (.-ticket hs) (.-ticket sessionTicketMsg))
+        nil))))
+
+
+^{:go/end 1067} (go/method saveSessionTicket ^error [^{:tag (* clientHandshakeState)} hs]
+  (when (== (.-ticket hs) nil)
+    (return nil))
+
+  (let [c (.-c hs)
+
+      ^{:line 1055} cacheKey (.clientSessionCacheKey c)]
+    (when (== cacheKey "")
+      (return nil))
+
+
+    (let [session (.sessionState c)]
+      (set! (.-secret session) (.-masterSecret hs))
+      (set! (.-ticket session) (.-ticket hs))
+
+      ^{:go/breaks [3]} (let [cs (addr (lit ClientSessionState :session session))]
+        (.Put (.-ClientSessionCache (.-config c)) cacheKey cs)
+        nil))))
+
+
+^{:go/end 1083} (go/method sendFinished ^error [^{:tag (* clientHandshakeState)} hs ^{:tag (slice byte)} out]
+  (let [c (.-c hs)]
+
+    (when [err (.writeChangeCipherRecord c)] (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [5]} (let [finished (new finishedMsg)]
+      (set! (.-verifyData finished) (.clientSum (.-finishedHash hs) (.-masterSecret hs)))
+      (when [(values _ err) (.writeHandshakeRecord (.-c hs) finished (addr (.-finishedHash hs)))] (!= err nil)
+        (return err))
+
+      (copy out (.-verifyData finished))
+      nil)))
+
+
+
+
+(go/const ^{:val 8192 :doc "defaultMaxRSAKeySize is the maximum RSA key size in bits that we are willing\nto verify the signatures of during a TLS handshake.\n"} defaultMaxRSAKeySize 8192)
+
+(go/var tlsmaxrsasize (godebug/New "tlsmaxrsasize"))
+
+^{:go/end 1101} (go/func checkKeySize [^int n] :results [^int max ^bool ok]
+  (when [v (.Value tlsmaxrsasize)] (!= v "")
+    (when [(values max err) (strconv/Atoi v)] (== err nil)
+      (when (!= (<= n max) (<= n defaultMaxRSAKeySize))
+        (.IncNonDefault tlsmaxrsasize))
+
+      (return max (<= n max))))
+
+
+  (return defaultMaxRSAKeySize (<= n defaultMaxRSAKeySize)))
+
+
+
+
+^{:go/end 1206} (go/method verifyServerCertificate "verifyServerCertificate parses and verifies the provided chain, setting\nc.verifiedChains and c.peerCertificates or sending the appropriate alert.\n" ^error [^{:tag (* Conn)} c ^{:tag (slice (slice byte))} certificates]
+  (let [certs (make (slice (* x509/Certificate)) (len certificates))]
+    (range [i asn1Data certificates]
+      (let [(values cert err) (.newCert globalCertCache asn1Data)]
+        (when (!= err nil)
+          (.sendAlert c alertDecodeError)
+          (return (errors/New (+ "tls: failed to parse certificate from server: " (.Error err)))))
+
+        (when (== (.-PublicKeyAlgorithm cert) x509/RSA)
+          (let [n (.BitLen (.-N (assert (* rsa/PublicKey) (.-PublicKey cert))))]
+            (when [(values max ok) (checkKeySize n)] (not ok)
+              (.sendAlert c alertBadCertificate)
+              (return (fmt/Errorf "tls: server sent certificate containing RSA key larger than %d bits" max)))))
+
+
+        (aset certs i cert)))
+
+
+    ^{:go/breaks [[7 1205]]} (let [echRejected (and (!= (.-EncryptedClientHelloConfigList (.-config c)) nil) (not (.-echAccepted c)))]
+      (cond echRejected
+        (if (!= (.-EncryptedClientHelloRejectionVerify (.-config c)) nil)
+          (when [err ((.-EncryptedClientHelloRejectionVerify (.-config c)) (.connectionStateLocked c))] (!= err nil)
+            (.sendAlert c alertBadCertificate)
+            (return err))
+
+
+          (let [opts ^{:go/breaks [2 4 6 8]} (lit x509/VerifyOptions
+                :Roots (.-RootCAs (.-config c))
+                :CurrentTime (.time (.-config c))
+                :DNSName (.-serverName c)
+                :Intermediates (x509/NewCertPool))]
+
+
+            (range [_ cert (subslice certs 1)]
+              (.AddCert (.-Intermediates opts) cert))
+
+            (let [(values chains err) (.Verify (aget certs 0) opts)]
+              (when (!= err nil)
+                (.sendAlert c alertBadCertificate)
+                (return (addr (lit CertificateVerificationError :UnverifiedCertificates certs :Err err))))
+
+
+              (set! (values (.-verifiedChains c) err) (fipsAllowedChains chains))
+              (when (!= err nil)
+                (.sendAlert c alertBadCertificate)
+                (return (addr (lit CertificateVerificationError :UnverifiedCertificates certs :Err err)))))))
+
+
+        (not (.-InsecureSkipVerify (.-config c)))
+        (let [opts ^{:go/breaks [2 4 6 8]} (lit x509/VerifyOptions
+              :Roots (.-RootCAs (.-config c))
+              :CurrentTime (.time (.-config c))
+              :DNSName (.-ServerName (.-config c))
+              :Intermediates (x509/NewCertPool))]
+
+
+          (range [_ cert (subslice certs 1)]
+            (.AddCert (.-Intermediates opts) cert))
+
+          (let [(values chains err) (.Verify (aget certs 0) opts)]
+            (when (!= err nil)
+              (.sendAlert c alertBadCertificate)
+              (return (addr (lit CertificateVerificationError :UnverifiedCertificates certs :Err err))))
+
+
+            (set! (values (.-verifiedChains c) err) (fipsAllowedChains chains))
+            (when (!= err nil)
+              (.sendAlert c alertBadCertificate)
+              (return (addr (lit CertificateVerificationError :UnverifiedCertificates certs :Err err)))))))
+
+
+
+      (type-switch (.-PublicKey (aget certs 0))
+        (case [(* rsa/PublicKey) (* ecdsa/PublicKey) ed25519/PublicKey])
+        (case [(* mldsa/PublicKey)]
+          (when (< (.-vers c) VersionTLS13)
+            (.sendAlert c alertIllegalParameter)
+            (return (errors/New "tls: server's certificate uses ML-DSA, which requires TLS 1.3"))))
+
+        (default
+          (.sendAlert c alertUnsupportedCertificate)
+          (return (fmt/Errorf "tls: server's certificate contains an unsupported type of public key: %T" (.-PublicKey (aget certs 0))))))
+
+
+      (set! (.-peerCertificates c) certs)
+
+      (when (and (!= (.-VerifyPeerCertificate (.-config c)) nil) (not echRejected))
+        (when [err ((.-VerifyPeerCertificate (.-config c)) certificates (.-verifiedChains c))] (!= err nil)
+          (.sendAlert c alertBadCertificate)
+          (return err)))
+
+
+
+      (when (and (!= (.-VerifyConnection (.-config c)) nil) (not echRejected))
+        (when [err ((.-VerifyConnection (.-config c)) (.connectionStateLocked c))] (!= err nil)
+          (.sendAlert c alertBadCertificate)
+          (return err)))
+
+
+
+      nil)))
+
+
+
+
+^{:go/end 1272} (go/func certificateRequestInfoFromMsg "certificateRequestInfoFromMsg generates a CertificateRequestInfo from a TLS\n<= 1.2 CertificateRequest, making an effort to fill in missing information.\n" ^{:tag (* CertificateRequestInfo)} [^context/Context ctx ^uint16 vers ^{:tag (* certificateRequestMsg)} certReq]
+  (let [cri (addr ^{:go/breaks [2 4 6]} (lit CertificateRequestInfo
+          :AcceptableCAs (.-certificateAuthorities certReq)
+          :Version vers
+          :ctx ctx))
+
+
+      (values ^bool rsaAvail ^bool ecAvail) (zero bool)]
+    (range [_ certType (.-certificateTypes certReq)]
+      (switch certType
+        (case [certTypeRSASign]
+          (set! rsaAvail true))
+        (case [certTypeECDSASign]
+          (set! ecAvail true))))
+
+
+
+    (when (not (.-hasSignatureAlgorithm certReq))
+      ;; Prior to TLS 1.2, signature schemes did not exist. In this case we
+      ;; make up a list based on the acceptable certificate types, to help
+      ;; GetClientCertificate and SupportsCertificate select the right certificate.
+      ;; The hash part of the SignatureScheme is a lie here, because
+      ;; TLS 1.0 and 1.1 always use MD5+SHA1 for RSA and SHA1 for ECDSA.
+      (switch
+        (case [(and rsaAvail ecAvail)]
+          (set! (.-SignatureSchemes cri) (lit (slice SignatureScheme)
+              ^{:line 1236} ECDSAWithP256AndSHA256 ECDSAWithP384AndSHA384 ECDSAWithP521AndSHA512
+              ^{:line 1237} PKCS1WithSHA256 PKCS1WithSHA384 PKCS1WithSHA512 PKCS1WithSHA1)))
+
+        (case [rsaAvail]
+          (set! (.-SignatureSchemes cri) (lit (slice SignatureScheme)
+              ^{:line 1241} PKCS1WithSHA256 PKCS1WithSHA384 PKCS1WithSHA512 PKCS1WithSHA1)))
+
+        (case [ecAvail]
+          (set! (.-SignatureSchemes cri) (lit (slice SignatureScheme)
+              ^{:line 1245} ECDSAWithP256AndSHA256 ECDSAWithP384AndSHA384 ECDSAWithP521AndSHA512))))
+
+
+      (return cri))
+
+
+    ;; Filter the signature schemes based on the certificate types.
+    ;; See RFC 5246, Section 7.4.4 (where it calls this "somewhat complicated").
+    (set! (.-SignatureSchemes cri) (make (slice SignatureScheme) 0 (len (.-supportedSignatureAlgorithms certReq))))
+    (range [_ sigScheme (.-supportedSignatureAlgorithms certReq)]
+      (let [(values sigType _ err) (typeAndHashFromSignatureScheme sigScheme)]
+        (when (!= err nil)
+          (continue))
+
+        (switch sigType
+          (case [signatureECDSA signatureEd25519]
+            (when ecAvail
+              (set! (.-SignatureSchemes cri) (append (.-SignatureSchemes cri) sigScheme))))
+
+          (case [signatureRSAPSS signaturePKCS1v15]
+            (when rsaAvail
+              (set! (.-SignatureSchemes cri) (append (.-SignatureSchemes cri) sigScheme)))))))
+
+
+
+
+    ^{:line 1271} cri))
+
+
+^{:go/end 1288} (go/method getClientCertificate [^{:tag (* Conn)} c ^{:tag (* CertificateRequestInfo)} cri] :results [(* Certificate) error]
+  (when (!= (.-GetClientCertificate (.-config c)) nil)
+    (return ((.-GetClientCertificate (.-config c)) cri)))
+
+
+  (range [_ chain (.-Certificates (.-config c))]
+    (when [err (.SupportsCertificate cri (addr chain))] (!= err nil)
+      (continue))
+
+    (return (addr chain) nil))
+
+
+  ;; No acceptable certificate found. Don't send a certificate.
+  (return (new Certificate) nil))
+
+
+
+
+^{:go/breaks [[6 1299]] :go/end 1300} (go/method clientSessionCacheKey "clientSessionCacheKey returns a key used to cache sessionTickets that could\nbe used to resume previously negotiated TLS sessions with a server.\n" ^string [^{:tag (* Conn)} c]
+  (when (> (len (.-ServerName (.-config c))) 0)
+    (return (.-ServerName (.-config c))))
+
+  (when (!= (.-conn c) nil)
+    (return (.String (.RemoteAddr (.-conn c)))))
+
+  "")
+
+
+
+
+
+^{:go/end 1320} (go/func hostnameInSNI "hostnameInSNI converts name into an appropriate hostname for SNI.\nLiteral IP addresses and absolute FQDNs are not permitted as SNI values.\nSee RFC 6066, Section 3.\n" ^string [^string name]
+  (let [host name]
+    (when (and (> (len host) 0) (== (aget host 0) \[) (== (aget host (- (len host) 1)) \]))
+      (set! host (subslice host 1 (- (len host) 1))))
+
+    (when [i (strings/LastIndex host "%")] (> i 0)
+      (set! host (subslice host _ i)))
+
+    (when (!= (net/ParseIP host) nil)
+      (return ""))
+
+    (while (and (> (len name) 0) (== (aget name (- (len name) 1)) \.))
+      (set! name (subslice name _ (- (len name) 1))))
+
+    ^{:line 1319} name))
+
+
+^{:go/end 1330} (go/func computeAndUpdatePSK ^error [^{:tag (* clientHelloMsg)} m ^{:tag (slice byte)} binderKey ^hash/Hash transcript ^{:tag (func [(slice byte) hash/Hash] [(slice byte)])} finishedHash]
+  (let [(values helloBytes err) (.marshalWithoutBinders m)]
+    (when (!= err nil)
+      (return err))
+
+    (.Write transcript helloBytes)
+    (let [pskBinders (lit (slice (slice byte)) (finishedHash binderKey transcript))]
+      (.updateBinders m pskBinders))))

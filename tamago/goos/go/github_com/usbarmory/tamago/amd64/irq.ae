@@ -1,0 +1,167 @@
+;; AMD64 processor support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.amd64) (go/file "irq.go" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [binary "encoding/binary"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [signal "os/signal"]
+    ^{:line 16} [syscall "syscall"]
+
+    ^{:line 18} [lapic "github.com/usbarmory/tamago/amd64/lapic"]
+    ^{:line 19} [dma "github.com/usbarmory/tamago/dma"]])
+
+
+
+(go/const "Interrupt Gate Descriptor Attributes\n"
+  ^{:line 24} [^{:val 142} InterruptGate 2r10001110]
+  ^{:line 25} [^{:val 143} TrapGate 2r10001111])
+
+
+
+(go/const "IRQ handling jump table constants\n"
+  ^{:line 30} [^{:val 5} callSize 5]
+  ^{:line 31} [^{:val 256} vectors 256])
+
+
+(go/const
+
+
+  ^{:line 37} [^{:val 4 :doc "IRQ_SIGNAL represents the `os/signal` used to signal and service\ninterrupts.\n"} IRQ_SIGNAL syscall/SIGTRAP]
+
+
+
+
+  ^{:line 42} [^{:val 255 :doc "IRQ_WAKEUP represents the interrupt vector raised by [CPU.SetAlarm],\nit cannot be serviced by [CPU.ServiceInterrupt] as the IRQ is\nhandled internally to resume halted processors.\n"} IRQ_WAKEUP 255])
+
+
+(go/var
+
+  ^{:line 47} [^{:tag uintptr :doc "IRQ handling jump table variables\n"} idtAddr]
+  ^{:line 48} [^uintptr irqHandlerAddr]
+
+
+  ^{:line 51} [^{:tag bool :doc "IRQ handling goroutine and state\n"} irqHandling]
+  ^{:line 52} [^bool irqLock])
+
+
+
+(go/func ^:extern load_idt "defined in irq.s\n" [] :results [^uintptr idt ^uintptr irqHandler])
+(go/func ^:extern wfi [])
+
+
+(go/func ^:extern ^:go/nosplit irqHandler [])
+
+
+
+
+(go/type GateDescriptor "GateDescriptor represents an IDT Gate descriptor\n(Intel® 64 and IA-32 Architectures Software Developer’s Manual\nVolume 3A - 6.14.1 64-Bit Mode IDT).\n" (struct
+    ^{:line 66 :tag uint16} Offset1
+    ^{:line 67 :tag uint16} SegmentSelector
+    ^{:line 68 :tag uint8} IST
+    ^{:line 69 :tag uint8} Attributes
+    ^{:line 70 :tag uint16} Offset2
+    ^{:line 71 :tag uint32} Offset3
+    ^{:line 72 :tag uint32} Reserved))
+
+
+
+^{:go/end 80} (go/method Bytes "Bytes converts the descriptor structure to byte array format.\n" ^{:tag (slice byte)} [^{:tag (* GateDescriptor)} d]
+  (let [buf (new bytes/Buffer)]
+    (binary/Write buf binary/LittleEndian d)
+    (.Bytes buf)))
+
+
+
+^{:go/end 87} (go/method SetOffset "SetOffset sets the address of the handling procedure entry point.\n" [^{:tag (* GateDescriptor)} d ^uintptr addr]
+  (set! (.-Offset1 d) (conv uint16 (bit-and addr 0xffff)))
+  (set! (.-Offset2 d) (conv uint16 (bit-and (>> addr 16) 0xffff)))
+  (set! (.-Offset3 d) (conv uint32 (>> addr 32))))
+
+
+^{:go/end 121} (go/func setIDT [^int start ^int end]
+  (when (or (== idtAddr 0) (== irqHandlerAddr 0))
+    (set! (values idtAddr irqHandlerAddr) (load_idt)))
+
+
+  (let [desc (addr ^{:go/breaks [2 4]} (lit GateDescriptor
+          :SegmentSelector (<< 1 3)
+          :Attributes InterruptGate))
+
+
+      ^{:line 99} gateSize (len (.Bytes desc))
+      ^{:line 100} idtSize (* gateSize vectors)
+
+      (values r err) (dma/NewRegion (conv uint idtAddr) idtSize true)]
+
+    (when (!= err nil)
+      (panic err))
+
+
+    (let [(values addr idt) (.Reserve r idtSize 0)]
+      (defer (.Release r addr))
+
+      (for [i start] (<= i end) (inc! i)
+        (when (== i vectors)
+          (break))
+
+
+        ;; set ISR to irqHandler.abi0 + vector offset
+        (let [off (+ irqHandlerAddr (conv uintptr (* i callSize)))]
+          (.SetOffset desc off)
+          (copy (subslice idt (* i gateSize)) (.Bytes desc)))))))
+
+
+
+
+^{:go/end 143} (go/method ClearInterrupt "ClearInterrupt signals the end of an interrupt handling routine.\n" [^{:tag (* CPU)} cpu]
+  (when (== (.-init cpu) 0)
+    (.ClearInterrupt (.-LAPIC cpu))
+    (set! irqLock false)
+    (return))
+
+
+  ;; ensure parent is waiting on channel
+  (while (not (signal/Waiting)))
+  ;; stay on this M
+
+
+  ;; ensure we are not interrupting ·handleInterrupt on BSP
+  (while irqHandling)
+  ;; stay on this M
+
+
+  ;; IRQs are always handled by the BSP
+  (.IPI (.-LAPIC cpu) 0 0 lapic/ICR_DLV_NMI))
+
+
+
+
+^{:go/end 149} (go/method WaitInterrupt "WaitInterrupt suspends execution on the current processor until an interrupt\nis received.\n" [^{:tag (* CPU)} cpu]
+  (wfi))
+
+
+
+
+
+^{:go/end 169} (go/method ServiceInterrupts "ServiceInterrupts puts the calling goroutine in wait state, its execution is\nresumed when a user defined interrupt is received, an argument function can\nbe set for servicing.\n" [^{:tag (* CPU)} cpu ^{:tag (func [int])} isr]
+  (when (== isr nil)
+    (set! isr ^{:go/end 156} (fn [^int _] (return))))
+
+
+  (let [c (make (chan os/Signal) 1)]
+    (signal/Notify c IRQ_SIGNAL)
+
+    (while true
+      ;; To avoid losing interrupts, service completion must happen
+      ;; only after we are sleeping.
+      (go (.ClearInterrupt cpu))
+      (<! c)
+      (isr (currentVectorNumber)))))

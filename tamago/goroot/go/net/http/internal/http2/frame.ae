@@ -1,0 +1,1890 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.internal.http2) (go/file "frame.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [log "log"]
+    ^{:line 14} [slices "slices"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [sync "sync"]
+
+    ^{:line 18} [httpsfv "net/http/internal/httpsfv"]
+
+    ^{:line 20} [hpack "golang.org/x/net/http2/hpack"]
+
+    ^{:line 22} [httpguts "golang.org/x/net/http/httpguts"]])
+
+
+(go/const ^{:val 9} frameHeaderLen 9)
+
+(go/var padZeros (make (slice byte) 255)) ; zeros for padding
+
+
+
+
+(go/type FrameType "A FrameType is a registered frame type as defined in\nhttps://httpwg.org/specs/rfc7540.html#rfc.section.11.2 and other future\nRFCs.\n" uint8)
+
+(go/const
+  ^{:line 35} [^{:tag FrameType :val 0} FrameData 0x0]
+  ^{:line 36} [^{:tag FrameType :val 1} FrameHeaders 0x1]
+  ^{:line 37} [^{:tag FrameType :val 2} FramePriority 0x2]
+  ^{:line 38} [^{:tag FrameType :val 3} FrameRSTStream 0x3]
+  ^{:line 39} [^{:tag FrameType :val 4} FrameSettings 0x4]
+  ^{:line 40} [^{:tag FrameType :val 5} FramePushPromise 0x5]
+  ^{:line 41} [^{:tag FrameType :val 6} FramePing 0x6]
+  ^{:line 42} [^{:tag FrameType :val 7} FrameGoAway 0x7]
+  ^{:line 43} [^{:tag FrameType :val 8} FrameWindowUpdate 0x8]
+  ^{:line 44} [^{:tag FrameType :val 9} FrameContinuation 0x9]
+  ^{:line 45} [^{:tag FrameType :val 16} FramePriorityUpdate 0x10])
+
+
+(go/var frameNames (lit (array ... string)
+    ^{:line 49} [FrameData "DATA"]
+    ^{:line 50} [FrameHeaders "HEADERS"]
+    ^{:line 51} [FramePriority "PRIORITY"]
+    ^{:line 52} [FrameRSTStream "RST_STREAM"]
+    ^{:line 53} [FrameSettings "SETTINGS"]
+    ^{:line 54} [FramePushPromise "PUSH_PROMISE"]
+    ^{:line 55} [FramePing "PING"]
+    ^{:line 56} [FrameGoAway "GOAWAY"]
+    ^{:line 57} [FrameWindowUpdate "WINDOW_UPDATE"]
+    ^{:line 58} [FrameContinuation "CONTINUATION"]
+    ^{:line 59} [FramePriorityUpdate "PRIORITY_UPDATE"]))
+
+
+^{:go/end 67} (go/method String ^string [^FrameType t]
+  (when (< (conv int t) (len frameNames))
+    (return (aget frameNames t)))
+
+  (fmt/Sprintf "UNKNOWN_FRAME_TYPE_%d" t))
+
+
+
+
+(go/type Flags "Flags is a bitmask of HTTP/2 flags.\nThe meaning of flags varies depending on the frame type.\n" uint8)
+
+
+^{:go/end 76} (go/method Has "Has reports whether f contains all (0 or more) flags in v.\n" ^bool [^Flags f ^Flags v]
+  (== (bit-and f v) v))
+
+
+
+(go/const "Frame-specific FrameHeader flag bits.\n"
+
+  ^{:line 81} [^{:tag Flags :val 1 :doc "Data Frame\n"} FlagDataEndStream 0x1]
+  ^{:line 82} [^{:tag Flags :val 8} FlagDataPadded 0x8]
+
+
+  ^{:line 85} [^{:tag Flags :val 1 :doc "Headers Frame\n"} FlagHeadersEndStream 0x1]
+  ^{:line 86} [^{:tag Flags :val 4} FlagHeadersEndHeaders 0x4]
+  ^{:line 87} [^{:tag Flags :val 8} FlagHeadersPadded 0x8]
+  ^{:line 88} [^{:tag Flags :val 32} FlagHeadersPriority 0x20]
+
+
+  ^{:line 91} [^{:tag Flags :val 1 :doc "Settings Frame\n"} FlagSettingsAck 0x1]
+
+
+  ^{:line 94} [^{:tag Flags :val 1 :doc "Ping Frame\n"} FlagPingAck 0x1]
+
+
+  ^{:line 97} [^{:tag Flags :val 4 :doc "Continuation Frame\n"} FlagContinuationEndHeaders 0x4]
+
+  ^{:line 99} [^{:tag Flags :val 4} FlagPushPromiseEndHeaders 0x4]
+  ^{:line 100} [^{:tag Flags :val 8} FlagPushPromisePadded 0x8])
+
+
+(go/var flagName (lit (map FrameType (map Flags string))
+    ^{:line 104} [FrameData (lit _
+        ^{:line 105} [FlagDataEndStream "END_STREAM"]
+        ^{:line 106} [FlagDataPadded "PADDED"])]
+
+    ^{:line 108} [FrameHeaders (lit _
+        ^{:line 109} [FlagHeadersEndStream "END_STREAM"]
+        ^{:line 110} [FlagHeadersEndHeaders "END_HEADERS"]
+        ^{:line 111} [FlagHeadersPadded "PADDED"]
+        ^{:line 112} [FlagHeadersPriority "PRIORITY"])]
+
+    ^{:line 114} [FrameSettings (lit _
+        ^{:line 115} [FlagSettingsAck "ACK"])]
+
+    ^{:line 117} [FramePing (lit _
+        ^{:line 118} [FlagPingAck "ACK"])]
+
+    ^{:line 120} [FrameContinuation (lit _
+        ^{:line 121} [FlagContinuationEndHeaders "END_HEADERS"])]
+
+    ^{:line 123} [FramePushPromise (lit _
+        ^{:line 124} [FlagPushPromiseEndHeaders "END_HEADERS"]
+        ^{:line 125} [FlagPushPromisePadded "PADDED"])]))
+
+
+
+
+
+
+(go/type frameParser "a frameParser parses a frame given its FrameHeader and payload\nbytes. The length of payload will always equal fh.Length (which\nmight be 0).\n" (func [^{:tag (* frameCache)} fc ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} payload] [Frame error]))
+
+(go/var frameParsers (lit (array ... frameParser)
+    ^{:line 135} [FrameData parseDataFrame]
+    ^{:line 136} [FrameHeaders parseHeadersFrame]
+    ^{:line 137} [FramePriority parsePriorityFrame]
+    ^{:line 138} [FrameRSTStream parseRSTStreamFrame]
+    ^{:line 139} [FrameSettings parseSettingsFrame]
+    ^{:line 140} [FramePushPromise parsePushPromise]
+    ^{:line 141} [FramePing parsePingFrame]
+    ^{:line 142} [FrameGoAway parseGoAwayFrame]
+    ^{:line 143} [FrameWindowUpdate parseWindowUpdateFrame]
+    ^{:line 144} [FrameContinuation parseContinuationFrame]
+    ^{:line 145} [FramePriorityUpdate parsePriorityUpdateFrame]))
+
+
+^{:go/end 155} (go/func typeFrameParser ^frameParser [^FrameType t]
+  (when (< (conv int t) (len frameParsers))
+    (when [f (aget frameParsers t)] (!= f nil)
+      (return f)))
+
+
+  ^{:line 154} parseUnknownFrame)
+
+
+
+
+
+(go/type FrameHeader "A FrameHeader is the 9 byte header of all HTTP/2 frames.\n\nSee https://httpwg.org/specs/rfc7540.html#FrameHeader\n" (struct
+    ^{:line 161 :tag bool} valid ; caller can access []byte fields in the Frame
+
+
+
+
+    ^{:line 166 :tag FrameType :doc "Type is the 1 byte frame type. There are ten standard frame\ntypes, but extension frame types may be written by WriteRawFrame\nand will be returned by ReadFrame (as UnknownFrame).\n"} Type
+
+
+
+    ^{:line 170 :tag Flags :doc "Flags are the 1 byte of 8 potential bit flags per frame.\nThey are specific to the frame type.\n"} Flags
+
+
+
+
+    ^{:line 175 :tag uint32 :doc "Length is the length of the frame, not including the 9 byte header.\nThe maximum size is one byte less than 16MB (uint24), but only\nframes up to 16KB are allowed without peer agreement.\n"} Length
+
+
+
+    ^{:line 179 :tag uint32 :doc "StreamID is which stream this frame is for. Certain frames\nare not stream-specific, in which case this field is 0.\n"} StreamID))
+
+
+
+
+^{:go/end 184} (go/method Header "Header returns h. It exists so FrameHeaders can be embedded in other\nspecific frame types and implement the Frame interface.\n" ^FrameHeader [^FrameHeader h] h)
+
+^{:go/end 192} (go/method String ^string [^FrameHeader h]
+  (let [^bytes/Buffer buf (zero bytes/Buffer)]
+    (.WriteString buf "[FrameHeader ")
+    (.writeDebug h (addr buf))
+    (.WriteByte buf \])
+    (.String buf)))
+
+
+^{:go/end 219} (go/method writeDebug [^FrameHeader h ^{:tag (* bytes/Buffer)} buf]
+  (.WriteString buf (.String (.-Type h)))
+  (when (!= (.-Flags h) 0)
+    (.WriteString buf " flags=")
+    (let [set 0]
+      (range [i (conv uint8 8)]
+        (when (== (bit-and (.-Flags h) ^Flags (<< 1 i)) 0)
+          (continue))
+
+        (inc! set)
+        (when (> set 1)
+          (.WriteByte buf \|))
+
+        (let [name (aget (aget flagName (.-Type h)) (conv Flags ^Flags (<< 1 i)))]
+          (if (!= name "")
+            (.WriteString buf name)
+
+            (fmt/Fprintf buf "0x%x" ^int (<< 1 i)))))))
+
+
+
+  (when (!= (.-StreamID h) 0)
+    (fmt/Fprintf buf " stream=%d" (.-StreamID h)))
+
+  (fmt/Fprintf buf " len=%d" (.-Length h)))
+
+
+^{:go/end 225} (go/method checkValid [^{:tag (* FrameHeader)} h]
+  (when (not (.-valid h))
+    (panic "Frame accessor called on non-owned Frame")))
+
+
+
+^{:go/end 227} (go/method invalidate [^{:tag (* FrameHeader)} h] (set! (.-valid h) false))
+
+
+
+(go/var ^{:doc "frame header bytes.\nUsed only by ReadFrameHeader.\n"} fhBytes ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 235} (fn ^any []
+      (let [buf (make (slice byte) frameHeaderLen)]
+        (addr buf)))))
+
+
+
+^{:go/end 241} (go/func invalidHTTP1LookingFrameHeader ^FrameHeader []
+  (let [(values fh _) (readFrameHeader (make (slice byte) frameHeaderLen) (strings/NewReader "HTTP/1.1 "))]
+    ^{:line 240} fh))
+
+
+
+
+^{:go/end 249} (go/func ReadFrameHeader "ReadFrameHeader reads 9 bytes from r and returns a FrameHeader.\nMost users should use Framer.ReadFrame instead.\n" [^io/Reader r] :results [FrameHeader error]
+  (let [bufp (assert (* (slice byte)) (.Get fhBytes))]
+    (defer (.Put fhBytes bufp))
+    (readFrameHeader @bufp r)))
+
+
+^{:go/end 263} (go/func readFrameHeader [^{:tag (slice byte)} buf ^io/Reader r] :results [FrameHeader error]
+  (let [(values _ err) (io/ReadFull r (subslice buf _ frameHeaderLen))]
+    (when (!= err nil)
+      (return (lit FrameHeader) err))
+
+    ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6 8 10]} (lit FrameHeader
+        :Length (bit-or (<< (conv uint32 (aget buf 0)) 16) (<< (conv uint32 (aget buf 1)) 8) (conv uint32 (aget buf 2)))
+        :Type (conv FrameType (aget buf 3))
+        :Flags (conv Flags (aget buf 4))
+        :StreamID (bit-and (.Uint32 binary/BigEndian (subslice buf 5)) (- (<< 1 31) 1))
+        :valid true)
+      nil)))
+
+
+
+
+
+
+
+(go/type Frame "A Frame is the base interface implemented by all frame types.\nCallers will generally type-assert the specific frame type:\n*HeadersFrame, *SettingsFrame, *WindowUpdateFrame, etc.\n\nFrames are only valid until the next call to Framer.ReadFrame.\n" (interface
+    (Header ^FrameHeader [])
+
+
+
+
+    (^{:doc "invalidate is called by Framer.ReadFrame to make this\nframe's buffers as being invalid, since the subsequent\nframe will reuse them.\n"} invalidate [])))
+
+
+
+(go/type Framer "A Framer reads and writes Frames.\n" (struct
+    ^{:line 281 :tag io/Reader} r
+    ^{:line 282 :tag Frame} lastFrame
+    ^{:line 283 :tag error} errDetail
+
+
+
+
+    ^{:line 288 :tag (func [^string errToken]) :doc "countError is a non-nil func that's called on a frame parse\nerror with some unique error path token. It's initialized\nfrom Transport.CountError or Server.CountError.\n"} countError
+
+
+
+    ^{:line 292 :tag uint32 :doc "lastHeaderStream is non-zero if the last frame was an\nunfinished HEADERS/CONTINUATION.\n"} lastHeaderStream
+
+    ^{:line 294 :tag FrameType :doc "lastFrameType holds the type of the last frame for verifying frame order.\n"} lastFrameType
+
+    ^{:line 296 :tag uint32} maxReadSize
+    ^{:line 297 :tag (array frameHeaderLen byte)} headerBuf
+
+
+
+
+    ^{:line 302 :tag (func [^uint32 size] [(slice byte)]) :doc "TODO: let getReadBuf be configurable, and use a less memory-pinning\nallocator in server.go to minimize memory pinned for many idle conns.\nWill probably also need to make frame invalidation have a hook too.\n"} getReadBuf
+    ^{:line 303 :tag (slice byte)} readBuf ; cache for default getReadBuf
+
+    ^{:line 305 :tag uint32} maxWriteSize ; zero means unlimited; TODO: implement
+
+    ^{:line 307 :tag io/Writer} w
+    ^{:line 308 :tag (slice byte)} wbuf
+
+
+
+
+
+
+
+    ^{:line 316 :tag bool :doc "AllowIllegalWrites permits the Framer's Write methods to\nwrite frames that do not conform to the HTTP/2 spec. This\npermits using the Framer to test other HTTP/2\nimplementations' conformance to the spec.\nIf false, the Write methods will prefer to return an error\nrather than comply.\n"} AllowIllegalWrites
+
+
+
+
+
+
+    ^{:line 323 :tag bool :doc "AllowIllegalReads permits the Framer's ReadFrame method\nto return non-compliant frames or frame orders.\nThis is for testing and permits using the Framer to test\nother HTTP/2 implementations' conformance to the spec.\nIt is not compatible with ReadMetaHeaders.\n"} AllowIllegalReads
+
+
+
+
+    ^{:line 328 :tag (* hpack/Decoder) :doc "ReadMetaHeaders if non-nil causes ReadFrame to merge\nHEADERS and CONTINUATION frames together and return\nMetaHeadersFrame instead.\n"} ReadMetaHeaders
+
+
+
+
+
+    ^{:line 334 :tag uint32 :doc "MaxHeaderListSize is the http2 MAX_HEADER_LIST_SIZE.\nIt's used only if ReadMetaHeaders is set; 0 means a sane default\n(currently 16MB)\nIf the limit is hit, MetaHeadersFrame.Truncated is set true.\n"} MaxHeaderListSize
+
+
+
+
+
+    ^{:line 340 :tag int :doc "MaxHeaderValueCount is the maximum permitted number of\nheader values.\nIt's used only if ReadMetaHeaders is set; 0 means no limit.\nIf the limit is hit, MetaHeadersFrame.Truncated is set true.\n"} MaxHeaderValueCount
+
+    ;; TODO: track which type of frame & with which flags was sent
+    ;; last. Then return an error (unless AllowIllegalWrites) if
+    ;; we're in the middle of a header block and a
+    ;; non-Continuation or Continuation on a different stream is
+    ;; attempted to be written.
+
+    ^{:line 348 :tag bool} logReads ^bool logWrites
+
+    ^{:line 350 :tag (* Framer)} debugFramer ; only use for logging written writes
+    ^{:line 351 :tag (* bytes/Buffer)} debugFramerBuf
+    ^{:line 352 :tag (func [string & (slice any)])} debugReadLoggerf
+    ^{:line 353 :tag (func [string & (slice any)])} debugWriteLoggerf
+
+    ^{:line 355 :tag (* frameCache)} frameCache)) ; nil if frames aren't reused (default)
+
+
+^{:go/end 363} (go/method maxHeaderListSize ^uint32 [^{:tag (* Framer)} fr]
+  (when (== (.-MaxHeaderListSize fr) 0)
+    (return (<< 16 20))) ; sane default, per docs
+
+  (.-MaxHeaderListSize fr))
+
+
+^{:go/end 367} (go/method maxHeaderValueCount ^int [^{:tag (* Framer)} fr]
+  (.-MaxHeaderValueCount fr))
+
+
+^{:go/end 381} (go/method startWrite [^{:tag (* Framer)} f ^FrameType ftype ^Flags flags ^uint32 streamID]
+  ;; Write the FrameHeader.
+  (set! (.-wbuf f) ^{:go/breaks [2 3 4]} (append (subslice (.-wbuf f) _ 0)
+      0 ; 3 bytes of length, filled in endWrite
+      0
+      0
+      (conv byte ftype)
+      (conv byte flags)
+      (conv byte (>> streamID 24))
+      (conv byte (>> streamID 16))
+      (conv byte (>> streamID 8))
+      (conv byte streamID))))
+
+
+^{:go/end 403} (go/method endWrite ^error [^{:tag (* Framer)} f]
+  ;; Now that we know the final size, fill in the FrameHeader in
+  ;; the space previously reserved for it. Abuse append.
+  (let [length (- (len (.-wbuf f)) frameHeaderLen)]
+    (when (>= length (<< 1 24))
+      (return ErrFrameTooLarge))
+
+    (set! _ (append (subslice (.-wbuf f) _ 0)
+        (conv byte (>> length 16))
+        (conv byte (>> length 8))
+        (conv byte length)))
+    (when (.-logWrites f)
+      (.logWrite f))
+
+
+    (let [(values n err) (.Write (.-w f) (.-wbuf f))]
+      (when (and (== err nil) (!= n (len (.-wbuf f))))
+        (set! err io/ErrShortWrite))
+
+      ^{:line 402} err)))
+
+
+^{:go/end 421} (go/method logWrite [^{:tag (* Framer)} f]
+  (when (== (.-debugFramer f) nil)
+    (set! (.-debugFramerBuf f) (new bytes/Buffer))
+    (set! (.-debugFramer f) (NewFramer nil (.-debugFramerBuf f)))
+    (set! (.-logReads (.-debugFramer f)) false) ; we log it ourselves, saying "wrote" below
+    ;; Let us read anything, even if we accidentally wrote it
+    ;; in the wrong order:
+    (set! (.-AllowIllegalReads (.-debugFramer f)) true))
+
+  (.Write (.-debugFramerBuf f) (.-wbuf f))
+  (let [(values fr err) (.ReadFrame (.-debugFramer f))]
+    (when (!= err nil)
+      ((.-debugWriteLoggerf f) "http2: Framer %p: failed to decode just-written frame" f)
+      (return))
+
+    ((.-debugWriteLoggerf f) "http2: Framer %p: wrote %v" f (summarizeFrame fr))))
+
+
+^{:go/end 423} (go/method writeByte [^{:tag (* Framer)} f ^byte v] (set! (.-wbuf f) (append (.-wbuf f) v)))
+^{:go/end 424} (go/method writeBytes [^{:tag (* Framer)} f ^{:tag (slice byte)} v] (set! (.-wbuf f) (append (.-wbuf f) (spread v))))
+^{:go/end 425} (go/method writeUint16 [^{:tag (* Framer)} f ^uint16 v] (set! (.-wbuf f) (append (.-wbuf f) (conv byte (>> v 8)) (conv byte v))))
+^{:go/end 428} (go/method writeUint32 [^{:tag (* Framer)} f ^uint32 v]
+  (set! (.-wbuf f) (append (.-wbuf f) (conv byte (>> v 24)) (conv byte (>> v 16)) (conv byte (>> v 8)) (conv byte v))))
+
+
+(go/const
+  ^{:line 431} [^{:val 16384} minMaxFrameSize (<< 1 14)]
+  ^{:line 432} [^{:val 16777215} maxFrameSize (- (<< 1 24) 1)])
+
+
+
+
+
+^{:go/end 443} (go/method SetReuseFrames "SetReuseFrames allows the Framer to reuse Frames.\nIf called on a Framer, Frames returned by calls to ReadFrame are only\nvalid until the next call to ReadFrame.\n" [^{:tag (* Framer)} fr]
+  (when (!= (.-frameCache fr) nil)
+    (return))
+
+  (set! (.-frameCache fr) (addr (lit frameCache))))
+
+
+(go/type frameCache (struct
+    ^{:line 446 :tag DataFrame} dataFrame))
+
+
+^{:go/end 454} (go/method getDataFrame ^{:tag (* DataFrame)} [^{:tag (* frameCache)} fc]
+  (when (== fc nil)
+    (return (addr (lit DataFrame))))
+
+  (addr (.-dataFrame fc)))
+
+
+
+^{:go/end 476} (go/func NewFramer "NewFramer returns a Framer that writes frames to w and reads them from r.\n" ^{:tag (* Framer)} [^io/Writer w ^io/Reader r]
+  (let [fr (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit Framer
+          :w w
+          :r r
+          :countError ^{:go/end 461} (fn [string])
+          :logReads logFrameReads
+          :logWrites logFrameWrites
+          :debugReadLoggerf log/Printf
+          :debugWriteLoggerf log/Printf))]
+
+    (set! (.-getReadBuf fr) ^{:go/end 473} (fn ^{:tag (slice byte)} [^uint32 size]
+        (when (>= (cap (.-readBuf fr)) (conv int size))
+          (return (subslice (.-readBuf fr) _ size)))
+
+        (set! (.-readBuf fr) (make (slice byte) size))
+        (.-readBuf fr)))
+
+    (.SetMaxReadFrameSize fr maxFrameSize)
+    ^{:line 475} fr))
+
+
+
+
+
+
+^{:go/end 487} (go/method SetMaxReadFrameSize "SetMaxReadFrameSize sets the maximum size of a frame\nthat will be read by a subsequent call to ReadFrame.\nIt is the caller's responsibility to advertise this\nlimit with a SETTINGS frame.\n" [^{:tag (* Framer)} fr ^uint32 v]
+  (when (> v maxFrameSize)
+    (set! v maxFrameSize))
+
+  (set! (.-maxReadSize fr) v))
+
+
+
+
+
+
+
+
+
+^{:go/end 498} (go/method ErrorDetail "ErrorDetail returns a more detailed error of the last error\nreturned by Framer.ReadFrame. For instance, if ReadFrame\nreturns a StreamError with code PROTOCOL_ERROR, ErrorDetail\nwill say exactly what was invalid. ErrorDetail is not guaranteed\nto return a non-nil value and like the rest of the http2 package,\nits return value is not protected by an API compatibility promise.\nErrorDetail is reset after the next call to ReadFrame.\n" ^error [^{:tag (* Framer)} fr]
+  (.-errDetail fr))
+
+
+
+
+(go/var ^{:doc "ErrFrameTooLarge is returned from Framer.ReadFrame when the peer\nsends a frame that is larger than declared with SetMaxReadFrameSize.\n"} ErrFrameTooLarge (errors/New "http2: frame too large"))
+
+
+
+^{:go/end 511} (go/func terminalReadFrameError "terminalReadFrameError reports whether err is an unrecoverable\nerror from ReadFrame and no other frames should be read.\n" ^bool [^error err]
+  (when [(values _ ok) (assert StreamError err)] ok
+    (return false))
+
+  (!= err nil))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 539} (go/method ReadFrameHeader "ReadFrameHeader reads the header of the next frame.\nIt reads the 9-byte fixed frame header, and does not read any portion of the\nframe payload. The caller is responsible for consuming the payload, either\nwith ReadFrameForHeader or directly from the Framer's io.Reader.\n\nIf the frame is larger than previously set with SetMaxReadFrameSize, it\nreturns the frame header and ErrFrameTooLarge.\n\nIf the returned FrameHeader.StreamID is non-zero, it indicates the stream\nresponsible for the error.\n" [^{:tag (* Framer)} fr] :results [FrameHeader error]
+  (set! (.-errDetail fr) nil)
+  (let [(values fh err) (readFrameHeader (subslice (.-headerBuf fr)) (.-r fr))]
+    (when (!= err nil)
+      (return fh err))
+
+    (when (> (.-Length fh) (.-maxReadSize fr))
+      (when (== fh (invalidHTTP1LookingFrameHeader))
+        (return fh (fmt/Errorf "http2: failed reading the frame payload: %w, note that the frame header looked like an HTTP/1.1 header" ErrFrameTooLarge)))
+
+      (return fh ErrFrameTooLarge))
+
+    (when [err (.checkFrameOrder fr fh)] (!= err nil)
+      (return fh err))
+
+    (return fh nil)))
+
+
+
+
+
+
+^{:go/end 571} (go/method ReadFrameForHeader "ReadFrameForHeader reads the payload for the frame with the given FrameHeader.\n\nIt behaves identically to ReadFrame, other than not checking the maximum\nframe size.\n" [^{:tag (* Framer)} fr ^FrameHeader fh] :results [Frame error]
+  (when (!= (.-lastFrame fr) nil)
+    (.invalidate (.-lastFrame fr)))
+
+  (let [payload ((.-getReadBuf fr) (.-Length fh))]
+    (when [(values _ err) (io/ReadFull (.-r fr) payload)] (!= err nil)
+      (when (== fh (invalidHTTP1LookingFrameHeader))
+        (return nil (fmt/Errorf "http2: failed reading the frame payload: %w, note that the frame header looked like an HTTP/1.1 header" err)))
+
+      (return nil err))
+
+    (let [(values f err) ((typeFrameParser (.-Type fh)) (.-frameCache fr) fh (.-countError fr) payload)]
+      (when (!= err nil)
+        (when [(values ce ok) (assert connError err)] ok
+          (return nil (.connError fr (.-Code ce) (.-Reason ce))))
+
+        (return nil err))
+
+      (set! (.-lastFrame fr) f)
+      (when (.-logReads fr)
+        ((.-debugReadLoggerf fr) "http2: Framer %p: read %v" fr (summarizeFrame f)))
+
+      (when (and (== (.-Type fh) FrameHeaders) (!= (.-ReadMetaHeaders fr) nil))
+        (return (.readMetaFrame fr (assert (* HeadersFrame) f))))
+
+      (return f nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 589} (go/method ReadFrame "ReadFrame reads a single frame. The returned Frame is only valid\nuntil the next call to ReadFrame or ReadFrameBodyForHeader.\n\nIf the frame is larger than previously set with SetMaxReadFrameSize, the\nreturned error is ErrFrameTooLarge. Other errors may be of type\nConnectionError, StreamError, or anything else from the underlying\nreader.\n\nIf ReadFrame returns an error and a non-nil Frame, the Frame's StreamID\nindicates the stream responsible for the error.\n" [^{:tag (* Framer)} fr] :results [Frame error]
+  (let [(values fh err) (.ReadFrameHeader fr)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.ReadFrameForHeader fr fh)))
+
+
+
+
+
+
+^{:go/end 598} (go/method connError "connError returns ConnectionError(code) but first\nstashes away a public reason to the caller can optionally relay it\nto the peer before hanging up on them. This might help others debug\ntheir implementations.\n" ^error [^{:tag (* Framer)} fr ^ErrCode code ^string reason]
+  (set! (.-errDetail fr) (errors/New reason))
+  (conv ConnectionError code))
+
+
+
+
+
+^{:go/end 636} (go/method checkFrameOrder "checkFrameOrder reports an error if f is an invalid frame to return\nnext from ReadFrame. Mostly it checks whether HEADERS and\nCONTINUATION frames are contiguous.\n" ^error [^{:tag (* Framer)} fr ^FrameHeader fh]
+  ^{:go/breaks [[6 635]]} (let [lastType (.-lastFrameType fr)]
+    (set! (.-lastFrameType fr) (.-Type fh))
+    (when (.-AllowIllegalReads fr)
+      (return nil))
+
+
+    (cond (!= (.-lastHeaderStream fr) 0) (do
+        (when (!= (.-Type fh) FrameContinuation)
+          (return (.connError fr ErrCodeProtocol
+              (fmt/Sprintf "got %s for stream %d; expected CONTINUATION following %s for stream %d"
+                (.-Type fh) (.-StreamID fh)
+                ^{:line 615} lastType (.-lastHeaderStream fr)))))
+
+        (when (!= (.-StreamID fh) (.-lastHeaderStream fr))
+          (return (.connError fr ErrCodeProtocol
+              (fmt/Sprintf "got CONTINUATION for stream %d; expected stream %d"
+                (.-StreamID fh) (.-lastHeaderStream fr))))))
+
+      (== (.-Type fh) FrameContinuation)
+      (return (.connError fr ErrCodeProtocol (fmt/Sprintf "unexpected CONTINUATION for stream %d" (.-StreamID fh)))))
+
+
+    (switch (.-Type fh)
+      (case [FrameHeaders FrameContinuation]
+        (if (.Has (.-Flags fh) FlagHeadersEndHeaders)
+          (set! (.-lastHeaderStream fr) 0)
+
+          (set! (.-lastHeaderStream fr) (.-StreamID fh)))))
+
+
+
+    nil))
+
+
+
+
+
+(go/type DataFrame "A DataFrame conveys arbitrary, variable-length sequences of octets\nassociated with a stream.\nSee https://httpwg.org/specs/rfc7540.html#rfc.section.6.1\n" (struct
+    ^{:line 642} FrameHeader
+    ^{:line 643 :tag (slice byte)} data))
+
+
+^{:go/end 648} (go/method StreamEnded ^bool [^{:tag (* DataFrame)} f]
+  (.Has (.-Flags (.-FrameHeader f)) FlagDataEndStream))
+
+
+
+
+
+
+^{:go/end 657} (go/method Data "Data returns the frame's data octets, not including any padding\nsize byte or padding suffix bytes.\nThe caller must not retain the returned memory past the next\ncall to ReadFrame.\n" ^{:tag (slice byte)} [^{:tag (* DataFrame)} f]
+  ^{:go/via [FrameHeader]} (.checkValid f)
+  (.-data f))
+
+
+^{:go/end 691} (go/func parseDataFrame [^{:tag (* frameCache)} fc ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} payload] :results [Frame error]
+  (when (== (.-StreamID fh) 0)
+    ;; DATA frames MUST be associated with a stream. If a
+    ;; DATA frame is received whose stream identifier
+    ;; field is 0x0, the recipient MUST respond with a
+    ;; connection error (Section 5.4.1) of type
+    ;; PROTOCOL_ERROR.
+    (countError "frame_data_stream_0")
+    (return nil (lit connError ErrCodeProtocol "DATA frame with stream ID 0")))
+
+  (let [f (.getDataFrame fc)]
+    (set! (.-FrameHeader f) fh)
+
+    (let [^byte padSize (zero byte)]
+      (when (.Has (.-Flags fh) FlagDataPadded)
+        (let [^error err (zero error)]
+          (set! (values payload padSize err) (readByte payload))
+          (when (!= err nil)
+            (countError "frame_data_pad_byte_short")
+            (return nil err))))
+
+
+      (when (> (conv int padSize) (len payload))
+        ;; If the length of the padding is greater than the
+        ;; length of the frame payload, the recipient MUST
+        ;; treat this as a connection error.
+        ;; Filed: https://github.com/http2/http2-spec/issues/610
+        (countError "frame_data_pad_too_big")
+        (return nil (lit connError ErrCodeProtocol "pad size larger than data payload")))
+
+      (set! (.-data f) (subslice payload _ (- (len payload) (conv int padSize))))
+      (return f nil))))
+
+
+(go/var
+  ^{:line 694} [errStreamID (errors/New "invalid stream ID")]
+  ^{:line 695} [errDepStreamID (errors/New "invalid dependent stream ID")]
+  ^{:line 696} [errPadLength (errors/New "pad length too large")]
+  ^{:line 697} [errPadBytes (errors/New "padding bytes must all be zeros unless AllowIllegalWrites is enabled")])
+
+
+^{:go/end 702} (go/func validStreamIDOrZero ^bool [^uint32 streamID]
+  (== (bit-and streamID (<< 1 31)) 0))
+
+
+^{:go/end 706} (go/func validStreamID ^bool [^uint32 streamID]
+  (and (!= streamID 0) (== (bit-and streamID (<< 1 31)) 0)))
+
+
+
+
+
+
+
+^{:go/end 715} (go/method WriteData "WriteData writes a DATA frame.\n\nIt will perform exactly one Write to the underlying Writer.\nIt is the caller's responsibility not to violate the maximum frame size\nand to not call other Write methods concurrently.\n" ^error [^{:tag (* Framer)} f ^uint32 streamID ^bool endStream ^{:tag (slice byte)} data]
+  (.WriteDataPadded f streamID endStream data nil))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 731} (go/method WriteDataPadded "WriteDataPadded writes a DATA frame with optional padding.\n\nIf pad is nil, the padding bit is not sent.\nThe length of pad must not exceed 255 bytes.\nThe bytes of pad must all be zero, unless f.AllowIllegalWrites is set.\n\nIt will perform exactly one Write to the underlying Writer.\nIt is the caller's responsibility not to violate the maximum frame size\nand to not call other Write methods concurrently.\n" ^error [^{:tag (* Framer)} f ^uint32 streamID ^bool endStream ^{:tag (slice byte)} data ^{:tag (slice byte)} pad]
+  (when [err (.startWriteDataPadded f streamID endStream data pad)] (!= err nil)
+    (return err))
+
+  (.endWrite f))
+
+
+
+
+^{:go/end 766} (go/method startWriteDataPadded "startWriteDataPadded is WriteDataPadded, but only writes the frame to the Framer's internal buffer.\nThe caller should call endWrite to flush the frame to the underlying writer.\n" ^error [^{:tag (* Framer)} f ^uint32 streamID ^bool endStream ^{:tag (slice byte)} data ^{:tag (slice byte)} pad]
+  (when (and (not (validStreamID streamID)) (not (.-AllowIllegalWrites f)))
+    (return errStreamID))
+
+  (when (> (len pad) 0)
+    (when (> (len pad) 255)
+      (return errPadLength))
+
+    (when (not (.-AllowIllegalWrites f))
+      (range [_ b pad]
+        (when (!= b 0)
+          ;; "Padding octets MUST be set to zero when sending."
+          (return errPadBytes)))))
+
+
+
+
+  ^{:go/breaks [8]} (let [^Flags flags (zero Flags)]
+    (when endStream
+      (set! flags bit-or FlagDataEndStream))
+
+    (when (!= pad nil)
+      (set! flags bit-or FlagDataPadded))
+
+    (.startWrite f FrameData flags streamID)
+    (when (!= pad nil)
+      (set! (.-wbuf f) (append (.-wbuf f) (conv byte (len pad)))))
+
+    (set! (.-wbuf f) (append (.-wbuf f) (spread data)))
+    (set! (.-wbuf f) (append (.-wbuf f) (spread pad)))
+    nil))
+
+
+
+
+
+
+
+(go/type SettingsFrame "A SettingsFrame conveys configuration parameters that affect how\nendpoints communicate, such as preferences and constraints on peer\nbehavior.\n\nSee https://httpwg.org/specs/rfc7540.html#SETTINGS\n" (struct
+    ^{:line 774} FrameHeader
+    ^{:line 775 :tag (slice byte)} p))
+
+
+^{:go/end 814} (go/func parseSettingsFrame [^{:tag (* frameCache)} _ ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} p] :results [Frame error]
+  (when (and (.Has (.-Flags fh) FlagSettingsAck) (> (.-Length fh) 0))
+    ;; When this (ACK 0x1) bit is set, the payload of the
+    ;; SETTINGS frame MUST be empty. Receipt of a
+    ;; SETTINGS frame with the ACK flag set and a length
+    ;; field value other than 0 MUST be treated as a
+    ;; connection error (Section 5.4.1) of type
+    ;; FRAME_SIZE_ERROR.
+    (countError "frame_settings_ack_with_length")
+    (return nil (conv ConnectionError ErrCodeFrameSize)))
+
+  (when (!= (.-StreamID fh) 0)
+    ;; SETTINGS frames always apply to a connection,
+    ;; never a single stream. The stream identifier for a
+    ;; SETTINGS frame MUST be zero (0x0).  If an endpoint
+    ;; receives a SETTINGS frame whose stream identifier
+    ;; field is anything other than 0x0, the endpoint MUST
+    ;; respond with a connection error (Section 5.4.1) of
+    ;; type PROTOCOL_ERROR.
+    (countError "frame_settings_has_stream")
+    (return nil (conv ConnectionError ErrCodeProtocol)))
+
+  (when (!= (% (len p) 6) 0)
+    (countError "frame_settings_mod_6")
+    ;; Expecting even number of 6 byte settings.
+    (return nil (conv ConnectionError ErrCodeFrameSize)))
+
+  (let [f (addr (lit SettingsFrame :FrameHeader fh :p p))]
+    (when [(values v ok) (.Value f SettingInitialWindowSize)] (and ok (> v (- (<< 1 31) 1)))
+      (countError "frame_settings_window_size_too_big")
+      ;; Values above the maximum flow control window size of 2^31 - 1 MUST
+      ;; be treated as a connection error (Section 5.4.1) of type
+      ;; FLOW_CONTROL_ERROR.
+      (return nil (conv ConnectionError ErrCodeFlowControl)))
+
+    (return f nil)))
+
+
+^{:go/end 818} (go/method IsAck ^bool [^{:tag (* SettingsFrame)} f]
+  (.Has (.-Flags (.-FrameHeader f)) FlagSettingsAck))
+
+
+^{:go/end 828} (go/method Value [^{:tag (* SettingsFrame)} f ^SettingID id] :results [^uint32 v ^bool ok]
+  ^{:go/via [FrameHeader]} (.checkValid f)
+  (for [i 0] (< i (.NumSettings f)) (inc! i)
+    (when [s (.Setting f i)] (== (.-ID s) id)
+      (return (.-Val s) true)))
+
+
+  (return 0 false))
+
+
+
+
+^{:go/end 838} (go/method Setting "Setting returns the setting from the frame at the given 0-based index.\nThe index must be >= 0 and less than f.NumSettings().\n" ^Setting [^{:tag (* SettingsFrame)} f ^int i]
+  (let [buf (.-p f)]
+    ^{:go/breaks [2 4]} (lit Setting
+      :ID (conv SettingID (.Uint16 binary/BigEndian (subslice buf (* i 6) (+ (* i 6) 2))))
+      :Val (.Uint32 binary/BigEndian (subslice buf (+ (* i 6) 2) (+ (* i 6) 6))))))
+
+
+
+^{:go/end 840} (go/method NumSettings ^int [^{:tag (* SettingsFrame)} f] (/ (len (.-p f)) 6))
+
+
+^{:go/end 871} (go/method HasDuplicates "HasDuplicates reports whether f contains any duplicate setting IDs.\n" ^bool [^{:tag (* SettingsFrame)} f]
+  (let [num (.NumSettings f)]
+    (when (== num 0)
+      (return false))
+
+    ;; If it's small enough (the common case), just do the n^2
+    ;; thing and avoid a map allocation.
+    (when (< num 10)
+      (range [i num]
+        (let [idi (.-ID (.Setting f i))]
+          (for [j (+ i 1)] (< j num) (inc! j)
+            (let [idj (.-ID (.Setting f j))]
+              (when (== idi idj)
+                (return true))))))
+
+
+
+      (return false))
+
+    ^{:go/breaks [[3 870]]} (let [seen (lit (map SettingID bool))]
+      (range [i num]
+        (let [id (.-ID (.Setting f i))]
+          (when (aget seen id)
+            (return true))
+
+          (aset seen id true)))
+
+      false)))
+
+
+
+
+^{:go/breaks [[6 882]] :go/end 883} (go/method ForeachSetting "ForeachSetting runs fn for each setting.\nIt stops and returns the first error.\n" ^error [^{:tag (* SettingsFrame)} f ^{:tag (func [Setting] [error])} fn]
+  ^{:go/via [FrameHeader]} (.checkValid f)
+  (for [i 0] (< i (.NumSettings f)) (inc! i)
+    (when [err (go/call fn (.Setting f i))] (!= err nil)
+      (return err)))
+
+
+  nil)
+
+
+
+
+
+
+
+^{:go/end 897} (go/method WriteSettings "WriteSettings writes a SETTINGS frame with zero or more settings\nspecified and the ACK bit not set.\n\nIt will perform exactly one Write to the underlying Writer.\nIt is the caller's responsibility to not call other Write methods concurrently.\n" ^error [^{:tag (* Framer)} f & ^{:tag (slice Setting)} settings]
+  (.startWrite f FrameSettings 0 0)
+  (range [_ s settings]
+    (.writeUint16 f (conv uint16 (.-ID s)))
+    (.writeUint32 f (.-Val s)))
+
+  (.endWrite f))
+
+
+
+
+
+
+^{:go/end 906} (go/method WriteSettingsAck "WriteSettingsAck writes an empty SETTINGS frame with the ACK bit set.\n\nIt will perform exactly one Write to the underlying Writer.\nIt is the caller's responsibility to not call other Write methods concurrently.\n" ^error [^{:tag (* Framer)} f]
+  (.startWrite f FrameSettings FlagSettingsAck 0)
+  (.endWrite f))
+
+
+
+
+
+
+(go/type PingFrame "A PingFrame is a mechanism for measuring a minimal round trip time\nfrom the sender, as well as determining whether an idle connection\nis still functional.\nSee https://httpwg.org/specs/rfc7540.html#rfc.section.6.7\n" (struct
+    ^{:line 913} FrameHeader
+    ^{:line 914 :tag (array 8 byte)} Data))
+
+
+^{:go/end 917} (go/method IsAck ^bool [^{:tag (* PingFrame)} f] (.Has ^{:go/via [FrameHeader]} (.-Flags f) FlagPingAck))
+
+^{:go/end 931} (go/func parsePingFrame [^{:tag (* frameCache)} _ ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} payload] :results [Frame error]
+  (when (!= (len payload) 8)
+    (countError "frame_ping_length")
+    (return nil (conv ConnectionError ErrCodeFrameSize)))
+
+  (when (!= (.-StreamID fh) 0)
+    (countError "frame_ping_has_stream")
+    (return nil (conv ConnectionError ErrCodeProtocol)))
+
+  (let [f (addr (lit PingFrame :FrameHeader fh))]
+    (copy (subslice (.-Data f)) payload)
+    (return f nil)))
+
+
+^{:go/end 941} (go/method WritePing ^error [^{:tag (* Framer)} f ^bool ack ^{:tag (array 8 byte)} data]
+  (let [^Flags flags (zero Flags)]
+    (when ack
+      (set! flags FlagPingAck))
+
+    (.startWrite f FramePing flags 0)
+    (.writeBytes f (subslice data))
+    (.endWrite f)))
+
+
+
+
+(go/type GoAwayFrame "A GoAwayFrame informs the remote peer to stop creating streams on this connection.\nSee https://httpwg.org/specs/rfc7540.html#rfc.section.6.8\n" (struct
+    ^{:line 946} FrameHeader
+    ^{:line 947 :tag uint32} LastStreamID
+    ^{:line 948 :tag ErrCode} ErrCode
+    ^{:line 949 :tag (slice byte)} debugData))
+
+
+
+
+
+
+^{:go/end 959} (go/method DebugData "DebugData returns any debug data in the GOAWAY frame. Its contents\nare not defined.\nThe caller must not retain the returned memory past the next\ncall to ReadFrame.\n" ^{:tag (slice byte)} [^{:tag (* GoAwayFrame)} f]
+  ^{:go/via [FrameHeader]} (.checkValid f)
+  (.-debugData f))
+
+
+^{:go/end 976} (go/func parseGoAwayFrame [^{:tag (* frameCache)} _ ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} p] :results [Frame error]
+  (when (!= (.-StreamID fh) 0)
+    (countError "frame_goaway_has_stream")
+    (return nil (conv ConnectionError ErrCodeProtocol)))
+
+  (when (< (len p) 8)
+    (countError "frame_goaway_short")
+    (return nil (conv ConnectionError ErrCodeFrameSize)))
+
+  ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4 6 8]} (lit GoAwayFrame
+        :FrameHeader fh
+        :LastStreamID (bit-and (.Uint32 binary/BigEndian (subslice p _ 4)) (- (<< 1 31) 1))
+        :ErrCode (conv ErrCode (.Uint32 binary/BigEndian (subslice p 4 8)))
+        :debugData (subslice p 8)))
+    nil))
+
+
+^{:go/end 984} (go/method WriteGoAway ^error [^{:tag (* Framer)} f ^uint32 maxStreamID ^ErrCode code ^{:tag (slice byte)} debugData]
+  (.startWrite f FrameGoAway 0 0)
+  (.writeUint32 f (bit-and maxStreamID (- (<< 1 31) 1)))
+  (.writeUint32 f (conv uint32 code))
+  (.writeBytes f debugData)
+  (.endWrite f))
+
+
+
+
+(go/type UnknownFrame "An UnknownFrame is the frame type returned when the frame type is unknown\nor no specific frame type parser exists.\n" (struct
+    ^{:line 989} FrameHeader
+    ^{:line 990 :tag (slice byte)} p))
+
+
+
+
+
+
+
+^{:go/end 1001} (go/method Payload "Payload returns the frame's payload (after the header).  It is not\nvalid to call this method after a subsequent call to\nFramer.ReadFrame, nor is it valid to retain the returned slice.\nThe memory is owned by the Framer and is invalidated when the next\nframe is read.\n" ^{:tag (slice byte)} [^{:tag (* UnknownFrame)} f]
+  ^{:go/via [FrameHeader]} (.checkValid f)
+  (.-p f))
+
+
+^{:go/end 1005} (go/func parseUnknownFrame [^{:tag (* frameCache)} _ ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} p] :results [Frame error]
+  (return (addr (lit UnknownFrame fh p)) nil))
+
+
+
+
+(go/type WindowUpdateFrame "A WindowUpdateFrame is used to implement flow control.\nSee https://httpwg.org/specs/rfc7540.html#rfc.section.6.9\n" (struct
+    ^{:line 1010} FrameHeader
+    ^{:line 1011 :tag uint32} Increment)) ; never read with high bit set
+
+
+^{:go/end 1038} (go/func parseWindowUpdateFrame [^{:tag (* frameCache)} _ ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} p] :results [Frame error]
+  (when (!= (len p) 4)
+    (countError "frame_windowupdate_bad_len")
+    (return nil (conv ConnectionError ErrCodeFrameSize)))
+
+  (let [inc (bit-and (.Uint32 binary/BigEndian (subslice p _ 4)) 0x7fffffff)] ; mask off high reserved bit
+    (when (== inc 0)
+      ;; A receiver MUST treat the receipt of a
+      ;; WINDOW_UPDATE frame with an flow control window
+      ;; increment of 0 as a stream error (Section 5.4.2) of
+      ;; type PROTOCOL_ERROR; errors on the connection flow
+      ;; control window MUST be treated as a connection
+      ;; error (Section 5.4.1).
+      (when (== (.-StreamID fh) 0)
+        (countError "frame_windowupdate_zero_inc_conn")
+        (return nil (conv ConnectionError ErrCodeProtocol)))
+
+      (countError "frame_windowupdate_zero_inc_stream")
+      (return nil (streamError (.-StreamID fh) ErrCodeProtocol)))
+
+    ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4]} (lit WindowUpdateFrame
+          :FrameHeader fh
+          :Increment inc))
+      nil)))
+
+
+
+
+
+
+^{:go/end 1052} (go/method WriteWindowUpdate "WriteWindowUpdate writes a WINDOW_UPDATE frame.\nThe increment value must be between 1 and 2,147,483,647, inclusive.\nIf the Stream ID is zero, the window update applies to the\nconnection as a whole.\n" ^error [^{:tag (* Framer)} f ^uint32 streamID ^uint32 incr]
+  ;; "The legal range for the increment to the flow control window is 1 to 2^31-1 (2,147,483,647) octets."
+  (when (and ^:go/paren (or (< incr 1) (> incr 2147483647)) (not (.-AllowIllegalWrites f)))
+    (return (errors/New "illegal window increment value")))
+
+  (.startWrite f FrameWindowUpdate 0 streamID)
+  (.writeUint32 f incr)
+  (.endWrite f))
+
+
+
+
+(go/type HeadersFrame "A HeadersFrame is used to open a stream and additionally carries a\nheader block fragment.\n" (struct
+    ^{:line 1057} FrameHeader
+
+
+    ^{:line 1060 :tag PriorityParam :doc "Priority is set if FlagHeadersPriority is set in the FrameHeader.\n"} Priority
+
+    ^{:line 1062 :tag (slice byte)} headerFragBuf)) ; not owned
+
+
+^{:go/end 1068} (go/method HeaderBlockFragment ^{:tag (slice byte)} [^{:tag (* HeadersFrame)} f]
+  ^{:go/via [FrameHeader]} (.checkValid f)
+  (.-headerFragBuf f))
+
+
+^{:go/end 1072} (go/method HeadersEnded ^bool [^{:tag (* HeadersFrame)} f]
+  (.Has (.-Flags (.-FrameHeader f)) FlagHeadersEndHeaders))
+
+
+^{:go/end 1076} (go/method StreamEnded ^bool [^{:tag (* HeadersFrame)} f]
+  (.Has (.-Flags (.-FrameHeader f)) FlagHeadersEndStream))
+
+
+^{:go/end 1080} (go/method HasPriority ^bool [^{:tag (* HeadersFrame)} f]
+  (.Has (.-Flags (.-FrameHeader f)) FlagHeadersPriority))
+
+
+^{:go/end 1122} (go/func parseHeadersFrame [^{:tag (* frameCache)} _ ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} p] :results [^Frame _ ^error err]
+  (let [hf (addr ^{:go/breaks [2]} (lit HeadersFrame
+          :FrameHeader fh))]
+
+    (when (== (.-StreamID fh) 0)
+      ;; HEADERS frames MUST be associated with a stream. If a HEADERS frame
+      ;; is received whose stream identifier field is 0x0, the recipient MUST
+      ;; respond with a connection error (Section 5.4.1) of type
+      ;; PROTOCOL_ERROR.
+      (countError "frame_headers_zero_stream")
+      (return nil (lit connError ErrCodeProtocol "HEADERS frame with stream ID 0")))
+
+    (let [^uint8 padLength (zero uint8)]
+      (when (.Has (.-Flags fh) FlagHeadersPadded)
+        (when [(set! (values p padLength err) (readByte p))] (!= err nil)
+          (countError "frame_headers_pad_short")
+          (return)))
+
+
+      (when (.Has (.-Flags fh) FlagHeadersPriority)
+        (let [^uint32 v (zero uint32)]
+          (set! (values p v err) (readUint32 p))
+          (when (!= err nil)
+            (countError "frame_headers_prio_short")
+            (return nil err))
+
+          (set! (.-StreamDep (.-Priority hf)) (bit-and v 0x7fffffff))
+          (set! (.-Exclusive (.-Priority hf)) (!= v (.-StreamDep (.-Priority hf)))) ; high bit was set
+          (set! (values p (.-Weight (.-Priority hf)) err) (readByte p))
+          (when (!= err nil)
+            (countError "frame_headers_prio_weight_short")
+            (return nil err))))
+
+
+      (when (< (- (len p) (conv int padLength)) 0)
+        (countError "frame_headers_pad_too_big")
+        (return nil (streamError (.-StreamID fh) ErrCodeProtocol)))
+
+      (set! (.-headerFragBuf hf) (subslice p _ (- (len p) (conv int padLength))))
+      (return hf nil))))
+
+
+
+(go/type HeadersFrameParam "HeadersFrameParam are the parameters for writing a HEADERS frame.\n" (struct
+
+    ^{:line 1127 :tag uint32 :doc "StreamID is the required Stream ID to initiate.\n"} StreamID
+
+    ^{:line 1129 :tag (slice byte) :doc "BlockFragment is part (or all) of a Header Block.\n"} BlockFragment
+
+
+
+
+
+    ^{:line 1135 :tag bool :doc "EndStream indicates that the header block is the last that\nthe endpoint will send for the identified stream. Setting\nthis flag causes the stream to enter one of \"half closed\"\nstates.\n"} EndStream
+
+
+
+
+    ^{:line 1140 :tag bool :doc "EndHeaders indicates that this frame contains an entire\nheader block and is not followed by any\nCONTINUATION frames.\n"} EndHeaders
+
+
+
+    ^{:line 1144 :tag uint8 :doc "PadLength is the optional number of bytes of zeros to add\nto this frame.\n"} PadLength
+
+
+
+    ^{:line 1148 :tag PriorityParam :doc "Priority, if non-zero, includes stream priority information\nin the HEADER frame.\n"} Priority))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1194} (go/method WriteHeaders "WriteHeaders writes a single HEADERS frame.\n\nThis is a low-level header writing method. Encoding headers and\nsplitting them into any necessary CONTINUATION frames is handled\nelsewhere.\n\nIt will perform exactly one Write to the underlying Writer.\nIt is the caller's responsibility to not call other Write methods concurrently.\n" ^error [^{:tag (* Framer)} f ^HeadersFrameParam p]
+  (when (and (not (validStreamID (.-StreamID p))) (not (.-AllowIllegalWrites f)))
+    (return errStreamID))
+
+  (let [^Flags flags (zero Flags)]
+    (when (!= (.-PadLength p) 0)
+      (set! flags bit-or FlagHeadersPadded))
+
+    (when (.-EndStream p)
+      (set! flags bit-or FlagHeadersEndStream))
+
+    (when (.-EndHeaders p)
+      (set! flags bit-or FlagHeadersEndHeaders))
+
+    (when (not (.IsZero (.-Priority p)))
+      (set! flags bit-or FlagHeadersPriority))
+
+    (.startWrite f FrameHeaders flags (.-StreamID p))
+    (when (!= (.-PadLength p) 0)
+      (.writeByte f (.-PadLength p)))
+
+    (when (not (.IsZero (.-Priority p)))
+      (let [v (.-StreamDep (.-Priority p))]
+        (when (and (not (validStreamIDOrZero v)) (not (.-AllowIllegalWrites f)))
+          (return errDepStreamID))
+
+        (when (.-Exclusive (.-Priority p))
+          (set! v bit-or (<< 1 31)))
+
+        (.writeUint32 f v)
+        (.writeByte f (.-Weight (.-Priority p)))))
+
+    (set! (.-wbuf f) (append (.-wbuf f) (spread (.-BlockFragment p))))
+    (set! (.-wbuf f) (append (.-wbuf f) (spread (subslice padZeros _ (.-PadLength p)))))
+    (.endWrite f)))
+
+
+
+
+(go/type PriorityFrame "A PriorityFrame specifies the sender-advised priority of a stream.\nSee https://httpwg.org/specs/rfc7540.html#rfc.section.6.3\n" (struct
+    ^{:line 1199} FrameHeader
+    ^{:line 1200} PriorityParam))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1231} (go/func defaultRFC9218Priority "defaultRFC9218Priority determines what priority we should use as the default\nvalue.\n\nAccording to RFC 9218, by default, streams should be given an urgency of 3\nand should be non-incremental. However, making streams non-incremental by\ndefault would be a huge change to our historical behavior where we would\nround-robin writes across streams. When streams are non-incremental, we\nwould process streams of the same urgency one-by-one to completion instead.\n\nTo avoid such a sudden change which might break some HTTP/2 users, this\nfunction allows the caller to specify whether they can actually use the\ndefault value as specified in RFC 9218. If not, this function will return a\npriority value where streams are incremental by default instead: effectively\na round-robin between stream of the same urgency.\n\nAs an example, a server might not be able to use the RFC 9218 default value\nwhen it's not sure that the client it is serving is aware of RFC 9218.\n" ^PriorityParam [^bool canUseDefault]
+  (when canUseDefault
+    (return ^{:go/breaks [2 4]} (lit PriorityParam
+        :urgency 3
+        :incremental 0)))
+
+
+  ^{:go/breaks [2 4]} (lit PriorityParam
+    :urgency 3
+    :incremental 1))
+
+
+
+;; Note that HTTP/2 has had two different prioritization schemes, and
+;; PriorityParam struct below is a superset of both schemes. The exported
+;; symbols are from RFC 7540 and the non-exported ones are from RFC 9218.
+
+
+(go/type PriorityParam "PriorityParam are the stream prioritization parameters.\n" (struct
+
+
+
+    ^{:line 1242 :tag uint32 :doc "StreamDep is a 31-bit stream identifier for the\nstream that this stream depends on. Zero means no\ndependency.\n"} StreamDep
+
+
+    ^{:line 1245 :tag bool :doc "Exclusive is whether the dependency is exclusive.\n"} Exclusive
+
+
+
+
+
+    ^{:line 1251 :tag uint8 :doc "Weight is the stream's zero-indexed weight. It should be\nset together with StreamDep, or neither should be set. Per\nthe spec, \"Add one to the value to obtain a weight between\n1 and 256.\"\n"} Weight
+
+
+
+
+    ^{:line 1256 :tag uint8 :doc "\"The urgency (u) parameter value is Integer (see Section 3.3.1 of\n[STRUCTURED-FIELDS]), between 0 and 7 inclusive, in descending order of\npriority. The default is 3.\"\n"} urgency
+
+
+
+
+
+
+
+
+    ^{:line 1265 :tag uint8 :doc "\"The incremental (i) parameter value is Boolean (see Section 3.3.6 of\n[STRUCTURED-FIELDS]). It indicates if an HTTP response can be processed\nincrementally, i.e., provide some meaningful output as chunks of the\nresponse arrive.\"\n\nWe use uint8 (i.e. 0 is false, 1 is true) instead of bool so we can\navoid unnecessary type conversions and because either type takes 1 byte.\n"} incremental))
+
+
+^{:go/end 1270} (go/method IsZero ^bool [^PriorityParam p]
+  (== p (lit PriorityParam)))
+
+
+^{:go/end 1291} (go/func parsePriorityFrame [^{:tag (* frameCache)} _ ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} payload] :results [Frame error]
+  (when (== (.-StreamID fh) 0)
+    (countError "frame_priority_zero_stream")
+    (return nil (lit connError ErrCodeProtocol "PRIORITY frame with stream ID 0")))
+
+  (when (!= (len payload) 5)
+    (countError "frame_priority_bad_length")
+    (return nil (lit connError ErrCodeFrameSize (fmt/Sprintf "PRIORITY frame payload size was %d; want 5" (len payload)))))
+
+  (let [v (.Uint32 binary/BigEndian (subslice payload _ 4))
+      ^{:line 1282} streamID (bit-and v 0x7fffffff)] ; mask off high bit
+    ^{:go/breaks [[2 1290]]} (return (addr ^{:go/breaks [2 4]} (lit PriorityFrame
+          :FrameHeader fh
+          :PriorityParam ^{:go/breaks [2 4 6]} (lit PriorityParam
+            :Weight (aget payload 4)
+            :StreamDep streamID
+            :Exclusive (!= streamID v)))) ; was high bit set?
+
+      nil)))
+
+
+
+
+
+
+^{:go/end 1312} (go/method WritePriority "WritePriority writes a PRIORITY frame.\n\nIt will perform exactly one Write to the underlying Writer.\nIt is the caller's responsibility to not call other Write methods concurrently.\n" ^error [^{:tag (* Framer)} f ^uint32 streamID ^PriorityParam p]
+  (when (and (not (validStreamID streamID)) (not (.-AllowIllegalWrites f)))
+    (return errStreamID))
+
+  (when (not (validStreamIDOrZero (.-StreamDep p)))
+    (return errDepStreamID))
+
+  (.startWrite f FramePriority 0 streamID)
+  (let [v (.-StreamDep p)]
+    (when (.-Exclusive p)
+      (set! v bit-or (<< 1 31)))
+
+    (.writeUint32 f v)
+    (.writeByte f (.-Weight p))
+    (.endWrite f)))
+
+
+
+
+(go/type PriorityUpdateFrame "PriorityUpdateFrame is a PRIORITY_UPDATE frame as described in\nhttps://www.rfc-editor.org/rfc/rfc9218.html#name-the-priority_update-frame.\n" (struct
+    ^{:line 1317} FrameHeader
+    ^{:line 1318 :tag string} Priority
+    ^{:line 1319 :tag uint32} PrioritizedStreamID))
+
+
+^{:go/end 1344} (go/func parseRFC9218Priority [^string s ^bool canUseDefault] :results [^PriorityParam p ^bool ok]
+  (set! p (defaultRFC9218Priority canUseDefault))
+  (set! ok (httpsfv/ParseDictionary s ^{:go/end 1339} (fn [^string key ^string val ^string _]
+        (switch key
+          (case ["u"]
+            (when [(values u ok) (httpsfv/ParseInteger val)] (and ok (>= u 0) (<= u 7))
+              (set! (.-urgency p) (conv uint8 u))))
+
+          (case ["i"]
+            (when [(values i ok) (httpsfv/ParseBoolean val)] ok
+              (if i
+                (set! (.-incremental p) 1)
+
+                (set! (.-incremental p) 0))))))))
+
+
+
+
+  (when (not ok)
+    (return (defaultRFC9218Priority canUseDefault) ok))
+
+  (return p true))
+
+
+^{:go/end 1366} (go/func parsePriorityUpdateFrame [^{:tag (* frameCache)} _ ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} payload] :results [Frame error]
+  (when (!= (.-StreamID fh) 0)
+    (countError "frame_priority_update_non_zero_stream")
+    (return nil (lit connError ErrCodeProtocol "PRIORITY_UPDATE frame with non-zero stream ID")))
+
+  (when (< (len payload) 4)
+    (countError "frame_priority_update_bad_length")
+    (return nil (lit connError ErrCodeFrameSize (fmt/Sprintf "PRIORITY_UPDATE frame payload size was %d; want at least 4" (len payload)))))
+
+  (let [v (.Uint32 binary/BigEndian (subslice payload _ 4))
+      ^{:line 1356} streamID (bit-and v 0x7fffffff)] ; mask off high bit
+    (when (== streamID 0)
+      (countError "frame_priority_update_prioritizing_zero_stream")
+      (return nil (lit connError ErrCodeProtocol "PRIORITY_UPDATE frame with prioritized stream ID of zero")))
+
+    ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4 6]} (lit PriorityUpdateFrame
+          :FrameHeader fh
+          :PrioritizedStreamID streamID
+          :Priority (conv string (subslice payload 4))))
+      nil)))
+
+
+
+
+
+
+^{:go/end 1380} (go/method WritePriorityUpdate "WritePriorityUpdate writes a PRIORITY_UPDATE frame.\n\nIt will perform exactly one Write to the underlying Writer.\nIt is the caller's responsibility to not call other Write methods concurrently.\n" ^error [^{:tag (* Framer)} f ^uint32 streamID ^string priority]
+  (when (and (not (validStreamID streamID)) (not (.-AllowIllegalWrites f)))
+    (return errStreamID))
+
+  (.startWrite f FramePriorityUpdate 0 0)
+  (.writeUint32 f streamID)
+  (.writeBytes f (conv (slice byte) priority))
+  (.endWrite f))
+
+
+
+
+(go/type RSTStreamFrame "A RSTStreamFrame allows for abnormal termination of a stream.\nSee https://httpwg.org/specs/rfc7540.html#rfc.section.6.4\n" (struct
+    ^{:line 1385} FrameHeader
+    ^{:line 1386 :tag ErrCode} ErrCode))
+
+
+^{:go/end 1399} (go/func parseRSTStreamFrame [^{:tag (* frameCache)} _ ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} p] :results [Frame error]
+  (when (!= (len p) 4)
+    (countError "frame_rststream_bad_len")
+    (return nil (conv ConnectionError ErrCodeFrameSize)))
+
+  (when (== (.-StreamID fh) 0)
+    (countError "frame_rststream_zero_stream")
+    (return nil (conv ConnectionError ErrCodeProtocol)))
+
+  (return (addr (lit RSTStreamFrame fh (conv ErrCode (.Uint32 binary/BigEndian (subslice p _ 4))))) nil))
+
+
+
+
+
+
+^{:go/end 1412} (go/method WriteRSTStream "WriteRSTStream writes a RST_STREAM frame.\n\nIt will perform exactly one Write to the underlying Writer.\nIt is the caller's responsibility to not call other Write methods concurrently.\n" ^error [^{:tag (* Framer)} f ^uint32 streamID ^ErrCode code]
+  (when (and (not (validStreamID streamID)) (not (.-AllowIllegalWrites f)))
+    (return errStreamID))
+
+  (.startWrite f FrameRSTStream 0 streamID)
+  (.writeUint32 f (conv uint32 code))
+  (.endWrite f))
+
+
+
+
+(go/type ContinuationFrame "A ContinuationFrame is used to continue a sequence of header block fragments.\nSee https://httpwg.org/specs/rfc7540.html#rfc.section.6.10\n" (struct
+    ^{:line 1417} FrameHeader
+    ^{:line 1418 :tag (slice byte)} headerFragBuf))
+
+
+^{:go/end 1427} (go/func parseContinuationFrame [^{:tag (* frameCache)} _ ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} p] :results [Frame error]
+  (when (== (.-StreamID fh) 0)
+    (countError "frame_continuation_zero_stream")
+    (return nil (lit connError ErrCodeProtocol "CONTINUATION frame with stream ID 0")))
+
+  (return (addr (lit ContinuationFrame fh p)) nil))
+
+
+^{:go/end 1432} (go/method HeaderBlockFragment ^{:tag (slice byte)} [^{:tag (* ContinuationFrame)} f]
+  ^{:go/via [FrameHeader]} (.checkValid f)
+  (.-headerFragBuf f))
+
+
+^{:go/end 1436} (go/method HeadersEnded ^bool [^{:tag (* ContinuationFrame)} f]
+  (.Has (.-Flags (.-FrameHeader f)) FlagContinuationEndHeaders))
+
+
+
+
+
+
+^{:go/end 1453} (go/method WriteContinuation "WriteContinuation writes a CONTINUATION frame.\n\nIt will perform exactly one Write to the underlying Writer.\nIt is the caller's responsibility to not call other Write methods concurrently.\n" ^error [^{:tag (* Framer)} f ^uint32 streamID ^bool endHeaders ^{:tag (slice byte)} headerBlockFragment]
+  (when (and (not (validStreamID streamID)) (not (.-AllowIllegalWrites f)))
+    (return errStreamID))
+
+  (let [^Flags flags (zero Flags)]
+    (when endHeaders
+      (set! flags bit-or FlagContinuationEndHeaders))
+
+    (.startWrite f FrameContinuation flags streamID)
+    (set! (.-wbuf f) (append (.-wbuf f) (spread headerBlockFragment)))
+    (.endWrite f)))
+
+
+
+
+(go/type PushPromiseFrame "A PushPromiseFrame is used to initiate a server stream.\nSee https://httpwg.org/specs/rfc7540.html#rfc.section.6.6\n" (struct
+    ^{:line 1458} FrameHeader
+    ^{:line 1459 :tag uint32} PromiseID
+    ^{:line 1460 :tag (slice byte)} headerFragBuf)) ; not owned
+
+
+^{:go/end 1466} (go/method HeaderBlockFragment ^{:tag (slice byte)} [^{:tag (* PushPromiseFrame)} f]
+  ^{:go/via [FrameHeader]} (.checkValid f)
+  (.-headerFragBuf f))
+
+
+^{:go/end 1470} (go/method HeadersEnded ^bool [^{:tag (* PushPromiseFrame)} f]
+  (.Has (.-Flags (.-FrameHeader f)) FlagPushPromiseEndHeaders))
+
+
+^{:go/end 1510} (go/func parsePushPromise [^{:tag (* frameCache)} _ ^FrameHeader fh ^{:tag (func [string])} countError ^{:tag (slice byte)} p] :results [^Frame _ ^error err]
+  (let [pp (addr ^{:go/breaks [2]} (lit PushPromiseFrame
+          :FrameHeader fh))]
+
+    (when (== ^{:go/via [FrameHeader]} (.-StreamID pp) 0)
+      ;; PUSH_PROMISE frames MUST be associated with an existing,
+      ;; peer-initiated stream. The stream identifier of a
+      ;; PUSH_PROMISE frame indicates the stream it is associated
+      ;; with. If the stream identifier field specifies the value
+      ;; 0x0, a recipient MUST respond with a connection error
+      ;; (Section 5.4.1) of type PROTOCOL_ERROR.
+      (countError "frame_pushpromise_zero_stream")
+      (return nil (conv ConnectionError ErrCodeProtocol)))
+
+    ;; The PUSH_PROMISE frame includes optional padding.
+    ;; Padding fields and flags are identical to those defined for DATA frames
+    (let [^uint8 padLength (zero uint8)]
+      (when (.Has (.-Flags fh) FlagPushPromisePadded)
+        (when [(set! (values p padLength err) (readByte p))] (!= err nil)
+          (countError "frame_pushpromise_pad_short")
+          (return)))
+
+
+
+      (set! (values p (.-PromiseID pp) err) (readUint32 p))
+      (when (!= err nil)
+        (countError "frame_pushpromise_promiseid_short")
+        (return))
+
+      (set! (.-PromiseID pp) (bit-and (.-PromiseID pp) (- (<< 1 31) 1)))
+
+      (when (> (conv int padLength) (len p))
+        ;; like the DATA frame, error out if padding is longer than the body.
+        (countError "frame_pushpromise_pad_too_big")
+        (return nil (conv ConnectionError ErrCodeProtocol)))
+
+      (set! (.-headerFragBuf pp) (subslice p _ (- (len p) (conv int padLength))))
+      (return pp nil))))
+
+
+
+(go/type PushPromiseParam "PushPromiseParam are the parameters for writing a PUSH_PROMISE frame.\n" (struct
+
+    ^{:line 1515 :tag uint32 :doc "StreamID is the required Stream ID to initiate.\n"} StreamID
+
+
+
+    ^{:line 1519 :tag uint32 :doc "PromiseID is the required Stream ID which this\nPush Promises\n"} PromiseID
+
+
+    ^{:line 1522 :tag (slice byte) :doc "BlockFragment is part (or all) of a Header Block.\n"} BlockFragment
+
+
+
+
+    ^{:line 1527 :tag bool :doc "EndHeaders indicates that this frame contains an entire\nheader block and is not followed by any\nCONTINUATION frames.\n"} EndHeaders
+
+
+
+    ^{:line 1531 :tag uint8 :doc "PadLength is the optional number of bytes of zeros to add\nto this frame.\n"} PadLength))
+
+
+
+
+
+
+
+
+
+^{:go/end 1563} (go/method WritePushPromise "WritePushPromise writes a single PushPromise Frame.\n\nAs with Header Frames, This is the low level call for writing\nindividual frames. Continuation frames are handled elsewhere.\n\nIt will perform exactly one Write to the underlying Writer.\nIt is the caller's responsibility to not call other Write methods concurrently.\n" ^error [^{:tag (* Framer)} f ^PushPromiseParam p]
+  (when (and (not (validStreamID (.-StreamID p))) (not (.-AllowIllegalWrites f)))
+    (return errStreamID))
+
+  (let [^Flags flags (zero Flags)]
+    (when (!= (.-PadLength p) 0)
+      (set! flags bit-or FlagPushPromisePadded))
+
+    (when (.-EndHeaders p)
+      (set! flags bit-or FlagPushPromiseEndHeaders))
+
+    (.startWrite f FramePushPromise flags (.-StreamID p))
+    (when (!= (.-PadLength p) 0)
+      (.writeByte f (.-PadLength p)))
+
+    (when (and (not (validStreamID (.-PromiseID p))) (not (.-AllowIllegalWrites f)))
+      (return errStreamID))
+
+    (.writeUint32 f (.-PromiseID p))
+    (set! (.-wbuf f) (append (.-wbuf f) (spread (.-BlockFragment p))))
+    (set! (.-wbuf f) (append (.-wbuf f) (spread (subslice padZeros _ (.-PadLength p)))))
+    (.endWrite f)))
+
+
+
+
+^{:go/end 1571} (go/method WriteRawFrame "WriteRawFrame writes a raw frame. This can be used to write\nextension frames unknown to this package.\n" ^error [^{:tag (* Framer)} f ^FrameType t ^Flags flags ^uint32 streamID ^{:tag (slice byte)} payload]
+  (.startWrite f t flags streamID)
+  (.writeBytes f payload)
+  (.endWrite f))
+
+
+^{:go/end 1578} (go/func readByte [^{:tag (slice byte)} p] :results [^{:tag (slice byte)} remain ^byte b ^error err]
+  (when (== (len p) 0)
+    (return nil 0 io/ErrUnexpectedEOF))
+
+  (return (subslice p 1) (aget p 0) nil))
+
+
+^{:go/end 1585} (go/func readUint32 [^{:tag (slice byte)} p] :results [^{:tag (slice byte)} remain ^uint32 v ^error err]
+  (when (< (len p) 4)
+    (return nil 0 io/ErrUnexpectedEOF))
+
+  (return (subslice p 4) (.Uint32 binary/BigEndian (subslice p _ 4)) nil))
+
+
+(go/type streamEnder (interface
+    (StreamEnded ^bool [])))
+
+
+(go/type headersEnder (interface
+    (HeadersEnded ^bool [])))
+
+
+(go/type headersOrContinuation (interface
+    ^{:line 1596} headersEnder
+    (HeaderBlockFragment ^{:tag (slice byte)} [])))
+
+
+
+
+
+
+
+
+(go/type MetaHeadersFrame "A MetaHeadersFrame is the representation of one HEADERS frame and\nzero or more contiguous CONTINUATION frames and the decoding of\ntheir HPACK-encoded contents.\n\nThis type of frame does not appear on the wire and is only returned\nby the Framer when Framer.ReadMetaHeaders is set.\n" (struct
+    (* HeadersFrame)
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 1619 :tag (slice hpack/HeaderField) :doc "Fields are the fields contained in the HEADERS and\nCONTINUATION frames. The underlying slice is owned by the\nFramer and must not be retained after the next call to\nReadFrame.\n\nFields are guaranteed to be in the correct http2 order and\nnot have unknown pseudo header fields or invalid header\nfield names or values. Required pseudo header fields may be\nmissing, however. Use the MetaHeadersFrame.Pseudo accessor\nmethod access pseudo headers.\n"} Fields
+
+
+
+
+    ^{:line 1624 :tag bool :doc "Truncated is whether the max header list size limit was hit\nand Fields is incomplete. The hpack decoder state is still\nvalid, however.\n"} Truncated))
+
+
+
+
+^{:go/breaks [[5 1638]] :go/end 1639} (go/method PseudoValue "PseudoValue returns the given pseudo header field's value.\nThe provided pseudo field should not contain the leading colon.\n" ^string [^{:tag (* MetaHeadersFrame)} mh ^string pseudo]
+  (range [_ hf (.-Fields mh)]
+    (when (not (.IsPseudo hf))
+      (return ""))
+
+    (when (== (subslice (.-Name hf) 1) pseudo)
+      (return (.-Value hf))))
+
+
+  "")
+
+
+
+
+^{:go/breaks [[5 1649]] :go/end 1650} (go/method RegularFields "RegularFields returns the regular (non-pseudo) header fields of mh.\nThe caller does not own the returned slice.\n" ^{:tag (slice hpack/HeaderField)} [^{:tag (* MetaHeadersFrame)} mh]
+  (range [i hf (.-Fields mh)]
+    (when (not (.IsPseudo hf))
+      (return (subslice (.-Fields mh) i))))
+
+
+  nil)
+
+
+
+
+^{:go/end 1661} (go/method PseudoFields "PseudoFields returns the pseudo header fields of mh.\nThe caller does not own the returned slice.\n" ^{:tag (slice hpack/HeaderField)} [^{:tag (* MetaHeadersFrame)} mh]
+  (range [i hf (.-Fields mh)]
+    (when (not (.IsPseudo hf))
+      (return (subslice (.-Fields mh) _ i))))
+
+
+  (.-Fields mh))
+
+
+^{:go/end 1678} (go/method rfc9218Priority [^{:tag (* MetaHeadersFrame)} mh ^bool priorityAware] :results [^PriorityParam p ^bool priorityAwareAfter ^bool hasIntermediary]
+  (let [^string s (zero string)]
+    (range [_ field (.-Fields mh)]
+      (when (== (.-Name field) "priority")
+        (set! s (.-Value field))
+        (set! priorityAware true))
+
+      (when (^{:inst [(slice string) string]} slices/Contains (lit (slice string) "via" "forwarded" "x-forwarded-for") (.-Name field))
+        (set! hasIntermediary true)))
+
+
+    ;; No need to check for ok. parseRFC9218Priority will return a default
+    ;; value if there is no priority field or if the field cannot be parsed.
+    (set! (values p _) (parseRFC9218Priority s (and priorityAware (not hasIntermediary))))
+    (return p priorityAware hasIntermediary)))
+
+
+^{:go/end 1705} (go/method checkPseudos ^error [^{:tag (* MetaHeadersFrame)} mh]
+  ^{:go/breaks [[4 1704]]} (let [(values ^bool isRequest ^bool isResponse) (zero bool)
+      ^{:line 1682} pf (.PseudoFields mh)]
+    (range [i hf pf]
+      (switch (.-Name hf)
+        (case [":method" ":path" ":scheme" ":authority" ":protocol"]
+          (set! isRequest true))
+        (case [":status"]
+          (set! isResponse true))
+        (default
+          (return (conv pseudoHeaderError (.-Name hf)))))
+
+      ;; Check for duplicates.
+      ;; This would be a bad algorithm, but N is 5.
+      ;; And this doesn't allocate.
+      (range [_ hf2 (subslice pf _ i)]
+        (when (== (.-Name hf) (.-Name hf2))
+          (return (conv duplicatePseudoHeaderError (.-Name hf))))))
+
+
+
+    (when (and isRequest isResponse)
+      (return errMixPseudoHeaderTypes))
+
+    nil))
+
+
+^{:go/end 1714} (go/method maxHeaderStringLen ^int [^{:tag (* Framer)} fr]
+  (let [v (conv int (.maxHeaderListSize fr))]
+    (when (< v 0)
+      ;; If maxHeaderListSize overflows an int, use no limit (0).
+      (return 0))
+
+    ^{:line 1713} v))
+
+
+
+
+
+^{:go/end 1848} (go/method readMetaFrame "readMetaFrame returns 0 or more CONTINUATION frames from fr and\nmerge them into the provided hf and returns a MetaHeadersFrame\nwith the decoded hpack values.\n" [^{:tag (* Framer)} fr ^{:tag (* HeadersFrame)} hf] :results [Frame error]
+  (when (.-AllowIllegalReads fr)
+    (return nil (errors/New "illegal use of AllowIllegalReads with ReadMetaHeaders")))
+
+  (let [mh (addr ^{:go/breaks [2]} (lit MetaHeadersFrame
+          :HeadersFrame hf))
+
+      ^:var ^{:line 1726} remainSize (.maxHeaderListSize fr)
+      ^{:line 1727 :tag bool} sawRegular (zero bool)
+      ^{:line 1728 :tag int} headerCount (zero int)
+
+      ^{:line 1730 :tag error} invalid (zero error) ; pseudo header field errors
+      ^{:line 1731} hdec (.-ReadMetaHeaders fr)]
+    (.SetEmitEnabled hdec true)
+    (.SetMaxStringLength hdec (.maxHeaderStringLen fr))
+    (.SetEmitFunc hdec ^{:go/end 1776} (fn [^hpack/HeaderField hf]
+        (when (and VerboseLogs (.-logReads fr))
+          ((.-debugReadLoggerf fr) "http2: decoded hpack field %+v" hf))
+
+        (inc! headerCount)
+        (when [limit (.maxHeaderValueCount fr)] (and (> limit 0) (> headerCount limit))
+          (.SetEmitEnabled hdec false)
+          (set! (.-Truncated mh) true)
+          (set! remainSize 0)
+          (return))
+
+        (when (not (httpguts/ValidHeaderFieldValue (.-Value hf)))
+          ;; Don't include the value in the error, because it may be sensitive.
+          (set! invalid (conv headerFieldValueError (.-Name hf))))
+
+        (let [isPseudo (strings/HasPrefix (.-Name hf) ":")]
+          (if isPseudo
+            (when sawRegular
+              (set! invalid errPseudoAfterRegular))
+
+            (do
+              (set! sawRegular true)
+              (when (not (validWireHeaderFieldName (.-Name hf)))
+                (set! invalid (conv headerFieldNameError (.-Name hf))))))
+
+
+
+          (when (!= invalid nil)
+            (.SetEmitEnabled hdec false)
+            (return))
+
+
+          (let [size (.Size hf)]
+            (when (> size remainSize)
+              (.SetEmitEnabled hdec false)
+              (set! (.-Truncated mh) true)
+              (set! remainSize 0)
+              (return))
+
+            (set! remainSize - size)
+
+            (set! (.-Fields mh) (append (.-Fields mh) hf))))))
+
+    ;; Lose reference to MetaHeadersFrame:
+    (defer (.SetEmitFunc hdec ^{:go/end 1778} (fn [^hpack/HeaderField hf])))
+
+    (let [^headersOrContinuation hc hf]
+      (while true
+        (let [frag (.HeaderBlockFragment hc)]
+
+          ;; Avoid parsing large amounts of headers that we will then discard.
+          ;; If the sender exceeds the max header list size by too much,
+          ;; skip parsing the fragment and close the connection.
+          ;;
+          ;; "Too much" is either any CONTINUATION frame after we've already
+          ;; exceeded the max header list size (in which case remainSize is 0),
+          ;; or a frame whose encoded size is more than twice the remaining
+          ;; header list bytes we're willing to accept.
+          (when (> (conv int64 (len frag)) (conv int64 (* 2 remainSize)))
+            (when VerboseLogs
+              (log/Printf "http2: header list too large"))
+
+            ;; It would be nice to send a RST_STREAM before sending the GOAWAY,
+            ;; but the structure of the server's frame writer makes this difficult.
+            (return mh (conv ConnectionError ErrCodeProtocol)))
+
+
+          ;; Also close the connection after any CONTINUATION frame following an
+          ;; invalid header, since we stop tracking the size of the headers after
+          ;; an invalid one.
+          (when (!= invalid nil)
+            (when VerboseLogs
+              (log/Printf "http2: invalid header: %v" invalid))
+
+            ;; It would be nice to send a RST_STREAM before sending the GOAWAY,
+            ;; but the structure of the server's frame writer makes this difficult.
+            (return mh (conv ConnectionError ErrCodeProtocol)))
+
+
+          (when [(values _ err) (.Write hdec frag)] (!= err nil)
+            (return mh (conv ConnectionError ErrCodeCompression)))
+
+
+          (when (.HeadersEnded hc)
+            (break))
+
+          (if [(values f err) (.ReadFrame fr)] (!= err nil)
+            (return nil err)
+
+            (set! hc (assert (* ContinuationFrame) f))))) ; guaranteed by checkFrameOrder
+
+
+
+      (set! (.-headerFragBuf (.-HeadersFrame mh)) nil)
+      ^{:go/via [FrameHeader]} (.invalidate (.-HeadersFrame mh))
+
+      (when [err (.Close hdec)] (!= err nil)
+        (return mh (conv ConnectionError ErrCodeCompression)))
+
+      (when (!= invalid nil)
+        (set! (.-errDetail fr) invalid)
+        (when VerboseLogs
+          (log/Printf "http2: invalid header: %v" invalid))
+
+        (return nil (lit StreamError ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID mh) ErrCodeProtocol invalid)))
+
+      (when [err (.checkPseudos mh)] (!= err nil)
+        (set! (.-errDetail fr) err)
+        (when VerboseLogs
+          (log/Printf "http2: invalid pseudo headers: %v" err))
+
+        (return nil (lit StreamError ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID mh) ErrCodeProtocol err)))
+
+      (return mh nil))))
+
+
+^{:go/end 1891} (go/func summarizeFrame ^string [^Frame f]
+  (let [^bytes/Buffer buf (zero bytes/Buffer)]
+    (.writeDebug (.Header f) (addr buf))
+    (type-switch [f f]
+      (case [(* SettingsFrame)]
+        (let [n 0]
+          (.ForeachSetting f ^{:go/breaks [5] :go/end 1863} (fn ^error [^Setting s]
+              (inc! n)
+              (when (== n 1)
+                (.WriteString buf ", settings:"))
+
+              (fmt/Fprintf (addr buf) " %v=%v," (.-ID s) (.-Val s))
+              nil))
+
+          (when (> n 0)
+            (.Truncate buf (- (.Len buf) 1))))) ; remove trailing comma
+
+      (case [(* DataFrame)]
+        (let [data (.Data f)
+            ^:const ^{:line 1869 :val 256} max 256]
+          (when (> (len data) max)
+            (set! data (subslice data _ max)))
+
+          (fmt/Fprintf (addr buf) " data=%q" data)
+          (when (> (len (.Data f)) max)
+            (fmt/Fprintf (addr buf) " (%d bytes omitted)" (- (len (.Data f)) max)))))
+
+      (case [(* WindowUpdateFrame)]
+        (when (== ^{:go/via [FrameHeader]} (.-StreamID f) 0)
+          (.WriteString buf " (conn)"))
+
+        (fmt/Fprintf (addr buf) " incr=%v" (.-Increment f)))
+      (case [(* PingFrame)]
+        (fmt/Fprintf (addr buf) " ping=%q" (subslice (.-Data f))))
+      (case [(* GoAwayFrame)]
+        (fmt/Fprintf (addr buf) " LastStreamID=%v ErrCode=%v Debug=%q"
+          (.-LastStreamID f) (.-ErrCode f) (.-debugData f)))
+      (case [(* RSTStreamFrame)]
+        (fmt/Fprintf (addr buf) " ErrCode=%v" (.-ErrCode f))))
+
+    (.String buf)))

@@ -1,0 +1,2041 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.v2) (go/file "arshal_default.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [cmp "cmp"]
+    ^{:line 12} [encoding "encoding"]
+    ^{:line 13} [base32 "encoding/base32"]
+    ^{:line 14} [base64 "encoding/base64"]
+    ^{:line 15} [hex "encoding/hex"]
+    ^{:line 16} [errors "errors"]
+    ^{:line 17} [fmt "fmt"]
+    ^{:line 18} [math "math"]
+    ^{:line 19} [reflect "reflect"]
+    ^{:line 20} [slices "slices"]
+    ^{:line 21} [strconv "strconv"]
+    ^{:line 22} [strings "strings"]
+    ^{:line 23} [sync "sync"]
+
+    ^{:line 25} [internal "encoding/json/internal"]
+    ^{:line 26} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 27} [jsonopts "encoding/json/internal/jsonopts"]
+    ^{:line 28} [jsonwire "encoding/json/internal/jsonwire"]
+    ^{:line 29} [jsontext "encoding/json/jsontext"]])
+
+
+
+
+
+(go/const ^{:val true :doc "optimizeCommon specifies whether to use optimizations targeted for certain\ncommon patterns, rather than using the slower, but more general logic.\nAll tests should pass regardless of whether this is true or not.\n"} optimizeCommon true)
+
+(go/var
+
+  ^{:line 39} [^{:doc "Most natural Go types that correspond with each JSON type.\n"} anyType ((inst reflect/TypeFor any))] ; JSON value
+  ^{:line 40} [boolType ((inst reflect/TypeFor bool))] ; JSON bool
+  ^{:line 41} [stringType ((inst reflect/TypeFor string))] ; JSON string
+  ^{:line 42} [float64Type ((inst reflect/TypeFor float64))] ; JSON number
+  ^{:line 43} [mapStringAnyType ((inst reflect/TypeFor (map string any)))] ; JSON object
+  ^{:line 44} [sliceAnyType ((inst reflect/TypeFor (slice any)))] ; JSON array
+
+  ^{:line 46} [bytesType ((inst reflect/TypeFor (slice byte)))]
+  ^{:line 47} [emptyStructType ((inst reflect/TypeFor (struct)))])
+
+
+(go/const ^{:val 1000} startDetectingCyclesAfter 1000)
+
+(go/type ^:alias seenPointers (map any (struct)))
+
+(go/type typedPointer (struct
+    ^{:line 55 :tag reflect/Type} typ
+    ^{:line 56 :tag any} ptr ; always stores unsafe.Pointer, but avoids depending on unsafe
+    ^{:line 57 :tag int} len)) ; remember slice length to avoid false positives
+
+
+
+
+^{:go/end 72} (go/func visitPointer "visitPointer visits pointer p of type t, reporting an error if seen before.\nIf successfully visited, then the caller must eventually call leave.\n" ^error [^{:tag (* seenPointers)} m ^reflect/Value v]
+  ^{:go/breaks [5]} (let [p (lit typedPointer (.Type v) (.UnsafePointer v) (sliceLen v))]
+    (when [(values _ ok) (aget @m p)] ok
+      (return internal/ErrCycle))
+
+    (when (== @m nil)
+      (set! @m (make seenPointers)))
+
+    (aset @m p (lit (struct)))
+    nil))
+
+^{:go/end 76} (go/func leavePointer [^{:tag (* seenPointers)} m ^reflect/Value v]
+  (let [p (lit typedPointer (.Type v) (.UnsafePointer v) (sliceLen v))]
+    (delete @m p)))
+
+
+^{:go/breaks [[4 82]] :go/end 83} (go/func sliceLen ^int [^reflect/Value v]
+  (when (== (.Kind v) reflect/Slice)
+    (return (.Len v)))
+
+  0)
+
+
+^{:go/end 87} (go/func len64 :type-params [^{:tag (| (tilde (slice byte)) (tilde string))} Bytes] ^int64 [^Bytes in]
+  (conv int64 (len in)))
+
+
+^{:go/end 124} (go/func makeDefaultArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  (switch (.Kind t)
+    (case [reflect/Bool]
+      (return (makeBoolArshaler t)))
+    (case [reflect/String]
+      (return (makeStringArshaler t)))
+    (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+      (return (makeIntArshaler t)))
+    (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+      (return (makeUintArshaler t)))
+    (case [reflect/Float32 reflect/Float64]
+      (return (makeFloatArshaler t)))
+    (case [reflect/Map]
+      (return (makeMapArshaler t)))
+    (case [reflect/Struct]
+      (return (makeStructArshaler t)))
+    (case [reflect/Slice]
+      (let [fncs (makeSliceArshaler t)]
+        (when (== (.Kind (.Elem t)) reflect/Uint8)
+          (return (makeBytesArshaler t fncs)))
+
+        (return fncs)))
+    (case [reflect/Array]
+      (let [fncs (makeArrayArshaler t)]
+        (when (== (.Kind (.Elem t)) reflect/Uint8)
+          (return (makeBytesArshaler t fncs)))
+
+        (return fncs)))
+    (case [reflect/Pointer]
+      (return (makePointerArshaler t)))
+    (case [reflect/Interface]
+      (return (makeInterfaceArshaler t)))
+    (default
+      (return (makeInvalidArshaler t)))))
+
+
+
+^{:go/end 209} (go/func makeBoolArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  (let [^arshaler fncs (zero arshaler)]
+    (set! (.-marshal fncs) ^{:go/end 159} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        (let [xe (.Encoder export enc)
+            ^{:line 130 :tag bool} stringify (zero bool)] ; always false except `string` tag with StringifyWithLegacySemantics
+          (when (.Has (.-Flags mo) jsonflags/TagFlags)
+            (set! stringify (and (.Get (.-Flags mo) jsonflags/StringTag) (.Get (.-Flags mo) jsonflags/StringifyWithLegacySemantics)))
+            (when (and (.Get (.-Flags mo) jsonflags/StringTag) (not (.Get (.-Flags mo) (bit-or jsonflags/StringifyWithLegacySemantics jsonflags/ReportErrorsWithLegacySemantics))))
+              (return (newMarshalErrorBefore enc t errInvalidStringTag)))
+
+            (when (.Has (.-Flags mo) jsonflags/FormatTag)
+              (return (newInvalidFormatError enc t))))
+
+
+
+          ;; Optimize for marshaling without preceding whitespace.
+          (when (and optimizeCommon (not (.Get (.-Flags mo) jsonflags/AnyWhitespace)) (not stringify) (not (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe)))))
+            (set! ^{:go/via [encodeBuffer]} (.-Buf xe) (strconv/AppendBool (.MayAppendDelim ^{:go/via [state]} (.-Tokens xe) ^{:go/via [encodeBuffer]} (.-Buf xe) \t) ^{:go/via [Value]} (.Bool va)))
+            (.Increment (.-Last ^{:go/via [state]} (.-Tokens xe)))
+            (when (.NeedFlush xe)
+              (return (.Flush xe)))
+
+            (return nil))
+
+
+          (when stringify
+            (if ^{:go/via [Value]} (.Bool va)
+              (return (.WriteToken enc (jsontext/String "true")))
+
+              (return (.WriteToken enc (jsontext/String "false")))))
+
+
+          (.WriteToken enc (jsontext/Bool ^{:go/via [Value]} (.Bool va))))))
+
+    (set! (.-unmarshal fncs) ^{:go/end 207} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+        (let [^bool stringify (zero bool)] ; always false except `string` tag with StringifyWithLegacySemantics
+          (when (.Has (.-Flags uo) jsonflags/TagFlags)
+            (set! stringify (and (.Get (.-Flags uo) jsonflags/StringTag) (.Get (.-Flags uo) jsonflags/StringifyWithLegacySemantics)))
+            (when (and (.Get (.-Flags uo) jsonflags/StringTag) (not (.Get (.-Flags uo) (bit-or jsonflags/StringifyWithLegacySemantics jsonflags/ReportErrorsWithLegacySemantics))))
+              (return (newUnmarshalErrorBeforeWithSkipping dec t errInvalidStringTag)))
+
+            (when (.Has (.-Flags uo) jsonflags/FormatTag)
+              (return (newInvalidFormatError dec t))))
+
+
+          (let [(values tok err) (.ReadToken dec)]
+            (when (!= err nil)
+              (return err))
+
+            (let [k (.Kind tok)]
+              (switch k
+                (case [\n]
+                  (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                    ^{:go/via [Value]} (.SetBool va false))
+
+                  (return nil))
+                (case [\t \f]
+                  (when (not stringify)
+                    ^{:go/via [Value]} (.SetBool va (.Bool tok))
+                    (return nil)))
+
+                (case [\"]
+                  (when stringify
+                    (switch (.String tok)
+                      (case ["true"]
+                        ^{:go/via [Value]} (.SetBool va true))
+                      (case ["false"]
+                        ^{:go/via [Value]} (.SetBool va false))
+                      (default
+                        (when (and (.Get (.-Flags uo) jsonflags/StringifyWithLegacySemantics) (== (.String tok) "null"))
+                          (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                            ^{:go/via [Value]} (.SetBool va false))
+
+                          (return nil))
+
+                        (return (newUnmarshalErrorAfterWithValue dec t strconv/ErrSyntax))))
+
+                    (return nil))))
+
+
+              (newUnmarshalErrorAfterWithSkipping dec t nil))))))
+
+    (addr fncs)))
+
+
+^{:go/end 305} (go/func makeStringArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  (let [^arshaler fncs (zero arshaler)]
+    (set! (.-marshal fncs) ^{:go/end 256} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        (let [xe (.Encoder export enc)
+            ^{:line 215 :tag bool} stringify (zero bool)] ; always false except `string` tag with StringifyWithLegacySemantics
+          (when (.Has (.-Flags mo) jsonflags/TagFlags)
+            (set! stringify (and (.Get (.-Flags mo) jsonflags/StringTag) (.Get (.-Flags mo) jsonflags/StringifyWithLegacySemantics)))
+            (when (and (.Get (.-Flags mo) jsonflags/StringTag) (not (.Get (.-Flags mo) (bit-or jsonflags/StringifyWithLegacySemantics jsonflags/ReportErrorsWithLegacySemantics))))
+              (return (newMarshalErrorBefore enc t errInvalidStringTag)))
+
+            (when (.Has (.-Flags mo) jsonflags/FormatTag)
+              (return (newInvalidFormatError enc t))))
+
+
+
+          ;; Optimize for marshaling without preceding whitespace.
+          (let [s ^{:go/via [Value]} (.String va)]
+            (when (and optimizeCommon (not (.Get (.-Flags mo) jsonflags/AnyWhitespace)) (not stringify) (not (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe)))))
+              (let [b ^{:go/via [encodeBuffer]} (.-Buf xe)]
+                (set! b (.MayAppendDelim ^{:go/via [state]} (.-Tokens xe) b \"))
+                (let [(values ^:assign b err) (jsonwire/AppendQuote b (conv (slice byte) s) (addr (.-Flags mo)))]
+                  (when (== err nil)
+                    (set! ^{:go/via [encodeBuffer]} (.-Buf xe) b)
+                    (.Increment (.-Last ^{:go/via [state]} (.-Tokens xe)))
+                    (when (.NeedFlush xe)
+                      (return (.Flush xe)))
+
+                    (return nil)))))
+
+            ;; Otherwise, the string contains invalid UTF-8,
+            ;; so let the logic below construct the proper error.
+
+
+            (when stringify
+              (let [(values b err) (jsonwire/AppendQuote nil (conv (slice byte) s) (addr (.-Flags mo)))]
+                (when (!= err nil)
+                  (return (newMarshalErrorBefore enc t (addr (lit jsontext/SyntacticError :Err err)))))
+
+                (let [(values q ^:assign err) (^{:inst [(slice byte)]} jsontext/AppendQuote nil b)]
+                  (when (!= err nil)
+                    (panic (+ "BUG: second AppendQuote should never fail: " (.Error err))))
+
+                  (return (.WriteValue enc q)))))
+
+            (.WriteToken enc (jsontext/String s))))))
+
+    (set! (.-unmarshal fncs) ^{:go/end 303} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+        (let [xd (.Decoder export dec)
+            ^{:line 259 :tag bool} stringify (zero bool)] ; always false except `string` tag with StringifyWithLegacySemantics
+          (when (.Has (.-Flags uo) jsonflags/TagFlags)
+            (set! stringify (and (.Get (.-Flags uo) jsonflags/StringTag) (.Get (.-Flags uo) jsonflags/StringifyWithLegacySemantics)))
+            (when (and (.Get (.-Flags uo) jsonflags/StringTag) (not (.Get (.-Flags uo) (bit-or jsonflags/StringifyWithLegacySemantics jsonflags/ReportErrorsWithLegacySemantics))))
+              (return (newUnmarshalErrorBeforeWithSkipping dec t errInvalidStringTag)))
+
+            (when (.Has (.-Flags uo) jsonflags/FormatTag)
+              (return (newInvalidFormatError dec t))))
+
+
+          (let [^jsonwire/ValueFlags flags (zero jsonwire/ValueFlags)
+              (values val err) (.ReadValue xd (addr flags))]
+            (when (!= err nil)
+              (return err))
+
+            (let [k (.Kind val)]
+              (switch k
+                (case [\n]
+                  (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                    ^{:go/via [Value]} (.SetString va ""))
+
+                  (return nil))
+                (case [\"]
+                  (set! val (jsonwire/UnquoteMayCopy val (.IsVerbatim flags)))
+                  (when stringify
+                    (when (== (conv string val) "null")
+                      (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                        ^{:go/via [Value]} (.SetString va ""))
+
+                      (return nil))
+
+                    (set! (values val err) (^{:inst [jsontext/Value]} jsontext/AppendUnquote nil val))
+                    (when (!= err nil)
+                      (return (newUnmarshalErrorAfter dec t err))))
+
+
+                  (when (== (.-StringCache xd) nil)
+                    (set! (.-StringCache xd) (new stringCache)))
+
+                  (let [str (makeString (.-StringCache xd) val)]
+                    ^{:go/via [Value]} (.SetString va str)
+                    (return nil))))
+
+              (newUnmarshalErrorAfter dec t nil))))))
+
+    (addr fncs)))
+
+
+(go/var
+  ^{:line 308} [appendEncodeBase16 hex/AppendEncode]
+  ^{:line 309} [appendEncodeBase32 (.-AppendEncode base32/StdEncoding)]
+  ^{:line 310} [appendEncodeBase32Hex (.-AppendEncode base32/HexEncoding)]
+  ^{:line 311} [appendEncodeBase64 (.-AppendEncode base64/StdEncoding)]
+  ^{:line 312} [appendEncodeBase64URL (.-AppendEncode base64/URLEncoding)]
+  ^{:line 313} [encodedLenBase16 hex/EncodedLen]
+  ^{:line 314} [encodedLenBase32 (.-EncodedLen base32/StdEncoding)]
+  ^{:line 315} [encodedLenBase32Hex (.-EncodedLen base32/HexEncoding)]
+  ^{:line 316} [encodedLenBase64 (.-EncodedLen base64/StdEncoding)]
+  ^{:line 317} [encodedLenBase64URL (.-EncodedLen base64/URLEncoding)]
+  ^{:line 318} [appendDecodeBase16 hex/AppendDecode]
+  ^{:line 319} [appendDecodeBase32 (.-AppendDecode base32/StdEncoding)]
+  ^{:line 320} [appendDecodeBase32Hex (.-AppendDecode base32/HexEncoding)]
+  ^{:line 321} [appendDecodeBase64 (.-AppendDecode base64/StdEncoding)]
+  ^{:line 322} [appendDecodeBase64URL (.-AppendDecode base64/URLEncoding)])
+
+
+^{:go/end 465} (go/func makeBytesArshaler ^{:tag (* arshaler)} [^reflect/Type t ^{:tag (* arshaler)} fncs]
+  ;; NOTE: This handles both []~byte and [N]~byte.
+  ;; The v2 default is to treat a []namedByte as equivalent to []T
+  ;; since being able to convert []namedByte to []byte relies on
+  ;; dubious Go reflection behavior (see https://go.dev/issue/24746).
+  ;; For v1 emulation, we use jsonflags.FormatBytesWithLegacySemantics
+  ;; to forcibly treat []namedByte as a []byte.
+  (let [marshalArray (.-marshal fncs)
+      ^{:line 333} isNamedByte (!= (.PkgPath (.Elem t)) "")
+      ^{:line 334} hasMarshaler (implementsAny (.Elem t) (spread allMarshalerTypes))]
+    (set! (.-marshal fncs) ^{:go/end 376} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        (when (and (not (.Get (.-Flags mo) jsonflags/FormatBytesWithLegacySemantics)) isNamedByte)
+          (return (marshalArray enc va mo))) ; treat as []T or [N]T
+
+        (let [xe (.Encoder export enc)
+            ^{:line 340} appendEncode appendEncodeBase64]
+          (when (.Has (.-Flags mo) (bit-or jsonflags/TagFlags jsonflags/FormatByteArrayAsArray jsonflags/FormatBytesWithLegacySemantics jsonflags/FormatNilSliceAsNull))
+            (switch
+              (case [(and (.Get (.-Flags mo) jsonflags/StringTag) (not (.Get (.-Flags mo) jsonflags/ReportErrorsWithLegacySemantics)))]
+                (return (newMarshalErrorBefore enc t errInvalidStringTag)))
+              (case [(.Has (.-Flags mo) jsonflags/FormatTag)]
+                (switch ^{:go/via [ArshalValues]} (.-Format mo)
+                  (case ["base64"]
+                    (set! appendEncode appendEncodeBase64))
+                  (case ["base64url"]
+                    (set! appendEncode appendEncodeBase64URL))
+                  (case ["base32"]
+                    (set! appendEncode appendEncodeBase32))
+                  (case ["base32hex"]
+                    (set! appendEncode appendEncodeBase32Hex))
+                  (case ["base16" "hex"]
+                    (set! appendEncode appendEncodeBase16))
+                  (case ["array"]
+                    (.Clear (.-Flags mo) jsonflags/FormatTag)
+                    (return (marshalArray enc va mo)))
+                  (default
+                    (return (newInvalidFormatError enc t)))))
+
+              (case [(and (.Get (.-Flags mo) jsonflags/FormatByteArrayAsArray) (== ^{:go/via [Value]} (.Kind va) reflect/Array))]
+                (return (marshalArray enc va mo)))
+              (case [(and (.Get (.-Flags mo) jsonflags/FormatBytesWithLegacySemantics) hasMarshaler)]
+                (return (marshalArray enc va mo))))
+
+            (when (and (.Get (.-Flags mo) jsonflags/FormatNilSliceAsNull) (== ^{:go/via [Value]} (.Kind va) reflect/Slice) ^{:go/via [Value]} (.IsNil va))
+              ;; TODO: Provide an "emitempty" format override?
+              (return (.WriteToken enc jsontext/Null))))
+
+
+          (.AppendRaw xe \" true ^{:go/end 375} (fn [^{:tag (slice byte)} b] :results [(slice byte) error]
+              (return (appendEncode b ^{:go/via [Value]} (.Bytes va)) nil))))))
+
+
+    (let [unmarshalArray (.-unmarshal fncs)]
+      (set! (.-unmarshal fncs) ^{:go/end 463} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+          (when (and (not (.Get (.-Flags uo) jsonflags/FormatBytesWithLegacySemantics)) isNamedByte)
+            (return (unmarshalArray dec va uo))) ; treat as []T or [N]T
+
+          (let [xd (.Decoder export dec)
+              (values appendDecode encodedLen) (values appendDecodeBase64 encodedLenBase64)]
+            (when (.Has (.-Flags uo) (bit-or jsonflags/TagFlags jsonflags/FormatByteArrayAsArray jsonflags/FormatBytesWithLegacySemantics))
+              (switch
+                (case [(and (.Get (.-Flags uo) jsonflags/StringTag) (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)))]
+                  (return (newUnmarshalErrorBeforeWithSkipping dec t errInvalidStringTag)))
+                (case [(.Has (.-Flags uo) jsonflags/FormatTag)]
+                  (switch ^{:go/via [ArshalValues]} (.-Format uo)
+                    (case ["base64"]
+                      (set! (values appendDecode encodedLen) (values appendDecodeBase64 encodedLenBase64)))
+                    (case ["base64url"]
+                      (set! (values appendDecode encodedLen) (values appendDecodeBase64URL encodedLenBase64URL)))
+                    (case ["base32"]
+                      (set! (values appendDecode encodedLen) (values appendDecodeBase32 encodedLenBase32)))
+                    (case ["base32hex"]
+                      (set! (values appendDecode encodedLen) (values appendDecodeBase32Hex encodedLenBase32Hex)))
+                    (case ["base16" "hex"]
+                      (set! (values appendDecode encodedLen) (values appendDecodeBase16 encodedLenBase16)))
+                    (case ["array"]
+                      (.Clear (.-Flags uo) jsonflags/FormatTag)
+                      (return (unmarshalArray dec va uo)))
+                    (default
+                      (return (newInvalidFormatError dec t)))))
+
+                (case [(and (.Get (.-Flags uo) jsonflags/FormatByteArrayAsArray) (== ^{:go/via [Value]} (.Kind va) reflect/Array))]
+                  (return (unmarshalArray dec va uo)))
+                (case [(and (.Get (.-Flags uo) jsonflags/FormatBytesWithLegacySemantics) (== (.PeekKind dec) \[))]
+                  (return (unmarshalArray dec va uo)))))
+
+
+            (let [^jsonwire/ValueFlags flags (zero jsonwire/ValueFlags)
+                (values val err) (.ReadValue xd (addr flags))]
+              (when (!= err nil)
+                (return err))
+
+              (let [k (.Kind val)]
+                (switch k
+                  (case [\n]
+                    (when (or (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics)) (!= ^{:go/via [Value]} (.Kind va) reflect/Array))
+                      ^{:go/via [Value]} (.SetZero va))
+
+                    (return nil))
+                  (case [\"]
+                    ;; NOTE: The v2 default is to strictly comply with RFC 4648.
+                    ;; Section 3.2 specifies that padding is required.
+                    ;; Section 3.3 specifies that non-alphabet characters
+                    ;; (e.g., '\r' or '\n') must be rejected.
+                    ;; Section 3.5 specifies that unnecessary non-zero bits in
+                    ;; the last quantum may be rejected. Since this is optional,
+                    ;; we do not reject such inputs.
+                    (set! val (jsonwire/UnquoteMayCopy val (.IsVerbatim flags)))
+                    (let [(values b err) (appendDecode (subslice ^{:go/via [Value]} (.Bytes va) _ 0) val)]
+                      (when (!= err nil)
+                        (return (newUnmarshalErrorAfter dec t err)))
+
+                      (when (and (!= (len val) (encodedLen (len b))) (not (.Get (.-Flags uo) jsonflags/ParseBytesWithLooseRFC4648)))
+                        ;; TODO(https://go.dev/issue/53845): RFC 4648, section 3.3,
+                        ;; specifies that non-alphabet characters must be rejected.
+                        ;; Unfortunately, the "base32" and "base64" packages allow
+                        ;; '\r' and '\n' characters by default.
+                        (let [i (bytes/IndexAny val "\r\n")
+                            ^{:line 443} err (fmt/Errorf "illegal character %s at offset %d" (jsonwire/QuoteRune (subslice val i)) i)]
+                          (return (newUnmarshalErrorAfter dec t err))))
+
+
+                      (if (== ^{:go/via [Value]} (.Kind va) reflect/Array)
+                        (let [dst ^{:go/via [Value]} (.Bytes va)]
+                          (clear (subslice dst (copy dst b))) ; noop if len(b) >= len(dst)
+                          (when (and (!= (len b) (len dst)) (not (.Get (.-Flags uo) jsonflags/UnmarshalArrayFromAnyLength)))
+                            (let [err (fmt/Errorf "decoded length of %d mismatches array length of %d" (len b) (len dst))]
+                              (return (newUnmarshalErrorAfter dec t err)))))
+
+                        (do
+                          (when (== b nil)
+                            (set! b (lit (slice byte))))
+
+                          ^{:go/via [Value]} (.SetBytes va b)))
+
+                      (return nil))))
+
+                (newUnmarshalErrorAfter dec t nil))))))
+
+      ^{:line 464} fncs)))
+
+
+^{:go/end 564} (go/func makeIntArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  (let [^arshaler fncs (zero arshaler)
+      ^{:line 469} bits (.Bits t)]
+    (set! (.-marshal fncs) ^{:go/end 491} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        (let [xe (.Encoder export enc)
+            ^{:line 472} stringify (or (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe))) (.Get (.-Flags mo) (bit-or jsonflags/StringifyNumbers jsonflags/StringTag)))]
+          (when (.Has (.-Flags mo) jsonflags/FormatTag)
+            (return (newInvalidFormatError enc t)))
+
+
+          ;; Optimize for marshaling without preceding whitespace or string escaping.
+          (when (and optimizeCommon (not (.Get (.-Flags mo) jsonflags/AnyWhitespace)) (not stringify))
+            (set! ^{:go/via [encodeBuffer]} (.-Buf xe) (strconv/AppendInt (.MayAppendDelim ^{:go/via [state]} (.-Tokens xe) ^{:go/via [encodeBuffer]} (.-Buf xe) \0) ^{:go/via [Value]} (.Int va) 10))
+            (.Increment (.-Last ^{:go/via [state]} (.-Tokens xe)))
+            (when (.NeedFlush xe)
+              (return (.Flush xe)))
+
+            (return nil))
+
+
+          (let [k (stringOrNumberKind stringify)]
+            (.AppendRaw xe k true ^{:go/end 490} (fn [^{:tag (slice byte)} b] :results [(slice byte) error]
+                (return (strconv/AppendInt b ^{:go/via [Value]} (.Int va) 10) nil)))))))
+
+
+    (set! (.-unmarshal fncs) ^{:go/end 562} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+        (let [xd (.Decoder export dec)
+            ^{:line 494} stringify (or (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xd))) (.Get (.-Flags uo) (bit-or jsonflags/StringifyNumbers jsonflags/StringTag)))]
+          (when (.Has (.-Flags uo) jsonflags/FormatTag)
+            (return (newInvalidFormatError dec t)))
+
+          (let [^jsonwire/ValueFlags flags (zero jsonwire/ValueFlags)
+              (values val err) (.ReadValue xd (addr flags))]
+            (when (!= err nil)
+              (return err))
+
+            (let [k (.Kind val)]
+              (switch k
+                (case [\n]
+                  (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                    ^{:go/via [Value]} (.SetInt va 0))
+
+                  (return nil))
+                (case [\"]
+                  (when (not stringify)
+                    (break))
+
+                  (set! val (jsonwire/UnquoteMayCopy val (.IsVerbatim flags)))
+                  (when (.Get (.-Flags uo) jsonflags/StringifyWithLegacySemantics)
+                    ;; For historical reasons, v1 parsed a quoted number
+                    ;; according to the Go syntax and permitted a quoted null.
+                    ;; See https://go.dev/issue/75619
+                    (let [(values n err) (strconv/ParseInt (conv string val) 10 bits)]
+                      (when (!= err nil)
+                        (when (== (conv string val) "null")
+                          (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                            ^{:go/via [Value]} (.SetInt va 0))
+
+                          (return nil))
+
+                        (return (newUnmarshalErrorAfterWithValue dec t (errors/Unwrap err))))
+
+                      ^{:go/via [Value]} (.SetInt va n)
+                      (return nil)))
+
+                  (fallthrough))
+                (case [\0]
+                  (when (and stringify (== k \0))
+                    (break))
+
+                  (let [^int negOffset (zero int)
+                      ^{:line 538} neg (and (> (len val) 0) (== (aget val 0) \-))]
+                    (when neg
+                      (set! negOffset 1))
+
+                    (let [(values n ok) (jsonwire/ParseUint (subslice val negOffset))
+                        ^{:line 543} maxInt (<< (conv uint64 1) (- bits 1))
+                        ^{:line 544} overflow (or ^:go/paren (and neg (> n maxInt)) ^:go/paren (and (not neg) (> n (- maxInt 1))))]
+                      (when (not ok)
+                        (when (!= n math/MaxUint64)
+                          (return (newUnmarshalErrorAfterWithValue dec t strconv/ErrSyntax)))
+
+                        (set! overflow true))
+
+                      (when overflow
+                        (return (newUnmarshalErrorAfterWithValue dec t strconv/ErrRange)))
+
+                      (if neg
+                        ^{:go/via [Value]} (.SetInt va (conv int64 (- n)))
+
+                        ^{:go/via [Value]} (.SetInt va (conv int64 (+ n))))
+
+                      (return nil)))))
+
+              (newUnmarshalErrorAfter dec t nil))))))
+
+    (addr fncs)))
+
+
+^{:go/end 654} (go/func makeUintArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  (let [^arshaler fncs (zero arshaler)
+      ^{:line 568} bits (.Bits t)]
+    (set! (.-marshal fncs) ^{:go/end 590} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        (let [xe (.Encoder export enc)
+            ^{:line 571} stringify (or (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe))) (.Get (.-Flags mo) (bit-or jsonflags/StringifyNumbers jsonflags/StringTag)))]
+          (when (.Has (.-Flags mo) jsonflags/FormatTag)
+            (return (newInvalidFormatError enc t)))
+
+
+          ;; Optimize for marshaling without preceding whitespace or string escaping.
+          (when (and optimizeCommon (not (.Get (.-Flags mo) jsonflags/AnyWhitespace)) (not stringify))
+            (set! ^{:go/via [encodeBuffer]} (.-Buf xe) (strconv/AppendUint (.MayAppendDelim ^{:go/via [state]} (.-Tokens xe) ^{:go/via [encodeBuffer]} (.-Buf xe) \0) ^{:go/via [Value]} (.Uint va) 10))
+            (.Increment (.-Last ^{:go/via [state]} (.-Tokens xe)))
+            (when (.NeedFlush xe)
+              (return (.Flush xe)))
+
+            (return nil))
+
+
+          (let [k (stringOrNumberKind stringify)]
+            (.AppendRaw xe k true ^{:go/end 589} (fn [^{:tag (slice byte)} b] :results [(slice byte) error]
+                (return (strconv/AppendUint b ^{:go/via [Value]} (.Uint va) 10) nil)))))))
+
+
+    (set! (.-unmarshal fncs) ^{:go/end 652} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+        (let [xd (.Decoder export dec)
+            ^{:line 593} stringify (or (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xd))) (.Get (.-Flags uo) (bit-or jsonflags/StringifyNumbers jsonflags/StringTag)))]
+          (when (.Has (.-Flags uo) jsonflags/FormatTag)
+            (return (newInvalidFormatError dec t)))
+
+          (let [^jsonwire/ValueFlags flags (zero jsonwire/ValueFlags)
+              (values val err) (.ReadValue xd (addr flags))]
+            (when (!= err nil)
+              (return err))
+
+            (let [k (.Kind val)]
+              (switch k
+                (case [\n]
+                  (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                    ^{:go/via [Value]} (.SetUint va 0))
+
+                  (return nil))
+                (case [\"]
+                  (when (not stringify)
+                    (break))
+
+                  (set! val (jsonwire/UnquoteMayCopy val (.IsVerbatim flags)))
+                  (when (.Get (.-Flags uo) jsonflags/StringifyWithLegacySemantics)
+                    ;; For historical reasons, v1 parsed a quoted number
+                    ;; according to the Go syntax and permitted a quoted null.
+                    ;; See https://go.dev/issue/75619
+                    (let [(values n err) (strconv/ParseUint (conv string val) 10 bits)]
+                      (when (!= err nil)
+                        (when (== (conv string val) "null")
+                          (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                            ^{:go/via [Value]} (.SetUint va 0))
+
+                          (return nil))
+
+                        (return (newUnmarshalErrorAfterWithValue dec t (errors/Unwrap err))))
+
+                      ^{:go/via [Value]} (.SetUint va n)
+                      (return nil)))
+
+                  (fallthrough))
+                (case [\0]
+                  (when (and stringify (== k \0))
+                    (break))
+
+                  (let [(values n ok) (jsonwire/ParseUint val)
+                      ^{:line 637} maxUint (<< (conv uint64 1) bits)
+                      ^{:line 638} overflow (> n (- maxUint 1))]
+                    (when (not ok)
+                      (when (!= n math/MaxUint64)
+                        (return (newUnmarshalErrorAfterWithValue dec t strconv/ErrSyntax)))
+
+                      (set! overflow true))
+
+                    (when overflow
+                      (return (newUnmarshalErrorAfterWithValue dec t strconv/ErrRange)))
+
+                    ^{:go/via [Value]} (.SetUint va n)
+                    (return nil))))
+
+              (newUnmarshalErrorAfter dec t nil))))))
+
+    (addr fncs)))
+
+
+^{:go/end 772} (go/func makeFloatArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  (let [^arshaler fncs (zero arshaler)
+      ^{:line 658} bits (.Bits t)]
+    (set! (.-marshal fncs) ^{:go/end 694} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        (let [xe (.Encoder export enc)
+            ^{:line 661} stringify (or (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe))) (.Get (.-Flags mo) (bit-or jsonflags/StringifyNumbers jsonflags/StringTag)))
+            ^{:line 662 :tag bool} allowNonFinite (zero bool)]
+          (when (.Has (.-Flags mo) jsonflags/FormatTag)
+            (if (== ^{:go/via [ArshalValues]} (.-Format mo) "nonfinite")
+              (set! allowNonFinite true)
+
+              (return (newInvalidFormatError enc t))))
+
+
+
+          (let [fv ^{:go/via [Value]} (.Float va)]
+            (when (or (math/IsNaN fv) (math/IsInf fv 0))
+              (when (not allowNonFinite)
+                (let [err (fmt/Errorf "unsupported value: %v" fv)]
+                  (return (newMarshalErrorBefore enc t err))))
+
+              (return (.WriteToken enc (jsontext/Float fv))))
+
+
+            ;; Optimize for marshaling without preceding whitespace or string escaping.
+            (when (and optimizeCommon (not (.Get (.-Flags mo) jsonflags/AnyWhitespace)) (not stringify))
+              (set! ^{:go/via [encodeBuffer]} (.-Buf xe) (jsonwire/AppendFloat (.MayAppendDelim ^{:go/via [state]} (.-Tokens xe) ^{:go/via [encodeBuffer]} (.-Buf xe) \0) fv bits))
+              (.Increment (.-Last ^{:go/via [state]} (.-Tokens xe)))
+              (when (.NeedFlush xe)
+                (return (.Flush xe)))
+
+              (return nil))
+
+
+            (let [k (stringOrNumberKind stringify)]
+              (.AppendRaw xe k true ^{:go/end 693} (fn [^{:tag (slice byte)} b] :results [(slice byte) error]
+                  (return (jsonwire/AppendFloat b ^{:go/via [Value]} (.Float va) bits) nil))))))))
+
+
+    (set! (.-unmarshal fncs) ^{:go/end 770} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+        (let [xd (.Decoder export dec)
+            ^{:line 697} stringify (or (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xd))) (.Get (.-Flags uo) (bit-or jsonflags/StringifyNumbers jsonflags/StringTag)))
+            ^{:line 698 :tag bool} allowNonFinite (zero bool)]
+          (when (.Has (.-Flags uo) jsonflags/FormatTag)
+            (if (== ^{:go/via [ArshalValues]} (.-Format uo) "nonfinite")
+              (set! allowNonFinite true)
+
+              (return (newInvalidFormatError dec t))))
+
+
+
+          (let [^jsonwire/ValueFlags flags (zero jsonwire/ValueFlags)
+              (values val err) (.ReadValue xd (addr flags))]
+            (when (!= err nil)
+              (return err))
+
+            (let [k (.Kind val)]
+              (switch k
+                (case [\n]
+                  (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                    ^{:go/via [Value]} (.SetFloat va 0))
+
+                  (return nil))
+                (case [\"]
+                  (set! val (jsonwire/UnquoteMayCopy val (.IsVerbatim flags)))
+                  (when allowNonFinite
+                    (switch (conv string val)
+                      (case ["NaN"]
+                        ^{:go/via [Value]} (.SetFloat va (math/NaN))
+                        (return nil))
+                      (case ["Infinity"]
+                        ^{:go/via [Value]} (.SetFloat va (math/Inf (+ 1)))
+                        (return nil))
+                      (case ["-Infinity"]
+                        ^{:go/via [Value]} (.SetFloat va (math/Inf -1))
+                        (return nil))))
+
+
+                  (when (not stringify)
+                    (break))
+
+                  (when (.Get (.-Flags uo) jsonflags/StringifyWithLegacySemantics)
+                    ;; For historical reasons, v1 parsed a quoted number
+                    ;; according to the Go syntax and permitted a quoted null.
+                    ;; See https://go.dev/issue/75619
+                    (let [(values n err) (strconv/ParseFloat (conv string val) bits)]
+                      (when (!= err nil)
+                        (when (== (conv string val) "null")
+                          (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                            ^{:go/via [Value]} (.SetFloat va 0))
+
+                          (return nil))
+
+                        (return (newUnmarshalErrorAfterWithValue dec t (errors/Unwrap err))))
+
+                      ^{:go/via [Value]} (.SetFloat va n)
+                      (return nil)))
+
+                  (when [(values n err) (jsonwire/ConsumeNumber val)] (or (!= n (len val)) (!= err nil))
+                    (return (newUnmarshalErrorAfterWithValue dec t strconv/ErrSyntax)))
+
+                  (fallthrough))
+                (case [\0]
+                  (when (and stringify (== k \0))
+                    (break))
+
+                  (let [(values fv err) (strconv/ParseFloat (conv string val) bits)]
+                    ^{:go/via [Value]} (.SetFloat va fv)
+                    (when (!= err nil)
+                      (return (newUnmarshalErrorAfterWithValue dec t (errors/Unwrap err))))
+
+                    (return nil))))
+
+              (newUnmarshalErrorAfter dec t nil))))))
+
+    (addr fncs)))
+
+
+^{:go/end 1079} (go/func makeMapArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  ;; NOTE: The logic below disables namespaces for tracking duplicate names
+  ;; when handling map keys with a unique representation.
+
+  ;; NOTE: Values retrieved from a map are not addressable,
+  ;; so we shallow copy the values to make them addressable and
+  ;; store them back into the map afterwards.
+
+  (let [^arshaler fncs (zero arshaler)
+
+      ^{:line 784 :tag sync/Once} once (zero sync/Once)
+      ^{:line 785 :tag (* arshaler)} keyFncs (zero (* arshaler))
+      ^{:line 786 :tag (* arshaler)} valFncs (zero (* arshaler))
+
+      ^{:line 788} init ^{:go/end 791} (fn []
+        (set! keyFncs (lookupArshaler (.Key t)))
+        (set! valFncs (lookupArshaler (.Elem t))))
+
+      ^{:line 792} nillableLegacyKey (and (== (.Kind (.Key t)) reflect/Pointer)
+        (implementsAny (.Key t) textMarshalerType textAppenderType))]
+    (set! (.-marshal fncs) ^{:go/end 954} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        ;; Check for cycles.
+        (let [xe (.Encoder export enc)]
+          (when (> (.Depth ^{:go/via [state]} (.-Tokens xe)) startDetectingCyclesAfter)
+            (when [err (visitPointer (addr (.-SeenPointers xe)) (.-Value va))] (!= err nil)
+              (return (newMarshalErrorBefore enc t err)))
+
+            (defer (leavePointer (addr (.-SeenPointers xe)) (.-Value va))))
+
+
+          (let [emitNull (.Get (.-Flags mo) jsonflags/FormatNilMapAsNull)]
+            (when (.Has (.-Flags mo) jsonflags/TagFlags)
+              (when (and (.Get (.-Flags mo) jsonflags/StringTag) (not (.Get (.-Flags mo) jsonflags/ReportErrorsWithLegacySemantics)))
+                (return (newMarshalErrorBefore enc t errInvalidStringTag)))
+
+              (when (.Has (.-Flags mo) jsonflags/FormatTag)
+                (switch ^{:go/via [ArshalValues]} (.-Format mo)
+                  (case ["emitnull"]
+                    (set! emitNull true))
+                  (case ["emitempty"]
+                    (set! emitNull false))
+                  (default
+                    (return (newInvalidFormatError enc t))))))
+
+
+
+
+            ;; Handle empty maps.
+            ^{:go/breaks [[7 953]]} (let [n ^{:go/via [Value]} (.Len va)]
+              (when (== n 0)
+                (when (and emitNull ^{:go/via [Value]} (.IsNil va))
+                  (return (.WriteToken enc jsontext/Null)))
+
+                ;; Optimize for marshaling an empty map without any preceding whitespace.
+                (when (and optimizeCommon (not (.Get (.-Flags mo) jsonflags/AnyWhitespace)) (not (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe)))))
+                  (set! ^{:go/via [encodeBuffer]} (.-Buf xe) (append (.MayAppendDelim ^{:go/via [state]} (.-Tokens xe) ^{:go/via [encodeBuffer]} (.-Buf xe) \{) (spread "{}")))
+                  (.Increment (.-Last ^{:go/via [state]} (.-Tokens xe)))
+                  (when (.NeedFlush xe)
+                    (return (.Flush xe)))
+
+                  (return nil)))
+
+
+
+              (.Do once init)
+              (when [err (.WriteToken enc jsontext/BeginObject)] (!= err nil)
+                (return err))
+
+              (when (> n 0)
+                (let [nonDefaultKey (.-nonDefault keyFncs)
+                    ^{:line 844} marshalKey (.-marshal keyFncs)
+                    ^{:line 845} marshalVal (.-marshal valFncs)]
+                  (when (!= ^{:go/via [ArshalValues]} (.-Marshalers mo) nil)
+                    (let [^bool ok (zero bool)]
+                      (set! (values marshalKey ok) (.lookup (assert (* Marshalers) ^{:go/via [ArshalValues]} (.-Marshalers mo)) marshalKey (.Key t)))
+                      (set! (values marshalVal _) (.lookup (assert (* Marshalers) ^{:go/via [ArshalValues]} (.-Marshalers mo)) marshalVal (.Elem t)))
+                      (set! nonDefaultKey (or nonDefaultKey ok))))
+
+                  (let [k (newAddressableValue (.Key t))
+                      ^{:line 853} v (newAddressableValue (.Elem t))]
+
+                    ;; A Go map guarantees that each entry has a unique key.
+                    ;; As such, disable the expensive duplicate name check if we know
+                    ;; that every Go key will serialize as a unique JSON string.
+                    (when (and (not nonDefaultKey) (mapKeyWithUniqueRepresentation ^{:go/via [Value]} (.Kind k) (.Get (.-Flags mo) jsonflags/AllowInvalidUTF8)))
+                      (.DisableNamespace (.-Last ^{:go/via [state]} (.-Tokens xe))))
+
+
+                    (switch
+                      (case [(or (not (.Get (.-Flags mo) jsonflags/Deterministic)) (<= n 1))]
+                        (for [iter (.MapRange (.-Value va))] (.Next iter) _
+                          ^{:go/via [Value]} (.SetIterKey k iter)
+                          (let [err (marshalKey enc k mo)]
+                            (when (!= err nil)
+                              (when (and (.Get (.-Flags mo) jsonflags/CallMethodsWithLegacySemantics)
+                                  (errors/Is err jsontext/ErrNonStringName) nillableLegacyKey ^{:go/via [Value]} (.IsNil k))
+                                (set! err (.WriteToken enc (jsontext/String ""))))
+
+                              (when (!= err nil)
+                                (when [(values serr ok) (assert (* jsontext/SyntacticError) err)] (and ok (== (.-Err serr) jsontext/ErrNonStringName))
+                                  (set! err (newMarshalErrorBefore enc ^{:go/via [Value]} (.Type k) err)))
+
+                                (return err)))
+
+
+                            ^{:go/via [Value]} (.SetIterValue v iter)
+                            (when [err (marshalVal enc v mo)] (!= err nil)
+                              (return err)))))
+
+
+                      (case [(and (not nonDefaultKey) (== (.Kind (.Key t)) reflect/String))]
+                        (let [names (getStrings n)]
+                          (for [(values i iter) (values 0 (.MapRange (.-Value va)))] (and (< i n) (.Next iter)) (inc! i)
+                            ^{:go/via [Value]} (.SetIterKey k iter)
+                            (aset @names i ^{:go/via [Value]} (.String k)))
+
+                          (^{:inst [stringSlice string]} slices/Sort @names)
+                          (range [_ name @names]
+                            (when [err (.WriteToken enc (jsontext/String name))] (!= err nil)
+                              (return err))
+
+                            ;; TODO(https://go.dev/issue/57061): Use v.SetMapIndexOf.
+                            ^{:go/via [Value]} (.SetString k name)
+                            ^{:go/via [Value]} (.Set v ^{:go/via [Value]} (.MapIndex va (.-Value k)))
+                            (when [err (marshalVal enc v mo)] (!= err nil)
+                              (return err)))
+
+
+                          (putStrings names)))
+                      (default
+                        (let-type [member (struct
+                              ^{:line 905 :tag string} name ; unquoted name
+                              ^{:line 906 :tag addressableValue} key
+                              ^{:line 907 :tag addressableValue} val)]
+
+                          (let [members (make (slice member) n)
+                              ^{:line 910} keys (reflect/MakeSlice (reflect/SliceOf (.Key t)) n n)
+                              ^{:line 911} vals (reflect/MakeSlice (reflect/SliceOf (.Elem t)) n n)]
+                            (for [(values i iter) (values 0 (.MapRange (.-Value va)))] (and (< i n) (.Next iter)) (inc! i)
+                              ;; Marshal the member name.
+                              (let [k (lit addressableValue (.Index keys i) true)] ; indexed slice element is always addressable
+                                ^{:go/via [Value]} (.SetIterKey k iter)
+                                (let [v (lit addressableValue (.Index vals i) true)] ; indexed slice element is always addressable
+                                  ^{:go/via [Value]} (.SetIterValue v iter)
+                                  (let [err (marshalKey enc k mo)]
+                                    (when (!= err nil)
+                                      (when (and (.Get (.-Flags mo) jsonflags/CallMethodsWithLegacySemantics)
+                                          (errors/Is err jsontext/ErrNonStringName) nillableLegacyKey ^{:go/via [Value]} (.IsNil k))
+                                        (set! err (.WriteToken enc (jsontext/String ""))))
+
+                                      (when (!= err nil)
+                                        (when [(values serr ok) (assert (* jsontext/SyntacticError) err)] (and ok (== (.-Err serr) jsontext/ErrNonStringName))
+                                          (set! err (newMarshalErrorBefore enc ^{:go/via [Value]} (.Type k) err)))
+
+                                        (return err)))
+
+
+                                    (let [name (.UnwriteOnlyObjectMemberName xe)]
+                                      (aset members i (lit member name k v)))))))
+
+                            ;; TODO: If AllowDuplicateNames is enabled, then sort according
+                            ;; to reflect.Value as well if the names are equal.
+                            ;; See internal/fmtsort.
+                            (^{:inst [(slice member) member]} slices/SortFunc members ^{:go/end 939} (fn ^int [^member x ^member y]
+                                (strings/Compare (.-name x) (.-name y))))
+
+                            (range [_ member members]
+                              (when [err (.WriteToken enc (jsontext/String (.-name member)))] (!= err nil)
+                                (return err))
+
+                              (when [err (marshalVal enc (.-val member) mo)] (!= err nil)
+                                (return err))))))))))
+
+
+
+
+              (when [err (.WriteToken enc jsontext/EndObject)] (!= err nil)
+                (return err))
+
+              nil)))))
+
+    (set! (.-unmarshal fncs) ^{:go/end 1077} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+        (let [xd (.Decoder export dec)]
+          (when (.Has (.-Flags uo) jsonflags/TagFlags)
+            (when (and (.Get (.-Flags uo) jsonflags/StringTag) (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)))
+              (return (newUnmarshalErrorBeforeWithSkipping dec t errInvalidStringTag)))
+
+            (when (.Has (.-Flags uo) jsonflags/FormatTag)
+              (switch ^{:go/via [ArshalValues]} (.-Format uo)
+                (case ["emitnull" "emitempty"])
+                (default
+                  (return (newInvalidFormatError dec t))))))
+
+
+
+          (let [(values tok err) (.ReadToken dec)]
+            (when (!= err nil)
+              (return err))
+
+            (let [k (.Kind tok)]
+              (switch k
+                (case [\n]
+                  ^{:go/via [Value]} (.SetZero va)
+                  (return nil))
+                (case [\{]
+                  (.Do once init)
+                  (when ^{:go/via [Value]} (.IsNil va)
+                    ^{:go/via [Value]} (.Set va (reflect/MakeMap t)))
+
+
+                  (let [nonDefaultKey (.-nonDefault keyFncs)
+                      ^{:line 985} unmarshalKey (.-unmarshal keyFncs)
+                      ^{:line 986} unmarshalVal (.-unmarshal valFncs)]
+                    (when (!= ^{:go/via [ArshalValues]} (.-Unmarshalers uo) nil)
+                      (let [^bool ok (zero bool)]
+                        (set! (values unmarshalKey ok) (.lookup (assert (* Unmarshalers) ^{:go/via [ArshalValues]} (.-Unmarshalers uo)) unmarshalKey (.Key t)))
+                        (set! (values unmarshalVal _) (.lookup (assert (* Unmarshalers) ^{:go/via [ArshalValues]} (.-Unmarshalers uo)) unmarshalVal (.Elem t)))
+                        (set! nonDefaultKey (or nonDefaultKey ok))))
+
+                    (let [k (newAddressableValue (.Key t))
+                        ^{:line 994} v (newAddressableValue (.Elem t))]
+
+                      ;; Manually check for duplicate entries by virtue of whether the
+                      ;; unmarshaled key already exists in the destination Go map.
+                      ;; Consequently, syntactically different names (e.g., "0" and "-0")
+                      ;; will be rejected as duplicates since they semantically refer
+                      ;; to the same Go value. This is an unusual interaction
+                      ;; between syntax and semantics, but is more correct.
+                      (when (and (not nonDefaultKey) (mapKeyWithUniqueRepresentation ^{:go/via [Value]} (.Kind k) (.Get (.-Flags uo) jsonflags/AllowInvalidUTF8)))
+                        (.DisableNamespace (.-Last ^{:go/via [state]} (.-Tokens xd))))
+
+
+                      ;; In the rare case where the map is not already empty,
+                      ;; then we need to manually track which keys we already saw
+                      ;; since existing presence alone is insufficient to indicate
+                      ;; whether the input had a duplicate name.
+                      (let [^reflect/Value seen (zero reflect/Value)]
+                        (when (and (not (.Get (.-Flags uo) jsonflags/AllowDuplicateNames)) (> ^{:go/via [Value]} (.Len va) 0))
+                          (set! seen (reflect/MakeMap (reflect/MapOf ^{:go/via [Value]} (.Type k) emptyStructType))))
+
+
+                        (let [^error errUnmarshal (zero error)]
+                          (while (!= (.PeekKind dec) \})
+                            ;; Unmarshal the map entry key.
+                            ^{:go/via [Value]} (.SetZero k)
+                            (let [err (unmarshalKey dec k uo)]
+                              (when (!= err nil)
+                                (when (isFatalError err (.-Flags uo))
+                                  (return err))
+
+                                (when [err (.SkipValue dec)] (!= err nil)
+                                  (return err))
+
+                                (set! errUnmarshal (^{:inst [error]} cmp/Or errUnmarshal err))
+                                (continue))
+
+                              (when (and (== ^{:go/via [Value]} (.Kind k) reflect/Interface) (not ^{:go/via [Value]} (.IsNil k)) (not (.Comparable (.Type ^{:go/via [Value]} (.Elem k)))))
+                                (let [err (newUnmarshalErrorAfter dec t (fmt/Errorf "invalid incomparable key type %v" (.Type ^{:go/via [Value]} (.Elem k))))]
+                                  (when (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics))
+                                    (return err))
+
+                                  (when [err2 (.SkipValue dec)] (!= err2 nil)
+                                    (return err2))
+
+                                  (set! errUnmarshal (^{:inst [error]} cmp/Or errUnmarshal err))
+                                  (continue)))
+
+
+                              ;; Check if a pre-existing map entry value exists for this key.
+                              (if [v2 ^{:go/via [Value]} (.MapIndex va (.-Value k))] (.IsValid v2) (do
+                                  (when (and (not (.Get (.-Flags uo) jsonflags/AllowDuplicateNames)) ^:go/paren (or (not (.IsValid seen)) (.IsValid (.MapIndex seen (.-Value k)))))
+                                    ;; TODO: Unread the object name.
+                                    (let [name ^{:go/via [decodeBuffer]} (.PreviousTokenOrValue xd)]
+                                      (return (newDuplicateNameError (.StackPointer dec) nil (- (.InputOffset dec) (^{:inst [(slice byte)]} len64 name))))))
+
+                                  (if (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                                    ^{:go/via [Value]} (.Set v v2)
+
+                                    ^{:go/via [Value]} (.SetZero v)))
+
+
+                                ^{:go/via [Value]} (.SetZero v))
+
+
+                              ;; Unmarshal the map entry value.
+                              (set! err (unmarshalVal dec v uo))
+                              ^{:go/via [Value]} (.SetMapIndex va (.-Value k) (.-Value v))
+                              (when (.IsValid seen)
+                                (.SetMapIndex seen (.-Value k) (reflect/Zero emptyStructType)))
+
+                              (when (!= err nil)
+                                (when (isFatalError err (.-Flags uo))
+                                  (return err))
+
+                                (set! errUnmarshal (^{:inst [error]} cmp/Or errUnmarshal err)))))
+
+
+                          (when [(values _ err) (.ReadToken dec)] (!= err nil)
+                            (return err))
+
+                          (return errUnmarshal)))))))
+
+              (newUnmarshalErrorAfterWithSkipping dec t nil))))))
+
+    (addr fncs)))
+
+
+
+
+
+
+^{:go/end 1100} (go/func mapKeyWithUniqueRepresentation "mapKeyWithUniqueRepresentation reports whether all possible values of k\nmarshal to a different JSON value, and whether all possible JSON values\nthat can unmarshal into k unmarshal to different Go values.\nIn other words, the representation must be a bijection.\n" ^bool [^reflect/Kind k ^bool allowInvalidUTF8]
+  (switch k
+    (case [reflect/Bool
+        ^{:line 1088} reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64
+        ^{:line 1089} reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+      (return true))
+    (case [reflect/String]
+      ;; For strings, we have to be careful since names with invalid UTF-8
+      ;; may unescape to the same Go string value.
+      (return (not allowInvalidUTF8)))
+    (default
+      ;; Floating-point kinds are not listed above since NaNs
+      ;; can appear multiple times and all serialize as "NaN".
+      (return false))))
+
+
+
+(go/var errNilField (errors/New "cannot set embedded pointer to unexported struct type"))
+(go/var errInvalidStringTag (errors/New "invalid use of `string` tag option"))
+
+^{:go/end 1419} (go/func makeStructArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  ;; NOTE: The logic below disables namespaces for tracking duplicate names
+  ;; and does the tracking locally with an efficient bit-set based on which
+  ;; Go struct fields were seen.
+
+  (let [^arshaler fncs (zero arshaler)
+
+      ^{:line 1112 :tag sync/Once} once (zero sync/Once)
+      ^{:line 1113 :tag structFields} fields (zero structFields)
+      ^{:line 1114 :tag (* SemanticError)} errInit (zero (* SemanticError))
+
+      ^{:line 1116} init ^{:go/end 1118} (fn []
+        (set! (values fields errInit) (makeStructFields t)))]
+
+    (set! (.-marshal fncs) ^{:go/end 1284} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        (let [xe (.Encoder export enc)]
+          (when (.Has (.-Flags mo) jsonflags/TagFlags)
+            (when (and (.Get (.-Flags mo) jsonflags/StringTag) (not (.Get (.-Flags mo) jsonflags/ReportErrorsWithLegacySemantics)))
+              (return (newMarshalErrorBefore enc t errInvalidStringTag)))
+
+            (when (.Has (.-Flags mo) jsonflags/FormatTag)
+              (return (newInvalidFormatError enc t))))
+
+
+          (.Do once init)
+          (cond (and (!= errInit nil) (not (.Get (.-Flags mo) jsonflags/ReportErrorsWithLegacySemantics)))
+            (return (newMarshalErrorBefore enc (.-GoType errInit) (.-Err errInit)))
+            (and (!= (.-errUnsupportedFormat fields) nil) (not (.Get (.-Flags mo) jsonflags/FormatTagSupported)))
+            (return (newMarshalErrorBefore enc (.-GoType (.-errUnsupportedFormat fields)) (.-Err (.-errUnsupportedFormat fields)))))
+
+
+          (when [err (.WriteToken enc jsontext/BeginObject)] (!= err nil)
+            (return err))
+
+          ^{:go/breaks [[6 1283]]} (let [^uintSet seenIdxs (zero uintSet)
+              ^{:line 1140} prevIdx -1]
+            (.DisableNamespace (.-Last ^{:go/via [state]} (.-Tokens xe))) ; we manually ensure unique names below
+            (range [i (.-flattened fields)]
+              (let [f (addr (aget (.-flattened fields) i))
+                  ^{:line 1144} v (lit addressableValue ^{:go/via [Value]} (.Field va (.-index0 f)) (.-forcedAddr va))] ; addressable if struct value is addressable
+                (when (> (len (.-index f)) 0)
+                  (set! v (.fieldByIndex v (.-index f) false))
+                  (when (not ^{:go/via [Value]} (.IsValid v))
+                    (continue))) ; implies a nil embedded field
+
+
+
+                ;; OmitZero skips the field if the Go value is zero,
+                ;; which we can determine up front without calling the marshaler.
+                (when (and ^:go/paren (or ^{:go/via [fieldOptions]} (.-omitzero f) (.Get (.-Flags mo) jsonflags/OmitZeroStructFields))
+                    ^:go/paren (or ^:go/paren (and (== (.-isZero f) nil) ^{:go/via [Value]} (.IsZero v)) ^:go/paren (and (!= (.-isZero f) nil) ((.-isZero f) v))))
+                  (continue))
+
+
+                ;; Check for the legacy definition of omitempty.
+                (when (and ^{:go/via [fieldOptions]} (.-omitempty f) (.Get (.-Flags mo) jsonflags/OmitEmptyWithLegacySemantics) (isLegacyEmpty v))
+                  (continue))
+
+
+                (let [marshal (.-marshal (.-fncs f))
+                    ^{:line 1165} nonDefault (.-nonDefault (.-fncs f))]
+                  (when (!= ^{:go/via [ArshalValues]} (.-Marshalers mo) nil)
+                    (let [^bool ok (zero bool)]
+                      (set! (values marshal ok) (.lookup (assert (* Marshalers) ^{:go/via [ArshalValues]} (.-Marshalers mo)) marshal (.-typ f)))
+                      (set! nonDefault (or nonDefault ok))))
+
+
+                  ;; OmitEmpty skips the field if the marshaled JSON value is empty,
+                  ;; which we can know up front if there are no custom marshalers,
+                  ;; otherwise we must marshal the value and unwrite it if empty.
+                  (when (and ^{:go/via [fieldOptions]} (.-omitempty f) (not (.Get (.-Flags mo) jsonflags/OmitEmptyWithLegacySemantics))
+                      (not nonDefault) (!= (.-isEmpty f) nil) ((.-isEmpty f) v))
+                    (continue)) ; fast path for omitempty
+
+
+                  ;; Write the object member name.
+                  ;;
+                  ;; The logic below is semantically equivalent to:
+                  ;;	enc.WriteToken(String(f.name))
+                  ;; but specialized and simplified because:
+                  ;;	1. The Encoder must be expecting an object name.
+                  ;;	2. The object namespace is guaranteed to be disabled.
+                  ;;	3. The object name is guaranteed to be valid and pre-escaped.
+                  ;;	4. There is no need to flush the buffer (for unwrite purposes).
+                  ;;	5. There is no possibility of an error occurring.
+                  (if optimizeCommon
+                    ;; Append any delimiters or optional whitespace.
+                    (let [b ^{:go/via [encodeBuffer]} (.-Buf xe)]
+                      (when (> (.Length (.-Last ^{:go/via [state]} (.-Tokens xe))) 0)
+                        (set! b (append b \,))
+                        (when (.Get (.-Flags mo) jsonflags/SpaceAfterComma)
+                          (set! b (append b \space))))
+
+
+                      (when (.Get (.-Flags mo) jsonflags/Multiline)
+                        (set! b (.AppendIndent xe b (.NeedIndent ^{:go/via [state]} (.-Tokens xe) \"))))
+
+
+                      ;; Append the token to the output and to the state machine.
+                      (let [n0 (len b)] ; offset before calling AppendQuote
+                        (if (not ^{:go/via [fieldOptions]} (.-nameNeedEscape f))
+                          (set! b (append b (spread ^{:go/via [fieldOptions]} (.-quotedName f))))
+
+                          (set! (values b _) (jsonwire/AppendQuote b (conv (slice byte) ^{:go/via [fieldOptions]} (.-name f)) (addr (.-Flags mo)))))
+
+                        (set! ^{:go/via [encodeBuffer]} (.-Buf xe) b)
+                        (.ReplaceLastQuotedOffset ^{:go/via [state]} (.-Names xe) n0)
+                        (.Increment (.-Last ^{:go/via [state]} (.-Tokens xe)))))
+                    (do
+                      (when [err (.WriteToken enc (jsontext/String ^{:go/via [fieldOptions]} (.-name f)))] (!= err nil)
+                        (return err))))
+
+
+
+                  ;; Write the object member value.
+                  (let [flagsOriginal (.-Flags mo)]
+                    (when ^{:go/via [fieldOptions]} (.-string f)
+                      (.Set (.-Flags mo) (bit-or jsonflags/StringTag 1)))
+
+                    (when (!= ^{:go/via [fieldOptions]} (.-format f) "")
+                      (.Set (.-Flags mo) (bit-or jsonflags/FormatTag 1))
+                      (set! ^{:go/via [ArshalValues]} (.-Format mo) ^{:go/via [fieldOptions]} (.-format f)))
+
+                    (let [err (marshal enc v mo)]
+                      (set! (.-Flags mo) flagsOriginal)
+                      (set! ^{:go/via [ArshalValues]} (.-Format mo) "")
+                      (when (!= err nil)
+                        (return err))
+
+
+                      ;; Try unwriting the member if empty (slow path for omitempty).
+                      (when (and ^{:go/via [fieldOptions]} (.-omitempty f) (not (.Get (.-Flags mo) jsonflags/OmitEmptyWithLegacySemantics)))
+                        (let [^{:tag (* string)} prevName (zero (* string))]
+                          (when (>= prevIdx 0)
+                            (set! prevName (addr ^{:go/via [fieldOptions]} (.-name (aget (.-flattened fields) prevIdx)))))
+
+                          (when (.UnwriteEmptyObjectMember xe prevName)
+                            (continue))))
+
+
+
+                      ;; Remember the previous written object member.
+                      ;; The set of seen fields only needs to be updated to detect
+                      ;; duplicate names with those from the embedded fallback.
+                      (when (and (not (.Get (.-Flags mo) jsonflags/AllowDuplicateNames)) (!= (.-embeddedFallback fields) nil))
+                        (.insert seenIdxs (conv uint (.-id f))))
+
+                      (set! prevIdx (.-id f)))))))
+
+            (when (!= (.-embeddedFallback fields) nil)
+              (let [^{:tag (func [(slice byte)] [bool])} insertUnquotedName (zero (func [(slice byte)] [bool]))]
+                (when (not (.Get (.-Flags mo) jsonflags/AllowDuplicateNames))
+                  (set! insertUnquotedName ^{:go/end 1274} (fn ^bool [^{:tag (slice byte)} name]
+                      ;; Check that the name from embedded fallback does not match
+                      ;; one of the previously marshaled names from known fields.
+                      (when [foldedFields (.lookupByFoldedName fields name)] (> (len foldedFields) 0)
+                        (when [f (aget (.-byActualName fields) (conv string name))] (!= f nil)
+                          (return (.insert seenIdxs (conv uint (.-id f)))))
+
+                        (range [_ f foldedFields]
+                          (when (.matchFoldedName f name (addr (.-Flags mo)))
+                            (return (.insert seenIdxs (conv uint (.-id f)))))))
+
+
+
+
+                      ;; Check that the name does not match any other name
+                      ;; previously marshaled from the embedded fallback.
+                      (.InsertUnquoted (.Last ^{:go/via [state]} (.-Namespaces xe)) name))))
+
+
+                (when [err (marshalEmbeddedFallbackAll enc va mo (.-embeddedFallback fields) insertUnquotedName)] (!= err nil)
+                  (return err))))
+
+
+            (when [err (.WriteToken enc jsontext/EndObject)] (!= err nil)
+              (return err))
+
+            nil))))
+
+    (set! (.-unmarshal fncs) ^{:go/end 1417} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+        (let [xd (.Decoder export dec)]
+          (when (.Has (.-Flags uo) jsonflags/TagFlags)
+            (when (and (.Get (.-Flags uo) jsonflags/StringTag) (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)))
+              (return (newUnmarshalErrorBeforeWithSkipping dec t errInvalidStringTag)))
+
+            (when (.Has (.-Flags uo) jsonflags/FormatTag)
+              (return (newInvalidFormatError dec t))))
+
+
+          (let [(values tok err) (.ReadToken dec)]
+            (when (!= err nil)
+              (return err))
+
+            (let [k (.Kind tok)]
+              (switch k
+                (case [\n]
+                  (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                    ^{:go/via [Value]} (.SetZero va))
+
+                  (return nil))
+                (case [\{]
+                  (.Do once init)
+                  (cond (and (!= errInit nil) (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)))
+                    (return (newUnmarshalErrorAfter dec (.-GoType errInit) (.-Err errInit)))
+                    (and (!= (.-errUnsupportedFormat fields) nil) (not (.Get (.-Flags uo) jsonflags/FormatTagSupported)))
+                    (return (newUnmarshalErrorAfter dec (.-GoType (.-errUnsupportedFormat fields)) (.-Err (.-errUnsupportedFormat fields)))))
+
+
+                  (let [^uintSet seenIdxs (zero uintSet)]
+                    (.DisableNamespace (.-Last ^{:go/via [state]} (.-Tokens xd)))
+                    (let [^error errUnmarshal (zero error)]
+                      (while (!= (.PeekKind dec) \})
+                        ;; Process the object member name.
+                        (let [^jsonwire/ValueFlags flags (zero jsonwire/ValueFlags)
+                            (values val err) (.ReadValue xd (addr flags))]
+                          (when (!= err nil)
+                            (return err))
+
+                          (let [name (jsonwire/UnquoteMayCopy val (.IsVerbatim flags))
+                              ^{:line 1325} f (aget (.-byActualName fields) (conv string name))]
+                            (when (== f nil)
+                              (let [^int numMatch (zero int)]
+                                (range [_ f2 (.lookupByFoldedName fields name)]
+                                  (when (.matchFoldedName f2 name (addr (.-Flags uo)))
+                                    (when (== f nil)
+                                      (set! f f2)) ; use first seen name by breadth-first order
+
+                                    (inc! numMatch)))
+
+
+                                (when (and (> numMatch 1) (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)))
+                                  (return (newUnmarshalErrorAfter dec t errAmbiguousName)))
+
+                                (when (== f nil)
+                                  (when (and (.Get (.-Flags uo) jsonflags/RejectUnknownMembers) (== (.-embeddedFallback fields) nil))
+                                    (let [err (newUnmarshalErrorAfter dec t ErrUnknownName)]
+                                      (when (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics))
+                                        (return err))
+
+                                      (set! errUnmarshal (^{:inst [error]} cmp/Or errUnmarshal err))))
+
+                                  (when (and (not (.Get (.-Flags uo) jsonflags/AllowDuplicateNames)) (not (.InsertUnquoted (.Last ^{:go/via [state]} (.-Namespaces xd)) name)))
+                                    ;; TODO: Unread the object name.
+                                    (return (newDuplicateNameError (.StackPointer dec) nil (- (.InputOffset dec) (^{:inst [jsontext/Value]} len64 val)))))
+
+
+                                  (if (== (.-embeddedFallback fields) nil)
+                                    ;; Skip unknown value since we have no place to store it.
+                                    (when [err (.SkipValue dec)] (!= err nil)
+                                      (return err))
+
+                                    (do
+                                      ;; Unmarshal into a value capable of storing arbitrary object members.
+                                      (when [err (unmarshalEmbeddedFallbackNext dec va uo (.-embeddedFallback fields) val name)] (!= err nil)
+                                        (when (isFatalError err (.-Flags uo))
+                                          (return err))
+
+                                        (set! errUnmarshal (^{:inst [error]} cmp/Or errUnmarshal err)))))
+
+
+                                  (continue))))
+
+
+                            (when (and (not (.Get (.-Flags uo) jsonflags/AllowDuplicateNames)) (not (.insert seenIdxs (conv uint (.-id f)))))
+                              ;; TODO: Unread the object name.
+                              (return (newDuplicateNameError (.StackPointer dec) nil (- (.InputOffset dec) (^{:inst [jsontext/Value]} len64 val)))))
+
+
+                            ;; Process the object member value.
+                            (let [unmarshal (.-unmarshal (.-fncs f))]
+                              (when (!= ^{:go/via [ArshalValues]} (.-Unmarshalers uo) nil)
+                                (set! (values unmarshal _) (.lookup (assert (* Unmarshalers) ^{:go/via [ArshalValues]} (.-Unmarshalers uo)) unmarshal (.-typ f))))
+
+                              (let [flagsOriginal (.-Flags uo)]
+                                (when ^{:go/via [fieldOptions]} (.-string f)
+                                  (.Set (.-Flags uo) (bit-or jsonflags/StringTag 1)))
+
+                                (when (!= ^{:go/via [fieldOptions]} (.-format f) "")
+                                  (.Set (.-Flags uo) (bit-or jsonflags/FormatTag 1))
+                                  (set! ^{:go/via [ArshalValues]} (.-Format uo) ^{:go/via [fieldOptions]} (.-format f)))
+
+                                (let [v (lit addressableValue ^{:go/via [Value]} (.Field va (.-index0 f)) (.-forcedAddr va))] ; addressable if struct value is addressable
+                                  (when (> (len (.-index f)) 0)
+                                    (set! v (.fieldByIndex v (.-index f) true))
+                                    (when (not ^{:go/via [Value]} (.IsValid v))
+                                      (let [err (newUnmarshalErrorBefore dec t errNilField)]
+                                        (when (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics))
+                                          (return err))
+
+                                        (set! errUnmarshal (^{:inst [error]} cmp/Or errUnmarshal err))
+                                        (set! unmarshal ^{:go/end 1398} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue _ ^{:tag (* jsonopts/Struct)} _]
+                                            (.SkipValue dec))))))
+
+
+
+                                  (set! err (unmarshal dec v uo))
+                                  (set! (.-Flags uo) flagsOriginal)
+                                  (set! ^{:go/via [ArshalValues]} (.-Format uo) "")
+                                  (when (!= err nil)
+                                    (when (isFatalError err (.-Flags uo))
+                                      (return err))
+
+                                    (set! errUnmarshal (^{:inst [error]} cmp/Or errUnmarshal err)))))))))
+
+
+                      (when [(values _ err) (.ReadToken dec)] (!= err nil)
+                        (return err))
+
+                      (return errUnmarshal)))))
+
+              (newUnmarshalErrorAfterWithSkipping dec t nil))))))
+
+    (addr fncs)))
+
+
+^{:go/end 1430} (go/method fieldByIndex ^addressableValue [^addressableValue va ^{:tag (slice int)} index ^bool mayAlloc]
+  (range [_ i index]
+    (set! va (.indirect va mayAlloc))
+    (when (not ^{:go/via [Value]} (.IsValid va))
+      (return va))
+
+    (set! va (lit addressableValue ^{:go/via [Value]} (.Field va i) (.-forcedAddr va)))) ; addressable if struct value is addressable
+
+  ^{:line 1429} va)
+
+
+^{:go/end 1443} (go/method indirect ^addressableValue [^addressableValue va ^bool mayAlloc]
+  (when (== ^{:go/via [Value]} (.Kind va) reflect/Pointer)
+    (when ^{:go/via [Value]} (.IsNil va)
+      (when (or (not mayAlloc) (not ^{:go/via [Value]} (.CanSet va)))
+        (return (lit addressableValue)))
+
+      ^{:go/via [Value]} (.Set va (reflect/New (.Elem ^{:go/via [Value]} (.Type va)))))
+
+    (set! va (lit addressableValue ^{:go/via [Value]} (.Elem va) false))) ; dereferenced pointer is always addressable
+
+  ^{:line 1442} va)
+
+
+
+^{:go/breaks [[5 1462]] :go/end 1463} (go/func isLegacyEmpty "isLegacyEmpty reports whether a value is empty according to the v1 definition.\n" ^bool [^addressableValue v]
+  ;; Equivalent to encoding/json.isEmptyValue@v1.21.0.
+  (switch ^{:go/via [Value]} (.Kind v)
+    (case [reflect/Bool]
+      (return (== ^{:go/via [Value]} (.Bool v) false)))
+    (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+      (return (== ^{:go/via [Value]} (.Int v) 0)))
+    (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+      (return (== ^{:go/via [Value]} (.Uint v) 0)))
+    (case [reflect/Float32 reflect/Float64]
+      (return (== ^{:go/via [Value]} (.Float v) 0)))
+    (case [reflect/String reflect/Map reflect/Slice reflect/Array]
+      (return (== ^{:go/via [Value]} (.Len v) 0)))
+    (case [reflect/Pointer reflect/Interface]
+      (return ^{:go/via [Value]} (.IsNil v))))
+
+  false)
+
+
+^{:go/end 1607} (go/func makeSliceArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  (let [^arshaler fncs (zero arshaler)
+
+      ^{:line 1468 :tag sync/Once} once (zero sync/Once)
+      ^{:line 1469 :tag (* arshaler)} valFncs (zero (* arshaler))
+
+      ^{:line 1471} init ^{:go/end 1473} (fn []
+        (set! valFncs (lookupArshaler (.Elem t))))]
+
+    (set! (.-marshal fncs) ^{:go/end 1536} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        ;; Check for cycles.
+        (let [xe (.Encoder export enc)]
+          (when (> (.Depth ^{:go/via [state]} (.-Tokens xe)) startDetectingCyclesAfter)
+            (when [err (visitPointer (addr (.-SeenPointers xe)) (.-Value va))] (!= err nil)
+              (return (newMarshalErrorBefore enc t err)))
+
+            (defer (leavePointer (addr (.-SeenPointers xe)) (.-Value va))))
+
+
+          (let [emitNull (.Get (.-Flags mo) jsonflags/FormatNilSliceAsNull)]
+            (when (.Has (.-Flags mo) jsonflags/TagFlags)
+              (when (and (.Get (.-Flags mo) jsonflags/StringTag) (not (.Get (.-Flags mo) jsonflags/ReportErrorsWithLegacySemantics)))
+                (return (newMarshalErrorBefore enc t errInvalidStringTag)))
+
+              (when (.Has (.-Flags mo) jsonflags/FormatTag)
+                (switch ^{:go/via [ArshalValues]} (.-Format mo)
+                  (case ["emitnull"]
+                    (set! emitNull true))
+                  (case ["emitempty"]
+                    (set! emitNull false))
+                  (default
+                    (return (newInvalidFormatError enc t))))))
+
+
+
+
+            ;; Handle empty slices.
+            (let [n ^{:go/via [Value]} (.Len va)]
+              (when (== n 0)
+                (when (and emitNull ^{:go/via [Value]} (.IsNil va))
+                  (return (.WriteToken enc jsontext/Null)))
+
+                ;; Optimize for marshaling an empty slice without any preceding whitespace.
+                (when (and optimizeCommon (not (.Get (.-Flags mo) jsonflags/AnyWhitespace)) (not (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe)))))
+                  (set! ^{:go/via [encodeBuffer]} (.-Buf xe) (append (.MayAppendDelim ^{:go/via [state]} (.-Tokens xe) ^{:go/via [encodeBuffer]} (.-Buf xe) \[) (spread "[]")))
+                  (.Increment (.-Last ^{:go/via [state]} (.-Tokens xe)))
+                  (when (.NeedFlush xe)
+                    (return (.Flush xe)))
+
+                  (return nil)))
+
+
+
+              (.Do once init)
+              (when [err (.WriteToken enc jsontext/BeginArray)] (!= err nil)
+                (return err))
+
+              ^{:go/breaks [[5 1535]]} (let [marshal (.-marshal valFncs)]
+                (when (!= ^{:go/via [ArshalValues]} (.-Marshalers mo) nil)
+                  (set! (values marshal _) (.lookup (assert (* Marshalers) ^{:go/via [ArshalValues]} (.-Marshalers mo)) marshal (.Elem t))))
+
+                (range [i n]
+                  (let [v (lit addressableValue ^{:go/via [Value]} (.Index va i) false)] ; indexed slice element is always addressable
+                    (when [err (marshal enc v mo)] (!= err nil)
+                      (return err))))
+
+
+                (when [err (.WriteToken enc jsontext/EndArray)] (!= err nil)
+                  (return err))
+
+                nil))))))
+
+    (let [emptySlice (reflect/MakeSlice t 0 0)]
+      (set! (.-unmarshal fncs) ^{:go/end 1605} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+          (when (.Has (.-Flags uo) jsonflags/TagFlags)
+            (when (and (.Get (.-Flags uo) jsonflags/StringTag) (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)))
+              (return (newUnmarshalErrorBeforeWithSkipping dec t errInvalidStringTag)))
+
+            (when (.Has (.-Flags uo) jsonflags/FormatTag)
+              (switch ^{:go/via [ArshalValues]} (.-Format uo)
+                (case ["emitnull" "emitempty"])
+                (default
+                  (return (newInvalidFormatError dec t))))))
+
+
+
+
+          (let [(values tok err) (.ReadToken dec)]
+            (when (!= err nil)
+              (return err))
+
+            (let [k (.Kind tok)]
+              (switch k
+                (case [\n]
+                  ^{:go/via [Value]} (.SetZero va)
+                  (return nil))
+                (case [\[]
+                  (.Do once init)
+                  (let [unmarshal (.-unmarshal valFncs)]
+                    (when (!= ^{:go/via [ArshalValues]} (.-Unmarshalers uo) nil)
+                      (set! (values unmarshal _) (.lookup (assert (* Unmarshalers) ^{:go/via [ArshalValues]} (.-Unmarshalers uo)) unmarshal (.Elem t))))
+
+                    (let [mustZero true ; we do not know the cleanliness of unused capacity
+                        ^{:line 1568} cap ^{:go/via [Value]} (.Cap va)]
+                      (when (> cap 0)
+                        ^{:go/via [Value]} (.SetLen va cap))
+
+                      (let [^int i (zero int)
+                          ^{:line 1573 :tag error} errUnmarshal (zero error)]
+                        (while (!= (.PeekKind dec) \])
+                          (when (== i cap)
+                            (.Grow (.-Value va) 1)
+                            (set! cap ^{:go/via [Value]} (.Cap va))
+                            ^{:go/via [Value]} (.SetLen va cap)
+                            (set! mustZero false)) ; reflect.Value.Grow ensures new capacity is zero-initialized
+
+                          (let [v (lit addressableValue ^{:go/via [Value]} (.Index va i) false)] ; indexed slice element is always addressable
+                            (inc! i)
+                            (when (and mustZero (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics)))
+                              ^{:go/via [Value]} (.SetZero v))
+
+                            (when [err (unmarshal dec v uo)] (!= err nil)
+                              (when (isFatalError err (.-Flags uo))
+                                ^{:go/via [Value]} (.SetLen va i)
+                                (return err))
+
+                              (set! errUnmarshal (^{:inst [error]} cmp/Or errUnmarshal err)))))
+
+
+                        (if (== i 0)
+                          ^{:go/via [Value]} (.Set va emptySlice)
+
+                          ^{:go/via [Value]} (.SetLen va i))
+
+                        (when [(values _ err) (.ReadToken dec)] (!= err nil)
+                          (return err))
+
+                        (return errUnmarshal))))))
+
+              (newUnmarshalErrorAfterWithSkipping dec t nil)))))
+
+      (addr fncs))))
+
+
+(go/var errArrayUnderflow (errors/New "too few array elements"))
+(go/var errArrayOverflow (errors/New "too many array elements"))
+
+^{:go/end 1713} (go/func makeArrayArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  (let [^arshaler fncs (zero arshaler)
+
+      ^{:line 1615 :tag sync/Once} once (zero sync/Once)
+      ^{:line 1616 :tag (* arshaler)} valFncs (zero (* arshaler))
+
+      ^{:line 1618} init ^{:go/end 1620} (fn []
+        (set! valFncs (lookupArshaler (.Elem t))))
+
+      ^{:line 1621} n (.Len t)]
+    (set! (.-marshal fncs) ^{:go/end 1649} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        (when (.Has (.-Flags mo) jsonflags/TagFlags)
+          (when (and (.Get (.-Flags mo) jsonflags/StringTag) (not (.Get (.-Flags mo) jsonflags/ReportErrorsWithLegacySemantics)))
+            (return (newMarshalErrorBefore enc t errInvalidStringTag)))
+
+          (when (.Has (.-Flags mo) jsonflags/FormatTag)
+            (return (newInvalidFormatError enc t))))
+
+
+        (.Do once init)
+        (when [err (.WriteToken enc jsontext/BeginArray)] (!= err nil)
+          (return err))
+
+        ^{:go/breaks [[5 1648]]} (let [marshal (.-marshal valFncs)]
+          (when (!= ^{:go/via [ArshalValues]} (.-Marshalers mo) nil)
+            (set! (values marshal _) (.lookup (assert (* Marshalers) ^{:go/via [ArshalValues]} (.-Marshalers mo)) marshal (.Elem t))))
+
+          (range [i n]
+            (let [v (lit addressableValue ^{:go/via [Value]} (.Index va i) (.-forcedAddr va))] ; indexed array element is addressable if array is addressable
+              (when [err (marshal enc v mo)] (!= err nil)
+                (return err))))
+
+
+          (when [err (.WriteToken enc jsontext/EndArray)] (!= err nil)
+            (return err))
+
+          nil)))
+
+    (set! (.-unmarshal fncs) ^{:go/end 1711} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+        (when (.Has (.-Flags uo) jsonflags/TagFlags)
+          (when (and (.Get (.-Flags uo) jsonflags/StringTag) (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)))
+            (return (newUnmarshalErrorBeforeWithSkipping dec t errInvalidStringTag)))
+
+          (when (.Has (.-Flags uo) jsonflags/FormatTag)
+            (return (newInvalidFormatError dec t))))
+
+
+        (let [(values tok err) (.ReadToken dec)]
+          (when (!= err nil)
+            (return err))
+
+          (let [k (.Kind tok)]
+            (switch k
+              (case [\n]
+                (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                  ^{:go/via [Value]} (.SetZero va))
+
+                (return nil))
+              (case [\[]
+                (.Do once init)
+                (let [unmarshal (.-unmarshal valFncs)]
+                  (when (!= ^{:go/via [ArshalValues]} (.-Unmarshalers uo) nil)
+                    (set! (values unmarshal _) (.lookup (assert (* Unmarshalers) ^{:go/via [ArshalValues]} (.-Unmarshalers uo)) unmarshal (.Elem t))))
+
+                  (let [^int i (zero int)
+                      ^{:line 1677 :tag error} errUnmarshal (zero error)]
+                    (while (!= (.PeekKind dec) \])
+                      (when (>= i n)
+                        (when [err (.SkipValue dec)] (!= err nil)
+                          (return err))
+
+                        (set! err errArrayOverflow)
+                        (continue))
+
+                      (let [v (lit addressableValue ^{:go/via [Value]} (.Index va i) (.-forcedAddr va))] ; indexed array element is addressable if array is addressable
+                        (when (not (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics))
+                          ^{:go/via [Value]} (.SetZero v))
+
+                        (when [err (unmarshal dec v uo)] (!= err nil)
+                          (when (isFatalError err (.-Flags uo))
+                            (return err))
+
+                          (set! errUnmarshal (^{:inst [error]} cmp/Or errUnmarshal err)))
+
+                        (inc! i)))
+
+                    (for [] (< i n) (inc! i)
+                      (.SetZero ^{:go/via [Value]} (.Index va i))
+                      (set! err errArrayUnderflow))
+
+                    (when [(values _ err) (.ReadToken dec)] (!= err nil)
+                      (return err))
+
+                    (when (and (!= err nil) (not (.Get (.-Flags uo) jsonflags/UnmarshalArrayFromAnyLength)))
+                      (return (newUnmarshalErrorAfter dec t err)))
+
+                    (return errUnmarshal)))))
+
+            (newUnmarshalErrorAfterWithSkipping dec t nil)))))
+
+    (addr fncs)))
+
+
+^{:go/end 1793} (go/func makePointerArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  (let [^arshaler fncs (zero arshaler)
+
+      ^{:line 1718 :tag sync/Once} once (zero sync/Once)
+      ^{:line 1719 :tag (* arshaler)} valFncs (zero (* arshaler))
+
+      ^{:line 1721} init ^{:go/end 1723} (fn []
+        (set! valFncs (lookupArshaler (.Elem t))))]
+
+    (set! (.-marshal fncs) ^{:go/end 1751} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        ;; Check for cycles.
+        (let [xe (.Encoder export enc)]
+          (when (> (.Depth ^{:go/via [state]} (.-Tokens xe)) startDetectingCyclesAfter)
+            (when [err (visitPointer (addr (.-SeenPointers xe)) (.-Value va))] (!= err nil)
+              (return (newMarshalErrorBefore enc t err)))
+
+            (defer (leavePointer (addr (.-SeenPointers xe)) (.-Value va))))
+
+
+          ;; NOTE: Struct.Format is forwarded to underlying marshal.
+          (when (and (.Get (.-Flags mo) jsonflags/StringTag) (.Get (.-Flags mo) jsonflags/StringifyWithLegacySemantics) (== (.Kind (.Elem t)) reflect/Pointer))
+            (when (not (.Get (.-Flags mo) jsonflags/ReportErrorsWithLegacySemantics))
+              (return (newMarshalErrorBefore enc t errInvalidStringTag)))
+
+            (.Clear (.-Flags mo) jsonflags/StringTag)) ; the `string` tag option does not apply to nested pointers
+
+          (when ^{:go/via [Value]} (.IsNil va)
+            (return (.WriteToken enc jsontext/Null)))
+
+          (.Do once init)
+          (let [marshal (.-marshal valFncs)]
+            (when (!= ^{:go/via [ArshalValues]} (.-Marshalers mo) nil)
+              (set! (values marshal _) (.lookup (assert (* Marshalers) ^{:go/via [ArshalValues]} (.-Marshalers mo)) marshal (.Elem t))))
+
+            (let [v (lit addressableValue ^{:go/via [Value]} (.Elem va) false)] ; dereferenced pointer is always addressable
+              (marshal enc v mo))))))
+
+    (set! (.-unmarshal fncs) ^{:go/end 1791} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+        ;; NOTE: Struct.Format is forwarded to underlying unmarshal.
+        (when (== (.PeekKind dec) \n)
+          (when [(values _ err) (.ReadToken dec)] (!= err nil)
+            (return err))
+
+          ^{:go/via [Value]} (.SetZero va)
+          (return nil))
+
+        (when (and (.Get (.-Flags uo) jsonflags/StringTag) (.Get (.-Flags uo) jsonflags/StringifyWithLegacySemantics) (== (.Kind (.Elem t)) reflect/Pointer))
+          (when (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics))
+            (return (newUnmarshalErrorBeforeWithSkipping dec t errInvalidStringTag)))
+
+          (.Clear (.-Flags uo) jsonflags/StringTag)) ; the `string` tag option does not apply to nested pointers
+
+        (.Do once init)
+        (let [unmarshal (.-unmarshal valFncs)]
+          (when (!= ^{:go/via [ArshalValues]} (.-Unmarshalers uo) nil)
+            (set! (values unmarshal _) (.lookup (assert (* Unmarshalers) ^{:go/via [ArshalValues]} (.-Unmarshalers uo)) unmarshal (.Elem t))))
+
+          (when ^{:go/via [Value]} (.IsNil va)
+            ^{:go/via [Value]} (.Set va (reflect/New (.Elem t))))
+
+          ^{:go/breaks [[4 1790]]} (let [v (lit addressableValue ^{:go/via [Value]} (.Elem va) false)] ; dereferenced pointer is always addressable
+            (when [err (unmarshal dec v uo)] (!= err nil)
+              (return err))
+
+            (when (and (.Get (.-Flags uo) jsonflags/StringTag) (.Get (.-Flags uo) jsonflags/StringifyWithLegacySemantics))
+              ;; A JSON null quoted within a JSON string should take effect
+              ;; within the pointer value, rather than the indirect value.
+              ;;
+              ;; TODO: This does not correctly handle escaped nulls
+              ;; (e.g., "\u006e\u0075\u006c\u006c"), but is good enough
+              ;; for such an esoteric use case of the `string` option.
+              (when (== (conv string ^{:go/via [decodeBuffer]} (.PreviousTokenOrValue (.Decoder export dec))) "\"null\"")
+                ^{:go/via [Value]} (.SetZero va)))
+
+
+            nil))))
+
+    (addr fncs)))
+
+
+^{:go/end 1959} (go/func makeInterfaceArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  ;; NOTE: Values retrieved from an interface are not addressable,
+  ;; so we shallow copy the values to make them addressable and
+  ;; store them back into the interface afterwards.
+
+  (let [^arshaler fncs (zero arshaler)
+      ^{:line 1801 :tag reflect/Type} whichMarshaler (zero reflect/Type)]
+    (range [_ iface allMarshalerTypes]
+      (when (.Implements t iface)
+        (set! whichMarshaler t)
+        (break)))
+
+
+    (set! (.-marshal fncs) ^{:go/end 1856} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        (when (.Has (.-Flags mo) jsonflags/TagFlags)
+          (when (.Get (.-Flags mo) jsonflags/StringTag)
+            (when (not (.Get (.-Flags mo) jsonflags/ReportErrorsWithLegacySemantics))
+              (return (newMarshalErrorBefore enc t errInvalidStringTag)))
+
+            (when (.Get (.-Flags mo) jsonflags/StringifyWithLegacySemantics)
+              (.Clear (.-Flags mo) jsonflags/StringTag))) ; the `string` tag option does not apply to interface types
+
+
+          (when (.Has (.-Flags mo) jsonflags/FormatTag)
+            (return (newInvalidFormatError enc t))))
+
+
+        (cond ^{:go/via [Value]} (.IsNil va)
+          (return (.WriteToken enc jsontext/Null))
+          (and (.Get (.-Flags mo) jsonflags/CallMethodsWithLegacySemantics) (!= whichMarshaler nil))
+          ;; The marshaler for a pointer never calls the method on a nil receiver.
+          ;; Wrap the nil pointer within a struct type so that marshal
+          ;; instead appears on a value receiver and may be called.
+          (when (and (== (.Kind ^{:go/via [Value]} (.Elem va)) reflect/Pointer) (.IsNil ^{:go/via [Value]} (.Elem va)))
+            (let [v2 (newAddressableValue whichMarshaler)]
+              (switch whichMarshaler
+                (case [jsonMarshalerToType]
+                  ^{:go/via [Value]} (.Set v2 (reflect/ValueOf (lit (struct MarshalerTo) (assert MarshalerTo (.Interface ^{:go/via [Value]} (.Elem va)))))))
+                (case [jsonMarshalerType]
+                  ^{:go/via [Value]} (.Set v2 (reflect/ValueOf (lit (struct Marshaler) (assert Marshaler (.Interface ^{:go/via [Value]} (.Elem va)))))))
+                (case [textAppenderType]
+                  ^{:go/via [Value]} (.Set v2 (reflect/ValueOf (lit (struct encoding/TextAppender) (assert encoding/TextAppender (.Interface ^{:go/via [Value]} (.Elem va)))))))
+                (case [textMarshalerType]
+                  ^{:go/via [Value]} (.Set v2 (reflect/ValueOf (lit (struct encoding/TextMarshaler) (assert encoding/TextMarshaler (.Interface ^{:go/via [Value]} (.Elem va))))))))
+
+              (set! va v2))))
+
+
+        (let [v (newAddressableValue (.Type ^{:go/via [Value]} (.Elem va)))]
+          ^{:go/via [Value]} (.Set v ^{:go/via [Value]} (.Elem va))
+          (let [marshal (.-marshal (lookupArshaler ^{:go/via [Value]} (.Type v)))]
+            (when (!= ^{:go/via [ArshalValues]} (.-Marshalers mo) nil)
+              (set! (values marshal _) (.lookup (assert (* Marshalers) ^{:go/via [ArshalValues]} (.-Marshalers mo)) marshal ^{:go/via [Value]} (.Type v))))
+
+            ;; Optimize for the any type if there are no special options.
+            (when (and optimizeCommon
+                (== t anyType) (not (.Get (.-Flags mo) (bit-or jsonflags/StringifyNumbers jsonflags/TagFlags)))
+                ^:go/paren (or (== ^{:go/via [ArshalValues]} (.-Marshalers mo) nil) (not (.-fromAny (assert (* Marshalers) ^{:go/via [ArshalValues]} (.-Marshalers mo))))))
+              (return (marshalValueAny enc (.Interface ^{:go/via [Value]} (.Elem va)) mo)))
+
+            (marshal enc v mo)))))
+
+    (set! (.-unmarshal fncs) ^{:go/end 1957} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+        (when (.Has (.-Flags uo) jsonflags/TagFlags)
+          (when (.Get (.-Flags uo) jsonflags/StringTag)
+            (when (not (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics))
+              (return (newUnmarshalErrorBeforeWithSkipping dec t errInvalidStringTag)))
+
+            (when (.Get (.-Flags uo) jsonflags/StringifyWithLegacySemantics)
+              (.Clear (.-Flags uo) jsonflags/StringTag))) ; the `string` tag option does not apply to interface types
+
+
+          (when (.Has (.-Flags uo) jsonflags/FormatTag)
+            (return (newInvalidFormatError dec t))))
+
+
+        (when (and (.Get (.-Flags uo) jsonflags/MergeWithLegacySemantics) (not ^{:go/via [Value]} (.IsNil va)))
+          ;; Legacy merge behavior is difficult to explain.
+          ;; In general, it only merges for non-nil pointer kinds.
+          ;; As a special case, unmarshaling a JSON null into a pointer
+          ;; sets a concrete nil pointer of the underlying type
+          ;; (rather than setting the interface value itself to nil).
+          (let [e ^{:go/via [Value]} (.Elem va)]
+            (if (and (== (.Kind e) reflect/Pointer) (not (.IsNil e)))
+              (when (and (== (.PeekKind dec) \n) (== (.Kind (.Elem e)) reflect/Pointer))
+                (when [(values _ err) (.ReadToken dec)] (!= err nil)
+                  (return err))
+
+                (.SetZero (.Elem ^{:go/via [Value]} (.Elem va)))
+                (return nil))
+
+
+              ^{:go/via [Value]} (.SetZero va))))
+
+
+        (when (== (.PeekKind dec) \n)
+          (when [(values _ err) (.ReadToken dec)] (!= err nil)
+            (return err))
+
+          ^{:go/via [Value]} (.SetZero va)
+          (return nil))
+
+        (let [^addressableValue v (zero addressableValue)]
+          (if ^{:go/via [Value]} (.IsNil va) (do
+              ;; Optimize for the any type if there are no special options.
+              ;; We do not care about stringified numbers since JSON strings
+              ;; are always unmarshaled into an any value as Go strings.
+              ;; Duplicate name check must be enforced since unmarshalValueAny
+              ;; does not implement merge semantics.
+              (when (and optimizeCommon
+                  (== t anyType) (not (.Get (.-Flags uo) (bit-or jsonflags/AllowDuplicateNames jsonflags/FormatTag)))
+                  ^:go/paren (or (== ^{:go/via [ArshalValues]} (.-Unmarshalers uo) nil) (not (.-fromAny (assert (* Unmarshalers) ^{:go/via [ArshalValues]} (.-Unmarshalers uo))))))
+                (let [(values v err) (unmarshalValueAny dec uo)]
+                  ;; We must check for nil interface values up front.
+                  ;; See https://go.dev/issue/52310.
+                  (when (!= v nil)
+                    ^{:go/via [Value]} (.Set va (reflect/ValueOf v)))
+
+                  (return err)))
+
+
+              (let [k (.PeekKind dec)]
+                (when (not (isAnyType t))
+                  (return (newUnmarshalErrorBeforeWithSkipping dec t internal/ErrNilInterface)))
+
+                (switch k
+                  (case [\f \t]
+                    (set! v (newAddressableValue boolType)))
+                  (case [\"]
+                    (set! v (newAddressableValue stringType)))
+                  (case [\0]
+                    (if (.Get (.-Flags uo) jsonflags/UnmarshalAnyWithRawNumber)
+                      (set! v (lit addressableValue (.Elem (reflect/ValueOf (internal/NewRawNumber))) true))
+
+                      (set! v (newAddressableValue float64Type))))
+
+                  (case [\{]
+                    (set! v (newAddressableValue mapStringAnyType)))
+                  (case [\[]
+                    (set! v (newAddressableValue sliceAnyType)))
+                  (default
+                    ;; If k is invalid (e.g., due to an I/O or syntax error), then
+                    ;; that will be cached by PeekKind and returned by ReadValue.
+                    ;; If k is '}' or ']', then ReadValue must error since
+                    ;; those are invalid kinds at the start of a JSON value.
+                    (let [(values _ err) (.ReadValue dec)]
+                      (return err))))))
+
+            (do
+              ;; Shallow copy the existing value to keep it addressable.
+              ;; Any mutations at the top-level of the value will be observable
+              ;; since we always store this value back into the interface value.
+              (set! v (newAddressableValue (.Type ^{:go/via [Value]} (.Elem va))))
+              ^{:go/via [Value]} (.Set v ^{:go/via [Value]} (.Elem va))))
+
+          (let [unmarshal (.-unmarshal (lookupArshaler ^{:go/via [Value]} (.Type v)))]
+            (when (!= ^{:go/via [ArshalValues]} (.-Unmarshalers uo) nil)
+              (set! (values unmarshal _) (.lookup (assert (* Unmarshalers) ^{:go/via [ArshalValues]} (.-Unmarshalers uo)) unmarshal ^{:go/via [Value]} (.Type v))))
+
+            (let [err (unmarshal dec v uo)]
+              ^{:go/via [Value]} (.Set va (.-Value v))
+              ^{:line 1956} err)))))
+
+    (addr fncs)))
+
+
+
+^{:go/end 1968} (go/func isAnyType "isAnyType reports whether t is equivalent to the any interface type.\n" ^bool [^reflect/Type t]
+  ;; This is forward compatible if the Go language permits type sets within
+  ;; ordinary interfaces where an interface with zero methods does not
+  ;; necessarily mean it can hold every possible Go type.
+  ;; See https://go.dev/issue/45346.
+  (or (== t anyType) (.Implements anyType t)))
+
+
+^{:go/end 1992} (go/func makeInvalidArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  (let [^arshaler fncs (zero arshaler)]
+    (set! (.-marshal fncs) ^{:go/end 1974} (fn ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo]
+        (newMarshalErrorBefore enc t nil)))
+
+    (set! (.-unmarshal fncs) ^{:go/end 1990} (fn ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo]
+        ;; Under legacy error semantics, unmarshal continues on even with errors.
+        ;; Thus, always consume the value first.
+        ;; As a special-case, null is permitted for unsupported types.
+        (when (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)
+          (switch [(values val err) (.ReadValue dec)]
+            (case [(!= err nil)]
+              (return err))
+            (case [(== (.Kind val) \n)]
+              (return nil))
+            (default
+              (return (newUnmarshalErrorAfter dec t nil)))))
+
+
+        (newUnmarshalErrorBefore dec t nil)))
+
+    (addr fncs)))
+
+
+^{:go/end 2000} (go/func stringOrNumberKind ^jsontext/Kind [^bool isString]
+  (if isString
+    (return \")
+
+    (return \0)))
+
+
+
+(go/type uintSet64 uint64)
+
+^{:go/end 2004} (go/method has ^bool [^uintSet64 s ^uint i] (> (bit-and s ^uintSet64 (<< 1 i)) 0))
+^{:go/end 2005} (go/method set [^{:tag (* uintSet64)} s ^uint i] (set! @s bit-or ^uintSet64 (<< 1 i)))
+
+
+
+(go/type uintSet "uintSet is a set of unsigned integers.\nIt is optimized for most integers being close to zero.\n" (struct
+    ^{:line 2010 :tag uintSet64} lo
+    ^{:line 2011 :tag (slice uintSet64)} hi))
+
+
+
+^{:go/end 2023} (go/method has "has reports whether i is in the set.\n" ^bool [^{:tag (* uintSet)} s ^uint i]
+  (if (< i 64)
+    (return (.has (.-lo s) i))
+    (do
+      (set! i - 64)
+      (let [(values iHi iLo) (values (conv int (/ i 64)) (% i 64))]
+        (return (and (< iHi (len (.-hi s))) (.has (aget (.-hi s) iHi) iLo)))))))
+
+
+
+
+^{:go/end 2043} (go/method insert "insert inserts i into the set and reports whether it was the first insertion.\n" ^bool [^{:tag (* uintSet)} s ^uint i]
+  ;; TODO: Make this inlinable at least for the lower 64-bit case.
+  (if (< i 64)
+    (let [has (.has (.-lo s) i)]
+      (.set (.-lo s) i)
+      (return (not has)))
+    (do
+      (set! i - 64)
+      (let [(values iHi iLo) (values (conv int (/ i 64)) (% i 64))]
+        (when (>= iHi (len (.-hi s)))
+          (set! (.-hi s) (append (.-hi s) (spread (make (slice uintSet64) (- (+ iHi 1) (len (.-hi s)))))))
+          (set! (.-hi s) (subslice (.-hi s) _ (cap (.-hi s)))))
+
+        (let [has (.has (aget (.-hi s) iHi) iLo)]
+          (.set (aget (.-hi s) iHi) iLo)
+          (return (not has)))))))

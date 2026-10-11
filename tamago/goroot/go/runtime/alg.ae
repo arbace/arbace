@@ -1,0 +1,401 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "alg.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [byteorder "internal/byteorder"]
+    ^{:line 10} [goarch "internal/goarch"]
+    ^{:line 11} [maps "internal/runtime/maps"]
+    ^{:line 12} [sys "internal/runtime/sys"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+(go/const
+
+  ^{:line 18} [^{:val 8 :doc "We use 32-bit hash on Wasm, see hash32.go.\n"} hashSize (+ (* (- 1 goarch/IsWasm) goarch/PtrSize) (* goarch/IsWasm 4))]
+  ^{:line 19} [^{:val 33054211828000289} c0 (conv uintptr (+ (* (/ (- 8 hashSize) 4) 2860486313) (* (/ (- hashSize 4) 4) 33054211828000289)))]
+  ^{:line 20} [^{:val 23344194077549503} c1 (conv uintptr (+ (* (/ (- 8 hashSize) 4) 3267000013) (* (/ (- hashSize 4) 4) 23344194077549503)))])
+
+
+^{:go/end 32} (go/func trimHash ^uintptr [^uintptr h]
+  (when (!= goarch/IsWasm 0)
+    ;; On Wasm, we use 32-bit hash, despite that uintptr is 64-bit.
+    ;; memhash* always returns a uintptr with high 32-bit being 0
+    ;; (see hash32.go). We trim the hash in other places where we
+    ;; compute the hash manually, e.g. in interhash.
+    (return (conv uintptr (conv uint32 h))))
+
+  ^{:line 31} h)
+
+
+^{:go/end 36} (go/func memhash0 ^uintptr [^unsafe/Pointer p ^uintptr h]
+  ^{:line 35} h)
+
+
+^{:go/end 40} (go/func memhash8 ^uintptr [^unsafe/Pointer p ^uintptr h]
+  (memhash p h 1))
+
+
+^{:go/end 44} (go/func memhash16 ^uintptr [^unsafe/Pointer p ^uintptr h]
+  (memhash p h 2))
+
+
+^{:go/end 48} (go/func memhash128 ^uintptr [^unsafe/Pointer p ^uintptr h]
+  (memhash p h 16))
+
+
+
+^{:go/end 55} (go/func ^:go/nosplit memhash_varlen ^uintptr [^unsafe/Pointer p ^uintptr h]
+  (let [ptr (sys/GetClosurePtr)
+      ^{:line 53} size @(conv (* uintptr) (conv unsafe/Pointer (+ ptr (unsafe/Sizeof h))))]
+    (memhash p h size)))
+
+
+;; This is simple wrappers.
+;; It's better to use maps.MemHash functions directly,
+;; but we have reflection code that still calls hashing from runtime via LookupRuntime,
+;; so we have to try to minimize overhead of an extra call.
+;; For this add nosplit for performance
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 83} (go/func ^:go/nosplit ^{:go/linkname "memhash"} memhash "memhash should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/aacfactory/fns\n  - github.com/dgraph-io/ristretto\n  - github.com/minio/simdjson-go\n  - github.com/nbd-wtf/go-nostr\n  - github.com/outcaste-io/ristretto\n  - github.com/puzpuzpuz/xsync/v2\n  - github.com/puzpuzpuz/xsync/v3\n  - github.com/authzed/spicedb\n  - github.com/pingcap/badger\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^uintptr [^unsafe/Pointer p ^uintptr h ^uintptr s]
+  (maps/MemHash p h s))
+
+
+
+^{:go/end 88} (go/func ^:go/nosplit memhash64 ^uintptr [^unsafe/Pointer p ^uintptr seed]
+  (maps/MemHash64 (readUnaligned64 p) seed))
+
+
+
+^{:go/end 93} (go/func ^:go/nosplit memhash32 ^uintptr [^unsafe/Pointer p ^uintptr seed]
+  (maps/MemHash32 (readUnaligned32 p) seed))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 111} (go/func ^:go/nosplit ^{:go/linkname "strhash"} strhash "strhash should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/aristanetworks/goarista\n  - github.com/bytedance/sonic\n  - github.com/bytedance/go-tagexpr/v2\n  - github.com/cloudwego/dynamicgo\n  - github.com/v2fly/v2ray-core/v5\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^uintptr [^unsafe/Pointer p ^uintptr h]
+  (maps/StrHash @(conv (* string) p) h))
+
+
+;; NOTE: Because NaN != NaN, a map can contain any
+;; number of (mostly useless) entries keyed with NaNs.
+;; To avoid long hash chains, we assign a random number
+;; as the hash value for a NaN.
+
+^{:go/end 128} (go/func f32hash ^uintptr [^unsafe/Pointer p ^uintptr h]
+  (let [f @(conv (* float32) p)]
+    (switch
+      (case [(== f 0)]
+        (return (trimHash (* c1 (bit-xor c0 h))))) ; +0, -0
+      (case [(!= f f)]
+        (return (trimHash (* c1 (bit-xor c0 h (conv uintptr (rand))))))) ; any kind of NaN
+      (default
+        (return (memhash p h 4))))))
+
+
+
+^{:go/end 140} (go/func f64hash ^uintptr [^unsafe/Pointer p ^uintptr h]
+  (let [f @(conv (* float64) p)]
+    (switch
+      (case [(== f 0)]
+        (return (trimHash (* c1 (bit-xor c0 h))))) ; +0, -0
+      (case [(!= f f)]
+        (return (trimHash (* c1 (bit-xor c0 h (conv uintptr (rand))))))) ; any kind of NaN
+      (default
+        (return (memhash p h 8))))))
+
+
+
+^{:go/end 145} (go/func c64hash ^uintptr [^unsafe/Pointer p ^uintptr h]
+  (let [x (conv (* (array 2 float32)) p)]
+    (f32hash (conv unsafe/Pointer (addr (aget x 1))) (f32hash (conv unsafe/Pointer (addr (aget x 0))) h))))
+
+
+^{:go/end 150} (go/func c128hash ^uintptr [^unsafe/Pointer p ^uintptr h]
+  (let [x (conv (* (array 2 float64)) p)]
+    (f64hash (conv unsafe/Pointer (addr (aget x 1))) (f64hash (conv unsafe/Pointer (addr (aget x 0))) h))))
+
+
+^{:go/end 171} (go/func interhash ^uintptr [^unsafe/Pointer p ^uintptr h]
+  (let [a (conv (* iface) p)
+      ^{:line 154} tab (.-tab a)]
+    (when (== tab nil)
+      (return h))
+
+    (let [t (.-Type tab)]
+      (when (== (.-Equal t) nil)
+        ;; Check hashability here. We could do this check inside
+        ;; typehash, but we want to report the topmost type in
+        ;; the error text (e.g. in a struct with a field of slice type
+        ;; we want to report the struct, not the slice).
+        (panic (conv errorString (+ "hash of unhashable type " (.string (toRType t))))))
+
+      (if (.IsDirectIface t)
+        (return (trimHash (* c1 (typehash t (conv unsafe/Pointer (addr (.-data a))) (bit-xor h c0)))))
+
+        (return (trimHash (* c1 (typehash t (.-data a) (bit-xor h c0)))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 198} (go/func ^{:go/linkname "nilinterhash"} nilinterhash "nilinterhash should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/anacrolix/stm\n  - github.com/aristanetworks/goarista\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^uintptr [^unsafe/Pointer p ^uintptr h]
+  (let [a (conv (* eface) p)
+      ^{:line 185} t (.-_type a)]
+    (when (== t nil)
+      (return h))
+
+    (when (== (.-Equal t) nil)
+      ;; See comment in interhash above.
+      (panic (conv errorString (+ "hash of unhashable type " (.string (toRType t))))))
+
+    (if (.IsDirectIface t)
+      (return (trimHash (* c1 (typehash t (conv unsafe/Pointer (addr (.-data a))) (bit-xor h c0)))))
+
+      (return (trimHash (* c1 (typehash t (.-data a) (bit-xor h c0))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 268} (go/func ^{:go/linkname "typehash"} typehash "typehash computes the hash of the object of type t at address p.\nh is the seed.\nThis function is seldom used. Most maps use for hashing either\nfixed functions (e.g. f32hash) or compiler-generated functions\n(e.g. for a type like struct { x, y string }). This implementation\nis slower but more general and is used for hashing interface types\n(called from interhash or nilinterhash, above) or for hashing in\nmaps generated by reflect.MapOf (reflect_typehash, below).\n\ntypehash should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/puzpuzpuz/xsync/v2\n  - github.com/puzpuzpuz/xsync/v3\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^uintptr [^{:tag (* _type)} t ^unsafe/Pointer p ^uintptr h]
+  (when (!= (bit-and (.-TFlag t) abi/TFlagRegularMemory) 0)
+    ;; Handle ptr sizes specially, see issue 37086.
+    (switch (.-Size_ t)
+      (case [4]
+        (return (memhash32 p h)))
+      (case [8]
+        (return (memhash64 p h)))
+      (default
+        (return (memhash p h (.-Size_ t))))))
+
+
+  (switch (.Kind t)
+    (case [abi/Float32]
+      (return (f32hash p h)))
+    (case [abi/Float64]
+      (return (f64hash p h)))
+    (case [abi/Complex64]
+      (return (c64hash p h)))
+    (case [abi/Complex128]
+      (return (c128hash p h)))
+    (case [abi/String]
+      (return (strhash p h)))
+    (case [abi/Interface]
+      (let [i (conv (* interfacetype) (conv unsafe/Pointer t))]
+        (when (== (len (.-Methods i)) 0)
+          (return (nilinterhash p h)))
+
+        (return (interhash p h))))
+    (case [abi/Array]
+      (let [a (conv (* arraytype) (conv unsafe/Pointer t))]
+        (for [i (conv uintptr 0)] (< i (.-Len a)) (inc! i)
+          (set! h (typehash (.-Elem a) (add p (* i (.-Size_ (.-Elem a)))) h)))
+
+        (return h)))
+    (case [abi/Struct]
+      (let [s (conv (* structtype) (conv unsafe/Pointer t))]
+        (range [_ f (.-Fields s)]
+          (when (.IsBlank (.-Name f))
+            (continue))
+
+          (set! h (typehash (.-Typ f) (add p (.-Offset f)) h)))
+
+        (return h)))
+    (default
+      ;; Should never happen, as typehash should only be called
+      ;; with comparable types.
+      (panic (conv errorString (+ "hash of unhashable type " (.string (toRType t))))))))
+
+
+
+
+^{:go/end 273} (go/func ^{:go/linkname "reflect_typehash reflect.typehash"} reflect_typehash ^uintptr [^{:tag (* _type)} t ^unsafe/Pointer p ^uintptr h]
+  (typehash t p h))
+
+
+^{:go/breaks [3] :go/end 277} (go/func memequal0 ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  true)
+
+^{:go/end 280} (go/func memequal8 ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (== @(conv (* int8) p) @(conv (* int8) q)))
+
+^{:go/end 283} (go/func memequal16 ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (== @(conv (* int16) p) @(conv (* int16) q)))
+
+^{:go/end 286} (go/func memequal32 ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (== @(conv (* int32) p) @(conv (* int32) q)))
+
+^{:go/end 289} (go/func memequal64 ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (== @(conv (* int64) p) @(conv (* int64) q)))
+
+^{:go/end 292} (go/func memequal128 ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (== @(conv (* (array 2 int64)) p) @(conv (* (array 2 int64)) q)))
+
+^{:go/end 295} (go/func f32equal ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (== @(conv (* float32) p) @(conv (* float32) q)))
+
+^{:go/end 298} (go/func f64equal ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (== @(conv (* float64) p) @(conv (* float64) q)))
+
+^{:go/end 301} (go/func c64equal ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (== @(conv (* complex64) p) @(conv (* complex64) q)))
+
+^{:go/end 304} (go/func c128equal ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (== @(conv (* complex128) p) @(conv (* complex128) q)))
+
+^{:go/end 307} (go/func strequal ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (== @(conv (* string) p) @(conv (* string) q)))
+
+^{:go/end 312} (go/func interequal ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (let [x @(conv (* iface) p)
+      ^{:line 310} y @(conv (* iface) q)]
+    (and (== (.-tab x) (.-tab y)) (ifaceeq (.-tab x) (.-data x) (.-data y)))))
+
+^{:go/end 317} (go/func nilinterequal ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+  (let [x @(conv (* eface) p)
+      ^{:line 315} y @(conv (* eface) q)]
+    (and (== (.-_type x) (.-_type y)) (efaceeq (.-_type x) (.-data x) (.-data y)))))
+
+^{:go/end 333} (go/func efaceeq ^bool [^{:tag (* _type)} t ^unsafe/Pointer x ^unsafe/Pointer y]
+  (when (== t nil)
+    (return true))
+
+  (let [eq (.-Equal t)]
+    (when (== eq nil)
+      (panic (conv errorString (+ "comparing uncomparable type " (.string (toRType t))))))
+
+    (when (.IsDirectIface t)
+      ;; Direct interface types are ptr, chan, map, func, and single-element structs/arrays thereof.
+      ;; Maps and funcs are not comparable, so they can't reach here.
+      ;; Ptrs, chans, and single-element items can be compared directly using ==.
+      (return (== x y)))
+
+    (eq x y)))
+
+^{:go/end 348} (go/func ifaceeq ^bool [^{:tag (* itab)} tab ^unsafe/Pointer x ^unsafe/Pointer y]
+  (when (== tab nil)
+    (return true))
+
+  (let [t (.-Type tab)
+      ^{:line 339} eq (.-Equal t)]
+    (when (== eq nil)
+      (panic (conv errorString (+ "comparing uncomparable type " (.string (toRType t))))))
+
+    (when (.IsDirectIface t)
+      ;; See comment in efaceeq.
+      (return (== x y)))
+
+    (eq x y)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 363} (go/func ^{:go/linkname "stringHash"} stringHash "Testing adapters for hash quality tests (see hash_test.go)\n\nstringHash should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/k14s/starlark-go\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^uintptr [^string s ^uintptr seed]
+  (strhash (noescape (conv unsafe/Pointer (addr s))) seed))
+
+
+^{:go/end 368} (go/func bytesHash ^uintptr [^{:tag (slice byte)} b ^uintptr seed]
+  (let [s (conv (* slice) (conv unsafe/Pointer (addr b)))]
+    (memhash (.-array s) seed (conv uintptr (.-len s)))))
+
+
+^{:go/end 372} (go/func int32Hash ^uintptr [^uint32 i ^uintptr seed]
+  (memhash32 (noescape (conv unsafe/Pointer (addr i))) seed))
+
+
+^{:go/end 376} (go/func int64Hash ^uintptr [^uint64 i ^uintptr seed]
+  (memhash64 (noescape (conv unsafe/Pointer (addr i))) seed))
+
+
+^{:go/end 380} (go/func efaceHash ^uintptr [^any i ^uintptr seed]
+  (nilinterhash (noescape (conv unsafe/Pointer (addr i))) seed))
+
+
+^{:go/end 386} (go/func ifaceHash ^uintptr [^{:tag (interface (F []))} i
+
+    ^{:line 384 :tag uintptr} seed]
+  (interhash (noescape (conv unsafe/Pointer (addr i))) seed))
+
+
+^{:go/end 394} (go/func readUnaligned32 ^uint32 [^unsafe/Pointer p]
+  (let [q (conv (* (array 4 byte)) p)]
+    (when goarch/BigEndian
+      (return (byteorder/BEUint32 (subslice q))))
+
+    (byteorder/LEUint32 (subslice q))))
+
+
+^{:go/end 402} (go/func readUnaligned64 ^uint64 [^unsafe/Pointer p]
+  (let [q (conv (* (array 8 byte)) p)]
+    (when goarch/BigEndian
+      (return (byteorder/BEUint64 (subslice q))))
+
+    (byteorder/LEUint64 (subslice q))))

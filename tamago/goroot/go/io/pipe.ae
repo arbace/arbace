@@ -1,0 +1,201 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Pipe adapter to connect code expecting an io.Reader
+;; with code expecting an io.Writer.
+
+(in-ns 'go.io) (go/file "pipe.go" :imports [
+
+
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [sync "sync"]])
+
+
+
+(go/type onceError "onceError is an object that will only store an error once.\n" (struct
+    ^{:line 17} sync/Mutex ; guards following
+    ^{:line 18 :tag error} err))
+
+
+^{:go/end 28} (go/method Store [^{:tag (* onceError)} a ^error err]
+  ^{:go/via [Mutex]} (.Lock a)
+  (defer ^{:go/via [Mutex]} (.Unlock a))
+  (when (!= (.-err a) nil)
+    (return))
+
+  (set! (.-err a) err))
+
+^{:go/end 33} (go/method Load ^error [^{:tag (* onceError)} a]
+  ^{:go/via [Mutex]} (.Lock a)
+  (defer ^{:go/via [Mutex]} (.Unlock a))
+  (.-err a))
+
+
+
+(go/var ^{:doc "ErrClosedPipe is the error used for read or write operations on a closed pipe.\n"} ErrClosedPipe (errors/New "io: read/write on closed pipe"))
+
+
+(go/type pipe "A pipe is the shared pipe structure underlying PipeReader and PipeWriter.\n" (struct
+    ^{:line 40 :tag sync/Mutex} wrMu ; Serializes Write operations
+    ^{:line 41 :tag (chan (slice byte))} wrCh
+    ^{:line 42 :tag (chan int)} rdCh
+
+    ^{:line 44 :tag sync/Once} once ; Protects closing done
+    ^{:line 45 :tag (chan (struct))} done
+    ^{:line 46 :tag onceError} rerr
+    ^{:line 47 :tag onceError} werr))
+
+
+^{:go/end 65} (go/method read [^{:tag (* pipe)} p ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (select
+    (case (<! (.-done p))
+      (return 0 (.readCloseError p)))
+    (default))
+
+
+  (select
+    (case [bw (<! (.-wrCh p))]
+      (let [nr (copy b bw)]
+        (>! (.-rdCh p) nr)
+        (return nr nil)))
+    (case (<! (.-done p))
+      (return 0 (.readCloseError p)))))
+
+
+
+^{:go/breaks [6] :go/end 74} (go/method closeRead ^error [^{:tag (* pipe)} p ^error err]
+  (when (== err nil)
+    (set! err ErrClosedPipe))
+
+  (.Store (.-rerr p) err)
+  (.Do (.-once p) ^{:go/end 72} (fn [] (close (.-done p))))
+  nil)
+
+
+^{:go/end 96} (go/method write [^{:tag (* pipe)} p ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (select
+    (case (<! (.-done p))
+      (return 0 (.writeCloseError p)))
+    (default
+      (.Lock (.-wrMu p))
+      (defer (.Unlock (.-wrMu p)))))
+
+
+  (for [once true] (or once (> (len b) 0)) (set! once false)
+    (select
+      (case (>! (.-wrCh p) b)
+        (let [nw (<! (.-rdCh p))]
+          (set! b (subslice b nw))
+          (set! n + nw)))
+      (case (<! (.-done p))
+        (return n (.writeCloseError p)))))
+
+
+  (return n nil))
+
+
+^{:go/breaks [6] :go/end 105} (go/method closeWrite ^error [^{:tag (* pipe)} p ^error err]
+  (when (== err nil)
+    (set! err EOF))
+
+  (.Store (.-werr p) err)
+  (.Do (.-once p) ^{:go/end 103} (fn [] (close (.-done p))))
+  nil)
+
+
+
+^{:go/end 114} (go/method readCloseError "readCloseError is considered internal to the pipe type.\n" ^error [^{:tag (* pipe)} p]
+  (let [rerr (.Load (.-rerr p))]
+    (when [werr (.Load (.-werr p))] (and (== rerr nil) (!= werr nil))
+      (return werr))
+
+    ^{:line 113} ErrClosedPipe))
+
+
+
+^{:go/end 123} (go/method writeCloseError "writeCloseError is considered internal to the pipe type.\n" ^error [^{:tag (* pipe)} p]
+  (let [werr (.Load (.-werr p))]
+    (when [rerr (.Load (.-rerr p))] (and (== werr nil) (!= rerr nil))
+      (return rerr))
+
+    ^{:line 122} ErrClosedPipe))
+
+
+
+(go/type PipeReader "A PipeReader is the read half of a pipe.\n" (struct pipe))
+
+
+
+
+
+
+^{:go/end 135} (go/method Read "Read implements the standard Read interface:\nit reads data from the pipe, blocking until a writer\narrives or the write end is closed.\nIf the write end is closed with an error, that error is\nreturned as err; otherwise err is EOF.\n" [^{:tag (* PipeReader)} r ^{:tag (slice byte)} data] :results [^int n ^error err]
+  (.read (.-pipe r) data))
+
+
+
+
+^{:go/end 141} (go/method Close "Close closes the reader; subsequent writes to the\nwrite half of the pipe will return the error [ErrClosedPipe].\n" ^error [^{:tag (* PipeReader)} r]
+  (.CloseWithError r nil))
+
+
+
+
+
+
+
+^{:go/end 150} (go/method CloseWithError "CloseWithError closes the reader; subsequent writes\nto the write half of the pipe will return the error err.\n\nCloseWithError never overwrites the previous error if it exists\nand always returns nil.\n" ^error [^{:tag (* PipeReader)} r ^error err]
+  (.closeRead (.-pipe r) err))
+
+
+
+(go/type PipeWriter "A PipeWriter is the write half of a pipe.\n" (struct ^PipeReader r))
+
+
+
+
+
+
+^{:go/end 162} (go/method Write "Write implements the standard Write interface:\nit writes data to the pipe, blocking until one or more readers\nhave consumed all the data or the read end is closed.\nIf the read end is closed with an error, that err is\nreturned as err; otherwise err is [ErrClosedPipe].\n" [^{:tag (* PipeWriter)} w ^{:tag (slice byte)} data] :results [^int n ^error err]
+  (.write (.-pipe (.-r w)) data))
+
+
+
+
+^{:go/end 168} (go/method Close "Close closes the writer; subsequent reads from the\nread half of the pipe will return no bytes and EOF.\n" ^error [^{:tag (* PipeWriter)} w]
+  (.CloseWithError w nil))
+
+
+
+
+
+
+
+
+^{:go/end 178} (go/method CloseWithError "CloseWithError closes the writer; subsequent reads from the\nread half of the pipe will return no bytes and the error err,\nor EOF if err is nil.\n\nCloseWithError never overwrites the previous error if it exists\nand always returns nil.\n" ^error [^{:tag (* PipeWriter)} w ^error err]
+  (.closeWrite (.-pipe (.-r w)) err))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 202} (go/func Pipe "Pipe creates a synchronous in-memory pipe.\nIt can be used to connect code expecting an [io.Reader]\nwith code expecting an [io.Writer].\n\nReads and Writes on the pipe are matched one to one\nexcept when multiple Reads are needed to consume a single Write.\nThat is, each Write to the [PipeWriter] blocks until it has satisfied\none or more Reads from the [PipeReader] that fully consume\nthe written data.\nThe data is copied directly from the Write to the corresponding\nRead (or Reads); there is no internal buffering.\n\nIt is safe to call Read and Write in parallel with each other or with Close.\nParallel calls to Read and parallel calls to Write are also safe:\nthe individual calls will be gated sequentially.\n" [] :results [(* PipeReader) (* PipeWriter)]
+  (let [pw (addr (lit PipeWriter :r (lit PipeReader :pipe ^{:go/breaks [2 4 6]} (lit pipe
+              :wrCh (make (chan (slice byte)))
+              :rdCh (make (chan int))
+              :done (make (chan (struct)))))))]
+
+    (return (addr (.-r pw)) pw)))

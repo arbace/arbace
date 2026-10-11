@@ -1,0 +1,146 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.archive.zip) (go/file "register.go" :imports [
+
+
+    ^{:line 8} [flate "compress/flate"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [sync "sync"]])
+
+
+
+
+
+
+
+(go/type Compressor "A Compressor returns a new compressing writer, writing to w.\nThe WriteCloser's Close method must be used to flush pending data to w.\nThe Compressor itself must be safe to invoke from multiple goroutines\nsimultaneously, but each returned writer will be used only by\none goroutine at a time.\n" (func [^io/Writer w] [io/WriteCloser error]))
+
+
+
+
+
+
+(go/type Decompressor "A Decompressor returns a new decompressing reader, reading from r.\nThe [io.ReadCloser]'s Close method must be used to release associated resources.\nThe Decompressor itself must be safe to invoke from multiple goroutines\nsimultaneously, but each returned reader will be used only by\none goroutine at a time.\n" (func [^io/Reader r] [io/ReadCloser]))
+
+(go/var ^sync/Pool flateWriterPool)
+
+^{:go/end 38} (go/func newFlateWriter ^io/WriteCloser [^io/Writer w]
+  (let [(values fw ok) (assert (* flate/Writer) (.Get flateWriterPool))]
+    (if ok
+      (.Reset fw w)
+
+      (set! (values fw _) (flate/NewWriter w 5)))
+
+    (addr (lit pooledFlateWriter :fw fw))))
+
+
+(go/type pooledFlateWriter (struct
+    ^{:line 41 :tag sync/Mutex} mu ; guards Close and Write
+    ^{:line 42 :tag (* flate/Writer)} fw))
+
+
+^{:go/end 52} (go/method Write [^{:tag (* pooledFlateWriter)} w ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (.Lock (.-mu w))
+  (defer (.Unlock (.-mu w)))
+  (when (== (.-fw w) nil)
+    (return 0 (errors/New "Write after Close")))
+
+  (.Write (.-fw w) p))
+
+
+^{:go/end 64} (go/method Close ^error [^{:tag (* pooledFlateWriter)} w]
+  (.Lock (.-mu w))
+  (defer (.Unlock (.-mu w)))
+  (let [^error err (zero error)]
+    (when (!= (.-fw w) nil)
+      (set! err (.Close (.-fw w)))
+      (.Put flateWriterPool (.-fw w))
+      (set! (.-fw w) nil))
+
+    ^{:line 63} err))
+
+
+(go/var ^sync/Pool flateReaderPool)
+
+^{:go/end 76} (go/func newFlateReader ^io/ReadCloser [^io/Reader r]
+  (let [(values fr ok) (assert io/ReadCloser (.Get flateReaderPool))]
+    (if ok
+      (.Reset (assert flate/Resetter fr) r nil)
+
+      (set! fr (flate/NewReader r)))
+
+    (addr (lit pooledFlateReader :fr fr))))
+
+
+(go/type pooledFlateReader (struct
+    ^{:line 79 :tag sync/Mutex} mu ; guards Close and Read
+    ^{:line 80 :tag io/ReadCloser} fr))
+
+
+^{:go/end 90} (go/method Read [^{:tag (* pooledFlateReader)} r ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (.Lock (.-mu r))
+  (defer (.Unlock (.-mu r)))
+  (when (== (.-fr r) nil)
+    (return 0 (errors/New "Read after Close")))
+
+  (.Read (.-fr r) p))
+
+
+^{:go/end 102} (go/method Close ^error [^{:tag (* pooledFlateReader)} r]
+  (.Lock (.-mu r))
+  (defer (.Unlock (.-mu r)))
+  (let [^error err (zero error)]
+    (when (!= (.-fr r) nil)
+      (set! err (.Close (.-fr r)))
+      (.Put flateReaderPool (.-fr r))
+      (set! (.-fr r) nil))
+
+    ^{:line 101} err))
+
+
+(go/var
+  ^{:line 105} [^sync/Map compressors] ; map[uint16]Compressor
+  ^{:line 106} [^sync/Map decompressors]) ; map[uint16]Decompressor
+
+
+^{:go/end 115} (go/func init []
+  (.Store compressors Store (conv Compressor ^{:go/end 110} (fn [^io/Writer w] :results [io/WriteCloser error] (return (addr (lit nopCloser w)) nil))))
+  (.Store compressors Deflate (conv Compressor ^{:go/end 111} (fn [^io/Writer w] :results [io/WriteCloser error] (return (newFlateWriter w) nil))))
+
+  (.Store decompressors Store (conv Decompressor io/NopCloser))
+  (.Store decompressors Deflate (conv Decompressor newFlateReader)))
+
+
+
+
+^{:go/end 123} (go/func RegisterDecompressor "RegisterDecompressor allows custom decompressors for a specified method ID.\nThe common methods [Store] and [Deflate] are built in.\n" [^uint16 method ^Decompressor dcomp]
+  (when [(values _ dup) (.LoadOrStore decompressors method dcomp)] dup
+    (panic "decompressor already registered")))
+
+
+
+
+
+^{:go/end 131} (go/func RegisterCompressor "RegisterCompressor registers custom compressors for a specified method ID.\nThe common methods [Store] and [Deflate] are built in.\n" [^uint16 method ^Compressor comp]
+  (when [(values _ dup) (.LoadOrStore compressors method comp)] dup
+    (panic "compressor already registered")))
+
+
+
+^{:go/end 139} (go/func compressor ^Compressor [^uint16 method]
+  (let [(values ci ok) (.Load compressors method)]
+    (when (not ok)
+      (return nil))
+
+    (assert Compressor ci)))
+
+
+^{:go/end 147} (go/func decompressor ^Decompressor [^uint16 method]
+  (let [(values di ok) (.Load decompressors method)]
+    (when (not ok)
+      (return nil))
+
+    (assert Decompressor di)))

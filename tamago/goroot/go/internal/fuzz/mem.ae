@@ -1,0 +1,138 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.fuzz) (go/file "mem.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [os "os"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+(go/type sharedMem "sharedMem manages access to a region of virtual memory mapped from a file,\nshared between multiple processes. The region includes space for a header and\na value of variable length.\n\nWhen fuzzing, the coordinator creates a sharedMem from a temporary file for\neach worker. This buffer is used to pass values to fuzz between processes.\nCare must be taken to manage access to shared memory across processes;\nsharedMem provides no synchronization on its own. See workerComm for an\nexplanation.\n" (struct
+
+    ^{:line 25 :tag (* os/File) :doc "f is the file mapped into memory.\n"} f
+
+
+
+    ^{:line 29 :tag (slice byte) :doc "region is the mapped region of virtual memory for f. The content of f may\nbe read or written through this slice.\n"} region
+
+
+    ^{:line 32 :tag bool :doc "removeOnClose is true if the file should be deleted by Close.\n"} removeOnClose
+
+
+    ^{:line 35 :tag sharedMemSys :doc "sys contains OS-specific information.\n"} sys))
+
+
+
+(go/type sharedMemHeader "sharedMemHeader stores metadata in shared memory.\n" (struct
+
+
+    ^{:line 42 :tag int64 :doc "count is the number of times the worker has called the fuzz function.\nMay be reset by coordinator.\n"} count
+
+
+    ^{:line 45 :tag int :doc "valueLen is the number of bytes in region which should be read.\n"} valueLen
+
+
+    ^{:line 48 :tag uint64 :doc "randState and randInc hold the state of a pseudo-random number generator.\n"} randState ^{:tag uint64 :doc "randState and randInc hold the state of a pseudo-random number generator.\n"} randInc
+
+
+
+
+
+    ^{:line 54 :tag bool :doc "rawInMem is true if the region holds raw bytes, which occurs during\nminimization. If true after the worker fails during minimization, this\nindicates that an unrecoverable error occurred, and the region can be\nused to retrieve the raw bytes that caused the error.\n"} rawInMem))
+
+
+
+
+^{:go/end 62} (go/func sharedMemSize "sharedMemSize returns the size needed for a shared memory buffer that can\ncontain values of the given size.\n" ^int [^int valueSize]
+  ;; TODO(jayconrod): set a reasonable maximum size per platform.
+  (+ (conv int (unsafe/Sizeof (lit sharedMemHeader))) valueSize))
+
+
+
+
+^{:go/end 88} (go/func sharedMemTempFile "sharedMemTempFile creates a new temporary file of the given size, then maps\nit into memory. The file will be removed when the Close method is called.\n" [^int size] :results [^{:tag (* sharedMem)} m ^error err]
+  ;; Create a temporary file.
+  (let [(values f ^:assign err) (os/CreateTemp "" "fuzz-*")]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (^{:go/end 77} (fn []
+          (when (!= err nil)
+            (.Close f)
+            (os/Remove (.Name f))))))
+
+
+
+    ;; Resize it to the correct size.
+    (let [totalSize (sharedMemSize size)]
+      (when [err (.Truncate f (conv int64 totalSize))] (!= err nil)
+        (return nil err))
+
+
+      ;; Map the file into memory.
+      (let [removeOnClose true]
+        (sharedMemMapFile f totalSize removeOnClose)))))
+
+
+
+^{:go/end 93} (go/method header "header returns a pointer to metadata within the shared memory region.\n" ^{:tag (* sharedMemHeader)} [^{:tag (* sharedMem)} m]
+  (conv (* sharedMemHeader) (conv unsafe/Pointer (addr (aget (.-region m) 0)))))
+
+
+
+
+^{:go/end 101} (go/method valueRef "valueRef returns the value currently stored in shared memory. The returned\nslice points to shared memory; it is not a copy.\n" ^{:tag (slice byte)} [^{:tag (* sharedMem)} m]
+  (let [length (.-valueLen (.header m))
+      ^{:line 99} valueOffset (conv int (unsafe/Sizeof (lit sharedMemHeader)))]
+    (subslice (.-region m) valueOffset (+ valueOffset length))))
+
+
+
+^{:go/end 107} (go/method valueCopy "valueCopy returns a copy of the value stored in shared memory.\n" ^{:tag (slice byte)} [^{:tag (* sharedMem)} m]
+  (let [ref (.valueRef m)]
+    (bytes/Clone ref)))
+
+
+
+
+
+^{:go/end 119} (go/method setValue "setValue copies the data in b into the shared memory buffer and sets\nthe length. len(b) must be less than or equal to the capacity of the buffer\n(as returned by cap(m.value())).\n" [^{:tag (* sharedMem)} m ^{:tag (slice byte)} b]
+  (let [v (.valueRef m)]
+    (when (> (len b) (cap v))
+      (panic (fmt/Sprintf "value length %d larger than shared memory capacity %d" (len b) (cap v))))
+
+    (set! (.-valueLen (.header m)) (len b))
+    (copy (subslice v _ (cap v)) b)))
+
+
+
+
+
+
+
+
+^{:go/end 133} (go/method setValueLen "setValueLen sets the length of the shared memory buffer returned by valueRef\nto n, which may be at most the cap of that slice.\n\nNote that we can only store the length in the shared memory header. The full\nslice header contains a pointer, which is likely only valid for one process,\nsince each process can map shared memory at a different virtual address.\n" [^{:tag (* sharedMem)} m ^int n]
+  (let [v (.valueRef m)]
+    (when (> n (cap v))
+      (panic (fmt/Sprintf "length %d larger than shared memory capacity %d" n (cap v))))
+
+    (set! (.-valueLen (.header m)) n)))
+
+
+;; TODO(jayconrod): add method to resize the buffer. We'll need that when the
+;; mutator can increase input length. Only the coordinator will be able to
+;; do it, since we'll need to send a message to the worker telling it to
+;; remap the file.

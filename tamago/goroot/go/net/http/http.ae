@@ -1,0 +1,322 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http) (go/file "http.go" :imports [
+
+
+    ^{:line 8} [io "io"]
+    ^{:line 9} [strconv "strconv"]
+    ^{:line 10} [strings "strings"]
+    ^{:line 11} [time "time"]
+    ^{:line 12} [utf8 "unicode/utf8"]
+    ^{:line 13} [_ "unsafe"]
+
+    ^{:line 15} [httpguts "golang.org/x/net/http/httpguts"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Protocols "Protocols is a set of HTTP protocols.\nThe zero value is an empty set of protocols.\n\nThe supported protocols are:\n\n  - HTTP1 is the HTTP/1.0 and HTTP/1.1 protocols.\n    HTTP1 is supported on both unsecured TCP and secured TLS connections.\n\n  - HTTP2 is the HTTP/2 protocol over a TLS connection.\n\n  - UnencryptedHTTP2 is the HTTP/2 protocol over an unsecured TCP connection.\n" (struct
+    ^{:line 30 :tag uint8} bits))
+
+
+(go/const
+  ^{:line 34} [^{:val 1} protoHTTP1 (<< 1 iota)]
+  ^{:line 35} [^{:val 2} protoHTTP2]
+  ^{:line 36} [^{:val 4} protoUnencryptedHTTP2]
+  ^{:line 37} [^{:val 8} protoHTTP3])
+
+
+
+^{:go/end 41} (go/method HTTP1 "HTTP1 reports whether p includes HTTP/1.\n" ^bool [^Protocols p] (!= (bit-and (.-bits p) protoHTTP1) 0))
+
+
+^{:go/end 44} (go/method SetHTTP1 "SetHTTP1 adds or removes HTTP/1 from p.\n" [^{:tag (* Protocols)} p ^bool ok] (.setBit p protoHTTP1 ok))
+
+
+^{:go/end 47} (go/method HTTP2 "HTTP2 reports whether p includes HTTP/2.\n" ^bool [^Protocols p] (!= (bit-and (.-bits p) protoHTTP2) 0))
+
+
+^{:go/end 50} (go/method SetHTTP2 "SetHTTP2 adds or removes HTTP/2 from p.\n" [^{:tag (* Protocols)} p ^bool ok] (.setBit p protoHTTP2 ok))
+
+
+^{:go/end 53} (go/method UnencryptedHTTP2 "UnencryptedHTTP2 reports whether p includes unencrypted HTTP/2.\n" ^bool [^Protocols p] (!= (bit-and (.-bits p) protoUnencryptedHTTP2) 0))
+
+
+^{:go/end 56} (go/method SetUnencryptedHTTP2 "SetUnencryptedHTTP2 adds or removes unencrypted HTTP/2 from p.\n" [^{:tag (* Protocols)} p ^bool ok] (.setBit p protoUnencryptedHTTP2 ok))
+
+
+^{:go/end 59} (go/method http3 "http3 reports whether p includes HTTP/3.\n" ^bool [^Protocols p] (!= (bit-and (.-bits p) protoHTTP3) 0))
+
+
+^{:go/end 62} (go/method setHTTP3 "setHTTP3 adds or removes HTTP/3 from p.\n" [^{:tag (* Protocols)} p ^bool ok] (.setBit p protoHTTP3 ok))
+
+
+^{:go/end 65} (go/func ^{:go/linkname "protocolSetHTTP3 golang.org/x/net/internal/http3_test.protocolSetHTTP3"} protocolSetHTTP3 [^{:tag (* Protocols)} p] (.setHTTP3 p true))
+
+^{:go/end 73} (go/method setBit [^{:tag (* Protocols)} p ^uint8 bit ^bool ok]
+  (if ok
+    (set! (.-bits p) bit-or bit)
+
+    (set! (.-bits p) bit-and-not bit)))
+
+
+
+
+^{:go/end 78} (go/method empty "empty returns true if p has no protocol set at all.\n" ^bool [^Protocols p]
+  (== (.-bits p) 0))
+
+
+^{:go/end 95} (go/method String ^string [^Protocols p]
+  (let [^{:tag (slice string)} s (zero (slice string))]
+    (when (.HTTP1 p)
+      (set! s (append s "HTTP1")))
+
+    (when (.HTTP2 p)
+      (set! s (append s "HTTP2")))
+
+    (when (.UnencryptedHTTP2 p)
+      (set! s (append s "UnencryptedHTTP2")))
+
+    (when (.http3 p)
+      (set! s (append s "HTTP3")))
+
+    (+ "{" (strings/Join s ",") "}")))
+
+
+
+
+
+(go/type incomparable "incomparable is a zero-width, non-comparable type. Adding it to a struct\nmakes that struct also non-comparable, and generally doesn't add\nany size (as long as it's first).\n" (array 0 (func [])))
+
+
+
+(go/const ^{:val 9223372036854775807 :doc "maxInt64 is the effective \"infinite\" value for the Server and\nTransport's byte-limiting readers.\n"} maxInt64 (- (<< 1 63) 1))
+
+
+
+(go/var ^{:doc "aLongTimeAgo is a non-zero time, far in the past, used for\nimmediate cancellation of network operations.\n"} aLongTimeAgo (time/Unix 1 0))
+
+
+
+
+(go/var ^{:tag bool :doc "omitBundledHTTP2 is set by omithttp2.go when the nethttpomithttp2\nbuild tag is set. That means h2_bundle.go isn't compiled in and we\nshouldn't try to use it.\n"} omitBundledHTTP2)
+
+;; TODO(bradfitz): move common stuff here. The other files have accumulated
+;; generic http stuff in random places.
+
+
+
+(go/type contextKey "contextKey is a value for use with context.WithValue. It's used as\na pointer so it fits in an interface{} without allocation.\n" (struct
+    ^{:line 121 :tag string} name))
+
+
+^{:go/end 124} (go/method String ^string [^{:tag (* contextKey)} k] (+ "net/http context value " (.-name k)))
+
+
+^{:go/end 137} (go/func removePort "removePort strips the port while correctly handling IPv6.\n" ^string [^string host]
+  (for [i (- (len host) 1)] (>= i 0) (dec! i)
+    (switch (aget host i)
+      (case [\:]
+        (return (subslice host _ i)))
+      (case [\]]
+        (return host))))
+
+
+  ^{:line 136} host)
+
+
+
+^{:go/end 143} (go/func isToken "isToken reports whether v is a valid token (https://www.rfc-editor.org/rfc/rfc2616#section-2.2).\n" ^bool [^string v]
+  ;; For historical reasons, this function is called ValidHeaderFieldName (see issue #67031).
+  (httpguts/ValidHeaderFieldName v))
+
+
+
+^{:go/breaks [[5 153]] :go/end 154} (go/func stringContainsCTLByte "stringContainsCTLByte reports whether s contains any ASCII control character.\n" ^bool [^string s]
+  (for [i 0] (< i (len s)) (inc! i)
+    (let [b (aget s i)]
+      (when (or (< b \space) (== b 0x7f))
+        (return true))))
+
+
+  false)
+
+
+^{:go/end 184} (go/func hexEscapeNonASCII ^string [^string s]
+  (let [newLen 0]
+    (for [i 0] (< i (len s)) (inc! i)
+      (if (>= (aget s i) utf8/RuneSelf)
+        (set! newLen + 3)
+
+        (inc! newLen)))
+
+
+    (when (== newLen (len s))
+      (return s))
+
+    (let [b (make (slice byte) 0 newLen)
+        ^{:line 169 :tag int} pos (zero int)]
+      (for [i 0] (< i (len s)) (inc! i)
+        (when (>= (aget s i) utf8/RuneSelf)
+          (when (< pos i)
+            (set! b (append b (spread (subslice s pos i)))))
+
+          (set! b (append b \%))
+          (set! b (strconv/AppendInt b (conv int64 (aget s i)) 16))
+          (set! pos (+ i 1))))
+
+
+      (when (< pos (len s))
+        (set! b (append b (spread (subslice s pos)))))
+
+      (conv string b))))
+
+
+
+
+
+
+(go/var ^{:doc "NoBody is an [io.ReadCloser] with no bytes. Read always returns EOF\nand Close always returns nil. It can be used in an outgoing client\nrequest to explicitly signal that a request has zero bytes.\nAn alternative, however, is to simply set [Request.Body] to nil.\n"} NoBody (lit noBody))
+
+(go/type noBody (struct))
+
+^{:go/end 194} (go/method Read [noBody (slice byte)] :results [int error] (return 0 io/EOF))
+^{:go/end 195} (go/method Close ^error [noBody] nil)
+^{:go/end 196} (go/method WriteTo [noBody io/Writer] :results [int64 error] (return 0 nil))
+
+(go/var
+
+  ^{:line 200} [^{:tag io/WriterTo :doc "verify that an io.Copy from NoBody won't require a buffer:\n"} _ NoBody]
+  ^{:line 201} [^io/ReadCloser _ NoBody])
+
+
+
+(go/type PushOptions "PushOptions describes options for [Pusher.Push].\n" (struct
+
+
+    ^{:line 208 :tag string :doc "Method specifies the HTTP method for the promised request.\nIf set, it must be \"GET\" or \"HEAD\". Empty means \"GET\".\n"} Method
+
+
+
+
+    ^{:line 213 :tag Header :doc "Header specifies additional promised request headers. This cannot\ninclude HTTP/2 pseudo header fields like \":path\" and \":scheme\",\nwhich will be added automatically.\n"} Header))
+
+
+
+
+
+(go/type Pusher "Pusher is the interface implemented by ResponseWriters that support\nHTTP/2 server push. For more background, see\nhttps://tools.ietf.org/html/rfc7540#section-8.2.\n" (interface
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    (^{:doc "Push initiates an HTTP/2 server push. This constructs a synthetic\nrequest using the given target and options, serializes that request\ninto a PUSH_PROMISE frame, then dispatches that request using the\nserver's request handler. If opts is nil, default options are used.\n\nThe target must either be an absolute path (like \"/path\") or an absolute\nURL that contains a valid host and the same scheme as the parent request.\nIf the target is a path, it will inherit the scheme and host of the\nparent request.\n\nThe HTTP/2 spec disallows recursive pushes and cross-authority pushes.\nPush may or may not detect these invalid pushes; however, invalid\npushes will be detected and canceled by conforming clients.\n\nHandlers that wish to push URL X should call Push before sending any\ndata that may trigger a request for URL X. This avoids a race where the\nclient issues requests for X before receiving the PUSH_PROMISE for X.\n\nPush will run in a separate goroutine making the order of arrival\nnon-deterministic. Any required synchronization needs to be implemented\nby the caller.\n\nPush returns ErrNotSupported if the client has disabled push or if push\nis not supported on the underlying connection.\n"} Push ^error [^string target ^{:tag (* PushOptions)} opts])))
+
+
+
+
+(go/type HTTP2Config "HTTP2Config defines HTTP/2 configuration parameters common to\nboth [Transport] and [Server].\n" (struct
+
+
+
+
+
+    ^{:line 255 :tag int :doc "MaxConcurrentStreams optionally specifies the number of\nconcurrent streams that a client may have open at a time.\nIf zero, MaxConcurrentStreams defaults to at least 100.\n\nThis parameter only applies to Servers.\n"} MaxConcurrentStreams
+
+
+
+
+
+
+
+
+
+
+    ^{:line 266 :tag bool :doc "StrictMaxConcurrentRequests controls whether an HTTP/2 server's\nconcurrency limit should be respected across all connections\nto that server.\nIf true, new requests sent when a connection's concurrency limit\nhas been exceeded will block until an existing request completes.\nIf false, an additional connection will be opened if all\nexisting connections are at their limit.\n\nThis parameter only applies to Transports.\n"} StrictMaxConcurrentRequests
+
+
+
+
+
+
+    ^{:line 273 :tag int :doc "MaxDecoderHeaderTableSize optionally specifies an upper limit for the\nsize of the header compression table used for decoding headers sent\nby the peer.\nA valid value is less than 4MiB.\nIf zero or invalid, a default value is used.\n"} MaxDecoderHeaderTableSize
+
+
+
+
+
+    ^{:line 279 :tag int :doc "MaxEncoderHeaderTableSize optionally specifies an upper limit for the\nheader compression table used for sending headers to the peer.\nA valid value is less than 4MiB.\nIf zero or invalid, a default value is used.\n"} MaxEncoderHeaderTableSize
+
+
+
+
+
+    ^{:line 285 :tag int :doc "MaxReadFrameSize optionally specifies the largest frame\nthis endpoint is willing to read.\nA valid value is between 16KiB and 16MiB, inclusive.\nIf zero or invalid, a default value is used.\n"} MaxReadFrameSize
+
+
+
+
+
+    ^{:line 291 :tag int :doc "MaxReceiveBufferPerConnection is the maximum size of the\nflow control window for data received on a connection.\nA valid value is at least 64KiB and less than 4MiB.\nIf invalid, a default value is used.\n"} MaxReceiveBufferPerConnection
+
+
+
+
+
+    ^{:line 297 :tag int :doc "MaxReceiveBufferPerStream is the maximum size of\nthe flow control window for data received on a stream (request).\nA valid value is less than 4MiB.\nIf zero or invalid, a default value is used.\n"} MaxReceiveBufferPerStream
+
+
+
+
+    ^{:line 302 :tag time/Duration :doc "SendPingTimeout is the timeout after which a health check using a ping\nframe will be carried out if no frame is received on a connection.\nIf zero, no health check is performed.\n"} SendPingTimeout
+
+
+
+
+    ^{:line 307 :tag time/Duration :doc "PingTimeout is the timeout after which a connection will be closed\nif a response to a ping is not received.\nIf zero, a default of 15 seconds is used.\n"} PingTimeout
+
+
+
+
+    ^{:line 312 :tag time/Duration :doc "WriteByteTimeout is the timeout after which a connection will be\nclosed if no data can be written to it. The timeout begins when data is\navailable to write, and is extended whenever any bytes are written.\n"} WriteByteTimeout
+
+
+
+    ^{:line 316 :tag bool :doc "PermitProhibitedCipherSuites, if true, permits the use of\ncipher suites prohibited by the HTTP/2 spec.\n"} PermitProhibitedCipherSuites
+
+
+
+
+
+    ^{:line 322 :tag (func [^string errType]) :doc "CountError, if non-nil, is called on HTTP/2 errors.\nIt is intended to increment a metric for monitoring.\nThe errType contains only lowercase letters, digits, and underscores\n(a-z, 0-9, _).\n"} CountError))

@@ -1,0 +1,387 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package unicode provides data and functions to test some properties of
+;; Unicode code points.
+(in-ns 'go.unicode) (go/file "letter.go" :doc "Package unicode provides data and functions to test some properties of\nUnicode code points.\n" :imports [])
+
+(go/const
+  ^{:line 10} [^{:val (rune 0x10FFFF)} MaxRune (rune 0x10FFFF)] ; Maximum valid Unicode code point.
+  ^{:line 11} [^{:val \ufffd} ReplacementChar \ufffd] ; Represents invalid code points.
+  ^{:line 12} [^{:val \u007f} MaxASCII \u007f] ; maximum ASCII value.
+  ^{:line 13} [^{:val \ÿ} MaxLatin1 \ÿ]) ; maximum Latin-1 value.
+
+
+
+
+
+
+
+(go/type RangeTable "RangeTable defines a set of Unicode code points by listing the ranges of\ncode points within the set. The ranges are listed in two slices\nto save space: a slice of 16-bit ranges and a slice of 32-bit ranges.\nThe two slices must be in sorted order and non-overlapping.\nAlso, R32 should contain only values >= 0x10000 (1<<16).\n" (struct
+    ^{:line 22 :tag (slice Range16)} R16
+    ^{:line 23 :tag (slice Range32)} R32
+    ^{:line 24 :tag int} LatinOffset)) ; number of entries in R16 with Hi <= MaxLatin1
+
+
+
+
+(go/type Range16 "Range16 represents of a range of 16-bit Unicode code points. The range runs from Lo to Hi\ninclusive and has the specified stride.\n" (struct
+    ^{:line 30 :tag uint16} Lo
+    ^{:line 31 :tag uint16} Hi
+    ^{:line 32 :tag uint16} Stride))
+
+
+
+
+
+(go/type Range32 "Range32 represents of a range of Unicode code points and is used when one or\nmore of the values will not fit in 16 bits. The range runs from Lo to Hi\ninclusive and has the specified stride. Lo and Hi must always be >= 1<<16.\n" (struct
+    ^{:line 39 :tag uint32} Lo
+    ^{:line 40 :tag uint32} Hi
+    ^{:line 41 :tag uint32} Stride))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type CaseRange "CaseRange represents a range of Unicode code points for simple (one\ncode point to one code point) case conversion.\nThe range runs from Lo to Hi inclusive, with a fixed stride of 1. Deltas\nare the number to add to the code point to reach the code point for a\ndifferent case for that character. They may be negative. If zero, it\nmeans the character is in the corresponding case. There is a special\ncase representing sequences of alternating corresponding Upper and Lower\npairs. It appears with a fixed Delta of\n\n\t{UpperLower, UpperLower, UpperLower}\n\nThe constant UpperLower has an otherwise impossible delta value.\n" (struct
+    ^{:line 57 :tag uint32} Lo
+    ^{:line 58 :tag uint32} Hi
+    ^{:line 59 :tag d} Delta))
+
+
+
+
+(go/type SpecialCase "SpecialCase represents language-specific case mappings such as Turkish.\nMethods of SpecialCase customize (by overriding) the standard mappings.\n" (slice CaseRange))
+
+;; BUG(r): There is no mechanism for full case folding, that is, for
+;; characters that involve multiple runes in the input or output.
+
+
+(go/const "Indices into the Delta arrays inside CaseRanges for case mapping.\n"
+  ^{:line 71} [^{:val 0} UpperCase iota]
+  ^{:line 72} [^{:val 1} LowerCase]
+  ^{:line 73} [^{:val 2} TitleCase]
+  ^{:line 74} [^{:val 3} MaxCase])
+
+
+(go/type d (array MaxCase rune)) ; to make the CaseRanges text shorter
+
+
+
+
+(go/const "If the Delta field of a [CaseRange] is UpperLower, it means\nthis CaseRange represents a sequence of the form (say)\n[Upper] [Lower] [Upper] [Lower].\n"
+  ^{:line 83} [^{:val (rune 0x110000)} UpperLower (+ MaxRune 1)]) ; (Cannot be a valid delta.)
+
+
+
+
+(go/const ^{:val 18 :doc "linearMax is the maximum size table for linear search for non-Latin1 rune.\nDerived by running 'go test -calibrate'.\n"} linearMax 18)
+
+
+^{:go/end 121} (go/func is16 "is16 reports whether r is in the sorted slice of 16-bit ranges.\n" ^bool [^{:tag (slice Range16)} ranges ^uint16 r]
+  (when (or (<= (len ranges) linearMax) (<= r MaxLatin1))
+    (range [i ranges]
+      (let [range_ (addr (aget ranges i))]
+        (when (< r (.-Lo range_))
+          (return false))
+
+        (when (<= r (.-Hi range_))
+          (return (or (== (.-Stride range_) 1) (== (% (- r (.-Lo range_)) (.-Stride range_)) 0))))))
+
+
+    (return false))
+
+
+  ;; binary search over ranges
+  ^{:go/breaks [[3 120]]} (let [lo 0
+      ^{:line 107} hi (len ranges)]
+    (while (< lo hi)
+      (let [m (conv int (>> (conv uint (+ lo hi)) 1))
+          ^{:line 110} range_ (addr (aget ranges m))]
+        (when (and (<= (.-Lo range_) r) (<= r (.-Hi range_)))
+          (return (or (== (.-Stride range_) 1) (== (% (- r (.-Lo range_)) (.-Stride range_)) 0))))
+
+        (if (< r (.-Lo range_))
+          (set! hi m)
+
+          (set! lo (+ m 1)))))
+
+
+    false))
+
+
+
+^{:go/end 154} (go/func is32 "is32 reports whether r is in the sorted slice of 32-bit ranges.\n" ^bool [^{:tag (slice Range32)} ranges ^uint32 r]
+  (when (<= (len ranges) linearMax)
+    (range [i ranges]
+      (let [range_ (addr (aget ranges i))]
+        (when (< r (.-Lo range_))
+          (return false))
+
+        (when (<= r (.-Hi range_))
+          (return (or (== (.-Stride range_) 1) (== (% (- r (.-Lo range_)) (.-Stride range_)) 0))))))
+
+
+    (return false))
+
+
+  ;; binary search over ranges
+  ^{:go/breaks [[3 153]]} (let [lo 0
+      ^{:line 140} hi (len ranges)]
+    (while (< lo hi)
+      (let [m (conv int (>> (conv uint (+ lo hi)) 1))
+          ^{:line 143} range_ (aget ranges m)]
+        (when (and (<= (.-Lo range_) r) (<= r (.-Hi range_)))
+          (return (or (== (.-Stride range_) 1) (== (% (- r (.-Lo range_)) (.-Stride range_)) 0))))
+
+        (if (< r (.-Lo range_))
+          (set! hi m)
+
+          (set! lo (+ m 1)))))
+
+
+    false))
+
+
+
+^{:go/end 168} (go/func Is "Is reports whether the rune is in the specified table of ranges.\n" ^bool [^{:tag (* RangeTable)} rangeTab ^rune r]
+  (let [r16 (.-R16 rangeTab)]
+    ;; Compare as uint32 to correctly handle negative runes.
+    (when (and (> (len r16) 0) (<= (conv uint32 r) (conv uint32 (.-Hi (aget r16 (- (len r16) 1))))))
+      (return (is16 r16 (conv uint16 r))))
+
+    ^{:go/breaks [[3 167]]} (let [r32 (.-R32 rangeTab)]
+      (when (and (> (len r32) 0) (>= r (conv rune (.-Lo (aget r32 0)))))
+        (return (is32 r32 (conv uint32 r))))
+
+      false)))
+
+
+^{:go/end 181} (go/func isExcludingLatin ^bool [^{:tag (* RangeTable)} rangeTab ^rune r]
+  (let [r16 (.-R16 rangeTab)]
+    ;; Compare as uint32 to correctly handle negative runes.
+    (when [off (.-LatinOffset rangeTab)] (and (> (len r16) off) (<= (conv uint32 r) (conv uint32 (.-Hi (aget r16 (- (len r16) 1))))))
+      (return (is16 (subslice r16 off) (conv uint16 r))))
+
+    ^{:go/breaks [[3 180]]} (let [r32 (.-R32 rangeTab)]
+      (when (and (> (len r32) 0) (>= r (conv rune (.-Lo (aget r32 0)))))
+        (return (is32 r32 (conv uint32 r))))
+
+      false)))
+
+
+
+^{:go/end 190} (go/func IsUpper "IsUpper reports whether the rune is an upper case letter.\n" ^bool [^rune r]
+  ;; See comment in IsGraphic.
+  (when (<= (conv uint32 r) MaxLatin1)
+    (return (== (bit-and (aget properties (conv uint8 r)) pLmask) pLu)))
+
+  (isExcludingLatin Upper r))
+
+
+
+^{:go/end 199} (go/func IsLower "IsLower reports whether the rune is a lower case letter.\n" ^bool [^rune r]
+  ;; See comment in IsGraphic.
+  (when (<= (conv uint32 r) MaxLatin1)
+    (return (== (bit-and (aget properties (conv uint8 r)) pLmask) pLl)))
+
+  (isExcludingLatin Lower r))
+
+
+
+^{:go/end 207} (go/func IsTitle "IsTitle reports whether the rune is a title case letter.\n" ^bool [^rune r]
+  (when (<= r MaxLatin1)
+    (return false))
+
+  (isExcludingLatin Title r))
+
+
+
+
+^{:go/end 228} (go/func lookupCaseRange "lookupCaseRange returns the CaseRange mapping for rune r or nil if no\nmapping exists for r.\n" ^{:tag (* CaseRange)} [^rune r ^{:tag (slice CaseRange)} caseRange]
+  ;; binary search over ranges
+  ^{:go/breaks [[3 227]]} (let [lo 0
+      ^{:line 214} hi (len caseRange)]
+    (while (< lo hi)
+      (let [m (conv int (>> (conv uint (+ lo hi)) 1))
+          ^{:line 217} cr (addr (aget caseRange m))]
+        (when (and (<= (conv rune (.-Lo cr)) r) (<= r (conv rune (.-Hi cr))))
+          (return cr))
+
+        (if (< r (conv rune (.-Lo cr)))
+          (set! hi m)
+
+          (set! lo (+ m 1)))))
+
+
+    nil))
+
+
+
+^{:go/end 247} (go/func convertCase "convertCase converts r to _case using CaseRange cr.\n" ^rune [^int _case ^rune r ^{:tag (* CaseRange)} cr]
+  (let [delta (aget (.-Delta cr) _case)]
+    (when (> delta MaxRune)
+      ;; In an Upper-Lower sequence, which always starts with
+      ;; an UpperCase letter, the real deltas always look like:
+      ;;	{0, 1, 0}    UpperCase (Lower is next)
+      ;;	{-1, 0, -1}  LowerCase (Upper, Title are previous)
+      ;; The characters at even offsets from the beginning of the
+      ;; sequence are upper case; the ones at odd offsets are lower.
+      ;; The correct mapping can be done by clearing or setting the low
+      ;; bit in the sequence offset.
+      ;; The constants UpperCase and TitleCase are even while LowerCase
+      ;; is odd so we take the low bit from _case.
+      (return (+ (conv rune (.-Lo cr)) (bit-or (bit-and-not (- r (conv rune (.-Lo cr))) 1) (conv rune (bit-and _case 1))))))
+
+    (+ r delta)))
+
+
+
+
+^{:go/end 259} (go/func to "to maps the rune using the specified case mapping.\nIt additionally reports whether caseRange contained a mapping for r.\n" [^int _case ^rune r ^{:tag (slice CaseRange)} caseRange] :results [^rune mappedRune ^bool foundMapping]
+  (when (or (< _case 0) (<= MaxCase _case))
+    (return ReplacementChar false)) ; as reasonable an error as any
+
+  (when [cr (lookupCaseRange r caseRange)] (!= cr nil)
+    (return (convertCase _case r cr) true))
+
+  (return r false))
+
+
+
+^{:go/end 265} (go/func To "To maps the rune to the specified case: [UpperCase], [LowerCase], or [TitleCase].\n" ^rune [^int _case ^rune r]
+  (set! (values r _) (to _case r CaseRanges))
+  ^{:line 264} r)
+
+
+
+^{:go/end 276} (go/func ToUpper "ToUpper maps the rune to upper case.\n" ^rune [^rune r]
+  (when (<= r MaxASCII)
+    (when (and (<= \a r) (<= r \z))
+      (set! r - (- \a \A)))
+
+    (return r))
+
+  (To UpperCase r))
+
+
+
+^{:go/end 287} (go/func ToLower "ToLower maps the rune to lower case.\n" ^rune [^rune r]
+  (when (<= r MaxASCII)
+    (when (and (<= \A r) (<= r \Z))
+      (set! r + (- \a \A)))
+
+    (return r))
+
+  (To LowerCase r))
+
+
+
+^{:go/end 298} (go/func ToTitle "ToTitle maps the rune to title case.\n" ^rune [^rune r]
+  (when (<= r MaxASCII)
+    (when (and (<= \a r) (<= r \z)) ; title case is upper case for ASCII
+      (set! r - (- \a \A)))
+
+    (return r))
+
+  (To TitleCase r))
+
+
+
+^{:go/end 307} (go/method ToUpper "ToUpper maps the rune to upper case giving priority to the special mapping.\n" ^rune [^SpecialCase special ^rune r]
+  (let [(values r1 hadMapping) (to UpperCase r (conv (slice CaseRange) special))]
+    (when (and (== r1 r) (not hadMapping))
+      (set! r1 (ToUpper r)))
+
+    ^{:line 306} r1))
+
+
+
+^{:go/end 316} (go/method ToTitle "ToTitle maps the rune to title case giving priority to the special mapping.\n" ^rune [^SpecialCase special ^rune r]
+  (let [(values r1 hadMapping) (to TitleCase r (conv (slice CaseRange) special))]
+    (when (and (== r1 r) (not hadMapping))
+      (set! r1 (ToTitle r)))
+
+    ^{:line 315} r1))
+
+
+
+^{:go/end 325} (go/method ToLower "ToLower maps the rune to lower case giving priority to the special mapping.\n" ^rune [^SpecialCase special ^rune r]
+  (let [(values r1 hadMapping) (to LowerCase r (conv (slice CaseRange) special))]
+    (when (and (== r1 r) (not hadMapping))
+      (set! r1 (ToLower r)))
+
+    ^{:line 324} r1))
+
+
+
+
+
+
+(go/type foldPair "caseOrbit is defined in tables.go as []foldPair. Right now all the\nentries fit in uint16, so use uint16. If that changes, compilation\nwill fail (the constants in the composite literal will not fit in uint16)\nand the types here can change to uint32.\n" (struct
+    ^{:line 332 :tag uint16} From
+    ^{:line 333 :tag uint16} To))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 388} (go/func SimpleFold "SimpleFold iterates over Unicode code points equivalent under\nthe Unicode-defined simple case folding. Among the code points\nequivalent to rune (including rune itself), SimpleFold returns the\nsmallest rune > r if one exists, or else the smallest rune >= 0.\nIf r is not a valid Unicode code point, SimpleFold(r) returns r.\n\nFor example:\n\n\tSimpleFold('A') = 'a'\n\tSimpleFold('a') = 'A'\n\n\tSimpleFold('K') = 'k'\n\tSimpleFold('k') = '\\u212A' (Kelvin symbol, K)\n\tSimpleFold('\\u212A') = 'K'\n\n\tSimpleFold('1') = '1'\n\n\tSimpleFold(-2) = -2\n" ^rune [^rune r]
+  (when (or (< r 0) (> r MaxRune))
+    (return r))
+
+
+  (when (< (conv int r) (len asciiFold))
+    (return (conv rune (aget asciiFold r))))
+
+
+  ;; Consult caseOrbit table for special cases.
+  (let [lo 0
+      ^{:line 365} hi (len caseOrbit)]
+    (while (< lo hi)
+      (let [m (conv int (>> (conv uint (+ lo hi)) 1))]
+        (if (< (conv rune (.-From (aget caseOrbit m))) r)
+          (set! lo (+ m 1))
+
+          (set! hi m))))
+
+
+    (when (and (< lo (len caseOrbit)) (== (conv rune (.-From (aget caseOrbit lo))) r))
+      (return (conv rune (.-To (aget caseOrbit lo)))))
+
+
+    ;; No folding specified. This is a one- or two-element
+    ;; equivalence class containing rune and ToLower(rune)
+    ;; and ToUpper(rune) if they are different from rune.
+    (when [cr (lookupCaseRange r CaseRanges)] (!= cr nil)
+      (when [l (convertCase LowerCase r cr)] (!= l r)
+        (return l))
+
+      (return (convertCase UpperCase r cr)))
+
+    ^{:line 387} r))

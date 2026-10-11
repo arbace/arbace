@@ -1,0 +1,200 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.compress.flate) (go/file "deflatefast.go" :imports [
+
+
+    ^{:line 8} [bits "math/bits"]])
+
+
+(go/const
+
+  ^{:line 13} [^{:val 15 :doc "tableBits is the number of bits used in the hash table.\n"} tableBits 15]
+
+
+  ^{:line 16} [^{:val 32768 :doc "tableSize is the size of the hash table.\n"} tableSize (<< 1 tableBits)]
+
+
+  ^{:line 19} [^{:val 7 :doc "hashLongBytes is the number of bytes used for long table hashes.\n"} hashLongBytes 7]
+
+
+  ^{:line 22} [^{:val 1 :doc "baseMatchOffset is the smallest match offset.\n"} baseMatchOffset 1]
+
+
+  ^{:line 25} [^{:val 3 :doc "baseMatchLength is the smallest match length per RFC section 3.2.5.\n"} baseMatchLength 3]
+
+
+  ^{:line 28} [^{:val 32768 :doc "maxMatchOffset is the largest match offset.\n"} maxMatchOffset (<< 1 15)]
+
+
+  ^{:line 31} [^{:val 327675 :doc "allocHistory is the size to preallocate for history.\n"} allocHistory (* maxStoreBlockSize 5)]
+
+
+  ^{:line 34} [^{:val 2147090437 :doc "bufferReset is the buffer offset at which the history is reset.\n"} bufferReset (- (<< 1 31) allocHistory maxStoreBlockSize 1)])
+
+
+;; fastEncL1 to fastEncL6 provides specialized encoders for levels 1-6
+;; that each provide a different speed/size/memory strategies.
+;;
+;; Level 1: Single small table, 5 byte hashes, sparse indexing.
+;; Level 2: Single big table, 5 byte hashes, indexing ~ every 2 bytes.
+;; Level 3: Single medium table, 5 byte hashes, 2 candidates per table entry.
+;; Level 4: Two tables, 4/7 byte hashes, 1 candidate per table entry.
+;; Level 5: Two tables, 4/7 byte hashes, 2 candidates per 7-byte table entry.
+;; Level 6: Two tables, 4/7 byte hashes, full indexing, checks for repeats.
+;;
+;; Skipping on contiguous non-matches also decreases as levels go up.
+
+
+(go/type fastEnc "fastEnc is the interface implemented by the level 1-6 fast encoders.\n" (interface
+
+    (^{:doc "encode src into dst.\n"} encode [^{:tag (* tokens)} dst ^{:tag (slice byte)} src])
+
+    (^{:doc "reset the encoder so matches are not made with previous data.\n"} reset [])))
+
+
+
+^{:go/end 75} (go/func newFastEnc "newFastEnc returns a fastEnc encoder for the given compression level (1-6).\n" ^fastEnc [^int level]
+  (switch level
+    (case [1]
+      (return (addr (lit fastEncL1 :fastGen (lit fastGen :cur maxStoreBlockSize)))))
+    (case [2]
+      (return (addr (lit fastEncL2 :fastGen (lit fastGen :cur maxStoreBlockSize)))))
+    (case [3]
+      (return (addr (lit fastEncL3 :fastGen (lit fastGen :cur maxStoreBlockSize)))))
+    (case [4]
+      (return (addr (lit fastEncL4 :fastGen (lit fastGen :cur maxStoreBlockSize)))))
+    (case [5]
+      (return (addr (lit fastEncL5 :fastGen (lit fastGen :cur maxStoreBlockSize)))))
+    (case [6]
+      (return (addr (lit fastEncL6 :fastGen (lit fastGen :cur maxStoreBlockSize)))))
+    (default
+      (panic "invalid level specified"))))
+
+
+
+
+
+
+(go/type fastGen "fastGen maintains the table for matches,\nand the previous byte block for level 1 and up.\nThis is the generic implementation.\n" (struct
+    ^{:line 81 :tag (slice byte)} hist
+    ^{:line 82 :tag int32} cur))
+
+
+
+^{:go/end 105} (go/method addBlock "addBlock appends src to the history and returns the offset where src starts in e.hist.\n" ^int32 [^{:tag (* fastGen)} e ^{:tag (slice byte)} src]
+  ;; check if we have space already
+  (when (> (+ (len (.-hist e)) (len src)) (cap (.-hist e)))
+    (if (== (cap (.-hist e)) 0)
+      (set! (.-hist e) (make (slice byte) 0 allocHistory))
+      (do
+        (when (< (cap (.-hist e)) (* maxMatchOffset 2))
+          (panic "unexpected buffer size"))
+
+        ;; Move down
+        (let [offset (- (conv int32 (len (.-hist e))) maxMatchOffset)]
+          (copy (subslice (.-hist e) 0 maxMatchOffset) (subslice (.-hist e) offset (+ offset maxMatchOffset)))
+          (set! (.-cur e) + offset)
+          (set! (.-hist e) (subslice (.-hist e) _ maxMatchOffset))))))
+
+
+  (let [s (conv int32 (len (.-hist e)))]
+    (set! (.-hist e) (append (.-hist e) (spread src)))
+    ^{:line 104} s))
+
+
+
+
+
+^{:go/end 114} (go/method matchLenLimited "matchLenLimited returns the match length between offsets s and t in src.\nThe maximum length returned is maxMatchLength - 4.\nIt is assumed that s > t, that t >= 0 and s < len(src).\n" ^int32 [^{:tag (* fastGen)} e ^int s ^int t ^{:tag (slice byte)} src]
+  (let [a (subslice src s (min (- (+ s maxMatchLength) 4) (len src)))
+      ^{:line 112} b (subslice src t)]
+    (conv int32 (matchLen a b))))
+
+
+
+
+^{:go/end 120} (go/method matchLenLong "matchLenLong returns the match length between offsets s and t in src.\nIt is assumed that s > t, that t >= 0 and s < len(src).\n" ^int32 [^{:tag (* fastGen)} e ^int s ^int t ^{:tag (slice byte)} src]
+  (conv int32 (matchLen (subslice src s) (subslice src t))))
+
+
+
+^{:go/end 133} (go/method reset "reset resets the encoding table to prepare for a new compression stream.\n" [^{:tag (* fastGen)} e]
+  (when (< (cap (.-hist e)) allocHistory)
+    (set! (.-hist e) (make (slice byte) 0 allocHistory)))
+
+  ;; We offset current position so everything will be out of reach.
+  ;; If we are above the buffer reset it will be cleared anyway since len(hist) == 0.
+  (when (<= (.-cur e) bufferReset)
+    (set! (.-cur e) + (+ maxMatchOffset (conv int32 (len (.-hist e))))))
+
+  (set! (.-hist e) (subslice (.-hist e) _ 0)))
+
+
+^{:go/end 135} (go/method getFastGen ^{:tag (* fastGen)} [^{:tag (* fastGen)} f] f)
+
+
+(go/type tableEntry "tableEntry stores the offset of a hash match in the input history.\n" (struct
+    ^{:line 139 :tag int32} offset))
+
+
+
+(go/type tableEntryPrev "tableEntryPrev stores the current and previous offsets for a hash entry.\n" (struct
+    ^{:line 144 :tag tableEntry} cur
+    ^{:line 145 :tag tableEntry} prev))
+
+
+(go/const
+  ^{:line 149} [^{:val 506832829} prime3bytes 506832829]
+  ^{:line 150} [^{:val 2654435761} prime4bytes 2654435761]
+  ^{:line 151} [^{:val 889523592379} prime5bytes 889523592379]
+  ^{:line 152} [^{:val 227718039650203} prime6bytes 227718039650203]
+  ^{:line 153} [^{:val 58295818150454627} prime7bytes 58295818150454627]
+  ^{:line 154} [^{:val 14923729446382167139N} prime8bytes 0xcf1bbcdcb7a56463])
+
+
+
+
+
+
+^{:go/end 176} (go/func hashLen "hashLen returns a hash of the first n bytes of u, using b output bits.\nIt expects 3 <= n <= 8; other values are treated as n == 4.\nThe bit length b must be <= 32.\nb and n should be constants in speed-critical use.\n" ^uint32 [^uint64 u ^uint8 b ^uint8 n]
+  (switch n
+    (case [3]
+      (return (>> (* (conv uint32 (<< u 8)) prime3bytes) (- 32 b))))
+    (case [5]
+      (return (conv uint32 (>> (* (<< u (- 64 40)) prime5bytes) (- 64 b)))))
+    (case [6]
+      (return (conv uint32 (>> (* (<< u (- 64 48)) prime6bytes) (- 64 b)))))
+    (case [7]
+      (return (conv uint32 (>> (* (<< u (- 64 56)) prime7bytes) (- 64 b)))))
+    (case [8]
+      (return (conv uint32 (>> (* u prime8bytes) (- 64 b)))))
+    (default
+      (return (>> (* (conv uint32 u) prime4bytes) (- 32 b))))))
+
+
+
+
+
+^{:go/end 201} (go/func matchLen "matchLen returns the maximum common prefix length of a and b.\na must be the shortest of the two.\n" [^{:tag (slice byte)} a ^{:tag (slice byte)} b] :results [^int n]
+  (let [left (len a)]
+    (while (>= left 8)
+      (let [diff (bit-xor (^{:inst [int]} loadLE64 a n) (^{:inst [int]} loadLE64 b n))]
+        (when (!= diff 0)
+          (return (+ n (>> (bits/TrailingZeros64 diff) 3))))
+
+        (set! n + 8)
+        (set! left - 8)))
+
+
+    (set! a (subslice a n))
+    (set! b (subslice b n))
+    (set! b (subslice b _ (len a)))
+    (range [i a]
+      (when (!= (aget a i) (aget b i))
+        (break))
+
+      (inc! n))
+
+    ^{:line 200} n))

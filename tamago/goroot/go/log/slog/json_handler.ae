@@ -1,0 +1,364 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.log.slog) (go/file "json_handler.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [context "context"]
+    ^{:line 10} [json "encoding/json"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [goexperiment "internal/goexperiment"]
+    ^{:line 14} [io "io"]
+    ^{:line 15} [buffer "log/slog/internal/buffer"]
+    ^{:line 16} [strconv "strconv"]
+    ^{:line 17} [sync "sync"]
+    ^{:line 18} [time "time"]
+    ^{:line 19} [utf8 "unicode/utf8"]])
+
+
+
+
+(go/type JSONHandler "JSONHandler is a [Handler] that writes Records to an [io.Writer] as\nline-delimited JSON objects.\n" (struct
+    (* commonHandler)))
+
+
+
+
+
+^{:go/end 43} (go/func NewJSONHandler "NewJSONHandler creates a [JSONHandler] that writes to w,\nusing the given options.\nIf opts is nil, the default options are used.\n" ^{:tag (* JSONHandler)} [^io/Writer w ^{:tag (* HandlerOptions)} opts]
+  (when (== opts nil)
+    (set! opts (addr (lit HandlerOptions))))
+
+  (addr (lit JSONHandler
+      (addr ^{:go/breaks [2 4 6 8]} (lit commonHandler
+          :json true
+          :w w
+          :opts @opts
+          :mu (addr (lit sync/Mutex)))))))
+
+
+
+
+
+
+^{:go/end 49} (go/method Enabled "Enabled reports whether the handler handles records at the given level.\nThe handler ignores records whose level is lower.\n" ^bool [^{:tag (* JSONHandler)} h ^context/Context _ ^Level level]
+  (.enabled (.-commonHandler h) level))
+
+
+
+
+^{:go/end 55} (go/method WithAttrs "WithAttrs returns a new [JSONHandler] whose attributes consists\nof h's attributes followed by attrs.\n" ^Handler [^{:tag (* JSONHandler)} h ^{:tag (slice Attr)} attrs]
+  (addr (lit JSONHandler :commonHandler (.withAttrs (.-commonHandler h) attrs))))
+
+
+^{:go/end 59} (go/method WithGroup ^Handler [^{:tag (* JSONHandler)} h ^string name]
+  (addr (lit JSONHandler :commonHandler (.withGroup (.-commonHandler h) name))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 91} (go/method Handle "Handle formats its argument [Record] as a JSON object on a single line.\n\nIf the Record's time is zero, the time is omitted.\nOtherwise, the key is \"time\"\nand the value is output as with json.Marshal.\n\nThe level's key is \"level\" and its value is the result of calling [Level.String].\n\nIf the AddSource option is set and source information is available,\nthe key is \"source\", and the value is a record of type [Source].\n\nThe message's key is \"msg\".\n\nTo modify these or other attributes, or remove them from the output, use\n[HandlerOptions.ReplaceAttr].\n\nValues are formatted as with an [encoding/json.Encoder] with SetEscapeHTML(false),\nwith two exceptions.\n\nFirst, an Attr whose Value is of type error is formatted as a string, by\ncalling its Error method. Only errors in Attrs receive this special treatment,\nnot errors embedded in structs, slices, maps or other data structures that\nare processed by the [encoding/json] package.\n\nSecond, an encoding failure does not cause Handle to return an error.\nInstead, the error message is formatted as a string.\n\nEach call to Handle results in a single serialized call to io.Writer.Write.\n" ^error [^{:tag (* JSONHandler)} h ^context/Context _ ^Record r]
+  (.handle (.-commonHandler h) r))
+
+
+
+^{:go/end 104} (go/func appendJSONTime "Adapted from time.Time.MarshalJSON to avoid allocation.\n" [^{:tag (* handleState)} s ^time/Time t]
+  (when [y (.Year t)] (or (< y 0) (>= y 10000))
+    ;; RFC 3339 is clear that years are 4 digits exactly.
+    ;; See golang.org/issue/4556#c15 for more discussion.
+    (.appendError s (errors/New "time.Time year outside of range [0,9999]"))
+    (return))
+
+  (.WriteByte (.-buf s) \")
+  (set! @(.-buf s) (.AppendFormat t @(.-buf s) time/RFC3339Nano))
+  (.WriteByte (.-buf s) \"))
+
+
+^{:go/breaks [[4 139]] :go/end 140} (go/func appendJSONValue ^error [^{:tag (* handleState)} s ^Value v]
+  (switch (.Kind v)
+    (case [KindString]
+      (.appendString s (.str v)))
+    (case [KindInt64]
+      (set! @(.-buf s) (strconv/AppendInt @(.-buf s) (.Int64 v) 10)))
+    (case [KindUint64]
+      (set! @(.-buf s) (strconv/AppendUint @(.-buf s) (.Uint64 v) 10)))
+    (case [KindFloat64]
+      ;; json.Marshal is funny about floats; it doesn't
+      ;; always match strconv.AppendFloat. So just call it.
+      ;; That's expensive, but floats are rare.
+      (when [err (appendJSONMarshal (.-buf s) (.Float64 v))] (!= err nil)
+        (return err)))
+
+    (case [KindBool]
+      (set! @(.-buf s) (strconv/AppendBool @(.-buf s) (.Bool v))))
+    (case [KindDuration]
+      ;; Do what json.Marshal does.
+      (set! @(.-buf s) (strconv/AppendInt @(.-buf s) (conv int64 (.Duration v)) 10)))
+    (case [KindTime]
+      (.appendTime s (.Time v)))
+    (case [KindAny]
+      (let [a (.Any v)
+          (values _ jm) (assert json/Marshaler a)]
+        (if [(values err ok) (assert error a)] (and ok (not jm))
+          (.appendString s (.Error err))
+
+          (return (appendJSONMarshal (.-buf s) a)))))
+
+    (default
+      (panic (fmt/Sprintf "bad kind: %s" (.Kind v)))))
+
+  nil)
+
+
+(go/type jsonEncoder (struct
+    ^{:line 143 :tag (* bytes/Buffer)} buf
+
+    ^{:line 145 :tag (* json/Encoder) :doc "Use a json.Encoder to avoid escaping HTML.\n"} json))
+
+
+(go/var jsonEncoderPool (addr ^{:go/breaks [2]} (lit sync/Pool
+      :New ^{:go/end 156} (fn ^any []
+        (let [enc (addr ^{:go/breaks [2]} (lit jsonEncoder
+                :buf (new bytes/Buffer)))]
+
+          (set! (.-json enc) (json/NewEncoder (.-buf enc)))
+          (.SetEscapeHTML (.-json enc) false)
+          ^{:line 155} enc)))))
+
+
+
+^{:go/end 178} (go/func appendJSONMarshal ^error [^{:tag (* buffer/Buffer)} buf ^any v]
+  (let [j (assert (* jsonEncoder) (.Get jsonEncoderPool))]
+    (defer (^{:go/end 169} (fn []
+          ;; To reduce peak allocation, return only smaller buffers to the pool.
+          (let [^:const ^{:val 16384} maxBufferSize (<< 16 10)]
+            (when (> (.Cap (.-buf j)) maxBufferSize)
+              (return))
+
+            (.Reset (.-buf j))
+            (.Put jsonEncoderPool j)))))
+
+
+    (when [err (.Encode (.-json j) v)] (!= err nil)
+      (return err))
+
+
+    ^{:go/breaks [3]} (let [bs (.Bytes (.-buf j))]
+      (.Write buf (subslice bs _ (- (len bs) 1))) ; remove final newline
+      nil)))
+
+
+
+
+
+
+
+^{:go/end 256} (go/func appendEscapedJSONString "appendEscapedJSONString escapes s for JSON and appends it to buf.\nIt does not surround the string in quotation marks.\n\nModified from encoding/json/encode.go:encodeState.string,\nwith escapeHTML set to false.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} buf ^string s]
+  (let [char ^{:go/end 186} (fn [^byte b] (set! buf (append buf b)))
+      ^{:line 187} str ^{:go/end 187} (fn [^string s] (set! buf (append buf (spread s))))
+
+      ^{:line 189} start 0]
+    (for [i 0] (< i (len s)) _
+      (when [b (aget s i)] (< b utf8/RuneSelf)
+        (when (aget safeSet b)
+          (inc! i)
+          (continue))
+
+        (when (< start i)
+          (str (subslice s start i)))
+
+        (char \\)
+        (switch b
+          (case [\\ \"]
+            (char b))
+          (case [\newline]
+            (char \n))
+          (case [\return]
+            (char \r))
+          (case [\tab]
+            (char \t))
+          (default
+            ;; This encodes bytes < 0x20 except for \t, \n and \r.
+            (str "u00")
+            (char (aget hex (>> b 4)))
+            (char (aget hex (bit-and b 0xF)))))
+
+        (inc! i)
+        (set! start i)
+        (continue))
+
+      (let [(values c size) (utf8/DecodeRuneInString (subslice s i))]
+        (when (and (== c utf8/RuneError) (== size 1))
+          (when (< start i)
+            (str (subslice s start i)))
+
+          (if goexperiment/JSONv2
+            (str "\ufffd") ; see https://go.dev/cl/687116
+
+            (str "\\ufffd"))
+
+          (set! i + size)
+          (set! start i)
+          (continue))
+
+        ;; U+2028 is LINE SEPARATOR.
+        ;; U+2029 is PARAGRAPH SEPARATOR.
+        ;; They are both technically valid characters in JSON strings,
+        ;; but don't work in JSONP, which has to be evaluated as JavaScript,
+        ;; and can lead to security holes there. It is valid JSON to
+        ;; escape them, so we do so unconditionally.
+        ;; See http://timelessrepo.com/json-isnt-a-javascript-subset for discussion.
+        (when (or (== c \u2028) (== c \u2029))
+          (when (< start i)
+            (str (subslice s start i)))
+
+          (str "\\u202")
+          (char (aget hex (bit-and c 0xF)))
+          (set! i + size)
+          (set! start i)
+          (continue))
+
+        (set! i + size)))
+
+    (when (< start (len s))
+      (str (subslice s start)))
+
+    ^{:line 255} buf))
+
+
+(go/const ^{:val "0123456789abcdef"} hex "0123456789abcdef")
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "Copied from encoding/json/tables.go.\n\nsafeSet holds the value true if the ASCII character with the given array\nposition can be represented inside a JSON string without any further\nescaping.\n\nAll values are true except for the ASCII control characters (0-31), the\ndouble quote (\"), and the backslash character (\"\\\").\n"} safeSet (lit (array utf8/RuneSelf bool)
+    ^{:line 269} [\space true]
+    ^{:line 270} [\! true]
+    ^{:line 271} [\" false]
+    ^{:line 272} [\# true]
+    ^{:line 273} [\$ true]
+    ^{:line 274} [\% true]
+    ^{:line 275} [\& true]
+    ^{:line 276} [\' true]
+    ^{:line 277} [\( true]
+    ^{:line 278} [\) true]
+    ^{:line 279} [\* true]
+    ^{:line 280} [\+ true]
+    ^{:line 281} [\, true]
+    ^{:line 282} [\- true]
+    ^{:line 283} [\. true]
+    ^{:line 284} [\/ true]
+    ^{:line 285} [\0 true]
+    ^{:line 286} [\1 true]
+    ^{:line 287} [\2 true]
+    ^{:line 288} [\3 true]
+    ^{:line 289} [\4 true]
+    ^{:line 290} [\5 true]
+    ^{:line 291} [\6 true]
+    ^{:line 292} [\7 true]
+    ^{:line 293} [\8 true]
+    ^{:line 294} [\9 true]
+    ^{:line 295} [\: true]
+    ^{:line 296} [\; true]
+    ^{:line 297} [\< true]
+    ^{:line 298} [\= true]
+    ^{:line 299} [\> true]
+    ^{:line 300} [\? true]
+    ^{:line 301} [\@ true]
+    ^{:line 302} [\A true]
+    ^{:line 303} [\B true]
+    ^{:line 304} [\C true]
+    ^{:line 305} [\D true]
+    ^{:line 306} [\E true]
+    ^{:line 307} [\F true]
+    ^{:line 308} [\G true]
+    ^{:line 309} [\H true]
+    ^{:line 310} [\I true]
+    ^{:line 311} [\J true]
+    ^{:line 312} [\K true]
+    ^{:line 313} [\L true]
+    ^{:line 314} [\M true]
+    ^{:line 315} [\N true]
+    ^{:line 316} [\O true]
+    ^{:line 317} [\P true]
+    ^{:line 318} [\Q true]
+    ^{:line 319} [\R true]
+    ^{:line 320} [\S true]
+    ^{:line 321} [\T true]
+    ^{:line 322} [\U true]
+    ^{:line 323} [\V true]
+    ^{:line 324} [\W true]
+    ^{:line 325} [\X true]
+    ^{:line 326} [\Y true]
+    ^{:line 327} [\Z true]
+    ^{:line 328} [\[ true]
+    ^{:line 329} [\\ false]
+    ^{:line 330} [\] true]
+    ^{:line 331} [\^ true]
+    ^{:line 332} [\_ true]
+    ^{:line 333} [\` true]
+    ^{:line 334} [\a true]
+    ^{:line 335} [\b true]
+    ^{:line 336} [\c true]
+    ^{:line 337} [\d true]
+    ^{:line 338} [\e true]
+    ^{:line 339} [\f true]
+    ^{:line 340} [\g true]
+    ^{:line 341} [\h true]
+    ^{:line 342} [\i true]
+    ^{:line 343} [\j true]
+    ^{:line 344} [\k true]
+    ^{:line 345} [\l true]
+    ^{:line 346} [\m true]
+    ^{:line 347} [\n true]
+    ^{:line 348} [\o true]
+    ^{:line 349} [\p true]
+    ^{:line 350} [\q true]
+    ^{:line 351} [\r true]
+    ^{:line 352} [\s true]
+    ^{:line 353} [\t true]
+    ^{:line 354} [\u true]
+    ^{:line 355} [\v true]
+    ^{:line 356} [\w true]
+    ^{:line 357} [\x true]
+    ^{:line 358} [\y true]
+    ^{:line 359} [\z true]
+    ^{:line 360} [\{ true]
+    ^{:line 361} [\| true]
+    ^{:line 362} [\} true]
+    ^{:line 363} [\~ true]
+    ^{:line 364} [\u007f true]))

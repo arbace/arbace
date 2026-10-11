@@ -1,0 +1,160 @@
+;; AMD Secure Encrypted Virtualization support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.sev) (go/file "page.go" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [binary "encoding/binary"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [fmt "fmt"]
+
+    ^{:line 17} [bits "github.com/usbarmory/tamago/bits"]])
+
+
+
+
+(go/const ^{:val 2147483664 :doc "SEV-ES Guest-Hypervisor Communication Block Standardization\nTable 7: List of Supported Non-Automatic Events.\n"} PAGE_STATE_CHANGE 0x80000010)
+
+
+
+(go/const "SEV-ES Guest-Hypervisor Communication Block Standardization\nTable 9: Page State Change Entry.\n"
+  ^{:line 27} [^{:val 0} PAGE_SIZE_4K 0]
+  ^{:line 28} [^{:val 1} PAGE_SIZE_2M 1])
+
+
+
+
+(go/const "AMD64 Architecture Programmer’s Manual, Volume 3\nRMPADJUST - Adjust RMP Permissions.\n"
+  ^{:line 34} [^{:val 16} RMP_VMSA 16]
+  ^{:line 35} [^{:val 8} RMP_TARGET_PERM_MASK 8]
+  ^{:line 36} [^{:val 0} RMP_TARGET_VMPL 0])
+
+
+(go/type pscHeader (struct
+    ^{:line 40 :tag uint16} CurEntry
+    ^{:line 41 :tag uint16} EndEntry
+    ^{:line 42 :tag uint32} _))
+
+
+^{:go/end 48} (go/method unmarshal [^{:tag (* pscHeader)} h ^{:tag (slice byte)} buf] :results [^error err]
+  (set! (values _ err) (binary/Decode buf binary/LittleEndian h))
+  (return))
+
+
+
+(go/const "Page State Change Entry constants\n"
+
+  ^{:line 53} [^{:val 56 :doc "offsets\n"} entryPageSize 56]
+  ^{:line 54} [^{:val 52} entryOperation 52]
+  ^{:line 55} [^{:val 12} entryGFN 12]
+  ^{:line 56} [^{:val 0} entrycurrentPage 0]
+
+
+  ^{:line 59} [^{:val 1 :doc "page types\n"} privatePage 0x0001]
+  ^{:line 60} [^{:val 2} sharedPage 0x0002]
+
+  ^{:line 62} [^{:val 253} MaxPSCEntries 253])
+
+
+(go/type psc (struct
+    ^{:line 66 :tag pscHeader} Header
+    ^{:line 67 :tag (array MaxPSCEntries uint64)} Entries))
+
+
+^{:go/end 74} (go/method Bytes ^{:tag (slice byte)} [^{:tag (* psc)} r]
+  (let [buf (new bytes/Buffer)]
+    (binary/Write buf binary/LittleEndian r)
+    (.Bytes buf)))
+
+
+^{:go/end 91} (go/method AddEntry [^{:tag (* psc)} r ^int index ^uint64 gpa ^int pageSize ^bool private]
+  (let [^uint64 entry (zero uint64)]
+
+    (bits/SetN64 (addr entry) entryGFN 0xffffffffff (>> gpa 12))
+    (bits/SetN64 (addr entry) entryPageSize 1 (conv uint64 pageSize))
+
+    (if private
+      (bits/SetN64 (addr entry) entryOperation 2r1111 privatePage)
+
+      (bits/SetN64 (addr entry) entryOperation 2r1111 sharedPage))
+
+
+    (aset (.-Entries r) index entry)
+
+    (return)))
+
+
+
+(go/func ^:extern pvalidate "defined in page.s\n" [^uint64 addr ^int size ^bool validate] :results [^uint32 ret])
+(go/func ^:extern rmpadjust [^uint64 addr ^int size ^uint64 attrs] :results [^uint32 ret])
+
+
+
+
+^{:go/end 161} (go/method PageStateChange "PageStateChange requests a page state change to either private/shared\nassignment, as pages are validated/invalidated accordingly any C-Bit\ntransition [see SetEncryptedBit] must be performed after/before.\n" [^{:tag (* GHCB)} b ^uint64 start ^uint64 end ^int pageSize ^bool private] :results [^error err]
+  (let [^uint64 size (zero uint64)
+      ^{:line 102 :tag int} i (zero int)]
+
+    (switch pageSize
+      (case [PAGE_SIZE_4K]
+        (set! size (<< 1 12)))
+      (case [PAGE_SIZE_2M]
+        (set! size (<< 2 20)))
+      (default
+        (return (errors/New "invalid page size"))))
+
+
+    (let [req (addr (lit psc))]
+
+      (for [gpa start] (< gpa end) (set! gpa + size)
+        (when (>= i MaxPSCEntries)
+          (return (errors/New "range exceeds page state change entries size")))
+
+
+        (.AddEntry req i gpa pageSize private)
+        (set! i + 1)
+
+        (if (not private)
+          (when [ret (pvalidate gpa pageSize false)] (!= ret 0)
+            (return (fmt/Errorf "pvalidate error, gpa:%#x ret:%d" gpa ret)))
+
+
+          (defer (^{:go/end 132} (fn []
+                (when [ret (pvalidate gpa pageSize true)] (!= ret 0)
+                  (set! err (fmt/Errorf "pvalidate error, gpa:%#x ret:%d" gpa ret))))))))
+
+
+
+
+
+      (let [last (conv uint16 (- i 1))]
+        (set! (.-EndEntry (.-Header req)) last)
+
+        (when (== (.-Layout b) nil)
+          (when [(set! err (.init b))] (!= err nil)
+            (return)))
+
+
+
+        (let [buf (.Bytes req)]
+          (copy (subslice (.-buf b) SharedBuffer) buf)
+
+          (when [(set! err (.Exit b PAGE_STATE_CHANGE 0 0 (+ (conv uint64 (.-addr b)) SharedBuffer)))] (!= err nil)
+            (return))
+
+
+          (when [(set! err (.unmarshal (.-Header req) (subslice (.-buf b) SharedBuffer (+ SharedBuffer 8))))] (!= err nil)
+            (return (fmt/Errorf "could not parse response header, %v" err)))
+
+
+          (when (or (<= (.-CurEntry (.-Header req)) last) (> (.-EndEntry (.-Header req)) last))
+            (return (fmt/Errorf "incomplete psc (%d/%d/%d)" last (.-CurEntry (.-Header req)) (.-EndEntry (.-Header req)))))
+
+
+          (return))))))

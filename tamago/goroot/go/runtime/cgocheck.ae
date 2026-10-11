@@ -1,0 +1,174 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Code to check that pointer writes follow the cgo rules.
+;; These functions are invoked when GOEXPERIMENT=cgocheck2 is enabled.
+
+(in-ns 'go.runtime) (go/file "cgocheck.go" :imports [
+
+
+    ^{:line 11} [goarch "internal/goarch"]
+    ^{:line 12} [unsafe "unsafe"]])
+
+
+(go/const ^{:val "unpinned Go pointer stored into non-Go memory"} cgoWriteBarrierFail "unpinned Go pointer stored into non-Go memory")
+
+
+
+
+
+
+
+
+
+^{:go/end 69} (go/func ^:go/nosplit ^:go/nowritebarrier cgoCheckPtrWrite "cgoCheckPtrWrite is called whenever a pointer is stored into memory.\nIt throws if the program is storing an unpinned Go pointer into non-Go\nmemory.\n\nThis is called from generated code when GOEXPERIMENT=cgocheck2 is enabled.\n" [^{:tag (* unsafe/Pointer)} dst ^unsafe/Pointer src]
+  (when (not mainStarted)
+    ;; Something early in startup hates this function.
+    ;; Don't start doing any actual checking until the
+    ;; runtime has set itself up.
+    (return))
+
+  (when (not (cgoIsGoPointer src))
+    (return))
+
+  (when (cgoIsGoPointer (conv unsafe/Pointer dst))
+    (return))
+
+
+  ;; If we are running on the system stack then dst might be an
+  ;; address on the stack, which is OK.
+  (let [gp (getg)]
+    (when (or (== gp (.-g0 (.-m gp))) (== gp (.-gsignal (.-m gp))))
+      (return))
+
+
+    ;; Allocating memory can write to various mfixalloc structs
+    ;; that look like they are non-Go memory.
+    (when (!= (.-mallocing (.-m gp)) 0)
+      (return))
+
+
+    ;; If the object is pinned, it's safe to store it in C memory. The GC
+    ;; ensures it will not be moved or freed.
+    (when (isPinned src)
+      (return))
+
+
+    ;; It's OK if writing to memory allocated by persistentalloc.
+    ;; Do this check last because it is more expensive and rarely true.
+    ;; If it is false the expense doesn't matter since we are crashing.
+    (when (inPersistentAlloc (conv uintptr (conv unsafe/Pointer dst)))
+      (return))
+
+
+    (systemstack ^{:go/end 68} (fn []
+        (println "write of unpinned Go pointer" (conv hex (conv uintptr src)) "to non-Go memory" (conv hex (conv uintptr (conv unsafe/Pointer dst))))
+        (throw cgoWriteBarrierFail)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 81} (go/func ^:go/nosplit ^:go/nowritebarrier cgoCheckMemmove "cgoCheckMemmove is called when moving a block of memory.\nIt throws if the program is copying a block that contains an unpinned Go\npointer into non-Go memory.\n\nThis is called from generated code when GOEXPERIMENT=cgocheck2 is enabled.\n" [^{:tag (* _type)} typ ^unsafe/Pointer dst ^unsafe/Pointer src]
+  (cgoCheckMemmove2 typ dst src 0 (.-Size_ typ)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 102} (go/func ^:go/nosplit ^:go/nowritebarrier cgoCheckMemmove2 "cgoCheckMemmove2 is called when moving a block of memory.\ndst and src point off bytes into the value to copy.\nsize is the number of bytes to copy.\nIt throws if the program is copying a block that contains an unpinned Go\npointer into non-Go memory.\n" [^{:tag (* _type)} typ ^unsafe/Pointer dst ^unsafe/Pointer src ^uintptr off ^uintptr size]
+  (when (not (.Pointers typ))
+    (return))
+
+  (when (not (cgoIsGoPointer src))
+    (return))
+
+  (when (cgoIsGoPointer dst)
+    (return))
+
+  (cgoCheckTypedBlock typ src off size))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 127} (go/func ^:go/nosplit ^:go/nowritebarrier cgoCheckSliceCopy "cgoCheckSliceCopy is called when copying n elements of a slice.\nsrc and dst are pointers to the first element of the slice.\ntyp is the element type of the slice.\nIt throws if the program is copying slice elements that contain unpinned Go\npointers into non-Go memory.\n" [^{:tag (* _type)} typ ^unsafe/Pointer dst ^unsafe/Pointer src ^int n]
+  (when (not (.Pointers typ))
+    (return))
+
+  (when (not (cgoIsGoPointer src))
+    (return))
+
+  (when (cgoIsGoPointer dst)
+    (return))
+
+  (let [p src]
+    (for [i 0] (< i n) (inc! i)
+      (cgoCheckTypedBlock typ p 0 (.-Size_ typ))
+      (set! p (add p (.-Size_ typ))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 145} (go/func ^:go/nosplit ^:go/nowritebarrier cgoCheckTypedBlock "cgoCheckTypedBlock checks the block of memory at src, for up to size bytes,\nand throws if it finds an unpinned Go pointer. The type of the memory is typ,\nand src is off bytes into that type.\n" [^{:tag (* _type)} typ ^unsafe/Pointer src ^uintptr off ^uintptr size]
+  ;; Anything past typ.PtrBytes is not a pointer.
+  (when (<= (.-PtrBytes typ) off)
+    (return))
+
+  (when [ptrdataSize (- (.-PtrBytes typ) off)] (> size ptrdataSize)
+    (set! size ptrdataSize))
+
+
+  (cgoCheckBits src (getGCMask typ) off size))
+
+
+
+
+
+
+
+
+^{:go/end 179} (go/func ^:go/nosplit ^:go/nowritebarrier cgoCheckBits "cgoCheckBits checks the block of memory at src, for up to size\nbytes, and throws if it finds an unpinned Go pointer. The gcbits mark each\npointer value. The src pointer is off bytes into the gcbits.\n" [^unsafe/Pointer src ^{:tag (* byte)} gcbits ^uintptr off ^uintptr size]
+  (let [skipMask (/ off goarch/PtrSize 8)
+      ^{:line 155} skipBytes (* skipMask goarch/PtrSize 8)
+      ^{:line 156} ptrmask (addb gcbits skipMask)]
+    (set! src (add src skipBytes))
+    (set! off - skipBytes)
+    (set! size + off)
+    (let [^uint32 bits (zero uint32)]
+      (for [i (conv uintptr 0)] (< i size) (set! i + goarch/PtrSize)
+        (if (== (bit-and i (- (* goarch/PtrSize 8) 1)) 0) (do
+            (set! bits (conv uint32 @ptrmask))
+            (set! ptrmask (addb ptrmask 1)))
+
+          (set! bits >> 1))
+
+        (if (> off 0)
+          (set! off - goarch/PtrSize)
+          (do
+            (when (!= (bit-and bits 1) 0)
+              (let [v @(conv (* unsafe/Pointer) (add src i))]
+                (when (and (cgoIsGoPointer v) (not (isPinned v)))
+                  (throw cgoWriteBarrierFail))))))))))

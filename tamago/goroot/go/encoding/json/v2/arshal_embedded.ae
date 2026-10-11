@@ -1,0 +1,228 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.v2) (go/file "arshal_embedded.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [reflect "reflect"]
+    ^{:line 14} [slices "slices"]
+
+    ^{:line 16} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 17} [jsonopts "encoding/json/internal/jsonopts"]
+    ^{:line 18} [jsonwire "encoding/json/internal/jsonwire"]
+    ^{:line 19} [jsontext "encoding/json/jsontext"]])
+
+
+;; This package supports "embedding" a Go struct field, where the contents
+;; of the serialized field (which must be a JSON object) are treated as if
+;; they are part of the parent Go struct (which represents a JSON object).
+;;
+;; Generally, embedded fields are of a Go struct type, where the fields of the
+;; nested struct are virtually hoisted up to the parent struct using rules
+;; similar to how Go embedding works (but operating within the JSON namespace).
+;;
+;; However, embedded fields may also be of a Go map type with a string key or
+;; a jsontext.Value. Such embedded fields are called "fallback" fields since they
+;; represent any arbitrary JSON object member. Explicitly named fields take
+;; precedence over the embedded fallback. Only one embedded fallback is allowed.
+
+(go/var errRawEmbedNotObject (errors/New "embedded raw value must be a JSON object"))
+
+(go/var jsontextValueType ((inst reflect/TypeFor jsontext/Value)))
+
+
+^{:go/end 166} (go/func marshalEmbeddedFallbackAll "marshalEmbeddedFallbackAll marshals all the members in an embedded fallback.\n" ^error [^{:tag (* jsontext/Encoder)} enc ^addressableValue va ^{:tag (* jsonopts/Struct)} mo ^{:tag (* structField)} f ^{:tag (func [(slice byte)] [bool])} insertUnquotedName]
+  (let [v (lit addressableValue ^{:go/via [Value]} (.Field va (.-index0 f)) (.-forcedAddr va))] ; addressable if struct value is addressable
+    (when (> (len (.-index f)) 0)
+      (set! v (.fieldByIndex v (.-index f) false))
+      (when (not ^{:go/via [Value]} (.IsValid v))
+        (return nil))) ; implies a nil embedded field
+
+
+    (set! v (.indirect v false))
+    (when (not ^{:go/via [Value]} (.IsValid v))
+      (return nil))
+
+
+    (if (== ^{:go/via [Value]} (.Type v) jsontextValueType)
+      (let [(values b _) ((inst reflect/TypeAssert jsontext/Value) (.-Value v))]
+        (when (== (len b) 0) ; TODO: Should this be nil? What if it were all whitespace?
+          (return nil))
+
+
+        (let [dec (.GetBufferedDecoder export b)]
+          (defer (.PutBufferedDecoder export dec))
+          (let [xd (.Decoder export dec)]
+            (.Set ^{:go/via [Struct]} (.-Flags xd) (bit-or jsonflags/AllowDuplicateNames jsonflags/AllowInvalidUTF8 1))
+
+            (let [(values tok err) (.ReadToken dec)]
+              (when (!= err nil)
+                (when (== err io/EOF)
+                  (set! err io/ErrUnexpectedEOF))
+
+                (return (newMarshalErrorBefore enc ^{:go/via [Value]} (.Type v) err)))
+
+              (when (!= (.Kind tok) \{)
+                (return (newMarshalErrorBefore enc ^{:go/via [Value]} (.Type v) errRawEmbedNotObject)))
+
+              (while (!= (.PeekKind dec) \})
+                ;; Parse the JSON object name.
+                (let [^jsonwire/ValueFlags flags (zero jsonwire/ValueFlags)
+                    (values val err) (.ReadValue xd (addr flags))]
+                  (when (!= err nil)
+                    (return (newMarshalErrorBefore enc ^{:go/via [Value]} (.Type v) err)))
+
+                  (when (!= insertUnquotedName nil)
+                    (let [name (jsonwire/UnquoteMayCopy val (.IsVerbatim flags))]
+                      (when (not (insertUnquotedName name))
+                        (return (newDuplicateNameError (.Parent (.StackPointer enc)) val (.OutputOffset enc))))))
+
+
+                  (when [err (.WriteValue enc val)] (!= err nil)
+                    (return err))
+
+
+                  ;; Parse the JSON object value.
+                  (set! (values val err) (.ReadValue xd (addr flags)))
+                  (when (!= err nil)
+                    (return (newMarshalErrorBefore enc ^{:go/via [Value]} (.Type v) err)))
+
+                  (when [err (.WriteValue enc val)] (!= err nil)
+                    (return err))))
+
+
+              (when [(values _ err) (.ReadToken dec)] (!= err nil)
+                (return (newMarshalErrorBefore enc ^{:go/via [Value]} (.Type v) err)))
+
+              (when [err (.CheckEOF xd)] (!= err nil)
+                (return (newMarshalErrorBefore enc ^{:go/via [Value]} (.Type v) err)))
+
+              (return nil)))))
+
+      (let [m v ; must be a map[~string]V
+          ^{:line 109} n ^{:go/via [Value]} (.Len m)]
+        (when (== n 0)
+          (return nil))
+
+        (let [mk (newAddressableValue (.Key ^{:go/via [Value]} (.Type m)))
+            ^{:line 114} mv (newAddressableValue (.Elem ^{:go/via [Value]} (.Type m)))
+            ^{:line 115} marshalKey ^{:go/end 128} (fn ^error [^addressableValue mk]
+              (let [(values b err) (jsonwire/AppendQuote (.AvailableBuffer enc) (conv (slice byte) ^{:go/via [Value]} (.String mk)) (addr (.-Flags mo)))]
+                (when (!= err nil)
+                  (return (newMarshalErrorBefore enc (.Key ^{:go/via [Value]} (.Type m)) err)))
+
+                (when (!= insertUnquotedName nil)
+                  (let [isVerbatim (< (bytes/IndexByte b \\) 0)
+                      ^{:line 122} name (jsonwire/UnquoteMayCopy b isVerbatim)]
+                    (when (not (insertUnquotedName name))
+                      (return (newDuplicateNameError (.Parent (.StackPointer enc)) b (.OutputOffset enc))))))
+
+
+                (.WriteValue enc b)))
+
+            ^{:line 129} marshalVal (.-marshal (.-fncs f))]
+          (when (!= ^{:go/via [ArshalValues]} (.-Marshalers mo) nil)
+            (set! (values marshalVal _) (.lookup (assert (* Marshalers) ^{:go/via [ArshalValues]} (.-Marshalers mo)) marshalVal ^{:go/via [Value]} (.Type mv))))
+
+          (if (or (not (.Get (.-Flags mo) jsonflags/Deterministic)) (<= n 1))
+            (for [iter ^{:go/via [Value]} (.MapRange m)] (.Next iter) _
+              ^{:go/via [Value]} (.SetIterKey mk iter)
+              (when [err (marshalKey mk)] (!= err nil)
+                (return err))
+
+              ^{:go/via [Value]} (.Set mv (.Value iter))
+              (when [err (marshalVal enc mv mo)] (!= err nil)
+                (return err)))
+
+
+
+            (let [names (getStrings n)]
+              (for [(values i iter) (values 0 (.MapRange (.-Value m)))] (and (< i n) (.Next iter)) (inc! i)
+                ^{:go/via [Value]} (.SetIterKey mk iter)
+                (aset @names i ^{:go/via [Value]} (.String mk)))
+
+              (^{:inst [stringSlice string]} slices/Sort @names)
+              (range [_ name @names]
+                ^{:go/via [Value]} (.SetString mk name)
+                (when [err (marshalKey mk)] (!= err nil)
+                  (return err))
+
+                ;; TODO(https://go.dev/issue/57061): Use mv.SetMapIndexOf.
+                ^{:go/via [Value]} (.Set mv ^{:go/via [Value]} (.MapIndex m (.-Value mk)))
+                (when [err (marshalVal enc mv mo)] (!= err nil)
+                  (return err)))
+
+
+              (putStrings names)))
+
+          (return nil))))))
+
+
+
+
+^{:go/end 230} (go/func unmarshalEmbeddedFallbackNext "unmarshalEmbeddedFallbackNext unmarshals only the next member in an embedded fallback.\n" ^error [^{:tag (* jsontext/Decoder)} dec ^addressableValue va ^{:tag (* jsonopts/Struct)} uo ^{:tag (* structField)} f ^{:tag (slice byte)} quotedName ^{:tag (slice byte)} unquotedName]
+  (let [v (lit addressableValue ^{:go/via [Value]} (.Field va (.-index0 f)) (.-forcedAddr va))] ; addressable if struct value is addressable
+    (when (> (len (.-index f)) 0)
+      (set! v (.fieldByIndex v (.-index f) true)))
+
+    (set! v (.indirect v true))
+
+    (if (== ^{:go/via [Value]} (.Type v) jsontextValueType)
+      (let [(values b _) ((inst reflect/TypeAssert (* jsontext/Value)) ^{:go/via [Value]} (.Addr v))]
+        (if (== (len @b) 0) ; TODO: Should this be nil? What if it were all whitespace?
+          (set! @b (append @b \{))
+          (do
+            (set! @b (jsonwire/TrimSuffixWhitespace @b))
+            (if (jsonwire/HasSuffixByte @b \}) (do
+                ;; TODO: When merging into an object for the first time,
+                ;; should we verify that it is valid?
+                (set! @b (jsonwire/TrimSuffixByte @b \}))
+                (set! @b (jsonwire/TrimSuffixWhitespace @b))
+                (when (and (not (jsonwire/HasSuffixByte @b \,)) (not (jsonwire/HasSuffixByte @b \{)))
+                  (set! @b (append @b \,))))
+
+
+              (return (newUnmarshalErrorAfterWithSkipping dec ^{:go/via [Value]} (.Type v) errRawEmbedNotObject)))))
+
+
+        (set! @b (append @b (spread quotedName)))
+        (set! @b (append @b \:))
+        (let [(values val err) (.ReadValue dec)]
+          (when (!= err nil)
+            (return err))
+
+          (set! @b (append @b (spread val)))
+          (set! @b (append @b \}))
+          (return nil)))
+
+      (let [name (conv string unquotedName) ; TODO: Intern this?
+
+          ^{:line 206} m v] ; must be a map[~string]V
+        (when ^{:go/via [Value]} (.IsNil m)
+          ^{:go/via [Value]} (.Set m (reflect/MakeMap ^{:go/via [Value]} (.Type m))))
+
+        (let [mk (reflect/ValueOf name)]
+          (when [mkt (.Key ^{:go/via [Value]} (.Type m))] (!= mkt stringType)
+            (set! mk (.Convert mk mkt)))
+
+          (let [mv (newAddressableValue (.Elem ^{:go/via [Value]} (.Type m)))] ; TODO: Cache across calls?
+            (when [v2 ^{:go/via [Value]} (.MapIndex m mk)] (.IsValid v2)
+              ^{:go/via [Value]} (.Set mv v2))
+
+
+            (let [unmarshal (.-unmarshal (.-fncs f))]
+              (when (!= ^{:go/via [ArshalValues]} (.-Unmarshalers uo) nil)
+                (set! (values unmarshal _) (.lookup (assert (* Unmarshalers) ^{:go/via [ArshalValues]} (.-Unmarshalers uo)) unmarshal ^{:go/via [Value]} (.Type mv))))
+
+              (let [err (unmarshal dec mv uo)]
+                ^{:go/via [Value]} (.SetMapIndex m mk (.-Value mv))
+                (when (!= err nil)
+                  (return err))
+
+                (return nil)))))))))

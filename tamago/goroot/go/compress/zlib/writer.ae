@@ -1,0 +1,204 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.compress.zlib) (go/file "writer.go" :imports [
+
+
+    ^{:line 8} [flate "compress/flate"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [hash "hash"]
+    ^{:line 12} [adler32 "hash/adler32"]
+    ^{:line 13} [io "io"]])
+
+
+
+
+(go/const "These constants are copied from the [flate] package, so that code that imports\n[compress/zlib] does not also have to import [compress/flate].\n"
+  ^{:line 19} [^{:val 0} NoCompression flate/NoCompression]
+  ^{:line 20} [^{:val 1} BestSpeed flate/BestSpeed]
+  ^{:line 21} [^{:val 9} BestCompression flate/BestCompression]
+  ^{:line 22} [^{:val -1} DefaultCompression flate/DefaultCompression]
+  ^{:line 23} [^{:val -2} HuffmanOnly flate/HuffmanOnly])
+
+
+
+
+(go/type Writer "A Writer takes data written to it and writes the compressed\nform of that data to an underlying writer (see [NewWriter]).\n" (struct
+    ^{:line 29 :tag io/Writer} w
+    ^{:line 30 :tag int} level
+    ^{:line 31 :tag (slice byte)} dict
+    ^{:line 32 :tag (* flate/Writer)} compressor
+    ^{:line 33 :tag hash/Hash32} digest
+    ^{:line 34 :tag error} err
+    ^{:line 35 :tag (array 4 byte)} scratch
+    ^{:line 36 :tag bool} wroteHeader))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 51} (go/func NewWriter "NewWriter creates a new [Writer].\nWrites to the returned Writer are compressed and written to w.\n\nIt is the caller's responsibility to call Close on the Writer when done.\nWrites may be buffered and not flushed until Close.\n\nNote that the exact bytes written to w are not covered by the Go 1\ncompatibility promise. Callers, including tests, should not depend on the\nexact written bytes.\n" ^{:tag (* Writer)} [^io/Writer w]
+  (let [(values z _) (NewWriterLevelDict w DefaultCompression nil)]
+    ^{:line 50} z))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 65} (go/func NewWriterLevel "NewWriterLevel is like [NewWriter] but specifies the compression level instead\nof assuming [DefaultCompression].\n\nThe compression level can be [DefaultCompression], [NoCompression], [HuffmanOnly]\nor any integer value between [BestSpeed] and [BestCompression] inclusive.\nThe error returned will be nil if the level is valid.\n\nNote that the exact bytes written to w are not covered by the Go 1\ncompatibility promise. Callers, including tests, should not depend on the\nexact written bytes.\n" [^io/Writer w ^int level] :results [(* Writer) error]
+  (NewWriterLevelDict w level nil))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 85} (go/func NewWriterLevelDict "NewWriterLevelDict is like [NewWriterLevel] but specifies a dictionary to\ncompress with.\n\nThe dictionary may be nil. If not, its contents should not be modified until\nthe Writer is closed.\n\nNote that the exact bytes written to w are not covered by the Go 1\ncompatibility promise. Callers, including tests, should not depend on the\nexact written bytes.\n" [^io/Writer w ^int level ^{:tag (slice byte)} dict] :results [(* Writer) error]
+  (when (or (< level HuffmanOnly) (> level BestCompression))
+    (return nil (fmt/Errorf "zlib: invalid compression level: %d" level)))
+
+  ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4 6]} (lit Writer
+        :w w
+        :level level
+        :dict dict))
+    nil))
+
+
+
+
+
+^{:go/end 102} (go/method Reset "Reset clears the state of the [Writer] z such that it is equivalent to its\ninitial state from [NewWriterLevel] or [NewWriterLevelDict], but instead writing\nto w.\n" [^{:tag (* Writer)} z ^io/Writer w]
+  (set! (.-w z) w)
+  ;; z.level and z.dict left unchanged.
+  (when (!= (.-compressor z) nil)
+    (.Reset (.-compressor z) w))
+
+  (when (!= (.-digest z) nil)
+    (.Reset (.-digest z)))
+
+  (set! (.-err z) nil)
+  (set! (.-scratch z) (lit (array 4 byte)))
+  (set! (.-wroteHeader z) false))
+
+
+
+^{:go/breaks [[14 150]] :go/end 151} (go/method writeHeader "writeHeader writes the ZLIB header.\n" [^{:tag (* Writer)} z] :results [^error err]
+  (set! (.-wroteHeader z) true)
+  ;; ZLIB has a two-byte header (as documented in RFC 1950).
+  ;; The first four bits is the CINFO (compression info), which is 7 for the default deflate window size.
+  ;; The next four bits is the CM (compression method), which is 8 for deflate.
+  (aset (.-scratch z) 0 0x78)
+  ;; The next two bits is the FLEVEL (compression level). The four values are:
+  ;; 0=fastest, 1=fast, 2=default, 3=best.
+  ;; The next bit, FDICT, is set if a dictionary is given.
+  ;; The final five FCHECK bits form a mod-31 checksum.
+  (switch (.-level z)
+    (case [-2 0 1]
+      (aset (.-scratch z) 1 (<< 0 6)))
+    (case [2 3 4 5]
+      (aset (.-scratch z) 1 (<< 1 6)))
+    (case [6 -1]
+      (aset (.-scratch z) 1 (<< 2 6)))
+    (case [7 8 9]
+      (aset (.-scratch z) 1 (<< 3 6)))
+    (default
+      (panic "unreachable")))
+
+  (when (!= (.-dict z) nil)
+    (set! (aget (.-scratch z) 1) bit-or (<< 1 5)))
+
+  (set! (aget (.-scratch z) 1) + (conv uint8 (- 31 (% (.Uint16 binary/BigEndian (subslice (.-scratch z) _ 2)) 31))))
+  (when [(set! (values _ err) (.Write (.-w z) (subslice (.-scratch z) 0 2)))] (!= err nil)
+    (return err))
+
+  (when (!= (.-dict z) nil)
+    ;; The next four bytes are the Adler-32 checksum of the dictionary.
+    (.PutUint32 binary/BigEndian (subslice (.-scratch z)) (adler32/Checksum (.-dict z)))
+    (when [(set! (values _ err) (.Write (.-w z) (subslice (.-scratch z) 0 4)))] (!= err nil)
+      (return err)))
+
+
+  (when (== (.-compressor z) nil)
+    ;; Initialize deflater unless the Writer is being reused
+    ;; after a Reset call.
+    (set! (values (.-compressor z) err) (flate/NewWriterDict (.-w z) (.-level z) (.-dict z)))
+    (when (!= err nil)
+      (return err))
+
+    (set! (.-digest z) (adler32/New)))
+
+  nil)
+
+
+
+
+
+^{:go/end 173} (go/method Write "Write writes a compressed form of p to the underlying [io.Writer]. The\ncompressed bytes are not necessarily flushed until the [Writer] is closed or\nexplicitly flushed.\n" [^{:tag (* Writer)} z ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (not (.-wroteHeader z))
+    (set! (.-err z) (.writeHeader z)))
+
+  (when (!= (.-err z) nil)
+    (return 0 (.-err z)))
+
+  (when (== (len p) 0)
+    (return 0 nil))
+
+  (set! (values n err) (.Write (.-compressor z) p))
+  (when (!= err nil)
+    (set! (.-err z) err)
+    (return))
+
+  (.Write (.-digest z) p)
+  (return))
+
+
+
+^{:go/end 185} (go/method Flush "Flush flushes the Writer to its underlying [io.Writer].\n" ^error [^{:tag (* Writer)} z]
+  (when (not (.-wroteHeader z))
+    (set! (.-err z) (.writeHeader z)))
+
+  (when (!= (.-err z) nil)
+    (return (.-err z)))
+
+  (set! (.-err z) (.Flush (.-compressor z)))
+  (.-err z))
+
+
+
+
+^{:go/end 205} (go/method Close "Close closes the Writer, flushing any unwritten data to the underlying\n[io.Writer], but does not close the underlying io.Writer.\n" ^error [^{:tag (* Writer)} z]
+  (when (not (.-wroteHeader z))
+    (set! (.-err z) (.writeHeader z)))
+
+  (when (!= (.-err z) nil)
+    (return (.-err z)))
+
+  (set! (.-err z) (.Close (.-compressor z)))
+  (when (!= (.-err z) nil)
+    (return (.-err z)))
+
+  (let [checksum (.Sum32 (.-digest z))]
+    ;; ZLIB (RFC 1950) is big-endian, unlike GZIP (RFC 1952).
+    (.PutUint32 binary/BigEndian (subslice (.-scratch z)) checksum)
+    (set! (values _ (.-err z)) (.Write (.-w z) (subslice (.-scratch z) 0 4)))
+    (.-err z)))

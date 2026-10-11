@@ -1,0 +1,297 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.x509) (go/file "cert_pool.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [sha256 "crypto/sha256"]
+    ^{:line 10} [pem "encoding/pem"]
+    ^{:line 11} [sync "sync"]])
+
+
+(go/type sum224 (array sha256/Size224 byte))
+
+
+(go/type CertPool "CertPool is a set of certificates.\n" (struct
+    ^{:line 18 :tag (map string (slice int))} byName ; cert.RawSubject => index into lazyCerts
+
+
+
+    ^{:line 22 :tag (slice lazyCert) :doc "lazyCerts contains funcs that return a certificate,\nlazily parsing/decompressing it as needed.\n"} lazyCerts
+
+
+
+
+
+
+    ^{:line 29 :tag (map sum224 bool) :doc "haveSum maps from sum224(cert.Raw) to true. It's used only\nfor AddCert duplicate detection, to avoid CertPool.contains\ncalls in the AddCert path (because the contains method can\ncall getCert and otherwise negate savings from lazy getCert\nfuncs).\n"} haveSum
+
+
+
+
+
+    ^{:line 35 :tag bool :doc "systemPool indicates whether this is a special pool derived from the\nsystem roots. If it includes additional roots, it requires doing two\nverifications, one using the roots provided by the caller, and one using\nthe system platform verifier.\n"} systemPool))
+
+
+
+
+(go/type lazyCert "lazyCert is minimal metadata about a Cert and a func to retrieve it\nin its normal expanded *Certificate form.\n" (struct
+
+
+
+
+    ^{:line 45 :tag (slice byte) :doc "rawSubject is the Certificate.RawSubject value.\nIt's the same as the CertPool.byName key, but in []byte\nform to make CertPool.Subjects (as used by crypto/tls) do\nfewer allocations.\n"} rawSubject
+
+
+
+
+    ^{:line 50 :tag (func [(slice (* Certificate))] [error]) :doc "constraint is a function to run against a chain when it is a candidate to\nbe added to the chain. This allows adding arbitrary constraints that are\nnot specified in the certificate itself.\n"} constraint
+
+
+
+
+
+
+
+
+
+    ^{:line 60 :tag (func [] [(* Certificate) error]) :doc "getCert returns the certificate.\n\nIt is not meant to do network operations or anything else\nwhere a failure is likely; the func is meant to lazily\nparse/decompress data that is already known to be good. The\nerror in the signature primarily is meant for use in the\ncase where a cert file existed on local disk when the program\nstarted up is deleted later before it's read.\n"} getCert))
+
+
+
+^{:go/end 69} (go/func NewCertPool "NewCertPool returns a new, empty CertPool.\n" ^{:tag (* CertPool)} []
+  (addr ^{:go/breaks [2 4]} (lit CertPool
+      :byName (make (map string (slice int)))
+      :haveSum (make (map sum224 bool)))))
+
+
+
+
+
+^{:go/end 78} (go/method len "len returns the number of certs in the set.\nA nil set is a valid empty set.\n" ^int [^{:tag (* CertPool)} s]
+  (when (== s nil)
+    (return 0))
+
+  (len (.-lazyCerts s)))
+
+
+
+^{:go/end 84} (go/method cert "cert returns cert index n in s.\n" [^{:tag (* CertPool)} s ^int n] :results [(* Certificate) (func [(slice (* Certificate))] [error]) error]
+  (let [(values cert err) ((.-getCert (aget (.-lazyCerts s) n)))]
+    (return cert (.-constraint (aget (.-lazyCerts s) n)) err)))
+
+
+
+^{:go/end 104} (go/method Clone "Clone returns a copy of s.\n" ^{:tag (* CertPool)} [^{:tag (* CertPool)} s]
+  (let [p (addr ^{:go/breaks [2 4 6 8]} (lit CertPool
+          :byName (make (map string (slice int)) (len (.-byName s)))
+          :lazyCerts (make (slice lazyCert) (len (.-lazyCerts s)))
+          :haveSum (make (map sum224 bool) (len (.-haveSum s)))
+          :systemPool (.-systemPool s)))]
+
+    (range [k v (.-byName s)]
+      (let [indexes (make (slice int) (len v))]
+        (copy indexes v)
+        (aset (.-byName p) k indexes)))
+
+    (range [k (.-haveSum s)]
+      (aset (.-haveSum p) k true))
+
+    (copy (.-lazyCerts p) (.-lazyCerts s))
+    ^{:line 103} p))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 127} (go/func SystemCertPool "SystemCertPool returns a copy of the system cert pool.\n\nThe environment variables SSL_CERT_FILE and SSL_CERT_DIR can be used to\noverride the system default locations for the SSL certificate file and SSL\ncertificate files directory, respectively. The latter can be a\ncolon-separated list, or a semicolon-separated list on Windows. On platforms\nwhich have system APIs for certificate verification (macOS and Windows),\nsetting SSL_CERT_FILE or SSL_CERT_DIR will prevent those APIs from being\nused, unless the x509sslcertoverrideplatform=0 GODEBUG setting is used. (This\nchanged in Go 1.27.)\n\nAny mutations to the returned pool are not written to disk and do not affect\nany other pool returned by SystemCertPool.\n\nNew changes in the system cert pool might not be reflected in subsequent calls.\n" [] :results [(* CertPool) error]
+  (when [sysRoots (systemRootsPool)] (!= sysRoots nil)
+    (return (.Clone sysRoots) nil))
+
+
+  (loadSystemRoots))
+
+
+(go/type potentialParent (struct
+    ^{:line 130 :tag (* Certificate)} cert
+    ^{:line 131 :tag (func [(slice (* Certificate))] [error])} constraint))
+
+
+
+
+^{:go/end 174} (go/method findPotentialParents "findPotentialParents returns the certificates in s which might have signed\ncert.\n" ^{:tag (slice potentialParent)} [^{:tag (* CertPool)} s ^{:tag (* Certificate)} cert]
+  (when (== s nil)
+    (return nil))
+
+
+  ;; consider all candidates where cert.Issuer matches cert.Subject.
+  ;; when picking possible candidates the list is built in the order
+  ;; of match plausibility as to save cycles in buildChains:
+  ;;   AKID and SKID match
+  ;;   AKID present, SKID missing / AKID missing, SKID present
+  ;;   AKID and SKID don't match
+  (let [(values ^{:tag (slice potentialParent)} matchingKeyID ^{:tag (slice potentialParent)} oneKeyID ^{:tag (slice potentialParent)} mismatchKeyID) (zero (slice potentialParent))]
+    (range [_ c (aget (.-byName s) (conv string (.-RawIssuer cert)))]
+      (let [(values candidate constraint err) (.cert s c)]
+        (when (!= err nil)
+          (continue))
+
+        (let [kidMatch (bytes/Equal (.-SubjectKeyId candidate) (.-AuthorityKeyId cert))]
+          (switch
+            (case [kidMatch]
+              (set! matchingKeyID (append matchingKeyID (lit potentialParent candidate constraint))))
+            (case [(or ^:go/paren (and (== (len (.-SubjectKeyId candidate)) 0) (> (len (.-AuthorityKeyId cert)) 0))
+                  ^:go/paren (and (> (len (.-SubjectKeyId candidate)) 0) (== (len (.-AuthorityKeyId cert)) 0)))]
+              (set! oneKeyID (append oneKeyID (lit potentialParent candidate constraint))))
+            (default
+              (set! mismatchKeyID (append mismatchKeyID (lit potentialParent candidate constraint))))))))
+
+
+
+    (let [found (+ (len matchingKeyID) (len oneKeyID) (len mismatchKeyID))]
+      (when (== found 0)
+        (return nil))
+
+      (let [candidates (make (slice potentialParent) 0 found)]
+        (set! candidates (append candidates (spread matchingKeyID)))
+        (set! candidates (append candidates (spread oneKeyID)))
+        (set! candidates (append candidates (spread mismatchKeyID)))
+        ^{:line 173} candidates))))
+
+
+^{:go/end 181} (go/method contains ^bool [^{:tag (* CertPool)} s ^{:tag (* Certificate)} cert]
+  (when (== s nil)
+    (return false))
+
+  (aget (.-haveSum s) (sha256/Sum224 (.-Raw cert))))
+
+
+
+^{:go/end 191} (go/method AddCert "AddCert adds a certificate to a pool.\n" [^{:tag (* CertPool)} s ^{:tag (* Certificate)} cert]
+  (when (== cert nil)
+    (panic "adding nil Certificate to CertPool"))
+
+  ^{:go/breaks [5]} (.addCertFunc s (sha256/Sum224 (.-Raw cert)) (conv string (.-RawSubject cert)) ^{:go/end 190} (fn [] :results [(* Certificate) error]
+      (return cert nil))
+    nil))
+
+
+
+
+
+
+
+^{:go/end 215} (go/method addCertFunc "addCertFunc adds metadata about a certificate to a pool, along with\na func to fetch that certificate later when needed.\n\nThe rawSubject is Certificate.RawSubject and must be non-empty.\nThe getCert func may be called 0 or more times.\n" [^{:tag (* CertPool)} s ^sum224 rawSum224 ^string rawSubject ^{:tag (func [] [(* Certificate) error])} getCert ^{:tag (func [(slice (* Certificate))] [error])} constraint]
+  (when (== getCert nil)
+    (panic "getCert can't be nil"))
+
+
+  ;; Check that the certificate isn't being added twice.
+  (when (aget (.-haveSum s) rawSum224)
+    (return))
+
+
+  (aset (.-haveSum s) rawSum224 true)
+  (set! (.-lazyCerts s) (append (.-lazyCerts s) ^{:go/breaks [2 4 6]} (lit lazyCert
+        :rawSubject (conv (slice byte) rawSubject)
+        :getCert getCert
+        :constraint constraint)))
+
+  (aset (.-byName s) rawSubject (append (aget (.-byName s) rawSubject) (- (len (.-lazyCerts s)) 1))))
+
+
+
+
+
+
+
+
+^{:go/end 255} (go/method AppendCertsFromPEM "AppendCertsFromPEM attempts to parse a series of PEM encoded certificates.\nIt appends any certificates found to s and reports whether any certificates\nwere successfully parsed.\n\nOn many Linux systems, /etc/ssl/cert.pem will contain the system wide set\nof root CAs in a format suitable for this function.\n" [^{:tag (* CertPool)} s ^{:tag (slice byte)} pemCerts] :results [^bool ok]
+  (while (> (len pemCerts) 0)
+    (let [^{:tag (* pem/Block)} block (zero (* pem/Block))]
+      (set! (values block pemCerts) (pem/Decode pemCerts))
+      (when (== block nil)
+        (break))
+
+      (when (or (!= (.-Type block) "CERTIFICATE") (!= (len (.-Headers block)) 0))
+        (continue))
+
+
+      (let [certBytes (.-Bytes block)
+          (values cert err) (ParseCertificate certBytes)]
+        (when (!= err nil)
+          (continue))
+
+        (let [^{:tag (struct sync/Once ^{:tag (* Certificate)} v)} lazyCert (zero (struct
+                ^{:line 240} sync/Once
+                ^{:line 241 :tag (* Certificate)} v))]
+
+          ^{:go/breaks [5]} (.addCertFunc s (sha256/Sum224 (.-Raw cert)) (conv string (.-RawSubject cert)) ^{:go/end 250} (fn [] :results [(* Certificate) error]
+              ^{:go/via [Once]} (.Do lazyCert ^{:go/end 248} (fn []
+                  ;; This can't fail, as the same bytes already parsed above.
+                  (set! (values (.-v lazyCert) _) (ParseCertificate certBytes))
+                  (set! certBytes nil)))
+
+              (return (.-v lazyCert) nil))
+            nil)
+          (set! ok true)))))
+
+
+  ^{:line 254} ok)
+
+
+
+
+
+
+
+^{:go/end 268} (go/method Subjects "Subjects returns a list of the DER-encoded subjects of\nall of the certificates in the pool.\n\nDeprecated: if s was returned by [SystemCertPool], Subjects\nwill not include the system roots.\n" ^{:tag (slice (slice byte))} [^{:tag (* CertPool)} s]
+  (let [res (make (slice (slice byte)) (.len s))]
+    (range [i lc (.-lazyCerts s)]
+      (aset res i (.-rawSubject lc)))
+
+    ^{:line 267} res))
+
+
+
+^{:go/breaks [[7 283]] :go/end 284} (go/method Equal "Equal reports whether s and other are equal.\n" ^bool [^{:tag (* CertPool)} s ^{:tag (* CertPool)} other]
+  (when (or (== s nil) (== other nil))
+    (return (== s other)))
+
+  (when (or (!= (.-systemPool s) (.-systemPool other)) (!= (len (.-haveSum s)) (len (.-haveSum other))))
+    (return false))
+
+  (range [h (.-haveSum s)]
+    (when (not (aget (.-haveSum other) h))
+      (return false)))
+
+
+  true)
+
+
+
+
+
+
+
+^{:go/end 298} (go/method AddCertWithConstraint "AddCertWithConstraint adds a certificate to the pool with the additional\nconstraint. When Certificate.Verify builds a chain which is rooted by cert,\nit will additionally pass the whole chain to constraint to determine its\nvalidity. If constraint returns a non-nil error, the chain will be discarded.\nconstraint may be called concurrently from multiple goroutines.\n" [^{:tag (* CertPool)} s ^{:tag (* Certificate)} cert ^{:tag (func [(slice (* Certificate))] [error])} constraint]
+  (when (== cert nil)
+    (panic "adding nil Certificate to CertPool"))
+
+  (.addCertFunc s (sha256/Sum224 (.-Raw cert)) (conv string (.-RawSubject cert)) ^{:go/end 297} (fn [] :results [(* Certificate) error]
+      (return cert nil))
+    ^{:line 297} constraint))

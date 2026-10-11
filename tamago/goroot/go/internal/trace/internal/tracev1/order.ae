@@ -1,0 +1,171 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace.internal.tracev1) (go/file "order.go" :imports [
+
+    ^{:line 7} [errors "errors"]])
+
+(go/type orderEvent (struct
+    ^{:line 10 :tag Event} ev
+    ^{:line 11 :tag (* proc)} proc))
+
+
+(go/type gStatus int)
+
+(go/type gState (struct
+    ^{:line 17 :tag uint64} seq
+    ^{:line 18 :tag gStatus} status))
+
+
+(go/const
+  ^{:line 22} [^{:tag gStatus :val 0} gDead iota]
+  ^{:line 23} [^{:val 1} gRunnable]
+  ^{:line 24} [^{:val 2} gRunning]
+  ^{:line 25} [^{:val 3} gWaiting]
+
+  ^{:line 27} [^{:val 18446744073709551615N} unordered (bit-not (conv uint64 0))]
+  ^{:line 28} [^{:val 18446744073709551614N} garbage (- (bit-not (conv uint64 0)) 1)]
+  ^{:line 29} [^{:val 18446744073709551615N} noseq (bit-not (conv uint64 0))]
+  ^{:line 30} [^{:val 18446744073709551614N} seqinc (- (bit-not (conv uint64 0)) 1)])
+
+
+
+
+^{:go/end 97} (go/func stateTransition "stateTransition returns goroutine state (sequence and status) when the event\nbecomes ready for merging (init) and the goroutine state after the event (next).\n" [^{:tag (* Event)} ev] :results [^uint64 g ^gState init ^gState next]
+  ;; Note that we have an explicit return in each case, as that produces slightly better code (tested on Go 1.19).
+
+  (switch (.-Type ev)
+    (case [EvGoCreate]
+      (set! g (aget (.-Args ev) 0))
+      (set! init (lit gState 0 gDead))
+      (set! next (lit gState 1 gRunnable))
+      (return))
+    (case [EvGoWaiting EvGoInSyscall]
+      (set! g (.-G ev))
+      (set! init (lit gState 1 gRunnable))
+      (set! next (lit gState 2 gWaiting))
+      (return))
+    (case [EvGoStart EvGoStartLabel]
+      (set! g (.-G ev))
+      (set! init (lit gState (aget (.-Args ev) 1) gRunnable))
+      (set! next (lit gState (+ (aget (.-Args ev) 1) 1) gRunning))
+      (return))
+    (case [EvGoStartLocal]
+      ;; noseq means that this event is ready for merging as soon as
+      ;; frontier reaches it (EvGoStartLocal is emitted on the same P
+      ;; as the corresponding EvGoCreate/EvGoUnblock, and thus the latter
+      ;; is already merged).
+      ;; seqinc is a stub for cases when event increments g sequence,
+      ;; but since we don't know current seq we also don't know next seq.
+      (set! g (.-G ev))
+      (set! init (lit gState noseq gRunnable))
+      (set! next (lit gState seqinc gRunning))
+      (return))
+    (case [EvGoBlock EvGoBlockSend EvGoBlockRecv EvGoBlockSelect
+        ^{:line 66} EvGoBlockSync EvGoBlockCond EvGoBlockNet EvGoSleep
+        ^{:line 67} EvGoSysBlock EvGoBlockGC]
+      (set! g (.-G ev))
+      (set! init (lit gState noseq gRunning))
+      (set! next (lit gState noseq gWaiting))
+      (return))
+    (case [EvGoSched EvGoPreempt]
+      (set! g (.-G ev))
+      (set! init (lit gState noseq gRunning))
+      (set! next (lit gState noseq gRunnable))
+      (return))
+    (case [EvGoUnblock EvGoSysExit]
+      (set! g (aget (.-Args ev) 0))
+      (set! init (lit gState (aget (.-Args ev) 1) gWaiting))
+      (set! next (lit gState (+ (aget (.-Args ev) 1) 1) gRunnable))
+      (return))
+    (case [EvGoUnblockLocal EvGoSysExitLocal]
+      (set! g (aget (.-Args ev) 0))
+      (set! init (lit gState noseq gWaiting))
+      (set! next (lit gState seqinc gRunnable))
+      (return))
+    (case [EvGCStart]
+      (set! g garbage)
+      (set! init (lit gState (aget (.-Args ev) 0) gDead))
+      (set! next (lit gState (+ (aget (.-Args ev) 0) 1) gDead))
+      (return))
+    (default
+      ;; no ordering requirements
+      (set! g unordered)
+      (return))))
+
+
+
+^{:go/end 101} (go/func transitionReady ^bool [^uint64 g ^gState curr ^gState init]
+  (or (== g unordered) (and ^:go/paren (or (== (.-seq init) noseq) (== (.-seq init) (.-seq curr))) (== (.-status init) (.-status curr)))))
+
+
+^{:go/end 121} (go/func transition ^error [^{:tag (map uint64 gState)} gs ^uint64 g ^gState init ^gState next]
+  (when (== g unordered)
+    (return nil))
+
+  ^{:go/breaks [5]} (let [curr (aget gs g)]
+    (when (not (transitionReady g curr init))
+      ;; See comment near the call to transition, where we're building the frontier, for details on how this could
+      ;; possibly happen.
+      (return (errors/New "encountered impossible goroutine state transition")))
+
+    (switch (.-seq next)
+      (case [noseq]
+        (set! (.-seq next) (.-seq curr)))
+      (case [seqinc]
+        (set! (.-seq next) (+ (.-seq curr) 1))))
+
+    (aset gs g next)
+    nil))
+
+
+(go/type orderEventList (slice orderEvent))
+
+^{:go/end 127} (go/method Less ^bool [^{:tag (* orderEventList)} l ^int i ^int j]
+  (< (.-Ts (.-ev (aget @l i))) (.-Ts (.-ev (aget @l j)))))
+
+
+^{:go/end 132} (go/method Push [^{:tag (* orderEventList)} h ^orderEvent x]
+  (set! @h (append @h x))
+  (heapUp h (- (len @h) 1)))
+
+
+^{:go/end 141} (go/method Pop ^orderEvent [^{:tag (* orderEventList)} h]
+  (let [n (- (len @h) 1)]
+    (set! (values (aget @h 0) (aget @h n)) (values (aget @h n) (aget @h 0)))
+    (heapDown h 0 n)
+    (let [x (aget @h (- (len @h) 1))]
+      (set! @h (subslice @h _ (- (len @h) 1)))
+      ^{:line 140} x)))
+
+
+^{:go/end 152} (go/func heapUp [^{:tag (* orderEventList)} h ^int j]
+  (while true
+    (let [i (/ (- j 1) 2)] ; parent
+      (when (or (== i j) (not (.Less h j i)))
+        (break))
+
+      (set! (values (aget @h i) (aget @h j)) (values (aget @h j) (aget @h i)))
+      (set! j i))))
+
+
+
+^{:go/end 172} (go/func heapDown ^bool [^{:tag (* orderEventList)} h ^int i0 ^int n]
+  (let [i i0]
+    (while true
+      (let [j1 (+ (* 2 i) 1)]
+        (when (or (>= j1 n) (< j1 0)) ; j1 < 0 after int overflow
+          (break))
+
+        (let [j j1] ; left child
+          (when [j2 (+ j1 1)] (and (< j2 n) (.Less h j2 j1))
+            (set! j j2)) ; = 2*i + 2  // right child
+
+          (when (not (.Less h j i))
+            (break))
+
+          (set! (values (aget @h i) (aget @h j)) (values (aget @h j) (aget @h i)))
+          (set! i j))))
+
+    (> i i0)))

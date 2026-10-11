@@ -1,0 +1,90 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json) (go/file "v2_scanner.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [strings "strings"]
+
+    ^{:line 14} [internal "encoding/json/internal"]
+    ^{:line 15} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 16} [jsontext "encoding/json/jsontext"]])
+
+
+
+(go/var ^{:doc "export exposes internal functionality of the \"jsontext\" package.\n"} export (.Export jsontext/Internal (addr internal/AllowInternalUse)))
+
+
+^{:go/end 25} (go/func Valid "Valid reports whether data is a valid JSON encoding.\n" ^bool [^{:tag (slice byte)} data]
+  (== (checkValid data) nil))
+
+
+^{:go/end 43} (go/func checkValid ^error [^{:tag (slice byte)} data]
+  (let [d (.GetBufferedDecoder export data)]
+    (defer (.PutBufferedDecoder export d))
+    ^{:go/breaks [[5 42]]} (let [xd (.Decoder export d)]
+      (.Set (.-Flags (.-Struct xd)) (bit-or jsonflags/ReportErrorsWithLegacySemantics jsonflags/AllowDuplicateNames jsonflags/AllowInvalidUTF8 1))
+      (when [(values _ err) (.ReadValue d)] (!= err nil)
+        (when (== err io/EOF)
+          (let [offset (+ (.InputOffset d) (conv int64 (len (.UnreadBuffer d))))]
+            (set! err (addr (lit jsontext/SyntacticError :ByteOffset offset :Err io/ErrUnexpectedEOF)))))
+
+        (return (transformSyntacticError err)))
+
+      (when [err (.CheckEOF xd)] (!= err nil)
+        (return (transformSyntacticError err)))
+
+      nil)))
+
+
+
+
+(go/type SyntaxError "A SyntaxError is a description of a JSON syntax error.\n[Unmarshal] will return a SyntaxError if the JSON can't be parsed.\n" (struct
+    ^{:line 48 :tag string} msg ; description of error
+    ^{:line 49 :tag int64} Offset)) ; error occurred after reading Offset bytes
+
+
+^{:go/end 52} (go/method Error ^string [^{:tag (* SyntaxError)} e] (.-msg e))
+
+(go/var errUnexpectedEnd (errors/New "unexpected end of JSON input"))
+
+^{:go/end 79} (go/func transformSyntacticError ^error [^error err]
+  (switch [(values serr ok) (assert (* jsontext/SyntacticError) err)]
+    (case [(!= serr nil)]
+      ;; If the SyntacticError wraps an IO error, unwrap it
+      ;; to match v1 behavior which returned IO errors directly.
+      (when (.IsIOError export (.-Err serr))
+        (return (errors/Unwrap (.-Err serr))))
+
+      (when (== (.-Err serr) io/ErrUnexpectedEOF)
+        (set! (.-Err serr) errUnexpectedEnd))
+
+      (let [msg (.Error (.-Err serr))]
+        (when [i (strings/Index msg " (expecting")] (and (>= i 0) (not (strings/Contains msg " in literal")))
+          (set! msg (subslice msg _ i)))
+
+        (return (addr (lit SyntaxError :Offset (.-ByteOffset serr) :msg (.Replace syntaxErrorReplacer msg))))))
+    (case [ok]
+      (return (conv (* SyntaxError) nil)))
+    (case [(.IsIOError export err)]
+      (return (errors/Unwrap err))) ; v1 historically did not wrap IO errors
+    (default
+      (return err))))
+
+
+
+
+
+
+
+(go/var ^{:doc "syntaxErrorReplacer replaces certain string literals in the v2 error\nto better match the historical string rendering of syntax errors.\nIn particular, v2 uses the terminology \"object name\" to match RFC 8259,\nwhile v1 uses \"object key\", which is not a term found in JSON literature.\n"} syntaxErrorReplacer ^{:go/breaks [1 3 5 7 9]} (strings/NewReplacer
+    "object name" "object key"
+    "at start of value" "looking for beginning of value"
+    "at start of string" "looking for beginning of object key string"
+    "after object value" "after object key:value pair"
+    "in number" "in numeric literal"))

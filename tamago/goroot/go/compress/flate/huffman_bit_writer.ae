@@ -1,0 +1,1114 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.compress.flate) (go/file "huffman_bit_writer.go" :imports [
+
+
+    ^{:line 8} [io "io"]
+    ^{:line 9} [math "math"]
+    ^{:line 10} [sync "sync"]])
+
+
+(go/const
+
+  ^{:line 15} [^{:val 30 :doc "The largest offset code.\n"} offsetCodeCount 30]
+
+
+  ^{:line 18} [^{:val 256 :doc "The special code used to mark the end of a block.\n"} endBlockMarker 256]
+
+
+  ^{:line 21} [^{:val 257 :doc "The first length code.\n"} lengthCodesStart 257]
+
+
+  ^{:line 24} [^{:val 19 :doc "The number of codegen codes.\n"} codegenCodeCount 19]
+  ^{:line 25} [^{:val 255} badCode 255]
+
+
+
+  ^{:line 29} [^{:val 250 :doc "maxPredefinedTokens is the maximum number of tokens\nwhere we check if fixed size is smaller.\n"} maxPredefinedTokens 250]
+
+
+
+
+
+  ^{:line 35} [^{:val 246 :doc "bufferFlushSize indicates the buffer size\nafter which bytes are flushed to the writer.\nShould preferably be a multiple of 6, since\nwe accumulate 6 bytes between writes to the buffer.\n"} bufferFlushSize 246])
+
+
+
+(go/const ^{:val 8 :doc "lengthExtraBitsMinCode is the minimum length code that emits extra bits.\n"} lengthExtraBitsMinCode 8)
+
+
+
+(go/var ^{:doc "lengthExtraBits[i] is the number of extra bits needed by\nlength code i + lengthCodesStart.\n"} lengthExtraBits ^{:go/breaks [2 5 15 25]} (lit (array 32 uint8)
+    0 0 0 ; /* 257 */
+    0 0 0 0 0 1 1 1 1 2 ; /* 260 */
+    2 2 2 3 3 3 3 4 4 4 ; /* 270 */
+    4 5 5 5 5 0)) ; /* 280 */
+
+
+
+(go/var ^{:doc "lengthBase[i] is the length indicated by length code i + lengthCodesStart.\n"} lengthBase ^{:go/breaks [2 12 22]} (lit (array 32 uint8)
+    0 1 2 3 4 5 6 7 8 10
+    12 14 16 20 24 28 32 40 48 56
+    64 80 96 112 128 160 192 224 255))
+
+
+
+(go/const ^{:val 4 :doc "offsetExtraBitsMinCode is the minimum offset code that emits extra bits.\n"} offsetExtraBitsMinCode 4)
+
+
+(go/var ^{:doc "offsetExtraBits[i] is the number of extra bits for offset code i.\n"} offsetExtraBits ^{:go/breaks [2 12 22 [32 66]]} (lit (array 32 int8)
+    0 0 0 0 1 1 2 2 3 3
+    4 4 5 5 6 6 7 7 8 8
+    9 9 10 10 11 11 12 12 13 13
+    ;; /* extended window */
+    14 14))
+
+
+
+(go/var ^{:doc "offsetCombined combines offset lookup of extra bits and offset code in a single table.\n"} offsetCombined ^{:go/breaks [2 10 16 22 28]} (lit (array 32 uint32)
+    0x0 0x0 0x0 0x0 0x401 0x601 0x802 0xc02
+    0x1003 0x1803 0x2004 0x3004 0x4005 0x6005
+    0x8006 0xc006 0x10007 0x18007 0x20008 0x30008
+    0x40009 0x60009 0x8000a 0xc000a 0x10000b 0x18000b
+    0x20000c 0x30000c 0x40000d 0x60000d 0x0 0x0))
+
+;; /*
+;; Generated with:
+;; 
+;; func genOffsetCombined() {
+;; var offsetBase = [32]uint32{
+;; 0x000000, 0x000001, 0x000002, 0x000003, 0x000004,
+;; 0x000006, 0x000008, 0x00000c, 0x000010, 0x000018,
+;; 0x000020, 0x000030, 0x000040, 0x000060, 0x000080,
+;; 0x0000c0, 0x000100, 0x000180, 0x000200, 0x000300,
+;; 0x000400, 0x000600, 0x000800, 0x000c00, 0x001000,
+;; 0x001800, 0x002000, 0x003000, 0x004000, 0x006000,
+;; 
+;; 0x008000, 0x00c000,
+;; }
+;; 
+;; for i := range offsetCombined[:] {
+;; // Don't use extended window values...
+;; if offsetExtraBits[i] == 0 || offsetBase[i] > 0x006000 {
+;; continue
+;; }
+;; offsetCombined[i] = uint32(offsetExtraBits[i]) | (offsetBase[i] << 8)
+;; }
+;; fmt.Printf("offsetCombined = %#v\n", offsetCombined)
+;; }
+;; */
+
+
+(go/var ^{:doc "codegenOrder is the order in which codegen code sizes are written.\n"} codegenOrder (lit (slice uint32) 16 17 18 0 8 7 9 6 10 5 11 4 12 3 13 2 14 1 15))
+
+
+
+
+
+
+
+
+
+(go/type huffmanBitWriter "huffmanBitWriter encodes tokens and values to a stream.\nThe huffmanBitWriter supports reusing huffman tables and will combine\nblocks, if compression is less than creating a new table.\n\nAn incoming block estimates the output size of a new table using a\n'fresh' by calculating the optimal size and adding a penalty.\nA Huffman table is not optimal, which is why we add a penalty,\nand generating a new table is slower for both compression and decompression.\n" (struct
+
+
+
+    ^{:line 118 :tag io/Writer :doc "writer is the underlying writer.\nDo not use it directly; use the write method, which ensures\nthat Write errors are sticky.\n"} writer
+
+
+
+    ^{:line 122 :tag uint64 :doc "Data waiting to be written is bytes[0:nbytes]\nand then the low nbits of bits.\n"} bits
+    ^{:line 123 :tag uint8} nbits
+    ^{:line 124 :tag uint8} nbytes
+
+
+
+    ^{:line 128 :tag bool :doc "If wroteHuffman is set, a table for outputting only literals\nhas been generated and offsets are invalid.\n"} wroteHuffman
+    ^{:line 129 :tag (* huffmanEncoder)} literalEncoding
+    ^{:line 130 :tag (* huffmanEncoder)} tmpLitEncoding
+    ^{:line 131 :tag (* huffmanEncoder)} offsetEncoding
+    ^{:line 132 :tag (* huffmanEncoder)} codegenEncoding
+    ^{:line 133 :tag error} err
+
+
+
+
+    ^{:line 138 :tag int :doc "If prevHeader is non-zero the Huffman table can be reused.\nIt also indicates that an EOB has not yet been emitted, so if a new table\nis generated, an EOB with the previous table must be written.\n"} prevHeader
+
+
+
+
+    ^{:line 143 :tag uint :doc "logNewTablePenalty is a log2 penalty reduction for creating new tables.\nThe initial penalty is 100%.\nAdding 1 will cut the penalty in half.\n"} logNewTablePenalty
+    ^{:line 144 :tag (array (+ 256 8) byte)} bytes
+    ^{:line 145 :tag (array (+ lengthCodesStart 32) uint16)} literalFreq
+    ^{:line 146 :tag (array 32 uint16)} offsetFreq
+    ^{:line 147 :tag (array codegenCodeCount uint16)} codegenFreq
+
+
+    ^{:line 150 :tag (array (+ literalCount offsetCodeCount 1) uint8) :doc "codegen must have an extra space for the final symbol.\n"} codegen))
+
+
+
+^{:go/end 162} (go/func newHuffmanBitWriter "newHuffmanBitWriter creates a new huffmanBitWriter that will write to w.\n" ^{:tag (* huffmanBitWriter)} [^io/Writer w]
+  (addr ^{:go/breaks [2 4 6 8 10]} (lit huffmanBitWriter
+      :writer w
+      :literalEncoding (newHuffmanEncoder literalCount)
+      :tmpLitEncoding (newHuffmanEncoder literalCount)
+      :codegenEncoding (newHuffmanEncoder codegenCodeCount)
+      :offsetEncoding (newHuffmanEncoder offsetCodeCount))))
+
+
+
+
+^{:go/end 170} (go/method reset "reset the huffmanBitWriter state and replace the output.\n" [^{:tag (* huffmanBitWriter)} w ^io/Writer writer]
+  (set! (.-writer w) writer)
+  (set! (values (.-bits w) (.-nbits w) (.-nbytes w) (.-err w)) (values 0 0 0 nil))
+  (set! (.-prevHeader w) 0)
+  (set! (.-wroteHuffman w) false))
+
+
+
+
+^{:go/end 201} (go/method canReuse "canReuse checks if the current generated tables can be\nreused for the provided tokens.\n" [^{:tag (* huffmanBitWriter)} w ^{:tag (* tokens)} t] :results [^bool ok]
+  ^{:go/breaks [[11 200]]} (let [a (subslice (.-offHist t) _ offsetCodeCount)
+      ^{:line 176} b (.-codes (.-offsetEncoding w))]
+    (set! b (subslice b _ (len a)))
+    (range [i v a]
+      (when (and (!= v 0) (.zero (aget b i)))
+        (return false)))
+
+
+
+    (set! a (subslice (.-extraHist t) _ (- literalCount 256)))
+    (set! b (subslice (.-codes (.-literalEncoding w)) 256 literalCount))
+    (set! b (subslice b _ (len a)))
+    (range [i v a]
+      (when (and (!= v 0) (.zero (aget b i)))
+        (return false)))
+
+
+
+    (set! a (subslice (.-litHist t) _ 256))
+    (set! b (subslice (.-codes (.-literalEncoding w)) _ (len a)))
+    (range [i v a]
+      (when (and (!= v 0) (.zero (aget b i)))
+        (return false)))
+
+
+    true))
+
+
+
+
+^{:go/end 231} (go/method flush "flush flushes the currently encoded data.\nAn EOB will be written if the current block hasn't been ended.\n" [^{:tag (* huffmanBitWriter)} w]
+  (when (!= (.-err w) nil)
+    (set! (.-nbits w) 0)
+    (return))
+
+  (when (> (.-prevHeader w) 0)
+    ;; We owe an EOB
+    (.writeCode w (aget (.-codes (.-literalEncoding w)) endBlockMarker))
+    (set! (.-prevHeader w) 0))
+
+  (let [n (.-nbytes w)]
+    (while (!= (.-nbits w) 0)
+      (aset (.-bytes w) n (conv byte (.-bits w)))
+      (set! (.-bits w) >> 8)
+      (if (> (.-nbits w) 8) ; Avoid underflow
+        (set! (.-nbits w) - 8)
+
+        (set! (.-nbits w) 0))
+
+      (inc! n))
+
+    (set! (.-bits w) 0)
+    (when (> n 0)
+      (.write w (subslice (.-bytes w) _ n)))
+
+    (set! (.-nbytes w) 0)))
+
+
+
+
+^{:go/end 240} (go/method write "write writes the provided bytes directly to the output,\nignoring all queued bytes.\n" [^{:tag (* huffmanBitWriter)} w ^{:tag (slice byte)} b]
+  (when (!= (.-err w) nil)
+    (return))
+
+  (set! (values _ (.-err w)) (.Write (.-writer w) b)))
+
+
+
+^{:go/end 249} (go/method writeBits "writeBits writes nb bits from b to the stream.\n" [^{:tag (* huffmanBitWriter)} w ^int32 b ^uint8 nb]
+  (set! (.-bits w) bit-or (<< (conv uint64 b) (bit-and (.-nbits w) 63)))
+  (set! (.-nbits w) + nb)
+  (when (>= (.-nbits w) 48)
+    (.flushBits w)))
+
+
+
+
+^{:go/end 272} (go/method writeBytes "writeBytes writes the provided bytes to the stream.\n" [^{:tag (* huffmanBitWriter)} w ^{:tag (slice byte)} bytes]
+  (when (!= (.-err w) nil)
+    (return))
+
+  (let [n (.-nbytes w)]
+    (when (!= (bit-and (.-nbits w) 7) 0)
+      (set! (.-err w) (conv InternalError "writeBytes with unfinished bits"))
+      (return))
+
+    (while (!= (.-nbits w) 0)
+      (aset (.-bytes w) n (conv byte (.-bits w)))
+      (set! (.-bits w) >> 8)
+      (set! (.-nbits w) - 8)
+      (inc! n))
+
+    (when (!= n 0)
+      (.write w (subslice (.-bytes w) _ n)))
+
+    (set! (.-nbytes w) 0)
+    (.write w bytes)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 363} (go/method generateCodegen "RFC 1951 3.2.7 specifies a special run-length encoding for specifying\nthe literal and offset lengths arrays (which are concatenated into a single\narray).  This method generates that run-length encoding.\n\nThe result is written into the codegen array, and the frequencies\nof each code is written into the codegenFreq array.\nCodes 0-15 are single byte codes. Codes 16-18 are followed by additional\ninformation. Code badCode is an end marker\n\n\tnumLiterals      The number of literals in literalEncoding\n\tnumOffsets       The number of offsets in offsetEncoding\n\tlitenc, offenc   The literal and offset encoder to use\n" [^{:tag (* huffmanBitWriter)} w ^int numLiterals ^int numOffsets ^{:tag (* huffmanEncoder)} litEnc ^{:tag (* huffmanEncoder)} offEnc]
+  (clear (subslice (.-codegenFreq w)))
+  ;; Note that we are using codegen both as a temporary variable for holding
+  ;; a copy of the frequencies, and as the place where we put the result.
+  ;; This is fine because the output is always shorter than the input used
+  ;; so far.
+  (let [codegen (subslice (.-codegen w)) ; cache
+      ;; Copy the concatenated code sizes to codegen. Put a marker at the end.
+      ^{:line 294} cgnl (subslice codegen _ numLiterals)]
+    (range [i cgnl]
+      (aset cgnl i (.len (aget (.-codes litEnc) i))))
+
+
+    (set! cgnl (subslice codegen numLiterals (+ numLiterals numOffsets)))
+    (range [i cgnl]
+      (aset cgnl i (.len (aget (.-codes offEnc) i))))
+
+    (aset codegen (+ numLiterals numOffsets) badCode)
+
+    (let [size (aget codegen 0)
+        ^{:line 306} count 1
+        ^{:line 307} outIndex 0]
+      (for [inIndex 1] (!= size badCode) (inc! inIndex)
+        ;; INVARIANT: We have seen "count" copies of size that have not yet
+        ;; had output generated for them.
+        (let [nextSize (aget codegen inIndex)]
+          (when (== nextSize size)
+            (inc! count)
+            (continue))
+
+          ;; We need to generate codegen indicating "count" of size.
+          (if (!= size 0) (do
+              (aset codegen outIndex size)
+              (inc! outIndex)
+              (inc! (aget (.-codegenFreq w) size))
+              (dec! count)
+              (while (>= count 3)
+                (let [n (min 6 count)]
+                  (aset codegen outIndex 16)
+                  (inc! outIndex)
+                  (aset codegen outIndex (conv uint8 (- n 3)))
+                  (inc! outIndex)
+                  (inc! (aget (.-codegenFreq w) 16))
+                  (set! count - n))))
+
+            (do
+              (while (>= count 11)
+                (let [n (min 138 count)]
+                  (aset codegen outIndex 18)
+                  (inc! outIndex)
+                  (aset codegen outIndex (conv uint8 (- n 11)))
+                  (inc! outIndex)
+                  (inc! (aget (.-codegenFreq w) 18))
+                  (set! count - n)))
+
+              (when (>= count 3)
+                ;; count >= 3 && count <= 10
+                (aset codegen outIndex 17)
+                (inc! outIndex)
+                (aset codegen outIndex (conv uint8 (- count 3)))
+                (inc! outIndex)
+                (inc! (aget (.-codegenFreq w) 17))
+                (set! count 0))))
+
+
+          (dec! count)
+          (for [] (>= count 0) (dec! count)
+            (aset codegen outIndex size)
+            (inc! outIndex)
+            (inc! (aget (.-codegenFreq w) size)))
+
+          ;; Set up invariant for next time through the loop.
+          (set! size nextSize)
+          (set! count 1)))
+
+      ;; Marker indicating the end of the codegen.
+      (aset codegen outIndex badCode))))
+
+
+
+^{:go/end 372} (go/method codegens "codegens returns current number of non-zero codegens.\n" ^int [^{:tag (* huffmanBitWriter)} w]
+  (let [numCodegens (len (.-codegenFreq w))]
+    (while (and (> numCodegens 4) (== (aget (.-codegenFreq w) (aget codegenOrder (- numCodegens 1))) 0))
+      (dec! numCodegens))
+
+    ^{:line 371} numCodegens))
+
+
+
+^{:go/end 385} (go/method headerSize "headerSize returns the size of the header with the current encodings.\n" [^{:tag (* huffmanBitWriter)} w] :results [^int size ^int numCodegens]
+  (set! numCodegens (len (.-codegenFreq w)))
+  (while (and (> numCodegens 4) (== (aget (.-codegenFreq w) (aget codegenOrder (- numCodegens 1))) 0))
+    (dec! numCodegens))
+
+  (return (+ 3 5 5 4 (* 3 numCodegens)
+      (.bitLength (.-codegenEncoding w) (subslice (.-codegenFreq w)))
+      (* (conv int (aget (.-codegenFreq w) 16)) 2)
+      (* (conv int (aget (.-codegenFreq w) 17)) 3)
+      (* (conv int (aget (.-codegenFreq w) 18)) 7)) numCodegens))
+
+
+
+^{:go/end 392} (go/method dynamicReuseSize "dynamicSize returns the size of dynamically encoded data in bits.\n" [^{:tag (* huffmanBitWriter)} w ^{:tag (* huffmanEncoder)} litEnc ^{:tag (* huffmanEncoder)} offEnc] :results [^int size]
+  (set! size (+ (.bitLength litEnc (subslice (.-literalFreq w)))
+      (.bitLength offEnc (subslice (.-offsetFreq w)))))
+  ^{:line 391} size)
+
+
+
+^{:go/end 402} (go/method dynamicSize "dynamicSize returns the size of dynamically encoded data in bits.\n" [^{:tag (* huffmanBitWriter)} w ^{:tag (* huffmanEncoder)} litEnc ^{:tag (* huffmanEncoder)} offEnc ^int extraBits] :results [^int size ^int numCodegens]
+  (let [(values header ^:assign numCodegens) (.headerSize w)]
+    (set! size (+ header
+        (.bitLength litEnc (subslice (.-literalFreq w)))
+        (.bitLength offEnc (subslice (.-offsetFreq w)))
+        ^{:line 400} extraBits))
+    (return size numCodegens)))
+
+
+
+
+^{:go/end 415} (go/method extraBitSize "extraBitSize returns the number of bits that will be written\nas \"extra\" bits on matches.\n" ^int [^{:tag (* huffmanBitWriter)} w]
+  (let [total 0]
+    (range [i n (subslice (.-literalFreq w) 257 literalCount)]
+      (set! total + (* (conv int n) (conv int (aget lengthExtraBits (bit-and i 31))))))
+
+    (range [i n (subslice (.-offsetFreq w) _ offsetCodeCount)]
+      (set! total + (* (conv int n) (conv int (aget offsetExtraBits (bit-and i 31))))))
+
+    ^{:line 414} total))
+
+
+
+^{:go/end 423} (go/method fixedSize "fixedSize returns the size of dynamically encoded data in bits.\n" ^int [^{:tag (* huffmanBitWriter)} w ^int extraBits]
+  (+ 3
+    (.bitLength (fixedLiteralEncoding) (subslice (.-literalFreq w)))
+    (.bitLength (fixedOffsetEncoding) (subslice (.-offsetFreq w)))
+    ^{:line 422} extraBits))
+
+
+
+
+
+^{:go/end 436} (go/method storedSize "storedSize calculates the stored size, including header.\nThe function returns the size in bits and whether the block\nfits inside a single block.\n" [^{:tag (* huffmanBitWriter)} w ^{:tag (slice byte)} in] :results [int bool]
+  (when (== in nil)
+    (return 0 false))
+
+  (when (<= (len in) maxStoreBlockSize)
+    (return (* (+ (len in) 5) 8) true))
+
+  (return 0 false))
+
+
+
+^{:go/end 445} (go/method writeCode "writeCode writes 'c' to the stream.\n" [^{:tag (* huffmanBitWriter)} w ^hcode c]
+  (set! (.-bits w) bit-or (<< (.code64 c) (bit-and (.-nbits w) reg8SizeMask64)))
+  (set! (.-nbits w) + (.len c))
+  (when (>= (.-nbits w) 48)
+    (.flushBits w)))
+
+
+
+
+^{:go/end 468} (go/method flushBits "flushBits writes accumulated bits to the byte buffer.\n" [^{:tag (* huffmanBitWriter)} w]
+  (let [bits (.-bits w)]
+    (set! (.-bits w) >> 48)
+    (set! (.-nbits w) - 48)
+    (let [n (.-nbytes w)]
+
+      ;; We overwrite, but faster...
+      (storeLE64 (subslice (.-bytes w) n) bits)
+      (set! n + 6)
+
+      (when (>= n bufferFlushSize)
+        (when (!= (.-err w) nil)
+          (set! n 0)
+          (return))
+
+        (.write w (subslice (.-bytes w) _ n))
+        (set! n 0))
+
+
+      (set! (.-nbytes w) n))))
+
+
+
+
+
+
+
+^{:go/end 514} (go/method writeDynamicHeader "writeDynamicHeader writes the header of a dynamic Huffman block to the output stream.\n\nnumLiterals is the number of literals specified in codegen.\nnumOffsets is the number of offsets specified in codegen.\nnumCodegens is the number of codegens used in codegen.\n" [^{:tag (* huffmanBitWriter)} w ^int numLiterals ^int numOffsets ^int numCodegens ^bool isEof]
+  (when (!= (.-err w) nil)
+    (return))
+
+  (let [^int32 firstBits 4]
+    (when isEof
+      (set! firstBits 5))
+
+    (.writeBits w firstBits 3)
+    (.writeBits w (conv int32 (- numLiterals 257)) 5)
+    (.writeBits w (conv int32 (- numOffsets 1)) 5)
+    (.writeBits w (conv int32 (- numCodegens 4)) 4)
+
+    (range [i numCodegens]
+      (let [value (conv uint (.len (aget (.-codes (.-codegenEncoding w)) (aget codegenOrder i))))]
+        (.writeBits w (conv int32 value) 3)))
+
+
+    (let [i 0]
+      (while true
+        (let [^:var codeWord (conv uint32 (aget (.-codegen w) i))]
+          (inc! i)
+          (when (== codeWord badCode)
+            (break))
+
+          (.writeCode w (aget (.-codes (.-codegenEncoding w)) codeWord))
+
+          (switch codeWord
+            (case [16]
+              (.writeBits w (conv int32 (aget (.-codegen w) i)) 2)
+              (inc! i))
+            (case [17]
+              (.writeBits w (conv int32 (aget (.-codegen w) i)) 3)
+              (inc! i))
+            (case [18]
+              (.writeBits w (conv int32 (aget (.-codegen w) i)) 7)
+              (inc! i))))))))
+
+
+
+
+
+
+
+^{:go/end 546} (go/method writeStoredHeader "writeStoredHeader writes a stored header.\nIf the stored block is only used for EOF,\nit is replaced with a fixed huffman block.\n" [^{:tag (* huffmanBitWriter)} w ^int length ^bool isEof]
+  (when (!= (.-err w) nil)
+    (return))
+
+  (when (> (.-prevHeader w) 0)
+    ;; We owe an EOB
+    (.writeCode w (aget (.-codes (.-literalEncoding w)) endBlockMarker))
+    (set! (.-prevHeader w) 0))
+
+
+  ;; To write EOF, use a fixed encoding block. 10 bits instead of 5 bytes.
+  (when (and (== length 0) isEof)
+    (.writeFixedHeader w isEof)
+    ;; EOB: 7 bits, value: 0
+    (.writeBits w 0 7)
+    (.flush w)
+    (return))
+
+
+  (let [^int32 flag (zero int32)]
+    (when isEof
+      (set! flag 1))
+
+    (.writeBits w flag 3)
+    (.flush w)
+    (.writeBits w (conv int32 length) 16)
+    (.writeBits w (conv int32 (bit-not (conv uint16 length))) 16)))
+
+
+
+^{:go/end 565} (go/method writeFixedHeader "writeFixedHeader writes a fixed encoding header to the output stream.\n" [^{:tag (* huffmanBitWriter)} w ^bool isEof]
+  (when (!= (.-err w) nil)
+    (return))
+
+  (when (> (.-prevHeader w) 0)
+    ;; We owe an EOB
+    (.writeCode w (aget (.-codes (.-literalEncoding w)) endBlockMarker))
+    (set! (.-prevHeader w) 0))
+
+
+  ;; Indicate that we are a fixed Huffman block
+  (let [^int32 value 2]
+    (when isEof
+      (set! value 3))
+
+    (.writeBits w value 3)))
+
+
+
+
+
+
+
+^{:go/end 631} (go/method writeBlock "writeBlock writes a block of tokens using the smallest encoding.\nThe original input can be supplied, and if the Huffman-encoded data\nis larger than the original bytes, the data will be written as a\nstored block.\nIf the input is nil, the tokens will always be Huffman encoded.\n" [^{:tag (* huffmanBitWriter)} w ^{:tag (* tokens)} tokens ^bool eof ^{:tag (slice byte)} input]
+  (when (!= (.-err w) nil)
+    (return))
+
+
+  (.AddEOB tokens)
+  (when (> (.-prevHeader w) 0)
+    ;; We owe an EOB
+    (.writeCode w (aget (.-codes (.-literalEncoding w)) endBlockMarker))
+    (set! (.-prevHeader w) 0))
+
+  (let [(values numLiterals numOffsets) (.indexTokens w tokens)]
+    (.generate w)
+    (let [^int extraBits (zero int)
+        (values storedSize storable) (.storedSize w input)]
+      (when storable
+        (set! extraBits (.extraBitSize w)))
+
+
+      ;; Figure out smallest code.
+      ;; Fixed Huffman baseline.
+      (let [^:var literalEncoding (fixedLiteralEncoding)
+          ^:var ^{:line 594} offsetEncoding (fixedOffsetEncoding)
+          ^:var ^{:line 595} size math/MaxInt32]
+        (when (< (.-n tokens) maxPredefinedTokens)
+          (set! size (.fixedSize w extraBits)))
+
+
+        ;; Dynamic Huffman?
+        (let [^int numCodegens (zero int)]
+
+          ;; Generate codegen and codegenFrequencies, which indicates how to encode
+          ;; the literalEncoding and the offsetEncoding.
+          (.generateCodegen w numLiterals numOffsets (.-literalEncoding w) (.-offsetEncoding w))
+          (.generate (.-codegenEncoding w) (subslice (.-codegenFreq w)) 7)
+          (let [(values dynamicSize ^:assign numCodegens) (.dynamicSize w (.-literalEncoding w) (.-offsetEncoding w) extraBits)]
+
+            (when (< dynamicSize size)
+              (set! size dynamicSize)
+              (set! literalEncoding (.-literalEncoding w))
+              (set! offsetEncoding (.-offsetEncoding w)))
+
+
+            ;; Stored bytes?
+            (when (and storable (<= storedSize size))
+              (.writeStoredHeader w (len input) eof)
+              (.writeBytes w input)
+              (return))
+
+
+            ;; Huffman.
+            (if (== literalEncoding (fixedLiteralEncoding))
+              (.writeFixedHeader w eof)
+
+              (.writeDynamicHeader w numLiterals numOffsets numCodegens eof))
+
+
+            ;; Write the tokens.
+            (.writeTokens w (.Slice tokens) (.-codes literalEncoding) (.-codes offsetEncoding))))))))
+
+
+
+
+
+^{:go/end 772} (go/method writeBlockDynamic "writeBlockDynamic encodes a block using a dynamic Huffman table.\nThis should be used if the symbols used have a disproportionate\nhistogram distribution.\n" [^{:tag (* huffmanBitWriter)} w ^{:tag (* tokens)} tokens ^bool eof ^{:tag (slice byte)} input ^bool sync]
+  (when (!= (.-err w) nil)
+    (return))
+
+
+  (set! sync (or sync eof))
+  (if sync
+    (.AddEOB tokens)
+
+    ;; Ensure we can always write EOB.
+    (aset (.-extraHist tokens) 0 1))
+
+
+  ;; We cannot reuse pure Huffman table, and must mark as EOF.
+  (when (and ^:go/paren (or (.-wroteHuffman w) eof) (> (.-prevHeader w) 0))
+    ;; We will not try to reuse.
+    (.writeCode w (aget (.-codes (.-literalEncoding w)) endBlockMarker))
+    (set! (.-prevHeader w) 0)
+    (set! (.-wroteHuffman w) false))
+
+
+  (when (and (> (.-prevHeader w) 0) (not (.canReuse w tokens)))
+    (.writeCode w (aget (.-codes (.-literalEncoding w)) endBlockMarker))
+    (set! (.-prevHeader w) 0))
+
+
+  (let [(values numLiterals numOffsets) (.indexTokens w tokens)
+      ^{:line 663} extraBits 0
+      (values ssize storable) (.storedSize w input)]
+
+    (when (or storable (> (.-prevHeader w) 0))
+      (set! extraBits (.extraBitSize w)))
+
+
+    (let [^int size (zero int)]
+
+      ;; Check whether we should reuse the previous Huffman table.
+      (when (> (.-prevHeader w) 0)
+        ;; Estimate size for using a new table.
+        ;; Use the previous header size as the best estimate.
+        (let [newSize (+ (.-prevHeader w) (.EstimatedBits tokens))]
+
+          ;; The estimated size is calculated as an optimal table.
+          ;; We add a penalty to make it more realistic and re-use a bit more.
+          (set! newSize + (+ (conv int (.len (aget (.-codes (.-literalEncoding w)) endBlockMarker))) (>> newSize (.-logNewTablePenalty w))))
+
+          ;; Calculate the size for reusing the current table.
+          (let [reuseSize (+ (.dynamicReuseSize w (.-literalEncoding w) (.-offsetEncoding w)) extraBits)]
+
+            ;; Check if a new table is better.
+            (if (< newSize reuseSize) (do
+                ;; Write the EOB we owe.
+                (.writeCode w (aget (.-codes (.-literalEncoding w)) endBlockMarker))
+                (set! size newSize)
+                (set! (.-prevHeader w) 0))
+
+              (set! size reuseSize))
+
+
+            ;; Small blocks can be more efficient with fixed encoding.
+            (when (< (.-n tokens) maxPredefinedTokens)
+              (when [preSize (+ (.fixedSize w extraBits) 7)] (< preSize size)
+                ;; Check if we get a reasonable size decrease.
+                (when (and storable (<= ssize size))
+                  (.writeStoredHeader w (len input) eof)
+                  (.writeBytes w input)
+                  (return))
+
+                (.writeFixedHeader w eof)
+                (when (not sync)
+                  (.AddEOB tokens))
+
+                (.writeTokens w (.Slice tokens) (.-codes (fixedLiteralEncoding)) (.-codes (fixedOffsetEncoding)))
+                (return)))
+
+
+
+            ;; Check if we get a reasonable size decrease.
+            (when (and storable (<= ssize size))
+              (.writeStoredHeader w (len input) eof)
+              (.writeBytes w input)
+              (return)))))
+
+
+
+      ;; We want a new block/table
+      (when (== (.-prevHeader w) 0)
+        (aset (.-literalFreq w) endBlockMarker 1)
+
+        (.generate w)
+        ;; Generate codegen and codegenFrequencies, which indicates how to encode
+        ;; the literalEncoding and the offsetEncoding.
+        (.generateCodegen w numLiterals numOffsets (.-literalEncoding w) (.-offsetEncoding w))
+        (.generate (.-codegenEncoding w) (subslice (.-codegenFreq w)) 7)
+
+        (let [^int numCodegens (zero int)]
+          (set! (values size numCodegens) (.dynamicSize w (.-literalEncoding w) (.-offsetEncoding w) extraBits))
+
+          ;; Store predefined or raw, if we don't get a reasonable improvement.
+          (when (< (.-n tokens) maxPredefinedTokens)
+            (when [preSize (.fixedSize w extraBits)] (<= preSize size)
+              ;; Store bytes, if we don't get an improvement.
+              (when (and storable (<= ssize preSize))
+                (.writeStoredHeader w (len input) eof)
+                (.writeBytes w input)
+                (return))
+
+              (.writeFixedHeader w eof)
+              (when (not sync)
+                (.AddEOB tokens))
+
+              (.writeTokens w (.Slice tokens) (.-codes (fixedLiteralEncoding)) (.-codes (fixedOffsetEncoding)))
+              (return)))
+
+
+
+          (when (and storable (<= ssize size))
+            ;; Store bytes, if we don't get an improvement.
+            (.writeStoredHeader w (len input) eof)
+            (.writeBytes w input)
+            (return))
+
+
+          ;; Write Huffman table.
+          (.writeDynamicHeader w numLiterals numOffsets numCodegens eof)
+          (when (not sync)
+            (set! (values (.-prevHeader w) _) (.headerSize w)))
+
+          (set! (.-wroteHuffman w) false)))
+
+
+      (when sync
+        (set! (.-prevHeader w) 0))
+
+      ;; Write the tokens.
+      (.writeTokens w (.Slice tokens) (.-codes (.-literalEncoding w)) (.-codes (.-offsetEncoding w))))))
+
+
+
+
+
+^{:go/end 802} (go/method indexTokens "indexTokens indexes a slice of tokens, updates literalFreq and offsetFreq,\nand generates literalEncoding and offsetEncoding.\nIt returns the number of literal and offset tokens.\n" [^{:tag (* huffmanBitWriter)} w ^{:tag (* tokens)} t] :results [^int numLiterals ^int numOffsets]
+  (set! @(conv (* (array 256 uint16)) (subslice (.-literalFreq w))) (.-litHist t))
+  (set! @(conv (* (array 32 uint16)) (subslice (.-literalFreq w) 256)) (.-extraHist t))
+  (set! (.-offsetFreq w) (.-offHist t))
+
+  (when (== (.-n t) 0)
+    (return))
+
+  ;; get the number of literals
+  (set! numLiterals (len (.-literalFreq w)))
+  (while (== (aget (.-literalFreq w) (- numLiterals 1)) 0)
+    (dec! numLiterals))
+
+  ;; get the number of offsets
+  (set! numOffsets (len (.-offsetFreq w)))
+  (while (and (> numOffsets 0) (== (aget (.-offsetFreq w) (- numOffsets 1)) 0))
+    (dec! numOffsets))
+
+  (when (== numOffsets 0)
+    ;; We haven't found a single match. If we want to go with the dynamic encoding,
+    ;; we should count at least one offset to be sure that the offset huffman tree could be encoded.
+    (aset (.-offsetFreq w) 0 1)
+    (set! numOffsets 1))
+
+  (return))
+
+
+
+^{:go/end 808} (go/method generate "generate literalEncoding and offsetEncoding based on respective histograms.\n" [^{:tag (* huffmanBitWriter)} w]
+  (.generate (.-literalEncoding w) (subslice (.-literalFreq w) _ literalCount) 15)
+  (.generate (.-offsetEncoding w) (subslice (.-offsetFreq w) _ offsetCodeCount) 15))
+
+
+
+
+^{:go/end 949} (go/method writeTokens "writeTokens writes a slice of tokens to the output.\nCodes for literal and offset encoding must be supplied.\n" [^{:tag (* huffmanBitWriter)} w ^{:tag (slice token)} tokens ^{:tag (slice hcode)} lenCodes ^{:tag (slice hcode)} offCodes]
+  (when (!= (.-err w) nil)
+    (return))
+
+  (when (== (len tokens) 0)
+    (return))
+
+
+  ;; Only last token should be endBlockMarker.
+  (let [^bool deferEOB (zero bool)]
+    (when (== (aget tokens (- (len tokens) 1)) endBlockMarker)
+      (set! tokens (subslice tokens _ (- (len tokens) 1)))
+      (set! deferEOB true))
+
+
+    ;; Create slices up to the next power of two to avoid bounds checks.
+    (let [lits (subslice lenCodes _ 256)
+        ^{:line 829} offs (subslice offCodes _ 32)
+        ^{:line 830} lengths (subslice lenCodes lengthCodesStart)]
+      (set! lengths (subslice lengths _ 32))
+
+      ;; Go 1.16 LOVES having these on stack.
+      (let [(values bits nbits nbytes) (values (.-bits w) (.-nbits w) (.-nbytes w))]
+
+        (range [_ t tokens]
+          (when (< t 256)
+            (let [c (aget lits t)]
+              (set! bits bit-or (<< (.code64 c) (bit-and nbits 63)))
+              (set! nbits + (.len c))
+              (when (>= nbits 48)
+                (storeLE64 (subslice (.-bytes w) nbytes) bits)
+                (set! bits >> 48)
+                (set! nbits - 48)
+                (set! nbytes + 6)
+                (when (>= nbytes bufferFlushSize)
+                  (when (!= (.-err w) nil)
+                    (set! nbytes 0)
+                    (return))
+
+                  (set! (values _ (.-err w)) (.Write (.-writer w) (subslice (.-bytes w) _ nbytes)))
+                  (set! nbytes 0)))
+
+
+              (continue)))
+
+
+          ;; Write the length
+          (let [length (.length t)
+              ^{:line 860} lenCode (bit-and (lengthCode length) 31)
+              ;; inlined 'w.writeCode(lengths[lengthCode])'
+              ^{:line 862} c (aget lengths lenCode)]
+            (set! bits bit-or (<< (.code64 c) (bit-and nbits 63)))
+            (set! nbits + (.len c))
+            (when (>= nbits 48)
+              (storeLE64 (subslice (.-bytes w) nbytes) bits)
+              (set! bits >> 48)
+              (set! nbits - 48)
+              (set! nbytes + 6)
+              (when (>= nbytes bufferFlushSize)
+                (when (!= (.-err w) nil)
+                  (set! nbytes 0)
+                  (return))
+
+                (set! (values _ (.-err w)) (.Write (.-writer w) (subslice (.-bytes w) _ nbytes)))
+                (set! nbytes 0)))
+
+
+
+            (when (>= lenCode lengthExtraBitsMinCode)
+              (let [extraLengthBits (aget lengthExtraBits lenCode)
+                  ;;w.writeBits(extraLength, extraLengthBits)
+                  ^{:line 883} extraLength (conv int32 (- length (aget lengthBase lenCode)))]
+                (set! bits bit-or (<< (conv uint64 extraLength) (bit-and nbits 63)))
+                (set! nbits + extraLengthBits)
+                (when (>= nbits 48)
+                  (storeLE64 (subslice (.-bytes w) nbytes) bits)
+                  (set! bits >> 48)
+                  (set! nbits - 48)
+                  (set! nbytes + 6)
+                  (when (>= nbytes bufferFlushSize)
+                    (when (!= (.-err w) nil)
+                      (set! nbytes 0)
+                      (return))
+
+                    (set! (values _ (.-err w)) (.Write (.-writer w) (subslice (.-bytes w) _ nbytes)))
+                    (set! nbytes 0)))))
+
+
+
+            ;; Write the offset
+            (let [offset (.offset t)
+                ^{:line 903} offCode (bit-and (>> offset 16) 31)]
+              ;; inlined 'w.writeCode(offs[offCode])'
+              (set! c (aget offs offCode))
+              (set! bits bit-or (<< (.code64 c) (bit-and nbits 63)))
+              (set! nbits + (.len c))
+              (when (>= nbits 48)
+                (storeLE64 (subslice (.-bytes w) nbytes) bits)
+                (set! bits >> 48)
+                (set! nbits - 48)
+                (set! nbytes + 6)
+                (when (>= nbytes bufferFlushSize)
+                  (when (!= (.-err w) nil)
+                    (set! nbytes 0)
+                    (return))
+
+                  (set! (values _ (.-err w)) (.Write (.-writer w) (subslice (.-bytes w) _ nbytes)))
+                  (set! nbytes 0)))
+
+
+
+              (when (>= offCode offsetExtraBitsMinCode)
+                (let [offsetComb (aget offsetCombined offCode)]
+                  (set! bits bit-or (<< (conv uint64 (bit-and (- offset (>> offsetComb 8)) matchOffsetOnlyMask)) (bit-and nbits 63)))
+                  (set! nbits + (conv uint8 offsetComb))
+                  (when (>= nbits 48)
+                    (storeLE64 (subslice (.-bytes w) nbytes) bits)
+                    (set! bits >> 48)
+                    (set! nbits - 48)
+                    (set! nbytes + 6)
+                    (when (>= nbytes bufferFlushSize)
+                      (when (!= (.-err w) nil)
+                        (set! nbytes 0)
+                        (return))
+
+                      (set! (values _ (.-err w)) (.Write (.-writer w) (subslice (.-bytes w) _ nbytes)))
+                      (set! nbytes 0))))))))
+
+
+
+
+        ;; Restore...
+        (set! (values (.-bits w) (.-nbits w) (.-nbytes w)) (values bits nbits nbytes))
+
+        (when deferEOB
+          (.writeCode w (aget lenCodes endBlockMarker)))))))
+
+
+
+
+
+(go/var ^{:doc "huffOffset is a static offset encoder used for Huffman-only encoding.\nIt can be reused since we will not be encoding offset values.\n"} huffOffset (^{:inst [(* huffmanEncoder)]} sync/OnceValue ^{:go/end 959} (fn ^{:tag (* huffmanEncoder)} []
+      (let [w (newHuffmanBitWriter nil)]
+        (aset (.-offsetFreq w) 0 1)
+        (let [h (newHuffmanEncoder offsetCodeCount)]
+          (.generate h (subslice (.-offsetFreq w) _ offsetCodeCount) 15)
+          ^{:line 958} h)))))
+
+
+
+
+
+^{:go/end 1116} (go/method writeBlockHuff "writeBlockHuff encodes a block of bytes as either\nHuffman-encoded literals or uncompressed bytes if the\nresults gain very little from compression.\n" [^{:tag (* huffmanBitWriter)} w ^bool eof ^{:tag (slice byte)} input ^bool sync]
+  (when (!= (.-err w) nil)
+    (return))
+
+
+  ;; Clear histogram
+  (clear (subslice (.-literalFreq w)))
+  (when (not (.-wroteHuffman w))
+    (clear (subslice (.-offsetFreq w))))
+
+
+  (let [^:const ^{:val 257} numLiterals (+ endBlockMarker 1)
+      ^:const ^{:line 976 :val 1} numOffsets 1
+
+      ;; Estimate size of literal encoding.
+      ^:const ^{:line 979 :val 560} guessHeaderSizeBits (* 70 8)] ; 70 bytes; see https://stackoverflow.com/a/25454430
+    (histogram input (subslice (.-literalFreq w) _ numLiterals))
+    (let [(values ssize storable) (.storedSize w input)]
+      (when (and storable (> (len input) 1024))
+        ;; Quick check for incompressible content.
+        ;; The following checks if all frequencies lie
+        ;; close to the average frequency.
+        ;; If so, we quickly store the data uncompressed.
+        ;; This will typically only trigger on random data.
+        ;; Most other data will typically exit after only a few iterations.
+        (let [abs (conv float64 0)
+            ^{:line 990} avg (/ (conv float64 (len input)) 256)
+            ^{:line 991} max (conv float64 (* (len input) 2))]
+          (range [_ v (subslice (.-literalFreq w) _ 256)]
+            (let [diff (- (conv float64 v) avg)]
+              (set! abs + (* diff diff))
+              (when (>= abs max)
+                (break))))
+
+
+          (when (< abs max)
+            ;; No chance we can compress this...
+            (.writeStoredHeader w (len input) eof)
+            (.writeBytes w input)
+            (return))))
+
+
+      (aset (.-literalFreq w) endBlockMarker 1)
+      (.generate (.-tmpLitEncoding w) (subslice (.-literalFreq w) _ numLiterals) 15)
+      (let [estBits (.canEncodeLen (.-tmpLitEncoding w) (subslice (.-literalFreq w) _ numLiterals))]
+        (when (< estBits math/MaxInt32)
+          (set! estBits + (.-prevHeader w))
+          (when (== (.-prevHeader w) 0)
+            (set! estBits + guessHeaderSizeBits))
+
+          (set! estBits + (>> estBits (.-logNewTablePenalty w))))
+
+
+        ;; Store bytes, if we don't get a reasonable improvement.
+        (when (and storable (<= ssize estBits))
+          (.writeStoredHeader w (len input) eof)
+          (.writeBytes w input)
+          (return))
+
+
+        (when (> (.-prevHeader w) 0)
+          (let [reuseSize (.canEncodeLen (.-literalEncoding w) (subslice (.-literalFreq w) _ 256))]
+            (when (< estBits reuseSize)
+              ;; We owe an EOB
+              (.writeCode w (aget (.-codes (.-literalEncoding w)) endBlockMarker))
+              (set! (.-prevHeader w) 0))))
+
+
+
+        (when (== (.-prevHeader w) 0)
+          ;; Use the temp encoding, so swap.
+          (set! (values (.-literalEncoding w) (.-tmpLitEncoding w)) (values (.-tmpLitEncoding w) (.-literalEncoding w)))
+          ;; Generate codegen and codegenFrequencies, which indicates how to encode
+          ;; the literalEncoding and the offsetEncoding.
+          (.generateCodegen w numLiterals numOffsets (.-literalEncoding w) (huffOffset))
+          (.generate (.-codegenEncoding w) (subslice (.-codegenFreq w)) 7)
+          (let [numCodegens (.codegens w)]
+
+            ;; Huffman.
+            (.writeDynamicHeader w numLiterals numOffsets numCodegens eof)
+            (set! (.-wroteHuffman w) true)
+            (set! (values (.-prevHeader w) _) (.headerSize w))))
+
+
+        (let [encoding (subslice (.-codes (.-literalEncoding w)) _ 256)
+            ;; Go 1.16 LOVES having these on stack. At least 1.5x the speed.
+            (values bits nbits nbytes) (values (.-bits w) (.-nbits w) (.-nbytes w))]
+
+          ;; Unroll, write 3 codes/loop.
+          ;; Fastest number of unrolls.
+          (while (> (len input) 3)
+            ;; We must have at least 48 bits free.
+            (when (>= nbits 8)
+              (let [n (>> nbits 3)]
+                (storeLE64 (subslice (.-bytes w) nbytes) bits)
+                (set! bits >> (bit-and (* n 8) 63))
+                (set! nbits - (* n 8))
+                (set! nbytes + n)))
+
+            (when (>= nbytes bufferFlushSize)
+              (when (!= (.-err w) nil)
+                (set! nbytes 0)
+                (return))
+
+              (set! (values _ (.-err w)) (.Write (.-writer w) (subslice (.-bytes w) _ nbytes)))
+              (set! nbytes 0))
+
+            (let [(values a b) (values (aget encoding (aget input 0)) (aget encoding (aget input 1)))]
+              (set! bits bit-or (<< (.code64 a) (bit-and nbits 63)))
+              (set! bits bit-or (<< (.code64 b) (bit-and (+ nbits (.len a)) 63)))
+              (let [c (aget encoding (aget input 2))]
+                (set! nbits + (+ (.len b) (.len a)))
+                (set! bits bit-or (<< (.code64 c) (bit-and nbits 63)))
+                (set! nbits + (.len c))
+                (set! input (subslice input 3)))))
+
+
+          ;; Remaining...
+          (range [_ t input]
+            (when (>= nbits 48)
+              (storeLE64 (subslice (.-bytes w) nbytes) bits)
+              (set! bits >> 48)
+              (set! nbits - 48)
+              (set! nbytes + 6)
+              (when (>= nbytes bufferFlushSize)
+                (when (!= (.-err w) nil)
+                  (set! nbytes 0)
+                  (return))
+
+                (set! (values _ (.-err w)) (.Write (.-writer w) (subslice (.-bytes w) _ nbytes)))
+                (set! nbytes 0)))
+
+
+            ;; Bitwriting inlined, ~30% speedup
+            (let [c (aget encoding t)]
+              (set! bits bit-or (<< (.code64 c) (bit-and nbits 63)))
+
+              (set! nbits + (.len c))))
+
+          ;; Restore...
+          (set! (values (.-bits w) (.-nbits w) (.-nbytes w)) (values bits nbits nbytes))
+
+          ;; Flush if needed to have space.
+          (when (>= (.-nbits w) 48)
+            (.flushBits w))
+
+
+          (when (or eof sync)
+            (.writeCode w (aget (.-codes (.-literalEncoding w)) endBlockMarker))
+            (set! (.-prevHeader w) 0)
+            (set! (.-wroteHuffman w) false)))))))

@@ -1,0 +1,243 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.mldsa) (go/file "semiexpanded.go" :imports [
+
+
+    ^{:line 8} [drbg "crypto/internal/fips140/drbg"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [bits "math/bits"]])
+
+
+;; FIPS 204 defines a needless semi-expanded format for private keys. This is
+;; not a good format for key storage and exchange, because it is large and
+;; requires careful parsing to reject malformed keys. Seeds instead are just 32
+;; bytes, are always valid, and always expand to valid keys in memory. It is
+;; *also* a poor in-memory format, because it defers computing the NTT of s1,
+;; s2, and t0 and the expansion of A until signing time, which is inefficient.
+;; For a hot second, it looked like we could have all agreed to only use seeds,
+;; but unfortunately OpenSSL and BouncyCastle lobbied hard against that during
+;; the WGLC of the LAMPS IETF working group. Also, ACVP tests provide and expect
+;; semi-expanded keys, so we implement them here for testing purposes.
+
+^{:go/end 30} (go/func semiExpandedPrivKeySize ^int [^parameters p]
+  (let [(values k l) (values (.-k p) (.-l p))
+      ^{:line 26} ηBitlen (+ (bits/Len (conv uint (.-η p))) 1)]
+    ;; ρ + K + tr + l × n × η-bit coefficients of s₁ +
+    ;; k × n × η-bit coefficients of s₂ + k × n × 13-bit coefficients of t₀
+    (+ 32 32 64 (/ (* l n ηBitlen) 8) (/ (* k n ηBitlen) 8) (/ (* k n 13) 8))))
+
+
+
+
+
+
+
+
+^{:go/end 116} (go/func TestingOnlyNewPrivateKeyFromSemiExpanded "TestingOnlyNewPrivateKeyFromSemiExpanded creates a PrivateKey from a\nsemi-expanded private key encoding, for testing purposes. It rejects\ninconsistent keys.\n\n[PrivateKey.Bytes] must NOT be called on the resulting key, as it will\nproduce a random value.\n" [^{:tag (slice byte)} sk] :results [(* PrivateKey) error]
+  (let [^parameters p (zero parameters)]
+    (switch (len sk)
+      (case [(semiExpandedPrivKeySize params44)]
+        (set! p params44))
+      (case [(semiExpandedPrivKeySize params65)]
+        (set! p params65))
+      (case [(semiExpandedPrivKeySize params87)]
+        (set! p params87))
+      (default
+        (return nil (errors/New "mldsa: invalid semi-expanded private key size"))))
+
+    (let [(values k l) (values (.-k p) (.-l p))
+
+        (values ρ K tr s1 s2 t0 err) (skDecode sk p)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (let [priv (addr (lit PrivateKey :pub (lit PublicKey :p p)))]
+        (set! (.-k priv) K)
+        (set! (.-tr (.-pub priv)) tr)
+        (let [A (subslice (.-a priv) _ (* k l))]
+          (computeMatrixA A (subslice ρ) p)
+          (range [r l]
+            (aset (.-s1 priv) r (ntt (aget s1 r))))
+
+          (range [r k]
+            (aset (.-s2 priv) r (ntt (aget s2 r))))
+
+          (range [r k]
+            (aset (.-t0 priv) r (ntt (aget t0 r))))
+
+
+          ;; We need to put something in priv.seed, and putting random bytes feels
+          ;; safer than putting anything predictable.
+          (drbg/Read (subslice (.-seed priv)))
+
+          ;; Making this format *even more* annoying, we need to recompute t1 from ρ,
+          ;; s1, and s2 if we want to generate the public key. This is essentially as
+          ;; much work as regenerating everything from seed.
+          ;;
+          ;; You might also notice that the semi-expanded format also stores t0 and a
+          ;; hash of the public key, though. How are we supposed to check they are
+          ;; consistent without regenerating the public key? Do we even need to check?
+          ;; Who knows! FIPS 204 says
+          ;;
+          ;;  > Note that there exist malformed inputs that can cause skDecode to
+          ;;  > return values that are not in the correct range. Hence, skDecode
+          ;;  > should only be run on inputs that come from trusted sources.
+          ;;
+          ;; so it sounds like it doesn't even want us to check the coefficients are
+          ;; within bounds, but especially if using this format for key exchange, that
+          ;; sounds like a bad idea. So we check everything.
+
+          (let [t1 (make (slice (array n uint16)) k maxK)]
+            (range [i k]
+              (let [tHat (aget (.-s2 priv) i)]
+                (range [j l]
+                  (set! tHat (^{:inst [nttElement]} polyAdd tHat (nttMul (aget A (+ (* i l) j)) (aget (.-s1 priv) j)))))
+
+                (let [t (inverseNTT tHat)]
+                  (range [j n]
+                    (let [(values r1 r0) (power2Round (aget t j))]
+                      (aset (aget t1 i) j r1)
+                      (when (!= r0 (aget (aget t0 i) j))
+                        (return nil (errors/New "mldsa: semi-expanded private key inconsistent with t0"))))))))
+
+
+
+
+            (let [pk (pkEncode (subslice (.-raw (.-pub priv)) _ 0) (subslice ρ) t1 p)]
+              (when (!= (computePublicKeyHash pk) tr)
+                (return nil (errors/New "mldsa: semi-expanded private key inconsistent with public key hash")))
+
+              (computeT1Hat (subslice (.-t1 priv) _ k) t1) ; NTT(t₁ ⋅ 2ᵈ)
+
+              (return priv nil))))))))
+
+
+^{:go/end 135} (go/func TestingOnlyPrivateKeySemiExpandedBytes ^{:tag (slice byte)} [^{:tag (* PrivateKey)} priv]
+  (let [(values k l η) (values (.-k (.-p (.-pub priv))) (.-l (.-p (.-pub priv))) (.-η (.-p (.-pub priv))))
+      ^{:line 120} sk (make (slice byte) 0 (semiExpandedPrivKeySize (.-p (.-pub priv))))]
+    (set! sk (append sk (spread (subslice (.-raw (.-pub priv)) _ 32)))) ; ρ
+    (set! sk (append sk (spread (subslice (.-k priv))))) ; K
+    (set! sk (append sk (spread (subslice (.-tr (.-pub priv)))))) ; tr
+    (range [i l]
+      (set! sk (bitPackSlow sk (inverseNTT (aget (.-s1 priv) i)) η η)))
+
+    (range [i k]
+      (set! sk (bitPackSlow sk (inverseNTT (aget (.-s2 priv) i)) η η)))
+
+    (let [^:const ^{:val 4096} bound (<< 1 (- 13 1))] ; 2^(d-1)
+      (range [i k]
+        (set! sk (bitPackSlow sk (inverseNTT (aget (.-t0 priv) i)) (- bound 1) bound)))
+
+      ^{:line 134} sk)))
+
+
+^{:go/end 182} (go/func skDecode [^{:tag (slice byte)} sk ^parameters p] :results [^{:tag (array 32 byte)} ρ ^{:tag (array 32 byte)} K ^{:tag (array 64 byte)} tr ^{:tag (slice ringElement)} s1 ^{:tag (slice ringElement)} s2 ^{:tag (slice ringElement)} t0 ^error err]
+  (let [(values k l η) (values (.-k p) (.-l p) (.-η p))]
+    (when (!= (len sk) (semiExpandedPrivKeySize p))
+      (set! err (errors/New "mldsa: invalid semi-expanded private key size"))
+      (return))
+
+    (copy (subslice ρ) (subslice sk _ 32))
+    (set! sk (subslice sk 32))
+    (copy (subslice K) (subslice sk _ 32))
+    (set! sk (subslice sk 32))
+    (copy (subslice tr) (subslice sk _ 64))
+    (set! sk (subslice sk 64))
+
+    (set! s1 (make (slice ringElement) l))
+    (range [i l]
+      (let [length (/ (* n (bits/Len (* (conv uint η) 2))) 8)]
+        (set! (values (aget s1 i) err) (bitUnpackSlow (subslice sk _ length) η η))
+        (when (!= err nil)
+          (return))
+
+        (set! sk (subslice sk length))))
+
+
+    (set! s2 (make (slice ringElement) k))
+    (range [i k]
+      (let [length (/ (* n (bits/Len (* (conv uint η) 2))) 8)]
+        (set! (values (aget s2 i) err) (bitUnpackSlow (subslice sk _ length) η η))
+        (when (!= err nil)
+          (return))
+
+        (set! sk (subslice sk length))))
+
+
+    (let [^:const ^{:val 4096} bound (<< 1 (- 13 1))] ; 2^(d-1)
+      (set! t0 (make (slice ringElement) k))
+      (range [i k]
+        (let [length (/ (* n 13) 8)]
+          (set! (values (aget t0 i) err) (bitUnpackSlow (subslice sk _ length) (- bound 1) bound))
+          (when (!= err nil)
+            (return))
+
+          (set! sk (subslice sk length))))
+
+
+      (return))))
+
+
+^{:go/end 207} (go/func bitPackSlow ^{:tag (slice byte)} [^{:tag (slice byte)} buf ^ringElement r ^int a ^int b]
+  (let [bitlen (bits/Len (conv uint (+ a b)))]
+    (when (or (<= bitlen 0) (> bitlen 16))
+      (panic "mldsa: internal error: invalid bitlen"))
+
+    (let [(values out v) (sliceForAppend buf (/ (* n bitlen) 8))
+        ^{:line 190 :tag uint32} acc (zero uint32)
+        ^{:line 191 :tag uint} accBits (zero uint)]
+      (range [i r]
+        (let [w (- (conv int32 b) (fieldCenteredMod (aget r i)))]
+          (set! acc bit-or (<< (conv uint32 w) accBits))
+          (set! accBits + (conv uint bitlen))
+          (while (>= accBits 8)
+            (aset v 0 (conv byte acc))
+            (set! v (subslice v 1))
+            (set! acc >> 8)
+            (set! accBits - 8))))
+
+
+      (when (> accBits 0)
+        (aset v 0 (conv byte acc)))
+
+      ^{:line 206} out)))
+
+
+^{:go/end 244} (go/func bitUnpackSlow [^{:tag (slice byte)} v ^int a ^int b] :results [ringElement error]
+  (let [bitlen (bits/Len (conv uint (+ a b)))]
+    (when (or (<= bitlen 0) (> bitlen 16))
+      (panic "mldsa: internal error: invalid bitlen"))
+
+    (when (!= (len v) (/ (* n bitlen) 8))
+      (return (lit ringElement) (errors/New "mldsa: invalid input length for bitUnpackSlow")))
+
+
+    (let [mask (conv uint32 (- ^uint32 (<< 1 bitlen) 1))
+        ^{:line 219} maxValue (conv uint32 (+ a b))
+
+        ^{:line 221 :tag ringElement} r (zero ringElement)
+        ^{:line 222 :tag uint32} acc (zero uint32)
+        ^{:line 223 :tag uint} accBits (zero uint)
+        ^{:line 224} vIdx 0]
+
+      (range [i r]
+        (while (< accBits (conv uint bitlen))
+          (when (< vIdx (len v))
+            (set! acc bit-or (<< (conv uint32 (aget v vIdx)) accBits))
+            (inc! vIdx)
+            (set! accBits + 8)))
+
+
+        (let [w (bit-and acc mask)]
+          (when (> w maxValue)
+            (return (lit ringElement) (errors/New "mldsa: coefficient out of range")))
+
+          (aset r i (fieldSubToMontgomery (conv uint32 b) w))
+          (set! acc >> bitlen)
+          (set! accBits - (conv uint bitlen))))
+
+
+      (return r nil))))

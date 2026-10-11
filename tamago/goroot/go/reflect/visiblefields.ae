@@ -1,0 +1,104 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.reflect) (go/file "visiblefields.go" :imports [])
+
+
+
+
+
+
+
+
+
+
+^{:go/end 47} (go/func VisibleFields "VisibleFields returns all the visible fields in t, which must be a\nstruct type. A field is defined as visible if it's accessible\ndirectly with a FieldByName call. The returned fields include fields\ninside anonymous struct members and unexported fields. They follow\nthe same order found in the struct, with anonymous fields followed\nimmediately by their promoted fields.\n\nFor each element e of the returned slice, the corresponding field\ncan be retrieved from a value v of type t by calling v.FieldByIndex(e.Index).\n" ^{:tag (slice StructField)} [^Type t]
+  (when (== t nil)
+    (panic "reflect: VisibleFields(nil)"))
+
+  (when (!= (.Kind t) Struct)
+    (panic "reflect.VisibleFields of non-struct type"))
+
+  (let [w (addr ^{:go/breaks [2 4 6 8]} (lit visibleFieldsWalker
+          :byName (make (map string int))
+          :visiting (make (map Type bool))
+          :fields (make (slice StructField) 0 (.NumField t))
+          :index (make (slice int) 0 2)))]
+
+    (.walk w t)
+    ;; Remove all the fields that have been hidden.
+    ;; Use an in-place removal that avoids copying in
+    ;; the common case that there are no hidden fields.
+    (let [j 0]
+      (range [i (.-fields w)]
+        (let [f (addr (aget (.-fields w) i))]
+          (when (== (.-Name f) "")
+            (continue))
+
+          (when (!= i j)
+            ;; A field has been removed. We need to shuffle
+            ;; all the subsequent elements up.
+            (aset (.-fields w) j @f))
+
+          (inc! j)))
+
+      (subslice (.-fields w) _ j))))
+
+
+(go/type visibleFieldsWalker (struct
+    ^{:line 50 :tag (map string int)} byName
+    ^{:line 51 :tag (map Type bool)} visiting
+    ^{:line 52 :tag (slice StructField)} fields
+    ^{:line 53 :tag (slice int)} index))
+
+
+
+
+
+
+
+^{:go/end 105} (go/method walk "walk walks all the fields in the struct type t, visiting\nfields in index preorder and appending them to w.fields\n(this maintains the required ordering).\nFields that have been overridden have their\nName field cleared.\n" [^{:tag (* visibleFieldsWalker)} w ^Type t]
+  (when (aget (.-visiting w) t)
+    (return))
+
+  (aset (.-visiting w) t true)
+  (for [i 0] (< i (.NumField t)) (inc! i)
+    (let [f (.Field t i)]
+      (set! (.-index w) (append (.-index w) i))
+      (let [add true]
+        (when [(values oldIndex ok) (aget (.-byName w) (.-Name f))] ok
+          (let [old (addr (aget (.-fields w) oldIndex))]
+            (cond (== (len (.-index w)) (len (.-Index old))) (do
+                ;; Fields with the same name at the same depth
+                ;; cancel one another out. Set the field name
+                ;; to empty to signify that has happened, and
+                ;; there's no need to add this field.
+                (set! (.-Name old) "")
+                (set! add false))
+              (< (len (.-index w)) (len (.-Index old)))
+              ;; The old field loses because it's deeper than the new one.
+              (set! (.-Name old) "") :else
+
+              ;; The old field wins because it's shallower than the new one.
+              (set! add false))))
+
+
+        (when add
+          ;; Copy the index so that it's not overwritten
+          ;; by the other appends.
+          (set! (.-Index f) (append (conv (slice int) nil) (spread (.-index w))))
+          (aset (.-byName w) (.-Name f) (len (.-fields w)))
+          (set! (.-fields w) (append (.-fields w) f)))
+
+        (when (.-Anonymous f)
+          (when (== (.Kind (.-Type f)) Pointer)
+            (set! (.-Type f) (.Elem (.-Type f))))
+
+          (when (== (.Kind (.-Type f)) Struct)
+            (.walk w (.-Type f))))
+
+
+        (set! (.-index w) (subslice (.-index w) _ (- (len (.-index w)) 1))))))
+
+  (delete (.-visiting w) t))

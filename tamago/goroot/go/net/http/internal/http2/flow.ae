@@ -1,0 +1,119 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Flow control
+
+(in-ns 'go.net.http.internal.http2) (go/file "flow.go" :imports [])
+
+
+
+(go/const ^{:val 4096 :doc "inflowMinRefresh is the minimum number of bytes we'll send for a\nflow control window update.\n"} inflowMinRefresh (<< 4 10))
+
+
+
+
+(go/type inflow "inflow accounts for an inbound flow control window.\nIt tracks both the latest window sent to the peer (used for enforcement)\nand the accumulated unsent window.\n" (struct
+    ^{:line 17 :tag int32} avail
+    ^{:line 18 :tag int32} unsent))
+
+
+
+^{:go/end 24} (go/method init "init sets the initial window.\n" [^{:tag (* inflow)} f ^int32 n]
+  (set! (.-avail f) n))
+
+
+
+
+
+
+
+
+
+^{:go/end 53} (go/method add "add adds n bytes to the window, with a maximum window size of max,\nindicating that the peer can now send us more data.\nFor example, the user read from a {Request,Response} body and consumed\nsome of the buffered data, so the peer can now send more.\nIt returns the number of bytes to send in a WINDOW_UPDATE frame to the peer.\nWindow updates are accumulated and sent when the unsent capacity\nis at least inflowMinRefresh or will at least double the peer's available window.\n" [^{:tag (* inflow)} f ^int n] :results [^int32 connAdd]
+  (when (< n 0)
+    (panic "negative update"))
+
+  (let [unsent (+ (conv int64 (.-unsent f)) (conv int64 n))
+      ;; "A sender MUST NOT allow a flow-control window to exceed 2^31-1 octets."
+      ;; RFC 7540 Section 6.9.1.
+      ^:const ^{:line 40 :val 2147483647} maxWindow (- (<< 1 31) 1)]
+    (when (> (+ unsent (conv int64 (.-avail f))) maxWindow)
+      (panic "flow control update exceeds maximum window size"))
+
+    (set! (.-unsent f) (conv int32 unsent))
+    (when (and (< (.-unsent f) inflowMinRefresh) (< (.-unsent f) (.-avail f)))
+      ;; If there aren't at least inflowMinRefresh bytes of window to send,
+      ;; and this update won't at least double the window, buffer the update for later.
+      (return 0))
+
+    (set! (.-avail f) + (.-unsent f))
+    (set! (.-unsent f) 0)
+    (conv int32 unsent)))
+
+
+
+
+^{:go/breaks [6] :go/end 63} (go/method take "take attempts to take n bytes from the peer's flow control window.\nIt reports whether the window has available capacity.\n" ^bool [^{:tag (* inflow)} f ^uint32 n]
+  (when (> n (conv uint32 (.-avail f)))
+    (return false))
+
+  (set! (.-avail f) - (conv int32 n))
+  true)
+
+
+
+
+
+^{:go/breaks [7] :go/end 75} (go/func takeInflows "takeInflows attempts to take n bytes from two inflows,\ntypically connection-level and stream-level flows.\nIt reports whether both windows have available capacity.\n" ^bool [^{:tag (* inflow)} f1 ^{:tag (* inflow)} f2 ^uint32 n]
+  (when (or (> n (conv uint32 (.-avail f1))) (> n (conv uint32 (.-avail f2))))
+    (return false))
+
+  (set! (.-avail f1) - (conv int32 n))
+  (set! (.-avail f2) - (conv int32 n))
+  true)
+
+
+
+(go/type outflow "outflow is the outbound flow control window's size.\n" (struct
+    ^{:line 79 :tag incomparable} _
+
+
+
+    ^{:line 83 :tag int32 :doc "n is the number of DATA bytes we're allowed to send.\nAn outflow is kept both on a conn and a per-stream.\n"} n
+
+
+
+
+    ^{:line 88 :tag (* outflow) :doc "conn points to the shared connection-level outflow that is\nshared by all streams on that conn. It is nil for the outflow\nthat's on the conn directly.\n"} conn))
+
+
+^{:go/end 91} (go/method setConnFlow [^{:tag (* outflow)} f ^{:tag (* outflow)} cf] (set! (.-conn f) cf))
+
+^{:go/end 99} (go/method available ^int32 [^{:tag (* outflow)} f]
+  (let [n (.-n f)]
+    (when (and (!= (.-conn f) nil) (< (.-n (.-conn f)) n))
+      (set! n (.-n (.-conn f))))
+
+    ^{:line 98} n))
+
+
+^{:go/end 109} (go/method take [^{:tag (* outflow)} f ^int32 n]
+  (when (> n (.available f))
+    (panic "internal error: took too much"))
+
+  (set! (.-n f) - n)
+  (when (!= (.-conn f) nil)
+    (set! (.-n (.-conn f)) - n)))
+
+
+
+
+
+^{:go/end 120} (go/method add "add adds n bytes (positive or negative) to the flow control window.\nIt returns false if the sum would exceed 2^31-1.\n" ^bool [^{:tag (* outflow)} f ^int32 n]
+  ^{:go/breaks [[3 119]]} (let [sum (+ (.-n f) n)]
+    (when (== (> sum n) (> (.-n f) 0))
+      (set! (.-n f) sum)
+      (return true))
+
+    false))

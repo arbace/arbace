@@ -1,0 +1,153 @@
+;; 16550 Universal Asynchronous Receiver/Transmitter (UART) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package uart implements a driver for Intel Serial I/O UART controllers adopting the
+;; following reference specifications:
+;;   - PC16550D - Universal Asynchronous Receiver/Transmitter with FIFOs - June 1995
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=amd64` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.intel.uart) (go/file "uart.go" :doc "Package uart implements a driver for Intel Serial I/O UART controllers adopting the\nfollowing reference specifications:\n  - PC16550D - Universal Asynchronous Receiver/Transmitter with FIFOs - June 1995\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=amd64` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 19} [runtime "runtime"]
+
+    ^{:line 21} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "UART registers\n"
+  ^{:line 26} [^{:val 0} RBR 0x00]
+  ^{:line 27} [^{:val 0} THR 0x00]
+
+  ^{:line 29} [^{:val 1} IER 0x01]
+  ^{:line 30} [^{:val 0} IER_ERBFI 0]
+
+  ^{:line 32} [^{:val 2} FCR 0x02]
+  ^{:line 33} [^{:val 3} LCR 0x03]
+
+  ^{:line 35} [^{:val 4} MCR 0x04]
+  ^{:line 36} [^{:val 3} MCR_INTEN 3]
+  ^{:line 37} [^{:val 1} MCR_RTS 1]
+  ^{:line 38} [^{:val 0} MCR_DTR 0]
+
+  ^{:line 40} [^{:val 5} LSR 0x05]
+  ^{:line 41} [^{:val 0} LSR_DR 0]
+  ^{:line 42} [^{:val 5} LSR_THRE 5]
+
+  ^{:line 44} [^{:val 6} MSR 0x06])
+
+
+
+(go/type UART "UART represents a serial port instance.\n" (struct
+
+    ^{:line 50 :tag int :doc "Controller index\n"} Index
+
+    ^{:line 52 :tag uint16 :doc "Base register\n"} Base
+
+    ^{:line 54 :tag int :doc "Interrupt ID\n"} IRQ
+
+
+    ^{:line 57 :tag bool :doc "Data Terminal Ready\n"} DTR
+
+    ^{:line 59 :tag bool :doc "Request To Send\n"} RTS
+
+    ^{:line 61 :tag (chan bool)} rx))
+
+
+
+^{:go/end 81} (go/method Init "Init initializes and enables the UART.\n" [^{:tag (* UART)} hw]
+  (when (== (.-Base hw) 0)
+    (panic "invalid UART controller instance"))
+
+
+  (let [mcr (conv uint8 (<< 1 MCR_INTEN))]
+
+    (when (.-RTS hw)
+      (set! mcr bit-or (<< 1 MCR_RTS)))
+
+
+    (when (.-DTR hw)
+      (set! mcr bit-or (<< 1 MCR_DTR)))
+
+
+    (reg/Out8 (+ (.-Base hw) MCR) mcr)))
+
+
+
+
+
+
+^{:go/end 95} (go/method EnableInterrupt "EnableInterrupt enables interrupt generation for receive FIFOs. Once enabled\n[UART.Read] and [UART.Rx] block, as required, on the argument channel rather\nthan polling for valid data. A nil channel disables receive interrupts and\nrestores polling.\n" [^{:tag (* UART)} hw ^{:tag (chan bool)} rx]
+  (if (== rx nil)
+    (reg/Out8 (+ (.-Base hw) IER) 0)
+
+    (reg/Out8 (+ (.-Base hw) IER) (<< 1 IER_ERBFI)))
+
+
+  (set! (.-rx hw) rx))
+
+
+
+^{:go/end 104} (go/method Tx "Tx transmits a single character to the serial port.\n" [^{:tag (* UART)} hw ^byte c]
+  (while (== (bit-and (reg/In8 (+ (.-Base hw) LSR)) (<< 1 LSR_THRE)) 0))
+  ;; wait for TX FIFO to have room for a character
+
+
+  (reg/Out8 (+ (.-Base hw) THR) (conv uint8 c)))
+
+
+
+^{:go/end 123} (go/method Rx "Rx receives a single character from the serial port.\n" [^{:tag (* UART)} hw ^bool block] :results [^byte c ^bool valid]
+  (while true
+    (when (== (bit-and (reg/In8 (+ (.-Base hw) LSR)) (<< 1 LSR_DR)) 1)
+      (return (conv byte (reg/In8 (+ (.-Base hw) RBR))) true))
+
+
+    (when (not block)
+      (return))
+
+
+    (if (!= (.-rx hw) nil)
+      (<! (.-rx hw))
+
+      (runtime/Gosched))))
+
+
+
+
+
+^{:go/end 132} (go/method Write "Write data from buffer to serial port.\n" [^{:tag (* UART)} hw ^{:tag (slice byte)} buf] :results [^int n ^error _]
+  (range [_ c buf]
+    (.Tx hw c))
+
+
+  (return (len buf) nil))
+
+
+
+^{:go/end 154} (go/method Read "Read available data to buffer from serial port.\n" [^{:tag (* UART)} hw ^{:tag (slice byte)} buf] :results [^int n ^error _]
+  (let [block true]
+
+    (while (< n (len buf))
+      (let [(values c valid) (.Rx hw block)]
+
+        (when (not valid)
+          (break))
+
+
+        (aset buf n c)
+        (inc! n)
+
+        (when (== n 1)
+          (set! block false))))
+
+
+
+    (return)))

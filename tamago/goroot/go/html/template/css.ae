@@ -1,0 +1,259 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.html.template) (go/file "css.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [strings "strings"]
+    ^{:line 11} [unicode "unicode"]
+    ^{:line 12} [utf8 "unicode/utf8"]])
+
+
+
+
+^{:go/end 36} (go/func endsWithCSSKeyword "endsWithCSSKeyword reports whether b ends with an ident that\ncase-insensitively matches the lower-case kw.\n" ^bool [^{:tag (slice byte)} b ^string kw]
+  (let [i (- (len b) (len kw))]
+    (when (< i 0)
+      ;; Too short.
+      (return false))
+
+    (when (!= i 0)
+      (let [(values r _) (utf8/DecodeLastRune (subslice b _ i))]
+        (when (isCSSNmchar r)
+          ;; Too long.
+          (return false))))
+
+
+    ;; Many CSS keywords, such as "!important" can have characters encoded,
+    ;; but the URI production does not allow that according to
+    ;; https://www.w3.org/TR/css3-syntax/#TOK-URI
+    ;; This does not attempt to recognize encoded keywords. For example,
+    ;; given "\75\72\6c" and "url" this return false.
+    (== (conv string (bytes/ToLower (subslice b i))) kw)))
+
+
+
+^{:go/end 52} (go/func isCSSNmchar "isCSSNmchar reports whether rune is allowed anywhere in a CSS identifier.\n" ^bool [^rune r]
+  ;; Based on the CSS3 nmchar production but ignores multi-rune escape
+  ;; sequences.
+  ;; https://www.w3.org/TR/css3-syntax/#SUBTOK-nmchar
+  (or (and (<= \a r) (<= r \z))
+    (and (<= \A r) (<= r \Z))
+    (and (<= \0 r) (<= r \9))
+    (== r \-)
+    (== r \_)
+    ;; Non-ASCII cases below.
+    (and (<= 0x80 r) (<= r 0xd7ff))
+    (and (<= 0xe000 r) (<= r 0xfffd))
+    (and (<= 0x10000 r) (<= r 0x10ffff))))
+
+
+
+
+
+
+^{:go/end 101} (go/func decodeCSS "decodeCSS decodes CSS3 escapes given a sequence of stringchars.\nIf there is no change, it returns the input, otherwise it returns a slice\nbacked by a new array.\nhttps://www.w3.org/TR/css3-syntax/#SUBTOK-stringchar defines stringchar.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} s]
+  (let [i (bytes/IndexByte s \\)]
+    (when (== i -1)
+      (return s))
+
+    ;; The UTF-8 sequence for a codepoint is never longer than 1 + the
+    ;; number hex digits need to represent that codepoint, so len(s) is an
+    ;; upper bound on the output length.
+    (let [b (make (slice byte) 0 (len s))]
+      (while (!= (len s) 0)
+        (let [i (bytes/IndexByte s \\)]
+          (when (== i -1)
+            (set! i (len s)))
+
+          (set! (values b s) (values (append b (spread (subslice s _ i))) (subslice s i)))
+          (when (< (len s) 2)
+            (break))
+
+          ;; https://www.w3.org/TR/css3-syntax/#SUBTOK-escape
+          ;; escape ::= unicode | '\' [#x20-#x7E#x80-#xD7FF#xE000-#xFFFD#x10000-#x10FFFF]
+          (if (isHex (aget s 1))
+            ;; https://www.w3.org/TR/css3-syntax/#SUBTOK-unicode
+            ;;   unicode ::= '\' [0-9a-fA-F]{1,6} wc?
+            (let [j 2]
+              (while (and (< j (len s)) (< j 7) (isHex (aget s j)))
+                (inc! j))
+
+              (let [r (hexDecode (subslice s 1 j))]
+                (when (> r unicode/MaxRune)
+                  (set! (values r j) (values (/ r 16) (- j 1))))
+
+                (let [n (utf8/EncodeRune (subslice b (len b) (cap b)) r)]
+                  ;; The optional space at the end allows a hex
+                  ;; sequence to be followed by a literal hex.
+                  ;; string(decodeCSS([]byte(`\A B`))) == "\nB"
+                  (set! (values b s) (values (subslice b _ (+ (len b) n)) (skipCSSSpace (subslice s j)))))))
+
+            ;; `\\` decodes to `\` and `\"` to `"`.
+            (let [(values _ n) (utf8/DecodeRune (subslice s 1))]
+              (set! (values b s) (values (append b (spread (subslice s 1 (+ 1 n)))) (subslice s (+ 1 n))))))))
+
+
+      ^{:line 100} b)))
+
+
+
+^{:go/end 106} (go/func isHex "isHex reports whether the given character is a hex digit.\n" ^bool [^byte c]
+  (or (and (<= \0 c) (<= c \9)) (and (<= \a c) (<= c \f)) (and (<= \A c) (<= c \F))))
+
+
+
+^{:go/end 125} (go/func hexDecode "hexDecode decodes a short hex digit sequence: \"10\" -> 16.\n" ^rune [^{:tag (slice byte)} s]
+  (let [n \u0000]
+    (range [_ c s]
+      (set! n << 4)
+      (switch
+        (case [(and (<= \0 c) (<= c \9))]
+          (set! n bit-or (conv rune (- c \0))))
+        (case [(and (<= \a c) (<= c \f))]
+          (set! n bit-or (+ (conv rune (- c \a)) 10)))
+        (case [(and (<= \A c) (<= c \F))]
+          (set! n bit-or (+ (conv rune (- c \A)) 10)))
+        (default
+          (panic (fmt/Sprintf "Bad hex digit in %q" s)))))
+
+
+    ^{:line 124} n))
+
+
+
+^{:go/end 146} (go/func skipCSSSpace "skipCSSSpace returns a suffix of c, skipping over a single space.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} c]
+  (when (== (len c) 0)
+    (return c))
+
+  ;; wc ::= #x9 | #xA | #xC | #xD | #x20
+  (switch (aget c 0)
+    (case [\tab \newline \formfeed \space]
+      (return (subslice c 1)))
+    (case [\return]
+      ;; This differs from CSS3's wc production because it contains a
+      ;; probable spec error whereby wc contains all the single byte
+      ;; sequences in nl (newline) but not CRLF.
+      (when (and (>= (len c) 2) (== (aget c 1) \newline))
+        (return (subslice c 2)))
+
+      (return (subslice c 1))))
+
+  ^{:line 145} c)
+
+
+
+^{:go/breaks [[5 154]] :go/end 155} (go/func isCSSSpace "isCSSSpace reports whether b is a CSS space char as defined in wc.\n" ^bool [^byte b]
+  (switch b
+    (case [\tab \newline \formfeed \return \space]
+      (return true)))
+
+  false)
+
+
+
+^{:go/end 187} (go/func cssEscaper "cssEscaper escapes HTML and CSS special characters using \\<hex>+ escapes.\n" ^string [& ^{:tag (slice any)} args]
+  (let [(values s _) (stringify (spread args))
+      ^{:line 160 :tag strings/Builder} b (zero strings/Builder)
+      (values r w written) (values (conv rune 0) 0 0)]
+    (for [i 0] (< i (len s)) (set! i + w)
+      ;; See comment in htmlEscaper.
+      (set! (values r w) (utf8/DecodeRuneInString (subslice s i)))
+      (let [^string repl (zero string)]
+        (switch
+          (case [(and (< (conv int r) (len cssReplacementTable)) (!= (aget cssReplacementTable r) ""))]
+            (set! repl (aget cssReplacementTable r)))
+          (default
+            (continue)))
+
+        (when (== written 0)
+          (.Grow b (len s)))
+
+        (.WriteString b (subslice s written i))
+        (.WriteString b repl)
+        (set! written (+ i w))
+        (when (and (!= repl "\\\\") ^:go/paren (or (== written (len s)) (isHex (aget s written)) (isCSSSpace (aget s written))))
+          (.WriteByte b \space))))
+
+
+    (when (== written 0)
+      (return s))
+
+    (.WriteString b (subslice s written))
+    (.String b)))
+
+
+(go/var cssReplacementTable (lit (slice string)
+    ^{:line 190} [0 "\\0"]
+    ^{:line 191} [\tab "\\9"]
+    ^{:line 192} [\newline "\\a"]
+    ^{:line 193} [\formfeed "\\c"]
+    ^{:line 194} [\return "\\d"]
+    ;; Encode HTML specials as hex so the output can be embedded
+    ;; in HTML attributes without further encoding.
+    ^{:line 197} [\" "\\22"]
+    ^{:line 198} [\& "\\26"]
+    ^{:line 199} [\' "\\27"]
+    ^{:line 200} [\( "\\28"]
+    ^{:line 201} [\) "\\29"]
+    ^{:line 202} [\+ "\\2b"]
+    ^{:line 203} [\/ "\\2f"]
+    ^{:line 204} [\: "\\3a"]
+    ^{:line 205} [\; "\\3b"]
+    ^{:line 206} [\< "\\3c"]
+    ^{:line 207} [\> "\\3e"]
+    ^{:line 208} [\\ "\\\\"]
+    ^{:line 209} [\{ "\\7b"]
+    ^{:line 210} [\} "\\7d"]))
+
+
+(go/var expressionBytes (conv (slice byte) "expression"))
+(go/var mozBindingBytes (conv (slice byte) "mozbinding"))
+
+
+
+
+
+
+^{:go/end 260} (go/func cssValueFilter "cssValueFilter allows innocuous CSS values in the output including CSS\nquantities (10px or 25%), ID or class literals (#foo, .bar), keyword values\n(inherit, blue), and colors (#888).\nIt filters out unsafe values, such as those that affect token boundaries,\nand anything that might execute scripts.\n" ^string [& ^{:tag (slice any)} args]
+  (let [(values s t) (stringify (spread args))]
+    (when (== t contentTypeCSS)
+      (return s))
+
+    (let [(values b id) (values (decodeCSS (conv (slice byte) s)) (make (slice byte) 0 64))]
+
+      ;; CSS3 error handling is specified as honoring string boundaries per
+      ;; https://www.w3.org/TR/css3-syntax/#error-handling :
+      ;;     Malformed declarations. User agents must handle unexpected
+      ;;     tokens encountered while parsing a declaration by reading until
+      ;;     the end of the declaration, while observing the rules for
+      ;;     matching pairs of (), [], {}, "", and '', and correctly handling
+      ;;     escapes. For example, a malformed declaration may be missing a
+      ;;     property, colon (:) or value.
+      ;; So we need to make sure that values do not have mismatched bracket
+      ;; or quote characters to prevent the browser from restarting parsing
+      ;; inside a string that might embed JavaScript source.
+      (range [i c b]
+        (switch c
+          (case [0 \" \' \( \) \/ \; \@ \[ \\ \] \` \{ \} \< \>]
+            (return filterFailsafe))
+          (case [\-]
+            ;; Disallow <!-- or -->.
+            ;; -- should not appear in valid identifiers.
+            (when (and (!= i 0) (== (aget b (- i 1)) \-))
+              (return filterFailsafe)))
+
+          (default
+            (when (and (< c utf8/RuneSelf) (isCSSNmchar (conv rune c)))
+              (set! id (append id c))))))
+
+
+
+      (set! id (bytes/ToLower id))
+      (when (or (bytes/Contains id expressionBytes) (bytes/Contains id mozBindingBytes))
+        (return filterFailsafe))
+
+      (conv string b))))

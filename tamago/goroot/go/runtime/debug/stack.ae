@@ -1,0 +1,93 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package debug contains facilities for programs to debug themselves while
+;; they are running.
+(in-ns 'go.runtime.debug) (go/file "stack.go" :doc "Package debug contains facilities for programs to debug themselves while\nthey are running.\n" :imports [
+
+
+    ^{:line 10} [poll "internal/poll"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [runtime "runtime"]
+    ^{:line 13} [_ "unsafe"]]) ; for linkname
+
+
+
+^{:go/end 19} (go/func PrintStack "PrintStack prints to standard error the stack trace returned by [runtime.Stack].\n" []
+  (.Write os/Stderr (Stack)))
+
+
+
+
+^{:go/end 32} (go/func Stack "Stack returns a formatted stack trace of the goroutine that calls it.\nIt calls [runtime.Stack] with a large enough buffer to capture the entire trace.\n" ^{:tag (slice byte)} []
+  (let [buf (make (slice byte) 1024)]
+    (while true
+      (let [n (runtime/Stack buf false)]
+        (when (< n (len buf))
+          (return (subslice buf _ n)))
+
+        (set! buf (make (slice byte) (* 2 (len buf))))))))
+
+
+
+
+
+(go/type CrashOptions "CrashOptions provides options that control the formatting of the\nfatal crash message.\n" (struct))
+;; /* for future expansion */
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 90} (go/func SetCrashOutput "SetCrashOutput configures a single additional file where unhandled\npanics and other fatal errors are printed, in addition to standard error.\nThere is only one additional file: calling SetCrashOutput again overrides\nany earlier call.\nSetCrashOutput duplicates f's file descriptor, so the caller may safely\nclose f as soon as SetCrashOutput returns.\nTo disable this additional crash output, call SetCrashOutput(nil).\nIf called concurrently with a crash, some in-progress output may be written\nto the old file even after an overriding SetCrashOutput returns.\n" ^error [^{:tag (* os/File)} f ^CrashOptions opts]
+  ^{:go/breaks [[4 89]]} (let [fd (bit-not (conv uintptr 0))]
+    (when (!= f nil)
+      ;; The runtime will write to this file descriptor from
+      ;; low-level routines during a panic, possibly without
+      ;; a G, so we must call f.Fd() eagerly. This creates a
+      ;; danger that the file descriptor is no longer
+      ;; valid at the time of the write, because the caller
+      ;; (incorrectly) called f.Close() and the kernel
+      ;; reissued the fd in a later call to open(2), leading
+      ;; to crashes being written to the wrong file.
+      ;;
+      ;; So, we duplicate the fd to obtain a private one
+      ;; that cannot be closed by the user.
+      ;; This also alleviates us from concerns about the
+      ;; lifetime and finalization of f.
+      ;; (DupCloseOnExec returns an fd, not a *File, so
+      ;; there is no finalizer, and we are responsible for
+      ;; closing it.)
+      ;;
+      ;; The new fd must be close-on-exec, otherwise if the
+      ;; crash monitor is a child process, it may inherit
+      ;; it, so it will never see EOF from the pipe even
+      ;; when this process crashes.
+      ;;
+      ;; A side effect of Fd() is that it calls SetBlocking,
+      ;; which is important so that writes of a crash report
+      ;; to a full pipe buffer don't get lost.
+      (let [(values fd2 _ err) (poll/DupCloseOnExec (conv int (.Fd f)))]
+        (when (!= err nil)
+          (return err))
+
+        (runtime/KeepAlive f) ; prevent finalization before dup
+        (set! fd (conv uintptr fd2))))
+
+    (when [prev (runtime_setCrashFD fd)] (!= prev (bit-not (conv uintptr 0)))
+      ;; We use NewFile+Close because it is portable
+      ;; unlike syscall.Close, whose parameter type varies.
+      (.Close (os/NewFile prev ""))) ; ignore error
+
+    nil))
+
+
+
+(go/func ^:extern ^{:go/linkname "runtime_setCrashFD runtime.setCrashFD"} runtime_setCrashFD ^uintptr [uintptr])

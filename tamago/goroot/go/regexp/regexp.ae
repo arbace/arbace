@@ -1,0 +1,1349 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package regexp implements regular expression search.
+;;
+;; The syntax of the regular expressions accepted is the same
+;; general syntax used by Perl, Python, and other languages.
+;; More precisely, it is the syntax accepted by RE2 and described at
+;; https://golang.org/s/re2syntax, except for \C.
+;; For an overview of the syntax, see the [regexp/syntax] package.
+;;
+;; The regexp implementation provided by this package is
+;; guaranteed to run in time linear in the size of the input.
+;; (This is a property not guaranteed by most open source
+;; implementations of regular expressions.) For more information
+;; about this property, see https://swtch.com/~rsc/regexp/regexp1.html
+;; or any book about automata theory.
+;;
+;; All characters are UTF-8-encoded code points.
+;; Following [utf8.DecodeRune], each byte of an invalid UTF-8 sequence
+;; is treated as if it encoded utf8.RuneError (U+FFFD).
+;;
+;; There are 24 methods of [Regexp] that match a regular expression and identify
+;; the matched text. Their names are matched by this regular expression:
+;;
+;;	(All|Find|FindAll)(String)?(Submatch)?(Index)?
+;;
+;; The ‘All’ variants return an iterator over successive non-overlapping
+;; matches of the entire expression. The ‘FindAll’ variants return a slice
+;; of those matches instead. Empty matches abutting a preceding
+;; match are ignored. The ‘FindAll’ variants take an extra integer argument, n.
+;; If n >= 0, the function returns at most n matches/submatches;
+;; otherwise, it returns all of them.
+;;
+;; The ‘Find’ variants return only the first match that All or FindAll would return.
+;;
+;; If ‘String’ is present, the argument is a string; otherwise it is a []byte.
+;;
+;; By default, each returned match is denoted by the substring matching the
+;; regular expression, of type string or []byte according to the type of the argument.
+;; If ‘Submatch’ is present, each match is represented instead by a slice of
+;; the substrings matching the regular expression's parenthesized subexpressions
+;; (also known as capturing groups), numbered from left to right in order of opening
+;; parenthesis. Submatch 0 is the match of the entire expression, submatch 1 is
+;; the match of the first parenthesized subexpression, and so on.
+;; If ‘Index’ is present, each substring is instead denoted by a pair of byte indexes
+;; within the input string. If an index is negative or substring is nil, it means that
+;; the subexpression did not match any string in the input. For ‘String’ versions,
+;; an empty string means either no match or an empty match.
+;;
+;; There is also a subset of the methods that can be applied to text read from
+;; an [io.RuneReader]: [Regexp.MatchReader], [Regexp.FindReaderIndex],
+;; [Regexp.FindReaderSubmatchIndex].
+;; Note that regular expression matches may need to
+;; examine text beyond the text returned by a match, so the methods that
+;; match text from an [io.RuneReader] may read arbitrarily far into the input
+;; before returning.
+;;
+;; (There are a few other methods that do not match this pattern.)
+(in-ns 'go.regexp) (go/file "regexp.go" :doc "Package regexp implements regular expression search.\n\nThe syntax of the regular expressions accepted is the same\ngeneral syntax used by Perl, Python, and other languages.\nMore precisely, it is the syntax accepted by RE2 and described at\nhttps://golang.org/s/re2syntax, except for \\C.\nFor an overview of the syntax, see the [regexp/syntax] package.\n\nThe regexp implementation provided by this package is\nguaranteed to run in time linear in the size of the input.\n(This is a property not guaranteed by most open source\nimplementations of regular expressions.) For more information\nabout this property, see https://swtch.com/~rsc/regexp/regexp1.html\nor any book about automata theory.\n\nAll characters are UTF-8-encoded code points.\nFollowing [utf8.DecodeRune], each byte of an invalid UTF-8 sequence\nis treated as if it encoded utf8.RuneError (U+FFFD).\n\nThere are 24 methods of [Regexp] that match a regular expression and identify\nthe matched text. Their names are matched by this regular expression:\n\n\t(All|Find|FindAll)(String)?(Submatch)?(Index)?\n\nThe ‘All’ variants return an iterator over successive non-overlapping\nmatches of the entire expression. The ‘FindAll’ variants return a slice\nof those matches instead. Empty matches abutting a preceding\nmatch are ignored. The ‘FindAll’ variants take an extra integer argument, n.\nIf n >= 0, the function returns at most n matches/submatches;\notherwise, it returns all of them.\n\nThe ‘Find’ variants return only the first match that All or FindAll would return.\n\nIf ‘String’ is present, the argument is a string; otherwise it is a []byte.\n\nBy default, each returned match is denoted by the substring matching the\nregular expression, of type string or []byte according to the type of the argument.\nIf ‘Submatch’ is present, each match is represented instead by a slice of\nthe substrings matching the regular expression's parenthesized subexpressions\n(also known as capturing groups), numbered from left to right in order of opening\nparenthesis. Submatch 0 is the match of the entire expression, submatch 1 is\nthe match of the first parenthesized subexpression, and so on.\nIf ‘Index’ is present, each substring is instead denoted by a pair of byte indexes\nwithin the input string. If an index is negative or substring is nil, it means that\nthe subexpression did not match any string in the input. For ‘String’ versions,\nan empty string means either no match or an empty match.\n\nThere is also a subset of the methods that can be applied to text read from\nan [io.RuneReader]: [Regexp.MatchReader], [Regexp.FindReaderIndex],\n[Regexp.FindReaderSubmatchIndex].\nNote that regular expression matches may need to\nexamine text beyond the text returned by a match, so the methods that\nmatch text from an [io.RuneReader] may read arbitrarily far into the input\nbefore returning.\n\n(There are a few other methods that do not match this pattern.)\n" :imports [
+
+
+    ^{:line 64} [bytes "bytes"]
+    ^{:line 65} [io "io"]
+    ^{:line 66} [iter "iter"]
+    ^{:line 67} [syntax "regexp/syntax"]
+    ^{:line 68} [slices "slices"]
+    ^{:line 69} [strconv "strconv"]
+    ^{:line 70} [strings "strings"]
+    ^{:line 71} [sync "sync"]
+    ^{:line 72} [unicode "unicode"]
+    ^{:line 73} [utf8 "unicode/utf8"]])
+
+
+
+
+
+(go/type Regexp "Regexp is the representation of a compiled regular expression.\nA Regexp is safe for concurrent use by multiple goroutines,\nexcept for configuration methods, such as [Regexp.Longest].\n" (struct
+    ^{:line 80 :tag string} expr ; as passed to Compile
+    ^{:line 81 :tag (* syntax/Prog)} prog ; compiled program
+    ^{:line 82 :tag (* onePassProg)} onepass ; onepass program or nil
+    ^{:line 83 :tag int} numSubexp
+    ^{:line 84 :tag int} maxBitStateLen
+    ^{:line 85 :tag (slice string)} subexpNames
+    ^{:line 86 :tag string} prefix ; required prefix in unanchored matches
+    ^{:line 87 :tag (slice byte)} prefixBytes ; prefix, as a []byte
+    ^{:line 88 :tag rune} prefixRune ; first rune in prefix
+    ^{:line 89 :tag uint32} prefixEnd ; pc for last rune in prefix
+    ^{:line 90 :tag int} mpool ; pool for machines
+    ^{:line 91 :tag int} matchcap ; size of recorded match lengths
+    ^{:line 92 :tag bool} prefixComplete ; prefix is the entire regexp
+    ^{:line 93 :tag syntax/EmptyOp} cond ; empty-width conditions required at start of match
+    ^{:line 94 :tag int} minInputLen ; minimum length of the input in bytes
+
+
+
+    ^{:line 98 :tag bool :doc "This field can be modified by the Longest method,\nbut it is otherwise read-only.\n"} longest)) ; whether regexp prefers leftmost-longest match
+
+
+
+^{:go/end 104} (go/method String "String returns the source text used to compile the regular expression.\n" ^string [^{:tag (* Regexp)} re]
+  (.-expr re))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 117} (go/method Copy "Copy returns a new [Regexp] object copied from re.\nCalling [Regexp.Longest] on one copy does not affect another.\n\nDeprecated: In earlier releases, when using a [Regexp] in multiple goroutines,\ngiving each goroutine its own copy helped to avoid lock contention.\nAs of Go 1.12, using Copy is no longer necessary to avoid lock contention.\nCopy may still be appropriate if the reason for its use is to make\ntwo copies with different [Regexp.Longest] settings.\n" ^{:tag (* Regexp)} [^{:tag (* Regexp)} re]
+  (let [re2 @re]
+    (addr re2)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 131} (go/func Compile "Compile parses a regular expression and returns, if successful,\na [Regexp] object that can be used to match against text.\n\nWhen matching against text, the regexp returns a match that\nbegins as early as possible in the input (leftmost), and among those\nit chooses the one that a backtracking search would have found first.\nThis so-called leftmost-first matching is the same semantics\nthat Perl, Python, and other implementations use, although this\npackage implements it without the expense of backtracking.\nFor POSIX leftmost-longest matching, see [CompilePOSIX].\n" [^string expr] :results [(* Regexp) error]
+  (compile expr syntax/Perl false))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 154} (go/func CompilePOSIX "CompilePOSIX is like [Compile] but restricts the regular expression\nto POSIX ERE (egrep) syntax and changes the match semantics to\nleftmost-longest.\n\nThat is, when matching against text, the regexp returns a match that\nbegins as early as possible in the input (leftmost), and among those\nit chooses a match that is as long as possible.\nThis so-called leftmost-longest matching is the same semantics\nthat early regular expression implementations used and that POSIX\nspecifies.\n\nHowever, there can be multiple leftmost-longest matches, with different\nsubmatch choices, and here this package diverges from POSIX.\nAmong the possible leftmost-longest matches, this package chooses\nthe one that a backtracking search would have found first, while POSIX\nspecifies that the match be chosen to maximize the length of the first\nsubexpression, then the second, and so on from left to right.\nThe POSIX rule is computationally prohibitive and not even well-defined.\nSee https://swtch.com/~rsc/regexp/regexp2.html#posix for details.\n" [^string expr] :results [(* Regexp) error]
+  (compile expr syntax/POSIX true))
+
+
+
+
+
+
+
+
+^{:go/end 164} (go/method Longest "Longest makes future searches prefer the leftmost-longest match.\nThat is, when matching against text, the regexp returns a match that\nbegins as early as possible in the input (leftmost), and among those\nit chooses a match that is as long as possible.\nThis method modifies the [Regexp] and may not be called concurrently\nwith any other methods.\n" [^{:tag (* Regexp)} re]
+  (set! (.-longest re) true))
+
+
+^{:go/end 215} (go/func compile [^string expr ^syntax/Flags mode ^bool longest] :results [(* Regexp) error]
+  (let [(values re err) (syntax/Parse expr mode)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [maxCap (.MaxCap re)
+        ^{:line 172} capNames (.CapNames re)]
+
+      (set! re (.Simplify re))
+      (let [(values prog ^:assign err) (syntax/Compile re)]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [matchcap (.-NumCap prog)]
+          (when (< matchcap 2)
+            (set! matchcap 2))
+
+          (let [regexp (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit Regexp
+                  :expr expr
+                  :prog prog
+                  :onepass (compileOnePass prog)
+                  :numSubexp maxCap
+                  :subexpNames capNames
+                  :cond (.StartCond prog)
+                  :longest longest
+                  :matchcap matchcap
+                  :minInputLen (minInputLen re)))]
+
+            (if (== (.-onepass regexp) nil) (do
+                (set! (values (.-prefix regexp) (.-prefixComplete regexp)) (.Prefix prog))
+                (set! (.-maxBitStateLen regexp) (maxBitStateLen prog)))
+
+              (set! (values (.-prefix regexp) (.-prefixComplete regexp) (.-prefixEnd regexp)) (onePassPrefix prog)))
+
+            (when (!= (.-prefix regexp) "")
+              ;; TODO(rsc): Remove this allocation by adding
+              ;; IndexString to package bytes.
+              (set! (.-prefixBytes regexp) (conv (slice byte) (.-prefix regexp)))
+              (set! (values (.-prefixRune regexp) _) (utf8/DecodeRuneInString (.-prefix regexp))))
+
+
+            (let [n (len (.-Inst prog))
+                ^{:line 208} i 0]
+              (while (and (!= (aget matchSize i) 0) (< (aget matchSize i) n))
+                (inc! i))
+
+              (set! (.-mpool regexp) i)
+
+              (return regexp nil))))))))
+
+
+
+
+
+
+
+
+(go/var "Pools of *machine for use during (*Regexp).find,\nsplit up by the size of the execution queues.\nmatchPool[i] machines have queue size matchSize[i].\nOn a 64-bit system each queue entry is 16 bytes,\nso matchPool[0] has 16*2*128 = 4kB queues, etc.\nThe final matchPool is a catch-all for very large queues.\n"
+  ^{:line 224} [matchSize (lit (array ... int) 128 512 2048 16384 0)]
+  ^{:line 225} [^{:tag (array (len matchSize) sync/Pool)} matchPool])
+
+
+
+
+
+^{:go/end 256} (go/method get "get returns a machine to use for matching re.\nIt uses the re's machine cache if possible, to avoid\nunnecessary allocation.\n" ^{:tag (* machine)} [^{:tag (* Regexp)} re]
+  (let [(values m ok) (assert (* machine) (.Get (aget matchPool (.-mpool re))))]
+    (when (not ok)
+      (set! m (new machine)))
+
+    (set! (.-re m) re)
+    (set! (.-p m) (.-prog re))
+    (when (< (cap (.-matchcap m)) (.-matchcap re))
+      (set! (.-matchcap m) (make (slice int) (.-matchcap re)))
+      (range [_ t (.-pool m)]
+        (set! (.-cap t) (make (slice int) (.-matchcap re)))))
+
+
+
+    ;; Allocate queues if needed.
+    ;; Or reallocate, for "large" match pool.
+    (let [n (aget matchSize (.-mpool re))]
+      (when (== n 0) ; large pool
+        (set! n (len (.-Inst (.-prog re)))))
+
+      (when (< (len (.-sparse (.-q0 m))) n)
+        (set! (.-q0 m) (lit queue (make (slice uint32) n) (make (slice entry) 0 n)))
+        (set! (.-q1 m) (lit queue (make (slice uint32) n) (make (slice entry) 0 n))))
+
+      ^{:line 255} m)))
+
+
+
+^{:go/end 264} (go/method put "put returns a machine to the correct machine pool.\n" [^{:tag (* Regexp)} re ^{:tag (* machine)} m]
+  (set! (.-re m) nil)
+  (set! (.-p m) nil)
+  (.clear (.-inputs m))
+  (.Put (aget matchPool (.-mpool re)) m))
+
+
+
+^{:go/end 304} (go/func minInputLen "minInputLen walks the regexp to find the minimum length of any matchable input.\n" ^int [^{:tag (* syntax/Regexp)} re]
+  (switch (.-Op re)
+    (default
+      (return 0))
+    (case [syntax/OpAnyChar syntax/OpAnyCharNotNL syntax/OpCharClass]
+      (return 1))
+    (case [syntax/OpLiteral]
+      (let [l 0]
+        (range [_ r (.-Rune re)]
+          (if (== r utf8/RuneError)
+            (inc! l)
+
+            (set! l + (utf8/RuneLen r))))
+
+
+        (return l)))
+    (case [syntax/OpCapture syntax/OpPlus]
+      (return (minInputLen (aget (.-Sub re) 0))))
+    (case [syntax/OpRepeat]
+      (return (* (.-Min re) (minInputLen (aget (.-Sub re) 0)))))
+    (case [syntax/OpConcat]
+      (let [l 0]
+        (range [_ sub (.-Sub re)]
+          (set! l + (minInputLen sub)))
+
+        (return l)))
+    (case [syntax/OpAlternate]
+      (let [l (minInputLen (aget (.-Sub re) 0))
+          ^{:line 295 :tag int} lnext (zero int)]
+        (range [_ sub (subslice (.-Sub re) 1)]
+          (set! lnext (minInputLen sub))
+          (when (< lnext l)
+            (set! l lnext)))
+
+
+        (return l)))))
+
+
+
+
+
+
+^{:go/end 315} (go/func MustCompile "MustCompile is like [Compile] but panics if the expression cannot be parsed.\nIt simplifies safe initialization of global variables holding compiled regular\nexpressions.\n" ^{:tag (* Regexp)} [^string str]
+  (let [(values regexp err) (Compile str)]
+    (when (!= err nil)
+      (panic (+ "regexp: Compile(" (quote str) "): " (.Error err))))
+
+    ^{:line 314} regexp))
+
+
+
+
+
+^{:go/end 326} (go/func MustCompilePOSIX "MustCompilePOSIX is like [CompilePOSIX] but panics if the expression cannot be parsed.\nIt simplifies safe initialization of global variables holding compiled regular\nexpressions.\n" ^{:tag (* Regexp)} [^string str]
+  (let [(values regexp err) (CompilePOSIX str)]
+    (when (!= err nil)
+      (panic (+ "regexp: CompilePOSIX(" (quote str) "): " (.Error err))))
+
+    ^{:line 325} regexp))
+
+
+^{:go/end 333} (go/func quote ^string [^string s]
+  (when (strconv/CanBackquote s)
+    (return (+ "`" s "`")))
+
+  (strconv/Quote s))
+
+
+
+^{:go/end 338} (go/method NumSubexp "NumSubexp returns the number of parenthesized subexpressions in this [Regexp].\n" ^int [^{:tag (* Regexp)} re]
+  (.-numSubexp re))
+
+
+
+
+
+
+
+^{:go/end 347} (go/method SubexpNames "SubexpNames returns the names of the parenthesized subexpressions\nin this [Regexp]. The name for the first sub-expression is names[1],\nso that if m is a match slice, the name for m[i] is SubexpNames()[i].\nSince the Regexp as a whole cannot be named, names[0] is always\nthe empty string. The slice should not be modified.\n" ^{:tag (slice string)} [^{:tag (* Regexp)} re]
+  (.-subexpNames re))
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[5 364]] :go/end 365} (go/method SubexpIndex "SubexpIndex returns the index of the first subexpression with the given name,\nor -1 if there is no subexpression with that name.\n\nNote that multiple subexpressions can be written using the same name, as in\n(?P<bob>a+)(?P<bob>b+), which declares two subexpressions named \"bob\".\nIn this case, SubexpIndex returns the index of the leftmost such subexpression\nin the regular expression.\n" ^int [^{:tag (* Regexp)} re ^string name]
+  (when (!= name "")
+    (range [i s (.-subexpNames re)]
+      (when (== name s)
+        (return i))))
+
+
+
+  -1)
+
+
+(go/const ^{:tag rune :val -1} endOfText -1)
+
+
+
+(go/type input "input abstracts different representations of the input text. It provides\none-character lookahead.\n" (interface
+    (step [^int pos] :results [^rune r ^int width]) ; advance one rune
+    (canCheckPrefix ^bool []) ; can we look ahead without losing info?
+    (hasPrefix ^bool [^{:tag (* Regexp)} re])
+    (index ^int [^{:tag (* Regexp)} re ^int pos])
+    (context ^lazyFlag [^int pos])))
+
+
+
+(go/type inputString "inputString scans a string.\n" (struct
+    ^{:line 381 :tag string} str))
+
+
+^{:go/end 389} (go/method step [^{:tag (* inputString)} i ^int pos] :results [rune int]
+  (when (< pos (len (.-str i)))
+    (return (utf8/DecodeRuneInString (subslice (.-str i) pos))))
+
+  (return endOfText 0))
+
+
+^{:go/breaks [3] :go/end 393} (go/method canCheckPrefix ^bool [^{:tag (* inputString)} i]
+  true)
+
+
+^{:go/end 397} (go/method hasPrefix ^bool [^{:tag (* inputString)} i ^{:tag (* Regexp)} re]
+  (strings/HasPrefix (.-str i) (.-prefix re)))
+
+
+^{:go/end 401} (go/method index ^int [^{:tag (* inputString)} i ^{:tag (* Regexp)} re ^int pos]
+  (strings/Index (subslice (.-str i) pos) (.-prefix re)))
+
+
+^{:go/end 414} (go/method context ^lazyFlag [^{:tag (* inputString)} i ^int pos]
+  (let [(values r1 r2) (values endOfText endOfText)]
+    ;; 0 < pos && pos <= len(i.str)
+    (when (< (conv uint (- pos 1)) (conv uint (len (.-str i))))
+      (set! (values r1 _) (utf8/DecodeLastRuneInString (subslice (.-str i) _ pos))))
+
+    ;; 0 <= pos && pos < len(i.str)
+    (when (< (conv uint pos) (conv uint (len (.-str i))))
+      (set! (values r2 _) (utf8/DecodeRuneInString (subslice (.-str i) pos))))
+
+    (newLazyFlag r1 r2)))
+
+
+
+(go/type inputBytes "inputBytes scans a byte slice.\n" (struct
+    ^{:line 418 :tag (slice byte)} str))
+
+
+^{:go/end 426} (go/method step [^{:tag (* inputBytes)} i ^int pos] :results [rune int]
+  (when (< pos (len (.-str i)))
+    (return (utf8/DecodeRune (subslice (.-str i) pos))))
+
+  (return endOfText 0))
+
+
+^{:go/breaks [3] :go/end 430} (go/method canCheckPrefix ^bool [^{:tag (* inputBytes)} i]
+  true)
+
+
+^{:go/end 434} (go/method hasPrefix ^bool [^{:tag (* inputBytes)} i ^{:tag (* Regexp)} re]
+  (bytes/HasPrefix (.-str i) (.-prefixBytes re)))
+
+
+^{:go/end 438} (go/method index ^int [^{:tag (* inputBytes)} i ^{:tag (* Regexp)} re ^int pos]
+  (bytes/Index (subslice (.-str i) pos) (.-prefixBytes re)))
+
+
+^{:go/end 451} (go/method context ^lazyFlag [^{:tag (* inputBytes)} i ^int pos]
+  (let [(values r1 r2) (values endOfText endOfText)]
+    ;; 0 < pos && pos <= len(i.str)
+    (when (< (conv uint (- pos 1)) (conv uint (len (.-str i))))
+      (set! (values r1 _) (utf8/DecodeLastRune (subslice (.-str i) _ pos))))
+
+    ;; 0 <= pos && pos < len(i.str)
+    (when (< (conv uint pos) (conv uint (len (.-str i))))
+      (set! (values r2 _) (utf8/DecodeRune (subslice (.-str i) pos))))
+
+    (newLazyFlag r1 r2)))
+
+
+
+(go/type inputReader "inputReader scans a RuneReader.\n" (struct
+    ^{:line 455 :tag io/RuneReader} r
+    ^{:line 456 :tag bool} atEOT
+    ^{:line 457 :tag int} pos))
+
+
+^{:go/end 472} (go/method step [^{:tag (* inputReader)} i ^int pos] :results [rune int]
+  (when (and (not (.-atEOT i)) (!= pos (.-pos i)))
+    (return endOfText 0))
+
+
+  (let [(values r w err) (.ReadRune (.-r i))]
+    (when (!= err nil)
+      (set! (.-atEOT i) true)
+      (return endOfText 0))
+
+    (set! (.-pos i) + w)
+    (return r w)))
+
+
+^{:go/breaks [3] :go/end 476} (go/method canCheckPrefix ^bool [^{:tag (* inputReader)} i]
+  false)
+
+
+^{:go/breaks [3] :go/end 480} (go/method hasPrefix ^bool [^{:tag (* inputReader)} i ^{:tag (* Regexp)} re]
+  false)
+
+
+^{:go/breaks [3] :go/end 484} (go/method index ^int [^{:tag (* inputReader)} i ^{:tag (* Regexp)} re ^int pos]
+  -1)
+
+
+^{:go/breaks [3] :go/end 488} (go/method context ^lazyFlag [^{:tag (* inputReader)} i ^int pos]
+  0) ; not used
+
+
+
+
+
+^{:go/end 495} (go/method LiteralPrefix "LiteralPrefix returns a literal string that must begin any match\nof the regular expression re. It returns the boolean true if the\nliteral string comprises the entire regular expression.\n" [^{:tag (* Regexp)} re] :results [^string prefix ^bool complete]
+  (return (.-prefix re) (.-prefixComplete re)))
+
+
+
+
+^{:go/end 501} (go/method MatchReader "MatchReader reports whether the text returned by the [io.RuneReader]\ncontains any match of the regular expression re.\n" ^bool [^{:tag (* Regexp)} re ^io/RuneReader r]
+  (.doMatch re r nil ""))
+
+
+
+
+^{:go/end 507} (go/method MatchString "MatchString reports whether the string s\ncontains any match of the regular expression re.\n" ^bool [^{:tag (* Regexp)} re ^string s]
+  (.doMatch re nil nil s))
+
+
+
+
+^{:go/end 513} (go/method Match "Match reports whether the byte slice b\ncontains any match of the regular expression re.\n" ^bool [^{:tag (* Regexp)} re ^{:tag (slice byte)} b]
+  (.doMatch re nil b ""))
+
+
+
+
+
+^{:go/end 524} (go/func MatchReader "MatchReader reports whether the text returned by the [io.RuneReader]\ncontains any match of the regular expression pattern.\nMore complicated queries need to use [Compile] and the full [Regexp] interface.\n" [^string pattern ^io/RuneReader r] :results [^bool matched ^error err]
+  (let [(values re ^:assign err) (Compile pattern)]
+    (when (!= err nil)
+      (return false err))
+
+    (return (.MatchReader re r) nil)))
+
+
+
+
+
+^{:go/end 535} (go/func MatchString "MatchString reports whether the string s\ncontains any match of the regular expression pattern.\nMore complicated queries need to use [Compile] and the full [Regexp] interface.\n" [^string pattern ^string s] :results [^bool matched ^error err]
+  (let [(values re ^:assign err) (Compile pattern)]
+    (when (!= err nil)
+      (return false err))
+
+    (return (.MatchString re s) nil)))
+
+
+
+
+
+^{:go/end 546} (go/func Match "Match reports whether the byte slice b\ncontains any match of the regular expression pattern.\nMore complicated queries need to use [Compile] and the full [Regexp] interface.\n" [^string pattern ^{:tag (slice byte)} b] :results [^bool matched ^error err]
+  (let [(values re ^:assign err) (Compile pattern)]
+    (when (!= err nil)
+      (return false err))
+
+    (return (.Match re b) nil)))
+
+
+
+
+
+^{:go/end 560} (go/method ReplaceAllString "ReplaceAllString returns a copy of src, replacing matches of the [Regexp]\nwith the replacement string repl.\nInside repl, $ signs are interpreted as in [Regexp.Expand].\n" ^string [^{:tag (* Regexp)} re ^string src ^string repl]
+  (let [n 2]
+    (when (strings/Contains repl "$")
+      (set! n (* 2 (+ (.-numSubexp re) 1))))
+
+    (let [b (.replaceAll re nil src n ^{:go/end 558} (fn ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^{:tag (slice int)} match]
+            (.expand re dst repl nil src match)))]
+
+      (conv string b))))
+
+
+
+
+
+^{:go/end 569} (go/method ReplaceAllLiteralString "ReplaceAllLiteralString returns a copy of src, replacing matches of the [Regexp]\nwith the replacement string repl. The replacement repl is substituted directly,\nwithout using [Regexp.Expand].\n" ^string [^{:tag (* Regexp)} re ^string src ^string repl]
+  (conv string (.replaceAll re nil src 2 ^{:go/end 568} (fn ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^{:tag (slice int)} match]
+        (append dst (spread repl))))))
+
+
+
+
+
+
+
+^{:go/end 580} (go/method ReplaceAllStringFunc "ReplaceAllStringFunc returns a copy of src in which all matches of the\n[Regexp] have been replaced by the return value of function repl applied\nto the matched substring. The replacement returned by repl is substituted\ndirectly, without using [Regexp.Expand].\n" ^string [^{:tag (* Regexp)} re ^string src ^{:tag (func [string] [string])} repl]
+  (let [b (.replaceAll re nil src 2 ^{:go/end 578} (fn ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^{:tag (slice int)} match]
+          (append dst (spread (repl (subslice src (aget match 0) (aget match 1)))))))]
+
+    (conv string b)))
+
+
+^{:go/end 645} (go/method replaceAll ^{:tag (slice byte)} [^{:tag (* Regexp)} re ^{:tag (slice byte)} bsrc ^string src ^int nmatch ^{:tag (func [^{:tag (slice byte)} dst ^{:tag (slice int)} m] [(slice byte)])} repl]
+  (let [lastMatchEnd 0 ; end position of the most recent match
+      ^{:line 584} searchPos 0 ; position where we next look for a match
+      ^{:line 585 :tag (slice byte)} buf (zero (slice byte))
+      ^{:line 586 :tag int} endPos (zero int)]
+    (if (!= bsrc nil)
+      (set! endPos (len bsrc))
+
+      (set! endPos (len src)))
+
+    (when (> nmatch (.-NumCap (.-prog re)))
+      (set! nmatch (.-NumCap (.-prog re))))
+
+
+    (let [^{:tag (array 2 int)} dstCap (zero (array 2 int))]
+      (while (<= searchPos endPos)
+        (let [a (.find re nil bsrc src searchPos nmatch (subslice dstCap _ 0))]
+          (when (== (len a) 0)
+            (break)) ; no more matches
+
+
+          ;; Copy the unmatched characters before this match.
+          (if (!= bsrc nil)
+            (set! buf (append buf (spread (subslice bsrc lastMatchEnd (aget a 0)))))
+
+            (set! buf (append buf (spread (subslice src lastMatchEnd (aget a 0))))))
+
+
+          ;; Now insert a copy of the replacement string, but not for a
+          ;; match of the empty string immediately after another match.
+          ;; (Otherwise, we get double replacement for patterns that
+          ;; match both empty and nonempty strings.)
+          (when (or (> (aget a 1) lastMatchEnd) (== (aget a 0) 0))
+            (set! buf (repl buf a)))
+
+          (set! lastMatchEnd (aget a 1))
+
+          ;; Advance past this match; always advance at least one character.
+          (let [^int width (zero int)]
+            (if (!= bsrc nil)
+              (set! (values _ width) (utf8/DecodeRune (subslice bsrc searchPos)))
+
+              (set! (values _ width) (utf8/DecodeRuneInString (subslice src searchPos))))
+
+            (cond (> (+ searchPos width) (aget a 1))
+              (set! searchPos + width)
+              (> (+ searchPos 1) (aget a 1))
+              ;; This clause is only needed at the end of the input
+              ;; string. In that case, DecodeRuneInString returns width=0.
+              (inc! searchPos) :else
+
+              (set! searchPos (aget a 1))))))
+
+
+
+      ;; Copy the unmatched characters after the last match.
+      (if (!= bsrc nil)
+        (set! buf (append buf (spread (subslice bsrc lastMatchEnd))))
+
+        (set! buf (append buf (spread (subslice src lastMatchEnd)))))
+
+
+      ^{:line 644} buf)))
+
+
+
+
+
+^{:go/end 663} (go/method ReplaceAll "ReplaceAll returns a copy of src, replacing matches of the [Regexp]\nwith the replacement text repl.\nInside repl, $ signs are interpreted as in [Regexp.Expand].\n" ^{:tag (slice byte)} [^{:tag (* Regexp)} re ^{:tag (slice byte)} src ^{:tag (slice byte)} repl]
+  (let [n 2]
+    (when (>= (bytes/IndexByte repl \$) 0)
+      (set! n (* 2 (+ (.-numSubexp re) 1))))
+
+    (let [srepl ""
+        ^{:line 656} b (.replaceAll re src "" n ^{:go/end 661} (fn ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^{:tag (slice int)} match]
+            (when (!= (len srepl) (len repl))
+              (set! srepl (conv string repl)))
+
+            (.expand re dst srepl src "" match)))]
+
+      ^{:line 662} b)))
+
+
+
+
+
+^{:go/end 672} (go/method ReplaceAllLiteral "ReplaceAllLiteral returns a copy of src, replacing matches of the [Regexp]\nwith the replacement bytes repl. The replacement repl is substituted directly,\nwithout using [Regexp.Expand].\n" ^{:tag (slice byte)} [^{:tag (* Regexp)} re ^{:tag (slice byte)} src ^{:tag (slice byte)} repl]
+  (.replaceAll re src "" 2 ^{:go/end 671} (fn ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^{:tag (slice int)} match]
+      (append dst (spread repl)))))
+
+
+
+
+
+
+
+^{:go/end 682} (go/method ReplaceAllFunc "ReplaceAllFunc returns a copy of src in which all matches of the\n[Regexp] have been replaced by the return value of function repl applied\nto the matched byte slice. The replacement returned by repl is substituted\ndirectly, without using [Regexp.Expand].\n" ^{:tag (slice byte)} [^{:tag (* Regexp)} re ^{:tag (slice byte)} src ^{:tag (func [(slice byte)] [(slice byte)])} repl]
+  (.replaceAll re src "" 2 ^{:go/end 681} (fn ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^{:tag (slice int)} match]
+      (append dst (spread (repl (subslice src (aget match 0) (aget match 1))))))))
+
+
+
+
+(go/var ^{:tag (array 16 byte) :doc "Bitmap used by func special to check whether a character needs to be escaped.\n"} specialBytes)
+
+
+^{:go/end 690} (go/func special "special reports whether byte b needs to be escaped by QuoteMeta.\n" ^bool [^byte b]
+  (and (< b utf8/RuneSelf) (!= (bit-and (aget specialBytes (% b 16)) ^byte (<< 1 (/ b 16))) 0)))
+
+
+^{:go/end 696} (go/func init []
+  (range [_ b (conv (slice byte) "\\.+*?()|[]{}^$")]
+    (set! (aget specialBytes (% b 16)) bit-or ^byte (<< 1 (/ b 16)))))
+
+
+
+
+
+
+^{:go/end 726} (go/func QuoteMeta "QuoteMeta returns a string that escapes all regular expression metacharacters\ninside the argument text; the returned string is a regular expression matching\nthe literal text.\n" ^string [^string s]
+  ;; A byte loop is correct because all metacharacters are ASCII.
+  (let [^int i (zero int)]
+    (for [(set! i 0)] (< i (len s)) (inc! i)
+      (when (special (aget s i))
+        (break)))
+
+
+    ;; No meta characters found, so return original string.
+    (when (>= i (len s))
+      (return s))
+
+
+    (let [b (make (slice byte) (- (* 2 (len s)) i))]
+      (copy b (subslice s _ i))
+      (let [j i]
+        (for [] (< i (len s)) (inc! i)
+          (when (special (aget s i))
+            (aset b j \\)
+            (inc! j))
+
+          (aset b j (aget s i))
+          (inc! j))
+
+        (conv string (subslice b _ j))))))
+
+
+
+
+
+
+
+^{:go/end 743} (go/method pad "The number of capture values in the program may correspond\nto fewer capturing expressions than are in the regexp.\nFor example, \"(a){0}\" turns into an empty program, so the\nmaximum capture in the program is 0 but we need to return\nan expression for \\1.  Pad appends -1s to the slice a as needed.\n" ^{:tag (slice int)} [^{:tag (* Regexp)} re ^{:tag (slice int)} a]
+  (when (== a nil)
+    ;; No match.
+    (return nil))
+
+  (let [n (* (+ 1 (.-numSubexp re)) 2)]
+    (while (< (len a) n)
+      (set! a (append a -1)))
+
+    ^{:line 742} a))
+
+
+
+
+^{:go/end 803} (go/method matches "matches yields the location of successive matches in the input text.\nThe input text is b if non-nil, otherwise s.\n" ^{:tag (iter/Seq (slice int))} [^{:tag (* Regexp)} re ^string s ^{:tag (slice byte)} b ^int max ^int ncap]
+  ^{:go/end 802} (fn [^{:tag (func [(slice int)] [bool])} yield]
+    (when (== max 0)
+      (return))
+
+    (let [^int end (zero int)]
+      (if (== b nil)
+        (set! end (len s))
+
+        (set! end (len b)))
+
+      (let [^{:tag (slice int)} matches (zero (slice int))]
+        (for [(values pos prevMatchEnd) (values 0 -1)] (<= pos end) _
+          (set! matches (.find re nil b s pos ncap (subslice matches _ 0)))
+          (when (== (len matches) 0)
+            (break))
+
+
+          (let [accept true]
+            (if (== (aget matches 1) pos) (do
+                ;; We've found an empty match.
+                (when (== (aget matches 0) prevMatchEnd)
+                  ;; We don't allow an empty match right
+                  ;; after a previous match, so ignore it.
+                  (set! accept false))
+
+                (let [^int width (zero int)]
+                  (if (== b nil)
+                    (let [is (lit inputString :str s)]
+                      (set! (values _ width) (.step is pos)))
+
+                    (let [ib (lit inputBytes :str b)]
+                      (set! (values _ width) (.step ib pos))))
+
+                  (if (> width 0)
+                    (set! pos + width)
+
+                    (set! pos (+ end 1)))))
+
+
+              (set! pos (aget matches 1)))
+
+            (set! prevMatchEnd (aget matches 1))
+
+            (when accept
+              (when (not (yield (.pad re matches)))
+                (return))
+
+              (when (> max 0)
+                (when [(dec! max)] (== max 0)
+                  (return))))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 814} (go/method Find "Find returns the text of the leftmost match for re in b.\nThe return value is nil for no match.\n" ^{:tag (slice byte)} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b]
+  (let [^{:tag (array 2 int)} dstCap (zero (array 2 int))
+      ^{:line 809} a (.find re nil b "" 0 2 (subslice dstCap _ 0))]
+    (when (== a nil)
+      (return nil))
+
+    (subslice b (aget a 0) (aget a 1) (aget a 1))))
+
+
+
+
+
+^{:go/end 826} (go/method FindString "FindString returns the text of the leftmost match for re in s.\nThe return value is the empty string both for an empty match and for no match.\nTo distinguish those two cases, use [Regexp.FindStringIndex] or [Regexp.FindStringSubmatch].\n" ^string [^{:tag (* Regexp)} re ^string s]
+  (let [^{:tag (array 2 int)} dstCap (zero (array 2 int))
+      ^{:line 821} a (.find re nil nil s 0 2 (subslice dstCap _ 0))]
+    (when (== a nil)
+      (return ""))
+
+    (subslice s (aget a 0) (aget a 1))))
+
+
+
+
+
+^{:go/end 837} (go/method FindIndex "FindIndex returns the location of the leftmost match for re in b.\nThe match itself is at b[m[0]:m[1]].\nThe return value is nil for no match.\n" [^{:tag (* Regexp)} re ^{:tag (slice byte)} b] :results [^{:tag (slice int)} m]
+  (set! m (.find re nil b "" 0 2 nil))
+  (when (== m nil)
+    (return nil))
+
+  (subslice m 0 2))
+
+
+
+
+
+^{:go/end 848} (go/method FindStringIndex "FindStringIndex returns the location of the leftmost match for re in s.\nThe match itself is at s[m[0]:m[1]].\nThe return value is nil for no match.\n" [^{:tag (* Regexp)} re ^string s] :results [^{:tag (slice int)} m]
+  (set! m (.find re nil nil s 0 2 nil))
+  (when (== m nil)
+    (return nil))
+
+  (subslice m 0 2))
+
+
+
+
+
+
+
+
+^{:go/end 862} (go/method FindReaderIndex "FindReaderIndex returns the location of the leftmost match for re in r.\nThe match starts at byte index m[0] and ends just before byte index m[1].\nThe return value is nil for no match.\n\nFindReaderIndex may read arbitrarily far from r,\nincluding reading beyond the returned match.\n" [^{:tag (* Regexp)} re ^io/RuneReader r] :results [^{:tag (slice int)} m]
+  (set! m (.find re r nil "" 0 2 nil))
+  (when (== m nil)
+    (return nil))
+
+  (subslice m 0 2))
+
+
+
+
+
+^{:go/end 880} (go/method FindSubmatch "FindSubmatch returns the first match for re in b, including submatches.\nThe overall match is m[0], the first submatch is m[1], and so on.\nThe return value is nil for no match.\n" ^{:tag (slice (slice byte))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b]
+  (let [^{:tag (array 4 int)} dstCap (zero (array 4 int))
+      ^{:line 869} m (.find re nil b "" 0 (.-NumCap (.-prog re)) (subslice dstCap _ 0))]
+    (when (== m nil)
+      (return nil))
+
+    (let [sub (make (slice (slice byte)) (+ 1 (.-numSubexp re)))]
+      (range [i sub]
+        (when (and (< (* 2 i) (len m)) (>= (aget m (* 2 i)) 0))
+          (aset sub i (subslice b (aget m (* 2 i)) (aget m (+ (* 2 i) 1)) (aget m (+ (* 2 i) 1))))))
+
+
+      ^{:line 879} sub)))
+
+
+
+
+
+^{:go/end 898} (go/method FindStringSubmatch "FindStringSubmatch returns the first match for re in s, including submatches.\nThe overall match is s[0], the first submatch is s[1], and so on.\nThe return value is nil for no match.\n" ^{:tag (slice string)} [^{:tag (* Regexp)} re ^string s]
+  (let [^{:tag (array 4 int)} dstCap (zero (array 4 int))
+      ^{:line 887} a (.find re nil nil s 0 (.-NumCap (.-prog re)) (subslice dstCap _ 0))]
+    (when (== a nil)
+      (return nil))
+
+    (let [ret (make (slice string) (+ 1 (.-numSubexp re)))]
+      (range [i ret]
+        (when (and (< (* 2 i) (len a)) (>= (aget a (* 2 i)) 0))
+          (aset ret i (subslice s (aget a (* 2 i)) (aget a (+ (* 2 i) 1))))))
+
+
+      ^{:line 897} ret)))
+
+
+
+
+
+^{:go/end 905} (go/method FindSubmatchIndex "FindSubmatchIndex returns the first match for re in b, including submatches.\nThe overall match is b[m[0]:m[1]], the first submatch is b[m[2]:m[3]], and so on.\nThe return value is nil for no match.\n" ^{:tag (slice int)} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b]
+  (.pad re (.find re nil b "" 0 (.-NumCap (.-prog re)) nil)))
+
+
+
+
+
+^{:go/end 912} (go/method FindStringSubmatchIndex "FindStringSubmatchIndex returns the first match for re in s, including submatches.\nThe overall match is s[m[0]:m[1]], the first submatch is s[m[2]:m[3]], and so on.\nThe return value is nil for no match.\n" ^{:tag (slice int)} [^{:tag (* Regexp)} re ^string s]
+  (.pad re (.find re nil nil s 0 (.-NumCap (.-prog re)) nil)))
+
+
+
+
+
+
+
+
+
+^{:go/end 923} (go/method FindReaderSubmatchIndex "FindReaderSubmatchIndex returns the first match for re in r, including submatches.\nThe overall match is at byte index m[0] up to m[1],\nthe first submatch is at byte index m[2] up to m[3], and so on.\nThe return value is nil for no match.\n\nFindReaderSubmatchIndex may read arbitrarily far from r,\nincluding reading beyond the returned match.\n" ^{:tag (slice int)} [^{:tag (* Regexp)} re ^io/RuneReader r]
+  (.pad re (.find re r nil "" 0 (.-NumCap (.-prog re)) nil)))
+
+
+
+^{:go/end 934} (go/method all "all returns at most n matches for re in b.\n" ^{:tag (iter/Seq (slice byte))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b ^int n]
+  ^{:go/end 933} (fn [^{:tag (func [(slice byte)] [bool])} yield]
+    (range [m (.matches re "" b n 2)]
+      (when (not (yield (subslice b (aget m 0) (aget m 1) (aget m 1))))
+        (break)))))
+
+
+
+
+
+
+^{:go/end 945} (go/method allString "allString returns at most n matches for re in s.\n" ^{:tag (iter/Seq string)} [^{:tag (* Regexp)} re ^string s ^int n]
+  ^{:go/end 944} (fn [^{:tag (func [string] [bool])} yield]
+    (range [m (.matches re s nil n 2)]
+      (when (not (yield (subslice s (aget m 0) (aget m 1))))
+        (break)))))
+
+
+
+
+
+
+^{:go/end 956} (go/method allIndex "allIndex returns the locations of at most n matches for re in b.\n" ^{:tag (iter/Seq (slice int))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b ^int n]
+  ^{:go/end 955} (fn [^{:tag (func [(slice int)] [bool])} yield]
+    (range [m (.matches re "" b n 2)]
+      (when (not (yield (lit (slice int) (aget m 0) (aget m 1))))
+        (break)))))
+
+
+
+
+
+
+^{:go/end 967} (go/method allStringIndex "allStringIndex returns the locations of at most n matches for re in s.\n" ^{:tag (iter/Seq (slice int))} [^{:tag (* Regexp)} re ^string s ^int n]
+  ^{:go/end 966} (fn [^{:tag (func [(slice int)] [bool])} yield]
+    (range [m (.matches re s nil n 2)]
+      (when (not (yield (lit (slice int) (aget m 0) (aget m 1))))
+        (break)))))
+
+
+
+
+
+
+
+^{:go/end 985} (go/method allSubmatch "allSubmatch returns the locations of at most n matches for re in b,\nincluding submatch locations.\n" ^{:tag (iter/Seq (slice (slice byte)))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b ^int n]
+  ^{:go/end 984} (fn [^{:tag (func [(slice (slice byte))] [bool])} yield]
+    (range [m (.matches re "" b n (.-NumCap (.-prog re)))]
+      (let [sub (make (slice (slice byte)) (/ (len m) 2))]
+        (range [i sub]
+          (when (>= (aget m (* 2 i)) 0)
+            (aset sub i (subslice b (aget m (* 2 i)) (aget m (+ (* 2 i) 1)) (aget m (+ (* 2 i) 1))))))
+
+
+        (when (not (yield sub))
+          (break))))))
+
+
+
+
+
+
+
+^{:go/end 1003} (go/method allStringSubmatch "allStringSubmatch returns the locations of at most n matches for re in s,\nincluding submatch locations.\n" ^{:tag (iter/Seq (slice string))} [^{:tag (* Regexp)} re ^string s ^int n]
+  ^{:go/end 1002} (fn [^{:tag (func [(slice string)] [bool])} yield]
+    (range [m (.matches re s nil n (.-NumCap (.-prog re)))]
+      (let [sub (make (slice string) (/ (len m) 2))]
+        (range [i sub]
+          (when (>= (aget m (* 2 i)) 0)
+            (aset sub i (subslice s (aget m (* 2 i)) (aget m (+ (* 2 i) 1))))))
+
+
+        (when (not (yield sub))
+          (break))))))
+
+
+
+
+
+
+
+^{:go/end 1015} (go/method allSubmatchIndex "allSubmatchIndex returns the locations of at most n matches for re in b,\nincluding submatch locations.\n" ^{:tag (iter/Seq (slice int))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b ^int n]
+  ^{:go/end 1014} (fn [^{:tag (func [(slice int)] [bool])} yield]
+    (range [m (.matches re "" b n (.-NumCap (.-prog re)))]
+      (when (not (yield (^{:inst [(slice int) int]} slices/Clone m)))
+        (break)))))
+
+
+
+
+
+
+
+^{:go/end 1027} (go/method allStringSubmatchIndex "allStringSubmatchIndex returns the locations of at most n matches for re in s,\nincluding submatch locations.\n" ^{:tag (iter/Seq (slice int))} [^{:tag (* Regexp)} re ^string s ^int n]
+  ^{:go/end 1026} (fn [^{:tag (func [(slice int)] [bool])} yield]
+    (range [m (.matches re s nil n (.-NumCap (.-prog re)))]
+      (when (not (yield (^{:inst [(slice int) int]} slices/Clone m)))
+        (break)))))
+
+
+
+
+
+
+^{:go/end 1032} (go/method _All "All returns all the matches for re in b.\n" ^{:tag (iter/Seq (slice byte))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b]
+  (.all re b -1))
+
+
+
+^{:go/end 1037} (go/method _AllString "AllString returns all the matches for re in s.\n" ^{:tag (iter/Seq string)} [^{:tag (* Regexp)} re ^string s]
+  (.allString re s -1))
+
+
+
+^{:go/end 1042} (go/method _AllIndex "AllIndex returns the locations of all matches for re in b.\n" ^{:tag (iter/Seq (slice int))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b]
+  (.allIndex re b -1))
+
+
+
+^{:go/end 1047} (go/method _AllStringIndex "AllStringIndex returns the locations of all matches for re in s.\n" ^{:tag (iter/Seq (slice int))} [^{:tag (* Regexp)} re ^string s]
+  (.allStringIndex re s -1))
+
+
+
+
+
+
+^{:go/end 1055} (go/method _AllSubmatch "AllSubmatch returns the locations of all matches for re in b,\nincluding submatch locations.\nIn each returned match m, the overall match is m[0],\nthe first submatch is m[1], and so on.\n" ^{:tag (iter/Seq (slice (slice byte)))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b]
+  (.allSubmatch re b -1))
+
+
+
+
+
+
+^{:go/end 1063} (go/method _AllStringSubmatch "AllStringSubmatch returns the locations of all matches for re in s,\nincluding submatch locations.\nIn each returned match m, m[0] is the overall match,\nm[1] is the first submatch, and so on.\n" ^{:tag (iter/Seq (slice string))} [^{:tag (* Regexp)} re ^string s]
+  (.allStringSubmatch re s -1))
+
+
+
+
+
+
+^{:go/end 1071} (go/method _AllSubmatchIndex "AllSubmatchIndex returns the locations of all matches for re in b,\nincluding submatch locations.\nIn each returned match m, the overall match is b[m[0]:m[1]],\nthe first submatch is b[m[2]:m[3]], and so on.\n" ^{:tag (iter/Seq (slice int))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b]
+  (.allSubmatchIndex re b -1))
+
+
+
+
+
+
+^{:go/end 1079} (go/method _AllStringSubmatchIndex "AllStringSubmatchIndex returns the locations of all matches for re in s,\nincluding submatch locations.\nIn each returned match m, the overall match is s[m[0]:m[1]],\nthe first submatch is s[m[2]:m[3]], and so on.\n" ^{:tag (iter/Seq (slice int))} [^{:tag (* Regexp)} re ^string s]
+  (.allStringSubmatchIndex re s -1))
+
+
+
+
+
+^{:go/end 1086} (go/method FindAll "FindAll returns all the matches for re in b.\nIf n >= 0, FindAll returns no more than n matches.\nSee [Regexp.All] for the equivalent iterator form.\n" ^{:tag (slice (slice byte))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b ^int n]
+  (^{:inst [(slice byte)]} slices/Collect (.all re b n)))
+
+
+
+
+
+^{:go/end 1093} (go/method FindAllString "FindAllString returns all the matches for re in s.\nIf n >= 0, FindAllString returns no more than n matches.\nSee [Regexp.AllString] for the equivalent iterator form.\n" ^{:tag (slice string)} [^{:tag (* Regexp)} re ^string s ^int n]
+  (^{:inst [string]} slices/Collect (.allString re s n)))
+
+
+
+
+
+^{:go/end 1100} (go/method FindAllIndex "FindAllIndex returns the locations of all matches for re in b.\nIf n >= 0, FindAllIndex returns no more than n matches.\nSee [Regexp.AllIndex] for the equivalent iterator form.\n" ^{:tag (slice (slice int))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b ^int n]
+  (^{:inst [(slice int)]} slices/Collect (.allIndex re b n)))
+
+
+
+
+
+^{:go/end 1107} (go/method FindAllStringIndex "FindAllStringIndex returns the locations of all matches for re in s.\nIf n >= 0, FindAllStringIndex returns no more than n matches.\nSee [Regexp.AllStringIndex] for the equivalent iterator form.\n" ^{:tag (slice (slice int))} [^{:tag (* Regexp)} re ^string s ^int n]
+  (^{:inst [(slice int)]} slices/Collect (.allStringIndex re s n)))
+
+
+
+
+
+
+
+
+^{:go/end 1117} (go/method FindAllSubmatch "FindAllSubmatch returns the locations of all matches for re in b,\nincluding submatch locations.\nIn each returned match m, the overall match is m[0],\nthe first submatch is m[1], and so on.\nIf n >= 0, FindAllSubmatch returns no more than n matches.\nSee [Regexp.AllSubmatch] for the equivalent iterator form.\n" ^{:tag (slice (slice (slice byte)))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b ^int n]
+  (^{:inst [(slice (slice byte))]} slices/Collect (.allSubmatch re b n)))
+
+
+
+
+
+
+
+
+^{:go/end 1127} (go/method FindAllStringSubmatch "FindAllStringSubmatch returns the locations of all matches for re in s,\nincluding submatch locations.\nIn each returned match m, m[0] is the overall match,\nm[1] is the first submatch, and so on.\nIf n >= 0, FindAllStringSubmatch returns no more than n matches.\nSee [Regexp.AllStringSubmatch] for the equivalent iterator form.\n" ^{:tag (slice (slice string))} [^{:tag (* Regexp)} re ^string s ^int n]
+  (^{:inst [(slice string)]} slices/Collect (.allStringSubmatch re s n)))
+
+
+
+
+
+
+
+
+^{:go/end 1137} (go/method FindAllSubmatchIndex "FindAllSubmatchIndex returns the locations of all matches for re in b,\nincluding submatch locations.\nIn each returned match m, the overall match is b[m[0]:m[1]],\nthe first submatch is b[m[2]:m[3]], and so on.\nIf n >= 0, FindAllSubmatchIndex returns no more than n matches.\nSee [Regexp.AllSubmatchIndex] for the equivalent iterator form.\n" ^{:tag (slice (slice int))} [^{:tag (* Regexp)} re ^{:tag (slice byte)} b ^int n]
+  (^{:inst [(slice int)]} slices/Collect (.allSubmatchIndex re b n)))
+
+
+
+
+
+
+
+
+^{:go/end 1147} (go/method FindAllStringSubmatchIndex "FindAllStringSubmatchIndex returns the locations of all matches for re in s,\nincluding submatch locations.\nIn each returned match m, the overall match is s[m[0]:m[1]],\nthe first submatch is s[m[2]:m[3]], and so on.\nIf n >= 0, FindAllStringSubmatchIndex returns no more than n matches.\nSee [Regexp.AllStringSubmatchIndex] for the equivalent iterator form.\n" ^{:tag (slice (slice int))} [^{:tag (* Regexp)} re ^string s ^int n]
+  (^{:inst [(slice int)]} slices/Collect (.allStringSubmatchIndex re s n)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1168} (go/method Expand "Expand appends template to dst and returns the result; during the\nappend, Expand replaces variables in the template with corresponding\nmatches drawn from src. The match slice should have been returned by\n[Regexp.FindSubmatchIndex].\n\nIn the template, a variable is denoted by a substring of the form\n$name or ${name}, where name is a non-empty sequence of letters,\ndigits, and underscores. A purely numeric name like $1 refers to\nthe submatch with the corresponding index; other names refer to\ncapturing parentheses named with the (?P<name>...) syntax. A\nreference to an out of range or unmatched index or a name that is not\npresent in the regular expression is replaced with an empty slice.\n\nIn the $name form, name is taken to be as long as possible: $1x is\nequivalent to ${1x}, not ${1}x, and, $10 is equivalent to ${10}, not ${1}0.\n\nTo insert a literal $ in the output, use $$ in the template.\n" ^{:tag (slice byte)} [^{:tag (* Regexp)} re ^{:tag (slice byte)} dst ^{:tag (slice byte)} template ^{:tag (slice byte)} src ^{:tag (slice int)} match]
+  (.expand re dst (conv string template) src "" match))
+
+
+
+
+
+^{:go/end 1175} (go/method ExpandString "ExpandString is like [Regexp.Expand] but the template and source are strings.\nIt appends to and returns a byte slice in order to give the calling\ncode control over allocation.\n" ^{:tag (slice byte)} [^{:tag (* Regexp)} re ^{:tag (slice byte)} dst ^string template ^string src ^{:tag (slice int)} match]
+  (.expand re dst template nil src match))
+
+
+^{:go/end 1221} (go/method expand ^{:tag (slice byte)} [^{:tag (* Regexp)} re ^{:tag (slice byte)} dst ^string template ^{:tag (slice byte)} bsrc ^string src ^{:tag (slice int)} match]
+  (while (> (len template) 0)
+    (let [(values before after ok) (strings/Cut template "$")]
+      (when (not ok)
+        (break))
+
+      (set! dst (append dst (spread before)))
+      (set! template after)
+      (when (and (!= template "") (== (aget template 0) \$))
+        ;; Treat $$ as $.
+        (set! dst (append dst \$))
+        (set! template (subslice template 1))
+        (continue))
+
+      (let [(values name num rest ^:assign ok) (extract template)]
+        (when (not ok)
+          ;; Malformed; treat $ as raw text.
+          (set! dst (append dst \$))
+          (continue))
+
+        (set! template rest)
+        (if (>= num 0)
+          (when (and (< (+ (* 2 num) 1) (len match)) (>= (aget match (* 2 num)) 0))
+            (if (!= bsrc nil)
+              (set! dst (append dst (spread (subslice bsrc (aget match (* 2 num)) (aget match (+ (* 2 num) 1))))))
+
+              (set! dst (append dst (spread (subslice src (aget match (* 2 num)) (aget match (+ (* 2 num) 1))))))))
+
+
+
+          (range [i namei (.-subexpNames re)]
+            (when (and (== name namei) (< (+ (* 2 i) 1) (len match)) (>= (aget match (* 2 i)) 0))
+              (if (!= bsrc nil)
+                (set! dst (append dst (spread (subslice bsrc (aget match (* 2 i)) (aget match (+ (* 2 i) 1))))))
+
+                (set! dst (append dst (spread (subslice src (aget match (* 2 i)) (aget match (+ (* 2 i) 1)))))))
+
+              (break)))))))
+
+
+
+
+  (set! dst (append dst (spread template)))
+  ^{:line 1220} dst)
+
+
+
+
+
+^{:go/end 1273} (go/func extract "extract returns the name from a leading \"name\" or \"{name}\" in str.\n(The $ has already been removed by the caller.)\nIf it is a number, extract returns num set to that number; otherwise num = -1.\n" [^string str] :results [^string name ^int num ^string rest ^bool ok]
+  (when (== str "")
+    (return))
+
+  (let [brace false]
+    (when (== (aget str 0) \{)
+      (set! brace true)
+      (set! str (subslice str 1)))
+
+    (let [i 0]
+      (while (< i (len str))
+        (let [(values rune size) (utf8/DecodeRuneInString (subslice str i))]
+          (when (and (not (unicode/IsLetter rune)) (not (unicode/IsDigit rune)) (!= rune \_))
+            (break))
+
+          (set! i + size)))
+
+      (when (== i 0)
+        ;; empty name is not okay
+        (return))
+
+      (set! name (subslice str _ i))
+      (when brace
+        (when (or (>= i (len str)) (!= (aget str i) \}))
+          ;; missing closing brace
+          (return))
+
+        (inc! i))
+
+
+      ;; Parse number.
+      (set! num 0)
+      (for [i 0] (< i (len name)) (inc! i)
+        (when (or (< (aget name i) \0) (< \9 (aget name i)) (>= num 1.0E8))
+          (set! num -1)
+          (break))
+
+        (set! num (- (+ (* num 10) (conv int (aget name i))) \0)))
+
+      ;; Disallow leading zeros.
+      (when (and (== (aget name 0) \0) (> (len name) 1))
+        (set! num -1))
+
+
+      (set! rest (subslice str i))
+      (set! ok true)
+      (return))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1321} (go/method Split "Split slices s into substrings separated by the expression and returns a slice of\nthe substrings between those expression matches.\n\nThe slice returned by this method consists of all the substrings of s\nnot contained in the slice returned by [Regexp.FindAllString]. When called on an expression\nthat contains no metacharacters, it is equivalent to [strings.SplitN].\n\nExample:\n\n\ts := regexp.MustCompile(\"a*\").Split(\"abaabaccadaaae\", 5)\n\t// s: [\"\", \"b\", \"b\", \"c\", \"cadaaae\"]\n\nThe count determines the number of substrings to return:\n  - n > 0: at most n substrings; the last substring will be the unsplit remainder;\n  - n == 0: the result is nil (zero substrings);\n  - n < 0: all substrings.\n" ^{:tag (slice string)} [^{:tag (* Regexp)} re ^string s ^int n]
+  (when (== n 0)
+    (return nil))
+
+  (when (and (> (len (.-expr re)) 0) (== (len s) 0))
+    (return (lit (slice string) "")))
+
+
+  (let [matches (.FindAllStringIndex re s n)
+      ^{:line 1300} strings (make (slice string) 0 (len matches))
+
+      ^{:line 1302} beg 0
+      ^{:line 1303} end 0]
+    (range [_ match matches]
+      (when (and (> n 0) (>= (len strings) (- n 1)))
+        (break))
+
+
+      (set! end (aget match 0))
+      (when (!= (aget match 1) 0)
+        (set! strings (append strings (subslice s beg end))))
+
+      (set! beg (aget match 1)))
+
+
+    (when (!= end (len s))
+      (set! strings (append strings (subslice s beg))))
+
+
+    ^{:line 1320} strings))
+
+
+
+
+
+
+
+
+^{:go/end 1331} (go/method AppendText "AppendText implements [encoding.TextAppender]. The output\nmatches that of calling the [Regexp.String] method.\n\nNote that the output is lossy in some cases: This method does not indicate\nPOSIX regular expressions (i.e. those compiled by calling [CompilePOSIX]), or\nthose for which the [Regexp.Longest] method has been called.\n" [^{:tag (* Regexp)} re ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (return (append b (spread (.String re))) nil))
+
+
+
+
+
+
+^{:go/end 1339} (go/method MarshalText "MarshalText implements [encoding.TextMarshaler]. The output\nmatches that of calling the [Regexp.AppendText] method.\n\nSee [Regexp.AppendText] for more information.\n" [^{:tag (* Regexp)} re] :results [(slice byte) error]
+  (.AppendText re nil))
+
+
+
+
+^{:go/end 1350} (go/method UnmarshalText "UnmarshalText implements [encoding.TextUnmarshaler] by calling\n[Compile] on the encoded value.\n" ^error [^{:tag (* Regexp)} re ^{:tag (slice byte)} text]
+  ^{:go/breaks [4]} (let [(values newRE err) (Compile (conv string text))]
+    (when (!= err nil)
+      (return err))
+
+    (set! @re @newRE)
+    nil))

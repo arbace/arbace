@@ -1,0 +1,214 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http) (go/file "servemux121.go" :imports [
+
+    ;; This file implements ServeMux behavior as in Go 1.21.
+    ;; The behavior is controlled by a GODEBUG setting.
+    ;; Most of this code is derived from commit 08e35cc334.
+    ;; Changes are minimal: aside from the different receiver type,
+    ;; they mostly involve renaming functions, usually by unexporting them.
+
+    ;; servemux121.go exists solely to provide a snapshot of
+    ;; the pre-Go 1.22 ServeMux implementation for backwards compatibility.
+    ;; Do not modify this file, it should remain frozen.
+
+
+    ^{:line 18} [godebug "internal/godebug"]
+    ^{:line 19} [url "net/url"]
+    ^{:line 20} [sort "sort"]
+    ^{:line 21} [strings "strings"]
+    ^{:line 22} [sync "sync"]])
+
+
+(go/var httpmuxgo121 (godebug/New "httpmuxgo121"))
+
+(go/var ^bool use121)
+
+
+
+^{:go/end 36} (go/func init "Read httpmuxgo121 once at startup, since dealing with changes to it during\nprogram execution is too complex and error-prone.\n" []
+  (when (== (.Value httpmuxgo121) "1")
+    (set! use121 true)
+    (.IncNonDefault httpmuxgo121)))
+
+
+
+
+(go/type serveMux121 "serveMux121 holds the state of a ServeMux needed for Go 1.21 behavior.\n" (struct
+    ^{:line 40 :tag sync/RWMutex} mu
+    ^{:line 41 :tag (map string muxEntry)} m
+    ^{:line 42 :tag (slice muxEntry)} es ; slice of entries sorted from longest to shortest.
+    ^{:line 43 :tag bool} hosts)) ; whether any patterns contain hostnames
+
+
+(go/type muxEntry (struct
+    ^{:line 47 :tag Handler} h
+    ^{:line 48 :tag string} pattern))
+
+
+
+^{:go/end 78} (go/method handle "Formerly ServeMux.Handle.\n" [^{:tag (* serveMux121)} mux ^string pattern ^Handler handler]
+  (.Lock (.-mu mux))
+  (defer (.Unlock (.-mu mux)))
+
+  (when (== pattern "")
+    (panic "http: invalid pattern"))
+
+  (when (== handler nil)
+    (panic "http: nil handler"))
+
+  (when [(values _ exist) (aget (.-m mux) pattern)] exist
+    (panic (+ "http: multiple registrations for " pattern)))
+
+
+  (when (== (.-m mux) nil)
+    (set! (.-m mux) (make (map string muxEntry))))
+
+  (let [e (lit muxEntry :h handler :pattern pattern)]
+    (aset (.-m mux) pattern e)
+    (when (== (aget pattern (- (len pattern) 1)) \/)
+      (set! (.-es mux) (appendSorted (.-es mux) e)))
+
+
+    (when (!= (aget pattern 0) \/)
+      (set! (.-hosts mux) true))))
+
+
+
+^{:go/end 93} (go/func appendSorted ^{:tag (slice muxEntry)} [^{:tag (slice muxEntry)} es ^muxEntry e]
+  (let [n (len es)
+      ^{:line 82} i (sort/Search n ^{:go/end 84} (fn ^bool [^int i]
+          (< (len (.-pattern (aget es i))) (len (.-pattern e)))))]
+
+    (when (== i n)
+      (return (append es e)))
+
+    ;; we now know that i points at where we want to insert
+    (set! es (append es (lit muxEntry))) ; try to grow the slice in place, any entry works.
+    (copy (subslice es (+ i 1)) (subslice es i)) ; Move shorter entries down
+    (aset es i e)
+    ^{:line 92} es))
+
+
+
+^{:go/end 101} (go/method handleFunc "Formerly ServeMux.HandleFunc.\n" [^{:tag (* serveMux121)} mux ^string pattern ^{:tag (func [ResponseWriter (* Request)])} handler]
+  (when (== handler nil)
+    (panic "http: nil handler"))
+
+  (.handle mux pattern (conv HandlerFunc handler)))
+
+
+
+^{:go/end 136} (go/method findHandler "Formerly ServeMux.Handler.\n" [^{:tag (* serveMux121)} mux ^{:tag (* Request)} r] :results [^Handler h ^string pattern]
+
+  ;; CONNECT requests are not canonicalized.
+  (when (== (.-Method r) "CONNECT")
+    ;; If r.URL.Path is /tree and its handler is not registered,
+    ;; the /tree -> /tree/ redirect applies to CONNECT requests
+    ;; but the path canonicalization does not.
+    (when [(values u ok) (.redirectToPathSlash mux (.-Host (.-URL r)) (.-Path (.-URL r)) (.-URL r))] ok
+      (return (RedirectHandler (.String u) StatusMovedPermanently) (.-Path u)))
+
+
+    (return (.handler mux (.-Host r) (.-Path (.-URL r)))))
+
+
+  ;; All other requests have any port stripped and path cleaned
+  ;; before passing to mux.handler.
+  (let [host (stripHostPort (.-Host r))
+      ^{:line 121} path (cleanPath (.-Path (.-URL r)))]
+
+    ;; If the given path is /tree and its handler is not registered,
+    ;; redirect for /tree/.
+    (when [(values u ok) (.redirectToPathSlash mux host path (.-URL r))] ok
+      (return (RedirectHandler (.String u) StatusMovedPermanently) (.-Path u)))
+
+
+    (when (!= path (.-Path (.-URL r)))
+      (set! (values _ pattern) (.handler mux host path))
+      (let [u (addr (lit url/URL :Path path :RawQuery (.-RawQuery (.-URL r))))]
+        (return (RedirectHandler (.String u) StatusMovedPermanently) pattern)))
+
+
+    (.handler mux host (.-Path (.-URL r)))))
+
+
+
+
+^{:go/end 155} (go/method handler "handler is the main implementation of findHandler.\nThe path is known to be in canonical form, except for CONNECT methods.\n" [^{:tag (* serveMux121)} mux ^string host ^string path] :results [^Handler h ^string pattern]
+  (.RLock (.-mu mux))
+  (defer (.RUnlock (.-mu mux)))
+
+  ;; Host-specific pattern takes precedence over generic ones
+  (when (.-hosts mux)
+    (set! (values h pattern) (.match mux (+ host path))))
+
+  (when (== h nil)
+    (set! (values h pattern) (.match mux path)))
+
+  (when (== h nil)
+    (set! (values h pattern) (values (NotFoundHandler) "")))
+
+  (return))
+
+
+
+
+^{:go/end 174} (go/method match "Find a handler on a handler map given a path string.\nMost-specific (longest) pattern wins.\n" [^{:tag (* serveMux121)} mux ^string path] :results [^Handler h ^string pattern]
+  ;; Check for exact match first.
+  (let [(values v ok) (aget (.-m mux) path)]
+    (when ok
+      (return (.-h v) (.-pattern v)))
+
+
+    ;; Check for longest valid match.  mux.es contains all patterns
+    ;; that end in / sorted from longest to shortest.
+    (range [_ e (.-es mux)]
+      (when (strings/HasPrefix path (.-pattern e))
+        (return (.-h e) (.-pattern e))))
+
+
+    (return nil "")))
+
+
+
+
+
+
+^{:go/end 190} (go/method redirectToPathSlash "redirectToPathSlash determines if the given path needs appending \"/\" to it.\nThis occurs when a handler for path + \"/\" was already registered, but\nnot for path itself. If the path needs appending to, it creates a new\nURL, setting the path to u.Path + \"/\" and returning true to indicate so.\n" [^{:tag (* serveMux121)} mux ^string host ^string path ^{:tag (* url/URL)} u] :results [(* url/URL) bool]
+  (.RLock (.-mu mux))
+  (let [shouldRedirect (.shouldRedirectRLocked mux host path)]
+    (.RUnlock (.-mu mux))
+    (when (not shouldRedirect)
+      (return u false))
+
+    (set! path (+ path "/"))
+    (set! u (addr (lit url/URL :Path path :RawQuery (.-RawQuery u))))
+    (return u true)))
+
+
+
+
+
+^{:go/end 215} (go/method shouldRedirectRLocked "shouldRedirectRLocked reports whether the given path and host should be redirected to\npath+\"/\". This should happen if a handler is registered for path+\"/\" but\nnot path -- see comments at ServeMux.\n" ^bool [^{:tag (* serveMux121)} mux ^string host ^string path]
+  (let [p (lit (slice string) path (+ host path))]
+
+    (range [_ c p]
+      (when [(values _ exist) (aget (.-m mux) c)] exist
+        (return false)))
+
+
+
+    ^{:go/breaks [[4 214]]} (let [n (len path)]
+      (when (== n 0)
+        (return false))
+
+      (range [_ c p]
+        (when [(values _ exist) (aget (.-m mux) (+ c "/"))] exist
+          (return (!= (aget path (- n 1)) \/))))
+
+
+
+      false)))

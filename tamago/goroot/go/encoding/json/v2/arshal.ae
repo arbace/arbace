@@ -1,0 +1,561 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.v2) (go/file "arshal.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [encoding "encoding"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [reflect "reflect"]
+    ^{:line 15} [sync "sync"]
+    ^{:line 16} [time "time"]
+
+    ^{:line 18} [internal "encoding/json/internal"]
+    ^{:line 19} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 20} [jsonopts "encoding/json/internal/jsonopts"]
+    ^{:line 21} [jsontext "encoding/json/jsontext"]])
+
+
+
+
+(go/var "Reference encoding and time packages to assist pkgsite\nin being able to hotlink references to those packages.\n"
+  ^{:line 27} [^encoding/TextMarshaler _]
+  ^{:line 28} [^encoding/TextAppender _]
+  ^{:line 29} [^encoding/TextUnmarshaler _]
+  ^{:line 30} [^time/Time _]
+  ^{:line 31} [^time/Duration _])
+
+
+(go/var
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 48} [^{:doc "Once a JSON object has begun processing without duplicate name verification,\nit does not track the history of names that have been seen so far.\nReject changing the setting for the current JSON object namespace,\notherwise we would be operating with inconsistent state.\nNote that you can change the setting before processing the start\nof a different JSON object.\n\nTODO: We could loosen this restriction in certain conditions.\nIf we are already checking for duplicate names,\nwe can momentarily disable it for the next JSON object member name.\nHowever, if we are already NOT checking for duplicate names,\nwe cannot momentarily enable it for the next JSON object member name\nsince we already lack prior history of JSON object names.\n"} errChangingDuplicateNames (errors/New "cannot change duplicate name checks after a JSON object has already begun processing")]
+
+
+
+
+
+
+
+  ^{:line 56} [^{:doc "The presence of invalid UTF-8 has an interesting intersection\nwith checking for duplicate names. Due to the semantic of mangling\ninvalid UTF-8 as the Unicode replacement character,\ntwo string keys in a Go map (both with invalid UTF-8)\nmay encode as the same JSON string. Thus, we forbid changing of\ninvalid UTF-8 checks in the current JSON object namespace.\n"} errChangingInvalidUTF8 (errors/New "cannot change UTF-8 checks after a JSON object has already begun processing")]
+
+
+
+
+  ^{:line 61} [^{:doc "TODO(https://go.dev/issue/79559): Changing whitespace currently\nleads to strange effects and will need more careful adjustment.\nFor now, we just report an error.\n"} errChangingWhitespace (errors/New "cannot change whitespace formatting within a MarshalEncode call")])
+
+
+
+(go/var ^{:doc "export exposes internal functionality of the \"jsontext\" package.\n"} export (.Export jsontext/Internal (addr internal/AllowInternalUse)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 173} (go/func Marshal "Marshal serializes a Go value as a []byte according to the provided\nmarshal and encode options (while ignoring unmarshal or decode options).\nIt does not terminate the output with a newline.\n\nType-specific marshal functions and methods take precedence\nover the default representation of a value.\nFunctions or methods that operate on *T are only called when encoding\na value of type T (by taking its address) or a non-nil value of *T.\nMarshal ensures that a value is always addressable\n(by copying the value if necessary) so that\nthese functions and methods can be consistently called. For performance,\nit is recommended that Marshal be passed a non-nil pointer to the value.\n\nThe input value is encoded as JSON according to the following rules:\n\n  - If any type-specific functions in a [WithMarshalers] option match\n    the value type, then those functions are called to encode the value.\n    If all applicable functions return [errors.ErrUnsupported],\n    then the value is encoded according to subsequent rules.\n\n  - If the value type implements [MarshalerTo],\n    then the MarshalJSONTo method is called to encode the value.\n    If the method returns [errors.ErrUnsupported],\n    then the input is encoded according to subsequent rules.\n\n  - If the value type implements [Marshaler],\n    then the MarshalJSON method is called to encode the value.\n\n  - If the value type implements [encoding.TextAppender],\n    then the AppendText method is called to encode the value and\n    subsequently encode its result as a JSON string.\n\n  - If the value type implements [encoding.TextMarshaler],\n    then the MarshalText method is called to encode the value and\n    subsequently encode its result as a JSON string.\n\n  - Otherwise, the value is encoded according to the value's type\n    as described in detail below.\n\nMost Go types have a default JSON representation as follows:\n\n  - A Go boolean is encoded as a JSON boolean (e.g., true or false).\n\n  - A Go string is encoded as a JSON string.\n\n  - A Go []byte or [N]byte is encoded as a JSON string containing\n    a binary value using Base 64 Encoding per RFC 4648, section 4.\n\n  - A Go integer is encoded as a JSON number without fractions or exponents.\n    If [StringifyNumbers] is specified or encoding a JSON object name,\n    then the JSON number is encoded within a JSON string.\n\n  - A Go float is encoded as a JSON number.\n    If [StringifyNumbers] is specified or encoding a JSON object name,\n    then the JSON number is encoded within a JSON string.\n    Encoding a NaN or ±Inf results in a [SemanticError].\n\n  - A Go map is encoded as a JSON object, where each Go map key and value\n    is recursively encoded as a name and value pair in the JSON object.\n    The Go map key must encode as a JSON string, otherwise this results\n    in a [SemanticError]. The Go map is traversed in a non-deterministic order.\n    For deterministic encoding, consider using the [Deterministic] option.\n    By default, a nil map is encoded as an empty JSON object,\n    unless the [FormatNilMapAsNull] option is specified.\n\n  - A Go struct is encoded as a JSON object.\n    See the “JSON Representation of Go structs” section\n    in the package-level documentation for more details.\n\n  - A Go slice is encoded as a JSON array, where each Go slice element\n    is recursively JSON-encoded as the elements of the JSON array.\n    By default, a nil slice is encoded as an empty JSON array,\n    unless the [FormatNilSliceAsNull] option is specified.\n\n  - A Go array is encoded as a JSON array, where each Go array element\n    is recursively JSON-encoded as the elements of the JSON array.\n    The JSON array length is always identical to the Go array length.\n\n  - A Go pointer is encoded as a JSON null if nil, otherwise it is\n    the recursively JSON-encoded representation of the underlying value.\n\n  - A Go interface is encoded as a JSON null if nil, otherwise it is\n    the recursively JSON-encoded representation of the underlying value.\n\n  - A Go [time.Time] is encoded as a JSON string containing the timestamp\n    formatted in RFC 3339 with nanosecond precision.\n\n  - A Go [time.Duration] currently has no default representation and\n    results in a [SemanticError], unless the [encoding/json.FormatDurationAsNano]\n    option is specified, in which case it is encoded as a JSON number\n    without fractions or exponents, representing the duration in nanoseconds.\n\n  - All other Go types (e.g., complex numbers, channels, and functions)\n    have no default representation and result in a [SemanticError].\n\nJSON cannot represent cyclic data structures and Marshal does not handle them.\n" [^any in & ^{:tag (slice Options)} opts] :results [^{:tag (slice byte)} out ^error err]
+  (let [enc (.GetBufferedEncoder export (spread opts))]
+    (defer (.PutBufferedEncoder export enc))
+    (let [xe (.Encoder export enc)]
+      (.Set ^{:go/via [Struct]} (.-Flags xe) (bit-or jsonflags/OmitTopLevelNewline 1))
+      (set! err (marshalEncode enc in (addr (.-Struct xe))))
+      (when (and (!= err nil) (.Get ^{:go/via [Struct]} (.-Flags xe) jsonflags/ReportErrorsWithLegacySemantics))
+        (return nil (internal/TransformMarshalError in err)))
+
+      (return (bytes/Clone ^{:go/via [encodeBuffer]} (.-Buf xe)) err))))
+
+
+
+
+
+
+^{:go/end 189} (go/func MarshalWrite "MarshalWrite serializes a Go value into an [io.Writer] according to the provided\nmarshal and encode options (while ignoring unmarshal or decode options).\nIt does not terminate the output with a newline.\nSee [Marshal] for details about the conversion of a Go value into JSON.\n" [^io/Writer out ^any in & ^{:tag (slice Options)} opts] :results [^error err]
+  (let [enc (.GetStreamingEncoder export out (spread opts))]
+    (defer (.PutStreamingEncoder export enc))
+    (let [xe (.Encoder export enc)]
+      (.Set ^{:go/via [Struct]} (.-Flags xe) (bit-or jsonflags/OmitTopLevelNewline 1))
+      (set! err (marshalEncode enc in (addr (.-Struct xe))))
+      (when (and (!= err nil) (.Get ^{:go/via [Struct]} (.-Flags xe) jsonflags/ReportErrorsWithLegacySemantics))
+        (return (internal/TransformMarshalError in err)))
+
+      ^{:line 188} err)))
+
+
+
+
+
+
+
+
+^{:go/end 225} (go/func MarshalEncode "MarshalEncode serializes a Go value into an [jsontext.Encoder] according to\nthe provided marshal or encode options (while ignoring unmarshal or decode options).\nThe options provided take precedence over options already applied on\nthe [jsontext.Encoder] and only apply for the duration of the marshal call.\n\nSee [Marshal] for details about the conversion of a Go value into JSON.\n" [^{:tag (* jsontext/Encoder)} out ^any in & ^{:tag (slice Options)} opts] :results [^error err]
+  (let [xe (.Encoder export out)]
+    (when (> (len opts) 0)
+      (let [optsOriginal (.-Struct xe)]
+        (defer (^{:go/end 201} (fn [] (set! (.-Struct xe) optsOriginal))))
+        (.Join (.-Struct xe) (spread opts))
+        (when (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xe)))
+          (when (!= (.Get (.-Flags optsOriginal) jsonflags/AllowDuplicateNames) (.Get (.-Flags (.-Struct xe)) jsonflags/AllowDuplicateNames))
+            (return (newMarshalErrorBefore out (reflect/TypeOf in) errChangingDuplicateNames)))
+
+          (when (!= (.Get (.-Flags optsOriginal) jsonflags/AllowInvalidUTF8) (.Get (.-Flags (.-Struct xe)) jsonflags/AllowInvalidUTF8))
+            (return (newMarshalErrorBefore out (reflect/TypeOf in) errChangingInvalidUTF8))))
+
+
+        (when (.Has (.-Flags (.-Struct xe)) jsonflags/AnyWhitespace)
+          (when (.Get (.-Flags (.-Struct xe)) jsonflags/Multiline)
+            (.InitializeMultiline (.-Struct xe)))
+
+          (when (jsonopts/ChangedWhitespace optsOriginal (.-Struct xe))
+            (return (newMarshalErrorBefore out (reflect/TypeOf in) errChangingWhitespace))))))
+
+
+
+    (set! err (marshalEncode out in (addr (.-Struct xe))))
+    (when (and (!= err nil) (.Get ^{:go/via [Struct]} (.-Flags xe) jsonflags/ReportErrorsWithLegacySemantics))
+      (return (internal/TransformMarshalError in err)))
+
+    ^{:line 224} err))
+
+
+^{:go/end 255} (go/func marshalEncode [^{:tag (* jsontext/Encoder)} out ^any in ^{:tag (* jsonopts/Struct)} mo] :results [^error err]
+  (let [v (reflect/ValueOf in)]
+    (when (or (not (.IsValid v)) ^:go/paren (and (== (.Kind v) reflect/Pointer) (.IsNil v)))
+      (return (.WriteToken out jsontext/Null)))
+
+    ;; Shallow copy non-pointer values to obtain an addressable value.
+    ;; It is beneficial to performance to always pass pointers to avoid this.
+    (let [forceAddr (!= (.Kind v) reflect/Pointer)]
+      (when forceAddr
+        (let [v2 (reflect/New (.Type v))]
+          (.Set (.Elem v2) v)
+          (set! v v2)))
+
+      ^{:go/breaks [[4 254]]} (let [va (lit addressableValue (.Elem v) forceAddr) ; dereferenced pointer is always addressable
+          ^{:line 241} t ^{:go/via [Value]} (.Type va)
+
+          ;; Lookup and call the marshal function for this type.
+          ^{:line 244} marshal (.-marshal (lookupArshaler t))]
+        (when (!= ^{:go/via [ArshalValues]} (.-Marshalers mo) nil)
+          (set! (values marshal _) (.lookup (assert (* Marshalers) ^{:go/via [ArshalValues]} (.-Marshalers mo)) marshal t)))
+
+        (when [err (marshal out va mo)] (!= err nil)
+          (when (not (.Get (.-Flags mo) jsonflags/AllowDuplicateNames))
+            (.InvalidateDisabledNamespaces ^{:go/via [state]} (.-Tokens (.Encoder export out))))
+
+          (return err))
+
+        nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 395} (go/func Unmarshal "Unmarshal decodes a []byte input into a Go value according to the provided\nunmarshal and decode options (while ignoring marshal or encode options).\nThe input must be a single JSON value with optional whitespace interspersed.\nThe output must be a non-nil pointer.\n\nType-specific unmarshal functions and methods take precedence\nover the default representation of a value.\nFunctions or methods that operate on *T are only called when decoding\na value of type T (by taking its address) or a non-nil value of *T.\nUnmarshal ensures that a value is always addressable\n(by copying the value if necessary) so that\nthese functions and methods can be consistently called.\nIf a value must be shallow copied to call a pointer-receiver\n[Unmarshaler], [UnmarshalerFrom], or [encoding.TextUnmarshaler] method,\nthen any mutations performed by the method are shallow copied back\ninto the destination value.\n\nThe input is decoded into the output according to the following rules:\n\n  - If any type-specific functions in a [WithUnmarshalers] option match\n    the value type, then those functions are called to decode the JSON\n    value. If all applicable functions return [errors.ErrUnsupported],\n    then the input is decoded according to subsequent rules.\n\n  - If the value type implements [UnmarshalerFrom],\n    then the UnmarshalJSONFrom method is called to decode the JSON value.\n    If the method returns [errors.ErrUnsupported],\n    then the input is decoded according to subsequent rules.\n\n  - If the value type implements [Unmarshaler],\n    then the UnmarshalJSON method is called to decode the JSON value.\n\n  - If the value type implements [encoding.TextUnmarshaler],\n    then the input is decoded as a JSON string and\n    the UnmarshalText method is called with the decoded string value.\n    This fails with a [SemanticError] if the input is not a JSON string.\n\n  - Otherwise, the JSON value is decoded according to the value's type\n    as described in detail below.\n\nMost Go types have a default JSON representation.\nA JSON null may be decoded into every supported Go value where\nit is equivalent to storing the zero value of the Go value.\nIf the input JSON kind is not handled by the current Go value type,\nthen this fails with a [SemanticError]. Unless otherwise specified,\nthe decoded value replaces any pre-existing value.\n\nThe representation of each type is as follows:\n\n  - A Go boolean is decoded from a JSON boolean (e.g., true or false).\n\n  - A Go string is decoded from a JSON string.\n\n  - A Go []byte or [N]byte is decoded from a JSON string containing\n    a binary value using Base 64 Encoding per RFC 4648, section 4.\n    When decoding into a non-nil []byte, the slice length is reset to zero\n    and the decoded input is appended to it.\n    When decoding into a [N]byte, the input must decode to exactly N bytes,\n    otherwise it fails with a [SemanticError].\n\n  - A Go integer is decoded from a JSON number.\n    It must be decoded from a JSON string containing a JSON number\n    if [StringifyNumbers] is specified or decoding a JSON object name.\n    It fails with a [SemanticError] if the JSON number\n    has a fractional or exponent component.\n    It also fails if it overflows the representation of the Go integer type.\n\n  - A Go float is decoded from a JSON number.\n    It must be decoded from a JSON string containing a JSON number\n    if [StringifyNumbers] is specified or decoding a JSON object name.\n    It fails if it overflows the representation of the Go float type.\n    Since JSON lacks a native representation for a NaN or ±Inf,\n    such values cannot be the result of decoding.\n\n  - A Go map is decoded from a JSON object,\n    where each JSON object name and value pair is recursively decoded\n    as the Go map key and value. Maps are not cleared.\n    If the Go map is nil, then a new map is allocated to decode into.\n    If the decoded key matches an existing Go map entry, the entry value\n    is reused by decoding the JSON object value into it.\n\n  - A Go struct is decoded from a JSON object.\n    See the “JSON Representation of Go structs” section\n    in the package-level documentation for more details.\n\n  - A Go slice is decoded from a JSON array, where each JSON element\n    is recursively decoded and appended to the Go slice.\n    Before appending into a Go slice, a new slice is allocated if it is nil,\n    otherwise the slice length is reset to zero.\n\n  - A Go array is decoded from a JSON array, where each JSON array element\n    is recursively decoded as each corresponding Go array element.\n    Each Go array element is zeroed before decoding into it.\n    It fails with a [SemanticError] if the JSON array does not contain\n    the exact same number of elements as the Go array.\n\n  - A Go pointer is decoded based on the JSON kind and underlying Go type.\n    If the input is a JSON null, then this stores a nil pointer.\n    Otherwise, it allocates a new underlying value if the pointer is nil,\n    and recursively JSON decodes into the underlying value.\n\n  - A Go interface is decoded based on the JSON kind and underlying Go type.\n    If the input is a JSON null, then this stores a nil interface value.\n    Otherwise, a nil interface value of an empty interface type is initialized\n    with a zero Go bool, string, float64, map[string]any, or []any if the\n    input is a JSON boolean, string, number, object, or array, respectively.\n    If the interface value is still nil, then this fails with a [SemanticError]\n    since decoding could not determine an appropriate Go type to decode into.\n    For example, unmarshaling into a nil io.Reader fails since\n    there is no concrete type to populate the interface value with.\n    Otherwise an underlying value exists and it recursively decodes\n    the JSON input into it.\n\n  - A Go [time.Time] is decoded from a JSON string containing the time\n    formatted in RFC 3339 with nanosecond precision.\n\n  - A Go [time.Duration] currently has no default representation and\n    results in a [SemanticError], unless the [encoding/json.FormatDurationAsNano]\n    option is specified, in which case it is decoded as a JSON number\n    without fractions or exponents, representing the duration in nanoseconds.\n\n  - All other Go types (e.g., complex numbers, channels, and functions)\n    have no default representation and result in a [SemanticError].\n\nIn general, unmarshaling follows merge semantics (similar to RFC 7396)\nwhere the decoded Go value replaces the destination value\nfor any JSON kind other than an object.\nFor JSON objects, the input object is merged into the destination value\nwhere matching object members recursively apply merge semantics.\n" [^{:tag (slice byte)} in ^any out & ^{:tag (slice Options)} opts] :results [^error err]
+  (let [dec (.GetBufferedDecoder export in (spread opts))]
+    (defer (.PutBufferedDecoder export dec))
+    (let [xd (.Decoder export dec)]
+      (set! err (unmarshalDecode dec out (addr (.-Struct xd)) true))
+      (when (and (!= err nil) (.Get ^{:go/via [Struct]} (.-Flags xd) jsonflags/ReportErrorsWithLegacySemantics))
+        (return (internal/TransformUnmarshalError out err)))
+
+      ^{:line 394} err)))
+
+
+
+
+
+
+
+
+^{:go/end 412} (go/func UnmarshalRead "UnmarshalRead deserializes a Go value from an [io.Reader] according to the\nprovided unmarshal and decode options (while ignoring marshal or encode options).\nThe input must be a single JSON value with optional whitespace interspersed.\nIt consumes the entirety of [io.Reader] until [io.EOF] is encountered,\nwithout reporting an error for EOF. The output must be a non-nil pointer.\nSee [Unmarshal] for details about the conversion of JSON into a Go value.\n" [^io/Reader in ^any out & ^{:tag (slice Options)} opts] :results [^error err]
+  (let [dec (.GetStreamingDecoder export in (spread opts))]
+    (defer (.PutStreamingDecoder export dec))
+    (let [xd (.Decoder export dec)]
+      (set! err (unmarshalDecode dec out (addr (.-Struct xd)) true))
+      (when (and (!= err nil) (.Get ^{:go/via [Struct]} (.-Flags xd) jsonflags/ReportErrorsWithLegacySemantics))
+        (return (internal/TransformUnmarshalError out err)))
+
+      ^{:line 411} err)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 444} (go/func UnmarshalDecode "UnmarshalDecode deserializes a Go value from a [jsontext.Decoder] according to\nthe provided unmarshal or decode options (while ignoring marshal or encode options).\nThe options provided take precedence over options already applied on\nthe [jsontext.Decoder] and only apply for the duration of the unmarshal call.\n\nThe input may be a stream of zero or more JSON values.\nUnmarshalDecode unmarshals only the next JSON value in the stream.\nIf there are no more top-level JSON values, it reports [io.EOF].\nThe output must be a non-nil pointer.\nSee [Unmarshal] for details about the conversion of JSON into a Go value.\n" [^{:tag (* jsontext/Decoder)} in ^any out & ^{:tag (slice Options)} opts] :results [^error err]
+  (let [xd (.Decoder export in)]
+    (when (> (len opts) 0)
+      (let [optsOriginal (.-Struct xd)]
+        (defer (^{:go/end 428} (fn [] (set! (.-Struct xd) optsOriginal))))
+        (.Join (.-Struct xd) (spread opts))
+        (when (.NeedObjectName (.-Last ^{:go/via [state]} (.-Tokens xd)))
+          (when (!= (.Get (.-Flags optsOriginal) jsonflags/AllowDuplicateNames) (.Get (.-Flags (.-Struct xd)) jsonflags/AllowDuplicateNames))
+            (return (newUnmarshalErrorBefore in (reflect/TypeOf out) errChangingDuplicateNames)))
+
+          (when (!= (.Get (.-Flags optsOriginal) jsonflags/AllowInvalidUTF8) (.Get (.-Flags (.-Struct xd)) jsonflags/AllowInvalidUTF8))
+            (return (newUnmarshalErrorBefore in (reflect/TypeOf out) errChangingInvalidUTF8))))))
+
+
+
+    (set! err (unmarshalDecode in out (addr (.-Struct xd)) false))
+    (when (and (!= err nil) (.Get ^{:go/via [Struct]} (.-Flags xd) jsonflags/ReportErrorsWithLegacySemantics))
+      (return (internal/TransformUnmarshalError out err)))
+
+    ^{:line 443} err))
+
+
+^{:go/end 485} (go/func unmarshalDecode [^{:tag (* jsontext/Decoder)} in ^any out ^{:tag (* jsonopts/Struct)} uo ^bool last] :results [^error err]
+  (let [v (reflect/ValueOf out)]
+    (when (or (!= (.Kind v) reflect/Pointer) (.IsNil v))
+      (return (addr (lit SemanticError :action "unmarshal" :GoType (reflect/TypeOf out) :Err internal/ErrNonNilReference))))
+
+    (let [va (lit addressableValue (.Elem v) false) ; dereferenced pointer is always addressable
+        ^{:line 452} t ^{:go/via [Value]} (.Type va)]
+
+      ;; In legacy semantics, the entirety of the next JSON value
+      ;; was validated before attempting to unmarshal it.
+      (when (.Get (.-Flags uo) jsonflags/ReportErrorsWithLegacySemantics)
+        (when [err (.CheckNextValue (.Decoder export in) last)] (!= err nil)
+          (when (and (== err io/EOF) last)
+            (let [offset (+ (.InputOffset in) (conv int64 (len (.UnreadBuffer in))))]
+              (return (addr (lit jsontext/SyntacticError :ByteOffset offset :Err io/ErrUnexpectedEOF)))))
+
+          (return err)))
+
+
+
+      ;; Lookup and call the unmarshal function for this type.
+      ^{:go/breaks [[5 484]]} (let [unmarshal (.-unmarshal (lookupArshaler t))]
+        (when (!= ^{:go/via [ArshalValues]} (.-Unmarshalers uo) nil)
+          (set! (values unmarshal _) (.lookup (assert (* Unmarshalers) ^{:go/via [ArshalValues]} (.-Unmarshalers uo)) unmarshal t)))
+
+        (when [err (unmarshal in va uo)] (!= err nil)
+          (when (not (.Get (.-Flags uo) jsonflags/AllowDuplicateNames))
+            (.InvalidateDisabledNamespaces ^{:go/via [state]} (.-Tokens (.Decoder export in))))
+
+          (when (and (== err io/EOF) last)
+            (let [offset (+ (.InputOffset in) (conv int64 (len (.UnreadBuffer in))))]
+              (return (addr (lit jsontext/SyntacticError :ByteOffset offset :Err io/ErrUnexpectedEOF)))))
+
+          (return err))
+
+        (when last
+          (return (.CheckEOF (.Decoder export in))))
+
+        nil))))
+
+
+
+
+
+
+
+
+(go/type addressableValue "addressableValue is a reflect.Value that is guaranteed to be addressable\nsuch that calling the Addr and Set methods do not panic.\n\nThere is no compile magic that enforces this property,\nbut rather the need to construct this type makes it easier to examine each\nconstruction site to ensure that this property is upheld.\n" (struct
+    ^{:line 494} reflect/Value
+
+
+
+
+    ^{:line 499 :tag bool :doc "forcedAddr reports whether this value is addressable\nonly through the use of [newAddressableValue].\nThis is only used for [jsonflags.CallMethodsWithLegacySemantics].\n"} forcedAddr))
+
+
+
+^{:go/end 505} (go/func newAddressableValue "newAddressableValue constructs a new addressable value of type t.\n" ^addressableValue [^reflect/Type t]
+  (lit addressableValue (.Elem (reflect/New t)) true))
+
+
+;; TODO: Remove *jsonopts.Struct argument from [marshaler] and [unmarshaler].
+;; This can be directly accessed on the encoder or decoder.
+
+
+
+
+
+
+(go/type "All marshal and unmarshal behavior is implemented using these signatures.\nThe *jsonopts.Struct argument is guaranteed to be identical to or at least\na strict super-set of the options in Encoder.Struct or Decoder.Struct.\nIt is identical for Marshal, Unmarshal, MarshalWrite, and UnmarshalRead.\nIt is a super-set for MarshalEncode and UnmarshalDecode.\n"
+  ^{:line 516} [^:alias marshaler (func [(* jsontext/Encoder) addressableValue (* jsonopts/Struct)] [error])]
+  ^{:line 517} [^:alias unmarshaler (func [(* jsontext/Decoder) addressableValue (* jsonopts/Struct)] [error])])
+
+
+(go/type arshaler (struct
+    ^{:line 521 :tag marshaler} marshal
+    ^{:line 522 :tag unmarshaler} unmarshal
+    ^{:line 523 :tag bool} nonDefault))
+
+
+(go/var ^sync/Map lookupArshalerCache) ; map[reflect.Type]*arshaler
+
+^{:go/end 540} (go/func lookupArshaler ^{:tag (* arshaler)} [^reflect/Type t]
+  (when [(values v ok) (.Load lookupArshalerCache t)] ok
+    (return (assert (* arshaler) v)))
+
+
+  (let [fncs (makeDefaultArshaler t)]
+    (set! fncs (makeMethodArshaler fncs t))
+    (set! fncs (makeTimeArshaler fncs t))
+
+    ;; Use the last stored so that duplicate arshalers can be garbage collected.
+    (let [(values v _) (.LoadOrStore lookupArshalerCache t fncs)]
+      (assert (* arshaler) v))))
+
+
+(go/var stringsPools (addr (lit sync/Pool :New ^{:go/end 542} (fn ^any [] (new stringSlice)))))
+
+(go/type stringSlice (slice string))
+
+
+^{:go/end 554} (go/func getStrings "getStrings returns a non-nil pointer to a slice with length n.\n" ^{:tag (* stringSlice)} [^int n]
+  (let [s (assert (* stringSlice) (.Get stringsPools))]
+    (when (< (cap @s) n)
+      (set! @s (make (slice string) n)))
+
+    (set! @s (subslice @s _ n))
+    ^{:line 553} s))
+
+
+^{:go/end 562} (go/func putStrings [^{:tag (* stringSlice)} s]
+  (when (> (cap @s) (<< 1 10))
+    (set! @s nil)) ; avoid pinning arbitrarily large amounts of memory
+
+  (clear @s) ; avoid pinning a reference to each string
+  (.Put stringsPools s))

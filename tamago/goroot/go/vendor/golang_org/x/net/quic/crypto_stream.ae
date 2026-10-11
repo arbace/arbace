@@ -1,0 +1,156 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "crypto_stream.go" :imports [])
+
+
+
+
+
+
+(go/const ^{:val 1048576 :doc "\"Implementations MUST support buffering at least 4096 bytes of data\nreceived in out-of-order CRYPTO frames.\"\nhttps://www.rfc-editor.org/rfc/rfc9000.html#section-7.5-2\n\n4096 is too small for real-world cases, however, so we allow more.\n"} cryptoBufferSize (<< 1 20))
+
+
+
+(go/type cryptoStream "A cryptoStream is the stream of data passed in CRYPTO frames.\nThere is one cryptoStream per packet number space.\n" (struct
+
+    ^{:line 18 :tag pipe :doc "CRYPTO data received from the peer.\n"} in
+    ^{:line 19 :tag (rangeset int64)} inset ; bytes received
+
+
+    ^{:line 22 :tag pipe :doc "CRYPTO data queued for transmission to the peer.\n"} out
+    ^{:line 23 :tag (rangeset int64)} outunsent ; bytes in need of sending
+    ^{:line 24 :tag (rangeset int64)} outacked)) ; bytes acked by peer
+
+
+
+^{:go/end 65} (go/method handleCrypto "handleCrypto processes data received in a CRYPTO frame.\n" ^error [^{:tag (* cryptoStream)} s ^int64 off ^{:tag (slice byte)} b ^{:tag (func [(slice byte)] [error])} f]
+  (let [end (+ off (conv int64 (len b)))]
+    (when (> (- end (.min (.-inset s))) cryptoBufferSize)
+      (return ^{:go/breaks [2 4]} (lit localTransportError
+          :code errCryptoBufferExceeded
+          :reason "crypto buffer exceeded")))
+
+
+    (.add (.-inset s) off end)
+    (if (== off (.-start (.-in s))) (do
+        ;; Fast path: This is the next chunk of data in the stream,
+        ;; so just handle it immediately.
+        (when [err (f b)] (!= err nil)
+          (return err))
+
+        (.discardBefore (.-in s) end))
+
+      ;; This is either data we've already processed,
+      ;; data we can't process yet, or a mix of both.
+      (.writeAt (.-in s) b off))
+
+    ;; s.in.start is the next byte in sequence.
+    ;; If it's in s.inset, we have bytes to provide.
+    ;; If it isn't, we don't--we're either out of data,
+    ;; or only have data that comes after the next byte.
+    (when (not (.contains (.-inset s) (.-start (.-in s))))
+      (return nil))
+
+    ;; size is the size of the first contiguous chunk of bytes
+    ;; that have not been processed yet.
+    (let [size (conv int (- (.-end (aget (.-inset s) 0)) (.-start (.-in s))))]
+      (when (<= size 0)
+        (return nil))
+
+      (let [err (.read (.-in s) (.-start (.-in s)) size f)]
+        (.discardBefore (.-in s) (.-end (aget (.-inset s) 0)))
+        ^{:line 64} err))))
+
+
+
+
+
+
+^{:go/end 75} (go/method write "write queues data for sending to the peer.\nIt does not block or limit the amount of buffered data.\nQUIC connections don't communicate the amount of CRYPTO data they are willing to buffer,\nso we send what we have and the peer can close the connection if it is too much.\n" [^{:tag (* cryptoStream)} s ^{:tag (slice byte)} b]
+  (let [start (.-end (.-out s))]
+    (.writeAt (.-out s) b start)
+    (.add (.-outunsent s) start (.-end (.-out s)))))
+
+
+
+^{:go/end 96} (go/method ackOrLoss "ackOrLoss reports that an CRYPTO frame sent by us has been acknowledged by the peer, or lost.\n" [^{:tag (* cryptoStream)} s ^int64 start ^int64 end ^packetFate fate]
+  (switch fate
+    (case [packetAcked]
+      (.add (.-outacked s) start end)
+      (.sub (.-outunsent s) start end)
+      ;; If this ack is for data at the start of the send buffer, we can now discard it.
+      (when (.contains (.-outacked s) (.-start (.-out s)))
+        (.discardBefore (.-out s) (.-end (aget (.-outacked s) 0)))))
+
+    (case [packetLost]
+      ;; Mark everything lost, but not previously acked, as needing retransmission.
+      ;; We do this by adding all the lost bytes to outunsent, and then
+      ;; removing everything already acked.
+      (.add (.-outunsent s) start end)
+      (range [_ a (.-outacked s)]
+        (.sub (.-outunsent s) (.-start a) (.-end a))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 131} (go/method dataToSend "dataToSend reports what data should be sent in CRYPTO frames to the peer.\nIt calls f with each range of data to send.\nf uses sendData to get the bytes to send, and returns the number of bytes sent.\ndataToSend calls f until no data is left, or f returns 0.\n\nThis function is unusually indirect (why not just return a []byte,\nor implement io.Reader?).\n\nReturning a []byte to the caller either requires that we store the\ndata to send contiguously (which we don't), allocate a temporary buffer\nand copy into it (inefficient), or return less data than we have available\n(requires complexity to avoid unnecessarily breaking data across frames).\n\nAccepting a []byte from the caller (io.Reader) makes packet construction\ndifficult. Since CRYPTO data is encoded with a varint length prefix, the\nlocation of the data depends on the length of the data. (We could hardcode\na 2-byte length, of course.)\n\nInstead, we tell the caller how much data is, the caller figures out where\nto put it (and possibly decides that it doesn't have space for this data\nin the packet after all), and the caller then makes a separate call to\ncopy the data it wants into position.\n" [^{:tag (* cryptoStream)} s ^bool pto ^{:tag (func [^int64 off ^int64 size] [^int64 sent])} f]
+  (while true
+    (let [(values off size) (dataToSend (.-start (.-out s)) (.-end (.-out s)) (.-outunsent s) (.-outacked s) pto)]
+      (when (== size 0)
+        (return))
+
+      (let [n (f off size)]
+        (when (or (== n 0) pto)
+          (return))))))
+
+
+
+
+
+
+
+^{:go/end 139} (go/method sendData "sendData fills b with data to send to the peer, starting at off,\nand marks the data as sent. The caller must have already ascertained\nthat there is data to send in this region using dataToSend.\n" [^{:tag (* cryptoStream)} s ^int64 off ^{:tag (slice byte)} b]
+  (.copy (.-out s) off b)
+  (.sub (.-outunsent s) off (+ off (conv int64 (len b)))))
+
+
+
+^{:go/breaks [7] :go/end 157} (go/method discardKeys "discardKeys is called when the packet protection keys for the stream are dropped.\n" ^error [^{:tag (* cryptoStream)} s]
+  (when (!= (- (.-end (.-in s)) (.-start (.-in s))) 0)
+    ;; The peer sent some unprocessed CRYPTO data that we're about to discard.
+    ;; Close the connection with a TLS unexpected_message alert.
+    ;; https://www.rfc-editor.org/rfc/rfc5246#section-7.2.2
+    (let [^:const ^{:val 10} unexpectedMessage 10]
+      (return ^{:go/breaks [2 4]} (lit localTransportError
+          :code (+ errTLSBase unexpectedMessage)
+          :reason "excess crypto data"))))
+
+
+  ;; Discard any unacked (but presumably received) data in our output buffer.
+  (.discardBefore (.-out s) (.-end (.-out s)))
+  (set! @s (lit cryptoStream))
+  nil)

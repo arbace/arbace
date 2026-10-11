@@ -1,0 +1,429 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.tls) (go/file "ticket.go" :imports [
+
+
+    ^{:line 8} [aes "crypto/aes"]
+    ^{:line 9} [cipher "crypto/cipher"]
+    ^{:line 10} [hmac "crypto/hmac"]
+    ^{:line 11} [sha256 "crypto/sha256"]
+    ^{:line 12} [subtle "crypto/subtle"]
+    ^{:line 13} [x509 "crypto/x509"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [io "io"]
+
+    ^{:line 17} [cryptobyte "golang.org/x/crypto/cryptobyte"]])
+
+
+
+(go/type SessionState "A SessionState is a resumable session.\n" (struct
+    ;; Encoded as a SessionState (in the language of RFC 8446, Section 3).
+    ;;
+    ;;   enum { server(1), client(2) } SessionStateType;
+    ;;
+    ;;   opaque Certificate<1..2^24-1>;
+    ;;
+    ;;   Certificate CertificateChain<0..2^24-1>;
+    ;;
+    ;;   opaque Extra<0..2^24-1>;
+    ;;
+    ;;   struct {
+    ;;       uint16 version;
+    ;;       SessionStateType type;
+    ;;       uint16 cipher_suite;
+    ;;       uint64 created_at;
+    ;;       opaque secret<1..2^8-1>;
+    ;;       Extra extra<0..2^24-1>;
+    ;;       uint8 ext_master_secret = { 0, 1 };
+    ;;       uint8 early_data = { 0, 1 };
+    ;;       CertificateEntry certificate_list<0..2^24-1>;
+    ;;       CertificateChain verified_chains<0..2^24-1>; /* excluding leaf */
+    ;;       select (SessionState.early_data) {
+    ;;           case 0: Empty;
+    ;;           case 1: opaque alpn<1..2^8-1>;
+    ;;       };
+    ;;       select (SessionState.version) {
+    ;;           case VersionTLS10..VersionTLS12: uint16 curve_id;
+    ;;           case VersionTLS13: select (SessionState.type) {
+    ;;               case server: Empty;
+    ;;               case client: struct {
+    ;;                   uint64 use_by;
+    ;;                   uint32 age_add;
+    ;;               };
+    ;;           };
+    ;;       };
+    ;;   } SessionState;
+    ;;
+    ;; The format can be extended backwards-compatibly by adding new fields at
+    ;; the end. Otherwise, a new SessionStateType must be used, as different Go
+    ;; versions may share the same session ticket encryption key.
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 74 :tag (slice (slice byte)) :doc "Extra is ignored by crypto/tls, but is encoded by [SessionState.Bytes]\nand parsed by [ParseSessionState].\n\nThis allows [Config.UnwrapSession]/[Config.WrapSession] and\n[ClientSessionCache] implementations to store and retrieve additional\ndata alongside this session.\n\nTo allow different layers in a protocol stack to share this field,\napplications must only append to it, not replace it, and must use entries\nthat can be recognized even if out of order (for example, by starting\nwith an id and version prefix).\n"} Extra
+
+
+
+
+    ^{:line 79 :tag bool :doc "EarlyData indicates whether the ticket can be used for 0-RTT in a QUIC\nconnection. The application may set this to false if it is true to\ndecline to offer 0-RTT even if supported.\n"} EarlyData
+
+    ^{:line 81 :tag uint16} version
+    ^{:line 82 :tag bool} isClient
+    ^{:line 83 :tag uint16} cipherSuite
+
+
+
+    ^{:line 87 :tag uint64 :doc "createdAt is the generation time of the secret on the server (which for\nTLS 1.0–1.2 might be earlier than the current session) and the time at\nwhich the ticket was received on the client.\n"} createdAt ; seconds since UNIX epoch
+    ^{:line 88 :tag (slice byte)} secret ; master secret for TLS 1.2, or the PSK for TLS 1.3
+    ^{:line 89 :tag bool} extMasterSecret
+    ^{:line 90 :tag (slice (* x509/Certificate))} peerCertificates
+    ^{:line 91 :tag (slice byte)} ocspResponse
+    ^{:line 92 :tag (slice (slice byte))} scts
+    ^{:line 93 :tag (slice (slice (* x509/Certificate)))} verifiedChains
+    ^{:line 94 :tag string} alpnProtocol ; only set if EarlyData is true
+
+
+    ^{:line 97 :tag uint64 :doc "Client-side TLS 1.3-only fields.\n"} useBy ; seconds since UNIX epoch
+    ^{:line 98 :tag uint32} ageAdd
+    ^{:line 99 :tag (slice byte)} ticket
+
+
+    ^{:line 102 :tag CurveID :doc "TLS 1.0–1.2 only fields.\n"} curveID))
+
+
+
+
+
+
+
+
+^{:go/end 176} (go/method Bytes "Bytes encodes the session, including any private fields, so that it can be\nparsed by [ParseSessionState]. The encoding contains secret values critical\nto the security of future and possibly past sessions.\n\nThe specific encoding should be considered opaque and may change incompatibly\nbetween Go versions.\n" [^{:tag (* SessionState)} s] :results [(slice byte) error]
+  (let [^cryptobyte/Builder b (zero cryptobyte/Builder)]
+    (.AddUint16 b (.-version s))
+    (if (.-isClient s)
+      (.AddUint8 b 2) ; client
+
+      (.AddUint8 b 1)) ; server
+
+    (.AddUint16 b (.-cipherSuite s))
+    (addUint64 (addr b) (.-createdAt s))
+    (.AddUint8LengthPrefixed b ^{:go/end 123} (fn [^{:tag (* cryptobyte/Builder)} b]
+        (.AddBytes b (.-secret s))))
+
+    (.AddUint24LengthPrefixed b ^{:go/end 130} (fn [^{:tag (* cryptobyte/Builder)} b]
+        (range [_ extra (.-Extra s)]
+          (.AddUint24LengthPrefixed b ^{:go/end 128} (fn [^{:tag (* cryptobyte/Builder)} b]
+              (.AddBytes b extra))))))
+
+
+
+    (if (.-extMasterSecret s)
+      (.AddUint8 b 1)
+
+      (.AddUint8 b 0))
+
+    (if (.-EarlyData s)
+      (.AddUint8 b 1)
+
+      (.AddUint8 b 0))
+
+    (marshalCertificate (addr b) ^{:go/breaks [2 4 6]} (lit Certificate
+        :Certificate (certificatesToBytesSlice (.-peerCertificates s))
+        :OCSPStaple (.-ocspResponse s)
+        :SignedCertificateTimestamps (.-scts s)))
+
+    (.AddUint24LengthPrefixed b ^{:go/end 161} (fn [^{:tag (* cryptobyte/Builder)} b]
+        (range [_ chain (.-verifiedChains s)]
+          (.AddUint24LengthPrefixed b ^{:go/end 159} (fn [^{:tag (* cryptobyte/Builder)} b]
+              ;; We elide the first certificate because it's always the leaf.
+              (when (== (len chain) 0)
+                (.SetError b (errors/New "tls: internal error: empty verified chain"))
+                (return))
+
+              (range [_ cert (subslice chain 1)]
+                (.AddUint24LengthPrefixed b ^{:go/end 157} (fn [^{:tag (* cryptobyte/Builder)} b]
+                    (.AddBytes b (.-Raw cert))))))))))
+
+
+
+
+
+    (when (.-EarlyData s)
+      (.AddUint8LengthPrefixed b ^{:go/end 165} (fn [^{:tag (* cryptobyte/Builder)} b]
+          (.AddBytes b (conv (slice byte) (.-alpnProtocol s))))))
+
+
+    (if (>= (.-version s) VersionTLS13)
+      (when (.-isClient s)
+        (addUint64 (addr b) (.-useBy s))
+        (.AddUint32 b (.-ageAdd s)))
+
+
+      (.AddUint16 b (conv uint16 (.-curveID s))))
+
+    (.Bytes b)))
+
+
+^{:go/end 184} (go/func certificatesToBytesSlice ^{:tag (slice (slice byte))} [^{:tag (slice (* x509/Certificate))} certs]
+  (let [s (make (slice (slice byte)) 0 (len certs))]
+    (range [_ c certs]
+      (set! s (append s (.-Raw c))))
+
+    ^{:line 183} s))
+
+
+
+^{:go/end 294} (go/func ParseSessionState "ParseSessionState parses a [SessionState] encoded by [SessionState.Bytes].\n" [^{:tag (slice byte)} data] :results [(* SessionState) error]
+  (let [ss (addr (lit SessionState))
+      ^{:line 189} s (conv cryptobyte/String data)
+      (values ^uint8 typ ^uint8 extMasterSecret ^uint8 earlyData) (zero uint8)
+      ^{:line 191 :tag Certificate} cert (zero Certificate)
+      ^{:line 192 :tag cryptobyte/String} extra (zero cryptobyte/String)]
+    (when (or (not (.ReadUint16 s (addr (.-version ss))))
+        (not (.ReadUint8 s (addr typ)))
+        (not (.ReadUint16 s (addr (.-cipherSuite ss))))
+        (not (readUint64 (addr s) (addr (.-createdAt ss))))
+        (not (readUint8LengthPrefixed (addr s) (addr (.-secret ss))))
+        (not (.ReadUint24LengthPrefixed s (addr extra)))
+        (not (.ReadUint8 s (addr extMasterSecret)))
+        (not (.ReadUint8 s (addr earlyData)))
+        (== (len (.-secret ss)) 0)
+        (not (unmarshalCertificate (addr s) (addr cert))))
+      (return nil (errors/New "tls: invalid session encoding")))
+
+    (while (not (.Empty extra))
+      (let [^{:tag (slice byte)} e (zero (slice byte))]
+        (when (not (readUint24LengthPrefixed (addr extra) (addr e)))
+          (return nil (errors/New "tls: invalid session encoding")))
+
+        (set! (.-Extra ss) (append (.-Extra ss) e))))
+
+    (switch typ
+      (case [1]
+        (set! (.-isClient ss) false))
+      (case [2]
+        (set! (.-isClient ss) true))
+      (default
+        (return nil (errors/New "tls: unknown session encoding"))))
+
+    (switch extMasterSecret
+      (case [0]
+        (set! (.-extMasterSecret ss) false))
+      (case [1]
+        (set! (.-extMasterSecret ss) true))
+      (default
+        (return nil (errors/New "tls: invalid session encoding"))))
+
+    (switch earlyData
+      (case [0]
+        (set! (.-EarlyData ss) false))
+      (case [1]
+        (set! (.-EarlyData ss) true))
+      (default
+        (return nil (errors/New "tls: invalid session encoding"))))
+
+    (range [_ cert (.-Certificate cert)]
+      (let [(values c err) (.newCert globalCertCache cert)]
+        (when (!= err nil)
+          (return nil err))
+
+        (set! (.-peerCertificates ss) (append (.-peerCertificates ss) c))))
+
+    (when (and (.-isClient ss) (== (len (.-peerCertificates ss)) 0))
+      (return nil (errors/New "tls: no server certificates in client session")))
+
+    (set! (.-ocspResponse ss) (.-OCSPStaple cert))
+    (set! (.-scts ss) (.-SignedCertificateTimestamps cert))
+    (let [^cryptobyte/String chainList (zero cryptobyte/String)]
+      (when (not (.ReadUint24LengthPrefixed s (addr chainList)))
+        (return nil (errors/New "tls: invalid session encoding")))
+
+      (while (not (.Empty chainList))
+        (let [^cryptobyte/String certList (zero cryptobyte/String)]
+          (when (not (.ReadUint24LengthPrefixed chainList (addr certList)))
+            (return nil (errors/New "tls: invalid session encoding")))
+
+          (let [^{:tag (slice (* x509/Certificate))} chain (zero (slice (* x509/Certificate)))]
+            (when (== (len (.-peerCertificates ss)) 0)
+              (return nil (errors/New "tls: invalid session encoding")))
+
+            (set! chain (append chain (aget (.-peerCertificates ss) 0)))
+            (while (not (.Empty certList))
+              (let [^{:tag (slice byte)} cert (zero (slice byte))]
+                (when (not (readUint24LengthPrefixed (addr certList) (addr cert)))
+                  (return nil (errors/New "tls: invalid session encoding")))
+
+                (let [(values c err) (.newCert globalCertCache cert)]
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (set! chain (append chain c)))))
+
+            (set! (.-verifiedChains ss) (append (.-verifiedChains ss) chain)))))
+
+      (when (.-EarlyData ss)
+        (let [^{:tag (slice byte)} alpn (zero (slice byte))]
+          (when (not (readUint8LengthPrefixed (addr s) (addr alpn)))
+            (return nil (errors/New "tls: invalid session encoding")))
+
+          (set! (.-alpnProtocol ss) (conv string alpn))))
+
+      (if (>= (.-version ss) VersionTLS13)
+        (when (.-isClient ss)
+          (when (or (not (.ReadUint64 s (addr (.-useBy ss)))) (not (.ReadUint32 s (addr (.-ageAdd ss)))))
+            (return nil (errors/New "tls: invalid session encoding"))))
+
+
+        (do
+          (when (not (.ReadUint16 s (conv (* uint16) (addr (.-curveID ss)))))
+            (return nil (errors/New "tls: invalid session encoding")))))
+
+
+      (return ss nil))))
+
+
+
+
+^{:go/end 312} (go/method sessionState "sessionState returns a partially filled-out [SessionState] with information\nfrom the current connection.\n" ^{:tag (* SessionState)} [^{:tag (* Conn)} c]
+  (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22]} (lit SessionState
+      :version (.-vers c)
+      :cipherSuite (.-cipherSuite c)
+      :createdAt (conv uint64 (.Unix (.time (.-config c))))
+      :alpnProtocol (.-clientProtocol c)
+      :peerCertificates (.-peerCertificates c)
+      :ocspResponse (.-ocspResponse c)
+      :scts (.-scts c)
+      :isClient (.-isClient c)
+      :extMasterSecret (.-extMasterSecret c)
+      :verifiedChains (.-verifiedChains c)
+      :curveID (.-curveID c))))
+
+
+
+
+
+^{:go/end 323} (go/method EncryptTicket "EncryptTicket encrypts a ticket with the [Config]'s configured (or default)\nsession ticket keys. It can be used as a [Config.WrapSession] implementation.\n" [^{:tag (* Config)} c ^ConnectionState cs ^{:tag (* SessionState)} ss] :results [(slice byte) error]
+  (let [ticketKeys (.ticketKeys c nil)
+      (values stateBytes err) (.Bytes ss)]
+    (when (!= err nil)
+      (return nil err))
+
+    (.encryptTicket c stateBytes ticketKeys)))
+
+
+^{:go/end 351} (go/method encryptTicket [^{:tag (* Config)} c ^{:tag (slice byte)} state ^{:tag (slice ticketKey)} ticketKeys] :results [(slice byte) error]
+  (when (== (len ticketKeys) 0)
+    (return nil (errors/New "tls: internal error: session ticket keys unavailable")))
+
+
+  (let [encrypted (make (slice byte) (+ aes/BlockSize (len state) sha256/Size))
+      ^{:line 331} iv (subslice encrypted _ aes/BlockSize)
+      ^{:line 332} ciphertext (subslice encrypted aes/BlockSize (- (len encrypted) sha256/Size))
+      ^{:line 333} authenticated (subslice encrypted _ (- (len encrypted) sha256/Size))
+      ^{:line 334} macBytes (subslice encrypted (- (len encrypted) sha256/Size))]
+
+    (when [(values _ err) (io/ReadFull (.rand c) iv)] (!= err nil)
+      (return nil err))
+
+    (let [key (aget ticketKeys 0)
+        (values block err) (aes/NewCipher (subslice (.-aesKey key)))]
+      (when (!= err nil)
+        (return nil (errors/New (+ "tls: failed to create cipher while encrypting ticket: " (.Error err)))))
+
+      (.XORKeyStream (cipher/NewCTR block iv) ciphertext state)
+
+      (let [mac (hmac/New sha256/New (subslice (.-hmacKey key)))]
+        (.Write mac authenticated)
+        (.Sum mac (subslice macBytes _ 0))
+
+        (return encrypted nil)))))
+
+
+
+
+
+
+^{:go/end 368} (go/method DecryptTicket "DecryptTicket decrypts a ticket encrypted by [Config.EncryptTicket]. It can\nbe used as a [Config.UnwrapSession] implementation.\n\nIf the ticket can't be decrypted or parsed, DecryptTicket returns (nil, nil).\n" [^{:tag (* Config)} c ^{:tag (slice byte)} identity ^ConnectionState cs] :results [(* SessionState) error]
+  (let [ticketKeys (.ticketKeys c nil)
+      ^{:line 359} stateBytes (.decryptTicket c identity ticketKeys)]
+    (when (== stateBytes nil)
+      (return nil nil))
+
+    (let [(values s err) (ParseSessionState stateBytes)]
+      (when (!= err nil)
+        (return nil nil)) ; drop unparsable tickets on the floor
+
+      (return s nil))))
+
+
+^{:go/end 400} (go/method decryptTicket ^{:tag (slice byte)} [^{:tag (* Config)} c ^{:tag (slice byte)} encrypted ^{:tag (slice ticketKey)} ticketKeys]
+  (when (< (len encrypted) (+ aes/BlockSize sha256/Size))
+    (return nil))
+
+
+  ^{:go/breaks [[3 399]]} (let [iv (subslice encrypted _ aes/BlockSize)
+      ^{:line 376} ciphertext (subslice encrypted aes/BlockSize (- (len encrypted) sha256/Size))
+      ^{:line 377} authenticated (subslice encrypted _ (- (len encrypted) sha256/Size))
+      ^{:line 378} macBytes (subslice encrypted (- (len encrypted) sha256/Size))]
+
+    (range [_ key ticketKeys]
+      (let [mac (hmac/New sha256/New (subslice (.-hmacKey key)))]
+        (.Write mac authenticated)
+        (let [expected (.Sum mac nil)]
+
+          (when (!= (subtle/ConstantTimeCompare macBytes expected) 1)
+            (continue))
+
+
+          (let [(values block err) (aes/NewCipher (subslice (.-aesKey key)))]
+            (when (!= err nil)
+              (return nil))
+
+            (let [plaintext (make (slice byte) (len ciphertext))]
+              (.XORKeyStream (cipher/NewCTR block iv) plaintext ciphertext)
+
+              (return plaintext))))))
+
+
+    nil))
+
+
+
+
+(go/type ClientSessionState "ClientSessionState contains the state needed by a client to\nresume a previous TLS session.\n" (struct
+    ^{:line 405 :tag (* SessionState)} session))
+
+
+
+
+
+
+
+^{:go/end 418} (go/method ResumptionState "ResumptionState returns the session ticket sent by the server (also known as\nthe session's identity) and the state necessary to resume this session.\n\nIt can be called by [ClientSessionCache.Put] to serialize (with\n[SessionState.Bytes]) and store the session.\n" [^{:tag (* ClientSessionState)} cs] :results [^{:tag (slice byte)} ticket ^{:tag (* SessionState)} state ^error err]
+  (when (or (== cs nil) (== (.-session cs) nil))
+    (return nil nil nil))
+
+  (return (.-ticket (.-session cs)) (.-session cs) nil))
+
+
+
+
+
+
+
+^{:go/end 430} (go/func NewResumptionState "NewResumptionState returns a state value that can be returned by\n[ClientSessionCache.Get] to resume a previous session.\n\nstate needs to be returned by [ParseSessionState], and the ticket and session\nstate must have been returned by [ClientSessionState.ResumptionState].\n" [^{:tag (slice byte)} ticket ^{:tag (* SessionState)} state] :results [(* ClientSessionState) error]
+  (set! (.-ticket state) ticket)
+  ^{:go/breaks [2]} (return (addr ^{:go/breaks [2]} (lit ClientSessionState
+        :session state))
+    nil))

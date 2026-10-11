@@ -1,0 +1,216 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http) (go/file "csrf.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [url "net/url"]
+    ^{:line 11} [sync "sync"]
+    ^{:line 12} [atomic "sync/atomic"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type CrossOriginProtection "CrossOriginProtection implements protections against [Cross-Site Request\nForgery (CSRF)] by rejecting non-safe cross-origin browser requests.\n\nCross-origin requests are currently detected with the [Sec-Fetch-Site]\nheader, available in all browsers since 2023, or by comparing the hostname of\nthe [Origin] header with the Host header.\n\nThe GET, HEAD, and OPTIONS methods are [safe methods] and are always allowed.\nIt's important that applications do not perform any state changing actions\ndue to requests with safe methods.\n\nRequests without Sec-Fetch-Site or Origin headers are currently assumed to be\neither same-origin or non-browser requests, and are allowed.\n\nThe zero value of CrossOriginProtection is valid and has no trusted origins\nor bypass patterns.\n\n[Sec-Fetch-Site]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Sec-Fetch-Site\n[Origin]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Origin\n[Cross-Site Request Forgery (CSRF)]: https://developer.mozilla.org/en-US/docs/Web/Security/Attacks/CSRF\n[safe methods]: https://developer.mozilla.org/en-US/docs/Glossary/Safe/HTTP\n" (struct
+    ^{:line 37 :tag (atomic/Pointer ServeMux)} bypass
+    ^{:line 38 :tag sync/RWMutex} trustedMu
+    ^{:line 39 :tag (map string bool)} trusted
+    ^{:line 40 :tag (atomic/Pointer Handler)} deny))
+
+
+
+^{:go/end 46} (go/func NewCrossOriginProtection "NewCrossOriginProtection returns a new [CrossOriginProtection] value.\n" ^{:tag (* CrossOriginProtection)} []
+  (addr (lit CrossOriginProtection)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 78} (go/method AddTrustedOrigin "AddTrustedOrigin allows all requests with an [Origin] header\nwhich exactly matches the given value.\n\nOrigin header values are of the form \"scheme://host[:port]\".\n\nAddTrustedOrigin can be called concurrently with other methods\nor request handling, and applies to future requests.\n\n[Origin]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Origin\n" ^error [^{:tag (* CrossOriginProtection)} c ^string origin]
+  ^{:go/breaks [10]} (let [(values u err) (url/Parse origin)]
+    (when (!= err nil)
+      (return (fmt/Errorf "invalid origin %q: %w" origin err)))
+
+    (when (== (.-Scheme u) "")
+      (return (fmt/Errorf "invalid origin %q: scheme is required" origin)))
+
+    (when (== (.-Host u) "")
+      (return (fmt/Errorf "invalid origin %q: host is required" origin)))
+
+    (when (or (!= (.-Path u) "") (!= (.-RawQuery u) "") (!= (.-Fragment u) ""))
+      (return (fmt/Errorf "invalid origin %q: path, query, and fragment are not allowed" origin)))
+
+    (.Lock (.-trustedMu c))
+    (defer (.Unlock (.-trustedMu c)))
+    (when (== (.-trusted c) nil)
+      (set! (.-trusted c) (make (map string bool))))
+
+    (aset (.-trusted c) origin true)
+    nil))
+
+
+(go/type noopHandler (struct))
+
+^{:go/end 82} (go/method ServeHTTP [noopHandler ResponseWriter (* Request)])
+
+(go/var ^Handler sentinelHandler (addr (lit noopHandler)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 115} (go/method AddInsecureBypassPattern "AddInsecureBypassPattern permits all requests that match the given pattern.\n\nThe pattern syntax and precedence rules are the same as [ServeMux]. Only\nrequests that match the pattern directly are permitted. Those that ServeMux\nwould redirect to a pattern (e.g. after cleaning the path or adding a\ntrailing slash) are not.\n\nAddInsecureBypassPattern panics if the pattern conflicts with one already\nregistered, or if the pattern is syntactically invalid (for example, an\nimproperly formed wildcard).\n\nAddInsecureBypassPattern can be called concurrently with other methods or\nrequest handling, and applies to future requests.\n" [^{:tag (* CrossOriginProtection)} c ^string pattern]
+  (let [^{:tag (* ServeMux)} bypass (zero (* ServeMux))]
+
+    ;; Lazily initialize c.bypass
+    (while true
+      (set! bypass (.Load (.-bypass c)))
+      (when (!= bypass nil)
+        (break))
+
+      (set! bypass (NewServeMux))
+      (when (.CompareAndSwap (.-bypass c) nil bypass)
+        (break)))
+
+
+
+    (.Handle bypass pattern sentinelHandler)))
+
+
+
+
+
+
+
+
+
+^{:go/end 130} (go/method SetDenyHandler "SetDenyHandler sets a handler to invoke when a request is rejected.\nThe default error handler responds with a 403 Forbidden status.\n\nSetDenyHandler can be called concurrently with other methods\nor request handling, and applies to future requests.\n\nCheck does not call the error handler.\n" [^{:tag (* CrossOriginProtection)} c ^Handler h]
+  (when (== h nil)
+    (.Store (.-deny c) nil)
+    (return))
+
+  (.Store (.-deny c) (addr h)))
+
+
+
+
+^{:go/end 175} (go/method Check "Check applies cross-origin checks to a request.\nIt returns an error if the request should be rejected.\n" ^error [^{:tag (* CrossOriginProtection)} c ^{:tag (* Request)} req]
+  (switch (.-Method req)
+    (case ["GET" "HEAD" "OPTIONS"]
+      ;; Safe methods are always allowed.
+      (return nil)))
+
+
+  (switch (.Get (.-Header req) "Sec-Fetch-Site")
+    (case [""])
+    ;; No Sec-Fetch-Site header is present.
+    ;; Fallthrough to check the Origin header.
+    (case ["same-origin" "none"]
+      (return nil))
+    (default
+      (when (.isRequestExempt c req)
+        (return nil))
+
+      (return errCrossOriginRequest)))
+
+
+  (let [origin (.Get (.-Header req) "Origin")]
+    (when (== origin "")
+      ;; Neither Sec-Fetch-Site nor Origin headers are present.
+      ;; Either the request is same-origin or not a browser request.
+      (return nil))
+
+
+    (when [(values o err) (url/Parse origin)] (and (== err nil) (== (.-Host o) (.-Host req)))
+      ;; The Origin header matches the Host header. Note that the Host header
+      ;; doesn't include the scheme, so we don't know if this might be an
+      ;; HTTP→HTTPS cross-origin request. We fail open, since all modern
+      ;; browsers support Sec-Fetch-Site since 2023, and running an older
+      ;; browser makes a clear security trade-off already. Sites can mitigate
+      ;; this with HTTP Strict Transport Security (HSTS).
+      (return nil))
+
+
+    (when (.isRequestExempt c req)
+      (return nil))
+
+    ^{:line 174} errCrossOriginRequestFromOldBrowser))
+
+
+(go/var
+  ^{:line 178} [errCrossOriginRequest (errors/New "cross-origin request detected from Sec-Fetch-Site header")]
+  ^{:line 179} [errCrossOriginRequestFromOldBrowser (errors/New ^{:go/breaks [2]} (+ "cross-origin request detected, and/or browser is out of date: "
+        "Sec-Fetch-Site is missing, and Origin does not match Host"))])
+
+
+
+
+^{:go/end 198} (go/method isRequestExempt "isRequestExempt checks the bypasses which require taking a lock, and should\nbe deferred until the last moment.\n" ^bool [^{:tag (* CrossOriginProtection)} c ^{:tag (* Request)} req]
+  (when [bypass (.Load (.-bypass c))] (!= bypass nil)
+    (when [(values h _) (.Handler bypass req)] (== h sentinelHandler)
+      ;; The request matches a bypass pattern.
+      (return true)))
+
+
+
+  (.RLock (.-trustedMu c))
+  (defer (.RUnlock (.-trustedMu c)))
+  (let [origin (.Get (.-Header req) "Origin")]
+    ;; The request matches a trusted origin.
+    (and (!= origin "") (aget (.-trusted c) origin))))
+
+
+
+
+
+
+
+
+^{:go/end 218} (go/method Handler "Handler returns a handler that applies cross-origin checks\nbefore invoking the handler h.\n\nIf a request fails cross-origin checks, the request is rejected\nwith a 403 Forbidden status or handled with the handler passed\nto [CrossOriginProtection.SetDenyHandler].\n" ^Handler [^{:tag (* CrossOriginProtection)} c ^Handler h]
+  (conv HandlerFunc ^{:go/end 217} (fn [^ResponseWriter w ^{:tag (* Request)} r]
+      (when [err (.Check c r)] (!= err nil)
+        (when [deny (.Load (.-deny c))] (!= deny nil)
+          (.ServeHTTP @deny w r)
+          (return))
+
+        (Error w (.Error err) StatusForbidden)
+        (return))
+
+      (.ServeHTTP h w r))))

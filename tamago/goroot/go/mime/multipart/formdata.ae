@@ -1,0 +1,305 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.mime.multipart) (go/file "formdata.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [godebug "internal/godebug"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [math "math"]
+    ^{:line 13} [textproto "net/textproto"]
+    ^{:line 14} [os "os"]
+    ^{:line 15} [strconv "strconv"]])
+
+
+
+
+(go/var ^{:doc "ErrMessageTooLarge is returned by ReadForm if the message form\ndata is too large to be processed.\n"} ErrMessageTooLarge (errors/New "multipart: message too large"))
+
+;; TODO(adg,bradfitz): find a way to unify the DoS-prevention strategy here
+;; with that of the http package's ParseForm.
+
+
+
+
+
+
+
+
+^{:go/end 34} (go/method ReadForm "ReadForm parses an entire multipart message whose parts have\na Content-Disposition of \"form-data\".\nIt stores up to maxMemory bytes + 10MB (reserved for non-file parts)\nin memory. File parts which can't be stored in memory will be stored on\ndisk in temporary files.\nIt returns [ErrMessageTooLarge] if all non-file parts can't be stored in\nmemory.\n" [^{:tag (* Reader)} r ^int64 maxMemory] :results [(* Form) error]
+  (.readForm r maxMemory))
+
+
+(go/var
+  ^{:line 37} [multipartfiles (godebug/New "#multipartfiles")] ; TODO: document and remove #
+  ^{:line 38} [multipartmaxparts (godebug/New "multipartmaxparts")])
+
+
+^{:go/end 215} (go/method readForm [^{:tag (* Reader)} r ^int64 maxMemory] :results [^{:tag (* Form)} _ ^error err]
+  (let [form (addr (lit Form (make (map string (slice string))) (make (map string (slice (* FileHeader))))))
+
+      ^{:line 44 :tag (* os/File)} file (zero (* os/File))
+      ^{:line 45 :tag int64} fileOff (zero int64)
+
+      ^{:line 47} numDiskFiles 0
+      ^{:line 48} combineFiles true]
+    (when (== (.Value multipartfiles) "distinct")
+      (set! combineFiles false))
+    ;; multipartfiles.IncNonDefault() // TODO: uncomment after documenting
+
+    (let [maxParts 1000]
+      (when [s (.Value multipartmaxparts)] (!= s "")
+        (when [(values v err) (strconv/Atoi s)] (and (== err nil) (>= v 0))
+          (set! maxParts v)
+          (.IncNonDefault multipartmaxparts)))
+
+
+      (let [maxHeaders (maxMIMEHeaders)]
+
+        (defer (^{:go/end 81} (fn []
+              (when (!= file nil)
+                (when [cerr (.Close file)] (== err nil)
+                  (set! err cerr)))
+
+
+              (when (and combineFiles (> numDiskFiles 1))
+                (range [_ fhs (.-File form)]
+                  (range [_ fh fhs]
+                    (set! (.-tmpshared fh) true))))
+
+
+
+              (when (!= err nil)
+                (.RemoveAll form)
+                (when (!= file nil)
+                  (os/Remove (.Name file)))))))
+
+
+
+
+        ;; maxFileMemoryBytes is the maximum bytes of file data we will store in memory.
+        ;; Data past this limit is written to disk.
+        ;; This limit strictly applies to content, not metadata (filenames, MIME headers, etc.),
+        ;; since metadata is always stored in memory, not disk.
+        ;;
+        ;; maxMemoryBytes is the maximum bytes we will store in memory, including file content,
+        ;; non-file part values, metadata, and map entry overhead.
+        ;;
+        ;; We reserve an additional 10 MB in maxMemoryBytes for non-file data.
+        ;;
+        ;; The relationship between these parameters, as well as the overly-large and
+        ;; unconfigurable 10 MB added on to maxMemory, is unfortunate but difficult to change
+        ;; within the constraints of the API as documented.
+        (let [maxFileMemoryBytes maxMemory]
+          (when (== maxFileMemoryBytes math/MaxInt64)
+            (dec! maxFileMemoryBytes))
+
+          (let [maxMemoryBytes (+ maxMemory (conv int64 (<< 10 20)))]
+            (when (<= maxMemoryBytes 0)
+              (if (< maxMemory 0)
+                (set! maxMemoryBytes 0)
+
+                (set! maxMemoryBytes math/MaxInt64)))
+
+
+            (let [^{:tag (slice byte)} copyBuf (zero (slice byte))]
+              (while true
+                (let [(values p err) (.nextPart r false maxMemoryBytes maxHeaders)]
+                  (when (== err io/EOF)
+                    (break))
+
+                  (when (!= err nil)
+                    (return nil err))
+
+                  (when (<= maxParts 0)
+                    (return nil ErrMessageTooLarge))
+
+                  (dec! maxParts)
+
+                  (let [name (.FormName p)]
+                    (when (== name "")
+                      (continue))
+
+                    (let [filename (.FileName p)
+
+                        ;; Multiple values for the same key (one map entry, longer slice) are cheaper
+                        ;; than the same number of values for different keys (many map entries), but
+                        ;; using a consistent per-value cost for overhead is simpler.
+                        ^:const ^{:line 131 :val 200} mapEntryOverhead 200]
+                      (set! maxMemoryBytes - (conv int64 (len name)))
+                      (set! maxMemoryBytes - mapEntryOverhead)
+                      (when (< maxMemoryBytes 0)
+                        ;; We can't actually take this path, since nextPart would already have
+                        ;; rejected the MIME headers for being too large. Check anyway.
+                        (return nil ErrMessageTooLarge))
+
+
+                      (let [^bytes/Buffer b (zero bytes/Buffer)]
+
+                        (when (== filename "")
+                          ;; value, store as string in memory
+                          (let [(values n err) (io/CopyN (addr b) p (+ maxMemoryBytes 1))]
+                            (when (and (!= err nil) (!= err io/EOF))
+                              (return nil err))
+
+                            (set! maxMemoryBytes - n)
+                            (when (< maxMemoryBytes 0)
+                              (return nil ErrMessageTooLarge))
+
+                            (aset (.-Value form) name (append (aget (.-Value form) name) (.String b)))
+                            (continue)))
+
+
+                        ;; file, store in memory or on disk
+                        (let [^:const ^{:val 100} fileHeaderSize 100]
+                          (set! maxMemoryBytes - (mimeHeaderSize (.-Header p)))
+                          (set! maxMemoryBytes - mapEntryOverhead)
+                          (set! maxMemoryBytes - fileHeaderSize)
+                          (when (< maxMemoryBytes 0)
+                            (return nil ErrMessageTooLarge))
+
+                          (range [_ v (.-Header p)]
+                            (set! maxHeaders - (conv int64 (len v))))
+
+                          (let [fh (addr ^{:go/breaks [2 4]} (lit FileHeader
+                                  :Filename filename
+                                  :Header (.-Header p)))
+
+                              (values n ^:assign err) (io/CopyN (addr b) p (+ maxFileMemoryBytes 1))]
+                            (when (and (!= err nil) (!= err io/EOF))
+                              (return nil err))
+
+                            (if (> n maxFileMemoryBytes) (do
+                                (when (== file nil)
+                                  (set! (values file err) (os/CreateTemp (.-tempDir r) "multipart-"))
+                                  (when (!= err nil)
+                                    (return nil err)))
+
+
+                                (inc! numDiskFiles)
+                                (when [(values _ err) (.Write file (.Bytes b))] (!= err nil)
+                                  (return nil err))
+
+                                (when (== copyBuf nil)
+                                  (set! copyBuf (make (slice byte) (* 32 1024)))) ; same buffer size as io.Copy uses
+
+                                ;; os.File.ReadFrom will allocate its own copy buffer if we let io.Copy use it.
+                                (let-type [writerOnly (struct io/Writer)]
+                                  (let [(values remainingSize err) (io/CopyBuffer (lit writerOnly file) p copyBuf)]
+                                    (when (!= err nil)
+                                      (return nil err))
+
+                                    (set! (.-tmpfile fh) (.Name file))
+                                    (set! (.-Size fh) (+ (conv int64 (.Len b)) remainingSize))
+                                    (set! (.-tmpoff fh) fileOff)
+                                    (set! fileOff + (.-Size fh))
+                                    (when (not combineFiles)
+                                      (when [err (.Close file)] (!= err nil)
+                                        (return nil err))
+
+                                      (set! file nil)))))
+
+                              (do
+                                (set! (.-content fh) (.Bytes b))
+                                (set! (.-Size fh) (conv int64 (len (.-content fh))))
+                                (set! maxFileMemoryBytes - n)
+                                (set! maxMemoryBytes - n)))
+
+                            (aset (.-File form) name (append (aget (.-File form) name) fh)))))))))
+
+
+              (return form nil))))))))
+
+
+^{:go/end 227} (go/func mimeHeaderSize [^textproto/MIMEHeader h] :results [^int64 size]
+  (set! size 400)
+  (range [k vs h]
+    (set! size + (conv int64 (len k)))
+    (set! size + 200) ; map entry overhead
+    (range [_ v vs]
+      (set! size + (conv int64 (len v)))))
+
+
+  ^{:line 226} size)
+
+
+
+
+
+
+
+(go/type Form "Form is a parsed multipart form.\nIts File parts are stored either in memory or on disk,\nand are accessible via the [*FileHeader]'s Open method.\nIts Value parts are stored as strings.\nBoth are keyed by field name.\n" (struct
+    ^{:line 235 :tag (map string (slice string))} Value
+    ^{:line 236 :tag (map string (slice (* FileHeader)))} File))
+
+
+
+^{:go/end 253} (go/method RemoveAll "RemoveAll removes any temporary files associated with a [Form].\n" ^error [^{:tag (* Form)} f]
+  (let [^error err (zero error)]
+    (range [_ fhs (.-File f)]
+      (range [_ fh fhs]
+        (when (!= (.-tmpfile fh) "")
+          (let [e (os/Remove (.-tmpfile fh))]
+            (when (and (!= e nil) (not (errors/Is e os/ErrNotExist)) (== err nil))
+              (set! err e))))))
+
+
+
+
+    ^{:line 252} err))
+
+
+
+(go/type FileHeader "A FileHeader describes a file part of a multipart request.\n" (struct
+    ^{:line 257 :tag string} Filename
+    ^{:line 258 :tag textproto/MIMEHeader} Header
+    ^{:line 259 :tag int64} Size
+
+    ^{:line 261 :tag (slice byte)} content
+    ^{:line 262 :tag string} tmpfile
+    ^{:line 263 :tag int64} tmpoff
+    ^{:line 264 :tag bool} tmpshared))
+
+
+
+^{:go/end 282} (go/method Open "Open opens and returns the [FileHeader]'s associated File.\n" [^{:tag (* FileHeader)} fh] :results [File error]
+  (when [b (.-content fh)] (!= b nil)
+    (let [r (io/NewSectionReader (bytes/NewReader b) 0 (conv int64 (len b)))]
+      (return (lit sectionReadCloser r nil) nil)))
+
+  (when (.-tmpshared fh)
+    (let [(values f err) (os/Open (.-tmpfile fh))]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [r (io/NewSectionReader f (.-tmpoff fh) (.-Size fh))]
+        (return (lit sectionReadCloser r f) nil))))
+
+  (os/Open (.-tmpfile fh)))
+
+
+
+
+
+(go/type File "File is an interface to access the file part of a multipart message.\nIts contents may be either stored in memory or on disk.\nIf stored on disk, the File's underlying concrete type will be an *os.File.\n" (interface
+    ^{:line 288} io/Reader
+    ^{:line 289} io/ReaderAt
+    ^{:line 290} io/Seeker
+    ^{:line 291} io/Closer))
+
+
+;; helper types to turn a []byte into a File
+
+(go/type sectionReadCloser (struct
+    (* io/SectionReader)
+    ^{:line 298} io/Closer))
+
+
+^{:go/breaks [[4 305]] :go/end 306} (go/method Close ^error [^sectionReadCloser rc]
+  (when (!= (.-Closer rc) nil)
+    (return (.Close (.-Closer rc))))
+
+  nil)

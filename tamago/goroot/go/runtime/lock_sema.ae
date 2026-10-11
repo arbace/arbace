@@ -1,0 +1,178 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.runtime) (go/file "lock_sema.go" :build ["//go:build aix || darwin || netbsd || openbsd || plan9 || solaris || windows || tamago"] :imports [
+
+
+    ^{:line 10} [atomic "internal/runtime/atomic"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+(go/const
+  ^{:line 15} [^{:tag uintptr :val 1} locked 1])
+
+
+
+^{:go/end 21} (go/func noteclear "One-time notifications.\n" [^{:tag (* note)} n]
+  (set! (.-key n) 0))
+
+
+^{:go/end 44} (go/func notewakeup [^{:tag (* note)} n]
+  (let [^uintptr v (zero uintptr)]
+    (while true
+      (set! v (atomic/Loaduintptr (addr (.-key n))))
+      (when (atomic/Casuintptr (addr (.-key n)) v locked)
+        (break)))
+
+
+
+    ;; Successfully set waitm to locked.
+    ;; What was it before?
+    (switch
+      (case [(== v 0)])
+      ;; Nothing was waiting. Done.
+      (case [(== v locked)]
+        ;; Two notewakeups! Not allowed.
+        (throw "notewakeup - double wakeup"))
+      (default
+        ;; Must be the waiting m. Wake it up.
+        (semawakeup (conv (* m) (conv unsafe/Pointer v)))))))
+
+
+
+^{:go/end 72} (go/func notesleep [^{:tag (* note)} n]
+  (let [gp (getg)]
+    (when (!= gp (.-g0 (.-m gp)))
+      (throw "notesleep not on g0"))
+
+    (semacreate (.-m gp))
+    (when (not (atomic/Casuintptr (addr (.-key n)) 0 (conv uintptr (conv unsafe/Pointer (.-m gp)))))
+      ;; Must be locked (got wakeup).
+      (when (!= (.-key n) locked)
+        (throw "notesleep - waitm out of sync"))
+
+      (return))
+
+    ;; Queued. Sleep.
+    (set! (.-blocked (.-m gp)) true)
+    (if (== @cgo_yield nil)
+      (semasleep -1)
+
+      ;; Sleep for an arbitrary-but-moderate interval to poll libc interceptors.
+      (let [^:const ^{:val 1.0E7} ns 1.0E7]
+        (while (== (atomic/Loaduintptr (addr (.-key n))) 0)
+          (semasleep ns)
+          (asmcgocall @cgo_yield nil))))
+
+
+    (set! (.-blocked (.-m gp)) false)))
+
+
+
+^{:go/end 156} (go/func ^:go/nosplit notetsleep_internal ^bool [^{:tag (* note)} n ^int64 ns ^{:tag (* g)} gp ^int64 deadline]
+  ;; gp and deadline are logically local variables, but they are written
+  ;; as parameters so that the stack space they require is charged
+  ;; to the caller.
+  ;; This reduces the nosplit footprint of notetsleep_internal.
+  (set! gp (getg))
+
+  ;; Register for wakeup on n->waitm.
+  (when (not (atomic/Casuintptr (addr (.-key n)) 0 (conv uintptr (conv unsafe/Pointer (.-m gp)))))
+    ;; Must be locked (got wakeup).
+    (when (!= (.-key n) locked)
+      (throw "notetsleep - waitm out of sync"))
+
+    (return true))
+
+  (when (< ns 0)
+    ;; Queued. Sleep.
+    (set! (.-blocked (.-m gp)) true)
+    (if (== @cgo_yield nil)
+      (semasleep -1)
+
+      ;; Sleep in arbitrary-but-moderate intervals to poll libc interceptors.
+      (let [^:const ^{:val 1.0E7} ns 1.0E7]
+        (while (< (semasleep ns) 0)
+          (asmcgocall @cgo_yield nil))))
+
+
+    (set! (.-blocked (.-m gp)) false)
+    (return true))
+
+
+  (set! deadline (+ (nanotime) ns))
+  (while true
+    ;; Registered. Sleep.
+    (set! (.-blocked (.-m gp)) true)
+    (when (and (!= @cgo_yield nil) (> ns 1.0E7))
+      (set! ns 1.0E7))
+
+    (when (>= (semasleep ns) 0)
+      (set! (.-blocked (.-m gp)) false)
+      ;; Acquired semaphore, semawakeup unregistered us.
+      ;; Done.
+      (return true))
+
+    (when (!= @cgo_yield nil)
+      (asmcgocall @cgo_yield nil))
+
+    (set! (.-blocked (.-m gp)) false)
+    ;; Interrupted or timed out. Still registered. Semaphore not acquired.
+    (set! ns (- deadline (nanotime)))
+    (when (<= ns 0)
+      (break)))
+
+  ;; Deadline hasn't arrived. Keep sleeping.
+
+
+  ;; Deadline arrived. Still registered. Semaphore not acquired.
+  ;; Want to give up and return, but have to unregister first,
+  ;; so that any notewakeup racing with the return does not
+  ;; try to grant us the semaphore when we don't expect it.
+  (while true
+    (let [v (atomic/Loaduintptr (addr (.-key n)))]
+      (switch v
+        (case [(conv uintptr (conv unsafe/Pointer (.-m gp)))]
+          ;; No wakeup yet; unregister if possible.
+          (when (atomic/Casuintptr (addr (.-key n)) v 0)
+            (return false)))
+
+        (case [locked]
+          ;; Wakeup happened so semaphore is available.
+          ;; Grab it to avoid getting out of sync.
+          (set! (.-blocked (.-m gp)) true)
+          (when (< (semasleep -1) 0)
+            (throw "runtime: unable to acquire - semaphore out of sync"))
+
+          (set! (.-blocked (.-m gp)) false)
+          (return true))
+        (default
+          (throw "runtime: unexpected waitm - semaphore out of sync"))))))
+
+
+
+
+^{:go/end 165} (go/func notetsleep ^bool [^{:tag (* note)} n ^int64 ns]
+  (let [gp (getg)]
+    (when (!= gp (.-g0 (.-m gp)))
+      (throw "notetsleep not on g0"))
+
+    (semacreate (.-m gp))
+    (notetsleep_internal n ns nil 0)))
+
+
+
+
+^{:go/end 179} (go/func notetsleepg "same as runtime·notetsleep, but called on user g (not g0)\ncalls only nosplit functions between entersyscallblock/exitsyscall.\n" ^bool [^{:tag (* note)} n ^int64 ns]
+  (let [gp (getg)]
+    (when (== gp (.-g0 (.-m gp)))
+      (throw "notetsleepg on g0"))
+
+    (semacreate (.-m gp))
+    (entersyscallblock)
+    (let [ok (notetsleep_internal n ns nil 0)]
+      (exitsyscall)
+      ^{:line 178} ok)))

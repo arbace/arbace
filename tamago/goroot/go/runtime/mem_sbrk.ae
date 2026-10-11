@@ -1,0 +1,305 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.runtime) (go/file "mem_sbrk.go" :build ["//go:build plan9 || wasm || tamago"] :imports [
+
+    ^{:line 9} [unsafe "unsafe"]])
+
+(go/const ^{:val true} isSbrkPlatform true)
+
+(go/const ^{:val false} memDebug false)
+
+;; Memory management on sbrk systems (including the linear memory
+;; on Wasm).
+
+;; bloc is the runtime's sense of the break, which can go up or
+;; down. blocMax is the system's break, also the high water mark
+;; of bloc. The runtime uses memory up to bloc. The memory
+;; between bloc and blocMax is allocated by the OS but not used
+;; by the runtime.
+;;
+;; When the runtime needs to grow the heap address range, it
+;; increases bloc. When it needs to grow beyond blocMax, it calls
+;; the system sbrk to allocate more memory (and therefore
+;; increase blocMax).
+;;
+;; When the runtime frees memory at the end of the address space,
+;; it decreases bloc, but does not reduces the system break (as
+;; the OS doesn't support it). When the runtime frees memory in
+;; the middle of the address space, the memory goes to a free
+;; list.
+
+(go/var ^uintptr bloc) ; The runtime's sense of break. Can go up or down.
+(go/var ^uintptr blocMax) ; The break of the OS. Only increase.
+(go/var ^mutex memlock)
+
+(go/type memHdr (struct
+    ^{:line 40 :tag memHdrPtr} next
+    ^{:line 41 :tag uintptr} size))
+
+
+(go/var ^memHdrPtr memFreelist) ; sorted in ascending order
+
+(go/type memHdrPtr uintptr)
+
+^{:go/end 48} (go/method ptr ^{:tag (* memHdr)} [^memHdrPtr p] (conv (* memHdr) (conv unsafe/Pointer p)))
+^{:go/end 49} (go/method set [^{:tag (* memHdrPtr)} p ^{:tag (* memHdr)} x] (set! @p (conv memHdrPtr (conv unsafe/Pointer x))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 66} (go/func ^:go/systemstack memAlloc "memAlloc allocates n bytes from the brk reservation, or if it's full,\nthe system.\n\nmemlock must be held.\n\nmemAlloc must be called on the system stack, otherwise a stack growth\ncould cause us to call back into it. Since memlock is held, that could\nlead to a self-deadlock.\n" ^unsafe/Pointer [^uintptr n]
+  (when [p (memAllocNoGrow n)] (!= p nil)
+    (return p))
+
+  (sbrk n))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 98} (go/func ^:go/systemstack memAllocNoGrow "memAllocNoGrow attempts to allocate n bytes from the existing brk.\n\nmemlock must be held.\n\nmemAlloc must be called on the system stack, otherwise a stack growth\ncould cause us to call back into it. Since memlock is held, that could\nlead to a self-deadlock.\n" ^unsafe/Pointer [^uintptr n]
+  (set! n (memRound n))
+  ^{:go/breaks [[3 97]]} (let [^{:tag (* memHdr)} prevp (zero (* memHdr))]
+    (for [p (.ptr memFreelist)] (!= p nil) (set! p (.ptr (.-next p)))
+      (when (>= (.-size p) n)
+        (if (== (.-size p) n)
+          (if (!= prevp nil)
+            (set! (.-next prevp) (.-next p))
+
+            (set! memFreelist (.-next p)))
+
+          (do
+            (set! (.-size p) - n)
+            (set! p (conv (* memHdr) (add (conv unsafe/Pointer p) (.-size p))))))
+
+        (set! @p (lit memHdr))
+        (return (conv unsafe/Pointer p)))
+
+      (set! prevp p))
+
+    nil))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 151} (go/func ^:go/systemstack memFree "memFree makes [ap, ap+n) available for reallocation by memAlloc.\n\nmemlock must be held.\n\nmemAlloc must be called on the system stack, otherwise a stack growth\ncould cause us to call back into it. Since memlock is held, that could\nlead to a self-deadlock.\n" [^unsafe/Pointer ap ^uintptr n]
+  (set! n (memRound n))
+  (memclrNoHeapPointers ap n)
+  (let [bp (conv (* memHdr) ap)]
+    (set! (.-size bp) n)
+    (let [bpn (conv uintptr ap)]
+      (when (== memFreelist 0)
+        (set! (.-next bp) 0)
+        (.set memFreelist bp)
+        (return))
+
+      (let [p (.ptr memFreelist)]
+        (when (< bpn (conv uintptr (conv unsafe/Pointer p)))
+          (.set memFreelist bp)
+          (if (== (+ bpn (.-size bp)) (conv uintptr (conv unsafe/Pointer p))) (do
+              (set! (.-size bp) + (.-size p))
+              (set! (.-next bp) (.-next p))
+              (set! @p (lit memHdr)))
+
+            (.set (.-next bp) p))
+
+          (return))
+
+        (for [] (!= (.-next p) 0) (set! p (.ptr (.-next p)))
+          (when (and (> bpn (conv uintptr (conv unsafe/Pointer p))) (< bpn (conv uintptr (conv unsafe/Pointer (.-next p)))))
+            (break)))
+
+
+        (if (== (+ bpn (.-size bp)) (conv uintptr (conv unsafe/Pointer (.-next p)))) (do
+            (set! (.-size bp) + (.-size (.ptr (.-next p))))
+            (set! (.-next bp) (.-next (.ptr (.-next p))))
+            (set! @(.ptr (.-next p)) (lit memHdr)))
+
+          (set! (.-next bp) (.-next p)))
+
+        (if (== (+ (conv uintptr (conv unsafe/Pointer p)) (.-size p)) bpn) (do
+            (set! (.-size p) + (.-size bp))
+            (set! (.-next p) (.-next bp))
+            (set! @bp (lit memHdr)))
+
+          (.set (.-next p) bp))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 186} (go/func ^:go/systemstack memCheck "memCheck checks invariants around free list management.\n\nmemlock must be held.\n\nmemAlloc must be called on the system stack, otherwise a stack growth\ncould cause us to call back into it. Since memlock is held, that could\nlead to a self-deadlock.\n" []
+  (when (not memDebug)
+    (return))
+
+  (for [p (.ptr memFreelist)] (and (!= p nil) (!= (.-next p) 0)) (set! p (.ptr (.-next p)))
+    (when (== (conv uintptr (conv unsafe/Pointer p)) (conv uintptr (conv unsafe/Pointer (.-next p))))
+      (print "runtime: " (conv unsafe/Pointer p) " == " (conv unsafe/Pointer (.-next p)) "\n")
+      (throw "mem: infinite loop"))
+
+    (when (> (conv uintptr (conv unsafe/Pointer p)) (conv uintptr (conv unsafe/Pointer (.-next p))))
+      (print "runtime: " (conv unsafe/Pointer p) " > " (conv unsafe/Pointer (.-next p)) "\n")
+      (throw "mem: unordered list"))
+
+    (when (> (+ (conv uintptr (conv unsafe/Pointer p)) (.-size p)) (conv uintptr (conv unsafe/Pointer (.-next p))))
+      (print "runtime: " (conv unsafe/Pointer p) "+" (.-size p) " > " (conv unsafe/Pointer (.-next p)) "\n")
+      (throw "mem: overlapping blocks"))
+
+    (for [b (add (conv unsafe/Pointer p) (unsafe/Sizeof (lit memHdr)))] (< (conv uintptr b) (+ (conv uintptr (conv unsafe/Pointer p)) (.-size p))) (set! b (add b 1))
+      (when (!= @(conv (* byte) b) 0)
+        (print "runtime: value at addr " b " with offset " (- (conv uintptr b) (conv uintptr (conv unsafe/Pointer p))) " in block " p " of size " (.-size p) " is not zero\n")
+        (throw "mem: uninitialised memory")))))
+
+
+
+
+
+^{:go/end 190} (go/func memRound ^uintptr [^uintptr p]
+  (alignUp p physPageSize))
+
+
+^{:go/end 195} (go/func initBloc []
+  (set! bloc (memRound (.-end firstmoduledata)))
+  (set! blocMax bloc))
+
+
+^{:go/end 206} (go/func sysAllocOS ^unsafe/Pointer [^uintptr n ^string _]
+  (let [^uintptr p (zero uintptr)]
+    (systemstack ^{:go/end 204} (fn []
+        (lock (addr memlock))
+        (set! p (conv uintptr (memAlloc n)))
+        (memCheck)
+        (unlock (addr memlock))))
+
+    (conv unsafe/Pointer p)))
+
+
+^{:go/end 227} (go/func sysFreeOS [^unsafe/Pointer v ^uintptr n]
+  (when (== v nil)
+    ;; A failed sysReserveOS returns nil, so freeing it is a no-op.
+    (return))
+
+  (systemstack ^{:go/end 226} (fn []
+      (lock (addr memlock))
+      (if (== (+ (conv uintptr v) n) bloc) (do
+          ;; Address range being freed is at the end of memory,
+          ;; so record a new lower value for end of memory.
+          ;; Can't actually shrink address space because segment is shared.
+          (memclrNoHeapPointers v n)
+          (set! bloc - n))
+        (do
+          (memFree v n)
+          (memCheck)))
+
+      (unlock (addr memlock)))))
+
+
+
+^{:go/end 230} (go/func sysUnusedOS [^unsafe/Pointer v ^uintptr n])
+
+
+^{:go/end 233} (go/func sysUsedOS [^unsafe/Pointer v ^uintptr n])
+
+
+^{:go/end 236} (go/func sysHugePageOS [^unsafe/Pointer v ^uintptr n])
+
+
+^{:go/end 239} (go/func sysNoHugePageOS [^unsafe/Pointer v ^uintptr n])
+
+
+^{:go/end 242} (go/func sysHugePageCollapseOS [^unsafe/Pointer v ^uintptr n])
+
+
+^{:go/end 245} (go/func sysMapOS [^unsafe/Pointer v ^uintptr n ^string _])
+
+
+^{:go/end 248} (go/func sysFaultOS [^unsafe/Pointer v ^uintptr n])
+
+
+^{:go/end 266} (go/func sysReserveOS ^unsafe/Pointer [^unsafe/Pointer v ^uintptr n ^string _]
+  (let [^uintptr p (zero uintptr)]
+    (systemstack ^{:go/end 264} (fn []
+        (lock (addr memlock))
+        (when (== (conv uintptr v) bloc)
+          ;; Address hint is the current end of memory,
+          ;; so try to extend the address space.
+          (set! p (conv uintptr (sbrk n))))
+
+        (when (and (== p 0) (== v nil))
+          (set! p (conv uintptr (memAlloc n)))
+          (memCheck))
+
+        (unlock (addr memlock))))
+
+    (conv unsafe/Pointer p)))
+
+
+^{:go/end 302} (go/func sysReserveAlignedSbrk [^uintptr size ^uintptr align] :results [unsafe/Pointer uintptr]
+  (let [^uintptr p (zero uintptr)]
+    (systemstack ^{:go/end 300} (fn []
+        (lock (addr memlock))
+        (when [base (memAllocNoGrow (+ size align))] (!= base nil)
+          ;; We can satisfy the reservation from the free list.
+          ;; Trim off the unaligned parts.
+          (let [start (alignUp (conv uintptr base) align)]
+            (when [startLen (- start (conv uintptr base))] (> startLen 0)
+              (memFree base startLen))
+
+            (let [end (+ start size)]
+              (when [endLen (- (+ (conv uintptr base) size align) end)] (> endLen 0)
+                (memFree (conv unsafe/Pointer end) endLen))
+
+              (memCheck)
+              (unlock (addr memlock))
+              (set! p start)
+              (return))))
+
+
+        ;; Round up bloc to align, then allocate size.
+        (set! p (alignUp bloc align))
+        (let [r (sbrk (- (+ p size) bloc))]
+          (if (== r nil)
+            (set! (values p size) (values 0 0))
+            (when [l (- p (conv uintptr r))] (> l 0)
+              ;; Free the area we skipped over for alignment.
+              (memFree r l)
+              (memCheck)))
+
+          (unlock (addr memlock)))))
+
+    (return (conv unsafe/Pointer p) size)))
+
+
+^{:go/breaks [3] :go/end 306} (go/func needZeroAfterSysUnusedOS ^bool []
+  true)

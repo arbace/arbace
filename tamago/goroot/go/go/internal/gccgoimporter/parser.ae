@@ -1,0 +1,1289 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.internal.gccgoimporter) (go/file "parser.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [constant "go/constant"]
+    ^{:line 11} [token "go/token"]
+    ^{:line 12} [types "go/types"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]
+    ^{:line 16} [scanner "text/scanner"]
+    ^{:line 17} [utf8 "unicode/utf8"]])
+
+
+(go/type parser (struct
+    ^{:line 21 :tag (* scanner/Scanner)} scanner
+    ^{:line 22 :tag string} version ; format version
+    ^{:line 23 :tag rune} tok ; current token
+    ^{:line 24 :tag string} lit ; literal string; only valid for Ident, Int, String tokens
+    ^{:line 25 :tag string} pkgpath ; package path of imported package
+    ^{:line 26 :tag string} pkgname ; name of imported package
+    ^{:line 27 :tag (* types/Package)} pkg ; reference to imported package
+    ^{:line 28 :tag (map string (* types/Package))} imports ; package path -> package object
+    ^{:line 29 :tag (slice types/Type)} typeList ; type number -> type
+    ^{:line 30 :tag (slice string)} typeData ; unparsed type data (v3 and later)
+    ^{:line 31 :tag (slice fixupRecord)} fixups ; fixups to apply at end of parsing
+    ^{:line 32 :tag InitData} initdata ; package init priority data
+    ^{:line 33 :tag (map int string)} aliases)) ; maps saved type number to alias name
+
+
+;; When reading export data it's possible to encounter a defined type
+;; N1 with an underlying defined type N2 while we are still reading in
+;; that defined type N2; see issues #29006 and #29198 for instances
+;; of this. Example:
+;;
+;;   type N1 N2
+;;   type N2 struct {
+;;      ...
+;;      p *N1
+;;   }
+;;
+;; To handle such cases, the parser generates a fixup record (below) and
+;; delays setting of N1's underlying type until parsing is complete, at
+;; which point fixups are applied.
+
+(go/type fixupRecord (struct
+    ^{:line 52 :tag (* types/Named)} toUpdate ; type to modify when fixup is processed
+    ^{:line 53 :tag types/Type} target)) ; type that was incomplete when fixup was created
+
+
+^{:go/end 62} (go/method init [^{:tag (* parser)} p ^string filename ^io/Reader src ^{:tag (map string (* types/Package))} imports]
+  (set! (.-scanner p) (new scanner/Scanner))
+  (.initScanner p filename src)
+  (set! (.-imports p) imports)
+  (set! (.-aliases p) (make (map int string)))
+  (set! (.-typeList p) (make (slice types/Type) 1 16))) ; /* type numbers start at 1 */
+
+
+^{:go/end 71} (go/method initScanner [^{:tag (* parser)} p ^string filename ^io/Reader src]
+  (.Init (.-scanner p) src)
+  (set! (.-Error (.-scanner p)) ^{:go/end 66} (fn [^{:tag (* scanner/Scanner)} _ ^string msg] (.error p msg)))
+  (set! (.-Mode (.-scanner p)) (bit-or scanner/ScanIdents scanner/ScanInts scanner/ScanFloats scanner/ScanStrings))
+  (set! (.-Whitespace (.-scanner p)) (bit-or (<< 1 \tab) (<< 1 \space)))
+  (set! ^{:go/via [Position]} (.-Filename (.-scanner p)) filename) ; for good error messages
+  (.next p))
+
+
+(go/type importError (struct
+    ^{:line 74 :tag scanner/Position} pos
+    ^{:line 75 :tag error} err))
+
+
+(go/var ^error _ (lit importError))
+
+^{:go/end 82} (go/method Error ^string [^importError e]
+  (fmt/Sprintf "import error %s (byte offset = %d): %s" (.-pos e) (.-Offset (.-pos e)) (.-err e)))
+
+
+^{:go/end 90} (go/method error [^{:tag (* parser)} p ^any err]
+  (when [(values s ok) (assert string err)] ok
+    (set! err (errors/New s)))
+
+  ;; panic with a runtime.Error if err is not an error
+  (panic (lit importError (.Pos (.-scanner p)) (assert error err))))
+
+
+^{:go/end 94} (go/method errorf [^{:tag (* parser)} p ^string format & ^{:tag (slice any)} args]
+  (.error p (fmt/Errorf format (spread args))))
+
+
+^{:go/end 103} (go/method expect ^string [^{:tag (* parser)} p ^rune tok]
+  (let [lit (.-lit p)]
+    (when (!= (.-tok p) tok)
+      (.errorf p "expected %s, got %s (%s)" (scanner/TokenString tok) (scanner/TokenString (.-tok p)) lit))
+
+    (.next p)
+    ^{:line 102} lit))
+
+
+^{:go/end 110} (go/method expectEOL [^{:tag (* parser)} p]
+  (when (or (== (.-version p) "v1") (== (.-version p) "v2"))
+    (.expect p \;))
+
+  (.expect p \newline))
+
+
+^{:go/end 117} (go/method expectKeyword [^{:tag (* parser)} p ^string keyword]
+  (let [lit (.expect p scanner/Ident)]
+    (when (!= lit keyword)
+      (.errorf p "expected keyword %s, got %q" keyword lit))))
+
+
+
+^{:go/end 125} (go/method parseString ^string [^{:tag (* parser)} p]
+  (let [(values str err) (strconv/Unquote (.expect p scanner/String))]
+    (when (!= err nil)
+      (.error p err))
+
+    ^{:line 124} str))
+
+
+
+
+^{:go/end 143} (go/method parseUnquotedString "unquotedString     = { unquotedStringChar } .\nunquotedStringChar = <neither a whitespace nor a ';' char> .\n" ^string [^{:tag (* parser)} p]
+  (when (== (.-tok p) scanner/EOF)
+    (.error p "unexpected EOF"))
+
+  (let [^strings/Builder b (zero strings/Builder)]
+    (.WriteString b (.TokenText (.-scanner p)))
+    ;; This loop needs to examine each character before deciding whether to consume it. If we see a semicolon,
+    ;; we need to let it be consumed by p.next().
+    (for [ch (.Peek (.-scanner p))] (and (!= ch \newline) (!= ch \;) (!= ch scanner/EOF) (== (bit-and (.-Whitespace (.-scanner p)) ^uint64 (<< 1 (conv uint ch))) 0)) (set! ch (.Peek (.-scanner p)))
+      (.WriteRune b ch)
+      (.Next (.-scanner p)))
+
+    (.next p)
+    (.String b)))
+
+
+^{:go/end 153} (go/method next [^{:tag (* parser)} p]
+  (set! (.-tok p) (.Scan (.-scanner p)))
+  (switch (.-tok p)
+    (case [scanner/Ident scanner/Int scanner/Float scanner/String \·]
+      (set! (.-lit p) (.TokenText (.-scanner p))))
+    (default
+      (set! (.-lit p) ""))))
+
+
+
+^{:go/end 157} (go/method parseQualifiedName [^{:tag (* parser)} p] :results [^string path ^string name]
+  (.parseQualifiedNameStr p (.parseString p)))
+
+
+^{:go/end 161} (go/method parseUnquotedQualifiedName [^{:tag (* parser)} p] :results [^string path ^string name]
+  (.parseQualifiedNameStr p (.parseUnquotedString p)))
+
+
+
+
+
+^{:go/end 186} (go/method parseQualifiedNameStr "qualifiedName = [ [\".\"] unquotedString \".\" ] unquotedString .\n\nThe above production uses greedy matching.\n" [^{:tag (* parser)} p ^string unquotedName] :results [^string pkgpath ^string name]
+  (let [parts (strings/Split unquotedName ".")]
+    (when (== (aget parts 0) "")
+      (set! parts (subslice parts 1)))
+
+
+    (switch (len parts)
+      (case [0]
+        (.errorf p "malformed qualified name: %q" unquotedName))
+      (case [1]
+        ;; unqualified name
+        (set! pkgpath (.-pkgpath p))
+        (set! name (aget parts 0)))
+      (default
+        ;; qualified name, which may contain periods
+        (set! pkgpath (strings/Join (subslice parts _ (- (len parts) 1)) "."))
+        (set! name (aget parts (- (len parts) 1)))))
+
+
+    (return)))
+
+
+
+
+
+^{:go/end 202} (go/method getPkg "getPkg returns the package for a given path. If the package is\nnot found but we have a package name, create the package and\nadd it to the p.imports map.\n" ^{:tag (* types/Package)} [^{:tag (* parser)} p ^string pkgpath ^string name]
+  ;; package unsafe is not in the imports map - handle explicitly
+  (when (== pkgpath "unsafe")
+    (return types/Unsafe))
+
+  (let [pkg (aget (.-imports p) pkgpath)]
+    (when (and (== pkg nil) (!= name ""))
+      (set! pkg (types/NewPackage pkgpath name))
+      (aset (.-imports p) pkgpath pkg))
+
+    ^{:line 201} pkg))
+
+
+
+
+
+
+^{:go/end 219} (go/method parseExportedName "parseExportedName is like parseQualifiedName, but\nthe package path is resolved to an imported *types.Package.\n\nExportedName = string [string] .\n" [^{:tag (* parser)} p] :results [^{:tag (* types/Package)} pkg ^string name]
+  (let [(values path ^:assign name) (.parseQualifiedName p)
+      ^{:line 210 :tag string} pkgname (zero string)]
+    (when (== (.-tok p) scanner/String)
+      (set! pkgname (.parseString p)))
+
+    (set! pkg (.getPkg p path pkgname))
+    (when (== pkg nil)
+      (.errorf p "package %s (path = %q) not found" name path))
+
+    (return)))
+
+
+
+^{:go/end 231} (go/method parseName "Name = QualifiedName | \"?\" .\n" ^string [^{:tag (* parser)} p]
+  (when (== (.-tok p) \?)
+    ;; Anonymous.
+    (.next p)
+    (return ""))
+
+  ;; The package path is redundant for us. Don't try to parse it.
+  (let [(values _ name) (.parseUnquotedQualifiedName p)]
+    ^{:line 230} name))
+
+
+^{:go/end 238} (go/func deref ^types/Type [^types/Type typ]
+  (when [(values p _) (assert (* types/Pointer) typ)] (!= p nil)
+    (set! typ (.Elem p)))
+
+  ^{:line 237} typ)
+
+
+
+^{:go/end 266} (go/method parseField "Field = Name Type [string] .\n" [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg] :results [^{:tag (* types/Var)} field ^string tag]
+  (let [name (.parseName p)
+      (values typ n) (.parseTypeExtended p pkg)
+      ^{:line 244} anon false]
+    (when (== name "")
+      (set! anon true)
+      ;; Alias?
+      (if [(values aname ok) (aget (.-aliases p) n)] ok
+        (set! name aname)
+
+        (type-switch [typ (go/call deref typ)]
+          (case [(* types/Basic)]
+            (set! name (.Name typ)))
+          (case [(* types/Named)]
+            (set! name ^{:go/via [object]} (.Name (.Obj typ))))
+          (default
+            (.error p "embedded field expected")))))
+
+
+
+    (set! field (types/NewField token/NoPos pkg name typ anon))
+    (when (== (.-tok p) scanner/String)
+      (set! tag (.parseString p)))
+
+    (return)))
+
+
+
+^{:go/end 296} (go/method parseParam "Param = Name [\"...\"] Type .\n" [^{:tag (* parser)} p ^types/VarKind kind ^{:tag (* types/Package)} pkg] :results [^{:tag (* types/Var)} param ^bool isVariadic]
+  (let [name (.parseName p)]
+    ;; Ignore names invented for inlinable functions.
+    (when (or (strings/HasPrefix name "p.") (strings/HasPrefix name "r.") (strings/HasPrefix name "$ret"))
+      (set! name ""))
+
+    (when (and (== (.-tok p) \<) (== (.Peek (.-scanner p)) \e))
+      ;; EscInfo = "<esc:" int ">" . (optional and ignored)
+      (.next p)
+      (.expectKeyword p "esc")
+      (.expect p \:)
+      (.expect p scanner/Int)
+      (.expect p \>))
+
+    (when (== (.-tok p) \.)
+      (.next p)
+      (.expect p \.)
+      (.expect p \.)
+      (set! isVariadic true))
+
+    (let [typ (.parseType p pkg)]
+      (when isVariadic
+        (set! typ (types/NewSlice typ)))
+
+      (set! param (types/NewParam token/NoPos pkg name typ))
+      (.SetKind param kind)
+      (return))))
+
+
+
+^{:go/end 309} (go/method parseVar "Var = Name Type .\n" ^{:tag (* types/Var)} [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg]
+  (let [name (.parseName p)
+      ^{:line 301} v (types/NewVar token/NoPos pkg name (.parseType p pkg))] ; (types.PackageVar)
+    (when (or (== (aget name 0) \.) (== (aget name 0) \<))
+      ;; This is an unexported variable,
+      ;; or a variable defined in a different package.
+      ;; We only want to record exported variables.
+      (return nil))
+
+    ^{:line 308} v))
+
+
+
+^{:go/end 320} (go/method parseConversion "Conversion = \"convert\" \"(\" Type \",\" ConstValue \")\" .\n" [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg] :results [^constant/Value val ^types/Type typ]
+  (.expectKeyword p "convert")
+  (.expect p \()
+  (set! typ (.parseType p pkg))
+  (.expect p \,)
+  (set! (values val _) (.parseConstValue p pkg))
+  (.expect p \))
+  (return))
+
+
+
+
+^{:go/end 427} (go/method parseConstValue "ConstValue     = string | \"false\" | \"true\" | [\"-\"] (int [\"'\"] | FloatOrComplex) | Conversion .\nFloatOrComplex = float [\"i\" | (\"+\"|\"-\") float \"i\"] .\n" [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg] :results [^constant/Value val ^types/Type typ]
+  ;; v3 changed to $false, $true, $convert, to avoid confusion
+  ;; with variable names in inline function bodies.
+  (when (== (.-tok p) \$)
+    (.next p)
+    (when (!= (.-tok p) scanner/Ident)
+      (.errorf p "expected identifier after '$', got %s (%q)" (scanner/TokenString (.-tok p)) (.-lit p))))
+
+
+
+  (switch (.-tok p)
+    (case [scanner/String]
+      (let [str (.parseString p)]
+        (set! val (constant/MakeString str))
+        (set! typ (aget types/Typ types/UntypedString))
+        (return)))
+
+    (case [scanner/Ident]
+      (let [b false]
+        (switch (.-lit p)
+          (case ["false"])
+          (case ["true"]
+            (set! b true))
+
+          (case ["convert"]
+            (return (.parseConversion p pkg)))
+
+          (default
+            (.errorf p "expected const value, got %s (%q)" (scanner/TokenString (.-tok p)) (.-lit p))))
+
+
+        (.next p)
+        (set! val (constant/MakeBool b))
+        (set! typ (aget types/Typ types/UntypedBool))
+        (return))))
+
+
+  (let [sign ""]
+    (when (== (.-tok p) \-)
+      (.next p)
+      (set! sign "-"))
+
+
+    (switch (.-tok p)
+      (case [scanner/Int]
+        (set! val (constant/MakeFromLiteral (+ sign (.-lit p)) token/INT 0))
+        (when (== val nil)
+          (.error p "could not parse integer literal"))
+
+
+        (.next p)
+        (if (== (.-tok p) \') (do
+            (.next p)
+            (set! typ (aget types/Typ types/UntypedRune)))
+
+          (set! typ (aget types/Typ types/UntypedInt))))
+
+
+      (case [scanner/Float]
+        (let [re (+ sign (.-lit p))]
+          (.next p)
+
+          (let [^string im (zero string)]
+            (switch (.-tok p)
+              (case [\+]
+                (.next p)
+                (set! im (.expect p scanner/Float)))
+
+              (case [\-]
+                (.next p)
+                (set! im (+ "-" (.expect p scanner/Float))))
+
+              (case [scanner/Ident]
+                ;; re is in fact the imaginary component. Expect "i" below.
+                (set! im re)
+                (set! re "0"))
+
+              (default
+                (set! val (constant/MakeFromLiteral re token/FLOAT 0))
+                (when (== val nil)
+                  (.error p "could not parse float literal"))
+
+                (set! typ (aget types/Typ types/UntypedFloat))
+                (return)))
+
+
+            (.expectKeyword p "i")
+            (let [reval (constant/MakeFromLiteral re token/FLOAT 0)]
+              (when (== reval nil)
+                (.error p "could not parse real component of complex literal"))
+
+              (let [imval (constant/MakeFromLiteral (+ im "i") token/IMAG 0)]
+                (when (== imval nil)
+                  (.error p "could not parse imag component of complex literal"))
+
+                (set! val (constant/BinaryOp reval token/ADD imval))
+                (set! typ (aget types/Typ types/UntypedComplex)))))))
+
+      (default
+        (.errorf p "expected const value, got %s (%q)" (scanner/TokenString (.-tok p)) (.-lit p))))
+
+
+    (return)))
+
+
+
+^{:go/end 442} (go/method parseConst "Const = Name [Type] \"=\" ConstValue .\n" ^{:tag (* types/Const)} [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg]
+  (let [name (.parseName p)
+      ^{:line 432 :tag types/Type} typ (zero types/Type)]
+    (when (== (.-tok p) \<)
+      (set! typ (.parseType p pkg)))
+
+    (.expect p \=)
+    (let [(values val vtyp) (.parseConstValue p pkg)]
+      (when (== typ nil)
+        (set! typ vtyp))
+
+      (types/NewConst token/NoPos pkg name typ val))))
+
+
+
+
+
+
+
+(go/var ^{:doc "reserved is a singleton type used to fill type map slots that have\nbeen reserved (i.e., for which a type number has been parsed) but\nwhich don't have their actual type yet. When the type map is updated,\nthe actual type must replace a reserved entry (or we have an internal\nerror). Used for self-verification only - not required for correctness.\n"} reserved (new (struct types/Type)))
+
+
+^{:go/end 471} (go/method reserve "reserve reserves the type map entry n for future use.\n" [^{:tag (* parser)} p ^int n]
+  ;; Notes:
+  ;; - for pre-V3 export data, the type numbers we see are
+  ;;   guaranteed to be in increasing order, so we append a
+  ;;   reserved entry onto the list.
+  ;; - for V3+ export data, type numbers can appear in
+  ;;   any order, however the 'types' section tells us the
+  ;;   total number of types, hence typeList is pre-allocated.
+  (if (== (len (.-typeData p)) 0) (do
+      (when (!= n (len (.-typeList p)))
+        (.errorf p "invalid type number %d (out of sync)" n))
+
+      (set! (.-typeList p) (append (.-typeList p) reserved)))
+    (do
+      (when (!= (aget (.-typeList p) n) nil)
+        (.errorf p "previously visited type number %d" n))
+
+      (aset (.-typeList p) n reserved))))
+
+
+
+
+
+
+
+
+^{:go/end 508} (go/method update "update sets the type map entries for the entries in nlist to t.\nAn entry in nlist can be a type number in p.typeList,\nused to resolve named types, or it can be a *types.Pointer,\nused to resolve pointers to named types in case they are referenced\nby embedded fields.\n" [^{:tag (* parser)} p ^types/Type t ^{:tag (slice any)} nlist]
+  (when (== t reserved)
+    (.errorf p "internal error: update(%v) invoked on reserved" nlist))
+
+  (when (== t nil)
+    (.errorf p "internal error: update(%v) invoked on nil" nlist))
+
+  (range [_ n nlist]
+    (type-switch [n n]
+      (case [int]
+        (when (== (aget (.-typeList p) n) t)
+          (continue))
+
+        (when (!= (aget (.-typeList p) n) reserved)
+          (.errorf p "internal error: update(%v): %d not reserved" nlist n))
+
+        (aset (.-typeList p) n t))
+      (case [(* types/Pointer)]
+        (when (!= @n (lit types/Pointer))
+          (let [elem (.Elem n)]
+            (when (== elem t)
+              (continue))
+
+            (.errorf p "internal error: update: pointer already set to %v, expected %v" elem t)))
+
+        (set! @n @(types/NewPointer t)))
+      (default
+        (.errorf p "internal error: %T on nlist" n)))))
+
+
+
+
+
+
+
+^{:go/end 609} (go/method parseNamedType "NamedType = TypeName [ \"=\" ] Type { Method } .\nTypeName  = ExportedName .\nMethod    = \"func\" \"(\" Param \")\" Name ParamList ResultList [InlineBody] \";\" .\n" ^types/Type [^{:tag (* parser)} p ^{:tag (slice any)} nlist]
+  (let [(values pkg name) (.parseExportedName p)
+      ^{:line 515} scope (.Scope pkg)
+      ^{:line 516} obj (.Lookup scope name)]
+    (when (and (!= obj nil) (== (.Type obj) nil))
+      (.errorf p "%v has nil type" obj))
+
+
+    (when (and (== (.-tok p) scanner/Ident) (== (.-lit p) "notinheap"))
+      (.next p))
+    ;; The go/types package has no way of recording that
+    ;; this type is marked notinheap. Presumably no user
+    ;; of this package actually cares.
+
+
+    ;; type alias
+    (when (== (.-tok p) \=)
+      (.next p)
+      (aset (.-aliases p) (assert int (aget nlist (- (len nlist) 1))) name)
+      (when (!= obj nil)
+        ;; use the previously imported (canonical) type
+        (let [t (.Type obj)]
+          (.update p t nlist)
+          (.parseType p pkg) ; discard
+          (return t)))
+
+      (let [t (.parseType p pkg (spread nlist))]
+        (set! obj (types/NewTypeName token/NoPos pkg name t))
+        (.Insert scope obj)
+        (return t)))
+
+
+    ;; defined type
+    (when (== obj nil)
+      ;; A named type may be referred to before the underlying type
+      ;; is known - set it up.
+      (let [tname (types/NewTypeName token/NoPos pkg name nil)]
+        (types/NewNamed tname nil nil)
+        (.Insert scope tname)
+        (set! obj tname)))
+
+
+    ;; use the previously imported (canonical), or newly created type
+    (let [t (.Type obj)]
+      (.update p t nlist)
+
+      (let [(values nt ok) (assert (* types/Named) t)]
+        (when (not ok)
+          ;; This can happen for unsafe.Pointer, which is a TypeName holding a Basic type.
+          (let [pt (.parseType p pkg)]
+            (when (!= pt t)
+              (.error p "unexpected underlying type for non-named TypeName"))
+
+            (return t)))
+
+
+        (let [underlying (.parseType p pkg)]
+          (when (== (.Underlying nt) nil)
+            (if (== (.Underlying underlying) nil)
+              (let [fix (lit fixupRecord :toUpdate nt :target underlying)]
+                (set! (.-fixups p) (append (.-fixups p) fix)))
+
+              (.SetUnderlying nt (.Underlying underlying))))
+
+
+
+          (when (== (.-tok p) \newline)
+            (.next p)
+            ;; collect associated methods
+            (while (== (.-tok p) scanner/Ident)
+              (.expectKeyword p "func")
+              (when (== (.-tok p) \/)
+                ;; Skip a /*nointerface*/ or /*asm ID */ comment.
+                (.expect p \/)
+                (.expect p \*)
+                (when (== (.expect p scanner/Ident) "asm")
+                  (.parseUnquotedString p))
+
+                (.expect p \*)
+                (.expect p \/))
+
+              (.expect p \()
+              (let [(values receiver _) (.parseParam p types/RecvVar pkg)]
+                (.expect p \))
+                (let [name (.parseName p)
+                    (values params isVariadic) (.parseParamList p types/ParamVar pkg)
+                    ^{:line 599} results (.parseResultList p pkg)]
+                  (.skipInlineBody p)
+                  (.expectEOL p)
+
+                  (let [sig (types/NewSignatureType receiver nil nil params results isVariadic)]
+                    (.AddMethod nt (types/NewFunc token/NoPos pkg name sig)))))))
+
+
+
+          ^{:line 608} nt)))))
+
+
+^{:go/end 618} (go/method parseInt64 ^int64 [^{:tag (* parser)} p]
+  (let [lit (.expect p scanner/Int)
+      (values n err) (strconv/ParseInt lit 10 64)]
+    (when (!= err nil)
+      (.error p err))
+
+    ^{:line 617} n))
+
+
+^{:go/end 627} (go/method parseInt ^int [^{:tag (* parser)} p]
+  (let [lit (.expect p scanner/Int)
+      (values n err) (strconv/ParseInt lit 10 0)] ; /* int */
+    (when (!= err nil)
+      (.error p err))
+
+    (conv int n)))
+
+
+
+^{:go/end 650} (go/method parseArrayOrSliceType "ArrayOrSliceType = \"[\" [ int ] \"]\" Type .\n" ^types/Type [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg ^{:tag (slice any)} nlist]
+  (.expect p \[)
+  (when (== (.-tok p) \])
+    (.next p)
+
+    (let [t (new types/Slice)]
+      (.update p t nlist)
+
+      (set! @t @(types/NewSlice (.parseType p pkg)))
+      (return t)))
+
+
+  (let [t (new types/Array)]
+    (.update p t nlist)
+
+    (let [len (.parseInt64 p)]
+      (.expect p \])
+
+      (set! @t @(types/NewArray (.parseType p pkg) len))
+      ^{:line 649} t)))
+
+
+
+^{:go/end 666} (go/method parseMapType "MapType = \"map\" \"[\" Type \"]\" Type .\n" ^types/Type [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg ^{:tag (slice any)} nlist]
+  (.expectKeyword p "map")
+
+  (let [t (new types/Map)]
+    (.update p t nlist)
+
+    (.expect p \[)
+    (let [key (.parseType p pkg)]
+      (.expect p \])
+      (let [elem (.parseType p pkg)]
+
+        (set! @t @(types/NewMap key elem))
+        ^{:line 665} t))))
+
+
+
+^{:go/end 693} (go/method parseChanType "ChanType = \"chan\" [\"<-\" | \"-<\"] Type .\n" ^types/Type [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg ^{:tag (slice any)} nlist]
+  (.expectKeyword p "chan")
+
+  (let [t (new types/Chan)]
+    (.update p t nlist)
+
+    (let [dir types/SendRecv]
+      (switch (.-tok p)
+        (case [\-]
+          (.next p)
+          (.expect p \<)
+          (set! dir types/SendOnly))
+
+        (case [\<]
+          ;; don't consume '<' if it belongs to Type
+          (when (== (.Peek (.-scanner p)) \-)
+            (.next p)
+            (.expect p \-)
+            (set! dir types/RecvOnly))))
+
+
+
+      (set! @t @(types/NewChan dir (.parseType p pkg)))
+      ^{:line 692} t)))
+
+
+
+^{:go/end 716} (go/method parseStructType "StructType = \"struct\" \"{\" { Field } \"}\" .\n" ^types/Type [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg ^{:tag (slice any)} nlist]
+  (.expectKeyword p "struct")
+
+  (let [t (new types/Struct)]
+    (.update p t nlist)
+
+    (let [^{:tag (slice (* types/Var))} fields (zero (slice (* types/Var)))
+        ^{:line 703 :tag (slice string)} tags (zero (slice string))]
+
+      (.expect p \{)
+      (while (and (!= (.-tok p) \}) (!= (.-tok p) scanner/EOF))
+        (let [(values field tag) (.parseField p pkg)]
+          (.expect p \;)
+          (set! fields (append fields field))
+          (set! tags (append tags tag))))
+
+      (.expect p \})
+
+      (set! @t @(types/NewStruct fields tags))
+      ^{:line 715} t)))
+
+
+
+^{:go/end 740} (go/method parseParamList "ParamList = \"(\" [ { Parameter \",\" } Parameter ] \")\" .\n" [^{:tag (* parser)} p ^types/VarKind kind ^{:tag (* types/Package)} pkg] :results [(* types/Tuple) bool]
+  (let [^{:tag (slice (* types/Var))} list (zero (slice (* types/Var)))
+      ^{:line 721} isVariadic false]
+
+    (.expect p \()
+    (while (and (!= (.-tok p) \)) (!= (.-tok p) scanner/EOF))
+      (when (> (len list) 0)
+        (.expect p \,))
+
+      (let [(values par variadic) (.parseParam p kind pkg)]
+        (set! list (append list par))
+        (when variadic
+          (when isVariadic
+            (.error p "... not on final argument"))
+
+          (set! isVariadic true))))
+
+
+    (.expect p \))
+
+    (return (types/NewTuple (spread list)) isVariadic)))
+
+
+
+^{:go/end 762} (go/method parseResultList "ResultList = Type | ParamList .\n" ^{:tag (* types/Tuple)} [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg]
+  (switch (.-tok p)
+    (case [\<]
+      (.next p)
+      (when (and (== (.-tok p) scanner/Ident) (== (.-lit p) "inl"))
+        (return nil))
+
+      (let [(values taa _) (.parseTypeAfterAngle p pkg)
+          ^{:line 751} param (types/NewParam token/NoPos pkg "" taa)]
+        (.SetKind param types/ResultVar)
+        (return (types/NewTuple param))))
+
+    (case [\(]
+      (let [(values params _) (.parseParamList p types/ResultVar pkg)]
+        (return params)))
+
+    (default
+      (return nil))))
+
+
+
+
+^{:go/end 774} (go/method parseFunctionType "FunctionType = ParamList ResultList .\n" ^{:tag (* types/Signature)} [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg ^{:tag (slice any)} nlist]
+  (let [t (new types/Signature)]
+    (.update p t nlist)
+
+    (let [(values params isVariadic) (.parseParamList p types/ParamVar pkg)
+        ^{:line 770} results (.parseResultList p pkg)]
+
+      (set! @t @(types/NewSignatureType nil nil nil params results isVariadic))
+      ^{:line 773} t)))
+
+
+
+^{:go/end 802} (go/method parseFunc "Func = Name FunctionType [InlineBody] .\n" ^{:tag (* types/Func)} [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg]
+  (when (== (.-tok p) \/)
+    ;; Skip an /*asm ID */ comment.
+    (.expect p \/)
+    (.expect p \*)
+    (when (== (.expect p scanner/Ident) "asm")
+      (.parseUnquotedString p))
+
+    (.expect p \*)
+    (.expect p \/))
+
+
+  (let [name (.parseName p)
+      ^{:line 790} f (types/NewFunc token/NoPos pkg name (.parseFunctionType p pkg nil))]
+    (.skipInlineBody p)
+
+    (when (or (== (aget name 0) \.) (== (aget name 0) \<) (strings/ContainsRune name \$))
+      ;; This is an unexported function,
+      ;; or a function defined in a different package,
+      ;; or a type$equal or type$hash function.
+      ;; We only want to record exported functions.
+      (return nil))
+
+
+    ^{:line 801} f))
+
+
+
+^{:go/end 831} (go/method parseInterfaceType "InterfaceType = \"interface\" \"{\" { (\"?\" Type | Func) \";\" } \"}\" .\n" ^types/Type [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg ^{:tag (slice any)} nlist]
+  (.expectKeyword p "interface")
+
+  (let [t (new types/Interface)]
+    (.update p t nlist)
+
+    (let [^{:tag (slice (* types/Func))} methods (zero (slice (* types/Func)))
+        ^{:line 812 :tag (slice types/Type)} embeddeds (zero (slice types/Type))]
+
+      (.expect p \{)
+      (while (and (!= (.-tok p) \}) (!= (.-tok p) scanner/EOF))
+        (if (== (.-tok p) \?) (do
+            (.next p)
+            (set! embeddeds (append embeddeds (.parseType p pkg))))
+
+          (let [method (.parseFunc p pkg)]
+            (when (!= method nil)
+              (set! methods (append methods method)))))
+
+
+        (.expect p \;))
+
+      (.expect p \})
+
+      (set! @t @(types/NewInterfaceType methods embeddeds))
+      ^{:line 830} t)))
+
+
+
+^{:go/end 849} (go/method parsePointerType "PointerType = \"*\" (\"any\" | Type) .\n" ^types/Type [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg ^{:tag (slice any)} nlist]
+  (.expect p \*)
+  (when (== (.-tok p) scanner/Ident)
+    (.expectKeyword p "any")
+    (let [t (aget types/Typ types/UnsafePointer)]
+      (.update p t nlist)
+      (return t)))
+
+
+  (let [t (new types/Pointer)]
+    (.update p t nlist)
+
+    (set! @t @(types/NewPointer (.parseType p pkg t)))
+
+    ^{:line 848} t))
+
+
+
+^{:go/breaks [6] :go/end 884} (go/method parseTypeSpec "TypeSpec = NamedType | MapType | ChanType | StructType | InterfaceType | PointerType | ArrayOrSliceType | FunctionType .\n" ^types/Type [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg ^{:tag (slice any)} nlist]
+  (switch (.-tok p)
+    (case [scanner/String]
+      (return (.parseNamedType p nlist)))
+
+    (case [scanner/Ident]
+      (switch (.-lit p)
+        (case ["map"]
+          (return (.parseMapType p pkg nlist)))
+
+        (case ["chan"]
+          (return (.parseChanType p pkg nlist)))
+
+        (case ["struct"]
+          (return (.parseStructType p pkg nlist)))
+
+        (case ["interface"]
+          (return (.parseInterfaceType p pkg nlist)))))
+
+
+    (case [\*]
+      (return (.parsePointerType p pkg nlist)))
+
+    (case [\[]
+      (return (.parseArrayOrSliceType p pkg nlist)))
+
+    (case [\(]
+      (return (.parseFunctionType p pkg nlist))))
+
+
+  (.errorf p "expected type name or literal, got %s" (scanner/TokenString (.-tok p)))
+  nil)
+
+
+(go/const
+
+
+
+  ^{:line 890} [^{:val 1 :doc "From gofrontend/go/export.h\nNote that these values are negative in the gofrontend and have been made positive\nin the gccgoimporter.\n"} gccgoBuiltinINT8 1]
+  ^{:line 891} [^{:val 2} gccgoBuiltinINT16 2]
+  ^{:line 892} [^{:val 3} gccgoBuiltinINT32 3]
+  ^{:line 893} [^{:val 4} gccgoBuiltinINT64 4]
+  ^{:line 894} [^{:val 5} gccgoBuiltinUINT8 5]
+  ^{:line 895} [^{:val 6} gccgoBuiltinUINT16 6]
+  ^{:line 896} [^{:val 7} gccgoBuiltinUINT32 7]
+  ^{:line 897} [^{:val 8} gccgoBuiltinUINT64 8]
+  ^{:line 898} [^{:val 9} gccgoBuiltinFLOAT32 9]
+  ^{:line 899} [^{:val 10} gccgoBuiltinFLOAT64 10]
+  ^{:line 900} [^{:val 11} gccgoBuiltinINT 11]
+  ^{:line 901} [^{:val 12} gccgoBuiltinUINT 12]
+  ^{:line 902} [^{:val 13} gccgoBuiltinUINTPTR 13]
+  ^{:line 903} [^{:val 15} gccgoBuiltinBOOL 15]
+  ^{:line 904} [^{:val 16} gccgoBuiltinSTRING 16]
+  ^{:line 905} [^{:val 17} gccgoBuiltinCOMPLEX64 17]
+  ^{:line 906} [^{:val 18} gccgoBuiltinCOMPLEX128 18]
+  ^{:line 907} [^{:val 19} gccgoBuiltinERROR 19]
+  ^{:line 908} [^{:val 20} gccgoBuiltinBYTE 20]
+  ^{:line 909} [^{:val 21} gccgoBuiltinRUNE 21]
+  ^{:line 910} [^{:val 22} gccgoBuiltinANY 22])
+
+
+^{:go/end 937} (go/func lookupBuiltinType ^types/Type [^int typ]
+  (aget (lit (array ... types/Type)
+      ^{:line 915} [gccgoBuiltinINT8 (aget types/Typ types/Int8)]
+      ^{:line 916} [gccgoBuiltinINT16 (aget types/Typ types/Int16)]
+      ^{:line 917} [gccgoBuiltinINT32 (aget types/Typ types/Int32)]
+      ^{:line 918} [gccgoBuiltinINT64 (aget types/Typ types/Int64)]
+      ^{:line 919} [gccgoBuiltinUINT8 (aget types/Typ types/Uint8)]
+      ^{:line 920} [gccgoBuiltinUINT16 (aget types/Typ types/Uint16)]
+      ^{:line 921} [gccgoBuiltinUINT32 (aget types/Typ types/Uint32)]
+      ^{:line 922} [gccgoBuiltinUINT64 (aget types/Typ types/Uint64)]
+      ^{:line 923} [gccgoBuiltinFLOAT32 (aget types/Typ types/Float32)]
+      ^{:line 924} [gccgoBuiltinFLOAT64 (aget types/Typ types/Float64)]
+      ^{:line 925} [gccgoBuiltinINT (aget types/Typ types/Int)]
+      ^{:line 926} [gccgoBuiltinUINT (aget types/Typ types/Uint)]
+      ^{:line 927} [gccgoBuiltinUINTPTR (aget types/Typ types/Uintptr)]
+      ^{:line 928} [gccgoBuiltinBOOL (aget types/Typ types/Bool)]
+      ^{:line 929} [gccgoBuiltinSTRING (aget types/Typ types/String)]
+      ^{:line 930} [gccgoBuiltinCOMPLEX64 (aget types/Typ types/Complex64)]
+      ^{:line 931} [gccgoBuiltinCOMPLEX128 (aget types/Typ types/Complex128)]
+      ^{:line 932} [gccgoBuiltinERROR (.Type (.Lookup types/Universe "error"))]
+      ^{:line 933} [gccgoBuiltinBYTE (.Type (.Lookup types/Universe "byte"))]
+      ^{:line 934} [gccgoBuiltinRUNE (.Type (.Lookup types/Universe "rune"))]
+      ^{:line 935} [gccgoBuiltinANY (.Type (.Lookup types/Universe "any"))])
+    ^{:line 936} typ))
+
+
+
+
+
+^{:go/end 946} (go/method parseType "Type = \"<\" \"type\" ( \"-\" int | int [ TypeSpec ] ) \">\" .\n\nparseType updates the type map to t for all type numbers n.\n" ^types/Type [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg & ^{:tag (slice any)} n]
+  (.expect p \<)
+  (let [(values t _) (.parseTypeAfterAngle p pkg (spread n))]
+    ^{:line 945} t))
+
+
+
+^{:go/end 987} (go/method parseTypeAfterAngle "(*parser).Type after reading the \"<\".\n" [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg & ^{:tag (slice any)} n] :results [^types/Type t ^int n1]
+  (.expectKeyword p "type")
+
+  (set! n1 0)
+  (switch (.-tok p)
+    (case [scanner/Int]
+      (set! n1 (.parseInt p))
+      (if (== (.-tok p) \>) (do
+          (when (and (> (len (.-typeData p)) 0) (== (aget (.-typeList p) n1) nil))
+            (.parseSavedType p pkg n1 n))
+
+          (set! t (aget (.-typeList p) n1))
+          (when (and (== (len (.-typeData p)) 0) (== t reserved))
+            (.errorf p "invalid type cycle, type %d not yet defined (nlist=%v)" n1 n))
+
+          (.update p t n))
+        (do
+          (.reserve p n1)
+          (set! t (.parseTypeSpec p pkg (append n n1))))))
+
+
+    (case [\-]
+      (.next p)
+      (let [n1 (.parseInt p)]
+        (set! t (lookupBuiltinType n1))
+        (.update p t n)))
+
+    (default
+      (.errorf p "expected type number, got %s (%q)" (scanner/TokenString (.-tok p)) (.-lit p))
+      (return nil 0)))
+
+
+  (when (or (== t nil) (== t reserved))
+    (.errorf p "internal error: bad return from parseType(%v)" n))
+
+
+  (.expect p \>)
+  (return))
+
+
+
+
+
+^{:go/end 996} (go/method parseTypeExtended "parseTypeExtended is identical to parseType, but if the type in\nquestion is a saved type, returns the index as well as the type\npointer (index returned is zero if we parsed a builtin).\n" [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg & ^{:tag (slice any)} n] :results [^types/Type t ^int n1]
+  (.expect p \<)
+  (set! (values t n1) (.parseTypeAfterAngle p pkg (spread n)))
+  (return))
+
+
+
+
+^{:go/end 1029} (go/method skipInlineBody "InlineBody = \"<inl:NN>\" .{NN}\nReports whether a body was skipped.\n" [^{:tag (* parser)} p]
+  ;; We may or may not have seen the '<' already, depending on
+  ;; whether the function had a result type or not.
+  (cond (== (.-tok p) \<) (do
+      (.next p)
+      (.expectKeyword p "inl"))
+    (or (!= (.-tok p) scanner/Ident) (!= (.-lit p) "inl"))
+    (return) :else
+
+    (.next p))
+
+
+  (.expect p \:)
+  (let [want (.parseInt p)]
+    (.expect p \>)
+
+    (defer (^{:go/end 1018} (fn [^uint64 w]
+          (set! (.-Whitespace (.-scanner p)) w))
+        (.-Whitespace (.-scanner p))))
+    (set! (.-Whitespace (.-scanner p)) 0)
+
+    (let [got 0]
+      (while (< got want)
+        (let [r (.Next (.-scanner p))]
+          (when (== r scanner/EOF)
+            (.error p "unexpected EOF"))
+
+          (set! got + (utf8/RuneLen r)))))))
+
+
+
+
+^{:go/end 1076} (go/method parseTypes "Types = \"types\" maxp1 exportedp1 (offset length)* .\n" [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg]
+  (let [maxp1 (.parseInt p)
+      ^{:line 1034} exportedp1 (.parseInt p)]
+    (set! (.-typeList p) (make (slice types/Type) maxp1 maxp1))
+
+    (let-type [typeOffset (struct
+          ^{:line 1038 :tag int} offset
+          ^{:line 1039 :tag int} length)]
+
+      (let [^{:tag (slice typeOffset)} typeOffsets (zero (slice typeOffset))
+
+          ^{:line 1043} total 0]
+        (for [i 1] (< i maxp1) (inc! i)
+          (let [len (.parseInt p)]
+            (set! typeOffsets (append typeOffsets (lit typeOffset total len)))
+            (set! total + len)))
+
+
+        (defer (^{:go/end 1052} (fn [^uint64 w]
+              (set! (.-Whitespace (.-scanner p)) w))
+            (.-Whitespace (.-scanner p))))
+        (set! (.-Whitespace (.-scanner p)) 0)
+
+        ;; We should now have p.tok pointing to the final newline.
+        ;; The next runes from the scanner should be the type data.
+
+        (let [^strings/Builder sb (zero strings/Builder)]
+          (while (< (.Len sb) total)
+            (let [r (.Next (.-scanner p))]
+              (when (== r scanner/EOF)
+                (.error p "unexpected EOF"))
+
+              (.WriteRune sb r)))
+
+          (let [allTypeData (.String sb)]
+
+            (set! (.-typeData p) (lit (slice string) "")) ; type 0, unused
+            (range [_ to typeOffsets]
+              (set! (.-typeData p) (append (.-typeData p) (subslice allTypeData (.-offset to) (+ (.-offset to) (.-length to))))))
+
+
+            (for [i 1] (< i exportedp1) (inc! i)
+              (.parseSavedType p pkg i nil))))))))
+
+
+
+
+^{:go/end 1103} (go/method parseSavedType "parseSavedType parses one saved type definition.\n" [^{:tag (* parser)} p ^{:tag (* types/Package)} pkg ^int i ^{:tag (slice any)} nlist]
+  (defer (^{:go/end 1084} (fn [^{:tag (* scanner/Scanner)} s ^rune tok ^string lit]
+        (set! (.-scanner p) s)
+        (set! (.-tok p) tok)
+        (set! (.-lit p) lit))
+      (.-scanner p) (.-tok p) (.-lit p)))
+
+  (set! (.-scanner p) (new scanner/Scanner))
+  (.initScanner p ^{:go/via [Position]} (.-Filename (.-scanner p)) (strings/NewReader (aget (.-typeData p) i)))
+  (.expectKeyword p "type")
+  (let [id (.parseInt p)]
+    (when (!= id i)
+      (.errorf p "type ID mismatch: got %d, want %d" id i))
+
+    (when (== (aget (.-typeList p) i) reserved)
+      (.errorf p "internal error: %d already reserved in parseSavedType" i))
+
+    (when (== (aget (.-typeList p) i) nil)
+      (.reserve p i)
+      (.parseTypeSpec p pkg (append nlist i)))
+
+    (when (or (== (aget (.-typeList p) i) nil) (== (aget (.-typeList p) i) reserved))
+      (.errorf p "internal error: parseSavedType(%d,%v) reserved/nil" i nlist))))
+
+
+
+
+^{:go/end 1114} (go/method parsePackageInit "PackageInit = unquotedString unquotedString int .\n" ^PackageInit [^{:tag (* parser)} p]
+  (let [name (.parseUnquotedString p)
+      ^{:line 1108} initfunc (.parseUnquotedString p)
+      ^{:line 1109} priority -1]
+    (when (== (.-version p) "v1")
+      (set! priority (.parseInt p)))
+
+    (lit PackageInit :Name name :InitFunc initfunc :Priority priority)))
+
+
+
+^{:go/end 1121} (go/method maybeCreatePackage "Create the package if we have parsed both the package path and package name.\n" [^{:tag (* parser)} p]
+  (when (and (!= (.-pkgname p) "") (!= (.-pkgpath p) ""))
+    (set! (.-pkg p) (.getPkg p (.-pkgpath p) (.-pkgname p)))))
+
+
+
+
+
+
+
+
+^{:go/end 1175} (go/method parseInitDataDirective "InitDataDirective = ( \"v1\" | \"v2\" | \"v3\" ) \";\" |\n\n\t\"priority\" int \";\" |\n\t\"init\" { PackageInit } \";\" |\n\t\"checksum\" unquotedString \";\" .\n" [^{:tag (* parser)} p]
+  (when (!= (.-tok p) scanner/Ident)
+    ;; unexpected token kind; panic
+    (.expect p scanner/Ident))
+
+
+  (switch (.-lit p)
+    (case ["v1" "v2" "v3"]
+      (set! (.-version p) (.-lit p))
+      (.next p)
+      (.expect p \;)
+      (.expect p \newline))
+
+    (case ["priority"]
+      (.next p)
+      (set! (.-Priority (.-initdata p)) (.parseInt p))
+      (.expectEOL p))
+
+    (case ["init"]
+      (.next p)
+      (while (and (!= (.-tok p) \newline) (!= (.-tok p) \;) (!= (.-tok p) scanner/EOF))
+        (set! (.-Inits (.-initdata p)) (append (.-Inits (.-initdata p)) (.parsePackageInit p))))
+
+      (.expectEOL p))
+
+    (case ["init_graph"]
+      (.next p)
+      ;; The graph data is thrown away for now.
+      (while (and (!= (.-tok p) \newline) (!= (.-tok p) \;) (!= (.-tok p) scanner/EOF))
+        (.parseInt64 p)
+        (.parseInt64 p))
+
+      (.expectEOL p))
+
+    (case ["checksum"]
+      ;; Don't let the scanner try to parse the checksum as a number.
+      (defer (^{:go/end 1166} (fn [^uint mode]
+            (set! (.-Mode (.-scanner p)) mode))
+          (.-Mode (.-scanner p))))
+      (set! (.-Mode (.-scanner p)) bit-and-not (bit-or scanner/ScanInts scanner/ScanFloats))
+      (.next p)
+      (.parseUnquotedString p)
+      (.expectEOL p))
+
+    (default
+      (.errorf p "unexpected identifier: %q" (.-lit p)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1269} (go/method parseDirective "Directive = InitDataDirective |\n\n\t\"package\" unquotedString [ unquotedString ] [ unquotedString ] \";\" |\n\t\"pkgpath\" unquotedString \";\" |\n\t\"prefix\" unquotedString \";\" |\n\t\"import\" unquotedString unquotedString string \";\" |\n\t\"indirectimport\" unquotedString unquotedstring \";\" |\n\t\"func\" Func \";\" |\n\t\"type\" Type \";\" |\n\t\"var\" Var \";\" |\n\t\"const\" Const \";\" .\n" [^{:tag (* parser)} p]
+  (when (!= (.-tok p) scanner/Ident)
+    ;; unexpected token kind; panic
+    (.expect p scanner/Ident))
+
+
+  (switch (.-lit p)
+    (case ["v1" "v2" "v3" "priority" "init" "init_graph" "checksum"]
+      (.parseInitDataDirective p))
+
+    (case ["package"]
+      (.next p)
+      (set! (.-pkgname p) (.parseUnquotedString p))
+      (.maybeCreatePackage p)
+      (when (and (!= (.-version p) "v1") (!= (.-tok p) \newline) (!= (.-tok p) \;))
+        (.parseUnquotedString p)
+        (.parseUnquotedString p))
+
+      (.expectEOL p))
+
+    (case ["pkgpath"]
+      (.next p)
+      (set! (.-pkgpath p) (.parseUnquotedString p))
+      (.maybeCreatePackage p)
+      (.expectEOL p))
+
+    (case ["prefix"]
+      (.next p)
+      (set! (.-pkgpath p) (.parseUnquotedString p))
+      (.expectEOL p))
+
+    (case ["import"]
+      (.next p)
+      (let [pkgname (.parseUnquotedString p)
+          ^{:line 1222} pkgpath (.parseUnquotedString p)]
+        (.getPkg p pkgpath pkgname)
+        (.parseString p)
+        (.expectEOL p)))
+
+    (case ["indirectimport"]
+      (.next p)
+      (let [pkgname (.parseUnquotedString p)
+          ^{:line 1230} pkgpath (.parseUnquotedString p)]
+        (.getPkg p pkgpath pkgname)
+        (.expectEOL p)))
+
+    (case ["types"]
+      (.next p)
+      (.parseTypes p (.-pkg p))
+      (.expectEOL p))
+
+    (case ["func"]
+      (.next p)
+      (let [fun (.parseFunc p (.-pkg p))]
+        (when (!= fun nil)
+          (.Insert (.Scope (.-pkg p)) fun))
+
+        (.expectEOL p)))
+
+    (case ["type"]
+      (.next p)
+      (.parseType p (.-pkg p))
+      (.expectEOL p))
+
+    (case ["var"]
+      (.next p)
+      (let [v (.parseVar p (.-pkg p))]
+        (when (!= v nil)
+          (.Insert (.Scope (.-pkg p)) v))
+
+        (.expectEOL p)))
+
+    (case ["const"]
+      (.next p)
+      (let [c (.parseConst p (.-pkg p))]
+        (.Insert (.Scope (.-pkg p)) c)
+        (.expectEOL p)))
+
+    (default
+      (.errorf p "unexpected identifier: %q" (.-lit p)))))
+
+
+
+
+^{:go/end 1290} (go/method parsePackage "Package = { Directive } .\n" ^{:tag (* types/Package)} [^{:tag (* parser)} p]
+  (while (!= (.-tok p) scanner/EOF)
+    (.parseDirective p))
+
+  (range [_ f (.-fixups p)]
+    (when (== (.Underlying (.-target f)) nil)
+      (.errorf p "internal error: fixup can't be applied, loop required"))
+
+    (.SetUnderlying (.-toUpdate f) (.Underlying (.-target f))))
+
+  (set! (.-fixups p) nil)
+  (range [_ typ (.-typeList p)]
+    (when [(values it ok) (assert (* types/Interface) typ)] ok
+      (.Complete it)))
+
+
+  (.MarkComplete (.-pkg p))
+  (.-pkg p))

@@ -1,0 +1,193 @@
+;; NXP On-Chip OTP Controller (OCOTP_CTRL) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package ocotp implements a driver for the NXP On-Chip OTP Controller
+;; (OCOTP_CTRL), which provides an interface to on-chip fuses for read/write
+;; operation, adopting the following reference specifications:
+;;   - IMX6ULLRM - i.MX 6ULL Applications Processor Reference Manual - Rev 1 2017/11
+;;   - IMX8MPRM  - i.MX 8MP  Applications Processor Reference Manual - Rev 1 2021/06
+;;
+;; WARNING: Fusing SoC OTPs is an **irreversible** action that permanently
+;; fuses values on the device. This means that any errors in the process, or
+;; lost fused data such as cryptographic key material, might result in a
+;; **bricked** device.
+;;
+;; The use of this package is therefore **at your own risk**.
+;;
+;; This package is only meant to be used with `GOOS=tamago` as supported by the
+;; TamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.ocotp) (go/file "ocotp.go" :doc "Package ocotp implements a driver for the NXP On-Chip OTP Controller\n(OCOTP_CTRL), which provides an interface to on-chip fuses for read/write\noperation, adopting the following reference specifications:\n  - IMX6ULLRM - i.MX 6ULL Applications Processor Reference Manual - Rev 1 2017/11\n  - IMX8MPRM  - i.MX 8MP  Applications Processor Reference Manual - Rev 1 2021/06\n\nWARNING: Fusing SoC OTPs is an **irreversible** action that permanently\nfuses values on the device. This means that any errors in the process, or\nlost fused data such as cryptographic key material, might result in a\n**bricked** device.\n\nThe use of this package is therefore **at your own risk**.\n\nThis package is only meant to be used with `GOOS=tamago` as supported by the\nTamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 27} [errors "errors"]
+    ^{:line 28} [sync "sync"]
+    ^{:line 29} [time "time"]
+
+    ^{:line 31} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+
+(go/const "OCOTP registers\n(p2388, 37.5 OCOTP Memory Map/Register Definition, IMX6ULLRM).\n"
+  ^{:line 37} [^{:val 0} OCOTP_CTRL 0x0000]
+  ^{:line 38} [^{:val 16} CTRL_WRUNLOCK 16]
+  ^{:line 39} [^{:val 10} CTRL_RELOAD_SHADOWS 10]
+  ^{:line 40} [^{:val 9} CTRL_ERROR 9]
+  ^{:line 41} [^{:val 8} CTRL_BUSY 8]
+  ^{:line 42} [^{:val 0} CTRL_ADDR 0]
+
+  ^{:line 44} [^{:val 8} OCOTP_CTRL_CLR 0x0008]
+  ^{:line 45} [^{:val 32} OCOTP_DATA 0x0020])
+
+
+
+(go/const "Configuration constants\n"
+
+  ^{:line 51} [^{:val 4 :doc "WordSize represents the number of bytes per OTP word.\n"} WordSize 4]
+
+  ^{:line 53} [^{:val 8 :doc "BankSize represents the number of words per OTP bank.\n"} BankSize 8]
+
+  ^{:line 55} [^{:val 10000000 :doc "Timeout is the default timeout for OCOTP operations.\n"} Timeout (* 10 time/Millisecond)])
+
+
+(go/type OCOTP (struct
+    ^{:line 59} sync/Mutex
+
+
+    ^{:line 62 :tag uint32 :doc "Base register\n"} Base
+
+    ^{:line 64 :tag uint32 :doc "Bank base register (bank 0, word 0)\n"} BankBase
+
+    ^{:line 66 :tag int :doc "Banks size\n"} Banks
+
+    ^{:line 68 :tag uint32 :doc "Clock gate register\n"} CCGR
+
+    ^{:line 70 :tag int :doc "Clock gate\n"} CG
+
+    ^{:line 72 :tag time/Duration :doc "Timeout for OCOTP controller operations\n"} Timeout
+
+
+    ^{:line 75 :tag uint32 :doc "control registers\n"} ctrl
+    ^{:line 76 :tag uint32} ctrl_clr
+    ^{:line 77 :tag uint32} data))
+
+
+
+^{:go/end 99} (go/method Init "Init initializes the OCOTP controller instance.\n" [^{:tag (* OCOTP)} hw]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (or (== (.-Base hw) 0) (== (.-BankBase hw) 0) (== (.-CCGR hw) 0))
+    (panic "invalid OCOTP instance"))
+
+
+  (when (== (.-Timeout hw) 0)
+    (set! (.-Timeout hw) Timeout))
+
+
+  (set! (.-ctrl hw) (+ (.-Base hw) OCOTP_CTRL))
+  (set! (.-ctrl_clr hw) (+ (.-Base hw) OCOTP_CTRL_CLR))
+  (set! (.-data hw) (+ (.-Base hw) OCOTP_DATA))
+
+  ;; enable clock
+  (reg/SetN (.-CCGR hw) (.-CG hw) 2r11 2r11))
+
+
+
+^{:go/end 123} (go/method Read "Read returns the value in the argument bank and word location.\n" [^{:tag (* OCOTP)} hw ^int bank ^int word] :results [^uint32 value ^error err]
+  (when (or (> bank (.-Banks hw)) (> word BankSize))
+    (return 0 (errors/New "invalid argument")))
+
+
+  ;; Within the shadow register address map the addresses are spaced 0x10
+  ;; apart.
+  (let [offset (* 0x10 (conv uint32 (+ (* BankSize bank) word)))]
+
+    ;; Account for the gap in shadow registers address map between bank 5
+    ;; and bank 6.
+    (when (> bank 5)
+      (set! offset + 0x100))
+
+
+    ^{:go/via [Mutex]} (.Lock hw)
+    (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+    (set! value (reg/Read (+ (.-BankBase hw) offset)))
+
+    (return)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 167} (go/method Blow "Blow fuses a value in the argument bank and word location.\n(p2384, 37.3.1.3 Fuse and Shadow Register Writes, IMX6ULLRM).\n\nWARNING: Fusing SoC OTPs is an **irreversible** action that permanently\nfuses values on the device. This means that any errors in the process, or\nlost fused data such as cryptographic key material, might result in a\n**bricked** device.\n\nThe use of this function is therefore **at your own risk**.\n" [^{:tag (* OCOTP)} hw ^int bank ^int word ^uint32 value] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (not (reg/WaitFor (.-Timeout hw) (.-ctrl hw) CTRL_BUSY 1 0))
+    (return (errors/New "OCOTP controller busy")))
+
+
+  ;; We do not configure the OCOTP_TIMING register. Timings depend on
+  ;; IPG_CLK_ROOT frequency. Default values work for default frequency of
+  ;; 66 MHz.
+
+  ;; p2393, OCOTP_CTRLn field descriptions, IMX6ULLRM
+
+  ;; clear error bit
+  (reg/Set (.-ctrl_clr hw) CTRL_ERROR)
+  ;; set OTP write register
+  (reg/SetN (.-ctrl hw) CTRL_ADDR 0x7f (conv uint32 (+ (* BankSize bank) word)))
+  ;; enable OTP write access
+  (reg/SetN (.-ctrl hw) CTRL_WRUNLOCK 0xffff 0x3e77)
+
+  ;; blow the fuse
+  (reg/Write (.-data hw) value)
+
+  (when [(set! err (.checkOp hw))] (!= err nil)
+    (return))
+
+
+  ;; 2385, 37.3.1.4 Write Postamble, IMX6ULLRM
+  (time/Sleep (* 2 time/Microsecond))
+
+  ;; ensure update of shadow registers
+  (.shadowReload hw))
+
+
+^{:go/end 179} (go/method checkOp [^{:tag (* OCOTP)} hw] :results [^error err]
+  (when (not (reg/WaitFor (.-Timeout hw) (.-ctrl hw) CTRL_BUSY 1 0))
+    (return (errors/New "operation timeout")))
+
+
+  (when (!= (reg/GetN (.-ctrl hw) CTRL_ERROR 1) 0)
+    (return (errors/New "operation error")))
+
+
+  (return))
+
+
+
+
+^{:go/end 194} (go/method shadowReload "shadowReload reloads memory mapped shadow registers from OTP fuse banks\n(p2383, 37.3.1.1 Shadow Register Reload, IMX6ULLRM).\n" [^{:tag (* OCOTP)} hw] :results [^error err]
+  (when (not (reg/WaitFor (.-Timeout hw) (.-ctrl hw) CTRL_BUSY 1 0))
+    (return (errors/New "OCOTP controller busy")))
+
+
+  ;; clear error bit
+  (reg/Set (.-ctrl_clr hw) CTRL_ERROR)
+  ;; force re-loading of shadow registers
+  (reg/Set (.-ctrl hw) CTRL_RELOAD_SHADOWS)
+
+  (.checkOp hw))

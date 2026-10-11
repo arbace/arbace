@@ -1,0 +1,2082 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package xml implements a simple XML 1.0 parser that
+;; understands XML name spaces.
+(in-ns 'go.encoding.xml) (go/file "xml.go" :doc "Package xml implements a simple XML 1.0 parser that\nunderstands XML name spaces.\n" :imports [
+
+    ;; References:
+    ;;    Annotated XML spec: https://www.xml.com/axml/testaxml.htm
+    ;;    XML name spaces: https://www.w3.org/TR/REC-xml-names/
+
+
+    ^{:line 14} [bufio "bufio"]
+    ^{:line 15} [bytes "bytes"]
+    ^{:line 16} [errors "errors"]
+    ^{:line 17} [fmt "fmt"]
+    ^{:line 18} [io "io"]
+    ^{:line 19} [strconv "strconv"]
+    ^{:line 20} [strings "strings"]
+    ^{:line 21} [unicode "unicode"]
+    ^{:line 22} [utf8 "unicode/utf8"]])
+
+
+
+(go/type SyntaxError "A SyntaxError represents a syntax error in the XML input stream.\n" (struct
+    ^{:line 27 :tag string} Msg
+    ^{:line 28 :tag int} Line))
+
+
+^{:go/end 33} (go/method Error ^string [^{:tag (* SyntaxError)} e]
+  (+ "XML syntax error on line " (strconv/Itoa (.-Line e)) ": " (.-Msg e)))
+
+
+
+
+
+
+
+(go/type Name "A Name represents an XML name (Local) annotated\nwith a name space identifier (Space).\nIn tokens returned by [Decoder.Token], the Space identifier\nis given as a canonical URL, not the short prefix used\nin the document being parsed.\n" (struct
+    ^{:line 41 :tag string} Space ^string Local))
+
+
+
+(go/type Attr "An Attr represents an attribute in an XML element (Name=Value).\n" (struct
+    ^{:line 46 :tag Name} Name
+    ^{:line 47 :tag string} Value))
+
+
+
+
+(go/type Token "A Token is an interface holding one of the token types:\n[StartElement], [EndElement], [CharData], [Comment], [ProcInst], or [Directive].\n" any)
+
+
+(go/type StartElement "A StartElement represents an XML start element.\n" (struct
+    ^{:line 56 :tag Name} Name
+    ^{:line 57 :tag (slice Attr)} Attr))
+
+
+
+^{:go/end 66} (go/method Copy "Copy creates a new copy of StartElement.\n" ^StartElement [^StartElement e]
+  (let [attrs (make (slice Attr) (len (.-Attr e)))]
+    (copy attrs (.-Attr e))
+    (set! (.-Attr e) attrs)
+    ^{:line 65} e))
+
+
+
+^{:go/end 71} (go/method End "End returns the corresponding XML end element.\n" ^EndElement [^StartElement e]
+  (lit EndElement (.-Name e)))
+
+
+
+(go/type EndElement "An EndElement represents an XML end element.\n" (struct
+    ^{:line 75 :tag Name} Name))
+
+
+
+
+
+(go/type CharData "A CharData represents XML character data (raw text),\nin which XML escape sequences have been replaced by\nthe characters they represent.\n" (slice byte))
+
+
+^{:go/end 84} (go/method Copy "Copy creates a new copy of CharData.\n" ^CharData [^CharData c] (conv CharData (bytes/Clone c)))
+
+
+
+(go/type Comment "A Comment represents an XML comment of the form <!--comment-->.\nThe bytes do not include the <!-- and --> comment markers.\n" (slice byte))
+
+
+^{:go/end 91} (go/method Copy "Copy creates a new copy of Comment.\n" ^Comment [^Comment c] (conv Comment (bytes/Clone c)))
+
+
+(go/type ProcInst "A ProcInst represents an XML processing instruction of the form <?target inst?>\n" (struct
+    ^{:line 95 :tag string} Target
+    ^{:line 96 :tag (slice byte)} Inst))
+
+
+
+^{:go/end 103} (go/method Copy "Copy creates a new copy of ProcInst.\n" ^ProcInst [^ProcInst p]
+  (set! (.-Inst p) (bytes/Clone (.-Inst p)))
+  ^{:line 102} p)
+
+
+
+
+(go/type Directive "A Directive represents an XML directive of the form <!text>.\nThe bytes do not include the <! and > markers.\n" (slice byte))
+
+
+^{:go/end 110} (go/method Copy "Copy creates a new copy of Directive.\n" ^Directive [^Directive d] (conv Directive (bytes/Clone d)))
+
+
+^{:go/end 127} (go/func CopyToken "CopyToken returns a copy of a Token.\n" ^Token [^Token t]
+  (type-switch [v t]
+    (case [CharData]
+      (return (.Copy v)))
+    (case [Comment]
+      (return (.Copy v)))
+    (case [Directive]
+      (return (.Copy v)))
+    (case [ProcInst]
+      (return (.Copy v)))
+    (case [StartElement]
+      (return (.Copy v))))
+
+  ^{:line 126} t)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type TokenReader "A TokenReader is anything that can decode a stream of XML tokens, including a\n[Decoder].\n\nWhen Token encounters an error or end-of-file condition after successfully\nreading a token, it returns the token. It may return the (non-nil) error from\nthe same call or return the error (and a nil token) from a subsequent call.\nAn instance of this general case is that a TokenReader returning a non-nil\ntoken at the end of the token stream may return either io.EOF or a nil error.\nThe next Read should return nil, [io.EOF].\n\nImplementations of Token are discouraged from returning a nil token with a\nnil error. Callers should treat a return of nil, nil as indicating that\nnothing happened; in particular it does not indicate EOF.\n" (interface
+    (Token [] :results [Token error])))
+
+
+
+
+(go/type Decoder "A Decoder represents an XML parser reading a particular input stream.\nThe parser assumes that its input is encoded in UTF-8.\n" (struct
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 170 :tag bool :doc "Strict defaults to true, enforcing the requirements\nof the XML specification.\nIf set to false, the parser allows input containing common\nmistakes:\n\t* If an element is missing an end tag, the parser invents\n\t  end tags as necessary to keep the return values from Token\n\t  properly balanced.\n\t* In attribute values and character data, unknown or malformed\n\t  character entities (sequences beginning with &) are left alone.\n\nSetting:\n\n\td.Strict = false\n\td.AutoClose = xml.HTMLAutoClose\n\td.Entity = xml.HTMLEntity\n\ncreates a parser that can handle typical HTML.\n\nStrict mode does not enforce the requirements of the XML name spaces TR.\nIn particular it does not reject name space tags using undefined prefixes.\nSuch tags are recorded with the unknown prefix as the name space URL.\n"} Strict
+
+
+
+
+    ^{:line 175 :tag (slice string) :doc "When Strict == false, AutoClose indicates a set of elements to\nconsider closed immediately after they are opened, regardless\nof whether an end element is present.\n"} AutoClose
+
+
+
+
+
+
+
+
+
+
+    ^{:line 186 :tag (map string string) :doc "Entity can be used to map non-standard entity names to string replacements.\nThe parser behaves as if these standard mappings are present in the map,\nregardless of the actual map content:\n\n\t\"lt\": \"<\",\n\t\"gt\": \">\",\n\t\"amp\": \"&\",\n\t\"apos\": \"'\",\n\t\"quot\": `\"`,\n"} Entity
+
+
+
+
+
+
+    ^{:line 193 :tag (func [^string charset ^io/Reader input] [io/Reader error]) :doc "CharsetReader, if non-nil, defines a function to generate\ncharset-conversion readers, converting from the provided\nnon-UTF-8 charset into UTF-8. If CharsetReader is nil or\nreturns an error, parsing stops with an error. One of the\nCharsetReader's result values must be non-nil.\n"} CharsetReader
+
+
+
+
+    ^{:line 198 :tag string :doc "DefaultSpace sets the default name space used for unadorned tags,\nas if the entire XML stream were wrapped in an element containing\nthe attribute xmlns=\"DefaultSpace\".\n"} DefaultSpace
+
+    ^{:line 200 :tag io/ByteReader} r
+    ^{:line 201 :tag TokenReader} t
+    ^{:line 202 :tag bytes/Buffer} buf
+    ^{:line 203 :tag (* bytes/Buffer)} saved
+    ^{:line 204 :tag (* stack)} stk
+    ^{:line 205 :tag int} stkDepth
+    ^{:line 206 :tag (* stack)} free
+    ^{:line 207 :tag bool} needClose
+    ^{:line 208 :tag Name} toClose
+    ^{:line 209 :tag Token} nextToken
+    ^{:line 210 :tag int} nextByte
+    ^{:line 211 :tag (map string string)} ns
+    ^{:line 212 :tag error} err
+    ^{:line 213 :tag int} line
+    ^{:line 214 :tag int64} linestart
+    ^{:line 215 :tag int64} offset
+    ^{:line 216 :tag bool} inUnmarshalXML))
+
+
+
+
+
+^{:go/end 231} (go/func NewDecoder "NewDecoder creates a new XML parser reading from r.\nIf r does not implement [io.ByteReader], NewDecoder will\ndo its own buffering.\n" ^{:tag (* Decoder)} [^io/Reader r]
+  (let [d (addr ^{:go/breaks [2 4 6 8]} (lit Decoder
+          :ns (make (map string string))
+          :nextByte -1
+          :line 1
+          :Strict true))]
+
+    (.switchToReader d r)
+    ^{:line 230} d))
+
+
+
+^{:go/end 247} (go/func NewTokenDecoder "NewTokenDecoder creates a new XML parser using an underlying token stream.\n" ^{:tag (* Decoder)} [^TokenReader t]
+  ;; Is it already a Decoder?
+  (when [(values d ok) (assert (* Decoder) t)] ok
+    (return d))
+
+  (let [d (addr ^{:go/breaks [2 4 6 8 10]} (lit Decoder
+          :ns (make (map string string))
+          :t t
+          :nextByte -1
+          :line 1
+          :Strict true))]
+
+    ^{:line 246} d))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 335} (go/method Token "Token returns the next XML token in the input stream.\nAt the end of the input stream, Token returns nil, [io.EOF].\n\nSlices of bytes in the returned token data refer to the\nparser's internal buffer and remain valid only until the next\ncall to Token. To acquire a copy of the bytes, call [CopyToken]\nor the token's Copy method.\n\nToken expands self-closing elements such as <br>\ninto separate start and end elements returned by successive calls.\n\nToken guarantees that the [StartElement] and [EndElement]\ntokens it returns are properly nested and matched:\nif Token encounters an unexpected end element\nor EOF before all expected end elements,\nit will return an error.\n\nIf [Decoder.CharsetReader] is called and returns an error,\nthe error is wrapped and returned.\n\nToken implements XML name spaces as described by\nhttps://www.w3.org/TR/REC-xml-names/. Each of the\n[Name] structures contained in the Token has the Space\nset to the URL identifying its name space when known.\nIf Token encounters an unrecognized name space prefix,\nit uses the prefix as the Space rather than report an error.\n" [^{:tag (* Decoder)} d] :results [Token error]
+  (let [^Token t (zero Token)
+      ^{:line 277 :tag error} err (zero error)]
+    (when (and (!= (.-stk d) nil) (== (.-kind (.-stk d)) stkEOF))
+      (return nil io/EOF))
+
+    (if (!= (.-nextToken d) nil) (do
+        (set! t (.-nextToken d))
+        (set! (.-nextToken d) nil))
+      (do
+        (when [(set! (values t err) (.rawToken d))] (and (== t nil) (!= err nil))
+          (when (and (== err io/EOF) (!= (.-stk d) nil) (!= (.-kind (.-stk d)) stkEOF))
+            (set! err (.syntaxError d "unexpected EOF")))
+
+          (return nil err))
+
+        ;; We still have a token to process, so clear any
+        ;; errors (e.g. EOF) and proceed.
+        (set! err nil)))
+
+    (when (not (.-Strict d))
+      (when [(values t1 ok) (.autoClose d t)] ok
+        (set! (.-nextToken d) t)
+        (set! t t1)))
+
+
+    (type-switch [t1 t]
+      (case [StartElement]
+        ;; In XML name spaces, the translations listed in the
+        ;; attributes apply to the element name and
+        ;; to the other attribute names, so process
+        ;; the translations first.
+        (range [_ a (.-Attr t1)]
+          (when (== (.-Space (.-Name a)) xmlnsPrefix)
+            (let [(values v ok) (aget (.-ns d) (.-Local (.-Name a)))]
+              (.pushNs d (.-Local (.-Name a)) v ok)
+              (aset (.-ns d) (.-Local (.-Name a)) (.-Value a))))
+
+          (when (and (== (.-Space (.-Name a)) "") (== (.-Local (.-Name a)) xmlnsPrefix))
+            ;; Default space for untagged names
+            (let [(values v ok) (aget (.-ns d) "")]
+              (.pushNs d "" v ok)
+              (aset (.-ns d) "" (.-Value a)))))
+
+
+
+        (.pushElement d (.-Name t1))
+        (.translate d (addr (.-Name t1)) true)
+        (range [i (.-Attr t1)]
+          (.translate d (addr (.-Name (aget (.-Attr t1) i))) false))
+
+        (set! t t1))
+
+      (case [EndElement]
+        (when (not (.popElement d (addr t1)))
+          (return nil (.-err d)))
+
+        (set! t t1)))
+
+    (return t err)))
+
+
+(go/const
+  ^{:line 338} [^{:val "http://www.w3.org/XML/1998/namespace"} xmlURL "http://www.w3.org/XML/1998/namespace"]
+  ^{:line 339} [^{:val "xmlns"} xmlnsPrefix "xmlns"]
+  ^{:line 340} [^{:val "xml"} xmlPrefix "xml"])
+
+
+
+
+
+^{:go/end 362} (go/method translate "Apply name space translation to name n.\nThe default name space (for Space==\"\")\napplies only to element names, not to attribute names.\n" [^{:tag (* Decoder)} d ^{:tag (* Name)} n ^bool isElementName]
+  (switch
+    (case [(== (.-Space n) xmlnsPrefix)]
+      (return))
+    (case [(and (== (.-Space n) "") (not isElementName))]
+      (return))
+    (case [(== (.-Space n) xmlPrefix)]
+      (set! (.-Space n) xmlURL))
+    (case [(and (== (.-Space n) "") (== (.-Local n) xmlnsPrefix))]
+      (return)))
+
+  (if [(values v ok) (aget (.-ns d) (.-Space n))] ok
+    (set! (.-Space n) v)
+    (when (== (.-Space n) "")
+      (set! (.-Space n) (.-DefaultSpace d)))))
+
+
+
+^{:go/end 374} (go/method switchToReader [^{:tag (* Decoder)} d ^io/Reader r]
+  ;; Get efficient byte at a time reader.
+  ;; Assume that if reader has its own
+  ;; ReadByte, it's efficient enough.
+  ;; Otherwise, use bufio.
+  (if [(values rb ok) (assert io/ByteReader r)] ok
+    (set! (.-r d) rb)
+
+    (set! (.-r d) (bufio/NewReader r))))
+
+
+
+
+
+
+
+(go/type stack "Parsing state - stack holds old name space translations\nand the current set of open elements. The translations to pop when\nending a given tag are *below* it on the stack, which is\nmore work but forced on us by XML.\n" (struct
+    ^{:line 381 :tag (* stack)} next
+    ^{:line 382 :tag int} kind
+    ^{:line 383 :tag Name} name
+    ^{:line 384 :tag bool} ok))
+
+
+(go/const
+  ^{:line 388} [^{:val 0} stkStart iota]
+  ^{:line 389} [^{:val 1} stkNs]
+  ^{:line 390} [^{:val 2} stkEOF])
+
+
+^{:go/end 407} (go/method push ^{:tag (* stack)} [^{:tag (* Decoder)} d ^int kind]
+  (let [s (.-free d)]
+    (if (!= s nil)
+      (set! (.-free d) (.-next s))
+
+      (set! s (new stack)))
+
+    (set! (.-next s) (.-stk d))
+    (set! (.-kind s) kind)
+    (when (== kind stkStart)
+      (inc! (.-stkDepth d)))
+
+    (set! (.-stk d) s)
+    ^{:line 406} s))
+
+
+^{:go/end 420} (go/method pop ^{:tag (* stack)} [^{:tag (* Decoder)} d]
+  (let [s (.-stk d)]
+    (when (!= s nil)
+      (when (== (.-kind s) stkStart)
+        (dec! (.-stkDepth d)))
+
+      (set! (.-stk d) (.-next s))
+      (set! (.-next s) (.-free d))
+      (set! (.-free d) s))
+
+    ^{:line 419} s))
+
+
+
+
+
+^{:go/end 447} (go/method pushEOF "Record that after the current element is finished\n(that element is already pushed on the stack)\nToken should return EOF until popEOF is called.\n" [^{:tag (* Decoder)} d]
+  ;; Walk down stack to find Start.
+  ;; It might not be the top, because there might be stkNs
+  ;; entries above it.
+  (let [start (.-stk d)]
+    (while (!= (.-kind start) stkStart)
+      (set! start (.-next start)))
+
+    ;; The stkNs entries below a start are associated with that
+    ;; element too; skip over them.
+    (while (and (!= (.-next start) nil) (== (.-kind (.-next start)) stkNs))
+      (set! start (.-next start)))
+
+    (let [s (.-free d)]
+      (if (!= s nil)
+        (set! (.-free d) (.-next s))
+
+        (set! s (new stack)))
+
+      (set! (.-kind s) stkEOF)
+      (set! (.-next s) (.-next start))
+      (set! (.-next start) s))))
+
+
+
+
+^{:go/breaks [6] :go/end 457} (go/method popEOF "Undo a pushEOF.\nThe element must have been finished, so the EOF should be at the top of the stack.\n" ^bool [^{:tag (* Decoder)} d]
+  (when (or (== (.-stk d) nil) (!= (.-kind (.-stk d)) stkEOF))
+    (return false))
+
+  (.pop d)
+  true)
+
+
+
+^{:go/end 463} (go/method pushElement "Record that we are starting an element with the given name.\n" [^{:tag (* Decoder)} d ^Name name]
+  (let [s (.push d stkStart)]
+    (set! (.-name s) name)))
+
+
+
+
+^{:go/end 472} (go/method pushNs "Record that we are changing the value of ns[local].\nThe old value is url, ok.\n" [^{:tag (* Decoder)} d ^string local ^string url ^bool ok]
+  (let [s (.push d stkNs)]
+    (set! (.-Local (.-name s)) local)
+    (set! (.-Space (.-name s)) url)
+    (set! (.-ok s) ok)))
+
+
+
+^{:go/end 477} (go/method syntaxError "Creates a SyntaxError with the current line number.\n" ^error [^{:tag (* Decoder)} d ^string msg]
+  (addr (lit SyntaxError :Msg msg :Line (.-line d))))
+
+
+
+
+
+
+
+
+^{:go/end 525} (go/method popElement "Record that we are ending an element with the given name.\nThe name must match the record at the top of the stack,\nwhich must be a pushElement record.\nAfter popping the element, apply any undo records from\nthe stack to restore the name translations that existed\nbefore we saw this element.\n" ^bool [^{:tag (* Decoder)} d ^{:tag (* EndElement)} t]
+  ^{:go/breaks [[5 524]]} (let [s (.pop d)
+      ^{:line 487} name (.-Name t)]
+    (switch
+      (case [(or (== s nil) (!= (.-kind s) stkStart))]
+        (set! (.-err d) (.syntaxError d (+ "unexpected end element </" (.-Local name) ">")))
+        (return false))
+      (case [(!= (.-Local (.-name s)) (.-Local name))]
+        (when (not (.-Strict d))
+          (set! (.-needClose d) true)
+          (set! (.-toClose d) (.-Name t))
+          (set! (.-Name t) (.-name s))
+          (return true))
+
+        (set! (.-err d) (.syntaxError d (+ "element <" (.-Local (.-name s)) "> closed by </" (.-Local name) ">")))
+        (return false))
+      (case [(!= (.-Space (.-name s)) (.-Space name))]
+        (let [ns (.-Space name)]
+          (when (== (.-Space name) "")
+            (set! ns "\"\""))
+
+          (set! (.-err d) (.syntaxError d ^{:go/breaks [5]} (+ "element <" (.-Local (.-name s)) "> in space " (.-Space (.-name s))
+                " closed by </" (.-Local name) "> in space " ns)))
+          (return false))))
+
+
+    (.translate d (addr (.-Name t)) true)
+
+    ;; Pop stack until a Start or EOF is on the top, undoing the
+    ;; translations that were associated with the element we just closed.
+    (while (and (!= (.-stk d) nil) (!= (.-kind (.-stk d)) stkStart) (!= (.-kind (.-stk d)) stkEOF))
+      (let [s (.pop d)]
+        (if (.-ok s)
+          (aset (.-ns d) (.-Local (.-name s)) (.-Space (.-name s)))
+
+          (delete (.-ns d) (.-Local (.-name s))))))
+
+
+
+    true))
+
+
+
+
+^{:go/end 544} (go/method autoClose "If the top element on the stack is autoclosing and\nt is not the end tag, invent the end tag.\n" [^{:tag (* Decoder)} d ^Token t] :results [Token bool]
+  (when (or (== (.-stk d) nil) (!= (.-kind (.-stk d)) stkStart))
+    (return nil false))
+
+  (range [_ s (.-AutoClose d)]
+    (when (strings/EqualFold s (.-Local (.-name (.-stk d))))
+      ;; This one should be auto closed if t doesn't close it.
+      (let [(values et ok) (assert EndElement t)]
+        (when (or (not ok) (not (strings/EqualFold (.-Local (.-Name et)) (.-Local (.-name (.-stk d))))))
+          (return (lit EndElement (.-name (.-stk d))) true))
+
+        (break))))
+
+
+  (return nil false))
+
+
+(go/var errRawToken (errors/New "xml: cannot use RawToken from UnmarshalXML method"))
+
+
+
+
+^{:go/end 556} (go/method RawToken "RawToken is like [Decoder.Token] but does not verify that\nstart and end elements match and does not translate\nname space prefixes to their corresponding URLs.\n" [^{:tag (* Decoder)} d] :results [Token error]
+  (when (.-inUnmarshalXML d)
+    (return nil errRawToken))
+
+  (.rawToken d))
+
+
+^{:go/end 858} (go/method rawToken [^{:tag (* Decoder)} d] :results [Token error]
+  (when (!= (.-t d) nil)
+    (return (.Token (.-t d))))
+
+  (when (!= (.-err d) nil)
+    (return nil (.-err d)))
+
+  (when (.-needClose d)
+    ;; The last element we read was self-closing and
+    ;; we returned just the StartElement half.
+    ;; Return the EndElement half now.
+    (set! (.-needClose d) false)
+    (return (lit EndElement (.-toClose d)) nil))
+
+
+  (let [(values b ok) (.getc d)]
+    (when (not ok)
+      (return nil (.-err d)))
+
+
+    (when (!= b \<)
+      ;; Text section.
+      (.ungetc d b)
+      (let [data (.text d -1 false)]
+        (when (== data nil)
+          (return nil (.-err d)))
+
+        (return (conv CharData data) nil)))
+
+
+    (when [(set! (values b ok) (.mustgetc d))] (not ok)
+      (return nil (.-err d)))
+
+    (switch b
+      (case [\/]
+        ;; </: End element
+        (let [^Name name (zero Name)]
+          (when [(set! (values name ok) (.nsname d))] (not ok)
+            (when (== (.-err d) nil)
+              (set! (.-err d) (.syntaxError d "expected element name after </")))
+
+            (return nil (.-err d)))
+
+          (.space d)
+          (when [(set! (values b ok) (.mustgetc d))] (not ok)
+            (return nil (.-err d)))
+
+          (when (!= b \>)
+            (set! (.-err d) (.syntaxError d (+ "invalid characters between </" (.-Local name) " and >")))
+            (return nil (.-err d)))
+
+          (return (lit EndElement name) nil)))
+
+      (case [\?]
+        ;; <?: Processing instruction.
+        (let [^string target (zero string)]
+          (when [(set! (values target ok) (.name d))] (not ok)
+            (when (== (.-err d) nil)
+              (set! (.-err d) (.syntaxError d "expected target name after <?")))
+
+            (return nil (.-err d)))
+
+          (.space d)
+          (.Reset (.-buf d))
+          (let [^byte b0 (zero byte)]
+            (while true
+              (when [(set! (values b ok) (.mustgetc d))] (not ok)
+                (return nil (.-err d)))
+
+              (.WriteByte (.-buf d) b)
+              (when (and (== b0 \?) (== b \>))
+                (break))
+
+              (set! b0 b))
+
+            (let [data (.Bytes (.-buf d))]
+              (set! data (subslice data 0 (- (len data) 2))) ; chop ?>
+
+              (when (== target "xml")
+                (let [content (conv string data)
+                    ^{:line 638} ver (procInst "version" content)]
+                  (when (and (!= ver "") (!= ver "1.0"))
+                    (set! (.-err d) (fmt/Errorf "xml: unsupported version %q; only version 1.0 is supported" ver))
+                    (return nil (.-err d)))
+
+                  (let [enc (procInst "encoding" content)]
+                    (when (and (!= enc "") (!= enc "utf-8") (!= enc "UTF-8") (not (strings/EqualFold enc "utf-8")))
+                      (when (== (.-CharsetReader d) nil)
+                        (set! (.-err d) (fmt/Errorf "xml: encoding %q declared but Decoder.CharsetReader is nil" enc))
+                        (return nil (.-err d)))
+
+                      (let [(values newr err) ((.-CharsetReader d) enc (assert io/Reader (.-r d)))]
+                        (when (!= err nil)
+                          (set! (.-err d) (fmt/Errorf "xml: opening charset %q: %w" enc err))
+                          (return nil (.-err d)))
+
+                        (when (== newr nil)
+                          (panic (+ "CharsetReader returned a nil Reader for charset " enc)))
+
+                        (.switchToReader d newr))))))
+
+
+              (return (lit ProcInst target data) nil)))))
+
+      (case [\!]
+        ;; <!: Maybe comment, maybe CDATA.
+        (when [(set! (values b ok) (.mustgetc d))] (not ok)
+          (return nil (.-err d)))
+
+        (switch b
+          (case [\-] ; <!-
+            ;; Probably <!-- for a comment.
+            (when [(set! (values b ok) (.mustgetc d))] (not ok)
+              (return nil (.-err d)))
+
+            (when (!= b \-)
+              (set! (.-err d) (.syntaxError d "invalid sequence <!- not part of <!--"))
+              (return nil (.-err d)))
+
+            ;; Look for terminator.
+            (.Reset (.-buf d))
+            (let [(values ^byte b0 ^byte b1) (zero byte)]
+              (while true
+                (when [(set! (values b ok) (.mustgetc d))] (not ok)
+                  (return nil (.-err d)))
+
+                (.WriteByte (.-buf d) b)
+                (when (and (== b0 \-) (== b1 \-))
+                  (when (!= b \>)
+                    (set! (.-err d) ^{:go/breaks [2]} (.syntaxError d
+                        "invalid sequence \"--\" not allowed in comments"))
+                    (return nil (.-err d)))
+
+                  (break))
+
+                (set! (values b0 b1) (values b1 b)))
+
+              (let [data (.Bytes (.-buf d))]
+                (set! data (subslice data 0 (- (len data) 3))) ; chop -->
+                (return (conv Comment data) nil))))
+
+          (case [\[] ; <![
+            ;; Probably <![CDATA[.
+            (for [i 0] (< i 6) (inc! i)
+              (when [(set! (values b ok) (.mustgetc d))] (not ok)
+                (return nil (.-err d)))
+
+              (when (!= b (aget "CDATA[" i))
+                (set! (.-err d) (.syntaxError d "invalid <![ sequence"))
+                (return nil (.-err d))))
+
+
+            ;; Have <![CDATA[.  Read text until ]]>.
+            (let [data (.text d -1 true)]
+              (when (== data nil)
+                (return nil (.-err d)))
+
+              (return (conv CharData data) nil))))
+
+
+        ;; Probably a directive: <!DOCTYPE ...>, <!ENTITY ...>, etc.
+        ;; We don't care, but accumulate for caller. Quoted angle
+        ;; brackets do not count for nesting.
+        (.Reset (.-buf d))
+        (.WriteByte (.-buf d) b)
+        (let [inquote (conv uint8 0)
+            ^{:line 724} depth 0]
+          (while true
+            (when [(set! (values b ok) (.mustgetc d))] (not ok)
+              (return nil (.-err d)))
+
+            (when (and (== inquote 0) (== b \>) (== depth 0))
+              (break))
+
+            (label :HandleB
+              (.WriteByte (.-buf d) b))
+            (switch
+              (case [(== b inquote)]
+                (set! inquote 0))
+
+              (case [(!= inquote 0)])
+              ;; in quotes, no special action
+
+              (case [(or (== b \') (== b \"))]
+                (set! inquote b))
+
+              (case [(and (== b \>) (== inquote 0))]
+                (dec! depth))
+
+              (case [(and (== b \<) (== inquote 0))]
+                ;; Look for <!-- to begin comment.
+                (let [s "!--"]
+                  (for [i 0] (< i (len s)) (inc! i)
+                    (when [(set! (values b ok) (.mustgetc d))] (not ok)
+                      (return nil (.-err d)))
+
+                    (when (!= b (aget s i))
+                      (for [j 0] (< j i) (inc! j)
+                        (.WriteByte (.-buf d) (aget s j)))
+
+                      (inc! depth)
+                      (goto :HandleB)))
+
+
+
+                  ;; Remove < that was written above.
+                  (.Truncate (.-buf d) (- (.Len (.-buf d)) 1))
+
+                  ;; Look for terminator.
+                  (let [(values ^byte b0 ^byte b1) (zero byte)]
+                    (while true
+                      (when [(set! (values b ok) (.mustgetc d))] (not ok)
+                        (return nil (.-err d)))
+
+                      (when (and (== b0 \-) (== b1 \-) (== b \>))
+                        (break))
+
+                      (set! (values b0 b1) (values b1 b)))
+
+
+                    ;; Replace the comment with a space in the returned Directive
+                    ;; body, so that markup parts that were separated by the comment
+                    ;; (like a "<" and a "!") don't get joined when re-encoding the
+                    ;; Directive, taking new semantic meaning.
+                    (.WriteByte (.-buf d) \space))))))
+
+
+          (return (conv Directive (.Bytes (.-buf d))) nil))))
+
+
+    ;; Must be an open element like <a href="foo">
+    (.ungetc d b)
+
+    (let [
+        ^{:line 792 :tag Name} name (zero Name)
+        ^{:line 793 :tag bool} empty (zero bool)
+        ^{:line 794 :tag (slice Attr)} attr (zero (slice Attr))]
+
+      (when [(set! (values name ok) (.nsname d))] (not ok)
+        (when (== (.-err d) nil)
+          (set! (.-err d) (.syntaxError d "expected element name after <")))
+
+        (return nil (.-err d)))
+
+
+      (set! attr (lit (slice Attr)))
+      (while true
+        (.space d)
+        (when [(set! (values b ok) (.mustgetc d))] (not ok)
+          (return nil (.-err d)))
+
+        (when (== b \/)
+          (set! empty true)
+          (when [(set! (values b ok) (.mustgetc d))] (not ok)
+            (return nil (.-err d)))
+
+          (when (!= b \>)
+            (set! (.-err d) (.syntaxError d "expected /> in element"))
+            (return nil (.-err d)))
+
+          (break))
+
+        (when (== b \>)
+          (break))
+
+        (.ungetc d b)
+
+        (let [a (lit Attr)]
+          (when [(set! (values (.-Name a) ok) (.nsname d))] (not ok)
+            (when (== (.-err d) nil)
+              (set! (.-err d) (.syntaxError d "expected attribute name in element")))
+
+            (return nil (.-err d)))
+
+          (.space d)
+          (when [(set! (values b ok) (.mustgetc d))] (not ok)
+            (return nil (.-err d)))
+
+          (if (!= b \=) (do
+              (when (.-Strict d)
+                (set! (.-err d) (.syntaxError d "attribute name without = in element"))
+                (return nil (.-err d)))
+
+              (.ungetc d b)
+              (set! (.-Value a) (.-Local (.-Name a))))
+            (do
+              (.space d)
+              (let [data (.attrval d)]
+                (when (== data nil)
+                  (return nil (.-err d)))
+
+                (set! (.-Value a) (conv string data)))))
+
+          (set! attr (append attr a))))
+
+      (when empty
+        (set! (.-needClose d) true)
+        (set! (.-toClose d) name))
+
+      (return (lit StartElement name attr) nil))))
+
+
+^{:go/end 892} (go/method attrval ^{:tag (slice byte)} [^{:tag (* Decoder)} d]
+  (let [(values b ok) (.mustgetc d)]
+    (when (not ok)
+      (return nil))
+
+    ;; Handle quoted attribute values
+    (when (or (== b \") (== b \'))
+      (return (.text d (conv int b) false)))
+
+    ;; Handle unquoted attribute values for strict parsers
+    (when (.-Strict d)
+      (set! (.-err d) (.syntaxError d "unquoted or missing attribute value in element"))
+      (return nil))
+
+    ;; Handle unquoted attribute values for unstrict parsers
+    (.ungetc d b)
+    (.Reset (.-buf d))
+    (while true
+      (set! (values b ok) (.mustgetc d))
+      (when (not ok)
+        (return nil))
+
+      ;; https://www.w3.org/TR/REC-html40/intro/sgmltut.html#h-3.2.2
+      (if (or (and (<= \a b) (<= b \z)) (and (<= \A b) (<= b \Z))
+          (and (<= \0 b) (<= b \9)) (== b \_) (== b \:) (== b \-))
+        (.WriteByte (.-buf d) b)
+        (do
+          (.ungetc d b)
+          (break))))
+
+
+    (.Bytes (.-buf d))))
+
+
+
+^{:go/end 908} (go/method space "Skip spaces if any\n" [^{:tag (* Decoder)} d]
+  (while true
+    (let [(values b ok) (.getc d)]
+      (when (not ok)
+        (return))
+
+      (switch b
+        (case [\space \return \newline \tab])
+        (default
+          (.ungetc d b)
+          (return))))))
+
+
+
+
+
+
+
+
+^{:go/end 936} (go/method getc "Read a single byte.\nIf there is no byte to read, return ok==false\nand leave the error in d.err.\nMaintain line number.\n" [^{:tag (* Decoder)} d] :results [^byte b ^bool ok]
+  (when (!= (.-err d) nil)
+    (return 0 false))
+
+  (if (>= (.-nextByte d) 0) (do
+      (set! b (conv byte (.-nextByte d)))
+      (set! (.-nextByte d) -1))
+    (do
+      (set! (values b (.-err d)) (.ReadByte (.-r d)))
+      (when (!= (.-err d) nil)
+        (return 0 false))
+
+      (when (!= (.-saved d) nil)
+        (.WriteByte (.-saved d) b))))
+
+
+  (when (== b \newline)
+    (inc! (.-line d))
+    (set! (.-linestart d) (+ (.-offset d) 1)))
+
+  (inc! (.-offset d))
+  (return b true))
+
+
+
+
+
+^{:go/end 943} (go/method InputOffset "InputOffset returns the input stream byte offset of the current decoder position.\nThe offset gives the location of the end of the most recently returned token\nand the beginning of the next token.\n" ^int64 [^{:tag (* Decoder)} d]
+  (.-offset d))
+
+
+
+
+
+^{:go/end 950} (go/method InputPos "InputPos returns the line of the current decoder position and the 1 based\ninput position of the line. The position gives the location of the end of the\nmost recently returned token.\n" [^{:tag (* Decoder)} d] :results [^int line ^int column]
+  (return (.-line d) (+ (conv int (- (.-offset d) (.-linestart d))) 1)))
+
+
+
+
+^{:go/end 960} (go/method savedOffset "Return saved offset.\nIf we did ungetc (nextByte >= 0), have to back up one.\n" ^int [^{:tag (* Decoder)} d]
+  (let [n (.Len (.-saved d))]
+    (when (>= (.-nextByte d) 0)
+      (dec! n))
+
+    ^{:line 959} n))
+
+
+
+
+
+
+^{:go/end 973} (go/method mustgetc "Must read a single byte.\nIf there is no byte to read,\nset d.err to SyntaxError(\"unexpected EOF\")\nand return ok==false\n" [^{:tag (* Decoder)} d] :results [^byte b ^bool ok]
+  (when [(set! (values b ok) (.getc d))] (not ok)
+    (when (== (.-err d) io/EOF)
+      (set! (.-err d) (.syntaxError d "unexpected EOF"))))
+
+
+  (return))
+
+
+
+^{:go/end 982} (go/method ungetc "Unread a single byte.\n" [^{:tag (* Decoder)} d ^byte b]
+  (when (== b \newline)
+    (dec! (.-line d)))
+
+  (set! (.-nextByte d) (conv int b))
+  (dec! (.-offset d)))
+
+
+(go/var entity (lit (map string rune)
+    ^{:line 985} ["lt" \<]
+    ^{:line 986} ["gt" \>]
+    ^{:line 987} ["amp" \&]
+    ^{:line 988} ["apos" \']
+    ^{:line 989} ["quot" \"]))
+
+
+
+
+
+
+^{:go/end 1159} (go/method text "Read plain text section (XML calls it character data).\nIf quote >= 0, we are in a quoted string and need to find the matching quote.\nIf cdata == true, we are in a <![CDATA[ section and need to find ]]>.\nOn failure return nil and leave the error in d.err.\n" ^{:tag (slice byte)} [^{:tag (* Decoder)} d ^int quote ^bool cdata]
+  (let [(values ^byte b0 ^byte b1) (zero byte)
+      ^{:line 998 :tag int} trunc (zero int)]
+    (.Reset (.-buf d))
+    (label :Input
+      (while true
+        (let [(values b ok) (.getc d)]
+          (when (not ok)
+            (when cdata
+              (when (== (.-err d) io/EOF)
+                (set! (.-err d) (.syntaxError d "unexpected EOF in CDATA section")))
+
+              (return nil))
+
+            (break :Input))
+
+
+          ;; <![CDATA[ section ends with ]]>.
+          ;; It is an error for ]]> to appear in ordinary text,
+          ;; but it is allowed in quoted strings.
+          (when (and (< quote 0) (== b0 \]) (== b1 \]) (== b \>))
+            (when cdata
+              (set! trunc 2)
+              (break :Input))
+
+            (set! (.-err d) (.syntaxError d "unescaped ]]> not in CDATA section"))
+            (return nil))
+
+
+          ;; Stop reading text if we see a <.
+          (when (and (== b \<) (not cdata))
+            (when (>= quote 0)
+              (set! (.-err d) (.syntaxError d "unescaped < inside quoted string"))
+              (return nil))
+
+            (.ungetc d \<)
+            (break :Input))
+
+          (when (and (>= quote 0) (== b (conv byte quote)))
+            (break :Input))
+
+          (when (and (== b \&) (not cdata))
+            ;; Read escaped character expression up to semicolon.
+            ;; XML in all its glory allows a document to define and use
+            ;; its own character names with <!ENTITY ...> directives.
+            ;; Parsers are required to recognize lt, gt, amp, apos, and quot
+            ;; even if they have not been declared.
+            (let [before (.Len (.-buf d))]
+              (.WriteByte (.-buf d) \&)
+              (let [^bool ok (zero bool)
+                  ^{:line 1046 :tag string} text (zero string)
+                  ^{:line 1047 :tag bool} haveText (zero bool)]
+                (when [(set! (values b ok) (.mustgetc d))] (not ok)
+                  (return nil))
+
+                (if (== b \#) (do
+                    (.WriteByte (.-buf d) b)
+                    (when [(set! (values b ok) (.mustgetc d))] (not ok)
+                      (return nil))
+
+                    (let [base 10]
+                      (when (== b \x)
+                        (set! base 16)
+                        (.WriteByte (.-buf d) b)
+                        (when [(set! (values b ok) (.mustgetc d))] (not ok)
+                          (return nil)))
+
+
+                      (let [start (.Len (.-buf d))]
+                        (while (or (and (<= \0 b) (<= b \9))
+                            (and (== base 16) (<= \a b) (<= b \f))
+                            (and (== base 16) (<= \A b) (<= b \F)))
+                          (.WriteByte (.-buf d) b)
+                          (when [(set! (values b ok) (.mustgetc d))] (not ok)
+                            (return nil)))
+
+
+                        (if (!= b \;)
+                          (.ungetc d b)
+
+                          (let [s (conv string (subslice (.Bytes (.-buf d)) start))]
+                            (.WriteByte (.-buf d) \;)
+                            (let [(values n err) (strconv/ParseUint s base 64)]
+                              (when (and (== err nil) (<= n unicode/MaxRune))
+                                (set! text (conv string (conv rune n)))
+                                (set! haveText true))))))))
+
+
+                  (do
+                    (.ungetc d b)
+                    (when (not (.readName d))
+                      (when (!= (.-err d) nil)
+                        (return nil)))
+
+
+                    (when [(set! (values b ok) (.mustgetc d))] (not ok)
+                      (return nil))
+
+                    (if (!= b \;)
+                      (.ungetc d b)
+
+                      (let [name (subslice (.Bytes (.-buf d)) (+ before 1))]
+                        (.WriteByte (.-buf d) \;)
+                        (when (isName name)
+                          (let [s (conv string name)]
+                            (if [(values r ok) (aget entity s)] ok (do
+                                (set! text (conv string r))
+                                (set! haveText true))
+                              (when (!= (.-Entity d) nil)
+                                (set! (values text haveText) (aget (.-Entity d) s))))))))))
+
+
+
+
+
+                (when haveText
+                  (.Truncate (.-buf d) before)
+                  (.WriteString (.-buf d) text)
+                  (set! (values b0 b1) (values 0 0))
+                  (continue :Input))
+
+                (when (not (.-Strict d))
+                  (set! (values b0 b1) (values 0 0))
+                  (continue :Input))
+
+                (let [ent (conv string (subslice (.Bytes (.-buf d)) before))]
+                  (when (!= (aget ent (- (len ent) 1)) \;)
+                    (set! ent + " (no semicolon)"))
+
+                  (set! (.-err d) (.syntaxError d (+ "invalid character entity " ent)))
+                  (return nil)))))
+
+
+          ;; We must rewrite unescaped \r and \r\n into \n.
+          (cond (== b \return)
+            (.WriteByte (.-buf d) \newline)
+            (and (== b1 \return) (== b \newline)) (do) :else
+            ;; Skip \r\n--we already wrote \n.
+
+            (.WriteByte (.-buf d) b))
+
+
+          (set! (values b0 b1) (values b1 b)))))
+
+    (let [data (.Bytes (.-buf d))]
+      (set! data (subslice data 0 (- (len data) trunc)))
+
+      ;; Inspect each rune for being a disallowed character.
+      (let [buf data]
+        (while (> (len buf) 0)
+          (let [(values r size) (utf8/DecodeRune buf)]
+            (when (and (== r utf8/RuneError) (== size 1))
+              (set! (.-err d) (.syntaxError d "invalid UTF-8"))
+              (return nil))
+
+            (set! buf (subslice buf size))
+            (when (not (isInCharacterRange r))
+              (set! (.-err d) (.syntaxError d (fmt/Sprintf "illegal character code %U" r)))
+              (return nil))))
+
+
+
+        ^{:line 1158} data))))
+
+
+
+
+
+^{:go/end 1171} (go/func isInCharacterRange "Decide whether the given rune is in the XML Character Range, per\nthe Char production of https://www.xml.com/axml/testaxml.htm,\nSection 2.2 Characters.\n" [^rune r] :results [^bool inrange]
+  (or (== r 0x09)
+    (== r 0x0A)
+    (== r 0x0D)
+    (and (>= r 0x20) (<= r 0xD7FF))
+    (and (>= r 0xE000) (<= r 0xFFFD))
+    (and (>= r 0x10000) (<= r 0x10FFFF))))
+
+
+
+
+^{:go/end 1189} (go/method nsname "Get name space name: name with a : stuck in the middle.\nThe part before the : is the name space identifier.\n" [^{:tag (* Decoder)} d] :results [^Name name ^bool ok]
+  (let [(values s ^:assign ok) (.name d)]
+    (when (not ok)
+      (return))
+
+    (if (> (strings/Count s ":") 1)
+      (return name false)
+      (if [(values space local ok) (strings/Cut s ":")] (or (not ok) (== space "") (== local ""))
+        (set! (.-Local name) s)
+        (do
+          (set! (.-Space name) space)
+          (set! (.-Local name) local))))
+
+    (return name true)))
+
+
+
+
+
+^{:go/end 1207} (go/method name "Get name: /first(first|second)*/\nDo not set d.err if the name is missing (unless unexpected EOF is received):\nlet the caller provide better context.\n" [^{:tag (* Decoder)} d] :results [^string s ^bool ok]
+  (.Reset (.-buf d))
+  (when (not (.readName d))
+    (return "" false))
+
+
+  ;; Now we check the characters.
+  (let [b (.Bytes (.-buf d))]
+    (when (not (isName b))
+      (set! (.-err d) (.syntaxError d (+ "invalid XML name: " (conv string b))))
+      (return "" false))
+
+    (return (conv string b) true)))
+
+
+
+
+
+^{:go/end 1234} (go/method readName "Read a name and append its bytes to d.buf.\nThe name is delimited by any single-byte character not valid in names.\nAll multi-byte characters are accepted; the caller must check their validity.\n" [^{:tag (* Decoder)} d] :results [^bool ok]
+  ^{:go/breaks [[6 1233]]} (let [^byte b (zero byte)]
+    (when [(set! (values b ok) (.mustgetc d))] (not ok)
+      (return))
+
+    (when (and (< b utf8/RuneSelf) (not (isNameByte b)))
+      (.ungetc d b)
+      (return false))
+
+    (.WriteByte (.-buf d) b)
+
+    (while true
+      (when [(set! (values b ok) (.mustgetc d))] (not ok)
+        (return))
+
+      (when (and (< b utf8/RuneSelf) (not (isNameByte b)))
+        (.ungetc d b)
+        (break))
+
+      (.WriteByte (.-buf d) b))
+
+    true))
+
+
+^{:go/end 1241} (go/func isNameByte ^bool [^byte c]
+  (or (and (<= \A c) (<= c \Z))
+    (and (<= \a c) (<= c \z))
+    (and (<= \0 c) (<= c \9))
+    (== c \_) (== c \:) (== c \.) (== c \-)))
+
+
+^{:go/end 1265} (go/func isName ^bool [^{:tag (slice byte)} s]
+  (when (== (len s) 0)
+    (return false))
+
+  ^{:go/breaks [[5 1264]]} (let [(values c n) (utf8/DecodeRune s)]
+    (when (and (== c utf8/RuneError) (== n 1))
+      (return false))
+
+    (when (not (unicode/Is first c))
+      (return false))
+
+    (while (< n (len s))
+      (set! s (subslice s n))
+      (set! (values c n) (utf8/DecodeRune s))
+      (when (and (== c utf8/RuneError) (== n 1))
+        (return false))
+
+      (when (and (not (unicode/Is first c)) (not (unicode/Is second c)))
+        (return false)))
+
+
+    true))
+
+
+^{:go/end 1289} (go/func isNameString ^bool [^string s]
+  (when (== (len s) 0)
+    (return false))
+
+  ^{:go/breaks [[5 1288]]} (let [(values c n) (utf8/DecodeRuneInString s)]
+    (when (and (== c utf8/RuneError) (== n 1))
+      (return false))
+
+    (when (not (unicode/Is first c))
+      (return false))
+
+    (while (< n (len s))
+      (set! s (subslice s n))
+      (set! (values c n) (utf8/DecodeRuneInString s))
+      (when (and (== c utf8/RuneError) (== n 1))
+        (return false))
+
+      (when (and (not (unicode/Is first c)) (not (unicode/Is second c)))
+        (return false)))
+
+
+    true))
+
+
+;; These tables were generated by cut and paste from Appendix B of
+;; the XML spec at https://www.xml.com/axml/testaxml.htm
+;; and then reformatting. First corresponds to (Letter | '_' | ':')
+;; and second corresponds to NameChar.
+
+(go/var first (addr ^{:go/breaks [2]} (lit unicode/RangeTable
+      :R16 (lit (slice unicode/Range16)
+        (lit _ 0x003A 0x003A 1)
+        (lit _ 0x0041 0x005A 1)
+        (lit _ 0x005F 0x005F 1)
+        (lit _ 0x0061 0x007A 1)
+        (lit _ 0x00C0 0x00D6 1)
+        (lit _ 0x00D8 0x00F6 1)
+        (lit _ 0x00F8 0x00FF 1)
+        (lit _ 0x0100 0x0131 1)
+        (lit _ 0x0134 0x013E 1)
+        (lit _ 0x0141 0x0148 1)
+        (lit _ 0x014A 0x017E 1)
+        (lit _ 0x0180 0x01C3 1)
+        (lit _ 0x01CD 0x01F0 1)
+        (lit _ 0x01F4 0x01F5 1)
+        (lit _ 0x01FA 0x0217 1)
+        (lit _ 0x0250 0x02A8 1)
+        (lit _ 0x02BB 0x02C1 1)
+        (lit _ 0x0386 0x0386 1)
+        (lit _ 0x0388 0x038A 1)
+        (lit _ 0x038C 0x038C 1)
+        (lit _ 0x038E 0x03A1 1)
+        (lit _ 0x03A3 0x03CE 1)
+        (lit _ 0x03D0 0x03D6 1)
+        (lit _ 0x03DA 0x03E0 2)
+        (lit _ 0x03E2 0x03F3 1)
+        (lit _ 0x0401 0x040C 1)
+        (lit _ 0x040E 0x044F 1)
+        (lit _ 0x0451 0x045C 1)
+        (lit _ 0x045E 0x0481 1)
+        (lit _ 0x0490 0x04C4 1)
+        (lit _ 0x04C7 0x04C8 1)
+        (lit _ 0x04CB 0x04CC 1)
+        (lit _ 0x04D0 0x04EB 1)
+        (lit _ 0x04EE 0x04F5 1)
+        (lit _ 0x04F8 0x04F9 1)
+        (lit _ 0x0531 0x0556 1)
+        (lit _ 0x0559 0x0559 1)
+        (lit _ 0x0561 0x0586 1)
+        (lit _ 0x05D0 0x05EA 1)
+        (lit _ 0x05F0 0x05F2 1)
+        (lit _ 0x0621 0x063A 1)
+        (lit _ 0x0641 0x064A 1)
+        (lit _ 0x0671 0x06B7 1)
+        (lit _ 0x06BA 0x06BE 1)
+        (lit _ 0x06C0 0x06CE 1)
+        (lit _ 0x06D0 0x06D3 1)
+        (lit _ 0x06D5 0x06D5 1)
+        (lit _ 0x06E5 0x06E6 1)
+        (lit _ 0x0905 0x0939 1)
+        (lit _ 0x093D 0x093D 1)
+        (lit _ 0x0958 0x0961 1)
+        (lit _ 0x0985 0x098C 1)
+        (lit _ 0x098F 0x0990 1)
+        (lit _ 0x0993 0x09A8 1)
+        (lit _ 0x09AA 0x09B0 1)
+        (lit _ 0x09B2 0x09B2 1)
+        (lit _ 0x09B6 0x09B9 1)
+        (lit _ 0x09DC 0x09DD 1)
+        (lit _ 0x09DF 0x09E1 1)
+        (lit _ 0x09F0 0x09F1 1)
+        (lit _ 0x0A05 0x0A0A 1)
+        (lit _ 0x0A0F 0x0A10 1)
+        (lit _ 0x0A13 0x0A28 1)
+        (lit _ 0x0A2A 0x0A30 1)
+        (lit _ 0x0A32 0x0A33 1)
+        (lit _ 0x0A35 0x0A36 1)
+        (lit _ 0x0A38 0x0A39 1)
+        (lit _ 0x0A59 0x0A5C 1)
+        (lit _ 0x0A5E 0x0A5E 1)
+        (lit _ 0x0A72 0x0A74 1)
+        (lit _ 0x0A85 0x0A8B 1)
+        (lit _ 0x0A8D 0x0A8D 1)
+        (lit _ 0x0A8F 0x0A91 1)
+        (lit _ 0x0A93 0x0AA8 1)
+        (lit _ 0x0AAA 0x0AB0 1)
+        (lit _ 0x0AB2 0x0AB3 1)
+        (lit _ 0x0AB5 0x0AB9 1)
+        (lit _ 0x0ABD 0x0AE0 0x23)
+        (lit _ 0x0B05 0x0B0C 1)
+        (lit _ 0x0B0F 0x0B10 1)
+        (lit _ 0x0B13 0x0B28 1)
+        (lit _ 0x0B2A 0x0B30 1)
+        (lit _ 0x0B32 0x0B33 1)
+        (lit _ 0x0B36 0x0B39 1)
+        (lit _ 0x0B3D 0x0B3D 1)
+        (lit _ 0x0B5C 0x0B5D 1)
+        (lit _ 0x0B5F 0x0B61 1)
+        (lit _ 0x0B85 0x0B8A 1)
+        (lit _ 0x0B8E 0x0B90 1)
+        (lit _ 0x0B92 0x0B95 1)
+        (lit _ 0x0B99 0x0B9A 1)
+        (lit _ 0x0B9C 0x0B9C 1)
+        (lit _ 0x0B9E 0x0B9F 1)
+        (lit _ 0x0BA3 0x0BA4 1)
+        (lit _ 0x0BA8 0x0BAA 1)
+        (lit _ 0x0BAE 0x0BB5 1)
+        (lit _ 0x0BB7 0x0BB9 1)
+        (lit _ 0x0C05 0x0C0C 1)
+        (lit _ 0x0C0E 0x0C10 1)
+        (lit _ 0x0C12 0x0C28 1)
+        (lit _ 0x0C2A 0x0C33 1)
+        (lit _ 0x0C35 0x0C39 1)
+        (lit _ 0x0C60 0x0C61 1)
+        (lit _ 0x0C85 0x0C8C 1)
+        (lit _ 0x0C8E 0x0C90 1)
+        (lit _ 0x0C92 0x0CA8 1)
+        (lit _ 0x0CAA 0x0CB3 1)
+        (lit _ 0x0CB5 0x0CB9 1)
+        (lit _ 0x0CDE 0x0CDE 1)
+        (lit _ 0x0CE0 0x0CE1 1)
+        (lit _ 0x0D05 0x0D0C 1)
+        (lit _ 0x0D0E 0x0D10 1)
+        (lit _ 0x0D12 0x0D28 1)
+        (lit _ 0x0D2A 0x0D39 1)
+        (lit _ 0x0D60 0x0D61 1)
+        (lit _ 0x0E01 0x0E2E 1)
+        (lit _ 0x0E30 0x0E30 1)
+        (lit _ 0x0E32 0x0E33 1)
+        (lit _ 0x0E40 0x0E45 1)
+        (lit _ 0x0E81 0x0E82 1)
+        (lit _ 0x0E84 0x0E84 1)
+        (lit _ 0x0E87 0x0E88 1)
+        (lit _ 0x0E8A 0x0E8D 3)
+        (lit _ 0x0E94 0x0E97 1)
+        (lit _ 0x0E99 0x0E9F 1)
+        (lit _ 0x0EA1 0x0EA3 1)
+        (lit _ 0x0EA5 0x0EA7 2)
+        (lit _ 0x0EAA 0x0EAB 1)
+        (lit _ 0x0EAD 0x0EAE 1)
+        (lit _ 0x0EB0 0x0EB0 1)
+        (lit _ 0x0EB2 0x0EB3 1)
+        (lit _ 0x0EBD 0x0EBD 1)
+        (lit _ 0x0EC0 0x0EC4 1)
+        (lit _ 0x0F40 0x0F47 1)
+        (lit _ 0x0F49 0x0F69 1)
+        (lit _ 0x10A0 0x10C5 1)
+        (lit _ 0x10D0 0x10F6 1)
+        (lit _ 0x1100 0x1100 1)
+        (lit _ 0x1102 0x1103 1)
+        (lit _ 0x1105 0x1107 1)
+        (lit _ 0x1109 0x1109 1)
+        (lit _ 0x110B 0x110C 1)
+        (lit _ 0x110E 0x1112 1)
+        (lit _ 0x113C 0x1140 2)
+        (lit _ 0x114C 0x1150 2)
+        (lit _ 0x1154 0x1155 1)
+        (lit _ 0x1159 0x1159 1)
+        (lit _ 0x115F 0x1161 1)
+        (lit _ 0x1163 0x1169 2)
+        (lit _ 0x116D 0x116E 1)
+        (lit _ 0x1172 0x1173 1)
+        (lit _ 0x1175 0x119E (- 0x119E 0x1175))
+        (lit _ 0x11A8 0x11AB (- 0x11AB 0x11A8))
+        (lit _ 0x11AE 0x11AF 1)
+        (lit _ 0x11B7 0x11B8 1)
+        (lit _ 0x11BA 0x11BA 1)
+        (lit _ 0x11BC 0x11C2 1)
+        (lit _ 0x11EB 0x11F0 (- 0x11F0 0x11EB))
+        (lit _ 0x11F9 0x11F9 1)
+        (lit _ 0x1E00 0x1E9B 1)
+        (lit _ 0x1EA0 0x1EF9 1)
+        (lit _ 0x1F00 0x1F15 1)
+        (lit _ 0x1F18 0x1F1D 1)
+        (lit _ 0x1F20 0x1F45 1)
+        (lit _ 0x1F48 0x1F4D 1)
+        (lit _ 0x1F50 0x1F57 1)
+        (lit _ 0x1F59 0x1F5B (- 0x1F5B 0x1F59))
+        (lit _ 0x1F5D 0x1F5D 1)
+        (lit _ 0x1F5F 0x1F7D 1)
+        (lit _ 0x1F80 0x1FB4 1)
+        (lit _ 0x1FB6 0x1FBC 1)
+        (lit _ 0x1FBE 0x1FBE 1)
+        (lit _ 0x1FC2 0x1FC4 1)
+        (lit _ 0x1FC6 0x1FCC 1)
+        (lit _ 0x1FD0 0x1FD3 1)
+        (lit _ 0x1FD6 0x1FDB 1)
+        (lit _ 0x1FE0 0x1FEC 1)
+        (lit _ 0x1FF2 0x1FF4 1)
+        (lit _ 0x1FF6 0x1FFC 1)
+        (lit _ 0x2126 0x2126 1)
+        (lit _ 0x212A 0x212B 1)
+        (lit _ 0x212E 0x212E 1)
+        (lit _ 0x2180 0x2182 1)
+        (lit _ 0x3007 0x3007 1)
+        (lit _ 0x3021 0x3029 1)
+        (lit _ 0x3041 0x3094 1)
+        (lit _ 0x30A1 0x30FA 1)
+        (lit _ 0x3105 0x312C 1)
+        (lit _ 0x4E00 0x9FA5 1)
+        (lit _ 0xAC00 0xD7A3 1)))))
+
+
+
+(go/var second (addr ^{:go/breaks [2]} (lit unicode/RangeTable
+      :R16 (lit (slice unicode/Range16)
+        (lit _ 0x002D 0x002E 1)
+        (lit _ 0x0030 0x0039 1)
+        (lit _ 0x00B7 0x00B7 1)
+        (lit _ 0x02D0 0x02D1 1)
+        (lit _ 0x0300 0x0345 1)
+        (lit _ 0x0360 0x0361 1)
+        (lit _ 0x0387 0x0387 1)
+        (lit _ 0x0483 0x0486 1)
+        (lit _ 0x0591 0x05A1 1)
+        (lit _ 0x05A3 0x05B9 1)
+        (lit _ 0x05BB 0x05BD 1)
+        (lit _ 0x05BF 0x05BF 1)
+        (lit _ 0x05C1 0x05C2 1)
+        (lit _ 0x05C4 0x0640 (- 0x0640 0x05C4))
+        (lit _ 0x064B 0x0652 1)
+        (lit _ 0x0660 0x0669 1)
+        (lit _ 0x0670 0x0670 1)
+        (lit _ 0x06D6 0x06DC 1)
+        (lit _ 0x06DD 0x06DF 1)
+        (lit _ 0x06E0 0x06E4 1)
+        (lit _ 0x06E7 0x06E8 1)
+        (lit _ 0x06EA 0x06ED 1)
+        (lit _ 0x06F0 0x06F9 1)
+        (lit _ 0x0901 0x0903 1)
+        (lit _ 0x093C 0x093C 1)
+        (lit _ 0x093E 0x094C 1)
+        (lit _ 0x094D 0x094D 1)
+        (lit _ 0x0951 0x0954 1)
+        (lit _ 0x0962 0x0963 1)
+        (lit _ 0x0966 0x096F 1)
+        (lit _ 0x0981 0x0983 1)
+        (lit _ 0x09BC 0x09BC 1)
+        (lit _ 0x09BE 0x09BF 1)
+        (lit _ 0x09C0 0x09C4 1)
+        (lit _ 0x09C7 0x09C8 1)
+        (lit _ 0x09CB 0x09CD 1)
+        (lit _ 0x09D7 0x09D7 1)
+        (lit _ 0x09E2 0x09E3 1)
+        (lit _ 0x09E6 0x09EF 1)
+        (lit _ 0x0A02 0x0A3C 0x3A)
+        (lit _ 0x0A3E 0x0A3F 1)
+        (lit _ 0x0A40 0x0A42 1)
+        (lit _ 0x0A47 0x0A48 1)
+        (lit _ 0x0A4B 0x0A4D 1)
+        (lit _ 0x0A66 0x0A6F 1)
+        (lit _ 0x0A70 0x0A71 1)
+        (lit _ 0x0A81 0x0A83 1)
+        (lit _ 0x0ABC 0x0ABC 1)
+        (lit _ 0x0ABE 0x0AC5 1)
+        (lit _ 0x0AC7 0x0AC9 1)
+        (lit _ 0x0ACB 0x0ACD 1)
+        (lit _ 0x0AE6 0x0AEF 1)
+        (lit _ 0x0B01 0x0B03 1)
+        (lit _ 0x0B3C 0x0B3C 1)
+        (lit _ 0x0B3E 0x0B43 1)
+        (lit _ 0x0B47 0x0B48 1)
+        (lit _ 0x0B4B 0x0B4D 1)
+        (lit _ 0x0B56 0x0B57 1)
+        (lit _ 0x0B66 0x0B6F 1)
+        (lit _ 0x0B82 0x0B83 1)
+        (lit _ 0x0BBE 0x0BC2 1)
+        (lit _ 0x0BC6 0x0BC8 1)
+        (lit _ 0x0BCA 0x0BCD 1)
+        (lit _ 0x0BD7 0x0BD7 1)
+        (lit _ 0x0BE7 0x0BEF 1)
+        (lit _ 0x0C01 0x0C03 1)
+        (lit _ 0x0C3E 0x0C44 1)
+        (lit _ 0x0C46 0x0C48 1)
+        (lit _ 0x0C4A 0x0C4D 1)
+        (lit _ 0x0C55 0x0C56 1)
+        (lit _ 0x0C66 0x0C6F 1)
+        (lit _ 0x0C82 0x0C83 1)
+        (lit _ 0x0CBE 0x0CC4 1)
+        (lit _ 0x0CC6 0x0CC8 1)
+        (lit _ 0x0CCA 0x0CCD 1)
+        (lit _ 0x0CD5 0x0CD6 1)
+        (lit _ 0x0CE6 0x0CEF 1)
+        (lit _ 0x0D02 0x0D03 1)
+        (lit _ 0x0D3E 0x0D43 1)
+        (lit _ 0x0D46 0x0D48 1)
+        (lit _ 0x0D4A 0x0D4D 1)
+        (lit _ 0x0D57 0x0D57 1)
+        (lit _ 0x0D66 0x0D6F 1)
+        (lit _ 0x0E31 0x0E31 1)
+        (lit _ 0x0E34 0x0E3A 1)
+        (lit _ 0x0E46 0x0E46 1)
+        (lit _ 0x0E47 0x0E4E 1)
+        (lit _ 0x0E50 0x0E59 1)
+        (lit _ 0x0EB1 0x0EB1 1)
+        (lit _ 0x0EB4 0x0EB9 1)
+        (lit _ 0x0EBB 0x0EBC 1)
+        (lit _ 0x0EC6 0x0EC6 1)
+        (lit _ 0x0EC8 0x0ECD 1)
+        (lit _ 0x0ED0 0x0ED9 1)
+        (lit _ 0x0F18 0x0F19 1)
+        (lit _ 0x0F20 0x0F29 1)
+        (lit _ 0x0F35 0x0F39 2)
+        (lit _ 0x0F3E 0x0F3F 1)
+        (lit _ 0x0F71 0x0F84 1)
+        (lit _ 0x0F86 0x0F8B 1)
+        (lit _ 0x0F90 0x0F95 1)
+        (lit _ 0x0F97 0x0F97 1)
+        (lit _ 0x0F99 0x0FAD 1)
+        (lit _ 0x0FB1 0x0FB7 1)
+        (lit _ 0x0FB9 0x0FB9 1)
+        (lit _ 0x20D0 0x20DC 1)
+        (lit _ 0x20E1 0x3005 (- 0x3005 0x20E1))
+        (lit _ 0x302A 0x302F 1)
+        (lit _ 0x3031 0x3035 1)
+        (lit _ 0x3099 0x309A 1)
+        (lit _ 0x309D 0x309E 1)
+        (lit _ 0x30FC 0x30FE 1)))))
+
+
+
+
+
+
+
+(go/var ^{:tag (map string string) :doc "HTMLEntity is an entity map containing translations for the\nstandard HTML entity characters.\n\nSee the [Decoder.Strict] and [Decoder.Entity] fields' documentation.\n"} HTMLEntity htmlEntity)
+
+(go/var htmlEntity (lit (map string string)
+    ;; /*
+    ;; hget http://www.w3.org/TR/html4/sgml/entities.html |
+    ;; ssam '
+    ;; ,y /\&gt;/ x/\&lt;(.|\n)+/ s/\n/ /g
+    ;; ,x v/^\&lt;!ENTITY/d
+    ;; ,s/\&lt;!ENTITY ([^ ]+) .*U\+([0-9A-F][0-9A-F][0-9A-F][0-9A-F]) .+/	"\1": "\\u\2",/g
+    ;; '
+    ;; */
+    ^{:line 1623} ["nbsp" "\u00a0"]
+    ^{:line 1624} ["iexcl" "¡"]
+    ^{:line 1625} ["cent" "¢"]
+    ^{:line 1626} ["pound" "£"]
+    ^{:line 1627} ["curren" "¤"]
+    ^{:line 1628} ["yen" "¥"]
+    ^{:line 1629} ["brvbar" "¦"]
+    ^{:line 1630} ["sect" "§"]
+    ^{:line 1631} ["uml" "¨"]
+    ^{:line 1632} ["copy" "©"]
+    ^{:line 1633} ["ordf" "ª"]
+    ^{:line 1634} ["laquo" "«"]
+    ^{:line 1635} ["not" "¬"]
+    ^{:line 1636} ["shy" "\u00ad"]
+    ^{:line 1637} ["reg" "®"]
+    ^{:line 1638} ["macr" "¯"]
+    ^{:line 1639} ["deg" "°"]
+    ^{:line 1640} ["plusmn" "±"]
+    ^{:line 1641} ["sup2" "²"]
+    ^{:line 1642} ["sup3" "³"]
+    ^{:line 1643} ["acute" "´"]
+    ^{:line 1644} ["micro" "µ"]
+    ^{:line 1645} ["para" "¶"]
+    ^{:line 1646} ["middot" "·"]
+    ^{:line 1647} ["cedil" "¸"]
+    ^{:line 1648} ["sup1" "¹"]
+    ^{:line 1649} ["ordm" "º"]
+    ^{:line 1650} ["raquo" "»"]
+    ^{:line 1651} ["frac14" "¼"]
+    ^{:line 1652} ["frac12" "½"]
+    ^{:line 1653} ["frac34" "¾"]
+    ^{:line 1654} ["iquest" "¿"]
+    ^{:line 1655} ["Agrave" "À"]
+    ^{:line 1656} ["Aacute" "Á"]
+    ^{:line 1657} ["Acirc" "Â"]
+    ^{:line 1658} ["Atilde" "Ã"]
+    ^{:line 1659} ["Auml" "Ä"]
+    ^{:line 1660} ["Aring" "Å"]
+    ^{:line 1661} ["AElig" "Æ"]
+    ^{:line 1662} ["Ccedil" "Ç"]
+    ^{:line 1663} ["Egrave" "È"]
+    ^{:line 1664} ["Eacute" "É"]
+    ^{:line 1665} ["Ecirc" "Ê"]
+    ^{:line 1666} ["Euml" "Ë"]
+    ^{:line 1667} ["Igrave" "Ì"]
+    ^{:line 1668} ["Iacute" "Í"]
+    ^{:line 1669} ["Icirc" "Î"]
+    ^{:line 1670} ["Iuml" "Ï"]
+    ^{:line 1671} ["ETH" "Ð"]
+    ^{:line 1672} ["Ntilde" "Ñ"]
+    ^{:line 1673} ["Ograve" "Ò"]
+    ^{:line 1674} ["Oacute" "Ó"]
+    ^{:line 1675} ["Ocirc" "Ô"]
+    ^{:line 1676} ["Otilde" "Õ"]
+    ^{:line 1677} ["Ouml" "Ö"]
+    ^{:line 1678} ["times" "×"]
+    ^{:line 1679} ["Oslash" "Ø"]
+    ^{:line 1680} ["Ugrave" "Ù"]
+    ^{:line 1681} ["Uacute" "Ú"]
+    ^{:line 1682} ["Ucirc" "Û"]
+    ^{:line 1683} ["Uuml" "Ü"]
+    ^{:line 1684} ["Yacute" "Ý"]
+    ^{:line 1685} ["THORN" "Þ"]
+    ^{:line 1686} ["szlig" "ß"]
+    ^{:line 1687} ["agrave" "à"]
+    ^{:line 1688} ["aacute" "á"]
+    ^{:line 1689} ["acirc" "â"]
+    ^{:line 1690} ["atilde" "ã"]
+    ^{:line 1691} ["auml" "ä"]
+    ^{:line 1692} ["aring" "å"]
+    ^{:line 1693} ["aelig" "æ"]
+    ^{:line 1694} ["ccedil" "ç"]
+    ^{:line 1695} ["egrave" "è"]
+    ^{:line 1696} ["eacute" "é"]
+    ^{:line 1697} ["ecirc" "ê"]
+    ^{:line 1698} ["euml" "ë"]
+    ^{:line 1699} ["igrave" "ì"]
+    ^{:line 1700} ["iacute" "í"]
+    ^{:line 1701} ["icirc" "î"]
+    ^{:line 1702} ["iuml" "ï"]
+    ^{:line 1703} ["eth" "ð"]
+    ^{:line 1704} ["ntilde" "ñ"]
+    ^{:line 1705} ["ograve" "ò"]
+    ^{:line 1706} ["oacute" "ó"]
+    ^{:line 1707} ["ocirc" "ô"]
+    ^{:line 1708} ["otilde" "õ"]
+    ^{:line 1709} ["ouml" "ö"]
+    ^{:line 1710} ["divide" "÷"]
+    ^{:line 1711} ["oslash" "ø"]
+    ^{:line 1712} ["ugrave" "ù"]
+    ^{:line 1713} ["uacute" "ú"]
+    ^{:line 1714} ["ucirc" "û"]
+    ^{:line 1715} ["uuml" "ü"]
+    ^{:line 1716} ["yacute" "ý"]
+    ^{:line 1717} ["thorn" "þ"]
+    ^{:line 1718} ["yuml" "ÿ"]
+    ^{:line 1719} ["fnof" "ƒ"]
+    ^{:line 1720} ["Alpha" "Α"]
+    ^{:line 1721} ["Beta" "Β"]
+    ^{:line 1722} ["Gamma" "Γ"]
+    ^{:line 1723} ["Delta" "Δ"]
+    ^{:line 1724} ["Epsilon" "Ε"]
+    ^{:line 1725} ["Zeta" "Ζ"]
+    ^{:line 1726} ["Eta" "Η"]
+    ^{:line 1727} ["Theta" "Θ"]
+    ^{:line 1728} ["Iota" "Ι"]
+    ^{:line 1729} ["Kappa" "Κ"]
+    ^{:line 1730} ["Lambda" "Λ"]
+    ^{:line 1731} ["Mu" "Μ"]
+    ^{:line 1732} ["Nu" "Ν"]
+    ^{:line 1733} ["Xi" "Ξ"]
+    ^{:line 1734} ["Omicron" "Ο"]
+    ^{:line 1735} ["Pi" "Π"]
+    ^{:line 1736} ["Rho" "Ρ"]
+    ^{:line 1737} ["Sigma" "Σ"]
+    ^{:line 1738} ["Tau" "Τ"]
+    ^{:line 1739} ["Upsilon" "Υ"]
+    ^{:line 1740} ["Phi" "Φ"]
+    ^{:line 1741} ["Chi" "Χ"]
+    ^{:line 1742} ["Psi" "Ψ"]
+    ^{:line 1743} ["Omega" "Ω"]
+    ^{:line 1744} ["alpha" "α"]
+    ^{:line 1745} ["beta" "β"]
+    ^{:line 1746} ["gamma" "γ"]
+    ^{:line 1747} ["delta" "δ"]
+    ^{:line 1748} ["epsilon" "ε"]
+    ^{:line 1749} ["zeta" "ζ"]
+    ^{:line 1750} ["eta" "η"]
+    ^{:line 1751} ["theta" "θ"]
+    ^{:line 1752} ["iota" "ι"]
+    ^{:line 1753} ["kappa" "κ"]
+    ^{:line 1754} ["lambda" "λ"]
+    ^{:line 1755} ["mu" "μ"]
+    ^{:line 1756} ["nu" "ν"]
+    ^{:line 1757} ["xi" "ξ"]
+    ^{:line 1758} ["omicron" "ο"]
+    ^{:line 1759} ["pi" "π"]
+    ^{:line 1760} ["rho" "ρ"]
+    ^{:line 1761} ["sigmaf" "ς"]
+    ^{:line 1762} ["sigma" "σ"]
+    ^{:line 1763} ["tau" "τ"]
+    ^{:line 1764} ["upsilon" "υ"]
+    ^{:line 1765} ["phi" "φ"]
+    ^{:line 1766} ["chi" "χ"]
+    ^{:line 1767} ["psi" "ψ"]
+    ^{:line 1768} ["omega" "ω"]
+    ^{:line 1769} ["thetasym" "ϑ"]
+    ^{:line 1770} ["upsih" "ϒ"]
+    ^{:line 1771} ["piv" "ϖ"]
+    ^{:line 1772} ["bull" "•"]
+    ^{:line 1773} ["hellip" "…"]
+    ^{:line 1774} ["prime" "′"]
+    ^{:line 1775} ["Prime" "″"]
+    ^{:line 1776} ["oline" "‾"]
+    ^{:line 1777} ["frasl" "⁄"]
+    ^{:line 1778} ["weierp" "℘"]
+    ^{:line 1779} ["image" "ℑ"]
+    ^{:line 1780} ["real" "ℜ"]
+    ^{:line 1781} ["trade" "™"]
+    ^{:line 1782} ["alefsym" "ℵ"]
+    ^{:line 1783} ["larr" "←"]
+    ^{:line 1784} ["uarr" "↑"]
+    ^{:line 1785} ["rarr" "→"]
+    ^{:line 1786} ["darr" "↓"]
+    ^{:line 1787} ["harr" "↔"]
+    ^{:line 1788} ["crarr" "↵"]
+    ^{:line 1789} ["lArr" "⇐"]
+    ^{:line 1790} ["uArr" "⇑"]
+    ^{:line 1791} ["rArr" "⇒"]
+    ^{:line 1792} ["dArr" "⇓"]
+    ^{:line 1793} ["hArr" "⇔"]
+    ^{:line 1794} ["forall" "∀"]
+    ^{:line 1795} ["part" "∂"]
+    ^{:line 1796} ["exist" "∃"]
+    ^{:line 1797} ["empty" "∅"]
+    ^{:line 1798} ["nabla" "∇"]
+    ^{:line 1799} ["isin" "∈"]
+    ^{:line 1800} ["notin" "∉"]
+    ^{:line 1801} ["ni" "∋"]
+    ^{:line 1802} ["prod" "∏"]
+    ^{:line 1803} ["sum" "∑"]
+    ^{:line 1804} ["minus" "−"]
+    ^{:line 1805} ["lowast" "∗"]
+    ^{:line 1806} ["radic" "√"]
+    ^{:line 1807} ["prop" "∝"]
+    ^{:line 1808} ["infin" "∞"]
+    ^{:line 1809} ["ang" "∠"]
+    ^{:line 1810} ["and" "∧"]
+    ^{:line 1811} ["or" "∨"]
+    ^{:line 1812} ["cap" "∩"]
+    ^{:line 1813} ["cup" "∪"]
+    ^{:line 1814} ["int" "∫"]
+    ^{:line 1815} ["there4" "∴"]
+    ^{:line 1816} ["sim" "∼"]
+    ^{:line 1817} ["cong" "≅"]
+    ^{:line 1818} ["asymp" "≈"]
+    ^{:line 1819} ["ne" "≠"]
+    ^{:line 1820} ["equiv" "≡"]
+    ^{:line 1821} ["le" "≤"]
+    ^{:line 1822} ["ge" "≥"]
+    ^{:line 1823} ["sub" "⊂"]
+    ^{:line 1824} ["sup" "⊃"]
+    ^{:line 1825} ["nsub" "⊄"]
+    ^{:line 1826} ["sube" "⊆"]
+    ^{:line 1827} ["supe" "⊇"]
+    ^{:line 1828} ["oplus" "⊕"]
+    ^{:line 1829} ["otimes" "⊗"]
+    ^{:line 1830} ["perp" "⊥"]
+    ^{:line 1831} ["sdot" "⋅"]
+    ^{:line 1832} ["lceil" "⌈"]
+    ^{:line 1833} ["rceil" "⌉"]
+    ^{:line 1834} ["lfloor" "⌊"]
+    ^{:line 1835} ["rfloor" "⌋"]
+    ^{:line 1836} ["lang" "〈"]
+    ^{:line 1837} ["rang" "〉"]
+    ^{:line 1838} ["loz" "◊"]
+    ^{:line 1839} ["spades" "♠"]
+    ^{:line 1840} ["clubs" "♣"]
+    ^{:line 1841} ["hearts" "♥"]
+    ^{:line 1842} ["diams" "♦"]
+    ^{:line 1843} ["quot" "\""]
+    ^{:line 1844} ["amp" "&"]
+    ^{:line 1845} ["lt" "<"]
+    ^{:line 1846} ["gt" ">"]
+    ^{:line 1847} ["OElig" "Œ"]
+    ^{:line 1848} ["oelig" "œ"]
+    ^{:line 1849} ["Scaron" "Š"]
+    ^{:line 1850} ["scaron" "š"]
+    ^{:line 1851} ["Yuml" "Ÿ"]
+    ^{:line 1852} ["circ" "ˆ"]
+    ^{:line 1853} ["tilde" "˜"]
+    ^{:line 1854} ["ensp" "\u2002"]
+    ^{:line 1855} ["emsp" "\u2003"]
+    ^{:line 1856} ["thinsp" "\u2009"]
+    ^{:line 1857} ["zwnj" "\u200c"]
+    ^{:line 1858} ["zwj" "\u200d"]
+    ^{:line 1859} ["lrm" "\u200e"]
+    ^{:line 1860} ["rlm" "\u200f"]
+    ^{:line 1861} ["ndash" "–"]
+    ^{:line 1862} ["mdash" "—"]
+    ^{:line 1863} ["lsquo" "‘"]
+    ^{:line 1864} ["rsquo" "’"]
+    ^{:line 1865} ["sbquo" "‚"]
+    ^{:line 1866} ["ldquo" "“"]
+    ^{:line 1867} ["rdquo" "”"]
+    ^{:line 1868} ["bdquo" "„"]
+    ^{:line 1869} ["dagger" "†"]
+    ^{:line 1870} ["Dagger" "‡"]
+    ^{:line 1871} ["permil" "‰"]
+    ^{:line 1872} ["lsaquo" "‹"]
+    ^{:line 1873} ["rsaquo" "›"]
+    ^{:line 1874} ["euro" "€"]))
+
+
+
+
+
+
+(go/var ^{:tag (slice string) :doc "HTMLAutoClose is the set of HTML elements that\nshould be considered to close automatically.\n\nSee the [Decoder.Strict] and [Decoder.Entity] fields' documentation.\n"} HTMLAutoClose htmlAutoClose)
+
+(go/var htmlAutoClose ^{:go/breaks [[2 1888] 3 4 5 6 7 8 9 10 11 12 13 14]} (lit (slice string)
+    ;; /*
+    ;; hget http://www.w3.org/TR/html4/loose.dtd |
+    ;; 9 sed -n 's/<!ELEMENT ([^ ]*) +- O EMPTY.+/	"\1",/p' | tr A-Z a-z
+    ;; */
+    "basefont"
+    "br"
+    "area"
+    "link"
+    "img"
+    "param"
+    "hr"
+    "input"
+    "col"
+    "frame"
+    "isindex"
+    "base"
+    "meta"))
+
+
+(go/var
+  ^{:line 1904} [escQuot (conv (slice byte) "&#34;")] ; shorter than "&quot;"
+  ^{:line 1905} [escApos (conv (slice byte) "&#39;")] ; shorter than "&apos;"
+  ^{:line 1906} [escAmp (conv (slice byte) "&amp;")]
+  ^{:line 1907} [escLT (conv (slice byte) "&lt;")]
+  ^{:line 1908} [escGT (conv (slice byte) "&gt;")]
+  ^{:line 1909} [escTab (conv (slice byte) "&#x9;")]
+  ^{:line 1910} [escNL (conv (slice byte) "&#xA;")]
+  ^{:line 1911} [escCR (conv (slice byte) "&#xD;")]
+  ^{:line 1912} [escFFFD (conv (slice byte) "\ufffd")]) ; Unicode replacement character
+
+
+
+
+^{:go/end 1919} (go/func EscapeText "EscapeText writes to w the properly escaped XML equivalent\nof the plain text data s.\n" ^error [^io/Writer w ^{:tag (slice byte)} s]
+  (escapeText w s true))
+
+
+
+
+
+^{:go/end 1967} (go/func escapeText "escapeText writes to w the properly escaped XML equivalent\nof the plain text data s. If escapeNewline is true, newline\ncharacters will be escaped.\n" ^error [^io/Writer w ^{:tag (slice byte)} s ^bool escapeNewline]
+  (let [^{:tag (slice byte)} esc (zero (slice byte))
+      ^{:line 1926} last 0]
+    (for [i 0] (< i (len s)) _
+      (let [(values r width) (utf8/DecodeRune (subslice s i))]
+        (set! i + width)
+        (switch r
+          (case [\"]
+            (set! esc escQuot))
+          (case [\']
+            (set! esc escApos))
+          (case [\&]
+            (set! esc escAmp))
+          (case [\<]
+            (set! esc escLT))
+          (case [\>]
+            (set! esc escGT))
+          (case [\tab]
+            (set! esc escTab))
+          (case [\newline]
+            (when (not escapeNewline)
+              (continue))
+
+            (set! esc escNL))
+          (case [\return]
+            (set! esc escCR))
+          (default
+            (when (or (not (isInCharacterRange r)) ^:go/paren (and (== r 0xFFFD) (== width 1)))
+              (set! esc escFFFD)
+              (break))
+
+            (continue)))
+
+        (when [(values _ err) (.Write w (subslice s last (- i width)))] (!= err nil)
+          (return err))
+
+        (when [(values _ err) (.Write w esc)] (!= err nil)
+          (return err))
+
+        (set! last i)))
+
+    (let [(values _ err) (.Write w (subslice s last))]
+      ^{:line 1966} err)))
+
+
+
+
+^{:go/end 2006} (go/method EscapeString "EscapeString writes to p the properly escaped XML equivalent\nof the plain text data s.\n" [^{:tag (* printer)} p ^string s]
+  (let [^{:tag (slice byte)} esc (zero (slice byte))
+      ^{:line 1973} last 0]
+    (for [i 0] (< i (len s)) _
+      (let [(values r width) (utf8/DecodeRuneInString (subslice s i))]
+        (set! i + width)
+        (switch r
+          (case [\"]
+            (set! esc escQuot))
+          (case [\']
+            (set! esc escApos))
+          (case [\&]
+            (set! esc escAmp))
+          (case [\<]
+            (set! esc escLT))
+          (case [\>]
+            (set! esc escGT))
+          (case [\tab]
+            (set! esc escTab))
+          (case [\newline]
+            (set! esc escNL))
+          (case [\return]
+            (set! esc escCR))
+          (default
+            (when (or (not (isInCharacterRange r)) ^:go/paren (and (== r 0xFFFD) (== width 1)))
+              (set! esc escFFFD)
+              (break))
+
+            (continue)))
+
+        (.WriteString p (subslice s last (- i width)))
+        (.Write p esc)
+        (set! last i)))
+
+    (.WriteString p (subslice s last))))
+
+
+
+
+
+^{:go/end 2013} (go/func Escape "Escape is like [EscapeText] but omits the error return value.\nIt is provided for backwards compatibility with Go 1.0.\nCode targeting Go 1.1 or later should use [EscapeText].\n" [^io/Writer w ^{:tag (slice byte)} s]
+  (EscapeText w s))
+
+
+(go/var
+  ^{:line 2016} [cdataStart (conv (slice byte) "<![CDATA[")]
+  ^{:line 2017} [cdataEnd (conv (slice byte) "]]>")]
+  ^{:line 2018} [cdataEscape (conv (slice byte) "]]]]><![CDATA[>")])
+
+
+
+
+^{:go/end 2052} (go/func emitCDATA "emitCDATA writes to w the CDATA-wrapped plain text data s.\nIt escapes CDATA directives nested in s.\n" ^error [^io/Writer w ^{:tag (slice byte)} s]
+  (when (== (len s) 0)
+    (return nil))
+
+  (when [(values _ err) (.Write w cdataStart)] (!= err nil)
+    (return err))
+
+
+  (while true
+    (let [(values before after ok) (bytes/Cut s cdataEnd)]
+      (when (not ok)
+        (break))
+
+      ;; Found a nested CDATA directive end.
+      (when [(values _ err) (.Write w before)] (!= err nil)
+        (return err))
+
+      (when [(values _ err) (.Write w cdataEscape)] (!= err nil)
+        (return err))
+
+      (set! s after)))
+
+
+  (when [(values _ err) (.Write w s)] (!= err nil)
+    (return err))
+
+
+  (let [(values _ err) (.Write w cdataEnd)]
+    ^{:line 2051} err))
+
+
+
+
+^{:go/end 2083} (go/func procInst "procInst parses the `param=\"...\"` or `param='...'`\nvalue out of the provided string, returning \"\" if not found.\n" ^string [^string param ^string s]
+  ;; TODO: this parsing is somewhat lame and not exact.
+  ;; It works for all actual cases, though.
+  (set! param (+ param "="))
+  (let [lenp (len param)
+      ^{:line 2061} i 0
+      ^{:line 2062 :tag byte} sep (zero byte)]
+    (while (< i (len s))
+      (let [sub (subslice s i)
+          ^{:line 2065} k (strings/Index sub param)]
+        (when (or (< k 0) (>= (+ lenp k) (len sub)))
+          (return ""))
+
+        (set! i + (+ lenp k 1))
+        (when [c (aget sub (+ lenp k))] (or (== c \') (== c \"))
+          (set! sep c)
+          (break))))
+
+
+    (when (== sep 0)
+      (return ""))
+
+    (let [j (strings/IndexByte (subslice s i) sep)]
+      (when (< j 0)
+        (return ""))
+
+      (subslice s i (+ i j)))))

@@ -1,0 +1,164 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.sha3) (go/file "shake.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fips140 "crypto/internal/fips140"]
+    ^{:line 10} [byteorder "crypto/internal/fips140deps/byteorder"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [bits "math/bits"]])
+
+
+(go/type SHAKE (struct
+    ^{:line 16 :tag Digest} d ; SHA-3 state context and Read/Write operations
+
+
+
+
+
+
+    ^{:line 23 :tag (slice byte) :doc "initBlock is the cSHAKE specific initialization set of bytes. It is initialized\nby newCShake function and stores concatenation of N followed by S, encoded\nby the method specified in 3.3 of [1].\nIt is stored here in order for Reset() to be able to put context into\ninitial state.\n"} initBlock))
+
+
+^{:go/end 34} (go/func bytepadWrite [^{:tag (* SHAKE)} c ^{:tag (slice byte)} data ^int rate]
+  (let [rateEnc (leftEncode (conv uint64 rate))]
+    (.Write c rateEnc)
+    (.Write c data)
+    (when [padlen (- rate (% (+ (len rateEnc) (len data)) rate))] (< padlen rate)
+      (let [^:const ^{:val 168} maxRate rateK256]
+        (.Write c (make (slice byte) padlen maxRate)))))) ; explicit cap to allow stack allocation
+
+
+
+^{:go/end 48} (go/func leftEncode ^{:tag (slice byte)} [^uint64 x]
+  ;; Let n be the smallest positive integer for which 2^(8n) > x.
+  (let [n (/ (+ (bits/Len64 x) 7) 8)]
+    (when (== n 0)
+      (set! n 1))
+
+    ;; Return n || x with n as a byte and x an n bytes in big-endian order.
+    (let [b (make (slice byte) 9)]
+      (byteorder/BEPutUint64 (subslice b 1) x)
+      (set! b (subslice b (- 9 n 1)))
+      (aset b 0 (conv byte n))
+      ^{:line 47} b)))
+
+
+^{:go/end 59} (go/func newCShake ^{:tag (* SHAKE)} [^{:tag (* SHAKE)} c ^{:tag (slice byte)} N ^{:tag (slice byte)} S ^int rate ^int outputLen ^byte dsbyte]
+  (set! (.-d c) (lit Digest :rate rate :outputLen outputLen :dsbyte dsbyte))
+  (set! (.-initBlock c) (make (slice byte) 0 (+ 9 (len N) 9 (len S)))) ; leftEncode returns max 9 bytes
+  (set! (.-initBlock c) (append (.-initBlock c) (spread (leftEncode (* (conv uint64 (len N)) 8)))))
+  (set! (.-initBlock c) (append (.-initBlock c) (spread N)))
+  (set! (.-initBlock c) (append (.-initBlock c) (spread (leftEncode (* (conv uint64 (len S)) 8)))))
+  (set! (.-initBlock c) (append (.-initBlock c) (spread S)))
+  (bytepadWrite c (.-initBlock c) (.-rate (.-d c)))
+  ^{:line 58} c)
+
+
+^{:go/end 61} (go/method BlockSize ^int [^{:tag (* SHAKE)} s] (.BlockSize (.-d s)))
+^{:go/end 62} (go/method Size ^int [^{:tag (* SHAKE)} s] (.Size (.-d s)))
+
+
+
+
+
+^{:go/end 68} (go/method Sum "Sum appends a portion of output to b and returns the resulting slice. The\noutput length is selected to provide full-strength generic security: 32 bytes\nfor SHAKE128 and 64 bytes for SHAKE256. It does not change the underlying\nstate. It panics if any output has already been read.\n" ^{:tag (slice byte)} [^{:tag (* SHAKE)} s ^{:tag (slice byte)} in] (.Sum (.-d s) in))
+
+
+
+^{:go/end 72} (go/method Write "Write absorbs more data into the hash's state.\nIt panics if any output has already been read.\n" [^{:tag (* SHAKE)} s ^{:tag (slice byte)} p] :results [^int n ^error err] (.Write (.-d s) p))
+
+^{:go/end 79} (go/method Read [^{:tag (* SHAKE)} s ^{:tag (slice byte)} out] :results [^int n ^error err]
+  (fips140/RecordApproved)
+  ;; Note that read is not exposed on Digest since SHA-3 does not offer
+  ;; variable output length. It is only used internally by Sum.
+  (.read (.-d s) out))
+
+
+
+^{:go/end 87} (go/method Reset "Reset resets the hash to initial state.\n" [^{:tag (* SHAKE)} s]
+  (.Reset (.-d s))
+  (when (!= (len (.-initBlock s)) 0)
+    (bytepadWrite s (.-initBlock s) (.-rate (.-d s)))))
+
+
+
+
+^{:go/end 93} (go/method Clone "Clone returns a copy of the SHAKE context in its current state.\n" ^{:tag (* SHAKE)} [^{:tag (* SHAKE)} s]
+  (let [ret @s]
+    (addr ret)))
+
+
+^{:go/end 97} (go/method MarshalBinary [^{:tag (* SHAKE)} s] :results [(slice byte) error]
+  (.AppendBinary s (make (slice byte) 0 (+ marshaledSize (len (.-initBlock s))))))
+
+
+^{:go/end 106} (go/method AppendBinary [^{:tag (* SHAKE)} s ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (let [(values ^:assign b err) (.AppendBinary (.-d s) b)]
+    (when (!= err nil)
+      (return nil err))
+
+    (set! b (append b (spread (.-initBlock s))))
+    (return b nil)))
+
+
+^{:go/breaks [6] :go/end 117} (go/method UnmarshalBinary ^error [^{:tag (* SHAKE)} s ^{:tag (slice byte)} b]
+  (when (< (len b) marshaledSize)
+    (return (errors/New "sha3: invalid hash state")))
+
+  (when [err (.UnmarshalBinary (.-d s) (subslice b _ marshaledSize))] (!= err nil)
+    (return err))
+
+  (set! (.-initBlock s) (bytes/Clone (subslice b marshaledSize)))
+  nil)
+
+
+
+^{:go/end 122} (go/func NewShake128 "NewShake128 creates a new SHAKE128 XOF.\n" ^{:tag (* SHAKE)} []
+  (addr (lit SHAKE :d (lit Digest :rate rateK256 :outputLen 32 :dsbyte dsbyteShake))))
+
+
+
+^{:go/end 127} (go/func NewShake256 "NewShake256 creates a new SHAKE256 XOF.\n" ^{:tag (* SHAKE)} []
+  (addr (lit SHAKE :d (lit Digest :rate rateK512 :outputLen 64 :dsbyte dsbyteShake))))
+
+
+
+
+
+
+
+^{:go/end 138} (go/func NewCShake128 "NewCShake128 creates a new cSHAKE128 XOF.\n\nN is used to define functions based on cSHAKE, it can be empty when plain\ncSHAKE is desired. S is a customization byte string used for domain\nseparation. When N and S are both empty, this is equivalent to NewShake128.\n" ^{:tag (* SHAKE)} [^{:tag (slice byte)} N ^{:tag (slice byte)} S]
+  ;; The actual logic is in a separate function to outline this allocation.
+  (let [c (addr (lit SHAKE))]
+    (newCShake128 c N S)))
+
+
+^{:go/end 146} (go/func newCShake128 ^{:tag (* SHAKE)} [^{:tag (* SHAKE)} c ^{:tag (slice byte)} N ^{:tag (slice byte)} S]
+  (when (and (== (len N) 0) (== (len S) 0))
+    (set! @c @(NewShake128))
+    (return c))
+
+  (newCShake c N S rateK256 32 dsbyteCShake))
+
+
+
+
+
+
+
+^{:go/end 157} (go/func NewCShake256 "NewCShake256 creates a new cSHAKE256 XOF.\n\nN is used to define functions based on cSHAKE, it can be empty when plain\ncSHAKE is desired. S is a customization byte string used for domain\nseparation. When N and S are both empty, this is equivalent to NewShake256.\n" ^{:tag (* SHAKE)} [^{:tag (slice byte)} N ^{:tag (slice byte)} S]
+  ;; The actual logic is in a separate function to outline this allocation.
+  (let [c (addr (lit SHAKE))]
+    (newCShake256 c N S)))
+
+
+^{:go/end 165} (go/func newCShake256 ^{:tag (* SHAKE)} [^{:tag (* SHAKE)} c ^{:tag (slice byte)} N ^{:tag (slice byte)} S]
+  (when (and (== (len N) 0) (== (len S) 0))
+    (set! @c @(NewShake256))
+    (return c))
+
+  (newCShake c N S rateK512 64 dsbyteCShake))

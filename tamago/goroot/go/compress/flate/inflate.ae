@@ -1,0 +1,835 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package flate implements the DEFLATE compressed data format, described in
+;; RFC 1951.  The [compress/gzip] and [compress/zlib] packages implement access
+;; to DEFLATE-based file formats.
+(in-ns 'go.compress.flate) (go/file "inflate.go" :doc "Package flate implements the DEFLATE compressed data format, described in\nRFC 1951.  The [compress/gzip] and [compress/zlib] packages implement access\nto DEFLATE-based file formats.\n" :imports [
+
+
+    ^{:line 11} [bufio "bufio"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [bits "math/bits"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [sync "sync"]])
+
+
+(go/const
+  ^{:line 19} [^{:val 16} maxCodeLen 16] ; max length of Huffman code
+
+
+
+  ^{:line 23} [^{:val 286 :doc "The next three numbers come from the RFC section 3.2.7, with the\nadditional proviso in section 3.2.5 which implies that distance codes\n30 and 31 should never occur in compressed data.\n"} maxNumLit 286]
+  ^{:line 24} [^{:val 30} maxNumDist 30]
+  ^{:line 25} [^{:val 19} numCodes 19]) ; number of codes in Huffman meta-code
+
+
+
+(go/var ^{:tag sync/Once :doc "Initialize the fixedHuffmanDecoder only once upon first use.\n"} fixedOnce)
+(go/var ^huffmanDecoder fixedHuffmanDecoder)
+
+
+(go/type CorruptInputError "A CorruptInputError reports the presence of corrupt input at a given offset.\n" int64)
+
+^{:go/end 37} (go/method Error ^string [^CorruptInputError e]
+  (+ "flate: corrupt input before offset " (strconv/FormatInt (conv int64 e) 10)))
+
+
+
+(go/type InternalError "An InternalError reports an error in the flate code itself.\n" string)
+
+^{:go/end 42} (go/method Error ^string [^InternalError e] (+ "flate: internal error: " (conv string e)))
+
+
+
+
+(go/type ReadError "A ReadError reports an error encountered while reading input.\n\nDeprecated: No longer returned.\n" (struct
+    ^{:line 48 :tag int64} Offset ; byte offset where error occurred
+    ^{:line 49 :tag error} Err)) ; error returned by underlying Read
+
+
+^{:go/end 54} (go/method Error ^string [^{:tag (* ReadError)} e]
+  (+ "flate: read error at offset " (strconv/FormatInt (.-Offset e) 10) ": " (.Error (.-Err e))))
+
+
+
+
+
+(go/type WriteError "A WriteError reports an error encountered while writing output.\n\nDeprecated: No longer returned.\n" (struct
+    ^{:line 60 :tag int64} Offset ; byte offset where error occurred
+    ^{:line 61 :tag error} Err)) ; error returned by underlying Write
+
+
+^{:go/end 66} (go/method Error ^string [^{:tag (* WriteError)} e]
+  (+ "flate: write error at offset " (strconv/FormatInt (.-Offset e) 10) ": " (.Error (.-Err e))))
+
+
+
+
+
+(go/type Resetter "Resetter resets a ReadCloser returned by [NewReader] or [NewReaderDict]\nto switch to a new underlying [Reader]. This permits reusing a ReadCloser\ninstead of allocating a new one.\n" (interface
+
+
+    (^{:doc "Reset discards any buffered data and resets the Resetter as if it was\nnewly initialized with the given reader.\n"} Reset ^error [^io/Reader r ^{:tag (slice byte)} dict])))
+
+
+;; The data structure for decoding Huffman tables is based on that of
+;; zlib. There is a lookup table of a fixed bit width (huffmanChunkBits),
+;; For codes smaller than the table width, there are multiple entries
+;; (each combination of trailing bits has the same value). For codes
+;; larger than the table width, the table contains a link to an overflow
+;; table. The width of each entry in the link table is the maximum code
+;; size minus the chunk width.
+;;
+;; Note that you can do a lookup in the table even without all bits
+;; filled. Since the extra bits are zero, and the DEFLATE Huffman codes
+;; have the property that shorter codes come before longer ones, the
+;; bit length estimate in the result is a lower bound on the actual
+;; number of bits.
+;;
+;; See the following:
+;;	https://github.com/madler/zlib/raw/master/doc/algorithm.txt
+
+;; chunk & 15 is number of bits
+;; chunk >> 4 is value, including table link
+
+(go/const
+  ^{:line 98} [^{:val 9} huffmanChunkBits 9]
+  ^{:line 99} [^{:val 512} huffmanNumChunks (<< 1 huffmanChunkBits)]
+  ^{:line 100} [^{:val 15} huffmanCountMask 15]
+  ^{:line 101} [^{:val 4} huffmanValueShift 4])
+
+
+(go/type huffmanDecoder (struct
+    ^{:line 105 :tag int} min ; the minimum code length
+    ^{:line 106 :tag (array huffmanNumChunks uint32)} chunks ; chunks as described above
+    ^{:line 107 :tag (slice (slice uint32))} links ; overflow links
+    ^{:line 108 :tag uint32} linkMask)) ; mask the width of the link table
+
+
+
+
+
+
+
+^{:go/end 256} (go/method init "Initialize Huffman decoding tables from array of code lengths.\nFollowing this function, h is guaranteed to be initialized into a complete\ntree (i.e., neither over-subscribed nor under-subscribed). The exception is a\ndegenerate case where the tree has only a single symbol with length 1. Empty\ntrees are permitted.\n" ^bool [^{:tag (* huffmanDecoder)} h ^{:tag (slice int)} lengths]
+  ;; Sanity enables additional runtime tests during Huffman
+  ;; table construction. It's intended to be used during
+  ;; development to supplement the currently ad-hoc unit tests.
+  (let [^:const ^{:val false} sanity false]
+
+    (when (!= (.-min h) 0)
+      (set! @h (lit huffmanDecoder)))
+
+
+    ;; Count number of codes of each length,
+    ;; compute min and max length.
+    (let [^{:tag (array maxCodeLen int)} count (zero (array maxCodeLen int))
+        (values ^int min ^int max) (zero int)]
+      (range [_ n lengths]
+        (when (== n 0)
+          (continue))
+
+        (when (or (== min 0) (< n min))
+          (set! min n))
+
+        (when (> n max)
+          (set! max n))
+
+        (inc! (aget count n)))
+
+
+      ;; Empty tree. The decompressor.huffSym function will fail later if the tree
+      ;; is used. Technically, an empty tree is only valid for the HDIST tree and
+      ;; not the HCLEN and HLIT tree. However, a stream with an empty HCLEN tree
+      ;; is guaranteed to fail since it will attempt to use the tree to decode the
+      ;; codes for the HLIT and HDIST trees. Similarly, an empty HLIT tree is
+      ;; guaranteed to fail later since the compressed data section must be
+      ;; composed of at least one symbol (the end-of-block marker).
+      (when (== max 0)
+        (return true))
+
+
+      ^{:go/breaks [[8 255]]} (let [code 0
+          ^{:line 155 :tag (array maxCodeLen int)} nextcode (zero (array maxCodeLen int))]
+        (for [i min] (<= i max) (inc! i)
+          (set! code << 1)
+          (aset nextcode i code)
+          (set! code + (aget count i)))
+
+
+        ;; Check that the coding is complete (i.e., that we've
+        ;; assigned all 2-to-the-max possible bit sequences).
+        ;; Exception: To be compatible with zlib, we also need to
+        ;; accept degenerate single-code codings. See also
+        ;; TestDegenerateHuffmanCoding.
+        (when (and (!= code ^int (<< 1 (conv uint max))) (not (and (== code 1) (== max 1))))
+          (return false))
+
+
+        (set! (.-min h) min)
+        (when (> max huffmanChunkBits)
+          (let [numLinks ^int (<< 1 (- (conv uint max) huffmanChunkBits))]
+            (set! (.-linkMask h) (conv uint32 (- numLinks 1)))
+
+            ;; create link tables
+            (let [link (>> (aget nextcode (+ huffmanChunkBits 1)) 1)]
+              (set! (.-links h) (make (slice (slice uint32)) (- huffmanNumChunks link)))
+              (for [j (conv uint link)] (< j huffmanNumChunks) (inc! j)
+                (let [reverse (conv int (bits/Reverse16 (conv uint16 j)))]
+                  (set! reverse >> (conv uint (- 16 huffmanChunkBits)))
+                  (let [off (- j (conv uint link))]
+                    (when (and sanity (!= (aget (.-chunks h) reverse) 0))
+                      (panic "impossible: overwriting existing chunk"))
+
+                    (aset (.-chunks h) reverse (conv uint32 (bit-or (<< off huffmanValueShift) (+ huffmanChunkBits 1))))
+                    (aset (.-links h) off (make (slice uint32) numLinks))))))))
+
+
+
+        (range [i n lengths]
+          (when (== n 0)
+            (continue))
+
+          (let [code (aget nextcode n)]
+            (inc! (aget nextcode n))
+            (let [chunk (conv uint32 (bit-or (<< i huffmanValueShift) n))
+                ^{:line 198} reverse (conv int (bits/Reverse16 (conv uint16 code)))]
+              (set! reverse >> (conv uint (- 16 n)))
+              (if (<= n huffmanChunkBits)
+                (for [off reverse] (< off (len (.-chunks h))) (set! off + ^int (<< 1 (conv uint n)))
+                  ;; We should never need to overwrite
+                  ;; an existing chunk. Also, 0 is
+                  ;; never a valid chunk, because the
+                  ;; lower 4 "count" bits should be
+                  ;; between 1 and 15.
+                  (when (and sanity (!= (aget (.-chunks h) off) 0))
+                    (panic "impossible: overwriting existing chunk"))
+
+                  (aset (.-chunks h) off chunk))
+
+
+                (let [j (bit-and reverse (- huffmanNumChunks 1))]
+                  (when (and sanity (!= (bit-and (aget (.-chunks h) j) huffmanCountMask) (+ huffmanChunkBits 1)))
+                    ;; Longer codes should have been
+                    ;; associated with a link table above.
+                    (panic "impossible: not an indirect chunk"))
+
+                  (let [value (>> (aget (.-chunks h) j) huffmanValueShift)
+                      ^{:line 220} linktab (aget (.-links h) value)]
+                    (set! reverse >> huffmanChunkBits)
+                    (for [off reverse] (< off (len linktab)) (set! off + ^int (<< 1 (conv uint (- n huffmanChunkBits))))
+                      (when (and sanity (!= (aget linktab off) 0))
+                        (panic "impossible: overwriting existing chunk"))
+
+                      (aset linktab off chunk))))))))
+
+
+
+
+        (when sanity
+          ;; Above we've sanity checked that we never overwrote
+          ;; an existing entry. Here we additionally check that
+          ;; we filled the tables completely.
+          (range [i chunk (.-chunks h)]
+            (when (== chunk 0)
+              ;; As an exception, in the degenerate
+              ;; single-code case, we allow odd
+              ;; chunks to be missing.
+              (when (and (== code 1) (== (% i 2) 1))
+                (continue))
+
+              (panic "impossible: missing chunk")))
+
+
+          (range [_ linktab (.-links h)]
+            (range [_ chunk linktab]
+              (when (== chunk 0)
+                (panic "impossible: missing chunk")))))
+
+
+
+
+
+        true))))
+
+
+
+
+
+(go/type Reader "The actual read interface needed by [NewReader].\nIf the passed in [io.Reader] does not also have ReadByte,\nthe [NewReader] will introduce its own buffering.\n" (interface
+    ^{:line 262} io/Reader
+    ^{:line 263} io/ByteReader))
+
+
+
+(go/type decompressor "Decompress state.\n" (struct
+
+    ^{:line 269 :tag Reader :doc "Input source.\n"} r
+    ^{:line 270 :tag (* bufio/Reader)} rBuf ; created if provided io.Reader does not implement io.ByteReader
+    ^{:line 271 :tag int64} roffset
+
+
+    ^{:line 274 :tag uint32 :doc "Input bits, in top of b.\n"} b
+    ^{:line 275 :tag uint} nb
+
+
+    ^{:line 278 :tag huffmanDecoder :doc "Huffman decoders for literal/length, distance.\n"} h1 ^{:tag huffmanDecoder :doc "Huffman decoders for literal/length, distance.\n"} h2
+
+
+    ^{:line 281 :tag (* (array (+ maxNumLit maxNumDist) int)) :doc "Length arrays used to define Huffman codes.\n"} bits
+    ^{:line 282 :tag (* (array numCodes int))} codebits
+
+
+    ^{:line 285 :tag dictDecoder :doc "Output history, buffer.\n"} dict
+
+
+    ^{:line 288 :tag (array 4 byte) :doc "Temporary buffer (avoids repeated allocation).\n"} buf
+
+
+
+    ^{:line 292 :tag (func [(* decompressor)]) :doc "Next step in the decompression,\nand decompression state.\n"} step
+    ^{:line 293 :tag int} stepState
+    ^{:line 294 :tag bool} final
+    ^{:line 295 :tag error} err
+    ^{:line 296 :tag (slice byte)} toRead
+    ^{:line 297 :tag (* huffmanDecoder)} hl ^{:tag (* huffmanDecoder)} hd
+    ^{:line 298 :tag int} copyLen
+    ^{:line 299 :tag int} copyDist))
+
+
+^{:go/end 333} (go/method nextBlock [^{:tag (* decompressor)} f]
+  (while (< (.-nb f) (+ 1 2))
+    (when [(set! (.-err f) (.moreBits f))] (!= (.-err f) nil)
+      (return)))
+
+
+  (set! (.-final f) (== (bit-and (.-b f) 1) 1))
+  (set! (.-b f) >> 1)
+  (let [typ (bit-and (.-b f) 3)]
+    (set! (.-b f) >> 2)
+    (set! (.-nb f) - (+ 1 2))
+    (switch typ
+      (case [0]
+        (.dataBlock f))
+      (case [1]
+        ;; compressed, fixed Huffman tables
+        (set! (.-hl f) (addr fixedHuffmanDecoder))
+        (set! (.-hd f) nil)
+        (.huffmanBlock f))
+      (case [2]
+        ;; compressed, dynamic Huffman tables
+        (when [(set! (.-err f) (.readHuffman f))] (!= (.-err f) nil)
+          (break))
+
+        (set! (.-hl f) (addr (.-h1 f)))
+        (set! (.-hd f) (addr (.-h2 f)))
+        (.huffmanBlock f))
+      (default
+        ;; 3 is reserved.
+        (set! (.-err f) (conv CorruptInputError (.-roffset f)))))))
+
+
+
+^{:go/end 353} (go/method Read [^{:tag (* decompressor)} f ^{:tag (slice byte)} b] :results [int error]
+  (while true
+    (when (> (len (.-toRead f)) 0)
+      (let [n (copy b (.-toRead f))]
+        (set! (.-toRead f) (subslice (.-toRead f) n))
+        (when (== (len (.-toRead f)) 0)
+          (return n (.-err f)))
+
+        (return n nil)))
+
+    (when (!= (.-err f) nil)
+      (return 0 (.-err f)))
+
+    ((.-step f) f)
+    (when (and (!= (.-err f) nil) (== (len (.-toRead f)) 0))
+      (set! (.-toRead f) (.readFlush (.-dict f)))))) ; Flush what's left in case of error
+
+
+
+
+^{:go/end 360} (go/method Close ^error [^{:tag (* decompressor)} f]
+  (when (== (.-err f) io/EOF)
+    (return nil))
+
+  (.-err f))
+
+
+;; RFC 1951 section 3.2.7.
+;; Compression with dynamic Huffman codes
+
+(go/var codeOrder (lit (array ... int) 16 17 18 0 8 7 9 6 10 5 11 4 12 3 13 2 14 1 15))
+
+^{:go/end 473} (go/method readHuffman ^error [^{:tag (* decompressor)} f]
+  ;; HLIT[5], HDIST[5], HCLEN[4].
+  (while (< (.-nb f) (+ 5 5 4))
+    (when [err (.moreBits f)] (!= err nil)
+      (return err)))
+
+
+  (let [nlit (+ (conv int (bit-and (.-b f) 0x1F)) 257)]
+    (when (> nlit maxNumLit)
+      (return (conv CorruptInputError (.-roffset f))))
+
+    (set! (.-b f) >> 5)
+    (let [ndist (+ (conv int (bit-and (.-b f) 0x1F)) 1)]
+      (when (> ndist maxNumDist)
+        (return (conv CorruptInputError (.-roffset f))))
+
+      (set! (.-b f) >> 5)
+      ^{:go/breaks [[10 472]]} (let [nclen (+ (conv int (bit-and (.-b f) 0xF)) 4)]
+        ;; numCodes is 19, so nclen is always valid.
+        (set! (.-b f) >> 4)
+        (set! (.-nb f) - (+ 5 5 4))
+
+        ;; (HCLEN+4)*3 bits: code lengths in the magic codeOrder order.
+        (for [i 0] (< i nclen) (inc! i)
+          (while (< (.-nb f) 3)
+            (when [err (.moreBits f)] (!= err nil)
+              (return err)))
+
+
+          (aset (.-codebits f) (aget codeOrder i) (conv int (bit-and (.-b f) 0x7)))
+          (set! (.-b f) >> 3)
+          (set! (.-nb f) - 3))
+
+        (for [i nclen] (< i (len codeOrder)) (inc! i)
+          (aset (.-codebits f) (aget codeOrder i) 0))
+
+        (when (not (.init (.-h1 f) (subslice (.-codebits f) 0)))
+          (return (conv CorruptInputError (.-roffset f))))
+
+
+        ;; HLIT + 257 code lengths, HDIST + 1 code lengths,
+        ;; using the code length Huffman code.
+        (for [(values i n) (values 0 (+ nlit ndist))] (< i n) _
+          (let [(values x err) (.huffSym f (addr (.-h1 f)))]
+            (when (!= err nil)
+              (return err))
+
+            (when (< x 16)
+              ;; Actual length.
+              (aset (.-bits f) i x)
+              (inc! i)
+              (continue))
+
+            ;; Repeat previous length or zero.
+            (let [^int rep (zero int)
+                ^{:line 422 :tag uint} nb (zero uint)
+                ^{:line 423 :tag int} b (zero int)]
+              (switch x
+                (default
+                  (return (conv InternalError "unexpected length code")))
+                (case [16]
+                  (set! rep 3)
+                  (set! nb 2)
+                  (when (== i 0)
+                    (return (conv CorruptInputError (.-roffset f))))
+
+                  (set! b (aget (.-bits f) (- i 1))))
+                (case [17]
+                  (set! rep 3)
+                  (set! nb 3)
+                  (set! b 0))
+                (case [18]
+                  (set! rep 11)
+                  (set! nb 7)
+                  (set! b 0)))
+
+              (while (< (.-nb f) nb)
+                (when [err (.moreBits f)] (!= err nil)
+                  (return err)))
+
+
+              (set! rep + (conv int (bit-and (.-b f) (conv uint32 (- ^uint32 (<< 1 nb) 1)))))
+              (set! (.-b f) >> nb)
+              (set! (.-nb f) - nb)
+              (when (> (+ i rep) n)
+                (return (conv CorruptInputError (.-roffset f))))
+
+              (for [j 0] (< j rep) (inc! j)
+                (aset (.-bits f) i b)
+                (inc! i)))))
+
+
+
+        (when (or (not (.init (.-h1 f) (subslice (.-bits f) 0 nlit))) (not (.init (.-h2 f) (subslice (.-bits f) nlit (+ nlit ndist)))))
+          (return (conv CorruptInputError (.-roffset f))))
+
+
+        ;; As an optimization, we can initialize the min bits to read at a time
+        ;; for the HLIT tree to the length of the EOB marker since we know that
+        ;; every block must terminate with one. This preserves the property that
+        ;; we never read any extra bytes after the end of the DEFLATE stream.
+        (when (< (.-min (.-h1 f)) (aget (.-bits f) endBlockMarker))
+          (set! (.-min (.-h1 f)) (aget (.-bits f) endBlockMarker)))
+
+
+        nil))))
+
+
+
+
+
+
+^{:go/end 620} (go/method huffmanBlock "Decode a single Huffman block from f.\nhl and hd are the Huffman states for the lit/length values\nand the distance values, respectively. If hd == nil, using the\nfixed distance encoding associated with fixed Huffman blocks.\n" [^{:tag (* decompressor)} f]
+  (let [
+      ^:const ^{:line 481 :val 0} stateInit iota ; Zero value must be stateInit
+      ^:const ^:go/grouped ^:go/implicit ^{:line 482 :val 1} stateDict iota]
+
+
+    (switch (.-stepState f)
+      (case [stateInit]
+        (goto :readLiteral))
+      (case [stateDict]
+        (goto :copyHistory)))
+
+
+    (label :readLiteral
+      ;; Read literal and/or (length, distance) according to RFC section 3.2.3.
+      (do
+        (let [(values v err) (.huffSym f (.-hl f))]
+          (when (!= err nil)
+            (set! (.-err f) err)
+            (return))
+
+          (let [^uint n (zero uint) ; number of bits extra
+              ^{:line 501 :tag int} length (zero int)]
+            (switch
+              (case [(< v 256)]
+                (.writeByte (.-dict f) (conv byte v))
+                (when (== (.availWrite (.-dict f)) 0)
+                  (set! (.-toRead f) (.readFlush (.-dict f)))
+                  (set! (.-step f) (method-expr (* decompressor) huffmanBlock))
+                  (set! (.-stepState f) stateInit)
+                  (return))
+
+                (goto :readLiteral))
+              (case [(== v 256)]
+                (.finishBlock f)
+                (return))
+              ;; otherwise, reference to older data
+              (case [(< v 265)]
+                (set! length (- v (- 257 3)))
+                (set! n 0))
+              (case [(< v 269)]
+                (set! length (- (* v 2) (- (* 265 2) 11)))
+                (set! n 1))
+              (case [(< v 273)]
+                (set! length (- (* v 4) (- (* 269 4) 19)))
+                (set! n 2))
+              (case [(< v 277)]
+                (set! length (- (* v 8) (- (* 273 8) 35)))
+                (set! n 3))
+              (case [(< v 281)]
+                (set! length (- (* v 16) (- (* 277 16) 67)))
+                (set! n 4))
+              (case [(< v 285)]
+                (set! length (- (* v 32) (- (* 281 32) 131)))
+                (set! n 5))
+              (case [(< v maxNumLit)]
+                (set! length 258)
+                (set! n 0))
+              (default
+                (set! (.-err f) (conv CorruptInputError (.-roffset f)))
+                (return)))
+
+            (when (> n 0)
+              (while (< (.-nb f) n)
+                (when [(set! err (.moreBits f))] (!= err nil)
+                  (set! (.-err f) err)
+                  (return)))
+
+
+              (set! length + (conv int (bit-and (.-b f) (conv uint32 (- ^uint32 (<< 1 n) 1)))))
+              (set! (.-b f) >> n)
+              (set! (.-nb f) - n))
+
+
+            (let [^int dist (zero int)]
+              (if (== (.-hd f) nil) (do
+                  (while (< (.-nb f) 5)
+                    (when [(set! err (.moreBits f))] (!= err nil)
+                      (set! (.-err f) err)
+                      (return)))
+
+
+                  (set! dist (conv int (bits/Reverse8 (conv uint8 (<< (bit-and (.-b f) 0x1F) 3)))))
+                  (set! (.-b f) >> 5)
+                  (set! (.-nb f) - 5))
+                (do
+                  (when [(set! (values dist err) (.huffSym f (.-hd f)))] (!= err nil)
+                    (set! (.-err f) err)
+                    (return))))
+
+
+
+              (switch
+                (case [(< dist 4)]
+                  (inc! dist))
+                (case [(< dist maxNumDist)]
+                  (let [nb (>> (conv uint (- dist 2)) 1)
+                      ;; have 1 bit in bottom of dist, need nb more.
+                      ^{:line 577} extra (<< (bit-and dist 1) nb)]
+                    (while (< (.-nb f) nb)
+                      (when [(set! err (.moreBits f))] (!= err nil)
+                        (set! (.-err f) err)
+                        (return)))
+
+
+                    (set! extra bit-or (conv int (bit-and (.-b f) (conv uint32 (- ^uint32 (<< 1 nb) 1)))))
+                    (set! (.-b f) >> nb)
+                    (set! (.-nb f) - nb)
+                    (set! dist (+ ^int (<< 1 (+ nb 1)) 1 extra))))
+                (default
+                  (set! (.-err f) (conv CorruptInputError (.-roffset f)))
+                  (return)))
+
+
+              ;; No check on length; encoding can be prescient.
+              (when (> dist (.histSize (.-dict f)))
+                (set! (.-err f) (conv CorruptInputError (.-roffset f)))
+                (return))
+
+
+              (set! (values (.-copyLen f) (.-copyDist f)) (values length dist))
+              (goto :copyHistory))))))
+
+
+    (label :copyHistory
+      ;; Perform a backwards copy according to RFC section 3.2.3.
+      (do
+        (let [cnt (.tryWriteCopy (.-dict f) (.-copyDist f) (.-copyLen f))]
+          (when (== cnt 0)
+            (set! cnt (.writeCopy (.-dict f) (.-copyDist f) (.-copyLen f))))
+
+          (set! (.-copyLen f) - cnt)
+
+          (when (or (== (.availWrite (.-dict f)) 0) (> (.-copyLen f) 0))
+            (set! (.-toRead f) (.readFlush (.-dict f)))
+            (set! (.-step f) (method-expr (* decompressor) huffmanBlock)) ; We need to continue this work
+            (set! (.-stepState f) stateDict)
+            (return))
+
+          (goto :readLiteral))))))
+
+
+
+
+^{:go/end 651} (go/method dataBlock "Copy a single uncompressed data block from input to output.\n" [^{:tag (* decompressor)} f]
+  ;; Uncompressed.
+  ;; Discard current half-byte.
+  (set! (.-nb f) 0)
+  (set! (.-b f) 0)
+
+  ;; Length then ones-complement of length.
+  (let [(values nr err) (io/ReadFull (.-r f) (subslice (.-buf f) 0 4))]
+    (set! (.-roffset f) + (conv int64 nr))
+    (when (!= err nil)
+      (set! (.-err f) (noEOF err))
+      (return))
+
+    (let [n (bit-or (conv int (aget (.-buf f) 0)) (<< (conv int (aget (.-buf f) 1)) 8))
+        ^{:line 637} nn (bit-or (conv int (aget (.-buf f) 2)) (<< (conv int (aget (.-buf f) 3)) 8))]
+      (when (!= (conv uint16 nn) (conv uint16 (bit-not n)))
+        (set! (.-err f) (conv CorruptInputError (.-roffset f)))
+        (return))
+
+
+      (when (== n 0)
+        (set! (.-toRead f) (.readFlush (.-dict f)))
+        (.finishBlock f)
+        (return))
+
+
+      (set! (.-copyLen f) n)
+      (.copyData f))))
+
+
+
+
+^{:go/end 676} (go/method copyData "copyData copies f.copyLen bytes from the underlying reader into f.hist.\nIt pauses for reads when f.hist is full.\n" [^{:tag (* decompressor)} f]
+  (let [buf (.writeSlice (.-dict f))]
+    (when (> (len buf) (.-copyLen f))
+      (set! buf (subslice buf _ (.-copyLen f))))
+
+
+    (let [(values cnt err) (io/ReadFull (.-r f) buf)]
+      (set! (.-roffset f) + (conv int64 cnt))
+      (set! (.-copyLen f) - cnt)
+      (.writeMark (.-dict f) cnt)
+      (when (!= err nil)
+        (set! (.-err f) (noEOF err))
+        (return))
+
+
+      (when (or (== (.availWrite (.-dict f)) 0) (> (.-copyLen f) 0))
+        (set! (.-toRead f) (.readFlush (.-dict f)))
+        (set! (.-step f) (method-expr (* decompressor) copyData))
+        (return))
+
+      (.finishBlock f))))
+
+
+^{:go/end 686} (go/method finishBlock [^{:tag (* decompressor)} f]
+  (when (.-final f)
+    (when (> (.availRead (.-dict f)) 0)
+      (set! (.-toRead f) (.readFlush (.-dict f))))
+
+    (set! (.-err f) io/EOF))
+
+  (set! (.-step f) (method-expr (* decompressor) nextBlock)))
+
+
+
+^{:go/end 694} (go/func noEOF "noEOF returns err, unless err == io.EOF, in which case it returns io.ErrUnexpectedEOF.\n" ^error [^error e]
+  (when (== e io/EOF)
+    (return io/ErrUnexpectedEOF))
+
+  ^{:line 693} e)
+
+
+^{:go/end 705} (go/method moreBits ^error [^{:tag (* decompressor)} f]
+  ^{:go/breaks [6]} (let [(values c err) (.ReadByte (.-r f))]
+    (when (!= err nil)
+      (return (noEOF err)))
+
+    (inc! (.-roffset f))
+    (set! (.-b f) bit-or (<< (conv uint32 c) (.-nb f)))
+    (set! (.-nb f) + 8)
+    nil))
+
+
+
+^{:go/end 748} (go/method huffSym "Read the next Huffman-encoded symbol from f according to h.\n" [^{:tag (* decompressor)} f ^{:tag (* huffmanDecoder)} h] :results [int error]
+  ;; Since a huffmanDecoder can be empty or be composed of a degenerate tree
+  ;; with single element, huffSym must error on these two edge cases. In both
+  ;; cases, the chunks slice will be 0 for the invalid sequence, leading it
+  ;; satisfy the n == 0 check below.
+  (let [n (conv uint (.-min h))
+      ;; Optimization. Compiler isn't smart enough to keep f.b,f.nb in registers,
+      ;; but is smart enough to keep local variables in registers, so use nb and b,
+      ;; inline call to moreBits and reassign b,nb back to f on return.
+      (values nb b) (values (.-nb f) (.-b f))]
+    (while true
+      (while (< nb n)
+        (let [(values c err) (.ReadByte (.-r f))]
+          (when (!= err nil)
+            (set! (.-b f) b)
+            (set! (.-nb f) nb)
+            (return 0 (noEOF err)))
+
+          (inc! (.-roffset f))
+          (set! b bit-or (<< (conv uint32 c) (bit-and nb 31)))
+          (set! nb + 8)))
+
+      (let [chunk (aget (.-chunks h) (bit-and b (- huffmanNumChunks 1)))]
+        (set! n (conv uint (bit-and chunk huffmanCountMask)))
+        (when (> n huffmanChunkBits)
+          (set! chunk (aget (aget (.-links h) (>> chunk huffmanValueShift)) (bit-and (>> b huffmanChunkBits) (.-linkMask h))))
+          (set! n (conv uint (bit-and chunk huffmanCountMask))))
+
+        (when (<= n nb)
+          (when (== n 0)
+            (set! (.-b f) b)
+            (set! (.-nb f) nb)
+            (set! (.-err f) (conv CorruptInputError (.-roffset f)))
+            (return 0 (.-err f)))
+
+          (set! (.-b f) (>> b (bit-and n 31)))
+          (set! (.-nb f) (- nb n))
+          (return (conv int (>> chunk huffmanValueShift)) nil))))))
+
+
+
+
+^{:go/end 764} (go/method makeReader [^{:tag (* decompressor)} f ^io/Reader r]
+  (when [(values rr ok) (assert Reader r)] ok
+    (set! (.-rBuf f) nil)
+    (set! (.-r f) rr)
+    (return))
+
+  ;; Reuse rBuf if possible. Invariant: rBuf is always created (and owned) by decompressor.
+  (if (!= (.-rBuf f) nil)
+    (.Reset (.-rBuf f) r)
+
+    ;; bufio.NewReader will not return r, as r does not implement flate.Reader, so it is not bufio.Reader.
+    (set! (.-rBuf f) (bufio/NewReader r)))
+
+  (set! (.-r f) (.-rBuf f)))
+
+
+^{:go/end 784} (go/func fixedHuffmanDecoderInit []
+  (.Do fixedOnce ^{:go/end 783} (fn []
+      ;; These come from the RFC section 3.2.6.
+      (let [^{:tag (array 288 int)} bits (zero (array 288 int))]
+        (for [i 0] (< i 144) (inc! i)
+          (aset bits i 8))
+
+        (for [i 144] (< i 256) (inc! i)
+          (aset bits i 9))
+
+        (for [i 256] (< i 280) (inc! i)
+          (aset bits i 7))
+
+        (for [i 280] (< i 288) (inc! i)
+          (aset bits i 8))
+
+        (.init fixedHuffmanDecoder (subslice bits))))))
+
+
+
+^{:go/breaks [6] :go/end 797} (go/method Reset ^error [^{:tag (* decompressor)} f ^io/Reader r ^{:tag (slice byte)} dict]
+  (set! @f ^{:go/breaks [2 4 6 8 10]} (lit decompressor
+      :rBuf (.-rBuf f)
+      :bits (.-bits f)
+      :codebits (.-codebits f)
+      :dict (.-dict f)
+      :step (method-expr (* decompressor) nextBlock)))
+
+  (.makeReader f r)
+  (.init (.-dict f) maxMatchOffset dict)
+  nil)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 817} (go/func NewReader "NewReader returns a new ReadCloser that can be used\nto read the uncompressed version of r.\nIf r does not also implement [io.ByteReader],\nthe decompressor may read more data than necessary from r.\nThe reader returns [io.EOF] after the final block in the DEFLATE stream has\nbeen encountered. Any trailing data after the final block is ignored.\n\nThe [io.ReadCloser] returned by NewReader also implements [Resetter].\n" ^io/ReadCloser [^io/Reader r]
+  (fixedHuffmanDecoderInit)
+
+  (let [^decompressor f (zero decompressor)]
+    (.makeReader f r)
+    (set! (.-bits f) (new (array (+ maxNumLit maxNumDist) int)))
+    (set! (.-codebits f) (new (array numCodes int)))
+    (set! (.-step f) (method-expr (* decompressor) nextBlock))
+    (.init (.-dict f) maxMatchOffset nil)
+    (addr f)))
+
+
+
+
+
+
+
+
+
+^{:go/end 836} (go/func NewReaderDict "NewReaderDict is like [NewReader] but initializes the reader\nwith a preset dictionary. The returned reader behaves as if\nthe uncompressed data stream started with the given dictionary,\nwhich has already been read. NewReaderDict is typically used\nto read data compressed by [NewWriterDict].\n\nThe ReadCloser returned by NewReaderDict also implements [Resetter].\n" ^io/ReadCloser [^io/Reader r ^{:tag (slice byte)} dict]
+  (fixedHuffmanDecoderInit)
+
+  (let [^decompressor f (zero decompressor)]
+    (.makeReader f r)
+    (set! (.-bits f) (new (array (+ maxNumLit maxNumDist) int)))
+    (set! (.-codebits f) (new (array numCodes int)))
+    (set! (.-step f) (method-expr (* decompressor) nextBlock))
+    (.init (.-dict f) maxMatchOffset dict)
+    (addr f)))

@@ -1,0 +1,121 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "tls.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [tls "crypto/tls"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [net "net"]
+    ^{:line 13} [time "time"]])
+
+
+
+^{:go/end 43} (go/method startTLS "startTLS starts the TLS handshake.\n" ^error [^{:tag (* Conn)} c ^time/Time now ^{:tag (slice byte)} initialConnID ^string peerHostname ^transportParameters params]
+  (let [tlsConfig (.-TLSConfig (.-config c))]
+    (when [(values a _ err) (net/SplitHostPort peerHostname)] (== err nil)
+      (set! peerHostname a))
+
+    (when (and (== (.-ServerName tlsConfig) "") (!= peerHostname ""))
+      (set! tlsConfig (.Clone tlsConfig))
+      (set! (.-ServerName tlsConfig) peerHostname))
+
+
+    (set! (.-keysInitial c) (initialKeys initialConnID (.-side c)))
+
+    (let [qconfig (addr (lit tls/QUICConfig :TLSConfig tlsConfig))]
+      (if (== (.-side c) clientSide)
+        (set! (.-tls c) (tls/QUICClient qconfig))
+
+        (set! (.-tls c) (tls/QUICServer qconfig)))
+
+      (.SetTransportParameters (.-tls c) (marshalTransportParameters params))
+      ;; TODO: We don't need or want a context for cancellation here,
+      ;; but users can use a context to plumb values through to hooks defined
+      ;; in the tls.Config. Pass through a context.
+      (when [err (.Start (.-tls c) (context/TODO))] (!= err nil)
+        (return err))
+
+      (.handleTLSEvents c now))))
+
+
+^{:go/end 105} (go/method handleTLSEvents ^error [^{:tag (* Conn)} c ^time/Time now]
+  (while true
+    (let [e (.NextEvent (.-tls c))]
+      (when (!= (.-testHooks c) nil)
+        (.handleTLSEvent (.-testHooks c) e))
+
+      (switch (.-Kind e)
+        (case [tls/QUICNoEvent]
+          (return nil))
+        (case [tls/QUICSetReadSecret]
+          (when [err (checkCipherSuite (.-Suite e))] (!= err nil)
+            (return err))
+
+          (switch (.-Level e)
+            (case [tls/QUICEncryptionLevelHandshake]
+              (.init (.-r (.-keysHandshake c)) (.-Suite e) (.-Data e)))
+            (case [tls/QUICEncryptionLevelApplication]
+              (.init (.-r (.-keysAppData c)) (.-Suite e) (.-Data e)))))
+
+        (case [tls/QUICSetWriteSecret]
+          (when [err (checkCipherSuite (.-Suite e))] (!= err nil)
+            (return err))
+
+          (switch (.-Level e)
+            (case [tls/QUICEncryptionLevelHandshake]
+              (.init (.-w (.-keysHandshake c)) (.-Suite e) (.-Data e)))
+            (case [tls/QUICEncryptionLevelApplication]
+              (.init (.-w (.-keysAppData c)) (.-Suite e) (.-Data e)))))
+
+        (case [tls/QUICWriteData]
+          (let [^numberSpace space (zero numberSpace)]
+            (switch (.-Level e)
+              (case [tls/QUICEncryptionLevelInitial]
+                (set! space initialSpace))
+              (case [tls/QUICEncryptionLevelHandshake]
+                (set! space handshakeSpace))
+              (case [tls/QUICEncryptionLevelApplication]
+                (set! space appDataSpace))
+              (default
+                (return (fmt/Errorf "quic: internal error: write handshake data at level %v" (.-Level e)))))
+
+            (.write (aget (.-crypto c) space) (.-Data e))))
+        (case [tls/QUICHandshakeDone]
+          (when (== (.-side c) serverSide)
+            ;; "[...] the TLS handshake is considered confirmed
+            ;; at the server when the handshake completes."
+            ;; https://www.rfc-editor.org/rfc/rfc9001#section-4.1.2-1
+            (.confirmHandshake c now))
+
+          (.handshakeDone c))
+        (case [tls/QUICTransportParameters]
+          (let [(values params err) (unmarshalTransportParams (.-Data e))]
+            (when (!= err nil)
+              (return err))
+
+            (when [err (.receiveTransportParameters c params)] (!= err nil)
+              (return err))))))))
+
+
+
+
+
+
+^{:go/end 123} (go/method handleCrypto "handleCrypto processes data received in a CRYPTO frame.\n" ^error [^{:tag (* Conn)} c ^time/Time now ^numberSpace space ^int64 off ^{:tag (slice byte)} data]
+  (let [^tls/QUICEncryptionLevel level (zero tls/QUICEncryptionLevel)]
+    (switch space
+      (case [initialSpace]
+        (set! level tls/QUICEncryptionLevelInitial))
+      (case [handshakeSpace]
+        (set! level tls/QUICEncryptionLevelHandshake))
+      (case [appDataSpace]
+        (set! level tls/QUICEncryptionLevelApplication))
+      (default
+        (return (errors/New "quic: internal error: received CRYPTO frame in unexpected number space"))))
+
+    (.handleCrypto (aget (.-crypto c) space) off data ^{:go/end 122} (fn ^error [^{:tag (slice byte)} b]
+        (.HandleData (.-tls c) level b)))))

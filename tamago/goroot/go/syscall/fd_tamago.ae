@@ -1,0 +1,260 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; File descriptor support for tamago (adapted from fd_nacl.go).
+
+(in-ns 'go.syscall) (go/file "fd_tamago.go" :imports [
+
+
+    ^{:line 10} [sync "sync"]])
+
+
+
+(go/var ^{:tag (struct sync/RWMutex ^{:tag (slice (* file))} tab) :doc "files is the table indexed by a file descriptor.\n"} files)
+
+
+
+
+
+
+(go/type file "A file is an open file, something with a file descriptor.\nA particular *file may appear in files multiple times, due to use of Dup or Dup2.\n" (struct
+    ^{:line 22 :tag int} fdref ; uses in files.tab
+    ^{:line 23 :tag fileImpl} impl)) ; underlying implementation
+
+
+
+(go/type fileImpl "A fileImpl is the implementation of something that can be a file.\n" (interface
+
+
+    (^{:doc "Standard operations.\nThese can be called concurrently from multiple goroutines.\n"} stat ^error [(* Stat_t)])
+    (read [(slice byte)] :results [int error])
+    (write [(slice byte)] :results [int error])
+    (seek [int64 int] :results [int64 error])
+    (pread [(slice byte) int64] :results [int error])
+    (pwrite [(slice byte) int64] :results [int error])
+
+
+
+
+    (^{:doc "Close is called when the last reference to a *file is removed\nfrom the file descriptor table. It may be called concurrently\nwith active operations such as blocked read or write calls.\n"} close ^error [])))
+
+
+
+
+
+^{:go/end 59} (go/func newFD "newFD adds impl to the file descriptor table,\nreturning the new file descriptor.\nLike Unix, it uses the lowest available descriptor.\n" ^int [^fileImpl impl]
+  ^{:go/via [RWMutex]} (.Lock files)
+  (defer ^{:go/via [RWMutex]} (.Unlock files))
+  (let [f (addr (lit file :impl impl :fdref 1))]
+    (range [fd oldf (.-tab files)]
+      (when (== oldf nil)
+        (aset (.-tab files) fd f)
+        (return fd)))
+
+
+    (let [fd (len (.-tab files))]
+      (set! (.-tab files) (append (.-tab files) f))
+      ^{:line 58} fd)))
+
+
+
+
+^{:go/end 67} (go/func init "Reserve stdin, stdout, stderr descriptors to never allocate them with this\nAPI and avoid conflicts.\n" []
+  (newFD (addr (lit pipeFile)))
+  (newFD (addr (lit pipeFile)))
+  (newFD (addr (lit pipeFile))))
+
+
+
+^{:go/end 77} (go/func fdToFile "fdToFile retrieves the *file corresponding to a file descriptor.\n" [^int fd] :results [(* file) error]
+  ^{:go/via [RWMutex]} (.Lock files)
+  (defer ^{:go/via [RWMutex]} (.Unlock files))
+  (when (or (< fd 0) (>= fd (len (.-tab files))) (== (aget (.-tab files) fd) nil))
+    (return nil EBADF))
+
+  (return (aget (.-tab files) fd) nil))
+
+
+^{:go/end 94} (go/func Close ^error [^int fd]
+  ^{:go/via [RWMutex]} (.Lock files)
+  (when (or (< fd 0) (>= fd (len (.-tab files))) (== (aget (.-tab files) fd) nil))
+    ^{:go/via [RWMutex]} (.Unlock files)
+    (return EBADF))
+
+  (let [f (aget (.-tab files) fd)]
+    (aset (.-tab files) fd nil)
+    (dec! (.-fdref f))
+    (let [fdref (.-fdref f)]
+      ^{:go/via [RWMutex]} (.Unlock files)
+      (when (> fdref 0)
+        (return nil))
+
+      (.close (.-impl f)))))
+
+
+^{:go/end 98} (go/func CloseOnExec [^int fd])
+;; nothing to do - no exec
+
+
+^{:go/end 117} (go/func Dup [^int fd] :results [int error]
+  ^{:go/via [RWMutex]} (.Lock files)
+  (defer ^{:go/via [RWMutex]} (.Unlock files))
+  (when (or (< fd 0) (>= fd (len (.-tab files))) (== (aget (.-tab files) fd) nil))
+    (return -1 EBADF))
+
+  (let [f (aget (.-tab files) fd)]
+    (inc! (.-fdref f))
+    (range [newfd oldf (.-tab files)]
+      (when (== oldf nil)
+        (aset (.-tab files) newfd f)
+        (return newfd nil)))
+
+
+    (let [newfd (len (.-tab files))]
+      (set! (.-tab files) (append (.-tab files) f))
+      (return newfd nil))))
+
+
+^{:go/end 144} (go/func Dup2 ^error [^int fd ^int newfd]
+  ^{:go/via [RWMutex]} (.Lock files)
+  (when (or (< fd 0) (>= fd (len (.-tab files))) (== (aget (.-tab files) fd) nil) (< newfd 0) (>= newfd (+ (len (.-tab files)) 100)))
+    ^{:go/via [RWMutex]} (.Unlock files)
+    (return EBADF))
+
+  (let [f (aget (.-tab files) fd)]
+    (inc! (.-fdref f))
+    (while (<= (cap (.-tab files)) newfd)
+      (set! (.-tab files) (append (subslice (.-tab files) _ (cap (.-tab files))) nil)))
+
+    ^{:go/breaks [[6 143]]} (let [oldf (aget (.-tab files) newfd)
+        ^{:line 131 :tag int} oldfdref (zero int)]
+      (when (!= oldf nil)
+        (dec! (.-fdref oldf))
+        (set! oldfdref (.-fdref oldf)))
+
+      (aset (.-tab files) newfd f)
+      ^{:go/via [RWMutex]} (.Unlock files)
+      (when (!= oldf nil)
+        (when (== oldfdref 0)
+          (.close (.-impl oldf))))
+
+
+      nil)))
+
+
+^{:go/end 152} (go/func Fstat ^error [^int fd ^{:tag (* Stat_t)} st]
+  (let [(values f err) (fdToFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (.stat (.-impl f) st)))
+
+
+^{:go/end 160} (go/func Read [^int fd ^{:tag (slice byte)} b] :results [int error]
+  (let [(values f err) (fdToFile fd)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (.read (.-impl f) b)))
+
+
+(go/var ^{:tag (array 0 byte)} zerobuf)
+
+^{:go/end 178} (go/func Write [^int fd ^{:tag (slice byte)} b] :results [int error]
+  (when (or (== fd 1) (== fd 2))
+    (return (write fd b)))
+
+
+  (when (== b nil)
+    ;; avoid nil in syscalls.
+    (set! b (subslice zerobuf)))
+
+  (let [(values f err) (fdToFile fd)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (.write (.-impl f) b)))
+
+
+^{:go/end 186} (go/func Pread [^int fd ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (let [(values f err) (fdToFile fd)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (.pread (.-impl f) b offset)))
+
+
+^{:go/end 194} (go/func Pwrite [^int fd ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (let [(values f err) (fdToFile fd)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (.pwrite (.-impl f) b offset)))
+
+
+^{:go/end 202} (go/func Seek [^int fd ^int64 offset ^int whence] :results [int64 error]
+  (let [(values f err) (fdToFile fd)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (.seek (.-impl f) offset whence)))
+
+
+
+
+(go/type defaultFileImpl "defaulFileImpl implements fileImpl.\nIt can be embedded to complete a partial fileImpl implementation.\n" (struct))
+
+^{:go/end 208} (go/method close ^error [(* defaultFileImpl)] nil)
+^{:go/end 209} (go/method stat ^error [(* defaultFileImpl) (* Stat_t)] ENOSYS)
+^{:go/end 210} (go/method read [(* defaultFileImpl) (slice byte)] :results [int error] (return 0 ENOSYS))
+^{:go/end 211} (go/method write [(* defaultFileImpl) (slice byte)] :results [int error] (return 0 ENOSYS))
+^{:go/end 212} (go/method seek [(* defaultFileImpl) int64 int] :results [int64 error] (return 0 ENOSYS))
+^{:go/end 213} (go/method pread [(* defaultFileImpl) (slice byte) int64] :results [int error] (return 0 ENOSYS))
+^{:go/end 214} (go/method pwrite [(* defaultFileImpl) (slice byte) int64] :results [int error] (return 0 ENOSYS))
+
+
+
+(go/type pipeFile "A pipeFile is an in-memory implementation of a pipe.\nThe byteq implementation is in net_tamago.go.\n" (struct
+    ^{:line 219} defaultFileImpl
+    ^{:line 220 :tag (* byteq)} rd
+    ^{:line 221 :tag (* byteq)} wr))
+
+
+^{:go/breaks [[5 231]] :go/end 232} (go/method close ^error [^{:tag (* pipeFile)} f]
+  (when (!= (.-rd f) nil)
+    ^{:go/via [queue]} (.close (.-rd f)))
+
+  (when (!= (.-wr f) nil)
+    ^{:go/via [queue]} (.close (.-wr f)))
+
+  nil)
+
+
+^{:go/end 243} (go/method read [^{:tag (* pipeFile)} f ^{:tag (slice byte)} b] :results [int error]
+  (when (== (.-rd f) nil)
+    (return 0 EINVAL))
+
+  (let [(values n err) (.read (.-rd f) b 0)]
+    (when (== err EAGAIN)
+      (set! err nil))
+
+    (return n err)))
+
+
+^{:go/end 254} (go/method write [^{:tag (* pipeFile)} f ^{:tag (slice byte)} b] :results [int error]
+  (when (== (.-wr f) nil)
+    (return 0 EINVAL))
+
+  (let [(values n err) (.write (.-wr f) b 0)]
+    (when (== err EAGAIN)
+      (set! err EPIPE))
+
+    (return n err)))
+
+
+^{:go/end 261} (go/func Pipe ^error [^{:tag (slice int)} fd]
+  ^{:go/breaks [4]} (let [q (newByteq)]
+    (aset fd 0 (newFD (addr (lit pipeFile :rd q))))
+    (aset fd 1 (newFD (addr (lit pipeFile :wr q))))
+    nil))

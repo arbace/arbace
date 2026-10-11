@@ -1,0 +1,200 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Trace goroutine and P status management.
+
+(in-ns 'go.runtime) (go/file "tracestatus.go" :imports [
+
+
+    ^{:line 10} [atomic "internal/runtime/atomic"]
+    ^{:line 11} [tracev2 "internal/trace/tracev2"]])
+
+
+
+
+
+
+
+
+^{:go/end 39} (go/method ^:go/nosplit writeGoStatus "writeGoStatus emits a GoStatus event as well as any active ranges on the goroutine.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" ^traceWriter [^traceWriter w ^uint64 goid ^int64 mid ^tracev2/GoStatus status ^bool markAssist ^uint64 stackID]
+  ;; The status should never be bad. Some invariant must have been violated.
+  (when (== status tracev2/GoBad)
+    (print "runtime: goid=" goid "\n")
+    (throw "attempted to trace a bad status for a goroutine"))
+
+
+  ;; Trace the status.
+  (if (== stackID 0)
+    (set! w (.event w tracev2/EvGoStatus (conv traceArg goid) (conv traceArg (conv uint64 mid)) (conv traceArg status)))
+
+    (set! w (.event w tracev2/EvGoStatusStack (conv traceArg goid) (conv traceArg (conv uint64 mid)) (conv traceArg status) (conv traceArg stackID))))
+
+
+  ;; Trace any special ranges that are in-progress.
+  (when markAssist
+    (set! w (.event w tracev2/EvGCMarkAssistActive (conv traceArg goid))))
+
+  ^{:line 38} w)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 78} (go/method ^:go/nosplit writeProcStatusForP "writeProcStatusForP emits a ProcStatus event for the provided p based on its status.\n\nThe caller must fully own pp and it must be prevented from transitioning (e.g. this can be\ncalled by a forEachP callback or from a STW).\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" ^traceWriter [^traceWriter w ^{:tag (* p)} pp ^bool inSTW]
+  (when (not ^{:go/via [traceSchedResourceState]} (.acquireStatus (.-trace pp) ^{:go/via [traceLocker]} (.-gen w)))
+    (return w))
+
+  (let [^tracev2/ProcStatus status (zero tracev2/ProcStatus)]
+    (switch (.-status pp)
+      (case [_Pidle _Pgcstop]
+        (set! status tracev2/ProcIdle)
+        (when (and (== (.-status pp) _Pgcstop) inSTW)
+          ;; N.B. a P that is running and currently has the world stopped will be
+          ;; in _Pgcstop, but we model it as running in the tracer.
+          (set! status tracev2/ProcRunning)))
+
+      (case [_Prunning]
+        (set! status tracev2/ProcRunning)
+        ;; A P is considered to be in a syscall if its attached G is. Since we fully
+        ;; own P, then the goroutine isn't going to transition and we can trivially
+        ;; check if the goroutine is in a syscall. This used to be just a small problematic
+        ;; window, but this is now the default since _Psyscall no longer exists. See #64318
+        ;; for the history on why it was needed while _Psyscall still existed.
+        (when (and (== (.ptr (.-p ^{:go/via [traceLocker]} (.-mp w))) pp) (!= (.-curg ^{:go/via [traceLocker]} (.-mp w)) nil) (== (bit-and-not (readgstatus (.-curg ^{:go/via [traceLocker]} (.-mp w))) _Gscan) _Gsyscall))
+          (set! status tracev2/ProcSyscall)))
+
+      (default
+        (throw "attempt to trace invalid or unsupported P status")))
+
+    (set! w (.writeProcStatus w (conv uint64 (.-id pp)) status (.-inSweep (.-trace pp))))
+    ^{:line 77} w))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 104} (go/method ^:go/nosplit writeProcStatus "writeProcStatus emits a ProcStatus event with all the provided information.\n\nThe caller must have taken ownership of a P's status writing, and the P must be\nprevented from transitioning.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" ^traceWriter [^traceWriter w ^uint64 pid ^tracev2/ProcStatus status ^bool inSweep]
+  ;; The status should never be bad. Some invariant must have been violated.
+  (when (== status tracev2/ProcBad)
+    (print "runtime: pid=" pid "\n")
+    (throw "attempted to trace a bad status for a proc"))
+
+
+  ;; Trace the status.
+  (set! w (.event w tracev2/EvProcStatus (conv traceArg pid) (conv traceArg status)))
+
+  ;; Trace any special ranges that are in-progress.
+  (when inSweep
+    (set! w (.event w tracev2/EvGCSweepActive (conv traceArg pid))))
+
+  ^{:line 103} w)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 142} (go/func ^:go/nosplit goStatusToTraceGoStatus "goStatusToTraceGoStatus translates the internal status to tracGoStatus.\n\nstatus must not be _Gdead or any status whose name has the suffix \"_unused.\"\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" ^tracev2/GoStatus [^uint32 status ^waitReason wr]
+  ;; N.B. Ignore the _Gscan bit. We don't model it in the tracer.
+  (let [^tracev2/GoStatus tgs (zero tracev2/GoStatus)]
+    (switch (bit-and-not status _Gscan)
+      (case [_Grunnable]
+        (set! tgs tracev2/GoRunnable))
+      (case [_Grunning _Gcopystack]
+        (set! tgs tracev2/GoRunning))
+      (case [_Gsyscall]
+        (set! tgs tracev2/GoSyscall))
+      (case [_Gwaiting _Gpreempted _Gleaked]
+        ;; There are a number of cases where a G might end up in
+        ;; _Gwaiting but it's actually running in a non-preemptive
+        ;; state but needs to present itself as preempted to the
+        ;; garbage collector and traceAdvance (via suspendG). In
+        ;; these cases, we're not going to emit an event, and we
+        ;; want these goroutines to appear in the final trace as
+        ;; if they're running, not blocked.
+        (set! tgs tracev2/GoWaiting)
+        (when (and (== status _Gwaiting) (.isWaitingForSuspendG wr))
+          (set! tgs tracev2/GoRunning)))
+
+      (case [_Gdead _Gdeadextra]
+        (throw "tried to trace dead goroutine"))
+      (default
+        (throw "tried to trace goroutine with invalid or unsupported status")))
+
+    ^{:line 141} tgs))
+
+
+
+
+(go/type traceSchedResourceState "traceSchedResourceState is shared state for scheduling resources (i.e. fields common to\nboth Gs and Ps).\n" (struct
+
+
+
+
+
+
+    ^{:line 153 :tag (array 3 atomic/Uint32) :doc "statusTraced indicates whether a status event was traced for this resource\na particular generation.\n\nThere are 3 of these because when transitioning across generations, traceAdvance\nneeds to be able to reliably observe whether a status was traced for the previous\ngeneration, while we need to clear the value for the next generation.\n"} statusTraced
+
+
+
+
+
+
+
+
+    ^{:line 162 :tag (array 2 uint64) :doc "seq is the sequence counter for this scheduling resource's events.\nThe purpose of the sequence counter is to establish a partial order between\nevents that don't obviously happen serially (same M) in the stream ofevents.\n\nThere are two of these so that we can reset the counter on each generation.\nThis saves space in the resulting trace by keeping the counter small and allows\nGoStatus and GoCreate events to omit a sequence number (implicitly 0).\n"} seq))
+
+
+
+
+
+
+
+
+^{:go/breaks [6] :go/end 177} (go/method ^:go/nosplit acquireStatus "acquireStatus acquires the right to emit a Status event for the scheduling resource.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" ^bool [^{:tag (* traceSchedResourceState)} r ^uintptr gen]
+  (when (not (.CompareAndSwap (aget (.-statusTraced r) (% gen 3)) 0 1))
+    (return false))
+
+  (.readyNextGen r gen)
+  true)
+
+
+
+^{:go/end 184} (go/method readyNextGen "readyNextGen readies r for the generation following gen.\n" [^{:tag (* traceSchedResourceState)} r ^uintptr gen]
+  (let [nextGen (traceNextGen gen)]
+    (aset (.-seq r) (% nextGen 2) 0)
+    (.Store (aget (.-statusTraced r) (% nextGen 3)) 0)))
+
+
+
+^{:go/end 189} (go/method statusWasTraced "statusWasTraced returns true if the sched resource's status was already acquired for tracing.\n" ^bool [^{:tag (* traceSchedResourceState)} r ^uintptr gen]
+  (!= (.Load (aget (.-statusTraced r) (% gen 3))) 0))
+
+
+
+
+^{:go/end 195} (go/method setStatusTraced "setStatusTraced indicates that the resource's status was already traced, for example\nwhen a goroutine is created.\n" [^{:tag (* traceSchedResourceState)} r ^uintptr gen]
+  (.Store (aget (.-statusTraced r) (% gen 3)) 1))
+
+
+
+^{:go/end 201} (go/method nextSeq "nextSeq returns the next sequence number for the resource.\n" ^traceArg [^{:tag (* traceSchedResourceState)} r ^uintptr gen]
+  (inc! (aget (.-seq r) (% gen 2)))
+  (conv traceArg (aget (.-seq r) (% gen 2))))

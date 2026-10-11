@@ -1,0 +1,709 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.time) (go/file "zoneinfo.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [sync "sync"]
+    ^{:line 10} [syscall "syscall"]])
+
+
+(go/directive "//go:generate env ZONEINFO=$GOROOT/lib/time/zoneinfo.zip go run genzabbrs.go -output zoneinfo_abbrs_windows.go")
+
+
+
+
+
+
+
+
+
+(go/type Location "A Location maps time instants to the zone in use at that time.\nTypically, the Location represents the collection of time offsets\nin use in a geographical area. For many Locations the time offset varies\ndepending on whether daylight savings time is in use at the time instant.\n\nLocation is used to provide a time zone in a printed Time value and for\ncalculations involving intervals that may cross daylight savings time\nboundaries.\n" (struct
+    ^{:line 24 :tag string} name
+    ^{:line 25 :tag (slice zone)} zone
+    ^{:line 26 :tag (slice zoneTrans)} tx
+
+
+
+
+
+
+    ^{:line 33 :tag string :doc "The tzdata information can be followed by a string that describes\nhow to handle DST transitions not recorded in zoneTrans.\nThe format is the TZ environment variable without a colon; see\nhttps://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap08.html.\nExample string, for America/Los_Angeles: PST8PDT,M3.2.0,M11.1.0\n"} extend
+
+
+
+
+
+
+
+
+
+
+    ^{:line 44 :tag int64 :doc "Most lookups will be for the current time.\nTo avoid the binary search through tx, keep a\nstatic one-element cache that gives the correct\nzone for the time when the Location was created.\nif cacheStart <= t < cacheEnd,\nlookup can return cacheZone.\nThe units for cacheStart and cacheEnd are seconds\nsince January 1, 1970 UTC, to match the argument\nto lookup.\n"} cacheStart
+    ^{:line 45 :tag int64} cacheEnd
+    ^{:line 46 :tag (* zone)} cacheZone))
+
+
+
+(go/type zone "A zone represents a single time zone such as CET.\n" (struct
+    ^{:line 51 :tag string} name ; abbreviated name, "CET"
+    ^{:line 52 :tag int} offset ; seconds east of UTC
+    ^{:line 53 :tag bool} isDST)) ; is this zone Daylight Savings Time?
+
+
+
+(go/type zoneTrans "A zoneTrans represents a single time zone transition.\n" (struct
+    ^{:line 58 :tag int64} when ; transition time, in seconds since 1970 GMT
+    ^{:line 59 :tag uint8} index ; the index of the zone that goes into effect at that time
+    ^{:line 60 :tag bool} isstd ^bool isutc)) ; ignored - no idea what these mean
+
+
+
+
+(go/const "alpha and omega are the beginning and end of time for zone\ntransitions.\n"
+  ^{:line 66} [^{:val -9223372036854775808} alpha (<< -1 63)] ; math.MinInt64
+  ^{:line 67} [^{:val 9223372036854775807} omega (- (<< 1 63) 1)]) ; math.MaxInt64
+
+
+
+(go/var ^{:tag (* Location) :doc "UTC represents Universal Coordinated Time (UTC).\n"} UTC (addr utcLoc))
+
+
+
+
+(go/var ^{:doc "utcLoc is separate so that get can refer to &utcLoc\nand ensure that it never returns a nil *Location,\neven if a badly behaved client has changed UTC.\n"} utcLoc (lit Location :name "UTC"))
+
+
+
+
+
+
+
+(go/var ^{:tag (* Location) :doc "Local represents the system's local time zone.\nOn Unix systems, Local consults the TZ environment\nvariable to find the time zone to use. No TZ means\nuse the system default /etc/localtime.\nTZ=\"\" means use UTC.\nTZ=\"foo\" means use file foo in the system timezone directory.\n"} Local (addr localLoc))
+
+
+
+(go/var ^{:tag Location :doc "localLoc is separate so that initLocal can initialize\nit even if a client has changed Local.\n"} localLoc)
+(go/var ^sync/Once localOnce)
+
+^{:go/end 99} (go/method get ^{:tag (* Location)} [^{:tag (* Location)} l]
+  (when (== l nil)
+    (return (addr utcLoc)))
+
+  (when (== l (addr localLoc))
+    (.Do localOnce initLocal))
+
+  ^{:line 98} l)
+
+
+
+
+^{:go/end 105} (go/method String "String returns a descriptive name for the time zone information,\ncorresponding to the name argument to [LoadLocation] or [FixedZone].\n" ^string [^{:tag (* Location)} l]
+  (.-name (.get l)))
+
+
+(go/var ^{:tag (slice (* Location))} unnamedFixedZones)
+(go/var ^sync/Once unnamedFixedZonesOnce)
+
+
+
+^{:go/end 128} (go/func FixedZone "FixedZone returns a [Location] that always uses\nthe given zone name and offset (seconds east of UTC).\n" ^{:tag (* Location)} [^string name ^int offset]
+  ;; Most calls to FixedZone have an unnamed zone with an offset by the hour.
+  ;; Optimize for that case by returning the same *Location for a given hour.
+  (let [^:const ^{:val 12} hoursBeforeUTC 12
+      ^:const ^{:line 116 :val 14} hoursAfterUTC 14
+      ^{:line 117} hour (/ offset 60 60)]
+    (when (and (== name "") (<= (- hoursBeforeUTC) hour) (<= hour (+ hoursAfterUTC)) (== (* hour 60 60) offset))
+      (.Do unnamedFixedZonesOnce ^{:go/end 124} (fn []
+          (set! unnamedFixedZones (make (slice (* Location)) (+ hoursBeforeUTC 1 hoursAfterUTC)))
+          (for [hr (- hoursBeforeUTC)] (<= hr (+ hoursAfterUTC)) (inc! hr)
+            (aset unnamedFixedZones (+ hr hoursBeforeUTC) (fixedZone "" (* hr 60 60))))))
+
+
+      (return (aget unnamedFixedZones (+ hour hoursBeforeUTC))))
+
+    (fixedZone name offset)))
+
+
+^{:go/end 140} (go/func fixedZone ^{:tag (* Location)} [^string name ^int offset]
+  (let [l (addr ^{:go/breaks [2 4 6 8 10]} (lit Location
+          :name name
+          :zone (lit (slice zone) (lit _ name offset false))
+          :tx (lit (slice zoneTrans) (lit _ alpha 0 false false))
+          :cacheStart alpha
+          :cacheEnd omega))]
+
+    (set! (.-cacheZone l) (addr (aget (.-zone l) 0)))
+    ^{:line 139} l))
+
+
+
+
+
+
+
+
+
+^{:go/end 216} (go/method lookup "lookup returns information about the time zone in use at an\ninstant in time expressed as seconds since January 1, 1970 00:00:00 UTC.\n\nThe returned information gives the name of the zone (such as \"CET\"),\nthe start and end times bracketing sec when that zone is in effect,\nthe offset in seconds east of UTC (such as -5*60*60), and whether\nthe daylight savings is being observed at that time.\n" [^{:tag (* Location)} l ^int64 sec] :results [^string name ^int offset ^int64 start ^int64 end ^bool isDST]
+  (set! l (.get l))
+
+  (when (== (len (.-zone l)) 0)
+    (set! name "UTC")
+    (set! offset 0)
+    (set! start alpha)
+    (set! end omega)
+    (set! isDST false)
+    (return))
+
+
+  (when [zone (.-cacheZone l)] (and (!= zone nil) (<= (.-cacheStart l) sec) (< sec (.-cacheEnd l)))
+    (set! name (.-name zone))
+    (set! offset (.-offset zone))
+    (set! start (.-cacheStart l))
+    (set! end (.-cacheEnd l))
+    (set! isDST (.-isDST zone))
+    (return))
+
+
+  (when (or (== (len (.-tx l)) 0) (< sec (.-when (aget (.-tx l) 0))))
+    (let [zone (addr (aget (.-zone l) (.lookupFirstZone l)))]
+      (set! name (.-name zone))
+      (set! offset (.-offset zone))
+      (set! start alpha)
+      (if (> (len (.-tx l)) 0)
+        (set! end (.-when (aget (.-tx l) 0)))
+
+        (set! end omega))
+
+      (set! isDST (.-isDST zone))
+      (return)))
+
+
+  ;; Binary search for entry with largest time <= sec.
+  ;; Not using sort.Search to avoid dependencies.
+  (let [tx (.-tx l)]
+    (set! end omega)
+    (let [lo 0
+        ^{:line 189} hi (len tx)]
+      (while (> (- hi lo) 1)
+        (let [m (conv int (>> (conv uint (+ lo hi)) 1))
+            ^{:line 192} lim (.-when (aget tx m))]
+          (if (< sec lim) (do
+              (set! end lim)
+              (set! hi m))
+
+            (set! lo m))))
+
+
+      (let [zone (addr (aget (.-zone l) (.-index (aget tx lo))))]
+        (set! name (.-name zone))
+        (set! offset (.-offset zone))
+        (set! start (.-when (aget tx lo)))
+        ;; end = maintained during the search
+        (set! isDST (.-isDST zone))
+
+        ;; If we're at the end of the known zone transitions,
+        ;; try the extend string.
+        (when (and (== lo (- (len tx) 1)) (!= (.-extend l) ""))
+          (when [(values ename eoffset estart eend eisDST ok) (tzset (.-extend l) start sec)] ok
+            (return ename eoffset estart eend eisDST)))
+
+
+
+        (return)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[7 256]] :go/end 257} (go/method lookupFirstZone "lookupFirstZone returns the index of the time zone to use for times\nbefore the first transition time, or when there are no transition\ntimes.\n\nThe reference implementation in localtime.c from\nhttps://www.iana.org/time-zones/repository/releases/tzcode2013g.tar.gz\nimplements the following algorithm for these cases:\n 1. If the first zone is unused by the transitions, use it.\n 2. Otherwise, if there are transition times, and the first\n    transition is to a zone in daylight time, find the first\n    non-daylight-time zone before and closest to the first transition\n    zone.\n 3. Otherwise, use the first zone that is not daylight time, if\n    there is one.\n 4. Otherwise, use the first zone.\n" ^int [^{:tag (* Location)} l]
+  ;; Case 1.
+  (when (not (.firstZoneUsed l))
+    (return 0))
+
+
+  ;; Case 2.
+  (when (and (> (len (.-tx l)) 0) (.-isDST (aget (.-zone l) (.-index (aget (.-tx l) 0)))))
+    (for [zi (- (conv int (.-index (aget (.-tx l) 0))) 1)] (>= zi 0) (dec! zi)
+      (when (not (.-isDST (aget (.-zone l) zi)))
+        (return zi))))
+
+
+
+
+  ;; Case 3.
+  (range [zi (.-zone l)]
+    (when (not (.-isDST (aget (.-zone l) zi)))
+      (return zi)))
+
+
+
+  ;; Case 4.
+  0)
+
+
+
+
+^{:go/breaks [[5 267]] :go/end 268} (go/method firstZoneUsed "firstZoneUsed reports whether the first zone is used by some\ntransition.\n" ^bool [^{:tag (* Location)} l]
+  (range [_ tx (.-tx l)]
+    (when (== (.-index tx) 0)
+      (return true)))
+
+
+  false)
+
+
+
+
+
+
+
+
+^{:go/end 364} (go/func tzset "tzset takes a timezone string like the one found in the TZ environment\nvariable, the time of the last time zone transition expressed as seconds\nsince January 1, 1970 00:00:00 UTC, and a time expressed the same way.\nWe call this a tzset string since in C the function tzset reads TZ.\nThe return values are as for lookup, plus ok which reports whether the\nparse succeeded.\n" [^string s ^int64 lastTxSec ^int64 sec] :results [^string name ^int offset ^int64 start ^int64 end ^bool isDST ^bool ok]
+  (let [
+      (values ^string stdName ^string dstName) (zero string)
+      (values ^int stdOffset ^int dstOffset) (zero int)]
+
+
+    (set! (values stdName s ok) (tzsetName s))
+    (when ok
+      (set! (values stdOffset s ok) (tzsetOffset s)))
+
+    (when (not ok)
+      (return "" 0 0 0 false false))
+
+
+    ;; The numbers in the tzset string are added to local time to get UTC,
+    ;; but our offsets are added to UTC to get local time,
+    ;; so we negate the number we see here.
+    (set! stdOffset (- stdOffset))
+
+    (when (or (== (len s) 0) (== (aget s 0) \,))
+      ;; No daylight savings time.
+      (return stdName stdOffset lastTxSec omega false true))
+
+
+    (set! (values dstName s ok) (tzsetName s))
+    (when ok
+      (if (or (== (len s) 0) (== (aget s 0) \,))
+        (set! dstOffset (+ stdOffset secondsPerHour))
+        (do
+          (set! (values dstOffset s ok) (tzsetOffset s))
+          (set! dstOffset (- dstOffset))))) ; as with stdOffset, above
+
+
+    (when (not ok)
+      (return "" 0 0 0 false false))
+
+
+    (when (== (len s) 0)
+      ;; Default DST rules per tzcode.
+      (set! s ",M3.2.0,M11.1.0"))
+
+    ;; The TZ definition does not mention ';' here but tzcode accepts it.
+    (when (and (!= (aget s 0) \,) (!= (aget s 0) \;))
+      (return "" 0 0 0 false false))
+
+    (set! s (subslice s 1))
+
+    (let [(values ^rule startRule ^rule endRule) (zero rule)]
+      (set! (values startRule s ok) (tzsetRule s))
+      (when (or (not ok) (== (len s) 0) (!= (aget s 0) \,))
+        (return "" 0 0 0 false false))
+
+      (set! s (subslice s 1))
+      (set! (values endRule s ok) (tzsetRule s))
+      (when (or (not ok) (> (len s) 0))
+        (return "" 0 0 0 false false))
+
+
+      ;; Compute start of year in seconds since Unix epoch,
+      ;; and seconds since then to get to sec.
+      (let [(values year yday) (.yearYday (.days (conv absSeconds (+ sec unixToInternal internalToAbsolute))))
+          ^{:line 337} ysec (+ (conv int64 (* (- yday 1) secondsPerDay)) (% sec secondsPerDay))
+          ^{:line 338} ystart (- sec ysec)
+
+          ^{:line 340} startSec (conv int64 (tzruleTime year startRule stdOffset))
+          ^{:line 341} endSec (conv int64 (tzruleTime year endRule dstOffset))
+          (values dstIsDST stdIsDST) (values true false)]
+        ;; Note: this is a flipping of "DST" and "STD" while retaining the labels
+        ;; This happens in southern hemispheres. The labelling here thus is a little
+        ;; inconsistent with the goal.
+        (when (< endSec startSec)
+          (set! (values startSec endSec) (values endSec startSec))
+          (set! (values stdName dstName) (values dstName stdName))
+          (set! (values stdOffset dstOffset) (values dstOffset stdOffset))
+          (set! (values stdIsDST dstIsDST) (values dstIsDST stdIsDST)))
+
+
+        ;; The start and end values that we return are accurate
+        ;; close to a daylight savings transition, but are otherwise
+        ;; just the start and end of the year. That suffices for
+        ;; the only caller that cares, which is Date.
+        (cond (< ysec startSec)
+          (return stdName stdOffset ystart (+ startSec ystart) stdIsDST true)
+          (>= ysec endSec)
+          (return stdName stdOffset (+ endSec ystart) (+ ystart (* 365 secondsPerDay)) stdIsDST true) :else
+
+          (return dstName dstOffset (+ startSec ystart) (+ endSec ystart) dstIsDST true))))))
+
+
+
+
+
+^{:go/end 394} (go/func tzsetName "tzsetName returns the timezone name at the start of the tzset string s,\nand the remainder of s, and reports whether the parsing is OK.\n" [^string s] :results [string string bool]
+  (when (== (len s) 0)
+    (return "" "" false))
+
+  (if (!= (aget s 0) \<) (do
+      (range [i r s]
+        (switch r
+          (case [\0 \1 \2 \3 \4 \5 \6 \7 \8 \9 \, \- \+]
+            (when (< i 3)
+              (return "" "" false))
+
+            (return (subslice s _ i) (subslice s i) true))))
+
+
+      (when (< (len s) 3)
+        (return "" "" false))
+
+      (return s "" true))
+    (do
+      (range [i r s]
+        (when (== r \>)
+          (return (subslice s 1 i) (subslice s (+ i 1)) true)))
+
+
+      (return "" "" false))))
+
+
+
+
+
+
+^{:go/end 450} (go/func tzsetOffset "tzsetOffset returns the timezone offset at the start of the tzset string s,\nand the remainder of s, and reports whether the parsing is OK.\nThe timezone offset is returned as a number of seconds.\n" [^string s] :results [^int offset ^string rest ^bool ok]
+  (when (== (len s) 0)
+    (return 0 "" false))
+
+  (let [neg false]
+    (cond (== (aget s 0) \+)
+      (set! s (subslice s 1))
+      (== (aget s 0) \-) (do
+        (set! s (subslice s 1))
+        (set! neg true)))
+
+
+    ;; The tzdata code permits values up to 24 * 7 here,
+    ;; although POSIX does not.
+    (let [^int hours (zero int)]
+      (set! (values hours s ok) (tzsetNum s 0 (* 24 7)))
+      (when (not ok)
+        (return 0 "" false))
+
+      (let [off (* hours secondsPerHour)]
+        (when (or (== (len s) 0) (!= (aget s 0) \:))
+          (when neg
+            (set! off (- off)))
+
+          (return off s true))
+
+
+        (let [^int mins (zero int)]
+          (set! (values mins s ok) (tzsetNum (subslice s 1) 0 59))
+          (when (not ok)
+            (return 0 "" false))
+
+          (set! off + (* mins secondsPerMinute))
+          (when (or (== (len s) 0) (!= (aget s 0) \:))
+            (when neg
+              (set! off (- off)))
+
+            (return off s true))
+
+
+          (let [^int secs (zero int)]
+            (set! (values secs s ok) (tzsetNum (subslice s 1) 0 59))
+            (when (not ok)
+              (return 0 "" false))
+
+            (set! off + secs)
+
+            (when neg
+              (set! off (- off)))
+
+            (return off s true)))))))
+
+
+
+(go/type ruleKind "ruleKind is the kinds of rules that can be seen in a tzset string.\n" int)
+
+(go/const
+  ^{:line 456} [^{:tag ruleKind :val 0} ruleJulian iota]
+  ^{:line 457} [^{:val 1} ruleDOY]
+  ^{:line 458} [^{:val 2} ruleMonthWeekDay])
+
+
+
+(go/type rule "rule is a rule read from a tzset string.\n" (struct
+    ^{:line 463 :tag ruleKind} kind
+    ^{:line 464 :tag int} day
+    ^{:line 465 :tag int} week
+    ^{:line 466 :tag int} mon
+    ^{:line 467 :tag int} time)) ; transition time
+
+
+
+
+^{:go/end 529} (go/func tzsetRule "tzsetRule parses a rule from a tzset string.\nIt returns the rule, and the remainder of the string, and reports success.\n" [^string s] :results [rule string bool]
+  (let [^rule r (zero rule)]
+    (when (== (len s) 0)
+      (return (lit rule) "" false))
+
+    (let [ok false]
+      (cond (== (aget s 0) \J)
+        (let [^int jday (zero int)]
+          (set! (values jday s ok) (tzsetNum (subslice s 1) 1 365))
+          (when (not ok)
+            (return (lit rule) "" false))
+
+          (set! (.-kind r) ruleJulian)
+          (set! (.-day r) jday))
+        (== (aget s 0) \M)
+        (let [^int mon (zero int)]
+          (set! (values mon s ok) (tzsetNum (subslice s 1) 1 12))
+          (when (or (not ok) (== (len s) 0) (!= (aget s 0) \.))
+            (return (lit rule) "" false))
+
+
+          (let [^int week (zero int)]
+            (set! (values week s ok) (tzsetNum (subslice s 1) 1 5))
+            (when (or (not ok) (== (len s) 0) (!= (aget s 0) \.))
+              (return (lit rule) "" false))
+
+            (let [^int day (zero int)]
+              (set! (values day s ok) (tzsetNum (subslice s 1) 0 6))
+              (when (not ok)
+                (return (lit rule) "" false))
+
+              (set! (.-kind r) ruleMonthWeekDay)
+              (set! (.-day r) day)
+              (set! (.-week r) week)
+              (set! (.-mon r) mon)))) :else
+
+        (let [^int day (zero int)]
+          (set! (values day s ok) (tzsetNum s 0 365))
+          (when (not ok)
+            (return (lit rule) "" false))
+
+          (set! (.-kind r) ruleDOY)
+          (set! (.-day r) day)))
+
+
+      (when (or (== (len s) 0) (!= (aget s 0) \/))
+        (set! (.-time r) (* 2 secondsPerHour)) ; 2am is the default
+        (return r s true))
+
+
+      (let [(values offset ^:assign s ^:assign ok) (tzsetOffset (subslice s 1))]
+        (when (not ok)
+          (return (lit rule) "" false))
+
+        (set! (.-time r) offset)
+
+        (return r s true)))))
+
+
+
+
+
+^{:go/end 556} (go/func tzsetNum "tzsetNum parses a number from a tzset string.\nIt returns the number, and the remainder of the string, and reports success.\nThe number must be between min and max.\n" [^string s ^int min ^int max] :results [^int num ^string rest ^bool ok]
+  (when (== (len s) 0)
+    (return 0 "" false))
+
+  (set! num 0)
+  (range [i r s]
+    (when (or (< r \0) (> r \9))
+      (when (or (== i 0) (< num min))
+        (return 0 "" false))
+
+      (return num (subslice s i) true))
+
+    (set! num * 10)
+    (set! num + (- (conv int r) \0))
+    (when (> num max)
+      (return 0 "" false)))
+
+
+  (when (< num min)
+    (return 0 "" false))
+
+  (return num "" true))
+
+
+
+
+
+^{:go/end 604} (go/func tzruleTime "tzruleTime takes a year, a rule, and a timezone offset,\nand returns the number of seconds since the start of the year\nthat the rule takes effect.\n" ^int [^int year ^rule r ^int off]
+  (let [^int s (zero int)]
+    (switch (.-kind r)
+      (case [ruleJulian]
+        (set! s (* (- (.-day r) 1) secondsPerDay))
+        (when (and (isLeap year) (>= (.-day r) 60))
+          (set! s + secondsPerDay)))
+
+      (case [ruleDOY]
+        (set! s (* (.-day r) secondsPerDay)))
+      (case [ruleMonthWeekDay]
+        ;; Zeller's Congruence.
+        (let [m1 (+ (% (+ (.-mon r) 9) 12) 1)
+            ^{:line 574} yy0 year]
+          (when (<= (.-mon r) 2)
+            (dec! yy0))
+
+          (let [yy1 (/ yy0 100)
+              ^{:line 579} yy2 (% yy0 100)
+              ^{:line 580} dow (% (- (+ (/ (- (* 26 m1) 2) 10) 1 yy2 (/ yy2 4) (/ yy1 4)) (* 2 yy1)) 7)]
+            (when (< dow 0)
+              (set! dow + 7))
+
+            ;; Now dow is the day-of-week of the first day of r.mon.
+            ;; Get the day-of-month of the first "dow" day.
+            (let [d (- (.-day r) dow)]
+              (when (< d 0)
+                (set! d + 7))
+
+              (for [i 1] (< i (.-week r)) (inc! i)
+                (when (>= (+ d 7) (daysIn (conv Month (.-mon r)) year))
+                  (break))
+
+                (set! d + 7))
+
+              (set! d + (daysBefore (conv Month (.-mon r))))
+              (when (and (isLeap year) (> (.-mon r) 2))
+                (inc! d))
+
+              (set! s (* d secondsPerDay)))))))
+
+
+    (- (+ s (.-time r)) off)))
+
+
+
+
+
+^{:go/end 638} (go/method lookupName "lookupName returns information about the time zone with\nthe given name (such as \"EST\") at the given pseudo-Unix time\n(what the given time of day would be in UTC).\n" [^{:tag (* Location)} l ^string name ^int64 unix] :results [^int offset ^bool ok]
+  (set! l (.get l))
+
+  ;; First try for a zone with the right name that was actually
+  ;; in effect at the given time. (In Sydney, Australia, both standard
+  ;; and daylight-savings time are abbreviated "EST". Using the
+  ;; offset helps us pick the right one for the given time.
+  ;; It's not perfect: during the backward transition we might pick
+  ;; either one.)
+  (range [i (.-zone l)]
+    (let [zone (addr (aget (.-zone l) i))]
+      (when (== (.-name zone) name)
+        (let [(values nam offset _ _ _) (.lookup l (- unix (conv int64 (.-offset zone))))]
+          (when (== nam (.-name zone))
+            (return offset true))))))
+
+
+
+
+  ;; Otherwise fall back to an ordinary name match.
+  (range [i (.-zone l)]
+    (let [zone (addr (aget (.-zone l) i))]
+      (when (== (.-name zone) name)
+        (return (.-offset zone) true))))
+
+
+
+  ;; Otherwise, give up.
+  (return))
+
+
+;; NOTE(rsc): Eventually we will need to accept the POSIX TZ environment
+;; syntax too, but I don't feel like implementing it today.
+
+(go/var errLocation (errors/New "time: invalid location name"))
+
+(go/var ^{:tag (* string)} zoneinfo)
+(go/var ^sync/Once zoneinfoOnce)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 697} (go/func LoadLocation "LoadLocation returns a [Location] with the given name.\n\nIf the name is \"\" or \"UTC\", LoadLocation returns [UTC].\nIf the name is \"Local\", LoadLocation returns [Local].\n\nOtherwise, a new [Location] is created where the name is taken\nto be a location name corresponding to a file\nin the IANA Time Zone database, such as \"America/New_York\".\n\nLoadLocation looks for the IANA Time Zone database in the following\nlocations in order:\n\n  - the directory or uncompressed zip file named by the ZONEINFO environment variable\n  - on a Unix system, the system standard installation location\n  - $GOROOT/lib/time/zoneinfo.zip\n  - the time/tzdata package, if it was imported\n" [^string name] :results [(* Location) error]
+  (when (or (== name "") (== name "UTC"))
+    (return UTC nil))
+
+  (when (== name "Local")
+    (return Local nil))
+
+  (when (or (containsDotDot name) (== (aget name 0) \/) (== (aget name 0) \\))
+    ;; No valid IANA Time Zone name contains a single dot,
+    ;; much less dot dot. Likewise, none begin with a slash.
+    (return nil errLocation))
+
+  (.Do zoneinfoOnce ^{:go/end 679} (fn []
+      (let [(values env _) (syscall/Getenv "ZONEINFO")]
+        (set! zoneinfo (addr env)))))
+
+  (let [^error firstErr (zero error)]
+    (when (!= @zoneinfo "")
+      (if [(values zoneData err) (loadTzinfoFromDirOrZip @zoneinfo name)] (== err nil) (do
+          (when [(values z err) (LoadLocationFromTZData name zoneData)] (== err nil)
+            (return z nil))
+
+          (set! firstErr err))
+        (when (!= err syscall/ENOENT)
+          (set! firstErr err))))
+
+
+    (if [(values z err) (loadLocation name platformZoneSources)] (== err nil)
+      (return z nil)
+      (when (== firstErr nil)
+        (set! firstErr err)))
+
+    (return nil firstErr)))
+
+
+
+^{:go/breaks [[6 709]] :go/end 710} (go/func containsDotDot "containsDotDot reports whether s contains \"..\".\n" ^bool [^string s]
+  (when (< (len s) 2)
+    (return false))
+
+  (for [i 0] (< i (- (len s) 1)) (inc! i)
+    (when (and (== (aget s i) \.) (== (aget s (+ i 1)) \.))
+      (return true)))
+
+
+  false)

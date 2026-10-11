@@ -1,0 +1,314 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.poll) (go/file "fd_mutex.go" :imports [
+
+    ^{:line 7} [atomic "sync/atomic"]])
+
+
+
+
+(go/type fdMutex "fdMutex is a specialized synchronization primitive that manages\nlifetime of an fd and serializes access to Read, Write and Close\nmethods on FD.\n" (struct
+    ^{:line 13 :tag uint64} state
+    ^{:line 14 :tag uint32} rsema
+    ^{:line 15 :tag uint32} wsema))
+
+
+
+
+
+
+
+
+
+(go/const "fdMutex.state is organized as follows:\n1 bit - whether FD is closed, if set all subsequent lock operations will fail.\n1 bit - lock for read operations.\n1 bit - lock for write operations.\n20 bits - total number of references (read+write+misc).\n20 bits - number of outstanding read waiters.\n20 bits - number of outstanding write waiters.\n"
+  ^{:line 26} [^{:val 1} mutexClosed (<< 1 0)]
+  ^{:line 27} [^{:val 2} mutexRLock (<< 1 1)]
+  ^{:line 28} [^{:val 4} mutexWLock (<< 1 2)]
+  ^{:line 29} [^{:val 8} mutexRef (<< 1 3)]
+  ^{:line 30} [^{:val 8388600} mutexRefMask (<< (- (<< 1 20) 1) 3)]
+  ^{:line 31} [^{:val 8388608} mutexRWait (<< 1 23)]
+  ^{:line 32} [^{:val 8796084633600} mutexRMask (<< (- (<< 1 20) 1) 23)]
+  ^{:line 33} [^{:val 8796093022208} mutexWWait (<< 1 43)]
+  ^{:line 34} [^{:val 9223363240761753600} mutexWMask (<< (- (<< 1 20) 1) 43)])
+
+
+(go/const
+  ^{:line 38} [^{:val true} readlock true]
+  ^{:line 39} [^{:val false} writeLock false]
+  ^{:line 40} [^{:val true} waitLock true]
+  ^{:line 41} [^{:val false} tryLock false])
+
+
+(go/const ^{:val "too many concurrent operations on a single file or socket (max 1048575)"} overflowMsg "too many concurrent operations on a single file or socket (max 1048575)")
+
+;; Read operations must do rwlock(readlock, waitLock)/rwunlock(readlock).
+;;
+;; Write operations must do rwlock(writeLock, waitLock)/rwunlock(writeLock).
+;;
+;; Misc operations must do incref/decref.
+;; Misc operations include functions like setsockopt and setDeadline.
+;; They need to use incref/decref to ensure that they operate on the
+;; correct fd in presence of a concurrent close call (otherwise fd can
+;; be closed under their feet).
+;;
+;; Close operations must do increfAndClose/decref.
+
+
+
+^{:go/end 74} (go/method incref "incref adds a reference to mu.\nIt reports whether mu is available for reading or writing.\n" ^bool [^{:tag (* fdMutex)} mu]
+  (while true
+    (let [old (atomic/LoadUint64 (addr (.-state mu)))]
+      (when (!= (bit-and old mutexClosed) 0)
+        (return false))
+
+      (let [new (+ old mutexRef)]
+        (when (== (bit-and new mutexRefMask) 0)
+          (panic overflowMsg))
+
+        (when (atomic/CompareAndSwapUint64 (addr (.-state mu)) old new)
+          (return true))))))
+
+
+
+
+
+
+^{:go/end 105} (go/method increfAndClose "increfAndClose sets the state of mu to closed.\nIt returns false if the file was already closed.\n" ^bool [^{:tag (* fdMutex)} mu]
+  (while true
+    (let [old (atomic/LoadUint64 (addr (.-state mu)))]
+      (when (!= (bit-and old mutexClosed) 0)
+        (return false))
+
+      ;; Mark as closed and acquire a reference.
+      (let [new (+ (bit-or old mutexClosed) mutexRef)]
+        (when (== (bit-and new mutexRefMask) 0)
+          (panic overflowMsg))
+
+        ;; Remove all read and write waiters.
+        (set! new bit-and-not (bit-or mutexRMask mutexWMask))
+        (when (atomic/CompareAndSwapUint64 (addr (.-state mu)) old new)
+          ;; Wake all read and write waiters,
+          ;; they will observe closed flag after wakeup.
+          (while (!= (bit-and old mutexRMask) 0)
+            (set! old - mutexRWait)
+            (runtime_Semrelease (addr (.-rsema mu))))
+
+          (while (!= (bit-and old mutexWMask) 0)
+            (set! old - mutexWWait)
+            (runtime_Semrelease (addr (.-wsema mu))))
+
+          (return true))))))
+
+
+
+
+
+
+^{:go/end 120} (go/method decref "decref removes a reference from mu.\nIt reports whether there is no remaining reference.\n" ^bool [^{:tag (* fdMutex)} mu]
+  (while true
+    (let [old (atomic/LoadUint64 (addr (.-state mu)))]
+      (when (== (bit-and old mutexRefMask) 0)
+        (panic "inconsistent poll.fdMutex"))
+
+      (let [new (- old mutexRef)]
+        (when (atomic/CompareAndSwapUint64 (addr (.-state mu)) old new)
+          (return (== (bit-and new (bit-or mutexClosed mutexRefMask)) mutexClosed)))))))
+
+
+
+
+
+
+
+^{:go/end 169} (go/method rwlock "lock adds a reference to mu and locks mu.\nIt reports whether mu is available for reading or writing.\nIf wait is false, lock fails immediately if mu is not available.\n" ^bool [^{:tag (* fdMutex)} mu ^bool read ^bool wait]
+  (let [(values ^uint64 mutexBit ^uint64 mutexWait ^uint64 mutexMask) (zero uint64)
+      ^{:line 127 :tag (* uint32)} mutexSema (zero (* uint32))]
+    (if read (do
+        (set! mutexBit mutexRLock)
+        (set! mutexWait mutexRWait)
+        (set! mutexMask mutexRMask)
+        (set! mutexSema (addr (.-rsema mu))))
+      (do
+        (set! mutexBit mutexWLock)
+        (set! mutexWait mutexWWait)
+        (set! mutexMask mutexWMask)
+        (set! mutexSema (addr (.-wsema mu)))))
+
+    (while true
+      (let [old (atomic/LoadUint64 (addr (.-state mu)))]
+        (when (!= (bit-and old mutexClosed) 0)
+          (return false))
+
+        (let [^uint64 new (zero uint64)]
+          (if (== (bit-and old mutexBit) 0) (do
+              ;; Lock is free, acquire it.
+              (set! new (+ (bit-or old mutexBit) mutexRef))
+              (when (== (bit-and new mutexRefMask) 0)
+                (panic overflowMsg)))
+
+            (do
+              ;; Wait for lock.
+              (when (not wait)
+                (return false))
+
+              (set! new (+ old mutexWait))
+              (when (== (bit-and new mutexMask) 0)
+                (panic overflowMsg))))
+
+
+          (when (atomic/CompareAndSwapUint64 (addr (.-state mu)) old new)
+            (when (== (bit-and old mutexBit) 0)
+              (return true))
+
+            (runtime_Semacquire mutexSema)))))))
+;; The signaller has subtracted mutexWait.
+
+
+
+
+
+
+^{:go/end 204} (go/method rwunlock "unlock removes a reference from mu and unlocks mu.\nIt reports whether there is no remaining reference.\n" ^bool [^{:tag (* fdMutex)} mu ^bool read]
+  (let [(values ^uint64 mutexBit ^uint64 mutexWait ^uint64 mutexMask) (zero uint64)
+      ^{:line 175 :tag (* uint32)} mutexSema (zero (* uint32))]
+    (if read (do
+        (set! mutexBit mutexRLock)
+        (set! mutexWait mutexRWait)
+        (set! mutexMask mutexRMask)
+        (set! mutexSema (addr (.-rsema mu))))
+      (do
+        (set! mutexBit mutexWLock)
+        (set! mutexWait mutexWWait)
+        (set! mutexMask mutexWMask)
+        (set! mutexSema (addr (.-wsema mu)))))
+
+    (while true
+      (let [old (atomic/LoadUint64 (addr (.-state mu)))]
+        (when (or (== (bit-and old mutexBit) 0) (== (bit-and old mutexRefMask) 0))
+          (panic "inconsistent poll.fdMutex"))
+
+        ;; Drop lock, drop reference and wake read waiter if present.
+        (let [new (- (bit-and-not old mutexBit) mutexRef)]
+          (when (!= (bit-and old mutexMask) 0)
+            (set! new - mutexWait))
+
+          (when (atomic/CompareAndSwapUint64 (addr (.-state mu)) old new)
+            (when (!= (bit-and old mutexMask) 0)
+              (runtime_Semrelease mutexSema))
+
+            (return (== (bit-and new (bit-or mutexClosed mutexRefMask)) mutexClosed))))))))
+
+
+
+
+
+(go/func ^:extern runtime_Semacquire "Implemented in runtime package.\n" [^{:tag (* uint32)} sema])
+(go/func ^:extern runtime_Semrelease [^{:tag (* uint32)} sema])
+
+
+
+^{:go/breaks [[5 216]] :go/end 217} (go/method incref "incref adds a reference to fd.\nIt returns an error when fd cannot be used.\n" ^error [^{:tag (* FD)} fd]
+  (when (not (.incref (.-fdmu fd)))
+    (return (errClosing (.-isFile fd))))
+
+  nil)
+
+
+
+
+
+^{:go/breaks [[5 226]] :go/end 227} (go/method decref "decref removes a reference from fd.\nIt also closes fd when the state of fd is set to closed and there\nis no remaining reference.\n" ^error [^{:tag (* FD)} fd]
+  (when (.decref (.-fdmu fd))
+    (return (.destroy fd)))
+
+  nil)
+
+
+
+
+^{:go/breaks [[5 235]] :go/end 236} (go/method readLock "readLock adds a reference to fd and locks fd for reading.\nIt returns an error when fd cannot be used for reading.\n" ^error [^{:tag (* FD)} fd]
+  (when (not (.rwlock (.-fdmu fd) readlock waitLock))
+    (return (errClosing (.-isFile fd))))
+
+  nil)
+
+
+
+
+
+^{:go/end 245} (go/method readUnlock "readUnlock removes a reference from fd and unlocks fd for reading.\nIt also closes fd when the state of fd is set to closed and there\nis no remaining reference.\n" [^{:tag (* FD)} fd]
+  (when (.rwunlock (.-fdmu fd) readlock)
+    (.destroy fd)))
+
+
+
+
+
+^{:go/breaks [[5 253]] :go/end 254} (go/method writeLock "writeLock adds a reference to fd and locks fd for writing.\nIt returns an error when fd cannot be used for writing.\n" ^error [^{:tag (* FD)} fd]
+  (when (not (.rwlock (.-fdmu fd) writeLock waitLock))
+    (return (errClosing (.-isFile fd))))
+
+  nil)
+
+
+
+
+
+^{:go/end 263} (go/method writeUnlock "writeUnlock removes a reference from fd and unlocks fd for writing.\nIt also closes fd when the state of fd is set to closed and there\nis no remaining reference.\n" [^{:tag (* FD)} fd]
+  (when (.rwunlock (.-fdmu fd) writeLock)
+    (.destroy fd)))
+
+
+
+
+
+^{:go/breaks [[6 277]] :go/end 278} (go/method readWriteLock "readWriteLock adds a reference to fd and locks fd for reading and writing.\nIt returns an error when fd cannot be used for reading and writing.\n" ^error [^{:tag (* FD)} fd]
+  (when (not (.rwlock (.-fdmu fd) readlock waitLock))
+    (return (errClosing (.-isFile fd))))
+
+  (when (not (.rwlock (.-fdmu fd) writeLock waitLock))
+    (when (.rwunlock (.-fdmu fd) readlock)
+      (.destroy fd))
+
+    (return (errClosing (.-isFile fd))))
+
+  nil)
+
+
+
+
+
+^{:go/end 300} (go/method tryReadWriteLock "tryReadWriteLock tries to add a reference to fd and lock fd for reading and writing.\nIt returns (false, nil) when fd is not available for reading and writing but is not closing.\nIt returns (false, errClosing) when fd is closing.\n" [^{:tag (* FD)} fd] :results [bool error]
+  (when (not (.rwlock (.-fdmu fd) readlock tryLock))
+    (when (.closing fd)
+      (return false (errClosing (.-isFile fd))))
+
+    (return false nil))
+
+  (when (not (.rwlock (.-fdmu fd) writeLock tryLock))
+    (when (.rwunlock (.-fdmu fd) readlock)
+      (.destroy fd))
+
+    (when (.closing fd)
+      (return false (errClosing (.-isFile fd))))
+
+    (return false nil))
+
+  (return true nil))
+
+
+
+
+
+^{:go/end 310} (go/method readWriteUnlock "readWriteUnlock removes a reference from fd and unlocks fd for reading and writing.\nIt also closes fd when the state of fd is set to closed and there\nis no remaining reference.\n" [^{:tag (* FD)} fd]
+  (.rwunlock (.-fdmu fd) readlock)
+  (when (.rwunlock (.-fdmu fd) writeLock)
+    (.destroy fd)))
+
+
+
+
+^{:go/end 315} (go/method closing "closing returns true if fd is closing.\n" ^bool [^{:tag (* FD)} fd]
+  (!= (bit-and (atomic/LoadUint64 (addr (.-state (.-fdmu fd)))) mutexClosed) 0))

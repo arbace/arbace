@@ -1,0 +1,339 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; /*
+;; Package plan9obj implements access to Plan 9 a.out object files.
+;; 
+;; # Security
+;; 
+;; This package is not designed to be hardened against adversarial inputs, and is
+;; outside the scope of https://go.dev/security/policy. In particular, only basic
+;; validation is done when parsing object files. As such, care should be taken when
+;; parsing untrusted inputs, as parsing malformed files may consume significant
+;; resources, or cause panics.
+;; */
+(in-ns 'go.debug.plan9obj) (go/file "file.go" :doc "Package plan9obj implements access to Plan 9 a.out object files.\n\n# Security\n\nThis package is not designed to be hardened against adversarial inputs, and is\noutside the scope of https://go.dev/security/policy. In particular, only basic\nvalidation is done when parsing object files. As such, care should be taken when\nparsing untrusted inputs, as parsing malformed files may consume significant\nresources, or cause panics.\n" :imports [
+
+
+    ^{:line 19} [binary "encoding/binary"]
+    ^{:line 20} [errors "errors"]
+    ^{:line 21} [fmt "fmt"]
+    ^{:line 22} [saferio "internal/saferio"]
+    ^{:line 23} [io "io"]
+    ^{:line 24} [os "os"]])
+
+
+
+(go/type FileHeader "A FileHeader represents a Plan 9 a.out file header.\n" (struct
+    ^{:line 29 :tag uint32} Magic
+    ^{:line 30 :tag uint32} Bss
+    ^{:line 31 :tag uint64} Entry
+    ^{:line 32 :tag int} PtrSize
+    ^{:line 33 :tag uint64} LoadAddress
+    ^{:line 34 :tag uint64} HdrSize))
+
+
+
+(go/type File "A File represents an open Plan 9 a.out file.\n" (struct
+    ^{:line 39} FileHeader
+    ^{:line 40 :tag (slice (* Section))} Sections
+    ^{:line 41 :tag io/Closer} closer))
+
+
+
+
+
+(go/type SectionHeader "A SectionHeader represents a single Plan 9 a.out section header.\nThis structure doesn't exist on-disk, but eases navigation\nthrough the object file.\n" (struct
+    ^{:line 48 :tag string} Name
+    ^{:line 49 :tag uint32} Size
+    ^{:line 50 :tag uint32} Offset))
+
+
+
+(go/type Section "A Section represents a single section in a Plan 9 a.out file.\n" (struct
+    ^{:line 55} SectionHeader
+
+
+
+
+
+
+
+    ^{:line 63 :doc "Embed ReaderAt for ReadAt method.\nDo not embed SectionReader directly\nto avoid having Read and Seek.\nIf a client wants Read and Seek it must use\nOpen() to avoid fighting over the seek offset\nwith other clients.\n"} io/ReaderAt
+    ^{:line 64 :tag (* io/SectionReader)} sr))
+
+
+
+^{:go/end 70} (go/method Data "Data reads and returns the contents of the Plan 9 a.out section.\n" [^{:tag (* Section)} s] :results [(slice byte) error]
+  (saferio/ReadDataAt (.-sr s) (conv uint64 ^{:go/via [SectionHeader]} (.-Size s)) 0))
+
+
+
+^{:go/end 73} (go/method Open "Open returns a new ReadSeeker reading the Plan 9 a.out section.\n" ^io/ReadSeeker [^{:tag (* Section)} s] (io/NewSectionReader (.-sr s) 0 (- (<< 1 63) 1)))
+
+
+(go/type Sym "A Symbol represents an entry in a Plan 9 a.out symbol table section.\n" (struct
+    ^{:line 77 :tag uint64} Value
+    ^{:line 78 :tag rune} Type
+    ^{:line 79 :tag string} Name))
+
+
+;; /*
+;; * Plan 9 a.out reader
+;; */
+
+
+
+(go/type formatError "formatError is returned by some operations if the data does\nnot have the correct format for an object file.\n" (struct
+    ^{:line 89 :tag int} off
+    ^{:line 90 :tag string} msg
+    ^{:line 91 :tag any} val))
+
+
+^{:go/end 101} (go/method Error ^string [^{:tag (* formatError)} e]
+  (let [msg (.-msg e)]
+    (when (!= (.-val e) nil)
+      (set! msg + (fmt/Sprintf " '%v'" (.-val e))))
+
+    (set! msg + (fmt/Sprintf " in record at byte %#x" (.-off e)))
+    ^{:line 100} msg))
+
+
+
+^{:go/end 116} (go/func Open "Open opens the named file using [os.Open] and prepares it for use as a Plan 9 a.out binary.\n" [^string name] :results [(* File) error]
+  (let [(values f err) (os/Open name)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values ff ^:assign err) (NewFile f)]
+      (when (!= err nil)
+        (.Close f)
+        (return nil err))
+
+      (set! (.-closer ff) f)
+      (return ff nil))))
+
+
+
+
+
+^{:go/end 128} (go/method Close "Close closes the [File].\nIf the [File] was created using [NewFile] directly instead of [Open],\nClose has no effect.\n" ^error [^{:tag (* File)} f]
+  (let [^error err (zero error)]
+    (when (!= (.-closer f) nil)
+      (set! err (.Close (.-closer f)))
+      (set! (.-closer f) nil))
+
+    ^{:line 127} err))
+
+
+^{:go/end 137} (go/func parseMagic [^{:tag (slice byte)} magic] :results [uint32 error]
+  (let [m (.Uint32 binary/BigEndian magic)]
+    (switch m
+      (case [Magic386 MagicAMD64 MagicARM]
+        (return m nil)))
+
+    (return 0 (addr (lit formatError 0 "bad magic number" magic)))))
+
+
+
+
+^{:go/end 205} (go/func NewFile "NewFile creates a new [File] for accessing a Plan 9 binary in an underlying reader.\nThe Plan 9 binary is expected to start at position 0 in the ReaderAt.\n" [^io/ReaderAt r] :results [(* File) error]
+  (let [sr (io/NewSectionReader r 0 (- (<< 1 63) 1))
+      ;; Read and decode Plan 9 magic
+      ^{:line 144 :tag (array 4 byte)} magic (zero (array 4 byte))]
+    (when [(values _ err) (.ReadAt r (subslice magic) 0)] (!= err nil)
+      (return nil err))
+
+    (let [(values _ err) (parseMagic (subslice magic))]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (let [ph (new prog)]
+        (when [err (binary/Read sr binary/BigEndian ph)] (!= err nil)
+          (return nil err))
+
+
+        (let [f (addr (lit File :FileHeader ^{:go/breaks [2 4 6 8 10 12]} (lit FileHeader
+                  :Magic (.-Magic ph)
+                  :Bss (.-Bss ph)
+                  :Entry (conv uint64 (.-Entry ph))
+                  :PtrSize 4
+                  :LoadAddress 0x1000
+                  :HdrSize (* 4 8))))]
+
+
+          (when (!= (bit-and (.-Magic ph) Magic64) 0)
+            (when [err (binary/Read sr binary/BigEndian (addr ^{:go/via [FileHeader]} (.-Entry f)))] (!= err nil)
+              (return nil err))
+
+            (set! ^{:go/via [FileHeader]} (.-PtrSize f) 8)
+            (set! ^{:go/via [FileHeader]} (.-LoadAddress f) 0x200000)
+            (set! ^{:go/via [FileHeader]} (.-HdrSize f) + 8))
+
+
+          (let [^:var sects (lit (slice (struct
+                    ^{:line 177 :tag string} name
+                    ^{:line 178 :tag uint32} size))
+
+                (lit _ "text" (.-Text ph))
+                (lit _ "data" (.-Data ph))
+                (lit _ "syms" (.-Syms ph))
+                (lit _ "spsz" (.-Spsz ph))
+                (lit _ "pcsz" (.-Pcsz ph)))]
+
+
+            (set! (.-Sections f) (make (slice (* Section)) 5))
+
+            (let [off (conv uint32 ^{:go/via [FileHeader]} (.-HdrSize f))]
+
+              (range [i sect sects]
+                (let [s (new Section)]
+                  (set! (.-SectionHeader s) ^{:go/breaks [2 4 6]} (lit SectionHeader
+                      :Name (.-name sect)
+                      :Size (.-size sect)
+                      :Offset off))
+
+                  (set! off + (.-size sect))
+                  (set! (.-sr s) (io/NewSectionReader r (conv int64 ^{:go/via [SectionHeader]} (.-Offset s)) (conv int64 ^{:go/via [SectionHeader]} (.-Size s))))
+                  (set! (.-ReaderAt s) (.-sr s))
+                  (aset (.-Sections f) i s)))
+
+
+              (return f nil))))))))
+
+
+^{:go/end 261} (go/func walksymtab ^error [^{:tag (slice byte)} data ^int ptrsz ^{:tag (func [sym] [error])} fn]
+  ^{:go/breaks [[3 260]]} (let [^binary/ByteOrder order binary/BigEndian
+      ^{:line 209 :tag sym} s (zero sym)
+      ^{:line 210} p data]
+    (while (>= (len p) 4)
+      ;; Symbol type, value.
+      (when (< (len p) ptrsz)
+        (return (addr (lit formatError (len data) "unexpected EOF" nil))))
+
+      ;; fixed-width value
+      (if (== ptrsz 8) (do
+          (set! (.-value s) (.Uint64 order (subslice p 0 8)))
+          (set! p (subslice p 8)))
+        (do
+          (set! (.-value s) (conv uint64 (.Uint32 order (subslice p 0 4))))
+          (set! p (subslice p 4))))
+
+
+      (when (< (len p) 1)
+        (return (addr (lit formatError (len data) "unexpected EOF" nil))))
+
+      (let [typ (bit-and (aget p 0) 0x7F)]
+        (set! (.-typ s) typ)
+        (set! p (subslice p 1))
+
+        ;; Name.
+        (let [^int i (zero int)
+            ^{:line 234 :tag int} nnul (zero int)]
+          (for [(set! i 0)] (< i (len p)) (inc! i)
+            (when (== (aget p i) 0)
+              (set! nnul 1)
+              (break)))
+
+
+          (switch typ
+            (case [\z \Z]
+              (set! p (subslice p (+ i nnul)))
+              (for [(set! i 0)] (<= (+ i 2) (len p)) (set! i + 2)
+                (when (and (== (aget p i) 0) (== (aget p (+ i 1)) 0))
+                  (set! nnul 2)
+                  (break)))))
+
+
+
+          (when (< (len p) (+ i nnul))
+            (return (addr (lit formatError (len data) "unexpected EOF" nil))))
+
+          (set! (.-name s) (subslice p 0 i))
+          (set! i + nnul)
+          (set! p (subslice p i))
+
+          (go/call fn s))))
+
+    nil))
+
+
+
+
+^{:go/end 310} (go/func newTable "newTable decodes the Go symbol table in data,\nreturning an in-memory representation.\n" [^{:tag (slice byte)} symtab ^int ptrsz] :results [(slice Sym) error]
+  (let [^int n (zero int)
+      ^{:line 267} err (walksymtab symtab ptrsz ^{:go/breaks [3] :go/end 270} (fn ^error [^sym s]
+          (inc! n)
+          nil))]
+
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [fname (make (map uint16 string))
+        ^{:line 276} syms (make (slice Sym) 0 n)]
+      (set! err (walksymtab symtab ptrsz ^{:go/end 304} (fn ^error [^sym s]
+            (let [n (len syms)]
+              (set! syms (subslice syms 0 (+ n 1)))
+              ^{:go/breaks [[6 303]]} (let [ts (addr (aget syms n))]
+                (set! (.-Type ts) (conv rune (.-typ s)))
+                (set! (.-Value ts) (.-value s))
+                (switch (.-typ s)
+                  (default
+                    (set! (.-Name ts) (conv string (.-name s))))
+                  (case [\z \Z]
+                    (for [i 0] (< i (len (.-name s))) (set! i + 2)
+                      (let [eltIdx (.Uint16 binary/BigEndian (subslice (.-name s) i (+ i 2)))
+                          (values elt ok) (aget fname eltIdx)]
+                        (when (not ok)
+                          (return (addr (lit formatError -1 "bad filename code" eltIdx))))
+
+                        (when [n (len (.-Name ts))] (and (> n 0) (!= (aget (.-Name ts) (- n 1)) \/))
+                          (set! (.-Name ts) + "/"))
+
+                        (set! (.-Name ts) + elt)))))
+
+
+                (switch (.-typ s)
+                  (case [\f]
+                    (aset fname (conv uint16 (.-value s)) (.-Name ts))))
+
+                nil)))))
+
+      (when (!= err nil)
+        (return nil err))
+
+
+      (return syms nil))))
+
+
+
+
+(go/var ^{:doc "ErrNoSymbols is returned by [File.Symbols] if there is no such section\nin the File.\n"} ErrNoSymbols (errors/New "no symbol section"))
+
+
+^{:go/end 329} (go/method Symbols "Symbols returns the symbol table for f.\n" [^{:tag (* File)} f] :results [(slice Sym) error]
+  (let [symtabSection (.Section f "syms")]
+    (when (== symtabSection nil)
+      (return nil ErrNoSymbols))
+
+
+    (let [(values symtab err) (.Data symtabSection)]
+      (when (!= err nil)
+        (return nil (errors/New "cannot load symbol section")))
+
+
+      (newTable symtab ^{:go/via [FileHeader]} (.-PtrSize f)))))
+
+
+
+
+^{:go/breaks [[5 339]] :go/end 340} (go/method Section "Section returns a section with the given name, or nil if no such\nsection exists.\n" ^{:tag (* Section)} [^{:tag (* File)} f ^string name]
+  (range [_ s (.-Sections f)]
+    (when (== ^{:go/via [SectionHeader]} (.-Name s) name)
+      (return s)))
+
+
+  nil)

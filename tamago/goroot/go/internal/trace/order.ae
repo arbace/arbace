@@ -1,0 +1,1420 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace) (go/file "order.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [slices "slices"]
+    ^{:line 10} [strings "strings"]
+
+    ^{:line 12} [tracev2 "internal/trace/tracev2"]
+    ^{:line 13} [version "internal/trace/version"]])
+
+
+
+
+
+
+
+
+
+(go/type ordering "ordering emulates Go scheduler state for both validation and\nfor putting events in the right order.\n\nThe interface to ordering consists of two methods: Advance\nand Next. Advance is called to try and advance an event and\nadd completed events to the ordering. Next is used to pick\noff events in the ordering.\n" (struct
+    ^{:line 24 :tag version/Version} traceVer
+    ^{:line 25 :tag (map GoID (* gState))} gStates
+    ^{:line 26 :tag (map ProcID (* pState))} pStates ; TODO: The keys are dense, so this can be a slice.
+    ^{:line 27 :tag (map ThreadID (* mState))} mStates
+    ^{:line 28 :tag (map TaskID taskState)} activeTasks
+    ^{:line 29 :tag uint64} gcSeq
+    ^{:line 30 :tag gcState} gcState
+    ^{:line 31 :tag uint64} initialGen
+    ^{:line 32 :tag (queue Event)} queue))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 89} (go/method Advance "Advance checks if it's valid to proceed with ev which came from thread m.\n\nIt assumes the gen value passed to it is monotonically increasing across calls.\n\nIf any error is returned, then the trace is broken and trace parsing must cease.\nIf it's not valid to advance with ev, but no error was encountered, the caller\nshould attempt to advance with other candidate events from other threads. If the\ncaller runs out of candidates, the trace is invalid.\n\nIf this returns true, Next is guaranteed to return a complete event. However,\nmultiple events may be added to the ordering, so the caller should (but is not\nrequired to) continue to call Next until it is exhausted.\n" [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen] :results [bool error]
+  (when (== (.-initialGen o) 0)
+    ;; Set the initial gen if necessary.
+    (set! (.-initialGen o) gen))
+
+
+  (let [(values ^schedCtx curCtx ^schedCtx newCtx) (zero schedCtx)]
+    (set! (.-M curCtx) m)
+    (set! (.-M newCtx) m)
+
+    (let [^{:tag (* mState)} ms (zero (* mState))]
+      (if (== m NoThread) (do
+          (set! (.-P curCtx) NoProc)
+          (set! (.-G curCtx) NoGoroutine)
+          (set! newCtx curCtx))
+
+        ;; Pull out or create the mState for this event.
+        (let [^bool ok (zero bool)]
+          (set! (values ms ok) (aget (.-mStates o) m))
+          (when (not ok)
+            (set! ms (addr ^{:go/breaks [2 4]} (lit mState
+                  :g NoGoroutine
+                  :p NoProc)))
+
+            (aset (.-mStates o) m ms))
+
+          (set! (.-P curCtx) (.-p ms))
+          (set! (.-G curCtx) (.-g ms))
+          (set! newCtx curCtx)))
+
+
+      (let [f (aget orderingDispatch (.-typ ev))]
+        (when (== f nil)
+          (return false (fmt/Errorf "bad event type found while ordering: %v" (.-typ ev))))
+
+        (let [(values ^:assign newCtx ok err) (f o ev evt m gen curCtx)]
+          (when (and (== err nil) ok (!= ms nil))
+            ;; Update the mState for this event.
+            (set! (.-p ms) (.-P newCtx))
+            (set! (.-g ms) (.-G newCtx)))
+
+          (return ok err))))))
+
+
+^{:go/end 93} (go/method evName ^string [^{:tag (* ordering)} o ^tracev2/EventType typ]
+  (.EventName (.-traceVer o) typ))
+
+
+(go/type orderingHandleFunc (func [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] [schedCtx bool error]))
+
+(go/var orderingDispatch (lit (array 256 orderingHandleFunc)
+    ;; Procs.
+    ^{:line 99} [tracev2/EvProcsChange (method-expr (* ordering) advanceAnnotation)]
+    ^{:line 100} [tracev2/EvProcStart (method-expr (* ordering) advanceProcStart)]
+    ^{:line 101} [tracev2/EvProcStop (method-expr (* ordering) advanceProcStop)]
+    ^{:line 102} [tracev2/EvProcSteal (method-expr (* ordering) advanceProcSteal)]
+    ^{:line 103} [tracev2/EvProcStatus (method-expr (* ordering) advanceProcStatus)]
+
+    ;; Goroutines.
+    ^{:line 106} [tracev2/EvGoCreate (method-expr (* ordering) advanceGoCreate)]
+    ^{:line 107} [tracev2/EvGoCreateSyscall (method-expr (* ordering) advanceGoCreateSyscall)]
+    ^{:line 108} [tracev2/EvGoStart (method-expr (* ordering) advanceGoStart)]
+    ^{:line 109} [tracev2/EvGoDestroy (method-expr (* ordering) advanceGoStopExec)]
+    ^{:line 110} [tracev2/EvGoDestroySyscall (method-expr (* ordering) advanceGoDestroySyscall)]
+    ^{:line 111} [tracev2/EvGoStop (method-expr (* ordering) advanceGoStopExec)]
+    ^{:line 112} [tracev2/EvGoBlock (method-expr (* ordering) advanceGoStopExec)]
+    ^{:line 113} [tracev2/EvGoUnblock (method-expr (* ordering) advanceGoUnblock)]
+    ^{:line 114} [tracev2/EvGoSyscallBegin (method-expr (* ordering) advanceGoSyscallBegin)]
+    ^{:line 115} [tracev2/EvGoSyscallEnd (method-expr (* ordering) advanceGoSyscallEnd)]
+    ^{:line 116} [tracev2/EvGoSyscallEndBlocked (method-expr (* ordering) advanceGoSyscallEndBlocked)]
+    ^{:line 117} [tracev2/EvGoStatus (method-expr (* ordering) advanceGoStatus)]
+
+    ;; STW.
+    ^{:line 120} [tracev2/EvSTWBegin (method-expr (* ordering) advanceGoRangeBegin)]
+    ^{:line 121} [tracev2/EvSTWEnd (method-expr (* ordering) advanceGoRangeEnd)]
+
+    ;; GC events.
+    ^{:line 124} [tracev2/EvGCActive (method-expr (* ordering) advanceGCActive)]
+    ^{:line 125} [tracev2/EvGCBegin (method-expr (* ordering) advanceGCBegin)]
+    ^{:line 126} [tracev2/EvGCEnd (method-expr (* ordering) advanceGCEnd)]
+    ^{:line 127} [tracev2/EvGCSweepActive (method-expr (* ordering) advanceGCSweepActive)]
+    ^{:line 128} [tracev2/EvGCSweepBegin (method-expr (* ordering) advanceGCSweepBegin)]
+    ^{:line 129} [tracev2/EvGCSweepEnd (method-expr (* ordering) advanceGCSweepEnd)]
+    ^{:line 130} [tracev2/EvGCMarkAssistActive (method-expr (* ordering) advanceGoRangeActive)]
+    ^{:line 131} [tracev2/EvGCMarkAssistBegin (method-expr (* ordering) advanceGoRangeBegin)]
+    ^{:line 132} [tracev2/EvGCMarkAssistEnd (method-expr (* ordering) advanceGoRangeEnd)]
+    ^{:line 133} [tracev2/EvHeapAlloc (method-expr (* ordering) advanceHeapMetric)]
+    ^{:line 134} [tracev2/EvHeapGoal (method-expr (* ordering) advanceHeapMetric)]
+
+    ;; Annotations.
+    ^{:line 137} [tracev2/EvGoLabel (method-expr (* ordering) advanceAnnotation)]
+    ^{:line 138} [tracev2/EvUserTaskBegin (method-expr (* ordering) advanceUserTaskBegin)]
+    ^{:line 139} [tracev2/EvUserTaskEnd (method-expr (* ordering) advanceUserTaskEnd)]
+    ^{:line 140} [tracev2/EvUserRegionBegin (method-expr (* ordering) advanceUserRegionBegin)]
+    ^{:line 141} [tracev2/EvUserRegionEnd (method-expr (* ordering) advanceUserRegionEnd)]
+    ^{:line 142} [tracev2/EvUserLog (method-expr (* ordering) advanceAnnotation)]
+
+    ;; Coroutines. Added in Go 1.23.
+    ^{:line 145} [tracev2/EvGoSwitch (method-expr (* ordering) advanceGoSwitch)]
+    ^{:line 146} [tracev2/EvGoSwitchDestroy (method-expr (* ordering) advanceGoSwitch)]
+    ^{:line 147} [tracev2/EvGoCreateBlocked (method-expr (* ordering) advanceGoCreate)]
+
+    ;; GoStatus event with a stack. Added in Go 1.23.
+    ^{:line 150} [tracev2/EvGoStatusStack (method-expr (* ordering) advanceGoStatus)]
+
+    ;; Experimental events.
+
+    ;; Experimental heap span events. Added in Go 1.23.
+    ^{:line 155} [tracev2/EvSpan (method-expr (* ordering) advanceAllocFree)]
+    ^{:line 156} [tracev2/EvSpanAlloc (method-expr (* ordering) advanceAllocFree)]
+    ^{:line 157} [tracev2/EvSpanFree (method-expr (* ordering) advanceAllocFree)]
+
+    ;; Experimental heap object events. Added in Go 1.23.
+    ^{:line 160} [tracev2/EvHeapObject (method-expr (* ordering) advanceAllocFree)]
+    ^{:line 161} [tracev2/EvHeapObjectAlloc (method-expr (* ordering) advanceAllocFree)]
+    ^{:line 162} [tracev2/EvHeapObjectFree (method-expr (* ordering) advanceAllocFree)]
+
+    ;; Experimental goroutine stack events. Added in Go 1.23.
+    ^{:line 165} [tracev2/EvGoroutineStack (method-expr (* ordering) advanceAllocFree)]
+    ^{:line 166} [tracev2/EvGoroutineStackAlloc (method-expr (* ordering) advanceAllocFree)]
+    ^{:line 167} [tracev2/EvGoroutineStackFree (method-expr (* ordering) advanceAllocFree)]))
+
+
+^{:go/end 232} (go/method advanceProcStatus [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (let [pid (conv ProcID (aget (.-args ev) 0))
+      ^{:line 172} status (conv tracev2/ProcStatus (aget (.-args ev) 1))]
+    (when (>= (conv int status) (len tracev2ProcStatus2ProcState))
+      (return curCtx false (fmt/Errorf "invalid status for proc %d: %d" pid status)))
+
+    (let [oldState (aget tracev2ProcStatus2ProcState status)]
+      (if [(values s ok) (aget (.-pStates o) pid)] ok (do
+          (cond (and (== status tracev2/ProcSyscallAbandoned) (== (.-status s) tracev2/ProcSyscall)) (do
+              ;; ProcSyscallAbandoned is a special case of ProcSyscall. It indicates a
+              ;; potential loss of information, but if we're already in ProcSyscall,
+              ;; we haven't lost the relevant information. Promote the status and advance.
+              (set! oldState ProcRunning)
+              (aset (.-args ev) 1 (conv uint64 tracev2/ProcSyscall)))
+            (and (== status tracev2/ProcSyscallAbandoned) (== (.-status s) tracev2/ProcSyscallAbandoned)) (do
+              ;; If we're passing through ProcSyscallAbandoned, then there's no promotion
+              ;; to do. We've lost the M that this P is associated with. However it got there,
+              ;; it's going to appear as idle in the API, so pass through as idle.
+              (set! oldState ProcIdle)
+              (aset (.-args ev) 1 (conv uint64 tracev2/ProcSyscallAbandoned)))
+            (!= (.-status s) status)
+            (return curCtx false (fmt/Errorf "inconsistent status for proc %d: old %v vs. new %v" pid (.-status s) status)))
+
+          (set! (.-seq s) (makeSeq gen 0))) ; Reset seq.
+        (do
+          (aset (.-pStates o) pid (addr (lit pState :id pid :status status :seq (makeSeq gen 0))))
+          (if (== gen (.-initialGen o))
+            (set! oldState ProcUndetermined)
+
+            (set! oldState ProcNotExist))))
+
+
+      (aset (.extra ev version/Go122) 0 (conv uint64 oldState)) ; Smuggle in the old state for StateTransition.
+
+      ;; Bind the proc to the new context, if it's running.
+      (let [newCtx curCtx]
+        (when (or (== status tracev2/ProcRunning) (== status tracev2/ProcSyscall))
+          (set! (.-P newCtx) pid))
+
+        ;; If we're advancing through ProcSyscallAbandoned *but* oldState is running then we've
+        ;; promoted it to ProcSyscall. However, because it's ProcSyscallAbandoned, we know this
+        ;; P is about to get stolen and its status very likely isn't being emitted by the same
+        ;; thread it was bound to. Since this status is Running -> Running and Running is binding,
+        ;; we need to make sure we emit it in the right context: the context to which it is bound.
+        ;; Find it, and set our current context to it.
+        (when (and (== status tracev2/ProcSyscallAbandoned) (== oldState ProcRunning))
+          ;; N.B. This is slow but it should be fairly rare.
+          (let [found false]
+            (range [mid ms (.-mStates o)]
+              (when (== (.-p ms) pid)
+                (set! (.-M curCtx) mid)
+                (set! (.-P curCtx) pid)
+                (set! (.-G curCtx) (.-g ms))
+                (set! found true)))
+
+
+            (when (not found)
+              (return curCtx false (fmt/Errorf "failed to find sched context for proc %d that's about to be stolen" pid)))))
+
+
+        (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+        (return newCtx true nil)))))
+
+
+^{:go/end 263} (go/method advanceProcStart [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (let [pid (conv ProcID (aget (.-args ev) 0))
+      ^{:line 236} seq (makeSeq gen (aget (.-args ev) 1))
+
+      ;; Try to advance. We might fail here due to sequencing, because the P hasn't
+      ;; had a status emitted, or because we already have a P and we're in a syscall,
+      ;; and we haven't observed that it was stolen from us yet.
+      (values state ok) (aget (.-pStates o) pid)]
+    (when (or (not ok) (!= (.-status state) tracev2/ProcIdle) (not (.succeeds seq (.-seq state))) (!= (.-P curCtx) NoProc))
+      ;; We can't make an inference as to whether this is bad. We could just be seeing
+      ;; a ProcStart on a different M before the proc's state was emitted, or before we
+      ;; got to the right point in the trace.
+      ;;
+      ;; Note that we also don't advance here if we have a P and we're in a syscall.
+      (return curCtx false nil))
+
+    ;; We can advance this P. Check some invariants.
+    ;;
+    ;; We might have a goroutine if a goroutine is exiting a syscall.
+    (let [reqs (lit schedReqs :M mustHave :P mustNotHave :G mayHave)]
+      (when [err (validateCtx curCtx reqs)] (!= err nil)
+        (return curCtx false err))
+
+      (set! (.-status state) tracev2/ProcRunning)
+      (set! (.-seq state) seq)
+      (let [newCtx curCtx]
+        (set! (.-P newCtx) pid)
+        (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+        (return newCtx true nil)))))
+
+
+^{:go/end 291} (go/method advanceProcStop [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; We must be able to advance this P.
+  ;;
+  ;; There are 2 ways a P can stop: ProcStop and ProcSteal. ProcStop is used when the P
+  ;; is stopped by the same M that started it, while ProcSteal is used when another M
+  ;; steals the P by stopping it from a distance.
+  ;;
+  ;; Since a P is bound to an M, and we're stopping on the same M we started, it must
+  ;; always be possible to advance the current M's P from a ProcStop. This is also why
+  ;; ProcStop doesn't need a sequence number.
+  (let [(values state ok) (aget (.-pStates o) (.-P curCtx))]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "event %s for proc (%v) that doesn't exist" (.evName o (.-typ ev)) (.-P curCtx))))
+
+    (when (and (!= (.-status state) tracev2/ProcRunning) (!= (.-status state) tracev2/ProcSyscall))
+      (return curCtx false (fmt/Errorf "%s event for proc that's not %s or %s" (.evName o (.-typ ev)) tracev2/ProcRunning tracev2/ProcSyscall)))
+
+    (let [reqs (lit schedReqs :M mustHave :P mustHave :G mayHave)]
+      (when [err (validateCtx curCtx reqs)] (!= err nil)
+        (return curCtx false err))
+
+      (set! (.-status state) tracev2/ProcIdle)
+      (let [newCtx curCtx]
+        (set! (.-P newCtx) NoProc)
+        (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+        (return newCtx true nil)))))
+
+
+^{:go/end 362} (go/method advanceProcSteal [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (let [pid (conv ProcID (aget (.-args ev) 0))
+      ^{:line 295} seq (makeSeq gen (aget (.-args ev) 1))
+      (values state ok) (aget (.-pStates o) pid)]
+    (when (or (not ok) ^:go/paren (and (!= (.-status state) tracev2/ProcSyscall) (!= (.-status state) tracev2/ProcSyscallAbandoned)) (not (.succeeds seq (.-seq state))))
+      ;; We can't make an inference as to whether this is bad. We could just be seeing
+      ;; a ProcStart on a different M before the proc's state was emitted, or before we
+      ;; got to the right point in the trace.
+      (return curCtx false nil))
+
+    ;; We can advance this P. Check some invariants.
+    (let [reqs (lit schedReqs :M mustHave :P mayHave :G mayHave)]
+      (when [err (validateCtx curCtx reqs)] (!= err nil)
+        (return curCtx false err))
+
+      ;; Smuggle in the P state that let us advance so we can surface information to the event.
+      ;; Specifically, we need to make sure that the event is interpreted not as a transition of
+      ;; ProcRunning -> ProcIdle but ProcIdle -> ProcIdle instead.
+      ;;
+      ;; ProcRunning is binding, but we may be running with a P on the current M and we can't
+      ;; bind another P. This P is about to go ProcIdle anyway.
+      (let [oldStatus (.-status state)]
+        (aset (.extra ev version/Go122) 0 (conv uint64 oldStatus))
+
+        ;; Update the P's status and sequence number.
+        (set! (.-status state) tracev2/ProcIdle)
+        (set! (.-seq state) seq)
+
+        ;; If we've lost information then don't try to do anything with the M.
+        ;; It may have moved on and we can't be sure.
+        (when (== oldStatus tracev2/ProcSyscallAbandoned)
+          (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+          (return curCtx true nil))
+
+
+        ;; Validate that the M we're stealing from is what we expect.
+        (let [mid (conv ThreadID (aget (.-args ev) 2)) ; The M we're stealing from.
+
+            ^{:line 331} newCtx curCtx]
+          (when (== mid (.-M curCtx))
+            ;; We're stealing from ourselves. This behaves like a ProcStop.
+            (when (!= (.-P curCtx) pid)
+              (return curCtx false (fmt/Errorf "tried to self-steal proc %d (thread %d), but got proc %d instead" pid mid (.-P curCtx))))
+
+            (set! (.-P newCtx) NoProc)
+            (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+            (return newCtx true nil))
+
+
+          ;; We're stealing from some other M.
+          (let [(values mState ^:assign ok) (aget (.-mStates o) mid)]
+            (when (not ok)
+              (return curCtx false (fmt/Errorf "stole proc from non-existent thread %d" mid)))
+
+
+            ;; Make sure we're actually stealing the right P.
+            (when (!= (.-p mState) pid)
+              (return curCtx false (fmt/Errorf "tried to steal proc %d from thread %d, but got proc %d instead" pid mid (.-p mState))))
+
+
+            ;; Tell the M it has no P so it can proceed.
+            ;;
+            ;; This is safe because we know the P was in a syscall and
+            ;; the other M must be trying to get out of the syscall.
+            ;; GoSyscallEndBlocked cannot advance until the corresponding
+            ;; M loses its P.
+            (set! (.-p mState) NoProc)
+            (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+            (return newCtx true nil)))))))
+
+
+^{:go/end 439} (go/method advanceGoStatus [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (let [gid (conv GoID (aget (.-args ev) 0))
+      ^{:line 366} mid (conv ThreadID (aget (.-args ev) 1))
+      ^{:line 367} status (conv tracev2/GoStatus (aget (.-args ev) 2))]
+
+    (when (>= (conv int status) (len tracev2GoStatus2GoState))
+      (return curCtx false (fmt/Errorf "invalid status for goroutine %d: %d" gid status)))
+
+    (let [oldState (aget tracev2GoStatus2GoState status)]
+      (if [(values s ok) (aget (.-gStates o) gid)] ok (do
+          (when (!= (.-status s) status)
+            (return curCtx false (fmt/Errorf "inconsistent status for goroutine %d: old %v vs. new %v" gid (.-status s) status)))
+
+          (set! (.-seq s) (makeSeq gen 0))) ; Reset seq.
+        (if (== gen (.-initialGen o)) (do
+            ;; Set the state.
+            (aset (.-gStates o) gid (addr (lit gState :id gid :status status :seq (makeSeq gen 0))))
+            (set! oldState GoUndetermined))
+
+          (return curCtx false (fmt/Errorf "found goroutine status for new goroutine after the first generation: id=%v status=%v" gid status))))
+
+      (aset (.-args ev) 2 (bit-or (<< (conv uint64 oldState) 32) (conv uint64 status))) ; Smuggle in the old state for StateTransition.
+
+      (let [newCtx curCtx]
+        (switch status
+          (case [tracev2/GoRunning]
+            ;; Bind the goroutine to the new context, since it's running.
+            (set! (.-G newCtx) gid))
+          (case [tracev2/GoSyscall]
+            (when (== mid NoThread)
+              (return curCtx false (fmt/Errorf "found goroutine %d in syscall without a thread" gid)))
+
+            ;; Is the syscall on this thread? If so, bind it to the context.
+            ;; Otherwise, we're talking about a G sitting in a syscall on an M.
+            ;; Validate the named M.
+            (when (== mid (.-M curCtx))
+              (when (and (!= gen (.-initialGen o)) (!= (.-G curCtx) gid))
+                ;; If this isn't the first generation, we *must* have seen this
+                ;; binding occur already. Even if the G was blocked in a syscall
+                ;; for multiple generations since trace start, we would have seen
+                ;; a previous GoStatus event that bound the goroutine to an M.
+                (return curCtx false (fmt/Errorf "inconsistent thread for syscalling goroutine %d: thread has goroutine %d" gid (.-G curCtx))))
+
+              (set! (.-G newCtx) gid)
+              (break))
+
+            ;; Now we're talking about a thread and goroutine that have been
+            ;; blocked on a syscall for the entire generation. This case must
+            ;; not have a P; the runtime makes sure that all Ps are traced at
+            ;; the beginning of a generation, which involves taking a P back
+            ;; from every thread.
+            (let [(values ms ok) (aget (.-mStates o) mid)]
+              (cond ok (do
+                  ;; This M has been seen. That means we must have seen this
+                  ;; goroutine go into a syscall on this thread at some point.
+                  (when (!= (.-g ms) gid)
+                    ;; But the G on the M doesn't match. Something's wrong.
+                    (return curCtx false (fmt/Errorf "inconsistent thread for syscalling goroutine %d: thread has goroutine %d" gid (.-g ms))))
+
+                  ;; This case is just a Syscall->Syscall event, which needs to
+                  ;; appear as having the G currently bound to this M.
+                  (set! (.-G curCtx) (.-g ms)))
+                (not ok)
+                ;; The M hasn't been seen yet. That means this goroutine
+                ;; has just been sitting in a syscall on this M. Create
+                ;; a state for it.
+                (aset (.-mStates o) mid (addr (lit mState :g gid :p NoProc))))
+              ;; Don't set curCtx.G in this case because this event is the
+              ;; binding event (and curCtx represents the "before" state).
+
+              ;; Update the current context to the M we're talking about.
+              (set! (.-M curCtx) mid))))
+
+        (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+        (return newCtx true nil)))))
+
+
+^{:go/end 464} (go/method advanceGoCreate [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; Goroutines must be created on a running P, but may or may not be created
+  ;; by a running goroutine.
+  (let [reqs (lit schedReqs :M mustHave :P mustHave :G mayHave)]
+    (when [err (validateCtx curCtx reqs)] (!= err nil)
+      (return curCtx false err))
+
+    ;; If we have a goroutine, it must be running.
+    (when [(values state ok) (aget (.-gStates o) (.-G curCtx))] (and ok (!= (.-status state) tracev2/GoRunning))
+      (return curCtx false (fmt/Errorf "%s event for goroutine that's not %s" (.evName o (.-typ ev)) GoRunning)))
+
+    ;; This goroutine created another. Add a state for it.
+    (let [newgid (conv GoID (aget (.-args ev) 0))]
+      (when [(values _ ok) (aget (.-gStates o) newgid)] ok
+        (return curCtx false (fmt/Errorf "tried to create goroutine (%v) that already exists" newgid)))
+
+      (let [status tracev2/GoRunnable]
+        (when (== (.-typ ev) tracev2/EvGoCreateBlocked)
+          (set! status tracev2/GoWaiting))
+
+        (aset (.-gStates o) newgid (addr (lit gState :id newgid :status status :seq (makeSeq gen 0))))
+        (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+        (return curCtx true nil)))))
+
+
+^{:go/end 499} (go/method advanceGoStopExec [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; These are goroutine events that all require an active running
+  ;; goroutine on some thread. They must *always* be advance-able,
+  ;; since running goroutines are bound to their M.
+  (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+    (return curCtx false err))
+
+  (let [(values state ok) (aget (.-gStates o) (.-G curCtx))]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "event %s for goroutine (%v) that doesn't exist" (.evName o (.-typ ev)) (.-G curCtx))))
+
+    (when (!= (.-status state) tracev2/GoRunning)
+      (return curCtx false (fmt/Errorf "%s event for goroutine that's not %s" (.evName o (.-typ ev)) GoRunning)))
+
+    ;; Handle each case slightly differently; we just group them together
+    ;; because they have shared preconditions.
+    (let [newCtx curCtx]
+      (switch (.-typ ev)
+        (case [tracev2/EvGoDestroy]
+          ;; This goroutine is exiting itself.
+          (delete (.-gStates o) (.-G curCtx))
+          (set! (.-G newCtx) NoGoroutine))
+        (case [tracev2/EvGoStop]
+          ;; Goroutine stopped (yielded). It's runnable but not running on this M.
+          (set! (.-status state) tracev2/GoRunnable)
+          (set! (.-G newCtx) NoGoroutine))
+        (case [tracev2/EvGoBlock]
+          ;; Goroutine blocked. It's waiting now and not running on this M.
+          (set! (.-status state) tracev2/GoWaiting)
+          (set! (.-G newCtx) NoGoroutine)))
+
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+      (return newCtx true nil))))
+
+
+^{:go/end 522} (go/method advanceGoStart [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (let [gid (conv GoID (aget (.-args ev) 0))
+      ^{:line 503} seq (makeSeq gen (aget (.-args ev) 1))
+      (values state ok) (aget (.-gStates o) gid)]
+    (when (or (not ok) (!= (.-status state) tracev2/GoRunnable) (not (.succeeds seq (.-seq state))))
+      ;; We can't make an inference as to whether this is bad. We could just be seeing
+      ;; a GoStart on a different M before the goroutine was created, before it had its
+      ;; state emitted, or before we got to the right point in the trace yet.
+      (return curCtx false nil))
+
+    ;; We can advance this goroutine. Check some invariants.
+    (let [reqs (lit schedReqs :M mustHave :P mustHave :G mustNotHave)]
+      (when [err (validateCtx curCtx reqs)] (!= err nil)
+        (return curCtx false err))
+
+      (set! (.-status state) tracev2/GoRunning)
+      (set! (.-seq state) seq)
+      (let [newCtx curCtx]
+        (set! (.-G newCtx) gid)
+        (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+        (return newCtx true nil)))))
+
+
+^{:go/end 541} (go/method advanceGoUnblock [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; N.B. These both reference the goroutine to unblock, not the current goroutine.
+  (let [gid (conv GoID (aget (.-args ev) 0))
+      ^{:line 527} seq (makeSeq gen (aget (.-args ev) 1))
+      (values state ok) (aget (.-gStates o) gid)]
+    (when (or (not ok) (!= (.-status state) tracev2/GoWaiting) (not (.succeeds seq (.-seq state))))
+      ;; We can't make an inference as to whether this is bad. We could just be seeing
+      ;; a GoUnblock on a different M before the goroutine was created and blocked itself,
+      ;; before it had its state emitted, or before we got to the right point in the trace yet.
+      (return curCtx false nil))
+
+    (set! (.-status state) tracev2/GoRunnable)
+    (set! (.-seq state) seq)
+    ;; N.B. No context to validate. Basically anything can unblock
+    ;; a goroutine (e.g. sysmon).
+    (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+    (return curCtx true nil)))
+
+
+^{:go/end 603} (go/method advanceGoSwitch [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; GoSwitch and GoSwitchDestroy represent a trio of events:
+  ;; - Unblock of the goroutine to switch to.
+  ;; - Block or destroy of the current goroutine.
+  ;; - Start executing the next goroutine.
+  ;;
+  ;; Because it acts like a GoStart for the next goroutine, we can
+  ;; only advance it if the sequence numbers line up.
+  ;;
+  ;; The current goroutine on the thread must be actively running.
+  (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+    (return curCtx false err))
+
+  (let [(values curGState ok) (aget (.-gStates o) (.-G curCtx))]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "event %s for goroutine (%v) that doesn't exist" (.evName o (.-typ ev)) (.-G curCtx))))
+
+    (when (!= (.-status curGState) tracev2/GoRunning)
+      (return curCtx false (fmt/Errorf "%s event for goroutine that's not %s" (.evName o (.-typ ev)) GoRunning)))
+
+    (let [nextg (conv GoID (aget (.-args ev) 0))
+        ^{:line 564} seq (makeSeq gen (aget (.-args ev) 1)) ; seq is for nextg, not curCtx.G.
+        (values nextGState ^:assign ok) (aget (.-gStates o) nextg)]
+      (when (or (not ok) (!= (.-status nextGState) tracev2/GoWaiting) (not (.succeeds seq (.-seq nextGState))))
+        ;; We can't make an inference as to whether this is bad. We could just be seeing
+        ;; a GoSwitch on a different M before the goroutine was created, before it had its
+        ;; state emitted, or before we got to the right point in the trace yet.
+        (return curCtx false nil))
+
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+
+      ;; Update the state of the executing goroutine and emit an event for it
+      ;; (GoSwitch and GoSwitchDestroy will be interpreted as GoUnblock events
+      ;; for nextg).
+      (switch (.-typ ev)
+        (case [tracev2/EvGoSwitch]
+          ;; Goroutine blocked. It's waiting now and not running on this M.
+          (set! (.-status curGState) tracev2/GoWaiting)
+
+          ;; Emit a GoBlock event.
+          ;; TODO(mknyszek): Emit a reason.
+          (.push (.-queue o) (makeEvent evt curCtx tracev2/EvGoBlock (.-time ev) 0 0))) ; /* no reason */ ; /* no stack */
+        (case [tracev2/EvGoSwitchDestroy]
+          ;; This goroutine is exiting itself.
+          (delete (.-gStates o) (.-G curCtx))
+
+          ;; Emit a GoDestroy event.
+          (.push (.-queue o) (makeEvent evt curCtx tracev2/EvGoDestroy (.-time ev)))))
+
+      ;; Update the state of the next goroutine.
+      (set! (.-status nextGState) tracev2/GoRunning)
+      (set! (.-seq nextGState) seq)
+      (let [newCtx curCtx]
+        (set! (.-G newCtx) nextg)
+
+        ;; Queue an event for the next goroutine starting to run.
+        (let [startCtx curCtx]
+          (set! (.-G startCtx) NoGoroutine)
+          (.push (.-queue o) (makeEvent evt startCtx tracev2/EvGoStart (.-time ev) (conv uint64 nextg) (aget (.-args ev) 1)))
+          (return newCtx true nil))))))
+
+
+^{:go/end 643} (go/method advanceGoSyscallBegin [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; Entering a syscall requires an active running goroutine with a
+  ;; proc on some thread. It is always advancable.
+  (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+    (return curCtx false err))
+
+  (let [(values state ok) (aget (.-gStates o) (.-G curCtx))]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "event %s for goroutine (%v) that doesn't exist" (.evName o (.-typ ev)) (.-G curCtx))))
+
+    (when (!= (.-status state) tracev2/GoRunning)
+      (return curCtx false (fmt/Errorf "%s event for goroutine that's not %s" (.evName o (.-typ ev)) GoRunning)))
+
+    ;; Goroutine entered a syscall. It's still running on this P and M.
+    (set! (.-status state) tracev2/GoSyscall)
+    (let [(values pState ^:assign ok) (aget (.-pStates o) (.-P curCtx))]
+      (when (not ok)
+        (return curCtx false (fmt/Errorf "uninitialized proc %d found during %s" (.-P curCtx) (.evName o (.-typ ev)))))
+
+      (set! (.-status pState) tracev2/ProcSyscall)
+      ;; Validate the P sequence number on the event and advance it.
+      ;;
+      ;; We have a P sequence number for what is supposed to be a goroutine event
+      ;; so that we can correctly model P stealing. Without this sequence number here,
+      ;; the syscall from which a ProcSteal event is stealing can be ambiguous in the
+      ;; face of broken timestamps. See the go122-syscall-steal-proc-ambiguous test for
+      ;; more details.
+      ;;
+      ;; Note that because this sequence number only exists as a tool for disambiguation,
+      ;; we can enforce that we have the right sequence number at this point; we don't need
+      ;; to back off and see if any other events will advance. This is a running P.
+      (let [pSeq (makeSeq gen (aget (.-args ev) 0))]
+        (when (not (.succeeds pSeq (.-seq pState)))
+          (return curCtx false (fmt/Errorf "failed to advance %s: can't make sequence: %s -> %s" (.evName o (.-typ ev)) (.-seq pState) pSeq)))
+
+        (set! (.-seq pState) pSeq)
+        (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+        (return curCtx true nil)))))
+
+
+^{:go/end 672} (go/method advanceGoSyscallEnd [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; This event is always advance-able because it happens on the same
+  ;; thread that EvGoSyscallStart happened, and the goroutine can't leave
+  ;; that thread until its done.
+  (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+    (return curCtx false err))
+
+  (let [(values state ok) (aget (.-gStates o) (.-G curCtx))]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "event %s for goroutine (%v) that doesn't exist" (.evName o (.-typ ev)) (.-G curCtx))))
+
+    (when (!= (.-status state) tracev2/GoSyscall)
+      (return curCtx false (fmt/Errorf "%s event for goroutine that's not %s" (.evName o (.-typ ev)) GoRunning)))
+
+    (set! (.-status state) tracev2/GoRunning)
+
+    ;; Transfer the P back to running from syscall.
+    (let [(values pState ^:assign ok) (aget (.-pStates o) (.-P curCtx))]
+      (when (not ok)
+        (return curCtx false (fmt/Errorf "uninitialized proc %d found during %s" (.-P curCtx) (.evName o (.-typ ev)))))
+
+      (when (!= (.-status pState) tracev2/ProcSyscall)
+        (return curCtx false (fmt/Errorf "expected proc %d in state %v, but got %v instead" (.-P curCtx) tracev2/ProcSyscall (.-status pState))))
+
+      (set! (.-status pState) tracev2/ProcRunning)
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+      (return curCtx true nil))))
+
+
+^{:go/end 711} (go/method advanceGoSyscallEndBlocked [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; This event becomes advanceable when its P is not in a syscall state
+  ;; (lack of a P altogether is also acceptable for advancing).
+  ;; The transfer out of ProcSyscall can happen either voluntarily via
+  ;; ProcStop or involuntarily via ProcSteal. We may also acquire a new P
+  ;; before we get here (after the transfer out) but that's OK: that new
+  ;; P won't be in the ProcSyscall state anymore.
+  ;;
+  ;; Basically: while we have a preemptible P, don't advance, because we
+  ;; *know* from the event that we're going to lose it at some point during
+  ;; the syscall. We shouldn't advance until that happens.
+  (when (!= (.-P curCtx) NoProc)
+    (let [(values pState ok) (aget (.-pStates o) (.-P curCtx))]
+      (when (not ok)
+        (return curCtx false (fmt/Errorf "uninitialized proc %d found during %s" (.-P curCtx) (.evName o (.-typ ev)))))
+
+      (when (== (.-status pState) tracev2/ProcSyscall)
+        (return curCtx false nil))))
+
+
+  ;; As mentioned above, we may have a P here if we ProcStart
+  ;; before this event.
+  (when [err (validateCtx curCtx (lit schedReqs :M mustHave :P mayHave :G mustHave))] (!= err nil)
+    (return curCtx false err))
+
+  (let [(values state ok) (aget (.-gStates o) (.-G curCtx))]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "event %s for goroutine (%v) that doesn't exist" (.evName o (.-typ ev)) (.-G curCtx))))
+
+    (when (!= (.-status state) tracev2/GoSyscall)
+      (return curCtx false (fmt/Errorf "%s event for goroutine that's not %s" (.evName o (.-typ ev)) GoRunning)))
+
+    (let [newCtx curCtx]
+      (set! (.-G newCtx) NoGoroutine)
+      (set! (.-status state) tracev2/GoRunnable)
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+      (return newCtx true nil))))
+
+
+^{:go/end 731} (go/method advanceGoCreateSyscall [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; This event indicates that a goroutine is effectively
+  ;; being created out of a cgo callback. Such a goroutine
+  ;; is 'created' in the syscall state.
+  (when [err (validateCtx curCtx (lit schedReqs :M mustHave :P mayHave :G mustNotHave))] (!= err nil)
+    (return curCtx false err))
+
+  ;; This goroutine is effectively being created. Add a state for it.
+  (let [newgid (conv GoID (aget (.-args ev) 0))]
+    (when [(values _ ok) (aget (.-gStates o) newgid)] ok
+      (return curCtx false (fmt/Errorf "tried to create goroutine (%v) in syscall that already exists" newgid)))
+
+    (aset (.-gStates o) newgid (addr (lit gState :id newgid :status tracev2/GoSyscall :seq (makeSeq gen 0))))
+    ;; Goroutine is executing. Bind it to the context.
+    (let [newCtx curCtx]
+      (set! (.-G newCtx) newgid)
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+      (return newCtx true nil))))
+
+
+^{:go/end 786} (go/method advanceGoDestroySyscall [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; This event indicates that a goroutine created for a
+  ;; cgo callback is disappearing, either because the callback
+  ;; ending or the C thread that called it is being destroyed.
+  ;;
+  ;; Also, treat this as if we lost our P too.
+  ;; The thread ID may be reused by the platform and we'll get
+  ;; really confused if we try to steal the P is this is running
+  ;; with later. The new M with the same ID could even try to
+  ;; steal back this P from itself!
+  ;;
+  ;; The runtime is careful to make sure that any GoCreateSyscall
+  ;; event will enter the runtime emitting events for reacquiring a P.
+  ;;
+  ;; Note: we might have a P here. The P might not be released
+  ;; eagerly by the runtime, and it might get stolen back later
+  ;; (or never again, if the program is going to exit).
+  (when [err (validateCtx curCtx (lit schedReqs :M mustHave :P mayHave :G mustHave))] (!= err nil)
+    (return curCtx false err))
+
+  ;; Check to make sure the goroutine exists in the right state.
+  (let [(values state ok) (aget (.-gStates o) (.-G curCtx))]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "event %s for goroutine (%v) that doesn't exist" (.evName o (.-typ ev)) (.-G curCtx))))
+
+    (when (!= (.-status state) tracev2/GoSyscall)
+      (return curCtx false (fmt/Errorf "%s event for goroutine that's not %v" (.evName o (.-typ ev)) GoSyscall)))
+
+    ;; This goroutine is exiting itself.
+    (delete (.-gStates o) (.-G curCtx))
+    (let [newCtx curCtx]
+      (set! (.-G newCtx) NoGoroutine)
+
+      ;; If we have a proc, then we're dissociating from it now. See the comment at the top of the case.
+      (when (!= (.-P curCtx) NoProc)
+        (let [(values pState ok) (aget (.-pStates o) (.-P curCtx))]
+          (when (not ok)
+            (return curCtx false (fmt/Errorf "found invalid proc %d during %s" (.-P curCtx) (.evName o (.-typ ev)))))
+
+          (when (!= (.-status pState) tracev2/ProcSyscall)
+            (return curCtx false (fmt/Errorf "proc %d in unexpected state %s during %s" (.-P curCtx) (.-status pState) (.evName o (.-typ ev)))))
+
+          ;; See the go122-create-syscall-reuse-thread-id test case for more details.
+          (set! (.-status pState) tracev2/ProcSyscallAbandoned)
+          (set! (.-P newCtx) NoProc)
+
+          ;; Queue an extra self-ProcSteal event.
+          (let [extra (makeEvent evt curCtx tracev2/EvProcSteal (.-time ev) (conv uint64 (.-P curCtx)))]
+            (aset (.extra (.-base extra) version/Go122) 0 (conv uint64 tracev2/ProcSyscall))
+            (.push (.-queue o) extra))))
+
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+      (return newCtx true nil))))
+
+
+^{:go/end 824} (go/method advanceUserTaskBegin [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; Handle tasks. Tasks are interesting because:
+  ;; - There's no Begin event required to reference a task.
+  ;; - End for a particular task ID can appear multiple times.
+  ;; As a result, there's very little to validate. The only
+  ;; thing we have to be sure of is that a task didn't begin
+  ;; after it had already begun. Task IDs are allowed to be
+  ;; reused, so we don't care about a Begin after an End.
+  (let [id (conv TaskID (aget (.-args ev) 0))]
+    (when [(values _ ok) (aget (.-activeTasks o) id)] ok
+      (return curCtx false (fmt/Errorf "task ID conflict: %d" id)))
+
+    ;; Get the parent ID, but don't validate it. There's no guarantee
+    ;; we actually have information on whether it's active.
+    (let [parentID (conv TaskID (aget (.-args ev) 1))]
+      (when (== parentID BackgroundTask)
+        ;; Note: a value of 0 here actually means no parent, *not* the
+        ;; background task. Automatic background task attachment only
+        ;; applies to regions.
+        (set! parentID NoTask)
+        (aset (.-args ev) 1 (conv uint64 NoTask)))
+
+
+      ;; Validate the name and record it. We'll need to pass it through to
+      ;; EvUserTaskEnd.
+      (let [nameID (conv stringID (aget (.-args ev) 2))
+          (values name ok) (.get (.-strings evt) nameID)]
+        (when (not ok)
+          (return curCtx false (fmt/Errorf "invalid string ID %v for %v event" nameID (.-typ ev))))
+
+        (aset (.-activeTasks o) id (lit taskState :name name :parentID parentID))
+        (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+          (return curCtx false err))
+
+        (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+        (return curCtx true nil)))))
+
+
+^{:go/end 845} (go/method advanceUserTaskEnd [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (let [id (conv TaskID (aget (.-args ev) 0))]
+    (if [(values ts ok) (aget (.-activeTasks o) id)] ok (do
+        ;; Smuggle the task info. This may happen in a different generation,
+        ;; which may not have the name in its string table. Add it to the extra
+        ;; strings table so we can look it up later.
+        (aset (.extra ev version/Go122) 0 (conv uint64 (.-parentID ts)))
+        (aset (.extra ev version/Go122) 1 (conv uint64 (.addExtraString evt (.-name ts))))
+        (delete (.-activeTasks o) id))
+      (do
+        ;; Explicitly clear the task info.
+        (aset (.extra ev version/Go122) 0 (conv uint64 NoTask))
+        (aset (.extra ev version/Go122) 1 (conv uint64 (.addExtraString evt "")))))
+
+    (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+      (return curCtx false err))
+
+    (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+    (return curCtx true nil)))
+
+
+^{:go/end 866} (go/method advanceUserRegionBegin [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+    (return curCtx false err))
+
+  (let [tid (conv TaskID (aget (.-args ev) 0))
+      ^{:line 852} nameID (conv stringID (aget (.-args ev) 1))
+      (values name ok) (.get (.-strings evt) nameID)]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "invalid string ID %v for %v event" nameID (.-typ ev))))
+
+    (let [(values gState ^:assign ok) (aget (.-gStates o) (.-G curCtx))]
+      (when (not ok)
+        (return curCtx false (fmt/Errorf "encountered EvUserRegionBegin without known state for current goroutine %d" (.-G curCtx))))
+
+      (when [err (.beginRegion gState (lit userRegion tid name))] (!= err nil)
+        (return curCtx false err))
+
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+      (return curCtx true nil))))
+
+
+^{:go/end 887} (go/method advanceUserRegionEnd [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+    (return curCtx false err))
+
+  (let [tid (conv TaskID (aget (.-args ev) 0))
+      ^{:line 873} nameID (conv stringID (aget (.-args ev) 1))
+      (values name ok) (.get (.-strings evt) nameID)]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "invalid string ID %v for %v event" nameID (.-typ ev))))
+
+    (let [(values gState ^:assign ok) (aget (.-gStates o) (.-G curCtx))]
+      (when (not ok)
+        (return curCtx false (fmt/Errorf "encountered EvUserRegionEnd without known state for current goroutine %d" (.-G curCtx))))
+
+      (when [err (.endRegion gState (lit userRegion tid name))] (!= err nil)
+        (return curCtx false err))
+
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+      (return curCtx true nil))))
+
+
+
+
+
+
+
+
+
+^{:go/end 920} (go/method advanceGCActive "Handle the GC mark phase.\n\nWe have sequence numbers for both start and end because they\ncan happen on completely different threads. We want an explicit\npartial order edge between start and end here, otherwise we're\nrelying entirely on timestamps to make sure we don't advance a\nGCEnd for a _different_ GC cycle if timestamps are wildly broken.\n" [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (let [seq (aget (.-args ev) 0)]
+    (when (== gen (.-initialGen o))
+      (when (!= (.-gcState o) gcUndetermined)
+        (return curCtx false (fmt/Errorf "GCActive in the first generation isn't first GC event")))
+
+      (set! (.-gcSeq o) seq)
+      (set! (.-gcState o) gcRunning)
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+      (return curCtx true nil))
+
+    (when (!= seq (+ (.-gcSeq o) 1))
+      ;; This is not the right GC cycle.
+      (return curCtx false nil))
+
+    (when (!= (.-gcState o) gcRunning)
+      (return curCtx false (fmt/Errorf "encountered GCActive while GC was not in progress")))
+
+    (set! (.-gcSeq o) seq)
+    (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+      (return curCtx false err))
+
+    (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+    (return curCtx true nil)))
+
+
+^{:go/end 944} (go/method advanceGCBegin [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (let [seq (aget (.-args ev) 0)]
+    (when (== (.-gcState o) gcUndetermined)
+      (set! (.-gcSeq o) seq)
+      (set! (.-gcState o) gcRunning)
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+      (return curCtx true nil))
+
+    (when (!= seq (+ (.-gcSeq o) 1))
+      ;; This is not the right GC cycle.
+      (return curCtx false nil))
+
+    (when (== (.-gcState o) gcRunning)
+      (return curCtx false (fmt/Errorf "encountered GCBegin while GC was already in progress")))
+
+    (set! (.-gcSeq o) seq)
+    (set! (.-gcState o) gcRunning)
+    (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+      (return curCtx false err))
+
+    (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+    (return curCtx true nil)))
+
+
+^{:go/end 965} (go/method advanceGCEnd [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (let [seq (aget (.-args ev) 0)]
+    (when (!= seq (+ (.-gcSeq o) 1))
+      ;; This is not the right GC cycle.
+      (return curCtx false nil))
+
+    (when (== (.-gcState o) gcNotRunning)
+      (return curCtx false (fmt/Errorf "encountered GCEnd when GC was not in progress")))
+
+    (when (== (.-gcState o) gcUndetermined)
+      (return curCtx false (fmt/Errorf "encountered GCEnd when GC was in an undetermined state")))
+
+    (set! (.-gcSeq o) seq)
+    (set! (.-gcState o) gcNotRunning)
+    (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+      (return curCtx false err))
+
+    (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+    (return curCtx true nil)))
+
+
+^{:go/end 974} (go/method advanceAnnotation [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; Handle simple instantaneous events that require a G.
+  (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+    (return curCtx false err))
+
+  (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+  (return curCtx true nil))
+
+
+^{:go/end 983} (go/method advanceHeapMetric [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; Handle allocation metrics, which don't require a G.
+  (when [err (validateCtx curCtx (lit schedReqs :M mustHave :P mustHave :G mayHave))] (!= err nil)
+    (return curCtx false err))
+
+  (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+  (return curCtx true nil))
+
+
+^{:go/end 995} (go/method advanceGCSweepBegin [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; Handle sweep, which is bound to a P and doesn't require a G.
+  (when [err (validateCtx curCtx (lit schedReqs :M mustHave :P mustHave :G mayHave))] (!= err nil)
+    (return curCtx false err))
+
+  (when [err ^{:go/via [rangeState]} (.beginRange (aget (.-pStates o) (.-P curCtx)) (makeRangeType (.-typ ev) 0))] (!= err nil)
+    (return curCtx false err))
+
+  (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+  (return curCtx true nil))
+
+
+^{:go/end 1012} (go/method advanceGCSweepActive [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (let [pid (conv ProcID (aget (.-args ev) 0))
+      ;; N.B. In practice Ps can't block while they're sweeping, so this can only
+      ;; ever reference curCtx.P. However, be lenient about this like we are with
+      ;; GCMarkAssistActive; there's no reason the runtime couldn't change to block
+      ;; in the middle of a sweep.
+      (values pState ok) (aget (.-pStates o) pid)]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "encountered GCSweepActive for unknown proc %d" pid)))
+
+    (when [err ^{:go/via [rangeState]} (.activeRange pState (makeRangeType (.-typ ev) 0) (== gen (.-initialGen o)))] (!= err nil)
+      (return curCtx false err))
+
+    (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+    (return curCtx true nil)))
+
+
+^{:go/end 1024} (go/method advanceGCSweepEnd [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (when [err (validateCtx curCtx (lit schedReqs :M mustHave :P mustHave :G mayHave))] (!= err nil)
+    (return curCtx false err))
+
+  (let [(values _ err) ^{:go/via [rangeState]} (.endRange (aget (.-pStates o) (.-P curCtx)) (.-typ ev))]
+    (when (!= err nil)
+      (return curCtx false err))
+
+    (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+    (return curCtx true nil)))
+
+
+^{:go/end 1044} (go/method advanceGoRangeBegin [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; Handle special goroutine-bound event ranges.
+  (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+    (return curCtx false err))
+
+  (let [desc (conv stringID 0)]
+    (when (== (.-typ ev) tracev2/EvSTWBegin)
+      (set! desc (conv stringID (aget (.-args ev) 0))))
+
+    (let [(values gState ok) (aget (.-gStates o) (.-G curCtx))]
+      (when (not ok)
+        (return curCtx false (fmt/Errorf "encountered event of type %d without known state for current goroutine %d" (.-typ ev) (.-G curCtx))))
+
+      (when [err ^{:go/via [rangeState]} (.beginRange gState (makeRangeType (.-typ ev) desc))] (!= err nil)
+        (return curCtx false err))
+
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+      (return curCtx true nil))))
+
+
+^{:go/end 1060} (go/method advanceGoRangeActive [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (let [gid (conv GoID (aget (.-args ev) 0))
+      ;; N.B. Like GoStatus, this can happen at any time, because it can
+      ;; reference a non-running goroutine. Don't check anything about the
+      ;; current scheduler context.
+      (values gState ok) (aget (.-gStates o) gid)]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "uninitialized goroutine %d found during %s" gid (.evName o (.-typ ev)))))
+
+    (when [err ^{:go/via [rangeState]} (.activeRange gState (makeRangeType (.-typ ev) 0) (== gen (.-initialGen o)))] (!= err nil)
+      (return curCtx false err))
+
+    (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+    (return curCtx true nil)))
+
+
+^{:go/end 1081} (go/method advanceGoRangeEnd [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  (when [err (validateCtx curCtx userGoReqs)] (!= err nil)
+    (return curCtx false err))
+
+  (let [(values gState ok) (aget (.-gStates o) (.-G curCtx))]
+    (when (not ok)
+      (return curCtx false (fmt/Errorf "encountered event of type %d without known state for current goroutine %d" (.-typ ev) (.-G curCtx))))
+
+    (let [(values desc err) ^{:go/via [rangeState]} (.endRange gState (.-typ ev))]
+      (when (!= err nil)
+        (return curCtx false err))
+
+      (when (== (.-typ ev) tracev2/EvSTWEnd)
+        ;; Smuggle the kind into the event.
+        ;; Don't use ev.extra here so we have symmetry with STWBegin.
+        (aset (.-args ev) 0 (conv uint64 desc)))
+
+      (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+      (return curCtx true nil))))
+
+
+^{:go/end 1090} (go/method advanceAllocFree [^{:tag (* ordering)} o ^{:tag (* baseEvent)} ev ^{:tag (* evTable)} evt ^ThreadID m ^uint64 gen ^schedCtx curCtx] :results [schedCtx bool error]
+  ;; Handle simple instantaneous events that may or may not have a P.
+  (when [err (validateCtx curCtx (lit schedReqs :M mustHave :P mayHave :G mayHave))] (!= err nil)
+    (return curCtx false err))
+
+  (.push (.-queue o) (lit Event :table evt :ctx curCtx :base @ev))
+  (return curCtx true nil))
+
+
+
+^{:go/end 1095} (go/method Next "Next returns the next event in the ordering.\n" [^{:tag (* ordering)} o] :results [Event bool]
+  (.pop (.-queue o)))
+
+
+
+(go/type schedCtx "schedCtx represents the scheduling resources associated with an event.\n" (struct
+    ^{:line 1099 :tag GoID} G
+    ^{:line 1100 :tag ProcID} P
+    ^{:line 1101 :tag ThreadID} M))
+
+
+
+
+^{:go/breaks [[7 1127]] :go/end 1128} (go/func validateCtx "validateCtx ensures that ctx conforms to some reqs, returning an error if\nit doesn't.\n" ^error [^schedCtx ctx ^schedReqs reqs]
+  ;; Check thread requirements.
+  (cond (and (== (.-M reqs) mustHave) (== (.-M ctx) NoThread))
+    (return (fmt/Errorf "expected a thread but didn't have one"))
+    (and (== (.-M reqs) mustNotHave) (!= (.-M ctx) NoThread))
+    (return (fmt/Errorf "expected no thread but had one")))
+
+
+  ;; Check proc requirements.
+  (cond (and (== (.-P reqs) mustHave) (== (.-P ctx) NoProc))
+    (return (fmt/Errorf "expected a proc but didn't have one"))
+    (and (== (.-P reqs) mustNotHave) (!= (.-P ctx) NoProc))
+    (return (fmt/Errorf "expected no proc but had one")))
+
+
+  ;; Check goroutine requirements.
+  (cond (and (== (.-G reqs) mustHave) (== (.-G ctx) NoGoroutine))
+    (return (fmt/Errorf "expected a goroutine but didn't have one"))
+    (and (== (.-G reqs) mustNotHave) (!= (.-G ctx) NoGoroutine))
+    (return (fmt/Errorf "expected no goroutine but had one")))
+
+  nil)
+
+
+
+
+
+(go/type gcState "gcState is a trinary variable for the current state of the GC.\n\nThe third state besides \"enabled\" and \"disabled\" is \"undetermined.\"\n" uint8)
+
+(go/const
+  ^{:line 1136} [^{:tag gcState :val 0} gcUndetermined iota]
+  ^{:line 1137} [^{:val 1} gcNotRunning]
+  ^{:line 1138} [^{:val 2} gcRunning])
+
+
+
+^{:go/breaks [[5 1151]] :go/end 1152} (go/method String "String returns a human-readable string for the GC state.\n" ^string [^gcState s]
+  (switch s
+    (case [gcUndetermined]
+      (return "Undetermined"))
+    (case [gcNotRunning]
+      (return "NotRunning"))
+    (case [gcRunning]
+      (return "Running")))
+
+  "Bad")
+
+
+
+(go/type userRegion "userRegion represents a unique user region when attached to some gState.\n" (struct
+
+
+
+    ^{:line 1159 :tag TaskID :doc "name must be a resolved string because the string ID for the same\nstring may change across generations, but we care about checking\nthe value itself.\n"} taskID
+    ^{:line 1160 :tag string} name))
+
+
+
+
+
+
+
+(go/type rangeType "rangeType is a way to classify special ranges of time.\n\nThese typically correspond 1:1 with \"Begin\" events, but\nthey may have an optional subtype that describes the range\nin more detail.\n" (struct
+    ^{:line 1169 :tag tracev2/EventType} typ ; "Begin" event.
+    ^{:line 1170 :tag stringID} desc)) ; Optional subtype.
+
+
+
+^{:go/end 1179} (go/func makeRangeType "makeRangeType constructs a new rangeType.\n" ^rangeType [^tracev2/EventType typ ^stringID desc]
+  (when [styp (.-StartEv (aget (tracev2/Specs) typ))] (!= styp tracev2/EvNone)
+    (set! typ styp))
+
+  (lit rangeType typ desc))
+
+
+
+(go/type gState "gState is the state of a goroutine at a point in the trace.\n" (struct
+    ^{:line 1183 :tag GoID} id
+    ^{:line 1184 :tag tracev2/GoStatus} status
+    ^{:line 1185 :tag seqCounter} seq
+
+
+    ^{:line 1188 :tag (slice userRegion) :doc "regions are the active user regions for this goroutine.\n"} regions
+
+
+    ^{:line 1191 :doc "rangeState is the state of special time ranges bound to this goroutine.\n"} rangeState))
+
+
+
+^{:go/breaks [5] :go/end 1198} (go/method beginRegion "beginRegion starts a user region on the goroutine.\n" ^error [^{:tag (* gState)} s ^userRegion r]
+  (set! (.-regions s) (append (.-regions s) r))
+  nil)
+
+
+
+^{:go/breaks [7] :go/end 1211} (go/method endRegion "endRegion ends a user region on the goroutine.\n" ^error [^{:tag (* gState)} s ^userRegion r]
+  (when (== (len (.-regions s)) 0)
+    ;; We do not know about regions that began before tracing started.
+    (return nil))
+
+  (when [next (aget (.-regions s) (- (len (.-regions s)) 1))] (!= next r)
+    (return (fmt/Errorf "misuse of region in goroutine %v: region end %v when the inner-most active region start event is %v" (.-id s) r next)))
+
+  (set! (.-regions s) (subslice (.-regions s) _ (- (len (.-regions s)) 1)))
+  nil)
+
+
+
+(go/type pState "pState is the state of a proc at a point in the trace.\n" (struct
+    ^{:line 1215 :tag ProcID} id
+    ^{:line 1216 :tag tracev2/ProcStatus} status
+    ^{:line 1217 :tag seqCounter} seq
+
+
+    ^{:line 1220 :doc "rangeState is the state of special time ranges bound to this proc.\n"} rangeState))
+
+
+
+(go/type mState "mState is the state of a thread at a point in the trace.\n" (struct
+    ^{:line 1225 :tag GoID} g ; Goroutine bound to this M. (The goroutine's state is Executing.)
+    ^{:line 1226 :tag ProcID} p)) ; Proc bound to this M. (The proc's state is Executing.)
+
+
+
+(go/type rangeState "rangeState represents the state of special time ranges.\n" (struct
+
+    ^{:line 1232 :tag (slice rangeType) :doc "inFlight contains the rangeTypes of any ranges bound to a resource.\n"} inFlight))
+
+
+
+
+
+^{:go/breaks [6] :go/end 1244} (go/method beginRange "beginRange begins a special range in time on the goroutine.\n\nReturns an error if the range is already in progress.\n" ^error [^{:tag (* rangeState)} s ^rangeType typ]
+  (when (.hasRange s typ)
+    (return (fmt/Errorf "discovered event already in-flight for when starting event %v" (.-Name (aget (tracev2/Specs) (.-typ typ))))))
+
+  (set! (.-inFlight s) (append (.-inFlight s) typ))
+  nil)
+
+
+
+
+^{:go/breaks [[5 1257]] :go/end 1258} (go/method activeRange "activeRange marks special range in time on the goroutine as active in the\ninitial generation, or confirms that it is indeed active in later generations.\n" ^error [^{:tag (* rangeState)} s ^rangeType typ ^bool isInitialGen]
+  (cond isInitialGen (do
+      (when (.hasRange s typ)
+        (return (fmt/Errorf "found named active range already in first gen: %v" typ)))
+
+      (set! (.-inFlight s) (append (.-inFlight s) typ)))
+    (not (.hasRange s typ))
+    (return (fmt/Errorf "resource is missing active range: %v %v" (.-Name (aget (tracev2/Specs) (.-typ typ))) (.-inFlight s))))
+
+  nil)
+
+
+
+^{:go/end 1263} (go/method hasRange "hasRange returns true if a special time range on the goroutine as in progress.\n" ^bool [^{:tag (* rangeState)} s ^rangeType typ]
+  (^{:inst [(slice rangeType) rangeType]} slices/Contains (.-inFlight s) typ))
+
+
+
+
+
+^{:go/end 1285} (go/method endRange "endRange ends a special range in time on the goroutine.\n\nThis must line up with the start event type  of the range the goroutine is currently in.\n" [^{:tag (* rangeState)} s ^tracev2/EventType typ] :results [stringID error]
+  (let [st (.-StartEv (aget (tracev2/Specs) typ))
+      ^{:line 1270} idx -1]
+    (range [i r (.-inFlight s)]
+      (when (== (.-typ r) st)
+        (set! idx i)
+        (break)))
+
+
+    (when (< idx 0)
+      (return 0 (fmt/Errorf "tried to end event %v, but not in-flight" (.-Name (aget (tracev2/Specs) st)))))
+
+    ;; Swap remove.
+    (let [desc (.-desc (aget (.-inFlight s) idx))]
+      (set! (values (aget (.-inFlight s) idx) (aget (.-inFlight s) (- (len (.-inFlight s)) 1))) (values (aget (.-inFlight s) (- (len (.-inFlight s)) 1)) (aget (.-inFlight s) idx)))
+      (set! (.-inFlight s) (subslice (.-inFlight s) _ (- (len (.-inFlight s)) 1)))
+      (return desc nil))))
+
+
+
+(go/type seqCounter "seqCounter represents a global sequence counter for a resource.\n" (struct
+    ^{:line 1289 :tag uint64} gen ; The generation for the local sequence counter seq.
+    ^{:line 1290 :tag uint64} seq)) ; The sequence number local to the generation.
+
+
+
+^{:go/end 1296} (go/func makeSeq "makeSeq creates a new seqCounter.\n" ^seqCounter [^uint64 gen ^uint64 seq]
+  (lit seqCounter :gen gen :seq seq))
+
+
+
+^{:go/end 1301} (go/method succeeds "succeeds returns true if a is the immediate successor of b.\n" ^bool [^seqCounter a ^seqCounter b]
+  (and (== (.-gen a) (.-gen b)) (== (.-seq a) (+ (.-seq b) 1))))
+
+
+
+^{:go/end 1306} (go/method String "String returns a debug string representation of the seqCounter.\n" ^string [^seqCounter c]
+  (fmt/Sprintf "%d (gen=%d)" (.-seq c) (.-gen c)))
+
+
+^{:go/end 1324} (go/func dumpOrdering ^string [^{:tag (* ordering)} order]
+  (let [^strings/Builder sb (zero strings/Builder)]
+    (range [id state (.-gStates order)]
+      (fmt/Fprintf (addr sb) "G %d [status=%s seq=%s]\n" id (.-status state) (.-seq state)))
+
+    (fmt/Fprintln (addr sb))
+    (range [id state (.-pStates order)]
+      (fmt/Fprintf (addr sb) "P %d [status=%s seq=%s]\n" id (.-status state) (.-seq state)))
+
+    (fmt/Fprintln (addr sb))
+    (range [id state (.-mStates order)]
+      (fmt/Fprintf (addr sb) "M %d [g=%d p=%d]\n" id (.-g state) (.-p state)))
+
+    (fmt/Fprintln (addr sb))
+    (fmt/Fprintf (addr sb) "GC %d %s\n" (.-gcSeq order) (.-gcState order))
+    (.String sb)))
+
+
+
+(go/type taskState "taskState represents an active task.\n" (struct
+
+    ^{:line 1329 :tag string :doc "name is the type of the active task.\n"} name
+
+
+    ^{:line 1332 :tag TaskID :doc "parentID is the parent ID of the active task.\n"} parentID))
+
+
+
+(go/type queue "queue implements a growable ring buffer with a queue API.\n" :type-params [T] (struct
+    ^{:line 1337 :tag int} start ^:go/grouped ^int end
+    ^{:line 1338 :tag (slice T)} buf))
+
+
+
+^{:go/end 1348} (go/method push "push adds a new event to the back of the queue.\n" [^{:tag (* (queue T))} q ^T value]
+  (when (== (- (.-end q) (.-start q)) (len (.-buf q)))
+    (.grow q))
+
+  (aset (.-buf q) (% (.-end q) (len (.-buf q))) value)
+  (inc! (.-end q)))
+
+
+
+^{:go/end 1368} (go/method grow "grow increases the size of the queue.\n" [^{:tag (* (queue T))} q]
+  (when (== (len (.-buf q)) 0)
+    (set! (.-buf q) (make (slice T) 2))
+    (return))
+
+
+  ;; Create new buf and copy data over.
+  (let [newBuf (make (slice T) (* (len (.-buf q)) 2))
+      ^{:line 1359} pivot (% (.-start q) (len (.-buf q)))
+      (values first last) (values (subslice (.-buf q) pivot) (subslice (.-buf q) _ pivot))]
+    (copy (subslice newBuf _ (len first)) first)
+    (copy (subslice newBuf (len first)) last)
+
+    ;; Update the queue state.
+    (set! (.-start q) 0)
+    (set! (.-end q) (len (.-buf q)))
+    (set! (.-buf q) newBuf)))
+
+
+
+
+^{:go/end 1381} (go/method pop "pop removes an event from the front of the queue. If the\nqueue is empty, it returns an EventBad event.\n" [^{:tag (* (queue T))} q] :results [T bool]
+  (when (== (- (.-end q) (.-start q)) 0)
+    (return @(new T) false))
+
+  (let [elem (addr (aget (.-buf q) (% (.-start q) (len (.-buf q)))))
+      ^{:line 1377} value @elem]
+    (set! @elem @(new T)) ; Clear the entry before returning, so we don't hold onto old tables.
+    (inc! (.-start q))
+    (return value true)))
+
+
+
+
+
+
+
+^{:go/end 1399} (go/func makeEvent "makeEvent creates an Event from the provided information.\n\nIt's just a convenience function; it's always OK to construct\nan Event manually if this isn't quite the right way to express\nthe contents of the event.\n" ^Event [^{:tag (* evTable)} table ^schedCtx ctx ^tracev2/EventType typ ^Time time & ^{:tag (slice uint64)} args]
+  (let [ev ^{:go/breaks [2 4 6]} (lit Event
+        :table table
+        :ctx ctx
+        :base ^{:go/breaks [2 4]} (lit baseEvent
+          :typ typ
+          :time time))]
+
+
+    (copy (subslice (.-args (.-base ev))) args)
+    ^{:line 1398} ev))
+
+
+
+
+(go/type schedReqs "schedReqs is a set of constraints on what the scheduling\ncontext must look like.\n" (struct
+    ^{:line 1404 :tag constraint} M
+    ^{:line 1405 :tag constraint} P
+    ^{:line 1406 :tag constraint} G))
+
+
+
+(go/type constraint "constraint represents a various presence requirements.\n" uint8)
+
+(go/const
+  ^{:line 1413} [^{:tag constraint :val 0} mustNotHave iota]
+  ^{:line 1414} [^{:val 1} mayHave]
+  ^{:line 1415} [^{:val 2} mustHave])
+
+
+
+
+(go/var ^{:doc "userGoReqs is a common requirement among events that are running\nor are close to running user code.\n"} userGoReqs (lit schedReqs :M mustHave :P mustHave :G mustHave))

@@ -1,0 +1,163 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Runtime -> tracer API for memory events.
+
+(in-ns 'go.runtime) (go/file "traceallocfree.go" :imports [
+
+
+    ^{:line 10} [abi "internal/abi"]
+    ^{:line 11} [gc "internal/runtime/gc"]
+    ^{:line 12} [sys "internal/runtime/sys"]
+    ^{:line 13} [tracev2 "internal/trace/tracev2"]])
+
+
+
+(go/const "Batch type values for the alloc/free experiment.\n"
+  ^{:line 18} [^{:val 0} traceAllocFreeTypesBatch iota] ; Contains types. [{id, address, size, ptrspan, name length, name string} ...]
+  ^{:line 19} [^{:val 1} traceAllocFreeInfoBatch]) ; Contains info for interpreting events. [min heap addr, page size, min heap align, min stack align]
+
+
+
+
+
+
+^{:go/end 83} (go/func traceSnapshotMemory "traceSnapshotMemory takes a snapshot of all runtime memory that there are events for\n(heap spans, heap objects, goroutine stacks, etc.) and writes out events for them.\n\nThe world must be stopped and tracing must be enabled when this function is called.\n" [^uintptr gen]
+  (assertWorldStopped)
+
+  ;; Write a batch containing information that'll be necessary to
+  ;; interpret the events.
+  (let [^bool flushed (zero bool)
+      ^{:line 32} w (unsafeTraceExpWriter gen nil tracev2/AllocFree)]
+    (set! (values w flushed) (.ensure w (+ 1 (* 4 traceBytesPerNumber))))
+    (when flushed
+      ;; Annotate the batch as containing additional info.
+      ^{:go/via [traceBuf]} (.byte w (conv byte traceAllocFreeInfoBatch)))
+
+
+    ;; Emit info.
+    ^{:go/via [traceBuf]} (.varint w (.-minPageHeapAddr trace))
+    ^{:go/via [traceBuf]} (.varint w (conv uint64 pageSize))
+    ^{:go/via [traceBuf]} (.varint w (conv uint64 gc/MinHeapAlign))
+    ^{:go/via [traceBuf]} (.varint w (conv uint64 fixedStack))
+
+    ;; Finish writing the batch.
+    (.end (.flush w))
+
+    ;; Start tracing.
+    (let [trace (traceAcquire)]
+      (when (not (.ok trace))
+        (throw "traceSnapshotMemory: tracing is not enabled"))
+
+
+      ;; Write out all the heap spans and heap objects.
+      (range [_ s (.-allspans mheap_)]
+        (when (== (.get (.-state s)) mSpanDead)
+          (continue))
+
+        ;; It's some kind of span, so trace that it exists.
+        (.SpanExists trace s)
+
+        ;; Write out allocated objects if it's a heap span.
+        (when (!= (.get (.-state s)) mSpanInUse)
+          (continue))
+
+
+        ;; Find all allocated objects.
+        (let [abits (.allocBitsForIndex s 0)]
+          (for [i (conv uintptr 0)] (< i (conv uintptr (.-nelems s))) (inc! i)
+            (when (or (< (.-index abits) (conv uintptr (.-freeindex s))) (.isMarked abits))
+              (let [x (+ (.base s) (* i (.-elemsize s)))]
+                (.HeapObjectExists trace x (.-typ (.typePointersOfUnchecked s x)))))
+
+            (.advance abits))))
+
+
+
+      ;; Write out all the goroutine stacks.
+      (forEachGRace ^{:go/end 81} (fn [^{:tag (* g)} gp]
+          (.GoroutineStackExists trace (.-lo (.-stack gp)) (- (.-hi (.-stack gp)) (.-lo (.-stack gp))))))
+
+      (traceRelease trace))))
+
+
+^{:go/end 90} (go/func traceSpanTypeAndClass ^traceArg [^{:tag (* mspan)} s]
+  (when (== (.get (.-state s)) mSpanInUse)
+    (return (<< (conv traceArg (.-spanclass s)) 1)))
+
+  (conv traceArg 1))
+
+
+
+^{:go/end 95} (go/method SpanExists "SpanExists records an event indicating that the span exists.\n" [^traceLocker tl ^{:tag (* mspan)} s]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvSpan (traceSpanID s) (conv traceArg (.-npages s)) (traceSpanTypeAndClass s)))
+
+
+
+^{:go/end 100} (go/method SpanAlloc "SpanAlloc records an event indicating that the span has just been allocated.\n" [^traceLocker tl ^{:tag (* mspan)} s]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvSpanAlloc (traceSpanID s) (conv traceArg (.-npages s)) (traceSpanTypeAndClass s)))
+
+
+
+^{:go/end 105} (go/method SpanFree "SpanFree records an event indicating that the span is about to be freed.\n" [^traceLocker tl ^{:tag (* mspan)} s]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvSpanFree (traceSpanID s)))
+
+
+
+^{:go/end 110} (go/func traceSpanID "traceSpanID creates a trace ID for the span s for the trace.\n" ^traceArg [^{:tag (* mspan)} s]
+  (/ (conv traceArg (- (conv uint64 (.base s)) (.-minPageHeapAddr trace))) pageSize))
+
+
+
+
+
+^{:go/end 117} (go/method HeapObjectExists "HeapObjectExists records that an object already exists at addr with the provided type.\nThe type is optional, and the size of the slot occupied the object is inferred from the\nspan containing it.\n" [^traceLocker tl ^uintptr addr ^{:tag (* abi/Type)} typ]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvHeapObject (traceHeapObjectID addr) (.rtype tl typ)))
+
+
+
+
+
+^{:go/end 124} (go/method HeapObjectAlloc "HeapObjectAlloc records that an object was newly allocated at addr with the provided type.\nThe type is optional, and the size of the slot occupied the object is inferred from the\nspan containing it.\n" [^traceLocker tl ^uintptr addr ^{:tag (* abi/Type)} typ]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvHeapObjectAlloc (traceHeapObjectID addr) (.rtype tl typ)))
+
+
+
+^{:go/end 129} (go/method HeapObjectFree "HeapObjectFree records that an object at addr is about to be freed.\n" [^traceLocker tl ^uintptr addr]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvHeapObjectFree (traceHeapObjectID addr)))
+
+
+
+^{:go/end 134} (go/func traceHeapObjectID "traceHeapObjectID creates a trace ID for a heap object at address addr.\n" ^traceArg [^uintptr addr]
+  (/ (conv traceArg (- (conv uint64 addr) (.-minPageHeapAddr trace))) gc/MinHeapAlign))
+
+
+
+^{:go/end 140} (go/method GoroutineStackExists "GoroutineStackExists records that a goroutine stack already exists at address base with the provided size.\n" [^traceLocker tl ^uintptr base ^uintptr size]
+  (let [order (traceCompressStackSize size)]
+    (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGoroutineStack (traceGoroutineStackID base) order)))
+
+
+
+^{:go/end 146} (go/method GoroutineStackAlloc "GoroutineStackAlloc records that a goroutine stack was newly allocated at address base with the provided size..\n" [^traceLocker tl ^uintptr base ^uintptr size]
+  (let [order (traceCompressStackSize size)]
+    (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGoroutineStackAlloc (traceGoroutineStackID base) order)))
+
+
+
+^{:go/end 151} (go/method GoroutineStackFree "GoroutineStackFree records that a goroutine stack at address base is about to be freed.\n" [^traceLocker tl ^uintptr base]
+  (.event (.eventWriter tl tracev2/GoRunning tracev2/ProcRunning) tracev2/EvGoroutineStackFree (traceGoroutineStackID base)))
+
+
+
+^{:go/end 156} (go/func traceGoroutineStackID "traceGoroutineStackID creates a trace ID for the goroutine stack from its base address.\n" ^traceArg [^uintptr base]
+  (/ (conv traceArg (- (conv uint64 base) (.-minPageHeapAddr trace))) fixedStack))
+
+
+
+^{:go/end 164} (go/func traceCompressStackSize "traceCompressStackSize assumes size is a power of 2 and returns log2(size).\n" ^traceArg [^uintptr size]
+  (when (!= (bit-and size (- size 1)) 0)
+    (throw "goroutine stack size is not a power of 2"))
+
+  (conv traceArg (sys/Len64 (conv uint64 size))))

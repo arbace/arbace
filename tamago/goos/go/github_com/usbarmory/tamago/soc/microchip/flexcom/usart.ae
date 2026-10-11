@@ -1,0 +1,221 @@
+;; Microchip FLEXCOM USART support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.microchip.flexcom) (go/file "usart.go" :imports [
+
+
+    ^{:line 12} [math "math"]
+    ^{:line 13} [runtime "runtime"]
+
+    ^{:line 15} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "USART registers\n"
+  ^{:line 20} [^{:val 115200} UART_BAUDRATE_DEFAULT 115200]
+  ^{:line 21} [^{:val 921600} UART_BAUDRATE_HS 921600]
+
+  ^{:line 23} [^{:val 512} FLEX_USART_OFFSET 0x200]
+
+  ^{:line 25} [^{:val 0} FLEX_US_CR 0x00]
+  ^{:line 26} [^{:val 31} US_CR_FIFODIS 31]
+  ^{:line 27} [^{:val 30} US_CR_FIFOEN 30]
+  ^{:line 28} [^{:val 25} US_CR_RXFCLR 25]
+  ^{:line 29} [^{:val 24} US_CR_TXFCLR 24]
+  ^{:line 30} [^{:val 7} US_CR_TXDIS 7]
+  ^{:line 31} [^{:val 6} US_CR_TXEN 6]
+  ^{:line 32} [^{:val 5} US_CR_RXDIS 5]
+  ^{:line 33} [^{:val 4} US_CR_RXEN 4]
+  ^{:line 34} [^{:val 3} US_CR_RSTTX 3]
+  ^{:line 35} [^{:val 2} US_CR_RSTRX 2]
+
+  ^{:line 37} [^{:val 4} FLEX_US_MR 0x04]
+  ^{:line 38} [^{:val 14} US_MR_CHMODE 14]
+  ^{:line 39} [^{:val 12} US_MR_NBSTOP 12]
+  ^{:line 40} [^{:val 9} US_MR_PAR 9]
+  ^{:line 41} [^{:val 8} US_MR_SYNC 8]
+  ^{:line 42} [^{:val 6} US_MR_CHRL 6]
+
+  ^{:line 44} [^{:val 8} FLEX_US_IER 0x08]
+  ^{:line 45} [^{:val 1} US_IER_TXRDY_IE 1]
+  ^{:line 46} [^{:val 0} US_IER_RXRDY_IE 0]
+
+  ^{:line 48} [^{:val 12} FLEX_US_IDR 0x0c]
+
+  ^{:line 50} [^{:val 20} FLEX_US_CSR 0x14]
+  ^{:line 51} [^{:val 1} US_CSR_TXRDY 1]
+  ^{:line 52} [^{:val 0} US_CSR_RXRDY 0]
+
+  ^{:line 54} [^{:val 24} FLEX_US_RHR 0x18]
+  ^{:line 55} [^{:val 28} FLEX_US_THR 0x1c]
+
+  ^{:line 57} [^{:val 32} FLEX_US_BRGR 0x20]
+  ^{:line 58} [^{:val 0} US_BRGR_CD 0]
+
+  ^{:line 60} [^{:val 160} FLEX_US_FMR 0xa0])
+
+
+
+(go/type USART "USART represents the FLEXCOM USART mode instance.\n" (struct
+    ^{:line 65} FLEXCOM
+
+
+    ^{:line 68 :tag uint32 :doc "Baud rate\n"} Baudrate
+
+
+    ^{:line 71 :tag uint32 :doc "usart control registers\n"} cr
+    ^{:line 72 :tag uint32} mr
+    ^{:line 73 :tag uint32} ier
+    ^{:line 74 :tag uint32} idr
+    ^{:line 75 :tag uint32} csr
+    ^{:line 76 :tag uint32} rhr
+    ^{:line 77 :tag uint32} thr
+    ^{:line 78 :tag uint32} brgr
+    ^{:line 79 :tag uint32} fmr
+
+    ^{:line 81 :tag (chan bool)} rx))
+
+
+^{:go/end 121} (go/method init [^{:tag (* USART)} hw]
+  (when (== (.-Baudrate hw) 0)
+    (set! (.-Baudrate hw) UART_BAUDRATE_DEFAULT))
+
+
+  ;; set baud rate
+  ;; p583, 3.47.11.2.5 USART Functional Description, Microchip DS00005048E
+  ;;              SelectedClock
+  ;; baudrate = -----------------
+  ;;            8 * (2-OVER) * CD
+  ;;
+  (let [cd (math/Round (/ (conv float64 PERIPHERAL_CLK) (* 16 (conv float64 (.-Baudrate hw)))))]
+    (reg/Write (.-brgr hw) (conv uint32 cd))
+
+    ;; reset the receiver and transmitter
+    (reg/Write (.-cr hw) (<< 1 US_CR_RSTRX))
+    (reg/Write (.-cr hw) (<< 1 US_CR_RSTTX))
+    (reg/Write (.-cr hw) (<< 1 US_CR_RXDIS))
+    (reg/Write (.-cr hw) (<< 1 US_CR_TXDIS))
+
+    ;; set 8N1 mode
+    (reg/SetN (.-mr hw) US_MR_PAR 2r111 4)
+    (reg/SetN (.-mr hw) US_MR_CHRL 2r11 3)
+    (reg/SetN (.-mr hw) US_MR_NBSTOP 2r11 0)
+
+    ;; set asynchronous mode (UART)
+    (reg/ClearN (.-mr hw) US_MR_SYNC 1)
+
+    ;; single-data FIFOs
+    (reg/Write (.-fmr hw) 0)
+    (reg/Write (.-cr hw) (<< 1 US_CR_FIFOEN))
+    (reg/Write (.-cr hw) (<< 1 US_CR_RXFCLR))
+    (reg/Write (.-cr hw) (<< 1 US_CR_TXFCLR))
+
+    ;; enable Tx and RX
+    (reg/Write (.-cr hw) (<< 1 US_CR_RXEN))
+    (reg/Write (.-cr hw) (<< 1 US_CR_TXEN))))
+
+
+
+
+^{:go/end 148} (go/method Init "Init initializes and enables a FLEXCOM controller in USART mode, this is\nmutually exclusive with other modes.\n" [^{:tag (* USART)} hw]
+  ^{:go/via [FLEXCOM Mutex]} (.Lock hw)
+
+  (when (== ^{:go/via [FLEXCOM]} (.-Base hw) 0)
+    (panic "invalid FLEXCOM controller instance"))
+
+
+  ^{:go/via [FLEXCOM]} (.mode hw MR_OPMODE_USART)
+
+  (set! (.-cr hw) (+ ^{:go/via [FLEXCOM]} (.-Base hw) FLEX_USART_OFFSET FLEX_US_CR))
+  (set! (.-mr hw) (+ ^{:go/via [FLEXCOM]} (.-Base hw) FLEX_USART_OFFSET FLEX_US_MR))
+  (set! (.-ier hw) (+ ^{:go/via [FLEXCOM]} (.-Base hw) FLEX_USART_OFFSET FLEX_US_IER))
+  (set! (.-idr hw) (+ ^{:go/via [FLEXCOM]} (.-Base hw) FLEX_USART_OFFSET FLEX_US_IDR))
+  (set! (.-csr hw) (+ ^{:go/via [FLEXCOM]} (.-Base hw) FLEX_USART_OFFSET FLEX_US_CSR))
+  (set! (.-rhr hw) (+ ^{:go/via [FLEXCOM]} (.-Base hw) FLEX_USART_OFFSET FLEX_US_RHR))
+  (set! (.-thr hw) (+ ^{:go/via [FLEXCOM]} (.-Base hw) FLEX_USART_OFFSET FLEX_US_THR))
+  (set! (.-brgr hw) (+ ^{:go/via [FLEXCOM]} (.-Base hw) FLEX_USART_OFFSET FLEX_US_BRGR))
+  (set! (.-fmr hw) (+ ^{:go/via [FLEXCOM]} (.-Base hw) FLEX_USART_OFFSET FLEX_US_FMR))
+
+  (.init hw)
+
+  ;; no defer as goos.Hwinit1 might call us from system stack
+  ^{:go/via [FLEXCOM Mutex]} (.Unlock hw))
+
+
+
+
+
+
+^{:go/end 162} (go/method EnableInterrupt "EnableInterrupt enables interrupt generation for receive FIFOs. Once enabled\n[USART.Read] and [USART.Rx] block, as required, on the argument channel\nrather than polling for valid data. A nil channel disables receive\ninterrupts and restores polling.\n" [^{:tag (* USART)} hw ^{:tag (chan bool)} rx]
+  (if (== rx nil)
+    (reg/Write (.-idr hw) (<< 1 US_IER_RXRDY_IE))
+
+    (reg/Write (.-ier hw) (<< 1 US_IER_RXRDY_IE)))
+
+
+  (set! (.-rx hw) rx))
+
+
+
+^{:go/end 171} (go/method Tx "Tx transmits a single character to the serial port.\n" [^{:tag (* USART)} hw ^byte c]
+  (while (== (reg/GetN (.-csr hw) US_CSR_TXRDY 1) 0))
+  ;; wait for TX FIFO to have room for a character
+
+
+  (reg/Write8 (.-thr hw) c))
+
+
+
+
+^{:go/end 191} (go/method Rx "Rx receives a single character from the serial port, waiting for data to\nbecome available if the argument is true.\n" [^{:tag (* USART)} hw ^bool block] :results [^byte c ^bool valid]
+  (while true
+    (when (== (reg/GetN (.-csr hw) US_CSR_RXRDY 1) 1)
+      (return (reg/Read8 (.-rhr hw)) true))
+
+
+    (when (not block)
+      (return))
+
+
+    (if (!= (.-rx hw) nil)
+      (<! (.-rx hw))
+
+      (runtime/Gosched))))
+
+
+
+
+
+^{:go/end 200} (go/method Write "Write data from buffer to serial port.\n" [^{:tag (* USART)} hw ^{:tag (slice byte)} buf] :results [^int n ^error _]
+  (range [_ c buf]
+    (.Tx hw c))
+
+
+  (return (len buf) nil))
+
+
+
+^{:go/end 222} (go/method Read "Read available data to buffer from serial port.\n" [^{:tag (* USART)} hw ^{:tag (slice byte)} buf] :results [^int n ^error _]
+  (let [block true]
+
+    (while (< n (len buf))
+      (let [(values c valid) (.Rx hw block)]
+
+        (when (not valid)
+          (break))
+
+
+        (aset buf n c)
+        (inc! n)
+
+        (when (== n 1)
+          (set! block false))))
+
+
+
+    (return)))

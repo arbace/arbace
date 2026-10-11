@@ -1,0 +1,147 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.aes) (go/file "ctr.go" :imports [
+
+
+    ^{:line 8} [fips140 "crypto/internal/fips140"]
+    ^{:line 9} [alias "crypto/internal/fips140/alias"]
+    ^{:line 10} [subtle "crypto/internal/fips140/subtle"]
+    ^{:line 11} [byteorder "crypto/internal/fips140deps/byteorder"]
+    ^{:line 12} [bits "math/bits"]])
+
+
+(go/type CTR (struct
+    ^{:line 16 :tag Block} b
+    ^{:line 17 :tag uint64} ivlo ^uint64 ivhi ; start counter as 64-bit limbs
+    ^{:line 18 :tag uint64} offset)) ; for XORKeyStream only
+
+
+^{:go/end 27} (go/func NewCTR ^{:tag (* CTR)} [^{:tag (* Block)} b ^{:tag (slice byte)} iv]
+  ;; Allocate the CTR here, in an easily inlineable function, so
+  ;; the allocation can be done in the caller's stack frame
+  ;; instead of the heap.  See issue 70499.
+  (let [c (newCTR b iv)]
+    (addr c)))
+
+^{:go/end 39} (go/func newCTR ^CTR [^{:tag (* Block)} b ^{:tag (slice byte)} iv]
+  (when (!= (len iv) BlockSize)
+    (panic "bad IV length"))
+
+
+  ^{:go/breaks [2 4 6 8]} (lit CTR
+    :b @b
+    :ivlo (byteorder/BEUint64 (subslice iv 8 16))
+    :ivhi (byteorder/BEUint64 (subslice iv 0 8))
+    :offset 0))
+
+
+
+^{:go/end 49} (go/method XORKeyStream [^{:tag (* CTR)} c ^{:tag (slice byte)} dst ^{:tag (slice byte)} src]
+  (.XORKeyStreamAt c dst src (.-offset c))
+
+  (let [^uint64 carry (zero uint64)]
+    (set! (values (.-offset c) carry) (bits/Add64 (.-offset c) (conv uint64 (len src)) 0))
+    (when (!= carry 0)
+      (panic "crypto/aes: counter overflow"))))
+
+
+
+
+
+^{:go/end 61} (go/func RoundToBlock "RoundToBlock is used by CTR_DRBG, which discards the rightmost unused bits at\neach request. It rounds the offset up to the next block boundary.\n" [^{:tag (* CTR)} c]
+  (when [remainder (% (.-offset c) BlockSize)] (!= remainder 0)
+    (let [^uint64 carry (zero uint64)]
+      (set! (values (.-offset c) carry) (bits/Add64 (.-offset c) (- BlockSize remainder) 0))
+      (when (!= carry 0)
+        (panic "crypto/aes: counter overflow")))))
+
+
+
+
+
+
+
+
+^{:go/end 124} (go/method XORKeyStreamAt "XORKeyStreamAt behaves like XORKeyStream but keeps no state, and instead\nseeks into the keystream by the given bytes offset from the start (ignoring\nany XORKetStream calls). This allows for random access into the keystream, up\nto 16 EiB from the start.\n" [^{:tag (* CTR)} c ^{:tag (slice byte)} dst ^{:tag (slice byte)} src ^uint64 offset]
+  (when (< (len dst) (len src))
+    (panic "crypto/aes: len(dst) < len(src)"))
+
+  (set! dst (subslice dst _ (len src)))
+  (when (alias/InexactOverlap dst src)
+    (panic "crypto/aes: invalid buffer overlap"))
+
+  (fips140/RecordApproved)
+
+  (let [(values ivlo ivhi) (add128 (.-ivlo c) (.-ivhi c) (/ offset BlockSize))]
+
+    (when [blockOffset (% offset BlockSize)] (!= blockOffset 0)
+      ;; We have a partial block at the beginning.
+      (let [(values ^{:tag (array BlockSize byte)} in ^{:tag (array BlockSize byte)} out) (zero (array BlockSize byte))]
+        (copy (subslice in blockOffset) src)
+        (ctrBlocks1 (addr (.-b c)) (addr out) (addr in) ivlo ivhi)
+        (let [n (copy dst (subslice out blockOffset))]
+          (set! src (subslice src n))
+          (set! dst (subslice dst n))
+          (set! (values ivlo ivhi) (add128 ivlo ivhi 1)))))
+
+
+    (while (>= (len src) (* 8 BlockSize))
+      (ctrBlocks8 (addr (.-b c)) (conv (* (array (* 8 BlockSize) byte)) dst) (conv (* (array (* 8 BlockSize) byte)) src) ivlo ivhi)
+      (set! src (subslice src (* 8 BlockSize)))
+      (set! dst (subslice dst (* 8 BlockSize)))
+      (set! (values ivlo ivhi) (add128 ivlo ivhi 8)))
+
+
+    ;; The tail can have at most 7 = 4 + 2 + 1 blocks.
+    (when (>= (len src) (* 4 BlockSize))
+      (ctrBlocks4 (addr (.-b c)) (conv (* (array (* 4 BlockSize) byte)) dst) (conv (* (array (* 4 BlockSize) byte)) src) ivlo ivhi)
+      (set! src (subslice src (* 4 BlockSize)))
+      (set! dst (subslice dst (* 4 BlockSize)))
+      (set! (values ivlo ivhi) (add128 ivlo ivhi 4)))
+
+    (when (>= (len src) (* 2 BlockSize))
+      (ctrBlocks2 (addr (.-b c)) (conv (* (array (* 2 BlockSize) byte)) dst) (conv (* (array (* 2 BlockSize) byte)) src) ivlo ivhi)
+      (set! src (subslice src (* 2 BlockSize)))
+      (set! dst (subslice dst (* 2 BlockSize)))
+      (set! (values ivlo ivhi) (add128 ivlo ivhi 2)))
+
+    (when (>= (len src) (* 1 BlockSize))
+      (ctrBlocks1 (addr (.-b c)) (conv (* (array (* 1 BlockSize) byte)) dst) (conv (* (array (* 1 BlockSize) byte)) src) ivlo ivhi)
+      (set! src (subslice src (* 1 BlockSize)))
+      (set! dst (subslice dst (* 1 BlockSize)))
+      (set! (values ivlo ivhi) (add128 ivlo ivhi 1)))
+
+
+    (when (!= (len src) 0)
+      ;; We have a partial block at the end.
+      (let [(values ^{:tag (array BlockSize byte)} in ^{:tag (array BlockSize byte)} out) (zero (array BlockSize byte))]
+        (copy (subslice in) src)
+        (ctrBlocks1 (addr (.-b c)) (addr out) (addr in) ivlo ivhi)
+        (copy dst (subslice out))))))
+
+
+
+;; Each ctrBlocksN function XORs src with N blocks of counter keystream, and
+;; stores it in dst. src is loaded in full before storing dst, so they can
+;; overlap even inexactly. The starting counter value is passed in as a pair of
+;; little-endian 64-bit integers.
+
+^{:go/end 142} (go/func ctrBlocks [^{:tag (* Block)} b ^{:tag (slice byte)} dst ^{:tag (slice byte)} src ^uint64 ivlo ^uint64 ivhi]
+  (let [buf (make (slice byte) (len src) (* 8 BlockSize))]
+    (for [i 0] (< i (len buf)) (set! i + BlockSize)
+      (byteorder/BEPutUint64 (subslice buf i) ivhi)
+      (byteorder/BEPutUint64 (subslice buf (+ i 8)) ivlo)
+      (set! (values ivlo ivhi) (add128 ivlo ivhi 1))
+      (encryptBlock b (subslice buf i) (subslice buf i)))
+
+    ;; XOR into buf first, in case src and dst overlap (see above).
+    (subtle/XORBytes buf src buf)
+    (copy dst buf)))
+
+
+^{:go/end 148} (go/func add128 [^uint64 lo ^uint64 hi ^uint64 x] :results [uint64 uint64]
+  (let [(values ^:assign lo c) (bits/Add64 lo x 0)]
+    (set! (values hi _) (bits/Add64 hi 0 c))
+    (return lo hi)))

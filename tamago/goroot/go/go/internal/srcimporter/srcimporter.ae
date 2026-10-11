@@ -1,0 +1,269 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package srcimporter implements importing directly
+;; from source files rather than installed packages.
+(in-ns 'go.go.internal.srcimporter) (go/file "srcimporter.go" :doc "Package srcimporter implements importing directly\nfrom source files rather than installed packages.\n" :imports [ ; import "go/internal/srcimporter"
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [ast "go/ast"]
+    ^{:line 12} [build "go/build"]
+    ^{:line 13} [parser "go/parser"]
+    ^{:line 14} [token "go/token"]
+    ^{:line 15} [types "go/types"]
+    ^{:line 16} [io "io"]
+    ^{:line 17} [os "os"]
+    ^{:line 18} [exec "os/exec"]
+    ^{:line 19} [filepath "path/filepath"]
+    ^{:line 20} [strings "strings"]
+    ^{:line 21} [sync "sync"]
+    ^{:line 22} [_ "unsafe"]]) ; for go:linkname
+
+
+
+(go/type Importer "An Importer provides the context for importing packages from source code.\n" (struct
+    ^{:line 27 :tag (* build/Context)} ctxt
+    ^{:line 28 :tag (* token/FileSet)} fset
+    ^{:line 29 :tag types/Sizes} sizes
+    ^{:line 30 :tag (map string (* types/Package))} packages))
+
+
+
+
+
+
+
+
+^{:go/end 46} (go/func New "New returns a new Importer for the given context, file set, and map\nof packages. The context is used to resolve import paths to package paths,\nand identifying the files belonging to the package. If the context provides\nnon-nil file system functions, they are used instead of the regular package\nos functions. The file set is used to track position information of package\nfiles; and imported packages are added to the packages map.\n" ^{:tag (* Importer)} [^{:tag (* build/Context)} ctxt ^{:tag (* token/FileSet)} fset ^{:tag (map string (* types/Package))} packages]
+  (addr ^{:go/breaks [2 4 6 8]} (lit Importer
+      :ctxt ctxt
+      :fset fset
+      :sizes (types/SizesFor (.-Compiler ctxt) (.-GOARCH ctxt)) ; uses go/types default if GOARCH not found
+      :packages packages)))
+
+
+
+
+
+(go/var ^{:tag types/Package :doc "Importing is a sentinel taking the place in Importer.packages\nfor a package that is in the process of being imported.\n"} importing)
+
+
+^{:go/end 55} (go/method Import "Import(path) is a shortcut for ImportFrom(path, \".\", 0).\n" [^{:tag (* Importer)} p ^string path] :results [(* types/Package) error]
+  (.ImportFrom p path "." 0)) ; use "." rather than "" (see issue #24441)
+
+
+
+
+
+
+
+
+^{:go/end 163} (go/method ImportFrom "ImportFrom imports the package with the given import path resolved from the given srcDir,\nadds the new package to the set of packages maintained by the importer, and returns the\npackage. Package path resolution and file system operations are controlled by the context\nmaintained with the importer. The import mode must be zero but is otherwise ignored.\nPackages that are not comprised entirely of pure Go files may fail to import because the\ntype checker may not be able to determine all exported entities (e.g. due to cgo dependencies).\n" [^{:tag (* Importer)} p ^string path ^string srcDir ^types/ImportMode mode] :results [(* types/Package) error]
+  (when (!= mode 0)
+    (panic "non-zero import mode"))
+
+
+  (when [(values abs err) (.absPath p srcDir)] (== err nil) ; see issue #14282
+    (set! srcDir abs))
+
+  (let [(values bp err) (.Import (.-ctxt p) path srcDir 0)]
+    (when (!= err nil)
+      (return nil err)) ; err may be *build.NoGoError - return as is
+
+
+    ;; package unsafe is known to the type checker
+    (when (== (.-ImportPath bp) "unsafe")
+      (return types/Unsafe nil))
+
+
+    ;; no need to re-import if the package was imported completely before
+    (let [pkg (aget (.-packages p) (.-ImportPath bp))]
+      (when (!= pkg nil)
+        (when (== pkg (addr importing))
+          (return nil (fmt/Errorf "import cycle through package %q" (.-ImportPath bp))))
+
+        (when (not (.Complete pkg))
+          ;; Package exists but is not complete - we cannot handle this
+          ;; at the moment since the source importer replaces the package
+          ;; wholesale rather than augmenting it (see #19337 for details).
+          ;; Return incomplete package with error (see #16088).
+          (return pkg (fmt/Errorf "reimported partially imported package %q" (.-ImportPath bp))))
+
+        (return pkg nil))
+
+
+      (aset (.-packages p) (.-ImportPath bp) (addr importing))
+      (defer (^{:go/end 106} (fn []
+            ;; clean up in case of error
+            ;; TODO(gri) Eventually we may want to leave a (possibly empty)
+            ;; package in the map in all cases (and use that package to
+            ;; identify cycles). See also issue 16088.
+            (when (== (aget (.-packages p) (.-ImportPath bp)) (addr importing))
+              (aset (.-packages p) (.-ImportPath bp) nil)))))
+
+
+
+      (let [^{:tag (slice string)} filenames (zero (slice string))]
+        (set! filenames (append filenames (spread (.-GoFiles bp))))
+        (set! filenames (append filenames (spread (.-CgoFiles bp))))
+
+        (let [(values files ^:assign err) (.parseFiles p (.-Dir bp) filenames)]
+          (when (!= err nil)
+            (return nil err))
+
+
+          ;; type-check package files
+          (let [^error firstHardErr (zero error)
+              ^{:line 119} conf ^{:go/breaks [2 [4 122] [6 127] 8]} (lit types/Config
+                :IgnoreFuncBodies true
+                ;; continue type-checking after the first error
+                :Error ^{:go/end 126} (fn [^error err]
+                  (when (and (== firstHardErr nil) (not (.-Soft (assert types/Error err))))
+                    (set! firstHardErr err)))
+
+
+                :Importer p
+                :Sizes (.-sizes p))]
+
+            (when (> (len (.-CgoFiles bp)) 0)
+              (if (!= (.-OpenFile (.-ctxt p)) nil)
+                ;; cgo, gcc, pkg-config, etc. do not support
+                ;; build.Context's VFS.
+                (set! (.-FakeImportC conf) true)
+                (do
+                  (setUsesCgo (addr conf))
+                  (let [(values file err) (.cgo p bp)]
+                    (when (!= err nil)
+                      (return nil (fmt/Errorf "error processing cgo for package %q: %w" (.-ImportPath bp) err)))
+
+                    (set! files (append files file))))))
+
+
+
+            (set! (values pkg err) (.Check conf (.-ImportPath bp) (.-fset p) files nil))
+            (when (!= err nil)
+              ;; If there was a hard error it is possibly unsafe
+              ;; to use the package as it may not be fully populated.
+              ;; Do not return it (see also #20837, #20855).
+              (when (!= firstHardErr nil)
+                (set! pkg nil)
+                (set! err firstHardErr)) ; give preference to first hard error over any soft error
+
+              (return pkg (fmt/Errorf "type-checking package %q failed (%v)" (.-ImportPath bp) err)))
+
+            (when (!= firstHardErr nil)
+              ;; this can only happen if we have a bug in go/types
+              (panic "package is not safe yet no error was returned"))
+
+
+            (aset (.-packages p) (.-ImportPath bp) pkg)
+            (return pkg nil)))))))
+
+
+^{:go/end 199} (go/method parseFiles [^{:tag (* Importer)} p ^string dir ^{:tag (slice string)} filenames] :results [(slice (* ast/File)) error]
+  ;; use build.Context's OpenFile if there is one
+  (let [open (.-OpenFile (.-ctxt p))]
+    (when (== open nil)
+      (set! open ^{:go/end 169} (fn [^string name] :results [io/ReadCloser error] (os/Open name))))
+
+
+    (let [files (make (slice (* ast/File)) (len filenames))
+        ^{:line 173} errors (make (slice error) (len filenames))
+
+        ^{:line 175 :tag sync/WaitGroup} wg (zero sync/WaitGroup)]
+      (.Add wg (len filenames))
+      (range [i filename filenames]
+        (go (^{:go/end 187} (fn [^int i ^string filepath]
+              (defer (.Done wg))
+              (let [(values src err) (open filepath)]
+                (when (!= err nil)
+                  (aset errors i err) ; open provides operation and filename in error
+                  (return))
+
+                (set! (values (aget files i) (aget errors i)) (parser/ParseFile (.-fset p) filepath src parser/SkipObjectResolution))
+                (.Close src))) ; ignore Close error - parsing may have succeeded which is all we need
+            ^{:line 187} i (.joinPath p dir filename))))
+
+      (.Wait wg)
+
+      ;; if there are errors, return the first one for deterministic results
+      (range [_ err errors]
+        (when (!= err nil)
+          (return nil err)))
+
+
+
+      (return files nil))))
+
+
+^{:go/end 244} (go/method cgo [^{:tag (* Importer)} p ^{:tag (* build/Package)} bp] :results [(* ast/File) error]
+  (let [(values tmpdir err) (os/MkdirTemp "" "srcimporter")]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (os/RemoveAll tmpdir))
+
+    (let [goCmd "go"]
+      (when (!= (.-GOROOT (.-ctxt p)) "")
+        (set! goCmd (filepath/Join (.-GOROOT (.-ctxt p)) "bin" "go")))
+
+      (let [args (lit (slice string) goCmd "tool" "cgo" "-objdir" tmpdir)]
+        (when (.-Goroot bp)
+          (switch (.-ImportPath bp)
+            (case ["runtime/cgo"]
+              (set! args (append args "-import_runtime_cgo=false" "-import_syscall=false")))
+            (case ["runtime/race"]
+              (set! args (append args "-import_syscall=false")))))
+
+
+        (set! args (append args "--"))
+        (set! args (append args (spread (strings/Fields (os/Getenv "CGO_CPPFLAGS")))))
+        (set! args (append args (spread (.-CgoCPPFLAGS bp))))
+        (when (> (len (.-CgoPkgConfig bp)) 0)
+          (let [cmd (exec/Command "pkg-config" (spread (append (lit (slice string) "--cflags") (spread (.-CgoPkgConfig bp)))))
+              (values out err) (.Output cmd)]
+            (when (!= err nil)
+              (return nil (fmt/Errorf "pkg-config --cflags: %w" err)))
+
+            (set! args (append args (spread (strings/Fields (conv string out)))))))
+
+        (set! args (append args "-I" tmpdir))
+        (set! args (append args (spread (strings/Fields (os/Getenv "CGO_CFLAGS")))))
+        (set! args (append args (spread (.-CgoCFLAGS bp))))
+        (set! args (append args (spread (.-CgoFiles bp))))
+
+        (let [cmd (exec/Command (aget args 0) (spread (subslice args 1)))]
+          (set! (.-Dir cmd) (.-Dir bp))
+          (when [err (.Run cmd)] (!= err nil)
+            (return nil (fmt/Errorf "go tool cgo: %w" err)))
+
+
+          (parser/ParseFile (.-fset p) (filepath/Join tmpdir "_cgo_gotypes.go") nil parser/SkipObjectResolution))))))
+
+
+;; context-controlled file system operations
+
+^{:go/end 252} (go/method absPath [^{:tag (* Importer)} p ^string path] :results [string error]
+  ;; TODO(gri) This should be using p.ctxt.AbsPath which doesn't
+  ;; exist but probably should. See also issue #14282.
+  (filepath/Abs path))
+
+
+^{:go/end 259} (go/method isAbsPath ^bool [^{:tag (* Importer)} p ^string path]
+  (when [f (.-IsAbsPath (.-ctxt p))] (!= f nil)
+    (return (f path)))
+
+  (filepath/IsAbs path))
+
+
+^{:go/end 266} (go/method joinPath ^string [^{:tag (* Importer)} p & ^{:tag (slice string)} elem]
+  (when [f (.-JoinPath (.-ctxt p))] (!= f nil)
+    (return (f (spread elem))))
+
+  (filepath/Join (spread elem)))
+
+
+
+(go/func ^:extern ^{:go/linkname "setUsesCgo go/types.srcimporter_setUsesCgo"} setUsesCgo [^{:tag (* types/Config)} conf])

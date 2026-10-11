@@ -1,0 +1,289 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package lzw implements the Lempel-Ziv-Welch compressed data format,
+;; described in T. A. Welch, “A Technique for High-Performance Data
+;; Compression”, Computer, 17(6) (June 1984), pp 8-19.
+;;
+;; In particular, it implements LZW as used by the GIF and PDF file
+;; formats, which means variable-width codes up to 12 bits and the first
+;; two non-literal codes are a clear code and an EOF code.
+;;
+;; The TIFF file format uses a similar but incompatible version of the LZW
+;; algorithm. See the [golang.org/x/image/tiff/lzw] package for an
+;; implementation.
+(in-ns 'go.compress.lzw) (go/file "reader.go" :doc "Package lzw implements the Lempel-Ziv-Welch compressed data format,\ndescribed in T. A. Welch, “A Technique for High-Performance Data\nCompression”, Computer, 17(6) (June 1984), pp 8-19.\n\nIn particular, it implements LZW as used by the GIF and PDF file\nformats, which means variable-width codes up to 12 bits and the first\ntwo non-literal codes are a clear code and an EOF code.\n\nThe TIFF file format uses a similar but incompatible version of the LZW\nalgorithm. See the [golang.org/x/image/tiff/lzw] package for an\nimplementation.\n" :imports [
+
+    ;; TODO(nigeltao): check that PDF uses LZW in the same way as GIF,
+    ;; modulo LSB/MSB packing order.
+
+
+    ^{:line 22} [bufio "bufio"]
+    ^{:line 23} [errors "errors"]
+    ^{:line 24} [fmt "fmt"]
+    ^{:line 25} [io "io"]])
+
+
+
+(go/type Order "Order specifies the bit ordering in an LZW data stream.\n" int)
+
+(go/const
+
+  ^{:line 33} [^{:tag Order :val 0 :doc "LSB means Least Significant Bits first, as used in the GIF file format.\n"} LSB iota]
+
+
+  ^{:line 36} [^{:val 1 :doc "MSB means Most Significant Bits first, as used in the TIFF and PDF\nfile formats.\n"} MSB])
+
+
+(go/const
+  ^{:line 40} [^{:val 12} maxWidth 12]
+  ^{:line 41} [^{:val 65535} decoderInvalidCode 0xffff]
+  ^{:line 42} [^{:val 4096} flushBuffer (<< 1 maxWidth)])
+
+
+
+
+(go/type Reader "Reader is an [io.Reader] which can be used to read compressed data in the\nLZW format.\n" (struct
+    ^{:line 48 :tag io/ByteReader} r
+    ^{:line 49 :tag uint32} bits
+    ^{:line 50 :tag uint} nBits
+    ^{:line 51 :tag uint} width
+    ^{:line 52 :tag (func [(* Reader)] [uint16 error])} read ; readLSB or readMSB
+    ^{:line 53 :tag int} litWidth ; width in bits of literal codes
+    ^{:line 54 :tag error} err
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 67 :tag uint16 :doc "The first 1<<litWidth codes are literal codes.\nThe next two codes mean clear and EOF.\nOther valid codes are in the range [lo, hi] where lo := clear + 2,\nwith the upper bound incrementing on each code seen.\n\noverflow is the code at which hi overflows the code width. It always\nequals 1 << width.\n\nlast is the most recently seen code, or decoderInvalidCode.\n\nAn invariant is that hi < overflow.\n"} clear ^{:tag uint16 :doc "The first 1<<litWidth codes are literal codes.\nThe next two codes mean clear and EOF.\nOther valid codes are in the range [lo, hi] where lo := clear + 2,\nwith the upper bound incrementing on each code seen.\n\noverflow is the code at which hi overflows the code width. It always\nequals 1 << width.\n\nlast is the most recently seen code, or decoderInvalidCode.\n\nAn invariant is that hi < overflow.\n"} eof ^{:tag uint16 :doc "The first 1<<litWidth codes are literal codes.\nThe next two codes mean clear and EOF.\nOther valid codes are in the range [lo, hi] where lo := clear + 2,\nwith the upper bound incrementing on each code seen.\n\noverflow is the code at which hi overflows the code width. It always\nequals 1 << width.\n\nlast is the most recently seen code, or decoderInvalidCode.\n\nAn invariant is that hi < overflow.\n"} hi ^{:tag uint16 :doc "The first 1<<litWidth codes are literal codes.\nThe next two codes mean clear and EOF.\nOther valid codes are in the range [lo, hi] where lo := clear + 2,\nwith the upper bound incrementing on each code seen.\n\noverflow is the code at which hi overflows the code width. It always\nequals 1 << width.\n\nlast is the most recently seen code, or decoderInvalidCode.\n\nAn invariant is that hi < overflow.\n"} overflow ^{:tag uint16 :doc "The first 1<<litWidth codes are literal codes.\nThe next two codes mean clear and EOF.\nOther valid codes are in the range [lo, hi] where lo := clear + 2,\nwith the upper bound incrementing on each code seen.\n\noverflow is the code at which hi overflows the code width. It always\nequals 1 << width.\n\nlast is the most recently seen code, or decoderInvalidCode.\n\nAn invariant is that hi < overflow.\n"} last
+
+
+
+
+
+
+    ^{:line 74 :tag (array (<< 1 maxWidth) uint8) :doc "Each code c in [lo, hi] expands to two or more bytes. For c != hi:\n  suffix[c] is the last of these bytes.\n  prefix[c] is the code for all but the last byte.\n  This code can either be a literal code or another code in [lo, c).\nThe c == hi case is a special case.\n"} suffix
+    ^{:line 75 :tag (array (<< 1 maxWidth) uint16)} prefix
+
+
+
+
+
+
+
+
+    ^{:line 84 :tag (array (<< (* 2 1) maxWidth) byte) :doc "output is the temporary output buffer.\nLiteral codes are accumulated from the start of the buffer.\nNon-literal codes decode to a sequence of suffixes that are first\nwritten right-to-left from the end of the buffer before being copied\nto the start of the buffer.\nIt is flushed when it contains >= 1<<maxWidth bytes,\nso that there is always room to decode an entire code.\n"} output
+    ^{:line 85 :tag int} o ; write index into output
+    ^{:line 86 :tag (slice byte)} toRead)) ; bytes to return from Read
+
+
+
+^{:go/end 103} (go/method readLSB "readLSB returns the next code for \"Least Significant Bits first\" data.\n" [^{:tag (* Reader)} r] :results [uint16 error]
+  (while (< (.-nBits r) (.-width r))
+    (let [(values x err) (.ReadByte (.-r r))]
+      (when (!= err nil)
+        (return 0 err))
+
+      (set! (.-bits r) bit-or (<< (conv uint32 x) (.-nBits r)))
+      (set! (.-nBits r) + 8)))
+
+  (let [code (conv uint16 (bit-and (.-bits r) (- ^uint32 (<< 1 (.-width r)) 1)))]
+    (set! (.-bits r) >> (.-width r))
+    (set! (.-nBits r) - (.-width r))
+    (return code nil)))
+
+
+
+^{:go/end 119} (go/method readMSB "readMSB returns the next code for \"Most Significant Bits first\" data.\n" [^{:tag (* Reader)} r] :results [uint16 error]
+  (while (< (.-nBits r) (.-width r))
+    (let [(values x err) (.ReadByte (.-r r))]
+      (when (!= err nil)
+        (return 0 err))
+
+      (set! (.-bits r) bit-or (<< (conv uint32 x) (- 24 (.-nBits r))))
+      (set! (.-nBits r) + 8)))
+
+  (let [code (conv uint16 (>> (.-bits r) (- 32 (.-width r))))]
+    (set! (.-bits r) << (.-width r))
+    (set! (.-nBits r) - (.-width r))
+    (return code nil)))
+
+
+
+^{:go/end 134} (go/method Read "Read implements io.Reader, reading uncompressed bytes from its underlying reader.\n" [^{:tag (* Reader)} r ^{:tag (slice byte)} b] :results [int error]
+  (while true
+    (when (> (len (.-toRead r)) 0)
+      (let [n (copy b (.-toRead r))]
+        (set! (.-toRead r) (subslice (.-toRead r) n))
+        (return n nil)))
+
+    (when (!= (.-err r) nil)
+      (return 0 (.-err r)))
+
+    (.decode r)))
+
+
+
+
+
+
+^{:go/end 224} (go/method decode "decode decompresses bytes from r and leaves them in d.toRead.\nread specifies how to decode bytes into codes.\nlitWidth is the width in bits of literal codes.\n" [^{:tag (* Reader)} r]
+  ;; Loop over the code stream, converting codes into decompressed bytes.
+  (label :loop
+    (while true
+      (let [(values code err) ((.-read r) r)]
+        (when (!= err nil)
+          (when (== err io/EOF)
+            (set! err io/ErrUnexpectedEOF))
+
+          (set! (.-err r) err)
+          (break))
+
+        (switch
+          (case [(< code (.-clear r))]
+            ;; We have a literal code.
+            (aset (.-output r) (.-o r) (conv uint8 code))
+            (inc! (.-o r))
+            (when (!= (.-last r) decoderInvalidCode)
+              ;; Save what the hi code expands to.
+              (aset (.-suffix r) (.-hi r) (conv uint8 code))
+              (aset (.-prefix r) (.-hi r) (.-last r))))
+
+          (case [(== code (.-clear r))]
+            (set! (.-width r) (+ 1 (conv uint (.-litWidth r))))
+            (set! (.-hi r) (.-eof r))
+            (set! (.-overflow r) ^uint16 (<< 1 (.-width r)))
+            (set! (.-last r) decoderInvalidCode)
+            (continue))
+          (case [(== code (.-eof r))]
+            (set! (.-err r) io/EOF)
+            (break :loop))
+          (case [(<= code (.-hi r))]
+            (let [(values c i) (values code (- (len (.-output r)) 1))]
+              (when (and (== code (.-hi r)) (!= (.-last r) decoderInvalidCode))
+                ;; code == hi is a special case which expands to the last expansion
+                ;; followed by the head of the last expansion. To find the head, we walk
+                ;; the prefix chain until we find a literal code.
+                (set! c (.-last r))
+                (while (>= c (.-clear r))
+                  (set! c (aget (.-prefix r) c)))
+
+                (aset (.-output r) i (conv uint8 c))
+                (dec! i)
+                (set! c (.-last r)))
+
+              ;; Copy the suffix chain into output and then write that to w.
+              (while (>= c (.-clear r))
+                (aset (.-output r) i (aget (.-suffix r) c))
+                (dec! i)
+                (set! c (aget (.-prefix r) c)))
+
+              (aset (.-output r) i (conv uint8 c))
+              (set! (.-o r) + (copy (subslice (.-output r) (.-o r)) (subslice (.-output r) i)))
+              (when (!= (.-last r) decoderInvalidCode)
+                ;; Save what the hi code expands to.
+                (aset (.-suffix r) (.-hi r) (conv uint8 c))
+                (aset (.-prefix r) (.-hi r) (.-last r)))))
+
+          (default
+            (set! (.-err r) (errors/New "lzw: invalid code"))
+            (break :loop)))
+
+        (set! (values (.-last r) (.-hi r)) (values code (+ (.-hi r) 1)))
+        (when (>= (.-hi r) (.-overflow r))
+          (when (> (.-hi r) (.-overflow r))
+            (panic "unreachable"))
+
+          (if (== (.-width r) maxWidth) (do
+              (set! (.-last r) decoderInvalidCode)
+              ;; Undo the d.hi++ a few lines above, so that (1) we maintain
+              ;; the invariant that d.hi < d.overflow, and (2) d.hi does not
+              ;; eventually overflow a uint16.
+              (dec! (.-hi r)))
+            (do
+              (inc! (.-width r))
+              (set! (.-overflow r) ^uint16 (<< 1 (.-width r))))))
+
+
+        (when (>= (.-o r) flushBuffer)
+          (break)))))
+
+
+  ;; Flush pending output.
+  (set! (.-toRead r) (subslice (.-output r) _ (.-o r)))
+  (set! (.-o r) 0))
+
+
+(go/var errClosed (errors/New "lzw: reader/writer is closed"))
+
+
+
+^{:go/breaks [5] :go/end 233} (go/method Close "Close closes the [Reader] and returns an error for any future read operation.\nIt does not close the underlying [io.Reader].\n" ^error [^{:tag (* Reader)} r]
+  (set! (.-err r) errClosed) ; in case any Reads come along
+  nil)
+
+
+
+
+^{:go/end 240} (go/method Reset "Reset clears the [Reader]'s state and allows it to be reused again\nas a new [Reader].\n" [^{:tag (* Reader)} r ^io/Reader src ^Order order ^int litWidth]
+  (set! @r (lit Reader))
+  (.init r src order litWidth))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 256} (go/func NewReader "NewReader creates a new [io.ReadCloser].\nReads from the returned [io.ReadCloser] read and decompress data from r.\nIf r does not also implement [io.ByteReader],\nthe decompressor may read more data than necessary from r.\nIt is the caller's responsibility to call Close on the ReadCloser when\nfinished reading.\nThe number of bits to use for literal codes, litWidth, must be in the\nrange [2,8] and is typically 8. It must equal the litWidth\nused during compression.\n\nIt is guaranteed that the underlying type of the returned [io.ReadCloser]\nis a *[Reader].\n" ^io/ReadCloser [^io/Reader r ^Order order ^int litWidth]
+  (newReader r order litWidth))
+
+
+^{:go/end 262} (go/func newReader ^{:tag (* Reader)} [^io/Reader src ^Order order ^int litWidth]
+  (let [r (new Reader)]
+    (.init r src order litWidth)
+    ^{:line 261} r))
+
+
+^{:go/end 290} (go/method init [^{:tag (* Reader)} r ^io/Reader src ^Order order ^int litWidth]
+  (switch order
+    (case [LSB]
+      (set! (.-read r) (method-expr (* Reader) readLSB)))
+    (case [MSB]
+      (set! (.-read r) (method-expr (* Reader) readMSB)))
+    (default
+      (set! (.-err r) (errors/New "lzw: unknown order"))
+      (return)))
+
+  (when (or (< litWidth 2) (< 8 litWidth))
+    (set! (.-err r) (fmt/Errorf "lzw: litWidth %d out of range" litWidth))
+    (return))
+
+
+  (let [(values br ok) (assert io/ByteReader src)]
+    (when (and (not ok) (!= src nil))
+      (set! br (bufio/NewReader src)))
+
+    (set! (.-r r) br)
+    (set! (.-litWidth r) litWidth)
+    (set! (.-width r) (+ 1 (conv uint litWidth)))
+    (set! (.-clear r) (<< (conv uint16 1) (conv uint litWidth)))
+    (set! (values (.-eof r) (.-hi r)) (values (+ (.-clear r) 1) (+ (.-clear r) 1)))
+    (set! (.-overflow r) (<< (conv uint16 1) (.-width r)))
+    (set! (.-last r) decoderInvalidCode)))

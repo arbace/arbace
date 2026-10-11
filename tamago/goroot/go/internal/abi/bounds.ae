@@ -1,0 +1,112 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.abi) (go/file "bounds.go" :imports [])
+
+
+
+(go/type BoundsErrorCode "This type and constants are for encoding different\nkinds of bounds check failures.\n" uint8)
+
+(go/const
+  ^{:line 12} [^{:tag BoundsErrorCode :val 0} BoundsIndex iota] ; s[x], 0 <= x < len(s) failed
+  ^{:line 13} [^{:val 1} BoundsSliceAlen] ; s[?:x], 0 <= x <= len(s) failed
+  ^{:line 14} [^{:val 2} BoundsSliceAcap] ; s[?:x], 0 <= x <= cap(s) failed
+  ^{:line 15} [^{:val 3} BoundsSliceB] ; s[x:y], 0 <= x <= y failed (but boundsSliceA didn't happen)
+  ^{:line 16} [^{:val 4} BoundsSlice3Alen] ; s[?:?:x], 0 <= x <= len(s) failed
+  ^{:line 17} [^{:val 5} BoundsSlice3Acap] ; s[?:?:x], 0 <= x <= cap(s) failed
+  ^{:line 18} [^{:val 6} BoundsSlice3B] ; s[?:x:y], 0 <= x <= y failed (but boundsSlice3A didn't happen)
+  ^{:line 19} [^{:val 7} BoundsSlice3C] ; s[x:y:?], 0 <= x <= y failed (but boundsSlice3A/B didn't happen)
+  ^{:line 20} [^{:val 8} BoundsConvert] ; (*[x]T)(s), 0 <= x <= len(s) failed
+  ^{:line 21} [^{:val 9} numBoundsCodes])
+
+
+(go/const
+  ^{:line 25} [^{:val 15} BoundsMaxReg 15]
+  ^{:line 26} [^{:val 31} BoundsMaxConst 31])
+
+
+;; Here's how we encode PCDATA_PanicBounds entries:
+
+;; We allow 16 registers (0-15) and 32 constants (0-31).
+;; Encode the following constant c:
+;;     bits    use
+;; -----------------------------
+;;       0     x is in a register
+;;       1     y is in a register
+;;
+;; if x is in a register
+;;       2     x is signed
+;;     [3:6]   x's register number
+;; else
+;;     [2:6]   x's constant value
+;;
+;; if y is in a register
+;;     [7:10]  y's register number
+;; else
+;;     [7:11]  y's constant value
+;;
+;; The final integer is c * numBoundsCode + code
+
+;; TODO: 32-bit
+
+
+
+^{:go/end 85} (go/func BoundsEncode "Encode bounds failure information into an integer for PCDATA_PanicBounds.\nRegister numbers must be in 0-15. Constants must be in 0-31.\n" ^int [^BoundsErrorCode code ^bool signed ^bool xIsReg ^bool yIsReg ^int xVal ^int yVal]
+  (let [c (conv int 0)]
+    (if xIsReg (do
+        (set! c bit-or (<< 1 0))
+        (when signed
+          (set! c bit-or (<< 1 2)))
+
+        (when (or (< xVal 0) (> xVal BoundsMaxReg))
+          (panic "bad xReg"))
+
+        (set! c bit-or (<< xVal 3)))
+      (do
+        (when (or (< xVal 0) (> xVal BoundsMaxConst))
+          (panic "bad xConst"))
+
+        (set! c bit-or (<< xVal 2))))
+
+    (if yIsReg (do
+        (set! c bit-or (<< 1 1))
+        (when (or (< yVal 0) (> yVal BoundsMaxReg))
+          (panic "bad yReg"))
+
+        (set! c bit-or (<< yVal 7)))
+      (do
+        (when (or (< yVal 0) (> yVal BoundsMaxConst))
+          (panic "bad yConst"))
+
+        (set! c bit-or (<< yVal 7))))
+
+    (+ (* c (conv int numBoundsCodes)) (conv int code))))
+
+^{:go/end 113} (go/func BoundsDecode [^int v] :results [^BoundsErrorCode code ^bool signed ^bool xIsReg ^bool yIsReg ^int xVal ^int yVal]
+  (set! code (conv BoundsErrorCode (% v (conv int numBoundsCodes))))
+  (let [c (/ v (conv int numBoundsCodes))]
+    (set! xIsReg (!= (bit-and c 1) 0))
+    (set! c >> 1)
+    (set! yIsReg (!= (bit-and c 1) 0))
+    (set! c >> 1)
+    (if xIsReg (do
+        (set! signed (!= (bit-and c 1) 0))
+        (set! c >> 1)
+        (set! xVal (bit-and c 0xf))
+        (set! c >> 4))
+      (do
+        (set! xVal (bit-and c 0x1f))
+        (set! c >> 5)))
+
+    (if yIsReg (do
+        (set! yVal (bit-and c 0xf))
+        (set! c >> 4))
+      (do
+        (set! yVal (bit-and c 0x1f))
+        (set! c >> 5)))
+
+    (when (!= c 0)
+      (panic "BoundsDecode decoding error"))
+
+    (return)))

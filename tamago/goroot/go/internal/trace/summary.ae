@@ -1,0 +1,698 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace) (go/file "summary.go" :imports [
+
+
+    ^{:line 8} [cmp "cmp"]
+    ^{:line 9} [slices "slices"]
+    ^{:line 10} [strings "strings"]
+    ^{:line 11} [time "time"]])
+
+
+
+(go/type Summary "Summary is the analysis result produced by the summarizer.\n" (struct
+    ^{:line 16 :tag (map GoID (* GoroutineSummary))} Goroutines
+    ^{:line 17 :tag (map TaskID (* UserTaskSummary))} Tasks))
+
+
+
+
+(go/type GoroutineSummary "GoroutineSummary contains statistics and execution details of a single goroutine.\n(For v2 traces.)\n" (struct
+    ^{:line 23 :tag GoID} ID
+    ^{:line 24 :tag string} Name ; A non-unique human-friendly identifier for the goroutine.
+    ^{:line 25 :tag uint64} PC ; The first PC we saw for the entry function of the goroutine
+    ^{:line 26 :tag Time} CreationTime ; Timestamp of the first appearance in the trace.
+    ^{:line 27 :tag Time} StartTime ; Timestamp of the first time it started running. 0 if the goroutine never ran.
+    ^{:line 28 :tag Time} EndTime ; Timestamp of when the goroutine exited. 0 if the goroutine never exited.
+
+
+    ^{:line 31 :tag (slice (* UserRegionSummary)) :doc "List of regions in the goroutine, sorted based on the start time.\n"} Regions
+
+
+    ^{:line 34 :doc "Statistics of execution time during the goroutine execution.\n"} GoroutineExecStats
+
+
+
+
+
+
+    ^{:doc "goroutineSummary is state used just for computing this structure.\nIt's dropped before being returned to the caller.\n\nMore specifically, if it's nil, it indicates that this summary has\nalready been finalized.\n"} (* goroutineSummary)))
+
+
+
+(go/type UserTaskSummary "UserTaskSummary represents a task in the trace.\n" (struct
+    ^{:line 46 :tag TaskID} ID
+    ^{:line 47 :tag string} Name
+    ^{:line 48 :tag (* UserTaskSummary)} Parent ; nil if the parent is unknown.
+    ^{:line 49 :tag (slice (* UserTaskSummary))} Children
+
+
+    ^{:line 52 :tag (* Event) :doc "Task begin event. An EventTaskBegin event or nil.\n"} Start
+
+
+    ^{:line 55 :tag (* Event) :doc "End end event. Normally EventTaskEnd event or nil.\n"} End
+
+
+    ^{:line 58 :tag (slice (* Event)) :doc "Logs is a list of EventLog events associated with the task.\n"} Logs
+
+
+    ^{:line 61 :tag (slice (* UserRegionSummary)) :doc "List of regions in the task, sorted based on the start time.\n"} Regions
+
+
+    ^{:line 64 :tag (map GoID (* GoroutineSummary)) :doc "Goroutines is the set of goroutines associated with this task.\n"} Goroutines))
+
+
+
+
+^{:go/end 71} (go/method Complete "Complete returns true if we have complete information about the task\nfrom the trace: both a start and an end.\n" ^bool [^{:tag (* UserTaskSummary)} s]
+  (and (!= (.-Start s) nil) (!= (.-End s) nil)))
+
+
+
+
+^{:go/end 81} (go/method Descendents "Descendents returns a slice consisting of itself (always the first task returned),\nand the transitive closure of all of its children.\n" ^{:tag (slice (* UserTaskSummary))} [^{:tag (* UserTaskSummary)} s]
+  (let [descendents (lit (slice (* UserTaskSummary)) s)]
+    (range [_ child (.-Children s)]
+      (set! descendents (append descendents (spread (.Descendents child)))))
+
+    ^{:line 80} descendents))
+
+
+
+
+(go/type UserRegionSummary "UserRegionSummary represents a region and goroutine execution stats\nwhile the region was active. (For v2 traces.)\n" (struct
+    ^{:line 86 :tag TaskID} TaskID
+    ^{:line 87 :tag string} Name
+
+
+
+
+
+    ^{:line 93 :tag (* Event) :doc "Region start event. Normally EventRegionBegin event or nil,\nbut can be a state transition event from NotExist or Undetermined\nif the region is a synthetic region representing task inheritance\nfrom the parent goroutine.\n"} Start
+
+
+
+
+    ^{:line 98 :tag (* Event) :doc "Region end event. Normally EventRegionEnd event or nil,\nbut can be a state transition event to NotExist if the goroutine\nterminated without explicitly ending the region.\n"} End
+
+    ^{:line 100} GoroutineExecStats))
+
+
+
+
+(go/type GoroutineExecStats "GoroutineExecStats contains statistics about a goroutine's execution\nduring a period of time.\n" (struct
+
+    ^{:line 107 :tag time/Duration :doc "These stats are all non-overlapping.\n"} ExecTime
+    ^{:line 108 :tag time/Duration} SchedWaitTime
+    ^{:line 109 :tag (map string time/Duration)} BlockTimeByReason
+    ^{:line 110 :tag time/Duration} SyscallTime
+    ^{:line 111 :tag time/Duration} SyscallBlockTime
+
+
+
+    ^{:line 115 :tag time/Duration :doc "TotalTime is the duration of the goroutine's presence in the trace.\nNecessarily overlaps with other stats.\n"} TotalTime
+
+
+
+    ^{:line 119 :tag (map string time/Duration) :doc "Total time the goroutine spent in certain ranges; may overlap\nwith other stats.\n"} RangeTime))
+
+
+^{:go/end 136} (go/method NonOverlappingStats ^{:tag (map string time/Duration)} [^GoroutineExecStats s]
+  (let [stats (lit (map string time/Duration)
+        ^{:line 124} ["Execution time" (.-ExecTime s)]
+        ^{:line 125} ["Sched wait time" (.-SchedWaitTime s)]
+        ^{:line 126} ["Syscall execution time" (.-SyscallTime s)]
+        ^{:line 127} ["Block time (syscall)" (.-SyscallBlockTime s)]
+        ^{:line 128} ["Unknown time" (.UnknownTime s)])]
+
+    (range [reason dt (.-BlockTimeByReason s)]
+      (set! (aget stats (+ "Block time (" reason ")")) + dt))
+
+    ;; N.B. Don't include RangeTime or TotalTime; they overlap with these other
+    ;; stats.
+    ^{:line 135} stats))
+
+
+
+^{:go/end 151} (go/method UnknownTime "UnknownTime returns whatever isn't accounted for in TotalTime.\n" ^time/Duration [^GoroutineExecStats s]
+  ^{:go/breaks [[4 150]]} (let [sum (+ (.-ExecTime s) (.-SchedWaitTime s) (.-SyscallTime s)
+        (.-SyscallBlockTime s))]
+    (range [_ dt (.-BlockTimeByReason s)]
+      (set! sum + dt))
+
+    ;; N.B. Don't include range time. Ranges overlap with
+    ;; other stats, whereas these stats are non-overlapping.
+    (when (< sum (.-TotalTime s))
+      (return (- (.-TotalTime s) sum)))
+
+    0))
+
+
+
+^{:go/end 168} (go/method sub "sub returns the stats v-s.\n" [^GoroutineExecStats s ^GoroutineExecStats v] :results [^GoroutineExecStats r]
+  (set! r (.clone s))
+  (set! (.-ExecTime r) - (.-ExecTime v))
+  (set! (.-SchedWaitTime r) - (.-SchedWaitTime v))
+  (range [reason (.-BlockTimeByReason s)]
+    (set! (aget (.-BlockTimeByReason r) reason) - (aget (.-BlockTimeByReason v) reason)))
+
+  (set! (.-SyscallTime r) - (.-SyscallTime v))
+  (set! (.-SyscallBlockTime r) - (.-SyscallBlockTime v))
+  (set! (.-TotalTime r) - (.-TotalTime v))
+  (range [name (.-RangeTime s)]
+    (set! (aget (.-RangeTime r) name) - (aget (.-RangeTime v) name)))
+
+  ^{:line 167} r)
+
+
+^{:go/end 181} (go/method clone [^GoroutineExecStats s] :results [^GoroutineExecStats r]
+  (set! r s)
+  (set! (.-BlockTimeByReason r) (make (map string time/Duration)))
+  (range [reason dt (.-BlockTimeByReason s)]
+    (aset (.-BlockTimeByReason r) reason dt))
+
+  (set! (.-RangeTime r) (make (map string time/Duration)))
+  (range [name dt (.-RangeTime s)]
+    (aset (.-RangeTime r) name dt))
+
+  ^{:line 180} r)
+
+
+
+
+
+^{:go/end 218} (go/method snapshotStat "snapshotStat returns the snapshot of the goroutine execution statistics.\nThis is called as we process the ordered trace event stream. lastTs is used\nto process pending statistics if this is called before any goroutine end event.\n" [^{:tag (* GoroutineSummary)} g ^Time lastTs] :results [^GoroutineExecStats ret]
+  (set! ret (.clone (.-GoroutineExecStats g)))
+
+  (when (== (.-goroutineSummary g) nil)
+    (return ret)) ; Already finalized; no pending state.
+
+
+  ;; Set the total time if necessary.
+  (when (== ^{:go/via [GoroutineExecStats]} (.-TotalTime g) 0)
+    (set! (.-TotalTime ret) (.Sub lastTs (.-CreationTime g))))
+
+
+  ;; Add in time since lastTs.
+  (when (!= ^{:go/via [goroutineSummary]} (.-lastStartTime g) 0)
+    (set! (.-ExecTime ret) + (.Sub lastTs ^{:go/via [goroutineSummary]} (.-lastStartTime g))))
+
+  (when (!= ^{:go/via [goroutineSummary]} (.-lastRunnableTime g) 0)
+    (set! (.-SchedWaitTime ret) + (.Sub lastTs ^{:go/via [goroutineSummary]} (.-lastRunnableTime g))))
+
+  (when (!= ^{:go/via [goroutineSummary]} (.-lastBlockTime g) 0)
+    (set! (aget (.-BlockTimeByReason ret) ^{:go/via [goroutineSummary]} (.-lastBlockReason g)) + (.Sub lastTs ^{:go/via [goroutineSummary]} (.-lastBlockTime g))))
+
+  (when (!= ^{:go/via [goroutineSummary]} (.-lastSyscallTime g) 0)
+    (set! (.-SyscallTime ret) + (.Sub lastTs ^{:go/via [goroutineSummary]} (.-lastSyscallTime g))))
+
+  (when (!= ^{:go/via [goroutineSummary]} (.-lastSyscallBlockTime g) 0)
+    (set! (.-SchedWaitTime ret) + (.Sub lastTs ^{:go/via [goroutineSummary]} (.-lastSyscallBlockTime g))))
+
+  (range [name ts ^{:go/via [goroutineSummary]} (.-lastRangeTime g)]
+    (set! (aget (.-RangeTime ret) name) + (.Sub lastTs ts)))
+
+  ^{:line 217} ret)
+
+
+
+
+
+^{:go/end 243} (go/method finalize "finalize is called when processing a goroutine end event or at\nthe end of trace processing. This finalizes the execution stat\nand any active regions in the goroutine, in which case trigger is nil.\n" [^{:tag (* GoroutineSummary)} g ^Time lastTs ^{:tag (* Event)} trigger]
+  (when (!= trigger nil)
+    (set! (.-EndTime g) (.Time trigger)))
+
+  (let [finalStat (.snapshotStat g lastTs)]
+
+    (set! (.-GoroutineExecStats g) finalStat)
+
+    ;; System goroutines are never part of regions, even though they
+    ;; "inherit" a task due to creation (EvGoCreate) from within a region.
+    ;; This may happen e.g. if the first GC is triggered within a region,
+    ;; starting the GC worker goroutines.
+    (when (not (IsSystemGoroutine (.-Name g)))
+      (range [_ s ^{:go/via [goroutineSummary]} (.-activeRegions g)]
+        (set! (.-End s) trigger)
+        (set! (.-GoroutineExecStats s) (.sub finalStat (.-GoroutineExecStats s)))
+        (set! (.-Regions g) (append (.-Regions g) s))))
+
+
+    (set! @(.-goroutineSummary g) (lit goroutineSummary))))
+
+
+
+(go/type goroutineSummary "goroutineSummary is a private part of GoroutineSummary that is required only during analysis.\n" (struct
+    ^{:line 247 :tag Time} lastStartTime
+    ^{:line 248 :tag Time} lastRunnableTime
+    ^{:line 249 :tag Time} lastBlockTime
+    ^{:line 250 :tag string} lastBlockReason
+    ^{:line 251 :tag Time} lastSyscallTime
+    ^{:line 252 :tag Time} lastSyscallBlockTime
+    ^{:line 253 :tag (map string Time)} lastRangeTime
+    ^{:line 254 :tag (slice (* UserRegionSummary))} activeRegions)) ; stack of active regions
+
+
+
+(go/type Summarizer "Summarizer constructs per-goroutine time statistics for v2 traces.\n" (struct
+
+    ^{:line 260 :tag (map GoID (* GoroutineSummary)) :doc "gs contains the map of goroutine summaries we're building up to return to the caller.\n"} gs
+
+
+    ^{:line 263 :tag (map TaskID (* UserTaskSummary)) :doc "tasks contains the map of task summaries we're building up to return to the caller.\n"} tasks
+
+
+
+    ^{:line 267 :tag (map ProcID GoID) :doc "syscallingP and syscallingG represent a binding between a P and G in a syscall.\nUsed to correctly identify and clean up after syscalls (blocking or otherwise).\n"} syscallingP
+    ^{:line 268 :tag (map GoID ProcID)} syscallingG
+
+
+
+
+
+    ^{:line 274 :tag (map rangeP GoID) :doc "rangesP is used for optimistic tracking of P-based ranges for goroutines.\n\nIt's a best-effort mapping of an active range on a P to the goroutine we think\nis associated with it.\n"} rangesP
+
+    ^{:line 276 :tag Time} lastTs ; timestamp of the last event processed.
+    ^{:line 277 :tag Time} syncTs)) ; timestamp of the last sync event processed (or the first timestamp in the trace).
+
+
+
+^{:go/end 289} (go/func NewSummarizer "NewSummarizer creates a new struct to build goroutine stats from a trace.\n" ^{:tag (* Summarizer)} []
+  (addr ^{:go/breaks [2 4 6 8 10]} (lit Summarizer
+      :gs (make (map GoID (* GoroutineSummary)))
+      :tasks (make (map TaskID (* UserTaskSummary)))
+      :syscallingP (make (map ProcID GoID))
+      :syscallingG (make (map GoID ProcID))
+      :rangesP (make (map rangeP GoID)))))
+
+
+
+(go/type rangeP (struct
+    ^{:line 292 :tag ProcID} id
+    ^{:line 293 :tag string} name))
+
+
+
+^{:go/end 600} (go/method Event "Event feeds a single event into the stats summarizer.\n" [^{:tag (* Summarizer)} s ^{:tag (* Event)} ev]
+  (when (== (.-syncTs s) 0)
+    (set! (.-syncTs s) (.Time ev)))
+
+  (set! (.-lastTs s) (.Time ev))
+
+  (switch (.Kind ev)
+    ;; Record sync time for the RangeActive events.
+    (case [EventSync]
+      (set! (.-syncTs s) (.Time ev)))
+
+    ;; Handle state transitions.
+    (case [EventStateTransition]
+      (let [st (.StateTransition ev)]
+        (switch (.-Kind (.-Resource st))
+          ;; Handle goroutine transitions, which are the meat of this computation.
+          (case [ResourceGoroutine]
+            (let [id (.Goroutine (.-Resource st))
+                (values old new) (.Goroutine st)]
+              (when (== old new)
+                ;; Skip these events; they're not telling us anything new.
+                (break))
+
+
+              ;; Handle transition out.
+              (let [g (aget (.-gs s) id)]
+                (switch old
+                  (case [GoUndetermined]
+                    (set! g (addr (lit GoroutineSummary :ID id :goroutineSummary (addr (lit goroutineSummary)))))
+
+                    ;; The goroutine is being named for the first time.
+                    ;; If we're coming out of GoUndetermined, then the creation time is the
+                    ;; time of the last sync.
+                    (set! (.-CreationTime g) (.-syncTs s))
+                    (set! ^{:go/via [goroutineSummary]} (.-lastRangeTime g) (make (map string Time)))
+                    (set! ^{:go/via [GoroutineExecStats]} (.-BlockTimeByReason g) (make (map string time/Duration)))
+                    (set! ^{:go/via [GoroutineExecStats]} (.-RangeTime g) (make (map string time/Duration)))
+
+                    ;; Accumulate all the time we spent in new as if it was old.
+                    ;;
+                    ;; Note that we still handle "new" again below because the time until
+                    ;; the *next* event still needs to be accumulated (even though it's
+                    ;; probably going to come immediately after this event).
+                    (let [stateTime (.Sub (.Time ev) (.-syncTs s))]
+                      (switch new
+                        (case [GoRunning]
+                          (set! ^{:go/via [GoroutineExecStats]} (.-ExecTime g) + stateTime))
+                        (case [GoWaiting]
+                          (set! (aget ^{:go/via [GoroutineExecStats]} (.-BlockTimeByReason g) (.-Reason st)) + stateTime))
+                        (case [GoRunnable]
+                          (set! ^{:go/via [GoroutineExecStats]} (.-SchedWaitTime g) + stateTime))
+                        (case [GoSyscall]
+                          ;; For a syscall, we're not going to be 'naming' this P from afar.
+                          ;; It's "executing" somewhere. If we've got a P, then that means
+                          ;; we've had that P since the start, so this is regular syscall time.
+                          ;; Otherwise, this is syscall block time (no P).
+                          (if (== (.Proc ev) NoProc)
+                            (set! ^{:go/via [GoroutineExecStats]} (.-SyscallBlockTime g) + stateTime)
+
+                            (set! ^{:go/via [GoroutineExecStats]} (.-SyscallTime g) + stateTime))))
+
+
+                      (aset (.-gs s) (.-ID g) g)))
+                  (case [GoNotExist]
+                    (set! g (addr (lit GoroutineSummary :ID id :goroutineSummary (addr (lit goroutineSummary)))))
+
+                    ;; The goroutine is being created.
+                    (set! (.-CreationTime g) (.Time ev))
+                    (set! ^{:go/via [goroutineSummary]} (.-lastRangeTime g) (make (map string Time)))
+                    (set! ^{:go/via [GoroutineExecStats]} (.-BlockTimeByReason g) (make (map string time/Duration)))
+                    (set! ^{:go/via [GoroutineExecStats]} (.-RangeTime g) (make (map string time/Duration)))
+
+                    ;; When a goroutine is newly created, inherit the task
+                    ;; of the active region. For ease handling of this
+                    ;; case, we create a fake region description with the
+                    ;; task id. This isn't strictly necessary as this
+                    ;; goroutine may not be associated with the task, but
+                    ;; it can be convenient to see all children created
+                    ;; during a region.
+                    ;;
+                    ;; N.B. ev.Goroutine() will always be NoGoroutine for the
+                    ;; Undetermined case, so this is will simply not fire.
+                    (when [creatorG (aget (.-gs s) (.Goroutine ev))] (and (!= creatorG nil) (> (len ^{:go/via [goroutineSummary]} (.-activeRegions creatorG)) 0))
+                      (let [regions ^{:go/via [goroutineSummary]} (.-activeRegions creatorG)
+                          ^{:line 381} s (aget regions (- (len regions) 1))]
+                        (set! ^{:go/via [goroutineSummary]} (.-activeRegions g) (lit (slice (* UserRegionSummary)) (lit _ :TaskID (.-TaskID s) :Start ev)))))
+
+                    (aset (.-gs s) (.-ID g) g))
+                  (case [GoRunning]
+                    ;; Record execution time as we transition out of running
+                    (set! ^{:go/via [GoroutineExecStats]} (.-ExecTime g) + (.Sub (.Time ev) ^{:go/via [goroutineSummary]} (.-lastStartTime g)))
+                    (set! ^{:go/via [goroutineSummary]} (.-lastStartTime g) 0))
+                  (case [GoWaiting]
+                    ;; Record block time as we transition out of waiting.
+                    (when (!= ^{:go/via [goroutineSummary]} (.-lastBlockTime g) 0)
+                      (set! (aget ^{:go/via [GoroutineExecStats]} (.-BlockTimeByReason g) ^{:go/via [goroutineSummary]} (.-lastBlockReason g)) + (.Sub (.Time ev) ^{:go/via [goroutineSummary]} (.-lastBlockTime g)))
+                      (set! ^{:go/via [goroutineSummary]} (.-lastBlockTime g) 0)))
+
+                  (case [GoRunnable]
+                    ;; Record sched latency time as we transition out of runnable.
+                    (when (!= ^{:go/via [goroutineSummary]} (.-lastRunnableTime g) 0)
+                      (set! ^{:go/via [GoroutineExecStats]} (.-SchedWaitTime g) + (.Sub (.Time ev) ^{:go/via [goroutineSummary]} (.-lastRunnableTime g)))
+                      (set! ^{:go/via [goroutineSummary]} (.-lastRunnableTime g) 0)))
+
+                  (case [GoSyscall]
+                    ;; Record syscall execution time and syscall block time as we transition out of syscall.
+                    (when (!= ^{:go/via [goroutineSummary]} (.-lastSyscallTime g) 0)
+                      (if (!= ^{:go/via [goroutineSummary]} (.-lastSyscallBlockTime g) 0) (do
+                          (set! ^{:go/via [GoroutineExecStats]} (.-SyscallBlockTime g) + (.Sub (.Time ev) ^{:go/via [goroutineSummary]} (.-lastSyscallBlockTime g)))
+                          (set! ^{:go/via [GoroutineExecStats]} (.-SyscallTime g) + (.Sub ^{:go/via [goroutineSummary]} (.-lastSyscallBlockTime g) ^{:go/via [goroutineSummary]} (.-lastSyscallTime g))))
+
+                        (set! ^{:go/via [GoroutineExecStats]} (.-SyscallTime g) + (.Sub (.Time ev) ^{:go/via [goroutineSummary]} (.-lastSyscallTime g))))
+
+                      (set! ^{:go/via [goroutineSummary]} (.-lastSyscallTime g) 0)
+                      (set! ^{:go/via [goroutineSummary]} (.-lastSyscallBlockTime g) 0)
+
+                      ;; Clear the syscall map.
+                      (delete (.-syscallingP s) (aget (.-syscallingG s) id))
+                      (delete (.-syscallingG s) id))))
+
+
+
+                ;; The goroutine hasn't been identified yet. Take the transition stack
+                ;; and identify the goroutine by the root frame of that stack.
+                ;; This root frame will be identical for all transitions on this
+                ;; goroutine, because it represents its immutable start point.
+                (when (== (.-Name g) "")
+                  (range [frame (.Frames (.-Stack st))]
+                    ;; NB: this PC won't actually be consistent for
+                    ;; goroutines which existed at the start of the
+                    ;; trace. The UI doesn't use it directly; this
+                    ;; mainly serves as an indication that we
+                    ;; actually saw a call stack for the goroutine
+                    (set! (.-PC g) (.-PC frame))
+                    (set! (.-Name g) (.-Func frame))))
+
+
+
+                ;; Handle transition in.
+                (switch new
+                  (case [GoRunning]
+                    ;; We started running. Record it.
+                    (set! ^{:go/via [goroutineSummary]} (.-lastStartTime g) (.Time ev))
+                    (when (== (.-StartTime g) 0)
+                      (set! (.-StartTime g) (.Time ev))))
+
+                  (case [GoRunnable]
+                    (set! ^{:go/via [goroutineSummary]} (.-lastRunnableTime g) (.Time ev)))
+                  (case [GoWaiting]
+                    (when (!= (.-Reason st) "forever")
+                      (set! ^{:go/via [goroutineSummary]} (.-lastBlockTime g) (.Time ev))
+                      (set! ^{:go/via [goroutineSummary]} (.-lastBlockReason g) (.-Reason st))
+                      (break))
+
+                    ;; "Forever" is like goroutine death.
+                    (fallthrough))
+                  (case [GoNotExist]
+                    (.finalize g (.Time ev) ev))
+                  (case [GoSyscall]
+                    (aset (.-syscallingP s) (.Proc ev) id)
+                    (aset (.-syscallingG s) id (.Proc ev))
+                    (set! ^{:go/via [goroutineSummary]} (.-lastSyscallTime g) (.Time ev)))))))
+
+
+          ;; Handle procs to detect syscall blocking, which si identifiable as a
+          ;; proc going idle while the goroutine it was attached to is in a syscall.
+          (case [ResourceProc]
+            (let [id (.Proc (.-Resource st))
+                (values old new) (.Proc st)]
+              (when (and (!= old new) (== new ProcIdle))
+                (when [(values goid ok) (aget (.-syscallingP s) id)] ok
+                  (let [g (aget (.-gs s) goid)]
+                    (set! ^{:go/via [goroutineSummary]} (.-lastSyscallBlockTime g) (.Time ev))
+                    (delete (.-syscallingP s) id)))))))))
+
+
+
+
+    ;; Handle ranges of all kinds.
+    (case [EventRangeBegin EventRangeActive]
+      (let [r (.Range ev)
+          ^{:line 478 :tag (* GoroutineSummary)} g (zero (* GoroutineSummary))]
+        (switch (.-Kind (.-Scope r))
+          (case [ResourceGoroutine]
+            ;; Simple goroutine range. We attribute the entire range regardless of
+            ;; goroutine stats. Lots of situations are still identifiable, e.g. a
+            ;; goroutine blocked often in mark assist will have both high mark assist
+            ;; and high block times. Those interested in a deeper view can look at the
+            ;; trace viewer.
+            (set! g (aget (.-gs s) (.Goroutine (.-Scope r)))))
+          (case [ResourceProc]
+            ;; N.B. These ranges are not actually bound to the goroutine, they're
+            ;; bound to the P. But if we happen to be on the P the whole time, let's
+            ;; try to attribute it to the goroutine. (e.g. GC sweeps are here.)
+            (set! g (aget (.-gs s) (.Goroutine ev)))
+            (when (!= g nil)
+              (aset (.-rangesP s) (lit rangeP :id (.Proc (.-Scope r)) :name (.-Name r)) (.Goroutine ev)))))
+
+
+        (when (== g nil)
+          (break))
+
+        (if (== (.Kind ev) EventRangeActive) (do
+            (when [ts (aget ^{:go/via [goroutineSummary]} (.-lastRangeTime g) (.-Name r))] (!= ts 0)
+              (set! (aget ^{:go/via [GoroutineExecStats]} (.-RangeTime g) (.-Name r)) + (.Sub (.-syncTs s) ts)))
+
+            (aset ^{:go/via [goroutineSummary]} (.-lastRangeTime g) (.-Name r) (.-syncTs s)))
+
+          (aset ^{:go/via [goroutineSummary]} (.-lastRangeTime g) (.-Name r) (.Time ev)))))
+
+    (case [EventRangeEnd]
+      (let [r (.Range ev)
+          ^{:line 509 :tag (* GoroutineSummary)} g (zero (* GoroutineSummary))]
+        (switch (.-Kind (.-Scope r))
+          (case [ResourceGoroutine]
+            (set! g (aget (.-gs s) (.Goroutine (.-Scope r)))))
+          (case [ResourceProc]
+            (let [rp (lit rangeP :id (.Proc (.-Scope r)) :name (.-Name r))]
+              (when [(values goid ok) (aget (.-rangesP s) rp)] ok
+                (when (== goid (.Goroutine ev))
+                  ;; As the comment in the RangeBegin case states, this is only OK
+                  ;; if we finish on the same goroutine we started on.
+                  (set! g (aget (.-gs s) goid)))
+
+                (delete (.-rangesP s) rp)))))
+
+
+        (when (== g nil)
+          (break))
+
+        (let [ts (aget ^{:go/via [goroutineSummary]} (.-lastRangeTime g) (.-Name r))]
+          (when (== ts 0)
+            (break))
+
+          (set! (aget ^{:go/via [GoroutineExecStats]} (.-RangeTime g) (.-Name r)) + (.Sub (.Time ev) ts))
+          (delete ^{:go/via [goroutineSummary]} (.-lastRangeTime g) (.-Name r)))))
+
+    ;; Handle user-defined regions.
+    (case [EventRegionBegin]
+      (let [g (aget (.-gs s) (.Goroutine ev))
+          ^{:line 537} r (.Region ev)
+          ^{:line 538} region (addr ^{:go/breaks [2 4 6 8]} (lit UserRegionSummary
+              :Name (.-Type r)
+              :TaskID (.-Task r)
+              :Start ev
+              :GoroutineExecStats (.snapshotStat g (.Time ev))))]
+
+        (set! ^{:go/via [goroutineSummary]} (.-activeRegions g) (append ^{:go/via [goroutineSummary]} (.-activeRegions g) region))
+        ;; Associate the region and current goroutine to the task.
+        (let [task (.getOrAddTask s (.-Task r))]
+          (set! (.-Regions task) (append (.-Regions task) region))
+          (aset (.-Goroutines task) (.-ID g) g))))
+    (case [EventRegionEnd]
+      (let [g (aget (.-gs s) (.Goroutine ev))
+          ^{:line 551} r (.Region ev)
+          ^{:line 552 :tag (* UserRegionSummary)} sd (zero (* UserRegionSummary))]
+        (if [regionStk ^{:go/via [goroutineSummary]} (.-activeRegions g)] (> (len regionStk) 0)
+          ;; Pop the top region from the stack since that's what must have ended.
+          (let [n (len regionStk)]
+            (set! sd (aget regionStk (- n 1)))
+            (set! regionStk (subslice regionStk _ (- n 1)))
+            (set! ^{:go/via [goroutineSummary]} (.-activeRegions g) regionStk))
+          ;; N.B. No need to add the region to a task; the EventRegionBegin already handled it.
+          (do
+            ;; This is an "end" without a start. Just fabricate the region now.
+            (set! sd (addr (lit UserRegionSummary :Name (.-Type r) :TaskID (.-Task r))))
+            ;; Associate the region and current goroutine to the task.
+            (let [task (.getOrAddTask s (.-Task r))]
+              (aset (.-Goroutines task) (.-ID g) g)
+              (set! (.-Regions task) (append (.-Regions task) sd)))))
+
+        (set! (.-GoroutineExecStats sd) (.sub (.snapshotStat g (.Time ev)) (.-GoroutineExecStats sd)))
+        (set! (.-End sd) ev)
+        (set! (.-Regions g) (append (.-Regions g) sd))))
+
+    ;; Handle tasks and logs.
+    (case [EventTaskBegin EventTaskEnd]
+      ;; Initialize the task.
+      (let [t (.Task ev)
+          ^{:line 576} task (.getOrAddTask s (.-ID t))]
+        (set! (.-Name task) (.-Type t))
+        (aset (.-Goroutines task) (.Goroutine ev) (aget (.-gs s) (.Goroutine ev)))
+        (if (== (.Kind ev) EventTaskBegin)
+          (set! (.-Start task) ev)
+
+          (set! (.-End task) ev))
+
+        ;; Initialize the parent, if one exists and it hasn't been done yet.
+        ;; We need to avoid doing it twice, otherwise we could appear twice
+        ;; in the parent's Children list.
+        (when (and (!= (.-Parent t) NoTask) (== (.-Parent task) nil))
+          (let [parent (.getOrAddTask s (.-Parent t))]
+            (set! (.-Parent task) parent)
+            (set! (.-Children parent) (append (.-Children parent) task))))))
+
+    (case [EventLog]
+      (let [log (.Log ev)
+          ;; Just add the log to the task. We'll create the task if it
+          ;; doesn't exist (it's just been mentioned now).
+          ^{:line 596} task (.getOrAddTask s (.-Task log))]
+        (aset (.-Goroutines task) (.Goroutine ev) (aget (.-gs s) (.Goroutine ev)))
+        (set! (.-Logs task) (append (.-Logs task) ev))))))
+
+
+
+^{:go/end 609} (go/method getOrAddTask ^{:tag (* UserTaskSummary)} [^{:tag (* Summarizer)} s ^TaskID id]
+  (let [task (aget (.-tasks s) id)]
+    (when (== task nil)
+      (set! task (addr (lit UserTaskSummary :ID id :Goroutines (make (map GoID (* GoroutineSummary))))))
+      (aset (.-tasks s) id task))
+
+    ^{:line 608} task))
+
+
+
+
+^{:go/end 638} (go/method Finalize "Finalize indicates to the summarizer that we're done processing the trace.\nIt cleans up any remaining state and returns the full summary.\n" ^{:tag (* Summary)} [^{:tag (* Summarizer)} s]
+  (range [_ g (.-gs s)]
+    (.finalize g (.-lastTs s) nil)
+
+    ;; Sort based on region start time.
+    (^{:inst [(slice (* UserRegionSummary)) (* UserRegionSummary)]} slices/SortFunc (.-Regions g) ^{:go/end 631} (fn ^int [^{:tag (* UserRegionSummary)} a ^{:tag (* UserRegionSummary)} b]
+        (let [x (.-Start a)
+            ^{:line 620} y (.-Start b)]
+          (when (== x nil)
+            (when (== y nil)
+              (return 0))
+
+            (return -1))
+
+          (when (== y nil)
+            (return (+ 1)))
+
+          (^{:inst [Time]} cmp/Compare (.Time x) (.Time y)))))
+
+    (set! (.-goroutineSummary g) nil))
+
+  (addr ^{:go/breaks [2 4]} (lit Summary
+      :Goroutines (.-gs s)
+      :Tasks (.-tasks s))))
+
+
+
+
+
+
+^{:go/end 692} (go/func RelatedGoroutinesV2 "RelatedGoroutinesV2 finds a set of goroutines related to goroutine goid for v2 traces.\nThe association is based on whether they have synchronized with each other in the Go\nscheduler (one has unblocked another).\n" ^{:tag (map GoID (struct))} [^{:tag (slice Event)} events ^GoID goid]
+  ;; Process all the events, looking for transitions of goroutines
+  ;; out of GoWaiting. If there was an active goroutine when this
+  ;; happened, then we know that active goroutine unblocked another.
+  ;; Scribble all these down so we can process them.
+  (let-type [unblockEdge (struct
+        ^{:line 649 :tag GoID} operator
+        ^{:line 650 :tag GoID} operand)]
+
+    (let [^{:tag (slice unblockEdge)} unblockEdges (zero (slice unblockEdge))]
+      (range [_ ev events]
+        (when (== (.Goroutine ev) NoGoroutine)
+          (continue))
+
+        (when (!= (.Kind ev) EventStateTransition)
+          (continue))
+
+        (let [st (.StateTransition ev)]
+          (when (!= (.-Kind (.-Resource st)) ResourceGoroutine)
+            (continue))
+
+          (let [id (.Goroutine (.-Resource st))
+              (values old new) (.Goroutine st)]
+            (when (or (== old new) (!= old GoWaiting))
+              (continue))
+
+            (set! unblockEdges (append unblockEdges ^{:go/breaks [2 4]} (lit unblockEdge
+                  :operator (.Goroutine ev)
+                  :operand id))))))
+
+
+      ;; Compute the transitive closure of depth 2 of goroutines that have unblocked each other
+      ;; (starting from goid).
+      (let [gmap (make (map GoID (struct)))]
+        (aset gmap goid (lit (struct)))
+        (for [i 0] (< i 2) (inc! i)
+          ;; Copy the map.
+          (let [gmap1 (make (map GoID (struct)))]
+            (range [g gmap]
+              (aset gmap1 g (lit (struct))))
+
+            (range [_ edge unblockEdges]
+              (when [(values _ ok) (aget gmap (.-operand edge))] ok
+                (aset gmap1 (.-operator edge) (lit (struct)))))
+
+
+            (set! gmap gmap1)))
+
+        ^{:line 691} gmap))))
+
+
+^{:go/end 699} (go/func IsSystemGoroutine ^bool [^string entryFn]
+  ;; This mimics runtime.isSystemGoroutine as closely as
+  ;; possible.
+  ;; Also, locked g in extra M (with empty entryFn) is system goroutine.
+  (or (== entryFn "") (and (!= entryFn "runtime.main") (strings/HasPrefix entryFn "runtime."))))

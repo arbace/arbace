@@ -1,0 +1,424 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.zstd) (go/file "block.go" :imports [
+
+
+    ^{:line 8} [io "io"]])
+
+
+
+(go/const ^{:val false :doc "debug can be set in the source to print debug info using println.\n"} debug false)
+
+
+
+
+^{:go/end 60} (go/method compressedBlock "compressedBlock decompresses a compressed block, storing the decompressed\ndata in r.buffer. The blockSize argument is the compressed size.\nRFC 3.1.1.3.\n" ^error [^{:tag (* Reader)} r ^int blockSize]
+  (if (>= (len (.-compressedBuf r)) blockSize)
+    (set! (.-compressedBuf r) (subslice (.-compressedBuf r) _ blockSize))
+
+    ;; We know that blockSize <= 128K,
+    ;; so this won't allocate an enormous amount.
+    (let [need (- blockSize (len (.-compressedBuf r)))]
+      (set! (.-compressedBuf r) (append (.-compressedBuf r) (spread (make (slice byte) need))))))
+
+
+  (when [(values _ err) (io/ReadFull (.-r r) (.-compressedBuf r))] (!= err nil)
+    (return (.wrapNonEOFError r 0 err)))
+
+
+  (let [data (conv block (.-compressedBuf r))
+      ^{:line 32} off 0]
+    (set! (.-buffer r) (subslice (.-buffer r) _ 0))
+
+    (let [(values litoff litbuf err) (.readLiterals r data off (subslice (.-literals r) _ 0))]
+      (when (!= err nil)
+        (return err))
+
+      (set! (.-literals r) litbuf)
+
+      (set! off litoff)
+
+      (let [(values seqCount ^:assign off ^:assign err) (.initSeqs r data off)]
+        (when (!= err nil)
+          (return err))
+
+
+        (when (== seqCount 0)
+          ;; No sequences, just literals.
+          (when (< off (len data))
+            (return (.makeError r off "extraneous data after no sequences")))
+
+
+          (set! (.-buffer r) (append (.-buffer r) (spread litbuf)))
+
+          (return nil))
+
+
+        (.execSeqs r data off litbuf seqCount)))))
+
+
+
+(go/type seqCode "seqCode is the kind of sequence codes we have to handle.\n" int)
+
+(go/const
+  ^{:line 66} [^{:tag seqCode :val 0} seqLiteral iota]
+  ^{:line 67} [^{:val 1} seqOffset]
+  ^{:line 68} [^{:val 2} seqMatch])
+
+
+
+
+(go/type seqCodeInfoData "seqCodeInfoData is the information needed to set up seqTables and\nseqTableBits for a particular kind of sequence code.\n" (struct
+    ^{:line 74 :tag (slice fseBaselineEntry)} predefTable ; predefined FSE
+    ^{:line 75 :tag int} predefTableBits ; number of bits in predefTable
+    ^{:line 76 :tag int} maxSym ; max symbol value in FSE
+    ^{:line 77 :tag int} maxBits ; max bits for FSE
+
+
+    ^{:line 80 :tag (func [(* Reader) int (slice fseEntry) (slice fseBaselineEntry)] [error]) :doc "toBaseline converts from an FSE table to an FSE baseline table.\n"} toBaseline))
+
+
+
+(go/var ^{:doc "seqCodeInfo is the seqCodeInfoData for each kind of sequence code.\n"} seqCodeInfo (lit (array 3 seqCodeInfoData)
+    ^{:line 85} [seqLiteral ^{:go/breaks [2 4 6 8 10]} (lit _
+        :predefTable (subslice predefinedLiteralTable)
+        :predefTableBits 6
+        :maxSym 35
+        :maxBits 9
+        :toBaseline (method-expr (* Reader) makeLiteralBaselineFSE))]
+
+    ^{:line 92} [seqOffset ^{:go/breaks [2 4 6 8 10]} (lit _
+        :predefTable (subslice predefinedOffsetTable)
+        :predefTableBits 5
+        :maxSym 31
+        :maxBits 8
+        :toBaseline (method-expr (* Reader) makeOffsetBaselineFSE))]
+
+    ^{:line 99} [seqMatch ^{:go/breaks [2 4 6 8 10]} (lit _
+        :predefTable (subslice predefinedMatchTable)
+        :predefTableBits 6
+        :maxSym 52
+        :maxBits 9
+        :toBaseline (method-expr (* Reader) makeMatchBaselineFSE))]))
+
+
+
+
+
+
+^{:go/end 169} (go/method initSeqs "initSeqs reads the Sequences_Section_Header and sets up the FSE\ntables used to read the sequence codes. It returns the number of\nsequences and the new offset. RFC 3.1.1.3.2.1.\n" [^{:tag (* Reader)} r ^block data ^int off] :results [int int error]
+  (when (>= off (len data))
+    (return 0 0 (.makeEOFError r off)))
+
+
+  (let [seqHdr (aget data off)]
+    (inc! off)
+    (when (== seqHdr 0)
+      (return 0 off nil))
+
+
+    (let [^int seqCount (zero int)]
+      (cond (< seqHdr 128)
+        (set! seqCount (conv int seqHdr))
+        (< seqHdr 255) (do
+          (when (>= off (len data))
+            (return 0 0 (.makeEOFError r off)))
+
+          (set! seqCount (+ (<< (- (conv int seqHdr) 128) 8) (conv int (aget data off))))
+          (inc! off)) :else
+        (do
+          (when (>= (+ off 1) (len data))
+            (return 0 0 (.makeEOFError r off)))
+
+          (set! seqCount (+ (conv int (aget data off)) (<< (conv int (aget data (+ off 1))) 8) 0x7f00))
+          (set! off + 2)))
+
+
+      ;; Read the Symbol_Compression_Modes byte.
+
+      (when (>= off (len data))
+        (return 0 0 (.makeEOFError r off)))
+
+      (let [symMode (aget data off)]
+        (when (!= (bit-and symMode 3) 0)
+          (return 0 0 (.makeError r off "invalid symbol compression mode")))
+
+        (inc! off)
+
+        ;; Set up the FSE tables used to decode the sequence codes.
+
+        (let [^error err (zero error)]
+          (set! (values off err) (.setSeqTable r data off seqLiteral (bit-and (>> symMode 6) 3)))
+          (when (!= err nil)
+            (return 0 0 err))
+
+
+          (set! (values off err) (.setSeqTable r data off seqOffset (bit-and (>> symMode 4) 3)))
+          (when (!= err nil)
+            (return 0 0 err))
+
+
+          (set! (values off err) (.setSeqTable r data off seqMatch (bit-and (>> symMode 2) 3)))
+          (when (!= err nil)
+            (return 0 0 err))
+
+
+          (return seqCount off nil))))))
+
+
+
+
+
+^{:go/end 246} (go/method setSeqTable "setSeqTable uses the Compression_Mode in mode to set up r.seqTables and\nr.seqTableBits for kind. We store these in the Reader because one of\nthe modes simply reuses the value from the last block in the frame.\n" [^{:tag (* Reader)} r ^block data ^int off ^seqCode kind ^byte mode] :results [int error]
+  (let [info (addr (aget seqCodeInfo kind))]
+    (switch mode
+      (case [0]
+        ;; Predefined_Mode
+        (aset (.-seqTables r) kind (.-predefTable info))
+        (aset (.-seqTableBits r) kind (conv uint8 (.-predefTableBits info)))
+        (return off nil))
+
+      (case [1]
+        ;; RLE_Mode
+        (when (>= off (len data))
+          (return 0 (.makeEOFError r off)))
+
+        (let [rle (aget data off)]
+          (inc! off)
+
+          ;; Build a simple baseline table that always returns rle.
+
+          (let [entry (lit (slice fseEntry)
+                ^{:go/breaks [2 4 6]} (lit _
+                  :sym rle
+                  :bits 0
+                  :base 0))]
+
+
+            (when (== (cap (aget (.-seqTableBuffers r) kind)) 0)
+              (aset (.-seqTableBuffers r) kind (make (slice fseBaselineEntry) ^int (<< 1 (.-maxBits info)))))
+
+            (aset (.-seqTableBuffers r) kind (subslice (aget (.-seqTableBuffers r) kind) _ 1))
+            (when [err ((.-toBaseline info) r off entry (aget (.-seqTableBuffers r) kind))] (!= err nil)
+              (return 0 err))
+
+
+            (aset (.-seqTables r) kind (aget (.-seqTableBuffers r) kind))
+            (aset (.-seqTableBits r) kind 0)
+            (return off nil))))
+
+      (case [2]
+        ;; FSE_Compressed_Mode
+        (when (< (cap (.-fseScratch r)) ^int (<< 1 (.-maxBits info)))
+          (set! (.-fseScratch r) (make (slice fseEntry) ^int (<< 1 (.-maxBits info)))))
+
+        (set! (.-fseScratch r) (subslice (.-fseScratch r) _ ^int (<< 1 (.-maxBits info))))
+
+        (let [(values tableBits roff err) (.readFSE r data off (.-maxSym info) (.-maxBits info) (.-fseScratch r))]
+          (when (!= err nil)
+            (return 0 err))
+
+          (set! (.-fseScratch r) (subslice (.-fseScratch r) _ ^int (<< 1 tableBits)))
+
+          (when (== (cap (aget (.-seqTableBuffers r) kind)) 0)
+            (aset (.-seqTableBuffers r) kind (make (slice fseBaselineEntry) ^int (<< 1 (.-maxBits info)))))
+
+          (aset (.-seqTableBuffers r) kind (subslice (aget (.-seqTableBuffers r) kind) _ ^int (<< 1 tableBits)))
+
+          (when [err ((.-toBaseline info) r roff (.-fseScratch r) (aget (.-seqTableBuffers r) kind))] (!= err nil)
+            (return 0 err))
+
+
+          (aset (.-seqTables r) kind (aget (.-seqTableBuffers r) kind))
+          (aset (.-seqTableBits r) kind (conv uint8 tableBits))
+          (return roff nil)))
+
+      (case [3]
+        ;; Repeat_Mode
+        (when (== (len (aget (.-seqTables r) kind)) 0)
+          (return 0 (.makeError r off "missing repeat sequence FSE table")))
+
+        (return off nil)))
+
+    (panic "unreachable")))
+
+
+
+^{:go/end 383} (go/method execSeqs "execSeqs reads and executes the sequences. RFC 3.1.1.3.2.1.2.\n" ^error [^{:tag (* Reader)} r ^block data ^int off ^{:tag (slice byte)} litbuf ^int seqCount]
+  ;; Set up the initial states for the sequence code readers.
+
+  (let [(values rbr err) (.makeReverseBitReader r data (- (len data) 1) off)]
+    (when (!= err nil)
+      (return err))
+
+
+    (let [(values literalState ^:assign err) (.val rbr (aget (.-seqTableBits r) seqLiteral))]
+      (when (!= err nil)
+        (return err))
+
+
+      (let [(values offsetState ^:assign err) (.val rbr (aget (.-seqTableBits r) seqOffset))]
+        (when (!= err nil)
+          (return err))
+
+
+        (let [(values matchState ^:assign err) (.val rbr (aget (.-seqTableBits r) seqMatch))]
+          (when (!= err nil)
+            (return err))
+
+
+          ;; Read and perform all the sequences. RFC 3.1.1.4.
+
+          ^{:go/breaks [[5 382]]} (let [seq 0]
+            (while (< seq seqCount)
+              (when (> (+ (len (.-buffer r)) (len litbuf)) (<< 128 10))
+                (return (.makeError rbr "uncompressed size too big")))
+
+
+              (let [ptoffset (addr (aget (aget (.-seqTables r) seqOffset) offsetState))
+                  ^{:line 281} ptmatch (addr (aget (aget (.-seqTables r) seqMatch) matchState))
+                  ^{:line 282} ptliteral (addr (aget (aget (.-seqTables r) seqLiteral) literalState))
+
+                  (values add err) (.val rbr (.-basebits ptoffset))]
+                (when (!= err nil)
+                  (return err))
+
+                (let [offset (+ (.-baseline ptoffset) add)]
+
+                  (set! (values add err) (.val rbr (.-basebits ptmatch)))
+                  (when (!= err nil)
+                    (return err))
+
+                  (let [match (+ (.-baseline ptmatch) add)]
+
+                    (set! (values add err) (.val rbr (.-basebits ptliteral)))
+                    (when (!= err nil)
+                      (return err))
+
+                    (let [literal (+ (.-baseline ptliteral) add)]
+
+                      ;; Handle repeat offsets. RFC 3.1.1.5.
+                      ;; See the comment in makeOffsetBaselineFSE.
+                      (if (> (.-basebits ptoffset) 1) (do
+                          (set! (.-repeatedOffset3 r) (.-repeatedOffset2 r))
+                          (set! (.-repeatedOffset2 r) (.-repeatedOffset1 r))
+                          (set! (.-repeatedOffset1 r) offset))
+                        (do
+                          (when (== literal 0)
+                            (inc! offset))
+
+                          (switch offset
+                            (case [1]
+                              (set! offset (.-repeatedOffset1 r)))
+                            (case [2]
+                              (set! offset (.-repeatedOffset2 r))
+                              (set! (.-repeatedOffset2 r) (.-repeatedOffset1 r))
+                              (set! (.-repeatedOffset1 r) offset))
+                            (case [3]
+                              (set! offset (.-repeatedOffset3 r))
+                              (set! (.-repeatedOffset3 r) (.-repeatedOffset2 r))
+                              (set! (.-repeatedOffset2 r) (.-repeatedOffset1 r))
+                              (set! (.-repeatedOffset1 r) offset))
+                            (case [4]
+                              (set! offset (- (.-repeatedOffset1 r) 1))
+                              (set! (.-repeatedOffset3 r) (.-repeatedOffset2 r))
+                              (set! (.-repeatedOffset2 r) (.-repeatedOffset1 r))
+                              (set! (.-repeatedOffset1 r) offset)))))
+
+
+
+                      (inc! seq)
+                      (when (< seq seqCount)
+                        ;; Update the states.
+                        (set! (values add err) (.val rbr (.-bits ptliteral)))
+                        (when (!= err nil)
+                          (return err))
+
+                        (set! literalState (+ (conv uint32 (.-base ptliteral)) add))
+
+                        (set! (values add err) (.val rbr (.-bits ptmatch)))
+                        (when (!= err nil)
+                          (return err))
+
+                        (set! matchState (+ (conv uint32 (.-base ptmatch)) add))
+
+                        (set! (values add err) (.val rbr (.-bits ptoffset)))
+                        (when (!= err nil)
+                          (return err))
+
+                        (set! offsetState (+ (conv uint32 (.-base ptoffset)) add)))
+
+
+                      ;; The next sequence is now in literal, offset, match.
+
+                      (when debug
+                        (println "literal" literal "offset" offset "match" match))
+
+
+                      ;; Copy literal bytes from litbuf.
+                      (when (> literal (conv uint32 (len litbuf)))
+                        (return (.makeError rbr "literal byte overflow")))
+
+                      (when (> literal 0)
+                        (set! (.-buffer r) (append (.-buffer r) (spread (subslice litbuf _ literal))))
+                        (set! litbuf (subslice litbuf literal)))
+
+
+                      (when (> match 0)
+                        (when [err (.copyFromWindow r (addr rbr) offset match)] (!= err nil)
+                          (return err))))))))
+
+
+
+
+            (set! (.-buffer r) (append (.-buffer r) (spread litbuf)))
+
+            (when (!= (.-cnt rbr) 0)
+              (return (.makeError r off "extraneous data after sequences")))
+
+
+            nil))))))
+
+
+
+^{:go/end 425} (go/method copyFromWindow "Copy match bytes from the decoded output, or the window, at offset.\n" ^error [^{:tag (* Reader)} r ^{:tag (* reverseBitReader)} rbr ^uint32 offset ^uint32 match]
+  (when (== offset 0)
+    (return (.makeError rbr "invalid zero offset")))
+
+
+  ;; Offset may point into the buffer or the window and
+  ;; match may extend past the end of the initial buffer.
+  ;; |--r.window--|--r.buffer--|
+  ;;        |<-----offset------|
+  ;;        |------match----------->|
+  ^{:go/breaks [[4 424]]} (let [bufferOffset (conv uint32 0)
+      ^{:line 397} lenBlock (conv uint32 (len (.-buffer r)))]
+    (if (< lenBlock offset)
+      (let [lenWindow (.len (.-window r))
+          ^{:line 400} copy (- offset lenBlock)]
+        (when (> copy lenWindow)
+          (return (.makeError rbr "offset past window")))
+
+        (let [windowOffset (- lenWindow copy)]
+          (when (> copy match)
+            (set! copy match))
+
+          (set! (.-buffer r) (.appendTo (.-window r) (.-buffer r) windowOffset (+ windowOffset copy)))
+          (set! match - copy)))
+
+      (set! bufferOffset (- lenBlock offset)))
+
+
+    ;; We are being asked to copy data that we are adding to the
+    ;; buffer in the same copy.
+    (while (> match 0)
+      (let [copy (- (conv uint32 (len (.-buffer r))) bufferOffset)]
+        (when (> copy match)
+          (set! copy match))
+
+        (set! (.-buffer r) (append (.-buffer r) (spread (subslice (.-buffer r) bufferOffset (+ bufferOffset copy)))))
+        (set! match - copy)))
+
+    nil))

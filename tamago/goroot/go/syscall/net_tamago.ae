@@ -1,0 +1,954 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; A simulated network for use within tamago (adapted from net_nacl.go).
+;; The simulation is not particularly tied to NaCl,
+;; but other systems have real networks.
+
+;; All int64 times are UnixNanos.
+
+(in-ns 'go.syscall) (go/file "net_tamago.go" :imports [
+
+
+    ^{:line 14} [sync "sync"]
+    ^{:line 15} [atomic "sync/atomic"]])
+
+
+;; Interface to timers implemented in package runtime.
+;; Must be in sync with ../runtime/time.go:/^type timer
+;; Really for use by package time, but we cannot import time here.
+
+(go/type runtimeTimer (struct
+    ^{:line 23 :tag uintptr} tb
+    ^{:line 24 :tag int} i
+
+    ^{:line 26 :tag int64} when
+    ^{:line 27 :tag int64} period
+    ^{:line 28 :tag (func [(interface) uintptr])} f ; NOTE: must not be closure
+    ^{:line 29 :tag (interface)} arg
+    ^{:line 30 :tag uintptr} seq))
+
+
+(go/type timer (struct
+    ^{:line 34 :tag bool} expired
+    ^{:line 35 :tag (* queue)} q
+    ^{:line 36 :tag runtimeTimer} r))
+
+
+^{:go/end 43} (go/method start [^{:tag (* timer)} t ^{:tag (* queue)} q ^int64 deadline]
+  (when (!= deadline 0)
+    (panic "unsupported deadline")))
+
+
+
+^{:go/end 47} (go/method stop [^{:tag (* timer)} t]
+  (return))
+
+
+^{:go/end 53} (go/method reset [^{:tag (* timer)} t ^{:tag (* queue)} q ^int64 deadline]
+  (when (!= deadline 0)
+    (panic "unsupported deadline")))
+
+
+
+^{:go/end 64} (go/func timerExpired [^{:tag (interface)} i ^uintptr seq]
+  (let [t (assert (* timer) i)]
+    (go (^{:go/end 63} (fn []
+          ^{:go/via [Mutex]} (.Lock (.-q t))
+          (defer ^{:go/via [Mutex]} (.Unlock (.-q t)))
+          (set! (.-expired t) true)
+          (.Broadcast (.-canRead (.-q t)))
+          (.Broadcast (.-canWrite (.-q t))))))))
+
+
+
+;; Network constants and data structures. These match the traditional values.
+
+(go/const
+  ^{:line 69} [^{:val 0} AF_UNSPEC iota]
+  ^{:line 70} [^{:val 1} AF_UNIX]
+  ^{:line 71} [^{:val 2} AF_INET]
+  ^{:line 72} [^{:val 3} AF_INET6])
+
+
+(go/const
+  ^{:line 76} [^{:val 0} SHUT_RD iota]
+  ^{:line 77} [^{:val 1} SHUT_WR]
+  ^{:line 78} [^{:val 2} SHUT_RDWR])
+
+
+(go/const
+  ^{:line 82} [^{:val 1} SOCK_STREAM (+ 1 iota)]
+  ^{:line 83} [^{:val 2} SOCK_DGRAM]
+  ^{:line 84} [^{:val 3} SOCK_RAW]
+  ^{:line 85} [^{:val 4} SOCK_SEQPACKET])
+
+
+(go/const
+  ^{:line 89} [^{:val 0} IPPROTO_IP 0]
+  ^{:line 90} [^{:val 4} IPPROTO_IPV4 4]
+  ^{:line 91} [^{:val 41} IPPROTO_IPV6 0x29]
+  ^{:line 92} [^{:val 6} IPPROTO_TCP 6]
+  ^{:line 93} [^{:val 17} IPPROTO_UDP 0x11])
+
+
+
+(go/const "Misc constants expected by package net but not supported.\n"
+  ^{:line 98} [^{:val 0} _ iota]
+  ^{:line 99} [^{:val 1} SOL_SOCKET]
+  ^{:line 100} [^{:val 2} SO_TYPE]
+  ^{:line 101} [^{:val 3} NET_RT_IFLIST]
+  ^{:line 102} [^{:val 4} IFNAMSIZ]
+  ^{:line 103} [^{:val 5} IFF_UP]
+  ^{:line 104} [^{:val 6} IFF_BROADCAST]
+  ^{:line 105} [^{:val 7} IFF_LOOPBACK]
+  ^{:line 106} [^{:val 8} IFF_POINTOPOINT]
+  ^{:line 107} [^{:val 9} IFF_MULTICAST]
+  ^{:line 108} [^{:val 10} IPV6_V6ONLY]
+  ^{:line 109} [^{:val 11} SOMAXCONN]
+  ^{:line 110} [^{:val 12} F_DUPFD_CLOEXEC]
+  ^{:line 111} [^{:val 13} SO_BROADCAST]
+  ^{:line 112} [^{:val 14} SO_REUSEADDR]
+  ^{:line 113} [^{:val 15} SO_REUSEPORT]
+  ^{:line 114} [^{:val 16} SO_RCVBUF]
+  ^{:line 115} [^{:val 17} SO_SNDBUF]
+  ^{:line 116} [^{:val 18} SO_KEEPALIVE]
+  ^{:line 117} [^{:val 19} SO_LINGER]
+  ^{:line 118} [^{:val 20} SO_ERROR]
+  ^{:line 119} [^{:val 21} IP_PORTRANGE]
+  ^{:line 120} [^{:val 22} IP_PORTRANGE_DEFAULT]
+  ^{:line 121} [^{:val 23} IP_PORTRANGE_LOW]
+  ^{:line 122} [^{:val 24} IP_PORTRANGE_HIGH]
+  ^{:line 123} [^{:val 25} IP_MULTICAST_IF]
+  ^{:line 124} [^{:val 26} IP_MULTICAST_LOOP]
+  ^{:line 125} [^{:val 27} IP_ADD_MEMBERSHIP]
+  ^{:line 126} [^{:val 28} IPV6_PORTRANGE]
+  ^{:line 127} [^{:val 29} IPV6_PORTRANGE_DEFAULT]
+  ^{:line 128} [^{:val 30} IPV6_PORTRANGE_LOW]
+  ^{:line 129} [^{:val 31} IPV6_PORTRANGE_HIGH]
+  ^{:line 130} [^{:val 32} IPV6_MULTICAST_IF]
+  ^{:line 131} [^{:val 33} IPV6_MULTICAST_LOOP]
+  ^{:line 132} [^{:val 34} IPV6_JOIN_GROUP]
+  ^{:line 133} [^{:val 35} TCP_NODELAY]
+  ^{:line 134} [^{:val 36} TCP_KEEPINTVL]
+  ^{:line 135} [^{:val 37} TCP_KEEPIDLE]
+
+  ^{:line 137} [^{:val 500} SYS_FCNTL 500]) ; unsupported
+
+
+(go/var ^bool SocketDisableIPv6)
+
+
+(go/type Sockaddr "A Sockaddr is one of the SockaddrXxx structs.\n" (interface
+
+    (^{:doc "copy returns a copy of the underlying data.\n"} copy ^Sockaddr [])
+
+
+
+    (^{:doc "key returns the value of the underlying data,\nfor comparison as a map key.\n"} key ^{:tag (interface)} [])))
+
+
+(go/type SockaddrInet4 (struct
+    ^{:line 153 :tag int} Port
+    ^{:line 154 :tag (array 4 byte)} Addr))
+
+
+^{:go/end 160} (go/method copy ^Sockaddr [^{:tag (* SockaddrInet4)} sa]
+  (let [sa1 @sa]
+    (addr sa1)))
+
+
+^{:go/end 162} (go/method key ^{:tag (interface)} [^{:tag (* SockaddrInet4)} sa] @sa)
+
+^{:go/end 167} (go/func isIPv4Localhost ^bool [^Sockaddr sa]
+  (let [(values sa4 ok) (assert (* SockaddrInet4) sa)]
+    (and ok (== (.-Addr sa4) (lit (array 4 byte) 127 0 0 1)))))
+
+
+(go/type SockaddrInet6 (struct
+    ^{:line 170 :tag int} Port
+    ^{:line 171 :tag uint32} ZoneId
+    ^{:line 172 :tag (array 16 byte)} Addr))
+
+
+^{:go/end 178} (go/method copy ^Sockaddr [^{:tag (* SockaddrInet6)} sa]
+  (let [sa1 @sa]
+    (addr sa1)))
+
+
+^{:go/end 180} (go/method key ^{:tag (interface)} [^{:tag (* SockaddrInet6)} sa] @sa)
+
+(go/type SockaddrUnix (struct
+    ^{:line 183 :tag string} Name))
+
+
+^{:go/end 189} (go/method copy ^Sockaddr [^{:tag (* SockaddrUnix)} sa]
+  (let [sa1 @sa]
+    (addr sa1)))
+
+
+^{:go/end 191} (go/method key ^{:tag (interface)} [^{:tag (* SockaddrUnix)} sa] @sa)
+
+(go/type SockaddrDatalink (struct
+    ^{:line 194 :tag uint8} Len
+    ^{:line 195 :tag uint8} Family
+    ^{:line 196 :tag uint16} Index
+    ^{:line 197 :tag uint8} Type
+    ^{:line 198 :tag uint8} Nlen
+    ^{:line 199 :tag uint8} Alen
+    ^{:line 200 :tag uint8} Slen
+    ^{:line 201 :tag (array 12 int8)} Data))
+
+
+^{:go/end 207} (go/method copy ^Sockaddr [^{:tag (* SockaddrDatalink)} sa]
+  (let [sa1 @sa]
+    (addr sa1)))
+
+
+^{:go/end 209} (go/method key ^{:tag (interface)} [^{:tag (* SockaddrDatalink)} sa] @sa)
+
+
+(go/type RoutingMessage "RoutingMessage represents a routing message.\n" (interface
+    (unimplemented [])))
+
+
+(go/type IPMreq (struct
+    ^{:line 217 :tag (array 4 byte)} Multiaddr ; /* in_addr */
+    ^{:line 218 :tag (array 4 byte)} Interface)) ; /* in_addr */
+
+
+(go/type IPv6Mreq (struct
+    ^{:line 222 :tag (array 16 byte)} Multiaddr ; /* in6_addr */
+    ^{:line 223 :tag uint32} Interface))
+
+
+(go/type Linger (struct
+    ^{:line 227 :tag int32} Onoff
+    ^{:line 228 :tag int32} Linger))
+
+
+(go/type ICMPv6Filter (struct
+    ^{:line 232 :tag (array 8 uint32)} Filt))
+
+
+
+
+
+
+(go/type queue "A queue is the bookkeeping for a synchronized buffered queue.\nWe do not use channels because we need to be able to handle\nwrites after and during close, and because a chan byte would\nrequire too many send and receive operations in real use.\n" (struct
+    ^{:line 240} sync/Mutex
+    ^{:line 241 :tag sync/Cond} canRead
+    ^{:line 242 :tag sync/Cond} canWrite
+    ^{:line 243 :tag (* timer)} rtimer ; non-nil if in read
+    ^{:line 244 :tag (* timer)} wtimer ; non-nil if in write
+    ^{:line 245 :tag int} r ; total read index
+    ^{:line 246 :tag int} w ; total write index
+    ^{:line 247 :tag int} m ; index mask
+    ^{:line 248 :tag bool} closed))
+
+
+^{:go/end 258} (go/method init [^{:tag (* queue)} q ^int size]
+  (when (!= (bit-and size (- size 1)) 0)
+    (panic "invalid queue size - must be power of two"))
+
+  (set! (.-L (.-canRead q)) (addr (.-Mutex q)))
+  (set! (.-L (.-canWrite q)) (addr (.-Mutex q)))
+  (set! (.-m q) (- size 1)))
+
+
+^{:go/end 263} (go/func past ^bool [^int64 deadline]
+  (let [(values sec nsec) (now)]
+    (and (> deadline 0) (< deadline (+ (* sec 1.0E9) (conv int64 nsec))))))
+
+
+^{:go/end 287} (go/method waitRead [^{:tag (* queue)} q ^int n ^int64 deadline] :results [int error]
+  (when (past deadline)
+    (return 0 EAGAIN))
+
+  (let [^timer t (zero timer)]
+    (.start t q deadline)
+    (set! (.-rtimer q) (addr t))
+    (while (and (== (- (.-w q) (.-r q)) 0) (not (.-closed q)) (not (.-expired t)))
+      (.Wait (.-canRead q)))
+
+    (set! (.-rtimer q) nil)
+    (.stop t)
+    (let [m (- (.-w q) (.-r q))]
+      (when (and (== m 0) (.-expired t))
+        (return 0 EAGAIN))
+
+      (when (> m n)
+        (set! m n)
+        (.Signal (.-canRead q))) ; wake up next reader too
+
+      (.Signal (.-canWrite q))
+      (return m nil))))
+
+
+^{:go/end 314} (go/method waitWrite [^{:tag (* queue)} q ^int n ^int64 deadline] :results [int error]
+  (when (past deadline)
+    (return 0 EAGAIN))
+
+  (let [^timer t (zero timer)]
+    (.start t q deadline)
+    (set! (.-wtimer q) (addr t))
+    (while (and (> (- (.-w q) (.-r q)) (.-m q)) (not (.-closed q)) (not (.-expired t)))
+      (.Wait (.-canWrite q)))
+
+    (set! (.-wtimer q) nil)
+    (.stop t)
+    (let [m (- (+ (.-m q) 1) (- (.-w q) (.-r q)))]
+      (when (and (== m 0) (.-expired t))
+        (return 0 EAGAIN))
+
+      (when (== m 0)
+        (return 0 EAGAIN))
+
+      (when (> m n)
+        (set! m n)
+        (.Signal (.-canWrite q))) ; wake up next writer too
+
+      (.Signal (.-canRead q))
+      (return m nil))))
+
+
+^{:go/end 322} (go/method close [^{:tag (* queue)} q]
+  ^{:go/via [Mutex]} (.Lock q)
+  (defer ^{:go/via [Mutex]} (.Unlock q))
+  (set! (.-closed q) true)
+  (.Broadcast (.-canRead q))
+  (.Broadcast (.-canWrite q)))
+
+
+
+(go/type byteq "A byteq is a byte queue.\n" (struct
+    ^{:line 326} queue
+    ^{:line 327 :tag (slice byte)} data))
+
+
+^{:go/end 336} (go/func newByteq ^{:tag (* byteq)} []
+  (let [q (addr ^{:go/breaks [2]} (lit byteq
+          :data (make (slice byte) 4096)))]
+
+    ^{:go/via [queue]} (.init q (len (.-data q)))
+    ^{:line 335} q))
+
+
+^{:go/end 352} (go/method read [^{:tag (* byteq)} q ^{:tag (slice byte)} b ^int64 deadline] :results [int error]
+  ^{:go/via [queue Mutex]} (.Lock q)
+  (defer ^{:go/via [queue Mutex]} (.Unlock q))
+  (let [(values n err) ^{:go/via [queue]} (.waitRead q (len b) deadline)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (set! b (subslice b _ n))
+    (while (> (len b) 0)
+      (let [m (copy b (subslice (.-data q) (bit-and ^{:go/via [queue]} (.-r q) ^{:go/via [queue]} (.-m q))))]
+        (set! ^{:go/via [queue]} (.-r q) + m)
+        (set! b (subslice b m))))
+
+    (return n nil)))
+
+
+^{:go/end 371} (go/method write [^{:tag (* byteq)} q ^{:tag (slice byte)} b ^int64 deadline] :results [^int n ^error err]
+  ^{:go/via [queue Mutex]} (.Lock q)
+  (defer ^{:go/via [queue Mutex]} (.Unlock q))
+  (while (< n (len b))
+    (let [(values nn err) ^{:go/via [queue]} (.waitWrite q (len (subslice b n)) deadline)]
+      (when (!= err nil)
+        (return n err))
+
+      (let [bb (subslice b n (+ n nn))]
+        (set! n + nn)
+        (while (> (len bb) 0)
+          (let [m (copy (subslice (.-data q) (bit-and ^{:go/via [queue]} (.-w q) ^{:go/via [queue]} (.-m q))) bb)]
+            (set! ^{:go/via [queue]} (.-w q) + m)
+            (set! bb (subslice bb m)))))))
+
+
+  (return n nil))
+
+
+
+(go/type msgq "A msgq is a queue of messages.\n" (struct
+    ^{:line 375} queue
+    ^{:line 376 :tag (slice (interface))} data))
+
+
+^{:go/end 385} (go/func newMsgq ^{:tag (* msgq)} []
+  (let [q (addr ^{:go/breaks [2]} (lit msgq
+          :data (make (slice (interface)) 32)))]
+
+    ^{:go/via [queue]} (.init q (len (.-data q)))
+    ^{:line 384} q))
+
+
+^{:go/end 400} (go/method read [^{:tag (* msgq)} q ^int64 deadline] :results [(interface) error]
+  ^{:go/via [queue Mutex]} (.Lock q)
+  (defer ^{:go/via [queue Mutex]} (.Unlock q))
+  (let [(values n err) ^{:go/via [queue]} (.waitRead q 1 deadline)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (== n 0)
+      (return nil nil))
+
+    (let [m (aget (.-data q) (bit-and ^{:go/via [queue]} (.-r q) ^{:go/via [queue]} (.-m q)))]
+      (inc! ^{:go/via [queue]} (.-r q))
+      (return m nil))))
+
+
+^{:go/end 412} (go/method write ^error [^{:tag (* msgq)} q ^{:tag (interface)} m ^int64 deadline]
+  ^{:go/via [queue Mutex]} (.Lock q)
+  (defer ^{:go/via [queue Mutex]} (.Unlock q))
+  ^{:go/breaks [5]} (let [(values _ err) ^{:go/via [queue]} (.waitWrite q 1 deadline)]
+    (when (!= err nil)
+      (return err))
+
+    (aset (.-data q) (bit-and ^{:go/via [queue]} (.-w q) ^{:go/via [queue]} (.-m q)) m)
+    (inc! ^{:go/via [queue]} (.-w q))
+    nil))
+
+
+
+
+(go/type addr "An addr is a sequence of bytes uniquely identifying a network address.\nIt is not human-readable.\n" string)
+
+
+
+(go/type conn "A conn is one side of a stream-based network connection.\nThat is, a stream-based network connection is a pair of cross-connected conns.\n" (struct
+    ^{:line 421 :tag (* byteq)} rd
+    ^{:line 422 :tag (* byteq)} wr
+    ^{:line 423 :tag addr} local
+    ^{:line 424 :tag addr} remote))
+
+
+
+
+(go/type pktconn "A pktconn is one side of a packet-based network connection.\nThat is, a packet-based network connection is a pair of cross-connected pktconns.\n" (struct
+    ^{:line 430 :tag (* msgq)} rd
+    ^{:line 431 :tag (* msgq)} wr
+    ^{:line 432 :tag addr} local
+    ^{:line 433 :tag addr} remote))
+
+
+
+(go/type listener "A listener accepts incoming stream-based network connections.\n" (struct
+    ^{:line 438 :tag (* msgq)} rd
+    ^{:line 439 :tag addr} local))
+
+
+
+(go/type netFile "A netFile is an open network file.\n" (struct
+    ^{:line 444} defaultFileImpl
+    ^{:line 445 :tag (* netproto)} proto
+    ^{:line 446 :tag int} sotype
+    ^{:line 447 :tag (* msgq)} listener
+    ^{:line 448 :tag (* msgq)} packet
+    ^{:line 449 :tag (* byteq)} rd
+    ^{:line 450 :tag (* byteq)} wr
+    ^{:line 451 :tag int64} rddeadline
+    ^{:line 452 :tag int64} wrdeadline
+    ^{:line 453 :tag Sockaddr} addr
+    ^{:line 454 :tag Sockaddr} raddr))
+
+
+
+
+(go/type netAddr "A netAddr is a network address in the global listener map.\nAll the fields must have defined == operations.\n" (struct
+    ^{:line 460 :tag (* netproto)} proto
+    ^{:line 461 :tag int} sotype
+    ^{:line 462 :tag (interface)} addr))
+
+
+
+
+(go/var ^{:doc "net records the state of the network.\nIt maps a network address to the listener on that address.\n"} net ^{:go/breaks [[2 471]]} (lit (struct
+      ^{:line 468} sync/Mutex
+      ^{:line 469 :tag (map netAddr (* netFile))} listener)
+
+    :listener (make (map netAddr (* netFile)))))
+
+
+
+
+(go/var ^{:doc "TODO(rsc): Some day, do a better job with port allocation.\nFor playground programs, incrementing is fine.\n"} nextport 2)
+
+
+
+
+
+
+(go/type netproto "A netproto contains protocol-specific functionality\n(one for AF_INET, one for AF_INET6 and so on).\nIt is a struct instead of an interface because the\nimplementation needs no state, and I expect to\nadd some data fields at some point.\n" (struct
+    ^{:line 484 :tag (func [(* netFile) Sockaddr] [error])} bind))
+
+
+(go/var netprotoAF_INET (addr ^{:go/breaks [2]} (lit netproto
+      :bind ^{:go/end 508} (fn ^error [^{:tag (* netFile)} f ^Sockaddr sa]
+        (when (== sa nil)
+          (set! (.-addr f) (addr ^{:go/breaks [2 4]} (lit SockaddrInet4
+                :Port nextport
+                :Addr (lit (array 4 byte) 127 0 0 1))))
+
+          (inc! nextport)
+          (return nil))
+
+        ^{:go/breaks [6]} (let [(values addr ok) (assert (* SockaddrInet4) sa)]
+          (when (not ok)
+            (return EINVAL))
+
+          (set! addr (assert (* SockaddrInet4) (.copy addr)))
+          (when (== (.-Port addr) 0)
+            (set! (.-Port addr) nextport)
+            (inc! nextport))
+
+          (set! (.-addr f) addr)
+          nil)))))
+
+
+
+(go/var netprotos (lit (map int (* netproto))
+    ^{:line 512} [AF_INET netprotoAF_INET]))
+
+
+;; These functions implement the usual BSD socket operations.
+
+^{:go/breaks [[6 533]] :go/end 534} (go/method bind ^error [^{:tag (* netFile)} f ^Sockaddr sa]
+  (when (!= (.-addr f) nil)
+    (return EISCONN))
+
+  (when [err ((.-bind (.-proto f)) f sa)] (!= err nil)
+    (return err))
+
+  (when (== (.-sotype f) SOCK_DGRAM)
+    (let [(values _ ok) (aget (.-listener net) (lit netAddr (.-proto f) (.-sotype f) (.key (.-addr f))))]
+      (when ok
+        (set! (.-addr f) nil)
+        (return EADDRINUSE))
+
+      (aset (.-listener net) (lit netAddr (.-proto f) (.-sotype f) (.key (.-addr f))) f)
+      (set! (.-packet f) (newMsgq))))
+
+  nil)
+
+
+^{:go/end 549} (go/method listen ^error [^{:tag (* netFile)} f ^int backlog]
+  ^{:go/via [Mutex]} (.Lock net)
+  (defer ^{:go/via [Mutex]} (.Unlock net))
+  (when (!= (.-listener f) nil)
+    (return EINVAL))
+
+  ^{:go/breaks [5]} (let [(values old ok) (aget (.-listener net) (lit netAddr (.-proto f) (.-sotype f) (.key (.-addr f))))]
+    (when (and ok (not (.listenerClosed old)))
+      (return EADDRINUSE))
+
+    (aset (.-listener net) (lit netAddr (.-proto f) (.-sotype f) (.key (.-addr f))) f)
+    (set! (.-listener f) (newMsgq))
+    nil))
+
+
+^{:go/end 562} (go/method accept [^{:tag (* netFile)} f] :results [^int fd ^Sockaddr sa ^error err]
+  (let [(values msg ^:assign err) (.read (.-listener f) (.readDeadline f))]
+    (when (!= err nil)
+      (return -1 nil err))
+
+    (let [(values newf ok) (assert (* netFile) msg)]
+      (when (not ok)
+        ;; must be eof
+        (return -1 nil EAGAIN))
+
+      (return (newFD newf) (.copy (.-raddr newf)) nil))))
+
+
+^{:go/end 619} (go/method connect ^error [^{:tag (* netFile)} f ^Sockaddr sa]
+  (when (past (.writeDeadline f))
+    (return EAGAIN))
+
+  (when (== (.-addr f) nil)
+    (when [err (.bind f nil)] (!= err nil)
+      (return err)))
+
+
+  ^{:go/via [Mutex]} (.Lock net)
+  (when (== sa nil)
+    ^{:go/via [Mutex]} (.Unlock net)
+    (return EINVAL))
+
+  (set! sa (.copy sa))
+  (when (!= (.-raddr f) nil)
+    ^{:go/via [Mutex]} (.Unlock net)
+    (return EISCONN))
+
+  (when (== (.-sotype f) SOCK_DGRAM)
+    ^{:go/via [Mutex]} (.Unlock net)
+    (set! (.-raddr f) sa)
+    (return nil))
+
+  (when (!= (.-listener f) nil)
+    ^{:go/via [Mutex]} (.Unlock net)
+    (return EISCONN))
+
+  (let [(values l ok) (aget (.-listener net) (lit netAddr (.-proto f) (.-sotype f) (.key sa)))]
+    (when (not ok)
+      ;; If we're dialing 127.0.0.1 but found nothing, try
+      ;; 0.0.0.0 also. (Issue 20611)
+      (when (isIPv4Localhost sa)
+        (set! sa (addr (lit SockaddrInet4 :Port (.-Port (assert (* SockaddrInet4) sa)))))
+        (set! (values l ok) (aget (.-listener net) (lit netAddr (.-proto f) (.-sotype f) (.key sa))))))
+
+
+    (when (or (not ok) (.listenerClosed l))
+      ^{:go/via [Mutex]} (.Unlock net)
+      (return ECONNREFUSED))
+
+    (set! (.-raddr f) sa)
+    (set! (.-rd f) (newByteq))
+    (set! (.-wr f) (newByteq))
+    ^{:go/breaks [4]} (let [newf (addr ^{:go/breaks [2 4 6 8 10 12]} (lit netFile
+            :proto (.-proto f)
+            :sotype (.-sotype f)
+            :addr (.-raddr f)
+            :raddr (.-addr f)
+            :rd (.-wr f)
+            :wr (.-rd f)))]
+
+      ^{:go/via [Mutex]} (.Unlock net)
+      (.write (.-listener l) newf (.writeDeadline f))
+      nil)))
+
+
+^{:go/end 630} (go/method read [^{:tag (* netFile)} f ^{:tag (slice byte)} b] :results [int error]
+  (when (== (.-rd f) nil)
+    (when (!= (.-raddr f) nil)
+      (let [(values n _ err) (.recvfrom f b 0)]
+        (return n err)))
+
+    (return 0 ENOTCONN))
+
+  (.read (.-rd f) b (.readDeadline f)))
+
+
+^{:go/end 645} (go/method write [^{:tag (* netFile)} f ^{:tag (slice byte)} b] :results [int error]
+  (when (== (.-wr f) nil)
+    (when (!= (.-raddr f) nil)
+      (let [err (.sendto f b 0 (.-raddr f))
+          ^{:line 636 :tag int} n (zero int)]
+        (when (== err nil)
+          (set! n (len b)))
+
+        (return n err)))
+
+    (return 0 ENOTCONN))
+
+  (.write (.-wr f) b (.writeDeadline f)))
+
+
+(go/type pktmsg (struct
+    ^{:line 648 :tag (slice byte)} buf
+    ^{:line 649 :tag Sockaddr} addr))
+
+
+^{:go/end 668} (go/method recvfrom [^{:tag (* netFile)} f ^{:tag (slice byte)} p ^int flags] :results [^int n ^Sockaddr from ^error err]
+  (when (!= (.-sotype f) SOCK_DGRAM)
+    (return 0 nil EINVAL))
+
+  (when (== (.-packet f) nil)
+    (return 0 nil ENOTCONN))
+
+  (let [(values msg1 ^:assign err) (.read (.-packet f) (.readDeadline f))]
+    (when (!= err nil)
+      (return 0 nil err))
+
+    (let [(values msg ok) (assert (* pktmsg) msg1)]
+      (when (not ok)
+        (return 0 nil EAGAIN))
+
+      (return (copy p (.-buf msg)) (.-addr msg) nil))))
+
+
+^{:go/end 698} (go/method sendto ^error [^{:tag (* netFile)} f ^{:tag (slice byte)} p ^int flags ^Sockaddr to]
+  (when (!= (.-sotype f) SOCK_DGRAM)
+    (return EINVAL))
+
+  (when (== (.-packet f) nil)
+    (when [err (.bind f nil)] (!= err nil)
+      (return err)))
+
+
+  ^{:go/via [Mutex]} (.Lock net)
+  (when (== to nil)
+    ^{:go/via [Mutex]} (.Unlock net)
+    (return EINVAL))
+
+  (set! to (.copy to))
+  (let [(values l ok) (aget (.-listener net) (lit netAddr (.-proto f) (.-sotype f) (.key to)))]
+    (when (or (not ok) (== (.-packet l) nil))
+      ^{:go/via [Mutex]} (.Unlock net)
+      (return ECONNREFUSED))
+
+    ^{:go/via [Mutex]} (.Unlock net)
+    ^{:go/breaks [4]} (let [msg (addr ^{:go/breaks [2 4]} (lit pktmsg
+            :buf (make (slice byte) (len p))
+            :addr (.-addr f)))]
+
+      (copy (.-buf msg) p)
+      (.write (.-packet l) msg (.writeDeadline f))
+      nil)))
+
+
+^{:go/end 704} (go/method listenerClosed ^bool [^{:tag (* netFile)} f]
+  ^{:go/via [queue Mutex]} (.Lock (.-listener f))
+  (defer ^{:go/via [queue Mutex]} (.Unlock (.-listener f)))
+  ^{:go/via [queue]} (.-closed (.-listener f)))
+
+
+^{:go/breaks [[7 719]] :go/end 720} (go/method close ^error [^{:tag (* netFile)} f]
+  (when (!= (.-listener f) nil)
+    ^{:go/via [queue]} (.close (.-listener f)))
+
+  (when (!= (.-packet f) nil)
+    ^{:go/via [queue]} (.close (.-packet f)))
+
+  (when (!= (.-rd f) nil)
+    ^{:go/via [queue]} (.close (.-rd f)))
+
+  (when (!= (.-wr f) nil)
+    ^{:go/via [queue]} (.close (.-wr f)))
+
+  nil)
+
+
+^{:go/end 733} (go/func fdToNetFile [^int fd] :results [(* netFile) error]
+  (let [(values f err) (fdToFile fd)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [impl (.-impl f)
+        (values netf ok) (assert (* netFile) impl)]
+      (when (not ok)
+        (return nil EINVAL))
+
+      (return netf nil))))
+
+
+^{:go/end 748} (go/func Socket [^int proto ^int sotype ^int unused] :results [^int fd ^error err]
+  (let [p (aget netprotos proto)]
+    (when (== p nil)
+      (return -1 EPROTONOSUPPORT))
+
+    (when (and (!= sotype SOCK_STREAM) (!= sotype SOCK_DGRAM))
+      (return -1 ESOCKTNOSUPPORT))
+
+    (let [f (addr ^{:go/breaks [2 4]} (lit netFile
+            :proto p
+            :sotype sotype))]
+
+      (return (newFD f) nil))))
+
+
+^{:go/end 756} (go/func Bind ^error [^int fd ^Sockaddr sa]
+  (let [(values f err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (.bind f sa)))
+
+
+^{:go/end 765} (go/func StopIO ^error [^int fd]
+  ^{:go/breaks [4]} (let [(values f err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (.close f)
+    nil))
+
+
+^{:go/end 773} (go/func Listen ^error [^int fd ^int backlog]
+  (let [(values f err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (.listen f backlog)))
+
+
+^{:go/end 781} (go/func Accept [^int fd] :results [^int newfd ^Sockaddr sa ^error err]
+  (let [(values f ^:assign err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return 0 nil err))
+
+    (.accept f)))
+
+
+^{:go/end 792} (go/func Getsockname [^int fd] :results [^Sockaddr sa ^error err]
+  (let [(values f ^:assign err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (== (.-addr f) nil)
+      (return nil ENOTCONN))
+
+    (return (.copy (.-addr f)) nil)))
+
+
+^{:go/end 803} (go/func Getpeername [^int fd] :results [^Sockaddr sa ^error err]
+  (let [(values f ^:assign err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (== (.-raddr f) nil)
+      (return nil ENOTCONN))
+
+    (return (.copy (.-raddr f)) nil)))
+
+
+^{:go/end 811} (go/func Connect ^error [^int fd ^Sockaddr sa]
+  (let [(values f err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (.connect f sa)))
+
+
+^{:go/end 819} (go/func Recvfrom [^int fd ^{:tag (slice byte)} p ^int flags] :results [^int n ^Sockaddr from ^error err]
+  (let [(values f ^:assign err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return 0 nil err))
+
+    (.recvfrom f p flags)))
+
+
+^{:go/end 827} (go/func Sendto ^error [^int fd ^{:tag (slice byte)} p ^int flags ^Sockaddr to]
+  (let [(values f err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (.sendto f p flags to)))
+
+
+^{:go/end 836} (go/func Recvmsg [^int fd ^{:tag (slice byte)} p ^{:tag (slice byte)} oob ^int flags] :results [^int n ^int oobn ^int recvflags ^Sockaddr from ^error err]
+  (let [(values f ^:assign err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return))
+
+    (set! (values n from err) (.recvfrom f p flags))
+    (return)))
+
+
+^{:go/end 841} (go/func Sendmsg ^error [^int fd ^{:tag (slice byte)} p ^{:tag (slice byte)} oob ^Sockaddr to ^int flags]
+  (let [(values _ err) (SendmsgN fd p oob to flags)]
+    ^{:line 840} err))
+
+
+^{:go/end 859} (go/func SendmsgN [^int fd ^{:tag (slice byte)} p ^{:tag (slice byte)} oob ^Sockaddr to ^int flags] :results [^int n ^error err]
+  (let [(values f ^:assign err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (switch (.-sotype f)
+      (case [SOCK_STREAM]
+        (set! (values n err) (.write f p)))
+      (case [SOCK_DGRAM]
+        (set! n (len p))
+        (set! err (.sendto f p flags to))))
+
+    (when (!= err nil)
+      (return 0 err))
+
+    (return n nil)))
+
+
+^{:go/end 871} (go/func GetsockoptInt [^int fd ^int level ^int opt] :results [^int value ^error err]
+  (let [(values f ^:assign err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (switch
+      (case [(and (== level SOL_SOCKET) (== opt SO_TYPE))]
+        (return (.-sotype f) nil)))
+
+    (return 0 ENOTSUP)))
+
+
+^{:go/breaks [3] :go/end 875} (go/func SetsockoptInt ^error [^int fd ^int level ^int opt ^int value]
+  nil)
+
+
+^{:go/end 883} (go/func SetsockoptByte ^error [^int fd ^int level ^int opt ^byte value]
+  (let [(values _ err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    ^{:line 882} ENOTSUP))
+
+
+^{:go/breaks [3] :go/end 887} (go/func SetsockoptLinger ^error [^int fd ^int level ^int opt ^{:tag (* Linger)} l]
+  nil)
+
+
+^{:go/end 903} (go/func SetReadDeadline ^error [^int fd ^int64 t]
+  ^{:go/breaks [[5 902]]} (let [(values f err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (atomic/StoreInt64 (addr (.-rddeadline f)) t)
+    (when [bq (.-rd f)] (!= bq nil)
+      ^{:go/via [queue Mutex]} (.Lock bq)
+      (when [timer ^{:go/via [queue]} (.-rtimer bq)] (!= timer nil)
+        (.reset timer (addr (.-queue bq)) t))
+
+      ^{:go/via [queue Mutex]} (.Unlock bq))
+
+    nil))
+
+
+^{:go/end 907} (go/method readDeadline ^int64 [^{:tag (* netFile)} f]
+  (atomic/LoadInt64 (addr (.-rddeadline f))))
+
+
+^{:go/end 923} (go/func SetWriteDeadline ^error [^int fd ^int64 t]
+  ^{:go/breaks [[5 922]]} (let [(values f err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (atomic/StoreInt64 (addr (.-wrdeadline f)) t)
+    (when [bq (.-wr f)] (!= bq nil)
+      ^{:go/via [queue Mutex]} (.Lock bq)
+      (when [timer ^{:go/via [queue]} (.-wtimer bq)] (!= timer nil)
+        (.reset timer (addr (.-queue bq)) t))
+
+      ^{:go/via [queue Mutex]} (.Unlock bq))
+
+    nil))
+
+
+^{:go/end 927} (go/method writeDeadline ^int64 [^{:tag (* netFile)} f]
+  (atomic/LoadInt64 (addr (.-wrdeadline f))))
+
+
+^{:go/end 944} (go/func Shutdown ^error [^int fd ^int how]
+  ^{:go/breaks [[4 943]]} (let [(values f err) (fdToNetFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (switch how
+      (case [SHUT_RD]
+        ^{:go/via [queue]} (.close (.-rd f)))
+      (case [SHUT_WR]
+        ^{:go/via [queue]} (.close (.-wr f)))
+      (case [SHUT_RDWR]
+        ^{:go/via [queue]} (.close (.-rd f))
+        ^{:go/via [queue]} (.close (.-wr f))))
+
+    nil))
+
+
+^{:go/end 946} (go/func SetsockoptICMPv6Filter ^error [^int fd ^int level ^int opt ^{:tag (* ICMPv6Filter)} filter] (panic "SetsockoptICMPv"))
+^{:go/end 947} (go/func SetsockoptIPMreq ^error [^int fd ^int level ^int opt ^{:tag (* IPMreq)} mreq] (panic "SetsockoptIPMreq"))
+^{:go/end 948} (go/func SetsockoptIPv6Mreq ^error [^int fd ^int level ^int opt ^{:tag (* IPv6Mreq)} mreq] (panic "SetsockoptIPv"))
+^{:go/end 949} (go/func SetsockoptInet4Addr ^error [^int fd ^int level ^int opt ^{:tag (array 4 byte)} value] (panic "SetsockoptInet"))
+^{:go/end 950} (go/func SetsockoptString ^error [^int fd ^int level ^int opt ^string s] (panic "SetsockoptString"))
+^{:go/end 951} (go/func SetsockoptTimeval ^error [^int fd ^int level ^int opt ^{:tag (* Timeval)} tv] (panic "SetsockoptTimeval"))
+^{:go/end 952} (go/func Socketpair [^int domain ^int typ ^int proto] :results [^{:tag (array 2 int)} fd ^error err] (panic "Socketpair"))
+
+^{:go/end 954} (go/func SetNonblock ^error [^int fd ^bool nonblocking] nil)

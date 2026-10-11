@@ -1,0 +1,257 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.compress.gzip) (go/file "gzip.go" :imports [
+
+
+    ^{:line 8} [flate "compress/flate"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [crc32 "hash/crc32"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [time "time"]])
+
+
+
+
+(go/const "These constants are copied from the [flate] package, so that code that imports\n[compress/gzip] does not also have to import [compress/flate].\n"
+  ^{:line 19} [^{:val 0} NoCompression flate/NoCompression]
+  ^{:line 20} [^{:val 1} BestSpeed flate/BestSpeed]
+  ^{:line 21} [^{:val 9} BestCompression flate/BestCompression]
+  ^{:line 22} [^{:val -1} DefaultCompression flate/DefaultCompression]
+  ^{:line 23} [^{:val -2} HuffmanOnly flate/HuffmanOnly])
+
+
+
+
+(go/type Writer "A Writer is an [io.WriteCloser].\nWrites to a Writer are compressed and written to w.\n" (struct
+    ^{:line 29} Header ; written at first call to Write, Flush, or Close
+    ^{:line 30 :tag io/Writer} w
+    ^{:line 31 :tag int} level
+    ^{:line 32 :tag bool} wroteHeader
+    ^{:line 33 :tag bool} closed
+    ^{:line 34 :tag (array 10 byte)} buf
+    ^{:line 35 :tag (* flate/Writer)} compressor
+    ^{:line 36 :tag uint32} digest ; CRC-32, IEEE polynomial (section 8)
+    ^{:line 37 :tag uint32} size ; Uncompressed size (section 2.3.1)
+    ^{:line 38 :tag error} err))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 56} (go/func NewWriter "NewWriter returns a new [Writer].\nWrites to the returned writer are compressed and written to w.\n\nIt is the caller's responsibility to call Close on the [Writer] when done.\nWrites may be buffered and not flushed until Close.\n\nCallers that wish to set the fields in Writer.[Header] must do so before\nthe first call to Write, Flush, or Close.\n\nNote that the exact bytes written to w are not covered by the Go 1\ncompatibility promise. Callers, including tests, should not depend on the\nexact written bytes.\n" ^{:tag (* Writer)} [^io/Writer w]
+  (let [(values z _) (NewWriterLevel w DefaultCompression)]
+    ^{:line 55} z))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 75} (go/func NewWriterLevel "NewWriterLevel is like [NewWriter] but specifies the compression level instead\nof assuming [DefaultCompression].\n\nThe compression level can be [DefaultCompression], [NoCompression], [HuffmanOnly]\nor any integer value between [BestSpeed] and [BestCompression] inclusive.\nThe error returned will be nil if the level is valid.\n\nNote that the exact bytes written to w are not covered by the Go 1\ncompatibility promise. Callers, including tests, should not depend on the\nexact written bytes.\n" [^io/Writer w ^int level] :results [(* Writer) error]
+  (when (or (< level HuffmanOnly) (> level BestCompression))
+    (return nil (fmt/Errorf "gzip: invalid compression level: %d" level)))
+
+  (let [z (new Writer)]
+    (.init z w level)
+    (return z nil)))
+
+
+^{:go/end 90} (go/method init [^{:tag (* Writer)} z ^io/Writer w ^int level]
+  (let [compressor (.-compressor z)]
+    (when (!= compressor nil)
+      (.Reset compressor w))
+
+    (set! @z ^{:go/breaks [2 [4 86] 6 8]} (lit Writer
+        :Header ^{:go/breaks [2]} (lit Header
+          :OS 255) ; unknown
+
+        :w w
+        :level level
+        :compressor compressor))))
+
+
+
+
+
+
+
+^{:go/end 98} (go/method Reset "Reset discards the [Writer] z's state and makes it equivalent to the\nresult of its original state from [NewWriter] or [NewWriterLevel], but\nwriting to w instead. This permits reusing a [Writer] rather than\nallocating a new one.\n" [^{:tag (* Writer)} z ^io/Writer w]
+  (.init z w (.-level z)))
+
+
+
+^{:go/end 112} (go/method writeBytes "writeBytes writes a length-prefixed byte slice to z.w.\n" ^error [^{:tag (* Writer)} z ^{:tag (slice byte)} b]
+  (when (> (len b) 0xffff)
+    (return (errors/New "gzip.Write: Extra data is too large")))
+
+  (.PutUint16 le (subslice (.-buf z) _ 2) (conv uint16 (len b)))
+  (let [(values _ err) (.Write (.-w z) (subslice (.-buf z) _ 2))]
+    (when (!= err nil)
+      (return err))
+
+    (set! (values _ err) (.Write (.-w z) b))
+    ^{:line 111} err))
+
+
+
+
+^{:go/end 143} (go/method writeString "writeString writes a UTF-8 string s in GZIP's format to z.w.\nGZIP (RFC 1952) specifies that strings are NUL-terminated ISO 8859-1 (Latin-1).\n" [^{:tag (* Writer)} z ^string s] :results [^error err]
+  ;; GZIP stores Latin-1 strings; error if non-Latin-1; convert if non-ASCII.
+  (let [needconv false]
+    (range [_ v s]
+      (when (or (== v 0) (> v 0xff))
+        (return (errors/New "gzip.Write: non-Latin-1 header string")))
+
+      (when (> v 0x7f)
+        (set! needconv true)))
+
+
+    (if needconv
+      (let [b (make (slice byte) 0 (len s))]
+        (range [_ v s]
+          (set! b (append b (conv byte v))))
+
+        (set! (values _ err) (.Write (.-w z) b)))
+
+      (set! (values _ err) (io/WriteString (.-w z) s)))
+
+    (when (!= err nil)
+      (return err))
+
+    ;; GZIP strings are NUL-terminated.
+    (aset (.-buf z) 0 0)
+    (set! (values _ err) (.Write (.-w z) (subslice (.-buf z) _ 1)))
+    ^{:line 142} err))
+
+
+
+
+^{:go/end 206} (go/method Write "Write writes a compressed form of p to the underlying [io.Writer]. The\ncompressed bytes are not necessarily flushed until the [Writer] is closed.\n" [^{:tag (* Writer)} z ^{:tag (slice byte)} p] :results [int error]
+  (when (!= (.-err z) nil)
+    (return 0 (.-err z)))
+
+  (let [^int n (zero int)]
+    ;; Write the GZIP header lazily.
+    (when (not (.-wroteHeader z))
+      (set! (.-wroteHeader z) true)
+      (set! (.-buf z) (lit (array 10 byte) [0 gzipID1] [1 gzipID2] [2 gzipDeflate]))
+      (when (!= ^{:go/via [Header]} (.-Extra z) nil)
+        (set! (aget (.-buf z) 3) bit-or 0x04))
+
+      (when (!= ^{:go/via [Header]} (.-Name z) "")
+        (set! (aget (.-buf z) 3) bit-or 0x08))
+
+      (when (!= ^{:go/via [Header]} (.-Comment z) "")
+        (set! (aget (.-buf z) 3) bit-or 0x10))
+
+      (when (.After ^{:go/via [Header]} (.-ModTime z) (time/Unix 0 0))
+        ;; Section 2.3.1, the zero value for MTIME means that the
+        ;; modified time is not set.
+        (.PutUint32 le (subslice (.-buf z) 4 8) (conv uint32 (.Unix ^{:go/via [Header]} (.-ModTime z)))))
+
+      (cond (== (.-level z) BestCompression)
+        (aset (.-buf z) 8 2)
+        (== (.-level z) BestSpeed)
+        (aset (.-buf z) 8 4))
+
+      (aset (.-buf z) 9 ^{:go/via [Header]} (.-OS z))
+      (set! (values _ (.-err z)) (.Write (.-w z) (subslice (.-buf z) _ 10)))
+      (when (!= (.-err z) nil)
+        (return 0 (.-err z)))
+
+      (when (!= ^{:go/via [Header]} (.-Extra z) nil)
+        (set! (.-err z) (.writeBytes z ^{:go/via [Header]} (.-Extra z)))
+        (when (!= (.-err z) nil)
+          (return 0 (.-err z))))
+
+
+      (when (!= ^{:go/via [Header]} (.-Name z) "")
+        (set! (.-err z) (.writeString z ^{:go/via [Header]} (.-Name z)))
+        (when (!= (.-err z) nil)
+          (return 0 (.-err z))))
+
+
+      (when (!= ^{:go/via [Header]} (.-Comment z) "")
+        (set! (.-err z) (.writeString z ^{:go/via [Header]} (.-Comment z)))
+        (when (!= (.-err z) nil)
+          (return 0 (.-err z))))
+
+
+      (when (== (.-compressor z) nil)
+        (set! (values (.-compressor z) _) (flate/NewWriter (.-w z) (.-level z)))))
+
+
+    (set! (.-size z) + (conv uint32 (len p)))
+    (set! (.-digest z) (crc32/Update (.-digest z) crc32/IEEETable p))
+    (set! (values n (.-err z)) (.Write (.-compressor z) p))
+    (return n (.-err z))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 231} (go/method Flush "Flush flushes any pending compressed data to the underlying writer.\n\nIt is useful mainly in compressed network protocols, to ensure that\na remote reader has enough data to reconstruct a packet. Flush does\nnot return until the data has been written. If the underlying\nwriter returns an error, Flush returns that error.\n\nIn the terminology of the zlib library, Flush is equivalent to Z_SYNC_FLUSH.\n" ^error [^{:tag (* Writer)} z]
+  (when (!= (.-err z) nil)
+    (return (.-err z)))
+
+  (when (.-closed z)
+    (return nil))
+
+  (when (not (.-wroteHeader z))
+    (.Write z nil)
+    (when (!= (.-err z) nil)
+      (return (.-err z))))
+
+
+  (set! (.-err z) (.Flush (.-compressor z)))
+  (.-err z))
+
+
+
+
+
+^{:go/end 258} (go/method Close "Close closes the [Writer] by flushing any unwritten data to the underlying\n[io.Writer] and writing the GZIP footer.\nIt does not close the underlying [io.Writer].\n" ^error [^{:tag (* Writer)} z]
+  (when (!= (.-err z) nil)
+    (return (.-err z)))
+
+  (when (.-closed z)
+    (return nil))
+
+  (set! (.-closed z) true)
+  (when (not (.-wroteHeader z))
+    (.Write z nil)
+    (when (!= (.-err z) nil)
+      (return (.-err z))))
+
+
+  (set! (.-err z) (.Close (.-compressor z)))
+  (when (!= (.-err z) nil)
+    (return (.-err z)))
+
+  (.PutUint32 le (subslice (.-buf z) _ 4) (.-digest z))
+  (.PutUint32 le (subslice (.-buf z) 4 8) (.-size z))
+  (set! (values _ (.-err z)) (.Write (.-w z) (subslice (.-buf z) _ 8)))
+  (.-err z))

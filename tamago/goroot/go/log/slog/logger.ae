@@ -1,0 +1,342 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.log.slog) (go/file "logger.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [context "context"]
+    ^{:line 10} [log "log"]
+    ^:alias ^{:line 11} [loginternal "log/internal"]
+    ^{:line 12} [internal "log/slog/internal"]
+    ^{:line 13} [runtime "runtime"]
+    ^{:line 14} [atomic "sync/atomic"]
+    ^{:line 15} [time "time"]])
+
+
+(go/var ^{:tag (atomic/Pointer Logger)} defaultLogger)
+
+(go/var ^LevelVar logLoggerLevel)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 48} (go/func SetLogLoggerLevel "SetLogLoggerLevel controls the level for the bridge to the [log] package.\n\nBefore [SetDefault] is called, slog top-level logging functions call the default [log.Logger].\nIn that mode, SetLogLoggerLevel sets the minimum level for those calls.\nBy default, the minimum level is Info, so calls to [Debug]\n(as well as top-level logging calls at lower levels)\nwill not be passed to the log.Logger. After calling\n\n\tslog.SetLogLoggerLevel(slog.LevelDebug)\n\ncalls to [Debug] will be passed to the log.Logger.\n\nAfter [SetDefault] is called, calls to the default [log.Logger] are passed to the\nslog default handler. In that mode,\nSetLogLoggerLevel sets the level at which those calls are logged.\nThat is, after calling\n\n\tslog.SetLogLoggerLevel(slog.LevelDebug)\n\nA call to [log.Printf] will result in output at level [LevelDebug].\n\nSetLogLoggerLevel returns the previous value.\n" [^Level level] :results [^Level oldLevel]
+  (set! oldLevel (.Level logLoggerLevel))
+  (.Set logLoggerLevel level)
+  (return))
+
+
+^{:go/end 52} (go/func init []
+  (.Store defaultLogger (New (newDefaultHandler loginternal/DefaultOutput))))
+
+
+
+^{:go/end 55} (go/func Default "Default returns the default [Logger].\n" ^{:tag (* Logger)} [] (.Load defaultLogger))
+
+
+
+
+
+
+^{:go/end 75} (go/func SetDefault "SetDefault makes l the default [Logger], which is used by\nthe top-level functions [Info], [Debug] and so on.\nAfter this call, output from the log package's default Logger\n(as with [log.Print], etc.) will be logged using l's Handler,\nat a level controlled by [SetLogLoggerLevel].\n" [^{:tag (* Logger)} l]
+  (.Store defaultLogger l)
+  ;; If the default's handler is a defaultHandler, then don't use a handleWriter,
+  ;; or we'll deadlock as they both try to acquire the log default mutex.
+  ;; The defaultHandler will use whatever the log default writer is currently
+  ;; set to, which is correct.
+  ;; This can occur with SetDefault(Default()).
+  ;; See TestSetDefault.
+  (when [(values _ ok) (assert (* defaultHandler) (.Handler l))] (not ok)
+    (let [capturePC (!= (bit-and (log/Flags) (bit-or log/Lshortfile log/Llongfile)) 0)]
+      (log/SetOutput (addr (lit handlerWriter (.Handler l) (addr logLoggerLevel) capturePC)))
+      (log/SetFlags 0)))) ; we want just the log message, no time or location
+
+
+
+
+
+(go/type handlerWriter "handlerWriter is an io.Writer that calls a Handler.\nIt is used to link the default log.Logger to the default slog.Logger.\n" (struct
+    ^{:line 80 :tag Handler} h
+    ^{:line 81 :tag Leveler} level
+    ^{:line 82 :tag bool} capturePC))
+
+
+^{:go/end 103} (go/method Write [^{:tag (* handlerWriter)} w ^{:tag (slice byte)} buf] :results [int error]
+  (let [level (.Level (.-level w))]
+    (when (not (.Enabled (.-h w) (context/Background) level))
+      (return 0 nil))
+
+    (let [^uintptr pc (zero uintptr)]
+      (when (and (not internal/IgnorePC) (.-capturePC w))
+        ;; skip [runtime.Callers, w.Write, Logger.Output, log.Print]
+        (let [^{:tag (array 1 uintptr)} pcs (zero (array 1 uintptr))]
+          (runtime/Callers 4 (subslice pcs))
+          (set! pc (aget pcs 0))))
+
+
+      ;; Remove final newline.
+      (let [origLen (len buf)] ; Report that the entire buf was written.
+        (set! buf (bytes/TrimSuffix buf (lit (slice byte) \newline)))
+        (let [r (NewRecord (time/Now) level (conv string buf) pc)]
+          (return origLen (.Handle (.-h w) (context/Background) r)))))))
+
+
+
+
+
+
+
+
+(go/type Logger "A Logger records structured information about each call to its\nLog, Debug, Info, Warn, and Error methods.\nFor each call, it creates a [Record] and passes it to a [Handler].\n\nTo create a new Logger, call [New] or a Logger method\nthat begins \"With\".\n" (struct
+    ^{:line 112 :tag Handler} handler)) ; for structured logging
+
+
+^{:go/end 118} (go/method clone ^{:tag (* Logger)} [^{:tag (* Logger)} l]
+  (let [c @l]
+    (addr c)))
+
+
+
+^{:go/end 121} (go/method Handler "Handler returns l's Handler.\n" ^Handler [^{:tag (* Logger)} l] (.-handler l))
+
+
+
+
+^{:go/end 133} (go/method With "With returns a Logger that includes the given attributes\nin each output operation. Arguments are converted to\nattributes as if by [Logger.Log].\n" ^{:tag (* Logger)} [^{:tag (* Logger)} l & ^{:tag (slice any)} args]
+  (when (== (len args) 0)
+    (return l))
+
+  (let [c (.clone l)]
+    (set! (.-handler c) (.WithAttrs (.-handler l) (argsToAttrSlice args)))
+    ^{:line 132} c))
+
+
+
+
+
+
+
+
+^{:go/end 148} (go/method WithGroup "WithGroup returns a Logger that starts a group, if name is non-empty.\nThe keys of all attributes added to the Logger will be qualified by the given\nname. (How that qualification happens depends on the [Handler.WithGroup]\nmethod of the Logger's Handler.)\n\nIf name is empty, WithGroup returns the receiver.\n" ^{:tag (* Logger)} [^{:tag (* Logger)} l ^string name]
+  (when (== name "")
+    (return l))
+
+  (let [c (.clone l)]
+    (set! (.-handler c) (.WithGroup (.-handler l) name))
+    ^{:line 147} c))
+
+
+
+^{:go/end 156} (go/func New "New creates a new Logger with the given non-nil Handler.\n" ^{:tag (* Logger)} [^Handler h]
+  (when (== h nil)
+    (panic "nil Handler"))
+
+  (addr (lit Logger :handler h)))
+
+
+
+^{:go/end 161} (go/func With "With calls [Logger.With] on the default logger.\n" ^{:tag (* Logger)} [& ^{:tag (slice any)} args]
+  (.With (Default) (spread args)))
+
+
+
+^{:go/end 169} (go/method Enabled "Enabled reports whether l emits log records at the given context and level.\n" ^bool [^{:tag (* Logger)} l ^context/Context ctx ^Level level]
+  (when (== ctx nil)
+    (set! ctx (context/Background)))
+
+  (.Enabled (.Handler l) ctx level))
+
+
+
+
+
+^{:go/end 176} (go/func NewLogLogger "NewLogLogger returns a new [log.Logger] such that each call to its Output method\ndispatches a Record to the specified handler. The logger acts as a bridge from\nthe older log API to newer structured logging handlers.\n" ^{:tag (* log/Logger)} [^Handler h ^Level level]
+  (log/New (addr (lit handlerWriter h level true)) "" 0))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 190} (go/method Log "Log emits a log record with the current time and the given level and message.\nThe Record's Attrs consist of the Logger's attributes followed by\nthe Attrs specified by args.\n\nThe attribute arguments are processed as follows:\n  - If an argument is an Attr, it is used as is.\n  - If an argument is a string and this is not the last argument,\n    the following argument is treated as the value and the two are combined\n    into an Attr.\n  - Otherwise, the argument is treated as a value with key \"!BADKEY\".\n" [^{:tag (* Logger)} l ^context/Context ctx ^Level level ^string msg & ^{:tag (slice any)} args]
+  (.log l ctx level msg (spread args)))
+
+
+
+^{:go/end 195} (go/method LogAttrs "LogAttrs is a more efficient version of [Logger.Log] that accepts only Attrs.\n" [^{:tag (* Logger)} l ^context/Context ctx ^Level level ^string msg & ^{:tag (slice Attr)} attrs]
+  (.logAttrs l ctx level msg (spread attrs)))
+
+
+
+
+
+^{:go/end 202} (go/method Debug "Debug logs at [LevelDebug].\nIt uses [context.Background] internally; to specify the context, use\n[Logger.DebugContext].\n" [^{:tag (* Logger)} l ^string msg & ^{:tag (slice any)} args]
+  (.log l (context/Background) LevelDebug msg (spread args)))
+
+
+
+^{:go/end 207} (go/method DebugContext "DebugContext logs at [LevelDebug] with the given context.\n" [^{:tag (* Logger)} l ^context/Context ctx ^string msg & ^{:tag (slice any)} args]
+  (.log l ctx LevelDebug msg (spread args)))
+
+
+
+
+
+^{:go/end 214} (go/method Info "Info logs at [LevelInfo].\nIt uses [context.Background] internally; to specify the context, use\n[Logger.InfoContext].\n" [^{:tag (* Logger)} l ^string msg & ^{:tag (slice any)} args]
+  (.log l (context/Background) LevelInfo msg (spread args)))
+
+
+
+^{:go/end 219} (go/method InfoContext "InfoContext logs at [LevelInfo] with the given context.\n" [^{:tag (* Logger)} l ^context/Context ctx ^string msg & ^{:tag (slice any)} args]
+  (.log l ctx LevelInfo msg (spread args)))
+
+
+
+
+
+^{:go/end 226} (go/method Warn "Warn logs at [LevelWarn].\nIt uses [context.Background] internally; to specify the context, use\n[Logger.WarnContext].\n" [^{:tag (* Logger)} l ^string msg & ^{:tag (slice any)} args]
+  (.log l (context/Background) LevelWarn msg (spread args)))
+
+
+
+^{:go/end 231} (go/method WarnContext "WarnContext logs at [LevelWarn] with the given context.\n" [^{:tag (* Logger)} l ^context/Context ctx ^string msg & ^{:tag (slice any)} args]
+  (.log l ctx LevelWarn msg (spread args)))
+
+
+
+
+
+^{:go/end 238} (go/method Error "Error logs at [LevelError].\nIt uses [context.Background] internally; to specify the context, use\n[Logger.ErrorContext].\n" [^{:tag (* Logger)} l ^string msg & ^{:tag (slice any)} args]
+  (.log l (context/Background) LevelError msg (spread args)))
+
+
+
+^{:go/end 243} (go/method ErrorContext "ErrorContext logs at [LevelError] with the given context.\n" [^{:tag (* Logger)} l ^context/Context ctx ^string msg & ^{:tag (slice any)} args]
+  (.log l ctx LevelError msg (spread args)))
+
+
+
+
+
+^{:go/end 265} (go/method log "log is the low-level logging method for methods that take ...any.\nIt must always be called directly by an exported logging method\nor function, because it uses a fixed call depth to obtain the pc.\n" [^{:tag (* Logger)} l ^context/Context ctx ^Level level ^string msg & ^{:tag (slice any)} args]
+  (when (== ctx nil)
+    (set! ctx (context/Background)))
+
+  (when (not (.Enabled l ctx level))
+    (return))
+
+  (let [^uintptr pc (zero uintptr)]
+    (when (not internal/IgnorePC)
+      (let [^{:tag (array 1 uintptr)} pcs (zero (array 1 uintptr))]
+        ;; skip [runtime.Callers, this function, this function's caller]
+        (runtime/Callers 3 (subslice pcs))
+        (set! pc (aget pcs 0))))
+
+    (let [r (NewRecord (time/Now) level msg pc)]
+      (.Add r (spread args))
+      (set! _ (.Handle (.Handler l) ctx r)))))
+
+
+
+^{:go/end 285} (go/method logAttrs "logAttrs is like [Logger.log], but for methods that take ...Attr.\n" [^{:tag (* Logger)} l ^context/Context ctx ^Level level ^string msg & ^{:tag (slice Attr)} attrs]
+  (when (== ctx nil)
+    (set! ctx (context/Background)))
+
+  (when (not (.Enabled l ctx level))
+    (return))
+
+  (let [^uintptr pc (zero uintptr)]
+    (when (not internal/IgnorePC)
+      (let [^{:tag (array 1 uintptr)} pcs (zero (array 1 uintptr))]
+        ;; skip [runtime.Callers, this function, this function's caller]
+        (runtime/Callers 3 (subslice pcs))
+        (set! pc (aget pcs 0))))
+
+    (let [r (NewRecord (time/Now) level msg pc)]
+      (.AddAttrs r (spread attrs))
+      (set! _ (.Handle (.Handler l) ctx r)))))
+
+
+
+
+
+^{:go/end 292} (go/func Debug "Debug calls [Logger.Debug] on the default logger.\nIt uses [context.Background] internally; to specify the context, use\n[DebugContext].\n" [^string msg & ^{:tag (slice any)} args]
+  (.log (Default) (context/Background) LevelDebug msg (spread args)))
+
+
+
+^{:go/end 297} (go/func DebugContext "DebugContext calls [Logger.DebugContext] on the default logger.\n" [^context/Context ctx ^string msg & ^{:tag (slice any)} args]
+  (.log (Default) ctx LevelDebug msg (spread args)))
+
+
+
+
+
+^{:go/end 304} (go/func Info "Info calls [Logger.Info] on the default logger.\nIt uses [context.Background] internally; to specify the context, use\n[InfoContext].\n" [^string msg & ^{:tag (slice any)} args]
+  (.log (Default) (context/Background) LevelInfo msg (spread args)))
+
+
+
+^{:go/end 309} (go/func InfoContext "InfoContext calls [Logger.InfoContext] on the default logger.\n" [^context/Context ctx ^string msg & ^{:tag (slice any)} args]
+  (.log (Default) ctx LevelInfo msg (spread args)))
+
+
+
+
+
+^{:go/end 316} (go/func Warn "Warn calls [Logger.Warn] on the default logger.\nIt uses [context.Background] internally; to specify the context, use\n[WarnContext].\n" [^string msg & ^{:tag (slice any)} args]
+  (.log (Default) (context/Background) LevelWarn msg (spread args)))
+
+
+
+^{:go/end 321} (go/func WarnContext "WarnContext calls [Logger.WarnContext] on the default logger.\n" [^context/Context ctx ^string msg & ^{:tag (slice any)} args]
+  (.log (Default) ctx LevelWarn msg (spread args)))
+
+
+
+
+
+^{:go/end 328} (go/func Error "Error calls [Logger.Error] on the default logger.\nIt uses [context.Background] internally; to specify the context, use\n[ErrorContext].\n" [^string msg & ^{:tag (slice any)} args]
+  (.log (Default) (context/Background) LevelError msg (spread args)))
+
+
+
+^{:go/end 333} (go/func ErrorContext "ErrorContext calls [Logger.ErrorContext] on the default logger.\n" [^context/Context ctx ^string msg & ^{:tag (slice any)} args]
+  (.log (Default) ctx LevelError msg (spread args)))
+
+
+
+^{:go/end 338} (go/func Log "Log calls [Logger.Log] on the default logger.\n" [^context/Context ctx ^Level level ^string msg & ^{:tag (slice any)} args]
+  (.log (Default) ctx level msg (spread args)))
+
+
+
+^{:go/end 343} (go/func LogAttrs "LogAttrs calls [Logger.LogAttrs] on the default logger.\n" [^context/Context ctx ^Level level ^string msg & ^{:tag (slice Attr)} attrs]
+  (.logAttrs (Default) ctx level msg (spread attrs)))

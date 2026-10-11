@@ -1,0 +1,213 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.mime.multipart) (go/file "writer.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [rand "crypto/rand"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [maps "maps"]
+    ^{:line 14} [textproto "net/textproto"]
+    ^{:line 15} [slices "slices"]
+    ^{:line 16} [strings "strings"]])
+
+
+
+(go/type Writer "A Writer generates multipart messages.\n" (struct
+    ^{:line 21 :tag io/Writer} w
+    ^{:line 22 :tag string} boundary
+    ^{:line 23 :tag (* part)} lastpart))
+
+
+
+
+^{:go/end 33} (go/func NewWriter "NewWriter returns a new multipart [Writer] with a random boundary,\nwriting to w.\n" ^{:tag (* Writer)} [^io/Writer w]
+  (addr ^{:go/breaks [2 4]} (lit Writer
+      :w w
+      :boundary (randomBoundary))))
+
+
+
+
+^{:go/end 38} (go/method Boundary "Boundary returns the [Writer]'s boundary.\n" ^string [^{:tag (* Writer)} w]
+  (.-boundary w))
+
+
+
+
+
+
+
+
+^{:go/end 71} (go/method SetBoundary "SetBoundary overrides the [Writer]'s default randomly-generated\nboundary separator with an explicit value.\n\nSetBoundary must be called before any parts are created, may only\ncontain certain ASCII characters, and must be non-empty and\nat most 70 bytes long.\n" ^error [^{:tag (* Writer)} w ^string boundary]
+  (when (!= (.-lastpart w) nil)
+    (return (errors/New "mime: SetBoundary called after write")))
+
+  ;; rfc2046#section-5.1.1
+  (when (or (< (len boundary) 1) (> (len boundary) 70))
+    (return (errors/New "mime: invalid boundary length")))
+
+  ^{:go/breaks [4]} (let [end (- (len boundary) 1)]
+    (range [i b boundary]
+      (when (or (and (<= \A b) (<= b \Z)) (and (<= \a b) (<= b \z)) (and (<= \0 b) (<= b \9)))
+        (continue))
+
+      (switch b
+        (case [\' \( \) \+ \_ \, \- \. \/ \: \= \?]
+          (continue))
+        (case [\space]
+          (when (!= i end)
+            (continue))))
+
+
+      (return (errors/New "mime: invalid boundary character")))
+
+    (set! (.-boundary w) boundary)
+    nil))
+
+
+
+
+^{:go/end 83} (go/method FormDataContentType "FormDataContentType returns the Content-Type for an HTTP\nmultipart/form-data with this [Writer]'s Boundary.\n" ^string [^{:tag (* Writer)} w]
+  (let [b (.-boundary w)]
+    ;; We must quote the boundary if it contains any of the
+    ;; tspecials characters defined by RFC 2045, or space.
+    (when (strings/ContainsAny b "()<>@,;:\\\"/[]?= ")
+      (set! b (+ "\"" b "\"")))
+
+    (+ "multipart/form-data; boundary=" b)))
+
+
+^{:go/end 92} (go/func randomBoundary ^string []
+  (let [^{:tag (array 30 byte)} buf (zero (array 30 byte))
+      (values _ err) (io/ReadFull rand/Reader (subslice buf))]
+    (when (!= err nil)
+      (panic err))
+
+    (fmt/Sprintf "%x" (subslice buf))))
+
+
+
+
+
+
+^{:go/end 126} (go/method CreatePart "CreatePart creates a new multipart section with the provided\nheader. The body of the part should be written to the returned\n[Writer]. After calling CreatePart, any previous part may no longer\nbe written to.\n" [^{:tag (* Writer)} w ^textproto/MIMEHeader header] :results [io/Writer error]
+  (when (!= (.-lastpart w) nil)
+    (when [err (.close (.-lastpart w))] (!= err nil)
+      (return nil err)))
+
+
+  (let [^bytes/Buffer b (zero bytes/Buffer)]
+    (if (!= (.-lastpart w) nil)
+      (fmt/Fprintf (addr b) "\r\n--%s\r\n" (.-boundary w))
+
+      (fmt/Fprintf (addr b) "--%s\r\n" (.-boundary w)))
+
+
+    (range [_ k (^{:inst [string]} slices/Sorted (^{:inst [textproto/MIMEHeader string (slice string)]} maps/Keys header))]
+      (range [_ v (aget header k)]
+        (fmt/Fprintf (addr b) "%s: %s\r\n" k v)))
+
+
+    (fmt/Fprintf (addr b) "\r\n")
+    (let [(values _ err) (io/Copy (.-w w) (addr b))]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [p (addr ^{:go/breaks [2]} (lit part
+              :mw w))]
+
+        (set! (.-lastpart w) p)
+        (return p nil)))))
+
+
+(go/var quoteEscaper (strings/NewReplacer "\\" "\\\\" "\"" "\\\"" "\r" "%0D" "\n" "%0A"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 144} (go/func escapeQuotes "escapeQuotes escapes special characters in field parameter values.\n\nFor historical reasons, this uses \\ escaping for \" and \\ characters,\nand percent encoding for CR and LF.\n\nThe WhatWG specification for form data encoding suggests that we should\nuse percent encoding for \" (%22), and should not escape \\.\nhttps://html.spec.whatwg.org/multipage/form-control-infrastructure.html#multipart/form-data-encoding-algorithm\n\nEmpirically, as of the time this comment was written, it is necessary\nto escape \\ characters or else Chrome (and possibly other browsers) will\ninterpet the unescaped \\ as an escape.\n" ^string [^string s]
+  (.Replace quoteEscaper s))
+
+
+
+
+^{:go/end 153} (go/method CreateFormFile "CreateFormFile is a convenience wrapper around [Writer.CreatePart]. It creates\na new form-data header with the provided field name and file name.\n" [^{:tag (* Writer)} w ^string fieldname ^string filename] :results [io/Writer error]
+  (let [h (make textproto/MIMEHeader)]
+    (.Set h "Content-Disposition" (FileContentDisposition fieldname filename))
+    (.Set h "Content-Type" "application/octet-stream")
+    (.CreatePart w h)))
+
+
+
+
+^{:go/end 162} (go/method CreateFormField "CreateFormField calls [Writer.CreatePart] with a header using the\ngiven field name.\n" [^{:tag (* Writer)} w ^string fieldname] :results [io/Writer error]
+  (let [h (make textproto/MIMEHeader)]
+    (.Set h "Content-Disposition"
+      (fmt/Sprintf "form-data; name=\"%s\"" (escapeQuotes fieldname)))
+    (.CreatePart w h)))
+
+
+
+
+^{:go/end 169} (go/func FileContentDisposition "FileContentDisposition returns the value of a Content-Disposition header\nwith the provided field name and file name.\n" ^string [^string fieldname ^string filename]
+  (fmt/Sprintf "form-data; name=\"%s\"; filename=\"%s\""
+    (escapeQuotes fieldname) (escapeQuotes filename)))
+
+
+
+^{:go/end 179} (go/method WriteField "WriteField calls [Writer.CreateFormField] and then writes the given value.\n" ^error [^{:tag (* Writer)} w ^string fieldname ^string value]
+  (let [(values p err) (.CreateFormField w fieldname)]
+    (when (!= err nil)
+      (return err))
+
+    (set! (values _ err) (.Write p (conv (slice byte) value)))
+    ^{:line 178} err))
+
+
+
+
+^{:go/end 192} (go/method Close "Close finishes the multipart message and writes the trailing\nboundary end line to the output.\n" ^error [^{:tag (* Writer)} w]
+  (when (!= (.-lastpart w) nil)
+    (when [err (.close (.-lastpart w))] (!= err nil)
+      (return err))
+
+    (set! (.-lastpart w) nil))
+
+  (let [(values _ err) (fmt/Fprintf (.-w w) "\r\n--%s--\r\n" (.-boundary w))]
+    ^{:line 191} err))
+
+
+(go/type part (struct
+    ^{:line 195 :tag (* Writer)} mw
+    ^{:line 196 :tag bool} closed
+    ^{:line 197 :tag error} we)) ; last error that occurred writing
+
+
+^{:go/end 203} (go/method close ^error [^{:tag (* part)} p]
+  (set! (.-closed p) true)
+  (.-we p))
+
+
+^{:go/end 214} (go/method Write [^{:tag (* part)} p ^{:tag (slice byte)} d] :results [^int n ^error err]
+  (when (.-closed p)
+    (return 0 (errors/New "multipart: can't write to finished part")))
+
+  (set! (values n err) (.Write (.-w (.-mw p)) d))
+  (when (!= err nil)
+    (set! (.-we p) err))
+
+  (return))

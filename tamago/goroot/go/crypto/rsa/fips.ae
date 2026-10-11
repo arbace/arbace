@@ -1,0 +1,471 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.rsa) (go/file "fips.go" :imports [
+
+
+    ^{:line 8} [crypto "crypto"]
+    ^{:line 9} [boring "crypto/internal/boring"]
+    ^{:line 10} [rsa "crypto/internal/fips140/rsa"]
+    ^{:line 11} [fips140hash "crypto/internal/fips140hash"]
+    ^{:line 12} [fips140only "crypto/internal/fips140only"]
+    ^{:line 13} [rand "crypto/internal/rand"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [hash "hash"]
+    ^{:line 16} [io "io"]])
+
+
+(go/const
+
+
+
+
+
+  ^{:line 25} [^{:val 0 :doc "PSSSaltLengthAuto causes the salt in a PSS signature to be as large\nas possible when signing, and to be auto-detected when verifying.\n\nWhen signing in FIPS 140-3 mode, the salt length is capped at the length\nof the hash function used in the signature.\n"} PSSSaltLengthAuto 0]
+
+
+  ^{:line 28} [^{:val -1 :doc "PSSSaltLengthEqualsHash causes the salt length to equal the length\nof the hash used in the signature.\n"} PSSSaltLengthEqualsHash -1])
+
+
+
+(go/type PSSOptions "PSSOptions contains options for creating and verifying PSS signatures.\n" (struct
+
+
+
+    ^{:line 36 :tag int :doc "SaltLength controls the length of the salt used in the PSS signature. It\ncan either be a positive number of bytes, or one of the special\nPSSSaltLength constants.\n"} SaltLength
+
+
+
+
+    ^{:line 41 :tag crypto/Hash :doc "Hash is the hash function used to generate the message digest. If not\nzero, it overrides the hash function passed to SignPSS. It's required\nwhen using PrivateKey.Sign.\n"} Hash))
+
+
+
+^{:go/end 47} (go/method HashFunc "HashFunc returns opts.Hash so that [PSSOptions] implements [crypto.SignerOpts].\n" ^crypto/Hash [^{:tag (* PSSOptions)} opts]
+  (.-Hash opts))
+
+
+^{:go/end 54} (go/method saltLength ^int [^{:tag (* PSSOptions)} opts]
+  (when (== opts nil)
+    (return PSSSaltLengthAuto))
+
+  (.-SaltLength opts))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 126} (go/func SignPSS "SignPSS calculates the signature of digest using PSS.\n\ndigest must be the result of hashing the input message using the given hash\nfunction. The opts argument may be nil, in which case sensible defaults are\nused. If opts.Hash is set, it overrides hash.\n\nThe signature is randomized depending on the message, key, and salt size,\nusing bytes from random. Most applications should use [crypto/rand.Reader] as\nrandom.\n" [^io/Reader random ^{:tag (* PrivateKey)} priv ^crypto/Hash hash ^{:tag (slice byte)} digest ^{:tag (* PSSOptions)} opts] :results [(slice byte) error]
+  (when [err (checkPublicKeySize (addr (.-PublicKey priv)))] (!= err nil)
+    (return nil err))
+
+
+  (when (and (!= opts nil) (!= (.-Hash opts) 0))
+    (set! hash (.-Hash opts)))
+
+
+  (when (and boring/Enabled (rand/IsDefaultReader random) (>= (.BitLen ^{:go/via [PublicKey]} (.-N priv)) 1024))
+    (let [(values bkey err) (boringPrivateKey priv)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return (boring/SignRSAPSS bkey hash digest (.saltLength opts)))))
+
+  (when (>= (.BitLen ^{:go/via [PublicKey]} (.-N priv)) 1024)
+    (boring/UnreachableExceptTests))
+
+
+  (when (not (.Available hash))
+    (return nil (errors/New (+ "crypto/rsa: requested hash function unavailable: " (.String hash)))))
+
+  (let [h (fips140hash/Unwrap (.New hash))]
+
+    (when [err (checkFIPS140OnlyPrivateKey priv)] (!= err nil)
+      (return nil err))
+
+    (when (and (fips140only/Enforced) (not (fips140only/ApprovedHash h)))
+      (return nil (errors/New "crypto/rsa: use of hash functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode")))
+
+    (when (and (fips140only/Enforced) (not (fips140only/ApprovedRandomReader random)))
+      (return nil (errors/New "crypto/rsa: only crypto/rand.Reader is allowed in FIPS 140-only mode")))
+
+
+    (let [(values k err) (fipsPrivateKey priv)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (let [saltLength (.saltLength opts)]
+        (when (and (fips140only/Enforced) (> saltLength (.Size h)))
+          (return nil (errors/New "crypto/rsa: use of PSS salt longer than the hash is not allowed in FIPS 140-only mode")))
+
+        (switch saltLength
+          (case [PSSSaltLengthAuto]
+            (set! (values saltLength err) (rsa/PSSMaxSaltLength (.PublicKey k) h))
+            (when (!= err nil)
+              (return nil (fipsError err))))
+
+          (case [PSSSaltLengthEqualsHash]
+            (set! saltLength (.Size h)))
+          (default
+            ;; If we get here saltLength is either > 0 or < -1, in the
+            ;; latter case we fail out.
+            (when (<= saltLength 0)
+              (return nil (errors/New "crypto/rsa: invalid PSS salt length")))))
+
+
+
+        (^{:inst [(slice byte)]} fipsError2 (rsa/SignPSS random k h digest saltLength))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 182} (go/func VerifyPSS "VerifyPSS verifies a PSS signature.\n\nA valid signature is indicated by returning a nil error. digest must be the\nresult of hashing the input message using the given hash function. The opts\nargument may be nil, in which case sensible defaults are used. opts.Hash is\nignored.\n\nThe inputs are not considered confidential, and may leak through timing side\nchannels, or if an attacker has control of part of the inputs.\n" ^error [^{:tag (* PublicKey)} pub ^crypto/Hash hash ^{:tag (slice byte)} digest ^{:tag (slice byte)} sig ^{:tag (* PSSOptions)} opts]
+  (when [err (checkPublicKeySize pub)] (!= err nil)
+    (return err))
+
+
+  (when boring/Enabled
+    (let [(values bkey err) (boringPublicKey pub)]
+      (when (!= err nil)
+        (return err))
+
+      (when [err (boring/VerifyRSAPSS bkey hash digest sig (.saltLength opts))] (!= err nil)
+        (return ErrVerification))
+
+      (return nil)))
+
+
+  (when (not (.Available hash))
+    (return (errors/New (+ "crypto/rsa: requested hash function unavailable: " (.String hash)))))
+
+  (let [h (fips140hash/Unwrap (.New hash))]
+
+    (when [err (checkFIPS140OnlyPublicKey pub)] (!= err nil)
+      (return err))
+
+    (when (and (fips140only/Enforced) (not (fips140only/ApprovedHash h)))
+      (return (errors/New "crypto/rsa: use of hash functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode")))
+
+
+    (let [(values k err) (fipsPublicKey pub)]
+      (when (!= err nil)
+        (return err))
+
+
+      (let [saltLength (.saltLength opts)]
+        (when (and (fips140only/Enforced) (> saltLength (.Size h)))
+          (return (errors/New "crypto/rsa: use of PSS salt longer than the hash is not allowed in FIPS 140-only mode")))
+
+        (switch saltLength
+          (case [PSSSaltLengthAuto]
+            (return (fipsError (rsa/VerifyPSS k h digest sig))))
+          (case [PSSSaltLengthEqualsHash]
+            (return (fipsError (rsa/VerifyPSSWithSaltLength k h digest sig (.Size h)))))
+          (default
+            (return (fipsError (rsa/VerifyPSSWithSaltLength k h digest sig saltLength)))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 204} (go/func EncryptOAEP "EncryptOAEP encrypts the given message with RSA-OAEP.\n\nOAEP is parameterised by a hash function that is used as a random oracle.\nEncryption and decryption of a given message must use the same hash function\nand sha256.New() is a reasonable choice.\n\nThe random parameter is used as a source of entropy to ensure that\nencrypting the same message twice doesn't result in the same ciphertext.\nMost applications should use [crypto/rand.Reader] as random.\n\nThe label parameter may contain arbitrary data that will not be encrypted,\nbut which gives important context to the message. For example, if a given\npublic key is used to encrypt two types of messages then distinct label\nvalues could be used to ensure that a ciphertext for one purpose cannot be\nused for another by an attacker. If not required it can be empty.\n\nThe message must be no longer than the length of the public modulus minus\ntwice the hash length, minus a further 2.\n" [^hash/Hash hash ^io/Reader random ^{:tag (* PublicKey)} pub ^{:tag (slice byte)} msg ^{:tag (slice byte)} label] :results [(slice byte) error]
+  (encryptOAEP hash hash random pub msg label))
+
+
+
+
+
+
+
+
+
+^{:go/end 224} (go/func EncryptOAEPWithOptions "EncryptOAEPWithOptions encrypts the given message with RSA-OAEP using the\nprovided options.\n\nThis function should only be used over [EncryptOAEP] when there is a need to\nspecify the OAEP and MGF1 hashes separately.\n\nSee [EncryptOAEP] for additional details.\n" [^io/Reader random ^{:tag (* PublicKey)} pub ^{:tag (slice byte)} msg ^{:tag (* OAEPOptions)} opts] :results [(slice byte) error]
+  (when (not (.Available (.-Hash opts)))
+    (return nil (errors/New (+ "crypto/rsa: requested hash function unavailable: " (.String (.-Hash opts))))))
+
+  (when (and (!= (.-MGFHash opts) 0) (not (.Available (.-MGFHash opts))))
+    (return nil (errors/New (+ "crypto/rsa: requested hash function unavailable: " (.String (.-MGFHash opts))))))
+
+  (when (== (.-MGFHash opts) 0)
+    (return (encryptOAEP (.New (.-Hash opts)) (.New (.-Hash opts)) random pub msg (.-Label opts))))
+
+  (encryptOAEP (.New (.-Hash opts)) (.New (.-MGFHash opts)) random pub msg (.-Label opts)))
+
+
+^{:go/end 264} (go/func encryptOAEP [^hash/Hash hash ^hash/Hash mgfHash ^io/Reader random ^{:tag (* PublicKey)} pub ^{:tag (slice byte)} msg ^{:tag (slice byte)} label] :results [(slice byte) error]
+  (when [err (checkPublicKeySize pub)] (!= err nil)
+    (return nil err))
+
+
+  (defer (.Reset hash))
+  (defer (.Reset mgfHash))
+
+  (when (and boring/Enabled (rand/IsDefaultReader random))
+    (let [k (.Size pub)]
+      (when (> (len msg) (- k (* 2 (.Size hash)) 2))
+        (return nil ErrMessageTooLong))
+
+      (let [(values bkey err) (boringPublicKey pub)]
+        (when (!= err nil)
+          (return nil err))
+
+        (return (boring/EncryptRSAOAEP hash mgfHash bkey msg label)))))
+
+  (boring/UnreachableExceptTests)
+
+  (set! hash (fips140hash/Unwrap hash))
+
+  (when [err (checkFIPS140OnlyPublicKey pub)] (!= err nil)
+    (return nil err))
+
+  (when (and (fips140only/Enforced) (not (fips140only/ApprovedHash hash)))
+    (return nil (errors/New "crypto/rsa: use of hash functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode")))
+
+  (when (and (fips140only/Enforced) (not (fips140only/ApprovedRandomReader random)))
+    (return nil (errors/New "crypto/rsa: only crypto/rand.Reader is allowed in FIPS 140-only mode")))
+
+
+  (let [(values k err) (fipsPublicKey pub)]
+    (when (!= err nil)
+      (return nil err))
+
+    (^{:inst [(slice byte)]} fipsError2 (rsa/EncryptOAEP hash mgfHash random k msg label))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 279} (go/func DecryptOAEP "DecryptOAEP decrypts ciphertext using RSA-OAEP.\n\nOAEP is parameterised by a hash function that is used as a random oracle.\nEncryption and decryption of a given message must use the same hash function\nand sha256.New() is a reasonable choice.\n\nThe random parameter is legacy and ignored, and it can be nil.\n\nThe label parameter must match the value given when encrypting. See\n[EncryptOAEP] for details.\n" [^hash/Hash hash ^io/Reader random ^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} label] :results [(slice byte) error]
+  (defer (.Reset hash))
+  (decryptOAEP hash hash priv ciphertext label))
+
+
+^{:go/end 321} (go/func decryptOAEP [^hash/Hash hash ^hash/Hash mgfHash ^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} label] :results [(slice byte) error]
+  (when [err (checkPublicKeySize (addr (.-PublicKey priv)))] (!= err nil)
+    (return nil err))
+
+
+  (when (and boring/Enabled (>= (.BitLen ^{:go/via [PublicKey]} (.-N priv)) 1024))
+    (let [k ^{:go/via [PublicKey]} (.Size priv)]
+      (when (or (> (len ciphertext) k)
+          (< k (+ (* (.Size hash) 2) 2)))
+        (return nil ErrDecryption))
+
+      (let [(values bkey err) (boringPrivateKey priv)]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [(values out ^:assign err) (boring/DecryptRSAOAEP hash mgfHash bkey ciphertext label)]
+          (when (!= err nil)
+            (return nil ErrDecryption))
+
+          (return out nil)))))
+
+
+  (set! hash (fips140hash/Unwrap hash))
+  (set! mgfHash (fips140hash/Unwrap mgfHash))
+
+  (when [err (checkFIPS140OnlyPrivateKey priv)] (!= err nil)
+    (return nil err))
+
+  (when (fips140only/Enforced)
+    (when (or (not (fips140only/ApprovedHash hash)) (not (fips140only/ApprovedHash mgfHash)))
+      (return nil (errors/New "crypto/rsa: use of hash functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode"))))
+
+
+
+  (let [(values k err) (fipsPrivateKey priv)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (^{:inst [(slice byte)]} fipsError2 (rsa/DecryptOAEP hash mgfHash k ciphertext label))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 370} (go/func SignPKCS1v15 "SignPKCS1v15 calculates the signature of hashed using\nRSASSA-PKCS1-V1_5-SIGN from RSA PKCS #1 v1.5.  Note that hashed must\nbe the result of hashing the input message using the given hash\nfunction. If hash is zero, hashed is signed directly. This isn't\nadvisable except for interoperability.\n\nThe random parameter is legacy and ignored, and it can be nil.\n\nThis function is deterministic. Thus, if the set of possible\nmessages is small, an attacker may be able to build a map from\nmessages to signatures and identify the signed messages. As ever,\nsignatures provide authenticity, not confidentiality.\n" [^io/Reader random ^{:tag (* PrivateKey)} priv ^crypto/Hash hash ^{:tag (slice byte)} hashed] :results [(slice byte) error]
+  (let [^string hashName (zero string)]
+    (when (!= hash (conv crypto/Hash 0))
+      (when (!= (len hashed) (.Size hash))
+        (return nil (errors/New "crypto/rsa: input must be hashed message")))
+
+      (set! hashName (.String hash)))
+
+
+    (when [err (checkPublicKeySize (addr (.-PublicKey priv)))] (!= err nil)
+      (return nil err))
+
+
+    (when (and boring/Enabled (>= (.BitLen ^{:go/via [PublicKey]} (.-N priv)) 1024))
+      (let [(values bkey err) (boringPrivateKey priv)]
+        (when (!= err nil)
+          (return nil err))
+
+        (return (boring/SignRSAPKCS1v15 bkey hash hashed))))
+
+
+    (when [err (checkFIPS140OnlyPrivateKey priv)] (!= err nil)
+      (return nil err))
+
+    (when (fips140only/Enforced)
+      (when (or (not (.Available hash)) (not (fips140only/ApprovedHash (fips140hash/Unwrap (.New hash)))))
+        (return nil (errors/New "crypto/rsa: use of hash functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode"))))
+
+
+
+    (let [(values k err) (fipsPrivateKey priv)]
+      (when (!= err nil)
+        (return nil err))
+
+      (^{:inst [(slice byte)]} fipsError2 (rsa/SignPKCS1v15 k hashName hashed)))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 418} (go/func VerifyPKCS1v15 "VerifyPKCS1v15 verifies an RSA PKCS #1 v1.5 signature.\nhashed is the result of hashing the input message using the given hash\nfunction and sig is the signature. A valid signature is indicated by\nreturning a nil error. If hash is zero then hashed is used directly. This\nisn't advisable except for interoperability.\n\nThe inputs are not considered confidential, and may leak through timing side\nchannels, or if an attacker has control of part of the inputs.\n" ^error [^{:tag (* PublicKey)} pub ^crypto/Hash hash ^{:tag (slice byte)} hashed ^{:tag (slice byte)} sig]
+  (let [^string hashName (zero string)]
+    (when (!= hash (conv crypto/Hash 0))
+      (when (!= (len hashed) (.Size hash))
+        (return (errors/New "crypto/rsa: input must be hashed message")))
+
+      (set! hashName (.String hash)))
+
+
+    (when [err (checkPublicKeySize pub)] (!= err nil)
+      (return err))
+
+
+    (when boring/Enabled
+      (let [(values bkey err) (boringPublicKey pub)]
+        (when (!= err nil)
+          (return err))
+
+        (when [err (boring/VerifyRSAPKCS1v15 bkey hash hashed sig)] (!= err nil)
+          (return ErrVerification))
+
+        (return nil)))
+
+
+    (when [err (checkFIPS140OnlyPublicKey pub)] (!= err nil)
+      (return err))
+
+    (when (fips140only/Enforced)
+      (when (or (not (.Available hash)) (not (fips140only/ApprovedHash (fips140hash/Unwrap (.New hash)))))
+        (return (errors/New "crypto/rsa: use of hash functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode"))))
+
+
+
+    (let [(values k err) (fipsPublicKey pub)]
+      (when (!= err nil)
+        (return err))
+
+      (fipsError (rsa/VerifyPKCS1v15 k hashName hashed sig)))))
+
+
+^{:go/end 430} (go/func fipsError ^error [^error err]
+  (switch err
+    (case [rsa/ErrDecryption]
+      (return ErrDecryption))
+    (case [rsa/ErrVerification]
+      (return ErrVerification))
+    (case [rsa/ErrMessageTooLong]
+      (return ErrMessageTooLong)))
+
+  ^{:line 429} err)
+
+
+^{:go/end 434} (go/func fipsError2 :type-params [T] [^T x ^error err] :results [T error]
+  (return x (fipsError err)))
+
+
+^{:go/breaks [[9 455]] :go/end 456} (go/func checkFIPS140OnlyPublicKey ^error [^{:tag (* PublicKey)} pub]
+  (when (not (fips140only/Enforced))
+    (return nil))
+
+  (when (== (.-N pub) nil)
+    (return (errors/New "crypto/rsa: public key missing N")))
+
+  (when (< (.BitLen (.-N pub)) 2048)
+    (return (errors/New "crypto/rsa: use of keys smaller than 2048 bits is not allowed in FIPS 140-only mode")))
+
+  (when (== (% (.BitLen (.-N pub)) 2) 1)
+    (return (errors/New "crypto/rsa: use of keys with odd size is not allowed in FIPS 140-only mode")))
+
+  (when (<= (.-E pub) (<< 1 16))
+    (return (errors/New "crypto/rsa: use of public exponent <= 2¹⁶ is not allowed in FIPS 140-only mode")))
+
+  (when (== (bit-and (.-E pub) 1) 0)
+    (return (errors/New "crypto/rsa: use of even public exponent is not allowed in FIPS 140-only mode")))
+
+  nil)
+
+
+^{:go/breaks [[7 471]] :go/end 472} (go/func checkFIPS140OnlyPrivateKey ^error [^{:tag (* PrivateKey)} priv]
+  (when (not (fips140only/Enforced))
+    (return nil))
+
+  (when [err (checkFIPS140OnlyPublicKey (addr (.-PublicKey priv)))] (!= err nil)
+    (return err))
+
+  (when (!= (len (.-Primes priv)) 2)
+    (return (errors/New "crypto/rsa: use of multi-prime keys is not allowed in FIPS 140-only mode")))
+
+  (when (or (== (aget (.-Primes priv) 0) nil) (== (aget (.-Primes priv) 1) nil) (!= (.BitLen (aget (.-Primes priv) 0)) (.BitLen (aget (.-Primes priv) 1))))
+    (return (errors/New "crypto/rsa: use of primes of different sizes is not allowed in FIPS 140-only mode")))
+
+  nil)

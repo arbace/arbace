@@ -1,0 +1,212 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.jsontext) (go/file "errors.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [strconv "strconv"]
+
+    ^{:line 14} [jsonflags "encoding/json/internal/jsonflags"]
+    ^{:line 15} [jsonopts "encoding/json/internal/jsonopts"]
+    ^{:line 16} [jsonwire "encoding/json/internal/jsonwire"]])
+
+
+(go/const ^{:val "jsontext: "} errorPrefix "jsontext: ")
+
+(go/type ioError (struct
+    ^{:line 22 :tag string} action ; either "read" or "write"
+    ^{:line 23 :tag error} err))
+
+
+^{:go/end 28} (go/method Error ^string [^{:tag (* ioError)} e]
+  (+ errorPrefix (.-action e) " error: " (.Error (.-err e))))
+
+^{:go/end 31} (go/method Unwrap ^error [^{:tag (* ioError)} e]
+  (.-err e))
+
+
+(go/type numError (struct
+    ^{:line 34 :tag string} accessor ; either "Int", "Uint", or "Float"
+    ^{:line 35 :tag string} value ; e.g., "1e1000"
+    ^{:line 36 :tag error} err)) ; either [strconv.ErrSyntax] or [strconv.ErrRange]
+
+
+^{:go/end 41} (go/method Error ^string [^{:tag (* numError)} e]
+  (+ "jsontext.Token(" (.-value e) ")." (.-accessor e) " error: " (.Error (.-err e))))
+
+^{:go/end 44} (go/method Unwrap ^error [^{:tag (* numError)} e]
+  (.-err e))
+
+
+
+
+
+
+(go/type SyntacticError "SyntacticError is a description of an error that occurred when\nencoding or decoding JSON according to the grammar.\n\nThe contents of this error as produced by this package may change over time.\n" (struct
+    ^{:line 51} requireKeyedLiterals
+    ^{:line 52} nonComparable
+
+
+    ^{:line 55 :tag int64 :doc "ByteOffset indicates that an error occurred at or after this byte offset.\n"} ByteOffset
+
+
+    ^{:line 58 :tag Pointer :doc "JSONPointer indicates that an error occurred within this JSON value\nas indicated using the JSON Pointer notation (see RFC 6901).\n"} JSONPointer
+
+
+    ^{:line 61 :tag error :doc "Err is the underlying error.\n"} Err))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 118} (go/func wrapSyntacticError "wrapSyntacticError wraps an error and annotates it with a precise location\nusing the provided [encoderState] or [decoderState].\nIf err is an [ioError] or [io.EOF], then it is not wrapped.\n\nIt takes a relative offset pos that can be resolved into\nan absolute offset using state.offsetAt.\n\nIt takes a where that specifies how the JSON pointer is derived.\nIf the underlying error is a [pointerSuffixError],\nthen the suffix is appended to the derived pointer.\n" ^error [^{:tag (interface (options ^{:tag (* jsonopts/Struct)} []) (offsetAt ^int64 [^int pos]) (AppendStackPointer ^{:tag (slice byte)} [^{:tag (slice byte)} b ^int where]))} state
+
+
+
+    ^{:line 78 :tag error} err ^int pos ^int where]
+  (when [(values _ ok) (assert (* ioError) err)] (or (== err io/EOF) ok)
+    (return err))
+
+  (let [offset (.offsetAt state pos)
+      ^{:line 83} ptr (.AppendStackPointer state nil where)]
+    (when [(values serr ok) (assert (* pointerSuffixError) err)] ok
+      (set! ptr (.appendPointer serr ptr))
+      (set! err (.-error serr)))
+
+    (when [(values d ok) (assert (* decoderState) state)] (and ok (== err errMismatchDelim))
+      (let [where "at start of value"]
+        (when (and (> (len (.-Stack ^{:go/via [state]} (.-Tokens d))) 0) (> (.Length (.-Last ^{:go/via [state]} (.-Tokens d))) 0))
+          (switch
+            (case [(.isArray (.-Last ^{:go/via [state]} (.-Tokens d)))]
+              (set! where "after array element (expecting ',' or ']')")
+              (set! ptr (conv (slice byte) (.Parent (conv Pointer ptr))))) ; problem is with parent array
+            (case [(.isObject (.-Last ^{:go/via [state]} (.-Tokens d)))]
+              (set! where "after object value (expecting ',' or '}')")
+              (set! ptr (conv (slice byte) (.Parent (conv Pointer ptr))))))) ; problem is with parent object
+
+
+        (set! err (^{:inst [(slice byte)]} jsonwire/NewInvalidCharacterError (subslice ^{:go/via [decodeBuffer]} (.-buf d) pos) where))))
+
+    (when (and (.Get (.-Flags (.options state)) jsonflags/ReportErrorsWithLegacySemantics) (!= err io/ErrUnexpectedEOF))
+      ;; The v1 error offset more consistently reported
+      ;; the number of bytes read that lead to the error.
+      ;; This implies that the offset is after the invalid text.
+      (if [(values werr ok) (assert (* jsonwire/InvalidTextError) err)] (and ok (!= werr nil))
+        (set! offset + (conv int64 (len (.-What werr))))
+
+        ;; This implies a structural error (e.g., parsing a JSON number
+        ;; when the grammar is expecting a JSON string for the object name).
+        ;; In such a case, simply increment by one, since the first byte
+        ;; is usually sufficient to indicate that the incoming token
+        ;; cannot possibly be correct.
+        (inc! offset)))
+
+
+    (addr (lit SyntacticError :ByteOffset offset :JSONPointer (conv Pointer ptr) :Err err))))
+
+
+^{:go/end 141} (go/method Error ^string [^{:tag (* SyntacticError)} e]
+  (let [pointer (.-JSONPointer e)
+      ^{:line 122} offset (.-ByteOffset e)
+      ^{:line 123} b (conv (slice byte) errorPrefix)]
+    (if (!= (.-Err e) nil) (do
+        (set! b (append b (spread (.Error (.-Err e)))))
+        (when (== (.-Err e) ErrDuplicateName)
+          (set! b (strconv/AppendQuote (append b \space) (.LastToken pointer)))
+          (set! pointer (.Parent pointer))
+          (set! offset 0))) ; not useful to print offset for duplicate names
+
+
+      (set! b (append b (spread "syntactic error"))))
+
+    (when (!= pointer "")
+      (set! b (strconv/AppendQuote (append b (spread " within ")) (jsonwire/TruncatePointer (conv string pointer) 100))))
+
+    (when (> offset 0)
+      (set! b (strconv/AppendInt (append b (spread " after offset ")) offset 10)))
+
+    (conv string b)))
+
+
+^{:go/end 145} (go/method Unwrap ^error [^{:tag (* SyntacticError)} e]
+  (.-Err e))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type pointerSuffixError "pointerSuffixError represents a JSON pointer suffix to be appended\nto [SyntacticError.JSONPointer]. It is an internal error type\nused within this package and does not appear in the public API.\n\nThis type is primarily used to annotate errors in Encoder.WriteValue\nand Decoder.ReadValue with precise positions.\nAt the time WriteValue or ReadValue is called, a JSON pointer to the\nupcoming value can be constructed using the Encoder/Decoder state.\nHowever, tracking pointers within values during normal operation\nwould incur a performance penalty in the error-free case.\n\nTo provide precise error locations without this overhead,\nthe error is wrapped with object names or array indices\nas the call stack is popped when an error occurs.\nSince this happens in reverse order, pointerSuffixError holds\nthe pointer in reverse and is only later reversed when appending to\nthe pointer prefix.\n\nFor example, if the encoder is at \"/alpha/bravo/charlie\"\nand an error occurs in WriteValue at \"/xray/yankee/zulu\", then\nthe final pointer should be \"/alpha/bravo/charlie/xray/yankee/zulu\".\n\nAs pointerSuffixError is populated during the error return path,\nit first contains \"/zulu\", then \"/zulu/yankee\",\nand finally \"/zulu/yankee/xray\".\nThese tokens are reversed and concatenated to \"/alpha/bravo/charlie\"\nto form the full pointer.\n" (struct
+    ^{:line 175} error
+
+
+    ^{:line 178 :tag (slice byte) :doc "reversePointer is a JSON pointer, but with each token in reverse order.\n"} reversePointer))
+
+
+
+
+^{:go/end 191} (go/func wrapWithObjectName "wrapWithObjectName wraps err with a JSON object name access,\nwhich must be a valid quoted JSON string.\n" ^error [^error err ^{:tag (slice byte)} quotedName]
+  (let [(values serr _) (assert (* pointerSuffixError) err)]
+    (when (== serr nil)
+      (set! serr (addr (lit pointerSuffixError :error err))))
+
+    (let [name (jsonwire/UnquoteMayCopy quotedName false)]
+      (set! (.-reversePointer serr) (appendEscapePointerName (append (.-reversePointer serr) \/) name))
+      ^{:line 190} serr)))
+
+
+
+^{:go/end 201} (go/func wrapWithArrayIndex "wrapWithArrayIndex wraps err with a JSON array index access.\n" ^error [^error err ^int64 index]
+  (let [(values serr _) (assert (* pointerSuffixError) err)]
+    (when (== serr nil)
+      (set! serr (addr (lit pointerSuffixError :error err))))
+
+    (set! (.-reversePointer serr) (strconv/AppendUint (append (.-reversePointer serr) \/) (conv uint64 index) 10))
+    ^{:line 200} serr))
+
+
+
+^{:go/end 213} (go/method appendPointer "appendPointer appends the path encoded in e to the end of pointer.\n" ^{:tag (slice byte)} [^{:tag (* pointerSuffixError)} e ^{:tag (slice byte)} pointer]
+  ;; Copy each token in reversePointer to the end of pointer in reverse order.
+  ;; Double reversal means that the appended suffix is now in forward order.
+  (let [(values bi bo) (values (.-reversePointer e) pointer)]
+    (while (> (len bi) 0)
+      (let [i (bytes/LastIndexByte bi \/)]
+        (set! (values bi bo) (values (subslice bi _ i) (append bo (spread (subslice bi i)))))))
+
+    ^{:line 212} bo))

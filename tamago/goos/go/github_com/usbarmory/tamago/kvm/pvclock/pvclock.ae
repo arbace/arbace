@@ -1,0 +1,131 @@
+;; KVM pvclock driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package pvclock implements a driver for the KVM specific paravirtualized
+;; clocksource following the MSR_KVM_SYSTEM_TIME_NEW KVM-specific MSR as
+;; described at:
+;;
+;;	https://docs.kernel.org/virt/kvm/x86/msr.html
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=amd64` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.kvm.pvclock) (go/file "pvclock.go" :doc "Package pvclock implements a driver for the KVM specific paravirtualized\nclocksource following the MSR_KVM_SYSTEM_TIME_NEW KVM-specific MSR as\ndescribed at:\n\n\thttps://docs.kernel.org/virt/kvm/x86/msr.html\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=amd64` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 21} [binary "encoding/binary"]
+    ^{:line 22} [big "math/big"]
+    ^{:line 23} [time "time"]
+
+    ^{:line 25} [amd64 "github.com/usbarmory/tamago/amd64"]
+    ^{:line 26} [dma "github.com/usbarmory/tamago/dma"]])
+
+
+(go/type pvClockTimeInfo (struct
+    ^{:line 30 :tag uint32} Version
+    ^{:line 31 :tag uint32} _
+    ^{:line 32 :tag uint64} Timestamp
+    ^{:line 33 :tag uint64} SystemTime
+    ^{:line 34 :tag uint32} Multiplier
+    ^{:line 35 :tag int8} Shift
+    ^{:line 36 :tag uint8} Flags
+    ^{:line 37 :tag (array 2 uint8)} _))
+
+
+
+(go/func ^:extern pvclock "defined in timer.s\n" [^uint32 msr] :results [^uint32 ptr])
+
+(go/var
+
+  ^{:line 45} [^{:tag time/Duration :doc "TimeInfoUpdate is the kvmclock sync interval\n"} TimeInfoUpdate (* 1 time/Second)]
+
+
+  ^{:line 48} [^{:tag (slice byte) :doc "host shared DMA buffer\n"} timeInfoBuffer])
+
+
+^{:go/end 62} (go/func initTimeInfo [^uint32 msr]
+  (let [ptr (pvclock msr)
+      ^{:line 53} size 32
+
+      (values r err) (dma/NewRegion (conv uint ptr) size true)]
+
+    (when (!= err nil)
+      (panic "internal error"))
+
+
+    (set! (values _ timeInfoBuffer) (.Reserve r size 0))))
+
+
+^{:go/end 86} (go/func pvClock ^int64 [^{:tag (* amd64/CPU)} cpu ^{:tag (* pvClockTimeInfo)} timeInfo]
+  (when (== timeInfo nil)
+    (set! timeInfo (addr (lit pvClockTimeInfo))))
+
+
+  (binary/Decode timeInfoBuffer binary/LittleEndian timeInfo)
+  (let [delta (- (.Counter cpu) (.-Timestamp timeInfo))]
+
+    (if (< (.-Shift timeInfo) 0)
+      (set! delta >> (- (.-Shift timeInfo)))
+
+      (set! delta << (.-Shift timeInfo)))
+
+
+    (let [d (big/NewInt (conv int64 delta))
+        ^{:line 79} m (big/NewInt (conv int64 (.-Multiplier timeInfo)))
+        ^{:line 80} r (big/NewInt 0)]
+
+      (.Mul r d m)
+      (.Rsh r r 32)
+
+      (conv int64 (+ (.Uint64 r) (.-SystemTime timeInfo))))))
+
+
+^{:go/end 104} (go/func pvClockSync [^{:tag (* amd64/CPU)} cpu]
+  (let [version (conv uint32 0)
+      ^{:line 90} timeInfo (addr (lit pvClockTimeInfo))]
+
+    (while true
+      (time/Sleep TimeInfoUpdate)
+
+      (binary/Decode timeInfoBuffer binary/LittleEndian timeInfo)
+
+      (when (or (== (.-Version timeInfo) version) (== (% (.-Version timeInfo) 2) 1))
+        (continue))
+
+
+      (set! version (.-Version timeInfo))
+      (.SetTime cpu (pvClock cpu timeInfo)))))
+
+
+
+
+
+^{:go/end 133} (go/func Init "Init adjusts the CPU system timer using the KVM pvclock as required by the\nTime Stamp Counter (TSC) reliability.\n" [^{:tag (* amd64/CPU)} cpu]
+  (let [features (.Features cpu)]
+
+    (switch
+      (case [(and (.-TSCInvariant features) (not (.-KVM features)))])
+      ;; no action required as TSC is reliable
+      (case [(and (.-TSCInvariant features) (.-KVM features) (> (.-KVMClockMSR features) 0))]
+        ;; no action required as TSC is reliable but we
+        ;; opportunistically adjust once with kvmclock
+        (initTimeInfo (.-KVMClockMSR features))
+        (.SetTime cpu (pvClock cpu nil)))
+      (case [(and (.-KVM features) (> (.-KVMClockMSR features) 0))]
+        ;; TSC must be adjusted as it is not reliable through state
+        ;; changes.
+        ;;
+        ;; As nanotime() cannot malloc we cannot override it, rather
+        ;; we adjust asynchronously with kvmclock every TimeInfoUpdate
+        ;; interval.
+        ;;
+        ;; If ever required pvClockSync() can be moved to Go assembly.
+        (initTimeInfo (.-KVMClockMSR features))
+        (go (pvClockSync cpu)))
+      (default
+        (panic "could not set system timer")))))

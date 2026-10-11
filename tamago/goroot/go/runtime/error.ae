@@ -1,0 +1,354 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "error.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [bytealg "internal/bytealg"]
+    ^{:line 10} [sys "internal/runtime/sys"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Error "Error identifies a runtime error used in panic.\n\nThe Go runtime triggers panics for a variety of cases, as described by the\nGo Language Spec, such as out-of-bounds slice/array access, close of nil\nchannels, type assertion failures, etc.\n\nWhen these cases occur, the Go runtime panics with an error that implements\nError. This can be useful when recovering from panics to distinguish between\ncustom application panics and fundamental runtime panics.\n\nPackages outside of the Go standard library should not implement Error.\n" (interface
+    ^{:line 25} error
+
+
+
+
+
+    (^{:doc "RuntimeError is a no-op function but\nserves to distinguish types that are runtime\nerrors from ordinary errors: a type is a\nruntime error if it has a RuntimeError method.\n"} RuntimeError [])))
+
+
+
+(go/type TypeAssertionError "A TypeAssertionError explains a failed type assertion.\n" (struct
+    ^{:line 36 :tag (* _type)} _interface
+    ^{:line 37 :tag (* _type)} concrete
+    ^{:line 38 :tag (* _type)} asserted
+    ^{:line 39 :tag string} missingMethod)) ; one method needed by Interface, missing from Concrete
+
+
+^{:go/end 42} (go/method RuntimeError [(* TypeAssertionError)])
+
+^{:go/end 68} (go/method Error ^string [^{:tag (* TypeAssertionError)} e]
+  (let [inter "interface"]
+    (when (!= (.-_interface e) nil)
+      (set! inter (.string (toRType (.-_interface e)))))
+
+    (let [as (.string (toRType (.-asserted e)))]
+      (when (== (.-concrete e) nil)
+        (return (+ "interface conversion: " inter " is nil, not " as)))
+
+      (let [cs (.string (toRType (.-concrete e)))]
+        (when (== (.-missingMethod e) "")
+          (let [msg (+ "interface conversion: " inter " is " cs ", not " as)]
+            (when (== cs as)
+              ;; provide slightly clearer error message
+              (if (!= (.pkgpath (toRType (.-concrete e))) (.pkgpath (toRType (.-asserted e))))
+                (set! msg + " (types from different packages)")
+
+                (set! msg + " (types from different scopes)")))
+
+
+            (return msg)))
+
+        ^{:go/breaks [5]} (+ "interface conversion: " cs " is not " as
+          ": missing method " (.-missingMethod e))))))
+
+
+
+
+
+
+
+^{:go/end 84} (go/func ^:go/nosplit itoa "itoa converts val to a decimal representation. The result is\nwritten somewhere within buf and the location of the result is returned.\nbuf must be at least 20 bytes.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} buf ^uint64 val]
+  (let [i (- (len buf) 1)]
+    (while (>= val 10)
+      (aset buf i (conv byte (+ (% val 10) \0)))
+      (dec! i)
+      (set! val / 10))
+
+    (aset buf i (conv byte (+ val \0)))
+    (subslice buf i)))
+
+
+
+(go/type errorString "An errorString represents a runtime error described by a single string.\n" string)
+
+^{:go/end 89} (go/method RuntimeError [^errorString e])
+
+^{:go/end 93} (go/method Error ^string [^errorString e]
+  (+ "runtime error: " (conv string e)))
+
+
+(go/type errorAddressString (struct
+    ^{:line 96 :tag string} msg ; error message
+    ^{:line 97 :tag uintptr} addr)) ; memory address where the error occurred
+
+
+^{:go/end 100} (go/method RuntimeError [^errorAddressString e])
+
+^{:go/end 104} (go/method Error ^string [^errorAddressString e]
+  (+ "runtime error: " (.-msg e)))
+
+
+(go/var ^error _ (lit errorAddressString))
+
+
+
+
+
+
+^{:go/end 115} (go/method Addr "Addr returns the memory address where a fault occurred.\nThe address provided is best-effort.\nThe veracity of the result may depend on the platform.\nErrors providing this method will only be returned as\na result of using [runtime/debug.SetPanicOnFault].\n" ^uintptr [^errorAddressString e]
+  (.-addr e))
+
+
+
+
+
+(go/type plainError "plainError represents a runtime error described a string without\nthe prefix \"runtime error: \" after invoking errorString.Error().\nSee Issue #14965.\n" string)
+
+^{:go/end 122} (go/method RuntimeError [^plainError e])
+
+^{:go/end 126} (go/method Error ^string [^plainError e]
+  (conv string e))
+
+
+(go/var ^error _ (conv plainError ""))
+
+
+(go/type boundsError "A boundsError represents an indexing or slicing operation gone wrong.\n" (struct
+    ^{:line 132 :tag int64} x
+    ^{:line 133 :tag int} y
+
+
+
+
+    ^{:line 138 :tag bool :doc "Values in an index or slice expression can be signed or unsigned.\nThat means we'd need 65 bits to encode all possible indexes, from -2^63 to 2^64-1.\nInstead, we keep track of whether x should be interpreted as signed or unsigned.\ny is known to be nonnegative and to fit in an int.\n"} signed
+    ^{:line 139 :tag abi/BoundsErrorCode} code))
+
+
+(go/var ^error _ (lit boundsError))
+
+
+
+
+(go/var ^{:doc "boundsErrorFmts provide error text for various out-of-bounds panics.\nNote: if you change these strings, you should adjust the size of the buffer\nin boundsError.Error below as well.\n"} boundsErrorFmts (lit (array ... string)
+    ^{:line 148} [abi/BoundsIndex "index out of range [%x] with length %y"]
+    ^{:line 149} [abi/BoundsSliceAlen "slice bounds out of range [:%x] with length %y"]
+    ^{:line 150} [abi/BoundsSliceAcap "slice bounds out of range [:%x] with capacity %y"]
+    ^{:line 151} [abi/BoundsSliceB "slice bounds out of range [%x:%y]"]
+    ^{:line 152} [abi/BoundsSlice3Alen "slice bounds out of range [::%x] with length %y"]
+    ^{:line 153} [abi/BoundsSlice3Acap "slice bounds out of range [::%x] with capacity %y"]
+    ^{:line 154} [abi/BoundsSlice3B "slice bounds out of range [:%x:%y]"]
+    ^{:line 155} [abi/BoundsSlice3C "slice bounds out of range [%x:%y:]"]
+    ^{:line 156} [abi/BoundsConvert "cannot convert slice with length %y to array or pointer to array with length %x"]))
+
+
+
+(go/var ^{:doc "boundsNegErrorFmts are overriding formats if x is negative. In this case there's no need to report y.\n"} boundsNegErrorFmts (lit (array ... string)
+    ^{:line 161} [abi/BoundsIndex "index out of range [%x]"]
+    ^{:line 162} [abi/BoundsSliceAlen "slice bounds out of range [:%x]"]
+    ^{:line 163} [abi/BoundsSliceAcap "slice bounds out of range [:%x]"]
+    ^{:line 164} [abi/BoundsSliceB "slice bounds out of range [%x:]"]
+    ^{:line 165} [abi/BoundsSlice3Alen "slice bounds out of range [::%x]"]
+    ^{:line 166} [abi/BoundsSlice3Acap "slice bounds out of range [::%x]"]
+    ^{:line 167} [abi/BoundsSlice3B "slice bounds out of range [:%x:]"]
+    ^{:line 168} [abi/BoundsSlice3C "slice bounds out of range [%x::]"]))
+
+
+^{:go/end 171} (go/method RuntimeError [^boundsError e])
+
+^{:go/end 181} (go/func appendIntStr ^{:tag (slice byte)} [^{:tag (slice byte)} b ^int64 v ^bool signed]
+  (when (and signed (< v 0))
+    (set! b (append b \-))
+    (set! v (- v)))
+
+  (let [^{:tag (array 20 byte)} buf (zero (array 20 byte))]
+    (set! b (append b (spread (itoa (subslice buf) (conv uint64 v)))))
+    ^{:line 180} b))
+
+
+^{:go/end 207} (go/method Error ^string [^boundsError e]
+  (let [fmt (aget boundsErrorFmts (.-code e))]
+    (when (and (.-signed e) (< (.-x e) 0))
+      (set! fmt (aget boundsNegErrorFmts (.-code e))))
+
+    ;; max message length is 99: "runtime error: slice bounds out of range [::%x] with capacity %y"
+    ;; x can be at most 20 characters. y can be at most 19.
+    (let [b (make (slice byte) 0 100)]
+      (set! b (append b (spread "runtime error: ")))
+      (for [i 0] (< i (len fmt)) (inc! i)
+        (let [c (aget fmt i)]
+          (when (!= c \%)
+            (set! b (append b c))
+            (continue))
+
+          (inc! i)
+          (switch (aget fmt i)
+            (case [\x]
+              (set! b (appendIntStr b (.-x e) (.-signed e))))
+            (case [\y]
+              (set! b (appendIntStr b (conv int64 (.-y e)) true))))))
+
+
+      (conv string b))))
+
+
+(go/type stringer (interface
+    (String ^string [])))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 262} (go/func printpanicval "printpanicval prints an argument passed to panic.\nIf panic is called with a value that has a String or Error method,\nit has already been converted into a string by preprintpanics.\n\nTo ensure that the traceback can be unambiguously parsed even when\nthe panic value contains \"\\ngoroutine\" and other stack-like\nstrings, newlines in the string representation of v are replaced by\n\"\\n\\t\".\n" [^any v]
+  (type-switch [v v]
+    (case [nil]
+      (print "nil"))
+    (case [bool]
+      (print v))
+    (case [int]
+      (print v))
+    (case [int8]
+      (print v))
+    (case [int16]
+      (print v))
+    (case [int32]
+      (print v))
+    (case [int64]
+      (print v))
+    (case [uint]
+      (print v))
+    (case [uint8]
+      (print v))
+    (case [uint16]
+      (print v))
+    (case [uint32]
+      (print v))
+    (case [uint64]
+      (print v))
+    (case [uintptr]
+      (print v))
+    (case [float32]
+      (print v))
+    (case [float64]
+      (print v))
+    (case [complex64]
+      (print v))
+    (case [complex128]
+      (print v))
+    (case [string]
+      (printindented v))
+    (default
+      (printanycustomtype v))))
+
+
+
+
+^{:go/end 309} (go/func printanycustomtype "Invariant: each newline in the string representation is followed by a tab.\n" [^any i]
+  (let [eface (efaceOf (addr i))
+      ^{:line 267} typestring (.string (toRType (.-_type eface)))]
+
+    (switch (.Kind (.-_type eface))
+      (case [abi/String]
+        (print typestring "(\"")
+        (printindented @(conv (* string) (.-data eface)))
+        (print "\")"))
+      (case [abi/Bool]
+        (print typestring "(" @(conv (* bool) (.-data eface)) ")"))
+      (case [abi/Int]
+        (print typestring "(" @(conv (* int) (.-data eface)) ")"))
+      (case [abi/Int8]
+        (print typestring "(" @(conv (* int8) (.-data eface)) ")"))
+      (case [abi/Int16]
+        (print typestring "(" @(conv (* int16) (.-data eface)) ")"))
+      (case [abi/Int32]
+        (print typestring "(" @(conv (* int32) (.-data eface)) ")"))
+      (case [abi/Int64]
+        (print typestring "(" @(conv (* int64) (.-data eface)) ")"))
+      (case [abi/Uint]
+        (print typestring "(" @(conv (* uint) (.-data eface)) ")"))
+      (case [abi/Uint8]
+        (print typestring "(" @(conv (* uint8) (.-data eface)) ")"))
+      (case [abi/Uint16]
+        (print typestring "(" @(conv (* uint16) (.-data eface)) ")"))
+      (case [abi/Uint32]
+        (print typestring "(" @(conv (* uint32) (.-data eface)) ")"))
+      (case [abi/Uint64]
+        (print typestring "(" @(conv (* uint64) (.-data eface)) ")"))
+      (case [abi/Uintptr]
+        (print typestring "(" @(conv (* uintptr) (.-data eface)) ")"))
+      (case [abi/Float32]
+        (print typestring "(" @(conv (* float32) (.-data eface)) ")"))
+      (case [abi/Float64]
+        (print typestring "(" @(conv (* float64) (.-data eface)) ")"))
+      (case [abi/Complex64]
+        (print typestring @(conv (* complex64) (.-data eface))))
+      (case [abi/Complex128]
+        (print typestring @(conv (* complex128) (.-data eface))))
+      (default
+        (print "(" typestring ") " (.-data eface))))))
+
+
+
+
+^{:go/end 324} (go/func printindented "printindented prints s, replacing \"\\n\" with \"\\n\\t\".\n" [^string s]
+  (while true
+    (let [i (bytealg/IndexByteString s \newline)]
+      (when (< i 0)
+        (break))
+
+      (set! i + (len "\n"))
+      (print (subslice s _ i))
+      (print "\t")
+      (set! s (subslice s i))))
+
+  (print s))
+
+
+
+
+
+
+^{:go/end 355} (go/func panicwrap "panicwrap generates a panic for a call to a wrapped value method\nwith a nil pointer receiver.\n\nIt is called from the generated wrapper code.\n" []
+  (let [pc (sys/GetCallerPC)
+      ^{:line 332} name (funcNameForPrint (funcname (findfunc pc)))
+      ;; name is something like "main.(*T).F".
+      ;; We want to extract pkg ("main"), typ ("T"), and meth ("F").
+      ;; Do it by finding the parens.
+      ^{:line 336} i (bytealg/IndexByteString name \()]
+    (when (< i 0)
+      (throw (+ "panicwrap: no ( in " name)))
+
+    (let [pkg (subslice name _ (- i 1))]
+      (when (or (>= (+ i 2) (len name)) (!= (subslice name (- i 1) (+ i 2)) ".(*"))
+        (throw (+ "panicwrap: unexpected string after package name: " name)))
+
+      (set! name (subslice name (+ i 2)))
+      (set! i (bytealg/IndexByteString name \)))
+      (when (< i 0)
+        (throw (+ "panicwrap: no ) in " name)))
+
+      (when (or (>= (+ i 2) (len name)) (!= (subslice name i (+ i 2)) ")."))
+        (throw (+ "panicwrap: unexpected string after type name: " name)))
+
+      (let [typ (subslice name _ i)
+          ^{:line 353} meth (subslice name (+ i 2))]
+        (panic (conv plainError (+ "value method " pkg "." typ "." meth " called using nil *" typ " pointer")))))))

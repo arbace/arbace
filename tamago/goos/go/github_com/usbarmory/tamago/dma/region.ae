@@ -1,0 +1,352 @@
+;; First-fit memory allocator for DMA buffers
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.dma) (go/file "region.go" :imports [
+
+
+    ^{:line 12} [list "container/list"]
+    ^{:line 13} [sync "sync"]
+    ^{:line 14} [unsafe "unsafe"]])
+
+
+(go/const ^{:val 8} DefaultAlignment (/ (<< 32 (>> (bit-not (conv uint 0)) 63)) 8))
+
+
+(go/type Region "Region represents a memory region allocated for DMA purposes.\n" (struct
+    ^{:line 21} sync/Mutex
+
+    ^{:line 23 :tag uint} start
+    ^{:line 24 :tag uint} size
+
+    ^{:line 26 :tag (* list/List)} freeBlocks
+    ^{:line 27 :tag (map uint (* block))} usedBlocks))
+
+
+
+(go/var ^{:tag (* Region) :doc "global DMA region instance\n"} dma)
+
+
+^{:go/end 36} (go/func Default "Default returns the global DMA region instance.\n" ^{:tag (* Region)} []
+  ^{:line 35} dma)
+
+
+
+^{:go/end 52} (go/method Init "Init initializes a memory region with a single block that fits it.\n" [^{:tag (* Region)} r ^uint start ^uint size]
+  (set! (.-start r) start)
+  (set! (.-size r) size)
+
+  (let [b (addr ^{:go/breaks [2 4]} (lit block
+          :addr start
+          :size size))]
+
+
+    (set! (.-freeBlocks r) (list/New))
+    (.PushFront (.-freeBlocks r) b)
+
+    (set! (.-usedBlocks r) (make (map uint (* block))))))
+
+
+
+^{:go/end 57} (go/method Start "Start returns the DMA region start address.\n" ^uint [^{:tag (* Region)} r]
+  (.-start r))
+
+
+
+^{:go/end 62} (go/method End "End returns the DMA region end address.\n" ^uint [^{:tag (* Region)} r]
+  (+ (.-start r) (.-size r)))
+
+
+
+^{:go/end 67} (go/method Size "Size returns the DMA region size.\n" ^uint [^{:tag (* Region)} r]
+  (.-size r))
+
+
+
+^{:go/end 79} (go/method FreeBlocks "FreeBlocks returns the DMA region free blocks addresses and size.\n" ^{:tag (map uint uint)} [^{:tag (* Region)} r]
+  (let [m (make (map uint uint))]
+
+    (for [e (.Front (.-freeBlocks r))] (!= e nil) (set! e (.Next e))
+      (let [b (assert (* block) (.-Value e))]
+        (aset m (.-addr b) (.-size b))))
+
+
+    ^{:line 78} m))
+
+
+
+^{:go/end 90} (go/method UsedBlocks "UsedBlocks returns the DMA region allocated blocks addresses and size.\n" ^{:tag (map uint uint)} [^{:tag (* Region)} r]
+  (let [m (make (map uint uint))]
+
+    (range [addr b (.-usedBlocks r)]
+      (aset m addr (.-size b)))
+
+
+    ^{:line 89} m))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 122} (go/method Reserve "Reserve allocates a Slice of bytes for DMA purposes, by placing its data\nwithin the DMA region, with optional alignment. It returns the slice along\nwith its data allocation address. The buffer can be freed up with Release().\n\nReserving buffers with Reserve() allows applications to pre-allocate DMA\nregions, avoiding unnecessary memory copy operations when performance is a\nconcern. Reserved buffers cause Alloc() and Read() to return without any\nallocation or memory copy.\n\nGreat care must be taken on reserved buffer as:\n  - buf contents are uninitialized (unlike when using Alloc())\n  - buf slices remain in reserved space but only the original buf\n    can be subject of Release()\n\nThe optional alignment must be a power of 2 and word alignment is always\nenforced, 0 means 4 on 32-bit platforms and 8 on 64-bit ones.\n" [^{:tag (* Region)} r ^int size ^int align] :results [^uint addr ^{:tag (slice byte)} buf]
+  (when (== size 0)
+    (return))
+
+
+  ^{:go/via [Mutex]} (.Lock r)
+  (defer ^{:go/via [Mutex]} (.Unlock r))
+
+  (let [b (.alloc r (conv uint size) (conv uint align))]
+    (set! (.-res b) true)
+
+    (aset (.-usedBlocks r) (.-addr b) b)
+
+    (return (.-addr b) (.slice b))))
+
+
+
+
+
+^{:go/end 132} (go/method Reserved "Reserved returns whether a slice of bytes data is allocated within the DMA\nbuffer region, it is used to determine whether the passed buffer has been\npreviously allocated by this package with Reserve().\n" [^{:tag (* Region)} r ^{:tag (slice byte)} buf] :results [^bool res ^uint addr]
+  (set! addr (conv uint (conv uintptr (conv unsafe/Pointer (addr (aget buf 0))))))
+  (set! res (and (>= addr (.-start r)) (<= (+ addr (conv uint (len buf))) (+ (.-start r) (.-size r)))))
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 163} (go/method Alloc "Alloc reserves a memory region for DMA purposes, copying over a buffer and\nreturning its allocation address, with optional alignment. The region can be\nfreed up with Free().\n\nIf the argument is a buffer previously created with Reserve(), then its\naddress is return without any re-allocation.\n\nThe optional alignment must be a power of 2 and word alignment is always\nenforced, 0 means 4 on 32-bit platforms and 8 on 64-bit ones.\n" [^{:tag (* Region)} r ^{:tag (slice byte)} buf ^int align] :results [^uint addr]
+  (let [size (len buf)]
+
+    (when (== size 0)
+      (return 0))
+
+
+    (when [(values res addr) (.Reserved r buf)] res
+      (return addr))
+
+
+    ^{:go/via [Mutex]} (.Lock r)
+    (defer ^{:go/via [Mutex]} (.Unlock r))
+
+    (let [b (.alloc r (conv uint size) (conv uint align))]
+      (.write b 0 buf)
+
+      (aset (.-usedBlocks r) (.-addr b) b)
+
+      (.-addr b))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 200} (go/method Read "Read reads exactly len(buf) bytes from a memory region address into a\nbuffer, the region must have been previously allocated with Alloc().\n\nThe offset and buffer size are used to retrieve a slice of the memory\nregion, a panic occurs if these parameters are not compatible with the\ninitial allocation for the address.\n\nIf the argument is a buffer previously created with Reserve(), then the\nfunction returns without modifying it, as it is assumed for the buffer to be\nalready updated.\n" [^{:tag (* Region)} r ^uint addr ^int off ^{:tag (slice byte)} buf]
+  (let [size (len buf)]
+
+    (when (or (== addr 0) (== size 0))
+      (return))
+
+
+    (when [(values res _) (.Reserved r buf)] res
+      (return))
+
+
+    ^{:go/via [Mutex]} (.Lock r)
+    (defer ^{:go/via [Mutex]} (.Unlock r))
+
+    (let [(values b ok) (aget (.-usedBlocks r) addr)]
+
+      (when (not ok)
+        (panic "read of unallocated pointer"))
+
+
+      (when (> (conv uint (+ off size)) (.-size b))
+        (panic "invalid read parameters"))
+
+
+      (.read b (conv uint off) buf))))
+
+
+
+
+
+
+
+
+^{:go/end 229} (go/method Write "Write writes buffer contents to a memory region address, the region must\nhave been previously allocated with Alloc().\n\nAn offset can be passed to write a slice of the memory region, a panic\noccurs if the offset is not compatible with the initial allocation for the\naddress.\n" [^{:tag (* Region)} r ^uint addr ^int off ^{:tag (slice byte)} buf]
+  (let [size (len buf)]
+
+    (when (or (== addr 0) (== size 0))
+      (return))
+
+
+    ^{:go/via [Mutex]} (.Lock r)
+    (defer ^{:go/via [Mutex]} (.Unlock r))
+
+    (let [(values b ok) (aget (.-usedBlocks r) addr)]
+
+      (when (not ok)
+        (return))
+
+
+      (when (> (conv uint (+ off size)) (.-size b))
+        (panic "invalid write parameters"))
+
+
+      (.write b (conv uint off) buf))))
+
+
+
+
+^{:go/end 235} (go/method Free "Free frees the memory region stored at the passed address, the region must\nhave been previously allocated with Alloc().\n" [^{:tag (* Region)} r ^uint addr]
+  (.freeBlock r addr false))
+
+
+
+
+^{:go/end 241} (go/method Release "Release frees the memory region stored at the passed address, the region\nmust have been previously allocated with Reserve().\n" [^{:tag (* Region)} r ^uint addr]
+  (.freeBlock r addr true))
+
+
+^{:go/end 260} (go/method defrag [^{:tag (* Region)} r]
+  (let [^{:tag (* block)} prevBlock (zero (* block))]
+
+    ;; find contiguous free blocks and combine them
+    (for [e (.Front (.-freeBlocks r))] (!= e nil) (set! e (.Next e))
+      (let [b (assert (* block) (.-Value e))]
+
+        (when (!= prevBlock nil)
+          (when (== (+ (.-addr prevBlock) (.-size prevBlock)) (.-addr b))
+            (set! (.-size prevBlock) + (.-size b))
+            (defer (.Remove (.-freeBlocks r) e))
+            (continue)))
+
+
+
+        (set! prevBlock (assert (* block) (.-Value e)))))))
+
+
+
+^{:go/end 316} (go/method alloc ^{:tag (* block)} [^{:tag (* Region)} r ^uint size ^uint align]
+  (let [^{:tag (* list/Element)} e (zero (* list/Element))
+      ^{:line 264 :tag (* block)} freeBlock (zero (* block))
+      ^{:line 265 :tag uint} pad (zero uint)]
+
+    (when (or (== align 0) (!= (bit-and align (- align 1)) 0))
+      (set! align DefaultAlignment))
+
+
+    ;; find suitable block
+    (for [(set! e (.Front (.-freeBlocks r)))] (!= e nil) (set! e (.Next e))
+      (let [b (assert (* block) (.-Value e))]
+
+        ;; pad to required alignment
+        (set! pad (bit-and (- (.-addr b)) (- align 1)))
+
+        (when (>= (.-size b) (+ size pad))
+          (set! freeBlock b)
+          (set! size + pad)
+          (break))))
+
+
+
+    (when (== freeBlock nil)
+      (panic "out of memory"))
+
+
+    ;; allocate block from free linked list
+    (defer (.Remove (.-freeBlocks r) e))
+
+    ;; adjust block to desired size, add new block for remainder
+    (when [n (- (.-size freeBlock) size)] (!= n 0)
+      (let [newBlockAfter (addr ^{:go/breaks [2 4]} (lit block
+              :addr (+ (.-addr freeBlock) size)
+              :size n))]
+
+
+        (set! (.-size freeBlock) size)
+        (.InsertAfter (.-freeBlocks r) newBlockAfter e)))
+
+
+    (when (!= pad 0)
+      ;; claim padding space
+      (let [newBlockBefore (addr ^{:go/breaks [2 4]} (lit block
+              :addr (.-addr freeBlock)
+              :size pad))]
+
+
+        (set! (.-addr freeBlock) + pad)
+        (set! (.-size freeBlock) - pad)
+        (.InsertBefore (.-freeBlocks r) newBlockBefore e)))
+
+
+    ^{:line 315} freeBlock))
+
+
+^{:go/end 331} (go/method free [^{:tag (* Region)} r ^{:tag (* block)} usedBlock]
+  (defer (.defrag r))
+
+  (for [e (.Front (.-freeBlocks r))] (!= e nil) (set! e (.Next e))
+    (let [b (assert (* block) (.-Value e))]
+
+      (when (> (.-addr b) (.-addr usedBlock))
+        (.InsertBefore (.-freeBlocks r) usedBlock e)
+        (return))))
+
+
+
+  (.PushBack (.-freeBlocks r) usedBlock))
+
+
+^{:go/end 353} (go/method freeBlock [^{:tag (* Region)} r ^uint addr ^bool res]
+  (when (== addr 0)
+    (return))
+
+
+  ^{:go/via [Mutex]} (.Lock r)
+  (defer ^{:go/via [Mutex]} (.Unlock r))
+
+  (let [(values b ok) (aget (.-usedBlocks r) addr)]
+
+    (when (not ok)
+      (return))
+
+
+    (when (!= (.-res b) res)
+      (return))
+
+
+    (.free r b)
+    (delete (.-usedBlocks r) addr)))

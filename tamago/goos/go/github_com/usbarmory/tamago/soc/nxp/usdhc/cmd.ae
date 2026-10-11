@@ -1,0 +1,284 @@
+;; NXP Ultra Secured Digital Host Controller (uSDHC) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; IP: https://www.mobiveil.com/esdhc/
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.usdhc) (go/file "cmd.go" :imports [
+
+
+    ^{:line 14} [fmt "fmt"]
+    ^{:line 15} [time "time"]
+
+    ^{:line 17} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 18} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "CMD constants\n"
+  ^{:line 23} [^{:val 0} GO_IDLE_STATE 0]
+
+
+  ^{:line 26} [^{:val 16 :doc "p127, 4.9.5 (Published RCA response), SD-PL-7.10\n"} RCA_ADDR 16]
+  ^{:line 27} [^{:val 0} RCA_STATUS 0]
+
+
+
+  ^{:line 31} [^{:val 9 :doc "p131, Table 4-42 : Card Status, SD-PL-7.10\np160, Table 68 - Device Status, JESD84-B51\n"} STATUS_CURRENT_STATE 9]
+  ^{:line 32} [^{:val 7} STATUS_SWITCH_ERROR 7]
+  ^{:line 33} [^{:val 5} STATUS_APP_CMD 5]
+  ^{:line 34} [^{:val 2} CURRENT_STATE_IDENT 2]
+  ^{:line 35} [^{:val 4} CURRENT_STATE_TRAN 4]
+
+
+  ^{:line 38} [^{:val 0 :doc "data transfer direction\n"} WRITE 0]
+  ^{:line 39} [^{:val 1} READ 1]
+
+
+  ^{:line 42} [^{:val 0 :doc "response types\n"} RSP_NONE 2r00]
+  ^{:line 43} [^{:val 1} RSP_136 2r01]
+  ^{:line 44} [^{:val 2} RSP_48 2r10]
+  ^{:line 45} [^{:val 3} RSP_48_CHECK_BUSY 2r11]
+
+
+  ^{:line 48} [^{:val -8 :doc "SEND_CSD response contains CSD[127:8],\n"} CSD_RSP_OFF -8]
+
+  ^{:line 50} [^{:val 10000000} DEFAULT_CMD_TIMEOUT (* 10 time/Millisecond)])
+
+
+(go/type cmdParams (struct
+
+    ^{:line 55 :tag uint32 :doc "data transfer direction\n"} dtd
+
+    ^{:line 57 :tag uint32 :doc "response type\n"} res
+
+    ^{:line 59 :tag bool :doc "command index verification\n"} cic
+
+    ^{:line 61 :tag bool :doc "CRC verification\n"} ccc))
+
+
+(go/var cmds (lit (map uint32 cmdParams)
+    ;; CMD0 - GO_IDLE_STATE - reset card
+    ^{:line 66} [0 (lit _ READ RSP_NONE false false)]
+    ;; MMC: CMD1 - SEND_OP_COND - send operating conditions
+    ^{:line 68} [1 (lit _ READ RSP_48 false false)]
+    ;; CMD2 - ALL_SEND_CID - get unique card identification
+    ^{:line 70} [2 (lit _ READ RSP_136 false true)]
+    ;;  SD: CMD3 - SEND_RELATIVE_ADDR - get relative card address (RCA)
+    ;; MMC: CMD3 -  SET_RELATIVE_ADDR - set relative card address (RCA
+    ^{:line 73} [3 (lit _ READ RSP_48 true true)]
+    ;; CMD6 - SWITCH - switch mode of operation
+    ^{:line 75} [6 (lit _ READ RSP_48_CHECK_BUSY true true)]
+    ;; CMD7 - SELECT/DESELECT CARD - enter transfer state
+    ^{:line 77} [7 (lit _ READ RSP_48_CHECK_BUSY true true)]
+    ;;  SD: CMD8 - SEND_IF_COND - read device data
+    ;; MMC: CMD8 - SEND_EXT_CSD - read extended device data
+    ^{:line 80} [8 (lit _ READ RSP_48 true true)]
+    ;; CMD9 - SEND_CSD - read device data
+    ^{:line 82} [9 (lit _ READ RSP_136 false true)]
+    ;; SD: CMD11 - VOLTAGE_SWITCH - switch to 1.8V signaling
+    ^{:line 84} [11 (lit _ READ RSP_48 true true)]
+    ;; CMD12 - STOP_TRANSMISSION - stop transmission
+    ^{:line 86} [12 (lit _ READ RSP_NONE true true)]
+    ;; CMD13 - SEND_STATUS - poll card status
+    ^{:line 88} [13 (lit _ READ RSP_48 true true)]
+    ;; CMD16 - SET_BLOCKLEN - define the block length
+    ^{:line 90} [16 (lit _ READ RSP_48 true true)]
+    ;; CMD18 - READ_MULTIPLE_BLOCK - read consecutive blocks
+    ^{:line 92} [18 (lit _ READ RSP_48 true true)]
+    ;; CMD19 - send tuning block command, ignore responses
+    ^{:line 94} [19 (lit _ READ RSP_48 true true)]
+    ;; CMD23 - SET_BLOCK_COUNT - define read/write block count
+    ^{:line 96} [23 (lit _ READ RSP_48 true true)]
+    ;; CMD25 - WRITE_MULTIPLE_BLOCK - write consecutive blocks
+    ^{:line 98} [25 (lit _ WRITE RSP_48 true true)]
+    ;; SD: ACMD41 - SD_SEND_OP_COND - read capacity information
+    ^{:line 100} [41 (lit _ READ RSP_48 false false)]
+    ;; SD: CMD55 - APP_CMD - next command is application specific
+    ^{:line 102} [55 (lit _ READ RSP_48 true true)]))
+
+
+
+
+^{:go/end 244} (go/method cmd "cmd sends an SD / MMC command as described in\np349, 35.4.3 Send command to card flow chart, IMX6FG\n" [^{:tag (* USDHC)} hw ^uint32 index ^uint32 arg ^uint32 blocks ^time/Duration timeout] :results [^error err]
+  (let [(values params ok) (aget cmds index)]
+
+    (when (not ok)
+      (return (fmt/Errorf "CMD%d unsupported" index)))
+
+
+    (when (== timeout 0)
+      (set! timeout DEFAULT_CMD_TIMEOUT))
+
+
+    ;; clear interrupt status
+    (reg/Write (.-int_status hw) 0xffffffff)
+
+    ;; enable interrupt status
+    (reg/Write (.-int_status_en hw) 0xffffffff)
+
+    ;; wait for command inhibit to be clear
+    (when (not (reg/WaitFor timeout (.-pres_state hw) PRES_STATE_CIHB 1 0))
+      (return (fmt/Errorf "CMD%d command inhibit" index)))
+
+
+    ;; wait for data inhibit to be clear
+    (when (and (> blocks 0) (not (reg/WaitFor timeout (.-pres_state hw) PRES_STATE_CDIHB 1 0)))
+      (return (fmt/Errorf "CMD%d data inhibit" index)))
+
+
+    ;; clear interrupts status
+    (reg/Write (.-int_status hw) 0xffffffff)
+
+    (when (and (== (.-dtd params) WRITE) (== (reg/GetN (.-pres_state hw) PRES_STATE_WPSPL 1) 0))
+      ;; The uSDHC merely reports on WP, it doesn't really act on it
+      ;; despite IMX6ULLRM suggesting otherwise (e.g. p4017).
+      (return (fmt/Errorf "card is write protected")))
+
+
+    (defer (^{:go/end 149} (fn []
+          (when (!= err nil)
+            (reg/Clear (.-pres_state hw) PRES_STATE_CIHB)
+            (reg/Clear (.-pres_state hw) PRES_STATE_CDIHB)
+            (reg/Set (.-sys_ctrl hw) SYS_CTRL_RSTC)))))
+
+
+
+    (let [dmasel (conv uint32 DMASEL_NONE)]
+
+      (when (> blocks 0)
+        (set! dmasel DMASEL_ADMA2)
+        (reg/Write (.-int_signal_en hw) 0xffffffff))
+
+
+      ;; select DMA mode
+      (reg/SetN (.-prot_ctrl hw) PROT_CTRL_DMASEL 2r11 dmasel)
+
+      ;; set command arguments
+      (reg/Write (.-cmd_arg hw) arg)
+
+      (let [xfr (reg/Read (.-cmd_xfr hw))
+          ^{:line 165} mix (reg/Read (.-mix_ctrl hw))]
+
+        ;; set command index
+        (bits/SetN (addr xfr) CMD_XFR_TYP_CMDINX 2r111111 index)
+        ;; clear special command types
+        (bits/SetN (addr xfr) CMD_XFR_TYP_CMDTYP 2r11 0)
+        ;; command index verification
+        (bits/SetTo (addr xfr) CMD_XFR_TYP_CICEN (.-cic params))
+        ;; CRC verification
+        (bits/SetTo (addr xfr) CMD_XFR_TYP_CCCEN (.-ccc params))
+        ;; dual data rate
+        (bits/SetTo (addr mix) MIX_CTRL_DDR_EN (.-DDR (.-card hw)))
+
+        ;; command completion
+        (let [int_status INT_STATUS_CC]
+
+          (if (> blocks 0) (do
+              ;; transfer completion
+              (set! int_status INT_STATUS_TC)
+              ;; enable data presence
+              (bits/Set (addr xfr) CMD_XFR_TYP_DPSEL)
+              ;; enable DMA
+              (bits/Set (addr mix) MIX_CTRL_DMAEN)
+              ;; enable automatic CMD12 to stop transactions
+              (bits/Set (addr mix) MIX_CTRL_AC12EN)
+              ;; multiple blocks
+              (bits/SetTo (addr mix) MIX_CTRL_MSBSEL (> blocks 1))
+              ;; block count
+              (bits/SetTo (addr mix) MIX_CTRL_BCEN (> blocks 1)))
+            (do
+              (bits/Clear (addr xfr) CMD_XFR_TYP_DPSEL)
+              (bits/Clear (addr mix) MIX_CTRL_AC12EN)
+              (bits/Clear (addr mix) MIX_CTRL_BCEN)
+              (bits/Clear (addr mix) MIX_CTRL_DMAEN)
+              (bits/Clear (addr mix) MIX_CTRL_MSBSEL)))
+
+
+          ;; set response type
+          (bits/SetN (addr xfr) CMD_XFR_TYP_RSPTYP 2r11 (.-res params))
+          ;; set data transfer direction
+          (bits/SetN (addr mix) MIX_CTRL_DTDSEL 1 (.-dtd params))
+
+          (reg/Write (.-mix_ctrl hw) mix)
+          (reg/Write (.-cmd_xfr hw) xfr)
+
+          ;; wait for completion
+          (when (not (reg/WaitFor timeout (.-int_status hw) int_status 1 1))
+            (set! err (fmt/Errorf "CMD%d:timeout pres_state:%#x int_status:%#x" index
+                (reg/Read (.-pres_state hw))
+                (reg/Read (.-int_status hw)))))
+          ;; According to the IMX6FG flow chart we shouldn't return in
+          ;; case of error, but still go ahead and check status.
+
+
+          ;; mask all interrupts
+          (reg/Write (.-int_signal_en hw) 0)
+
+          ;; read status
+          (let [status (reg/Read (.-int_status hw))]
+
+            ;; p3997, 58.5.3.5.4 Auto CMD12 Error, IMX6ULLRM
+            (when (== (>> status 16) (>> (<< 1 INT_STATUS_AC12E) 16))
+              ;; retry once CMD12 if the Auto one fails
+              (when [err (.cmd hw 12 0 0 (.-writeTimeout hw))] (== err nil)
+                (bits/Clear (addr status) INT_STATUS_AC12E)))
+
+
+
+            (when (> (>> status 16) 0)
+              (let [msg (fmt/Sprintf "pres_state:%#x int_status:%#x" (reg/Read (.-pres_state hw)) status)]
+
+                (when (== (bits/GetN (addr status) INT_STATUS_AC12E 1) 1)
+                  (set! msg + (fmt/Sprintf " AC12:%#x" (reg/Read (.-ac12_err_status hw)))))
+
+
+                (set! err (fmt/Errorf "CMD%d:error %s" index msg))))
+
+
+            (return)))))))
+
+
+^{:go/end 252} (go/method rsp ^uint32 [^{:tag (* USDHC)} hw ^int i]
+  (when (> i 3)
+    (return 0))
+
+
+  (reg/Read (+ (.-cmd_rsp hw) (conv uint32 (* i 4)))))
+
+
+^{:go/end 258} (go/method rspVal [^{:tag (* USDHC)} hw ^int pos ^int mask] :results [^uint32 val]
+  (set! val (>> (.rsp hw (/ pos 32)) (% pos 32)))
+  (set! val bit-and (conv uint32 mask))
+  (return))
+
+
+^{:go/end 285} (go/method waitState [^{:tag (* USDHC)} hw ^int state ^time/Duration timeout] :results [^error err]
+  (let [start (time/Now)]
+
+    (while true
+      ;; CMD13 - SEND_STATUS - poll card status
+      (when [(set! err (.cmd hw 13 (.-rca hw) 0 (.-writeTimeout hw)))] (!= err nil)
+        (when (>= (time/Since start) timeout)
+          (return (fmt/Errorf "error polling card status, %v" err)))
+
+
+        (continue))
+
+
+      (let [curState (bit-and (>> (.rsp hw 0) STATUS_CURRENT_STATE) 2r1111)]
+
+        (when (== curState (conv uint32 state))
+          (break))
+
+
+        (when (>= (time/Since start) timeout)
+          (return (fmt/Errorf "expected card state %d, got %d" state curState)))))
+
+
+
+    (return)))

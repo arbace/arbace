@@ -1,0 +1,466 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.nettest) (go/file "conntest.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [rand "math/rand"]
+    ^{:line 12} [net "net"]
+    ^{:line 13} [runtime "runtime"]
+    ^{:line 14} [sync "sync"]
+    ^{:line 15} [testing "testing"]
+    ^{:line 16} [time "time"]])
+
+
+
+
+
+
+(go/type MakePipe "MakePipe creates a connection between two endpoints and returns the pair\nas c1 and c2, such that anything written to c1 is read by c2 and vice-versa.\nThe stop function closes all resources, including c1, c2, and the underlying\nnet.Listener (if there is one), and should not be nil.\n" (func [] [^net/Conn c1 ^net/Conn c2 ^{:tag (func [])} stop ^error err]))
+
+
+
+
+
+
+^{:go/end 42} (go/func TestConn "TestConn tests that a net.Conn implementation properly satisfies the interface.\nThe tests should not produce any false positives, but may experience\nfalse negatives. Thus, some issues may only be detected when the test is\nrun multiple times. For maximal effectiveness, run the tests under the\nrace detector.\n" [^{:tag (* testing/T)} t ^MakePipe mp]
+  (.Run t "BasicIO" ^{:go/end 31} (fn [^{:tag (* testing/T)} t] (timeoutWrapper t mp testBasicIO)))
+  (.Run t "PingPong" ^{:go/end 32} (fn [^{:tag (* testing/T)} t] (timeoutWrapper t mp testPingPong)))
+  (.Run t "RacyRead" ^{:go/end 33} (fn [^{:tag (* testing/T)} t] (timeoutWrapper t mp testRacyRead)))
+  (.Run t "RacyWrite" ^{:go/end 34} (fn [^{:tag (* testing/T)} t] (timeoutWrapper t mp testRacyWrite)))
+  (.Run t "ReadTimeout" ^{:go/end 35} (fn [^{:tag (* testing/T)} t] (timeoutWrapper t mp testReadTimeout)))
+  (.Run t "WriteTimeout" ^{:go/end 36} (fn [^{:tag (* testing/T)} t] (timeoutWrapper t mp testWriteTimeout)))
+  (.Run t "PastTimeout" ^{:go/end 37} (fn [^{:tag (* testing/T)} t] (timeoutWrapper t mp testPastTimeout)))
+  (.Run t "PresentTimeout" ^{:go/end 38} (fn [^{:tag (* testing/T)} t] (timeoutWrapper t mp testPresentTimeout)))
+  (.Run t "FutureTimeout" ^{:go/end 39} (fn [^{:tag (* testing/T)} t] (timeoutWrapper t mp testFutureTimeout)))
+  (.Run t "CloseTimeout" ^{:go/end 40} (fn [^{:tag (* testing/T)} t] (timeoutWrapper t mp testCloseTimeout)))
+  (.Run t "ConcurrentMethods" ^{:go/end 41} (fn [^{:tag (* testing/T)} t] (timeoutWrapper t mp testConcurrentMethods))))
+
+
+(go/type connTester (func [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]))
+
+^{:go/end 62} (go/func timeoutWrapper [^{:tag (* testing/T)} t ^MakePipe mp ^connTester f]
+  ^{:go/via [common]} (.Helper t)
+  (let [(values c1 c2 stop err) (mp)]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatalf t "unable to make pipe: %v" err))
+
+    (let [^sync/Once once (zero sync/Once)]
+      (defer (.Do once ^{:go/end 53} (fn [] (stop))))
+      (let [timer (time/AfterFunc time/Minute ^{:go/end 59} (fn []
+              (.Do once ^{:go/end 58} (fn []
+                  ^{:go/via [common]} (.Error t "test timed out; terminating pipe")
+                  (stop)))))]
+
+
+        (defer (.Stop timer))
+        (f t c1 c2)))))
+
+
+
+^{:go/end 94} (go/func testBasicIO "testBasicIO tests that the data sent on c1 is properly received on c2.\n" [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]
+  (let [want (make (slice byte) (<< 1 20))]
+    (.Read (rand/New (rand/NewSource 0)) want)
+
+    (let [dataCh (make (chan (slice byte)))]
+      (go (^{:go/end 78} (fn []
+            (let [rd (bytes/NewReader want)]
+              (when [err (chunkedCopy c1 rd)] (!= err nil)
+                ^{:go/via [common]} (.Errorf t "unexpected c1.Write error: %v" err))
+
+              (when [err (.Close c1)] (!= err nil)
+                ^{:go/via [common]} (.Errorf t "unexpected c1.Close error: %v" err))))))
+
+
+
+      (go (^{:go/end 89} (fn []
+            (let [wr (new bytes/Buffer)]
+              (when [err (chunkedCopy wr c2)] (!= err nil)
+                ^{:go/via [common]} (.Errorf t "unexpected c2.Read error: %v" err))
+
+              (when [err (.Close c2)] (!= err nil)
+                ^{:go/via [common]} (.Errorf t "unexpected c2.Close error: %v" err))
+
+              (>! dataCh (.Bytes wr))))))
+
+
+      (when [got (<! dataCh)] (not (bytes/Equal got want))
+        ^{:go/via [common]} (.Error t "transmitted data differs")))))
+
+
+
+
+
+^{:go/end 142} (go/func testPingPong "testPingPong tests that the two endpoints can synchronously send data to\neach other in a typical request-response pattern.\n" [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]
+  (let [^sync/WaitGroup wg (zero sync/WaitGroup)]
+    (defer (.Wait wg))
+
+    (let [pingPonger ^{:go/end 132} (fn [^net/Conn c]
+          (defer (.Done wg))
+          (let [buf (make (slice byte) 8)
+              ^{:line 105 :tag uint64} prev (zero uint64)]
+            (while true
+              (when [(values _ err) (io/ReadFull c buf)] (!= err nil)
+                (when (== err io/EOF)
+                  (break))
+
+                ^{:go/via [common]} (.Errorf t "unexpected Read error: %v" err))
+
+
+              (let [v (.Uint64 binary/LittleEndian buf)]
+                (.PutUint64 binary/LittleEndian buf (+ v 1))
+                (when (and (!= prev 0) (!= (+ prev 2) v))
+                  ^{:go/via [common]} (.Errorf t "mismatching value: got %d, want %d" v (+ prev 2)))
+
+                (set! prev v)
+                (when (== v 1000)
+                  (break))
+
+
+                (when [(values _ err) (.Write c buf)] (!= err nil)
+                  ^{:go/via [common]} (.Errorf t "unexpected Write error: %v" err)
+                  (break))))
+
+
+            (when [err (.Close c)] (!= err nil)
+              ^{:go/via [common]} (.Errorf t "unexpected Close error: %v" err))))]
+
+
+
+      (.Add wg 2)
+      (go (pingPonger c1))
+      (go (pingPonger c2))
+
+      ;; Start off the chain reaction.
+      (when [(values _ err) (.Write c1 (make (slice byte) 8))] (!= err nil)
+        ^{:go/via [common]} (.Errorf t "unexpected c1.Write error: %v" err)))))
+
+
+
+
+
+^{:go/end 170} (go/func testRacyRead "testRacyRead tests that it is safe to mutate the input Read buffer\nimmediately after cancellation has occurred.\n" [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]
+  (go (chunkedCopy c2 (rand/New (rand/NewSource 0))))
+
+  (let [^sync/WaitGroup wg (zero sync/WaitGroup)]
+    (defer (.Wait wg))
+
+    (.SetReadDeadline c1 (.Add (time/Now) time/Millisecond))
+    (for [i 0] (< i 10) (inc! i)
+      (.Add wg 1)
+      (go (^{:go/end 168} (fn []
+            (defer (.Done wg))
+
+            (let [b1 (make (slice byte) 1024)
+                ^{:line 159} b2 (make (slice byte) 1024)]
+              (for [j 0] (< j 100) (inc! j)
+                (let [(values _ err) (.Read c1 b1)]
+                  (copy b1 b2) ; Mutate b1 to trigger potential race
+                  (when (!= err nil)
+                    (checkForTimeoutError t err)
+                    (.SetReadDeadline c1 (.Add (time/Now) time/Millisecond))))))))))))
+
+
+
+
+
+
+
+
+^{:go/end 198} (go/func testRacyWrite "testRacyWrite tests that it is safe to mutate the input Write buffer\nimmediately after cancellation has occurred.\n" [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]
+  (go (chunkedCopy io/Discard c2))
+
+  (let [^sync/WaitGroup wg (zero sync/WaitGroup)]
+    (defer (.Wait wg))
+
+    (.SetWriteDeadline c1 (.Add (time/Now) time/Millisecond))
+    (for [i 0] (< i 10) (inc! i)
+      (.Add wg 1)
+      (go (^{:go/end 196} (fn []
+            (defer (.Done wg))
+
+            (let [b1 (make (slice byte) 1024)
+                ^{:line 187} b2 (make (slice byte) 1024)]
+              (for [j 0] (< j 100) (inc! j)
+                (let [(values _ err) (.Write c1 b1)]
+                  (copy b1 b2) ; Mutate b1 to trigger potential race
+                  (when (!= err nil)
+                    (checkForTimeoutError t err)
+                    (.SetWriteDeadline c1 (.Add (time/Now) time/Millisecond))))))))))))
+
+
+
+
+
+
+
+^{:go/end 210} (go/func testReadTimeout "testReadTimeout tests that Read timeouts do not affect Write.\n" [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]
+  (go (chunkedCopy io/Discard c2))
+
+  (.SetReadDeadline c1 aLongTimeAgo)
+  (let [(values _ err) (.Read c1 (make (slice byte) 1024))]
+    (checkForTimeoutError t err)
+    (when [(values _ err) (.Write c1 (make (slice byte) 1024))] (!= err nil)
+      ^{:go/via [common]} (.Errorf t "unexpected Write error: %v" err))))
+
+
+
+
+^{:go/end 222} (go/func testWriteTimeout "testWriteTimeout tests that Write timeouts do not affect Read.\n" [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]
+  (go (chunkedCopy c2 (rand/New (rand/NewSource 0))))
+
+  (.SetWriteDeadline c1 aLongTimeAgo)
+  (let [(values _ err) (.Write c1 (make (slice byte) 1024))]
+    (checkForTimeoutError t err)
+    (when [(values _ err) (.Read c1 (make (slice byte) 1024))] (!= err nil)
+      ^{:go/via [common]} (.Errorf t "unexpected Read error: %v" err))))
+
+
+
+
+
+^{:go/end 244} (go/func testPastTimeout "testPastTimeout tests that a deadline set in the past immediately times out\nRead and Write requests.\n" [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]
+  (go (chunkedCopy c2 c2))
+
+  (testRoundtrip t c1)
+
+  (.SetDeadline c1 aLongTimeAgo)
+  (let [(values n err) (.Write c1 (make (slice byte) 1024))]
+    (when (!= n 0)
+      ^{:go/via [common]} (.Errorf t "unexpected Write count: got %d, want 0" n))
+
+    (checkForTimeoutError t err)
+    (set! (values n err) (.Read c1 (make (slice byte) 1024)))
+    (when (!= n 0)
+      ^{:go/via [common]} (.Errorf t "unexpected Read count: got %d, want 0" n))
+
+    (checkForTimeoutError t err)
+
+    (testRoundtrip t c1)))
+
+
+
+
+^{:go/end 283} (go/func testPresentTimeout "testPresentTimeout tests that a past deadline set while there are pending\nRead and Write operations immediately times out those operations.\n" [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]
+  (let [^sync/WaitGroup wg (zero sync/WaitGroup)]
+    (defer (.Wait wg))
+    (.Add wg 3)
+
+    (let [deadlineSet (make (chan bool) 1)]
+      (go (^{:go/end 260} (fn []
+            (defer (.Done wg))
+            (time/Sleep (* 100 time/Millisecond))
+            (>! deadlineSet true)
+            (.SetReadDeadline c1 aLongTimeAgo)
+            (.SetWriteDeadline c1 aLongTimeAgo))))
+
+      (go (^{:go/end 271} (fn []
+            (defer (.Done wg))
+            (let [(values n err) (.Read c1 (make (slice byte) 1024))]
+              (when (!= n 0)
+                ^{:go/via [common]} (.Errorf t "unexpected Read count: got %d, want 0" n))
+
+              (checkForTimeoutError t err)
+              (when (== (len deadlineSet) 0)
+                ^{:go/via [common]} (.Error t "Read timed out before deadline is set"))))))
+
+
+      (go (^{:go/end 282} (fn []
+            (defer (.Done wg))
+            (let [^error err (zero error)]
+              (while (== err nil)
+                (set! (values _ err) (.Write c1 (make (slice byte) 1024))))
+
+              (checkForTimeoutError t err)
+              (when (== (len deadlineSet) 0)
+                ^{:go/via [common]} (.Error t "Write timed out before deadline is set")))))))))
+
+
+
+
+
+
+^{:go/end 310} (go/func testFutureTimeout "testFutureTimeout tests that a future deadline will eventually time out\nRead and Write operations.\n" [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]
+  (let [^sync/WaitGroup wg (zero sync/WaitGroup)]
+    (.Add wg 2)
+
+    (.SetDeadline c1 (.Add (time/Now) (* 100 time/Millisecond)))
+    (go (^{:go/end 296} (fn []
+          (defer (.Done wg))
+          (let [(values _ err) (.Read c1 (make (slice byte) 1024))]
+            (checkForTimeoutError t err)))))
+
+    (go (^{:go/end 304} (fn []
+          (defer (.Done wg))
+          (let [^error err (zero error)]
+            (while (== err nil)
+              (set! (values _ err) (.Write c1 (make (slice byte) 1024))))
+
+            (checkForTimeoutError t err)))))
+
+    (.Wait wg)
+
+    (go (chunkedCopy c2 c2))
+    (resyncConn t c1)
+    (testRoundtrip t c1)))
+
+
+
+
+^{:go/end 344} (go/func testCloseTimeout "testCloseTimeout tests that calling Close immediately times out pending\nRead and Write operations.\n" [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]
+  (go (chunkedCopy c2 c2))
+
+  (let [^sync/WaitGroup wg (zero sync/WaitGroup)]
+    (defer (.Wait wg))
+    (.Add wg 3)
+
+    ;; Test for cancellation upon connection closure.
+    (.SetDeadline c1 neverTimeout)
+    (go (^{:go/end 327} (fn []
+          (defer (.Done wg))
+          (time/Sleep (* 100 time/Millisecond))
+          (.Close c1))))
+
+    (go (^{:go/end 335} (fn []
+          (defer (.Done wg))
+          (let [^error err (zero error)
+              ^{:line 331} buf (make (slice byte) 1024)]
+            (while (== err nil)
+              (set! (values _ err) (.Read c1 buf)))))))
+
+
+    (go (^{:go/end 343} (fn []
+          (defer (.Done wg))
+          (let [^error err (zero error)
+              ^{:line 339} buf (make (slice byte) 1024)]
+            (while (== err nil)
+              (set! (values _ err) (.Write c1 buf)))))))))
+
+
+
+
+
+
+^{:go/end 392} (go/func testConcurrentMethods "testConcurrentMethods tests that the methods of net.Conn can safely\nbe called concurrently.\n" [^{:tag (* testing/T)} t ^net/Conn c1 ^net/Conn c2]
+  (when (== runtime/GOOS "plan9")
+    ^{:go/via [common]} (.Skip t "skipping on plan9; see https://golang.org/issue/20489"))
+
+  (go (chunkedCopy c2 c2))
+
+  ;; The results of the calls may be nonsensical, but this should
+  ;; not trigger a race detector warning.
+  (let [^sync/WaitGroup wg (zero sync/WaitGroup)]
+    (for [i 0] (< i 100) (inc! i)
+      (.Add wg 7)
+      (go (^{:go/end 362} (fn []
+            (defer (.Done wg))
+            (.Read c1 (make (slice byte) 1024)))))
+
+      (go (^{:go/end 366} (fn []
+            (defer (.Done wg))
+            (.Write c1 (make (slice byte) 1024)))))
+
+      (go (^{:go/end 370} (fn []
+            (defer (.Done wg))
+            (.SetDeadline c1 (.Add (time/Now) (* 10 time/Millisecond))))))
+
+      (go (^{:go/end 374} (fn []
+            (defer (.Done wg))
+            (.SetReadDeadline c1 aLongTimeAgo))))
+
+      (go (^{:go/end 378} (fn []
+            (defer (.Done wg))
+            (.SetWriteDeadline c1 aLongTimeAgo))))
+
+      (go (^{:go/end 382} (fn []
+            (defer (.Done wg))
+            (.LocalAddr c1))))
+
+      (go (^{:go/end 386} (fn []
+            (defer (.Done wg))
+            (.RemoteAddr c1)))))
+
+
+    (.Wait wg) ; At worst, the deadline is set 10ms into the future
+
+    (resyncConn t c1)
+    (testRoundtrip t c1)))
+
+
+
+
+^{:go/end 409} (go/func checkForTimeoutError "checkForTimeoutError checks that the error satisfies the Error interface\nand that Timeout returns true.\n" [^{:tag (* testing/T)} t ^error err]
+  ^{:go/via [common]} (.Helper t)
+  (if [(values nerr ok) (assert net/Error err)] ok
+    (when (not (.Timeout nerr))
+      (if (and (== runtime/GOOS "windows") (== runtime/GOARCH "arm64") (== ^{:go/via [common]} (.Name t) "TestTestConn/TCP/RacyRead"))
+        ^{:go/via [common]} (.Logf t "ignoring known failure mode on windows/arm64; see https://go.dev/issue/52893")
+
+        ^{:go/via [common]} (.Errorf t "got error: %v, want err.Timeout() = true" nerr)))
+
+
+
+    ^{:go/via [common]} (.Errorf t "got %T: %v, want net.Error" err err)))
+
+
+
+
+
+^{:go/end 430} (go/func testRoundtrip "testRoundtrip writes something into c and reads it back.\nIt assumes that everything written into c is echoed back to itself.\n" [^{:tag (* testing/T)} t ^net/Conn c]
+  ^{:go/via [common]} (.Helper t)
+  (when [err (.SetDeadline c neverTimeout)] (!= err nil)
+    ^{:go/via [common]} (.Errorf t "roundtrip SetDeadline error: %v" err))
+
+
+  (let [^:const ^{:val "Hello, world!"} s "Hello, world!"
+      ^{:line 420} buf (conv (slice byte) s)]
+    (when [(values _ err) (.Write c buf)] (!= err nil)
+      ^{:go/via [common]} (.Errorf t "roundtrip Write error: %v" err))
+
+    (when [(values _ err) (io/ReadFull c buf)] (!= err nil)
+      ^{:go/via [common]} (.Errorf t "roundtrip Read error: %v" err))
+
+    (when (!= (conv string buf) s)
+      ^{:go/via [common]} (.Errorf t "roundtrip data mismatch: got %q, want %q" buf s))))
+
+
+
+
+
+
+^{:go/end 457} (go/func resyncConn "resyncConn resynchronizes the connection into a sane state.\nIt assumes that everything written into c is echoed back to itself.\nIt assumes that 0xff is not currently on the wire or in the read buffer.\n" [^{:tag (* testing/T)} t ^net/Conn c]
+  ^{:go/via [common]} (.Helper t)
+  (.SetDeadline c neverTimeout)
+  (let [errCh (make (chan error))]
+    (go (^{:go/end 442} (fn []
+          (let [(values _ err) (.Write c (lit (slice byte) 0xff))]
+            (>! errCh err)))))
+
+    (let [buf (make (slice byte) 1024)]
+      (while true
+        (let [(values n err) (.Read c buf)]
+          (when (and (> n 0) (== (bytes/IndexByte (subslice buf _ n) 0xff) (- n 1)))
+            (break))
+
+          (when (!= err nil)
+            ^{:go/via [common]} (.Errorf t "unexpected Read error: %v" err)
+            (break))))
+
+
+      (when [err (<! errCh)] (!= err nil)
+        ^{:go/via [common]} (.Errorf t "unexpected Write error: %v" err)))))
+
+
+
+
+
+
+
+^{:go/end 467} (go/func chunkedCopy "chunkedCopy copies from r to w in fixed-width chunks to avoid\ncausing a Write that exceeds the maximum packet size for packet-based\nconnections like \"unixpacket\".\nWe assume that the maximum packet size is at least 1024.\n" ^error [^io/Writer w ^io/Reader r]
+  (let [b (make (slice byte) 1024)
+      (values _ err) (io/CopyBuffer (lit (struct io/Writer) w) (lit (struct io/Reader) r) b)]
+    ^{:line 466} err))

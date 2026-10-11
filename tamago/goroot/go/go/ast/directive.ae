@@ -1,0 +1,178 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.ast) (go/file "directive.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [token "go/token"]
+    ^{:line 10} [strconv "strconv"]
+    ^{:line 11} [strings "strings"]
+    ^{:line 12} [unicode "unicode"]
+    ^{:line 13} [utf8 "unicode/utf8"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Directive "A Directive is a comment of this form:\n\n\t//tool:name args\n\nFor example, this directive:\n\n\t//go:generate stringer -type Op -trimprefix Op\n\nwould have Tool \"go\", Name \"generate\", and Args \"stringer -type Op\n-trimprefix Op\".\n\nWhile Args does not have a strict syntax, by convention it is a\nspace-separated sequence of unquoted words, '\"'-quoted Go strings, or\n'`'-quoted raw strings.\n\nSee https://go.dev/doc/comment#directives for specification.\n" (struct
+    ^{:line 33 :tag string} Tool
+    ^{:line 34 :tag string} Name
+    ^{:line 35 :tag string} Args ; no leading or trailing whitespace
+
+
+    ^{:line 38 :tag token/Pos :doc "Slash is the position of the \"//\" at the beginning of the directive.\n"} Slash
+
+
+
+    ^{:line 42 :tag token/Pos :doc "ArgsPos is the position where Args begins, based on the position passed\nto ParseDirective.\n"} ArgsPos))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 92} (go/func ParseDirective "ParseDirective parses a single comment line for a directive comment.\n\nIf the line is not a directive comment, it returns false.\n\nThe provided text must be a single line and should include the leading \"//\".\nIf the text does not start with \"//\", it returns false.\n\nThe caller may provide a file position of the start of c. This will be used\nto track the position of the arguments. This may be [Comment.Slash],\nsynthesized by the caller, or simply 0. If the caller passes 0, then the\npositions are effectively byte offsets into the string c.\n" [^token/Pos pos ^string c] :results [Directive bool]
+  ;; Fast path to eliminate most non-directive comments. Must be a line
+  ;; comment starting with [a-z0-9]
+  (when (not (and (>= (len c) 3) (== (aget c 0) \/) (== (aget c 1) \/) (isalnum (aget c 2))))
+    (return (lit Directive) false))
+
+
+  (let [buf (lit directiveScanner c pos)]
+    (.skip buf (len "//"))
+
+    ;; Check for a valid directive and parse tool part.
+    ;;
+    ;; This logic matches isDirective. (We could combine them, but isDirective
+    ;; itself is duplicated in several places.)
+    (let [colon (strings/Index (.-str buf) ":")]
+      (when (or (<= colon 0) (>= (+ colon 1) (len (.-str buf))))
+        (return (lit Directive) false))
+
+      (for [i 0] (<= i (+ colon 1)) (inc! i)
+        (when (== i colon)
+          (continue))
+
+        (when (not (isalnum (aget (.-str buf) i)))
+          (return (lit Directive) false)))
+
+
+      (let [tool (.take buf colon)]
+        (.skip buf (len ":"))
+
+        ;; Parse name and args.
+        (let [name (.takeNonSpace buf)]
+          (.skipSpace buf)
+          (let [argsPos (.-pos buf)
+              ^{:line 89} args (strings/TrimRightFunc (.-str buf) unicode/IsSpace)]
+
+            (return (lit Directive tool name args pos argsPos) true)))))))
+
+
+^{:go/end 96} (go/func isalnum ^bool [^byte b]
+  (or (and (<= \a b) (<= b \z)) (and (<= \0 b) (<= b \9))))
+
+
+^{:go/end 98} (go/method Pos ^token/Pos [^{:tag (* Directive)} d] (.-Slash d))
+^{:go/end 99} (go/method End ^token/Pos [^{:tag (* Directive)} d] (conv token/Pos (+ (conv int (.-ArgsPos d)) (len (.-Args d)))))
+
+
+(go/type DirectiveArg "A DirectiveArg is an argument to a directive comment.\n" (struct
+
+
+    ^{:line 105 :tag string :doc "Arg is the parsed argument string. If the argument was a quoted string,\nthis is its unquoted form.\n"} Arg
+
+    ^{:line 107 :tag token/Pos :doc "Pos is the position of the first character in this argument.\n"} Pos))
+
+
+
+
+
+
+
+
+^{:go/end 148} (go/method ParseArgs "ParseArgs parses a [Directive]'s arguments using the standard convention,\nwhich is a sequence of tokens, where each token may be a bare word, or a\ndouble quoted Go string, or a back quoted raw Go string. Each token must be\nseparated by one or more Unicode spaces.\n\nIf the arguments do not conform to this syntax, it returns an error.\n" [^{:tag (* Directive)} d] :results [(slice DirectiveArg) error]
+  (let [args (lit directiveScanner (.-Args d) (.-ArgsPos d))
+
+      ^{:line 119} list (lit (slice DirectiveArg))]
+    (for [(.skipSpace args)] (!= (.-str args) "") (.skipSpace args)
+      (let [^string arg (zero string)
+          ^{:line 122} argPos (.-pos args)]
+
+        (switch (aget (.-str args) 0)
+          (default
+            (set! arg (.takeNonSpace args)))
+
+          (case [\` \"]
+            (let [(values q err) (strconv/QuotedPrefix (.-str args))]
+              (when (!= err nil) ; Always strconv.ErrSyntax
+                (return nil (fmt/Errorf "invalid quoted string in //%s:%s: %s" (.-Tool d) (.-Name d) (.-str args))))
+
+              ;; Any errors will have been returned by QuotedPrefix
+              (set! (values arg _) (strconv/Unquote (.take args (len q))))
+
+              ;; Check that the quoted string is followed by a space (or nothing)
+              (when (!= (.-str args) "")
+                (let [(values r _) (utf8/DecodeRuneInString (.-str args))]
+                  (when (not (unicode/IsSpace r))
+                    (return nil (fmt/Errorf "invalid quoted string in //%s:%s: %s" (.-Tool d) (.-Name d) (.-str args)))))))))
+
+
+
+
+        (set! list (append list (lit DirectiveArg arg argPos)))))
+
+    (return list nil)))
+
+
+
+
+(go/type directiveScanner "directiveScanner is a helper for parsing directive comments while maintaining\nposition information.\n" (struct
+    ^{:line 153 :tag string} str
+    ^{:line 154 :tag token/Pos} pos))
+
+
+^{:go/end 160} (go/method skip [^{:tag (* directiveScanner)} s ^int n]
+  (set! (.-pos s) + (conv token/Pos n))
+  (set! (.-str s) (subslice (.-str s) n)))
+
+
+^{:go/end 166} (go/method take ^string [^{:tag (* directiveScanner)} s ^int n]
+  (let [res (subslice (.-str s) _ n)]
+    (.skip s n)
+    ^{:line 165} res))
+
+
+^{:go/end 174} (go/method takeNonSpace ^string [^{:tag (* directiveScanner)} s]
+  (let [i (strings/IndexFunc (.-str s) unicode/IsSpace)]
+    (when (== i -1)
+      (set! i (len (.-str s))))
+
+    (.take s i)))
+
+
+^{:go/end 179} (go/method skipSpace [^{:tag (* directiveScanner)} s]
+  (let [trim (strings/TrimLeftFunc (.-str s) unicode/IsSpace)]
+    (.skip s (- (len (.-str s)) (len trim)))))

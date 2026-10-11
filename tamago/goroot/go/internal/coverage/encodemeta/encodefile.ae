@@ -1,0 +1,133 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.coverage.encodemeta) (go/file "encodefile.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [binary "encoding/binary"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [fnv "hash/fnv"]
+    ^{:line 12} [coverage "internal/coverage"]
+    ^{:line 13} [stringtab "internal/coverage/stringtab"]
+    ^{:line 14} [io "io"]
+    ^{:line 15} [os "os"]
+    ^{:line 16} [unsafe "unsafe"]])
+
+
+;; This package contains APIs and helpers for writing out a meta-data
+;; file (composed of a file header, offsets/lengths, and then a series of
+;; meta-data blobs emitted by the compiler, one per Go package).
+
+(go/type CoverageMetaFileWriter (struct
+    ^{:line 24 :tag stringtab/Writer} stab
+    ^{:line 25 :tag string} mfname
+    ^{:line 26 :tag (* bufio/Writer)} w
+    ^{:line 27 :tag (slice byte)} tmp
+    ^{:line 28 :tag bool} debug))
+
+
+^{:go/end 40} (go/func NewCoverageMetaFileWriter ^{:tag (* CoverageMetaFileWriter)} [^string mfname ^io/Writer w]
+  (let [r (addr ^{:go/breaks [2 4 6]} (lit CoverageMetaFileWriter
+          :mfname mfname
+          :w (bufio/NewWriter w)
+          :tmp (make (slice byte) 64)))]
+
+    (.InitWriter (.-stab r))
+    (.Lookup (.-stab r) "")
+    ^{:line 39} r))
+
+
+^{:go/end 134} (go/method Write ^error [^{:tag (* CoverageMetaFileWriter)} m ^{:tag (array 16 byte)} finalHash ^{:tag (slice (slice byte))} blobs ^coverage/CounterMode mode ^coverage/CounterGranularity granularity]
+  (let [mhsz (conv uint64 (unsafe/Sizeof (lit coverage/MetaFileHeader)))
+      ^{:line 44} stSize (.Size (.-stab m))
+      ^{:line 45} stOffset (+ mhsz (conv uint64 (* 16 (len blobs))))
+      ^{:line 46} preambleLength (+ stOffset (conv uint64 stSize))]
+
+    (when (.-debug m)
+      (fmt/Fprintf os/Stderr "=+= sizeof(MetaFileHeader)=%d\n" mhsz)
+      (fmt/Fprintf os/Stderr "=+= preambleLength=%d stSize=%d\n" preambleLength stSize))
+
+
+    ;; Compute total size
+    (let [tlen preambleLength]
+      (for [i 0] (< i (len blobs)) (inc! i)
+        (set! tlen + (conv uint64 (len (aget blobs i)))))
+
+
+      ;; Emit header
+      (let [mh ^{:go/breaks [2 4 6 8 10 12 14 16 18]} (lit coverage/MetaFileHeader
+            :Magic coverage/CovMetaMagic
+            :Version coverage/MetaFileVersion
+            :TotalLength tlen
+            :Entries (conv uint64 (len blobs))
+            :MetaFileHash finalHash
+            :StrTabOffset (conv uint32 stOffset)
+            :StrTabLength stSize
+            :CMode mode
+            :CGranularity granularity)
+
+          ^{:line 71 :tag error} err (zero error)]
+        (when [(set! err (binary/Write (.-w m) binary/LittleEndian mh))] (!= err nil)
+          (return (fmt/Errorf "error writing %s: %v" (.-mfname m) err)))
+
+
+        (when (.-debug m)
+          (fmt/Fprintf os/Stderr "=+= len(blobs) is %d\n" (.-Entries mh)))
+
+
+        ;; Emit package offsets section followed by package lengths section.
+        ^{:go/breaks [[7 133]]} (let [off preambleLength
+            ^{:line 82} off2 mhsz
+            ^{:line 83} buf (make (slice byte) 8)]
+          (range [_ blob blobs]
+            (.PutUint64 binary/LittleEndian buf off)
+            (when [(set! (values _ err) (.Write (.-w m) buf))] (!= err nil)
+              (return (fmt/Errorf "error writing %s: %v" (.-mfname m) err)))
+
+            (when (.-debug m)
+              (fmt/Fprintf os/Stderr "=+= pkg offset %d 0x%x\n" off off))
+
+            (set! off + (conv uint64 (len blob)))
+            (set! off2 + 8))
+
+          (range [_ blob blobs]
+            (let [bl (conv uint64 (len blob))]
+              (.PutUint64 binary/LittleEndian buf bl)
+              (when [(set! (values _ err) (.Write (.-w m) buf))] (!= err nil)
+                (return (fmt/Errorf "error writing %s: %v" (.-mfname m) err)))
+
+              (when (.-debug m)
+                (fmt/Fprintf os/Stderr "=+= pkg len %d 0x%x\n" bl bl))
+
+              (set! off2 + 8)))
+
+
+          ;; Emit string table
+          (when [(set! err (.Write (.-stab m) (.-w m)))] (!= err nil)
+            (return err))
+
+
+          ;; Now emit blobs themselves.
+          (range [k blob blobs]
+            (when (.-debug m)
+              (let [h (fnv/New128a)]
+                (.Write h blob)
+                (fmt/Fprintf os/Stderr "=+= writing blob %d len %d at off=%d hash %s\n" k (len blob) off2 (fmt/Sprintf "%x" (.Sum h nil)))))
+
+            (when [(set! (values _ err) (.Write (.-w m) blob))] (!= err nil)
+              (return (fmt/Errorf "error writing %s: %v" (.-mfname m) err)))
+
+            (when (.-debug m)
+              (fmt/Fprintf os/Stderr "=+= wrote package payload of %d bytes\n"
+                (len blob)))
+
+            (set! off2 + (conv uint64 (len blob))))
+
+
+          ;; Flush writer, and we're done.
+          (when [(set! err (.Flush (.-w m)))] (!= err nil)
+            (return (fmt/Errorf "error writing %s: %v" (.-mfname m) err)))
+
+          nil)))))

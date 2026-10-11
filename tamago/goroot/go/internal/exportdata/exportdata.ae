@@ -1,0 +1,354 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package exportdata implements common utilities for finding
+;; and reading gc-generated object files.
+(in-ns 'go.internal.exportdata) (go/file "exportdata.go" :doc "Package exportdata implements common utilities for finding\nand reading gc-generated object files.\n" :imports [
+
+    ;; This file should be kept in sync with src/cmd/compile/internal/gc/obj.go .
+
+
+    ^{:line 12} [bufio "bufio"]
+    ^{:line 13} [bytes "bytes"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [build "go/build"]
+    ^{:line 17} [saferio "internal/saferio"]
+    ^{:line 18} [io "io"]
+    ^{:line 19} [os "os"]
+    ^{:line 20} [exec "os/exec"]
+    ^{:line 21} [filepath "path/filepath"]
+    ^{:line 22} [strings "strings"]
+    ^{:line 23} [sync "sync"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 109} (go/func ReadUnified "ReadUnified reads the contents of the unified export data from a reader r\nthat contains the contents of a GC-created archive file.\n\nOn success, the reader will be positioned after the end-of-section marker \"\\n$$\\n\".\n\nSupported GC-created archive files have 4 layers of nesting:\n  - An archive file containing a package definition file.\n  - The package definition file contains headers followed by a data section.\n    Headers are lines (≤ 4kb) that do not start with \"$$\".\n  - The data section starts with \"$$B\\n\" followed by export data followed\n    by an end of section marker \"\\n$$\\n\". (The section start \"$$\\n\" is no\n    longer supported.)\n  - The export data starts with a format byte ('u') followed by the <data> in\n    the given format. (See ReadExportDataHeader for older formats.)\n\nPutting this together, the bytes in a GC-created archive files are expected\nto look like the following.\nSee cmd/internal/archive for more details on ar file headers.\n\n| <!arch>\\n             | ar file signature\n| __.PKGDEF...size...\\n | ar header for __.PKGDEF including size.\n| go object <...>\\n     | objabi header\n| <optional headers>\\n  | other headers such as build id\n| $$B\\n                 | binary format marker\n| u<data>\\n             | unified export <data>\n| $$\\n                  | end-of-section marker\n| [optional padding]    | padding byte (0x0A) if size is odd\n| [ar file header]      | other ar files\n| [ar file data]        |\n" [^{:tag (* bufio/Reader)} r] :results [^{:tag (slice byte)} data ^error err]
+  ;; We historically guaranteed headers at the default buffer size (4096) work.
+  ;; This ensures we can use ReadSlice throughout.
+  (let [^:const ^{:val 4096} minBufferSize 4096]
+    (set! r (bufio/NewReaderSize r minBufferSize))
+
+    (let [(values size ^:assign err) (FindPackageDefinition r)]
+      (when (!= err nil)
+        (return))
+
+      (let [n size
+
+          (values objapi headers ^:assign err) (ReadObjectHeaders r)]
+        (when (!= err nil)
+          (return))
+
+        (set! n - (len objapi))
+        (range [_ h headers]
+          (set! n - (len h)))
+
+
+        (let [(values hdrlen ^:assign err) (ReadExportDataHeader r)]
+          (when (!= err nil)
+            (return))
+
+          (set! n - hdrlen)
+
+          ;; size also includes the end of section marker. Remove that many bytes from the end.
+          (let [^:const ^{:val "\n$$\n"} marker "\n$$\n"]
+            (set! n - (len marker))
+
+            (when (< n 0)
+              (set! err (fmt/Errorf "invalid size (%d) in the archive file: %d bytes remain without section headers (recompile package)" size n))
+              (return))
+
+
+            ;; Read n bytes from buf.
+            (set! (values data err) (saferio/ReadData r (conv uint64 n)))
+            (when (!= err nil)
+              (return))
+
+
+            ;; Check for marker at the end.
+            (let [^{:tag (array (len marker) byte)} suffix (zero (array (len marker) byte))]
+              (set! (values _ err) (io/ReadFull r (subslice suffix)))
+              (when (!= err nil)
+                (return))
+
+              (when [s (conv string (subslice suffix))] (!= s marker)
+                (set! err (fmt/Errorf "read %q instead of end-of-section marker (%q)" s marker))
+                (return))
+
+
+              (return))))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 143} (go/func FindPackageDefinition "FindPackageDefinition positions the reader r at the beginning of a package\ndefinition file (\"__.PKGDEF\") within a GC-created archive by reading\nfrom it, and returns the size of the package definition file in the archive.\n\nThe reader must be positioned at the start of the archive file before calling\nthis function, and \"__.PKGDEF\" is assumed to be the first file in the archive.\n\nSee cmd/internal/archive for details on the archive format.\n" [^{:tag (* bufio/Reader)} r] :results [^int size ^error err]
+  ;; Uses ReadSlice to limit risk of malformed inputs.
+
+  ;; Read first line to make sure this is an object file.
+  (let [(values line ^:assign err) (.ReadSlice r \newline)]
+    (when (!= err nil)
+      (set! err (fmt/Errorf "can't find export data (%v)" err))
+      (return))
+
+
+    ;; Is the first line an archive file signature?
+    (when (!= (conv string line) "!<arch>\n")
+      (set! err (fmt/Errorf "not the start of an archive file (%q)" line))
+      (return))
+
+
+    ;; package export block should be first
+    (set! size (readArchiveHeader r "__.PKGDEF"))
+    (when (<= size 0)
+      (set! err (fmt/Errorf "not a package file"))
+      (return))
+
+
+    (return)))
+
+
+
+
+
+
+
+
+^{:go/end 187} (go/func ReadObjectHeaders "ReadObjectHeaders reads object headers from the reader. Object headers are\nlines that do not start with an end-of-section marker \"$$\". The first header\nis the objabi header. On success, the reader will be positioned at the beginning\nof the end-of-section marker.\n\nIt returns an error if any header does not fit in r.Size() bytes.\n" [^{:tag (* bufio/Reader)} r] :results [^string objapi ^{:tag (slice string)} headers ^error err]
+  ;; line is a temporary buffer for headers.
+  ;; Use bounded reads (ReadSlice, Peek) to limit risk of malformed inputs.
+  (let [^{:tag (slice byte)} line (zero (slice byte))]
+
+    ;; objapi header should be the first line
+    (when [(set! (values line err) (.ReadSlice r \newline))] (!= err nil)
+      (set! err (fmt/Errorf "can't find export data (%v)" err))
+      (return))
+
+    (set! objapi (conv string line))
+
+    ;; objapi header begins with "go object ".
+    (when (not (strings/HasPrefix objapi "go object "))
+      (set! err (fmt/Errorf "not a go object file: %s" objapi))
+      (return))
+
+
+    ;; process remaining object header lines
+    (while true
+      ;; check for an end of section marker "$$"
+      (set! (values line err) (.Peek r 2))
+      (when (!= err nil)
+        (return))
+
+      (when (== (conv string line) "$$")
+        (return)) ; stop
+
+
+      ;; read next header
+      (set! (values line err) (.ReadSlice r \newline))
+      (when (!= err nil)
+        (return))
+
+      (set! headers (append headers (conv string line))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 233} (go/func ReadExportDataHeader "ReadExportDataHeader reads the export data header and format from r.\nIt returns the number of bytes read, or an error if the format is no longer\nsupported or it failed to read.\n\nThe only currently supported format is binary export data in the\nunified export format.\n" [^{:tag (* bufio/Reader)} r] :results [^int n ^error err]
+  ;; Read export data header.
+  (let [(values line ^:assign err) (.ReadSlice r \newline)]
+    (when (!= err nil)
+      (return))
+
+
+    (let [hdr (conv string line)]
+      (switch hdr
+        (case ["$$\n"]
+          (set! err (fmt/Errorf "old textual export format no longer supported (recompile package)"))
+          (return))
+
+        (case ["$$B\n"]
+          (let [^byte format (zero byte)]
+            (set! (values format err) (.ReadByte r))
+            (when (!= err nil)
+              (return))
+
+            ;; The unified export format starts with a 'u'.
+            (switch format
+              (case [\u])
+              (default
+                ;; Older no longer supported export formats include:
+                ;; indexed export format which started with an 'i'; and
+                ;; the older binary export format which started with a 'c',
+                ;; 'd', or 'v' (from "version").
+                (set! err (fmt/Errorf "binary export format %q is no longer supported (recompile package)" format))
+                (return)))))
+
+
+        (default
+          (set! err (fmt/Errorf "unknown export data header: %q" hdr))
+          (return)))
+
+
+      (set! n (+ (len hdr) 1)) ; + 1 is for 'u'
+      (return))))
+
+
+
+
+
+
+^{:go/end 306} (go/func FindPkg "FindPkg returns the filename and unique package id for an import\npath based on package information provided by build.Import (using\nthe build.Default build.Context). A relative srcDir is interpreted\nrelative to the current working directory.\n" [^string path ^string srcDir] :results [^string filename ^string id ^error err]
+  (when (== path "")
+    (return "" "" (errors/New "path is empty")))
+
+
+  (let [^string noext (zero string)]
+    (switch
+      (default
+        ;; "x" -> "$GOPATH/pkg/$GOOS_$GOARCH/x.ext", "x"
+        ;; Don't require the source files to be present.
+        (when [(values abs err) (filepath/Abs srcDir)] (== err nil) ; see issue 14282
+          (set! srcDir abs))
+
+        (let [^{:tag (* build/Package)} bp (zero (* build/Package))]
+          (set! (values bp err) (build/Import path srcDir (bit-or build/FindOnly build/AllowBinary)))
+          (if (== (.-PkgObj bp) "") (do
+              (when (and (.-Goroot bp) (!= (.-Dir bp) ""))
+                (set! (values filename err) (lookupGorootExport (.-Dir bp)))
+                (when (== err nil)
+                  (set! (values _ err) (os/Stat filename)))
+
+                (when (== err nil)
+                  (return filename (.-ImportPath bp) nil)))
+
+
+              (goto :notfound))
+
+            (set! noext (strings/TrimSuffix (.-PkgObj bp) ".a")))
+
+          (set! id (.-ImportPath bp))))
+
+      (case [(build/IsLocalImport path)]
+        ;; "./x" -> "/this/directory/x.ext", "/this/directory/x"
+        (set! noext (filepath/Join srcDir path))
+        (set! id noext))
+
+      (case [(filepath/IsAbs path)]
+        ;; for completeness only - go/build.Import
+        ;; does not support absolute imports
+        ;; "/x" -> "/x.ext", "/x"
+        (set! noext path)
+        (set! id path)))
+
+
+    (when false ; for debugging
+      (when (!= path id)
+        (fmt/Printf "%s -> %s\n" path id)))
+
+
+
+    ;; try extensions
+    (range [_ ext pkgExts]
+      (set! filename (+ noext ext))
+      (let [(values f statErr) (os/Stat filename)]
+        (when (and (== statErr nil) (not (.IsDir f)))
+          (return filename id nil))
+
+        (when (== err nil)
+          (set! err statErr))))
+
+
+
+    (label :notfound
+      (when (== err nil)
+        (return "" path (fmt/Errorf "can't find import: %q" path))))
+
+    (return "" path (fmt/Errorf "can't find import: %q: %w" path err))))
+
+
+(go/var pkgExts (lit (array ... string) ".a" ".o")) ; a file from the build cache will have no extension
+
+(go/var ^sync/Map exportMap) ; package dir → func() (string, error)
+
+
+
+
+
+
+
+
+^{:go/end 355} (go/func lookupGorootExport "lookupGorootExport returns the location of the export data\n(normally found in the build cache, but located in GOROOT/pkg\nin prior Go releases) for the package located in pkgDir.\n\n(We use the package's directory instead of its import path\nmainly to simplify handling of the packages in src/vendor\nand cmd/vendor.)\n" [^string pkgDir] :results [string error]
+  (let [(values f ok) (.Load exportMap pkgDir)]
+    (when (not ok)
+      (let [
+          ^{:line 323 :tag sync/Once} listOnce (zero sync/Once)
+          ^{:line 324 :tag string} exportPath (zero string)
+          ^{:line 325 :tag error} err (zero error)]
+
+        (set! (values f _) (.LoadOrStore exportMap pkgDir ^{:go/end 351} (fn [] :results [string error]
+              (.Do listOnce ^{:go/end 348} (fn []
+                  (let [cmd (exec/Command (filepath/Join (.-GOROOT build/Default) "bin" "go") "list" "-export" "-f" "{{.Export}}" pkgDir)]
+                    (set! (.-Dir cmd) (.-GOROOT build/Default))
+                    (set! (.-Env cmd) (append (os/Environ) (+ "PWD=" (.-Dir cmd)) (+ "GOROOT=" (.-GOROOT build/Default))))
+                    (let [^{:tag (slice byte)} output (zero (slice byte))]
+                      (set! (values output err) (.Output cmd))
+                      (when (!= err nil)
+                        (when [(values ee ok) (assert (* exec/ExitError) err)] (and ok (> (len (.-Stderr ee)) 0))
+                          (set! err (errors/New (conv string (.-Stderr ee)))))
+
+                        (return))
+
+
+                      (let [exports (strings/Split (conv string (bytes/TrimSpace output)) "\n")]
+                        (when (!= (len exports) 1)
+                          (set! err (fmt/Errorf "go list reported %d exports; expected 1" (len exports)))
+                          (return))
+
+
+                        (set! exportPath (aget exports 0)))))))
+
+
+              (return exportPath err))))))
+
+
+
+    ((assert (func [] [string error]) f))))

@@ -1,0 +1,132 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package format implements standard formatting of Go source.
+;;
+;; Note that formatting of Go source code changes over time, so tools relying on
+;; consistent formatting should execute a specific version of the gofmt binary
+;; instead of using this package. That way, the formatting will be stable, and
+;; the tools won't need to be recompiled each time gofmt changes.
+;;
+;; For example, pre-submit checks that use this package directly would behave
+;; differently depending on what Go version each developer uses, causing the
+;; check to be inherently fragile.
+(in-ns 'go.go.format) (go/file "format.go" :doc "Package format implements standard formatting of Go source.\n\nNote that formatting of Go source code changes over time, so tools relying on\nconsistent formatting should execute a specific version of the gofmt binary\ninstead of using this package. That way, the formatting will be stable, and\nthe tools won't need to be recompiled each time gofmt changes.\n\nFor example, pre-submit checks that use this package directly would behave\ndifferently depending on what Go version each developer uses, causing the\ncheck to be inherently fragile.\n" :imports [
+
+
+    ^{:line 18} [bytes "bytes"]
+    ^{:line 19} [fmt "fmt"]
+    ^{:line 20} [ast "go/ast"]
+    ^{:line 21} [parser "go/parser"]
+    ^{:line 22} [printer "go/printer"]
+    ^{:line 23} [token "go/token"]
+    ^{:line 24} [io "io"]])
+
+
+
+(go/const "Keep these in sync with cmd/gofmt/gofmt.go.\n"
+  ^{:line 29} [^{:val 8} tabWidth 8]
+  ^{:line 30} [^{:val 1073741830} printerMode (bit-or printer/UseSpaces printer/TabIndent printerNormalizeNumbers)]
+
+
+
+
+
+  ^{:line 36} [^{:val 1073741824 :doc "printerNormalizeNumbers means to canonicalize number literal prefixes\nand exponents while printing. See https://golang.org/doc/go1.13#gofmt.\n\nThis value is defined in go/printer specifically for go/format and cmd/gofmt.\n"} printerNormalizeNumbers (<< 1 30)])
+
+
+(go/var config (lit printer/Config :Mode printerMode :Tabwidth tabWidth))
+
+(go/const ^{:val 68} parserMode (bit-or parser/ParseComments parser/SkipObjectResolution))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 91} (go/func Node "Node formats node in canonical gofmt style and writes the result to dst.\n\nThe node type must be *[ast.File], *[printer.CommentedNode], [][ast.Decl],\n[][ast.Stmt], or assignment-compatible to [ast.Expr], [ast.Decl], [ast.Spec],\nor [ast.Stmt]. Node does not modify node. Imports are not sorted for\nnodes representing partial source files (for instance, if the node is\nnot an *[ast.File] or a *[printer.CommentedNode] not wrapping an *[ast.File]).\n\nThe function may return early (before the entire result is written)\nand return a formatting error, for instance due to an incorrect AST.\n" ^error [^io/Writer dst ^{:tag (* token/FileSet)} fset ^any node]
+  ;; Determine if we have a complete source file (file != nil).
+  (let [^{:tag (* ast/File)} file (zero (* ast/File))
+      ^{:line 56 :tag (* printer/CommentedNode)} cnode (zero (* printer/CommentedNode))]
+    (type-switch [n node]
+      (case [(* ast/File)]
+        (set! file n))
+      (case [(* printer/CommentedNode)]
+        (when [(values f ok) (assert (* ast/File) (.-Node n))] ok
+          (set! file f)
+          (set! cnode n))))
+
+
+
+    ;; Sort imports if necessary.
+    (when (and (!= file nil) (hasUnsortedImports file))
+      ;; Make a copy of the AST because ast.SortImports is destructive.
+      ;; TODO(gri) Do this more efficiently.
+      (let [^bytes/Buffer buf (zero bytes/Buffer)
+          ^{:line 72} err (.Fprint config (addr buf) fset file)]
+        (when (!= err nil)
+          (return err))
+
+        (set! (values file err) (parser/ParseFile fset "" (.Bytes buf) parserMode))
+        (when (!= err nil)
+          ;; We should never get here. If we do, provide good diagnostic.
+          (return (fmt/Errorf "format.Node internal error (%s)" err)))
+
+        (ast/SortImports fset file)
+
+        ;; Use new file with sorted imports.
+        (set! node file)
+        (when (!= cnode nil)
+          (set! node (addr (lit printer/CommentedNode :Node file :Comments (.-Comments cnode)))))))
+
+
+
+    (.Fprint config dst fset node)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 115} (go/func Source "Source formats src in canonical gofmt style and returns the result\nor an (I/O or syntax) error. src is expected to be a syntactically\ncorrect Go source file, or a list of Go declarations or statements.\n\nIf src is a partial source file, the leading and trailing space of src\nis applied to the result (such that it has the same leading and trailing\nspace as src), and the result is indented by the same amount as the first\nline of src containing code. Imports are not sorted for partial source files.\n" [^{:tag (slice byte)} src] :results [(slice byte) error]
+  (let [fset (token/NewFileSet)
+      (values file sourceAdj indentAdj err) (parse fset "" src true)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (when (== sourceAdj nil)
+      ;; Complete source file.
+      ;; TODO(gri) consider doing this always.
+      (ast/SortImports fset file))
+
+
+    (format fset file sourceAdj indentAdj src config)))
+
+
+^{:go/breaks [[4 132]] :go/end 133} (go/func hasUnsortedImports ^bool [^{:tag (* ast/File)} file]
+  (range [_ d (.-Decls file)]
+    (let [(values d ok) (assert (* ast/GenDecl) d)]
+      (when (or (not ok) (!= (.-Tok d) token/IMPORT))
+        ;; Not an import declaration, so we're done.
+        ;; Imports are always first.
+        (return false))
+
+      (when (.IsValid (.-Lparen d))
+        ;; For now assume all grouped imports are unsorted.
+        ;; TODO(gri) Should check if they are sorted already.
+        (return true))))
+
+  ;; Ungrouped imports are sorted by default.
+
+  false)

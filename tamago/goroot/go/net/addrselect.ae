@@ -1,0 +1,367 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Minimal RFC 6724 address selection.
+
+(in-ns 'go.net) (go/file "addrselect.go" :imports [
+
+
+    ^{:line 10} [netip "net/netip"]
+    ^{:line 11} [slices "slices"]])
+
+
+^{:go/end 19} (go/func sortByRFC6724 [^{:tag (slice IPAddr)} addrs]
+  (when (< (len addrs) 2)
+    (return))
+
+  (sortByRFC6724withSrcs addrs (srcAddrs addrs)))
+
+
+^{:go/end 39} (go/func sortByRFC6724withSrcs [^{:tag (slice IPAddr)} addrs ^{:tag (slice netip/Addr)} srcs]
+  (when (!= (len addrs) (len srcs))
+    (panic "internal error"))
+
+  (let [addrInfos (make (slice byRFC6724Info) (len addrs))]
+    (range [i v addrs]
+      (let [(values addrAttrIP _) (netip/AddrFromSlice (.-IP v))]
+        (aset addrInfos i ^{:go/breaks [2 4 6 8]} (lit byRFC6724Info
+            :addr (aget addrs i)
+            :addrAttr (ipAttrOf addrAttrIP)
+            :src (aget srcs i)
+            :srcAttr (ipAttrOf (aget srcs i))))))
+
+
+    (^{:inst [(slice byRFC6724Info) byRFC6724Info]} slices/SortStableFunc addrInfos compareByRFC6724)
+    (range [i addrInfos]
+      (aset addrs i (.-addr (aget addrInfos i))))))
+
+
+
+
+
+
+^{:go/end 59} (go/func srcAddrs "srcAddrs tries to UDP-connect to each address to see if it has a\nroute. (This doesn't send any packets). The destination port\nnumber is irrelevant.\n" ^{:tag (slice netip/Addr)} [^{:tag (slice IPAddr)} addrs]
+  (let [srcs (make (slice netip/Addr) (len addrs))
+      ^{:line 46} dst (lit UDPAddr :Port 53)]
+    (range [i addrs]
+      (set! (.-IP dst) (.-IP (aget addrs i)))
+      (set! (.-Zone dst) (.-Zone (aget addrs i)))
+      (let [(values c err) (DialUDP "udp" nil (addr dst))]
+        (when (== err nil)
+          (when [(values src ok) (assert (* UDPAddr) ^{:go/via [conn]} (.LocalAddr c))] ok
+            (set! (values (aget srcs i) _) (netip/AddrFromSlice (.-IP src))))
+
+          ^{:go/via [conn]} (.Close c))))
+
+
+    ^{:line 58} srcs))
+
+
+(go/type ipAttr (struct
+    ^{:line 62 :tag scope} Scope
+    ^{:line 63 :tag uint8} Precedence
+    ^{:line 64 :tag uint8} Label))
+
+
+^{:go/end 77} (go/func ipAttrOf ^ipAttr [^netip/Addr ip]
+  (when (not (.IsValid ip))
+    (return (lit ipAttr)))
+
+  (let [match (.Classify rfc6724policyTable ip)]
+    ^{:go/breaks [2 4 6]} (lit ipAttr
+      :Scope (classifyScope ip)
+      :Precedence (.-Precedence match)
+      :Label (.-Label match))))
+
+
+
+(go/type byRFC6724Info (struct
+    ^{:line 80 :tag IPAddr} addr
+    ^{:line 81 :tag ipAttr} addrAttr
+    ^{:line 82 :tag netip/Addr} src
+    ^{:line 83 :tag ipAttr} srcAttr))
+
+
+
+
+
+
+^{:go/end 208} (go/func compareByRFC6724 "compareByRFC6724 compares two byRFC6724Info records and returns an integer\nindicating the order. It follows the algorithm and variable names from\nRFC 6724 section 6. Returns -1 if a is preferred, 1 if b is preferred,\nand 0 if they are equal.\n" ^int [^byRFC6724Info a ^byRFC6724Info b]
+  ^{:go/breaks [[14 207]]} (let [DA (.-IP (.-addr a))
+      ^{:line 92} DB (.-IP (.-addr b))
+      ^{:line 93} SourceDA (.-src a)
+      ^{:line 94} SourceDB (.-src b)
+      ^{:line 95} attrDA (addr (.-addrAttr a))
+      ^{:line 96} attrDB (addr (.-addrAttr b))
+      ^{:line 97} attrSourceDA (addr (.-srcAttr a))
+      ^{:line 98} attrSourceDB (addr (.-srcAttr b))
+
+      ^:const ^{:line 100 :val -1} preferDA -1
+      ^:const ^{:line 101 :val 1} preferDB 1]
+
+    ;; Rule 1: Avoid unusable destinations.
+    ;; If DB is known to be unreachable or if Source(DB) is undefined, then
+    ;; prefer DA.  Similarly, if DA is known to be unreachable or if
+    ;; Source(DA) is undefined, then prefer DB.
+    (when (and (not (.IsValid SourceDA)) (not (.IsValid SourceDB)))
+      (return 0)) ; "equal"
+
+    (when (not (.IsValid SourceDB))
+      (return preferDA))
+
+    (when (not (.IsValid SourceDA))
+      (return preferDB))
+
+
+    ;; Rule 2: Prefer matching scope.
+    ;; If Scope(DA) = Scope(Source(DA)) and Scope(DB) <> Scope(Source(DB)),
+    ;; then prefer DA.  Similarly, if Scope(DA) <> Scope(Source(DA)) and
+    ;; Scope(DB) = Scope(Source(DB)), then prefer DB.
+    (when (and (== (.-Scope attrDA) (.-Scope attrSourceDA)) (!= (.-Scope attrDB) (.-Scope attrSourceDB)))
+      (return preferDA))
+
+    (when (and (!= (.-Scope attrDA) (.-Scope attrSourceDA)) (== (.-Scope attrDB) (.-Scope attrSourceDB)))
+      (return preferDB))
+
+
+    ;; Rule 3: Avoid deprecated addresses.
+    ;; If Source(DA) is deprecated and Source(DB) is not, then prefer DB.
+    ;; Similarly, if Source(DA) is not deprecated and Source(DB) is
+    ;; deprecated, then prefer DA.
+
+    ;; TODO(bradfitz): implement? low priority for now.
+
+    ;; Rule 4: Prefer home addresses.
+    ;; If Source(DA) is simultaneously a home address and care-of address
+    ;; and Source(DB) is not, then prefer DA.  Similarly, if Source(DB) is
+    ;; simultaneously a home address and care-of address and Source(DA) is
+    ;; not, then prefer DB.
+
+    ;; TODO(bradfitz): implement? low priority for now.
+
+    ;; Rule 5: Prefer matching label.
+    ;; If Label(Source(DA)) = Label(DA) and Label(Source(DB)) <> Label(DB),
+    ;; then prefer DA.  Similarly, if Label(Source(DA)) <> Label(DA) and
+    ;; Label(Source(DB)) = Label(DB), then prefer DB.
+    (when (and (== (.-Label attrSourceDA) (.-Label attrDA))
+        (!= (.-Label attrSourceDB) (.-Label attrDB)))
+      (return preferDA))
+
+    (when (and (!= (.-Label attrSourceDA) (.-Label attrDA))
+        (== (.-Label attrSourceDB) (.-Label attrDB)))
+      (return preferDB))
+
+
+    ;; Rule 6: Prefer higher precedence.
+    ;; If Precedence(DA) > Precedence(DB), then prefer DA.  Similarly, if
+    ;; Precedence(DA) < Precedence(DB), then prefer DB.
+    (when (> (.-Precedence attrDA) (.-Precedence attrDB))
+      (return preferDA))
+
+    (when (< (.-Precedence attrDA) (.-Precedence attrDB))
+      (return preferDB))
+
+
+    ;; Rule 7: Prefer native transport.
+    ;; If DA is reached via an encapsulating transition mechanism (e.g.,
+    ;; IPv6 in IPv4) and DB is not, then prefer DB.  Similarly, if DB is
+    ;; reached via encapsulation and DA is not, then prefer DA.
+
+    ;; TODO(bradfitz): implement? low priority for now.
+
+    ;; Rule 8: Prefer smaller scope.
+    ;; If Scope(DA) < Scope(DB), then prefer DA.  Similarly, if Scope(DA) >
+    ;; Scope(DB), then prefer DB.
+    (when (< (.-Scope attrDA) (.-Scope attrDB))
+      (return preferDA))
+
+    (when (> (.-Scope attrDA) (.-Scope attrDB))
+      (return preferDB))
+
+
+    ;; Rule 9: Use the longest matching prefix.
+    ;; When DA and DB belong to the same address family (both are IPv6 or
+    ;; both are IPv4 [but see below]): If CommonPrefixLen(Source(DA), DA) >
+    ;; CommonPrefixLen(Source(DB), DB), then prefer DA.  Similarly, if
+    ;; CommonPrefixLen(Source(DA), DA) < CommonPrefixLen(Source(DB), DB),
+    ;; then prefer DB.
+    ;;
+    ;; However, applying this rule to IPv4 addresses causes
+    ;; problems (see issues 13283 and 18518), so limit to IPv6.
+    (when (and (== (.To4 DA) nil) (== (.To4 DB) nil))
+      (let [commonA (commonPrefixLen SourceDA DA)
+          ^{:line 194} commonB (commonPrefixLen SourceDB DB)]
+
+        (when (> commonA commonB)
+          (return preferDA))
+
+        (when (< commonA commonB)
+          (return preferDB))))
+
+
+
+    ;; Rule 10: Otherwise, leave the order unchanged.
+    ;; If DA preceded DB in the original list, prefer DA.
+    ;; Otherwise, prefer DB.
+    0)) ; "equal"
+
+
+(go/type policyTableEntry (struct
+    ^{:line 211 :tag netip/Prefix} Prefix
+    ^{:line 212 :tag uint8} Precedence
+    ^{:line 213 :tag uint8} Label))
+
+
+(go/type policyTable (slice policyTableEntry))
+
+
+
+(go/var ^{:doc "RFC 6724 section 2.1.\nItems are sorted by the size of their Prefix.Mask.Size,\n"} rfc6724policyTable (lit policyTable
+    ^{:go/breaks [[2 223] 4 6]} (lit _
+      ;; "::1/128"
+      :Prefix (netip/PrefixFrom (netip/AddrFrom16 (lit (array 16 byte) 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0x01)) 128)
+      :Precedence 50
+      :Label 0)
+
+    ^{:go/breaks [[2 230] 4 6]} (lit _
+      ;; "::ffff:0:0/96"
+      ;; IPv4-compatible, etc.
+      :Prefix (netip/PrefixFrom (netip/AddrFrom16 (lit (array 16 byte) 0 0 0 0 0 0 0 0 0 0 0xff 0xff)) 96)
+      :Precedence 35
+      :Label 4)
+
+    ^{:go/breaks [[2 236] 4 6]} (lit _
+      ;; "::/96"
+      :Prefix (netip/PrefixFrom (netip/AddrFrom16 (lit (array 16 byte))) 96)
+      :Precedence 1
+      :Label 3)
+
+    ^{:go/breaks [[2 243] 4 6]} (lit _
+      ;; "2001::/32"
+      ;; Teredo
+      :Prefix (netip/PrefixFrom (netip/AddrFrom16 (lit (array 16 byte) 0x20 0x01)) 32)
+      :Precedence 5
+      :Label 5)
+
+    ^{:go/breaks [[2 250] 4 6]} (lit _
+      ;; "2002::/16"
+      ;; 6to4
+      :Prefix (netip/PrefixFrom (netip/AddrFrom16 (lit (array 16 byte) 0x20 0x02)) 16)
+      :Precedence 30
+      :Label 2)
+
+    ^{:go/breaks [[2 256] 4 6]} (lit _
+      ;; "3ffe::/16"
+      :Prefix (netip/PrefixFrom (netip/AddrFrom16 (lit (array 16 byte) 0x3f 0xfe)) 16)
+      :Precedence 1
+      :Label 12)
+
+    ^{:go/breaks [[2 262] 4 6]} (lit _
+      ;; "fec0::/10"
+      :Prefix (netip/PrefixFrom (netip/AddrFrom16 (lit (array 16 byte) 0xfe 0xc0)) 10)
+      :Precedence 1
+      :Label 11)
+
+    ^{:go/breaks [[2 268] 4 6]} (lit _
+      ;; "fc00::/7"
+      :Prefix (netip/PrefixFrom (netip/AddrFrom16 (lit (array 16 byte) 0xfc)) 7)
+      :Precedence 3
+      :Label 13)
+
+    ^{:go/breaks [[2 274] 4 6]} (lit _
+      ;; "::/0"
+      :Prefix (netip/PrefixFrom (netip/AddrFrom16 (lit (array 16 byte))) 0)
+      :Precedence 40
+      :Label 1)))
+
+
+
+
+
+
+^{:go/end 294} (go/method Classify "Classify returns the policyTableEntry of the entry with the longest\nmatching prefix that contains ip.\nThe table t must be sorted from largest mask size to smallest.\n" ^policyTableEntry [^policyTable t ^netip/Addr ip]
+  ;; Prefix.Contains() will not match an IPv6 prefix for an IPv4 address.
+  (when (.Is4 ip)
+    (set! ip (netip/AddrFrom16 (.As16 ip))))
+
+  (range [_ ent t]
+    (when (.Contains (.-Prefix ent) ip)
+      (return ent)))
+
+
+  (lit policyTableEntry))
+
+
+
+(go/type scope "RFC 6724 section 3.1.\n" uint8)
+
+(go/const
+  ^{:line 300} [^{:tag scope :val 1} scopeInterfaceLocal 0x1]
+  ^{:line 301} [^{:tag scope :val 2} scopeLinkLocal 0x2]
+  ^{:line 302} [^{:tag scope :val 4} scopeAdminLocal 0x4]
+  ^{:line 303} [^{:tag scope :val 5} scopeSiteLocal 0x5]
+  ^{:line 304} [^{:tag scope :val 8} scopeOrgLocal 0x8]
+  ^{:line 305} [^{:tag scope :val 14} scopeGlobal 0xe])
+
+
+^{:go/end 323} (go/func classifyScope ^scope [^netip/Addr ip]
+  (when (or (.IsLoopback ip) (.IsLinkLocalUnicast ip))
+    (return scopeLinkLocal))
+
+  (let [ipv6 (and (.Is6 ip) (not (.Is4In6 ip)))
+      ^{:line 313} ipv6AsBytes (.As16 ip)]
+    (when (and ipv6 (.IsMulticast ip))
+      (return (conv scope (bit-and (aget ipv6AsBytes 1) 0xf))))
+
+    ;; Site-local addresses are defined in RFC 3513 section 2.5.6
+    ;; (and deprecated in RFC 3879).
+    (when (and ipv6 (== (aget ipv6AsBytes 0) 0xfe) (== (bit-and (aget ipv6AsBytes 1) 0xc0) 0xc0))
+      (return scopeSiteLocal))
+
+    ^{:line 322} scopeGlobal))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 368} (go/func commonPrefixLen "commonPrefixLen reports the length of the longest prefix (looking\nat the most significant, or leftmost, bits) that the\ntwo addresses have in common, up to the length of a's prefix (i.e.,\nthe portion of the address not including the interface ID).\n\nIf a or b is an IPv4 address as an IPv6 address, the IPv4 addresses\nare compared (with max common prefix length of 32).\nIf a and b are different IP versions, 0 is returned.\n\nSee https://tools.ietf.org/html/rfc6724#section-2.2\n" [^netip/Addr a ^IP b] :results [^int cpl]
+  (when [b4 (.To4 b)] (!= b4 nil)
+    (set! b b4))
+
+  (let [aAsSlice (.AsSlice a)]
+    (when (!= (len aAsSlice) (len b))
+      (return 0))
+
+    ;; If IPv6, only up to the prefix (first 64 bits)
+    (when (> (len aAsSlice) 8)
+      (set! aAsSlice (subslice aAsSlice _ 8))
+      (set! b (subslice b _ 8)))
+
+    (while (> (len aAsSlice) 0)
+      (when (== (aget aAsSlice 0) (aget b 0))
+        (set! cpl + 8)
+        (set! aAsSlice (subslice aAsSlice 1))
+        (set! b (subslice b 1))
+        (continue))
+
+      (let [bits 8
+          (values ab bb) (values (aget aAsSlice 0) (aget b 0))]
+        (while true
+          (set! ab >> 1)
+          (set! bb >> 1)
+          (dec! bits)
+          (when (== ab bb)
+            (set! cpl + bits)
+            (return)))))
+
+
+
+    (return)))

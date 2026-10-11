@@ -1,0 +1,130 @@
+;; NXP Random Number Generator (RNGB) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package rngb implements a driver for the NXP True Random Number Generator
+;; (RNGB) adopting the following specifications:
+;;   - IMX6ULLRM - i.MX 6ULL Applications Processor Reference Manual - Rev 1 2017/11
+;;
+;; This package is only meant to be used with `GOOS=tamago` as supported by the
+;; TamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.rngb) (go/file "rngb.go" :doc "Package rngb implements a driver for the NXP True Random Number Generator\n(RNGB) adopting the following specifications:\n  - IMX6ULLRM - i.MX 6ULL Applications Processor Reference Manual - Rev 1 2017/11\n\nThis package is only meant to be used with `GOOS=tamago` as supported by the\nTamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 18} [sync "sync"]
+
+    ^{:line 20} [reg "github.com/usbarmory/tamago/internal/reg"]
+    ^{:line 21} [rng "github.com/usbarmory/tamago/internal/rng"]])
+
+
+
+(go/const "RNGB registers\n"
+  ^{:line 26} [^{:val 4} RNG_CMD 0x04]
+  ^{:line 27} [^{:val 6} RNG_CMD_SR 6]
+  ^{:line 28} [^{:val 5} RNG_CMD_CE 5]
+  ^{:line 29} [^{:val 4} RNG_CMD_CI 4]
+  ^{:line 30} [^{:val 1} RNG_CMD_GS 1]
+  ^{:line 31} [^{:val 0} RNG_CMD_ST 0]
+
+  ^{:line 33} [^{:val 8} RNG_CR 0x08]
+  ^{:line 34} [^{:val 4} RNG_CR_AR 4]
+  ^{:line 35} [^{:val 1} RNG_CR_GS 1]
+
+  ^{:line 37} [^{:val 12} RNG_SR 0x0c]
+  ^{:line 38} [^{:val 21} RNG_SR_ST_PF 21]
+  ^{:line 39} [^{:val 16} RNG_SR_ERR 16]
+  ^{:line 40} [^{:val 8} RNG_SR_FIFO_LVL 8]
+  ^{:line 41} [^{:val 5} RNG_SR_SDN 5]
+  ^{:line 42} [^{:val 4} RNG_SR_STDN 4]
+
+  ^{:line 44} [^{:val 16} RNG_ESR 0x10]
+  ^{:line 45} [^{:val 20} RNG_OUT 0x14])
+
+
+
+(go/type RNGB "RNGB represents the RNGB instance.\n" (struct
+    ^{:line 50} sync/Mutex
+
+
+    ^{:line 53 :tag uint32 :doc "Base register\n"} Base
+
+
+    ^{:line 56 :tag uint32 :doc "control registers\n"} cmd
+    ^{:line 57 :tag uint32} cr
+    ^{:line 58 :tag uint32} sr
+    ^{:line 59 :tag uint32} esr
+    ^{:line 60 :tag uint32} out))
+
+
+
+^{:go/end 70} (go/method Reset "Reset resets the RNGB module.\n" [^{:tag (* RNGB)} hw]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  ;; soft reset RNGB
+  (reg/Set (.-cmd hw) RNG_CMD_SR))
+
+
+
+^{:go/end 117} (go/method Init "Init initializes the RNGB module with automatic seeding.\n" [^{:tag (* RNGB)} hw]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (== (.-Base hw) 0)
+    (panic "invalid RNGB instance"))
+
+
+  (set! (.-cmd hw) (+ (.-Base hw) RNG_CMD))
+  (set! (.-cr hw) (+ (.-Base hw) RNG_CR))
+  (set! (.-sr hw) (+ (.-Base hw) RNG_SR))
+  (set! (.-esr hw) (+ (.-Base hw) RNG_ESR))
+  (set! (.-out hw) (+ (.-Base hw) RNG_OUT))
+
+  ;; p3105, 44.5.2 Automatic seeding, IMX6ULLRM
+
+  ;; clear errors
+  (reg/Set (.-cmd hw) RNG_CMD_CE)
+
+  ;; soft reset RNGB
+  (reg/Set (.-cmd hw) RNG_CMD_SR)
+
+  ;; perform self-test
+  (reg/Set (.-cmd hw) RNG_CMD_ST)
+
+  (while (!= (reg/GetN (.-sr hw) RNG_SR_STDN 1) 1))
+  ;; reg.Wait cannot be used before runtime initialization
+
+
+  (when (or (!= (reg/GetN (.-sr hw) RNG_SR_ERR 1) 0) (!= (reg/GetN (.-sr hw) RNG_SR_ST_PF 1) 0))
+    (panic "rngb self-test failure"))
+
+
+  ;; enable auto-reseed
+  (reg/Set (.-cr hw) RNG_CR_AR)
+  ;; generate a seed
+  (reg/Set (.-cmd hw) RNG_CR_GS)
+
+  (while (!= (reg/GetN (.-sr hw) RNG_SR_SDN 1) 1))
+  ;; reg.Wait cannot be used before runtime initialization
+
+
+  ;; clear interrupts
+  (reg/Set (.-cmd hw) RNG_CMD_CI))
+
+
+
+^{:go/end 133} (go/method GetRandomData "GetRandomData returns len(b) random bytes gathered from the RNGB module.\n" [^{:tag (* RNGB)} hw ^{:tag (slice byte)} b]
+  (let [read 0
+      ^{:line 122} need (len b)]
+
+    (while (< read need)
+      (when (!= (reg/GetN (.-sr hw) RNG_SR_ERR 1) 0)
+        (panic "rngb error"))
+
+
+      (when (> (reg/GetN (.-sr hw) RNG_SR_FIFO_LVL 2r1111) 0)
+        (set! read (rng/Fill b read (reg/Read (.-out hw))))))))

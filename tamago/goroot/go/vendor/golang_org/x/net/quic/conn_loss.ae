@@ -1,0 +1,82 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "conn_loss.go" :imports [
+
+    ^{:line 7} [fmt "fmt"]])
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 85} (go/method handleAckOrLoss "handleAckOrLoss deals with the final fate of a packet we sent:\nEither the peer acknowledges it, or we declare it lost.\n\nIn order to handle packet loss, we must retain any information sent to the peer\nuntil the peer has acknowledged it.\n\nWhen information is acknowledged, we can discard it.\n\nWhen information is lost, we mark it for retransmission.\nSee RFC 9000, Section 13.3 for a complete list of information which is retransmitted on loss.\nhttps://www.rfc-editor.org/rfc/rfc9000#section-13.3\n" [^{:tag (* Conn)} c ^numberSpace space ^{:tag (* sentPacket)} sent ^packetFate fate]
+  (when (and (== fate packetLost) (.logEnabled c QLogLevelPacket))
+    (.logPacketLost c space sent))
+
+
+  ;; The list of frames in a sent packet is marshaled into a buffer in the sentPacket
+  ;; by the packetWriter. Unmarshal that buffer here. This code must be kept in sync with
+  ;; packetWriter.append*.
+  ;;
+  ;; A sent packet meets its fate (acked or lost) only once, so it's okay to consume
+  ;; the sentPacket's buffer here.
+  (while (not (.done sent))
+    (switch [f (.next sent)] f
+      (default
+        (panic (fmt/Sprintf "BUG: unhandled acked/lost frame type %x" f)))
+      (case [frameTypeAck frameTypeAckECN]
+        ;; Unlike most information, loss of an ACK frame does not trigger
+        ;; retransmission. ACKs are sent in response to ack-eliciting packets,
+        ;; and always contain the latest information available.
+        ;;
+        ;; Acknowledgement of an ACK frame may allow us to discard information
+        ;; about older packets.
+        (let [largest (conv packetNumber (.nextInt sent))]
+          (when (== fate packetAcked)
+            (.handleAck (aget (.-acks c) space) largest))))
+
+      (case [frameTypeCrypto]
+        (let [(values start end) (.nextRange sent)]
+          (.ackOrLoss (aget (.-crypto c) space) start end fate)))
+      (case [frameTypeMaxData]
+        (.ackOrLossMaxData c (.-num sent) fate))
+      (case [frameTypeResetStream
+          ^{:line 52} frameTypeStopSending
+          ^{:line 53} frameTypeMaxStreamData
+          ^{:line 54} frameTypeStreamDataBlocked]
+        (let [id (conv streamID (.nextInt sent))
+            ^{:line 56} s (.streamForID c id)]
+          (when (== s nil)
+            (continue))
+
+          (.ackOrLoss s (.-num sent) f fate)))
+      (case [frameTypeStreamBase
+          (bit-or frameTypeStreamBase streamFinBit)]
+        (let [id (conv streamID (.nextInt sent))
+            (values start end) (.nextRange sent)
+            ^{:line 65} s (.streamForID c id)]
+          (when (== s nil)
+            (continue))
+
+          (let [fin (!= (bit-and f streamFinBit) 0)]
+            (.ackOrLossData s (.-num sent) start end fin fate))))
+      (case [frameTypeMaxStreamsBidi]
+        (.ackLatestOrLoss (.-sendMax (aget (.-remoteLimit (.-streams c)) bidiStream)) (.-num sent) fate))
+      (case [frameTypeMaxStreamsUni]
+        (.ackLatestOrLoss (.-sendMax (aget (.-remoteLimit (.-streams c)) uniStream)) (.-num sent) fate))
+      (case [frameTypeNewConnectionID]
+        (let [seq (conv int64 (.nextInt sent))]
+          (.ackOrLossNewConnectionID (.-connIDState c) (.-num sent) seq fate)))
+      (case [frameTypeRetireConnectionID]
+        (let [seq (conv int64 (.nextInt sent))]
+          (.ackOrLossRetireConnectionID (.-connIDState c) (.-num sent) seq fate)))
+      (case [frameTypeHandshakeDone]
+        (.ackOrLoss (.-handshakeConfirmed c) (.-num sent) fate)))))

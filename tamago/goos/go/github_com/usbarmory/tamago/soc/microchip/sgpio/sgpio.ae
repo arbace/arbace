@@ -1,0 +1,137 @@
+;; Microchip Serial GPIO support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package sgpio implements the Serial GPIO controller found on Microchip
+;; LAN969x SoCs under the following specification:
+;;   - Microchip - LAN9694/LAN9696/LAN9698 Datasheet - DS00005048E (02-27-25)
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=arm64` as
+;; supported by the TamaGo framework for bare metal Go, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.microchip.sgpio) (go/file "sgpio.go" :doc "Package sgpio implements the Serial GPIO controller found on Microchip\nLAN969x SoCs under the following specification:\n  - Microchip - LAN9694/LAN9696/LAN9698 Datasheet - DS00005048E (02-27-25)\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=arm64` as\nsupported by the TamaGo framework for bare metal Go, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 19} [errors "errors"]
+    ^{:line 20} [fmt "fmt"]
+    ^{:line 21} [sync "sync"]
+
+    ^{:line 23} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 24} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+(go/const
+  ^{:line 28} [^{:val 16} SIO_CFG 0x10]
+  ^{:line 29} [^{:val 3} CFG_SIO_PORT_WIDTH 3]
+  ^{:line 30} [^{:val 3} CFG_SIO_PORT_WIDTH_MASK 0x3]
+  ^{:line 31} [^{:val 6} CFG_SIO_AUTO_REPEAT 6]
+
+  ^{:line 33} [^{:val 20} SIO_CLOCK 0x14]
+  ^{:line 34} [^{:val 0} CLOCK_SYS_CLK_PERIOD 0]
+  ^{:line 35} [^{:val 255} CLOCK_SYS_CLK_PERIOD_MASK 0xff]
+  ^{:line 36} [^{:val 8} CLOCK_SIO_CLK_FREQ 8]
+  ^{:line 37} [^{:val 4095} CLOCK_SIO_CLK_FREQ_MASK 0xfff]
+
+  ^{:line 39} [^{:val 24} SIO_PORT_CFG 0x18]
+  ^{:line 40} [^{:val 12} PORT_CFG_BIT_SOURCE 12]
+  ^{:line 41} [^{:val 7} PORT_CFG_BIT_SOURCE_MASK 0x7]
+  ^{:line 42} [^{:val 0} BIT_SOURCE_FORCED_LOW 0]
+  ^{:line 43} [^{:val 1} BIT_SOURCE_FORCED_HIGH 1]
+
+  ^{:line 45} [^{:val 152} SIO_PORT_ENA 0x98]
+
+  ^{:line 47} [^{:val 32} PORT_COUNT 32]
+  ^{:line 48} [^{:val 4} PORT_WIDTH_MAX 4])
+
+
+
+(go/type SGPIO "SGPIO represents a serial GPIO controller instance.\n" (struct
+    ^{:line 53} sync/Mutex
+
+
+    ^{:line 56 :tag uint32 :doc "Base register of the SIO_CTRL group.\n"} Base
+
+    ^{:line 58 :tag int :doc "PortWidth configures one to four serial GPIO bits per port.\n"} PortWidth
+
+    ^{:line 60 :tag uint32 :doc "ClockPeriod is the system clock period in units of 100 ps.\n"} ClockPeriod
+
+    ^{:line 62 :tag uint32 :doc "ClockDivider divides the system clock to produce the shift clock.\n"} ClockDivider
+
+    ^{:line 64 :tag bool :doc "AutoRepeat continuously emits configured output bursts when enabled.\n"} AutoRepeat))
+
+
+
+
+^{:go/end 95} (go/method Init "Init configures the port width and shift clock. Pin routing is configured\nseparately through the GPIO controller.\n" [^{:tag (* SGPIO)} hw] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (switch
+    (case [(== (.-Base hw) 0)]
+      (return (errors/New "invalid SGPIO controller instance")))
+    (case [(or (< (.-PortWidth hw) 1) (> (.-PortWidth hw) PORT_WIDTH_MAX))]
+      (return (fmt/Errorf "invalid SGPIO port width %d" (.-PortWidth hw))))
+    (case [(or (== (.-ClockPeriod hw) 0) (> (.-ClockPeriod hw) CLOCK_SYS_CLK_PERIOD_MASK))]
+      (return (fmt/Errorf "invalid SGPIO clock period %d" (.-ClockPeriod hw))))
+    (case [(or (== (.-ClockDivider hw) 0) (> (.-ClockDivider hw) CLOCK_SIO_CLK_FREQ_MASK))]
+      (return (fmt/Errorf "invalid SGPIO clock divider %d" (.-ClockDivider hw)))))
+
+
+  (let [^uint32 config (zero uint32)]
+    (bits/SetN (addr config) CFG_SIO_PORT_WIDTH CFG_SIO_PORT_WIDTH_MASK (conv uint32 (- (.-PortWidth hw) 1)))
+    (bits/SetTo (addr config) CFG_SIO_AUTO_REPEAT (.-AutoRepeat hw))
+    (reg/Write (+ (.-Base hw) SIO_CFG) config)
+
+    (let [^uint32 clock (zero uint32)]
+      (bits/SetN (addr clock) CLOCK_SYS_CLK_PERIOD CLOCK_SYS_CLK_PERIOD_MASK (.-ClockPeriod hw))
+      (bits/SetN (addr clock) CLOCK_SIO_CLK_FREQ CLOCK_SIO_CLK_FREQ_MASK (.-ClockDivider hw))
+      (reg/Write (+ (.-Base hw) SIO_CLOCK) clock)
+
+      (return))))
+
+
+
+
+^{:go/end 110} (go/method EnablePorts "EnablePorts enables every port selected by mask without disabling ports that\nare already active.\n" [^{:tag (* SGPIO)} hw ^uint32 mask] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (== (.-Base hw) 0)
+    (return (errors/New "invalid SGPIO controller instance")))
+
+
+  (reg/Or (+ (.-Base hw) SIO_PORT_ENA) mask)
+
+  (return))
+
+
+
+^{:go/end 138} (go/method SetBit "SetBit configures one port output as forced high or forced low.\n" [^{:tag (* SGPIO)} hw ^int port ^int bit ^bool high] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (switch
+    (case [(== (.-Base hw) 0)]
+      (return (errors/New "invalid SGPIO controller instance")))
+    (case [(or (< port 0) (>= port PORT_COUNT))]
+      (return (fmt/Errorf "invalid SGPIO port %d" port)))
+    (case [(or (< (.-PortWidth hw) 1) (> (.-PortWidth hw) PORT_WIDTH_MAX))]
+      (return (fmt/Errorf "invalid SGPIO port width %d" (.-PortWidth hw))))
+    (case [(or (< bit 0) (>= bit (.-PortWidth hw)))]
+      (return (fmt/Errorf "invalid SGPIO bit %d" bit))))
+
+
+  (let [source (conv uint32 BIT_SOURCE_FORCED_LOW)]
+
+    (when high
+      (set! source BIT_SOURCE_FORCED_HIGH))
+
+
+    (let [addr (+ (.-Base hw) SIO_PORT_CFG (conv uint32 (* port 4)))]
+      (reg/SetN addr (+ PORT_CFG_BIT_SOURCE (* bit 3)) PORT_CFG_BIT_SOURCE_MASK source)
+
+      (return))))

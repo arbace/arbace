@@ -1,0 +1,280 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.tls) (go/file "prf.go" :imports [
+
+
+    ^{:line 8} [crypto "crypto"]
+    ^{:line 9} [hmac "crypto/hmac"]
+    ^{:line 10} [tls12 "crypto/internal/fips140/tls12"]
+    ^{:line 11} [md5 "crypto/md5"]
+    ^{:line 12} [sha1 "crypto/sha1"]
+    ^{:line 13} [sha256 "crypto/sha256"]
+    ^{:line 14} [sha512 "crypto/sha512"]
+    ^{:line 15} [errors "errors"]
+    ^{:line 16} [fmt "fmt"]
+    ^{:line 17} [hash "hash"]])
+
+
+(go/type prfFunc (func [^{:tag (slice byte)} secret ^string label ^{:tag (slice byte)} seed ^int keyLen] [(slice byte)]))
+
+
+^{:go/end 27} (go/func splitPreMasterSecret "Split a premaster secret in two as specified in RFC 4346, Section 5.\n" [^{:tag (slice byte)} secret] :results [^{:tag (slice byte)} s1 ^{:tag (slice byte)} s2]
+  (set! s1 (subslice secret 0 (/ (+ (len secret) 1) 2)))
+  (set! s2 (subslice secret (/ (len secret) 2)))
+  (return))
+
+
+
+^{:go/end 48} (go/func pHash "pHash implements the P_hash function, as defined in RFC 4346, Section 5.\n" [^{:tag (slice byte)} result ^{:tag (slice byte)} secret ^{:tag (slice byte)} seed ^{:tag (func [] [hash/Hash])} hash]
+  (let [h (hmac/New hash secret)]
+    (.Write h seed)
+    (let [a (.Sum h nil)
+
+        ^{:line 35} j 0]
+      (while (< j (len result))
+        (.Reset h)
+        (.Write h a)
+        (.Write h seed)
+        (let [b (.Sum h nil)]
+          (copy (subslice result j) b)
+          (set! j + (len b))
+
+          (.Reset h)
+          (.Write h a)
+          (set! a (.Sum h nil)))))))
+
+
+
+
+^{:go/end 70} (go/func prf10 "prf10 implements the TLS 1.0 pseudo-random function, as defined in RFC 2246, Section 5.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} secret ^string label ^{:tag (slice byte)} seed ^int keyLen]
+  (let [result (make (slice byte) keyLen)
+      ^{:line 53} hashSHA1 sha1/New
+      ^{:line 54} hashMD5 md5/New
+
+      ^{:line 56} labelAndSeed (make (slice byte) (+ (len label) (len seed)))]
+    (copy labelAndSeed label)
+    (copy (subslice labelAndSeed (len label)) seed)
+
+    (let [(values s1 s2) (splitPreMasterSecret secret)]
+      (pHash result s1 labelAndSeed hashMD5)
+      (let [result2 (make (slice byte) (len result))]
+        (pHash result2 s2 labelAndSeed hashSHA1)
+
+        (range [i b result2]
+          (set! (aget result i) bit-xor b))
+
+
+        ^{:line 69} result))))
+
+
+
+^{:go/end 77} (go/func prf12 "prf12 implements the TLS 1.2 pseudo-random function, as defined in RFC 5246, Section 5.\n" ^prfFunc [^{:tag (func [] [hash/Hash])} hashFunc]
+  ^{:go/end 76} (fn ^{:tag (slice byte)} [^{:tag (slice byte)} secret ^string label ^{:tag (slice byte)} seed ^int keyLen]
+    (^{:inst [hash/Hash]} tls12/PRF hashFunc secret label seed keyLen)))
+
+
+
+(go/const
+  ^{:line 80} [^{:val 48} masterSecretLength 48] ; Length of a master secret in TLS 1.1.
+  ^{:line 81} [^{:val 12} finishedVerifyLength 12]) ; Length of verify_data in a Finished message.
+
+
+(go/const ^{:val "master secret"} masterSecretLabel "master secret")
+(go/const ^{:val "extended master secret"} extendedMasterSecretLabel "extended master secret")
+(go/const ^{:val "key expansion"} keyExpansionLabel "key expansion")
+(go/const ^{:val "client finished"} clientFinishedLabel "client finished")
+(go/const ^{:val "server finished"} serverFinishedLabel "server finished")
+
+^{:go/end 102} (go/func prfAndHashForVersion [^uint16 version ^{:tag (* cipherSuite)} suite] :results [prfFunc crypto/Hash]
+  (switch version
+    (case [VersionTLS10 VersionTLS11]
+      (return prf10 (conv crypto/Hash 0)))
+    (case [VersionTLS12]
+      (when (!= (bit-and (.-flags suite) suiteSHA384) 0)
+        (return (prf12 sha512/New384) crypto/SHA384))
+
+      (return (prf12 sha256/New) crypto/SHA256))
+    (default
+      (panic "unknown version"))))
+
+
+
+^{:go/end 107} (go/func prfForVersion ^prfFunc [^uint16 version ^{:tag (* cipherSuite)} suite]
+  (let [(values prf _) (prfAndHashForVersion version suite)]
+    ^{:line 106} prf))
+
+
+
+
+^{:go/end 117} (go/func masterFromPreMasterSecret "masterFromPreMasterSecret generates the master secret from the pre-master\nsecret. See RFC 5246, Section 8.1.\n" ^{:tag (slice byte)} [^uint16 version ^{:tag (* cipherSuite)} suite ^{:tag (slice byte)} preMasterSecret ^{:tag (slice byte)} clientRandom ^{:tag (slice byte)} serverRandom]
+  (let [seed (make (slice byte) 0 (+ (len clientRandom) (len serverRandom)))]
+    (set! seed (append seed (spread clientRandom)))
+    (set! seed (append seed (spread serverRandom)))
+
+    ((prfForVersion version suite) preMasterSecret masterSecretLabel seed masterSecretLength)))
+
+
+
+
+^{:go/end 129} (go/func extMasterFromPreMasterSecret "extMasterFromPreMasterSecret generates the extended master secret from the\npre-master secret. See RFC 7627.\n" ^{:tag (slice byte)} [^uint16 version ^{:tag (* cipherSuite)} suite ^{:tag (slice byte)} preMasterSecret ^{:tag (slice byte)} transcript]
+  (let [(values prf hash) (prfAndHashForVersion version suite)]
+    (when (== version VersionTLS12)
+      ;; Use the FIPS 140-3 module only for TLS 1.2 with EMS, which is the
+      ;; only TLS 1.0-1.2 approved mode per IG D.Q.
+      (return (^{:inst [hash/Hash]} tls12/MasterSecret (.-New hash) preMasterSecret transcript)))
+
+    (prf preMasterSecret extendedMasterSecretLabel transcript masterSecretLength)))
+
+
+
+
+
+^{:go/end 153} (go/func keysFromMasterSecret "keysFromMasterSecret generates the connection keys from the master\nsecret, given the lengths of the MAC key, cipher key and IV, as defined in\nRFC 2246, Section 6.3.\n" [^uint16 version ^{:tag (* cipherSuite)} suite ^{:tag (slice byte)} masterSecret ^{:tag (slice byte)} clientRandom ^{:tag (slice byte)} serverRandom ^int macLen ^int keyLen ^int ivLen] :results [^{:tag (slice byte)} clientMAC ^{:tag (slice byte)} serverMAC ^{:tag (slice byte)} clientKey ^{:tag (slice byte)} serverKey ^{:tag (slice byte)} clientIV ^{:tag (slice byte)} serverIV]
+  (let [seed (make (slice byte) 0 (+ (len serverRandom) (len clientRandom)))]
+    (set! seed (append seed (spread serverRandom)))
+    (set! seed (append seed (spread clientRandom)))
+
+    (let [n (+ (* 2 macLen) (* 2 keyLen) (* 2 ivLen))
+        ^{:line 140} keyMaterial ((prfForVersion version suite) masterSecret keyExpansionLabel seed n)]
+      (set! clientMAC (subslice keyMaterial _ macLen))
+      (set! keyMaterial (subslice keyMaterial macLen))
+      (set! serverMAC (subslice keyMaterial _ macLen))
+      (set! keyMaterial (subslice keyMaterial macLen))
+      (set! clientKey (subslice keyMaterial _ keyLen))
+      (set! keyMaterial (subslice keyMaterial keyLen))
+      (set! serverKey (subslice keyMaterial _ keyLen))
+      (set! keyMaterial (subslice keyMaterial keyLen))
+      (set! clientIV (subslice keyMaterial _ ivLen))
+      (set! keyMaterial (subslice keyMaterial ivLen))
+      (set! serverIV (subslice keyMaterial _ ivLen))
+      (return))))
+
+
+^{:go/end 167} (go/func newFinishedHash ^finishedHash [^uint16 version ^{:tag (* cipherSuite)} cipherSuite]
+  (let [^{:tag (slice byte)} buffer (zero (slice byte))]
+    (when (>= version VersionTLS12)
+      (set! buffer (lit (slice byte))))
+
+
+    (let [(values prf hash) (prfAndHashForVersion version cipherSuite)]
+      (when (!= hash 0)
+        (return (lit finishedHash (.New hash) (.New hash) nil nil buffer version prf)))
+
+
+      (lit finishedHash (sha1/New) (sha1/New) (md5/New) (md5/New) buffer version prf))))
+
+
+
+
+(go/type finishedHash "A finishedHash calculates the hash of a set of handshake messages suitable\nfor including in a Finished message.\n" (struct
+    ^{:line 172 :tag hash/Hash} client
+    ^{:line 173 :tag hash/Hash} server
+
+
+    ^{:line 176 :tag hash/Hash :doc "Prior to TLS 1.2, an additional MD5 hash is required.\n"} clientMD5
+    ^{:line 177 :tag hash/Hash} serverMD5
+
+
+    ^{:line 180 :tag (slice byte) :doc "In TLS 1.2, a full buffer is sadly required.\n"} buffer
+
+    ^{:line 182 :tag uint16} version
+    ^{:line 183 :tag prfFunc} prf))
+
+
+^{:go/end 200} (go/method Write [^{:tag (* finishedHash)} h ^{:tag (slice byte)} msg] :results [^int n ^error err]
+  (.Write (.-client h) msg)
+  (.Write (.-server h) msg)
+
+  (when (< (.-version h) VersionTLS12)
+    (.Write (.-clientMD5 h) msg)
+    (.Write (.-serverMD5 h) msg))
+
+
+  (when (!= (.-buffer h) nil)
+    (set! (.-buffer h) (append (.-buffer h) (spread msg))))
+
+
+  (return (len msg) nil))
+
+
+^{:go/end 210} (go/method Sum ^{:tag (slice byte)} [^finishedHash h]
+  (when (>= (.-version h) VersionTLS12)
+    (return (.Sum (.-client h) nil)))
+
+
+  (let [out (make (slice byte) 0 (+ md5/Size sha1/Size))]
+    (set! out (.Sum (.-clientMD5 h) out))
+    (.Sum (.-client h) out)))
+
+
+
+
+^{:go/end 216} (go/method clientSum "clientSum returns the contents of the verify_data member of a client's\nFinished message.\n" ^{:tag (slice byte)} [^finishedHash h ^{:tag (slice byte)} masterSecret]
+  ((.-prf h) masterSecret clientFinishedLabel (.Sum h) finishedVerifyLength))
+
+
+
+
+^{:go/end 222} (go/method serverSum "serverSum returns the contents of the verify_data member of a server's\nFinished message.\n" ^{:tag (slice byte)} [^finishedHash h ^{:tag (slice byte)} masterSecret]
+  ((.-prf h) masterSecret serverFinishedLabel (.Sum h) finishedVerifyLength))
+
+
+
+
+^{:go/end 232} (go/method hashForClientCertificate "hashForClientCertificate returns the handshake messages so far, pre-hashed,\nsuitable for signing by a TLS 1.0 and 1.1 client certificate.\n" ^{:tag (slice byte)} [^finishedHash h ^uint8 sigType]
+  (when (== sigType signatureECDSA)
+    (return (.Sum (.-server h) nil)))
+
+
+  (.Sum h))
+
+
+
+
+^{:go/end 238} (go/method discardHandshakeBuffer "discardHandshakeBuffer is called when there is no more need to\nbuffer the entirety of the handshake messages.\n" [^{:tag (* finishedHash)} h]
+  (set! (.-buffer h) nil))
+
+
+
+
+
+^{:go/end 245} (go/func noEKMBecauseRenegotiation "noEKMBecauseRenegotiation is used as a value of\nConnectionState.ekm when renegotiation is enabled and thus\nwe wish to fail all key-material export requests.\n" [^string label ^{:tag (slice byte)} context ^int length] :results [(slice byte) error]
+  (return nil (errors/New "crypto/tls: ExportKeyingMaterial is unavailable when renegotiation is enabled")))
+
+
+
+
+
+^{:go/end 252} (go/func noEKMBecauseNoEMS "noEKMBecauseNoEMS is used as a value of ConnectionState.ekm when Extended\nMaster Secret is not negotiated and thus we wish to fail all key-material\nexport requests.\n" [^string label ^{:tag (slice byte)} context ^int length] :results [(slice byte) error]
+  (return nil (errors/New "crypto/tls: ExportKeyingMaterial is unavailable when neither TLS 1.3 nor Extended Master Secret are negotiated")))
+
+
+
+^{:go/end 282} (go/func ekmFromMasterSecret "ekmFromMasterSecret generates exported keying material as defined in RFC 5705.\n" ^{:tag (func [string (slice byte) int] [(slice byte) error])} [^uint16 version ^{:tag (* cipherSuite)} suite ^{:tag (slice byte)} masterSecret ^{:tag (slice byte)} clientRandom ^{:tag (slice byte)} serverRandom]
+  ^{:go/end 281} (fn [^string label ^{:tag (slice byte)} context ^int length] :results [(slice byte) error]
+    (switch label
+      (case ["client finished" "server finished" "master secret" "key expansion"]
+        ;; These values are reserved and may not be used.
+        (return nil (fmt/Errorf "crypto/tls: reserved ExportKeyingMaterial label: %s" label))))
+
+
+    (let [seedLen (+ (len serverRandom) (len clientRandom))]
+      (when (!= context nil)
+        (set! seedLen + (+ 2 (len context))))
+
+      (let [seed (make (slice byte) 0 seedLen)]
+
+        (set! seed (append seed (spread clientRandom)))
+        (set! seed (append seed (spread serverRandom)))
+
+        (when (!= context nil)
+          (when (>= (len context) (<< 1 16))
+            (return nil (fmt/Errorf "crypto/tls: ExportKeyingMaterial context too long")))
+
+          (set! seed (append seed (conv byte (>> (len context) 8)) (conv byte (len context))))
+          (set! seed (append seed (spread context))))
+
+
+        (return ((prfForVersion version suite) masterSecret label seed length) nil)))))

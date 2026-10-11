@@ -1,0 +1,83 @@
+;; Intel Peripheral Component Interconnect (PCI) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.intel.pci) (go/file "msix.go" :imports [
+
+
+    ^{:line 12} [binary "encoding/binary"]
+    ^{:line 13} [errors "errors"]
+
+    ^{:line 15} [dma "github.com/usbarmory/tamago/dma"]])
+
+
+(go/const ^{:val 31} msixEnable 31)
+
+
+(go/type CapabilityMSIX "CapabilityMSIX represents an MSI-X Capability Structure.\n" (struct
+    ^{:line 22} CapabilityHeader
+
+    ^{:line 24 :tag uint16} MessageControl
+    ^{:line 25 :tag uint32} TableOffset
+    ^{:line 26 :tag uint32} PBAOffset
+
+    ^{:line 28 :tag (* Device)} device
+    ^{:line 29 :tag uint32} off))
+
+
+
+
+^{:go/end 47} (go/method Unmarshal "Unmarshal decodes a PCI MSI-X Capability from the argument device\nconfiguration space at function 0 and the given register offset.\n" [^{:tag (* CapabilityMSIX)} msix ^{:tag (* Device)} d ^uint32 off] :results [^error err]
+  (let [val (.Read d 0 off)]
+    (set! ^{:go/via [CapabilityHeader]} (.-Vendor msix) (conv uint8 (bit-and val 0xff)))
+    (set! ^{:go/via [CapabilityHeader]} (.-Next msix) (conv uint8 (>> val 8)))
+    (set! (.-MessageControl msix) (conv uint16 (>> val 16)))
+
+    (set! (.-TableOffset msix) (.Read d 0 (+ off 4)))
+    (set! (.-PBAOffset msix) (.Read d 0 (+ off 8)))
+
+    (set! (.-device msix) d)
+    (set! (.-off msix) off)
+
+    (return)))
+
+
+
+^{:go/end 52} (go/method TableSize "TableSize returns the number of entries in the MSI-X table.\n" ^int [^{:tag (* CapabilityMSIX)} msix]
+  (+ (conv int (bit-and (.-MessageControl msix) 0x7ff)) 1))
+
+
+
+
+^{:go/end 84} (go/method EnableInterrupt "EnableInterrupt configures an MSI-X interrupt entry and enables the MSI-X\ntable.\n" [^{:tag (* CapabilityMSIX)} msix ^int n ^uint64 addr ^uint32 data] :results [^error err]
+  (when (or (> n (.TableSize msix)) (== (.-device msix) nil))
+    (return (errors/New "invalid capability instance")))
+
+
+  (let [bir (conv int (bit-and (.-TableOffset msix) 2r11))
+      ^{:line 62} bar (conv uint64 (.BaseAddress (.-device msix) bir))
+      ^{:line 63} table (+ bar (bit-and (conv uint64 (.-TableOffset msix)) 0xfffffffc))
+
+      ^{:line 65} size 16
+      ^{:line 66} off (conv uint64 (* size n))
+
+      (values r ^:assign err) (dma/NewRegion (conv uint (+ table off)) size false)]
+
+    (when (!= err nil)
+      (return err))
+
+
+    (let [(values ptr entry) (.Reserve r size 0)]
+      (defer (dma/Release ptr))
+
+      (.PutUint64 binary/LittleEndian (subslice entry 0) addr)
+      (.PutUint32 binary/LittleEndian (subslice entry 8) data)
+      (.PutUint32 binary/LittleEndian (subslice entry 12) 0)
+
+      (.Write (.-device msix) 0 (.-off msix) (<< 1 msixEnable))
+
+      (return))))

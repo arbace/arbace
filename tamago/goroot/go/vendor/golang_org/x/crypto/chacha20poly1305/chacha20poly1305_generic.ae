@@ -1,0 +1,86 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.crypto.chacha20poly1305) (go/file "chacha20poly1305_generic.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]
+
+    ^{:line 10} [chacha20 "golang.org/x/crypto/chacha20"]
+    ^{:line 11} [alias "golang.org/x/crypto/internal/alias"]
+    ^{:line 12} [poly1305 "golang.org/x/crypto/internal/poly1305"]])
+
+
+^{:go/end 22} (go/func writeWithPadding [^{:tag (* poly1305/MAC)} p ^{:tag (slice byte)} b]
+  (.Write p b)
+  (when [rem (% (len b) 16)] (!= rem 0)
+    (let [^{:tag (array 16 byte)} buf (zero (array 16 byte))
+        ^{:line 19} padLen (- 16 rem)]
+      (.Write p (subslice buf _ padLen)))))
+
+
+
+^{:go/end 28} (go/func writeUint64 [^{:tag (* poly1305/MAC)} p ^int n]
+  (let [^{:tag (array 8 byte)} buf (zero (array 8 byte))]
+    (.PutUint64 binary/LittleEndian (subslice buf) (conv uint64 n))
+    (.Write p (subslice buf))))
+
+
+^{:go/end 54} (go/method sealGeneric ^{:tag (slice byte)} [^{:tag (* chacha20poly1305)} c ^{:tag (slice byte)} dst ^{:tag (slice byte)} nonce ^{:tag (slice byte)} plaintext ^{:tag (slice byte)} additionalData]
+  (let [(values ret out) (sliceForAppend dst (+ (len plaintext) poly1305/TagSize))
+      (values ciphertext tag) (values (subslice out _ (len plaintext)) (subslice out (len plaintext)))]
+    (when (alias/InexactOverlap out plaintext)
+      (panic "chacha20poly1305: invalid buffer overlap of output and input"))
+
+    (when (alias/AnyOverlap out additionalData)
+      (panic "chacha20poly1305: invalid buffer overlap of output and additional data"))
+
+
+    (let [^{:tag (array 32 byte)} polyKey (zero (array 32 byte))
+        (values s _) (chacha20/NewUnauthenticatedCipher (subslice (.-key c)) nonce)]
+      (.XORKeyStream s (subslice polyKey) (subslice polyKey))
+      (.SetCounter s 1) ; set the counter to 1, skipping 32 bytes
+      (.XORKeyStream s ciphertext plaintext)
+
+      (let [p (poly1305/New (addr polyKey))]
+        (writeWithPadding p additionalData)
+        (writeWithPadding p ciphertext)
+        (writeUint64 p (len additionalData))
+        (writeUint64 p (len plaintext))
+        (.Sum p (subslice tag _ 0))
+
+        ^{:line 53} ret))))
+
+
+^{:go/end 87} (go/method openGeneric [^{:tag (* chacha20poly1305)} c ^{:tag (slice byte)} dst ^{:tag (slice byte)} nonce ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} additionalData] :results [(slice byte) error]
+  (let [tag (subslice ciphertext (- (len ciphertext) 16))]
+    (set! ciphertext (subslice ciphertext _ (- (len ciphertext) 16)))
+
+    (let [^{:tag (array 32 byte)} polyKey (zero (array 32 byte))
+        (values s _) (chacha20/NewUnauthenticatedCipher (subslice (.-key c)) nonce)]
+      (.XORKeyStream s (subslice polyKey) (subslice polyKey))
+      (.SetCounter s 1) ; set the counter to 1, skipping 32 bytes
+
+      (let [p (poly1305/New (addr polyKey))]
+        (writeWithPadding p additionalData)
+        (writeWithPadding p ciphertext)
+        (writeUint64 p (len additionalData))
+        (writeUint64 p (len ciphertext))
+
+        (let [(values ret out) (sliceForAppend dst (len ciphertext))]
+          (when (alias/InexactOverlap out ciphertext)
+            (panic "chacha20poly1305: invalid buffer overlap of output and input"))
+
+          (when (alias/AnyOverlap out additionalData)
+            (panic "chacha20poly1305: invalid buffer overlap of output and additional data"))
+
+          (when (not (.Verify p tag))
+            (range [i out]
+              (aset out i 0))
+
+            (return nil errOpen))
+
+
+          (.XORKeyStream s out ciphertext)
+          (return ret nil))))))

@@ -1,0 +1,1373 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.runtime.maps) (go/file "table.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [goexperiment "internal/goexperiment"]
+    ^{:line 10} [math "internal/runtime/math"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+(go/const ^{:val 1024 :doc "Maximum size of a table before it is split at the directory level.\n\nTODO: Completely made up value. This should be tuned for performance vs grow\nlatency.\nTODO: This should likely be based on byte size, as copying costs will\ndominate grow latency for large objects.\n"} maxTableCapacity 1024)
+
+
+
+(go/var ^{:doc "Ensure the max capacity fits in uint16, used for capacity and growthLeft\nbelow.\n"} _ (conv uint16 maxTableCapacity))
+
+
+
+
+
+
+
+
+
+(go/type table "table is a Swiss table hash table structure.\n\nEach table is a complete hash table implementation.\n\nMap uses one or more tables to store entries. Extendible hashing (hash\nprefix) is used to select the table to use for a specific key. Using\nmultiple tables enables incremental growth by growing only one table at a\ntime.\n" (struct
+
+    ^{:line 36 :tag uint16 :doc "The number of filled slots (i.e. the number of elements in the table).\n"} used
+
+
+
+    ^{:line 40 :tag uint16 :doc "The total number of slots (always 2^N). Equal to\n`(groups.lengthMask+1)*abi.MapGroupSlots`.\n"} capacity
+
+
+
+
+
+
+    ^{:line 47 :tag uint16 :doc "The number of slots we can still fill without needing to rehash.\n\nWe rehash when used + tombstones > loadFactor*capacity, including\ntombstones so the table doesn't overfill with tombstones. This field\ncounts down remaining empty slots before the next rehash.\n"} growthLeft
+
+
+
+
+    ^{:line 52 :tag uint8 :doc "The number of bits used by directory lookups above this table. Note\nthat this may be less then globalDepth, if the directory has grown\nbut this table has not yet been split.\n"} localDepth
+
+
+
+
+
+
+
+    ^{:line 60 :tag int :doc "Index of this table in the Map directory. This is the index of the\n_first_ location in the directory. The table may occur in multiple\nsequential indices.\n\nindex is -1 if the table is stale (no longer installed in the\ndirectory).\n"} index
+
+
+
+
+
+
+
+
+
+
+    ^{:line 71 :tag groupsReference :doc "groups is an array of slot groups. Each group holds abi.MapGroupSlots\nkey/elem slots and their control bytes. A table has a fixed size\ngroups array. The table is replaced (in rehash) when more space is\nrequired.\n\nTODO(prattmic): keys and elements are interleaved to maximize\nlocality, but it comes at the expense of wasted space for some types\n(consider uint8 key, uint64 element). Consider placing all keys\ntogether in these cases to save space.\n"} groups))
+
+
+^{:go/end 98} (go/func newTable ^{:tag (* table)} [^{:tag (* abi/MapType)} typ ^uint64 capacity ^int index ^uint8 localDepth]
+  (when (< capacity abi/MapGroupSlots)
+    (set! capacity abi/MapGroupSlots))
+
+
+  (let [t (addr ^{:go/breaks [2 4]} (lit table
+          :index index
+          :localDepth localDepth))]
+
+
+    (when (> capacity maxTableCapacity)
+      (panic "initial table capacity too large"))
+
+
+    ;; N.B. group count must be a power of two for probeSeq to visit every
+    ;; group.
+    (let [(values ^:assign capacity overflow) (alignUpPow2 capacity)]
+      (when overflow
+        (panic "rounded-up capacity overflows uint64"))
+
+
+      (.reset t typ (conv uint16 capacity))
+
+      ^{:line 97} t)))
+
+
+
+
+^{:go/end 112} (go/method reset "reset resets the table with new, empty groups with the specified new total\ncapacity.\n" [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^uint16 capacity]
+  (let [groupCount (/ (conv uint64 capacity) abi/MapGroupSlots)]
+    (set! (.-groups t) (newGroups typ groupCount))
+    (set! (.-capacity t) capacity)
+    (set! (.-growthLeft t) (.maxGrowthLeft t))
+
+    (for [i (conv uint64 0)] (<= i (.-lengthMask (.-groups t))) (inc! i)
+      (let [g (.group (.-groups t) typ i)]
+        (.setEmpty (.ctrls g))))))
+
+
+
+
+
+^{:go/end 136} (go/method maxGrowthLeft "maxGrowthLeft is the number of inserts we can do before\nresizing, starting from an empty table.\n" ^uint16 [^{:tag (* table)} t]
+  (cond (== (.-capacity t) 0)
+    ;; No real reason to support zero capacity table, since an
+    ;; empty Map simply won't have a table.
+    (panic "table must have positive capacity")
+    (<= (.-capacity t) abi/MapGroupSlots)
+    ;; If the map fits in a single group then we're able to fill all of
+    ;; the slots except 1 (an empty slot is needed to terminate find
+    ;; operations).
+    ;;
+    ;; TODO(go.dev/issue/54766): With a special case in probing for
+    ;; single-group tables, we could fill all slots.
+    (return (- (.-capacity t) 1)) :else
+    (do
+      (when (> (.-capacity t) (/ math/MaxUint16 maxAvgGroupLoad))
+        (panic "overflow"))
+
+      (return (/ (* (.-capacity t) maxAvgGroupLoad) abi/MapGroupSlots)))))
+
+
+
+
+^{:go/end 140} (go/method Used ^uint64 [^{:tag (* table)} t]
+  (conv uint64 (.-used t)))
+
+
+
+
+^{:go/end 154} (go/method Get "Get performs a lookup of the key that key points to. It returns a pointer to\nthe element, or false if the key doesn't exist.\n" [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m ^unsafe/Pointer key] :results [unsafe/Pointer bool]
+  ;; TODO(prattmic): We could avoid hashing in a variety of special
+  ;; cases.
+  ;;
+  ;; - One entry maps could just directly compare the single entry
+  ;;   without hashing.
+  ;; - String keys could do quick checks of a few bytes before hashing.
+  (let [hash ((.-Hasher typ) key (.-seed m))
+      (values _ elem ok) (.getWithKey t typ hash key)]
+    (return elem ok)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 224} (go/method getWithKey "getWithKey performs a lookup of key, returning a pointer to the version of\nthe key in the map in addition to the element.\n\nThis is relevant when multiple different key values compare equal (e.g.,\n+0.0 and -0.0). When a grow occurs during iteration, iteration perform a\nlookup of keys from the old group in the new group in order to correctly\nexpose updated elements. For NeedsKeyUpdate keys, iteration also must return\nthe new key value, not the old key value.\nhash must be the hash of the key.\n" [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^uintptr hash ^unsafe/Pointer key] :results [unsafe/Pointer unsafe/Pointer bool]
+  ;; To find the location of a key in the table, we compute hash(key). From
+  ;; h1(hash(key)) and the capacity, we construct a probeSeq that visits
+  ;; every group of slots in some interesting order. See [probeSeq].
+  ;;
+  ;; We walk through these indices. At each index, we select the entire
+  ;; group starting with that index and extract potential candidates:
+  ;; occupied slots with a control byte equal to h2(hash(key)). The key
+  ;; at candidate slot i is compared with key; if key == g.slot(i).key
+  ;; we are done and return the slot; if there is an empty slot in the
+  ;; group, we stop and return an error; otherwise we continue to the
+  ;; next probe index. Tombstones (ctrlDeleted) effectively behave like
+  ;; full slots that never match the value we're looking for.
+  ;;
+  ;; The h2 bits ensure when we compare a key we are likely to have
+  ;; actually found the object. That is, the chance is low that keys
+  ;; compare false. Thus, when we search for an object, we are unlikely
+  ;; to call Equal many times. This likelihood can be analyzed as follows
+  ;; (assuming that h2 is a random enough hash function).
+  ;;
+  ;; Let's assume that there are k "wrong" objects that must be examined
+  ;; in a probe sequence. For example, when doing a find on an object
+  ;; that is in the table, k is the number of objects between the start
+  ;; of the probe sequence and the final found object (not including the
+  ;; final found object). The expected number of objects with an h2 match
+  ;; is then k/128. Measurements and analysis indicate that even at high
+  ;; load factors, k is less than 32, meaning that the number of false
+  ;; positive comparisons we must perform is less than 1/8 per find.
+  (let [seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))
+      ^{:line 194} h2Hash (h2 hash)]
+    (for [] _ (set! seq (.next seq))
+      (let [g (.group (.-groups t) typ (.-offset seq))
+
+          ^{:line 198} match (.matchH2 (.ctrls g) h2Hash)]
+
+        (while (!= match 0)
+          (let [i (.first match)
+
+              ^{:line 203} slotKey (.key g typ i)]
+            (when (.IndirectKey typ)
+              (set! slotKey @(conv (* unsafe/Pointer) slotKey)))
+
+            (when ((.-Equal (.-Key typ)) key slotKey)
+              (let [slotElem (.elem g typ i)]
+                (when (.IndirectElem typ)
+                  (set! slotElem @(conv (* unsafe/Pointer) slotElem)))
+
+                (return slotKey slotElem true)))
+
+            (set! match (.removeFirst match))))
+
+
+        (set! match (.matchEmpty (.ctrls g)))
+        (when (!= match 0)
+          ;; Finding an empty slot means we've reached the end of
+          ;; the probe sequence.
+          (return nil nil false))))))
+
+
+
+
+^{:go/end 258} (go/method getWithoutKey [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^uintptr hash ^unsafe/Pointer key] :results [unsafe/Pointer bool]
+  (let [seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))
+      ^{:line 228} h2Hash (h2 hash)]
+    (for [] _ (set! seq (.next seq))
+      (let [g (.group (.-groups t) typ (.-offset seq))
+
+          ^{:line 232} match (.matchH2 (.ctrls g) h2Hash)]
+
+        (while (!= match 0)
+          (let [i (.first match)
+
+              ^{:line 237} slotKey (.key g typ i)]
+            (when (.IndirectKey typ)
+              (set! slotKey @(conv (* unsafe/Pointer) slotKey)))
+
+            (when ((.-Equal (.-Key typ)) key slotKey)
+              (let [slotElem (.elem g typ i)]
+                (when (.IndirectElem typ)
+                  (set! slotElem @(conv (* unsafe/Pointer) slotElem)))
+
+                (return slotElem true)))
+
+            (set! match (.removeFirst match))))
+
+
+        (set! match (.matchEmpty (.ctrls g)))
+        (when (!= match 0)
+          ;; Finding an empty slot means we've reached the end of
+          ;; the probe sequence.
+          (return nil false))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 365} (go/method PutSlot "PutSlot returns a pointer to the element slot where an inserted element\nshould be written, and ok if it returned a valid slot.\n\nPutSlot returns ok false if the table was split and the Map needs to find\nthe new table.\n\nhash must be the hash of key.\n" [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m ^uintptr hash ^unsafe/Pointer key] :results [unsafe/Pointer bool]
+  (let [seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))
+
+      ;; As we look for a match, keep track of the first deleted slot we
+      ;; find, which we'll use to insert the new entry if necessary.
+      ^{:line 272 :tag groupReference} firstDeletedGroup (zero groupReference)
+      ^{:line 273 :tag uintptr} firstDeletedSlot (zero uintptr)
+
+      ^{:line 275} h2Hash (h2 hash)]
+    (for [] _ (set! seq (.next seq))
+      (let [g (.group (.-groups t) typ (.-offset seq))
+          ^{:line 278} match (.matchH2 (.ctrls g) h2Hash)]
+
+        ;; Look for an existing slot containing this key.
+        (while (!= match 0)
+          (let [i (.first match)
+
+              ^{:line 284} slotKey (.key g typ i)]
+            (when (.IndirectKey typ)
+              (set! slotKey @(conv (* unsafe/Pointer) slotKey)))
+
+            (when ((.-Equal (.-Key typ)) key slotKey)
+              (when (.NeedKeyUpdate typ)
+                (typedmemmove (.-Key typ) slotKey key))
+
+
+              (let [slotElem (.elem g typ i)]
+                (when (.IndirectElem typ)
+                  (set! slotElem @(conv (* unsafe/Pointer) slotElem)))
+
+
+                (.checkInvariants t typ m)
+                (return slotElem true)))
+
+            (set! match (.removeFirst match))))
+
+
+        ;; No existing slot for this key in this group. Is this the end
+        ;; of the probe sequence?
+        (set! match (.matchEmptyOrDeleted (.ctrls g)))
+        (when (== match 0)
+          (continue)) ; nothing but filled slots. Keep probing.
+
+        (let [i (.first match)]
+          (when (== (.get (.ctrls g) i) ctrlDeleted)
+            ;; There are some deleted slots. Remember
+            ;; the first one, and keep probing.
+            (when (== (.-data firstDeletedGroup) nil)
+              (set! firstDeletedGroup g)
+              (set! firstDeletedSlot i))
+
+            (continue))
+
+          ;; We've found an empty slot, which means we've reached the end of
+          ;; the probe sequence.
+
+          ;; If we found a deleted slot along the way, we can
+          ;; replace it without consuming growthLeft.
+          (when (!= (.-data firstDeletedGroup) nil)
+            (set! g firstDeletedGroup)
+            (set! i firstDeletedSlot)
+            (inc! (.-growthLeft t))) ; will be decremented below to become a no-op.
+
+
+          ;; If we have no space left, first try to remove some tombstones.
+          (when (== (.-growthLeft t) 0)
+            (.pruneTombstones t typ m))
+
+
+          ;; If there is room left to grow, just insert the new entry.
+          (when (> (.-growthLeft t) 0)
+            (let [slotKey (.key g typ i)]
+              (when (.IndirectKey typ)
+                (let [kmem (newobject (.-Key typ))]
+                  (set! @(conv (* unsafe/Pointer) slotKey) kmem)
+                  (set! slotKey kmem)))
+
+              (typedmemmove (.-Key typ) slotKey key)
+
+              (let [slotElem (.elem g typ i)]
+                (when (.IndirectElem typ)
+                  (let [emem (newobject (.-Elem typ))]
+                    (set! @(conv (* unsafe/Pointer) slotElem) emem)
+                    (set! slotElem emem)))
+
+
+                (.set (.ctrls g) i (conv ctrl h2Hash))
+                (dec! (.-growthLeft t))
+                (inc! (.-used t))
+                (inc! (.-used m))
+
+                (.checkInvariants t typ m)
+                (return slotElem true))))
+
+
+          (.rehash t typ m)
+          (return nil false))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 420} (go/method uncheckedPutSlot "uncheckedPutSlot inserts an entry known not to be in the table.\nThis is used for grow/split where we are making a new table from\nentries in an existing table.\n\nDecrements growthLeft and increments used.\n\nRequires that the entry does not exist in the table, and that the table has\nroom for another element without rehashing.\n\nRequires that there are no deleted entries in the table.\n\nFor indirect keys and/or elements, the key and elem pointers can be\nput directly into the map, they do not need to be copied. This\nrequires the caller to ensure that the referenced memory never\nchanges (by sourcing those pointers from another indirect key/elem\nmap).\n" [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^uintptr hash ^unsafe/Pointer key ^unsafe/Pointer elem]
+  (when (== (.-growthLeft t) 0)
+    (panic "invariant failed: growthLeft is unexpectedly 0"))
+
+
+  ;; Given key and its hash hash(key), to insert it, we construct a
+  ;; probeSeq, and use it to find the first group with an unoccupied (empty
+  ;; or deleted) slot. We place the key/value into the first such slot in
+  ;; the group and mark it as full with key's H2.
+  (let [seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))]
+    (for [] _ (set! seq (.next seq))
+      (let [g (.group (.-groups t) typ (.-offset seq))
+
+          ^{:line 396} match (.matchEmptyOrDeleted (.ctrls g))]
+        (when (!= match 0)
+          (let [i (.first match)
+
+              ^{:line 400} slotKey (.key g typ i)]
+            (if (.IndirectKey typ)
+              (set! @(conv (* unsafe/Pointer) slotKey) key)
+
+              (typedmemmove (.-Key typ) slotKey key))
+
+
+            (let [slotElem (.elem g typ i)]
+              (if (.IndirectElem typ)
+                (set! @(conv (* unsafe/Pointer) slotElem) elem)
+
+                (typedmemmove (.-Elem typ) slotElem elem))
+
+
+              (dec! (.-growthLeft t))
+              (inc! (.-used t))
+              (.set (.ctrls g) i (conv ctrl (h2 hash)))
+              (return))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 475} (go/method uncheckedPutSlotForAssign "uncheckedPutSlotForAssign inserts a new key into the table for map\nassignment and returns the element slot.\n\nDecrements growthLeft and increments used.\n\nRequires that the entry does not exist in the table, and that the table has\nroom for another element without rehashing.\n\nBefore calling this method, you must ensure that the necessary check has\nbeen performed in advance.\n\nFor indirect keys, memory is allocated and the key is copied into it.\nFor indirect elements, memory is pre-allocated and the slot is returned\nto the caller, who must write the element value into it.\n" ^unsafe/Pointer [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^uintptr hash ^unsafe/Pointer key]
+  (when (== (.-growthLeft t) 0)
+    (panic "invariant failed: growthLeft is unexpectedly 0"))
+
+
+  ;; Given key and its hash hash(key), to insert it, we construct a
+  ;; probeSeq, and use it to find the first group with an unoccupied (empty
+  ;; or deleted) slot. We place the key into the first such slot in the
+  ;; group and mark it as full with key's H2. For indirect elements, we
+  ;; pre-allocate the element slot and return it to the caller.
+  (let [seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))]
+    (for [] _ (set! seq (.next seq))
+      (let [g (.group (.-groups t) typ (.-offset seq))
+
+          ^{:line 450} match (.matchEmptyOrDeleted (.ctrls g))]
+        (when (!= match 0)
+          (let [i (.first match)
+
+              ^{:line 454} slotKey (.key g typ i)]
+            (when (.IndirectKey typ)
+              (let [kmem (newobject (.-Key typ))]
+                (set! @(conv (* unsafe/Pointer) slotKey) kmem)
+                (set! slotKey kmem)))
+
+            (typedmemmove (.-Key typ) slotKey key)
+
+            (let [slotElem (.elem g typ i)]
+              (when (.IndirectElem typ)
+                (let [emem (newobject (.-Elem typ))]
+                  (set! @(conv (* unsafe/Pointer) slotElem) emem)
+                  (set! slotElem emem)))
+
+
+              (dec! (.-growthLeft t))
+              (inc! (.-used t))
+              (.set (.ctrls g) i (conv ctrl (h2 hash)))
+              (return slotElem))))))))
+
+
+
+
+
+^{:go/end 550} (go/method Delete "Delete returns true if it put a tombstone in t.\n" ^bool [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m ^uintptr hash ^unsafe/Pointer key]
+  (let [seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))
+      ^{:line 480} h2Hash (h2 hash)]
+    (for [] _ (set! seq (.next seq))
+      (let [g (.group (.-groups t) typ (.-offset seq))
+          ^{:line 483} match (.matchH2 (.ctrls g) h2Hash)]
+
+        (while (!= match 0)
+          (let [i (.first match)
+
+              ^{:line 488} slotKey (.key g typ i)
+              ^{:line 489} origSlotKey slotKey]
+            (when (.IndirectKey typ)
+              (set! slotKey @(conv (* unsafe/Pointer) slotKey)))
+
+
+            (when ((.-Equal (.-Key typ)) key slotKey)
+              (dec! (.-used t))
+              (dec! (.-used m))
+
+              (cond (.IndirectKey typ)
+                ;; Clearing the pointer is sufficient.
+                (set! @(conv (* unsafe/Pointer) origSlotKey) nil)
+                (.Pointers (.-Key typ))
+                ;; Only bothing clear the key if there
+                ;; are pointers in it.
+                (typedmemclr (.-Key typ) slotKey))
+
+
+              (let [slotElem (.elem g typ i)]
+                (if (.IndirectElem typ)
+                  ;; Clearing the pointer is sufficient.
+                  (set! @(conv (* unsafe/Pointer) slotElem) nil)
+
+                  ;; Unlike keys, always clear the elem (even if
+                  ;; it contains no pointers), as compound
+                  ;; assignment operations depend on cleared
+                  ;; deleted values. See
+                  ;; https://go.dev/issue/25936.
+                  (typedmemclr (.-Elem typ) slotElem))
+
+
+                ;; Only a full group can appear in the middle
+                ;; of a probe sequence (a group with at least
+                ;; one empty slot terminates probing). Once a
+                ;; group becomes full, it stays full until
+                ;; rehashing/resizing. So if the group isn't
+                ;; full now, we can simply remove the element.
+                ;; Otherwise, we create a tombstone to mark the
+                ;; slot as deleted.
+                (let [^bool tombstone (zero bool)]
+                  (if (!= (.matchEmpty (.ctrls g)) 0) (do
+                      (.set (.ctrls g) i ctrlEmpty)
+                      (inc! (.-growthLeft t)))
+                    (do
+                      (.set (.ctrls g) i ctrlDeleted)
+                      (set! tombstone true)))
+
+
+                  (.checkInvariants t typ m)
+                  (return tombstone))))
+
+            (set! match (.removeFirst match))))
+
+
+        (set! match (.matchEmpty (.ctrls g)))
+        (when (!= match 0)
+          ;; Finding an empty slot means we've reached the end of
+          ;; the probe sequence.
+          (return false))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 646} (go/method pruneTombstones "pruneTombstones goes through the table and tries to remove\ntombstones that are no longer needed. Best effort.\nNote that it only removes tombstones, it does not move elements.\nMoving elements would do a better job but is infeasbile due to\niterator semantics.\n\nPruning should only succeed if it can remove O(n) tombstones.\nIt would be bad if we did O(n) work to find 1 tombstone to remove.\nThen the next insert would spend another O(n) work to find 1 more\ntombstone to remove, etc.\n\nWe really need to remove O(n) tombstones so we can pay for the cost\nof finding them. If we can't, then we need to grow (which is also O(n),\nbut guarantees O(n) subsequent inserts can happen in constant time).\n" [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m]
+  (when (< (* (.tombstones t) 10) (.-capacity t)) ; 10% of capacity
+    ;; Not enough tombstones to be worth the effort.
+    (return))
+
+
+  ;; Bit set marking all the groups whose tombstones are needed.
+  (let [^{:tag (array (/ (+ (/ maxTableCapacity abi/MapGroupSlots) 31) 32) uint32)} needed (zero (array (/ (+ (/ maxTableCapacity abi/MapGroupSlots) 31) 32) uint32))]
+
+    ;; Trace the probe sequence of every full entry.
+    (for [i (conv uint64 0)] (<= i (.-lengthMask (.-groups t))) (inc! i)
+      (let [g (.group (.-groups t) typ i)
+          ^{:line 578} match (.matchFull (.ctrls g))]
+        (while (!= match 0)
+          (let [j (.first match)]
+            (set! match (.removeFirst match))
+            (let [key (.key g typ j)]
+              (when (.IndirectKey typ)
+                (set! key @(conv (* unsafe/Pointer) key)))
+
+              (when (not ((.-Equal (.-Key typ)) key key))
+                ;; Key not equal to itself. We never have to find these
+                ;; keys on lookup (only on iteration), so we can break
+                ;; their probe sequences at will.
+                (continue))
+
+              ;; Walk probe sequence for this key.
+              ;; Each tombstone group we need to walk past is marked required.
+              (let [hash ((.-Hasher typ) key (.-seed m))]
+                (for [seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))] _ (set! seq (.next seq))
+                  (when (== (.-offset seq) i)
+                    (break)) ; reached group of element in probe sequence
+
+                  (let [g (.group (.-groups t) typ (.-offset seq))
+                      ^{:line 600} m (.matchEmptyOrDeleted (.ctrls g))]
+                    (when (!= m 0) ; must be deleted, not empty, as we haven't found our key yet
+                      ;; Mark this group's tombstone as required.
+                      (set! (aget needed (/ (.-offset seq) 32)) bit-or ^uint32 (<< 1 (% (.-offset seq) 32))))))))))
+
+
+
+        (when (!= (.matchEmpty (.ctrls g)) 0)
+          ;; Also mark non-tombstone-containing groups, so we don't try
+          ;; to remove tombstones from them below.
+          (set! (aget needed (/ i 32)) bit-or ^uint32 (<< 1 (% i 32))))))
+
+
+
+    ;; First, see if we can remove enough tombstones to restore capacity.
+    ;; This function is O(n), so only remove tombstones if we can remove
+    ;; enough of them to justify the O(n) cost.
+    (let [cnt 0]
+      (for [i (conv uint64 0)] (<= i (.-lengthMask (.-groups t))) (inc! i)
+        (when (!= (bit-and (>> (aget needed (/ i 32)) (% i 32)) 1) 0)
+          (continue))
+
+        (let [g (.group (.-groups t) typ i)
+            ^{:line 623} m (.matchEmptyOrDeleted (.ctrls g))] ; must be deleted
+          (set! cnt + (.count m))))
+
+      (when (< (* cnt 10) (conv int (.-capacity t))) ; Can we restore 10% of capacity?
+        (return)) ; don't bother removing tombstones. Caller will grow instead.
+
+
+      ;; Prune unneeded tombstones.
+      (for [i (conv uint64 0)] (<= i (.-lengthMask (.-groups t))) (inc! i)
+        (when (!= (bit-and (>> (aget needed (/ i 32)) (% i 32)) 1) 0)
+          (continue))
+
+        (let [g (.group (.-groups t) typ i)
+            ^{:line 636} m (.matchEmptyOrDeleted (.ctrls g))] ; must be deleted
+          (while (!= m 0)
+            (let [k (.first m)]
+              (set! m (.removeFirst m))
+              (.set (.ctrls g) k ctrlEmpty)
+              (inc! (.-growthLeft t)))))))))
+
+;; TODO: maybe we could convert all slots at once
+;; using some bitvector trickery.
+
+
+
+
+
+
+^{:go/end 653} (go/method tombstones "tombstones returns the number of deleted (tombstone) entries in the table. A\ntombstone is a slot that has been deleted but is still considered occupied\nso as not to violate the probing invariant.\n" ^uint16 [^{:tag (* table)} t]
+  (- (/ (* (.-capacity t) maxAvgGroupLoad) abi/MapGroupSlots) (.-used t) (.-growthLeft t)))
+
+
+
+^{:go/end 702} (go/method Clear "Clear deletes all entries from the table resulting in an empty table.\n" [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ]
+  (let [mgl (.maxGrowthLeft t)]
+    (when (and (== (.-used t) 0) (== (.-growthLeft t) mgl)) ; no current entries and no tombstones
+      (return))
+
+    ;; We only want to do the work of clearing slots
+    ;; if they are full. But we also don't want to do too
+    ;; much work to figure out whether a slot is full or not,
+    ;; especially if clearing a slot is cheap.
+    ;;  1) We decide group-by-group instead of slot-by-slot.
+    ;;     If any slot in a group is full, we zero the whole group.
+    ;;  2) If groups are unlikely to be empty, don't bother
+    ;;     testing for it.
+    ;;  3) If groups are 50%/50% likely to be empty, also don't
+    ;;     bother testing, as it confuses the branch predictor. See #75097.
+    ;;  4) But if a group is really large, do the test anyway, as
+    ;;     clearing is expensive.
+    (let [fullTest (<= (* (conv uint64 (.-used t)) 4) (.-lengthMask (.-groups t)))] ; less than ~0.25 entries per group -> >3/4 empty groups
+      (if goexperiment/MapSplitGroup
+        (when (> (+ (.-KeyStride typ) (.-ElemStride typ)) 32)
+          ;; For large slots, it is always worth doing the test first.
+          (set! fullTest true))
+
+        (do
+          (when (> (.-KeyStride typ) 32) ; KeyStride == SlotSize in interleaved layout
+            ;; For large slots, it is always worth doing the test first.
+            (set! fullTest true))))
+
+
+      (if fullTest
+        (for [i (conv uint64 0)] (<= i (.-lengthMask (.-groups t))) (inc! i)
+          (let [g (.group (.-groups t) typ i)]
+            (when (.anyFull (.ctrls g))
+              (typedmemclr (.-Group typ) (.-data g)))
+
+            (.setEmpty (.ctrls g))))
+
+
+        (for [i (conv uint64 0)] (<= i (.-lengthMask (.-groups t))) (inc! i)
+          (let [g (.group (.-groups t) typ i)]
+            (typedmemclr (.-Group typ) (.-data g))
+            (.setEmpty (.ctrls g)))))
+
+
+      (set! (.-used t) 0)
+      (set! (.-growthLeft t) mgl))))
+
+
+(go/type Iter (struct
+    ^{:line 705 :tag unsafe/Pointer} key ; Must be in first position.  Write nil to indicate iteration end (see cmd/compile/internal/walk/range.go).
+    ^{:line 706 :tag unsafe/Pointer} elem ; Must be in second position (see cmd/compile/internal/walk/range.go).
+    ^{:line 707 :tag (* abi/MapType)} typ
+    ^{:line 708 :tag (* Map)} m
+
+
+
+
+    ^{:line 713 :tag uint64 :doc "Randomize iteration order by starting iteration at a random slot\noffset. The offset into the directory uses a separate offset, as it\nmust adjust when the directory grows.\n"} entryOffset
+    ^{:line 714 :tag uint64} dirOffset
+
+
+
+    ^{:line 718 :tag uint64 :doc "Snapshot of Map.clearSeq at iteration initialization time. Used to\ndetect clear during iteration.\n"} clearSeq
+
+
+
+    ^{:line 722 :tag uint8 :doc "Value of Map.globalDepth during the last call to Next. Used to\ndetect directory grow during iteration.\n"} globalDepth
+
+
+
+    ^{:line 726 :tag int :doc "dirIdx is the current directory index, prior to adjustment by\ndirOffset.\n"} dirIdx
+
+
+    ^{:line 729 :tag (* table) :doc "tab is the table at dirIdx during the previous call to Next.\n"} tab
+
+
+    ^{:line 732 :tag groupReference :doc "group is the group at entryIdx during the previous call to Next.\n"} group
+
+
+
+
+    ^{:line 737 :tag uint64 :doc "entryIdx is the current entry index, prior to adjustment by entryOffset.\nThe lower 3 bits of the index are the slot index, and the upper bits\nare the group index.\n"} entryIdx))
+
+
+
+^{:go/end 763} (go/method Init "Init initializes Iter for iteration.\n" [^{:tag (* Iter)} it ^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m]
+  (set! (.-typ it) typ)
+
+  (when (or (== m nil) (== (.-used m) 0))
+    (return))
+
+
+  (let [dirIdx 0
+      ^{:line 749 :tag groupReference} groupSmall (zero groupReference)]
+    (when (<= (.-dirLen m) 0)
+      ;; Use dirIdx == -1 as sentinel for small maps.
+      (set! dirIdx -1)
+      (set! (.-data groupSmall) (.-dirPtr m)))
+
+
+    (set! (.-m it) m)
+    (set! (.-entryOffset it) (rand))
+    (set! (.-dirOffset it) (rand))
+    (set! (.-globalDepth it) (.-globalDepth m))
+    (set! (.-dirIdx it) dirIdx)
+    (set! (.-group it) groupSmall)
+    (set! (.-clearSeq it) (.-clearSeq m))))
+
+
+^{:go/end 767} (go/method Initialized ^bool [^{:tag (* Iter)} it]
+  (!= (.-typ it) nil))
+
+
+
+^{:go/end 772} (go/method Map "Map returns the map this iterator is iterating over.\n" ^{:tag (* Map)} [^{:tag (* Iter)} it]
+  (.-m it))
+
+
+
+
+
+^{:go/end 779} (go/method Key "Key returns a pointer to the current key. nil indicates end of iteration.\n\nMust not be called prior to Next.\n" ^unsafe/Pointer [^{:tag (* Iter)} it]
+  (.-key it))
+
+
+
+
+
+
+^{:go/end 787} (go/method Elem "Elem returns a pointer to the current element. nil indicates end of\niteration.\n\nMust not be called prior to Next.\n" ^unsafe/Pointer [^{:tag (* Iter)} it]
+  (.-elem it))
+
+
+^{:go/end 821} (go/method nextDirIdx [^{:tag (* Iter)} it]
+  ;; Skip other entries in the directory that refer to the same
+  ;; logical table. There are two cases of this:
+  ;;
+  ;; Consider this directory:
+  ;;
+  ;; - 0: *t1
+  ;; - 1: *t1
+  ;; - 2: *t2a
+  ;; - 3: *t2b
+  ;;
+  ;; At some point, the directory grew to accommodate a split of
+  ;; t2. t1 did not split, so entries 0 and 1 both point to t1.
+  ;; t2 did split, so the two halves were installed in entries 2
+  ;; and 3.
+  ;;
+  ;; If dirIdx is 0 and it.tab is t1, then we should skip past
+  ;; entry 1 to avoid repeating t1.
+  ;;
+  ;; If dirIdx is 2 and it.tab is t2 (pre-split), then we should
+  ;; skip past entry 3 because our pre-split t2 already covers
+  ;; all keys from t2a and t2b (except for new insertions, which
+  ;; iteration need not return).
+  ;;
+  ;; We can achieve both of these by using to difference between
+  ;; the directory and table depth to compute how many entries
+  ;; the table covers.
+  (let [entries ^int (<< 1 (- (.-globalDepth (.-m it)) (.-localDepth (.-tab it))))]
+    (set! (.-dirIdx it) + entries)
+    (set! (.-tab it) nil)
+    (set! (.-group it) (lit groupReference))
+    (set! (.-entryIdx it) 0)))
+
+
+
+
+^{:go/end 864} (go/method grownKeyElem "Return the appropriate key/elem for key at slotIdx index within it.group, if\nany.\n" [^{:tag (* Iter)} it ^unsafe/Pointer key ^uintptr slotIdx] :results [unsafe/Pointer unsafe/Pointer bool]
+  (let [(values newKey newElem ok) (.getWithKey (.-m it) (.-typ it) key)]
+    (when (not ok)
+      ;; Key has likely been deleted, and
+      ;; should be skipped.
+      ;;
+      ;; One exception is keys that don't
+      ;; compare equal to themselves (e.g.,
+      ;; NaN). These keys cannot be looked
+      ;; up, so getWithKey will fail even if
+      ;; the key exists.
+      ;;
+      ;; However, we are in luck because such
+      ;; keys cannot be updated and they
+      ;; cannot be deleted except with clear.
+      ;; Thus if no clear has occurred, the
+      ;; key/elem must still exist exactly as
+      ;; in the old groups, so we can return
+      ;; them from there.
+      ;;
+      ;; TODO(prattmic): Consider checking
+      ;; clearSeq early. If a clear occurred,
+      ;; Next could always return
+      ;; immediately, as iteration doesn't
+      ;; need to return anything added after
+      ;; clear.
+      (when (and (== (.-clearSeq it) (.-clearSeq (.-m it))) (not ((.-Equal (.-Key (.-typ it))) key key)))
+        (let [elem (.elem (.-group it) (.-typ it) slotIdx)]
+          (when (.IndirectElem (.-typ it))
+            (set! elem @(conv (* unsafe/Pointer) elem)))
+
+          (return key elem true)))
+
+
+      ;; This entry doesn't exist anymore.
+      (return nil nil false))
+
+
+    (return newKey newElem true)))
+
+
+
+
+
+
+
+
+
+^{:go/end 1203} (go/method Next "Next proceeds to the next element in iteration, which can be accessed via\nthe Key and Elem methods.\n\nThe table can be mutated during iteration, though there is no guarantee that\nthe mutations will be visible to the iteration.\n\nInit must be called prior to Next.\n" [^{:tag (* Iter)} it]
+  (when (== (.-m it) nil)
+    ;; Map was empty at Iter.Init.
+    (set! (.-key it) nil)
+    (set! (.-elem it) nil)
+    (return))
+
+
+  (when (!= (.-writing (.-m it)) 0)
+    (fatal "concurrent map iteration and map write")
+    (return))
+
+
+  (when (< (.-dirIdx it) 0)
+    ;; Map was small at Init.
+    (for [] (< (.-entryIdx it) abi/MapGroupSlots) (inc! (.-entryIdx it))
+      (let [k (% (conv uintptr (+ (.-entryIdx it) (.-entryOffset it))) abi/MapGroupSlots)]
+
+        (when (== (bit-and (.get (.ctrls (.-group it)) k) ctrlEmpty) ctrlEmpty)
+          ;; Empty or deleted.
+          (continue))
+
+
+        (let [key (.key (.-group it) (.-typ it) k)]
+          (when (.IndirectKey (.-typ it))
+            (set! key @(conv (* unsafe/Pointer) key)))
+
+
+          ;; As below, if we have grown to a full map since Init,
+          ;; we continue to use the old group to decide the keys
+          ;; to return, but must look them up again in the new
+          ;; tables.
+          (let [grown (> (.-dirLen (.-m it)) 0)
+              ^{:line 906 :tag unsafe/Pointer} elem (zero unsafe/Pointer)]
+            (if grown
+              (let [^bool ok (zero bool)
+                  (values newKey newElem ^:assign ok) (.getWithKey (.-m it) (.-typ it) key)]
+                (if (not ok)
+                  ;; See comment below.
+                  (if (and (== (.-clearSeq it) (.-clearSeq (.-m it))) (not ((.-Equal (.-Key (.-typ it))) key key))) (do
+                      (set! elem (.elem (.-group it) (.-typ it) k))
+                      (when (.IndirectElem (.-typ it))
+                        (set! elem @(conv (* unsafe/Pointer) elem))))
+
+
+                    (continue))
+
+                  (do
+                    (set! key newKey)
+                    (set! elem newElem))))
+
+              (do
+                (set! elem (.elem (.-group it) (.-typ it) k))
+                (when (.IndirectElem (.-typ it))
+                  (set! elem @(conv (* unsafe/Pointer) elem)))))
+
+
+
+            (inc! (.-entryIdx it))
+            (set! (.-key it) key)
+            (set! (.-elem it) elem)
+            (return)))))
+
+    (set! (.-key it) nil)
+    (set! (.-elem it) nil)
+    (return))
+
+
+  (when (!= (.-globalDepth it) (.-globalDepth (.-m it)))
+    ;; Directory has grown since the last call to Next. Adjust our
+    ;; directory index.
+    ;;
+    ;; Consider:
+    ;;
+    ;; Before:
+    ;; - 0: *t1
+    ;; - 1: *t2  <- dirIdx
+    ;;
+    ;; After:
+    ;; - 0: *t1a (split)
+    ;; - 1: *t1b (split)
+    ;; - 2: *t2  <- dirIdx
+    ;; - 3: *t2
+    ;;
+    ;; That is, we want to double the current index when the
+    ;; directory size doubles (or quadruple when the directory size
+    ;; quadruples, etc).
+    ;;
+    ;; The actual (randomized) dirIdx is computed below as:
+    ;;
+    ;; dirIdx := (it.dirIdx + it.dirOffset) % it.m.dirLen
+    ;;
+    ;; Multiplication is associative across modulo operations,
+    ;; A * (B % C) = (A * B) % (A * C),
+    ;; provided that A is positive.
+    ;;
+    ;; Thus we can achieve this by adjusting it.dirIdx,
+    ;; it.dirOffset, and it.m.dirLen individually.
+    (let [orders (- (.-globalDepth (.-m it)) (.-globalDepth it))]
+      (set! (.-dirIdx it) << orders)
+      (set! (.-dirOffset it) << orders)
+      ;; it.m.dirLen was already adjusted when the directory grew.
+
+      (set! (.-globalDepth it) (.-globalDepth (.-m it)))))
+
+
+  ;; Continue iteration until we find a full slot.
+  (for [] (< (.-dirIdx it) (.-dirLen (.-m it))) (.nextDirIdx it)
+    ;; Resolve the table.
+    (when (== (.-tab it) nil)
+      (let [dirIdx (conv int (bit-and (+ (conv uint64 (.-dirIdx it)) (.-dirOffset it)) (conv uint64 (- (.-dirLen (.-m it)) 1))))
+          ^{:line 984} newTab (.directoryAt (.-m it) (conv uintptr dirIdx))]
+        (when (!= (.-index newTab) dirIdx)
+          ;; Normally we skip past all duplicates of the
+          ;; same entry in the table (see updates to
+          ;; it.dirIdx at the end of the loop below), so
+          ;; this case wouldn't occur.
+          ;;
+          ;; But on the very first call, we have a
+          ;; completely randomized dirIdx that may refer
+          ;; to a middle of a run of tables in the
+          ;; directory. Do a one-time adjustment of the
+          ;; offset to ensure we start at first index for
+          ;; newTable.
+          (let [diff (- dirIdx (.-index newTab))]
+            (set! (.-dirOffset it) - (conv uint64 diff))
+            (set! dirIdx (.-index newTab))))
+
+        (set! (.-tab it) newTab)))
+
+
+    ;; N.B. Use it.tab, not newTab. It is important to use the old
+    ;; table for key selection if the table has grown. See comment
+    ;; on grown below.
+
+    (let [entryMask (- (conv uint64 (.-capacity (.-tab it))) 1)]
+      (when (> (.-entryIdx it) entryMask)
+        ;; Continue to next table.
+        (continue))
+
+
+      ;; Fast path: skip matching and directly check if entryIdx is a
+      ;; full slot.
+      ;;
+      ;; In the slow path below, we perform an 8-slot match check to
+      ;; look for full slots within the group.
+      ;;
+      ;; However, with a max load factor of 7/8, each slot in a
+      ;; mostly full map has a high probability of being full. Thus
+      ;; it is cheaper to check a single slot than do a full control
+      ;; match.
+
+      (let [entryIdx (bit-and (+ (.-entryIdx it) (.-entryOffset it)) entryMask)
+          ^{:line 1026} slotIdx (conv uintptr (bit-and entryIdx (- abi/MapGroupSlots 1)))]
+        (when (or (== slotIdx 0) (== (.-data (.-group it)) nil))
+          ;; Only compute the group (a) when we switch
+          ;; groups (slotIdx rolls over) and (b) on the
+          ;; first iteration in this table (slotIdx may
+          ;; not be zero due to entryOffset).
+          (let [groupIdx (>> entryIdx abi/MapGroupSlotsBits)]
+            (set! (.-group it) (.group (.-groups (.-tab it)) (.-typ it) groupIdx))))
+
+
+        (when (== (bit-and (.get (.ctrls (.-group it)) slotIdx) ctrlEmpty) 0)
+          ;; Slot full.
+
+          (let [key (.key (.-group it) (.-typ it) slotIdx)]
+            (when (.IndirectKey (.-typ it))
+              (set! key @(conv (* unsafe/Pointer) key)))
+
+
+            (let [grown (== (.-index (.-tab it)) -1)
+                ^{:line 1045 :tag unsafe/Pointer} elem (zero unsafe/Pointer)]
+              (if grown
+                (let [(values newKey newElem ok) (.grownKeyElem it key slotIdx)]
+                  (if (not ok)
+                    ;; This entry doesn't exist
+                    ;; anymore. Continue to the
+                    ;; next one.
+                    (goto :next)
+                    (do
+                      (set! key newKey)
+                      (set! elem newElem))))
+
+                (do
+                  (set! elem (.elem (.-group it) (.-typ it) slotIdx))
+                  (when (.IndirectElem (.-typ it))
+                    (set! elem @(conv (* unsafe/Pointer) elem)))))
+
+
+
+              (inc! (.-entryIdx it))
+              (set! (.-key it) key)
+              (set! (.-elem it) elem)
+              (return))))
+
+
+        (label :next
+          (inc! (.-entryIdx it)))
+
+        ;; Slow path: use a match on the control word to jump ahead to
+        ;; the next full slot.
+        ;;
+        ;; This is highly effective for maps with particularly low load
+        ;; (e.g., map allocated with large hint but few insertions).
+        ;;
+        ;; For maps with medium load (e.g., 3-4 empty slots per group)
+        ;; it also tends to work pretty well. Since slots within a
+        ;; group are filled in order, then if there have been no
+        ;; deletions, a match will allow skipping past all empty slots
+        ;; at once.
+        ;;
+        ;; Note: it is tempting to cache the group match result in the
+        ;; iterator to use across Next calls. However because entries
+        ;; may be deleted between calls later calls would still need to
+        ;; double-check the control value.
+
+        (let [^bitset groupMatch (zero bitset)]
+          (while (<= (.-entryIdx it) entryMask)
+            (let [entryIdx (bit-and (+ (.-entryIdx it) (.-entryOffset it)) entryMask)
+                ^{:line 1093} slotIdx (conv uintptr (bit-and entryIdx (- abi/MapGroupSlots 1)))]
+
+              (when (or (== slotIdx 0) (== (.-data (.-group it)) nil))
+                ;; Only compute the group (a) when we switch
+                ;; groups (slotIdx rolls over) and (b) on the
+                ;; first iteration in this table (slotIdx may
+                ;; not be zero due to entryOffset).
+                (let [groupIdx (>> entryIdx abi/MapGroupSlotsBits)]
+                  (set! (.-group it) (.group (.-groups (.-tab it)) (.-typ it) groupIdx))))
+
+
+              (when (== groupMatch 0)
+                (set! groupMatch (.matchFull (.ctrls (.-group it))))
+
+                (when (!= slotIdx 0)
+                  ;; Starting in the middle of the group.
+                  ;; Ignore earlier groups.
+                  (set! groupMatch (.removeBelow groupMatch slotIdx)))
+
+
+                ;; Skip over groups that are composed of only empty or
+                ;; deleted slots.
+                (when (== groupMatch 0)
+                  ;; Jump past remaining slots in this
+                  ;; group.
+                  (set! (.-entryIdx it) + (- abi/MapGroupSlots (conv uint64 slotIdx)))
+                  (continue))
+
+
+                (let [i (.first groupMatch)]
+                  (set! (.-entryIdx it) + (conv uint64 (- i slotIdx)))
+                  (when (> (.-entryIdx it) entryMask)
+                    ;; Past the end of this table's iteration.
+                    (continue))
+
+                  (set! entryIdx + (conv uint64 (- i slotIdx)))
+                  (set! slotIdx i)))
+
+
+              (let [key (.key (.-group it) (.-typ it) slotIdx)]
+                (when (.IndirectKey (.-typ it))
+                  (set! key @(conv (* unsafe/Pointer) key)))
+
+
+                ;; If the table has changed since the last
+                ;; call, then it has grown or split. In this
+                ;; case, further mutations (changes to
+                ;; key->elem or deletions) will not be visible
+                ;; in our snapshot table. Instead we must
+                ;; consult the new table by doing a full
+                ;; lookup.
+                ;;
+                ;; We still use our old table to decide which
+                ;; keys to lookup in order to avoid returning
+                ;; the same key twice.
+                (let [grown (== (.-index (.-tab it)) -1)
+                    ^{:line 1149 :tag unsafe/Pointer} elem (zero unsafe/Pointer)]
+                  (if grown
+                    (let [(values newKey newElem ok) (.grownKeyElem it key slotIdx)]
+                      (if (not ok) (do
+                          ;; This entry doesn't exist anymore.
+                          ;; Continue to the next one.
+                          (set! groupMatch (.removeFirst groupMatch))
+                          (when (== groupMatch 0)
+                            ;; No more entries in this
+                            ;; group. Continue to next
+                            ;; group.
+                            (set! (.-entryIdx it) + (- abi/MapGroupSlots (conv uint64 slotIdx)))
+                            (continue))
+
+
+                          ;; Next full slot.
+                          (let [i (.first groupMatch)]
+                            (set! (.-entryIdx it) + (conv uint64 (- i slotIdx)))
+                            (continue)))
+                        (do
+                          (set! key newKey)
+                          (set! elem newElem))))
+
+                    (do
+                      (set! elem (.elem (.-group it) (.-typ it) slotIdx))
+                      (when (.IndirectElem (.-typ it))
+                        (set! elem @(conv (* unsafe/Pointer) elem)))))
+
+
+
+                  ;; Jump ahead to the next full slot or next group.
+                  (set! groupMatch (.removeFirst groupMatch))
+                  (if (== groupMatch 0)
+                    ;; No more entries in
+                    ;; this group. Continue
+                    ;; to next group.
+                    (set! (.-entryIdx it) + (- abi/MapGroupSlots (conv uint64 slotIdx)))
+
+                    ;; Next full slot.
+                    (let [i (.first groupMatch)]
+                      (set! (.-entryIdx it) + (conv uint64 (- i slotIdx)))))
+
+
+                  (set! (.-key it) key)
+                  (set! (.-elem it) elem)
+                  (return)))))))))
+
+
+  ;; Continue to next table.
+
+
+  (set! (.-key it) nil)
+  (set! (.-elem it) nil)
+  (return))
+
+
+
+
+
+^{:go/end 1231} (go/method rehash "Replaces the table with one larger table or two split tables to fit more\nentries. Since the table is replaced, t is now stale and should not be\nmodified.\n" [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m]
+  ;; TODO(prattmic): SwissTables typically perform a "rehash in place"
+  ;; operation which recovers capacity consumed by tombstones without growing
+  ;; the table by reordering slots as necessary to maintain the probe
+  ;; invariant while eliminating all tombstones.
+  ;;
+  ;; However, it is unclear how to make rehash in place work with
+  ;; iteration. Since iteration simply walks through all slots in order
+  ;; (with random start offset), reordering the slots would break
+  ;; iteration.
+  ;;
+  ;; As an alternative, we could do a "resize" to new groups allocation
+  ;; of the same size. This would eliminate the tombstones, but using a
+  ;; new allocation, so the existing grow support in iteration would
+  ;; continue to work.
+
+  (let [newCapacity (* 2 (.-capacity t))]
+    (when (<= newCapacity maxTableCapacity)
+      (.grow t typ m newCapacity)
+      (return))
+
+
+    (.split t typ m)))
+
+
+
+^{:go/end 1239} (go/func localDepthMask "Bitmask for the last selection bit at this depth.\n" ^uintptr [^uint8 localDepth]
+  (when (not Use64BitHash)
+    (return (<< (conv uintptr 1) (- 32 localDepth))))
+
+  (<< (conv uintptr 1) (- 64 localDepth)))
+
+
+
+^{:go/end 1284} (go/method split "split the table into two, installing the new tables in the map directory.\n" [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m]
+  (let [localDepth (.-localDepth t)]
+    (inc! localDepth)
+
+    ;; TODO: is this the best capacity?
+    (let [left (newTable typ maxTableCapacity -1 localDepth)
+        ^{:line 1248} right (newTable typ maxTableCapacity -1 localDepth)
+
+        ;; Split in half at the localDepth bit from the top.
+        ^{:line 1251} mask (localDepthMask localDepth)]
+
+      (for [i (conv uint64 0)] (<= i (.-lengthMask (.-groups t))) (inc! i)
+        (let [g (.group (.-groups t) typ i)]
+          (for [j (conv uintptr 0)] (< j abi/MapGroupSlots) (inc! j)
+            (when (== (bit-and (.get (.ctrls g) j) ctrlEmpty) ctrlEmpty)
+              ;; Empty or deleted
+              (continue))
+
+
+            (let [key (.key g typ j)]
+              (when (.IndirectKey typ)
+                (set! key @(conv (* unsafe/Pointer) key)))
+
+
+              (let [elem (.elem g typ j)]
+                (when (.IndirectElem typ)
+                  (set! elem @(conv (* unsafe/Pointer) elem)))
+
+
+                (let [hash ((.-Hasher typ) key (.-seed m))
+                    ^{:line 1272 :tag (* table)} newTable (zero (* table))]
+                  (if (== (bit-and hash mask) 0)
+                    (set! newTable left)
+
+                    (set! newTable right))
+
+                  (.uncheckedPutSlot newTable typ hash key elem)))))))
+
+
+
+      (.installTableSplit m t left right)
+      (set! (.-index t) -1))))
+
+
+
+
+
+
+^{:go/end 1322} (go/method grow "grow the capacity of the table by allocating a new table with a bigger array\nand uncheckedPutting each element of the table into the new table (we know\nthat no insertion here will Put an already-present value), and discard the\nold table.\n" [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m ^uint16 newCapacity]
+  (let [newTable (newTable typ (conv uint64 newCapacity) (.-index t) (.-localDepth t))]
+
+    (when (> (.-capacity t) 0)
+      (for [i (conv uint64 0)] (<= i (.-lengthMask (.-groups t))) (inc! i)
+        (let [g (.group (.-groups t) typ i)]
+          (for [j (conv uintptr 0)] (< j abi/MapGroupSlots) (inc! j)
+            (when (== (bit-and (.get (.ctrls g) j) ctrlEmpty) ctrlEmpty)
+              ;; Empty or deleted
+              (continue))
+
+
+            (let [key (.key g typ j)]
+              (when (.IndirectKey typ)
+                (set! key @(conv (* unsafe/Pointer) key)))
+
+
+              (let [elem (.elem g typ j)]
+                (when (.IndirectElem typ)
+                  (set! elem @(conv (* unsafe/Pointer) elem)))
+
+
+                (let [hash ((.-Hasher typ) key (.-seed m))]
+
+                  (.uncheckedPutSlot newTable typ hash key elem))))))))
+
+
+
+
+    (.checkInvariants newTable typ m)
+    (.replaceTable m newTable)
+    (set! (.-index t) -1)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type probeSeq "probeSeq maintains the state for a probe sequence that iterates through the\ngroups in a table. The sequence is a triangular progression of the form\nhash, hash + 1, hash + 1 + 2, hash + 1 + 2 + 3, ..., modulo mask + 1.\nThe i-th term of the sequence is\n\n\tp(i) := hash + (i^2 + i)/2 (mod mask+1)\n\nThe sequence effectively outputs the indexes of *groups*. The group\nmachinery allows us to check an entire group with minimal branching.\n\nIt turns out that this probe sequence visits every group exactly once if\nthe number of groups is a power of two, since (i^2+i)/2 is a bijection in\nZ/(2^m). See https://en.wikipedia.org/wiki/Quadratic_probing\n" (struct
+    ^{:line 1338 :tag uint64} mask
+    ^{:line 1339 :tag uint64} offset
+    ^{:line 1340 :tag uint64} index))
+
+
+^{:go/end 1349} (go/func makeProbeSeq ^probeSeq [^uintptr hash ^uint64 mask]
+  ^{:go/breaks [2 4 6]} (lit probeSeq
+    :mask mask
+    :offset (bit-and (conv uint64 hash) mask)
+    :index 0))
+
+
+
+^{:go/end 1355} (go/method next ^probeSeq [^probeSeq s]
+  (inc! (.-index s))
+  (set! (.-offset s) (bit-and (+ (.-offset s) (.-index s)) (.-mask s)))
+  ^{:line 1354} s)
+
+
+^{:go/end 1374} (go/method clone ^{:tag (* table)} [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ]
+  ;; Shallow copy the table structure.
+  (let [t2 (new table)]
+    (set! @t2 @t)
+    (set! t t2)
+
+    ;; We need to just deep copy the groups.data field.
+    (let [oldGroups (.-groups t)
+        ^{:line 1365} newGroups (newGroups typ (+ (.-lengthMask oldGroups) 1))]
+      (for [i (conv uint64 0)] (<= i (.-lengthMask oldGroups)) (inc! i)
+        (let [oldGroup (.group oldGroups typ i)
+            ^{:line 1368} newGroup (.group newGroups typ i)]
+          (cloneGroup typ newGroup oldGroup)))
+
+      (set! (.-groups t) newGroups)
+
+      ^{:line 1373} t)))

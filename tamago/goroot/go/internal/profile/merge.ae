@@ -1,0 +1,460 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.profile) (go/file "merge.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [sort "sort"]
+    ^{:line 10} [strconv "strconv"]
+    ^{:line 11} [strings "strings"]])
+
+
+
+
+
+
+
+
+
+^{:go/end 68} (go/func Merge "Merge merges all the profiles in profs into a single Profile.\nReturns a new profile independent of the input profiles. The merged\nprofile is compacted to eliminate unused samples, locations,\nfunctions and mappings. Profiles must have identical profile sample\nand period types or the merge will fail. profile.Period of the\nresulting profile will be the maximum of all profiles, and\nprofile.TimeNanos will be the earliest nonzero one.\n" [^{:tag (slice (* Profile))} srcs] :results [(* Profile) error]
+  (when (== (len srcs) 0)
+    (return nil (fmt/Errorf "no profiles to merge")))
+
+  (let [(values p err) (combineHeaders srcs)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [pm (addr ^{:go/breaks [2 4 6 8 10]} (lit profileMerger
+            :p p
+            :samples (make (map sampleKey (* Sample)) (len (.-Sample (aget srcs 0))))
+            :locations (make (map locationKey (* Location)) (len (.-Location (aget srcs 0))))
+            :functions (make (map functionKey (* Function)) (len (.-Function (aget srcs 0))))
+            :mappings (make (map mappingKey (* Mapping)) (len (.-Mapping (aget srcs 0))))))]
+
+
+      (range [_ src srcs]
+        ;; Clear the profile-specific hash tables
+        (set! (.-locationsByID pm) (make (map uint64 (* Location)) (len (.-Location src))))
+        (set! (.-functionsByID pm) (make (map uint64 (* Function)) (len (.-Function src))))
+        (set! (.-mappingsByID pm) (make (map uint64 mapInfo) (len (.-Mapping src))))
+
+        (when (and (== (len (.-mappings pm)) 0) (> (len (.-Mapping src)) 0))
+          ;; The Mapping list has the property that the first mapping
+          ;; represents the main binary. Take the first Mapping we see,
+          ;; otherwise the operations below will add mappings in an
+          ;; arbitrary order.
+          (.mapMapping pm (aget (.-Mapping src) 0)))
+
+
+        (range [_ s (.-Sample src)]
+          (when (not (isZeroSample s))
+            (.mapSample pm s))))
+
+
+
+
+      (range [_ s (.-Sample p)]
+        (when (isZeroSample s)
+          ;; If there are any zero samples, re-merge the profile to GC
+          ;; them.
+          (return (Merge (lit (slice (* Profile)) p)))))
+
+
+
+      (return p nil))))
+
+
+
+
+
+^{:go/end 103} (go/method Normalize "Normalize normalizes the source profile by multiplying each value in profile by the\nratio of the sum of the base profile's values of that sample type to the sum of the\nsource profile's value of that sample type.\n" ^error [^{:tag (* Profile)} p ^{:tag (* Profile)} pb]
+
+  (when [err (.compatible p pb)] (!= err nil)
+    (return err))
+
+
+  (let [baseVals (make (slice int64) (len (.-SampleType p)))]
+    (range [_ s (.-Sample pb)]
+      (range [i v (.-Value s)]
+        (set! (aget baseVals i) + v)))
+
+
+
+    (let [srcVals (make (slice int64) (len (.-SampleType p)))]
+      (range [_ s (.-Sample p)]
+        (range [i v (.-Value s)]
+          (set! (aget srcVals i) + v)))
+
+
+
+      ^{:go/breaks [4]} (let [normScale (make (slice float64) (len baseVals))]
+        (range [i baseVals]
+          (if (== (aget srcVals i) 0)
+            (aset normScale i 0.0)
+
+            (aset normScale i (/ (conv float64 (aget baseVals i)) (conv float64 (aget srcVals i))))))
+
+
+        (.ScaleN p normScale)
+        nil))))
+
+
+^{:go/breaks [[4 111]] :go/end 112} (go/func isZeroSample ^bool [^{:tag (* Sample)} s]
+  (range [_ v (.-Value s)]
+    (when (!= v 0)
+      (return false)))
+
+
+  true)
+
+
+(go/type profileMerger (struct
+    ^{:line 115 :tag (* Profile)} p
+
+
+    ^{:line 118 :tag (map uint64 (* Location)) :doc "Memoization tables within a profile.\n"} locationsByID
+    ^{:line 119 :tag (map uint64 (* Function))} functionsByID
+    ^{:line 120 :tag (map uint64 mapInfo)} mappingsByID
+
+
+    ^{:line 123 :tag (map sampleKey (* Sample)) :doc "Memoization tables for profile entities.\n"} samples
+    ^{:line 124 :tag (map locationKey (* Location))} locations
+    ^{:line 125 :tag (map functionKey (* Function))} functions
+    ^{:line 126 :tag (map mappingKey (* Mapping))} mappings))
+
+
+(go/type mapInfo (struct
+    ^{:line 130 :tag (* Mapping)} m
+    ^{:line 131 :tag int64} offset))
+
+
+^{:go/end 173} (go/method mapSample ^{:tag (* Sample)} [^{:tag (* profileMerger)} pm ^{:tag (* Sample)} src]
+  (let [s (addr ^{:go/breaks [2 4 6 8 10]} (lit Sample
+          :Location (make (slice (* Location)) (len (.-Location src)))
+          :Value (make (slice int64) (len (.-Value src)))
+          :Label (make (map string (slice string)) (len (.-Label src)))
+          :NumLabel (make (map string (slice int64)) (len (.-NumLabel src)))
+          :NumUnit (make (map string (slice string)) (len (.-NumLabel src)))))]
+
+    (range [i l (.-Location src)]
+      (aset (.-Location s) i (.mapLocation pm l)))
+
+    (range [k v (.-Label src)]
+      (let [vv (make (slice string) (len v))]
+        (copy vv v)
+        (aset (.-Label s) k vv)))
+
+    (range [k v (.-NumLabel src)]
+      (let [u (aget (.-NumUnit src) k)
+          ^{:line 152} vv (make (slice int64) (len v))
+          ^{:line 153} uu (make (slice string) (len u))]
+        (copy vv v)
+        (copy uu u)
+        (aset (.-NumLabel s) k vv)
+        (aset (.-NumUnit s) k uu)))
+
+    ;; Check memoization table. Must be done on the remapped location to
+    ;; account for the remapped mapping. Add current values to the
+    ;; existing sample.
+    (let [k (.key s)]
+      (when [(values ss ok) (aget (.-samples pm) k)] ok
+        (range [i v (.-Value src)]
+          (set! (aget (.-Value ss) i) + v))
+
+        (return ss))
+
+      (copy (.-Value s) (.-Value src))
+      (aset (.-samples pm) k s)
+      (set! (.-Sample (.-p pm)) (append (.-Sample (.-p pm)) s))
+      ^{:line 172} s)))
+
+
+
+^{:go/end 199} (go/method key "key generates sampleKey to be used as a key for maps.\n" ^sampleKey [^{:tag (* Sample)} sample]
+  (let [ids (make (slice string) (len (.-Location sample)))]
+    (range [i l (.-Location sample)]
+      (aset ids i (strconv/FormatUint (.-ID l) 16)))
+
+
+    (let [labels (make (slice string) 0 (len (.-Label sample)))]
+      (range [k v (.-Label sample)]
+        (set! labels (append labels (fmt/Sprintf "%q%q" k v))))
+
+      (sort/Strings labels)
+
+      (let [numlabels (make (slice string) 0 (len (.-NumLabel sample)))]
+        (range [k v (.-NumLabel sample)]
+          (set! numlabels (append numlabels (fmt/Sprintf "%q%x%x" k v (aget (.-NumUnit sample) k)))))
+
+        (sort/Strings numlabels)
+
+        (lit sampleKey
+          (strings/Join ids "|")
+          (strings/Join labels "")
+          (strings/Join numlabels ""))))))
+
+
+
+(go/type sampleKey (struct
+    ^{:line 202 :tag string} locations
+    ^{:line 203 :tag string} labels
+    ^{:line 204 :tag string} numlabels))
+
+
+^{:go/end 239} (go/method mapLocation ^{:tag (* Location)} [^{:tag (* profileMerger)} pm ^{:tag (* Location)} src]
+  (when (== src nil)
+    (return nil))
+
+
+  (when [(values l ok) (aget (.-locationsByID pm) (.-ID src))] ok
+    (aset (.-locationsByID pm) (.-ID src) l)
+    (return l))
+
+
+  (let [mi (.mapMapping pm (.-Mapping src))
+      ^{:line 218} l (addr ^{:go/breaks [2 4 6 8 10]} (lit Location
+          :ID (conv uint64 (+ (len (.-Location (.-p pm))) 1))
+          :Mapping (.-m mi)
+          :Address (conv uint64 (+ (conv int64 (.-Address src)) (.-offset mi)))
+          :Line (make (slice Line) (len (.-Line src)))
+          :IsFolded (.-IsFolded src)))]
+
+    (range [i ln (.-Line src)]
+      (aset (.-Line l) i (.mapLine pm ln)))
+
+    ;; Check memoization table. Must be done on the remapped location to
+    ;; account for the remapped mapping ID.
+    (let [k (.key l)]
+      (when [(values ll ok) (aget (.-locations pm) k)] ok
+        (aset (.-locationsByID pm) (.-ID src) ll)
+        (return ll))
+
+      (aset (.-locationsByID pm) (.-ID src) l)
+      (aset (.-locations pm) k l)
+      (set! (.-Location (.-p pm)) (append (.-Location (.-p pm)) l))
+      ^{:line 238} l)))
+
+
+
+^{:go/end 261} (go/method key "key generates locationKey to be used as a key for maps.\n" ^locationKey [^{:tag (* Location)} l]
+  (let [key ^{:go/breaks [2 4]} (lit locationKey
+        :addr (.-Address l)
+        :isFolded (.-IsFolded l))]
+
+    (when (!= (.-Mapping l) nil)
+      ;; Normalizes address to handle address space randomization.
+      (set! (.-addr key) - (.-Start (.-Mapping l)))
+      (set! (.-mappingID key) (.-ID (.-Mapping l))))
+
+    (let [lines (make (slice string) (* (len (.-Line l)) 2))]
+      (range [i line (.-Line l)]
+        (when (!= (.-Function line) nil)
+          (aset lines (* i 2) (strconv/FormatUint (.-ID (.-Function line)) 16)))
+
+        (aset lines (+ (* i 2) 1) (strconv/FormatInt (.-Line line) 16)))
+
+      (set! (.-lines key) (strings/Join lines "|"))
+      ^{:line 260} key)))
+
+
+(go/type locationKey (struct
+    ^{:line 264 :tag uint64} addr ^uint64 mappingID
+    ^{:line 265 :tag string} lines
+    ^{:line 266 :tag bool} isFolded))
+
+
+^{:go/end 304} (go/method mapMapping ^mapInfo [^{:tag (* profileMerger)} pm ^{:tag (* Mapping)} src]
+  (when (== src nil)
+    (return (lit mapInfo)))
+
+
+  (when [(values mi ok) (aget (.-mappingsByID pm) (.-ID src))] ok
+    (return mi))
+
+
+  ;; Check memoization tables.
+  (let [mk (.key src)]
+    (when [(values m ok) (aget (.-mappings pm) mk)] ok
+      (let [mi (lit mapInfo m (- (conv int64 (.-Start m)) (conv int64 (.-Start src))))]
+        (aset (.-mappingsByID pm) (.-ID src) mi)
+        (return mi)))
+
+    (let [m (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20]} (lit Mapping
+            :ID (conv uint64 (+ (len (.-Mapping (.-p pm))) 1))
+            :Start (.-Start src)
+            :Limit (.-Limit src)
+            :Offset (.-Offset src)
+            :File (.-File src)
+            :BuildID (.-BuildID src)
+            :HasFunctions (.-HasFunctions src)
+            :HasFilenames (.-HasFilenames src)
+            :HasLineNumbers (.-HasLineNumbers src)
+            :HasInlineFrames (.-HasInlineFrames src)))]
+
+      (set! (.-Mapping (.-p pm)) (append (.-Mapping (.-p pm)) m))
+
+      ;; Update memoization tables.
+      (aset (.-mappings pm) mk m)
+      (let [mi (lit mapInfo m 0)]
+        (aset (.-mappingsByID pm) (.-ID src) mi)
+        ^{:line 303} mi))))
+
+
+
+
+^{:go/end 332} (go/method key "key generates encoded strings of Mapping to be used as a key for\nmaps.\n" ^mappingKey [^{:tag (* Mapping)} m]
+  ;; Normalize addresses to handle address space randomization.
+  ;; Round up to next 4K boundary to avoid minor discrepancies.
+  (let [^:const ^{:val 4096} mapsizeRounding 0x1000
+
+      ^{:line 313} size (- (.-Limit m) (.-Start m))]
+    (set! size (- (+ size mapsizeRounding) 1))
+    (set! size (- size (% size mapsizeRounding)))
+    (let [key ^{:go/breaks [2 4]} (lit mappingKey
+          :size size
+          :offset (.-Offset m))]
+
+
+      (switch
+        (case [(!= (.-BuildID m) "")]
+          (set! (.-buildIDOrFile key) (.-BuildID m)))
+        (case [(!= (.-File m) "")]
+          (set! (.-buildIDOrFile key) (.-File m)))
+        (default))
+      ;; A mapping containing neither build ID nor file name is a fake mapping. A
+      ;; key with empty buildIDOrFile is used for fake mappings so that they are
+      ;; treated as the same mapping during merging.
+
+      ^{:line 331} key)))
+
+
+(go/type mappingKey (struct
+    ^{:line 335 :tag uint64} size ^uint64 offset
+    ^{:line 336 :tag string} buildIDOrFile))
+
+
+^{:go/end 345} (go/method mapLine ^Line [^{:tag (* profileMerger)} pm ^Line src]
+  (let [ln ^{:go/breaks [2 4]} (lit Line
+        :Function (.mapFunction pm (.-Function src))
+        :Line (.-Line src))]
+
+    ^{:line 344} ln))
+
+
+^{:go/end 370} (go/method mapFunction ^{:tag (* Function)} [^{:tag (* profileMerger)} pm ^{:tag (* Function)} src]
+  (when (== src nil)
+    (return nil))
+
+  (when [(values f ok) (aget (.-functionsByID pm) (.-ID src))] ok
+    (return f))
+
+  (let [k (.key src)]
+    (when [(values f ok) (aget (.-functions pm) k)] ok
+      (aset (.-functionsByID pm) (.-ID src) f)
+      (return f))
+
+    (let [f (addr ^{:go/breaks [2 4 6 8 10]} (lit Function
+            :ID (conv uint64 (+ (len (.-Function (.-p pm))) 1))
+            :Name (.-Name src)
+            :SystemName (.-SystemName src)
+            :Filename (.-Filename src)
+            :StartLine (.-StartLine src)))]
+
+      (aset (.-functions pm) k f)
+      (aset (.-functionsByID pm) (.-ID src) f)
+      (set! (.-Function (.-p pm)) (append (.-Function (.-p pm)) f))
+      ^{:line 369} f)))
+
+
+
+^{:go/end 380} (go/method key "key generates a struct to be used as a key for maps.\n" ^functionKey [^{:tag (* Function)} f]
+  (lit functionKey
+    (.-StartLine f)
+    (.-Name f)
+    (.-SystemName f)
+    (.-Filename f)))
+
+
+
+(go/type functionKey (struct
+    ^{:line 383 :tag int64} startLine
+    ^{:line 384 :tag string} name ^string systemName ^string fileName))
+
+
+
+
+^{:go/end 435} (go/func combineHeaders "combineHeaders checks that all profiles can be merged and returns\ntheir combined profile.\n" [^{:tag (slice (* Profile))} srcs] :results [(* Profile) error]
+  (range [_ s (subslice srcs 1)]
+    (when [err (.compatible (aget srcs 0) s)] (!= err nil)
+      (return nil err)))
+
+
+
+  (let [(values ^int64 timeNanos ^int64 durationNanos ^int64 period) (zero int64)
+      ^{:line 397 :tag (slice string)} comments (zero (slice string))
+      ^{:line 398} seenComments (lit (map string bool))
+      ^{:line 399 :tag string} defaultSampleType (zero string)]
+    (range [_ s srcs]
+      (when (or (== timeNanos 0) (< (.-TimeNanos s) timeNanos))
+        (set! timeNanos (.-TimeNanos s)))
+
+      (set! durationNanos + (.-DurationNanos s))
+      (when (or (== period 0) (< period (.-Period s)))
+        (set! period (.-Period s)))
+
+      (range [_ c (.-Comments s)]
+        (when [seen (aget seenComments c)] (not seen)
+          (set! comments (append comments c))
+          (aset seenComments c true)))
+
+
+      (when (== defaultSampleType "")
+        (set! defaultSampleType (.-DefaultSampleType s))))
+
+
+
+    (let [p (addr ^{:go/breaks [2 [4 422] 6 [8 425] 10 12 14 [16 430] 18]} (lit Profile
+            :SampleType (make (slice (* ValueType)) (len (.-SampleType (aget srcs 0))))
+
+            :DropFrames (.-DropFrames (aget srcs 0))
+            :KeepFrames (.-KeepFrames (aget srcs 0))
+
+            :TimeNanos timeNanos
+            :DurationNanos durationNanos
+            :PeriodType (.-PeriodType (aget srcs 0))
+            :Period period
+
+            :Comments comments
+            :DefaultSampleType defaultSampleType))]
+
+      (copy (.-SampleType p) (.-SampleType (aget srcs 0)))
+      (return p nil))))
+
+
+
+
+
+^{:go/breaks [[7 454]] :go/end 455} (go/method compatible "compatible determines if two profiles can be compared/merged.\nreturns nil if the profiles are compatible; otherwise an error with\ndetails on the incompatibility.\n" ^error [^{:tag (* Profile)} p ^{:tag (* Profile)} pb]
+  (when (not (equalValueType (.-PeriodType p) (.-PeriodType pb)))
+    (return (fmt/Errorf "incompatible period types %v and %v" (.-PeriodType p) (.-PeriodType pb))))
+
+
+  (when (!= (len (.-SampleType p)) (len (.-SampleType pb)))
+    (return (fmt/Errorf "incompatible sample types %v and %v" (.-SampleType p) (.-SampleType pb))))
+
+
+  (range [i (.-SampleType p)]
+    (when (not (equalValueType (aget (.-SampleType p) i) (aget (.-SampleType pb) i)))
+      (return (fmt/Errorf "incompatible sample types %v and %v" (.-SampleType p) (.-SampleType pb)))))
+
+
+  nil)
+
+
+
+
+^{:go/end 461} (go/func equalValueType "equalValueType returns true if the two value types are semantically\nequal. It ignores the internal fields used during encode/decode.\n" ^bool [^{:tag (* ValueType)} st1 ^{:tag (* ValueType)} st2]
+  (and (== (.-Type st1) (.-Type st2)) (== (.-Unit st1) (.-Unit st2))))

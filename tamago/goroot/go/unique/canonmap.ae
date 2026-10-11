@@ -1,0 +1,385 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.unique) (go/file "canonmap.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [goarch "internal/goarch"]
+    ^{:line 10} [runtime "runtime"]
+    ^{:line 11} [sync "sync"]
+    ^{:line 12} [atomic "sync/atomic"]
+    ^{:line 13} [unsafe "unsafe"]
+    ^{:line 14} [weak "weak"]])
+
+
+
+
+
+(go/type canonMap "canonMap is a map of T -> *T. The map controls the creation\nof a canonical *T, and elements of the map are automatically\ndeleted when the canonical *T is no longer referenced.\n" :type-params [^comparable T] (struct
+    ^{:line 21 :tag (atomic/Pointer (indirect T))} root
+    ^{:line 22 :tag (func [unsafe/Pointer uintptr] [uintptr])} hash
+    ^{:line 23 :tag uintptr} seed))
+
+
+^{:go/end 35} (go/func newCanonMap :type-params [^comparable T] ^{:tag (* (canonMap T))} []
+  (let [cm (new (inst canonMap T))]
+    (.Store (.-root cm) ((inst newIndirectNode T) nil))
+
+    (let [^{:tag (map T (struct))} m (zero (map T (struct)))
+        ^{:line 31} mapType (.MapType (abi/TypeOf m))]
+      (set! (.-hash cm) (.-Hasher mapType))
+      (set! (.-seed cm) (conv uintptr (runtime_rand)))
+      ^{:line 34} cm)))
+
+
+^{:go/end 56} (go/method Load ^{:tag (* T)} [^{:tag (* (canonMap T))} m ^T key]
+  (let [hash ((.-hash m) (abi/NoEscape (conv unsafe/Pointer (addr key))) (.-seed m))
+
+      ^{:line 40} i (.Load (.-root m))
+      ^{:line 41} hashShift (* 8 goarch/PtrSize)]
+    (while (!= hashShift 0)
+      (set! hashShift - nChildrenLog2)
+
+      (let [n (.Load (aget (.-children i) (bit-and (>> hash hashShift) nChildrenMask)))]
+        (when (== n nil)
+          (return nil))
+
+        (when (.-isEntry n)
+          (let [(values v _) (.lookup (.entry n) key)]
+            (return v)))
+
+        (set! i (.indirect n))))
+
+    (panic "unique.canonMap: ran out of hash bits while iterating")))
+
+
+^{:go/end 140} (go/method LoadOrStore ^{:tag (* T)} [^{:tag (* (canonMap T))} m ^T key]
+  (let [hash ((.-hash m) (abi/NoEscape (conv unsafe/Pointer (addr key))) (.-seed m))
+
+      ^{:line 61 :tag (* (indirect T))} i (zero (* (indirect T)))
+      ^{:line 62 :tag uint} hashShift (zero uint)
+      ^{:line 63 :tag (* (atomic/Pointer (node T)))} slot (zero (* (atomic/Pointer (node T))))
+      ^{:line 64 :tag (* (node T))} n (zero (* (node T)))]
+    (while true
+      ;; Find the key or a candidate location for insertion.
+      (set! i (.Load (.-root m)))
+      (set! hashShift (* 8 goarch/PtrSize))
+      (let [haveInsertPoint false]
+        (while (!= hashShift 0)
+          (set! hashShift - nChildrenLog2)
+
+          (set! slot (addr (aget (.-children i) (bit-and (>> hash hashShift) nChildrenMask))))
+          (set! n (.Load slot))
+          (when (== n nil)
+            ;; We found a nil slot which is a candidate for insertion.
+            (set! haveInsertPoint true)
+            (break))
+
+          (when (.-isEntry n)
+            ;; We found an existing entry, which is as far as we can go.
+            ;; If it stays this way, we'll have to replace it with an
+            ;; indirect node.
+            (when [(values v _) (.lookup (.entry n) key)] (!= v nil)
+              (return v))
+
+            (set! haveInsertPoint true)
+            (break))
+
+          (set! i (.indirect n)))
+
+        (when (not haveInsertPoint)
+          (panic "unique.canonMap: ran out of hash bits while iterating"))
+
+
+        ;; Grab the lock and double-check what we saw.
+        (.Lock (.-mu i))
+        (set! n (.Load slot))
+        (when (and ^:go/paren (or (== n nil) (.-isEntry n)) (not (.Load (.-dead i))))
+          ;; What we saw is still true, so we can continue with the insert.
+          (break))
+
+        ;; We have to start over.
+        (.Unlock (.-mu i))))
+
+    ;; N.B. This lock is held from when we broke out of the outer loop above.
+    ;; We specifically break this out so that we can use defer here safely.
+    ;; One option is to break this out into a new function instead, but
+    ;; there's so much local iteration state used below that this turns out
+    ;; to be cleaner.
+    (defer (.Unlock (.-mu i)))
+
+    (let [^{:tag (* (entry T))} oldEntry (zero (* (entry T)))]
+      (when (!= n nil)
+        (set! oldEntry (.entry n))
+        (when [(values v _) (.lookup oldEntry key)] (!= v nil)
+          ;; Easy case: by loading again, it turns out exactly what we wanted is here!
+          (return v)))
+
+
+      (let [(values newEntry canon wp) (^{:inst [T]} newEntryNode key hash)]
+        ;; Prune dead pointers. This is to avoid O(n) lookups when we store the exact same
+        ;; value in the set but the cleanup hasn't run yet because it got delayed for some
+        ;; reason.
+        (set! oldEntry (.prune oldEntry))
+        (if (== oldEntry nil)
+          ;; Easy case: create a new entry and store it.
+          (.Store slot (addr (.-node newEntry)))
+
+          ;; We possibly need to expand the entry already there into one or more new nodes.
+          ;;
+          ;; Publish the node last, which will make both oldEntry and newEntry visible. We
+          ;; don't want readers to be able to observe that oldEntry isn't in the tree.
+          (.Store slot (.expand m oldEntry newEntry hash hashShift i)))
+
+        (^{:inst [T (struct)]} runtime/AddCleanup canon ^{:go/end 138} (fn [^{:tag (struct)} _]
+            (.cleanup m hash wp))
+          (lit (struct)))
+        ^{:line 139} canon))))
+
+
+
+
+
+^{:go/end 174} (go/method expand "expand takes oldEntry and newEntry whose hashes conflict from bit 64 down to hashShift and\nproduces a subtree of indirect nodes to hold the two new entries. newHash is the hash of\nthe value in the new entry.\n" ^{:tag (* (node T))} [^{:tag (* (canonMap T))} m ^{:tag (* (entry T))} oldEntry ^:go/grouped ^{:tag (* (entry T))} newEntry ^uintptr newHash ^uint hashShift ^{:tag (* (indirect T))} parent]
+  ;; Check for a hash collision.
+  (let [oldHash (.-hash oldEntry)]
+    (when (== oldHash newHash)
+      ;; Store the old entry in the new entry's overflow list, then store
+      ;; the new entry.
+      (.Store (.-overflow newEntry) oldEntry)
+      (return (addr (.-node newEntry))))
+
+    ;; We have to add an indirect node. Worse still, we may need to add more than one.
+    (let [newIndirect (^{:inst [T]} newIndirectNode parent)
+        ^{:line 156} top newIndirect]
+      (while true
+        (when (== hashShift 0)
+          (panic "unique.canonMap: ran out of hash bits while inserting"))
+
+        (set! hashShift - nChildrenLog2) ; hashShift is for the level parent is at. We need to go deeper.
+        (let [oi (bit-and (>> oldHash hashShift) nChildrenMask)
+            ^{:line 163} ni (bit-and (>> newHash hashShift) nChildrenMask)]
+          (when (!= oi ni)
+            (.Store (aget (.-children newIndirect) oi) (addr (.-node oldEntry)))
+            (.Store (aget (.-children newIndirect) ni) (addr (.-node newEntry)))
+            (break))
+
+          (let [nextIndirect (^{:inst [T]} newIndirectNode newIndirect)]
+            (.Store (aget (.-children newIndirect) oi) (addr (.-node nextIndirect)))
+            (set! newIndirect nextIndirect))))
+
+      (addr (.-node top)))))
+
+
+
+
+
+
+^{:go/end 253} (go/method cleanup "cleanup deletes the entry corresponding to wp in the canon map, if it's\nstill in the map. wp must have a Value method that returns nil by the\ntime this function is called. hash must be the hash of the value that\nwp once pointed to (that is, the hash of *wp.Value()).\n" [^{:tag (* (canonMap T))} m ^uintptr hash ^{:tag (weak/Pointer T)} wp]
+  (let [^{:tag (* (indirect T))} i (zero (* (indirect T)))
+      ^{:line 182 :tag uint} hashShift (zero uint)
+      ^{:line 183 :tag (* (atomic/Pointer (node T)))} slot (zero (* (atomic/Pointer (node T))))
+      ^{:line 184 :tag (* (node T))} n (zero (* (node T)))]
+    (while true
+      ;; Find wp in the map by following hash.
+      (set! i (.Load (.-root m)))
+      (set! hashShift (* 8 goarch/PtrSize))
+      (let [haveEntry false]
+        (while (!= hashShift 0)
+          (set! hashShift - nChildrenLog2)
+
+          (set! slot (addr (aget (.-children i) (bit-and (>> hash hashShift) nChildrenMask))))
+          (set! n (.Load slot))
+          (when (== n nil)
+            ;; We found a nil slot, already deleted.
+            (return))
+
+          (when (.-isEntry n)
+            (when (not (.hasWeakPointer (.entry n) wp))
+              ;; The weak pointer was already pruned.
+              (return))
+
+            (set! haveEntry true)
+            (break))
+
+          (set! i (.indirect n)))
+
+        (when (not haveEntry)
+          (panic "unique.canonMap: ran out of hash bits while iterating"))
+
+
+        ;; Grab the lock and double-check what we saw.
+        (.Lock (.-mu i))
+        (set! n (.Load slot))
+        (when (and (!= n nil) (.-isEntry n))
+          ;; Prune the entry node without thinking too hard. If we do
+          ;; somebody else's work, such as someone trying to insert an
+          ;; entry with the same hash (probably the same value) then
+          ;; great, they'll back out without taking the lock.
+          (let [newEntry (.prune (.entry n))]
+            (if (== newEntry nil)
+              (.Store slot nil)
+
+              (.Store slot (addr (.-node newEntry))))
+
+
+            ;; Delete interior nodes that are empty, up the tree.
+            ;;
+            ;; We'll hand-over-hand lock our way up the tree as we do this,
+            ;; since we need to delete each empty node's link in its parent,
+            ;; which requires the parents' lock.
+            (while (and (!= (.-parent i) nil) (.empty i))
+              (when (== hashShift (* 8 goarch/PtrSize))
+                (panic "unique.canonMap: ran out of hash bits while iterating"))
+
+              (set! hashShift + nChildrenLog2)
+
+              ;; Delete the current node in the parent.
+              (let [parent (.-parent i)]
+                (.Lock (.-mu parent))
+                (.Store (.-dead i) true) ; Could be done outside of parent's lock.
+                (.Store (aget (.-children parent) (bit-and (>> hash hashShift) nChildrenMask)) nil)
+                (.Unlock (.-mu i))
+                (set! i parent)))
+
+            (.Unlock (.-mu i))
+            (return)))
+
+        ;; We have to start over.
+        (.Unlock (.-mu i))))))
+
+
+
+
+
+(go/type node "node is the header for a node. It's polymorphic and\nis actually either an entry or an indirect.\n" :type-params [^comparable T] (struct
+    ^{:line 258 :tag bool} isEntry))
+
+
+^{:go/end 266} (go/method entry ^{:tag (* (entry T))} [^{:tag (* (node T))} n]
+  (when (not (.-isEntry n))
+    (panic "called entry on non-entry node"))
+
+  (conv (* (entry T)) (conv unsafe/Pointer n)))
+
+
+^{:go/end 273} (go/method indirect ^{:tag (* (indirect T))} [^{:tag (* (node T))} n]
+  (when (.-isEntry n)
+    (panic "called indirect on entry node"))
+
+  (conv (* (indirect T)) (conv unsafe/Pointer n)))
+
+
+(go/const
+
+
+
+
+  ^{:line 280} [^{:val 4 :doc "16 children. This seems to be the sweet spot for\nload performance: any smaller and we lose out on\n50% or more in CPU performance. Any larger and the\nreturns are minuscule (~1% improvement for 32 children).\n"} nChildrenLog2 4]
+  ^{:line 281} [^{:val 16} nChildren (<< 1 nChildrenLog2)]
+  ^{:line 282} [^{:val 15} nChildrenMask (- nChildren 1)])
+
+
+
+(go/type indirect "indirect is an internal node in the hash-trie.\n" :type-params [^comparable T] (struct
+    (node T)
+    ^{:line 288 :tag atomic/Bool} dead
+    ^{:line 289 :tag (* (indirect T))} parent
+    ^{:line 290 :tag sync/Mutex} mu ; Protects mutation to children and any children that are entry nodes.
+    ^{:line 291 :tag (array nChildren (atomic/Pointer (node T)))} children))
+
+
+^{:go/end 296} (go/func newIndirectNode :type-params [^comparable T] ^{:tag (* (indirect T))} [^{:tag (* (indirect T))} parent]
+  (addr (lit (indirect T) :node (lit (node T) :isEntry false) :parent parent)))
+
+
+^{:go/breaks [[4 304]] :go/end 305} (go/method empty ^bool [^{:tag (* (indirect T))} i]
+  (range [j (.-children i)]
+    (when (!= (.Load (aget (.-children i) j)) nil)
+      (return false)))
+
+
+  true)
+
+
+
+(go/type entry "entry is a leaf node in the hash-trie.\n" :type-params [^comparable T] (struct
+    (node T)
+    ^{:line 310 :tag (atomic/Pointer (entry T))} overflow ; Overflow for hash collisions.
+    ^{:line 311 :tag (weak/Pointer T)} key
+    ^{:line 312 :tag uintptr} hash))
+
+
+^{:go/end 324} (go/func newEntryNode :type-params [^comparable T] [^T key ^uintptr hash] :results [(* (entry T)) (* T) (weak/Pointer T)]
+  (let [k (new T)]
+    (set! @k key)
+    (let [wp (^{:inst [T]} weak/Make k)]
+      (return (addr ^{:go/breaks [2 4 6]} (lit (entry T)
+            :node (lit (node T) :isEntry true)
+            :key wp
+            :hash hash))
+        ^{:line 323} k wp))))
+
+
+
+
+
+^{:go/end 338} (go/method lookup "lookup finds the entry in the overflow chain that has the provided key.\n\nReturns the key's canonical pointer and the weak pointer for that canonical pointer.\n" [^{:tag (* (entry T))} e ^T key] :results [(* T) (weak/Pointer T)]
+  (while (!= e nil)
+    (let [s (.Value (.-key e))]
+      (when (and (!= s nil) (== @s key))
+        (return s (.-key e)))
+
+      (set! e (.Load (.-overflow e)))))
+
+  (return nil (lit (weak/Pointer T))))
+
+
+
+^{:go/breaks [[5 348]] :go/end 349} (go/method hasWeakPointer "hasWeakPointer returns true if the provided weak pointer can be found in the overflow chain.\n" ^bool [^{:tag (* (entry T))} e ^{:tag (weak/Pointer T)} wp]
+  (while (!= e nil)
+    (when (== (.-key e) wp)
+      (return true))
+
+    (set! e (.Load (.-overflow e))))
+
+  false)
+
+
+
+
+
+^{:go/end 379} (go/method prune "prune removes all entries in the overflow chain whose keys are nil.\n\nThe caller must hold the lock on e's parent node.\n" ^{:tag (* (entry T))} [^{:tag (* (entry T))} e]
+  ;; Prune the head of the list.
+  (while (!= e nil)
+    (when (!= (.Value (.-key e)) nil)
+      (break))
+
+    (set! e (.Load (.-overflow e))))
+
+  (when (== e nil)
+    (return nil))
+
+
+  ;; Prune individual nodes in the list.
+  (let [newHead e
+      ^{:line 368} i (addr (.-overflow e))]
+    (set! e (.Load i))
+    (while (!= e nil)
+      (if (!= (.Value (.-key e)) nil)
+        (set! i (addr (.-overflow e)))
+
+        (.Store i (.Load (.-overflow e))))
+
+      (set! e (.Load (.-overflow e))))
+
+    ^{:line 378} newHead))
+
+
+
+
+
+
+(go/func ^:extern ^{:go/linkname "runtime_rand runtime.rand"} runtime_rand "Pull in runtime.rand so that we don't need to take a dependency\non math/rand/v2.\n" ^uint64 [])

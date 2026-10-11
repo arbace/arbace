@@ -1,0 +1,312 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json) (go/file "v2_stream.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [reflect "reflect"]
+
+    ^{:line 15} [jsontext "encoding/json/jsontext"]
+    ^:alias ^{:line 16} [jsonv2 "encoding/json/v2"]])
+
+
+
+(go/type Decoder "A Decoder reads and decodes JSON values from an input stream.\n" (struct
+    ^{:line 21 :tag (* jsontext/Decoder)} dec
+    ^{:line 22 :tag jsonv2/Options} opts
+    ^{:line 23 :tag error} err
+
+
+
+    ^{:line 27 :tag bool :doc "hadPeeked reports whether [Decoder.More] was called.\nIt is reset by [Decoder.Decode] and [Decoder.Token].\n"} hadPeeked
+
+
+
+    ^{:line 31 :tag bool :doc "hadEOF reports whether [Decoder.Token] had hit [io.EOF].\nIt is reset by [Decoder.Decode] and [Decoder.Token].\n"} hadEOF))
+
+
+
+
+
+
+^{:go/end 50} (go/func NewDecoder "NewDecoder returns a new decoder that reads from r.\n\nThe decoder introduces its own buffering and may\nread data from r beyond the JSON values requested.\n" ^{:tag (* Decoder)} [^io/Reader r]
+  ;; Hide bytes.Buffer from jsontext since it implements optimizations that
+  ;; also limit certain ways it could be used. For example, one cannot write
+  ;; to the bytes.Buffer while it is in use by jsontext.Decoder.
+  (when [(values _ ok) (assert (* bytes/Buffer) r)] ok
+    (set! r (lit (struct io/Reader) r)))
+
+
+  (let [dec (new Decoder)]
+    (set! (.-opts dec) (DefaultOptionsV1))
+    (set! (.-dec dec) (jsontext/NewDecoder r (.-opts dec)))
+    ^{:line 49} dec))
+
+
+
+
+^{:go/end 58} (go/method UseNumber "UseNumber causes the Decoder to unmarshal a number into an\ninterface value as a [Number] instead of as a float64.\n" [^{:tag (* Decoder)} dec]
+  (when [(values useNumber _) (^{:inst [bool]} jsonv2/GetOption (.-opts dec) unmarshalAnyWithRawNumber)] (not useNumber)
+    (set! (.-opts dec) (jsonv2/JoinOptions (.-opts dec) (unmarshalAnyWithRawNumber true)))))
+
+
+
+
+
+
+^{:go/end 67} (go/method DisallowUnknownFields "DisallowUnknownFields causes the Decoder to return an error when the destination\nis a struct and the input contains object keys which do not match any\nnon-ignored, exported fields in the destination.\n" [^{:tag (* Decoder)} dec]
+  (when [(values reject _) (^{:inst [bool]} jsonv2/GetOption (.-opts dec) jsonv2/RejectUnknownMembers)] (not reject)
+    (set! (.-opts dec) (jsonv2/JoinOptions (.-opts dec) (jsonv2/RejectUnknownMembers true)))))
+
+
+
+
+
+
+
+
+^{:go/end 91} (go/method Decode "Decode reads the next JSON-encoded value from its\ninput and stores it in the value pointed to by v.\n\nSee the documentation for [Unmarshal] for details about\nthe conversion of JSON into a Go value.\n" ^error [^{:tag (* Decoder)} dec ^any v]
+  (when (!= (.-err dec) nil)
+    (return (.-err dec)))
+
+  (let [(values b err) (.ReadValue (.-dec dec))]
+    (when (!= err nil)
+      (set! (.-err dec) (transformSyntacticError err))
+      (when (== (.Error (.-err dec)) (.Error errUnexpectedEnd))
+        ;; NOTE: Decode has always been inconsistent with Unmarshal
+        ;; with regard to the exact error value for truncated input.
+        (set! (.-err dec) io/ErrUnexpectedEOF))
+
+      (return (.-err dec)))
+
+    (set! (.-hadPeeked dec) false)
+    (set! (.-hadEOF dec) false)
+    (jsonv2/Unmarshal b v (.-opts dec))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 109} (go/method Buffered "Buffered returns a reader of the data remaining in the unread buffer,\nwhich may contain zero or more bytes.\nThis is the data already consumed from the input [io.Reader],\nbut not yet read by a [Decoder.Decode] or [Decoder.Token] call.\nIt may contain bytes that do not form valid JSON as it has not yet\nbeen validated according to the JSON grammar.\nThe exact amount of buffered data is an implementation detail\nof the Decoder and may change over time.\n\nIt is the caller's responsibility to concatenate this buffer with\nthe remainder of the input Reader to obtain the full sequence\nof bytes after the last decoded JSON value.\n\nThe reader is valid until the next call to [Decoder.Decode] or [Decoder.Token].\n" ^io/Reader [^{:tag (* Decoder)} dec]
+  (bytes/NewReader (.UnreadBuffer (.-dec dec))))
+
+
+
+(go/type Encoder "An Encoder writes JSON values to an output stream.\n" (struct
+    ^{:line 113 :tag io/Writer} w
+    ^{:line 114 :tag jsonv2/Options} opts
+    ^{:line 115 :tag error} err
+
+    ^{:line 117 :tag bytes/Buffer} indentBuf
+
+    ^{:line 119 :tag string} indentPrefix
+    ^{:line 120 :tag string} indentValue))
+
+
+
+^{:go/end 129} (go/func NewEncoder "NewEncoder returns a new encoder that writes to w.\n" ^{:tag (* Encoder)} [^io/Writer w]
+  (let [enc (new Encoder)]
+    (set! (.-w enc) w)
+    (set! (.-opts enc) (DefaultOptionsV1))
+    ^{:line 128} enc))
+
+
+
+
+
+
+
+^{:go/end 161} (go/method Encode "Encode writes the JSON encoding of v to the stream,\nfollowed by a newline character.\n\nSee the documentation for [Marshal] for details about the\nconversion of Go values to JSON.\n" ^error [^{:tag (* Encoder)} enc ^any v]
+  (when (!= (.-err enc) nil)
+    (return (.-err enc)))
+
+
+  (let [e (.GetBufferedEncoder export (.-opts enc))]
+    (defer (.PutBufferedEncoder export e))
+    (when [err (jsonv2/MarshalEncode e v)] (!= err nil)
+      (return err))
+
+    ^{:go/breaks [[5 160]]} (let [b ^{:go/via [encodeBuffer]} (.-Buf (.Encoder export e))] ; b must not leak current scope
+      (when (> (+ (len (.-indentPrefix enc)) (len (.-indentValue enc))) 0)
+        (.Reset (.-indentBuf enc))
+        (when [err (Indent (addr (.-indentBuf enc)) b (.-indentPrefix enc) (.-indentValue enc))] (!= err nil)
+          (return err))
+
+        (set! b (.Bytes (.-indentBuf enc))))
+
+      (set! b (append b \newline))
+
+      (when [(values _ err) (.Write (.-w enc) b)] (!= err nil)
+        (set! (.-err enc) err)
+        (return err))
+
+      nil)))
+
+
+
+
+
+^{:go/end 172} (go/method SetIndent "SetIndent instructs the encoder to format each subsequent encoded\nvalue as if indented by the package-level function Indent(dst, src, prefix, indent).\nCalling SetIndent(\"\", \"\") disables indentation.\n" [^{:tag (* Encoder)} enc ^string prefix ^string indent]
+  ;; NOTE: Do not rely on the newer [jsontext.WithIndent] option since
+  ;; the v1 [Indent] behavior has historical bugs that cannot be changed
+  ;; for backward compatibility reasons.
+  (set! (.-indentPrefix enc) prefix)
+  (set! (.-indentValue enc) indent))
+
+
+
+
+
+
+
+
+
+^{:go/end 185} (go/method SetEscapeHTML "SetEscapeHTML specifies whether problematic HTML characters\nshould be escaped inside JSON quoted strings.\nThe default behavior is to escape &, <, and > to \\u0026, \\u003c, and \\u003e\nto avoid certain safety problems that can arise when embedding JSON in HTML.\n\nIn non-HTML settings where the escaping interferes with the readability\nof the output, SetEscapeHTML(false) disables this behavior.\n" [^{:tag (* Encoder)} enc ^bool on]
+  (when [(values escape _) (^{:inst [bool]} jsonv2/GetOption (.-opts enc) jsontext/EscapeForHTML)] (!= escape on)
+    (set! (.-opts enc) (jsonv2/JoinOptions (.-opts enc) (jsontext/EscapeForHTML on)))))
+
+
+
+
+
+
+(go/type ^:alias RawMessage "RawMessage is a raw encoded JSON value.\nIt implements [Marshaler] and [Unmarshaler] and can\nbe used to delay JSON decoding or precompute a JSON encoding.\n" jsontext/Value)
+
+
+
+
+
+
+
+
+
+(go/type Token "A Token holds a value of one of these types:\n\n  - [Delim], for the four JSON delimiters [ ] { }\n  - bool, for JSON booleans\n  - float64, for JSON numbers\n  - [Number], for JSON numbers\n  - string, for JSON string literals\n  - nil, for JSON null\n" any)
+
+
+(go/type Delim "A Delim is a JSON array or object delimiter, one of [ ] { or }.\n" rune)
+
+^{:go/end 207} (go/method String ^string [^Delim d]
+  (conv string d))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 266} (go/method Token "Token returns the next JSON token in the input stream.\nAt the end of the input stream, Token returns nil, [io.EOF].\n\nToken guarantees that the delimiters [ ] { } it returns are\nproperly nested and matched: if Token encounters an unexpected\ndelimiter in the input, it will return an error.\n\nThe input stream consists of basic JSON values—bool, string,\nnumber, and null—along with delimiters [ ] { } of type [Delim]\nto mark the start and end of arrays and objects.\nCommas and colons are elided.\n" [^{:tag (* Decoder)} dec] :results [Token error]
+  (when (!= (.-err dec) nil)
+    (return nil (.-err dec)))
+
+  (let [(values tok err) (.ReadToken (.-dec dec))]
+    (when (!= err nil)
+      ;; Historically, v1 would report just [io.EOF] if
+      ;; the stream is a prefix of a valid JSON value.
+      ;; It reports an unwrapped [io.ErrUnexpectedEOF] if
+      ;; truncated within a JSON token such as a literal, number, or string.
+      ;; If the underlying [io.Reader] produced the [io.ErrUnexpectedEOF],
+      ;; then return the error as-is (including any wrapping).
+      (when (and (errors/Is err io/ErrUnexpectedEOF) (not (.IsIOError export err)))
+        (when (== (len (bytes/Trim (.UnreadBuffer (.-dec dec)) " \r\n\t,:")) 0)
+          (set! (.-hadEOF dec) true)
+          (return nil io/EOF))
+
+        (return nil io/ErrUnexpectedEOF))
+
+      (return nil (transformSyntacticError err)))
+
+    (set! (.-hadPeeked dec) false)
+    (set! (.-hadEOF dec) false)
+    (switch [k (.Kind tok)] k
+      (case [\n]
+        (return nil nil))
+      (case [\f]
+        (return false nil))
+      (case [\t]
+        (return true nil))
+      (case [\"]
+        (return (.String tok) nil))
+      (case [\0]
+        (when [(values useNumber _) (^{:inst [bool]} jsonv2/GetOption (.-opts dec) unmarshalAnyWithRawNumber)] useNumber
+          (return (conv Number (.String tok)) nil))
+
+        (let [(values v err) (.Float tok)]
+          (when (!= err nil)
+            (return nil (addr (lit UnmarshalTypeError :Value (+ "number " (.String tok)) :Type ((inst reflect/TypeFor float64)) :Offset (.InputOffset dec)))))
+
+          (return v nil)))
+      (case [\{ \} \[ \]]
+        (return (conv Delim k) nil))
+      (default
+        (panic "unreachable")))))
+
+
+
+
+
+^{:go/end 287} (go/method More "More reports whether there is another element in the\ncurrent array or object being parsed.\n" ^bool [^{:tag (* Decoder)} dec]
+  (set! (.-hadPeeked dec) true)
+  (let [k (.PeekKind (.-dec dec))]
+    (when (== k 0)
+      (when (== (.-err dec) nil)
+        ;; PeekKind doesn't distinguish between EOF and error,
+        ;; so read the next token to see which we get.
+        (let [(values _ err) (.ReadToken (.-dec dec))]
+          (when (== err nil)
+            ;; This is only possible if jsontext violates its documentation.
+            (set! err (errors/New "json: successful read after failed peek")))
+
+          (set! (.-err dec) (transformSyntacticError err))))
+
+      (return (!= (.-err dec) io/EOF)))
+
+    (and (!= k \]) (!= k \}))))
+
+
+
+
+
+^{:go/end 313} (go/method InputOffset "InputOffset returns the input stream byte offset of the current decoder position.\nThe offset gives the location of the end of the most recently returned token\nand the beginning of the next token.\n" ^int64 [^{:tag (* Decoder)} dec]
+  (let [offset (.InputOffset (.-dec dec))]
+    (when (or (.-hadPeeked dec) (.-hadEOF dec))
+      ;; Historically, InputOffset reported the location of
+      ;; the end of the most recently returned token
+      ;; unless [Decoder.More] is called, in which case, it reported
+      ;; the beginning of the next token.
+      (let [unreadBuffer (.UnreadBuffer (.-dec dec))
+          ^{:line 300} trailingTokens (bytes/TrimLeft unreadBuffer " \n\r\t")]
+        (when (> (len trailingTokens) 0)
+          (let [leadingWhitespace (- (len unreadBuffer) (len trailingTokens))]
+            (set! offset + (conv int64 leadingWhitespace))
+
+            ;; If [Decoder.Token] had encountered [io.EOF],
+            ;; then it also includes the upcoming comma or colon.
+            (when (and (.-hadEOF dec) ^:go/paren (or (== (aget trailingTokens 0) \,) (== (aget trailingTokens 0) \:)))
+              (inc! offset))))))
+
+
+
+    ^{:line 312} offset))

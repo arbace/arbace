@@ -1,0 +1,241 @@
+;; NXP Data Co-Processor (DCP) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package dcp implements a driver for the NXP Data Co-Processor (DCP)
+;; cryptographic accelerator adopting the following reference specifications:
+;;   - MCIMX28RM - i.MX28 Applications Processor Reference Manual - Rev 2 2013/08
+;;
+;; This package is only meant to be used with `GOOS=tamago` as supported by the
+;; TamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.dcp) (go/file "dcp.go" :doc "Package dcp implements a driver for the NXP Data Co-Processor (DCP)\ncryptographic accelerator adopting the following reference specifications:\n  - MCIMX28RM - i.MX28 Applications Processor Reference Manual - Rev 2 2013/08\n\nThis package is only meant to be used with `GOOS=tamago` as supported by the\nTamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 18} [bytes "bytes"]
+    ^{:line 19} [binary "encoding/binary"]
+    ^{:line 20} [errors "errors"]
+    ^{:line 21} [fmt "fmt"]
+    ^{:line 22} [sync "sync"]
+
+    ^{:line 24} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 25} [dma "github.com/usbarmory/tamago/dma"]
+    ^{:line 26} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "DCP registers\n"
+  ^{:line 31} [^{:val 0} DCP_CTRL 0x00]
+  ^{:line 32} [^{:val 31} CTRL_SFTRST 31]
+  ^{:line 33} [^{:val 30} CTRL_CLKGATE 30]
+  ^{:line 34} [^{:val 0} CTRL_CHANNEL_INTERRUPT_ENABLE 0]
+
+  ^{:line 36} [^{:val 16} DCP_STAT 0x10]
+  ^{:line 37} [^{:val 24} DCP_STAT_CLR 0x18]
+  ^{:line 38} [^{:val 0} DCP_STAT_IRQ 0]
+
+  ^{:line 40} [^{:val 32} DCP_CHANNELCTRL 0x0020]
+
+  ^{:line 42} [^{:val 96} DCP_KEY 0x0060]
+  ^{:line 43} [^{:val 4} KEY_INDEX 4]
+  ^{:line 44} [^{:val 0} KEY_SUBWORD 0]
+
+  ^{:line 46} [^{:val 112} DCP_KEYDATA 0x0070]
+  ^{:line 47} [^{:val 256} DCP_CH0CMDPTR 0x0100]
+  ^{:line 48} [^{:val 272} DCP_CH0SEMA 0x0110]
+
+  ^{:line 50} [^{:val 288} DCP_CH0STAT 0x0120]
+  ^{:line 51} [^{:val 16} CHxSTAT_ERROR_CODE 16]
+  ^{:line 52} [^{:val 126} CHxSTAT_ERROR_MASK 2r1111110]
+
+  ^{:line 54} [^{:val 296} DCP_CH0STAT_CLR 0x0128])
+
+
+
+(go/const "DCP channels\n"
+  ^{:line 59} [^{:val 1} DCP_CHANNEL_0 (+ iota 1)]
+  ^{:line 60} [^{:val 2} DCP_CHANNEL_1]
+  ^{:line 61} [^{:val 3} DCP_CHANNEL_2]
+  ^{:line 62} [^{:val 4} DCP_CHANNEL_3])
+
+
+
+(go/const "DCP control packet settings\n"
+  ;; p1068, 13.2.6.4.2 Control0 Field, MCIMX28RM
+
+  ^{:line 69} [^{:val 13} DCP_CTRL0_HASH_TERM 13]
+  ^{:line 70} [^{:val 12} DCP_CTRL0_HASH_INIT 12]
+  ^{:line 71} [^{:val 10} DCP_CTRL0_OTP_KEY 10]
+  ^{:line 72} [^{:val 9} DCP_CTRL0_CIPHER_INIT 9]
+  ^{:line 73} [^{:val 8} DCP_CTRL0_CIPHER_ENCRYPT 8]
+  ^{:line 74} [^{:val 6} DCP_CTRL0_ENABLE_HASH 6]
+  ^{:line 75} [^{:val 5} DCP_CTRL0_ENABLE_CIPHER 5]
+  ^{:line 76} [^{:val 2} DCP_CTRL0_CHAIN 2]
+  ^{:line 77} [^{:val 1} DCP_CTRL0_DECR_SEMAPHORE 1]
+  ^{:line 78} [^{:val 0} DCP_CTRL0_INTERRUPT_ENABL 0]
+
+  ;; p1070, 13.2.6.4.3 Control1 Field, MCIMX28RM
+  ;; p1098, 13.3.11 DCP_PACKET2 field descriptions, MCIMX28RM
+
+  ^{:line 83} [^{:val 16} DCP_CTRL1_HASH_SELECT 16]
+  ^{:line 84} [^{:val 0} HASH_SELECT_SHA1 0x00]
+  ^{:line 85} [^{:val 1} HASH_SELECT_CRC32 0x01]
+  ^{:line 86} [^{:val 2} HASH_SELECT_SHA256 0x02]
+
+  ^{:line 88} [^{:val 8} DCP_CTRL1_KEY_SELECT 8]
+  ^{:line 89} [^{:val 254} KEY_SELECT_UNIQUE_KEY 0xfe]
+
+  ^{:line 91} [^{:val 4} DCP_CTRL1_CIPHER_MODE 4]
+  ^{:line 92} [^{:val 1} CIPHER_MODE_CBC 0x01]
+
+  ^{:line 94} [^{:val 0} DCP_CTRL1_CIPHER_SELECT 0]
+  ^{:line 95} [^{:val 0} CIPHER_SELECT_AES128 0x00])
+
+
+(go/const ^{:val 32} WorkPacketLength 32)
+
+
+
+(go/type WorkPacket "WorkPacket represents a DCP work packet\n(p1067, 13.2.6.4 Work Packet Structure, MCIMX28RM).\n" (struct
+    ^{:line 103 :tag uint32} NextCmdAddr
+    ^{:line 104 :tag uint32} Control0
+    ^{:line 105 :tag uint32} Control1
+    ^{:line 106 :tag uint32} SourceBufferAddress
+    ^{:line 107 :tag uint32} DestinationBufferAddress
+    ^{:line 108 :tag uint32} BufferSize
+    ^{:line 109 :tag uint32} PayloadPointer
+    ^{:line 110 :tag uint32} Status))
+
+
+
+(go/type DCP "DCP represents the Data Co-Processor instance.\n" (struct
+    ^{:line 115} sync/Mutex
+
+
+    ^{:line 118 :tag uint32 :doc "Base register\n"} Base
+
+    ^{:line 120 :tag uint32 :doc "Clock gate register\n"} CCGR
+
+    ^{:line 122 :tag int :doc "Clock gate\n"} CG
+
+    ^{:line 124 :tag int :doc "Interrupt ID\n"} IRQ
+
+
+
+
+
+
+
+
+
+
+    ^{:line 135 :tag (* dma/Region) :doc "DeriveKeyMemory represents the DMA memory region used for exchanging DCP\nderived keys when the derivation index points to an internal DCP key RAM\nslot. The memory region must be initialized before DeriveKey().\n\nIt is recommended to use a DMA region within the internal RAM (e.g.\ni.MX6 On-Chip OCRAM/iRAM) to avoid exposure to external RAM.\n\nThe DeriveKey() function uses DeriveKeyMemory only if the default\nDMA region start does not overlap with it.\n"} DeriveKeyMemory
+
+
+    ^{:line 138 :tag (chan bool) :doc "command completion signal\n"} irq
+
+
+    ^{:line 141 :tag uint32 :doc "control registers\n"} ctrl
+    ^{:line 142 :tag uint32} stat
+    ^{:line 143 :tag uint32} stat_clr
+    ^{:line 144 :tag uint32} chctrl
+    ^{:line 145 :tag uint32} key
+    ^{:line 146 :tag uint32} keydata
+    ^{:line 147 :tag uint32} ch0cmdptr
+    ^{:line 148 :tag uint32} ch0sema
+    ^{:line 149 :tag uint32} ch0stat
+    ^{:line 150 :tag uint32} ch0stat_clr))
+
+
+
+^{:go/end 158} (go/method Bytes "Bytes converts the DCP work packet structure to byte array format.\n" ^{:tag (slice byte)} [^{:tag (* WorkPacket)} pkt]
+  (let [buf (new bytes/Buffer)]
+    (binary/Write buf binary/LittleEndian pkt)
+    (.Bytes buf)))
+
+
+
+^{:go/end 192} (go/method Init "Init initializes the DCP module.\n" [^{:tag (* DCP)} hw]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (or (== (.-Base hw) 0) (== (.-CCGR hw) 0))
+    (panic "invalid DCP instance"))
+
+
+  (set! (.-ctrl hw) (+ (.-Base hw) DCP_CTRL))
+  (set! (.-stat hw) (+ (.-Base hw) DCP_STAT))
+  (set! (.-stat_clr hw) (+ (.-Base hw) DCP_STAT_CLR))
+  (set! (.-chctrl hw) (+ (.-Base hw) DCP_CHANNELCTRL))
+  (set! (.-key hw) (+ (.-Base hw) DCP_KEY))
+  (set! (.-keydata hw) (+ (.-Base hw) DCP_KEYDATA))
+  (set! (.-ch0cmdptr hw) (+ (.-Base hw) DCP_CH0CMDPTR))
+  (set! (.-ch0sema hw) (+ (.-Base hw) DCP_CH0SEMA))
+  (set! (.-ch0stat hw) (+ (.-Base hw) DCP_CH0STAT))
+  (set! (.-ch0stat_clr hw) (+ (.-Base hw) DCP_CH0STAT_CLR))
+
+  ;; enable clock
+  (reg/SetN (.-CCGR hw) (.-CG hw) 2r11 2r11)
+
+  ;; soft reset DCP
+  (reg/Set (.-ctrl hw) CTRL_SFTRST)
+  (reg/Clear (.-ctrl hw) CTRL_SFTRST)
+
+  ;; enable DCP
+  (reg/Clear (.-ctrl hw) CTRL_CLKGATE)
+
+  ;; enable channel 0
+  (reg/Write (.-chctrl hw) DCP_CHANNEL_0))
+
+
+^{:go/end 230} (go/method cmd [^{:tag (* DCP)} hw ^uint ptr ^int count] :results [^error err]
+  ^{:go/via [Mutex]} (.Lock hw)
+  (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+  (when (!= (reg/Read (.-chctrl hw)) DCP_CHANNEL_0)
+    (return (errors/New "co-processor is not initialized")))
+
+
+  ;; clear channel status
+  (reg/Write (.-ch0stat_clr hw) 0xffffffff)
+
+  ;; set command address
+  (reg/Write (.-ch0cmdptr hw) (conv uint32 ptr))
+  ;; activate channel
+  (reg/SetN (.-ch0sema hw) 0 0xff (conv uint32 count))
+
+  ;; wait for completion
+  (if (!= (.-irq hw) nil)
+    (<! (.-irq hw))
+
+    (reg/Wait (.-stat hw) DCP_STAT_IRQ DCP_CHANNEL_0 1))
+
+
+  ;; clear interrupt register
+  (reg/Set (.-stat_clr hw) DCP_CHANNEL_0)
+
+  (let [chstatus (reg/Read (.-ch0stat hw))]
+
+    ;; check for errors
+    (when (!= (bits/GetN (addr chstatus) 0 CHxSTAT_ERROR_MASK) 0)
+      (let [code (bits/GetN (addr chstatus) CHxSTAT_ERROR_CODE 0xff)
+          ^{:line 225} sema (reg/Read (.-ch0sema hw))]
+        (return (fmt/Errorf "DCP channel 0 error, status:%#x error_code:%#x sema:%#x" chstatus code sema))))
+
+
+    (return)))
+
+
+
+
+^{:go/end 237} (go/method EnableInterrupt "EnableInterrupt enables interrupt generation on command completion, when\nenabled ServiceInterrupt() is required to finalize command processing.\n" [^{:tag (* DCP)} hw]
+  (set! (.-irq hw) (make (chan bool)))
+  (reg/SetN (.-ctrl hw) CTRL_CHANNEL_INTERRUPT_ENABLE 0xf DCP_CHANNEL_0))
+
+
+
+^{:go/end 242} (go/method ServiceInterrupt "ServiceInterrupt signals completion to pending commands.\n" [^{:tag (* DCP)} hw]
+  (>! (.-irq hw) true))

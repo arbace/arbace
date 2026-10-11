@@ -1,0 +1,327 @@
+;; Copyright (c) 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.edwards25519.field) (go/file "fe_generic.go" :imports [
+
+    ^{:line 7} [bits "math/bits"]])
+
+
+
+(go/type uint128 "uint128 holds a 128-bit number as two 64-bit limbs, for use with the\nbits.Mul64 and bits.Add64 intrinsics.\n" (struct
+    ^{:line 12 :tag uint64} lo ^uint64 hi))
+
+
+
+^{:go/end 19} (go/func mul "mul returns a * b.\n" ^uint128 [^uint64 a ^uint64 b]
+  (let [(values hi lo) (bits/Mul64 a b)]
+    (lit uint128 lo hi)))
+
+
+
+^{:go/end 27} (go/func addMul "addMul returns v + a * b.\n" ^uint128 [^uint128 v ^uint64 a ^uint64 b]
+  (let [(values hi lo) (bits/Mul64 a b)
+      (values ^:assign lo c) (bits/Add64 lo (.-lo v) 0)]
+    (set! (values hi _) (bits/Add64 hi (.-hi v) c))
+    (lit uint128 lo hi)))
+
+
+
+^{:go/end 33} (go/func mul19 "mul19 returns v * 19.\n" ^uint64 [^uint64 v]
+  ;; Using this approach seems to yield better optimizations than *19.
+  (+ v (<< (+ v (<< v 3)) 1)))
+
+
+
+^{:go/end 41} (go/func addMul19 "addMul19 returns v + 19 * a * b, where a and b are at most 52 bits.\n" ^uint128 [^uint128 v ^uint64 a ^uint64 b]
+  (let [(values hi lo) (bits/Mul64 (mul19 a) b)
+      (values ^:assign lo c) (bits/Add64 lo (.-lo v) 0)]
+    (set! (values hi _) (bits/Add64 hi (.-hi v) c))
+    (lit uint128 lo hi)))
+
+
+
+^{:go/end 49} (go/func addMul38 "addMul38 returns v + 38 * a * b, where a and b are at most 52 bits.\n" ^uint128 [^uint128 v ^uint64 a ^uint64 b]
+  (let [(values hi lo) (bits/Mul64 (mul19 a) (* b 2))
+      (values ^:assign lo c) (bits/Add64 lo (.-lo v) 0)]
+    (set! (values hi _) (bits/Add64 hi (.-hi v) c))
+    (lit uint128 lo hi)))
+
+
+
+^{:go/end 54} (go/func shiftRightBy51 "shiftRightBy51 returns a >> 51. a is assumed to be at most 115 bits.\n" ^uint64 [^uint128 a]
+  (bit-or (<< (.-hi a) (- 64 51)) (>> (.-lo a) 51)))
+
+
+^{:go/end 184} (go/func feMulGeneric [^{:tag (* Element)} v ^{:tag (* Element)} a ^{:tag (* Element)} b]
+  (let [a0 (.-l0 a)
+      ^{:line 58} a1 (.-l1 a)
+      ^{:line 59} a2 (.-l2 a)
+      ^{:line 60} a3 (.-l3 a)
+      ^{:line 61} a4 (.-l4 a)
+
+      ^{:line 63} b0 (.-l0 b)
+      ^{:line 64} b1 (.-l1 b)
+      ^{:line 65} b2 (.-l2 b)
+      ^{:line 66} b3 (.-l3 b)
+      ^{:line 67} b4 (.-l4 b)
+
+      ;; Limb multiplication works like pen-and-paper columnar multiplication, but
+      ;; with 51-bit limbs instead of digits.
+      ;;
+      ;;                          a4   a3   a2   a1   a0  x
+      ;;                          b4   b3   b2   b1   b0  =
+      ;;                         ------------------------
+      ;;                        a4b0 a3b0 a2b0 a1b0 a0b0  +
+      ;;                   a4b1 a3b1 a2b1 a1b1 a0b1       +
+      ;;              a4b2 a3b2 a2b2 a1b2 a0b2            +
+      ;;         a4b3 a3b3 a2b3 a1b3 a0b3                 +
+      ;;    a4b4 a3b4 a2b4 a1b4 a0b4                      =
+      ;;   ----------------------------------------------
+      ;;      r8   r7   r6   r5   r4   r3   r2   r1   r0
+      ;;
+      ;; We can then use the reduction identity (a * 2²⁵⁵ + b = a * 19 + b) to
+      ;; reduce the limbs that would overflow 255 bits. r5 * 2²⁵⁵ becomes 19 * r5,
+      ;; r6 * 2³⁰⁶ becomes 19 * r6 * 2⁵¹, etc.
+      ;;
+      ;; Reduction can be carried out simultaneously to multiplication. For
+      ;; example, we do not compute r5: whenever the result of a multiplication
+      ;; belongs to r5, like a1b4, we multiply it by 19 and add the result to r0.
+      ;;
+      ;;            a4b0    a3b0    a2b0    a1b0    a0b0  +
+      ;;            a3b1    a2b1    a1b1    a0b1 19×a4b1  +
+      ;;            a2b2    a1b2    a0b2 19×a4b2 19×a3b2  +
+      ;;            a1b3    a0b3 19×a4b3 19×a3b3 19×a2b3  +
+      ;;            a0b4 19×a4b4 19×a3b4 19×a2b4 19×a1b4  =
+      ;;           --------------------------------------
+      ;;              r4      r3      r2      r1      r0
+      ;;
+      ;; Finally we add up the columns into wide, overlapping limbs.
+
+      ;; r0 = a0×b0 + 19×(a1×b4 + a2×b3 + a3×b2 + a4×b1)
+      ^{:line 102} r0 (mul a0 b0)]
+    (set! r0 (addMul19 r0 a1 b4))
+    (set! r0 (addMul19 r0 a2 b3))
+    (set! r0 (addMul19 r0 a3 b2))
+    (set! r0 (addMul19 r0 a4 b1))
+
+    ;; r1 = a0×b1 + a1×b0 + 19×(a2×b4 + a3×b3 + a4×b2)
+    (let [r1 (mul a0 b1)]
+      (set! r1 (addMul r1 a1 b0))
+      (set! r1 (addMul19 r1 a2 b4))
+      (set! r1 (addMul19 r1 a3 b3))
+      (set! r1 (addMul19 r1 a4 b2))
+
+      ;; r2 = a0×b2 + a1×b1 + a2×b0 + 19×(a3×b4 + a4×b3)
+      (let [r2 (mul a0 b2)]
+        (set! r2 (addMul r2 a1 b1))
+        (set! r2 (addMul r2 a2 b0))
+        (set! r2 (addMul19 r2 a3 b4))
+        (set! r2 (addMul19 r2 a4 b3))
+
+        ;; r3 = a0×b3 + a1×b2 + a2×b1 + a3×b0 + 19×a4×b4
+        (let [r3 (mul a0 b3)]
+          (set! r3 (addMul r3 a1 b2))
+          (set! r3 (addMul r3 a2 b1))
+          (set! r3 (addMul r3 a3 b0))
+          (set! r3 (addMul19 r3 a4 b4))
+
+          ;; r4 = a0×b4 + a1×b3 + a2×b2 + a3×b1 + a4×b0
+          (let [r4 (mul a0 b4)]
+            (set! r4 (addMul r4 a1 b3))
+            (set! r4 (addMul r4 a2 b2))
+            (set! r4 (addMul r4 a3 b1))
+            (set! r4 (addMul r4 a4 b0))
+
+            ;; After the multiplication, we need to reduce (carry) the five coefficients
+            ;; to obtain a result with limbs that are at most slightly larger than 2⁵¹,
+            ;; to respect the Element invariant.
+            ;;
+            ;; Overall, the reduction works the same as carryPropagate, except with
+            ;; wider inputs: we take the carry for each coefficient by shifting it right
+            ;; by 51, and add it to the limb above it. The top carry is multiplied by 19
+            ;; according to the reduction identity and added to the lowest limb.
+            ;;
+            ;; The largest coefficient (r0) will be at most 111 bits, which guarantees
+            ;; that all carries are at most 111 - 51 = 60 bits, which fits in a uint64.
+            ;;
+            ;;     r0 = a0×b0 + 19×(a1×b4 + a2×b3 + a3×b2 + a4×b1)
+            ;;     r0 < 2⁵²×2⁵² + 19×(2⁵²×2⁵² + 2⁵²×2⁵² + 2⁵²×2⁵² + 2⁵²×2⁵²)
+            ;;     r0 < (1 + 19 × 4) × 2⁵² × 2⁵²
+            ;;     r0 < 2⁷ × 2⁵² × 2⁵²
+            ;;     r0 < 2¹¹¹
+            ;;
+            ;; Moreover, the top coefficient (r4) is at most 107 bits, so c4 is at most
+            ;; 56 bits, and c4 * 19 is at most 61 bits, which again fits in a uint64 and
+            ;; allows us to easily apply the reduction identity.
+            ;;
+            ;;     r4 = a0×b4 + a1×b3 + a2×b2 + a3×b1 + a4×b0
+            ;;     r4 < 5 × 2⁵² × 2⁵²
+            ;;     r4 < 2¹⁰⁷
+            ;;
+
+            (let [c0 (shiftRightBy51 r0)
+                ^{:line 164} c1 (shiftRightBy51 r1)
+                ^{:line 165} c2 (shiftRightBy51 r2)
+                ^{:line 166} c3 (shiftRightBy51 r3)
+                ^{:line 167} c4 (shiftRightBy51 r4)
+
+                ^{:line 169} rr0 (+ (bit-and (.-lo r0) maskLow51Bits) (mul19 c4))
+                ^{:line 170} rr1 (+ (bit-and (.-lo r1) maskLow51Bits) c0)
+                ^{:line 171} rr2 (+ (bit-and (.-lo r2) maskLow51Bits) c1)
+                ^{:line 172} rr3 (+ (bit-and (.-lo r3) maskLow51Bits) c2)
+                ^{:line 173} rr4 (+ (bit-and (.-lo r4) maskLow51Bits) c3)]
+
+              ;; Now all coefficients fit into 64-bit registers but are still too large to
+              ;; be passed around as an Element. We therefore do one last carry chain,
+              ;; where the carries will be small enough to fit in the wiggle room above 2⁵¹.
+
+              (set! (.-l0 v) (+ (bit-and rr0 maskLow51Bits) (mul19 (>> rr4 51))))
+              (set! (.-l1 v) (+ (bit-and rr1 maskLow51Bits) (>> rr0 51)))
+              (set! (.-l2 v) (+ (bit-and rr2 maskLow51Bits) (>> rr1 51)))
+              (set! (.-l3 v) (+ (bit-and rr3 maskLow51Bits) (>> rr2 51)))
+              (set! (.-l4 v) (+ (bit-and rr4 maskLow51Bits) (>> rr3 51))))))))))
+
+
+^{:go/end 257} (go/func feSquare [^{:tag (* Element)} v ^{:tag (* Element)} a]
+  (let [l0 (.-l0 a)
+      ^{:line 188} l1 (.-l1 a)
+      ^{:line 189} l2 (.-l2 a)
+      ^{:line 190} l3 (.-l3 a)
+      ^{:line 191} l4 (.-l4 a)
+
+      ;; Squaring works precisely like multiplication above, but thanks to its
+      ;; symmetry we get to group a few terms together.
+      ;;
+      ;;                          l4   l3   l2   l1   l0  x
+      ;;                          l4   l3   l2   l1   l0  =
+      ;;                         ------------------------
+      ;;                        l4l0 l3l0 l2l0 l1l0 l0l0  +
+      ;;                   l4l1 l3l1 l2l1 l1l1 l0l1       +
+      ;;              l4l2 l3l2 l2l2 l1l2 l0l2            +
+      ;;         l4l3 l3l3 l2l3 l1l3 l0l3                 +
+      ;;    l4l4 l3l4 l2l4 l1l4 l0l4                      =
+      ;;   ----------------------------------------------
+      ;;      r8   r7   r6   r5   r4   r3   r2   r1   r0
+      ;;
+      ;;            l4l0    l3l0    l2l0    l1l0    l0l0  +
+      ;;            l3l1    l2l1    l1l1    l0l1 19×l4l1  +
+      ;;            l2l2    l1l2    l0l2 19×l4l2 19×l3l2  +
+      ;;            l1l3    l0l3 19×l4l3 19×l3l3 19×l2l3  +
+      ;;            l0l4 19×l4l4 19×l3l4 19×l2l4 19×l1l4  =
+      ;;           --------------------------------------
+      ;;              r4      r3      r2      r1      r0
+
+      ;; r0 = l0×l0 + 19×(l1×l4 + l2×l3 + l3×l2 + l4×l1) = l0×l0 + 19×2×(l1×l4 + l2×l3)
+      ^{:line 216} r0 (mul l0 l0)]
+    (set! r0 (addMul38 r0 l1 l4))
+    (set! r0 (addMul38 r0 l2 l3))
+
+    ;; r1 = l0×l1 + l1×l0 + 19×(l2×l4 + l3×l3 + l4×l2) = 2×l0×l1 + 19×2×l2×l4 + 19×l3×l3
+    (let [r1 (mul (* l0 2) l1)]
+      (set! r1 (addMul38 r1 l2 l4))
+      (set! r1 (addMul19 r1 l3 l3))
+
+      ;; r2 = l0×l2 + l1×l1 + l2×l0 + 19×(l3×l4 + l4×l3) = 2×l0×l2 + l1×l1 + 19×2×l3×l4
+      (let [r2 (mul (* l0 2) l2)]
+        (set! r2 (addMul r2 l1 l1))
+        (set! r2 (addMul38 r2 l3 l4))
+
+        ;; r3 = l0×l3 + l1×l2 + l2×l1 + l3×l0 + 19×l4×l4 = 2×l0×l3 + 2×l1×l2 + 19×l4×l4
+        (let [r3 (mul (* l0 2) l3)]
+          (set! r3 (addMul r3 (* l1 2) l2))
+          (set! r3 (addMul19 r3 l4 l4))
+
+          ;; r4 = l0×l4 + l1×l3 + l2×l2 + l3×l1 + l4×l0 = 2×l0×l4 + 2×l1×l3 + l2×l2
+          (let [r4 (mul (* l0 2) l4)]
+            (set! r4 (addMul r4 (* l1 2) l3))
+            (set! r4 (addMul r4 l2 l2))
+
+            (let [c0 (shiftRightBy51 r0)
+                ^{:line 241} c1 (shiftRightBy51 r1)
+                ^{:line 242} c2 (shiftRightBy51 r2)
+                ^{:line 243} c3 (shiftRightBy51 r3)
+                ^{:line 244} c4 (shiftRightBy51 r4)
+
+                ^{:line 246} rr0 (+ (bit-and (.-lo r0) maskLow51Bits) (mul19 c4))
+                ^{:line 247} rr1 (+ (bit-and (.-lo r1) maskLow51Bits) c0)
+                ^{:line 248} rr2 (+ (bit-and (.-lo r2) maskLow51Bits) c1)
+                ^{:line 249} rr3 (+ (bit-and (.-lo r3) maskLow51Bits) c2)
+                ^{:line 250} rr4 (+ (bit-and (.-lo r4) maskLow51Bits) c3)]
+
+              (set! (.-l0 v) (+ (bit-and rr0 maskLow51Bits) (mul19 (>> rr4 51))))
+              (set! (.-l1 v) (+ (bit-and rr1 maskLow51Bits) (>> rr0 51)))
+              (set! (.-l2 v) (+ (bit-and rr2 maskLow51Bits) (>> rr1 51)))
+              (set! (.-l3 v) (+ (bit-and rr3 maskLow51Bits) (>> rr2 51)))
+              (set! (.-l4 v) (+ (bit-and rr4 maskLow51Bits) (>> rr3 51))))))))))
+
+
+
+
+^{:go/end 313} (go/func feSquareN "feSquareN squares a n times and writes the result to v.\nIt uses local variables to keep limbs in registers.\n" [^{:tag (* Element)} v ^{:tag (* Element)} a ^int n]
+  (let [l0 (.-l0 a)
+      ^{:line 263} l1 (.-l1 a)
+      ^{:line 264} l2 (.-l2 a)
+      ^{:line 265} l3 (.-l3 a)
+      ^{:line 266} l4 (.-l4 a)]
+
+    (range [n]
+      (let [r0 (mul l0 l0)]
+        (set! r0 (addMul38 r0 l1 l4))
+        (set! r0 (addMul38 r0 l2 l3))
+
+        (let [r1 (mul (* l0 2) l1)]
+          (set! r1 (addMul38 r1 l2 l4))
+          (set! r1 (addMul19 r1 l3 l3))
+
+          (let [r2 (mul (* l0 2) l2)]
+            (set! r2 (addMul r2 l1 l1))
+            (set! r2 (addMul38 r2 l3 l4))
+
+            (let [r3 (mul (* l0 2) l3)]
+              (set! r3 (addMul r3 (* l1 2) l2))
+              (set! r3 (addMul19 r3 l4 l4))
+
+              (let [r4 (mul (* l0 2) l4)]
+                (set! r4 (addMul r4 (* l1 2) l3))
+                (set! r4 (addMul r4 l2 l2))
+
+                (let [c0 (shiftRightBy51 r0)
+                    ^{:line 290} c1 (shiftRightBy51 r1)
+                    ^{:line 291} c2 (shiftRightBy51 r2)
+                    ^{:line 292} c3 (shiftRightBy51 r3)
+                    ^{:line 293} c4 (shiftRightBy51 r4)
+
+                    ^{:line 295} rr0 (+ (bit-and (.-lo r0) maskLow51Bits) (mul19 c4))
+                    ^{:line 296} rr1 (+ (bit-and (.-lo r1) maskLow51Bits) c0)
+                    ^{:line 297} rr2 (+ (bit-and (.-lo r2) maskLow51Bits) c1)
+                    ^{:line 298} rr3 (+ (bit-and (.-lo r3) maskLow51Bits) c2)
+                    ^{:line 299} rr4 (+ (bit-and (.-lo r4) maskLow51Bits) c3)]
+
+                  (set! l0 (+ (bit-and rr0 maskLow51Bits) (mul19 (>> rr4 51))))
+                  (set! l1 (+ (bit-and rr1 maskLow51Bits) (>> rr0 51)))
+                  (set! l2 (+ (bit-and rr2 maskLow51Bits) (>> rr1 51)))
+                  (set! l3 (+ (bit-and rr3 maskLow51Bits) (>> rr2 51)))
+                  (set! l4 (+ (bit-and rr4 maskLow51Bits) (>> rr3 51))))))))))
+
+
+    (set! (.-l0 v) l0)
+    (set! (.-l1 v) l1)
+    (set! (.-l2 v) l2)
+    (set! (.-l3 v) l3)
+    (set! (.-l4 v) l4)))
+
+
+
+
+^{:go/end 328} (go/method carryPropagate "carryPropagate brings the limbs below 52 bits by applying the reduction\nidentity (a * 2²⁵⁵ + b = a * 19 + b) to the l4 carry.\n" ^{:tag (* Element)} [^{:tag (* Element)} v]
+  ;; (l4>>51) is at most 64 - 51 = 13 bits, so (l4>>51)*19 is at most 18 bits, and
+  ;; the final l0 will be at most 52 bits. Similarly for the rest.
+  (let [l0 (.-l0 v)]
+    (set! (.-l0 v) (+ (bit-and (.-l0 v) maskLow51Bits) (mul19 (>> (.-l4 v) 51))))
+    (set! (.-l4 v) (+ (bit-and (.-l4 v) maskLow51Bits) (>> (.-l3 v) 51)))
+    (set! (.-l3 v) (+ (bit-and (.-l3 v) maskLow51Bits) (>> (.-l2 v) 51)))
+    (set! (.-l2 v) (+ (bit-and (.-l2 v) maskLow51Bits) (>> (.-l1 v) 51)))
+    (set! (.-l1 v) (+ (bit-and (.-l1 v) maskLow51Bits) (>> l0 51)))
+
+    ^{:line 327} v))

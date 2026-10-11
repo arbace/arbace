@@ -1,0 +1,1193 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.fuzz) (go/file "worker.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [context "context"]
+    ^{:line 10} [sha256 "crypto/sha256"]
+    ^{:line 11} [json "encoding/json"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [io "io"]
+    ^{:line 15} [os "os"]
+    ^{:line 16} [exec "os/exec"]
+    ^{:line 17} [reflect "reflect"]
+    ^{:line 18} [runtime "runtime"]
+    ^{:line 19} [sync "sync"]
+    ^{:line 20} [time "time"]])
+
+
+(go/const
+
+
+  ^{:line 26} [^{:val 100000000 :doc "workerFuzzDuration is the amount of time a worker can spend testing random\nvariations of an input given by the coordinator.\n"} workerFuzzDuration (* 100 time/Millisecond)]
+
+
+
+  ^{:line 30} [^{:val 1000000000 :doc "workerTimeoutDuration is the amount of time a worker can go without\nresponding to the coordinator before being stopped.\n"} workerTimeoutDuration (* 1 time/Second)]
+
+
+
+
+  ^{:line 35} [^{:val 70 :doc "workerExitCode is used as an exit code by fuzz worker processes after an internal error.\nThis distinguishes internal errors from uncontrolled panics and other crashes.\nKeep in sync with internal/fuzz.workerExitCode.\n"} workerExitCode 70]
+
+
+
+  ^{:line 39} [^{:val 104857600 :doc "workerSharedMemSize is the maximum size of the shared memory file used to\ncommunicate with workers. This limits the size of fuzz inputs.\n"} workerSharedMemSize (<< 100 20)]) ; 100 MB
+
+
+
+
+
+
+(go/type worker "worker manages a worker process running a test binary. The worker object\nexists only in the coordinator (the process started by 'go test -fuzz').\nworkerClient is used by the coordinator to send RPCs to the worker process,\nwhich handles them with workerServer.\n" (struct
+    ^{:line 47 :tag string} dir ; working directory, same as package directory
+    ^{:line 48 :tag string} binPath ; path to test executable
+    ^{:line 49 :tag (slice string)} args ; arguments for test executable
+    ^{:line 50 :tag (slice string)} env ; environment for test executable
+
+    ^{:line 52 :tag (* coordinator)} coordinator
+
+    ^{:line 54 :tag (chan (* sharedMem))} memMu ; mutex guarding shared memory with worker; persists across processes.
+
+    ^{:line 56 :tag (* exec/Cmd)} cmd ; current worker process
+    ^{:line 57 :tag (* workerClient)} client ; used to communicate with worker process
+    ^{:line 58 :tag error} waitErr ; last error returned by wait, set before termC is closed.
+    ^{:line 59 :tag bool} interrupted ; true after stop interrupts a running worker.
+    ^{:line 60 :tag (chan (struct))} termC)) ; closed by wait when worker process terminates
+
+
+^{:go/end 78} (go/func newWorker [^{:tag (* coordinator)} c ^string dir ^string binPath ^{:tag (slice string)} args ^{:tag (slice string)} env] :results [(* worker) error]
+  (let [(values mem err) (sharedMemTempFile workerSharedMemSize)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [memMu (make (chan (* sharedMem)) 1)]
+      (>! memMu mem)
+      ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4 6 8 10 12]} (lit worker
+            :dir dir
+            :binPath binPath
+            :args args
+            :env (subslice env _ (len env) (len env)) ; copy on append to ensure workers don't overwrite each other.
+            :coordinator c
+            :memMu memMu))
+        nil))))
+
+
+
+^{:go/end 88} (go/method cleanup "cleanup releases persistent resources associated with the worker.\n" ^error [^{:tag (* worker)} w]
+  (let [mem (<! (.-memMu w))]
+    (when (== mem nil)
+      (return nil))
+
+    (close (.-memMu w))
+    (.Close mem)))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 232} (go/method coordinate "coordinate runs the test binary to perform fuzzing.\n\ncoordinate loops until ctx is canceled or a fatal error is encountered.\nIf a test process terminates unexpectedly while fuzzing, coordinate will\nattempt to restart and continue unless the termination can be attributed\nto an interruption (from a timer or the user).\n\nWhile looping, coordinate receives inputs from the coordinator, passes\nthose inputs to the worker process, then passes the results back to\nthe coordinator.\n" ^error [^{:tag (* worker)} w ^context/Context ctx]
+  ;; Main event loop.
+  (while true
+    ;; Start or restart the worker if it's not running.
+    (when (not (.isRunning w))
+      (when [err (.startAndPing w ctx)] (!= err nil)
+        (return err)))
+
+
+
+    (select
+      (case (<! (.Done ctx))
+        ;; Worker was told to stop.
+        (let [err (.stop w)]
+          (when (and (!= err nil) (not (.-interrupted w)) (not (isInterruptError err)))
+            (return err))
+
+          (return (.Err ctx))))
+
+      (case (<! (.-termC w))
+        ;; Worker process terminated unexpectedly while waiting for input.
+        (let [err (.stop w)]
+          (when (.-interrupted w)
+            (panic "worker interrupted after unexpected termination"))
+
+          (when (or (== err nil) (isInterruptError err))
+            ;; Worker stopped, either by exiting with status 0 or after being
+            ;; interrupted with a signal that was not sent by the coordinator.
+            ;;
+            ;; When the user presses ^C, on POSIX platforms, SIGINT is delivered to
+            ;; all processes in the group concurrently, and the worker may see it
+            ;; before the coordinator. The worker should exit 0 gracefully (in
+            ;; theory).
+            ;;
+            ;; This condition is probably intended by the user, so suppress
+            ;; the error.
+            (return nil))
+
+          (when [(values exitErr ok) (assert (* exec/ExitError) err)] (and ok (== ^{:go/via [ProcessState]} (.ExitCode exitErr) workerExitCode))
+            ;; Worker exited with a code indicating F.Fuzz was not called correctly,
+            ;; for example, F.Fail was called first.
+            (return (fmt/Errorf "fuzzing process exited unexpectedly due to an internal failure: %w" err)))
+
+          ;; Worker exited non-zero or was terminated by a non-interrupt
+          ;; signal (for example, SIGSEGV) while fuzzing.
+          (return (fmt/Errorf "fuzzing process hung or terminated unexpectedly: %w" err))))
+      ;; TODO(jayconrod,katiehockman): if -keepfuzzing, restart worker.
+
+      (case [input (<! (.-inputC (.-coordinator w)))]
+        ;; Received input from coordinator.
+        (let [args ^{:go/breaks [2 4 6 8]} (lit fuzzArgs
+              :Limit (.-limit input)
+              :Timeout (.-timeout input)
+              :Warmup (.-warmup input)
+              :CoverageData (.-coverageData input))
+
+            (values entry resp isInternalError err) (.fuzz (.-client w) ctx (.-entry input) args)
+            ^{:line 157} canMinimize true]
+          (when (!= err nil)
+            ;; Error communicating with worker.
+            (.stop w)
+            (when (!= (.Err ctx) nil)
+              ;; Timeout or interruption.
+              (return (.Err ctx)))
+
+            (when (.-interrupted w)
+              ;; Communication error before we stopped the worker.
+              ;; Report an error, but don't record a crasher.
+              (return (fmt/Errorf "communicating with fuzzing process: %v" err)))
+
+            (when [(values sig ok) (terminationSignal (.-waitErr w))] (and ok (not (isCrashSignal sig)))
+              ;; Worker terminated by a signal that probably wasn't caused by a
+              ;; specific input to the fuzz function. For example, on Linux,
+              ;; the kernel (OOM killer) may send SIGKILL to a process using a lot
+              ;; of memory. Or the shell might send SIGHUP when the terminal
+              ;; is closed. Don't record a crasher.
+              (return (fmt/Errorf "fuzzing process terminated by unexpected signal; no crash will be recorded: %v" (.-waitErr w))))
+
+            (when isInternalError
+              ;; An internal error occurred which shouldn't be considered
+              ;; a crash.
+              (return err))
+
+            ;; Unexpected termination. Set error message and fall through.
+            ;; We'll restart the worker on the next iteration.
+            ;; Don't attempt to minimize this since it crashed the worker.
+            (set! (.-Err resp) (fmt/Sprintf "fuzzing process hung or terminated unexpectedly: %v" (.-waitErr w)))
+            (set! canMinimize false))
+
+          (let [result ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit fuzzResult
+                :limit (.-limit input)
+                :count (.-Count resp)
+                :totalDuration (.-TotalDuration resp)
+                :entryDuration (.-InterestingDuration resp)
+                :entry entry
+                :crasherMsg (.-Err resp)
+                :coverageData (.-CoverageData resp)
+                :canMinimize canMinimize)]
+
+            (>! (.-resultC (.-coordinator w)) result))))
+
+      (case [input (<! (.-minimizeC (.-coordinator w)))]
+        ;; Received input to minimize from coordinator.
+        (let [(values result err) (.minimize w ctx input)]
+          (when (!= err nil)
+            ;; Error minimizing. Send back the original input. If it didn't cause
+            ;; an error before, report it as causing an error now.
+            ;; TODO: double-check this is handled correctly when
+            ;; implementing -keepfuzzing.
+            (set! result ^{:go/breaks [2 4 6 8]} (lit fuzzResult
+                :entry (.-entry input)
+                :crasherMsg (.-crasherMsg input)
+                :canMinimize false
+                :limit (.-limit input)))
+
+            (when (== (.-crasherMsg result) "")
+              (set! (.-crasherMsg result) (.Error err))))
+
+
+          (when (shouldPrintDebugInfo)
+            ^{:go/breaks [2]} (.debugLogf (.-coordinator w)
+              "input minimized, id: %s, original id: %s, crasher: %t, originally crasher: %t, minimizing took: %s"
+              (.-Path (.-entry result))
+              (.-Path (.-entry input))
+              (!= (.-crasherMsg result) "")
+              (!= (.-crasherMsg input) "")
+              (.-totalDuration result)))
+
+
+          (>! (.-resultC (.-coordinator w)) result))))))
+
+
+
+
+
+
+
+
+^{:go/end 291} (go/method minimize "minimize tells a worker process to attempt to find a smaller value that\neither causes an error (if we started minimizing because we found an input\nthat causes an error) or preserves new coverage (if we started minimizing\nbecause we found an input that expands coverage).\n" [^{:tag (* worker)} w ^context/Context ctx ^fuzzMinimizeInput input] :results [^fuzzResult min ^error err]
+  (when (!= (.-MinimizeTimeout (.-opts (.-coordinator w))) 0)
+    (let [^{:tag (func [])} cancel (zero (func []))]
+      (set! (values ctx cancel) (context/WithTimeout ctx (.-MinimizeTimeout (.-opts (.-coordinator w)))))
+      (defer (cancel))))
+
+
+  (let [args ^{:go/breaks [2 4 6]} (lit minimizeArgs
+        :Limit (.-limit input)
+        :Timeout (.-timeout input)
+        :KeepCoverage (.-keepCoverage input))
+
+      (values entry resp ^:assign err) (.minimize (.-client w) ctx (.-entry input) args)]
+    (when (!= err nil)
+      ;; Error communicating with worker.
+      (.stop w)
+      (when (or (!= (.Err ctx) nil) (.-interrupted w) (isInterruptError (.-waitErr w)))
+        ;; Worker was interrupted, possibly by the user pressing ^C.
+        ;; Normally, workers can handle interrupts and timeouts gracefully and
+        ;; will return without error. An error here indicates the worker
+        ;; may not have been in a good state, but the error won't be meaningful
+        ;; to the user. Just return the original crasher without logging anything.
+        ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6 8 10]} (lit fuzzResult
+            :entry (.-entry input)
+            :crasherMsg (.-crasherMsg input)
+            :coverageData (.-keepCoverage input)
+            :canMinimize false
+            :limit (.-limit input))
+          nil))
+
+      ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6 8 10 12]} (lit fuzzResult
+          :entry entry
+          :crasherMsg (fmt/Sprintf "fuzzing process hung or terminated unexpectedly while minimizing: %v" err)
+          :canMinimize false
+          :limit (.-limit input)
+          :count (.-Count resp)
+          :totalDuration (.-Duration resp))
+        nil))
+
+
+    (when (and (!= (.-crasherMsg input) "") (== (.-Err resp) ""))
+      (return (lit fuzzResult) (fmt/Errorf "attempted to minimize a crash but could not reproduce")))
+
+
+    ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6 8 10 12 14]} (lit fuzzResult
+        :entry entry
+        :crasherMsg (.-Err resp)
+        :coverageData (.-CoverageData resp)
+        :canMinimize false
+        :limit (.-limit input)
+        :count (.-Count resp)
+        :totalDuration (.-Duration resp))
+      nil)))
+
+
+^{:go/end 295} (go/method isRunning ^bool [^{:tag (* worker)} w]
+  (!= (.-cmd w) nil))
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[7 324]] :go/end 325} (go/method startAndPing "startAndPing starts the worker process and sends it a message to make sure it\ncan communicate.\n\nstartAndPing returns an error if any part of this didn't work, including if\nthe context is expired or the worker process was interrupted before it\nresponded. Errors that happen after start but before the ping response\nlikely indicate that the worker did not call F.Fuzz or called F.Fail first.\nWe don't record crashers for these errors.\n" ^error [^{:tag (* worker)} w ^context/Context ctx]
+  (when (!= (.Err ctx) nil)
+    (return (.Err ctx)))
+
+  (when [err (.start w)] (!= err nil)
+    (return err))
+
+  (when [err (.ping (.-client w) ctx)] (!= err nil)
+    (.stop w)
+    (when (!= (.Err ctx) nil)
+      (return (.Err ctx)))
+
+    (when (isInterruptError err)
+      ;; User may have pressed ^C before worker responded.
+      (return err))
+
+    ;; TODO: record and return stderr.
+    (return (fmt/Errorf "fuzzing process terminated without fuzzing: %w" err)))
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 392} (go/method start "start runs a new worker process.\n\nIf the process couldn't be started, start returns an error. Start won't\nreturn later termination errors from the process if they occur.\n\nIf the process starts successfully, start returns nil. stop must be called\nonce later to clean up, even if the process terminates on its own.\n\nWhen the process terminates, w.waitErr is set to the error (if any), and\nw.termC is closed.\n" [^{:tag (* worker)} w] :results [^error err]
+  (when (.isRunning w)
+    (panic "worker already started"))
+
+  (set! (.-waitErr w) nil)
+  (set! (.-interrupted w) false)
+  (set! (.-termC w) nil)
+
+  (let [cmd (exec/Command (.-binPath w) (spread (.-args w)))]
+    (set! (.-Dir cmd) (.-dir w))
+    (set! (.-Env cmd) (subslice (.-env w) _ (len (.-env w)) (len (.-env w)))) ; copy on append to ensure workers don't overwrite each other.
+
+    ;; Create the "fuzz_in" and "fuzz_out" pipes so we can communicate with
+    ;; the worker. We don't use stdin and stdout, since the test binary may
+    ;; do something else with those.
+    ;;
+    ;; Each pipe has a reader and a writer. The coordinator writes to fuzzInW
+    ;; and reads from fuzzOutR. The worker inherits fuzzInR and fuzzOutW.
+    ;; The coordinator closes fuzzInR and fuzzOutW after starting the worker,
+    ;; since we have no further need of them.
+    (let [(values fuzzInR fuzzInW ^:assign err) (os/Pipe)]
+      (when (!= err nil)
+        (return err))
+
+      (defer (.Close fuzzInR))
+      (let [(values fuzzOutR fuzzOutW ^:assign err) (os/Pipe)]
+        (when (!= err nil)
+          (.Close fuzzInW)
+          (return err))
+
+        (defer (.Close fuzzOutW))
+        (setWorkerComm cmd (lit workerComm :fuzzIn fuzzInR :fuzzOut fuzzOutW :memMu (.-memMu w)))
+
+        ;; Start the worker process.
+        (when [err (.Start cmd)] (!= err nil)
+          (.Close fuzzInW)
+          (.Close fuzzOutR)
+          (return err))
+
+
+        ;; Worker started successfully.
+        ;; After this, w.client owns fuzzInW and fuzzOutR, so w.client.Close must be
+        ;; called later by stop.
+        (set! (.-cmd w) cmd)
+        (set! (.-termC w) (make (chan (struct))))
+        ^{:go/breaks [[4 391]]} (let [comm (lit workerComm :fuzzIn fuzzInW :fuzzOut fuzzOutR :memMu (.-memMu w))
+            ^{:line 383} m (newMutator)]
+          (set! (.-client w) (newWorkerClient comm m))
+
+          (go (^{:go/end 389} (fn []
+                (set! (.-waitErr w) (.Wait (.-cmd w)))
+                (close (.-termC w)))))
+
+
+          nil)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 472} (go/method stop "stop tells the worker process to exit by closing w.client, then blocks until\nit terminates. If the worker doesn't terminate after a short time, stop\nsignals it with os.Interrupt (where supported), then os.Kill.\n\nstop returns the error the process terminated with, if any (same as\nw.waitErr).\n\nstop must be called at least once after start returns successfully, even if\nthe worker process terminates unexpectedly.\n" ^error [^{:tag (* worker)} w]
+  (when (== (.-termC w) nil)
+    (panic "worker was not started successfully"))
+
+  (select
+    (case (<! (.-termC w))
+      ;; Worker already terminated.
+      (when (== (.-client w) nil)
+        ;; stop already called.
+        (return (.-waitErr w)))
+
+      ;; Possible unexpected termination.
+      (.Close (.-client w))
+      (set! (.-cmd w) nil)
+      (set! (.-client w) nil)
+      (return (.-waitErr w)))
+    (default))
+  ;; Worker still running.
+
+
+  ;; Tell the worker to stop by closing fuzz_in. It won't actually stop until it
+  ;; finishes with earlier calls.
+  (let [closeC (make (chan (struct)))]
+    (go (^{:go/end 429} (fn []
+          (.Close (.-client w))
+          (close closeC))))
+
+
+    (let [sig os/Interrupt]
+      (when (== runtime/GOOS "windows")
+        ;; Per https://golang.org/pkg/os/#Signal, “Interrupt is not implemented on
+        ;; Windows; using it with os.Process.Signal will return an error.”
+        ;; Fall back to Kill instead.
+        (set! sig os/Kill))
+
+
+      (let [t (time/NewTimer workerTimeoutDuration)]
+        (while true
+          (select
+            (case (<! (.-termC w))
+              ;; Worker terminated.
+              (.Stop t)
+              (<! closeC)
+              (set! (.-cmd w) nil)
+              (set! (.-client w) nil)
+              (return (.-waitErr w)))
+
+            (case (<! (.-C t))
+              ;; Timer fired before worker terminated.
+              (set! (.-interrupted w) true)
+              (switch sig
+                (case [os/Interrupt]
+                  ;; Try to stop the worker with SIGINT and wait a little longer.
+                  (.Signal (.-Process (.-cmd w)) sig)
+                  (set! sig os/Kill)
+                  (.Reset t workerTimeoutDuration))
+
+                (case [os/Kill]
+                  ;; Try to stop the worker with SIGKILL and keep waiting.
+                  (.Signal (.-Process (.-cmd w)) sig)
+                  (set! sig nil)
+                  (.Reset t workerTimeoutDuration))
+
+                (case [nil]
+                  ;; Still waiting. Print a message to let the user know why.
+                  (fmt/Fprintf (.-Log (.-opts (.-coordinator w))) "waiting for fuzzing process to terminate...\n"))))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 503} (go/func RunFuzzWorker "RunFuzzWorker is called in a worker process to communicate with the\ncoordinator process in order to fuzz random inputs. RunFuzzWorker loops\nuntil the coordinator tells it to stop.\n\nfn is a wrapper on the fuzz function. It may return an error to indicate\na given input \"crashed\". The coordinator will also record a crasher if\nthe function times out or terminates the process.\n\nRunFuzzWorker returns an error if it could not communicate with the\ncoordinator process.\n" ^error [^context/Context ctx ^{:tag (func [CorpusEntry] [error])} fn]
+  (let [(values comm err) (getWorkerComm)]
+    (when (!= err nil)
+      (return err))
+
+    (let [srv (addr ^{:go/breaks [2 4 [6 500]]} (lit workerServer
+            :workerComm comm
+            :fuzzFn ^{:go/end 499} (fn [^CorpusEntry e] :results [time/Duration error]
+              (let [timer (time/AfterFunc (* 60 time/Second) ^{:go/end 494} (fn []
+                      (panic "deadlocked!")))] ; this error message won't be printed
+
+                (defer (.Stop timer))
+                (let [start (time/Now)
+                    ^{:line 497} err (go/call fn e)]
+                  (return (time/Since start) err))))
+
+            :m (newMutator)))]
+
+      (.serve srv ctx))))
+
+
+
+
+
+(go/type call "call is serialized and sent from the coordinator on fuzz_in. It acts as\na minimalist RPC mechanism. Exactly one of its fields must be set to indicate\nwhich method to call.\n" (struct
+    ^{:line 509 :tag (* pingArgs)} Ping
+    ^{:line 510 :tag (* fuzzArgs)} Fuzz
+    ^{:line 511 :tag (* minimizeArgs)} Minimize))
+
+
+
+
+(go/type minimizeArgs "minimizeArgs contains arguments to workerServer.minimize. The value to\nminimize is already in shared memory.\n" (struct
+
+
+
+    ^{:line 520 :tag time/Duration :doc "Timeout is the time to spend minimizing. This may include time to start up,\nespecially if the input causes the worker process to terminated, requiring\nrepeated restarts.\n"} Timeout
+
+
+
+    ^{:line 524 :tag int64 :doc "Limit is the maximum number of values to test, without spending more time\nthan Duration. 0 indicates no limit.\n"} Limit
+
+
+
+
+    ^{:line 529 :tag (slice byte) :doc "KeepCoverage is a set of coverage counters the worker should attempt to\nkeep in minimized values. When provided, the worker will reject inputs that\ndon't cause at least one of these bits to be set.\n"} KeepCoverage
+
+
+    ^{:line 532 :tag int :doc "Index is the index of the fuzz target parameter to be minimized.\n"} Index))
+
+
+
+(go/type minimizeResponse "minimizeResponse contains results from workerServer.minimize.\n" (struct
+
+
+
+
+    ^{:line 541 :tag bool :doc "WroteToMem is true if the worker found a smaller input and wrote it to\nshared memory. If minimizeArgs.KeepCoverage was set, the minimized input\npreserved at least one coverage bit and did not cause an error.\nOtherwise, the minimized input caused some error, recorded in Err.\n"} WroteToMem
+
+
+    ^{:line 544 :tag string :doc "Err is the error string caused by the value in shared memory, if any.\n"} Err
+
+
+
+
+    ^{:line 549 :tag (slice byte) :doc "CoverageData is the set of coverage bits activated by the minimized value\nin shared memory. When set, it contains at least one bit from KeepCoverage.\nCoverageData will be nil if Err is set or if minimization failed.\n"} CoverageData
+
+
+    ^{:line 552 :tag time/Duration :doc "Duration is the time spent minimizing, not including starting or cleaning up.\n"} Duration
+
+
+    ^{:line 555 :tag int64 :doc "Count is the number of values tested.\n"} Count))
+
+
+
+
+(go/type fuzzArgs "fuzzArgs contains arguments to workerServer.fuzz. The value to fuzz is\npassed in shared memory.\n" (struct
+
+
+    ^{:line 563 :tag time/Duration :doc "Timeout is the time to spend fuzzing, not including starting or\ncleaning up.\n"} Timeout
+
+
+
+    ^{:line 567 :tag int64 :doc "Limit is the maximum number of values to test, without spending more time\nthan Duration. 0 indicates no limit.\n"} Limit
+
+
+
+
+    ^{:line 572 :tag bool :doc "Warmup indicates whether this is part of a warmup run, meaning that\nfuzzing should not occur. If coverageEnabled is true, then coverage data\nshould be reported.\n"} Warmup
+
+
+
+    ^{:line 576 :tag (slice byte) :doc "CoverageData is the coverage data. If set, the worker should update its\nlocal coverage data prior to fuzzing.\n"} CoverageData))
+
+
+
+(go/type fuzzResponse "fuzzResponse contains results from workerServer.fuzz.\n" (struct
+
+    ^{:line 582 :tag time/Duration :doc "Duration is the time spent fuzzing, not including starting or cleaning up.\n"} TotalDuration
+    ^{:line 583 :tag time/Duration} InterestingDuration
+
+
+    ^{:line 586 :tag int64 :doc "Count is the number of values tested.\n"} Count
+
+
+
+    ^{:line 590 :tag (slice byte) :doc "CoverageData is set if the value in shared memory expands coverage\nand therefore may be interesting to the coordinator.\n"} CoverageData
+
+
+
+    ^{:line 594 :tag string :doc "Err is the error string caused by the value in shared memory, which is\nnon-empty if the value in shared memory caused a crash.\n"} Err
+
+
+
+    ^{:line 598 :tag string :doc "InternalErr is the error string caused by an internal error in the\nworker. This shouldn't be considered a crasher.\n"} InternalErr))
+
+
+
+(go/type pingArgs "pingArgs contains arguments to workerServer.ping.\n" (struct))
+
+
+(go/type pingResponse "pingResponse contains results from workerServer.ping.\n" (struct))
+
+
+
+
+
+
+
+
+
+
+(go/type workerComm "workerComm holds pipes and shared memory used for communication\nbetween the coordinator process (client) and a worker process (server).\nThese values are unique to each worker; they are shared only with the\ncoordinator, not with other workers.\n\nAccess to shared memory is synchronized implicitly over the RPC protocol\nimplemented in workerServer and workerClient. During a call, the client\n(worker) has exclusive access to shared memory; at other times, the server\n(coordinator) has exclusive access.\n" (struct
+    ^{:line 617 :tag (* os/File)} fuzzIn ^{:tag (* os/File)} fuzzOut
+    ^{:line 618 :tag (chan (* sharedMem))} memMu)) ; mutex guarding shared memory
+
+
+
+
+
+
+
+(go/type workerServer "workerServer is a minimalist RPC server, run by fuzz worker processes.\nIt allows the coordinator process (using workerClient) to call methods in a\nworker process. This system allows the coordinator to run multiple worker\nprocesses in parallel and to collect inputs that caused crashes from shared\nmemory after a worker process terminates unexpectedly.\n" (struct
+    ^{:line 627} workerComm
+    ^{:line 628 :tag (* mutator)} m
+
+
+
+
+    ^{:line 633 :tag (slice byte) :doc "coverageMask is the local coverage data for the worker. It is\nperiodically updated to reflect the data in the coordinator when new\ncoverage is found.\n"} coverageMask
+
+
+
+
+
+
+    ^{:line 640 :tag (func [CorpusEntry] [time/Duration error]) :doc "fuzzFn runs the worker's fuzz target on the given input and returns an\nerror if it finds a crasher (the process may also exit or crash), and the\ntime it took to run the input. It sets a deadline of 10 seconds, at which\npoint it will panic with the assumption that the process is hanging or\ndeadlocked.\n"} fuzzFn))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 682} (go/method serve "serve reads serialized RPC messages on fuzzIn. When serve receives a message,\nit calls the corresponding method, then sends the serialized result back\non fuzzOut.\n\nserve handles RPC calls synchronously; it will not attempt to read a message\nuntil the previous call has finished.\n\nserve returns errors that occurred when communicating over pipes. serve\ndoes not return errors from method calls; those are passed through serialized\nresponses.\n" ^error [^{:tag (* workerServer)} ws ^context/Context ctx]
+  (let [enc (json/NewEncoder ^{:go/via [workerComm]} (.-fuzzOut ws))
+      ^{:line 655} dec (json/NewDecoder (addr (lit contextReader :ctx ctx :r ^{:go/via [workerComm]} (.-fuzzIn ws))))]
+    (while true
+      (let [^call c (zero call)]
+        (when [err (.Decode dec (addr c))] (!= err nil)
+          (if (or (== err io/EOF) (== err (.Err ctx)))
+            (return nil)
+
+            (return err)))
+
+
+
+        (let [^any resp (zero any)]
+          (switch
+            (case [(!= (.-Fuzz c) nil)]
+              (set! resp (.fuzz ws ctx @(.-Fuzz c))))
+            (case [(!= (.-Minimize c) nil)]
+              (set! resp (.minimize ws ctx @(.-Minimize c))))
+            (case [(!= (.-Ping c) nil)]
+              (set! resp (.ping ws ctx @(.-Ping c))))
+            (default
+              (return (errors/New "no arguments provided for any call"))))
+
+
+          (when [err (.Encode enc resp)] (!= err nil)
+            (return err)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const ^{:val 5 :doc "chainedMutations is how many mutations are applied before the worker\nresets the input to its original state.\nNOTE: this number was picked without much thought. It is low enough that\nit seems to create a significant diversity in mutated inputs. We may want\nto consider looking into this more closely once we have a proper performance\ntesting framework. Another option is to randomly pick the number of chained\nmutations on each invocation of the workerServer.fuzz method (this appears to\nbe what libFuzzer does, although there seems to be no documentation which\nexplains why this choice was made.)\n"} chainedMutations 5)
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 801} (go/method fuzz "fuzz runs the test function on random variations of the input value in shared\nmemory for a limited duration or number of iterations.\n\nfuzz returns early if it finds an input that crashes the fuzz function (with\nfuzzResponse.Err set) or an input that expands coverage (with\nfuzzResponse.InterestingDuration set).\n\nfuzz does not modify the input in shared memory. Instead, it saves the\ninitial PRNG state in shared memory and increments a counter in shared\nmemory before each call to the test function. The caller may reconstruct\nthe crashing input with this information, since the PRNG is deterministic.\n" [^{:tag (* workerServer)} ws ^context/Context ctx ^fuzzArgs args] :results [^fuzzResponse resp]
+  (when (!= (.-CoverageData args) nil)
+    (when (and (!= (.-coverageMask ws) nil) (!= (len (.-CoverageData args)) (len (.-coverageMask ws))))
+      (set! (.-InternalErr resp) (fmt/Sprintf "unexpected size for CoverageData: got %d, expected %d" (len (.-CoverageData args)) (len (.-coverageMask ws))))
+      (return resp))
+
+    (set! (.-coverageMask ws) (.-CoverageData args)))
+
+  (let [start (time/Now)]
+    (defer (^{:go/end 715} (fn [] (set! (.-TotalDuration resp) (time/Since start)))))
+
+    (when (!= (.-Timeout args) 0)
+      (let [^{:tag (func [])} cancel (zero (func []))]
+        (set! (values ctx cancel) (context/WithTimeout ctx (.-Timeout args)))
+        (defer (cancel))))
+
+    (let [mem (<! ^{:go/via [workerComm]} (.-memMu ws))]
+      (.save (.-r (.-m ws)) (addr (.-randState (.header mem))) (addr (.-randInc (.header mem))))
+      (defer (^{:go/end 727} (fn []
+            (set! (.-Count resp) (.-count (.header mem)))
+            (>! ^{:go/via [workerComm]} (.-memMu ws) mem))))
+
+      (when (and (> (.-Limit args) 0) (>= (.-count (.header mem)) (.-Limit args)))
+        (set! (.-InternalErr resp) (fmt/Sprintf "mem.header().count %d already exceeds args.Limit %d" (.-count (.header mem)) (.-Limit args)))
+        (return resp))
+
+
+      (let [(values originalVals err) (unmarshalCorpusFile (.valueCopy mem))]
+        (when (!= err nil)
+          (set! (.-InternalErr resp) (.Error err))
+          (return resp))
+
+        (let [vals (make (slice any) (len originalVals))]
+          (copy vals originalVals)
+
+          (let [shouldStop ^{:go/end 743} (fn ^bool []
+                (and (> (.-Limit args) 0) (>= (.-count (.header mem)) (.-Limit args))))
+
+              ^{:line 744} fuzzOnce ^{:go/end 759} (fn [^CorpusEntry entry] :results [^time/Duration dur ^{:tag (slice byte)} cov ^string errMsg]
+                (inc! (.-count (.header mem)))
+                (let [^error err (zero error)]
+                  (set! (values dur err) ((.-fuzzFn ws) entry))
+                  (when (!= err nil)
+                    (set! errMsg (.Error err))
+                    (when (== errMsg "")
+                      (set! errMsg "fuzz function failed with no input"))
+
+                    (return dur nil errMsg))
+
+                  (when (and (!= (.-coverageMask ws) nil) (> (countNewCoverageBits (.-coverageMask ws) coverageSnapshot) 0))
+                    (return dur coverageSnapshot ""))
+
+                  (return dur nil "")))]
+
+
+            (when (.-Warmup args)
+              (let [(values dur _ errMsg) (fuzzOnce (lit CorpusEntry :Values vals))]
+                (when (!= errMsg "")
+                  (set! (.-Err resp) errMsg)
+                  (return resp))
+
+                (set! (.-InterestingDuration resp) dur)
+                (when coverageEnabled
+                  (set! (.-CoverageData resp) coverageSnapshot))
+
+                (return resp)))
+
+
+            (while true
+              (select
+                (case (<! (.Done ctx))
+                  (return resp))
+                (default
+                  (when (== (% (.-count (.header mem)) chainedMutations) 0)
+                    (copy vals originalVals)
+                    (.save (.-r (.-m ws)) (addr (.-randState (.header mem))) (addr (.-randInc (.header mem)))))
+
+                  (.mutate (.-m ws) vals (cap (.valueRef mem)))
+
+                  (let [entry (lit CorpusEntry :Values vals)
+                      (values dur cov errMsg) (fuzzOnce entry)]
+                    (when (!= errMsg "")
+                      (set! (.-Err resp) errMsg)
+                      (return resp))
+
+                    (when (!= cov nil)
+                      (set! (.-CoverageData resp) cov)
+                      (set! (.-InterestingDuration resp) dur)
+                      (return resp))
+
+                    (when (shouldStop)
+                      (return resp))))))))))))
+
+
+
+
+
+^{:go/end 843} (go/method minimize [^{:tag (* workerServer)} ws ^context/Context ctx ^minimizeArgs args] :results [^minimizeResponse resp]
+  (let [start (time/Now)]
+    (defer (^{:go/end 805} (fn [] (set! (.-Duration resp) (time/Since start)))))
+    (let [mem (<! ^{:go/via [workerComm]} (.-memMu ws))]
+      (defer (^{:go/end 807} (fn [] (>! ^{:go/via [workerComm]} (.-memMu ws) mem))))
+      (let [(values vals err) (unmarshalCorpusFile (.valueCopy mem))]
+        (when (!= err nil)
+          (panic err))
+
+        (let [inpHash (sha256/Sum256 (.valueCopy mem))]
+          (when (!= (.-Timeout args) 0)
+            (let [^{:tag (func [])} cancel (zero (func []))]
+              (set! (values ctx cancel) (context/WithTimeout ctx (.-Timeout args)))
+              (defer (cancel))))
+
+
+          ;; Minimize the values in vals, then write to shared memory. We only write
+          ;; to shared memory after completing minimization.
+          (let [(values success ^:assign err) (.minimizeInput ws ctx vals mem args)]
+            (when success
+              (writeToMem vals mem)
+              (let [outHash (sha256/Sum256 (.valueCopy mem))]
+                (set! (.-rawInMem (.header mem)) false)
+                (set! (.-WroteToMem resp) true)
+                (if (!= err nil)
+                  (set! (.-Err resp) (.Error err))
+                  (do
+                    ;; If the values didn't change during minimization then coverageSnapshot is likely
+                    ;; a dirty snapshot which represents the very last step of minimization, not the
+                    ;; coverage for the initial input. In that case just return the coverage we were
+                    ;; given initially, since it more accurately represents the coverage map for the
+                    ;; input we are returning.
+                    (if (!= outHash inpHash)
+                      (set! (.-CoverageData resp) coverageSnapshot)
+
+                      (set! (.-CoverageData resp) (.-KeepCoverage args)))))))
+
+
+
+            ^{:line 842} resp))))))
+
+
+
+
+
+
+
+^{:go/end 922} (go/method minimizeInput "minimizeInput applies a series of minimizing transformations on the provided\nvals, ensuring that each minimization still causes an error, or keeps\ncoverage, in fuzzFn. It uses the context to determine how long to run,\nstopping once closed. It returns a bool indicating whether minimization was\nsuccessful and an error if one was found.\n" [^{:tag (* workerServer)} ws ^context/Context ctx ^{:tag (slice any)} vals ^{:tag (* sharedMem)} mem ^minimizeArgs args] :results [^bool success ^error retErr]
+  (let [keepCoverage (.-KeepCoverage args)
+      ^{:line 852} memBytes (.valueRef mem)
+      ^{:line 853} bPtr (addr memBytes)
+      ^{:line 854} count (addr (.-count (.header mem)))
+      ^{:line 855} shouldStop ^{:go/end 858} (fn ^bool []
+        (or (!= (.Err ctx) nil)
+          ^:go/paren (and (> (.-Limit args) 0) (>= @count (.-Limit args)))))]
+
+    (when (shouldStop)
+      (return false nil))
+
+
+    ;; Check that the original value preserves coverage or causes an error.
+    ;; If not, then whatever caused us to think the value was interesting may
+    ;; have been a flake, and we can't minimize it.
+    (inc! @count)
+    (set! (values _ retErr) ((.-fuzzFn ws) (lit CorpusEntry :Values vals)))
+    (cond (!= keepCoverage nil)
+      (when (or (not (hasCoverageBit keepCoverage coverageSnapshot)) (!= retErr nil))
+        (return false nil))
+
+      (== retErr nil)
+      (return false nil))
+
+    (set! (.-rawInMem (.header mem)) true)
+
+    ;; tryMinimized runs the fuzz function with candidate replacing the value
+    ;; at index valI. tryMinimized returns whether the input with candidate is
+    ;; interesting for the same reason as the original input: it returns
+    ;; an error if one was expected, or it preserves coverage.
+    (let [tryMinimized ^{:go/end 912} (fn ^bool [^{:tag (slice byte)} candidate]
+          (let [prev (aget vals (.-Index args))]
+            (type-switch prev
+              (case [(slice byte)]
+                (aset vals (.-Index args) candidate))
+              (case [string]
+                (aset vals (.-Index args) (conv string candidate)))
+              (default
+                (panic "impossible")))
+
+            (copy @bPtr candidate)
+            (set! @bPtr (subslice @bPtr _ (len candidate)))
+            (.setValueLen mem (len candidate))
+            (inc! @count)
+            ^{:go/breaks [5]} (let [(values _ err) ((.-fuzzFn ws) (lit CorpusEntry :Values vals))]
+              (when (!= err nil)
+                (set! retErr err)
+                (when (!= keepCoverage nil)
+                  ;; Now that we've found a crash, that's more important than any
+                  ;; minimization of interesting inputs that was being done. Clear out
+                  ;; keepCoverage to only minimize the crash going forward.
+                  (set! keepCoverage nil))
+
+                (return true))
+
+              ;; Minimization should preserve coverage bits.
+              (when (and (!= keepCoverage nil) (isCoverageSubset keepCoverage coverageSnapshot))
+                (return true))
+
+              (aset vals (.-Index args) prev)
+              false)))]
+
+      (type-switch [v (aget vals (.-Index args))]
+        (case [string]
+          (minimizeBytes (conv (slice byte) v) tryMinimized shouldStop))
+        (case [(slice byte)]
+          (minimizeBytes v tryMinimized shouldStop))
+        (default
+          (panic "impossible")))
+
+      (return true retErr))))
+
+
+^{:go/end 927} (go/func writeToMem [^{:tag (slice any)} vals ^{:tag (* sharedMem)} mem]
+  (let [b (marshalCorpusFile (spread vals))]
+    (.setValue mem b)))
+
+
+
+
+^{:go/end 933} (go/method ping "ping does nothing. The coordinator calls this method to ensure the worker\nhas called F.Fuzz and can communicate.\n" ^pingResponse [^{:tag (* workerServer)} ws ^context/Context ctx ^pingArgs args]
+  (lit pingResponse))
+
+
+
+
+
+(go/type workerClient "workerClient is a minimalist RPC client. The coordinator process uses a\nworkerClient to call methods in each worker process (handled by\nworkerServer).\n" (struct
+    ^{:line 939} workerComm
+    ^{:line 940 :tag (* mutator)} m
+
+
+
+
+
+
+    ^{:line 947 :tag sync/Mutex :doc "mu is the mutex protecting the workerComm.fuzzIn pipe. This must be\nlocked before making calls to the workerServer. It prevents\nworkerClient.Close from closing fuzzIn while workerClient methods are\nwriting to it concurrently, and prevents multiple callers from writing to\nfuzzIn concurrently.\n"} mu))
+
+
+^{:go/end 952} (go/func newWorkerClient ^{:tag (* workerClient)} [^workerComm comm ^{:tag (* mutator)} m]
+  (addr (lit workerClient :workerComm comm :m m)))
+
+
+
+
+
+^{:go/end 975} (go/method Close "Close shuts down the connection to the RPC server (the worker process) by\nclosing fuzz_in. Close drains fuzz_out (avoiding a SIGPIPE in the worker),\nand closes it after the worker process closes the other end.\n" ^error [^{:tag (* workerClient)} wc]
+  (.Lock (.-mu wc))
+  (defer (.Unlock (.-mu wc)))
+
+  ;; Close fuzzIn. This signals to the server that there are no more calls,
+  ;; and it should exit.
+  (when [err (.Close ^{:go/via [workerComm]} (.-fuzzIn wc))] (!= err nil)
+    (.Close ^{:go/via [workerComm]} (.-fuzzOut wc))
+    (return err))
+
+
+  ;; Drain fuzzOut and close it. When the server exits, the kernel will close
+  ;; its end of fuzzOut, and we'll get EOF.
+  (when [(values _ err) (io/Copy io/Discard ^{:go/via [workerComm]} (.-fuzzOut wc))] (!= err nil)
+    (.Close ^{:go/via [workerComm]} (.-fuzzOut wc))
+    (return err))
+
+  (.Close ^{:go/via [workerComm]} (.-fuzzOut wc)))
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "errSharedMemClosed is returned by workerClient methods that cannot access\nshared memory because it was closed and unmapped by another goroutine. That\ncan happen when worker.cleanup is called in the worker goroutine while a\nworkerClient.fuzz call runs concurrently.\n\nThis error should not be reported. It indicates the operation was\ninterrupted.\n"} errSharedMemClosed (errors/New "internal error: shared memory was closed and unmapped"))
+
+
+
+^{:go/end 1071} (go/method minimize "minimize tells the worker to call the minimize method. See\nworkerServer.minimize.\n" [^{:tag (* workerClient)} wc ^context/Context ctx ^CorpusEntry entryIn ^minimizeArgs args] :results [^CorpusEntry entryOut ^minimizeResponse resp ^error retErr]
+  (.Lock (.-mu wc))
+  (defer (.Unlock (.-mu wc)))
+
+  (let [(values mem ok) (<! ^{:go/via [workerComm]} (.-memMu wc))]
+    (when (not ok)
+      (return (lit CorpusEntry) (lit minimizeResponse) errSharedMemClosed))
+
+    (defer (^{:go/end 996} (fn [] (>! ^{:go/via [workerComm]} (.-memMu wc) mem))))
+    (set! (.-count (.header mem)) 0)
+    (let [(values inp err) (corpusEntryData entryIn)]
+      (when (!= err nil)
+        (return (lit CorpusEntry) (lit minimizeResponse) err))
+
+      (.setValue mem inp)
+      (set! entryOut entryIn)
+      (set! (values (.-Values entryOut) err) (unmarshalCorpusFile inp))
+      (when (!= err nil)
+        (return (lit CorpusEntry) (lit minimizeResponse) (fmt/Errorf "workerClient.minimize unmarshaling provided value: %v" err)))
+
+      (range [i v (.-Values entryOut)]
+        (when (not (isMinimizable (reflect/TypeOf v)))
+          (continue))
+
+
+        (>! ^{:go/via [workerComm]} (.-memMu wc) mem)
+        (set! (.-Index args) i)
+        (let [c (lit call :Minimize (addr args))
+            ^{:line 1016} callErr (.callLocked wc ctx c (addr resp))]
+          (set! (values mem ok) (<! ^{:go/via [workerComm]} (.-memMu wc)))
+          (when (not ok)
+            (return (lit CorpusEntry) (lit minimizeResponse) errSharedMemClosed))
+
+
+          (when (!= callErr nil)
+            (set! retErr callErr)
+            (when (not (.-rawInMem (.header mem)))
+              ;; An unrecoverable error occurred before minimization began.
+              (return entryIn (lit minimizeResponse) retErr))
+
+            ;; An unrecoverable error occurred during minimization. mem now
+            ;; holds the raw, unmarshaled bytes of entryIn.Values[i] that
+            ;; caused the error.
+            (type-switch (aget (.-Values entryOut) i)
+              (case [string]
+                (aset (.-Values entryOut) i (conv string (.valueCopy mem))))
+              (case [(slice byte)]
+                (aset (.-Values entryOut) i (.valueCopy mem)))
+              (default
+                (panic "impossible")))
+
+            (set! (.-Data entryOut) (marshalCorpusFile (spread (.-Values entryOut))))
+            ;; Stop minimizing; another unrecoverable error is likely to occur.
+            (break))
+
+
+          (when (.-WroteToMem resp)
+            ;; Minimization succeeded, and mem holds the marshaled data.
+            (set! (.-Data entryOut) (.valueCopy mem))
+            (set! (values (.-Values entryOut) err) (unmarshalCorpusFile (.-Data entryOut)))
+            (when (!= err nil)
+              (return (lit CorpusEntry) (lit minimizeResponse) (fmt/Errorf "workerClient.minimize unmarshaling minimized value: %v" err))))
+
+
+
+          ;; Prepare for next iteration of the loop.
+          (when (!= (.-Timeout args) 0)
+            (set! (.-Timeout args) - (.-Duration resp))
+            (when (<= (.-Timeout args) 0)
+              (break)))
+
+
+          (when (!= (.-Limit args) 0)
+            (set! (.-Limit args) - (.-count (.header mem)))
+            (when (<= (.-Limit args) 0)
+              (break)))))
+
+
+
+      (set! (.-Count resp) (.-count (.header mem)))
+      (let [h (sha256/Sum256 (.-Data entryOut))]
+        (set! (.-Path entryOut) (fmt/Sprintf "%x" (subslice h _ 4)))
+        (return entryOut resp retErr)))))
+
+
+
+^{:go/end 1139} (go/method fuzz "fuzz tells the worker to call the fuzz method. See workerServer.fuzz.\n" [^{:tag (* workerClient)} wc ^context/Context ctx ^CorpusEntry entryIn ^fuzzArgs args] :results [^CorpusEntry entryOut ^fuzzResponse resp ^bool isInternalError ^error err]
+  (.Lock (.-mu wc))
+  (defer (.Unlock (.-mu wc)))
+
+  (let [(values mem ok) (<! ^{:go/via [workerComm]} (.-memMu wc))]
+    (when (not ok)
+      (return (lit CorpusEntry) (lit fuzzResponse) true errSharedMemClosed))
+
+    (set! (.-count (.header mem)) 0)
+    (let [(values inp ^:assign err) (corpusEntryData entryIn)]
+      (when (!= err nil)
+        (>! ^{:go/via [workerComm]} (.-memMu wc) mem)
+        (return (lit CorpusEntry) (lit fuzzResponse) true err))
+
+      (.setValue mem inp)
+      (>! ^{:go/via [workerComm]} (.-memMu wc) mem)
+
+      (let [c (lit call :Fuzz (addr args))
+          ^{:line 1092} callErr (.callLocked wc ctx c (addr resp))]
+        (when (!= (.-InternalErr resp) "")
+          (return (lit CorpusEntry) (lit fuzzResponse) true (errors/New (.-InternalErr resp))))
+
+        (set! (values mem ok) (<! ^{:go/via [workerComm]} (.-memMu wc)))
+        (when (not ok)
+          (return (lit CorpusEntry) (lit fuzzResponse) true errSharedMemClosed))
+
+        (defer (^{:go/end 1100} (fn [] (>! ^{:go/via [workerComm]} (.-memMu wc) mem))))
+        (set! (.-Count resp) (.-count (.header mem)))
+
+        (when (not (bytes/Equal inp (.valueRef mem)))
+          (return (lit CorpusEntry) (lit fuzzResponse) true (errors/New "workerServer.fuzz modified input")))
+
+        (let [needEntryOut (or (!= callErr nil) (!= (.-Err resp) "")
+              ^:go/paren (and (not (.-Warmup args)) (!= (.-CoverageData resp) nil)))]
+          (when needEntryOut
+            (let [(values valuesOut err) (unmarshalCorpusFile inp)]
+              (when (!= err nil)
+                (return (lit CorpusEntry) (lit fuzzResponse) true (fmt/Errorf "unmarshaling fuzz input value after call: %v" err)))
+
+              (.restore (.-r (.-m wc)) (.-randState (.header mem)) (.-randInc (.header mem)))
+              (when (not (.-Warmup args))
+                ;; Only mutate the valuesOut if fuzzing actually occurred.
+                (let [numMutations (+ (% (- (.-Count resp) 1) chainedMutations) 1)]
+                  (for [i (conv int64 0)] (< i numMutations) (inc! i)
+                    (.mutate (.-m wc) valuesOut (cap (.valueRef mem))))))
+
+
+              (let [dataOut (marshalCorpusFile (spread valuesOut))
+
+                  ^{:line 1123} h (sha256/Sum256 dataOut)
+                  ^{:line 1124} name (fmt/Sprintf "%x" (subslice h _ 4))]
+                (set! entryOut ^{:go/breaks [2 4 6 8]} (lit CorpusEntry
+                    :Parent (.-Path entryIn)
+                    :Path name
+                    :Data dataOut
+                    :Generation (+ (.-Generation entryIn) 1)))
+
+                (when (.-Warmup args)
+                  ;; The bytes weren't mutated, so if entryIn was a seed corpus value,
+                  ;; then entryOut is too.
+                  (set! (.-IsSeed entryOut) (.-IsSeed entryIn))))))
+
+
+
+          (return entryOut resp false callErr))))))
+
+
+
+^{:go/end 1148} (go/method ping "ping tells the worker to call the ping method. See workerServer.ping.\n" ^error [^{:tag (* workerClient)} wc ^context/Context ctx]
+  (.Lock (.-mu wc))
+  (defer (.Unlock (.-mu wc)))
+  (let [c (lit call :Ping (addr (lit pingArgs)))
+      ^{:line 1146 :tag pingResponse} resp (zero pingResponse)]
+    (.callLocked wc ctx c (addr resp))))
+
+
+
+
+^{:go/end 1159} (go/method callLocked "callLocked sends an RPC from the coordinator to the worker process and waits\nfor the response. The callLocked may be canceled with ctx.\n" [^{:tag (* workerClient)} wc ^context/Context ctx ^call c ^any resp] :results [^error err]
+  (let [enc (json/NewEncoder ^{:go/via [workerComm]} (.-fuzzIn wc))
+      ^{:line 1154} dec (json/NewDecoder (addr (lit contextReader :ctx ctx :r ^{:go/via [workerComm]} (.-fuzzOut wc))))]
+    (when [err (.Encode enc c)] (!= err nil)
+      (return err))
+
+    (.Decode dec resp)))
+
+
+
+
+
+
+
+
+
+
+(go/type contextReader "contextReader wraps a Reader with a Context. If the context is canceled\nwhile the underlying reader is blocked, Read returns immediately.\n\nThis is useful for reading from a pipe. Closing a pipe file descriptor does\nnot unblock pending Reads on that file descriptor. All copies of the pipe's\nother file descriptor (the write end) must be closed in all processes that\ninherit it. This is difficult to do correctly in the situation we care about\n(process group termination).\n" (struct
+    ^{:line 1170 :tag context/Context} ctx
+    ^{:line 1171 :tag io/Reader} r))
+
+
+^{:go/end 1195} (go/method Read [^{:tag (* contextReader)} cr ^{:tag (slice byte)} b] :results [int error]
+  (when [ctxErr (.Err (.-ctx cr))] (!= ctxErr nil)
+    (return 0 ctxErr))
+
+  (let [done (make (chan (struct)))
+
+      ;; This goroutine may stay blocked after Read returns because the underlying
+      ;; read is blocked.
+      ^{:line 1182 :tag int} n (zero int)
+      ^{:line 1183 :tag error} err (zero error)]
+    (go (^{:go/end 1187} (fn []
+          (set! (values n err) (.Read (.-r cr) b))
+          (close done))))
+
+
+    (select
+      (case (<! (.Done (.-ctx cr)))
+        (return 0 (.Err (.-ctx cr))))
+      (case (<! done)
+        (return n err)))))

@@ -1,0 +1,841 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package bufio implements buffered I/O. It wraps an io.Reader or io.Writer
+;; object, creating another object (Reader or Writer) that also implements
+;; the interface but provides buffering and some help for textual I/O.
+(in-ns 'go.bufio) (go/file "bufio.go" :doc "Package bufio implements buffered I/O. It wraps an io.Reader or io.Writer\nobject, creating another object (Reader or Writer) that also implements\nthe interface but provides buffering and some help for textual I/O.\n" :imports [
+
+
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [strings "strings"]
+    ^{:line 15} [utf8 "unicode/utf8"]])
+
+
+(go/const
+  ^{:line 19} [^{:val 4096} defaultBufSize 4096])
+
+
+(go/var
+  ^{:line 23} [ErrInvalidUnreadByte (errors/New "bufio: invalid use of UnreadByte")]
+  ^{:line 24} [ErrInvalidUnreadRune (errors/New "bufio: invalid use of UnreadRune")]
+  ^{:line 25} [ErrBufferFull (errors/New "bufio: buffer full")]
+  ^{:line 26} [ErrNegativeCount (errors/New "bufio: negative count")])
+
+
+;; Buffered input.
+
+
+
+
+
+(go/type Reader "Reader implements buffering for an io.Reader object.\nA new Reader is created by calling [NewReader] or [NewReaderSize];\nalternatively the zero value of a Reader may be used after calling [Reader.Reset]\non it.\n" (struct
+    ^{:line 36 :tag (slice byte)} buf
+    ^{:line 37 :tag io/Reader} rd ; reader provided by the client
+    ^{:line 38 :tag int} r ^int w ; buf read and write positions
+    ^{:line 39 :tag error} err
+    ^{:line 40 :tag int} lastByte ; last byte read for UnreadByte; -1 means invalid
+    ^{:line 41 :tag int} lastRuneSize)) ; size of last rune read for UnreadRune; -1 means invalid
+
+
+(go/const ^{:val 16} minReadBufferSize 16)
+(go/const ^{:val 100} maxConsecutiveEmptyReads 100)
+
+
+
+
+^{:go/end 59} (go/func NewReaderSize "NewReaderSize returns a new [Reader] whose buffer has at least the specified\nsize. If the argument io.Reader is already a [Reader] with large enough\nsize, it returns the underlying [Reader].\n" ^{:tag (* Reader)} [^io/Reader rd ^int size]
+  ;; Is it already a Reader?
+  (let [(values b ok) (assert (* Reader) rd)]
+    (when (and ok (>= (len (.-buf b)) size))
+      (return b))
+
+    (let [r (new Reader)]
+      (.reset r (make (slice byte) (max size minReadBufferSize)) rd)
+      ^{:line 58} r)))
+
+
+
+^{:go/end 64} (go/func NewReader "NewReader returns a new [Reader] whose buffer has the default size.\n" ^{:tag (* Reader)} [^io/Reader rd]
+  (NewReaderSize rd defaultBufSize))
+
+
+
+^{:go/end 67} (go/method Size "Size returns the size of the underlying buffer in bytes.\n" ^int [^{:tag (* Reader)} b] (len (.-buf b)))
+
+
+
+
+
+
+^{:go/end 85} (go/method Reset "Reset discards any buffered data, resets all state, and switches\nthe buffered reader to read from r.\nCalling Reset on the zero value of [Reader] initializes the internal buffer\nto the default size.\nCalling b.Reset(b) (that is, resetting a [Reader] to itself) does nothing.\n" [^{:tag (* Reader)} b ^io/Reader r]
+  ;; If a Reader r is passed to NewReader, NewReader will return r.
+  ;; Different layers of code may do that, and then later pass r
+  ;; to Reset. Avoid infinite recursion in that case.
+  (when (== b r)
+    (return))
+
+  (when (== (.-buf b) nil)
+    (set! (.-buf b) (make (slice byte) defaultBufSize)))
+
+  (.reset b (.-buf b) r))
+
+
+^{:go/end 94} (go/method reset [^{:tag (* Reader)} b ^{:tag (slice byte)} buf ^io/Reader r]
+  (set! @b ^{:go/breaks [2 4 6 8]} (lit Reader
+      :buf buf
+      :rd r
+      :lastByte -1
+      :lastRuneSize -1)))
+
+
+
+(go/var errNegativeRead (errors/New "bufio: reader returned negative count from Read"))
+
+
+^{:go/end 127} (go/method fill "fill reads a new chunk into the buffer.\n" [^{:tag (* Reader)} b]
+  ;; Slide existing data to beginning.
+  (when (> (.-r b) 0)
+    (copy (.-buf b) (subslice (.-buf b) (.-r b) (.-w b)))
+    (set! (.-w b) - (.-r b))
+    (set! (.-r b) 0))
+
+
+  (when (>= (.-w b) (len (.-buf b)))
+    (panic "bufio: tried to fill full buffer"))
+
+
+  ;; Read new data: try a limited number of times.
+  (for [i maxConsecutiveEmptyReads] (> i 0) (dec! i)
+    (let [(values n err) (.Read (.-rd b) (subslice (.-buf b) (.-w b)))]
+      (when (< n 0)
+        (panic errNegativeRead))
+
+      (set! (.-w b) + n)
+      (when (!= err nil)
+        (set! (.-err b) err)
+        (return))
+
+      (when (> n 0)
+        (return))))
+
+
+  (set! (.-err b) io/ErrNoProgress))
+
+
+^{:go/end 133} (go/method readErr ^error [^{:tag (* Reader)} b]
+  (let [err (.-err b)]
+    (set! (.-err b) nil)
+    ^{:line 132} err))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 170} (go/method Peek "Peek returns the next n bytes without advancing the reader. The bytes stop\nbeing valid at the next read call. If necessary, Peek will read more bytes\ninto the buffer in order to make n bytes available. If Peek returns fewer\nthan n bytes, it also returns an error explaining why the read is short.\nThe error is [ErrBufferFull] if n is larger than b's buffer size.\n\nCalling Peek prevents a [Reader.UnreadByte] or [Reader.UnreadRune] call from succeeding\nuntil the next read operation.\n" [^{:tag (* Reader)} b ^int n] :results [(slice byte) error]
+  (when (< n 0)
+    (return nil ErrNegativeCount))
+
+
+  (set! (.-lastByte b) -1)
+  (set! (.-lastRuneSize b) -1)
+
+  (while (and (< (- (.-w b) (.-r b)) n) (< (- (.-w b) (.-r b)) (len (.-buf b))) (== (.-err b) nil))
+    (.fill b)) ; b.w-b.r < len(b.buf) => buffer is not full
+
+
+  (when (> n (len (.-buf b)))
+    (return (subslice (.-buf b) (.-r b) (.-w b)) ErrBufferFull))
+
+
+  ;; 0 <= n <= len(b.buf)
+  (let [^error err (zero error)]
+    (when [avail (- (.-w b) (.-r b))] (< avail n)
+      ;; not enough data in buffer
+      (set! n avail)
+      (set! err (.readErr b))
+      (when (== err nil)
+        (set! err ErrBufferFull)))
+
+
+    (return (subslice (.-buf b) (.-r b) (+ (.-r b) n)) err)))
+
+
+
+
+
+
+
+^{:go/end 207} (go/method Discard "Discard skips the next n bytes, returning the number of bytes discarded.\n\nIf Discard skips fewer than n bytes, it also returns an error.\nIf 0 <= n <= b.Buffered(), Discard is guaranteed to succeed without\nreading from the underlying io.Reader.\n" [^{:tag (* Reader)} b ^int n] :results [^int discarded ^error err]
+  (when (< n 0)
+    (return 0 ErrNegativeCount))
+
+  (when (== n 0)
+    (return))
+
+
+  (set! (.-lastByte b) -1)
+  (set! (.-lastRuneSize b) -1)
+
+  (let [remain n]
+    (while true
+      (let [skip (.Buffered b)]
+        (when (== skip 0)
+          (.fill b)
+          (set! skip (.Buffered b)))
+
+        (when (> skip remain)
+          (set! skip remain))
+
+        (set! (.-r b) + skip)
+        (set! remain - skip)
+        (when (== remain 0)
+          (return n nil))
+
+        (when (!= (.-err b) nil)
+          (return (- n remain) (.readErr b)))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 263} (go/method Read "Read reads data into p.\nIt returns the number of bytes read into p.\nThe bytes are taken from at most one Read on the underlying [Reader],\nhence n may be less than len(p).\nTo read exactly len(p) bytes, use io.ReadFull(b, p).\nIf the underlying [Reader] can return a non-zero count with io.EOF,\nthen this Read method can do so as well; see the [io.Reader] docs.\n" [^{:tag (* Reader)} b ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (set! n (len p))
+  (when (== n 0)
+    (when (> (.Buffered b) 0)
+      (return 0 nil))
+
+    (return 0 (.readErr b)))
+
+  (when (== (.-r b) (.-w b))
+    (when (!= (.-err b) nil)
+      (return 0 (.readErr b)))
+
+    (when (>= (len p) (len (.-buf b)))
+      ;; Large read, empty buffer.
+      ;; Read directly into p to avoid copy.
+      (set! (values n (.-err b)) (.Read (.-rd b) p))
+      (when (< n 0)
+        (panic errNegativeRead))
+
+      (when (> n 0)
+        (set! (.-lastByte b) (conv int (aget p (- n 1))))
+        (set! (.-lastRuneSize b) -1))
+
+      (return n (.readErr b)))
+
+    ;; One read.
+    ;; Do not use b.fill, which will loop.
+    (set! (.-r b) 0)
+    (set! (.-w b) 0)
+    (set! (values n (.-err b)) (.Read (.-rd b) (.-buf b)))
+    (when (< n 0)
+      (panic errNegativeRead))
+
+    (when (== n 0)
+      (return 0 (.readErr b)))
+
+    (set! (.-w b) + n))
+
+
+  ;; copy as much as we can
+  ;; Note: if the slice panics here, it is probably because
+  ;; the underlying reader returned a bad count. See issue 49795.
+  (set! n (copy p (subslice (.-buf b) (.-r b) (.-w b))))
+  (set! (.-r b) + n)
+  (set! (.-lastByte b) (conv int (aget (.-buf b) (- (.-r b) 1))))
+  (set! (.-lastRuneSize b) -1)
+  (return n nil))
+
+
+
+
+^{:go/end 279} (go/method ReadByte "ReadByte reads and returns a single byte.\nIf no byte is available, returns an error.\n" [^{:tag (* Reader)} b] :results [byte error]
+  (set! (.-lastRuneSize b) -1)
+  (while (== (.-r b) (.-w b))
+    (when (!= (.-err b) nil)
+      (return 0 (.readErr b)))
+
+    (.fill b)) ; buffer is empty
+
+  (let [c (aget (.-buf b) (.-r b))]
+    (inc! (.-r b))
+    (set! (.-lastByte b) (conv int c))
+    (return c nil)))
+
+
+
+
+
+
+
+^{:go/breaks [9] :go/end 301} (go/method UnreadByte "UnreadByte unreads the last byte. Only the most recently read byte can be unread.\n\nUnreadByte returns an error if the most recent method called on the\n[Reader] was not a read operation. Notably, [Reader.Peek], [Reader.Discard], and [Reader.WriteTo] are not\nconsidered read operations.\n" ^error [^{:tag (* Reader)} b]
+  (when (or (< (.-lastByte b) 0) (and (== (.-r b) 0) (> (.-w b) 0)))
+    (return ErrInvalidUnreadByte))
+
+  ;; b.r > 0 || b.w == 0
+  (if (> (.-r b) 0)
+    (dec! (.-r b))
+
+    ;; b.r == 0 && b.w == 0
+    (set! (.-w b) 1))
+
+  (aset (.-buf b) (.-r b) (conv byte (.-lastByte b)))
+  (set! (.-lastByte b) -1)
+  (set! (.-lastRuneSize b) -1)
+  nil)
+
+
+
+
+
+^{:go/end 319} (go/method ReadRune "ReadRune reads a single UTF-8 encoded Unicode character and returns the\nrune and its size in bytes. If the encoded rune is invalid, it consumes one byte\nand returns unicode.ReplacementChar (U+FFFD) with a size of 1.\n" [^{:tag (* Reader)} b] :results [^rune r ^int size ^error err]
+  (while (and (> (+ (.-r b) utf8/UTFMax) (.-w b)) (not (utf8/FullRune (subslice (.-buf b) (.-r b) (.-w b)))) (== (.-err b) nil) (< (- (.-w b) (.-r b)) (len (.-buf b))))
+    (.fill b)) ; b.w-b.r < len(buf) => buffer is not full
+
+  (set! (.-lastRuneSize b) -1)
+  (when (== (.-r b) (.-w b))
+    (return 0 0 (.readErr b)))
+
+  (set! (values r size) (utf8/DecodeRune (subslice (.-buf b) (.-r b) (.-w b))))
+  (set! (.-r b) + size)
+  (set! (.-lastByte b) (conv int (aget (.-buf b) (- (.-r b) 1))))
+  (set! (.-lastRuneSize b) size)
+  (return r size nil))
+
+
+
+
+
+
+^{:go/breaks [8] :go/end 333} (go/method UnreadRune "UnreadRune unreads the last rune. If the most recent method called on\nthe [Reader] was not a [Reader.ReadRune], [Reader.UnreadRune] returns an error. (In this\nregard it is stricter than [Reader.UnreadByte], which will unread the last byte\nfrom any read operation.)\n" ^error [^{:tag (* Reader)} b]
+  (when (or (< (.-lastRuneSize b) 0) (< (.-r b) (.-lastRuneSize b)))
+    (return ErrInvalidUnreadRune))
+
+  (set! (.-r b) - (.-lastRuneSize b))
+  (set! (.-lastByte b) -1)
+  (set! (.-lastRuneSize b) -1)
+  nil)
+
+
+
+^{:go/end 336} (go/method Buffered "Buffered returns the number of bytes that can be read from the current buffer.\n" ^int [^{:tag (* Reader)} b] (- (.-w b) (.-r b)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 387} (go/method ReadSlice "ReadSlice reads until the first occurrence of delim in the input,\nreturning a slice pointing at the bytes in the buffer.\nThe bytes stop being valid at the next read.\nIf ReadSlice encounters an error before finding a delimiter,\nit returns all the data in the buffer and the error itself (often io.EOF).\nReadSlice fails with error [ErrBufferFull] if the buffer fills without a delim.\nBecause the data returned from ReadSlice will be overwritten\nby the next I/O operation, most clients should use\n[Reader.ReadBytes] or ReadString instead.\nReadSlice returns err != nil if and only if line does not end in delim.\n" [^{:tag (* Reader)} b ^byte delim] :results [^{:tag (slice byte)} line ^error err]
+  (let [s 0] ; search start index
+    (while true
+      ;; Search buffer.
+      (when [i (bytes/IndexByte (subslice (.-buf b) (+ (.-r b) s) (.-w b)) delim)] (>= i 0)
+        (set! i + s)
+        (set! line (subslice (.-buf b) (.-r b) (+ (.-r b) i 1)))
+        (set! (.-r b) + (+ i 1))
+        (break))
+
+
+      ;; Pending error?
+      (when (!= (.-err b) nil)
+        (set! line (subslice (.-buf b) (.-r b) (.-w b)))
+        (set! (.-r b) (.-w b))
+        (set! err (.readErr b))
+        (break))
+
+
+      ;; Buffer full?
+      (when (>= (.Buffered b) (len (.-buf b)))
+        (set! (.-r b) (.-w b))
+        (set! line (.-buf b))
+        (set! err ErrBufferFull)
+        (break))
+
+
+      (set! s (- (.-w b) (.-r b))) ; do not rescan area we scanned before
+
+      (.fill b)) ; buffer is not full
+
+
+    ;; Handle last byte, if any.
+    (when [i (- (len line) 1)] (>= i 0)
+      (set! (.-lastByte b) (conv int (aget line i)))
+      (set! (.-lastRuneSize b) -1))
+
+
+    (return)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 438} (go/method ReadLine "ReadLine is a low-level line-reading primitive. Most callers should use\n[Reader.ReadBytes]('\\n') or [Reader.ReadString]('\\n') instead or use a [Scanner].\n\nReadLine tries to return a single line, not including the end-of-line bytes.\nIf the line was too long for the buffer then isPrefix is set and the\nbeginning of the line is returned. The rest of the line will be returned\nfrom future calls. isPrefix will be false when returning the last fragment\nof the line. The returned buffer is only valid until the next call to\nReadLine. ReadLine either returns a non-nil line or it returns an error,\nnever both.\n\nThe text returned from ReadLine does not include the line end (\"\\r\\n\" or \"\\n\").\nNo indication or error is given if the input ends without a final line end.\nCalling [Reader.UnreadByte] after ReadLine will always unread the last byte read\n(possibly a character belonging to the line end) even if that byte is not\npart of the line returned by ReadLine.\n" [^{:tag (* Reader)} b] :results [^{:tag (slice byte)} line ^bool isPrefix ^error err]
+  (set! (values line err) (.ReadSlice b \newline))
+  (when (== err ErrBufferFull)
+    ;; Handle the case where "\r\n" straddles the buffer.
+    (when (and (> (len line) 0) (== (aget line (- (len line) 1)) \return))
+      ;; Put the '\r' back on buf and drop it from line.
+      ;; Let the next call to ReadLine check for "\r\n".
+      (when (== (.-r b) 0)
+        ;; should be unreachable
+        (panic "bufio: tried to rewind past start of buffer"))
+
+      (dec! (.-r b))
+      (set! line (subslice line _ (- (len line) 1))))
+
+    (return line true nil))
+
+
+  (when (== (len line) 0)
+    (when (!= err nil)
+      (set! line nil))
+
+    (return))
+
+  (set! err nil)
+
+  (when (== (aget line (- (len line) 1)) \newline)
+    (let [drop 1]
+      (when (and (> (len line) 1) (== (aget line (- (len line) 2)) \return))
+        (set! drop 2))
+
+      (set! line (subslice line _ (- (len line) drop)))))
+
+  (return))
+
+
+
+
+
+
+
+
+
+^{:go/end 469} (go/method collectFragments "collectFragments reads until the first occurrence of delim in the input. It\nreturns (slice of full buffers, remaining bytes before delim, total number\nof bytes in the combined first two elements, error).\nThe complete result is equal to\n`bytes.Join(append(fullBuffers, finalFragment), nil)`, which has a\nlength of `totalLen`. The result is structured in this way to allow callers\nto minimize allocations and copies.\n" [^{:tag (* Reader)} b ^byte delim] :results [^{:tag (slice (slice byte))} fullBuffers ^{:tag (slice byte)} finalFragment ^int totalLen ^error err]
+  (let [^{:tag (slice byte)} frag (zero (slice byte))]
+    ;; Use ReadSlice to look for delim, accumulating full buffers.
+    (while true
+      (let [^error e (zero error)]
+        (set! (values frag e) (.ReadSlice b delim))
+        (when (== e nil) ; got final fragment
+          (break))
+
+        (when (!= e ErrBufferFull) ; unexpected error
+          (set! err e)
+          (break))
+
+
+        ;; Make a copy of the buffer.
+        (let [buf (bytes/Clone frag)]
+          (set! fullBuffers (append fullBuffers buf))
+          (set! totalLen + (len buf)))))
+
+
+    (set! totalLen + (len frag))
+    (return fullBuffers frag totalLen err)))
+
+
+
+
+
+
+
+
+
+^{:go/end 489} (go/method ReadBytes "ReadBytes reads until the first occurrence of delim in the input,\nreturning a slice containing the data up to and including the delimiter.\nIf ReadBytes encounters an error before finding a delimiter,\nit returns the data read before the error and the error itself (often io.EOF).\nReadBytes returns err != nil if and only if the returned data does not end in\ndelim.\nFor simple uses, a Scanner may be more convenient.\n" [^{:tag (* Reader)} b ^byte delim] :results [(slice byte) error]
+  (let [(values full frag n err) (.collectFragments b delim)
+      ;; Allocate new buffer to hold the full pieces and the fragment.
+      ^{:line 481} buf (make (slice byte) n)]
+    (set! n 0)
+    ;; Copy full pieces and fragment in.
+    (range [i full]
+      (set! n + (copy (subslice buf n) (aget full i))))
+
+    (copy (subslice buf n) frag)
+    (return buf err)))
+
+
+
+
+
+
+
+
+
+^{:go/end 509} (go/method ReadString "ReadString reads until the first occurrence of delim in the input,\nreturning a string containing the data up to and including the delimiter.\nIf ReadString encounters an error before finding a delimiter,\nit returns the data read before the error and the error itself (often io.EOF).\nReadString returns err != nil if and only if the returned data does not end in\ndelim.\nFor simple uses, a Scanner may be more convenient.\n" [^{:tag (* Reader)} b ^byte delim] :results [string error]
+  (let [(values full frag n err) (.collectFragments b delim)
+      ;; Allocate new buffer to hold the full pieces and the fragment.
+      ^{:line 501 :tag strings/Builder} buf (zero strings/Builder)]
+    (.Grow buf n)
+    ;; Copy full pieces and fragment in.
+    (range [_ fb full]
+      (.Write buf fb))
+
+    (.Write buf frag)
+    (return (.String buf) err)))
+
+
+
+
+
+
+^{:go/end 557} (go/method WriteTo "WriteTo implements io.WriterTo.\nThis may make multiple calls to the [Reader.Read] method of the underlying [Reader].\nIf the underlying reader supports the [Reader.WriteTo] method,\nthis calls the underlying [Reader.WriteTo] without buffering.\n" [^{:tag (* Reader)} b ^io/Writer w] :results [^int64 n ^error err]
+  (set! (.-lastByte b) -1)
+  (set! (.-lastRuneSize b) -1)
+
+  (when (< (.-r b) (.-w b))
+    (set! (values n err) (.writeBuf b w))
+    (when (!= err nil)
+      (return)))
+
+
+
+  (when [(values r ok) (assert io/WriterTo (.-rd b))] ok
+    (let [(values m err) (.WriteTo r w)]
+      (set! n + m)
+      (return n err)))
+
+
+  (when [(values w ok) (assert io/ReaderFrom w)] ok
+    (let [(values m err) (.ReadFrom w (.-rd b))]
+      (set! n + m)
+      (return n err)))
+
+
+  (when (< (- (.-w b) (.-r b)) (len (.-buf b)))
+    (.fill b)) ; buffer not full
+
+
+  (while (< (.-r b) (.-w b))
+    ;; b.r < b.w => buffer is not empty
+    (let [(values m err) (.writeBuf b w)]
+      (set! n + m)
+      (when (!= err nil)
+        (return n err))
+
+      (.fill b))) ; buffer is empty
+
+
+  (when (== (.-err b) io/EOF)
+    (set! (.-err b) nil))
+
+
+  (return n (.readErr b)))
+
+
+(go/var errNegativeWrite (errors/New "bufio: writer returned negative count from Write"))
+
+
+^{:go/end 569} (go/method writeBuf "writeBuf writes the [Reader]'s buffer to the writer.\n" [^{:tag (* Reader)} b ^io/Writer w] :results [int64 error]
+  (let [(values n err) (.Write w (subslice (.-buf b) (.-r b) (.-w b)))]
+    (when (< n 0)
+      (panic errNegativeWrite))
+
+    (set! (.-r b) + n)
+    (return (conv int64 n) err)))
+
+
+;; buffered output
+
+
+
+
+
+
+
+(go/type Writer "Writer implements buffering for an [io.Writer] object.\nIf an error occurs writing to a [Writer], no more data will be\naccepted and all subsequent writes, and [Writer.Flush], will return the error.\nAfter all data has been written, the client should call the\n[Writer.Flush] method to guarantee all data has been forwarded to\nthe underlying [io.Writer].\n" (struct
+    ^{:line 580 :tag error} err
+    ^{:line 581 :tag (slice byte)} buf
+    ^{:line 582 :tag int} n
+    ^{:line 583 :tag io/Writer} wr))
+
+
+
+
+
+^{:go/end 602} (go/func NewWriterSize "NewWriterSize returns a new [Writer] whose buffer has at least the specified\nsize. If the argument io.Writer is already a [Writer] with large enough\nsize, it returns the underlying [Writer].\n" ^{:tag (* Writer)} [^io/Writer w ^int size]
+  ;; Is it already a Writer?
+  (let [(values b ok) (assert (* Writer) w)]
+    (when (and ok (>= (len (.-buf b)) size))
+      (return b))
+
+    (when (<= size 0)
+      (set! size defaultBufSize))
+
+    (addr ^{:go/breaks [2 4]} (lit Writer
+        :buf (make (slice byte) size)
+        :wr w))))
+
+
+
+
+
+
+^{:go/end 609} (go/func NewWriter "NewWriter returns a new [Writer] whose buffer has the default size.\nIf the argument io.Writer is already a [Writer] with large enough buffer size,\nit returns the underlying [Writer].\n" ^{:tag (* Writer)} [^io/Writer w]
+  (NewWriterSize w defaultBufSize))
+
+
+
+^{:go/end 612} (go/method Size "Size returns the size of the underlying buffer in bytes.\n" ^int [^{:tag (* Writer)} b] (len (.-buf b)))
+
+
+
+
+
+
+^{:go/end 632} (go/method Reset "Reset discards any unflushed buffered data, clears any error, and\nresets b to write its output to w.\nCalling Reset on the zero value of [Writer] initializes the internal buffer\nto the default size.\nCalling w.Reset(w) (that is, resetting a [Writer] to itself) does nothing.\n" [^{:tag (* Writer)} b ^io/Writer w]
+  ;; If a Writer w is passed to NewWriter, NewWriter will return w.
+  ;; Different layers of code may do that, and then later pass w
+  ;; to Reset. Avoid infinite recursion in that case.
+  (when (== b w)
+    (return))
+
+  (when (== (.-buf b) nil)
+    (set! (.-buf b) (make (slice byte) defaultBufSize)))
+
+  (set! (.-err b) nil)
+  (set! (.-n b) 0)
+  (set! (.-wr b) w))
+
+
+
+^{:go/end 656} (go/method Flush "Flush writes any buffered data to the underlying [io.Writer].\n" ^error [^{:tag (* Writer)} b]
+  (when (!= (.-err b) nil)
+    (return (.-err b)))
+
+  (when (== (.-n b) 0)
+    (return nil))
+
+  ^{:go/breaks [5]} (let [(values n err) (.Write (.-wr b) (subslice (.-buf b) 0 (.-n b)))]
+    (when (and (< n (.-n b)) (== err nil))
+      (set! err io/ErrShortWrite))
+
+    (when (!= err nil)
+      (when (and (> n 0) (< n (.-n b)))
+        (copy (subslice (.-buf b) 0 (- (.-n b) n)) (subslice (.-buf b) n (.-n b))))
+
+      (set! (.-n b) - n)
+      (set! (.-err b) err)
+      (return err))
+
+    (set! (.-n b) 0)
+    nil))
+
+
+
+^{:go/end 659} (go/method Available "Available returns how many bytes are unused in the buffer.\n" ^int [^{:tag (* Writer)} b] (- (len (.-buf b)) (.-n b)))
+
+
+
+
+
+^{:go/end 667} (go/method AvailableBuffer "AvailableBuffer returns an empty buffer with b.Available() capacity.\nThis buffer is intended to be appended to and\npassed to an immediately succeeding [Writer.Write] call.\nThe buffer is only valid until the next write operation on b.\n" ^{:tag (slice byte)} [^{:tag (* Writer)} b]
+  (subslice (subslice (.-buf b) (.-n b)) _ 0))
+
+
+
+^{:go/end 670} (go/method Buffered "Buffered returns the number of bytes that have been written into the current buffer.\n" ^int [^{:tag (* Writer)} b] (.-n b))
+
+
+
+
+
+^{:go/end 698} (go/method Write "Write writes the contents of p into the buffer.\nIt returns the number of bytes written.\nIf nn < len(p), it also returns an error explaining\nwhy the write is short.\n" [^{:tag (* Writer)} b ^{:tag (slice byte)} p] :results [^int nn ^error err]
+  (while (and (> (len p) (.Available b)) (== (.-err b) nil))
+    (let [^int n (zero int)]
+      (if (== (.Buffered b) 0)
+        ;; Large write, empty buffer.
+        ;; Write directly from p to avoid copy.
+        (set! (values n (.-err b)) (.Write (.-wr b) p))
+        (do
+          (set! n (copy (subslice (.-buf b) (.-n b)) p))
+          (set! (.-n b) + n)
+          (.Flush b)))
+
+      (set! nn + n)
+      (set! p (subslice p n))))
+
+  (when (!= (.-err b) nil)
+    (return nn (.-err b)))
+
+  (let [n (copy (subslice (.-buf b) (.-n b)) p)]
+    (set! (.-n b) + n)
+    (set! nn + n)
+    (return nn nil)))
+
+
+
+^{:go/breaks [8] :go/end 711} (go/method WriteByte "WriteByte writes a single byte.\n" ^error [^{:tag (* Writer)} b ^byte c]
+  (when (!= (.-err b) nil)
+    (return (.-err b)))
+
+  (when (and (<= (.Available b) 0) (!= (.Flush b) nil))
+    (return (.-err b)))
+
+  (aset (.-buf b) (.-n b) c)
+  (inc! (.-n b))
+  nil)
+
+
+
+
+^{:go/end 741} (go/method WriteRune "WriteRune writes a single Unicode code point, returning\nthe number of bytes written and any error.\n" [^{:tag (* Writer)} b ^rune r] :results [^int size ^error err]
+  ;; Compare as uint32 to correctly handle negative runes.
+  (when (< (conv uint32 r) utf8/RuneSelf)
+    (set! err (.WriteByte b (conv byte r)))
+    (when (!= err nil)
+      (return 0 err))
+
+    (return 1 nil))
+
+  (when (!= (.-err b) nil)
+    (return 0 (.-err b)))
+
+  (let [n (.Available b)]
+    (when (< n utf8/UTFMax)
+      (when [(.Flush b)] (!= (.-err b) nil)
+        (return 0 (.-err b)))
+
+      (set! n (.Available b))
+      (when (< n utf8/UTFMax)
+        ;; Can only happen if buffer is silly small.
+        (return (.WriteString b (conv string r)))))
+
+
+    (set! size (utf8/EncodeRune (subslice (.-buf b) (.-n b)) r))
+    (set! (.-n b) + size)
+    (return size nil)))
+
+
+
+
+
+
+^{:go/end 778} (go/method WriteString "WriteString writes a string.\nIt returns the number of bytes written.\nIf the count is less than len(s), it also returns an error explaining\nwhy the write is short.\n" [^{:tag (* Writer)} b ^string s] :results [int error]
+  (let [^io/StringWriter sw (zero io/StringWriter)
+      ^{:line 749} tryStringWriter true
+
+      ^{:line 751} nn 0]
+    (while (and (> (len s) (.Available b)) (== (.-err b) nil))
+      (let [^int n (zero int)]
+        (when (and (== (.Buffered b) 0) (== sw nil) tryStringWriter)
+          ;; Check at most once whether b.wr is a StringWriter.
+          (set! (values sw tryStringWriter) (assert io/StringWriter (.-wr b))))
+
+        (if (and (== (.Buffered b) 0) tryStringWriter)
+          ;; Large write, empty buffer, and the underlying writer supports
+          ;; WriteString: forward the write to the underlying StringWriter.
+          ;; This avoids an extra copy.
+          (set! (values n (.-err b)) (.WriteString sw s))
+          (do
+            (set! n (copy (subslice (.-buf b) (.-n b)) s))
+            (set! (.-n b) + n)
+            (.Flush b)))
+
+        (set! nn + n)
+        (set! s (subslice s n))))
+
+    (when (!= (.-err b) nil)
+      (return nn (.-err b)))
+
+    (let [n (copy (subslice (.-buf b) (.-n b)) s)]
+      (set! (.-n b) + n)
+      (set! nn + n)
+      (return nn nil))))
+
+
+
+
+
+
+^{:go/end 828} (go/method ReadFrom "ReadFrom implements [io.ReaderFrom]. If the underlying writer\nsupports the ReadFrom method, this calls the underlying ReadFrom.\nIf there is buffered data and an underlying ReadFrom, this fills\nthe buffer and writes it before calling ReadFrom.\n" [^{:tag (* Writer)} b ^io/Reader r] :results [^int64 n ^error err]
+  (when (!= (.-err b) nil)
+    (return 0 (.-err b)))
+
+  (let [(values readerFrom readerFromOK) (assert io/ReaderFrom (.-wr b))
+      ^{:line 789 :tag int} m (zero int)]
+    (while true
+      (when (== (.Available b) 0)
+        (when [err1 (.Flush b)] (!= err1 nil)
+          (return n err1)))
+
+
+      (when (and readerFromOK (== (.Buffered b) 0))
+        (let [(values nn err) (.ReadFrom readerFrom r)]
+          (set! (.-err b) err)
+          (set! n + nn)
+          (return n err)))
+
+      (let [nr 0]
+        (while (< nr maxConsecutiveEmptyReads)
+          (set! (values m err) (.Read r (subslice (.-buf b) (.-n b))))
+          (when (or (!= m 0) (!= err nil))
+            (break))
+
+          (inc! nr))
+
+        (when (== nr maxConsecutiveEmptyReads)
+          (return n io/ErrNoProgress))
+
+        (set! (.-n b) + m)
+        (set! n + (conv int64 m))
+        (when (!= err nil)
+          (break))))
+
+
+    (when (== err io/EOF)
+      ;; If we filled the buffer exactly, flush preemptively.
+      (if (== (.Available b) 0)
+        (set! err (.Flush b))
+
+        (set! err nil)))
+
+
+    (return n err)))
+
+
+;; buffered input and output
+
+
+
+(go/type ReadWriter "ReadWriter stores pointers to a [Reader] and a [Writer].\nIt implements [io.ReadWriter].\n" (struct
+    (* Reader)
+    (* Writer)))
+
+
+
+^{:go/end 842} (go/func NewReadWriter "NewReadWriter allocates a new [ReadWriter] that dispatches to r and w.\n" ^{:tag (* ReadWriter)} [^{:tag (* Reader)} r ^{:tag (* Writer)} w]
+  (addr (lit ReadWriter r w)))

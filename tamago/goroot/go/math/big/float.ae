@@ -1,0 +1,1729 @@
+;; Copyright 2014 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements multi-precision floating-point numbers.
+;; Like in the GNU MPFR library (https://www.mpfr.org/), operands
+;; can be of mixed precision. Unlike MPFR, the rounding mode is
+;; not specified with each operation, but with each operand. The
+;; rounding mode of the result operand determines the rounding
+;; mode of an operation. This is a from-scratch implementation.
+
+(in-ns 'go.math.big) (go/file "float.go" :imports [
+
+
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [math "math"]
+    ^{:line 17} [bits "math/bits"]])
+
+
+(go/const ^{:val false} debugFloat false) ; enable for debugging
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Float "A nonzero finite Float represents a multi-precision floating point number\n\n\tsign × mantissa × 2**exponent\n\nwith 0.5 <= mantissa < 1.0, and MinExp <= exponent <= MaxExp.\nA Float may also be zero (+0, -0) or infinite (+Inf, -Inf).\nAll Floats are ordered, and the ordering of two Floats x and y\nis defined by x.Cmp(y).\n\nEach Float value also has a precision, rounding mode, and accuracy.\nThe precision is the maximum number of mantissa bits available to\nrepresent the value. The rounding mode specifies how a result should\nbe rounded to fit into the mantissa bits, and accuracy describes the\nrounding error with respect to the exact result.\n\nUnless specified otherwise, all operations (including setters) that\nspecify a *Float variable for the result (usually via the receiver\nwith the exception of [Float.MantExp]), round the numeric result according\nto the precision and rounding mode of the result variable.\n\nIf the provided result precision is 0 (see below), it is set to the\nprecision of the argument with the largest precision value before any\nrounding takes place, and the rounding mode remains unchanged. Thus,\nuninitialized Floats provided as result arguments will have their\nprecision set to a reasonable value determined by the operands, and\ntheir mode is the zero value for RoundingMode (ToNearestEven).\n\nBy setting the desired precision to 24 or 53 and using matching rounding\nmode (typically [ToNearestEven]), Float operations produce the same results\nas the corresponding float32 or float64 IEEE 754 arithmetic for operands\nthat correspond to normal (i.e., not denormal) float32 or float64 numbers.\nExponent underflow and overflow lead to a 0 or an Infinity for different\nvalues than IEEE 754 because Float exponents have a much larger range.\n\nThe zero (uninitialized) value for a Float is ready to use and represents\nthe number +0.0 exactly, with precision 0 and rounding mode [ToNearestEven].\n\nOperations always take pointer arguments (*Float) rather\nthan Float values, and each unique Float value requires\nits own unique *Float pointer. To \"copy\" a Float value,\nan existing (or newly allocated) Float must be set to\na new value using the [Float.Set] method; shallow copies\nof Floats are not supported and may lead to errors.\n" (struct
+    ^{:line 66 :tag uint32} prec
+    ^{:line 67 :tag RoundingMode} mode
+    ^{:line 68 :tag Accuracy} acc
+    ^{:line 69 :tag form} form
+    ^{:line 70 :tag bool} neg
+    ^{:line 71 :tag nat} mant
+    ^{:line 72 :tag int32} exp))
+
+
+
+
+(go/type ErrNaN "An ErrNaN panic is raised by a [Float] operation that would lead to\na NaN under IEEE 754 rules. An ErrNaN implements the error interface.\n" (struct
+    ^{:line 78 :tag string} msg))
+
+
+(go/var ^error _ (lit ErrNaN))
+
+^{:go/end 85} (go/method Error ^string [^ErrNaN err]
+  (.-msg err))
+
+
+
+
+
+^{:go/end 95} (go/func NewFloat "NewFloat allocates and returns a new [Float] set to x,\nwith precision 53 and rounding mode [ToNearestEven].\nNewFloat panics with [ErrNaN] if x is a NaN.\n" ^{:tag (* Float)} [^float64 x]
+  (when (math/IsNaN x)
+    (panic (lit ErrNaN "NewFloat(NaN)")))
+
+  (.SetFloat64 (new Float) x))
+
+
+
+(go/const "Exponent and precision limits.\n"
+  ^{:line 99} [^{:val 2147483647} MaxExp math/MaxInt32] ; largest supported exponent
+  ^{:line 100} [^{:val -2147483648} MinExp math/MinInt32] ; smallest supported exponent
+  ^{:line 101} [^{:val 4294967295} MaxPrec math/MaxUint32]) ; largest (theoretically) supported precision; likely memory-limited
+
+
+;; Internal representation: The mantissa bits x.mant of a nonzero finite
+;; Float x are stored in a nat slice long enough to hold up to x.prec bits;
+;; the slice may (but doesn't have to) be shorter if the mantissa contains
+;; trailing 0 bits. x.mant is normalized if the msb of x.mant == 1 (i.e.,
+;; the msb is shifted all the way "to the left"). Thus, if the mantissa has
+;; trailing 0 bits or x.prec is not a multiple of the Word size _W,
+;; x.mant[0] has trailing zero bits. The msb of the mantissa corresponds
+;; to the value 0.5; the exponent x.exp shifts the binary point as needed.
+;;
+;; A zero or non-finite Float x ignores x.mant and x.exp.
+;;
+;; x                 form      neg      mant         exp
+;; ----------------------------------------------------------
+;; ±0                zero      sign     -            -
+;; 0 < |x| < +Inf    finite    sign     mantissa     exponent
+;; ±Inf              inf       sign     -            -
+
+
+(go/type form "A form value describes the internal representation.\n" byte)
+
+
+(go/const "The form value order is relevant - do not change!\n"
+  ^{:line 126} [^{:tag form :val 0} zero iota]
+  ^{:line 127} [^{:val 1} finite]
+  ^{:line 128} [^{:val 2} inf])
+
+
+
+
+
+(go/type RoundingMode "RoundingMode determines how a [Float] value is rounded to the\ndesired precision. Rounding may change the [Float] value; the\nrounding error is described by the [Float]'s [Accuracy].\n" byte)
+
+
+(go/const "These constants define supported rounding modes.\n"
+  ^{:line 138} [^{:tag RoundingMode :val 0} ToNearestEven iota] ; == IEEE 754-2008 roundTiesToEven
+  ^{:line 139} [^{:val 1} ToNearestAway] ; == IEEE 754-2008 roundTiesToAway
+  ^{:line 140} [^{:val 2} ToZero] ; == IEEE 754-2008 roundTowardZero
+  ^{:line 141} [^{:val 3} AwayFromZero] ; no IEEE 754-2008 equivalent
+  ^{:line 142} [^{:val 4} ToNegativeInf] ; == IEEE 754-2008 roundTowardNegative
+  ^{:line 143} [^{:val 5} ToPositiveInf]) ; == IEEE 754-2008 roundTowardPositive
+
+
+(go/directive "//go:generate stringer -type=RoundingMode")
+
+
+
+(go/type Accuracy "Accuracy describes the rounding error produced by the most recent\noperation that generated a [Float] value, relative to the exact value.\n" int8)
+
+
+(go/const "Constants describing the [Accuracy] of a [Float].\n"
+  ^{:line 154} [^{:tag Accuracy :val -1} Below -1]
+  ^{:line 155} [^{:tag Accuracy :val 0} Exact 0]
+  ^{:line 156} [^{:tag Accuracy :val 1} Above (+ 1)])
+
+
+(go/directive "//go:generate stringer -type=Accuracy")
+
+
+
+
+
+
+^{:go/end 190} (go/method SetPrec "SetPrec sets z's precision to prec and returns the (possibly) rounded\nvalue of z. Rounding occurs according to z's rounding mode if the mantissa\ncannot be represented in prec bits without loss of precision.\nSetPrec(0) maps all finite values to ±0; infinite values remain unchanged.\nIf prec > [MaxPrec], it is set to [MaxPrec].\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^uint prec]
+  (set! (.-acc z) Exact) ; optimistically assume no rounding is needed
+
+  ;; special case
+  (when (== prec 0)
+    (set! (.-prec z) 0)
+    (when (== (.-form z) finite)
+      ;; truncate z to 0
+      (set! (.-acc z) (makeAcc (.-neg z)))
+      (set! (.-form z) zero))
+
+    (return z))
+
+
+  ;; general case
+  (when (> prec MaxPrec)
+    (set! prec MaxPrec))
+
+  (let [old (.-prec z)]
+    (set! (.-prec z) (conv uint32 prec))
+    (when (< (.-prec z) old)
+      (.round z 0))
+
+    ^{:line 189} z))
+
+
+^{:go/end 197} (go/func makeAcc ^Accuracy [^bool above]
+  (when above
+    (return Above))
+
+  ^{:line 196} Below)
+
+
+
+
+
+^{:go/end 206} (go/method SetMode "SetMode sets z's rounding mode to mode and returns an exact z.\nz remains unchanged otherwise.\nz.SetMode(z.Mode()) is a cheap way to set z's accuracy to [Exact].\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^RoundingMode mode]
+  (set! (.-mode z) mode)
+  (set! (.-acc z) Exact)
+  ^{:line 205} z)
+
+
+
+
+^{:go/end 212} (go/method Prec "Prec returns the mantissa precision of x in bits.\nThe result may be 0 for |x| == 0 and |x| == Inf.\n" ^uint [^{:tag (* Float)} x]
+  (conv uint (.-prec x)))
+
+
+
+
+
+^{:go/end 222} (go/method MinPrec "MinPrec returns the minimum precision required to represent x exactly\n(i.e., the smallest prec before x.SetPrec(prec) would start rounding x).\nThe result is 0 for |x| == 0 and |x| == Inf.\n" ^uint [^{:tag (* Float)} x]
+  (when (!= (.-form x) finite)
+    (return 0))
+
+  (- (* (conv uint (len (.-mant x))) _W) (.trailingZeroBits (.-mant x))))
+
+
+
+^{:go/end 227} (go/method Mode "Mode returns the rounding mode of x.\n" ^RoundingMode [^{:tag (* Float)} x]
+  (.-mode x))
+
+
+
+
+
+^{:go/end 234} (go/method Acc "Acc returns the accuracy of x produced by the most recent\noperation, unless explicitly documented otherwise by that\noperation.\n" ^Accuracy [^{:tag (* Float)} x]
+  (.-acc x))
+
+
+
+
+
+
+^{:go/breaks [[7 250]] :go/end 251} (go/method Sign "Sign returns:\n  - -1 if x < 0;\n  - 0 if x is ±0;\n  - +1 if x > 0.\n" ^int [^{:tag (* Float)} x]
+  (when debugFloat
+    (.validate x))
+
+  (when (== (.-form x) zero)
+    (return 0))
+
+  (when (.-neg x)
+    (return -1))
+
+  1)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 282} (go/method MantExp "MantExp breaks x into its mantissa and exponent components\nand returns the exponent. If a non-nil mant argument is\nprovided its value is set to the mantissa of x, with the\nsame precision and rounding mode as x. The components\nsatisfy x == mant × 2**exp, with 0.5 <= |mant| < 1.0.\nCalling MantExp with a nil argument is an efficient way to\nget the exponent of the receiver.\n\nSpecial cases are:\n\n\t(  ±0).MantExp(mant) = 0, with mant set to   ±0\n\t(±Inf).MantExp(mant) = 0, with mant set to ±Inf\n\nx and mant may be the same in which case x is set to its\nmantissa value.\n" [^{:tag (* Float)} x ^{:tag (* Float)} mant] :results [^int exp]
+  (when debugFloat
+    (.validate x))
+
+  (when (== (.-form x) finite)
+    (set! exp (conv int (.-exp x))))
+
+  (when (!= mant nil)
+    (.Copy mant x)
+    (when (== (.-form mant) finite)
+      (set! (.-exp mant) 0)))
+
+
+  (return))
+
+
+^{:go/end 302} (go/method setExpAndRound [^{:tag (* Float)} z ^int64 exp ^uint sbit]
+  (when (< exp MinExp)
+    ;; underflow
+    (set! (.-acc z) (makeAcc (.-neg z)))
+    (set! (.-form z) zero)
+    (return))
+
+
+  (when (> exp MaxExp)
+    ;; overflow
+    (set! (.-acc z) (makeAcc (not (.-neg z))))
+    (set! (.-form z) inf)
+    (return))
+
+
+  (set! (.-form z) finite)
+  (set! (.-exp z) (conv int32 exp))
+  (.round z sbit))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 333} (go/method SetMantExp "SetMantExp sets z to mant × 2**exp and returns z.\nThe result z has the same precision and rounding mode\nas mant. SetMantExp is an inverse of [Float.MantExp] but does\nnot require 0.5 <= |mant| < 1.0. Specifically, for a\ngiven x of type *[Float], SetMantExp relates to [Float.MantExp]\nas follows:\n\n\tmant := new(Float)\n\tnew(Float).SetMantExp(mant, x.MantExp(mant)).Cmp(x) == 0\n\nSpecial cases are:\n\n\tz.SetMantExp(  ±0, exp) =   ±0\n\tz.SetMantExp(±Inf, exp) = ±Inf\n\nz and mant may be the same in which case z's exponent\nis set to exp.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^{:tag (* Float)} mant ^int exp]
+  (when debugFloat
+    (.validate z)
+    (.validate mant))
+
+  (.Copy z mant)
+
+  (when (== (.-form z) finite)
+    ;; 0 < |mant| < +Inf
+    (.setExpAndRound z (+ (conv int64 (.-exp z)) (conv int64 exp)) 0))
+
+  ^{:line 332} z)
+
+
+
+^{:go/end 338} (go/method Signbit "Signbit reports whether x is negative or negative zero.\n" ^bool [^{:tag (* Float)} x]
+  (.-neg x))
+
+
+
+^{:go/end 343} (go/method IsInf "IsInf reports whether x is +Inf or -Inf.\n" ^bool [^{:tag (* Float)} x]
+  (== (.-form x) inf))
+
+
+
+
+^{:go/end 361} (go/method IsInt "IsInt reports whether x is an integer.\n±Inf values are not integers.\n" ^bool [^{:tag (* Float)} x]
+  (when debugFloat
+    (.validate x))
+
+  ;; special cases
+  (when (!= (.-form x) finite)
+    (return (== (.-form x) zero)))
+
+  ;; x.form == finite
+  (when (<= (.-exp x) 0)
+    (return false))
+
+  ;; x.exp > 0
+  (or (<= (.-prec x) (conv uint32 (.-exp x))) (<= (.MinPrec x) (conv uint (.-exp x))))) ; not enough bits for fractional mantissa
+
+
+
+^{:go/end 372} (go/method validate "debugging support\n" [^{:tag (* Float)} x]
+  (when (not debugFloat)
+    ;; avoid performance bugs
+    (panic "validate called but debugFloat is not set"))
+
+  (when [msg (.validate0 x)] (!= msg "")
+    (panic msg)))
+
+
+
+^{:go/end 390} (go/method validate0 ^string [^{:tag (* Float)} x]
+  (when (!= (.-form x) finite)
+    (return ""))
+
+  (let [m (len (.-mant x))]
+    (when (== m 0)
+      (return "nonzero finite number with empty mantissa"))
+
+    ^{:go/breaks [[4 389]]} (let [^:const ^{:val 9223372036854775808N} msb (<< 1 (- _W 1))]
+      (when (== (bit-and (aget (.-mant x) (- m 1)) msb) 0)
+        (return (fmt/Sprintf "msb not set in last word %#x of %s" (aget (.-mant x) (- m 1)) (.Text x \p 0))))
+
+      (when (== (.-prec x) 0)
+        (return "zero precision finite number"))
+
+      "")))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 507} (go/method round "round rounds z according to z.mode to z.prec bits and sets z.acc accordingly.\nsbit must be 0 or 1 and summarizes any \"sticky bit\" information one might\nhave before calling round. z's mantissa must be normalized (with the msb set)\nor empty.\n\nCAUTION: The rounding modes [ToNegativeInf], [ToPositiveInf] are affected by the\nsign of z. For correct rounding, the sign of z must be set correctly before\ncalling round.\n" [^{:tag (* Float)} z ^uint sbit]
+  (when debugFloat
+    (.validate z))
+
+
+  (set! (.-acc z) Exact)
+  (when (!= (.-form z) finite)
+    ;; ±0 or ±Inf => nothing left to do
+    (return))
+
+  ;; z.form == finite && len(z.mant) > 0
+  ;; m > 0 implies z.prec > 0 (checked by validate)
+
+  (let [m (conv uint32 (len (.-mant z))) ; present mantissa length in words
+      ^{:line 414} bits (* m _W)] ; present mantissa bits; bits > 0
+    (when (<= bits (.-prec z))
+      ;; mantissa fits => nothing to do
+      (return))
+
+    ;; bits > z.prec
+
+    ;; Rounding is based on two bits: the rounding bit (rbit) and the
+    ;; sticky bit (sbit). The rbit is the bit immediately before the
+    ;; z.prec leading mantissa bits (the "0.5"). The sbit is set if any
+    ;; of the bits before the rbit are set (the "0.25", "0.125", etc.):
+    ;;
+    ;;   rbit  sbit  => "fractional part"
+    ;;
+    ;;   0     0        == 0
+    ;;   0     1        >  0  , < 0.5
+    ;;   1     0        == 0.5
+    ;;   1     1        >  0.5, < 1.0
+
+    ;; bits > z.prec: mantissa too large => round
+    (let [r (conv uint (- bits (.-prec z) 1)) ; rounding bit position; r >= 0
+        ^{:line 435} rbit (bit-and (.bit (.-mant z) r) 1)] ; rounding bit; be safe and ensure it's a single bit
+      ;; The sticky bit is only needed for rounding ToNearestEven
+      ;; or when the rounding bit is zero. Avoid computation otherwise.
+      (when (and (== sbit 0) ^:go/paren (or (== rbit 0) (== (.-mode z) ToNearestEven)))
+        (set! sbit (.sticky (.-mant z) r)))
+
+      (set! sbit bit-and 1) ; be safe and ensure it's a single bit
+
+      ;; cut off extra words
+      (let [n (/ (+ (.-prec z) (- _W 1)) _W)] ; mantissa length in words for desired precision
+        (when (> m n)
+          (copy (.-mant z) (subslice (.-mant z) (- m n))) ; move n last words to front
+          (set! (.-mant z) (subslice (.-mant z) _ n)))
+
+
+        ;; determine number of trailing zero bits (ntz) and compute lsb mask of mantissa's least-significant word
+        (let [ntz (- (* n _W) (.-prec z)) ; 0 <= ntz < _W
+            ^{:line 452} lsb (<< (conv Word 1) ntz)]
+
+          ;; round if result is inexact
+          (when (!= (bit-or rbit sbit) 0)
+            ;; Make rounding decision: The result mantissa is truncated ("rounded down")
+            ;; by default. Decide if we need to increment, or "round up", the (unsigned)
+            ;; mantissa.
+            (let [inc false]
+              (switch (.-mode z)
+                (case [ToNegativeInf]
+                  (set! inc (.-neg z)))
+                (case [ToZero])
+                ;; nothing to do
+                (case [ToNearestEven]
+                  (set! inc (and (!= rbit 0) ^:go/paren (or (!= sbit 0) (!= (bit-and (aget (.-mant z) 0) lsb) 0)))))
+                (case [ToNearestAway]
+                  (set! inc (!= rbit 0)))
+                (case [AwayFromZero]
+                  (set! inc true))
+                (case [ToPositiveInf]
+                  (set! inc (not (.-neg z))))
+                (default
+                  (panic "unreachable")))
+
+
+              ;; A positive result (!z.neg) is Above the exact result if we increment,
+              ;; and it's Below if we truncate (Exact results require no rounding).
+              ;; For a negative result (z.neg) it is exactly the opposite.
+              (set! (.-acc z) (makeAcc (!= inc (.-neg z))))
+
+              (when inc
+                ;; add 1 to mantissa
+                (when (!= (addVW (.-mant z) (.-mant z) lsb) 0)
+                  ;; mantissa overflow => adjust exponent
+                  (when (>= (.-exp z) MaxExp)
+                    ;; exponent overflow
+                    (set! (.-form z) inf)
+                    (return))
+
+                  (inc! (.-exp z))
+                  ;; adjust mantissa: divide by 2 to compensate for exponent adjustment
+                  (rshVU (.-mant z) (.-mant z) 1)
+                  ;; set msb == carry == 1 from the mantissa overflow above
+                  (let [^:const ^{:val 9223372036854775808N} msb (<< 1 (- _W 1))]
+                    (set! (aget (.-mant z) (- n 1)) bit-or msb))))))
+
+
+
+
+          ;; zero out trailing bits in least-significant word
+          (set! (aget (.-mant z) 0) bit-and-not (- lsb 1))
+
+          (when debugFloat
+            (.validate z)))))))
+
+
+
+^{:go/end 528} (go/method setBits64 ^{:tag (* Float)} [^{:tag (* Float)} z ^bool neg ^uint64 x]
+  (when (== (.-prec z) 0)
+    (set! (.-prec z) 64))
+
+  (set! (.-acc z) Exact)
+  (set! (.-neg z) neg)
+  (when (== x 0)
+    (set! (.-form z) zero)
+    (return z))
+
+  ;; x != 0
+  (set! (.-form z) finite)
+  (let [s (bits/LeadingZeros64 x)]
+    (set! (.-mant z) (.setUint64 (.-mant z) (<< x (conv uint s))))
+    (set! (.-exp z) (conv int32 (- 64 s))) ; always fits
+    (when (< (.-prec z) 64)
+      (.round z 0))
+
+    ^{:line 527} z))
+
+
+
+
+
+^{:go/end 535} (go/method SetUint64 "SetUint64 sets z to the (possibly rounded) value of x and returns z.\nIf z's precision is 0, it is changed to 64 (and rounding will have\nno effect).\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^uint64 x]
+  (.setBits64 z false x))
+
+
+
+
+
+^{:go/end 548} (go/method SetInt64 "SetInt64 sets z to the (possibly rounded) value of x and returns z.\nIf z's precision is 0, it is changed to 64 (and rounding will have\nno effect).\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^int64 x]
+  (let [u x]
+    (when (< u 0)
+      (set! u (- u)))
+
+    ;; We cannot simply call z.SetUint64(uint64(u)) and change
+    ;; the sign afterwards because the sign affects rounding.
+    (.setBits64 z (< x 0) (conv uint64 u))))
+
+
+
+
+
+^{:go/end 579} (go/method SetFloat64 "SetFloat64 sets z to the (possibly rounded) value of x and returns z.\nIf z's precision is 0, it is changed to 53 (and rounding will have\nno effect). SetFloat64 panics with [ErrNaN] if x is a NaN.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^float64 x]
+  (when (== (.-prec z) 0)
+    (set! (.-prec z) 53))
+
+  (when (math/IsNaN x)
+    (panic (lit ErrNaN "Float.SetFloat64(NaN)")))
+
+  (set! (.-acc z) Exact)
+  (set! (.-neg z) (math/Signbit x)) ; handle -0, -Inf correctly
+  (when (== x 0)
+    (set! (.-form z) zero)
+    (return z))
+
+  (when (math/IsInf x 0)
+    (set! (.-form z) inf)
+    (return z))
+
+  ;; normalized x != 0
+  (set! (.-form z) finite)
+  (let [(values fmant exp) (math/Frexp x)] ; get normalized mantissa
+    (set! (.-mant z) (.setUint64 (.-mant z) (bit-or (<< 1 63) (<< (math/Float64bits fmant) 11))))
+    (set! (.-exp z) (conv int32 exp)) ; always fits
+    (when (< (.-prec z) 53)
+      (.round z 0))
+
+    ^{:line 578} z))
+
+
+
+
+
+^{:go/end 596} (go/func fnorm "fnorm normalizes mantissa m by shifting it to the left\nsuch that the msb of the most-significant word (msw) is 1.\nIt returns the shift amount. It assumes that len(m) != 0.\n" ^int64 [^nat m]
+  (when (and debugFloat ^:go/paren (or (== (len m) 0) (== (aget m (- (len m) 1)) 0)))
+    (panic "msw of mantissa is 0"))
+
+  (let [s (nlz (aget m (- (len m) 1)))]
+    (when (> s 0)
+      (let [c (lshVU m m s)]
+        (when (and debugFloat (!= c 0))
+          (panic "nlz or lshVU incorrect"))))
+
+
+    (conv int64 s)))
+
+
+
+
+
+^{:go/end 620} (go/method SetInt "SetInt sets z to the (possibly rounded) value of x and returns z.\nIf z's precision is 0, it is changed to the larger of x.BitLen()\nor 64 (and rounding will have no effect).\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^{:tag (* Int)} x]
+  ;; TODO(gri) can be more efficient if z.prec > 0
+  ;; but small compared to the size of x, or if there
+  ;; are many trailing 0's.
+  (let [bits (conv uint32 (.BitLen x))]
+    (when (== (.-prec z) 0)
+      (set! (.-prec z) (max bits 64)))
+
+    (set! (.-acc z) Exact)
+    (set! (.-neg z) (.-neg x))
+    (when (== (len (.-abs x)) 0)
+      (set! (.-form z) zero)
+      (return z))
+
+    ;; x != 0
+    (set! (.-mant z) (.set (.-mant z) (.-abs x)))
+    (fnorm (.-mant z))
+    (.setExpAndRound z (conv int64 bits) 0)
+    ^{:line 619} z))
+
+
+
+
+
+^{:go/end 636} (go/method SetRat "SetRat sets z to the (possibly rounded) value of x and returns z.\nIf z's precision is 0, it is changed to the largest of a.BitLen(),\nb.BitLen(), or 64; with x = a/b.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^{:tag (* Rat)} x]
+  (when (.IsInt x)
+    (return (.SetInt z (.Num x))))
+
+  (let [(values ^Float a ^Float b) (zero Float)]
+    (.SetInt a (.Num x))
+    (.SetInt b (.Denom x))
+    (when (== (.-prec z) 0)
+      (set! (.-prec z) (max (.-prec a) (.-prec b))))
+
+    (.Quo z (addr a) (addr b))))
+
+
+
+
+
+
+^{:go/end 647} (go/method SetInf "SetInf sets z to the infinite Float -Inf if signbit is\nset, or +Inf if signbit is not set, and returns z. The\nprecision of z is unchanged and the result is always\n[Exact].\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^bool signbit]
+  (set! (.-acc z) Exact)
+  (set! (.-form z) inf)
+  (set! (.-neg z) signbit)
+  ^{:line 646} z)
+
+
+
+
+
+
+
+
+^{:go/end 674} (go/method Set "Set sets z to the (possibly rounded) value of x and returns z.\nIf z's precision is 0, it is changed to the precision of x\nbefore setting z (and rounding will have no effect).\nRounding is performed according to z's precision and rounding\nmode; and z's accuracy reports the result error relative to the\nexact (not rounded) result.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^{:tag (* Float)} x]
+  (when debugFloat
+    (.validate x))
+
+  (set! (.-acc z) Exact)
+  (when (!= z x)
+    (set! (.-form z) (.-form x))
+    (set! (.-neg z) (.-neg x))
+    (when (== (.-form x) finite)
+      (set! (.-exp z) (.-exp x))
+      (set! (.-mant z) (.set (.-mant z) (.-mant x))))
+
+    (cond (== (.-prec z) 0)
+      (set! (.-prec z) (.-prec x))
+      (< (.-prec z) (.-prec x))
+      (.round z 0)))
+
+
+  ^{:line 673} z)
+
+
+
+
+^{:go/end 694} (go/method Copy "Copy sets z to x, with the same precision, rounding mode, and accuracy as x.\nCopy returns z. If x and z are identical, Copy is a no-op.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^{:tag (* Float)} x]
+  (when debugFloat
+    (.validate x))
+
+  (when (!= z x)
+    (set! (.-prec z) (.-prec x))
+    (set! (.-mode z) (.-mode x))
+    (set! (.-acc z) (.-acc x))
+    (set! (.-form z) (.-form x))
+    (set! (.-neg z) (.-neg x))
+    (when (== (.-form z) finite)
+      (set! (.-mant z) (.set (.-mant z) (.-mant x)))
+      (set! (.-exp z) (.-exp x))))
+
+
+  ^{:line 693} z)
+
+
+
+^{:go/end 712} (go/func msb32 "msb32 returns the 32 most significant bits of x.\n" ^uint32 [^nat x]
+  (let [i (- (len x) 1)]
+    (when (< i 0)
+      (return 0))
+
+    (when (and debugFloat (== (bit-and (aget x i) (<< 1 (- _W 1))) 0))
+      (panic "x not normalized"))
+
+    (switch _W
+      (case [32]
+        (return (conv uint32 (aget x i))))
+      (case [64]
+        (return (conv uint32 (>> (aget x i) 32)))))
+
+    (panic "unreachable")))
+
+
+
+^{:go/end 734} (go/func msb64 "msb64 returns the 64 most significant bits of x.\n" ^uint64 [^nat x]
+  (let [i (- (len x) 1)]
+    (when (< i 0)
+      (return 0))
+
+    (when (and debugFloat (== (bit-and (aget x i) (<< 1 (- _W 1))) 0))
+      (panic "x not normalized"))
+
+    (switch _W
+      (case [32]
+        (let [v (<< (conv uint64 (aget x i)) 32)]
+          (when (> i 0)
+            (set! v bit-or (conv uint64 (aget x (- i 1)))))
+
+          (return v)))
+      (case [64]
+        (return (conv uint64 (aget x i)))))
+
+    (panic "unreachable")))
+
+
+
+
+
+
+
+^{:go/end 779} (go/method Uint64 "Uint64 returns the unsigned integer resulting from truncating x\ntowards zero. If 0 <= x <= [math.MaxUint64], the result is [Exact]\nif x is an integer and [Below] otherwise.\nThe result is (0, [Above]) for x < 0, and ([math.MaxUint64], [Below])\nfor x > [math.MaxUint64].\n" [^{:tag (* Float)} x] :results [uint64 Accuracy]
+  (when debugFloat
+    (.validate x))
+
+
+  (switch (.-form x)
+    (case [finite]
+      (when (.-neg x)
+        (return 0 Above))
+
+      ;; 0 < x < +Inf
+      (when (<= (.-exp x) 0)
+        ;; 0 < x < 1
+        (return 0 Below))
+
+      ;; 1 <= x < Inf
+      (when (<= (.-exp x) 64)
+        ;; u = trunc(x) fits into a uint64
+        (let [u (>> (msb64 (.-mant x)) (- 64 (conv uint32 (.-exp x))))]
+          (when (<= (.MinPrec x) 64)
+            (return u Exact))
+
+          (return u Below))) ; x truncated
+
+      ;; x too large
+      (return math/MaxUint64 Below))
+
+    (case [zero]
+      (return 0 Exact))
+
+    (case [inf]
+      (when (.-neg x)
+        (return 0 Above))
+
+      (return math/MaxUint64 Below)))
+
+
+  (panic "unreachable"))
+
+
+
+
+
+
+
+^{:go/end 834} (go/method Int64 "Int64 returns the integer resulting from truncating x towards zero.\nIf [math.MinInt64] <= x <= [math.MaxInt64], the result is [Exact] if x is\nan integer, and [Above] (x < 0) or [Below] (x > 0) otherwise.\nThe result is ([math.MinInt64], [Above]) for x < [math.MinInt64],\nand ([math.MaxInt64], [Below]) for x > [math.MaxInt64].\n" [^{:tag (* Float)} x] :results [int64 Accuracy]
+  (when debugFloat
+    (.validate x))
+
+
+  (switch (.-form x)
+    (case [finite]
+      ;; 0 < |x| < +Inf
+      (let [acc (makeAcc (.-neg x))]
+        (when (<= (.-exp x) 0)
+          ;; 0 < |x| < 1
+          (return 0 acc))
+
+        ;; x.exp > 0
+
+        ;; 1 <= |x| < +Inf
+        (when (<= (.-exp x) 63)
+          ;; i = trunc(x) fits into an int64 (excluding math.MinInt64)
+          (let [i (conv int64 (>> (msb64 (.-mant x)) (- 64 (conv uint32 (.-exp x)))))]
+            (when (.-neg x)
+              (set! i (- i)))
+
+            (when (<= (.MinPrec x) (conv uint (.-exp x)))
+              (return i Exact))
+
+            (return i acc))) ; x truncated
+
+        (when (.-neg x)
+          ;; check for special case x == math.MinInt64 (i.e., x == -(0.5 << 64))
+          (when (and (== (.-exp x) 64) (== (.MinPrec x) 1))
+            (set! acc Exact))
+
+          (return math/MinInt64 acc))
+
+        ;; x too large
+        (return math/MaxInt64 Below)))
+
+    (case [zero]
+      (return 0 Exact))
+
+    (case [inf]
+      (when (.-neg x)
+        (return math/MinInt64 Above))
+
+      (return math/MaxInt64 Below)))
+
+
+  (panic "unreachable"))
+
+
+
+
+
+
+
+^{:go/end 954} (go/method Float32 "Float32 returns the float32 value nearest to x. If x is too small to be\nrepresented by a float32 (|x| < [math.SmallestNonzeroFloat32]), the result\nis (0, [Below]) or (-0, [Above]), respectively, depending on the sign of x.\nIf x is too large to be represented by a float32 (|x| > [math.MaxFloat32]),\nthe result is (+Inf, [Above]) or (-Inf, [Below]), depending on the sign of x.\n" [^{:tag (* Float)} x] :results [float32 Accuracy]
+  (when debugFloat
+    (.validate x))
+
+
+  (switch (.-form x)
+    (case [finite]
+      ;; 0 < |x| < +Inf
+
+      (let [
+          ^:const ^{:line 851 :val 32} fbits 32 ;        float size
+          ^:const ^:go/grouped ^{:line 852 :val 23} mbits 23 ;        mantissa size (excluding implicit msb)
+          ^:const ^:go/grouped ^{:line 853 :val 8} ebits (- fbits mbits 1) ;     8  exponent size
+          ^:const ^:go/grouped ^{:line 854 :val 127} bias (- (<< 1 (- ebits 1)) 1) ;   127  exponent bias
+          ^:const ^:go/grouped ^{:line 855 :val -149} dmin (- 1 bias mbits) ;  -149  smallest unbiased exponent (denormal)
+          ^:const ^:go/grouped ^{:line 856 :val -126} emin (- 1 bias) ;  -126  smallest unbiased exponent (normal)
+          ^:const ^:go/grouped ^{:line 857 :val 127} emax bias ;   127  largest unbiased exponent (normal)
+
+
+          ;; Float mantissa m is 0.5 <= m < 1.0; compute exponent e for float32 mantissa.
+          ^{:line 861} e (- (.-exp x) 1) ; exponent for normal mantissa m with 1.0 <= m < 2.0
+
+          ;; Compute precision p for float32 mantissa.
+          ;; If the exponent is too small, we have a denormal number before
+          ;; rounding and fewer than p mantissa bits of precision available
+          ;; (the exponent remains fixed but the mantissa gets shifted right).
+          ^{:line 867} p (+ mbits 1)] ; precision of normal float
+        (when (< e emin)
+          ;; recompute precision
+          (set! p (+ (- (+ mbits 1) emin) (conv int e)))
+          ;; If p == 0, the mantissa of x is shifted so much to the right
+          ;; that its msb falls immediately to the right of the float32
+          ;; mantissa space. In other words, if the smallest denormal is
+          ;; considered "1.0", for p == 0, the mantissa value m is >= 0.5.
+          ;; If m > 0.5, it is rounded up to 1.0; i.e., the smallest denormal.
+          ;; If m == 0.5, it is rounded down to even, i.e., 0.0.
+          ;; If p < 0, the mantissa value m is <= "0.25" which is never rounded up.
+          (when (or (< p 0) (and (== p 0) (== (.sticky (.-mant x) (- (* (conv uint (len (.-mant x))) _W) 1)) 0))) ; /* m <= 0.25 */ ; /* m == 0.5 */
+            ;; underflow to ±0
+            (when (.-neg x)
+              (let [^float32 z (zero float32)]
+                (return (- z) Above)))
+
+            (return 0.0 Below))
+
+          ;; otherwise, round up
+          ;; We handle p == 0 explicitly because it's easy and because
+          ;; Float.round doesn't support rounding to 0 bits of precision.
+          (when (== p 0)
+            (when (.-neg x)
+              (return (- math/SmallestNonzeroFloat32) Below))
+
+            (return math/SmallestNonzeroFloat32 Above)))
+
+
+        ;; p > 0
+
+        ;; round
+        (let [^Float r (zero Float)]
+          (set! (.-prec r) (conv uint32 p))
+          (.Set r x)
+          (set! e (- (.-exp r) 1))
+
+          ;; Rounding may have caused r to overflow to ±Inf
+          ;; (rounding never causes underflows to 0).
+          ;; If the exponent is too large, also overflow to ±Inf.
+          (when (or (== (.-form r) inf) (> e emax))
+            ;; overflow
+            (when (.-neg x)
+              (return (conv float32 (math/Inf -1)) Below))
+
+            (return (conv float32 (math/Inf (+ 1))) Above))
+
+          ;; e <= emax
+
+          ;; Determine sign, biased exponent, and mantissa.
+          (let [(values ^uint32 sign ^uint32 bexp ^uint32 mant) (zero uint32)]
+            (when (.-neg x)
+              (set! sign (<< 1 (- fbits 1))))
+
+
+            ;; Rounding may have caused a denormal number to
+            ;; become normal. Check again.
+            (if (< e emin) (do
+                ;; denormal number: recompute precision
+                ;; Since rounding may have at best increased precision
+                ;; and we have eliminated p <= 0 early, we know p > 0.
+                ;; bexp == 0 for denormals
+                (set! p (+ (- (+ mbits 1) emin) (conv int e)))
+                (set! mant (>> (msb32 (.-mant r)) (conv uint (- fbits p)))))
+              (do
+                ;; normal number: emin <= e <= emax
+                (set! bexp (<< (conv uint32 (+ e bias)) mbits))
+                (set! mant (bit-and (>> (msb32 (.-mant r)) ebits) (- (<< 1 mbits) 1))))) ; cut off msb (implicit 1 bit)
+
+
+            (return (math/Float32frombits (bit-or sign bexp mant)) (.-acc r))))))
+
+    (case [zero]
+      (when (.-neg x)
+        (let [^float32 z (zero float32)]
+          (return (- z) Exact)))
+
+      (return 0.0 Exact))
+
+    (case [inf]
+      (when (.-neg x)
+        (return (conv float32 (math/Inf -1)) Exact))
+
+      (return (conv float32 (math/Inf (+ 1))) Exact)))
+
+
+  (panic "unreachable"))
+
+
+
+
+
+
+
+^{:go/end 1074} (go/method Float64 "Float64 returns the float64 value nearest to x. If x is too small to be\nrepresented by a float64 (|x| < [math.SmallestNonzeroFloat64]), the result\nis (0, [Below]) or (-0, [Above]), respectively, depending on the sign of x.\nIf x is too large to be represented by a float64 (|x| > [math.MaxFloat64]),\nthe result is (+Inf, [Above]) or (-Inf, [Below]), depending on the sign of x.\n" [^{:tag (* Float)} x] :results [float64 Accuracy]
+  (when debugFloat
+    (.validate x))
+
+
+  (switch (.-form x)
+    (case [finite]
+      ;; 0 < |x| < +Inf
+
+      (let [
+          ^:const ^{:line 971 :val 64} fbits 64 ;        float size
+          ^:const ^:go/grouped ^{:line 972 :val 52} mbits 52 ;        mantissa size (excluding implicit msb)
+          ^:const ^:go/grouped ^{:line 973 :val 11} ebits (- fbits mbits 1) ;    11  exponent size
+          ^:const ^:go/grouped ^{:line 974 :val 1023} bias (- (<< 1 (- ebits 1)) 1) ;  1023  exponent bias
+          ^:const ^:go/grouped ^{:line 975 :val -1074} dmin (- 1 bias mbits) ; -1074  smallest unbiased exponent (denormal)
+          ^:const ^:go/grouped ^{:line 976 :val -1022} emin (- 1 bias) ; -1022  smallest unbiased exponent (normal)
+          ^:const ^:go/grouped ^{:line 977 :val 1023} emax bias ;  1023  largest unbiased exponent (normal)
+
+
+          ;; Float mantissa m is 0.5 <= m < 1.0; compute exponent e for float64 mantissa.
+          ^{:line 981} e (- (.-exp x) 1) ; exponent for normal mantissa m with 1.0 <= m < 2.0
+
+          ;; Compute precision p for float64 mantissa.
+          ;; If the exponent is too small, we have a denormal number before
+          ;; rounding and fewer than p mantissa bits of precision available
+          ;; (the exponent remains fixed but the mantissa gets shifted right).
+          ^{:line 987} p (+ mbits 1)] ; precision of normal float
+        (when (< e emin)
+          ;; recompute precision
+          (set! p (+ (- (+ mbits 1) emin) (conv int e)))
+          ;; If p == 0, the mantissa of x is shifted so much to the right
+          ;; that its msb falls immediately to the right of the float64
+          ;; mantissa space. In other words, if the smallest denormal is
+          ;; considered "1.0", for p == 0, the mantissa value m is >= 0.5.
+          ;; If m > 0.5, it is rounded up to 1.0; i.e., the smallest denormal.
+          ;; If m == 0.5, it is rounded down to even, i.e., 0.0.
+          ;; If p < 0, the mantissa value m is <= "0.25" which is never rounded up.
+          (when (or (< p 0) (and (== p 0) (== (.sticky (.-mant x) (- (* (conv uint (len (.-mant x))) _W) 1)) 0))) ; /* m <= 0.25 */ ; /* m == 0.5 */
+            ;; underflow to ±0
+            (when (.-neg x)
+              (let [^float64 z (zero float64)]
+                (return (- z) Above)))
+
+            (return 0.0 Below))
+
+          ;; otherwise, round up
+          ;; We handle p == 0 explicitly because it's easy and because
+          ;; Float.round doesn't support rounding to 0 bits of precision.
+          (when (== p 0)
+            (when (.-neg x)
+              (return (- math/SmallestNonzeroFloat64) Below))
+
+            (return math/SmallestNonzeroFloat64 Above)))
+
+
+        ;; p > 0
+
+        ;; round
+        (let [^Float r (zero Float)]
+          (set! (.-prec r) (conv uint32 p))
+          (.Set r x)
+          (set! e (- (.-exp r) 1))
+
+          ;; Rounding may have caused r to overflow to ±Inf
+          ;; (rounding never causes underflows to 0).
+          ;; If the exponent is too large, also overflow to ±Inf.
+          (when (or (== (.-form r) inf) (> e emax))
+            ;; overflow
+            (when (.-neg x)
+              (return (math/Inf -1) Below))
+
+            (return (math/Inf (+ 1)) Above))
+
+          ;; e <= emax
+
+          ;; Determine sign, biased exponent, and mantissa.
+          (let [(values ^uint64 sign ^uint64 bexp ^uint64 mant) (zero uint64)]
+            (when (.-neg x)
+              (set! sign (<< 1 (- fbits 1))))
+
+
+            ;; Rounding may have caused a denormal number to
+            ;; become normal. Check again.
+            (if (< e emin) (do
+                ;; denormal number: recompute precision
+                ;; Since rounding may have at best increased precision
+                ;; and we have eliminated p <= 0 early, we know p > 0.
+                ;; bexp == 0 for denormals
+                (set! p (+ (- (+ mbits 1) emin) (conv int e)))
+                (set! mant (>> (msb64 (.-mant r)) (conv uint (- fbits p)))))
+              (do
+                ;; normal number: emin <= e <= emax
+                (set! bexp (<< (conv uint64 (+ e bias)) mbits))
+                (set! mant (bit-and (>> (msb64 (.-mant r)) ebits) (- (<< 1 mbits) 1))))) ; cut off msb (implicit 1 bit)
+
+
+            (return (math/Float64frombits (bit-or sign bexp mant)) (.-acc r))))))
+
+    (case [zero]
+      (when (.-neg x)
+        (let [^float64 z (zero float64)]
+          (return (- z) Exact)))
+
+      (return 0.0 Exact))
+
+    (case [inf]
+      (when (.-neg x)
+        (return (math/Inf -1) Exact))
+
+      (return (math/Inf (+ 1)) Exact)))
+
+
+  (panic "unreachable"))
+
+
+
+
+
+
+
+
+^{:go/end 1131} (go/method Int "Int returns the result of truncating x towards zero;\nor nil if x is an infinity.\nThe result is [Exact] if x.IsInt(); otherwise it is [Below]\nfor x > 0, and [Above] for x < 0.\nIf a non-nil *[Int] argument z is provided, [Int] stores\nthe result in z instead of allocating a new [Int].\n" [^{:tag (* Float)} x ^{:tag (* Int)} z] :results [(* Int) Accuracy]
+  (when debugFloat
+    (.validate x))
+
+
+  (when (and (== z nil) (<= (.-form x) finite))
+    (set! z (new Int)))
+
+
+  (switch (.-form x)
+    (case [finite]
+      ;; 0 < |x| < +Inf
+      (let [acc (makeAcc (.-neg x))]
+        (when (<= (.-exp x) 0)
+          ;; 0 < |x| < 1
+          (return (.SetInt64 z 0) acc))
+
+        ;; x.exp > 0
+
+        ;; 1 <= |x| < +Inf
+        ;; determine minimum required precision for x
+        (let [allBits (* (conv uint (len (.-mant x))) _W)
+            ^{:line 1104} exp (conv uint (.-exp x))]
+          (when (<= (.MinPrec x) exp)
+            (set! acc Exact))
+
+          ;; shift mantissa as needed
+          (when (== z nil)
+            (set! z (new Int)))
+
+          (set! (.-neg z) (.-neg x))
+          (switch
+            (case [(> exp allBits)]
+              (set! (.-abs z) (.lsh (.-abs z) (.-mant x) (- exp allBits))))
+            (default
+              (set! (.-abs z) (.set (.-abs z) (.-mant x))))
+            (case [(< exp allBits)]
+              (set! (.-abs z) (.rsh (.-abs z) (.-mant x) (- allBits exp)))))
+
+          (return z acc))))
+
+    (case [zero]
+      (return (.SetInt64 z 0) Exact))
+
+    (case [inf]
+      (return nil (makeAcc (.-neg x)))))
+
+
+  (panic "unreachable"))
+
+
+
+
+
+
+
+^{:go/end 1178} (go/method Rat "Rat returns the rational number corresponding to x;\nor nil if x is an infinity.\nThe result is [Exact] if x is not an Inf.\nIf a non-nil *[Rat] argument z is provided, [Rat] stores\nthe result in z instead of allocating a new [Rat].\n" [^{:tag (* Float)} x ^{:tag (* Rat)} z] :results [(* Rat) Accuracy]
+  (when debugFloat
+    (.validate x))
+
+
+  (when (and (== z nil) (<= (.-form x) finite))
+    (set! z (new Rat)))
+
+
+  (switch (.-form x)
+    (case [finite]
+      ;; 0 < |x| < +Inf
+      (let [allBits (* (conv int32 (len (.-mant x))) _W)]
+        ;; build up numerator and denominator
+        (set! (.-neg (.-a z)) (.-neg x))
+        (switch
+          (case [(> (.-exp x) allBits)]
+            (set! (.-abs (.-a z)) (.lsh (.-abs (.-a z)) (.-mant x) (conv uint (- (.-exp x) allBits))))
+            (set! (.-abs (.-b z)) (subslice (.-abs (.-b z)) _ 0))) ; == 1 (see Rat)
+          ;; z already in normal form
+          (default
+            (set! (.-abs (.-a z)) (.set (.-abs (.-a z)) (.-mant x)))
+            (set! (.-abs (.-b z)) (subslice (.-abs (.-b z)) _ 0))) ; == 1 (see Rat)
+          ;; z already in normal form
+          (case [(< (.-exp x) allBits)]
+            (set! (.-abs (.-a z)) (.set (.-abs (.-a z)) (.-mant x)))
+            (let [t (.setUint64 (.-abs (.-b z)) 1)]
+              (set! (.-abs (.-b z)) (.lsh t t (conv uint (- allBits (.-exp x)))))
+              (.norm z))))
+
+        (return z Exact)))
+
+    (case [zero]
+      (return (.SetInt64 z 0) Exact))
+
+    (case [inf]
+      (return nil (makeAcc (.-neg x)))))
+
+
+  (panic "unreachable"))
+
+
+
+
+^{:go/end 1186} (go/method Abs "Abs sets z to the (possibly rounded) value |x| (the absolute value of x)\nand returns z.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^{:tag (* Float)} x]
+  (.Set z x)
+  (set! (.-neg z) false)
+  ^{:line 1185} z)
+
+
+
+
+^{:go/end 1194} (go/method Neg "Neg sets z to the (possibly rounded) value of x with its sign negated,\nand returns z.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^{:tag (* Float)} x]
+  (.Set z x)
+  (set! (.-neg z) (not (.-neg z)))
+  ^{:line 1193} z)
+
+
+^{:go/end 1207} (go/func validateBinaryOperands [^{:tag (* Float)} x ^{:tag (* Float)} y]
+  (when (not debugFloat)
+    ;; avoid performance bugs
+    (panic "validateBinaryOperands called but debugFloat is not set"))
+
+  (when (== (len (.-mant x)) 0)
+    (panic "empty mantissa for x"))
+
+  (when (== (len (.-mant y)) 0)
+    (panic "empty mantissa for y")))
+
+
+
+
+
+
+^{:go/end 1261} (go/method uadd "z = x + y, ignoring signs of x and y for the addition\nbut using the sign of z for rounding the result.\nx and y must have a non-empty mantissa and valid exponent.\n" [^{:tag (* Float)} z ^{:tag (* Float)} x ^{:tag (* Float)} y]
+  ;; Note: This implementation requires 2 shifts most of the
+  ;; time. It is also inefficient if exponents or precisions
+  ;; differ by wide margins. The following article describes
+  ;; an efficient (but much more complicated) implementation
+  ;; compatible with the internal representation used here:
+  ;;
+  ;; Vincent Lefèvre: "The Generic Multiple-Precision Floating-
+  ;; Point Addition With Exact Rounding (as in the MPFR Library)"
+  ;; http://www.vinc17.net/research/papers/rnc6.pdf
+
+  (when debugFloat
+    (validateBinaryOperands x y))
+
+
+  ;; compute exponents ex, ey for mantissa with "binary point"
+  ;; on the right (mantissa.0) - use int64 to avoid overflow
+  (let [ex (- (conv int64 (.-exp x)) (* (conv int64 (len (.-mant x))) _W))
+      ^{:line 1230} ey (- (conv int64 (.-exp y)) (* (conv int64 (len (.-mant y))) _W))
+
+      ^{:line 1232} al (or (alias (.-mant z) (.-mant x)) (alias (.-mant z) (.-mant y)))]
+
+    ;; TODO(gri) having a combined add-and-shift primitive
+    ;;           could make this code significantly faster
+    (switch
+      (case [(< ex ey)]
+        (if al
+          (let [t (.lsh (conv nat nil) (.-mant y) (conv uint (- ey ex)))]
+            (set! (.-mant z) (.add (.-mant z) (.-mant x) t)))
+          (do
+            (set! (.-mant z) (.lsh (.-mant z) (.-mant y) (conv uint (- ey ex))))
+            (set! (.-mant z) (.add (.-mant z) (.-mant x) (.-mant z))))))
+
+      (default
+        ;; ex == ey, no shift needed
+        (set! (.-mant z) (.add (.-mant z) (.-mant x) (.-mant y))))
+      (case [(> ex ey)]
+        (if al
+          (let [t (.lsh (conv nat nil) (.-mant x) (conv uint (- ex ey)))]
+            (set! (.-mant z) (.add (.-mant z) t (.-mant y))))
+          (do
+            (set! (.-mant z) (.lsh (.-mant z) (.-mant x) (conv uint (- ex ey))))
+            (set! (.-mant z) (.add (.-mant z) (.-mant z) (.-mant y)))))
+
+        (set! ex ey)))
+
+    ;; len(z.mant) > 0
+
+    (.setExpAndRound z (- (+ ex (* (conv int64 (len (.-mant z))) _W)) (fnorm (.-mant z))) 0)))
+
+
+
+
+
+^{:go/end 1314} (go/method usub "z = x - y for |x| > |y|, ignoring signs of x and y for the subtraction\nbut using the sign of z for rounding the result.\nx and y must have a non-empty mantissa and valid exponent.\n" [^{:tag (* Float)} z ^{:tag (* Float)} x ^{:tag (* Float)} y]
+  ;; This code is symmetric to uadd.
+  ;; We have not factored the common code out because
+  ;; eventually uadd (and usub) should be optimized
+  ;; by special-casing, and the code will diverge.
+
+  (when debugFloat
+    (validateBinaryOperands x y))
+
+
+  (let [ex (- (conv int64 (.-exp x)) (* (conv int64 (len (.-mant x))) _W))
+      ^{:line 1277} ey (- (conv int64 (.-exp y)) (* (conv int64 (len (.-mant y))) _W))
+
+      ^{:line 1279} al (or (alias (.-mant z) (.-mant x)) (alias (.-mant z) (.-mant y)))]
+
+    (switch
+      (case [(< ex ey)]
+        (if al
+          (let [t (.lsh (conv nat nil) (.-mant y) (conv uint (- ey ex)))]
+            (set! (.-mant z) (.sub t (.-mant x) t)))
+          (do
+            (set! (.-mant z) (.lsh (.-mant z) (.-mant y) (conv uint (- ey ex))))
+            (set! (.-mant z) (.sub (.-mant z) (.-mant x) (.-mant z))))))
+
+      (default
+        ;; ex == ey, no shift needed
+        (set! (.-mant z) (.sub (.-mant z) (.-mant x) (.-mant y))))
+      (case [(> ex ey)]
+        (if al
+          (let [t (.lsh (conv nat nil) (.-mant x) (conv uint (- ex ey)))]
+            (set! (.-mant z) (.sub t t (.-mant y))))
+          (do
+            (set! (.-mant z) (.lsh (.-mant z) (.-mant x) (conv uint (- ex ey))))
+            (set! (.-mant z) (.sub (.-mant z) (.-mant z) (.-mant y)))))
+
+        (set! ex ey)))
+
+
+    ;; operands may have canceled each other out
+    (when (== (len (.-mant z)) 0)
+      (set! (.-acc z) Exact)
+      (set! (.-form z) zero)
+      (set! (.-neg z) false)
+      (return))
+
+    ;; len(z.mant) > 0
+
+    (.setExpAndRound z (- (+ ex (* (conv int64 (len (.-mant z))) _W)) (fnorm (.-mant z))) 0)))
+
+
+
+
+
+^{:go/end 1337} (go/method umul "z = x * y, ignoring signs of x and y for the multiplication\nbut using the sign of z for rounding the result.\nx and y must have a non-empty mantissa and valid exponent.\n" [^{:tag (* Float)} z ^{:tag (* Float)} x ^{:tag (* Float)} y]
+  (when debugFloat
+    (validateBinaryOperands x y))
+
+
+  ;; Note: This is doing too much work if the precision
+  ;; of z is less than the sum of the precisions of x
+  ;; and y which is often the case (e.g., if all floats
+  ;; have the same precision).
+  ;; TODO(gri) Optimize this for the common case.
+
+  (let [e (+ (conv int64 (.-exp x)) (conv int64 (.-exp y)))]
+    (if (== x y)
+      (set! (.-mant z) (.sqr (.-mant z) nil (.-mant x)))
+
+      (set! (.-mant z) (.mul (.-mant z) nil (.-mant x) (.-mant y))))
+
+    (.setExpAndRound z (- e (fnorm (.-mant z))) 0)))
+
+
+
+
+
+^{:go/end 1384} (go/method uquo "z = x / y, ignoring signs of x and y for the division\nbut using the sign of z for rounding the result.\nx and y must have a non-empty mantissa and valid exponent.\n" [^{:tag (* Float)} z ^{:tag (* Float)} x ^{:tag (* Float)} y]
+  (when debugFloat
+    (validateBinaryOperands x y))
+
+
+  ;; mantissa length in words for desired result precision + 1
+  ;; (at least one extra bit so we get the rounding bit after
+  ;; the division)
+  (let [n (+ (conv int (/ (.-prec z) _W)) 1)
+
+      ;; compute adjusted x.mant such that we get enough result precision
+      ^{:line 1353} xadj (.-mant x)]
+    (when [d (+ (- n (len (.-mant x))) (len (.-mant y)))] (> d 0)
+      ;; d extra words needed => add d "0 digits" to x
+      (set! xadj (make nat (+ (len (.-mant x)) d)))
+      (copy (subslice xadj d) (.-mant x)))
+
+    ;; TODO(gri): If we have too many digits (d < 0), we should be able
+    ;; to shorten x for faster division. But we must be extra careful
+    ;; with rounding in that case.
+
+    ;; Compute d before division since there may be aliasing of x.mant
+    ;; (via xadj) or y.mant with z.mant.
+    (let [d (- (len xadj) (len (.-mant y)))
+
+        ;; divide
+        ^{:line 1368} stk (getStack)]
+      (defer (.free stk))
+      (let [^nat r (zero nat)]
+        (set! (values (.-mant z) r) (.div (.-mant z) stk nil xadj (.-mant y)))
+        (let [e (- (conv int64 (.-exp x)) (conv int64 (.-exp y)) (* (conv int64 (- d (len (.-mant z)))) _W))
+
+            ;; The result is long enough to include (at least) the rounding bit.
+            ;; If there's a non-zero remainder, the corresponding fractional part
+            ;; (if it were computed), would have a non-zero sticky bit (if it were
+            ;; zero, it couldn't have a non-zero remainder).
+            ^{:line 1378 :tag uint} sbit (zero uint)]
+          (when (> (len r) 0)
+            (set! sbit 1))
+
+
+          (.setExpAndRound z (- e (fnorm (.-mant z))) sbit))))))
+
+
+
+
+
+^{:go/end 1424} (go/method ucmp "ucmp returns -1, 0, or +1, depending on whether\n|x| < |y|, |x| == |y|, or |x| > |y|.\nx and y must have a non-empty mantissa and valid exponent.\n" ^int [^{:tag (* Float)} x ^{:tag (* Float)} y]
+  (when debugFloat
+    (validateBinaryOperands x y))
+
+
+  (switch
+    (case [(< (.-exp x) (.-exp y))]
+      (return -1))
+    (case [(> (.-exp x) (.-exp y))]
+      (return (+ 1))))
+
+  ;; x.exp == y.exp
+
+  ;; compare mantissas
+  ^{:go/breaks [[3 1423]]} (let [i (len (.-mant x))
+      ^{:line 1404} j (len (.-mant y))]
+    (while (or (> i 0) (> j 0))
+      (let [(values ^Word xm ^Word ym) (zero Word)]
+        (when (> i 0)
+          (dec! i)
+          (set! xm (aget (.-mant x) i)))
+
+        (when (> j 0)
+          (dec! j)
+          (set! ym (aget (.-mant y) j)))
+
+        (switch
+          (case [(< xm ym)]
+            (return -1))
+          (case [(> xm ym)]
+            (return (+ 1))))))
+
+
+
+    0))
+
+
+;; Handling of sign bit as defined by IEEE 754-2008, section 6.3:
+;;
+;; When neither the inputs nor result are NaN, the sign of a product or
+;; quotient is the exclusive OR of the operands’ signs; the sign of a sum,
+;; or of a difference x−y regarded as a sum x+(−y), differs from at most
+;; one of the addends’ signs; and the sign of the result of conversions,
+;; the quantize operation, the roundToIntegral operations, and the
+;; roundToIntegralExact (see 5.3.1) is the sign of the first or only operand.
+;; These rules shall apply even when operands or results are zero or infinite.
+;;
+;; When the sum of two operands with opposite signs (or the difference of
+;; two operands with like signs) is exactly zero, the sign of that sum (or
+;; difference) shall be +0 in all rounding-direction attributes except
+;; roundTowardNegative; under that attribute, the sign of an exact zero
+;; sum (or difference) shall be −0. However, x+x = x−(−x) retains the same
+;; sign as x even when x is zero.
+;;
+;; See also: https://play.golang.org/p/RtH3UCt5IH
+
+
+
+
+
+
+
+^{:go/end 1519} (go/method Add "Add sets z to the rounded sum x+y and returns z. If z's precision is 0,\nit is changed to the larger of x's or y's precision before the operation.\nRounding is performed according to z's precision and rounding mode; and\nz's accuracy reports the result error relative to the exact (not rounded)\nresult. Add panics with [ErrNaN] if x and y are infinities with opposite\nsigns. The value of z is undefined in that case.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^{:tag (* Float)} x ^{:tag (* Float)} y]
+  (when debugFloat
+    (.validate x)
+    (.validate y))
+
+
+  (when (== (.-prec z) 0)
+    (set! (.-prec z) (max (.-prec x) (.-prec y))))
+
+
+  (when (and (== (.-form x) finite) (== (.-form y) finite))
+    ;; x + y (common case)
+
+    ;; Below we set z.neg = x.neg, and when z aliases y this will
+    ;; change the y operand's sign. This is fine, because if an
+    ;; operand aliases the receiver it'll be overwritten, but we still
+    ;; want the original x.neg and y.neg values when we evaluate
+    ;; x.neg != y.neg, so we need to save y.neg before setting z.neg.
+    (let [yneg (.-neg y)]
+
+      (set! (.-neg z) (.-neg x))
+      (if (== (.-neg x) yneg)
+        ;; x + y == x + y
+        ;; (-x) + (-y) == -(x + y)
+        (.uadd z x y)
+        (do
+          ;; x + (-y) == x - y == -(y - x)
+          ;; (-x) + y == y - x == -(x - y)
+          (if (> (.ucmp x y) 0)
+            (.usub z x y)
+            (do
+              (set! (.-neg z) (not (.-neg z)))
+              (.usub z y x)))))
+
+
+      (when (and (== (.-form z) zero) (== (.-mode z) ToNegativeInf) (== (.-acc z) Exact))
+        (set! (.-neg z) true))
+
+      (return z)))
+
+
+  (when (and (== (.-form x) inf) (== (.-form y) inf) (!= (.-neg x) (.-neg y)))
+    ;; +Inf + -Inf
+    ;; -Inf + +Inf
+    ;; value of z is undefined but make sure it's valid
+    (set! (.-acc z) Exact)
+    (set! (.-form z) zero)
+    (set! (.-neg z) false)
+    (panic (lit ErrNaN "addition of infinities with opposite signs")))
+
+
+  (when (and (== (.-form x) zero) (== (.-form y) zero))
+    ;; ±0 + ±0
+    (set! (.-acc z) Exact)
+    (set! (.-form z) zero)
+    (set! (.-neg z) (and (.-neg x) (.-neg y))) ; -0 + -0 == -0
+    (return z))
+
+
+  (when (or (== (.-form x) inf) (== (.-form y) zero))
+    ;; ±Inf + y
+    ;; x + ±0
+    (return (.Set z x)))
+
+
+  ;; ±0 + y
+  ;; x + ±Inf
+  (.Set z y))
+
+
+
+
+
+
+^{:go/end 1586} (go/method Sub "Sub sets z to the rounded difference x-y and returns z.\nPrecision, rounding, and accuracy reporting are as for [Float.Add].\nSub panics with [ErrNaN] if x and y are infinities with equal\nsigns. The value of z is undefined in that case.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^{:tag (* Float)} x ^{:tag (* Float)} y]
+  (when debugFloat
+    (.validate x)
+    (.validate y))
+
+
+  (when (== (.-prec z) 0)
+    (set! (.-prec z) (max (.-prec x) (.-prec y))))
+
+
+  (when (and (== (.-form x) finite) (== (.-form y) finite))
+    ;; x - y (common case)
+    (let [yneg (.-neg y)]
+      (set! (.-neg z) (.-neg x))
+      (if (!= (.-neg x) yneg)
+        ;; x - (-y) == x + y
+        ;; (-x) - y == -(x + y)
+        (.uadd z x y)
+        (do
+          ;; x - y == x - y == -(y - x)
+          ;; (-x) - (-y) == y - x == -(x - y)
+          (if (> (.ucmp x y) 0)
+            (.usub z x y)
+            (do
+              (set! (.-neg z) (not (.-neg z)))
+              (.usub z y x)))))
+
+
+      (when (and (== (.-form z) zero) (== (.-mode z) ToNegativeInf) (== (.-acc z) Exact))
+        (set! (.-neg z) true))
+
+      (return z)))
+
+
+  (when (and (== (.-form x) inf) (== (.-form y) inf) (== (.-neg x) (.-neg y)))
+    ;; +Inf - +Inf
+    ;; -Inf - -Inf
+    ;; value of z is undefined but make sure it's valid
+    (set! (.-acc z) Exact)
+    (set! (.-form z) zero)
+    (set! (.-neg z) false)
+    (panic (lit ErrNaN "subtraction of infinities with equal signs")))
+
+
+  (when (and (== (.-form x) zero) (== (.-form y) zero))
+    ;; ±0 - ±0
+    (set! (.-acc z) Exact)
+    (set! (.-form z) zero)
+    (set! (.-neg z) (and (.-neg x) (not (.-neg y)))) ; -0 - +0 == -0
+    (return z))
+
+
+  (when (or (== (.-form x) inf) (== (.-form y) zero))
+    ;; ±Inf - y
+    ;; x - ±0
+    (return (.Set z x)))
+
+
+  ;; ±0 - y
+  ;; x - ±Inf
+  (.Neg z y))
+
+
+
+
+
+
+^{:go/end 1631} (go/method Mul "Mul sets z to the rounded product x*y and returns z.\nPrecision, rounding, and accuracy reporting are as for [Float.Add].\nMul panics with [ErrNaN] if one operand is zero and the other\noperand an infinity. The value of z is undefined in that case.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^{:tag (* Float)} x ^{:tag (* Float)} y]
+  (when debugFloat
+    (.validate x)
+    (.validate y))
+
+
+  (when (== (.-prec z) 0)
+    (set! (.-prec z) (max (.-prec x) (.-prec y))))
+
+
+  (set! (.-neg z) (!= (.-neg x) (.-neg y)))
+
+  (when (and (== (.-form x) finite) (== (.-form y) finite))
+    ;; x * y (common case)
+    (.umul z x y)
+    (return z))
+
+
+  (set! (.-acc z) Exact)
+  (when (or (and (== (.-form x) zero) (== (.-form y) inf)) (and (== (.-form x) inf) (== (.-form y) zero)))
+    ;; ±0 * ±Inf
+    ;; ±Inf * ±0
+    ;; value of z is undefined but make sure it's valid
+    (set! (.-form z) zero)
+    (set! (.-neg z) false)
+    (panic (lit ErrNaN "multiplication of zero with infinity")))
+
+
+  (when (or (== (.-form x) inf) (== (.-form y) inf))
+    ;; ±Inf * y
+    ;; x * ±Inf
+    (set! (.-form z) inf)
+    (return z))
+
+
+  ;; ±0 * y
+  ;; x * ±0
+  (set! (.-form z) zero)
+  ^{:line 1630} z)
+
+
+
+
+
+
+^{:go/end 1676} (go/method Quo "Quo sets z to the rounded quotient x/y and returns z.\nPrecision, rounding, and accuracy reporting are as for [Float.Add].\nQuo panics with [ErrNaN] if both operands are zero or infinities.\nThe value of z is undefined in that case.\n" ^{:tag (* Float)} [^{:tag (* Float)} z ^{:tag (* Float)} x ^{:tag (* Float)} y]
+  (when debugFloat
+    (.validate x)
+    (.validate y))
+
+
+  (when (== (.-prec z) 0)
+    (set! (.-prec z) (max (.-prec x) (.-prec y))))
+
+
+  (set! (.-neg z) (!= (.-neg x) (.-neg y)))
+
+  (when (and (== (.-form x) finite) (== (.-form y) finite))
+    ;; x / y (common case)
+    (.uquo z x y)
+    (return z))
+
+
+  (set! (.-acc z) Exact)
+  (when (or (and (== (.-form x) zero) (== (.-form y) zero)) (and (== (.-form x) inf) (== (.-form y) inf)))
+    ;; ±0 / ±0
+    ;; ±Inf / ±Inf
+    ;; value of z is undefined but make sure it's valid
+    (set! (.-form z) zero)
+    (set! (.-neg z) false)
+    (panic (lit ErrNaN "division of zero by zero or infinity by infinity")))
+
+
+  (when (or (== (.-form x) zero) (== (.-form y) inf))
+    ;; ±0 / y
+    ;; x / ±Inf
+    (set! (.-form z) zero)
+    (return z))
+
+
+  ;; x / ±0
+  ;; ±Inf / y
+  (set! (.-form z) inf)
+  ^{:line 1675} z)
+
+
+
+
+
+
+^{:go/end 1707} (go/method Cmp "Cmp compares x and y and returns:\n  - -1 if x < y;\n  - 0 if x == y (incl. -0 == 0, -Inf == -Inf, and +Inf == +Inf);\n  - +1 if x > y.\n" ^int [^{:tag (* Float)} x ^{:tag (* Float)} y]
+  (when debugFloat
+    (.validate x)
+    (.validate y))
+
+
+  ^{:go/breaks [[4 1706]]} (let [mx (.ord x)
+      ^{:line 1689} my (.ord y)]
+    (switch
+      (case [(< mx my)]
+        (return -1))
+      (case [(> mx my)]
+        (return (+ 1))))
+
+    ;; mx == my
+
+    ;; only if |mx| == 1 we have to compare the mantissae
+    (switch mx
+      (case [-1]
+        (return (.ucmp y x)))
+      (case [(+ 1)]
+        (return (.ucmp x y))))
+
+
+    0))
+
+
+
+
+
+
+
+
+
+^{:go/end 1730} (go/method ord "ord classifies x and returns:\n\n\t-2 if -Inf == x\n\t-1 if -Inf < x < 0\n\t 0 if x == 0 (signed or unsigned)\n\t+1 if 0 < x < +Inf\n\t+2 if x == +Inf\n" ^int [^{:tag (* Float)} x]
+  (let [^int m (zero int)]
+    (switch (.-form x)
+      (case [finite]
+        (set! m 1))
+      (case [zero]
+        (return 0))
+      (case [inf]
+        (set! m 2)))
+
+    (when (.-neg x)
+      (set! m (- m)))
+
+    ^{:line 1729} m))

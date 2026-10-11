@@ -1,0 +1,117 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Simple not-in-heap bump-pointer traceRegion allocator.
+
+(in-ns 'go.runtime) (go/file "traceregion.go" :imports [
+
+
+    ^{:line 10} [atomic "internal/runtime/atomic"]
+    ^{:line 11} [sys "internal/runtime/sys"]
+    ^{:line 12} [unsafe "unsafe"]])
+
+
+
+
+(go/type traceRegionAlloc "traceRegionAlloc is a thread-safe region allocator.\nIt holds a linked list of traceRegionAllocBlock.\n" (struct
+    ^{:line 18 :tag mutex} lock
+    ^{:line 19 :tag atomic/Bool} dropping ; For checking invariants.
+    ^{:line 20 :tag atomic/UnsafePointer} current ; *traceRegionAllocBlock
+    ^{:line 21 :tag (* traceRegionAllocBlock)} full))
+
+
+
+
+
+
+
+(go/type traceRegionAllocBlock "traceRegionAllocBlock is a block in traceRegionAlloc.\n\ntraceRegionAllocBlock is allocated from non-GC'd memory, so it must not\ncontain heap pointers. Writes to pointers to traceRegionAllocBlocks do\nnot need write barriers.\n" (struct
+    ^{:line 30 :tag sys/NotInHeap} _
+    ^{:line 31} traceRegionAllocBlockHeader
+    ^{:line 32 :tag (array traceRegionAllocBlockData byte)} data))
+
+
+(go/type traceRegionAllocBlockHeader (struct
+    ^{:line 36 :tag (* traceRegionAllocBlock)} next
+    ^{:line 37 :tag atomic/Uintptr} off))
+
+
+(go/const ^{:val 65520} traceRegionAllocBlockData (- (<< 64 10) (unsafe/Sizeof (lit traceRegionAllocBlockHeader))))
+
+
+^{:go/end 100} (go/method alloc "alloc allocates n-byte block. The block is always aligned to 8 bytes, regardless of platform.\n" ^{:tag (* notInHeap)} [^{:tag (* traceRegionAlloc)} a ^uintptr n]
+  (set! n (alignUp n 8))
+  (when (> n traceRegionAllocBlockData)
+    (throw "traceRegion: alloc too large"))
+
+  (when (.Load (.-dropping a))
+    (throw "traceRegion: alloc with concurrent drop"))
+
+
+  ;; Try to bump-pointer allocate into the current block.
+  (let [block (conv (* traceRegionAllocBlock) (.Load (.-current a)))]
+    (when (!= block nil)
+      (let [r (.Add ^{:go/via [traceRegionAllocBlockHeader]} (.-off block) n)]
+        (when (<= r (conv uintptr (len (.-data block))))
+          (return (conv (* notInHeap) (conv unsafe/Pointer (addr (aget (.-data block) (- r n)))))))))
+
+
+
+    ;; Try to install a new block.
+    (let [^{:tag (* notInHeap)} x (zero (* notInHeap))]
+      (systemstack ^{:go/end 98} (fn []
+          ;; Acquire a.lock on the systemstack to avoid stack growth
+          ;; and accidentally entering the tracer again.
+          (lock (addr (.-lock a)))
+
+          ;; Check block again under the lock. Someone may
+          ;; have gotten here first.
+          (set! block (conv (* traceRegionAllocBlock) (.Load (.-current a))))
+          (when (!= block nil)
+            (let [r (.Add ^{:go/via [traceRegionAllocBlockHeader]} (.-off block) n)]
+              (when (<= r (conv uintptr (len (.-data block))))
+                (unlock (addr (.-lock a)))
+                (set! x (conv (* notInHeap) (conv unsafe/Pointer (addr (aget (.-data block) (- r n))))))
+                (return))
+
+
+              ;; Add the existing block to the full list.
+              (set! ^{:go/via [traceRegionAllocBlockHeader]} (.-next block) (.-full a))
+              (set! (.-full a) block)))
+
+
+          ;; Allocate a new block.
+          (set! block (conv (* traceRegionAllocBlock) (sysAlloc (unsafe/Sizeof (lit traceRegionAllocBlock)) (addr (.-other_sys memstats)) "trace arena alloc")))
+          (when (== block nil)
+            (throw "traceRegion: out of memory"))
+
+
+          ;; Allocate space for our current request, so we always make
+          ;; progress.
+          (.Store ^{:go/via [traceRegionAllocBlockHeader]} (.-off block) n)
+          (set! x (conv (* notInHeap) (conv unsafe/Pointer (addr (aget (.-data block) 0)))))
+
+          ;; Publish the new block. No write barrier as the memory is off heap.
+          (.StoreNoWB (.-current a) (conv unsafe/Pointer block))
+          (unlock (addr (.-lock a)))))
+
+      ^{:line 99} x)))
+
+
+
+
+
+
+^{:go/end 118} (go/method drop "drop frees all previously allocated memory and resets the allocator.\n\ndrop is not safe to call concurrently with other calls to drop or with calls to alloc. The caller\nmust ensure that it is not possible for anything else to be using the same structure.\n" [^{:tag (* traceRegionAlloc)} a]
+  (.Store (.-dropping a) true)
+  (while (!= (.-full a) nil)
+    (let [block (.-full a)]
+      (set! (.-full a) ^{:go/via [traceRegionAllocBlockHeader]} (.-next block))
+      (sysFree (conv unsafe/Pointer block) (unsafe/Sizeof (lit traceRegionAllocBlock)) (addr (.-other_sys memstats)))))
+
+  (when [current (.Load (.-current a))] (!= current nil)
+    (sysFree current (unsafe/Sizeof (lit traceRegionAllocBlock)) (addr (.-other_sys memstats)))
+    (.StoreNoWB (.-current a) nil))
+
+  (.Store (.-dropping a) false))

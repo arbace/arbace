@@ -1,0 +1,3216 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Transport code.
+
+(in-ns 'go.net.http.internal.http2) (go/file "transport.go" :imports [
+
+
+    ^{:line 10} [bufio "bufio"]
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [flate "compress/flate"]
+    ^{:line 13} [gzip "compress/gzip"]
+    ^{:line 14} [context "context"]
+    ^{:line 15} [rand "crypto/rand"]
+    ^{:line 16} [tls "crypto/tls"]
+    ^{:line 17} [errors "errors"]
+    ^{:line 18} [fmt "fmt"]
+    ^{:line 19} [io "io"]
+    ^{:line 20} [fs "io/fs"]
+    ^{:line 21} [log "log"]
+    ^{:line 22} [math "math"]
+    ^{:line 23} [bits "math/bits"]
+    ^:alias ^{:line 24} [mathrand "math/rand"]
+    ^{:line 25} [net "net"]
+    ^{:line 26} [httptrace "net/http/httptrace"]
+    ^{:line 27} [internal "net/http/internal"]
+    ^{:line 28} [httpcommon "net/http/internal/httpcommon"]
+    ^{:line 29} [textproto "net/textproto"]
+    ^{:line 30} [slices "slices"]
+    ^{:line 31} [strconv "strconv"]
+    ^{:line 32} [strings "strings"]
+    ^{:line 33} [sync "sync"]
+    ^{:line 34} [atomic "sync/atomic"]
+    ^{:line 35} [time "time"]
+
+    ^{:line 37} [httpguts "golang.org/x/net/http/httpguts"]
+    ^{:line 38} [hpack "golang.org/x/net/http2/hpack"]
+    ^{:line 39} [idna "golang.org/x/net/idna"]])
+
+
+(go/const
+
+
+  ^{:line 45} [^{:val 1073741824 :doc "transportDefaultConnFlow is how many connection-level flow control\ntokens we give the server at start-up, past the default 64k.\n"} transportDefaultConnFlow (<< 1 30)]
+
+
+
+
+  ^{:line 50} [^{:val 4194304 :doc "transportDefaultStreamFlow is how many stream-level flow\ncontrol tokens we announce to the peer, and how many bytes\nwe buffer per stream.\n"} transportDefaultStreamFlow (<< 4 20)]
+
+  ^{:line 52} [^{:val "Go-http-client/2.0"} defaultUserAgent "Go-http-client/2.0"]
+
+
+
+
+  ^{:line 57} [^{:val 100 :doc "initialMaxConcurrentStreams is a connections maxConcurrentStreams until\nit's received servers initial SETTINGS frame, which corresponds with the\nspec's minimum recommended value.\n"} initialMaxConcurrentStreams 100]
+
+
+
+  ^{:line 61} [^{:val 1000 :doc "defaultMaxConcurrentStreams is a connections default maxConcurrentStreams\nif the server doesn't include one in its initial SETTINGS frame.\n"} defaultMaxConcurrentStreams 1000])
+
+
+
+
+
+
+(go/type Transport "Transport is an HTTP/2 Transport.\n\nA Transport internally caches connections to servers. It is safe\nfor concurrent use by multiple goroutines.\n" (struct
+    ^{:line 69 :tag TransportConfig} t1
+    ^{:line 70 :tag noDialClientConnPool} connPool
+    (* transportTestHooks)))
+
+
+;; Hook points used for testing.
+;; Outside of tests, t.transportTestHooks is nil and these all have minimal implementations.
+;; Inside tests, see the testSyncHooks function docs.
+
+(go/type transportTestHooks (struct
+    ^{:line 79 :tag (func [(* ClientConn)])} newclientconn))
+
+
+^{:go/end 97} (go/method maxHeaderListSize ^uint32 [^{:tag (* Transport)} t]
+  (let [n (.MaxHeaderListSize (.-t1 t))]
+    (when [b (.MaxResponseHeaderBytes (.-t1 t))] (!= b 0)
+      (set! n b)
+      (when (> n 0)
+        (set! n (adjustHTTP1MaxHeaderSize n))))
+
+
+    (when (<= n 0)
+      (return (<< 10 20)))
+
+    (when (>= n 0xffffffff)
+      (return 0))
+
+    (conv uint32 n)))
+
+
+^{:go/end 101} (go/method disableCompression ^bool [^{:tag (* Transport)} t]
+  (and (!= (.-t1 t) nil) (.DisableCompression (.-t1 t))))
+
+
+^{:go/end 111} (go/func NewTransport ^{:tag (* Transport)} [^TransportConfig t1]
+  (let [connPool (new clientConnPool)
+      ^{:line 105} t2 (addr ^{:go/breaks [2 4]} (lit Transport
+          :connPool (lit noDialClientConnPool connPool)
+          :t1 t1))]
+
+    (set! (.-t connPool) t2)
+    ^{:line 110} t2))
+
+
+^{:go/end 120} (go/method AddConn ^error [^{:tag (* Transport)} t ^string scheme ^string authority ^net/Conn c]
+  (let [addr (authorityAddr scheme authority)
+      (values used err) ^{:go/via [clientConnPool]} (.addConnIfNeeded (.-connPool t) addr t c)]
+    (when (not used)
+      (go (.Close c)))
+
+    ^{:line 119} err))
+
+
+
+
+(go/type unencryptedTransport "unencryptedTransport is a Transport with a RoundTrip method that\nalways permits http:// URLs.\n" Transport)
+
+^{:go/end 128} (go/method RoundTrip [^{:tag (* unencryptedTransport)} t ^{:tag (* ClientRequest)} req] :results [(* ClientResponse) error]
+  (.RoundTripOpt (conv (* Transport) t) req (lit RoundTripOpt)))
+
+
+
+
+(go/type ClientConn "ClientConn is the state of a single HTTP/2 client connection to an\nHTTP/2 server.\n" (struct
+    ^{:line 133 :tag (* Transport)} t
+    ^{:line 134 :tag net/Conn} tconn ; usually *tls.Conn, except specialized impls
+    ^{:line 135 :tag (* tls/ConnectionState)} tlsState ; nil only for specialized impls
+    ^{:line 136 :tag uint32} atomicReused ; whether conn is being reused; atomic
+    ^{:line 137 :tag bool} singleUse ; whether being used for a single http.Request
+    ^{:line 138 :tag bool} getConnCalled ; used by clientConnPool
+
+
+    ^{:line 141 :tag (chan (struct)) :doc "readLoop goroutine fields:\n"} readerDone ; closed on error
+    ^{:line 142 :tag error} readerErr ; set before readerDone is closed
+
+    ^{:line 144 :tag time/Duration} idleTimeout ; or 0 for never
+    ^{:line 145 :tag (* time/Timer)} idleTimer
+
+    ^{:line 147 :tag sync/Mutex} mu ; guards following
+    ^{:line 148 :tag (* sync/Cond)} cond ; hold mu; broadcast on flow/closed changes
+    ^{:line 149 :tag outflow} flow ; our conn-level flow control quota (cs.outflow is per stream)
+    ^{:line 150 :tag inflow} inflow ; peer's conn-level flow control
+    ^{:line 151 :tag bool} doNotReuse ; whether conn is marked to not be reused for any future requests
+    ^{:line 152 :tag bool} closing
+    ^{:line 153 :tag bool} closed
+    ^{:line 154 :tag bool} closedOnIdle ; true if conn was closed for idleness
+    ^{:line 155 :tag bool} seenSettings ; true if we've seen a settings frame, false otherwise
+    ^{:line 156 :tag (chan (struct))} seenSettingsChan ; closed when seenSettings is true or frame reading fails
+    ^{:line 157 :tag bool} wantSettingsAck ; we sent a SETTINGS frame and haven't heard back
+    ^{:line 158 :tag (* GoAwayFrame)} goAway ; if non-nil, the GoAwayFrame we received
+    ^{:line 159 :tag string} goAwayDebug ; goAway frame's debug data, retained as a string
+    ^{:line 160 :tag (map uint32 (* clientStream))} streams ; client-initiated
+    ^{:line 161 :tag int} streamsReserved ; incr by ReserveNewRequest; decr on RoundTrip
+    ^{:line 162 :tag uint32} nextStreamID
+    ^{:line 163 :tag int} pendingRequests ; requests blocked and waiting to be sent because len(streams) == maxConcurrentStreams
+    ^{:line 164 :tag (map (array 8 byte) (chan (struct)))} pings ; in flight ping data to notification channel
+    ^{:line 165 :tag (* bufio/Reader)} br
+    ^{:line 166 :tag time/Time} lastActive
+    ^{:line 167 :tag time/Time} lastIdle ; time last idle
+
+    ^{:line 169 :tag uint32 :doc "Settings from peer: (also guarded by wmu)\n"} maxFrameSize
+    ^{:line 170 :tag uint32} maxConcurrentStreams
+    ^{:line 171 :tag uint64} peerMaxHeaderListSize
+    ^{:line 172 :tag uint32} peerMaxHeaderTableSize
+    ^{:line 173 :tag uint32} initialWindowSize
+    ^{:line 174 :tag int32} initialStreamRecvWindowSize
+    ^{:line 175 :tag time/Duration} readIdleTimeout
+    ^{:line 176 :tag time/Duration} pingTimeout
+    ^{:line 177 :tag bool} extendedConnectAllowed
+    ^{:line 178 :tag bool} strictMaxConcurrentStreams
+
+
+
+
+
+
+
+
+
+    ^{:line 188 :tag bool :doc "rstStreamPingsBlocked works around an unfortunate gRPC behavior.\ngRPC strictly limits the number of PING frames that it will receive.\nThe default is two pings per two hours, but the limit resets every time\nthe gRPC endpoint sends a HEADERS or DATA frame. See golang/go#70575.\n\nrstStreamPingsBlocked is set after receiving a response to a PING frame\nbundled with an RST_STREAM (see pendingResets below), and cleared after\nreceiving a HEADERS or DATA frame.\n"} rstStreamPingsBlocked
+
+
+
+
+
+
+
+    ^{:line 196 :tag int :doc "pendingResets is the number of RST_STREAM frames we have sent to the peer,\nwithout confirming that the peer has received them. When we send a RST_STREAM,\nwe bundle it with a PING frame, unless a PING is already in flight. We count\nthe reset stream against the connection's concurrency limit until we get\na PING response. This limits the number of requests we'll try to send to a\ncompletely unresponsive connection.\n"} pendingResets
+
+
+
+
+
+
+    ^{:line 203 :tag uint32 :doc "readBeforeStreamID is the smallest stream ID that has not been followed by\na frame read from the peer. We use this to determine when a request may\nhave been sent to a completely unresponsive connection:\nIf the request ID is less than readBeforeStreamID, then we have had some\nindication of life on the connection since sending the request.\n"} readBeforeStreamID
+
+
+
+
+    ^{:line 208 :tag (chan (struct)) :doc "reqHeaderMu is a 1-element semaphore channel controlling access to sending new requests.\nWrite to reqHeaderMu to lock it, read from it to unlock.\nLock reqmu BEFORE mu or wmu.\n"} reqHeaderMu
+
+
+
+
+
+    ^{:line 214 :tag (func []) :doc "internalStateHook reports state changes back to the net/http.ClientConn.\nNote that this is different from the user state hook registered by\nnet/http.ClientConn.SetStateHook: The internal hook calls ClientConn,\nwhich calls the user hook.\n"} internalStateHook
+
+
+
+
+    ^{:line 219 :tag sync/Mutex :doc "wmu is held while writing.\nAcquire BEFORE mu when holding both, to avoid blocking mu on network writes.\nOnly acquire both at the same time when changing peer settings.\n"} wmu
+    ^{:line 220 :tag (* bufio/Writer)} bw
+    ^{:line 221 :tag (* Framer)} fr
+    ^{:line 222 :tag error} werr ; first write error that has occurred
+    ^{:line 223 :tag bytes/Buffer} hbuf ; HPACK encoder writes into this
+    ^{:line 224 :tag (* hpack/Encoder)} henc))
+
+
+
+
+(go/type clientStream "clientStream is the state for a single HTTP/2 stream. One of these\nis created for each Transport.RoundTrip call.\n" (struct
+    ^{:line 230 :tag (* ClientConn)} cc
+
+
+    ^{:line 233 :tag context/Context :doc "Fields of Request that we may access even after the response body is closed.\n"} ctx
+    ^{:line 234 :tag (chan :recv (struct))} reqCancel
+
+    ^{:line 236 :tag (* httptrace/ClientTrace)} trace ; or nil
+    ^{:line 237 :tag uint32} ID
+    ^{:line 238 :tag pipe} bufPipe ; buffered pipe with the flow-controlled response payload
+    ^{:line 239 :tag bool} requestedGzip
+    ^{:line 240 :tag bool} isHead
+
+    ^{:line 242 :tag sync/Once} abortOnce
+    ^{:line 243 :tag (chan (struct))} abort ; closed to signal stream should end immediately
+    ^{:line 244 :tag error} abortErr ; set if abort is closed
+
+    ^{:line 246 :tag (chan (struct))} peerClosed ; closed when the peer sends an END_STREAM flag
+    ^{:line 247 :tag (chan (struct))} donec ; closed after the stream is in the closed state
+    ^{:line 248 :tag (chan (struct))} on100 ; buffered; written to if a 100 is received
+
+    ^{:line 250 :tag (chan (struct))} respHeaderRecv ; closed when headers are received
+    ^{:line 251 :tag (* ClientResponse)} res ; set if respHeaderRecv is closed
+
+    ^{:line 253 :tag outflow} flow ; guarded by cc.mu
+    ^{:line 254 :tag inflow} inflow ; guarded by cc.mu
+    ^{:line 255 :tag int64} bytesRemain ; -1 means unknown; owned by transportResponseBody.Read
+    ^{:line 256 :tag error} readErr ; sticky read error; owned by transportResponseBody.Read
+
+    ^{:line 258 :tag io/ReadCloser} reqBody
+    ^{:line 259 :tag int64} reqBodyContentLength ; -1 means unknown
+    ^{:line 260 :tag (chan (struct))} reqBodyClosed ; guarded by cc.mu; non-nil on Close, closed when done
+
+
+    ^{:line 263 :tag bool :doc "owned by writeRequest:\n"} sentEndStream ; sent an END_STREAM flag to the peer
+    ^{:line 264 :tag bool} sentHeaders
+
+
+    ^{:line 267 :tag bool :doc "owned by clientConnReadLoop:\n"} firstByte ; got the first response byte
+    ^{:line 268 :tag bool} pastHeaders ; got first MetaHeadersFrame (actual headers)
+    ^{:line 269 :tag bool} pastTrailers ; got optional second MetaHeadersFrame (trailers)
+    ^{:line 270 :tag bool} readClosed ; peer sent an END_STREAM flag
+    ^{:line 271 :tag bool} readAborted ; read loop reset the stream
+    ^{:line 272 :tag int64} totalHeaderSize ; total size of 1xx headers seen
+
+    ^{:line 274 :tag Header} trailer ; accumulated trailers
+    ^{:line 275 :tag (* Header)} resTrailer ; client's Response.Trailer
+
+    ^{:line 277 :tag ClientResponse} staticResp))
+
+
+(go/var ^{:tag (func [int textproto/MIMEHeader] [error])} got1xxFuncForTests)
+
+
+
+^{:go/end 289} (go/method get1xxTraceFunc "get1xxTraceFunc returns the value of request's httptrace.ClientTrace.Got1xxResponse func,\nif any. It returns nil if not set or if the Go version is too old.\n" ^{:tag (func [int textproto/MIMEHeader] [error])} [^{:tag (* clientStream)} cs]
+  (when [fn got1xxFuncForTests] (!= fn nil)
+    (return fn))
+
+  (traceGot1xxResponseFunc (.-trace cs)))
+
+
+^{:go/end 295} (go/method abortStream [^{:tag (* clientStream)} cs ^error err]
+  (.Lock (.-mu (.-cc cs)))
+  (defer (.Unlock (.-mu (.-cc cs))))
+  (.abortStreamLocked cs err))
+
+
+^{:go/end 310} (go/method abortStreamLocked [^{:tag (* clientStream)} cs ^error err]
+  (.Do (.-abortOnce cs) ^{:go/end 301} (fn []
+      (set! (.-abortErr cs) err)
+      (close (.-abort cs))))
+
+  (when (!= (.-reqBody cs) nil)
+    (.closeReqBodyLocked cs))
+
+  ;; TODO(dneil): Clean up tests where cs.cc.cond is nil.
+  (when (!= (.-cond (.-cc cs)) nil)
+    ;; Wake up writeRequestBody if it is waiting on flow control.
+    (.Broadcast (.-cond (.-cc cs)))))
+
+
+
+^{:go/end 320} (go/method abortRequestBodyWrite [^{:tag (* clientStream)} cs]
+  (let [cc (.-cc cs)]
+    (.Lock (.-mu cc))
+    (defer (.Unlock (.-mu cc)))
+    (when (and (!= (.-reqBody cs) nil) (== (.-reqBodyClosed cs) nil))
+      (.closeReqBodyLocked cs)
+      (.Broadcast (.-cond cc)))))
+
+
+
+^{:go/end 332} (go/method closeReqBodyLocked [^{:tag (* clientStream)} cs]
+  (when (!= (.-reqBodyClosed cs) nil)
+    (return))
+
+  (set! (.-reqBodyClosed cs) (make (chan (struct))))
+  (let [reqBodyClosed (.-reqBodyClosed cs)]
+    (go (^{:go/end 331} (fn []
+          (.Close (.-reqBody cs))
+          (close reqBodyClosed))))))
+
+
+
+(go/type stickyErrWriter (struct
+    ^{:line 335 :tag net/Conn} conn
+    ^{:line 336 :tag time/Duration} timeout
+    ^{:line 337 :tag (* error)} err))
+
+
+^{:go/end 347} (go/method Write [^stickyErrWriter sew ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (!= @(.-err sew) nil)
+    (return 0 @(.-err sew)))
+
+  (set! (values n err) (writeWithByteTimeout (.-conn sew) (.-timeout sew) p))
+  (set! @(.-err sew) err)
+  (return n err))
+
+
+
+
+
+
+
+
+(go/type noCachedConnError "noCachedConnError is the concrete type of ErrNoCachedConn, which\nneeds to be detected by net/http regardless of whether it's its\nbundled version (in h2_bundle.go with a rewritten type name) or\nfrom a user's x/net/http2. As such, as it has a unique method name\n(IsHTTP2NoCachedConnError) that net/http sniffs for via func\nisNoCachedConnError.\n" (struct))
+
+^{:go/end 357} (go/method IsHTTP2NoCachedConnError [noCachedConnError])
+^{:go/end 358} (go/method Error ^string [noCachedConnError] "http2: no cached connection was available")
+
+
+
+
+^{:go/end 366} (go/func isNoCachedConnError "isNoCachedConnError reports whether err is of type noCachedConnError\nor its equivalent renamed type in net/http2's h2_bundle.go. Both types\nmay coexist in the same running program.\n" ^bool [^error err]
+  (let [(values _ ok) (assert (interface (IsHTTP2NoCachedConnError [])) err)]
+    ^{:line 365} ok))
+
+
+(go/var ^error ErrNoCachedConn (lit noCachedConnError))
+
+
+(go/type RoundTripOpt "RoundTripOpt are options for the Transport.RoundTripOpt method.\n" (struct
+
+
+
+
+    ^{:line 376 :tag bool :doc "OnlyCachedConn controls whether RoundTripOpt may\ncreate a new TCP connection. If set true and\nno cached connection is available, RoundTripOpt\nwill return ErrNoCachedConn.\n"} OnlyCachedConn))
+
+
+^{:go/end 381} (go/method RoundTrip [^{:tag (* Transport)} t ^{:tag (* ClientRequest)} req] :results [(* ClientResponse) error]
+  (.RoundTripOpt t req (lit RoundTripOpt)))
+
+
+
+
+^{:go/end 405} (go/func authorityAddr "authorityAddr returns a given authority (a host/IP, or host:port / ip:port)\nand returns a host:port. The port 443 is added if needed.\n" [^string scheme ^string authority] :results [^string addr]
+  (let [(values host port err) (net/SplitHostPort authority)]
+    (when (!= err nil) ; authority didn't have a port
+      (set! host authority)
+      (set! port ""))
+
+    (when (== port "") ; authority's port was empty
+      (set! port "443")
+      (when (== scheme "http")
+        (set! port "80")))
+
+
+    (when [(values a err) (idna/ToASCII host)] (== err nil)
+      (set! host a))
+
+    ;; IPv6 address literal, without a port:
+    (when (and (strings/HasPrefix host "[") (strings/HasSuffix host "]"))
+      (return (+ host ":" port)))
+
+    (net/JoinHostPort host port)))
+
+
+
+^{:go/end 470} (go/method RoundTripOpt "RoundTripOpt is like RoundTrip, but takes options.\n" [^{:tag (* Transport)} t ^{:tag (* ClientRequest)} req ^RoundTripOpt opt] :results [(* ClientResponse) error]
+  (switch (.-Scheme (.-URL req))
+    (case ["https"])
+    (case ["http"])
+    (default
+      (return nil (errors/New "http2: unsupported scheme"))))
+
+
+  (let [addr (authorityAddr (.-Scheme (.-URL req)) (.-Host (.-URL req)))]
+    (for [retry 0] _ (inc! retry)
+      (let [(values cc err) (.GetClientConn (.-connPool t) req addr)]
+        (when (!= err nil)
+          (.vlogf t "http2: Transport failed to get client conn for %s: %v" addr err)
+          (return nil err))
+
+        (let [reused (not (atomic/CompareAndSwapUint32 (addr (.-atomicReused cc)) 0 1))]
+          (traceGotConn req cc reused)
+          (let [(values res ^:assign err) (.RoundTrip cc req)]
+            (when (and (!= err nil) (<= retry 6))
+              (let [roundTripErr err]
+                (when [(set! (values req err) (shouldRetryRequest req err))] (== err nil)
+                  ;; After the first retry, do exponential backoff with 10% jitter.
+                  (when (== retry 0)
+                    (.vlogf t "RoundTrip retrying after failure: %v" roundTripErr)
+                    (continue))
+
+                  (let [backoff (conv float64 (<< (conv uint 1) (- (conv uint retry) 1)))]
+                    (set! backoff + (* backoff (* 0.1 (mathrand/Float64))))
+                    (let [d (* time/Second (conv time/Duration backoff))
+                        ^{:line 437} tm (time/NewTimer d)]
+                      (select
+                        (case (<! (.-C tm))
+                          (.vlogf t "RoundTrip retrying after failure: %v" roundTripErr)
+                          (continue))
+                        (case (<! (.Done (.-Context req)))
+                          (.Stop tm)
+                          (set! err (.Err (.-Context req))))))))))
+
+
+
+            (when (== err errClientConnNotEstablished)
+              ;; This ClientConn was created recently,
+              ;; this is the first request to use it,
+              ;; and the connection is closed and not usable.
+              ;;
+              ;; In this state, cc.idleTimer will remove the conn from the pool
+              ;; when it fires. Stop the timer and remove it here so future requests
+              ;; won't try to use this connection.
+              ;;
+              ;; If the timer has already fired and we're racing it, the redundant
+              ;; call to MarkDead is harmless.
+              (when (!= (.-idleTimer cc) nil)
+                (.Stop (.-idleTimer cc)))
+
+              ^{:go/via [clientConnPool]} (.MarkDead (.-connPool t) cc))
+
+            (when (!= err nil)
+              (.vlogf t "RoundTrip failure: %v" err)
+              (return nil err))
+
+            (return res nil)))))))
+
+
+
+^{:go/end 485} (go/method IdleConnStrsForTesting ^{:tag (slice string)} [^{:tag (* Transport)} t]
+  (let [^{:tag (slice string)} ret (zero (slice string))]
+    (.Lock ^{:go/via [clientConnPool]} (.-mu (.-connPool t)))
+    (defer (.Unlock ^{:go/via [clientConnPool]} (.-mu (.-connPool t))))
+    (range [k ccs ^{:go/via [clientConnPool]} (.-conns (.-connPool t))]
+      (range [_ cc ccs]
+        (when (.-canTakeNewRequest (.idleState cc))
+          (set! ret (append ret k)))))
+
+
+
+    (^{:inst [(slice string) string]} slices/Sort ret)
+    ^{:line 484} ret))
+
+
+
+
+
+^{:go/end 492} (go/method CloseIdleConnections "CloseIdleConnections closes any connections which were previously\nconnected from previous requests but are now sitting idle.\nIt does not interrupt any connections currently in use.\n" [^{:tag (* Transport)} t]
+  ^{:go/via [clientConnPool]} (.closeIdleConnections (.-connPool t)))
+
+
+(go/var
+  ^{:line 495} [errClientConnClosed (errors/New "http2: client conn is closed")]
+  ^{:line 496} [errClientConnUnusable (errors/New "http2: client conn not usable")]
+  ^{:line 497} [errClientConnNotEstablished (errors/New "http2: client conn could not be established")]
+  ^{:line 498} [errClientConnGotGoAway (errors/New "http2: Transport received Server's graceful shutdown GOAWAY")]
+  ^{:line 499} [errClientConnForceClosed (errors/New "http2: client connection force closed via ClientConn.Close")])
+
+
+
+
+
+
+
+^{:go/end 535} (go/func shouldRetryRequest "shouldRetryRequest is called by RoundTrip when a request fails to get\nresponse headers. It is always called with a non-nil error.\nIt returns either a request to retry or an error if the request can't be replayed.\nIf the request is retried, it always clones the request (since requests\ncontain an unreusable clientStream).\n" [^{:tag (* ClientRequest)} req ^error err] :results [(* ClientRequest) error]
+  (when (not (canRetryError err))
+    (return nil err))
+
+  ;; If the Body is nil (or http.NoBody), it's safe to reuse this request's Body.
+  (when (or (== (.-Body req) nil) (== (.-Body req) NoBody))
+    (return (.Clone req) nil))
+
+
+  ;; If the request body can be reset back to its original
+  ;; state via the optional req.GetBody, do that.
+  (when (!= (.-GetBody req) nil)
+    (let [(values body err) ((.-GetBody req))]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [newReq (.Clone req)]
+        (set! (.-Body newReq) body)
+        (return newReq nil))))
+
+
+  ;; The Request.Body can't reset back to the beginning, but we
+  ;; don't seem to have started to read from it yet, so reuse the body.
+  (when (== err errClientConnUnusable)
+    (return (.Clone req) nil))
+
+
+  (return nil (fmt/Errorf "http2: Transport: cannot retry err [%v] after Request.Body was written; define Request.GetBody to avoid this error" err)))
+
+
+^{:go/breaks [[5 544]] :go/end 545} (go/func canRetryError ^bool [^error err]
+  (when (or (== err errClientConnUnusable) (== err errClientConnGotGoAway))
+    (return true))
+
+  (when [(values se ok) (assert StreamError err)] ok
+    (return (== (.-Code se) ErrCodeRefusedStream)))
+
+  false)
+
+
+^{:go/end 560} (go/method dialClientConn [^{:tag (* Transport)} t ^context/Context ctx ^string addr ^bool singleUse] :results [(* ClientConn) error]
+  (when (!= (.-transportTestHooks t) nil)
+    (return (.newClientConn t nil singleUse nil)))
+
+  (let [(values host _ err) (net/SplitHostPort addr)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values tconn ^:assign err) (.dialTLS t ctx "tcp" addr (.newTLSConfig t host))]
+      (when (!= err nil)
+        (return nil err))
+
+      (.newClientConn t tconn singleUse nil))))
+
+
+^{:go/end 571} (go/method newTLSConfig ^{:tag (* tls/Config)} [^{:tag (* Transport)} t ^string host]
+  (let [cfg (new tls/Config)]
+    (when (not (^{:inst [(slice string) string]} slices/Contains (.-NextProtos cfg) NextProtoTLS))
+      (set! (.-NextProtos cfg) (append (lit (slice string) NextProtoTLS) (spread (.-NextProtos cfg)))))
+
+    (when (== (.-ServerName cfg) "")
+      (set! (.-ServerName cfg) host))
+
+    ^{:line 570} cfg))
+
+
+^{:go/end 586} (go/method dialTLS [^{:tag (* Transport)} t ^context/Context ctx ^string network ^string addr ^{:tag (* tls/Config)} tlsCfg] :results [net/Conn error]
+  (let [(values tlsCn err) (.dialTLSWithContext t ctx network addr tlsCfg)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [state (.ConnectionState tlsCn)]
+      (when [p (.-NegotiatedProtocol state)] (!= p NextProtoTLS)
+        (return nil (fmt/Errorf "http2: unexpected ALPN protocol %q; want %q" p NextProtoTLS)))
+
+      (when (not (.-NegotiatedProtocolIsMutual state))
+        (return nil (errors/New "http2: could not negotiate protocol mutually")))
+
+      (return tlsCn nil))))
+
+
+
+
+^{:go/end 592} (go/method disableKeepAlives "disableKeepAlives reports whether connections should be closed as\nsoon as possible after handling the first request.\n" ^bool [^{:tag (* Transport)} t]
+  (and (!= (.-t1 t) nil) (.DisableKeepAlives (.-t1 t))))
+
+
+^{:go/end 599} (go/method expectContinueTimeout ^time/Duration [^{:tag (* Transport)} t]
+  (when (== (.-t1 t) nil)
+    (return 0))
+
+  (.ExpectContinueTimeout (.-t1 t)))
+
+
+^{:go/end 612} (go/method NewClientConn [^{:tag (* Transport)} t ^net/Conn c ^{:tag (func [])} internalStateHook] :results [NetHTTPClientConn error]
+  (let [(values cc err) (.newClientConn t c (.disableKeepAlives t) internalStateHook)]
+    (when (!= err nil)
+      (return (lit NetHTTPClientConn) err))
+
+
+    ;; RoundTrip should block when the conn is at its concurrency limit,
+    ;; not return an error. Setting strictMaxConcurrentStreams enables this.
+    (set! (.-strictMaxConcurrentStreams cc) true)
+
+    (return (lit NetHTTPClientConn cc) nil)))
+
+
+^{:go/end 705} (go/method newClientConn [^{:tag (* Transport)} t ^net/Conn c ^bool singleUse ^{:tag (func [])} internalStateHook] :results [(* ClientConn) error]
+  (let [conf (configFromTransport t)
+      ^{:line 616} cc (addr ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24 26 28 30 32 34 36 38 40]} (lit ClientConn
+          :t t
+          :tconn c
+          :readerDone (make (chan (struct)))
+          :nextStreamID 1
+          :maxFrameSize (<< 16 10) ; spec default
+          :initialWindowSize 65535 ; spec default
+          :initialStreamRecvWindowSize (conv int32 (.-MaxReceiveBufferPerStream conf))
+          :maxConcurrentStreams initialMaxConcurrentStreams ; "infinite", per spec. Use a smaller value until we have received server settings.
+          :strictMaxConcurrentStreams (.-StrictMaxConcurrentRequests conf)
+          :peerMaxHeaderListSize 0xffffffffffffffff ; "infinite", per spec. Use 2^64-1 instead.
+          :streams (make (map uint32 (* clientStream)))
+          :singleUse singleUse
+          :seenSettingsChan (make (chan (struct)))
+          :wantSettingsAck true
+          :readIdleTimeout (.-SendPingTimeout conf)
+          :pingTimeout (.-PingTimeout conf)
+          :pings (make (map (array 8 byte) (chan (struct))))
+          :reqHeaderMu (make (chan (struct)) 1)
+          :lastActive (time/Now)
+          :internalStateHook internalStateHook))]
+
+    (when (!= (.-transportTestHooks t) nil)
+      ((.-newclientconn (.-transportTestHooks t)) cc)
+      (set! c (.-tconn cc)))
+
+    (when VerboseLogs
+      (.vlogf t "http2: Transport creating client conn %p to %v" cc (.RemoteAddr c)))
+
+
+    (set! (.-cond cc) (sync/NewCond (addr (.-mu cc))))
+    (.add (.-flow cc) (conv int32 initialWindowSize))
+
+    ;; TODO: adjust this writer size to account for frame size +
+    ;; MTU + crypto/tls record padding.
+    (set! (.-bw cc) (bufio/NewWriter ^{:go/breaks [2 4 6]} (lit stickyErrWriter
+          :conn c
+          :timeout (.-WriteByteTimeout conf)
+          :err (addr (.-werr cc)))))
+
+    (set! (.-br cc) (bufio/NewReader c))
+    (set! (.-fr cc) (NewFramer (.-bw cc) (.-br cc)))
+    (.SetMaxReadFrameSize (.-fr cc) (conv uint32 (.-MaxReadFrameSize conf)))
+    (when (!= (.-CountError conf) nil)
+      (set! (.-countError (.-fr cc)) (.-CountError conf)))
+
+    (let [maxHeaderTableSize (conv uint32 (.-MaxDecoderHeaderTableSize conf))]
+      (set! (.-ReadMetaHeaders (.-fr cc)) (hpack/NewDecoder maxHeaderTableSize nil))
+      (set! (.-MaxHeaderListSize (.-fr cc)) (.maxHeaderListSize t))
+
+      (set! (.-henc cc) (hpack/NewEncoder (addr (.-hbuf cc))))
+      (.SetMaxDynamicTableSizeLimit (.-henc cc) (conv uint32 (.-MaxEncoderHeaderTableSize conf)))
+      (set! (.-peerMaxHeaderTableSize cc) initialHeaderTableSize)
+
+      (when [(values cs ok) (assert connectionStater c)] ok
+        (let [state (.ConnectionState cs)]
+          (set! (.-tlsState cc) (addr state))))
+
+
+      (let [initialSettings (lit (slice Setting)
+            (lit _ :ID SettingEnablePush :Val 0)
+            (lit _ :ID SettingInitialWindowSize :Val (conv uint32 (.-initialStreamRecvWindowSize cc))))]
+
+        (set! initialSettings (append initialSettings (lit Setting :ID SettingMaxFrameSize :Val (conv uint32 (.-MaxReadFrameSize conf)))))
+        (when [max (.maxHeaderListSize t)] (!= max 0)
+          (set! initialSettings (append initialSettings (lit Setting :ID SettingMaxHeaderListSize :Val max))))
+
+        (when (!= maxHeaderTableSize initialHeaderTableSize)
+          (set! initialSettings (append initialSettings (lit Setting :ID SettingHeaderTableSize :Val maxHeaderTableSize))))
+
+
+        (.Write (.-bw cc) clientPreface)
+        (.WriteSettings (.-fr cc) (spread initialSettings))
+        (.WriteWindowUpdate (.-fr cc) 0 (conv uint32 (.-MaxReceiveBufferPerConnection conf)))
+        (.init (.-inflow cc) (+ (conv int32 (.-MaxReceiveBufferPerConnection conf)) initialWindowSize))
+        (.Flush (.-bw cc))
+        (when (!= (.-werr cc) nil)
+          (.Close cc)
+          (return nil (.-werr cc)))
+
+
+        ;; Start the idle timer after the connection is fully initialized.
+        (when [d (.idleConnTimeout t)] (!= d 0)
+          (set! (.-idleTimeout cc) d)
+          (set! (.-idleTimer cc) (time/AfterFunc d (.-onIdleTimeout cc))))
+
+
+        (go (.readLoop cc))
+        (return cc nil)))))
+
+
+^{:go/end 721} (go/method healthCheck [^{:tag (* ClientConn)} cc]
+  (let [pingTimeout (.-pingTimeout cc)
+      ;; We don't need to periodically ping in the health check, because the readLoop of ClientConn will
+      ;; trigger the healthCheck again if there is no frame received.
+      (values ctx cancel) (context/WithTimeout (context/Background) pingTimeout)]
+    (defer (cancel))
+    (.vlogf cc "http2: Transport sending health check")
+    (let [err (.Ping cc ctx)]
+      (if (!= err nil) (do
+          (.vlogf cc "http2: Transport health check failure: %v" err)
+          (.closeForLostPing cc))
+
+        (.vlogf cc "http2: Transport health check success")))))
+
+
+
+
+^{:go/end 728} (go/method SetDoNotReuse "SetDoNotReuse marks cc as not reusable for future HTTP requests.\n" [^{:tag (* ClientConn)} cc]
+  (.Lock (.-mu cc))
+  (defer (.Unlock (.-mu cc)))
+  (set! (.-doNotReuse cc) true))
+
+
+
+
+
+
+
+^{:go/end 739} (go/method CanTakeNewRequest "CanTakeNewRequest reports whether the connection can take a new request,\nmeaning it has not been closed or received or sent a GOAWAY.\n\nIf the caller is going to immediately make a new request on this\nconnection, use ReserveNewRequest instead.\n" ^bool [^{:tag (* ClientConn)} cc]
+  (.Lock (.-mu cc))
+  (defer (.Unlock (.-mu cc)))
+  (.canTakeNewRequestLocked cc))
+
+
+
+
+
+^{:go/breaks [8] :go/end 752} (go/method ReserveNewRequest "ReserveNewRequest is like CanTakeNewRequest but also reserves a\nconcurrent stream in cc. The reservation is decremented on the\nnext call to RoundTrip.\n" ^bool [^{:tag (* ClientConn)} cc]
+  (.Lock (.-mu cc))
+  (defer (.Unlock (.-mu cc)))
+  (when [st (.idleStateLocked cc)] (not (.-canTakeNewRequest st))
+    (return false))
+
+  (inc! (.-streamsReserved cc))
+  true)
+
+
+
+(go/type ClientConnState "ClientConnState describes the state of a ClientConn.\n" (struct
+
+    ^{:line 757 :tag bool :doc "Closed is whether the connection is closed.\n"} Closed
+
+
+
+
+
+    ^{:line 763 :tag bool :doc "Closing is whether the connection is in the process of\nclosing. It may be closing due to shutdown, being a\nsingle-use connection, being marked as DoNotReuse, or\nhaving received a GOAWAY frame.\n"} Closing
+
+
+    ^{:line 766 :tag int :doc "StreamsActive is how many streams are active.\n"} StreamsActive
+
+
+
+    ^{:line 770 :tag int :doc "StreamsReserved is how many streams have been reserved via\nClientConn.ReserveNewRequest.\n"} StreamsReserved
+
+
+
+
+    ^{:line 775 :tag int :doc "StreamsPending is how many requests have been sent in excess\nof the peer's advertised MaxConcurrentStreams setting and\nare waiting for other streams to complete.\n"} StreamsPending
+
+
+
+
+    ^{:line 780 :tag uint32 :doc "MaxConcurrentStreams is how many concurrent streams the\npeer advertised as acceptable. Zero means no SETTINGS\nframe has been received yet.\n"} MaxConcurrentStreams
+
+
+
+    ^{:line 784 :tag time/Time :doc "LastIdle, if non-zero, is when the connection last\ntransitioned to idle state.\n"} LastIdle))
+
+
+
+^{:go/end 807} (go/method State "State returns a snapshot of cc's state.\n" ^ClientConnState [^{:tag (* ClientConn)} cc]
+  (.Lock (.-wmu cc))
+  (let [maxConcurrent (.-maxConcurrentStreams cc)]
+    (when (not (.-seenSettings cc))
+      (set! maxConcurrent 0))
+
+    (.Unlock (.-wmu cc))
+
+    (.Lock (.-mu cc))
+    (defer (.Unlock (.-mu cc)))
+    ^{:go/breaks [2 4 6 8 10 12 14]} (lit ClientConnState
+      :Closed (.-closed cc)
+      :Closing (or (.-closing cc) (.-singleUse cc) (.-doNotReuse cc) (!= (.-goAway cc) nil))
+      :StreamsActive (+ (len (.-streams cc)) (.-pendingResets cc))
+      :StreamsReserved (.-streamsReserved cc)
+      :StreamsPending (.-pendingRequests cc)
+      :LastIdle (.-lastIdle cc)
+      :MaxConcurrentStreams maxConcurrent)))
+
+
+
+
+
+(go/type clientConnIdleState "clientConnIdleState describes the suitability of a client\nconnection to initiate a new RoundTrip request.\n" (struct
+    ^{:line 812 :tag bool} canTakeNewRequest))
+
+
+^{:go/end 819} (go/method idleState ^clientConnIdleState [^{:tag (* ClientConn)} cc]
+  (.Lock (.-mu cc))
+  (defer (.Unlock (.-mu cc)))
+  (.idleStateLocked cc))
+
+
+^{:go/end 856} (go/method idleStateLocked [^{:tag (* ClientConn)} cc] :results [^clientConnIdleState st]
+  (when (and (.-singleUse cc) (> (.-nextStreamID cc) 1))
+    (return))
+
+  (let [^bool maxConcurrentOkay (zero bool)]
+    (if (.-strictMaxConcurrentStreams cc)
+      ;; We'll tell the caller we can take a new request to
+      ;; prevent the caller from dialing a new TCP
+      ;; connection, but then we'll block later before
+      ;; writing it.
+      (set! maxConcurrentOkay true)
+
+      ;; We can take a new request if the total of
+      ;;   - active streams;
+      ;;   - reservation slots for new streams; and
+      ;;   - streams for which we have sent a RST_STREAM and a PING,
+      ;;     but received no subsequent frame
+      ;; is less than the concurrency limit.
+      (set! maxConcurrentOkay (< (.currentRequestCountLocked cc) (conv int (.-maxConcurrentStreams cc)))))
+
+
+    (set! (.-canTakeNewRequest st) (and maxConcurrentOkay (.isUsableLocked cc)))
+
+    ;; If this connection has never been used for a request and is closed,
+    ;; then let it take a request (which will fail).
+    ;; If the conn was closed for idleness, we're racing the idle timer;
+    ;; don't try to use the conn. (Issue #70515.)
+    ;;
+    ;; This avoids a situation where an error early in a connection's lifetime
+    ;; goes unreported.
+    (when (and (== (.-nextStreamID cc) 1) (== (.-streamsReserved cc) 0) (.-closed cc) (not (.-closedOnIdle cc)))
+      (set! (.-canTakeNewRequest st) true))
+
+
+    (return)))
+
+
+^{:go/end 865} (go/method isUsableLocked ^bool [^{:tag (* ClientConn)} cc]
+  (and (== (.-goAway cc) nil)
+    (not (.-closed cc))
+    (not (.-closing cc))
+    (not (.-doNotReuse cc))
+    (< (+ (conv int64 (.-nextStreamID cc)) (* 2 (conv int64 (.-pendingRequests cc)))) math/MaxInt32)
+    (not (.tooIdleLocked cc))))
+
+
+
+
+
+
+
+
+^{:go/breaks [[6 880]] :go/end 881} (go/method canReserveLocked "canReserveLocked reports whether a net/http.ClientConn can reserve a slot on this conn.\n\nThis follows slightly different rules than clientConnIdleState.canTakeNewRequest.\nWe only permit reservations up to the conn's concurrency limit.\nThis differs from ClientConn.ReserveNewRequest, which permits reservations\npast the limit when StrictMaxConcurrentStreams is set.\n" ^bool [^{:tag (* ClientConn)} cc]
+  (when (>= (.currentRequestCountLocked cc) (conv int (.-maxConcurrentStreams cc)))
+    (return false))
+
+  (when (not (.isUsableLocked cc))
+    (return false))
+
+  true)
+
+
+
+
+^{:go/end 887} (go/method currentRequestCountLocked "currentRequestCountLocked reports the number of concurrency slots currently in use,\nincluding active streams, reserved slots, and reset streams waiting for acknowledgement.\n" ^int [^{:tag (* ClientConn)} cc]
+  (+ (len (.-streams cc)) (.-streamsReserved cc) (.-pendingResets cc)))
+
+
+^{:go/end 892} (go/method canTakeNewRequestLocked ^bool [^{:tag (* ClientConn)} cc]
+  (let [st (.idleStateLocked cc)]
+    (.-canTakeNewRequest st)))
+
+
+
+^{:go/end 900} (go/method availableLocked "availableLocked reports the number of concurrency slots available.\n" ^int [^{:tag (* ClientConn)} cc]
+  (when (not (.canTakeNewRequestLocked cc))
+    (return 0))
+
+  (max 0 (- (conv int (.-maxConcurrentStreams cc)) (.currentRequestCountLocked cc))))
+
+
+
+
+^{:go/end 910} (go/method tooIdleLocked "tooIdleLocked reports whether this connection has been been sitting idle\nfor too much wall time.\n" ^bool [^{:tag (* ClientConn)} cc]
+  ;; The Round(0) strips the monontonic clock reading so the
+  ;; times are compared based on their wall time. We don't want
+  ;; to reuse a connection that's been sitting idle during
+  ;; VM/laptop suspend if monotonic time was also frozen.
+  (and (!= (.-idleTimeout cc) 0) (not (.IsZero (.-lastIdle cc))) (> (time/Since (.Round (.-lastIdle cc) 0)) (.-idleTimeout cc))))
+
+
+
+
+
+
+
+
+^{:go/end 920} (go/method onIdleTimeout "onIdleTimeout is called from a time.AfterFunc goroutine. It will\nonly be called when we're idle, but because we're coming from a new\ngoroutine, there could be a new request coming in at the same time,\nso this simply calls the synchronized closeIfIdle to shut down this\nconnection. The timer could just call closeIfIdle, but this is more\nclear.\n" [^{:tag (* ClientConn)} cc]
+  (.closeIfIdle cc))
+
+
+^{:go/end 927} (go/method closeConn [^{:tag (* ClientConn)} cc]
+  (let [t (time/AfterFunc (* 250 time/Millisecond) (.-forceCloseConn cc))]
+    (defer (.Stop t))
+    (.Close (.-tconn cc))
+    (.maybeCallStateHook cc)))
+
+
+
+
+^{:go/end 939} (go/method forceCloseConn "A tls.Conn.Close can hang for a long time if the peer is unresponsive.\nTry to shut it down more aggressively.\n" [^{:tag (* ClientConn)} cc]
+  (let [(values tc ok) (assert (* tls/Conn) (.-tconn cc))]
+    (when (not ok)
+      (return))
+
+    (when [nc (.NetConn tc)] (!= nc nil)
+      (.Close nc))))
+
+
+
+^{:go/end 957} (go/method closeIfIdle [^{:tag (* ClientConn)} cc]
+  (.Lock (.-mu cc))
+  (when (or (> (len (.-streams cc)) 0) (> (.-streamsReserved cc) 0))
+    (.Unlock (.-mu cc))
+    (return))
+
+  (set! (.-closed cc) true)
+  (set! (.-closedOnIdle cc) true)
+  (let [nextID (.-nextStreamID cc)]
+    ;; TODO: do clients send GOAWAY too? maybe? Just Close:
+    (.Unlock (.-mu cc))
+
+    (when VerboseLogs
+      (.vlogf cc "http2: Transport closing idle conn %p (forSingleUse=%v, maxStream=%v)" cc (.-singleUse cc) (- nextID 2)))
+
+    (.closeConn cc)))
+
+
+^{:go/end 963} (go/method isDoNotReuseAndIdle ^bool [^{:tag (* ClientConn)} cc]
+  (.Lock (.-mu cc))
+  (defer (.Unlock (.-mu cc)))
+  (and (.-doNotReuse cc) (== (len (.-streams cc)) 0)))
+
+
+(go/var shutdownEnterWaitStateHook ^{:go/end 965} (fn []))
+
+
+^{:go/end 1003} (go/method Shutdown "Shutdown gracefully closes the client connection, waiting for running streams to complete.\n" ^error [^{:tag (* ClientConn)} cc ^context/Context ctx]
+  (when [err (.sendGoAway cc)] (!= err nil)
+    (return err))
+
+  ;; Wait for all in-flight streams to complete or connection to close
+  (let [done (make (chan (struct)))
+      ^{:line 974} cancelled false] ; guarded by cc.mu
+    (go (^{:go/end 989} (fn []
+          (.Lock (.-mu cc))
+          (defer (.Unlock (.-mu cc)))
+          (while true
+            (when (or (== (len (.-streams cc)) 0) (.-closed cc))
+              (set! (.-closed cc) true)
+              (close done)
+              (break))
+
+            (when cancelled
+              (break))
+
+            (.Wait (.-cond cc))))))
+
+
+    (shutdownEnterWaitStateHook)
+    (select
+      (case (<! done)
+        (.closeConn cc)
+        (return nil))
+      (case (<! (.Done ctx))
+        (.Lock (.-mu cc))
+        ;; Free the goroutine above
+        (set! cancelled true)
+        (.Broadcast (.-cond cc))
+        (.Unlock (.-mu cc))
+        (return (.Err ctx))))))
+
+
+
+^{:go/end 1027} (go/method sendGoAway ^error [^{:tag (* ClientConn)} cc]
+  (.Lock (.-mu cc))
+  (let [closing (.-closing cc)]
+    (set! (.-closing cc) true)
+    ^{:go/breaks [[8 1026]]} (let [maxStreamID (.-nextStreamID cc)]
+      (.Unlock (.-mu cc))
+      (when closing
+        ;; GOAWAY sent already
+        (return nil))
+
+
+      (.Lock (.-wmu cc))
+      (defer (.Unlock (.-wmu cc)))
+      ;; Send a graceful shutdown frame to server
+      (when [err (.WriteGoAway (.-fr cc) maxStreamID ErrCodeNo nil)] (!= err nil)
+        (return err))
+
+      (when [err (.Flush (.-bw cc))] (!= err nil)
+        (return err))
+
+      ;; Prevent new requests
+      nil)))
+
+
+
+
+^{:go/end 1040} (go/method closeForError "closes the client connection immediately. In-flight requests are interrupted.\nerr is sent to streams.\n" [^{:tag (* ClientConn)} cc ^error err]
+  (.Lock (.-mu cc))
+  (set! (.-closed cc) true)
+  (range [_ cs (.-streams cc)]
+    (.abortStreamLocked cs err))
+
+  (.Broadcast (.-cond cc))
+  (.Unlock (.-mu cc))
+  (.closeConn cc))
+
+
+
+
+
+^{:go/breaks [5] :go/end 1048} (go/method Close "Close closes the client connection immediately.\n\nIn-flight requests are interrupted. For a graceful shutdown, use Shutdown instead.\n" ^error [^{:tag (* ClientConn)} cc]
+  (.closeForError cc errClientConnForceClosed)
+  nil)
+
+
+
+^{:go/end 1057} (go/method closeForLostPing "closes the client connection immediately. In-flight requests are interrupted.\n" [^{:tag (* ClientConn)} cc]
+  (let [err (errors/New "http2: client connection lost")]
+    (when [f (.-countError (.-fr cc))] (!= f nil)
+      (f "conn_close_lost_ping"))
+
+    (.closeForError cc err)))
+
+
+
+
+(go/var ^{:doc "errRequestCanceled is a copy of net/http's errRequestCanceled because it's not\nexported. At least they'll be DeepEqual for h1-vs-h2 comparisons tests.\n"} errRequestCanceled internal/ErrRequestCanceled)
+
+^{:go/breaks [[4 1071]] :go/end 1072} (go/method responseHeaderTimeout ^time/Duration [^{:tag (* ClientConn)} cc]
+  (when (!= (.-t1 (.-t cc)) nil)
+    (return (.ResponseHeaderTimeout (.-t1 (.-t cc)))))
+
+  ;; No way to do this (yet?) with just an http2.Transport. Probably
+  ;; no need. Request.Cancel this is the new way. We only need to support
+  ;; this for compatibility with the old http.Transport fields when
+  ;; we're doing transparent http2.
+  0)
+
+
+
+
+
+^{:go/breaks [[6 1084]] :go/end 1085} (go/func actualContentLength "actualContentLength returns a sanitized version of\nreq.ContentLength, where 0 actually means zero (not unknown) and -1\nmeans unknown.\n" ^int64 [^{:tag (* ClientRequest)} req]
+  (when (or (== (.-Body req) nil) (== (.-Body req) NoBody))
+    (return 0))
+
+  (when (!= (.-ContentLength req) 0)
+    (return (.-ContentLength req)))
+
+  -1)
+
+
+^{:go/end 1091} (go/method decrStreamReservations [^{:tag (* ClientConn)} cc]
+  (.Lock (.-mu cc))
+  (defer (.Unlock (.-mu cc)))
+  (.decrStreamReservationsLocked cc))
+
+
+^{:go/end 1097} (go/method decrStreamReservationsLocked [^{:tag (* ClientConn)} cc]
+  (when (> (.-streamsReserved cc) 0)
+    (dec! (.-streamsReserved cc))))
+
+
+
+^{:go/end 1101} (go/method RoundTrip [^{:tag (* ClientConn)} cc ^{:tag (* ClientRequest)} req] :results [(* ClientResponse) error]
+  (.roundTrip cc req nil))
+
+
+^{:go/end 1210} (go/method roundTrip [^{:tag (* ClientConn)} cc ^{:tag (* ClientRequest)} req ^{:tag (func [(* clientStream)])} streamf] :results [(* ClientResponse) error]
+  (let [ctx (.-Context req)]
+    (set! (.-stream req) ^{:go/breaks [2 4 6 8 10 12 14 16 18 20 22 24]} (lit clientStream
+        :cc cc
+        :ctx ctx
+        :reqCancel (.-Cancel req)
+        :isHead (== (.-Method req) "HEAD")
+        :reqBody (.-Body req)
+        :reqBodyContentLength (actualContentLength req)
+        :trace (httptrace/ContextClientTrace ctx)
+        :peerClosed (make (chan (struct)))
+        :abort (make (chan (struct)))
+        :respHeaderRecv (make (chan (struct)))
+        :donec (make (chan (struct)))
+        :resTrailer (.-ResTrailer req)))
+
+    (let [cs (addr (.-stream req))]
+
+      (set! (.-requestedGzip cs) (httpcommon/IsRequestGzip (.-Method req) (.-Header req) (.disableCompression (.-t cc))))
+
+      (go (.doRequest cs req streamf))
+
+      (let [waitDone ^{:go/end 1134} (fn ^error []
+            (select
+              (case (<! (.-donec cs))
+                (return nil))
+              (case (<! (.Done ctx))
+                (return (.Err ctx)))
+              (case (<! (.-reqCancel cs))
+                (return errRequestCanceled))))
+
+
+
+          ^{:line 1136} handleResponseHeaders ^{:go/end 1160} (fn [] :results [(* ClientResponse) error]
+            (let [res (.-res cs)]
+              (when (> (.-StatusCode res) 299)
+                ;; On error or status code 3xx, 4xx, 5xx, etc abort any
+                ;; ongoing write, assuming that the server doesn't care
+                ;; about our request body. If the server replied with 1xx or
+                ;; 2xx, however, then assume the server DOES potentially
+                ;; want our body (e.g. full-duplex streaming:
+                ;; golang.org/issue/13444). If it turns out the server
+                ;; doesn't, they'll RST_STREAM us soon enough. This is a
+                ;; heuristic to avoid adding knobs to Transport. Hopefully
+                ;; we can keep it.
+                (.abortRequestBodyWrite cs))
+
+              (set! (.-TLS res) (.-tlsState cc))
+              (when (and (== (.-Body res) NoBody) (== (actualContentLength req) 0))
+                ;; If there isn't a request or response body still being
+                ;; written, then wait for the stream to be closed before
+                ;; RoundTrip returns.
+                (when [err (waitDone)] (!= err nil)
+                  (return nil err)))
+
+
+              (return res nil)))
+
+
+          ^{:line 1162} cancelRequest ^{:go/end 1183} (fn ^error [^{:tag (* clientStream)} cs ^error err]
+            (.Lock (.-mu (.-cc cs)))
+            (let [bodyClosed (.-reqBodyClosed cs)]
+              (.Unlock (.-mu (.-cc cs)))
+              ;; Wait for the request body to be closed.
+              ;;
+              ;; If nothing closed the body before now, abortStreamLocked
+              ;; will have started a goroutine to close it.
+              ;;
+              ;; Closing the body before returning avoids a race condition
+              ;; with net/http checking its readTrackingBody to see if the
+              ;; body was read from or closed. See golang/go#60041.
+              ;;
+              ;; The body is closed in a separate goroutine without the
+              ;; connection mutex held, but dropping the mutex before waiting
+              ;; will keep us from holding it indefinitely if the body
+              ;; close is slow for some reason.
+              (when (!= bodyClosed nil)
+                (<! bodyClosed))
+
+              ^{:line 1182} err))]
+
+
+        (while true
+          (select
+            (case (<! (.-respHeaderRecv cs))
+              (return (handleResponseHeaders)))
+            (case (<! (.-abort cs))
+              (select
+                (case (<! (.-respHeaderRecv cs))
+                  ;; If both cs.respHeaderRecv and cs.abort are signaling,
+                  ;; pick respHeaderRecv. The server probably wrote the
+                  ;; response and immediately reset the stream.
+                  ;; golang.org/issue/49645
+                  (return (handleResponseHeaders)))
+                (default
+                  (waitDone)
+                  (return nil (.-abortErr cs)))))
+
+            (case (<! (.Done ctx))
+              (let [err (.Err ctx)]
+                (.abortStream cs err)
+                (return nil (cancelRequest cs err))))
+            (case (<! (.-reqCancel cs))
+              (.abortStream cs errRequestCanceled)
+              (return nil (cancelRequest cs errRequestCanceled)))))))))
+
+
+
+
+
+
+
+^{:go/end 1218} (go/method doRequest "doRequest runs for the duration of the request lifetime.\n\nIt sends the request and performs post-request cleanup (closing Request.Body, etc.).\n" [^{:tag (* clientStream)} cs ^{:tag (* ClientRequest)} req ^{:tag (func [(* clientStream)])} streamf]
+  (let [err (.writeRequest cs req streamf)]
+    (.cleanupWriteRequest cs err)))
+
+
+(go/var errExtendedConnectNotSupported (errors/New "net/http: extended connect not supported by peer"))
+
+
+
+
+
+
+
+
+^{:go/end 1371} (go/method writeRequest "writeRequest sends a request.\n\nIt returns nil after the request is written, the response read,\nand the request stream is half-closed by the peer.\n\nIt returns non-nil if the request ends otherwise.\nIf the returned error is StreamError, the error Code may be used in resetting the stream.\n" [^{:tag (* clientStream)} cs ^{:tag (* ClientRequest)} req ^{:tag (func [(* clientStream)])} streamf] :results [^error err]
+  (let [cc (.-cc cs)
+      ^{:line 1231} ctx (.-ctx cs)
+
+      ;; wait for setting frames to be received, a server can change this value later,
+      ;; but we just wait for the first settings frame
+      ^{:line 1235 :tag bool} isExtendedConnect (zero bool)]
+    (when (and (== (.-Method req) "CONNECT") (!= (.Get (.-Header req) ":protocol") ""))
+      (set! isExtendedConnect true))
+
+
+    ;; Acquire the new-request lock by writing to reqHeaderMu.
+    ;; This lock guards the critical section covering allocating a new stream ID
+    ;; (requires mu) and creating the stream (requires wmu).
+    (when (== (.-reqHeaderMu cc) nil)
+      (panic "RoundTrip on uninitialized ClientConn")) ; for tests
+
+    (when isExtendedConnect
+      (select
+        (case (<! (.-reqCancel cs))
+          (return errRequestCanceled))
+        (case (<! (.Done ctx))
+          (return (.Err ctx)))
+        (case (<! (.-seenSettingsChan cc))
+          (when (not (.-extendedConnectAllowed cc))
+            (return errExtendedConnectNotSupported)))))
+
+
+
+    (select
+      (case (>! (.-reqHeaderMu cc) (lit (struct))))
+      (case (<! (.-reqCancel cs))
+        (return errRequestCanceled))
+      (case (<! (.Done ctx))
+        (return (.Err ctx))))
+
+
+    (.Lock (.-mu cc))
+    (when (!= (.-idleTimer cc) nil)
+      (.Stop (.-idleTimer cc)))
+
+    (.decrStreamReservationsLocked cc)
+    (when [err (.awaitOpenSlotForStreamLocked cc cs)] (!= err nil)
+      (.Unlock (.-mu cc))
+      (<! (.-reqHeaderMu cc))
+      (return err))
+
+    (.addStreamLocked cc cs) ; assigns stream ID
+    (when (isConnectionCloseRequest req)
+      (set! (.-doNotReuse cc) true))
+
+    (.Unlock (.-mu cc))
+
+    (when (!= streamf nil)
+      (streamf cs))
+
+
+    (let [continueTimeout (.expectContinueTimeout (.-t cc))]
+      (when (!= continueTimeout 0)
+        (if (not (httpguts/HeaderValuesContainsToken (aget (.-Header req) "Expect") "100-continue"))
+          (set! continueTimeout 0)
+
+          (set! (.-on100 cs) (make (chan (struct)) 1))))
+
+
+
+      ;; Past this point (where we send request headers), it is possible for
+      ;; RoundTrip to return successfully. Since the RoundTrip contract permits
+      ;; the caller to "mutate or reuse" the Request after closing the Response's Body,
+      ;; we must take care when referencing the Request from here on.
+      (set! err (.encodeAndWriteHeaders cs req))
+      (<! (.-reqHeaderMu cc))
+      (when (!= err nil)
+        (return err))
+
+
+      (let [hasBody (!= (.-reqBodyContentLength cs) 0)]
+        (if (not hasBody)
+          (set! (.-sentEndStream cs) true)
+          (do
+            (when (!= continueTimeout 0)
+              (traceWait100Continue (.-trace cs))
+              (let [timer (time/NewTimer continueTimeout)]
+                (select
+                  (case (<! (.-C timer))
+                    (set! err nil))
+                  (case (<! (.-on100 cs))
+                    (set! err nil))
+                  (case (<! (.-abort cs))
+                    (set! err (.-abortErr cs)))
+                  (case (<! (.Done ctx))
+                    (set! err (.Err ctx)))
+                  (case (<! (.-reqCancel cs))
+                    (set! err errRequestCanceled)))
+
+                (.Stop timer)
+                (when (!= err nil)
+                  (traceWroteRequest (.-trace cs) err)
+                  (return err))))
+
+
+
+            (if [(set! err (.writeRequestBody cs req))] (!= err nil)
+              (when (!= err errStopReqBodyWrite)
+                (traceWroteRequest (.-trace cs) err)
+                (return err))
+
+
+              (set! (.-sentEndStream cs) true))))
+
+
+
+        (traceWroteRequest (.-trace cs) err)
+
+        (let [^{:tag (chan :recv time/Time)} respHeaderTimer (zero (chan :recv time/Time))
+            ^{:line 1344 :tag (chan (struct))} respHeaderRecv (zero (chan (struct)))]
+          (when [d (.responseHeaderTimeout cc)] (!= d 0)
+            (let [timer (time/NewTimer d)]
+              (defer (.Stop timer))
+              (set! respHeaderTimer (.-C timer))
+              (set! respHeaderRecv (.-respHeaderRecv cs))))
+
+          ;; Wait until the peer half-closes its end of the stream,
+          ;; or until the request is aborted (via context, error, or otherwise),
+          ;; whichever comes first.
+          (while true
+            (select
+              (case (<! (.-peerClosed cs))
+                (return nil))
+              (case (<! respHeaderTimer)
+                (return errTimeout))
+              (case (<! respHeaderRecv)
+                (set! respHeaderRecv nil)
+                (set! respHeaderTimer nil)) ; keep waiting for END_STREAM
+              (case (<! (.-abort cs))
+                (return (.-abortErr cs)))
+              (case (<! (.Done ctx))
+                (return (.Err ctx)))
+              (case (<! (.-reqCancel cs))
+                (return errRequestCanceled)))))))))
+
+
+
+
+^{:go/end 1411} (go/method encodeAndWriteHeaders ^error [^{:tag (* clientStream)} cs ^{:tag (* ClientRequest)} req]
+  (let [cc (.-cc cs)
+      ^{:line 1375} ctx (.-ctx cs)]
+
+    (.Lock (.-wmu cc))
+    (defer (.Unlock (.-wmu cc)))
+
+    ;; If the request was canceled while waiting for cc.mu, just quit.
+    (select
+      (case (<! (.-abort cs))
+        (return (.-abortErr cs)))
+      (case (<! (.Done ctx))
+        (return (.Err ctx)))
+      (case (<! (.-reqCancel cs))
+        (return errRequestCanceled))
+      (default))
+
+
+    ;; Encode headers.
+    ;;
+    ;; we send: HEADERS{1}, CONTINUATION{0,} + DATA{0,} (DATA is
+    ;; sent by writeRequestBody below, along with any Trailers,
+    ;; again in form HEADERS{1}, CONTINUATION{0,})
+    (.Reset (.-hbuf cc))
+    (let [(values res err) (encodeRequestHeaders req (.-requestedGzip cs) (.-peerMaxHeaderListSize cc) ^{:go/end 1399} (fn [^string name ^string value]
+            (.writeHeader cc name value)))]
+
+      (when (!= err nil)
+        (return (fmt/Errorf "http2: %w" err)))
+
+      (let [hdrs (.Bytes (.-hbuf cc))
+
+          ;; Write the request.
+          ^{:line 1406} endStream (and (not (.-HasBody res)) (not (.-HasTrailers res)))]
+        (set! (.-sentHeaders cs) true)
+        (set! err (.writeHeaders cc (.-ID cs) endStream (conv int (.-maxFrameSize cc)) hdrs))
+        (traceWroteHeaders (.-trace cs))
+        ^{:line 1410} err))))
+
+
+^{:go/end 1427} (go/func encodeRequestHeaders [^{:tag (* ClientRequest)} req ^bool addGzipHeader ^uint64 peerMaxHeaderListSize ^{:tag (func [^string name ^string value])} headerf] :results [httpcommon/EncodeHeadersResult error]
+  (httpcommon/EncodeHeaders (.-Context req) ^{:go/breaks [2 [4 1423] 6 8]} (lit httpcommon/EncodeHeadersParam
+      :Request ^{:go/breaks [2 4 6 8 10 12]} (lit httpcommon/Request
+        :Header (.-Header req)
+        :Trailer (.-Trailer req)
+        :URL (.-URL req)
+        :Host (.-Host req)
+        :Method (.-Method req)
+        :ActualContentLength (actualContentLength req))
+
+      :AddGzipHeader addGzipHeader
+      :PeerMaxHeaderListSize peerMaxHeaderListSize
+      :DefaultUserAgent defaultUserAgent)
+    ^{:line 1426} headerf))
+
+
+
+
+
+
+^{:go/end 1535} (go/method cleanupWriteRequest "cleanupWriteRequest performs post-request tasks.\n\nIf err (the result of writeRequest) is non-nil and the stream is not closed,\ncleanupWriteRequest will send a reset to the peer.\n" [^{:tag (* clientStream)} cs ^error err]
+  (let [cc (.-cc cs)]
+
+    (when (== (.-ID cs) 0)
+      ;; We were canceled before creating the stream, so return our reservation.
+      (.decrStreamReservations cc))
+
+
+    ;; TODO: write h12Compare test showing whether
+    ;; Request.Body is closed by the Transport,
+    ;; and in multiple cases: server replies <=299 and >299
+    ;; while still writing request body
+    (.Lock (.-mu cc))
+    (let [mustCloseBody false]
+      (when (and (!= (.-reqBody cs) nil) (== (.-reqBodyClosed cs) nil))
+        (set! mustCloseBody true)
+        (set! (.-reqBodyClosed cs) (make (chan (struct)))))
+
+      (let [bodyClosed (.-reqBodyClosed cs)
+          ^{:line 1452} closeOnIdle (or (.-singleUse cc) (.-doNotReuse cc) (.disableKeepAlives (.-t cc)) (!= (.-goAway cc) nil))
+          ;; Have we read any frames from the connection since sending this request?
+          ^{:line 1454} readSinceStream (> (.-readBeforeStreamID cc) (.-ID cs))]
+        (.Unlock (.-mu cc))
+        (when mustCloseBody
+          (.Close (.-reqBody cs))
+          (close bodyClosed))
+
+        (when (!= bodyClosed nil)
+          (<! bodyClosed))
+
+
+        (when (and (!= err nil) (.-sentEndStream cs))
+          ;; If the connection is closed immediately after the response is read,
+          ;; we may be aborted before finishing up here. If the stream was closed
+          ;; cleanly on both sides, there is no error.
+          (select
+            (case (<! (.-peerClosed cs))
+              (set! err nil))
+            (default)))
+
+
+        (if (!= err nil) (do
+            (.abortStream cs err) ; possibly redundant, but harmless
+            (when (.-sentHeaders cs)
+              (if [(values se ok) (assert StreamError err)] ok
+                (when (!= (.-Cause se) errFromPeer)
+                  (.writeStreamReset cc (.-ID cs) (.-Code se) false err))
+
+
+                ;; We're cancelling an in-flight request.
+                ;;
+                ;; This could be due to the server becoming unresponsive.
+                ;; To avoid sending too many requests on a dead connection,
+                ;; if we haven't read any frames from the connection since
+                ;; sending this request, we let it continue to consume
+                ;; a concurrency slot until we can confirm the server is
+                ;; still responding.
+                ;; We do this by sending a PING frame along with the RST_STREAM
+                ;; (unless a ping is already in flight).
+                ;;
+                ;; For simplicity, we don't bother tracking the PING payload:
+                ;; We reset cc.pendingResets any time we receive a PING ACK.
+                ;;
+                ;; We skip this if the conn is going to be closed on idle,
+                ;; because it's short lived and will probably be closed before
+                ;; we get the ping response.
+                (let [ping false]
+                  (when (and (not closeOnIdle) (not readSinceStream))
+                    (.Lock (.-mu cc))
+                    ;; rstStreamPingsBlocked works around a gRPC behavior:
+                    ;; see comment on the field for details.
+                    (when (not (.-rstStreamPingsBlocked cc))
+                      (when (== (.-pendingResets cc) 0)
+                        (set! ping true))
+
+                      (inc! (.-pendingResets cc)))
+
+                    (.Unlock (.-mu cc)))
+
+                  (.writeStreamReset cc (.-ID cs) ErrCodeCancel ping err))))
+
+
+            (.CloseWithError (.-bufPipe cs) err)) ; no-op if already closed
+          (do
+            (when (and (.-sentHeaders cs) (not (.-sentEndStream cs)))
+              (.writeStreamReset cc (.-ID cs) ErrCodeNo false nil))
+
+            (.CloseWithError (.-bufPipe cs) errRequestCanceled)))
+
+        (when (!= (.-ID cs) 0)
+          (.forgetStreamID cc (.-ID cs)))
+
+
+        (.Lock (.-wmu cc))
+        (let [werr (.-werr cc)]
+          (.Unlock (.-wmu cc))
+          (when (!= werr nil)
+            (.Close cc))
+
+
+          (close (.-donec cs))
+          (.maybeCallStateHook cc))))))
+
+
+
+
+^{:go/end 1563} (go/method awaitOpenSlotForStreamLocked "awaitOpenSlotForStreamLocked waits until len(streams) < maxConcurrentStreams.\nMust hold cc.mu.\n" ^error [^{:tag (* ClientConn)} cc ^{:tag (* clientStream)} cs]
+  (while true
+    (when (and (.-closed cc) (== (.-nextStreamID cc) 1) (== (.-streamsReserved cc) 0))
+      ;; This is the very first request sent to this connection.
+      ;; Return a fatal error which aborts the retry loop.
+      (return errClientConnNotEstablished))
+
+    (set! (.-lastActive cc) (time/Now))
+    (when (or (.-closed cc) (not (.canTakeNewRequestLocked cc)))
+      (return errClientConnUnusable))
+
+    (set! (.-lastIdle cc) (lit time/Time))
+    (when (< (.currentRequestCountLocked cc) (conv int (.-maxConcurrentStreams cc)))
+      (return nil))
+
+    (inc! (.-pendingRequests cc))
+    (.Wait (.-cond cc))
+    (dec! (.-pendingRequests cc))
+    (select
+      (case (<! (.-abort cs))
+        (return (.-abortErr cs)))
+      (default))))
+
+
+
+
+
+^{:go/end 1589} (go/method writeHeaders "requires cc.wmu be held\n" ^error [^{:tag (* ClientConn)} cc ^uint32 streamID ^bool endStream ^int maxFrameSize ^{:tag (slice byte)} hdrs]
+  (let [first true] ; first frame written (HEADERS is first, then CONTINUATION)
+    (while (and (> (len hdrs) 0) (== (.-werr cc) nil))
+      (let [chunk hdrs]
+        (when (> (len chunk) maxFrameSize)
+          (set! chunk (subslice chunk _ maxFrameSize)))
+
+        (set! hdrs (subslice hdrs (len chunk)))
+        (let [endHeaders (== (len hdrs) 0)]
+          (if first (do
+              (.WriteHeaders (.-fr cc) ^{:go/breaks [2 4 6 8]} (lit HeadersFrameParam
+                  :StreamID streamID
+                  :BlockFragment chunk
+                  :EndStream endStream
+                  :EndHeaders endHeaders))
+
+              (set! first false))
+
+            (.WriteContinuation (.-fr cc) streamID endHeaders chunk)))))
+
+
+    (.Flush (.-bw cc))
+    (.-werr cc)))
+
+
+
+(go/var "internal error values; they don't escape to callers\n"
+
+  ^{:line 1594} [^{:doc "abort request body write; don't send cancel\n"} errStopReqBodyWrite (errors/New "http2: aborting request body write")]
+
+
+  ^{:line 1597} [^{:doc "abort request body write, but send stream reset of cancel.\n"} errStopReqBodyWriteAndCancel (errors/New "http2: canceling request")]
+
+  ^{:line 1599} [errReqBodyTooLong (errors/New "http2: request body larger than specified content length")])
+
+
+
+
+
+
+
+^{:go/end 1621} (go/method frameScratchBufferLen "frameScratchBufferLen returns the length of a buffer to use for\noutgoing request bodies to read/write to/from.\n\nIt returns max(1, min(peer's advertised max frame size,\nRequest.ContentLength+1, 512KB)).\n" ^int [^{:tag (* clientStream)} cs ^int maxFrameSize]
+  (let [^:const ^{:val 524288} max (<< 512 10)
+      ^{:line 1609} n (min (conv int64 maxFrameSize) max)]
+    (when [cl (.-reqBodyContentLength cs)] (and (!= cl -1) (< (+ cl 1) n))
+      ;; Add an extra byte past the declared content-length to
+      ;; give the caller's Request.Body io.Reader a chance to
+      ;; give us more bytes than they declared, so we can catch it
+      ;; early.
+      (set! n (+ cl 1)))
+
+    (when (< n 1)
+      (return 1))
+
+    (conv int n))) ; doesn't truncate; max is 512K
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag (array 7 sync/Pool) :doc "Seven bufPools manage different frame sizes. This helps to avoid scenarios where long-running\nstreaming requests using small frame sizes occupy large buffers initially allocated for prior\nrequests needing big buffers. The size ranges are as follows:\n{0 KB, 16 KB], {16 KB, 32 KB], {32 KB, 64 KB], {64 KB, 128 KB], {128 KB, 256 KB],\n{256 KB, 512 KB], {512 KB, infinity}\nIn practice, the maximum scratch buffer size should not exceed 512 KB due to\nframeScratchBufferLen(maxFrameSize), thus the \"infinity pool\" should never be used.\nIt exists mainly as a safety measure, for potential future increases in max buffer size.\n"} bufPools) ; of *[]byte
+^{:go/end 1643} (go/func bufPoolIndex ^int [^int size]
+  (when (<= size 16384)
+    (return 0))
+
+  (set! size - 1)
+  (let [bits (bits/Len (conv uint size))
+      ^{:line 1638} index (- bits 14)]
+    (when (>= index (len bufPools))
+      (return (- (len bufPools) 1)))
+
+    ^{:line 1642} index))
+
+
+^{:go/end 1775} (go/method writeRequestBody [^{:tag (* clientStream)} cs ^{:tag (* ClientRequest)} req] :results [^error err]
+  (let [cc (.-cc cs)
+      ^{:line 1647} body (.-reqBody cs)
+      ^{:line 1648} sentEnd false ; whether we sent the final DATA frame w/ END_STREAM
+
+      ^{:line 1650} hasTrailers (!= (.-Trailer req) nil)
+      ^{:line 1651} remainLen (.-reqBodyContentLength cs)
+      ^{:line 1652} hasContentLen (!= remainLen -1)]
+
+    (.Lock (.-mu cc))
+    (let [maxFrameSize (conv int (.-maxFrameSize cc))]
+      (.Unlock (.-mu cc))
+
+      ;; Scratch buffer for reading into & writing from.
+      (let [scratchLen (.frameScratchBufferLen cs maxFrameSize)
+          ^{:line 1660 :tag (slice byte)} buf (zero (slice byte))
+          ^{:line 1661} index (bufPoolIndex scratchLen)]
+        (if [(values bp ok) (assert (* (slice byte)) (.Get (aget bufPools index)))] (and ok (>= (len @bp) scratchLen)) (do
+            (defer (.Put (aget bufPools index) bp))
+            (set! buf @bp))
+          (do
+            (set! buf (make (slice byte) scratchLen))
+            (defer (.Put (aget bufPools index) (addr buf)))))
+
+
+        (let [^bool sawEOF (zero bool)]
+          (while (not sawEOF)
+            (let [(values n err) (.Read body buf)]
+              (when hasContentLen
+                (set! remainLen - (conv int64 n))
+                (when (and (== remainLen 0) (== err nil))
+                  ;; The request body's Content-Length was predeclared and
+                  ;; we just finished reading it all, but the underlying io.Reader
+                  ;; returned the final chunk with a nil error (which is one of
+                  ;; the two valid things a Reader can do at EOF). Because we'd prefer
+                  ;; to send the END_STREAM bit early, double-check that we're actually
+                  ;; at EOF. Subsequent reads should return (0, EOF) at this point.
+                  ;; If either value is different, we return an error in one of two ways below.
+                  (let [^{:tag (array 1 byte)} scratch (zero (array 1 byte))
+                      ^{:line 1684 :tag int} n1 (zero int)]
+                    (set! (values n1 err) (.Read body (subslice scratch)))
+                    (set! remainLen - (conv int64 n1))))
+
+                (when (< remainLen 0)
+                  (set! err errReqBodyTooLong)
+                  (return err)))
+
+
+              (when (!= err nil)
+                (.Lock (.-mu cc))
+                (let [bodyClosed (!= (.-reqBodyClosed cs) nil)]
+                  (.Unlock (.-mu cc))
+                  (switch
+                    (case [bodyClosed]
+                      (return errStopReqBodyWrite))
+                    (case [(== err io/EOF)]
+                      (set! sawEOF true)
+                      (set! err nil))
+                    (default
+                      (return err)))))
+
+
+
+              (let [remain (subslice buf _ n)]
+                (while (and (> (len remain) 0) (== err nil))
+                  (let [^int32 allowed (zero int32)]
+                    (set! (values allowed err) (.awaitFlowControl cs (len remain)))
+                    (when (!= err nil)
+                      (return err))
+
+                    (.Lock (.-wmu cc))
+                    (let [data (subslice remain _ allowed)]
+                      (set! remain (subslice remain allowed))
+                      (set! sentEnd (and sawEOF (== (len remain) 0) (not hasTrailers)))
+                      (set! err (.WriteData (.-fr cc) (.-ID cs) sentEnd data))
+                      (when (== err nil)
+                        ;; TODO(bradfitz): this flush is for latency, not bandwidth.
+                        ;; Most requests won't need this. Make this opt-in or
+                        ;; opt-out?  Use some heuristic on the body type? Nagel-like
+                        ;; timers?  Based on 'n'? Only last chunk of this for loop,
+                        ;; unless flow control tokens are low? For now, always.
+                        ;; If we change this, see comment below.
+                        (set! err (.Flush (.-bw cc))))
+
+                      (.Unlock (.-wmu cc)))))
+
+                (when (!= err nil)
+                  (return err)))))
+
+
+
+          (when sentEnd
+            ;; Already sent END_STREAM (which implies we have no
+            ;; trailers) and flushed, because currently all
+            ;; WriteData frames above get a flush. So we're done.
+            (return nil))
+
+
+          ;; Since the RoundTrip contract permits the caller to "mutate or reuse"
+          ;; a request after the Response's Body is closed, verify that this hasn't
+          ;; happened before accessing the trailers.
+          (.Lock (.-mu cc))
+          (let [trailer (.-Trailer req)]
+            (set! err (.-abortErr cs))
+            (.Unlock (.-mu cc))
+            (when (!= err nil)
+              (return err))
+
+
+            (.Lock (.-wmu cc))
+            (defer (.Unlock (.-wmu cc)))
+            (let [^{:tag (slice byte)} trls (zero (slice byte))]
+              (when (> (len trailer) 0)
+                (set! (values trls err) (.encodeTrailers cc trailer))
+                (when (!= err nil)
+                  (return err)))
+
+
+
+              ;; Two ways to send END_STREAM: either with trailers, or
+              ;; with an empty DATA frame.
+              (if (> (len trls) 0)
+                (set! err (.writeHeaders cc (.-ID cs) true maxFrameSize trls))
+
+                (set! err (.WriteData (.-fr cc) (.-ID cs) true nil)))
+
+              (when [ferr (.Flush (.-bw cc))] (and (!= ferr nil) (== err nil))
+                (set! err ferr))
+
+              ^{:line 1774} err)))))))
+
+
+
+
+
+
+^{:go/end 1816} (go/method awaitFlowControl "awaitFlowControl waits for [1, min(maxBytes, cc.cs.maxFrameSize)] flow\ncontrol tokens from the server.\nIt returns either the non-zero number of tokens taken or an error\nif the stream is dead.\n" [^{:tag (* clientStream)} cs ^int maxBytes] :results [^int32 taken ^error err]
+  (let [cc (.-cc cs)
+      ^{:line 1783} ctx (.-ctx cs)]
+    (.Lock (.-mu cc))
+    (defer (.Unlock (.-mu cc)))
+    (while true
+      (when (.-closed cc)
+        (return 0 errClientConnClosed))
+
+      (when (!= (.-reqBodyClosed cs) nil)
+        (return 0 errStopReqBodyWrite))
+
+      (select
+        (case (<! (.-abort cs))
+          (return 0 (.-abortErr cs)))
+        (case (<! (.Done ctx))
+          (return 0 (.Err ctx)))
+        (case (<! (.-reqCancel cs))
+          (return 0 errRequestCanceled))
+        (default))
+
+      (when [a (.available (.-flow cs))] (> a 0)
+        (let [take a]
+          (when (> (conv int take) maxBytes)
+
+            (set! take (conv int32 maxBytes))) ; can't truncate int; take is int32
+
+          (when (> take (conv int32 (.-maxFrameSize cc)))
+            (set! take (conv int32 (.-maxFrameSize cc))))
+
+          (.take (.-flow cs) take)
+          (return take nil)))
+
+      (.Wait (.-cond cc)))))
+
+
+
+
+^{:go/end 1847} (go/method encodeTrailers "requires cc.wmu be held.\n" [^{:tag (* ClientConn)} cc ^Header trailer] :results [(slice byte) error]
+  (.Reset (.-hbuf cc))
+
+  (let [hlSize (conv uint64 0)]
+    (range [k vv trailer]
+      (range [_ v vv]
+        (let [hf (lit hpack/HeaderField :Name k :Value v)]
+          (set! hlSize + (conv uint64 (.Size hf))))))
+
+
+    (when (> hlSize (.-peerMaxHeaderListSize cc))
+      (return nil errRequestHeaderListSize))
+
+
+    (range [k vv trailer]
+      (let [(values lowKey ascii) (httpcommon/LowerHeader k)]
+        (when (not ascii)
+          ;; Skip writing invalid headers. Per RFC 7540, Section 8.1.2, header
+          ;; field names have to be ASCII characters (just as in HTTP/1.x).
+          (continue))
+
+        ;; Transfer-Encoding, etc.. have already been filtered at the
+        ;; start of RoundTrip
+        (range [_ v vv]
+          (.writeHeader cc lowKey v))))
+
+
+    (return (.Bytes (.-hbuf cc)) nil)))
+
+
+^{:go/end 1854} (go/method writeHeader [^{:tag (* ClientConn)} cc ^string name ^string value]
+  (when VerboseLogs
+    (log/Printf "http2: Transport encoding header %q = %q" name value))
+
+  (.WriteField (.-henc cc) (lit hpack/HeaderField :Name name :Value value)))
+
+
+(go/type resAndError (struct
+    ^{:line 1857 :tag incomparable} _
+    ^{:line 1858 :tag (* ClientResponse)} res
+    ^{:line 1859 :tag error} err))
+
+
+
+^{:go/end 1873} (go/method addStreamLocked "requires cc.mu be held.\n" [^{:tag (* ClientConn)} cc ^{:tag (* clientStream)} cs]
+  (.add (.-flow cs) (conv int32 (.-initialWindowSize cc)))
+  (.setConnFlow (.-flow cs) (addr (.-flow cc)))
+  (.init (.-inflow cs) (.-initialStreamRecvWindowSize cc))
+  (set! (.-ID cs) (.-nextStreamID cc))
+  (set! (.-nextStreamID cc) + 2)
+  (aset (.-streams cc) (.-ID cs) cs)
+  (when (== (.-ID cs) 0)
+    (panic "assigned stream ID 0")))
+
+
+
+^{:go/end 1901} (go/method forgetStreamID [^{:tag (* ClientConn)} cc ^uint32 id]
+  (.Lock (.-mu cc))
+  (let [slen (len (.-streams cc))]
+    (delete (.-streams cc) id)
+    (when (!= (len (.-streams cc)) (- slen 1))
+      (panic "forgetting unknown stream id"))
+
+    (set! (.-lastActive cc) (time/Now))
+    (when (and (== (len (.-streams cc)) 0) (!= (.-idleTimer cc) nil))
+      (.Reset (.-idleTimer cc) (.-idleTimeout cc))
+      (set! (.-lastIdle cc) (time/Now)))
+
+    ;; Wake up writeRequestBody via clientStream.awaitFlowControl and
+    ;; wake up RoundTrip if there is a pending request.
+    (.Broadcast (.-cond cc))
+
+    (let [closeOnIdle (or (.-singleUse cc) (.-doNotReuse cc) (.disableKeepAlives (.-t cc)) (!= (.-goAway cc) nil))]
+      (when (and closeOnIdle (== (.-streamsReserved cc) 0) (== (len (.-streams cc)) 0))
+        (when VerboseLogs
+          (.vlogf cc "http2: Transport closing idle conn %p (forSingleUse=%v, maxStream=%v)" cc (.-singleUse cc) (- (.-nextStreamID cc) 2)))
+
+        (set! (.-closed cc) true)
+        (defer (.closeConn cc)))
+
+
+      (.Unlock (.-mu cc)))))
+
+
+
+(go/type clientConnReadLoop "clientConnReadLoop is the state owned by the clientConn's frame-reading readLoop.\n" (struct
+    ^{:line 1905 :tag incomparable} _
+    ^{:line 1906 :tag (* ClientConn)} cc))
+
+
+
+^{:go/end 1919} (go/method readLoop "readLoop runs in its own goroutine and reads and dispatches frames.\n" [^{:tag (* ClientConn)} cc]
+  (let [rl (addr (lit clientConnReadLoop :cc cc))]
+    (defer (.cleanup rl))
+    (set! (.-readerErr cc) (.run rl))
+    (when [(values ce ok) (assert ConnectionError (.-readerErr cc))] ok
+      (.Lock (.-wmu cc))
+      (.WriteGoAway (.-fr cc) 0 (conv ErrCode ce) nil)
+      (.Unlock (.-wmu cc)))))
+
+
+
+
+
+(go/type GoAwayError "GoAwayError is returned by the Transport when the server closes the\nTCP connection after sending a GOAWAY frame.\n" (struct
+    ^{:line 1924 :tag uint32} LastStreamID
+    ^{:line 1925 :tag ErrCode} ErrCode
+    ^{:line 1926 :tag string} DebugData))
+
+
+^{:go/end 1932} (go/method Error ^string [^GoAwayError e]
+  (fmt/Sprintf "http2: server sent GOAWAY and closed the connection; LastStreamID=%v, ErrCode=%v, debug=%q"
+    (.-LastStreamID e) (.-ErrCode e) (.-DebugData e)))
+
+
+^{:go/end 1940} (go/func isEOFOrNetReadError ^bool [^error err]
+  (when (== err io/EOF)
+    (return true))
+
+  (let [(values ne ok) (assert (* net/OpError) err)]
+    (and ok (== (.-Op ne) "read"))))
+
+
+^{:go/end 2006} (go/method cleanup [^{:tag (* clientConnReadLoop)} rl]
+  (let [cc (.-cc rl)]
+    (defer (.closeConn cc))
+    (defer (close (.-readerDone cc)))
+
+    (when (!= (.-idleTimer cc) nil)
+      (.Stop (.-idleTimer cc)))
+
+
+    ;; Close any response bodies if the server closes prematurely.
+    ;; TODO: also do this if we've written the headers but not
+    ;; gotten a response yet.
+    (let [err (.-readerErr cc)]
+      (.Lock (.-mu cc))
+      (cond (and (!= (.-goAway cc) nil) (isEOFOrNetReadError err))
+        (set! err ^{:go/breaks [2 4 6]} (lit GoAwayError
+            :LastStreamID (.-LastStreamID (.-goAway cc))
+            :ErrCode (.-ErrCode (.-goAway cc))
+            :DebugData (.-goAwayDebug cc)))
+
+        (== err io/EOF)
+        (set! err io/ErrUnexpectedEOF))
+
+      (set! (.-closed cc) true)
+
+      ;; If the connection has never been used, and has been open for only a short time,
+      ;; leave it in the connection pool for a little while.
+      ;;
+      ;; This avoids a situation where new connections are constantly created,
+      ;; added to the pool, fail, and are removed from the pool, without any error
+      ;; being surfaced to the user.
+      (let [unusedWaitTime (* 5 time/Second)]
+        (when (and (> (.-idleTimeout cc) 0) (> unusedWaitTime (.-idleTimeout cc)))
+          (set! unusedWaitTime (.-idleTimeout cc)))
+
+        (let [idleTime (.Sub (time/Now) (.-lastActive cc))]
+          (if (and (== (atomic/LoadUint32 (addr (.-atomicReused cc))) 0) (< idleTime unusedWaitTime) (not (.-closedOnIdle cc)))
+            (set! (.-idleTimer cc) (time/AfterFunc (- unusedWaitTime idleTime) ^{:go/end 1981} (fn []
+                  ^{:go/via [clientConnPool]} (.MarkDead (.-connPool (.-t cc)) cc))))
+
+            (do
+              (.Unlock (.-mu cc)) ; avoid any deadlocks in MarkDead
+              ^{:go/via [clientConnPool]} (.MarkDead (.-connPool (.-t cc)) cc)
+              (.Lock (.-mu cc))))
+
+
+          (range [_ cs (.-streams cc)]
+            (select
+              (case (<! (.-peerClosed cs)))
+              ;; The server closed the stream before closing the conn,
+              ;; so no need to interrupt it.
+              (default
+                (.abortStreamLocked cs err))))
+
+
+          (.Broadcast (.-cond cc))
+          (.Unlock (.-mu cc))
+
+          (when (not (.-seenSettings cc))
+            ;; If we have a pending request that wants extended CONNECT,
+            ;; let it continue and fail with the connection error.
+            (set! (.-extendedConnectAllowed cc) true)
+            (close (.-seenSettingsChan cc))))))))
+
+
+
+
+
+^{:go/end 2033} (go/method countReadFrameError "countReadFrameError calls ClientConn.fr.countError with a string\nrepresenting err.\n" [^{:tag (* ClientConn)} cc ^error err]
+  (let [f (.-countError (.-fr cc))]
+    (when (or (== f nil) (== err nil))
+      (return))
+
+    (when [(values ce ok) (assert ConnectionError err)] ok
+      (let [errCode (conv ErrCode ce)]
+        (f (fmt/Sprintf "read_frame_conn_error_%s" (.stringToken errCode)))
+        (return)))
+
+    (when (errors/Is err io/EOF)
+      (f "read_frame_eof")
+      (return))
+
+    (when (errors/Is err io/ErrUnexpectedEOF)
+      (f "read_frame_unexpected_eof")
+      (return))
+
+    (when (errors/Is err ErrFrameTooLarge)
+      (f "read_frame_too_large")
+      (return))
+
+    (f "read_frame_other")))
+
+
+
+(go/var ^{:doc "errStopReadLoop is an error which cleanly exits the client's read loop.\n"} errStopReadLoop (errors/New "client connection is closing (BUG: this is not user visible)"))
+
+^{:go/end 2104} (go/method run ^error [^{:tag (* clientConnReadLoop)} rl]
+  (let [cc (.-cc rl)
+      ^{:line 2040} gotSettings false
+      ^{:line 2041} readIdleTimeout (.-readIdleTimeout cc)
+      ^{:line 2042 :tag (* time/Timer)} t (zero (* time/Timer))]
+    (when (!= readIdleTimeout 0)
+      (set! t (time/AfterFunc readIdleTimeout (.-healthCheck cc))))
+
+    (while true
+      (let [(values f err) (.ReadFrame (.-fr cc))]
+        (when (!= t nil)
+          (.Reset t readIdleTimeout))
+
+        (when (!= err nil)
+          (.vlogf cc "http2: Transport readFrame error on conn %p: (%T) %v" cc err err))
+
+        (if [(values se ok) (assert StreamError err)] ok (do
+            (when [cs (.streamByID rl (.-StreamID se) notHeaderOrDataFrame)] (!= cs nil)
+              (when (== (.-Cause se) nil)
+                (set! (.-Cause se) (.-errDetail (.-fr cc))))
+
+              (.endStreamError rl cs se))
+
+            (continue))
+          (when (!= err nil)
+            (.countReadFrameError cc err)
+            (return err)))
+
+        (when VerboseLogs
+          (.vlogf cc "http2: Transport received %s" (summarizeFrame f)))
+
+        (when (not gotSettings)
+          (when [(values _ ok) (assert (* SettingsFrame) f)] (not ok)
+            (.logf cc "protocol error: received %T before a SETTINGS frame" f)
+            (return (conv ConnectionError ErrCodeProtocol)))
+
+          (set! gotSettings true))
+
+
+        (type-switch [f f]
+          (case [(* MetaHeadersFrame)]
+            (set! err (.processHeaders rl f)))
+          (case [(* DataFrame)]
+            (set! err (.processData rl f)))
+          (case [(* GoAwayFrame)]
+            (set! err (.processGoAway rl f)))
+          (case [(* RSTStreamFrame)]
+            (set! err (.processResetStream rl f)))
+          (case [(* SettingsFrame)]
+            (set! err (.processSettings rl f)))
+          (case [(* PushPromiseFrame)]
+            (set! err (.processPushPromise rl f)))
+          (case [(* WindowUpdateFrame)]
+            (set! err (.processWindowUpdate rl f)))
+          (case [(* PingFrame)]
+            (set! err (.processPing rl f)))
+          (default
+            (.logf cc "Transport: unhandled response frame type %T" f)))
+
+        (when (!= err nil)
+          (when (and VerboseLogs (!= err errStopReadLoop))
+            (.vlogf cc "http2: Transport conn %p received error from processing frame %v: %v" cc (summarizeFrame f) err))
+
+          (return err))))))
+
+
+
+
+^{:go/end 2161} (go/method processHeaders ^error [^{:tag (* clientConnReadLoop)} rl ^{:tag (* MetaHeadersFrame)} f]
+  (let [cs (.streamByID rl ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f) headerOrDataFrame)]
+    (when (== cs nil)
+      ;; We'd get here if we canceled a request while the
+      ;; server had its response still in flight. So if this
+      ;; was just something we canceled, ignore it.
+      (return nil))
+
+    (when (.-readClosed cs)
+      (.endStreamError rl cs ^{:go/breaks [2 4 6]} (lit StreamError
+          :StreamID ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f)
+          :Code ErrCodeProtocol
+          :Cause (errors/New "protocol error: headers after END_STREAM")))
+
+      (return nil))
+
+    (when (not (.-firstByte cs))
+      (when (!= (.-trace cs) nil)
+        ;; TODO(bradfitz): move first response byte earlier,
+        ;; when we first read the 9 byte header, not waiting
+        ;; until all the HEADERS+CONTINUATION frames have been
+        ;; merged. This works for now.
+        (traceFirstResponseByte (.-trace cs)))
+
+      (set! (.-firstByte cs) true))
+
+    (if (not (.-pastHeaders cs))
+      (set! (.-pastHeaders cs) true)
+
+      (return (.processTrailers rl cs f)))
+
+
+    ^{:go/breaks [[7 2160]]} (let [(values res err) (.handleResponse rl cs f)]
+      (when (!= err nil)
+        (when [(values _ ok) (assert ConnectionError err)] ok
+          (return err))
+
+        ;; Any other error type is a stream error.
+        (.endStreamError rl cs ^{:go/breaks [2 4 6]} (lit StreamError
+            :StreamID ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f)
+            :Code ErrCodeProtocol
+            :Cause err))
+
+        (return nil)) ; return nil from process* funcs to keep conn alive
+
+      (when (== res nil)
+        ;; (nil, nil) special case. See handleResponse docs.
+        (return nil))
+
+      (set! (.-res cs) res)
+      (close (.-respHeaderRecv cs))
+      (when ^{:go/via [HeadersFrame]} (.StreamEnded f)
+        (.endStream rl cs))
+
+      nil)))
+
+
+
+
+
+
+
+
+^{:go/end 2304} (go/method handleResponse "may return error types nil, or ConnectionError. Any other error value\nis a StreamError of type ErrCodeProtocol. The returned error in that case\nis the detail.\n\nAs a special case, handleResponse may return (nil, nil) to skip the\nframe (currently only used for 1xx responses).\n" [^{:tag (* clientConnReadLoop)} rl ^{:tag (* clientStream)} cs ^{:tag (* MetaHeadersFrame)} f] :results [(* ClientResponse) error]
+  (when (.-Truncated f)
+    (return nil errResponseHeaderListSize))
+
+
+  (let [status (.PseudoValue f "status")]
+    (when (== status "")
+      (return nil (errors/New "malformed response from server: missing status pseudo header")))
+
+    (let [(values statusCode err) (strconv/Atoi status)]
+      (when (!= err nil)
+        (return nil (errors/New "malformed response from server: malformed non-numeric status pseudo header")))
+
+
+      (let [regularFields (.RegularFields f)
+          ^{:line 2184} strs (make (slice string) (len regularFields))
+          ^{:line 2185} header (make Header (len regularFields))
+          ^{:line 2186} res (addr (.-staticResp cs))]
+        (set! (.-staticResp cs) ^{:go/breaks [2 4 6]} (lit ClientResponse
+            :Header header
+            :StatusCode statusCode
+            :Status status))
+
+        (range [_ hf regularFields]
+          (let [key (httpcommon/CanonicalHeader (.-Name hf))]
+            (if (== key "Trailer")
+              (let [t (.-Trailer res)]
+                (when (== t nil)
+                  (set! t (make Header))
+                  (set! (.-Trailer res) t))
+
+                (foreachHeaderElement (.-Value hf) ^{:go/end 2202} (fn [^string v]
+                    (aset t (httpcommon/CanonicalHeader v) nil))))
+
+
+              (let [vv (aget header key)]
+                (if (and (== vv nil) (> (len strs) 0)) (do
+                    ;; More than likely this will be a single-element key.
+                    ;; Most headers aren't multi-valued.
+                    ;; Set the capacity on strs[0] to 1, so any future append
+                    ;; won't extend the slice into the other strings.
+                    (set! (values vv strs) (values (subslice strs _ 1 1) (subslice strs 1)))
+                    (aset vv 0 (.-Value hf))
+                    (aset header key vv))
+
+                  (aset header key (append vv (.-Value hf))))))))
+
+
+
+
+        (when (and (>= statusCode 100) (<= statusCode 199))
+          (when ^{:go/via [HeadersFrame]} (.StreamEnded f)
+            (return nil (errors/New "1xx informational response with END_STREAM flag")))
+
+          (if [fn (.get1xxTraceFunc cs)] (!= fn nil)
+            ;; If the 1xx response is being delivered to the user,
+            ;; then they're responsible for limiting the number
+            ;; of responses.
+            (when [err (go/call fn statusCode (conv textproto/MIMEHeader header))] (!= err nil)
+              (return nil err))
+
+
+            ;; If the user didn't examine the 1xx response, then we
+            ;; limit the size of all 1xx headers.
+            ;;
+            ;; This differs a bit from the HTTP/1 implementation, which
+            ;; limits the size of all 1xx headers plus the final response.
+            ;; Use the larger limit of MaxHeaderListSize and
+            ;; net/http.Transport.MaxResponseHeaderBytes.
+            (let [limit (conv int64 (.maxHeaderListSize (.-t (.-cc cs))))]
+              (when [t1 (.-t1 (.-t (.-cc cs)))] (and (!= t1 nil) (> (.MaxResponseHeaderBytes t1) limit))
+                (set! limit (.MaxResponseHeaderBytes t1)))
+
+              (range [_ h (.-Fields f)]
+                (set! (.-totalHeaderSize cs) + (conv int64 (.Size h))))
+
+              (when (> (.-totalHeaderSize cs) limit)
+                (when VerboseLogs
+                  (log/Printf "http2: 1xx informational responses too large"))
+
+                (return nil (errors/New "header list too large")))))
+
+
+          (when (== statusCode 100)
+            (traceGot100Continue (.-trace cs))
+            (select
+              (case (>! (.-on100 cs) (lit (struct))))
+              (default)))
+
+
+          (set! (.-pastHeaders cs) false) ; do it all again
+          (return nil nil))
+
+
+        (set! (.-ContentLength res) -1)
+        (if [clens (aget (.-Header res) "Content-Length")] (== (len clens) 1)
+          (if [(values cl err) (strconv/ParseUint (aget clens 0) 10 63)] (== err nil)
+            (set! (.-ContentLength res) (conv int64 cl))
+            (do))
+          ;; TODO: care? unlike http/1, it won't mess up our framing, so it's
+          ;; more safe smuggling-wise to ignore.
+
+          (cond (> (len clens) 1) (do)
+            ;; TODO: care? unlike http/1, it won't mess up our framing, so it's
+            ;; more safe smuggling-wise to ignore.
+            (and ^{:go/via [HeadersFrame]} (.StreamEnded f) (not (.-isHead cs)))
+            (set! (.-ContentLength res) 0)))
+
+
+        (when (.-isHead cs)
+          (set! (.-Body res) NoBody)
+          (return res nil))
+
+
+        (when ^{:go/via [HeadersFrame]} (.StreamEnded f)
+          (if (> (.-ContentLength res) 0)
+            (set! (.-Body res) (lit missingBody))
+
+            (set! (.-Body res) NoBody))
+
+          (return res nil))
+
+
+        (.setBuffer (.-bufPipe cs) (addr (lit dataBuffer :expected (.-ContentLength res))))
+        (set! (.-bytesRemain cs) (.-ContentLength res))
+        (set! (.-Body res) (lit transportResponseBody cs))
+
+        (when (and (.-requestedGzip cs) (asciiEqualFold (.Get (.-Header res) "Content-Encoding") "gzip"))
+          (.Del (.-Header res) "Content-Encoding")
+          (.Del (.-Header res) "Content-Length")
+          (set! (.-ContentLength res) -1)
+          (set! (.-Body res) (addr (lit gzipReader :body (.-Body res))))
+          (set! (.-Uncompressed res) true))
+
+        (return res nil)))))
+
+
+^{:go/end 2340} (go/method processTrailers ^error [^{:tag (* clientConnReadLoop)} rl ^{:tag (* clientStream)} cs ^{:tag (* MetaHeadersFrame)} f]
+  (when (.-pastTrailers cs)
+    ;; Too many HEADERS frames for this stream.
+    (return (conv ConnectionError ErrCodeProtocol)))
+
+  (set! (.-pastTrailers cs) true)
+  (when (not ^{:go/via [HeadersFrame]} (.StreamEnded f))
+    ;; We expect that any headers for trailers also
+    ;; has END_STREAM.
+    (return (conv ConnectionError ErrCodeProtocol)))
+
+  (when (> (len (.PseudoFields f)) 0)
+    ;; No pseudo header fields are defined for trailers.
+    ;; TODO: ConnectionError might be overly harsh? Check.
+    (return (conv ConnectionError ErrCodeProtocol)))
+
+  (when (.-Truncated f)
+    (.endStreamError rl cs ^{:go/breaks [2 4 6]} (lit StreamError
+        :StreamID ^{:go/via [HeadersFrame FrameHeader]} (.-StreamID f)
+        :Code ErrCodeProtocol
+        :Cause errResponseHeaderListSize))
+
+    (return nil))
+
+
+  ^{:go/breaks [5]} (let [trailer (make Header)]
+    (range [_ hf (.RegularFields f)]
+      (let [key (httpcommon/CanonicalHeader (.-Name hf))]
+        (aset trailer key (append (aget trailer key) (.-Value hf)))))
+
+    (set! (.-trailer cs) trailer)
+
+    (.endStream rl cs)
+    nil))
+
+
+
+
+(go/type transportResponseBody "transportResponseBody is the concrete type of Transport.RoundTrip's\nResponse.Body. It is an io.ReadCloser.\n" (struct
+    ^{:line 2345 :tag (* clientStream)} cs))
+
+
+^{:go/end 2398} (go/method Read [^transportResponseBody b ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (let [cs (.-cs b)
+      ^{:line 2350} cc (.-cc cs)]
+
+    (when (!= (.-readErr cs) nil)
+      (return 0 (.-readErr cs)))
+
+    (set! (values n err) (.Read (.-bufPipe (.-cs b)) p))
+    (when (!= (.-bytesRemain cs) -1)
+      (when (> (conv int64 n) (.-bytesRemain cs))
+        (set! n (conv int (.-bytesRemain cs)))
+        (when (== err nil)
+          (set! err (errors/New "net/http: server replied with more than declared Content-Length; truncated"))
+          (.abortStream cs err))
+
+        (set! (.-readErr cs) err)
+        (return (conv int (.-bytesRemain cs)) err))
+
+      (set! (.-bytesRemain cs) - (conv int64 n))
+      (when (and (== err io/EOF) (> (.-bytesRemain cs) 0))
+        (set! err io/ErrUnexpectedEOF)
+        (set! (.-readErr cs) err)
+        (return n err)))
+
+
+    (when (== n 0)
+      ;; No flow control tokens to send back.
+      (return))
+
+
+    (.Lock (.-mu cc))
+    (let [connAdd (.add (.-inflow cc) n)
+        ^{:line 2380 :tag int32} streamAdd (zero int32)]
+      (when (== err nil) ; No need to refresh if the stream is over or failed.
+        (set! streamAdd (.add (.-inflow cs) n)))
+
+      (.Unlock (.-mu cc))
+
+      (when (or (!= connAdd 0) (!= streamAdd 0))
+        (.Lock (.-wmu cc))
+        (defer (.Unlock (.-wmu cc)))
+        (when (!= connAdd 0)
+          (.WriteWindowUpdate (.-fr cc) 0 (mustUint31 connAdd)))
+
+        (when (!= streamAdd 0)
+          (.WriteWindowUpdate (.-fr cc) (.-ID cs) (mustUint31 streamAdd)))
+
+        (.Flush (.-bw cc)))
+
+      (return))))
+
+
+(go/var errClosedResponseBody (errors/New "http2: response body closed"))
+
+^{:go/end 2438} (go/method Close ^error [^transportResponseBody b]
+  (let [cs (.-cs b)
+      ^{:line 2404} cc (.-cc cs)]
+
+    (.BreakWithError (.-bufPipe cs) errClosedResponseBody)
+    (.abortStream cs errClosedResponseBody)
+
+    ^{:go/breaks [[4 2437]]} (let [unread (.Len (.-bufPipe cs))]
+      (when (> unread 0)
+        (.Lock (.-mu cc))
+        ;; Return connection-level flow control.
+        (let [connAdd (.add (.-inflow cc) unread)]
+          (.Unlock (.-mu cc))
+
+          ;; TODO(dneil): Acquiring this mutex can block indefinitely.
+          ;; Move flow control return to a goroutine?
+          (.Lock (.-wmu cc))
+          ;; Return connection-level flow control.
+          (when (> connAdd 0)
+            (.WriteWindowUpdate (.-fr cc) 0 (conv uint32 connAdd)))
+
+          (.Flush (.-bw cc))
+          (.Unlock (.-wmu cc))))
+
+
+      (select
+        (case (<! (.-donec cs)))
+        (case (<! (.Done (.-ctx cs)))
+          ;; See golang/go#49366: The net/http package can cancel the
+          ;; request context after the response body is fully read.
+          ;; Don't treat this as an error.
+          (return nil))
+        (case (<! (.-reqCancel cs))
+          (return errRequestCanceled)))
+
+      nil)))
+
+
+^{:go/end 2554} (go/method processData ^error [^{:tag (* clientConnReadLoop)} rl ^{:tag (* DataFrame)} f]
+  ^{:go/breaks [[7 2553]]} (let [cc (.-cc rl)
+      ^{:line 2442} cs (.streamByID rl ^{:go/via [FrameHeader]} (.-StreamID f) headerOrDataFrame)
+      ^{:line 2443} data (.Data f)]
+    (when (== cs nil)
+      (.Lock (.-mu cc))
+      (let [neverSent (.-nextStreamID cc)]
+        (.Unlock (.-mu cc))
+        (when (>= ^{:go/via [FrameHeader]} (.-StreamID f) neverSent)
+          ;; We never asked for this.
+          (.logf cc "http2: Transport received unsolicited DATA frame; closing connection")
+          (return (conv ConnectionError ErrCodeProtocol)))
+
+        ;; We probably did ask for this, but canceled. Just ignore it.
+        ;; TODO: be stricter here? only silently ignore things which
+        ;; we canceled, but not things which were closed normally
+        ;; by the peer? Tough without accumulating too much state.
+
+        ;; But at least return their flow control:
+        (when (> ^{:go/via [FrameHeader]} (.-Length f) 0)
+          (.Lock (.-mu cc))
+          (let [ok (.take (.-inflow cc) ^{:go/via [FrameHeader]} (.-Length f))
+              ^{:line 2462} connAdd (.add (.-inflow cc) (conv int ^{:go/via [FrameHeader]} (.-Length f)))]
+            (.Unlock (.-mu cc))
+            (when (not ok)
+              (return (conv ConnectionError ErrCodeFlowControl)))
+
+            (when (> connAdd 0)
+              (.Lock (.-wmu cc))
+              (.WriteWindowUpdate (.-fr cc) 0 (conv uint32 connAdd))
+              (.Flush (.-bw cc))
+              (.Unlock (.-wmu cc)))))
+
+
+        (return nil)))
+
+    (when (.-readClosed cs)
+      (.logf cc "protocol error: received DATA after END_STREAM")
+      (.endStreamError rl cs ^{:go/breaks [2 4]} (lit StreamError
+          :StreamID ^{:go/via [FrameHeader]} (.-StreamID f)
+          :Code ErrCodeProtocol))
+
+      (return nil))
+
+    (when (not (.-pastHeaders cs))
+      (.logf cc "protocol error: received DATA before a HEADERS frame")
+      (.endStreamError rl cs ^{:go/breaks [2 4]} (lit StreamError
+          :StreamID ^{:go/via [FrameHeader]} (.-StreamID f)
+          :Code ErrCodeProtocol))
+
+      (return nil))
+
+    (when (> ^{:go/via [FrameHeader]} (.-Length f) 0)
+      (when (and (.-isHead cs) (> (len data) 0))
+        (.logf cc "protocol error: received DATA on a HEAD request")
+        (.endStreamError rl cs ^{:go/breaks [2 4]} (lit StreamError
+            :StreamID ^{:go/via [FrameHeader]} (.-StreamID f)
+            :Code ErrCodeProtocol))
+
+        (return nil))
+
+      ;; Check connection-level flow control.
+      (.Lock (.-mu cc))
+      (when (not (takeInflows (addr (.-inflow cc)) (addr (.-inflow cs)) ^{:go/via [FrameHeader]} (.-Length f)))
+        (.Unlock (.-mu cc))
+        (return (conv ConnectionError ErrCodeFlowControl)))
+
+      ;; Return any padded flow control now, since we won't
+      ;; refund it later on body reads.
+      (let [^int refund (zero int)]
+        (when [pad (- (conv int ^{:go/via [FrameHeader]} (.-Length f)) (len data))] (> pad 0)
+          (set! refund + pad))
+
+
+        (let [didReset false
+            ^{:line 2515 :tag error} err (zero error)]
+          (when (> (len data) 0)
+            (when [(set! (values _ err) (.Write (.-bufPipe cs) data))] (!= err nil)
+              ;; Return len(data) now if the stream is already closed,
+              ;; since data will never be read.
+              (set! didReset true)
+              (set! refund + (len data))))
+
+
+
+          (let [sendConn (.add (.-inflow cc) refund)
+              ^{:line 2526 :tag int32} sendStream (zero int32)]
+            (when (not didReset)
+              (set! sendStream (.add (.-inflow cs) refund)))
+
+            (.Unlock (.-mu cc))
+
+            (when (or (> sendConn 0) (> sendStream 0))
+              (.Lock (.-wmu cc))
+              (when (> sendConn 0)
+                (.WriteWindowUpdate (.-fr cc) 0 (conv uint32 sendConn)))
+
+              (when (> sendStream 0)
+                (.WriteWindowUpdate (.-fr cc) (.-ID cs) (conv uint32 sendStream)))
+
+              (.Flush (.-bw cc))
+              (.Unlock (.-wmu cc)))
+
+
+            (when (!= err nil)
+              (.endStreamError rl cs err)
+              (return nil))))))
+
+
+
+    (when (.StreamEnded f)
+      (.endStream rl cs))
+
+    nil))
+
+
+^{:go/end 2570} (go/method endStream [^{:tag (* clientConnReadLoop)} rl ^{:tag (* clientStream)} cs]
+  ;; TODO: check that any declared content-length matches, like
+  ;; server.go's (*stream).endStream method.
+  (when (not (.-readClosed cs))
+    (set! (.-readClosed cs) true)
+    ;; Close cs.bufPipe and cs.peerClosed with cc.mu held to avoid a
+    ;; race condition: The caller can read io.EOF from Response.Body
+    ;; and close the body before we close cs.peerClosed, causing
+    ;; cleanupWriteRequest to send a RST_STREAM.
+    (.Lock (.-mu (.-cc rl)))
+    (defer (.Unlock (.-mu (.-cc rl))))
+    (.closeWithErrorAndCode (.-bufPipe cs) io/EOF (.-copyTrailers cs))
+    (close (.-peerClosed cs))))
+
+
+
+^{:go/end 2575} (go/method endStreamError [^{:tag (* clientConnReadLoop)} rl ^{:tag (* clientStream)} cs ^error err]
+  (set! (.-readAborted cs) true)
+  (.abortStream cs err))
+
+
+^{:go/end 2580} (go/method endStreamErrorLocked [^{:tag (* clientConnReadLoop)} rl ^{:tag (* clientStream)} cs ^error err]
+  (set! (.-readAborted cs) true)
+  (.abortStreamLocked cs err))
+
+
+
+(go/const "Constants passed to streamByID for documentation purposes.\n"
+  ^{:line 2584} [^{:val true} headerOrDataFrame true]
+  ^{:line 2585} [^{:val false} notHeaderOrDataFrame false])
+
+
+
+
+^{:go/end 2604} (go/method streamByID "streamByID returns the stream with the given id, or nil if no stream has that id.\nIf headerOrData is true, it clears rst.StreamPingsBlocked.\n" ^{:tag (* clientStream)} [^{:tag (* clientConnReadLoop)} rl ^uint32 id ^bool headerOrData]
+  (.Lock (.-mu (.-cc rl)))
+  (defer (.Unlock (.-mu (.-cc rl))))
+  (when headerOrData
+    ;; Work around an unfortunate gRPC behavior.
+    ;; See comment on ClientConn.rstStreamPingsBlocked for details.
+    (set! (.-rstStreamPingsBlocked (.-cc rl)) false))
+
+  (set! (.-readBeforeStreamID (.-cc rl)) (.-nextStreamID (.-cc rl)))
+  ^{:go/breaks [[3 2603]]} (let [cs (aget (.-streams (.-cc rl)) id)]
+    (when (and (!= cs nil) (not (.-readAborted cs)))
+      (return cs))
+
+    nil))
+
+
+^{:go/end 2614} (go/method copyTrailers [^{:tag (* clientStream)} cs]
+  (range [k vv (.-trailer cs)]
+    (let [t (.-resTrailer cs)]
+      (when (== @t nil)
+        (set! @t (make Header)))
+
+      (aset @t k vv))))
+
+
+
+^{:go/end 2664} (go/method processGoAway ^error [^{:tag (* clientConnReadLoop)} rl ^{:tag (* GoAwayFrame)} f]
+  (let [cc (.-cc rl)]
+    ^{:go/via [clientConnPool]} (.MarkDead (.-connPool (.-t cc)) cc)
+    (when (!= (.-ErrCode f) 0)
+      ;; TODO: deal with GOAWAY more. particularly the error code
+      (.vlogf cc "transport got GOAWAY with error code = %v" (.-ErrCode f))
+      (when [fn (.-countError (.-fr cc))] (!= fn nil)
+        (go/call fn (+ "recv_goaway_" (.stringToken (.-ErrCode f))))))
+
+
+
+    (.Lock (.-mu cc))
+    (defer (.Unlock (.-mu cc)))
+
+    (let [old (.-goAway cc)]
+      (set! (.-goAway cc) f)
+
+      ;; Merge the previous and current GoAway error frames.
+      (when (== (.-goAwayDebug cc) "")
+        (set! (.-goAwayDebug cc) (conv string (.DebugData f))))
+
+      (when (and (!= old nil) (!= (.-ErrCode old) ErrCodeNo))
+        (set! (.-ErrCode (.-goAway cc)) (.-ErrCode old)))
+
+      ^{:go/breaks [[4 2663]]} (let [last (.-LastStreamID f)]
+        (when (== (len (.-streams cc)) 0)
+          ;; Received a GOAWAY and no streams active, just close the conn.
+          (return errStopReadLoop))
+
+        (range [streamID cs (.-streams cc)]
+          (when (<= streamID last)
+            ;; The server's GOAWAY indicates that it received this stream.
+            ;; It will either finish processing it, or close the connection
+            ;; without doing so. Either way, leave the stream alone for now.
+            (continue))
+
+          (if (and (== streamID 1) (!= (.-ErrCode (.-goAway cc)) ErrCodeNo))
+            ;; Don't retry the first stream on a connection if we get a non-NO error.
+            ;; If the server is sending an error on a new connection,
+            ;; retrying the request on a new one probably isn't going to work.
+            (.abortStreamLocked cs (fmt/Errorf "http2: Transport received GOAWAY from server ErrCode:%v" (.-ErrCode (.-goAway cc))))
+
+            ;; Aborting the stream with errClentConnGotGoAway indicates that
+            ;; the request should be retried on a new connection.
+            (.abortStreamLocked cs errClientConnGotGoAway)))
+
+
+        nil))))
+
+
+^{:go/end 2681} (go/method processSettings ^error [^{:tag (* clientConnReadLoop)} rl ^{:tag (* SettingsFrame)} f]
+  ^{:go/breaks [[6 2680]]} (let [cc (.-cc rl)]
+    ;; Locking both mu and wmu here allows frame encoding to read settings with only wmu held.
+    ;; Acquiring wmu when f.IsAck() is unnecessary, but convenient and mostly harmless.
+    (.Lock (.-wmu cc))
+    (defer (.Unlock (.-wmu cc)))
+
+    (when [err (.processSettingsNoWrite rl f)] (!= err nil)
+      (return err))
+
+    (when (not (.IsAck f))
+      (.WriteSettingsAck (.-fr cc))
+      (.Flush (.-bw cc)))
+
+    nil))
+
+
+^{:go/end 2760} (go/method processSettingsNoWrite ^error [^{:tag (* clientConnReadLoop)} rl ^{:tag (* SettingsFrame)} f]
+  (let [cc (.-cc rl)]
+    (defer (.maybeCallStateHook cc))
+    (.Lock (.-mu cc))
+    (defer (.Unlock (.-mu cc)))
+
+    (when (.IsAck f)
+      (when (.-wantSettingsAck cc)
+        (set! (.-wantSettingsAck cc) false)
+        (return nil))
+
+      (return (conv ConnectionError ErrCodeProtocol)))
+
+
+    ^{:go/breaks [[4 2759]]} (let [^bool seenMaxConcurrentStreams (zero bool)
+        ^{:line 2698} err (.ForeachSetting f ^{:go/breaks [[4 2741]] :go/end 2742} (fn ^error [^Setting s]
+            (when [err (.Valid s)] (!= err nil)
+              (return err))
+
+            (switch (.-ID s)
+              (case [SettingMaxFrameSize]
+                (set! (.-maxFrameSize cc) (.-Val s)))
+              (case [SettingMaxConcurrentStreams]
+                (set! (.-maxConcurrentStreams cc) (.-Val s))
+                (set! seenMaxConcurrentStreams true))
+              (case [SettingMaxHeaderListSize]
+                (set! (.-peerMaxHeaderListSize cc) (conv uint64 (.-Val s))))
+              (case [SettingInitialWindowSize]
+                ;; Adjust flow control of currently-open
+                ;; frames by the difference of the old initial
+                ;; window size and this one.
+                (let [delta (- (conv int32 (.-Val s)) (conv int32 (.-initialWindowSize cc)))]
+                  (range [_ cs (.-streams cc)]
+                    (when (not (.add (.-flow cs) delta))
+                      (return (conv ConnectionError ErrCodeFlowControl))))
+
+
+                  (.Broadcast (.-cond cc))
+
+                  (set! (.-initialWindowSize cc) (.-Val s))))
+              (case [SettingHeaderTableSize]
+                (.SetMaxDynamicTableSize (.-henc cc) (.-Val s))
+                (set! (.-peerMaxHeaderTableSize cc) (.-Val s)))
+              (case [SettingEnableConnectProtocol]
+                ;; If the peer wants to send us SETTINGS_ENABLE_CONNECT_PROTOCOL,
+                ;; we require that it do so in the first SETTINGS frame.
+                ;;
+                ;; When we attempt to use extended CONNECT, we wait for the first
+                ;; SETTINGS frame to see if the server supports it. If we let the
+                ;; server enable the feature with a later SETTINGS frame, then
+                ;; users will see inconsistent results depending on whether we've
+                ;; seen that frame or not.
+                (when (not (.-seenSettings cc))
+                  (set! (.-extendedConnectAllowed cc) (== (.-Val s) 1))))
+
+              (default
+                (.vlogf cc "Unhandled Setting: %v" s)))
+
+            nil))]
+
+      (when (!= err nil)
+        (return err))
+
+
+      (when (not (.-seenSettings cc))
+        (when (not seenMaxConcurrentStreams)
+          ;; This was the servers initial SETTINGS frame and it
+          ;; didn't contain a MAX_CONCURRENT_STREAMS field so
+          ;; increase the number of concurrent streams this
+          ;; connection can establish to our default.
+          (set! (.-maxConcurrentStreams cc) defaultMaxConcurrentStreams))
+
+        (close (.-seenSettingsChan cc))
+        (set! (.-seenSettings cc) true))
+
+
+      nil)))
+
+
+^{:go/end 2790} (go/method processWindowUpdate ^error [^{:tag (* clientConnReadLoop)} rl ^{:tag (* WindowUpdateFrame)} f]
+  (let [cc (.-cc rl)
+      ^{:line 2764} cs (.streamByID rl ^{:go/via [FrameHeader]} (.-StreamID f) notHeaderOrDataFrame)]
+    (when (and (!= ^{:go/via [FrameHeader]} (.-StreamID f) 0) (== cs nil))
+      (return nil))
+
+
+    (.Lock (.-mu cc))
+    (defer (.Unlock (.-mu cc)))
+
+    ^{:go/breaks [5]} (let [fl (addr (.-flow cc))]
+      (when (!= cs nil)
+        (set! fl (addr (.-flow cs))))
+
+      (when (not (.add fl (conv int32 (.-Increment f))))
+        ;; For stream, the sender sends RST_STREAM with an error code of FLOW_CONTROL_ERROR
+        (when (!= cs nil)
+          (.endStreamErrorLocked rl cs ^{:go/breaks [2 4]} (lit StreamError
+              :StreamID ^{:go/via [FrameHeader]} (.-StreamID f)
+              :Code ErrCodeFlowControl))
+
+          (return nil))
+
+
+        (return (conv ConnectionError ErrCodeFlowControl)))
+
+      (.Broadcast (.-cond cc))
+      nil)))
+
+
+^{:go/end 2810} (go/method processResetStream ^error [^{:tag (* clientConnReadLoop)} rl ^{:tag (* RSTStreamFrame)} f]
+  (let [cs (.streamByID rl ^{:go/via [FrameHeader]} (.-StreamID f) notHeaderOrDataFrame)]
+    (when (== cs nil)
+      ;; TODO: return error if server tries to RST_STREAM an idle stream
+      (return nil))
+
+    ^{:go/breaks [7]} (let [serr (streamError (.-ID cs) (.-ErrCode f))]
+      (set! (.-Cause serr) errFromPeer)
+      (when (== (.-ErrCode f) ErrCodeProtocol)
+        (.SetDoNotReuse (.-cc rl)))
+
+      (when [fn (.-countError (.-fr (.-cc cs)))] (!= fn nil)
+        (go/call fn (+ "recv_rststream_" (.stringToken (.-ErrCode f)))))
+
+      (.abortStream cs serr)
+
+      (.CloseWithError (.-bufPipe cs) serr)
+      nil)))
+
+
+
+^{:go/end 2855} (go/method Ping "Ping sends a PING frame to the server and waits for the ack.\n" ^error [^{:tag (* ClientConn)} cc ^context/Context ctx]
+  (let [c (make (chan (struct)))
+      ;; Generate a random payload
+      ^{:line 2816 :tag (array 8 byte)} p (zero (array 8 byte))]
+    (while true
+      (when [(values _ err) (rand/Read (subslice p))] (!= err nil)
+        (return err))
+
+      (.Lock (.-mu cc))
+      ;; check for dup before insert
+      (when [(values _ found) (aget (.-pings cc) p)] (not found)
+        (aset (.-pings cc) p c)
+        (.Unlock (.-mu cc))
+        (break))
+
+      (.Unlock (.-mu cc)))
+
+    (let [^error pingError (zero error)
+        ^{:line 2831} errc (make (chan (struct)))]
+      (go (^{:go/end 2843} (fn []
+            (.Lock (.-wmu cc))
+            (defer (.Unlock (.-wmu cc)))
+            (when [(set! pingError (.WritePing (.-fr cc) false p))] (!= pingError nil)
+              (close errc)
+              (return))
+
+            (when [(set! pingError (.Flush (.-bw cc)))] (!= pingError nil)
+              (close errc)
+              (return)))))
+
+
+      (select
+        (case (<! c)
+          (return nil))
+        (case (<! errc)
+          (return pingError))
+        (case (<! (.Done ctx))
+          (return (.Err ctx)))
+        (case (<! (.-readerDone cc))
+          ;; connection closed
+          (return (.-readerErr cc)))))))
+
+
+
+^{:go/end 2883} (go/method processPing ^error [^{:tag (* clientConnReadLoop)} rl ^{:tag (* PingFrame)} f]
+  (when (.IsAck f)
+    (let [cc (.-cc rl)]
+      (defer (.maybeCallStateHook cc))
+      (.Lock (.-mu cc))
+      (defer (.Unlock (.-mu cc)))
+      ;; If ack, notify listener if any
+      (when [(values c ok) (aget (.-pings cc) (.-Data f))] ok
+        (close c)
+        (delete (.-pings cc) (.-Data f)))
+
+      (when (> (.-pendingResets cc) 0)
+        ;; See clientStream.cleanupWriteRequest.
+        (set! (.-pendingResets cc) 0)
+        (set! (.-rstStreamPingsBlocked cc) true)
+        (.Broadcast (.-cond cc)))
+
+      (return nil)))
+
+  (let [cc (.-cc rl)]
+    (.Lock (.-wmu cc))
+    (defer (.Unlock (.-wmu cc)))
+    (when [err (.WritePing (.-fr cc) true (.-Data f))] (!= err nil)
+      (return err))
+
+    (.Flush (.-bw cc))))
+
+
+^{:go/end 2894} (go/method processPushPromise ^error [^{:tag (* clientConnReadLoop)} rl ^{:tag (* PushPromiseFrame)} f]
+  ;; We told the peer we don't want them.
+  ;; Spec says:
+  ;; "PUSH_PROMISE MUST NOT be sent if the SETTINGS_ENABLE_PUSH
+  ;; setting of the peer endpoint is set to 0. An endpoint that
+  ;; has set this setting and has received acknowledgement MUST
+  ;; treat the receipt of a PUSH_PROMISE frame as a connection
+  ;; error (Section 5.4.1) of type PROTOCOL_ERROR."
+  (conv ConnectionError ErrCodeProtocol))
+
+
+
+
+^{:go/end 2912} (go/method writeStreamReset "writeStreamReset sends a RST_STREAM frame.\nWhen ping is true, it also sends a PING frame with a random payload.\n" [^{:tag (* ClientConn)} cc ^uint32 streamID ^ErrCode code ^bool ping ^error err]
+  ;; TODO: map err to more interesting error codes, once the
+  ;; HTTP community comes up with some. But currently for
+  ;; RST_STREAM there's no equivalent to GOAWAY frame's debug
+  ;; data, and the error codes are all pretty vague ("cancel").
+  (.Lock (.-wmu cc))
+  (.WriteRSTStream (.-fr cc) streamID code)
+  (when ping
+    (let [^{:tag (array 8 byte)} payload (zero (array 8 byte))]
+      (rand/Read (subslice payload))
+      (.WritePing (.-fr cc) false payload)))
+
+  (.Flush (.-bw cc))
+  (.Unlock (.-wmu cc)))
+
+
+(go/var
+  ^{:line 2915} [errResponseHeaderListSize (errors/New "http2: response header list larger than advertised limit")]
+  ^{:line 2916} [errRequestHeaderListSize httpcommon/ErrRequestHeaderListSize])
+
+
+^{:go/end 2921} (go/method logf [^{:tag (* ClientConn)} cc ^string format & ^{:tag (slice any)} args]
+  (.logf (.-t cc) format (spread args)))
+
+
+^{:go/end 2925} (go/method vlogf [^{:tag (* ClientConn)} cc ^string format & ^{:tag (slice any)} args]
+  (.vlogf (.-t cc) format (spread args)))
+
+
+^{:go/end 2931} (go/method vlogf [^{:tag (* Transport)} t ^string format & ^{:tag (slice any)} args]
+  (when VerboseLogs
+    (.logf t format (spread args))))
+
+
+
+^{:go/end 2935} (go/method logf [^{:tag (* Transport)} t ^string format & ^{:tag (slice any)} args]
+  (log/Printf format (spread args)))
+
+
+(go/type missingBody (struct))
+
+^{:go/end 2939} (go/method Close ^error [missingBody] nil)
+^{:go/end 2940} (go/method Read [missingBody (slice byte)] :results [int error] (return 0 io/ErrUnexpectedEOF))
+
+(go/type erringRoundTripper (struct ^error err))
+
+^{:go/end 2944} (go/method RoundTripErr ^error [^erringRoundTripper rt] (.-err rt))
+^{:go/end 2945} (go/method RoundTrip [^erringRoundTripper rt (* ClientRequest)] :results [(* ClientResponse) error] (return nil (.-err rt)))
+
+(go/var errConcurrentReadOnResBody (errors/New "http2: concurrent read on response body"))
+
+
+
+
+
+(go/type gzipReader "gzipReader wraps a response body so it can lazily\nget gzip.Reader from the pool on the first call to Read.\nAfter Close is called it puts gzip.Reader to the pool immediately\nif there is no Read in progress or later when Read completes.\n" (struct
+    ^{:line 2954 :tag incomparable} _
+    ^{:line 2955 :tag io/ReadCloser} body ; underlying Response.Body
+    ^{:line 2956 :tag sync/Mutex} mu ; guards zr and zerr
+    ^{:line 2957 :tag (* gzip/Reader)} zr ; stores gzip reader from the pool between reads
+    ^{:line 2958 :tag error} zerr)) ; sticky gzip reader init error or sentinel value to detect concurrent read and read after close
+
+
+(go/type eofReader (struct))
+
+^{:go/end 2963} (go/method Read [eofReader (slice byte)] :results [int error] (return 0 io/EOF))
+^{:go/end 2964} (go/method ReadByte [eofReader] :results [byte error] (return 0 io/EOF))
+
+(go/var gzipPool (lit sync/Pool :New ^{:go/end 2966} (fn ^any [] (new gzip/Reader))))
+
+
+^{:go/end 2976} (go/func gzipPoolGet "gzipPoolGet gets a gzip.Reader from the pool and resets it to read from r.\n" [^io/Reader r] :results [(* gzip/Reader) error]
+  (let [zr (assert (* gzip/Reader) (.Get gzipPool))]
+    (when [err (.Reset zr r)] (!= err nil)
+      (gzipPoolPut zr)
+      (return nil err))
+
+    (return zr nil)))
+
+
+
+^{:go/end 2985} (go/func gzipPoolPut "gzipPoolPut puts a gzip.Reader back into the pool.\n" [^{:tag (* gzip/Reader)} zr]
+  ;; Reset will allocate bufio.Reader if we pass it anything
+  ;; other than a flate.Reader, so ensure that it's getting one.
+  (let [^flate/Reader r (lit eofReader)]
+    (.Reset zr r)
+    (.Put gzipPool zr)))
+
+
+
+
+^{:go/end 3019} (go/method acquire "acquire returns a gzip.Reader for reading response body.\nThe reader must be released after use.\n" [^{:tag (* gzipReader)} gz] :results [(* gzip/Reader) error]
+  (.Lock (.-mu gz))
+  (defer (.Unlock (.-mu gz)))
+  (when (!= (.-zerr gz) nil)
+    (return nil (.-zerr gz)))
+
+  (when (== (.-zr gz) nil)
+    ;; gzipPoolGet might block indefinitely since it reads the gzip header.
+    ;; Therefore, drop mu temporarily when using gzipPoolGet.
+    ;; We set zerr to errConcurrentReadOnResBody to prevent concurrent read
+    ;; even when mu is temporarily dropped.
+    (set! (.-zerr gz) errConcurrentReadOnResBody)
+    (.Unlock (.-mu gz))
+    (let [(values zr err) (gzipPoolGet (.-body gz))]
+      (.Lock (.-mu gz))
+      ;; Guard against Close being called while gzipPoolGet is running.
+      (when (!= (.-zerr gz) errConcurrentReadOnResBody)
+        (when (!= zr nil)
+          (gzipPoolPut zr))
+
+        (return nil (.-zerr gz)))
+
+      (set! (values (.-zr gz) (.-zerr gz)) (values zr err))
+      (when (!= (.-zerr gz) nil)
+        (return nil (.-zerr gz)))))
+
+
+  (let [ret (.-zr gz)]
+    (set! (values (.-zr gz) (.-zerr gz)) (values nil errConcurrentReadOnResBody))
+    (return ret nil)))
+
+
+
+^{:go/end 3030} (go/method release "release returns the gzip.Reader to the pool if Close was called during Read.\n" [^{:tag (* gzipReader)} gz ^{:tag (* gzip/Reader)} zr]
+  (.Lock (.-mu gz))
+  (defer (.Unlock (.-mu gz)))
+  (if (== (.-zerr gz) errConcurrentReadOnResBody)
+    (set! (values (.-zr gz) (.-zerr gz)) (values zr nil))
+    ;; fs.ErrClosed
+    (gzipPoolPut zr)))
+
+
+
+
+
+^{:go/end 3042} (go/method close "close returns the gzip.Reader to the pool immediately or\nsignals release to do so after Read completes.\n" [^{:tag (* gzipReader)} gz]
+  (.Lock (.-mu gz))
+  (defer (.Unlock (.-mu gz)))
+  (when (and (== (.-zerr gz) nil) (!= (.-zr gz) nil))
+    (gzipPoolPut (.-zr gz))
+    (set! (.-zr gz) nil))
+
+  (set! (.-zerr gz) fs/ErrClosed))
+
+
+^{:go/end 3052} (go/method Read [^{:tag (* gzipReader)} gz ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (let [(values zr ^:assign err) (.acquire gz)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (defer (.release gz zr))
+
+    (.Read zr p)))
+
+
+^{:go/end 3058} (go/method Close ^error [^{:tag (* gzipReader)} gz]
+  (.close gz)
+
+  (.Close (.-body gz)))
+
+
+
+
+^{:go/end 3064} (go/func isConnectionCloseRequest "isConnectionCloseRequest reports whether req should use its own\nconnection for a single request and then close the connection.\n" ^bool [^{:tag (* ClientRequest)} req]
+  (or (.-Close req) (httpguts/HeaderValuesContainsToken (aget (.-Header req) "Connection") "close")))
+
+
+
+
+(go/type NetHTTPClientConn "netHTTPClientConn wraps ClientConn and implements the interface net/http expects from\nthe RoundTripper returned by NewClientConn.\n" (struct
+    ^{:line 3069 :tag (* ClientConn)} cc))
+
+
+^{:go/end 3074} (go/method RoundTrip [^NetHTTPClientConn cc ^{:tag (* ClientRequest)} req] :results [(* ClientResponse) error]
+  (.RoundTrip (.-cc cc) req))
+
+
+^{:go/end 3078} (go/method Close ^error [^NetHTTPClientConn cc]
+  (.Close (.-cc cc)))
+
+
+^{:go/breaks [[6 3086]] :go/end 3087} (go/method Err ^error [^NetHTTPClientConn cc]
+  (.Lock (.-mu (.-cc cc)))
+  (defer (.Unlock (.-mu (.-cc cc))))
+  (when (.-closed (.-cc cc))
+    (return (errors/New "connection closed")))
+
+  nil)
+
+
+^{:go/breaks [8] :go/end 3098} (go/method Reserve ^error [^NetHTTPClientConn cc]
+  (defer (.maybeCallStateHook (.-cc cc)))
+  (.Lock (.-mu (.-cc cc)))
+  (defer (.Unlock (.-mu (.-cc cc))))
+  (when (not (.canReserveLocked (.-cc cc)))
+    (return (errors/New "connection is unavailable")))
+
+  (inc! (.-streamsReserved (.-cc cc)))
+  nil)
+
+
+^{:go/end 3111} (go/method Release [^NetHTTPClientConn cc]
+  (defer (.maybeCallStateHook (.-cc cc)))
+  (.Lock (.-mu (.-cc cc)))
+  (defer (.Unlock (.-mu (.-cc cc))))
+  ;; We don't complain if streamsReserved is 0.
+  ;;
+  ;; This is consistent with RoundTrip: both Release and RoundTrip will
+  ;; consume a reservation iff one exists.
+  (when (> (.-streamsReserved (.-cc cc)) 0)
+    (dec! (.-streamsReserved (.-cc cc)))))
+
+
+
+^{:go/end 3117} (go/method Available ^int [^NetHTTPClientConn cc]
+  (.Lock (.-mu (.-cc cc)))
+  (defer (.Unlock (.-mu (.-cc cc))))
+  (.availableLocked (.-cc cc)))
+
+
+^{:go/end 3123} (go/method InFlight ^int [^NetHTTPClientConn cc]
+  (.Lock (.-mu (.-cc cc)))
+  (defer (.Unlock (.-mu (.-cc cc))))
+  (.currentRequestCountLocked (.-cc cc)))
+
+
+^{:go/end 3127} (go/method Ping ^error [^NetHTTPClientConn cc ^context/Context ctx]
+  (.Ping (.-cc cc) ctx))
+
+
+^{:go/end 3133} (go/method maybeCallStateHook [^{:tag (* ClientConn)} cc]
+  (when (!= (.-internalStateHook cc) nil)
+    ((.-internalStateHook cc))))
+
+
+
+^{:go/breaks [[4 3140]] :go/end 3141} (go/method idleConnTimeout ^time/Duration [^{:tag (* Transport)} t]
+  (when (!= (.-t1 t) nil)
+    (return (.IdleConnTimeout (.-t1 t))))
+
+
+  0)
+
+
+^{:go/end 3149} (go/func traceGetConn [^{:tag (* ClientRequest)} req ^string hostPort]
+  (let [trace (httptrace/ContextClientTrace (.-Context req))]
+    (when (or (== trace nil) (== (.-GetConn trace) nil))
+      (return))
+
+    ((.-GetConn trace) hostPort)))
+
+
+^{:go/end 3166} (go/func traceGotConn [^{:tag (* ClientRequest)} req ^{:tag (* ClientConn)} cc ^bool reused]
+  (let [trace (httptrace/ContextClientTrace (.-Context req))]
+    (when (or (== trace nil) (== (.-GotConn trace) nil))
+      (return))
+
+    (let [ci (lit httptrace/GotConnInfo :Conn (.-tconn cc))]
+      (set! (.-Reused ci) reused)
+      (.Lock (.-mu cc))
+      (set! (.-WasIdle ci) (and (== (len (.-streams cc)) 0) reused))
+      (when (and (.-WasIdle ci) (not (.IsZero (.-lastActive cc))))
+        (set! (.-IdleTime ci) (time/Since (.-lastActive cc))))
+
+      (.Unlock (.-mu cc))
+
+      ((.-GotConn trace) ci))))
+
+
+^{:go/end 3172} (go/func traceWroteHeaders [^{:tag (* httptrace/ClientTrace)} trace]
+  (when (and (!= trace nil) (!= (.-WroteHeaders trace) nil))
+    ((.-WroteHeaders trace))))
+
+
+
+^{:go/end 3178} (go/func traceGot100Continue [^{:tag (* httptrace/ClientTrace)} trace]
+  (when (and (!= trace nil) (!= (.-Got100Continue trace) nil))
+    ((.-Got100Continue trace))))
+
+
+
+^{:go/end 3184} (go/func traceWait100Continue [^{:tag (* httptrace/ClientTrace)} trace]
+  (when (and (!= trace nil) (!= (.-Wait100Continue trace) nil))
+    ((.-Wait100Continue trace))))
+
+
+
+^{:go/end 3190} (go/func traceWroteRequest [^{:tag (* httptrace/ClientTrace)} trace ^error err]
+  (when (and (!= trace nil) (!= (.-WroteRequest trace) nil))
+    ((.-WroteRequest trace) (lit httptrace/WroteRequestInfo :Err err))))
+
+
+
+^{:go/end 3196} (go/func traceFirstResponseByte [^{:tag (* httptrace/ClientTrace)} trace]
+  (when (and (!= trace nil) (!= (.-GotFirstResponseByte trace) nil))
+    ((.-GotFirstResponseByte trace))))
+
+
+
+^{:go/breaks [[4 3202]] :go/end 3203} (go/func traceGot1xxResponseFunc ^{:tag (func [int textproto/MIMEHeader] [error])} [^{:tag (* httptrace/ClientTrace)} trace]
+  (when (!= trace nil)
+    (return (.-Got1xxResponse trace)))
+
+  nil)
+
+
+
+
+^{:go/end 3217} (go/method dialTLSWithContext "dialTLSWithContext uses tls.Dialer, added in Go 1.15, to open a TLS\nconnection.\n" [^{:tag (* Transport)} t ^context/Context ctx ^string network ^string addr ^{:tag (* tls/Config)} cfg] :results [(* tls/Conn) error]
+  (let [dialer (addr ^{:go/breaks [2]} (lit tls/Dialer
+          :Config cfg))
+
+      (values cn err) (.DialContext dialer ctx network addr)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [tlsCn (assert (* tls/Conn) cn)] ; DialContext comment promises this will always succeed
+      (return tlsCn nil))))

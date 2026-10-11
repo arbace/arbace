@@ -1,0 +1,251 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.x509) (go/file "pem_decrypt.go" :imports [
+
+    ;; RFC 1423 describes the encryption of PEM blocks. The algorithm used to
+    ;; generate a key from the password was derived by looking at the OpenSSL
+    ;; implementation.
+
+
+    ^{:line 12} [aes "crypto/aes"]
+    ^{:line 13} [cipher "crypto/cipher"]
+    ^{:line 14} [des "crypto/des"]
+    ^{:line 15} [md5 "crypto/md5"]
+    ^{:line 16} [hex "encoding/hex"]
+    ^{:line 17} [pem "encoding/pem"]
+    ^{:line 18} [errors "errors"]
+    ^{:line 19} [io "io"]
+    ^{:line 20} [strings "strings"]])
+
+
+(go/type PEMCipher int)
+
+
+(go/const "Possible values for the EncryptPEMBlock encryption algorithm.\n"
+  ^{:line 27} [^{:tag PEMCipher :val 0} _ iota]
+  ^{:line 28} [^{:val 1} PEMCipherDES]
+  ^{:line 29} [^{:val 2} PEMCipher3DES]
+  ^{:line 30} [^{:val 3} PEMCipherAES128]
+  ^{:line 31} [^{:val 4} PEMCipherAES192]
+  ^{:line 32} [^{:val 5} PEMCipherAES256])
+
+
+
+(go/type rfc1423Algo "rfc1423Algo holds a method for enciphering a PEM block.\n" (struct
+    ^{:line 37 :tag PEMCipher} cipher
+    ^{:line 38 :tag string} name
+    ^{:line 39 :tag (func [^{:tag (slice byte)} key] [cipher/Block error])} cipherFunc
+    ^{:line 40 :tag int} keySize
+    ^{:line 41 :tag int} blockSize))
+
+
+
+
+(go/var ^{:doc "rfc1423Algos holds a slice of the possible ways to encrypt a PEM\nblock. The ivSize numbers were taken from the OpenSSL source.\n"} rfc1423Algos (lit (slice rfc1423Algo) ^{:go/breaks [2 4 6 8 10]} (lit _
+      :cipher PEMCipherDES
+      :name "DES-CBC"
+      :cipherFunc des/NewCipher
+      :keySize 8
+      :blockSize des/BlockSize)
+    ^{:go/breaks [2 4 6 8 10]} (lit _
+      :cipher PEMCipher3DES
+      :name "DES-EDE3-CBC"
+      :cipherFunc des/NewTripleDESCipher
+      :keySize 24
+      :blockSize des/BlockSize)
+    ^{:go/breaks [2 4 6 8 10]} (lit _
+      :cipher PEMCipherAES128
+      :name "AES-128-CBC"
+      :cipherFunc aes/NewCipher
+      :keySize 16
+      :blockSize aes/BlockSize)
+    ^{:go/breaks [2 4 6 8 10]} (lit _
+      :cipher PEMCipherAES192
+      :name "AES-192-CBC"
+      :cipherFunc aes/NewCipher
+      :keySize 24
+      :blockSize aes/BlockSize)
+    ^{:go/breaks [2 4 6 8 10]} (lit _
+      :cipher PEMCipherAES256
+      :name "AES-256-CBC"
+      :cipherFunc aes/NewCipher
+      :keySize 32
+      :blockSize aes/BlockSize)))
+
+
+
+
+
+
+^{:go/end 96} (go/method deriveKey "deriveKey uses a key derivation function to stretch the password into a key\nwith the number of bits our cipher requires. This algorithm was derived from\nthe OpenSSL source.\n" ^{:tag (slice byte)} [^rfc1423Algo c ^{:tag (slice byte)} password ^{:tag (slice byte)} salt]
+  (let [hash (md5/New)
+      ^{:line 84} out (make (slice byte) (.-keySize c))
+      ^{:line 85 :tag (slice byte)} digest (zero (slice byte))]
+
+    (for [i 0] (< i (len out)) (set! i + (len digest))
+      (.Reset hash)
+      (.Write hash digest)
+      (.Write hash password)
+      (.Write hash salt)
+      (set! digest (.Sum hash (subslice digest _ 0)))
+      (copy (subslice out i) digest))
+
+    ^{:line 95} out))
+
+
+
+
+
+
+
+
+^{:go/end 107} (go/func IsEncryptedPEMBlock "IsEncryptedPEMBlock returns whether the PEM block is password encrypted\naccording to RFC 1423.\n\nDeprecated: Legacy PEM encryption as specified in RFC 1423 is insecure by\ndesign. Since it does not authenticate the ciphertext, it is vulnerable to\npadding oracle attacks that can let an attacker recover the plaintext.\n" ^bool [^{:tag (* pem/Block)} b]
+  (let [(values _ ok) (aget (.-Headers b) "DEK-Info")]
+    ^{:line 106} ok))
+
+
+
+(go/var ^{:doc "IncorrectPasswordError is returned when an incorrect password is detected.\n"} IncorrectPasswordError (errors/New "x509: decryption password incorrect"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 186} (go/func DecryptPEMBlock "DecryptPEMBlock takes a PEM block encrypted according to RFC 1423 and the\npassword used to encrypt it and returns a slice of decrypted DER encoded\nbytes. It inspects the DEK-Info header to determine the algorithm used for\ndecryption. If no DEK-Info header is present, an error is returned. If an\nincorrect password is detected an [IncorrectPasswordError] is returned. Because\nof deficiencies in the format, it's not always possible to detect an\nincorrect password. In these cases no error will be returned but the\ndecrypted DER bytes will be random noise.\n\nDeprecated: Legacy PEM encryption as specified in RFC 1423 is insecure by\ndesign. Since it does not authenticate the ciphertext, it is vulnerable to\npadding oracle attacks that can let an attacker recover the plaintext.\n" [^{:tag (* pem/Block)} b ^{:tag (slice byte)} password] :results [(slice byte) error]
+  (let [(values dek ok) (aget (.-Headers b) "DEK-Info")]
+    (when (not ok)
+      (return nil (errors/New "x509: no DEK-Info header in block")))
+
+
+    (let [(values mode hexIV ^:assign ok) (strings/Cut dek ",")]
+      (when (not ok)
+        (return nil (errors/New "x509: malformed DEK-Info header")))
+
+
+      (let [ciph (cipherByName mode)]
+        (when (== ciph nil)
+          (return nil (errors/New "x509: unknown encryption mode")))
+
+        (let [(values iv err) (hex/DecodeString hexIV)]
+          (when (!= err nil)
+            (return nil err))
+
+          (when (!= (len iv) (.-blockSize ciph))
+            (return nil (errors/New "x509: incorrect IV size")))
+
+
+          ;; Based on the OpenSSL implementation. The salt is the first 8 bytes
+          ;; of the initialization vector.
+          (let [key (.deriveKey ciph password (subslice iv _ 8))
+              (values block ^:assign err) ((.-cipherFunc ciph) key)]
+            (when (!= err nil)
+              (return nil err))
+
+
+            (when (!= (% (len (.-Bytes b)) (.BlockSize block)) 0)
+              (return nil (errors/New "x509: encrypted PEM data is not a multiple of the block size")))
+
+
+            (let [data (make (slice byte) (len (.-Bytes b)))
+                ^{:line 160} dec (cipher/NewCBCDecrypter block iv)]
+              (.CryptBlocks dec data (.-Bytes b))
+
+              ;; Blocks are padded using a scheme where the last n bytes of padding are all
+              ;; equal to n. It can pad from 1 to blocksize bytes inclusive. See RFC 1423.
+              ;; For example:
+              ;;	[x y z 2 2]
+              ;;	[x y 7 7 7 7 7 7 7]
+              ;; If we detect a bad padding, we assume it is an invalid password.
+              (let [dlen (len data)]
+                (when (or (== dlen 0) (!= (% dlen (.-blockSize ciph)) 0))
+                  (return nil (errors/New "x509: invalid padding")))
+
+                (let [last (conv int (aget data (- dlen 1)))]
+                  (when (< dlen last)
+                    (return nil IncorrectPasswordError))
+
+                  (when (or (== last 0) (> last (.-blockSize ciph)))
+                    (return nil IncorrectPasswordError))
+
+                  (range [_ val (subslice data (- dlen last))]
+                    (when (!= (conv int val) last)
+                      (return nil IncorrectPasswordError)))
+
+
+                  (return (subslice data _ (- dlen last)) nil))))))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 232} (go/func EncryptPEMBlock "EncryptPEMBlock returns a PEM block of the specified type holding the\ngiven DER encoded data encrypted with the specified algorithm and\npassword according to RFC 1423.\n\nDeprecated: Legacy PEM encryption as specified in RFC 1423 is insecure by\ndesign. Since it does not authenticate the ciphertext, it is vulnerable to\npadding oracle attacks that can let an attacker recover the plaintext.\n" [^io/Reader rand ^string blockType ^{:tag (slice byte)} data ^{:tag (slice byte)} password ^PEMCipher alg] :results [(* pem/Block) error]
+  (let [ciph (cipherByKey alg)]
+    (when (== ciph nil)
+      (return nil (errors/New "x509: unknown encryption mode")))
+
+    (let [iv (make (slice byte) (.-blockSize ciph))]
+      (when [(values _ err) (io/ReadFull rand iv)] (!= err nil)
+        (return nil (errors/New (+ "x509: cannot generate IV: " (.Error err)))))
+
+      ;; The salt is the first 8 bytes of the initialization vector,
+      ;; matching the key derivation in DecryptPEMBlock.
+      (let [key (.deriveKey ciph password (subslice iv _ 8))
+          (values block err) ((.-cipherFunc ciph) key)]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [enc (cipher/NewCBCEncrypter block iv)
+            ^{:line 212} pad (- (.-blockSize ciph) (% (len data) (.-blockSize ciph)))
+            ^{:line 213} encrypted (make (slice byte) (len data) (+ (len data) pad))]
+          ;; We could save this copy by encrypting all the whole blocks in
+          ;; the data separately, but it doesn't seem worth the additional
+          ;; code.
+          (copy encrypted data)
+          ;; See RFC 1423, Section 1.1.
+          (for [i 0] (< i pad) (inc! i)
+            (set! encrypted (append encrypted (conv byte pad))))
+
+          (.CryptBlocks enc encrypted encrypted)
+
+          ^{:go/breaks [2]} (return (addr ^{:go/breaks [2 4 [6 230]]} (lit pem/Block
+                :Type blockType
+                :Headers (lit (map string string)
+                  ^{:line 227} ["Proc-Type" "4,ENCRYPTED"]
+                  ^{:line 228} ["DEK-Info" (+ (.-name ciph) "," (hex/EncodeToString iv))])
+
+                :Bytes encrypted))
+            nil))))))
+
+
+^{:go/breaks [[4 241]] :go/end 242} (go/func cipherByName ^{:tag (* rfc1423Algo)} [^string name]
+  (range [i rfc1423Algos]
+    (let [alg (addr (aget rfc1423Algos i))]
+      (when (== (.-name alg) name)
+        (return alg))))
+
+
+  nil)
+
+
+^{:go/breaks [[4 251]] :go/end 252} (go/func cipherByKey ^{:tag (* rfc1423Algo)} [^PEMCipher key]
+  (range [i rfc1423Algos]
+    (let [alg (addr (aget rfc1423Algos i))]
+      (when (== (.-cipher alg) key)
+        (return alg))))
+
+
+  nil)

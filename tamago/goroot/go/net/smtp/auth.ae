@@ -1,0 +1,108 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.smtp) (go/file "auth.go" :imports [
+
+
+    ^{:line 8} [hmac "crypto/hmac"]
+    ^{:line 9} [md5 "crypto/md5"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [fmt "fmt"]])
+
+
+
+(go/type Auth "Auth is implemented by an SMTP authentication mechanism.\n" (interface
+
+
+
+
+
+
+    (^{:doc "Start begins an authentication with a server.\nIt returns the name of the authentication protocol\nand optionally data to include in the initial AUTH message\nsent to the server.\nIf it returns a non-nil error, the SMTP client aborts\nthe authentication attempt and closes the connection.\n"} Start [^{:tag (* ServerInfo)} server] :results [^string proto ^{:tag (slice byte)} toServer ^error err])
+
+
+
+
+
+
+
+    (^{:doc "Next continues the authentication. The server has just sent\nthe fromServer data. If more is true, the server expects a\nresponse, which Next should return as toServer; otherwise\nNext should return toServer == nil.\nIf Next returns a non-nil error, the SMTP client aborts\nthe authentication attempt and closes the connection.\n"} Next [^{:tag (slice byte)} fromServer ^bool more] :results [^{:tag (slice byte)} toServer ^error err])))
+
+
+
+(go/type ServerInfo "ServerInfo records information about an SMTP server.\n" (struct
+    ^{:line 35 :tag string} Name ; SMTP server name
+    ^{:line 36 :tag bool} TLS ; using TLS, with valid certificate for Name
+    ^{:line 37 :tag (slice string)} Auth)) ; advertised authentication mechanisms
+
+
+(go/type plainAuth (struct
+    ^{:line 41 :tag string} identity ^string username ^string password
+    ^{:line 42 :tag string} host))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 55} (go/func PlainAuth "PlainAuth returns an [Auth] that implements the PLAIN authentication\nmechanism as defined in RFC 4616. The returned Auth uses the given\nusername and password to authenticate to host and act as identity.\nUsually identity should be the empty string, to act as username.\n\nPlainAuth will only send the credentials if the connection is using TLS\nor is connected to localhost. Otherwise authentication will fail with an\nerror, without sending the credentials.\n" ^Auth [^string identity ^string username ^string password ^string host]
+  (addr (lit plainAuth identity username password host)))
+
+
+^{:go/end 59} (go/func isLocalhost ^bool [^string name]
+  (or (== name "localhost") (== name "127.0.0.1") (== name "::1")))
+
+
+^{:go/end 75} (go/method Start [^{:tag (* plainAuth)} a ^{:tag (* ServerInfo)} server] :results [string (slice byte) error]
+  ;; Must have TLS, or else localhost server.
+  ;; Note: If TLS is not true, then we can't trust ANYTHING in ServerInfo.
+  ;; In particular, it doesn't matter if the server advertises PLAIN auth.
+  ;; That might just be the attacker saying
+  ;; "it's ok, you can trust me with your password."
+  (when (and (not (.-TLS server)) (not (isLocalhost (.-Name server))))
+    (return "" nil (errors/New "unencrypted connection")))
+
+  (when (!= (.-Name server) (.-host a))
+    (return "" nil (errors/New "wrong host name")))
+
+  (let [resp (conv (slice byte) (+ (.-identity a) "\u0000" (.-username a) "\u0000" (.-password a)))]
+    (return "PLAIN" resp nil)))
+
+
+^{:go/end 83} (go/method Next [^{:tag (* plainAuth)} a ^{:tag (slice byte)} fromServer ^bool more] :results [(slice byte) error]
+  (when more
+    ;; We've already sent everything.
+    (return nil (errors/New "unexpected server challenge")))
+
+  (return nil nil))
+
+
+(go/type cramMD5Auth (struct
+    ^{:line 86 :tag string} username ^string secret))
+
+
+
+
+
+
+^{:go/end 95} (go/func CRAMMD5Auth "CRAMMD5Auth returns an [Auth] that implements the CRAM-MD5 authentication\nmechanism as defined in RFC 2195.\nThe returned Auth uses the given username and secret to authenticate\nto the server using the challenge-response mechanism.\n" ^Auth [^string username ^string secret]
+  (addr (lit cramMD5Auth username secret)))
+
+
+^{:go/end 99} (go/method Start [^{:tag (* cramMD5Auth)} a ^{:tag (* ServerInfo)} server] :results [string (slice byte) error]
+  (return "CRAM-MD5" nil nil))
+
+
+^{:go/end 109} (go/method Next [^{:tag (* cramMD5Auth)} a ^{:tag (slice byte)} fromServer ^bool more] :results [(slice byte) error]
+  (when more
+    (let [d (hmac/New md5/New (conv (slice byte) (.-secret a)))]
+      (.Write d fromServer)
+      (let [s (make (slice byte) 0 (.Size d))]
+        (return (fmt/Appendf nil "%s %x" (.-username a) (.Sum d s)) nil))))
+
+  (return nil nil))

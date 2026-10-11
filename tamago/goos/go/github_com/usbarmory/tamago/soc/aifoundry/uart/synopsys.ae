@@ -1,0 +1,137 @@
+;; CORE-ET Silicom Platform Universal Asynchronous Receiver/Transmitter (UART) drivers
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package uart implements drivers for UART controllers found in CORE-ET
+;; Silicom Platform processors, adopting the following reference
+;; specifications:
+;;   - Shakti SoC Device Register Manual - 2021/06/24 - (Erbium)
+;;   - Synopsys DesignWare APB UART      - 2006/01/20 - (ET-SoC1)
+;;
+;; This package is only meant to be used with `GOOS=tamago GOARCH=riscv64` as
+;; supported by the TamaGo framework for bare metal Go on RISC-V SoCs, see
+;; https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.aifoundry.uart) (go/file "synopsys.go" :doc "Package uart implements drivers for UART controllers found in CORE-ET\nSilicom Platform processors, adopting the following reference\nspecifications:\n  - Shakti SoC Device Register Manual - 2021/06/24 - (Erbium)\n  - Synopsys DesignWare APB UART      - 2006/01/20 - (ET-SoC1)\n\nThis package is only meant to be used with `GOOS=tamago GOARCH=riscv64` as\nsupported by the TamaGo framework for bare metal Go on RISC-V SoCs, see\nhttps://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 21} [runtime "runtime"]
+
+    ^{:line 23} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+(go/const "APB UART registers\n"
+  ^{:line 28} [^{:val 0} RBR_THR_DLL 0x00]
+  ^{:line 29} [^{:val 4} DLH_IER 0x04]
+
+  ^{:line 31} [^{:val 8} IIR_FCR 0x08]
+  ^{:line 32} [^{:val 1} FCR_TFIFOR 1]
+  ^{:line 33} [^{:val 1} FCR_RFIFOR 1]
+  ^{:line 34} [^{:val 0} FCR_FIFOE 0]
+
+  ^{:line 36} [^{:val 12} LCR 0x0c]
+  ^{:line 37} [^{:val 7} LCR_DLAB 7]
+  ^{:line 38} [^{:val 3} LCR_PEN 3]
+  ^{:line 39} [^{:val 2} LCR_STOP 2]
+  ^{:line 40} [^{:val 0} LCR_DLS 0]
+
+  ^{:line 42} [^{:val 124} USR 0x7c]
+  ^{:line 43} [^{:val 3} USR_RFNE 3]
+  ^{:line 44} [^{:val 1} USR_TFNF 1]
+
+  ^{:line 46} [^{:val 136} SRR 0x88]
+  ^{:line 47} [^{:val 0} SRR_UR 0])
+
+
+
+(go/type Synopsys "Synopsys represents a Synopsys APB UART serial port instance.\n" (struct
+
+    ^{:line 53 :tag int :doc "Controller index\n"} Index
+
+    ^{:line 55 :tag uint32 :doc "Base register\n"} Base
+
+
+    ^{:line 58 :tag uint32 :doc "control registers\n"} fifo
+    ^{:line 59 :tag uint32} status))
+
+
+
+
+^{:go/end 71} (go/method SetBaudRate "SetBaudRate configures the divisor for 115200 baud\nclockHz is the frequency of the UART peripheral clock (e.g., 24000000)\n" [^{:tag (* Synopsys)} hw ^uint32 clockHz ^int baud]
+  (reg/Set (+ (.-Base hw) LCR) LCR_DLAB)
+  (defer (reg/Clear (+ (.-Base hw) LCR) LCR_DLAB))
+
+  (let [divisor (conv uint32 (/ clockHz (conv uint32 (* 16 baud))))]
+    (reg/Write (+ (.-Base hw) RBR_THR_DLL) (bit-and divisor 0xff))
+    (reg/Write (+ (.-Base hw) DLH_IER) (bit-and (>> divisor 8) 0xff))))
+
+
+
+^{:go/end 96} (go/method Init "Init initializes an APB serial port instance.\n" [^{:tag (* Synopsys)} hw]
+  (when (== (.-Base hw) 0)
+    (panic "invalid UART controller instance"))
+
+
+  (set! (.-fifo hw) (+ (.-Base hw) RBR_THR_DLL))
+  (set! (.-status hw) (+ (.-Base hw) USR))
+
+  ;; software reset
+  (reg/Set (+ (.-Base hw) SRR) SRR_UR)
+
+  ;; FIFO Enable, Reset RX/TX
+  (reg/Set (+ (.-Base hw) IIR_FCR) FCR_FIFOE)
+  (reg/Set (+ (.-Base hw) IIR_FCR) FCR_RFIFOR)
+  (reg/Set (+ (.-Base hw) IIR_FCR) FCR_TFIFOR)
+
+  ;; 8-bit data length, 1 stop bit, parity disabled
+  (reg/SetN (+ (.-Base hw) LCR) LCR_DLS 2r11 2r11)
+  (reg/Clear (+ (.-Base hw) LCR) LCR_STOP)
+  (reg/Clear (+ (.-Base hw) LCR) LCR_PEN)
+
+  (.SetBaudRate hw 25000000 115200))
+
+
+
+^{:go/end 101} (go/method Tx "Tx transmits a single character to the serial port.\n" [^{:tag (* Synopsys)} hw ^byte c]
+  (reg/Write (.-fifo hw) (conv uint32 c)))
+
+
+
+^{:go/end 108} (go/method Rx "Rx receives a single character from the serial port.\n" [^{:tag (* Synopsys)} hw] :results [^byte c ^bool valid]
+  (set! c (conv byte (reg/Read (.-fifo hw))))
+  (set! valid (!= c 0))
+  (return))
+
+
+
+^{:go/end 117} (go/method Write "Write data from buffer to serial port.\n" [^{:tag (* Synopsys)} hw ^{:tag (slice byte)} buf] :results [^int n ^error _]
+  (range [_ c buf]
+    (.Tx hw c))
+
+
+  (return (len buf) nil))
+
+
+
+^{:go/end 138} (go/method Read "Read available data to buffer from serial port.\n" [^{:tag (* Synopsys)} hw ^{:tag (slice byte)} buf] :results [^int n ^error _]
+  (let [^bool valid (zero bool)]
+
+    (while (< n (len buf))
+      (set! (values (aget buf n) valid) (.Rx hw))
+
+      (when (not valid)
+        (when (== n 0)
+          (runtime/Gosched))
+
+
+        (break))
+
+
+      (inc! n))
+
+
+    (return)))

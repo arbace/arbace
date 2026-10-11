@@ -1,0 +1,473 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; /*
+;; Package iter provides basic definitions and operations related to
+;; iterators over sequences.
+;; 
+;; # Iterators
+;; 
+;; An iterator is a function that passes successive elements of a
+;; sequence to a callback function, conventionally named yield.
+;; The function stops either when the sequence is finished or
+;; when yield returns false, indicating to stop the iteration early.
+;; This package defines [Seq] and [Seq2]
+;; (pronounced like seek—the first syllable of sequence)
+;; as shorthands for iterators that pass 1 or 2 values per sequence element
+;; to yield:
+;; 
+;; type (
+;; Seq[V any]     func(yield func(V) bool)
+;; Seq2[K, V any] func(yield func(K, V) bool)
+;; )
+;; 
+;; Seq2 represents a sequence of paired values, conventionally key-value
+;; or index-value pairs.
+;; 
+;; Yield returns true if the iterator should continue with the next
+;; element in the sequence, false if it should stop.
+;; 
+;; Yield panics if called after it returns false.
+;; 
+;; For instance, [maps.Keys] returns an iterator that produces the sequence
+;; of keys of the map m, implemented as follows:
+;; 
+;; func Keys[Map ~map[K]V, K comparable, V any](m Map) iter.Seq[K] {
+;; return func(yield func(K) bool) {
+;; for k := range m {
+;; if !yield(k) {
+;; return
+;; }
+;; }
+;; }
+;; }
+;; 
+;; Further examples can be found in [The Go Blog: Range Over Function Types].
+;; 
+;; Iterator functions are most often called by a [range loop], as in:
+;; 
+;; func PrintAll[V any](seq iter.Seq[V]) {
+;; for v := range seq {
+;; fmt.Println(v)
+;; }
+;; }
+;; 
+;; # Naming Conventions
+;; 
+;; Iterator functions and methods are named for the sequence being walked:
+;; 
+;; // All returns an iterator over all elements in s.
+;; func (s *Set[V]) All() iter.Seq[V]
+;; 
+;; The iterator method on a collection type is conventionally named All,
+;; because it iterates a sequence of all the values in the collection.
+;; 
+;; For a type containing multiple possible sequences, the iterator's name
+;; can indicate which sequence is being provided:
+;; 
+;; // Cities returns an iterator over the major cities in the country.
+;; func (c *Country) Cities() iter.Seq[*City]
+;; 
+;; // Languages returns an iterator over the official spoken languages of the country.
+;; func (c *Country) Languages() iter.Seq[string]
+;; 
+;; If an iterator requires additional configuration, the constructor function
+;; can take additional configuration arguments:
+;; 
+;; // Scan returns an iterator over key-value pairs with min ≤ key ≤ max.
+;; func (m *Map[K, V]) Scan(min, max K) iter.Seq2[K, V]
+;; 
+;; // Split returns an iterator over the (possibly-empty) substrings of s
+;; // separated by sep.
+;; func Split(s, sep string) iter.Seq[string]
+;; 
+;; When there are multiple possible iteration orders, the method name may
+;; indicate that order:
+;; 
+;; // All returns an iterator over the list from head to tail.
+;; func (l *List[V]) All() iter.Seq[V]
+;; 
+;; // Backward returns an iterator over the list from tail to head.
+;; func (l *List[V]) Backward() iter.Seq[V]
+;; 
+;; // Preorder returns an iterator over all nodes of the syntax tree
+;; // beneath (and including) the specified root, in depth-first preorder,
+;; // visiting a parent node before its children.
+;; func Preorder(root Node) iter.Seq[Node]
+;; 
+;; # Single-Use Iterators
+;; 
+;; Most iterators provide the ability to walk an entire sequence:
+;; when called, the iterator does any setup necessary to start the
+;; sequence, then calls yield on successive elements of the sequence,
+;; and then cleans up before returning. Calling the iterator again
+;; walks the sequence again.
+;; 
+;; Some iterators break that convention, providing the ability to walk a
+;; sequence only once. These “single-use iterators” typically report values
+;; from a data stream that cannot be rewound to start over.
+;; Calling the iterator again after stopping early may continue the
+;; stream, but calling it again after the sequence is finished will yield
+;; no values at all. Doc comments for functions or methods that return
+;; single-use iterators should document this fact:
+;; 
+;; // Lines returns an iterator over lines read from r.
+;; // It returns a single-use iterator.
+;; func (r *Reader) Lines() iter.Seq[string]
+;; 
+;; # Pulling Values
+;; 
+;; Functions and methods that accept or return iterators
+;; should use the standard [Seq] or [Seq2] types, to ensure
+;; compatibility with range loops and other iterator adapters.
+;; The standard iterators can be thought of as “push iterators”, which
+;; push values to the yield function.
+;; 
+;; Sometimes a range loop is not the most natural way to consume values
+;; of the sequence. In this case, [Pull] converts a standard push iterator
+;; to a “pull iterator”, which can be called to pull one value at a time
+;; from the sequence. [Pull] starts an iterator and returns a pair
+;; of functions—next and stop—which return the next value from the iterator
+;; and stop it, respectively.
+;; 
+;; For example:
+;; 
+;; // Pairs returns an iterator over successive pairs of values from seq.
+;; func Pairs[V any](seq iter.Seq[V]) iter.Seq2[V, V] {
+;; return func(yield func(V, V) bool) {
+;; next, stop := iter.Pull(seq)
+;; defer stop()
+;; for {
+;; v1, ok1 := next()
+;; if !ok1 {
+;; return
+;; }
+;; v2, ok2 := next()
+;; // If ok2 is false, v2 should be the
+;; // zero value; yield one last pair.
+;; if !yield(v1, v2) {
+;; return
+;; }
+;; if !ok2 {
+;; return
+;; }
+;; }
+;; }
+;; }
+;; 
+;; If clients do not consume the sequence to completion, they must call stop,
+;; which allows the iterator function to finish and return. As shown in
+;; the example, the conventional way to ensure this is to use defer.
+;; 
+;; # Standard Library Usage
+;; 
+;; A few packages in the standard library provide iterator-based APIs,
+;; most notably the [maps] and [slices] packages.
+;; For example, [maps.Keys] returns an iterator over the keys of a map,
+;; while [slices.Sorted] collects the values of an iterator into a slice,
+;; sorts them, and returns the slice, so to iterate over the sorted keys of a map:
+;; 
+;; for _, key := range slices.Sorted(maps.Keys(m)) {
+;; ...
+;; }
+;; 
+;; # Mutation
+;; 
+;; Iterators provide only the values of the sequence, not any direct way
+;; to modify it. If an iterator wishes to provide a mechanism for modifying
+;; a sequence during iteration, the usual approach is to define a position type
+;; with the extra operations and then provide an iterator over positions.
+;; 
+;; For example, a tree implementation might provide:
+;; 
+;; // Positions returns an iterator over positions in the sequence.
+;; func (t *Tree[V]) Positions() iter.Seq[*Pos[V]]
+;; 
+;; // A Pos represents a position in the sequence.
+;; // It is only valid during the yield call it is passed to.
+;; type Pos[V any] struct { ... }
+;; 
+;; // Value returns the value at the cursor.
+;; func (p *Pos[V]) Value() V
+;; 
+;; // Delete deletes the value at this point in the iteration.
+;; func (p *Pos[V]) Delete()
+;; 
+;; // Set changes the value v at the cursor.
+;; func (p *Pos[V]) Set(v V)
+;; 
+;; And then a client could delete boring values from the tree using:
+;; 
+;; for p := range t.Positions() {
+;; if boring(p.Value()) {
+;; p.Delete()
+;; }
+;; }
+;; 
+;; [The Go Blog: Range Over Function Types]: https://go.dev/blog/range-functions
+;; [range loop]: https://go.dev/ref/spec#For_range
+;; */
+(in-ns 'go.iter) (go/file "iter.go" :doc "Package iter provides basic definitions and operations related to\niterators over sequences.\n\n# Iterators\n\nAn iterator is a function that passes successive elements of a\nsequence to a callback function, conventionally named yield.\nThe function stops either when the sequence is finished or\nwhen yield returns false, indicating to stop the iteration early.\nThis package defines [Seq] and [Seq2]\n(pronounced like seek—the first syllable of sequence)\nas shorthands for iterators that pass 1 or 2 values per sequence element\nto yield:\n\n\ttype (\n\t\tSeq[V any]     func(yield func(V) bool)\n\t\tSeq2[K, V any] func(yield func(K, V) bool)\n\t)\n\nSeq2 represents a sequence of paired values, conventionally key-value\nor index-value pairs.\n\nYield returns true if the iterator should continue with the next\nelement in the sequence, false if it should stop.\n\nYield panics if called after it returns false.\n\nFor instance, [maps.Keys] returns an iterator that produces the sequence\nof keys of the map m, implemented as follows:\n\n\tfunc Keys[Map ~map[K]V, K comparable, V any](m Map) iter.Seq[K] {\n\t\treturn func(yield func(K) bool) {\n\t\t\tfor k := range m {\n\t\t\t\tif !yield(k) {\n\t\t\t\t\treturn\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\nFurther examples can be found in [The Go Blog: Range Over Function Types].\n\nIterator functions are most often called by a [range loop], as in:\n\n\tfunc PrintAll[V any](seq iter.Seq[V]) {\n\t\tfor v := range seq {\n\t\t\tfmt.Println(v)\n\t\t}\n\t}\n\n# Naming Conventions\n\nIterator functions and methods are named for the sequence being walked:\n\n\t// All returns an iterator over all elements in s.\n\tfunc (s *Set[V]) All() iter.Seq[V]\n\nThe iterator method on a collection type is conventionally named All,\nbecause it iterates a sequence of all the values in the collection.\n\nFor a type containing multiple possible sequences, the iterator's name\ncan indicate which sequence is being provided:\n\n\t// Cities returns an iterator over the major cities in the country.\n\tfunc (c *Country) Cities() iter.Seq[*City]\n\n\t// Languages returns an iterator over the official spoken languages of the country.\n\tfunc (c *Country) Languages() iter.Seq[string]\n\nIf an iterator requires additional configuration, the constructor function\ncan take additional configuration arguments:\n\n\t// Scan returns an iterator over key-value pairs with min ≤ key ≤ max.\n\tfunc (m *Map[K, V]) Scan(min, max K) iter.Seq2[K, V]\n\n\t// Split returns an iterator over the (possibly-empty) substrings of s\n\t// separated by sep.\n\tfunc Split(s, sep string) iter.Seq[string]\n\nWhen there are multiple possible iteration orders, the method name may\nindicate that order:\n\n\t// All returns an iterator over the list from head to tail.\n\tfunc (l *List[V]) All() iter.Seq[V]\n\n\t// Backward returns an iterator over the list from tail to head.\n\tfunc (l *List[V]) Backward() iter.Seq[V]\n\n\t// Preorder returns an iterator over all nodes of the syntax tree\n\t// beneath (and including) the specified root, in depth-first preorder,\n\t// visiting a parent node before its children.\n\tfunc Preorder(root Node) iter.Seq[Node]\n\n# Single-Use Iterators\n\nMost iterators provide the ability to walk an entire sequence:\nwhen called, the iterator does any setup necessary to start the\nsequence, then calls yield on successive elements of the sequence,\nand then cleans up before returning. Calling the iterator again\nwalks the sequence again.\n\nSome iterators break that convention, providing the ability to walk a\nsequence only once. These “single-use iterators” typically report values\nfrom a data stream that cannot be rewound to start over.\nCalling the iterator again after stopping early may continue the\nstream, but calling it again after the sequence is finished will yield\nno values at all. Doc comments for functions or methods that return\nsingle-use iterators should document this fact:\n\n\t// Lines returns an iterator over lines read from r.\n\t// It returns a single-use iterator.\n\tfunc (r *Reader) Lines() iter.Seq[string]\n\n# Pulling Values\n\nFunctions and methods that accept or return iterators\nshould use the standard [Seq] or [Seq2] types, to ensure\ncompatibility with range loops and other iterator adapters.\nThe standard iterators can be thought of as “push iterators”, which\npush values to the yield function.\n\nSometimes a range loop is not the most natural way to consume values\nof the sequence. In this case, [Pull] converts a standard push iterator\nto a “pull iterator”, which can be called to pull one value at a time\nfrom the sequence. [Pull] starts an iterator and returns a pair\nof functions—next and stop—which return the next value from the iterator\nand stop it, respectively.\n\nFor example:\n\n\t// Pairs returns an iterator over successive pairs of values from seq.\n\tfunc Pairs[V any](seq iter.Seq[V]) iter.Seq2[V, V] {\n\t\treturn func(yield func(V, V) bool) {\n\t\t\tnext, stop := iter.Pull(seq)\n\t\t\tdefer stop()\n\t\t\tfor {\n\t\t\t\tv1, ok1 := next()\n\t\t\t\tif !ok1 {\n\t\t\t\t\treturn\n\t\t\t\t}\n\t\t\t\tv2, ok2 := next()\n\t\t\t\t// If ok2 is false, v2 should be the\n\t\t\t\t// zero value; yield one last pair.\n\t\t\t\tif !yield(v1, v2) {\n\t\t\t\t\treturn\n\t\t\t\t}\n\t\t\t\tif !ok2 {\n\t\t\t\t\treturn\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\nIf clients do not consume the sequence to completion, they must call stop,\nwhich allows the iterator function to finish and return. As shown in\nthe example, the conventional way to ensure this is to use defer.\n\n# Standard Library Usage\n\nA few packages in the standard library provide iterator-based APIs,\nmost notably the [maps] and [slices] packages.\nFor example, [maps.Keys] returns an iterator over the keys of a map,\nwhile [slices.Sorted] collects the values of an iterator into a slice,\nsorts them, and returns the slice, so to iterate over the sorted keys of a map:\n\n\tfor _, key := range slices.Sorted(maps.Keys(m)) {\n\t\t...\n\t}\n\n# Mutation\n\nIterators provide only the values of the sequence, not any direct way\nto modify it. If an iterator wishes to provide a mechanism for modifying\na sequence during iteration, the usual approach is to define a position type\nwith the extra operations and then provide an iterator over positions.\n\nFor example, a tree implementation might provide:\n\n\t// Positions returns an iterator over positions in the sequence.\n\tfunc (t *Tree[V]) Positions() iter.Seq[*Pos[V]]\n\n\t// A Pos represents a position in the sequence.\n\t// It is only valid during the yield call it is passed to.\n\ttype Pos[V any] struct { ... }\n\n\t// Value returns the value at the cursor.\n\tfunc (p *Pos[V]) Value() V\n\n\t// Delete deletes the value at this point in the iteration.\n\tfunc (p *Pos[V]) Delete()\n\n\t// Set changes the value v at the cursor.\n\tfunc (p *Pos[V]) Set(v V)\n\nAnd then a client could delete boring values from the tree using:\n\n\tfor p := range t.Positions() {\n\t\tif boring(p.Value()) {\n\t\t\tp.Delete()\n\t\t}\n\t}\n\n[The Go Blog: Range Over Function Types]: https://go.dev/blog/range-functions\n[range loop]: https://go.dev/ref/spec#For_range\n" :imports [
+
+
+    ^{:line 214} [race "internal/race"]
+    ^{:line 215} [runtime "runtime"]
+    ^{:line 216} [unsafe "unsafe"]])
+
+
+
+
+
+
+(go/type Seq "Seq is an iterator over sequences of individual values.\nWhen called as seq(yield), seq calls yield(v) for each value v in the sequence,\nstopping early if yield returns false.\nSee the [iter] package documentation for more details.\n" :type-params [V] (func [^{:tag (func [V] [bool])} yield]))
+
+
+
+
+
+(go/type Seq2 "Seq2 is an iterator over sequences of pairs of values, most commonly key-value pairs.\nWhen called as seq(yield), seq calls yield(k, v) for each pair (k, v) in the sequence,\nstopping early if yield returns false.\nSee the [iter] package documentation for more details.\n" :type-params [K ^:go/grouped V] (func [^{:tag (func [K V] [bool])} yield]))
+
+(go/type coro (struct))
+
+(go/directive "//go:linknamestd newcoro runtime.newcoro")
+(go/func ^:extern newcoro ^{:tag (* coro)} [(func [(* coro)])])
+
+(go/directive "//go:linknamestd coroswitch runtime.coroswitch")
+(go/func ^:extern coroswitch [(* coro)])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 352} (go/func Pull "Pull converts the “push-style” iterator sequence seq\ninto a “pull-style” iterator accessed by the two functions\nnext and stop.\n\nNext returns the next value in the sequence\nand a boolean indicating whether the value is valid.\nWhen the sequence is over, next returns the zero V and false.\nIt is valid to call next after reaching the end of the sequence\nor after calling stop. These calls will continue\nto return the zero V and false.\n\nStop ends the iteration. It must be called when the caller is\nno longer interested in next values and next has not yet\nsignaled that the sequence is over (with a false boolean return).\nIt is valid to call stop multiple times and when next has\nalready returned false. Typically, callers should “defer stop()”.\n\nIt is an error to call next or stop from multiple goroutines\nsimultaneously.\n\nIf the iterator panics during a call to next (or stop),\nthen next (or stop) itself panics with the same value.\n" :type-params [V] [^{:tag (Seq V)} seq] :results [^{:tag (func [] [V bool])} next ^{:tag (func [])} stop]
+  (let [^{:tag (struct ^V v ^bool ok ^{:go/grouped false :tag bool} done ^{:go/grouped false :tag bool} yieldNext ^{:go/grouped false :tag bool} seqDone ^int racer ^any panicValue)} pull (zero (struct
+          ^{:line 263 :tag V} v
+          ^{:line 264 :tag bool} ok
+          ^{:line 265 :go/grouped false :tag bool} done
+          ^{:line 266 :go/grouped false :tag bool} yieldNext
+          ^{:line 267 :go/grouped false :tag bool} seqDone ; to detect Goexit
+          ^{:line 268 :tag int} racer
+          ^{:line 269 :tag any} panicValue))
+
+      ^{:line 271} c (newcoro ^{:go/end 305} (fn [^{:tag (* coro)} c]
+          (race/Acquire (conv unsafe/Pointer (addr (.-racer pull))))
+          (when (.-done pull)
+            (race/Release (conv unsafe/Pointer (addr (.-racer pull))))
+            (return))
+
+          (let [yield ^{:go/end 290} (fn ^bool [^V v1]
+                (when (.-done pull)
+                  (return false))
+
+                (when (not (.-yieldNext pull))
+                  (panic "iter.Pull: yield called again before next"))
+
+                (set! (.-yieldNext pull) false)
+                (set! (values (.-v pull) (.-ok pull)) (values v1 true))
+                (race/Release (conv unsafe/Pointer (addr (.-racer pull))))
+                (coroswitch c)
+                (race/Acquire (conv unsafe/Pointer (addr (.-racer pull))))
+                (not (.-done pull)))]
+
+            ;; Recover and propagate panics from seq.
+            (defer (^{:go/end 300} (fn []
+                  (if [p (recover)] (!= p nil)
+                    (set! (.-panicValue pull) p)
+                    (when (not (.-seqDone pull))
+                      (set! (.-panicValue pull) goexitPanicValue)))
+
+                  (set! (.-done pull) true) ; Invalidate iterator
+                  (race/Release (conv unsafe/Pointer (addr (.-racer pull)))))))
+
+            (seq yield)
+            (let [^V v0 (zero V)]
+              (set! (values (.-v pull) (.-ok pull)) (values v0 false))
+              (set! (.-seqDone pull) true)))))]
+
+    (set! next ^{:go/end 330} (fn [] :results [^V v1 ^bool ok1]
+        (race/Write (conv unsafe/Pointer (addr (.-racer pull)))) ; detect races
+
+        (when (.-done pull)
+          (return))
+
+        (when (.-yieldNext pull)
+          (panic "iter.Pull: next called again before yield"))
+
+        (set! (.-yieldNext pull) true)
+        (race/Release (conv unsafe/Pointer (addr (.-racer pull))))
+        (coroswitch c)
+        (race/Acquire (conv unsafe/Pointer (addr (.-racer pull))))
+
+        ;; Propagate panics and goexits from seq.
+        (when (!= (.-panicValue pull) nil)
+          (if (== (.-panicValue pull) goexitPanicValue)
+            ;; Propagate runtime.Goexit from seq.
+            (runtime/Goexit)
+
+            (panic (.-panicValue pull))))
+
+
+        (return (.-v pull) (.-ok pull))))
+
+    (set! stop ^{:go/end 350} (fn []
+        (race/Write (conv unsafe/Pointer (addr (.-racer pull)))) ; detect races
+
+        (when (not (.-done pull))
+          (set! (.-done pull) true)
+          (race/Release (conv unsafe/Pointer (addr (.-racer pull))))
+          (coroswitch c)
+          (race/Acquire (conv unsafe/Pointer (addr (.-racer pull))))
+
+          ;; Propagate panics and goexits from seq.
+          (when (!= (.-panicValue pull) nil)
+            (if (== (.-panicValue pull) goexitPanicValue)
+              ;; Propagate runtime.Goexit from seq.
+              (runtime/Goexit)
+
+              (panic (.-panicValue pull)))))))
+
+
+
+
+    (return next stop)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 469} (go/func Pull2 "Pull2 converts the “push-style” iterator sequence seq\ninto a “pull-style” iterator accessed by the two functions\nnext and stop.\n\nNext returns the next pair in the sequence\nand a boolean indicating whether the pair is valid.\nWhen the sequence is over, next returns a pair of zero values and false.\nIt is valid to call next after reaching the end of the sequence\nor after calling stop. These calls will continue\nto return a pair of zero values and false.\n\nStop ends the iteration. It must be called when the caller is\nno longer interested in next values and next has not yet\nsignaled that the sequence is over (with a false boolean return).\nIt is valid to call stop multiple times and when next has\nalready returned false. Typically, callers should “defer stop()”.\n\nIt is an error to call next or stop from multiple goroutines\nsimultaneously.\n\nIf the iterator panics during a call to next (or stop),\nthen next (or stop) itself panics with the same value.\n" :type-params [K ^:go/grouped V] [^{:tag (Seq2 K V)} seq] :results [^{:tag (func [] [K V bool])} next ^{:tag (func [])} stop]
+  (let [^{:tag (struct ^K k ^V v ^bool ok ^{:go/grouped false :tag bool} done ^{:go/grouped false :tag bool} yieldNext ^{:go/grouped false :tag bool} seqDone ^int racer ^any panicValue)} pull (zero (struct
+          ^{:line 378 :tag K} k
+          ^{:line 379 :tag V} v
+          ^{:line 380 :tag bool} ok
+          ^{:line 381 :go/grouped false :tag bool} done
+          ^{:line 382 :go/grouped false :tag bool} yieldNext
+          ^{:line 383 :go/grouped false :tag bool} seqDone
+          ^{:line 384 :tag int} racer
+          ^{:line 385 :tag any} panicValue))
+
+      ^{:line 387} c (newcoro ^{:go/end 422} (fn [^{:tag (* coro)} c]
+          (race/Acquire (conv unsafe/Pointer (addr (.-racer pull))))
+          (when (.-done pull)
+            (race/Release (conv unsafe/Pointer (addr (.-racer pull))))
+            (return))
+
+          (let [yield ^{:go/end 406} (fn ^bool [^K k1 ^V v1]
+                (when (.-done pull)
+                  (return false))
+
+                (when (not (.-yieldNext pull))
+                  (panic "iter.Pull2: yield called again before next"))
+
+                (set! (.-yieldNext pull) false)
+                (set! (values (.-k pull) (.-v pull) (.-ok pull)) (values k1 v1 true))
+                (race/Release (conv unsafe/Pointer (addr (.-racer pull))))
+                (coroswitch c)
+                (race/Acquire (conv unsafe/Pointer (addr (.-racer pull))))
+                (not (.-done pull)))]
+
+            ;; Recover and propagate panics from seq.
+            (defer (^{:go/end 416} (fn []
+                  (if [p (recover)] (!= p nil)
+                    (set! (.-panicValue pull) p)
+                    (when (not (.-seqDone pull))
+                      (set! (.-panicValue pull) goexitPanicValue)))
+
+                  (set! (.-done pull) true) ; Invalidate iterator.
+                  (race/Release (conv unsafe/Pointer (addr (.-racer pull)))))))
+
+            (seq yield)
+            (let [^K k0 (zero K)
+                ^{:line 419 :tag V} v0 (zero V)]
+              (set! (values (.-k pull) (.-v pull) (.-ok pull)) (values k0 v0 false))
+              (set! (.-seqDone pull) true)))))]
+
+    (set! next ^{:go/end 447} (fn [] :results [^K k1 ^V v1 ^bool ok1]
+        (race/Write (conv unsafe/Pointer (addr (.-racer pull)))) ; detect races
+
+        (when (.-done pull)
+          (return))
+
+        (when (.-yieldNext pull)
+          (panic "iter.Pull2: next called again before yield"))
+
+        (set! (.-yieldNext pull) true)
+        (race/Release (conv unsafe/Pointer (addr (.-racer pull))))
+        (coroswitch c)
+        (race/Acquire (conv unsafe/Pointer (addr (.-racer pull))))
+
+        ;; Propagate panics and goexits from seq.
+        (when (!= (.-panicValue pull) nil)
+          (if (== (.-panicValue pull) goexitPanicValue)
+            ;; Propagate runtime.Goexit from seq.
+            (runtime/Goexit)
+
+            (panic (.-panicValue pull))))
+
+
+        (return (.-k pull) (.-v pull) (.-ok pull))))
+
+    (set! stop ^{:go/end 467} (fn []
+        (race/Write (conv unsafe/Pointer (addr (.-racer pull)))) ; detect races
+
+        (when (not (.-done pull))
+          (set! (.-done pull) true)
+          (race/Release (conv unsafe/Pointer (addr (.-racer pull))))
+          (coroswitch c)
+          (race/Acquire (conv unsafe/Pointer (addr (.-racer pull))))
+
+          ;; Propagate panics and goexits from seq.
+          (when (!= (.-panicValue pull) nil)
+            (if (== (.-panicValue pull) goexitPanicValue)
+              ;; Propagate runtime.Goexit from seq.
+              (runtime/Goexit)
+
+              (panic (.-panicValue pull)))))))
+
+
+
+
+    (return next stop)))
+
+
+
+
+(go/var ^{:tag any :doc "goexitPanicValue is a sentinel value indicating that an iterator\nexited via runtime.Goexit.\n"} goexitPanicValue (new int))

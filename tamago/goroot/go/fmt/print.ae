@@ -1,0 +1,1207 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.fmt) (go/file "print.go" :imports [
+
+
+    ^{:line 8} [fmtsort "internal/fmtsort"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [os "os"]
+    ^{:line 11} [reflect "reflect"]
+    ^{:line 12} [strconv "strconv"]
+    ^{:line 13} [sync "sync"]
+    ^{:line 14} [utf8 "unicode/utf8"]])
+
+
+
+
+(go/const "Strings for use with buffer.WriteString.\nThis is less overhead than using buffer.Write with byte arrays.\n"
+  ^{:line 20} [^{:val ", "} commaSpaceString ", "]
+  ^{:line 21} [^{:val "<nil>"} nilAngleString "<nil>"]
+  ^{:line 22} [^{:val "(nil)"} nilParenString "(nil)"]
+  ^{:line 23} [^{:val "nil"} nilString "nil"]
+  ^{:line 24} [^{:val "map["} mapString "map["]
+  ^{:line 25} [^{:val "%!"} percentBangString "%!"]
+  ^{:line 26} [^{:val "(MISSING)"} missingString "(MISSING)"]
+  ^{:line 27} [^{:val "(BADINDEX)"} badIndexString "(BADINDEX)"]
+  ^{:line 28} [^{:val "(PANIC="} panicString "(PANIC="]
+  ^{:line 29} [^{:val "%!(EXTRA "} extraString "%!(EXTRA "]
+  ^{:line 30} [^{:val "%!(BADWIDTH)"} badWidthString "%!(BADWIDTH)"]
+  ^{:line 31} [^{:val "%!(BADPREC)"} badPrecString "%!(BADPREC)"]
+  ^{:line 32} [^{:val "%!(NOVERB)"} noVerbString "%!(NOVERB)"]
+  ^{:line 33} [^{:val "<invalid reflect.Value>"} invReflectString "<invalid reflect.Value>"])
+
+
+
+
+
+(go/type State "State represents the printer state passed to custom formatters.\nIt provides access to the [io.Writer] interface plus information about\nthe flags and options for the operand's format specifier.\n" (interface
+
+    (^{:doc "Write is the function to call to emit formatted output to be printed.\n"} Write [^{:tag (slice byte)} b] :results [^int n ^error err])
+
+    (^{:doc "Width returns the value of the width option and whether it has been set.\n"} Width [] :results [^int wid ^bool ok])
+
+    (^{:doc "Precision returns the value of the precision option and whether it has been set.\n"} Precision [] :results [^int prec ^bool ok])
+
+
+    (^{:doc "Flag reports whether the flag c, a character, has been set.\n"} Flag ^bool [^int c])))
+
+
+
+
+
+(go/type Formatter "Formatter is implemented by any value that has a Format method.\nThe implementation controls how [State] and rune are interpreted,\nand may call [Sprint] or [Fprint](f) etc. to generate its output.\n" (interface
+    (Format [^State f ^rune verb])))
+
+
+
+
+
+
+
+(go/type Stringer "Stringer is implemented by any value that has a String method,\nwhich defines the “native” format for that value.\nThe String method is used to print values passed as an operand\nto any format that accepts a string or to an unformatted printer\nsuch as [Print].\n" (interface
+    (String ^string [])))
+
+
+
+
+
+
+(go/type GoStringer "GoStringer is implemented by any value that has a GoString method,\nwhich defines the Go syntax for that value.\nThe GoString method is used to print values passed as an operand\nto a %#v format.\n" (interface
+    (GoString ^string [])))
+
+
+
+
+
+
+
+
+^{:go/end 98} (go/func FormatString "FormatString returns a string representing the fully qualified formatting\ndirective captured by the [State], followed by the argument verb. ([State] does not\nitself contain the verb.) The result has a leading percent sign followed by any\nflags, the width, and the precision. Missing flags, width, and precision are\nomitted. This function allows a [Formatter] to reconstruct the original\ndirective triggering the call to Format.\n" ^string [^State state ^rune verb]
+  (let [^{:tag (array 16 byte)} tmp (zero (array 16 byte)) ; Use a local buffer.
+      ^{:line 83} b (append (subslice tmp _ 0) \%)]
+    (range [_ c " +-#0"] ; All known flags
+      (when (.Flag state (conv int c)) ; The argument is an int for historical reasons.
+        (set! b (append b (conv byte c)))))
+
+
+    (when [(values w ok) (.Width state)] ok
+      (set! b (strconv/AppendInt b (conv int64 w) 10)))
+
+    (when [(values p ok) (.Precision state)] ok
+      (set! b (append b \.))
+      (set! b (strconv/AppendInt b (conv int64 p) 10)))
+
+    (set! b (utf8/AppendRune b verb))
+    (conv string b)))
+
+
+
+(go/type buffer "Use simple []byte instead of bytes.Buffer to avoid large dependency.\n" (slice byte))
+
+^{:go/end 105} (go/method write [^{:tag (* buffer)} b ^{:tag (slice byte)} p]
+  (set! @b (append @b (spread p))))
+
+
+^{:go/end 109} (go/method writeString [^{:tag (* buffer)} b ^string s]
+  (set! @b (append @b (spread s))))
+
+
+^{:go/end 113} (go/method writeByte [^{:tag (* buffer)} b ^byte c]
+  (set! @b (append @b c)))
+
+
+^{:go/end 117} (go/method writeRune [^{:tag (* buffer)} b ^rune r]
+  (set! @b (utf8/AppendRune @b r)))
+
+
+
+(go/type pp "pp is used to store a printer's state and is reused with sync.Pool to avoid allocations.\n" (struct
+    ^{:line 121 :tag buffer} buf
+
+
+    ^{:line 124 :tag fmt :doc "fmt is used to format basic items such as integers or strings.\n"} fmt
+
+
+    ^{:line 127 :tag bool :doc "reordered records whether the format string used argument reordering.\n"} reordered
+
+    ^{:line 129 :tag bool :doc "goodArgNum records whether the most recent reordering directive was valid.\n"} goodArgNum
+
+    ^{:line 131 :tag bool :doc "panicking is set by catchPanic to avoid infinite panic, recover, panic, ... recursion.\n"} panicking
+
+    ^{:line 133 :tag bool :doc "erroring is set when printing an error string to guard against calling handleMethods.\n"} erroring
+
+    ^{:line 135 :tag bool :doc "wrapErrs is set when the format string may contain a %w verb.\n"} wrapErrs
+
+    ^{:line 137 :tag (slice int) :doc "wrappedErrs records the targets of the %w verb.\n"} wrappedErrs))
+
+
+(go/var ppFree ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 141} (fn ^any [] (new pp))))
+
+
+
+^{:go/end 152} (go/func newPrinter "newPrinter allocates a new pp struct or grabs a cached one.\n" ^{:tag (* pp)} []
+  (let [p (assert (* pp) (.Get ppFree))]
+    (set! (.-panicking p) false)
+    (set! (.-erroring p) false)
+    (set! (.-wrapErrs p) false)
+    (.init (.-fmt p) (addr (.-buf p)))
+    ^{:line 151} p))
+
+
+
+^{:go/end 174} (go/method free "free saves used pp structs in ppFree; avoids an allocation per invocation.\n" [^{:tag (* pp)} p]
+  ;; Proper usage of a sync.Pool requires each entry to have approximately
+  ;; the same memory cost. To obtain this property when the stored type
+  ;; contains a variably-sized buffer, we add a hard limit on the maximum
+  ;; buffer to place back in the pool. If the buffer is larger than the
+  ;; limit, we drop the buffer and recycle just the printer.
+  ;;
+  ;; See https://golang.org/issue/23199.
+  (if (> (cap (.-buf p)) (* 64 1024))
+    (set! (.-buf p) nil)
+
+    (set! (.-buf p) (subslice (.-buf p) _ 0)))
+
+  (when (> (cap (.-wrappedErrs p)) 8)
+    (set! (.-wrappedErrs p) nil))
+
+
+  (set! (.-wrappedErrs p) (subslice (.-wrappedErrs p) _ 0))
+  (.Put ppFree p))
+
+
+^{:go/end 176} (go/method Width [^{:tag (* pp)} p] :results [^int wid ^bool ok] (return (.-wid (.-fmt p)) ^{:go/via [fmtFlags]} (.-widPresent (.-fmt p))))
+
+^{:go/end 178} (go/method Precision [^{:tag (* pp)} p] :results [^int prec ^bool ok] (return (.-prec (.-fmt p)) ^{:go/via [fmtFlags]} (.-precPresent (.-fmt p))))
+
+^{:go/breaks [[4 193]] :go/end 194} (go/method Flag ^bool [^{:tag (* pp)} p ^int b]
+  (switch b
+    (case [\-]
+      (return ^{:go/via [fmtFlags]} (.-minus (.-fmt p))))
+    (case [\+]
+      (return (or ^{:go/via [fmtFlags]} (.-plus (.-fmt p)) ^{:go/via [fmtFlags]} (.-plusV (.-fmt p)))))
+    (case [\#]
+      (return (or ^{:go/via [fmtFlags]} (.-sharp (.-fmt p)) ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p)))))
+    (case [\space]
+      (return ^{:go/via [fmtFlags]} (.-space (.-fmt p))))
+    (case [\0]
+      (return ^{:go/via [fmtFlags]} (.-zero (.-fmt p)))))
+
+  false)
+
+
+
+
+^{:go/end 201} (go/method Write "Write implements [io.Writer] so we can call [Fprintf] on a pp (through [State]), for\nrecursive use in custom verbs.\n" [^{:tag (* pp)} p ^{:tag (slice byte)} b] :results [^int ret ^error err]
+  (.write (.-buf p) b)
+  (return (len b) nil))
+
+
+
+
+^{:go/end 208} (go/method WriteString "WriteString implements [io.StringWriter] so that we can call [io.WriteString]\non a pp (through state), for efficiency.\n" [^{:tag (* pp)} p ^string s] :results [^int ret ^error err]
+  (.writeString (.-buf p) s)
+  (return (len s) nil))
+
+
+;; These routines end in 'f' and take a format string.
+
+
+
+^{:go/end 220} (go/func Fprintf "Fprintf formats according to a format specifier and writes to w.\nIt returns the number of bytes written and any write error encountered.\n" [^io/Writer w ^string format & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (let [p (newPrinter)]
+    (.doPrintf p format a)
+    (set! (values n err) (.Write w (.-buf p)))
+    (.free p)
+    (return)))
+
+
+
+
+^{:go/end 226} (go/func Printf "Printf formats according to a format specifier and writes to standard output.\nIt returns the number of bytes written and any write error encountered.\n" [^string format & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (Fprintf os/Stdout format (spread a)))
+
+
+
+^{:go/end 235} (go/func Sprintf "Sprintf formats according to a format specifier and returns the resulting string.\n" ^string [^string format & ^{:tag (slice any)} a]
+  (let [p (newPrinter)]
+    (.doPrintf p format a)
+    (let [s (conv string (.-buf p))]
+      (.free p)
+      ^{:line 234} s)))
+
+
+
+
+^{:go/end 245} (go/func Appendf "Appendf formats according to a format specifier, appends the result to the byte\nslice, and returns the updated slice.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b ^string format & ^{:tag (slice any)} a]
+  (let [p (newPrinter)]
+    (.doPrintf p format a)
+    (set! b (append b (spread (.-buf p))))
+    (.free p)
+    ^{:line 244} b))
+
+
+;; These routines do not take a format string
+
+
+
+
+^{:go/end 258} (go/func Fprint "Fprint formats using the default formats for its operands and writes to w.\nSpaces are added between operands when neither is a string.\nIt returns the number of bytes written and any write error encountered.\n" [^io/Writer w & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (let [p (newPrinter)]
+    (.doPrint p a)
+    (set! (values n err) (.Write w (.-buf p)))
+    (.free p)
+    (return)))
+
+
+
+
+
+^{:go/end 265} (go/func Print "Print formats using the default formats for its operands and writes to standard output.\nSpaces are added between operands when neither is a string.\nIt returns the number of bytes written and any write error encountered.\n" [& ^{:tag (slice any)} a] :results [^int n ^error err]
+  (Fprint os/Stdout (spread a)))
+
+
+
+
+^{:go/end 275} (go/func Sprint "Sprint formats using the default formats for its operands and returns the resulting string.\nSpaces are added between operands when neither is a string.\n" ^string [& ^{:tag (slice any)} a]
+  (let [p (newPrinter)]
+    (.doPrint p a)
+    (let [s (conv string (.-buf p))]
+      (.free p)
+      ^{:line 274} s)))
+
+
+
+
+
+^{:go/end 286} (go/func Append "Append formats using the default formats for its operands, appends the result to\nthe byte slice, and returns the updated slice.\nSpaces are added between operands when neither is a string.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b & ^{:tag (slice any)} a]
+  (let [p (newPrinter)]
+    (.doPrint p a)
+    (set! b (append b (spread (.-buf p))))
+    (.free p)
+    ^{:line 285} b))
+
+
+;; These routines end in 'ln', do not take a format string,
+;; always add spaces between operands, and add a newline
+;; after the last operand.
+
+
+
+
+^{:go/end 301} (go/func Fprintln "Fprintln formats using the default formats for its operands and writes to w.\nSpaces are always added between operands and a newline is appended.\nIt returns the number of bytes written and any write error encountered.\n" [^io/Writer w & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (let [p (newPrinter)]
+    (.doPrintln p a)
+    (set! (values n err) (.Write w (.-buf p)))
+    (.free p)
+    (return)))
+
+
+
+
+
+^{:go/end 308} (go/func Println "Println formats using the default formats for its operands and writes to standard output.\nSpaces are always added between operands and a newline is appended.\nIt returns the number of bytes written and any write error encountered.\n" [& ^{:tag (slice any)} a] :results [^int n ^error err]
+  (Fprintln os/Stdout (spread a)))
+
+
+
+
+^{:go/end 318} (go/func Sprintln "Sprintln formats using the default formats for its operands and returns the resulting string.\nSpaces are always added between operands and a newline is appended.\n" ^string [& ^{:tag (slice any)} a]
+  (let [p (newPrinter)]
+    (.doPrintln p a)
+    (let [s (conv string (.-buf p))]
+      (.free p)
+      ^{:line 317} s)))
+
+
+
+
+
+^{:go/end 329} (go/func Appendln "Appendln formats using the default formats for its operands, appends the result\nto the byte slice, and returns the updated slice. Spaces are always added\nbetween operands and a newline is appended.\n" ^{:tag (slice byte)} [^{:tag (slice byte)} b & ^{:tag (slice any)} a]
+  (let [p (newPrinter)]
+    (.doPrintln p a)
+    (set! b (append b (spread (.-buf p))))
+    (.free p)
+    ^{:line 328} b))
+
+
+
+
+
+^{:go/end 340} (go/func getField "getField gets the i'th field of the struct value.\nIf the field itself is a non-nil interface, return a value for\nthe thing inside the interface, not the interface itself.\n" ^reflect/Value [^reflect/Value v ^int i]
+  (let [val (.Field v i)]
+    (when (and (== (.Kind val) reflect/Interface) (not (.IsNil val)))
+      (set! val (.Elem val)))
+
+    ^{:line 339} val))
+
+
+
+
+^{:go/end 347} (go/func tooLarge "tooLarge reports whether the magnitude of the integer is\ntoo large to be used as a formatting width or precision.\n" ^bool [^int x]
+  (let [^:const ^{:tag int :val 1000000} max 1000000.0]
+    (or (> x max) (< x (- max)))))
+
+
+
+^{:go/end 362} (go/func parsenum "parsenum converts ASCII to integer.  num is 0 (and isnum is false) if no number present.\n" [^string s ^int start ^int end] :results [^int num ^bool isnum ^int newi]
+  (when (>= start end)
+    (return 0 false end))
+
+  (for [(set! newi start)] (and (< newi end) (<= \0 (aget s newi)) (<= (aget s newi) \9)) (inc! newi)
+    (when (tooLarge num)
+      (return 0 false end)) ; Overflow; crazy long number most likely.
+
+    (set! num (+ (* num 10) (conv int (- (aget s newi) \0))))
+    (set! isnum true))
+
+  (return))
+
+
+^{:go/end 372} (go/method unknownType [^{:tag (* pp)} p ^reflect/Value v]
+  (when (not (.IsValid v))
+    (.writeString (.-buf p) nilAngleString)
+    (return))
+
+  (.writeByte (.-buf p) \?)
+  (.writeString (.-buf p) (.String (.Type v)))
+  (.writeByte (.-buf p) \?))
+
+
+^{:go/end 393} (go/method badVerb [^{:tag (* pp)} p ^any arg ^reflect/Value value ^rune verb]
+  (set! (.-erroring p) true)
+  (.writeString (.-buf p) percentBangString)
+  (.writeRune (.-buf p) verb)
+  (.writeByte (.-buf p) \()
+  (switch
+    (case [(!= arg nil)]
+      (.writeString (.-buf p) (.String (reflect/TypeOf arg)))
+      (.writeByte (.-buf p) \=)
+      (.printArg p arg \v))
+    (case [(.IsValid value)]
+      (.writeString (.-buf p) (.String (.Type value)))
+      (.writeByte (.-buf p) \=)
+      (.printValue p value \v 0))
+    (default
+      (.writeString (.-buf p) nilAngleString)))
+
+  (.writeByte (.-buf p) \))
+  (set! (.-erroring p) false))
+
+
+^{:go/end 402} (go/method fmtBool [^{:tag (* pp)} p ^any arg ^reflect/Value value ^bool v ^rune verb]
+  (switch verb
+    (case [\t \v]
+      (.fmtBoolean (.-fmt p) v))
+    (default
+      (.badVerb p arg value verb))))
+
+
+
+
+
+^{:go/end 411} (go/method fmt0x64 "fmt0x64 formats a uint64 in hexadecimal and prefixes it with 0x or\nnot, as requested, by temporarily setting the sharp flag.\n" [^{:tag (* pp)} p ^uint64 v ^bool leading0x]
+  (let [sharp ^{:go/via [fmtFlags]} (.-sharp (.-fmt p))]
+    (set! ^{:go/via [fmtFlags]} (.-sharp (.-fmt p)) leading0x)
+    (.fmtInteger (.-fmt p) v 16 unsigned \v ldigits)
+    (set! ^{:go/via [fmtFlags]} (.-sharp (.-fmt p)) sharp)))
+
+
+
+^{:go/end 441} (go/method fmtInteger "fmtInteger formats a signed or unsigned integer.\n" [^{:tag (* pp)} p ^any arg ^reflect/Value value ^uint64 v ^bool isSigned ^rune verb]
+  (switch verb
+    (case [\v]
+      (if (and ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p)) (not isSigned))
+        (.fmt0x64 p v true)
+
+        (.fmtInteger (.-fmt p) v 10 isSigned verb ldigits)))
+
+    (case [\d]
+      (.fmtInteger (.-fmt p) v 10 isSigned verb ldigits))
+    (case [\b]
+      (.fmtInteger (.-fmt p) v 2 isSigned verb ldigits))
+    (case [\o \O]
+      (.fmtInteger (.-fmt p) v 8 isSigned verb ldigits))
+    (case [\x]
+      (.fmtInteger (.-fmt p) v 16 isSigned verb ldigits))
+    (case [\X]
+      (.fmtInteger (.-fmt p) v 16 isSigned verb udigits))
+    (case [\c]
+      (.fmtC (.-fmt p) v))
+    (case [\q]
+      (.fmtQc (.-fmt p) v))
+    (case [\U]
+      (.fmtUnicode (.-fmt p) v))
+    (default
+      (.badVerb p arg value verb))))
+
+
+
+
+
+^{:go/end 458} (go/method fmtFloat "fmtFloat formats a float. The default precision for each verb\nis specified as last argument in the call to fmt_float.\n" [^{:tag (* pp)} p ^any arg ^reflect/Value value ^float64 v ^int size ^rune verb]
+  (switch verb
+    (case [\v]
+      (.fmtFloat (.-fmt p) v size \g -1))
+    (case [\b \g \G \x \X]
+      (.fmtFloat (.-fmt p) v size verb -1))
+    (case [\f \e \E]
+      (.fmtFloat (.-fmt p) v size verb 6))
+    (case [\F]
+      (.fmtFloat (.-fmt p) v size \f 6))
+    (default
+      (.badVerb p arg value verb))))
+
+
+
+
+
+
+^{:go/end 479} (go/method fmtComplex "fmtComplex formats a complex number v with\nr = real(v) and j = imag(v) as (r+ji) using\nfmtFloat for r and j formatting.\n" [^{:tag (* pp)} p ^any arg ^reflect/Value value ^complex128 v ^int size ^rune verb]
+  ;; Make sure any unsupported verbs are found before the
+  ;; calls to fmtFloat to not generate an incorrect error string.
+  (switch verb
+    (case [\v \b \g \G \x \X \f \F \e \E]
+      (let [oldPlus ^{:go/via [fmtFlags]} (.-plus (.-fmt p))]
+        (.writeByte (.-buf p) \()
+        (.fmtFloat p arg value (real v) (/ size 2) verb)
+        ;; Imaginary part always has a sign.
+        (set! ^{:go/via [fmtFlags]} (.-plus (.-fmt p)) true)
+        (.fmtFloat p arg value (imag v) (/ size 2) verb)
+        (.writeString (.-buf p) "i)")
+        (set! ^{:go/via [fmtFlags]} (.-plus (.-fmt p)) oldPlus)))
+    (default
+      (.badVerb p arg value verb))))
+
+
+
+^{:go/end 500} (go/method fmtString [^{:tag (* pp)} p ^any arg ^reflect/Value value ^string v ^rune verb]
+  (switch verb
+    (case [\v]
+      (if ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p))
+        (.fmtQ (.-fmt p) v)
+
+        (.fmtS (.-fmt p) v)))
+
+    (case [\s]
+      (.fmtS (.-fmt p) v))
+    (case [\x]
+      (.fmtSx (.-fmt p) v ldigits))
+    (case [\X]
+      (.fmtSx (.-fmt p) v udigits))
+    (case [\q]
+      (.fmtQ (.-fmt p) v))
+    (default
+      (.badVerb p arg value verb))))
+
+
+
+^{:go/end 540} (go/method fmtBytes [^{:tag (* pp)} p ^{:tag (slice byte)} v ^rune verb ^string typeString]
+  (switch verb
+    (case [\v \d]
+      (if ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p)) (do
+          (.writeString (.-buf p) typeString)
+          (when (== v nil)
+            (.writeString (.-buf p) nilParenString)
+            (return))
+
+          (.writeByte (.-buf p) \{)
+          (range [i c v]
+            (when (> i 0)
+              (.writeString (.-buf p) commaSpaceString))
+
+            (.fmt0x64 p (conv uint64 c) true))
+
+          (.writeByte (.-buf p) \}))
+        (do
+          (.writeByte (.-buf p) \[)
+          (range [i c v]
+            (when (> i 0)
+              (.writeByte (.-buf p) \space))
+
+            (.fmtInteger (.-fmt p) (conv uint64 c) 10 unsigned verb ldigits))
+
+          (.writeByte (.-buf p) \]))))
+
+    (case [\s]
+      (.fmtBs (.-fmt p) v))
+    (case [\x]
+      (.fmtBx (.-fmt p) v ldigits))
+    (case [\X]
+      (.fmtBx (.-fmt p) v udigits))
+    (case [\q]
+      (.fmtQ (.-fmt p) (conv string v)))
+    (default
+      (.printValue p (reflect/ValueOf v) verb 0))))
+
+
+
+^{:go/end 578} (go/method fmtPointer [^{:tag (* pp)} p ^any arg ^reflect/Value value ^rune verb]
+  (let [^uintptr u (zero uintptr)]
+    (switch (.Kind value)
+      (case [reflect/Chan reflect/Func reflect/Map reflect/Pointer reflect/Slice reflect/UnsafePointer]
+        (set! u (conv uintptr (.UnsafePointer value))))
+      (default
+        (.badVerb p arg value verb)
+        (return)))
+
+
+    (switch verb
+      (case [\v]
+        (if ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p)) (do
+            (.writeByte (.-buf p) \()
+            (.writeString (.-buf p) (.String (.Type value)))
+            (.writeString (.-buf p) ")(")
+            (if (== u 0)
+              (.writeString (.-buf p) nilString)
+
+              (.fmt0x64 p (conv uint64 u) true))
+
+            (.writeByte (.-buf p) \)))
+          (do
+            (if (== u 0)
+              (.padString (.-fmt p) nilAngleString)
+
+              (.fmt0x64 p (conv uint64 u) (not ^{:go/via [fmtFlags]} (.-sharp (.-fmt p))))))))
+
+
+      (case [\p]
+        (.fmt0x64 p (conv uint64 u) (not ^{:go/via [fmtFlags]} (.-sharp (.-fmt p)))))
+      (case [\b \o \d \x \X]
+        (.fmtInteger p arg value (conv uint64 u) unsigned verb))
+      (default
+        (.badVerb p arg value verb)))))
+
+
+
+^{:go/end 612} (go/method catchPanic [^{:tag (* pp)} p ^any arg ^rune verb ^string method]
+  (when [err (recover)] (!= err nil)
+    ;; If it's a nil pointer, just say "<nil>". The likeliest causes are a
+    ;; Stringer that fails to guard against nil or a nil pointer for a
+    ;; value receiver, and in either case, "<nil>" is a nice result.
+    (when [v (reflect/ValueOf arg)] (and (== (.Kind v) reflect/Pointer) (.IsNil v))
+      (.writeString (.-buf p) nilAngleString)
+      (return))
+
+    ;; Otherwise print a concise panic message. Most of the time the panic
+    ;; value will print itself nicely.
+    (when (.-panicking p)
+      ;; Nested panics; the recursion in printArg cannot succeed.
+      (panic err))
+
+
+    (let [oldFlags (.-fmtFlags (.-fmt p))]
+      ;; For this output we want default behavior.
+      (.clearflags (.-fmt p))
+
+      (.writeString (.-buf p) percentBangString)
+      (.writeRune (.-buf p) verb)
+      (.writeString (.-buf p) panicString)
+      (.writeString (.-buf p) method)
+      (.writeString (.-buf p) " method: ")
+      (set! (.-panicking p) true)
+      (.printArg p err \v)
+      (set! (.-panicking p) false)
+      (.writeByte (.-buf p) \))
+
+      (set! (.-fmtFlags (.-fmt p)) oldFlags))))
+
+
+
+^{:go/breaks [[9 671]] :go/end 672} (go/method handleMethods [^{:tag (* pp)} p ^any arg ^reflect/Value value ^rune verb] :results [^bool handled]
+  (when (.-erroring p)
+    (return))
+
+  (when (== verb \w)
+    ;; It is invalid to use %w other than with Errorf or with a non-error arg.
+    (let [(values _ ok) (assert error arg)]
+      (when (or (not ok) (not (.-wrapErrs p)))
+        (.badVerb p arg value verb)
+        (return true))
+
+      ;; If the arg is a Formatter, pass 'v' as the verb to it.
+      (set! verb \v)))
+
+
+  ;; Is it a Formatter?
+  (when [(values formatter ok) (assert Formatter arg)] ok
+    (set! handled true)
+    (defer (.catchPanic p arg verb "Format"))
+    (.Format formatter p verb)
+    (return))
+
+
+  ;; If we're doing Go syntax and the argument knows how to supply it, take care of it now.
+  (if ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p))
+    (when [(values stringer ok) (assert GoStringer arg)] ok
+      (set! handled true)
+      (defer (.catchPanic p arg verb "GoString"))
+      ;; Print the result of GoString unadorned.
+      (.fmtS (.-fmt p) (.GoString stringer))
+      (return))
+
+
+    ;; If a string is acceptable according to the format, see if
+    ;; the value satisfies one of the string-valued interfaces.
+    ;; Println etc. set verb to %v, which is "stringable".
+    (switch verb
+      (case [\v \s \x \X \q]
+        ;; Is it an error or Stringer?
+        ;; The duplication in the bodies is necessary:
+        ;; setting handled and deferring catchPanic
+        ;; must happen before calling the method.
+        (type-switch [v arg]
+          (case [error]
+            (set! handled true)
+            (defer (.catchPanic p arg verb "Error"))
+            (.fmtString p arg value (.Error v) verb)
+            (return))
+
+          (case [Stringer]
+            (set! handled true)
+            (defer (.catchPanic p arg verb "String"))
+            (.fmtString p arg value (.String v) verb)
+            (return))))))
+
+
+
+  false)
+
+
+^{:go/end 752} (go/method printArg [^{:tag (* pp)} p ^any arg ^rune verb]
+  (when (== arg nil)
+    (switch verb
+      (case [\T \v]
+        (.padString (.-fmt p) nilAngleString))
+      (default
+        (.badVerb p arg (lit reflect/Value) verb)))
+
+    (return))
+
+
+  ;; Special processing considerations.
+  ;; %T (the value's type) and %p (its address) are special; we always do them first.
+  (switch verb
+    (case [\T]
+      (.fmtS (.-fmt p) (.String (reflect/TypeOf arg)))
+      (return))
+    (case [\p]
+      (.fmtPointer p arg (reflect/ValueOf arg) \p)
+      (return)))
+
+
+  ;; Some types can be done without reflection.
+  (type-switch [f arg]
+    (case [bool]
+      (.fmtBool p arg (lit reflect/Value) f verb))
+    (case [float32]
+      (.fmtFloat p arg (lit reflect/Value) (conv float64 f) 32 verb))
+    (case [float64]
+      (.fmtFloat p arg (lit reflect/Value) f 64 verb))
+    (case [complex64]
+      (.fmtComplex p arg (lit reflect/Value) (conv complex128 f) 64 verb))
+    (case [complex128]
+      (.fmtComplex p arg (lit reflect/Value) f 128 verb))
+    (case [int]
+      (.fmtInteger p arg (lit reflect/Value) (conv uint64 f) signed verb))
+    (case [int8]
+      (.fmtInteger p arg (lit reflect/Value) (conv uint64 f) signed verb))
+    (case [int16]
+      (.fmtInteger p arg (lit reflect/Value) (conv uint64 f) signed verb))
+    (case [int32]
+      (.fmtInteger p arg (lit reflect/Value) (conv uint64 f) signed verb))
+    (case [int64]
+      (.fmtInteger p arg (lit reflect/Value) (conv uint64 f) signed verb))
+    (case [uint]
+      (.fmtInteger p arg (lit reflect/Value) (conv uint64 f) unsigned verb))
+    (case [uint8]
+      (.fmtInteger p arg (lit reflect/Value) (conv uint64 f) unsigned verb))
+    (case [uint16]
+      (.fmtInteger p arg (lit reflect/Value) (conv uint64 f) unsigned verb))
+    (case [uint32]
+      (.fmtInteger p arg (lit reflect/Value) (conv uint64 f) unsigned verb))
+    (case [uint64]
+      (.fmtInteger p arg (lit reflect/Value) f unsigned verb))
+    (case [uintptr]
+      (.fmtInteger p arg (lit reflect/Value) (conv uint64 f) unsigned verb))
+    (case [string]
+      (.fmtString p arg (lit reflect/Value) f verb))
+    (case [(slice byte)]
+      (.fmtBytes p f verb "[]byte"))
+    (case [reflect/Value]
+      ;; Handle extractable values with special methods
+      ;; since printValue does not handle them at depth 0.
+      (when (and (.IsValid f) (.CanInterface f))
+        (set! arg (.Interface f)) ; TODO(thepudds): Currently causes f to escape.
+        (when (.handleMethods p arg (lit reflect/Value) verb)
+          (return)))
+
+
+      (.printValue p f verb 0))
+    (default
+      ;; If the type is not simple, it might have methods.
+      (when (not (.handleMethods p arg (lit reflect/Value) verb))
+        ;; Need to use reflection, since the type had no
+        ;; interface methods that could be used for formatting.
+        (.printValue p (reflect/ValueOf f) verb 0)))))
+
+
+
+
+
+
+^{:go/end 919} (go/method printValue "printValue is similar to printArg but starts with a reflect value, not an interface{} value.\nIt does not handle 'p' and 'T' verbs because these should have been already handled by printArg.\n" [^{:tag (* pp)} p ^reflect/Value value ^rune verb ^int depth]
+  ;; Handle values with special methods if not already handled by printArg (depth == 0).
+  (when (and (> depth 0) (.IsValid value) (.CanInterface value))
+    (let [arg (.Interface value)] ; TODO(thepudds): Currently causes value to escape.
+      (when (.handleMethods p arg value verb)
+        (return))))
+
+
+
+  (switch [f value] (.Kind value)
+    (case [reflect/Invalid]
+      (if (== depth 0)
+        (.writeString (.-buf p) invReflectString)
+
+        (switch verb
+          (case [\v]
+            (.writeString (.-buf p) nilAngleString))
+          (default
+            (.badVerb p nil value verb)))))
+
+
+    (case [reflect/Bool]
+      (.fmtBool p nil value (.Bool f) verb))
+    (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+      (.fmtInteger p nil value (conv uint64 (.Int f)) signed verb))
+    (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+      (.fmtInteger p nil value (.Uint f) unsigned verb))
+    (case [reflect/Float32]
+      (.fmtFloat p nil value (.Float f) 32 verb))
+    (case [reflect/Float64]
+      (.fmtFloat p nil value (.Float f) 64 verb))
+    (case [reflect/Complex64]
+      (.fmtComplex p nil value (.Complex f) 64 verb))
+    (case [reflect/Complex128]
+      (.fmtComplex p nil value (.Complex f) 128 verb))
+    (case [reflect/String]
+      (.fmtString p nil value (.String f) verb))
+    (case [reflect/Map]
+      (if ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p)) (do
+          (.writeString (.-buf p) (.String (.Type f)))
+          (when (.IsNil f)
+            (.writeString (.-buf p) nilParenString)
+            (return))
+
+          (.writeByte (.-buf p) \{))
+
+        (.writeString (.-buf p) mapString))
+
+      (let [sorted (fmtsort/Sort f)]
+        (range [i m sorted]
+          (when (> i 0)
+            (if ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p))
+              (.writeString (.-buf p) commaSpaceString)
+
+              (.writeByte (.-buf p) \space)))
+
+
+          (.printValue p (.-Key m) verb (+ depth 1))
+          (.writeByte (.-buf p) \:)
+          (.printValue p (.-Value m) verb (+ depth 1)))
+
+        (if ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p))
+          (.writeByte (.-buf p) \})
+
+          (.writeByte (.-buf p) \]))))
+
+    (case [reflect/Struct]
+      (when ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p))
+        (.writeString (.-buf p) (.String (.Type f))))
+
+      (.writeByte (.-buf p) \{)
+      (for [i 0] (< i (.NumField f)) (inc! i)
+        (when (> i 0)
+          (if ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p))
+            (.writeString (.-buf p) commaSpaceString)
+
+            (.writeByte (.-buf p) \space)))
+
+
+        (when (or ^{:go/via [fmtFlags]} (.-plusV (.-fmt p)) ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p)))
+          (when [name (.-Name (.Field (.Type f) i))] (!= name "")
+            (.writeString (.-buf p) name)
+            (.writeByte (.-buf p) \:)))
+
+
+        (.printValue p (getField f i) verb (+ depth 1)))
+
+      (.writeByte (.-buf p) \}))
+    (case [reflect/Interface]
+      (let [value (.Elem f)]
+        (if (not (.IsValid value))
+          (if ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p)) (do
+              (.writeString (.-buf p) (.String (.Type f)))
+              (.writeString (.-buf p) nilParenString))
+
+            (.writeString (.-buf p) nilAngleString))
+
+
+          (.printValue p value verb (+ depth 1)))))
+
+    (case [reflect/Array reflect/Slice]
+      (switch verb
+        (case [\s \q \x \X]
+          ;; Handle byte and uint8 slices and arrays special for the above verbs.
+          (let [t (.Type f)]
+            (when (== (.Kind (.Elem t)) reflect/Uint8)
+              (let [^{:tag (slice byte)} bytes (zero (slice byte))]
+                (if (or (== (.Kind f) reflect/Slice) (.CanAddr f))
+                  (set! bytes (.Bytes f))
+                  (do
+                    ;; We have an array, but we cannot Bytes() a non-addressable array,
+                    ;; so we build a slice by hand. This is a rare case but it would be nice
+                    ;; if reflection could help a little more.
+                    (set! bytes (make (slice byte) (.Len f)))
+                    (range [i bytes]
+                      (aset bytes i (conv byte (.Uint (.Index f i)))))))
+
+
+                (.fmtBytes p bytes verb (.String t))
+                (return))))))
+
+
+      (if ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p)) (do
+          (.writeString (.-buf p) (.String (.Type f)))
+          (when (and (== (.Kind f) reflect/Slice) (.IsNil f))
+            (.writeString (.-buf p) nilParenString)
+            (return))
+
+          (.writeByte (.-buf p) \{)
+          (for [i 0] (< i (.Len f)) (inc! i)
+            (when (> i 0)
+              (.writeString (.-buf p) commaSpaceString))
+
+            (.printValue p (.Index f i) verb (+ depth 1)))
+
+          (.writeByte (.-buf p) \}))
+        (do
+          (.writeByte (.-buf p) \[)
+          (for [i 0] (< i (.Len f)) (inc! i)
+            (when (> i 0)
+              (.writeByte (.-buf p) \space))
+
+            (.printValue p (.Index f i) verb (+ depth 1)))
+
+          (.writeByte (.-buf p) \]))))
+
+    (case [reflect/Pointer]
+      ;; pointer to array or slice or struct? ok at top level
+      ;; but not embedded (avoid loops)
+      (when (and (== depth 0) (!= (.UnsafePointer f) nil))
+        (switch [a (.Elem f)] (.Kind a)
+          (case [reflect/Array reflect/Slice reflect/Struct reflect/Map]
+            (.writeByte (.-buf p) \&)
+            (.printValue p a verb (+ depth 1))
+            (return))))
+
+
+      (fallthrough))
+    (case [reflect/Chan reflect/Func reflect/UnsafePointer]
+      (.fmtPointer p nil f verb))
+    (default
+      (.unknownType p f))))
+
+
+
+
+^{:go/end 952} (go/func intFromArg "intFromArg gets the argNumth element of a. On return, isInt reports whether the argument has integer type.\n" [^{:tag (slice any)} a ^int argNum] :results [^int num ^bool isInt ^int newArgNum]
+  (set! newArgNum argNum)
+  (when (< argNum (len a))
+    (set! (values num isInt) (assert int (aget a argNum))) ; Almost always OK.
+    (when (not isInt)
+      ;; Work harder.
+      (switch [v (reflect/ValueOf (aget a argNum))] (.Kind v)
+        (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+          (let [n (.Int v)]
+            (when (== (conv int64 (conv int n)) n)
+              (set! num (conv int n))
+              (set! isInt true))))
+
+        (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+          (let [n (.Uint v)]
+            (when (and (>= (conv int64 n) 0) (== (conv uint64 (conv int n)) n))
+              (set! num (conv int n))
+              (set! isInt true))))
+
+        (default)))
+    ;; Already 0, false.
+
+
+    (set! newArgNum (+ argNum 1))
+    (when (tooLarge num)
+      (set! num 0)
+      (set! isInt false)))
+
+
+  (return))
+
+
+
+
+
+
+
+
+^{:go/end 977} (go/func parseArgNumber "parseArgNumber returns the value of the bracketed number, minus 1\n(explicit argument numbers are one-indexed but we want zero-indexed).\nThe opening bracket is known to be present at format[0].\nThe returned values are the index, the number of bytes to consume\nup to the closing paren, if present, and whether the number parsed\nok. The bytes to consume will be 1 if no closing paren is present.\n" [^string format] :results [^int index ^int wid ^bool ok]
+  ;; There must be at least 3 bytes: [n].
+  (when (< (len format) 3)
+    (return 0 1 false))
+
+
+  ;; Find closing bracket.
+  (for [i 1] (< i (len format)) (inc! i)
+    (when (== (aget format i) \])
+      (let [(values width ok newi) (parsenum format 1 i)]
+        (when (or (not ok) (!= newi i))
+          (return 0 (+ i 1) false))
+
+        (return (- width 1) (+ i 1) true)))) ; arg numbers are one-indexed and skip paren.
+
+
+  (return 0 1 false))
+
+
+
+
+
+^{:go/end 993} (go/method argNumber "argNumber returns the next argument to evaluate, which is either the value of the passed-in\nargNum or the value of the bracketed integer that begins format[i:]. It also returns\nthe new value of i, that is, the index of the next byte of the format to process.\n" [^{:tag (* pp)} p ^int argNum ^string format ^int i ^int numArgs] :results [^int newArgNum ^int newi ^bool found]
+  (when (or (<= (len format) i) (!= (aget format i) \[))
+    (return argNum i false))
+
+  (set! (.-reordered p) true)
+  (let [(values index wid ok) (parseArgNumber (subslice format i))]
+    (when (and ok (<= 0 index) (< index numArgs))
+      (return index (+ i wid) true))
+
+    (set! (.-goodArgNum p) false)
+    (return argNum (+ i wid) ok)))
+
+
+^{:go/end 999} (go/method badArgNum [^{:tag (* pp)} p ^rune verb]
+  (.writeString (.-buf p) percentBangString)
+  (.writeRune (.-buf p) verb)
+  (.writeString (.-buf p) badIndexString))
+
+
+^{:go/end 1005} (go/method missingArg [^{:tag (* pp)} p ^rune verb]
+  (.writeString (.-buf p) percentBangString)
+  (.writeRune (.-buf p) verb)
+  (.writeString (.-buf p) missingString))
+
+
+^{:go/end 1183} (go/method doPrintf [^{:tag (* pp)} p ^string format ^{:tag (slice any)} a]
+  (let [end (len format)
+      ^{:line 1009} argNum 0 ; we process one argument per non-trivial format
+      ^{:line 1010} afterIndex false] ; previous item in format was an index like [3].
+    (set! (.-reordered p) false)
+    (label :formatLoop
+      (for [i 0] (< i end) _
+        (set! (.-goodArgNum p) true)
+        (let [lasti i]
+          (while (and (< i end) (!= (aget format i) \%))
+            (inc! i))
+
+          (when (> i lasti)
+            (.writeString (.-buf p) (subslice format lasti i)))
+
+          (when (>= i end)
+            ;; done processing format string
+            (break))
+
+
+          ;; Process one verb
+          (inc! i)
+
+          ;; Do we have flags?
+          (.clearflags (.-fmt p))
+          (label :simpleFormat
+            (for [] (< i end) (inc! i)
+              (let [c (aget format i)]
+                (switch c
+                  (case [\#]
+                    (set! ^{:go/via [fmtFlags]} (.-sharp (.-fmt p)) true))
+                  (case [\0]
+                    (set! ^{:go/via [fmtFlags]} (.-zero (.-fmt p)) true))
+                  (case [\+]
+                    (set! ^{:go/via [fmtFlags]} (.-plus (.-fmt p)) true))
+                  (case [\-]
+                    (set! ^{:go/via [fmtFlags]} (.-minus (.-fmt p)) true))
+                  (case [\space]
+                    (set! ^{:go/via [fmtFlags]} (.-space (.-fmt p)) true))
+                  (default
+                    ;; Fast path for common case of ascii lower case simple verbs
+                    ;; without precision or width or argument indices.
+                    (when (and (<= \a c) (<= c \z) (< argNum (len a)))
+                      (switch c
+                        (case [\w]
+                          (set! (.-wrappedErrs p) (append (.-wrappedErrs p) argNum))
+                          (fallthrough))
+                        (case [\v]
+                          ;; Go syntax
+                          (set! ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p)) ^{:go/via [fmtFlags]} (.-sharp (.-fmt p)))
+                          (set! ^{:go/via [fmtFlags]} (.-sharp (.-fmt p)) false)
+                          ;; Struct-field syntax
+                          (set! ^{:go/via [fmtFlags]} (.-plusV (.-fmt p)) ^{:go/via [fmtFlags]} (.-plus (.-fmt p)))
+                          (set! ^{:go/via [fmtFlags]} (.-plus (.-fmt p)) false)))
+
+                      (.printArg p (aget a argNum) (conv rune c))
+                      (inc! argNum)
+                      (inc! i)
+                      (continue :formatLoop))
+
+                    ;; Format is more complex than simple flags and a verb or is malformed.
+                    (break :simpleFormat))))))
+
+
+
+          ;; Do we have an explicit argument index?
+          (set! (values argNum i afterIndex) (.argNumber p argNum format i (len a)))
+
+          ;; Do we have width?
+          (if (and (< i end) (== (aget format i) \*)) (do
+              (inc! i)
+              (set! (values (.-wid (.-fmt p)) ^{:go/via [fmtFlags]} (.-widPresent (.-fmt p)) argNum) (intFromArg a argNum))
+
+              (when (not ^{:go/via [fmtFlags]} (.-widPresent (.-fmt p)))
+                (.writeString (.-buf p) badWidthString))
+
+
+              ;; We have a negative width, so take its value and ensure
+              ;; that the minus flag is set
+              (when (< (.-wid (.-fmt p)) 0)
+                (set! (.-wid (.-fmt p)) (- (.-wid (.-fmt p))))
+                (set! ^{:go/via [fmtFlags]} (.-minus (.-fmt p)) true)
+                (set! ^{:go/via [fmtFlags]} (.-zero (.-fmt p)) false)) ; Do not pad with zeros to the right.
+
+              (set! afterIndex false))
+            (do
+              (set! (values (.-wid (.-fmt p)) ^{:go/via [fmtFlags]} (.-widPresent (.-fmt p)) i) (parsenum format i end))
+              (when (and afterIndex ^{:go/via [fmtFlags]} (.-widPresent (.-fmt p))) ; "%[3]2d"
+                (set! (.-goodArgNum p) false))))
+
+
+
+          ;; Do we have precision?
+          (when (and (< (+ i 1) end) (== (aget format i) \.))
+            (inc! i)
+            (when afterIndex ; "%[3].2d"
+              (set! (.-goodArgNum p) false))
+
+            (set! (values argNum i afterIndex) (.argNumber p argNum format i (len a)))
+            (if (and (< i end) (== (aget format i) \*)) (do
+                (inc! i)
+                (set! (values (.-prec (.-fmt p)) ^{:go/via [fmtFlags]} (.-precPresent (.-fmt p)) argNum) (intFromArg a argNum))
+                ;; Negative precision arguments don't make sense
+                (when (< (.-prec (.-fmt p)) 0)
+                  (set! (.-prec (.-fmt p)) 0)
+                  (set! ^{:go/via [fmtFlags]} (.-precPresent (.-fmt p)) false))
+
+                (when (not ^{:go/via [fmtFlags]} (.-precPresent (.-fmt p)))
+                  (.writeString (.-buf p) badPrecString))
+
+                (set! afterIndex false))
+              (do
+                (set! (values (.-prec (.-fmt p)) ^{:go/via [fmtFlags]} (.-precPresent (.-fmt p)) i) (parsenum format i end))
+                (when (not ^{:go/via [fmtFlags]} (.-precPresent (.-fmt p)))
+                  (set! (.-prec (.-fmt p)) 0)
+                  (set! ^{:go/via [fmtFlags]} (.-precPresent (.-fmt p)) true)))))
+
+
+
+
+          (when (not afterIndex)
+            (set! (values argNum i afterIndex) (.argNumber p argNum format i (len a))))
+
+
+          (when (>= i end)
+            (.writeString (.-buf p) noVerbString)
+            (break))
+
+
+          (let [(values verb size) (utf8/DecodeRuneInString (subslice format i))]
+            (set! i + size)
+
+            (switch
+              (case [(== verb \%)] ; Percent does not absorb operands and ignores f.wid and f.prec.
+                (.writeByte (.-buf p) \%))
+              (case [(not (.-goodArgNum p))]
+                (.badArgNum p verb))
+              (case [(>= argNum (len a))] ; No argument left over to print for the current verb.
+                (.missingArg p verb))
+              (case [(== verb \w)]
+                (set! (.-wrappedErrs p) (append (.-wrappedErrs p) argNum))
+                (fallthrough))
+              (case [(== verb \v)]
+                ;; Go syntax
+                (set! ^{:go/via [fmtFlags]} (.-sharpV (.-fmt p)) ^{:go/via [fmtFlags]} (.-sharp (.-fmt p)))
+                (set! ^{:go/via [fmtFlags]} (.-sharp (.-fmt p)) false)
+                ;; Struct-field syntax
+                (set! ^{:go/via [fmtFlags]} (.-plusV (.-fmt p)) ^{:go/via [fmtFlags]} (.-plus (.-fmt p)))
+                (set! ^{:go/via [fmtFlags]} (.-plus (.-fmt p)) false)
+                (fallthrough))
+              (default
+                (.printArg p (aget a argNum) verb)
+                (inc! argNum)))))))
+
+
+
+    ;; Check for extra arguments unless the call accessed the arguments
+    ;; out of order, in which case it's too expensive to detect if they've all
+    ;; been used and arguably OK if they're not.
+    (when (and (not (.-reordered p)) (< argNum (len a)))
+      (.clearflags (.-fmt p))
+      (.writeString (.-buf p) extraString)
+      (range [i arg (subslice a argNum)]
+        (when (> i 0)
+          (.writeString (.-buf p) commaSpaceString))
+
+        (if (== arg nil)
+          (.writeString (.-buf p) nilAngleString)
+          (do
+            (.writeString (.-buf p) (.String (reflect/TypeOf arg)))
+            (.writeByte (.-buf p) \=)
+            (.printArg p arg \v))))
+
+
+      (.writeByte (.-buf p) \)))))
+
+
+
+^{:go/end 1196} (go/method doPrint [^{:tag (* pp)} p ^{:tag (slice any)} a]
+  (let [prevString false]
+    (range [argNum arg a]
+      (let [isString (and (!= arg nil) (== (.Kind (reflect/TypeOf arg)) reflect/String))]
+        ;; Add a space between two non-string arguments.
+        (when (and (> argNum 0) (not isString) (not prevString))
+          (.writeByte (.-buf p) \space))
+
+        (.printArg p arg \v)
+        (set! prevString isString)))))
+
+
+
+
+
+^{:go/end 1208} (go/method doPrintln "doPrintln is like doPrint but always adds a space between arguments\nand a newline after the last argument.\n" [^{:tag (* pp)} p ^{:tag (slice any)} a]
+  (range [argNum arg a]
+    (when (> argNum 0)
+      (.writeByte (.-buf p) \space))
+
+    (.printArg p arg \v))
+
+  (.writeByte (.-buf p) \newline))

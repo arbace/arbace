@@ -1,0 +1,289 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Floating point binary↔decimal conversion by fast unrounded scaling.
+;; See “Floating-Point Printing and Parsing Can Be Simple And Fast”,
+;; https://research.swtch.com/fp
+
+(in-ns 'go.internal.strconv) (go/file "uscale.go" :imports [
+
+
+    ^{:line 12} [bits "math/bits"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+
+^{:go/breaks [[7 21]] :go/end 22} (go/func bool2 "bool2 converts b to an integer: 1 for true, 0 for false.\n" :type-params [^{:tag (| (tilde int) (tilde uint32) (tilde uint64))} T] ^T [^bool b]
+  (when b
+    (return 1))
+
+  0)
+
+
+
+
+
+^{:go/end 35} (go/func pack64 "pack64 takes m, e and returns f = m * 2**e.\nIt assumes the caller has provided a 53-bit mantissa m\nand an exponent that is in range for the mantissa.\n" [^uint64 m ^int e] :results [float64 error]
+  (when (== (bit-and m (<< 1 52)) 0)
+    (return (float64frombits m) nil))
+
+  (when (>= e (- 0x7FF 1075))
+    (return (float64frombits (bit-or (bit-and m (<< 1 63)) (<< 0x7ff 52))) ErrRange))
+
+  (return (float64frombits (bit-or (bit-and-not m (<< 1 52)) (<< (conv uint64 (+ 1075 e)) 52))) nil))
+
+
+
+
+
+^{:go/end 48} (go/func pack32 "pack32 takes m, e and returns f = m * 2**e.\nIt assumes the caller has provided a 24-bit mantissa m\nand an exponent that is in range for the mantissa.\n" [^uint32 m ^int e] :results [float32 error]
+  (when (== (bit-and m (<< 1 23)) 0)
+    (return (float32frombits m) nil))
+
+  (when (>= e (- 0xFF 150))
+    (return (float32frombits (bit-or (bit-and m (<< 1 31)) (<< 0xff 23))) ErrRange))
+
+  (return (float32frombits (bit-or (bit-and-not m (<< 1 23)) (<< (conv uint32 (+ 150 e)) 23))) nil))
+
+
+
+(go/type unrounded "An unrounded represents an unrounded value.\n" uint64)
+
+^{:go/end 53} (go/method floor ^uint64 [^unrounded u] (conv uint64 (>> (+ u 0) 2)))
+^{:go/end 54} (go/method roundHalfDown ^uint64 [^unrounded u] (conv uint64 (>> (+ u 1) 2)))
+^{:go/end 55} (go/method round ^uint64 [^unrounded u] (conv uint64 (>> (+ u 1 (bit-and (>> u 2) 1)) 2)))
+^{:go/end 56} (go/method roundHalfUp ^uint64 [^unrounded u] (conv uint64 (>> (+ u 2) 2)))
+^{:go/end 57} (go/method ceil ^uint64 [^unrounded u] (conv uint64 (>> (+ u 3) 2)))
+^{:go/end 58} (go/method nudge ^unrounded [^unrounded u ^int δ] (+ u (conv unrounded δ)))
+
+^{:go/end 63} (go/method div ^unrounded [^unrounded u ^uint64 d]
+  (let [x (conv uint64 u)]
+    (bit-or (conv unrounded (/ x d)) (bit-and u 1) ((inst bool2 unrounded) (!= (% x d) 0)))))
+
+
+^{:go/end 67} (go/method rsh ^unrounded [^unrounded u ^int s]
+  (bit-or (>> u s) (bit-and u 1) ((inst bool2 unrounded) (!= (bit-and u (- ^unrounded (<< 1 s) 1)) 0))))
+
+
+
+^{:go/end 73} (go/func log10Pow2 "log10Pow2(x) returns ⌊log₁₀ 2**x⌋ = ⌊x * log₁₀ 2⌋.\n" ^int [^int x]
+  ;; log₁₀ 2 ≈ 0.30102999566 ≈ 78913 / 2^18
+  (>> (* x 78913) 18))
+
+
+
+^{:go/end 79} (go/func log2Pow10 "log2Pow10(x) returns ⌊log₂ 10**x⌋ = ⌊x * log₂ 10⌋.\n" ^int [^int x]
+  ;; log₂ 10 ≈ 3.32192809489 ≈ 108853 / 2^15
+  (>> (* x 108853) 15))
+
+
+
+(go/var ^{:doc "uint64pow10[x] is 10**x.\n"} uint64pow10 ^{:go/breaks [2 12]} (lit (array ... uint64)
+    1 10.0 100.0 1000.0 10000.0 100000.0 1000000.0 1.0E7 1.0E8 1.0E9
+    1.0E10 1.0E11 1.0E12 1.0E13 1.0E14 1.0E15 1.0E16 1.0E17 1.0E18 1.0E19))
+
+
+
+
+
+
+^{:go/end 107} (go/func fixedWidthFloat "fixedWidthFloat returns the n-digit decimal form of f = m * 2**e as d * 10**p.\nn can be at most 18.\nIf fmt == 'f' then n is a conservative estimate of the number of digits,\nand digits are discarded to match prec.\n" [^uint64 m ^int e ^int n ^int prec ^byte fmt] :results [^uint64 d ^int p]
+  (set! p (- n 1 (log10Pow2 (+ e 63))))
+  (let [^scaler pre (zero scaler)]
+    (prescale (addr pre) e p (log2Pow10 p))
+    (let [u (uscale m (addr pre))]
+      (when (>= u (unmin (aget uint64pow10 n)))
+        (set! u (.div u 10))
+        (dec! p))
+
+      (when (== fmt \f)
+        (while (> p prec)
+          (set! u (.div u 10))
+          (dec! p)))
+
+
+      (return (.round u) (- p)))))
+
+
+
+
+
+^{:go/end 133} (go/func parseFloat64 "parseFloat64 rounds d * 10**p to the nearest float64 f.\nd can have at most 19 digits.\nIt returns ErrRange if the result rounds to infinity.\n" [^uint64 d ^int p ^uint64 sign] :results [float64 error]
+  (let [b (bits/Len64 d)
+      ^{:line 114} lp (log2Pow10 p)
+      ^{:line 115} e (min 1074 (- 53 b lp))
+      ^{:line 116 :tag scaler} pre (zero scaler)]
+    (prescale (addr pre) (- e (- 64 b)) p lp)
+    (when (>= (.-s pre) 64)
+      (return (float64frombits (bit-or sign 0)) nil))
+
+    (let [u (uscale (<< d (- 64 b)) (addr pre))
+
+        ;; This block is branch-free code for:
+        ;;	if u.round() >= 1<<53 {
+        ;;		u = u.rsh(1)
+        ;;		e = e - 1
+        ;;	}
+        ^{:line 128} s ((inst bool2 int) (>= u (unmin (<< 1 53))))]
+      (set! u (bit-or (>> u s) (bit-and u 1)))
+      (set! e (- e s))
+
+      (pack64 (bit-or sign (.round u)) (- e)))))
+
+
+
+
+
+^{:go/end 159} (go/func parseFloat32 "parseFloat32 rounds d * 10**p to the nearest float32 f.\nd can have at most 19 digits.\nIt returns ErrRange if the result rounds to infinity.\n" [^uint64 d ^int p ^uint32 sign] :results [float32 error]
+  (let [b (bits/Len64 d)
+      ^{:line 140} lp (log2Pow10 p)
+      ^{:line 141} e (min 149 (- 24 b lp))
+      ^{:line 142 :tag scaler} pre (zero scaler)]
+    (prescale (addr pre) (- e (- 64 b)) p lp)
+    (when (>= (.-s pre) 64)
+      (return (float32frombits (bit-or sign 0)) nil))
+
+    (let [u (uscale (<< d (- 64 b)) (addr pre))
+
+        ;; This block is branch-free code for:
+        ;;	if u.round() >= 1<<24 {
+        ;;		u = u.rsh(1)
+        ;;		e = e - 1
+        ;;	}
+        ^{:line 154} s ((inst bool2 int) (>= u (unmin (<< 1 24))))]
+      (set! u (bit-or (>> u s) (bit-and u 1)))
+      (set! e (- e s))
+
+      (pack32 (bit-or sign (conv uint32 (.round u))) (- e)))))
+
+
+
+^{:go/end 164} (go/func unmin "unmin returns the minimum unrounded that rounds to x.\n" ^unrounded [^uint64 x]
+  (conv unrounded (- (<< x 2) 2)))
+
+
+
+
+
+^{:go/end 216} (go/func shortFloat "shortFloat computes the shortest formatting of f,\nusing as few digits as possible that will still round trip\nback to the original float.\n" :type-params [^{:tag (| float32 float64)} F] [^uint64 m ^int e] :results [^uint64 d ^int p]
+  (let [(values ^int mantBits ^int minExp) (zero int)] ; parameterized constants
+    (switch (* 8 (unsafe/Sizeof (conv F 0)))
+      (case [32]
+        (set! mantBits float32MantBits)
+        (set! minExp float32MinExp))
+      (case [64]
+        (set! mantBits float64MantBits)
+        (set! minExp float64MinExp)))
+
+
+    ;; Note: these cases could be factored a little more,
+    ;; but in the first two branches, z is a constant,
+    ;; allowing the compiler to greatly simplify the code.
+    (let [(values ^uint64 min ^uint64 max) (zero uint64)
+        ^{:line 184 :tag int} odd (zero int)
+        ^{:line 185} z (- 63 mantBits)]
+      (cond (and (== m (<< 1 63)) (> e minExp)) (do
+          (set! p (- (skewed (+ e z))))
+          (set! min (- m ^uint64 (<< 1 (- z 2)))) ; min = m - 1/4 * 2**(e+z)
+          (set! max (+ m ^uint64 (<< 1 (- z 1)))) ; max = m + 1/2 * 2**(e+z)
+          (set! odd (bit-and (conv int (>> m z)) 1)))
+        (>= e minExp) (do
+          (set! p (- (log10Pow2 (+ e z))))
+          (set! min (- m ^uint64 (<< 1 (- z 1)))) ; min = m - 1/2 * 2**(e+z)
+          (set! max (+ m ^uint64 (<< 1 (- z 1)))) ; max = m + 1/2 * 2**(e+z)
+          (set! odd (bit-and (conv int (>> m z)) 1))) :else
+        (do
+          (set! z (+ z (- minExp e)))
+          (set! p (- (log10Pow2 (+ e z))))
+          (set! min (- m ^uint64 (<< 1 (- z 1)))) ; min = m - 1/2 * 2**(e+z)
+          (set! max (+ m ^uint64 (<< 1 (- z 1)))) ; max = m + 1/2 * 2**(e+z)
+          (set! odd (bit-and (conv int (>> m z)) 1))))
+
+
+      (let [^scaler pre (zero scaler)]
+        (prescale (addr pre) e p (log2Pow10 p))
+        (let [dmin (.ceil (.nudge (uscale min (addr pre)) (+ odd)))
+            ^{:line 207} dmax (.floor (.nudge (uscale max (addr pre)) (- odd)))]
+
+          (when [(set! d (/ dmax 10))] (>= (* d 10) dmin)
+            (return d (- (- p 1))))
+
+          (when [(set! d dmin)] (< d dmax)
+            (set! d (.round (uscale m (addr pre)))))
+
+          (return d (- p)))))))
+
+
+
+
+^{:go/end 222} (go/func skewed "skewed computes the skewed footprint of m * 2**e,\nwhich is ⌊log₁₀ 3/4 * 2**e⌋ = ⌊e*(log₁₀ 2)-(log₁₀ 4/3)⌋.\n" ^int [^int e]
+  (>> (- (* e 631305) 261663) 21))
+
+
+
+(go/type pmHiLo "A pmHiLo represents hi<<64 - lo.\n" (struct
+    ^{:line 226 :tag uint64} hi
+    ^{:line 227 :tag uint64} lo))
+
+
+
+(go/type scaler "A scaler holds derived scaling constants for a given e, p pair.\n" (struct
+
+    ^{:line 233 :tag uint64 :doc "Note: using pm pmHiLo here nudges uscale just over the inlining boundary. Don't.\n"} pmHi
+    ^{:line 234 :tag uint64} pmLo
+    ^{:line 235 :tag int} s))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 250} (go/func prescale "prescale returns the scaling constants for e, p.\nlp must be log2Pow10(p).\nThe caller is responsible for either avoiding e, p pairs\nthat cause pre.s < 0 or pre.s >= 64, or else handling\nthose cases before passing the result to uscale.\nIn practice, pre.s < 0 would indicate a buggy caller\nand pre.s >= 64 can only happen for parsing and is\npicked off at those call sites.\n" [^{:tag (* scaler)} pre ^int e ^int p ^int lp]
+  (set! (.-pmHi pre) (.-hi (aget pow10Tab (- p pow10Min))))
+  (set! (.-pmLo pre) (.-lo (aget pow10Tab (- p pow10Min))))
+  (set! (.-s pre) (- (+ e lp 3))))
+
+
+
+
+
+
+
+
+^{:go/end 267} (go/func uscale "uscale returns unround(x * 2**e * 10**p).\nThe caller should pass &pre for prescale(&pre, e, p, log2Pow10(p))\nand should have left-justified x so its high bit is set.\nThe caller is also responsible for checking that c.s < 64.\nFor formatting, that's always true.\nFor parsing, the caller needs to pick it off early and return a signed 0.\n" ^unrounded [^uint64 x ^{:tag (* scaler)} c]
+  (let [(values hi mid) (bits/Mul64 x (.-pmHi c))
+      ^{:line 260} s (bit-and (.-s c) 63)] ; make shifts cheaper
+    (when (!= (<< (>> hi s) s) hi)
+      (return (conv unrounded (bit-or (>> hi s) 1))))
+
+    (let [(values mid2 _) (bits/Mul64 x (.-pmLo c))]
+      (set! hi - ((inst bool2 uint64) (< mid mid2)))
+      (conv unrounded (bit-or (>> hi s) ((inst bool2 uint64) (> (- mid mid2) 1)))))))
+
+
+
+^{:go/end 283} (go/func setDigits "setDigits sets digs to the nd digits described by d, p.\n" [^{:tag (slice byte)} s ^uint64 d ^int p ^int nd] :results [^int dp ^int nzd]
+  ;; Note: nd <= len(s) is guaranteed by caller,
+  ;; but writing it explicitly here lets the compiler know,
+  ;; so that it can remove the bounds check in the loop.
+  ;; (The slice s[:nd] not panicking only establishes nd <= cap(s).)
+  (when (<= nd (len s))
+    (formatBase10 (subslice s _ nd) d)
+    (set! dp (+ nd p))
+    (while (and (> nd 0) (== (aget s (- nd 1)) \0))
+      (dec! nd)))
+
+
+  (return dp nd))
+
+
+
+
+^{:go/end 290} (go/func numDigits "numDigits returns the number of decimal digits in d.\nIt requires d ≥ 1.\n" ^int [^uint64 d]
+  (let [nd (log10Pow2 (bits/Len64 d))]
+    (+ nd ((inst bool2 int) (>= d (aget uint64pow10 nd))))))

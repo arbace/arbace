@@ -1,0 +1,208 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.os) (go/file "dir_unix.go" :build ["//go:build aix || dragonfly || freebsd || (js && wasm) || wasip1 || linux || netbsd || openbsd || solaris || tamago"] :imports [
+
+
+    ^{:line 10} [byteorder "internal/byteorder"]
+    ^{:line 11} [goarch "internal/goarch"]
+    ^{:line 12} [io "io"]
+    ^{:line 13} [runtime "runtime"]
+    ^{:line 14} [sync "sync"]
+    ^{:line 15} [syscall "syscall"]
+    ^{:line 16} [unsafe "unsafe"]])
+
+
+
+(go/type dirInfo "Auxiliary information if the File describes a directory\n" (struct
+    ^{:line 21 :tag sync/Mutex} mu
+    ^{:line 22 :tag (* (slice byte))} buf ; buffer for directory I/O
+    ^{:line 23 :tag int} nbuf ; length of buf; return value from Getdirentries
+    ^{:line 24 :tag int} bufp)) ; location of next record in buf.
+
+
+(go/const
+
+  ^{:line 29} [^{:val 8192 :doc "More than 5760 to work around https://golang.org/issue/24015.\n"} blockSize 8192])
+
+
+(go/var dirBufPool ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 37} (fn ^any []
+      ;; The buffer must be at least a block long.
+      (let [buf (make (slice byte) blockSize)]
+        (addr buf)))))
+
+
+
+^{:go/end 45} (go/method close [^{:tag (* dirInfo)} d]
+  (when (!= (.-buf d) nil)
+    (.Put dirBufPool (.-buf d))
+    (set! (.-buf d) nil)))
+
+
+
+^{:go/end 169} (go/method readdir [^{:tag (* File)} f ^int n ^readdirMode mode] :results [^{:tag (slice string)} names ^{:tag (slice DirEntry)} dirents ^{:tag (slice FileInfo)} infos ^error err]
+  ;; If this file has no dirInfo, create one.
+  (let [^{:tag (* dirInfo)} d (zero (* dirInfo))]
+    (while true
+      (set! d (.Load ^{:go/via [file]} (.-dirinfo f)))
+      (when (!= d nil)
+        (break))
+
+      (let [newD (new dirInfo)]
+        (when (.CompareAndSwap ^{:go/via [file]} (.-dirinfo f) nil newD)
+          (set! d newD)
+          (break))))
+
+
+
+    (.Lock (.-mu d))
+    (defer (.Unlock (.-mu d)))
+    (when (== (.-buf d) nil)
+      (set! (.-buf d) (assert (* (slice byte)) (.Get dirBufPool))))
+
+
+    ;; Change the meaning of n for the implementation below.
+    ;;
+    ;; The n above was for the public interface of "if n <= 0,
+    ;; Readdir returns all the FileInfo from the directory in a
+    ;; single slice".
+    ;;
+    ;; But below, we use only negative to mean looping until the
+    ;; end and positive to mean bounded, with positive
+    ;; terminating at 0.
+    (when (== n 0)
+      (set! n -1))
+
+
+    (while (!= n 0)
+      ;; Refill the buffer if necessary
+      (when (>= (.-bufp d) (.-nbuf d))
+        (set! (.-bufp d) 0)
+        (let [^error errno (zero error)]
+          (set! (values (.-nbuf d) errno) (.ReadDirent ^{:go/via [file]} (.-pfd f) @(.-buf d)))
+          (runtime/KeepAlive f)
+          (when (!= errno nil)
+            (return names dirents infos (addr (lit PathError :Op "readdirent" :Path ^{:go/via [file]} (.-name f) :Err errno))))
+
+          (when (<= (.-nbuf d) 0)
+            ;; Optimization: we can return the buffer to the pool, there is nothing else to read.
+            (.Put dirBufPool (.-buf d))
+            (set! (.-buf d) nil)
+            (break)))) ; EOF
+
+
+
+      ;; Drain the buffer
+      (let [buf (subslice @(.-buf d) (.-bufp d) (.-nbuf d))
+          (values reclen ok) (direntReclen buf)]
+        (when (or (not ok) (> reclen (conv uint64 (len buf))))
+          (break))
+
+        (let [rec (subslice buf _ reclen)]
+          (set! (.-bufp d) + (conv int reclen))
+          (let [(values ino ^:assign ok) (direntIno rec)]
+            (when (not ok)
+              (break))
+
+            ;; When building to wasip1, the host runtime might be running on Windows
+            ;; or might expose a remote file system which does not have the concept
+            ;; of inodes. Therefore, we cannot make the assumption that it is safe
+            ;; to skip entries with zero inodes.
+            ;; Some Linux filesystems (old XFS, FUSE) can return valid files with zero inodes.
+            (when (and (== ino 0) (!= runtime/GOOS "linux") (!= runtime/GOOS "wasip1"))
+              (continue))
+
+            (let [^:const ^{:val 18} namoff (conv uint64 (unsafe/Offsetof (.-Name (lit syscall/Dirent))))
+                (values namlen ^:assign ok) (direntNamlen rec)]
+              (when (or (not ok) (> (+ namoff namlen) (conv uint64 (len rec))))
+                (break))
+
+              (let [name (subslice rec namoff (+ namoff namlen))]
+                (range [i c name]
+                  (when (== c 0)
+                    (set! name (subslice name _ i))
+                    (break)))
+
+
+                ;; Check for useless names before allocating a string.
+                (when (or (== (conv string name) ".") (== (conv string name) ".."))
+                  (continue))
+
+                (when (> n 0) ; see 'n == 0' comment above
+                  (dec! n))
+
+                (cond (== mode readdirName)
+                  (set! names (append names (conv string name)))
+                  (== mode readdirDirEntry)
+                  (let [(values de err) (newUnixDirent f (conv string name) (direntType rec))]
+                    (when (IsNotExist err)
+                      ;; File disappeared between readdir and stat.
+                      ;; Treat as if it didn't exist.
+                      (continue))
+
+                    (when (!= err nil)
+                      (return nil dirents nil err))
+
+                    (set! dirents (append dirents de))) :else
+
+                  (let [(values info err) (.lstatat f (conv string name))]
+                    (when (IsNotExist err)
+                      ;; File disappeared between readdir + stat.
+                      ;; Treat as if it didn't exist.
+                      (continue))
+
+                    (when (!= err nil)
+                      (return nil nil infos err))
+
+                    (set! infos (append infos info))))))))))
+
+
+
+    (when (and (> n 0) (== (+ (len names) (len dirents) (len infos)) 0))
+      (return nil nil nil io/EOF))
+
+    (return names dirents infos nil)))
+
+
+
+^{:go/end 180} (go/func readInt "readInt returns the size-bytes unsigned integer in native byte order at offset off.\n" [^{:tag (slice byte)} b ^uintptr off ^uintptr size] :results [^uint64 u ^bool ok]
+  (when (< (len b) (conv int (+ off size)))
+    (return 0 false))
+
+  (when goarch/BigEndian
+    (return (readIntBE (subslice b off) size) true))
+
+  (return (readIntLE (subslice b off) size) true))
+
+
+^{:go/end 195} (go/func readIntBE ^uint64 [^{:tag (slice byte)} b ^uintptr size]
+  (switch size
+    (case [1]
+      (return (conv uint64 (aget b 0))))
+    (case [2]
+      (return (conv uint64 (byteorder/BEUint16 b))))
+    (case [4]
+      (return (conv uint64 (byteorder/BEUint32 b))))
+    (case [8]
+      (return (conv uint64 (byteorder/BEUint64 b))))
+    (default
+      (panic "syscall: readInt with unsupported size"))))
+
+
+
+^{:go/end 210} (go/func readIntLE ^uint64 [^{:tag (slice byte)} b ^uintptr size]
+  (switch size
+    (case [1]
+      (return (conv uint64 (aget b 0))))
+    (case [2]
+      (return (conv uint64 (byteorder/LEUint16 b))))
+    (case [4]
+      (return (conv uint64 (byteorder/LEUint32 b))))
+    (case [8]
+      (return (conv uint64 (byteorder/LEUint64 b))))
+    (default
+      (panic "syscall: readInt with unsupported size"))))

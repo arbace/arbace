@@ -1,0 +1,130 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.internal.http3) (go/file "conn.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [sync "sync"]
+
+    ^{:line 12} [quic "golang.org/x/net/quic"]])
+
+
+(go/type streamHandler (interface
+    (handleControlStream ^error [(* stream)])
+    (handlePushStream ^error [(* stream)])
+    (handleEncoderStream ^error [(* stream)])
+    (handleDecoderStream ^error [(* stream)])
+    (handleRequestStream ^error [(* stream)])
+    (abort [error])))
+
+
+(go/type genericConn (struct
+    ^{:line 25 :tag sync/Mutex} mu
+
+
+
+
+    ^{:line 30 :tag uint8 :doc "The peer may create exactly one control, encoder, and decoder stream.\nstreamsCreated is a bitset of streams created so far.\nBits are 1 << streamType.\n"} streamsCreated))
+
+
+^{:go/end 47} (go/method acceptStreams [^{:tag (* genericConn)} c ^{:tag (* quic/Conn)} qconn ^streamHandler h]
+  (while true
+    ;; Use context.Background: This blocks until a stream is accepted
+    ;; or the connection closes.
+    (let [(values st err) (.AcceptStream qconn (context/Background))]
+      (when (!= err nil)
+        (return)) ; connection closed
+
+      (if (.IsReadOnly st)
+        (go (.handleUnidirectionalStream c (newStream st) h))
+
+        (go (.handleRequestStream c (newStream st) h))))))
+
+
+
+
+^{:go/end 91} (go/method handleUnidirectionalStream [^{:tag (* genericConn)} c ^{:tag (* stream)} st ^streamHandler h]
+  ;; Unidirectional stream header: One varint with the stream type.
+  (let [(values v err) (.readVarint st)]
+    (when (!= err nil)
+      (.abort h (addr ^{:go/breaks [2 4]} (lit connectionError
+            :code errH3StreamCreationError
+            :message "error reading unidirectional stream header")))
+
+      (return))
+
+    (let [stype (conv streamType v)]
+      (when [err (.checkStreamCreation c stype)] (!= err nil)
+        (.abort h err)
+        (return))
+
+      (switch stype
+        (case [streamTypeControl]
+          (set! err (.handleControlStream h st)))
+        (case [streamTypePush]
+          (set! err (.handlePushStream h st)))
+        (case [streamTypeEncoder]
+          (set! err (.handleEncoderStream h st)))
+        (case [streamTypeDecoder]
+          (set! err (.handleDecoderStream h st)))
+        (default
+          ;; "Recipients of unknown stream types MUST either abort reading
+          ;; of the stream or discard incoming data without further processing."
+          ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-6.2-7
+          ;;
+          ;; We should send the H3_STREAM_CREATION_ERROR error code,
+          ;; but the quic package currently doesn't allow setting error codes
+          ;; for STOP_SENDING frames.
+          ;; TODO: Should CloseRead take an error code?
+          (set! err nil)))
+
+      (when (== err io/EOF)
+        (set! err (addr ^{:go/breaks [2 4]} (lit connectionError
+              :code errH3ClosedCriticalStream
+              :message (+ (.String (conv streamType stype)) " stream closed")))))
+
+
+      (.handleStreamError c st h err))))
+
+
+^{:go/end 95} (go/method handleRequestStream [^{:tag (* genericConn)} c ^{:tag (* stream)} st ^streamHandler h]
+  (.handleStreamError c st h (.handleRequestStream h st)))
+
+
+^{:go/end 111} (go/method handleStreamError [^{:tag (* genericConn)} c ^{:tag (* stream)} st ^streamHandler h ^error err]
+  (type-switch [err err]
+    (case [(* connectionError)]
+      (.abort h err))
+    (case [nil]
+      (.CloseRead (.-stream st))
+      (.CloseWrite (.-stream st)))
+    (case [(* streamError)]
+      (.CloseRead (.-stream st))
+      (.Reset (.-stream st) (conv uint64 (.-code err))))
+    (default
+      (.CloseRead (.-stream st))
+      (.Reset (.-stream st) (conv uint64 errH3InternalError)))))
+
+
+
+^{:go/end 131} (go/method checkStreamCreation ^error [^{:tag (* genericConn)} c ^streamType stype]
+  (switch stype
+    (case [streamTypeControl streamTypeEncoder streamTypeDecoder])
+    ;; The peer may create exactly one control, encoder, and decoder stream.
+    (default
+      (return nil)))
+
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+  ^{:go/breaks [4]} (let [bit (<< (conv uint8 1) stype)]
+    (when (!= (bit-and (.-streamsCreated c) bit) 0)
+      (return (addr ^{:go/breaks [2 4]} (lit connectionError
+            :code errH3StreamCreationError
+            :message (+ "multiple " (.String stype) " streams created")))))
+
+
+    (set! (.-streamsCreated c) bit-or bit)
+    nil))

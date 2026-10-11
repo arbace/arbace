@@ -1,0 +1,436 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.zstd) (go/file "fse.go" :imports [
+
+
+    ^{:line 8} [bits "math/bits"]])
+
+
+
+(go/type fseEntry "fseEntry is one entry in an FSE table.\n" (struct
+    ^{:line 13 :tag uint8} sym ; value that this entry records
+    ^{:line 14 :tag uint8} bits ; number of bits to read to determine next state
+    ^{:line 15 :tag uint16} base)) ; add those bits to this state to get the next state
+
+
+
+
+
+
+
+
+^{:go/end 151} (go/method readFSE "readFSE reads an FSE table from data starting at off.\nmaxSym is the maximum symbol value.\nmaxBits is the maximum number of bits permitted for symbols in the table.\nThe FSE is written into table, which must be at least 1<<maxBits in size.\nThis returns the number of bits in the FSE table and the new offset.\nRFC 4.1.1.\n" [^{:tag (* Reader)} r ^block data ^int off ^int maxSym ^int maxBits ^{:tag (slice fseEntry)} table] :results [^int tableBits ^int roff ^error err]
+  (let [br (.makeBitReader r data off)]
+    (when [err (.moreBits br)] (!= err nil)
+      (return 0 0 err))
+
+
+    (let [accuracyLog (+ (conv int (.val br 4)) 5)]
+      (when (> accuracyLog maxBits)
+        (return 0 0 (.makeError br "FSE accuracy log too large")))
+
+
+      ;; The number of remaining probabilities, plus 1.
+      ;; This determines the number of bits to be read for the next value.
+      (let [remaining (+ ^int (<< 1 accuracyLog) 1)
+
+          ;; The current difference between small and large values,
+          ;; which depends on the number of remaining values.
+          ;; Small values use 1 less bit.
+          ^{:line 42} threshold ^int (<< 1 accuracyLog)
+
+          ;; The number of bits needed to compute threshold.
+          ^{:line 45} bitsNeeded (+ accuracyLog 1)
+
+          ;; The next character value.
+          ^{:line 48} sym 0
+
+          ;; Whether the last count was 0.
+          ^{:line 51} prev0 false
+
+          ^{:line 53 :tag (array 256 int16)} norm (zero (array 256 int16))]
+
+        (while (and (> remaining 1) (<= sym maxSym))
+          (when [err (.moreBits br)] (!= err nil)
+            (return 0 0 err))
+
+
+          (when prev0
+            ;; Previous count was 0, so there is a 2-bit
+            ;; repeat flag. If the 2-bit flag is 0b11,
+            ;; it adds 3 and then there is another repeat flag.
+            (let [zsym sym]
+              (while (== (bit-and (.-bits br) 0xfff) 0xfff)
+                (set! zsym + (* 3 6))
+                (set! (.-bits br) >> 12)
+                (set! (.-cnt br) - 12)
+                (when [err (.moreBits br)] (!= err nil)
+                  (return 0 0 err)))
+
+
+              (while (== (bit-and (.-bits br) 3) 3)
+                (set! zsym + 3)
+                (set! (.-bits br) >> 2)
+                (set! (.-cnt br) - 2)
+                (when [err (.moreBits br)] (!= err nil)
+                  (return 0 0 err)))
+
+
+
+              ;; We have at least 14 bits here,
+              ;; no need to call moreBits
+
+              (set! zsym + (conv int (.val br 2)))
+
+              (when (> zsym maxSym)
+                (return 0 0 (.makeError br "FSE symbol index overflow")))
+
+
+              (for [] (< sym zsym) (inc! sym)
+                (aset norm (conv uint8 sym) 0))
+
+
+              (set! prev0 false)
+              (continue)))
+
+
+          (let [max (- (* 2 threshold) 1 remaining)
+              ^{:line 100 :tag int} count (zero int)]
+            (if (< (conv int (bit-and (.-bits br) (conv uint32 (- threshold 1)))) max) (do
+                ;; A small value.
+                (set! count (conv int (bit-and (.-bits br) (conv uint32 (- threshold 1)))))
+                (set! (.-bits br) >> (- bitsNeeded 1))
+                (set! (.-cnt br) - (conv uint32 (- bitsNeeded 1))))
+              (do
+                ;; A large value.
+                (set! count (conv int (bit-and (.-bits br) (conv uint32 (- (* 2 threshold) 1)))))
+                (when (>= count threshold)
+                  (set! count - max))
+
+                (set! (.-bits br) >> bitsNeeded)
+                (set! (.-cnt br) - (conv uint32 bitsNeeded))))
+
+
+            (dec! count)
+            (if (>= count 0)
+              (set! remaining - count)
+
+              (dec! remaining))
+
+            (when (>= sym 256)
+              (return 0 0 (.makeError br "FSE sym overflow")))
+
+            (aset norm (conv uint8 sym) (conv int16 count))
+            (inc! sym)
+
+            (set! prev0 (== count 0))
+
+            (while (< remaining threshold)
+              (dec! bitsNeeded)
+              (set! threshold >> 1))))
+
+
+
+        (when (!= remaining 1)
+          (return 0 0 (.makeError br "too many symbols in FSE table")))
+
+
+        (for [] (<= sym maxSym) (inc! sym)
+          (aset norm (conv uint8 sym) 0))
+
+
+        (.backup br)
+
+        (when [err (.buildFSE r off (subslice norm _ (+ maxSym 1)) table accuracyLog)] (!= err nil)
+          (return 0 0 err))
+
+
+        (return accuracyLog (conv int (.-off br)) nil)))))
+
+
+
+
+
+^{:go/end 205} (go/method buildFSE "buildFSE builds an FSE decoding table from a list of probabilities.\nThe probabilities are in norm. next is scratch space. The number of bits\nin the table is tableBits.\n" ^error [^{:tag (* Reader)} r ^int off ^{:tag (slice int16)} norm ^{:tag (slice fseEntry)} table ^int tableBits]
+  (let [tableSize ^int (<< 1 tableBits)
+      ^{:line 158} highThreshold (- tableSize 1)
+
+      ^{:line 160 :tag (array 256 uint16)} next (zero (array 256 uint16))]
+
+    (range [i n norm]
+      (if (>= n 0)
+        (aset next (conv uint8 i) (conv uint16 n))
+        (do
+          (set! (.-sym (aget table highThreshold)) (conv uint8 i))
+          (dec! highThreshold)
+          (aset next (conv uint8 i) 1))))
+
+
+
+    ^{:go/breaks [[5 204]]} (let [pos 0
+        ^{:line 173} step (+ (>> tableSize 1) (>> tableSize 3) 3)
+        ^{:line 174} mask (- tableSize 1)]
+      (range [i n norm]
+        (for [j 0] (< j (conv int n)) (inc! j)
+          (set! (.-sym (aget table pos)) (conv uint8 i))
+          (set! pos (bit-and (+ pos step) mask))
+          (while (> pos highThreshold)
+            (set! pos (bit-and (+ pos step) mask)))))
+
+
+
+      (when (!= pos 0)
+        (return (.makeError r off "FSE count error")))
+
+
+      (for [i 0] (< i tableSize) (inc! i)
+        (let [sym (.-sym (aget table i))
+            ^{:line 190} nextState (aget next sym)]
+          (inc! (aget next sym))
+
+          (when (== nextState 0)
+            (return (.makeError r off "FSE state error")))
+
+
+          (let [highBit (- 15 (bits/LeadingZeros16 nextState))
+
+              ^{:line 199} bits (- tableBits highBit)]
+            (set! (.-bits (aget table i)) (conv uint8 bits))
+            (set! (.-base (aget table i)) (- (<< nextState bits) (conv uint16 tableSize))))))
+
+
+      nil)))
+
+
+
+
+
+
+
+
+(go/type fseBaselineEntry "fseBaselineEntry is an entry in an FSE baseline table.\nWe use these for literal/match/length values.\nThose require mapping the symbol to a baseline value,\nand then reading zero or more bits and adding the value to the baseline.\nRather than looking these up in separate tables,\nwe convert the FSE table to an FSE baseline table.\n" (struct
+    ^{:line 214 :tag uint32} baseline ; baseline for value that this entry represents
+    ^{:line 215 :tag uint8} basebits ; number of bits to read to add to baseline
+    ^{:line 216 :tag uint8} bits ; number of bits to read to determine next state
+    ^{:line 217 :tag uint16} base)) ; add the bits to this base to get the next state
+
+
+;; Given a literal length code, we need to read a number of bits and
+;; add that to a baseline. For states 0 to 15 the baseline is the
+;; state and the number of bits is zero. RFC 3.1.1.3.2.1.1.
+
+(go/const ^{:val 16} literalLengthOffset 16)
+
+(go/var literalLengthBase (lit (slice uint32)
+    (bit-or 16 (<< 1 24))
+    (bit-or 18 (<< 1 24))
+    (bit-or 20 (<< 1 24))
+    (bit-or 22 (<< 1 24))
+    (bit-or 24 (<< 2 24))
+    (bit-or 28 (<< 2 24))
+    (bit-or 32 (<< 3 24))
+    (bit-or 40 (<< 3 24))
+    (bit-or 48 (<< 4 24))
+    (bit-or 64 (<< 6 24))
+    (bit-or 128 (<< 7 24))
+    (bit-or 256 (<< 8 24))
+    (bit-or 512 (<< 9 24))
+    (bit-or 1024 (<< 10 24))
+    (bit-or 2048 (<< 11 24))
+    (bit-or 4096 (<< 12 24))
+    (bit-or 8192 (<< 13 24))
+    (bit-or 16384 (<< 14 24))
+    (bit-or 32768 (<< 15 24))
+    (bit-or 65536 (<< 16 24))))
+
+
+
+^{:go/breaks [[5 270]] :go/end 271} (go/method makeLiteralBaselineFSE "makeLiteralBaselineFSE converts the literal length fseTable to baselineTable.\n" ^error [^{:tag (* Reader)} r ^int off ^{:tag (slice fseEntry)} fseTable ^{:tag (slice fseBaselineEntry)} baselineTable]
+  (range [i e fseTable]
+    (let [be ^{:go/breaks [2 4]} (lit fseBaselineEntry
+          :bits (.-bits e)
+          :base (.-base e))]
+
+      (if (< (.-sym e) literalLengthOffset) (do
+          (set! (.-baseline be) (conv uint32 (.-sym e)))
+          (set! (.-basebits be) 0))
+        (do
+          (when (> (.-sym e) 35)
+            (return (.makeError r off "FSE baseline symbol overflow")))
+
+          (let [idx (- (.-sym e) literalLengthOffset)
+              ^{:line 264} basebits (aget literalLengthBase idx)]
+            (set! (.-baseline be) (bit-and basebits 0xffffff))
+            (set! (.-basebits be) (conv uint8 (>> basebits 24))))))
+
+      (aset baselineTable i be)))
+
+  nil)
+
+
+
+^{:go/breaks [[5 309]] :go/end 310} (go/method makeOffsetBaselineFSE "makeOffsetBaselineFSE converts the offset length fseTable to baselineTable.\n" ^error [^{:tag (* Reader)} r ^int off ^{:tag (slice fseEntry)} fseTable ^{:tag (slice fseBaselineEntry)} baselineTable]
+  (range [i e fseTable]
+    (let [be ^{:go/breaks [2 4]} (lit fseBaselineEntry
+          :bits (.-bits e)
+          :base (.-base e))]
+
+      (when (> (.-sym e) 31)
+        (return (.makeError r off "FSE offset symbol overflow")))
+
+
+      ;; The simple way to write this is
+      ;;     be.baseline = 1 << e.sym
+      ;;     be.basebits = e.sym
+      ;; That would give us an offset value that corresponds to
+      ;; the one described in the RFC. However, for offsets > 3
+      ;; we have to subtract 3. And for offset values 1, 2, 3
+      ;; we use a repeated offset.
+      ;;
+      ;; The baseline is always a power of 2, and is never 0,
+      ;; so for those low values we will see one entry that is
+      ;; baseline 1, basebits 0, and one entry that is baseline 2,
+      ;; basebits 1. All other entries will have baseline >= 4
+      ;; basebits >= 2.
+      ;;
+      ;; So we can check for RFC offset <= 3 by checking for
+      ;; basebits <= 1. That means that we can subtract 3 here
+      ;; and not worry about doing it in the hot loop.
+
+      (set! (.-baseline be) ^uint32 (<< 1 (.-sym e)))
+      (when (>= (.-sym e) 2)
+        (set! (.-baseline be) - 3))
+
+      (set! (.-basebits be) (.-sym e))
+      (aset baselineTable i be)))
+
+  nil)
+
+
+;; Given a match length code, we need to read a number of bits and add
+;; that to a baseline. For states 0 to 31 the baseline is state+3 and
+;; the number of bits is zero. RFC 3.1.1.3.2.1.1.
+
+(go/const ^{:val 32} matchLengthOffset 32)
+
+(go/var matchLengthBase (lit (slice uint32)
+    (bit-or 35 (<< 1 24))
+    (bit-or 37 (<< 1 24))
+    (bit-or 39 (<< 1 24))
+    (bit-or 41 (<< 1 24))
+    (bit-or 43 (<< 2 24))
+    (bit-or 47 (<< 2 24))
+    (bit-or 51 (<< 3 24))
+    (bit-or 59 (<< 3 24))
+    (bit-or 67 (<< 4 24))
+    (bit-or 83 (<< 4 24))
+    (bit-or 99 (<< 5 24))
+    (bit-or 131 (<< 7 24))
+    (bit-or 259 (<< 8 24))
+    (bit-or 515 (<< 9 24))
+    (bit-or 1027 (<< 10 24))
+    (bit-or 2051 (<< 11 24))
+    (bit-or 4099 (<< 12 24))
+    (bit-or 8195 (<< 13 24))
+    (bit-or 16387 (<< 14 24))
+    (bit-or 32771 (<< 15 24))
+    (bit-or 65539 (<< 16 24))))
+
+
+
+^{:go/breaks [[5 363]] :go/end 364} (go/method makeMatchBaselineFSE "makeMatchBaselineFSE converts the match length fseTable to baselineTable.\n" ^error [^{:tag (* Reader)} r ^int off ^{:tag (slice fseEntry)} fseTable ^{:tag (slice fseBaselineEntry)} baselineTable]
+  (range [i e fseTable]
+    (let [be ^{:go/breaks [2 4]} (lit fseBaselineEntry
+          :bits (.-bits e)
+          :base (.-base e))]
+
+      (if (< (.-sym e) matchLengthOffset) (do
+          (set! (.-baseline be) (+ (conv uint32 (.-sym e)) 3))
+          (set! (.-basebits be) 0))
+        (do
+          (when (> (.-sym e) 52)
+            (return (.makeError r off "FSE baseline symbol overflow")))
+
+          (let [idx (- (.-sym e) matchLengthOffset)
+              ^{:line 357} basebits (aget matchLengthBase idx)]
+            (set! (.-baseline be) (bit-and basebits 0xffffff))
+            (set! (.-basebits be) (conv uint8 (>> basebits 24))))))
+
+      (aset baselineTable i be)))
+
+  nil)
+
+
+
+
+
+(go/var ^{:doc "predefinedLiteralTable is the predefined table to use for literal lengths.\nGenerated from table in RFC 3.1.1.3.2.2.1.\nChecked by TestPredefinedTables.\n"} predefinedLiteralTable (lit (array ... fseBaselineEntry)
+    (lit _ 0 0 4 0) (lit _ 0 0 4 16) (lit _ 1 0 5 32)
+    (lit _ 3 0 5 0) (lit _ 4 0 5 0) (lit _ 6 0 5 0)
+    (lit _ 7 0 5 0) (lit _ 9 0 5 0) (lit _ 10 0 5 0)
+    (lit _ 12 0 5 0) (lit _ 14 0 6 0) (lit _ 16 1 5 0)
+    (lit _ 20 1 5 0) (lit _ 22 1 5 0) (lit _ 28 2 5 0)
+    (lit _ 32 3 5 0) (lit _ 48 4 5 0) (lit _ 64 6 5 32)
+    (lit _ 128 7 5 0) (lit _ 256 8 6 0) (lit _ 1024 10 6 0)
+    (lit _ 4096 12 6 0) (lit _ 0 0 4 32) (lit _ 1 0 4 0)
+    (lit _ 2 0 5 0) (lit _ 4 0 5 32) (lit _ 5 0 5 0)
+    (lit _ 7 0 5 32) (lit _ 8 0 5 0) (lit _ 10 0 5 32)
+    (lit _ 11 0 5 0) (lit _ 13 0 6 0) (lit _ 16 1 5 32)
+    (lit _ 18 1 5 0) (lit _ 22 1 5 32) (lit _ 24 2 5 0)
+    (lit _ 32 3 5 32) (lit _ 40 3 5 0) (lit _ 64 6 4 0)
+    (lit _ 64 6 4 16) (lit _ 128 7 5 32) (lit _ 512 9 6 0)
+    (lit _ 2048 11 6 0) (lit _ 0 0 4 48) (lit _ 1 0 4 16)
+    (lit _ 2 0 5 32) (lit _ 3 0 5 32) (lit _ 5 0 5 32)
+    (lit _ 6 0 5 32) (lit _ 8 0 5 32) (lit _ 9 0 5 32)
+    (lit _ 11 0 5 32) (lit _ 12 0 5 32) (lit _ 15 0 6 0)
+    (lit _ 18 1 5 32) (lit _ 20 1 5 32) (lit _ 24 2 5 32)
+    (lit _ 28 2 5 32) (lit _ 40 3 5 32) (lit _ 48 4 5 32)
+    (lit _ 65536 16 6 0) (lit _ 32768 15 6 0) (lit _ 16384 14 6 0)
+    (lit _ 8192 13 6 0)))
+
+
+
+
+
+(go/var ^{:doc "predefinedOffsetTable is the predefined table to use for offsets.\nGenerated from table in RFC 3.1.1.3.2.2.3.\nChecked by TestPredefinedTables.\n"} predefinedOffsetTable (lit (array ... fseBaselineEntry)
+    (lit _ 1 0 5 0) (lit _ 61 6 4 0) (lit _ 509 9 5 0)
+    (lit _ 32765 15 5 0) (lit _ 2097149 21 5 0) (lit _ 5 3 5 0)
+    (lit _ 125 7 4 0) (lit _ 4093 12 5 0) (lit _ 262141 18 5 0)
+    (lit _ 8388605 23 5 0) (lit _ 29 5 5 0) (lit _ 253 8 4 0)
+    (lit _ 16381 14 5 0) (lit _ 1048573 20 5 0) (lit _ 1 2 5 0)
+    (lit _ 125 7 4 16) (lit _ 2045 11 5 0) (lit _ 131069 17 5 0)
+    (lit _ 4194301 22 5 0) (lit _ 13 4 5 0) (lit _ 253 8 4 16)
+    (lit _ 8189 13 5 0) (lit _ 524285 19 5 0) (lit _ 2 1 5 0)
+    (lit _ 61 6 4 16) (lit _ 1021 10 5 0) (lit _ 65533 16 5 0)
+    (lit _ 268435453 28 5 0) (lit _ 134217725 27 5 0) (lit _ 67108861 26 5 0)
+    (lit _ 33554429 25 5 0) (lit _ 16777213 24 5 0)))
+
+
+
+
+
+(go/var ^{:doc "predefinedMatchTable is the predefined table to use for match lengths.\nGenerated from table in RFC 3.1.1.3.2.2.2.\nChecked by TestPredefinedTables.\n"} predefinedMatchTable (lit (array ... fseBaselineEntry)
+    (lit _ 3 0 6 0) (lit _ 4 0 4 0) (lit _ 5 0 5 32)
+    (lit _ 6 0 5 0) (lit _ 8 0 5 0) (lit _ 9 0 5 0)
+    (lit _ 11 0 5 0) (lit _ 13 0 6 0) (lit _ 16 0 6 0)
+    (lit _ 19 0 6 0) (lit _ 22 0 6 0) (lit _ 25 0 6 0)
+    (lit _ 28 0 6 0) (lit _ 31 0 6 0) (lit _ 34 0 6 0)
+    (lit _ 37 1 6 0) (lit _ 41 1 6 0) (lit _ 47 2 6 0)
+    (lit _ 59 3 6 0) (lit _ 83 4 6 0) (lit _ 131 7 6 0)
+    (lit _ 515 9 6 0) (lit _ 4 0 4 16) (lit _ 5 0 4 0)
+    (lit _ 6 0 5 32) (lit _ 7 0 5 0) (lit _ 9 0 5 32)
+    (lit _ 10 0 5 0) (lit _ 12 0 6 0) (lit _ 15 0 6 0)
+    (lit _ 18 0 6 0) (lit _ 21 0 6 0) (lit _ 24 0 6 0)
+    (lit _ 27 0 6 0) (lit _ 30 0 6 0) (lit _ 33 0 6 0)
+    (lit _ 35 1 6 0) (lit _ 39 1 6 0) (lit _ 43 2 6 0)
+    (lit _ 51 3 6 0) (lit _ 67 4 6 0) (lit _ 99 5 6 0)
+    (lit _ 259 8 6 0) (lit _ 4 0 4 32) (lit _ 4 0 4 48)
+    (lit _ 5 0 4 16) (lit _ 7 0 5 32) (lit _ 8 0 5 32)
+    (lit _ 10 0 5 32) (lit _ 11 0 5 32) (lit _ 14 0 6 0)
+    (lit _ 17 0 6 0) (lit _ 20 0 6 0) (lit _ 23 0 6 0)
+    (lit _ 26 0 6 0) (lit _ 29 0 6 0) (lit _ 32 0 6 0)
+    (lit _ 65539 16 6 0) (lit _ 32771 15 6 0) (lit _ 16387 14 6 0)
+    (lit _ 8195 13 6 0) (lit _ 4099 12 6 0) (lit _ 2051 11 6 0)
+    (lit _ 1027 10 6 0)))

@@ -1,0 +1,238 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Deep equality test via reflection
+
+(in-ns 'go.reflect) (go/file "deepequal.go" :imports [
+
+
+    ^{:line 10} [bytealg "internal/bytealg"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+
+
+
+
+(go/type visit "During deepValueEqual, must keep track of checks that are\nin progress. The comparison algorithm assumes that all\nchecks in progress are true when it reencounters them.\nVisited comparisons are stored in a map indexed by visit.\n" (struct
+    ^{:line 19 :tag unsafe/Pointer} a1
+    ^{:line 20 :tag unsafe/Pointer} a2
+    ^{:line 21 :tag Type} typ))
+
+
+
+
+
+^{:go/end 176} (go/func deepValueEqual "Tests for deep equality using reflected types. The map argument tracks\ncomparisons that have already been seen, which allows short circuiting on\nrecursive types.\n" ^bool [^Value v1 ^Value v2 ^{:tag (map visit bool)} visited]
+  (when (or (not (.IsValid v1)) (not (.IsValid v2)))
+    (return (== (.IsValid v1) (.IsValid v2))))
+
+  (when (!= (.Type v1) (.Type v2))
+    (return false))
+
+
+  ;; We want to avoid putting more in the visited map than we need to.
+  ;; For any possible reference cycle that might be encountered,
+  ;; hard(v1, v2) needs to return true for at least one of the types in the cycle,
+  ;; and it's safe and valid to get Value's internal pointer.
+  (let [hard ^{:go/breaks [[3 55]] :go/end 56} (fn ^bool [^Value v1 ^Value v2]
+        (switch (.Kind v1)
+          (case [Pointer]
+            (when (not (.Pointers (.typ v1)))
+              ;; not-in-heap pointers can't be cyclic.
+              ;; At least, all of our current uses of internal/runtime/sys.NotInHeap
+              ;; have that property. The runtime ones aren't cyclic (and we don't use
+              ;; DeepEqual on them anyway), and the cgo-generated ones are
+              ;; all empty structs.
+              (return false))
+
+            (fallthrough))
+          (case [Map Slice Interface]
+            ;; Nil pointers cannot be cyclic. Avoid putting them in the visited map.
+            (return (and (not (.IsNil v1)) (not (.IsNil v2))))))
+
+        false)]
+
+
+    (when (hard v1 v2)
+      ;; For a Pointer or Map value, we need to check flagIndir,
+      ;; which we do by calling the pointer method.
+      ;; For Slice or Interface, flagIndir is always set,
+      ;; and using v.ptr suffices.
+      (let [ptrval ^{:go/end 70} (fn ^unsafe/Pointer [^Value v]
+            (switch (.Kind v)
+              (case [Pointer Map]
+                (return (.pointer v)))
+              (default
+                (return (.-ptr v)))))
+
+
+          ^{:line 71} addr1 (ptrval v1)
+          ^{:line 72} addr2 (ptrval v2)]
+        (when (> (conv uintptr addr1) (conv uintptr addr2))
+          ;; Canonicalize order to reduce number of entries in visited.
+          ;; Assumes non-moving garbage collector.
+          (set! (values addr1 addr2) (values addr2 addr1)))
+
+
+        ;; Short circuit if references are already seen.
+        (let [typ (.Type v1)
+            ^{:line 81} v (lit visit addr1 addr2 typ)]
+          (when (aget visited v)
+            (return true))
+
+
+          ;; Remember for later.
+          (aset visited v true))))
+
+
+    (switch (.Kind v1)
+      (case [Array]
+        (for [i 0] (< i (.Len v1)) (inc! i)
+          (when (not (deepValueEqual (.Index v1 i) (.Index v2 i) visited))
+            (return false)))
+
+
+        (return true))
+      (case [Slice]
+        (when (!= (.IsNil v1) (.IsNil v2))
+          (return false))
+
+        (when (!= (.Len v1) (.Len v2))
+          (return false))
+
+        (when (== (.UnsafePointer v1) (.UnsafePointer v2))
+          (return true))
+
+        ;; Special case for []byte, which is common.
+        (when (== (.Kind (.Elem (.Type v1))) Uint8)
+          (return (bytealg/Equal (.Bytes v1) (.Bytes v2))))
+
+        (for [i 0] (< i (.Len v1)) (inc! i)
+          (when (not (deepValueEqual (.Index v1 i) (.Index v2 i) visited))
+            (return false)))
+
+
+        (return true))
+      (case [Interface]
+        (when (or (.IsNil v1) (.IsNil v2))
+          (return (== (.IsNil v1) (.IsNil v2))))
+
+        (return (deepValueEqual (.Elem v1) (.Elem v2) visited)))
+      (case [Pointer]
+        (when (== (.UnsafePointer v1) (.UnsafePointer v2))
+          (return true))
+
+        (return (deepValueEqual (.Elem v1) (.Elem v2) visited)))
+      (case [Struct]
+        (for [(values i n) (values 0 (.NumField v1))] (< i n) (inc! i)
+          (when (not (deepValueEqual (.Field v1 i) (.Field v2 i) visited))
+            (return false)))
+
+
+        (return true))
+      (case [Map]
+        (when (!= (.IsNil v1) (.IsNil v2))
+          (return false))
+
+        (when (!= (.Len v1) (.Len v2))
+          (return false))
+
+        (when (== (.UnsafePointer v1) (.UnsafePointer v2))
+          (return true))
+
+        (let [iter (.MapRange v1)]
+          (while (.Next iter)
+            (let [val1 (.Value iter)
+                ^{:line 148} val2 (.MapIndex v2 (.Key iter))]
+              (when (or (not (.IsValid val1)) (not (.IsValid val2)) (not (deepValueEqual val1 val2 visited)))
+                (return false))))
+
+
+          (return true)))
+      (case [Func]
+        (when (and (.IsNil v1) (.IsNil v2))
+          (return true))
+
+        ;; Can't do better than this:
+        (return false))
+      (case [Int Int8 Int16 Int32 Int64]
+        (return (== (.Int v1) (.Int v2))))
+      (case [Uint Uint8 Uint16 Uint32 Uint64 Uintptr]
+        (return (== (.Uint v1) (.Uint v2))))
+      (case [String]
+        (return (== (.String v1) (.String v2))))
+      (case [Bool]
+        (return (== (.Bool v1) (.Bool v2))))
+      (case [Float32 Float64]
+        (return (== (.Float v1) (.Float v2))))
+      (case [Complex64 Complex128]
+        (return (== (.Complex v1) (.Complex v2))))
+      (default
+        ;; Normal equality suffices
+        (return (== (valueInterface v1 false) (valueInterface v2 false)))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 239} (go/func DeepEqual "DeepEqual reports whether x and y are “deeply equal,” defined as follows.\nTwo values of identical type are deeply equal if one of the following cases applies.\nValues of distinct types are never deeply equal.\n\nArray values are deeply equal when their corresponding elements are deeply equal.\n\nStruct values are deeply equal if their corresponding fields,\nboth exported and unexported, are deeply equal.\n\nFunc values are deeply equal if both are nil; otherwise they are not deeply equal.\n\nInterface values are deeply equal if they hold deeply equal concrete values.\n\nMap values are deeply equal when all of the following are true:\nthey are both nil or both non-nil, they have the same length,\nand either they are the same map object or their corresponding keys\n(matched using Go equality) map to deeply equal values.\n\nPointer values are deeply equal if they are equal using Go's == operator\nor if they point to deeply equal values.\n\nSlice values are deeply equal when all of the following are true:\nthey are both nil or both non-nil, they have the same length,\nand either they point to the same initial entry of the same underlying array\n(that is, &x[0] == &y[0]) or their corresponding elements (up to length) are deeply equal.\nNote that a non-nil empty slice and a nil slice (for example, []byte{} and []byte(nil))\nare not deeply equal.\n\nOther values - numbers, bools, strings, and channels - are deeply equal\nif they are equal using Go's == operator.\n\nIn general DeepEqual is a recursive relaxation of Go's == operator.\nHowever, this idea is impossible to implement without some inconsistency.\nSpecifically, it is possible for a value to be unequal to itself,\neither because it is of func type (uncomparable in general)\nor because it is a floating-point NaN value (not equal to itself in floating-point comparison),\nor because it is an array, struct, or interface containing\nsuch a value.\nOn the other hand, pointer values are always equal to themselves,\neven if they point at or contain such problematic values,\nbecause they compare equal using Go's == operator, and that\nis a sufficient condition to be deeply equal, regardless of content.\nDeepEqual has been defined so that the same short-cut applies\nto slices and maps: if x and y are the same slice or the same map,\nthey are deeply equal regardless of content.\n\nAs DeepEqual traverses the data values it may find a cycle. The\nsecond and subsequent times that DeepEqual compares two pointer\nvalues that have been compared before, it treats the values as\nequal rather than examining the values to which they point.\nThis ensures that DeepEqual terminates.\n" ^bool [^any x ^any y]
+  (when (or (== x nil) (== y nil))
+    (return (== x y)))
+
+  (let [v1 (ValueOf x)
+      ^{:line 234} v2 (ValueOf y)]
+    (when (!= (.Type v1) (.Type v2))
+      (return false))
+
+    (deepValueEqual v1 v2 (make (map visit bool)))))

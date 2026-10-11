@@ -1,0 +1,452 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.os) (go/file "root.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [bytealg "internal/bytealg"]
+    ^{:line 10} [stringslite "internal/stringslite"]
+    ^{:line 11} [testlog "internal/testlog"]
+    ^{:line 12} [fs "io/fs"]
+    ^{:line 13} [runtime "runtime"]
+    ^{:line 14} [slices "slices"]
+    ^{:line 15} [time "time"]])
+
+
+
+
+
+
+
+
+
+^{:go/end 32} (go/func OpenInRoot "OpenInRoot opens the file name in the directory dir.\nIt is equivalent to OpenRoot(dir) followed by opening the file in the root.\n\nOpenInRoot returns an error if any component of the name\nreferences a location outside of dir.\n\nSee [Root] for details and limitations.\n" [^string dir ^string name] :results [(* File) error]
+  (let [(values r err) (OpenRoot dir)]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (.Close r))
+    (.Open r name)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Root "Root may be used to only access files within a single directory tree.\n\nMethods on Root can only access files and directories beneath a root directory.\nIf any component of a file name passed to a method of Root references a location\noutside the root, the method returns an error.\nFile names may reference the directory itself (.).\n\nMethods on Root will follow symbolic links, but symbolic links may not\nreference a location outside the root.\nSymbolic links must not be absolute.\n\nMethods on Root do not prohibit traversal of filesystem boundaries,\nLinux bind mounts, /proc special files, or access to Unix device files.\n\nMethods on Root are safe to be used from multiple goroutines simultaneously.\n\nOn most platforms, creating a Root opens a file descriptor or handle referencing\nthe directory. If the directory is moved, methods on Root reference the original\ndirectory in its new location.\n\nRoot's behavior differs on some platforms:\n\n  - When GOOS=windows, file names may not reference Windows reserved device names\n    such as NUL and COM1.\n  - On Unix, [Root.Chmod], [Root.Chown], and [Root.Chtimes] are vulnerable to a race condition.\n    If the target of the operation is changed from a regular file to a symlink\n    while the operation is in progress, the operation may be performed on the link\n    rather than the link target.\n  - When GOOS=js, Root is vulnerable to TOCTOU (time-of-check-time-of-use)\n    attacks in symlink validation, and cannot ensure that operations will not\n    escape the root.\n  - When GOOS=plan9 or GOOS=js, Root does not track directories across renames.\n    On these platforms, a Root references a directory name, not a file descriptor.\n  - WASI preview 1 (GOOS=wasip1) does not support [Root.Chmod].\n" (struct
+    ^{:line 69 :tag (* root)} root))
+
+
+(go/const
+
+
+
+  ^{:line 76} [^{:val 8 :doc "Maximum number of symbolic links we will follow when resolving a file in a root.\n8 is __POSIX_SYMLOOP_MAX (the minimum allowed value for SYMLOOP_MAX),\nand a common limit.\n"} rootMaxSymlinks 8])
+
+
+
+
+
+^{:go/end 85} (go/func OpenRoot "OpenRoot opens the named directory.\nIt follows symbolic links in the directory name.\nIf there is an error, it will be of type [*PathError].\n" [^string name] :results [(* Root) error]
+  (testlog/Open name)
+  (openRootNolog name))
+
+
+
+
+
+^{:go/end 92} (go/method Name "Name returns the name of the directory presented to OpenRoot.\n\nIt is safe to call Name after [Close].\n" ^string [^{:tag (* Root)} r]
+  (.Name (.-root r)))
+
+
+
+
+^{:go/end 98} (go/method Close "Close closes the Root.\nAfter Close is called, methods on Root return errors.\n" ^error [^{:tag (* Root)} r]
+  (.Close (.-root r)))
+
+
+
+
+^{:go/end 104} (go/method Open "Open opens the named file in the root for reading.\nSee [Open] for more details.\n" [^{:tag (* Root)} r ^string name] :results [(* File) error]
+  (.OpenFile r name O_RDONLY 0))
+
+
+
+
+^{:go/end 110} (go/method Create "Create creates or truncates the named file in the root.\nSee [Create] for more details.\n" [^{:tag (* Root)} r ^string name] :results [(* File) error]
+  (.OpenFile r name (bit-or O_RDWR O_CREATE O_TRUNC) 0666))
+
+
+
+
+
+
+
+^{:go/end 128} (go/method OpenFile "OpenFile opens the named file in the root.\nSee [OpenFile] for more details.\n\nIf perm contains bits other than the nine least-significant bits (0o777),\nOpenFile returns an error.\n" [^{:tag (* Root)} r ^string name ^int flag ^FileMode perm] :results [(* File) error]
+  (when (!= (bit-and perm 0777) perm)
+    (return nil (addr (lit PathError :Op "openat" :Path name :Err (errors/New "unsupported file mode")))))
+
+  (.logOpen r name)
+  (let [(values rf err) (rootOpenFileNolog r name flag perm)]
+    (when (!= err nil)
+      (return nil err))
+
+    (set! ^{:go/via [file]} (.-appendMode rf) (!= (bit-and flag O_APPEND) 0))
+    (return rf nil)))
+
+
+
+
+^{:go/end 135} (go/method OpenRoot "OpenRoot opens the named directory in the root.\nIf there is an error, it will be of type [*PathError].\n" [^{:tag (* Root)} r ^string name] :results [(* Root) error]
+  (.logOpen r name)
+  (openRootInRoot r name))
+
+
+
+
+^{:go/end 141} (go/method Chmod "Chmod changes the mode of the named file in the root to mode.\nSee [Chmod] for more details.\n" ^error [^{:tag (* Root)} r ^string name ^FileMode mode]
+  (rootChmod r name mode))
+
+
+
+
+
+
+
+
+^{:go/end 154} (go/method Mkdir "Mkdir creates a new directory in the root\nwith the specified name and permission bits (before umask).\nSee [Mkdir] for more details.\n\nIf perm contains bits other than the nine least-significant bits (0o777),\nMkdir returns an error.\n" ^error [^{:tag (* Root)} r ^string name ^FileMode perm]
+  (when (!= (bit-and perm 0777) perm)
+    (return (addr (lit PathError :Op "mkdirat" :Path name :Err (errors/New "unsupported file mode")))))
+
+  (rootMkdir r name perm))
+
+
+
+
+
+
+
+^{:go/end 166} (go/method MkdirAll "MkdirAll creates a new directory in the root, along with any necessary parents.\nSee [MkdirAll] for more details.\n\nIf perm contains bits other than the nine least-significant bits (0o777),\nMkdirAll returns an error.\n" ^error [^{:tag (* Root)} r ^string name ^FileMode perm]
+  (when (!= (bit-and perm 0777) perm)
+    (return (addr (lit PathError :Op "mkdirat" :Path name :Err (errors/New "unsupported file mode")))))
+
+  (rootMkdirAll r name perm))
+
+
+
+
+^{:go/end 172} (go/method Chown "Chown changes the numeric uid and gid of the named file in the root.\nSee [Chown] for more details.\n" ^error [^{:tag (* Root)} r ^string name ^int uid ^int gid]
+  (rootChown r name uid gid))
+
+
+
+
+^{:go/end 178} (go/method Lchown "Lchown changes the numeric uid and gid of the named file in the root.\nSee [Lchown] for more details.\n" ^error [^{:tag (* Root)} r ^string name ^int uid ^int gid]
+  (rootLchown r name uid gid))
+
+
+
+
+^{:go/end 184} (go/method Chtimes "Chtimes changes the access and modification times of the named file in the root.\nSee [Chtimes] for more details.\n" ^error [^{:tag (* Root)} r ^string name ^time/Time atime ^time/Time mtime]
+  (rootChtimes r name atime mtime))
+
+
+
+
+^{:go/end 190} (go/method Remove "Remove removes the named file or (empty) directory in the root.\nSee [Remove] for more details.\n" ^error [^{:tag (* Root)} r ^string name]
+  (rootRemove r name))
+
+
+
+
+^{:go/end 196} (go/method RemoveAll "RemoveAll removes the named file or directory and any children that it contains.\nSee [RemoveAll] for more details.\n" ^error [^{:tag (* Root)} r ^string name]
+  (rootRemoveAll r name))
+
+
+
+
+^{:go/end 203} (go/method Stat "Stat returns a [FileInfo] describing the named file in the root.\nSee [Stat] for more details.\n" [^{:tag (* Root)} r ^string name] :results [FileInfo error]
+  (.logStat r name)
+  (rootStat r name false))
+
+
+
+
+
+
+^{:go/end 212} (go/method Lstat "Lstat returns a [FileInfo] describing the named file in the root.\nIf the file is a symbolic link, the returned FileInfo\ndescribes the symbolic link.\nSee [Lstat] for more details.\n" [^{:tag (* Root)} r ^string name] :results [FileInfo error]
+  (.logStat r name)
+  (rootStat r name true))
+
+
+
+
+^{:go/end 218} (go/method Readlink "Readlink returns the destination of the named symbolic link in the root.\nSee [Readlink] for more details.\n" [^{:tag (* Root)} r ^string name] :results [string error]
+  (rootReadlink r name))
+
+
+
+
+
+^{:go/end 225} (go/method Rename "Rename renames (moves) oldname to newname.\nBoth paths are relative to the root.\nSee [Rename] for more details.\n" ^error [^{:tag (* Root)} r ^string oldname ^string newname]
+  (rootRename r oldname newname))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 237} (go/method Link "Link creates newname as a hard link to the oldname file.\nBoth paths are relative to the root.\nSee [Link] for more details.\n\nIf oldname is a symbolic link, Link creates new link to oldname and not its target.\nThis behavior may differ from that of [Link] on some platforms.\n\nWhen GOOS=js, Link returns an error if oldname is a symbolic link.\n" ^error [^{:tag (* Root)} r ^string oldname ^string newname]
+  (rootLink r oldname newname))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 249} (go/method Symlink "Symlink creates newname as a symbolic link to oldname.\nSee [Symlink] for more details.\n\nSymlink does not validate oldname,\nwhich may reference a location outside the root.\n\nOn Windows, a directory link is created if oldname references\na directory within the root. Otherwise a file link is created.\n" ^error [^{:tag (* Root)} r ^string oldname ^string newname]
+  (rootSymlink r oldname newname))
+
+
+
+
+^{:go/end 260} (go/method ReadFile "ReadFile reads the named file in the root and returns its contents.\nSee [ReadFile] for more details.\n" [^{:tag (* Root)} r ^string name] :results [(slice byte) error]
+  (let [(values f err) (.Open r name)]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (.Close f))
+    (readFileContents (statOrZero f) (.-Read f))))
+
+
+
+
+^{:go/end 274} (go/method WriteFile "WriteFile writes data to the named file in the root, creating it if necessary.\nSee [WriteFile] for more details.\n" ^error [^{:tag (* Root)} r ^string name ^{:tag (slice byte)} data ^FileMode perm]
+  (let [(values f err) (.OpenFile r name (bit-or O_WRONLY O_CREATE O_TRUNC) perm)]
+    (when (!= err nil)
+      (return err))
+
+    (set! (values _ err) (.Write f data))
+    (when [err1 (.Close f)] (== err nil)
+      (set! err err1))
+
+    ^{:line 273} err))
+
+
+^{:go/end 282} (go/method logOpen [^{:tag (* Root)} r ^string name]
+  (when [log (testlog/Logger)] (!= log nil)
+    ;; This won't be right if r's name has changed since it was opened,
+    ;; but it's the best we can do.
+    (.Open log (joinPath (.Name r) name))))
+
+
+
+^{:go/end 290} (go/method logStat [^{:tag (* Root)} r ^string name]
+  (when [log (testlog/Logger)] (!= log nil)
+    ;; This won't be right if r's name has changed since it was opened,
+    ;; but it's the best we can do.
+    (.Stat log (joinPath (.Name r) name))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 353} (go/func splitPathInRoot "splitPathInRoot splits a path into components\nand joins it with the given prefix and suffix.\n\nThe path is relative to a Root, and must not be\nabsolute, volume-relative, or \"\".\n\n\".\" components are removed, except in the last component.\n\nendsInSlash reports whether the path ends in one or more slashes.\n" [^string s ^{:tag (slice string)} prefix ^{:tag (slice string)} suffix] :results [^{:tag (slice string)} _ ^bool endsInSlash ^error err]
+  (when (== (len s) 0)
+    (return nil false (errors/New "empty path")))
+
+  (when (IsPathSeparator (aget s 0))
+    (return nil false errPathEscapes))
+
+
+  (when (== runtime/GOOS "windows")
+    ;; Windows cleans paths before opening them.
+    (set! (values s err) (rootCleanPath s prefix suffix))
+    (when (!= err nil)
+      (return nil false err))
+
+    (set! prefix nil)
+    (set! suffix nil))
+
+
+  (let [parts (^{:inst [(slice string) string]} slices/Clone prefix)
+      (values i j) (values 0 1)]
+    (while true
+      (when (and (< j (len s)) (not (IsPathSeparator (aget s j))))
+        ;; Keep looking for the end of this component.
+        (inc! j)
+        (continue))
+
+      (set! parts (append parts (subslice s i j)))
+      ;; Advance to the next component, or end of the path.
+      (let [partEnd j]
+        (while (and (< j (len s)) (IsPathSeparator (aget s j)))
+          (inc! j))
+
+        (when (== j (len s))
+          ;; If this is the last path component,
+          ;; check for any trailing path separators.
+          (when (> (len (subslice s partEnd)) 0)
+            (set! endsInSlash true))
+
+          (break))
+
+        (when (== (aget parts (- (len parts) 1)) ".")
+          ;; Remove "." components, except at the end.
+          (set! parts (subslice parts _ (- (len parts) 1))))
+
+        (set! i j)))
+
+    (when (and (> (len suffix) 0) (> (len parts) 0) (== (aget parts (- (len parts) 1)) "."))
+      ;; Remove a trailing "." component if we're joining to a suffix.
+      (set! parts (subslice parts _ (- (len parts) 1))))
+
+    (set! parts (append parts (spread suffix)))
+    (return parts endsInSlash nil)))
+
+
+
+
+
+
+^{:go/end 361} (go/method FS "FS returns a file system (an fs.FS) for the tree of files in the root.\n\nThe result implements [io/fs.StatFS], [io/fs.ReadFileFS],\n[io/fs.ReadDirFS], and [io/fs.ReadLinkFS].\n" ^fs/FS [^{:tag (* Root)} r]
+  (conv (* rootFS) r))
+
+
+(go/type rootFS Root)
+
+^{:go/end 375} (go/method Open [^{:tag (* rootFS)} rfs ^string name] :results [fs/File error]
+  (let [r (conv (* Root) rfs)]
+    (when (not (isValidRootFSPath name))
+      (return nil (addr (lit PathError :Op "open" :Path name :Err ErrInvalid))))
+
+    (let [(values f err) (.Open r name)]
+      (when (!= err nil)
+        (return nil err))
+
+      (return f nil))))
+
+
+^{:go/end 399} (go/method ReadDir [^{:tag (* rootFS)} rfs ^string name] :results [(slice DirEntry) error]
+  (let [r (conv (* Root) rfs)]
+    (when (not (isValidRootFSPath name))
+      (return nil (addr (lit PathError :Op "readdir" :Path name :Err ErrInvalid))))
+
+
+    ;; This isn't efficient: We just open a regular file and ReadDir it.
+    ;; Ideally, we would skip creating a *File entirely and operate directly
+    ;; on the file descriptor, but that will require some extensive reworking
+    ;; of directory reading in general.
+    ;;
+    ;; This suffices for the moment.
+    (let [(values f err) (.Open r name)]
+      (when (!= err nil)
+        (return nil err))
+
+      (defer (.Close f))
+      (let [(values dirs ^:assign err) (.ReadDir f -1)]
+        (^{:inst [(slice DirEntry) DirEntry]} slices/SortFunc dirs ^{:go/end 397} (fn ^int [^DirEntry a ^DirEntry b]
+            (bytealg/CompareString (.Name a) (.Name b))))
+
+        (return dirs err)))))
+
+
+^{:go/end 412} (go/method ReadFile [^{:tag (* rootFS)} rfs ^string name] :results [(slice byte) error]
+  (let [r (conv (* Root) rfs)]
+    (when (not (isValidRootFSPath name))
+      (return nil (addr (lit PathError :Op "readfile" :Path name :Err ErrInvalid))))
+
+    (let [(values f err) (.Open r name)]
+      (when (!= err nil)
+        (return nil err))
+
+      (defer (.Close f))
+      (readFileContents (statOrZero f) (.-Read f)))))
+
+
+^{:go/end 420} (go/method ReadLink [^{:tag (* rootFS)} rfs ^string name] :results [string error]
+  (let [r (conv (* Root) rfs)]
+    (when (not (isValidRootFSPath name))
+      (return "" (addr (lit PathError :Op "readlink" :Path name :Err ErrInvalid))))
+
+    (.Readlink r name)))
+
+
+^{:go/end 428} (go/method Stat [^{:tag (* rootFS)} rfs ^string name] :results [FileInfo error]
+  (let [r (conv (* Root) rfs)]
+    (when (not (isValidRootFSPath name))
+      (return nil (addr (lit PathError :Op "stat" :Path name :Err ErrInvalid))))
+
+    (.Stat r name)))
+
+
+^{:go/end 436} (go/method Lstat [^{:tag (* rootFS)} rfs ^string name] :results [FileInfo error]
+  (let [r (conv (* Root) rfs)]
+    (when (not (isValidRootFSPath name))
+      (return nil (addr (lit PathError :Op "lstat" :Path name :Err ErrInvalid))))
+
+    (.Lstat r name)))
+
+
+
+^{:go/breaks [[6 452]] :go/end 453} (go/func isValidRootFSPath "isValidRootFSPath reports whether name is a valid filename to pass a Root.FS method.\n" ^bool [^string name]
+  (when (not (fs/ValidPath name))
+    (return false))
+
+  (when (== runtime/GOOS "windows")
+    ;; fs.FS paths are /-separated.
+    ;; On Windows, reject the path if it contains any \ separators.
+    ;; Other forms of invalid path (for example, "NUL") are handled by
+    ;; Root's usual file lookup mechanisms.
+    (when (>= (stringslite/IndexByte name \\) 0)
+      (return false)))
+
+
+  true)

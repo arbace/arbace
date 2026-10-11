@@ -1,0 +1,319 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace) (go/file "reader.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [slices "slices"]
+    ^{:line 13} [strings "strings"]
+
+    ^{:line 15} [tracev1 "internal/trace/internal/tracev1"]
+    ^{:line 16} [tracev2 "internal/trace/tracev2"]
+    ^{:line 17} [version "internal/trace/version"]])
+
+
+
+
+
+
+
+(go/type Reader "Reader reads a byte stream, validates it, and produces trace events.\n\nProvided the trace is non-empty the Reader always produces a Sync\nevent as the first event, and a Sync event as the last event.\n(There may also be any number of Sync events in the middle, too.)\n" (struct
+    ^{:line 26 :tag version/Version} version
+    ^{:line 27 :tag (* bufio/Reader)} r
+    ^{:line 28 :tag Time} lastTs
+    ^{:line 29 :tag (* generation)} gen
+    ^{:line 30 :tag (slice (* batchCursor))} frontier
+    ^{:line 31 :tag (slice cpuSample)} cpuSamples
+    ^{:line 32 :tag ordering} order
+    ^{:line 33 :tag int} syncs
+    ^{:line 34 :tag error} readGenErr
+    ^{:line 35 :tag bool} done
+
+
+
+
+
+
+
+
+
+
+    ^{:line 46 :tag (* spilledBatch) :doc "Spill state.\n\nTraces before Go 1.26 had no explicit end-of-generation signal, and\nso the first batch of the next generation needed to be parsed to identify\na new generation. This batch is the \"spilled\" so we don't lose track\nof it when parsing the next generation.\n\nThis is unnecessary after Go 1.26 because of an explicit end-of-generation\nsignal.\n"} spill
+    ^{:line 47 :tag error} spillErr ; error from reading spill
+    ^{:line 48 :tag bool} spillErrSync ; whether we emitted a Sync before reporting spillErr
+
+    ^{:line 50 :tag (* traceV1Converter)} v1Events))
+
+
+
+^{:go/end 84} (go/func NewReader "NewReader creates a new trace reader.\n" [^io/Reader r] :results [(* Reader) error]
+  (let [br (bufio/NewReader r)
+      (values v err) (version/ReadHeader br)]
+    (when (!= err nil)
+      (return nil err))
+
+    (switch v
+      (case [version/Go111 version/Go119 version/Go121]
+        (let [(values tr err) (tracev1/Parse br v)]
+          (when (!= err nil)
+            (return nil err))
+
+          ^{:go/breaks [2]} (return (addr ^{:go/breaks [2]} (lit Reader
+                :v1Events (convertV1Trace tr)))
+            nil)))
+      (case [version/Go122 version/Go123 version/Go125 version/Go126]
+        ^{:go/breaks [[2 80]]} (return (addr ^{:go/breaks [2 4 6]} (lit Reader
+              :version v
+              :r br
+              :order ^{:go/breaks [2 4 6 8 10]} (lit ordering
+                :traceVer v
+                :mStates (make (map ThreadID (* mState)))
+                :pStates (make (map ProcID (* pState)))
+                :gStates (make (map GoID (* gState)))
+                :activeTasks (make (map TaskID taskState)))))
+
+          nil))
+      (default
+        (return nil (fmt/Errorf "unknown or unsupported version go 1.%d" v))))))
+
+
+
+
+
+
+^{:go/end 235} (go/method ReadEvent "ReadEvent reads a single event from the stream.\n\nIf the stream has been exhausted, it returns an invalid event and io.EOF.\n" [^{:tag (* Reader)} r] :results [^Event e ^error err]
+  ;; Return only io.EOF if we're done.
+  (when (.-done r)
+    (return (lit Event) io/EOF))
+
+
+  ;; Handle v1 execution traces.
+  (when (!= (.-v1Events r) nil)
+    (when (== (.-syncs r) 0)
+      ;; Always emit a sync event first, if we have any events at all.
+      (let [(values ev ok) (.Peek (.-events (.-v1Events r)))]
+        (when ok
+          (inc! (.-syncs r))
+          (return (syncEvent (.-evt (.-v1Events r)) (conv Time (- (.-Ts ev) 1)) (.-syncs r)) nil))))
+
+
+    (let [(values ev err) (.next (.-v1Events r))]
+      (cond (== err io/EOF) (do
+          ;; Always emit a sync event at the end.
+          (set! (.-done r) true)
+          (inc! (.-syncs r))
+          (return (syncEvent nil (+ (.-lastTs (.-v1Events r)) 1) (.-syncs r)) nil))
+        (!= err nil)
+        (return (lit Event) err))
+
+      (return ev nil)))
+
+
+  ;; Trace v2 parsing algorithm.
+  ;;
+  ;; (1) Read in all the batches for the next generation from the stream.
+  ;;   (a) Use the size field in the header to quickly find all batches.
+  ;; (2) Parse out the strings, stacks, CPU samples, and timestamp conversion data.
+  ;; (3) Group each event batch by M, sorted by timestamp. (batchCursor contains the groups.)
+  ;; (4) Organize batchCursors in a min-heap, ordered by the timestamp of the next event for each M.
+  ;; (5) Try to advance the next event for the M at the top of the min-heap.
+  ;;   (a) On success, select that M.
+  ;;   (b) On failure, sort the min-heap and try to advance other Ms. Select the first M that advances.
+  ;;   (c) If there's nothing left to advance, goto (1).
+  ;; (6) Select the latest event for the selected M and get it ready to be returned.
+  ;; (7) Read the next event for the selected M and update the min-heap.
+  ;; (8) Return the selected event, goto (5) on the next call.
+
+  ;; Set us up to track the last timestamp and fix up
+  ;; the timestamp of any event that comes through.
+  (defer (^{:go/end 145} (fn []
+        (when (!= err nil)
+          (return))
+
+        (when [(set! err (.validateTableIDs e))] (!= err nil)
+          (return))
+
+        (when (<= (.-time (.-base e)) (.-lastTs r))
+          (set! (.-time (.-base e)) (+ (.-lastTs r) 1)))
+
+        (set! (.-lastTs r) (.-time (.-base e))))))
+
+
+  ;; Consume any events in the ordering first.
+  (when [(values ev ok) (.Next (.-order r))] ok
+    (return ev nil))
+
+
+  ;; Check if we need to refresh the generation.
+  (when (and (== (len (.-frontier r)) 0) (== (len (.-cpuSamples r)) 0))
+    (when (< (.-version r) version/Go126)
+      (return (.nextGenWithSpill r)))
+
+    (when (!= (.-readGenErr r) nil)
+      (return (lit Event) (.-readGenErr r)))
+
+    (let [(values gen err) (readGeneration (.-r r) (.-version r))]
+      (when (!= err nil)
+        ;; Before returning an error, emit the sync event
+        ;; for the current generation and queue up the error
+        ;; for the next call.
+        (set! (.-readGenErr r) err)
+        (set! (.-gen r) nil)
+        (inc! (.-syncs r))
+        (return (syncEvent nil (.-lastTs r) (.-syncs r)) nil))
+
+      (return (.installGen r gen))))
+
+  (let [tryAdvance ^{:go/end 192} (fn [^int i] :results [bool error]
+        (let [bc (aget (.-frontier r) i)]
+
+          (when [(values ok err) (.Advance (.-order r) (addr (.-ev bc)) (.-evTable (.-gen r)) (.-m bc) (.-gen (.-gen r)))] (or (not ok) (!= err nil))
+            (return ok err))
+
+
+          ;; Refresh the cursor's event.
+          (let [(values ok err) (.nextEvent bc (aget (.-batches (.-gen r)) (.-m bc)) ^{:go/via [evTable sync]} (.-freq (.-gen r)))]
+            (when (!= err nil)
+              (return false err))
+
+            (if ok
+              ;; If we successfully refreshed, update the heap.
+              (heapUpdate (.-frontier r) i)
+
+              ;; There's nothing else to read. Delete this cursor from the frontier.
+              (set! (.-frontier r) (heapRemove (.-frontier r) i)))
+
+            (return true nil))))]
+
+    ;; Inject a CPU sample if it comes next.
+    (when (!= (len (.-cpuSamples r)) 0)
+      (when (or (== (len (.-frontier r)) 0) (< (.-time (aget (.-cpuSamples r) 0)) (.-time (.-ev (aget (.-frontier r) 0)))))
+        (let [e (.asEvent (aget (.-cpuSamples r) 0) (.-evTable (.-gen r)))]
+          (set! (.-cpuSamples r) (subslice (.-cpuSamples r) 1))
+          (return e nil))))
+
+
+    ;; Try to advance the head of the frontier, which should have the minimum timestamp.
+    ;; This should be by far the most common case
+    (when (== (len (.-frontier r)) 0)
+      (return (lit Event) (fmt/Errorf "broken trace: frontier is empty:\n[gen=%d]\n\n%s\n%s\n" (.-gen (.-gen r)) (dumpFrontier (.-frontier r)) (dumpOrdering (addr (.-order r))))))
+
+    (if [(values ok err) (tryAdvance 0)] (!= err nil)
+      (return (lit Event) err)
+      (when (not ok)
+        ;; Try to advance the rest of the frontier, in timestamp order.
+        ;;
+        ;; To do this, sort the min-heap. A sorted min-heap is still a
+        ;; min-heap, but now we can iterate over the rest and try to
+        ;; advance in order. This path should be rare.
+        (^{:inst [(slice (* batchCursor)) (* batchCursor)]} slices/SortFunc (.-frontier r) (method-expr (* batchCursor) compare))
+        (let [success false]
+          (for [i 1] (< i (len (.-frontier r))) (inc! i)
+            (if [(set! (values ok err) (tryAdvance i))] (!= err nil)
+              (return (lit Event) err)
+              (when ok
+                (set! success true)
+                (break))))
+
+
+          (when (not success)
+            (return (lit Event) (fmt/Errorf "broken trace: failed to advance: frontier:\n[gen=%d]\n\n%s\n%s\n" (.-gen (.-gen r)) (dumpFrontier (.-frontier r)) (dumpOrdering (addr (.-order r)))))))))
+
+
+
+    ;; Pick off the next event on the queue. At this point, one must exist.
+    (let [(values ev ok) (.Next (.-order r))]
+      (when (not ok)
+        (panic "invariant violation: advance successful, but queue is empty"))
+
+      (return ev nil))))
+
+
+
+
+^{:go/end 272} (go/method nextGenWithSpill "nextGenWithSpill reads the generation and calls nextGen while\nalso handling any spilled batches.\n" [^{:tag (* Reader)} r] :results [Event error]
+  (when (>= (.-version r) version/Go126)
+    (return (lit Event) (errors/New "internal error: nextGenWithSpill called for Go 1.26+ trace")))
+
+  (when (!= (.-spillErr r) nil)
+    (when (.-spillErrSync r)
+      (return (lit Event) (.-spillErr r)))
+
+    (set! (.-spillErrSync r) true)
+    (inc! (.-syncs r))
+    (return (syncEvent nil (.-lastTs r) (.-syncs r)) nil))
+
+  (when (and (!= (.-gen r) nil) (== (.-spill r) nil))
+    ;; If we have a generation from the last read,
+    ;; and there's nothing left in the frontier, and
+    ;; there's no spilled batch, indicating that there's
+    ;; no further generation, it means we're done.
+    ;; Emit the final sync event.
+    (set! (.-done r) true)
+    (inc! (.-syncs r))
+    (return (syncEvent nil (.-lastTs r) (.-syncs r)) nil))
+
+
+  ;; Read the next generation.
+  (let [^{:tag (* generation)} gen (zero (* generation))]
+    (set! (values gen (.-spill r) (.-spillErr r)) (readGenerationWithSpill (.-r r) (.-spill r) (.-version r)))
+    (when (== gen nil)
+      (set! (.-gen r) nil)
+      (set! (.-spillErrSync r) true)
+      (inc! (.-syncs r))
+      (return (syncEvent nil (.-lastTs r) (.-syncs r)) nil))
+
+    (.installGen r gen)))
+
+
+
+
+^{:go/end 307} (go/method installGen "installGen installs the new generation into the Reader and returns\na Sync event for the new generation.\n" [^{:tag (* Reader)} r ^{:tag (* generation)} gen] :results [Event error]
+  (when (== gen nil)
+    ;; Emit the final sync event.
+    (set! (.-gen r) nil)
+    (set! (.-done r) true)
+    (inc! (.-syncs r))
+    (return (syncEvent nil (.-lastTs r) (.-syncs r)) nil))
+
+  (set! (.-gen r) gen)
+
+  ;; Reset CPU samples cursor.
+  (set! (.-cpuSamples r) (.-cpuSamples (.-gen r)))
+
+  ;; Reset frontier.
+  (range [_ m (.-batchMs (.-gen r))]
+    (let [batches (aget (.-batches (.-gen r)) m)
+        ^{:line 292} bc (addr (lit batchCursor :m m))
+        (values ok err) (.nextEvent bc batches ^{:go/via [evTable sync]} (.-freq (.-gen r)))]
+      (when (!= err nil)
+        (return (lit Event) err))
+
+      (when (not ok)
+        ;; Turns out there aren't actually any events in these batches.
+        (continue))
+
+      (set! (.-frontier r) (heapInsert (.-frontier r) bc))))
+
+  (inc! (.-syncs r))
+
+  ;; Always emit a sync event at the beginning of the generation.
+  (return (syncEvent (.-evTable (.-gen r)) (.mul ^{:go/via [evTable sync]} (.-freq (.-gen r)) (.-minTs (.-gen r))) (.-syncs r)) nil))
+
+
+^{:go/end 320} (go/func dumpFrontier ^string [^{:tag (slice (* batchCursor))} frontier]
+  (let [^strings/Builder sb (zero strings/Builder)]
+    (range [_ bc frontier]
+      (let [spec (aget (tracev2/Specs) (.-typ (.-ev bc)))]
+        (fmt/Fprintf (addr sb) "M %d [%s time=%d" (.-m bc) (.-Name spec) (.-time (.-ev bc)))
+        (range [i arg (subslice (.-Args spec) 1)]
+          (fmt/Fprintf (addr sb) " %s=%d" arg (aget (.-args (.-ev bc)) i)))
+
+        (fmt/Fprintf (addr sb) "]\n")))
+
+    (.String sb)))

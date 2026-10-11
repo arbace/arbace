@@ -1,0 +1,171 @@
+;; NXP Data Co-Processor (DCP) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.dcp) (go/file "sha.go" :imports [
+
+
+    ^{:line 12} [sha256 "crypto/sha256"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [io "io"]
+    ^{:line 15} [sync "sync"]])
+
+
+
+
+(go/var ^{:tag sync/Mutex :doc "A single DCP channel is used for all operations, this entails that only one\ndigest state can be kept at any given time.\n"} mu)
+
+
+
+
+
+
+(go/type Hash "Hash is the common interface to DCP hardware backed hash functions.\n\nWhile similar to Go native hash.Hash, this interface is not fully compatible\nwith it as hardware errors must be checked and checksum computation affects\nstate.\n" (interface
+
+
+    ^{:line 30 :doc "Write (via the embedded io.Writer interface) adds more data to the running hash.\nIt can return an error. It returns an error if Sum has been already invoked.\n"} io/Writer
+
+
+
+
+    (^{:doc "Sum appends the current hash to b and returns the resulting slice.\nIts invocation terminates the digest instance, for this reason Write\nwill return errors after Sum is invoked.\n"} Sum [^{:tag (slice byte)} b] :results [(slice byte) error])
+
+
+
+
+
+    (^{:doc "BlockSize returns the hash's underlying block size.\nThe Write method must be able to accept any amount\nof data, but it may operate more efficiently if all writes\nare a multiple of the block size.\n"} BlockSize ^int [])))
+
+
+(go/type digest (struct
+    ^{:line 45 :tag (* DCP)} dcp
+    ^{:line 46 :tag int} mode
+    ^{:line 47 :tag int} n
+    ^{:line 48 :tag int} bs
+    ^{:line 49 :tag bool} init
+    ^{:line 50 :tag (slice byte)} buf
+    ^{:line 51 :tag (slice byte)} sum))
+
+
+
+
+
+
+
+^{:go/end 101} (go/method Write "Write adds more data to the running hash. It returns an error if Sum has\nbeen already invoked or in case of hardware errors.\n\nThere must be sufficient DMA memory allocated to hold the data, otherwise\nthe function will panic.\n" [^{:tag (* digest)} d ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (!= (len (.-sum d)) 0)
+    (return 0 (errors/New "digest instance can no longer be used")))
+
+
+  ;; If we still don't have enough data for a block, accumulate and early
+  ;; out.
+  (when (< (+ (len (.-buf d)) (len p)) (.-bs d))
+    (set! (.-buf d) (append (.-buf d) (spread p)))
+    (return (len p) nil))
+
+
+  (let [pl (len p)
+
+      ;; top up partial block buffer, and process that
+      ^{:line 74} cut (- (.-bs d) (len (.-buf d)))]
+    (set! (.-buf d) (append (.-buf d) (spread (subslice p _ cut))))
+    (set! p (subslice p cut))
+
+    (when [(set! (values _ err) (.hash (.-dcp d) (.-buf d) (.-mode d) (.-n d) (.-init d) false))] (!= err nil)
+      (return))
+
+
+    (when (.-init d)
+      (set! (.-init d) false))
+
+
+    ;; work through any more full blocks in p
+    (when [l (len p)] (> l (.-bs d))
+      (let [r (% l (.-bs d))]
+
+        (when [(set! (values _ err) (.hash (.-dcp d) (subslice p _ (- l r)) (.-mode d) (.-n d) (.-init d) false))] (!= err nil)
+          (return))
+
+
+        (set! p (subslice p (- l r)))))
+
+
+    ;; save off any partial block remaining
+    (set! (.-buf d) (append (subslice (.-buf d) 0 0) (spread p)))
+
+    (return pl nil)))
+
+
+
+
+
+^{:go/end 126} (go/method Sum "Sum appends the current hash to in and returns the resulting slice.  Its\ninvocation terminates the digest instance, for this reason Write will return\nerrors after Sum is invoked.\n" [^{:tag (* digest)} d ^{:tag (slice byte)} in] :results [^{:tag (slice byte)} sum ^error err]
+  (when (!= (len (.-sum d)) 0)
+    (return (append in (spread (subslice (.-sum d)))) nil))
+
+
+  (defer (.Unlock mu))
+
+  (if (and (.-init d) (== (len (.-buf d)) 0))
+    (set! (.-sum d) (.Sum (sha256/New) nil))
+
+    (let [(values s err) (.hash (.-dcp d) (.-buf d) HASH_SELECT_SHA256 (.-n d) (.-init d) true)]
+
+      (when (!= err nil)
+        (return nil err))
+
+
+      (set! (.-sum d) s)))
+
+
+  (return (append in (spread (subslice (.-sum d)))) nil))
+
+
+
+^{:go/end 131} (go/method BlockSize "BlockSize returns the hash's underlying block size.\n" ^int [^{:tag (* digest)} d]
+  (.-bs d))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 156} (go/method New256 "New256 returns a new Digest computing the SHA256 checksum.\n\nA single DCP channel is used for all operations, this entails that only one\ndigest instance can be kept at any given time, if this condition is not met\nan error is returned.\n\nThe digest instance starts with New256() and terminates when when Sum() is\ninvoked, after which the digest state can no longer be changed.\n" [^{:tag (* DCP)} hw] :results [Hash error]
+  (when (not (.TryLock mu))
+    (return nil (errors/New "another digest instance is already in use")))
+
+
+  (let [d (addr ^{:go/breaks [2 4 6 8 10 12]} (lit digest
+          :dcp hw
+          :mode HASH_SELECT_SHA256
+          :n sha256/Size
+          :bs sha256/BlockSize
+          :init true
+          :buf (make (slice byte) 0 sha256/BlockSize)))]
+
+
+    (return d nil)))
+
+
+
+
+
+
+^{:go/end 172} (go/method Sum256 "Sum256 returns the SHA256 checksum of the data.\n\nThere must be sufficient DMA memory allocated to hold the data, otherwise\nthe function will panic.\n" [^{:tag (* DCP)} hw ^{:tag (slice byte)} data] :results [^{:tag (array 32 byte)} sum ^error err]
+  (let [(values s ^:assign err) (.hash hw data HASH_SELECT_SHA256 (len sum) true true)]
+
+    (when (!= err nil)
+      (return))
+
+
+    (copy (subslice sum) s)
+
+    (return)))

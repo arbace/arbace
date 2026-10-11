@@ -1,0 +1,215 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace.raw) (go/file "textreader.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [strconv "strconv"]
+    ^{:line 12} [strings "strings"]
+    ^{:line 13} [unicode "unicode"]
+
+    ^{:line 15} [tracev2 "internal/trace/tracev2"]
+    ^{:line 16} [version "internal/trace/version"]])
+
+
+
+
+(go/type TextReader "TextReader parses a text format trace with only very basic validation\ninto an event stream.\n" (struct
+    ^{:line 22 :tag version/Version} v
+    ^{:line 23 :tag (slice tracev2/EventSpec)} specs
+    ^{:line 24 :tag (map string tracev2/EventType)} names
+    ^{:line 25 :tag (* bufio/Scanner)} s))
+
+
+
+^{:go/end 60} (go/func NewTextReader "NewTextReader creates a new reader for the trace text format.\n" [^io/Reader r] :results [(* TextReader) error]
+  (let [tr (addr (lit TextReader :s (bufio/NewScanner r)))
+      (values line err) (.nextLine tr)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values trace ^:assign line) (readToken line)]
+      (when (!= trace "Trace")
+        (return nil (fmt/Errorf "failed to parse header")))
+
+      (let [(values gover ^:assign line) (readToken line)]
+        (when (not (strings/HasPrefix gover "Go1."))
+          (return nil (fmt/Errorf "failed to parse header Go version")))
+
+        (let [(values rawv ^:assign err) (strconv/ParseUint (subslice gover (len "Go1.")) 10 64)]
+          (when (!= err nil)
+            (return nil (fmt/Errorf "failed to parse header Go version: %v" err)))
+
+          (let [v (conv version/Version rawv)]
+            (when (not (.Valid v))
+              (return nil (fmt/Errorf "unknown or unsupported Go version 1.%d" v)))
+
+            (set! (.-v tr) v)
+            (set! (.-specs tr) (.Specs v))
+            (set! (.-names tr) (tracev2/EventNames (.-specs tr)))
+            (range [_ r line]
+              (when (not (unicode/IsSpace r))
+                (return nil (fmt/Errorf "encountered unexpected non-space at the end of the header: %q" line))))
+
+
+            (return tr nil)))))))
+
+
+
+^{:go/end 65} (go/method Version "Version returns the version of the trace that we're reading.\n" ^version/Version [^{:tag (* TextReader)} r]
+  (.-v r))
+
+
+
+^{:go/end 120} (go/method ReadEvent "ReadEvent reads and returns the next trace event in the text stream.\n" [^{:tag (* TextReader)} r] :results [Event error]
+  (let [(values line err) (.nextLine r)]
+    (when (!= err nil)
+      (return (lit Event) err))
+
+    (let [(values evStr ^:assign line) (readToken line)
+        (values ev ok) (aget (.-names r) evStr)]
+      (when (not ok)
+        (return (lit Event) (fmt/Errorf "unidentified event: %s" evStr)))
+
+      (let [spec (aget (.-specs r) ev)
+          (values args ^:assign err) (readArgs line (.-Args spec))]
+        (when (!= err nil)
+          (return (lit Event) (fmt/Errorf "reading args for %s: %v" evStr err)))
+
+        (when (.-IsStack spec)
+          (let [len (conv int (aget args 1))]
+            (for [i 0] (< i len) (inc! i)
+              (let [(values line err) (.nextLine r)]
+                (when (== err io/EOF)
+                  (return (lit Event) (fmt/Errorf "unexpected EOF while reading stack: args=%v" args)))
+
+                (when (!= err nil)
+                  (return (lit Event) err))
+
+                (let [(values frame ^:assign err) (readArgs line frameFields)]
+                  (when (!= err nil)
+                    (return (lit Event) err))
+
+                  (set! args (append args (spread frame))))))))
+
+
+        (let [^{:tag (slice byte)} data (zero (slice byte))]
+          (when (.-HasData spec)
+            (let [(values line err) (.nextLine r)]
+              (when (== err io/EOF)
+                (return (lit Event) (fmt/Errorf "unexpected EOF while reading data for %s: args=%v" evStr args)))
+
+              (when (!= err nil)
+                (return (lit Event) err))
+
+              (set! (values data err) (readData line))
+              (when (!= err nil)
+                (return (lit Event) err))))
+
+
+          ^{:go/breaks [2]} (return ^{:go/breaks [2 4 6 8]} (lit Event
+              :Version (.-v r)
+              :Ev ev
+              :Args args
+              :Data data)
+            nil))))))
+
+
+^{:go/end 137} (go/method nextLine [^{:tag (* TextReader)} r] :results [string error]
+  (while true
+    (when (not (.Scan (.-s r)))
+      (when [err (.Err (.-s r))] (!= err nil)
+        (return "" err))
+
+      (return "" io/EOF))
+
+    (let [txt (.Text (.-s r))
+        (values tok _) (readToken txt)]
+      (when (== tok "")
+        (continue)) ; Empty line or comment.
+
+      (return txt nil))))
+
+
+
+(go/var frameFields (lit (slice string) "pc" "func" "file" "line"))
+
+^{:go/end 160} (go/func readArgs [^string s ^{:tag (slice string)} names] :results [(slice uint64) error]
+  (let [^{:tag (slice uint64)} args (zero (slice uint64))]
+    (range [_ name names]
+      (let [(values arg value rest err) (readArg s)]
+        (when (!= err nil)
+          (return nil err))
+
+        (when (!= arg name)
+          (return nil (fmt/Errorf "expected argument %q, but got %q" name arg)))
+
+        (set! args (append args value))
+        (set! s rest)))
+
+    (range [_ r s]
+      (when (not (unicode/IsSpace r))
+        (return nil (fmt/Errorf "encountered unexpected non-space at the end of an event: %q" s))))
+
+
+    (return args nil)))
+
+
+^{:go/end 177} (go/func readArg [^string s] :results [^string arg ^uint64 value ^string rest ^error err]
+  (let [^string tok (zero string)]
+    (set! (values tok rest) (readToken s))
+    (when (== (len tok) 0)
+      (return "" 0 s (fmt/Errorf "no argument")))
+
+    (let [(values ^:assign arg val found) (strings/Cut tok "=")]
+      (when (not found)
+        (return "" 0 s (fmt/Errorf "malformed argument: %q" tok)))
+
+      (set! (values value err) (strconv/ParseUint val 10 64))
+      (when (!= err nil)
+        (return arg value s (fmt/Errorf "failed to parse argument value %q for arg %q" val arg)))
+
+      (return))))
+
+
+^{:go/end 204} (go/func readToken [^string s] :results [^string token ^string rest]
+  (let [tkStart -1]
+    (range [i r s]
+      (when (== r \#)
+        (return "" ""))
+
+      (when (not (unicode/IsSpace r))
+        (set! tkStart i)
+        (break)))
+
+
+    (when (< tkStart 0)
+      (return "" ""))
+
+    (let [tkEnd -1]
+      (range [i r (subslice s tkStart)]
+        (when (or (unicode/IsSpace r) (== r \#))
+          (set! tkEnd (+ i tkStart))
+          (break)))
+
+
+      (when (< tkEnd 0)
+        (return (subslice s tkStart) ""))
+
+      (return (subslice s tkStart tkEnd) (subslice s tkEnd)))))
+
+
+^{:go/end 216} (go/func readData [^string line] :results [(slice byte) error]
+  (let [(values dk dv found) (strings/Cut line "=")]
+    (when (or (not found) (!= (strings/TrimSpace dk) "data"))
+      (return nil (fmt/Errorf "malformed data: %q" line)))
+
+    (let [(values data err) (strconv/Unquote (strings/TrimSpace dv))]
+      (when (!= err nil)
+        (return nil (fmt/Errorf "failed to parse data: %q: %v" line err)))
+
+      (return (conv (slice byte) data) nil))))

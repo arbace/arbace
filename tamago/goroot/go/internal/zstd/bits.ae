@@ -1,0 +1,129 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.zstd) (go/file "bits.go" :imports [
+
+
+    ^{:line 8} [bits "math/bits"]])
+
+
+
+
+
+(go/type block "block is the data for a single compressed block.\nThe data starts immediately after the 3 byte block header,\nand is Block_Size bytes long.\n" (slice byte))
+
+
+(go/type bitReader "bitReader reads a bit stream going forward.\n" (struct
+    ^{:line 18 :tag (* Reader)} r ; for error reporting
+    ^{:line 19 :tag block} data ; the bits to read
+    ^{:line 20 :tag uint32} off ; current offset into data
+    ^{:line 21 :tag uint32} bits ; bits ready to be returned
+    ^{:line 22 :tag uint32} cnt)) ; number of valid bits in the bits field
+
+
+
+^{:go/end 32} (go/method makeBitReader "makeBitReader makes a bit reader starting at off.\n" ^bitReader [^{:tag (* Reader)} r ^block data ^int off]
+  ^{:go/breaks [2 4 6]} (lit bitReader
+    :r r
+    :data data
+    :off (conv uint32 off)))
+
+
+
+
+
+^{:go/breaks [[5 46]] :go/end 47} (go/method moreBits "moreBits is called to read more bits.\nThis ensures that at least 16 bits are available.\n" ^error [^{:tag (* bitReader)} br]
+  (while (< (.-cnt br) 16)
+    (when (>= (.-off br) (conv uint32 (len (.-data br))))
+      (return (.makeEOFError (.-r br) (conv int (.-off br)))))
+
+    (let [c (aget (.-data br) (.-off br))]
+      (inc! (.-off br))
+      (set! (.-bits br) bit-or (<< (conv uint32 c) (.-cnt br)))
+      (set! (.-cnt br) + 8)))
+
+  nil)
+
+
+
+^{:go/end 55} (go/method val "val is called to fetch a value of b bits.\n" ^uint32 [^{:tag (* bitReader)} br ^uint8 b]
+  (let [r (bit-and (.-bits br) (- ^uint32 (<< 1 b) 1))]
+    (set! (.-bits br) >> b)
+    (set! (.-cnt br) - (conv uint32 b))
+    ^{:line 54} r))
+
+
+
+^{:go/end 63} (go/method backup "backup steps back to the last byte we used.\n" [^{:tag (* bitReader)} br]
+  (while (>= (.-cnt br) 8)
+    (dec! (.-off br))
+    (set! (.-cnt br) - 8)))
+
+
+
+
+^{:go/end 68} (go/method makeError "makeError returns an error at the current offset wrapping a string.\n" ^error [^{:tag (* bitReader)} br ^string msg]
+  (.makeError (.-r br) (conv int (.-off br)) msg))
+
+
+
+(go/type reverseBitReader "reverseBitReader reads a bit stream in reverse.\n" (struct
+    ^{:line 72 :tag (* Reader)} r ; for error reporting
+    ^{:line 73 :tag block} data ; the bits to read
+    ^{:line 74 :tag uint32} off ; current offset into data
+    ^{:line 75 :tag uint32} start ; start in data; we read backward to start
+    ^{:line 76 :tag uint32} bits ; bits ready to be returned
+    ^{:line 77 :tag uint32} cnt)) ; number of valid bits in bits field
+
+
+
+
+
+^{:go/end 97} (go/method makeReverseBitReader "makeReverseBitReader makes a reverseBitReader reading backward\nfrom off to start. The bitstream starts with a 1 bit in the last\nbyte, at off.\n" [^{:tag (* Reader)} r ^block data ^int off ^int start] :results [reverseBitReader error]
+  (let [streamStart (aget data off)]
+    (when (== streamStart 0)
+      (return (lit reverseBitReader) (.makeError r off "zero byte at reverse bit stream start")))
+
+    (let [rbr ^{:go/breaks [2 4 6 8 10 12]} (lit reverseBitReader
+          :r r
+          :data data
+          :off (conv uint32 off)
+          :start (conv uint32 start)
+          :bits (conv uint32 streamStart)
+          :cnt (conv uint32 (- 7 (bits/LeadingZeros8 streamStart))))]
+
+      (return rbr nil))))
+
+
+
+^{:go/end 108} (go/method val "val is called to fetch a value of b bits.\n" [^{:tag (* reverseBitReader)} rbr ^uint8 b] :results [uint32 error]
+  (when (not (.fetch rbr b))
+    (return 0 (.makeEOFError (.-r rbr) (conv int (.-off rbr)))))
+
+
+  (set! (.-cnt rbr) - (conv uint32 b))
+  (let [v (bit-and (>> (.-bits rbr) (.-cnt rbr)) (- ^uint32 (<< 1 b) 1))]
+    (return v nil)))
+
+
+
+
+
+^{:go/breaks [[5 124]] :go/end 125} (go/method fetch "fetch is called to ensure that at least b bits are available.\nIt reports false if this can't be done,\nin which case only rbr.cnt bits are available.\n" ^bool [^{:tag (* reverseBitReader)} rbr ^uint8 b]
+  (while (< (.-cnt rbr) (conv uint32 b))
+    (when (<= (.-off rbr) (.-start rbr))
+      (return false))
+
+    (dec! (.-off rbr))
+    (let [c (aget (.-data rbr) (.-off rbr))]
+      (set! (.-bits rbr) << 8)
+      (set! (.-bits rbr) bit-or (conv uint32 c))
+      (set! (.-cnt rbr) + 8)))
+
+  true)
+
+
+
+^{:go/end 130} (go/method makeError "makeError returns an error at the current offset wrapping a string.\n" ^error [^{:tag (* reverseBitReader)} rbr ^string msg]
+  (.makeError (.-r rbr) (conv int (.-off rbr)) msg))

@@ -1,0 +1,479 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "mgclimit.go" :imports [
+
+    ^{:line 7} [atomic "internal/runtime/atomic"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag gcCPULimiterState :doc "gcCPULimiter is a mechanism to limit GC CPU utilization in situations\nwhere it might become excessive and inhibit application progress (e.g.\na death spiral).\n\nThe core of the limiter is a leaky bucket mechanism that fills with GC\nCPU time and drains with mutator time. Because the bucket fills and\ndrains with time directly (i.e. without any weighting), this effectively\nsets a very conservative limit of 50%. This limit could be enforced directly,\nhowever, but the purpose of the bucket is to accommodate spikes in GC CPU\nutilization without hurting throughput.\n\nNote that the bucket in the leaky bucket mechanism can never go negative,\nso the GC never gets credit for a lot of CPU time spent without the GC\nrunning. This is intentional, as an application that stays idle for, say,\nan entire day, could build up enough credit to fail to prevent a death\nspiral the following day. The bucket's capacity is the GC's only leeway.\n\nThe capacity thus also sets the window the limiter considers. For example,\nif the capacity of the bucket is 1 cpu-second, then the limiter will not\nkick in until at least 1 full cpu-second in the last 2 cpu-second window\nis spent on GC CPU time.\n"} gcCPULimiter)
+
+(go/type gcCPULimiterState (struct
+    ^{:line 33 :tag atomic/Uint32} lock
+
+    ^{:line 35 :tag atomic/Bool} enabled
+
+
+
+
+
+
+    ^{:line 42 :tag bool :doc "gcEnabled is an internal copy of gcBlackenEnabled that determines\nwhether the limiter tracks total assist time.\n\ngcBlackenEnabled isn't used directly so as to keep this structure\nunit-testable.\n"} gcEnabled
+
+
+
+    ^{:line 46 :tag bool :doc "transitioning is true when the GC is in a STW and transitioning between\nthe mark and sweep phases.\n"} transitioning
+
+
+    ^{:line 49 :tag bool :doc "test indicates whether this instance of the struct was made for testing purposes.\n"} test
+
+    ^{:line 51 :tag (struct ^{:tag uint64 :doc "Invariants:\n- fill >= 0\n- capacity >= 0\n- fill <= capacity\n"} fill ^{:tag uint64 :doc "Invariants:\n- fill >= 0\n- capacity >= 0\n- fill <= capacity\n"} capacity)} bucket
+
+
+
+
+
+
+
+
+    ^{:line 60 :tag uint64 :doc "overflow is the cumulative amount of GC CPU time that we tried to fill the\nbucket with but exceeded its capacity.\n"} overflow
+
+
+    ^{:line 63 :tag atomic/Int64 :doc "assistTimePool is the accumulated assist time since the last update.\n"} assistTimePool
+
+
+    ^{:line 66 :tag atomic/Int64 :doc "idleMarkTimePool is the accumulated idle mark time since the last update.\n"} idleMarkTimePool
+
+
+    ^{:line 69 :tag atomic/Int64 :doc "idleTimePool is the accumulated time Ps spent on the idle list since the last update.\n"} idleTimePool
+
+
+
+
+    ^{:line 74 :tag atomic/Int64 :doc "lastUpdate is the nanotime timestamp of the last time update was called.\n\nUpdated under lock, but may be read concurrently.\n"} lastUpdate
+
+
+    ^{:line 77 :tag atomic/Uint32 :doc "lastEnabledCycle is the GC cycle that last had the limiter enabled.\n"} lastEnabledCycle
+
+
+
+
+
+    ^{:line 83 :tag int32 :doc "nprocs is an internal copy of gomaxprocs, used to determine total available\nCPU time.\n\ngomaxprocs isn't used directly so as to keep this structure unit-testable.\n"} nprocs))
+
+
+
+
+
+
+^{:go/end 92} (go/method limiting "limiting returns true if the CPU limiter is currently enabled, meaning the Go GC\nshould take action to limit CPU utilization.\n\nIt is safe to call concurrently with other operations.\n" ^bool [^{:tag (* gcCPULimiterState)} l]
+  (.Load (.-enabled l)))
+
+
+
+
+
+
+
+
+^{:go/end 117} (go/method startGCTransition "startGCTransition notifies the limiter of a GC transition.\n\nThis call takes ownership of the limiter and disables all other means of\nupdating the limiter. Release ownership by calling finishGCTransition.\n\nIt is safe to call concurrently with other operations.\n" [^{:tag (* gcCPULimiterState)} l ^bool enableGC ^int64 now]
+  (when (not (.tryLock l))
+    ;; This must happen during a STW, so we can't fail to acquire the lock.
+    ;; If we did, something went wrong. Throw.
+    (throw "failed to acquire lock to start a GC transition"))
+
+  (when (== (.-gcEnabled l) enableGC)
+    (throw "transitioning GC to the same state as before?"))
+
+  ;; Flush whatever was left between the last update and now.
+  (.updateLocked l now)
+  (set! (.-gcEnabled l) enableGC)
+  (set! (.-transitioning l) true))
+;; N.B. finishGCTransition releases the lock.
+;;
+;; We don't release here to increase the chance that if there's a failure
+;; to finish the transition, that we throw on failing to acquire the lock.
+
+
+
+
+
+^{:go/end 136} (go/method finishGCTransition "finishGCTransition notifies the limiter that the GC transition is complete\nand releases ownership of it. It also accumulates STW time in the bucket.\nnow must be the timestamp from the end of the STW pause.\n" [^{:tag (* gcCPULimiterState)} l ^int64 now]
+  (when (not (.-transitioning l))
+    (throw "finishGCTransition called without starting one?"))
+
+  ;; Count the full nprocs set of CPU time because the world is stopped
+  ;; between startGCTransition and finishGCTransition. Even though the GC
+  ;; isn't running on all CPUs, it is preventing user code from doing so,
+  ;; so it might as well be.
+  (when [lastUpdate (.Load (.-lastUpdate l))] (>= now lastUpdate)
+    (.accumulate l 0 (* (- now lastUpdate) (conv int64 (.-nprocs l)))))
+
+  (.Store (.-lastUpdate l) now)
+  (set! (.-transitioning l) false)
+  (.unlock l))
+
+
+
+
+(go/const ^{:val 1.0E7 :doc "gcCPULimiterUpdatePeriod dictates the maximum amount of wall-clock time\nwe can go before updating the limiter.\n"} gcCPULimiterUpdatePeriod 1.0E7) ; 10ms
+
+
+
+^{:go/end 146} (go/method needUpdate "needUpdate returns true if the limiter's maximum update period has been\nexceeded, and so would benefit from an update.\n" ^bool [^{:tag (* gcCPULimiterState)} l ^int64 now]
+  (> (- now (.Load (.-lastUpdate l))) gcCPULimiterUpdatePeriod))
+
+
+
+
+^{:go/end 152} (go/method addAssistTime "addAssistTime notifies the limiter of additional assist time. It will be\nincluded in the next update.\n" [^{:tag (* gcCPULimiterState)} l ^int64 t]
+  (.Add (.-assistTimePool l) t))
+
+
+
+
+^{:go/end 158} (go/method addIdleTime "addIdleTime notifies the limiter of additional time a P spent on the idle list. It will be\nsubtracted from the total CPU time in the next update.\n" [^{:tag (* gcCPULimiterState)} l ^int64 t]
+  (.Add (.-idleTimePool l) t))
+
+
+
+
+
+
+^{:go/end 176} (go/method update "update updates the bucket given runtime-specific information. now is the\ncurrent monotonic time in nanoseconds.\n\nThis is safe to call concurrently with other operations, except *GCTransition.\n" [^{:tag (* gcCPULimiterState)} l ^int64 now]
+  (when (not (.tryLock l))
+    ;; We failed to acquire the lock, which means something else is currently
+    ;; updating. Just drop our update, the next one to update will include
+    ;; our total assist time.
+    (return))
+
+  (when (.-transitioning l)
+    (throw "update during transition"))
+
+  (.updateLocked l now)
+  (.unlock l))
+
+
+
+^{:go/end 258} (go/method updateLocked "updateLocked is the implementation of update. l.lock must be held.\n" [^{:tag (* gcCPULimiterState)} l ^int64 now]
+  (let [lastUpdate (.Load (.-lastUpdate l))]
+    (when (< now lastUpdate)
+      ;; Defensively avoid overflow. This isn't even the latest update anyway.
+      (return))
+
+    (let [windowTotalTime (* (- now lastUpdate) (conv int64 (.-nprocs l)))]
+      (.Store (.-lastUpdate l) now)
+
+      ;; Drain the pool of assist time.
+      (let [assistTime (.Load (.-assistTimePool l))]
+        (when (!= assistTime 0)
+          (.Add (.-assistTimePool l) (- assistTime)))
+
+
+        ;; Drain the pool of idle time.
+        (let [idleTime (.Load (.-idleTimePool l))]
+          (when (!= idleTime 0)
+            (.Add (.-idleTimePool l) (- idleTime)))
+
+
+          (when (not (.-test l))
+            ;; Consume time from in-flight events. Make sure we're not preemptible so allp can't change.
+            ;;
+            ;; The reason we do this instead of just waiting for those events to finish and push updates
+            ;; is to ensure that all the time we're accounting for happened sometime between lastUpdate
+            ;; and now. This dramatically simplifies reasoning about the limiter because we're not at
+            ;; risk of extra time being accounted for in this window than actually happened in this window,
+            ;; leading to all sorts of weird transient behavior.
+            (let [mp (acquirem)]
+              (range [_ pp allp]
+                (let [(values typ duration) (.consume (.-limiterEvent pp) now)]
+                  (switch typ
+                    (case [limiterEventIdle]
+                      (.Add (.-idleTime sched) duration)
+                      (set! idleTime + duration))
+                    (case [limiterEventIdleMarkWork]
+                      (set! idleTime + duration))
+                    (case [limiterEventMarkAssist limiterEventScavengeAssist]
+                      (set! assistTime + duration))
+                    (case [limiterEventNone]
+                      (break))
+                    (default
+                      (throw "invalid limiter event type found")))))
+
+
+              (releasem mp)))
+
+
+          ;; Compute total GC time.
+          (let [windowGCTime assistTime]
+            (when (.-gcEnabled l)
+              (set! windowGCTime + (conv int64 (* (conv float64 windowTotalTime) gcBackgroundUtilization))))
+
+
+            ;; Subtract out all idle time from the total time. Do this after computing
+            ;; GC time, because the background utilization is dependent on the *real*
+            ;; total time, not the total time after idle time is subtracted.
+            ;;
+            ;; Idle time is counted as any time that a P is on the P idle list plus idle mark
+            ;; time. Idle mark workers soak up time that the application spends idle.
+            ;;
+            ;; On a heavily undersubscribed system, any additional idle time can skew GC CPU
+            ;; utilization, because the GC might be executing continuously and thrashing,
+            ;; yet the CPU utilization with respect to GOMAXPROCS will be quite low, so
+            ;; the limiter fails to turn on. By subtracting idle time, we're removing time that
+            ;; we know the application was idle giving a more accurate picture of whether
+            ;; the GC is thrashing.
+            ;;
+            ;; Note that this can cause the limiter to turn on even if it's not needed. For
+            ;; instance, on a system with 32 Ps but only 1 running goroutine, each GC will have
+            ;; 8 dedicated GC workers. Assuming the GC cycle is half mark phase and half sweep
+            ;; phase, then the GC CPU utilization over that cycle, with idle time removed, will
+            ;; be 8/(8+2) = 80%. Even though the limiter turns on, though, assist should be
+            ;; unnecessary, as the GC has way more CPU time to outpace the 1 goroutine that's
+            ;; running.
+            (set! windowTotalTime - idleTime)
+
+            (.accumulate l (- windowTotalTime windowGCTime) windowGCTime)))))))
+
+
+
+
+
+
+^{:go/end 297} (go/method accumulate "accumulate adds time to the bucket and signals whether the limiter is enabled.\n\nThis is an internal function that deals just with the bucket. Prefer update.\nl.lock must be held.\n" [^{:tag (* gcCPULimiterState)} l ^int64 mutatorTime ^int64 gcTime]
+  (let [headroom (- (.-capacity (.-bucket l)) (.-fill (.-bucket l)))
+      ^{:line 266} enabled (== headroom 0)
+
+      ;; Let's be careful about three things here:
+      ;; 1. The addition and subtraction, for the invariants.
+      ;; 2. Overflow.
+      ;; 3. Excessive mutation of l.enabled, which is accessed
+      ;;    by all assists, potentially more than once.
+      ^{:line 273} change (- gcTime mutatorTime)]
+
+    ;; Handle limiting case.
+    (when (and (> change 0) (<= headroom (conv uint64 change)))
+      (set! (.-overflow l) + (- (conv uint64 change) headroom))
+      (set! (.-fill (.-bucket l)) (.-capacity (.-bucket l)))
+      (when (not enabled)
+        (.Store (.-enabled l) true)
+        (.Store (.-lastEnabledCycle l) (+ (.-numgc memstats) 1)))
+
+      (return))
+
+
+    ;; Handle non-limiting cases.
+    (if (and (< change 0) (<= (.-fill (.-bucket l)) (conv uint64 (- change))))
+      ;; Bucket emptied.
+      (set! (.-fill (.-bucket l)) 0)
+
+      ;; All other cases.
+      (set! (.-fill (.-bucket l)) - (conv uint64 (- change))))
+
+    (when (and (!= change 0) enabled)
+      (.Store (.-enabled l) false))))
+
+
+
+
+^{:go/end 302} (go/method tryLock "tryLock attempts to lock l. Returns true on success.\n" ^bool [^{:tag (* gcCPULimiterState)} l]
+  (.CompareAndSwap (.-lock l) 0 1))
+
+
+
+^{:go/end 310} (go/method unlock "unlock releases the lock on l. Must be called if tryLock returns true.\n" [^{:tag (* gcCPULimiterState)} l]
+  (let [old (.Swap (.-lock l) 0)]
+    (when (!= old 1)
+      (throw "double unlock"))))
+
+
+
+
+(go/const ^{:val 1.0E9 :doc "capacityPerProc is the limiter's bucket capacity for each P in GOMAXPROCS.\n"} capacityPerProc 1.0E9) ; 1 second in nanoseconds
+
+
+
+
+
+^{:go/end 338} (go/method resetCapacity "resetCapacity updates the capacity based on GOMAXPROCS. Must not be called\nwhile the GC is enabled.\n\nIt is safe to call concurrently with other operations.\n" [^{:tag (* gcCPULimiterState)} l ^int64 now ^int32 nprocs]
+  (when (not (.tryLock l))
+    ;; This must happen during a STW, so we can't fail to acquire the lock.
+    ;; If we did, something went wrong. Throw.
+    (throw "failed to acquire lock to reset capacity"))
+
+  ;; Flush the rest of the time for this period.
+  (.updateLocked l now)
+  (set! (.-nprocs l) nprocs)
+
+  (set! (.-capacity (.-bucket l)) (* (conv uint64 nprocs) capacityPerProc))
+  (cond (> (.-fill (.-bucket l)) (.-capacity (.-bucket l))) (do
+      (set! (.-fill (.-bucket l)) (.-capacity (.-bucket l)))
+      (.Store (.-enabled l) true)
+      (.Store (.-lastEnabledCycle l) (+ (.-numgc memstats) 1)))
+    (< (.-fill (.-bucket l)) (.-capacity (.-bucket l)))
+    (.Store (.-enabled l) false))
+
+  (.unlock l))
+
+
+
+
+
+
+
+
+(go/type limiterEventType "limiterEventType indicates the type of an event occurring on some P.\n\nThese events represent the full set of events that the GC CPU limiter tracks\nto execute its function.\n\nThis type may use no more than limiterEventBits bits of information.\n" uint8)
+
+(go/const
+  ^{:line 349} [^{:tag limiterEventType :val 0} limiterEventNone iota] ; None of the following events.
+  ^{:line 350} [^{:val 1} limiterEventIdleMarkWork] ; Refers to an idle mark worker (see gcMarkWorkerMode).
+  ^{:line 351} [^{:val 2} limiterEventMarkAssist] ; Refers to mark assist (see gcAssistAlloc).
+  ^{:line 352} [^{:val 3} limiterEventScavengeAssist] ; Refers to a scavenge assist (see allocSpan).
+  ^{:line 353} [^{:val 4} limiterEventIdle] ; Refers to time a P spent on the idle list.
+
+  ^{:line 355} [^{:val 3} limiterEventBits 3])
+
+
+
+
+(go/const "limiterEventTypeMask is a mask for the bits in p.limiterEventStart that represent\nthe event type. The rest of the bits of that field represent a timestamp.\n"
+  ^{:line 361} [^{:val 16140901064495857664N} limiterEventTypeMask (<< (conv uint64 (- (<< 1 limiterEventBits) 1)) (- 64 limiterEventBits))]
+  ^{:line 362} [^{:val 0} limiterEventStampNone (conv limiterEventStamp 0)])
+
+
+
+(go/type limiterEventStamp "limiterEventStamp is a nanotime timestamp packed with a limiterEventType.\n" uint64)
+
+
+^{:go/end 371} (go/func makeLimiterEventStamp "makeLimiterEventStamp creates a new stamp from the event type and the current timestamp.\n" ^limiterEventStamp [^limiterEventType typ ^int64 now]
+  (conv limiterEventStamp (bit-or (<< (conv uint64 typ) (- 64 limiterEventBits)) (bit-and-not (conv uint64 now) limiterEventTypeMask))))
+
+
+
+
+
+
+^{:go/end 385} (go/method duration "duration computes the difference between now and the start time stored in the stamp.\n\nReturns 0 if the difference is negative, which may happen if now is stale or if the\nbefore and after timestamps cross a 2^(64-limiterEventBits) boundary.\n" ^int64 [^limiterEventStamp s ^int64 now]
+  ;; The top limiterEventBits bits of the timestamp are derived from the current time
+  ;; when computing a duration.
+  (let [start (conv int64 (bit-or (bit-and (conv uint64 now) limiterEventTypeMask) (bit-and-not (conv uint64 s) limiterEventTypeMask)))]
+    (when (< now start)
+      (return 0))
+
+    (- now start)))
+
+
+
+^{:go/end 390} (go/method typ "type extracts the event type from the stamp.\n" ^limiterEventType [^limiterEventStamp s]
+  (conv limiterEventType (>> s (- 64 limiterEventBits))))
+
+
+
+(go/type limiterEvent "limiterEvent represents tracking state for an event tracked by the GC CPU limiter.\n" (struct
+    ^{:line 394 :tag atomic/Uint64} stamp)) ; Stores a limiterEventStamp.
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/breaks [6] :go/end 413} (go/method start "start begins tracking a new limiter event of the current type. If an event\nis already in flight, then a new event cannot begin because the current time is\nalready being attributed to that event. In this case, this function returns false.\nOtherwise, it returns true.\n\nThe caller must be non-preemptible until at least stop is called or this function\nreturns false. Because this is trying to measure \"on-CPU\" time of some event, getting\nscheduled away during it can mean that whatever we're measuring isn't a reflection\nof \"on-CPU\" time. The OS could deschedule us at any time, but we want to maintain as\nclose of an approximation as we can.\n" ^bool [^{:tag (* limiterEvent)} e ^limiterEventType typ ^int64 now]
+  (when (!= (.typ (conv limiterEventStamp (.Load (.-stamp e)))) limiterEventNone)
+    (return false))
+
+  (.Store (.-stamp e) (conv uint64 (makeLimiterEventStamp typ now)))
+  true)
+
+
+
+
+
+
+
+^{:go/end 442} (go/method consume "consume acquires the partial event CPU time from any in-flight event.\nIt achieves this by storing the current time as the new event time.\n\nReturns the type of the in-flight event, as well as how long it's currently been\nexecuting for. Returns limiterEventNone if no event is active.\n" [^{:tag (* limiterEvent)} e ^int64 now] :results [^limiterEventType typ ^int64 duration]
+  ;; Read the limiter event timestamp and update it to now.
+  (while true
+    (let [old (conv limiterEventStamp (.Load (.-stamp e)))]
+      (set! typ (.typ old))
+      (when (== typ limiterEventNone)
+        ;; There's no in-flight event, so just push that up.
+        (return))
+
+      (set! duration (.duration old now))
+      (when (== duration 0)
+        ;; We might have a stale now value, or this crossed the
+        ;; 2^(64-limiterEventBits) boundary in the clock readings.
+        ;; Just ignore it.
+        (return limiterEventNone 0))
+
+      (let [new (makeLimiterEventStamp typ now)]
+        (when (.CompareAndSwap (.-stamp e) (conv uint64 old) (conv uint64 new))
+          (break)))))
+
+
+  (return))
+
+
+
+
+
+^{:go/end 481} (go/method stop "stop stops the active limiter event. Throws if the\n\nThe caller must be non-preemptible across the event. See start as to why.\n" [^{:tag (* limiterEvent)} e ^limiterEventType typ ^int64 now]
+  (let [^limiterEventStamp stamp (zero limiterEventStamp)]
+    (while true
+      (set! stamp (conv limiterEventStamp (.Load (.-stamp e))))
+      (when (!= (.typ stamp) typ)
+        (print "runtime: want=" typ " got=" (.typ stamp) "\n")
+        (throw "limiterEvent.stop: found wrong event in p's limiter event slot"))
+
+      (when (.CompareAndSwap (.-stamp e) (conv uint64 stamp) (conv uint64 limiterEventStampNone))
+        (break)))
+
+
+    (let [duration (.duration stamp now)]
+      (when (== duration 0)
+        ;; It's possible that we're missing time because we crossed a
+        ;; 2^(64-limiterEventBits) boundary between the start and end.
+        ;; In this case, we're dropping that information. This is OK because
+        ;; at worst it'll cause a transient hiccup that will quickly resolve
+        ;; itself as all new timestamps begin on the other side of the boundary.
+        ;; Such a hiccup should be incredibly rare.
+        (return))
+
+      ;; Account for the event.
+      (switch typ
+        (case [limiterEventIdle]
+          (.Add (.-idleTime sched) duration)
+          (.addIdleTime gcCPULimiter duration))
+        (case [limiterEventIdleMarkWork]
+          (.addIdleTime gcCPULimiter duration))
+        (case [limiterEventMarkAssist limiterEventScavengeAssist]
+          (.addAssistTime gcCPULimiter duration))
+        (default
+          (throw "limiterEvent.stop: invalid limiter event type found"))))))

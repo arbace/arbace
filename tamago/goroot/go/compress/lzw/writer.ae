@@ -1,0 +1,292 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.compress.lzw) (go/file "writer.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [io "io"]])
+
+
+
+(go/type writer "A writer is a buffered, flushable writer.\n" (interface
+    ^{:line 16} io/ByteWriter
+    (Flush ^error [])))
+
+
+(go/const
+
+
+  ^{:line 23} [^{:val 4095 :doc "A code is a 12 bit value, stored as a uint32 when encoding to avoid\ntype conversions when shifting bits.\n"} maxCode (- (<< 1 12) 1)]
+  ^{:line 24} [^{:val 4294967295} invalidCode (- (<< 1 32) 1)]
+
+
+  ^{:line 27} [^{:val 16384 :doc "There are 1<<12 possible codes, which is an upper bound on the number of\nvalid hash table entries at any given point in time. tableSize is 4x that.\n"} tableSize (<< (* 4 1) 12)]
+  ^{:line 28} [^{:val 16383} tableMask (- tableSize 1)]
+
+
+  ^{:line 31} [^{:val 0 :doc "A hash table entry is a uint32. Zero is an invalid entry since the\nlower 12 bits of a valid entry must be a non-literal code.\n"} invalidEntry 0])
+
+
+
+
+(go/type Writer "Writer is an LZW compressor. It writes the compressed form of the data\nto an underlying writer (see [NewWriter]).\n" (struct
+
+    ^{:line 38 :tag writer :doc "w is the writer that compressed bytes are written to.\n"} w
+
+    ^{:line 40 :tag uint :doc "litWidth is the width in bits of literal codes.\n"} litWidth
+
+
+    ^{:line 43 :tag Order :doc "order, write, bits, nBits and width are the state for\nconverting a code stream into a byte stream.\n"} order
+    ^{:line 44 :tag (func [(* Writer) uint32] [error])} write
+    ^{:line 45 :tag uint} nBits
+    ^{:line 46 :tag uint} width
+    ^{:line 47 :tag uint32} bits
+
+
+    ^{:line 50 :tag uint32 :doc "hi is the code implied by the next code emission.\noverflow is the code at which hi overflows the code width.\n"} hi ^{:tag uint32 :doc "hi is the code implied by the next code emission.\noverflow is the code at which hi overflows the code width.\n"} overflow
+
+
+    ^{:line 53 :tag uint32 :doc "savedCode is the accumulated code at the end of the most recent Write\ncall. It is equal to invalidCode if there was no such call.\n"} savedCode
+
+
+    ^{:line 56 :tag error :doc "err is the first error encountered during writing. Closing the writer\nwill make any future Write calls return errClosed\n"} err
+
+
+
+
+    ^{:line 61 :tag (array tableSize uint32) :doc "table is the hash table from 20-bit keys to 12-bit values. Each table\nentry contains key<<12|val and collisions resolve by linear probing.\nThe keys consist of a 12-bit code prefix and an 8-bit byte suffix.\nThe values are a 12-bit code.\n"} table))
+
+
+
+^{:go/breaks [[7 75]] :go/end 76} (go/method writeLSB "writeLSB writes the code c for \"Least Significant Bits first\" data.\n" ^error [^{:tag (* Writer)} w ^uint32 c]
+  (set! (.-bits w) bit-or (<< c (.-nBits w)))
+  (set! (.-nBits w) + (.-width w))
+  (while (>= (.-nBits w) 8)
+    (when [err (.WriteByte (.-w w) (conv uint8 (.-bits w)))] (!= err nil)
+      (return err))
+
+    (set! (.-bits w) >> 8)
+    (set! (.-nBits w) - 8))
+
+  nil)
+
+
+
+^{:go/breaks [[7 89]] :go/end 90} (go/method writeMSB "writeMSB writes the code c for \"Most Significant Bits first\" data.\n" ^error [^{:tag (* Writer)} w ^uint32 c]
+  (set! (.-bits w) bit-or (<< c (- 32 (.-width w) (.-nBits w))))
+  (set! (.-nBits w) + (.-width w))
+  (while (>= (.-nBits w) 8)
+    (when [err (.WriteByte (.-w w) (conv uint8 (>> (.-bits w) 24)))] (!= err nil)
+      (return err))
+
+    (set! (.-bits w) << 8)
+    (set! (.-nBits w) - 8))
+
+  nil)
+
+
+
+
+(go/var ^{:doc "errOutOfCodes is an internal error that means that the writer has run out\nof unused codes and a clear code needs to be sent next.\n"} errOutOfCodes (errors/New "lzw: out of codes"))
+
+
+
+
+^{:go/breaks [[7 118]] :go/end 119} (go/method incHi "incHi increments e.hi and checks for both overflow and running out of\nunused codes. In the latter case, incHi sends a clear code, resets the\nwriter state and returns errOutOfCodes.\n" ^error [^{:tag (* Writer)} w]
+  (inc! (.-hi w))
+  (when (== (.-hi w) (.-overflow w))
+    (inc! (.-width w))
+    (set! (.-overflow w) << 1))
+
+  (when (== (.-hi w) maxCode)
+    (let [clear (<< (conv uint32 1) (.-litWidth w))]
+      (when [err ((.-write w) w clear)] (!= err nil)
+        (return err))
+
+      (set! (.-width w) (+ (.-litWidth w) 1))
+      (set! (.-hi w) (+ clear 1))
+      (set! (.-overflow w) (<< clear 1))
+      (range [i (.-table w)]
+        (aset (.-table w) i invalidEntry))
+
+      (return errOutOfCodes)))
+
+  nil)
+
+
+
+^{:go/end 196} (go/method Write "Write writes a compressed representation of p to w's underlying writer.\n" [^{:tag (* Writer)} w ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (!= (.-err w) nil)
+    (return 0 (.-err w)))
+
+  (when (== (len p) 0)
+    (return 0 nil))
+
+  (when [maxLit (conv uint8 (- ^uint8 (<< 1 (.-litWidth w)) 1))] (!= maxLit 0xff)
+    (range [_ x p]
+      (when (> x maxLit)
+        (set! (.-err w) (errors/New "lzw: input byte too large for the litWidth"))
+        (return 0 (.-err w)))))
+
+
+
+  (set! n (len p))
+  (let [code (.-savedCode w)]
+    (when (== code invalidCode)
+      ;; This is the first write; send a clear code.
+      ;; https://www.w3.org/Graphics/GIF/spec-gif89a.txt Appendix F
+      ;; "Variable-Length-Code LZW Compression" says that "Encoders should
+      ;; output a Clear code as the first code of each image data stream".
+      ;;
+      ;; LZW compression isn't only used by GIF, but it's cheap to follow
+      ;; that directive unconditionally.
+      (let [clear (<< (conv uint32 1) (.-litWidth w))]
+        (when [err ((.-write w) w clear)] (!= err nil)
+          (return 0 err))
+
+        ;; After the starting clear code, the next code sent (for non-empty
+        ;; input) is always a literal code.
+        (set! (values code p) (values (conv uint32 (aget p 0)) (subslice p 1)))))
+
+    (label :loop
+      (range [_ x p]
+        (let [literal (conv uint32 x)
+            ^{:line 158} key (bit-or (<< code 8) literal)
+            ;; If there is a hash table hit for this key then we continue the loop
+            ;; and do not emit a code yet.
+            ^{:line 161} hash (bit-and (bit-xor (>> key 12) key) tableMask)]
+          (for [(values h t) (values hash (aget (.-table w) hash))] (!= t invalidEntry) _
+            (when (== key (>> t 12))
+              (set! code (bit-and t maxCode))
+              (continue :loop))
+
+            (set! h (bit-and (+ h 1) tableMask))
+            (set! t (aget (.-table w) h)))
+
+          ;; Otherwise, write the current code, and literal becomes the start of
+          ;; the next emitted code.
+          (when [(set! (.-err w) ((.-write w) w code))] (!= (.-err w) nil)
+            (return 0 (.-err w)))
+
+          (set! code literal)
+          ;; Increment e.hi, the next implied code. If we run out of codes, reset
+          ;; the writer state (including clearing the hash table) and continue.
+          (when [err1 (.incHi w)] (!= err1 nil)
+            (when (== err1 errOutOfCodes)
+              (continue))
+
+            (set! (.-err w) err1)
+            (return 0 (.-err w)))
+
+          ;; Otherwise, insert key -> e.hi into the map that e.table represents.
+          (while true
+            (when (== (aget (.-table w) hash) invalidEntry)
+              (aset (.-table w) hash (bit-or (<< key 12) (.-hi w)))
+              (break))
+
+            (set! hash (bit-and (+ hash 1) tableMask))))))
+
+
+    (set! (.-savedCode w) code)
+    (return n nil)))
+
+
+
+
+^{:go/end 239} (go/method Close "Close closes the [Writer], flushing any pending output. It does not close\nw's underlying writer.\n" ^error [^{:tag (* Writer)} w]
+  (when (!= (.-err w) nil)
+    (when (== (.-err w) errClosed)
+      (return nil))
+
+    (return (.-err w)))
+
+  ;; Make any future calls to Write return errClosed.
+  (set! (.-err w) errClosed)
+  ;; Write the savedCode if valid.
+  (if (!= (.-savedCode w) invalidCode) (do
+      (when [err ((.-write w) w (.-savedCode w))] (!= err nil)
+        (return err))
+
+      (when [err (.incHi w)] (and (!= err nil) (!= err errOutOfCodes))
+        (return err)))
+
+
+    ;; Write the starting clear code, as w.Write did not.
+    (let [clear (<< (conv uint32 1) (.-litWidth w))]
+      (when [err ((.-write w) w clear)] (!= err nil)
+        (return err))))
+
+
+  ;; Write the eof code.
+  (let [eof (+ (<< (conv uint32 1) (.-litWidth w)) 1)]
+    (when [err ((.-write w) w eof)] (!= err nil)
+      (return err))
+
+    ;; Write the final bits.
+    (when (> (.-nBits w) 0)
+      (when (== (.-order w) MSB)
+        (set! (.-bits w) >> 24))
+
+      (when [err (.WriteByte (.-w w) (conv uint8 (.-bits w)))] (!= err nil)
+        (return err)))
+
+
+    (.Flush (.-w w))))
+
+
+
+
+^{:go/end 246} (go/method Reset "Reset clears the [Writer]'s state and allows it to be reused again\nas a new [Writer].\n" [^{:tag (* Writer)} w ^io/Writer dst ^Order order ^int litWidth]
+  (set! @w (lit Writer))
+  (.init w dst order litWidth))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 259} (go/func NewWriter "NewWriter creates a new [io.WriteCloser].\nWrites to the returned [io.WriteCloser] are compressed and written to w.\nIt is the caller's responsibility to call Close on the WriteCloser when\nfinished writing.\nThe number of bits to use for literal codes, litWidth, must be in the\nrange [2,8] and is typically 8. Input bytes must be less than 1<<litWidth.\n\nIt is guaranteed that the underlying type of the returned [io.WriteCloser]\nis a *[Writer].\n" ^io/WriteCloser [^io/Writer w ^Order order ^int litWidth]
+  (newWriter w order litWidth))
+
+
+^{:go/end 265} (go/func newWriter ^{:tag (* Writer)} [^io/Writer dst ^Order order ^int litWidth]
+  (let [w (new Writer)]
+    (.init w dst order litWidth)
+    ^{:line 264} w))
+
+
+^{:go/end 293} (go/method init [^{:tag (* Writer)} w ^io/Writer dst ^Order order ^int litWidth]
+  (switch order
+    (case [LSB]
+      (set! (.-write w) (method-expr (* Writer) writeLSB)))
+    (case [MSB]
+      (set! (.-write w) (method-expr (* Writer) writeMSB)))
+    (default
+      (set! (.-err w) (errors/New "lzw: unknown order"))
+      (return)))
+
+  (when (or (< litWidth 2) (< 8 litWidth))
+    (set! (.-err w) (fmt/Errorf "lzw: litWidth %d out of range" litWidth))
+    (return))
+
+  (let [(values bw ok) (assert writer dst)]
+    (when (and (not ok) (!= dst nil))
+      (set! bw (bufio/NewWriter dst)))
+
+    (set! (.-w w) bw)
+    (let [lw (conv uint litWidth)]
+      (set! (.-order w) order)
+      (set! (.-width w) (+ 1 lw))
+      (set! (.-litWidth w) lw)
+      (set! (.-hi w) (+ ^uint32 (<< 1 lw) 1))
+      (set! (.-overflow w) ^uint32 (<< 1 (+ lw 1)))
+      (set! (.-savedCode w) invalidCode))))

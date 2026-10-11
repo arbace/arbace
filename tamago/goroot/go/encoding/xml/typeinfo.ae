@@ -1,0 +1,366 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.encoding.xml) (go/file "typeinfo.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [reflect "reflect"]
+    ^{:line 10} [strings "strings"]
+    ^{:line 11} [sync "sync"]])
+
+
+
+(go/type typeInfo "typeInfo holds details for the xml representation of a type.\n" (struct
+    ^{:line 16 :tag (* fieldInfo)} xmlname
+    ^{:line 17 :tag (slice fieldInfo)} fields))
+
+
+
+(go/type fieldInfo "fieldInfo holds details for the xml representation of a single field.\n" (struct
+    ^{:line 22 :tag (slice int)} idx
+    ^{:line 23 :tag string} name
+    ^{:line 24 :tag string} xmlns
+    ^{:line 25 :tag fieldFlags} flags
+    ^{:line 26 :tag (slice string)} parents))
+
+
+(go/type fieldFlags int)
+
+(go/const
+  ^{:line 32} [^{:tag fieldFlags :val 1} fElement (<< 1 iota)]
+  ^{:line 33} [^{:val 2} fAttr]
+  ^{:line 34} [^{:val 4} fCDATA]
+  ^{:line 35} [^{:val 8} fCharData]
+  ^{:line 36} [^{:val 16} fInnerXML]
+  ^{:line 37} [^{:val 32} fComment]
+  ^{:line 38} [^{:val 64} fAny]
+
+  ^{:line 40} [^{:val 128} fOmitEmpty]
+
+  ^{:line 42} [^{:val 127} fMode (bit-or fElement fAttr fCDATA fCharData fInnerXML fComment fAny)]
+
+  ^{:line 44} [^{:val "XMLName"} xmlName "XMLName"])
+
+
+(go/var ^sync/Map tinfoMap) ; map[reflect.Type]*typeInfo
+
+(go/var nameType ((inst reflect/TypeFor Name)))
+
+
+
+^{:go/end 110} (go/func getTypeInfo "getTypeInfo returns the typeInfo structure with details necessary\nfor marshaling and unmarshaling typ.\n" [^reflect/Type typ] :results [(* typeInfo) error]
+  (when [(values ti ok) (.Load tinfoMap typ)] ok
+    (return (assert (* typeInfo) ti) nil))
+
+
+  (let [tinfo (addr (lit typeInfo))]
+    (when (and (== (.Kind typ) reflect/Struct) (!= typ nameType))
+      (let [n (.NumField typ)]
+        (for [i 0] (< i n) (inc! i)
+          (let [f (.Field typ i)]
+            (when (or ^:go/paren (and (not (.IsExported f)) (not (.-Anonymous f))) (== (.Get (.-Tag f) "xml") "-"))
+              (continue)) ; Private field
+
+
+            ;; For embedded structs, embed its fields.
+            (when (.-Anonymous f)
+              (let [t (.-Type f)]
+                (when (== (.Kind t) reflect/Pointer)
+                  (set! t (.Elem t)))
+
+                (when (== (.Kind t) reflect/Struct)
+                  (let [(values inner err) (getTypeInfo t)]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (when (== (.-xmlname tinfo) nil)
+                      (set! (.-xmlname tinfo) (.-xmlname inner)))
+
+                    (range [_ finfo (.-fields inner)]
+                      (set! (.-idx finfo) (append (lit (slice int) i) (spread (.-idx finfo))))
+                      (when [err (addFieldInfo typ tinfo (addr finfo))] (!= err nil)
+                        (return nil err)))
+
+
+                    (continue)))))
+
+
+
+            (let [(values finfo err) (structFieldInfo typ (addr f))]
+              (when (!= err nil)
+                (return nil err))
+
+
+              (when (== (.-Name f) xmlName)
+                (set! (.-xmlname tinfo) finfo)
+                (continue))
+
+
+              ;; Add the field if it doesn't conflict with other fields.
+              (when [err (addFieldInfo typ tinfo finfo)] (!= err nil)
+                (return nil err)))))))
+
+
+
+
+    (let [(values ti _) (.LoadOrStore tinfoMap typ tinfo)]
+      (return (assert (* typeInfo) ti) nil))))
+
+
+
+^{:go/end 226} (go/func structFieldInfo "structFieldInfo builds and returns a fieldInfo for f.\n" [^reflect/Type typ ^{:tag (* reflect/StructField)} f] :results [(* fieldInfo) error]
+  (let [finfo (addr (lit fieldInfo :idx (.-Index f)))
+
+      ;; Split the tag from the xml namespace if necessary.
+      ^{:line 117} tag (.Get (.-Tag f) "xml")]
+    (when [(values ns t ok) (strings/Cut tag " ")] ok
+      (set! (values (.-xmlns finfo) tag) (values ns t)))
+
+
+    ;; Parse flags.
+    (let [tokens (strings/Split tag ",")]
+      (if (== (len tokens) 1)
+        (set! (.-flags finfo) fElement)
+        (do
+          (set! tag (aget tokens 0))
+          (range [_ flag (subslice tokens 1)]
+            (switch flag
+              (case ["attr"]
+                (set! (.-flags finfo) bit-or fAttr))
+              (case ["cdata"]
+                (set! (.-flags finfo) bit-or fCDATA))
+              (case ["chardata"]
+                (set! (.-flags finfo) bit-or fCharData))
+              (case ["innerxml"]
+                (set! (.-flags finfo) bit-or fInnerXML))
+              (case ["comment"]
+                (set! (.-flags finfo) bit-or fComment))
+              (case ["any"]
+                (set! (.-flags finfo) bit-or fAny))
+              (case ["omitempty"]
+                (set! (.-flags finfo) bit-or fOmitEmpty))))
+
+
+
+          ;; Validate the flags used.
+          (let [valid true]
+            (switch [mode (bit-and (.-flags finfo) fMode)] mode
+              (case [0]
+                (set! (.-flags finfo) bit-or fElement))
+              (case [fAttr fCDATA fCharData fInnerXML fComment fAny (bit-or fAny fAttr)]
+                (when (or (== (.-Name f) xmlName) (and (!= tag "") (!= mode fAttr)))
+                  (set! valid false)))
+
+              (default
+                ;; This will also catch multiple modes in a single field.
+                (set! valid false)))
+
+            (when (== (bit-and (.-flags finfo) fMode) fAny)
+              (set! (.-flags finfo) bit-or fElement))
+
+            (when (and (!= (bit-and (.-flags finfo) fOmitEmpty) 0) (== (bit-and (.-flags finfo) (bit-or fElement fAttr)) 0))
+              (set! valid false))
+
+            (when (not valid)
+              (return nil (fmt/Errorf "xml: invalid tag in field %s of type %s: %q"
+                  (.-Name f) typ (.Get (.-Tag f) "xml")))))))
+
+
+
+      ;; Use of xmlns without a name is not allowed.
+      (when (and (!= (.-xmlns finfo) "") (== tag ""))
+        (return nil (fmt/Errorf "xml: namespace without name in field %s of type %s: %q"
+            (.-Name f) typ (.Get (.-Tag f) "xml"))))
+
+
+      (when (== (.-Name f) xmlName)
+        ;; The XMLName field records the XML element name. Don't
+        ;; process it as usual because its name should default to
+        ;; empty rather than to the field name.
+        (set! (.-name finfo) tag)
+        (return finfo nil))
+
+
+      (when (== tag "")
+        ;; If the name part of the tag is completely empty, get
+        ;; default from XMLName of underlying struct if feasible,
+        ;; or field name otherwise.
+        (if [xmlname (lookupXMLName (.-Type f))] (!= xmlname nil)
+          (set! (values (.-xmlns finfo) (.-name finfo)) (values (.-xmlns xmlname) (.-name xmlname)))
+
+          (set! (.-name finfo) (.-Name f)))
+
+        (return finfo nil))
+
+
+      ;; Prepare field name and parents.
+      (let [parents (strings/Split tag ">")]
+        (when (== (aget parents 0) "")
+          (aset parents 0 (.-Name f)))
+
+        (when (== (aget parents (- (len parents) 1)) "")
+          (return nil (fmt/Errorf "xml: trailing '>' in field %s of type %s" (.-Name f) typ)))
+
+        (set! (.-name finfo) (aget parents (- (len parents) 1)))
+        (when (> (len parents) 1)
+          (when (== (bit-and (.-flags finfo) fElement) 0)
+            (return nil (fmt/Errorf "xml: %s chain not valid with %s flag" tag (strings/Join (subslice tokens 1) ","))))
+
+          (set! (.-parents finfo) (subslice parents _ (- (len parents) 1))))
+
+
+        ;; If the field type has an XMLName field, the names must match
+        ;; so that the behavior of both marshaling and unmarshaling
+        ;; is straightforward and unambiguous.
+        (when (!= (bit-and (.-flags finfo) fElement) 0)
+          (let [ftyp (.-Type f)
+              ^{:line 219} xmlname (lookupXMLName ftyp)]
+            (when (and (!= xmlname nil) (!= (.-name xmlname) (.-name finfo)))
+              (return nil (fmt/Errorf "xml: name %q in tag of %s.%s conflicts with name %q in %s.XMLName"
+                  (.-name finfo) typ (.-Name f) (.-name xmlname) ftyp)))))
+
+
+        (return finfo nil)))))
+
+
+
+
+
+^{:go/breaks [[9 251]] :go/end 252} (go/func lookupXMLName "lookupXMLName returns the fieldInfo for typ's XMLName field\nin case it exists and has a valid xml field tag, otherwise\nit returns nil.\n" [^reflect/Type typ] :results [^{:tag (* fieldInfo)} xmlname]
+  (while (== (.Kind typ) reflect/Pointer)
+    (set! typ (.Elem typ)))
+
+  (when (!= (.Kind typ) reflect/Struct)
+    (return nil))
+
+  (for [(values i n) (values 0 (.NumField typ))] (< i n) (inc! i)
+    (let [f (.Field typ i)]
+      (when (!= (.-Name f) xmlName)
+        (continue))
+
+      (let [(values finfo err) (structFieldInfo typ (addr f))]
+        (when (and (== err nil) (!= (.-name finfo) ""))
+          (return finfo))
+
+        ;; Also consider errors as a non-existent field tag
+        ;; and let getTypeInfo itself report the error.
+        (break))))
+
+  nil)
+
+
+
+
+
+
+
+
+
+^{:go/end 326} (go/func addFieldInfo "addFieldInfo adds finfo to tinfo.fields if there are no\nconflicts, or if conflicts arise from previous fields that were\nobtained from deeper embedded structures than finfo. In the latter\ncase, the conflicting entries are dropped.\nA conflict occurs when the path (parent + name) to a field is\nitself a prefix of another path, or when two paths match exactly.\nIt is okay for field paths to share a common, shorter prefix.\n" ^error [^reflect/Type typ ^{:tag (* typeInfo)} tinfo ^{:tag (* fieldInfo)} newf]
+  ^{:go/breaks [8]} (let [^{:tag (slice int)} conflicts (zero (slice int))]
+    (label :Loop
+      ;; First, figure all conflicts. Most working code will have none.
+      (range [i (.-fields tinfo)]
+        (let [oldf (addr (aget (.-fields tinfo) i))]
+          (when (!= (bit-and (.-flags oldf) fMode) (bit-and (.-flags newf) fMode))
+            (continue))
+
+          (when (and (!= (.-xmlns oldf) "") (!= (.-xmlns newf) "") (!= (.-xmlns oldf) (.-xmlns newf)))
+            (continue))
+
+          (let [minl (min (len (.-parents newf)) (len (.-parents oldf)))]
+            (for [p 0] (< p minl) (inc! p)
+              (when (!= (aget (.-parents oldf) p) (aget (.-parents newf) p))
+                (continue :Loop)))
+
+
+            (cond (> (len (.-parents oldf)) (len (.-parents newf)))
+              (when (== (aget (.-parents oldf) (len (.-parents newf))) (.-name newf))
+                (set! conflicts (append conflicts i)))
+
+              (< (len (.-parents oldf)) (len (.-parents newf)))
+              (when (== (aget (.-parents newf) (len (.-parents oldf))) (.-name oldf))
+                (set! conflicts (append conflicts i))) :else
+
+              (do
+                (when (and (== (.-name newf) (.-name oldf)) (== (.-xmlns newf) (.-xmlns oldf)))
+                  (set! conflicts (append conflicts i)))))))))
+
+
+
+    ;; Without conflicts, add the new field and return.
+    (when (== conflicts nil)
+      (set! (.-fields tinfo) (append (.-fields tinfo) @newf))
+      (return nil))
+
+
+    ;; If any conflict is shallower, ignore the new field.
+    ;; This matches the Go field resolution on embedding.
+    (range [_ i conflicts]
+      (when (< (len (.-idx (aget (.-fields tinfo) i))) (len (.-idx newf)))
+        (return nil)))
+
+
+
+    ;; Otherwise, if any of them is at the same depth level, it's an error.
+    (range [_ i conflicts]
+      (let [oldf (addr (aget (.-fields tinfo) i))]
+        (when (== (len (.-idx oldf)) (len (.-idx newf)))
+          (let [f1 (.FieldByIndex typ (.-idx oldf))
+              ^{:line 312} f2 (.FieldByIndex typ (.-idx newf))]
+            (return (addr (lit TagPathError typ (.-Name f1) (.Get (.-Tag f1) "xml") (.-Name f2) (.Get (.-Tag f2) "xml"))))))))
+
+
+
+    ;; Otherwise, the new field is shallower, and thus takes precedence,
+    ;; so drop the conflicting fields from tinfo and append the new one.
+    (for [c (- (len conflicts) 1)] (>= c 0) (dec! c)
+      (let [i (aget conflicts c)]
+        (copy (subslice (.-fields tinfo) i) (subslice (.-fields tinfo) (+ i 1)))
+        (set! (.-fields tinfo) (subslice (.-fields tinfo) _ (- (len (.-fields tinfo)) 1)))))
+
+    (set! (.-fields tinfo) (append (.-fields tinfo) @newf))
+    nil))
+
+
+
+
+(go/type TagPathError "A TagPathError represents an error in the unmarshaling process\ncaused by the use of field tags with conflicting paths.\n" (struct
+    ^{:line 331 :tag reflect/Type} Struct
+    ^{:line 332 :tag string} Field1 ^string Tag1
+    ^{:line 333 :tag string} Field2 ^string Tag2))
+
+
+^{:go/end 338} (go/method Error ^string [^{:tag (* TagPathError)} e]
+  (fmt/Sprintf "%s field %q with tag %q conflicts with field %q with tag %q" (.-Struct e) (.-Field1 e) (.-Tag1 e) (.-Field2 e) (.-Tag2 e)))
+
+
+(go/const
+  ^{:line 341} [^{:val true} initNilPointers true]
+  ^{:line 342} [^{:val false} dontInitNilPointers false])
+
+
+
+
+
+
+
+^{:go/end 367} (go/method value "value returns v's field value corresponding to finfo.\nIt's equivalent to v.FieldByIndex(finfo.idx), but when passed\ninitNilPointers, it initializes and dereferences pointers as necessary.\nWhen passed dontInitNilPointers and a nil pointer is reached, the function\nreturns a zero reflect.Value.\n" ^reflect/Value [^{:tag (* fieldInfo)} finfo ^reflect/Value v ^bool shouldInitNilPointers]
+  (range [i x (.-idx finfo)]
+    (when (> i 0)
+      (let [t (.Type v)]
+        (when (and (== (.Kind t) reflect/Pointer) (== (.Kind (.Elem t)) reflect/Struct))
+          (when (.IsNil v)
+            (when (not shouldInitNilPointers)
+              (return (lit reflect/Value)))
+
+            (.Set v (reflect/New (.Elem (.Type v)))))
+
+          (set! v (.Elem v)))))
+
+
+    (set! v (.Field v x)))
+
+  ^{:line 366} v)

@@ -1,0 +1,70 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.quic) (go/file "rtt.go" :imports [
+
+
+    ^{:line 8} [time "time"]])
+
+
+(go/type rttState (struct
+    ^{:line 12 :tag time/Duration} minRTT
+    ^{:line 13 :tag time/Duration} latestRTT
+    ^{:line 14 :tag time/Duration} smoothedRTT
+    ^{:line 15 :tag time/Duration} rttvar ; RTT variation
+    ^{:line 16 :tag time/Time} firstSampleTime)) ; time of first RTT sample
+
+
+^{:go/end 29} (go/method init [^{:tag (* rttState)} r]
+  (set! (.-minRTT r) -1) ; -1 indicates the first sample has not been taken yet
+
+  ;; "[...] the initial RTT SHOULD be set to 333 milliseconds."
+  ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-6.2.2-1
+  (let [^:const ^{:val 333000000} initialRTT (* 333 time/Millisecond)]
+
+    ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-5.3-12
+    (set! (.-smoothedRTT r) initialRTT)
+    (set! (.-rttvar r) (/ initialRTT 2))))
+
+
+^{:go/end 36} (go/method establishPersistentCongestion [^{:tag (* rttState)} r]
+  ;; "Endpoints SHOULD set the min_rtt to the newest RTT sample
+  ;; after persistent congestion is established."
+  ;; https://www.rfc-editor.org/rfc/rfc9002#section-5.2-5
+  (set! (.-minRTT r) (.-latestRTT r)))
+
+
+
+
+^{:go/end 71} (go/method updateSample "updateSample is called when we generate a new RTT sample.\nhttps://www.rfc-editor.org/rfc/rfc9002.html#section-5\n" [^{:tag (* rttState)} r ^time/Time now ^bool handshakeConfirmed ^numberSpace spaceID ^time/Duration latestRTT ^time/Duration ackDelay ^time/Duration maxAckDelay]
+  (set! (.-latestRTT r) latestRTT)
+
+  (when (< (.-minRTT r) 0)
+    ;; First RTT sample.
+    ;; "min_rtt MUST be set to the latest_rtt on the first RTT sample."
+    ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-5.2-2
+    (set! (.-minRTT r) latestRTT)
+    ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-5.3-14
+    (set! (.-smoothedRTT r) latestRTT)
+    (set! (.-rttvar r) (/ latestRTT 2))
+    (set! (.-firstSampleTime r) now)
+    (return))
+
+
+  ;; "min_rtt MUST be set to the lesser of min_rtt and latest_rtt [...]
+  ;; on all other samples."
+  ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-5.2-2
+  (set! (.-minRTT r) (min (.-minRTT r) latestRTT))
+
+  ;; https://www.rfc-editor.org/rfc/rfc9002.html#section-5.3-16
+  (when handshakeConfirmed
+    (set! ackDelay (min ackDelay maxAckDelay)))
+
+  (let [adjustedRTT (- latestRTT ackDelay)]
+    (when (< adjustedRTT (.-minRTT r))
+      (set! adjustedRTT latestRTT))
+
+    (let [rttvarSample (^{:inst [time/Duration]} abs (- (.-smoothedRTT r) adjustedRTT))]
+      (set! (.-rttvar r) (/ (+ (* 3 (.-rttvar r)) rttvarSample) 4))
+      (set! (.-smoothedRTT r) (/ (+ (* 7 (.-smoothedRTT r)) adjustedRTT) 8)))))

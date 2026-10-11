@@ -1,0 +1,1361 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package exec runs external commands. It wraps os.StartProcess to make it
+;; easier to remap stdin and stdout, connect I/O with pipes, and do other
+;; adjustments.
+;;
+;; Unlike the "system" library call from C and other languages, the
+;; os/exec package intentionally does not invoke the system shell and
+;; does not expand any glob patterns or handle other expansions,
+;; pipelines, or redirections typically done by shells. The package
+;; behaves more like C's "exec" family of functions. To expand glob
+;; patterns, either call the shell directly, taking care to escape any
+;; dangerous input, or use the [path/filepath] package's Glob function.
+;; To expand environment variables, use package os's ExpandEnv.
+;;
+;; Note that the examples in this package assume a Unix system.
+;; They may not run on Windows, and they do not run in the Go Playground
+;; used by go.dev and pkg.go.dev.
+;;
+;; # Executables in the current directory
+;;
+;; The functions [Command] and [LookPath] look for a program
+;; in the directories listed in the current path, following the
+;; conventions of the host operating system.
+;; Operating systems have for decades included the current
+;; directory in this search, sometimes implicitly and sometimes
+;; configured explicitly that way by default.
+;; Modern practice is that including the current directory
+;; is usually unexpected and often leads to security problems.
+;;
+;; To avoid those security problems, as of Go 1.19, this package will not resolve a program
+;; using an implicit or explicit path entry relative to the current directory.
+;; That is, if you run [LookPath]("go"), it will not successfully return
+;; ./go on Unix nor .\go.exe on Windows, no matter how the path is configured.
+;; Instead, if the usual path algorithms would result in that answer,
+;; these functions return an error err satisfying [errors.Is](err, [ErrDot]).
+;;
+;; For example, consider these two program snippets:
+;;
+;;	path, err := exec.LookPath("prog")
+;;	if err != nil {
+;;		log.Fatal(err)
+;;	}
+;;	use(path)
+;;
+;; and
+;;
+;;	cmd := exec.Command("prog")
+;;	if err := cmd.Run(); err != nil {
+;;		log.Fatal(err)
+;;	}
+;;
+;; These will not find and run ./prog or .\prog.exe,
+;; no matter how the current path is configured.
+;;
+;; Code that always wants to run a program from the current directory
+;; can be rewritten to say "./prog" instead of "prog".
+;;
+;; Code that insists on including results from relative path entries
+;; can instead override the error using an errors.Is check:
+;;
+;;	path, err := exec.LookPath("prog")
+;;	if errors.Is(err, exec.ErrDot) {
+;;		err = nil
+;;	}
+;;	if err != nil {
+;;		log.Fatal(err)
+;;	}
+;;	use(path)
+;;
+;; and
+;;
+;;	cmd := exec.Command("prog")
+;;	if errors.Is(cmd.Err, exec.ErrDot) {
+;;		cmd.Err = nil
+;;	}
+;;	if err := cmd.Run(); err != nil {
+;;		log.Fatal(err)
+;;	}
+;;
+;; Setting the environment variable GODEBUG=execerrdot=0
+;; disables generation of ErrDot entirely, temporarily restoring the pre-Go 1.19
+;; behavior for programs that are unable to apply more targeted fixes.
+;; A future version of Go may remove support for this variable.
+;;
+;; Before adding such overrides, make sure you understand the
+;; security implications of doing so.
+;; See https://go.dev/blog/path-security for more information.
+(in-ns 'go.os.exec) (go/file "exec.go" :doc "Package exec runs external commands. It wraps os.StartProcess to make it\neasier to remap stdin and stdout, connect I/O with pipes, and do other\nadjustments.\n\nUnlike the \"system\" library call from C and other languages, the\nos/exec package intentionally does not invoke the system shell and\ndoes not expand any glob patterns or handle other expansions,\npipelines, or redirections typically done by shells. The package\nbehaves more like C's \"exec\" family of functions. To expand glob\npatterns, either call the shell directly, taking care to escape any\ndangerous input, or use the [path/filepath] package's Glob function.\nTo expand environment variables, use package os's ExpandEnv.\n\nNote that the examples in this package assume a Unix system.\nThey may not run on Windows, and they do not run in the Go Playground\nused by go.dev and pkg.go.dev.\n\n# Executables in the current directory\n\nThe functions [Command] and [LookPath] look for a program\nin the directories listed in the current path, following the\nconventions of the host operating system.\nOperating systems have for decades included the current\ndirectory in this search, sometimes implicitly and sometimes\nconfigured explicitly that way by default.\nModern practice is that including the current directory\nis usually unexpected and often leads to security problems.\n\nTo avoid those security problems, as of Go 1.19, this package will not resolve a program\nusing an implicit or explicit path entry relative to the current directory.\nThat is, if you run [LookPath](\"go\"), it will not successfully return\n./go on Unix nor .\\go.exe on Windows, no matter how the path is configured.\nInstead, if the usual path algorithms would result in that answer,\nthese functions return an error err satisfying [errors.Is](err, [ErrDot]).\n\nFor example, consider these two program snippets:\n\n\tpath, err := exec.LookPath(\"prog\")\n\tif err != nil {\n\t\tlog.Fatal(err)\n\t}\n\tuse(path)\n\nand\n\n\tcmd := exec.Command(\"prog\")\n\tif err := cmd.Run(); err != nil {\n\t\tlog.Fatal(err)\n\t}\n\nThese will not find and run ./prog or .\\prog.exe,\nno matter how the current path is configured.\n\nCode that always wants to run a program from the current directory\ncan be rewritten to say \"./prog\" instead of \"prog\".\n\nCode that insists on including results from relative path entries\ncan instead override the error using an errors.Is check:\n\n\tpath, err := exec.LookPath(\"prog\")\n\tif errors.Is(err, exec.ErrDot) {\n\t\terr = nil\n\t}\n\tif err != nil {\n\t\tlog.Fatal(err)\n\t}\n\tuse(path)\n\nand\n\n\tcmd := exec.Command(\"prog\")\n\tif errors.Is(cmd.Err, exec.ErrDot) {\n\t\tcmd.Err = nil\n\t}\n\tif err := cmd.Run(); err != nil {\n\t\tlog.Fatal(err)\n\t}\n\nSetting the environment variable GODEBUG=execerrdot=0\ndisables generation of ErrDot entirely, temporarily restoring the pre-Go 1.19\nbehavior for programs that are unable to apply more targeted fixes.\nA future version of Go may remove support for this variable.\n\nBefore adding such overrides, make sure you understand the\nsecurity implications of doing so.\nSee https://go.dev/blog/path-security for more information.\n" :imports [
+
+
+    ^{:line 94} [bytes "bytes"]
+    ^{:line 95} [context "context"]
+    ^{:line 96} [errors "errors"]
+    ^{:line 97} [godebug "internal/godebug"]
+    ^{:line 98} [execenv "internal/syscall/execenv"]
+    ^{:line 99} [io "io"]
+    ^{:line 100} [os "os"]
+    ^{:line 101} [filepath "path/filepath"]
+    ^{:line 102} [runtime "runtime"]
+    ^{:line 103} [strconv "strconv"]
+    ^{:line 104} [strings "strings"]
+    ^{:line 105} [atomic "sync/atomic"]
+    ^{:line 106} [syscall "syscall"]
+    ^{:line 107} [time "time"]])
+
+
+
+
+(go/type Error "Error is returned by [LookPath] when it fails to classify a file as an\nexecutable.\n" (struct
+
+    ^{:line 114 :tag string :doc "Name is the file name for which the error occurred.\n"} Name
+
+    ^{:line 116 :tag error :doc "Err is the underlying error.\n"} Err))
+
+
+^{:go/end 121} (go/method Error ^string [^{:tag (* Error)} e]
+  (+ "exec: " (strconv/Quote (.-Name e)) ": " (.Error (.-Err e))))
+
+
+^{:go/end 123} (go/method Unwrap ^error [^{:tag (* Error)} e] (.-Err e))
+
+
+
+
+(go/var ^{:doc "ErrWaitDelay is returned by [Cmd.Wait] if the process exits with a\nsuccessful status code but its output pipes are not closed before the\ncommand's WaitDelay expires.\n"} ErrWaitDelay (errors/New "exec: WaitDelay expired before I/O complete"))
+
+
+(go/type wrappedError "wrappedError wraps an error without relying on fmt.Errorf.\n" (struct
+    ^{:line 132 :tag string} prefix
+    ^{:line 133 :tag error} err))
+
+
+^{:go/end 138} (go/method Error ^string [^wrappedError w]
+  (+ (.-prefix w) ": " (.Error (.-err w))))
+
+
+^{:go/end 142} (go/method Unwrap ^error [^wrappedError w]
+  (.-err w))
+
+
+
+
+
+
+(go/type Cmd "Cmd represents an external command being prepared or run.\n\nA Cmd cannot be reused after calling its [Cmd.Start], [Cmd.Run],\n[Cmd.Output], or [Cmd.CombinedOutput] methods.\n" (struct
+
+
+
+
+
+    ^{:line 154 :tag string :doc "Path is the path of the command to run.\n\nThis is the only field that must be set to a non-zero\nvalue. If Path is relative, it is evaluated relative\nto Dir.\n"} Path
+
+
+
+
+
+    ^{:line 160 :tag (slice string) :doc "Args holds command line arguments, including the command as Args[0].\nIf the Args field is empty or nil, Run uses {Path}.\n\nIn typical use, both Path and Args are set by calling Command.\n"} Args
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 172 :tag (slice string) :doc "Env specifies the environment of the process.\nEach entry is of the form \"key=value\".\nIf Env is nil, the new process uses the current process's\nenvironment.\nIf Env contains duplicate environment keys, only the last\nvalue in the slice for each duplicate key is used.\nAs a special case on Windows, SYSTEMROOT is always added if\nmissing and not explicitly set to the empty string.\n\nSee also the Dir field, which may set PWD in the environment.\n"} Env
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 191 :tag string :doc "Dir specifies the working directory of the command.\nIf Dir is the empty string, Run runs the command in the\ncalling process's current directory.\n\nOn Unix systems, the value of Dir also determines the\nchild process's PWD environment variable if not otherwise\nspecified. A Unix process represents its working directory\nnot by name but as an implicit reference to a node in the\nfile tree. So, if the child process obtains its working\ndirectory by calling a function such as C's getcwd, which\ncomputes the canonical name by walking up the file tree, it\nwill not recover the original value of Dir if that value\nwas an alias involving symbolic links. However, if the\nchild process calls Go's [os.Getwd] or GNU C's\nget_current_dir_name, and the value of PWD is an alias for\nthe current directory, those functions will return the\nvalue of PWD, which matches the value of Dir.\n"} Dir
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 211 :tag io/Reader :doc "Stdin specifies the process's standard input.\n\nIf Stdin is nil, the process reads from the null device (os.DevNull).\n\nIf Stdin is an *os.File, the process's standard input is connected\ndirectly to that file.\n\nOtherwise, during the execution of the command a separate\ngoroutine reads from Stdin and delivers that data to the command\nover a pipe. In this case, Wait does not complete until the goroutine\nstops copying, either because it has reached the end of Stdin\n(EOF or a read error), or because writing to the pipe returned an error,\nor because a nonzero WaitDelay was set and expired.\n\nRegardless of WaitDelay, Wait can block until a Read from\nStdin completes. If you need to use a blocking io.Reader,\nuse the StdinPipe method to get a pipe, copy from the Reader\nto the pipe, and arrange to close the Reader after Wait returns.\n"} Stdin
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 235 :tag io/Writer :doc "Stdout and Stderr specify the process's standard output and error.\n\nIf either is nil, Run connects the corresponding file descriptor\nto the null device (os.DevNull).\n\nIf either is an *os.File, the corresponding output from the process\nis connected directly to that file.\n\nOtherwise, during the execution of the command a separate goroutine\nreads from the process over a pipe and delivers that data to the\ncorresponding Writer. In this case, Wait does not complete until the\ngoroutine reaches EOF or encounters an error or a nonzero WaitDelay\nexpires.\n\nRegardless of WaitDelay, Wait can block until a Write to\nStdout or Stderr completes. If you need to use a blocking io.Writer,\nuse the StdoutPipe or StderrPipe method to get a pipe,\ncopy from the pipe to the Writer, and arrange to close the\nWriter after Wait returns.\n\nIf Stdout and Stderr are the same writer, and have a type that can\nbe compared with ==, at most one goroutine at a time will call Write.\n"} Stdout
+    ^{:line 236 :tag io/Writer} Stderr
+
+
+
+
+
+
+    ^{:line 243 :tag (slice (* os/File)) :doc "ExtraFiles specifies additional open files to be inherited by the\nnew process. It does not include standard input, standard output, or\nstandard error. If non-nil, entry i becomes file descriptor 3+i.\n\nExtraFiles is not supported on Windows.\n"} ExtraFiles
+
+
+
+    ^{:line 247 :tag (* syscall/SysProcAttr) :doc "SysProcAttr holds optional, operating system-specific attributes.\nRun passes it to os.StartProcess as the os.ProcAttr's Sys field.\n"} SysProcAttr
+
+
+    ^{:line 250 :tag (* os/Process) :doc "Process is the underlying process, once started.\n"} Process
+
+
+
+
+    ^{:line 255 :tag (* os/ProcessState) :doc "ProcessState contains information about an exited process.\nIf the process was started successfully, Wait or Run will\npopulate its ProcessState when the command completes.\n"} ProcessState
+
+
+    ^{:line 258 :tag context/Context :doc "ctx is the context passed to CommandContext, if any.\n"} ctx
+
+    ^{:line 260 :tag error} Err ; LookPath error, if any.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 287 :tag (func [] [error]) :doc "If Cancel is non-nil, the command must have been created with\nCommandContext and Cancel will be called when the command's\nContext is done. By default, CommandContext sets Cancel to\ncall the Kill method on the command's Process.\n\nTypically a custom Cancel will send a signal to the command's\nProcess, but it may instead take other actions to initiate cancellation,\nsuch as closing a stdin or stdout pipe or sending a shutdown request on a\nnetwork socket.\n\nIf the command exits with a success status after Cancel is\ncalled, and Cancel does not return an error equivalent to\nos.ErrProcessDone, then Wait and similar methods will return a non-nil\nerror: either an error wrapping the one returned by Cancel,\nor the error from the Context.\n(If the command exits with a non-success status, or Cancel\nreturns an error that wraps os.ErrProcessDone, Wait and similar methods\ncontinue to return the command's usual exit status.)\n\nIf Cancel is set to nil, nothing will happen immediately when the command's\nContext is done, but a nonzero WaitDelay will still take effect. That may\nbe useful, for example, to work around deadlocks in commands that do not\nsupport shutdown signals but are expected to always finish quickly.\n\nCancel will not be called if Start returns a non-nil error.\n"} Cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 314 :tag time/Duration :doc "If WaitDelay is non-zero, it bounds the time spent waiting on two sources\nof unexpected delay in Wait: a child process that fails to exit after the\nassociated Context is canceled, and a child process that exits but leaves\nits I/O pipes unclosed.\n\nThe WaitDelay timer starts when either the associated Context is done or a\ncall to Wait observes that the child process has exited, whichever occurs\nfirst. When the delay has elapsed, the command shuts down the child process\nand/or its I/O pipes.\n\nIf the child process has failed to exit — perhaps because it ignored or\nfailed to receive a shutdown signal from a Cancel function, or because no\nCancel function was set — then it will be terminated using os.Process.Kill.\n\nThen, if the I/O pipes communicating with the child process are still open,\nthose pipes are closed in order to unblock any goroutines currently blocked\non Read or Write calls.\n\nIf pipes are closed due to WaitDelay, no Cancel call has occurred,\nand the command has otherwise exited with a successful status, Wait and\nsimilar methods will return ErrWaitDelay instead of nil.\n\nIf WaitDelay is zero (the default), I/O pipes will be read until EOF,\nwhich might not occur until orphaned subprocesses of the command have\nalso closed their descriptors for the pipes.\n"} WaitDelay
+
+
+
+
+
+    ^{:line 320 :tag (slice io/Closer) :doc "childIOFiles holds closers for any of the child process's\nstdin, stdout, and/or stderr files that were opened by the Cmd itself\n(not supplied by the caller). These should be closed as soon as they\nare inherited by the child process.\n"} childIOFiles
+
+
+
+
+
+
+    ^{:line 327 :tag (slice io/Closer) :doc "parentIOPipes holds closers for the parent's end of any pipes\nconnected to the child's stdin, stdout, and/or stderr streams\nthat were opened by the Cmd itself (not supplied by the caller).\nThese should be closed after Wait sees the command and copying\ngoroutines exit, or after WaitDelay has expired.\n"} parentIOPipes
+
+
+
+    ^{:line 331 :tag (slice (func [] [error])) :doc "goroutine holds a set of closures to execute to copy data\nto and/or from the command's I/O pipes.\n"} goroutine
+
+
+
+
+    ^{:line 336 :tag (chan :recv error) :doc "If goroutineErr is non-nil, it receives the first error from a copying\ngoroutine once all such goroutines have completed.\ngoroutineErr is set to nil once its error has been received.\n"} goroutineErr
+
+
+    ^{:line 339 :tag (chan :recv ctxResult) :doc "If ctxResult is non-nil, it receives the result of watchCtx exactly once.\n"} ctxResult
+
+
+
+    ^{:line 343 :tag (slice byte) :doc "The stack saved when the Command was created, if GODEBUG contains\nexecwait=2. Used for debugging leaks.\n"} createdByStack
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 362 :tag error :doc "For a security release long ago, we created x/sys/execabs,\nwhich manipulated the unexported lookPathErr error field\nin this struct. For Go 1.19 we exported the field as Err error,\nabove, but we have to keep lookPathErr around for use by\nold programs building against new toolchains.\nThe String and Start methods look for an error in lookPathErr\nin preference to Err, to preserve the errors that execabs sets.\n\nIn general we don't guarantee misuse of reflect like this,\nbut the misuse of reflect was by us, the best of various bad\noptions to fix the security problem, and people depend on\nthose old copies of execabs continuing to work.\nThe result is that we have to leave this variable around for the\nrest of time, a compatibility scar.\n\nSee https://go.dev/blog/path-security\nand https://go.dev/issue/43724 for more context.\n"} lookPathErr
+
+
+
+
+
+    ^{:line 368 :tag (struct ^string in ^string out) :doc "cachedLookExtensions caches the result of calling lookExtensions.\nIt is set when Command is called with an absolute path, letting it do\nthe work of resolving the extension, so Start doesn't need to do it again.\nThis is only used on Windows.\n"} cachedLookExtensions
+
+
+
+
+    ^{:line 373 :tag int32 :doc "startCalled records that Start was attempted, regardless of outcome.\n(Until go.dev/issue/77075 is resolved, we use atomic.SwapInt32,\nnot atomic.Bool.Swap, to avoid triggering the copylocks vet check.)\n"} startCalled))
+
+
+
+
+(go/type ctxResult "A ctxResult reports the result of watching the Context associated with a\nrunning command (and sending corresponding signals if needed).\n" (struct
+    ^{:line 379 :tag error} err
+
+
+
+
+
+
+
+    ^{:line 387 :tag (* time/Timer) :doc "If timer is non-nil, it expires after WaitDelay has elapsed after\nthe Context is done.\n\n(If timer is nil, that means that the Context was not done before the\ncommand completed, or no WaitDelay was set, or the WaitDelay already\nexpired and its effect was already applied.)\n"} timer))
+
+
+(go/var execwait (godebug/New "#execwait"))
+(go/var execerrdot (godebug/New "execerrdot"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 484} (go/func Command "Command returns the [Cmd] struct to execute the named program with\nthe given arguments.\n\nIt sets only the Path and Args in the returned structure.\n\nIf name contains no path separators, Command uses [LookPath] to\nresolve name to a complete path if possible. Otherwise it uses name\ndirectly as Path.\n\nThe returned Cmd's Args field is constructed from the command name\nfollowed by the elements of arg, so arg should not include the\ncommand name itself. For example, Command(\"echo\", \"hello\").\nArgs[0] is always name, not the possibly resolved Path.\n\nOn Windows, processes receive the whole command line as a single string\nand do their own parsing. Command combines and quotes Args into a command\nline string with an algorithm compatible with applications using\nCommandLineToArgvW (which is the most common way). Notable exceptions are\nmsiexec.exe and cmd.exe (and thus, all batch files), which have a different\nunquoting algorithm. In these or other similar cases, you can do the\nquoting yourself and provide the full command line in SysProcAttr.CmdLine,\nleaving Args empty.\n" ^{:tag (* Cmd)} [^string name & ^{:tag (slice string)} arg]
+  (let [cmd (addr ^{:go/breaks [2 4]} (lit Cmd
+          :Path name
+          :Args (append (lit (slice string) name) (spread arg))))]
+
+
+    (when [v (.Value execwait)] (!= v "")
+      (when (== v "2")
+        ;; Obtain the caller stack. (This is equivalent to runtime/debug.Stack,
+        ;; copied to avoid importing the whole package.)
+        (let [stack (make (slice byte) 1024)]
+          (while true
+            (let [n (runtime/Stack stack false)]
+              (when (< n (len stack))
+                (set! stack (subslice stack _ n))
+                (break))
+
+              (set! stack (make (slice byte) (* 2 (len stack))))))
+
+
+          (when [i (bytes/Index stack (conv (slice byte) "\nos/exec.Command("))] (>= i 0)
+            (set! stack (subslice stack (+ i 1))))
+
+          (set! (.-createdByStack cmd) stack)))
+
+
+      (runtime/SetFinalizer cmd ^{:go/end 454} (fn [^{:tag (* Cmd)} c]
+          (when (and (!= (.-Process c) nil) (== (.-ProcessState c) nil))
+            (let [debugHint ""]
+              (if (== (.-createdByStack c) nil)
+                (set! debugHint " (set GODEBUG=execwait=2 to capture stacks for debugging)")
+                (do
+                  (.WriteString os/Stderr "GODEBUG=execwait=2 detected a leaked exec.Cmd created by:\n")
+                  (.Write os/Stderr (.-createdByStack c))
+                  (.WriteString os/Stderr "\n")
+                  (set! debugHint "")))
+
+              (panic (+ "exec: Cmd started a Process but leaked without a call to Wait" debugHint)))))))
+
+
+
+
+    (cond (== (filepath/Base name) name)
+      (let [(values lp err) (LookPath name)]
+        (when (!= lp "")
+          ;; Update cmd.Path even if err is non-nil.
+          ;; If err is ErrDot (especially on Windows), lp may include a resolved
+          ;; extension (like .exe or .bat) that should be preserved.
+          (set! (.-Path cmd) lp))
+
+        (when (!= err nil)
+          (set! (.-Err cmd) err)))
+
+      (and (== runtime/GOOS "windows") (filepath/IsAbs name))
+      ;; We may need to add a filename extension from PATHEXT
+      ;; or verify an extension that is already present.
+      ;; Since the path is absolute, its extension should be unambiguous
+      ;; and independent of cmd.Dir, and we can go ahead and cache the lookup now.
+      ;;
+      ;; Note that we don't cache anything here for relative paths, because
+      ;; cmd.Dir may be set after we return from this function and that may
+      ;; cause the command to resolve to a different extension.
+      (if [(values lp err) (lookExtensions name "")] (== err nil)
+        (set! (values (.-in (.-cachedLookExtensions cmd)) (.-out (.-cachedLookExtensions cmd))) (values name lp))
+
+        (set! (.-Err cmd) err)))
+
+
+    ^{:line 483} cmd))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 505} (go/func CommandContext "CommandContext is like [Command] but includes a context.\n\nThe provided context is used to interrupt the process\n(by calling cmd.Cancel or [os.Process.Kill])\nif the context becomes done before the command completes on its own.\n\nCommandContext sets the command's Cancel function to invoke the Kill method\non its Process, and leaves its WaitDelay unset. The caller may change the\ncancellation behavior by modifying those fields before starting the command.\n" ^{:tag (* Cmd)} [^context/Context ctx ^string name & ^{:tag (slice string)} arg]
+  (when (== ctx nil)
+    (panic "nil Context"))
+
+  (let [cmd (Command name (spread arg))]
+    (set! (.-ctx cmd) ctx)
+    (set! (.-Cancel cmd) ^{:go/end 503} (fn ^error []
+        (.Kill (.-Process cmd))))
+
+    ^{:line 504} cmd))
+
+
+
+
+
+
+^{:go/end 524} (go/method String "String returns a human-readable description of c.\nIt is intended only for debugging.\nIn particular, it is not suitable for use as input to a shell.\nThe output of String may vary across Go releases.\n" ^string [^{:tag (* Cmd)} c]
+  (when (or (!= (.-Err c) nil) (!= (.-lookPathErr c) nil))
+    ;; failed to resolve path; report the original requested path (plus args)
+    (return (strings/Join (.-Args c) " ")))
+
+  ;; report the exact executable path (plus args)
+  (let [b (new strings/Builder)]
+    (.WriteString b (.-Path c))
+    (range [_ a (subslice (.argv c) 1)]
+      (.WriteByte b \space)
+      (.WriteString b a))
+
+    (.String b)))
+
+
+
+
+^{:go/end 533} (go/func interfaceEqual "interfaceEqual protects against panics from doing equality tests on\ntwo interfaces with non-comparable underlying types.\n" ^bool [^any a ^any b]
+  (defer (^{:go/end 531} (fn []
+        (recover))))
+
+  (== a b))
+
+
+^{:go/end 540} (go/method argv ^{:tag (slice string)} [^{:tag (* Cmd)} c]
+  (when (> (len (.-Args c)) 0)
+    (return (.-Args c)))
+
+  (lit (slice string) (.-Path c)))
+
+
+^{:go/end 574} (go/method childStdin [^{:tag (* Cmd)} c] :results [(* os/File) error]
+  (when (== (.-Stdin c) nil)
+    (let [(values f err) (os/Open os/DevNull)]
+      (when (!= err nil)
+        (return nil err))
+
+      (set! (.-childIOFiles c) (append (.-childIOFiles c) f))
+      (return f nil)))
+
+
+  (when [(values f ok) (assert (* os/File) (.-Stdin c))] ok
+    (return f nil))
+
+
+  (let [(values pr pw err) (os/Pipe)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (set! (.-childIOFiles c) (append (.-childIOFiles c) pr))
+    (set! (.-parentIOPipes c) (append (.-parentIOPipes c) pw))
+    (set! (.-goroutine c) (append (.-goroutine c) ^{:go/end 572} (fn ^error []
+          (let [(values _ err) (io/Copy pw (.-Stdin c))]
+            (when (skipStdinCopyError err)
+              (set! err nil))
+
+            (when [err1 (.Close pw)] (== err nil)
+              (set! err err1))
+
+            ^{:line 571} err))))
+
+    (return pr nil)))
+
+
+^{:go/end 578} (go/method childStdout [^{:tag (* Cmd)} c] :results [(* os/File) error]
+  (.writerDescriptor c (.-Stdout c)))
+
+
+^{:go/end 585} (go/method childStderr [^{:tag (* Cmd)} c ^{:tag (* os/File)} childStdout] :results [(* os/File) error]
+  (when (and (!= (.-Stderr c) nil) (interfaceEqual (.-Stderr c) (.-Stdout c)))
+    (return childStdout nil))
+
+  (.writerDescriptor c (.-Stderr c)))
+
+
+
+
+
+
+^{:go/end 618} (go/method writerDescriptor "writerDescriptor returns an os.File to which the child process\ncan write to send data to w.\n\nIf w is nil, writerDescriptor returns a File that writes to os.DevNull.\n" [^{:tag (* Cmd)} c ^io/Writer w] :results [(* os/File) error]
+  (when (== w nil)
+    (let [(values f err) (os/OpenFile os/DevNull os/O_WRONLY 0)]
+      (when (!= err nil)
+        (return nil err))
+
+      (set! (.-childIOFiles c) (append (.-childIOFiles c) f))
+      (return f nil)))
+
+
+  (when [(values f ok) (assert (* os/File) w)] ok
+    (return f nil))
+
+
+  (let [(values pr pw err) (os/Pipe)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (set! (.-childIOFiles c) (append (.-childIOFiles c) pw))
+    (set! (.-parentIOPipes c) (append (.-parentIOPipes c) pr))
+    (set! (.-goroutine c) (append (.-goroutine c) ^{:go/end 616} (fn ^error []
+          (let [(values _ err) (io/Copy w pr)]
+            (.Close pr) ; in case io.Copy stopped due to write error
+            ^{:line 615} err))))
+
+    (return pw nil)))
+
+
+^{:go/end 624} (go/func closeDescriptors [^{:tag (slice io/Closer)} closers]
+  (range [_ fd closers]
+    (.Close fd)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 644} (go/method Run "Run starts the specified command and waits for it to complete.\n\nThe returned error is nil if the command runs, has no problems\ncopying stdin, stdout, and stderr, and exits with a zero exit\nstatus.\n\nIf the command starts but does not complete successfully, the error is of\ntype [*ExitError]. Other error types may be returned for other situations.\n\nIf the calling goroutine has locked the operating system thread\nwith [runtime.LockOSThread] and modified any inheritable OS-level\nthread state (for example, Linux or Plan 9 name spaces), the new\nprocess will inherit the caller's thread state.\n" ^error [^{:tag (* Cmd)} c]
+  (when [err (.Start c)] (!= err nil)
+    (return err))
+
+  (.Wait c))
+
+
+
+
+
+
+
+
+^{:go/end 798} (go/method Start "Start starts the specified command but does not wait for it to complete.\n\nIf Start returns successfully, the c.Process field will be set.\n\nAfter a successful call to Start the [Cmd.Wait] method must be called in\norder to release associated system resources.\n" ^error [^{:tag (* Cmd)} c]
+  ;; Check for doubled Start calls before we defer failure cleanup. If the prior
+  ;; call to Start succeeded, we don't want to spuriously close its pipes.
+  ;; It is an error to call Start twice even if the first call did not create a process.
+  (when (!= (atomic/SwapInt32 (addr (.-startCalled c)) 1) 0)
+    (return (errors/New "exec: already started")))
+
+
+  (let [started false]
+    (defer (^{:go/end 670} (fn []
+          (closeDescriptors (.-childIOFiles c))
+          (set! (.-childIOFiles c) nil)
+
+          (when (not started)
+            (closeDescriptors (.-parentIOPipes c))
+            (set! (.-parentIOPipes c) nil)
+            (set! (.-goroutine c) nil))))) ; aid GC, finalization of pipe fds
+
+
+
+    (when (and (== (.-Path c) "") (== (.-Err c) nil) (== (.-lookPathErr c) nil))
+      (set! (.-Err c) (errors/New "exec: no command")))
+
+    (when (or (!= (.-Err c) nil) (!= (.-lookPathErr c) nil))
+      (when (!= (.-lookPathErr c) nil)
+        (return (.-lookPathErr c)))
+
+      (return (.-Err c)))
+
+    (let [lp (.-Path c)]
+      (when (== runtime/GOOS "windows")
+        (if (== (.-Path c) (.-in (.-cachedLookExtensions c)))
+          ;; If Command was called with an absolute path, we already resolved
+          ;; its extension and shouldn't need to do so again (provided c.Path
+          ;; wasn't set to another value between the calls to Command and Start).
+          (set! lp (.-out (.-cachedLookExtensions c)))
+
+          ;; If *Cmd was made without using Command at all, or if Command was
+          ;; called with a relative path, we had to wait until now to resolve
+          ;; it in case c.Dir was changed.
+          ;;
+          ;; Unfortunately, we cannot write the result back to c.Path because programs
+          ;; may assume that they can call Start concurrently with reading the path.
+          ;; (It is safe and non-racy to do so on Unix platforms, and users might not
+          ;; test with the race detector on all platforms;
+          ;; see https://go.dev/issue/62596.)
+          ;;
+          ;; So we will pass the fully resolved path to os.StartProcess, but leave
+          ;; c.Path as is: missing a bit of logging information seems less harmful
+          ;; than triggering a surprising data race, and if the user really cares
+          ;; about that bit of logging they can always use LookPath to resolve it.
+          (let [^error err (zero error)]
+            (set! (values lp err) (lookExtensions (.-Path c) (.-Dir c)))
+            (when (!= err nil)
+              (return err)))))
+
+
+
+      (when (and (!= (.-Cancel c) nil) (== (.-ctx c) nil))
+        (return (errors/New "exec: command with a non-nil Cancel was not created with CommandContext")))
+
+      (when (!= (.-ctx c) nil)
+        (select
+          (case (<! (.Done (.-ctx c)))
+            (return (.Err (.-ctx c))))
+          (default)))
+
+
+
+      (let [childFiles (make (slice (* os/File)) 0 (+ 3 (len (.-ExtraFiles c))))
+          (values stdin err) (.childStdin c)]
+        (when (!= err nil)
+          (return err))
+
+        (set! childFiles (append childFiles stdin))
+        (let [(values stdout ^:assign err) (.childStdout c)]
+          (when (!= err nil)
+            (return err))
+
+          (set! childFiles (append childFiles stdout))
+          (let [(values stderr ^:assign err) (.childStderr c stdout)]
+            (when (!= err nil)
+              (return err))
+
+            (set! childFiles (append childFiles stderr))
+            (set! childFiles (append childFiles (spread (.-ExtraFiles c))))
+
+            ^{:go/breaks [[8 797]]} (let [(values env ^:assign err) (.environ c)]
+              (when (!= err nil)
+                (return err))
+
+
+              (set! (values (.-Process c) err) (os/StartProcess lp (.argv c) (addr ^{:go/breaks [2 4 6 8]} (lit os/ProcAttr
+                      :Dir (.-Dir c)
+                      :Files childFiles
+                      :Env env
+                      :Sys (.-SysProcAttr c)))))
+
+              (when (!= err nil)
+                (return err))
+
+              (set! started true)
+
+              ;; Don't allocate the goroutineErr channel unless there are goroutines to start.
+              (when (> (len (.-goroutine c)) 0)
+                (let [goroutineErr (make (chan error) 1)]
+                  (set! (.-goroutineErr c) goroutineErr)
+
+                  (let-type [goroutineStatus (struct
+                        ^{:line 761 :tag int} running
+                        ^{:line 762 :tag error} firstErr)]
+
+                    (let [statusc (make (chan goroutineStatus) 1)]
+                      (>! statusc (lit goroutineStatus :running (len (.-goroutine c))))
+                      (range [_ fn (.-goroutine c)]
+                        (go (^{:go/end 780} (fn [^{:tag (func [] [error])} fn]
+                              (let [err (go/call fn)
+
+                                  ^{:line 770} status (<! statusc)]
+                                (when (== (.-firstErr status) nil)
+                                  (set! (.-firstErr status) err))
+
+                                (dec! (.-running status))
+                                (if (== (.-running status) 0)
+                                  (>! goroutineErr (.-firstErr status))
+
+                                  (>! statusc status))))
+
+                            ^{:line 780} fn)))
+
+                      (set! (.-goroutine c) nil))))) ; Allow the goroutines' closures to be GC'd when they complete.
+
+
+              ;; If we have anything to do when the command's Context expires,
+              ;; start a goroutine to watch for cancellation.
+              ;;
+              ;; (Even if the command was created by CommandContext, a helper library may
+              ;; have explicitly set its Cancel field back to nil, indicating that it should
+              ;; be allowed to continue running after cancellation after all.)
+              (when (and ^:go/paren (or (!= (.-Cancel c) nil) (!= (.-WaitDelay c) 0)) (!= (.-ctx c) nil) (!= (.Done (.-ctx c)) nil))
+                (let [resultc (make (chan ctxResult))]
+                  (set! (.-ctxResult c) resultc)
+                  (go (.watchCtx c resultc))))
+
+
+              nil)))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 893} (go/method watchCtx "watchCtx watches c.ctx until it is able to send a result to resultc.\n\nIf c.ctx is done before a result can be sent, watchCtx calls c.Cancel,\nand/or kills cmd.Process it after c.WaitDelay has elapsed.\n\nwatchCtx manipulates c.goroutineErr, so its result must be received before\nc.awaitGoroutines is called.\n" [^{:tag (* Cmd)} c ^{:tag (chan :send ctxResult)} resultc]
+  (select
+    (case (>! resultc (lit ctxResult))
+      (return))
+    (case (<! (.Done (.-ctx c)))))
+
+
+  (let [^error err (zero error)]
+    (when (!= (.-Cancel c) nil)
+      (if [interruptErr ((.-Cancel c))] (== interruptErr nil)
+        ;; We appear to have successfully interrupted the command, so any
+        ;; program behavior from this point may be due to ctx even if the
+        ;; command exits with code 0.
+        (set! err (.Err (.-ctx c)))
+        (if (errors/Is interruptErr os/ErrProcessDone) (do)
+          ;; The process already finished: we just didn't notice it yet.
+          ;; (Perhaps c.Wait hadn't been called, or perhaps it happened to race with
+          ;; c.ctx being canceled.) Don't inject a needless error.
+
+          (set! err ^{:go/breaks [2 4]} (lit wrappedError
+              :prefix "exec: canceling Cmd"
+              :err interruptErr)))))
+
+
+
+    (when (== (.-WaitDelay c) 0)
+      (>! resultc (lit ctxResult :err err))
+      (return))
+
+
+    (let [timer (time/NewTimer (.-WaitDelay c))]
+      (select
+        (case (>! resultc (lit ctxResult :err err :timer timer))
+          ;; c.Process.Wait returned and we've handed the timer off to c.Wait.
+          ;; It will take care of goroutine shutdown from here.
+          (return))
+        (case (<! (.-C timer))))
+
+
+      (let [killed false]
+        (if [killErr (.Kill (.-Process c))] (== killErr nil)
+          ;; We appear to have killed the process. c.Process.Wait should return a
+          ;; non-nil error to c.Wait unless the Kill signal races with a successful
+          ;; exit, and if that does happen we shouldn't report a spurious error,
+          ;; so don't set err to anything here.
+          (set! killed true)
+          (when (not (errors/Is killErr os/ErrProcessDone))
+            (set! err ^{:go/breaks [2 4]} (lit wrappedError
+                :prefix "exec: killing Cmd"
+                :err killErr))))
+
+
+
+        (when (!= (.-goroutineErr c) nil)
+          (select
+            (case [goroutineErr (<! (.-goroutineErr c))]
+              ;; Forward goroutineErr only if we don't have reason to believe it was
+              ;; caused by a call to Cancel or Kill above.
+              (when (and (== err nil) (not killed))
+                (set! err goroutineErr)))
+
+            (default
+              ;; Close the child process's I/O pipes, in case it abandoned some
+              ;; subprocess that inherited them and is still holding them open
+              ;; (see https://go.dev/issue/23019).
+              ;;
+              ;; We close the goroutine pipes only after we have sent any signals we're
+              ;; going to send to the process (via Signal or Kill above): if we send
+              ;; SIGKILL to the process, we would prefer for it to die of SIGKILL, not
+              ;; SIGPIPE. (However, this may still cause any orphaned subprocesses to
+              ;; terminate with SIGPIPE.)
+              (closeDescriptors (.-parentIOPipes c))
+              ;; Wait for the copying goroutines to finish, but report ErrWaitDelay for
+              ;; the error: any other error here could result from closing the pipes.
+              (set! _ (<! (.-goroutineErr c)))
+              (when (== err nil)
+                (set! err ErrWaitDelay))))
+
+
+
+          ;; Since we have already received the only result from c.goroutineErr,
+          ;; set it to nil to prevent awaitGoroutines from blocking on it.
+          (set! (.-goroutineErr c) nil))
+
+
+        (>! resultc (lit ctxResult :err err))))))
+
+
+
+(go/type ExitError "An ExitError reports an unsuccessful exit by a command.\n" (struct
+    (* os/ProcessState)
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 909 :tag (slice byte) :doc "Stderr holds a subset of the standard error output from the\nCmd.Output method if standard error was not otherwise being\ncollected.\n\nIf the error output is long, Stderr may contain only a prefix\nand suffix of the output, with the middle replaced with\ntext about the number of omitted bytes.\n\nStderr is provided for debugging, for inclusion in error messages.\nUsers with other needs should redirect Cmd.Stderr as needed.\n"} Stderr))
+
+
+^{:go/end 914} (go/method Error ^string [^{:tag (* ExitError)} e]
+  (.String (.-ProcessState e)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 972} (go/method Wait "Wait waits for the command to exit and waits for any copying to\nstdin or copying from stdout or stderr to complete.\n\nThe command must have been started by [Cmd.Start].\n\nThe returned error is nil if the command runs, has no problems\ncopying stdin, stdout, and stderr, and exits with a zero exit\nstatus.\n\nIf the command fails to run or doesn't complete successfully, the\nerror is of type [*ExitError]. Other error types may be\nreturned for I/O problems.\n\nIf any of c.Stdin, c.Stdout or c.Stderr are not an [*os.File], Wait also waits\nfor the respective I/O loop copying to or from the process to complete.\n\nWait must not be called concurrently from multiple goroutines.\nA custom Cmd.Cancel function should not call Wait.\n\nWait releases any resources associated with the [Cmd].\n" ^error [^{:tag (* Cmd)} c]
+  (when (== (.-Process c) nil)
+    (return (errors/New "exec: not started")))
+
+  (when (!= (.-ProcessState c) nil)
+    (return (errors/New "exec: Wait was already called")))
+
+
+  (let [(values state err) (.Wait (.-Process c))]
+    (when (and (== err nil) (not (.Success state)))
+      (set! err (addr (lit ExitError :ProcessState state))))
+
+    (set! (.-ProcessState c) state)
+
+    (let [^{:tag (* time/Timer)} timer (zero (* time/Timer))]
+      (when (!= (.-ctxResult c) nil)
+        (let [watch (<! (.-ctxResult c))]
+          (set! timer (.-timer watch))
+          ;; If c.Process.Wait returned an error, prefer that.
+          ;; Otherwise, report any error from the watchCtx goroutine,
+          ;; such as a Context cancellation or a WaitDelay overrun.
+          (when (and (== err nil) (!= (.-err watch) nil))
+            (set! err (.-err watch)))))
+
+
+
+      (when [goroutineErr (.awaitGoroutines c timer)] (== err nil)
+        ;; Report an error from the copying goroutines only if the program otherwise
+        ;; exited normally on its own. Otherwise, the copying error may be due to the
+        ;; abnormal termination.
+        (set! err goroutineErr))
+
+      (closeDescriptors (.-parentIOPipes c))
+      (set! (.-parentIOPipes c) nil)
+
+      ^{:line 971} err)))
+
+
+
+
+
+
+
+
+
+^{:go/end 1021} (go/method awaitGoroutines "awaitGoroutines waits for the results of the goroutines copying data to or\nfrom the command's I/O pipes.\n\nIf c.WaitDelay elapses before the goroutines complete, awaitGoroutines\nforcibly closes their pipes and returns ErrWaitDelay.\n\nIf timer is non-nil, it must send to timer.C at the end of c.WaitDelay.\n" ^error [^{:tag (* Cmd)} c ^{:tag (* time/Timer)} timer]
+  (defer (^{:go/end 987} (fn []
+        (when (!= timer nil)
+          (.Stop timer))
+
+        (set! (.-goroutineErr c) nil))))
+
+
+  (when (== (.-goroutineErr c) nil)
+    (return nil)) ; No running goroutines to await.
+
+
+  (when (== timer nil)
+    (when (== (.-WaitDelay c) 0)
+      (return (<! (.-goroutineErr c))))
+
+
+    (select
+      (case [err (<! (.-goroutineErr c))]
+        ;; Avoid the overhead of starting a timer.
+        (return err))
+      (default))
+
+
+    ;; No existing timer was started: either there is no Context associated with
+    ;; the command, or c.Process.Wait completed before the Context was done.
+    (set! timer (time/NewTimer (.-WaitDelay c))))
+
+
+  (select
+    (case (<! (.-C timer))
+      (closeDescriptors (.-parentIOPipes c))
+      ;; Wait for the copying goroutines to finish, but ignore any error
+      ;; (since it was probably caused by closing the pipes).
+      (set! _ (<! (.-goroutineErr c)))
+      (return ErrWaitDelay))
+
+    (case [err (<! (.-goroutineErr c))]
+      (return err))))
+
+
+
+
+
+
+
+
+^{:go/end 1047} (go/method Output "Output runs the command and returns its standard output.\nAny returned error will usually be of type [*ExitError].\nIf c.Stderr was nil and the returned error is of type\n[*ExitError], Output populates the Stderr field of the\nreturned error.\n" [^{:tag (* Cmd)} c] :results [(slice byte) error]
+  (when (!= (.-Stdout c) nil)
+    (return nil (errors/New "exec: Stdout already set")))
+
+  (let [^bytes/Buffer stdout (zero bytes/Buffer)]
+    (set! (.-Stdout c) (addr stdout))
+
+    (let [captureErr (== (.-Stderr c) nil)]
+      (when captureErr
+        (set! (.-Stderr c) (addr (lit prefixSuffixSaver :N (<< 32 10)))))
+
+
+      (let [err (.Run c)]
+        (when (and (!= err nil) captureErr)
+          (when [(values ee ok) (assert (* ExitError) err)] ok
+            (set! (.-Stderr ee) (.Bytes (assert (* prefixSuffixSaver) (.-Stderr c))))))
+
+
+        (return (.Bytes stdout) err)))))
+
+
+
+
+^{:go/end 1063} (go/method CombinedOutput "CombinedOutput runs the command and returns its combined standard\noutput and standard error.\n" [^{:tag (* Cmd)} c] :results [(slice byte) error]
+  (when (!= (.-Stdout c) nil)
+    (return nil (errors/New "exec: Stdout already set")))
+
+  (when (!= (.-Stderr c) nil)
+    (return nil (errors/New "exec: Stderr already set")))
+
+  (let [^bytes/Buffer b (zero bytes/Buffer)]
+    (set! (.-Stdout c) (addr b))
+    (set! (.-Stderr c) (addr b))
+    (let [err (.Run c)]
+      (return (.Bytes b) err))))
+
+
+
+
+
+
+
+
+^{:go/end 1086} (go/method StdinPipe "StdinPipe returns a pipe that will be connected to the command's\nstandard input when the command starts.\nThe pipe will be closed automatically after [Cmd.Wait] sees the command exit.\nA caller need only call Close to force the pipe to close sooner.\nFor example, if the command being run will not exit until standard input\nis closed, the caller must close the pipe.\n" [^{:tag (* Cmd)} c] :results [io/WriteCloser error]
+  (when (!= (.-Stdin c) nil)
+    (return nil (errors/New "exec: Stdin already set")))
+
+  (when (!= (.-Process c) nil)
+    (return nil (errors/New "exec: StdinPipe after process started")))
+
+  (let [(values pr pw err) (os/Pipe)]
+    (when (!= err nil)
+      (return nil err))
+
+    (set! (.-Stdin c) pr)
+    (set! (.-childIOFiles c) (append (.-childIOFiles c) pr))
+    (set! (.-parentIOPipes c) (append (.-parentIOPipes c) pw))
+    (return pw nil)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1111} (go/method StdoutPipe "StdoutPipe returns a pipe that will be connected to the command's\nstandard output when the command starts.\n\n[Cmd.Wait] will close the pipe after seeing the command exit, so most callers\nneed not close the pipe themselves. It is thus incorrect to call Wait\nbefore all reads from the pipe have completed.\nFor the same reason, it is incorrect to call [Cmd.Run] when using StdoutPipe.\nSee the example for idiomatic usage.\n" [^{:tag (* Cmd)} c] :results [io/ReadCloser error]
+  (when (!= (.-Stdout c) nil)
+    (return nil (errors/New "exec: Stdout already set")))
+
+  (when (!= (.-Process c) nil)
+    (return nil (errors/New "exec: StdoutPipe after process started")))
+
+  (let [(values pr pw err) (os/Pipe)]
+    (when (!= err nil)
+      (return nil err))
+
+    (set! (.-Stdout c) pw)
+    (set! (.-childIOFiles c) (append (.-childIOFiles c) pw))
+    (set! (.-parentIOPipes c) (append (.-parentIOPipes c) pr))
+    (return pr nil)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1136} (go/method StderrPipe "StderrPipe returns a pipe that will be connected to the command's\nstandard error when the command starts.\n\n[Cmd.Wait] will close the pipe after seeing the command exit, so most callers\nneed not close the pipe themselves. It is thus incorrect to call Wait\nbefore all reads from the pipe have completed.\nFor the same reason, it is incorrect to use [Cmd.Run] when using StderrPipe.\nSee the StdoutPipe example for idiomatic usage.\n" [^{:tag (* Cmd)} c] :results [io/ReadCloser error]
+  (when (!= (.-Stderr c) nil)
+    (return nil (errors/New "exec: Stderr already set")))
+
+  (when (!= (.-Process c) nil)
+    (return nil (errors/New "exec: StderrPipe after process started")))
+
+  (let [(values pr pw err) (os/Pipe)]
+    (when (!= err nil)
+      (return nil err))
+
+    (set! (.-Stderr c) pw)
+    (set! (.-childIOFiles c) (append (.-childIOFiles c) pw))
+    (set! (.-parentIOPipes c) (append (.-parentIOPipes c) pr))
+    (return pr nil)))
+
+
+
+
+
+(go/type prefixSuffixSaver "prefixSuffixSaver is an io.Writer which retains the first N bytes\nand the last N bytes written to it. The Bytes() methods reconstructs\nit with a pretty error message.\n" (struct
+    ^{:line 1142 :tag int} N ; max size of prefix or suffix
+    ^{:line 1143 :tag (slice byte)} prefix
+    ^{:line 1144 :tag (slice byte)} suffix ; ring buffer once len(suffix) == N
+    ^{:line 1145 :tag int} suffixOff ; offset to write into suffix
+    ^{:line 1146 :tag int64} skipped))
+
+;; TODO(bradfitz): we could keep one large []byte and use part of it for
+;; the prefix, reserve space for the '... Omitting N bytes ...' message,
+;; then the ring buffer suffix, and just rearrange the ring buffer
+;; suffix when Bytes() is called, but it doesn't seem worth it for
+;; now just for error messages. It's only ~64KB anyway.
+
+
+^{:go/end 1177} (go/method Write [^{:tag (* prefixSuffixSaver)} w ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (let [lenp (len p)]
+    (set! p (.fill w (addr (.-prefix w)) p))
+
+    ;; Only keep the last w.N bytes of suffix data.
+    (when [overage (- (len p) (.-N w))] (> overage 0)
+      (set! p (subslice p overage))
+      (set! (.-skipped w) + (conv int64 overage)))
+
+    (set! p (.fill w (addr (.-suffix w)) p))
+
+    ;; w.suffix is full now if p is non-empty. Overwrite it in a circle.
+    (while (> (len p) 0) ; 0, 1, or 2 iterations.
+      (let [n (copy (subslice (.-suffix w) (.-suffixOff w)) p)]
+        (set! p (subslice p n))
+        (set! (.-skipped w) + (conv int64 n))
+        (set! (.-suffixOff w) + n)
+        (when (== (.-suffixOff w) (.-N w))
+          (set! (.-suffixOff w) 0))))
+
+
+    (return lenp nil)))
+
+
+
+
+^{:go/end 1188} (go/method fill "fill appends up to len(p) bytes of p to *dst, such that *dst does not\ngrow larger than w.N. It returns the un-appended suffix of p.\n" [^{:tag (* prefixSuffixSaver)} w ^{:tag (* (slice byte))} dst ^{:tag (slice byte)} p] :results [^{:tag (slice byte)} pRemain]
+  (when [remain (- (.-N w) (len @dst))] (> remain 0)
+    (let [add (min (len p) remain)]
+      (set! @dst (append @dst (spread (subslice p _ add))))
+      (set! p (subslice p add))))
+
+  ^{:line 1187} p)
+
+
+^{:go/end 1206} (go/method Bytes ^{:tag (slice byte)} [^{:tag (* prefixSuffixSaver)} w]
+  (when (== (.-suffix w) nil)
+    (return (.-prefix w)))
+
+  (when (== (.-skipped w) 0)
+    (return (append (.-prefix w) (spread (.-suffix w)))))
+
+  (let [^bytes/Buffer buf (zero bytes/Buffer)]
+    (.Grow buf (+ (len (.-prefix w)) (len (.-suffix w)) 50))
+    (.Write buf (.-prefix w))
+    (.WriteString buf "\n... omitting ")
+    (.WriteString buf (strconv/FormatInt (.-skipped w) 10))
+    (.WriteString buf " bytes ...\n")
+    (.Write buf (subslice (.-suffix w) (.-suffixOff w)))
+    (.Write buf (subslice (.-suffix w) _ (.-suffixOff w)))
+    (.Bytes buf)))
+
+
+
+
+
+^{:go/end 1250} (go/method environ "environ returns a best-effort copy of the environment in which the command\nwould be run as it is currently configured. If an error occurs in computing\nthe environment, it is returned alongside the best-effort copy.\n" [^{:tag (* Cmd)} c] :results [(slice string) error]
+  (let [^error err (zero error)
+
+      ^{:line 1214} env (.-Env c)]
+    (when (== env nil)
+      (set! (values env err) (execenv/Default (.-SysProcAttr c)))
+      (when (!= err nil)
+        (set! env (os/Environ)))
+      ;; Note that the non-nil err is preserved despite env being overridden.
+
+
+      (when (!= (.-Dir c) "")
+        (switch runtime/GOOS
+          (case ["windows" "plan9"])
+          ;; Windows and Plan 9 do not use the PWD variable, so we don't need to
+          ;; keep it accurate.
+          (default
+            ;; On POSIX platforms, PWD represents “an absolute pathname of the
+            ;; current working directory.” Since we are changing the working
+            ;; directory for the command, we should also update PWD to reflect that.
+            ;;
+            ;; Unfortunately, we didn't always do that, so (as proposed in
+            ;; https://go.dev/issue/50599) to avoid unintended collateral damage we
+            ;; only implicitly update PWD when Env is nil. That way, we're much
+            ;; less likely to override an intentional change to the variable.
+            (if [(values pwd absErr) (filepath/Abs (.-Dir c))] (== absErr nil)
+              (set! env (append env (+ "PWD=" pwd)))
+              (when (== err nil)
+                (set! err absErr)))))))
+
+
+
+
+
+    (let [(values ^:assign env dedupErr) (dedupEnv env)]
+      (when (== err nil)
+        (set! err dedupErr))
+
+      (return (addCriticalEnv env) err))))
+
+
+
+
+^{:go/end 1258} (go/method Environ "Environ returns a copy of the environment in which the command would be run\nas it is currently configured.\n" ^{:tag (slice string)} [^{:tag (* Cmd)} c]
+  ;;  Intentionally ignore errors: environ returns a best-effort environment no matter what.
+  (let [(values env _) (.environ c)]
+    ^{:line 1257} env))
+
+
+
+
+
+
+
+^{:go/end 1267} (go/func dedupEnv "dedupEnv returns a copy of env with any duplicates removed, in favor of\nlater values.\nItems not of the normal environment \"key=value\" form are preserved unchanged.\nExcept on Plan 9, items containing NUL characters are removed, and\nan error is returned along with the remaining values.\n" [^{:tag (slice string)} env] :results [(slice string) error]
+  (dedupEnvCase (== runtime/GOOS "windows") (== runtime/GOOS "plan9") env))
+
+
+
+
+
+^{:go/end 1323} (go/func dedupEnvCase "dedupEnvCase is dedupEnv with a case option for testing.\nIf caseInsensitive is true, the case of keys is ignored.\nIf nulOK is false, items containing NUL characters are rejected.\n" [^bool caseInsensitive ^bool nulOK ^{:tag (slice string)} env] :results [(slice string) error]
+  ;; Construct the output in reverse order, to preserve the
+  ;; last occurrence of each key.
+  (let [^error err (zero error)
+      ^{:line 1276} out (make (slice string) 0 (len env))
+      ^{:line 1277} saw (make (map string bool) (len env))]
+    (for [n (len env)] (> n 0) (dec! n)
+      (let [kv (aget env (- n 1))]
+
+        ;; Reject NUL in environment variables to prevent security issues (#56284);
+        ;; except on Plan 9, which uses NUL as os.PathListSeparator (#56544).
+        (when (and (not nulOK) (!= (strings/IndexByte kv 0) -1))
+          (set! err (errors/New "exec: environment variable contains NUL"))
+          (continue))
+
+
+        (let [i (strings/Index kv "=")]
+          (when (== i 0)
+            ;; We observe in practice keys with a single leading "=" on Windows.
+            ;; TODO(#49886): Should we consume only the first leading "=" as part
+            ;; of the key, or parse through arbitrarily many of them until a non-"="?
+            (set! i (+ (strings/Index (subslice kv 1) "=") 1)))
+
+          (when (< i 0)
+            (when (!= kv "")
+              ;; The entry is not of the form "key=value" (as it is required to be).
+              ;; Leave it as-is for now.
+              ;; TODO(#52436): should we strip or reject these bogus entries?
+              (set! out (append out kv)))
+
+            (continue))
+
+          (let [k (subslice kv _ i)]
+            (when caseInsensitive
+              (set! k (strings/ToLower k)))
+
+            (when (aget saw k)
+              (continue))
+
+
+            (aset saw k true)
+            (set! out (append out kv))))))
+
+
+    ;; Now reverse the slice to restore the original order.
+    (for [i 0] (< i (/ (len out) 2)) (inc! i)
+      (let [j (- (len out) i 1)]
+        (set! (values (aget out i) (aget out j)) (values (aget out j) (aget out i)))))
+
+
+    (return out err)))
+
+
+
+
+
+^{:go/end 1343} (go/func addCriticalEnv "addCriticalEnv adds any critical environment variables that are required\n(or at least almost always required) on the operating system.\nCurrently this is only used for Windows.\n" ^{:tag (slice string)} [^{:tag (slice string)} env]
+  (when (!= runtime/GOOS "windows")
+    (return env))
+
+  (range [_ kv env]
+    (let [(values k _ ok) (strings/Cut kv "=")]
+      (when (not ok)
+        (continue))
+
+      (when (strings/EqualFold k "SYSTEMROOT")
+        ;; We already have it.
+        (return env))))
+
+
+  (append env (+ "SYSTEMROOT=" (os/Getenv "SYSTEMROOT"))))
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "ErrDot indicates that a path lookup resolved to an executable\nin the current directory due to ‘.’ being in the path, either\nimplicitly or explicitly. See the package documentation for details.\n\nNote that functions in this package do not return ErrDot directly.\nCode should use errors.Is(err, ErrDot), not err == ErrDot,\nto test whether a returned error err is due to this condition.\n"} ErrDot (errors/New "cannot run executable found relative to current directory"))
+
+
+
+^{:go/breaks [[5 1361]] :go/end 1362} (go/func validateLookPath "validateLookPath excludes paths that can't be valid\nexecutable names. See issue #74466 and CVE-2025-47906.\n" ^error [^string s]
+  (switch s
+    (case ["" "." ".."]
+      (return ErrNotFound)))
+
+  nil)

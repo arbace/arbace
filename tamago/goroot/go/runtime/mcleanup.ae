@@ -1,0 +1,837 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "mcleanup.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [cpu "internal/cpu"]
+    ^{:line 10} [goarch "internal/goarch"]
+    ^{:line 11} [atomic "internal/runtime/atomic"]
+    ^{:line 12} [math "internal/runtime/math"]
+    ^{:line 13} [sys "internal/runtime/sys"]
+    ^{:line 14} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 195} (go/func ^:go/nocheckptr AddCleanup "AddCleanup attaches a cleanup function to ptr. Some time after ptr is no longer\nreachable, the runtime will call cleanup(arg) in a separate goroutine.\n\nA typical use is that ptr is an object wrapping an underlying resource (e.g.,\na File object wrapping an OS file descriptor), arg is the underlying resource\n(e.g., the OS file descriptor), and the cleanup function releases the underlying\nresource (e.g., by calling the close system call).\n\nThere are few constraints on ptr. In particular, multiple cleanups may be\nattached to the same pointer, or to different pointers within the same\nallocation.\n\nIf ptr is reachable from cleanup or arg, ptr will never be collected\nand the cleanup will never run. As a protection against simple cases of this,\nAddCleanup panics if arg is equal to ptr.\n\nThere is no specified order in which cleanups will run.\nIn particular, if several objects point to each other and all become\nunreachable at the same time, their cleanups all become eligible to run\nand can run in any order. This is true even if the objects form a cycle.\n\nCleanups run concurrently with any user-created goroutines.\nCleanups may also run concurrently with one another (unlike finalizers).\nIf a cleanup function must run for a long time, it should create a new goroutine\nto avoid blocking the execution of other cleanups.\n\nIf ptr has both a cleanup and a finalizer, the cleanup will only run once\nit has been finalized and becomes unreachable without an associated finalizer.\n\nThe cleanup(arg) call is not always guaranteed to run; in particular it is not\nguaranteed to run before program exit.\n\nCleanups are not guaranteed to run if the size of T is zero bytes, because\nit may share same address with other zero-size objects in memory. See\nhttps://go.dev/ref/spec#Size_and_alignment_guarantees.\n\nIt is not guaranteed that a cleanup will run for objects allocated\nin initializers for package-level variables. Such objects may be\nlinker-allocated, not heap-allocated.\n\nNote that because cleanups may execute arbitrarily far into the future\nafter an object is no longer referenced, the runtime is allowed to perform\na space-saving optimization that batches objects together in a single\nallocation slot. The cleanup for an unreferenced object in such an\nallocation may never run if it always exists in the same batch as a\nreferenced object. Typically, this batching only happens for tiny\n(on the order of 16 bytes or less) and pointer-free objects.\n\nA cleanup may run as soon as an object becomes unreachable.\nIn order to use cleanups correctly, the program must ensure that\nthe object is reachable until it is safe to run its cleanup.\nObjects stored in global variables, or that can be found by tracing\npointers from a global variable, are reachable. A function argument or\nreceiver may become unreachable at the last point where the function\nmentions it. To ensure a cleanup does not get called prematurely,\npass the object to the [KeepAlive] function after the last point\nwhere the object must remain reachable.\n" :type-params [T ^:go/grouped S] ^Cleanup [^{:tag (* T)} ptr ^{:tag (func [S])} cleanup ^S arg]
+  ;; This is marked nocheckptr because checkptr doesn't understand the
+  ;; pointer manipulation done when looking at closure pointers.
+  ;; Similar code in mbitmap.go works because the functions are
+  ;; go:nosplit, which implies go:nocheckptr (CL 202158).
+
+  ;; Explicitly force ptr and cleanup to escape to the heap.
+  (set! ptr (^{:inst [(* T)]} abi/Escape ptr))
+  (set! cleanup (^{:inst [(func [S])]} abi/Escape cleanup))
+
+  ;; The pointer to the object must be valid.
+  (when (== ptr nil)
+    (panic "runtime.AddCleanup: ptr is nil"))
+
+  (let [usptr (conv uintptr (conv unsafe/Pointer ptr))
+
+      ;; Check that arg is not equal to ptr.
+      ^{:line 93} argType (abi/TypeOf arg)
+      ^{:line 94} kind (.Kind argType)]
+    (when (or (== kind abi/Pointer) (== kind abi/UnsafePointer))
+      (when (== (conv unsafe/Pointer ptr) @(conv (* unsafe/Pointer) (conv unsafe/Pointer (addr arg))))
+        (panic "runtime.AddCleanup: ptr is equal to arg, cleanup will never run")))
+
+
+    (when (inUserArenaChunk usptr)
+      ;; Arena-allocated objects are not eligible for cleanup.
+      (panic "runtime.AddCleanup: ptr is arena-allocated"))
+
+    (when (!= (.-sbrk debug) 0)
+      ;; debug.sbrk never frees memory, so no cleanup will ever run
+      ;; (and we don't have the data structures to record them).
+      ;; Return a noop cleanup.
+      (return (lit Cleanup)))
+
+
+    ;; Create new storage for the argument.
+    (let [^{:tag (* S)} argv (zero (* S))]
+      (if [size (unsafe/Sizeof arg)] (and (< size maxTinySize) (== (.-PtrBytes argType) 0))
+        ;; Side-step the tiny allocator to avoid liveness issues, since this box
+        ;; will be treated like a root by the GC. We model the box as an array of
+        ;; uintptrs to guarantee maximum allocator alignment.
+        ;;
+        ;; TODO(mknyszek): Consider just making space in cleanupFn for this. The
+        ;; unfortunate part of this is it would grow specialCleanup by 16 bytes, so
+        ;; while there wouldn't be an allocation, *every* cleanup would take the
+        ;; memory overhead hit.
+        (let [box (new (array (/ maxTinySize goarch/PtrSize) uintptr))]
+          (set! argv (conv (* S) (conv unsafe/Pointer box))))
+
+        (set! argv (new S)))
+
+      (set! @argv arg)
+
+      ;; Find the containing object.
+      (let [(values base span _) (findObject usptr 0 0)]
+        (when (== base 0)
+          (when (isGoPointerWithoutSpan (conv unsafe/Pointer ptr))
+            ;; Cleanup is a noop.
+            (return (lit Cleanup)))
+
+          (panic "runtime.AddCleanup: ptr not in allocated block"))
+
+
+        ;; Check that arg is not within ptr.
+        (when (or (== kind abi/Pointer) (== kind abi/UnsafePointer))
+          (let [argPtr (conv uintptr @(conv (* unsafe/Pointer) (conv unsafe/Pointer (addr arg))))]
+            (when (and (>= argPtr base) (< argPtr (+ base (.-elemsize span))))
+              ;; It's possible that both pointers are separate
+              ;; parts of a tiny allocation, which is OK.
+              ;; We side-stepped the tiny allocator above for
+              ;; the allocation for the cleanup,
+              ;; but the argument itself can still overlap
+              ;; with the value to which the cleanup is attached.
+              (when (!= (.-spanclass span) tinySpanClass)
+                (panic "runtime.AddCleanup: ptr is within arg, cleanup will never run")))))
+
+
+
+
+        ;; Check that the cleanup function doesn't close over the pointer.
+        (let [cleanupFV (conv unsafe/Pointer @(conv (* (* funcval)) (conv unsafe/Pointer (addr cleanup))))
+            (values cBase cSpan _) (findObject (conv uintptr cleanupFV) 0 0)]
+          (when (!= cBase 0)
+            (let [tp (.typePointersOfUnchecked cSpan cBase)]
+              (while true
+                (let [^uintptr addr (zero uintptr)]
+                  (when [(set! (values tp addr) (.next tp (+ cBase (.-elemsize cSpan))))] (== addr 0)
+                    (break))
+
+                  (let [ptr @(conv (* uintptr) (conv unsafe/Pointer addr))]
+                    (when (and (>= ptr base) (< ptr (+ base (.-elemsize span))))
+                      (panic "runtime.AddCleanup: cleanup function closes over ptr, cleanup will never run")))))))
+
+
+
+
+          ;; Create another G if necessary.
+          (when (.needG gcCleanups)
+            (.createGs gcCleanups))
+
+
+          (let [id (addCleanup (conv unsafe/Pointer ptr) ^{:go/breaks [[2 183] 4 6]} (lit cleanupFn
+                  ;; Instantiate a caller function to call the cleanup, that is cleanup(*argv).
+                  ;;
+                  ;; TODO(mknyszek): This allocates because the generic dictionary argument
+                  ;; gets closed over, but callCleanup doesn't even use the dictionary argument,
+                  ;; so theoretically that could be removed, eliminating an allocation.
+                  :call (inst callCleanup S)
+                  :fn @(conv (* (* funcval)) (conv unsafe/Pointer (addr cleanup)))
+                  :arg (conv unsafe/Pointer argv)))]
+
+            (when (!= (.-checkfinalizers debug) 0)
+              (let [cleanupFn @(conv (* (* funcval)) (conv unsafe/Pointer (addr cleanup)))]
+                (setCleanupContext (conv unsafe/Pointer ptr) ((inst abi/TypeFor T)) (sys/GetCallerPC) (.-fn cleanupFn) id)))
+
+            ^{:go/breaks [2 4]} (lit Cleanup
+              :id id
+              :ptr usptr)))))))
+
+
+
+
+
+
+
+
+^{:go/end 205} (go/func ^:go/noinline callCleanup "callCleanup is a helper for calling cleanups in a polymorphic way.\n\nIn practice, all it does is call fn(*arg). arg must be a *T.\n" :type-params [T] [^{:tag (* funcval)} fn ^unsafe/Pointer arg]
+  (let [cleanup @(conv (* (func [T])) (conv unsafe/Pointer (addr fn)))]
+    (cleanup @(conv (* T) arg))))
+
+
+
+(go/type Cleanup "Cleanup is a handle to a cleanup call for a specific object.\n" (struct
+
+    ^{:line 210 :tag uint64 :doc "id is the unique identifier for the cleanup within the arena.\n"} id
+
+    ^{:line 212 :tag uintptr :doc "ptr contains the pointer to the object.\n"} ptr))
+
+
+
+
+
+
+^{:go/end 281} (go/method Stop "Stop cancels the cleanup call. Stop will have no effect if the cleanup call\nhas already been queued for execution (because ptr became unreachable).\nTo guarantee that Stop removes the cleanup function, the caller must ensure\nthat the pointer that was passed to AddCleanup is reachable across the call to Stop.\n" [^Cleanup c]
+  (when (== (.-id c) 0)
+    ;; id is set to zero when the cleanup is a noop.
+    (return))
+
+
+  ;; The following block removes the Special record of type cleanup for the object c.ptr.
+  (let [span (spanOfHeap (.-ptr c))]
+    (when (== span nil)
+      (return))
+
+    ;; Ensure that the span is swept.
+    ;; Sweeping accesses the specials list w/o locks, so we have
+    ;; to synchronize with it. And it's just much safer.
+    (let [mp (acquirem)]
+      (.ensureSwept span)
+
+      (let [offset (- (.-ptr c) (.base span))
+
+          ^{:line 238 :tag (* special)} found (zero (* special))]
+        (lock (addr (.-speciallock span)))
+
+        (let [(values iter exists) (.specialFindSplicePoint span offset _KindSpecialCleanup)]
+          (when exists
+            (while true
+              (let [s @iter]
+                (when (== s nil)
+                  ;; Reached the end of the linked list. Stop searching at this point.
+                  (break))
+
+                (when (and (== offset (.-offset s)) (== _KindSpecialCleanup (.-kind s))
+                    (== (.-id (conv (* specialCleanup) (conv unsafe/Pointer s))) (.-id c)))
+                  ;; The special is a cleanup and contains a matching cleanup id.
+                  (set! @iter (.-next s))
+                  (set! found s)
+                  (break))
+
+                (when (or (< offset (.-offset s)) ^:go/paren (and (== offset (.-offset s)) (< _KindSpecialCleanup (.-kind s))))
+                  ;; The special is outside the region specified for that kind of
+                  ;; special. The specials are sorted by kind.
+                  (break))
+
+                ;; Try the next special.
+                (set! iter (addr (.-next s))))))
+
+
+          (when (== (.-specials span) nil)
+            (spanHasNoSpecials span))
+
+          (unlock (addr (.-speciallock span)))
+          (releasem mp)
+
+          (when (== found nil)
+            (return))
+
+          (lock (addr (.-speciallock mheap_)))
+          (.free (.-specialCleanupAlloc mheap_) (conv unsafe/Pointer found))
+          (unlock (addr (.-speciallock mheap_)))
+
+          (when (!= (.-checkfinalizers debug) 0)
+            (clearCleanupContext (.-ptr c) (.-id c))))))))
+
+
+
+(go/const ^{:val 512} cleanupBlockSize 512)
+
+
+
+
+
+
+(go/type cleanupBlock "cleanupBlock is an block of cleanups to be executed.\n\ncleanupBlock is allocated from non-GC'd memory, so any heap pointers\nmust be specially handled. The GC and cleanup queue currently assume\nthat the cleanup queue does not grow during marking (but it can shrink).\n" (struct
+    ^{:line 291} cleanupBlockHeader
+    ^{:line 292 :tag (array (/ (- cleanupBlockSize (unsafe/Sizeof (lit cleanupBlockHeader))) (unsafe/Sizeof (lit cleanupFn))) cleanupFn)} cleanups))
+
+
+(go/var cleanupFnPtrMask (lit (array ... uint8) 2r111))
+
+
+(go/type cleanupFn "cleanupFn represents a cleanup function with it's argument, yet to be called.\n" (struct
+
+    ^{:line 300 :tag (func [(* funcval) unsafe/Pointer]) :doc "call is an adapter function that understands how to safely call fn(*arg).\n"} call
+    ^{:line 301 :tag (* funcval)} fn ; cleanup function passed to AddCleanup.
+    ^{:line 302 :tag unsafe/Pointer} arg)) ; pointer to argument to pass to cleanup function.
+
+
+(go/var ^{:tag (array (/ cleanupBlockSize goarch/PtrSize 8) byte)} cleanupBlockPtrMask)
+
+(go/type cleanupBlockHeader (struct
+    ^{:line 308 :tag sys/NotInHeap} _
+    ^{:line 309} lfnode
+    ^{:line 310 :tag (* cleanupBlock)} alllink
+
+
+
+
+
+
+
+
+
+    ^{:line 320 :tag uint32 :doc "n is sometimes accessed atomically.\n\nThe invariant depends on what phase the garbage collector is in.\nDuring the sweep phase (gcphase == _GCoff), each block has exactly\none owner, so it's always safe to update this without atomics.\nBut if this *could* be updated during the mark phase, it must be\nupdated atomically to synchronize with the garbage collector\nscanning the block as a root.\n"} n))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 335} (go/method enqueue "enqueue pushes a single cleanup function into the block.\n\nReturns if this enqueue call filled the block. This is odd,\nbut we want to flush full blocks eagerly to get cleanups\nrunning as soon as possible.\n\nMust only be called if the GC is in the sweep phase (gcphase == _GCoff),\nbecause it does not synchronize with the garbage collector.\n" ^bool [^{:tag (* cleanupBlock)} b ^cleanupFn c]
+  (aset (.-cleanups b) ^{:go/via [cleanupBlockHeader]} (.-n b) c)
+  (inc! ^{:go/via [cleanupBlockHeader]} (.-n b))
+  (.full b))
+
+
+
+^{:go/end 340} (go/method full "full returns true if the cleanup block is full.\n" ^bool [^{:tag (* cleanupBlock)} b]
+  (== ^{:go/via [cleanupBlockHeader]} (.-n b) (conv uint32 (len (.-cleanups b)))))
+
+
+
+^{:go/end 345} (go/method empty "empty returns true if the cleanup block is empty.\n" ^bool [^{:tag (* cleanupBlock)} b]
+  (== ^{:go/via [cleanupBlockHeader]} (.-n b) 0))
+
+
+
+^{:go/end 362} (go/method take "take moves as many cleanups as possible from b into a.\n" [^{:tag (* cleanupBlock)} a ^{:tag (* cleanupBlock)} b]
+  (let [dst (subslice (.-cleanups a) ^{:go/via [cleanupBlockHeader]} (.-n a))]
+    (if (>= (conv uint32 (len dst)) ^{:go/via [cleanupBlockHeader]} (.-n b)) (do
+        ;; Take all.
+        (copy dst (subslice (.-cleanups b)))
+        (set! ^{:go/via [cleanupBlockHeader]} (.-n a) + ^{:go/via [cleanupBlockHeader]} (.-n b))
+        (set! ^{:go/via [cleanupBlockHeader]} (.-n b) 0))
+      (do
+        ;; Partial take. Copy from the tail to avoid having
+        ;; to move more memory around.
+        (copy dst (subslice (.-cleanups b) (- ^{:go/via [cleanupBlockHeader]} (.-n b) (conv uint32 (len dst))) ^{:go/via [cleanupBlockHeader]} (.-n b)))
+        (set! ^{:go/via [cleanupBlockHeader]} (.-n a) (conv uint32 (len (.-cleanups a))))
+        (set! ^{:go/via [cleanupBlockHeader]} (.-n b) - (conv uint32 (len dst)))))))
+
+
+
+
+(go/type cleanupQueue "cleanupQueue is a queue of ready-to-run cleanup functions.\n" (struct
+
+    ^{:line 367 :tag lfstack :doc "Stack of full cleanup blocks.\n"} full
+    ^{:line 368 :tag atomic/Uint64} workUnits ; length of full; decrement before pop from full, increment after push to full
+    ^{:line 369 :tag (array (- cpu/CacheLinePadSize (unsafe/Sizeof (conv lfstack 0)) (unsafe/Sizeof (lit atomic/Uint64))) byte)} _
+
+
+    ^{:line 372 :tag lfstack :doc "Stack of free cleanup blocks.\n"} free
+
+
+
+
+
+    ^{:line 378 :tag atomic/Bool :doc "flushed indicates whether all local cleanupBlocks have been\nflushed, and we're in a period of time where this condition is\nstable (after the last sweeper, before the next sweep phase\nbegins).\n"} flushed ; Next to free because frequently accessed together.
+
+    ^{:line 380 :tag (array (- cpu/CacheLinePadSize (unsafe/Sizeof (conv lfstack 0)) 1) byte)} _
+
+
+    ^{:line 383 :tag atomic/UnsafePointer :doc "Linked list of all cleanup blocks.\n"} all ; *cleanupBlock
+    ^{:line 384 :tag (array (- cpu/CacheLinePadSize (unsafe/Sizeof (lit atomic/UnsafePointer))) byte)} _
+
+
+    ^{:line 387 :tag mutex :doc "Goroutine block state.\n"} lock
+
+
+
+
+    ^{:line 392 :tag gList :doc "sleeping is the list of sleeping cleanup goroutines.\n\nProtected by lock.\n"} sleeping
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 404 :tag atomic/Uint32 :doc "asleep is the number of cleanup goroutines sleeping.\n\nRead without lock, written only with the lock held.\nWhen the lock is held, the lock holder may only observe\nasleep.Load() == sleeping.n.\n\nTo make reading without the lock safe as a signal to wake up\na goroutine and handle new work, it must always be greater\nthan or equal to sleeping.n. In the periods of time that it\nis strictly greater, it may cause spurious calls to wake.\n"} asleep
+
+
+
+
+
+    ^{:line 410 :tag atomic/Uint32 :doc "running indicates the number of cleanup goroutines actively\nexecuting user cleanup functions at any point in time.\n\nRead and written to without lock.\n"} running
+
+
+
+
+    ^{:line 415 :tag atomic/Uint32 :doc "ng is the number of cleanup goroutines.\n\nRead without lock, written only with lock held.\n"} ng
+
+
+
+
+
+    ^{:line 421 :tag atomic/Uint32 :doc "needg is the number of new cleanup goroutines that\nneed to be created.\n\nRead without lock, written only with lock held.\n"} needg
+
+    ;; Cleanup queue stats.
+
+
+
+
+
+
+    ^{:line 430 :tag uint64 :doc "queued represents a monotonic count of queued cleanups. This is sharded across\nPs via the field cleanupsQueued in each p, so reading just this value is insufficient.\nIn practice, this value only includes the queued count of dead Ps.\n\nWrites are protected by STW.\n"} queued
+
+
+
+
+    ^{:line 435 :tag atomic/Uint64 :doc "executed is a monotonic count of executed cleanups.\n\nRead and updated atomically.\n"} executed))
+
+
+
+^{:go/end 441} (go/method addWork "addWork indicates that n units of parallelizable work have been added to the queue.\n" [^{:tag (* cleanupQueue)} q ^int n]
+  (.Add (.-workUnits q) (conv int64 n)))
+
+
+
+
+^{:go/end 456} (go/method tryTakeWork "tryTakeWork is an attempt to dequeue some work by a cleanup goroutine.\nThis might fail if there's no work to do.\n" ^bool [^{:tag (* cleanupQueue)} q]
+  (while true
+    (let [wu (.Load (.-workUnits q))]
+      (when (== wu 0)
+        (return false))
+
+      ;; CAS to prevent us from going negative.
+      (when (.CompareAndSwap (.-workUnits q) wu (- wu 1))
+        (return true)))))
+
+
+
+
+
+
+
+^{:go/end 489} (go/method enqueue "enqueue queues a single cleanup for execution.\n\nCalled by the sweeper, and only the sweeper.\n" [^{:tag (* cleanupQueue)} q ^cleanupFn c]
+  (let [mp (acquirem)
+      ^{:line 463} pp (.ptr (.-p mp))
+      ^{:line 464} b (.-cleanups pp)]
+    (when (== b nil)
+      (when (.Load (.-flushed q))
+        (.Store (.-flushed q) false))
+
+      (set! b (conv (* cleanupBlock) (.pop (.-free q))))
+      (when (== b nil)
+        (set! b (conv (* cleanupBlock) (persistentalloc cleanupBlockSize tagAlign (addr (.-gcMiscSys memstats)))))
+        (while true
+          (let [next (conv (* cleanupBlock) (.Load (.-all q)))]
+            (set! ^{:go/via [cleanupBlockHeader]} (.-alllink b) next)
+            (when (.CompareAndSwap (.-all q) (conv unsafe/Pointer next) (conv unsafe/Pointer b))
+              (break)))))
+
+
+
+      (set! (.-cleanups pp) b))
+
+    (when [full (.enqueue b c)] full
+      (.push (.-full q) (addr ^{:go/via [cleanupBlockHeader]} (.-lfnode b)))
+      (set! (.-cleanups pp) nil)
+      (.addWork q 1))
+
+    (inc! (.-cleanupsQueued pp))
+    (releasem mp)))
+
+
+
+
+^{:go/end 524} (go/method dequeue "dequeue pops a block of cleanups from the queue. Blocks until one is available\nand never returns nil.\n" ^{:tag (* cleanupBlock)} [^{:tag (* cleanupQueue)} q]
+  (while true
+    (when (.tryTakeWork q)
+      ;; Guaranteed to be non-nil.
+      (return (conv (* cleanupBlock) (.pop (.-full q)))))
+
+    (lock (addr (.-lock q)))
+    ;; Increment asleep first. We may have to undo this if we abort the sleep.
+    ;; We must update asleep first because the scheduler might not try to wake
+    ;; us up when work comes in between the last check of workUnits and when we
+    ;; go to sleep. (It may see asleep as 0.) By incrementing it here, we guarantee
+    ;; after this point that if new work comes in, someone will try to grab the
+    ;; lock and wake us. However, this also means that if we back out, we may cause
+    ;; someone to spuriously grab the lock and try to wake us up, only to fail.
+    ;; This should be very rare because the window here is incredibly small: the
+    ;; window between now and when we decrement q.asleep below.
+    (.Add (.-asleep q) 1)
+
+    ;; Re-check workUnits under the lock and with asleep updated. If it's still zero,
+    ;; then no new work came in, and it's safe for us to go to sleep. If new work
+    ;; comes in after this point, then the scheduler will notice that we're sleeping
+    ;; and wake us up.
+    (when (> (.Load (.-workUnits q)) 0)
+      ;; Undo the q.asleep update and try to take work again.
+      (.Add (.-asleep q) -1)
+      (unlock (addr (.-lock q)))
+      (continue))
+
+    (.push (.-sleeping q) (getg))
+    (goparkunlock (addr (.-lock q)) waitReasonCleanupWait traceBlockSystemGoroutine 1)))
+
+
+
+
+
+
+
+
+
+^{:go/end 585} (go/method flush "flush pushes all active cleanup blocks to the full list and wakes up cleanup\ngoroutines to handle them.\n\nMust only be called at a point when we can guarantee that no more cleanups\nare being queued, such as after the final sweeper for the cycle is done\nbut before the next mark phase.\n" [^{:tag (* cleanupQueue)} q]
+  (let [mp (acquirem)
+      ^{:line 534} flushed 0
+      ^{:line 535} emptied 0
+      ^{:line 536} missing 0
+
+      ;; Coalesce the partially-filled blocks to present a more accurate picture of demand.
+      ;; We use the number of coalesced blocks to process as a signal for demand to create
+      ;; new cleanup goroutines.
+      ^{:line 541 :tag (* cleanupBlock)} cb (zero (* cleanupBlock))]
+    (range [_ pp allp]
+      (when (== pp nil)
+        ;; This function is reachable via mallocgc in the
+        ;; middle of procresize, when allp has been resized,
+        ;; but the new Ps not allocated yet.
+        (inc! missing)
+        (continue))
+
+      (let [b (.-cleanups pp)]
+        (when (== b nil)
+          (inc! missing)
+          (continue))
+
+        (set! (.-cleanups pp) nil)
+        (when (== cb nil)
+          (set! cb b)
+          (continue))
+
+        ;; N.B. After take, either cb is full, b is empty, or both.
+        (.take cb b)
+        (when (.full cb)
+          (.push (.-full q) (addr ^{:go/via [cleanupBlockHeader]} (.-lfnode cb)))
+          (inc! flushed)
+          (set! cb b)
+          (set! b nil))
+
+        (when (and (!= b nil) (.empty b))
+          (.push (.-free q) (addr ^{:go/via [cleanupBlockHeader]} (.-lfnode b)))
+          (inc! emptied))))
+
+
+    (when (!= cb nil)
+      (.push (.-full q) (addr ^{:go/via [cleanupBlockHeader]} (.-lfnode cb)))
+      (inc! flushed))
+
+    (when (!= flushed 0)
+      (.addWork q flushed))
+
+    (when (!= (+ flushed emptied missing) (len allp))
+      (throw "failed to correctly flush all P-owned cleanup blocks"))
+
+    (.Store (.-flushed q) true)
+    (releasem mp)))
+
+
+
+^{:go/end 590} (go/method needsWake "needsWake returns true if cleanup goroutines may need to be awoken or created to handle cleanup load.\n" ^bool [^{:tag (* cleanupQueue)} q]
+  (and (> (.Load (.-workUnits q)) 0) ^:go/paren (or (> (.Load (.-asleep q)) 0) (< (.Load (.-ng q)) (maxCleanupGs)))))
+
+
+
+
+
+^{:go/end 644} (go/method wake "wake wakes up one or more goroutines to process the cleanup queue. If there aren't\nenough sleeping goroutines to handle the demand, wake will arrange for new goroutines\nto be created.\n" [^{:tag (* cleanupQueue)} q]
+  (lock (addr (.-lock q)))
+
+  ;; Figure out how many goroutines to wake, and how many extra goroutines to create.
+  ;; Wake one goroutine for each work unit.
+  (let [(values ^uint32 wake ^uint32 extra) (zero uint32)
+      ^{:line 601} work (.Load (.-workUnits q))
+      ^{:line 602} asleep (conv uint64 (.Load (.-asleep q)))]
+    (if (> work asleep) (do
+        (set! wake (conv uint32 asleep))
+        (if (> work (conv uint64 math/MaxUint32))
+          ;; Protect against overflow.
+          (set! extra math/MaxUint32)
+
+          (set! extra (conv uint32 (- work asleep)))))
+
+      (do
+        (set! wake (conv uint32 work))
+        (set! extra 0)))
+
+    (when (!= extra 0)
+      ;; Signal that we should create new goroutines, one for each extra work unit,
+      ;; up to maxCleanupGs.
+      (let [newg (min extra (- (maxCleanupGs) (.Load (.-ng q))))]
+        (when (> newg 0)
+          (.Add (.-needg q) (conv int32 newg)))))
+
+
+    (when (== wake 0)
+      ;; Nothing to do.
+      (unlock (addr (.-lock q)))
+      (return))
+
+
+    ;; Take ownership of waking 'wake' goroutines.
+    ;;
+    ;; Nobody else will wake up these goroutines, so they're guaranteed
+    ;; to be sitting on q.sleeping, waiting for us to wake them.
+    (.Add (.-asleep q) (- (conv int32 wake)))
+
+    ;; Collect them and schedule them.
+    (let [^gList list (zero gList)]
+      (range [wake]
+        (.push list (.pop (.-sleeping q))))
+
+      (unlock (addr (.-lock q)))
+
+      (injectglist (addr list))
+      (return))))
+
+
+^{:go/end 656} (go/method needG ^bool [^{:tag (* cleanupQueue)} q]
+  (let [have (.Load (.-ng q))]
+    (when (>= have (maxCleanupGs))
+      (return false))
+
+    (when (== have 0)
+      ;; Make sure we have at least one.
+      (return true))
+
+    (> (.Load (.-needg q)) 0)))
+
+
+^{:go/end 674} (go/method createGs [^{:tag (* cleanupQueue)} q]
+  (lock (addr (.-lock q)))
+  (let [have (.Load (.-ng q))
+      ^{:line 661} need (min (.Swap (.-needg q) 0) (- (maxCleanupGs) have))]
+    (when (and (== have 0) (== need 0))
+      ;; Make sure we have at least one.
+      (set! need 1))
+
+    (when (> need 0)
+      (.Add (.-ng q) (conv int32 need)))
+
+    (unlock (addr (.-lock q)))
+
+    (range [need]
+      (go (runCleanups)))))
+
+
+
+^{:go/end 683} (go/method beginRunningCleanups [^{:tag (* cleanupQueue)} q]
+  ;; Update runningCleanups and running atomically with respect
+  ;; to goroutine profiles by disabling preemption.
+  (let [mp (acquirem)]
+    (.Store (.-runningCleanups (getg)) true)
+    (.Add (.-running q) 1)
+    (releasem mp)))
+
+
+^{:go/end 692} (go/method endRunningCleanups [^{:tag (* cleanupQueue)} q]
+  ;; Update runningCleanups and running atomically with respect
+  ;; to goroutine profiles by disabling preemption.
+  (let [mp (acquirem)]
+    (.Store (.-runningCleanups (getg)) false)
+    (.Add (.-running q) -1)
+    (releasem mp)))
+
+
+^{:go/end 705} (go/method readQueueStats [^{:tag (* cleanupQueue)} q] :results [^uint64 queued ^uint64 executed]
+  (set! executed (.Load (.-executed q)))
+  (set! queued (.-queued q))
+
+  ;; N.B. This is inconsistent, but that's intentional. It's just an estimate.
+  ;; Read this _after_ reading executed to decrease the chance that we observe
+  ;; an inconsistency in the statistics (executed > queued).
+  (range [_ pp allp]
+    (set! queued + (.-cleanupsQueued pp)))
+
+  (return))
+
+
+^{:go/end 710} (go/func maxCleanupGs ^uint32 []
+  ;; N.B. Left as a function to make changing the policy easier.
+  (conv uint32 (max (/ gomaxprocs 4) 1)))
+
+
+
+(go/var ^{:tag cleanupQueue :doc "gcCleanups is the global cleanup queue.\n"} gcCleanups)
+
+
+^{:go/end 758} (go/func runCleanups "runCleanups is the entrypoint for all cleanup-running goroutines.\n" []
+  (while true
+    (let [b (.dequeue gcCleanups)]
+      (when raceenabled
+        ;; Approximately: adds a happens-before edge between the cleanup
+        ;; argument being mutated and the call to the cleanup below.
+        (racefingo))
+
+
+      (.beginRunningCleanups gcCleanups)
+      (for [i 0] (< i (conv int ^{:go/via [cleanupBlockHeader]} (.-n b))) (inc! i)
+        (let [c (aget (.-cleanups b) i)]
+          (aset (.-cleanups b) i (lit cleanupFn))
+
+          (let [^uintptr racectx (zero uintptr)]
+            (when raceenabled
+              ;; Enter a new race context so the race detector can catch
+              ;; potential races between cleanups, even if they execute on
+              ;; the same goroutine.
+              ;;
+              ;; Synchronize on fn. This would fail to find races on the
+              ;; closed-over values in fn (suppose arg is passed to multiple
+              ;; AddCleanup calls) if arg was not unique, but it is.
+              (racerelease (conv unsafe/Pointer (.-arg c)))
+              (set! racectx (raceEnterNewCtx))
+              (raceacquire (conv unsafe/Pointer (.-arg c))))
+
+
+            ;; Execute the next cleanup.
+            ((.-call c) (.-fn c) (.-arg c))
+
+            (when raceenabled
+              ;; Restore the old context.
+              (raceRestoreCtx racectx)))))
+
+
+      (.endRunningCleanups gcCleanups)
+      (.Add (.-executed gcCleanups) (conv int64 ^{:go/via [cleanupBlockHeader]} (.-n b)))
+
+      (atomic/Store (addr ^{:go/via [cleanupBlockHeader]} (.-n b)) 0) ; Synchronize with markroot. See comment in cleanupBlockHeader.
+      (.push (.-free gcCleanups) (addr ^{:go/via [cleanupBlockHeader]} (.-lfnode b))))))
+
+
+
+
+
+
+
+^{:go/end 778} (go/method blockUntilEmpty "blockUntilEmpty blocks until either the cleanup queue is emptied\nand the cleanups have been executed, or the timeout is reached.\nReturns true if the cleanup queue was emptied.\nThis is used by the sync and unique tests.\n" ^bool [^{:tag (* cleanupQueue)} q ^int64 timeout]
+  ^{:go/breaks [[3 777]]} (let [start (nanotime)]
+    (while (< (- (nanotime) start) timeout)
+      (lock (addr (.-lock q)))
+      ;; The queue is empty when there's no work left to do *and* all the cleanup goroutines
+      ;; are asleep. If they're not asleep, they may be actively working on a block.
+      (when (and (.Load (.-flushed q)) (.empty (.-full q)) (== (conv uint32 (.-size (.-sleeping q))) (.Load (.-ng q))))
+        (unlock (addr (.-lock q)))
+        (return true))
+
+      (unlock (addr (.-lock q)))
+      (Gosched))
+
+    false))
+
+
+
+^{:go/end 783} (go/func ^{:go/linkname "unique_runtime_blockUntilEmptyCleanupQueue unique.runtime_blockUntilEmptyCleanupQueue"} unique_runtime_blockUntilEmptyCleanupQueue ^bool [^int64 timeout]
+  (.blockUntilEmpty gcCleanups timeout))
+
+
+
+^{:go/end 788} (go/func ^{:go/linkname "sync_test_runtime_blockUntilEmptyCleanupQueue sync_test.runtime_blockUntilEmptyCleanupQueue"} sync_test_runtime_blockUntilEmptyCleanupQueue ^bool [^int64 timeout]
+  (.blockUntilEmpty gcCleanups timeout))
+
+
+
+
+
+
+
+
+
+^{:go/end 821} (go/func ^:go/nosplit raceEnterNewCtx "raceEnterNewCtx creates a new racectx and switches the current\ngoroutine to it. Returns the old racectx.\n\nMust be running on a user goroutine. nosplit to match other race\ninstrumentation.\n" ^uintptr []
+  ;; We use the existing ctx as the spawn context, but gp.gopc
+  ;; as the spawn PC to make the error output a little nicer
+  ;; (pointing to AddCleanup, where the goroutines are created).
+  ;;
+  ;; We also need to carefully indicate to the race detector
+  ;; that the goroutine stack will only be accessed by the new
+  ;; race context, to avoid false positives on stack locations.
+  ;; We do this by marking the stack as free in the first context
+  ;; and then re-marking it as allocated in the second. Crucially,
+  ;; there must be (1) no race operations and (2) no stack changes
+  ;; in between. (1) is easy to avoid because we're in the runtime
+  ;; so there's no implicit race instrumentation. To avoid (2) we
+  ;; defensively become non-preemptible so the GC can't stop us,
+  ;; and rely on the fact that racemalloc, racefreem, and racectx
+  ;; are nosplit.
+  (let [mp (acquirem)
+      ^{:line 814} gp (getg)
+      ^{:line 815} ctx (.-racectx (getg))]
+    (racefree (conv unsafe/Pointer (.-lo (.-stack gp))) (- (.-hi (.-stack gp)) (.-lo (.-stack gp))))
+    (set! (.-racectx (getg)) (racectxstart (.-gopc gp) ctx))
+    (racemalloc (conv unsafe/Pointer (.-lo (.-stack gp))) (- (.-hi (.-stack gp)) (.-lo (.-stack gp))))
+    (releasem mp)
+    ^{:line 820} ctx))
+
+
+
+
+
+
+
+
+
+^{:go/end 838} (go/func ^:go/nosplit raceRestoreCtx "raceRestoreCtx restores ctx on the goroutine. It is the inverse of\nraceenternewctx and must be called with its result.\n\nMust be running on a user goroutine. nosplit to match other race\ninstrumentation.\n" [^uintptr ctx]
+  (let [mp (acquirem)
+      ^{:line 832} gp (getg)]
+    (racefree (conv unsafe/Pointer (.-lo (.-stack gp))) (- (.-hi (.-stack gp)) (.-lo (.-stack gp))))
+    (racectxend (.-racectx (getg)))
+    (racemalloc (conv unsafe/Pointer (.-lo (.-stack gp))) (- (.-hi (.-stack gp)) (.-lo (.-stack gp))))
+    (set! (.-racectx (getg)) ctx)
+    (releasem mp)))

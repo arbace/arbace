@@ -1,0 +1,659 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Implementation of Server
+
+(in-ns 'go.net.http.httptest) (go/file "server.go" :imports [
+
+
+    ^{:line 10} [context "context"]
+    ^{:line 11} [tls "crypto/tls"]
+    ^{:line 12} [x509 "crypto/x509"]
+    ^{:line 13} [flag "flag"]
+    ^{:line 14} [fmt "fmt"]
+    ^{:line 15} [nettest "internal/nettest"]
+    ^{:line 16} [log "log"]
+    ^{:line 17} [net "net"]
+    ^{:line 18} [http "net/http"]
+    ^{:line 19} [testcert "net/http/internal/testcert"]
+    ^{:line 20} [os "os"]
+    ^{:line 21} [runtime "runtime"]
+    ^{:line 22} [strings "strings"]
+    ^{:line 23} [sync "sync"]
+    ^{:line 24} [testing "testing"]
+    ^{:line 25} [time "time"]
+    ^{:line 26} [_ "unsafe"]]) ; for linkname
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Server "A Server is an HTTP server for use in end-to-end HTTP tests.\n\nMost tests should create a server with [NewTestServer].\nThe [Server.Client] method returns a client which sends requests to the test server.\n\n\t// Create a test server and send a request to it.\n\tserver := httptest.NewTestServer(t, handler)\n\tresp, err := server.Client().Get(\"http://www.example.com/\")\n\n# Configuration\n\nTests may change a Server's configuration prior to using it.\nThe configuration must not be changed after the first call to\n[Server.Client], [Server.Start], or [Server.StartTLS].\n\n\t// Configure a test server before using.\n\tserver := httptest.NewTestServer(t, handler)\n\tserver.Config.MaxHeaderBytes = 1024\n\tresp, err := server.Client().Get(\"http://www.example.com/\")\n\n# Tests\n\nServers created with [NewTestServer] will:\n\n  - Fail the test if the server handler panics with\n    any value other than [http.ErrAbortHandler].\n  - Register a Cleanup function to shut down the server at the end of the test.\n\nServers created in any other way must be manually shut down with [Server.Close].\n\n# In-Memory Network\n\nA Server may use an in-memory network implementation or\nlisten on a local network loopback interface.\nMost tests should use the in-memory network,\nwhich avoids port exhaustion and other transient networking issues\nand is suitable for use with the [testing/synctest] package.\n\nTo use the in-memory network, create a server with [NewTestServer].\nDo not call [Server.Start] or [Server.StartTLS].\n\nWhen using the in-memory network, the [http.Client] returned by [Server.Client]\nis configured to send all requests to the server.\nThe client will direct HTTP and HTTPS requests,\nregardless of destination address or hostname, to the server.\nRequests do not need to use [Server.URL] as the base URL.\n\n\tserver := httptest.NewTestServer(t, handler)\n\tclient := server.Client()\n\n\t// All of these requests are sent to the test server.\n\t// https:// requests use TLS over the in-memory network.\n\t_, _ = client.Get(\"http://www.example.com/\")\n\t_, _ = client.Get(\"https://go.dev/\")\n\t_, _ = client.Get(\"http://10.0.0.1/\")\n\nThe [Server.Listener] field is not set when using the in-memory network.\n\n# Loopback Network\n\nTo listen on a loopback interface, call [Server.Start] or [Server.StartTLS].\nThe server will listen on a system-chosen port.\n\nLoopback servers serve one of HTTP (when started with [Server.Start])\nor HTTPS (when started with [Server.StartTLS]).\n\nWhen using the loopback network, the [http.Client] returned by [Server.Client]\nis configured to send requests with a hostname of \"example.com\" or a subdomain\nof \".example.com\" to the server.\n\nRequests may also be sent to the server's loopback address.\nThe [Server.URL] field is set to a base URL containing the server's address.\n\n\tserver := httptest.NewTestServer(t, handler)\n\tserver.Start()\n\tclient := server.Client()\n\n\t// This request is sent to the test server.\n\t_, _ = server.Client().Get(server.URL + \"/\")\n\n\t// This request (using http.DefaultClient) is also sent to the test server,\n\t// since server.URL contains the server's local IP address.\n\t_, _ = http.Get(server.URL + \"/\")\n" (struct
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 124 :tag string :doc "URL is the base URL of the server, of the form http://address:port\nwith no trailing slash.\n\nIt is set by the first call to Client, Start, or StartTLS.\n\nFor servers listening on loopback, the address is the loopback IP address\nof the server.\n\nFor servers using the in-memory network, this address is \"example.com\".\nRequests sent to servers using the in-memory network may use any address.\nIt is not necessary to use this base URL.\n"} URL
+
+
+
+    ^{:line 128 :tag net/Listener :doc "Listener is the network listener for servers listening on loopback.\nIt is not set for servers using the in-memory network.\n"} Listener
+
+
+
+    ^{:line 132 :tag bool :doc "EnableHTTP2 controls whether HTTP/2 is enabled on the server.\nIt must be set before calling Client, Start, or StartTLS.\n"} EnableHTTP2
+
+
+
+
+    ^{:line 137 :tag (* tls/Config) :doc "TLS is the optional TLS configuration, populated with a new config\nafter TLS is started. If set on an unstarted server before StartTLS\nis called, existing fields are copied into the new config.\n"} TLS
+
+
+    ^{:line 140 :tag (* http/Server) :doc "Config may be changed before calling Client, Start, or StartTLS.\n"} Config
+
+    ^{:line 142 :tag testing/TB} t
+
+
+    ^{:line 145 :tag (* x509/Certificate) :doc "certificate is a parsed version of the TLS config certificate, if present.\n"} certificate
+
+
+    ^{:line 148 :tag sync/Once :doc "startOnce is used to start fakenet servers once.\n"} startOnce
+
+
+    ^{:line 151 :tag bool :doc "started indicates whether the server has been started.\n"} started
+
+
+    ^{:line 154 :tag (* nettest/Listener) :doc "Fake network listeners, one for HTTP and one for HTTPS.\n"} fakeListener
+    ^{:line 155 :tag (* nettest/Listener)} fakeTLSListener
+
+
+
+    ^{:line 159 :tag sync/WaitGroup :doc "wg counts the number of outstanding HTTP requests on this server.\nClose blocks until all requests are finished.\n"} wg
+
+    ^{:line 161 :tag sync/Mutex} mu ; guards closed and conns
+    ^{:line 162 :tag bool} closed
+    ^{:line 163 :tag (map net/Conn http/ConnState)} conns ; except terminal states
+
+
+
+    ^{:line 167 :tag (* http/Client) :doc "client is configured for use with the server.\nIts transport is automatically closed when Close is called.\n"} client))
+
+
+
+
+
+
+
+
+
+^{:go/end 186} (go/func NewTestServer "NewTestServer returns a new [Server] for a test.\nThe server will use an in-memory network implementation by default.\n\nIf the handler is nil, the server will serve 500 responses to all requests.\nIt will not use [http.DefaultServeMux].\n\nSee the [Server] documentation for more details.\n" ^{:tag (* Server)} [^testing/TB t ^http/Handler handler]
+  (let [s (addr ^{:go/breaks [2 4]} (lit Server
+          :t t
+          :Config (addr (lit http/Server :Handler (lit testServerHandler :t t :h handler)))))]
+
+    (.Cleanup t ^{:go/end 184} (fn []
+        (.Close s)))
+
+    ^{:line 185} s))
+
+
+(go/type testServerHandler (struct
+    ^{:line 189 :tag testing/TB} t
+    ^{:line 190 :tag http/Handler} h))
+
+
+^{:go/end 213} (go/method ServeHTTP [^testServerHandler h ^http/ResponseWriter w ^{:tag (* http/Request)} req]
+  (defer (^{:go/end 207} (fn []
+        (when [err (recover)] (!= err nil)
+          (when (!= err http/ErrAbortHandler)
+            ;; This is the same logging http.Server would do,
+            ;; but we can put it into the test output rather than stderr.
+            (let [^:const ^{:val 65536} size (<< 64 10)
+                ^{:line 200} buf (make (slice byte) size)]
+              (set! buf (subslice buf _ (runtime/Stack buf false)))
+              (.Errorf (.-t h) "httptest: panic in server handler: %v\n%s" err buf)))
+
+          ;; Convert panic to ErrAbortHandler to suppress http.Server's logging.
+          (panic http/ErrAbortHandler)))))
+
+
+  (if (!= (.-h h) nil)
+    (.ServeHTTP (.-h h) w req)
+
+    (.WriteHeader w 500)))
+
+
+
+^{:go/end 230} (go/func newLocalListener ^net/Listener []
+  (when (!= serveFlag "")
+    (let [(values l err) (net/Listen "tcp" serveFlag)]
+      (when (!= err nil)
+        (panic (fmt/Sprintf "httptest: failed to listen on %v: %v" serveFlag err)))
+
+      (return l)))
+
+  (let [(values l err) (net/Listen "tcp" "127.0.0.1:0")]
+    (when (!= err nil)
+      (when [(set! (values l err) (net/Listen "tcp6" "[::1]:0"))] (!= err nil)
+        (panic (fmt/Sprintf "httptest: failed to listen on a port: %v" err))))
+
+
+    ^{:line 229} l))
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag string :doc "When debugging a particular http server-based test,\nthis flag lets you run\n\n\tgo test -run='^BrokenTest$' -httptest.serve=127.0.0.1:8000\n\nto start the broken server so you can interact with it manually.\nWe only register this flag if it looks like the caller knows about it\nand is trying to use it as we don't want to pollute flags and this\nisn't really part of our API. Don't depend on this.\n"} serveFlag)
+
+^{:go/end 247} (go/func init []
+  (when (or (strSliceContainsPrefix os/Args "-httptest.serve=") (strSliceContainsPrefix os/Args "--httptest.serve="))
+    (flag/StringVar (addr serveFlag) "httptest.serve" "" "if non-empty, httptest.NewServer serves on this address and blocks.")))
+
+
+
+^{:go/breaks [[4 255]] :go/end 256} (go/func strSliceContainsPrefix ^bool [^{:tag (slice string)} v ^string pre]
+  (range [_ s v]
+    (when (strings/HasPrefix s pre)
+      (return true)))
+
+
+  false)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 270} (go/func NewServer "NewServer starts and returns a new [Server] listening on a\nlocal network loopback interface.\nThis is equivalent to calling [NewUnstartedServer] followed by [Server.Start].\n\nThe caller should call [Server.Close] when finished, to shut it down.\n\nMost users should use [NewTestServer] instead.\nSee the [Server] documentation for details.\n" ^{:tag (* Server)} [^http/Handler handler]
+  (let [ts (NewUnstartedServer handler)]
+    (.Start ts)
+    ^{:line 269} ts))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 287} (go/func NewUnstartedServer "NewUnstartedServer returns a new [Server] listening on a\nlocal network loopback interface. It does not start the server.\n\nAfter changing the server's configuration, the caller should\ncall [Server.Start] or [Server.StartTLS].\n\nThe caller should call [Server.Close] when finished, to shut it down.\n\nMost users should use [NewTestServer] instead.\nSee the [Server] documentation for details.\n" ^{:tag (* Server)} [^http/Handler handler]
+  (addr ^{:go/breaks [2 4]} (lit Server
+      :Listener (newLocalListener)
+      :Config (addr (lit http/Server :Handler handler)))))
+
+
+
+^{:go/end 314} (go/method startCommon [^{:tag (* Server)} s ^bool useLoopback]
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (when (.-started s)
+    (panic "Server already started"))
+
+  (when (.-closed s)
+    (panic "Start of closed Server"))
+
+  (set! (.-started s) true)
+  (when (and (!= (.-t s) nil) useLoopback)
+    ;; We're being called from Start or StartTLS.
+    ;; Don't try to start the server again when Client is called.
+    (.Do (.-startOnce s) ^{:go/end 302} (fn []))
+
+    ;; NewTestServer servers create their listener at start time.
+    ;;
+    ;; We might want to permit the user to provide their own Listener
+    ;; in the future. For now, we panic.
+    (when (!= (.-Listener s) nil)
+      (panic "Server.Listener is unexpectedly set"))
+
+    (set! (.-Listener s) (newLocalListener)))
+
+  (.wrap s))
+
+
+
+
+
+^{:go/end 346} (go/method Start "Start starts a server on a local loopback network interface.\n\nThe server should have been created by [NewTestServer] or [NewUnstartedServer].\n" [^{:tag (* Server)} s]
+  (.startCommon s true)
+
+  (let [tr (addr (lit http/Transport))]
+    (set! (.-client s) (addr (lit http/Client :Transport tr)))
+    (when (== (.-Listener s) nil)
+      (return))
+
+    (let [dialer (lit net/Dialer)]
+      ;; User code may set either of Dial or DialContext, with DialContext taking precedence.
+      ;; We set DialContext here to preserve any context values that are passed in,
+      ;; but fall back to Dial if the user has set it.
+      (set! (.-DialContext tr) ^{:go/end 339} (fn [^context/Context ctx ^string network ^string addr] :results [net/Conn error]
+          (when (!= (.-Dial tr) nil)
+            (return ((.-Dial tr) network addr)))
+
+          (when (or (== addr "example.com:80") (strings/HasSuffix addr ".example.com:80"))
+            (set! addr (.String (.Addr (.-Listener s)))))
+
+          (.DialContext dialer ctx network addr)))
+
+      (set! (.-URL s) (+ "http://" (.String (.Addr (.-Listener s)))))
+      (.goServe s (.-Listener s))
+      (when (!= serveFlag "")
+        (fmt/Fprintln os/Stderr "httptest: serving on" (.-URL s))
+        (select)))))
+
+
+
+^{:go/end 379} (go/method initTLS [^{:tag (* Server)} s] :results [^{:tag (* tls/Config)} tlsClientConfig ^error err]
+  (let [(values cert ^:assign err) (tls/X509KeyPair testcert/LocalhostCert testcert/LocalhostKey)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [existingConfig (.-TLS s)]
+      (if (!= existingConfig nil)
+        (set! (.-TLS s) (.Clone existingConfig))
+
+        (set! (.-TLS s) (new tls/Config)))
+
+      (when (== (.-NextProtos (.-TLS s)) nil)
+        (let [nextProtos (lit (slice string) "http/1.1")]
+          (when (.-EnableHTTP2 s)
+            (set! nextProtos (lit (slice string) "h2")))
+
+          (set! (.-NextProtos (.-TLS s)) nextProtos)))
+
+      (when (== (len (.-Certificates (.-TLS s))) 0)
+        (set! (.-Certificates (.-TLS s)) (lit (slice tls/Certificate) cert)))
+
+      (set! (values (.-certificate s) err) (x509/ParseCertificate (aget (.-Certificate (aget (.-Certificates (.-TLS s)) 0)) 0)))
+      (when (!= err nil)
+        (return nil err))
+
+      (let [certpool (x509/NewCertPool)]
+        (.AddCert certpool (.-certificate s))
+        ^{:go/breaks [2]} (return (addr ^{:go/breaks [2]} (lit tls/Config
+              :RootCAs certpool))
+          nil)))))
+
+
+
+
+
+^{:go/end 416} (go/method StartTLS "Start starts TLS on a server on a local loopback network interface.\n\nThe server should have been created by [NewTestServer] or [NewUnstartedServer].\n" [^{:tag (* Server)} s]
+  (.startCommon s true)
+
+  (set! (.-client s) (addr (lit http/Client)))
+
+  (let [(values tlsClientConfig err) (.initTLS s)]
+    (when (!= err nil)
+      (panic (fmt/Sprintf "httptest: NewTLSServer: %v" err)))
+
+
+    (let [tr (addr ^{:go/breaks [2 4]} (lit http/Transport
+            :TLSClientConfig tlsClientConfig
+            :ForceAttemptHTTP2 (.-EnableHTTP2 s)))]
+
+      (set! (.-Transport (.-client s)) tr)
+
+      (when (== (.-Listener s) nil)
+        (return))
+
+      (let [dialer (lit net/Dialer)]
+        (set! (.-DialContext tr) ^{:go/end 412} (fn [^context/Context ctx ^string network ^string addr] :results [net/Conn error]
+            (when (!= (.-Dial tr) nil)
+              (return ((.-Dial tr) network addr)))
+
+            (when (or (== addr "example.com:443") (strings/HasSuffix addr ".example.com:443"))
+              (set! addr (.String (.Addr (.-Listener s)))))
+
+            (.DialContext dialer ctx network addr)))
+
+        (set! (.-Listener s) (tls/NewListener (.-Listener s) (.-TLS s)))
+        (set! (.-URL s) (+ "https://" (.String (.Addr (.-Listener s)))))
+        (.goServe s (.-Listener s))))))
+
+
+^{:go/end 448} (go/method startFakeNet [^{:tag (* Server)} s]
+  (.startCommon s false)
+
+  (set! (.-client s) (addr (lit http/Client)))
+
+  (let [(values tlsClientConfig err) (.initTLS s)]
+    (when (!= err nil)
+      (panic (fmt/Sprintf "httptest: NewTestServer: %v" err)))
+
+
+    (let [tr (addr ^{:go/breaks [2 4]} (lit http/Transport
+            :TLSClientConfig tlsClientConfig
+            :ForceAttemptHTTP2 (.-EnableHTTP2 s)))]
+
+      (set! (.-Transport (.-client s)) tr)
+
+      (set! (.-fakeListener s) (nettest/NewListener))
+      (set! (.-fakeTLSListener s) (nettest/NewListener))
+
+      ;; Set InsecureSkipVerify rather than depending on a specific server hostname.
+      (set! (.-InsecureSkipVerify (.-TLSClientConfig tr)) true)
+      (set! (.-DialContext tr) ^{:go/end 441} (fn [^context/Context ctx ^string network ^string address] :results [net/Conn error]
+          (return (.NewConn (.-fakeListener s)) nil)))
+
+      (set! (.-DialTLSContext tr) ^{:go/end 444} (fn [^context/Context ctx ^string network ^string address] :results [net/Conn error]
+          (return (tls/Client (.NewConn (.-fakeTLSListener s)) (.-TLSClientConfig tr)) nil)))
+
+      (set! (.-URL s) "http://example.com")
+      (.goServe s (.-fakeListener s))
+      (.goServe s (tls/NewListener (.-fakeTLSListener s) (.-TLS s))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 462} (go/func NewTLSServer "NewTLSServer starts and returns a new [Server] using TLS and listening on a\nlocal network loopback interface.\nThis is equivalent to calling [NewUnstartedServer] followed by [Server.StartTLS].\n\nThe caller should call [Server.Close] when finished, to shut it down.\n\nMost users should use [NewTestServer] instead.\nSee the [Server] documentation for details.\n" ^{:tag (* Server)} [^http/Handler handler]
+  (let [ts (NewUnstartedServer handler)]
+    (.StartTLS ts)
+    ^{:line 461} ts))
+
+
+(go/type closeIdleTransport (interface
+    (CloseIdleConnections [])))
+
+
+
+
+^{:go/end 525} (go/method Close "Close shuts down the server and blocks until all outstanding\nrequests on this server have completed.\n" [^{:tag (* Server)} s]
+  (.Lock (.-mu s))
+  (when (not (.-closed s))
+    (set! (.-closed s) true)
+    (when (!= (.-Listener s) nil)
+      (.Close (.-Listener s)))
+
+    (when (!= (.-fakeListener s) nil)
+      (.Close (.-fakeListener s))
+      (.Close (.-fakeTLSListener s)))
+
+    (.SetKeepAlivesEnabled (.-Config s) false)
+    (range [c st (.-conns s)]
+      ;; Force-close any idle connections (those between
+      ;; requests) and new connections (those which connected
+      ;; but never sent a request). StateNew connections are
+      ;; super rare and have only been seen (in
+      ;; previously-flaky tests) in the case of
+      ;; socket-late-binding races from the http Client
+      ;; dialing this server and then getting an idle
+      ;; connection before the dial completed. There is thus
+      ;; a connected connection in StateNew with no
+      ;; associated Request. We only close StateIdle and
+      ;; StateNew because they're not doing anything. It's
+      ;; possible StateNew is about to do something in a few
+      ;; milliseconds, but a previous CL to check again in a
+      ;; few milliseconds wasn't liked (early versions of
+      ;; https://golang.org/cl/15151) so now we just
+      ;; forcefully close StateNew. The docs for Server.Close say
+      ;; we wait for "outstanding requests", so we don't close things
+      ;; in StateActive.
+      (when (or (== st http/StateIdle) (== st http/StateNew))
+        (.closeConn s c)))
+
+
+    ;; If this server doesn't shut down in 5 seconds, tell the user why.
+    (let [t (time/AfterFunc (* 5 time/Second) (.-logCloseHangDebugInfo s))]
+      (defer (.Stop t))))
+
+  (.Unlock (.-mu s))
+
+  ;; Not part of httptest.Server's correctness, but assume most
+  ;; users of httptest.Server will be using the standard
+  ;; transport, so help them out and close any idle connections for them.
+  (when [(values t ok) (assert closeIdleTransport http/DefaultTransport)] ok
+    (.CloseIdleConnections t))
+
+
+  ;; Also close the client idle connections.
+  (when (!= (.-client s) nil)
+    (when [(values t ok) (assert closeIdleTransport (.-Transport (.-client s)))] ok
+      (.CloseIdleConnections t)))
+
+
+  (.Wait (.-wg s)))
+
+
+^{:go/end 536} (go/method logCloseHangDebugInfo [^{:tag (* Server)} s]
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (let [^strings/Builder buf (zero strings/Builder)]
+    (.WriteString buf "httptest.Server blocked in Close after 5 seconds, waiting for connections:\n")
+    (range [c st (.-conns s)]
+      (fmt/Fprintf (addr buf) "  %T %p %v in state %v\n" c c (.RemoteAddr c) st))
+
+    (log/Print (.String buf))))
+
+
+
+^{:go/end 564} (go/method CloseClientConnections "CloseClientConnections closes any open HTTP connections to the test Server.\n" [^{:tag (* Server)} s]
+  (.Lock (.-mu s))
+  (let [nconn (len (.-conns s))
+      ^{:line 542} ch (make (chan (struct)) nconn)]
+    (range [c (.-conns s)]
+      (go (.closeConnChan s c ch)))
+
+    (.Unlock (.-mu s))
+
+    ;; Wait for outstanding closes to finish.
+    ;;
+    ;; Out of paranoia for making a late change in Go 1.6, we
+    ;; bound how long this can wait, since golang.org/issue/14291
+    ;; isn't fully understood yet. At least this should only be used
+    ;; in tests.
+    (let [timer (time/NewTimer (* 5 time/Second))]
+      (defer (.Stop timer))
+      (for [i 0] (< i nconn) (inc! i)
+        (select
+          (case (<! ch))
+          (case (<! (.-C timer))
+            ;; Too slow. Give up.
+            (return)))))))
+
+
+
+
+
+
+^{:go/end 570} (go/method Certificate "Certificate returns the certificate used by the server, or nil if\nthe server doesn't use TLS.\n" ^{:tag (* x509/Certificate)} [^{:tag (* Server)} s]
+  (.-certificate s))
+
+
+
+
+
+^{:go/end 580} (go/method Client "Client returns an HTTP client configured for making requests to the server.\nIt is configured to trust the server's TLS test certificate and will\nclose its idle connections on [Server.Close].\n" ^{:tag (* http/Client)} [^{:tag (* Server)} s]
+  (when (!= (.-t s) nil)
+    (.Do (.-startOnce s) (.-startFakeNet s)))
+
+  (.-client s))
+
+
+^{:go/end 588} (go/method goServe [^{:tag (* Server)} s ^net/Listener li]
+  (.Add (.-wg s) 1)
+  (go (^{:go/end 587} (fn []
+        (defer (.Done (.-wg s)))
+        (.Serve (.-Config s) li)))))
+
+
+
+
+
+^{:go/end 648} (go/method wrap "wrap installs the connection state-tracking hook to know which\nconnections are idle.\n" [^{:tag (* Server)} s]
+  (let [oldHook (.-ConnState (.-Config s))]
+    (set! (.-ConnState (.-Config s)) ^{:go/end 647} (fn [^net/Conn c ^http/ConnState cs]
+        (.Lock (.-mu s))
+        (defer (.Unlock (.-mu s)))
+
+        (switch cs
+          (case [http/StateNew]
+            (when [(values _ exists) (aget (.-conns s) c)] exists
+              (panic "invalid state transition"))
+
+            (when (== (.-conns s) nil)
+              (set! (.-conns s) (make (map net/Conn http/ConnState))))
+
+            ;; Add c to the set of tracked conns and increment it to the
+            ;; waitgroup.
+            (.Add (.-wg s) 1)
+            (aset (.-conns s) c cs)
+            (when (.-closed s)
+              ;; Probably just a socket-late-binding dial from
+              ;; the default transport that lost the race (and
+              ;; thus this connection is now idle and will
+              ;; never be used).
+              (.closeConn s c)))
+
+          (case [http/StateActive]
+            (when [(values oldState ok) (aget (.-conns s) c)] ok
+              (when (and (!= oldState http/StateNew) (!= oldState http/StateIdle))
+                (panic "invalid state transition"))
+
+              (aset (.-conns s) c cs)))
+
+          (case [http/StateIdle]
+            (when [(values oldState ok) (aget (.-conns s) c)] ok
+              (when (!= oldState http/StateActive)
+                (panic "invalid state transition"))
+
+              (aset (.-conns s) c cs))
+
+            (when (.-closed s)
+              (.closeConn s c)))
+
+          (case [http/StateHijacked http/StateClosed]
+            ;; Remove c from the set of tracked conns and decrement it from the
+            ;; waitgroup, unless it was previously removed.
+            (when [(values _ ok) (aget (.-conns s) c)] ok
+              (delete (.-conns s) c)
+              ;; Keep Close from returning until the user's ConnState hook
+              ;; (if any) finishes.
+              (defer (.Done (.-wg s))))))
+
+
+        (when (!= oldHook nil)
+          (oldHook c cs))))))
+
+
+
+
+
+
+^{:go/end 652} (go/method closeConn "closeConn closes c.\ns.mu must be held.\n" [^{:tag (* Server)} s ^net/Conn c] (.closeConnChan s c nil))
+
+
+
+^{:go/end 661} (go/method closeConnChan "closeConnChan is like closeConn, but takes an optional channel to receive a value\nwhen the goroutine closing c is done.\n" [^{:tag (* Server)} s ^net/Conn c ^{:tag (chan :send (struct))} done]
+  (.Close c)
+  (when (!= done nil)
+    (>! done (lit (struct)))))

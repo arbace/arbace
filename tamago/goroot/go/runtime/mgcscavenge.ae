@@ -1,0 +1,1413 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Scavenging free pages.
+;;
+;; This file implements scavenging (the release of physical pages backing mapped
+;; memory) of free and unused pages in the heap as a way to deal with page-level
+;; fragmentation and reduce the RSS of Go applications.
+;;
+;; Scavenging in Go happens on two fronts: there's the background
+;; (asynchronous) scavenger and the allocation-time (synchronous) scavenger.
+;;
+;; The former happens on a goroutine much like the background sweeper which is
+;; soft-capped at using scavengePercent of the mutator's time, based on
+;; order-of-magnitude estimates of the costs of scavenging. The latter happens
+;; when allocating pages from the heap.
+;;
+;; The scavenger's primary goal is to bring the estimated heap RSS of the
+;; application down to a goal.
+;;
+;; Before we consider what this looks like, we need to split the world into two
+;; halves. One in which a memory limit is not set, and one in which it is.
+;;
+;; For the former, the goal is defined as:
+;;   (retainExtraPercent+100) / 100 * (heapGoal / lastHeapGoal) * lastHeapInUse
+;;
+;; Essentially, we wish to have the application's RSS track the heap goal, but
+;; the heap goal is defined in terms of bytes of objects, rather than pages like
+;; RSS. As a result, we need to take into account for fragmentation internal to
+;; spans. heapGoal / lastHeapGoal defines the ratio between the current heap goal
+;; and the last heap goal, which tells us by how much the heap is growing and
+;; shrinking. We estimate what the heap will grow to in terms of pages by taking
+;; this ratio and multiplying it by heapInUse at the end of the last GC, which
+;; allows us to account for this additional fragmentation. Note that this
+;; procedure makes the assumption that the degree of fragmentation won't change
+;; dramatically over the next GC cycle. Overestimating the amount of
+;; fragmentation simply results in higher memory use, which will be accounted
+;; for by the next pacing up date. Underestimating the fragmentation however
+;; could lead to performance degradation. Handling this case is not within the
+;; scope of the scavenger. Situations where the amount of fragmentation balloons
+;; over the course of a single GC cycle should be considered pathologies,
+;; flagged as bugs, and fixed appropriately.
+;;
+;; An additional factor of retainExtraPercent is added as a buffer to help ensure
+;; that there's more unscavenged memory to allocate out of, since each allocation
+;; out of scavenged memory incurs a potentially expensive page fault.
+;;
+;; If a memory limit is set, then we wish to pick a scavenge goal that maintains
+;; that memory limit. For that, we look at total memory that has been committed
+;; (memstats.mappedReady) and try to bring that down below the limit. In this case,
+;; we want to give buffer space in the *opposite* direction. When the application
+;; is close to the limit, we want to make sure we push harder to keep it under, so
+;; if we target below the memory limit, we ensure that the background scavenger is
+;; giving the situation the urgency it deserves.
+;;
+;; In this case, the goal is defined as:
+;;    (100-reduceExtraPercent) / 100 * memoryLimit
+;;
+;; We compute both of these goals, and check whether either of them have been met.
+;; The background scavenger continues operating as long as either one of the goals
+;; has not been met.
+;;
+;; The goals are updated after each GC.
+;;
+;; Synchronous scavenging happens for one of two reasons: if an allocation would
+;; exceed the memory limit or whenever the heap grows in size, for some
+;; definition of heap-growth. The intuition behind this second reason is that the
+;; application had to grow the heap because existing fragments were not sufficiently
+;; large to satisfy a page-level memory allocation, so we scavenge those fragments
+;; eagerly to offset the growth in RSS that results.
+;;
+;; Lastly, not all pages are available for scavenging at all times and in all cases.
+;; The background scavenger and heap-growth scavenger only release memory in chunks
+;; that have not been densely-allocated for at least 1 full GC cycle. The reason
+;; behind this is likelihood of reuse: the Go heap is allocated in a first-fit order
+;; and by the end of the GC mark phase, the heap tends to be densely packed. Releasing
+;; memory in these densely packed chunks while they're being packed is counter-productive,
+;; and worse, it breaks up huge pages on systems that support them. The scavenger (invoked
+;; during memory allocation) further ensures that chunks it identifies as "dense" are
+;; immediately eligible for being backed by huge pages. Note that for the most part these
+;; density heuristics are best-effort heuristics. It's totally possible (but unlikely)
+;; that a chunk that just became dense is scavenged in the case of a race between memory
+;; allocation and scavenging.
+;;
+;; When synchronously scavenging for the memory limit or for debug.FreeOSMemory, these
+;; "dense" packing heuristics are ignored (in other words, scavenging is "forced") because
+;; in these scenarios returning memory to the OS is more important than keeping CPU
+;; overheads low.
+
+(in-ns 'go.runtime) (go/file "mgcscavenge.go" :imports [
+
+
+    ^{:line 94} [goos "internal/goos"]
+    ^{:line 95} [atomic "internal/runtime/atomic"]
+    ^{:line 96} [sys "internal/runtime/sys"]
+    ^{:line 97} [unsafe "unsafe"]])
+
+
+(go/const
+
+
+
+
+  ^{:line 105} [^{:val 1 :doc "The background scavenger is paced according to these parameters.\n\nscavengePercent represents the portion of mutator time we're willing\nto spend on scavenging in percent.\n"} scavengePercent 1] ; 1%
+
+
+
+
+
+
+
+
+
+  ^{:line 115} [^{:val 10 :doc "retainExtraPercent represents the amount of memory over the heap goal\nthat the scavenger should keep as a buffer space for the allocator.\nThis constant is used when we do not have a memory limit set.\n\nThe purpose of maintaining this overhead is to have a greater pool of\nunscavenged memory available for allocation (since using scavenged memory\nincurs an additional cost), to account for heap fragmentation and\nthe ever-changing layout of the heap.\n"} retainExtraPercent 10]
+
+
+
+
+
+
+
+
+
+
+  ^{:line 126} [^{:val 5 :doc "reduceExtraPercent represents the amount of memory under the limit\nthat the scavenger should target. For example, 5 means we target 95%\nof the limit.\n\nThe purpose of shooting lower than the limit is to ensure that, once\nclose to the limit, the scavenger is working hard to maintain it. If\nwe have a memory limit set but are far away from it, there's no harm\nin leaving up to 100-retainExtraPercent live, and it's more efficient\nanyway, for the same reasons that retainExtraPercent exists.\n"} reduceExtraPercent 5]
+
+
+
+  ^{:line 130} [^{:val 64 :doc "maxPagesPerPhysPage is the maximum number of supported runtime pages per\nphysical page, based on maxPhysPageSize.\n"} maxPagesPerPhysPage (/ maxPhysPageSize pageSize)]
+
+
+
+
+
+
+
+
+
+
+  ^{:line 141} [^{:val 0.0 :doc "scavengeCostRatio is the approximate ratio between the costs of using previously\nscavenged memory and scavenging memory.\n\nFor most systems the cost of scavenging greatly outweighs the costs\nassociated with using scavenged memory, making this constant 0. On other systems\n(especially ones where \"sysUsed\" is not just a no-op) this cost is non-trivial.\n\nThis ratio is used as part of multiplicative factor to help the scavenger account\nfor the additional costs of using scavenged memory in its pacing.\n"} scavengeCostRatio (* 0.7 (+ goos/IsDarwin goos/IsIos))]
+
+
+
+  ^{:line 145} [^{:val 0.96875 :doc "scavChunkHiOcFrac indicates the fraction of pages that need to be allocated\nin the chunk in a single GC cycle for it to be considered high density.\n"} scavChunkHiOccFrac 0.96875]
+  ^{:line 146} [^{:val 496} scavChunkHiOccPages (conv uint16 (* scavChunkHiOccFrac pallocChunkPages))])
+
+
+
+^{:go/end 152} (go/func heapRetained "heapRetained returns an estimate of the current heap RSS.\n" ^uint64 []
+  (+ (.load (.-heapInUse gcController)) (.load (.-heapFree gcController))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 234} (go/func gcPaceScavenger "gcPaceScavenger updates the scavenger's pacing, particularly\nits rate and RSS goal. For this, it requires the current heapGoal,\nand the heapGoal for the previous GC cycle.\n\nThe RSS goal is based on the current heap goal with a small overhead\nto accommodate non-determinism in the allocator.\n\nThe pacing is based on scavengePageRate, which applies to both regular and\nhuge pages. See that constant for more information.\n\nMust be called whenever GC pacing is updated.\n\nmheap_.lock must be held or the world must be stopped.\n" [^int64 memoryLimit ^uint64 heapGoal ^uint64 lastHeapGoal]
+  (assertWorldStoppedOrLockHeld (addr (.-lock mheap_)))
+
+  ;; As described at the top of this file, there are two scavenge goals here: one
+  ;; for gcPercent and one for memoryLimit. Let's handle the latter first because
+  ;; it's simpler.
+
+  ;; We want to target retaining (100-reduceExtraPercent)% of the heap.
+  (let [memoryLimitGoal (conv uint64 (* (conv float64 memoryLimit) (- 1 (/ reduceExtraPercent 100.0))))
+
+      ;; mappedReady is comparable to memoryLimit, and represents how much total memory
+      ;; the Go runtime has committed now (estimated).
+      ^{:line 179} mappedReady (.Load (.-mappedReady gcController))]
+
+    ;; If we're below the goal already indicate that we don't need the background
+    ;; scavenger for the memory limit. This may seems worrisome at first, but note
+    ;; that the allocator will assist the background scavenger in the face of a memory
+    ;; limit, so we'll be safe even if we stop the scavenger when we shouldn't have.
+    (if (<= mappedReady memoryLimitGoal)
+      (.Store (.-memoryLimitGoal scavenge) (bit-not (conv uint64 0)))
+
+      (.Store (.-memoryLimitGoal scavenge) memoryLimitGoal))
+
+
+    ;; Now handle the gcPercent goal.
+
+    ;; If we're called before the first GC completed, disable scavenging.
+    ;; We never scavenge before the 2nd GC cycle anyway (we don't have enough
+    ;; information about the heap yet) so this is fine, and avoids a fault
+    ;; or garbage data later.
+    (when (== lastHeapGoal 0)
+      (.Store (.-gcPercentGoal scavenge) (bit-not (conv uint64 0)))
+      (return))
+
+    ;; Compute our scavenging goal.
+    (let [goalRatio (/ (conv float64 heapGoal) (conv float64 lastHeapGoal))
+        ^{:line 203} gcPercentGoal (conv uint64 (* (conv float64 (.-lastHeapInUse memstats)) goalRatio))]
+      ;; Add retainExtraPercent overhead to retainedGoal. This calculation
+      ;; looks strange but the purpose is to arrive at an integer division
+      ;; (e.g. if retainExtraPercent = 12.5, then we get a divisor of 8)
+      ;; that also avoids the overflow from a multiplication.
+      (set! gcPercentGoal + (/ gcPercentGoal (/ 1.0 (/ retainExtraPercent 100.0))))
+      ;; Align it to a physical page boundary to make the following calculations
+      ;; a bit more exact.
+      (set! gcPercentGoal (bit-and-not (- (+ gcPercentGoal (conv uint64 physPageSize)) 1) (- (conv uint64 physPageSize) 1)))
+
+      ;; Represents where we are now in the heap's contribution to RSS in bytes.
+      ;;
+      ;; Guaranteed to always be a multiple of physPageSize on systems where
+      ;; physPageSize <= pageSize since we map new heap memory at a size larger than
+      ;; any physPageSize and released memory in multiples of the physPageSize.
+      ;;
+      ;; However, certain functions recategorize heap memory as other stats (e.g.
+      ;; stacks) and this happens in multiples of pageSize, so on systems
+      ;; where physPageSize > pageSize the calculations below will not be exact.
+      ;; Generally this is OK since we'll be off by at most one regular
+      ;; physical page.
+      (let [heapRetainedNow (heapRetained)]
+
+        ;; If we're already below our goal, or within one page of our goal, then indicate
+        ;; that we don't need the background scavenger for maintaining a memory overhead
+        ;; proportional to the heap goal.
+        (if (or (<= heapRetainedNow gcPercentGoal) (< (- heapRetainedNow gcPercentGoal) (conv uint64 physPageSize)))
+          (.Store (.-gcPercentGoal scavenge) (bit-not (conv uint64 0)))
+
+          (.Store (.-gcPercentGoal scavenge) gcPercentGoal))))))
+
+
+
+(go/var ^{:tag (struct ^{:tag atomic/Uint64 :doc "gcPercentGoal is the amount of retained heap memory (measured by\nheapRetained) that the runtime will try to maintain by returning\nmemory to the OS. This goal is derived from gcController.gcPercent\nby choosing to retain enough memory to allocate heap memory up to\nthe heap goal.\n"} gcPercentGoal ^{:tag atomic/Uint64 :doc "memoryLimitGoal is the amount of memory retained by the runtime (\nmeasured by gcController.mappedReady) that the runtime will try to\nmaintain by returning memory to the OS. This goal is derived from\ngcController.memoryLimit by choosing to target the memory limit or\nsome lower target to keep the scavenger working.\n"} memoryLimitGoal ^{:tag atomic/Int64 :doc "assistTime is the time spent by the allocator scavenging in the last GC cycle.\n\nThis is reset once a GC cycle ends.\n"} assistTime ^{:tag atomic/Int64 :doc "backgroundTime is the time spent by the background scavenger in the last GC cycle.\n\nThis is reset once a GC cycle ends.\n"} backgroundTime)} scavenge)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/const
+
+
+
+  ^{:line 266} [^{:val 0.001 :doc "It doesn't really matter what value we start at, but we can't be zero, because\nthat'll cause divide-by-zero issues. Pick something conservative which we'll\nalso use as a fallback.\n"} startingScavSleepRatio 0.001]
+
+
+
+
+  ^{:line 271} [^{:val 1000000.0 :doc "Spend at least 1 ms scavenging, otherwise the corresponding\nsleep time to maintain our desired utilization is too low to\nbe reliable.\n"} minScavWorkTime 1000000.0])
+
+
+
+(go/var ^{:tag scavengerState :doc "Sleep/wait state of the background scavenger.\n"} scavenger)
+
+(go/type scavengerState (struct
+
+    ^{:line 279 :tag mutex :doc "lock protects all fields below.\n"} lock
+
+
+    ^{:line 282 :tag (* g) :doc "g is the goroutine the scavenger is bound to.\n"} g
+
+
+    ^{:line 285 :tag (* timer) :doc "timer is the timer used for the scavenger to sleep.\n"} timer
+
+
+    ^{:line 288 :tag atomic/Uint32 :doc "sysmonWake signals to sysmon that it should wake the scavenger.\n"} sysmonWake
+
+
+    ^{:line 291 :tag bool :doc "parked is whether or not the scavenger is parked.\n"} parked
+
+
+
+    ^{:line 295 :tag bool :doc "printControllerReset instructs printScavTrace to signal that\nthe controller was reset.\n"} printControllerReset
+
+
+    ^{:line 298 :tag float64 :doc "targetCPUFraction is the target CPU overhead for the scavenger.\n"} targetCPUFraction
+
+
+
+
+
+
+
+
+    ^{:line 307 :tag float64 :doc "sleepRatio is the ratio of time spent doing scavenging work to\ntime spent sleeping. This is used to decide how long the scavenger\nshould sleep for in between batches of work. It is set by\ncritSleepController in order to maintain a CPU overhead of\ntargetCPUFraction.\n\nLower means more sleep, higher means more aggressive scavenging.\n"} sleepRatio
+
+
+
+
+    ^{:line 312 :tag piController :doc "sleepController controls sleepRatio.\n\nSee sleepRatio for more details.\n"} sleepController
+
+
+
+
+    ^{:line 317 :tag int64 :doc "controllerCooldown is the time left in nanoseconds during which we avoid\nusing the controller and we hold sleepRatio at a conservative\nvalue. Used if the controller's assumptions fail to hold.\n"} controllerCooldown
+
+
+
+
+
+
+
+
+
+    ^{:line 327 :tag (func [^int64 n] [int64]) :doc "sleepStub is a stub used for testing to avoid actually having\nthe scavenger sleep.\n\nUnlike the other stubs, this is not populated if left nil\nInstead, it is called when non-nil because any valid implementation\nof this function basically requires closing over this scavenger\nstate, and allocating a closure is not allowed in the runtime as\na matter of policy.\n"} sleepStub
+
+
+
+
+
+
+
+
+
+
+    ^{:line 338 :tag (func [^uintptr n] [uintptr int64]) :doc "scavenge is a function that scavenges n bytes of memory.\nReturns how many bytes of memory it actually scavenged, as\nwell as the time it took in nanoseconds. Usually mheap.pages.scavenge\nwith nanotime called around it, but stubbed out for testing.\nLike mheap.pages.scavenge, if it scavenges less than n bytes of\nmemory, the caller may assume the heap is exhausted of scavengable\nmemory for now.\n\nIf this is nil, it is populated with the real thing in init.\n"} scavenge
+
+
+
+
+
+
+    ^{:line 345 :tag (func [] [bool]) :doc "shouldStop is a callback called in the work loop and provides a\npoint that can force the scavenger to stop early, for example because\nthe scavenge policy dictates too much has been scavenged already.\n\nIf this is nil, it is populated with the real thing in init.\n"} shouldStop
+
+
+
+
+    ^{:line 350 :tag (func [] [int32]) :doc "gomaxprocs returns the current value of gomaxprocs. Stub for testing.\n\nIf this is nil, it is populated with the real thing in init.\n"} gomaxprocs))
+
+
+
+
+
+^{:go/end 416} (go/method init "init initializes a scavenger state and wires to the current G.\n\nMust be called from a regular goroutine that can allocate.\n" [^{:tag (* scavengerState)} s]
+  (when (!= (.-g s) nil)
+    (throw "scavenger state is already wired"))
+
+  (lockInit (addr (.-lock s)) lockRankScavenge)
+  (set! (.-g s) (getg))
+
+  (set! (.-timer s) (new timer))
+  (let [f ^{:go/end 366} (fn [^any s ^uintptr _ ^int64 _]
+        (.wake (assert (* scavengerState) s)))]
+
+    (.init (.-timer s) f s)
+
+    ;; input: fraction of CPU time actually used.
+    ;; setpoint: ideal CPU fraction.
+    ;; output: ratio of time worked to time slept (determines sleep time).
+    ;;
+    ;; The output of this controller is somewhat indirect to what we actually
+    ;; want to achieve: how much time to sleep for. The reason for this definition
+    ;; is to ensure that the controller's outputs have a direct relationship with
+    ;; its inputs (as opposed to an inverse relationship), making it somewhat
+    ;; easier to reason about for tuning purposes.
+    (set! (.-sleepController s) ^{:go/breaks [[2 380] 4 6 [8 386] 10]} (lit piController
+        ;; Tuned loosely via Ziegler-Nichols process.
+        :kp 0.3375
+        :ti 3200000.0
+        :tt 1.0E9 ; 1 second reset time.
+
+        ;; These ranges seem wide, but we want to give the controller plenty of
+        ;; room to hunt for the optimal value.
+        :min 0.001 ; 1:1000
+        :max 1000.0)) ; 1000:1
+
+    (set! (.-sleepRatio s) startingScavSleepRatio)
+
+    ;; Install real functions if stubs aren't present.
+    (when (== (.-scavenge s) nil)
+      (set! (.-scavenge s) ^{:go/end 402} (fn [^uintptr n] :results [uintptr int64]
+          (let [start (nanotime)
+              ^{:line 395} r (.scavenge (.-pages mheap_) n nil false)
+              ^{:line 396} end (nanotime)]
+            (when (>= start end)
+              (return r 0))
+
+            (.Add (.-backgroundTime scavenge) (- end start))
+            (return r (- end start))))))
+
+
+    (when (== (.-shouldStop s) nil)
+      (set! (.-shouldStop s) ^{:go/end 409} (fn ^bool []
+          ;; If background scavenging is disabled or if there's no work to do just stop.
+          (and (<= (heapRetained) (.Load (.-gcPercentGoal scavenge)))
+            (<= (.Load (.-mappedReady gcController)) (.Load (.-memoryLimitGoal scavenge)))))))
+
+
+    (when (== (.-gomaxprocs s) nil)
+      (set! (.-gomaxprocs s) ^{:go/end 414} (fn ^int32 []
+          ^{:line 413} gomaxprocs)))))
+
+
+
+
+
+^{:go/end 426} (go/method park "park parks the scavenger goroutine.\n" [^{:tag (* scavengerState)} s]
+  (lock (addr (.-lock s)))
+  (when (!= (getg) (.-g s))
+    (throw "tried to park scavenger from another goroutine"))
+
+  (set! (.-parked s) true)
+  (goparkunlock (addr (.-lock s)) waitReasonGCScavengeWait traceBlockSystemGoroutine 2))
+
+
+
+^{:go/end 431} (go/method ready "ready signals to sysmon that the scavenger should be awoken.\n" [^{:tag (* scavengerState)} s]
+  (.Store (.-sysmonWake s) 1))
+
+
+
+
+
+^{:go/end 456} (go/method wake "wake immediately unparks the scavenger if necessary.\n\nSafe to run without a P.\n" [^{:tag (* scavengerState)} s]
+  (lock (addr (.-lock s)))
+  (when (.-parked s)
+    ;; Unset sysmonWake, since the scavenger is now being awoken.
+    (.Store (.-sysmonWake s) 0)
+
+    ;; s.parked is unset to prevent a double wake-up.
+    (set! (.-parked s) false)
+
+    ;; Ready the goroutine by injecting it. We use injectglist instead
+    ;; of ready or goready in order to allow us to run this function
+    ;; without a P. injectglist also avoids placing the goroutine in
+    ;; the current P's runnext slot, which is desirable to prevent
+    ;; the scavenger from interfering with user goroutine scheduling
+    ;; too much.
+    (let [^gList list (zero gList)]
+      (.push list (.-g s))
+      (injectglist (addr list))))
+
+  (unlock (addr (.-lock s))))
+
+
+
+
+
+
+
+
+
+^{:go/end 560} (go/method sleep "sleep puts the scavenger to sleep based on the amount of time that it worked\nin nanoseconds.\n\nNote that this function should only be called by the scavenger.\n\nThe scavenger may be woken up earlier by a pacing change, and it may not go\nto sleep at all if there's a pending pacing change.\n" [^{:tag (* scavengerState)} s ^float64 worked]
+  (lock (addr (.-lock s)))
+  (when (!= (getg) (.-g s))
+    (throw "tried to sleep scavenger from another goroutine"))
+
+
+  (when (< worked minScavWorkTime)
+    ;; This means there wasn't enough work to actually fill up minScavWorkTime.
+    ;; That's fine; we shouldn't try to do anything with this information
+    ;; because it's going result in a short enough sleep request that things
+    ;; will get messy. Just assume we did at least this much work.
+    ;; All this means is that we'll sleep longer than we otherwise would have.
+    (set! worked minScavWorkTime))
+
+
+  ;; Multiply the critical time by 1 + the ratio of the costs of using
+  ;; scavenged memory vs. scavenging memory. This forces us to pay down
+  ;; the cost of reusing this memory eagerly by sleeping for a longer period
+  ;; of time and scavenging less frequently. More concretely, we avoid situations
+  ;; where we end up scavenging so often that we hurt allocation performance
+  ;; because of the additional overheads of using scavenged memory.
+  (set! worked * (+ 1 scavengeCostRatio))
+
+  ;; sleepTime is the amount of time we're going to sleep, based on the amount
+  ;; of time we worked, and the sleepRatio.
+  (let [sleepTime (conv int64 (/ worked (.-sleepRatio s)))
+
+      ^{:line 492 :tag int64} slept (zero int64)]
+    (if (== (.-sleepStub s) nil)
+      ;; Set the timer.
+      ;;
+      ;; This must happen here instead of inside gopark
+      ;; because we can't close over any variables without
+      ;; failing escape analysis.
+      (let [start (nanotime)]
+        (.reset (.-timer s) (+ start sleepTime) 0)
+
+        ;; Mark ourselves as asleep and go to sleep.
+        (set! (.-parked s) true)
+        (goparkunlock (addr (.-lock s)) waitReasonSleep traceBlockSleep 2)
+
+        ;; How long we actually slept for.
+        (set! slept (- (nanotime) start))
+
+        (lock (addr (.-lock s)))
+        ;; Stop the timer here because s.wake is unable to do it for us.
+        ;; We don't really care if we succeed in stopping the timer. One
+        ;; reason we might fail is that we've already woken up, but the timer
+        ;; might be in the process of firing on some other P; essentially we're
+        ;; racing with it. That's totally OK. Double wake-ups are perfectly safe.
+        (.stop (.-timer s))
+        (unlock (addr (.-lock s))))
+      (do
+        (unlock (addr (.-lock s)))
+        (set! slept ((.-sleepStub s) sleepTime))))
+
+
+    ;; Stop here if we're cooling down from the controller.
+    (when (> (.-controllerCooldown s) 0)
+      ;; worked and slept aren't exact measures of time, but it's OK to be a bit
+      ;; sloppy here. We're just hoping we're avoiding some transient bad behavior.
+      (let [t (+ slept (conv int64 worked))]
+        (if (> t (.-controllerCooldown s))
+          (set! (.-controllerCooldown s) 0)
+
+          (set! (.-controllerCooldown s) - t))
+
+        (return)))
+
+
+    ;; idealFraction is the ideal % of overall application CPU time that we
+    ;; spend scavenging.
+    (let [idealFraction (/ (conv float64 scavengePercent) 100.0)
+
+        ;; Calculate the CPU time spent.
+        ;;
+        ;; This may be slightly inaccurate with respect to GOMAXPROCS, but we're
+        ;; recomputing this often enough relative to GOMAXPROCS changes in general
+        ;; (it only changes when the world is stopped, and not during a GC) that
+        ;; that small inaccuracy is in the noise.
+        ^{:line 545} cpuFraction (/ worked (* (+ (conv float64 slept) worked) (conv float64 ((.-gomaxprocs s)))))
+
+        ;; Update the critSleepRatio, adjusting until we reach our ideal fraction.
+        ^{:line 548 :tag bool} ok (zero bool)]
+      (set! (values (.-sleepRatio s) ok) (.next (.-sleepController s) cpuFraction idealFraction (+ (conv float64 slept) worked)))
+      (when (not ok)
+        ;; The core assumption of the controller, that we can get a proportional
+        ;; response, broke down. This may be transient, so temporarily switch to
+        ;; sleeping a fixed, conservative amount.
+        (set! (.-sleepRatio s) startingScavSleepRatio)
+        (set! (.-controllerCooldown s) 5.0E9) ; 5 seconds.
+
+        ;; Signal the scav trace printer to output this.
+        (.controllerFailed s)))))
+
+
+
+
+
+^{:go/end 568} (go/method controllerFailed "controllerFailed indicates that the scavenger's scheduling\ncontroller failed.\n" [^{:tag (* scavengerState)} s]
+  (lock (addr (.-lock s)))
+  (set! (.-printControllerReset s) true)
+  (unlock (addr (.-lock s))))
+
+
+
+
+
+
+
+
+^{:go/end 642} (go/method run "run is the body of the main scavenging loop.\n\nReturns the number of bytes released and the estimated time spent\nreleasing those bytes.\n\nMust be run on the scavenger goroutine.\n" [^{:tag (* scavengerState)} s] :results [^uintptr released ^float64 worked]
+  (lock (addr (.-lock s)))
+  (when (!= (getg) (.-g s))
+    (throw "tried to run scavenger from another goroutine"))
+
+  (unlock (addr (.-lock s)))
+
+  (while (< worked minScavWorkTime)
+    ;; If something from outside tells us to stop early, stop.
+    (when ((.-shouldStop s))
+      (break))
+
+
+    ;; scavengeQuantum is the amount of memory we try to scavenge
+    ;; in one go. A smaller value means the scavenger is more responsive
+    ;; to the scheduler in case of e.g. preemption. A larger value means
+    ;; that the overheads of scavenging are better amortized, so better
+    ;; scavenging throughput.
+    ;;
+    ;; The current value is chosen assuming a cost of ~10µs/physical page
+    ;; (this is somewhat pessimistic), which implies a worst-case latency of
+    ;; about 160µs for 4 KiB physical pages. The current value is biased
+    ;; toward latency over throughput.
+    (let [^:const ^{:val 65536} scavengeQuantum (<< 64 10)
+
+        ;; Accumulate the amount of time spent scavenging.
+        (values r duration) ((.-scavenge s) scavengeQuantum)
+
+        ;; On some platforms we may see end >= start if the time it takes to scavenge
+        ;; memory is less than the minimum granularity of its clock (e.g. Windows) or
+        ;; due to clock bugs.
+        ;;
+        ;; In this case, just assume scavenging takes 10 µs per regular physical page
+        ;; (determined empirically), and conservatively ignore the impact of huge pages
+        ;; on timing.
+        ^:const ^{:line 611 :val 10000.0} approxWorkedNSPerPhysicalPage 10000.0]
+      (if (== duration 0)
+        (set! worked + (* approxWorkedNSPerPhysicalPage (conv float64 (/ r physPageSize))))
+
+        ;; TODO(mknyszek): If duration is small compared to worked, it could be
+        ;; rounded down to zero. Probably not a problem in practice because the
+        ;; values are all within a few orders of magnitude of each other but maybe
+        ;; worth worrying about.
+        (set! worked + (conv float64 duration)))
+
+      (set! released + r)
+
+      ;; scavenge does not return until it either finds the requisite amount of
+      ;; memory to scavenge, or exhausts the heap. If we haven't found enough
+      ;; to scavenge, then the heap must be exhausted.
+      (when (< r scavengeQuantum)
+        (break))
+
+      ;; When using fake time just do one loop.
+      (when (!= faketime 0)
+        (break))))
+
+
+  (when (and (> released 0) (< released physPageSize))
+    ;; If this happens, it means that we may have attempted to release part
+    ;; of a physical page, but the likely effect of that is that it released
+    ;; the whole physical page, some of which may have still been in-use.
+    ;; This could lead to memory corruption. Throw.
+    (throw "released less than one physical page of memory"))
+
+  (return))
+
+
+
+
+
+
+
+^{:go/end 664} (go/func bgscavenge "Background scavenger.\n\nThe background scavenger maintains the RSS of the application below\nthe line described by the proportional scavenging statistics in\nthe mheap struct.\n" [^{:tag (chan int)} c]
+  (.init scavenger)
+
+  (>! c 1)
+  (.park scavenger)
+
+  (while true
+    (let [(values released workTime) (.run scavenger)]
+      (when (== released 0)
+        (.park scavenger)
+        (continue))
+
+      (.Add (.-releasedBg (.-scav (.-pages mheap_))) released)
+      (.sleep scavenger workTime))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 690} (go/method scavenge "scavenge scavenges nbytes worth of free pages, starting with the\nhighest address first. Successive calls continue from where it left\noff until the heap is exhausted. force makes all memory available to\nscavenge, ignoring huge page heuristics.\n\nReturns the amount of memory scavenged in bytes.\n\nscavenge always tries to scavenge nbytes worth of memory, and will\nonly fail to do so if the heap is exhausted for now.\n" ^uintptr [^{:tag (* pageAlloc)} p ^uintptr nbytes ^{:tag (func [] [bool])} shouldStop ^bool force]
+  (let [released (conv uintptr 0)]
+    (while (< released nbytes)
+      (let [(values ci pageIdx) (.find (.-index (.-scav p)) force)]
+        (when (== ci 0)
+          (break))
+
+        (systemstack ^{:go/end 684} (fn []
+            (set! released + (.scavengeOne p ci pageIdx (- nbytes released)))))
+
+        (when (and (!= shouldStop nil) (shouldStop))
+          (break))))
+
+
+    ^{:line 689} released))
+
+
+
+
+
+
+
+
+
+^{:go/end 717} (go/func printScavTrace "printScavTrace prints a scavenge trace line to standard error.\n\nreleased should be the amount of memory released since the last time this\nwas called, and forced indicates whether the scavenge was forced by the\napplication.\n\nscavenger.lock must be held.\n" [^uintptr releasedBg ^uintptr releasedEager ^bool forced]
+  (assertLockHeld (addr (.-lock scavenger)))
+
+  (printlock)
+  (print "scav "
+    (>> releasedBg 10) " KiB work (bg), "
+    (>> releasedEager 10) " KiB work (eager), "
+    (>> (.load (.-heapReleased gcController)) 10) " KiB now, "
+    (/ (* (.load (.-heapInUse gcController)) 100) (heapRetained)) "% util")
+
+  (cond forced
+    (print " (forced)")
+    (.-printControllerReset scavenger) (do
+      (print " [controller reset]")
+      (set! (.-printControllerReset scavenger) false)))
+
+  (println)
+  (printunlock))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 813} (go/method ^:go/systemstack scavengeOne "scavengeOne walks over the chunk at chunk index ci and searches for\na contiguous run of pages to scavenge. It will try to scavenge\nat most max bytes at once, but may scavenge more to avoid\nbreaking huge pages. Once it scavenges some memory it returns\nhow much it scavenged in bytes.\n\nsearchIdx is the page index to start searching from in ci.\n\nReturns the number of bytes scavenged.\n\nMust run on the systemstack because it acquires p.mheapLock.\n" ^uintptr [^{:tag (* pageAlloc)} p ^chunkIdx ci ^uint searchIdx ^uintptr max]
+  ;; Calculate the maximum number of pages to scavenge.
+  ;;
+  ;; This should be alignUp(max, pageSize) / pageSize but max can and will
+  ;; be ^uintptr(0), so we need to be very careful not to overflow here.
+  ;; Rather than use alignUp, calculate the number of pages rounded down
+  ;; first, then add back one if necessary.
+  (let [maxPages (/ max pageSize)]
+    (when (!= (% max pageSize) 0)
+      (inc! maxPages))
+
+
+    ;; Calculate the minimum number of pages we can scavenge.
+    ;;
+    ;; Because we can only scavenge whole physical pages, we must
+    ;; ensure that we scavenge at least minPages each time, aligned
+    ;; to minPages*pageSize.
+    ^{:go/breaks [[7 812]]} (let [minPages (/ physPageSize pageSize)]
+      (when (< minPages 1)
+        (set! minPages 1))
+
+
+      (lock (.-mheapLock p))
+      (when (>= (.max (aget (aget (.-summary p) (- (len (.-summary p)) 1)) ci)) (conv uint minPages))
+        ;; We only bother looking for a candidate if there at least
+        ;; minPages free pages at all.
+        (let [(values base npages) (.findScavengeCandidate (.chunkOf p ci) searchIdx minPages maxPages)]
+
+          ;; If we found something, scavenge it and return!
+          (when (!= npages 0)
+            ;; Compute the full address for the start of the range.
+            (let [addr (+ (chunkBase ci) (* (conv uintptr base) pageSize))]
+
+              ;; Mark the range we're about to scavenge as allocated, because
+              ;; we don't want any allocating goroutines to grab it while
+              ;; the scavenging is in progress. Be careful here -- just do the
+              ;; bare minimum to avoid stepping on our own scavenging stats.
+              (.allocRange (.chunkOf p ci) base npages)
+              (.update p addr (conv uintptr npages) true true)
+
+              ;; With that done, it's safe to unlock.
+              (unlock (.-mheapLock p))
+
+              (when (not (.-test p))
+                ;; Only perform sys* operations if we're not in a test.
+                ;; It's dangerous to do so otherwise.
+                (sysUnused (conv unsafe/Pointer addr) (* (conv uintptr npages) pageSize))
+
+                ;; Update global accounting only when not in test, otherwise
+                ;; the runtime's accounting will be wrong.
+                (let [nbytes (conv int64 (* npages pageSize))]
+                  (.add (.-heapReleased gcController) nbytes)
+                  (.add (.-heapFree gcController) (- nbytes))
+
+                  (let [stats (.acquire (.-heapStats memstats))]
+                    (atomic/Xaddint64 (addr (.-committed stats)) (- nbytes))
+                    (atomic/Xaddint64 (addr (.-released stats)) nbytes)
+                    (.release (.-heapStats memstats)))))
+
+
+              ;; Relock the heap, because now we need to make these pages
+              ;; available allocation. Free them back to the page allocator.
+              (lock (.-mheapLock p))
+              (when [b (lit offAddr addr)] (.lessThan b (.-searchAddr p))
+                (set! (.-searchAddr p) b))
+
+              ^{:go/via [pallocBits]} (.free (.chunkOf p ci) base npages)
+              (.update p addr (conv uintptr npages) true false)
+
+              ;; Mark the range as scavenged.
+              (.setRange (.-scavenged (.chunkOf p ci)) base npages)
+              (unlock (.-mheapLock p))
+
+              (return (* (conv uintptr npages) pageSize))))))
+
+
+      ;; Mark this chunk as having no free pages.
+      (.setEmpty (.-index (.-scav p)) ci)
+      (unlock (.-mheapLock p))
+
+      0)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 872} (go/func fillAligned "fillAligned returns x but with all zeroes in m-aligned\ngroups of m bits set to 1 if any bit in the group is non-zero.\n\nFor example, fillAligned(0x0100a3, 8) == 0xff00ff.\n\nNote that if m == 1, this is a no-op.\n\nm must be a power of 2 <= maxPagesPerPhysPage.\n" ^uint64 [^uint64 x ^uint m]
+  (let [apply ^{:go/end 841} (fn ^uint64 [^uint64 x ^uint64 c]
+        ;; The technique used it here is derived from
+        ;; https://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
+        ;; and extended for more than just bytes (like nibbles
+        ;; and uint16s) by using an appropriate constant.
+        ;;
+        ;; To summarize the technique, quoting from that page:
+        ;; "[It] works by first zeroing the high bits of the [8]
+        ;; bytes in the word. Subsequently, it adds a number that
+        ;; will result in an overflow to the high bit of a byte if
+        ;; any of the low bits were initially set. Next the high
+        ;; bits of the original word are ORed with these values;
+        ;; thus, the high bit of a byte is set iff any bit in the
+        ;; byte was set. Finally, we determine if any of these high
+        ;; bits are zero by ORing with ones everywhere except the
+        ;; high bits and inverting the result."
+        (bit-not (bit-or (+ (bit-and x c) c) x c)))]
+
+    ;; Transform x to contain a 1 bit at the top of each m-aligned
+    ;; group of m zero bits.
+    (switch m
+      (case [1]
+        (return x))
+      (case [2]
+        (set! x (apply x 0x5555555555555555)))
+      (case [4]
+        (set! x (apply x 0x7777777777777777)))
+      (case [8]
+        (set! x (apply x 0x7f7f7f7f7f7f7f7f)))
+      (case [16]
+        (set! x (apply x 0x7fff7fff7fff7fff)))
+      (case [32]
+        (set! x (apply x 0x7fffffff7fffffff)))
+      (case [64] ; == maxPagesPerPhysPage
+        (set! x (apply x 0x7fffffffffffffff)))
+      (default
+        (throw "bad m value")))
+
+    ;; Now, the top bit of each m-aligned group in x is set
+    ;; that group was all zero in the original x.
+
+    ;; From each group of m bits subtract 1.
+    ;; Because we know only the top bits of each
+    ;; m-aligned group are set, we know this will
+    ;; set each group to have all the bits set except
+    ;; the top bit, so just OR with the original
+    ;; result to set all the bits.
+    (bit-not (bit-or (- x (>> x (- m 1))) x))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 989} (go/method findScavengeCandidate "findScavengeCandidate returns a start index and a size for this pallocData\nsegment which represents a contiguous region of free and unscavenged memory.\n\nsearchIdx indicates the page index within this chunk to start the search, but\nnote that findScavengeCandidate searches backwards through the pallocData. As\na result, it will return the highest scavenge candidate in address order.\n\nmin indicates a hard minimum size and alignment for runs of pages. That is,\nfindScavengeCandidate will not return a region smaller than min pages in size,\nor that is min pages or greater in size but not aligned to min. min must be\na non-zero power of 2 <= maxPagesPerPhysPage.\n\nmax is a hint for how big of a region is desired. If max >= pallocChunkPages, then\nfindScavengeCandidate effectively returns entire free and unscavenged regions.\nIf max < pallocChunkPages, it may truncate the returned region such that size is\nmax. However, findScavengeCandidate may still return a larger region if, for\nexample, it chooses to preserve huge pages, or if max is not aligned to min (it\nwill round up). That is, even if max is small, the returned size is not guaranteed\nto be equal to max. max is allowed to be less than min, in which case it is as if\nmax == min.\n" [^{:tag (* pallocData)} m ^uint searchIdx ^uintptr minimum ^uintptr max] :results [uint uint]
+  (cond (or (!= (bit-and minimum (- minimum 1)) 0) (== minimum 0)) (do
+      (print "runtime: min = " minimum "\n")
+      (throw "min must be a non-zero power of 2"))
+    (> minimum maxPagesPerPhysPage) (do
+      (print "runtime: min = " minimum "\n")
+      (throw "min too large")))
+
+  ;; max may not be min-aligned, so we might accidentally truncate to
+  ;; a max value which causes us to return a non-min-aligned value.
+  ;; To prevent this, align max up to a multiple of min (which is always
+  ;; a power of 2). This also prevents max from ever being less than
+  ;; min, unless it's zero, so handle that explicitly.
+  (if (== max 0)
+    (set! max minimum)
+
+    (set! max (alignUp max minimum)))
+
+
+  (let [i (conv int (/ searchIdx 64))]
+    ;; Start by quickly skipping over blocks of non-free or scavenged pages.
+    (for [] (>= i 0) (dec! i)
+      ;; 1s are scavenged OR non-free => 0s are unscavenged AND free
+      (let [x (fillAligned (bit-or (aget (.-scavenged m) i) (aget (.-pallocBits m) i)) (conv uint minimum))]
+        (when (!= x (bit-not (conv uint64 0)))
+          (break))))
+
+
+    (when (< i 0)
+      ;; Failed to find any free/unscavenged pages.
+      (return 0 0))
+
+    ;; We have something in the 64-bit chunk at i, but it could
+    ;; extend further. Loop until we find the extent of it.
+
+    ;; 1s are scavenged OR non-free => 0s are unscavenged AND free
+    (let [x (fillAligned (bit-or (aget (.-scavenged m) i) (aget (.-pallocBits m) i)) (conv uint minimum))
+        ^{:line 931} z1 (conv uint (sys/LeadingZeros64 (bit-not x)))
+        (values run end) (values (conv uint 0) (+ (* (conv uint i) 64) (- 64 z1)))]
+      (if (!= (<< x z1) 0)
+        ;; After shifting out z1 bits, we still have 1s,
+        ;; so the run ends inside this word.
+        (set! run (conv uint (sys/LeadingZeros64 (<< x z1))))
+        (do
+          ;; After shifting out z1 bits, we have no more 1s.
+          ;; This means the run extends to the bottom of the
+          ;; word so it may extend into further words.
+          (set! run (- 64 z1))
+          (for [j (- i 1)] (>= j 0) (dec! j)
+            (let [x (fillAligned (bit-or (aget (.-scavenged m) j) (aget (.-pallocBits m) j)) (conv uint minimum))]
+              (set! run + (conv uint (sys/LeadingZeros64 x)))
+              (when (!= x 0)
+                ;; The run stopped in this word.
+                (break))))))
+
+
+
+
+      ;; Split the run we found if it's larger than max but hold on to
+      ;; our original length, since we may need it later.
+      (let [size (min run (conv uint max))
+          ^{:line 955} start (- end size)]
+
+        ;; Each huge page is guaranteed to fit in a single palloc chunk.
+        ;;
+        ;; TODO(mknyszek): Support larger huge page sizes.
+        ;; TODO(mknyszek): Consider taking pages-per-huge-page as a parameter
+        ;; so we can write tests for this.
+        (when (and (> physHugePageSize pageSize) (> physHugePageSize physPageSize))
+          ;; We have huge pages, so let's ensure we don't break one by scavenging
+          ;; over a huge page boundary. If the range [start, start+size) overlaps with
+          ;; a free-and-unscavenged huge page, we want to grow the region we scavenge
+          ;; to include that huge page.
+
+          ;; Compute the huge page boundary above our candidate.
+          (let [pagesPerHugePage (/ physHugePageSize pageSize)
+              ^{:line 970} hugePageAbove (conv uint (alignUp (conv uintptr start) pagesPerHugePage))]
+
+            ;; If that boundary is within our current candidate, then we may be breaking
+            ;; a huge page.
+            (when (<= hugePageAbove end)
+              ;; Compute the huge page boundary below our candidate.
+              (let [hugePageBelow (conv uint (alignDown (conv uintptr start) pagesPerHugePage))]
+
+                (when (>= hugePageBelow (- end run))
+                  ;; We're in danger of breaking apart a huge page since start+size crosses
+                  ;; a huge page boundary and rounding down start to the nearest huge
+                  ;; page boundary is included in the full run we found. Include the entire
+                  ;; huge page in the bound by rounding down to the huge page size.
+                  (set! size (+ size (- start hugePageBelow)))
+                  (set! start hugePageBelow))))))
+
+
+
+        (return start size)))))
+
+
+
+
+(go/type scavengeIndex "scavengeIndex is a structure for efficiently managing which pageAlloc chunks have\nmemory available to scavenge.\n" (struct
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 1008 :tag (slice atomicScavChunkData) :doc "chunks is a scavChunkData-per-chunk structure that indicates the presence of pages\navailable for scavenging. Updates to the index are serialized by the pageAlloc lock.\n\nIt tracks chunk occupancy and a generation counter per chunk. If a chunk's occupancy\nnever exceeds pallocChunkDensePages over the course of a single GC cycle, the chunk\nbecomes eligible for scavenging on the next cycle. If a chunk ever hits this density\nthreshold it immediately becomes unavailable for scavenging in the current cycle as\nwell as the next.\n\n[min, max) represents the range of chunks that is safe to access (i.e. will not cause\na fault). As an optimization minHeapIdx represents the true minimum chunk that has been\nmapped, since min is likely rounded down to include the system page containing minHeapIdx.\n\nFor a chunk size of 4 MiB this structure will only use 2 MiB for a 1 TiB contiguous heap.\n"} chunks
+    ^{:line 1009 :tag atomic/Uintptr} min ^atomic/Uintptr max
+    ^{:line 1010 :tag atomic/Uintptr} minHeapIdx
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 1038 :tag atomicOffAddr :doc "searchAddr* is the maximum address (in the offset address space, so we have a linear\nview of the address space; see mranges.go:offAddr) containing memory available to\nscavenge. It is a hint to the find operation to avoid O(n^2) behavior in repeated lookups.\n\nsearchAddr* is always inclusive and should be the base address of the highest runtime\npage available for scavenging.\n\nsearchAddrForce is managed by find and free.\nsearchAddrBg is managed by find and nextGen.\n\nNormally, find monotonically decreases searchAddr* as it finds no more free pages to\nscavenge. However, mark, when marking a new chunk at an index greater than the current\nsearchAddr, sets searchAddr to the *negative* index into chunks of that page. The trick here\nis that concurrent calls to find will fail to monotonically decrease searchAddr*, and so they\nwon't barge over new memory becoming available to scavenge. Furthermore, this ensures\nthat some future caller of find *must* observe the new high index. That caller\n(or any other racing with it), then makes searchAddr positive before continuing, bringing\nus back to our monotonically decreasing steady-state.\n\nA pageAlloc lock serializes updates between min, max, and searchAddr, so abs(searchAddr)\nis always guaranteed to be >= min and < max (converted to heap addresses).\n\nsearchAddrBg is increased only on each new generation and is mainly used by the\nbackground scavenger and heap-growth scavenging. searchAddrForce is increased continuously\nas memory gets freed and is mainly used by eager memory reclaim such as debug.FreeOSMemory\nand scavenging to maintain the memory limit.\n"} searchAddrBg
+    ^{:line 1039 :tag atomicOffAddr} searchAddrForce
+
+
+
+    ^{:line 1043 :tag offAddr :doc "freeHWM is the highest address (in offset address space) that was freed\nthis generation.\n"} freeHWM
+
+
+    ^{:line 1046 :tag uint32 :doc "Generation counter. Updated by nextGen at the end of each mark phase.\n"} gen
+
+
+    ^{:line 1049 :tag bool :doc "test indicates whether or not we're in a test.\n"} test))
+
+
+
+
+
+^{:go/end 1061} (go/method init "init initializes the scavengeIndex.\n\nReturns the amount added to sysStat.\n" ^uintptr [^{:tag (* scavengeIndex)} s ^bool test ^{:tag (* sysMemStat)} sysStat]
+  (.Clear (.-searchAddrBg s))
+  (.Clear (.-searchAddrForce s))
+  (set! (.-freeHWM s) minOffAddr)
+  (set! (.-test s) test)
+  (.sysInit s test sysStat))
+
+
+
+
+
+^{:go/end 1074} (go/method grow "sysGrow updates the index's backing store in response to a heap growth.\n\nReturns the amount of memory added to sysStat.\n" ^uintptr [^{:tag (* scavengeIndex)} s ^uintptr base ^uintptr limit ^{:tag (* sysMemStat)} sysStat]
+  ;; Update minHeapIdx. Note that even if there's no mapping work to do,
+  ;; we may still have a new, lower minimum heap address.
+  (let [minHeapIdx (.Load (.-minHeapIdx s))]
+    (when [baseIdx (conv uintptr (chunkIndex base))] (or (== minHeapIdx 0) (< baseIdx minHeapIdx))
+      (.Store (.-minHeapIdx s) baseIdx))
+
+    (.sysGrow s base limit sysStat)))
+
+
+
+
+^{:go/end 1122} (go/method find "find returns the highest chunk index that may contain pages available to scavenge.\nIt also returns an offset to start searching in the highest chunk.\n" [^{:tag (* scavengeIndex)} s ^bool force] :results [chunkIdx uint]
+  (let [cursor (addr (.-searchAddrBg s))]
+    (when force
+      (set! cursor (addr (.-searchAddrForce s))))
+
+    (let [(values searchAddr marked) (.Load cursor)]
+      (when (== searchAddr (.addr minOffAddr))
+        ;; We got a cleared search addr.
+        (return 0 0))
+
+
+      ;; Starting from searchAddr's chunk, iterate until we find a chunk with pages to scavenge.
+      (let [gen (.-gen s)
+          ^{:line 1091} min (conv chunkIdx (.Load (.-minHeapIdx s)))
+          ^{:line 1092} start (chunkIndex searchAddr)]
+        ;; N.B. We'll never map the 0'th chunk, so minHeapIdx ensures this loop overflow.
+        (for [i start] (>= i min) (dec! i)
+          ;; Skip over chunks.
+          (when (not (.shouldScavenge (.load (aget (.-chunks s) i)) gen force))
+            (continue))
+
+          ;; We're still scavenging this chunk.
+          (when (== i start)
+            (return i (chunkPageIndex searchAddr)))
+
+          ;; Try to reduce searchAddr to newSearchAddr.
+          (let [newSearchAddr (- (+ (chunkBase i) pallocChunkBytes) pageSize)]
+            (if marked
+              ;; Attempt to be the first one to decrease the searchAddr
+              ;; after an increase. If we fail, that means there was another
+              ;; increase, or somebody else got to it before us. Either way,
+              ;; it doesn't matter. We may lose some performance having an
+              ;; incorrect search address, but it's far more important that
+              ;; we don't miss updates.
+              (.StoreUnmark cursor searchAddr newSearchAddr)
+
+              ;; Decrease searchAddr.
+              (.StoreMin cursor newSearchAddr))
+
+            (return i (- pallocChunkPages 1))))
+
+        ;; Clear searchAddr, because we've exhausted the heap.
+        (.Clear cursor)
+        (return 0 0)))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1141} (go/method alloc "alloc updates metadata for chunk at index ci with the fact that\nan allocation of npages occurred. It also eagerly attempts to collapse\nthe chunk's memory into hugepage if the chunk has become sufficiently\ndense and we're not allocating the whole chunk at once (which suggests\nthe allocation is part of a bigger one and it's probably not worth\neagerly collapsing).\n\nalloc may only run concurrently with find.\n" [^{:tag (* scavengeIndex)} s ^chunkIdx ci ^uint npages]
+  (let [sc (.load (aget (.-chunks s) ci))]
+    (.alloc sc npages (.-gen s))
+    ;; TODO(mknyszek): Consider eagerly backing memory with huge pages
+    ;; here and track whether we believe this chunk is backed by huge pages.
+    ;; In the past we've attempted to use sysHugePageCollapse (which uses
+    ;; MADV_COLLAPSE on Linux, and is unsupported elsewhere) for this purpose,
+    ;; but that caused performance issues in production environments.
+    (.store (aget (.-chunks s) ci) sc)))
+
+
+
+
+
+
+^{:go/end 1166} (go/method free "free updates metadata for chunk at index ci with the fact that\na free of npages occurred.\n\nfree may only run concurrently with find.\n" [^{:tag (* scavengeIndex)} s ^chunkIdx ci ^uint page ^uint npages]
+  (let [sc (.load (aget (.-chunks s) ci))]
+    (.free sc npages (.-gen s))
+    (.store (aget (.-chunks s) ci) sc)
+
+    ;; Update scavenge search addresses.
+    (let [addr (+ (chunkBase ci) (* (conv uintptr (- (+ page npages) 1)) pageSize))]
+      (when (.lessThan (.-freeHWM s) (lit offAddr addr))
+        (set! (.-freeHWM s) (lit offAddr addr)))
+
+      ;; N.B. Because free is serialized, it's not necessary to do a
+      ;; full CAS here. free only ever increases searchAddr, while
+      ;; find only ever decreases it. Since we only ever race with
+      ;; decreases, even if the value we loaded is stale, the actual
+      ;; value will never be larger.
+      (let [(values searchAddr _) (.Load (.-searchAddrForce s))]
+        (when (.lessThan (lit offAddr searchAddr) (lit offAddr addr))
+          (.StoreMarked (.-searchAddrForce s) addr))))))
+
+
+
+
+
+
+
+
+^{:go/end 1180} (go/method nextGen "nextGen moves the scavenger forward one generation. Must be called\nonce per GC cycle, but may be called more often to force more memory\nto be released.\n\nnextGen may only run concurrently with find.\n" [^{:tag (* scavengeIndex)} s]
+  (inc! (.-gen s))
+  (let [(values searchAddr _) (.Load (.-searchAddrBg s))]
+    (when (.lessThan (lit offAddr searchAddr) (.-freeHWM s))
+      (.StoreMarked (.-searchAddrBg s) (.addr (.-freeHWM s))))
+
+    (set! (.-freeHWM s) minOffAddr)))
+
+
+
+
+
+
+
+^{:go/end 1191} (go/method setEmpty "setEmpty marks that the scavenger has finished looking at ci\nfor now to prevent the scavenger from getting stuck looking\nat the same chunk.\n\nsetEmpty may only run concurrently with find.\n" [^{:tag (* scavengeIndex)} s ^chunkIdx ci]
+  (let [val (.load (aget (.-chunks s) ci))]
+    ^{:go/via [scavChunkFlags]} (.setEmpty val)
+    (.store (aget (.-chunks s) ci) val)))
+
+
+
+
+(go/type atomicScavChunkData "atomicScavChunkData is an atomic wrapper around a scavChunkData\nthat stores it in its packed form.\n" (struct
+    ^{:line 1196 :tag atomic/Uint64} value))
+
+
+
+^{:go/end 1202} (go/method load "load loads and unpacks a scavChunkData.\n" ^scavChunkData [^{:tag (* atomicScavChunkData)} sc]
+  (unpackScavChunkData (.Load (.-value sc))))
+
+
+
+
+^{:go/end 1208} (go/method store "store packs and writes a new scavChunkData. store must be serialized\nwith other calls to store.\n" [^{:tag (* atomicScavChunkData)} sc ^scavChunkData ssc]
+  (.Store (.-value sc) (.pack ssc)))
+
+
+
+
+
+
+(go/type scavChunkData "scavChunkData tracks information about a palloc chunk for\nscavenging. It packs well into 64 bits.\n\nThe zero value always represents a valid newly-grown chunk.\n" (struct
+
+
+
+
+    ^{:line 1219 :tag uint16 :doc "inUse indicates how many pages in this chunk are currently\nallocated.\n\nOnly the first 10 bits are used.\n"} inUse
+
+
+
+
+
+    ^{:line 1225 :tag uint16 :doc "lastInUse indicates how many pages in this chunk were allocated\nwhen we transitioned from gen-1 to gen.\n\nOnly the first 10 bits are used.\n"} lastInUse
+
+
+
+    ^{:line 1229 :tag uint32 :doc "gen is the generation counter from a scavengeIndex from the\nlast time this scavChunkData was updated.\n"} gen
+
+
+
+
+    ^{:line 1234 :doc "scavChunkFlags represents additional flags\n\nNote: only 6 bits are available.\n"} scavChunkFlags))
+
+
+
+^{:go/end 1245} (go/func unpackScavChunkData "unpackScavChunkData unpacks a scavChunkData from a uint64.\n" ^scavChunkData [^uint64 sc]
+  ^{:go/breaks [2 4 6 8]} (lit scavChunkData
+    :inUse (conv uint16 sc)
+    :lastInUse (bit-and (conv uint16 (>> sc 16)) scavChunkInUseMask)
+    :gen (conv uint32 (>> sc 32))
+    :scavChunkFlags (conv scavChunkFlags (bit-and (conv uint8 (>> sc (+ 16 logScavChunkInUseMax))) scavChunkFlagsMask))))
+
+
+
+
+^{:go/end 1253} (go/method pack "pack returns sc packed into a uint64.\n" ^uint64 [^scavChunkData sc]
+  (bit-or (conv uint64 (.-inUse sc))
+    (<< (conv uint64 (.-lastInUse sc)) 16)
+    (<< (conv uint64 (.-scavChunkFlags sc)) (+ 16 logScavChunkInUseMax))
+    (<< (conv uint64 (.-gen sc)) 32)))
+
+
+(go/const
+
+
+
+
+  ^{:line 1260} [^{:tag scavChunkFlags :val 1 :doc "scavChunkHasFree indicates whether the chunk has anything left to\nscavenge. This is the opposite of \"empty,\" used elsewhere in this\nfile. The reason we say \"HasFree\" here is so the zero value is\ncorrect for a newly-grown chunk. (New memory is scavenged.)\n"} scavChunkHasFree (<< 1 iota)]
+
+
+
+  ^{:line 1264} [^{:val 6 :doc "scavChunkMaxFlags is the maximum number of flags we can have, given how\na scavChunkData is packed into 8 bytes.\n"} scavChunkMaxFlags 6]
+  ^{:line 1265} [^{:val 63} scavChunkFlagsMask (- (<< 1 scavChunkMaxFlags) 1)]
+
+
+
+
+
+  ^{:line 1271} [^{:val 10 :doc "logScavChunkInUseMax is the number of bits needed to represent the number\nof pages allocated in a single chunk. This is 1 more than log2 of the\nnumber of pages in the chunk because we need to represent a fully-allocated\nchunk.\n"} logScavChunkInUseMax (+ logPallocChunkPages 1)]
+  ^{:line 1272} [^{:val 1023} scavChunkInUseMask (- (<< 1 logScavChunkInUseMax) 1)])
+
+
+
+(go/type scavChunkFlags "scavChunkFlags is a set of bit-flags for the scavenger for each palloc chunk.\n" uint8)
+
+
+^{:go/end 1281} (go/method isEmpty "isEmpty returns true if the hasFree flag is unset.\n" ^bool [^{:tag (* scavChunkFlags)} sc]
+  (== (bit-and @sc scavChunkHasFree) 0))
+
+
+
+^{:go/end 1286} (go/method setEmpty "setEmpty clears the hasFree flag.\n" [^{:tag (* scavChunkFlags)} sc]
+  (set! @sc bit-and-not scavChunkHasFree))
+
+
+
+^{:go/end 1291} (go/method setNonEmpty "setNonEmpty sets the hasFree flag.\n" [^{:tag (* scavChunkFlags)} sc]
+  (set! @sc bit-or scavChunkHasFree))
+
+
+
+
+^{:go/end 1313} (go/method shouldScavenge "shouldScavenge returns true if the corresponding chunk should be interrogated\nby the scavenger.\n" ^bool [^scavChunkData sc ^uint32 currGen ^bool force]
+  (when ^{:go/via [scavChunkFlags]} (.isEmpty sc)
+    ;; Nothing to scavenge.
+    (return false))
+
+  (when force
+    ;; We're forcing the memory to be scavenged.
+    (return true))
+
+  (when (== (.-gen sc) currGen)
+    ;; In the current generation, if either the current or last generation
+    ;; is dense, then skip scavenging. Inverting that, we should scavenge
+    ;; if both the current and last generation were not dense.
+    (return (and (< (.-inUse sc) scavChunkHiOccPages) (< (.-lastInUse sc) scavChunkHiOccPages))))
+
+  ;; If we're one or more generations ahead, we know inUse represents the current
+  ;; state of the chunk, since otherwise it would've been updated already.
+  (< (.-inUse sc) scavChunkHiOccPages))
+
+
+
+^{:go/end 1330} (go/method alloc "alloc updates sc given that npages were allocated in the corresponding chunk.\n" [^{:tag (* scavChunkData)} sc ^uint npages ^uint32 newGen]
+  (when (> (+ (conv uint (.-inUse sc)) npages) pallocChunkPages)
+    (print "runtime: inUse=" (.-inUse sc) " npages=" npages "\n")
+    (throw "too many pages allocated in chunk?"))
+
+  (when (!= (.-gen sc) newGen)
+    (set! (.-lastInUse sc) (.-inUse sc))
+    (set! (.-gen sc) newGen))
+
+  (set! (.-inUse sc) + (conv uint16 npages))
+  (when (== (.-inUse sc) pallocChunkPages)
+    ;; There's nothing for the scavenger to take from here.
+    ^{:go/via [scavChunkFlags]} (.setEmpty sc)))
+
+
+
+
+^{:go/end 1346} (go/method free "free updates sc given that npages was freed in the corresponding chunk.\n" [^{:tag (* scavChunkData)} sc ^uint npages ^uint32 newGen]
+  (when (< (conv uint (.-inUse sc)) npages)
+    (print "runtime: inUse=" (.-inUse sc) " npages=" npages "\n")
+    (throw "allocated pages below zero?"))
+
+  (when (!= (.-gen sc) newGen)
+    (set! (.-lastInUse sc) (.-inUse sc))
+    (set! (.-gen sc) newGen))
+
+  (set! (.-inUse sc) - (conv uint16 npages))
+  ;; The scavenger can no longer be done with this chunk now that
+  ;; new memory has been freed into it.
+  ^{:go/via [scavChunkFlags]} (.setNonEmpty sc))
+
+
+(go/type piController (struct
+    ^{:line 1349 :tag float64} kp ; Proportional constant.
+    ^{:line 1350 :tag float64} ti ; Integral time constant.
+    ^{:line 1351 :tag float64} tt ; Reset time.
+
+    ^{:line 1353 :tag float64} min ^float64 max ; Output boundaries.
+
+    ;; PI controller state.
+
+    ^{:line 1357 :tag float64} errIntegral ; Integral of the error from t=0 to now.
+
+
+    ^{:line 1360 :tag bool :doc "Error flags.\n"} errOverflow ; Set if errIntegral ever overflowed.
+    ^{:line 1361 :tag bool} inputOverflow)) ; Set if an operation with the input overflowed.
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1409} (go/method next "next provides a new sample to the controller.\n\ninput is the sample, setpoint is the desired point, and period is how much\ntime (in whatever unit makes the most sense) has passed since the last sample.\n\nReturns a new value for the variable it's controlling, and whether the operation\ncompleted successfully. One reason this might fail is if error has been growing\nin an unbounded manner, to the point of overflow.\n\nIn the specific case of an error overflow occurs, the errOverflow field will be\nset and the rest of the controller's internal state will be fully reset.\n" [^{:tag (* piController)} c ^float64 input ^float64 setpoint ^float64 period] :results [float64 bool]
+  ;; Compute the raw output value.
+  (let [prop (* (.-kp c) (- setpoint input))
+      ^{:line 1378} rawOutput (+ prop (.-errIntegral c))
+
+      ;; Clamp rawOutput into output.
+      ^{:line 1381} output rawOutput]
+    (when (or (isInf output) (isNaN output))
+      ;; The input had a large enough magnitude that either it was already
+      ;; overflowed, or some operation with it overflowed.
+      ;; Set a flag and reset. That's the safest thing to do.
+      (.reset c)
+      (set! (.-inputOverflow c) true)
+      (return (.-min c) false))
+
+    (cond (< output (.-min c))
+      (set! output (.-min c))
+      (> output (.-max c))
+      (set! output (.-max c)))
+
+
+    ;; Update the controller's state.
+    (when (and (!= (.-ti c) 0) (!= (.-tt c) 0))
+      (set! (.-errIntegral c) + (+ (* (/ (* (.-kp c) period) (.-ti c)) (- setpoint input)) (* (/ period (.-tt c)) (- output rawOutput))))
+      (when (or (isInf (.-errIntegral c)) (isNaN (.-errIntegral c)))
+        ;; So much error has accumulated that we managed to overflow.
+        ;; The assumptions around the controller have likely broken down.
+        ;; Set a flag and reset. That's the safest thing to do.
+        (.reset c)
+        (set! (.-errOverflow c) true)
+        (return (.-min c) false)))
+
+
+    (return output true)))
+
+
+
+^{:go/end 1414} (go/method reset "reset resets the controller state, except for controller error flags.\n" [^{:tag (* piController)} c]
+  (set! (.-errIntegral c) 0))

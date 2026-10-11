@@ -1,0 +1,159 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.debug.dwarf) (go/file "typeunit.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [strconv "strconv"]])
+
+
+;; Parse the type units stored in a DWARF4 .debug_types section. Each
+;; type unit defines a single primary type and an 8-byte signature.
+;; Other sections may then use formRefSig8 to refer to the type.
+
+
+
+(go/type typeUnit "The typeUnit format is a single type with a signature. It holds\nthe same data as a compilation unit.\n" (struct
+    ^{:line 19} unit
+    ^{:line 20 :tag Offset} toff ; Offset to signature type within data.
+    ^{:line 21 :tag string} name ; Name of .debug_type section.
+    ^{:line 22 :tag Type} cache)) ; Cache the type, nil to start.
+
+
+
+^{:go/end 85} (go/method parseTypes "Parse a .debug_types section.\n" ^error [^{:tag (* Data)} d ^string name ^{:tag (slice byte)} types]
+  ^{:go/breaks [[3 84]]} (let [b (makeBuf d (lit unknownFormat) name 0 types)]
+    (while (> (len (.-data b)) 0)
+      (let [base (.-off b)
+          (values n dwarf64) (.unitLength b)]
+        (when (!= n (conv Offset (conv uint32 n)))
+          (.error b "type unit length overflow")
+          (return (.-err b)))
+
+        (let [hdroff (.-off b)
+            ^{:line 36} vers (conv int (.uint16 b))]
+          (when (!= vers 4)
+            (.error b (+ "unsupported DWARF version " (strconv/Itoa vers)))
+            (return (.-err b)))
+
+          (let [^uint64 ao (zero uint64)]
+            (if (not dwarf64)
+              (set! ao (conv uint64 (.uint32 b)))
+
+              (set! ao (.uint64 b)))
+
+            (let [(values atable err) (.parseAbbrev d ao vers)]
+              (when (!= err nil)
+                (return err))
+
+              (let [asize (.uint8 b)
+                  ^{:line 52} sig (.uint64 b)
+
+                  ^{:line 54 :tag uint32} toff (zero uint32)]
+                (if (not dwarf64)
+                  (set! toff (.uint32 b))
+
+                  (let [to64 (.uint64 b)]
+                    (when (!= to64 (conv uint64 (conv uint32 to64)))
+                      (.error b "type unit type offset overflow")
+                      (return (.-err b)))
+
+                    (set! toff (conv uint32 to64))))
+
+
+                (let [boff (.-off b)]
+                  (aset (.-typeSigs d) sig (addr ^{:go/breaks [2 [4 77] 6]} (lit typeUnit
+                        :unit ^{:go/breaks [2 4 6 8 10 12 14]} (lit unit
+                          :base base
+                          :off boff
+                          :data (.bytes b (conv int (- n (- (.-off b) hdroff))))
+                          :atable atable
+                          :asize (conv int asize)
+                          :vers vers
+                          :is64 dwarf64)
+
+                        :toff (conv Offset toff)
+                        :name name)))
+
+                  (when (!= (.-err b) nil)
+                    (return (.-err b))))))))))
+
+
+    nil))
+
+
+
+^{:go/end 106} (go/method sigToType "Return the type for a type signature.\n" [^{:tag (* Data)} d ^uint64 sig] :results [Type error]
+  (let [tu (aget (.-typeSigs d) sig)]
+    (when (== tu nil)
+      (return nil (fmt/Errorf "no type unit with signature %v" sig)))
+
+    (when (!= (.-cache tu) nil)
+      (return (.-cache tu) nil))
+
+
+    (let [b (makeBuf d tu (.-name tu) ^{:go/via [unit]} (.-off tu) ^{:go/via [unit]} (.-data tu))
+        ^{:line 98} r (addr (lit typeUnitReader :d d :tu tu :b b))
+        (values t err) (.readType d (.-name tu) r (.-toff tu) (make (map Offset Type)) nil)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (set! (.-cache tu) t)
+      (return t nil))))
+
+
+
+(go/type typeUnitReader "typeUnitReader is a typeReader for a tagTypeUnit.\n" (struct
+    ^{:line 110 :tag (* Data)} d
+    ^{:line 111 :tag (* typeUnit)} tu
+    ^{:line 112 :tag buf} b
+    ^{:line 113 :tag error} err))
+
+
+
+^{:go/end 125} (go/method Seek "Seek to a new position in the type unit.\n" [^{:tag (* typeUnitReader)} tur ^Offset off]
+  (set! (.-err tur) nil)
+  (let [doff (- off ^{:go/via [unit]} (.-off (.-tu tur)))]
+    (when (or (< doff 0) (>= doff (conv Offset (len ^{:go/via [unit]} (.-data (.-tu tur))))))
+      (set! (.-err tur) (fmt/Errorf "%s: offset %d out of range; max %d" (.-name (.-tu tur)) doff (len ^{:go/via [unit]} (.-data (.-tu tur)))))
+      (return))
+
+    (set! (.-b tur) (makeBuf (.-d tur) (.-tu tur) (.-name (.-tu tur)) off (subslice ^{:go/via [unit]} (.-data (.-tu tur)) doff)))))
+
+
+
+^{:go/end 130} (go/method AddressSize "AddressSize returns the size in bytes of addresses in the current type unit.\n" ^int [^{:tag (* typeUnitReader)} tur]
+  (.-asize (.-unit (.-tu tur))))
+
+
+
+^{:go/end 146} (go/method Next "Next reads the next [Entry] from the type unit.\n" [^{:tag (* typeUnitReader)} tur] :results [(* Entry) error]
+  (when (!= (.-err tur) nil)
+    (return nil (.-err tur)))
+
+  (when (== (len ^{:go/via [unit]} (.-data (.-tu tur))) 0)
+    (return nil nil))
+
+  (let [e (.entry (.-b tur) nil (addr (.-unit (.-tu tur))))]
+    (when (!= (.-err (.-b tur)) nil)
+      (set! (.-err tur) (.-err (.-b tur)))
+      (return nil (.-err tur)))
+
+    (return e nil)))
+
+
+
+^{:go/end 155} (go/method clone "clone returns a new reader for the type unit.\n" ^typeReader [^{:tag (* typeUnitReader)} tur]
+  (addr ^{:go/breaks [2 4 6]} (lit typeUnitReader
+      :d (.-d tur)
+      :tu (.-tu tur)
+      :b (makeBuf (.-d tur) (.-tu tur) (.-name (.-tu tur)) ^{:go/via [unit]} (.-off (.-tu tur)) ^{:go/via [unit]} (.-data (.-tu tur))))))
+
+
+
+
+^{:go/end 160} (go/method offset "offset returns the current offset.\n" ^Offset [^{:tag (* typeUnitReader)} tur]
+  (.-off (.-b tur)))

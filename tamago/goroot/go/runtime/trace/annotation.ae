@@ -1,0 +1,198 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime.trace) (go/file "annotation.go" :imports [
+
+
+    ^{:line 8} [context "context"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [atomic "sync/atomic"]
+    ^{:line 11} [_ "unsafe"]])
+
+
+(go/type traceContextKey (struct))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 63} (go/func NewTask "NewTask creates a task instance with the type taskType and returns\nit along with a Context that carries the task.\nIf the input context contains a task, the new task is its subtask.\n\nThe taskType is used to classify task instances. Analysis tools\nlike the Go execution tracer may assume there are only a bounded\nnumber of unique task types in the system.\n\nThe returned Task's [Task.End] method is used to mark the task's end.\nThe trace tool measures task latency as the time between task creation\nand when the End method is called, and provides the latency\ndistribution per task type.\nIf the End method is called multiple times, only the first\ncall is used in the latency measurement.\n\n\tctx, task := trace.NewTask(ctx, \"awesomeTask\")\n\ttrace.WithRegion(ctx, \"preparation\", prepWork)\n\t// preparation of the task\n\tgo func() {  // continue processing the task in a separate goroutine.\n\t    defer task.End()\n\t    trace.WithRegion(ctx, \"remainingWork\", remainingWork)\n\t}()\n" [^context/Context pctx ^string taskType] :results [^context/Context ctx ^{:tag (* Task)} task]
+  (let [pid (.-id (fromContext pctx))
+      ^{:line 40} id (newID)]
+    (userTaskCreate id pid taskType)
+    (let [s (addr (lit Task :id id))]
+      (return (context/WithValue pctx (lit traceContextKey) s) s))))
+
+;; We allocate a new task even when
+;; the tracing is disabled because the context and task
+;; can be used across trace enable/disable boundaries,
+;; which complicates the problem.
+;;
+;; For example, consider the following scenario:
+;;   - trace is enabled.
+;;   - trace.WithRegion is called, so a new context ctx
+;;     with a new region is created.
+;;   - trace is disabled.
+;;   - trace is enabled again.
+;;   - trace APIs with the ctx is called. Is the ID in the task
+;;   a valid one to use?
+;;
+;; TODO(hyangah): reduce the overhead at least when
+;; tracing is disabled. Maybe the id can embed a tracing
+;; round number and ignore ids generated from previous
+;; tracing round.
+
+
+^{:go/end 70} (go/func fromContext ^{:tag (* Task)} [^context/Context ctx]
+  (when [(values s ok) (assert (* Task) (.Value ctx (lit traceContextKey)))] ok
+    (return s))
+
+  (addr bgTask))
+
+
+
+(go/type Task "Task is a data type for tracing a user-defined, logical operation.\n" (struct
+    ^{:line 74 :tag uint64} id))
+;; TODO(hyangah): record parent id?
+
+
+
+^{:go/end 81} (go/method End "End marks the end of the operation represented by the [Task].\n" [^{:tag (* Task)} t]
+  (userTaskEnd (.-id t)))
+
+
+(go/var ^uint64 lastTaskID 0) ; task id issued last time
+
+^{:go/end 88} (go/func newID ^uint64 []
+  ;; TODO(hyangah): use per-P cache
+  (atomic/AddUint64 (addr lastTaskID) 1))
+
+
+(go/var bgTask (lit Task :id (conv uint64 0)))
+
+
+
+
+^{:go/end 98} (go/func Log "Log emits a one-off event with the given category and message.\nCategory can be empty and the API assumes there are only a handful of\nunique categories in the system.\n" [^context/Context ctx ^string category ^string message]
+  (let [id (.-id (fromContext ctx))]
+    (userLog id category message)))
+
+
+
+^{:go/end 108} (go/func Logf "Logf is like [Log], but the value is formatted using the specified format spec.\n" [^context/Context ctx ^string category ^string format & ^{:tag (slice any)} args]
+  (when (IsEnabled)
+    ;; Ideally this should be just Log, but that will
+    ;; add one more frame in the stack trace.
+    (let [id (.-id (fromContext ctx))]
+      (userLog id category (fmt/Sprintf format (spread args))))))
+
+
+
+(go/const
+  ^{:line 111} [^{:val 0} regionStartCode (conv uint64 0)]
+  ^{:line 112} [^{:val 1} regionEndCode (conv uint64 1)])
+
+
+
+
+
+
+
+
+
+^{:go/end 142} (go/func WithRegion "WithRegion starts a region associated with its calling goroutine, runs fn,\nand then ends the region. If the context carries a task, the region is\nassociated with the task. Otherwise, the region is attached to the background\ntask.\n\nThe regionType is used to classify regions, so there should be only a\nhandful of unique region types.\n" [^context/Context ctx ^string regionType ^{:tag (func [])} fn]
+  ;; NOTE:
+  ;; WithRegion helps avoiding misuse of the API but in practice,
+  ;; this is very restrictive:
+  ;; - Use of WithRegion makes the stack traces captured from
+  ;;   region start and end are identical.
+  ;; - Refactoring the existing code to use WithRegion is sometimes
+  ;;   hard and makes the code less readable.
+  ;;     e.g. code block nested deep in the loop with various
+  ;;          exit point with return values
+  ;; - Refactoring the code to use this API with closure can
+  ;;   cause different GC behavior such as retaining some parameters
+  ;;   longer.
+  ;; This causes more churns in code than I hoped, and sometimes
+  ;; makes the code less readable.
+
+  (let [id (.-id (fromContext ctx))]
+    (userRegion id regionStartCode regionType)
+    (defer (userRegion id regionEndCode regionType))
+    (go/call fn)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 159} (go/func StartRegion "StartRegion starts a region and returns it.\nThe returned Region's [Region.End] method must be called\nfrom the same goroutine where the region was started.\nWithin each goroutine, regions must nest. That is, regions started\nafter this region must be ended before this region can be ended.\nRecommended usage is\n\n\tdefer trace.StartRegion(ctx, \"myTracedRegion\").End()\n" ^{:tag (* Region)} [^context/Context ctx ^string regionType]
+  (when (not (IsEnabled))
+    (return noopRegion))
+
+  (let [id (.-id (fromContext ctx))]
+    (userRegion id regionStartCode regionType)
+    (addr (lit Region id regionType))))
+
+
+
+(go/type Region "Region is a region of code whose execution time interval is traced.\n" (struct
+    ^{:line 163 :tag uint64} id
+    ^{:line 164 :tag string} regionType))
+
+
+(go/var noopRegion (addr (lit Region)))
+
+
+^{:go/end 175} (go/method End "End marks the end of the traced code region.\n" [^{:tag (* Region)} r]
+  (when (== r noopRegion)
+    (return))
+
+  (userRegion (.-id r) regionEndCode (.-regionType r)))
+
+
+
+
+
+^{:go/end 182} (go/func IsEnabled "IsEnabled reports whether tracing is enabled.\nThe information is advisory only. The tracing status\nmay have changed by the time this function returns.\n" ^bool []
+  (.Load (.-enabled tracing)))
+
+
+;;
+;; Function bodies are defined in runtime/trace.go
+;;
+
+
+(go/func ^:extern userTaskCreate "emits UserTaskCreate event.\n" [^uint64 id ^uint64 parentID ^string taskType])
+
+
+(go/func ^:extern userTaskEnd "emits UserTaskEnd event.\n" [^uint64 id])
+
+
+(go/func ^:extern userRegion "emits UserRegion event.\n" [^uint64 id ^uint64 mode ^string regionType])
+
+
+(go/func ^:extern userLog "emits UserLog event.\n" [^uint64 id ^string category ^string message])

@@ -1,0 +1,139 @@
+;; NXP Data Co-Processor (DCP) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.dcp) (go/file "key.go" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [aes "crypto/aes"]
+    ^{:line 14} [binary "encoding/binary"]
+    ^{:line 15} [errors "errors"]
+
+    ^{:line 17} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 18} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 82} (go/method DeriveKey "DeriveKey derives a hardware unique key in a manner equivalent to PKCS#11\nC_DeriveKey with CKM_AES_CBC_ENCRYPT_DATA.\n\nThe diversifier is AES-128-CBC encrypted using the internal OTPMK (when SNVS\nis enabled).\n\n*WARNING*: when SNVS is not enabled a default non-unique test vector is used\nand therefore key derivation is *unsafe*, see snvs.Available().\n\nA negative index argument results in the derived key being computed and\nreturned.\n\nAn index argument equal or greater than 0 moves the derived key, through\nDeriveKeyMemory, to the corresponding internal DCP key RAM slot (see\nSetKey()). In this case no key is returned by the function.\n" [^{:tag (* DCP)} hw ^{:tag (slice byte)} diversifier ^{:tag (slice byte)} iv ^int index] :results [^{:tag (slice byte)} key ^error err]
+  (when (!= (len iv) aes/BlockSize)
+    (return nil (errors/New "invalid IV size")))
+
+
+  ;; prepare diversifier for in-place encryption
+  (set! key (pad diversifier false))
+
+  (let [region (.-DeriveKeyMemory hw)]
+
+    (when (== region nil)
+      (return nil (errors/New "invalid DeriveKeyMemory")))
+
+
+    (let [sourceBufferAddress (.Alloc region key aes/BlockSize)]
+      (defer (.Free region sourceBufferAddress))
+
+      (let [payloadPointer (.Alloc region iv 0)]
+        (defer (.Free region payloadPointer))
+
+        (let [pkt (addr (lit WorkPacket))]
+          (.SetCipherDefaults pkt)
+
+          ;; Use device-specific hardware key for encryption.
+          (set! (.-Control0 pkt) bit-or (<< 1 DCP_CTRL0_CIPHER_ENCRYPT))
+          (set! (.-Control0 pkt) bit-or (<< 1 DCP_CTRL0_OTP_KEY))
+          (set! (.-Control1 pkt) bit-or (<< KEY_SELECT_UNIQUE_KEY DCP_CTRL1_KEY_SELECT))
+          (set! (.-SourceBufferAddress pkt) (conv uint32 sourceBufferAddress))
+          (set! (.-DestinationBufferAddress pkt) (.-SourceBufferAddress pkt))
+          (set! (.-BufferSize pkt) (conv uint32 (len key)))
+          (set! (.-PayloadPointer pkt) (conv uint32 payloadPointer))
+
+          (let [ptr (.Alloc region (.Bytes pkt) 0)]
+            (defer (.Free region ptr))
+
+            (when [(set! err (.cmd hw ptr 1))] (!= err nil)
+              (return nil err))
+
+
+            (if (>= index 0)
+              (return nil (.setKeyData hw index nil (.-DestinationBufferAddress pkt)))
+
+              (.Read region sourceBufferAddress 0 key))
+
+
+            (return)))))))
+
+
+^{:go/end 118} (go/method setKeyData [^{:tag (* DCP)} hw ^int index ^{:tag (slice byte)} key ^uint32 addr] :results [^error err]
+  (let [^uint32 keyLocation (zero uint32)
+      ^{:line 86 :tag uint32} subword (zero uint32)]
+
+    (when (or (< index 0) (> index 3))
+      (return (errors/New "key index must be between 0 and 3")))
+
+
+    (when (and (!= key nil) (!= (len key) aes/BlockSize))
+      (return (errors/New "invalid key size")))
+
+
+    (bits/SetN (addr keyLocation) KEY_INDEX 2r11 (conv uint32 index))
+
+    ^{:go/via [Mutex]} (.Lock hw)
+    (defer ^{:go/via [Mutex]} (.Unlock hw))
+
+    (while (< subword 4)
+      (let [off (* subword 4)]
+
+        (bits/SetN (addr keyLocation) KEY_SUBWORD 2r11 subword)
+        (reg/Write (.-key hw) keyLocation)
+
+        (if (!= key nil)
+          (let [k (subslice key off (+ off 4))]
+            (reg/Write (.-keydata hw) (.Uint32 binary/LittleEndian k)))
+
+          (reg/Move (.-keydata hw) (+ addr off)))
+
+
+        (inc! subword)))
+
+
+    (return)))
+
+
+
+
+^{:go/end 124} (go/method SetKey "SetKey configures an AES-128 key in one of the 4 available slots of the DCP\nkey RAM.\n" [^{:tag (* DCP)} hw ^int index ^{:tag (slice byte)} key] :results [^error err]
+  (.setKeyData hw index key 0))
+
+
+^{:go/end 140} (go/func pad ^{:tag (slice byte)} [^{:tag (slice byte)} buf ^bool extraBlock]
+  (let [padLen 0
+      ^{:line 128} r (% (len buf) aes/BlockSize)]
+
+    (cond (!= r 0)
+      (set! padLen (- aes/BlockSize r))
+      ^{:line 132} extraBlock
+      (set! padLen aes/BlockSize))
+
+
+    (let [padding (lit (slice byte) (conv byte padLen))]
+      (set! padding (bytes/Repeat padding padLen))
+
+      (append buf (spread padding)))))

@@ -1,0 +1,223 @@
+;; Copyright 2017 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.trace) (go/file "mud.go" :imports [
+
+
+    ^{:line 8} [cmp "cmp"]
+    ^{:line 9} [math "math"]
+    ^{:line 10} [slices "slices"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type mud "mud is an updatable mutator utilization distribution.\n\nThis is a continuous distribution of duration over mutator\nutilization. For example, the integral from mutator utilization a\nto b is the total duration during which the mutator utilization was\nin the range [a, b].\n\nThis distribution is *not* normalized (it is not a probability\ndistribution). This makes it easier to work with as it's being\nupdated.\n\nIt is represented as the sum of scaled uniform distribution\nfunctions and Dirac delta functions (which are treated as\ndegenerate uniform distributions).\n" (struct
+    ^{:line 28 :tag (slice edge)} sorted ^{:tag (slice edge)} unsorted
+
+
+
+    ^{:line 32 :tag float64 :doc "trackMass is the inverse cumulative sum to track as the\ndistribution is updated.\n"} trackMass
+
+
+
+    ^{:line 36 :tag int :doc "trackBucket is the bucket in which trackMass falls. If the\ntotal mass of the distribution is < trackMass, this is\nlen(hist).\n"} trackBucket
+
+
+    ^{:line 39 :tag float64 :doc "trackSum is the cumulative sum of hist[:trackBucket]. Once\ntrackSum >= trackMass, trackBucket must be recomputed.\n"} trackSum
+
+
+    ^{:line 42 :tag (array mudDegree float64) :doc "hist is a hierarchical histogram of distribution mass.\n"} hist))
+
+
+(go/const
+
+
+  ^{:line 48} [^{:val 1024 :doc "mudDegree is the number of buckets in the MUD summary\nhistogram.\n"} mudDegree 1024])
+
+
+(go/type edge (struct
+
+    ^{:line 53 :tag float64 :doc "At x, the function increases by y.\n"} x ^{:tag float64 :doc "At x, the function increases by y.\n"} delta
+
+    ^{:line 55 :tag float64 :doc "Additionally at x is a Dirac delta function with area dirac.\n"} dirac))
+
+
+
+
+^{:go/end 117} (go/method add "add adds a uniform function over [l, r] scaled so the total weight\nof the uniform is area. If l==r, this adds a Dirac delta function.\n" [^{:tag (* mud)} d ^float64 l ^float64 r ^float64 area]
+  (when (== area 0)
+    (return))
+
+
+  (when (< r l)
+    (set! (values l r) (values r l)))
+
+
+  ;; Add the edges.
+  (if (== l r)
+    (set! (.-unsorted d) (append (.-unsorted d) (lit edge l 0 area)))
+
+    (let [delta (/ area (- r l))]
+      (set! (.-unsorted d) (append (.-unsorted d) (lit edge l delta 0) (lit edge r (- delta) 0)))))
+
+
+  ;; Update the histogram.
+  (let [h (addr (.-hist d))
+      (values lbFloat lf) (math/Modf (* l mudDegree))
+      ^{:line 80} lb (conv int lbFloat)]
+    (when (>= lb mudDegree)
+      (set! (values lb lf) (values (- mudDegree 1) 1)))
+
+    (if (== l r)
+      (set! (aget h lb) + area)
+
+      (let [(values rbFloat rf) (math/Modf (* r mudDegree))
+          ^{:line 88} rb (conv int rbFloat)]
+        (when (>= rb mudDegree)
+          (set! (values rb rf) (values (- mudDegree 1) 1)))
+
+        (if (== lb rb)
+          (set! (aget h lb) + area)
+
+          (let [perBucket (/ area (- r l) mudDegree)]
+            (set! (aget h lb) + (* perBucket (- 1 lf)))
+            (set! (aget h rb) + (* perBucket rf))
+            (for [i (+ lb 1)] (< i rb) (inc! i)
+              (set! (aget h i) + perBucket))))))
+
+
+
+
+    ;; Update mass tracking.
+    (when [thresh (/ (conv float64 (.-trackBucket d)) mudDegree)] (< l thresh)
+      (if (< r thresh)
+        (set! (.-trackSum d) + area)
+
+        (set! (.-trackSum d) + (/ (* area (- thresh l)) (- r l))))
+
+      (when (>= (.-trackSum d) (.-trackMass d))
+        ;; The tracked mass now falls in a different
+        ;; bucket. Recompute the inverse cumulative sum.
+        (.setTrackMass d (.-trackMass d))))))
+
+
+
+
+
+
+
+
+
+^{:go/end 142} (go/method setTrackMass "setTrackMass sets the mass to track the inverse cumulative sum for.\n\nSpecifically, mass is a cumulative duration, and the mutator\nutilization bounds for this duration can be queried using\napproxInvCumulativeSum.\n" [^{:tag (* mud)} d ^float64 mass]
+  (set! (.-trackMass d) mass)
+
+  ;; Find the bucket currently containing trackMass by computing
+  ;; the cumulative sum.
+  (let [sum 0.0]
+    (range [i val (subslice (.-hist d))]
+      (let [newSum (+ sum val)]
+        (when (> newSum mass)
+          ;; mass falls in bucket i.
+          (set! (.-trackBucket d) i)
+          (set! (.-trackSum d) sum)
+          (return))
+
+        (set! sum newSum)))
+
+    (set! (.-trackBucket d) (len (.-hist d)))
+    (set! (.-trackSum d) sum)))
+
+
+
+
+
+
+
+^{:go/end 154} (go/method approxInvCumulativeSum "approxInvCumulativeSum is like invCumulativeSum, but specifically\noperates on the tracked mass and returns an upper and lower bound\napproximation of the inverse cumulative sum.\n\nThe true inverse cumulative sum will be in the range [lower, upper).\n" [^{:tag (* mud)} d] :results [float64 float64 bool]
+  (when (== (.-trackBucket d) (len (.-hist d)))
+    (return (math/NaN) (math/NaN) false))
+
+  (return (/ (conv float64 (.-trackBucket d)) mudDegree) (/ (conv float64 (+ (.-trackBucket d) 1)) mudDegree) true))
+
+
+
+
+
+
+
+
+
+^{:go/end 224} (go/method invCumulativeSum "invCumulativeSum returns x such that the integral of d from -∞ to x\nis y. If the total weight of d is less than y, it returns the\nmaximum of the distribution and false.\n\nSpecifically, y is a cumulative duration, and invCumulativeSum\nreturns the mutator utilization x such that at least y time has\nbeen spent with mutator utilization <= x.\n" [^{:tag (* mud)} d ^float64 y] :results [float64 bool]
+  (when (and (== (len (.-sorted d)) 0) (== (len (.-unsorted d)) 0))
+    (return (math/NaN) false))
+
+
+  ;; Sort edges.
+  (let [edges (.-unsorted d)]
+    (^{:inst [(slice edge) edge]} slices/SortFunc edges ^{:go/end 172} (fn ^int [^edge a ^edge b]
+        (^{:inst [float64]} cmp/Compare (.-x a) (.-x b))))
+
+    ;; Merge with sorted edges.
+    (set! (.-unsorted d) nil)
+    (if (== (.-sorted d) nil)
+      (set! (.-sorted d) edges)
+
+      (let [oldSorted (.-sorted d)
+          ^{:line 179} newSorted (make (slice edge) (+ (len oldSorted) (len edges)))
+          (values i j) (values 0 0)]
+        (range [o newSorted]
+          (cond (>= i (len oldSorted)) (do
+              (copy (subslice newSorted o) (subslice edges j))
+              (break))
+            (>= j (len edges)) (do
+              (copy (subslice newSorted o) (subslice oldSorted i))
+              (break))
+            (< (.-x (aget oldSorted i)) (.-x (aget edges j))) (do
+              (aset newSorted o (aget oldSorted i))
+              (inc! i)) :else
+            (do
+              (aset newSorted o (aget edges j))
+              (inc! j))))
+
+
+        (set! (.-sorted d) newSorted)))
+
+
+    ;; Traverse edges in order computing a cumulative sum.
+    (let [(values csum rate prevX) (values 0.0 0.0 0.0)]
+      (range [_ e (.-sorted d)]
+        (let [newCsum (+ csum (* (- (.-x e) prevX) rate))]
+          (when (>= newCsum y)
+            ;; y was exceeded between the previous edge
+            ;; and this one.
+            (when (== rate 0)
+              ;; Anywhere between prevX and
+              ;; e.x will do. We return e.x
+              ;; because that takes care of
+              ;; the y==0 case naturally.
+              (return (.-x e) true))
+
+            (return (+ (/ (- y csum) rate) prevX) true))
+
+          (set! newCsum + (.-dirac e))
+          (when (>= newCsum y)
+            ;; y was exceeded by the Dirac delta at e.x.
+            (return (.-x e) true))
+
+          (set! (values csum prevX) (values newCsum (.-x e)))
+          (set! rate + (.-delta e))))
+
+      (return prevX false))))

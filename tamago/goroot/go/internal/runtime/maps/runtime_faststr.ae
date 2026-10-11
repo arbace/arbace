@@ -1,0 +1,420 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.runtime.maps) (go/file "runtime_faststr.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [goarch "internal/goarch"]
+    ^{:line 10} [goexperiment "internal/goexperiment"]
+    ^{:line 11} [race "internal/race"]
+    ^{:line 12} [sys "internal/runtime/sys"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+^{:go/end 90} (go/method getWithoutKeySmallFastStr ^unsafe/Pointer [^{:tag (* Map)} m ^{:tag (* abi/MapType)} typ ^string key]
+  (let [g ^{:go/breaks [2]} (lit groupReference
+        :data (.-dirPtr m))
+
+
+      ^{:line 21} ctrls @(.ctrls g)
+      ^{:line 22} slotKey (.key g typ 0)
+      ^{:line 23 :tag uintptr} keyStride (zero uintptr)]
+    (if goexperiment/MapSplitGroup
+      (set! keyStride (* 2 goarch/PtrSize)) ; keys are contiguous in split layout
+
+      (set! keyStride (.-KeyStride typ))) ; == SlotSize in interleaved layout
+
+
+    ;; The 64 threshold was chosen based on performance of BenchmarkMapStringKeysEight,
+    ;; where there are 8 keys to check, all of which don't quick-match the lookup key.
+    ;; In that case, we can save hashing the lookup key. That savings is worth this extra code
+    ;; for strings that are long enough that hashing is expensive.
+    (when (> (len key) 64)
+      ;; String hashing and equality might be expensive. Do a quick check first.
+      (let [j abi/MapGroupSlots]
+        (range [i abi/MapGroupSlots]
+          (when (and (== (bit-and ctrls (<< 1 7)) 0) (longStringQuickEqualityTest key @(conv (* string) slotKey)))
+            (when (< j abi/MapGroupSlots)
+              ;; 2 strings both passed the quick equality test.
+              ;; Break out of this loop and do it the slow way.
+              (goto :dohash))
+
+            (set! j i))
+
+          (set! slotKey (conv unsafe/Pointer (+ (conv uintptr slotKey) keyStride)))
+          (set! ctrls >> 8))
+
+        (when (== j abi/MapGroupSlots)
+          ;; No slot passed the quick test.
+          (return nil))
+
+        ;; There's exactly one slot that passed the quick test. Do the single expensive comparison.
+        (set! slotKey (.key g typ (conv uintptr j)))
+        (when (== key @(conv (* string) slotKey))
+          (if goexperiment/MapSplitGroup
+            (return (.elem g typ (conv uintptr j)))
+
+            (return (conv unsafe/Pointer (+ (conv uintptr slotKey) (* 2 goarch/PtrSize))))))
+
+
+        (return nil)))
+
+
+    (let [
+        ;; This path will cost 1 hash and 1+ε comparisons.
+        ^{:line 67 :tag uintptr :go/label :dohash} hash (zero uintptr)]
+      ;; See the related comment in runtime_mapaccess2_fast32
+      (if (and memHashAESImplemented UseAeshash)
+        (set! hash (memHashAES (conv unsafe/Pointer (unsafe/StringData key)) (.-seed m) (conv uintptr (len key))))
+
+        (set! hash (memHashFallback (conv unsafe/Pointer (unsafe/StringData key)) (.-seed m) (conv uintptr (len key)))))
+
+      ^{:go/breaks [[5 89]]} (let [h2 (conv uint8 (h2 hash))]
+        (set! ctrls @(.ctrls g))
+        (set! slotKey (.key g typ 0))
+
+        (range [i (conv uintptr abi/MapGroupSlots)]
+          (when (and (== (conv uint8 ctrls) h2) (== key @(conv (* string) slotKey)))
+            (if goexperiment/MapSplitGroup
+              (return (.elem g typ i))
+
+              (return (conv unsafe/Pointer (+ (conv uintptr slotKey) (* 2 goarch/PtrSize))))))
+
+
+          (set! slotKey (conv unsafe/Pointer (+ (conv uintptr slotKey) keyStride)))
+          (set! ctrls >> 8))
+
+        nil))))
+
+
+
+
+
+^{:go/end 111} (go/func longStringQuickEqualityTest "Returns true if a and b might be equal.\nReturns false if a and b are definitely not equal.\nRequires len(a)>=8.\n" ^bool [^string a ^string b]
+  (when (!= (len a) (len b))
+    (return false))
+
+  ^{:go/breaks [[6 110]]} (let [(values x y) (values (conv unsafe/Pointer (unsafe/StringData a)) (conv unsafe/Pointer (unsafe/StringData b)))]
+    ;; Check first 8 bytes.
+    (when (!= @(conv (* (array 8 byte)) x) @(conv (* (array 8 byte)) y))
+      (return false))
+
+    ;; Check last 8 bytes.
+    (set! x (add x (conv uintptr (- (len a) 8))))
+    (set! y (add y (conv uintptr (- (len a) 8))))
+    (when (!= @(conv (* (array 8 byte)) x) @(conv (* (array 8 byte)) y))
+      (return false))
+
+    true))
+
+
+
+^{:go/end 117} (go/func ^{:go/linkname "runtime_mapaccess1_faststr runtime.mapaccess1_faststr"} runtime_mapaccess1_faststr ^unsafe/Pointer [^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m ^string key]
+  (let [(values p _) (runtime_mapaccess2_faststr typ m key)]
+    ^{:line 116} p))
+
+
+
+^{:go/end 185} (go/func ^{:go/linkname "runtime_mapaccess2_faststr runtime.mapaccess2_faststr"} runtime_mapaccess2_faststr [^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m ^string key] :results [unsafe/Pointer bool]
+  (when (and race/Enabled (!= m nil))
+    (let [callerpc (sys/GetCallerPC)
+        ^{:line 123} pc (abi/FuncPCABIInternal runtime_mapaccess2_faststr)]
+      (race/ReadPC (conv unsafe/Pointer m) callerpc pc)))
+
+
+  (when (or (== m nil) (== (.Used m) 0))
+    (return (conv unsafe/Pointer (addr (aget zeroVal 0))) false))
+
+
+  (when (!= (.-writing m) 0)
+    (fatal "concurrent map read and map write")
+    (return nil false))
+
+
+  (when (<= (.-dirLen m) 0)
+    (let [elem (.getWithoutKeySmallFastStr m typ key)]
+      (when (== elem nil)
+        (return (conv unsafe/Pointer (addr (aget zeroVal 0))) false))
+
+      (return elem true)))
+
+
+  (let [^uintptr hash (zero uintptr)]
+    ;; See the related comment in runtime_mapaccess2_fast32
+    (if (and memHashAESImplemented UseAeshash)
+      (set! hash (memHashAES (conv unsafe/Pointer (unsafe/StringData key)) (.-seed m) (conv uintptr (len key))))
+
+      (set! hash (memHashFallback (conv unsafe/Pointer (unsafe/StringData key)) (.-seed m) (conv uintptr (len key)))))
+
+
+    ;; Select table.
+    (let [idx (.directoryIndex m hash)
+        ^{:line 154} t (.directoryAt m idx)
+
+        ;; Probe table.
+        ^{:line 157} seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))
+        ^{:line 158} h2Hash (h2 hash)]
+      (for [] _ (set! seq (.next seq))
+        (let [g (.group (.-groups t) typ (.-offset seq))
+
+            ^{:line 162} match (.matchH2 (.ctrls g) h2Hash)]
+
+          (while (!= match 0)
+            (let [i (.first match)
+
+                ^{:line 167} slotKey (.key g typ i)]
+              (when (== key @(conv (* string) slotKey))
+                (if goexperiment/MapSplitGroup
+                  (return (.elem g typ i) true)
+
+                  (return (conv unsafe/Pointer (+ (conv uintptr slotKey) (* 2 goarch/PtrSize))) true)))
+
+
+              (set! match (.removeFirst match))))
+
+
+          (set! match (.matchEmpty (.ctrls g)))
+          (when (!= match 0)
+            ;; Finding an empty slot means we've reached the end of
+            ;; the probe sequence.
+            (return (conv unsafe/Pointer (addr (aget zeroVal 0))) false)))))))
+
+
+
+
+^{:go/end 228} (go/method putSlotSmallFastStr ^unsafe/Pointer [^{:tag (* Map)} m ^{:tag (* abi/MapType)} typ ^uintptr hash ^string key]
+  (let [g ^{:go/breaks [2]} (lit groupReference
+        :data (.-dirPtr m))
+
+
+      ^{:line 192} match (.matchH2 (.ctrls g) (h2 hash))]
+
+    ;; Look for an existing slot containing this key.
+    (while (!= match 0)
+      (let [i (.first match)
+
+          ^{:line 198} slotKey (.key g typ i)]
+        (when (== key @(conv (* string) slotKey))
+          ;; Key needs update, as the backing storage may differ.
+          (set! @(conv (* string) slotKey) key)
+          (let [slotElem (.elem g typ i)]
+            (return slotElem)))
+
+        (set! match (.removeFirst match))))
+
+
+    ;; There can't be deleted slots, small maps can't have them
+    ;; (see deleteSmall). Use matchEmptyOrDeleted as it is a bit
+    ;; more efficient than matchEmpty.
+    (set! match (.matchEmptyOrDeleted (.ctrls g)))
+    (when (== match 0)
+      ;; No empty slot found. Need to grow the map.
+      (return nil))
+
+
+    (let [i (.first match)
+
+        ^{:line 219} slotKey (.key g typ i)]
+      (set! @(conv (* string) slotKey) key)
+
+      (let [slotElem (.elem g typ i)]
+
+        (.set (.ctrls g) i (conv ctrl (h2 hash)))
+        (inc! (.-used m))
+
+        ^{:line 227} slotElem))))
+
+
+^{:go/end 258} (go/method uncheckedPutSlotForAssignFastStr ^unsafe/Pointer [^{:tag (* table)} t ^{:tag (* abi/MapType)} typ ^uintptr hash ^string key]
+  (when (== (.-growthLeft t) 0)
+    (panic "invariant failed: growthLeft is unexpectedly 0"))
+
+
+  ;; Given key and its hash hash(key), to insert it, we construct a
+  ;; probeSeq, and use it to find the first group with an unoccupied (empty
+  ;; or deleted) slot. We place the key/value into the first such slot in
+  ;; the group and mark it as full with key's H2.
+  (let [seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))]
+    (for [] _ (set! seq (.next seq))
+      (let [g (.group (.-groups t) typ (.-offset seq))
+
+          ^{:line 243} match (.matchEmptyOrDeleted (.ctrls g))]
+        (when (!= match 0)
+          (let [i (.first match)
+
+              ^{:line 247} slotKey (.key g typ i)]
+            (set! @(conv (* string) slotKey) key)
+
+            (let [slotElem (.elem g typ i)]
+
+              (dec! (.-growthLeft t))
+              (inc! (.-used t))
+              (.set (.ctrls g) i (conv ctrl (h2 hash)))
+              (return slotElem))))))))
+
+
+
+
+
+^{:go/end 406} (go/func ^{:go/linkname "runtime_mapassign_faststr runtime.mapassign_faststr"} runtime_mapassign_faststr ^unsafe/Pointer [^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m ^string key]
+  (when (== m nil)
+    (panic errNilAssign))
+
+  (when race/Enabled
+    (let [callerpc (sys/GetCallerPC)
+        ^{:line 267} pc (abi/FuncPCABIInternal runtime_mapassign_faststr)]
+      (race/WritePC (conv unsafe/Pointer m) callerpc pc)))
+
+  (when (!= (.-writing m) 0)
+    (fatal "concurrent map writes"))
+
+
+  (let [^uintptr hash (zero uintptr)]
+    ;; See the related comment in runtime_mapaccess2_fast32
+    (if (and memHashAESImplemented UseAeshash)
+      (set! hash (memHashAES (conv unsafe/Pointer (unsafe/StringData key)) (.-seed m) (conv uintptr (len key))))
+
+      (set! hash (memHashFallback (conv unsafe/Pointer (unsafe/StringData key)) (.-seed m) (conv uintptr (len key)))))
+
+
+    ;; Set writing after calling Hasher, since Hasher may panic, in which
+    ;; case we have not actually done a write.
+    (set! (.-writing m) bit-xor 1) ; toggle, see comment on writing
+
+    (when (== (.-dirPtr m) nil)
+      (.growToSmall m typ))
+
+
+    (when (== (.-dirLen m) 0)
+      (let [elem (.putSlotSmallFastStr m typ hash key)]
+        (when (== elem nil)
+          ;; Can't fit another entry, grow to full size map.
+          (let [tab (.growToTable m typ)]
+
+            (set! elem (.uncheckedPutSlotForAssignFastStr tab typ hash key))
+            (inc! (.-used m))
+
+            (.checkInvariants tab typ m)))
+
+
+        (when (== (.-writing m) 0)
+          (fatal "concurrent map writes"))
+
+        (set! (.-writing m) bit-xor 1)
+
+        (return elem)))
+
+
+    (let [^unsafe/Pointer slotElem (zero unsafe/Pointer)]
+      (label :outer
+        (while true
+          ;; Select table.
+          (let [idx (.directoryIndex m hash)
+              ^{:line 315} t (.directoryAt m idx)
+
+              ^{:line 317} seq (makeProbeSeq (h1 hash) (.-lengthMask (.-groups t)))
+
+              ;; As we look for a match, keep track of the first deleted slot
+              ;; we find, which we'll use to insert the new entry if
+              ;; necessary.
+              ^{:line 322 :tag groupReference} firstDeletedGroup (zero groupReference)
+              ^{:line 323 :tag uintptr} firstDeletedSlot (zero uintptr)
+
+              ^{:line 325} h2Hash (h2 hash)]
+            (for [] _ (set! seq (.next seq))
+              (let [g (.group (.-groups t) typ (.-offset seq))
+                  ^{:line 328} match (.matchH2 (.ctrls g) h2Hash)]
+
+                ;; Look for an existing slot containing this key.
+                (while (!= match 0)
+                  (let [i (.first match)
+
+                      ^{:line 334} slotKey (.key g typ i)]
+                    (when (== key @(conv (* string) slotKey))
+                      ;; Key needs update, as the backing
+                      ;; storage may differ.
+                      (set! @(conv (* string) slotKey) key)
+                      (set! slotElem (.elem g typ i))
+
+                      (.checkInvariants t typ m)
+                      (break :outer))
+
+                    (set! match (.removeFirst match))))
+
+
+                ;; No existing slot for this key in this group. Is this the end
+                ;; of the probe sequence?
+                (set! match (.matchEmptyOrDeleted (.ctrls g)))
+                (when (== match 0)
+                  (continue)) ; nothing but filled slots. Keep probing.
+
+                (let [i (.first match)]
+                  (when (== (.get (.ctrls g) i) ctrlDeleted)
+                    ;; There are some deleted slots. Remember
+                    ;; the first one, and keep probing.
+                    (when (== (.-data firstDeletedGroup) nil)
+                      (set! firstDeletedGroup g)
+                      (set! firstDeletedSlot i))
+
+                    (continue))
+
+                  ;; We've found an empty slot, which means we've reached the end of
+                  ;; the probe sequence.
+
+                  ;; If we found a deleted slot along the way, we can
+                  ;; replace it without consuming growthLeft.
+                  (when (!= (.-data firstDeletedGroup) nil)
+                    (set! g firstDeletedGroup)
+                    (set! i firstDeletedSlot)
+                    (inc! (.-growthLeft t))) ; will be decremented below to become a no-op.
+
+
+                  ;; If we have no space left, first try to remove some tombstones.
+                  (when (== (.-growthLeft t) 0)
+                    (.pruneTombstones t typ m))
+
+
+                  ;; If there is room left to grow, just insert the new entry.
+                  (when (> (.-growthLeft t) 0)
+                    (let [slotKey (.key g typ i)]
+                      (set! @(conv (* string) slotKey) key)
+
+                      (set! slotElem (.elem g typ i))
+
+                      (.set (.ctrls g) i (conv ctrl h2Hash))
+                      (dec! (.-growthLeft t))
+                      (inc! (.-used t))
+                      (inc! (.-used m))
+
+                      (.checkInvariants t typ m)
+                      (break :outer)))
+
+
+                  (.rehash t typ m)
+                  (continue :outer)))))))
+
+
+
+      (when (== (.-writing m) 0)
+        (fatal "concurrent map writes"))
+
+      (set! (.-writing m) bit-xor 1)
+
+      ^{:line 405} slotElem)))
+
+
+
+^{:go/end 421} (go/func ^{:go/linkname "runtime_mapdelete_faststr runtime.mapdelete_faststr"} runtime_mapdelete_faststr [^{:tag (* abi/MapType)} typ ^{:tag (* Map)} m ^string key]
+  (when race/Enabled
+    (let [callerpc (sys/GetCallerPC)
+        ^{:line 412} pc (abi/FuncPCABIInternal runtime_mapdelete_faststr)]
+      (race/WritePC (conv unsafe/Pointer m) callerpc pc)))
+
+
+  (when (or (== m nil) (== (.Used m) 0))
+    (return))
+
+
+  (.Delete m typ (abi/NoEscape (conv unsafe/Pointer (addr key)))))

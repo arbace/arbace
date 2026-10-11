@@ -1,0 +1,394 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.net.http.fcgi) (go/file "child.go" :imports [
+
+    ;; This file implements FastCGI from the perspective of a child process.
+
+
+    ^{:line 10} [context "context"]
+    ^{:line 11} [errors "errors"]
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [io "io"]
+    ^{:line 14} [net "net"]
+    ^{:line 15} [http "net/http"]
+    ^{:line 16} [cgi "net/http/cgi"]
+    ^{:line 17} [os "os"]
+    ^{:line 18} [strings "strings"]
+    ^{:line 19} [time "time"]])
+
+
+
+
+(go/type request "request holds the state for an in-progress request. As soon as it's complete,\nit's converted to an http.Request.\n" (struct
+    ^{:line 25 :tag (* io/PipeWriter)} pw
+    ^{:line 26 :tag uint16} reqId
+    ^{:line 27 :tag (map string string)} params
+    ^{:line 28 :tag (array 1024 byte)} buf
+    ^{:line 29 :tag (slice byte)} rawParams
+    ^{:line 30 :tag bool} keepConn))
+
+
+
+
+(go/type envVarsContextKey "envVarsContextKey uniquely identifies a mapping of CGI\nenvironment variables to their values in a request context\n" (struct))
+
+^{:go/end 45} (go/func newRequest ^{:tag (* request)} [^uint16 reqId ^uint8 flags]
+  (let [r (addr ^{:go/breaks [2 4 6]} (lit request
+          :reqId reqId
+          :params (lit (map string string))
+          :keepConn (!= (bit-and flags flagKeepConn) 0)))]
+
+    (set! (.-rawParams r) (subslice (.-buf r) _ 0))
+    ^{:line 44} r))
+
+
+
+^{:go/end 71} (go/method parseParams "parseParams reads an encoded []byte into Params.\n" [^{:tag (* request)} r]
+  (let [text (.-rawParams r)]
+    (set! (.-rawParams r) nil)
+    (while (> (len text) 0)
+      (let [(values keyLen n) (readSize text)]
+        (when (== n 0)
+          (return))
+
+        (set! text (subslice text n))
+        (let [(values valLen ^:assign n) (readSize text)]
+          (when (== n 0)
+            (return))
+
+          (set! text (subslice text n))
+          (when (> (+ (conv int keyLen) (conv int valLen)) (len text))
+            (return))
+
+          (let [key (readString text keyLen)]
+            (set! text (subslice text keyLen))
+            (let [val (readString text valLen)]
+              (set! text (subslice text valLen))
+              (aset (.-params r) key val))))))))
+
+
+
+
+(go/type response "response implements http.ResponseWriter.\n" (struct
+    ^{:line 75 :tag (* request)} req
+    ^{:line 76 :tag http/Header} header
+    ^{:line 77 :tag int} code
+    ^{:line 78 :tag bool} wroteHeader
+    ^{:line 79 :tag bool} wroteCGIHeader
+    ^{:line 80 :tag (* bufWriter)} w))
+
+
+^{:go/end 89} (go/func newResponse ^{:tag (* response)} [^{:tag (* child)} c ^{:tag (* request)} req]
+  (addr ^{:go/breaks [2 4 6]} (lit response
+      :req req
+      :header (lit http/Header)
+      :w (newWriter (.-conn c) typeStdout (.-reqId req)))))
+
+
+
+^{:go/end 93} (go/method Header ^http/Header [^{:tag (* response)} r]
+  (.-header r))
+
+
+^{:go/end 103} (go/method Write [^{:tag (* response)} r ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (when (not (.-wroteHeader r))
+    (.WriteHeader r http/StatusOK))
+
+  (when (not (.-wroteCGIHeader r))
+    (.writeCGIHeader r p))
+
+  ^{:go/via [Writer]} (.Write (.-w r) p))
+
+
+^{:go/end 120} (go/method WriteHeader [^{:tag (* response)} r ^int code]
+  (when (.-wroteHeader r)
+    (return))
+
+  (set! (.-wroteHeader r) true)
+  (set! (.-code r) code)
+  (when (== code http/StatusNotModified)
+    ;; Must not have body.
+    (.Del (.-header r) "Content-Type")
+    (.Del (.-header r) "Content-Length")
+    (.Del (.-header r) "Transfer-Encoding"))
+
+  (when (== (.Get (.-header r) "Date") "")
+    (.Set (.-header r) "Date" (.Format (.UTC (time/Now)) http/TimeFormat))))
+
+
+
+
+
+
+
+^{:go/end 138} (go/method writeCGIHeader "writeCGIHeader finalizes the header sent to the client and writes it to the output.\np is not written by writeHeader, but is the first chunk of the body\nthat will be written. It is sniffed for a Content-Type if none is\nset explicitly.\n" [^{:tag (* response)} r ^{:tag (slice byte)} p]
+  (when (.-wroteCGIHeader r)
+    (return))
+
+  (set! (.-wroteCGIHeader r) true)
+  (fmt/Fprintf (.-w r) "Status: %d %s\r\n" (.-code r) (http/StatusText (.-code r)))
+  (when [(values _ hasType) (aget (.-header r) "Content-Type")] (and (!= (.-code r) http/StatusNotModified) (not hasType))
+    (.Set (.-header r) "Content-Type" (http/DetectContentType p)))
+
+  (.Write (.-header r) (.-w r))
+  ^{:go/via [Writer]} (.WriteString (.-w r) "\r\n")
+  ^{:go/via [Writer]} (.Flush (.-w r)))
+
+
+^{:go/end 145} (go/method Flush [^{:tag (* response)} r]
+  (when (not (.-wroteHeader r))
+    (.WriteHeader r http/StatusOK))
+
+  ^{:go/via [Writer]} (.Flush (.-w r)))
+
+
+^{:go/end 150} (go/method Close ^error [^{:tag (* response)} r]
+  (.Flush r)
+  (.Close (.-w r)))
+
+
+(go/type child (struct
+    ^{:line 153 :tag (* conn)} conn
+    ^{:line 154 :tag http/Handler} handler
+
+    ^{:line 156 :tag (map uint16 (* request))} requests)) ; keyed by request ID
+
+
+^{:go/end 165} (go/func newChild ^{:tag (* child)} [^io/ReadWriteCloser rwc ^http/Handler handler]
+  (addr ^{:go/breaks [2 4 6]} (lit child
+      :conn (newConn rwc)
+      :handler handler
+      :requests (make (map uint16 (* request))))))
+
+
+
+^{:go/end 179} (go/method serve [^{:tag (* child)} c]
+  (defer (.Close (.-conn c)))
+  (defer (.cleanUp c))
+  (let [^record rec (zero record)]
+    (while true
+      (when [err (.read rec (.-rwc (.-conn c)))] (!= err nil)
+        (return))
+
+      (when [err (.handleRecord c (addr rec))] (!= err nil)
+        (return)))))
+
+
+
+
+(go/var errCloseConn (errors/New "fcgi: connection should be closed"))
+
+(go/var emptyBody (io/NopCloser (strings/NewReader "")))
+
+
+
+(go/var ^{:doc "ErrRequestAborted is returned by Read when a handler attempts to read the\nbody of a request that has been aborted by the web server.\n"} ErrRequestAborted (errors/New "fcgi: request aborted by web server"))
+
+
+
+(go/var ^{:doc "ErrConnClosed is returned by Read when a handler attempts to read the body of\na request after the connection to the web server has been closed.\n"} ErrConnClosed (errors/New "fcgi: connection to web server closed"))
+
+^{:go/end 276} (go/method handleRecord ^error [^{:tag (* child)} c ^{:tag (* record)} rec]
+  (let [(values req ok) (aget (.-requests c) (.-Id (.-h rec)))]
+    (when (and (not ok) (!= (.-Type (.-h rec)) typeBeginRequest) (!= (.-Type (.-h rec)) typeGetValues))
+      ;; The spec says to ignore unknown request IDs.
+      (return nil))
+
+
+    (switch (.-Type (.-h rec))
+      (case [typeBeginRequest]
+        (when (!= req nil)
+          ;; The server is trying to begin a request with the same ID
+          ;; as an in-progress request. This is an error.
+          (return (errors/New "fcgi: received ID that is already in-flight")))
+
+
+        (let [^beginRequest br (zero beginRequest)]
+          (when [err (.read br (.content rec))] (!= err nil)
+            (return err))
+
+          (when (!= (.-role br) roleResponder)
+            (.writeEndRequest (.-conn c) (.-Id (.-h rec)) 0 statusUnknownRole)
+            (return nil))
+
+          (set! req (newRequest (.-Id (.-h rec)) (.-flags br)))
+          (aset (.-requests c) (.-Id (.-h rec)) req)
+          (return nil)))
+      (case [typeParams]
+        ;; NOTE(eds): Technically a key-value pair can straddle the boundary
+        ;; between two packets. We buffer until we've received all parameters.
+        (when (> (len (.content rec)) 0)
+          (set! (.-rawParams req) (append (.-rawParams req) (spread (.content rec))))
+          (return nil))
+
+        (.parseParams req)
+        (return nil))
+      (case [typeStdin]
+        (let [content (.content rec)]
+          (when (== (.-pw req) nil)
+            (let [^io/ReadCloser body (zero io/ReadCloser)]
+              (if (> (len content) 0)
+                ;; body could be an io.LimitReader, but it shouldn't matter
+                ;; as long as both sides are behaving.
+                (set! (values body (.-pw req)) (io/Pipe))
+
+                (set! body emptyBody))
+
+              (go (.serveRequest c req body))))
+
+          (if (> (len content) 0)
+            ;; TODO(eds): This blocks until the handler reads from the pipe.
+            ;; If the handler takes a long time, it might be a problem.
+            (.Write (.-pw req) content)
+            (do
+              (delete (.-requests c) (.-reqId req))
+              (when (!= (.-pw req) nil)
+                (.Close (.-pw req)))))
+
+
+          (return nil)))
+      (case [typeGetValues]
+        (let [values (lit (map string string) ["FCGI_MPXS_CONNS" "1"])]
+          (.writePairs (.-conn c) typeGetValuesResult 0 values)
+          (return nil)))
+      (case [typeData]
+        ;; If the filter role is implemented, read the data stream here.
+        (return nil))
+      (case [typeAbortRequest]
+        (delete (.-requests c) (.-Id (.-h rec)))
+        (.writeEndRequest (.-conn c) (.-Id (.-h rec)) 0 statusRequestComplete)
+        (when (!= (.-pw req) nil)
+          (.CloseWithError (.-pw req) ErrRequestAborted))
+
+        (when (not (.-keepConn req))
+          ;; connection will close upon return
+          (return errCloseConn))
+
+        (return nil))
+      (default
+        (let [b (make (slice byte) 8)]
+          (aset b 0 (conv byte (.-Type (.-h rec))))
+          (.writeRecord (.-conn c) typeUnknownType 0 b)
+          (return nil))))))
+
+
+
+
+
+^{:go/end 288} (go/func filterOutUsedEnvVars "filterOutUsedEnvVars returns a new map of env vars without the\nvariables in the given envVars map that are read for creating each http.Request\n" ^{:tag (map string string)} [^{:tag (map string string)} envVars]
+  (let [withoutUsedEnvVars (make (map string string))]
+    (range [k v envVars]
+      (when (addFastCGIEnvToContext k)
+        (aset withoutUsedEnvVars k v)))
+
+
+    ^{:line 287} withoutUsedEnvVars))
+
+
+^{:go/end 322} (go/method serveRequest [^{:tag (* child)} c ^{:tag (* request)} req ^io/ReadCloser body]
+  (let [r (newResponse c req)
+      (values httpReq err) (cgi/RequestFromMap (.-params req))]
+    (if (!= err nil) (do
+        ;; there was an error reading the request
+        (.WriteHeader r http/StatusInternalServerError)
+        (.writeRecord (.-conn c) typeStderr (.-reqId req) (conv (slice byte) (.Error err))))
+      (do
+        (set! (.-Body httpReq) body)
+        (let [withoutUsedEnvVars (filterOutUsedEnvVars (.-params req))
+            ^{:line 300} envVarCtx (context/WithValue (.Context httpReq) (lit envVarsContextKey) withoutUsedEnvVars)]
+          (set! httpReq (.WithContext httpReq envVarCtx))
+          (.ServeHTTP (.-handler c) r httpReq))))
+
+    ;; Make sure we serve something even if nothing was written to r
+    (.Write r nil)
+    (.Close r)
+    (.writeEndRequest (.-conn c) (.-reqId req) 0 statusRequestComplete)
+
+    ;; Consume the entire body, so the host isn't still writing to
+    ;; us when we close the socket below in the !keepConn case,
+    ;; otherwise we'd send a RST. (golang.org/issue/4183)
+    ;; TODO(bradfitz): also bound this copy in time. Or send
+    ;; some sort of abort request to the host, so the host
+    ;; can properly cut off the client sending all the data.
+    ;; For now just bound it a little and
+    (io/CopyN io/Discard body (<< 100 20))
+    (.Close body)
+
+    (when (not (.-keepConn req))
+      (.Close (.-conn c)))))
+
+
+
+^{:go/end 332} (go/method cleanUp [^{:tag (* child)} c]
+  (range [_ req (.-requests c)]
+    (when (!= (.-pw req) nil)
+      ;; race with call to Close in c.serveRequest doesn't matter because
+      ;; Pipe(Reader|Writer).Close are idempotent
+      (.CloseWithError (.-pw req) ErrConnClosed))))
+
+
+
+
+
+
+
+
+
+^{:go/end 359} (go/func Serve "Serve accepts incoming FastCGI connections on the listener l, creating a new\ngoroutine for each. The goroutine reads requests and then calls handler\nto reply to them.\nIf l is nil, Serve accepts connections from os.Stdin.\nIf handler is nil, [http.DefaultServeMux] is used.\n" ^error [^net/Listener l ^http/Handler handler]
+  (when (== l nil)
+    (let [^error err (zero error)]
+      (set! (values l err) (net/FileListener os/Stdin))
+      (when (!= err nil)
+        (return err))
+
+      (defer (.Close l))))
+
+  (when (== handler nil)
+    (set! handler http/DefaultServeMux))
+
+  (while true
+    (let [(values rw err) (.Accept l)]
+      (when (!= err nil)
+        (return err))
+
+      (let [c (newChild rw handler)]
+        (go (.serve c))))))
+
+
+
+
+
+
+
+
+^{:go/end 369} (go/func ProcessEnv "ProcessEnv returns FastCGI environment variables associated with the request r\nfor which no effort was made to be included in the request itself - the data\nis hidden in the request's context. As an example, if REMOTE_USER is set for a\nrequest, it will not be found anywhere in r, but it will be included in\nProcessEnv's response (via r's context).\n" ^{:tag (map string string)} [^{:tag (* http/Request)} r]
+  (let [(values env _) (assert (map string string) (.Value (.Context r) (lit envVarsContextKey)))]
+    ^{:line 368} env))
+
+
+
+
+^{:go/breaks [[7 394]] :go/end 395} (go/func addFastCGIEnvToContext "addFastCGIEnvToContext reports whether to include the FastCGI environment variable s\nin the http.Request.Context, accessible via ProcessEnv.\n" ^bool [^string s]
+  ;; Exclude things supported by net/http natively:
+  (switch s
+    (case ^{:go/breaks [3 6 9]} ["CONTENT_LENGTH" "CONTENT_TYPE" "HTTPS"
+        "PATH_INFO" "QUERY_STRING" "REMOTE_ADDR"
+        "REMOTE_HOST" "REMOTE_PORT" "REQUEST_METHOD"
+        "REQUEST_URI" "SCRIPT_NAME" "SERVER_PROTOCOL"]
+      (return false)))
+
+  (when (strings/HasPrefix s "HTTP_")
+    (return false))
+
+  ;; Explicitly include FastCGI-specific things.
+  ;; This list is redundant with the default "return true" below.
+  ;; Consider this documentation of the sorts of things we expect
+  ;; to maybe see.
+  (switch s
+    (case ["REMOTE_USER"]
+      (return true)))
+
+  ;; Unknown, so include it to be safe.
+  true)

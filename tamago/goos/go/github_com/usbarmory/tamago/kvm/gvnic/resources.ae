@@ -1,0 +1,70 @@
+;; Google Compute Engine Virtual Ethernet (gVNIC) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.gvnic) (go/file "resources.go" :imports [
+
+
+    ^{:line 12} [binary "encoding/binary"]
+    ^{:line 13} [bits "math/bits"]
+
+    ^{:line 15} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+(go/const
+  ^{:line 19} [^{:val 2} ADMINQ_CONFIGURE_DEVICE_RESOURCES 0x2]
+
+  ^{:line 21} [^{:val 2} irqDoorbells 2]) ; rx+tx
+
+
+(go/type deviceResourcesCommand (struct
+    ^{:line 25 :tag uint64} CounterArray
+    ^{:line 26 :tag uint64} IRQDBAddr
+    ^{:line 27 :tag uint32} NumCounters
+    ^{:line 28 :tag uint32} NumIRQDBs
+    ^{:line 29 :tag uint32} IRQDBStride
+    ^{:line 30 :tag uint32} NtfyBlockMSIXBaseIdx
+    ^{:line 31 :tag uint8} QueueFormat
+    ^{:line 32 :tag (array 7 byte)} _))
+
+
+^{:go/end 71} (go/method configureDeviceResources [^{:tag (* GVE)} hw] :results [^error err]
+  ;; allocate counter array
+  (let [counterSize (* (conv int (.-Counters (.-Info hw))) 4)
+      (values counterArrayAddr counters) (.Reserve (.-Region hw) counterSize pageSize)
+
+      ;; allocate IRQ doorbells array
+      (values irqDBAddr irqs) (.Reserve (.-Region hw) (* descSize irqDoorbells) pageSize)]
+
+    ;; zero out DMA pages
+    (clear counters)
+    (clear irqs)
+
+    (set! (.-counters hw) counters)
+    (set! (.-irqs hw) irqs)
+
+    (let [cmd (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit deviceResourcesCommand
+            :CounterArray (conv uint64 counterArrayAddr)
+            :IRQDBAddr (conv uint64 irqDBAddr)
+            :NumCounters (conv uint32 (.-Counters (.-Info hw)))
+            :NumIRQDBs irqDoorbells
+            :IRQDBStride descSize
+            :NtfyBlockMSIXBaseIdx 0
+            :QueueFormat GVE_GQI_QPL_FORMAT))]
+
+
+      (when [(set! err (.Push (.-aq hw) ADMINQ_CONFIGURE_DEVICE_RESOURCES cmd))] (!= err nil)
+        (return))
+
+
+      (range [i irqDoorbells]
+        (let [off (* i descSize)
+            ^{:line 66} dbIdx (.Uint32 binary/BigEndian (subslice (.-irqs hw) off (+ off 4)))]
+          (reg/Write (+ (.-doorbells hw) (* dbIdx 4)) (bits/ReverseBytes32 0))))
+
+
+      (return))))

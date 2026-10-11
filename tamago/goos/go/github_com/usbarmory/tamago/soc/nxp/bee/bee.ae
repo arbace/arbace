@@ -1,0 +1,217 @@
+;; NXP Bus Encryption Engine (BEE) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+;; Package bee implements a driver for the NXP Bus Encryption Engine (BEE)
+;; adopting the following reference specifications:
+;;   - IMX6ULSRM - i.MX6UL Security Reference Manual - Rev 0 04/2016
+;;
+;; This package is only meant to be used with `GOOS=tamago` as supported by the
+;; TamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.bee) (go/file "bee.go" :doc "Package bee implements a driver for the NXP Bus Encryption Engine (BEE)\nadopting the following reference specifications:\n  - IMX6ULSRM - i.MX6UL Security Reference Manual - Rev 0 04/2016\n\nThis package is only meant to be used with `GOOS=tamago` as supported by the\nTamaGo framework for bare metal Go, see https://github.com/usbarmory/tamago.\n" :imports [
+
+
+    ^{:line 18} [aes "crypto/aes"]
+    ^{:line 19} [rand "crypto/rand"]
+    ^{:line 20} [errors "errors"]
+    ^{:line 21} [fmt "fmt"]
+    ^{:line 22} [sync "sync"]
+
+    ^{:line 24} [dma "github.com/usbarmory/tamago/dma"]
+    ^{:line 25} [reg "github.com/usbarmory/tamago/internal/reg"]
+    ^{:line 26} [snvs "github.com/usbarmory/tamago/soc/nxp/snvs"]])
+
+
+
+(go/const "BEE registers\n"
+  ^{:line 31} [^{:val 0} BEE_CTRL 0x00]
+  ^{:line 32} [^{:val 31} CTRL_CLK_EN_LOCK 31]
+  ^{:line 33} [^{:val 30} CTRL_SFTRST_N_LOCK 30]
+  ^{:line 34} [^{:val 29} CTRL_AES_MODE_LOCK 29]
+  ^{:line 35} [^{:val 24} CTRL_SECURITY_LEVEL_LOCK 24]
+  ^{:line 36} [^{:val 20} CTRL_AES_KEY_SEL_LOCK 20]
+  ^{:line 37} [^{:val 16} CTRL_BEE_ENABLE_LOCK 16]
+  ^{:line 38} [^{:val 15} CTRL_CLK_EN 15]
+  ^{:line 39} [^{:val 14} CTRL_SFTRST_N 14]
+  ^{:line 40} [^{:val 13} CTRL_AES_MODE 13]
+  ^{:line 41} [^{:val 8} CTRL_SECURITY_LEVEL 8]
+  ^{:line 42} [^{:val 4} CTRL_AES_KEY_SEL 4]
+  ^{:line 43} [^{:val 0} CTRL_BEE_ENABLE 0]
+
+  ^{:line 45} [^{:val 4} BEE_ADDR_OFFSET0 0x04]
+  ^{:line 46} [^{:val 8} BEE_ADDR_OFFSET1 0x08]
+
+
+  ^{:line 49} [^{:val 12 :doc "AES key\n"} BEE_AES_KEY0_W0 0x0c]
+  ^{:line 50} [^{:val 16} BEE_AES_KEY0_W1 0x10]
+  ^{:line 51} [^{:val 20} BEE_AES_KEY0_W2 0x14]
+  ^{:line 52} [^{:val 24} BEE_AES_KEY0_W3 0x18]
+
+
+  ^{:line 55} [^{:val 32 :doc "AES CTR nonce\n"} BEE_AES_KEY1_W0 0x20]
+  ^{:line 56} [^{:val 36} BEE_AES_KEY1_W1 0x24]
+  ^{:line 57} [^{:val 40} BEE_AES_KEY1_W2 0x28]
+  ^{:line 58} [^{:val 44} BEE_AES_KEY1_W3 0x2c])
+
+
+(go/const
+  ^{:line 62} [^{:val 268435456} AliasRegion0 0x10000000]
+  ^{:line 63} [^{:val 805306368} AliasRegion1 0x30000000]
+  ^{:line 64} [^{:val 536870912} AliasRegionSize 0x20000000])
+
+
+
+(go/type BEE "BEE represents the Bus Encryption Engine instance.\n" (struct
+
+    ^{:line 70 :tag sync/Mutex :doc "must be a variable to avoid conflict with Lock()\n"} mu
+
+
+    ^{:line 73 :tag uint32 :doc "Base register\n"} Base
+
+    ^{:line 75 :tag (* snvs/SNVS) :doc "SNVS instance\n"} SNVS
+
+
+    ^{:line 78 :tag uint32 :doc "control registers\n"} ctrl
+    ^{:line 79 :tag uint32} addr0
+    ^{:line 80 :tag uint32} addr1
+
+
+    ^{:line 83 :tag uint32 :doc "AES key pointer\n"} key
+
+    ^{:line 85 :tag uint32 :doc "AES CTR nonce pointer\n"} nonce))
+
+
+
+^{:go/end 110} (go/method Init "Init initializes the BEE module.\n" [^{:tag (* BEE)} hw]
+  (.Lock (.-mu hw))
+  (defer (.Unlock (.-mu hw)))
+
+  (when (== (.-Base hw) 0)
+    (panic "invalid BEE instance"))
+
+
+  (set! (.-ctrl hw) (+ (.-Base hw) BEE_CTRL))
+  (set! (.-addr0 hw) (+ (.-Base hw) BEE_ADDR_OFFSET0))
+  (set! (.-addr1 hw) (+ (.-Base hw) BEE_ADDR_OFFSET1))
+  (set! (.-key hw) (+ (.-Base hw) BEE_AES_KEY0_W0))
+  (set! (.-nonce hw) (+ (.-Base hw) BEE_AES_KEY1_W0))
+
+  ;; enable clock
+  (reg/Set (.-ctrl hw) CTRL_CLK_EN)
+  ;; disable reset
+  (reg/Set (.-ctrl hw) CTRL_SFTRST_N)
+
+  ;; disable
+  (reg/Clear (.-ctrl hw) CTRL_BEE_ENABLE))
+
+
+^{:go/end 131} (go/method generateKey [^{:tag (* BEE)} hw ^uint32 ptr] :results [^error err]
+  ;; avoid key exposure to external RAM
+  (let [(values key ^:assign err) (dma/NewRegion (conv uint ptr) aes/BlockSize false)]
+
+    (when (!= err nil)
+      (return))
+
+
+    (let [(values addr buf) (.Reserve key aes/BlockSize 0)]
+
+      (when [(values n err) (rand/Read buf)] (or (!= n aes/BlockSize) (!= err nil))
+        (return (errors/New "could not set random key")))
+
+
+      (when (!= addr (conv uint ptr))
+        (return (errors/New "invalid key address")))
+
+
+      (return))))
+
+
+^{:go/breaks [[5 143]] :go/end 144} (go/func checkRegion ^error [^uint32 region ^uint32 offset]
+  (when (!= (bit-and region 0xffff) 0)
+    (return (errors/New "address must be 64KB aligned")))
+
+
+  (when (or (and (>= offset AliasRegion0) (< offset (+ AliasRegion0 AliasRegionSize)))
+      (and (>= offset AliasRegion1) (< offset (+ AliasRegion1 AliasRegionSize))))
+    (return (errors/New "invalid region (offset overlaps with aliased region)")))
+
+
+  nil)
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 202} (go/method Enable "Enable activates the BEE using the argument memory regions, each can be up\nto AliasRegionSize (512 MB) in size.\n\nAfter activation the regions are encrypted using AES CTR. On secure booted\nsystems the internal OTPMK is used as key, otherwise a random one is\ngenerated and assigned.\n\nAfter enabling, both regions should only be accessed through their\nrespective aliased spaces (see AliasRegion0 and AliasRegion1) and only with\ncaching enabled (see arm.ConfigureMMU).\n" [^{:tag (* BEE)} hw ^uint32 region0 ^uint32 region1] :results [^error err]
+  (.Lock (.-mu hw))
+  (defer (.Unlock (.-mu hw)))
+
+  (when [(set! err (checkRegion region0 (- region0 AliasRegion0)))] (!= err nil)
+    (return (fmt/Errorf "region0 error: %v" err)))
+
+
+  (when [(set! err (checkRegion region1 (- region1 AliasRegion1)))] (!= err nil)
+    (return (fmt/Errorf "region1 error: %v" err)))
+
+
+  (when (== (.-addr0 hw) 0)
+    (return (errors/New "invalid BEE instance")))
+
+
+  (reg/Write (.-addr0 hw) (>> region0 16))
+  (reg/Write (.-addr1 hw) (>> region1 16))
+
+  (if (and (!= (.-SNVS hw) nil) (.Available (.-SNVS hw)))
+    ;; use OTPMK if SNVS is secure booted
+    (reg/Clear (.-ctrl hw) CTRL_AES_KEY_SEL)
+    (do
+      ;; set random AES key
+      (when [(set! err (.generateKey hw (.-key hw)))] (!= err nil)
+        (return))
+
+
+      ;; select software AES key
+      (reg/Set (.-ctrl hw) CTRL_AES_KEY_SEL)))
+
+
+  ;; set random nonce for CTR mode
+  (when [(set! err (.generateKey hw (.-nonce hw)))] (!= err nil)
+    (return))
+
+
+  ;; set AES CTR mode
+  (reg/Set (.-ctrl hw) CTRL_AES_MODE)
+  ;; set maximum security level
+  (reg/SetN (.-ctrl hw) CTRL_SECURITY_LEVEL 2r11 3)
+
+  ;; enable
+  (reg/Set (.-ctrl hw) CTRL_BEE_ENABLE)
+
+  (return))
+
+
+
+^{:go/end 218} (go/method Lock "Lock restricts BEE registers writing.\n" [^{:tag (* BEE)} hw]
+  (.Lock (.-mu hw))
+  (defer (.Unlock (.-mu hw)))
+
+  (reg/Set (.-ctrl hw) CTRL_CLK_EN_LOCK)
+  (reg/Set (.-ctrl hw) CTRL_SFTRST_N_LOCK)
+  (reg/Set (.-ctrl hw) CTRL_AES_MODE_LOCK)
+  (reg/SetN (.-ctrl hw) CTRL_SECURITY_LEVEL_LOCK 2r11 2r11)
+  (reg/Set (.-ctrl hw) CTRL_AES_KEY_SEL_LOCK)
+  (reg/Set (.-ctrl hw) CTRL_BEE_ENABLE_LOCK)
+
+  (reg/SetN (.-addr0 hw) 16 0xffff 0xffff)
+  (reg/SetN (.-addr1 hw) 16 0xffff 0xffff))

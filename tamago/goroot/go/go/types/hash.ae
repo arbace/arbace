@@ -1,0 +1,307 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.types) (go/file "hash.go" :imports [
+
+    ;; This file defines a hash function for Types.
+
+
+    ^{:line 10} [fmt "fmt"]
+    ^{:line 11} [maphash "hash/maphash"]])
+
+
+(go/type
+
+
+
+  ^{:line 18} [^{:doc "Hasher defines a hash function and equivalence relation\nfor [Types] that is consistent with [Identical].\nHashers are stateless.\n"} Hasher (struct)]
+
+
+
+  ^{:line 22} [^{:doc "HasherIgnoreTags is a variant of [Hasher] that is\nconsistent with [IdenticalIgnoreTags].\n"} HasherIgnoreTags (struct)])
+
+
+(go/var
+  ^{:line 26} [^{:tag (maphash/Hasher Type)} _ (lit Hasher)]
+  ^{:line 27} [^{:tag (maphash/Hasher Type)} _ (lit HasherIgnoreTags)])
+
+
+^{:go/end 37} (go/method Hash [Hasher ^{:tag (* maphash/Hash)} h ^Type t]
+  ;; The two hashers use essentially the same hash function,
+  ;; which ignores tags; only the Equal methods vary.
+  ;; But for future-proofing we gratuitously force them
+  ;; to differ by one byte.
+  (.WriteByte h 0)
+  (.hash (lit hasher :inGenericSig false) h t))
+
+^{:go/end 41} (go/method Hash [HasherIgnoreTags ^{:tag (* maphash/Hash)} h ^Type t]
+  (.WriteByte h 1)
+  (.hash (lit hasher :inGenericSig false) h t))
+
+
+^{:go/end 43} (go/method Equal ^bool [Hasher ^Type x ^Type y] (Identical x y))
+^{:go/end 44} (go/method Equal ^bool [HasherIgnoreTags ^Type x ^Type y] (IdenticalIgnoreTags x y))
+
+
+
+
+(go/type hasher "hasher holds the state of a single hash traversal, namely,\nwhether we are inside the signature of a generic function.\nThis is used to optimize [hasher.hashTypeParam].\n" (struct ^bool inGenericSig))
+
+^{:go/end 169} (go/method hash [^hasher hr ^{:tag (* maphash/Hash)} h ^Type t]
+  ;; See [Identical] for rationale.
+  (type-switch [t t]
+    (case [(* Alias)]
+      (.hash hr h (Unalias t)))
+
+    (case [(* Array)]
+      (.WriteByte h \A)
+      (^{:inst [int64]} maphash/WriteComparable h (.Len t))
+      (.hash hr h (.Elem t)))
+
+    (case [(* Basic)]
+      (.WriteByte h \B)
+      (.WriteByte h (conv byte (.Kind t))))
+
+    (case [(* Chan)]
+      (.WriteByte h \C)
+      (.WriteByte h (conv byte (.Dir t)))
+      (.hash hr h (.Elem t)))
+
+    (case [(* Interface)]
+      (.WriteByte h \I)
+      (.WriteByte h (conv byte (.NumMethods t)))
+
+      ;; Interfaces are identical if they have the same set of methods, with
+      ;; identical names and types, and they have the same set of type
+      ;; restrictions. See [Identical] for more details.
+
+      ;; Hash the methods.
+      ;;
+      ;; Because [Identical] treats Methods as an unordered set,
+      ;; we must either:
+      ;; (a) sort the methods into some canonical order; or
+      ;; (b) hash them each in parallel, combine them with a
+      ;;     commutative operation such as + or ^, and then
+      ;;     write this value into the primary hasher.
+      ;; Since (a) requires allocation, we choose (b).
+      (let [^uint64 hash (zero uint64)]
+        (range [m (.Methods t)]
+          (let [^maphash/Hash subh (zero maphash/Hash)]
+            (.SetSeed subh (.Seed h))
+            ;; Ignore m.Pkg().
+            ;; Use shallow hash on method signature to
+            ;; avoid anonymous interface cycles.
+            (.WriteString subh ^{:go/via [object]} (.Name m))
+            (.shallowHash hr (addr subh) ^{:go/via [object]} (.Type m))
+            (set! hash bit-xor (.Sum64 subh))))
+
+        (^{:inst [uint64]} maphash/WriteComparable h hash)))
+
+    ;; Hash type restrictions.
+    ;; TODO(adonovan): call (fork of) InterfaceTermSet from
+    ;; golang.org/x/tools/internal/typeparams/normalize.go.
+    ;; hr.hashTermSet(h, terms)
+
+    (case [(* Map)]
+      (.WriteByte h \M)
+      (.hash hr h (.Key t))
+      (.hash hr h (.Elem t)))
+
+    (case [(* Named)]
+      (.WriteByte h \N)
+      (.hashTypeName hr h (.Obj t))
+      (range [targ (.Types (.TypeArgs t))]
+        (.hash hr h targ)))
+
+
+    (case [(* Pointer)]
+      (.WriteByte h \P)
+      (.hash hr h (.Elem t)))
+
+    (case [(* Signature)]
+      (.WriteByte h \F)
+      (^{:inst [bool]} maphash/WriteComparable h (.Variadic t))
+      (let [tparams (.TypeParams t)]
+        (when [n (.Len tparams)] (> n 0)
+          (set! (.-inGenericSig hr) true) ; affects constraints, params, and results
+
+          (^{:inst [int]} maphash/WriteComparable h n)
+          (range [tparam (.TypeParams tparams)]
+            (.hash hr h (.Constraint tparam))))
+
+
+        (.hashTuple hr h (.Params t))
+        (.hashTuple hr h (.Results t))))
+
+    (case [(* Slice)]
+      (.WriteByte h \S)
+      (.hash hr h (.Elem t)))
+
+    (case [(* Struct)]
+      (.WriteByte h \R) ; mnemonic: a struct is a record type
+      (let [n (.NumFields t)]
+        (.WriteByte h (conv byte n))
+        (range [i n]
+          (let [f (.Field t i)]
+            (^{:inst [bool]} maphash/WriteComparable h (.Anonymous f))
+            ;; Ignore t.Tag(i), so that a single hash function
+            ;; can be used with both [Identical] and [IdenticalIgnoreTags].
+            (.WriteString h ^{:go/via [object]} (.Name f)) ; (ignore f.Pkg)
+            (.hash hr h ^{:go/via [object]} (.Type f))))))
+
+
+    (case [(* Tuple)]
+      (.hashTuple hr h t))
+
+    (case [(* TypeParam)]
+      (.hashTypeParam hr h t))
+
+    (case [(* Union)]
+      (.WriteByte h \U))
+    ;; TODO(adonovan): opt: call (fork of) UnionTermSet from
+    ;; golang.org/x/tools/internal/typeparams/normalize.go.
+    ;; hr.hashTermSet(h, terms)
+
+    (default
+      (panic (fmt/Sprintf "%T: %v" t t)))))
+
+
+
+^{:go/end 177} (go/method hashTuple [^hasher hr ^{:tag (* maphash/Hash)} h ^{:tag (* Tuple)} t]
+  (.WriteByte h \T)
+  (.WriteByte h (conv byte (.Len t)))
+  (range [v (.Variables t)]
+    (.hash hr h ^{:go/via [object]} (.Type v))))
+
+
+
+;; func (hr hasher) hashTermSet(h *maphash.Hash, terms []*Term) {
+;; 	h.WriteByte(byte(len(terms)))
+;; 	for _, term := range terms {
+;; 		// term order is not significant.
+;; 		h.WriteByte(byte(btoi(term.Tilde())))
+;; 		hr.hash(h, term.Type())
+;; 	}
+;; }
+
+
+^{:go/end 207} (go/method hashTypeParam "hashTypeParam encodes a type parameter into hasher h.\n" [^hasher hr ^{:tag (* maphash/Hash)} h ^{:tag (* TypeParam)} t]
+  (.WriteByte h \P)
+  ;; Within the signature of a generic function, TypeParams are
+  ;; identical if they have the same index and constraint, so we
+  ;; hash them based on index.
+  ;;
+  ;; When we are outside a generic function, free TypeParams are
+  ;; identical iff they are the same object, so we can use a
+  ;; more discriminating hash consistent with object identity.
+  ;; This optimization saves [Map] about 4% when hashing all the
+  ;; Info.Types in the forward closure of net/http.
+  (if (not (.-inGenericSig hr))
+    ;; Optimization: outside a generic function signature,
+    ;; use a more discrimating hash consistent with object identity.
+    (.hashTypeName hr h (.Obj t))
+
+    (.WriteByte h (conv byte (.Index t)))))
+
+
+
+
+^{:go/end 215} (go/method hashTypeName "hashTypeName hashes the pointer of tname.\n" [hasher ^{:tag (* maphash/Hash)} h ^{:tag (* TypeName)} tname]
+  (.WriteByte h \N)
+  ;; Since Identical uses == to compare TypeNames,
+  ;; the hash function uses maphash.Comparable.
+  (^{:inst [(* TypeName)]} maphash/WriteComparable h tname))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 301} (go/method shallowHash "shallowHash computes a hash of t without looking at any of its\nelement Types, to avoid potential anonymous cycles in the types of\ninterface methods.\n\nWhen an unnamed non-empty interface type appears anywhere among the\narguments or results of an interface method, there is a potential\nfor endless recursion. Consider:\n\n\ttype X interface { m() []*interface { X } }\n\nThe problem is that the Methods of the interface in m's result type\ninclude m itself; there is no mention of the named type X that\nmight help us break the cycle.\n(See comment in [Identical], case *Interface, for more.)\n" [^hasher hr ^{:tag (* maphash/Hash)} h ^Type t]
+  ;; t is the type of an interface method (Signature),
+  ;; its params or results (Tuples), or their immediate
+  ;; elements (mostly Slice, Pointer, Basic, Named),
+  ;; so there's no need to optimize anything else.
+  (type-switch [t t]
+    (case [(* Alias)]
+      (.shallowHash hr h (Unalias t)))
+
+    (case [(* Array)]
+      (.WriteByte h \A)
+      (^{:inst [int64]} maphash/WriteComparable h (.Len t)))
+    ;; ignore t.Elem()
+
+    (case [(* Basic)]
+      (.WriteByte h \B)
+      (.WriteByte h (conv byte (.Kind t))))
+
+    (case [(* Chan)]
+      (.WriteByte h \C))
+    ;; ignore Dir(), Elem()
+
+    (case [(* Interface)]
+      (.WriteByte h \I))
+    ;; no recursion here
+
+    (case [(* Map)]
+      (.WriteByte h \M))
+    ;; ignore Key(), Elem()
+
+    (case [(* Named)]
+      (.hashTypeName hr h (.Obj t)))
+
+    (case [(* Pointer)]
+      (.WriteByte h \P))
+    ;; ignore t.Elem()
+
+    (case [(* Signature)]
+      (.WriteByte h (conv byte (btoi (.Variadic t))))
+      ;; The Signature/Tuple recursion is always
+      ;; finite and invariably shallow.
+      (.shallowHash hr h (.Params t))
+      (.shallowHash hr h (.Results t)))
+
+    (case [(* Slice)]
+      (.WriteByte h \S))
+    ;; ignore t.Elem()
+
+    (case [(* Struct)]
+      (.WriteByte h \R) ; mnemonic: a struct is a record type
+      (.WriteByte h (conv byte (.NumFields t))))
+    ;; ignore t.Fields()
+
+    (case [(* Tuple)]
+      (.WriteByte h \T)
+      (.WriteByte h (conv byte (.Len t)))
+      (range [v (.Variables t)]
+        (.shallowHash hr h ^{:go/via [object]} (.Type v))))
+
+
+    (case [(* TypeParam)]
+      (.hashTypeParam hr h t))
+
+    (case [(* Union)]
+      (.WriteByte h \U))
+    ;; ignore term set
+
+    (default
+      (panic (fmt/Sprintf "shallowHash: %T: %v" t t)))))
+
+
+
+^{:go/end 309} (go/func btoi ^int [^bool b]
+  (if b
+    (return 1)
+
+    (return 0)))

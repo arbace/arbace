@@ -1,0 +1,1237 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.fmt) (go/file "scan.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [math "math"]
+    ^{:line 11} [os "os"]
+    ^{:line 12} [reflect "reflect"]
+    ^{:line 13} [strconv "strconv"]
+    ^{:line 14} [sync "sync"]
+    ^{:line 15} [utf8 "unicode/utf8"]])
+
+
+
+
+
+(go/type ScanState "ScanState represents the scanner state passed to custom scanners.\nScanners may do rune-at-a-time scanning or ask the ScanState\nto discover the next space-delimited token.\n" (interface
+
+
+
+
+    (^{:doc "ReadRune reads the next rune (Unicode code point) from the input.\nIf invoked during Scanln, Fscanln, or Sscanln, ReadRune() will\nreturn EOF after returning the first '\\n' or when reading beyond\nthe specified width.\n"} ReadRune [] :results [^rune r ^int size ^error err])
+
+    (^{:doc "UnreadRune causes the next call to ReadRune to return the same rune.\n"} UnreadRune ^error [])
+
+
+
+    (^{:doc "SkipSpace skips space in the input. Newlines are treated appropriately\nfor the operation being performed; see the package documentation\nfor more information.\n"} SkipSpace [])
+
+
+
+
+
+
+
+
+    (^{:doc "Token skips space in the input if skipSpace is true, then returns the\nrun of Unicode code points c satisfying f(c).  If f is nil,\n!unicode.IsSpace(c) is used; that is, the token will hold non-space\ncharacters. Newlines are treated appropriately for the operation being\nperformed; see the package documentation for more information.\nThe returned slice points to shared data that may be overwritten\nby the next call to Token, a call to a Scan function using the ScanState\nas input, or when the calling Scan method returns.\n"} Token [^bool skipSpace ^{:tag (func [rune] [bool])} f] :results [^{:tag (slice byte)} token ^error err])
+
+
+    (^{:doc "Width returns the value of the width option and whether it has been set.\nThe unit is Unicode code points.\n"} Width [] :results [^int wid ^bool ok])
+
+
+
+    (^{:doc "Because ReadRune is implemented by the interface, Read should never be\ncalled by the scanning routines and a valid implementation of\nScanState may choose always to return an error from Read.\n"} Read [^{:tag (slice byte)} buf] :results [^int n ^error err])))
+
+
+
+
+
+
+(go/type Scanner "Scanner is implemented by any value that has a Scan method, which scans\nthe input for the representation of a value and stores the result in the\nreceiver, which must be a pointer to be useful. The Scan method is called\nfor any argument to [Scan], [Scanf], or [Scanln] that implements it.\n" (interface
+    (Scan ^error [^ScanState state ^rune verb])))
+
+
+
+
+
+
+^{:go/end 65} (go/func Scan "Scan scans text read from standard input, storing successive\nspace-separated values into successive arguments. Newlines count\nas space. It returns the number of items successfully scanned.\nIf that is less than the number of arguments, err will report why.\n" [& ^{:tag (slice any)} a] :results [^int n ^error err]
+  (Fscan os/Stdin (spread a)))
+
+
+
+
+^{:go/end 71} (go/func Scanln "Scanln is similar to [Scan], but stops scanning at a newline and\nafter the final item there must be a newline or EOF.\n" [& ^{:tag (slice any)} a] :results [^int n ^error err]
+  (Fscanln os/Stdin (spread a)))
+
+
+
+
+
+
+
+
+
+^{:go/end 82} (go/func Scanf "Scanf scans text read from standard input, storing successive\nspace-separated values into successive arguments as determined by\nthe format. It returns the number of items successfully scanned.\nIf that is less than the number of arguments, err will report why.\nNewlines in the input must match newlines in the format.\nThe one exception: the verb %c always scans the next rune in the\ninput, even if it is a space (or tab etc.) or newline.\n" [^string format & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (Fscanf os/Stdin format (spread a)))
+
+
+(go/type stringReader string)
+
+^{:go/end 93} (go/method Read [^{:tag (* stringReader)} r ^{:tag (slice byte)} b] :results [^int n ^error err]
+  (set! n (copy b @r))
+  (set! @r (subslice @r n))
+  (when (== n 0)
+    (set! err io/EOF))
+
+  (return))
+
+
+
+
+
+
+^{:go/end 101} (go/func Sscan "Sscan scans the argument string, storing successive space-separated\nvalues into successive arguments. Newlines count as space. It\nreturns the number of items successfully scanned. If that is less\nthan the number of arguments, err will report why.\n" [^string str & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (Fscan (conv (* stringReader) (addr str)) (spread a)))
+
+
+
+
+^{:go/end 107} (go/func Sscanln "Sscanln is similar to [Sscan], but stops scanning at a newline and\nafter the final item there must be a newline or EOF.\n" [^string str & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (Fscanln (conv (* stringReader) (addr str)) (spread a)))
+
+
+
+
+
+
+^{:go/end 115} (go/func Sscanf "Sscanf scans the argument string, storing successive space-separated\nvalues into successive arguments as determined by the format. It\nreturns the number of items successfully parsed.\nNewlines in the input must match newlines in the format.\n" [^string str ^string format & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (Fscanf (conv (* stringReader) (addr str)) format (spread a)))
+
+
+
+
+
+
+^{:go/end 126} (go/func Fscan "Fscan scans text read from r, storing successive space-separated\nvalues into successive arguments. Newlines count as space. It\nreturns the number of items successfully scanned. If that is less\nthan the number of arguments, err will report why.\n" [^io/Reader r & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (let [(values s old) (newScanState r true false)]
+    (set! (values n err) (.doScan s a))
+    (.free s old)
+    (return)))
+
+
+
+
+^{:go/end 135} (go/func Fscanln "Fscanln is similar to [Fscan], but stops scanning at a newline and\nafter the final item there must be a newline or EOF.\n" [^io/Reader r & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (let [(values s old) (newScanState r false true)]
+    (set! (values n err) (.doScan s a))
+    (.free s old)
+    (return)))
+
+
+
+
+
+
+^{:go/end 146} (go/func Fscanf "Fscanf scans text read from r, storing successive space-separated\nvalues into successive arguments as determined by the format. It\nreturns the number of items successfully parsed.\nNewlines in the input must match newlines in the format.\n" [^io/Reader r ^string format & ^{:tag (slice any)} a] :results [^int n ^error err]
+  (let [(values s old) (newScanState r false false)]
+    (set! (values n err) (.doScanf s format a))
+    (.free s old)
+    (return)))
+
+
+
+
+(go/type scanError "scanError represents an error generated by the scanning software.\nIt's used as a unique signature to identify such errors when recovering.\n" (struct
+    ^{:line 151 :tag error} err))
+
+
+(go/const ^{:val -1} eof -1)
+
+
+(go/type ss "ss is the internal implementation of ScanState.\n" (struct
+    ^{:line 158 :tag io/RuneScanner} rs ; where to read input
+    ^{:line 159 :tag buffer} buf ; token accumulator
+    ^{:line 160 :tag int} count ; runes consumed so far.
+    ^{:line 161 :tag bool} atEOF ; already read EOF
+    ^{:line 162} ssave))
+
+
+
+
+(go/type ssave "ssave holds the parts of ss that need to be\nsaved and restored on recursive scans.\n" (struct
+    ^{:line 168 :tag bool} validSave ; is or was a part of an actual ss.
+    ^{:line 169 :tag bool} nlIsEnd ; whether newline terminates scan
+    ^{:line 170 :tag bool} nlIsSpace ; whether newline counts as white space
+    ^{:line 171 :tag int} argLimit ; max value of ss.count for this arg; argLimit <= limit
+    ^{:line 172 :tag int} limit ; max value of ss.count.
+    ^{:line 173 :tag int} maxWid)) ; width of this arg.
+
+
+
+
+
+^{:go/end 181} (go/method Read "The Read method is only in ScanState so that ScanState\nsatisfies io.Reader. It will never be called when used as\nintended, so there is no need to make it actually work.\n" [^{:tag (* ss)} s ^{:tag (slice byte)} buf] :results [^int n ^error err]
+  (return 0 (errors/New "ScanState's Read should not be called. Use ReadRune")))
+
+
+^{:go/end 199} (go/method ReadRune [^{:tag (* ss)} s] :results [^rune r ^int size ^error err]
+  (when (or (.-atEOF s) (>= (.-count s) ^{:go/via [ssave]} (.-argLimit s)))
+    (set! err io/EOF)
+    (return))
+
+
+  (set! (values r size err) (.ReadRune (.-rs s)))
+  (cond (== err nil) (do
+      (inc! (.-count s))
+      (when (and ^{:go/via [ssave]} (.-nlIsEnd s) (== r \newline))
+        (set! (.-atEOF s) true)))
+
+    (== err io/EOF)
+    (set! (.-atEOF s) true))
+
+  (return))
+
+
+^{:go/end 206} (go/method Width [^{:tag (* ss)} s] :results [^int wid ^bool ok]
+  (when (== ^{:go/via [ssave]} (.-maxWid s) hugeWid)
+    (return 0 false))
+
+  (return ^{:go/via [ssave]} (.-maxWid s) true))
+
+
+
+
+^{:go/end 219} (go/method getRune "The public method returns an error; this private one panics.\nIf getRune reaches EOF, the return value is EOF (-1).\n" [^{:tag (* ss)} s] :results [^rune r]
+  (let [(values ^:assign r _ err) (.ReadRune s)]
+    (when (!= err nil)
+      (when (== err io/EOF)
+        (return eof))
+
+      (.error s err))
+
+    (return)))
+
+
+
+
+
+^{:go/end 230} (go/method mustReadRune "mustReadRune turns io.EOF into a panic(io.ErrUnexpectedEOF).\nIt is called in cases such as string scanning where an EOF is a\nsyntax error.\n" [^{:tag (* ss)} s] :results [^rune r]
+  (set! r (.getRune s))
+  (when (== r eof)
+    (.error s io/ErrUnexpectedEOF))
+
+  (return))
+
+
+^{:go/breaks [6] :go/end 237} (go/method UnreadRune ^error [^{:tag (* ss)} s]
+  (.UnreadRune (.-rs s))
+  (set! (.-atEOF s) false)
+  (dec! (.-count s))
+  nil)
+
+
+^{:go/end 241} (go/method error [^{:tag (* ss)} s ^error err]
+  (panic (lit scanError err)))
+
+
+^{:go/end 245} (go/method errorString [^{:tag (* ss)} s ^string err]
+  (panic (lit scanError (errors/New err))))
+
+
+^{:go/end 263} (go/method Token [^{:tag (* ss)} s ^bool skipSpace ^{:tag (func [rune] [bool])} f] :results [^{:tag (slice byte)} tok ^error err]
+  (defer (^{:go/end 256} (fn []
+        (when [e (recover)] (!= e nil)
+          (if [(values se ok) (assert scanError e)] ok
+            (set! err (.-err se))
+
+            (panic e))))))
+
+
+
+  (when (== f nil)
+    (set! f notSpace))
+
+  (set! (.-buf s) (subslice (.-buf s) _ 0))
+  (set! tok (.token s skipSpace f))
+  (return))
+
+
+
+
+(go/var ^{:doc "space is a copy of the unicode.White_Space ranges,\nto avoid depending on package unicode.\n"} space (lit (slice (array 2 uint16))
+    (lit _ 0x0009 0x000d)
+    (lit _ 0x0020 0x0020)
+    (lit _ 0x0085 0x0085)
+    (lit _ 0x00a0 0x00a0)
+    (lit _ 0x1680 0x1680)
+    (lit _ 0x2000 0x200a)
+    (lit _ 0x2028 0x2029)
+    (lit _ 0x202f 0x202f)
+    (lit _ 0x205f 0x205f)
+    (lit _ 0x3000 0x3000)))
+
+
+^{:go/end 294} (go/func isSpace ^bool [^rune r]
+  (when (>= r (<< 1 16))
+    (return false))
+
+  ^{:go/breaks [[3 293]]} (let [rx (conv uint16 r)]
+    (range [_ rng space]
+      (when (< rx (aget rng 0))
+        (return false))
+
+      (when (<= rx (aget rng 1))
+        (return true)))
+
+
+    false))
+
+
+
+^{:go/end 299} (go/func notSpace "notSpace is the default scanning function used in Token.\n" ^bool [^rune r]
+  (not (isSpace r)))
+
+
+
+
+
+(go/type readRune "readRune is a structure to enable reading UTF-8 encoded code points\nfrom an io.Reader. It is used if the Reader given to the scanner does\nnot already implement io.RuneScanner.\n" (struct
+    ^{:line 305 :tag io/Reader} reader
+    ^{:line 306 :tag (array utf8/UTFMax byte)} buf ; used only inside ReadRune
+    ^{:line 307 :tag int} pending ; number of bytes in pendBuf; only >0 for bad UTF-8
+    ^{:line 308 :tag (array utf8/UTFMax byte)} pendBuf ; bytes left over
+    ^{:line 309 :tag rune} peekRune)) ; if >=0 next rune; when <0 is ^(previous Rune)
+
+
+
+
+^{:go/end 326} (go/method readByte "readByte returns the next byte from the input, which may be\nleft over from a previous read if the UTF-8 was ill-formed.\n" [^{:tag (* readRune)} r] :results [^byte b ^error err]
+  (when (> (.-pending r) 0)
+    (set! b (aget (.-pendBuf r) 0))
+    (copy (subslice (.-pendBuf r) 0) (subslice (.-pendBuf r) 1))
+    (dec! (.-pending r))
+    (return))
+
+  (let [(values n ^:assign err) (io/ReadFull (.-reader r) (subslice (.-pendBuf r) _ 1))]
+    (when (!= n 1)
+      (return 0 err))
+
+    (return (aget (.-pendBuf r) 0) err)))
+
+
+
+
+^{:go/end 367} (go/method ReadRune "ReadRune returns the next UTF-8 encoded code point from the\nio.Reader inside r.\n" [^{:tag (* readRune)} r] :results [^rune rr ^int size ^error err]
+  (when (>= (.-peekRune r) 0)
+    (set! rr (.-peekRune r))
+    (set! (.-peekRune r) (bit-not (.-peekRune r)))
+    (set! size (utf8/RuneLen rr))
+    (return))
+
+  (set! (values (aget (.-buf r) 0) err) (.readByte r))
+  (when (!= err nil)
+    (return))
+
+  (when (< (aget (.-buf r) 0) utf8/RuneSelf) ; fast check for common ASCII case
+    (set! rr (conv rune (aget (.-buf r) 0)))
+    (set! size 1) ; Known to be 1.
+    ;; Flip the bits of the rune so it's available to UnreadRune.
+    (set! (.-peekRune r) (bit-not rr))
+    (return))
+
+  (let [^int n (zero int)]
+    (for [(set! n 1)] (not (utf8/FullRune (subslice (.-buf r) _ n))) (inc! n)
+      (set! (values (aget (.-buf r) n) err) (.readByte r))
+      (when (!= err nil)
+        (when (== err io/EOF)
+          (set! err nil)
+          (break))
+
+        (return)))
+
+
+    (set! (values rr size) (utf8/DecodeRune (subslice (.-buf r) _ n)))
+    (when (< size n) ; an error, save the bytes for the next read
+      (copy (subslice (.-pendBuf r) (.-pending r)) (subslice (.-buf r) size n))
+      (set! (.-pending r) + (- n size)))
+
+    ;; Flip the bits of the rune so it's available to UnreadRune.
+    (set! (.-peekRune r) (bit-not rr))
+    (return)))
+
+
+^{:go/breaks [5] :go/end 376} (go/method UnreadRune ^error [^{:tag (* readRune)} r]
+  (when (>= (.-peekRune r) 0)
+    (return (errors/New "fmt: scanning called UnreadRune with no rune available")))
+
+  ;; Reverse bit flip of previously read rune to obtain valid >=0 state.
+  (set! (.-peekRune r) (bit-not (.-peekRune r)))
+  nil)
+
+
+(go/var ssFree ^{:go/breaks [2]} (lit sync/Pool
+    :New ^{:go/end 379} (fn ^any [] (new ss))))
+
+
+
+^{:go/end 399} (go/func newScanState "newScanState allocates a new ss struct or grab a cached one.\n" [^io/Reader r ^bool nlIsSpace ^bool nlIsEnd] :results [^{:tag (* ss)} s ^ssave old]
+  (set! s (assert (* ss) (.Get ssFree)))
+  (if [(values rs ok) (assert io/RuneScanner r)] ok
+    (set! (.-rs s) rs)
+
+    (set! (.-rs s) (addr (lit readRune :reader r :peekRune -1))))
+
+  (set! ^{:go/via [ssave]} (.-nlIsSpace s) nlIsSpace)
+  (set! ^{:go/via [ssave]} (.-nlIsEnd s) nlIsEnd)
+  (set! (.-atEOF s) false)
+  (set! ^{:go/via [ssave]} (.-limit s) hugeWid)
+  (set! ^{:go/via [ssave]} (.-argLimit s) hugeWid)
+  (set! ^{:go/via [ssave]} (.-maxWid s) hugeWid)
+  (set! ^{:go/via [ssave]} (.-validSave s) true)
+  (set! (.-count s) 0)
+  (return))
+
+
+
+^{:go/end 415} (go/method free "free saves used ss structs in ssFree; avoid an allocation per invocation.\n" [^{:tag (* ss)} s ^ssave old]
+  ;; If it was used recursively, just restore the old state.
+  (when (.-validSave old)
+    (set! (.-ssave s) old)
+    (return))
+
+  ;; Don't hold on to ss structs with large buffers.
+  (when (> (cap (.-buf s)) 1024)
+    (return))
+
+  (set! (.-buf s) (subslice (.-buf s) _ 0))
+  (set! (.-rs s) nil)
+  (.Put ssFree s))
+
+
+
+
+
+^{:go/end 441} (go/method SkipSpace "SkipSpace provides Scan methods the ability to skip space and newline\ncharacters in keeping with the current scanning mode set by format strings\nand [Scan]/[Scanln].\n" [^{:tag (* ss)} s]
+  (while true
+    (let [r (.getRune s)]
+      (when (== r eof)
+        (return))
+
+      (when (and (== r \return) (.peek s "\n"))
+        (continue))
+
+      (when (== r \newline)
+        (when ^{:go/via [ssave]} (.-nlIsSpace s)
+          (continue))
+
+        (.errorString s "unexpected newline")
+        (return))
+
+      (when (not (isSpace r))
+        (.UnreadRune s)
+        (break)))))
+
+
+
+
+
+
+
+^{:go/end 463} (go/method token "token returns the next space-delimited string from the input. It\nskips white space. For Scanln, it stops at newlines. For Scan,\nnewlines are treated as spaces.\n" ^{:tag (slice byte)} [^{:tag (* ss)} s ^bool skipSpace ^{:tag (func [rune] [bool])} f]
+  (when skipSpace
+    (.SkipSpace s))
+
+  ;; read until white space or newline
+  (while true
+    (let [r (.getRune s)]
+      (when (== r eof)
+        (break))
+
+      (when (not (f r))
+        (.UnreadRune s)
+        (break))
+
+      (.writeRune (.-buf s) r)))
+
+  (.-buf s))
+
+
+(go/var errComplex (errors/New "syntax error scanning complex number"))
+(go/var errBool (errors/New "syntax error scanning boolean"))
+
+^{:go/breaks [[4 474]] :go/end 475} (go/func indexRune ^int [^string s ^rune r]
+  (range [i c s]
+    (when (== c r)
+      (return i)))
+
+
+  -1)
+
+
+
+
+^{:go/end 494} (go/method consume "consume reads the next rune in the input and reports whether it is in the ok string.\nIf accept is true, it puts the character into the input token.\n" ^bool [^{:tag (* ss)} s ^string ok ^bool accept]
+  ^{:go/breaks [[5 493]]} (let [r (.getRune s)]
+    (when (== r eof)
+      (return false))
+
+    (when (>= (indexRune ok r) 0)
+      (when accept
+        (.writeRune (.-buf s) r))
+
+      (return true))
+
+    (when (and (!= r eof) accept)
+      (.UnreadRune s))
+
+    false))
+
+
+
+^{:go/end 503} (go/method peek "peek reports whether the next character is in the ok string, without consuming it.\n" ^bool [^{:tag (* ss)} s ^string ok]
+  (let [r (.getRune s)]
+    (when (!= r eof)
+      (.UnreadRune s))
+
+    (>= (indexRune ok r) 0)))
+
+
+^{:go/end 511} (go/method notEOF [^{:tag (* ss)} s]
+  ;; Guarantee there is data to be read.
+  (when [r (.getRune s)] (== r eof)
+    (panic io/EOF))
+
+  (.UnreadRune s))
+
+
+
+
+^{:go/end 517} (go/method accept "accept checks the next rune in the input. If it's a byte (sic) in the string, it puts it in the\nbuffer and returns true. Otherwise it return false.\n" ^bool [^{:tag (* ss)} s ^string ok]
+  (.consume s ok true))
+
+
+
+^{:go/breaks [6] :go/end 528} (go/method okVerb "okVerb verifies that the verb is present in the list, setting s.err appropriately if not.\n" ^bool [^{:tag (* ss)} s ^rune verb ^string okVerbs ^string typ]
+  (range [_ v okVerbs]
+    (when (== v verb)
+      (return true)))
+
+
+  (.errorString s (+ "bad verb '%" (conv string verb) "' for " typ))
+  false)
+
+
+
+^{:go/breaks [[8 554]] :go/end 555} (go/method scanBool "scanBool returns the value of the boolean represented by the next token.\n" ^bool [^{:tag (* ss)} s ^rune verb]
+  (.SkipSpace s)
+  (.notEOF s)
+  (when (not (.okVerb s verb "tv" "boolean"))
+    (return false))
+
+  ;; Syntax-checking a boolean is annoying. We're not fastidious about case.
+  (switch (.getRune s)
+    (case [\0]
+      (return false))
+    (case [\1]
+      (return true))
+    (case [\t \T]
+      (when (and (.accept s "rR") ^:go/paren (or (not (.accept s "uU")) (not (.accept s "eE"))))
+        (.error s errBool))
+
+      (return true))
+    (case [\f \F]
+      (when (and (.accept s "aA") ^:go/paren (or (not (.accept s "lL")) (not (.accept s "sS")) (not (.accept s "eE"))))
+        (.error s errBool))
+
+      (return false)))
+
+  false)
+
+
+
+(go/const "Numerical elements\n"
+  ^{:line 559} [^{:val "01"} binaryDigits "01"]
+  ^{:line 560} [^{:val "01234567"} octalDigits "01234567"]
+  ^{:line 561} [^{:val "0123456789"} decimalDigits "0123456789"]
+  ^{:line 562} [^{:val "0123456789aAbBcCdDeEfF"} hexadecimalDigits "0123456789aAbBcCdDeEfF"]
+  ^{:line 563} [^{:val "+-"} sign "+-"]
+  ^{:line 564} [^{:val "."} period "."]
+  ^{:line 565} [^{:val "eEpP"} exponent "eEpP"])
+
+
+
+^{:go/end 585} (go/method getBase "getBase returns the numeric base represented by the verb and its digit string.\n" [^{:tag (* ss)} s ^rune verb] :results [^int base ^string digits]
+  (.okVerb s verb "bdoUxXv" "integer") ; sets s.err
+  (set! base 10)
+  (set! digits decimalDigits)
+  (switch verb
+    (case [\b]
+      (set! base 2)
+      (set! digits binaryDigits))
+    (case [\o]
+      (set! base 8)
+      (set! digits octalDigits))
+    (case [\x \X \U]
+      (set! base 16)
+      (set! digits hexadecimalDigits)))
+
+  (return))
+
+
+
+^{:go/end 598} (go/method scanNumber "scanNumber returns the numerical string with specified digits starting here.\n" ^string [^{:tag (* ss)} s ^string digits ^bool haveDigits]
+  (when (not haveDigits)
+    (.notEOF s)
+    (when (not (.accept s digits))
+      (.errorString s "expected integer")))
+
+
+  (while (.accept s digits))
+
+  (conv string (.-buf s)))
+
+
+
+^{:go/end 610} (go/method scanRune "scanRune returns the next rune value in the input.\n" ^int64 [^{:tag (* ss)} s ^int bitSize]
+  (.notEOF s)
+  (let [r (.getRune s)
+      ^{:line 604} n (conv uint bitSize)
+      ^{:line 605} x (>> (<< (conv int64 r) (- 64 n)) (- 64 n))]
+    (when (!= x (conv int64 r))
+      (.errorString s (+ "overflow on character value " (conv string r))))
+
+    (conv int64 r)))
+
+
+
+
+
+^{:go/end 634} (go/method scanBasePrefix "scanBasePrefix reports whether the integer begins with a base prefix\nand returns the base, digit string, and whether a zero was found.\nIt is called only if the verb is %v.\n" [^{:tag (* ss)} s] :results [^int base ^string digits ^bool zeroFound]
+  (when (not (.peek s "0"))
+    (return 0 (+ decimalDigits "_") false))
+
+  (.accept s "0")
+  ;; Special cases for 0, 0b, 0o, 0x.
+  (switch
+    (case [(.peek s "bB")]
+      (.consume s "bB" true)
+      (return 0 (+ binaryDigits "_") true))
+    (case [(.peek s "oO")]
+      (.consume s "oO" true)
+      (return 0 (+ octalDigits "_") true))
+    (case [(.peek s "xX")]
+      (.consume s "xX" true)
+      (return 0 (+ hexadecimalDigits "_") true))
+    (default
+      (return 0 (+ octalDigits "_") true))))
+
+
+
+
+
+^{:go/end 667} (go/method scanInt "scanInt returns the value of the integer represented by the next\ntoken, checking for overflow. Any error is stored in s.err.\n" ^int64 [^{:tag (* ss)} s ^rune verb ^int bitSize]
+  (when (== verb \c)
+    (return (.scanRune s bitSize)))
+
+  (.SkipSpace s)
+  (.notEOF s)
+  (let [(values base digits) (.getBase s verb)
+      ^{:line 645} haveDigits false]
+    (if (== verb \U)
+      (when (or (not (.consume s "U" false)) (not (.consume s "+" false)))
+        (.errorString s "bad unicode format "))
+
+      (do
+        (.accept s sign) ; If there's a sign, it will be left in the token buffer.
+        (when (== verb \v)
+          (set! (values base digits haveDigits) (.scanBasePrefix s)))))
+
+
+    (let [tok (.scanNumber s digits haveDigits)
+        (values i err) (strconv/ParseInt tok base 64)]
+      (when (!= err nil)
+        (.error s err))
+
+      (let [n (conv uint bitSize)
+          ^{:line 662} x (>> (<< i (- 64 n)) (- 64 n))]
+        (when (!= x i)
+          (.errorString s (+ "integer overflow on token " tok)))
+
+        ^{:line 666} i))))
+
+
+
+
+^{:go/end 697} (go/method scanUint "scanUint returns the value of the unsigned integer represented\nby the next token, checking for overflow. Any error is stored in s.err.\n" ^uint64 [^{:tag (* ss)} s ^rune verb ^int bitSize]
+  (when (== verb \c)
+    (return (conv uint64 (.scanRune s bitSize))))
+
+  (.SkipSpace s)
+  (.notEOF s)
+  (let [(values base digits) (.getBase s verb)
+      ^{:line 678} haveDigits false]
+    (cond (== verb \U)
+      (when (or (not (.consume s "U" false)) (not (.consume s "+" false)))
+        (.errorString s "bad unicode format "))
+
+      (== verb \v)
+      (set! (values base digits haveDigits) (.scanBasePrefix s)))
+
+    (let [tok (.scanNumber s digits haveDigits)
+        (values i err) (strconv/ParseUint tok base 64)]
+      (when (!= err nil)
+        (.error s err))
+
+      (let [n (conv uint bitSize)
+          ^{:line 692} x (>> (<< i (- 64 n)) (- 64 n))]
+        (when (!= x i)
+          (.errorString s (+ "unsigned integer overflow on token " tok)))
+
+        ^{:line 696} i))))
+
+
+
+
+
+^{:go/end 738} (go/method floatToken "floatToken returns the floating-point number starting here, no longer than swid\nif the width is specified. It's not rigorous about syntax because it doesn't check that\nwe have at least some digits, but Atof will do that.\n" ^string [^{:tag (* ss)} s]
+  (set! (.-buf s) (subslice (.-buf s) _ 0))
+  ;; NaN?
+  (when (and (.accept s "nN") (.accept s "aA") (.accept s "nN"))
+    (return (conv string (.-buf s))))
+
+  ;; leading sign?
+  (.accept s sign)
+  ;; Inf?
+  (when (and (.accept s "iI") (.accept s "nN") (.accept s "fF"))
+    (return (conv string (.-buf s))))
+
+  (let [digits (+ decimalDigits "_")
+      ^{:line 715} exp exponent]
+    (when (and (.accept s "0") (.accept s "xX"))
+      (set! digits (+ hexadecimalDigits "_"))
+      (set! exp "pP"))
+
+    ;; digits?
+    (while (.accept s digits))
+
+    ;; decimal point?
+    (when (.accept s period)
+      ;; fraction?
+      (while (.accept s digits)))
+
+
+    ;; exponent?
+    (when (.accept s exp)
+      ;; leading sign?
+      (.accept s sign)
+      ;; digits?
+      (while (.accept s (+ decimalDigits "_"))))
+
+
+    (conv string (.-buf s))))
+
+
+
+
+
+^{:go/end 762} (go/method complexTokens "complexTokens returns the real and imaginary parts of the complex number starting here.\nThe number might be parenthesized and has the format (N+Ni) where N is a floating-point\nnumber and there are no spaces within.\n" [^{:tag (* ss)} s] :results [^string real ^string imag]
+  ;; TODO: accept N and Ni independently?
+  (let [parens (.accept s "(")]
+    (set! real (.floatToken s))
+    (set! (.-buf s) (subslice (.-buf s) _ 0))
+    ;; Must now have a sign.
+    (when (not (.accept s "+-"))
+      (.error s errComplex))
+
+    ;; Sign is now in buffer
+    (let [imagSign (conv string (.-buf s))]
+      (set! imag (.floatToken s))
+      (when (not (.accept s "i"))
+        (.error s errComplex))
+
+      (when (and parens (not (.accept s ")")))
+        (.error s errComplex))
+
+      (return real (+ imagSign imag)))))
+
+
+^{:go/breaks [[4 770]] :go/end 771} (go/func hasX ^bool [^string s]
+  (for [i 0] (< i (len s)) (inc! i)
+    (when (or (== (aget s i) \x) (== (aget s i) \X))
+      (return true)))
+
+
+  false)
+
+
+
+^{:go/end 804} (go/method convertFloat "convertFloat converts the string to a float64value.\n" ^float64 [^{:tag (* ss)} s ^string str ^int n]
+  ;; strconv.ParseFloat will handle "+0x1.fp+2",
+  ;; but we have to implement our non-standard
+  ;; decimal+binary exponent mix (1.2p4) ourselves.
+  (when [p (indexRune str \p)] (and (>= p 0) (not (hasX str)))
+    ;; Atof doesn't handle power-of-2 exponents,
+    ;; but they're easy to evaluate.
+    (let [(values f err) (strconv/ParseFloat (subslice str _ p) n)]
+      (when (!= err nil)
+        ;; Put full string into error.
+        (when [(values e ok) (assert (* strconv/NumError) err)] ok
+          (set! (.-Num e) str))
+
+        (.error s err))
+
+      (let [(values m ^:assign err) (strconv/Atoi (subslice str (+ p 1)))]
+        (when (!= err nil)
+          ;; Put full string into error.
+          (when [(values e ok) (assert (* strconv/NumError) err)] ok
+            (set! (.-Num e) str))
+
+          (.error s err))
+
+        (return (math/Ldexp f m)))))
+
+  (let [(values f err) (strconv/ParseFloat str n)]
+    (when (!= err nil)
+      (.error s err))
+
+    ^{:line 803} f))
+
+
+
+
+
+
+^{:go/end 820} (go/method scanComplex "scanComplex converts the next token to a complex128 value.\nThe atof argument is a type-specific reader for the underlying type.\nIf we're reading complex64, atof will parse float32s and convert them\nto float64's to avoid reproducing this code for each complex type.\n" ^complex128 [^{:tag (* ss)} s ^rune verb ^int n]
+  (when (not (.okVerb s verb floatVerbs "complex"))
+    (return 0))
+
+  (.SkipSpace s)
+  (.notEOF s)
+  (let [(values sreal simag) (.complexTokens s)
+      ^{:line 817} real (.convertFloat s sreal (/ n 2))
+      ^{:line 818} imag (.convertFloat s simag (/ n 2))]
+    (complex real imag)))
+
+
+
+
+^{:go/end 839} (go/method convertString "convertString returns the string represented by the next input characters.\nThe format of the input is determined by the verb.\n" [^{:tag (* ss)} s ^rune verb] :results [^string str]
+  (when (not (.okVerb s verb "svqxX" "string"))
+    (return ""))
+
+  (.SkipSpace s)
+  (.notEOF s)
+  (switch verb
+    (case [\q]
+      (set! str (.quotedString s)))
+    (case [\x \X]
+      (set! str (.hexString s)))
+    (default
+      (set! str (conv string (.token s true notSpace))))) ; %s and %v just return the next word
+
+  (return))
+
+
+
+^{:go/end 880} (go/method quotedString "quotedString returns the double- or back-quoted string represented by the next input characters.\n" ^string [^{:tag (* ss)} s]
+  (.notEOF s)
+  ^{:go/breaks [[3 879]]} (let [quote (.getRune s)]
+    (switch quote
+      (case [\`]
+        ;; Back-quoted: Anything goes until EOF or back quote.
+        (while true
+          (let [r (.mustReadRune s)]
+            (when (== r quote)
+              (break))
+
+            (.writeRune (.-buf s) r)))
+
+        (return (conv string (.-buf s))))
+      (case [\"]
+        ;; Double-quoted: Include the quotes and let strconv.Unquote do the backslash escapes.
+        (.writeByte (.-buf s) \")
+        (while true
+          (let [r (.mustReadRune s)]
+            (.writeRune (.-buf s) r)
+            (cond (== r \\)
+              ;; In a legal backslash escape, no matter how long, only the character
+              ;; immediately after the escape can itself be a backslash or quote.
+              ;; Thus we only need to protect the first character after the backslash.
+              (.writeRune (.-buf s) (.mustReadRune s))
+              (== r \")
+              (break))))
+
+
+        (let [(values result err) (strconv/Unquote (conv string (.-buf s)))]
+          (when (!= err nil)
+            (.error s err))
+
+          (return result)))
+      (default
+        (.errorString s "expected quoted string")))
+
+    ""))
+
+
+
+^{:go/end 894} (go/func hexDigit "hexDigit returns the value of the hexadecimal digit.\n" [^rune d] :results [int bool]
+  (let [digit (conv int d)]
+    (switch digit
+      (case [\0 \1 \2 \3 \4 \5 \6 \7 \8 \9]
+        (return (- digit \0) true))
+      (case [\a \b \c \d \e \f]
+        (return (- (+ 10 digit) \a) true))
+      (case [\A \B \C \D \E \F]
+        (return (- (+ 10 digit) \A) true)))
+
+    (return -1 false)))
+
+
+
+
+
+^{:go/end 915} (go/method hexByte "hexByte returns the next hex-encoded (two-character) byte from the input.\nIt returns ok==false if the next bytes in the input do not encode a hex byte.\nIf the first byte is hex and the second is not, processing stops.\n" [^{:tag (* ss)} s] :results [^byte b ^bool ok]
+  (let [rune1 (.getRune s)]
+    (when (== rune1 eof)
+      (return))
+
+    (let [(values value1 ^:assign ok) (hexDigit rune1)]
+      (when (not ok)
+        (.UnreadRune s)
+        (return))
+
+      (let [(values value2 ^:assign ok) (hexDigit (.mustReadRune s))]
+        (when (not ok)
+          (.errorString s "illegal hex digit")
+          (return))
+
+        (return (conv byte (bit-or (<< value1 4) value2)) true)))))
+
+
+
+^{:go/end 932} (go/method hexString "hexString returns the space-delimited hexpair-encoded string.\n" ^string [^{:tag (* ss)} s]
+  (.notEOF s)
+  (while true
+    (let [(values b ok) (.hexByte s)]
+      (when (not ok)
+        (break))
+
+      (.writeByte (.-buf s) b)))
+
+  (when (== (len (.-buf s)) 0)
+    (.errorString s "no hex data for %x string")
+    (return ""))
+
+  (conv string (.-buf s)))
+
+
+(go/const
+  ^{:line 935} [^{:val "beEfFgGv"} floatVerbs "beEfFgGv"]
+
+  ^{:line 937} [^{:val 1073741824} hugeWid (<< 1 30)]
+
+  ^{:line 939} [^{:val 64} intBits (<< 32 (>> (bit-not (conv uint 0)) 63))]
+  ^{:line 940} [^{:val 64} uintptrBits (<< 32 (>> (bit-not (conv uintptr 0)) 63))])
+
+
+
+^{:go/end 950} (go/method scanPercent "scanPercent scans a literal percent character.\n" [^{:tag (* ss)} s]
+  (.SkipSpace s)
+  (.notEOF s)
+  (when (not (.accept s "%"))
+    (.errorString s "missing literal %")))
+
+
+
+
+^{:go/end 1054} (go/method scanOne "scanOne scans a single value, deriving the scanner from the type of the argument.\n" [^{:tag (* ss)} s ^rune verb ^any arg]
+  (set! (.-buf s) (subslice (.-buf s) _ 0))
+  (let [^error err (zero error)]
+    ;; If the parameter has its own Scan method, use that.
+    (when [(values v ok) (assert Scanner arg)] ok
+      (set! err (.Scan v s verb))
+      (when (!= err nil)
+        (when (== err io/EOF)
+          (set! err io/ErrUnexpectedEOF))
+
+        (.error s err))
+
+      (return))
+
+
+    (type-switch [v arg]
+      (case [(* bool)]
+        (set! @v (.scanBool s verb)))
+      (case [(* complex64)]
+        (set! @v (conv complex64 (.scanComplex s verb 64))))
+      (case [(* complex128)]
+        (set! @v (.scanComplex s verb 128)))
+      (case [(* int)]
+        (set! @v (conv int (.scanInt s verb intBits))))
+      (case [(* int8)]
+        (set! @v (conv int8 (.scanInt s verb 8))))
+      (case [(* int16)]
+        (set! @v (conv int16 (.scanInt s verb 16))))
+      (case [(* int32)]
+        (set! @v (conv int32 (.scanInt s verb 32))))
+      (case [(* int64)]
+        (set! @v (.scanInt s verb 64)))
+      (case [(* uint)]
+        (set! @v (conv uint (.scanUint s verb intBits))))
+      (case [(* uint8)]
+        (set! @v (conv uint8 (.scanUint s verb 8))))
+      (case [(* uint16)]
+        (set! @v (conv uint16 (.scanUint s verb 16))))
+      (case [(* uint32)]
+        (set! @v (conv uint32 (.scanUint s verb 32))))
+      (case [(* uint64)]
+        (set! @v (.scanUint s verb 64)))
+      (case [(* uintptr)]
+        (set! @v (conv uintptr (.scanUint s verb uintptrBits))))
+      ;; Floats are tricky because you want to scan in the precision of the result, not
+      ;; scan in high precision and convert, in order to preserve the correct error condition.
+      (case [(* float32)]
+        (when (.okVerb s verb floatVerbs "float32")
+          (.SkipSpace s)
+          (.notEOF s)
+          (set! @v (conv float32 (.convertFloat s (.floatToken s) 32)))))
+
+      (case [(* float64)]
+        (when (.okVerb s verb floatVerbs "float64")
+          (.SkipSpace s)
+          (.notEOF s)
+          (set! @v (.convertFloat s (.floatToken s) 64))))
+
+      (case [(* string)]
+        (set! @v (.convertString s verb)))
+      (case [(* (slice byte))]
+        ;; We scan to string and convert so we get a copy of the data.
+        ;; If we scanned to bytes, the slice would point at the buffer.
+        (set! @v (conv (slice byte) (.convertString s verb))))
+      (default
+        (let [val (reflect/ValueOf v)
+            ^{:line 1019} ptr val]
+          (when (!= (.Kind ptr) reflect/Pointer)
+            (.errorString s (+ "type not a pointer: " (.String (.Type val))))
+            (return))
+
+          (switch [v (.Elem ptr)] (.Kind v)
+            (case [reflect/Bool]
+              (.SetBool v (.scanBool s verb)))
+            (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+              (.SetInt v (.scanInt s verb (.Bits (.Type v)))))
+            (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+              (.SetUint v (.scanUint s verb (.Bits (.Type v)))))
+            (case [reflect/String]
+              (.SetString v (.convertString s verb)))
+            (case [reflect/Slice]
+              ;; For now, can only handle (renamed) []byte.
+              (let [typ (.Type v)]
+                (when (!= (.Kind (.Elem typ)) reflect/Uint8)
+                  (.errorString s (+ "can't scan type: " (.String (.Type val)))))
+
+                (let [str (.convertString s verb)]
+                  (.Set v (reflect/MakeSlice typ (len str) (len str)))
+                  (for [i 0] (< i (len str)) (inc! i)
+                    (.SetUint (.Index v i) (conv uint64 (aget str i)))))))
+
+            (case [reflect/Float32 reflect/Float64]
+              (.SkipSpace s)
+              (.notEOF s)
+              (.SetFloat v (.convertFloat s (.floatToken s) (.Bits (.Type v)))))
+            (case [reflect/Complex64 reflect/Complex128]
+              (.SetComplex v (.scanComplex s verb (.Bits (.Type v)))))
+            (default
+              (.errorString s (+ "can't scan type: " (.String (.Type val)))))))))))
+
+
+
+
+
+^{:go/end 1067} (go/func errorHandler "errorHandler turns local panics into error returns.\n" [^{:tag (* error)} errp]
+  (when [e (recover)] (!= e nil)
+    (if [(values se ok) (assert scanError e)] ok ; catch local error
+      (set! @errp (.-err se))
+      (if [(values eof ok) (assert error e)] (and ok (== eof io/EOF)) ; out of input
+        (set! @errp eof)
+
+        (panic e)))))
+
+
+
+
+
+^{:go/end 1090} (go/method doScan "doScan does the real work for scanning without a format string.\n" [^{:tag (* ss)} s ^{:tag (slice any)} a] :results [^int numProcessed ^error err]
+  (defer (errorHandler (addr err)))
+  (range [_ arg a]
+    (.scanOne s \v arg)
+    (inc! numProcessed))
+
+  ;; Check for newline (or EOF) if required (Scanln etc.).
+  (when ^{:go/via [ssave]} (.-nlIsEnd s)
+    (while true
+      (let [r (.getRune s)]
+        (when (or (== r \newline) (== r eof))
+          (break))
+
+        (when (not (isSpace r))
+          (.errorString s "expected newline")
+          (break)))))
+
+
+
+  (return))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1177} (go/method advance "advance determines whether the next characters in the input match\nthose of the format. It returns the number of bytes (sic) consumed\nin the format. All runs of space characters in either input or\nformat behave as a single space. Newlines are special, though:\nnewlines in the format must match those in the input and vice versa.\nThis routine also handles the %% case. If the return value is zero,\neither format starts with a % (with no following %) or the input\nis empty. If it is negative, the input did not match the string.\n" [^{:tag (* ss)} s ^string format] :results [^int i]
+  (while (< i (len format))
+    (let [(values fmtc w) (utf8/DecodeRuneInString (subslice format i))]
+
+      ;; Space processing.
+      ;; In the rest of this comment "space" means spaces other than newline.
+      ;; Newline in the format matches input of zero or more spaces and then newline or end-of-input.
+      ;; Spaces in the format before the newline are collapsed into the newline.
+      ;; Spaces in the format after the newline match zero or more spaces after the corresponding input newline.
+      ;; Other spaces in the format match input of one or more spaces or end-of-input.
+      (when (isSpace fmtc)
+        (let [newlines 0
+            ^{:line 1112} trailingSpace false]
+          (while (and (isSpace fmtc) (< i (len format)))
+            (if (== fmtc \newline) (do
+                (inc! newlines)
+                (set! trailingSpace false))
+
+              (set! trailingSpace true))
+
+            (set! i + w)
+            (set! (values fmtc w) (utf8/DecodeRuneInString (subslice format i))))
+
+          (for [j 0] (< j newlines) (inc! j)
+            (let [inputc (.getRune s)]
+              (while (and (isSpace inputc) (!= inputc \newline))
+                (set! inputc (.getRune s)))
+
+              (when (and (!= inputc \newline) (!= inputc eof))
+                (.errorString s "newline in format does not match input"))))
+
+
+          (when trailingSpace
+            (let [inputc (.getRune s)]
+              (when (== newlines 0)
+                ;; If the trailing space stood alone (did not follow a newline),
+                ;; it must find at least one space to consume.
+                (when (and (not (isSpace inputc)) (!= inputc eof))
+                  (.errorString s "expected space in input to match format"))
+
+                (when (== inputc \newline)
+                  (.errorString s "newline in input does not match format")))
+
+
+              (while (and (isSpace inputc) (!= inputc \newline))
+                (set! inputc (.getRune s)))
+
+              (when (!= inputc eof)
+                (.UnreadRune s))))
+
+
+          (continue)))
+
+
+      ;; Verbs.
+      (when (== fmtc \%)
+        ;; % at end of string is an error.
+        (when (== (+ i w) (len format))
+          (.errorString s "missing verb: % at end of format string"))
+
+        ;; %% acts like a real percent
+        (let [(values nextc _) (utf8/DecodeRuneInString (subslice format (+ i w)))] ; will not match % if string is empty
+          (when (!= nextc \%)
+            (return))
+
+          (set! i + w))) ; skip the first %
+
+
+      ;; Literals.
+      (let [inputc (.mustReadRune s)]
+        (when (!= fmtc inputc)
+          (.UnreadRune s)
+          (return -1))
+
+        (set! i + w))))
+
+  (return))
+
+
+
+
+^{:go/end 1238} (go/method doScanf "doScanf does the real work when scanning with a format string.\nAt the moment, it handles only pointers to basic types.\n" [^{:tag (* ss)} s ^string format ^{:tag (slice any)} a] :results [^int numProcessed ^error err]
+  (defer (errorHandler (addr err)))
+  (let [end (- (len format) 1)]
+    ;; We process one item per non-trivial format
+    (for [i 0] (<= i end) _
+      (let [w (.advance s (subslice format i))]
+        (when (> w 0)
+          (set! i + w)
+          (continue))
+
+        ;; Either we failed to advance, we have a percent character, or we ran out of input.
+        (when (!= (aget format i) \%)
+          ;; Can't advance format. Why not?
+          (when (< w 0)
+            (.errorString s "input does not match format"))
+
+          ;; Otherwise at EOF; "too many operands" error handled below
+          (break))
+
+        (inc! i) ; % is one byte
+
+        ;; do we have 20 (width)?
+        (let [^bool widPresent (zero bool)]
+          (set! (values ^{:go/via [ssave]} (.-maxWid s) widPresent i) (parsenum format i end))
+          (when (not widPresent)
+            (set! ^{:go/via [ssave]} (.-maxWid s) hugeWid))
+
+
+          (let [(values c ^:assign w) (utf8/DecodeRuneInString (subslice format i))]
+            (set! i + w)
+
+            (when (!= c \c)
+              (.SkipSpace s))
+
+            (when (== c \%)
+              (.scanPercent s)
+              (continue)) ; Do not consume an argument.
+
+            (set! ^{:go/via [ssave]} (.-argLimit s) ^{:go/via [ssave]} (.-limit s))
+            (when [f (+ (.-count s) ^{:go/via [ssave]} (.-maxWid s))] (< f ^{:go/via [ssave]} (.-argLimit s))
+              (set! ^{:go/via [ssave]} (.-argLimit s) f))
+
+
+            (when (>= numProcessed (len a)) ; out of operands
+              (.errorString s (+ "too few operands for format '%" (subslice format (- i w)) "'"))
+              (break))
+
+            (let [arg (aget a numProcessed)]
+
+              (.scanOne s c arg)
+              (inc! numProcessed)
+              (set! ^{:go/via [ssave]} (.-argLimit s) ^{:go/via [ssave]} (.-limit s)))))))
+
+    (when (< numProcessed (len a))
+      (.errorString s "too many operands"))
+
+    (return)))

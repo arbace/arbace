@@ -1,0 +1,333 @@
+;; Copyright 2021 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.elliptic) (go/file "params.go" :imports [
+
+    ^{:line 7} [big "math/big"]])
+
+
+
+
+
+
+
+(go/type CurveParams "CurveParams contains the parameters of an elliptic curve and also provides\na generic, non-constant time implementation of [Curve].\n\nThe generic Curve implementation is deprecated, and using custom curves\n(those not returned by [P224], [P256], [P384], and [P521]) is not guaranteed\nto provide any security property.\n" (struct
+    ^{:line 16 :tag (* big/Int)} P ; the order of the underlying field
+    ^{:line 17 :tag (* big/Int)} N ; the order of the base point
+    ^{:line 18 :tag (* big/Int)} B ; the constant of the curve equation
+    ^{:line 19 :tag (* big/Int)} Gx ^{:tag (* big/Int)} Gy ; (x,y) of the base point
+    ^{:line 20 :tag int} BitSize ; the size of the underlying field
+    ^{:line 21 :tag string} Name)) ; the canonical name of the curve
+
+
+^{:go/end 26} (go/method Params ^{:tag (* CurveParams)} [^{:tag (* CurveParams)} curve]
+  ^{:line 25} curve)
+
+
+;; CurveParams operates, internally, on Jacobian coordinates. For a given
+;; (x, y) position on the curve, the Jacobian coordinates are (x1, y1, z1)
+;; where x = x1/z1² and y = y1/z1³. The greatest speedups come when the whole
+;; calculation can be performed within the transform (as in ScalarMult and
+;; ScalarBaseMult). But even for Add and Double, it's faster to apply and
+;; reverse the transform than to operate in affine coordinates.
+
+
+^{:go/end 48} (go/method polynomial "polynomial returns x³ - 3x + b.\n" ^{:tag (* big/Int)} [^{:tag (* CurveParams)} curve ^{:tag (* big/Int)} x]
+  (let [x3 (.Mul (new big/Int) x x)]
+    (.Mul x3 x3 x)
+
+    (let [threeX (.Lsh (new big/Int) x 1)]
+      (.Add threeX threeX x)
+
+      (.Sub x3 x3 threeX)
+      (.Add x3 x3 (.-B curve))
+      (.Mod x3 x3 (.-P curve))
+
+      ^{:line 47} x3)))
+
+
+
+
+
+
+
+
+^{:go/end 73} (go/method IsOnCurve "IsOnCurve implements [Curve.IsOnCurve].\n\nDeprecated: the [CurveParams] methods are deprecated and are not guaranteed to\nprovide any security property. For ECDH, use the [crypto/ecdh] package.\nFor ECDSA, use the [crypto/ecdsa] package with a [Curve] value returned directly\nfrom [P224], [P256], [P384], or [P521].\n" ^bool [^{:tag (* CurveParams)} curve ^{:tag (* big/Int)} x ^{:tag (* big/Int)} y]
+  ;; If there is a dedicated constant-time implementation for this curve operation,
+  ;; use that instead of the generic one.
+  (when [(values specific ok) (matchesSpecificCurve curve)] ok
+    (return (.IsOnCurve specific x y)))
+
+
+  (when (or (< (.Sign x) 0) (>= (.Cmp x (.-P curve)) 0)
+      (< (.Sign y) 0) (>= (.Cmp y (.-P curve)) 0))
+    (return false))
+
+
+  ;; y² = x³ - 3x + b
+  (let [y2 (.Mul (new big/Int) y y)]
+    (.Mod y2 y2 (.-P curve))
+
+    (== (.Cmp (.polynomial curve x) y2) 0)))
+
+
+
+
+
+^{:go/end 84} (go/func zForAffine "zForAffine returns a Jacobian Z value for the affine point (x, y). If x and\ny are zero, it assumes that they represent the point at infinity because (0,\n0) is not on the any of the curves handled here.\n" ^{:tag (* big/Int)} [^{:tag (* big/Int)} x ^{:tag (* big/Int)} y]
+  (let [z (new big/Int)]
+    (when (or (!= (.Sign x) 0) (!= (.Sign y) 0))
+      (.SetInt64 z 1))
+
+    ^{:line 83} z))
+
+
+
+
+^{:go/end 102} (go/method affineFromJacobian "affineFromJacobian reverses the Jacobian transform. See the comment at the\ntop of the file. If the point is ∞ it returns 0, 0.\n" [^{:tag (* CurveParams)} curve ^{:tag (* big/Int)} x ^{:tag (* big/Int)} y ^{:tag (* big/Int)} z] :results [^{:tag (* big/Int)} xOut ^{:tag (* big/Int)} yOut]
+  (when (== (.Sign z) 0)
+    (return (new big/Int) (new big/Int)))
+
+
+  (let [zinv (.ModInverse (new big/Int) z (.-P curve))
+      ^{:line 94} zinvsq (.Mul (new big/Int) zinv zinv)]
+
+    (set! xOut (.Mul (new big/Int) x zinvsq))
+    (.Mod xOut xOut (.-P curve))
+    (.Mul zinvsq zinvsq zinv)
+    (set! yOut (.Mul (new big/Int) y zinvsq))
+    (.Mod yOut yOut (.-P curve))
+    (return)))
+
+
+
+
+
+
+
+
+^{:go/end 122} (go/method Add "Add implements [Curve.Add].\n\nDeprecated: the [CurveParams] methods are deprecated and are not guaranteed to\nprovide any security property. For ECDH, use the [crypto/ecdh] package.\nFor ECDSA, use the [crypto/ecdsa] package with a [Curve] value returned directly\nfrom [P224], [P256], [P384], or [P521].\n" [^{:tag (* CurveParams)} curve ^{:tag (* big/Int)} x1 ^{:tag (* big/Int)} y1 ^{:tag (* big/Int)} x2 ^{:tag (* big/Int)} y2] :results [(* big/Int) (* big/Int)]
+  ;; If there is a dedicated constant-time implementation for this curve operation,
+  ;; use that instead of the generic one.
+  (when [(values specific ok) (matchesSpecificCurve curve)] ok
+    (return (.Add specific x1 y1 x2 y2)))
+
+  (panicIfNotOnCurve curve x1 y1)
+  (panicIfNotOnCurve curve x2 y2)
+
+  (let [z1 (zForAffine x1 y1)
+      ^{:line 120} z2 (zForAffine x2 y2)]
+    (.affineFromJacobian curve (.addJacobian curve x1 y1 z1 x2 y2 z2))))
+
+
+
+
+^{:go/end 200} (go/method addJacobian "addJacobian takes two points in Jacobian coordinates, (x1, y1, z1) and\n(x2, y2, z2) and returns their sum, also in Jacobian form.\n" [^{:tag (* CurveParams)} curve ^{:tag (* big/Int)} x1 ^{:tag (* big/Int)} y1 ^{:tag (* big/Int)} z1 ^{:tag (* big/Int)} x2 ^{:tag (* big/Int)} y2 ^{:tag (* big/Int)} z2] :results [(* big/Int) (* big/Int) (* big/Int)]
+  ;; See https://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-3.html#addition-add-2007-bl
+  (let [(values x3 y3 z3) (values (new big/Int) (new big/Int) (new big/Int))]
+    (when (== (.Sign z1) 0)
+      (.Set x3 x2)
+      (.Set y3 y2)
+      (.Set z3 z2)
+      (return x3 y3 z3))
+
+    (when (== (.Sign z2) 0)
+      (.Set x3 x1)
+      (.Set y3 y1)
+      (.Set z3 z1)
+      (return x3 y3 z3))
+
+
+    (let [z1z1 (.Mul (new big/Int) z1 z1)]
+      (.Mod z1z1 z1z1 (.-P curve))
+      (let [z2z2 (.Mul (new big/Int) z2 z2)]
+        (.Mod z2z2 z2z2 (.-P curve))
+
+        (let [u1 (.Mul (new big/Int) x1 z2z2)]
+          (.Mod u1 u1 (.-P curve))
+          (let [u2 (.Mul (new big/Int) x2 z1z1)]
+            (.Mod u2 u2 (.-P curve))
+            (let [h (.Sub (new big/Int) u2 u1)
+                ^{:line 152} xEqual (== (.Sign h) 0)]
+              (when (== (.Sign h) -1)
+                (.Add h h (.-P curve)))
+
+              (let [i (.Lsh (new big/Int) h 1)]
+                (.Mul i i i)
+                (let [j (.Mul (new big/Int) h i)
+
+                    ^{:line 160} s1 (.Mul (new big/Int) y1 z2)]
+                  (.Mul s1 s1 z2z2)
+                  (.Mod s1 s1 (.-P curve))
+                  (let [s2 (.Mul (new big/Int) y2 z1)]
+                    (.Mul s2 s2 z1z1)
+                    (.Mod s2 s2 (.-P curve))
+                    (let [r (.Sub (new big/Int) s2 s1)]
+                      (when (== (.Sign r) -1)
+                        (.Add r r (.-P curve)))
+
+                      (let [yEqual (== (.Sign r) 0)]
+                        (when (and xEqual yEqual)
+                          (return (.doubleJacobian curve x1 y1 z1)))
+
+                        (.Lsh r r 1)
+                        (let [v (.Mul (new big/Int) u1 i)]
+
+                          (.Set x3 r)
+                          (.Mul x3 x3 x3)
+                          (.Sub x3 x3 j)
+                          (.Sub x3 x3 v)
+                          (.Sub x3 x3 v)
+                          (.Mod x3 x3 (.-P curve))
+
+                          (.Set y3 r)
+                          (.Sub v v x3)
+                          (.Mul y3 y3 v)
+                          (.Mul s1 s1 j)
+                          (.Lsh s1 s1 1)
+                          (.Sub y3 y3 s1)
+                          (.Mod y3 y3 (.-P curve))
+
+                          (.Add z3 z1 z2)
+                          (.Mul z3 z3 z3)
+                          (.Sub z3 z3 z1z1)
+                          (.Sub z3 z3 z2z2)
+                          (.Mul z3 z3 h)
+                          (.Mod z3 z3 (.-P curve))
+
+                          (return x3 y3 z3))))))))))))))
+
+
+
+
+
+
+
+
+^{:go/end 218} (go/method Double "Double implements [Curve.Double].\n\nDeprecated: the [CurveParams] methods are deprecated and are not guaranteed to\nprovide any security property. For ECDH, use the [crypto/ecdh] package.\nFor ECDSA, use the [crypto/ecdsa] package with a [Curve] value returned directly\nfrom [P224], [P256], [P384], or [P521].\n" [^{:tag (* CurveParams)} curve ^{:tag (* big/Int)} x1 ^{:tag (* big/Int)} y1] :results [(* big/Int) (* big/Int)]
+  ;; If there is a dedicated constant-time implementation for this curve operation,
+  ;; use that instead of the generic one.
+  (when [(values specific ok) (matchesSpecificCurve curve)] ok
+    (return (.Double specific x1 y1)))
+
+  (panicIfNotOnCurve curve x1 y1)
+
+  (let [z1 (zForAffine x1 y1)]
+    (.affineFromJacobian curve (.doubleJacobian curve x1 y1 z1))))
+
+
+
+
+^{:go/end 279} (go/method doubleJacobian "doubleJacobian takes a point in Jacobian coordinates, (x, y, z), and\nreturns its double, also in Jacobian form.\n" [^{:tag (* CurveParams)} curve ^{:tag (* big/Int)} x ^{:tag (* big/Int)} y ^{:tag (* big/Int)} z] :results [(* big/Int) (* big/Int) (* big/Int)]
+  ;; See https://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-3.html#doubling-dbl-2001-b
+  (let [delta (.Mul (new big/Int) z z)]
+    (.Mod delta delta (.-P curve))
+    (let [gamma (.Mul (new big/Int) y y)]
+      (.Mod gamma gamma (.-P curve))
+      (let [alpha (.Sub (new big/Int) x delta)]
+        (when (== (.Sign alpha) -1)
+          (.Add alpha alpha (.-P curve)))
+
+        (let [alpha2 (.Add (new big/Int) x delta)]
+          (.Mul alpha alpha alpha2)
+          (.Set alpha2 alpha)
+          (.Lsh alpha alpha 1)
+          (.Add alpha alpha alpha2)
+
+          (let [beta (.Mul alpha2 x gamma)
+
+              ^{:line 240} x3 (.Mul (new big/Int) alpha alpha)
+              ^{:line 241} beta8 (.Lsh (new big/Int) beta 3)]
+            (.Mod beta8 beta8 (.-P curve))
+            (.Sub x3 x3 beta8)
+            (when (== (.Sign x3) -1)
+              (.Add x3 x3 (.-P curve)))
+
+            (.Mod x3 x3 (.-P curve))
+
+            (let [z3 (.Add (new big/Int) y z)]
+              (.Mul z3 z3 z3)
+              (.Sub z3 z3 gamma)
+              (when (== (.Sign z3) -1)
+                (.Add z3 z3 (.-P curve)))
+
+              (.Sub z3 z3 delta)
+              (when (== (.Sign z3) -1)
+                (.Add z3 z3 (.-P curve)))
+
+              (.Mod z3 z3 (.-P curve))
+
+              (.Lsh beta beta 2)
+              (.Sub beta beta x3)
+              (when (== (.Sign beta) -1)
+                (.Add beta beta (.-P curve)))
+
+              (let [y3 (.Mul alpha alpha beta)]
+
+                (.Mul gamma gamma gamma)
+                (.Lsh gamma gamma 3)
+                (.Mod gamma gamma (.-P curve))
+
+                (.Sub y3 y3 gamma)
+                (when (== (.Sign y3) -1)
+                  (.Add y3 y3 (.-P curve)))
+
+                (.Mod y3 y3 (.-P curve))
+
+                (return x3 y3 z3)))))))))
+
+
+
+
+
+
+
+
+^{:go/end 309} (go/method ScalarMult "ScalarMult implements [Curve.ScalarMult].\n\nDeprecated: the [CurveParams] methods are deprecated and are not guaranteed to\nprovide any security property. For ECDH, use the [crypto/ecdh] package.\nFor ECDSA, use the [crypto/ecdsa] package with a [Curve] value returned directly\nfrom [P224], [P256], [P384], or [P521].\n" [^{:tag (* CurveParams)} curve ^{:tag (* big/Int)} Bx ^{:tag (* big/Int)} By ^{:tag (slice byte)} k] :results [(* big/Int) (* big/Int)]
+  ;; If there is a dedicated constant-time implementation for this curve operation,
+  ;; use that instead of the generic one.
+  (when [(values specific ok) (matchesSpecificCurve curve)] ok
+    (return (.ScalarMult specific Bx By k)))
+
+  (panicIfNotOnCurve curve Bx By)
+
+  (let [Bz (.SetInt64 (new big/Int) 1)
+      (values x y z) (values (new big/Int) (new big/Int) (new big/Int))]
+
+    (range [_ b k]
+      (range [8]
+        (set! (values x y z) (.doubleJacobian curve x y z))
+        (when (== (bit-and b 0x80) 0x80)
+          (set! (values x y z) (.addJacobian curve Bx By Bz x y z)))
+
+        (set! b << 1)))
+
+
+
+    (.affineFromJacobian curve x y z)))
+
+
+
+
+
+
+
+
+^{:go/end 325} (go/method ScalarBaseMult "ScalarBaseMult implements [Curve.ScalarBaseMult].\n\nDeprecated: the [CurveParams] methods are deprecated and are not guaranteed to\nprovide any security property. For ECDH, use the [crypto/ecdh] package.\nFor ECDSA, use the [crypto/ecdsa] package with a [Curve] value returned directly\nfrom [P224], [P256], [P384], or [P521].\n" [^{:tag (* CurveParams)} curve ^{:tag (slice byte)} k] :results [(* big/Int) (* big/Int)]
+  ;; If there is a dedicated constant-time implementation for this curve operation,
+  ;; use that instead of the generic one.
+  (when [(values specific ok) (matchesSpecificCurve curve)] ok
+    (return (.ScalarBaseMult specific k)))
+
+
+  (.ScalarMult curve (.-Gx curve) (.-Gy curve) k))
+
+
+^{:go/end 334} (go/func matchesSpecificCurve [^{:tag (* CurveParams)} params] :results [Curve bool]
+  (range [_ c (lit (slice Curve) p224 p256 p384 p521)]
+    (when (== params (.Params c))
+      (return c true)))
+
+
+  (return nil false))

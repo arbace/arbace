@@ -1,0 +1,208 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package hmac implements HMAC according to [FIPS 198-1].
+;;
+;; [FIPS 198-1]: https://doi.org/10.6028/NIST.FIPS.198-1
+(in-ns 'go.crypto.internal.fips140.hmac) (go/file "hmac.go" :doc "Package hmac implements HMAC according to [FIPS 198-1].\n\n[FIPS 198-1]: https://doi.org/10.6028/NIST.FIPS.198-1\n" :imports [
+
+
+    ^{:line 11} [fips140 "crypto/internal/fips140"]
+    ^{:line 12} [sha256 "crypto/internal/fips140/sha256"]
+    ^{:line 13} [sha3 "crypto/internal/fips140/sha3"]
+    ^{:line 14} [sha512 "crypto/internal/fips140/sha512"]
+    ^{:line 15} [errors "errors"]
+    ^{:line 16} [hash "hash"]])
+
+
+;; key is zero padded to the block size of the hash function
+;; ipad = 0x36 byte repeated for key length
+;; opad = 0x5c byte repeated for key length
+;; hmac = H([key ^ opad] H([key ^ ipad] text))
+
+
+
+
+(go/type marshalable "marshalable is the combination of encoding.BinaryMarshaler and\nencoding.BinaryUnmarshaler. Their method definitions are repeated here to\navoid a dependency on the encoding package.\n" (interface
+    (MarshalBinary [] :results [(slice byte) error])
+    (UnmarshalBinary ^error [(slice byte)])))
+
+
+(go/type HMAC (struct
+
+    ^{:line 34 :tag (slice byte) :doc "opad and ipad may share underlying storage with HMAC clones.\n"} opad ^{:tag (slice byte) :doc "opad and ipad may share underlying storage with HMAC clones.\n"} ipad
+    ^{:line 35 :tag hash/Hash} outer ^hash/Hash inner
+
+
+
+
+    ^{:line 40 :tag bool :doc "If marshaled is true, then opad and ipad do not contain a padded\ncopy of the key, but rather the marshaled state of outer/inner after\nopad/ipad has been fed into it.\n"} marshaled
+
+
+    ^{:line 43 :tag bool :doc "forHKDF and keyLen are stored to inform the service indicator decision.\n"} forHKDF
+    ^{:line 44 :tag int} keyLen))
+
+
+^{:go/end 73} (go/method Sum ^{:tag (slice byte)} [^{:tag (* HMAC)} h ^{:tag (slice byte)} in]
+  ;; Per FIPS 140-3 IG C.M, key lengths below 112 bits are only allowed for
+  ;; legacy use (i.e. verification only) and we don't support that. However,
+  ;; HKDF uses the HMAC key for the salt, which is allowed to be shorter.
+  (when (and (< (.-keyLen h) (/ 112 8)) (not (.-forHKDF h)))
+    (fips140/RecordNonApproved))
+
+  (type-switch (.-inner h)
+    (case [(* sha256/Digest) (* sha512/Digest) (* sha3/Digest)])
+    (default
+      (fips140/RecordNonApproved)))
+
+
+  (let [origLen (len in)]
+    (set! in (.Sum (.-inner h) in))
+
+    (if (.-marshaled h)
+      (when [err (.UnmarshalBinary (assert marshalable (.-outer h)) (.-opad h))] (!= err nil)
+        (panic err))
+
+      (do
+        (.Reset (.-outer h))
+        (.Write (.-outer h) (.-opad h))))
+
+    (.Write (.-outer h) (subslice in origLen))
+    (.Sum (.-outer h) (subslice in _ origLen))))
+
+
+^{:go/end 77} (go/method Write [^{:tag (* HMAC)} h ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (.Write (.-inner h) p))
+
+
+^{:go/end 79} (go/method Size ^int [^{:tag (* HMAC)} h] (.Size (.-outer h)))
+^{:go/end 80} (go/method BlockSize ^int [^{:tag (* HMAC)} h] (.BlockSize (.-inner h)))
+
+^{:go/end 131} (go/method Reset [^{:tag (* HMAC)} h]
+  (when (.-marshaled h)
+    (when [err (.UnmarshalBinary (assert marshalable (.-inner h)) (.-ipad h))] (!= err nil)
+      (panic err))
+
+    (return))
+
+
+  (.Reset (.-inner h))
+  (.Write (.-inner h) (.-ipad h))
+
+  ;; If the underlying hash is marshalable, we can save some time by saving a
+  ;; copy of the hash state now, and restoring it on future calls to Reset and
+  ;; Sum instead of writing ipad/opad every time.
+  ;;
+  ;; We do this on Reset to avoid slowing down the common single-use case.
+  ;;
+  ;; This is allowed by FIPS 198-1, Section 6: "Conceptually, the intermediate
+  ;; results of the compression function on the B-byte blocks (K0 ⊕ ipad) and
+  ;; (K0 ⊕ opad) can be precomputed once, at the time of generation of the key
+  ;; K, or before its first use. These intermediate results can be stored and
+  ;; then used to initialize H each time that a message needs to be
+  ;; authenticated using the same key. [...] These stored intermediate values
+  ;; shall be treated and protected in the same manner as secret keys."
+  (let [(values marshalableInner innerOK) (assert marshalable (.-inner h))]
+    (when (not innerOK)
+      (return))
+
+    (let [(values marshalableOuter outerOK) (assert marshalable (.-outer h))]
+      (when (not outerOK)
+        (return))
+
+
+      (let [(values imarshal err) (.MarshalBinary marshalableInner)]
+        (when (!= err nil)
+          (return))
+
+
+        (.Reset (.-outer h))
+        (.Write (.-outer h) (.-opad h))
+        (let [(values omarshal ^:assign err) (.MarshalBinary marshalableOuter)]
+          (when (!= err nil)
+            (return))
+
+
+          ;; Marshaling succeeded; save the marshaled state for later
+          (set! (.-ipad h) imarshal)
+          (set! (.-opad h) omarshal)
+          (set! (.-marshaled h) true))))))
+
+
+(go/type errCloneUnsupported (struct))
+
+^{:go/breaks [3] :go/end 137} (go/method Error ^string [^errCloneUnsupported e]
+  "crypto/hmac: hash does not support hash.Cloner")
+
+
+^{:go/end 141} (go/method Unwrap ^error [^errCloneUnsupported e]
+  ^{:line 140} errors/ErrUnsupported)
+
+
+
+
+^{:go/end 165} (go/method Clone "Clone implements [hash.Cloner] if the underlying hash does.\nOtherwise, it returns an error wrapping [errors.ErrUnsupported].\n" [^{:tag (* HMAC)} h] :results [hash/Cloner error]
+  (let [r @h
+      (values ic ok) (assert hash/Cloner (.-inner h))]
+    (when (not ok)
+      (return nil (lit errCloneUnsupported)))
+
+    (let [(values oc ^:assign ok) (assert hash/Cloner (.-outer h))]
+      (when (not ok)
+        (return nil (lit errCloneUnsupported)))
+
+      (let [^error err (zero error)]
+        (set! (values (.-inner r) err) (.Clone ic))
+        (when (!= err nil)
+          (return nil (lit errCloneUnsupported)))
+
+        (set! (values (.-outer r) err) (.Clone oc))
+        (when (!= err nil)
+          (return nil (lit errCloneUnsupported)))
+
+        (return (addr r) nil)))))
+
+
+
+^{:go/end 204} (go/func New "New returns a new HMAC hash using the given [hash.Hash] type and key.\n" :type-params [^hash/Hash H] ^{:tag (* HMAC)} [^{:tag (func [] [H])} h ^{:tag (slice byte)} key]
+  (let [hm (addr (lit HMAC :keyLen (len key)))]
+    (set! (.-outer hm) (h))
+    (set! (.-inner hm) (h))
+    (let [unique true]
+      (^{:go/end 181} (fn []
+          (defer (^{:go/end 177} (fn []
+                ;; The comparison might panic if the underlying types are not comparable.
+                (set! _ (recover)))))
+
+          (when (== (.-outer hm) (.-inner hm))
+            (set! unique false))))
+
+
+      (when (not unique)
+        (panic "crypto/hmac: hash generation function does not produce unique values"))
+
+      (let [blocksize (.BlockSize (.-inner hm))]
+        (set! (.-ipad hm) (make (slice byte) blocksize))
+        (set! (.-opad hm) (make (slice byte) blocksize))
+        (when (> (len key) blocksize)
+          ;; If key is too big, hash it.
+          (.Write (.-outer hm) key)
+          (set! key (.Sum (.-outer hm) nil)))
+
+        (copy (.-ipad hm) key)
+        (copy (.-opad hm) key)
+        (range [i (.-ipad hm)]
+          (set! (aget (.-ipad hm) i) bit-xor 0x36))
+
+        (range [i (.-opad hm)]
+          (set! (aget (.-opad hm) i) bit-xor 0x5c))
+
+        (.Write (.-inner hm) (.-ipad hm))
+
+        ^{:line 203} hm))))
+
+
+
+^{:go/end 209} (go/func MarkAsUsedInKDF "MarkAsUsedInKDF records that this HMAC instance is used as part of a KDF.\n" [^{:tag (* HMAC)} h]
+  (set! (.-forHKDF h) true))

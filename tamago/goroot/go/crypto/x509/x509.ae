@@ -1,0 +1,2720 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package x509 implements a subset of the X.509 standard.
+;;
+;; It allows parsing and generating certificates, certificate signing
+;; requests, certificate revocation lists, and encoded public and private keys.
+;; It provides a certificate verifier, complete with a chain builder.
+;;
+;; The package targets the X.509 technical profile defined by the IETF (RFC
+;; 2459/3280/5280), and as further restricted by the CA/Browser Forum Baseline
+;; Requirements. There is minimal support for features outside of these
+;; profiles, as the primary goal of the package is to provide compatibility
+;; with the publicly trusted TLS certificate ecosystem and its policies and
+;; constraints.
+;;
+;; On macOS and Windows, certificate verification is handled by system APIs, but
+;; the package aims to apply consistent validation rules across operating
+;; systems.
+(in-ns 'go.crypto.x509) (go/file "x509.go" :doc "Package x509 implements a subset of the X.509 standard.\n\nIt allows parsing and generating certificates, certificate signing\nrequests, certificate revocation lists, and encoded public and private keys.\nIt provides a certificate verifier, complete with a chain builder.\n\nThe package targets the X.509 technical profile defined by the IETF (RFC\n2459/3280/5280), and as further restricted by the CA/Browser Forum Baseline\nRequirements. There is minimal support for features outside of these\nprofiles, as the primary goal of the package is to provide compatibility\nwith the publicly trusted TLS certificate ecosystem and its policies and\nconstraints.\n\nOn macOS and Windows, certificate verification is handled by system APIs, but\nthe package aims to apply consistent validation rules across operating\nsystems.\n" :imports [
+
+
+    ^{:line 24} [bytes "bytes"]
+    ^{:line 25} [crypto "crypto"]
+    ^{:line 26} [ecdh "crypto/ecdh"]
+    ^{:line 27} [ecdsa "crypto/ecdsa"]
+    ^{:line 28} [ed25519 "crypto/ed25519"]
+    ^{:line 29} [elliptic "crypto/elliptic"]
+    ^{:line 30} [fips140 "crypto/fips140"]
+    ^{:line 31} [mldsa "crypto/mldsa"]
+    ^{:line 32} [rsa "crypto/rsa"]
+    ^{:line 33} [sha1 "crypto/sha1"]
+    ^{:line 34} [sha256 "crypto/sha256"]
+    ^{:line 35} [pkix "crypto/x509/pkix"]
+    ^{:line 36} [asn1 "encoding/asn1"]
+    ^{:line 37} [pem "encoding/pem"]
+    ^{:line 38} [errors "errors"]
+    ^{:line 39} [fmt "fmt"]
+    ^{:line 40} [godebug "internal/godebug"]
+    ^{:line 41} [io "io"]
+    ^{:line 42} [big "math/big"]
+    ^{:line 43} [net "net"]
+    ^{:line 44} [url "net/url"]
+    ^{:line 45} [strconv "strconv"]
+    ^{:line 46} [time "time"]
+    ^{:line 47} [unicode "unicode"]
+
+    ;; Explicitly import these for their crypto.RegisterHash init side-effects.
+    ;; Keep these as blank imports, even if they're imported above.
+    ^{:line 51} [_ "crypto/sha1"]
+    ^{:line 52} [_ "crypto/sha256"]
+    ^{:line 53} [_ "crypto/sha512"]
+
+    ^{:line 55} [cryptobyte "golang.org/x/crypto/cryptobyte"]
+    ^:alias ^{:line 56} [cryptobyte_asn1 "golang.org/x/crypto/cryptobyte/asn1"]])
+
+
+
+
+(go/type pkixPublicKey "pkixPublicKey reflects a PKIX public key structure. See SubjectPublicKeyInfo\nin RFC 3280.\n" (struct
+    ^{:line 62 :tag pkix/AlgorithmIdentifier} Algo
+    ^{:line 63 :tag asn1/BitString} BitString))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 85} (go/func ParsePKIXPublicKey "ParsePKIXPublicKey parses a public key in PKIX, ASN.1 DER form. The encoded\npublic key is a SubjectPublicKeyInfo structure (see RFC 5280, Section 4.1).\n\nIt returns a *[rsa.PublicKey], *[dsa.PublicKey], *[ecdsa.PublicKey],\n[ed25519.PublicKey] (not a pointer), *[mldsa.PublicKey], or *[ecdh.PublicKey]\n(for X25519). More types might be supported in the future.\n\nThis kind of key is commonly encoded in PEM blocks of type \"PUBLIC KEY\".\n" [^{:tag (slice byte)} derBytes] :results [^any pub ^error err]
+  (let [^publicKeyInfo pki (zero publicKeyInfo)]
+    (if [(values rest err) (asn1/Unmarshal derBytes (addr pki))] (!= err nil) (do
+        (when [(values _ err) (asn1/Unmarshal derBytes (addr (lit pkcs1PublicKey)))] (== err nil)
+          (return nil (errors/New "x509: failed to parse public key (use ParsePKCS1PublicKey instead for this key format)")))
+
+        (return nil err))
+      (when (!= (len rest) 0)
+        (return nil (errors/New "x509: trailing data after ASN.1 of public-key"))))
+
+    (parsePublicKey (addr pki))))
+
+
+^{:go/end 149} (go/func marshalPublicKey [^any pub] :results [^{:tag (slice byte)} publicKeyBytes ^pkix/AlgorithmIdentifier publicKeyAlgorithm ^error err]
+  (type-switch [pub pub]
+    (case [(* rsa/PublicKey)]
+      (set! (values publicKeyBytes err) (asn1/Marshal ^{:go/breaks [2 4]} (lit pkcs1PublicKey
+            :N (.-N pub)
+            :E (.-E pub))))
+
+      (when (!= err nil)
+        (return nil (lit pkix/AlgorithmIdentifier) err))
+
+      (set! (.-Algorithm publicKeyAlgorithm) oidPublicKeyRSA)
+      ;; This is a NULL parameters value which is required by
+      ;; RFC 3279, Section 2.3.1.
+      (set! (.-Parameters publicKeyAlgorithm) asn1/NullRawValue))
+    (case [(* ecdsa/PublicKey)]
+      (let [(values oid ok) (oidFromNamedCurve (.-Curve pub))]
+        (when (not ok)
+          (return nil (lit pkix/AlgorithmIdentifier) (errors/New "x509: unsupported elliptic curve")))
+
+        (set! (values publicKeyBytes err) (.Bytes pub))
+        (when (!= err nil)
+          (return nil (lit pkix/AlgorithmIdentifier) err))
+
+        (set! (.-Algorithm publicKeyAlgorithm) oidPublicKeyECDSA)
+        (let [^{:tag (slice byte)} paramBytes (zero (slice byte))]
+          (set! (values paramBytes err) (asn1/Marshal oid))
+          (when (!= err nil)
+            (return))
+
+          (set! (.-FullBytes (.-Parameters publicKeyAlgorithm)) paramBytes))))
+    (case [ed25519/PublicKey]
+      (set! publicKeyBytes pub)
+      (set! (.-Algorithm publicKeyAlgorithm) oidPublicKeyEd25519))
+    (case [(* mldsa/PublicKey)]
+      (let [(values oid ok) (oidFromMLDSAParameters (.Parameters pub))]
+        (when (not ok)
+          (return nil (lit pkix/AlgorithmIdentifier) (errors/New "x509: unsupported ML-DSA parameters")))
+
+        (set! publicKeyBytes (.Bytes pub))
+        (set! (.-Algorithm publicKeyAlgorithm) oid)))
+    (case [(* ecdh/PublicKey)]
+      (set! publicKeyBytes (.Bytes pub))
+      (if (== (.Curve pub) (ecdh/X25519))
+        (set! (.-Algorithm publicKeyAlgorithm) oidPublicKeyX25519)
+
+        (let [(values oid ok) (oidFromECDHCurve (.Curve pub))]
+          (when (not ok)
+            (return nil (lit pkix/AlgorithmIdentifier) (errors/New "x509: unsupported elliptic curve")))
+
+          (set! (.-Algorithm publicKeyAlgorithm) oidPublicKeyECDSA)
+          (let [^{:tag (slice byte)} paramBytes (zero (slice byte))]
+            (set! (values paramBytes err) (asn1/Marshal oid))
+            (when (!= err nil)
+              (return))
+
+            (set! (.-FullBytes (.-Parameters publicKeyAlgorithm)) paramBytes)))))
+
+    (default
+      (return nil (lit pkix/AlgorithmIdentifier) (fmt/Errorf "x509: unsupported public key type: %T" pub))))
+
+
+  (return publicKeyBytes publicKeyAlgorithm nil))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 179} (go/func MarshalPKIXPublicKey "MarshalPKIXPublicKey converts a public key to PKIX, ASN.1 DER form.\nThe encoded public key is a SubjectPublicKeyInfo structure\n(see RFC 5280, Section 4.1).\n\nThe following key types are currently supported: *[rsa.PublicKey],\n*[ecdsa.PublicKey], [ed25519.PublicKey] (not a pointer), *[mldsa.PublicKey],\nand *[ecdh.PublicKey]. Unsupported key types result in an error.\n\nThis kind of key is commonly encoded in PEM blocks of type \"PUBLIC KEY\".\n" [^any pub] :results [(slice byte) error]
+  (let [^{:tag (slice byte)} publicKeyBytes (zero (slice byte))
+      ^{:line 162 :tag pkix/AlgorithmIdentifier} publicKeyAlgorithm (zero pkix/AlgorithmIdentifier)
+      ^{:line 163 :tag error} err (zero error)]
+
+    (when [(set! (values publicKeyBytes publicKeyAlgorithm err) (marshalPublicKey pub))] (!= err nil)
+      (return nil err))
+
+
+    (let [pkix ^{:go/breaks [2 4]} (lit pkixPublicKey
+          :Algo publicKeyAlgorithm
+          :BitString ^{:go/breaks [2 4]} (lit asn1/BitString
+            :Bytes publicKeyBytes
+            :BitLength (* 8 (len publicKeyBytes))))
+
+
+
+        (values ret _) (asn1/Marshal pkix)]
+      (return ret nil))))
+
+
+;; These structures reflect the ASN.1 structure of X.509 certificates.:
+
+(go/type certificate (struct
+    ^{:line 184 :tag tbsCertificate} TBSCertificate
+    ^{:line 185 :tag pkix/AlgorithmIdentifier} SignatureAlgorithm
+    ^{:line 186 :tag asn1/BitString} SignatureValue))
+
+
+(go/type tbsCertificate (struct
+    ^{:line 190 :tag asn1/RawContent} Raw
+    ^{:line 191 :tag int :go/tag "asn1:\"optional,explicit,default:0,tag:0\""} Version
+    ^{:line 192 :tag (* big/Int)} SerialNumber
+    ^{:line 193 :tag pkix/AlgorithmIdentifier} SignatureAlgorithm
+    ^{:line 194 :tag asn1/RawValue} Issuer
+    ^{:line 195 :tag validity} Validity
+    ^{:line 196 :tag asn1/RawValue} Subject
+    ^{:line 197 :tag publicKeyInfo} PublicKey
+    ^{:line 198 :tag asn1/BitString :go/tag "asn1:\"optional,tag:1\""} UniqueId
+    ^{:line 199 :tag asn1/BitString :go/tag "asn1:\"optional,tag:2\""} SubjectUniqueId
+    ^{:line 200 :tag (slice pkix/Extension) :go/tag "asn1:\"omitempty,optional,explicit,tag:3\""} Extensions))
+
+
+(go/type dsaAlgorithmParameters (struct
+    ^{:line 204 :tag (* big/Int)} P ^{:tag (* big/Int)} Q ^{:tag (* big/Int)} G))
+
+
+(go/type validity (struct
+    ^{:line 208 :tag time/Time} NotBefore ^time/Time NotAfter))
+
+
+(go/type publicKeyInfo (struct
+    ^{:line 212 :tag asn1/RawContent} Raw
+    ^{:line 213 :tag pkix/AlgorithmIdentifier} Algorithm
+    ^{:line 214 :tag asn1/BitString} PublicKey))
+
+
+
+(go/type authKeyId "RFC 5280,  4.2.1.1\n" (struct
+    ^{:line 219 :tag (slice byte) :go/tag "asn1:\"optional,tag:0\""} Id))
+
+
+(go/type SignatureAlgorithm int)
+
+(go/const
+  ^{:line 225} [^{:tag SignatureAlgorithm :val 0} UnknownSignatureAlgorithm iota]
+
+  ^{:line 227} [^{:val 1} MD2WithRSA] ; Unsupported.
+  ^{:line 228} [^{:val 2} MD5WithRSA] ; Only supported for signing, not verification.
+  ^{:line 229} [^{:val 3} SHA1WithRSA] ; Only supported for signing, and verification of CRLs, CSRs, and OCSP responses.
+  ^{:line 230} [^{:val 4} SHA256WithRSA]
+  ^{:line 231} [^{:val 5} SHA384WithRSA]
+  ^{:line 232} [^{:val 6} SHA512WithRSA]
+  ^{:line 233} [^{:val 7} DSAWithSHA1] ; Unsupported.
+  ^{:line 234} [^{:val 8} DSAWithSHA256] ; Unsupported.
+  ^{:line 235} [^{:val 9} ECDSAWithSHA1] ; Only supported for signing, and verification of CRLs, CSRs, and OCSP responses.
+  ^{:line 236} [^{:val 10} ECDSAWithSHA256]
+  ^{:line 237} [^{:val 11} ECDSAWithSHA384]
+  ^{:line 238} [^{:val 12} ECDSAWithSHA512]
+  ^{:line 239} [^{:val 13} SHA256WithRSAPSS]
+  ^{:line 240} [^{:val 14} SHA384WithRSAPSS]
+  ^{:line 241} [^{:val 15} SHA512WithRSAPSS]
+  ^{:line 242} [^{:val 16} PureEd25519]
+  ^{:line 243} [^{:val 17} MLDSA44]
+  ^{:line 244} [^{:val 18} MLDSA65]
+  ^{:line 245} [^{:val 19} MLDSA87])
+
+
+^{:go/breaks [[4 254]] :go/end 255} (go/method isRSAPSS ^bool [^SignatureAlgorithm algo]
+  (range [_ details signatureAlgorithmDetails]
+    (when (== (.-algo details) algo)
+      (return (.-isRSAPSS details))))
+
+
+  false)
+
+
+^{:go/end 264} (go/method hashFunc ^crypto/Hash [^SignatureAlgorithm algo]
+  (range [_ details signatureAlgorithmDetails]
+    (when (== (.-algo details) algo)
+      (return (.-hash details))))
+
+
+  (conv crypto/Hash 0))
+
+
+^{:go/end 273} (go/method String ^string [^SignatureAlgorithm algo]
+  (range [_ details signatureAlgorithmDetails]
+    (when (== (.-algo details) algo)
+      (return (.-name details))))
+
+
+  (strconv/Itoa (conv int algo)))
+
+
+(go/type PublicKeyAlgorithm int)
+
+(go/const
+  ^{:line 278} [^{:tag PublicKeyAlgorithm :val 0} UnknownPublicKeyAlgorithm iota]
+  ^{:line 279} [^{:val 1} RSA]
+  ^{:line 280} [^{:val 2} DSA] ; Only supported for parsing.
+  ^{:line 281} [^{:val 3} ECDSA]
+  ^{:line 282} [^{:val 4} Ed25519]
+  ^{:line 283} [^{:val 5} MLDSA])
+
+
+(go/var publicKeyAlgoName (lit (array ... string)
+    ^{:line 287} [RSA "RSA"]
+    ^{:line 288} [DSA "DSA"]
+    ^{:line 289} [ECDSA "ECDSA"]
+    ^{:line 290} [Ed25519 "Ed25519"]
+    ^{:line 291} [MLDSA "ML-DSA"]))
+
+
+^{:go/end 299} (go/method String ^string [^PublicKeyAlgorithm algo]
+  (when (and (< 0 algo) (< (conv int algo) (len publicKeyAlgoName)))
+    (return (aget publicKeyAlgoName algo)))
+
+  (strconv/Itoa (conv int algo)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var "OIDs for signature algorithms\n\n\tpkcs-1 OBJECT IDENTIFIER ::= {\n\t\tiso(1) member-body(2) us(840) rsadsi(113549) pkcs(1) 1 }\n\nRFC 3279 2.2.1 RSA Signature Algorithms\n\n\tmd5WithRSAEncryption OBJECT IDENTIFIER ::= { pkcs-1 4 }\n\n\tsha-1WithRSAEncryption OBJECT IDENTIFIER ::= { pkcs-1 5 }\n\n\tdsaWithSha1 OBJECT IDENTIFIER ::= {\n\t\tiso(1) member-body(2) us(840) x9-57(10040) x9cm(4) 3 }\n\nRFC 3279 2.2.3 ECDSA Signature Algorithm\n\n\tecdsa-with-SHA1 OBJECT IDENTIFIER ::= {\n\t\tiso(1) member-body(2) us(840) ansi-x962(10045)\n\t\tsignatures(4) ecdsa-with-SHA1(1)}\n\nRFC 4055 5 PKCS #1 Version 1.5\n\n\tsha256WithRSAEncryption OBJECT IDENTIFIER ::= { pkcs-1 11 }\n\n\tsha384WithRSAEncryption OBJECT IDENTIFIER ::= { pkcs-1 12 }\n\n\tsha512WithRSAEncryption OBJECT IDENTIFIER ::= { pkcs-1 13 }\n\nRFC 5758 3.1 DSA Signature Algorithms\n\n\tdsaWithSha256 OBJECT IDENTIFIER ::= {\n\t\tjoint-iso-ccitt(2) country(16) us(840) organization(1) gov(101)\n\t\tcsor(3) algorithms(4) id-dsa-with-sha2(3) 2}\n\nRFC 5758 3.2 ECDSA Signature Algorithm\n\n\tecdsa-with-SHA256 OBJECT IDENTIFIER ::= { iso(1) member-body(2)\n\t\tus(840) ansi-X9-62(10045) signatures(4) ecdsa-with-SHA2(3) 2 }\n\n\tecdsa-with-SHA384 OBJECT IDENTIFIER ::= { iso(1) member-body(2)\n\t\tus(840) ansi-X9-62(10045) signatures(4) ecdsa-with-SHA2(3) 3 }\n\n\tecdsa-with-SHA512 OBJECT IDENTIFIER ::= { iso(1) member-body(2)\n\t\tus(840) ansi-X9-62(10045) signatures(4) ecdsa-with-SHA2(3) 4 }\n\nRFC 8410 3 Curve25519 and Curve448 Algorithm Identifiers\n\n\tid-Ed25519   OBJECT IDENTIFIER ::= { 1 3 101 112 }\n"
+  ^{:line 350} [oidSignatureMD5WithRSA (lit asn1/ObjectIdentifier 1 2 840 113549 1 1 4)]
+  ^{:line 351} [oidSignatureSHA1WithRSA (lit asn1/ObjectIdentifier 1 2 840 113549 1 1 5)]
+  ^{:line 352} [oidSignatureSHA256WithRSA (lit asn1/ObjectIdentifier 1 2 840 113549 1 1 11)]
+  ^{:line 353} [oidSignatureSHA384WithRSA (lit asn1/ObjectIdentifier 1 2 840 113549 1 1 12)]
+  ^{:line 354} [oidSignatureSHA512WithRSA (lit asn1/ObjectIdentifier 1 2 840 113549 1 1 13)]
+  ^{:line 355} [oidSignatureRSAPSS (lit asn1/ObjectIdentifier 1 2 840 113549 1 1 10)]
+  ^{:line 356} [oidSignatureDSAWithSHA1 (lit asn1/ObjectIdentifier 1 2 840 10040 4 3)]
+  ^{:line 357} [oidSignatureDSAWithSHA256 (lit asn1/ObjectIdentifier 2 16 840 1 101 3 4 3 2)]
+  ^{:line 358} [oidSignatureECDSAWithSHA1 (lit asn1/ObjectIdentifier 1 2 840 10045 4 1)]
+  ^{:line 359} [oidSignatureECDSAWithSHA256 (lit asn1/ObjectIdentifier 1 2 840 10045 4 3 2)]
+  ^{:line 360} [oidSignatureECDSAWithSHA384 (lit asn1/ObjectIdentifier 1 2 840 10045 4 3 3)]
+  ^{:line 361} [oidSignatureECDSAWithSHA512 (lit asn1/ObjectIdentifier 1 2 840 10045 4 3 4)]
+  ^{:line 362} [oidSignatureEd25519 (lit asn1/ObjectIdentifier 1 3 101 112)]
+
+  ^{:line 364} [oidSHA256 (lit asn1/ObjectIdentifier 2 16 840 1 101 3 4 2 1)]
+  ^{:line 365} [oidSHA384 (lit asn1/ObjectIdentifier 2 16 840 1 101 3 4 2 2)]
+  ^{:line 366} [oidSHA512 (lit asn1/ObjectIdentifier 2 16 840 1 101 3 4 2 3)]
+
+  ^{:line 368} [oidMGF1 (lit asn1/ObjectIdentifier 1 2 840 113549 1 1 8)]
+
+
+
+
+  ^{:line 373} [^{:doc "oidISOSignatureSHA1WithRSA means the same as oidSignatureSHA1WithRSA\nbut it's specified by ISO. Microsoft's makecert.exe has been known\nto produce certificates with this OID.\n"} oidISOSignatureSHA1WithRSA (lit asn1/ObjectIdentifier 1 3 14 3 2 29)])
+
+
+(go/var signatureAlgorithmDetails (lit (slice (struct
+        ^{:line 377 :tag SignatureAlgorithm} algo
+        ^{:line 378 :tag string} name
+        ^{:line 379 :tag asn1/ObjectIdentifier} oid
+        ^{:line 380 :tag asn1/RawValue} params
+        ^{:line 381 :tag PublicKeyAlgorithm} pubKeyAlgo
+        ^{:line 382 :tag crypto/Hash} hash
+        ^{:line 383 :tag bool} isRSAPSS))
+
+    (lit _ MD5WithRSA "MD5-RSA" oidSignatureMD5WithRSA asn1/NullRawValue RSA crypto/MD5 false)
+    (lit _ SHA1WithRSA "SHA1-RSA" oidSignatureSHA1WithRSA asn1/NullRawValue RSA crypto/SHA1 false)
+    (lit _ SHA1WithRSA "SHA1-RSA" oidISOSignatureSHA1WithRSA asn1/NullRawValue RSA crypto/SHA1 false)
+    (lit _ SHA256WithRSA "SHA256-RSA" oidSignatureSHA256WithRSA asn1/NullRawValue RSA crypto/SHA256 false)
+    (lit _ SHA384WithRSA "SHA384-RSA" oidSignatureSHA384WithRSA asn1/NullRawValue RSA crypto/SHA384 false)
+    (lit _ SHA512WithRSA "SHA512-RSA" oidSignatureSHA512WithRSA asn1/NullRawValue RSA crypto/SHA512 false)
+    (lit _ SHA256WithRSAPSS "SHA256-RSAPSS" oidSignatureRSAPSS pssParametersSHA256 RSA crypto/SHA256 true)
+    (lit _ SHA384WithRSAPSS "SHA384-RSAPSS" oidSignatureRSAPSS pssParametersSHA384 RSA crypto/SHA384 true)
+    (lit _ SHA512WithRSAPSS "SHA512-RSAPSS" oidSignatureRSAPSS pssParametersSHA512 RSA crypto/SHA512 true)
+    (lit _ DSAWithSHA1 "DSA-SHA1" oidSignatureDSAWithSHA1 emptyRawValue DSA crypto/SHA1 false)
+    (lit _ DSAWithSHA256 "DSA-SHA256" oidSignatureDSAWithSHA256 emptyRawValue DSA crypto/SHA256 false)
+    (lit _ ECDSAWithSHA1 "ECDSA-SHA1" oidSignatureECDSAWithSHA1 emptyRawValue ECDSA crypto/SHA1 false)
+    (lit _ ECDSAWithSHA256 "ECDSA-SHA256" oidSignatureECDSAWithSHA256 emptyRawValue ECDSA crypto/SHA256 false)
+    (lit _ ECDSAWithSHA384 "ECDSA-SHA384" oidSignatureECDSAWithSHA384 emptyRawValue ECDSA crypto/SHA384 false)
+    (lit _ ECDSAWithSHA512 "ECDSA-SHA512" oidSignatureECDSAWithSHA512 emptyRawValue ECDSA crypto/SHA512 false)
+    (lit _ PureEd25519 "Ed25519" oidSignatureEd25519 emptyRawValue Ed25519 (conv crypto/Hash 0) false) ; /* no pre-hashing */
+    (lit _ MLDSA44 "ML-DSA-44" oidPublicKeyMLDSA44 emptyRawValue MLDSA (conv crypto/Hash 0) false) ; /* no pre-hashing */
+    (lit _ MLDSA65 "ML-DSA-65" oidPublicKeyMLDSA65 emptyRawValue MLDSA (conv crypto/Hash 0) false) ; /* no pre-hashing */
+    (lit _ MLDSA87 "ML-DSA-87" oidPublicKeyMLDSA87 emptyRawValue MLDSA (conv crypto/Hash 0) false))) ; /* no pre-hashing */
+
+
+(go/var emptyRawValue (lit asn1/RawValue))
+
+
+
+
+
+
+
+
+(go/var "DER encoded RSA PSS parameters for the\nSHA256, SHA384, and SHA512 hashes as defined in RFC 3447, Appendix A.2.3.\nThe parameters contain the following values:\n  - hashAlgorithm contains the associated hash identifier with NULL parameters\n  - maskGenAlgorithm always contains the default mgf1SHA1 identifier\n  - saltLength contains the length of the associated hash\n  - trailerField always contains the default trailerFieldBC value\n"
+  ^{:line 416} [pssParametersSHA256 (lit asn1/RawValue :FullBytes (lit (slice byte) 48 52 160 15 48 13 6 9 96 134 72 1 101 3 4 2 1 5 0 161 28 48 26 6 9 42 134 72 134 247 13 1 1 8 48 13 6 9 96 134 72 1 101 3 4 2 1 5 0 162 3 2 1 32))]
+  ^{:line 417} [pssParametersSHA384 (lit asn1/RawValue :FullBytes (lit (slice byte) 48 52 160 15 48 13 6 9 96 134 72 1 101 3 4 2 2 5 0 161 28 48 26 6 9 42 134 72 134 247 13 1 1 8 48 13 6 9 96 134 72 1 101 3 4 2 2 5 0 162 3 2 1 48))]
+  ^{:line 418} [pssParametersSHA512 (lit asn1/RawValue :FullBytes (lit (slice byte) 48 52 160 15 48 13 6 9 96 134 72 1 101 3 4 2 3 5 0 161 28 48 26 6 9 42 134 72 134 247 13 1 1 8 48 13 6 9 96 134 72 1 101 3 4 2 3 5 0 162 3 2 1 64))])
+
+
+
+
+(go/type pssParameters "pssParameters reflects the parameters in an AlgorithmIdentifier that\nspecifies RSA PSS. See RFC 3447, Appendix A.2.3.\n" (struct
+
+
+
+    ^{:line 427 :tag pkix/AlgorithmIdentifier :go/tag "asn1:\"explicit,tag:0\"" :doc "The following three fields are not marked as\noptional because the default values specify SHA-1,\nwhich is no longer suitable for use in signatures.\n"} Hash
+    ^{:line 428 :tag pkix/AlgorithmIdentifier :go/tag "asn1:\"explicit,tag:1\""} MGF
+    ^{:line 429 :tag int :go/tag "asn1:\"explicit,tag:2\""} SaltLength
+    ^{:line 430 :tag int :go/tag "asn1:\"optional,explicit,tag:3,default:1\""} TrailerField))
+
+
+^{:go/end 492} (go/func getSignatureAlgorithmFromAI ^SignatureAlgorithm [^pkix/AlgorithmIdentifier ai]
+  (when (or (.Equal (.-Algorithm ai) oidSignatureEd25519)
+      (.Equal (.-Algorithm ai) oidPublicKeyMLDSA44)
+      (.Equal (.-Algorithm ai) oidPublicKeyMLDSA65)
+      (.Equal (.-Algorithm ai) oidPublicKeyMLDSA87))
+    ;; RFC 8410, Section 3
+    ;; > For all of the OIDs, the parameters MUST be absent.
+    ;; RFC 9881, Section 2
+    ;; > The contents of the parameters component for each algorithm MUST be absent.
+    (when (!= (len (.-FullBytes (.-Parameters ai))) 0)
+      (return UnknownSignatureAlgorithm)))
+
+
+
+  (when (not (.Equal (.-Algorithm ai) oidSignatureRSAPSS))
+    (range [_ details signatureAlgorithmDetails]
+      (when (.Equal (.-Algorithm ai) (.-oid details))
+        (return (.-algo details))))
+
+
+    (return UnknownSignatureAlgorithm))
+
+
+  ;; RSA PSS is special because it encodes important parameters
+  ;; in the Parameters.
+
+  (let [^pssParameters params (zero pssParameters)]
+    (when [(values _ err) (asn1/Unmarshal (.-FullBytes (.-Parameters ai)) (addr params))] (!= err nil)
+      (return UnknownSignatureAlgorithm))
+
+
+    (let [^pkix/AlgorithmIdentifier mgf1HashFunc (zero pkix/AlgorithmIdentifier)]
+      (when [(values _ err) (asn1/Unmarshal (.-FullBytes (.-Parameters (.-MGF params))) (addr mgf1HashFunc))] (!= err nil)
+        (return UnknownSignatureAlgorithm))
+
+
+      ;; PSS is greatly overburdened with options. This code forces them into
+      ;; three buckets by requiring that the MGF1 hash function always match the
+      ;; message hash function (as recommended in RFC 3447, Section 8.1), that the
+      ;; salt length matches the hash length, and that the trailer field has the
+      ;; default value.
+      (when (or ^:go/paren (and (!= (len (.-FullBytes (.-Parameters (.-Hash params)))) 0) (not (bytes/Equal (.-FullBytes (.-Parameters (.-Hash params))) asn1/NullBytes)))
+          (not (.Equal (.-Algorithm (.-MGF params)) oidMGF1))
+          (not (.Equal (.-Algorithm mgf1HashFunc) (.-Algorithm (.-Hash params))))
+          ^:go/paren (and (!= (len (.-FullBytes (.-Parameters mgf1HashFunc))) 0) (not (bytes/Equal (.-FullBytes (.-Parameters mgf1HashFunc)) asn1/NullBytes)))
+          (!= (.-TrailerField params) 1))
+        (return UnknownSignatureAlgorithm))
+
+
+      (switch
+        (case [(and (.Equal (.-Algorithm (.-Hash params)) oidSHA256) (== (.-SaltLength params) 32))]
+          (return SHA256WithRSAPSS))
+        (case [(and (.Equal (.-Algorithm (.-Hash params)) oidSHA384) (== (.-SaltLength params) 48))]
+          (return SHA384WithRSAPSS))
+        (case [(and (.Equal (.-Algorithm (.-Hash params)) oidSHA512) (== (.-SaltLength params) 64))]
+          (return SHA512WithRSAPSS)))
+
+
+      ^{:line 491} UnknownSignatureAlgorithm)))
+
+
+(go/var
+
+
+
+
+
+
+
+
+
+  ^{:line 504} [^{:doc "RFC 3279, 2.3 Public Key Algorithms\n\n\tpkcs-1 OBJECT IDENTIFIER ::== { iso(1) member-body(2) us(840)\n\t\trsadsi(113549) pkcs(1) 1 }\n\nrsaEncryption OBJECT IDENTIFIER ::== { pkcs1-1 1 }\n\n\tid-dsa OBJECT IDENTIFIER ::== { iso(1) member-body(2) us(840)\n\t\tx9-57(10040) x9cm(4) 1 }\n"} oidPublicKeyRSA (lit asn1/ObjectIdentifier 1 2 840 113549 1 1 1)]
+  ^{:line 505} [oidPublicKeyDSA (lit asn1/ObjectIdentifier 1 2 840 10040 4 1)]
+
+
+
+
+  ^{:line 510} [^{:doc "RFC 5480, 2.1.1 Unrestricted Algorithm Identifier and Parameters\n\n\tid-ecPublicKey OBJECT IDENTIFIER ::= {\n\t\tiso(1) member-body(2) us(840) ansi-X9-62(10045) keyType(2) 1 }\n"} oidPublicKeyECDSA (lit asn1/ObjectIdentifier 1 2 840 10045 2 1)]
+
+
+
+
+  ^{:line 515} [^{:doc "RFC 8410, Section 3\n\n\tid-X25519    OBJECT IDENTIFIER ::= { 1 3 101 110 }\n\tid-Ed25519   OBJECT IDENTIFIER ::= { 1 3 101 112 }\n"} oidPublicKeyX25519 (lit asn1/ObjectIdentifier 1 3 101 110)]
+  ^{:line 516} [oidPublicKeyEd25519 (lit asn1/ObjectIdentifier 1 3 101 112)]
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 530} [^{:doc "RFC 9881, Section 2\n\n\tid-ml-dsa-44 OBJECT IDENTIFIER ::= { joint-iso-itu-t(2)\n\t\tcountry(16) us(840) organization(1) gov(101) csor(3)\n\t\tnistAlgorithm(4) sigAlgs(3) id-ml-dsa-44(17) }\n\n\tid-ml-dsa-65 OBJECT IDENTIFIER ::= { joint-iso-itu-t(2)\n\t\tcountry(16) us(840) organization(1) gov(101) csor(3)\n\t\tnistAlgorithm(4) sigAlgs(3) id-ml-dsa-65(18) }\n\n\tid-ml-dsa-87 OBJECT IDENTIFIER ::= { joint-iso-itu-t(2)\n\t\tcountry(16) us(840) organization(1) gov(101) csor(3)\n\t\tnistAlgorithm(4) sigAlgs(3) id-ml-dsa-87(19) }\n"} oidPublicKeyMLDSA44 (lit asn1/ObjectIdentifier 2 16 840 1 101 3 4 3 17)]
+  ^{:line 531} [oidPublicKeyMLDSA65 (lit asn1/ObjectIdentifier 2 16 840 1 101 3 4 3 18)]
+  ^{:line 532} [oidPublicKeyMLDSA87 (lit asn1/ObjectIdentifier 2 16 840 1 101 3 4 3 19)])
+
+
+
+
+
+^{:go/end 558} (go/func getPublicKeyAlgorithmFromOID "getPublicKeyAlgorithmFromOID returns the exposed PublicKeyAlgorithm\nidentifier for public key types supported in certificates and CSRs. Marshal\nand Parse functions may support a different set of public key types.\n" ^PublicKeyAlgorithm [^asn1/ObjectIdentifier oid]
+  (switch
+    (case [(.Equal oid oidPublicKeyRSA)]
+      (return RSA))
+    (case [(.Equal oid oidPublicKeyDSA)]
+      (return DSA))
+    (case [(.Equal oid oidPublicKeyECDSA)]
+      (return ECDSA))
+    (case [(.Equal oid oidPublicKeyEd25519)]
+      (return Ed25519))
+    (case [(.Equal oid oidPublicKeyMLDSA44)
+        (.Equal oid oidPublicKeyMLDSA65)
+        (.Equal oid oidPublicKeyMLDSA87)]
+      ;; ML-DSA is not available in FIPS 140-3 module v1.0.0.
+      (when (== (fips140/Version) "v1.0.0")
+        (return UnknownPublicKeyAlgorithm))
+
+      (return MLDSA)))
+
+  ^{:line 557} UnknownPublicKeyAlgorithm)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var "RFC 5480, 2.1.1.1. Named Curve\n\n\tsecp224r1 OBJECT IDENTIFIER ::= {\n\t  iso(1) identified-organization(3) certicom(132) curve(0) 33 }\n\n\tsecp256r1 OBJECT IDENTIFIER ::= {\n\t  iso(1) member-body(2) us(840) ansi-X9-62(10045) curves(3)\n\t  prime(1) 7 }\n\n\tsecp384r1 OBJECT IDENTIFIER ::= {\n\t  iso(1) identified-organization(3) certicom(132) curve(0) 34 }\n\n\tsecp521r1 OBJECT IDENTIFIER ::= {\n\t  iso(1) identified-organization(3) certicom(132) curve(0) 35 }\n\nNB: secp256r1 is equivalent to prime256v1\n"
+  ^{:line 577} [oidNamedCurveP224 (lit asn1/ObjectIdentifier 1 3 132 0 33)]
+  ^{:line 578} [oidNamedCurveP256 (lit asn1/ObjectIdentifier 1 2 840 10045 3 1 7)]
+  ^{:line 579} [oidNamedCurveP384 (lit asn1/ObjectIdentifier 1 3 132 0 34)]
+  ^{:line 580} [oidNamedCurveP521 (lit asn1/ObjectIdentifier 1 3 132 0 35)])
+
+
+^{:go/breaks [[4 594]] :go/end 595} (go/func namedCurveFromOID ^elliptic/Curve [^asn1/ObjectIdentifier oid]
+  (switch
+    (case [(.Equal oid oidNamedCurveP224)]
+      (return (elliptic/P224)))
+    (case [(.Equal oid oidNamedCurveP256)]
+      (return (elliptic/P256)))
+    (case [(.Equal oid oidNamedCurveP384)]
+      (return (elliptic/P384)))
+    (case [(.Equal oid oidNamedCurveP521)]
+      (return (elliptic/P521))))
+
+  nil)
+
+
+^{:go/end 610} (go/func oidFromNamedCurve [^elliptic/Curve curve] :results [asn1/ObjectIdentifier bool]
+  (switch curve
+    (case [(elliptic/P224)]
+      (return oidNamedCurveP224 true))
+    (case [(elliptic/P256)]
+      (return oidNamedCurveP256 true))
+    (case [(elliptic/P384)]
+      (return oidNamedCurveP384 true))
+    (case [(elliptic/P521)]
+      (return oidNamedCurveP521 true)))
+
+
+  (return nil false))
+
+
+^{:go/end 625} (go/func oidFromECDHCurve [^ecdh/Curve curve] :results [asn1/ObjectIdentifier bool]
+  (switch curve
+    (case [(ecdh/X25519)]
+      (return oidPublicKeyX25519 true))
+    (case [(ecdh/P256)]
+      (return oidNamedCurveP256 true))
+    (case [(ecdh/P384)]
+      (return oidNamedCurveP384 true))
+    (case [(ecdh/P521)]
+      (return oidNamedCurveP521 true)))
+
+
+  (return nil false))
+
+
+^{:go/end 637} (go/func mldsaParametersFromOID [^asn1/ObjectIdentifier oid] :results [mldsa/Parameters bool]
+  (switch
+    (case [(.Equal oid oidPublicKeyMLDSA44)]
+      (return (mldsa/MLDSA44) true))
+    (case [(.Equal oid oidPublicKeyMLDSA65)]
+      (return (mldsa/MLDSA65) true))
+    (case [(.Equal oid oidPublicKeyMLDSA87)]
+      (return (mldsa/MLDSA87) true)))
+
+  (return (lit mldsa/Parameters) false))
+
+
+^{:go/end 649} (go/func oidFromMLDSAParameters [^mldsa/Parameters params] :results [asn1/ObjectIdentifier bool]
+  (switch
+    (case [(== params (mldsa/MLDSA44))]
+      (return oidPublicKeyMLDSA44 true))
+    (case [(== params (mldsa/MLDSA65))]
+      (return oidPublicKeyMLDSA65 true))
+    (case [(== params (mldsa/MLDSA87))]
+      (return oidPublicKeyMLDSA87 true)))
+
+  (return nil false))
+
+
+
+
+(go/type KeyUsage "KeyUsage represents the set of actions that are valid for a given key. It's\na bitmap of the KeyUsage* constants.\n" int)
+
+(go/directive "//go:generate stringer -linecomment -type=KeyUsage,ExtKeyUsage -output=x509_string.go")
+
+(go/const
+  ^{:line 658} [^{:tag KeyUsage :val 1} KeyUsageDigitalSignature (<< 1 iota)] ; digitalSignature
+  ^{:line 659} [^{:val 2} KeyUsageContentCommitment] ; contentCommitment
+  ^{:line 660} [^{:val 4} KeyUsageKeyEncipherment] ; keyEncipherment
+  ^{:line 661} [^{:val 8} KeyUsageDataEncipherment] ; dataEncipherment
+  ^{:line 662} [^{:val 16} KeyUsageKeyAgreement] ; keyAgreement
+  ^{:line 663} [^{:val 32} KeyUsageCertSign] ; keyCertSign
+  ^{:line 664} [^{:val 64} KeyUsageCRLSign] ; cRLSign
+  ^{:line 665} [^{:val 128} KeyUsageEncipherOnly] ; encipherOnly
+  ^{:line 666} [^{:val 256} KeyUsageDecipherOnly]) ; decipherOnly
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var "RFC 5280, 4.2.1.12  Extended Key Usage\n\n\tanyExtendedKeyUsage OBJECT IDENTIFIER ::= { id-ce-extKeyUsage 0 }\n\n\tid-kp OBJECT IDENTIFIER ::= { id-pkix 3 }\n\n\tid-kp-serverAuth             OBJECT IDENTIFIER ::= { id-kp 1 }\n\tid-kp-clientAuth             OBJECT IDENTIFIER ::= { id-kp 2 }\n\tid-kp-codeSigning            OBJECT IDENTIFIER ::= { id-kp 3 }\n\tid-kp-emailProtection        OBJECT IDENTIFIER ::= { id-kp 4 }\n\tid-kp-timeStamping           OBJECT IDENTIFIER ::= { id-kp 8 }\n\tid-kp-OCSPSigning            OBJECT IDENTIFIER ::= { id-kp 9 }\n\nhttps://www.iana.org/assignments/smi-numbers/smi-numbers.xhtml#smi-numbers-1.3.6.1.5.5.7.3\n"
+  ^{:line 684} [oidExtKeyUsageAny (lit asn1/ObjectIdentifier 2 5 29 37 0)]
+  ^{:line 685} [oidExtKeyUsageServerAuth (lit asn1/ObjectIdentifier 1 3 6 1 5 5 7 3 1)]
+  ^{:line 686} [oidExtKeyUsageClientAuth (lit asn1/ObjectIdentifier 1 3 6 1 5 5 7 3 2)]
+  ^{:line 687} [oidExtKeyUsageCodeSigning (lit asn1/ObjectIdentifier 1 3 6 1 5 5 7 3 3)]
+  ^{:line 688} [oidExtKeyUsageEmailProtection (lit asn1/ObjectIdentifier 1 3 6 1 5 5 7 3 4)]
+  ^{:line 689} [oidExtKeyUsageIPSECEndSystem (lit asn1/ObjectIdentifier 1 3 6 1 5 5 7 3 5)]
+  ^{:line 690} [oidExtKeyUsageIPSECTunnel (lit asn1/ObjectIdentifier 1 3 6 1 5 5 7 3 6)]
+  ^{:line 691} [oidExtKeyUsageIPSECUser (lit asn1/ObjectIdentifier 1 3 6 1 5 5 7 3 7)]
+  ^{:line 692} [oidExtKeyUsageTimeStamping (lit asn1/ObjectIdentifier 1 3 6 1 5 5 7 3 8)]
+  ^{:line 693} [oidExtKeyUsageOCSPSigning (lit asn1/ObjectIdentifier 1 3 6 1 5 5 7 3 9)]
+  ^{:line 694} [oidExtKeyUsageMicrosoftServerGatedCrypto (lit asn1/ObjectIdentifier 1 3 6 1 4 1 311 10 3 3)]
+  ^{:line 695} [oidExtKeyUsageNetscapeServerGatedCrypto (lit asn1/ObjectIdentifier 2 16 840 1 113730 4 1)]
+  ^{:line 696} [oidExtKeyUsageMicrosoftCommercialCodeSigning (lit asn1/ObjectIdentifier 1 3 6 1 4 1 311 2 1 22)]
+  ^{:line 697} [oidExtKeyUsageMicrosoftKernelCodeSigning (lit asn1/ObjectIdentifier 1 3 6 1 4 1 311 61 1 1)])
+
+
+
+
+(go/type ExtKeyUsage "ExtKeyUsage represents an extended set of actions that are valid for a given key.\nEach of the ExtKeyUsage* constants define a unique action.\n" int)
+
+(go/const
+  ^{:line 705} [^{:tag ExtKeyUsage :val 0} ExtKeyUsageAny iota] ; anyExtendedKeyUsage
+  ^{:line 706} [^{:val 1} ExtKeyUsageServerAuth] ; serverAuth
+  ^{:line 707} [^{:val 2} ExtKeyUsageClientAuth] ; clientAuth
+  ^{:line 708} [^{:val 3} ExtKeyUsageCodeSigning] ; codeSigning
+  ^{:line 709} [^{:val 4} ExtKeyUsageEmailProtection] ; emailProtection
+  ^{:line 710} [^{:val 5} ExtKeyUsageIPSECEndSystem] ; ipsecEndSystem
+  ^{:line 711} [^{:val 6} ExtKeyUsageIPSECTunnel] ; ipsecTunnel
+  ^{:line 712} [^{:val 7} ExtKeyUsageIPSECUser] ; ipsecUser
+  ^{:line 713} [^{:val 8} ExtKeyUsageTimeStamping] ; timeStamping
+  ^{:line 714} [^{:val 9} ExtKeyUsageOCSPSigning] ; OCSPSigning
+  ^{:line 715} [^{:val 10} ExtKeyUsageMicrosoftServerGatedCrypto] ; msSGC
+  ^{:line 716} [^{:val 11} ExtKeyUsageNetscapeServerGatedCrypto] ; nsSGC
+  ^{:line 717} [^{:val 12} ExtKeyUsageMicrosoftCommercialCodeSigning] ; msCodeCom
+  ^{:line 718} [^{:val 13} ExtKeyUsageMicrosoftKernelCodeSigning]) ; msKernelCode
+
+
+
+(go/var ^{:doc "extKeyUsageOIDs contains the mapping between an ExtKeyUsage and its OID.\n"} extKeyUsageOIDs (lit (slice (struct
+        ^{:line 723 :tag ExtKeyUsage} extKeyUsage
+        ^{:line 724 :tag asn1/ObjectIdentifier} oid))
+
+    (lit _ ExtKeyUsageAny oidExtKeyUsageAny)
+    (lit _ ExtKeyUsageServerAuth oidExtKeyUsageServerAuth)
+    (lit _ ExtKeyUsageClientAuth oidExtKeyUsageClientAuth)
+    (lit _ ExtKeyUsageCodeSigning oidExtKeyUsageCodeSigning)
+    (lit _ ExtKeyUsageEmailProtection oidExtKeyUsageEmailProtection)
+    (lit _ ExtKeyUsageIPSECEndSystem oidExtKeyUsageIPSECEndSystem)
+    (lit _ ExtKeyUsageIPSECTunnel oidExtKeyUsageIPSECTunnel)
+    (lit _ ExtKeyUsageIPSECUser oidExtKeyUsageIPSECUser)
+    (lit _ ExtKeyUsageTimeStamping oidExtKeyUsageTimeStamping)
+    (lit _ ExtKeyUsageOCSPSigning oidExtKeyUsageOCSPSigning)
+    (lit _ ExtKeyUsageMicrosoftServerGatedCrypto oidExtKeyUsageMicrosoftServerGatedCrypto)
+    (lit _ ExtKeyUsageNetscapeServerGatedCrypto oidExtKeyUsageNetscapeServerGatedCrypto)
+    (lit _ ExtKeyUsageMicrosoftCommercialCodeSigning oidExtKeyUsageMicrosoftCommercialCodeSigning)
+    (lit _ ExtKeyUsageMicrosoftKernelCodeSigning oidExtKeyUsageMicrosoftKernelCodeSigning)))
+
+
+^{:go/end 749} (go/func extKeyUsageFromOID [^asn1/ObjectIdentifier oid] :results [^ExtKeyUsage eku ^bool ok]
+  (range [_ pair extKeyUsageOIDs]
+    (when (.Equal oid (.-oid pair))
+      (return (.-extKeyUsage pair) true)))
+
+
+  (return))
+
+
+^{:go/end 758} (go/func oidFromExtKeyUsage [^ExtKeyUsage eku] :results [^asn1/ObjectIdentifier oid ^bool ok]
+  (range [_ pair extKeyUsageOIDs]
+    (when (== eku (.-extKeyUsage pair))
+      (return (.-oid pair) true)))
+
+
+  (return))
+
+
+
+^{:go/end 771} (go/method OID "OID returns the ASN.1 object identifier of the EKU.\n" ^OID [^ExtKeyUsage eku]
+  (let [(values asn1OID ok) (oidFromExtKeyUsage eku)]
+    (when (not ok)
+      (panic "x509: internal error: known ExtKeyUsage has no OID"))
+
+    (let [(values oid err) (OIDFromASN1OID asn1OID)]
+      (when (!= err nil)
+        (panic "x509: internal error: known ExtKeyUsage has invalid OID"))
+
+      ^{:line 770} oid)))
+
+
+
+(go/type Certificate "A Certificate represents an X.509 certificate.\n" (struct
+    ^{:line 775 :tag (slice byte)} Raw ; Complete ASN.1 DER content (certificate, signature algorithm and signature).
+    ^{:line 776 :tag (slice byte)} RawTBSCertificate ; Certificate part of raw ASN.1 DER content.
+    ^{:line 777 :tag (slice byte)} RawSubjectPublicKeyInfo ; DER encoded SubjectPublicKeyInfo.
+    ^{:line 778 :tag (slice byte)} RawSubject ; DER encoded Subject
+    ^{:line 779 :tag (slice byte)} RawIssuer ; DER encoded Issuer
+    ^{:line 780 :tag (slice byte)} RawSignatureAlgorithm ; DER encoded AlgorithmIdentifier
+
+    ^{:line 782 :tag (slice byte)} Signature
+    ^{:line 783 :tag SignatureAlgorithm} SignatureAlgorithm
+
+    ^{:line 785 :tag PublicKeyAlgorithm} PublicKeyAlgorithm
+    ^{:line 786 :tag any} PublicKey
+
+    ^{:line 788 :tag int} Version
+    ^{:line 789 :tag (* big/Int)} SerialNumber
+    ^{:line 790 :tag pkix/Name} Issuer
+    ^{:line 791 :tag pkix/Name} Subject
+    ^{:line 792 :tag time/Time} NotBefore ^time/Time NotAfter ; Validity bounds.
+    ^{:line 793 :tag KeyUsage} KeyUsage
+
+
+
+
+
+    ^{:line 799 :tag (slice pkix/Extension) :doc "Extensions contains raw X.509 extensions. When parsing certificates,\nthis can be used to extract non-critical extensions that are not\nparsed by this package. When marshaling certificates, the Extensions\nfield is ignored, see ExtraExtensions.\n"} Extensions
+
+
+
+
+
+    ^{:line 805 :tag (slice pkix/Extension) :doc "ExtraExtensions contains extensions to be copied, raw, into any\nmarshaled certificates. Values override any extensions that would\notherwise be produced based on the other fields. The ExtraExtensions\nfield is not populated when parsing certificates, see Extensions.\n"} ExtraExtensions
+
+
+
+
+
+
+
+
+
+    ^{:line 815 :tag (slice asn1/ObjectIdentifier) :doc "UnhandledCriticalExtensions contains a list of extension IDs that\nwere not (fully) processed when parsing. Verify will fail if this\nslice is non-empty, unless verification is delegated to an OS\nlibrary which understands all the critical extensions.\n\nUsers can access these extensions using Extensions and can remove\nelements from this slice if they believe that they have been\nhandled.\n"} UnhandledCriticalExtensions
+
+    ^{:line 817 :tag (slice ExtKeyUsage)} ExtKeyUsage ; Sequence of extended key usages.
+    ^{:line 818 :tag (slice asn1/ObjectIdentifier)} UnknownExtKeyUsage ; Encountered extended key usages unknown to this package.
+
+
+
+    ^{:line 822 :tag bool :doc "BasicConstraintsValid indicates whether IsCA, MaxPathLen,\nand MaxPathLenZero are valid.\n"} BasicConstraintsValid
+    ^{:line 823 :tag bool} IsCA
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 837 :tag int :doc "MaxPathLen and MaxPathLenZero indicate the presence and\nvalue of the BasicConstraints' \"pathLenConstraint\".\n\nWhen parsing a certificate, a positive non-zero MaxPathLen\nmeans that the field was specified, -1 means it was unset,\nand MaxPathLenZero being true mean that the field was\nexplicitly set to zero. The case of MaxPathLen==0 with MaxPathLenZero==false\nshould be treated equivalent to -1 (unset).\n\nWhen generating a certificate, an unset pathLenConstraint\ncan be requested with either MaxPathLen == -1 or using the\nzero value for both MaxPathLen and MaxPathLenZero.\n"} MaxPathLen
+
+
+
+
+    ^{:line 842 :tag bool :doc "MaxPathLenZero indicates that BasicConstraintsValid==true\nand MaxPathLen==0 should be interpreted as an actual\nmaximum path length of zero. Otherwise, that combination is\ninterpreted as MaxPathLen not being set.\n"} MaxPathLenZero
+
+    ^{:line 844 :tag (slice byte)} SubjectKeyId
+    ^{:line 845 :tag (slice byte)} AuthorityKeyId
+
+
+    ^{:line 848 :tag (slice string) :doc "RFC 5280, 4.2.2.1 (Authority Information Access)\n"} OCSPServer
+    ^{:line 849 :tag (slice string)} IssuingCertificateURL
+
+
+
+
+    ^{:line 854 :tag (slice string) :doc "Subject Alternate Name values. (Note that these values may not be valid\nif invalid values were contained within a parsed certificate. For\nexample, an element of DNSNames may not be a valid DNS domain name.)\n"} DNSNames
+    ^{:line 855 :tag (slice string)} EmailAddresses
+    ^{:line 856 :tag (slice net/IP)} IPAddresses
+    ^{:line 857 :tag (slice (* url/URL))} URIs
+
+
+    ^{:line 860 :tag bool :doc "Name constraints\n"} PermittedDNSDomainsCritical ; if true then the name constraints are marked critical.
+    ^{:line 861 :tag (slice string)} PermittedDNSDomains
+    ^{:line 862 :tag (slice string)} ExcludedDNSDomains
+    ^{:line 863 :tag (slice (* net/IPNet))} PermittedIPRanges
+    ^{:line 864 :tag (slice (* net/IPNet))} ExcludedIPRanges
+    ^{:line 865 :tag (slice string)} PermittedEmailAddresses
+    ^{:line 866 :tag (slice string)} ExcludedEmailAddresses
+    ^{:line 867 :tag (slice string)} PermittedURIDomains
+    ^{:line 868 :tag (slice string)} ExcludedURIDomains
+
+
+    ^{:line 871 :tag (slice string) :doc "CRL Distribution Points\n"} CRLDistributionPoints
+
+
+
+
+
+
+
+
+    ^{:line 880 :tag (slice asn1/ObjectIdentifier) :doc "PolicyIdentifiers contains asn1.ObjectIdentifiers, the components\nof which are limited to int32. If a certificate contains a policy which\ncannot be represented by asn1.ObjectIdentifier, it will not be included in\nPolicyIdentifiers, but will be present in Policies, which contains all parsed\npolicy OIDs.\nSee CreateCertificate for context about how this field and the Policies field\ninteract.\n"} PolicyIdentifiers
+
+
+
+
+
+    ^{:line 886 :tag (slice OID) :doc "Policies contains all policy identifiers included in the certificate.\nSee CreateCertificate for context about how this field and the PolicyIdentifiers field\ninteract.\nIn Go 1.22, encoding/gob cannot handle and ignores this field.\n"} Policies
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 900 :tag int :doc "InhibitAnyPolicy and InhibitAnyPolicyZero indicate the presence and value\nof the inhibitAnyPolicy extension.\n\nThe value of InhibitAnyPolicy indicates the number of additional\ncertificates in the path after this certificate that may use the\nanyPolicy policy OID to indicate a match with any other policy.\n\nWhen parsing a certificate, a positive non-zero InhibitAnyPolicy means\nthat the field was specified, -1 means it was unset, and\nInhibitAnyPolicyZero being true mean that the field was explicitly set to\nzero. The case of InhibitAnyPolicy==0 with InhibitAnyPolicyZero==false\nshould be treated equivalent to -1 (unset).\n"} InhibitAnyPolicy
+
+
+
+    ^{:line 904 :tag bool :doc "InhibitAnyPolicyZero indicates that InhibitAnyPolicy==0 should be\ninterpreted as an actual maximum path length of zero. Otherwise, that\ncombination is interpreted as InhibitAnyPolicy not being set.\n"} InhibitAnyPolicyZero
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 920 :tag int :doc "InhibitPolicyMapping and InhibitPolicyMappingZero indicate the presence\nand value of the inhibitPolicyMapping field of the policyConstraints\nextension.\n\nThe value of InhibitPolicyMapping indicates the number of additional\ncertificates in the path after this certificate that may use policy\nmapping.\n\nWhen parsing a certificate, a positive non-zero InhibitPolicyMapping\nmeans that the field was specified, -1 means it was unset, and\nInhibitPolicyMappingZero being true mean that the field was explicitly\nset to zero. The case of InhibitPolicyMapping==0 with\nInhibitPolicyMappingZero==false should be treated equivalent to -1\n(unset).\n"} InhibitPolicyMapping
+
+
+
+    ^{:line 924 :tag bool :doc "InhibitPolicyMappingZero indicates that InhibitPolicyMapping==0 should be\ninterpreted as an actual maximum path length of zero. Otherwise, that\ncombination is interpreted as InhibitAnyPolicy not being set.\n"} InhibitPolicyMappingZero
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 943 :tag int :doc "RequireExplicitPolicy and RequireExplicitPolicyZero indicate the presence\nand value of the requireExplicitPolicy field of the policyConstraints\nextension.\n\nThe value of RequireExplicitPolicy indicates the number of additional\ncertificates in the path after this certificate before an explicit policy\nis required for the rest of the path. When an explicit policy is required,\neach subsequent certificate in the path must contain a required policy OID,\nor a policy OID which has been declared as equivalent through the policy\nmapping extension.\n\nWhen parsing a certificate, a positive non-zero RequireExplicitPolicy\nmeans that the field was specified, -1 means it was unset, and\nRequireExplicitPolicyZero being true mean that the field was explicitly\nset to zero. The case of RequireExplicitPolicy==0 with\nRequireExplicitPolicyZero==false should be treated equivalent to -1\n(unset).\n"} RequireExplicitPolicy
+
+
+
+    ^{:line 947 :tag bool :doc "RequireExplicitPolicyZero indicates that RequireExplicitPolicy==0 should be\ninterpreted as an actual maximum path length of zero. Otherwise, that\ncombination is interpreted as InhibitAnyPolicy not being set.\n"} RequireExplicitPolicyZero
+
+
+    ^{:line 950 :tag (slice PolicyMapping) :doc "PolicyMappings contains a list of policy mappings included in the certificate.\n"} PolicyMappings))
+
+
+
+(go/type PolicyMapping "PolicyMapping represents a policy mapping entry in the policyMappings extension.\n" (struct
+
+
+    ^{:line 957 :tag OID :doc "IssuerDomainPolicy contains a policy OID the issuing certificate considers\nequivalent to SubjectDomainPolicy in the subject certificate.\n"} IssuerDomainPolicy
+
+
+    ^{:line 960 :tag OID :doc "SubjectDomainPolicy contains a OID the issuing certificate considers\nequivalent to IssuerDomainPolicy in the subject certificate.\n"} SubjectDomainPolicy))
+
+
+
+
+(go/var ^{:doc "ErrUnsupportedAlgorithm results from attempting to perform an operation that\ninvolves algorithms that are not currently implemented.\n"} ErrUnsupportedAlgorithm (errors/New "x509: cannot verify signature: algorithm unimplemented"))
+
+
+
+(go/type InsecureAlgorithmError "An InsecureAlgorithmError indicates that the [SignatureAlgorithm] used to\ngenerate the signature is not secure, and the signature has been rejected.\n" SignatureAlgorithm)
+
+^{:go/end 973} (go/method Error ^string [^InsecureAlgorithmError e]
+  (fmt/Sprintf "x509: cannot verify signature: insecure algorithm %v" (conv SignatureAlgorithm e)))
+
+
+
+
+
+(go/type ConstraintViolationError "ConstraintViolationError results when a requested usage is not permitted by\na certificate. For example: checking a signature when the public key isn't a\ncertificate signing key.\n" (struct))
+
+^{:go/breaks [3] :go/end 982} (go/method Error ^string [ConstraintViolationError]
+  "x509: invalid signature: parent certificate cannot sign this kind of certificate")
+
+
+^{:go/end 989} (go/method Equal ^bool [^{:tag (* Certificate)} c ^{:tag (* Certificate)} other]
+  (when (or (== c nil) (== other nil))
+    (return (== c other)))
+
+  (bytes/Equal (.-Raw c) (.-Raw other)))
+
+
+^{:go/end 993} (go/method hasSANExtension ^bool [^{:tag (* Certificate)} c]
+  (oidInExtensions oidExtensionSubjectAltName (.-Extensions c)))
+
+
+
+
+
+
+^{:go/end 1019} (go/method CheckSignatureFrom "CheckSignatureFrom verifies that the signature on c is a valid signature from parent.\n\nThis is a low-level API that performs very limited checks, and not a full\npath verifier. Most users should use [Certificate.Verify] instead.\n" ^error [^{:tag (* Certificate)} c ^{:tag (* Certificate)} parent]
+  ;; RFC 5280, 4.2.1.9:
+  ;; "If the basic constraints extension is not present in a version 3
+  ;; certificate, or the extension is present but the cA boolean is not
+  ;; asserted, then the certified public key MUST NOT be used to verify
+  ;; certificate signatures."
+  (when (or (and (== (.-Version parent) 3) (not (.-BasicConstraintsValid parent)))
+      (and (.-BasicConstraintsValid parent) (not (.-IsCA parent))))
+    (return (lit ConstraintViolationError)))
+
+
+  (when (and (!= (.-KeyUsage parent) 0) (== (bit-and (.-KeyUsage parent) KeyUsageCertSign) 0))
+    (return (lit ConstraintViolationError)))
+
+
+  (when (== (.-PublicKeyAlgorithm parent) UnknownPublicKeyAlgorithm)
+    (return ErrUnsupportedAlgorithm))
+
+
+  (checkSignature (.-SignatureAlgorithm c) (.-RawTBSCertificate c) (.-Signature c) (.-PublicKey parent) false))
+
+
+
+
+
+
+
+
+
+^{:go/end 1030} (go/method CheckSignature "CheckSignature verifies that signature is a valid signature over signed from\nc's public key.\n\nThis is a low-level API that performs no validity checks on the certificate.\n\n[MD5WithRSA] signatures are rejected, while [SHA1WithRSA] and [ECDSAWithSHA1]\nsignatures are currently accepted.\n" ^error [^{:tag (* Certificate)} c ^SignatureAlgorithm algo ^{:tag (slice byte)} signed ^{:tag (slice byte)} signature]
+  (checkSignature algo signed signature (.-PublicKey c) true))
+
+
+^{:go/end 1034} (go/method hasNameConstraints ^bool [^{:tag (* Certificate)} c]
+  (oidInExtensions oidExtensionNameConstraints (.-Extensions c)))
+
+
+^{:go/breaks [[4 1042]] :go/end 1043} (go/method getSANExtension ^{:tag (slice byte)} [^{:tag (* Certificate)} c]
+  (range [_ e (.-Extensions c)]
+    (when (.Equal (.-Id e) oidExtensionSubjectAltName)
+      (return (.-Value e))))
+
+
+  nil)
+
+
+^{:go/end 1047} (go/func signaturePublicKeyAlgoMismatchError ^error [^PublicKeyAlgorithm expectedPubKeyAlgo ^any pubKey]
+  (fmt/Errorf "x509: signature algorithm specifies an %s public key, but have public key of type %T" (.String expectedPubKeyAlgo) pubKey))
+
+
+^{:go/end 1051} (go/func signatureMLDSAParametersMismatchError ^error [^SignatureAlgorithm expectedSigAlgo ^{:tag (* mldsa/PublicKey)} pubKey]
+  (fmt/Errorf "x509: signature algorithm specifies an ML-DSA public key with %s parameters, but have a public key with %s parameters" expectedSigAlgo (.Parameters pubKey)))
+
+
+
+
+^{:go/end 1141} (go/func checkSignature "checkSignature verifies that signature is a valid signature over signed from\na crypto.PublicKey.\n" [^SignatureAlgorithm algo ^{:tag (slice byte)} signed ^{:tag (slice byte)} signature ^crypto/PublicKey publicKey ^bool allowSHA1] :results [^error err]
+  (let [^crypto/Hash hashType (zero crypto/Hash)
+      ^{:line 1057 :tag PublicKeyAlgorithm} pubKeyAlgo (zero PublicKeyAlgorithm)]
+
+    (range [_ details signatureAlgorithmDetails]
+      (when (== (.-algo details) algo)
+        (set! hashType (.-hash details))
+        (set! pubKeyAlgo (.-pubKeyAlgo details))
+        (break)))
+
+
+
+    (switch hashType
+      (case [(conv crypto/Hash 0)]
+        (when (and (!= pubKeyAlgo Ed25519) (!= pubKeyAlgo MLDSA))
+          (return ErrUnsupportedAlgorithm)))
+
+      (case [crypto/MD5]
+        (return (conv InsecureAlgorithmError algo)))
+      (case [crypto/SHA1]
+        ;; SHA-1 signatures are only allowed for CRLs and CSRs.
+        (when (not allowSHA1)
+          (return (conv InsecureAlgorithmError algo)))
+
+        (fallthrough))
+      (default
+        (when (not (.Available hashType))
+          (return ErrUnsupportedAlgorithm))
+
+        (let [h (.New hashType)]
+          (.Write h signed)
+          (set! signed (.Sum h nil)))))
+
+
+    (type-switch [pub publicKey]
+      (case [(* rsa/PublicKey)]
+        (when (!= pubKeyAlgo RSA)
+          (return (signaturePublicKeyAlgoMismatchError pubKeyAlgo pub)))
+
+        (if (.isRSAPSS algo)
+          (return (rsa/VerifyPSS pub hashType signed signature (addr (lit rsa/PSSOptions :SaltLength rsa/PSSSaltLengthEqualsHash))))
+
+          (return (rsa/VerifyPKCS1v15 pub hashType signed signature))))
+
+      (case [(* ecdsa/PublicKey)]
+        (when (!= pubKeyAlgo ECDSA)
+          (return (signaturePublicKeyAlgoMismatchError pubKeyAlgo pub)))
+
+        (when (not (ecdsa/VerifyASN1 pub signed signature))
+          (return (errors/New "x509: ECDSA verification failure")))
+
+        (return))
+      (case [ed25519/PublicKey]
+        (when (!= pubKeyAlgo Ed25519)
+          (return (signaturePublicKeyAlgoMismatchError pubKeyAlgo pub)))
+
+        (when (not (ed25519/Verify pub signed signature))
+          (return (errors/New "x509: Ed25519 verification failure")))
+
+        (return))
+      (case [(* mldsa/PublicKey)]
+        (when (!= pubKeyAlgo MLDSA)
+          (return (signaturePublicKeyAlgoMismatchError pubKeyAlgo pub)))
+
+        (switch (.Parameters pub)
+          (case [(mldsa/MLDSA44)]
+            (when (!= algo MLDSA44)
+              (return (signatureMLDSAParametersMismatchError algo pub))))
+
+          (case [(mldsa/MLDSA65)]
+            (when (!= algo MLDSA65)
+              (return (signatureMLDSAParametersMismatchError algo pub))))
+
+          (case [(mldsa/MLDSA87)]
+            (when (!= algo MLDSA87)
+              (return (signatureMLDSAParametersMismatchError algo pub))))
+
+          (default
+            (return (fmt/Errorf "x509: unknown ML-DSA parameters: %s" (.Parameters pub)))))
+
+        (when [err (mldsa/Verify pub signed signature nil)] (!= err nil)
+          (return (fmt/Errorf "x509: ML-DSA verification failure: %w" err)))
+
+        (return)))
+
+    ^{:line 1140} ErrUnsupportedAlgorithm))
+
+
+
+
+
+^{:go/end 1149} (go/method CheckCRLSignature "CheckCRLSignature checks that the signature in crl is from c.\n\nDeprecated: Use [RevocationList.CheckSignatureFrom] instead.\n" ^error [^{:tag (* Certificate)} c ^{:tag (* pkix/CertificateList)} crl]
+  (let [algo (getSignatureAlgorithmFromAI (.-SignatureAlgorithm crl))]
+    (.CheckSignature c algo (.-Raw (.-TBSCertList crl)) (.RightAlign (.-SignatureValue crl)))))
+
+
+(go/type UnhandledCriticalExtension (struct))
+
+^{:go/breaks [3] :go/end 1155} (go/method Error ^string [^UnhandledCriticalExtension h]
+  "x509: unhandled critical extension")
+
+
+(go/type basicConstraints (struct
+    ^{:line 1158 :tag bool :go/tag "asn1:\"optional\""} IsCA
+    ^{:line 1159 :tag int :go/tag "asn1:\"optional,default:-1\""} MaxPathLen))
+
+
+
+(go/type policyInformation "RFC 5280 4.2.1.4\n" (struct
+    ^{:line 1164 :tag asn1/ObjectIdentifier} Policy))
+;; policyQualifiers omitted
+
+
+(go/const
+  ^{:line 1169} [^{:val 1} nameTypeEmail 1]
+  ^{:line 1170} [^{:val 2} nameTypeDNS 2]
+  ^{:line 1171} [^{:val 6} nameTypeURI 6]
+  ^{:line 1172} [^{:val 7} nameTypeIP 7])
+
+
+
+(go/type authorityInfoAccess "RFC 5280, 4.2.2.1\n" (struct
+    ^{:line 1177 :tag asn1/ObjectIdentifier} Method
+    ^{:line 1178 :tag asn1/RawValue} Location))
+
+
+
+(go/type distributionPoint "RFC 5280, 4.2.1.14\n" (struct
+    ^{:line 1183 :tag distributionPointName :go/tag "asn1:\"optional,tag:0\""} DistributionPoint
+    ^{:line 1184 :tag asn1/BitString :go/tag "asn1:\"optional,tag:1\""} Reason
+    ^{:line 1185 :tag asn1/RawValue :go/tag "asn1:\"optional,tag:2\""} CRLIssuer))
+
+
+(go/type distributionPointName (struct
+    ^{:line 1189 :tag (slice asn1/RawValue) :go/tag "asn1:\"optional,tag:0\""} FullName
+    ^{:line 1190 :tag pkix/RDNSequence :go/tag "asn1:\"optional,tag:1\""} RelativeName))
+
+
+^{:go/end 1198} (go/func reverseBitsInAByte ^byte [^byte in]
+  (let [b1 (bit-or (>> in 4) (<< in 4))
+      ^{:line 1195} b2 (bit-or (bit-and (>> b1 2) 0x33) (bit-and (<< b1 2) 0xcc))
+      ^{:line 1196} b3 (bit-or (bit-and (>> b2 1) 0x55) (bit-and (<< b2 1) 0xaa))]
+    ^{:line 1197} b3))
+
+
+
+
+
+^{:go/end 1218} (go/func asn1BitLength "asn1BitLength returns the bit-length of bitString by considering the\nmost-significant bit in a byte to be the \"first\" bit. This convention\nmatches ASN.1, but differs from almost everything else.\n" ^int [^{:tag (slice byte)} bitString]
+  ^{:go/breaks [[3 1217]]} (let [bitLen (* (len bitString) 8)]
+
+    (range [i bitString]
+      (let [b (aget bitString (- (len bitString) i 1))]
+
+        (for [bit (conv uint 0)] (< bit 8) (inc! bit)
+          (when (== (bit-and (>> b bit) 1) 1)
+            (return bitLen))
+
+          (dec! bitLen))))
+
+
+
+    0))
+
+
+(go/var
+  ^{:line 1221} [oidExtensionSubjectKeyId (lit (slice int) 2 5 29 14)]
+  ^{:line 1222} [oidExtensionKeyUsage (lit (slice int) 2 5 29 15)]
+  ^{:line 1223} [oidExtensionExtendedKeyUsage (lit (slice int) 2 5 29 37)]
+  ^{:line 1224} [oidExtensionAuthorityKeyId (lit (slice int) 2 5 29 35)]
+  ^{:line 1225} [oidExtensionBasicConstraints (lit (slice int) 2 5 29 19)]
+  ^{:line 1226} [oidExtensionSubjectAltName (lit (slice int) 2 5 29 17)]
+  ^{:line 1227} [oidExtensionCertificatePolicies (lit (slice int) 2 5 29 32)]
+  ^{:line 1228} [oidExtensionNameConstraints (lit (slice int) 2 5 29 30)]
+  ^{:line 1229} [oidExtensionCRLDistributionPoints (lit (slice int) 2 5 29 31)]
+  ^{:line 1230} [oidExtensionAuthorityInfoAccess (lit (slice int) 1 3 6 1 5 5 7 1 1)]
+  ^{:line 1231} [oidExtensionCRLNumber (lit (slice int) 2 5 29 20)]
+  ^{:line 1232} [oidExtensionReasonCode (lit (slice int) 2 5 29 21)])
+
+
+(go/var
+  ^{:line 1236} [oidAuthorityInfoAccessOcsp (lit asn1/ObjectIdentifier 1 3 6 1 5 5 7 48 1)]
+  ^{:line 1237} [oidAuthorityInfoAccessIssuers (lit asn1/ObjectIdentifier 1 3 6 1 5 5 7 48 2)])
+
+
+
+
+^{:go/breaks [[5 1248]] :go/end 1249} (go/func oidInExtensions "oidInExtensions reports whether an extension with the given oid exists in\nextensions.\n" ^bool [^asn1/ObjectIdentifier oid ^{:tag (slice pkix/Extension)} extensions]
+  (range [_ e extensions]
+    (when (.Equal (.-Id e) oid)
+      (return true)))
+
+
+  false)
+
+
+
+
+^{:go/end 1283} (go/func marshalSANs "marshalSANs marshals a list of addresses into a the contents of an X.509\nSubjectAlternativeName extension.\n" [^{:tag (slice string)} dnsNames ^{:tag (slice string)} emailAddresses ^{:tag (slice net/IP)} ipAddresses ^{:tag (slice (* url/URL))} uris] :results [^{:tag (slice byte)} derBytes ^error err]
+  (let [^{:tag (slice asn1/RawValue)} rawValues (zero (slice asn1/RawValue))]
+    (range [_ name dnsNames]
+      (when [err (isIA5String name)] (!= err nil)
+        (return nil err))
+
+      (set! rawValues (append rawValues (lit asn1/RawValue :Tag nameTypeDNS :Class 2 :Bytes (conv (slice byte) name)))))
+
+    (range [_ email emailAddresses]
+      (when [err (isIA5String email)] (!= err nil)
+        (return nil err))
+
+      (set! rawValues (append rawValues (lit asn1/RawValue :Tag nameTypeEmail :Class 2 :Bytes (conv (slice byte) email)))))
+
+    (range [_ rawIP ipAddresses]
+      ;; If possible, we always want to encode IPv4 addresses in 4 bytes.
+      (let [ip (.To4 rawIP)]
+        (when (== ip nil)
+          (set! ip rawIP))
+
+        (set! rawValues (append rawValues (lit asn1/RawValue :Tag nameTypeIP :Class 2 :Bytes ip)))))
+
+    (range [_ uri uris]
+      (let [uriStr (.String uri)]
+        (when [err (isIA5String uriStr)] (!= err nil)
+          (return nil err))
+
+        (set! rawValues (append rawValues (lit asn1/RawValue :Tag nameTypeURI :Class 2 :Bytes (conv (slice byte) uriStr))))))
+
+    (asn1/Marshal rawValues)))
+
+
+^{:go/breaks [[4 1293]] :go/end 1294} (go/func isIA5String ^error [^string s]
+  (range [_ r s]
+    ;; Per RFC5280 "IA5String is limited to the set of ASCII characters"
+    (when (> r unicode/MaxASCII)
+      (return (fmt/Errorf "x509: %q cannot be encoded as an IA5String" s))))
+
+
+
+  nil)
+
+
+(go/var x509usepolicies (godebug/New "x509usepolicies"))
+
+^{:go/end 1528} (go/func buildCertExtensions [^{:tag (* Certificate)} template ^bool subjectIsEmpty ^{:tag (slice byte)} authorityKeyId ^{:tag (slice byte)} subjectKeyId] :results [^{:tag (slice pkix/Extension)} ret ^error err]
+  (set! ret (make (slice pkix/Extension) 10)) ; /* maximum number of elements. */
+  (let [n 0]
+
+    (when (and (!= (.-KeyUsage template) 0)
+        (not (oidInExtensions oidExtensionKeyUsage (.-ExtraExtensions template))))
+      (set! (values (aget ret n) err) (marshalKeyUsage (.-KeyUsage template)))
+      (when (!= err nil)
+        (return nil err))
+
+      (inc! n))
+
+
+    (when (and ^:go/paren (or (> (len (.-ExtKeyUsage template)) 0) (> (len (.-UnknownExtKeyUsage template)) 0))
+        (not (oidInExtensions oidExtensionExtendedKeyUsage (.-ExtraExtensions template))))
+      (set! (values (aget ret n) err) (marshalExtKeyUsage (.-ExtKeyUsage template) (.-UnknownExtKeyUsage template)))
+      (when (!= err nil)
+        (return nil err))
+
+      (inc! n))
+
+
+    (when (and (.-BasicConstraintsValid template) (not (oidInExtensions oidExtensionBasicConstraints (.-ExtraExtensions template))))
+      (set! (values (aget ret n) err) (marshalBasicConstraints (.-IsCA template) (.-MaxPathLen template) (.-MaxPathLenZero template)))
+      (when (!= err nil)
+        (return nil err))
+
+      (inc! n))
+
+
+    (when (and (> (len subjectKeyId) 0) (not (oidInExtensions oidExtensionSubjectKeyId (.-ExtraExtensions template))))
+      (set! (.-Id (aget ret n)) oidExtensionSubjectKeyId)
+      (set! (values (.-Value (aget ret n)) err) (asn1/Marshal subjectKeyId))
+      (when (!= err nil)
+        (return))
+
+      (inc! n))
+
+
+    (when (and (> (len authorityKeyId) 0) (not (oidInExtensions oidExtensionAuthorityKeyId (.-ExtraExtensions template))))
+      (set! (.-Id (aget ret n)) oidExtensionAuthorityKeyId)
+      (set! (values (.-Value (aget ret n)) err) (asn1/Marshal (lit authKeyId authorityKeyId)))
+      (when (!= err nil)
+        (return))
+
+      (inc! n))
+
+
+    (when (and ^:go/paren (or (> (len (.-OCSPServer template)) 0) (> (len (.-IssuingCertificateURL template)) 0))
+        (not (oidInExtensions oidExtensionAuthorityInfoAccess (.-ExtraExtensions template))))
+      (set! (.-Id (aget ret n)) oidExtensionAuthorityInfoAccess)
+      (let [^{:tag (slice authorityInfoAccess)} aiaValues (zero (slice authorityInfoAccess))]
+        (range [_ name (.-OCSPServer template)]
+          (set! aiaValues (append aiaValues ^{:go/breaks [2 4]} (lit authorityInfoAccess
+                :Method oidAuthorityInfoAccessOcsp
+                :Location (lit asn1/RawValue :Tag 6 :Class 2 :Bytes (conv (slice byte) name))))))
+
+
+        (range [_ name (.-IssuingCertificateURL template)]
+          (set! aiaValues (append aiaValues ^{:go/breaks [2 4]} (lit authorityInfoAccess
+                :Method oidAuthorityInfoAccessIssuers
+                :Location (lit asn1/RawValue :Tag 6 :Class 2 :Bytes (conv (slice byte) name))))))
+
+
+        (set! (values (.-Value (aget ret n)) err) (asn1/Marshal aiaValues))
+        (when (!= err nil)
+          (return))
+
+        (inc! n)))
+
+
+    (when (and ^:go/paren (or (> (len (.-DNSNames template)) 0) (> (len (.-EmailAddresses template)) 0) (> (len (.-IPAddresses template)) 0) (> (len (.-URIs template)) 0))
+        (not (oidInExtensions oidExtensionSubjectAltName (.-ExtraExtensions template))))
+      (set! (.-Id (aget ret n)) oidExtensionSubjectAltName)
+      ;; From RFC 5280, Section 4.2.1.6:
+      ;; “If the subject field contains an empty sequence ... then
+      ;; subjectAltName extension ... is marked as critical”
+      (set! (.-Critical (aget ret n)) subjectIsEmpty)
+      (set! (values (.-Value (aget ret n)) err) (marshalSANs (.-DNSNames template) (.-EmailAddresses template) (.-IPAddresses template) (.-URIs template)))
+      (when (!= err nil)
+        (return))
+
+      (inc! n))
+
+
+    (let [usePolicies (!= (.Value x509usepolicies) "0")]
+      (when (and ^:go/paren (or ^:go/paren (and (not usePolicies) (> (len (.-PolicyIdentifiers template)) 0)) ^:go/paren (and usePolicies (> (len (.-Policies template)) 0)))
+          (not (oidInExtensions oidExtensionCertificatePolicies (.-ExtraExtensions template))))
+        (set! (values (aget ret n) err) (marshalCertificatePolicies (.-Policies template) (.-PolicyIdentifiers template)))
+        (when (!= err nil)
+          (return nil err))
+
+        (inc! n))
+
+
+      (when (and ^:go/paren (or (> (len (.-PermittedDNSDomains template)) 0) (> (len (.-ExcludedDNSDomains template)) 0)
+            (> (len (.-PermittedIPRanges template)) 0) (> (len (.-ExcludedIPRanges template)) 0)
+            (> (len (.-PermittedEmailAddresses template)) 0) (> (len (.-ExcludedEmailAddresses template)) 0)
+            (> (len (.-PermittedURIDomains template)) 0) (> (len (.-ExcludedURIDomains template)) 0))
+          (not (oidInExtensions oidExtensionNameConstraints (.-ExtraExtensions template))))
+        (set! (.-Id (aget ret n)) oidExtensionNameConstraints)
+        (set! (.-Critical (aget ret n)) (.-PermittedDNSDomainsCritical template))
+
+        (let [ipAndMask ^{:go/end 1412} (fn [^{:tag (* net/IPNet)} ipNet] :results [(slice byte) error]
+              (let [maskedIP (.Mask (.-IP ipNet) (.-Mask ipNet))]
+                ;; This is extremely unlikely to actually happen, but lets save people from doing something they
+                ;; probably shouldn't.
+                (when (and (== (len maskedIP) net/IPv6len) (!= (.To4 maskedIP) nil))
+                  (return nil (errors/New "x509: IP constraint contained IPv4-mapped IPv6 address with a IPv6 mask")))
+
+                (let [ipAndMask (make (slice byte) 0 (+ (len maskedIP) (len (.-Mask ipNet))))]
+                  (set! ipAndMask (append ipAndMask (spread maskedIP)))
+                  (set! ipAndMask (append ipAndMask (spread (.-Mask ipNet))))
+                  (return ipAndMask nil))))
+
+
+            ^{:line 1414} serialiseConstraints ^{:go/end 1466} (fn [^{:tag (slice string)} dns ^{:tag (slice (* net/IPNet))} ips ^{:tag (slice string)} emails ^{:tag (slice string)} uriDomains] :results [^{:tag (slice byte)} der ^error err]
+              (let [^cryptobyte/Builder b (zero cryptobyte/Builder)]
+
+                (range [_ name dns]
+                  (when [(set! err (isIA5String name))] (!= err nil)
+                    (return nil err))
+
+
+                  (.AddASN1 b cryptobyte_asn1/SEQUENCE ^{:go/end 1426} (fn [^{:tag (* cryptobyte/Builder)} b]
+                      (.AddASN1 b (.ContextSpecific (conv cryptobyte_asn1/Tag 2)) ^{:go/end 1425} (fn [^{:tag (* cryptobyte/Builder)} b]
+                          (.AddBytes b (conv (slice byte) name)))))))
+
+
+
+
+                (range [_ ipNet ips]
+                  (let [(values encodedIPNet err) (ipAndMask ipNet)]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (.AddASN1 b cryptobyte_asn1/SEQUENCE ^{:go/end 1438} (fn [^{:tag (* cryptobyte/Builder)} b]
+                        (.AddASN1 b (.ContextSpecific (conv cryptobyte_asn1/Tag 7)) ^{:go/end 1437} (fn [^{:tag (* cryptobyte/Builder)} b]
+                            (.AddBytes b encodedIPNet)))))))
+
+
+
+
+                (range [_ email emails]
+                  (when [(set! err (isIA5String email))] (!= err nil)
+                    (return nil err))
+
+
+                  (.AddASN1 b cryptobyte_asn1/SEQUENCE ^{:go/end 1450} (fn [^{:tag (* cryptobyte/Builder)} b]
+                      (.AddASN1 b (.ContextSpecific (conv cryptobyte_asn1/Tag 1)) ^{:go/end 1449} (fn [^{:tag (* cryptobyte/Builder)} b]
+                          (.AddBytes b (conv (slice byte) email)))))))
+
+
+
+
+                (range [_ uriDomain uriDomains]
+                  (when [(set! err (isIA5String uriDomain))] (!= err nil)
+                    (return nil err))
+
+
+                  (.AddASN1 b cryptobyte_asn1/SEQUENCE ^{:go/end 1462} (fn [^{:tag (* cryptobyte/Builder)} b]
+                      (.AddASN1 b (.ContextSpecific (conv cryptobyte_asn1/Tag 6)) ^{:go/end 1461} (fn [^{:tag (* cryptobyte/Builder)} b]
+                          (.AddBytes b (conv (slice byte) uriDomain)))))))
+
+
+
+
+                (.Bytes b)))
+
+
+            (values permitted err) (serialiseConstraints (.-PermittedDNSDomains template) (.-PermittedIPRanges template) (.-PermittedEmailAddresses template) (.-PermittedURIDomains template))]
+          (when (!= err nil)
+            (return nil err))
+
+
+          (let [(values excluded ^:assign err) (serialiseConstraints (.-ExcludedDNSDomains template) (.-ExcludedIPRanges template) (.-ExcludedEmailAddresses template) (.-ExcludedURIDomains template))]
+            (when (!= err nil)
+              (return nil err))
+
+
+            (let [^cryptobyte/Builder b (zero cryptobyte/Builder)]
+              (.AddASN1 b cryptobyte_asn1/SEQUENCE ^{:go/end 1491} (fn [^{:tag (* cryptobyte/Builder)} b]
+                  (when (> (len permitted) 0)
+                    (.AddASN1 b (.Constructed (.ContextSpecific (conv cryptobyte_asn1/Tag 0))) ^{:go/end 1483} (fn [^{:tag (* cryptobyte/Builder)} b]
+                        (.AddBytes b permitted))))
+
+
+
+                  (when (> (len excluded) 0)
+                    (.AddASN1 b (.Constructed (.ContextSpecific (conv cryptobyte_asn1/Tag 1))) ^{:go/end 1489} (fn [^{:tag (* cryptobyte/Builder)} b]
+                        (.AddBytes b excluded))))))
+
+
+
+
+              (set! (values (.-Value (aget ret n)) err) (.Bytes b))
+              (when (!= err nil)
+                (return nil err))
+
+              (inc! n)))))
+
+
+      (when (and (> (len (.-CRLDistributionPoints template)) 0)
+          (not (oidInExtensions oidExtensionCRLDistributionPoints (.-ExtraExtensions template))))
+        (set! (.-Id (aget ret n)) oidExtensionCRLDistributionPoints)
+
+        (let [^{:tag (slice distributionPoint)} crlDp (zero (slice distributionPoint))]
+          (range [_ name (.-CRLDistributionPoints template)]
+            (let [dp ^{:go/breaks [2]} (lit distributionPoint
+                  :DistributionPoint ^{:go/breaks [2]} (lit distributionPointName
+                    :FullName (lit (slice asn1/RawValue)
+                      (lit _ :Tag 6 :Class 2 :Bytes (conv (slice byte) name)))))]
+
+
+
+              (set! crlDp (append crlDp dp))))
+
+
+          (set! (values (.-Value (aget ret n)) err) (asn1/Marshal crlDp))
+          (when (!= err nil)
+            (return))
+
+          (inc! n)))
+
+
+      ;; Adding another extension here? Remember to update the maximum number
+      ;; of elements in the make() at the top of the function and the list of
+      ;; template fields used in CreateCertificate documentation.
+
+      (return (append (subslice ret _ n) (spread (.-ExtraExtensions template))) nil))))
+
+
+^{:go/end 1546} (go/func marshalKeyUsage [^KeyUsage ku] :results [pkix/Extension error]
+  (let [ext (lit pkix/Extension :Id oidExtensionKeyUsage :Critical true)
+
+      ^{:line 1533 :tag (array 2 byte)} a (zero (array 2 byte))]
+    (aset a 0 (reverseBitsInAByte (conv byte ku)))
+    (aset a 1 (reverseBitsInAByte (conv byte (>> ku 8))))
+
+    (let [l 1]
+      (when (!= (aget a 1) 0)
+        (set! l 2))
+
+
+      (let [bitString (subslice a _ l)
+          ^{:line 1543 :tag error} err (zero error)]
+        (set! (values (.-Value ext) err) (asn1/Marshal (lit asn1/BitString :Bytes bitString :BitLength (asn1BitLength bitString))))
+        (return ext err)))))
+
+
+^{:go/end 1565} (go/func marshalExtKeyUsage [^{:tag (slice ExtKeyUsage)} extUsages ^{:tag (slice asn1/ObjectIdentifier)} unknownUsages] :results [pkix/Extension error]
+  (let [ext (lit pkix/Extension :Id oidExtensionExtendedKeyUsage)
+
+      ^{:line 1551} oids (make (slice asn1/ObjectIdentifier) (+ (len extUsages) (len unknownUsages)))]
+    (range [i u extUsages]
+      (if [(values oid ok) (oidFromExtKeyUsage u)] ok
+        (aset oids i oid)
+
+        (return ext (errors/New "x509: unknown extended key usage"))))
+
+
+
+    (copy (subslice oids (len extUsages)) unknownUsages)
+
+    (let [^error err (zero error)]
+      (set! (values (.-Value ext) err) (asn1/Marshal oids))
+      (return ext err))))
+
+
+^{:go/end 1578} (go/func marshalBasicConstraints [^bool isCA ^int maxPathLen ^bool maxPathLenZero] :results [pkix/Extension error]
+  (let [ext (lit pkix/Extension :Id oidExtensionBasicConstraints :Critical true)]
+    ;; Leaving MaxPathLen as zero indicates that no maximum path
+    ;; length is desired, unless MaxPathLenZero is set. A value of
+    ;; -1 causes encoding/asn1 to omit the value as desired.
+    (when (and (== maxPathLen 0) (not maxPathLenZero))
+      (set! maxPathLen -1))
+
+    (let [^error err (zero error)]
+      (set! (values (.-Value ext) err) (asn1/Marshal (lit basicConstraints isCA maxPathLen)))
+      (return ext err))))
+
+
+^{:go/end 1610} (go/func marshalCertificatePolicies [^{:tag (slice OID)} policies ^{:tag (slice asn1/ObjectIdentifier)} policyIdentifiers] :results [pkix/Extension error]
+  (let [ext (lit pkix/Extension :Id oidExtensionCertificatePolicies)
+
+      ^{:line 1583} b (cryptobyte/NewBuilder (make (slice byte) 0 128))]
+    (.AddASN1 b cryptobyte_asn1/SEQUENCE ^{:go/end 1605} (fn [^{:tag (* cryptobyte/Builder)} child]
+        (if (!= (.Value x509usepolicies) "0") (do
+            (.IncNonDefault x509usepolicies)
+            (range [_ v policies]
+              (.AddASN1 child cryptobyte_asn1/SEQUENCE ^{:go/end 1596} (fn [^{:tag (* cryptobyte/Builder)} child]
+                  (.AddASN1 child cryptobyte_asn1/OBJECT_IDENTIFIER ^{:go/end 1595} (fn [^{:tag (* cryptobyte/Builder)} child]
+                      (when (== (len (.-der v)) 0)
+                        (.SetError child (errors/New "invalid policy object identifier"))
+                        (return))
+
+                      (.AddBytes child (.-der v))))))))
+
+
+
+
+          (range [_ v policyIdentifiers]
+            (.AddASN1 child cryptobyte_asn1/SEQUENCE ^{:go/end 1602} (fn [^{:tag (* cryptobyte/Builder)} child]
+                (.AddASN1ObjectIdentifier child v)))))))
+
+
+
+
+
+    (let [^error err (zero error)]
+      (set! (values (.-Value ext) err) (.Bytes b))
+      (return ext err))))
+
+
+^{:go/end 1629} (go/func buildCSRExtensions [^{:tag (* CertificateRequest)} template] :results [(slice pkix/Extension) error]
+  (let [^{:tag (slice pkix/Extension)} ret (zero (slice pkix/Extension))]
+
+    (when (and ^:go/paren (or (> (len (.-DNSNames template)) 0) (> (len (.-EmailAddresses template)) 0) (> (len (.-IPAddresses template)) 0) (> (len (.-URIs template)) 0))
+        (not (oidInExtensions oidExtensionSubjectAltName (.-ExtraExtensions template))))
+      (let [(values sanBytes err) (marshalSANs (.-DNSNames template) (.-EmailAddresses template) (.-IPAddresses template) (.-URIs template))]
+        (when (!= err nil)
+          (return nil err))
+
+
+        (set! ret (append ret ^{:go/breaks [2 4]} (lit pkix/Extension
+              :Id oidExtensionSubjectAltName
+              :Value sanBytes)))))
+
+
+
+    (return (append ret (spread (.-ExtraExtensions template))) nil)))
+
+
+^{:go/end 1637} (go/func subjectBytes [^{:tag (* Certificate)} cert] :results [(slice byte) error]
+  (when (> (len (.-RawSubject cert)) 0)
+    (return (.-RawSubject cert) nil))
+
+
+  (asn1/Marshal (.ToRDNSequence (.-Subject cert))))
+
+
+
+
+
+^{:go/end 1710} (go/func signingParamsForKey "signingParamsForKey returns the signature algorithm and its Algorithm\nIdentifier to use for signing, based on the key type. If sigAlgo is not zero\nthen it overrides the default.\n" [^crypto/Signer key ^SignatureAlgorithm sigAlgo] :results [SignatureAlgorithm pkix/AlgorithmIdentifier error]
+  (let [^pkix/AlgorithmIdentifier ai (zero pkix/AlgorithmIdentifier)
+      ^{:line 1644 :tag PublicKeyAlgorithm} pubType (zero PublicKeyAlgorithm)
+      ^{:line 1645 :tag SignatureAlgorithm} defaultAlgo (zero SignatureAlgorithm)]
+
+    (type-switch [pub (.Public key)]
+      (case [(* rsa/PublicKey)]
+        (set! pubType RSA)
+        (set! defaultAlgo SHA256WithRSA))
+
+      (case [(* ecdsa/PublicKey)]
+        (set! pubType ECDSA)
+        (switch (.-Curve pub)
+          (case [(elliptic/P224) (elliptic/P256)]
+            (set! defaultAlgo ECDSAWithSHA256))
+          (case [(elliptic/P384)]
+            (set! defaultAlgo ECDSAWithSHA384))
+          (case [(elliptic/P521)]
+            (set! defaultAlgo ECDSAWithSHA512))
+          (default
+            (return 0 ai (errors/New "x509: unsupported elliptic curve")))))
+
+
+      (case [ed25519/PublicKey]
+        (set! pubType Ed25519)
+        (set! defaultAlgo PureEd25519))
+
+      (case [(* mldsa/PublicKey)]
+        (set! pubType MLDSA)
+        (switch (.Parameters pub)
+          (case [(mldsa/MLDSA44)]
+            (set! defaultAlgo MLDSA44))
+          (case [(mldsa/MLDSA65)]
+            (set! defaultAlgo MLDSA65))
+          (case [(mldsa/MLDSA87)]
+            (set! defaultAlgo MLDSA87))
+          (default
+            (return 0 ai (fmt/Errorf "x509: unsupported ML-DSA parameters: %s" (.Parameters pub))))))
+
+
+      (default
+        (return 0 ai (errors/New "x509: only RSA, ECDSA, ML-DSA and Ed25519 keys supported"))))
+
+
+    (when (== sigAlgo 0)
+      (set! sigAlgo defaultAlgo))
+
+
+    (range [_ details signatureAlgorithmDetails]
+      (when (== (.-algo details) sigAlgo)
+        (when (!= (.-pubKeyAlgo details) pubType)
+          (return 0 ai (errors/New "x509: requested SignatureAlgorithm does not match private key type")))
+
+        (when (and (== pubType MLDSA) (!= sigAlgo defaultAlgo))
+          (return 0 ai (errors/New "x509: requested SignatureAlgorithm does not match ML-DSA parameters")))
+
+        (when (== (.-hash details) crypto/MD5)
+          (return 0 ai (errors/New "x509: signing with MD5 is not supported")))
+
+
+        ^{:go/breaks [3]} (return sigAlgo ^{:go/breaks [2 4]} (lit pkix/AlgorithmIdentifier
+            :Algorithm (.-oid details)
+            :Parameters (.-params details))
+          nil)))
+
+
+
+    (return 0 ai (errors/New "x509: unknown SignatureAlgorithm"))))
+
+
+^{:go/end 1734} (go/func signTBS [^{:tag (slice byte)} tbs ^crypto/Signer key ^SignatureAlgorithm sigAlg ^io/Reader rand] :results [(slice byte) error]
+  (let [hashFunc (.hashFunc sigAlg)
+
+      ^{:line 1715 :tag crypto/SignerOpts} signerOpts hashFunc]
+    (when (.isRSAPSS sigAlg)
+      (set! signerOpts (addr ^{:go/breaks [2 4]} (lit rsa/PSSOptions
+            :SaltLength rsa/PSSSaltLengthEqualsHash
+            :Hash hashFunc))))
+
+
+
+    (let [(values signature err) (crypto/SignMessage key rand tbs signerOpts)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      ;; Check the signature to ensure the crypto.Signer behaved correctly.
+      (when [err (checkSignature sigAlg tbs signature (.Public key) true)] (!= err nil)
+        (return nil (fmt/Errorf "x509: signature returned by signer is invalid: %w" err)))
+
+
+      (return signature nil))))
+
+
+
+
+(go/var ^{:doc "emptyASN1Subject is the ASN.1 DER encoding of an empty Subject, which is\njust an empty SEQUENCE.\n"} emptyASN1Subject (lit (slice byte) 0x30 0))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1938} (go/func CreateCertificate "CreateCertificate creates a new X.509 v3 certificate based on a template.\nThe following members of template are currently used:\n\n  - AuthorityKeyId\n  - BasicConstraintsValid\n  - CRLDistributionPoints\n  - DNSNames\n  - EmailAddresses\n  - ExcludedDNSDomains\n  - ExcludedEmailAddresses\n  - ExcludedIPRanges\n  - ExcludedURIDomains\n  - ExtKeyUsage\n  - ExtraExtensions\n  - IPAddresses\n  - IsCA\n  - IssuingCertificateURL\n  - KeyUsage\n  - MaxPathLen\n  - MaxPathLenZero\n  - NotAfter\n  - NotBefore\n  - OCSPServer\n  - PermittedDNSDomains\n  - PermittedDNSDomainsCritical\n  - PermittedEmailAddresses\n  - PermittedIPRanges\n  - PermittedURIDomains\n  - PolicyIdentifiers (see note below)\n  - Policies (see note below)\n  - SerialNumber\n  - SignatureAlgorithm\n  - Subject\n  - SubjectKeyId\n  - URIs\n  - UnknownExtKeyUsage\n\nThe certificate is signed by parent. If parent is equal to template then the\ncertificate is self-signed. The parameter pub is the public key of the\ncertificate to be generated and priv is the private key of the signer.\n\nThe returned slice is the certificate in DER encoding.\n\nThe currently supported key types are *rsa.PublicKey, *ecdsa.PublicKey,\ned25519.PublicKey, and *mldsa.PublicKey. pub must be a supported key type,\nand priv must be a crypto.Signer or crypto.MessageSigner with a supported\npublic key.\n\nThe AuthorityKeyId will be taken from the SubjectKeyId of parent, if any,\nunless the resulting certificate is self-signed. Otherwise the value from\ntemplate will be used.\n\nIf SubjectKeyId from template is empty and the template is a CA, SubjectKeyId\nwill be generated from the hash of the public key.\n\nIf template.SerialNumber is nil, a serial number will be generated which\nconforms to RFC 5280, Section 4.1.2.2 using entropy from rand.\n\nThe PolicyIdentifier and Policies fields can both be used to marshal certificate\npolicy OIDs. By default, only the Policies is marshaled, but if the\nGODEBUG setting \"x509usepolicies\" has the value \"0\", the PolicyIdentifiers field will\nbe marshaled instead of the Policies field. This changed in Go 1.24. The Policies field can\nbe used to marshal policy OIDs which have components that are larger than 31\nbits.\n\nIP addresses in IPAddresses which are in their IPv4-mapped IPv6 form will always be encoded\nin their IPv4 form.\n" [^io/Reader rand ^{:tag (* Certificate)} template ^{:tag (* Certificate)} parent ^any pub ^any priv] :results [(slice byte) error]
+  (let [(values key ok) (assert crypto/Signer priv)]
+    (when (not ok)
+      (return nil (errors/New "x509: certificate private key does not implement crypto.Signer")))
+
+
+    (let [serialNumber (.-SerialNumber template)]
+      (when (== serialNumber nil)
+        ;; Generate a serial number following RFC 5280, Section 4.1.2.2 if one
+        ;; is not provided. The serial number must be positive and at most 20
+        ;; octets *when encoded*.
+        (let [serialBytes (make (slice byte) 20)]
+          (when [(values _ err) (io/ReadFull rand serialBytes)] (!= err nil)
+            (return nil err))
+
+          ;; If the top bit is set, the serial will be padded with a leading zero
+          ;; byte during encoding, so that it's not interpreted as a negative
+          ;; integer. This padding would make the serial 21 octets so we clear the
+          ;; top bit to ensure the correct length in all cases.
+          (set! (aget serialBytes 0) bit-and 2r01111111)
+          (set! serialNumber (.SetBytes (new big/Int) serialBytes))))
+
+
+      ;; RFC 5280 Section 4.1.2.2: serial number must be positive
+      ;;
+      ;; We _should_ also restrict serials to <= 20 octets, but it turns out a lot of people
+      ;; get this wrong, in part because the encoding can itself alter the length of the
+      ;; serial. For now we accept these non-conformant serials.
+      (when (== (.Sign serialNumber) -1)
+        (return nil (errors/New "x509: serial number must be positive")))
+
+
+      (when (and (.-BasicConstraintsValid template) (< (.-MaxPathLen template) -1))
+        (return nil (errors/New "x509: invalid MaxPathLen, must be greater or equal to -1")))
+
+
+      (when (and (.-BasicConstraintsValid template) (not (.-IsCA template)) (!= (.-MaxPathLen template) -1) ^:go/paren (or (!= (.-MaxPathLen template) 0) (.-MaxPathLenZero template)))
+        (return nil (errors/New "x509: only CAs are allowed to specify MaxPathLen")))
+
+
+      (let [(values signatureAlgorithm algorithmIdentifier err) (signingParamsForKey key (.-SignatureAlgorithm template))]
+        (when (!= err nil)
+          (return nil err))
+
+
+        (let [(values publicKeyBytes publicKeyAlgorithm ^:assign err) (marshalPublicKey pub)]
+          (when (!= err nil)
+            (return nil err))
+
+          (when (== (getPublicKeyAlgorithmFromOID (.-Algorithm publicKeyAlgorithm)) UnknownPublicKeyAlgorithm)
+            (return nil (fmt/Errorf "x509: unsupported public key type: %T" pub)))
+
+
+          (let [(values asn1Issuer ^:assign err) (subjectBytes parent)]
+            (when (!= err nil)
+              (return nil err))
+
+
+            (let [(values asn1Subject ^:assign err) (subjectBytes template)]
+              (when (!= err nil)
+                (return nil err))
+
+
+              (let [authorityKeyId (.-AuthorityKeyId template)]
+                (when (and (not (bytes/Equal asn1Issuer asn1Subject)) (> (len (.-SubjectKeyId parent)) 0))
+                  (set! authorityKeyId (.-SubjectKeyId parent)))
+
+
+                (let [subjectKeyId (.-SubjectKeyId template)]
+                  (when (and (== (len subjectKeyId) 0) (.-IsCA template))
+                    (if (== (.Value x509sha256skid) "0") (do
+                        (.IncNonDefault x509sha256skid)
+                        ;; SubjectKeyId generated using method 1 in RFC 5280, Section 4.2.1.2:
+                        ;;   (1) The keyIdentifier is composed of the 160-bit SHA-1 hash of the
+                        ;;   value of the BIT STRING subjectPublicKey (excluding the tag,
+                        ;;   length, and number of unused bits).
+                        (let [h (sha1/Sum publicKeyBytes)]
+                          (set! subjectKeyId (subslice h))))
+
+                      ;; SubjectKeyId generated using method 1 in RFC 7093, Section 2:
+                      ;;    1) The keyIdentifier is composed of the leftmost 160-bits of the
+                      ;;    SHA-256 hash of the value of the BIT STRING subjectPublicKey
+                      ;;    (excluding the tag, length, and number of unused bits).
+                      (let [h (sha256/Sum256 publicKeyBytes)]
+                        (set! subjectKeyId (subslice h _ 20)))))
+
+
+
+                  ;; Check that the signer's public key matches the private key, if available.
+                  (let-type [privateKey (interface
+                        (Equal ^bool [crypto/PublicKey]))]
+
+                    (if [(values privPub ok) (assert privateKey (.Public key))] (not ok)
+                      (return nil (errors/New "x509: internal error: supported public key does not implement Equal"))
+                      (when (and (!= (.-PublicKey parent) nil) (not (.Equal privPub (.-PublicKey parent))))
+                        (return nil (errors/New "x509: provided PrivateKey doesn't match parent's PublicKey"))))
+
+
+                    (let [(values extensions ^:assign err) (buildCertExtensions template (bytes/Equal asn1Subject emptyASN1Subject) authorityKeyId subjectKeyId)]
+                      (when (!= err nil)
+                        (return nil err))
+
+
+                      (let [encodedPublicKey (lit asn1/BitString :BitLength (* (len publicKeyBytes) 8) :Bytes publicKeyBytes)
+                          ^{:line 1911} c ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit tbsCertificate
+                            :Version 2
+                            :SerialNumber serialNumber
+                            :SignatureAlgorithm algorithmIdentifier
+                            :Issuer (lit asn1/RawValue :FullBytes asn1Issuer)
+                            :Validity (lit validity (.UTC (.-NotBefore template)) (.UTC (.-NotAfter template)))
+                            :Subject (lit asn1/RawValue :FullBytes asn1Subject)
+                            :PublicKey (lit publicKeyInfo nil publicKeyAlgorithm encodedPublicKey)
+                            :Extensions extensions)
+
+
+                          (values tbsCertContents ^:assign err) (asn1/Marshal c)]
+                        (when (!= err nil)
+                          (return nil err))
+
+                        (set! (.-Raw c) tbsCertContents)
+
+                        (let [(values signature ^:assign err) (signTBS tbsCertContents key signatureAlgorithm rand)]
+                          (when (!= err nil)
+                            (return nil err))
+
+
+                          (asn1/Marshal ^{:go/breaks [2 4 6]} (lit certificate
+                              :TBSCertificate c
+                              :SignatureAlgorithm algorithmIdentifier
+                              :SignatureValue (lit asn1/BitString :Bytes signature :BitLength (* (len signature) 8)))))))))))))))))
+
+
+
+(go/var x509sha256skid (godebug/New "x509sha256skid"))
+
+
+
+(go/var ^{:doc "pemCRLPrefix is the magic string that indicates that we have a PEM encoded\nCRL.\n"} pemCRLPrefix (conv (slice byte) "-----BEGIN X509 CRL"))
+
+
+(go/var ^{:doc "pemType is the type of a PEM encoded CRL.\n"} pemType "X509 CRL")
+
+
+
+
+
+
+
+^{:go/end 1963} (go/func ParseCRL "ParseCRL parses a CRL from the given bytes. It's often the case that PEM\nencoded CRLs will appear where they should be DER encoded, so this function\nwill transparently handle PEM encoding as long as there isn't any leading\ngarbage.\n\nDeprecated: Use [ParseRevocationList] instead.\n" [^{:tag (slice byte)} crlBytes] :results [(* pkix/CertificateList) error]
+  (when (bytes/HasPrefix crlBytes pemCRLPrefix)
+    (let [(values block _) (pem/Decode crlBytes)]
+      (when (and (!= block nil) (== (.-Type block) pemType))
+        (set! crlBytes (.-Bytes block)))))
+
+
+  (ParseDERCRL crlBytes))
+
+
+
+
+
+^{:go/end 1976} (go/func ParseDERCRL "ParseDERCRL parses a DER encoded CRL from the given bytes.\n\nDeprecated: Use [ParseRevocationList] instead.\n" [^{:tag (slice byte)} derBytes] :results [(* pkix/CertificateList) error]
+  (let [certList (new pkix/CertificateList)]
+    (if [(values rest err) (asn1/Unmarshal derBytes certList)] (!= err nil)
+      (return nil err)
+      (when (!= (len rest) 0)
+        (return nil (errors/New "x509: trailing data after CRL"))))
+
+    (return certList nil)))
+
+
+
+
+
+
+
+^{:go/end 2037} (go/method CreateCRL "CreateCRL returns a DER encoded CRL, signed by this Certificate, that\ncontains the given list of revoked certificates.\n\nDeprecated: this method does not generate an RFC 5280 conformant X.509 v2 CRL.\nTo generate a standards compliant CRL, use [CreateRevocationList] instead.\n" [^{:tag (* Certificate)} c ^io/Reader rand ^any priv ^{:tag (slice pkix/RevokedCertificate)} revokedCerts ^time/Time now ^time/Time expiry] :results [^{:tag (slice byte)} crlBytes ^error err]
+  (let [(values key ok) (assert crypto/Signer priv)]
+    (when (not ok)
+      (return nil (errors/New "x509: certificate private key does not implement crypto.Signer")))
+
+
+    (let [(values signatureAlgorithm algorithmIdentifier ^:assign err) (signingParamsForKey key 0)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      ;; Force revocation times to UTC per RFC 5280.
+      (let [revokedCertsUTC (make (slice pkix/RevokedCertificate) (len revokedCerts))]
+        (range [i rc revokedCerts]
+          (set! (.-RevocationTime rc) (.UTC (.-RevocationTime rc)))
+          (aset revokedCertsUTC i rc))
+
+
+        (let [tbsCertList ^{:go/breaks [2 4 6 8 10 12]} (lit pkix/TBSCertificateList
+              :Version 1
+              :Signature algorithmIdentifier
+              :Issuer (.ToRDNSequence (.-Subject c))
+              :ThisUpdate (.UTC now)
+              :NextUpdate (.UTC expiry)
+              :RevokedCertificates revokedCertsUTC)]
+
+
+          ;; Authority Key Id
+          (when (> (len (.-SubjectKeyId c)) 0)
+            (let [^pkix/Extension aki (zero pkix/Extension)]
+              (set! (.-Id aki) oidExtensionAuthorityKeyId)
+              (set! (values (.-Value aki) err) (asn1/Marshal (lit authKeyId :Id (.-SubjectKeyId c))))
+              (when (!= err nil)
+                (return nil err))
+
+              (set! (.-Extensions tbsCertList) (append (.-Extensions tbsCertList) aki))))
+
+
+          (let [(values tbsCertListContents ^:assign err) (asn1/Marshal tbsCertList)]
+            (when (!= err nil)
+              (return nil err))
+
+            (set! (.-Raw tbsCertList) tbsCertListContents)
+
+            (let [(values signature ^:assign err) (signTBS tbsCertListContents key signatureAlgorithm rand)]
+              (when (!= err nil)
+                (return nil err))
+
+
+              (asn1/Marshal ^{:go/breaks [2 4 6]} (lit pkix/CertificateList
+                  :TBSCertList tbsCertList
+                  :SignatureAlgorithm algorithmIdentifier
+                  :SignatureValue (lit asn1/BitString :Bytes signature :BitLength (* (len signature) 8)))))))))))
+
+
+
+
+(go/type CertificateRequest "CertificateRequest represents a PKCS #10, certificate signature request.\n" (struct
+    ^{:line 2041 :tag (slice byte)} Raw ; Complete ASN.1 DER content (CSR, signature algorithm and signature).
+    ^{:line 2042 :tag (slice byte)} RawTBSCertificateRequest ; Certificate request info part of raw ASN.1 DER content.
+    ^{:line 2043 :tag (slice byte)} RawSubjectPublicKeyInfo ; DER encoded SubjectPublicKeyInfo.
+    ^{:line 2044 :tag (slice byte)} RawSubject ; DER encoded Subject.
+    ^{:line 2045 :tag (slice byte)} RawSignatureAlgorithm ; DER encoded AlgorithmIdentifier.
+
+    ^{:line 2047 :tag int} Version
+    ^{:line 2048 :tag (slice byte)} Signature
+    ^{:line 2049 :tag SignatureAlgorithm} SignatureAlgorithm
+
+    ^{:line 2051 :tag PublicKeyAlgorithm} PublicKeyAlgorithm
+    ^{:line 2052 :tag any} PublicKey
+
+    ^{:line 2054 :tag pkix/Name} Subject
+
+
+
+
+
+
+    ^{:line 2061 :tag (slice pkix/AttributeTypeAndValueSET) :doc "Attributes contains the CSR attributes that can parse as\npkix.AttributeTypeAndValueSET.\n\nDeprecated: Use Extensions and ExtraExtensions instead for parsing and\ngenerating the requestedExtensions attribute.\n"} Attributes
+
+
+
+
+    ^{:line 2066 :tag (slice pkix/Extension) :doc "Extensions contains all requested extensions, in raw form. When parsing\nCSRs, this can be used to extract extensions that are not parsed by this\npackage.\n"} Extensions
+
+
+
+
+
+
+
+
+    ^{:line 2075 :tag (slice pkix/Extension) :doc "ExtraExtensions contains extensions to be copied, raw, into any CSR\nmarshaled by CreateCertificateRequest. Values override any extensions\nthat would otherwise be produced based on the other fields but are\noverridden by any extensions specified in Attributes.\n\nThe ExtraExtensions field is not populated by ParseCertificateRequest,\nsee Extensions instead.\n"} ExtraExtensions
+
+
+    ^{:line 2078 :tag (slice string) :doc "Subject Alternate Name values.\n"} DNSNames
+    ^{:line 2079 :tag (slice string)} EmailAddresses
+    ^{:line 2080 :tag (slice net/IP)} IPAddresses
+    ^{:line 2081 :tag (slice (* url/URL))} URIs))
+
+
+;; These structures reflect the ASN.1 structure of X.509 certificate
+;; signature requests (see RFC 2986):
+
+(go/type tbsCertificateRequest (struct
+    ^{:line 2088 :tag asn1/RawContent} Raw
+    ^{:line 2089 :tag int} Version
+    ^{:line 2090 :tag asn1/RawValue} Subject
+    ^{:line 2091 :tag publicKeyInfo} PublicKey
+    ^{:line 2092 :tag (slice asn1/RawValue) :go/tag "asn1:\"tag:0\""} RawAttributes))
+
+
+(go/type certificateRequest (struct
+    ^{:line 2096 :tag asn1/RawContent} Raw
+    ^{:line 2097 :tag tbsCertificateRequest} TBSCSR
+    ^{:line 2098 :tag (struct ^asn1/RawContent Raw ^asn1/ObjectIdentifier Algorithm ^{:tag asn1/RawValue :go/tag "asn1:\"optional\""} Parameters)} SignatureAlgorithm
+
+
+
+
+    ^{:line 2103 :tag asn1/BitString} SignatureValue))
+
+
+
+
+(go/var ^{:doc "oidExtensionRequest is a PKCS #9 OBJECT IDENTIFIER that indicates requested\nextensions in a CSR.\n"} oidExtensionRequest (lit asn1/ObjectIdentifier 1 2 840 113549 1 9 14))
+
+
+
+^{:go/end 2126} (go/func newRawAttributes "newRawAttributes converts AttributeTypeAndValueSETs from a template\nCertificateRequest's Attributes into tbsCertificateRequest RawAttributes.\n" [^{:tag (slice pkix/AttributeTypeAndValueSET)} attributes] :results [(slice asn1/RawValue) error]
+  (let [^{:tag (slice asn1/RawValue)} rawAttributes (zero (slice asn1/RawValue))
+      (values b err) (asn1/Marshal attributes)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values rest ^:assign err) (asn1/Unmarshal b (addr rawAttributes))]
+      (when (!= err nil)
+        (return nil err))
+
+      (when (!= (len rest) 0)
+        (return nil (errors/New "x509: failed to unmarshal raw CSR Attributes")))
+
+      (return rawAttributes nil))))
+
+
+
+^{:go/end 2141} (go/func parseRawAttributes "parseRawAttributes Unmarshals RawAttributes into AttributeTypeAndValueSETs.\n" ^{:tag (slice pkix/AttributeTypeAndValueSET)} [^{:tag (slice asn1/RawValue)} rawAttributes]
+  (let [^{:tag (slice pkix/AttributeTypeAndValueSET)} attributes (zero (slice pkix/AttributeTypeAndValueSET))]
+    (range [_ rawAttr rawAttributes]
+      (let [^pkix/AttributeTypeAndValueSET attr (zero pkix/AttributeTypeAndValueSET)
+          (values rest err) (asn1/Unmarshal (.-FullBytes rawAttr) (addr attr))]
+        ;; Ignore attributes that don't parse into pkix.AttributeTypeAndValueSET
+        ;; (i.e.: challengePassword or unstructuredName).
+        (when (and (== err nil) (== (len rest) 0))
+          (set! attributes (append attributes attr)))))
+
+
+    ^{:line 2140} attributes))
+
+
+
+
+^{:go/end 2180} (go/func parseCSRExtensions "parseCSRExtensions parses the attributes from a CSR and extracts any\nrequested extensions.\n" [^{:tag (slice asn1/RawValue)} rawAttributes] :results [(slice pkix/Extension) error]
+  ;; pkcs10Attribute reflects the Attribute structure from RFC 2986, Section 4.1.
+  (let-type [pkcs10Attribute (struct
+        ^{:line 2148 :tag asn1/ObjectIdentifier} Id
+        ^{:line 2149 :tag (slice asn1/RawValue) :go/tag "asn1:\"set\""} Values)]
+
+
+    (let [^{:tag (slice pkix/Extension)} ret (zero (slice pkix/Extension))
+        ^{:line 2153} requestedExts (make (map string bool))]
+      (range [_ rawAttr rawAttributes]
+        (let [^pkcs10Attribute attr (zero pkcs10Attribute)]
+          (when [(values rest err) (asn1/Unmarshal (.-FullBytes rawAttr) (addr attr))] (or (!= err nil) (!= (len rest) 0) (== (len (.-Values attr)) 0))
+            ;; Ignore attributes that don't parse.
+            (continue))
+
+
+          (when (not (.Equal (.-Id attr) oidExtensionRequest))
+            (continue))
+
+
+          (let [^{:tag (slice pkix/Extension)} extensions (zero (slice pkix/Extension))]
+            (when [(values _ err) (asn1/Unmarshal (.-FullBytes (aget (.-Values attr) 0)) (addr extensions))] (!= err nil)
+              (return nil err))
+
+            (range [_ ext extensions]
+              (let [oidStr (.String (.-Id ext))]
+                (when (aget requestedExts oidStr)
+                  (return nil (errors/New "x509: certificate request contains duplicate requested extensions")))
+
+                (aset requestedExts oidStr true)))
+
+            (set! ret (append ret (spread extensions))))))
+
+
+      (return ret nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2345} (go/func CreateCertificateRequest "CreateCertificateRequest creates a new certificate request based on a\ntemplate. The following members of template are used:\n\n  - SignatureAlgorithm\n  - Subject\n  - DNSNames\n  - EmailAddresses\n  - IPAddresses\n  - URIs\n  - ExtraExtensions\n  - Attributes (deprecated)\n\npriv is the private key to sign the CSR with, and the corresponding public\nkey will be included in the CSR. It must implement crypto.Signer or\ncrypto.MessageSigner and its Public() method must return a *rsa.PublicKey or\na *ecdsa.PublicKey or a ed25519.PublicKey or a *mldsa.PublicKey.\n(A *rsa.PrivateKey, *ecdsa.PrivateKey or ed25519.PrivateKey or\n*mldsa.PrivateKey satisfies this.)\n\nThe returned slice is the certificate request in DER encoding.\n" [^io/Reader rand ^{:tag (* CertificateRequest)} template ^any priv] :results [^{:tag (slice byte)} csr ^error err]
+  (let [(values key ok) (assert crypto/Signer priv)]
+    (when (not ok)
+      (return nil (errors/New "x509: certificate private key does not implement crypto.Signer")))
+
+
+    (let [(values signatureAlgorithm algorithmIdentifier ^:assign err) (signingParamsForKey key (.-SignatureAlgorithm template))]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (let [^{:tag (slice byte)} publicKeyBytes (zero (slice byte))
+          ^{:line 2214 :tag pkix/AlgorithmIdentifier} publicKeyAlgorithm (zero pkix/AlgorithmIdentifier)]
+        (set! (values publicKeyBytes publicKeyAlgorithm err) (marshalPublicKey (.Public key)))
+        (when (!= err nil)
+          (return nil err))
+
+
+        (let [(values extensions ^:assign err) (buildCSRExtensions template)]
+          (when (!= err nil)
+            (return nil err))
+
+
+          ;; Make a copy of template.Attributes because we may alter it below.
+          (let [attributes (make (slice pkix/AttributeTypeAndValueSET) 0 (len (.-Attributes template)))]
+            (range [_ attr (.-Attributes template)]
+              (let [values (make (slice (slice pkix/AttributeTypeAndValue)) (len (.-Value attr)))]
+                (copy values (.-Value attr))
+                (set! attributes (append attributes ^{:go/breaks [2 4]} (lit pkix/AttributeTypeAndValueSET
+                      :Type (.-Type attr)
+                      :Value values)))))
+
+
+
+            (let [extensionsAppended false]
+              (when (> (len extensions) 0)
+                ;; Append the extensions to an existing attribute if possible.
+                (range [_ atvSet attributes]
+                  (when (or (not (.Equal (.-Type atvSet) oidExtensionRequest)) (== (len (.-Value atvSet)) 0))
+                    (continue))
+
+
+                  ;; specifiedExtensions contains all the extensions that we
+                  ;; found specified via template.Attributes.
+                  (let [specifiedExtensions (make (map string bool))]
+
+                    (range [_ atvs (.-Value atvSet)]
+                      (range [_ atv atvs]
+                        (aset specifiedExtensions (.String (.-Type atv)) true)))
+
+
+
+                    (let [newValue (make (slice pkix/AttributeTypeAndValue) 0 (+ (len (aget (.-Value atvSet) 0)) (len extensions)))]
+                      (set! newValue (append newValue (spread (aget (.-Value atvSet) 0))))
+
+                      (range [_ e extensions]
+                        (when (aget specifiedExtensions (.String (.-Id e)))
+                          ;; Attributes already contained a value for
+                          ;; this extension and it takes priority.
+                          (continue))
+
+
+                        (set! newValue (append newValue ^{:go/breaks [[2 2267] 4]} (lit pkix/AttributeTypeAndValue
+                              ;; There is no place for the critical
+                              ;; flag in an AttributeTypeAndValue.
+                              :Type (.-Id e)
+                              :Value (.-Value e)))))
+
+
+
+                      (aset (.-Value atvSet) 0 newValue)
+                      (set! extensionsAppended true)
+                      (break)))))
+
+
+
+              (let [(values rawAttributes ^:assign err) (newRawAttributes attributes)]
+                (when (!= err nil)
+                  (return nil err))
+
+
+                ;; If not included in attributes, add a new attribute for the
+                ;; extensions.
+                (when (and (> (len extensions) 0) (not extensionsAppended))
+                  (let [attr ^{:go/breaks [[2 2290] 4]} (lit (struct
+                          ^{:line 2287 :tag asn1/ObjectIdentifier} Type
+                          ^{:line 2288 :tag (slice (slice pkix/Extension)) :go/tag "asn1:\"set\""} Value)
+
+                        :Type oidExtensionRequest
+                        :Value (lit (slice (slice pkix/Extension)) extensions))
+
+
+                      (values b err) (asn1/Marshal attr)]
+                    (when (!= err nil)
+                      (return nil (errors/New (+ "x509: failed to serialise extensions attribute: " (.Error err)))))
+
+
+                    (let [^asn1/RawValue rawValue (zero asn1/RawValue)]
+                      (when [(values _ err) (asn1/Unmarshal b (addr rawValue))] (!= err nil)
+                        (return nil err))
+
+
+                      (set! rawAttributes (append rawAttributes rawValue)))))
+
+
+                (let [asn1Subject (.-RawSubject template)]
+                  (when (== (len asn1Subject) 0)
+                    (set! (values asn1Subject err) (asn1/Marshal (.ToRDNSequence (.-Subject template))))
+                    (when (!= err nil)
+                      (return nil err)))
+
+
+
+                  (let [tbsCSR ^{:go/breaks [2 4 6 [8 2325]]} (lit tbsCertificateRequest
+                        :Version 0 ; PKCS #10, RFC 2986
+                        :Subject (lit asn1/RawValue :FullBytes asn1Subject)
+                        :PublicKey ^{:go/breaks [2 4]} (lit publicKeyInfo
+                          :Algorithm publicKeyAlgorithm
+                          :PublicKey ^{:go/breaks [2 4]} (lit asn1/BitString
+                            :Bytes publicKeyBytes
+                            :BitLength (* (len publicKeyBytes) 8)))
+
+
+                        :RawAttributes rawAttributes)
+
+
+                      (values tbsCSRContents ^:assign err) (asn1/Marshal tbsCSR)]
+                    (when (!= err nil)
+                      (return nil err))
+
+                    (set! (.-Raw tbsCSR) tbsCSRContents)
+
+                    (let [(values signature ^:assign err) (signTBS tbsCSRContents key signatureAlgorithm rand)]
+                      (when (!= err nil)
+                        (return nil err))
+
+
+                      (let [cr (lit certificateRequest)]
+                        (set! (.-TBSCSR cr) tbsCSR)
+                        (set! (.-Algorithm (.-SignatureAlgorithm cr)) (.-Algorithm algorithmIdentifier))
+                        (set! (.-Parameters (.-SignatureAlgorithm cr)) (.-Parameters algorithmIdentifier))
+                        (set! (.-SignatureValue cr) (lit asn1/BitString :Bytes signature :BitLength (* (len signature) 8)))
+                        (asn1/Marshal cr)))))))))))))
+
+
+
+
+^{:go/end 2360} (go/func ParseCertificateRequest "ParseCertificateRequest parses a single certificate request from the\ngiven ASN.1 DER data.\n" [^{:tag (slice byte)} asn1Data] :results [(* CertificateRequest) error]
+  (let [^certificateRequest csr (zero certificateRequest)
+
+      (values rest err) (asn1/Unmarshal asn1Data (addr csr))]
+    (cond (!= err nil)
+      (return nil err)
+      (!= (len rest) 0)
+      (return nil (lit asn1/SyntaxError :Msg "trailing data")))
+
+
+    (parseCertificateRequest (addr csr))))
+
+
+^{:go/end 2411} (go/func parseCertificateRequest [^{:tag (* certificateRequest)} in] :results [(* CertificateRequest) error]
+  (let [out (addr ^{:go/breaks [2 4 6 8 10 [12 2370] 14 [16 2376] [18 2378] 20]} (lit CertificateRequest
+          :Raw (.-Raw in)
+          :RawTBSCertificateRequest (.-Raw (.-TBSCSR in))
+          :RawSubjectPublicKeyInfo (.-Raw (.-PublicKey (.-TBSCSR in)))
+          :RawSubject (.-FullBytes (.-Subject (.-TBSCSR in)))
+          :RawSignatureAlgorithm (.-Raw (.-SignatureAlgorithm in))
+
+          :Signature (.RightAlign (.-SignatureValue in))
+          :SignatureAlgorithm (getSignatureAlgorithmFromAI ^{:go/breaks [2 4]} (lit pkix/AlgorithmIdentifier
+              :Algorithm (.-Algorithm (.-SignatureAlgorithm in))
+              :Parameters (.-Parameters (.-SignatureAlgorithm in))))
+
+
+          :PublicKeyAlgorithm (getPublicKeyAlgorithmFromOID (.-Algorithm (.-Algorithm (.-PublicKey (.-TBSCSR in)))))
+
+          :Version (.-Version (.-TBSCSR in))
+          :Attributes (parseRawAttributes (.-RawAttributes (.-TBSCSR in)))))
+
+
+      ^{:line 2382 :tag error} err (zero error)]
+    (when (!= (.-PublicKeyAlgorithm out) UnknownPublicKeyAlgorithm)
+      (set! (values (.-PublicKey out) err) (parsePublicKey (addr (.-PublicKey (.-TBSCSR in)))))
+      (when (!= err nil)
+        (return nil err)))
+
+
+
+    (let [(values subject ^:assign err) (parseName (.-FullBytes (.-Subject (.-TBSCSR in))))]
+      (when (!= err nil)
+        (return nil err))
+
+      (.FillFromRDNSequence (.-Subject out) subject)
+
+      (when [(set! (values (.-Extensions out) err) (parseCSRExtensions (.-RawAttributes (.-TBSCSR in))))] (!= err nil)
+        (return nil err))
+
+
+      (range [_ extension (.-Extensions out)]
+        (switch
+          (case [(.Equal (.-Id extension) oidExtensionSubjectAltName)]
+            (set! (values (.-DNSNames out) (.-EmailAddresses out) (.-IPAddresses out) (.-URIs out) err) (parseSANExtension (.-Value extension)))
+            (when (!= err nil)
+              (return nil err)))))
+
+
+
+
+      (return out nil))))
+
+
+
+^{:go/end 2416} (go/method CheckSignature "CheckSignature reports whether the signature on c is valid.\n" ^error [^{:tag (* CertificateRequest)} c]
+  (checkSignature (.-SignatureAlgorithm c) (.-RawTBSCertificateRequest c) (.-Signature c) (.-PublicKey c) true))
+
+
+
+
+(go/type RevocationListEntry "RevocationListEntry represents an entry in the revokedCertificates\nsequence of a CRL.\n" (struct
+
+
+    ^{:line 2423 :tag (slice byte) :doc "Raw contains the raw bytes of the revokedCertificates entry. It is set when\nparsing a CRL; it is ignored when generating a CRL.\n"} Raw
+
+
+
+
+    ^{:line 2428 :tag (* big/Int) :doc "SerialNumber represents the serial number of a revoked certificate. It is\nboth used when creating a CRL and populated when parsing a CRL. It must not\nbe nil.\n"} SerialNumber
+
+
+
+    ^{:line 2432 :tag time/Time :doc "RevocationTime represents the time at which the certificate was revoked. It\nis both used when creating a CRL and populated when parsing a CRL. It must\nnot be the zero time.\n"} RevocationTime
+
+
+
+
+
+
+
+
+    ^{:line 2441 :tag int :doc "ReasonCode represents the reason for revocation, using the integer enum\nvalues specified in RFC 5280 Section 5.3.1. When creating a CRL, the zero\nvalue will result in the reasonCode extension being omitted. When parsing a\nCRL, the zero value may represent either the reasonCode extension being\nabsent (which implies the default revocation reason of 0/Unspecified), or\nit may represent the reasonCode extension being present and explicitly\ncontaining a value of 0/Unspecified (which should not happen according to\nthe DER encoding rules, but can and does happen anyway).\n"} ReasonCode
+
+
+
+
+
+    ^{:line 2447 :tag (slice pkix/Extension) :doc "Extensions contains raw X.509 extensions. When parsing CRL entries,\nthis can be used to extract non-critical extensions that are not\nparsed by this package. When marshaling CRL entries, the Extensions\nfield is ignored, see ExtraExtensions.\n"} Extensions
+
+
+
+
+    ^{:line 2452 :tag (slice pkix/Extension) :doc "ExtraExtensions contains extensions to be copied, raw, into any\nmarshaled CRL entries. Values override any extensions that would\notherwise be produced based on the other fields. The ExtraExtensions\nfield is not populated when parsing CRL entries, see Extensions.\n"} ExtraExtensions))
+
+
+
+
+(go/type RevocationList "RevocationList represents a [Certificate] Revocation List (CRL) as specified\nby RFC 5280.\n" (struct
+
+
+    ^{:line 2460 :tag (slice byte) :doc "Raw contains the complete ASN.1 DER content of the CRL (tbsCertList,\nsignatureAlgorithm, and signatureValue.)\n"} Raw
+
+
+    ^{:line 2463 :tag (slice byte) :doc "RawTBSRevocationList contains just the tbsCertList portion of the ASN.1\nDER.\n"} RawTBSRevocationList
+
+    ^{:line 2465 :tag (slice byte) :doc "RawIssuer contains the DER encoded Issuer.\n"} RawIssuer
+
+
+    ^{:line 2468 :tag (slice byte) :doc "RawSignatureAlgorithm contains the DER encoded signature algorithm as a\nPKIX AlgorithmIdentifier.\n"} RawSignatureAlgorithm
+
+
+    ^{:line 2471 :tag pkix/Name :doc "Issuer contains the DN of the issuing certificate.\n"} Issuer
+
+
+
+
+    ^{:line 2476 :tag (slice byte) :doc "AuthorityKeyId is used to identify the public key associated with the\nissuing certificate. It is populated from the authorityKeyIdentifier\nextension when parsing a CRL. It is ignored when creating a CRL; the\nextension is populated from the issuing certificate itself.\n"} AuthorityKeyId
+
+    ^{:line 2478 :tag (slice byte)} Signature
+
+
+
+    ^{:line 2482 :tag SignatureAlgorithm :doc "SignatureAlgorithm is used to determine the signature algorithm to be\nused when signing the CRL. If 0 the default algorithm for the signing\nkey will be used.\n"} SignatureAlgorithm
+
+
+
+
+
+    ^{:line 2488 :tag (slice RevocationListEntry) :doc "RevokedCertificateEntries represents the revokedCertificates sequence in\nthe CRL. It is used when creating a CRL and also populated when parsing a\nCRL. When creating a CRL, it may be empty or nil, in which case the\nrevokedCertificates ASN.1 sequence will be omitted from the CRL entirely.\n"} RevokedCertificateEntries
+
+
+
+
+
+
+    ^{:line 2495 :tag (slice pkix/RevokedCertificate) :doc "RevokedCertificates is used to populate the revokedCertificates\nsequence in the CRL if RevokedCertificateEntries is empty. It may be empty\nor nil, in which case an empty CRL will be created.\n\nDeprecated: Use RevokedCertificateEntries instead.\n"} RevokedCertificates
+
+
+
+
+
+    ^{:line 2501 :tag (* big/Int) :doc "Number is used to populate the X.509 v2 cRLNumber extension in the CRL,\nwhich should be a monotonically increasing sequence number for a given\nCRL scope and CRL issuer. It is also populated from the cRLNumber\nextension when parsing a CRL.\n"} Number
+
+
+
+    ^{:line 2505 :tag time/Time :doc "ThisUpdate is used to populate the thisUpdate field in the CRL, which\nindicates the issuance date of the CRL.\n"} ThisUpdate
+
+
+
+    ^{:line 2509 :tag time/Time :doc "NextUpdate is used to populate the nextUpdate field in the CRL, which\nindicates the date by which the next CRL will be issued. NextUpdate\nmust be greater than ThisUpdate.\n"} NextUpdate
+
+
+
+    ^{:line 2513 :tag (slice pkix/Extension) :doc "Extensions contains raw X.509 extensions. When creating a CRL,\nthe Extensions field is ignored, see ExtraExtensions.\n"} Extensions
+
+
+
+    ^{:line 2517 :tag (slice pkix/Extension) :doc "ExtraExtensions contains any additional extensions to add directly to\nthe CRL.\n"} ExtraExtensions))
+
+
+
+
+
+
+
+
+(go/type certificateList "These structures reflect the ASN.1 structure of X.509 CRLs better than\nthe existing crypto/x509/pkix variants do. These mirror the existing\ncertificate structs in this file.\n\nNotably, we include issuer as an asn1.RawValue, mirroring the behavior of\ntbsCertificate and allowing raw (unparsed) subjects to be passed cleanly.\n" (struct
+    ^{:line 2527 :tag tbsCertificateList} TBSCertList
+    ^{:line 2528 :tag pkix/AlgorithmIdentifier} SignatureAlgorithm
+    ^{:line 2529 :tag asn1/BitString} SignatureValue))
+
+
+(go/type tbsCertificateList (struct
+    ^{:line 2533 :tag asn1/RawContent} Raw
+    ^{:line 2534 :tag int :go/tag "asn1:\"optional,default:0\""} Version
+    ^{:line 2535 :tag pkix/AlgorithmIdentifier} Signature
+    ^{:line 2536 :tag asn1/RawValue} Issuer
+    ^{:line 2537 :tag time/Time} ThisUpdate
+    ^{:line 2538 :tag time/Time :go/tag "asn1:\"optional\""} NextUpdate
+    ^{:line 2539 :tag (slice pkix/RevokedCertificate) :go/tag "asn1:\"optional\""} RevokedCertificates
+    ^{:line 2540 :tag (slice pkix/Extension) :go/tag "asn1:\"tag:0,optional,explicit\""} Extensions))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2702} (go/func CreateRevocationList "CreateRevocationList creates a new X.509 v2 [Certificate] Revocation List,\naccording to RFC 5280, based on template.\n\nThe CRL is signed by priv which should be a crypto.Signer or\ncrypto.MessageSigner associated with the public key in the issuer\ncertificate.\n\nThe issuer may not be nil, and the crlSign bit must be set in [KeyUsage] in\norder to use it as a CRL issuer.\n\nThe issuer distinguished name CRL field and authority key identifier\nextension are populated using the issuer certificate. issuer must have\nSubjectKeyId set.\n" [^io/Reader rand ^{:tag (* RevocationList)} template ^{:tag (* Certificate)} issuer ^crypto/Signer priv] :results [(slice byte) error]
+  (when (== template nil)
+    (return nil (errors/New "x509: template can not be nil")))
+
+  (when (== issuer nil)
+    (return nil (errors/New "x509: issuer can not be nil")))
+
+  (when (== (bit-and (.-KeyUsage issuer) KeyUsageCRLSign) 0)
+    (return nil (errors/New "x509: issuer must have the crlSign key usage bit set")))
+
+  (when (== (len (.-SubjectKeyId issuer)) 0)
+    (return nil (errors/New "x509: issuer certificate doesn't contain a subject key identifier")))
+
+  (when (.Before (.-NextUpdate template) (.-ThisUpdate template))
+    (return nil (errors/New "x509: template.ThisUpdate is after template.NextUpdate")))
+
+  (when (== (.-Number template) nil)
+    (return nil (errors/New "x509: template contains nil Number field")))
+
+
+  (let [(values signatureAlgorithm algorithmIdentifier err) (signingParamsForKey priv (.-SignatureAlgorithm template))]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [^{:tag (slice pkix/RevokedCertificate)} revokedCerts (zero (slice pkix/RevokedCertificate))]
+      ;; Only process the deprecated RevokedCertificates field if it is populated
+      ;; and the new RevokedCertificateEntries field is not populated.
+      (if (and (> (len (.-RevokedCertificates template)) 0) (== (len (.-RevokedCertificateEntries template)) 0)) (do
+          ;; Force revocation times to UTC per RFC 5280.
+          (set! revokedCerts (make (slice pkix/RevokedCertificate) (len (.-RevokedCertificates template))))
+          (range [i rc (.-RevokedCertificates template)]
+            (set! (.-RevocationTime rc) (.UTC (.-RevocationTime rc)))
+            (aset revokedCerts i rc)))
+
+        (do
+          ;; Convert the ReasonCode field to a proper extension, and force revocation
+          ;; times to UTC per RFC 5280.
+          (set! revokedCerts (make (slice pkix/RevokedCertificate) (len (.-RevokedCertificateEntries template))))
+          (range [i rce (.-RevokedCertificateEntries template)]
+            (when (== (.-SerialNumber rce) nil)
+              (return nil (errors/New "x509: template contains entry with nil SerialNumber field")))
+
+            (when (.IsZero (.-RevocationTime rce))
+              (return nil (errors/New "x509: template contains entry with zero RevocationTime field")))
+
+
+            (let [rc ^{:go/breaks [2 4]} (lit pkix/RevokedCertificate
+                  :SerialNumber (.-SerialNumber rce)
+                  :RevocationTime (.UTC (.-RevocationTime rce)))
+
+
+                ;; Copy over any extra extensions, except for a Reason Code extension,
+                ;; because we'll synthesize that ourselves to ensure it is correct.
+                ^{:line 2610} exts (make (slice pkix/Extension) 0 (len (.-ExtraExtensions rce)))]
+              (range [_ ext (.-ExtraExtensions rce)]
+                (when (.Equal (.-Id ext) oidExtensionReasonCode)
+                  (return nil (errors/New "x509: template contains entry with ReasonCode ExtraExtension; use ReasonCode field instead")))
+
+                (set! exts (append exts ext)))
+
+
+              ;; Only add a reasonCode extension if the reason is non-zero, as per
+              ;; RFC 5280 Section 5.3.1.
+              (when (!= (.-ReasonCode rce) 0)
+                (let [(values reasonBytes err) (asn1/Marshal (conv asn1/Enumerated (.-ReasonCode rce)))]
+                  (when (!= err nil)
+                    (return nil err))
+
+
+                  (set! exts (append exts ^{:go/breaks [2 4]} (lit pkix/Extension
+                        :Id oidExtensionReasonCode
+                        :Value reasonBytes)))))
+
+
+
+              (when (> (len exts) 0)
+                (set! (.-Extensions rc) exts))
+
+              (aset revokedCerts i rc)))))
+
+
+
+      (let [(values aki ^:assign err) (asn1/Marshal (lit authKeyId :Id (.-SubjectKeyId issuer)))]
+        (when (!= err nil)
+          (return nil err))
+
+
+        (when [numBytes (.Bytes (.-Number template))] (or (> (len numBytes) 20) ^:go/paren (and (== (len numBytes) 20) (!= (bit-and (aget numBytes 0) 0x80) 0)))
+          (return nil (errors/New "x509: CRL number exceeds 20 octets")))
+
+        (let [(values crlNum ^:assign err) (asn1/Marshal (.-Number template))]
+          (when (!= err nil)
+            (return nil err))
+
+
+          ;; Correctly use the issuer's subject sequence if one is specified.
+          (let [(values issuerSubject ^:assign err) (subjectBytes issuer)]
+            (when (!= err nil)
+              (return nil err))
+
+
+            (let [tbsCertList ^{:go/breaks [2 4 6 8 10 12]} (lit tbsCertificateList
+                  :Version 1 ; v2
+                  :Signature algorithmIdentifier
+                  :Issuer (lit asn1/RawValue :FullBytes issuerSubject)
+                  :ThisUpdate (.UTC (.-ThisUpdate template))
+                  :NextUpdate (.UTC (.-NextUpdate template))
+                  :Extensions (lit (slice pkix/Extension)
+                    ^{:go/breaks [2 4]} (lit _
+                      :Id oidExtensionAuthorityKeyId
+                      :Value aki)
+
+                    ^{:go/breaks [2 4]} (lit _
+                      :Id oidExtensionCRLNumber
+                      :Value crlNum)))]
+
+
+
+              (when (> (len revokedCerts) 0)
+                (set! (.-RevokedCertificates tbsCertList) revokedCerts))
+
+
+              (when (> (len (.-ExtraExtensions template)) 0)
+                (set! (.-Extensions tbsCertList) (append (.-Extensions tbsCertList) (spread (.-ExtraExtensions template)))))
+
+
+              (let [(values tbsCertListContents ^:assign err) (asn1/Marshal tbsCertList)]
+                (when (!= err nil)
+                  (return nil err))
+
+
+                ;; Optimization to only marshal this struct once, when signing and
+                ;; then embedding in certificateList below.
+                (set! (.-Raw tbsCertList) tbsCertListContents)
+
+                (let [(values signature ^:assign err) (signTBS tbsCertListContents priv signatureAlgorithm rand)]
+                  (when (!= err nil)
+                    (return nil err))
+
+
+                  (asn1/Marshal ^{:go/breaks [2 4 6]} (lit certificateList
+                      :TBSCertList tbsCertList
+                      :SignatureAlgorithm algorithmIdentifier
+                      :SignatureValue (lit asn1/BitString :Bytes signature :BitLength (* (len signature) 8)))))))))))))
+
+
+
+
+
+^{:go/end 2721} (go/method CheckSignatureFrom "CheckSignatureFrom verifies that the signature on rl is a valid signature\nfrom issuer.\n" ^error [^{:tag (* RevocationList)} rl ^{:tag (* Certificate)} parent]
+  (when (or (and (== (.-Version parent) 3) (not (.-BasicConstraintsValid parent)))
+      (and (.-BasicConstraintsValid parent) (not (.-IsCA parent))))
+    (return (lit ConstraintViolationError)))
+
+
+  (when (and (!= (.-KeyUsage parent) 0) (== (bit-and (.-KeyUsage parent) KeyUsageCRLSign) 0))
+    (return (lit ConstraintViolationError)))
+
+
+  (when (== (.-PublicKeyAlgorithm parent) UnknownPublicKeyAlgorithm)
+    (return ErrUnsupportedAlgorithm))
+
+
+  (.CheckSignature parent (.-SignatureAlgorithm rl) (.-RawTBSRevocationList rl) (.-Signature rl)))

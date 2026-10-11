@@ -1,0 +1,1010 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.go.doc) (go/file "reader.go" :imports [
+
+
+    ^{:line 8} [cmp "cmp"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [ast "go/ast"]
+    ^{:line 11} [token "go/token"]
+    ^{:line 12} [lazyregexp "internal/lazyregexp"]
+    ^{:line 13} [path "path"]
+    ^{:line 14} [slices "slices"]
+    ^{:line 15} [strconv "strconv"]
+    ^{:line 16} [strings "strings"]
+    ^{:line 17} [unicode "unicode"]
+    ^{:line 18} [utf8 "unicode/utf8"]])
+
+
+;; ----------------------------------------------------------------------------
+;; function/method sets
+;;
+;; Internally, we treat functions like methods and collect them in method sets.
+
+
+
+(go/type methodSet "A methodSet describes a set of methods. Entries where Decl == nil are conflict\nentries (more than one method with the same name at the same embedding level).\n" (map string (* Func)))
+
+
+
+^{:go/breaks [[5 56]] :go/end 57} (go/func recvString "recvString returns a string representation of recv of the form \"T\", \"*T\",\n\"T[A, ...]\", \"*T[A, ...]\" or \"BADRECV\" (if not a proper receiver type).\n" ^string [^ast/Expr recv]
+  (type-switch [t recv]
+    (case [(* ast/Ident)]
+      (return (.-Name t)))
+    (case [(* ast/StarExpr)]
+      (return (+ "*" (recvString (.-X t)))))
+    (case [(* ast/IndexExpr)]
+      ;; Generic type with one parameter.
+      (return (fmt/Sprintf "%s[%s]" (recvString (.-X t)) (recvParam (.-Index t)))))
+    (case [(* ast/IndexListExpr)]
+      ;; Generic type with multiple parameters.
+      (when (> (len (.-Indices t)) 0)
+        (let [^strings/Builder b (zero strings/Builder)]
+          (.WriteString b (recvString (.-X t)))
+          (.WriteByte b \[)
+          (.WriteString b (recvParam (aget (.-Indices t) 0)))
+          (range [_ e (subslice (.-Indices t) 1)]
+            (.WriteString b ", ")
+            (.WriteString b (recvParam e)))
+
+          (.WriteByte b \])
+          (return (.String b))))))
+
+
+  "BADRECV")
+
+
+^{:go/breaks [[4 63]] :go/end 64} (go/func recvParam ^string [^ast/Expr p]
+  (when [(values id ok) (assert (* ast/Ident) p)] ok
+    (return (.-Name id)))
+
+  "BADPARAM")
+
+
+
+
+
+
+^{:go/end 100} (go/method set "set creates the corresponding Func for f and adds it to mset.\nIf there are multiple f's with the same name, set keeps the first\none with documentation; conflicts are ignored. The boolean\nspecifies whether to leave the AST untouched.\n" [^methodSet mset ^{:tag (* ast/FuncDecl)} f ^bool preserveAST]
+  (let [name (.-Name (.-Name f))]
+    (when [g (aget mset name)] (and (!= g nil) (!= (.-Doc g) ""))
+      ;; A function with the same name has already been registered;
+      ;; since it has documentation, assume f is simply another
+      ;; implementation and ignore it. This does not happen if the
+      ;; caller is using go/build.ScanDir to determine the list of
+      ;; files implementing a package.
+      (return))
+
+    ;; function doesn't exist or has no documentation; use f
+    (let [recv ""]
+      (when (!= (.-Recv f) nil)
+        (let [^ast/Expr typ (zero ast/Expr)]
+          ;; be careful in case of incorrect ASTs
+          (when [list (.-List (.-Recv f))] (== (len list) 1)
+            (set! typ (.-Type (aget list 0))))
+
+          (set! recv (recvString typ))))
+
+      (aset mset name (addr ^{:go/breaks [2 4 6 8 10]} (lit Func
+            :Doc (.Text (.-Doc f))
+            :Name name
+            :Decl f
+            :Recv recv
+            :Orig recv)))
+
+      (when (not preserveAST)
+        (set! (.-Doc f) nil))))) ; doc consumed - remove from AST
+
+
+
+
+
+
+^{:go/end 118} (go/method add "add adds method m to the method set; m is ignored if the method set\nalready contains a method with the same name at the same or a higher\nlevel than m.\n" [^methodSet mset ^{:tag (* Func)} m]
+  (let [old (aget mset (.-Name m))]
+    (when (or (== old nil) (< (.-Level m) (.-Level old)))
+      (aset mset (.-Name m) m)
+      (return))
+
+    (when (== (.-Level m) (.-Level old))
+      ;; conflict - mark it using a method with nil Decl
+      (aset mset (.-Name m) (addr ^{:go/breaks [2 4]} (lit Func
+            :Name (.-Name m)
+            :Level (.-Level m)))))))
+
+
+
+
+;; ----------------------------------------------------------------------------
+;; Named types
+
+
+
+^{:go/end 145} (go/func baseTypeName "baseTypeName returns the name of the base type of x (or \"\")\nand whether the type is imported or not.\n" [^ast/Expr x] :results [^string name ^bool imported]
+  (type-switch [t x]
+    (case [(* ast/Ident)]
+      (return (.-Name t) false))
+    (case [(* ast/IndexExpr)]
+      (return (baseTypeName (.-X t))))
+    (case [(* ast/IndexListExpr)]
+      (return (baseTypeName (.-X t))))
+    (case [(* ast/SelectorExpr)]
+      (when [(values _ ok) (assert (* ast/Ident) (.-X t))] ok
+        ;; only possible for qualified type names;
+        ;; assume type is imported
+        (return (.-Name (.-Sel t)) true)))
+
+    (case [(* ast/ParenExpr)]
+      (return (baseTypeName (.-X t))))
+    (case [(* ast/StarExpr)]
+      (return (baseTypeName (.-X t)))))
+
+  (return "" false))
+
+
+
+(go/type embeddedSet "An embeddedSet describes a set of embedded types.\n" (map (* namedType) bool))
+
+
+
+
+(go/type namedType "A namedType represents a named unqualified (package local, or possibly\npredeclared) type. The namedType for a type name is always found via\nreader.lookupType.\n" (struct
+    ^{:line 154 :tag string} doc ; doc comment for type
+    ^{:line 155 :tag string} name ; type name
+    ^{:line 156 :tag (* ast/GenDecl)} decl ; nil if declaration hasn't been seen yet
+
+    ^{:line 158 :tag bool} isEmbedded ; true if this type is embedded
+    ^{:line 159 :tag bool} isStruct ; true if this type is a struct
+    ^{:line 160 :tag embeddedSet} embedded ; true if the embedded type is a pointer
+
+
+    ^{:line 163 :tag (slice (* Value)) :doc "associated declarations\n"} values ; consts and vars
+    ^{:line 164 :tag methodSet} funcs
+    ^{:line 165 :tag methodSet} methods))
+
+
+;; ----------------------------------------------------------------------------
+;; AST reader
+
+
+
+
+
+
+
+(go/type reader "reader accumulates documentation for a single package.\nIt modifies the AST: Comments (declaration documentation)\nthat have been collected by the reader are set to nil\nin the respective AST nodes so that they are not printed\ntwice (once when printing the documentation and once when\nprinting the corresponding AST node).\n" (struct
+    ^{:line 178 :tag Mode} mode
+
+
+    ^{:line 181 :tag string :doc "package properties\n"} doc ; package documentation, if any
+    ^{:line 182 :tag (slice string)} filenames
+    ^{:line 183 :tag (map string (slice (* Note)))} notes
+
+
+    ^{:line 186 :tag (map string int) :doc "imports\n"} imports
+    ^{:line 187 :tag bool} hasDotImp ; if set, package contains a dot import
+    ^{:line 188 :tag (map string string)} importByName
+
+
+    ^{:line 191 :tag (slice (* Value)) :doc "declarations\n"} values ; consts and vars
+    ^{:line 192 :tag int} order ; sort order of const and var declarations (when we can't use a name)
+    ^{:line 193 :tag (map string (* namedType))} types
+    ^{:line 194 :tag methodSet} funcs
+
+
+    ^{:line 197 :tag (map string bool) :doc "support for package-local shadowing of predeclared types\n"} shadowedPredecl
+    ^{:line 198 :tag (map string (slice (* ast/InterfaceType)))} fixmap))
+
+
+^{:go/end 203} (go/method isVisible ^bool [^{:tag (* reader)} r ^string name]
+  (or (!= (bit-and (.-mode r) AllDecls) 0) (token/IsExported name)))
+
+
+
+
+
+
+^{:go/end 225} (go/method lookupType "lookupType returns the base type with the given name.\nIf the base type has not been encountered yet, a new\ntype with the given name but no associated declaration\nis added to the type map.\n" ^{:tag (* namedType)} [^{:tag (* reader)} r ^string name]
+  (when (or (== name "") (== name "_"))
+    (return nil)) ; no type docs for anonymous types
+
+  (when [(values typ found) (aget (.-types r) name)] found
+    (return typ))
+
+  ;; type not found - add one without declaration
+  (let [typ (addr ^{:go/breaks [2 4 6 8]} (lit namedType
+          :name name
+          :embedded (make embeddedSet)
+          :funcs (make methodSet)
+          :methods (make methodSet)))]
+
+    (aset (.-types r) name typ)
+    ^{:line 224} typ))
+
+
+
+
+
+
+^{:go/end 242} (go/method recordAnonymousField "recordAnonymousField registers fieldType as the type of an\nanonymous field in the parent type. If the field is imported\n(qualified name) or the parent is nil, the field is ignored.\nThe function returns the field name.\n" [^{:tag (* reader)} r ^{:tag (* namedType)} parent ^ast/Expr fieldType] :results [^string fname]
+  (let [(values ^:assign fname imp) (baseTypeName fieldType)]
+    (when (or (== parent nil) imp)
+      (return))
+
+    (when [ftype (.lookupType r fname)] (!= ftype nil)
+      (set! (.-isEmbedded ftype) true)
+      (let [(values _ ptr) (assert (* ast/StarExpr) fieldType)]
+        (aset (.-embedded parent) ftype ptr)))
+
+    (return)))
+
+
+^{:go/end 253} (go/method readDoc [^{:tag (* reader)} r ^{:tag (* ast/CommentGroup)} comment]
+  ;; By convention there should be only one package comment
+  ;; but collect all of them if there are more than one.
+  (let [text (.Text comment)]
+    (when (== (.-doc r) "")
+      (set! (.-doc r) text)
+      (return))
+
+    (set! (.-doc r) + (+ "\n" text))))
+
+
+^{:go/end 260} (go/method remember [^{:tag (* reader)} r ^string predecl ^{:tag (* ast/InterfaceType)} typ]
+  (when (== (.-fixmap r) nil)
+    (set! (.-fixmap r) (make (map string (slice (* ast/InterfaceType))))))
+
+  (aset (.-fixmap r) predecl (append (aget (.-fixmap r) predecl) typ)))
+
+
+^{:go/end 271} (go/func specNames ^{:tag (slice string)} [^{:tag (slice ast/Spec)} specs]
+  (let [names (make (slice string) 0 (len specs))] ; reasonable estimate
+    (range [_ s specs]
+      ;; s guaranteed to be an *ast.ValueSpec by readValue
+      (range [_ ident (.-Names (assert (* ast/ValueSpec) s))]
+        (set! names (append names (.-Name ident)))))
+
+
+    ^{:line 270} names))
+
+
+
+^{:go/end 344} (go/method readValue "readValue processes a const or var declaration.\n" [^{:tag (* reader)} r ^{:tag (* ast/GenDecl)} decl]
+  ;; determine if decl should be associated with a type
+  ;; Heuristic: For each typed entry, determine the type name, if any.
+  ;;            If there is exactly one type name that is sufficiently
+  ;;            frequent, associate the decl with the respective type.
+  (let [domName ""
+      ^{:line 280} domFreq 0
+      ^{:line 281} prev ""
+      ^{:line 282} n 0]
+    (range [_ spec (.-Specs decl)]
+      (let [(values s ok) (assert (* ast/ValueSpec) spec)]
+        (when (not ok)
+          (continue)) ; should not happen, but be conservative
+
+        (let [name ""]
+          (switch
+            (case [(!= (.-Type s) nil)]
+              ;; a type is present; determine its name
+              (when [(values n imp) (baseTypeName (.-Type s))] (not imp)
+                (set! name n)))
+
+            (case [(and (== (.-Tok decl) token/CONST) (== (len (.-Values s)) 0))]
+              ;; no type or value is present but we have a constant declaration;
+              ;; use the previous type name (possibly the empty string)
+              (set! name prev)))
+
+          (when (!= name "")
+            ;; entry has a named type
+            (when (and (!= domName "") (!= domName name))
+              ;; more than one type name - do not associate
+              ;; with any type
+              (set! domName "")
+              (break))
+
+            (set! domName name)
+            (inc! domFreq))
+
+          (set! prev name)
+          (inc! n))))
+
+
+    ;; nothing to do w/o a legal declaration
+    (when (== n 0)
+      (return))
+
+
+    ;; determine values list with which to associate the Value for this decl
+    (let [values (addr (.-values r))
+        ^:const ^{:line 322 :val 0.75} threshold 0.75]
+      (when (and (!= domName "") (.isVisible r domName) (>= domFreq (conv int (* (conv float64 (len (.-Specs decl))) threshold))))
+        ;; typed entries are sufficiently frequent
+        (when [typ (.lookupType r domName)] (!= typ nil)
+          (set! values (addr (.-values typ))))) ; associate with that type
+
+
+
+      (set! @values (append @values (addr ^{:go/breaks [2 4 6 8]} (lit Value
+              :Doc (.Text (.-Doc decl))
+              :Names (specNames (.-Specs decl))
+              :Decl decl
+              :order (.-order r)))))
+
+      (when (== (bit-and (.-mode r) PreserveAST) 0)
+        (set! (.-Doc decl) nil)) ; doc consumed - remove from AST
+
+      ;; Note: It's important that the order used here is global because the cleanupTypes
+      ;; methods may move values associated with types back into the global list. If the
+      ;; order is list-specific, sorting is not deterministic because the same order value
+      ;; may appear multiple times (was bug, found when fixing #16153).
+      (inc! (.-order r)))))
+
+
+
+^{:go/end 360} (go/func fields "fields returns a struct's fields or an interface's methods.\n" [^ast/Expr typ] :results [^{:tag (slice (* ast/Field))} list ^bool isStruct]
+  (let [^{:tag (* ast/FieldList)} fields (zero (* ast/FieldList))]
+    (type-switch [t typ]
+      (case [(* ast/StructType)]
+        (set! fields (.-Fields t))
+        (set! isStruct true))
+      (case [(* ast/InterfaceType)]
+        (set! fields (.-Methods t))))
+
+    (when (!= fields nil)
+      (set! list (.-List fields)))
+
+    (return)))
+
+
+
+^{:go/end 395} (go/method readType "readType processes a type declaration.\n" [^{:tag (* reader)} r ^{:tag (* ast/GenDecl)} decl ^{:tag (* ast/TypeSpec)} spec]
+  (let [typ (.lookupType r (.-Name (.-Name spec)))]
+    (when (== typ nil)
+      (return)) ; no name or blank name - ignore the type
+
+
+    ;; A type should be added at most once, so typ.decl
+    ;; should be nil - if it is not, simply overwrite it.
+    (set! (.-decl typ) decl)
+
+    ;; compute documentation
+    (let [doc (.-Doc spec)]
+      (when (== doc nil)
+        ;; no doc associated with the spec, use the declaration doc, if any
+        (set! doc (.-Doc decl)))
+
+      (when (== (bit-and (.-mode r) PreserveAST) 0)
+        (set! (.-Doc spec) nil) ; doc consumed - remove from AST
+        (set! (.-Doc decl) nil)) ; doc consumed - remove from AST
+
+      (set! (.-doc typ) (.Text doc))
+
+      ;; record anonymous fields (they may contribute methods)
+      ;; (some fields may have been recorded already when filtering
+      ;; exports, but that's ok)
+      (let [^{:tag (slice (* ast/Field))} list (zero (slice (* ast/Field)))]
+        (set! (values list (.-isStruct typ)) (fields (.-Type spec)))
+        (range [_ field list]
+          (when (== (len (.-Names field)) 0)
+            (.recordAnonymousField r typ (.-Type field))))))))
+
+
+
+
+
+^{:go/end 400} (go/method isPredeclared "isPredeclared reports whether n denotes a predeclared type.\n" ^bool [^{:tag (* reader)} r ^string n]
+  (and (aget predeclaredTypes n) (== (aget (.-types r) n) nil)))
+
+
+
+^{:go/end 471} (go/method readFunc "readFunc processes a func or method declaration.\n" [^{:tag (* reader)} r ^{:tag (* ast/FuncDecl)} fun]
+  ;; strip function body if requested.
+  (when (== (bit-and (.-mode r) PreserveAST) 0)
+    (set! (.-Body fun) nil))
+
+
+  ;; associate methods with the receiver type, if any
+  (when (!= (.-Recv fun) nil)
+    ;; method
+    (when (== (len (.-List (.-Recv fun))) 0)
+      ;; should not happen (incorrect AST); (See issue 17788)
+      ;; don't show this method
+      (return))
+
+    (let [(values recvTypeName imp) (baseTypeName (.-Type (aget (.-List (.-Recv fun)) 0)))]
+      (when imp
+        ;; should not happen (incorrect AST);
+        ;; don't show this method
+        (return))
+
+      (when [typ (.lookupType r recvTypeName)] (!= typ nil)
+        (.set (.-methods typ) fun (!= (bit-and (.-mode r) PreserveAST) 0)))
+
+      ;; otherwise ignore the method
+      ;; TODO(gri): There may be exported methods of non-exported types
+      ;; that can be called because of exported values (consts, vars, or
+      ;; function results) of that type. Could determine if that is the
+      ;; case and then show those methods in an appropriate section.
+      (return)))
+
+
+  ;; Associate factory functions with the first visible result type, as long as
+  ;; others are predeclared types.
+  (when (>= (.NumFields (.-Results (.-Type fun))) 1)
+    (let [^{:tag (* namedType)} typ (zero (* namedType)) ; type to associate the function with
+        ^{:line 438} numResultTypes 0]
+      (range [_ res (.-List (.-Results (.-Type fun)))]
+        (let [factoryType (.-Type res)]
+          (when [(values t ok) (assert (* ast/ArrayType) factoryType)] ok
+            ;; We consider functions that return slices or arrays of type
+            ;; T (or pointers to T) as factory functions of T.
+            (set! factoryType (.-Elt t)))
+
+          (when [(values n imp) (baseTypeName factoryType)] (and (not imp) (.isVisible r n) (not (.isPredeclared r n)))
+            (when (!= (lookupTypeParam n (.-TypeParams (.-Type fun))) nil)
+              ;; Issue #49477: don't associate fun with its type parameter result.
+              ;; A type parameter is not a defined type.
+              (continue))
+
+            (when [t (.lookupType r n)] (!= t nil)
+              (set! typ t)
+              (inc! numResultTypes)
+              (when (> numResultTypes 1)
+                (break))))))
+
+
+
+
+      ;; If there is exactly one result type,
+      ;; associate the function with that type.
+      (when (== numResultTypes 1)
+        (.set (.-funcs typ) fun (!= (bit-and (.-mode r) PreserveAST) 0))
+        (return))))
+
+
+
+  ;; just an ordinary function
+  (.set (.-funcs r) fun (!= (bit-and (.-mode r) PreserveAST) 0)))
+
+
+
+
+^{:go/breaks [[6 486]] :go/end 487} (go/func lookupTypeParam "lookupTypeParam searches for type parameters named name within the tparams\nfield list, returning the relevant identifier if found, or nil if not.\n" ^{:tag (* ast/Ident)} [^string name ^{:tag (* ast/FieldList)} tparams]
+  (when (== tparams nil)
+    (return nil))
+
+  (range [_ field (.-List tparams)]
+    (range [_ id (.-Names field)]
+      (when (== (.-Name id) name)
+        (return id))))
+
+
+
+  nil)
+
+
+(go/var
+  ^{:line 490} [noteMarker "([A-Z][A-Z]+)\\(([^)]+)\\):?"] ; MARKER(uid), MARKER at least 2 chars, uid at least 1 char
+  ^{:line 491} [noteMarkerRx (lazyregexp/New (+ "^[ \\t]*" noteMarker))] ; MARKER(uid) at text start
+  ^{:line 492} [noteCommentRx (lazyregexp/New (+ "^/[/*][ \\t]*" noteMarker))]) ; MARKER(uid) at comment start
+
+
+
+
+^{:go/end 515} (go/func clean "clean replaces each sequence of space, \\r, or \\t characters\nwith a single space and removes any trailing and leading spaces.\n" ^string [^string s]
+  (let [^{:tag (slice byte)} b (zero (slice byte))
+      ^{:line 499} p (conv byte \space)]
+    (for [i 0] (< i (len s)) (inc! i)
+      (let [q (aget s i)]
+        (when (or (== q \return) (== q \tab))
+          (set! q \space))
+
+        (when (or (!= q \space) (!= p \space))
+          (set! b (append b q))
+          (set! p q))))
+
+
+    ;; remove trailing blank, if any
+    (when [n (len b)] (and (> n 0) (== p \space))
+      (set! b (subslice b 0 (- n 1))))
+
+    (conv string b)))
+
+
+
+^{:go/end 536} (go/method readNote "readNote collects a single note from a sequence of comments.\n" [^{:tag (* reader)} r ^{:tag (slice (* ast/Comment))} list]
+  (let [text (.Text (addr (lit ast/CommentGroup :List list)))]
+    (when [m (.FindStringSubmatchIndex noteMarkerRx text)] (!= m nil)
+      ;; The note body starts after the marker.
+      ;; We remove any formatting so that we don't
+      ;; get spurious line breaks/indentation when
+      ;; showing the TODO body.
+      (let [body (clean (subslice text (aget m 1)))]
+        (when (!= body "")
+          (let [marker (subslice text (aget m 2) (aget m 3))]
+            (aset (.-notes r) marker (append (aget (.-notes r) marker) (addr ^{:go/breaks [2 4 6 8]} (lit Note
+                    :Pos (.Pos (aget list 0))
+                    :End (.End (aget list (- (len list) 1)))
+                    :UID (subslice text (aget m 4) (aget m 5))
+                    :Body body))))))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 559} (go/method readNotes "readNotes extracts notes from comments.\nA note must start at the beginning of a comment with \"MARKER(uid):\"\nand is followed by the note body (e.g., \"// BUG(gri): fix this\").\nThe note ends at the end of the comment group or at the start of\nanother note in the same comment group, whichever comes first.\n" [^{:tag (* reader)} r ^{:tag (slice (* ast/CommentGroup))} comments]
+  (range [_ group comments]
+    (let [i -1 ; comment index of most recent note start, valid if >= 0
+        ^{:line 546} list (.-List group)]
+      (range [j c list]
+        (when (.MatchString noteCommentRx (.-Text c))
+          (when (>= i 0)
+            (.readNote r (subslice list i j)))
+
+          (set! i j)))
+
+
+      (when (>= i 0)
+        (.readNote r (subslice list i))))))
+
+
+
+
+
+^{:go/end 648} (go/method readFile "readFile adds the AST for a source file to the reader.\n" [^{:tag (* reader)} r ^{:tag (* ast/File)} src]
+  ;; add package documentation
+  (when (!= (.-Doc src) nil)
+    (.readDoc r (.-Doc src))
+    (when (== (bit-and (.-mode r) PreserveAST) 0)
+      (set! (.-Doc src) nil))) ; doc consumed - remove from AST
+
+
+
+  ;; add all declarations but for functions which are processed in a separate pass
+  (range [_ decl (.-Decls src)]
+    (type-switch [d decl]
+      (case [(* ast/GenDecl)]
+        (switch (.-Tok d)
+          (case [token/IMPORT]
+            ;; imports are handled individually
+            (range [_ spec (.-Specs d)]
+              (when [(values s ok) (assert (* ast/ImportSpec) spec)] ok
+                (when [(values import_ err) (strconv/Unquote (.-Value (.-Path s)))] (== err nil)
+                  (aset (.-imports r) import_ 1)
+                  (let [^string name (zero string)]
+                    (when (!= (.-Name s) nil)
+                      (set! name (.-Name (.-Name s)))
+                      (when (== name ".")
+                        (set! (.-hasDotImp r) true)))
+
+
+                    (when (!= name ".")
+                      (when (== name "")
+                        (set! name (assumedPackageName import_)))
+
+                      (let [(values old ok) (aget (.-importByName r) name)]
+                        (cond (not ok)
+                          (aset (.-importByName r) name import_)
+                          (and (!= old import_) (!= old ""))
+                          (aset (.-importByName r) name ""))))))))) ; ambiguous
+
+
+
+
+
+          (case [token/CONST token/VAR]
+            ;; constants and variables are always handled as a group
+            (.readValue r d))
+          (case [token/TYPE]
+            ;; types are handled individually
+            (when (and (== (len (.-Specs d)) 1) (not (.IsValid (.-Lparen d))))
+              ;; common case: single declaration w/o parentheses
+              ;; (if a single declaration is parenthesized,
+              ;; create a new fake declaration below, so that
+              ;; go/doc type declarations always appear w/o
+              ;; parentheses)
+              (when [(values s ok) (assert (* ast/TypeSpec) (aget (.-Specs d) 0))] ok
+                (.readType r d s))
+
+              (break))
+
+            (range [_ spec (.-Specs d)]
+              (when [(values s ok) (assert (* ast/TypeSpec) spec)] ok
+                ;; use an individual (possibly fake) declaration
+                ;; for each type; this also ensures that each type
+                ;; gets to (re-)use the declaration documentation
+                ;; if there's none associated with the spec itself
+                (let [fake (addr ^{:go/breaks [2 [4 632] 6 8]} (lit ast/GenDecl
+                        :Doc (.-Doc d)
+                        ;; don't use the existing TokPos because it
+                        ;; will lead to the wrong selection range for
+                        ;; the fake declaration if there are more
+                        ;; than one type in the group (this affects
+                        ;; src/cmd/godoc/godoc.go's posLink_urlFunc)
+                        :TokPos (.Pos s)
+                        :Tok token/TYPE
+                        :Specs (lit (slice ast/Spec) s)))]
+
+                  (.readType r fake s)))))))))
+
+
+
+
+
+
+  ;; collect MARKER(...): annotations
+  (.readNotes r (.-Comments src))
+  (when (== (bit-and (.-mode r) PreserveAST) 0)
+    (set! (.-Comments src) nil))) ; consumed unassociated comments - remove from AST
+
+
+
+^{:go/end 692} (go/method readPackage [^{:tag (* reader)} r ^{:tag (* ast/Package)} pkg ^Mode mode]
+  ;; initialize reader
+  (set! (.-filenames r) (make (slice string) (len (.-Files pkg))))
+  (set! (.-imports r) (make (map string int)))
+  (set! (.-mode r) mode)
+  (set! (.-types r) (make (map string (* namedType))))
+  (set! (.-funcs r) (make methodSet))
+  (set! (.-notes r) (make (map string (slice (* Note)))))
+  (set! (.-importByName r) (make (map string string)))
+
+  ;; sort package files before reading them so that the
+  ;; result does not depend on map iteration order
+  (let [i 0]
+    (range [filename (.-Files pkg)]
+      (aset (.-filenames r) i filename)
+      (inc! i))
+
+    (^{:inst [(slice string) string]} slices/Sort (.-filenames r))
+
+    ;; process files in sorted order
+    (range [_ filename (.-filenames r)]
+      (let [f (aget (.-Files pkg) filename)]
+        (when (== (bit-and mode AllDecls) 0)
+          (.fileExports r f))
+
+        (.readFile r f)))
+
+
+    (range [name path (.-importByName r)]
+      (when (== path "")
+        (delete (.-importByName r) name)))
+
+
+
+    ;; process functions now that we have better type information
+    (range [_ f (.-Files pkg)]
+      (range [_ decl (.-Decls f)]
+        (when [(values d ok) (assert (* ast/FuncDecl) decl)] ok
+          (.readFunc r d))))))
+
+
+
+
+
+;; ----------------------------------------------------------------------------
+;; Types
+
+^{:go/end 730} (go/func customizeRecv ^{:tag (* Func)} [^{:tag (* Func)} f ^string recvTypeName ^bool embeddedIsPtr ^int level]
+  (when (or (== f nil) (== (.-Decl f) nil) (== (.-Recv (.-Decl f)) nil) (!= (len (.-List (.-Recv (.-Decl f)))) 1))
+    (return f)) ; shouldn't happen, but be safe
+
+
+  ;; copy existing receiver field and set new type
+  (let [newField @(aget (.-List (.-Recv (.-Decl f))) 0)
+      ^{:line 704} origPos (.Pos (.-Type newField))
+      (values _ origRecvIsPtr) (assert (* ast/StarExpr) (.-Type newField))
+      ^{:line 706} newIdent (addr (lit ast/Ident :NamePos origPos :Name recvTypeName))
+      ^{:line 707 :tag ast/Expr} typ newIdent]
+    (when (and (not embeddedIsPtr) origRecvIsPtr)
+      (inc! (.-NamePos newIdent)) ; '*' is one character
+      (set! typ (addr (lit ast/StarExpr :Star origPos :X newIdent))))
+
+    (set! (.-Type newField) typ)
+
+    ;; copy existing receiver field list and set new receiver field
+    (let [newFieldList @(.-Recv (.-Decl f))]
+      (set! (.-List newFieldList) (lit (slice (* ast/Field)) (addr newField)))
+
+      ;; copy existing function declaration and set new receiver field list
+      (let [newFuncDecl @(.-Decl f)]
+        (set! (.-Recv newFuncDecl) (addr newFieldList))
+
+        ;; copy existing function documentation and set new declaration
+        (let [newF @f]
+          (set! (.-Decl newF) (addr newFuncDecl))
+          (set! (.-Recv newF) (recvString typ))
+          ;; the Orig field never changes
+          (set! (.-Level newF) level)
+
+          (addr newF))))))
+
+
+
+^{:go/end 753} (go/method collectEmbeddedMethods "collectEmbeddedMethods collects the embedded methods of typ in mset.\n" [^{:tag (* reader)} r ^methodSet mset ^{:tag (* namedType)} typ ^string recvTypeName ^bool embeddedIsPtr ^int level ^embeddedSet visited]
+  (aset visited typ true)
+  (range [embedded isPtr (.-embedded typ)]
+    ;; Once an embedded type is embedded as a pointer type
+    ;; all embedded types in those types are treated like
+    ;; pointer types for the purpose of the receiver type
+    ;; computation; i.e., embeddedIsPtr is sticky for this
+    ;; embedding hierarchy.
+    (let [thisEmbeddedIsPtr (or embeddedIsPtr isPtr)]
+      (range [_ m (.-methods embedded)]
+        ;; only top-level methods are embedded
+        (when (== (.-Level m) 0)
+          (.add mset (customizeRecv m recvTypeName thisEmbeddedIsPtr level))))
+
+
+      (when (not (aget visited embedded))
+        (.collectEmbeddedMethods r mset embedded recvTypeName thisEmbeddedIsPtr (+ level 1) visited))))
+
+
+  (delete visited typ))
+
+
+
+^{:go/end 775} (go/method computeMethodSets "computeMethodSets determines the actual method sets for each type encountered.\n" [^{:tag (* reader)} r]
+  (range [_ t (.-types r)]
+    ;; collect embedded methods for t
+    (if (.-isStruct t)
+      ;; struct
+      (.collectEmbeddedMethods r (.-methods t) t (.-name t) false 1 (make embeddedSet))
+      (do)))
+  ;; interface
+  ;; TODO(gri) fix this
+
+
+
+  ;; For any predeclared names that are declared locally, don't treat them as
+  ;; exported fields anymore.
+  (range [predecl (.-shadowedPredecl r)]
+    (range [_ ityp (aget (.-fixmap r) predecl)]
+      (removeAnonymousField predecl ityp))))
+
+
+
+
+
+
+
+
+^{:go/end 815} (go/method cleanupTypes "cleanupTypes removes the association of functions and methods with\ntypes that have no declaration. Instead, these functions and methods\nare shown at the package level. It also removes types with missing\ndeclarations or which are not visible.\n" [^{:tag (* reader)} r]
+  (range [_ t (.-types r)]
+    (let [visible (.isVisible r (.-name t))
+        ^{:line 784} predeclared (aget predeclaredTypes (.-name t))]
+
+      (when (and (== (.-decl t) nil) ^:go/paren (or predeclared (and visible ^:go/paren (or (.-isEmbedded t) (.-hasDotImp r)))))
+        ;; t.name is a predeclared type (and was not redeclared in this package),
+        ;; or it was embedded somewhere but its declaration is missing (because
+        ;; the AST is incomplete), or we have a dot-import (and all bets are off):
+        ;; move any associated values, funcs, and methods back to the top-level so
+        ;; that they are not lost.
+        ;; 1) move values
+        (set! (.-values r) (append (.-values r) (spread (.-values t))))
+        ;; 2) move factory functions
+        (range [name f (.-funcs t)]
+          ;; in a correct AST, package-level function names
+          ;; are all different - no need to check for conflicts
+          (aset (.-funcs r) name f))
+
+        ;; 3) move methods
+        (when (not predeclared)
+          (range [name m (.-methods t)]
+            ;; don't overwrite functions with the same name - drop them
+            (when [(values _ found) (aget (.-funcs r) name)] (not found)
+              (aset (.-funcs r) name m)))))
+
+
+
+
+      ;; remove types w/o declaration or which are not visible
+      (when (or (== (.-decl t) nil) (not visible))
+        (delete (.-types r) (.-name t))))))
+
+
+
+
+;; ----------------------------------------------------------------------------
+;; Sorting
+
+^{:go/end 829} (go/func sortedKeys ^{:tag (slice string)} [^{:tag (map string int)} m]
+  (let [list (make (slice string) (len m))
+      ^{:line 822} i 0]
+    (range [key m]
+      (aset list i key)
+      (inc! i))
+
+    (^{:inst [(slice string) string]} slices/Sort list)
+    ^{:line 828} list))
+
+
+
+^{:go/breaks [[5 838]] :go/end 839} (go/func sortingName "sortingName returns the name to use when sorting d into place.\n" ^string [^{:tag (* ast/GenDecl)} d]
+  (when (== (len (.-Specs d)) 1)
+    (when [(values s ok) (assert (* ast/ValueSpec) (aget (.-Specs d) 0))] ok
+      (return (.-Name (aget (.-Names s) 0)))))
+
+
+  "")
+
+
+^{:go/end 861} (go/func sortedValues ^{:tag (slice (* Value))} [^{:tag (slice (* Value))} m ^token/Token tok]
+  (let [list (make (slice (* Value)) (len m)) ; big enough in any case
+      ^{:line 843} i 0]
+    (range [_ val m]
+      (when (== (.-Tok (.-Decl val)) tok)
+        (aset list i val)
+        (inc! i)))
+
+
+    (set! list (subslice list 0 i))
+
+    (^{:inst [(slice (* Value)) (* Value)]} slices/SortFunc list ^{:go/end 858} (fn ^int [^{:tag (* Value)} a ^{:tag (* Value)} b]
+        (let [r (strings/Compare (sortingName (.-Decl a)) (sortingName (.-Decl b)))]
+          (when (!= r 0)
+            (return r))
+
+          (^{:inst [int]} cmp/Compare (.-order a) (.-order b)))))
+
+
+    ^{:line 860} list))
+
+
+^{:go/end 884} (go/func sortedTypes ^{:tag (slice (* Type))} [^{:tag (map string (* namedType))} m ^bool allMethods]
+  (let [list (make (slice (* Type)) (len m))
+      ^{:line 865} i 0]
+    (range [_ t m]
+      (aset list i (addr ^{:go/breaks [2 4 6 8 10 12 14]} (lit Type
+            :Doc (.-doc t)
+            :Name (.-name t)
+            :Decl (.-decl t)
+            :Consts (sortedValues (.-values t) token/CONST)
+            :Vars (sortedValues (.-values t) token/VAR)
+            :Funcs (sortedFuncs (.-funcs t) true)
+            :Methods (sortedFuncs (.-methods t) allMethods))))
+
+      (inc! i))
+
+
+    (^{:inst [(slice (* Type)) (* Type)]} slices/SortFunc list ^{:go/end 881} (fn ^int [^{:tag (* Type)} a ^{:tag (* Type)} b]
+        (strings/Compare (.-Name a) (.-Name b))))
+
+
+    ^{:line 883} list))
+
+
+^{:go/end 891} (go/func removeStar ^string [^string s]
+  (when (and (> (len s) 0) (== (aget s 0) \*))
+    (return (subslice s 1)))
+
+  ^{:line 890} s)
+
+
+^{:go/end 913} (go/func sortedFuncs ^{:tag (slice (* Func))} [^methodSet m ^bool allMethods]
+  (let [list (make (slice (* Func)) (len m))
+      ^{:line 895} i 0]
+    (range [_ m m]
+      ;; determine which methods to include
+      (switch
+        (case [(== (.-Decl m) nil)])
+        ;; exclude conflict entry
+        (case [allMethods (== (.-Level m) 0) (not (token/IsExported (removeStar (.-Orig m))))]
+          ;; forced inclusion, method not embedded, or method
+          ;; embedded but original receiver type not exported
+          (aset list i m)
+          (inc! i))))
+
+
+    (set! list (subslice list 0 i))
+    (^{:inst [(slice (* Func)) (* Func)]} slices/SortFunc list ^{:go/end 911} (fn ^int [^{:tag (* Func)} a ^{:tag (* Func)} b]
+        (strings/Compare (.-Name a) (.-Name b))))
+
+    ^{:line 912} list))
+
+
+
+
+^{:go/end 923} (go/func noteBodies "noteBodies returns a list of note body strings given a list of notes.\nThis is only used to populate the deprecated Package.Bugs field.\n" ^{:tag (slice string)} [^{:tag (slice (* Note))} notes]
+  (let [^{:tag (slice string)} list (zero (slice string))]
+    (range [_ n notes]
+      (set! list (append list (.-Body n))))
+
+    ^{:line 922} list))
+
+
+;; ----------------------------------------------------------------------------
+;; Predeclared identifiers
+
+
+^{:go/end 931} (go/func IsPredeclared "IsPredeclared reports whether s is a predeclared identifier.\n" ^bool [^string s]
+  (or (aget predeclaredTypes s) (aget predeclaredFuncs s) (aget predeclaredConstants s)))
+
+
+(go/var predeclaredTypes (lit (map string bool)
+    ^{:line 934} ["any" true]
+    ^{:line 935} ["bool" true]
+    ^{:line 936} ["byte" true]
+    ^{:line 937} ["comparable" true]
+    ^{:line 938} ["complex64" true]
+    ^{:line 939} ["complex128" true]
+    ^{:line 940} ["error" true]
+    ^{:line 941} ["float32" true]
+    ^{:line 942} ["float64" true]
+    ^{:line 943} ["int" true]
+    ^{:line 944} ["int8" true]
+    ^{:line 945} ["int16" true]
+    ^{:line 946} ["int32" true]
+    ^{:line 947} ["int64" true]
+    ^{:line 948} ["rune" true]
+    ^{:line 949} ["string" true]
+    ^{:line 950} ["uint" true]
+    ^{:line 951} ["uint8" true]
+    ^{:line 952} ["uint16" true]
+    ^{:line 953} ["uint32" true]
+    ^{:line 954} ["uint64" true]
+    ^{:line 955} ["uintptr" true]))
+
+
+(go/var predeclaredFuncs (lit (map string bool)
+    ^{:line 959} ["append" true]
+    ^{:line 960} ["cap" true]
+    ^{:line 961} ["clear" true]
+    ^{:line 962} ["close" true]
+    ^{:line 963} ["complex" true]
+    ^{:line 964} ["copy" true]
+    ^{:line 965} ["delete" true]
+    ^{:line 966} ["imag" true]
+    ^{:line 967} ["len" true]
+    ^{:line 968} ["make" true]
+    ^{:line 969} ["max" true]
+    ^{:line 970} ["min" true]
+    ^{:line 971} ["new" true]
+    ^{:line 972} ["panic" true]
+    ^{:line 973} ["print" true]
+    ^{:line 974} ["println" true]
+    ^{:line 975} ["real" true]
+    ^{:line 976} ["recover" true]))
+
+
+(go/var predeclaredConstants (lit (map string bool)
+    ^{:line 980} ["false" true]
+    ^{:line 981} ["iota" true]
+    ^{:line 982} ["nil" true]
+    ^{:line 983} ["true" true]))
+
+
+
+
+
+^{:go/end 1011} (go/func assumedPackageName "assumedPackageName returns the assumed package name\nfor a given import path. This is a copy of\ngolang.org/x/tools/internal/imports.ImportPathToAssumedName.\n" ^string [^string importPath]
+  (let [notIdentifier ^{:go/end 995} (fn ^bool [^rune ch]
+        (not (or (and (<= \a ch) (<= ch \z)) (and (<= \A ch) (<= ch \Z))
+            (and (<= \0 ch) (<= ch \9))
+            (== ch \_)
+            (and (>= ch utf8/RuneSelf) ^:go/paren (or (unicode/IsLetter ch) (unicode/IsDigit ch))))))
+
+
+      ^{:line 997} base (path/Base importPath)]
+    (when (strings/HasPrefix base "v")
+      (when [(values _ err) (strconv/Atoi (subslice base 1))] (== err nil)
+        (let [dir (path/Dir importPath)]
+          (when (!= dir ".")
+            (set! base (path/Base dir))))))
+
+
+
+    (set! base (strings/TrimPrefix base "go-"))
+    (when [i (strings/IndexFunc base notIdentifier)] (>= i 0)
+      (set! base (subslice base _ i)))
+
+    ^{:line 1010} base))

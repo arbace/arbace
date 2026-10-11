@@ -1,0 +1,333 @@
+;; Copyright 2015 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.text.unicode.bidi) (go/file "bracket.go" :imports [
+
+
+    ^{:line 8} [list "container/list"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [sort "sort"]])
+
+
+;; This file contains a port of the reference implementation of the
+;; Bidi Parentheses Algorithm:
+;; https://www.unicode.org/Public/PROGRAMS/BidiReferenceJava/BidiPBAReference.java
+;;
+;; The implementation in this file covers definitions BD14-BD16 and rule N0
+;; of UAX#9.
+;;
+;; Some preprocessing is done for each rune before data is passed to this
+;; algorithm:
+;;  - opening and closing brackets are identified
+;;  - a bracket pair type, like '(' and ')' is assigned a unique identifier that
+;;    is identical for the opening and closing bracket. It is left to do these
+;;    mappings.
+;;  - The BPA algorithm requires that bracket characters that are canonical
+;;    equivalents of each other be able to be substituted for each other.
+;;    It is the responsibility of the caller to do this canonicalization.
+;;
+;; In implementing BD16, this implementation departs slightly from the "logical"
+;; algorithm defined in UAX#9. In particular, the stack referenced there
+;; supports operations that go beyond a "basic" stack. An equivalent
+;; implementation based on a linked list is used here.
+
+
+
+
+
+
+
+(go/type bracketType "Bidi_Paired_Bracket_Type\nBD14. An opening paired bracket is a character whose\nBidi_Paired_Bracket_Type property value is Open.\n\nBD15. A closing paired bracket is a character whose\nBidi_Paired_Bracket_Type property value is Close.\n" byte)
+
+(go/const
+  ^{:line 44} [^{:tag bracketType :val 0} bpNone iota]
+  ^{:line 45} [^{:val 1} bpOpen]
+  ^{:line 46} [^{:val 2} bpClose])
+
+
+
+
+(go/type bracketPair "bracketPair holds a pair of index values for opening and closing bracket\nlocation of a bracket pair.\n" (struct
+    ^{:line 52 :tag int} opener
+    ^{:line 53 :tag int} closer))
+
+
+^{:go/end 58} (go/method String ^string [^{:tag (* bracketPair)} b]
+  (fmt/Sprintf "(%v, %v)" (.-opener b) (.-closer b)))
+
+
+
+(go/type bracketPairs "bracketPairs is a slice of bracketPairs with a sort.Interface implementation.\n" (slice bracketPair))
+
+^{:go/end 63} (go/method Len ^int [^bracketPairs b] (len b))
+^{:go/end 64} (go/method Swap [^bracketPairs b ^int i ^int j] (set! (values (aget b i) (aget b j)) (values (aget b j) (aget b i))))
+^{:go/end 65} (go/method Less ^bool [^bracketPairs b ^int i ^int j] (< (.-opener (aget b i)) (.-opener (aget b j))))
+
+
+
+
+
+
+
+
+
+^{:go/end 88} (go/func resolvePairedBrackets "resolvePairedBrackets runs the paired bracket part of the UBA algorithm.\n\nFor each rune, it takes the indexes into the original string, the class the\nbracket type (in pairTypes) and the bracket identifier (pairValues). It also\ntakes the direction type for the start-of-sentence and the embedding level.\n\nThe identifiers for bracket types are the rune of the canonicalized opening\nbracket for brackets (open or close) or 0 for runes that are not brackets.\n" [^{:tag (* isolatingRunSequence)} s]
+  (let [p ^{:go/breaks [2 4 6 8]} (lit bracketPairer
+        :sos (.-sos s)
+        :openers (list/New)
+        :codesIsolatedRun (.-types s)
+        :indexes (.-indexes s))
+
+      ^{:line 82} dirEmbed L]
+    (when (!= (bit-and (.-level s) 1) 0)
+      (set! dirEmbed R))
+
+    (.locateBrackets p (.-pairTypes (.-p s)) (.-pairValues (.-p s)))
+    (.resolveBrackets p dirEmbed (.-initialTypes (.-p s)))))
+
+
+(go/type bracketPairer (struct
+    ^{:line 91 :tag Class} sos ; direction corresponding to start of sequence
+
+    ;; The following is a restatement of BD 16 using non-algorithmic language.
+    ;;
+    ;; A bracket pair is a pair of characters consisting of an opening
+    ;; paired bracket and a closing paired bracket such that the
+    ;; Bidi_Paired_Bracket property value of the former equals the latter,
+    ;; subject to the following constraints.
+    ;; - both characters of a pair occur in the same isolating run sequence
+    ;; - the closing character of a pair follows the opening character
+    ;; - any bracket character can belong at most to one pair, the earliest possible one
+    ;; - any bracket character not part of a pair is treated like an ordinary character
+    ;; - pairs may nest properly, but their spans may not overlap otherwise
+
+    ;; Bracket characters with canonical decompositions are supposed to be
+    ;; treated as if they had been normalized, to allow normalized and non-
+    ;; normalized text to give the same result. In this implementation that step
+    ;; is pushed out to the caller. The caller has to ensure that the pairValue
+    ;; slices contain the rune of the opening bracket after normalization for
+    ;; any opening or closing bracket.
+
+    ^{:line 112 :tag (* list/List)} openers ; list of positions for opening brackets
+
+
+    ^{:line 115 :tag bracketPairs :doc "bracket pair positions sorted by location of opening bracket\n"} pairPositions
+
+    ^{:line 117 :tag (slice Class)} codesIsolatedRun ; directional bidi codes for an isolated run
+    ^{:line 118 :tag (slice int)} indexes)) ; array of index values into the original string
+
+
+
+
+
+^{:go/end 126} (go/method matchOpener "matchOpener reports whether characters at given positions form a matching\nbracket pair.\n" ^bool [^{:tag (* bracketPairer)} p ^{:tag (slice rune)} pairValues ^int opener ^int closer]
+  (== (aget pairValues (aget (.-indexes p) opener)) (aget pairValues (aget (.-indexes p) closer))))
+
+
+(go/const ^{:val 63} maxPairingDepth 63)
+
+
+
+
+
+
+^{:go/end 176} (go/method locateBrackets "locateBrackets locates matching bracket pairs according to BD16.\n\nThis implementation uses a linked list instead of a stack, because, while\nelements are added at the front (like a push) they are not generally removed\nin atomic 'pop' operations, reducing the benefit of the stack archetype.\n" [^{:tag (* bracketPairer)} p ^{:tag (slice bracketType)} pairTypes ^{:tag (slice rune)} pairValues]
+  ;; traverse the run
+  ;; do that explicitly (not in a for-each) so we can record position
+  (range [i index (.-indexes p)]
+
+    ;; look at the bracket type for each character
+    (when (or (== (aget pairTypes index) bpNone) (!= (aget (.-codesIsolatedRun p) i) ON))
+      ;; continue scanning
+      (continue))
+
+    (switch (aget pairTypes index)
+      (case [bpOpen]
+        ;; check if maximum pairing depth reached
+        (when (== (.Len (.-openers p)) maxPairingDepth)
+          (.Init (.-openers p))
+          (return))
+
+        ;; remember opener location, most recent first
+        (.PushFront (.-openers p) i))
+
+      (case [bpClose]
+        ;; see if there is a match
+        (let [count 0]
+          (for [elem (.Front (.-openers p))] (!= elem nil) (set! elem (.Next elem))
+            (inc! count)
+            (let [opener (assert int (.-Value elem))]
+              (when (.matchOpener p pairValues opener i)
+                ;; if the opener matches, add nested pair to the ordered list
+                (set! (.-pairPositions p) (append (.-pairPositions p) (lit bracketPair opener i)))
+                ;; remove up to and including matched opener
+                (for [] (> count 0) (dec! count)
+                  (.Remove (.-openers p) (.Front (.-openers p))))
+
+                (break))))
+
+
+          (sort/Sort (.-pairPositions p)))))))
+;; if we get here, the closing bracket matched no openers
+;; and gets ignored
+
+
+
+
+;; Bracket pairs within an isolating run sequence are processed as units so
+;; that both the opening and the closing paired bracket in a pair resolve to
+;; the same direction.
+;;
+;; N0. Process bracket pairs in an isolating run sequence sequentially in
+;; the logical order of the text positions of the opening paired brackets
+;; using the logic given below. Within this scope, bidirectional types EN
+;; and AN are treated as R.
+;;
+;; Identify the bracket pairs in the current isolating run sequence
+;; according to BD16. For each bracket-pair element in the list of pairs of
+;; text positions:
+;;
+;; a Inspect the bidirectional types of the characters enclosed within the
+;; bracket pair.
+;;
+;; b If any strong type (either L or R) matching the embedding direction is
+;; found, set the type for both brackets in the pair to match the embedding
+;; direction.
+;;
+;; o [ e ] o -> o e e e o
+;;
+;; o [ o e ] -> o e o e e
+;;
+;; o [ NI e ] -> o e NI e e
+;;
+;; c Otherwise, if a strong type (opposite the embedding direction) is
+;; found, test for adjacent strong types as follows: 1 First, check
+;; backwards before the opening paired bracket until the first strong type
+;; (L, R, or sos) is found. If that first preceding strong type is opposite
+;; the embedding direction, then set the type for both brackets in the pair
+;; to that type. 2 Otherwise, set the type for both brackets in the pair to
+;; the embedding direction.
+;;
+;; o [ o ] e -> o o o o e
+;;
+;; o [ o NI ] o -> o o o NI o o
+;;
+;; e [ o ] o -> e e o e o
+;;
+;; e [ o ] e -> e e o e e
+;;
+;; e ( o [ o ] NI ) e -> e e o o o o NI e e
+;;
+;; d Otherwise, do not set the type for the current bracket pair. Note that
+;; if the enclosed text contains no strong types the paired brackets will
+;; both resolve to the same level when resolved individually using rules N1
+;; and N2.
+;;
+;; e ( NI ) o -> e ( NI ) o
+
+
+
+
+
+^{:go/end 243} (go/method getStrongTypeN0 "getStrongTypeN0 maps character's directional code to strong type as required\nby rule N0.\n\nTODO: have separate type for \"strong\" directionality.\n" ^Class [^{:tag (* bracketPairer)} p ^int index]
+  (switch (aget (.-codesIsolatedRun p) index)
+    ;; in the scope of N0, number types are treated as R
+    (case [EN AN AL R]
+      (return R))
+    (case [L]
+      (return L))
+    (default
+      (return ON))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 266} (go/method classifyPairContent "classifyPairContent reports the strong types contained inside a Bracket Pair,\nassuming the given embedding direction.\n\nIt returns ON if no strong type is found. If a single strong type is found,\nit returns this type. Otherwise it returns the embedding direction.\n\nTODO: use separate type for \"strong\" directionality.\n" ^Class [^{:tag (* bracketPairer)} p ^bracketPair loc ^Class dirEmbed]
+  (let [dirOpposite ON]
+    (for [i (+ (.-opener loc) 1)] (< i (.-closer loc)) (inc! i)
+      (let [dir (.getStrongTypeN0 p i)]
+        (when (== dir ON)
+          (continue))
+
+        (when (== dir dirEmbed)
+          (return dir)) ; type matching embedding direction found
+
+        (set! dirOpposite dir)))
+
+    ;; return ON if no strong type found, or class opposite to dirEmbed
+    ^{:line 265} dirOpposite))
+
+
+
+
+^{:go/end 278} (go/method classBeforePair "classBeforePair determines which strong types are present before a Bracket\nPair. Return R or L if strong type found, otherwise ON.\n" ^Class [^{:tag (* bracketPairer)} p ^bracketPair loc]
+  (for [i (- (.-opener loc) 1)] (>= i 0) (dec! i)
+    (when [dir (.getStrongTypeN0 p i)] (!= dir ON)
+      (return dir)))
+
+
+  ;; no strong types found, return sos
+  (.-sos p))
+
+
+
+^{:go/end 307} (go/method assignBracketType "assignBracketType implements rule N0 for a single bracket pair.\n" [^{:tag (* bracketPairer)} p ^bracketPair loc ^Class dirEmbed ^{:tag (slice Class)} initialTypes]
+  ;; rule "N0, a", inspect contents of pair
+  (let [dirPair (.classifyPairContent p loc dirEmbed)]
+
+    ;; dirPair is now L, R, or N (no strong type found)
+
+    ;; the following logical tests are performed out of order compared to
+    ;; the statement of the rules but yield the same results
+    (when (== dirPair ON)
+      (return)) ; case "d" - nothing to do
+
+
+    (when (!= dirPair dirEmbed)
+      ;; case "c": strong type found, opposite - check before (c.1)
+      (set! dirPair (.classBeforePair p loc))
+      (when (or (== dirPair dirEmbed) (== dirPair ON))
+        ;; no strong opposite type found before - use embedding (c.2)
+        (set! dirPair dirEmbed)))
+
+
+    ;; else: case "b", strong type found matching embedding,
+    ;; no explicit action needed, as dirPair is already set to embedding
+    ;; direction
+
+    ;; set the bracket types to the type found
+    (.setBracketsToType p loc dirPair initialTypes)))
+
+
+^{:go/end 328} (go/method setBracketsToType [^{:tag (* bracketPairer)} p ^bracketPair loc ^Class dirPair ^{:tag (slice Class)} initialTypes]
+  (aset (.-codesIsolatedRun p) (.-opener loc) dirPair)
+  (aset (.-codesIsolatedRun p) (.-closer loc) dirPair)
+
+  (for [i (+ (.-opener loc) 1)] (< i (.-closer loc)) (inc! i)
+    (let [index (aget (.-indexes p) i)]
+      (when (!= (aget initialTypes index) NSM)
+        (break))
+
+      (aset (.-codesIsolatedRun p) i dirPair)))
+
+
+  (for [i (+ (.-closer loc) 1)] (< i (len (.-indexes p))) (inc! i)
+    (let [index (aget (.-indexes p) i)]
+      (when (!= (aget initialTypes index) NSM)
+        (break))
+
+      (aset (.-codesIsolatedRun p) i dirPair))))
+
+
+
+
+^{:go/end 335} (go/method resolveBrackets "resolveBrackets implements rule N0 for a list of pairs.\n" [^{:tag (* bracketPairer)} p ^Class dirEmbed ^{:tag (slice Class)} initialTypes]
+  (range [_ loc (.-pairPositions p)]
+    (.assignBracketType p loc dirEmbed initialTypes)))

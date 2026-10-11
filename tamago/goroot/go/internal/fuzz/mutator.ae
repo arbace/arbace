@@ -1,0 +1,291 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.fuzz) (go/file "mutator.go" :imports [
+
+
+    ^{:line 8} [binary "encoding/binary"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [math "math"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+(go/type mutator (struct
+    ^{:line 15 :tag mutatorRand} r
+    ^{:line 16 :tag (slice byte)} scratch)) ; scratch slice to avoid additional allocations
+
+
+^{:go/end 21} (go/func newMutator ^{:tag (* mutator)} []
+  (addr (lit mutator :r (newPcgRand))))
+
+
+^{:go/end 25} (go/method rand ^int [^{:tag (* mutator)} m ^int n]
+  (.intn (.-r m) n))
+
+
+^{:go/end 32} (go/method randByteOrder ^binary/ByteOrder [^{:tag (* mutator)} m]
+  (when (.bool (.-r m))
+    (return binary/LittleEndian))
+
+  ^{:line 31} binary/BigEndian)
+
+
+
+
+^{:go/end 45} (go/method chooseLen "chooseLen chooses length of range mutation in range [1,n]. It gives\npreference to shorter ranges.\n" ^int [^{:tag (* mutator)} m ^int n]
+  (switch [x (.rand m 100)]
+    (case [(< x 90)]
+      (return (+ (.rand m (min 8 n)) 1)))
+    (case [(< x 99)]
+      (return (+ (.rand m (min 32 n)) 1)))
+    (default
+      (return (+ (.rand m n) 1)))))
+
+
+
+
+^{:go/end 117} (go/method mutate "mutate performs several mutations on the provided values.\n" [^{:tag (* mutator)} m ^{:tag (slice any)} vals ^int maxBytes]
+  ;; TODO(katiehockman): pull some of these functions into helper methods and
+  ;; test that each case is working as expected.
+  ;; TODO(katiehockman): perform more types of mutations for []byte.
+
+  ;; maxPerVal will represent the maximum number of bytes that each value be
+  ;; allowed after mutating, giving an equal amount of capacity to each line.
+  ;; Allow a little wiggle room for the encoding.
+  (let [maxPerVal (- (/ maxBytes (len vals)) 100)
+
+      ;; Pick a random value to mutate.
+      ;; TODO: consider mutating more than one value at a time.
+      ^{:line 60} i (.rand m (len vals))]
+    (type-switch [v (aget vals i)]
+      (case [int]
+        (aset vals i (conv int (.mutateInt m (conv int64 v) maxInt))))
+      (case [int8]
+        (aset vals i (conv int8 (.mutateInt m (conv int64 v) math/MaxInt8))))
+      (case [int16]
+        (aset vals i (conv int16 (.mutateInt m (conv int64 v) math/MaxInt16))))
+      (case [int64]
+        (aset vals i (.mutateInt m v math/MaxInt64)))
+      (case [uint]
+        (aset vals i (conv uint (.mutateUInt m (conv uint64 v) maxUint))))
+      (case [uint16]
+        (aset vals i (conv uint16 (.mutateUInt m (conv uint64 v) math/MaxUint16))))
+      (case [uint32]
+        (aset vals i (conv uint32 (.mutateUInt m (conv uint64 v) math/MaxUint32))))
+      (case [uint64]
+        (aset vals i (.mutateUInt m v math/MaxUint64)))
+      (case [float32]
+        (aset vals i (conv float32 (.mutateFloat m (conv float64 v) math/MaxFloat32))))
+      (case [float64]
+        (aset vals i (.mutateFloat m v math/MaxFloat64)))
+      (case [bool]
+        (when (== (.rand m 2) 1)
+          (aset vals i (not v)))) ; 50% chance of flipping the bool
+
+      (case [rune] ; int32
+        (aset vals i (conv rune (.mutateInt m (conv int64 v) math/MaxInt32))))
+      (case [byte] ; uint8
+        (aset vals i (conv byte (.mutateUInt m (conv uint64 v) math/MaxUint8))))
+      (case [string]
+        (when (> (len v) maxPerVal)
+          (panic (fmt/Sprintf "cannot mutate bytes of length %d" (len v))))
+
+        (if (< (cap (.-scratch m)) maxPerVal)
+          (set! (.-scratch m) (append (make (slice byte) 0 maxPerVal) (spread v)))
+          (do
+            (set! (.-scratch m) (subslice (.-scratch m) _ (len v)))
+            (copy (.-scratch m) v)))
+
+        (.mutateBytes m (addr (.-scratch m)))
+        (aset vals i (conv string (.-scratch m))))
+      (case [(slice byte)]
+        (when (> (len v) maxPerVal)
+          (panic (fmt/Sprintf "cannot mutate bytes of length %d" (len v))))
+
+        (if (< (cap (.-scratch m)) maxPerVal)
+          (set! (.-scratch m) (append (make (slice byte) 0 maxPerVal) (spread v)))
+          (do
+            (set! (.-scratch m) (subslice (.-scratch m) _ (len v)))
+            (copy (.-scratch m) v)))
+
+        (.mutateBytes m (addr (.-scratch m)))
+        (aset vals i (.-scratch m)))
+      (default
+        (panic (fmt/Sprintf "type not supported for mutating: %T" (aget vals i)))))))
+
+
+
+^{:go/end 148} (go/method mutateInt ^int64 [^{:tag (* mutator)} m ^int64 v ^int64 maxValue]
+  (let [^int64 max (zero int64)]
+    (while true
+      (set! max 100)
+      (switch (.rand m 2)
+        (case [0]
+          ;; Add a random number
+          (when (>= v maxValue)
+            (continue))
+
+          (when (and (> v 0) (< (- maxValue v) max))
+            ;; Don't let v exceed maxValue
+            (set! max (- maxValue v)))
+
+          (set! v + (conv int64 (+ 1 (.rand m (conv int max)))))
+          (return v))
+        (case [1]
+          ;; Subtract a random number
+          (when (<= v (- maxValue))
+            (continue))
+
+          (when (and (< v 0) (< (+ maxValue v) max))
+            ;; Don't let v drop below -maxValue
+            (set! max (+ maxValue v)))
+
+          (set! v - (conv int64 (+ 1 (.rand m (conv int max)))))
+          (return v))))))
+
+
+
+
+^{:go/end 180} (go/method mutateUInt ^uint64 [^{:tag (* mutator)} m ^uint64 v ^uint64 maxValue]
+  (let [^uint64 max (zero uint64)]
+    (while true
+      (set! max 100)
+      (switch (.rand m 2)
+        (case [0]
+          ;; Add a random number
+          (when (>= v maxValue)
+            (continue))
+
+          (when (and (> v 0) (< (- maxValue v) max))
+            ;; Don't let v exceed maxValue
+            (set! max (- maxValue v)))
+
+
+          (set! v + (conv uint64 (+ 1 (.rand m (conv int max)))))
+          (return v))
+        (case [1]
+          ;; Subtract a random number
+          (when (<= v 0)
+            (continue))
+
+          (when (< v max)
+            ;; Don't let v drop below 0
+            (set! max v))
+
+          (set! v - (conv uint64 (+ 1 (.rand m (conv int max)))))
+          (return v))))))
+
+
+
+
+^{:go/end 232} (go/method mutateFloat ^float64 [^{:tag (* mutator)} m ^float64 v ^float64 maxValue]
+  (let [^float64 max (zero float64)]
+    (while true
+      (switch (.rand m 4)
+        (case [0]
+          ;; Add a random number
+          (when (>= v maxValue)
+            (continue))
+
+          (set! max 100)
+          (when (and (> v 0) (< (- maxValue v) max))
+            ;; Don't let v exceed maxValue
+            (set! max (- maxValue v)))
+
+          (set! v + (conv float64 (+ 1 (.rand m (conv int max)))))
+          (return v))
+        (case [1]
+          ;; Subtract a random number
+          (when (<= v (- maxValue))
+            (continue))
+
+          (set! max 100)
+          (when (and (< v 0) (< (+ maxValue v) max))
+            ;; Don't let v drop below -maxValue
+            (set! max (+ maxValue v)))
+
+          (set! v - (conv float64 (+ 1 (.rand m (conv int max)))))
+          (return v))
+        (case [2]
+          ;; Multiply by a random number
+          (let [absV (math/Abs v)]
+            (when (or (== v 0) (>= absV maxValue))
+              (continue))
+
+            (set! max 10)
+            (when (< (/ maxValue absV) max)
+              ;; Don't let v go beyond the minimum or maximum value
+              (set! max (/ maxValue absV)))
+
+            (set! v * (conv float64 (+ 1 (.rand m (conv int max)))))
+            (return v)))
+        (case [3]
+          ;; Divide by a random number
+          (when (== v 0)
+            (continue))
+
+          (set! v / (conv float64 (+ 1 (.rand m 10))))
+          (return v))))))
+
+
+
+
+(go/type byteSliceMutator (func [(* mutator) (slice byte)] [(slice byte)]))
+
+(go/var byteSliceMutators (lit (slice byteSliceMutator)
+    ^{:line 237} byteSliceRemoveBytes
+    ^{:line 238} byteSliceInsertRandomBytes
+    ^{:line 239} byteSliceDuplicateBytes
+    ^{:line 240} byteSliceOverwriteBytes
+    ^{:line 241} byteSliceBitFlip
+    ^{:line 242} byteSliceXORByte
+    ^{:line 243} byteSliceSwapByte
+    ^{:line 244} byteSliceArithmeticUint8
+    ^{:line 245} byteSliceArithmeticUint16
+    ^{:line 246} byteSliceArithmeticUint32
+    ^{:line 247} byteSliceArithmeticUint64
+    ^{:line 248} byteSliceOverwriteInterestingUint8
+    ^{:line 249} byteSliceOverwriteInterestingUint16
+    ^{:line 250} byteSliceOverwriteInterestingUint32
+    ^{:line 251} byteSliceInsertConstantBytes
+    ^{:line 252} byteSliceOverwriteConstantBytes
+    ^{:line 253} byteSliceShuffleBytes
+    ^{:line 254} byteSliceSwapBytes))
+
+
+^{:go/end 273} (go/method mutateBytes [^{:tag (* mutator)} m ^{:tag (* (slice byte))} ptrB]
+  (let [b @ptrB]
+    (defer (^{:go/end 264} (fn []
+          (when (!= (unsafe/SliceData @ptrB) (unsafe/SliceData b))
+            (panic "data moved to new address"))
+
+          (set! @ptrB b))))
+
+
+    (while true
+      (let [mut (aget byteSliceMutators (.rand m (len byteSliceMutators)))]
+        (when [mutated (mut m b)] (!= mutated nil)
+          (set! b mutated)
+          (return))))))
+
+
+
+
+(go/var
+  ^{:line 276} [interesting8 (lit (slice int8) -128 -1 0 1 16 32 64 100 127)]
+  ^{:line 277} [interesting16 (lit (slice int16) -32768 -129 128 255 256 512 1000 1024 4096 32767)]
+  ^{:line 278} [interesting32 (lit (slice int32) -2147483648 -100663046 -32769 32768 65535 65536 100663045 2147483647)])
+
+
+(go/const
+  ^{:line 282} [^{:val 18446744073709551615N} maxUint (conv uint64 (bit-not (conv uint 0)))]
+  ^{:line 283} [^{:val 9223372036854775807} maxInt (conv int64 (>> maxUint 1))])
+
+
+^{:go/end 293} (go/func init []
+  (range [_ v interesting8]
+    (set! interesting16 (append interesting16 (conv int16 v))))
+
+  (range [_ v interesting16]
+    (set! interesting32 (append interesting32 (conv int32 v)))))

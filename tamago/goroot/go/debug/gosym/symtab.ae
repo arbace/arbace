@@ -1,0 +1,770 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package gosym implements access to the Go symbol
+;; and line number tables embedded in Go binaries generated
+;; by the gc compilers.
+(in-ns 'go.debug.gosym) (go/file "symtab.go" :doc "Package gosym implements access to the Go symbol\nand line number tables embedded in Go binaries generated\nby the gc compilers.\n" :imports [
+
+
+    ^{:line 11} [bytes "bytes"]
+    ^{:line 12} [binary "encoding/binary"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]])
+
+
+;; /*
+;; * Symbols
+;; */
+
+
+(go/type Sym "A Sym represents a single symbol table entry.\n" (struct
+    ^{:line 24 :tag uint64} Value
+    ^{:line 25 :tag byte} Type
+    ^{:line 26 :tag string} Name
+    ^{:line 27 :tag uint64} GoType
+
+    ^{:line 29 :tag (* Func) :doc "If this symbol is a function symbol, the corresponding Func\n"} Func
+
+    ^{:line 31 :tag version} goVersion))
+
+
+
+^{:go/end 35} (go/method Static "Static reports whether this symbol is static (not visible outside its file).\n" ^bool [^{:tag (* Sym)} s] (>= (.-Type s) \a))
+
+
+
+
+
+
+
+^{:go/end 65} (go/method nameWithoutInst "nameWithoutInst returns s.Name with all bracketed expressions masked by\nunderscores. This is useful to ignore any extra slashes or dots inside the\nbrackets from the string searches below, while preserving the byte indices\nof the characters outside the brackets.\n\ns.Name is returned as-is if the brackets are imbalanced.\n" ^string [^{:tag (* Sym)} s]
+  (let [n 0
+      ^{:line 45} b (conv (slice byte) (.-Name s))]
+    (range [i r b]
+      (switch r
+        (case [\[]
+          (inc! n))
+        (case [\]]
+          (dec! n)
+          (when (< n 0)
+            (return (.-Name s)))) ; malformed
+
+        (default
+          (when (> n 0)
+            (aset b i \_)))))
+
+
+
+    (when (> n 0)
+      (return (.-Name s))) ; malformed
+
+    (conv string b)))
+
+
+
+
+^{:go/end 94} (go/method PackageName "PackageName returns the package part of the symbol name,\nor the empty string if there is none.\n" ^string [^{:tag (* Sym)} s]
+  (let [name (.nameWithoutInst s)]
+
+    ;; Since go1.20, a prefix of "type:" and "go:" is a compiler-generated symbol,
+    ;; they do not belong to any package.
+    ;;
+    ;; See cmd/compile/internal/base/link.go:ReservedImports variable.
+    (when (and (>= (.-goVersion s) ver120) ^:go/paren (or (strings/HasPrefix name "go:") (strings/HasPrefix name "type:")))
+      (return ""))
+
+
+    ;; For go1.18 and below, the prefix are "type." and "go." instead.
+    (when (and (<= (.-goVersion s) ver118) ^:go/paren (or (strings/HasPrefix name "go.") (strings/HasPrefix name "type.")))
+      (return ""))
+
+
+    ^{:go/breaks [[4 93]]} (let [pathend (strings/LastIndex name "/")]
+      (when (< pathend 0)
+        (set! pathend 0))
+
+
+      (when [i (strings/Index (subslice name pathend) ".")] (!= i -1)
+        (return (subslice (.-Name s) _ (+ pathend i))))
+
+      "")))
+
+
+
+
+
+^{:go/end 115} (go/method ReceiverName "ReceiverName returns the receiver type name of this symbol,\nor the empty string if there is none.  A receiver name is only detected in\nthe case that s.Name is fully-specified with a package name.\n" ^string [^{:tag (* Sym)} s]
+  (let [name (.nameWithoutInst s)
+      ^{:line 101} pathend (strings/LastIndex name "/")]
+    (when (< pathend 0)
+      (set! pathend 0))
+
+    ;; Find the first dot after pathend (or from the beginning, if there was
+    ;; no slash in name).
+    (let [l (strings/Index (subslice name pathend) ".")
+        ;; Find the last dot after pathend (or the beginning).
+        ^{:line 109} r (strings/LastIndex (subslice name pathend) ".")]
+      (when (or (== l -1) (== r -1) (== l r))
+        ;; There is no receiver if we didn't find two distinct dots after pathend.
+        (return ""))
+
+      (subslice (.-Name s) (+ pathend l 1) (+ pathend r)))))
+
+
+
+^{:go/end 124} (go/method BaseName "BaseName returns the symbol name without the package or receiver name.\n" ^string [^{:tag (* Sym)} s]
+  (let [name (.nameWithoutInst s)]
+    (when [i (strings/LastIndex name ".")] (!= i -1)
+      (return (subslice (.-Name s) (+ i 1))))
+
+    (.-Name s)))
+
+
+
+(go/type Func "A Func collects information about a single function.\n" (struct
+    ^{:line 128 :tag uint64} Entry
+    (* Sym)
+    ^{:line 130 :tag uint64} End
+    ^{:line 131 :tag (slice (* Sym))} Params ; nil for Go 1.3 and later binaries
+    ^{:line 132 :tag (slice (* Sym))} Locals ; nil for Go 1.3 and later binaries
+    ^{:line 133 :tag int} FrameSize
+    ^{:line 134 :tag (* LineTable)} LineTable
+    ^{:line 135 :tag (* Obj)} Obj))
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Obj "An Obj represents a collection of functions in a symbol table.\n\nThe exact method of division of a binary into separate Objs is an internal detail\nof the symbol table format.\n\nIn early versions of Go each source file became a different Obj.\n\nIn Go 1 and Go 1.1, each package produced one Obj for all Go sources\nand one Obj per C source file.\n\nIn Go 1.2, there is a single Obj for the entire program.\n" (struct
+
+    ^{:line 151 :tag (slice Func) :doc "Funcs is a list of functions in the Obj.\n"} Funcs
+
+
+
+
+
+    ^{:line 157 :tag (slice Sym) :doc "In Go 1.1 and earlier, Paths is a list of symbols corresponding\nto the source file names that produced the Obj.\nIn Go 1.2, Paths is nil.\nUse the keys of Table.Files to obtain a list of source files.\n"} Paths)) ; meta
+
+
+;; /*
+;; * Symbol tables
+;; */
+
+
+
+
+(go/type Table "Table represents a Go symbol table. It stores all of the\nsymbols decoded from the program and provides methods to translate\nbetween symbols, names, and addresses.\n" (struct
+    ^{:line 168 :tag (slice Sym)} Syms ; nil for Go 1.3 and later binaries
+    ^{:line 169 :tag (slice Func)} Funcs
+    ^{:line 170 :tag (map string (* Obj))} Files ; for Go 1.2 and later all files map to one Obj
+    ^{:line 171 :tag (slice Obj)} Objs ; for Go 1.2 and later only one Obj in slice
+
+    ^{:line 173 :tag (* LineTable)} go12line)) ; Go 1.2 line number table
+
+
+(go/type sym (struct
+    ^{:line 177 :tag uint64} value
+    ^{:line 178 :tag uint64} gotype
+    ^{:line 179 :tag byte} typ
+    ^{:line 180 :tag (slice byte)} name))
+
+
+(go/var
+  ^{:line 184} [littleEndianSymtab (lit (slice byte) 0xFD 0xFF 0xFF 0xFF 0x00 0x00 0x00)]
+  ^{:line 185} [bigEndianSymtab (lit (slice byte) 0xFF 0xFF 0xFF 0xFD 0x00 0x00 0x00)]
+  ^{:line 186} [oldLittleEndianSymtab (lit (slice byte) 0xFE 0xFF 0xFF 0xFF 0x00 0x00)])
+
+
+^{:go/end 327} (go/func walksymtab ^error [^{:tag (slice byte)} data ^{:tag (func [sym] [error])} fn]
+  (when (== (len data) 0) ; missing symtab is okay
+    (return nil))
+
+  (let [^binary/ByteOrder order binary/BigEndian
+      ^{:line 194} newTable false]
+    (switch
+      (case [(bytes/HasPrefix data oldLittleEndianSymtab)]
+        ;; Same as Go 1.0, but little endian.
+        ;; Format was used during interim development between Go 1.0 and Go 1.1.
+        ;; Should not be widespread, but easy to support.
+        (set! data (subslice data 6))
+        (set! order binary/LittleEndian))
+      (case [(bytes/HasPrefix data bigEndianSymtab)]
+        (set! newTable true))
+      (case [(bytes/HasPrefix data littleEndianSymtab)]
+        (set! newTable true)
+        (set! order binary/LittleEndian)))
+
+    (let [^int ptrsz (zero int)]
+      (when newTable
+        (when (< (len data) 8)
+          (return (addr (lit DecodingError (len data) "unexpected EOF" nil))))
+
+        (set! ptrsz (conv int (aget data 7)))
+        (when (and (!= ptrsz 4) (!= ptrsz 8))
+          (return (addr (lit DecodingError 7 "invalid pointer size" ptrsz))))
+
+        (set! data (subslice data 8)))
+
+      ^{:go/breaks [[3 326]]} (let [^sym s (zero sym)
+          ^{:line 220} p data]
+        (while (>= (len p) 4)
+          (let [^byte typ (zero byte)]
+            (if newTable (do
+                ;; Symbol type, value, Go type.
+                (set! typ (bit-and (aget p 0) 0x3F))
+                (let [wideValue (!= (bit-and (aget p 0) 0x40) 0)
+                    ^{:line 227} goType (!= (bit-and (aget p 0) 0x80) 0)]
+                  (if (< typ 26)
+                    (set! typ + \A)
+
+                    (set! typ + (- \a 26)))
+
+                  (set! (.-typ s) typ)
+                  (set! p (subslice p 1))
+                  (if wideValue (do
+                      (when (< (len p) ptrsz)
+                        (return (addr (lit DecodingError (len data) "unexpected EOF" nil))))
+
+                      ;; fixed-width value
+                      (if (== ptrsz 8) (do
+                          (set! (.-value s) (.Uint64 order (subslice p 0 8)))
+                          (set! p (subslice p 8)))
+                        (do
+                          (set! (.-value s) (conv uint64 (.Uint32 order (subslice p 0 4))))
+                          (set! p (subslice p 4)))))
+
+                    (do
+                      ;; varint value
+                      (set! (.-value s) 0)
+                      (let [shift (conv uint 0)]
+                        (while (and (> (len p) 0) (!= (bit-and (aget p 0) 0x80) 0))
+                          (set! (.-value s) bit-or (<< (conv uint64 (bit-and (aget p 0) 0x7F)) shift))
+                          (set! shift + 7)
+                          (set! p (subslice p 1)))
+
+                        (when (== (len p) 0)
+                          (return (addr (lit DecodingError (len data) "unexpected EOF" nil))))
+
+                        (set! (.-value s) bit-or (<< (conv uint64 (aget p 0)) shift))
+                        (set! p (subslice p 1)))))
+
+                  (when goType
+                    (when (< (len p) ptrsz)
+                      (return (addr (lit DecodingError (len data) "unexpected EOF" nil))))
+
+                    ;; fixed-width go type
+                    (if (== ptrsz 8) (do
+                        (set! (.-gotype s) (.Uint64 order (subslice p 0 8)))
+                        (set! p (subslice p 8)))
+                      (do
+                        (set! (.-gotype s) (conv uint64 (.Uint32 order (subslice p 0 4))))
+                        (set! p (subslice p 4)))))))
+
+
+              (do
+                ;; Value, symbol type.
+                (set! (.-value s) (conv uint64 (.Uint32 order (subslice p 0 4))))
+                (when (< (len p) 5)
+                  (return (addr (lit DecodingError (len data) "unexpected EOF" nil))))
+
+                (set! typ (aget p 4))
+                (when (== (bit-and typ 0x80) 0)
+                  (return (addr (lit DecodingError (+ (- (len data) (len p)) 4) "bad symbol type" typ))))
+
+                (set! typ bit-and-not 0x80)
+                (set! (.-typ s) typ)
+                (set! p (subslice p 5))))
+
+
+            ;; Name.
+            (let [^int i (zero int)
+                ^{:line 292 :tag int} nnul (zero int)]
+              (for [(set! i 0)] (< i (len p)) (inc! i)
+                (when (== (aget p i) 0)
+                  (set! nnul 1)
+                  (break)))
+
+
+              (switch typ
+                (case [\z \Z]
+                  (set! p (subslice p (+ i nnul)))
+                  (for [(set! i 0)] (<= (+ i 2) (len p)) (set! i + 2)
+                    (when (and (== (aget p i) 0) (== (aget p (+ i 1)) 0))
+                      (set! nnul 2)
+                      (break)))))
+
+
+
+              (when (< (len p) (+ i nnul))
+                (return (addr (lit DecodingError (len data) "unexpected EOF" nil))))
+
+              (set! (.-name s) (subslice p 0 i))
+              (set! i + nnul)
+              (set! p (subslice p i))
+
+              (when (not newTable)
+                (when (< (len p) 4)
+                  (return (addr (lit DecodingError (len data) "unexpected EOF" nil))))
+
+                ;; Go type.
+                (set! (.-gotype s) (conv uint64 (.Uint32 order (subslice p _ 4))))
+                (set! p (subslice p 4)))
+
+              (go/call fn s))))
+
+        nil))))
+
+
+
+
+
+
+^{:go/end 530} (go/func NewTable "NewTable decodes the Go symbol table (the \".gosymtab\" section in ELF),\nreturning an in-memory representation.\nStarting with Go 1.3, the Go symbol table no longer includes symbol data;\ncallers should pass nil for the symtab parameter.\n" [^{:tag (slice byte)} symtab ^{:tag (* LineTable)} pcln] :results [(* Table) error]
+  (let [^int n (zero int)
+      ^{:line 335} err (walksymtab symtab ^{:go/breaks [3] :go/end 338} (fn ^error [^sym s]
+          (inc! n)
+          nil))]
+
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [^Table t (zero Table)]
+      (when (.isGo12 pcln)
+        (set! (.-go12line t) pcln))
+
+      (let [fname (make (map uint16 string))]
+        (set! (.-Syms t) (make (slice Sym) 0 n))
+        (let [nf 0
+            ^{:line 350} nz 0
+            ^{:line 351} lasttyp (conv uint8 0)]
+          (set! err (walksymtab symtab ^{:go/end 398} (fn ^error [^sym s]
+                (let [n (len (.-Syms t))]
+                  (set! (.-Syms t) (subslice (.-Syms t) 0 (+ n 1)))
+                  ^{:go/breaks [9]} (let [ts (addr (aget (.-Syms t) n))]
+                    (set! (.-Type ts) (.-typ s))
+                    (set! (.-Value ts) (.-value s))
+                    (set! (.-GoType ts) (.-gotype s))
+                    (set! (.-goVersion ts) (.-version pcln))
+                    (switch (.-typ s)
+                      (default
+                        ;; rewrite name to use . instead of · (c2 b7)
+                        (let [w 0
+                            ^{:line 364} b (.-name s)]
+                          (for [i 0] (< i (len b)) (inc! i)
+                            (when (and (== (aget b i) 0xc2) (< (+ i 1) (len b)) (== (aget b (+ i 1)) 0xb7))
+                              (inc! i)
+                              (aset b i \.))
+
+                            (aset b w (aget b i))
+                            (inc! w))
+
+                          (set! (.-Name ts) (conv string (subslice (.-name s) 0 w)))))
+                      (case [\z \Z]
+                        (when (and (!= lasttyp \z) (!= lasttyp \Z))
+                          (inc! nz))
+
+                        (for [i 0] (< i (len (.-name s))) (set! i + 2)
+                          (let [eltIdx (.Uint16 binary/BigEndian (subslice (.-name s) i (+ i 2)))
+                              (values elt ok) (aget fname eltIdx)]
+                            (when (not ok)
+                              (return (addr (lit DecodingError -1 "bad filename code" eltIdx))))
+
+                            (when [n (len (.-Name ts))] (and (> n 0) (!= (aget (.-Name ts) (- n 1)) \/))
+                              (set! (.-Name ts) + "/"))
+
+                            (set! (.-Name ts) + elt)))))
+
+
+                    (switch (.-typ s)
+                      (case [\T \t \L \l]
+                        (inc! nf))
+                      (case [\f]
+                        (aset fname (conv uint16 (.-value s)) (.-Name ts))))
+
+                    (set! lasttyp (.-typ s))
+                    nil)))))
+
+          (when (!= err nil)
+            (return nil err))
+
+
+          (set! (.-Funcs t) (make (slice Func) 0 nf))
+          (set! (.-Files t) (make (map string (* Obj))))
+
+          (let [^{:tag (* Obj)} obj (zero (* Obj))]
+            (if (!= (.-go12line t) nil) (do
+                ;; Put all functions into one Obj.
+                (set! (.-Objs t) (make (slice Obj) 1))
+                (set! obj (addr (aget (.-Objs t) 0)))
+                (.go12MapFiles (.-go12line t) (.-Files t) obj))
+
+              (set! (.-Objs t) (make (slice Obj) 0 nz)))
+
+
+            ;; Count text symbols and attach frame sizes, parameters, and
+            ;; locals to them. Also, find object file boundaries.
+            (let [lastf 0]
+              (for [i 0] (< i (len (.-Syms t))) (inc! i)
+                (let [sym (addr (aget (.-Syms t) i))]
+                  (switch (.-Type sym)
+                    (case [\Z \z] ; path symbol
+                      (when (!= (.-go12line t) nil)
+                        ;; Go 1.2 binaries have the file information elsewhere. Ignore.
+                        (break))
+
+                      ;; Finish the current object
+                      (when (!= obj nil)
+                        (set! (.-Funcs obj) (subslice (.-Funcs t) lastf)))
+
+                      (set! lastf (len (.-Funcs t)))
+
+                      ;; Start new object
+                      (let [n (len (.-Objs t))]
+                        (set! (.-Objs t) (subslice (.-Objs t) 0 (+ n 1)))
+                        (set! obj (addr (aget (.-Objs t) n)))
+
+                        ;; Count & copy path symbols
+                        (let [^int end (zero int)]
+                          (for [(set! end (+ i 1))] (< end (len (.-Syms t))) (inc! end)
+                            (when [c (.-Type (aget (.-Syms t) end))] (and (!= c \Z) (!= c \z))
+                              (break)))
+
+
+                          (set! (.-Paths obj) (subslice (.-Syms t) i end))
+                          (set! i (- end 1)) ; loop will i++
+
+                          ;; Record file names
+                          (let [depth 0]
+                            (range [j (.-Paths obj)]
+                              (let [s (addr (aget (.-Paths obj) j))]
+                                (if (== (.-Name s) "")
+                                  (dec! depth)
+                                  (do
+                                    (when (== depth 0)
+                                      (aset (.-Files t) (.-Name s) obj))
+
+                                    (inc! depth)))))))))
+
+
+
+                    (case [\T \t \L \l] ; text symbol
+                      (when [n (len (.-Funcs t))] (> n 0)
+                        (set! (.-End (aget (.-Funcs t) (- n 1))) (.-Value sym)))
+
+                      (when (or (== (.-Name sym) "runtime.etext") (== (.-Name sym) "etext"))
+                        (continue))
+
+
+                      ;; Count parameter and local (auto) syms
+                      (let [(values ^int np ^int na) (zero int)
+                          ^{:line 472 :tag int} end (zero int)]
+                        (label :countloop
+                          (for [(set! end (+ i 1))] (< end (len (.-Syms t))) (inc! end)
+                            (switch (.-Type (aget (.-Syms t) end))
+                              (case [\T \t \L \l \Z \z]
+                                (break :countloop))
+                              (case [\p]
+                                (inc! np))
+                              (case [\a]
+                                (inc! na)))))
+
+
+
+                        ;; Fill in the function symbol
+                        (let [n (len (.-Funcs t))]
+                          (set! (.-Funcs t) (subslice (.-Funcs t) 0 (+ n 1)))
+                          (let [fn (addr (aget (.-Funcs t) n))]
+                            (set! (.-Func sym) fn)
+                            (set! (.-Params fn) (make (slice (* Sym)) 0 np))
+                            (set! (.-Locals fn) (make (slice (* Sym)) 0 na))
+                            (set! (.-Sym fn) sym)
+                            (set! (.-Entry fn) (.-Value sym))
+                            (set! (.-Obj fn) obj)
+                            (cond (!= (.-go12line t) nil)
+                              ;; All functions share the same line table.
+                              ;; It knows how to narrow down to a specific
+                              ;; function quickly.
+                              (set! (.-LineTable fn) (.-go12line t))
+                              (!= pcln nil) (do
+                                (set! (.-LineTable fn) (.slice pcln (.-Entry fn)))
+                                (set! pcln (.-LineTable fn))))
+
+                            (for [j i] (< j end) (inc! j)
+                              (let [s (addr (aget (.-Syms t) j))]
+                                (switch (.-Type s)
+                                  (case [\m]
+                                    (set! (.-FrameSize fn) (conv int (.-Value s))))
+                                  (case [\p]
+                                    (let [n (len (.-Params fn))]
+                                      (set! (.-Params fn) (subslice (.-Params fn) 0 (+ n 1)))
+                                      (aset (.-Params fn) n s)))
+                                  (case [\a]
+                                    (let [n (len (.-Locals fn))]
+                                      (set! (.-Locals fn) (subslice (.-Locals fn) 0 (+ n 1)))
+                                      (aset (.-Locals fn) n s))))))
+
+
+                            (set! i (- end 1))))))))) ; loop will i++
+
+
+
+              (when (and (!= (.-go12line t) nil) (== nf 0))
+                (set! (.-Funcs t) (.go12Funcs (.-go12line t))))
+
+              (when (!= obj nil)
+                (set! (.-Funcs obj) (subslice (.-Funcs t) lastf)))
+
+              (return (addr t) nil))))))))
+
+
+
+
+^{:go/end 549} (go/method PCToFunc "PCToFunc returns the function containing the program counter pc,\nor nil if there is no such function.\n" ^{:tag (* Func)} [^{:tag (* Table)} t ^uint64 pc]
+  ^{:go/breaks [[3 548]]} (let [funcs (.-Funcs t)]
+    (while (> (len funcs) 0)
+      (let [m (/ (len funcs) 2)
+          ^{:line 538} fn (addr (aget funcs m))]
+        (switch
+          (case [(< pc (.-Entry fn))]
+            (set! funcs (subslice funcs 0 m)))
+          (case [(and (<= (.-Entry fn) pc) (< pc (.-End fn)))]
+            (return fn))
+          (default
+            (set! funcs (subslice funcs (+ m 1)))))))
+
+
+    nil))
+
+
+
+
+^{:go/end 564} (go/method PCToLine "PCToLine looks up line number information for a program counter.\nIf there is no information, it returns fn == nil.\n" [^{:tag (* Table)} t ^uint64 pc] :results [^string file ^int line ^{:tag (* Func)} fn]
+  (when [(set! fn (.PCToFunc t pc))] (== fn nil)
+    (return))
+
+  (if (!= (.-go12line t) nil) (do
+      (set! file (.go12PCToFile (.-go12line t) pc))
+      (set! line (.go12PCToLine (.-go12line t) pc)))
+
+    (set! (values file line) (.lineFromAline (.-Obj fn) (.PCToLine (.-LineTable fn) pc))))
+
+  (return))
+
+
+
+
+
+^{:go/end 595} (go/method LineToPC "LineToPC looks up the first program counter on the given line in\nthe named file. It returns [UnknownFileError] or [UnknownLineError] if\nthere is an error looking up this line.\n" [^{:tag (* Table)} t ^string file ^int line] :results [^uint64 pc ^{:tag (* Func)} fn ^error err]
+  (let [(values obj ok) (aget (.-Files t) file)]
+    (when (not ok)
+      (return 0 nil (conv UnknownFileError file)))
+
+
+    (when (!= (.-go12line t) nil)
+      (let [pc (.go12LineToPC (.-go12line t) file line)]
+        (when (== pc 0)
+          (return 0 nil (addr (lit UnknownLineError file line))))
+
+        (return pc (.PCToFunc t pc) nil)))
+
+
+    (let [(values abs ^:assign err) (.alineFromLine obj file line)]
+      (when (!= err nil)
+        (return))
+
+      (range [i (.-Funcs obj)]
+        (let [f (addr (aget (.-Funcs obj) i))
+            ^{:line 589} pc (.LineToPC (.-LineTable f) abs (.-End f))]
+          (when (!= pc 0)
+            (return pc f nil))))
+
+
+      (return 0 nil (addr (lit UnknownLineError file line))))))
+
+
+
+
+^{:go/breaks [[5 610]] :go/end 611} (go/method LookupSym "LookupSym returns the text, data, or bss symbol with the given name,\nor nil if no such symbol is found.\n" ^{:tag (* Sym)} [^{:tag (* Table)} t ^string name]
+  ;; TODO(austin) Maybe make a map
+  (range [i (.-Syms t)]
+    (let [s (addr (aget (.-Syms t) i))]
+      (switch (.-Type s)
+        (case [\T \t \L \l \D \d \B \b]
+          (when (== (.-Name s) name)
+            (return s))))))
+
+
+
+  nil)
+
+
+
+
+^{:go/breaks [[5 622]] :go/end 623} (go/method LookupFunc "LookupFunc returns the text, data, or bss symbol with the given name,\nor nil if no such symbol is found.\n" ^{:tag (* Func)} [^{:tag (* Table)} t ^string name]
+  (range [i (.-Funcs t)]
+    (let [f (addr (aget (.-Funcs t) i))]
+      (when (== (.-Name (.-Sym f)) name)
+        (return f))))
+
+
+  nil)
+
+
+
+^{:go/breaks [[5 636]] :go/end 637} (go/method SymByAddr "SymByAddr returns the text, data, or bss symbol starting at the given address.\n" ^{:tag (* Sym)} [^{:tag (* Table)} t ^uint64 addr]
+  (range [i (.-Syms t)]
+    (let [s (addr (aget (.-Syms t) i))]
+      (switch (.-Type s)
+        (case [\T \t \L \l \D \d \B \b]
+          (when (== (.-Value s) addr)
+            (return s))))))
+
+
+
+  nil)
+
+
+;; /*
+;; * Object files
+;; */
+
+;; This is legacy code for Go 1.1 and earlier, which used the
+;; Plan 9 format for pc-line tables. This code was never quite
+;; correct. It's probably very close, and it's usually correct, but
+;; we never quite found all the corner cases.
+;;
+;; Go 1.2 and later use a simpler format, documented at golang.org/s/go12symtab.
+
+^{:go/end 690} (go/method lineFromAline [^{:tag (* Obj)} o ^int aline] :results [string int]
+  (let-type [stackEnt (struct
+        ^{:line 652 :tag string} path
+        ^{:line 653 :tag int} start
+        ^{:line 654 :tag int} offset
+        ^{:line 655 :tag (* stackEnt)} prev)]
+
+
+    (let [noPath (addr (lit stackEnt "" 0 0 nil))
+        ^{:line 659} tos noPath]
+
+      (label :pathloop
+        (range [_ s (.-Paths o)]
+          (let [val (conv int (.-Value s))]
+            (switch
+              (case [(> val aline)]
+                (break :pathloop))
+
+              (case [(== val 1)]
+                ;; Start a new stack
+                (set! tos (addr (lit stackEnt (.-Name s) val 0 noPath))))
+
+              (case [(== (.-Name s) "")]
+                ;; Pop
+                (when (== tos noPath)
+                  (return "<malformed symbol table>" 0))
+
+                (set! (.-offset (.-prev tos)) + (- val (.-start tos)))
+                (set! tos (.-prev tos)))
+
+              (default
+                ;; Push
+                (set! tos (addr (lit stackEnt (.-Name s) val 0 tos))))))))
+
+
+
+      (when (== tos noPath)
+        (return "" 0))
+
+      (return (.-path tos) (+ (- aline (.-start tos) (.-offset tos)) 1)))))
+
+
+^{:go/end 732} (go/method alineFromLine [^{:tag (* Obj)} o ^string path ^int line] :results [int error]
+  (when (< line 1)
+    (return 0 (addr (lit UnknownLineError path line))))
+
+
+  (range [i s (.-Paths o)]
+    ;; Find this path
+    (when (!= (.-Name s) path)
+      (continue))
+
+
+    ;; Find this line at this stack level
+    (let [depth 0
+        ^{:line 705 :tag int} incstart (zero int)]
+      (set! line + (conv int (.-Value s)))
+      (label :pathloop
+        (range [_ s (subslice (.-Paths o) i)]
+          (let [val (conv int (.-Value s))]
+            (switch
+              (case [(and (== depth 1) (>= val line))]
+                (return (- line 1) nil))
+
+              (case [(== (.-Name s) "")]
+                (dec! depth)
+                (cond (== depth 0)
+                  (break :pathloop)
+                  (== depth 1)
+                  (set! line + (- val incstart))))
+
+
+              (default
+                (when (== depth 1)
+                  (set! incstart val))
+
+                (inc! depth))))))
+
+
+      (return 0 (addr (lit UnknownLineError path line)))))
+
+  (return 0 (conv UnknownFileError path)))
+
+
+;; /*
+;; * Errors
+;; */
+
+
+
+(go/type UnknownFileError "UnknownFileError represents a failure to find the specific file in\nthe symbol table.\n" string)
+
+^{:go/end 742} (go/method Error ^string [^UnknownFileError e] (+ "unknown file: " (conv string e)))
+
+
+
+
+(go/type UnknownLineError "UnknownLineError represents a failure to map a line to a program\ncounter, either because the line is beyond the bounds of the file\nor because there is no code on the given line.\n" (struct
+    ^{:line 748 :tag string} File
+    ^{:line 749 :tag int} Line))
+
+
+^{:go/end 754} (go/method Error ^string [^{:tag (* UnknownLineError)} e]
+  (+ "no code at " (.-File e) ":" (strconv/Itoa (.-Line e))))
+
+
+
+
+(go/type DecodingError "DecodingError represents an error during the decoding of\nthe symbol table.\n" (struct
+    ^{:line 759 :tag int} off
+    ^{:line 760 :tag string} msg
+    ^{:line 761 :tag any} val))
+
+
+^{:go/end 771} (go/method Error ^string [^{:tag (* DecodingError)} e]
+  (let [msg (.-msg e)]
+    (when (!= (.-val e) nil)
+      (set! msg + (fmt/Sprintf " '%v'" (.-val e))))
+
+    (set! msg + (fmt/Sprintf " at byte %#x" (.-off e)))
+    ^{:line 770} msg))

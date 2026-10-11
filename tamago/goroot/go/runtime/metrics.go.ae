@@ -1,0 +1,1050 @@
+;; Copyright 2020 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "metrics.go" :imports [
+
+    ;; Metrics implementation exported to runtime/metrics.
+
+
+    ^{:line 10} [godebugs "internal/godebugs"]
+    ^{:line 11} [atomic "internal/runtime/atomic"]
+    ^{:line 12} [gc "internal/runtime/gc"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+(go/var
+
+
+
+
+
+
+  ^{:line 23} [^{:tag uint32 :doc "metrics is a map of runtime/metrics keys to data used by the runtime\nto sample each metric's value. metricsInit indicates it has been\ninitialized.\n\nThese fields are protected by metricsSema which should be\nlocked/unlocked with metricsLock() / metricsUnlock().\n"} metricsSema 1]
+  ^{:line 24} [^bool metricsInit]
+  ^{:line 25} [^{:tag (map string metricData)} metrics]
+
+  ^{:line 27} [^{:tag (slice float64)} sizeClassBuckets]
+  ^{:line 28} [^{:tag (slice float64)} timeHistBuckets])
+
+
+(go/type metricData (struct
+
+
+
+    ^{:line 35 :tag statDepSet :doc "deps is the set of runtime statistics that this metric\ndepends on. Before compute is called, the statAggregate\nwhich will be passed must ensure() these dependencies.\n"} deps
+
+
+
+    ^{:line 39 :tag (func [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]) :doc "compute is a function that populates a metricValue\ngiven a populated statAggregate structure.\n"} compute))
+
+
+^{:go/end 50} (go/func metricsLock []
+  ;; Acquire the metricsSema but with handoff. Operations are typically
+  ;; expensive enough that queueing up goroutines and handing off between
+  ;; them will be noticeably better-behaved.
+  (semacquire1 (addr metricsSema) true 0 0 waitReasonSemacquire)
+  (when raceenabled
+    (raceacquire (conv unsafe/Pointer (addr metricsSema)))))
+
+
+
+^{:go/end 57} (go/func metricsUnlock []
+  (when raceenabled
+    (racerelease (conv unsafe/Pointer (addr metricsSema))))
+
+  (semrelease (addr metricsSema)))
+
+
+
+
+
+^{:go/end 557} (go/func initMetrics "initMetrics initializes the metrics map if it hasn't been yet.\n\nmetricsSema must be held.\n" []
+  (when metricsInit
+    (return))
+
+
+  (set! sizeClassBuckets (make (slice float64) gc/NumSizeClasses (+ gc/NumSizeClasses 1)))
+  ;; Skip size class 0 which is a stand-in for large objects, but large
+  ;; objects are tracked separately (and they actually get placed in
+  ;; the last bucket, not the first).
+  (aset sizeClassBuckets 0 1) ; The smallest allocation is 1 byte in size.
+  (for [i 1] (< i gc/NumSizeClasses) (inc! i)
+    ;; Size classes have an inclusive upper-bound
+    ;; and exclusive lower bound (e.g. 48-byte size class is
+    ;; (32, 48]) whereas we want and inclusive lower-bound
+    ;; and exclusive upper-bound (e.g. 48-byte size class is
+    ;; [33, 49)). We can achieve this by shifting all bucket
+    ;; boundaries up by 1.
+    ;;
+    ;; Also, a float64 can precisely represent integers with
+    ;; value up to 2^53 and size classes are relatively small
+    ;; (nowhere near 2^48 even) so this will give us exact
+    ;; boundaries.
+    (aset sizeClassBuckets i (conv float64 (+ (aget gc/SizeClassToSize i) 1))))
+
+  (set! sizeClassBuckets (append sizeClassBuckets (float64Inf)))
+
+  (set! timeHistBuckets (timeHistogramMetricsBuckets))
+  (set! metrics (lit (map string metricData)
+      ^{:line 90} ["/cgo/go-to-c-calls:calls" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 94} (fn [^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (conv uint64 (NumCgoCall)))))]
+
+
+      ^{:line 96} ["/cpu/classes/gc/mark/assist:cpu-seconds" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet cpuStatsDep)
+          :compute ^{:go/end 101} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec ^{:go/via [cpuStats]} (.-GCAssistTime (.-cpuStats in)))))))]
+
+
+      ^{:line 103} ["/cpu/classes/gc/mark/dedicated:cpu-seconds" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet cpuStatsDep)
+          :compute ^{:go/end 108} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec ^{:go/via [cpuStats]} (.-GCDedicatedTime (.-cpuStats in)))))))]
+
+
+      ^{:line 110} ["/cpu/classes/gc/mark/idle:cpu-seconds" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet cpuStatsDep)
+          :compute ^{:go/end 115} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec ^{:go/via [cpuStats]} (.-GCIdleTime (.-cpuStats in)))))))]
+
+
+      ^{:line 117} ["/cpu/classes/gc/pause:cpu-seconds" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet cpuStatsDep)
+          :compute ^{:go/end 122} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec ^{:go/via [cpuStats]} (.-GCPauseTime (.-cpuStats in)))))))]
+
+
+      ^{:line 124} ["/cpu/classes/gc/total:cpu-seconds" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet cpuStatsDep)
+          :compute ^{:go/end 129} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec ^{:go/via [cpuStats]} (.-GCTotalTime (.-cpuStats in)))))))]
+
+
+      ^{:line 131} ["/cpu/classes/idle:cpu-seconds" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet cpuStatsDep)
+          :compute ^{:go/end 136} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec ^{:go/via [cpuStats]} (.-IdleTime (.-cpuStats in)))))))]
+
+
+      ^{:line 138} ["/cpu/classes/scavenge/assist:cpu-seconds" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet cpuStatsDep)
+          :compute ^{:go/end 143} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec ^{:go/via [cpuStats]} (.-ScavengeAssistTime (.-cpuStats in)))))))]
+
+
+      ^{:line 145} ["/cpu/classes/scavenge/background:cpu-seconds" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet cpuStatsDep)
+          :compute ^{:go/end 150} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec ^{:go/via [cpuStats]} (.-ScavengeBgTime (.-cpuStats in)))))))]
+
+
+      ^{:line 152} ["/cpu/classes/scavenge/total:cpu-seconds" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet cpuStatsDep)
+          :compute ^{:go/end 157} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec ^{:go/via [cpuStats]} (.-ScavengeTotalTime (.-cpuStats in)))))))]
+
+
+      ^{:line 159} ["/cpu/classes/total:cpu-seconds" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet cpuStatsDep)
+          :compute ^{:go/end 164} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec ^{:go/via [cpuStats]} (.-TotalTime (.-cpuStats in)))))))]
+
+
+      ^{:line 166} ["/cpu/classes/user:cpu-seconds" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet cpuStatsDep)
+          :compute ^{:go/end 171} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec ^{:go/via [cpuStats]} (.-UserTime (.-cpuStats in)))))))]
+
+
+      ^{:line 173} ["/gc/cleanups/executed:cleanups" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet finalStatsDep)
+          :compute ^{:go/end 178} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-cleanupsExecuted (.-finalStats in)))))]
+
+
+      ^{:line 180} ["/gc/cleanups/queued:cleanups" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet finalStatsDep)
+          :compute ^{:go/end 185} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-cleanupsQueued (.-finalStats in)))))]
+
+
+      ^{:line 187} ["/gc/cycles/automatic:gc-cycles" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet sysStatsDep)
+          :compute ^{:go/end 192} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (- (.-gcCyclesDone (.-sysStats in)) (.-gcCyclesForced (.-sysStats in))))))]
+
+
+      ^{:line 194} ["/gc/cycles/forced:gc-cycles" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet sysStatsDep)
+          :compute ^{:go/end 199} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-gcCyclesForced (.-sysStats in)))))]
+
+
+      ^{:line 201} ["/gc/cycles/total:gc-cycles" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet sysStatsDep)
+          :compute ^{:go/end 206} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-gcCyclesDone (.-sysStats in)))))]
+
+
+      ^{:line 208} ["/gc/finalizers/executed:finalizers" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet finalStatsDep)
+          :compute ^{:go/end 213} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-finalizersExecuted (.-finalStats in)))))]
+
+
+      ^{:line 215} ["/gc/finalizers/queued:finalizers" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet finalStatsDep)
+          :compute ^{:go/end 220} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-finalizersQueued (.-finalStats in)))))]
+
+
+      ^{:line 222} ["/gc/scan/globals:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet gcStatsDep)
+          :compute ^{:go/end 227} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-globalsScan (.-gcStats in)))))]
+
+
+      ^{:line 229} ["/gc/scan/heap:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet gcStatsDep)
+          :compute ^{:go/end 234} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-heapScan (.-gcStats in)))))]
+
+
+      ^{:line 236} ["/gc/scan/stack:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet gcStatsDep)
+          :compute ^{:go/end 241} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-stackScan (.-gcStats in)))))]
+
+
+      ^{:line 243} ["/gc/scan/total:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet gcStatsDep)
+          :compute ^{:go/end 248} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-totalScan (.-gcStats in)))))]
+
+
+      ^{:line 250} ["/gc/heap/allocs-by-size:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 260} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (let [hist (.float64HistOrInit out sizeClassBuckets)]
+              (aset (.-counts hist) (- (len (.-counts hist)) 1) ^{:go/via [heapStatsDelta]} (.-largeAllocCount (.-heapStats in)))
+              ;; Cut off the first index which is ostensibly for size class 0,
+              ;; but large objects are tracked separately so it's actually unused.
+              (range [i count (subslice ^{:go/via [heapStatsDelta]} (.-smallAllocCount (.-heapStats in)) 1)]
+                (aset (.-counts hist) i count)))))]
+
+
+
+      ^{:line 262} ["/gc/heap/allocs:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 267} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-totalAllocated (.-heapStats in)))))]
+
+
+      ^{:line 269} ["/gc/heap/allocs:objects" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 274} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-totalAllocs (.-heapStats in)))))]
+
+
+      ^{:line 276} ["/gc/heap/frees-by-size:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 286} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (let [hist (.float64HistOrInit out sizeClassBuckets)]
+              (aset (.-counts hist) (- (len (.-counts hist)) 1) ^{:go/via [heapStatsDelta]} (.-largeFreeCount (.-heapStats in)))
+              ;; Cut off the first index which is ostensibly for size class 0,
+              ;; but large objects are tracked separately so it's actually unused.
+              (range [i count (subslice ^{:go/via [heapStatsDelta]} (.-smallFreeCount (.-heapStats in)) 1)]
+                (aset (.-counts hist) i count)))))]
+
+
+
+      ^{:line 288} ["/gc/heap/frees:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 293} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-totalFreed (.-heapStats in)))))]
+
+
+      ^{:line 295} ["/gc/heap/frees:objects" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 300} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-totalFrees (.-heapStats in)))))]
+
+
+      ^{:line 302} ["/gc/heap/goal:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet sysStatsDep)
+          :compute ^{:go/end 307} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-heapGoal (.-sysStats in)))))]
+
+
+      ^{:line 309} ["/gc/gomemlimit:bytes" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 313} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (conv uint64 (.Load (.-memoryLimit gcController))))))]
+
+
+      ^{:line 315} ["/gc/gogc:percent" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 319} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (conv uint64 (.Load (.-gcPercent gcController))))))]
+
+
+      ^{:line 321} ["/gc/heap/live:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 326} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-heapMarked gcController))))]
+
+
+      ^{:line 328} ["/gc/heap/objects:objects" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 333} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-numObjects (.-heapStats in)))))]
+
+
+      ^{:line 335} ["/gc/heap/tiny/allocs:objects" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 340} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) ^{:go/via [heapStatsDelta]} (.-tinyAllocCount (.-heapStats in)))))]
+
+
+      ^{:line 342} ["/gc/limiter/last-enabled:gc-cycle" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 346} (fn [^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (conv uint64 (.Load (.-lastEnabledCycle gcCPULimiter))))))]
+
+
+      ^{:line 348} ["/gc/pauses:seconds" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 352} (fn [^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+            ;; N.B. this is identical to /sched/pauses/total/gc:seconds.
+            (.write (.-stwTotalTimeGC sched) out)))]
+
+
+      ^{:line 354} ["/gc/stack/starting-size:bytes" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 358} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (conv uint64 startingStackSize))))]
+
+
+      ^{:line 360} ["/memory/classes/heap/free:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 366} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (conv uint64 (- ^{:go/via [heapStatsDelta]} (.-committed (.-heapStats in)) ^{:go/via [heapStatsDelta]} (.-inHeap (.-heapStats in))
+                  ^{:go/via [heapStatsDelta]} (.-inStacks (.-heapStats in)) ^{:go/via [heapStatsDelta]} (.-inWorkBufs (.-heapStats in)))))))]
+
+
+      ^{:line 368} ["/memory/classes/heap/objects:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 373} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-inObjects (.-heapStats in)))))]
+
+
+      ^{:line 375} ["/memory/classes/heap/released:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 380} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (conv uint64 ^{:go/via [heapStatsDelta]} (.-released (.-heapStats in))))))]
+
+
+      ^{:line 382} ["/memory/classes/heap/stacks:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 387} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (conv uint64 ^{:go/via [heapStatsDelta]} (.-inStacks (.-heapStats in))))))]
+
+
+      ^{:line 389} ["/memory/classes/heap/unused:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep)
+          :compute ^{:go/end 394} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (- (conv uint64 ^{:go/via [heapStatsDelta]} (.-inHeap (.-heapStats in))) (.-inObjects (.-heapStats in))))))]
+
+
+      ^{:line 396} ["/memory/classes/metadata/mcache/free:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet sysStatsDep)
+          :compute ^{:go/end 401} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (- (.-mCacheSys (.-sysStats in)) (.-mCacheInUse (.-sysStats in))))))]
+
+
+      ^{:line 403} ["/memory/classes/metadata/mcache/inuse:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet sysStatsDep)
+          :compute ^{:go/end 408} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-mCacheInUse (.-sysStats in)))))]
+
+
+      ^{:line 410} ["/memory/classes/metadata/mspan/free:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet sysStatsDep)
+          :compute ^{:go/end 415} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (- (.-mSpanSys (.-sysStats in)) (.-mSpanInUse (.-sysStats in))))))]
+
+
+      ^{:line 417} ["/memory/classes/metadata/mspan/inuse:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet sysStatsDep)
+          :compute ^{:go/end 422} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-mSpanInUse (.-sysStats in)))))]
+
+
+      ^{:line 424} ["/memory/classes/metadata/other:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep sysStatsDep)
+          :compute ^{:go/end 429} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (+ (conv uint64 ^{:go/via [heapStatsDelta]} (.-inWorkBufs (.-heapStats in))) (.-gcMiscSys (.-sysStats in))))))]
+
+
+      ^{:line 431} ["/memory/classes/os-stacks:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet sysStatsDep)
+          :compute ^{:go/end 436} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-stacksSys (.-sysStats in)))))]
+
+
+      ^{:line 438} ["/memory/classes/other:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet sysStatsDep)
+          :compute ^{:go/end 443} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-otherSys (.-sysStats in)))))]
+
+
+      ^{:line 445} ["/memory/classes/profiling/buckets:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet sysStatsDep)
+          :compute ^{:go/end 450} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-buckHashSys (.-sysStats in)))))]
+
+
+      ^{:line 452} ["/memory/classes/total:bytes" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet heapStatsDep sysStatsDep)
+          :compute ^{:go/end 460} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (+ (conv uint64 (+ ^{:go/via [heapStatsDelta]} (.-committed (.-heapStats in)) ^{:go/via [heapStatsDelta]} (.-released (.-heapStats in))))
+                (.-stacksSys (.-sysStats in)) (.-mSpanSys (.-sysStats in))
+                (.-mCacheSys (.-sysStats in)) (.-buckHashSys (.-sysStats in))
+                (.-gcMiscSys (.-sysStats in)) (.-otherSys (.-sysStats in))))))]
+
+
+      ^{:line 462} ["/sched/gomaxprocs:threads" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 466} (fn [^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (conv uint64 gomaxprocs))))]
+
+
+      ^{:line 468} ["/sched/goroutines:goroutines" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet schedStatsDep)
+          :compute ^{:go/end 473} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-gTotal (.-schedStats in)))))]
+
+
+      ^{:line 475} ["/sched/goroutines/not-in-go:goroutines" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet schedStatsDep)
+          :compute ^{:go/end 480} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-gNonGo (.-schedStats in)))))]
+
+
+      ^{:line 482} ["/sched/goroutines/running:goroutines" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet schedStatsDep)
+          :compute ^{:go/end 487} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-gRunning (.-schedStats in)))))]
+
+
+      ^{:line 489} ["/sched/goroutines/runnable:goroutines" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet schedStatsDep)
+          :compute ^{:go/end 494} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-gRunnable (.-schedStats in)))))]
+
+
+      ^{:line 496} ["/sched/goroutines/waiting:goroutines" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet schedStatsDep)
+          :compute ^{:go/end 501} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-gWaiting (.-schedStats in)))))]
+
+
+      ^{:line 503} ["/sched/goroutines-created:goroutines" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet schedStatsDep)
+          :compute ^{:go/end 508} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-gCreated (.-schedStats in)))))]
+
+
+      ^{:line 510} ["/sched/latencies:seconds" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 513} (fn [^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+            (.write (.-timeToRun sched) out)))]
+
+
+      ^{:line 515} ["/sched/pauses/stopping/gc:seconds" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 518} (fn [^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+            (.write (.-stwStoppingTimeGC sched) out)))]
+
+
+      ^{:line 520} ["/sched/pauses/stopping/other:seconds" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 523} (fn [^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+            (.write (.-stwStoppingTimeOther sched) out)))]
+
+
+      ^{:line 525} ["/sched/pauses/total/gc:seconds" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 528} (fn [^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+            (.write (.-stwTotalTimeGC sched) out)))]
+
+
+      ^{:line 530} ["/sched/pauses/total/other:seconds" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 533} (fn [^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+            (.write (.-stwTotalTimeOther sched) out)))]
+
+
+      ^{:line 535} ["/sched/threads/total:threads" ^{:go/breaks [2 4]} (lit _
+          :deps (makeStatDepSet schedStatsDep)
+          :compute ^{:go/end 540} (fn [^{:tag (* statAggregate)} in ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindUint64)
+            (set! (.-scalar out) (.-threads (.-schedStats in)))))]
+
+
+      ^{:line 542} ["/sync/mutex/wait/total:seconds" ^{:go/breaks [2]} (lit _
+          :compute ^{:go/end 546} (fn [^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+            (set! (.-kind out) metricKindFloat64)
+            (set! (.-scalar out) (float64bits (nsToSec (totalMutexWaitTimeNanos))))))]))
+
+
+
+
+  (range [_ info godebugs/All]
+    (when (not (.-Opaque info))
+      (aset metrics (+ "/godebug/non-default-behavior/" (.-Name info) ":events") (lit metricData :compute compute0))))
+
+
+
+  (set! metricsInit true))
+
+
+^{:go/end 562} (go/func compute0 [^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+  (set! (.-kind out) metricKindUint64)
+  (set! (.-scalar out) 0))
+
+
+(go/type metricReader (func [] [uint64]))
+
+^{:go/end 569} (go/method compute [^metricReader f ^{:tag (* statAggregate)} _ ^{:tag (* metricValue)} out]
+  (set! (.-kind out) metricKindUint64)
+  (set! (.-scalar out) (f)))
+
+
+
+^{:go/end 582} (go/func ^{:go/linkname "godebug_registerMetric internal/godebug.registerMetric"} godebug_registerMetric [^string name ^{:tag (func [] [uint64])} read]
+  (metricsLock)
+  (initMetrics)
+  (let [(values d ok) (aget metrics name)]
+    (when (not ok)
+      (throw (+ "runtime: unexpected metric registration for " name)))
+
+    (set! (.-compute d) (.-compute (conv metricReader read)))
+    (aset metrics name d)
+    (metricsUnlock)))
+
+
+
+
+(go/type statDep "statDep is a dependency on a group of statistics\nthat a metric might have.\n" uint)
+
+(go/const
+  ^{:line 589} [^{:tag statDep :val 0} heapStatsDep iota] ; corresponds to heapStatsAggregate
+  ^{:line 590} [^{:val 1} sysStatsDep] ; corresponds to sysStatsAggregate
+  ^{:line 591} [^{:val 2} cpuStatsDep] ; corresponds to cpuStatsAggregate
+  ^{:line 592} [^{:val 3} gcStatsDep] ; corresponds to gcStatsAggregate
+  ^{:line 593} [^{:val 4} finalStatsDep] ; corresponds to finalStatsAggregate
+  ^{:line 594} [^{:val 5} schedStatsDep] ; corresponds to schedStatsAggregate
+  ^{:line 595} [^{:val 6} numStatsDeps])
+
+
+
+
+
+(go/type statDepSet "statDepSet represents a set of statDeps.\n\nUnder the hood, it's a bitmap.\n" (array 1 uint64))
+
+
+^{:go/end 610} (go/func makeStatDepSet "makeStatDepSet creates a new statDepSet from a list of statDeps.\n" ^statDepSet [& ^{:tag (slice statDep)} deps]
+  (let [^statDepSet s (zero statDepSet)]
+    (range [_ d deps]
+      (set! (aget s (/ d 64)) bit-or ^uint64 (<< 1 (% d 64))))
+
+    ^{:line 609} s))
+
+
+
+^{:go/end 619} (go/method difference "difference returns set difference of s from b as a new set.\n" ^statDepSet [^statDepSet s ^statDepSet b]
+  (let [^statDepSet c (zero statDepSet)]
+    (range [i s]
+      (aset c i (bit-and-not (aget s i) (aget b i))))
+
+    ^{:line 618} c))
+
+
+
+^{:go/end 628} (go/method union "union returns the union of the two sets as a new set.\n" ^statDepSet [^statDepSet s ^statDepSet b]
+  (let [^statDepSet c (zero statDepSet)]
+    (range [i s]
+      (aset c i (bit-or (aget s i) (aget b i))))
+
+    ^{:line 627} c))
+
+
+
+^{:go/breaks [[5 637]] :go/end 638} (go/method empty "empty returns true if there are no dependencies in the set.\n" ^bool [^{:tag (* statDepSet)} s]
+  (range [_ c s]
+    (when (!= c 0)
+      (return false)))
+
+
+  true)
+
+
+
+^{:go/end 643} (go/method has "has returns true if the set contains a given statDep.\n" ^bool [^{:tag (* statDepSet)} s ^statDep d]
+  (!= (bit-and (aget s (/ d 64)) ^uint64 (<< 1 (% d 64))) 0))
+
+
+
+
+
+
+
+(go/type heapStatsAggregate "heapStatsAggregate represents memory stats obtained from the\nruntime. This set of stats is grouped together because they\ndepend on each other in some way to make sense of the runtime's\ncurrent heap memory use. They're also sharded across Ps, so it\nmakes sense to grab them all at once.\n" (struct
+    ^{:line 651} heapStatsDelta
+
+    ;; Derived from values in heapStatsDelta.
+
+
+    ^{:line 656 :tag uint64 :doc "inObjects is the bytes of memory occupied by objects,\n"} inObjects
+
+
+    ^{:line 659 :tag uint64 :doc "numObjects is the number of live objects in the heap.\n"} numObjects
+
+
+
+    ^{:line 663 :tag uint64 :doc "totalAllocated is the total bytes of heap objects allocated\nover the lifetime of the program.\n"} totalAllocated
+
+
+
+    ^{:line 667 :tag uint64 :doc "totalFreed is the total bytes of heap objects freed\nover the lifetime of the program.\n"} totalFreed
+
+
+
+    ^{:line 671 :tag uint64 :doc "totalAllocs is the number of heap objects allocated over\nthe lifetime of the program.\n"} totalAllocs
+
+
+
+    ^{:line 675 :tag uint64 :doc "totalFrees is the number of heap objects freed over\nthe lifetime of the program.\n"} totalFrees))
+
+
+
+^{:go/end 697} (go/method compute "compute populates the heapStatsAggregate with values from the runtime.\n" [^{:tag (* heapStatsAggregate)} a]
+  (.read (.-heapStats memstats) (addr (.-heapStatsDelta a)))
+
+  ;; Calculate derived stats.
+  (set! (.-totalAllocs a) ^{:go/via [heapStatsDelta]} (.-largeAllocCount a))
+  (set! (.-totalFrees a) ^{:go/via [heapStatsDelta]} (.-largeFreeCount a))
+  (set! (.-totalAllocated a) ^{:go/via [heapStatsDelta]} (.-largeAlloc a))
+  (set! (.-totalFreed a) ^{:go/via [heapStatsDelta]} (.-largeFree a))
+  (range [i ^{:go/via [heapStatsDelta]} (.-smallAllocCount a)]
+    (let [na (aget ^{:go/via [heapStatsDelta]} (.-smallAllocCount a) i)
+        ^{:line 689} nf (aget ^{:go/via [heapStatsDelta]} (.-smallFreeCount a) i)]
+      (set! (.-totalAllocs a) + na)
+      (set! (.-totalFrees a) + nf)
+      (set! (.-totalAllocated a) + (* na (conv uint64 (aget gc/SizeClassToSize i))))
+      (set! (.-totalFreed a) + (* nf (conv uint64 (aget gc/SizeClassToSize i))))))
+
+  (set! (.-inObjects a) (- (.-totalAllocated a) (.-totalFreed a)))
+  (set! (.-numObjects a) (- (.-totalAllocs a) (.-totalFrees a))))
+
+
+
+
+
+
+
+
+
+(go/type sysStatsAggregate "sysStatsAggregate represents system memory stats obtained\nfrom the runtime. This set of stats is grouped together because\nthey're all relatively cheap to acquire and generally independent\nof one another and other runtime memory stats. The fact that they\nmay be acquired at different times, especially with respect to\nheapStatsAggregate, means there could be some skew, but because of\nthese stats are independent, there's no real consistency issue here.\n" (struct
+    ^{:line 707 :tag uint64} stacksSys
+    ^{:line 708 :tag uint64} mSpanSys
+    ^{:line 709 :tag uint64} mSpanInUse
+    ^{:line 710 :tag uint64} mCacheSys
+    ^{:line 711 :tag uint64} mCacheInUse
+    ^{:line 712 :tag uint64} buckHashSys
+    ^{:line 713 :tag uint64} gcMiscSys
+    ^{:line 714 :tag uint64} otherSys
+    ^{:line 715 :tag uint64} heapGoal
+    ^{:line 716 :tag uint64} gcCyclesDone
+    ^{:line 717 :tag uint64} gcCyclesForced))
+
+
+
+^{:go/end 738} (go/method compute "compute populates the sysStatsAggregate with values from the runtime.\n" [^{:tag (* sysStatsAggregate)} a]
+  (set! (.-stacksSys a) (.load (.-stacks_sys memstats)))
+  (set! (.-buckHashSys a) (.load (.-buckhash_sys memstats)))
+  (set! (.-gcMiscSys a) (.load (.-gcMiscSys memstats)))
+  (set! (.-otherSys a) (.load (.-other_sys memstats)))
+  (set! (.-heapGoal a) (.heapGoal gcController))
+  (set! (.-gcCyclesDone a) (conv uint64 (.-numgc memstats)))
+  (set! (.-gcCyclesForced a) (conv uint64 (.-numforcedgc memstats)))
+
+  (systemstack ^{:go/end 737} (fn []
+      (lock (addr (.-lock mheap_)))
+      (set! (.-mSpanSys a) (.load (.-mspan_sys memstats)))
+      (set! (.-mSpanInUse a) (conv uint64 (.-inuse (.-spanalloc mheap_))))
+      (set! (.-mCacheSys a) (.load (.-mcache_sys memstats)))
+      (set! (.-mCacheInUse a) (conv uint64 (.-inuse (.-cachealloc mheap_))))
+      (unlock (addr (.-lock mheap_))))))
+
+
+
+
+
+(go/type cpuStatsAggregate "cpuStatsAggregate represents CPU stats obtained from the runtime\nacquired together to avoid skew and inconsistencies.\n" (struct
+    ^{:line 743} cpuStats))
+
+
+
+^{:go/end 754} (go/method compute "compute populates the cpuStatsAggregate with values from the runtime.\n" [^{:tag (* cpuStatsAggregate)} a]
+  (set! (.-cpuStats a) (.-cpuStats work)))
+;; TODO(mknyszek): Update the CPU stats again so that we're not
+;; just relying on the STW snapshot. The issue here is that currently
+;; this will cause non-monotonicity in the "user" CPU time metric.
+;;
+;; a.cpuStats.accumulate(nanotime(), gcphase == _GCmark)
+
+
+
+
+(go/type gcStatsAggregate "gcStatsAggregate represents various GC stats obtained from the runtime\nacquired together to avoid skew and inconsistencies.\n" (struct
+    ^{:line 759 :tag uint64} heapScan
+    ^{:line 760 :tag uint64} stackScan
+    ^{:line 761 :tag uint64} globalsScan
+    ^{:line 762 :tag uint64} totalScan))
+
+
+
+^{:go/end 771} (go/method compute "compute populates the gcStatsAggregate with values from the runtime.\n" [^{:tag (* gcStatsAggregate)} a]
+  (set! (.-heapScan a) (.Load (.-heapScan gcController)))
+  (set! (.-stackScan a) (.Load (.-lastStackScan gcController)))
+  (set! (.-globalsScan a) (.Load (.-globalsScan gcController)))
+  (set! (.-totalScan a) (+ (.-heapScan a) (.-stackScan a) (.-globalsScan a))))
+
+
+
+
+(go/type finalStatsAggregate "finalStatsAggregate represents various finalizer/cleanup stats obtained\nfrom the runtime acquired together to avoid skew and inconsistencies.\n" (struct
+    ^{:line 776 :tag uint64} finalizersQueued
+    ^{:line 777 :tag uint64} finalizersExecuted
+    ^{:line 778 :tag uint64} cleanupsQueued
+    ^{:line 779 :tag uint64} cleanupsExecuted))
+
+
+
+^{:go/end 786} (go/method compute "compute populates the finalStatsAggregate with values from the runtime.\n" [^{:tag (* finalStatsAggregate)} a]
+  (set! (values (.-finalizersQueued a) (.-finalizersExecuted a)) (finReadQueueStats))
+  (set! (values (.-cleanupsQueued a) (.-cleanupsExecuted a)) (.readQueueStats gcCleanups)))
+
+
+
+
+(go/type schedStatsAggregate "schedStatsAggregate contains stats about the scheduler, including\nan approximate count of goroutines in each state.\n" (struct
+    ^{:line 791 :tag uint64} gTotal
+    ^{:line 792 :tag uint64} gRunning
+    ^{:line 793 :tag uint64} gRunnable
+    ^{:line 794 :tag uint64} gNonGo
+    ^{:line 795 :tag uint64} gWaiting
+    ^{:line 796 :tag uint64} gCreated
+    ^{:line 797 :tag uint64} threads))
+
+
+
+^{:go/end 872} (go/method compute "compute populates the schedStatsAggregate with values from the runtime.\n" [^{:tag (* schedStatsAggregate)} a]
+  ;; Lock the scheduler so the global run queue can't change and
+  ;; the number of Ps can't change. This doesn't prevent the
+  ;; local run queues from changing, so the results are still
+  ;; approximate.
+  (lock (addr (.-lock sched)))
+
+  ;; The total count of threads owned by Go is the number of Ms
+  ;; minus extra Ms on the list or in use.
+  (set! (.-threads a) (- (conv uint64 (mcount)) (conv uint64 (.Load extraMInUse)) (conv uint64 (.Load extraMLength))))
+
+  ;; Collect running/runnable from per-P run queues.
+  (set! (.-gCreated a) + (.Load (.-goroutinesCreated sched)))
+  (range [_ p allp]
+    (when (or (== p nil) (== (.-status p) _Pdead))
+      (break))
+
+    (set! (.-gCreated a) + (.-goroutinesCreated p))
+    (switch (.-status p)
+      (case [_Prunning]
+        (if [(values thread ok) (setBlockOnExitSyscall p)] ok (do
+            (.resume thread)
+            (inc! (.-gNonGo a)))
+
+          (inc! (.-gRunning a))))
+
+      (case [_Pgcstop]))
+    ;; The world is stopping or stopped.
+    ;; This is fine. The results will be
+    ;; slightly odd since nothing else
+    ;; is running, but it will be accurate.
+
+
+    (while true
+      (let [h (atomic/Load (addr (.-runqhead p)))
+          ^{:line 836} t (atomic/Load (addr (.-runqtail p)))
+          ^{:line 837} next (atomic/Loaduintptr (conv (* uintptr) (addr (.-runnext p))))
+          ^{:line 838} runnable (conv int32 (- t h))]
+        (when (or (!= (atomic/Load (addr (.-runqhead p))) h) (< runnable 0))
+          (continue))
+
+        (when (!= next 0)
+          (inc! runnable))
+
+        (set! (.-gRunnable a) + (conv uint64 runnable))
+        (break))))
+
+
+
+  ;; Global run queue.
+  (set! (.-gRunnable a) + (conv uint64 (.-size (.-runq sched))))
+
+  ;; Account for Gs that are in _Gsyscall without a P.
+  (let [nGsyscallNoP (.Load (.-nGsyscallNoP sched))]
+
+    ;; nGsyscallNoP can go negative during temporary races.
+    (when (>= nGsyscallNoP 0)
+      (set! (.-gNonGo a) + (conv uint64 nGsyscallNoP)))
+
+
+    ;; Compute the number of blocked goroutines. We have to
+    ;; include system goroutines in this count because we included
+    ;; them above.
+    (set! (.-gTotal a) (conv uint64 (gcount true)))
+    (if (< (.-gTotal a) (+ (.-gRunning a) (.-gRunnable a) (.-gNonGo a)))
+      (set! (.-gWaiting a) 0)
+
+      (set! (.-gWaiting a) (- (.-gTotal a) (+ (.-gRunning a) (.-gRunnable a) (.-gNonGo a)))))
+
+
+    (unlock (addr (.-lock sched)))))
+
+
+
+
+^{:go/end 878} (go/func nsToSec "nsToSec takes a duration in nanoseconds and converts it to seconds as\na float64.\n" ^float64 [^int64 ns]
+  (/ (conv float64 ns) 1.0E9))
+
+
+
+
+
+
+
+(go/type statAggregate "statAggregate is the main driver of the metrics implementation.\n\nIt contains multiple aggregates of runtime statistics, as well\nas a set of these aggregates that it has populated. The aggregates\nare populated lazily by its ensure method.\n" (struct
+    ^{:line 886 :tag statDepSet} ensured
+    ^{:line 887 :tag heapStatsAggregate} heapStats
+    ^{:line 888 :tag sysStatsAggregate} sysStats
+    ^{:line 889 :tag cpuStatsAggregate} cpuStats
+    ^{:line 890 :tag gcStatsAggregate} gcStats
+    ^{:line 891 :tag finalStatsAggregate} finalStats
+    ^{:line 892 :tag schedStatsAggregate} schedStats))
+
+
+
+
+^{:go/end 922} (go/method ensure "ensure populates statistics aggregates determined by deps if they\nhaven't yet been populated.\n" [^{:tag (* statAggregate)} a ^{:tag (* statDepSet)} deps]
+  (let [missing (.difference deps (.-ensured a))]
+    (when (.empty missing)
+      (return))
+
+    (for [i (conv statDep 0)] (< i numStatsDeps) (inc! i)
+      (when (not (.has missing i))
+        (continue))
+
+      (switch i
+        (case [heapStatsDep]
+          (.compute (.-heapStats a)))
+        (case [sysStatsDep]
+          (.compute (.-sysStats a)))
+        (case [cpuStatsDep]
+          (.compute (.-cpuStats a)))
+        (case [gcStatsDep]
+          (.compute (.-gcStats a)))
+        (case [finalStatsDep]
+          (.compute (.-finalStats a)))
+        (case [schedStatsDep]
+          (.compute (.-schedStats a)))))
+
+
+    (set! (.-ensured a) (.union (.-ensured a) missing))))
+
+
+
+
+(go/type metricKind "metricKind is a runtime copy of runtime/metrics.ValueKind and\nmust be kept structurally identical to that type.\n" int)
+
+(go/const
+
+
+  ^{:line 931} [^{:tag metricKind :val 0 :doc "These values must be kept identical to their corresponding Kind* values\nin the runtime/metrics package.\n"} metricKindBad iota]
+  ^{:line 932} [^{:val 1} metricKindUint64]
+  ^{:line 933} [^{:val 2} metricKindFloat64]
+  ^{:line 934} [^{:val 3} metricKindFloat64Histogram])
+
+
+
+
+(go/type metricSample "metricSample is a runtime copy of runtime/metrics.Sample and\nmust be kept structurally identical to that type.\n" (struct
+    ^{:line 940 :tag string} name
+    ^{:line 941 :tag metricValue} value))
+
+
+
+
+(go/type metricValue "metricValue is a runtime copy of runtime/metrics.Sample and\nmust be kept structurally identical to that type.\n" (struct
+    ^{:line 947 :tag metricKind} kind
+    ^{:line 948 :tag uint64} scalar ; contains scalar values for scalar Kinds.
+    ^{:line 949 :tag unsafe/Pointer} pointer)) ; contains non-scalar values.
+
+
+
+
+
+^{:go/end 969} (go/method float64HistOrInit "float64HistOrInit tries to pull out an existing float64Histogram\nfrom the value, but if none exists, then it allocates one with\nthe given buckets.\n" ^{:tag (* metricFloat64Histogram)} [^{:tag (* metricValue)} v ^{:tag (slice float64)} buckets]
+  (let [^{:tag (* metricFloat64Histogram)} hist (zero (* metricFloat64Histogram))]
+    (if (and (== (.-kind v) metricKindFloat64Histogram) (!= (.-pointer v) nil))
+      (set! hist (conv (* metricFloat64Histogram) (.-pointer v)))
+      (do
+        (set! (.-kind v) metricKindFloat64Histogram)
+        (set! hist (new metricFloat64Histogram))
+        (set! (.-pointer v) (conv unsafe/Pointer hist))))
+
+    (set! (.-buckets hist) buckets)
+    (when (!= (len (.-counts hist)) (- (len (.-buckets hist)) 1))
+      (set! (.-counts hist) (make (slice uint64) (- (len buckets) 1))))
+
+    ^{:line 968} hist))
+
+
+
+
+(go/type metricFloat64Histogram "metricFloat64Histogram is a runtime copy of runtime/metrics.Float64Histogram\nand must be kept structurally identical to that type.\n" (struct
+    ^{:line 974 :tag (slice uint64)} counts
+    ^{:line 975 :tag (slice float64)} buckets))
+
+
+
+
+
+
+
+(go/var ^{:tag statAggregate :doc "agg is used by readMetrics, and is protected by metricsSema.\n\nManaged as a global variable because its pointer will be\nan argument to a dynamically-defined function, and we'd\nlike to avoid it escaping to the heap.\n"} agg)
+
+(go/type metricName (struct
+    ^{:line 986 :tag string} name
+    ^{:line 987 :tag metricKind} kind))
+
+
+
+
+
+
+^{:go/end 1009} (go/func ^{:go/linkname "readMetricNames runtime/metrics_test.runtime_readMetricNames"} readMetricNames "readMetricNames is the implementation of runtime/metrics.readMetricNames,\nused by the runtime/metrics test and otherwise unreferenced.\n" ^{:tag (slice string)} []
+  (metricsLock)
+  (initMetrics)
+  (let [n (len metrics)]
+    (metricsUnlock)
+
+    (let [list (make (slice string) 0 n)]
+
+      (metricsLock)
+      (range [name metrics]
+        (set! list (append list name)))
+
+      (metricsUnlock)
+
+      ^{:line 1008} list)))
+
+
+
+
+
+^{:go/end 1023} (go/func ^{:go/linkname "readMetrics runtime/metrics.runtime_readMetrics"} readMetrics "readMetrics is the implementation of runtime/metrics.Read.\n" [^unsafe/Pointer samplesp ^int len ^int cap]
+  (metricsLock)
+
+  ;; Ensure the map is initialized.
+  (initMetrics)
+
+  ;; Read the metrics.
+  (readMetricsLocked samplesp len cap)
+  (metricsUnlock))
+
+
+
+
+
+
+^{:go/end 1052} (go/func readMetricsLocked "readMetricsLocked is the internal, locked portion of readMetrics.\n\nBroken out for more robust testing. metricsLock must be held and\ninitMetrics must have been called already.\n" [^unsafe/Pointer samplesp ^int len ^int cap]
+  ;; Construct a slice from the args.
+  (let [sl (lit slice samplesp len cap)
+      ^{:line 1032} samples @(conv (* (slice metricSample)) (conv unsafe/Pointer (addr sl)))]
+
+    ;; Clear agg defensively.
+    (set! agg (lit statAggregate))
+
+    ;; Sample.
+    (range [i samples]
+      (let [sample (addr (aget samples i))
+          (values data ok) (aget metrics (.-name sample))]
+        (when (not ok)
+          (set! (.-kind (.-value sample)) metricKindBad)
+          (continue))
+
+        ;; Ensure we have all the stats we need.
+        ;; agg is populated lazily.
+        (.ensure agg (addr (.-deps data)))
+
+        ;; Compute the value based on the stats we have.
+        ((.-compute data) (addr agg) (addr (.-value sample)))))))

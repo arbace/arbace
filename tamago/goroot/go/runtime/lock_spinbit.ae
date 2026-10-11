@@ -1,0 +1,467 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.runtime) (go/file "lock_spinbit.go" :build ["//go:build !wasm"] :imports [
+
+
+    ^{:line 10} [goarch "internal/goarch"]
+    ^{:line 11} [atomic "internal/runtime/atomic"]
+    ^{:line 12} [gc "internal/runtime/gc"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+;; This implementation depends on OS-specific implementations of
+;;
+;;	func semacreate(mp *m)
+;;		Create a semaphore for mp, if it does not already have one.
+;;
+;;	func semasleep(ns int64) int32
+;;		If ns < 0, acquire m's semaphore and return 0.
+;;		If ns >= 0, try to acquire m's semaphore for at most ns nanoseconds.
+;;		Return 0 if the semaphore was acquired, -1 if interrupted or timed out.
+;;
+;;	func semawakeup(mp *m)
+;;		Wake up mp, which is or will soon be sleeping on its semaphore.
+
+;; The mutex state consists of four flags and a pointer. The flag at bit 0,
+;; mutexLocked, represents the lock itself. Bit 1, mutexSleeping, is a hint that
+;; the pointer is non-nil. The fast paths for locking and unlocking the mutex
+;; are based on atomic 8-bit swap operations on the low byte; bits 2 through 7
+;; are unused.
+;;
+;; Bit 8, mutexSpinning, is a try-lock that grants a waiting M permission to
+;; spin on the state word. Most other Ms must attempt to spend their time
+;; sleeping to reduce traffic on the cache line. This is the "spin bit" for
+;; which the implementation is named. (The anti-starvation mechanism also grants
+;; temporary permission for an M to spin.)
+;;
+;; Bit 9, mutexStackLocked, is a try-lock that grants an unlocking M permission
+;; to inspect the list of waiting Ms and to pop an M off of that stack.
+;;
+;; The upper bits hold a (partial) pointer to the M that most recently went to
+;; sleep. The sleeping Ms form a stack linked by their mWaitList.next fields.
+;; Because the fast paths use an 8-bit swap on the low byte of the state word,
+;; we'll need to reconstruct the full M pointer from the bits we have. Most Ms
+;; are allocated on the heap, and have a known alignment and base offset. (The
+;; offset is due to mallocgc's allocation headers.) The main program thread uses
+;; a static M value, m0. We check for m0 specifically and add a known offset
+;; otherwise.
+
+(go/const
+  ^{:line 54} [^{:val 4} active_spin 4] ; referenced in proc.go for sync.Mutex implementation
+  ^{:line 55} [^{:val 30} active_spin_cnt 30]) ; referenced in proc.go for sync.Mutex implementation
+
+
+(go/const
+  ^{:line 59} [^{:val 1} mutexLocked 0x001]
+  ^{:line 60} [^{:val 2} mutexSleeping 0x002]
+  ^{:line 61} [^{:val 256} mutexSpinning 0x100]
+  ^{:line 62} [^{:val 512} mutexStackLocked 0x200]
+  ^{:line 63} [^{:val 1023} mutexMMask 0x3FF]
+  ^{:line 64} [^{:val 8} mutexMOffset gc/MallocHeaderSize] ; alignment of heap-allocated Ms (those other than m0)
+
+  ^{:line 66} [^{:val 4} mutexActiveSpinCount 4]
+  ^{:line 67} [^{:val 30} mutexActiveSpinSize 30]
+  ^{:line 68} [^{:val 1} mutexPassiveSpinCount 1]
+
+  ^{:line 70} [^{:val 16} mutexTailWakePeriod 16]
+
+
+
+
+
+
+
+
+  ^{:line 79} [^{:val 16 :doc "mutexMLocksDelta is the change in gp.m.locks for each lock/unlock of a\nmutex. The gp.m.locks field is shared with acquirem/releasem, and with\nother code that needs to disable preemption, which changes its value by\n1. Using a different delta for mutex in particular lets us notice when\nthe M is releasing its last mutex (so it can safely acquire another\nmutex, for profiling), even if the M has preemption disabled for other\nreasons.\n"} mutexMLocksDelta 16])
+
+
+
+^{:go/end 88} (go/func ^:go/nosplit key8 ^{:tag (* uint8)} [^{:tag (* uintptr)} p]
+  (when goarch/BigEndian
+    (return (addr (aget (conv (* (array 8 uint8)) (conv unsafe/Pointer p)) (- (/ goarch/PtrSize 1) 1)))))
+
+  (addr (aget (conv (* (array 8 uint8)) (conv unsafe/Pointer p)) 0)))
+
+
+
+
+
+
+
+
+
+(go/type mWaitList "mWaitList is part of the M struct, and holds the list of Ms that are waiting\nfor a particular runtime.mutex.\n\nWhen an M is unable to immediately obtain a lock, it adds itself to the list\nof Ms waiting for the lock. It does that via this struct's next field,\nforming a singly-linked list with the mutex's key field pointing to the head\nof the list.\n" (struct
+    ^{:line 98 :tag muintptr} next ; next m waiting for lock
+    ^{:line 99 :tag int64} startTicks)) ; when this m started waiting for the current lock holder, in cputicks
+
+
+
+^{:go/end 110} (go/func lockVerifyMSize "lockVerifyMSize confirms that we can recreate the low bits of the M pointer.\n" []
+  (let [size (+ (roundupsize (unsafe/Sizeof (lit mPadded)) false) gc/MallocHeaderSize)]
+    (when (!= (bit-and size mutexMMask) 0)
+      ^{:go/breaks [6]} (print "M structure uses sizeclass " size "/" (conv hex size) " bytes; "
+        "incompatible with mutex flag mask " (conv hex mutexMMask) "\n")
+      (throw "runtime.m memory alignment too small for spinbit mutex"))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 128} (go/func ^:go/nosplit mutexWaitListHead "mutexWaitListHead recovers a full muintptr that was missing its low bits.\nWith the exception of the static m0 value, it requires allocating runtime.m\nvalues in a size class with a particular minimum alignment. The 2048-byte\nsize class allows recovering the full muintptr value even after overwriting\nthe low 11 bits with flags. We can use those 11 bits as 3 flags and an\natomically-swapped byte.\n" ^muintptr [^uintptr v]
+  (if [highBits (bit-and-not v mutexMMask)] (== highBits 0)
+    (return 0)
+    (if [m0bits (conv muintptr (conv unsafe/Pointer (addr m0)))] (== highBits (bit-and-not (conv uintptr m0bits) mutexMMask))
+      (return m0bits)
+
+      (return (conv muintptr (+ highBits mutexMOffset))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 154} (go/func ^:go/nosplit mutexPreferLowLatency "mutexPreferLowLatency reports if this mutex prefers low latency at the risk\nof performance collapse. If so, we can allow all waiting threads to spin on\nthe state word rather than go to sleep.\n\nTODO: We could have the waiting Ms each spin on their own private cache line,\nespecially if we can put a bound on the on-CPU time that would consume.\n\nTODO: If there's a small set of mutex values with special requirements, they\ncould make use of a more specialized lock2/unlock2 implementation. Otherwise,\nwe're constrained to what we can fit within a single uintptr with no\nadditional storage on the M for each lock held.\n" ^bool [^{:tag (* mutex)} l]
+  (switch l
+    (default
+      (return false))
+    (case [(addr (.-lock sched))]
+      ;; We often expect sched.lock to pass quickly between Ms in a way that
+      ;; each M has unique work to do: for instance when we stop-the-world
+      ;; (bringing each P to idle) or add new netpoller-triggered work to the
+      ;; global run queue.
+      (return true))))
+
+
+
+^{:go/end 158} (go/func mutexContended ^bool [^{:tag (* mutex)} l]
+  (!= (bit-and-not (atomic/Loaduintptr (addr (.-key l))) mutexMMask) 0))
+
+
+^{:go/end 162} (go/func lock [^{:tag (* mutex)} l]
+  (lockWithRank l (getLockRank l)))
+
+
+^{:go/end 267} (go/func lock2 [^{:tag (* mutex)} l]
+  (let [gp (getg)]
+    (when (< (.-locks (.-m gp)) 0)
+      (throw "runtime·lock: lock count"))
+
+    (set! (.-locks (.-m gp)) + mutexMLocksDelta)
+
+    (let [k8 (key8 (addr (.-key l)))
+
+        ;; Speculative grab for lock.
+        ^{:line 174} v8 (atomic/Xchg8 k8 mutexLocked)]
+      (when (== (bit-and v8 mutexLocked) 0)
+        (when (!= (bit-and v8 mutexSleeping) 0)
+          (atomic/Or8 k8 mutexSleeping))
+
+        (return))
+
+      (semacreate (.-m gp))
+
+      (let [^int64 startTime (zero int64)
+          ;; On uniprocessors, no point spinning.
+          ;; On multiprocessors, spin for mutexActiveSpinCount attempts.
+          ^{:line 186} spin 0]
+        (when (> numCPUStartup 1)
+          (set! spin mutexActiveSpinCount))
+
+
+        (let [(values ^bool weSpin ^bool atTail ^bool haveTimers) (zero bool)
+            ^{:line 192} v (atomic/Loaduintptr (addr (.-key l)))]
+          (label :tryAcquire
+            (for [i 0] _ (inc! i)
+              (when (== (bit-and v mutexLocked) 0)
+                (if weSpin
+                  (let [next (bit-or (bit-and-not v mutexSpinning) mutexSleeping mutexLocked)]
+                    (when (== (bit-and-not next mutexMMask) 0)
+                      ;; The fast-path Xchg8 may have cleared mutexSleeping. Fix
+                      ;; the hint so unlock2 knows when to use its slow path.
+                      (set! next (bit-and-not next mutexSleeping)))
+
+                    (when (atomic/Casuintptr (addr (.-key l)) v next)
+                      (.end (.-mLockProfile (.-m gp)) startTime)
+                      (return)))
+
+
+                  (let [prev8 (atomic/Xchg8 k8 (bit-or mutexLocked mutexSleeping))]
+                    (when (== (bit-and prev8 mutexLocked) 0)
+                      (.end (.-mLockProfile (.-m gp)) startTime)
+                      (return))))
+
+
+                (set! v (atomic/Loaduintptr (addr (.-key l))))
+                (continue :tryAcquire))
+
+
+              (when (and (not weSpin) (== (bit-and v mutexSpinning) 0) (atomic/Casuintptr (addr (.-key l)) v (bit-or v mutexSpinning)))
+                (set! v bit-or mutexSpinning)
+                (set! weSpin true))
+
+
+              (when (or weSpin atTail (mutexPreferLowLatency l))
+                (cond (< i spin) (do
+                    (procyield mutexActiveSpinSize)
+                    (set! v (atomic/Loaduintptr (addr (.-key l))))
+                    (continue :tryAcquire))
+                  (< i (+ spin mutexPassiveSpinCount)) (do
+                    (osyield) ; TODO: Consider removing this step. See https://go.dev/issue/69268.
+                    (set! v (atomic/Loaduintptr (addr (.-key l))))
+                    (continue :tryAcquire))))
+
+
+
+              ;; Go to sleep
+              (when (== (bit-and v mutexLocked) 0)
+                (throw "runtime·lock: sleeping while lock is available"))
+
+
+              ;; Collect times for mutex profile (seen in unlock2 only via mWaitList),
+              ;; and for "/sync/mutex/wait/total:seconds" metric (to match).
+              (when (not haveTimers)
+                (set! (.-startTicks (.-mWaitList (.-m gp))) (cputicks))
+                (set! startTime (.start (.-mLockProfile (.-m gp))))
+                (set! haveTimers true))
+
+              ;; Store the current head of the list of sleeping Ms in our gp.m.mWaitList.next field
+              (set! (.-next (.-mWaitList (.-m gp))) (mutexWaitListHead v))
+
+              ;; Pack a (partial) pointer to this M with the current lock state bits
+              (let [next (bit-or (bit-and-not (conv uintptr (conv unsafe/Pointer (.-m gp))) mutexMMask) (bit-and v mutexMMask) mutexSleeping)]
+                (when weSpin ; If we were spinning, prepare to retire
+                  (set! next (bit-and-not next mutexSpinning)))
+
+
+                (when (atomic/Casuintptr (addr (.-key l)) v next)
+                  (set! weSpin false)
+                  ;; We've pushed ourselves onto the stack of waiters. Wait.
+                  (semasleep -1)
+                  (set! atTail (== (.-next (.-mWaitList (.-m gp))) 0)) ; we were at risk of starving
+                  (set! i 0))
+
+
+                (set! (.-next (.-mWaitList (.-m gp))) 0)
+                (set! v (atomic/Loaduintptr (addr (.-key l))))))))))))
+
+
+
+^{:go/end 271} (go/func unlock [^{:tag (* mutex)} l]
+  (unlockWithRank l))
+
+
+
+
+
+^{:go/end 334} (go/func ^:go/nowritebarrier unlock2 "We might not be holding a p in this code.\n" [^{:tag (* mutex)} l]
+  (let [gp (getg)
+
+      ^{:line 279 :tag uint8} prev8 (zero uint8)
+      ^{:line 280 :tag bool} haveStackLock (zero bool)
+      ^{:line 281 :tag int64} endTicks (zero int64)]
+    (if (not (mutexSampleContention))
+      ;; Not collecting a sample for the contention profile, do the quick release
+      (set! prev8 (atomic/Xchg8 (key8 (addr (.-key l))) 0))
+
+      ;; If there's contention, we'll sample it. Don't allow another
+      ;; lock2/unlock2 pair to finish before us and take our blame. Prevent
+      ;; that by trading for the stack lock with a CAS.
+      (let [v (atomic/Loaduintptr (addr (.-key l)))]
+        (while true
+          (when (or (== (bit-and-not v mutexMMask) 0) (!= (bit-and v mutexStackLocked) 0))
+            ;; No contention, or (stack lock unavailable) no way to calculate it
+            (set! prev8 (atomic/Xchg8 (key8 (addr (.-key l))) 0))
+            (set! endTicks 0)
+            (break))
+
+
+          ;; There's contention, the stack lock appeared to be available, and
+          ;; we'd like to collect a sample for the contention profile.
+          (when (== endTicks 0)
+            ;; Read the time before releasing the lock. The profile will be
+            ;; strictly smaller than what other threads would see by timing
+            ;; their lock calls.
+            (set! endTicks (cputicks)))
+
+          (let [next (bit-and-not (bit-or v mutexStackLocked) (bit-or mutexLocked mutexSleeping))]
+            (when (atomic/Casuintptr (addr (.-key l)) v next)
+              (set! haveStackLock true)
+              (set! prev8 (conv uint8 v))
+              ;; The fast path of lock2 may have cleared mutexSleeping.
+              ;; Restore it so we're sure to call unlock2Wake below.
+              (set! prev8 bit-or mutexSleeping)
+              (break))
+
+            (set! v (atomic/Loaduintptr (addr (.-key l))))))))
+
+
+    (when (== (bit-and prev8 mutexLocked) 0)
+      (throw "unlock of unlocked lock"))
+
+
+    (when (!= (bit-and prev8 mutexSleeping) 0)
+      (unlock2Wake l haveStackLock endTicks))
+
+
+    (.store (.-mLockProfile (.-m gp)))
+    (set! (.-locks (.-m gp)) - mutexMLocksDelta)
+    (when (< (.-locks (.-m gp)) 0)
+      (throw "runtime·unlock: lock count"))
+
+    (when (and (== (.-locks (.-m gp)) 0) (.-preempt gp)) ; restore the preemption request in case we've cleared it in newstack
+      (set! (.-stackguard0 gp) stackPreempt))))
+
+
+
+
+
+^{:go/end 341} (go/func mutexSampleContention "mutexSampleContention returns whether the current mutex operation should\nreport any contention it discovers.\n" ^bool []
+  (let [rate (atomic/Load64 (addr mutexprofilerate))]
+    (and (> rate 0) (== (% (cheaprandu64) rate) 0))))
+
+
+
+
+
+^{:go/end 469} (go/func ^:go/nowritebarrier unlock2Wake "unlock2Wake updates the list of Ms waiting on l, waking an M if necessary.\n" [^{:tag (* mutex)} l ^bool haveStackLock ^int64 endTicks]
+  (let [v (atomic/Loaduintptr (addr (.-key l)))
+
+      ;; On occasion, seek out and wake the M at the bottom of the stack so it
+      ;; doesn't starve.
+      ^{:line 351} antiStarve (== (cheaprandn mutexTailWakePeriod) 0)]
+
+    (when haveStackLock
+      (goto :useStackLock))
+
+
+    (when (not (or antiStarve ; avoiding starvation may require a wake
+          (== (bit-and v mutexSpinning) 0) ; no spinners means we must wake
+          (mutexPreferLowLatency l))) ; prefer waiters be awake as much as possible
+      (return))
+
+
+    (while true
+      (when (or (== (bit-and-not v mutexMMask) 0) (!= (bit-and v mutexStackLocked) 0))
+        ;; No waiting Ms means nothing to do.
+        ;;
+        ;; If the stack lock is unavailable, its owner would make the same
+        ;; wake decisions that we would, so there's nothing for us to do.
+        ;;
+        ;; Although: This thread may have a different call stack, which
+        ;; would result in a different entry in the mutex contention profile
+        ;; (upon completion of go.dev/issue/66999). That could lead to weird
+        ;; results if a slow critical section ends but another thread
+        ;; quickly takes the lock, finishes its own critical section,
+        ;; releases the lock, and then grabs the stack lock. That quick
+        ;; thread would then take credit (blame) for the delay that this
+        ;; slow thread caused. The alternative is to have more expensive
+        ;; atomic operations (a CAS) on the critical path of unlock2.
+        (return))
+
+      ;; Other M's are waiting for the lock.
+      ;; Obtain the stack lock, and pop off an M.
+      (let [next (bit-or v mutexStackLocked)]
+        (when (atomic/Casuintptr (addr (.-key l)) v next)
+          (break))
+
+        (set! v (atomic/Loaduintptr (addr (.-key l))))))
+
+
+    ;; We own the mutexStackLocked flag. New Ms may push themselves onto the
+    ;; stack concurrently, but we're now the only thread that can remove or
+    ;; modify the Ms that are sleeping in the list.
+    (label :useStackLock
+
+      (when (!= endTicks 0)
+        ;; Find the M at the bottom of the stack of waiters, which has been
+        ;; asleep for the longest. Take the average of its wait time and the
+        ;; head M's wait time for the mutex contention profile, matching the
+        ;; estimate we do in semrelease1 (for sync.Mutex contention).
+        ;;
+        ;; We don't keep track of the tail node (we don't need it often), so do
+        ;; an O(N) walk on the list of sleeping Ms to find it.
+        (let [head (.ptr (mutexWaitListHead v))]
+          (for [(values node n) (values head 0)] _ _
+            (inc! n)
+            (let [next (.ptr (.-next (.-mWaitList node)))]
+              (when (== next nil)
+                (let [cycles (/ (+ (- endTicks (.-startTicks (.-mWaitList head))) (- endTicks (.-startTicks (.-mWaitList node)))) 2)]
+                  (set! (.-startTicks (.-mWaitList node)) endTicks)
+                  (set! (.-startTicks (.-mWaitList head)) endTicks)
+                  (.recordUnlock (.-mLockProfile (.-m (getg))) (* cycles (conv int64 n)))
+                  (break)))
+
+              (set! node next))))))
+
+
+
+    (let [^{:tag (* m)} committed (zero (* m))] ; If we choose an M within the stack, we've made a promise to wake it
+      (while true
+        (let [headM (bit-and-not v mutexMMask)
+            ^{:line 421} flags (bit-and v (bit-and-not mutexMMask mutexStackLocked)) ; preserve low bits, but release stack lock
+
+            ^{:line 423} mp (.ptr (mutexWaitListHead v))
+            ^{:line 424} wakem committed]
+          (when (== committed nil)
+            (when (or (== (bit-and v mutexSpinning) 0) (mutexPreferLowLatency l))
+              (set! wakem mp))
+
+            (when antiStarve
+              ;; Wake the M at the bottom of the stack of waiters. (This is
+              ;; O(N) with the number of waiters.)
+              (set! wakem mp)
+              (let [prev mp]
+                (while true
+                  (let [next (.ptr (.-next (.-mWaitList wakem)))]
+                    (when (== next nil)
+                      (break))
+
+                    (set! (values prev wakem) (values wakem next))))
+
+                (when (!= wakem mp)
+                  (set! committed wakem)
+                  (set! (.-next (.-mWaitList prev)) (.-next (.-mWaitList wakem)))
+                  ;; An M sets its own startTicks when it first goes to sleep.
+                  ;; When an unlock operation is sampled for the mutex
+                  ;; contention profile, it takes blame for the entire list of
+                  ;; waiting Ms but only updates the startTicks value at the
+                  ;; tail. Copy any updates to the next-oldest M.
+                  (set! (.-startTicks (.-mWaitList prev)) (.-startTicks (.-mWaitList wakem)))))))
+
+
+
+
+          (when (== wakem mp)
+            (set! headM (bit-and-not (conv uintptr (.-next (.-mWaitList mp))) mutexMMask)))
+
+
+          (let [next (bit-or headM flags)]
+            (when (atomic/Casuintptr (addr (.-key l)) v next)
+              (when (!= wakem nil)
+                ;; Claimed an M. Wake it.
+                (semawakeup wakem))
+
+              (return))
+
+
+            (set! v (atomic/Loaduintptr (addr (.-key l))))))))))

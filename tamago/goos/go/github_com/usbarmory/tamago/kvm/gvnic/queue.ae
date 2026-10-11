@@ -1,0 +1,378 @@
+;; Google Compute Engine Virtual Ethernet (gVNIC) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.kvm.gvnic) (go/file "queue.go" :imports [
+
+
+    ^{:line 12} [binary "encoding/binary"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [bits "math/bits"]
+
+    ^{:line 16} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+(go/const
+  ^{:line 20} [^{:val 3} ADMINQ_REGISTER_PAGE_LIST 0x3]
+  ^{:line 21} [^{:val 5} ADMINQ_CREATE_TX_QUEUE 0x5]
+  ^{:line 22} [^{:val 6} ADMINQ_CREATE_RX_QUEUE 0x6]
+
+  ^{:line 24} [^{:val 2} GVE_GQI_QPL_FORMAT 0x02]
+  ^{:line 25} [^{:val 0} GVE_TXD_STD 0x00])
+
+
+(go/const
+  ^{:line 29} [^{:val 7} flagsMask 2r111]
+  ^{:line 30} [^{:val 2} rxPadLen 2]
+
+  ^{:line 32} [^{:val 2147483648} irqAck (<< 1 31)]
+  ^{:line 33} [^{:val 536870912} irqEvent (<< 1 29)])
+
+
+
+(go/const "TX descriptor offsets\n"
+  ^{:line 38} [^{:val 16} txDescSize 16]
+  ^{:line 39} [^{:val 0} txTypeFlags 0]
+  ^{:line 40} [^{:val 1} txCsumOff 1]
+  ^{:line 41} [^{:val 2} txHdrOff 2]
+  ^{:line 42} [^{:val 3} txDescCnt 3]
+  ^{:line 43} [^{:val 4} txLen 4]
+  ^{:line 44} [^{:val 6} txSegLen 6]
+  ^{:line 45} [^{:val 8} txSegAddr 8])
+
+
+
+(go/const "RX descriptor offsets\n"
+  ^{:line 50} [^{:val 64} rxDescSize descSize]
+  ^{:line 51} [^{:val 60} rxLen 60]
+  ^{:line 52} [^{:val 62} rxFlagsSeq 62])
+
+
+(go/type queueResources (struct
+    ^{:line 56 :tag uint32} DBIndex
+    ^{:line 57 :tag uint32} CounterIndex
+    ^{:line 58 :tag (array 56 byte)} _))
+
+
+(go/type registerPageListCommand (struct
+    ^{:line 62 :tag uint32} PageListID
+    ^{:line 63 :tag uint32} NumPages
+    ^{:line 64 :tag uint64} PageAddressListAddr
+    ^{:line 65 :tag (array 16 byte)} _))
+
+
+(go/type queue (struct
+    ^{:line 69 :tag int} id
+
+
+    ^{:line 72 :tag uint32 :doc "control registers\n"} Doorbell
+    ^{:line 73 :tag uint32} DoorbellIRQ
+
+
+    ^{:line 76 :tag (* queueResources) :doc "Resources cache\n"} Resources
+
+
+    ^{:line 79 :tag (slice byte) :doc "DMA buffers\n"} res
+    ^{:line 80 :tag (slice byte)} desc
+    ^{:line 81 :tag (slice byte)} data
+    ^{:line 82 :tag (slice byte)} qpl
+
+
+    ^{:line 85 :tag uint32 :doc "ring state\n"} size))
+
+
+^{:go/end 107} (go/method init [^{:tag (* queue)} q ^{:tag (* GVE)} hw ^uint16 ringSize] :results [^uint64 resAddr ^uint64 descAddr]
+  (let [^uint addr (zero uint)]
+
+    ;; allocate queue resources
+    (set! (.-Resources q) (addr (lit queueResources)))
+    (let [n (binary/Size (.-Resources q))]
+      (set! (values addr (.-res q)) (.Reserve (.-Region hw) n pageSize))
+      (set! resAddr (conv uint64 addr))
+
+      ;; allocate descriptor ring
+      (set! n (* rxDescSize (conv int ringSize)))
+      (set! (values addr (.-desc q)) (.Reserve (.-Region hw) n pageSize))
+      (set! descAddr (conv uint64 addr))
+
+      ;; zero out DMA pages
+      (clear (.-res q))
+      (clear (.-desc q))
+
+      (return))))
+
+
+^{:go/end 115} (go/method setDoorbells [^{:tag (* queue)} q ^{:tag (* GVE)} hw]
+  (binary/Decode (.-res q) binary/BigEndian (.-Resources q))
+  (set! (.-Doorbell q) (+ (.-doorbells hw) (* (.-DBIndex (.-Resources q)) 4)))
+
+  (let [irqIndex (.Uint32 binary/BigEndian (subslice (.-irqs hw) (* (.-id q) descSize)))]
+    (set! (.-DoorbellIRQ q) (+ (.-doorbells hw) (* irqIndex 4)))))
+
+
+^{:go/end 120} (go/method ack [^{:tag (* queue)} q]
+  ;; ack IRQ, re-enable event delivery
+  (reg/Write (.-DoorbellIRQ q) (bits/ReverseBytes32 (bit-or irqAck irqEvent))))
+
+
+(go/type txQueue (struct
+    ^{:line 123} queue
+
+
+    ^{:line 126 :tag uint32 :doc "ring state\n"} head
+    ^{:line 127 :tag uint32} tail))
+
+
+^{:go/end 136} (go/method next [^{:tag (* txQueue)} tx]
+  (inc! (.-head tx))
+
+  ;; notify ring size
+  (let [n (bits/ReverseBytes32 (.-head tx))]
+    (reg/Write ^{:go/via [queue]} (.-Doorbell tx) n)))
+
+
+(go/type createTxQueueCommand (struct
+    ^{:line 139 :tag uint32} QueueID
+    ^{:line 140 :tag uint32} _
+    ^{:line 141 :tag uint64} QueueResourcesAddr
+    ^{:line 142 :tag uint64} DescRingAddr
+    ^{:line 143 :tag uint32} QueuePageListID
+    ^{:line 144 :tag uint32} NtfyID
+    ^{:line 145 :tag uint64} CompRingAddr
+    ^{:line 146 :tag uint16} RingSize
+    ^{:line 147 :tag uint16} CompRingSize
+    ^{:line 148 :tag (array 4 byte)} _))
+
+
+(go/type rxQueue (struct
+    ^{:line 152} queue
+
+
+    ^{:line 155 :tag uint32 :doc "ring state\n"} cnt
+    ^{:line 156 :tag uint32} fill
+    ^{:line 157 :tag uint16} seqno))
+
+
+^{:go/end 180} (go/method next [^{:tag (* rxQueue)} rx]
+  ;; advance the read cursor
+  (inc! (.-cnt rx))
+
+  (if (== (.-seqno rx) flagsMask)
+    (set! (.-seqno rx) 1)
+
+    (set! (.-seqno rx) + 1))
+
+
+  ;; recycle consumed buffers when half is drained
+  (when (> (- (.-fill rx) (.-cnt rx)) (/ ^{:go/via [queue]} (.-size rx) 2))
+    (return))
+
+
+  (set! (.-fill rx) (+ (.-cnt rx) ^{:go/via [queue]} (.-size rx)))
+
+  ;; notify ring size
+  (let [n (bits/ReverseBytes32 (.-fill rx))]
+    (reg/Write ^{:go/via [queue]} (.-Doorbell rx) n)))
+
+
+(go/type createRxQueueCommand (struct
+    ^{:line 183 :tag uint32} QueueID
+    ^{:line 184 :tag uint32} Index
+    ^{:line 185 :tag uint32} _
+    ^{:line 186 :tag uint32} NtfyID
+    ^{:line 187 :tag uint64} QueueResourcesAddr
+    ^{:line 188 :tag uint64} DescRingAddr
+    ^{:line 189 :tag uint64} DataRingAddr
+    ^{:line 190 :tag uint32} QueuePageListID
+    ^{:line 191 :tag uint16} RingSize
+    ^{:line 192 :tag uint16} PacketBufferSize
+    ^{:line 193 :tag uint16} BuffRingSize
+    ^{:line 194 :tag uint8} EnableRsc
+    ^{:line 195 :tag (array 5 byte)} _))
+
+
+^{:go/end 228} (go/method registerPageList [^{:tag (* GVE)} hw ^int id ^int size] :results [^uint addr ^{:tag (slice byte)} buf ^error err]
+  (let [cmd (addr ^{:go/breaks [2 4]} (lit registerPageListCommand
+          :PageListID (conv uint32 id)
+          :NumPages (conv uint32 size)))
+
+
+      ;; allocate queue pair list
+      ^{:line 205} n (* pageSize (conv int (.-NumPages cmd)))]
+    (set! (values addr buf) (.Reserve (.-Region hw) n pageSize))
+
+    ;; allocate page list
+    (set! n (* 8 (conv int (.-NumPages cmd))))
+    (let [(values plAddr pageList) (.Reserve (.-Region hw) n pageSize)]
+      (set! (.-PageAddressListAddr cmd) (conv uint64 plAddr))
+      (defer (.Release (.-Region hw) plAddr))
+
+      ;; zero out DMA pages
+      (clear buf)
+      (clear pageList)
+
+      (for [i (conv uint64 0)] (< i (conv uint64 (.-NumPages cmd))) (inc! i)
+        (let [pga (+ (conv uint64 addr) (* i pageSize))]
+          (.PutUint64 binary/BigEndian (subslice pageList (* i 8)) pga)))
+
+
+      (when [(set! err (.Push (.-aq hw) ADMINQ_REGISTER_PAGE_LIST cmd))] (!= err nil)
+        (return 0 nil err))
+
+
+      (return))))
+
+
+^{:go/end 258} (go/method initTxQueue [^{:tag (* GVE)} hw ^int id] :results [^error err]
+  (let [queueSize (conv uint32 (.-TxQueueEntries (.-Info hw)))
+      ^{:line 232} qplSize (conv int (.-TxPagesPerQpl (.-Info hw)))]
+
+    (set! (.-tx hw) (addr (lit txQueue)))
+    (set! ^{:go/via [queue]} (.-id (.-tx hw)) id)
+    (set! ^{:go/via [queue]} (.-size (.-tx hw)) queueSize)
+
+    (when [(set! (values _ ^{:go/via [queue]} (.-qpl (.-tx hw)) err) (.registerPageList hw id qplSize))] (!= err nil)
+      (return))
+
+
+    (let [cmd (addr ^{:go/breaks [2 4 6 8]} (lit createTxQueueCommand
+            :QueueID (conv uint32 (.-Index hw))
+            :NtfyID (conv uint32 id)
+            :QueuePageListID (conv uint32 id)
+            :RingSize (.-TxQueueEntries (.-Info hw))))]
+
+
+      (set! (values (.-QueueResourcesAddr cmd) (.-DescRingAddr cmd)) ^{:go/via [queue]} (.init (.-tx hw) hw (.-RingSize cmd)))
+
+      (when [(set! err (.Push (.-aq hw) ADMINQ_CREATE_TX_QUEUE cmd))] (!= err nil)
+        (return))
+
+
+      ^{:go/via [queue]} (.setDoorbells (.-tx hw) hw)
+
+      (return))))
+
+
+^{:go/end 311} (go/method initRxQueue [^{:tag (* GVE)} hw ^int id] :results [^error err]
+  (let [^uint addr (zero uint)
+
+      ^{:line 263} queueSize (conv uint32 (.-RxQueueEntries (.-Info hw)))
+      ^{:line 264} qplSize (conv int (.-RxPagesPerQpl (.-Info hw)))]
+
+    (set! (.-rx hw) (addr ^{:go/breaks [2 4 6]} (lit rxQueue
+          :cnt 0
+          :fill queueSize
+          :seqno 1)))
+
+
+    (set! ^{:go/via [queue]} (.-id (.-rx hw)) id)
+    (set! ^{:go/via [queue]} (.-size (.-rx hw)) (.-fill (.-rx hw)))
+
+    (when [(set! (values _ ^{:go/via [queue]} (.-qpl (.-rx hw)) err) (.registerPageList hw id qplSize))] (!= err nil)
+      (return))
+
+
+    (let [cmd (addr ^{:go/breaks [2 4 6 8 10 12]} (lit createRxQueueCommand
+            :QueueID (conv uint32 (.-Index hw))
+            :Index (conv uint32 (.-Index hw))
+            :NtfyID (conv uint32 id)
+            :QueuePageListID (conv uint32 id)
+            :RingSize (conv uint16 ^{:go/via [queue]} (.-size (.-rx hw)))
+            :PacketBufferSize (/ pageSize 2)))]
+
+
+      (set! (values (.-QueueResourcesAddr cmd) (.-DescRingAddr cmd)) ^{:go/via [queue]} (.init (.-rx hw) hw (.-RingSize cmd)))
+
+      ;; allocate data ring
+      (let [n (* 8 (conv int (.-RingSize cmd)))]
+        (set! (values addr ^{:go/via [queue]} (.-data (.-rx hw))) (.Reserve (.-Region hw) n pageSize))
+        (set! (.-DataRingAddr cmd) (conv uint64 addr))
+
+        ;; fill data ring slots
+        (for [i (conv uint64 0)] (< i (conv uint64 (.-RingSize cmd))) (inc! i)
+          (.PutUint64 binary/BigEndian (subslice ^{:go/via [queue]} (.-data (.-rx hw)) (* i 8)) (* i pageSize)))
+
+
+        (when [(set! err (.Push (.-aq hw) ADMINQ_CREATE_RX_QUEUE cmd))] (!= err nil)
+          (return))
+
+
+        ^{:go/via [queue]} (.setDoorbells (.-rx hw) hw)
+
+        ;; notify ring size
+        (let [cnt (bits/ReverseBytes32 queueSize)]
+          (reg/Write ^{:go/via [queue]} (.-Doorbell (.-rx hw)) cnt)
+
+          (return))))))
+
+
+^{:go/end 341} (go/method Receive [^{:tag (* GVE)} hw ^{:tag (slice byte)} buf] :results [^int n ^error err]
+  (when (== (len buf) 0)
+    (return))
+
+
+  (let [idx (% (.-cnt (.-rx hw)) ^{:go/via [queue]} (.-size (.-rx hw)))
+      ^{:line 319} off (* (conv uint idx) rxDescSize)
+
+      ^{:line 321} length (.Uint16 binary/BigEndian (subslice ^{:go/via [queue]} (.-desc (.-rx hw)) (+ off rxLen)))
+      ^{:line 322} flagsSeq (.Uint16 binary/BigEndian (subslice ^{:go/via [queue]} (.-desc (.-rx hw)) (+ off rxFlagsSeq)))]
+
+    (when (!= (bit-and flagsSeq flagsMask) (.-seqno (.-rx hw)))
+      (return 0 nil))
+
+
+    (defer (.next (.-rx hw)))
+
+    (when (<= length rxPadLen)
+      (return 0 nil))
+
+
+    ;; the data ring holds 64-bit QPL offsets pointing to the actual data
+    (let [qplOff (conv uint (.Uint64 binary/BigEndian (subslice ^{:go/via [queue]} (.-data (.-rx hw)) (* idx 8))))
+        ^{:line 336} data (subslice ^{:go/via [queue]} (.-qpl (.-rx hw)) (+ qplOff rxPadLen) (+ qplOff (conv uint length)))]
+
+      (set! n (copy buf data))
+
+      (return n nil))))
+
+
+^{:go/end 379} (go/method Transmit [^{:tag (* GVE)} hw ^{:tag (slice byte)} buf] :results [^error err]
+  (when (> (len buf) pageSize)
+    (return (errors/New "frame too large")))
+
+
+  (let [txPages (conv uint32 (.-TxPagesPerQpl (.-Info hw)))
+      ^{:line 349} idx (% (.-head (.-tx hw)) ^{:go/via [queue]} (.-size (.-tx hw)))
+      ^{:line 350} qplOff (* (% (.-head (.-tx hw)) txPages) pageSize)
+
+      ^{:line 352} cntIndex (* (.-CounterIndex ^{:go/via [queue]} (.-Resources (.-tx hw))) 4)]
+    (set! (.-tail (.-tx hw)) (.Uint32 binary/BigEndian (subslice (.-counters hw) cntIndex)))
+
+    (let [inflight (- (.-head (.-tx hw)) (.-tail (.-tx hw)))]
+
+      (when (or (>= inflight ^{:go/via [queue]} (.-size (.-tx hw))) (>= inflight txPages))
+        (return (errors/New "tx queue full")))
+
+
+      ;; copy the frame into the TX QPL
+      (copy (subslice ^{:go/via [queue]} (.-qpl (.-tx hw)) qplOff (+ qplOff (conv uint32 (len buf)))) buf)
+
+      ^{:go/breaks [[10 378]]} (let [off (* (conv uint idx) txDescSize)
+          ^{:line 365} tx ^{:go/via [queue]} (.-desc (.-tx hw))]
+
+        (aset tx (+ off txTypeFlags) GVE_TXD_STD)
+        (aset tx (+ off txCsumOff) 0)
+        (aset tx (+ off txHdrOff) 0)
+        (aset tx (+ off txDescCnt) 1)
+
+        (.PutUint16 binary/BigEndian (subslice tx (+ off txLen)) (conv uint16 (len buf)))
+        (.PutUint16 binary/BigEndian (subslice tx (+ off txSegLen)) (conv uint16 (len buf)))
+        (.PutUint64 binary/BigEndian (subslice tx (+ off txSegAddr)) (conv uint64 qplOff))
+
+        (.next (.-tx hw))
+
+        nil))))

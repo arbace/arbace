@@ -1,0 +1,459 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Address range data structure.
+;;
+;; This file contains an implementation of a data structure which
+;; manages ordered address ranges.
+
+(in-ns 'go.runtime) (go/file "mranges.go" :imports [
+
+
+    ^{:line 13} [goarch "internal/goarch"]
+    ^{:line 14} [atomic "internal/runtime/atomic"]
+    ^{:line 15} [unsafe "unsafe"]])
+
+
+
+
+
+(go/type addrRange "addrRange represents a region of address space.\n\nAn addrRange must never span a gap in the address space.\n" (struct
+
+
+
+
+
+    ^{:line 27 :tag offAddr :doc "base and limit together represent the region of address space\n[base, limit). That is, base is inclusive, limit is exclusive.\nThese are address over an offset view of the address space on\nplatforms with a segmented address space, that is, on platforms\nwhere arenaBaseOffset != 0.\n"} base ^{:tag offAddr :doc "base and limit together represent the region of address space\n[base, limit). That is, base is inclusive, limit is exclusive.\nThese are address over an offset view of the address space on\nplatforms with a segmented address space, that is, on platforms\nwhere arenaBaseOffset != 0.\n"} limit))
+
+
+
+
+
+^{:go/end 39} (go/func makeAddrRange "makeAddrRange creates a new address range from two virtual addresses.\n\nThrows if the base and limit are not in the same memory segment.\n" ^addrRange [^uintptr base ^uintptr limit]
+  (let [r (lit addrRange (lit offAddr base) (lit offAddr limit))]
+    (when (!= (>= (- base arenaBaseOffset) base) (>= (- limit arenaBaseOffset) limit))
+      (throw "addr range base and limit are not in the same memory segment"))
+
+    ^{:line 38} r))
+
+
+
+^{:go/end 49} (go/method size "size returns the size of the range represented in bytes.\n" ^uintptr [^addrRange a]
+  (when (not (.lessThan (.-base a) (.-limit a)))
+    (return 0))
+
+  ;; Subtraction is safe because limit and base must be in the same
+  ;; segment of the address space.
+  (.diff (.-limit a) (.-base a)))
+
+
+
+^{:go/end 54} (go/method contains "contains returns whether or not the range contains a given address.\n" ^bool [^addrRange a ^uintptr addr]
+  (and (.lessEqual (.-base a) (lit offAddr addr)) (.lessThan (lit offAddr addr) (.-limit a))))
+
+
+
+
+
+
+^{:go/end 71} (go/method subtract "subtract takes the addrRange toPrune and cuts out any overlap with\nfrom, then returns the new range. subtract assumes that a and b\neither don't overlap at all, only overlap on one side, or are equal.\nIf b is strictly contained in a, thus forcing a split, it will throw.\n" ^addrRange [^addrRange a ^addrRange b]
+  (cond (and (.lessEqual (.-base b) (.-base a)) (.lessEqual (.-limit a) (.-limit b)))
+    (return (lit addrRange))
+    (and (.lessThan (.-base a) (.-base b)) (.lessThan (.-limit b) (.-limit a)))
+    (throw "bad prune")
+    (and (.lessThan (.-limit b) (.-limit a)) (.lessThan (.-base a) (.-limit b)))
+    (set! (.-base a) (.-limit b))
+    (and (.lessThan (.-base a) (.-base b)) (.lessThan (.-base b) (.-limit a)))
+    (set! (.-limit a) (.-base b)))
+
+  ^{:line 70} a)
+
+
+
+
+
+^{:go/end 83} (go/method takeFromFront "takeFromFront takes len bytes from the front of the address range, aligning\nthe base to align first. On success, returns the aligned start of the region\ntaken and true.\n" [^{:tag (* addrRange)} a ^uintptr len ^uint8 align] :results [uintptr bool]
+  (let [base (+ (alignUp (.addr (.-base a)) (conv uintptr align)) len)]
+    (when (> base (.addr (.-limit a)))
+      (return 0 false))
+
+    (set! (.-base a) (lit offAddr base))
+    (return (- base len) true)))
+
+
+
+
+
+^{:go/end 95} (go/method takeFromBack "takeFromBack takes len bytes from the end of the address range, aligning\nthe limit to align after subtracting len. On success, returns the aligned\nstart of the region taken and true.\n" [^{:tag (* addrRange)} a ^uintptr len ^uint8 align] :results [uintptr bool]
+  (let [limit (alignDown (- (.addr (.-limit a)) len) (conv uintptr align))]
+    (when (> (.addr (.-base a)) limit)
+      (return 0 false))
+
+    (set! (.-limit a) (lit offAddr limit))
+    (return limit true)))
+
+
+
+
+^{:go/end 107} (go/method removeGreaterEqual "removeGreaterEqual removes all addresses in a greater than or equal\nto addr and returns the new range.\n" ^addrRange [^addrRange a ^uintptr addr]
+  (when (.lessEqual (lit offAddr addr) (.-base a))
+    (return (lit addrRange)))
+
+  (when (.lessEqual (.-limit a) (lit offAddr addr))
+    (return a))
+
+  (makeAddrRange (.addr (.-base a)) addr))
+
+
+(go/var
+
+
+  ^{:line 112} [^{:doc "minOffAddr is the minimum address in the offset space, and\nit corresponds to the virtual address arenaBaseOffset.\n"} minOffAddr (lit offAddr arenaBaseOffset)]
+
+
+
+
+  ^{:line 117} [^{:doc "maxOffAddr is the maximum address in the offset address\nspace. It corresponds to the highest virtual address representable\nby the page alloc chunk and heap arena maps.\n"} maxOffAddr (lit offAddr (bit-and (+ (- (<< 1 heapAddrBits) 1) arenaBaseOffset) uintptrMask))])
+
+
+
+
+
+(go/type offAddr "offAddr represents an address in a contiguous view\nof the address space on systems where the address space is\nsegmented. On other systems, it's just a normal address.\n" (struct
+
+
+    ^{:line 126 :tag uintptr :doc "a is just the virtual address, but should never be used\ndirectly. Call addr() to get this value instead.\n"} a))
+
+
+
+^{:go/end 132} (go/method add "add adds a uintptr offset to the offAddr.\n" ^offAddr [^offAddr l ^uintptr bytes]
+  (lit offAddr :a (+ (.-a l) bytes)))
+
+
+
+^{:go/end 137} (go/method sub "sub subtracts a uintptr offset from the offAddr.\n" ^offAddr [^offAddr l ^uintptr bytes]
+  (lit offAddr :a (- (.-a l) bytes)))
+
+
+
+
+^{:go/end 143} (go/method diff "diff returns the amount of bytes in between the\ntwo offAddrs.\n" ^uintptr [^offAddr l1 ^offAddr l2]
+  (- (.-a l1) (.-a l2)))
+
+
+
+
+^{:go/end 149} (go/method lessThan "lessThan returns true if l1 is less than l2 in the offset\naddress space.\n" ^bool [^offAddr l1 ^offAddr l2]
+  (< (- (.-a l1) arenaBaseOffset) (- (.-a l2) arenaBaseOffset)))
+
+
+
+
+^{:go/end 155} (go/method lessEqual "lessEqual returns true if l1 is less than or equal to l2 in\nthe offset address space.\n" ^bool [^offAddr l1 ^offAddr l2]
+  (<= (- (.-a l1) arenaBaseOffset) (- (.-a l2) arenaBaseOffset)))
+
+
+
+^{:go/end 162} (go/method equal "equal returns true if the two offAddr values are equal.\n" ^bool [^offAddr l1 ^offAddr l2]
+  ;; No need to compare in the offset space, it
+  ;; means the same thing.
+  (== l1 l2))
+
+
+
+^{:go/end 167} (go/method addr "addr returns the virtual address for this offset address.\n" ^uintptr [^offAddr l]
+  (.-a l))
+
+
+
+
+
+(go/type atomicOffAddr "atomicOffAddr is like offAddr, but operations on it are atomic.\nIt also contains operations to be able to store marked addresses\nto ensure that they're not overridden until they've been seen.\n" (struct
+
+    ^{:line 174 :tag atomic/Int64 :doc "a contains the offset address, unlike offAddr.\n"} a))
+
+
+
+
+^{:go/end 189} (go/method Clear "Clear attempts to store minOffAddr in atomicOffAddr. It may fail\nif a marked value is placed in the box in the meanwhile.\n" [^{:tag (* atomicOffAddr)} b]
+  (while true
+    (let [old (.Load (.-a b))]
+      (when (< old 0)
+        (return))
+
+      (when (.CompareAndSwap (.-a b) old (conv int64 (- (.addr minOffAddr) arenaBaseOffset)))
+        (return)))))
+
+
+
+
+
+
+^{:go/end 204} (go/method StoreMin "StoreMin stores addr if it's less than the current value in the\noffset address space if the current value is not marked.\n" [^{:tag (* atomicOffAddr)} b ^uintptr addr]
+  (let [new (conv int64 (- addr arenaBaseOffset))]
+    (while true
+      (let [old (.Load (.-a b))]
+        (when (< old new)
+          (return))
+
+        (when (.CompareAndSwap (.-a b) old new)
+          (return))))))
+
+
+
+
+
+
+
+
+^{:go/end 212} (go/method StoreUnmark "StoreUnmark attempts to unmark the value in atomicOffAddr and\nreplace it with newAddr. markedAddr must be a marked address\nreturned by Load. This function will not store newAddr if the\nbox no longer contains markedAddr.\n" [^{:tag (* atomicOffAddr)} b ^uintptr markedAddr ^uintptr newAddr]
+  (.CompareAndSwap (.-a b) (- (conv int64 (- markedAddr arenaBaseOffset))) (conv int64 (- newAddr arenaBaseOffset))))
+
+
+
+
+^{:go/end 218} (go/method StoreMarked "StoreMarked stores addr but first converted to the offset address\nspace and then negated.\n" [^{:tag (* atomicOffAddr)} b ^uintptr addr]
+  (.Store (.-a b) (- (conv int64 (- addr arenaBaseOffset)))))
+
+
+
+
+^{:go/end 230} (go/method Load "Load returns the address in the box as a virtual address. It also\nreturns if the value was marked or not.\n" [^{:tag (* atomicOffAddr)} b] :results [uintptr bool]
+  (let [v (.Load (.-a b))
+      ^{:line 224} wasMarked false]
+    (when (< v 0)
+      (set! wasMarked true)
+      (set! v (- v)))
+
+    (return (+ (conv uintptr v) arenaBaseOffset) wasMarked)))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type addrRanges "addrRanges is a data structure holding a collection of ranges of\naddress space.\n\nThe ranges are coalesced eagerly to reduce the\nnumber ranges it holds.\n\nThe slice backing store for this field is persistentalloc'd\nand thus there is no way to free it.\n\naddrRanges is not thread-safe.\n" (struct
+
+    ^{:line 244 :tag (slice addrRange) :doc "ranges is a slice of ranges sorted by base.\n"} ranges
+
+
+
+    ^{:line 248 :tag uintptr :doc "totalBytes is the total amount of address space in bytes counted by\nthis addrRanges.\n"} totalBytes
+
+
+    ^{:line 251 :tag (* sysMemStat) :doc "sysStat is the stat to track allocations by this type\n"} sysStat))
+
+
+^{:go/end 261} (go/method init [^{:tag (* addrRanges)} a ^{:tag (* sysMemStat)} sysStat]
+  (let [ranges (conv (* notInHeapSlice) (conv unsafe/Pointer (addr (.-ranges a))))]
+    (set! (.-len ranges) 0)
+    (set! (.-cap ranges) 16)
+    (set! (.-array ranges) (conv (* notInHeap) (persistentalloc (* (unsafe/Sizeof (lit addrRange)) (conv uintptr (.-cap ranges))) goarch/PtrSize sysStat)))
+    (set! (.-sysStat a) sysStat)
+    (set! (.-totalBytes a) 0)))
+
+
+
+
+^{:go/end 303} (go/method findSucc "findSucc returns the first index in a such that addr is\nless than the base of the addrRange at that index.\n" ^int [^{:tag (* addrRanges)} a ^uintptr addr]
+  (let [base (lit offAddr addr)
+
+      ;; Narrow down the search space via a binary search
+      ;; for large addrRanges until we have at most iterMax
+      ;; candidates left.
+      ^:const ^{:line 271 :val 8} iterMax 8
+      (values bot top) (values 0 (len (.-ranges a)))]
+    (while (> (- top bot) iterMax)
+      (let [i (conv int (>> (conv uint (+ bot top)) 1))]
+        (when (.contains (aget (.-ranges a) i) (.addr base))
+          ;; a.ranges[i] contains base, so
+          ;; its successor is the next index.
+          (return (+ i 1)))
+
+        (if (.lessThan base (.-base (aget (.-ranges a) i)))
+          ;; In this case i might actually be
+          ;; the successor, but we can't be sure
+          ;; until we check the ones before it.
+          (set! top i)
+
+          ;; In this case we know base is
+          ;; greater than or equal to a.ranges[i].limit-1,
+          ;; so i is definitely not the successor.
+          ;; We already checked i, so pick the next
+          ;; one.
+          (set! bot (+ i 1)))))
+
+
+    ;; There are top-bot candidates left, so
+    ;; iterate over them and find the first that
+    ;; base is strictly less than.
+    (for [i bot] (< i top) (inc! i)
+      (when (.lessThan base (.-base (aget (.-ranges a) i)))
+        (return i)))
+
+
+    ^{:line 302} top))
+
+
+
+
+
+
+
+^{:go/end 322} (go/method findAddrGreaterEqual "findAddrGreaterEqual returns the smallest address represented by a\nthat is >= addr. Thus, if the address is represented by a,\nthen it returns addr. The second return value indicates whether\nsuch an address exists for addr in a. That is, if addr is larger than\nany address known to a, the second return value will be false.\n" [^{:tag (* addrRanges)} a ^uintptr addr] :results [uintptr bool]
+  (let [i (.findSucc a addr)]
+    (when (== i 0)
+      (return (.addr (.-base (aget (.-ranges a) 0))) true))
+
+    (when (.contains (aget (.-ranges a) (- i 1)) addr)
+      (return addr true))
+
+    (when (< i (len (.-ranges a)))
+      (return (.addr (.-base (aget (.-ranges a) i))) true))
+
+    (return 0 false)))
+
+
+
+^{:go/end 331} (go/method contains "contains returns true if a covers the address addr.\n" ^bool [^{:tag (* addrRanges)} a ^uintptr addr]
+  (let [i (.findSucc a addr)]
+    (when (== i 0)
+      (return false))
+
+    (.contains (aget (.-ranges a) (- i 1)) addr)))
+
+
+
+
+
+^{:go/end 397} (go/method add "add inserts a new address range to a.\n\nr must not overlap with any address range in a and r.size() must be > 0.\n" [^{:tag (* addrRanges)} a ^addrRange r]
+  ;; The copies in this function are potentially expensive, but this data
+  ;; structure is meant to represent the Go heap. At worst, copying this
+  ;; would take ~160µs assuming a conservative copying rate of 25 GiB/s (the
+  ;; copy will almost never trigger a page fault) for a 1 TiB heap with 4 MiB
+  ;; arenas which is completely discontiguous. ~160µs is still a lot, but in
+  ;; practice most platforms have 64 MiB arenas (which cuts this by a factor
+  ;; of 16) and Go heaps are usually mostly contiguous, so the chance that
+  ;; an addrRanges even grows to that size is extremely low.
+
+  ;; An empty range has no effect on the set of addresses represented
+  ;; by a, but passing a zero-sized range is almost always a bug.
+  (when (== (.size r) 0)
+    (print "runtime: range = {" (conv hex (.addr (.-base r))) ", " (conv hex (.addr (.-limit r))) "}\n")
+    (throw "attempted to add zero-sized address range"))
+
+  ;; Because we assume r is not currently represented in a,
+  ;; findSucc gives us our insertion index.
+  (let [i (.findSucc a (.addr (.-base r)))
+      ^{:line 355} coalescesDown (and (> i 0) (.equal (.-limit (aget (.-ranges a) (- i 1))) (.-base r)))
+      ^{:line 356} coalescesUp (and (< i (len (.-ranges a))) (.equal (.-limit r) (.-base (aget (.-ranges a) i))))]
+    (cond (and coalescesUp coalescesDown) (do
+        ;; We have neighbors and they both border us.
+        ;; Merge a.ranges[i-1], r, and a.ranges[i] together into a.ranges[i-1].
+        (set! (.-limit (aget (.-ranges a) (- i 1))) (.-limit (aget (.-ranges a) i)))
+
+        ;; Delete a.ranges[i].
+        (copy (subslice (.-ranges a) i) (subslice (.-ranges a) (+ i 1)))
+        (set! (.-ranges a) (subslice (.-ranges a) _ (- (len (.-ranges a)) 1))))
+      ^{:line 365} coalescesDown
+      ;; We have a neighbor at a lower address only and it borders us.
+      ;; Merge the new space into a.ranges[i-1].
+      (set! (.-limit (aget (.-ranges a) (- i 1))) (.-limit r))
+      ^{:line 369} coalescesUp
+      ;; We have a neighbor at a higher address only and it borders us.
+      ;; Merge the new space into a.ranges[i].
+      (set! (.-base (aget (.-ranges a) i)) (.-base r)) :else
+      (do
+        ;; We may or may not have neighbors which don't border us.
+        ;; Add the new range.
+        (if (> (+ (len (.-ranges a)) 1) (cap (.-ranges a)))
+          ;; Grow the array. Note that this leaks the old array, but since
+          ;; we're doubling we have at most 2x waste. For a 1 TiB heap and
+          ;; 4 MiB arenas which are all discontiguous (both very conservative
+          ;; assumptions), this would waste at most 4 MiB of memory.
+          (let [oldRanges (.-ranges a)
+              ^{:line 382} ranges (conv (* notInHeapSlice) (conv unsafe/Pointer (addr (.-ranges a))))]
+            (set! (.-len ranges) (+ (len oldRanges) 1))
+            (set! (.-cap ranges) (* (cap oldRanges) 2))
+            (set! (.-array ranges) (conv (* notInHeap) (persistentalloc (* (unsafe/Sizeof (lit addrRange)) (conv uintptr (.-cap ranges))) goarch/PtrSize (.-sysStat a))))
+
+            ;; Copy in the old array, but make space for the new range.
+            (copy (subslice (.-ranges a) _ i) (subslice oldRanges _ i))
+            (copy (subslice (.-ranges a) (+ i 1)) (subslice oldRanges i)))
+          (do
+            (set! (.-ranges a) (subslice (.-ranges a) _ (+ (len (.-ranges a)) 1)))
+            (copy (subslice (.-ranges a) (+ i 1)) (subslice (.-ranges a) i))))
+
+        (aset (.-ranges a) i r)))
+
+    (set! (.-totalBytes a) + (.size r))))
+
+
+
+
+
+^{:go/end 417} (go/method removeLast "removeLast removes and returns the highest-addressed contiguous range\nof a, or the last nBytes of that range, whichever is smaller. If a is\nempty, it returns an empty range.\n" ^addrRange [^{:tag (* addrRanges)} a ^uintptr nBytes]
+  (when (== (len (.-ranges a)) 0)
+    (return (lit addrRange)))
+
+  (let [r (aget (.-ranges a) (- (len (.-ranges a)) 1))
+      ^{:line 407} size (.size r)]
+    (when (> size nBytes)
+      (let [newEnd (.sub (.-limit r) nBytes)]
+        (set! (.-limit (aget (.-ranges a) (- (len (.-ranges a)) 1))) newEnd)
+        (set! (.-totalBytes a) - nBytes)
+        (return (lit addrRange newEnd (.-limit r)))))
+
+    (set! (.-ranges a) (subslice (.-ranges a) _ (- (len (.-ranges a)) 1)))
+    (set! (.-totalBytes a) - size)
+    ^{:line 416} r))
+
+
+
+
+^{:go/end 445} (go/method removeGreaterEqual "removeGreaterEqual removes the ranges of a which are above addr, and additionally\nsplits any range containing addr.\n" [^{:tag (* addrRanges)} a ^uintptr addr]
+  (let [pivot (.findSucc a addr)]
+    (when (== pivot 0)
+      ;; addr is before all ranges in a.
+      (set! (.-totalBytes a) 0)
+      (set! (.-ranges a) (subslice (.-ranges a) _ 0))
+      (return))
+
+    (let [removed (conv uintptr 0)]
+      (range [_ r (subslice (.-ranges a) pivot)]
+        (set! removed + (.size r)))
+
+      (when [r (aget (.-ranges a) (- pivot 1))] (.contains r addr)
+        (set! removed + (.size r))
+        (set! r (.removeGreaterEqual r addr))
+        (if (== (.size r) 0)
+          (dec! pivot)
+          (do
+            (set! removed - (.size r))
+            (aset (.-ranges a) (- pivot 1) r))))
+
+
+      (set! (.-ranges a) (subslice (.-ranges a) _ pivot))
+      (set! (.-totalBytes a) - removed))))
+
+
+
+
+^{:go/end 460} (go/method cloneInto "cloneInto makes a deep clone of a's state into b, re-using\nb's ranges if able.\n" [^{:tag (* addrRanges)} a ^{:tag (* addrRanges)} b]
+  (when (> (len (.-ranges a)) (cap (.-ranges b)))
+    ;; Grow the array.
+    (let [ranges (conv (* notInHeapSlice) (conv unsafe/Pointer (addr (.-ranges b))))]
+      (set! (.-len ranges) 0)
+      (set! (.-cap ranges) (cap (.-ranges a)))
+      (set! (.-array ranges) (conv (* notInHeap) (persistentalloc (* (unsafe/Sizeof (lit addrRange)) (conv uintptr (.-cap ranges))) goarch/PtrSize (.-sysStat b))))))
+
+  (set! (.-ranges b) (subslice (.-ranges b) _ (len (.-ranges a))))
+  (set! (.-totalBytes b) (.-totalBytes a))
+  (copy (.-ranges b) (.-ranges a)))

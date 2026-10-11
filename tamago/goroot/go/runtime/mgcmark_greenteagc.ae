@@ -1,0 +1,1278 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Green Tea mark algorithm
+;;
+;; The core idea behind Green Tea is simple: achieve better locality during
+;; mark/scan by delaying scanning so that we can accumulate objects to scan
+;; within the same span, then scan the objects that have accumulated on the
+;; span all together.
+;;
+;; By batching objects this way, we increase the chance that adjacent objects
+;; will be accessed, amortize the cost of accessing object metadata, and create
+;; better opportunities for prefetching. We can take this even further and
+;; optimize the scan loop by size class (not yet completed) all the way to the
+;; point of applying SIMD techniques to really tear through the heap.
+;;
+;; Naturally, this depends on being able to create opportunities to batch objects
+;; together. The basic idea here is to have two sets of mark bits. One set is the
+;; regular set of mark bits ("marks"), while the other essentially says that the
+;; objects have been scanned already ("scans"). When we see a pointer for the first
+;; time we set its mark and enqueue its span. We track these spans in work queues
+;; with a FIFO policy, unlike workbufs which have a LIFO policy. Empirically, a
+;; FIFO policy appears to work best for accumulating objects to scan on a span.
+;; Later, when we dequeue the span, we find both the union and intersection of the
+;; mark and scan bitsets. The union is then written back into the scan bits, while
+;; the intersection is used to decide which objects need scanning, such that the GC
+;; is still precise.
+;;
+;; Below is the bulk of the implementation, focusing on the worst case
+;; for locality, small objects. Specifically, those that are smaller than
+;; a few cache lines in size and whose metadata is stored the same way (at the
+;; end of the span).
+
+
+
+(in-ns 'go.runtime) (go/file "mgcmark_greenteagc.go" :build ["//go:build goexperiment.greenteagc"] :imports [
+
+
+    ^{:line 40} [goarch "internal/goarch"]
+    ^{:line 41} [atomic "internal/runtime/atomic"]
+    ^{:line 42} [gc "internal/runtime/gc"]
+    ^{:line 43} [scan "internal/runtime/gc/scan"]
+    ^{:line 44} [sys "internal/runtime/sys"]
+    ^{:line 45} [unsafe "unsafe"]])
+
+
+(go/const ^{:val false} doubleCheckGreenTea false)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type spanInlineMarkBits "spanInlineMarkBits are mark bits that are inlined into the span\nitself. gcUsesSpanInlineMarkBits may be used to check if objects\nof a particular size use inline mark bits.\n\nInline mark bits are a little bit more than just mark bits. They\nconsist of two parts: scans and marks. Marks are like pre-mark\nbits. They're set once a pointer to an object is discovered for\nthe first time. The marks allow us to scan many objects in bulk\nif we queue the whole span for scanning. Before we scan such objects\nin bulk, we copy the marks to the scans, computing a diff along the\nway. The resulting bitmap tells us which objects we should scan.\n\nThe inlineMarkBits also hold state sufficient for scanning any\nobject in the span, as well as state for acquiring ownership of\nthe span for queuing. This avoids the need to look at the mspan when\nscanning.\n" (struct
+    ^{:line 67 :tag (array 63 uint8)} scans ; scanned bits.
+    ^{:line 68 :tag spanScanOwnership} owned ; see the comment on spanScanOwnership.
+    ^{:line 69 :tag (array 63 uint8)} marks ; mark bits.
+    ^{:line 70 :tag spanClass} class))
+
+
+
+
+
+
+
+
+(go/type spanScanOwnership "spanScanOwnership indicates whether some thread has acquired\nthe span for scanning, and whether there has been one or more\nattempts to acquire the span. The latter information helps to\nfast-track span scans that only apply to a single mark, skipping\nthe relatively costly merge-and-diff process for scans and marks\nby allowing one to just set the mark directly.\n" uint8)
+
+(go/const
+  ^{:line 82} [^{:tag spanScanOwnership :val 0} spanScanUnowned 0] ; Indicates the span is not acquired for scanning.
+  ^{:line 83} [^{:val 2} spanScanOneMark (<< 1 iota)] ; Indicates that only one mark bit is set relative to the scan bits.
+  ^{:line 84} [^{:val 4} spanScanManyMark]) ; Indicates one or more scan bits may be set relative to the mark bits.
+;; "ManyMark" need not be exactly the value it has. In practice we just
+;; want to distinguish "none" from "one" from "many," so a comparison is
+;; sufficient (as opposed to a bit test) to check between these cases.
+
+
+
+^{:go/end 93} (go/method load "load atomically loads from a pointer to a spanScanOwnership.\n" ^spanScanOwnership [^{:tag (* spanScanOwnership)} o]
+  (conv spanScanOwnership (atomic/Load8 (conv (* uint8) (conv unsafe/Pointer o)))))
+
+
+^{:go/end 111} (go/method or ^spanScanOwnership [^{:tag (* spanScanOwnership)} o ^spanScanOwnership v]
+  ;; N.B. We round down the address and use Or32 because Or8 doesn't
+  ;; return a result, and it's strictly necessary for this protocol.
+  ;;
+  ;; Making Or8 return a result, while making the code look nicer, would
+  ;; not be strictly better on any supported platform, as an Or8 that
+  ;; returns a result is not a common instruction. On many platforms it
+  ;; would be implemented exactly as it is here, and since Or8 is
+  ;; exclusively used in the runtime and a hot function, we want to keep
+  ;; using its no-result version elsewhere for performance.
+  (let [o32 (conv (* uint32) (conv unsafe/Pointer (bit-and-not (conv uintptr (conv unsafe/Pointer o)) 2r11)))
+      ^{:line 106} off (* (bit-and (conv uintptr (conv unsafe/Pointer o)) 2r11) 8)]
+    (when goarch/BigEndian
+      (set! off (- 32 off 8)))
+
+    (conv spanScanOwnership (>> (atomic/Or32 o32 (<< (conv uint32 v) off)) off))))
+
+
+^{:go/end 142} (go/method init [^{:tag (* spanInlineMarkBits)} imb ^spanClass class ^bool needzero]
+  (when (== imb nil)
+    ;; This nil check and throw is almost pointless. Normally we would
+    ;; expect imb to never be nil. However, this is called on potentially
+    ;; freshly-allocated virtual memory. As of 2025, the compiler-inserted
+    ;; nil check is not a branch but a memory read that we expect to fault
+    ;; if the pointer really is nil.
+    ;;
+    ;; However, this causes a read of the page, and operating systems may
+    ;; take it as a hint to back the accessed memory with a read-only zero
+    ;; page. However, we immediately write to this memory, which can then
+    ;; force operating systems to have to update the page table and flush
+    ;; the TLB, causing a lot of churn for programs that are short-lived
+    ;; and monotonically grow in size.
+    ;;
+    ;; This nil check is thus an explicit branch instead of what the compiler
+    ;; would insert circa 2025, which is a memory read instruction.
+    ;;
+    ;; See go.dev/issue/74375 for details.
+    (throw "runtime: span inline mark bits nil?"))
+
+  (when needzero
+    ;; Use memclrNoHeapPointers to avoid having the compiler make a worse
+    ;; decision. We know that imb is both aligned and a nice power-of-two
+    ;; size that works well for wider SIMD instructions. The compiler likely
+    ;; has no idea that imb is aligned to 128 bytes.
+    (memclrNoHeapPointers (conv unsafe/Pointer imb) (unsafe/Sizeof (lit spanInlineMarkBits))))
+
+  (set! (.-class imb) class))
+
+
+
+
+^{:go/breaks [[5 162]] :go/end 163} (go/method tryAcquire "tryAcquire attempts to acquire the span for scanning. On success, the caller\nmust queue the span for scanning or scan the span immediately.\n" ^bool [^{:tag (* spanInlineMarkBits)} imb]
+  (switch (.load (.-owned imb))
+    (case [spanScanUnowned]
+      ;; Try to mark the span as having only one object marked.
+      (when (== (.or (.-owned imb) spanScanOneMark) spanScanUnowned)
+        (return true))
+
+      ;; If we didn't see an old value of spanScanUnowned, then we must
+      ;; have raced with someone else and seen spanScanOneMark or greater.
+      ;; Fall through and try to set spanScanManyMark.
+      (fallthrough))
+    (case [spanScanOneMark]
+      ;; We may be the first to set *any* bit on owned. In such a case,
+      ;; we still need to make sure the span is queued.
+      (return (== (.or (.-owned imb) spanScanManyMark) spanScanUnowned))))
+
+  false)
+
+
+
+
+
+
+
+
+
+
+^{:go/end 175} (go/method release "release releases the span for scanning, allowing another thread to queue the span.\n\nReturns an upper bound on the number of mark bits set since the span was queued. The\nupper bound is described as \"one\" (spanScanOneMark) or \"many\" (spanScanManyMark, with or\nwithout spanScanOneMark). If the return value indicates only one mark bit was set, the\ncaller can be certain that it was the same mark bit that caused the span to get queued.\nTake note of the fact that this is *only* an upper-bound. In particular, it may still\nturn out that only one mark bit was set, even if the return value indicates \"many\".\n" ^spanScanOwnership [^{:tag (* spanInlineMarkBits)} imb]
+  (conv spanScanOwnership (atomic/Xchg8 (conv (* uint8) (conv unsafe/Pointer (addr (.-owned imb)))) (conv uint8 spanScanUnowned))))
+
+
+
+
+
+^{:go/end 182} (go/func spanInlineMarkBitsFromBase "spanInlineMarkBitsFromBase returns the spanInlineMarkBits for a span whose start address is base.\n\nThe span must be gcUsesSpanInlineMarkBits(span.elemsize).\n" ^{:tag (* spanInlineMarkBits)} [^uintptr base]
+  (conv (* spanInlineMarkBits) (conv unsafe/Pointer (- (+ base gc/PageSize) (unsafe/Sizeof (lit spanInlineMarkBits))))))
+
+
+
+^{:go/end 191} (go/method initInlineMarkBits "initInlineMarkBits initializes the inlineMarkBits stored at the end of the span.\n" [^{:tag (* mspan)} s]
+  (when (and doubleCheckGreenTea (not (gcUsesSpanInlineMarkBits (.-elemsize s))))
+    (throw "expected span with inline mark bits"))
+
+  ;; Zeroing is only necessary if this span wasn't just freshly allocated from the OS.
+  (.init (.inlineMarkBits s) (.-spanclass s) (!= (.-needzero s) 0)))
+
+
+
+
+
+^{:go/end 216} (go/method moveInlineMarks "moveInlineMarks merges the span's inline mark bits into dst and clears them.\n\ngcUsesSpanInlineMarkBits(s.elemsize) must be true.\n" [^{:tag (* mspan)} s ^{:tag (* gcBits)} dst]
+  (when (and doubleCheckGreenTea (not (gcUsesSpanInlineMarkBits (.-elemsize s))))
+    (throw "expected span with inline mark bits"))
+
+  (let [bytes (divRoundUp (conv uintptr (.-nelems s)) 8)
+      ^{:line 201} imb (.inlineMarkBits s)
+      ^{:line 202} imbMarks (conv (* gc/ObjMask) (conv unsafe/Pointer (addr (.-marks imb))))]
+    (for [i (conv uintptr 0)] (< i bytes) (set! i + goarch/PtrSize)
+      (let [marks (bswapIfBigEndian (aget imbMarks (/ i goarch/PtrSize)))]
+        (when (== (/ i goarch/PtrSize) (- (/ (conv uintptr (+ (len (.-marks imb)) 1)) goarch/PtrSize) 1))
+          (set! marks bit-and-not (<< 0xff (* (- goarch/PtrSize 1) 8)))) ; mask out class
+
+        (set! @(conv (* uintptr) (conv unsafe/Pointer (.bytep dst i))) bit-or (bswapIfBigEndian marks))))
+
+    (when (and doubleCheckGreenTea (not (.noscan (.-spanclass s))) (!= (.-marks imb) (.-scans imb)))
+      (throw "marks don't match scans for span with pointer"))
+
+
+    ;; Reset the inline mark bits.
+    (.init imb (.-spanclass s) true))) ; /* We know these bits are always dirty now. */
+
+
+
+
+
+^{:go/end 226} (go/method inlineMarkBits "inlineMarkBits returns the inline mark bits for the span.\n\ngcUsesSpanInlineMarkBits(s.elemsize) must be true.\n" ^{:tag (* spanInlineMarkBits)} [^{:tag (* mspan)} s]
+  (when (and doubleCheckGreenTea (not (gcUsesSpanInlineMarkBits (.-elemsize s))))
+    (throw "expected span with inline mark bits"))
+
+  (spanInlineMarkBitsFromBase (.base s)))
+
+
+^{:go/end 237} (go/method markBitsForIndex [^{:tag (* mspan)} s ^uintptr objIndex] :results [^markBits bits]
+  (if (gcUsesSpanInlineMarkBits (.-elemsize s))
+    (set! (.-bytep bits) (addr (aget (.-marks (.inlineMarkBits s)) (/ objIndex 8))))
+
+    (set! (.-bytep bits) (.bytep (.-gcmarkBits s) (/ objIndex 8))))
+
+  (set! (.-mask bits) (<< (conv uint8 1) (% objIndex 8)))
+  (set! (.-index bits) objIndex)
+  (return))
+
+
+^{:go/end 244} (go/method markBitsForBase ^markBits [^{:tag (* mspan)} s]
+  (when (gcUsesSpanInlineMarkBits (.-elemsize s))
+    (return (lit markBits (addr (aget (.-marks (.inlineMarkBits s)) 0)) (conv uint8 1) 0)))
+
+  (lit markBits (addr (.-x (.-gcmarkBits s))) (conv uint8 1) 0))
+
+
+
+
+^{:go/end 250} (go/method scannedBitsForIndex "scannedBitsForIndex returns a markBits representing the scanned bit\nfor objIndex in the inline mark bits.\n" ^markBits [^{:tag (* mspan)} s ^uintptr objIndex]
+  (lit markBits (addr (aget (.-scans (.inlineMarkBits s)) (/ objIndex 8))) (<< (conv uint8 1) (% objIndex 8)) objIndex))
+
+
+
+
+
+
+
+
+^{:go/end 260} (go/func ^:go/nosplit gcUsesSpanInlineMarkBits "gcUsesSpanInlineMarkBits returns true if a span holding objects of a certain size\nhas inline mark bits. size must be the span's elemsize.\n\nnosplit because this is called from gcmarknewobject, which is nosplit.\n" ^bool [^uintptr size]
+  (and (heapBitsInSpan size) (>= size 16)))
+
+
+
+
+^{:go/end 314} (go/func tryDeferToSpanScan "tryDeferToSpanScan tries to queue p on the span it points to, if it\npoints to a small object span (gcUsesSpanQueue size).\n" ^bool [^uintptr p ^{:tag (* gcWork)} gcw]
+  (when useCheckmark
+    (return false))
+
+
+  ;; Quickly to see if this is a span that has inline mark bits.
+  (let [ha (heapArenaOf p)]
+    (when (== ha nil)
+      (return false))
+
+    (let [pageIdx (% (/ p pageSize 8) (conv uintptr (len (.-pageInUse ha))))
+        ^{:line 275} pageMask (conv byte ^byte (<< 1 (% (/ p pageSize) 8)))]
+      (when (== (bit-and (aget (.-pageUseSpanInlineMarkBits ha) pageIdx) pageMask) 0)
+        (return false))
+
+
+      ;; Find the object's index from the span class info stored in the inline mark bits.
+      ^{:go/breaks [[6 313]]} (let [base (alignDown p gc/PageSize)
+          ^{:line 282} q (spanInlineMarkBitsFromBase base)
+          ^{:line 283} objIndex (conv uint16 (>> (* (conv uint64 (- p base)) (conv uint64 (aget gc/SizeClassToDivMagic (.sizeclass (.-class q))))) 32))
+
+          ;; Set mark bit.
+          (values idx mask) (values (/ objIndex 8) (<< (conv uint8 1) (% objIndex 8)))]
+        (when (!= (bit-and (atomic/Load8 (addr (aget (.-marks q) idx))) mask) 0)
+          (return true))
+
+        (atomic/Or8 (addr (aget (.-marks q) idx)) mask)
+
+        ;; Fast-track noscan objects.
+        (when (.noscan (.-class q))
+          (set! (.-bytesMarked gcw) + (conv uint64 (aget gc/SizeClassToSize (.sizeclass (.-class q)))))
+          (return true))
+
+
+        ;; Queue up the pointer (as a representative for its span).
+        (when (.tryAcquire q)
+          (when (.put (.-spanq gcw) (makeObjPtr base objIndex))
+            (when (== gcphase _GCmark)
+              ;; This is intentionally racy; the bit set here might get
+              ;; stomped on by a stealing P. See the comment in tryStealSpan
+              ;; for an explanation as to why this is OK.
+              (when (not (.read (.-spanqMask work) (conv uint32 (.-id gcw))))
+                (.set (.-spanqMask work) (.-id gcw)))
+
+              (set! (.-mayNeedWorker gcw) true))
+
+            (set! (.-flushedWork gcw) true)))
+
+
+        true))))
+
+
+
+^{:go/end 319} (go/method tryGetSpanFast "tryGetSpanFast attempts to get an entire span to scan.\n" ^objptr [^{:tag (* gcWork)} w]
+  (.tryGetFast (.-spanq w)))
+
+
+
+^{:go/breaks [[7 335]] :go/end 336} (go/method tryGetSpan "tryGetSpan attempts to get an entire span to scan.\n" ^objptr [^{:tag (* gcWork)} w]
+  (when [s (.tryGetFast (.-spanq w))] (!= s 0)
+    (return s))
+
+  ;; "Steal" from ourselves.
+  (when [s (.steal (.-spanq w) (addr (.-spanq w)))] (!= s 0)
+    (return s))
+
+  ;; We failed to get any local work, so we're fresh out.
+  ;; Nobody else is going to add work for us. Clear our bit.
+  (when (.read (.-spanqMask work) (conv uint32 (.-id w)))
+    (.clear (.-spanqMask work) (.-id w)))
+
+  0)
+
+
+
+(go/type spanQueue "spanQueue is a P-local stealable span queue.\n" (struct
+
+    ^{:line 341 :tag uint32 :doc "head, tail, and ring represent a local non-thread-safe ring buffer.\n"} head ^{:tag uint32 :doc "head, tail, and ring represent a local non-thread-safe ring buffer.\n"} tail
+    ^{:line 342 :tag (array 256 objptr)} ring
+
+
+    ^{:line 345 :tag int :doc "putsSinceDrain counts the number of put calls since the last drain.\n"} putsSinceDrain
+
+
+
+
+
+
+
+    ^{:line 353 :tag (struct ^{:tag (* spanSPMC) :doc "head is the spanSPMC to put to. This is only accessed\nby the producer, so doesn't need to be synchronized.\n"} head ^{:tag atomic/UnsafePointer :doc "tail is the spanSPMC to steal from. This is accessed\nby consumers, so reads and writes must be atomic.\n"} tail) :doc "chain contains state visible to other Ps.\n\nIn particular, that means a linked chain of single-producer multi-consumer\nring buffers where the single producer is this P only.\n\nThis linked chain structure is based off the sync.Pool dequeue.\n"} chain))
+
+
+
+
+
+
+;; *spanSPMC
+
+
+
+
+^{:go/breaks [9] :go/end 372} (go/method putFast "putFast tries to put s onto the queue, but may fail if it's full.\n" [^{:tag (* spanQueue)} q ^objptr s] :results [^bool ok]
+  (when (== (- (.-tail q) (.-head q)) (conv uint32 (len (.-ring q))))
+    (return false))
+
+  (aset (.-ring q) (% (.-tail q) (conv uint32 (len (.-ring q)))) s)
+  (inc! (.-tail q))
+  true)
+
+
+
+
+
+^{:go/end 422} (go/method put "put puts s onto the queue.\n\nReturns whether the caller should spin up a new worker.\n" ^bool [^{:tag (* spanQueue)} q ^objptr s]
+  ;; The constants below define the period of and volume of
+  ;; spans we spill to the spmc chain when the local queue is
+  ;; not full.
+  ;;
+  ;; spillPeriod must be > spillMax, otherwise that sets the
+  ;; effective maximum size of our local span queue. Even if
+  ;; we have a span ring of size N, but we flush K spans every
+  ;; K puts, then K becomes our effective maximum length. When
+  ;; spillPeriod > spillMax, then we're always spilling spans
+  ;; at a slower rate than we're accumulating them.
+  ^{:go/breaks [[5 421]]} (let [
+      ;; spillPeriod defines how often to check if we should
+      ;; spill some spans, counted in the number of calls to put.
+      ^:const ^{:line 391 :val 64} spillPeriod 64
+
+      ;; spillMax defines, at most, how many spans to drain with
+      ;; each spill.
+      ^:const ^:go/grouped ^{:line 395 :val 16} spillMax 16]
+
+
+    (when (.putFast q s)
+      ;; Occasionally try to spill some work to generate parallelism.
+      (inc! (.-putsSinceDrain q))
+      (when (>= (.-putsSinceDrain q) spillPeriod)
+        ;; Reset even if we don't drain, so we don't check every time.
+        (set! (.-putsSinceDrain q) 0)
+
+        ;; Try to drain some spans. Don't bother if there's very
+        ;; few of them or there's already spans in the spmc chain.
+        (let [n (min (/ (- (.-tail q) (.-head q)) 2) spillMax)]
+          (when (and (> n 4) (.chainEmpty q))
+            (.drain q n)
+            (return true))))
+
+
+      (return false))
+
+
+    ;; We're out of space. Drain out our local spans.
+    (.drain q (/ (conv uint32 (len (.-ring q))) 2))
+    (when (not (.putFast q s))
+      (throw "failed putFast after drain"))
+
+    true))
+
+
+
+^{:go/end 431} (go/method flush "flush publishes all spans in the local queue to the spmc chain.\n" [^{:tag (* spanQueue)} q]
+  (let [n (- (.-tail q) (.-head q))]
+    (when (== n 0)
+      (return))
+
+    (.drain q n)))
+
+
+
+
+
+^{:go/end 442} (go/method empty "empty returns true if there's no more work on the queue.\n\nNot thread-safe. Must only be called by the owner of q.\n" ^bool [^{:tag (* spanQueue)} q]
+  ;; Check the local queue for work.
+  (when (> (- (.-tail q) (.-head q)) 0)
+    (return false))
+
+  (.chainEmpty q))
+
+
+
+
+
+^{:go/end 457} (go/method chainEmpty "chainEmpty returns true if the spmc chain is empty.\n\nThread-safe.\n" ^bool [^{:tag (* spanQueue)} q]
+  ;; Check the rest of the rings for work.
+  ^{:go/breaks [[3 456]]} (let [r (conv (* spanSPMC) (.Load (.-tail (.-chain q))))]
+    (while (!= r nil)
+      (when (not (.empty r))
+        (return false))
+
+      (set! r (conv (* spanSPMC) (.Load (.-prev r)))))
+
+    true))
+
+
+
+^{:go/end 506} (go/method drain "drain publishes n spans from the local queue to the spmc chain.\n" [^{:tag (* spanQueue)} q ^uint32 n]
+  (set! (.-putsSinceDrain q) 0)
+
+  (when (== (.-head (.-chain q)) nil)
+    ;; N.B. We target 1024, but this may be bigger if the physical
+    ;; page size is bigger, or if we can fit more uintptrs into a
+    ;; physical page. See newSpanSPMC docs.
+    (let [r (newSpanSPMC 1024)]
+      (set! (.-head (.-chain q)) r)
+      (.StoreNoWB (.-tail (.-chain q)) (conv unsafe/Pointer r))))
+
+
+  ;; Try to drain some of the queue to the head spmc.
+  (when (.tryDrain q (.-head (.-chain q)) n)
+    (return))
+
+  ;; No space. Create a bigger spmc and add it to the chain.
+
+  ;; Double the size of the next one, up to a maximum.
+  ;;
+  ;; We double each time so we can avoid taking this slow path
+  ;; in the future, which involves a global lock. Ideally we want
+  ;; to hit a steady-state where the deepest any queue goes during
+  ;; a mark phase can fit in the ring.
+  ;;
+  ;; However, we still set a maximum on this. We set the maximum
+  ;; to something large to amortize the cost of lock acquisition, but
+  ;; still at a reasonable size for big heaps and/or a lot of Ps (which
+  ;; tend to be correlated).
+  ;;
+  ;; It's not too bad to burn relatively large-but-fixed amounts of per-P
+  ;; memory if we need to deal with really, really deep queues, since the
+  ;; constants of proportionality are small. Simultaneously, we want to
+  ;; avoid a situation where a single worker ends up queuing O(heap)
+  ;; work and then forever retains a queue of that size.
+  (let [^:const ^{:val 131072} maxCap (/ (<< 1 20) goarch/PtrSize)
+      ^{:line 496} newCap (* (.-cap (.-head (.-chain q))) 2)]
+    (when (> newCap maxCap)
+      (set! newCap maxCap))
+
+    (let [newHead (newSpanSPMC newCap)]
+      (when (not (.tryDrain q newHead n))
+        (throw "failed to put span on newly-allocated spanSPMC"))
+
+      (.StoreNoWB (.-prev (.-head (.-chain q))) (conv unsafe/Pointer newHead))
+      (set! (.-head (.-chain q)) newHead))))
+
+
+
+
+
+^{:go/end 527} (go/method tryDrain "tryDrain attempts to drain n spans from q's local queue to the chain.\n\nReturns whether it succeeded.\n" ^bool [^{:tag (* spanQueue)} q ^{:tag (* spanSPMC)} r ^uint32 n]
+  (when (> (+ (.-head q) n) (.-tail q))
+    (throw "attempt to drain too many elements"))
+
+  ^{:go/breaks [[3 526]]} (let [h (.Load (.-head r)) ; synchronize with consumers
+      ^{:line 516} t (.Load (.-tail r))
+      ^{:line 517} rn (- t h)]
+    (when (<= (+ rn n) (.-cap r))
+      (for [i (conv uint32 0)] (< i n) (inc! i)
+        (set! @(.slot r (+ t i)) (aget (.-ring q) (% (+ (.-head q) i) (conv uint32 (len (.-ring q)))))))
+
+      (.Store (.-tail r) (+ t n)) ; Makes the items avail for consumption.
+      (set! (.-head q) + n)
+      (return true))
+
+    false))
+
+
+
+
+^{:go/end 538} (go/method tryGetFast "tryGetFast attempts to get a span from the local queue, but may fail if it's empty,\nreturning false.\n" ^objptr [^{:tag (* spanQueue)} q]
+  (when (== (- (.-tail q) (.-head q)) 0)
+    (return 0))
+
+  (let [s (aget (.-ring q) (% (.-head q) (conv uint32 (len (.-ring q)))))]
+    (inc! (.-head q))
+    ^{:line 537} s))
+
+
+
+
+
+^{:go/end 578} (go/method steal "steal takes some spans from the ring chain of another span queue.\n\nq == q2 is OK.\n" ^objptr [^{:tag (* spanQueue)} q ^{:tag (* spanQueue)} q2]
+  (let [r (conv (* spanSPMC) (.Load (.-tail (.-chain q2))))]
+    (when (== r nil)
+      (return 0))
+
+    (while true
+      ;; It's important that we load the next pointer
+      ;; *before* popping the tail. In general, r may be
+      ;; transiently empty, but if next is non-nil before
+      ;; the pop and the pop fails, then r is permanently
+      ;; empty, which is the only condition under which it's
+      ;; safe to drop r from the chain.
+      (let [r2 (conv (* spanSPMC) (.Load (.-prev r)))]
+
+        ;; Try to refill from one of the rings
+        (when [s (.refill q r)] (!= s 0)
+          (return s))
+
+
+        (when (== r2 nil)
+          ;; This is the only ring. It's empty right
+          ;; now, but could be pushed to in the future.
+          (return 0))
+
+
+        ;; The tail of the chain has been drained, so move on
+        ;; to the next ring. Try to drop it from the chain
+        ;; so the next consumer doesn't have to look at the empty
+        ;; ring again.
+        (when (.CompareAndSwapNoWB (.-tail (.-chain q2)) (conv unsafe/Pointer r) (conv unsafe/Pointer r2))
+          (.Store (.-dead r) true))
+
+
+        (set! r r2)))))
+
+
+
+
+
+
+
+
+
+^{:go/end 619} (go/method refill "refill takes some spans from r and puts them into q's local queue.\n\nOne span is removed from the stolen spans and returned on success.\nFailure to steal returns a zero objptr.\n\nsteal is thread-safe with respect to r.\n" ^objptr [^{:tag (* spanQueue)} q ^{:tag (* spanSPMC)} r]
+  (when (!= (- (.-tail q) (.-head q)) 0)
+    (throw "steal with local work available"))
+
+
+  ;; Steal some spans.
+  (let [^uint32 n (zero uint32)]
+    (while true
+      (let [h (.Load (.-head r)) ; load-acquire, synchronize with other consumers
+          ^{:line 595} t (.Load (.-tail r))] ; load-acquire, synchronize with the producer
+        (set! n (- t h))
+        (set! n (- n (/ n 2)))
+        (when (== n 0)
+          (return 0))
+
+        (when (> n (.-cap r)) ; read inconsistent h and t
+          (continue))
+
+        (set! n (min n (conv uint32 (/ (len (.-ring q)) 2))))
+        (for [i (conv uint32 0)] (< i n) (inc! i)
+          (aset (.-ring q) i @(.slot r (+ h i))))
+
+        (when (.CompareAndSwap (.-head r) h (+ h n))
+          (break))))
+
+
+
+    ;; Update local queue head and tail to reflect new buffered values.
+    (set! (.-head q) 0)
+    (set! (.-tail q) n)
+
+    ;; Pop off the head of the queue and return it.
+    (.tryGetFast q)))
+
+
+
+
+
+
+
+
+^{:go/end 650} (go/method destroy "destroy frees all chains in an empty spanQueue.\n\nPreconditions:\n- World is stopped.\n- GC is outside of the mark phase.\n- (Therefore) the queue is empty.\n" [^{:tag (* spanQueue)} q]
+  (assertWorldStopped)
+  (when (!= gcphase _GCoff)
+    (throw "spanQueue.destroy during the mark phase"))
+
+  (when (not (.empty q))
+    (throw "spanQueue.destroy on non-empty queue"))
+
+
+  (lock (addr (.-lock (.-spanSPMCs work))))
+
+  ;; Remove, deinitialize, and free each ring.
+  (for [r (conv (* spanSPMC) (.Load (.-tail (.-chain q))))] (!= r nil) (set! r (conv (* spanSPMC) (.Load (.-prev r))))
+    (.remove (.-list (.-spanSPMCs work)) (conv unsafe/Pointer r))
+    (.deinit r)
+    (.free (.-spanSPMCAlloc mheap_) (conv unsafe/Pointer r)))
+
+
+  (set! (.-head (.-chain q)) nil)
+  (.Store (.-tail (.-chain q)) nil)
+  (set! (.-putsSinceDrain q) 0)
+
+  (unlock (addr (.-lock (.-spanSPMCs work)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type spanSPMC "spanSPMC is a ring buffer of objptrs that represent spans.\nAccessed without a lock.\n\nSingle-producer, multi-consumer. The only producer is the P that owns this\nqueue, but any other P may consume from it.\n\n## Invariants for memory management\n\n1. All spanSPMCs are allocated from mheap_.spanSPMCAlloc.\n2. All allocated spanSPMCs must be on the work.spanSPMCs list.\n3. spanSPMCs may only be allocated if gcphase != _GCoff.\n4. spanSPMCs may only be deallocated if gcphase == _GCoff.\n\nInvariants (3) and (4) ensure that we do not need to concern ourselves with\ntricky reuse issues that stem from not knowing when a thread is truly done\nwith a spanSPMC. For example, two threads could load the same spanSPMC from\nthe tail of the chain. One thread is then paused while the other steals the\nlast few elements off of it. It's not safe to free at that point since the\nother thread will still inspect that spanSPMC, and we have no way of knowing\nwithout more complex and/or heavyweight synchronization.\n\nInstead, we rely on the global synchronization inherent to GC phases, and\nthe fact that spanSPMCs are only ever used during the mark phase, to ensure\nmemory safety. This means we temporarily waste some memory, but it's only\nuntil the end of the mark phase.\n" (struct
+    ^{:line 678 :tag sys/NotInHeap} _
+
+
+
+
+    ^{:line 683 :tag listNodeManual :doc "allnode is the linked list node for work.spanSPMCs list. This is\nused to find and free dead spanSPMCs. Protected by\nwork.spanSPMCs.lock.\n"} allnode
+
+
+
+
+
+    ^{:line 689 :tag atomic/Bool :doc "dead indicates whether the spanSPMC is no longer in use.\nProtected by the CAS to the prev field of the spanSPMC pointing\nto this spanSPMC. That is, whoever wins that CAS takes ownership\nof marking this spanSPMC as dead. See spanQueue.steal for details.\n"} dead
+
+
+
+
+    ^{:line 694 :tag atomic/UnsafePointer :doc "prev is the next link up a spanQueue's SPMC chain, from tail to head,\nhence the name \"prev.\" Set by a spanQueue's producer, cleared by a\nCAS in spanQueue.steal.\n"} prev ; *spanSPMC
+
+
+
+    ^{:line 698 :tag atomic/Uint32 :doc "head, tail, cap, and ring together represent a fixed-size SPMC lock-free\nring buffer of size cap. The ring buffer contains objptr values.\n"} head
+    ^{:line 699 :tag atomic/Uint32} tail
+    ^{:line 700 :tag uint32} cap ; cap(ring))
+    ^{:line 701 :tag (* objptr)} ring))
+
+
+
+
+
+
+^{:go/end 727} (go/func newSpanSPMC "newSpanSPMC allocates and initializes a new spmc with the provided capacity.\n\nnewSpanSPMC may override the capacity with a larger one if the provided one would\nwaste memory.\n" ^{:tag (* spanSPMC)} [^uint32 cap]
+  (lock (addr (.-lock (.-spanSPMCs work))))
+  (let [r (conv (* spanSPMC) (.alloc (.-spanSPMCAlloc mheap_)))]
+    (.push (.-list (.-spanSPMCs work)) (conv unsafe/Pointer r))
+    (unlock (addr (.-lock (.-spanSPMCs work))))
+
+    ;; If cap < the capacity of a single physical page, round up.
+    (let [pageCap (conv uint32 (/ physPageSize goarch/PtrSize))] ; capacity of a single page
+      (when (< cap pageCap)
+        (set! cap pageCap))
+
+      (when (!= (bit-and cap (- cap 1)) 0)
+        (throw "spmc capacity must be a power of 2"))
+
+
+      (set! (.-cap r) cap)
+      (let [ring (sysAlloc (* (conv uintptr cap) (unsafe/Sizeof (conv objptr 0))) (addr (.-gcMiscSys memstats)) "GC span queue")]
+        (atomic/StorepNoWB (conv unsafe/Pointer (addr (.-ring r))) ring)
+        ^{:line 726} r))))
+
+
+
+
+
+^{:go/end 736} (go/method empty "empty returns true if the spmc is empty.\n\nempty is thread-safe.\n" ^bool [^{:tag (* spanSPMC)} r]
+  (let [h (.Load (.-head r))
+      ^{:line 734} t (.Load (.-tail r))]
+    (== t h)))
+
+
+
+^{:go/end 748} (go/method deinit "deinit frees any resources the spanSPMC is holding onto and zeroes it.\n" [^{:tag (* spanSPMC)} r]
+  (sysFree (conv unsafe/Pointer (.-ring r)) (* (conv uintptr (.-cap r)) (unsafe/Sizeof (conv objptr 0))) (addr (.-gcMiscSys memstats)))
+  (set! (.-ring r) nil)
+  (.Store (.-dead r) false)
+  (.StoreNoWB (.-prev r) nil)
+  (.Store (.-head r) 0)
+  (.Store (.-tail r) 0)
+  (set! (.-cap r) 0)
+  (set! (.-allnode r) (lit listNodeManual)))
+
+
+
+^{:go/end 754} (go/method slot "slot returns a pointer to slot i%r.cap.\n" ^{:tag (* objptr)} [^{:tag (* spanSPMC)} r ^uint32 i]
+  (let [idx (conv uintptr (bit-and i (- (.-cap r) 1)))]
+    (conv (* objptr) (unsafe/Add (conv unsafe/Pointer (.-ring r)) (* idx (unsafe/Sizeof (conv objptr 0)))))))
+
+
+
+^{:go/end 792} (go/func freeDeadSpanSPMCs "freeDeadSpanSPMCs frees dead spanSPMCs back to the OS.\n" []
+  ;; According to the SPMC memory management invariants, we can only free
+  ;; spanSPMCs outside of the mark phase. We ensure we do this in two ways.
+  ;;
+  ;; 1. We take the work.spanSPMCs lock, which we need anyway. This ensures
+  ;;    that we are non-preemptible. If this path becomes lock-free, we will
+  ;;    need to become non-preemptible in some other way.
+  ;; 2. Once we are non-preemptible, we check the gcphase, and back out if
+  ;;    it's not safe.
+  ;;
+  ;; This way, we ensure that we don't start freeing if we're in the wrong
+  ;; phase, and the phase can't change on us while we're freeing.
+  ;;
+  ;; TODO(go.dev/issue/75771): Due to the grow semantics in
+  ;; spanQueue.drain, we expect a steady-state of around one spanSPMC per
+  ;; P, with some spikes higher when Ps have more than one. For high
+  ;; GOMAXPROCS, or if this list otherwise gets long, it would be nice to
+  ;; have a way to batch work that allows preemption during processing.
+  (lock (addr (.-lock (.-spanSPMCs work))))
+  (when (or (!= gcphase _GCoff) (.empty (.-list (.-spanSPMCs work))))
+    (unlock (addr (.-lock (.-spanSPMCs work))))
+    (return))
+
+  (let [r (conv (* spanSPMC) (.head (.-list (.-spanSPMCs work))))]
+    (while (!= r nil)
+      (let [next (conv (* spanSPMC) (conv unsafe/Pointer (.-next (.-allnode r))))]
+        (when (.Load (.-dead r))
+          ;; It's dead. Remove, deinitialize and free it.
+          (.remove (.-list (.-spanSPMCs work)) (conv unsafe/Pointer r))
+          (.deinit r)
+          (.free (.-spanSPMCAlloc mheap_) (conv unsafe/Pointer r)))
+
+        (set! r next)))
+
+    (unlock (addr (.-lock (.-spanSPMCs work))))))
+
+
+
+
+
+^{:go/end 821} (go/method tryStealSpan "tryStealSpan attempts to steal a span from another P's local queue.\n\nReturns a non-zero objptr on success.\n" ^objptr [^{:tag (* gcWork)} w]
+  ^{:go/breaks [[3 820]]} (let [pp (.ptr (.-p (.-m (getg))))]
+
+    (for [enum (.start stealOrder (cheaprand))] (not (.done enum)) (.next enum)
+      (when (not (.read (.-spanqMask work) (.position enum)))
+        (continue))
+
+      (let [p2 (aget allp (.position enum))]
+        (when (== pp p2)
+          (continue))
+
+        (when [s (.steal (.-spanq w) (addr (.-spanq (.-gcw p2))))] (!= s 0)
+          (return s))
+
+        ;; N.B. This is intentionally racy. We may stomp on a mask set by
+        ;; a P that just put a bunch of work into its local queue.
+        ;;
+        ;; This is OK because the ragged barrier in gcMarkDone will set
+        ;; the bit on each P if there's local work we missed. This race
+        ;; should generally be rare, since the window between noticing
+        ;; an empty local queue and this bit being set is quite small.
+        (.clear (.-spanqMask work) (conv int32 (.position enum)))))
+
+    0))
+
+
+
+(go/type objptr "objptr consists of a span base and the index of the object in the span.\n" uintptr)
+
+
+^{:go/end 832} (go/func makeObjPtr "makeObjPtr creates an objptr from a span base address and an object index.\n" ^objptr [^uintptr spanBase ^uint16 objIndex]
+  (when (and doubleCheckGreenTea (!= (bit-and spanBase (- (<< 1 gc/PageShift) 1)) 0))
+    (throw "created objptr with address that is incorrectly aligned"))
+
+  (conv objptr (bit-or spanBase (conv uintptr objIndex))))
+
+
+^{:go/end 836} (go/method spanBase ^uintptr [^objptr p]
+  (bit-and-not (conv uintptr p) (- (<< 1 gc/PageShift) 1)))
+
+
+^{:go/end 840} (go/method objIndex ^uint16 [^objptr p]
+  (bit-and (conv uint16 p) (- (<< 1 gc/PageShift) 1)))
+
+
+
+
+^{:go/end 929} (go/func scanSpan "scanSpan scans objects indicated marks&^scans and then scans those objects,\nqueuing the resulting pointers into gcw.\n" [^objptr p ^{:tag (* gcWork)} gcw]
+  (let [spanBase (.spanBase p)
+      ^{:line 846} imb (spanInlineMarkBitsFromBase spanBase)
+      ^{:line 847} spanclass (.-class imb)]
+    (when (.noscan spanclass)
+      (throw "noscan object in scanSpan"))
+
+    (let [elemsize (conv uintptr (aget gc/SizeClassToSize (.sizeclass spanclass)))]
+
+      ;; Release span.
+      (when (== (.release imb) spanScanOneMark)
+        ;; Nobody else set any mark bits on this span while it was acquired.
+        ;; That means p is the sole object we need to handle. Fast-track it.
+        (let [objIndex (.objIndex p)
+            ^{:line 858} bytep (addr (aget (.-scans imb) (/ objIndex 8)))
+            ^{:line 859} mask (<< (conv uint8 1) (% objIndex 8))]
+          (when (!= (bit-and (atomic/Load8 bytep) mask) 0)
+            (return))
+
+          (atomic/Or8 bytep mask)
+          (set! (.-bytesMarked gcw) + (conv uint64 elemsize))
+          (when (> (.-gctrace debug) 1)
+            (inc! (.-sparseObjsScanned (aget (.-stats gcw) (.sizeclass spanclass)))))
+
+          (let [b (+ spanBase (* (conv uintptr objIndex) elemsize))]
+            (scanObjectSmall spanBase b elemsize gcw)
+            (return))))
+
+
+      ;; Compute nelems.
+      (let [divMagic (conv uint64 (aget gc/SizeClassToDivMagic (.sizeclass spanclass)))
+          ^{:line 875} usableSpanSize (conv uint64 (- gc/PageSize (unsafe/Sizeof (lit spanInlineMarkBits))))]
+        (when (not (.noscan spanclass))
+          (set! usableSpanSize - (/ gc/PageSize goarch/PtrSize 8)))
+
+        (let [nelems (conv uint16 (>> (* usableSpanSize divMagic) 32))
+
+            ;; Grey objects and return if there's nothing else to do.
+            ^{:line 882 :tag gc/ObjMask} toScan (zero gc/ObjMask)
+            ^{:line 883} objsMarked (spanSetScans spanBase nelems imb (addr toScan))]
+          (when (== objsMarked 0)
+            (return))
+
+          (set! (.-bytesMarked gcw) + (* (conv uint64 objsMarked) (conv uint64 elemsize)))
+
+          ;; Check if we have enough density to make a dartboard scan
+          ;; worthwhile. If not, just do what scanobject does, but
+          ;; localized to the span, using the dartboard.
+          (when (or (not (scan/HasFastScanSpanPacked)) (< objsMarked (conv int (/ nelems 8))))
+            (when (> (.-gctrace debug) 1)
+              (inc! (.-spansSparseScanned (aget (.-stats gcw) (.sizeclass spanclass))))
+              (set! (.-spanObjsSparseScanned (aget (.-stats gcw) (.sizeclass spanclass))) + (conv uint64 objsMarked)))
+
+            (scanObjectsSmall spanBase elemsize nelems gcw (addr toScan))
+            (return))
+
+
+          ;; Scan the span.
+          ;;
+          ;; N.B. Use gcw.ptrBuf as the output buffer. This is a bit different
+          ;; from scanObjectsSmall, which puts addresses to dereference. ScanSpanPacked
+          ;; on the other hand, fills gcw.ptrBuf with already dereferenced pointers.
+          (let [nptrs (scan/ScanSpanPacked
+                (conv unsafe/Pointer spanBase)
+                (addr (aget (.-ptrBuf gcw) 0))
+                (addr toScan)
+                (conv uintptr (.sizeclass spanclass))
+                (spanPtrMaskUnsafe spanBase))]
+
+            (set! (.-heapScanWork gcw) + (* (conv int64 objsMarked) (conv int64 elemsize)))
+
+            (when (> (.-gctrace debug) 1)
+              ;; Write down some statistics.
+              (inc! (.-spansDenseScanned (aget (.-stats gcw) (.sizeclass spanclass))))
+              (set! (.-spanObjsDenseScanned (aget (.-stats gcw) (.sizeclass spanclass))) + (conv uint64 objsMarked)))
+
+
+            ;; Process all the pointers we just got.
+            (range [_ p (subslice (.-ptrBuf gcw) _ nptrs)]
+              (when (not (tryDeferToSpanScan p gcw))
+                (when [(values obj span objIndex) (findObject p 0 0)] (!= obj 0)
+                  (greyobject obj 0 0 span gcw objIndex))))))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 978} (go/func spanSetScans "spanSetScans sets any unset mark bits that have their mark bits set in the inline mark bits.\n\ntoScan is populated with bits indicating whether a particular mark bit was set.\n\nReturns the number of objects marked, which could be zero.\n" ^int [^uintptr spanBase ^uint16 nelems ^{:tag (* spanInlineMarkBits)} imb ^{:tag (* gc/ObjMask)} toScan]
+  (let [(values arena pageIdx pageMask) (pageIndexOf spanBase)]
+    (when (== (bit-and (aget (.-pageMarks arena) pageIdx) pageMask) 0)
+      (atomic/Or8 (addr (aget (.-pageMarks arena) pageIdx)) pageMask))
+
+
+    (let [bytes (divRoundUp (conv uintptr nelems) 8)
+        ^{:line 943} objsMarked 0
+
+        ;; Careful: these two structures alias since ObjMask is much bigger
+        ;; than marks or scans. We do these unsafe shenanigans so that we can
+        ;; access the marks and scans by uintptrs rather than by byte.
+        ^{:line 948} imbMarks (conv (* gc/ObjMask) (conv unsafe/Pointer (addr (.-marks imb))))
+        ^{:line 949} imbScans (conv (* gc/ObjMask) (conv unsafe/Pointer (addr (.-scans imb))))]
+
+      ;; Iterate over one uintptr-sized chunks at a time, computing both
+      ;; the union and intersection of marks and scans. Store the union
+      ;; into scans, and the intersection into toScan.
+      (for [i (conv uintptr 0)] (< i bytes) (set! i + goarch/PtrSize)
+        (let [scans (atomic/Loaduintptr (addr (aget imbScans (/ i goarch/PtrSize))))
+            ^{:line 956} marks (aget imbMarks (/ i goarch/PtrSize))]
+          (set! scans (bswapIfBigEndian scans))
+          (set! marks (bswapIfBigEndian marks))
+          (when (== (/ i goarch/PtrSize) (- (/ (conv uintptr (+ (len (.-marks imb)) 1)) goarch/PtrSize) 1))
+            (set! scans bit-and-not (<< 0xff (* (- goarch/PtrSize 1) 8))) ; mask out owned
+            (set! marks bit-and-not (<< 0xff (* (- goarch/PtrSize 1) 8)))) ; mask out class
+
+          (let [toGrey (bit-and-not marks scans)]
+            (aset toScan (/ i goarch/PtrSize) toGrey)
+
+            ;; If there's anything left to grey, do it.
+            (when (!= toGrey 0)
+              (set! toGrey (bswapIfBigEndian toGrey))
+              (if (== goarch/PtrSize 4)
+                (atomic/Or32 (conv (* uint32) (conv unsafe/Pointer (addr (aget imbScans (/ i goarch/PtrSize))))) (conv uint32 toGrey))
+
+                (atomic/Or64 (conv (* uint64) (conv unsafe/Pointer (addr (aget imbScans (/ i goarch/PtrSize))))) (conv uint64 toGrey))))
+
+
+            (set! objsMarked + (sys/OnesCount64 (conv uint64 toGrey))))))
+
+      ^{:line 977} objsMarked)))
+
+
+^{:go/end 1013} (go/func scanObjectSmall [^uintptr spanBase ^uintptr b ^uintptr objSize ^{:tag (* gcWork)} gcw]
+  (let [(values hbitsBase _) (spanHeapBitsRange spanBase gc/PageSize objSize)
+      ^{:line 982} hbits (conv (* byte) (conv unsafe/Pointer hbitsBase))
+      ^{:line 983} ptrBits (extractHeapBitsSmall hbits spanBase b objSize)]
+    (set! (.-heapScanWork gcw) + (conv int64 (* (sys/Len64 (conv uint64 ptrBits)) goarch/PtrSize)))
+    (let [nptrs 0
+        ^{:line 986} n (sys/OnesCount64 (conv uint64 ptrBits))]
+      (range [n]
+        (let [k (sys/TrailingZeros64 (conv uint64 ptrBits))]
+          (set! ptrBits bit-and-not ^uintptr (<< 1 k))
+          (let [addr (+ b (* (conv uintptr k) goarch/PtrSize))]
+
+            ;; Prefetch addr since we're about to use it. This point for prefetching
+            ;; was chosen empirically.
+            (sys/Prefetch addr)
+
+            ;; N.B. ptrBuf is always large enough to hold pointers for an entire 1-page span.
+            (aset (.-ptrBuf gcw) nptrs addr)
+            (inc! nptrs))))
+
+
+      ;; Process all the pointers we just got.
+      (range [_ p (subslice (.-ptrBuf gcw) _ nptrs)]
+        (set! p @(conv (* uintptr) (conv unsafe/Pointer p)))
+        (when (== p 0)
+          (continue))
+
+        (when (not (tryDeferToSpanScan p gcw))
+          (when [(values obj span objIndex) (findObject p 0 0)] (!= obj 0)
+            (greyobject obj 0 0 span gcw objIndex)))))))
+
+
+
+
+
+^{:go/end 1061} (go/func scanObjectsSmall [^uintptr base ^uintptr objSize ^uint16 elems ^{:tag (* gcWork)} gcw ^{:tag (* gc/ObjMask)} scans]
+  (let [nptrs 0]
+    (range [i bits scans]
+      (when (> (* i (* goarch/PtrSize 8)) (conv int elems))
+        (break))
+
+      (let [n (sys/OnesCount64 (conv uint64 bits))
+          (values hbitsBase _) (spanHeapBitsRange base gc/PageSize objSize)
+          ^{:line 1023} hbits (conv (* byte) (conv unsafe/Pointer hbitsBase))]
+        (range [n]
+          (let [j (sys/TrailingZeros64 (conv uint64 bits))]
+            (set! bits bit-and-not ^uintptr (<< 1 j))
+
+            (let [b (+ base (* (conv uintptr (+ (* i (* goarch/PtrSize 8)) j)) objSize))
+                ^{:line 1029} ptrBits (extractHeapBitsSmall hbits base b objSize)]
+              (set! (.-heapScanWork gcw) + (conv int64 (* (sys/Len64 (conv uint64 ptrBits)) goarch/PtrSize)))
+
+              (let [n (sys/OnesCount64 (conv uint64 ptrBits))]
+                (range [n]
+                  (let [k (sys/TrailingZeros64 (conv uint64 ptrBits))]
+                    (set! ptrBits bit-and-not ^uintptr (<< 1 k))
+                    (let [addr (+ b (* (conv uintptr k) goarch/PtrSize))]
+
+                      ;; Prefetch addr since we're about to use it. This point for prefetching
+                      ;; was chosen empirically.
+                      (sys/Prefetch addr)
+
+                      ;; N.B. ptrBuf is always large enough to hold pointers for an entire 1-page span.
+                      (aset (.-ptrBuf gcw) nptrs addr)
+                      (inc! nptrs))))))))))
+
+
+
+
+    ;; Process all the pointers we just got.
+    (range [_ p (subslice (.-ptrBuf gcw) _ nptrs)]
+      (set! p @(conv (* uintptr) (conv unsafe/Pointer p)))
+      (when (== p 0)
+        (continue))
+
+      (when (not (tryDeferToSpanScan p gcw))
+        (when [(values obj span objIndex) (findObject p 0 0)] (!= obj 0)
+          (greyobject obj 0 0 span gcw objIndex))))))
+
+
+
+
+
+^{:go/end 1090} (go/func extractHeapBitsSmall ^uintptr [^{:tag (* byte)} hbits ^uintptr spanBase ^uintptr addr ^uintptr elemsize]
+  ;; These objects are always small enough that their bitmaps
+  ;; fit in a single word, so just load the word or two we need.
+  ;;
+  ;; Mirrors mspan.writeHeapBitsSmall.
+  ;;
+  ;; We should be using heapBits(), but unfortunately it introduces
+  ;; both bounds checks panics and throw which causes us to exceed
+  ;; the nosplit limit in quite a few cases.
+  (let [i (/ (- addr spanBase) goarch/PtrSize ptrBits)
+      ^{:line 1073} j (% (/ (- addr spanBase) goarch/PtrSize) ptrBits)
+      ^{:line 1074} bits (/ elemsize goarch/PtrSize)
+      ^{:line 1075} word0 (conv (* uintptr) (conv unsafe/Pointer (addb hbits (* goarch/PtrSize (+ i 0)))))
+      ^{:line 1076} word1 (conv (* uintptr) (conv unsafe/Pointer (addb hbits (* goarch/PtrSize (+ i 1)))))
+
+      ^{:line 1078 :tag uintptr} read (zero uintptr)]
+    (if (> (+ j bits) ptrBits)
+      ;; Two reads.
+      (let [bits0 (- ptrBits j)
+          ^{:line 1082} bits1 (- bits bits0)]
+        (set! read (>> @word0 j))
+        (set! read bit-or (<< (bit-and @word1 (- ^uintptr (<< 1 bits1) 1)) bits0)))
+
+      ;; One read.
+      (set! read (bit-and (>> @word0 j) (- ^uintptr (<< 1 bits) 1))))
+
+    ^{:line 1089} read))
+
+
+
+
+
+
+
+
+^{:go/end 1101} (go/func spanPtrMaskUnsafe "spanPtrMaskUnsafe returns the pointer mask for a span with inline mark bits.\n\nThe caller must ensure spanBase is the base of a span that:\n- 1 page in size,\n- Uses inline mark bits,\n- Contains pointers.\n" ^{:tag (* gc/PtrMask)} [^uintptr spanBase]
+  (let [base (- (+ spanBase gc/PageSize) (unsafe/Sizeof (lit gc/PtrMask)) (unsafe/Sizeof (lit spanInlineMarkBits)))]
+    (conv (* gc/PtrMask) (conv unsafe/Pointer base))))
+
+
+(go/type sizeClassScanStats (struct
+    ^{:line 1104 :tag uint64} spansDenseScanned ; Spans scanned with ScanSpanPacked.
+    ^{:line 1105 :tag uint64} spanObjsDenseScanned ; Objects scanned with ScanSpanPacked.
+    ^{:line 1106 :tag uint64} spansSparseScanned ; Spans scanned with scanObjectsSmall.
+    ^{:line 1107 :tag uint64} spanObjsSparseScanned ; Objects scanned with scanObjectsSmall.
+    ^{:line 1108 :tag uint64} sparseObjsScanned)) ; Objects scanned with scanobject or scanObjectSmall.
+;; Note: sparseObjsScanned is sufficient for both cases because
+;; a particular size class either uses scanobject or scanObjectSmall,
+;; not both. In the latter case, we also know that there was one
+;; object scanned per span, so no need for a span counter.
+
+
+^{:go/end 1148} (go/func dumpScanStats []
+  (let [
+      ^{:line 1117 :tag uint64} spansDenseScanned (zero uint64)
+      ^{:line 1118 :tag uint64} spanObjsDenseScanned (zero uint64)
+      ^{:line 1119 :tag uint64} spansSparseScanned (zero uint64)
+      ^{:line 1120 :tag uint64} spanObjsSparseScanned (zero uint64)
+      ^{:line 1121 :tag uint64} sparseObjsScanned (zero uint64)]
+
+    (range [_ stats (.-lastScanStats memstats)]
+      (set! spansDenseScanned + (.-spansDenseScanned stats))
+      (set! spanObjsDenseScanned + (.-spanObjsDenseScanned stats))
+      (set! spansSparseScanned + (.-spansSparseScanned stats))
+      (set! spanObjsSparseScanned + (.-spanObjsSparseScanned stats))
+      (set! sparseObjsScanned + (.-sparseObjsScanned stats)))
+
+    (let [totalObjs (+ sparseObjsScanned spanObjsSparseScanned spanObjsDenseScanned)
+        ^{:line 1131} totalSpans (+ spansSparseScanned spansDenseScanned)]
+      (print "scan: total " sparseObjsScanned "+" spanObjsSparseScanned "+" spanObjsDenseScanned "=" totalObjs " objs")
+      (print ", " spansSparseScanned "+" spansDenseScanned "=" totalSpans " spans\n")
+      (range [i stats (.-lastScanStats memstats)]
+        (when (== stats (lit sizeClassScanStats))
+          (continue))
+
+        (let [totalObjs (+ (.-sparseObjsScanned stats) (.-spanObjsSparseScanned stats) (.-spanObjsDenseScanned stats))
+            ^{:line 1139} totalSpans (+ (.-spansSparseScanned stats) (.-spansDenseScanned stats))]
+          (if (== i 0)
+            (print "scan: class L ")
+
+            (print "scan: class " (aget gc/SizeClassToSize i) "B "))
+
+          (print (.-sparseObjsScanned stats) "+" (.-spanObjsSparseScanned stats) "+" (.-spanObjsDenseScanned stats) "=" totalObjs " objs")
+          (print ", " (.-spansSparseScanned stats) "+" (.-spansDenseScanned stats) "=" totalSpans " spans\n"))))))
+
+
+
+^{:go/end 1159} (go/method flushScanStats [^{:tag (* gcWork)} w ^{:tag (* (array gc/NumSizeClasses sizeClassScanStats))} dst]
+  (range [i (.-stats w)]
+    (set! (.-spansDenseScanned (aget dst i)) + (.-spansDenseScanned (aget (.-stats w) i)))
+    (set! (.-spanObjsDenseScanned (aget dst i)) + (.-spanObjsDenseScanned (aget (.-stats w) i)))
+    (set! (.-spansSparseScanned (aget dst i)) + (.-spansSparseScanned (aget (.-stats w) i)))
+    (set! (.-spanObjsSparseScanned (aget dst i)) + (.-spanObjsSparseScanned (aget (.-stats w) i)))
+    (set! (.-sparseObjsScanned (aget dst i)) + (.-sparseObjsScanned (aget (.-stats w) i))))
+
+  (clear (subslice (.-stats w))))
+
+
+
+
+
+
+^{:go/breaks [[7 1175]] :go/end 1176} (go/func gcMarkWorkAvailable "gcMarkWorkAvailable reports whether there's any non-local work available to do.\n\nThis is a heavyweight check and must only be used for correctness, not\nas a hint.\n" ^bool []
+  (when (not (.empty (.-full work)))
+    (return true)) ; global work available
+
+  (when (< (.Load (.-markrootNext work)) (.Load (.-markrootJobs work)))
+    (return true)) ; root scan work available
+
+  (when (.any (.-spanqMask work))
+    (return true)) ; stealable local work available
+
+  false)
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1280} (go/func ^:go/nowritebarrier scanObject "scanObject scans the object starting at b, adding pointers to gcw.\nb must point to the beginning of a heap object or an oblet.\nscanObject consults the GC bitmap for the pointer mask and the\nspans for the size of the object.\n\nUsed only for !gcUsesSpanInlineMarkBits spans, but supports all\nobject sizes and is safe to be called on all heap objects.\n" [^uintptr b ^{:tag (* gcWork)} gcw]
+  ;; Prefetch object before we scan it.
+  ;;
+  ;; This will overlap fetching the beginning of the object with initial
+  ;; setup before we start scanning the object.
+  (sys/Prefetch b)
+
+  ;; Find the bits for b and the size of the object at b.
+  ;;
+  ;; b is either the beginning of an object, in which case this
+  ;; is the size of the object to scan, or it points to an
+  ;; oblet, in which case we compute the size to scan below.
+  (let [s (spanOfUnchecked b)
+      ^{:line 1200} n (.-elemsize s)]
+    (when (== n 0)
+      (throw "scanObject n == 0"))
+
+    (when (.noscan (.-spanclass s))
+      ;; Correctness-wise this is ok, but it's inefficient
+      ;; if noscan objects reach here.
+      (throw "scanObject of a noscan object"))
+
+
+    (let [^typePointers tp (zero typePointers)]
+      (if (> n maxObletBytes) (do
+          ;; Large object. Break into oblets for better
+          ;; parallelism and lower latency.
+          (when (== b (.base s))
+            ;; Enqueue the other oblets to scan later.
+            ;; Some oblets may be in b's scalar tail, but
+            ;; these will be marked as "no more pointers",
+            ;; so we'll drop out immediately when we go to
+            ;; scan those.
+            (for [oblet (+ b maxObletBytes)] (< oblet (+ (.base s) (.-elemsize s))) (set! oblet + maxObletBytes)
+              (when (not (.putObjFast gcw oblet))
+                (.putObj gcw oblet))))
+
+
+
+
+          ;; Compute the size of the oblet. Since this object
+          ;; must be a large object, s.base() is the beginning
+          ;; of the object.
+          (set! n (- (+ (.base s) (.-elemsize s)) b))
+          (set! n (min n maxObletBytes))
+          (set! tp (.typePointersOfUnchecked s (.base s)))
+          (set! tp (.fastForward tp (- b (.-addr tp)) (+ b n))))
+
+        (set! tp (.typePointersOfUnchecked s b)))
+
+
+      (let [^uintptr scanSize (zero uintptr)]
+        (while true
+          (let [^uintptr addr (zero uintptr)]
+            (when [(set! (values tp addr) (.nextFast tp))] (== addr 0)
+              (when [(set! (values tp addr) (.next tp (+ b n)))] (== addr 0)
+                (break)))
+
+
+
+            ;; Keep track of farthest pointer we found, so we can
+            ;; update heapScanWork. TODO: is there a better metric,
+            ;; now that we can skip scalar portions pretty efficiently?
+            (set! scanSize (+ (- addr b) goarch/PtrSize))
+
+            ;; Work here is duplicated in scanblock and above.
+            ;; If you make changes here, make changes there too.
+            (let [obj @(conv (* uintptr) (conv unsafe/Pointer addr))]
+
+              ;; At this point we have extracted the next potential pointer.
+              ;; Quickly filter out nil and pointers back to the current object.
+              (when (and (!= obj 0) (>= (- obj b) n))
+                ;; Test if obj points into the Go heap and, if so,
+                ;; mark the object.
+                ;;
+                ;; Note that it's possible for findObject to
+                ;; fail if obj points to a just-allocated heap
+                ;; object because of a race with growing the
+                ;; heap. In this case, we know the object was
+                ;; just allocated and hence will be marked by
+                ;; allocation itself.
+                (when (not (tryDeferToSpanScan obj gcw))
+                  (when [(values obj span objIndex) (findObject obj b (- addr b))] (!= obj 0)
+                    (greyobject obj b (- addr b) span gcw objIndex)))))))
+
+
+
+
+        (set! (.-bytesMarked gcw) + (conv uint64 n))
+        (set! (.-heapScanWork gcw) + (conv int64 scanSize))
+        (when (> (.-gctrace debug) 1)
+          (inc! (.-sparseObjsScanned (aget (.-stats gcw) (.sizeclass (.-spanclass s))))))))))

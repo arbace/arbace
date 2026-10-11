@@ -1,0 +1,257 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; CPU profiling.
+;;
+;; The signal handler for the profiling clock tick adds a new stack trace
+;; to a log of recent traces. The log is read by a user goroutine that
+;; turns it into formatted profile data. If the reader does not keep up
+;; with the log, those writes will be recorded as a count of lost records.
+;; The actual profile buffer is in profbuf.go.
+
+(in-ns 'go.runtime) (go/file "cpuprof.go" :imports [
+
+
+    ^{:line 16} [abi "internal/abi"]
+    ^{:line 17} [sys "internal/runtime/sys"]
+    ^{:line 18} [unsafe "unsafe"]])
+
+
+(go/const
+  ^{:line 22} [^{:val 64} maxCPUProfStack 64]
+
+
+
+
+
+
+
+  ^{:line 30} [^{:val 131072 :doc "profBufWordCount is the size of the CPU profile buffer's storage for the\nheader and stack of each sample, measured in 64-bit words. Every sample\nhas a required header of two words. With a small additional header (a\nword or two) and stacks at the profiler's maximum length of 64 frames,\nthat capacity can support 1900 samples or 19 thread-seconds at a 100 Hz\nsample rate, at a cost of 1 MiB.\n"} profBufWordCount (<< 1 17)]
+
+
+
+  ^{:line 34} [^{:val 16384 :doc "profBufTagCount is the size of the CPU profile buffer's storage for the\ngoroutine tags associated with each sample. A capacity of 1<<14 means\nroom for 16k samples, or 160 thread-seconds at a 100 Hz sample rate.\n"} profBufTagCount (<< 1 14)])
+
+
+(go/type cpuProfile (struct
+    ^{:line 38 :tag mutex} lock
+    ^{:line 39 :tag bool} on ; profiling is on
+    ^{:line 40 :tag (* profBuf)} log ; profile events written here
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 53 :tag (array 1000 uintptr) :doc "extra holds extra stacks accumulated in addNonGo\ncorresponding to profiling signals arriving on\nnon-Go-created threads. Those stacks are written\nto log the next time a normal Go thread gets the\nsignal handler.\nAssuming the stacks are 2 words each (we don't get\na full traceback from those threads), plus one word\nsize for framing, 100 Hz profiling would generate\n300 words per second.\nHopefully a normal Go thread will get the profiling\nsignal at least once every few seconds.\n"} extra
+    ^{:line 54 :tag int} numExtra
+    ^{:line 55 :tag uint64} lostExtra ; count of frames lost because extra is full
+    ^{:line 56 :tag uint64} lostAtomic)) ; count of frames lost because of being in atomic64 on mips/arm; updated racily
+
+
+(go/var ^cpuProfile cpuprof)
+
+
+
+
+
+
+
+
+^{:go/end 97} (go/func SetCPUProfileRate "SetCPUProfileRate sets the CPU profiling rate to hz samples per second.\nIf hz <= 0, SetCPUProfileRate turns off profiling.\nIf the profiler is on, the rate cannot be changed without first turning it off.\n\nMost clients should use the [runtime/pprof] package or\nthe [testing] package's -test.cpuprofile flag instead of calling\nSetCPUProfileRate directly.\n" [^int hz]
+  ;; Clamp hz to something reasonable.
+  (when (< hz 0)
+    (set! hz 0))
+
+  (when (> hz 1000000)
+    (set! hz 1000000))
+
+
+  (lock (addr (.-lock cpuprof)))
+  (cond (> hz 0) (do
+      (when (or (.-on cpuprof) (!= (.-log cpuprof) nil))
+        (print "runtime: cannot set cpu profile rate until previous profile has finished.\n")
+        (unlock (addr (.-lock cpuprof)))
+        (return))
+
+
+      (set! (.-on cpuprof) true)
+      (set! (.-log cpuprof) (newProfBuf 1 profBufWordCount profBufTagCount))
+      (let [hdr (lit (array 1 uint64) (conv uint64 hz))]
+        (.write (.-log cpuprof) nil (nanotime) (subslice hdr) nil)
+        (setcpuprofilerate (conv int32 hz))))
+    (.-on cpuprof) (do
+      (setcpuprofilerate 0)
+      (set! (.-on cpuprof) false)
+      (.addExtra cpuprof)
+      (.close (.-log cpuprof))))
+
+  (unlock (addr (.-lock cpuprof))))
+
+
+
+
+
+
+
+
+
+^{:go/end 126} (go/method ^:go/nowritebarrierrec add "add adds the stack trace to the profile.\nIt is called from signal handlers and other limited environments\nand cannot allocate memory or acquire locks that might be\nheld at the time of the signal, nor can it use substantial amounts\nof stack.\n" [^{:tag (* cpuProfile)} p ^{:tag (* unsafe/Pointer)} tagPtr ^{:tag (slice uintptr)} stk]
+  ;; Simple cas-lock to coordinate with setcpuprofilerate.
+  (while (not (.CompareAndSwap (.-signalLock prof) 0 1))
+    ;; TODO: Is it safe to osyield here? https://go.dev/issue/52672
+    (osyield))
+
+
+  (when (!= (.Load (.-hz prof)) 0) ; implies cpuprof.log != nil
+    (when (or (> (.-numExtra p) 0) (> (.-lostExtra p) 0) (> (.-lostAtomic p) 0))
+      (.addExtra p))
+
+    (let [hdr (lit (array 1 uint64) 1)]
+      ;; Note: write "knows" that the argument is &gp.labels,
+      ;; because otherwise its write barrier behavior may not
+      ;; be correct. See the long comment there before
+      ;; changing the argument here.
+      (.write (.-log cpuprof) tagPtr (nanotime) (subslice hdr) stk)))
+
+
+  (.Store (.-signalLock prof) 0))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 160} (go/method ^:go/nosplit ^:go/nowritebarrierrec addNonGo "addNonGo adds the non-Go stack trace to the profile.\nIt is called from a non-Go thread, so we cannot use much stack at all,\nnor do anything that needs a g or an m.\nIn particular, we can't call cpuprof.log.write.\nInstead, we copy the stack into cpuprof.extra,\nwhich will be drained the next time a Go thread\ngets the signal handling event.\n" [^{:tag (* cpuProfile)} p ^{:tag (slice uintptr)} stk]
+  ;; Simple cas-lock to coordinate with SetCPUProfileRate.
+  ;; (Other calls to add or addNonGo should be blocked out
+  ;; by the fact that only one SIGPROF can be handled by the
+  ;; process at a time. If not, this lock will serialize those too.
+  ;; The use of timer_create(2) on Linux to request process-targeted
+  ;; signals may have changed this.)
+  (while (not (.CompareAndSwap (.-signalLock prof) 0 1))
+    ;; TODO: Is it safe to osyield here? https://go.dev/issue/52672
+    (osyield))
+
+
+  (if (< (+ (.-numExtra cpuprof) 1 (len stk)) (len (.-extra cpuprof)))
+    (let [i (.-numExtra cpuprof)]
+      (aset (.-extra cpuprof) i (conv uintptr (+ 1 (len stk))))
+      (copy (subslice (.-extra cpuprof) (+ i 1)) stk)
+      (set! (.-numExtra cpuprof) + (+ 1 (len stk))))
+
+    (inc! (.-lostExtra cpuprof)))
+
+
+  (.Store (.-signalLock prof) 0))
+
+
+
+
+
+
+
+^{:go/end 197} (go/method addExtra "addExtra adds the \"extra\" profiling events,\nqueued by addNonGo, to the profile log.\naddExtra is called either from a signal handler on a Go thread\nor from an ordinary goroutine; either way it can use stack\nand has a g. The world may be stopped, though.\n" [^{:tag (* cpuProfile)} p]
+  ;; Copy accumulated non-Go profile events.
+  (let [hdr (lit (array 1 uint64) 1)]
+    (for [i 0] (< i (.-numExtra p)) _
+      (.write (.-log p) nil 0 (subslice hdr) (subslice (.-extra p) (+ i 1) (+ i (conv int (aget (.-extra p) i)))))
+      (set! i + (conv int (aget (.-extra p) i))))
+
+    (set! (.-numExtra p) 0)
+
+    ;; Report any lost events.
+    (when (> (.-lostExtra p) 0)
+      (let [hdr (lit (array 1 uint64) (.-lostExtra p))
+          ^{:line 179} lostStk (lit (array 2 uintptr)
+            (+ (abi/FuncPCABIInternal _LostExternalCode) sys/PCQuantum)
+            (+ (abi/FuncPCABIInternal _ExternalCode) sys/PCQuantum))]
+
+        (.write (.-log p) nil 0 (subslice hdr) (subslice lostStk))
+        (set! (.-lostExtra p) 0)))
+
+
+    (when (> (.-lostAtomic p) 0)
+      (let [hdr (lit (array 1 uint64) (.-lostAtomic p))
+          ^{:line 189} lostStk (lit (array 2 uintptr)
+            (+ (abi/FuncPCABIInternal _LostSIGPROFDuringAtomic64) sys/PCQuantum)
+            (+ (abi/FuncPCABIInternal _System) sys/PCQuantum))]
+
+        (.write (.-log p) nil 0 (subslice hdr) (subslice lostStk))
+        (set! (.-lostAtomic p) 0)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 210} (go/func CPUProfile "CPUProfile panics.\nIt formerly provided raw access to chunks of\na pprof-format profile generated by the runtime.\nThe details of generating that format have changed,\nso this functionality has been removed.\n\nDeprecated: Use the [runtime/pprof] package,\nor the handlers in the [net/http/pprof] package,\nor the [testing] package's -test.cpuprofile flag instead.\n" ^{:tag (slice byte)} []
+  (panic "CPUProfile no longer available"))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 224} (go/func ^{:go/linkname "pprof_cyclesPerSecond runtime/pprof.runtime_cyclesPerSecond"} pprof_cyclesPerSecond "runtime/pprof.runtime_cyclesPerSecond should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/grafana/pyroscope-go/godeltaprof\n  - github.com/pyroscope-io/godeltaprof\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^int64 []
+  (ticksPerSecond))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 258} (go/func ^{:go/linkname "runtime_pprof_readProfile runtime/pprof.readProfile"} runtime_pprof_readProfile "readProfile, provided to runtime/pprof, returns the next chunk of\nbinary CPU profiling stack trace data, blocking until data is available.\nIf profiling is turned off and all the profile data accumulated while it was\non has been returned, readProfile returns eof=true.\nThe caller must save the returned data and tags before calling readProfile again.\nThe returned data contains a whole number of records, and tags contains\nexactly one entry per record.\n\nruntime_pprof_readProfile should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/pyroscope-io/pyroscope\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [] :results [(slice uint64) (slice unsafe/Pointer) bool]
+  (lock (addr (.-lock cpuprof)))
+  (let [log (.-log cpuprof)]
+    (unlock (addr (.-lock cpuprof)))
+    (let [readMode profBufBlocking]
+      (when (or (== GOOS "darwin") (== GOOS "ios") (== GOOS "tamago"))
+        (set! readMode profBufNonBlocking)) ; For #61768; on Darwin notes are not async-signal-safe.  See sigNoteSetup in os_darwin.go.
+
+      (let [(values data tags eof) (.read log readMode)]
+        (when (and (== (len data) 0) eof)
+          (lock (addr (.-lock cpuprof)))
+          (set! (.-log cpuprof) nil)
+          (unlock (addr (.-lock cpuprof))))
+
+        (return data tags eof)))))

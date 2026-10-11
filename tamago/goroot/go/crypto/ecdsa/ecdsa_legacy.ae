@@ -1,0 +1,217 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.ecdsa) (go/file "ecdsa_legacy.go" :imports [
+
+
+    ^{:line 8} [elliptic "crypto/elliptic"]
+    ^{:line 9} [fips140only "crypto/internal/fips140only"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [io "io"]
+    ^{:line 12} [big "math/big"]
+    ^{:line 13} [rand "math/rand/v2"]
+
+    ^{:line 15} [cryptobyte "golang.org/x/crypto/cryptobyte"]
+    ^{:line 16} [asn1 "golang.org/x/crypto/cryptobyte/asn1"]])
+
+
+;; This file contains a math/big implementation of ECDSA that is only used for
+;; deprecated custom curves.
+
+^{:go/end 37} (go/func generateLegacy [^elliptic/Curve c ^io/Reader rand] :results [(* PrivateKey) error]
+  (when (fips140only/Enforced)
+    (return nil (errors/New "crypto/ecdsa: use of custom curves is not allowed in FIPS 140-only mode")))
+
+
+  (let [(values k err) (randFieldElement c rand)]
+    (when (!= err nil)
+      (return nil err))
+
+
+    (let [priv (new PrivateKey)]
+      (set! (.-Curve (.-PublicKey priv)) c)
+      (set! (.-D priv) k)
+      (set! (values (.-X (.-PublicKey priv)) (.-Y (.-PublicKey priv))) (.ScalarBaseMult c (.Bytes k)))
+      (return priv nil))))
+
+
+
+
+
+^{:go/end 55} (go/func hashToInt "hashToInt converts a hash value to an integer. Per FIPS 186-4, Section 6.4,\nwe use the left-most bits of the hash to match the bit-length of the order of\nthe curve. This also performs Step 5 of SEC 1, Version 2.0, Section 4.1.3.\n" ^{:tag (* big/Int)} [^{:tag (slice byte)} hash ^elliptic/Curve c]
+  (let [orderBits (.BitLen (.-N (.Params c)))
+      ^{:line 44} orderBytes (/ (+ orderBits 7) 8)]
+    (when (> (len hash) orderBytes)
+      (set! hash (subslice hash _ orderBytes)))
+
+
+    (let [ret (.SetBytes (new big/Int) hash)
+        ^{:line 50} excess (- (* (len hash) 8) orderBits)]
+      (when (> excess 0)
+        (.Rsh ret ret (conv uint excess)))
+
+      ^{:line 54} ret)))
+
+
+(go/var errZeroParam (errors/New "zero parameter"))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 86} (go/func Sign "Sign signs a hash (which should be the result of hashing a larger message)\nusing the private key, priv. If the hash is longer than the bit-length of the\nprivate key's curve order, the hash will be truncated to that length. It\nreturns the signature as a pair of integers. Most applications should use\n[SignASN1] instead of dealing directly with r, s.\n\nThe signature is randomized. Since Go 1.26, a secure source of random bytes\nis always used, and the Reader is ignored unless GODEBUG=cryptocustomrand=1\nis set. This setting will be removed in a future Go release. Instead, use\n[testing/cryptotest.SetGlobalRandom].\n" [^io/Reader rand ^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} hash] :results [^{:tag (* big/Int)} r ^{:tag (* big/Int)} s ^error err]
+  (let [(values sig ^:assign err) (SignASN1 rand priv hash)]
+    (when (!= err nil)
+      (return nil nil err))
+
+
+    (set! (values r s) (values (new big/Int) (new big/Int)))
+    (let [^cryptobyte/String inner (zero cryptobyte/String)
+        ^{:line 77} input (conv cryptobyte/String sig)]
+      (when (or (not (.ReadASN1 input (addr inner) asn1/SEQUENCE))
+          (not (.Empty input))
+          (not (.ReadASN1Integer inner r))
+          (not (.ReadASN1Integer inner s))
+          (not (.Empty inner)))
+        (return nil nil (errors/New "invalid ASN.1 from SignASN1")))
+
+      (return r s nil))))
+
+
+^{:go/end 141} (go/func signLegacy [^{:tag (* PrivateKey)} priv ^io/Reader csprng ^{:tag (slice byte)} hash] :results [^{:tag (slice byte)} sig ^error err]
+  (when (fips140only/Enforced)
+    (return nil (errors/New "crypto/ecdsa: use of custom curves is not allowed in FIPS 140-only mode")))
+
+
+  (let [c ^{:go/via [PublicKey]} (.-Curve priv)
+
+      ;; A cheap version of hedged signatures, for the deprecated path.
+      ^{:line 96 :tag (array 32 byte)} seed (zero (array 32 byte))]
+    (when [(values _ err) (io/ReadFull csprng (subslice seed))] (!= err nil)
+      (return nil err))
+
+    (range [i b (.Bytes (.-D priv))]
+      (set! (aget seed (% i 32)) bit-xor b))
+
+    (range [i b hash]
+      (set! (aget seed (% i 32)) bit-xor b))
+
+    (set! csprng (rand/NewChaCha8 seed))
+
+    ;; SEC 1, Version 2.0, Section 4.1.3
+    (let [N (.-N (.Params c))]
+      (when (== (.Sign N) 0)
+        (return nil errZeroParam))
+
+      (let [(values ^{:tag (* big/Int)} k ^{:tag (* big/Int)} kInv ^{:tag (* big/Int)} r ^{:tag (* big/Int)} s) (zero (* big/Int))]
+        (while true
+          (while true
+            (set! (values k err) (randFieldElement c csprng))
+            (when (!= err nil)
+              (return nil err))
+
+
+            (set! kInv (.ModInverse (new big/Int) k N))
+
+            (set! (values r _) (.ScalarBaseMult c (.Bytes k)))
+            (.Mod r r N)
+            (when (!= (.Sign r) 0)
+              (break)))
+
+
+
+          (let [e (hashToInt hash c)]
+            (set! s (.Mul (new big/Int) (.-D priv) r))
+            (.Add s s e)
+            (.Mul s s kInv)
+            (.Mod s s N) ; N != 0
+            (when (!= (.Sign s) 0)
+              (break))))
+
+
+
+        (encodeSignature (.Bytes r) (.Bytes s))))))
+
+
+
+
+
+
+
+
+^{:go/end 158} (go/func Verify "Verify verifies the signature in r, s of hash using the public key, pub. Its\nreturn value records whether the signature is valid. Most applications should\nuse VerifyASN1 instead of dealing directly with r, s.\n\nThe inputs are not considered confidential, and may leak through timing side\nchannels, or if an attacker has control of part of the inputs.\n" ^bool [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} hash ^{:tag (* big/Int)} r ^{:tag (* big/Int)} s]
+  (when (or (<= (.Sign r) 0) (<= (.Sign s) 0))
+    (return false))
+
+  (let [(values sig err) (encodeSignature (.Bytes r) (.Bytes s))]
+    (when (!= err nil)
+      (return false))
+
+    (VerifyASN1 pub hash sig)))
+
+
+^{:go/end 199} (go/func verifyLegacy ^bool [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} hash ^{:tag (slice byte)} sig]
+  (when (fips140only/Enforced)
+    (panic "crypto/ecdsa: use of custom curves is not allowed in FIPS 140-only mode"))
+
+
+  (let [(values rBytes sBytes err) (parseSignature sig)]
+    (when (!= err nil)
+      (return false))
+
+    (let [(values r s) (values (.SetBytes (new big/Int) rBytes) (.SetBytes (new big/Int) sBytes))
+
+        ^{:line 171} c (.-Curve pub)
+        ^{:line 172} N (.-N (.Params c))]
+
+      (when (or (<= (.Sign r) 0) (<= (.Sign s) 0))
+        (return false))
+
+      (when (or (>= (.Cmp r N) 0) (>= (.Cmp s N) 0))
+        (return false))
+
+
+      ;; SEC 1, Version 2.0, Section 4.1.4
+      (let [e (hashToInt hash c)
+          ^{:line 183} w (.ModInverse (new big/Int) s N)
+
+          ^{:line 185} u1 (.Mul e e w)]
+        (.Mod u1 u1 N)
+        (let [u2 (.Mul w r w)]
+          (.Mod u2 u2 N)
+
+          (let [(values x1 y1) (.ScalarBaseMult c (.Bytes u1))
+              (values x2 y2) (.ScalarMult c (.-X pub) (.-Y pub) (.Bytes u2))
+              (values x y) (.Add c x1 y1 x2 y2)]
+
+            (when (and (== (.Sign x) 0) (== (.Sign y) 0))
+              (return false))
+
+            (.Mod x x N)
+            (== (.Cmp x r) 0)))))))
+
+
+(go/var one (.SetInt64 (new big/Int) 1))
+
+
+
+^{:go/end 220} (go/func randFieldElement "randFieldElement returns a random element of the order of the given\ncurve using the procedure given in FIPS 186-4, Appendix B.5.2.\n" [^elliptic/Curve c ^io/Reader rand] :results [^{:tag (* big/Int)} k ^error err]
+  (while true
+    (let [N (.-N (.Params c))
+        ^{:line 208} b (make (slice byte) (/ (+ (.BitLen N) 7) 8))]
+      (when [(set! (values _ err) (io/ReadFull rand b))] (!= err nil)
+        (return))
+
+      (when [excess (- (* (len b) 8) (.BitLen N))] (> excess 0)
+        (set! (aget b 0) >> excess))
+
+      (set! k (.SetBytes (new big/Int) b))
+      (when (and (!= (.Sign k) 0) (< (.Cmp k N) 0))
+        (return)))))

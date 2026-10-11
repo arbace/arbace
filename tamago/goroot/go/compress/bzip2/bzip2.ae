@@ -1,0 +1,499 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package bzip2 implements bzip2 decompression.
+(in-ns 'go.compress.bzip2) (go/file "bzip2.go" :doc "Package bzip2 implements bzip2 decompression.\n" :imports [
+
+    ^{:line 8} [io "io"]])
+
+;; There's no RFC for bzip2. I used the Wikipedia page for reference and a lot
+;; of guessing: https://en.wikipedia.org/wiki/Bzip2
+;; The source code to pyflate was useful for debugging:
+;; http://www.paul.sladen.org/projects/pyflate
+
+
+
+(go/type StructuralError "A StructuralError is returned when the bzip2 data is found to be\nsyntactically invalid.\n" string)
+
+^{:go/end 21} (go/method Error ^string [^StructuralError s]
+  (+ "bzip2 data invalid: " (conv string s)))
+
+
+
+(go/type reader "A reader decompresses bzip2 compressed data.\n" (struct
+    ^{:line 25 :tag bitReader} br
+    ^{:line 26 :tag uint32} fileCRC
+    ^{:line 27 :tag uint32} blockCRC
+    ^{:line 28 :tag uint32} wantBlockCRC
+    ^{:line 29 :tag bool} setupDone ; true if we have parsed the bzip2 header.
+    ^{:line 30 :tag bool} eof
+    ^{:line 31 :tag int} blockSize ; blockSize in bytes, i.e. 900 * 1000.
+    ^{:line 32 :tag (array 256 uint)} c ; the ``C'' array for the inverse BWT.
+    ^{:line 33 :tag (slice uint32)} tt ; mirrors the ``tt'' array in the bzip2 source and contains the P array in the upper 24 bits.
+    ^{:line 34 :tag uint32} tPos ; Index of the next output byte in tt.
+
+    ^{:line 36 :tag (slice uint32)} preRLE ; contains the RLE data still to be processed.
+    ^{:line 37 :tag int} preRLEUsed ; number of entries of preRLE used.
+    ^{:line 38 :tag int} lastByte ; the last byte value seen.
+    ^{:line 39 :tag uint} byteRepeats ; the number of repeats of lastByte seen.
+    ^{:line 40 :tag uint} repeats)) ; the number of copies of lastByte to output.
+
+
+
+
+
+^{:go/end 50} (go/func NewReader "NewReader returns an [io.Reader] which decompresses bzip2 data from r.\nIf r does not also implement [io.ByteReader],\nthe decompressor may read more data than necessary from r.\n" ^io/Reader [^io/Reader r]
+  (let [bz2 (new reader)]
+    (set! (.-br bz2) (newBitReader r))
+    ^{:line 49} bz2))
+
+
+(go/const ^{:val 16986} bzip2FileMagic 0x425a) ; "BZ"
+(go/const ^{:val 54156738319193} bzip2BlockMagic 0x314159265359)
+(go/const ^{:val 25779555029136} bzip2FinalMagic 0x177245385090)
+
+
+^{:go/end 83} (go/method setup "setup parses the bzip2 header.\n" ^error [^{:tag (* reader)} bz2 ^bool needMagic]
+  (let [br (addr (.-br bz2))]
+
+    (when needMagic
+      (let [magic (.ReadBits br 16)]
+        (when (!= magic bzip2FileMagic)
+          (return (conv StructuralError "bad magic value")))))
+
+
+
+    (let [t (.ReadBits br 8)]
+      (when (!= t \h)
+        (return (conv StructuralError "non-Huffman entropy encoding")))
+
+
+      ^{:go/breaks [[6 82]]} (let [level (.ReadBits br 8)]
+        (when (or (< level \1) (> level \9))
+          (return (conv StructuralError "invalid compression level")))
+
+
+        (set! (.-fileCRC bz2) 0)
+        (set! (.-blockSize bz2) (* 100 1000 (- level \0)))
+        (when (> (.-blockSize bz2) (len (.-tt bz2)))
+          (set! (.-tt bz2) (make (slice uint32) (.-blockSize bz2))))
+
+        nil))))
+
+
+^{:go/end 108} (go/method Read [^{:tag (* reader)} bz2 ^{:tag (slice byte)} buf] :results [^int n ^error err]
+  (when (.-eof bz2)
+    (return 0 io/EOF))
+
+
+  (when (not (.-setupDone bz2))
+    (set! err (.setup bz2 true))
+    (let [brErr (.Err (.-br bz2))]
+      (when (!= brErr nil)
+        (set! err brErr))
+
+      (when (!= err nil)
+        (return 0 err))
+
+      (set! (.-setupDone bz2) true)))
+
+
+  (set! (values n err) (.read bz2 buf))
+  (let [brErr (.Err (.-br bz2))]
+    (when (!= brErr nil)
+      (set! err brErr))
+
+    (return)))
+
+
+^{:go/end 161} (go/method readFromBlock ^int [^{:tag (* reader)} bz2 ^{:tag (slice byte)} buf]
+  ;; bzip2 is a block based compressor, except that it has a run-length
+  ;; preprocessing step. The block based nature means that we can
+  ;; preallocate fixed-size buffers and reuse them. However, the RLE
+  ;; preprocessing would require allocating huge buffers to store the
+  ;; maximum expansion. Thus we process blocks all at once, except for
+  ;; the RLE which we decompress as required.
+  (let [n 0]
+    (while (and ^:go/paren (or (> (.-repeats bz2) 0) (< (.-preRLEUsed bz2) (len (.-preRLE bz2)))) (< n (len buf)))
+      ;; We have RLE data pending.
+
+      ;; The run-length encoding works like this:
+      ;; Any sequence of four equal bytes is followed by a length
+      ;; byte which contains the number of repeats of that byte to
+      ;; include. (The number of repeats can be zero.) Because we are
+      ;; decompressing on-demand our state is kept in the reader
+      ;; object.
+
+      (when (> (.-repeats bz2) 0)
+        (aset buf n (conv byte (.-lastByte bz2)))
+        (inc! n)
+        (dec! (.-repeats bz2))
+        (when (== (.-repeats bz2) 0)
+          (set! (.-lastByte bz2) -1))
+
+        (continue))
+
+
+      (set! (.-tPos bz2) (aget (.-preRLE bz2) (.-tPos bz2)))
+      (let [b (conv byte (.-tPos bz2))]
+        (set! (.-tPos bz2) >> 8)
+        (inc! (.-preRLEUsed bz2))
+
+        (when (== (.-byteRepeats bz2) 3)
+          (set! (.-repeats bz2) (conv uint b))
+          (set! (.-byteRepeats bz2) 0)
+          (continue))
+
+
+        (if (== (.-lastByte bz2) (conv int b))
+          (inc! (.-byteRepeats bz2))
+
+          (set! (.-byteRepeats bz2) 0))
+
+        (set! (.-lastByte bz2) (conv int b))
+
+        (aset buf n b)
+        (inc! n)))
+
+
+    ^{:line 160} n))
+
+
+^{:go/end 233} (go/method read [^{:tag (* reader)} bz2 ^{:tag (slice byte)} buf] :results [int error]
+  (while true
+    (let [n (.readFromBlock bz2 buf)]
+      (when (or (> n 0) (== (len buf) 0))
+        (set! (.-blockCRC bz2) (updateCRC (.-blockCRC bz2) (subslice buf _ n)))
+        (return n nil))
+
+
+      ;; End of block. Check CRC.
+      (when (!= (.-blockCRC bz2) (.-wantBlockCRC bz2))
+        (set! (.-err (.-br bz2)) (conv StructuralError "block checksum mismatch"))
+        (return 0 (.-err (.-br bz2))))
+
+
+      ;; Find next block.
+      (let [br (addr (.-br bz2))]
+        (switch (.ReadBits64 br 48)
+          (default
+            (return 0 (conv StructuralError "bad magic value found")))
+
+          (case [bzip2BlockMagic]
+            ;; Start of block.
+            (let [err (.readBlock bz2)]
+              (when (!= err nil)
+                (return 0 err))))
+
+
+          (case [bzip2FinalMagic]
+            ;; Check end-of-file CRC.
+            (let [wantFileCRC (conv uint32 (.ReadBits64 br 32))]
+              (when (!= (.-err br) nil)
+                (return 0 (.-err br)))
+
+              (when (!= (.-fileCRC bz2) wantFileCRC)
+                (set! (.-err br) (conv StructuralError "file checksum mismatch"))
+                (return 0 (.-err br)))
+
+
+              ;; Skip ahead to byte boundary.
+              ;; Is there a file concatenated to this one?
+              ;; It would start with BZ.
+              (when (!= (% (.-bits br) 8) 0)
+                (.ReadBits br (% (.-bits br) 8)))
+
+              (let [(values b err) (.ReadByte (.-r br))]
+                (when (== err io/EOF)
+                  (set! (.-err br) io/EOF)
+                  (set! (.-eof bz2) true)
+                  (return 0 io/EOF))
+
+                (when (!= err nil)
+                  (set! (.-err br) err)
+                  (return 0 err))
+
+                (let [(values z ^:assign err) (.ReadByte (.-r br))]
+                  (when (!= err nil)
+                    (when (== err io/EOF)
+                      (set! err io/ErrUnexpectedEOF))
+
+                    (set! (.-err br) err)
+                    (return 0 err))
+
+                  (when (or (!= b \B) (!= z \Z))
+                    (return 0 (conv StructuralError "bad magic value in continuation file")))
+
+                  (when [err (.setup bz2 false)] (!= err nil)
+                    (return 0 err)))))))))))
+
+
+
+
+
+
+^{:go/end 444} (go/method readBlock "readBlock reads a bzip2 block. The magic number should already have been consumed.\n" [^{:tag (* reader)} bz2] :results [^error err]
+  (let [br (addr (.-br bz2))]
+    (set! (.-wantBlockCRC bz2) (conv uint32 (.ReadBits64 br 32))) ; skip checksum. TODO: check it if we can figure out what it is.
+    (set! (.-blockCRC bz2) 0)
+    (set! (.-fileCRC bz2) (bit-xor (bit-or (<< (.-fileCRC bz2) 1) (>> (.-fileCRC bz2) 31)) (.-wantBlockCRC bz2)))
+    (let [randomized (.ReadBits br 1)]
+      (when (!= randomized 0)
+        (return (conv StructuralError "deprecated randomized files")))
+
+      (let [origPtr (conv uint (.ReadBits br 24))
+
+          ;; If not every byte value is used in the block (i.e., it's text) then
+          ;; the symbol set is reduced. The symbols used are stored as a
+          ;; two-level, 16x16 bitmap.
+          ^{:line 250} symbolRangeUsedBitmap (.ReadBits br 16)
+          ^{:line 251} symbolPresent (make (slice bool) 256)
+          ^{:line 252} numSymbols 0]
+        (for [symRange (conv uint 0)] (< symRange 16) (inc! symRange)
+          (when (!= (bit-and symbolRangeUsedBitmap ^int (<< 1 (- 15 symRange))) 0)
+            (let [bits (.ReadBits br 16)]
+              (for [symbol (conv uint 0)] (< symbol 16) (inc! symbol)
+                (when (!= (bit-and bits ^int (<< 1 (- 15 symbol))) 0)
+                  (aset symbolPresent (+ (* 16 symRange) symbol) true)
+                  (inc! numSymbols))))))
+
+
+
+
+
+        (when (== numSymbols 0)
+          ;; There must be an EOF symbol.
+          (return (conv StructuralError "no symbols in input")))
+
+
+        ;; A block uses between two and six different Huffman trees.
+        (let [numHuffmanTrees (.ReadBits br 3)]
+          (when (or (< numHuffmanTrees 2) (> numHuffmanTrees 6))
+            (return (conv StructuralError "invalid number of Huffman trees")))
+
+
+          ;; The Huffman tree can switch every 50 symbols so there's a list of
+          ;; tree indexes telling us which tree to use for each 50 symbol block.
+          (let [numSelectors (.ReadBits br 15)
+              ^{:line 279} treeIndexes (make (slice uint8) numSelectors)
+
+              ;; The tree indexes are move-to-front transformed and stored as unary
+              ;; numbers.
+              ^{:line 283} mtfTreeDecoder (newMTFDecoderWithRange numHuffmanTrees)]
+            (range [i treeIndexes]
+              (let [c 0]
+                (while true
+                  (let [inc (.ReadBits br 1)]
+                    (when (== inc 0)
+                      (break))
+
+                    (inc! c)))
+
+                (when (>= c numHuffmanTrees)
+                  (return (conv StructuralError "tree index too large")))
+
+                (aset treeIndexes i (.Decode mtfTreeDecoder c))))
+
+
+            ;; The list of symbols for the move-to-front transform is taken from
+            ;; the previously decoded symbol bitmap.
+            (let [symbols (make (slice byte) numSymbols)
+                ^{:line 302} nextSymbol 0]
+              (for [i 0] (< i 256) (inc! i)
+                (when (aget symbolPresent i)
+                  (aset symbols nextSymbol (conv byte i))
+                  (inc! nextSymbol)))
+
+
+              (let [mtf (newMTFDecoder symbols)]
+
+                (set! numSymbols + 2) ; to account for RUNA and RUNB symbols
+                (let [huffmanTrees (make (slice huffmanTree) numHuffmanTrees)
+
+                    ;; Now we decode the arrays of code-lengths for each tree.
+                    ^{:line 315} lengths (make (slice uint8) numSymbols)]
+                  (range [i huffmanTrees]
+                    ;; The code lengths are delta encoded from a 5-bit base value.
+                    (let [length (.ReadBits br 5)]
+                      (range [j lengths]
+                        (while true
+                          (when (or (< length 1) (> length 20))
+                            (return (conv StructuralError "Huffman length out of range")))
+
+                          (when (not (.ReadBit br))
+                            (break))
+
+                          (if (.ReadBit br)
+                            (dec! length)
+
+                            (inc! length)))
+
+
+                        (aset lengths j (conv uint8 length)))
+
+                      (set! (values (aget huffmanTrees i) err) (newHuffmanTree lengths))
+                      (when (!= err nil)
+                        (return err))))
+
+
+
+                  (let [selectorIndex 1] ; the next tree index to use
+                    (when (== (len treeIndexes) 0)
+                      (return (conv StructuralError "no tree selectors given")))
+
+                    (when (>= (conv int (aget treeIndexes 0)) (len huffmanTrees))
+                      (return (conv StructuralError "tree selector out of range")))
+
+                    (let [currentHuffmanTree (aget huffmanTrees (aget treeIndexes 0))
+                        ^{:line 349} bufIndex 0 ; indexes bz2.buf, the output buffer.
+                        ;; The output of the move-to-front transform is run-length encoded and
+                        ;; we merge the decoding into the Huffman parsing loop. These two
+                        ;; variables accumulate the repeat count. See the Wikipedia page for
+                        ;; details.
+                        ^{:line 354} repeat 0
+                        ^{:line 355} repeatPower 0]
+
+                      ;; The `C' array (used by the inverse BWT) needs to be zero initialized.
+                      (clear (subslice (.-c bz2)))
+
+                      ^{:go/breaks [[10 443]]} (let [decoded 0] ; counts the number of symbols decoded by the current tree.
+                        (while true
+                          (when (== decoded 50)
+                            (when (>= selectorIndex numSelectors)
+                              (return (conv StructuralError "insufficient selector indices for number of symbols")))
+
+                            (when (>= (conv int (aget treeIndexes selectorIndex)) (len huffmanTrees))
+                              (return (conv StructuralError "tree selector out of range")))
+
+                            (set! currentHuffmanTree (aget huffmanTrees (aget treeIndexes selectorIndex)))
+                            (inc! selectorIndex)
+                            (set! decoded 0))
+
+
+                          (let [v (.Decode currentHuffmanTree br)]
+                            (inc! decoded)
+
+                            (when (< v 2)
+                              ;; This is either the RUNA or RUNB symbol.
+                              (when (== repeat 0)
+                                (set! repeatPower 1))
+
+                              (set! repeat + (<< repeatPower v))
+                              (set! repeatPower << 1)
+
+                              ;; This limit of 2 million comes from the bzip2 source
+                              ;; code. It prevents repeat from overflowing.
+                              (when (> repeat (* 2 1024 1024))
+                                (return (conv StructuralError "repeat count too large")))
+
+                              (continue))
+
+
+                            (when (> repeat 0)
+                              ;; We have decoded a complete run-length so we need to
+                              ;; replicate the last output symbol.
+                              (when (> repeat (- (.-blockSize bz2) bufIndex))
+                                (return (conv StructuralError "repeats past end of block")))
+
+                              (for [i 0] (< i repeat) (inc! i)
+                                (let [b (.First mtf)]
+                                  (aset (.-tt bz2) bufIndex (conv uint32 b))
+                                  (inc! (aget (.-c bz2) b))
+                                  (inc! bufIndex)))
+
+                              (set! repeat 0))
+
+
+                            (when (== (conv int v) (- numSymbols 1))
+                              ;; This is the EOF symbol. Because it's always at the
+                              ;; end of the move-to-front list, and never gets moved
+                              ;; to the front, it has this unique value.
+                              (break))
+
+
+                            ;; Since two metasymbols (RUNA and RUNB) have values 0 and 1,
+                            ;; one would expect |v-2| to be passed to the MTF decoder.
+                            ;; However, the front of the MTF list is never referenced as 0,
+                            ;; it's always referenced with a run-length of 1. Thus 0
+                            ;; doesn't need to be encoded and we have |v-1| in the next
+                            ;; line.
+                            (let [b (.Decode mtf (conv int (- v 1)))]
+                              (when (>= bufIndex (.-blockSize bz2))
+                                (return (conv StructuralError "data exceeds block size")))
+
+                              (aset (.-tt bz2) bufIndex (conv uint32 b))
+                              (inc! (aget (.-c bz2) b))
+                              (inc! bufIndex))))
+
+
+                        (when (>= origPtr (conv uint bufIndex))
+                          (return (conv StructuralError "origPtr out of bounds")))
+
+
+                        ;; We have completed the entropy decoding. Now we can perform the
+                        ;; inverse BWT and setup the RLE buffer.
+                        (set! (.-preRLE bz2) (subslice (.-tt bz2) _ bufIndex))
+                        (set! (.-preRLEUsed bz2) 0)
+                        (set! (.-tPos bz2) (inverseBWT (.-preRLE bz2) origPtr (subslice (.-c bz2))))
+                        (set! (.-lastByte bz2) -1)
+                        (set! (.-byteRepeats bz2) 0)
+                        (set! (.-repeats bz2) 0)
+
+                        nil))))))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 470} (go/func inverseBWT "inverseBWT implements the inverse Burrows-Wheeler transform as described in\nhttp://www.hpl.hp.com/techreports/Compaq-DEC/SRC-RR-124.pdf, section 4.2.\nIn that document, origPtr is called “I” and c is the “C” array after the\nfirst pass over the data. It's an argument here because we merge the first\npass with the Huffman decoding.\n\nThis also implements the “single array” method from the bzip2 source code\nwhich leaves the output, still shuffled, in the bottom 8 bits of tt with the\nindex of the next byte in the top 24-bits. The index of the first byte is\nreturned.\n" ^uint32 [^{:tag (slice uint32)} tt ^uint origPtr ^{:tag (slice uint)} c]
+  (let [sum (conv uint 0)]
+    (for [i 0] (< i 256) (inc! i)
+      (set! sum + (aget c i))
+      (aset c i (- sum (aget c i))))
+
+
+    (range [i tt]
+      (let [b (bit-and (aget tt i) 0xff)]
+        (set! (aget tt (aget c b)) bit-or (<< (conv uint32 i) 8))
+        (inc! (aget c b))))
+
+
+    (>> (aget tt origPtr) 8)))
+
+
+;; This is a standard CRC32 like in hash/crc32 except that all the shifts are reversed,
+;; causing the bits in the input to be processed in the reverse of the usual order.
+
+(go/var ^{:tag (array 256 uint32)} crctab)
+
+^{:go/end 490} (go/func init []
+  (let [^:const ^{:val 79764919} poly 0x04C11DB7]
+    (range [i crctab]
+      (let [crc (<< (conv uint32 i) 24)]
+        (for [j 0] (< j 8) (inc! j)
+          (if (!= (bit-and crc 0x80000000) 0)
+            (set! crc (bit-xor (<< crc 1) poly))
+
+            (set! crc << 1)))
+
+
+        (aset crctab i crc)))))
+
+
+
+
+
+^{:go/end 500} (go/func updateCRC "updateCRC updates the crc value to incorporate the data in b.\nThe initial value is 0.\n" ^uint32 [^uint32 val ^{:tag (slice byte)} b]
+  (let [crc (bit-not val)]
+    (range [_ v b]
+      (set! crc (bit-xor (aget crctab (bit-xor (conv byte (>> crc 24)) v)) (<< crc 8))))
+
+    (bit-not crc)))

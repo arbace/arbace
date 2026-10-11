@@ -1,0 +1,405 @@
+;; Copyright 2010 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.tls) (go/file "key_agreement.go" :imports [
+
+
+    ^{:line 8} [crypto "crypto"]
+    ^{:line 9} [ecdh "crypto/ecdh"]
+    ^{:line 10} [md5 "crypto/md5"]
+    ^{:line 11} [rsa "crypto/rsa"]
+    ^{:line 12} [sha1 "crypto/sha1"]
+    ^{:line 13} [x509 "crypto/x509"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [io "io"]
+    ^{:line 17} [slices "slices"]])
+
+
+
+
+(go/type keyAgreement "A keyAgreement implements the client and server side of a TLS 1.0–1.2 key\nagreement protocol by generating and processing key exchange messages.\n" (interface
+    ;; On the server side, the first two methods are called in order.
+
+
+
+
+    (^{:doc "In the case that the key agreement protocol doesn't use a\nServerKeyExchange message, generateServerKeyExchange can return nil,\nnil.\n"} generateServerKeyExchange [(* Config) (* Certificate) (* clientHelloMsg) (* serverHelloMsg)] :results [(* serverKeyExchangeMsg) error])
+    (processClientKeyExchange [(* Config) (* Certificate) (* clientKeyExchangeMsg) uint16] :results [(slice byte) error])
+
+    ;; On the client side, the next two methods are called in order.
+
+
+
+    (^{:doc "This method may not be called if the server doesn't send a\nServerKeyExchange message.\n"} processServerKeyExchange ^error [(* Config) (* clientHelloMsg) (* serverHelloMsg) (* x509/Certificate) (* serverKeyExchangeMsg)])
+    (generateClientKeyExchange [(* Config) (* clientHelloMsg) (* x509/Certificate)] :results [(slice byte) (* clientKeyExchangeMsg) error])))
+
+
+(go/var errClientKeyExchange (errors/New "tls: invalid ClientKeyExchange message"))
+(go/var errServerKeyExchange (errors/New "tls: invalid ServerKeyExchange message"))
+
+
+
+(go/type rsaKeyAgreement "rsaKeyAgreement implements the standard TLS key agreement where the client\nencrypts the pre-master secret to the server's public key.\n" (struct))
+
+^{:go/end 48} (go/method generateServerKeyExchange [^rsaKeyAgreement ka ^{:tag (* Config)} config ^{:tag (* Certificate)} cert ^{:tag (* clientHelloMsg)} clientHello ^{:tag (* serverHelloMsg)} hello] :results [(* serverKeyExchangeMsg) error]
+  (return nil nil))
+
+
+^{:go/end 76} (go/method processClientKeyExchange [^rsaKeyAgreement ka ^{:tag (* Config)} config ^{:tag (* Certificate)} cert ^{:tag (* clientKeyExchangeMsg)} ckx ^uint16 version] :results [(slice byte) error]
+  (when (< (len (.-ciphertext ckx)) 2)
+    (return nil errClientKeyExchange))
+
+  (let [ciphertextLen (bit-or (<< (conv int (aget (.-ciphertext ckx) 0)) 8) (conv int (aget (.-ciphertext ckx) 1)))]
+    (when (!= ciphertextLen (- (len (.-ciphertext ckx)) 2))
+      (return nil errClientKeyExchange))
+
+    (let [ciphertext (subslice (.-ciphertext ckx) 2)
+
+        (values priv ok) (assert crypto/Decrypter (.-PrivateKey cert))]
+      (when (not ok)
+        (return nil (errors/New "tls: certificate private key does not implement crypto.Decrypter")))
+
+      ;; Perform constant time RSA PKCS #1 v1.5 decryption
+      (let [(values preMasterSecret err) (.Decrypt priv (.rand config) ciphertext (addr (lit rsa/PKCS1v15DecryptOptions :SessionKeyLen 48)))]
+        (when (!= err nil)
+          (return nil err))
+
+        ;; We don't check the version number in the premaster secret. For one,
+        ;; by checking it, we would leak information about the validity of the
+        ;; encrypted pre-master secret. Secondly, it provides only a small
+        ;; benefit against a downgrade attack and some implementations send the
+        ;; wrong version anyway. See the discussion at the end of section
+        ;; 7.4.7.1 of RFC 4346.
+        (return preMasterSecret nil)))))
+
+
+^{:go/end 80} (go/method processServerKeyExchange ^error [^rsaKeyAgreement ka ^{:tag (* Config)} config ^{:tag (* clientHelloMsg)} clientHello ^{:tag (* serverHelloMsg)} serverHello ^{:tag (* x509/Certificate)} cert ^{:tag (* serverKeyExchangeMsg)} skx]
+  (errors/New "tls: unexpected ServerKeyExchange"))
+
+
+^{:go/end 105} (go/method generateClientKeyExchange [^rsaKeyAgreement ka ^{:tag (* Config)} config ^{:tag (* clientHelloMsg)} clientHello ^{:tag (* x509/Certificate)} cert] :results [(slice byte) (* clientKeyExchangeMsg) error]
+  (let [preMasterSecret (make (slice byte) 48)]
+    (aset preMasterSecret 0 (conv byte (>> (.-vers clientHello) 8)))
+    (aset preMasterSecret 1 (conv byte (.-vers clientHello)))
+    (let [(values _ err) (io/ReadFull (.rand config) (subslice preMasterSecret 2))]
+      (when (!= err nil)
+        (return nil nil err))
+
+
+      (let [(values rsaKey ok) (assert (* rsa/PublicKey) (.-PublicKey cert))]
+        (when (not ok)
+          (return nil nil (errors/New "tls: server certificate contains incorrect key type for selected ciphersuite")))
+
+        (let [(values encrypted ^:assign err) (rsa/EncryptPKCS1v15 (.rand config) rsaKey preMasterSecret)]
+          (when (!= err nil)
+            (return nil nil err))
+
+          (let [ckx (new clientKeyExchangeMsg)]
+            (set! (.-ciphertext ckx) (make (slice byte) (+ (len encrypted) 2)))
+            (aset (.-ciphertext ckx) 0 (conv byte (>> (len encrypted) 8)))
+            (aset (.-ciphertext ckx) 1 (conv byte (len encrypted)))
+            (copy (subslice (.-ciphertext ckx) 2) encrypted)
+            (return preMasterSecret ckx nil)))))))
+
+
+
+^{:go/end 114} (go/func sha1Hash "sha1Hash calculates a SHA1 hash over the given byte slices.\n" ^{:tag (slice byte)} [^{:tag (slice (slice byte))} slices]
+  (let [hsha1 (sha1/New)]
+    (range [_ slice slices]
+      (.Write hsha1 slice))
+
+    (.Sum hsha1 nil)))
+
+
+
+
+^{:go/end 127} (go/func md5SHA1Hash "md5SHA1Hash implements TLS 1.0's hybrid hash function which consists of the\nconcatenation of an MD5 and SHA1 hash.\n" ^{:tag (slice byte)} [^{:tag (slice (slice byte))} slices]
+  (let [md5sha1 (make (slice byte) (+ md5/Size sha1/Size))
+      ^{:line 120} hmd5 (md5/New)]
+    (range [_ slice slices]
+      (.Write hmd5 slice))
+
+    (copy md5sha1 (.Sum hmd5 nil))
+    (copy (subslice md5sha1 md5/Size) (sha1Hash slices))
+    ^{:line 126} md5sha1))
+
+
+
+
+^{:go/end 136} (go/func hashForServerKeyExchange "hashForServerKeyExchange hashes the given slices and returns their digest\nusing a hash based on the sigType. It can only be used for TLS 1.0 and 1.1.\n" ^{:tag (slice byte)} [^uint8 sigType & ^{:tag (slice (slice byte))} slices]
+  (when (== sigType signatureECDSA)
+    (return (sha1Hash slices)))
+
+  (md5SHA1Hash slices))
+
+
+
+
+
+
+(go/type ecdheKeyAgreement "ecdheKeyAgreement implements a TLS key agreement where the server\ngenerates an ephemeral EC public/private key pair and signs it. The\npre-master secret is then calculated using ECDH. The signature may\nbe ECDSA, Ed25519 or RSA.\n" (struct
+    ^{:line 143 :tag uint16} version
+    ^{:line 144 :tag bool} isRSA
+
+
+
+    ^{:line 148 :tag (* clientKeyExchangeMsg) :doc "ckx and preMasterSecret are generated in processServerKeyExchange\nand returned in generateClientKeyExchange.\n"} ckx
+    ^{:line 149 :tag (slice byte)} preMasterSecret
+
+
+
+    ^{:line 153 :tag CurveID :doc "curveID, signatureAlgorithm, and key are set by processServerKeyExchange\nand generateServerKeyExchange.\n"} curveID
+    ^{:line 154 :tag SignatureScheme} signatureAlgorithm
+    ^{:line 155 :tag (* ecdh/PrivateKey)} key))
+
+
+^{:go/end 252} (go/method generateServerKeyExchange [^{:tag (* ecdheKeyAgreement)} ka ^{:tag (* Config)} config ^{:tag (* Certificate)} cert ^{:tag (* clientHelloMsg)} clientHello ^{:tag (* serverHelloMsg)} hello] :results [(* serverKeyExchangeMsg) error]
+  (range [_ c (.-supportedCurves clientHello)]
+    (when (.supportsCurve config (.-version ka) c)
+      (set! (.-curveID ka) c)
+      (break)))
+
+
+
+  (when (== (.-curveID ka) 0)
+    (return nil (errors/New "tls: no supported elliptic curves offered")))
+
+  (when [(values _ ok) (curveForCurveID (.-curveID ka))] (not ok)
+    (return nil (errors/New "tls: internal error: supportsCurve accepted unimplemented curve")))
+
+
+  (let [(values key err) (generateECDHEKey (.rand config) (.-curveID ka))]
+    (when (!= err nil)
+      (return nil err))
+
+    (set! (.-key ka) key)
+
+    ;; See RFC 4492, Section 5.4.
+    (let [ecdhePublic (.Bytes (.PublicKey key))
+        ^{:line 181} serverECDHEParams (make (slice byte) (+ 1 2 1 (len ecdhePublic)))]
+      (aset serverECDHEParams 0 3) ; named curve
+      (aset serverECDHEParams 1 (conv byte (>> (.-curveID ka) 8)))
+      (aset serverECDHEParams 2 (conv byte (.-curveID ka)))
+      (aset serverECDHEParams 3 (conv byte (len ecdhePublic)))
+      (copy (subslice serverECDHEParams 4) ecdhePublic)
+
+      (let [(values priv ok) (assert crypto/Signer (.-PrivateKey cert))]
+        (when (not ok)
+          (return nil (fmt/Errorf "tls: certificate private key of type %T does not implement crypto.Signer" (.-PrivateKey cert))))
+
+
+        (let [^{:tag (slice byte)} sig (zero (slice byte))]
+          (if (>= (.-version ka) VersionTLS12) (do
+              (set! (values (.-signatureAlgorithm ka) err) (selectSignatureScheme (.-version ka) cert (.-supportedSignatureAlgorithms clientHello)))
+              (when (!= err nil)
+                (return nil err))
+
+              (let [(values sigType sigHash err) (typeAndHashFromSignatureScheme (.-signatureAlgorithm ka))]
+                (when (!= err nil)
+                  (return nil err))
+
+                (when (== sigHash crypto/SHA1)
+                  (.Value tlssha1) ; ensure godebug is initialized
+                  (.IncNonDefault tlssha1))
+
+                (let [signed (^{:inst [(slice byte) byte]} slices/Concat (.-random clientHello) (.-random hello) serverECDHEParams)]
+                  (when (!= (or (== sigType signaturePKCS1v15) (== sigType signatureRSAPSS)) (.-isRSA ka))
+                    (return nil (errors/New "tls: certificate cannot be used with the selected cipher suite")))
+
+                  (let [signOpts (conv crypto/SignerOpts sigHash)]
+                    (when (== sigType signatureRSAPSS)
+                      (set! signOpts (addr (lit rsa/PSSOptions :SaltLength rsa/PSSSaltLengthEqualsHash :Hash sigHash))))
+
+                    (set! (values sig err) (crypto/SignMessage priv (.rand config) signed signOpts))
+                    (when (!= err nil)
+                      (return nil (errors/New (+ "tls: failed to sign ECDHE parameters: " (.Error err)))))))))
+
+
+            (let [(values sigType sigHash err) (legacyTypeAndHashFromPublicKey (.Public priv))]
+              (when (!= err nil)
+                (return nil err))
+
+              (let [signed (hashForServerKeyExchange sigType (.-random clientHello) (.-random hello) serverECDHEParams)]
+                (when (!= (== sigType signaturePKCS1v15) (.-isRSA ka))
+                  (return nil (errors/New "tls: certificate cannot be used with the selected cipher suite")))
+
+                (set! (values sig err) (.Sign priv (.rand config) signed sigHash))
+                (when (!= err nil)
+                  (return nil (errors/New (+ "tls: failed to sign ECDHE parameters: " (.Error err))))))))
+
+
+
+          (let [skx (new serverKeyExchangeMsg)
+              ^{:line 235} sigAndHashLen 0]
+            (when (>= (.-version ka) VersionTLS12)
+              (set! sigAndHashLen 2))
+
+            (set! (.-key skx) (make (slice byte) (+ (len serverECDHEParams) sigAndHashLen 2 (len sig))))
+            (copy (.-key skx) serverECDHEParams)
+            (let [k (subslice (.-key skx) (len serverECDHEParams))]
+              (when (>= (.-version ka) VersionTLS12)
+                (aset k 0 (conv byte (>> (.-signatureAlgorithm ka) 8)))
+                (aset k 1 (conv byte (.-signatureAlgorithm ka)))
+                (set! k (subslice k 2)))
+
+              (aset k 0 (conv byte (>> (len sig) 8)))
+              (aset k 1 (conv byte (len sig)))
+              (copy (subslice k 2) sig)
+
+              (return skx nil))))))))
+
+
+^{:go/end 269} (go/method processClientKeyExchange [^{:tag (* ecdheKeyAgreement)} ka ^{:tag (* Config)} config ^{:tag (* Certificate)} cert ^{:tag (* clientKeyExchangeMsg)} ckx ^uint16 version] :results [(slice byte) error]
+  (when (or (== (len (.-ciphertext ckx)) 0) (!= (conv int (aget (.-ciphertext ckx) 0)) (- (len (.-ciphertext ckx)) 1)))
+    (return nil errClientKeyExchange))
+
+
+  (let [(values peerKey err) (.NewPublicKey (.Curve (.-key ka)) (subslice (.-ciphertext ckx) 1))]
+    (when (!= err nil)
+      (return nil errClientKeyExchange))
+
+    (let [(values preMasterSecret ^:assign err) (.ECDH (.-key ka) peerKey)]
+      (when (!= err nil)
+        (return nil errClientKeyExchange))
+
+
+      (return preMasterSecret nil))))
+
+
+^{:go/end 373} (go/method processServerKeyExchange ^error [^{:tag (* ecdheKeyAgreement)} ka ^{:tag (* Config)} config ^{:tag (* clientHelloMsg)} clientHello ^{:tag (* serverHelloMsg)} serverHello ^{:tag (* x509/Certificate)} cert ^{:tag (* serverKeyExchangeMsg)} skx]
+  (when (< (len (.-key skx)) 4)
+    (return errServerKeyExchange))
+
+  (when (!= (aget (.-key skx) 0) 3) ; named curve
+    (return (errors/New "tls: server selected unsupported curve")))
+
+  (set! (.-curveID ka) (bit-or (<< (conv CurveID (aget (.-key skx) 1)) 8) (conv CurveID (aget (.-key skx) 2))))
+
+  (let [publicLen (conv int (aget (.-key skx) 3))]
+    (when (> (+ publicLen 4) (len (.-key skx)))
+      (return errServerKeyExchange))
+
+    (let [serverECDHEParams (subslice (.-key skx) _ (+ 4 publicLen))
+        ^{:line 285} publicKey (subslice serverECDHEParams 4)
+
+        ^{:line 287} sig (subslice (.-key skx) (+ 4 publicLen))]
+      (when (< (len sig) 2)
+        (return errServerKeyExchange))
+
+      (when (>= (.-version ka) VersionTLS12)
+        (set! (.-signatureAlgorithm ka) (bit-or (<< (conv SignatureScheme (aget sig 0)) 8) (conv SignatureScheme (aget sig 1))))
+        (set! sig (subslice sig 2))
+        (when (< (len sig) 2)
+          (return errServerKeyExchange))
+
+        (switch (.-signatureAlgorithm ka)
+          (case [MLDSA44 MLDSA65 MLDSA87]
+            (return (errors/New "tls: server selected ML-DSA with TLS version < 1.3")))))
+
+
+      (let [sigLen (bit-or (<< (conv int (aget sig 0)) 8) (conv int (aget sig 1)))]
+        (when (!= (+ sigLen 2) (len sig))
+          (return errServerKeyExchange))
+
+        (set! sig (subslice sig 2))
+
+        (when (not (^{:inst [(slice CurveID) CurveID]} slices/Contains (.-supportedCurves clientHello) (.-curveID ka)))
+          (return (errors/New "tls: server selected unoffered curve")))
+
+
+        (when [(values _ ok) (curveForCurveID (.-curveID ka))] (not ok)
+          (return (errors/New "tls: server selected unsupported curve")))
+
+
+        (let [(values key err) (generateECDHEKey (.rand config) (.-curveID ka))]
+          (when (!= err nil)
+            (return err))
+
+          (set! (.-key ka) key)
+
+          (let [(values peerKey ^:assign err) (.NewPublicKey (.Curve key) publicKey)]
+            (when (!= err nil)
+              (return errServerKeyExchange))
+
+            (set! (values (.-preMasterSecret ka) err) (.ECDH key peerKey))
+            (when (!= err nil)
+              (return errServerKeyExchange))
+
+
+            (let [ourPublicKey (.Bytes (.PublicKey key))]
+              (set! (.-ckx ka) (new clientKeyExchangeMsg))
+              (set! (.-ciphertext (.-ckx ka)) (make (slice byte) (+ 1 (len ourPublicKey))))
+              (aset (.-ciphertext (.-ckx ka)) 0 (conv byte (len ourPublicKey)))
+              (copy (subslice (.-ciphertext (.-ckx ka)) 1) ourPublicKey)
+
+              ^{:go/breaks [[3 372]]} (let [^uint8 sigType (zero uint8)
+                  ^{:line 338 :tag crypto/Hash} sigHash (zero crypto/Hash)]
+                (if (>= (.-version ka) VersionTLS12) (do
+                    (when (not (isSupportedSignatureAlgorithm (.-signatureAlgorithm ka) (.-supportedSignatureAlgorithms clientHello)))
+                      (return (errors/New "tls: certificate used with invalid signature algorithm")))
+
+                    (set! (values sigType sigHash err) (typeAndHashFromSignatureScheme (.-signatureAlgorithm ka)))
+                    (when (!= err nil)
+                      (return err))
+
+                    (when (== sigHash crypto/SHA1)
+                      (.Value tlssha1) ; ensure godebug is initialized
+                      (.IncNonDefault tlssha1))
+
+                    (when (!= (or (== sigType signaturePKCS1v15) (== sigType signatureRSAPSS)) (.-isRSA ka))
+                      (return errServerKeyExchange))
+
+                    (let [signed (^{:inst [(slice byte) byte]} slices/Concat (.-random clientHello) (.-random serverHello) serverECDHEParams)]
+                      (when [err (verifyHandshakeSignature sigType (.-PublicKey cert) sigHash signed sig)] (!= err nil)
+                        (return (errors/New (+ "tls: invalid signature by the server certificate: " (.Error err)))))))
+
+                  (do
+                    (set! (values sigType sigHash err) (legacyTypeAndHashFromPublicKey (.-PublicKey cert)))
+                    (when (!= err nil)
+                      (return err))
+
+                    (when (!= (== sigType signaturePKCS1v15) (.-isRSA ka))
+                      (return errServerKeyExchange))
+
+                    (let [signed (hashForServerKeyExchange sigType (.-random clientHello) (.-random serverHello) serverECDHEParams)]
+                      (when [err (verifyLegacyHandshakeSignature sigType (.-PublicKey cert) sigHash signed sig)] (!= err nil)
+                        (return (errors/New (+ "tls: invalid signature by the server certificate: " (.Error err))))))))
+
+
+
+                nil))))))))
+
+
+^{:go/end 381} (go/method generateClientKeyExchange [^{:tag (* ecdheKeyAgreement)} ka ^{:tag (* Config)} config ^{:tag (* clientHelloMsg)} clientHello ^{:tag (* x509/Certificate)} cert] :results [(slice byte) (* clientKeyExchangeMsg) error]
+  (when (== (.-ckx ka) nil)
+    (return nil nil (errors/New "tls: missing ServerKeyExchange message")))
+
+
+  (return (.-preMasterSecret ka) (.-ckx ka) nil))
+
+
+
+
+^{:go/end 392} (go/func generateECDHEKey "generateECDHEKey returns a PrivateKey that implements Diffie-Hellman\naccording to RFC 8446, Section 4.2.8.2.\n" [^io/Reader rand ^CurveID curveID] :results [(* ecdh/PrivateKey) error]
+  (let [(values curve ok) (curveForCurveID curveID)]
+    (when (not ok)
+      (return nil (errors/New "tls: internal error: unsupported curve")))
+
+
+    (.GenerateKey curve rand)))
+
+
+^{:go/end 407} (go/func curveForCurveID [^CurveID id] :results [ecdh/Curve bool]
+  (switch id
+    (case [X25519]
+      (return (ecdh/X25519) true))
+    (case [CurveP256]
+      (return (ecdh/P256) true))
+    (case [CurveP384]
+      (return (ecdh/P384) true))
+    (case [CurveP521]
+      (return (ecdh/P521) true))
+    (default
+      (return nil false))))

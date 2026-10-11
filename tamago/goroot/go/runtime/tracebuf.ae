@@ -1,0 +1,385 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Trace buffer management.
+
+(in-ns 'go.runtime) (go/file "tracebuf.go" :imports [
+
+
+    ^{:line 10} [sys "internal/runtime/sys"]
+    ^{:line 11} [tracev2 "internal/trace/tracev2"]
+    ^{:line 12} [unsafe "unsafe"]])
+
+
+
+(go/const ^{:val 10 :doc "Maximum number of bytes required to encode uint64 in base-128.\n"} traceBytesPerNumber 10)
+
+
+
+
+
+
+
+
+
+(go/type traceWriter "traceWriter is the interface for writing all trace data.\n\nThis type is passed around as a value, and all of its methods return\na new traceWriter. This allows for chaining together calls in a fluent-style\nAPI. This is partly stylistic, and very slightly for performance, since\nthe compiler can destructure this value and pass it between calls as\njust regular arguments. However, this style is not load-bearing, and\nwe can change it if it's deemed too error-prone.\n" (struct
+    ^{:line 27} traceLocker
+    ^{:line 28 :tag tracev2/Experiment} exp
+    (* traceBuf)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 53} (go/method ^:go/nosplit writer "writer returns a traceWriter that writes into the current M's stream.\n\nOnce this is called, the caller must guard against stack growth until\nend is called on it. Therefore, it's highly recommended to use this\nAPI in a \"fluent\" style, for example tl.writer().event(...).end().\nBetter yet, callers just looking to write events should use eventWriter\nwhen possible, which is a much safer wrapper around this function.\n\nnosplit to allow for safe reentrant tracing from stack growth paths.\n" ^traceWriter [^traceLocker tl]
+  (when debugTraceReentrancy
+    ;; Checks that the invariants of this function are being upheld.
+    (let [gp (getg)]
+      (when (== gp (.-curg (.-m gp)))
+        (set! (.-oldthrowsplit (.-trace (.-mp tl))) (.-throwsplit gp))
+        (set! (.-throwsplit gp) true))))
+
+
+  (lit traceWriter :traceLocker tl :traceBuf (aget (aget (.-buf (.-trace (.-mp tl))) (% (.-gen tl) 2)) tracev2/NoExperiment)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 66} (go/func unsafeTraceWriter "unsafeTraceWriter produces a traceWriter that doesn't lock the trace.\n\nIt should only be used in contexts where either:\n- Another traceLocker is held.\n- trace.gen is prevented from advancing.\n\nThis does not have the same stack growth restrictions as traceLocker.writer.\n\nbuf may be nil.\n" ^traceWriter [^uintptr gen ^{:tag (* traceBuf)} buf]
+  (lit traceWriter :traceLocker (lit traceLocker :gen gen) :traceBuf buf))
+
+
+
+
+
+
+
+
+^{:go/end 96} (go/method ^:go/nosplit event "event writes out the bytes of an event into the event stream.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" ^traceWriter [^traceWriter w ^tracev2/EventType ev & ^{:tag (slice traceArg)} args]
+  ;; N.B. Everything in this call must be nosplit to maintain
+  ;; the stack growth related invariants for writing events.
+
+  ;; Make sure we have room.
+  (set! (values w _) (.ensure w (+ 1 (* (+ (len args) 1) traceBytesPerNumber))))
+
+  ;; Compute the timestamp diff that we'll put in the trace.
+  (let [ts (traceClockNow)]
+    (when (<= ts ^{:go/via [traceBufHeader]} (.-lastTime (.-traceBuf w)))
+      (set! ts (+ ^{:go/via [traceBufHeader]} (.-lastTime (.-traceBuf w)) 1)))
+
+    (let [tsDiff (conv uint64 (- ts ^{:go/via [traceBufHeader]} (.-lastTime (.-traceBuf w))))]
+      (set! ^{:go/via [traceBufHeader]} (.-lastTime (.-traceBuf w)) ts)
+
+      ;; Write out event.
+      ^{:go/via [traceBuf]} (.byte w (conv byte ev))
+      ^{:go/via [traceBuf]} (.varint w tsDiff)
+      (range [_ arg args]
+        ^{:go/via [traceBuf]} (.varint w (conv uint64 arg)))
+
+      ^{:line 95} w)))
+
+
+
+
+
+
+
+
+^{:go/end 119} (go/method ^:go/nosplit end "end writes the buffer back into the m.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" [^traceWriter w]
+  (when (== ^{:go/via [traceLocker]} (.-mp w) nil)
+    ;; Tolerate a nil mp. It makes code that creates traceWriters directly
+    ;; less error-prone.
+    (return))
+
+  (aset (aget (.-buf (.-trace ^{:go/via [traceLocker]} (.-mp w))) (% ^{:go/via [traceLocker]} (.-gen w) 2)) (.-exp w) (.-traceBuf w))
+  (when debugTraceReentrancy
+    ;; The writer is no longer live, we can drop throwsplit (if it wasn't
+    ;; already set upon entry).
+    (let [gp (getg)]
+      (when (== gp (.-curg (.-m gp)))
+        (set! (.-throwsplit gp) (.-oldthrowsplit (.-trace ^{:go/via [traceLocker]} (.-mp w))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 135} (go/method ^:go/nosplit ensure "ensure makes sure that at least maxSize bytes are available to write.\n\nReturns whether the buffer was flushed.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" [^traceWriter w ^int maxSize] :results [traceWriter bool]
+  (let [refill (or (== (.-traceBuf w) nil) (not ^{:go/via [traceBuf]} (.available w maxSize)))]
+    (when refill
+      (set! w (.refill w)))
+
+    (return w refill)))
+
+
+
+
+
+
+
+
+^{:go/end 153} (go/method ^:go/nosplit flush "flush puts w.traceBuf on the queue of full buffers.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" ^traceWriter [^traceWriter w]
+  (systemstack ^{:go/end 150} (fn []
+      (lock (addr (.-lock trace)))
+      (when (!= (.-traceBuf w) nil)
+        (traceBufFlush (.-traceBuf w) ^{:go/via [traceLocker]} (.-gen w)))
+
+      (unlock (addr (.-lock trace)))))
+
+  (set! (.-traceBuf w) nil)
+  ^{:line 152} w)
+
+
+
+^{:go/end 201} (go/method refill "refill puts w.traceBuf on the queue of full buffers and refresh's w's buffer.\n" ^traceWriter [^traceWriter w]
+  (systemstack ^{:go/end 173} (fn []
+      (lock (addr (.-lock trace)))
+      (when (!= (.-traceBuf w) nil)
+        (traceBufFlush (.-traceBuf w) ^{:go/via [traceLocker]} (.-gen w)))
+
+      (if (!= (.-empty trace) nil) (do
+          (set! (.-traceBuf w) (.-empty trace))
+          (set! (.-empty trace) ^{:go/via [traceBufHeader]} (.-link (.-traceBuf w)))
+          (unlock (addr (.-lock trace))))
+        (do
+          (unlock (addr (.-lock trace)))
+          (set! (.-traceBuf w) (conv (* traceBuf) (sysAlloc (unsafe/Sizeof (lit traceBuf)) (addr (.-other_sys memstats)) "trace buffer")))
+          (when (== (.-traceBuf w) nil)
+            (throw "trace: out of memory"))))))
+
+
+
+  ;; Initialize the buffer.
+  (let [ts (traceClockNow)]
+    (when (<= ts ^{:go/via [traceBufHeader]} (.-lastTime (.-traceBuf w)))
+      (set! ts (+ ^{:go/via [traceBufHeader]} (.-lastTime (.-traceBuf w)) 1)))
+
+    (set! ^{:go/via [traceBufHeader]} (.-lastTime (.-traceBuf w)) ts)
+    (set! ^{:go/via [traceBufHeader]} (.-link (.-traceBuf w)) nil)
+    (set! ^{:go/via [traceBufHeader]} (.-pos (.-traceBuf w)) 0)
+
+    ;; Tolerate a nil mp.
+    (let [mID (bit-not (conv uint64 0))]
+      (when (!= ^{:go/via [traceLocker]} (.-mp w) nil)
+        (set! mID (.-procid ^{:go/via [traceLocker]} (.-mp w))))
+
+
+      ;; Write the buffer's header.
+      (if (== (.-exp w) tracev2/NoExperiment)
+        ^{:go/via [traceBuf]} (.byte w (conv byte tracev2/EvEventBatch))
+        (do
+          ^{:go/via [traceBuf]} (.byte w (conv byte tracev2/EvExperimentalBatch))
+          ^{:go/via [traceBuf]} (.byte w (conv byte (.-exp w)))))
+
+      ^{:go/via [traceBuf]} (.varint w (conv uint64 ^{:go/via [traceLocker]} (.-gen w)))
+      ^{:go/via [traceBuf]} (.varint w mID)
+      ^{:go/via [traceBuf]} (.varint w (conv uint64 ts))
+      (set! ^{:go/via [traceBufHeader]} (.-lenPos (.-traceBuf w)) ^{:go/via [traceBuf]} (.varintReserve w))
+      ^{:line 200} w)))
+
+
+
+
+^{:go/end 207} (go/method expWriter "expWriter returns a traceWriter that writes into the current M's stream for\nthe given experiment.\n" ^traceWriter [^traceLocker tl ^tracev2/Experiment exp]
+  (lit traceWriter :traceLocker tl :traceBuf (aget (aget (.-buf (.-trace (.-mp tl))) (% (.-gen tl) 2)) exp) :exp exp))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 222} (go/func unsafeTraceExpWriter "unsafeTraceExpWriter produces a traceWriter for experimental trace batches\nthat doesn't lock the trace. Data written to experimental batches need not\nconform to the standard trace format.\n\nIt should only be used in contexts where either:\n- Another traceLocker is held.\n- trace.gen is prevented from advancing.\n\nThis does not have the same stack growth restrictions as traceLocker.writer.\n\nbuf may be nil.\n" ^traceWriter [^uintptr gen ^{:tag (* traceBuf)} buf ^tracev2/Experiment exp]
+  (lit traceWriter :traceLocker (lit traceLocker :gen gen) :traceBuf buf :exp exp))
+
+
+
+(go/type traceBufQueue "traceBufQueue is a FIFO of traceBufs.\n" (struct
+    ^{:line 226 :tag (* traceBuf)} head ^{:tag (* traceBuf)} tail))
+
+
+
+^{:go/end 238} (go/method push "push queues buf into queue of buffers.\n" [^{:tag (* traceBufQueue)} q ^{:tag (* traceBuf)} buf]
+  (set! ^{:go/via [traceBufHeader]} (.-link buf) nil)
+  (if (== (.-head q) nil)
+    (set! (.-head q) buf)
+
+    (set! ^{:go/via [traceBufHeader]} (.-link (.-tail q)) buf))
+
+  (set! (.-tail q) buf))
+
+
+
+^{:go/end 252} (go/method pop "pop dequeues from the queue of buffers.\n" ^{:tag (* traceBuf)} [^{:tag (* traceBufQueue)} q]
+  (let [buf (.-head q)]
+    (when (== buf nil)
+      (return nil))
+
+    (set! (.-head q) ^{:go/via [traceBufHeader]} (.-link buf))
+    (when (== (.-head q) nil)
+      (set! (.-tail q) nil))
+
+    (set! ^{:go/via [traceBufHeader]} (.-link buf) nil)
+    ^{:line 251} buf))
+
+
+^{:go/end 256} (go/method empty ^bool [^{:tag (* traceBufQueue)} q]
+  (== (.-head q) nil))
+
+
+
+(go/type traceBufHeader "traceBufHeader is per-P tracing buffer.\n" (struct
+    ^{:line 260 :tag (* traceBuf)} link ; in trace.empty/full
+    ^{:line 261 :tag traceTime} lastTime ; when we wrote the last event
+    ^{:line 262 :tag int} pos ; next write offset in arr
+    ^{:line 263 :tag int} lenPos)) ; position of batch length value
+
+
+
+
+
+(go/type traceBuf "traceBuf is per-M tracing buffer.\n\nTODO(mknyszek): Rename traceBuf to traceBatch, since they map 1:1 with event batches.\n" (struct
+    ^{:line 270 :tag sys/NotInHeap} _
+    ^{:line 271} traceBufHeader
+    ^{:line 272 :tag (array (- tracev2/MaxBatchSize (unsafe/Sizeof (lit traceBufHeader))) byte)} arr)) ; underlying buffer for traceBufHeader.buf
+
+
+
+
+
+
+
+
+^{:go/end 284} (go/method ^:go/nosplit byte "byte appends v to buf.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" [^{:tag (* traceBuf)} buf ^byte v]
+  (aset (.-arr buf) ^{:go/via [traceBufHeader]} (.-pos buf) v)
+  (inc! ^{:go/via [traceBufHeader]} (.-pos buf)))
+
+
+
+
+
+
+
+
+^{:go/end 305} (go/method ^:go/nosplit varint "varint appends v to buf in little-endian-base-128 encoding.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" [^{:tag (* traceBuf)} buf ^uint64 v]
+  (let [pos ^{:go/via [traceBufHeader]} (.-pos buf)
+      ^{:line 294} arr (subslice (.-arr buf) pos (+ pos traceBytesPerNumber))]
+    (range [i arr]
+      (when (< v 0x80)
+        (set! pos + (+ i 1))
+        (aset arr i (conv byte v))
+        (break))
+
+      (aset arr i (bit-or 0x80 (conv byte v)))
+      (set! v >> 7))
+
+    (set! ^{:go/via [traceBufHeader]} (.-pos buf) pos)))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 319} (go/method ^:go/nosplit varintReserve "varintReserve reserves enough space in buf to hold any varint.\n\nSpace reserved this way can be filled in with the varintAt method.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" ^int [^{:tag (* traceBuf)} buf]
+  (let [p ^{:go/via [traceBufHeader]} (.-pos buf)]
+    (set! ^{:go/via [traceBufHeader]} (.-pos buf) + traceBytesPerNumber)
+    ^{:line 318} p))
+
+
+
+
+
+
+
+
+^{:go/end 329} (go/method ^:go/nosplit stringData "stringData appends s's data directly to buf.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" [^{:tag (* traceBuf)} buf ^string s]
+  (set! ^{:go/via [traceBufHeader]} (.-pos buf) + (copy (subslice (.-arr buf) ^{:go/via [traceBufHeader]} (.-pos buf)) s)))
+
+
+
+
+
+
+^{:go/end 337} (go/method ^:go/nosplit available "nosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" ^bool [^{:tag (* traceBuf)} buf ^int size]
+  (>= (- (len (.-arr buf)) ^{:go/via [traceBufHeader]} (.-pos buf)) size))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 361} (go/method ^:go/nosplit varintAt "varintAt writes varint v at byte position pos in buf. This always\nconsumes traceBytesPerNumber bytes. This is intended for when the caller\nneeds to reserve space for a varint but can't populate it until later.\nUse varintReserve to reserve this space.\n\nnosplit because it's part of writing an event for an M, which must not\nhave any stack growth.\n" [^{:tag (* traceBuf)} buf ^int pos ^uint64 v]
+  (for [i 0] (< i traceBytesPerNumber) (inc! i)
+    (if (< i (- traceBytesPerNumber 1))
+      (aset (.-arr buf) pos (bit-or 0x80 (conv byte v)))
+
+      (aset (.-arr buf) pos (conv byte v)))
+
+    (set! v >> 7)
+    (inc! pos))
+
+  (when (!= v 0)
+    (throw "v could not fit in traceBytesPerNumber")))
+
+
+
+
+
+
+
+
+^{:go/end 387} (go/func ^:go/systemstack traceBufFlush "traceBufFlush flushes a trace buffer.\n\nMust run on the system stack because trace.lock must be held.\n" [^{:tag (* traceBuf)} buf ^uintptr gen]
+  (assertLockHeld (addr (.-lock trace)))
+
+  ;; Write out the non-header length of the batch in the header.
+  ;;
+  ;; Note: the length of the header is not included to make it easier
+  ;; to calculate this value when deserializing and reserializing the
+  ;; trace. Varints can have additional padding of zero bits that is
+  ;; quite difficult to preserve, and if we include the header we
+  ;; force serializers to do more work. Nothing else actually needs
+  ;; padding.
+  (.varintAt buf ^{:go/via [traceBufHeader]} (.-lenPos buf) (conv uint64 (- ^{:go/via [traceBufHeader]} (.-pos buf) (+ ^{:go/via [traceBufHeader]} (.-lenPos buf) traceBytesPerNumber))))
+  (.push (aget (.-full trace) (% gen 2)) buf)
+
+  ;; Notify the scheduler that there's work available and that the trace
+  ;; reader should be scheduled.
+  (when (not (.Load (.-workAvailable trace)))
+    (.Store (.-workAvailable trace) true)))

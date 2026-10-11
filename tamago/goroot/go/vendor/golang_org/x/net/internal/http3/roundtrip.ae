@@ -1,0 +1,421 @@
+;; Copyright 2025 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.vendor.golang_org.x.net.internal.http3) (go/file "roundtrip.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [http "net/http"]
+    ^{:line 11} [httptrace "net/http/httptrace"]
+    ^{:line 12} [textproto "net/textproto"]
+    ^{:line 13} [strconv "strconv"]
+    ^{:line 14} [sync "sync"]
+
+    ^{:line 16} [httpguts "golang.org/x/net/http/httpguts"]
+    ^{:line 17} [httpcommon "golang.org/x/net/internal/httpcommon"]])
+
+
+(go/type roundTripState (struct
+    ^{:line 21 :tag (* clientConn)} cc
+    ^{:line 22 :tag (* stream)} st
+
+
+    ^{:line 25 :tag sync/Once :doc "Request body, provided by the caller.\n"} onceCloseReqBody
+    ^{:line 26 :tag io/ReadCloser} reqBody
+
+    ^{:line 28 :tag bodyWriter} reqBodyWriter
+
+
+    ^{:line 31 :tag io/ReadCloser :doc "Response.Body, provided to the caller.\n"} respBody
+
+    ^{:line 33 :tag (* httptrace/ClientTrace)} trace
+
+    ^{:line 35 :tag sync/Once} errOnce
+    ^{:line 36 :tag error} err))
+
+
+
+
+^{:go/end 56} (go/method abort "abort terminates the RoundTrip.\nIt returns the first fatal error encountered by the RoundTrip call.\n" ^error [^{:tag (* roundTripState)} rt ^error err]
+  (.Do (.-errOnce rt) ^{:go/end 54} (fn []
+      (set! (.-err rt) err)
+      (type-switch [e err]
+        (case [(* connectionError)]
+          (.abort (.-cc rt) e))
+        (case [(* streamError)]
+          (.CloseRead (.-stream (.-st rt)))
+          (.Reset (.-stream (.-st rt)) (conv uint64 (.-code e))))
+        (default
+          (.CloseRead (.-stream (.-st rt)))
+          (.Reset (.-stream (.-st rt)) (conv uint64 errH3NoError))))))
+
+
+  (.-err rt))
+
+
+
+^{:go/end 65} (go/method closeReqBody "closeReqBody closes the Request.Body, at most once.\n" [^{:tag (* roundTripState)} rt]
+  (when (!= (.-reqBody rt) nil)
+    (.Do (.-onceCloseReqBody rt) ^{:go/end 63} (fn []
+        (.Close (.-reqBody rt))))))
+
+
+
+
+
+^{:go/end 73} (go/method maybeCallGot1xxResponse "TODO: Set up the rest of the hooks that might be in rt.trace.\n" ^error [^{:tag (* roundTripState)} rt ^int status ^http/Header h]
+  (when (or (== (.-trace rt) nil) (== (.-Got1xxResponse (.-trace rt)) nil))
+    (return nil))
+
+  ((.-Got1xxResponse (.-trace rt)) status (conv textproto/MIMEHeader h)))
+
+
+^{:go/end 80} (go/method maybeCallGot100Continue [^{:tag (* roundTripState)} rt]
+  (when (or (== (.-trace rt) nil) (== (.-Got100Continue (.-trace rt)) nil))
+    (return))
+
+  ((.-Got100Continue (.-trace rt))))
+
+
+^{:go/end 87} (go/method maybeCallWait100Continue [^{:tag (* roundTripState)} rt]
+  (when (or (== (.-trace rt) nil) (== (.-Wait100Continue (.-trace rt)) nil))
+    (return))
+
+  ((.-Wait100Continue (.-trace rt))))
+
+
+
+^{:go/end 230} (go/method RoundTrip "RoundTrip sends a request on the connection.\n" [^{:tag (* clientConn)} cc ^{:tag (* http/Request)} req] :results [^{:tag (* http/Response)} _ ^error err]
+  ;; Each request gets its own QUIC stream.
+  (let [(values st ^:assign err) (newConnStream (.Context req) (.-qconn cc) streamTypeRequest)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [rt (addr ^{:go/breaks [2 4 6 8]} (lit roundTripState
+            :cc cc
+            :st st
+            :trace (httptrace/ContextClientTrace (.Context req))
+            :reqBody (.-Body req)))]
+
+      (when (== (.-reqBody rt) nil)
+        (set! (.-reqBody rt) http/NoBody))
+
+      (defer (^{:go/end 109} (fn []
+            (when (!= err nil)
+              (set! err (.abort rt err))))))
+
+
+
+      ;; Cancel reads/writes on the stream when the request expires.
+      (.SetReadContext (.-stream st) (.Context req))
+      (.SetWriteContext (.-stream st) (.Context req))
+
+      (let [headers (.encode (.-enc cc) ^{:go/end 132} (fn [^{:tag (func [^indexType itype ^string name ^string value])} yield]
+              (set! (values _ err) (httpcommon/EncodeHeaders (.Context req) ^{:go/breaks [2 [4 125] 6 8]} (lit httpcommon/EncodeHeadersParam
+                    :Request ^{:go/breaks [2 4 6 8 10 12]} (lit httpcommon/Request
+                      :URL (.-URL req)
+                      :Method (.-Method req)
+                      :Host (.-Host req)
+                      :Header (.-Header req)
+                      :Trailer (.-Trailer req)
+                      :ActualContentLength (actualContentLength req))
+
+                    :AddGzipHeader false ; TODO: add when appropriate
+                    :PeerMaxHeaderListSize 0
+                    :DefaultUserAgent "Go-http-client/3")
+                  ^{:go/end 131} (fn [^string name ^string value]
+                    ;; Issue #71374: Consider supporting never-indexed fields.
+                    (yield mayIndex name value))))))]
+
+
+        (when (!= err nil)
+          (return nil err))
+
+
+        ;; Write the HEADERS frame.
+        (.writeVarint st (conv int64 frameTypeHeaders))
+        (.writeVarint st (conv int64 (len headers)))
+        (.Write st headers)
+        (when [err (.Flush st)] (!= err nil)
+          (return nil err))
+
+
+        (let [^bool bodyAndTrailerWritten (zero bool)
+            ^{:line 146} is100ContinueReq (httpguts/HeaderValuesContainsToken (aget (.-Header req) "Expect") "100-continue")]
+          (if is100ContinueReq
+            (.maybeCallWait100Continue rt)
+            (do
+              (set! bodyAndTrailerWritten true)
+              (go (.writeBodyAndTrailer cc rt req))))
+
+
+          ;; Read the response headers.
+          (while true
+            (let [(values ftype err) (.readFrameHeader st)]
+              (when (!= err nil)
+                (return nil err))
+
+              (switch ftype
+                (case [frameTypeHeaders]
+                  (let [(values statusCode h err) (.handleHeaders cc st)]
+                    (when (!= err nil)
+                      (return nil err))
+
+
+                    ;; TODO: Handle 1xx responses.
+                    (when (isInfoStatus statusCode)
+                      (when [err (.maybeCallGot1xxResponse rt statusCode h)] (!= err nil)
+                        (return nil err))
+
+                      (switch statusCode
+                        (case [100]
+                          (.maybeCallGot100Continue rt)
+                          (when (and is100ContinueReq (not bodyAndTrailerWritten))
+                            (set! bodyAndTrailerWritten true)
+                            (go (.writeBodyAndTrailer cc rt req))
+                            (continue)))
+
+                        ;; If we did not send "Expect: 100-continue" request but
+                        ;; received status 100 anyways, just continue per usual and
+                        ;; let the caller decide what to do with the response.
+                        (default
+                          (continue))))
+
+
+
+                    ;; We have the response headers.
+                    ;; Set up the response and return it to the caller.
+                    (let [(values contentLength ^:assign err) (parseResponseContentLength (.-Method req) statusCode h)]
+                      (when (!= err nil)
+                        (return nil err))
+
+
+                      (let [trailer (make http/Header)]
+                        (extractTrailerFromHeader h trailer)
+                        (delete h "Trailer")
+
+                        (if (or ^:go/paren (and (!= contentLength 0) (!= (.-Method req) http/MethodHead)) (> (len trailer) 0))
+                          (set! (.-respBody rt) (addr ^{:go/breaks [2 4 6]} (lit bodyReader
+                                :st st
+                                :remain contentLength
+                                :trailer trailer)))
+
+
+                          (set! (.-respBody rt) http/NoBody))
+
+                        (let [resp (addr ^{:go/breaks [2 4 6 8 10 12 14 16]} (lit http/Response
+                                :Proto "HTTP/3.0"
+                                :ProtoMajor 3
+                                :Header h
+                                :StatusCode statusCode
+                                :Status (+ (strconv/Itoa statusCode) " " (http/StatusText statusCode))
+                                :ContentLength contentLength
+                                :Trailer trailer
+                                :Body (conv (* transportResponseBody) rt)))]
+
+                          ;; TODO: Automatic Content-Type: gzip decoding.
+                          (return resp nil))))))
+                (case [frameTypePushPromise]
+                  (when [err (.handlePushPromise cc st)] (!= err nil)
+                    (return nil err)))
+
+                (default
+                  (when [err (.discardUnknownFrame st ftype)] (!= err nil)
+                    (return nil err)))))))))))
+
+
+
+
+
+
+
+^{:go/breaks [[6 241]] :go/end 242} (go/func actualContentLength "actualContentLength returns a sanitized version of req.ContentLength,\nwhere 0 actually means zero (not unknown) and -1 means unknown.\n" ^int64 [^{:tag (* http/Request)} req]
+  (when (or (== (.-Body req) nil) (== (.-Body req) http/NoBody))
+    (return 0))
+
+  (when (!= (.-ContentLength req) 0)
+    (return (.-ContentLength req)))
+
+  -1)
+
+
+
+
+^{:go/end 272} (go/method writeBodyAndTrailer "writeBodyAndTrailer handles writing the body and trailer for a given\nrequest, if any. This function will close the write direction of the stream.\n" [^{:tag (* clientConn)} cc ^{:tag (* roundTripState)} rt ^{:tag (* http/Request)} req]
+  (defer (.closeReqBody rt))
+
+  (let [declaredTrailer (.Clone (.-Trailer req))]
+
+    (set! (.-st (.-reqBodyWriter rt)) (.-st rt))
+    (set! (.-remain (.-reqBodyWriter rt)) (actualContentLength req))
+    (set! (.-flush (.-reqBodyWriter rt)) true)
+    (set! (.-name (.-reqBodyWriter rt)) "request")
+    (set! (.-trailer (.-reqBodyWriter rt)) (.-Trailer req))
+    (set! (.-enc (.-reqBodyWriter rt)) (addr (.-enc cc)))
+
+    (when [(values _ err) (io/Copy (addr (.-reqBodyWriter rt)) (.-reqBody rt))] (!= err nil)
+      (.abort rt err))
+
+    ;; Get rid of any trailer that was not declared beforehand, before we
+    ;; close the request body which will cause the trailer headers to be
+    ;; written.
+    (range [name (.-Trailer req)]
+      (when [(values _ ok) (aget declaredTrailer name)] (not ok)
+        (delete (.-Trailer req) name)))
+
+
+    (when [err (.Close (.-reqBodyWriter rt))] (!= err nil)
+      (.abort rt err))))
+
+
+
+
+(go/type transportResponseBody "transportResponseBody is the Response.Body returned by RoundTrip.\n" roundTripState)
+
+
+^{:go/end 280} (go/method Read "Read is Response.Body.Read.\n" [^{:tag (* transportResponseBody)} b ^{:tag (slice byte)} p] :results [^int n ^error err]
+  (.Read (.-respBody b) p))
+
+
+(go/var errRespBodyClosed (errors/New "response body closed"))
+
+
+
+^{:go/end 306} (go/method Close "Close is Response.Body.Close.\nClosing the response body is how the caller signals that they're done with a request.\n" ^error [^{:tag (* transportResponseBody)} b]
+  (let [rt (conv (* roundTripState) b)]
+    ;; Close the request body, which should wake up copyRequestBody if it's
+    ;; currently blocked reading the body.
+    (.closeReqBody rt)
+    ;; Close the request stream, since we're done with the request.
+    ;; Reset closes the sending half of the stream.
+    (.Reset (.-stream (.-st rt)) (conv uint64 errH3NoError))
+    ;; respBody.Close is responsible for closing the receiving half.
+    (let [err (.Close (.-respBody rt))]
+      (when (== err nil)
+        (set! err errRespBodyClosed))
+
+      (set! err (.abort rt err))
+      (when (== err errRespBodyClosed)
+        ;; No other errors occurred before closing Response.Body,
+        ;; so consider this a successful request.
+        (return nil))
+
+      ^{:line 305} err)))
+
+
+^{:go/end 340} (go/func parseResponseContentLength [^string method ^int statusCode ^http/Header h] :results [int64 error]
+  (let [clens (aget h "Content-Length")]
+    (when (== (len clens) 0)
+      (return -1 nil))
+
+
+    ;; We allow duplicate Content-Length headers,
+    ;; but only if they all have the same value.
+    (range [_ v (subslice clens 1)]
+      (when (!= (aget clens 0) v)
+        (return -1 (addr (lit streamError errH3MessageError "mismatching Content-Length headers")))))
+
+
+
+    ;; "A server MUST NOT send a Content-Length header field in any response
+    ;; with a status code of 1xx (Informational) or 204 (No Content).
+    ;; A server MUST NOT send a Content-Length header field in any 2xx (Successful)
+    ;; response to a CONNECT request [...]"
+    ;; https://www.rfc-editor.org/rfc/rfc9110#section-8.6-8
+    (when (or ^:go/paren (and (>= statusCode 100) (< statusCode 200))
+        (== statusCode 204)
+        ^:go/paren (and (== method "CONNECT") (>= statusCode 200) (< statusCode 300)))
+      ;; This is a protocol violation, but a fairly harmless one.
+      ;; Just ignore the header.
+      (return -1 nil))
+
+
+    (let [(values contentLen err) (strconv/ParseUint (aget clens 0) 10 63)]
+      (when (!= err nil)
+        (return -1 (addr (lit streamError errH3MessageError "invalid Content-Length header"))))
+
+      (return (conv int64 contentLen) nil))))
+
+
+^{:go/end 413} (go/method handleHeaders [^{:tag (* clientConn)} cc ^{:tag (* stream)} st] :results [^int statusCode ^http/Header h ^error err]
+  (let [haveStatus false
+      ^{:line 344} cookie ""]
+    ;; Issue #71374: Consider tracking the never-indexed status of headers
+    ;; with the N bit set in their QPACK encoding.
+    (set! err (.decode (.-dec cc) st ^{:go/breaks [[4 396]] :go/end 397} (fn ^error [^indexType _ ^string name ^string value]
+          (when (not (httpguts/ValidHeaderFieldValue value))
+            (return (addr (lit streamError errH3MessageError "invalid field value"))))
+
+          (switch
+            (case [(== name ":status")]
+              (when haveStatus
+                (return (addr (lit streamError errH3MessageError "duplicate :status"))))
+
+              (set! haveStatus true)
+              (set! (values statusCode err) (strconv/Atoi value))
+              (when (!= err nil)
+                (return (addr (lit streamError errH3MessageError "invalid :status")))))
+
+            (case [(== (aget name 0) \:)]
+              ;; "Endpoints MUST treat a request or response
+              ;; that contains undefined or invalid
+              ;; pseudo-header fields as malformed."
+              ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-4.3-3
+              (return (addr (lit streamError errH3MessageError "undefined pseudo-header"))))
+            (case [(== name "cookie")]
+              ;; "If a decompressed field section contains multiple cookie field lines,
+              ;; these MUST be concatenated into a single byte string [...]"
+              ;; using the two-byte delimiter of "; "''
+              ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-4.2.1-2
+              (if (== cookie "")
+                (set! cookie value)
+
+                (set! cookie + (+ "; " value))))
+
+            (default
+              (when (not (validWireHeaderFieldName name))
+                (return (addr (lit streamError errH3MessageError "invalid field name"))))
+
+              (when (== h nil)
+                (set! h (make http/Header)))
+
+              ;; TODO: Use a per-connection canonicalization cache as we do in HTTP/2.
+              ;; Maybe we could put this in the QPACK decoder and have it deliver
+              ;; pre-canonicalized headers to us here?
+              (let [cname (httpcommon/CanonicalHeader name)]
+                ;; TODO: Consider using a single []string slice for all headers,
+                ;; as we do in the HTTP/1 and HTTP/2 cases.
+                ;; This is a bit tricky, since we don't know the number of headers
+                ;; at the start of decoding. Perhaps it's worth doing a two-pass decode,
+                ;; or perhaps we should just allocate header value slices in
+                ;; reasonably-sized chunks.
+                (aset h cname (append (aget h cname) value)))))
+
+          nil)))
+
+    (when (not haveStatus)
+      ;; "[The :status] pseudo-header field MUST be included in all responses [...]"
+      ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-4.3.2-1
+      (set! err errH3MessageError))
+
+    (when (!= cookie "")
+      (when (== h nil)
+        (set! h (make http/Header)))
+
+      (aset h "Cookie" (lit (slice string) cookie)))
+
+    (when [err (.endFrame st)] (!= err nil)
+      (return 0 nil err))
+
+    (return statusCode h err)))
+
+
+^{:go/end 423} (go/method handlePushPromise ^error [^{:tag (* clientConn)} cc ^{:tag (* stream)} st]
+  ;; "A client MUST treat receipt of a PUSH_PROMISE frame that contains a
+  ;; larger push ID than the client has advertised as a connection error of H3_ID_ERROR."
+  ;; https://www.rfc-editor.org/rfc/rfc9114.html#section-7.2.5-5
+  (addr ^{:go/breaks [2 4]} (lit connectionError
+      :code errH3IDError
+      :message "PUSH_PROMISE received when no MAX_PUSH_ID has been sent")))

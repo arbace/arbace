@@ -1,0 +1,108 @@
+;; NXP Cryptographic Acceleration and Assurance Module (CAAM) driver
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.soc.nxp.caam) (go/file "cipher.go" :imports [
+
+
+    ^{:line 12} [aes "crypto/aes"]
+    ^{:line 13} [errors "errors"]
+
+    ^{:line 15} [dma "github.com/usbarmory/tamago/dma"]])
+
+
+^{:go/end 85} (go/method cipher [^{:tag (* CAAM)} hw ^{:tag (slice byte)} buf ^{:tag (slice byte)} key ^{:tag (slice byte)} iv ^uint32 mode ^bool enc] :results [^error err]
+  (when (!= (% (len buf) aes/BlockSize) 0)
+    (return (errors/New "invalid input size")))
+
+
+  (switch (len key)
+    (case [16 24 32]
+      (break))
+    (default
+      (return (conv aes/KeySizeError (len key)))))
+
+
+  (when (!= (len iv) aes/BlockSize)
+    (return (errors/New "invalid IV size")))
+
+
+  (let [keyBufferAddress (dma/Alloc key 4)]
+    (defer (dma/Free keyBufferAddress))
+
+    (let [loadKey (lit Key)]
+      (.SetDefaults loadKey)
+      ^{:go/via [LengthCommand Command]} (.Class loadKey 1)
+      ^{:go/via [LengthCommand]} (.Pointer loadKey keyBufferAddress (len key))
+
+      (let [ivBufferAddress (dma/Alloc iv 4)]
+        (defer (dma/Free ivBufferAddress))
+
+        (let [loadIV (lit Load)]
+          (.SetDefaults loadIV)
+          ^{:go/via [LengthCommand Command]} (.Class loadIV 1)
+          (.Destination loadIV CTX)
+          ^{:go/via [LengthCommand]} (.Pointer loadIV ivBufferAddress (len iv))
+
+          (let [op (lit Operation)]
+            (.SetDefaults op)
+            (.OpType op OPTYPE_ALG_CLASS1)
+            (.Algorithm op ALG_AES mode)
+            (.State op (bit-or AS_INITIALIZE AS_FINALIZE))
+            (.Encrypt op enc)
+
+            (let [sourceBufferAddress (dma/Alloc buf 4)]
+              (defer (dma/Free sourceBufferAddress))
+
+              (let [src (lit FIFOLoad)]
+                (.SetDefaults src)
+                ^{:go/via [ExtendedLengthCommand Command]} (.Class src 1)
+                (.DataType src (bit-or INPUT_DATA_TYPE_MESSAGE_DATA INPUT_DATA_TYPE_LC1))
+                ^{:go/via [ExtendedLengthCommand]} (.Pointer src sourceBufferAddress (len buf))
+
+                (let [dst (lit FIFOStore)]
+                  (.SetDefaults dst)
+                  (.DataType dst OUTPUT_DATA_TYPE_MESSAGE_DATA)
+                  ^{:go/via [ExtendedLengthCommand]} (.Pointer dst sourceBufferAddress (len buf))
+
+                  (let [jd ^{:go/via [LengthCommand Command]} (.Bytes loadKey)]
+                    (set! jd (append jd (spread ^{:go/via [LengthCommand Command]} (.Bytes loadIV))))
+                    (set! jd (append jd (spread ^{:go/via [Command]} (.Bytes op))))
+                    (set! jd (append jd (spread ^{:go/via [ExtendedLengthCommand Command]} (.Bytes src))))
+                    (set! jd (append jd (spread ^{:go/via [ExtendedLengthCommand Command]} (.Bytes dst))))
+
+                    (when [(set! err (.Job hw nil jd))] (!= err nil)
+                      (return))
+
+
+                    (dma/Read sourceBufferAddress 0 buf)
+
+                    (return)))))))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 97} (go/method Encrypt "Encrypt performs in-place buffer encryption using AES-CBC, the key argument\nshould be the AES key, either 16, 24, or 32 bytes to select AES-128,\nAES-192, or AES-256.\n\nAll argument buffers are copied to reserved buffers in the default DMA\nregion, buffers previously created with dma.Reserve() can be used to avoid\nexternal RAM exposure, when placed in iRAM, as their pointers are directly\npassed to the CAAM without access by the Go runtime.\n" [^{:tag (* CAAM)} hw ^{:tag (slice byte)} buf ^{:tag (slice byte)} key ^{:tag (slice byte)} iv] :results [^error err]
+  (.cipher hw buf key iv AAI_AES_CBC true))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 109} (go/method Decrypt "Decrypt performs in-place buffer decryption using AES-CBC, the key argument\nshould be the AES key, either 16, 24, or 32 bytes to select AES-128,\nAES-192, or AES-256.\n\nAll argument buffers are copied to reserved buffers in the default DMA\nregion, buffers previously created with dma.Reserve() can be used to avoid\nexternal RAM exposure, when placed in iRAM, as their pointers are directly\npassed to the CAAM without access by the Go runtime.\n" [^{:tag (* CAAM)} hw ^{:tag (slice byte)} buf ^{:tag (slice byte)} key ^{:tag (slice byte)} iv] :results [^error err]
+  (.cipher hw buf key iv AAI_AES_CBC false))

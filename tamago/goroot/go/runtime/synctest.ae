@@ -1,0 +1,451 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "synctest.go" :imports [
+
+
+    ^{:line 8} [atomic "internal/runtime/atomic"]
+    ^{:line 9} [sys "internal/runtime/sys"]
+    ^{:line 10} [unsafe "unsafe"]])
+
+
+
+(go/type synctestBubble "A synctestBubble is a set of goroutines started by synctest.Run.\n" (struct
+    ^{:line 15 :tag mutex} mu
+    ^{:line 16 :tag timers} timers
+    ^{:line 17 :tag uint64} id ; unique id
+    ^{:line 18 :tag int64} now ; current fake time
+    ^{:line 19 :tag (* g)} root ; caller of synctest.Run
+    ^{:line 20 :tag (* g)} waiter ; caller of synctest.Wait
+    ^{:line 21 :tag (* g)} main ; goroutine started by synctest.Run
+    ^{:line 22 :tag bool} waiting ; true if a goroutine is calling synctest.Wait
+    ^{:line 23 :tag bool} done ; true if main has exited
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 36 :tag int :doc "The bubble is active (not blocked) so long as running > 0 || active > 0.\n\nrunning is the number of goroutines which are not \"durably blocked\":\nGoroutines which are either running, runnable, or non-durably blocked\n(for example, blocked in a syscall).\n\nactive is used to keep the bubble from becoming blocked,\neven if all goroutines in the bubble are blocked.\nFor example, park_m can choose to immediately unpark a goroutine after parking it.\nIt increments the active count to keep the bubble active until it has determined\nthat the park operation has completed.\n"} total ; total goroutines
+    ^{:line 37 :tag int} running ; non-blocked goroutines
+    ^{:line 38 :tag int} active)) ; other sources of activity
+
+
+
+
+^{:go/end 107} (go/method changegstatus "changegstatus is called when the non-lock status of a g changes.\nIt is never called with a Gscanstatus.\n" [^{:tag (* synctestBubble)} bubble ^{:tag (* g)} gp ^uint32 oldval ^uint32 newval]
+  ;; Determine whether this change in status affects the idleness of the bubble.
+  ;; If this isn't a goroutine starting, stopping, durably blocking,
+  ;; or waking up after durably blocking, then return immediately without
+  ;; locking bubble.mu.
+  ;;
+  ;; For example, stack growth (newstack) will changegstatus
+  ;; from _Grunning to _Gcopystack. This is uninteresting to synctest,
+  ;; but if stack growth occurs while bubble.mu is held, we must not recursively lock.
+  (let [totalDelta 0
+      ^{:line 53} wasRunning true]
+    (switch oldval
+      (case [_Gdead _Gdeadextra]
+        (set! wasRunning false)
+        (inc! totalDelta))
+      (case [_Gwaiting]
+        (when (.isIdleInSynctest (.-waitreason gp))
+          (set! wasRunning false))))
+
+
+    (let [isRunning true]
+      (switch newval
+        (case [_Gdead _Gdeadextra]
+          (set! isRunning false)
+          (dec! totalDelta)
+          (when (== gp (.-main bubble))
+            (set! (.-done bubble) true)))
+
+        (case [_Gwaiting]
+          (when (.isIdleInSynctest (.-waitreason gp))
+            (set! isRunning false))))
+
+
+      ;; It's possible for wasRunning == isRunning while totalDelta != 0;
+      ;; for example, if a new goroutine is created in a non-running state.
+      (when (and (== wasRunning isRunning) (== totalDelta 0))
+        (return))
+
+
+      (lock (addr (.-mu bubble)))
+      (set! (.-total bubble) + totalDelta)
+      (when (!= wasRunning isRunning)
+        (if isRunning
+          (inc! (.-running bubble))
+          (do
+            (dec! (.-running bubble))
+            (when (and raceenabled (!= newval _Gdead) (!= newval _Gdeadextra))
+              ;; Record that this goroutine parking happens before
+              ;; any subsequent Wait.
+              (racereleasemergeg gp (.raceaddr bubble))))))
+
+
+
+      (when (< (.-total bubble) 0)
+        (fatal "total < 0"))
+
+      (when (< (.-running bubble) 0)
+        (fatal "running < 0"))
+
+      (let [wake (.maybeWakeLocked bubble)]
+        (unlock (addr (.-mu bubble)))
+        (when (!= wake nil)
+          (goready wake 0))))))
+
+
+
+
+
+^{:go/end 115} (go/method incActive "incActive increments the active-count for the bubble.\nA bubble does not become durably blocked while the active-count is non-zero.\n" [^{:tag (* synctestBubble)} bubble]
+  (lock (addr (.-mu bubble)))
+  (inc! (.-active bubble))
+  (unlock (addr (.-mu bubble))))
+
+
+
+^{:go/end 129} (go/method decActive "decActive decrements the active-count for the bubble.\n" [^{:tag (* synctestBubble)} bubble]
+  (lock (addr (.-mu bubble)))
+  (dec! (.-active bubble))
+  (when (< (.-active bubble) 0)
+    (throw "active < 0"))
+
+  (let [wake (.maybeWakeLocked bubble)]
+    (unlock (addr (.-mu bubble)))
+    (when (!= wake nil)
+      (goready wake 0))))
+
+
+
+
+^{:go/end 158} (go/method maybeWakeLocked "maybeWakeLocked returns a g to wake if the bubble is durably blocked.\n" ^{:tag (* g)} [^{:tag (* synctestBubble)} bubble]
+  (when (or (> (.-running bubble) 0) (> (.-active bubble) 0))
+    (return nil))
+
+  ;; Increment the bubble active count, since we've determined to wake something.
+  ;; The woken goroutine will decrement the count.
+  ;; We can't just call goready and let it increment bubble.running,
+  ;; since we can't call goready with bubble.mu held.
+  ;;
+  ;; Incrementing the active count here is only necessary if something has gone wrong,
+  ;; and a goroutine that we considered durably blocked wakes up unexpectedly.
+  ;; Two wakes happening at the same time leads to very confusing failure modes,
+  ;; so we take steps to avoid it happening.
+  (inc! (.-active bubble))
+  (let [next (.wakeTime (.-timers bubble))]
+    (when (and (> next 0) (<= next (.-now bubble)))
+      ;; A timer is scheduled to fire. Wake the root goroutine to handle it.
+      (return (.-root bubble)))
+
+    (when [gp (.-waiter bubble)] (!= gp nil)
+      ;; A goroutine is blocked in Wait. Wake it.
+      (return gp))
+
+    ;; All goroutines in the bubble are durably blocked, and nothing has called Wait.
+    ;; Wake the root goroutine.
+    (.-root bubble)))
+
+
+^{:go/end 166} (go/method raceaddr ^unsafe/Pointer [^{:tag (* synctestBubble)} bubble]
+  ;; Address used to record happens-before relationships created by the bubble.
+  ;;
+  ;; Wait creates a happens-before relationship between itself and
+  ;; the blocking operations which caused other goroutines in the bubble to park.
+  (conv unsafe/Pointer bubble))
+
+
+(go/var ^atomic/Uint64 bubbleGen) ; bubble ID counter
+
+
+^{:go/end 254} (go/func ^{:go/linkname "synctestRun internal/synctest.Run"} synctestRun [^{:tag (func [])} f]
+  (let [gp (getg)]
+    (when (!= (.-bubble gp) nil)
+      (panic "synctest.Run called from within a synctest bubble"))
+
+    (let [bubble (addr ^{:go/breaks [2 4 6 8]} (lit synctestBubble
+            :id (.Add bubbleGen 1)
+            :total 1
+            :running 1
+            :root gp))
+
+        ^:const ^{:line 182 :val 946684800000000000} synctestBaseTime 946684800000000000] ; midnight UTC 2000-01-01
+      (set! (.-now bubble) synctestBaseTime)
+      (lockInit (addr (.-mu bubble)) lockRankSynctest)
+      (lockInit (addr (.-mu (.-timers bubble))) lockRankTimers)
+
+      (set! (.-bubble gp) bubble)
+      (defer (^{:go/end 190} (fn []
+            (set! (.-bubble gp) nil))))
+
+
+      ;; This is newproc, but also records the new g in bubble.main.
+      (let [pc (sys/GetCallerPC)]
+        (systemstack ^{:go/end 200} (fn []
+            (let [fv @(conv (* (* funcval)) (conv unsafe/Pointer (addr f)))]
+              (set! (.-main bubble) (newproc1 fv gp pc false waitReasonZero))
+              (let [pp (.ptr (.-p (.-m (getg))))]
+                (runqput pp (.-main bubble) true)
+                (wakep)))))
+
+
+        (lock (addr (.-mu bubble)))
+        (inc! (.-active bubble))
+        (while true
+          (unlock (addr (.-mu bubble)))
+          (systemstack ^{:go/end 213} (fn []
+              ;; Clear gp.m.curg while running timers,
+              ;; so timer goroutines inherit their child race context from g0.
+              (let [curg (.-curg (.-m gp))]
+                (set! (.-curg (.-m gp)) nil)
+                (.check (.-timers (.-bubble gp)) (.-now bubble) bubble)
+                (set! (.-curg (.-m gp)) curg))))
+
+          (gopark synctestidle_c nil waitReasonSynctestRun traceBlockSynctest 0)
+          (lock (addr (.-mu bubble)))
+          (when (< (.-active bubble) 0)
+            (throw "active < 0"))
+
+          (let [next (.wakeTime (.-timers bubble))]
+            (when (== next 0)
+              (break))
+
+            (when (< next (.-now bubble))
+              (throw "time went backwards"))
+
+            (when (.-done bubble)
+              ;; Time stops once the bubble's main goroutine has exited.
+              (break))
+
+            (set! (.-now bubble) next)))
+
+
+        (let [total (.-total bubble)]
+          (unlock (addr (.-mu bubble)))
+          (when raceenabled
+            ;; Establish a happens-before relationship between bubbled goroutines exiting
+            ;; and Run returning.
+            (raceacquireg gp (.raceaddr (.-bubble gp))))
+
+          (when (!= total 1)
+            (let [^string reason (zero string)]
+              (if (.-done bubble)
+                (set! reason "deadlock: main bubble goroutine has exited but blocked goroutines remain")
+
+                (set! reason "deadlock: all goroutines in bubble are blocked"))
+
+              (panic (lit synctestDeadlockError :reason reason :bubble bubble))))
+
+          (when (and (!= (.-timer gp) nil) (.-isFake (.-timer gp)))
+            ;; Verify that we haven't marked this goroutine's sleep timer as fake.
+            ;; This could happen if something in Run were to call timeSleep.
+            (throw "synctest root goroutine has a fake timer")))))))
+
+
+
+(go/type synctestDeadlockError (struct
+    ^{:line 257 :tag string} reason
+    ^{:line 258 :tag (* synctestBubble)} bubble))
+
+
+(go/var ^error _ (lit synctestDeadlockError))
+
+^{:go/end 265} (go/method Error ^string [^synctestDeadlockError e]
+  (.-reason e))
+
+
+^{:go/end 278} (go/func synctestidle_c ^bool [^{:tag (* g)} gp ^unsafe/Pointer _]
+  (lock (addr (.-mu (.-bubble gp))))
+  (let [canIdle true]
+    (if (and (== (.-running (.-bubble gp)) 0) (== (.-active (.-bubble gp)) 1))
+      ;; All goroutines in the bubble have blocked or exited.
+      (set! canIdle false)
+
+      (dec! (.-active (.-bubble gp))))
+
+    (unlock (addr (.-mu (.-bubble gp))))
+    ^{:line 277} canIdle))
+
+
+
+^{:go/end 312} (go/func ^{:go/linkname "synctestWait internal/synctest.Wait"} synctestWait []
+  (let [gp (getg)]
+    (when (== (.-bubble gp) nil)
+      (panic "goroutine is not in a bubble"))
+
+    (lock (addr (.-mu (.-bubble gp))))
+    ;; We use a bubble.waiting bool to detect simultaneous calls to Wait rather than
+    ;; checking to see if bubble.waiter is non-nil. This avoids a race between unlocking
+    ;; bubble.mu and setting bubble.waiter while parking.
+    (when (.-waiting (.-bubble gp))
+      (unlock (addr (.-mu (.-bubble gp))))
+      (panic "wait already in progress"))
+
+    (set! (.-waiting (.-bubble gp)) true)
+    (unlock (addr (.-mu (.-bubble gp))))
+    (gopark synctestwait_c nil waitReasonSynctestWait traceBlockSynctest 0)
+
+    (lock (addr (.-mu (.-bubble gp))))
+    (dec! (.-active (.-bubble gp)))
+    (when (< (.-active (.-bubble gp)) 0)
+      (throw "active < 0"))
+
+    (set! (.-waiter (.-bubble gp)) nil)
+    (set! (.-waiting (.-bubble gp)) false)
+    (unlock (addr (.-mu (.-bubble gp))))
+
+    ;; Establish a happens-before relationship on the activity of the now-blocked
+    ;; goroutines in the bubble.
+    (when raceenabled
+      (raceacquireg gp (.raceaddr (.-bubble gp))))))
+
+
+
+^{:go/breaks [7] :go/end 323} (go/func synctestwait_c ^bool [^{:tag (* g)} gp ^unsafe/Pointer _]
+  (lock (addr (.-mu (.-bubble gp))))
+  (when (and (== (.-running (.-bubble gp)) 0) (== (.-active (.-bubble gp)) 0))
+    ;; This shouldn't be possible, since gopark increments active during unlockf.
+    (throw "running == 0 && active == 0"))
+
+  (set! (.-waiter (.-bubble gp)) gp)
+  (unlock (addr (.-mu (.-bubble gp))))
+  true)
+
+
+
+^{:go/end 328} (go/func ^{:go/linkname "synctest_isInBubble internal/synctest.IsInBubble"} synctest_isInBubble ^bool []
+  (!= (.-bubble (getg)) nil))
+
+
+
+^{:go/breaks [[4 336]] :go/end 337} (go/func ^{:go/linkname "synctest_acquire internal/synctest.acquire"} synctest_acquire ^any []
+  (when [bubble (.-bubble (getg))] (!= bubble nil)
+    (.incActive bubble)
+    (return bubble))
+
+  nil)
+
+
+
+^{:go/end 342} (go/func ^{:go/linkname "synctest_release internal/synctest.release"} synctest_release [^any bubble]
+  (.decActive (assert (* synctestBubble) bubble)))
+
+
+
+^{:go/end 355} (go/func ^{:go/linkname "synctest_inBubble internal/synctest.inBubble"} synctest_inBubble [^any bubble ^{:tag (func [])} f]
+  (let [gp (getg)]
+    (when (!= (.-bubble gp) nil)
+      (panic "goroutine is already bubbled"))
+
+    (set! (.-bubble gp) (assert (* synctestBubble) bubble))
+    (defer (^{:go/end 353} (fn []
+          (set! (.-bubble gp) nil))))
+
+    (f)))
+
+
+
+(go/type specialBubble "specialBubble is a special used to associate objects with bubbles.\n" (struct
+    ^{:line 359 :tag sys/NotInHeap} _
+    ^{:line 360 :tag special} special
+    ^{:line 361 :tag uint64} bubbleid))
+
+
+
+(go/const "Keep these in sync with internal/synctest.\n"
+  ^{:line 366} [^{:val 0} bubbleAssocUnbubbled iota] ; not associated with any bubble
+  ^{:line 367} [^{:val 1} bubbleAssocCurrentBubble] ; associated with the current bubble
+  ^{:line 368} [^{:val 2} bubbleAssocOtherBubble]) ; associated with a different bubble
+
+
+
+
+
+
+
+
+
+
+^{:go/end 430} (go/func getOrSetBubbleSpecial "getOrSetBubbleSpecial checks the special record for p's bubble membership.\n\nIf add is true and p is not associated with any bubble,\nit adds a special record for p associating it with bubbleid.\n\nIt returns ok==true if p is associated with bubbleid\n(including if a new association was added),\nand ok==false if not.\n" [^unsafe/Pointer p ^uint64 bubbleid ^bool add] :results [^int assoc]
+  (let [span (spanOfHeap (conv uintptr p))]
+    (when (== span nil)
+      ;; This is probably a package var.
+      ;; We can't attach a special to it, so always consider it unbubbled.
+      (return bubbleAssocUnbubbled))
+
+
+    ;; Ensure that the span is swept.
+    ;; Sweeping accesses the specials list w/o locks, so we have
+    ;; to synchronize with it. And it's just much safer.
+    (let [mp (acquirem)]
+      (.ensureSwept span)
+
+      (let [offset (- (conv uintptr p) (.base span))]
+
+        (lock (addr (.-speciallock span)))
+
+        ;; Find splice point, check for existing record.
+        (let [(values iter exists) (.specialFindSplicePoint span offset _KindSpecialBubble)]
+          (cond exists
+            ;; p is already associated with a bubble.
+            ;; Return true iff it's the same bubble.
+            (let [s (conv (* specialBubble) (conv unsafe/Pointer @iter))]
+              (if (== (.-bubbleid s) bubbleid)
+                (set! assoc bubbleAssocCurrentBubble)
+
+                (set! assoc bubbleAssocOtherBubble)))
+
+            ^{:line 408} add (do
+              ;; p is not associated with a bubble,
+              ;; and we've been asked to add an association.
+              (lock (addr (.-speciallock mheap_)))
+              (let [s (conv (* specialBubble) (.alloc (.-specialBubbleAlloc mheap_)))]
+                (unlock (addr (.-speciallock mheap_)))
+                (set! (.-bubbleid s) bubbleid)
+                (set! (.-kind (.-special s)) _KindSpecialBubble)
+                (set! (.-offset (.-special s)) offset)
+                (set! (.-next (.-special s)) @iter)
+                (set! @iter (conv (* special) (conv unsafe/Pointer s)))
+                (spanHasSpecials span)
+                (set! assoc bubbleAssocCurrentBubble))) :else
+
+            ;; p is not associated with a bubble.
+            (set! assoc bubbleAssocUnbubbled))
+
+
+          (unlock (addr (.-speciallock span)))
+          (releasem mp)
+
+          ^{:line 429} assoc)))))
+
+
+
+
+
+
+^{:go/end 438} (go/func ^{:go/linkname "synctest_associate internal/synctest.associate"} synctest_associate "synctest_associate associates p with the current bubble.\nIt returns false if p is already associated with a different bubble.\n" ^int [^unsafe/Pointer p]
+  (getOrSetBubbleSpecial p (.-id (.-bubble (getg))) true))
+
+
+
+
+
+^{:go/end 445} (go/func ^{:go/linkname "synctest_disassociate internal/synctest.disassociate"} synctest_disassociate "synctest_disassociate disassociates p from its bubble.\n" [^unsafe/Pointer p]
+  (removespecial p _KindSpecialBubble))
+
+
+
+
+
+^{:go/end 452} (go/func ^{:go/linkname "synctest_isAssociated internal/synctest.isAssociated"} synctest_isAssociated "synctest_isAssociated reports whether p is associated with the current bubble.\n" ^bool [^unsafe/Pointer p]
+  (== (getOrSetBubbleSpecial p (.-id (.-bubble (getg))) false) bubbleAssocCurrentBubble))

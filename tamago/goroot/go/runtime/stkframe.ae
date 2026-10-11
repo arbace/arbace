@@ -1,0 +1,284 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "stkframe.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [goarch "internal/goarch"]
+    ^{:line 10} [sys "internal/runtime/sys"]
+    ^{:line 11} [unsafe "unsafe"]])
+
+
+
+(go/type stkframe "A stkframe holds information about a single physical stack frame.\n" (struct
+
+
+    ^{:line 18 :tag funcInfo :doc "fn is the function being run in this frame. If there is\ninlining, this is the outermost function.\n"} fn
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ^{:line 44 :tag uintptr :doc "pc is the program counter within fn.\n\nThe meaning of this is subtle:\n\n- Typically, this frame performed a regular function call\n  and this is the return PC (just after the CALL\n  instruction). In this case, pc-1 reflects the CALL\n  instruction itself and is the correct source of symbolic\n  information.\n\n- If this frame \"called\" sigpanic, then pc is the\n  instruction that panicked, and pc is the correct address\n  to use for symbolic information.\n\n- If this is the innermost frame, then PC is where\n  execution will continue, but it may not be the\n  instruction following a CALL. This may be from\n  cooperative preemption, in which case this is the\n  instruction after the call to morestack. Or this may be\n  from a signal or an un-started goroutine, in which case\n  PC could be any instruction, including the first\n  instruction in a function. Conventionally, we use pc-1\n  for symbolic information, unless pc == fn.entry(), in\n  which case we use pc.\n"} pc
+
+
+
+
+
+
+
+
+
+    ^{:line 54 :tag uintptr :doc "continpc is the PC where execution will continue in fn, or\n0 if execution will not continue in this frame.\n\nThis is usually the same as pc, unless this frame \"called\"\nsigpanic, in which case it's either the address of\ndeferreturn or 0 if this frame will never execute again.\n\nThis is the PC to use to look up GC liveness for this frame.\n"} continpc
+
+    ^{:line 56 :tag uintptr} lr ; program counter at caller aka link register
+    ^{:line 57 :tag uintptr} sp ; stack pointer at pc
+    ^{:line 58 :tag uintptr} fp ; stack pointer at caller aka frame pointer
+    ^{:line 59 :tag uintptr} varp ; top of local variables
+    ^{:line 60 :tag uintptr} argp)) ; pointer to function arguments
+
+
+
+
+(go/type reflectMethodValue "reflectMethodValue is a partial duplicate of reflect.makeFuncImpl\nand reflect.methodValue.\n" (struct
+    ^{:line 66 :tag uintptr} fn
+    ^{:line 67 :tag (* bitvector)} stack ; ptrmap for both args and results
+    ^{:line 68 :tag uintptr} argLen)) ; just args
+
+
+
+^{:go/end 80} (go/method argBytes "argBytes returns the argument frame size for a call to frame.fn.\n" ^uintptr [^{:tag (* stkframe)} frame]
+  (when (!= ^{:go/via [_func]} (.-args (.-fn frame)) abi/ArgsSizeUnknown)
+    (return (conv uintptr ^{:go/via [_func]} (.-args (.-fn frame)))))
+
+  ;; This is an uncommon and complicated case. Fall back to fully
+  ;; fetching the argument map to compute its size.
+  (let [(values argMap _) (.argMapInternal frame)]
+    (* (conv uintptr (.-n argMap)) goarch/PtrSize)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 153} (go/method argMapInternal "argMapInternal is used internally by stkframe to fetch special\nargument maps.\n\nargMap.n is always populated with the size of the argument map.\n\nargMap.bytedata is only populated for dynamic argument maps (used\nby reflect). If the caller requires the argument map, it should use\nthis if non-nil, and otherwise fetch the argument map using the\ncurrent PC.\n\nhasReflectStackObj indicates that this frame also has a reflect\nfunction stack object, which the caller must synthesize.\n" [^{:tag (* stkframe)} frame] :results [^bitvector argMap ^bool hasReflectStackObj]
+  (let [f (.-fn frame)]
+    (when (!= ^{:go/via [_func]} (.-args f) abi/ArgsSizeUnknown)
+      (set! (.-n argMap) (/ ^{:go/via [_func]} (.-args f) goarch/PtrSize))
+      (return))
+
+    ;; Extract argument bitmaps for reflect stubs from the calls they made to reflect.
+    (switch (funcname f)
+      (case ["reflect.makeFuncStub" "reflect.methodValueCall"]
+        ;; These take a *reflect.methodValue as their
+        ;; context register and immediately save it to 0(SP).
+        ;; Get the methodValue from 0(SP).
+        (let [arg0 (+ (.-sp frame) sys/MinFrameSize)
+
+            ^{:line 108} minSP (.-fp frame)]
+          (when (not usesLR)
+            ;; The CALL itself pushes a word.
+            ;; Undo that adjustment.
+            (set! minSP - goarch/PtrSize))
+
+          (when (>= arg0 minSP)
+            ;; The function hasn't started yet.
+            ;; This only happens if f was the
+            ;; start function of a new goroutine
+            ;; that hasn't run yet *and* f takes
+            ;; no arguments and has no results
+            ;; (otherwise it will get wrapped in a
+            ;; closure). In this case, we can't
+            ;; reach into its locals because it
+            ;; doesn't have locals yet, but we
+            ;; also know its argument map is
+            ;; empty.
+            (when (!= (.-pc frame) (.entry f))
+              (print "runtime: confused by " (funcname f) ": no frame (sp=" (conv hex (.-sp frame)) " fp=" (conv hex (.-fp frame)) ") at entry+" (conv hex (- (.-pc frame) (.entry f))) "\n")
+              (throw "reflect mismatch"))
+
+            (return (lit bitvector) false)) ; No locals, so also no stack objects
+
+          (set! hasReflectStackObj true)
+          (let [mv @(conv (* (* reflectMethodValue)) (conv unsafe/Pointer arg0))
+              ;; Figure out whether the return values are valid.
+              ;; Reflect will update this value after it copies
+              ;; in the return values.
+              ^{:line 137} retValid @(conv (* bool) (conv unsafe/Pointer (+ arg0 (* 4 goarch/PtrSize))))]
+            (when (!= (.-fn mv) (.entry f))
+              (print "runtime: confused by " (funcname f) "\n")
+              (throw "reflect mismatch"))
+
+            (set! argMap @(.-stack mv))
+            (when (not retValid)
+              ;; argMap.n includes the results, but
+              ;; those aren't valid, so drop them.
+              (let [n (conv int32 (/ (bit-and-not (.-argLen mv) (- goarch/PtrSize 1)) goarch/PtrSize))]
+                (when (< n (.-n argMap))
+                  (set! (.-n argMap) n))))))))
+
+
+
+    (return)))
+
+
+
+
+^{:go/end 260} (go/method getStackMap "getStackMap returns the locals and arguments live pointer maps, and\nstack object list for frame.\n" [^{:tag (* stkframe)} frame ^bool debug] :results [^bitvector locals ^bitvector args ^{:tag (slice stackObjectRecord)} objs]
+  (let [targetpc (.-continpc frame)]
+    (when (== targetpc 0)
+      ;; Frame is dead. Return empty bitvectors.
+      (return))
+
+
+    (let [f (.-fn frame)
+        ^{:line 165} pcdata (conv int32 -1)]
+      (when (!= targetpc (.entry f))
+        ;; Back up to the CALL. If we're at the function entry
+        ;; point, we want to use the entry map (-1), even if
+        ;; the first instruction of the function changes the
+        ;; stack map.
+        (dec! targetpc)
+        (set! pcdata (pcdatavalue f abi/PCDATA_StackMapIndex targetpc)))
+
+      (when (== pcdata -1)
+        ;; We do not have a valid pcdata value but there might be a
+        ;; stackmap for this function. It is likely that we are looking
+        ;; at the function prologue, assume so and hope for the best.
+        (set! pcdata 0))
+
+
+      ;; Local variables.
+      (let [size (- (.-varp frame) (.-sp frame))
+          ^{:line 183 :tag uintptr} minsize (zero uintptr)]
+        (switch goarch/ArchFamily
+          (case [goarch/ARM64]
+            (set! minsize sys/StackAlign))
+          (default
+            (set! minsize sys/MinFrameSize)))
+
+        (when (> size minsize)
+          (let [stackid pcdata
+              ^{:line 192} stkmap (conv (* stackmap) (funcdata f abi/FUNCDATA_LocalsPointerMaps))]
+            (when (or (== stkmap nil) (<= (.-n stkmap) 0))
+              (print "runtime: frame " (funcname f) " untyped locals " (conv hex (- (.-varp frame) size)) "+" (conv hex size) "\n")
+              (throw "missing stackmap"))
+
+            ;; If nbit == 0, there's no work to do.
+            (cond (> (.-nbit stkmap) 0) (do
+                (when (or (< stackid 0) (>= stackid (.-n stkmap)))
+                  ;; don't know where we are
+                  (print "runtime: pcdata is " stackid " and " (.-n stkmap) " locals stack map entries for " (funcname f) " (targetpc=" (conv hex targetpc) ")\n")
+                  (throw "bad symbol table"))
+
+                (set! locals (stackmapdata stkmap stackid))
+                (when (and (>= stackDebug 3) debug)
+                  (print "      locals " stackid "/" (.-n stkmap) " " (.-n locals) " words " (.-bytedata locals) "\n")))
+
+              (and (>= stackDebug 3) debug)
+              (print "      no locals to adjust\n"))))
+
+
+
+        ;; Arguments. First fetch frame size and special-case argument maps.
+        (let [^bool isReflect (zero bool)]
+          (set! (values args isReflect) (.argMapInternal frame))
+          (when (and (> (.-n args) 0) (== (.-bytedata args) nil))
+            ;; Non-empty argument frame, but not a special map.
+            ;; Fetch the argument map at pcdata.
+            (let [stackmap (conv (* stackmap) (funcdata f abi/FUNCDATA_ArgsPointerMaps))]
+              (when (or (== stackmap nil) (<= (.-n stackmap) 0))
+                (print "runtime: frame " (funcname f) " untyped args " (conv hex (.-argp frame)) "+" (conv hex (* (.-n args) goarch/PtrSize)) "\n")
+                (throw "missing stackmap"))
+
+              (when (or (< pcdata 0) (>= pcdata (.-n stackmap)))
+                ;; don't know where we are
+                (print "runtime: pcdata is " pcdata " and " (.-n stackmap) " args stack map entries for " (funcname f) " (targetpc=" (conv hex targetpc) ")\n")
+                (throw "bad symbol table"))
+
+              (if (== (.-nbit stackmap) 0)
+                (set! (.-n args) 0)
+
+                (set! args (stackmapdata stackmap pcdata)))))
+
+
+
+          ;; stack objects.
+          (if (and ^:go/paren (or (== GOARCH "amd64") (== GOARCH "arm64") (== GOARCH "loong64") (== GOARCH "ppc64") (== GOARCH "ppc64le") (== GOARCH "riscv64") (== GOARCH "s390x"))
+              (> (unsafe/Sizeof (lit abi/RegArgs)) 0) isReflect)
+            ;; For reflect.makeFuncStub and reflect.methodValueCall,
+            ;; we need to fake the stack object record.
+            ;; These frames contain an internal/abi.RegArgs at a hard-coded offset.
+            ;; This offset matches the assembly code on amd64 and arm64.
+            (set! objs (subslice methodValueCallFrameObjs))
+
+            (let [p (funcdata f abi/FUNCDATA_StackObjects)]
+              (when (!= p nil)
+                (let [n @(conv (* uintptr) p)]
+                  (set! p (add p goarch/PtrSize))
+                  (let [r0 (conv (* stackObjectRecord) (noescape p))]
+                    (set! objs (unsafe/Slice r0 (conv int n))))))))
+          ;; Note: the noescape above is needed to keep
+          ;; getStackMap from "leaking param content:
+          ;; frame".  That leak propagates up to getgcmask, then
+          ;; GCMask, then verifyGCInfo, which converts the stack
+          ;; gcinfo tests into heap gcinfo tests :(
+
+
+
+          (return))))))
+
+
+(go/var ^{:tag (array 1 stackObjectRecord)} methodValueCallFrameObjs) ; initialized in stkobjinit
+
+^{:go/end 286} (go/func stkobjinit []
+  (let [^any abiRegArgsEface (lit abi/RegArgs)
+      ^{:line 266} abiRegArgsType (.-_type (efaceOf (addr abiRegArgsEface)))
+      ;; Set methodValueCallFrameObjs[0].gcdataoff so that
+      ;; stackObjectRecord.gcdata() will work correctly with it.
+      ^{:line 269} ptr (conv uintptr (conv unsafe/Pointer (addr (aget methodValueCallFrameObjs 0))))
+      ^{:line 270 :tag (* moduledata)} mod (zero (* moduledata))]
+    (for [datap (addr firstmoduledata)] (!= datap nil) (set! datap (.-next datap))
+      (when (and (<= (.-noptrbss datap) ptr) (< ptr (.-enoptrbss datap)))
+        (set! mod datap)
+        (break)))
+
+
+    (when (== mod nil)
+      (throw "methodValueCallFrameObjs is not in a module"))
+
+    (aset methodValueCallFrameObjs 0 ^{:go/breaks [2 4 6 8]} (lit stackObjectRecord
+        :off (- (conv int32 (alignUp (.-Size_ abiRegArgsType) 8))) ; It's always the highest address local.
+        :size (conv int32 (.-Size_ abiRegArgsType))
+        :ptrBytes (conv int32 (.-PtrBytes abiRegArgsType))
+        :gcdataoff (conv uint32 (- (conv uintptr (conv unsafe/Pointer (getGCMask abiRegArgsType))) (.-rodata mod)))))))

@@ -1,0 +1,773 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.text.template) (go/file "funcs.go" :imports [
+
+
+    ^{:line 8} [errors "errors"]
+    ^{:line 9} [fmt "fmt"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [url "net/url"]
+    ^{:line 12} [reflect "reflect"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [sync "sync"]
+    ^{:line 15} [unicode "unicode"]
+    ^{:line 16} [utf8 "unicode/utf8"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type FuncMap "FuncMap is the type of the map defining the mapping from names to functions.\nEach function must have either a single return value, or two return values of\nwhich the second has type error. In that case, if the second (error)\nreturn value evaluates to non-nil during execution, execution terminates and\nExecute returns that error.\n\nErrors returned by Execute wrap the underlying error; call [errors.AsType] to\nunwrap them.\n\nWhen template execution invokes a function with an argument list, that list\nmust be assignable to the function's parameter types. Functions meant to\napply to arguments of arbitrary type can use parameters of type interface{} or\nof type [reflect.Value]. Similarly, functions meant to return a result of arbitrary\ntype can return interface{} or [reflect.Value].\n" (map string any))
+
+
+
+
+
+^{:go/end 63} (go/func builtins "builtins returns the FuncMap.\nIt is not a global variable so the linker can dead code eliminate\nmore when this isn't called. See golang.org/issue/36021.\nTODO: revert this back to a global map once golang.org/issue/2559 is fixed.\n" ^FuncMap []
+  (lit FuncMap
+    ^{:line 41} ["and" and]
+    ^{:line 42} ["call" emptyCall]
+    ^{:line 43} ["html" HTMLEscaper]
+    ^{:line 44} ["index" index]
+    ^{:line 45} ["slice" slice]
+    ^{:line 46} ["js" JSEscaper]
+    ^{:line 47} ["len" length]
+    ^{:line 48} ["not" not]
+    ^{:line 49} ["or" or]
+    ^{:line 50} ["print" fmt/Sprint]
+    ^{:line 51} ["printf" fmt/Sprintf]
+    ^{:line 52} ["println" fmt/Sprintln]
+    ^{:line 53} ["urlquery" URLQueryEscaper]
+
+    ;; Comparisons
+    ^{:line 56} ["eq" eq] ; ==
+    ^{:line 57} ["ge" ge] ; >=
+    ^{:line 58} ["gt" gt] ; >
+    ^{:line 59} ["le" le] ; <=
+    ^{:line 60} ["lt" lt] ; <
+    ^{:line 61} ["ne" ne])) ; !=
+
+
+
+
+(go/var ^{:doc "builtinFuncs lazily computes & caches the builtinFuncs map.\n"} builtinFuncs (^{:inst [(map string reflect/Value)]} sync/OnceValue ^{:go/end 71} (fn ^{:tag (map string reflect/Value)} []
+      (let [funcMap (builtins)
+          ^{:line 68} m (make (map string reflect/Value) (len funcMap))]
+        (addValueFuncs m funcMap)
+        ^{:line 70} m))))
+
+
+
+^{:go/end 88} (go/func addValueFuncs "addValueFuncs adds to values the functions in funcs, converting them to reflect.Values.\n" [^{:tag (map string reflect/Value)} out ^FuncMap in]
+  (range [name fn in]
+    (when (not (goodName name))
+      (panic (fmt/Errorf "function name %q is not a valid identifier" name)))
+
+    (let [v (reflect/ValueOf fn)]
+      (when (!= (.Kind v) reflect/Func)
+        (panic (+ "value for " name " not a function")))
+
+      (when [err (goodFunc name (.Type v))] (!= err nil)
+        (panic err))
+
+      (aset out name v))))
+
+
+
+
+
+^{:go/end 96} (go/func addFuncs "addFuncs adds to values the functions in funcs. It does no checking of the input -\ncall addValueFuncs first.\n" [^FuncMap out ^FuncMap in]
+  (range [name fn in]
+    (aset out name fn)))
+
+
+
+
+^{:go/end 111} (go/func goodFunc "goodFunc reports whether the function or method has the right result signature.\n" ^error [^string name ^reflect/Type typ]
+  ;; We allow functions with 1 result or 2 results where the second is an error.
+  (switch [numOut (.NumOut typ)]
+    (case [(== numOut 1)]
+      (return nil))
+    (case [(and (== numOut 2) (== (.Out typ 1) errorType))]
+      (return nil))
+    (case [(== numOut 2)]
+      (return (fmt/Errorf "invalid function signature for %s: second return value should be error; is %s" name (.Out typ 1))))
+    (default
+      (return (fmt/Errorf "function %s has %d return values; should be 1 or 2" name (.NumOut typ))))))
+
+
+
+
+^{:go/breaks [[6 127]] :go/end 128} (go/func goodName "goodName reports whether the function name is a valid identifier.\n" ^bool [^string name]
+  (when (== name "")
+    (return false))
+
+  (range [i r name]
+    (switch
+      (case [(== r \_)])
+      (case [(and (== i 0) (not (unicode/IsLetter r)))]
+        (return false))
+      (case [(and (not (unicode/IsLetter r)) (not (unicode/IsDigit r)))]
+        (return false))))
+
+
+  true)
+
+
+
+^{:go/end 143} (go/func findFunction "findFunction looks for a function in the template, and global map.\n" [^string name ^{:tag (* Template)} tmpl] :results [^reflect/Value v ^bool isBuiltin ^bool ok]
+  (when (and (!= tmpl nil) (!= (.-common tmpl) nil))
+    (.RLock ^{:go/via [common]} (.-muFuncs tmpl))
+    (defer (.RUnlock ^{:go/via [common]} (.-muFuncs tmpl)))
+    (when [fn (aget ^{:go/via [common]} (.-execFuncs tmpl) name)] (.IsValid fn)
+      (return fn false true)))
+
+
+  (when [fn (aget (builtinFuncs) name)] (.IsValid fn)
+    (return fn true true))
+
+  (return (lit reflect/Value) false false))
+
+
+
+
+^{:go/end 162} (go/func prepareArg "prepareArg checks if value can be used as an argument of type argType, and\nconverts an invalid value to appropriate zero if possible.\n" [^reflect/Value value ^reflect/Type argType] :results [reflect/Value error]
+  (when (not (.IsValid value))
+    (when (not (canBeNil argType))
+      (return (lit reflect/Value) (fmt/Errorf "value is nil; should be of type %s" argType)))
+
+    (set! value (reflect/Zero argType)))
+
+  (when (.AssignableTo (.Type value) argType)
+    (return value nil))
+
+  (when (and (intLike (.Kind value)) (intLike (.Kind argType)) (.ConvertibleTo (.Type value) argType))
+    (set! value (.Convert value argType))
+    (return value nil))
+
+  (return (lit reflect/Value) (fmt/Errorf "value has type %s; should be %s" (.Type value) argType)))
+
+
+^{:go/breaks [[4 171]] :go/end 172} (go/func intLike ^bool [^reflect/Kind typ]
+  (switch typ
+    (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+      (return true))
+    (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+      (return true)))
+
+  false)
+
+
+
+^{:go/end 191} (go/func indexArg "indexArg checks if a reflect.Value can be used as an index, and converts it to int if possible.\n" [^reflect/Value index ^int cap] :results [int error]
+  (let [^int64 x (zero int64)]
+    (switch (.Kind index)
+      (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+        (set! x (.Int index)))
+      (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+        (set! x (conv int64 (.Uint index))))
+      (case [reflect/Invalid]
+        (return 0 (fmt/Errorf "cannot index slice/array with nil")))
+      (default
+        (return 0 (fmt/Errorf "cannot index slice/array with type %s" (.Type index)))))
+
+    (when (or (< x 0) (< (conv int x) 0) (> (conv int x) cap))
+      (return 0 (fmt/Errorf "index out of range: %d" x)))
+
+    (return (conv int x) nil)))
+
+
+;; Indexing.
+
+
+
+
+^{:go/end 234} (go/func index "index returns the result of indexing its first argument by the following\narguments. Thus \"index x 1 2 3\" is, in Go syntax, x[1][2][3]. Each\nindexed item must be a map, slice, or array.\n" [^reflect/Value item & ^{:tag (slice reflect/Value)} indexes] :results [reflect/Value error]
+  (set! item (indirectInterface item))
+  (when (not (.IsValid item))
+    (return (lit reflect/Value) (fmt/Errorf "index of untyped nil")))
+
+  (range [_ index indexes]
+    (set! index (indirectInterface index))
+    (let [^bool isNil (zero bool)]
+      (when [(set! (values item isNil) (indirect item))] isNil
+        (return (lit reflect/Value) (fmt/Errorf "index of nil pointer")))
+
+      (switch (.Kind item)
+        (case [reflect/Array reflect/Slice reflect/String]
+          (let [(values x err) (indexArg index (.Len item))]
+            (when (!= err nil)
+              (return (lit reflect/Value) err))
+
+            (set! item (.Index item x))))
+        (case [reflect/Map]
+          (let [(values index err) (prepareArg index (.Key (.Type item)))]
+            (when (!= err nil)
+              (return (lit reflect/Value) err))
+
+            (if [x (.MapIndex item index)] (.IsValid x)
+              (set! item x)
+
+              (set! item (reflect/Zero (.Elem (.Type item)))))))
+
+        (case [reflect/Invalid]
+          ;; the loop holds invariant: item.IsValid()
+          (panic "unreachable"))
+        (default
+          (return (lit reflect/Value) (fmt/Errorf "can't index item of type %s" (.Type item)))))))
+
+
+  (return item nil))
+
+
+;; Slicing.
+
+
+
+
+
+^{:go/end 287} (go/func slice "slice returns the result of slicing its first argument by the remaining\narguments. Thus \"slice x 1 2\" is, in Go syntax, x[1:2], while \"slice x\"\nis x[:], \"slice x 1\" is x[1:], and \"slice x 1 2 3\" is x[1:2:3]. The first\nargument must be a string, slice, or array.\n" [^reflect/Value item & ^{:tag (slice reflect/Value)} indexes] :results [reflect/Value error]
+  (set! item (indirectInterface item))
+  (when (not (.IsValid item))
+    (return (lit reflect/Value) (fmt/Errorf "slice of untyped nil")))
+
+  (let [^bool isNil (zero bool)]
+    (when [(set! (values item isNil) (indirect item))] isNil
+      (return (lit reflect/Value) (fmt/Errorf "slice of nil pointer")))
+
+    (when (> (len indexes) 3)
+      (return (lit reflect/Value) (fmt/Errorf "too many slice indexes: %d" (len indexes))))
+
+    (let [^int cap (zero int)]
+      (switch (.Kind item)
+        (case [reflect/String]
+          (when (== (len indexes) 3)
+            (return (lit reflect/Value) (fmt/Errorf "cannot 3-index slice a string")))
+
+          (set! cap (.Len item)))
+        (case [reflect/Array reflect/Slice]
+          (set! cap (.Cap item)))
+        (default
+          (return (lit reflect/Value) (fmt/Errorf "can't slice item of type %s" (.Type item)))))
+
+      ;; set default values for cases item[:], item[i:].
+      (let [idx (lit (array 3 int) 0 (.Len item))]
+        (range [i index indexes]
+          (let [(values x err) (indexArg index cap)]
+            (when (!= err nil)
+              (return (lit reflect/Value) err))
+
+            (aset idx i x)))
+
+        ;; given item[i:j], make sure i <= j.
+        (when (> (aget idx 0) (aget idx 1))
+          (return (lit reflect/Value) (fmt/Errorf "invalid slice index: %d > %d" (aget idx 0) (aget idx 1))))
+
+        (when (< (len indexes) 3)
+          (return (.Slice item (aget idx 0) (aget idx 1)) nil))
+
+        ;; given item[i:j:k], make sure i <= j <= k.
+        (when (> (aget idx 1) (aget idx 2))
+          (return (lit reflect/Value) (fmt/Errorf "invalid slice index: %d > %d" (aget idx 1) (aget idx 2))))
+
+        (return (.Slice3 item (aget idx 0) (aget idx 1) (aget idx 2)) nil)))))
+
+
+;; Length
+
+
+^{:go/end 302} (go/func length "length returns the length of the item, with an error if it has no defined length.\n" [^reflect/Value item] :results [int error]
+  (let [(values ^:assign item isNil) (indirect item)]
+    (when isNil
+      (return 0 (fmt/Errorf "len of nil pointer")))
+
+    (switch (.Kind item)
+      (case [reflect/Array reflect/Chan reflect/Map reflect/Slice reflect/String]
+        (return (.Len item) nil)))
+
+    (return 0 (fmt/Errorf "len of type %s" (.Type item)))))
+
+
+;; Function invocation
+
+^{:go/end 308} (go/func emptyCall ^reflect/Value [^reflect/Value fn & ^{:tag (slice reflect/Value)} args]
+  (panic "unreachable")) ; implemented as a special case in evalCall
+
+
+
+
+^{:go/end 352} (go/func call "call returns the result of evaluating the first argument as a function.\nThe function must return 1 result, or 2 results, the second of which is an error.\n" [^string name ^reflect/Value fn & ^{:tag (slice reflect/Value)} args] :results [reflect/Value error]
+  (set! fn (indirectInterface fn))
+  (when (not (.IsValid fn))
+    (return (lit reflect/Value) (fmt/Errorf "call of nil")))
+
+  (let [typ (.Type fn)]
+    (when (!= (.Kind typ) reflect/Func)
+      (return (lit reflect/Value) (fmt/Errorf "non-function %s of type %s" name typ)))
+
+
+    (when [err (goodFunc name typ)] (!= err nil)
+      (return (lit reflect/Value) err))
+
+    (let [numIn (.NumIn typ)
+        ^{:line 326 :tag reflect/Type} dddType (zero reflect/Type)]
+      (if (.IsVariadic typ) (do
+          (when (< (len args) (- numIn 1))
+            (return (lit reflect/Value) (fmt/Errorf "wrong number of args for %s: got %d want at least %d" name (len args) (- numIn 1))))
+
+          (set! dddType (.Elem (.In typ (- numIn 1)))))
+        (do
+          (when (!= (len args) numIn)
+            (return (lit reflect/Value) (fmt/Errorf "wrong number of args for %s: got %d want %d" name (len args) numIn)))))
+
+
+      (let [argv (make (slice reflect/Value) (len args))]
+        (range [i arg args]
+          (set! arg (indirectInterface arg))
+          ;; Compute the expected type. Clumsy because of variadics.
+          (let [argType dddType]
+            (when (or (not (.IsVariadic typ)) (< i (- numIn 1)))
+              (set! argType (.In typ i)))
+
+
+            (let [^error err (zero error)]
+              (when [(set! (values (aget argv i) err) (prepareArg arg argType))] (!= err nil)
+                (return (lit reflect/Value) (fmt/Errorf "arg %d: %w" i err))))))
+
+
+        (safeCall fn argv)))))
+
+
+
+
+^{:go/end 371} (go/func safeCall "safeCall runs fun.Call(args), and returns the resulting value and error, if\nany. If the call panics, the panic value is returned as an error.\n" [^reflect/Value fun ^{:tag (slice reflect/Value)} args] :results [^reflect/Value val ^error err]
+  (defer (^{:go/end 365} (fn []
+        (when [r (recover)] (!= r nil)
+          (if [(values e ok) (assert error r)] ok
+            (set! err e)
+
+            (set! err (fmt/Errorf "%v" r)))))))
+
+
+
+  (let [ret (.Call fun args)]
+    (when (and (== (len ret) 2) (not (.IsNil (aget ret 1))))
+      (return (aget ret 0) (assert error (.Interface (aget ret 1)))))
+
+    (return (aget ret 0) nil)))
+
+
+;; Boolean logic.
+
+^{:go/end 378} (go/func truth ^bool [^reflect/Value arg]
+  (let [(values t _) (isTrue (indirectInterface arg))]
+    ^{:line 377} t))
+
+
+
+
+^{:go/end 384} (go/func and "and computes the Boolean AND of its arguments, returning\nthe first false argument it encounters, or the last argument.\n" ^reflect/Value [^reflect/Value arg0 & ^{:tag (slice reflect/Value)} args]
+  (panic "unreachable")) ; implemented as a special case in evalCall
+
+
+
+
+^{:go/end 390} (go/func or "or computes the Boolean OR of its arguments, returning\nthe first true argument it encounters, or the last argument.\n" ^reflect/Value [^reflect/Value arg0 & ^{:tag (slice reflect/Value)} args]
+  (panic "unreachable")) ; implemented as a special case in evalCall
+
+
+
+^{:go/end 395} (go/func not "not returns the Boolean negation of its argument.\n" ^bool [^reflect/Value arg]
+  (not (truth arg)))
+
+
+;; Comparison.
+
+;; TODO: Perhaps allow comparison between signed and unsigned integers.
+
+(go/var
+  ^{:line 402} [errBadComparisonType (errors/New "invalid type for comparison")]
+  ^{:line 403} [errNoComparison (errors/New "missing argument for comparison")])
+
+
+(go/type kind int)
+
+(go/const
+  ^{:line 409} [^{:tag kind :val 0} invalidKind iota]
+  ^{:line 410} [^{:val 1} boolKind]
+  ^{:line 411} [^{:val 2} complexKind]
+  ^{:line 412} [^{:val 3} intKind]
+  ^{:line 413} [^{:val 4} floatKind]
+  ^{:line 414} [^{:val 5} stringKind]
+  ^{:line 415} [^{:val 6} uintKind])
+
+
+^{:go/end 434} (go/func basicKind [^reflect/Value v] :results [kind error]
+  (switch (.Kind v)
+    (case [reflect/Bool]
+      (return boolKind nil))
+    (case [reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64]
+      (return intKind nil))
+    (case [reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr]
+      (return uintKind nil))
+    (case [reflect/Float32 reflect/Float64]
+      (return floatKind nil))
+    (case [reflect/Complex64 reflect/Complex128]
+      (return complexKind nil))
+    (case [reflect/String]
+      (return stringKind nil)))
+
+  (return invalidKind errBadComparisonType))
+
+
+
+^{:go/breaks [[6 445]] :go/end 446} (go/func isNil "isNil returns true if v is the zero reflect.Value, or nil of its type.\n" ^bool [^reflect/Value v]
+  (when (not (.IsValid v))
+    (return true))
+
+  (switch (.Kind v)
+    (case [reflect/Chan reflect/Func reflect/Interface reflect/Map reflect/Pointer reflect/Slice]
+      (return (.IsNil v))))
+
+  false)
+
+
+
+
+^{:go/end 458} (go/func canCompare "canCompare reports whether v1 and v2 are both the same kind, or one is nil.\nCalled only when dealing with nillable types, or there's about to be an error.\n" ^bool [^reflect/Value v1 ^reflect/Value v2]
+  (let [k1 (.Kind v1)
+      ^{:line 452} k2 (.Kind v2)]
+    (when (== k1 k2)
+      (return true))
+
+    ;; We know the type can be compared to nil.
+    (or (== k1 reflect/Invalid) (== k2 reflect/Invalid))))
+
+
+
+^{:go/end 516} (go/func eq "eq evaluates the comparison a == b || a == c || ...\n" [^reflect/Value arg1 & ^{:tag (slice reflect/Value)} arg2] :results [bool error]
+  (set! arg1 (indirectInterface arg1))
+  (when (== (len arg2) 0)
+    (return false errNoComparison))
+
+  (let [(values k1 _) (basicKind arg1)]
+    (range [_ arg arg2]
+      (set! arg (indirectInterface arg))
+      (let [(values k2 _) (basicKind arg)
+          ^{:line 470} truth false]
+        (if (!= k1 k2)
+          ;; Special case: Can compare integer values regardless of type's sign.
+          (switch
+            (case [(and (== k1 intKind) (== k2 uintKind))]
+              (set! truth (and (>= (.Int arg1) 0) (== (conv uint64 (.Int arg1)) (.Uint arg)))))
+            (case [(and (== k1 uintKind) (== k2 intKind))]
+              (set! truth (and (>= (.Int arg) 0) (== (.Uint arg1) (conv uint64 (.Int arg))))))
+            (default
+              (when (and (.IsValid arg1) (.IsValid arg))
+                (return false (fmt/Errorf "incompatible types for comparison: %v and %v" (.Type arg1) (.Type arg))))))
+
+
+
+          (switch k1
+            (case [boolKind]
+              (set! truth (== (.Bool arg1) (.Bool arg))))
+            (case [complexKind]
+              (set! truth (== (.Complex arg1) (.Complex arg))))
+            (case [floatKind]
+              (set! truth (== (.Float arg1) (.Float arg))))
+            (case [intKind]
+              (set! truth (== (.Int arg1) (.Int arg))))
+            (case [stringKind]
+              (set! truth (== (.String arg1) (.String arg))))
+            (case [uintKind]
+              (set! truth (== (.Uint arg1) (.Uint arg))))
+            (default
+              (when (not (canCompare arg1 arg))
+                (return false (fmt/Errorf "non-comparable types %s: %v, %s: %v" arg1 (.Type arg1) (.Type arg) arg)))
+
+              (if (or (isNil arg1) (isNil arg))
+                (set! truth (== (isNil arg) (isNil arg1)))
+                (do
+                  (when (not (.Comparable (.Type arg)))
+                    (return false (fmt/Errorf "non-comparable type %s: %v" arg (.Type arg))))
+
+                  (set! truth (== (.Interface arg1) (.Interface arg))))))))
+
+
+
+        (when truth
+          (return true nil))))
+
+
+    (return false nil)))
+
+
+
+^{:go/end 523} (go/func ne "ne evaluates the comparison a != b.\n" [^reflect/Value arg1 ^reflect/Value arg2] :results [bool error]
+  ;; != is the inverse of ==.
+  (let [(values equal err) (eq arg1 arg2)]
+    (return (not equal) err)))
+
+
+
+^{:go/end 565} (go/func lt "lt evaluates the comparison a < b.\n" [^reflect/Value arg1 ^reflect/Value arg2] :results [bool error]
+  (set! arg1 (indirectInterface arg1))
+  (let [(values k1 err) (basicKind arg1)]
+    (when (!= err nil)
+      (return false err))
+
+    (set! arg2 (indirectInterface arg2))
+    (let [(values k2 ^:assign err) (basicKind arg2)]
+      (when (!= err nil)
+        (return false err))
+
+      (let [truth false]
+        (if (!= k1 k2)
+          ;; Special case: Can compare integer values regardless of type's sign.
+          (switch
+            (case [(and (== k1 intKind) (== k2 uintKind))]
+              (set! truth (or (< (.Int arg1) 0) (< (conv uint64 (.Int arg1)) (.Uint arg2)))))
+            (case [(and (== k1 uintKind) (== k2 intKind))]
+              (set! truth (and (>= (.Int arg2) 0) (< (.Uint arg1) (conv uint64 (.Int arg2))))))
+            (default
+              (return false (fmt/Errorf "incompatible types for comparison: %v and %v" (.Type arg1) (.Type arg2)))))
+
+
+          (switch k1
+            (case [boolKind complexKind]
+              (return false errBadComparisonType))
+            (case [floatKind]
+              (set! truth (< (.Float arg1) (.Float arg2))))
+            (case [intKind]
+              (set! truth (< (.Int arg1) (.Int arg2))))
+            (case [stringKind]
+              (set! truth (< (.String arg1) (.String arg2))))
+            (case [uintKind]
+              (set! truth (< (.Uint arg1) (.Uint arg2))))
+            (default
+              (panic "invalid kind"))))
+
+
+        (return truth nil)))))
+
+
+
+^{:go/end 575} (go/func le "le evaluates the comparison <= b.\n" [^reflect/Value arg1 ^reflect/Value arg2] :results [bool error]
+  ;; <= is < or ==.
+  (let [(values lessThan err) (lt arg1 arg2)]
+    (when (or lessThan (!= err nil))
+      (return lessThan err))
+
+    (eq arg1 arg2)))
+
+
+
+^{:go/end 585} (go/func gt "gt evaluates the comparison a > b.\n" [^reflect/Value arg1 ^reflect/Value arg2] :results [bool error]
+  ;; > is the inverse of <=.
+  (let [(values lessOrEqual err) (le arg1 arg2)]
+    (when (!= err nil)
+      (return false err))
+
+    (return (not lessOrEqual) nil)))
+
+
+
+^{:go/end 595} (go/func ge "ge evaluates the comparison a >= b.\n" [^reflect/Value arg1 ^reflect/Value arg2] :results [bool error]
+  ;; >= is the inverse of <.
+  (let [(values lessThan err) (lt arg1 arg2)]
+    (when (!= err nil)
+      (return false err))
+
+    (return (not lessThan) nil)))
+
+
+;; HTML escaping.
+
+(go/var
+  ^{:line 600} [htmlQuot (conv (slice byte) "&#34;")] ; shorter than "&quot;"
+  ^{:line 601} [htmlApos (conv (slice byte) "&#39;")] ; shorter than "&apos;" and apos was not in HTML until HTML5
+  ^{:line 602} [htmlAmp (conv (slice byte) "&amp;")]
+  ^{:line 603} [htmlLt (conv (slice byte) "&lt;")]
+  ^{:line 604} [htmlGt (conv (slice byte) "&gt;")]
+  ^{:line 605} [htmlNull (conv (slice byte) "\ufffd")])
+
+
+
+^{:go/end 634} (go/func HTMLEscape "HTMLEscape writes to w the escaped HTML equivalent of the plain text data b.\n" [^io/Writer w ^{:tag (slice byte)} b]
+  (let [last 0]
+    (range [i c b]
+      (let [^{:tag (slice byte)} html (zero (slice byte))]
+        (switch c
+          (case [\u0000]
+            (set! html htmlNull))
+          (case [\"]
+            (set! html htmlQuot))
+          (case [\']
+            (set! html htmlApos))
+          (case [\&]
+            (set! html htmlAmp))
+          (case [\<]
+            (set! html htmlLt))
+          (case [\>]
+            (set! html htmlGt))
+          (default
+            (continue)))
+
+        (.Write w (subslice b last i))
+        (.Write w html)
+        (set! last (+ i 1))))
+
+    (.Write w (subslice b last))))
+
+
+
+^{:go/end 645} (go/func HTMLEscapeString "HTMLEscapeString returns the escaped HTML equivalent of the plain text data s.\n" ^string [^string s]
+  ;; Avoid allocation if we can.
+  (when (not (strings/ContainsAny s "'\"&<>\u0000"))
+    (return s))
+
+  (let [^strings/Builder b (zero strings/Builder)]
+    (HTMLEscape (addr b) (conv (slice byte) s))
+    (.String b)))
+
+
+
+
+^{:go/end 651} (go/func HTMLEscaper "HTMLEscaper returns the escaped HTML equivalent of the textual\nrepresentation of its arguments.\n" ^string [& ^{:tag (slice any)} args]
+  (HTMLEscapeString (evalArgs args)))
+
+
+;; JavaScript escaping.
+
+(go/var
+  ^{:line 656} [jsLowUni (conv (slice byte) "\\u00")]
+  ^{:line 657} [hex (conv (slice byte) "0123456789ABCDEF")]
+
+  ^{:line 659} [jsBackslash (conv (slice byte) "\\\\")]
+  ^{:line 660} [jsApos (conv (slice byte) "\\'")]
+  ^{:line 661} [jsQuot (conv (slice byte) "\\\"")]
+  ^{:line 662} [jsLt (conv (slice byte) "\\u003C")]
+  ^{:line 663} [jsGt (conv (slice byte) "\\u003E")]
+  ^{:line 664} [jsAmp (conv (slice byte) "\\u0026")]
+  ^{:line 665} [jsEq (conv (slice byte) "\\u003D")])
+
+
+
+^{:go/end 717} (go/func JSEscape "JSEscape writes to w the escaped JavaScript equivalent of the plain text data b.\n" [^io/Writer w ^{:tag (slice byte)} b]
+  (let [last 0]
+    (for [i 0] (< i (len b)) (inc! i)
+      (let [c (aget b i)]
+
+        (when (not (jsIsSpecial (conv rune c)))
+          ;; fast path: nothing to do
+          (continue))
+
+        (.Write w (subslice b last i))
+
+        (if (< c utf8/RuneSelf)
+          ;; Quotes, slashes and angle brackets get quoted.
+          ;; Control characters get written as \u00XX.
+          (switch c
+            (case [\\]
+              (.Write w jsBackslash))
+            (case [\']
+              (.Write w jsApos))
+            (case [\"]
+              (.Write w jsQuot))
+            (case [\<]
+              (.Write w jsLt))
+            (case [\>]
+              (.Write w jsGt))
+            (case [\&]
+              (.Write w jsAmp))
+            (case [\=]
+              (.Write w jsEq))
+            (default
+              (.Write w jsLowUni)
+              (let [(values t b) (values (>> c 4) (bit-and c 0x0f))]
+                (.Write w (subslice hex t (+ t 1)))
+                (.Write w (subslice hex b (+ b 1))))))
+
+
+          ;; Unicode rune.
+          (let [(values r size) (utf8/DecodeRune (subslice b i))]
+            (if (unicode/IsPrint r)
+              (.Write w (subslice b i (+ i size)))
+
+              (fmt/Fprintf w "\\u%04X" r))
+
+            (set! i + (- size 1))))
+
+        (set! last (+ i 1))))
+
+    (.Write w (subslice b last))))
+
+
+
+^{:go/end 728} (go/func JSEscapeString "JSEscapeString returns the escaped JavaScript equivalent of the plain text data s.\n" ^string [^string s]
+  ;; Avoid allocation if we can.
+  (when (< (strings/IndexFunc s jsIsSpecial) 0)
+    (return s))
+
+  (let [^strings/Builder b (zero strings/Builder)]
+    (JSEscape (addr b) (conv (slice byte) s))
+    (.String b)))
+
+
+^{:go/end 736} (go/func jsIsSpecial ^bool [^rune r]
+  (switch r
+    (case [\\ \' \" \< \> \& \=]
+      (return true)))
+
+  (or (< r \space) (<= utf8/RuneSelf r)))
+
+
+
+
+^{:go/end 742} (go/func JSEscaper "JSEscaper returns the escaped JavaScript equivalent of the textual\nrepresentation of its arguments.\n" ^string [& ^{:tag (slice any)} args]
+  (JSEscapeString (evalArgs args)))
+
+
+
+
+^{:go/end 748} (go/func URLQueryEscaper "URLQueryEscaper returns the escaped value of the textual representation of\nits arguments in a form suitable for embedding in a URL query.\n" ^string [& ^{:tag (slice any)} args]
+  (url/QueryEscape (evalArgs args)))
+
+
+
+
+
+
+
+
+
+^{:go/end 774} (go/func evalArgs "evalArgs formats the list of arguments into a string. It is therefore equivalent to\n\n\tfmt.Sprint(args...)\n\nexcept that each argument is indirected (if a pointer), as required,\nusing the same rules as the default string evaluation during template\nexecution.\n" ^string [^{:tag (slice any)} args]
+  (let [ok false
+      ^{:line 759 :tag string} s (zero string)]
+    ;; Fast path for simple common case.
+    (when (== (len args) 1)
+      (set! (values s ok) (assert string (aget args 0))))
+
+    (when (not ok)
+      (range [i arg args]
+        (let [(values a ok) (printableValue (reflect/ValueOf arg))]
+          (when ok
+            (aset args i a))))
+      ;; else let fmt do its thing
+
+      (set! s (fmt/Sprint (spread args))))
+
+    ^{:line 773} s))

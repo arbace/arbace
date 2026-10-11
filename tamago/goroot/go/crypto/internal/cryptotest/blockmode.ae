@@ -1,0 +1,234 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.cryptotest) (go/file "blockmode.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [cipher "crypto/cipher"]
+    ^{:line 10} [testing "testing"]])
+
+
+
+
+(go/type MakeBlockMode "MakeBlockMode returns a cipher.BlockMode instance.\nIt expects len(iv) == b.BlockSize().\n" (func [^cipher/Block b ^{:tag (slice byte)} iv] [cipher/BlockMode]))
+
+
+
+^{:go/end 25} (go/func TestBlockMode "TestBlockMode performs a set of tests on cipher.BlockMode implementations,\nchecking the documented requirements of CryptBlocks.\n" [^{:tag (* testing/T)} t ^cipher/Block block ^MakeBlockMode makeEncrypter ^MakeBlockMode makeDecrypter]
+  (let [rng (newRandReader t)
+      ^{:line 21} iv (make (slice byte) (.BlockSize block))]
+    (.Read rng iv)
+
+    (testBlockModePair t block makeEncrypter makeDecrypter iv)))
+
+
+^{:go/end 53} (go/func testBlockModePair [^{:tag (* testing/T)} t ^cipher/Block b ^MakeBlockMode enc ^MakeBlockMode dec ^{:tag (slice byte)} iv]
+  (.Run t "Encryption" ^{:go/end 30} (fn [^{:tag (* testing/T)} t]
+      (testBlockMode t enc b iv)))
+
+
+  (.Run t "Decryption" ^{:go/end 34} (fn [^{:tag (* testing/T)} t]
+      (testBlockMode t dec b iv)))
+
+
+  (.Run t "Roundtrip" ^{:go/end 52} (fn [^{:tag (* testing/T)} t]
+      (let [rng (newRandReader t)
+
+          ^{:line 39} blockSize (.BlockSize (enc b iv))]
+        (when [decBlockSize (.BlockSize (dec b iv))] (!= decBlockSize blockSize)
+          ^{:go/via [common]} (.Errorf t "decryption blocksize different than encryption's; got %d, want %d" decBlockSize blockSize))
+
+
+        (let [(values before dst after) (values (make (slice byte) (* blockSize 2)) (make (slice byte) (* blockSize 2)) (make (slice byte) (* blockSize 2)))]
+          (.Read rng before)
+
+          (.CryptBlocks (enc b iv) dst before)
+          (.CryptBlocks (dec b iv) after dst)
+          (when (not (bytes/Equal after before))
+            ^{:go/via [common]} (.Errorf t "plaintext is different after an encrypt/decrypt cycle; got %x, want %x" after before)))))))
+
+
+
+
+^{:go/end 237} (go/func testBlockMode [^{:tag (* testing/T)} t ^MakeBlockMode bm ^cipher/Block b ^{:tag (slice byte)} iv]
+  (let [blockSize (.BlockSize (bm b iv))]
+
+    (.Run t "WrongIVLen" ^{:go/end 61} (fn [^{:tag (* testing/T)} t]
+        (let [iv (make (slice byte) (+ (.BlockSize b) 1))]
+          (mustPanic t "IV length must equal block size" ^{:go/end 60} (fn [] (bm b iv))))))
+
+
+    (.Run t "EmptyInput" ^{:go/end 74} (fn [^{:tag (* testing/T)} t]
+        (let [rng (newRandReader t)
+
+            (values src dst) (values (make (slice byte) blockSize) (make (slice byte) blockSize))]
+          (.Read rng dst)
+          (let [before (bytes/Clone dst)]
+
+            (.CryptBlocks (bm b iv) dst (subslice src _ 0))
+            (when (not (bytes/Equal dst before))
+              ^{:go/via [common]} (.Errorf t "CryptBlocks modified dst on empty input; got %x, want %x" dst before))))))
+
+
+
+    (.Run t "AlterInput" ^{:go/end 90} (fn [^{:tag (* testing/T)} t]
+        (let [rng (newRandReader t)
+
+            (values src dst before) (values (make (slice byte) (* blockSize 2)) (make (slice byte) (* blockSize 2)) (make (slice byte) (* blockSize 2)))]
+
+          (range [_ length (lit (slice int) 0 blockSize (* blockSize 2))]
+            (.Read rng src)
+            (copy before src)
+
+            (.CryptBlocks (bm b iv) (subslice dst _ length) (subslice src _ length))
+            (when (not (bytes/Equal src before))
+              ^{:go/via [common]} (.Errorf t "CryptBlocks modified src; got %x, want %x" src before))))))
+
+
+
+
+    (.Run t "Aliasing" ^{:go/end 109} (fn [^{:tag (* testing/T)} t]
+        (let [rng (newRandReader t)
+
+            (values buff expectedOutput) (values (make (slice byte) (* blockSize 2)) (make (slice byte) (* blockSize 2)))]
+
+          (range [_ length (lit (slice int) 0 blockSize (* blockSize 2))]
+            ;; Record what output is when src and dst are different
+            (.Read rng buff)
+            (.CryptBlocks (bm b iv) (subslice expectedOutput _ length) (subslice buff _ length))
+
+            ;; Check that the same output is generated when src=dst alias to the same
+            ;; memory
+            (.CryptBlocks (bm b iv) (subslice buff _ length) (subslice buff _ length))
+            (when (not (bytes/Equal (subslice buff _ length) (subslice expectedOutput _ length)))
+              ^{:go/via [common]} (.Errorf t "block cipher produced different output when dst = src; got %x, want %x" (subslice buff _ length) (subslice expectedOutput _ length)))))))
+
+
+
+
+    (.Run t "OutOfBoundsWrite" ^{:go/end 161} (fn [^{:tag (* testing/T)} t] ; Issue 21104
+        (let [rng (newRandReader t)
+
+            ^{:line 114} src (make (slice byte) blockSize)]
+          (.Read rng src)
+
+          ;; Make a buffer with dst in the middle and data on either end
+          (let [buff (make (slice byte) (* blockSize 3))
+              (values endOfPrefix startOfSuffix) (values blockSize (* blockSize 2))]
+            (.Read rng (subslice buff _ endOfPrefix))
+            (.Read rng (subslice buff startOfSuffix))
+            (let [dst (subslice buff endOfPrefix startOfSuffix)
+
+                ;; Record the prefix and suffix data to make sure they aren't written to
+                (values initPrefix initSuffix) (values (make (slice byte) blockSize) (make (slice byte) blockSize))]
+              (copy initPrefix (subslice buff _ endOfPrefix))
+              (copy initSuffix (subslice buff startOfSuffix))
+
+              ;; Write to dst (the middle of the buffer) and make sure it doesn't write
+              ;; beyond the dst slice on a valid CryptBlocks call
+              (.CryptBlocks (bm b iv) dst src)
+              (when (not (bytes/Equal (subslice buff startOfSuffix) initSuffix))
+                ^{:go/via [common]} (.Errorf t "block cipher did out of bounds write after end of dst slice; got %x, want %x" (subslice buff startOfSuffix) initSuffix))
+
+              (when (not (bytes/Equal (subslice buff _ endOfPrefix) initPrefix))
+                ^{:go/via [common]} (.Errorf t "block cipher did out of bounds write before beginning of dst slice; got %x, want %x" (subslice buff _ endOfPrefix) initPrefix))
+
+
+              ;; Check that dst isn't written to beyond len(src) even if there is room in
+              ;; the slice
+              (set! dst (subslice buff endOfPrefix)) ; Extend dst to include suffix
+              (.CryptBlocks (bm b iv) dst src)
+              (when (not (bytes/Equal (subslice buff startOfSuffix) initSuffix))
+                ^{:go/via [common]} (.Errorf t "CryptBlocks modified dst past len(src); got %x, want %x" (subslice buff startOfSuffix) initSuffix))
+
+
+              ;; Issue 21104: Shouldn't write to anything outside of dst even if src is bigger
+              (set! src (make (slice byte) (* blockSize 3)))
+              (.Read rng src)
+
+              (mustPanic t "output smaller than input" ^{:go/end 153} (fn []
+                  (.CryptBlocks (bm b iv) dst src)))
+
+
+              (when (not (bytes/Equal (subslice buff startOfSuffix) initSuffix))
+                ^{:go/via [common]} (.Errorf t "block cipher did out of bounds write after end of dst slice; got %x, want %x" (subslice buff startOfSuffix) initSuffix))
+
+              (when (not (bytes/Equal (subslice buff _ endOfPrefix) initPrefix))
+                ^{:go/via [common]} (.Errorf t "block cipher did out of bounds write before beginning of dst slice; got %x, want %x" (subslice buff _ endOfPrefix) initPrefix)))))))
+
+
+
+    ;; Check that output of cipher isn't affected by adjacent data beyond input
+    ;; slice scope
+    (.Run t "OutOfBoundsRead" ^{:go/end 187} (fn [^{:tag (* testing/T)} t]
+        (let [rng (newRandReader t)
+
+            ^{:line 168} src (make (slice byte) blockSize)]
+          (.Read rng src)
+          (let [expectedDst (make (slice byte) blockSize)]
+            (.CryptBlocks (bm b iv) expectedDst src)
+
+            ;; Make a buffer with src in the middle and data on either end
+            (let [buff (make (slice byte) (* blockSize 3))
+                (values endOfPrefix startOfSuffix) (values blockSize (* blockSize 2))]
+
+              (copy (subslice buff endOfPrefix startOfSuffix) src)
+              (.Read rng (subslice buff _ endOfPrefix))
+              (.Read rng (subslice buff startOfSuffix))
+
+              (let [testDst (make (slice byte) blockSize)]
+                (.CryptBlocks (bm b iv) testDst (subslice buff endOfPrefix startOfSuffix))
+
+                (when (not (bytes/Equal testDst expectedDst))
+                  ^{:go/via [common]} (.Errorf t "CryptBlocks affected by data outside of src slice bounds; got %x, want %x" testDst expectedDst))))))))
+
+
+
+    (.Run t "BufferOverlap" ^{:go/end 209} (fn [^{:tag (* testing/T)} t]
+        (let [rng (newRandReader t)
+
+            ^{:line 192} buff (make (slice byte) (* blockSize 2))]
+          (.Read rng buff)
+
+          ;; Make src and dst slices point to same array with inexact overlap
+          (let [src (subslice buff _ blockSize)
+              ^{:line 197} dst (subslice buff 1 (+ blockSize 1))]
+            (mustPanic t "invalid buffer overlap" ^{:go/end 198} (fn [] (.CryptBlocks (bm b iv) dst src)))
+
+            ;; Only overlap on one byte
+            (set! src (subslice buff _ blockSize))
+            (set! dst (subslice buff (- blockSize 1) (- (* 2 blockSize) 1)))
+            (mustPanic t "invalid buffer overlap" ^{:go/end 203} (fn [] (.CryptBlocks (bm b iv) dst src)))
+
+            ;; src comes after dst with one byte overlap
+            (set! src (subslice buff (- blockSize 1) (- (* 2 blockSize) 1)))
+            (set! dst (subslice buff _ blockSize))
+            (mustPanic t "invalid buffer overlap" ^{:go/end 208} (fn [] (.CryptBlocks (bm b iv) dst src)))))))
+
+
+    ;; Input to CryptBlocks should be a multiple of BlockSize
+    (.Run t "PartialBlocks" ^{:go/end 219} (fn [^{:tag (* testing/T)} t]
+        ;; Check a few cases of not being a multiple of BlockSize
+        (range [_ srcSize (lit (slice int) (- blockSize 1) (+ blockSize 1) (- (* 2 blockSize) 1) (+ (* 2 blockSize) 1))]
+          (let [src (make (slice byte) srcSize)
+              ^{:line 216} dst (make (slice byte) (* 3 blockSize))] ; Make a dst large enough for all src
+            (mustPanic t "input not full blocks" ^{:go/end 217} (fn [] (.CryptBlocks (bm b iv) dst src)))))))
+
+
+
+    (.Run t "KeepState" ^{:go/end 236} (fn [^{:tag (* testing/T)} t]
+        (let [rng (newRandReader t)
+
+            (values src serialDst compositeDst) (values (make (slice byte) (* blockSize 4)) (make (slice byte) (* blockSize 4)) (make (slice byte) (* blockSize 4)))]
+          (.Read rng src)
+
+          (let [(values length block) (values (* 2 blockSize) (bm b iv))]
+            (.CryptBlocks block serialDst (subslice src _ length))
+            (.CryptBlocks block (subslice serialDst length) (subslice src length))
+
+            (.CryptBlocks (bm b iv) compositeDst src)
+
+            (when (not (bytes/Equal serialDst compositeDst))
+              ^{:go/via [common]} (.Errorf t "two successive CryptBlocks calls returned a different result than a single one; got %x, want %x" serialDst compositeDst))))))))

@@ -1,0 +1,640 @@
+;; Copyright 2011 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.image.jpeg) (go/file "writer.go" :imports [
+
+
+    ^{:line 8} [bufio "bufio"]
+    ^{:line 9} [errors "errors"]
+    ^{:line 10} [image "image"]
+    ^{:line 11} [color "image/color"]
+    ^{:line 12} [io "io"]])
+
+
+
+^{:go/end 21} (go/func div "div returns a/b rounded to the nearest integer, instead of rounded to zero.\n" ^int32 [^int32 a ^int32 b]
+  (when (>= a 0)
+    (return (/ (+ a (>> b 1)) b)))
+
+  (- (/ (+ (- a) (>> b 1)) b)))
+
+
+
+(go/var ^{:doc "bitCount counts the number of bits needed to hold an integer.\n"} bitCount ^{:go/breaks [2 18 34 50 66 82 98 114 130 146 162 178 194 210 226 242]} (lit (array 256 byte)
+    0 1 2 2 3 3 3 3 4 4 4 4 4 4 4 4
+    5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5
+    6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6
+    6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6
+    7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7
+    7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7
+    7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7
+    7 7 7 7 7 7 7 7 7 7 7 7 7 7 7 7
+    8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8
+    8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8
+    8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8
+    8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8
+    8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8
+    8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8
+    8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8
+    8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8))
+
+
+(go/type quantIndex int)
+
+(go/const
+  ^{:line 46} [^{:tag quantIndex :val 0} quantIndexLuminance iota]
+  ^{:line 47} [^{:val 1} quantIndexChrominance]
+  ^{:line 48} [^{:val 2} nQuantIndex])
+
+
+
+
+
+
+(go/var ^{:doc "unscaledQuant are the unscaled quantization tables in zig-zag order. Each\nencoder copies and scales the tables according to its quality parameter.\nThe values are derived from section K.1 of the spec, after converting from\nnatural to zig-zag order.\n"} unscaledQuant (lit (array nQuantIndex (array blockSize byte))
+    ;; Luminance.
+    ^{:go/breaks [2 10 18 26 34 42 50 58]} (lit _
+      16 11 12 14 12 10 16 14
+      13 14 18 17 16 19 24 40
+      26 24 22 22 24 49 35 37
+      29 40 58 51 61 60 57 51
+      56 55 64 72 92 78 64 68
+      87 69 55 56 80 109 81 87
+      95 98 103 104 103 62 77 113
+      121 112 100 120 92 101 103 99)
+
+    ;; Chrominance.
+    ^{:go/breaks [2 10 18 26 34 42 50 58]} (lit _
+      17 18 18 24 21 24 47 26
+      26 47 99 66 56 66 99 99
+      99 99 99 99 99 99 99 99
+      99 99 99 99 99 99 99 99
+      99 99 99 99 99 99 99 99
+      99 99 99 99 99 99 99 99
+      99 99 99 99 99 99 99 99
+      99 99 99 99 99 99 99 99)))
+
+
+
+(go/type huffIndex int)
+
+(go/const
+  ^{:line 83} [^{:tag huffIndex :val 0} huffIndexLuminanceDC iota]
+  ^{:line 84} [^{:val 1} huffIndexLuminanceAC]
+  ^{:line 85} [^{:val 2} huffIndexChrominanceDC]
+  ^{:line 86} [^{:val 3} huffIndexChrominanceAC]
+  ^{:line 87} [^{:val 4} nHuffIndex])
+
+
+
+(go/type huffmanSpec "huffmanSpec specifies a Huffman encoding.\n" (struct
+
+    ^{:line 93 :tag (array 16 byte) :doc "count[i] is the number of codes of length i+1 bits.\n"} count
+
+    ^{:line 95 :tag (slice byte) :doc "value[i] is the decoded value of the i'th codeword.\n"} value))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "theHuffmanSpec is the Huffman encoding specifications.\n\nThis encoder uses the same Huffman encoding for all images. It is also the\nsame Huffman encoding used by section K.3 of the spec.\n\nThe DC tables have 12 decoded values, called categories.\n\nThe AC tables have 162 decoded values: bytes that pack a 4-bit Run and a\n4-bit Size. There are 16 valid Runs and 10 valid Sizes, plus two special R|S\ncases: 0|0 (meaning EOB) and F|0 (meaning ZRL).\n"} theHuffmanSpec (lit (array nHuffIndex huffmanSpec)
+    ;; Luminance DC.
+    (lit _
+      (lit (array 16 byte) 0 1 5 1 1 1 1 1 1 0 0 0 0 0 0 0)
+      (lit (slice byte) 0 1 2 3 4 5 6 7 8 9 10 11))
+
+    ;; Luminance AC.
+    (lit _
+      (lit (array 16 byte) 0 2 1 3 3 2 4 3 5 5 4 4 0 0 1 125)
+      ^{:go/breaks [2 10 18 26 34 42 50 58 66 74 82 90 98 106 114 122 130 138 146 154 162]} (lit (slice byte)
+        0x01 0x02 0x03 0x00 0x04 0x11 0x05 0x12
+        0x21 0x31 0x41 0x06 0x13 0x51 0x61 0x07
+        0x22 0x71 0x14 0x32 0x81 0x91 0xa1 0x08
+        0x23 0x42 0xb1 0xc1 0x15 0x52 0xd1 0xf0
+        0x24 0x33 0x62 0x72 0x82 0x09 0x0a 0x16
+        0x17 0x18 0x19 0x1a 0x25 0x26 0x27 0x28
+        0x29 0x2a 0x34 0x35 0x36 0x37 0x38 0x39
+        0x3a 0x43 0x44 0x45 0x46 0x47 0x48 0x49
+        0x4a 0x53 0x54 0x55 0x56 0x57 0x58 0x59
+        0x5a 0x63 0x64 0x65 0x66 0x67 0x68 0x69
+        0x6a 0x73 0x74 0x75 0x76 0x77 0x78 0x79
+        0x7a 0x83 0x84 0x85 0x86 0x87 0x88 0x89
+        0x8a 0x92 0x93 0x94 0x95 0x96 0x97 0x98
+        0x99 0x9a 0xa2 0xa3 0xa4 0xa5 0xa6 0xa7
+        0xa8 0xa9 0xaa 0xb2 0xb3 0xb4 0xb5 0xb6
+        0xb7 0xb8 0xb9 0xba 0xc2 0xc3 0xc4 0xc5
+        0xc6 0xc7 0xc8 0xc9 0xca 0xd2 0xd3 0xd4
+        0xd5 0xd6 0xd7 0xd8 0xd9 0xda 0xe1 0xe2
+        0xe3 0xe4 0xe5 0xe6 0xe7 0xe8 0xe9 0xea
+        0xf1 0xf2 0xf3 0xf4 0xf5 0xf6 0xf7 0xf8
+        0xf9 0xfa))
+
+
+    ;; Chrominance DC.
+    (lit _
+      (lit (array 16 byte) 0 3 1 1 1 1 1 1 1 1 1 0 0 0 0 0)
+      (lit (slice byte) 0 1 2 3 4 5 6 7 8 9 10 11))
+
+    ;; Chrominance AC.
+    (lit _
+      (lit (array 16 byte) 0 2 1 2 4 4 3 4 7 5 4 4 0 1 2 119)
+      ^{:go/breaks [2 10 18 26 34 42 50 58 66 74 82 90 98 106 114 122 130 138 146 154 162]} (lit (slice byte)
+        0x00 0x01 0x02 0x03 0x11 0x04 0x05 0x21
+        0x31 0x06 0x12 0x41 0x51 0x07 0x61 0x71
+        0x13 0x22 0x32 0x81 0x08 0x14 0x42 0x91
+        0xa1 0xb1 0xc1 0x09 0x23 0x33 0x52 0xf0
+        0x15 0x62 0x72 0xd1 0x0a 0x16 0x24 0x34
+        0xe1 0x25 0xf1 0x17 0x18 0x19 0x1a 0x26
+        0x27 0x28 0x29 0x2a 0x35 0x36 0x37 0x38
+        0x39 0x3a 0x43 0x44 0x45 0x46 0x47 0x48
+        0x49 0x4a 0x53 0x54 0x55 0x56 0x57 0x58
+        0x59 0x5a 0x63 0x64 0x65 0x66 0x67 0x68
+        0x69 0x6a 0x73 0x74 0x75 0x76 0x77 0x78
+        0x79 0x7a 0x82 0x83 0x84 0x85 0x86 0x87
+        0x88 0x89 0x8a 0x92 0x93 0x94 0x95 0x96
+        0x97 0x98 0x99 0x9a 0xa2 0xa3 0xa4 0xa5
+        0xa6 0xa7 0xa8 0xa9 0xaa 0xb2 0xb3 0xb4
+        0xb5 0xb6 0xb7 0xb8 0xb9 0xba 0xc2 0xc3
+        0xc4 0xc5 0xc6 0xc7 0xc8 0xc9 0xca 0xd2
+        0xd3 0xd4 0xd5 0xd6 0xd7 0xd8 0xd9 0xda
+        0xe2 0xe3 0xe4 0xe5 0xe6 0xe7 0xe8 0xe9
+        0xea 0xf2 0xf3 0xf4 0xf5 0xf6 0xf7 0xf8
+        0xf9 0xfa))))
+
+
+
+
+
+
+
+
+(go/type huffmanLUT "huffmanLUT is a compiled look-up table representation of a huffmanSpec.\nEach value maps to a uint32 of which the 8 most significant bits hold the\ncodeword size in bits and the 24 least significant bits hold the codeword.\nThe maximum codeword size is 16 bits.\n" (slice uint32))
+
+^{:go/end 199} (go/method init [^{:tag (* huffmanLUT)} h ^huffmanSpec s]
+  (let [maxValue 0]
+    (range [_ v (.-value s)]
+      (when (> (conv int v) maxValue)
+        (set! maxValue (conv int v))))
+
+
+    (set! @h (make (slice uint32) (+ maxValue 1)))
+    (let [(values code k) (values (conv uint32 0) 0)]
+      (for [i 0] (< i (len (.-count s))) (inc! i)
+        (let [nBits (<< (conv uint32 (+ i 1)) 24)]
+          (for [j (conv uint8 0)] (< j (aget (.-count s) i)) (inc! j)
+            (aset @h (aget (.-value s) k) (bit-or nBits code))
+            (inc! code)
+            (inc! k))
+
+          (set! code << 1))))))
+
+
+
+
+(go/var ^{:tag (array 4 huffmanLUT) :doc "theHuffmanLUT are compiled representations of theHuffmanSpec.\n"} theHuffmanLUT)
+
+^{:go/end 208} (go/func init []
+  (range [i s theHuffmanSpec]
+    (.init (aget theHuffmanLUT i) s)))
+
+
+
+
+(go/type writer "writer is a buffered writer.\n" (interface
+    (Flush ^error [])
+    ^{:line 213} io/Writer
+    ^{:line 214} io/ByteWriter))
+
+
+
+(go/type encoder "encoder encodes an image to the JPEG format.\n" (struct
+
+
+    ^{:line 221 :tag writer :doc "w is the writer to write to. err is the first error encountered during\nwriting. All attempted writes after the first error become no-ops.\n"} w
+    ^{:line 222 :tag error} err
+
+    ^{:line 224 :tag (array 16 byte) :doc "buf is a scratch buffer.\n"} buf
+
+    ^{:line 226 :tag uint32 :doc "bits and nBits are accumulated bits to write to w.\n"} bits ^{:tag uint32 :doc "bits and nBits are accumulated bits to write to w.\n"} nBits
+
+    ^{:line 228 :tag (array nQuantIndex (array blockSize byte)) :doc "quant is the scaled quantization tables, in zig-zag order.\n"} quant))
+
+
+^{:go/end 236} (go/method flush [^{:tag (* encoder)} e]
+  (when (!= (.-err e) nil)
+    (return))
+
+  (set! (.-err e) (.Flush (.-w e))))
+
+
+^{:go/end 243} (go/method write [^{:tag (* encoder)} e ^{:tag (slice byte)} p]
+  (when (!= (.-err e) nil)
+    (return))
+
+  (set! (values _ (.-err e)) (.Write (.-w e) p)))
+
+
+^{:go/end 250} (go/method writeByte [^{:tag (* encoder)} e ^byte b]
+  (when (!= (.-err e) nil)
+    (return))
+
+  (set! (.-err e) (.WriteByte (.-w e) b)))
+
+
+
+
+^{:go/end 268} (go/method emit "emit emits the least significant nBits bits of bits to the bit-stream.\nThe precondition is bits < 1<<nBits && nBits <= 16.\n" [^{:tag (* encoder)} e ^uint32 bits ^uint32 nBits]
+  (set! nBits + (.-nBits e))
+  (set! bits << (- 32 nBits))
+  (set! bits bit-or (.-bits e))
+  (while (>= nBits 8)
+    (let [b (conv uint8 (>> bits 24))]
+      (.writeByte e b)
+      (when (== b 0xff)
+        (.writeByte e 0x00))
+
+      (set! bits << 8)
+      (set! nBits - 8)))
+
+  (set! (values (.-bits e) (.-nBits e)) (values bits nBits)))
+
+
+
+^{:go/end 274} (go/method emitHuff "emitHuff emits the given value with the given Huffman encoder.\n" [^{:tag (* encoder)} e ^huffIndex h ^int32 value]
+  (let [x (aget (aget theHuffmanLUT h) value)]
+    (.emit e (bit-and x (- (<< 1 24) 1)) (>> x 24))))
+
+
+
+
+^{:go/end 293} (go/method emitHuffRLE "emitHuffRLE emits a run of runLength copies of value encoded with the given\nHuffman encoder.\n" [^{:tag (* encoder)} e ^huffIndex h ^int32 runLength ^int32 value]
+  (let [(values a b) (values value value)]
+    (when (< a 0)
+      (set! (values a b) (values (- value) (- value 1))))
+
+    (let [^uint32 nBits (zero uint32)]
+      (if (< a 0x100)
+        (set! nBits (conv uint32 (aget bitCount a)))
+
+        (set! nBits (+ 8 (conv uint32 (aget bitCount (>> a 8))))))
+
+      (.emitHuff e h (bit-or (<< runLength 4) (conv int32 nBits)))
+      (when (> nBits 0)
+        (.emit e (bit-and (conv uint32 b) (- ^uint32 (<< 1 nBits) 1)) nBits)))))
+
+
+
+
+^{:go/end 302} (go/method writeMarkerHeader "writeMarkerHeader writes the header for a marker with the given length.\n" [^{:tag (* encoder)} e ^uint8 marker ^int markerlen]
+  (aset (.-buf e) 0 0xff)
+  (aset (.-buf e) 1 marker)
+  (aset (.-buf e) 2 (conv uint8 (>> markerlen 8)))
+  (aset (.-buf e) 3 (conv uint8 (bit-and markerlen 0xff)))
+  (.write e (subslice (.-buf e) _ 4)))
+
+
+
+^{:go/end 312} (go/method writeDQT "writeDQT writes the Define Quantization Table marker.\n" [^{:tag (* encoder)} e]
+  (let [^:const ^{:val 132} markerlen (+ 2 (* (conv int nQuantIndex) (+ 1 blockSize)))]
+    (.writeMarkerHeader e dqtMarker markerlen)
+    (range [i (.-quant e)]
+      (.writeByte e (conv uint8 i))
+      (.write e (subslice (aget (.-quant e) i))))))
+
+
+
+
+^{:go/end 338} (go/method writeSOF0 "writeSOF0 writes the Start Of Frame (Baseline Sequential) marker.\n" [^{:tag (* encoder)} e ^image/Point size ^int nComponent]
+  (let [markerlen (+ 8 (* 3 nComponent))]
+    (.writeMarkerHeader e sof0Marker markerlen)
+    (aset (.-buf e) 0 8) ; 8-bit color.
+    (aset (.-buf e) 1 (conv uint8 (>> (.-Y size) 8)))
+    (aset (.-buf e) 2 (conv uint8 (bit-and (.-Y size) 0xff)))
+    (aset (.-buf e) 3 (conv uint8 (>> (.-X size) 8)))
+    (aset (.-buf e) 4 (conv uint8 (bit-and (.-X size) 0xff)))
+    (aset (.-buf e) 5 (conv uint8 nComponent))
+    (if (== nComponent 1) (do
+        (aset (.-buf e) 6 1)
+        ;; No subsampling for grayscale image.
+        (aset (.-buf e) 7 0x11)
+        (aset (.-buf e) 8 0x00))
+
+      (for [i 0] (< i nComponent) (inc! i)
+        (aset (.-buf e) (+ (* 3 i) 6) (conv uint8 (+ i 1)))
+        ;; We use 4:2:0 chroma subsampling.
+        (aset (.-buf e) (+ (* 3 i) 7) (aget "\"\u0011\u0011" i))
+        (aset (.-buf e) (+ (* 3 i) 8) (aget "\u0000\u0001\u0001" i))))
+
+
+    (.write e (subslice (.-buf e) _ (+ (* 3 (- nComponent 1)) 9)))))
+
+
+
+^{:go/end 357} (go/method writeDHT "writeDHT writes the Define Huffman Table marker.\n" [^{:tag (* encoder)} e ^int nComponent]
+  (let [markerlen 2
+      ^{:line 343} specs (subslice theHuffmanSpec)]
+    (when (== nComponent 1)
+      ;; Drop the Chrominance tables.
+      (set! specs (subslice specs _ 2)))
+
+    (range [_ s specs]
+      (set! markerlen + (+ 1 16 (len (.-value s)))))
+
+    (.writeMarkerHeader e dhtMarker markerlen)
+    (range [i s specs]
+      (.writeByte e (aget "\u0000\u0010\u0001\u0011" i))
+      (.write e (subslice (.-count s)))
+      (.write e (.-value s)))))
+
+
+
+
+
+
+^{:go/end 386} (go/method writeBlock "writeBlock writes a block of pixel data using the given quantization table,\nreturning the post-quantized DC value of the DCT-transformed block. b is in\nnatural (not zig-zag) order.\n" ^int32 [^{:tag (* encoder)} e ^{:tag (* block)} b ^quantIndex q ^int32 prevDC]
+  (fdct b)
+  ;; Emit the DC delta.
+  (let [dc (div (aget b 0) (* 8 (conv int32 (aget (aget (.-quant e) q) 0))))]
+    (.emitHuffRLE e (conv huffIndex (+ (* 2 q) 0)) 0 (- dc prevDC))
+    ;; Emit the AC components.
+    (let [(values h runLength) (values (conv huffIndex (+ (* 2 q) 1)) (conv int32 0))]
+      (for [zig 1] (< zig blockSize) (inc! zig)
+        (let [ac (div (aget b (aget unzig zig)) (* 8 (conv int32 (aget (aget (.-quant e) q) zig))))]
+          (if (== ac 0)
+            (inc! runLength)
+            (do
+              (while (> runLength 15)
+                (.emitHuff e h 0xf0)
+                (set! runLength - 16))
+
+              (.emitHuffRLE e h runLength ac)
+              (set! runLength 0)))))
+
+
+      (when (> runLength 0)
+        (.emitHuff e h 0x00))
+
+      ^{:line 385} dc)))
+
+
+
+
+^{:go/end 403} (go/func toYCbCr "toYCbCr converts the 8x8 region of m whose top-left corner is p to its\nYCbCr values.\n" [^image/Image m ^image/Point p ^{:tag (* block)} yBlock ^{:tag (* block)} cbBlock ^{:tag (* block)} crBlock]
+  (let [b (.Bounds m)
+      ^{:line 392} xmax (- (.-X (.-Max b)) 1)
+      ^{:line 393} ymax (- (.-Y (.-Max b)) 1)]
+    (for [j 0] (< j 8) (inc! j)
+      (for [i 0] (< i 8) (inc! i)
+        (let [(values r g b _) (.RGBA (.At m (min (+ (.-X p) i) xmax) (min (+ (.-Y p) j) ymax)))
+            (values yy cb cr) (color/RGBToYCbCr (conv uint8 (>> r 8)) (conv uint8 (>> g 8)) (conv uint8 (>> b 8)))]
+          (aset yBlock (+ (* 8 j) i) (conv int32 yy))
+          (aset cbBlock (+ (* 8 j) i) (conv int32 cb))
+          (aset crBlock (+ (* 8 j) i) (conv int32 cr)))))))
+
+
+
+
+
+^{:go/end 417} (go/func grayToY "grayToY stores the 8x8 region of m whose top-left corner is p in yBlock.\n" [^{:tag (* image/Gray)} m ^image/Point p ^{:tag (* block)} yBlock]
+  (let [b (.Bounds m)
+      ^{:line 408} xmax (- (.-X (.-Max b)) 1)
+      ^{:line 409} ymax (- (.-Y (.-Max b)) 1)
+      ^{:line 410} pix (.-Pix m)]
+    (for [j 0] (< j 8) (inc! j)
+      (for [i 0] (< i 8) (inc! i)
+        (let [idx (.PixOffset m (min (+ (.-X p) i) xmax) (min (+ (.-Y p) j) ymax))]
+          (aset yBlock (+ (* 8 j) i) (conv int32 (aget pix idx))))))))
+
+
+
+
+
+^{:go/end 442} (go/func rgbaToYCbCr "rgbaToYCbCr is a specialized version of toYCbCr for image.RGBA images.\n" [^{:tag (* image/RGBA)} m ^image/Point p ^{:tag (* block)} yBlock ^{:tag (* block)} cbBlock ^{:tag (* block)} crBlock]
+  (let [b (.Bounds m)
+      ^{:line 422} xmax (- (.-X (.-Max b)) 1)
+      ^{:line 423} ymax (- (.-Y (.-Max b)) 1)]
+    (for [j 0] (< j 8) (inc! j)
+      (let [sj (+ (.-Y p) j)]
+        (when (> sj ymax)
+          (set! sj ymax))
+
+        (let [offset (- (* (- sj (.-Y (.-Min b))) (.-Stride m)) (* (.-X (.-Min b)) 4))]
+          (for [i 0] (< i 8) (inc! i)
+            (let [sx (+ (.-X p) i)]
+              (when (> sx xmax)
+                (set! sx xmax))
+
+              (let [pix (subslice (.-Pix m) (+ offset (* sx 4)))
+                  (values yy cb cr) (color/RGBToYCbCr (aget pix 0) (aget pix 1) (aget pix 2))]
+                (aset yBlock (+ (* 8 j) i) (conv int32 yy))
+                (aset cbBlock (+ (* 8 j) i) (conv int32 cb))
+                (aset crBlock (+ (* 8 j) i) (conv int32 cr))))))))))
+
+
+
+
+
+^{:go/end 466} (go/func yCbCrToYCbCr "yCbCrToYCbCr is a specialized version of toYCbCr for image.YCbCr images.\n" [^{:tag (* image/YCbCr)} m ^image/Point p ^{:tag (* block)} yBlock ^{:tag (* block)} cbBlock ^{:tag (* block)} crBlock]
+  (let [b (.Bounds m)
+      ^{:line 447} xmax (- (.-X (.-Max b)) 1)
+      ^{:line 448} ymax (- (.-Y (.-Max b)) 1)]
+    (for [j 0] (< j 8) (inc! j)
+      (let [sy (+ (.-Y p) j)]
+        (when (> sy ymax)
+          (set! sy ymax))
+
+        (for [i 0] (< i 8) (inc! i)
+          (let [sx (+ (.-X p) i)]
+            (when (> sx xmax)
+              (set! sx xmax))
+
+            (let [yi (.YOffset m sx sy)
+                ^{:line 460} ci (.COffset m sx sy)]
+              (aset yBlock (+ (* 8 j) i) (conv int32 (aget (.-Y m) yi)))
+              (aset cbBlock (+ (* 8 j) i) (conv int32 (aget (.-Cb m) ci)))
+              (aset crBlock (+ (* 8 j) i) (conv int32 (aget (.-Cr m) ci))))))))))
+
+
+
+
+
+
+^{:go/end 481} (go/func scale "scale scales the 16x16 region represented by the 4 src blocks to the 8x8\ndst block.\n" [^{:tag (* block)} dst ^{:tag (* (array 4 block))} src]
+  (for [i 0] (< i 4) (inc! i)
+    (let [dstOff (bit-or (<< (bit-and i 2) 4) (<< (bit-and i 1) 2))]
+      (for [y 0] (< y 4) (inc! y)
+        (for [x 0] (< x 4) (inc! x)
+          (let [j (+ (* 16 y) (* 2 x))
+              ^{:line 476} sum (+ (aget (aget src i) j) (aget (aget src i) (+ j 1)) (aget (aget src i) (+ j 8)) (aget (aget src i) (+ j 9)))]
+            (aset dst (+ (* 8 y) x dstOff) (>> (+ sum 2) 2))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "sosHeaderY is the SOS marker \"\\xff\\xda\" followed by 8 bytes:\n  - the marker length \"\\x00\\x08\",\n  - the number of components \"\\x01\",\n  - component 1 uses DC table 0 and AC table 0 \"\\x01\\x00\",\n  - the bytes \"\\x00\\x3f\\x00\". Section B.2.3 of the spec says that for\n    sequential DCTs, those bytes (8-bit Ss, 8-bit Se, 4-bit Ah, 4-bit Al)\n    should be 0x00, 0x3f, 0x00<<4 | 0x00.\n"} sosHeaderY ^{:go/breaks [2]} (lit (slice byte)
+    0xff 0xda 0x00 0x08 0x01 0x01 0x00 0x00 0x3f 0x00))
+
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:doc "sosHeaderYCbCr is the SOS marker \"\\xff\\xda\" followed by 12 bytes:\n  - the marker length \"\\x00\\x0c\",\n  - the number of components \"\\x03\",\n  - component 1 uses DC table 0 and AC table 0 \"\\x01\\x00\",\n  - component 2 uses DC table 1 and AC table 1 \"\\x02\\x11\",\n  - component 3 uses DC table 1 and AC table 1 \"\\x03\\x11\",\n  - the bytes \"\\x00\\x3f\\x00\". Section B.2.3 of the spec says that for\n    sequential DCTs, those bytes (8-bit Ss, 8-bit Se, 4-bit Ah, 4-bit Al)\n    should be 0x00, 0x3f, 0x00<<4 | 0x00.\n"} sosHeaderYCbCr ^{:go/breaks [2 10]} (lit (slice byte)
+    0xff 0xda 0x00 0x0c 0x03 0x01 0x00 0x02
+    0x11 0x03 0x11 0x00 0x3f 0x00))
+
+
+
+^{:go/end 562} (go/method writeSOS "writeSOS writes the StartOfScan marker.\n" [^{:tag (* encoder)} e ^image/Image m]
+  (type-switch m
+    (case [(* image/Gray)]
+      (.write e sosHeaderY))
+    (default
+      (.write e sosHeaderYCbCr)))
+
+  (let [
+      ;; Scratch buffers to hold the YCbCr values.
+      ;; The blocks are in natural (not zig-zag) order.
+      ^{:line 519 :tag block} b (zero block)
+      (values ^{:tag (array 4 block)} cb ^{:tag (array 4 block)} cr) (zero (array 4 block))
+      ;; DC components are delta-encoded.
+      (values ^int32 prevDCY ^int32 prevDCCb ^int32 prevDCCr) (zero int32)
+
+      ^{:line 524} bounds (.Bounds m)]
+    (type-switch [m m]
+      ;; TODO(wathiede): switch on m.ColorModel() instead of type.
+      (case [(* image/Gray)]
+        (for [y (.-Y (.-Min bounds))] (< y (.-Y (.-Max bounds))) (set! y + 8)
+          (for [x (.-X (.-Min bounds))] (< x (.-X (.-Max bounds))) (set! x + 8)
+            (let [p (image/Pt x y)]
+              (grayToY m p (addr b))
+              (set! prevDCY (.writeBlock e (addr b) 0 prevDCY))))))
+
+
+      (default
+        (let [(values rgba _) (assert (* image/RGBA) m)
+            (values ycbcr _) (assert (* image/YCbCr) m)]
+          (for [y (.-Y (.-Min bounds))] (< y (.-Y (.-Max bounds))) (set! y + 16)
+            (for [x (.-X (.-Min bounds))] (< x (.-X (.-Max bounds))) (set! x + 16)
+              (for [i 0] (< i 4) (inc! i)
+                (let [xOff (* (bit-and i 1) 8)
+                    ^{:line 542} yOff (* (bit-and i 2) 4)
+                    ^{:line 543} p (image/Pt (+ x xOff) (+ y yOff))]
+                  (cond (!= rgba nil)
+                    (rgbaToYCbCr rgba p (addr b) (addr (aget cb i)) (addr (aget cr i)))
+                    (!= ycbcr nil)
+                    (yCbCrToYCbCr ycbcr p (addr b) (addr (aget cb i)) (addr (aget cr i))) :else
+
+                    (toYCbCr m p (addr b) (addr (aget cb i)) (addr (aget cr i))))
+
+                  (set! prevDCY (.writeBlock e (addr b) 0 prevDCY))))
+
+              (scale (addr b) (addr cb))
+              (set! prevDCCb (.writeBlock e (addr b) 1 prevDCCb))
+              (scale (addr b) (addr cr))
+              (set! prevDCCr (.writeBlock e (addr b) 1 prevDCCr)))))))
+
+
+
+    ;; Pad the last byte with 1's.
+    (.emit e 0x7f 7)))
+
+
+
+(go/const ^{:val 75 :doc "DefaultQuality is the default quality encoding parameter.\n"} DefaultQuality 75)
+
+
+
+(go/type Options "Options are the encoding parameters.\nQuality ranges from 1 to 100 inclusive, higher is better.\n" (struct
+    ^{:line 570 :tag int} Quality))
+
+
+
+
+^{:go/end 641} (go/func Encode "Encode writes the Image m to w in JPEG 4:2:0 baseline format with the given\noptions. Default parameters are used if a nil *[Options] is passed.\n" ^error [^io/Writer w ^image/Image m ^{:tag (* Options)} o]
+  (let [b (.Bounds m)]
+    (when (or (>= (.Dx b) (<< 1 16)) (>= (.Dy b) (<< 1 16)))
+      (return (errors/New "jpeg: image is too large to encode")))
+
+    (let [^encoder e (zero encoder)]
+      (if [(values ww ok) (assert writer w)] ok
+        (set! (.-w e) ww)
+
+        (set! (.-w e) (bufio/NewWriter w)))
+
+      ;; Clip quality to [1, 100].
+      (let [quality DefaultQuality]
+        (when (!= o nil)
+          (set! quality (.-Quality o))
+          (cond (< quality 1)
+            (set! quality 1)
+            (> quality 100)
+            (set! quality 100)))
+
+
+        ;; Convert from a quality rating to a scaling factor.
+        (let [^int scale (zero int)]
+          (if (< quality 50)
+            (set! scale (/ 5000 quality))
+
+            (set! scale (- 200 (* quality 2))))
+
+          ;; Initialize the quantization tables.
+          (range [i (.-quant e)]
+            (range [j (aget (.-quant e) i)]
+              (let [x (conv int (aget (aget unscaledQuant i) j))]
+                (set! x (/ (+ (* x scale) 50) 100))
+                (cond (< x 1)
+                  (set! x 1)
+                  (> x 255)
+                  (set! x 255))
+
+                (aset (aget (.-quant e) i) j (conv uint8 x)))))
+
+
+          ;; Compute number of components based on input image type.
+          (let [nComponent 3]
+            (type-switch m
+              ;; TODO(wathiede): switch on m.ColorModel() instead of type.
+              (case [(* image/Gray)]
+                (set! nComponent 1)))
+
+            ;; Write the Start Of Image marker.
+            (aset (.-buf e) 0 0xff)
+            (aset (.-buf e) 1 0xd8)
+            (.write e (subslice (.-buf e) _ 2))
+            ;; Write the quantization tables.
+            (.writeDQT e)
+            ;; Write the image dimensions.
+            (.writeSOF0 e (.Size b) nComponent)
+            ;; Write the Huffman tables.
+            (.writeDHT e nComponent)
+            ;; Write the image data.
+            (.writeSOS e m)
+            ;; Write the End Of Image marker.
+            (aset (.-buf e) 0 0xff)
+            (aset (.-buf e) 1 0xd9)
+            (.write e (subslice (.-buf e) _ 2))
+            (.flush e)
+            (.-err e)))))))

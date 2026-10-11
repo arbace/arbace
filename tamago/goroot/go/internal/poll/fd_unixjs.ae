@@ -1,0 +1,78 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.internal.poll) (go/file "fd_unixjs.go" :build ["//go:build unix || (js && wasm) || tamago"] :imports [
+
+    ^{:line 9} [syscall "syscall"]])
+
+(go/type SysFile (struct
+
+    ^{:line 13 :tag (* (slice syscall/Iovec)) :doc "Writev cache.\n"} iovecs))
+
+
+^{:go/end 16} (go/method init [^{:tag (* SysFile)} s])
+
+^{:go/end 25} (go/method destroy ^error [^{:tag (* SysFile)} s ^int fd]
+  ;; We don't use ignoringEINTR here because POSIX does not define
+  ;; whether the descriptor is closed if close returns EINTR.
+  ;; If the descriptor is indeed closed, using a loop would race
+  ;; with some other goroutine opening a new descriptor.
+  ;; (The Linux kernel guarantees that it is closed on an EINTR error.)
+  (CloseFunc fd))
+
+
+
+
+^{:go/end 38} (go/func dupCloseOnExecOld "dupCloseOnExecOld is the traditional way to dup an fd and\nset its O_CLOEXEC bit, using two system calls.\n" [^int fd] :results [int string error]
+  (.RLock syscall/ForkLock)
+  (defer (.RUnlock syscall/ForkLock))
+  (let [(values newfd err) (syscall/Dup fd)]
+    (when (!= err nil)
+      (return -1 "dup" err))
+
+    (syscall/CloseOnExec newfd)
+    (return newfd "" nil)))
+
+
+
+^{:go/end 47} (go/method Fchdir "Fchdir wraps syscall.Fchdir.\n" ^error [^{:tag (* FD)} fd]
+  (when [err (.incref fd)] (!= err nil)
+    (return err))
+
+  (defer (.decref fd))
+  (syscall/Fchdir (.-Sysfd fd)))
+
+
+
+
+
+^{:go/end 70} (go/method ReadDirent "ReadDirent wraps syscall.ReadDirent.\nWe treat this like an ordinary system call rather than a call\nthat tries to fill the buffer.\n" [^{:tag (* FD)} fd ^{:tag (slice byte)} buf] :results [int error]
+  (when [err (.incref fd)] (!= err nil)
+    (return 0 err))
+
+  (defer (.decref fd))
+  (while true
+    (let [(values n err) (ignoringEINTRIO syscall/ReadDirent (.-Sysfd fd) buf)]
+      (when (!= err nil)
+        (set! n 0)
+        (when (and (== err syscall/EAGAIN) (.pollable (.-pd fd)))
+          (when [(set! err (.waitRead (.-pd fd) (.-isFile fd)))] (== err nil)
+            (continue))))
+
+
+
+      ;; Do not call eofError; caller does not expect to see io.EOF.
+      (return n err))))
+
+
+
+
+^{:go/end 79} (go/method Seek "Seek wraps syscall.Seek.\n" [^{:tag (* FD)} fd ^int64 offset ^int whence] :results [int64 error]
+  (when [err (.incref fd)] (!= err nil)
+    (return 0 err))
+
+  (defer (.decref fd))
+  (syscall/Seek (.-Sysfd fd) offset whence))

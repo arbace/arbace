@@ -1,0 +1,87 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.encoding.json.v2) (go/file "intern.go" :build ["//go:build goexperiment.jsonv2"] :imports [
+
+
+    ^{:line 10} [binary "encoding/binary"]
+    ^{:line 11} [bits "math/bits"]])
+
+
+
+(go/type ^:alias stringCache "stringCache is a cache for strings converted from a []byte.\n" (array 256 string)) ; 256*unsafe.Sizeof(string("")) => 4KiB
+
+
+
+
+^{:go/end 55} (go/func makeString "makeString returns the string form of b.\nIt returns a pre-allocated string from c if present, otherwise\nit allocates a new string, inserts it into the cache, and returns it.\n" ^string [^{:tag (* stringCache)} c ^{:tag (slice byte)} b]
+  (let [
+      ^:const ^{:line 22 :val 2} minCachedLen 2 ; single byte strings are already interned by the runtime
+      ^:const ^:go/grouped ^{:line 23 :val 256} maxCachedLen 256] ; large enough for UUIDs, IPv6 addresses, SHA-256 checksums, etc.
+
+    (when (or (== c nil) (< (len b) minCachedLen) (> (len b) maxCachedLen))
+      (return (conv string b)))
+
+
+    ;; Compute a hash from the fixed-width prefix and suffix of the string.
+    ;; This ensures hashing a string is a constant time operation.
+    (let [^uint32 h (zero uint32)]
+      (switch
+        (case [(>= (len b) 8)]
+          (let [lo (.Uint64 binary/LittleEndian (subslice b _ 8))
+              ^{:line 35} hi (.Uint64 binary/LittleEndian (subslice b (- (len b) 8)))]
+            (set! h (bit-xor (hash64 (conv uint32 lo) (conv uint32 (>> lo 32))) (hash64 (conv uint32 hi) (conv uint32 (>> hi 32)))))))
+        (case [(>= (len b) 4)]
+          (let [lo (.Uint32 binary/LittleEndian (subslice b _ 4))
+              ^{:line 39} hi (.Uint32 binary/LittleEndian (subslice b (- (len b) 4)))]
+            (set! h (hash64 lo hi))))
+        (case [(>= (len b) 2)]
+          (let [lo (.Uint16 binary/LittleEndian (subslice b _ 2))
+              ^{:line 43} hi (.Uint16 binary/LittleEndian (subslice b (- (len b) 2)))]
+            (set! h (hash64 (conv uint32 lo) (conv uint32 hi))))))
+
+
+      ;; Check the cache for the string.
+      (let [i (% h (conv uint32 (len @c)))]
+        (when [s (aget @c i)] (== s (conv string b))
+          (return s))
+
+        (let [s (conv string b)]
+          (aset @c i s)
+          ^{:line 54} s)))))
+
+
+
+^{:go/end 88} (go/func hash64 "hash64 returns the hash of two uint32s as a single uint32.\n" ^uint32 [^uint32 lo ^uint32 hi]
+  ;; If avalanche=true, this is identical to XXH32 hash on an 8B string:
+  ;;	var b [8]byte
+  ;;	binary.LittleEndian.PutUint32(b[:4], lo)
+  ;;	binary.LittleEndian.PutUint32(b[4:], hi)
+  ;;	return xxhash.Sum32(b[:])
+  (let [
+      ^:const ^{:line 65 :val 2654435761} prime1 0x9e3779b1
+      ^:const ^:go/grouped ^{:line 66 :val 2246822519} prime2 0x85ebca77
+      ^:const ^:go/grouped ^{:line 67 :val 3266489917} prime3 0xc2b2ae3d
+      ^:const ^:go/grouped ^{:line 68 :val 668265263} prime4 0x27d4eb2f
+      ^:const ^:go/grouped ^{:line 69 :val 374761393} prime5 0x165667b1
+
+      ^{:line 71} h (+ prime5 (conv uint32 8))]
+    (set! h + (* lo prime3))
+    (set! h (* (bits/RotateLeft32 h 17) prime4))
+    (set! h + (* hi prime3))
+    (set! h (* (bits/RotateLeft32 h 17) prime4))
+    ;; Skip final mix (avalanche) step of XXH32 for performance reasons.
+    ;; Empirical testing shows that the improvements in unbiased distribution
+    ;; do not outweigh the extra cost in computational complexity.
+    (let [^:const ^{:val false} avalanche false]
+      (when avalanche
+        (set! h bit-xor (>> h 15))
+        (set! h * prime2)
+        (set! h bit-xor (>> h 13))
+        (set! h * prime3)
+        (set! h bit-xor (>> h 16)))
+
+      ^{:line 87} h)))

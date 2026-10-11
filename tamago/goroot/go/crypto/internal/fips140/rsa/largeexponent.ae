@@ -1,0 +1,364 @@
+;; Copyright 2026 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.rsa) (go/file "largeexponent.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [constanttime "crypto/internal/constanttime"]
+    ^{:line 10} [fips140 "crypto/internal/fips140"]
+    ^{:line 11} [bigmod "crypto/internal/fips140/bigmod"]
+    ^{:line 12} [drbg "crypto/internal/fips140/drbg"]
+    ^{:line 13} [subtle "crypto/internal/fips140/subtle"]
+    ^{:line 14} [errors "errors"]
+    ^{:line 15} [hash "hash"]
+    ^{:line 16} [io "io"]])
+
+
+
+
+
+
+
+(go/type TestingOnlyLargeExponentPublicKey "TestingOnlyLargeExponentPublicKey is a variant of [PublicKey] that supports\nlarge public exponents. It is only meant for supporting the full ACVP test\nsuite, which unfortunately forces us to choose between a fixed exponent and\nthe full (2¹⁶, 2²⁵⁶) range. This type must not be used in production code,\nnor for e values < 2³¹, which instead must use [PublicKey].\n" (struct
+    ^{:line 25 :tag (* bigmod/Modulus)} N
+
+    ^{:line 27 :tag (slice byte) :doc "E is the public exponent, represented as a big-endian byte slice.\n"} E))
+
+
+^{:go/end 32} (go/method Size ^int [^{:tag (* TestingOnlyLargeExponentPublicKey)} pub]
+  (/ (+ (.BitLen (.-N pub)) 7) 8))
+
+
+^{:go/end 62} (go/func checkLargeExponentPublicKey ^error [^{:tag (* TestingOnlyLargeExponentPublicKey)} pub]
+  (when (== (.-N pub) nil)
+    (return (errors/New "crypto/rsa: missing public modulus")))
+
+  (when (== (.IsOdd (.Nat (.-N pub))) 0)
+    (return (errors/New "crypto/rsa: public modulus is even")))
+
+  (when (< (.BitLen (.-N pub)) 2048)
+    (return (errors/New "crypto/rsa: public modulus too small")))
+
+  (when (== (% (.BitLen (.-N pub)) 2) 1)
+    (return (errors/New "crypto/rsa: public modulus bit length not even")))
+
+  ^{:go/breaks [[6 61]]} (let [E (.-E pub)]
+    (while (and (> (len E) 0) (== (aget E 0) 0))
+      (set! E (subslice E 1)))
+
+    (when (or (< (len E) (/ 32 8)) ^:go/paren (and (== (len E) (/ 32 8)) (< (aget E 0) 0x80)))
+      ;; Exponents less than 2^31 must use [PublicKey].
+      (return (errors/New "crypto/rsa: public exponent too small")))
+
+    (when (> (len E) (/ 256 8))
+      (return (errors/New "crypto/rsa: public exponent too large")))
+
+    (when (== (bit-and (aget E (- (len E) 1)) 1) 0)
+      (return (errors/New "crypto/rsa: public exponent is even")))
+
+    nil))
+
+
+^{:go/end 70} (go/func encryptLargeExponent [^{:tag (* TestingOnlyLargeExponentPublicKey)} pub ^{:tag (slice byte)} plaintext] :results [(slice byte) error]
+  (let [(values m err) (.SetBytes (bigmod/NewNat) plaintext (.-N pub))]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (.Bytes (.Exp (bigmod/NewNat) m (.-E pub) (.-N pub)) (.-N pub)) nil)))
+
+
+^{:go/end 94} (go/func TestingOnlyLargeExponentVerifyPKCS1v15 ^error [^{:tag (* TestingOnlyLargeExponentPublicKey)} pub ^string hash ^{:tag (slice byte)} hashed ^{:tag (slice byte)} sig]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (checkApprovedHashName hash)
+  (when [err (checkLargeExponentPublicKey pub)] (!= err nil)
+    (return err))
+
+  (when (!= (.Size pub) (len sig))
+    (return ErrVerification))
+
+  (let [(values em err) (encryptLargeExponent pub sig)]
+    (when (!= err nil)
+      (return ErrVerification))
+
+    ^{:go/breaks [[4 93]]} (let [(values expected ^:assign err) (pkcs1v15ConstructEM (addr (lit PublicKey :N (.-N pub))) hash hashed)]
+      (when (!= err nil)
+        (return ErrVerification))
+
+      (when (not (bytes/Equal em expected))
+        (return ErrVerification))
+
+      nil)))
+
+
+^{:go/end 119} (go/func TestingOnlyLargeExponentVerifyPSS ^error [^{:tag (* TestingOnlyLargeExponentPublicKey)} pub ^hash/Hash hash ^{:tag (slice byte)} digest ^{:tag (slice byte)} sig]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (checkApprovedHash hash)
+  (when [err (checkLargeExponentPublicKey pub)] (!= err nil)
+    (return err))
+
+  (when (!= (len sig) (.Size pub))
+    (return ErrVerification))
+
+  (let [emBits (- (.BitLen (.-N pub)) 1)
+      ^{:line 107} emLen (/ (+ emBits 7) 8)
+      (values em err) (encryptLargeExponent pub sig)]
+    (when (!= err nil)
+      (return ErrVerification))
+
+    (while (and (> (len em) emLen) (> (len em) 0))
+      (when (!= (aget em 0) 0)
+        (return ErrVerification))
+
+      (set! em (subslice em 1)))
+
+    (emsaPSSVerify digest em emBits pssSaltLengthAutodetect hash)))
+
+
+
+
+
+(go/type TestingOnlyLargeExponentPrivateKey "TestingOnlyLargeExponentPrivateKey is a variant of [PrivateKey] that supports\nlarge public exponents. It is only meant for supporting the full ACVP test\nsuite. This type must not be used in production code.\n" (struct
+    ^{:line 125 :tag (* bigmod/Modulus)} n
+    ^{:line 126 :tag (slice byte)} e ; big-endian public exponent
+    ^{:line 127 :tag (* bigmod/Nat)} d
+    ^{:line 128 :tag (* bigmod/Modulus)} p ^{:tag (* bigmod/Modulus)} q
+    ^{:line 129 :tag (slice byte)} dP
+    ^{:line 130 :tag (slice byte)} dQ
+    ^{:line 131 :tag (* bigmod/Nat)} qInv))
+
+
+^{:go/end 136} (go/method Size ^int [^{:tag (* TestingOnlyLargeExponentPrivateKey)} priv]
+  (/ (+ (.BitLen (.-n priv)) 7) 8))
+
+
+
+
+^{:go/end 170} (go/func TestingOnlyNewLargeExponentPrivateKeyWithPrecomputation "TestingOnlyNewLargeExponentPrivateKeyWithPrecomputation creates a new RSA private key\nwith a large public exponent from the given parameters. It is only meant for ACVP testing.\n" [^{:tag (slice byte)} N ^{:tag (slice byte)} e ^{:tag (slice byte)} d ^{:tag (slice byte)} P ^{:tag (slice byte)} Q ^{:tag (slice byte)} dP ^{:tag (slice byte)} dQ ^{:tag (slice byte)} qInv] :results [(* TestingOnlyLargeExponentPrivateKey) error]
+  (let [(values n err) (bigmod/NewModulus N)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values p ^:assign err) (bigmod/NewModulus P)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [(values q ^:assign err) (bigmod/NewModulus Q)]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [(values dN ^:assign err) (.SetBytes (bigmod/NewNat) d n)]
+          (when (!= err nil)
+            (return nil err))
+
+          (let [(values qInvNat ^:assign err) (.SetBytes (bigmod/NewNat) qInv p)]
+            (when (!= err nil)
+              (return nil err))
+
+
+            (let [priv (addr ^{:go/breaks [2 12]} (lit TestingOnlyLargeExponentPrivateKey
+                    :n n :e e :d dN :p p :q q
+                    :dP dP :dQ dQ :qInv qInvNat))]
+
+              (when [err (checkLargeExponentPrivateKey priv)] (!= err nil)
+                (return nil err))
+
+              (return priv nil))))))))
+
+
+^{:go/end 251} (go/func checkLargeExponentPrivateKey ^error [^{:tag (* TestingOnlyLargeExponentPrivateKey)} priv]
+  ;; Check public key portion.
+  (let [pub (addr (lit TestingOnlyLargeExponentPublicKey :N (.-n priv) :E (.-e priv)))]
+    (when [err (checkLargeExponentPublicKey pub)] (!= err nil)
+      (return err))
+
+
+    (let [N (.-n priv)
+        ^{:line 180} p (.-p priv)
+        ^{:line 181} q (.-q priv)]
+
+      ;; FIPS 186-5, Section 5.1 requires "that p and q be of the same bit length."
+      (when (!= (.BitLen p) (.BitLen q)))
+      ;; We don't enforce this for testing, just note it.
+
+
+      ;; Check that pq ≡ 1 mod N (and that p < N and q < N).
+      (let [pN (.ExpandFor (bigmod/NewNat) N)]
+        (when [(values _ err) (.SetBytes pN (.Bytes (.Nat p) p) N)] (!= err nil)
+          (return (errors/New "crypto/rsa: invalid prime")))
+
+        (let [qN (.ExpandFor (bigmod/NewNat) N)]
+          (when [(values _ err) (.SetBytes qN (.Bytes (.Nat q) q) N)] (!= err nil)
+            (return (errors/New "crypto/rsa: invalid prime")))
+
+          (when (!= (.IsZero (.Mul pN qN N)) 1)
+            (return (errors/New "crypto/rsa: p * q != n")))
+
+
+          ;; Check that de ≡ 1 mod p-1, and de ≡ 1 mod q-1.
+          ;; Uses byte-slice exponent for large exponents.
+          (let [(values pMinus1 err) (bigmod/NewModulus (.Bytes (.SubOne (.Nat p) p) p))]
+            (when (!= err nil)
+              (return (errors/New "crypto/rsa: invalid prime")))
+
+            (let [(values dP ^:assign err) (.SetBytes (bigmod/NewNat) (.-dP priv) pMinus1)]
+              (when (!= err nil)
+                (return (errors/New "crypto/rsa: invalid CRT exponent")))
+
+              (let [de (bigmod/NewNat)]
+                (when [(values _ err) (.SetBytes de (.-e priv) pMinus1)] (!= err nil)
+                  ;; Exponent might be larger than p-1, reduce it.
+                  (let [(values eNat _) (.SetBytes (bigmod/NewNat) (.-e priv) (.-n priv))]
+                    (.Mod de eNat pMinus1)))
+
+                (.Mul de dP pMinus1)
+                (when (!= (.IsOne de) 1)
+                  (return (errors/New "crypto/rsa: invalid CRT exponent")))
+
+
+                (let [(values qMinus1 ^:assign err) (bigmod/NewModulus (.Bytes (.SubOne (.Nat q) q) q))]
+                  (when (!= err nil)
+                    (return (errors/New "crypto/rsa: invalid prime")))
+
+                  (let [(values dQ ^:assign err) (.SetBytes (bigmod/NewNat) (.-dQ priv) qMinus1)]
+                    (when (!= err nil)
+                      (return (errors/New "crypto/rsa: invalid CRT exponent")))
+
+                    (when [(values _ err) (.SetBytes de (.-e priv) qMinus1)] (!= err nil)
+                      ;; Exponent might be larger than q-1, reduce it.
+                      (let [(values eNat _) (.SetBytes (bigmod/NewNat) (.-e priv) (.-n priv))]
+                        (.Mod de eNat qMinus1)))
+
+                    (.Mul de dQ qMinus1)
+                    (when (!= (.IsOne de) 1)
+                      (return (errors/New "crypto/rsa: invalid CRT exponent")))
+
+
+                    ;; Check that qInv * q ≡ 1 mod p.
+                    ^{:go/breaks [[4 250]]} (let [(values qP ^:assign err) (.SetOverflowingBytes (bigmod/NewNat) (.Bytes (.Nat q) q) p)]
+                      (when (!= err nil)
+                        ;; q >= 2^⌈log2(p)⌉
+                        (set! qP (.Mod (bigmod/NewNat) (.Nat q) p)))
+
+                      (when (!= (.IsOne (.Mul qP (.-qInv priv) p)) 1)
+                        (return (errors/New "crypto/rsa: invalid CRT coefficient")))
+
+
+                      nil)))))))))))
+
+
+^{:go/end 277} (go/func decryptLargeExponent [^{:tag (* TestingOnlyLargeExponentPrivateKey)} priv ^{:tag (slice byte)} ciphertext] :results [(slice byte) error]
+  (let [N (.-n priv)
+      (values c err) (.SetBytes (bigmod/NewNat) ciphertext N)]
+    (when (!= err nil)
+      (return nil ErrDecryption))
+
+
+    ;; CRT-based decryption (same as regular decrypt, doesn't use E).
+    (let [(values P Q) (values (.-p priv) (.-q priv))
+        ^{:line 262} t0 (bigmod/NewNat)
+        ;; m = c ^ Dp mod p
+        ^{:line 264} m (.Exp (bigmod/NewNat) (.Mod t0 c P) (.-dP priv) P)
+        ;; m2 = c ^ Dq mod q
+        ^{:line 266} m2 (.Exp (bigmod/NewNat) (.Mod t0 c Q) (.-dQ priv) Q)]
+      ;; m = m - m2 mod p
+      (.Sub m (.Mod t0 m2 P) P)
+      ;; m = m * Qinv mod p
+      (.Mul m (.-qInv priv) P)
+      ;; m = m * q mod N
+      (.Mul (.ExpandFor m N) (.Mod t0 (.Nat Q) N) N)
+      ;; m = m + m2 mod N
+      (.Add m (.ExpandFor m2 N) N)
+
+      (return (.Bytes m N) nil))))
+
+
+
+
+^{:go/end 329} (go/func TestingOnlyLargeExponentDecryptOAEP "TestingOnlyLargeExponentDecryptOAEP decrypts ciphertext using RSAES-OAEP with\na private key that has a large public exponent. It is only meant for ACVP testing.\n" [^hash/Hash hash ^hash/Hash mgfHash ^{:tag (* TestingOnlyLargeExponentPrivateKey)} priv ^{:tag (slice byte)} ciphertext ^{:tag (slice byte)} label] :results [(slice byte) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (checkApprovedHash hash)
+
+  (let [k (.Size priv)]
+    (when (or (> (len ciphertext) k) (< k (+ (* (.Size hash) 2) 2)))
+      (return nil ErrDecryption))
+
+
+    (let [(values em err) (decryptLargeExponent priv ciphertext)]
+      (when (!= err nil)
+        (return nil err))
+
+
+      (.Reset hash)
+      (.Write hash label)
+      (let [lHash (.Sum hash nil)
+
+          ^{:line 300} firstByteIsZero (constanttime/ByteEq (aget em 0) 0)
+
+          ^{:line 302} seed (subslice em 1 (+ (.Size hash) 1))
+          ^{:line 303} db (subslice em (+ (.Size hash) 1))]
+
+        (mgf1XOR seed mgfHash db)
+        (mgf1XOR db mgfHash seed)
+
+        (let [lHash2 (subslice db 0 (.Size hash))
+
+            ^{:line 310} lHash2Good (subtle/ConstantTimeCompare lHash lHash2)
+
+            (values ^int lookingForIndex ^int index ^int invalid) (zero int)]
+          (set! lookingForIndex 1)
+          (let [rest (subslice db (.Size hash))]
+
+            (for [i 0] (< i (len rest)) (inc! i)
+              (let [equals0 (constanttime/ByteEq (aget rest i) 0)
+                  ^{:line 318} equals1 (constanttime/ByteEq (aget rest i) 1)]
+                (set! index (constanttime/Select (bit-and lookingForIndex equals1) i index))
+                (set! lookingForIndex (constanttime/Select equals1 0 lookingForIndex))
+                (set! invalid (constanttime/Select (bit-and-not lookingForIndex equals0) 1 invalid))))
+
+
+            (when (!= (bit-and-not (bit-and firstByteIsZero lHash2Good) invalid lookingForIndex) 1)
+              (return nil ErrDecryption))
+
+
+            (return (subslice rest (+ index 1)) nil)))))))
+
+
+
+
+^{:go/end 365} (go/func TestingOnlyLargeExponentEncryptOAEP "TestingOnlyLargeExponentEncryptOAEP encrypts the given message with RSAES-OAEP\nusing a public key with a large exponent. It is only meant for ACVP testing.\n" [^hash/Hash hash ^hash/Hash mgfHash ^io/Reader random ^{:tag (* TestingOnlyLargeExponentPublicKey)} pub ^{:tag (slice byte)} msg ^{:tag (slice byte)} label] :results [(slice byte) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (checkApprovedHash hash)
+  (when [err (checkLargeExponentPublicKey pub)] (!= err nil)
+    (return nil err))
+
+  (let [k (.Size pub)]
+    (when (> (len msg) (- k (* 2 (.Size hash)) 2))
+      (return nil ErrMessageTooLong))
+
+
+    (.Reset hash)
+    (.Write hash label)
+    (let [lHash (.Sum hash nil)
+
+        ^{:line 349} em (make (slice byte) k)
+        ^{:line 350} seed (subslice em 1 (+ 1 (.Size hash)))
+        ^{:line 351} db (subslice em (+ 1 (.Size hash)))]
+
+      (copy (subslice db 0 (.Size hash)) lHash)
+      (aset db (- (len db) (len msg) 1) 1)
+      (copy (subslice db (- (len db) (len msg))) msg)
+
+      (when [err (drbg/ReadWithReader random seed)] (!= err nil)
+        (return nil err))
+
+
+      (mgf1XOR db mgfHash seed)
+      (mgf1XOR seed mgfHash db)
+
+      (encryptLargeExponent pub em))))

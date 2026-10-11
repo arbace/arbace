@@ -1,0 +1,278 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+
+
+(in-ns 'go.net) (go/file "ipsock_posix.go" :build ["//go:build unix || js || wasip1 || windows || tamago"] :imports [
+
+
+    ^{:line 10} [context "context"]
+    ^{:line 11} [poll "internal/poll"]
+    ^{:line 12} [netip "net/netip"]
+    ^{:line 13} [runtime "runtime"]
+    ^{:line 14} [syscall "syscall"]
+    ^{:line 15} [_ "unsafe"]]) ; for linkname
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 91} (go/method probe "probe probes IPv4, IPv6 and IPv4-mapped IPv6 communication\ncapabilities which are controlled by the IPV6_V6ONLY socket option\nand kernel configuration.\n\nShould we try to use the IPv4 socket interface if we're only\ndealing with IPv4 sockets? As long as the host system understands\nIPv4-mapped IPv6, it's okay to pass IPv4-mapped IPv6 addresses to\nthe IPv6 interface. That simplifies our code and is most\ngeneral. Unfortunately, we need to run on kernels built without\nIPv6 support too. So probe the kernel to figure it out.\n" [^{:tag (* ipStackCapabilities)} p]
+  (switch runtime/GOOS
+    (case ["js" "wasip1"]
+      ;; Both ipv4 and ipv6 are faked; see net_fake.go.
+      (set! (.-ipv4Enabled p) true)
+      (set! (.-ipv6Enabled p) true)
+      (set! (.-ipv4MappedIPv6Enabled p) true)
+      (return)))
+
+
+  (let [(values s err) (sysSocket syscall/AF_INET syscall/SOCK_STREAM syscall/IPPROTO_TCP)]
+    (switch err
+      (case [syscall/EAFNOSUPPORT syscall/EPROTONOSUPPORT])
+      (case [nil]
+        (poll/CloseFunc s)
+        (set! (.-ipv4Enabled p) true)))
+
+    (let [^:var probes (lit (slice (struct
+              ^{:line 46 :tag TCPAddr} laddr
+              ^{:line 47 :tag int} value))
+
+          ;; IPv6 communication capability
+          (lit _ :laddr (lit TCPAddr :IP (ParseIP "::1")) :value 1)
+          ;; IPv4-mapped IPv6 address communication capability
+          (lit _ :laddr (lit TCPAddr :IP (IPv4 127 0 0 1)) :value 0))]
+
+      (switch runtime/GOOS
+        (case ["tamago"]
+          (set! (.-ipv4Enabled p) true)
+          (set! (.-ipv6Enabled p) false)
+          (set! probes (subslice probes _ 1)))
+        (case ["dragonfly" "openbsd"]
+          ;; The latest DragonFly BSD and OpenBSD kernels don't
+          ;; support IPV6_V6ONLY=0. They always return an error
+          ;; and we don't need to probe the capability.
+          (set! probes (subslice probes _ 1))))
+
+      (range [i probes]
+        (let [(values s err) (sysSocket syscall/AF_INET6 syscall/SOCK_STREAM syscall/IPPROTO_TCP)]
+          (when (!= err nil)
+            (continue))
+
+          (defer (poll/CloseFunc s))
+          (syscall/SetsockoptInt s syscall/IPPROTO_IPV6 syscall/IPV6_V6ONLY (.-value (aget probes i)))
+          (let [(values sa ^:assign err) (.sockaddr (.-laddr (aget probes i)) syscall/AF_INET6)]
+            (when (!= err nil)
+              (continue))
+
+            (when [err (syscall/Bind s sa)] (!= err nil)
+              ;; If the bind was denied by a security policy (BPF, seccomp,
+              ;; SELinux, etc.), the kernel still supports IPv6 — the socket
+              ;; was created and setsockopt succeeded. Only treat errors like
+              ;; EADDRNOTAVAIL as lack of support. See go.dev/issue/77430.
+              (when (and (!= err syscall/EPERM) (!= err syscall/EACCES))
+                (continue)))
+
+
+            (if (== i 0)
+              (set! (.-ipv6Enabled p) true)
+
+              (set! (.-ipv4MappedIPv6Enabled p) true))))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 167} (go/func ^{:go/linkname "favoriteAddrFamily"} favoriteAddrFamily "favoriteAddrFamily returns the appropriate address family for the\ngiven network, laddr, raddr and mode.\n\nIf mode indicates \"listen\" and laddr is a wildcard, we assume that\nthe user wants to make a passive-open connection with a wildcard\naddress family, both AF_INET and AF_INET6, and a wildcard address\nlike the following:\n\n  - A listen for a wildcard communication domain, \"tcp\" or\n    \"udp\", with a wildcard address: If the platform supports\n    both IPv6 and IPv4-mapped IPv6 communication capabilities,\n    or does not support IPv4, we use a dual stack, AF_INET6 and\n    IPV6_V6ONLY=0, wildcard address listen. The dual stack\n    wildcard address listen may fall back to an IPv6-only,\n    AF_INET6 and IPV6_V6ONLY=1, wildcard address listen.\n    Otherwise we prefer an IPv4-only, AF_INET, wildcard address\n    listen.\n\n  - A listen for a wildcard communication domain, \"tcp\" or\n    \"udp\", with an IPv4 wildcard address: same as above.\n\n  - A listen for a wildcard communication domain, \"tcp\" or\n    \"udp\", with an IPv6 wildcard address: same as above.\n\n  - A listen for an IPv4 communication domain, \"tcp4\" or \"udp4\",\n    with an IPv4 wildcard address: We use an IPv4-only, AF_INET,\n    wildcard address listen.\n\n  - A listen for an IPv6 communication domain, \"tcp6\" or \"udp6\",\n    with an IPv6 wildcard address: We use an IPv6-only, AF_INET6\n    and IPV6_V6ONLY=1, wildcard address listen.\n\nOtherwise guess: If the addresses are IPv4 then returns AF_INET,\nor else returns AF_INET6. It also returns a boolean value what\ndesignates IPV6_V6ONLY option.\n\nNote that the latest DragonFly BSD and OpenBSD kernels allow\nneither \"net.inet6.ip6.v6only=1\" change nor IPPROTO_IPV6 level\nIPV6_V6ONLY socket option setting.\n\nfavoriteAddrFamily should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/database64128/tfo-go/v2\n  - github.com/metacubex/tfo-go\n  - github.com/sagernet/tfo-go\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^string network ^sockaddr laddr ^sockaddr raddr ^string mode] :results [^int family ^bool ipv6only]
+  (switch (aget network (- (len network) 1))
+    (case [\4]
+      (return syscall/AF_INET false))
+    (case [\6]
+      (return syscall/AF_INET6 true)))
+
+
+  (when (and (== mode "listen") ^:go/paren (or (== laddr nil) (.isWildcard laddr)))
+    (when (or (supportsIPv4map) (not (supportsIPv4)))
+      (return syscall/AF_INET6 false))
+
+    (when (== laddr nil)
+      (return syscall/AF_INET false))
+
+    (return (.family laddr) false))
+
+
+  (when (and ^:go/paren (or (== laddr nil) (== (.family laddr) syscall/AF_INET))
+      ^:go/paren (or (== raddr nil) (== (.family raddr) syscall/AF_INET)))
+    (return syscall/AF_INET false))
+
+  (return syscall/AF_INET6 false))
+
+
+^{:go/end 178} (go/func internetSocket [^context/Context ctx ^string net ^sockaddr laddr ^sockaddr raddr ^int sotype ^int proto ^string mode ^{:tag (func [context/Context string string syscall/RawConn] [error])} ctrlCtxFn] :results [^{:tag (* netFD)} fd ^error err]
+  (switch runtime/GOOS
+    (case ["aix" "freebsd" "windows" "openbsd" "js" "wasip1"]
+      (when (and (== mode "dial") (.isWildcard raddr))
+        (set! raddr (.toLocal raddr net)))))
+
+
+  (let [(values family ipv6only) (favoriteAddrFamily net laddr raddr mode)]
+    (socket ctx net family sotype proto ipv6only laddr raddr ctrlCtxFn)))
+
+
+^{:go/end 191} (go/func ipToSockaddrInet4 [^IP ip ^int port] :results [syscall/SockaddrInet4 error]
+  (when (== (len ip) 0)
+    (set! ip IPv4zero))
+
+  (let [ip4 (.To4 ip)]
+    (when (== ip4 nil)
+      (return (lit syscall/SockaddrInet4) (addr (lit AddrError :Err "non-IPv4 address" :Addr (.String ip)))))
+
+    (let [sa (lit syscall/SockaddrInet4 :Port port)]
+      (copy (subslice (.-Addr sa)) ip4)
+      (return sa nil))))
+
+
+^{:go/end 216} (go/func ipToSockaddrInet6 [^IP ip ^int port ^string zone] :results [syscall/SockaddrInet6 error]
+  ;; In general, an IP wildcard address, which is either
+  ;; "0.0.0.0" or "::", means the entire IP addressing
+  ;; space. For some historical reason, it is used to
+  ;; specify "any available address" on some operations
+  ;; of IP node.
+  ;;
+  ;; When the IP node supports IPv4-mapped IPv6 address,
+  ;; we allow a listener to listen to the wildcard
+  ;; address of both IP addressing spaces by specifying
+  ;; IPv6 wildcard address.
+  (when (or (== (len ip) 0) (.Equal ip IPv4zero))
+    (set! ip IPv6zero))
+
+  ;; We accept any IPv6 address including IPv4-mapped
+  ;; IPv6 address.
+  (let [ip6 (.To16 ip)]
+    (when (== ip6 nil)
+      (return (lit syscall/SockaddrInet6) (addr (lit AddrError :Err "non-IPv6 address" :Addr (.String ip)))))
+
+    (let [sa (lit syscall/SockaddrInet6 :Port port :ZoneId (conv uint32 (.index zoneCache zone)))]
+      (copy (subslice (.-Addr sa)) ip6)
+      (return sa nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 245} (go/func ^{:go/linkname "ipToSockaddr"} ipToSockaddr "ipToSockaddr should be an internal detail,\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/database64128/tfo-go/v2\n  - github.com/metacubex/tfo-go\n  - github.com/sagernet/tfo-go\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" [^int family ^IP ip ^int port ^string zone] :results [syscall/Sockaddr error]
+  (switch family
+    (case [syscall/AF_INET]
+      (let [(values sa err) (ipToSockaddrInet4 ip port)]
+        (when (!= err nil)
+          (return nil err))
+
+        (return (addr sa) nil)))
+    (case [syscall/AF_INET6]
+      (let [(values sa err) (ipToSockaddrInet6 ip port zone)]
+        (when (!= err nil)
+          (return nil err))
+
+        (return (addr sa) nil))))
+
+  (return nil (addr (lit AddrError :Err "invalid address family" :Addr (.String ip)))))
+
+
+^{:go/end 263} (go/func addrPortToSockaddrInet4 [^netip/AddrPort ap] :results [syscall/SockaddrInet4 error]
+  ;; ipToSockaddrInet4 has special handling here for zero length slices.
+  ;; We do not, because netip has no concept of a generic zero IP address.
+  ;;
+  ;; addr is allowed to be an IPv4-mapped IPv6 address.
+  ;; As4 will unmap it to an IPv4 address.
+  ;; The error message is kept consistent with ipToSockaddrInet4.
+  (let [addr (.Addr ap)]
+    (when (and (not (.Is4 addr)) (not (.Is4In6 addr)))
+      (return (lit syscall/SockaddrInet4) (addr (lit AddrError :Err "non-IPv4 address" :Addr (.String addr)))))
+
+    (let [sa ^{:go/breaks [2 4]} (lit syscall/SockaddrInet4
+          :Addr (.As4 addr)
+          :Port (conv int (.Port ap)))]
+
+      (return sa nil))))
+
+
+^{:go/end 279} (go/func addrPortToSockaddrInet6 [^netip/AddrPort ap] :results [syscall/SockaddrInet6 error]
+  ;; ipToSockaddrInet6 has special handling here for zero length slices.
+  ;; We do not, because netip has no concept of a generic zero IP address.
+  ;;
+  ;; addr is allowed to be an IPv4 address, because As16 will convert it
+  ;; to an IPv4-mapped IPv6 address.
+  ;; The error message is kept consistent with ipToSockaddrInet6.
+  (let [addr (.Addr ap)
+      ^{:line 273} sa ^{:go/breaks [2 4 6]} (lit syscall/SockaddrInet6
+        :Addr (.As16 addr)
+        :Port (conv int (.Port ap))
+        :ZoneId (conv uint32 (.index zoneCache (.Zone addr))))]
+
+    (return sa nil)))

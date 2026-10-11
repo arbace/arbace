@@ -1,0 +1,327 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.internal.fips140.ed25519) (go/file "ed25519.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [fips140 "crypto/internal/fips140"]
+    ^{:line 10} [drbg "crypto/internal/fips140/drbg"]
+    ^{:line 11} [edwards25519 "crypto/internal/fips140/edwards25519"]
+    ^{:line 12} [sha512 "crypto/internal/fips140/sha512"]
+    ^{:line 13} [errors "errors"]
+    ^{:line 14} [strconv "strconv"]])
+
+
+;; See https://blog.mozilla.org/warner/2011/11/29/ed25519-keys/ for the
+;; components of the keys and the moving parts of the algorithm.
+
+(go/const
+  ^{:line 21} [^{:val 32} seedSize 32]
+  ^{:line 22} [^{:val 32} publicKeySize 32]
+  ^{:line 23} [^{:val 64} privateKeySize (+ seedSize publicKeySize)]
+  ^{:line 24} [^{:val 64} signatureSize 64]
+  ^{:line 25} [^{:val 64} sha512Size 64])
+
+
+(go/type PrivateKey (struct
+    ^{:line 29 :tag (array seedSize byte)} seed
+    ^{:line 30 :tag (array publicKeySize byte)} pub
+    ^{:line 31 :tag edwards25519/Scalar} s
+    ^{:line 32 :tag (array (/ sha512Size 2) byte)} prefix))
+
+
+^{:go/end 40} (go/method Bytes ^{:tag (slice byte)} [^{:tag (* PrivateKey)} priv]
+  (let [k (make (slice byte) 0 privateKeySize)]
+    (set! k (append k (spread (subslice (.-seed priv)))))
+    (set! k (append k (spread (subslice (.-pub priv)))))
+    ^{:line 39} k))
+
+
+^{:go/end 45} (go/method Seed ^{:tag (slice byte)} [^{:tag (* PrivateKey)} priv]
+  (let [seed (.-seed priv)]
+    (subslice seed)))
+
+
+^{:go/end 50} (go/method PublicKey ^{:tag (slice byte)} [^{:tag (* PrivateKey)} priv]
+  (let [pub (.-pub priv)]
+    (subslice pub)))
+
+
+(go/type PublicKey (struct
+    ^{:line 53 :tag edwards25519/Point} a
+    ^{:line 54 :tag (array 32 byte)} aBytes))
+
+
+^{:go/end 60} (go/method Bytes ^{:tag (slice byte)} [^{:tag (* PublicKey)} pub]
+  (let [a (.-aBytes pub)]
+    (subslice a)))
+
+
+
+^{:go/end 66} (go/func GenerateKey "GenerateKey generates a new Ed25519 private key pair.\n" [] :results [(* PrivateKey) error]
+  (let [priv (addr (lit PrivateKey))]
+    (generateKey priv)))
+
+
+^{:go/end 74} (go/func generateKey [^{:tag (* PrivateKey)} priv] :results [(* PrivateKey) error]
+  (fips140/RecordApproved)
+  (drbg/Read (subslice (.-seed priv)))
+  (precomputePrivateKey priv)
+  (fipsPCT priv)
+  (return priv nil))
+
+
+^{:go/end 79} (go/func NewPrivateKeyFromSeed [^{:tag (slice byte)} seed] :results [(* PrivateKey) error]
+  (let [priv (addr (lit PrivateKey))]
+    (newPrivateKeyFromSeed priv seed)))
+
+
+^{:go/end 89} (go/func newPrivateKeyFromSeed [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} seed] :results [(* PrivateKey) error]
+  (fips140/RecordApproved)
+  (when [l (len seed)] (!= l seedSize)
+    (return nil (errors/New (+ "ed25519: bad seed length: " (strconv/Itoa l)))))
+
+  (copy (subslice (.-seed priv)) seed)
+  (precomputePrivateKey priv)
+  (return priv nil))
+
+
+^{:go/end 104} (go/func precomputePrivateKey [^{:tag (* PrivateKey)} priv]
+  (let [hs (sha512/New)]
+    (.Write hs (subslice (.-seed priv)))
+    (let [h (.Sum hs (make (slice byte) 0 sha512Size))
+
+        (values s err) (.SetBytesWithClamping (.-s priv) (subslice h _ 32))]
+      (when (!= err nil)
+        (panic "ed25519: internal error: setting scalar failed"))
+
+      (let [A (.ScalarBaseMult (addr (lit edwards25519/Point)) s)]
+        (copy (subslice (.-pub priv)) (.Bytes A))
+
+        (copy (subslice (.-prefix priv)) (subslice h 32))))))
+
+
+^{:go/end 109} (go/func NewPrivateKey [^{:tag (slice byte)} priv] :results [(* PrivateKey) error]
+  (let [p (addr (lit PrivateKey))]
+    (newPrivateKey p priv)))
+
+
+^{:go/end 134} (go/func newPrivateKey [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} privBytes] :results [(* PrivateKey) error]
+  (fips140/RecordApproved)
+  (when [l (len privBytes)] (!= l privateKeySize)
+    (return nil (errors/New (+ "ed25519: bad private key length: " (strconv/Itoa l)))))
+
+
+  (copy (subslice (.-seed priv)) (subslice privBytes _ 32))
+
+  (let [hs (sha512/New)]
+    (.Write hs (subslice (.-seed priv)))
+    (let [h (.Sum hs (make (slice byte) 0 sha512Size))]
+
+      (when [(values _ err) (.SetBytesWithClamping (.-s priv) (subslice h _ 32))] (!= err nil)
+        (panic "ed25519: internal error: setting scalar failed"))
+
+      ;; Note that we are not decompressing the public key point here,
+      ;; because it takes > 20% of the time of a signature generation.
+      ;; Signing doesn't use it as a point anyway.
+      (copy (subslice (.-pub priv)) (subslice privBytes 32))
+
+      (copy (subslice (.-prefix priv)) (subslice h 32))
+
+      (return priv nil))))
+
+
+^{:go/end 139} (go/func NewPublicKey [^{:tag (slice byte)} pub] :results [(* PublicKey) error]
+  (let [p (addr (lit PublicKey))]
+    (newPublicKey p pub)))
+
+
+^{:go/end 151} (go/func newPublicKey [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} pubBytes] :results [(* PublicKey) error]
+  (when [l (len pubBytes)] (!= l publicKeySize)
+    (return nil (errors/New (+ "ed25519: bad public key length: " (strconv/Itoa l)))))
+
+  ;; SetBytes checks that the point is on the curve.
+  (when [(values _ err) (.SetBytes (.-a pub) pubBytes)] (!= err nil)
+    (return nil (errors/New "ed25519: bad public key")))
+
+  (copy (subslice (.-aBytes pub)) pubBytes)
+  (return pub nil))
+
+
+
+
+(go/const "Domain separation prefixes used to disambiguate Ed25519/Ed25519ph/Ed25519ctx.\nSee RFC 8032, Section 2 and Section 5.1.\n"
+
+  ^{:line 157} [^{:val "" :doc "domPrefixPure is empty for pure Ed25519.\n"} domPrefixPure ""]
+
+
+  ^{:line 160} [^{:val "SigEd25519 no Ed25519 collisions\u0001" :doc "domPrefixPh is dom2(phflag=1) for Ed25519ph. It must be followed by the\nuint8-length prefixed context.\n"} domPrefixPh "SigEd25519 no Ed25519 collisions\u0001"]
+
+
+  ^{:line 163} [^{:val "SigEd25519 no Ed25519 collisions\u0000" :doc "domPrefixCtx is dom2(phflag=0) for Ed25519ctx. It must be followed by the\nuint8-length prefixed context.\n"} domPrefixCtx "SigEd25519 no Ed25519 collisions\u0000"])
+
+
+^{:go/end 171} (go/func Sign ^{:tag (slice byte)} [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} message]
+  ;; Outline the function body so that the returned signature can be
+  ;; stack-allocated.
+  (let [signature (make (slice byte) signatureSize)]
+    (sign signature priv message)))
+
+
+^{:go/end 177} (go/func sign ^{:tag (slice byte)} [^{:tag (slice byte)} signature ^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} message]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (signWithDom signature priv message domPrefixPure ""))
+
+
+^{:go/end 184} (go/func SignPH [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} message ^string context] :results [(slice byte) error]
+  ;; Outline the function body so that the returned signature can be
+  ;; stack-allocated.
+  (let [signature (make (slice byte) signatureSize)]
+    (signPH signature priv message context)))
+
+
+^{:go/end 196} (go/func signPH [^{:tag (slice byte)} signature ^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} message ^string context] :results [(slice byte) error]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (when [l (len message)] (!= l sha512Size)
+    (return nil (errors/New (+ "ed25519: bad Ed25519ph message hash length: " (strconv/Itoa l)))))
+
+  (when [l (len context)] (> l 255)
+    (return nil (errors/New (+ "ed25519: bad Ed25519ph context length: " (strconv/Itoa l)))))
+
+  (return (signWithDom signature priv message domPrefixPh context) nil))
+
+
+^{:go/end 203} (go/func SignCtx [^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} message ^string context] :results [(slice byte) error]
+  ;; Outline the function body so that the returned signature can be
+  ;; stack-allocated.
+  (let [signature (make (slice byte) signatureSize)]
+    (signCtx signature priv message context)))
+
+
+^{:go/end 214} (go/func signCtx [^{:tag (slice byte)} signature ^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} message ^string context] :results [(slice byte) error]
+  (fipsSelfTest)
+  ;; FIPS 186-5 specifies Ed25519 and Ed25519ph (with context), but not Ed25519ctx.
+  (fips140/RecordNonApproved)
+  ;; Note that per RFC 8032, Section 5.1, the context SHOULD NOT be empty.
+  (when [l (len context)] (> l 255)
+    (return nil (errors/New (+ "ed25519: bad Ed25519ctx context length: " (strconv/Itoa l)))))
+
+  (return (signWithDom signature priv message domPrefixCtx context) nil))
+
+
+^{:go/end 256} (go/func signWithDom ^{:tag (slice byte)} [^{:tag (slice byte)} signature ^{:tag (* PrivateKey)} priv ^{:tag (slice byte)} message ^string domPrefix ^string context]
+  (let [mh (sha512/New)]
+    (when (!= domPrefix domPrefixPure)
+      (.Write mh (conv (slice byte) domPrefix))
+      (.Write mh (lit (slice byte) (conv byte (len context))))
+      (.Write mh (conv (slice byte) context)))
+
+    (.Write mh (subslice (.-prefix priv)))
+    (.Write mh message)
+    (let [messageDigest (make (slice byte) 0 sha512Size)]
+      (set! messageDigest (.Sum mh messageDigest))
+      (let [(values r err) (.SetUniformBytes (edwards25519/NewScalar) messageDigest)]
+        (when (!= err nil)
+          (panic "ed25519: internal error: setting scalar failed"))
+
+
+        (let [R (.ScalarBaseMult (addr (lit edwards25519/Point)) r)
+
+            ^{:line 234} kh (sha512/New)]
+          (when (!= domPrefix domPrefixPure)
+            (.Write kh (conv (slice byte) domPrefix))
+            (.Write kh (lit (slice byte) (conv byte (len context))))
+            (.Write kh (conv (slice byte) context)))
+
+          (.Write kh (.Bytes R))
+          (.Write kh (subslice (.-pub priv)))
+          (.Write kh message)
+          (let [hramDigest (make (slice byte) 0 sha512Size)]
+            (set! hramDigest (.Sum kh hramDigest))
+            (let [(values k ^:assign err) (.SetUniformBytes (edwards25519/NewScalar) hramDigest)]
+              (when (!= err nil)
+                (panic "ed25519: internal error: setting scalar failed"))
+
+
+              (let [S (.MultiplyAdd (edwards25519/NewScalar) k (addr (.-s priv)) r)]
+
+                (copy (subslice signature _ 32) (.Bytes R))
+                (copy (subslice signature 32) (.Bytes S))
+
+                ^{:line 255} signature))))))))
+
+
+^{:go/end 260} (go/func Verify ^error [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} message ^{:tag (slice byte)} sig]
+  (verify pub message sig))
+
+
+^{:go/end 266} (go/func verify ^error [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} message ^{:tag (slice byte)} sig]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (verifyWithDom pub message sig domPrefixPure ""))
+
+
+^{:go/end 278} (go/func VerifyPH ^error [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} message ^{:tag (slice byte)} sig ^string context]
+  (fipsSelfTest)
+  (fips140/RecordApproved)
+  (when [l (len message)] (!= l sha512Size)
+    (return (errors/New (+ "ed25519: bad Ed25519ph message hash length: " (strconv/Itoa l)))))
+
+  (when [l (len context)] (> l 255)
+    (return (errors/New (+ "ed25519: bad Ed25519ph context length: " (strconv/Itoa l)))))
+
+  (verifyWithDom pub message sig domPrefixPh context))
+
+
+^{:go/end 288} (go/func VerifyCtx ^error [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} message ^{:tag (slice byte)} sig ^string context]
+  (fipsSelfTest)
+  ;; FIPS 186-5 specifies Ed25519 and Ed25519ph (with context), but not Ed25519ctx.
+  (fips140/RecordNonApproved)
+  (when [l (len context)] (> l 255)
+    (return (errors/New (+ "ed25519: bad Ed25519ctx context length: " (strconv/Itoa l)))))
+
+  (verifyWithDom pub message sig domPrefixCtx context))
+
+
+^{:go/end 328} (go/func verifyWithDom ^error [^{:tag (* PublicKey)} pub ^{:tag (slice byte)} message ^{:tag (slice byte)} sig ^string domPrefix ^string context]
+  (when [l (len sig)] (!= l signatureSize)
+    (return (errors/New (+ "ed25519: bad signature length: " (strconv/Itoa l)))))
+
+
+  (when (!= (bit-and (aget sig 63) 224) 0)
+    (return (errors/New "ed25519: invalid signature")))
+
+
+  (let [kh (sha512/New)]
+    (when (!= domPrefix domPrefixPure)
+      (.Write kh (conv (slice byte) domPrefix))
+      (.Write kh (lit (slice byte) (conv byte (len context))))
+      (.Write kh (conv (slice byte) context)))
+
+    (.Write kh (subslice sig _ 32))
+    (.Write kh (subslice (.-aBytes pub)))
+    (.Write kh message)
+    (let [hramDigest (make (slice byte) 0 sha512Size)]
+      (set! hramDigest (.Sum kh hramDigest))
+      (let [(values k err) (.SetUniformBytes (edwards25519/NewScalar) hramDigest)]
+        (when (!= err nil)
+          (panic "ed25519: internal error: setting scalar failed"))
+
+
+        (let [(values S ^:assign err) (.SetCanonicalBytes (edwards25519/NewScalar) (subslice sig 32))]
+          (when (!= err nil)
+            (return (errors/New "ed25519: invalid signature")))
+
+
+          ;; [S]B = R + [k]A --> [k](-A) + [S]B = R
+          ^{:go/breaks [[3 327]]} (let [minusA (.Negate (addr (lit edwards25519/Point)) (addr (.-a pub)))
+              ^{:line 322} R (.VarTimeDoubleScalarBaseMult (addr (lit edwards25519/Point)) k minusA S)]
+
+            (when (not (bytes/Equal (subslice sig _ 32) (.Bytes R)))
+              (return (errors/New "ed25519: invalid signature")))
+
+            nil))))))

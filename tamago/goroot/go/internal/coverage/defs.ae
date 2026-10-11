@@ -1,0 +1,388 @@
+;; Copyright 2022 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.internal.coverage) (go/file "defs.go" :imports [])
+
+;; Types and constants related to the output files written
+;; by code coverage tooling. When a coverage-instrumented binary
+;; is run, it emits two output files: a meta-data output file, and
+;; a counter data output file.
+
+;;.....................................................................
+;;
+;; Meta-data definitions:
+;;
+;; The meta-data file is composed of a file header, a series of
+;; meta-data blobs/sections (one per instrumented package), and an offsets
+;; area storing the offsets of each section. Format of the meta-data
+;; file looks like:
+;;
+;; --header----------
+;;  | magic: [4]byte magic string
+;;  | version
+;;  | total length of meta-data file in bytes
+;;  | numPkgs: number of package entries in file
+;;  | hash: [16]byte hash of entire meta-data payload
+;;  | offset to string table section
+;;  | length of string table
+;;  | number of entries in string table
+;;  | counter mode
+;;  | counter granularity
+;;  --package offsets table------
+;;  <offset to pkg 0>
+;;  <offset to pkg 1>
+;;  ...
+;;  --package lengths table------
+;;  <length of pkg 0>
+;;  <length of pkg 1>
+;;  ...
+;;  --string table------
+;;  <uleb128 len> 8
+;;  <data> "somestring"
+;;  ...
+;;  --package payloads------
+;;  <meta-symbol for pkg 0>
+;;  <meta-symbol for pkg 1>
+;;  ...
+;;
+;; Each package payload is a stand-alone blob emitted by the compiler,
+;; and does not depend on anything else in the meta-data file. In
+;; particular, each blob has it's own string table. Note that the
+;; file-level string table is expected to be very short (most strings
+;; will be in the meta-data blobs themselves).
+
+
+(go/var ^{:doc "CovMetaMagic holds the magic string for a meta-data file.\n"} CovMetaMagic (lit (array 4 byte) \u0000 \c \v \m))
+
+
+
+
+
+(go/const ^{:val "covmeta" :doc "MetaFilePref is a prefix used when emitting meta-data files; these\nfiles are of the form \"covmeta.<hash>\", where hash is a hash\ncomputed from the hashes of all the package meta-data symbols in\nthe program.\n"} MetaFilePref "covmeta")
+
+
+(go/const ^{:val 1 :doc "MetaFileVersion contains the current (most recent) meta-data file version.\n"} MetaFileVersion 1)
+
+
+(go/type MetaFileHeader "MetaFileHeader stores file header information for a meta-data file.\n" (struct
+    ^{:line 69 :tag (array 4 byte)} Magic
+    ^{:line 70 :tag uint32} Version
+    ^{:line 71 :tag uint64} TotalLength
+    ^{:line 72 :tag uint64} Entries
+    ^{:line 73 :tag (array 16 byte)} MetaFileHash
+    ^{:line 74 :tag uint32} StrTabOffset
+    ^{:line 75 :tag uint32} StrTabLength
+    ^{:line 76 :tag CounterMode} CMode
+    ^{:line 77 :tag CounterGranularity} CGranularity
+    ^{:line 78 :tag (array 6 byte)} _)) ; padding
+
+
+
+
+
+(go/type MetaSymbolHeader "MetaSymbolHeader stores header information for a single\nmeta-data blob, e.g. the coverage meta-data payload\ncomputed for a given Go package.\n" (struct
+    ^{:line 85 :tag uint32} Length ; size of meta-symbol payload in bytes
+    ^{:line 86 :tag uint32} PkgName ; string table index
+    ^{:line 87 :tag uint32} PkgPath ; string table index
+    ^{:line 88 :tag uint32} ModulePath ; string table index
+    ^{:line 89 :tag (array 16 byte)} MetaHash
+    ^{:line 90 :tag byte} _ ; currently unused
+    ^{:line 91 :tag (array 3 byte)} _ ; padding
+    ^{:line 92 :tag uint32} NumFiles
+    ^{:line 93 :tag uint32} NumFuncs))
+
+
+(go/const ^{:val 44} CovMetaHeaderSize (+ 16 4 4 4 4 4 4 4)) ; keep in sync with above
+
+;; As an example, consider the following Go package:
+;;
+;; 01: package p
+;; 02:
+;; 03: var v, w, z int
+;; 04:
+;; 05: func small(x, y int) int {
+;; 06:   v++
+;; 07:   // comment
+;; 08:   if y == 0 {
+;; 09:     return x
+;; 10:   }
+;; 11:   return (x << 1) ^ (9 / y)
+;; 12: }
+;; 13:
+;; 14: func Medium(q, r int) int {
+;; 15:   s1 := small(q, r)
+;; 16:   z += s1
+;; 17:   s2 := small(r, q)
+;; 18:   w -= s2
+;; 19:   return w + z
+;; 20: }
+;;
+;; The meta-data blob for the single package above might look like the
+;; following:
+;;
+;; -- MetaSymbolHeader header----------
+;;  | size: size of this blob in bytes
+;;  | packagepath: <path to p>
+;;  | modulepath: <modpath for p>
+;;  | nfiles: 1
+;;  | nfunctions: 2
+;;  --func offsets table------
+;;  <offset to func 0>
+;;  <offset to func 1>
+;;  --string table (contains all files and functions)------
+;;  | <uleb128 len> 4
+;;  | <data> "p.go"
+;;  | <uleb128 len> 5
+;;  | <data> "small"
+;;  | <uleb128 len> 6
+;;  | <data> "Medium"
+;;  --func 0------
+;;  | <uleb128> num units: 3
+;;  | <uleb128> func name: S1 (index into string table)
+;;  | <uleb128> file: S0 (index into string table)
+;;  | <unit 0>:  S0   L6     L8    2
+;;  | <unit 1>:  S0   L9     L9    1
+;;  | <unit 2>:  S0   L11    L11   1
+;;  --func 1------
+;;  | <uleb128> num units: 1
+;;  | <uleb128> func name: S2 (index into string table)
+;;  | <uleb128> file: S0 (index into string table)
+;;  | <unit 0>:  S0   L15    L19   5
+;;  ---end-----------
+
+;; The following types and constants used by the meta-data encoder/decoder.
+
+
+
+
+
+
+(go/type FuncDesc "FuncDesc encapsulates the meta-data definitions for a single Go function.\nThis version assumes that we're looking at a function before inlining;\nif we want to capture a post-inlining view of the world, the\nrepresentations of source positions would need to be a good deal more\ncomplicated.\n" (struct
+    ^{:line 162 :tag string} Funcname
+    ^{:line 163 :tag string} Srcfile
+    ^{:line 164 :tag (slice CoverableUnit)} Units
+    ^{:line 165 :tag bool} Lit)) ; true if this is a function literal
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type CoverableUnit "CoverableUnit describes the source characteristics of a single\nprogram unit for which we want to gather coverage info. Coverable\nunits are either \"simple\" or \"intraline\"; a \"simple\" coverable unit\ncorresponds to a basic block (region of straight-line code with no\njumps or control transfers). An \"intraline\" unit corresponds to a\nlogical clause nested within some other simple unit. A simple unit\nwill have a zero Parent value; for an intraline unit NxStmts will\nbe zero and Parent will be set to 1 plus the index of the\ncontaining simple statement. Example:\n\n\tL7:   q := 1\n\tL8:   x := (y == 101 || launch() == false)\n\tL9:   r := x * 2\n\nFor the code above we would have three simple units (one for each\nline), then an intraline unit describing the \"launch() == false\"\nclause in line 8, with Parent pointing to the index of the line 8\nunit in the units array.\n\nNote: in the initial version of the coverage revamp, only simple\nunits will be in use.\n" (struct
+    ^{:line 190 :tag uint32} StLine ^uint32 StCol
+    ^{:line 191 :tag uint32} EnLine ^uint32 EnCol
+    ^{:line 192 :tag uint32} NxStmts
+    ^{:line 193 :tag uint32} Parent))
+
+
+
+
+(go/type CounterMode "CounterMode tracks the \"flavor\" of the coverage counters being\nused in a given coverage-instrumented program.\n" uint8)
+
+(go/const
+  ^{:line 201} [^{:tag CounterMode :val 0} CtrModeInvalid iota]
+  ^{:line 202} [^{:val 1} CtrModeSet] ; "set" mode
+  ^{:line 203} [^{:val 2} CtrModeCount] ; "count" mode
+  ^{:line 204} [^{:val 3} CtrModeAtomic] ; "atomic" mode
+  ^{:line 205} [^{:val 4} CtrModeRegOnly] ; registration-only pseudo-mode
+  ^{:line 206} [^{:val 5} CtrModeTestMain]) ; testmain pseudo-mode
+
+
+^{:go/breaks [[4 222]] :go/end 223} (go/method String ^string [^CounterMode cm]
+  (switch cm
+    (case [CtrModeSet]
+      (return "set"))
+    (case [CtrModeCount]
+      (return "count"))
+    (case [CtrModeAtomic]
+      (return "atomic"))
+    (case [CtrModeRegOnly]
+      (return "regonly"))
+    (case [CtrModeTestMain]
+      (return "testmain")))
+
+  "<invalid>")
+
+
+^{:go/end 242} (go/func ParseCounterMode ^CounterMode [^string mode]
+  (let [^CounterMode cm (zero CounterMode)]
+    (switch mode
+      (case ["set"]
+        (set! cm CtrModeSet))
+      (case ["count"]
+        (set! cm CtrModeCount))
+      (case ["atomic"]
+        (set! cm CtrModeAtomic))
+      (case ["regonly"]
+        (set! cm CtrModeRegOnly))
+      (case ["testmain"]
+        (set! cm CtrModeTestMain))
+      (default
+        (set! cm CtrModeInvalid)))
+
+    ^{:line 241} cm))
+
+
+
+
+(go/type CounterGranularity "CounterGranularity tracks the granularity of the coverage counters being\nused in a given coverage-instrumented program.\n" uint8)
+
+(go/const
+  ^{:line 249} [^{:tag CounterGranularity :val 0} CtrGranularityInvalid iota]
+  ^{:line 250} [^{:val 1} CtrGranularityPerBlock]
+  ^{:line 251} [^{:val 2} CtrGranularityPerFunc])
+
+
+^{:go/breaks [[4 261]] :go/end 262} (go/method String ^string [^CounterGranularity cm]
+  (switch cm
+    (case [CtrGranularityPerBlock]
+      (return "perblock"))
+    (case [CtrGranularityPerFunc]
+      (return "perfunc")))
+
+  "<invalid>")
+
+
+
+
+
+
+(go/const ^{:val "metafiles.txt" :doc "Name of file within the \"go test -cover\" temp coverdir directory\ncontaining a list of meta-data files for packages being tested\nin a \"go test -coverpkg=... ...\" run. This constant is shared\nby the Go command and by the coverage runtime.\n"} MetaFilesFileName "metafiles.txt")
+
+
+
+
+(go/type MetaFileCollection "MetaFileCollection contains information generated by the Go command and\nthe read in by coverage test support functions within an executing\n\"go test -cover\" binary.\n" (struct
+    ^{:line 274 :tag (slice string)} ImportPaths
+    ^{:line 275 :tag (slice string)} MetaFileFragments))
+
+
+;;.....................................................................
+;;
+;; Counter data definitions:
+;;
+
+;; A counter data file is composed of a file header followed by one or
+;; more "segments" (each segment representing a given run or partial
+;; run of a give binary) followed by a footer.
+
+
+(go/var ^{:doc "CovCounterMagic holds the magic string for a coverage counter-data file.\n"} CovCounterMagic (lit (array 4 byte) \u0000 \c \w \m))
+
+
+(go/const ^{:val 1 :doc "CounterFileVersion stores the most recent counter data file version.\n"} CounterFileVersion 1)
+
+
+(go/type CounterFileHeader "CounterFileHeader stores files header information for a counter-data file.\n" (struct
+    ^{:line 295 :tag (array 4 byte)} Magic
+    ^{:line 296 :tag uint32} Version
+    ^{:line 297 :tag (array 16 byte)} MetaHash
+    ^{:line 298 :tag CounterFlavor} CFlavor
+    ^{:line 299 :tag bool} BigEndian
+    ^{:line 300 :tag (array 6 byte)} _)) ; padding
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type CounterSegmentHeader "CounterSegmentHeader encapsulates information about a specific\nsegment in a counter data file, which at the moment contains\ncounters data from a single execution of a coverage-instrumented\nprogram. Following the segment header will be the string table and\nargs table, and then (possibly) padding bytes to bring the byte\nsize of the preamble up to a multiple of 4. Immediately following\nthat will be the counter payloads.\n\nThe \"args\" section of a segment is used to store annotations\ndescribing where the counter data came from; this section is\nbasically a series of key-value pairs (can be thought of as an\nencoded 'map[string]string'). At the moment we only write os.Args()\ndata to this section, using pairs of the form \"argc=<integer>\",\n\"argv0=<os.Args[0]>\", \"argv1=<os.Args[1]>\", and so on. In the\nfuture the args table may also include things like GOOS/GOARCH\nvalues, and/or tags indicating which tests were run to generate the\ncounter data.\n" (struct
+    ^{:line 321 :tag uint64} FcnEntries
+    ^{:line 322 :tag uint32} StrTabLen
+    ^{:line 323 :tag uint32} ArgsLen))
+
+
+
+
+(go/type CounterFileFooter "CounterFileFooter appears at the tail end of a counter data file,\nand stores the number of segments it contains.\n" (struct
+    ^{:line 329 :tag (array 4 byte)} Magic
+    ^{:line 330 :tag (array 4 byte)} _ ; padding
+    ^{:line 331 :tag uint32} NumSegments
+    ^{:line 332 :tag (array 4 byte)} _)) ; padding
+
+
+
+
+
+
+(go/const ^{:val "covcounters" :doc "CounterFilePref is the file prefix used when emitting coverage data\noutput files. CounterFileTemplate describes the format of the file\nname: prefix followed by meta-file hash followed by process ID\nfollowed by emit UnixNanoTime.\n"} CounterFilePref "covcounters")
+(go/const ^{:val "%s.%x.%d.%d"} CounterFileTempl "%s.%x.%d.%d")
+(go/const ^{:val "^%s\\.(\\S+)\\.(\\d+)\\.(\\d+)+$"} CounterFileRegexp "^%s\\.(\\S+)\\.(\\d+)\\.(\\d+)+$")
+
+
+
+(go/type CounterFlavor "CounterFlavor describes how function and counters are\nstored/represented in the counter section of the file.\n" uint8)
+
+(go/const
+
+
+  ^{:line 350} [^{:tag CounterFlavor :val 1 :doc "\"Raw\" representation: all values (pkg ID, func ID, num counters,\nand counters themselves) are stored as uint32's.\n"} CtrRaw (+ iota 1)]
+
+
+
+  ^{:line 354} [^{:val 2 :doc "\"ULeb\" representation: all values (pkg ID, func ID, num counters,\nand counters themselves) are stored with ULEB128 encoding.\n"} CtrULeb128])
+
+
+^{:go/end 359} (go/func Round4 ^int [^int x]
+  (bit-and-not (+ x 3) 3))
+
+
+;;.....................................................................
+;;
+;; Runtime counter data definitions.
+;;
+
+;; At runtime within a coverage-instrumented program, the "counters"
+;; object we associated with instrumented function can be thought of
+;; as a struct of the following form:
+;;
+;; struct {
+;;     numCtrs uint32
+;;     pkgid uint32
+;;     funcid uint32
+;;     counterArray [numBlocks]uint32
+;; }
+;;
+;; where "numCtrs" is the number of blocks / coverable units within the
+;; function, "pkgid" is the unique index assigned to this package by
+;; the runtime, "funcid" is the index of this function within its containing
+;; package, and "counterArray" stores the actual counters.
+;;
+;; The counter variable itself is created not as a struct but as a flat
+;; array of uint32's; we then use the offsets below to index into it.
+
+(go/const ^{:val 0} NumCtrsOffset 0)
+(go/const ^{:val 1} PkgIdOffset 1)
+(go/const ^{:val 2} FuncIdOffset 2)
+(go/const ^{:val 3} FirstCtrOffset 3)

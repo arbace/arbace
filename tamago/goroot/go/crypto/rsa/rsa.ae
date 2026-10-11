@@ -1,0 +1,704 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package rsa implements RSA encryption as specified in PKCS #1 and RFC 8017.
+;;
+;; RSA is a single, fundamental operation that is used in this package to
+;; implement either public-key encryption or public-key signatures.
+;;
+;; The original specification for encryption and signatures with RSA is PKCS #1
+;; and the terms "RSA encryption" and "RSA signatures" by default refer to
+;; PKCS #1 version 1.5. However, that specification has flaws and new designs
+;; should use version 2, usually called by just OAEP and PSS, where
+;; possible.
+;;
+;; Two sets of interfaces are included in this package. When a more abstract
+;; interface isn't necessary, there are functions for encrypting/decrypting
+;; with v1.5/OAEP and signing/verifying with v1.5/PSS. If one needs to abstract
+;; over the public key primitive, the PrivateKey type implements the
+;; Decrypter and Signer interfaces from the crypto package.
+;;
+;; Operations involving private keys are implemented using constant-time
+;; algorithms, except for [GenerateKey] and for some operations involving
+;; deprecated multi-prime keys.
+;;
+;; # Minimum key size
+;;
+;; [GenerateKey] returns an error if a key of less than 1024 bits is requested,
+;; and all Sign, Verify, Encrypt, and Decrypt methods return an error if used
+;; with a key smaller than 1024 bits. Such keys are insecure and should not be
+;; used.
+;;
+;; The rsa1024min=0 GODEBUG setting suppresses this error, but we recommend
+;; doing so only in tests, if necessary. Tests can set this option using
+;; [testing.T.Setenv] or by including "//go:debug rsa1024min=0" in a *_test.go
+;; source file.
+;;
+;; Alternatively, see the [GenerateKey (TestKey)] example for a pregenerated
+;; test-only 2048-bit key.
+;;
+;; [GenerateKey (TestKey)]: https://pkg.go.dev/crypto/rsa#example-GenerateKey-TestKey
+(in-ns 'go.crypto.rsa) (go/file "rsa.go" :doc "Package rsa implements RSA encryption as specified in PKCS #1 and RFC 8017.\n\nRSA is a single, fundamental operation that is used in this package to\nimplement either public-key encryption or public-key signatures.\n\nThe original specification for encryption and signatures with RSA is PKCS #1\nand the terms \"RSA encryption\" and \"RSA signatures\" by default refer to\nPKCS #1 version 1.5. However, that specification has flaws and new designs\nshould use version 2, usually called by just OAEP and PSS, where\npossible.\n\nTwo sets of interfaces are included in this package. When a more abstract\ninterface isn't necessary, there are functions for encrypting/decrypting\nwith v1.5/OAEP and signing/verifying with v1.5/PSS. If one needs to abstract\nover the public key primitive, the PrivateKey type implements the\nDecrypter and Signer interfaces from the crypto package.\n\nOperations involving private keys are implemented using constant-time\nalgorithms, except for [GenerateKey] and for some operations involving\ndeprecated multi-prime keys.\n\n# Minimum key size\n\n[GenerateKey] returns an error if a key of less than 1024 bits is requested,\nand all Sign, Verify, Encrypt, and Decrypt methods return an error if used\nwith a key smaller than 1024 bits. Such keys are insecure and should not be\nused.\n\nThe rsa1024min=0 GODEBUG setting suppresses this error, but we recommend\ndoing so only in tests, if necessary. Tests can set this option using\n[testing.T.Setenv] or by including \"//go:debug rsa1024min=0\" in a *_test.go\nsource file.\n\nAlternatively, see the [GenerateKey (TestKey)] example for a pregenerated\ntest-only 2048-bit key.\n\n[GenerateKey (TestKey)]: https://pkg.go.dev/crypto/rsa#example-GenerateKey-TestKey\n" :imports [
+
+
+    ^{:line 45} [crypto "crypto"]
+    ^{:line 46} [boring "crypto/internal/boring"]
+    ^{:line 47} [bbig "crypto/internal/boring/bbig"]
+    ^{:line 48} [bigmod "crypto/internal/fips140/bigmod"]
+    ^{:line 49} [rsa "crypto/internal/fips140/rsa"]
+    ^{:line 50} [fips140only "crypto/internal/fips140only"]
+    ^{:line 51} [rand "crypto/internal/rand"]
+    ^:alias ^{:line 52} [cryptorand "crypto/rand"]
+    ^{:line 53} [subtle "crypto/subtle"]
+    ^{:line 54} [errors "errors"]
+    ^{:line 55} [fmt "fmt"]
+    ^{:line 56} [godebug "internal/godebug"]
+    ^{:line 57} [io "io"]
+    ^{:line 58} [math "math"]
+    ^{:line 59} [big "math/big"]])
+
+
+(go/var bigOne (big/NewInt 1))
+
+
+
+
+
+(go/type PublicKey "A PublicKey represents the public part of an RSA key.\n\nThe values of N and E are not considered confidential, and may leak through\nside channels, or could be mathematically derived from other public values.\n" (struct
+    ^{:line 69 :tag (* big/Int)} N ; modulus
+    ^{:line 70 :tag int} E)) ; public exponent
+
+
+;; Any methods implemented on PublicKey might need to also be implemented on
+;; PrivateKey, as the latter embeds the former and will expose its methods.
+
+
+
+^{:go/end 80} (go/method Size "Size returns the modulus size in bytes. Raw signatures and ciphertexts\nfor or by this public key will have the same size.\n" ^int [^{:tag (* PublicKey)} pub]
+  (/ (+ (.BitLen (.-N pub)) 7) 8))
+
+
+
+^{:go/end 89} (go/method Equal "Equal reports whether pub and x have the same value.\n" ^bool [^{:tag (* PublicKey)} pub ^crypto/PublicKey x]
+  (let [(values xx ok) (assert (* PublicKey) x)]
+    (when (not ok)
+      (return false))
+
+    (and (bigIntEqual (.-N pub) (.-N xx)) (== (.-E pub) (.-E xx)))))
+
+
+
+
+(go/type OAEPOptions "OAEPOptions allows passing options to OAEP encryption and decryption\nthrough the [PrivateKey.Decrypt] and [EncryptOAEPWithOptions] functions.\n" (struct
+
+    ^{:line 95 :tag crypto/Hash :doc "Hash is the hash function that will be used when generating the mask.\n"} Hash
+
+
+
+    ^{:line 99 :tag crypto/Hash :doc "MGFHash is the hash function used for MGF1.\nIf zero, Hash is used instead.\n"} MGFHash
+
+
+
+    ^{:line 103 :tag (slice byte) :doc "Label is an arbitrary byte string that must be equal to the value\nused when encrypting.\n"} Label))
+
+
+
+
+
+
+(go/type PrivateKey "A PrivateKey represents an RSA key.\n\nIts fields must not be modified after calling [PrivateKey.Precompute], and\nshould not be used directly as big.Int values for cryptographic purposes.\n" (struct
+    ^{:line 111} PublicKey ; public part.
+    ^{:line 112 :tag (* big/Int)} D ; private exponent
+    ^{:line 113 :tag (slice (* big/Int))} Primes ; prime factors of N, has >= 2 elements.
+
+
+
+
+    ^{:line 118 :tag PrecomputedValues :doc "Precomputed contains precomputed values that speed up RSA operations,\nif available. It must be generated by calling PrivateKey.Precompute and\nmust not be modified afterwards.\n"} Precomputed))
+
+
+
+^{:go/end 124} (go/method Public "Public returns the public key corresponding to priv.\n" ^crypto/PublicKey [^{:tag (* PrivateKey)} priv]
+  (addr (.-PublicKey priv)))
+
+
+
+
+^{:go/end 145} (go/method Equal "Equal reports whether priv and x have equivalent values. It ignores\nPrecomputed values.\n" ^bool [^{:tag (* PrivateKey)} priv ^crypto/PrivateKey x]
+  ^{:go/breaks [[6 144]]} (let [(values xx ok) (assert (* PrivateKey) x)]
+    (when (not ok)
+      (return false))
+
+    (when (or (not (.Equal (.-PublicKey priv) (addr (.-PublicKey xx)))) (not (bigIntEqual (.-D priv) (.-D xx))))
+      (return false))
+
+    (when (!= (len (.-Primes priv)) (len (.-Primes xx)))
+      (return false))
+
+    (range [i (.-Primes priv)]
+      (when (not (bigIntEqual (aget (.-Primes priv) i) (aget (.-Primes xx) i)))
+        (return false)))
+
+
+    true))
+
+
+
+
+^{:go/end 151} (go/func bigIntEqual "bigIntEqual reports whether a and b are equal leaking only their bit length\nthrough timing side-channels.\n" ^bool [^{:tag (* big/Int)} a ^{:tag (* big/Int)} b]
+  (== (subtle/ConstantTimeCompare (.Bytes a) (.Bytes b)) 1))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 167} (go/method Sign "Sign signs digest with priv, reading randomness from rand. If opts is a\n*[PSSOptions] then the PSS algorithm will be used, otherwise PKCS #1 v1.5 will\nbe used. digest must be the result of hashing the input message using\nopts.HashFunc().\n\nThis method implements [crypto.Signer], which is an interface to support keys\nwhere the private part is kept in, for example, a hardware module. Common\nuses should use the Sign* functions in this package directly.\n" [^{:tag (* PrivateKey)} priv ^io/Reader rand ^{:tag (slice byte)} digest ^crypto/SignerOpts opts] :results [(slice byte) error]
+  (when [(values pssOpts ok) (assert (* PSSOptions) opts)] ok
+    (return (SignPSS rand priv (.-Hash pssOpts) digest pssOpts)))
+
+
+  (SignPKCS1v15 rand priv (.HashFunc opts) digest))
+
+
+
+
+
+^{:go/end 208} (go/method Decrypt "Decrypt decrypts ciphertext with priv. If opts is nil or of type\n*[PKCS1v15DecryptOptions] then PKCS #1 v1.5 decryption is performed. Otherwise\nopts must have type *[OAEPOptions] and OAEP decryption is done.\n" [^{:tag (* PrivateKey)} priv ^io/Reader rand ^{:tag (slice byte)} ciphertext ^crypto/DecrypterOpts opts] :results [^{:tag (slice byte)} plaintext ^error err]
+  (when (== opts nil)
+    (return (DecryptPKCS1v15 rand priv ciphertext)))
+
+
+  (type-switch [opts opts]
+    (case [(* OAEPOptions)]
+      (when (not (.Available (.-Hash opts)))
+        (return nil (errors/New (+ "rsa: requested hash function unavailable: " (.String (.-Hash opts))))))
+
+      (when (and (!= (.-MGFHash opts) 0) (not (.Available (.-MGFHash opts))))
+        (return nil (errors/New (+ "rsa: requested hash function unavailable: " (.String (.-MGFHash opts))))))
+
+      (if (== (.-MGFHash opts) 0)
+        (return (decryptOAEP (.New (.-Hash opts)) (.New (.-Hash opts)) priv ciphertext (.-Label opts)))
+
+        (return (decryptOAEP (.New (.-Hash opts)) (.New (.-MGFHash opts)) priv ciphertext (.-Label opts)))))
+
+
+    (case [(* PKCS1v15DecryptOptions)]
+      (if [l (.-SessionKeyLen opts)] (> l 0) (do
+          (set! plaintext (make (slice byte) l))
+          (when [(values _ err) (io/ReadFull rand plaintext)] (!= err nil)
+            (return nil err))
+
+          (when [err (DecryptPKCS1v15SessionKey rand priv ciphertext plaintext)] (!= err nil)
+            (return nil err))
+
+          (return plaintext nil))
+
+        (return (DecryptPKCS1v15 rand priv ciphertext))))
+
+
+    (default
+      (return nil (errors/New "crypto/rsa: invalid options for Decrypt")))))
+
+
+
+(go/type PrecomputedValues (struct
+    ^{:line 211 :tag (* big/Int)} Dp ^{:tag (* big/Int)} Dq ; D mod (P-1) (or mod Q-1)
+    ^{:line 212 :tag (* big/Int)} Qinv ; Q^-1 mod P
+
+
+
+
+
+
+
+
+
+
+    ^{:line 223 :tag (slice CRTValue) :doc "CRTValues is used for the 3rd and subsequent primes. Due to a\nhistorical accident, the CRT for the first two primes is handled\ndifferently in PKCS #1 and interoperability is sufficiently\nimportant that we mirror this.\n\nDeprecated: These values are still filled in by Precompute for\nbackwards compatibility but are not used. Multi-prime RSA is very rare,\nand is implemented by this package without CRT optimizations to limit\ncomplexity.\n"} CRTValues
+
+    ^{:line 225 :tag (* rsa/PrivateKey)} fips))
+
+
+
+(go/type CRTValue "CRTValue contains the precomputed Chinese remainder theorem values.\n" (struct
+    ^{:line 230 :tag (* big/Int)} Exp ; D mod (prime-1).
+    ^{:line 231 :tag (* big/Int)} Coeff ; R·Coeff ≡ 1 mod Prime.
+    ^{:line 232 :tag (* big/Int)} R)) ; product of primes prior to this (inc p and q).
+
+
+
+
+
+
+^{:go/end 256} (go/method Validate "Validate performs basic sanity checks on the key.\nIt returns nil if the key is valid, or else an error describing a problem.\n\nIt runs faster on valid keys if run after [PrivateKey.Precompute].\n" ^error [^{:tag (* PrivateKey)} priv]
+  ;; We can operate on keys based on d alone, but they can't be encoded with
+  ;; [crypto/x509.MarshalPKCS1PrivateKey], which unfortunately doesn't return
+  ;; an error, so we need to reject them here.
+  (when (< (len (.-Primes priv)) 2)
+    (return (errors/New "crypto/rsa: missing primes")))
+
+  ;; If Precomputed.fips is set and consistent, then the key has been
+  ;; validated by [rsa.NewPrivateKey] or [rsa.NewPrivateKeyWithoutCRT].
+  (when (.precomputedIsConsistent priv)
+    (return nil))
+
+  (when (!= (.-fips (.-Precomputed priv)) nil)
+    (return (errors/New "crypto/rsa: precomputed values are inconsistent with the key")))
+
+  (let [(values _ err) (.precompute priv)]
+    ^{:line 255} err))
+
+
+^{:go/end 274} (go/method precomputedIsConsistent ^bool [^{:tag (* PrivateKey)} priv]
+  (when (== (.-fips (.-Precomputed priv)) nil)
+    (return false))
+
+  (let [(values N e d P Q dP dQ qInv) (.Export (.-fips (.-Precomputed priv)))]
+    (when (or (not (bigIntEqualToBytes ^{:go/via [PublicKey]} (.-N priv) N)) (!= ^{:go/via [PublicKey]} (.-E priv) e) (not (bigIntEqualToBytes (.-D priv) d)))
+      (return false))
+
+    (when (!= (len (.-Primes priv)) 2)
+      (return (and (== P nil) (== Q nil) (== dP nil) (== dQ nil) (== qInv nil))))
+
+    (and (bigIntEqualToBytes (aget (.-Primes priv) 0) P)
+      (bigIntEqualToBytes (aget (.-Primes priv) 1) Q)
+      (bigIntEqualToBytes (.-Dp (.-Precomputed priv)) dP)
+      (bigIntEqualToBytes (.-Dq (.-Precomputed priv)) dQ)
+      (bigIntEqualToBytes (.-Qinv (.-Precomputed priv)) qInv))))
+
+
+
+
+^{:go/end 284} (go/func bigIntEqualToBytes "bigIntEqual reports whether a and b are equal, ignoring leading zero bytes in\nb, and leaking only their bit length through timing side-channels.\n" ^bool [^{:tag (* big/Int)} a ^{:tag (slice byte)} b]
+  (when (or (== a nil) (> (.BitLen a) (* (len b) 8)))
+    (return false))
+
+  (let [buf (.FillBytes a (make (slice byte) (len b)))]
+    (== (subtle/ConstantTimeCompare buf b) 1)))
+
+
+
+
+(go/var ^{:doc "rsa1024min is a GODEBUG that re-enables weak RSA keys if set to \"0\".\nSee https://go.dev/issue/68762.\n"} rsa1024min (godebug/New "rsa1024min"))
+
+^{:go/end 299} (go/func checkKeySize ^error [^int size]
+  (when (>= size 1024)
+    (return nil))
+
+  (when (== (.Value rsa1024min) "0")
+    (.IncNonDefault rsa1024min)
+    (return nil))
+
+  (fmt/Errorf "crypto/rsa: %d-bit keys are insecure (see https://go.dev/pkg/crypto/rsa#hdr-Minimum_key_size)" size))
+
+
+^{:go/end 306} (go/func checkPublicKeySize ^error [^{:tag (* PublicKey)} k]
+  (when (== (.-N k) nil)
+    (return (errors/New "crypto/rsa: missing public modulus")))
+
+  (checkKeySize (.BitLen (.-N k))))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 410} (go/func GenerateKey "GenerateKey generates a random RSA private key of the given bit size.\n\nIf bits is less than 1024, [GenerateKey] returns an error. See the \"[Minimum\nkey size]\" section for further details.\n\nSince Go 1.26, a secure source of random bytes is always used, and the Reader is\nignored unless GODEBUG=cryptocustomrand=1 is set. This setting will be removed\nin a future Go release. Instead, use [testing/cryptotest.SetGlobalRandom].\n\n[Minimum key size]: https://pkg.go.dev/crypto/rsa#hdr-Minimum_key_size\n" [^io/Reader random ^int bits] :results [(* PrivateKey) error]
+  (when [err (checkKeySize bits)] (!= err nil)
+    (return nil err))
+
+
+  (when (and boring/Enabled (rand/IsDefaultReader random)
+      ^:go/paren (or (== bits 2048) (== bits 3072) (== bits 4096)))
+    (let [(values bN bE bD bP bQ bDp bDq bQinv err) (boring/GenerateKeyRSA bits)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [N (bbig/Dec bN)
+          ^{:line 330} E (bbig/Dec bE)
+          ^{:line 331} D (bbig/Dec bD)
+          ^{:line 332} P (bbig/Dec bP)
+          ^{:line 333} Q (bbig/Dec bQ)
+          ^{:line 334} Dp (bbig/Dec bDp)
+          ^{:line 335} Dq (bbig/Dec bDq)
+          ^{:line 336} Qinv (bbig/Dec bQinv)
+          ^{:line 337} e64 (.Int64 E)]
+        (when (or (not (.IsInt64 E)) (!= (conv int64 (conv int e64)) e64))
+          (return nil (errors/New "crypto/rsa: generated key exponent too large")))
+
+
+        (let [key (addr ^{:go/breaks [2 [4 347] 6 8]} (lit PrivateKey
+                :PublicKey ^{:go/breaks [2 4]} (lit PublicKey
+                  :N N
+                  :E (conv int e64))
+
+                :D D
+                :Primes (lit (slice (* big/Int)) P Q)
+                :Precomputed ^{:go/breaks [2 4 6 8]} (lit PrecomputedValues
+                  :Dp Dp
+                  :Dq Dq
+                  :Qinv Qinv
+                  :CRTValues (make (slice CRTValue) 0))))] ; non-nil, to match Precompute
+
+
+          (return key nil)))))
+
+
+  (set! random (rand/CustomReader random))
+
+  (when (and (fips140only/Enforced) (< bits 2048))
+    (return nil (errors/New "crypto/rsa: use of keys smaller than 2048 bits is not allowed in FIPS 140-only mode")))
+
+  (when (and (fips140only/Enforced) (== (% bits 2) 1))
+    (return nil (errors/New "crypto/rsa: use of keys with odd size is not allowed in FIPS 140-only mode")))
+
+  (when (and (fips140only/Enforced) (not (fips140only/ApprovedRandomReader random)))
+    (return nil (errors/New "crypto/rsa: only crypto/rand.Reader is allowed in FIPS 140-only mode")))
+
+
+  (let [(values k err) (rsa/GenerateKey random bits)]
+    (when (and (< bits 256) (!= err nil))
+      ;; Toy-sized keys have a non-negligible chance of hitting two hard
+      ;; failure cases: p == q and d <= 2^(nlen / 2).
+      ;;
+      ;; Since these are impossible to hit for real keys, we don't want to
+      ;; make the production code path more complex and harder to think about
+      ;; to handle them.
+      ;;
+      ;; Instead, just rerun the whole process a total of 8 times, which
+      ;; brings the chance of failure for 32-bit keys down to the same as for
+      ;; 256-bit keys.
+      (for [i 1] (and (< i 8) (!= err nil)) (inc! i)
+        (set! (values k err) (rsa/GenerateKey random bits))))
+
+
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values N e d p q dP dQ qInv) (.Export k)
+        ^{:line 391} key (addr ^{:go/breaks [2 [4 396] 6 [8 401]]} (lit PrivateKey
+            :PublicKey ^{:go/breaks [2 4]} (lit PublicKey
+              :N (.SetBytes (new big/Int) N)
+              :E e)
+
+            :D (.SetBytes (new big/Int) d)
+            :Primes (lit (slice (* big/Int))
+              (.SetBytes (new big/Int) p)
+              (.SetBytes (new big/Int) q))
+
+            :Precomputed ^{:go/breaks [2 4 6 8 10]} (lit PrecomputedValues
+              :fips k
+              :Dp (.SetBytes (new big/Int) dP)
+              :Dq (.SetBytes (new big/Int) dQ)
+              :Qinv (.SetBytes (new big/Int) qInv)
+              :CRTValues (make (slice CRTValue) 0))))] ; non-nil, to match Precompute
+
+
+      (return key nil))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 536} (go/func GenerateMultiPrimeKey "GenerateMultiPrimeKey generates a multi-prime RSA keypair of the given bit\nsize and the given random source.\n\nTable 1 in \"[On the Security of Multi-prime RSA]\" suggests maximum numbers of\nprimes for a given bit size.\n\nAlthough the public keys are compatible (actually, indistinguishable) from\nthe 2-prime case, the private keys are not. Thus it may not be possible to\nexport multi-prime private keys in certain formats or to subsequently import\nthem into other code.\n\nThis package does not implement CRT optimizations for multi-prime RSA, so the\nkeys with more than two primes will have worse performance.\n\nSince Go 1.26, a secure source of random bytes is always used, and the Reader is\nignored unless GODEBUG=cryptocustomrand=1 is set. This setting will be removed\nin a future Go release. Instead, use [testing/cryptotest.SetGlobalRandom].\n\nDeprecated: The use of this function with a number of primes different from\ntwo is not recommended for the above security, compatibility, and performance\nreasons. Use [GenerateKey] instead.\n\n[On the Security of Multi-prime RSA]: http://www.cacr.math.uwaterloo.ca/techreports/2006/cacr2006-16.pdf\n" [^io/Reader random ^int nprimes ^int bits] :results [(* PrivateKey) error]
+  (when (== nprimes 2)
+    (return (GenerateKey random bits)))
+
+  (when (fips140only/Enforced)
+    (return nil (errors/New "crypto/rsa: multi-prime RSA is not allowed in FIPS 140-only mode")))
+
+
+  (set! random (rand/CustomReader random))
+
+  (let [priv (new PrivateKey)]
+    (set! ^{:go/via [PublicKey]} (.-E priv) 65537)
+
+    (when (< nprimes 2)
+      (return nil (errors/New "crypto/rsa: GenerateMultiPrimeKey: nprimes must be >= 2")))
+
+
+    (when (< bits 64)
+      (let [primeLimit (conv float64 (<< (conv uint64 1) (conv uint (/ bits nprimes))))
+          ;; pi approximates the number of primes less than primeLimit
+          ^{:line 455} pi (/ primeLimit (- (math/Log primeLimit) 1))]
+        ;; Generated primes start with 11 (in binary) so we can only
+        ;; use a quarter of them.
+        (set! pi / 4)
+        ;; Use a factor of two to ensure that key generation terminates
+        ;; in a reasonable amount of time.
+        (set! pi / 2)
+        (when (<= pi (conv float64 nprimes))
+          (return nil (errors/New "crypto/rsa: too few primes of given length to generate an RSA key")))))
+
+
+
+    (let [primes (make (slice (* big/Int)) nprimes)]
+
+      (label :NextSetOfPrimes
+        (while true
+          (let [todo bits]
+            ;; crypto/rand should set the top two bits in each prime.
+            ;; Thus each prime has the form
+            ;;   p_i = 2^bitlen(p_i) × 0.11... (in base 2).
+            ;; And the product is:
+            ;;   P = 2^todo × α
+            ;; where α is the product of nprimes numbers of the form 0.11...
+            ;;
+            ;; If α < 1/2 (which can happen for nprimes > 2), we need to
+            ;; shift todo to compensate for lost bits: the mean value of 0.11...
+            ;; is 7/8, so todo + shift - nprimes * log2(7/8) ~= bits - 1/2
+            ;; will give good results.
+            (when (>= nprimes 7)
+              (set! todo + (/ (- nprimes 2) 5)))
+
+            (for [i 0] (< i nprimes) (inc! i)
+              (let [^error err (zero error)]
+                (set! (values (aget primes i) err) (cryptorand/Prime random (/ todo (- nprimes i))))
+                (when (!= err nil)
+                  (return nil err))
+
+                (set! todo - (.BitLen (aget primes i)))))
+
+
+            ;; Make sure that primes is pairwise unequal.
+            (range [i prime primes]
+              (for [j 0] (< j i) (inc! j)
+                (when (== (.Cmp prime (aget primes j)) 0)
+                  (continue :NextSetOfPrimes))))
+
+
+
+
+            (let [n (.Set (new big/Int) bigOne)
+                ^{:line 505} totient (.Set (new big/Int) bigOne)
+                ^{:line 506} pminus1 (new big/Int)]
+              (range [_ prime primes]
+                (.Mul n n prime)
+                (.Sub pminus1 prime bigOne)
+                (.Mul totient totient pminus1))
+
+              (when (!= (.BitLen n) bits)
+                ;; This should never happen for nprimes == 2 because
+                ;; crypto/rand should set the top two bits in each prime.
+                ;; For nprimes > 2 we hope it does not happen often.
+                (continue :NextSetOfPrimes))
+
+
+              (set! (.-D priv) (new big/Int))
+              (let [e (big/NewInt (conv int64 ^{:go/via [PublicKey]} (.-E priv)))
+                  ^{:line 521} ok (.ModInverse (.-D priv) e totient)]
+
+                (when (!= ok nil)
+                  (set! (.-Primes priv) primes)
+                  (set! ^{:go/via [PublicKey]} (.-N priv) n)
+                  (break)))))))
+
+
+
+      (.Precompute priv)
+      (when [err (.Validate priv)] (!= err nil)
+        (return nil err))
+
+
+      (return priv nil))))
+
+
+
+
+
+(go/var ^{:doc "ErrMessageTooLong is returned when attempting to encrypt or sign a message\nwhich is too large for the size of the key. When using [SignPSS], this can also\nbe returned if the size of the salt is too large.\n"} ErrMessageTooLong (errors/New "crypto/rsa: message too long for RSA key size"))
+
+
+
+(go/var ^{:doc "ErrDecryption represents a failure to decrypt a message.\nIt is deliberately vague to avoid adaptive attacks.\n"} ErrDecryption (errors/New "crypto/rsa: decryption error"))
+
+
+
+(go/var ^{:doc "ErrVerification represents a failure to verify a signature.\nIt is deliberately vague to avoid adaptive attacks.\n"} ErrVerification (errors/New "crypto/rsa: verification error"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 576} (go/method Precompute "Precompute performs some calculations that speed up private key operations in\nthe future. It is safe to run on non-validated private keys, and it can speed\nup future calls to [PrivateKey.Validate] for valid keys.\n\nPrecompute writes to the Precomputed field, so it must not be called\nconcurrently with any other method.\n\nPrecompute does not return an error. Applications should call\n[PrivateKey.Validate] after Precompute to check for any problems with the\nkey, including any that would cause Precompute to fail.\n\nCalling Precompute on a key that has already been precomputed is a no-op.\n" [^{:tag (* PrivateKey)} priv]
+  (when (.precomputedIsConsistent priv)
+    (return))
+
+
+  (let [(values precomputed err) (.precompute priv)]
+    (when (!= err nil)
+      ;; We don't have a way to report errors, so just leave Precomputed.fips
+      ;; nil. Validate will re-run precompute and report its error.
+      (set! (.-fips (.-Precomputed priv)) nil)
+      (return))
+
+    (set! (.-Precomputed priv) precomputed)))
+
+
+
+
+
+^{:go/end 627} (go/method precompute "precompute calculates the PrecomputedValues for priv and returns them.\n\nIt does NOT modify priv and is safe for concurrent use.\n" [^{:tag (* PrivateKey)} priv] :results [PrecomputedValues error]
+  (let [^PrecomputedValues precomputed (zero PrecomputedValues)]
+
+    (when (== ^{:go/via [PublicKey]} (.-N priv) nil)
+      (return precomputed (errors/New "crypto/rsa: missing public modulus")))
+
+    (when (== (.-D priv) nil)
+      (return precomputed (errors/New "crypto/rsa: missing private exponent")))
+
+    (when (!= (len (.-Primes priv)) 2)
+      (return (.precomputeLegacy priv)))
+
+    (when (== (aget (.-Primes priv) 0) nil)
+      (return precomputed (errors/New "crypto/rsa: prime P is nil")))
+
+    (when (== (aget (.-Primes priv) 1) nil)
+      (return precomputed (errors/New "crypto/rsa: prime Q is nil")))
+
+
+    ;; If the CRT values are already set, use them.
+    (when (and (!= (.-Dp (.-Precomputed priv)) nil) (!= (.-Dq (.-Precomputed priv)) nil) (!= (.-Qinv (.-Precomputed priv)) nil))
+      (let [(values k err) (rsa/NewPrivateKeyWithPrecomputation (.Bytes ^{:go/via [PublicKey]} (.-N priv)) ^{:go/via [PublicKey]} (.-E priv) (.Bytes (.-D priv))
+            (.Bytes (aget (.-Primes priv) 0)) (.Bytes (aget (.-Primes priv) 1))
+            (.Bytes (.-Dp (.-Precomputed priv))) (.Bytes (.-Dq (.-Precomputed priv))) (.Bytes (.-Qinv (.-Precomputed priv))))]
+        (when (!= err nil)
+          (return precomputed err))
+
+        (set! precomputed (.-Precomputed priv))
+        (set! (.-fips precomputed) k)
+        (set! (.-CRTValues precomputed) (make (slice CRTValue) 0))
+        (return precomputed nil)))
+
+
+    (let [(values k err) (rsa/NewPrivateKey (.Bytes ^{:go/via [PublicKey]} (.-N priv)) ^{:go/via [PublicKey]} (.-E priv) (.Bytes (.-D priv))
+          (.Bytes (aget (.-Primes priv) 0)) (.Bytes (aget (.-Primes priv) 1)))]
+      (when (!= err nil)
+        (return precomputed err))
+
+
+      (set! (.-fips precomputed) k)
+      (let [(values _ _ _ _ _ dP dQ qInv) (.Export k)]
+        (set! (.-Dp precomputed) (.SetBytes (new big/Int) dP))
+        (set! (.-Dq precomputed) (.SetBytes (new big/Int) dQ))
+        (set! (.-Qinv precomputed) (.SetBytes (new big/Int) qInv))
+        (set! (.-CRTValues precomputed) (make (slice CRTValue) 0))
+        (return precomputed nil)))))
+
+
+^{:go/end 682} (go/method precomputeLegacy [^{:tag (* PrivateKey)} priv] :results [PrecomputedValues error]
+  (let [^PrecomputedValues precomputed (zero PrecomputedValues)
+
+      (values k err) (rsa/NewPrivateKeyWithoutCRT (.Bytes ^{:go/via [PublicKey]} (.-N priv)) ^{:go/via [PublicKey]} (.-E priv) (.Bytes (.-D priv)))]
+    (when (!= err nil)
+      (return precomputed err))
+
+    (set! (.-fips precomputed) k)
+
+    (when (< (len (.-Primes priv)) 2)
+      (return precomputed nil))
+
+
+    ;; Ensure the Mod and ModInverse calls below don't panic.
+    (range [_ prime (.-Primes priv)]
+      (when (== prime nil)
+        (return precomputed (errors/New "crypto/rsa: prime factor is nil")))
+
+      (when (<= (.Cmp prime bigOne) 0)
+        (return precomputed (errors/New "crypto/rsa: prime factor is <= 1"))))
+
+
+
+    (set! (.-Dp precomputed) (.Sub (new big/Int) (aget (.-Primes priv) 0) bigOne))
+    (.Mod (.-Dp precomputed) (.-D priv) (.-Dp precomputed))
+
+    (set! (.-Dq precomputed) (.Sub (new big/Int) (aget (.-Primes priv) 1) bigOne))
+    (.Mod (.-Dq precomputed) (.-D priv) (.-Dq precomputed))
+
+    (set! (.-Qinv precomputed) (.ModInverse (new big/Int) (aget (.-Primes priv) 1) (aget (.-Primes priv) 0)))
+    (when (== (.-Qinv precomputed) nil)
+      (return precomputed (errors/New "crypto/rsa: prime factors are not relatively prime")))
+
+
+    (let [r (.Mul (new big/Int) (aget (.-Primes priv) 0) (aget (.-Primes priv) 1))]
+      (set! (.-CRTValues precomputed) (make (slice CRTValue) (- (len (.-Primes priv)) 2)))
+      (for [i 2] (< i (len (.-Primes priv))) (inc! i)
+        (let [prime (aget (.-Primes priv) i)
+            ^{:line 667} values (addr (aget (.-CRTValues precomputed) (- i 2)))]
+
+          (set! (.-Exp values) (.Sub (new big/Int) prime bigOne))
+          (.Mod (.-Exp values) (.-D priv) (.-Exp values))
+
+          (set! (.-R values) (.Set (new big/Int) r))
+          (set! (.-Coeff values) (.ModInverse (new big/Int) r prime))
+          (when (== (.-Coeff values) nil)
+            (return precomputed (errors/New "crypto/rsa: prime factors are not relatively prime")))
+
+
+          (.Mul r r prime)))
+
+
+      (return precomputed nil))))
+
+
+^{:go/end 690} (go/func fipsPublicKey [^{:tag (* PublicKey)} pub] :results [(* rsa/PublicKey) error]
+  (let [(values N err) (bigmod/NewModulus (.Bytes (.-N pub)))]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (addr (lit rsa/PublicKey :N N :E (.-E pub))) nil)))
+
+
+
+
+
+
+^{:go/end 705} (go/func fipsPrivateKey "fipsPrivateKey returns the *rsa.PrivateKey corresponding to priv, using the\nprecomputed values if available, and calculating them if not.\n\nIt does NOT modify priv and is safe for concurrent use.\n" [^{:tag (* PrivateKey)} priv] :results [(* rsa/PrivateKey) error]
+  (when (!= (.-fips (.-Precomputed priv)) nil)
+    (return (.-fips (.-Precomputed priv)) nil))
+
+  (let [(values precomputed err) (.precompute priv)]
+    (when (!= err nil)
+      (return nil err))
+
+    (return (.-fips precomputed) nil)))

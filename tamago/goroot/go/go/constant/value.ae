@@ -1,0 +1,1434 @@
+;; Copyright 2013 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package constant implements Values representing untyped
+;; Go constants and their corresponding operations.
+;;
+;; A special Unknown value may be used when a value
+;; is unknown due to an error. Operations on unknown
+;; values produce unknown values unless specified
+;; otherwise.
+(in-ns 'go.go.constant) (go/file "value.go" :doc "Package constant implements Values representing untyped\nGo constants and their corresponding operations.\n\nA special Unknown value may be used when a value\nis unknown due to an error. Operations on unknown\nvalues produce unknown values unless specified\notherwise.\n" :imports [
+
+
+    ^{:line 15} [fmt "fmt"]
+    ^{:line 16} [token "go/token"]
+    ^{:line 17} [math "math"]
+    ^{:line 18} [big "math/big"]
+    ^{:line 19} [bits "math/bits"]
+    ^{:line 20} [strconv "strconv"]
+    ^{:line 21} [strings "strings"]
+    ^{:line 22} [sync "sync"]
+    ^{:line 23} [utf8 "unicode/utf8"]])
+
+
+(go/directive "//go:generate stringer -type Kind")
+
+
+(go/type Kind "Kind specifies the kind of value represented by a [Value].\n" int)
+
+(go/const
+
+  ^{:line 33} [^{:tag Kind :val 0 :doc "unknown values\n"} Unknown iota]
+
+
+  ^{:line 36} [^{:val 1 :doc "non-numeric values\n"} Bool]
+  ^{:line 37} [^{:val 2} String]
+
+
+  ^{:line 40} [^{:val 3 :doc "numeric values\n"} Int]
+  ^{:line 41} [^{:val 4} Float]
+  ^{:line 42} [^{:val 5} Complex])
+
+
+
+(go/type Value "A Value represents the value of a Go constant.\n" (interface
+
+    (^{:doc "Kind returns the value kind.\n"} Kind ^Kind [])
+
+
+
+
+
+    (^{:doc "String returns a short, quoted (human-readable) form of the value.\nFor numeric values, the result may be an approximation;\nfor String values the result may be a shortened string.\nUse ExactString for a string representing a value exactly.\n"} String ^string [])
+
+
+
+    (^{:doc "ExactString returns an exact, quoted (human-readable) form of the value.\nIf the Value is of Kind String, use StringVal to obtain the unquoted string.\n"} ExactString ^string [])
+
+
+    (^{:doc "Prevent external implementations.\n"} implementsValue [])))
+
+
+;; ----------------------------------------------------------------------------
+;; Implementations
+
+
+
+(go/const ^{:val 512 :doc "Maximum supported mantissa precision.\nThe spec requires at least 256 bits; typical implementations use 512 bits.\n"} prec 512)
+
+;; TODO(gri) Consider storing "error" information in an unknownVal so clients
+;; can provide better error messages. For instance, if a number is
+;; too large (incl. infinity), that could be recorded in unknownVal.
+;; See also #20583 and #42695 for use cases.
+
+;; Representation of values:
+;;
+;; Values of Int and Float Kind have two different representations each: int64Val
+;; and intVal, and ratVal and floatVal. When possible, the "smaller", respectively
+;; more precise (for Floats) representation is chosen. However, once a Float value
+;; is represented as a floatVal, any subsequent results remain floatVals (unless
+;; explicitly converted); i.e., no attempt is made to convert a floatVal back into
+;; a ratVal. The reasoning is that all representations but floatVal are mathematically
+;; exact, but once that precision is lost (by moving to floatVal), moving back to
+;; a different representation implies a precision that's not actually there.
+
+(go/type
+  ^{:line 88} [unknownVal (struct)]
+  ^{:line 89} [boolVal bool]
+  ^{:line 90} [stringVal (struct
+
+      ^{:line 92 :tag sync/Mutex :doc "Lazy value: either a string (l,r==nil) or an addition (l,r!=nil).\n"} mu
+      ^{:line 93 :tag string} s
+      ^{:line 94 :tag (* stringVal)} l ^{:tag (* stringVal)} r)]
+
+  ^{:line 96} [int64Val int64] ; Int values representable as an int64
+  ^{:line 97} [intVal (struct ^{:tag (* big/Int)} val)] ; Int values not representable as an int64
+  ^{:line 98} [ratVal (struct ^{:tag (* big/Rat)} val)] ; Float values representable as a fraction
+  ^{:line 99} [floatVal (struct ^{:tag (* big/Float)} val)] ; Float values not representable as a fraction
+  ^{:line 100} [complexVal (struct ^Value re ^Value im)])
+
+
+^{:go/end 103} (go/method Kind ^Kind [unknownVal] Unknown)
+^{:go/end 104} (go/method Kind ^Kind [boolVal] Bool)
+^{:go/end 105} (go/method Kind ^Kind [(* stringVal)] String)
+^{:go/end 106} (go/method Kind ^Kind [int64Val] Int)
+^{:go/end 107} (go/method Kind ^Kind [intVal] Int)
+^{:go/end 108} (go/method Kind ^Kind [ratVal] Float)
+^{:go/end 109} (go/method Kind ^Kind [floatVal] Float)
+^{:go/end 110} (go/method Kind ^Kind [complexVal] Complex)
+
+^{:go/end 112} (go/method String ^string [unknownVal] "unknown")
+^{:go/end 113} (go/method String ^string [^boolVal x] (strconv/FormatBool (conv bool x)))
+
+
+^{:go/end 131} (go/method String "String returns a possibly shortened quoted form of the String value.\n" ^string [^{:tag (* stringVal)} x]
+  (let [^:const ^{:val 72} maxLen 72 ; a reasonable length
+      ^{:line 118} s (strconv/Quote (.string x))]
+    (when (> (utf8/RuneCountInString s) maxLen)
+      ;; The string without the enclosing quotes is greater than maxLen-2 runes
+      ;; long. Remove the last 3 runes (including the closing '"') by keeping
+      ;; only the first maxLen-3 runes; then add "...".
+      (let [i 0]
+        (for [n 0] (< n (- maxLen 3)) (inc! n)
+          (let [(values _ size) (utf8/DecodeRuneInString (subslice s i))]
+            (set! i + size)))
+
+        (set! s (+ (subslice s _ i) "..."))))
+
+    ^{:line 130} s))
+
+
+
+
+
+
+
+^{:go/end 147} (go/method string "string constructs and returns the actual string literal value.\nIf x represents an addition, then it rewrites x to be a single\nstring, to speed future calls. This lazy construction avoids\nbuilding different string values for all subpieces of a large\nconcatenation. See golang.org/issue/23348.\n" ^string [^{:tag (* stringVal)} x]
+  (.Lock (.-mu x))
+  (defer (.Unlock (.-mu x)))
+  (when (!= (.-l x) nil)
+    (set! (.-s x) (strings/Join (reverse (.appendReverse x nil)) ""))
+    (set! (.-l x) nil)
+    (set! (.-r x) nil))
+
+  (.-s x))
+
+
+
+^{:go/end 156} (go/func reverse "reverse reverses x in place and returns it.\n" ^{:tag (slice string)} [^{:tag (slice string)} x]
+  (let [n (len x)]
+    (for [i 0] (< (+ i i) n) (inc! i)
+      (set! (values (aget x i) (aget x (- n 1 i))) (values (aget x (- n 1 i)) (aget x i))))
+
+    ^{:line 155} x))
+
+
+
+
+
+
+
+
+^{:go/end 183} (go/method appendReverse "appendReverse appends to list all of x's subpieces, but in reverse,\nand returns the result. Appending the reversal allows processing\nthe right side in a recursive call and the left side in a loop.\nBecause a chain like a + b + c + d + e is actually represented\nas ((((a + b) + c) + d) + e), the left-side loop avoids deep recursion.\nx must be locked.\n" ^{:tag (slice string)} [^{:tag (* stringVal)} x ^{:tag (slice string)} list]
+  (let [y x]
+    (while (!= (.-r y) nil)
+      (.Lock (.-mu (.-r y)))
+      (set! list (.appendReverse (.-r y) list))
+      (.Unlock (.-mu (.-r y)))
+
+      (let [l (.-l y)]
+        (when (!= y x)
+          (.Unlock (.-mu y)))
+
+        (.Lock (.-mu l))
+        (set! y l)))
+
+    (let [s (.-s y)]
+      (when (!= y x)
+        (.Unlock (.-mu y)))
+
+      (append list s))))
+
+
+^{:go/end 185} (go/method String ^string [^int64Val x] (strconv/FormatInt (conv int64 x) 10))
+^{:go/end 186} (go/method String ^string [^intVal x] (.String (.-val x)))
+^{:go/end 187} (go/method String ^string [^ratVal x] (.String (rtof x)))
+
+
+^{:go/end 240} (go/method String "String returns a decimal approximation of the Float value.\n" ^string [^floatVal x]
+  (let [f (.-val x)]
+
+    ;; Don't try to convert infinities (will not terminate).
+    (when (.IsInf f)
+      (return (.String f)))
+
+
+    ;; Use exact fmt formatting if in float64 range (common case):
+    ;; proceed if f doesn't underflow to 0 or overflow to inf.
+    (when [(values x _) (.Float64 f)] (and (== (== (.Sign f) 0) (== x 0)) (not (math/IsInf x 0)))
+      (let [s (fmt/Sprintf "%.6g" x)]
+        (when (and (not (.IsInt f)) (< (strings/IndexByte s \.) 0))
+          ;; f is not an integer, but its string representation
+          ;; doesn't reflect that. Use more digits. See issue 56220.
+          (set! s (fmt/Sprintf "%g" x)))
+
+        (return s)))
+
+
+    ;; Out of float64 range. Do approximate manual to decimal
+    ;; conversion to avoid precise but possibly slow Float
+    ;; formatting.
+    ;; f = mant * 2**exp
+    (let [^big/Float mant (zero big/Float)
+        ^{:line 215} exp (.MantExp f (addr mant)) ; 0.5 <= |mant| < 1.0
+
+        ;; approximate float64 mantissa m and decimal exponent d
+        ;; f ~ m * 10**d
+        (values m _) (.Float64 mant) ; 0.5 <= |m| < 1.0
+        ^{:line 220} d (* (conv float64 exp) (/ math/Ln2 math/Ln10)) ; log_10(2)
+
+        ;; adjust m for truncated (integer) decimal exponent e
+        ^{:line 223} e (conv int64 d)]
+      (set! m * (math/Pow 10 (- d (conv float64 e))))
+
+      ;; ensure 1 <= |m| < 10
+      (switch [am (math/Abs m)]
+        (case [(< am (- 1 5.0E-7))]
+          ;; The %.6g format below rounds m to 5 digits after the
+          ;; decimal point. Make sure that m*10 < 10 even after
+          ;; rounding up: m*10 + 0.5e-5 < 10 => m < 1 - 0.5e6.
+          (set! m * 10)
+          (dec! e))
+        (case [(>= am 10)]
+          (set! m / 10)
+          (inc! e)))
+
+
+      (fmt/Sprintf "%.6ge%+d" m e))))
+
+
+^{:go/end 242} (go/method String ^string [^complexVal x] (fmt/Sprintf "(%s + %si)" (.-re x) (.-im x)))
+
+^{:go/end 244} (go/method ExactString ^string [^unknownVal x] (.String x))
+^{:go/end 245} (go/method ExactString ^string [^boolVal x] (.String x))
+^{:go/end 246} (go/method ExactString ^string [^{:tag (* stringVal)} x] (strconv/Quote (.string x)))
+^{:go/end 247} (go/method ExactString ^string [^int64Val x] (.String x))
+^{:go/end 248} (go/method ExactString ^string [^intVal x] (.String x))
+
+^{:go/end 256} (go/method ExactString ^string [^ratVal x]
+  (let [r (.-val x)]
+    (when (.IsInt r)
+      (return (.String (.Num r))))
+
+    (.String r)))
+
+
+^{:go/end 258} (go/method ExactString ^string [^floatVal x] (.Text (.-val x) \p 0))
+
+^{:go/end 262} (go/method ExactString ^string [^complexVal x]
+  (fmt/Sprintf "(%s + %si)" (.ExactString (.-re x)) (.ExactString (.-im x))))
+
+
+^{:go/end 264} (go/method implementsValue [unknownVal])
+^{:go/end 265} (go/method implementsValue [boolVal])
+^{:go/end 266} (go/method implementsValue [(* stringVal)])
+^{:go/end 267} (go/method implementsValue [int64Val])
+^{:go/end 268} (go/method implementsValue [ratVal])
+^{:go/end 269} (go/method implementsValue [intVal])
+^{:go/end 270} (go/method implementsValue [floatVal])
+^{:go/end 271} (go/method implementsValue [complexVal])
+
+^{:go/end 273} (go/func newInt ^{:tag (* big/Int)} [] (new big/Int))
+^{:go/end 274} (go/func newRat ^{:tag (* big/Rat)} [] (new big/Rat))
+^{:go/end 275} (go/func newFloat ^{:tag (* big/Float)} [] (.SetPrec (new big/Float) prec))
+
+^{:go/end 277} (go/func i64toi ^intVal [^int64Val x] (lit intVal (.SetInt64 (newInt) (conv int64 x))))
+^{:go/end 278} (go/func i64tor ^ratVal [^int64Val x] (lit ratVal (.SetInt64 (newRat) (conv int64 x))))
+^{:go/end 279} (go/func i64tof ^floatVal [^int64Val x] (lit floatVal (.SetInt64 (newFloat) (conv int64 x))))
+^{:go/end 280} (go/func itor ^ratVal [^intVal x] (lit ratVal (.SetInt (newRat) (.-val x))))
+^{:go/end 281} (go/func itof ^floatVal [^intVal x] (lit floatVal (.SetInt (newFloat) (.-val x))))
+^{:go/end 282} (go/func rtof ^floatVal [^ratVal x] (lit floatVal (.SetRat (newFloat) (.-val x))))
+^{:go/end 283} (go/func vtoc ^complexVal [^Value x] (lit complexVal x (conv int64Val 0)))
+
+^{:go/end 290} (go/func makeInt ^Value [^{:tag (* big/Int)} x]
+  (when (.IsInt64 x)
+    (return (conv int64Val (.Int64 x))))
+
+  (lit intVal x))
+
+
+^{:go/end 301} (go/func makeRat ^Value [^{:tag (* big/Rat)} x]
+  (let [a (.Num x)
+      ^{:line 294} b (.Denom x)]
+    (when (and (smallInt a) (smallInt b))
+      ;; ok to remain fraction
+      (return (lit ratVal x)))
+
+    ;; components too large => switch to float
+    (lit floatVal (.SetRat (newFloat) x))))
+
+
+(go/var floatVal0 (lit floatVal (newFloat)))
+
+^{:go/end 317} (go/func makeFloat ^Value [^{:tag (* big/Float)} x]
+  ;; convert -0
+  (when (== (.Sign x) 0)
+    (return floatVal0))
+
+  (when (.IsInf x)
+    (return (lit unknownVal)))
+
+  ;; No attempt is made to "go back" to ratVal, even if possible,
+  ;; to avoid providing the illusion of a mathematically exact
+  ;; representation.
+  (lit floatVal x))
+
+
+^{:go/end 324} (go/func makeComplex ^Value [^Value re ^Value im]
+  (when (or (== (.Kind re) Unknown) (== (.Kind im) Unknown))
+    (return (lit unknownVal)))
+
+  (lit complexVal re im))
+
+
+^{:go/breaks [[4 344]] :go/end 345} (go/func makeFloatFromLiteral ^Value [^string lit]
+  (when [(values f ok) (.SetString (newFloat) lit)] ok
+    (when (smallFloat f)
+      ;; ok to use rationals
+      (when (== (.Sign f) 0)
+        ;; Issue 20228: If the float underflowed to zero, parse just "0".
+        ;; Otherwise, lit might contain a value with a large negative exponent,
+        ;; such as -6e-1886451601. As a float, that will underflow to 0,
+        ;; but it'll take forever to parse as a Rat.
+        (set! lit "0"))
+
+      (when [(values r ok) (.SetString (newRat) lit)] ok
+        (return (lit ratVal r))))
+
+
+    ;; otherwise use floats
+    (return (makeFloat f)))
+
+  nil)
+
+
+
+
+(go/const ^{:val 4096 :doc "Permit fractions with component sizes up to maxExp\nbefore switching to using floating-point numbers.\n"} maxExp (<< 4 10))
+
+
+
+^{:go/end 355} (go/func smallInt "smallInt reports whether x would lead to \"reasonably\"-sized fraction\nif converted to a *big.Rat.\n" ^bool [^{:tag (* big/Int)} x]
+  (< (.BitLen x) maxExp))
+
+
+
+
+^{:go/end 365} (go/func smallFloat64 "smallFloat64 reports whether x would lead to \"reasonably\"-sized fraction\nif converted to a *big.Rat.\n" ^bool [^float64 x]
+  (when (math/IsInf x 0)
+    (return false))
+
+  (let [(values _ e) (math/Frexp x)]
+    (and (< (- maxExp) e) (< e maxExp))))
+
+
+
+
+^{:go/end 375} (go/func smallFloat "smallFloat reports whether x would lead to \"reasonably\"-sized fraction\nif converted to a *big.Rat.\n" ^bool [^{:tag (* big/Float)} x]
+  (when (.IsInf x)
+    (return false))
+
+  (let [e (.MantExp x nil)]
+    (and (< (- maxExp) e) (< e maxExp))))
+
+
+;; ----------------------------------------------------------------------------
+;; Factories
+
+
+^{:go/end 381} (go/func MakeUnknown "MakeUnknown returns the [Unknown] value.\n" ^Value [] (lit unknownVal))
+
+
+^{:go/end 384} (go/func MakeBool "MakeBool returns the [Bool] value for b.\n" ^Value [^bool b] (conv boolVal b))
+
+
+^{:go/end 392} (go/func MakeString "MakeString returns the [String] value for s.\n" ^Value [^string s]
+  (when (== s "")
+    (return (addr emptyString))) ; common case
+
+  (addr (lit stringVal :s s)))
+
+
+(go/var ^stringVal emptyString)
+
+
+^{:go/end 397} (go/func MakeInt64 "MakeInt64 returns the [Int] value for x.\n" ^Value [^int64 x] (conv int64Val x))
+
+
+^{:go/end 405} (go/func MakeUint64 "MakeUint64 returns the [Int] value for x.\n" ^Value [^uint64 x]
+  (when (< x (<< 1 63))
+    (return (conv int64Val (conv int64 x))))
+
+  (lit intVal (.SetUint64 (newInt) x)))
+
+
+
+
+
+^{:go/end 418} (go/func MakeFloat64 "MakeFloat64 returns the [Float] value for x.\nIf x is -0.0, the result is 0.0.\nIf x is not finite, the result is an [Unknown].\n" ^Value [^float64 x]
+  (when (or (math/IsInf x 0) (math/IsNaN x))
+    (return (lit unknownVal)))
+
+  (when (smallFloat64 x)
+    (return (lit ratVal (.SetFloat64 (newRat) (+ x 0))))) ; convert -0 to 0
+
+  (lit floatVal (.SetFloat64 (newFloat) (+ x 0))))
+
+
+
+
+
+
+
+^{:go/end 468} (go/func MakeFromLiteral "MakeFromLiteral returns the corresponding integer, floating-point,\nimaginary, character, or string value for a Go literal string. The\ntok value must be one of [token.INT], [token.FLOAT], [token.IMAG],\n[token.CHAR], or [token.STRING]. The final argument must be zero.\nIf the literal string syntax is invalid, the result is an [Unknown].\n" ^Value [^string lit ^token/Token tok ^uint zero]
+  (when (!= zero 0)
+    (panic "MakeFromLiteral called with non-zero last argument"))
+
+
+  (switch tok
+    (case [token/INT]
+      (when [(values x err) (strconv/ParseInt lit 0 64)] (== err nil)
+        (return (conv int64Val x)))
+
+      (when [(values x ok) (.SetString (newInt) lit 0)] ok
+        (return (lit intVal x))))
+
+
+    (case [token/FLOAT]
+      (when [x (makeFloatFromLiteral lit)] (!= x nil)
+        (return x)))
+
+
+    (case [token/IMAG]
+      (when [n (len lit)] (and (> n 0) (== (aget lit (- n 1)) \i))
+        (when [im (makeFloatFromLiteral (subslice lit _ (- n 1)))] (!= im nil)
+          (return (makeComplex (conv int64Val 0) im)))))
+
+
+
+    (case [token/CHAR]
+      (when [n (len lit)] (>= n 2)
+        (when [(values code _ _ err) (strconv/UnquoteChar (subslice lit 1 (- n 1)) \')] (== err nil)
+          (return (MakeInt64 (conv int64 code))))))
+
+
+
+    (case [token/STRING]
+      (when [(values s err) (strconv/Unquote lit)] (== err nil)
+        (return (MakeString s))))
+
+
+    (default
+      (panic (fmt/Sprintf "%v is not a valid token" tok))))
+
+
+  (lit unknownVal))
+
+
+;; ----------------------------------------------------------------------------
+;; Accessors
+;;
+;; For unknown arguments the result is the zero value for the respective
+;; accessor type, except for Sign, where the result is 1.
+
+
+
+^{:go/end 487} (go/func BoolVal "BoolVal returns the Go boolean value of x, which must be a [Bool] or an [Unknown].\nIf x is [Unknown], the result is false.\n" ^bool [^Value x]
+  (type-switch [x x]
+    (case [boolVal]
+      (return (conv bool x)))
+    (case [unknownVal]
+      (return false))
+    (default
+      (panic (fmt/Sprintf "%v not a Bool" x)))))
+
+
+
+
+
+^{:go/end 500} (go/func StringVal "StringVal returns the Go string value of x, which must be a [String] or an [Unknown].\nIf x is [Unknown], the result is \"\".\n" ^string [^Value x]
+  (type-switch [x x]
+    (case [(* stringVal)]
+      (return (.string x)))
+    (case [unknownVal]
+      (return ""))
+    (default
+      (panic (fmt/Sprintf "%v not a String" x)))))
+
+
+
+
+
+
+^{:go/end 516} (go/func Int64Val "Int64Val returns the Go int64 value of x and whether the result is exact;\nx must be an [Int] or an [Unknown]. If the result is not exact, its value is undefined.\nIf x is [Unknown], the result is (0, false).\n" [^Value x] :results [int64 bool]
+  (type-switch [x x]
+    (case [int64Val]
+      (return (conv int64 x) true))
+    (case [intVal]
+      (return (.Int64 (.-val x)) false)) ; not an int64Val and thus not exact
+    (case [unknownVal]
+      (return 0 false))
+    (default
+      (panic (fmt/Sprintf "%v not an Int" x)))))
+
+
+
+
+
+
+^{:go/end 532} (go/func Uint64Val "Uint64Val returns the Go uint64 value of x and whether the result is exact;\nx must be an [Int] or an [Unknown]. If the result is not exact, its value is undefined.\nIf x is [Unknown], the result is (0, false).\n" [^Value x] :results [uint64 bool]
+  (type-switch [x x]
+    (case [int64Val]
+      (return (conv uint64 x) (>= x 0)))
+    (case [intVal]
+      (return (.Uint64 (.-val x)) (.IsUint64 (.-val x))))
+    (case [unknownVal]
+      (return 0 false))
+    (default
+      (panic (fmt/Sprintf "%v not an Int" x)))))
+
+
+
+
+^{:go/end 553} (go/func Float32Val "Float32Val is like [Float64Val] but for float32 instead of float64.\n" [^Value x] :results [float32 bool]
+  (type-switch [x x]
+    (case [int64Val]
+      (let [f (conv float32 x)]
+        (return f (== (conv int64Val f) x))))
+    (case [intVal]
+      (let [(values f acc) (.Float32 (.SetInt (newFloat) (.-val x)))]
+        (return f (== acc big/Exact))))
+    (case [ratVal]
+      (return (.Float32 (.-val x))))
+    (case [floatVal]
+      (let [(values f acc) (.Float32 (.-val x))]
+        (return f (== acc big/Exact))))
+    (case [unknownVal]
+      (return 0 false))
+    (default
+      (panic (fmt/Sprintf "%v not a Float" x)))))
+
+
+
+
+
+
+
+
+^{:go/end 578} (go/func Float64Val "Float64Val returns the nearest Go float64 value of x and whether the result is exact;\nx must be numeric or an [Unknown], but not [Complex]. For values too small (too close to 0)\nto represent as float64, [Float64Val] silently underflows to 0. The result sign always\nmatches the sign of x, even for 0.\nIf x is [Unknown], the result is (0, false).\n" [^Value x] :results [float64 bool]
+  (type-switch [x x]
+    (case [int64Val]
+      (let [f (conv float64 (conv int64 x))]
+        (return f (== (conv int64Val f) x))))
+    (case [intVal]
+      (let [(values f acc) (.Float64 (.SetInt (newFloat) (.-val x)))]
+        (return f (== acc big/Exact))))
+    (case [ratVal]
+      (return (.Float64 (.-val x))))
+    (case [floatVal]
+      (let [(values f acc) (.Float64 (.-val x))]
+        (return f (== acc big/Exact))))
+    (case [unknownVal]
+      (return 0 false))
+    (default
+      (panic (fmt/Sprintf "%v not a Float" x)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 608} (go/func Val "Val returns the underlying value for a given constant. Since it returns an\ninterface, it is up to the caller to type assert the result to the expected\ntype. The possible dynamic return types are:\n\n\tx Kind             type of result\n\t-----------------------------------------\n\tBool               bool\n\tString             string\n\tInt                int64 or *big.Int\n\tFloat              *big.Float or *big.Rat\n\teverything else    nil\n" ^any [^Value x]
+  (type-switch [x x]
+    (case [boolVal]
+      (return (conv bool x)))
+    (case [(* stringVal)]
+      (return (.string x)))
+    (case [int64Val]
+      (return (conv int64 x)))
+    (case [intVal]
+      (return (.-val x)))
+    (case [ratVal]
+      (return (.-val x)))
+    (case [floatVal]
+      (return (.-val x)))
+    (default
+      (return nil))))
+
+
+
+
+
+
+^{:go/end 622} (go/func StringLen "StringLen returns the length of x if x is a [String].\nIf x is [Unknown], the result is 0.\nIn all other cases, the function panics.\n" ^int64 [^Value x]
+  (type-switch [x x]
+    (case [(* stringVal)]
+      (return (.len x)))
+    (case [unknownVal]
+      (return 0))
+    (default
+      (panic (fmt/Sprintf "%v not a String" x)))))
+
+
+
+
+^{:go/end 632} (go/method len "len computes and returns the length of x without constructing the entire string.\n" ^int64 [^{:tag (* stringVal)} x]
+  (.Lock (.-mu x))
+  (defer (.Unlock (.-mu x)))
+  (when (!= (.-l x) nil)
+    (return (+ (.len (.-l x)) (.len (.-r x)))))
+
+  (conv int64 (len (.-s x))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 662} (go/func Make "Make returns the [Value] for x.\n\n\ttype of x        result Kind\n\t----------------------------\n\tbool             Bool\n\tstring           String\n\tint64            Int\n\t*big.Int         Int\n\t*big.Float       Float\n\t*big.Rat         Float\n\tanything else    Unknown\n" ^Value [^any x]
+  (type-switch [x x]
+    (case [bool]
+      (return (conv boolVal x)))
+    (case [string]
+      (return (addr (lit stringVal :s x))))
+    (case [int64]
+      (return (conv int64Val x)))
+    (case [(* big/Int)]
+      (return (makeInt x)))
+    (case [(* big/Rat)]
+      (return (makeRat x)))
+    (case [(* big/Float)]
+      (return (makeFloat x)))
+    (default
+      (return (lit unknownVal)))))
+
+
+
+
+
+
+^{:go/end 682} (go/func BitLen "BitLen returns the number of bits required to represent\nthe absolute value x in binary representation; x must be an [Int] or an [Unknown].\nIf x is [Unknown], the result is 0.\n" ^int [^Value x]
+  (type-switch [x x]
+    (case [int64Val]
+      (let [u (conv uint64 x)]
+        (when (< x 0)
+          (set! u (conv uint64 (- x))))
+
+        (return (- 64 (bits/LeadingZeros64 u)))))
+    (case [intVal]
+      (return (.BitLen (.-val x))))
+    (case [unknownVal]
+      (return 0))
+    (default
+      (panic (fmt/Sprintf "%v not an Int" x)))))
+
+
+
+
+
+
+^{:go/end 710} (go/func Sign "Sign returns -1, 0, or 1 depending on whether x < 0, x == 0, or x > 0;\nx must be numeric or [Unknown]. For complex values x, the sign is 0 if x == 0,\notherwise it is != 0. If x is [Unknown], the result is 1.\n" ^int [^Value x]
+  (type-switch [x x]
+    (case [int64Val]
+      (switch
+        (case [(< x 0)]
+          (return -1))
+        (case [(> x 0)]
+          (return 1)))
+
+      (return 0))
+    (case [intVal]
+      (return (.Sign (.-val x))))
+    (case [ratVal]
+      (return (.Sign (.-val x))))
+    (case [floatVal]
+      (return (.Sign (.-val x))))
+    (case [complexVal]
+      (return (bit-or (Sign (.-re x)) (Sign (.-im x)))))
+    (case [unknownVal]
+      (return 1)) ; avoid spurious division by zero errors
+    (default
+      (panic (fmt/Sprintf "%v not numeric" x)))))
+
+
+
+;; ----------------------------------------------------------------------------
+;; Support for assembling/disassembling numeric values
+
+(go/const
+
+  ^{:line 717} [^{:val 18446744073709551615N :doc "Compute the size of a Word in bytes.\n"} _m (bit-not (conv big/Word 0))]
+  ^{:line 718} [^{:val 3} _log (+ (bit-and (>> _m 8) 1) (bit-and (>> _m 16) 1) (bit-and (>> _m 32) 1))]
+  ^{:line 719} [^{:val 8} wordSize (<< 1 _log)])
+
+
+
+
+^{:go/end 752} (go/func Bytes "Bytes returns the bytes for the absolute value of x in little-\nendian binary representation; x must be an [Int].\n" ^{:tag (slice byte)} [^Value x]
+  (let [^intVal t (zero intVal)]
+    (type-switch [x x]
+      (case [int64Val]
+        (set! t (i64toi x)))
+      (case [intVal]
+        (set! t x))
+      (default
+        (panic (fmt/Sprintf "%v not an Int" x))))
+
+
+    (let [words (.Bits (.-val t))
+        ^{:line 736} bytes (make (slice byte) (* (len words) wordSize))
+
+        ^{:line 738} i 0]
+      (range [_ w words]
+        (for [j 0] (< j wordSize) (inc! j)
+          (aset bytes i (conv byte w))
+          (set! w >> 8)
+          (inc! i)))
+
+
+      ;; remove leading 0's
+      (while (and (> i 0) (== (aget bytes (- i 1)) 0))
+        (dec! i))
+
+
+      (subslice bytes _ i))))
+
+
+
+
+^{:go/end 782} (go/func MakeFromBytes "MakeFromBytes returns the [Int] value given the bytes of its little-endian\nbinary representation. An empty byte slice argument represents 0.\n" ^Value [^{:tag (slice byte)} bytes]
+  (let [words (make (slice big/Word) (/ (+ (len bytes) (- wordSize 1)) wordSize))
+
+      ^{:line 759} i 0
+      ^{:line 760 :tag big/Word} w (zero big/Word)
+      ^{:line 761 :tag uint} s (zero uint)]
+    (range [_ b bytes]
+      (set! w bit-or (<< (conv big/Word b) s))
+      (when [(set! s + 8)] (== s (* wordSize 8))
+        (aset words i w)
+        (inc! i)
+        (set! w 0)
+        (set! s 0)))
+
+
+    ;; store last word
+    (when (< i (len words))
+      (aset words i w)
+      (inc! i))
+
+    ;; remove leading 0's
+    (while (and (> i 0) (== (aget words (- i 1)) 0))
+      (dec! i))
+
+
+    (makeInt (.SetBits (newInt) (subslice words _ i)))))
+
+
+
+
+
+
+^{:go/end 805} (go/func Num "Num returns the numerator of x; x must be [Int], [Float], or [Unknown].\nIf x is [Unknown], or if it is too large or small to represent as a\nfraction, the result is [Unknown]. Otherwise the result is an [Int]\nwith the same sign as x.\n" ^Value [^Value x]
+  (type-switch [x x]
+    (case [int64Val intVal]
+      (return x))
+    (case [ratVal]
+      (return (makeInt (.Num (.-val x)))))
+    (case [floatVal]
+      (when (smallFloat (.-val x))
+        (let [(values r _) (.Rat (.-val x) nil)]
+          (return (makeInt (.Num r))))))
+
+    (case [unknownVal]
+      (break))
+    (default
+      (panic (fmt/Sprintf "%v not Int or Float" x))))
+
+  (lit unknownVal))
+
+
+
+
+
+^{:go/end 827} (go/func Denom "Denom returns the denominator of x; x must be [Int], [Float], or [Unknown].\nIf x is [Unknown], or if it is too large or small to represent as a\nfraction, the result is [Unknown]. Otherwise the result is an [Int] >= 1.\n" ^Value [^Value x]
+  (type-switch [x x]
+    (case [int64Val intVal]
+      (return (conv int64Val 1)))
+    (case [ratVal]
+      (return (makeInt (.Denom (.-val x)))))
+    (case [floatVal]
+      (when (smallFloat (.-val x))
+        (let [(values r _) (.Rat (.-val x) nil)]
+          (return (makeInt (.Denom r))))))
+
+    (case [unknownVal]
+      (break))
+    (default
+      (panic (fmt/Sprintf "%v not Int or Float" x))))
+
+  (lit unknownVal))
+
+
+
+
+
+^{:go/end 841} (go/func MakeImag "MakeImag returns the [Complex] value x*i;\nx must be [Int], [Float], or [Unknown].\nIf x is [Unknown], the result is [Unknown].\n" ^Value [^Value x]
+  (type-switch x
+    (case [unknownVal]
+      (return x))
+    (case [int64Val intVal ratVal floatVal]
+      (return (makeComplex (conv int64Val 0) x)))
+    (default
+      (panic (fmt/Sprintf "%v not Int or Float" x)))))
+
+
+
+
+
+^{:go/end 854} (go/func Real "Real returns the real part of x, which must be a numeric or unknown value.\nIf x is [Unknown], the result is [Unknown].\n" ^Value [^Value x]
+  (type-switch [x x]
+    (case [unknownVal int64Val intVal ratVal floatVal]
+      (return x))
+    (case [complexVal]
+      (return (.-re x)))
+    (default
+      (panic (fmt/Sprintf "%v not numeric" x)))))
+
+
+
+
+
+^{:go/end 869} (go/func Imag "Imag returns the imaginary part of x, which must be a numeric or unknown value.\nIf x is [Unknown], the result is [Unknown].\n" ^Value [^Value x]
+  (type-switch [x x]
+    (case [unknownVal]
+      (return x))
+    (case [int64Val intVal ratVal floatVal]
+      (return (conv int64Val 0)))
+    (case [complexVal]
+      (return (.-im x)))
+    (default
+      (panic (fmt/Sprintf "%v not numeric" x)))))
+
+
+
+;; ----------------------------------------------------------------------------
+;; Numeric conversions
+
+
+
+^{:go/end 926} (go/func ToInt "ToInt converts x to an [Int] value if x is representable as an [Int].\nOtherwise it returns an [Unknown].\n" ^Value [^Value x]
+  (type-switch [x x]
+    (case [int64Val intVal]
+      (return x))
+
+    (case [ratVal]
+      (when (.IsInt (.-val x))
+        (return (makeInt (.Num (.-val x))))))
+
+
+    (case [floatVal]
+      ;; avoid creation of huge integers
+      ;; (Existing tests require permitting exponents of at least 1024;
+      ;; allow any value that would also be permissible as a fraction.)
+      (when (smallFloat (.-val x))
+        (let [i (newInt)]
+          (when [(values _ acc) (.Int (.-val x) i)] (== acc big/Exact)
+            (return (makeInt i)))
+
+
+          ;; If we can get an integer by rounding up or down,
+          ;; assume x is not an integer because of rounding
+          ;; errors in prior computations.
+
+          (let [^:const ^{:val 4} delta 4 ; a small number of bits > 0
+              ^{:line 901 :tag big/Float} t (zero big/Float)]
+            (.SetPrec t (- prec delta))
+
+            ;; try rounding down a little
+            (.SetMode t big/ToZero)
+            (.Set t (.-val x))
+            (when [(values _ acc) (.Int t i)] (== acc big/Exact)
+              (return (makeInt i)))
+
+
+            ;; try rounding up a little
+            (.SetMode t big/AwayFromZero)
+            (.Set t (.-val x))
+            (when [(values _ acc) (.Int t i)] (== acc big/Exact)
+              (return (makeInt i)))))))
+
+
+
+    (case [complexVal]
+      (when [re (ToFloat x)] (== (.Kind re) Float)
+        (return (ToInt re)))))
+
+
+
+  (lit unknownVal))
+
+
+
+
+^{:go/end 947} (go/func ToFloat "ToFloat converts x to a [Float] value if x is representable as a [Float].\nOtherwise it returns an [Unknown].\n" ^Value [^Value x]
+  (type-switch [x x]
+    (case [int64Val]
+      (return (i64tor x))) ; x is always a small int
+    (case [intVal]
+      (when (smallInt (.-val x))
+        (return (itor x)))
+
+      (return (itof x)))
+    (case [ratVal floatVal]
+      (return x))
+    (case [complexVal]
+      (when (== (Sign (.-im x)) 0)
+        (return (ToFloat (.-re x))))))
+
+
+  (lit unknownVal))
+
+
+
+
+^{:go/end 959} (go/func ToComplex "ToComplex converts x to a [Complex] value if x is representable as a [Complex].\nOtherwise it returns an [Unknown].\n" ^Value [^Value x]
+  (type-switch [x x]
+    (case [int64Val intVal ratVal floatVal]
+      (return (vtoc x)))
+    (case [complexVal]
+      (return x)))
+
+  (lit unknownVal))
+
+
+;; ----------------------------------------------------------------------------
+;; Operations
+
+
+^{:go/end 968} (go/func is32bit "is32bit reports whether x can be represented using 32 bits.\n" ^bool [^int64 x]
+  (let [^:const ^{:val 32} s 32]
+    (and (<= (<< -1 (- s 1)) x) (<= x (- (<< 1 (- s 1)) 1)))))
+
+
+
+^{:go/end 974} (go/func is63bit "is63bit reports whether x can be represented using 63 bits.\n" ^bool [^int64 x]
+  (let [^:const ^{:val 63} s 63]
+    (and (<= (<< -1 (- s 1)) x) (<= x (- (<< 1 (- s 1)) 1)))))
+
+
+
+
+
+
+^{:go/end 1040} (go/func UnaryOp "UnaryOp returns the result of the unary expression op y.\nThe operation must be defined for the operand.\nIf prec > 0 it specifies the ^ (xor) result size in bits.\nIf y is [Unknown], the result is [Unknown].\n" ^Value [^token/Token op ^Value y ^uint prec]
+  (switch op
+    (case [token/ADD]
+      (type-switch y
+        (case [unknownVal int64Val intVal ratVal floatVal complexVal]
+          (return y))))
+
+
+    (case [token/SUB]
+      (type-switch [y y]
+        (case [unknownVal]
+          (return y))
+        (case [int64Val]
+          (when [z (- y)] (!= z y)
+            (return z)) ; no overflow
+
+          (return (makeInt (.Neg (newInt) (big/NewInt (conv int64 y))))))
+        (case [intVal]
+          (return (makeInt (.Neg (newInt) (.-val y)))))
+        (case [ratVal]
+          (return (makeRat (.Neg (newRat) (.-val y)))))
+        (case [floatVal]
+          (return (makeFloat (.Neg (newFloat) (.-val y)))))
+        (case [complexVal]
+          (let [re (UnaryOp token/SUB (.-re y) 0)
+              ^{:line 1005} im (UnaryOp token/SUB (.-im y) 0)]
+            (return (makeComplex re im))))))
+
+
+    (case [token/XOR]
+      (let [z (newInt)]
+        (type-switch [y y]
+          (case [unknownVal]
+            (return y))
+          (case [int64Val]
+            (.Not z (big/NewInt (conv int64 y))))
+          (case [intVal]
+            (.Not z (.-val y)))
+          (default
+            (goto :Error)))
+
+        ;; For unsigned types, the result will be negative and
+        ;; thus "too large": We must limit the result precision
+        ;; to the type's precision.
+        (when (> prec 0)
+          (.AndNot z z (.Lsh (newInt) (big/NewInt -1) prec))) ; z &^= (-1)<<prec
+
+        (return (makeInt z))))
+
+    (case [token/NOT]
+      (type-switch [y y]
+        (case [unknownVal]
+          (return y))
+        (case [boolVal]
+          (return (not y))))))
+
+
+
+  (label :Error
+    (panic (fmt/Sprintf "invalid unary operation %s%v" op y))))
+
+
+^{:go/end 1063} (go/func ord ^int [^Value x]
+  (type-switch x
+    (default
+      ;; force invalid value into "x position" in match
+      ;; (don't panic here so that callers can provide a better error message)
+      (return -1))
+    (case [unknownVal]
+      (return 0))
+    (case [boolVal (* stringVal)]
+      (return 1))
+    (case [int64Val]
+      (return 2))
+    (case [intVal]
+      (return 3))
+    (case [ratVal]
+      (return 4))
+    (case [floatVal]
+      (return 5))
+    (case [complexVal]
+      (return 6))))
+
+
+
+
+
+
+
+^{:go/end 1077} (go/func match "match returns the matching representation (same type) with the\nsmallest complexity for two values x and y. If one of them is\nnumeric, both of them must be numeric. If one of them is Unknown\nor invalid (say, nil) both results are that value.\n" [^Value x ^Value y] :results [^Value _ ^Value _]
+  (switch [(values ox oy) (values (ord x) (ord y))]
+    (case [(< ox oy)]
+      (set! (values x y) (match0 x y)))
+    (case [(> ox oy)]
+      (set! (values y x) (match0 y x))))
+
+  (return x y))
+
+
+
+
+^{:go/end 1117} (go/func match0 "match0 must only be called by match.\nInvariant: ord(x) < ord(y)\n" [^Value x ^Value y] :results [^Value _ ^Value _]
+  ;; Prefer to return the original x and y arguments when possible,
+  ;; to avoid unnecessary heap allocations.
+
+  (type-switch y
+    (case [intVal]
+      (type-switch [x1 x]
+        (case [int64Val]
+          (return (i64toi x1) y))))
+
+    (case [ratVal]
+      (type-switch [x1 x]
+        (case [int64Val]
+          (return (i64tor x1) y))
+        (case [intVal]
+          (return (itor x1) y))))
+
+    (case [floatVal]
+      (type-switch [x1 x]
+        (case [int64Val]
+          (return (i64tof x1) y))
+        (case [intVal]
+          (return (itof x1) y))
+        (case [ratVal]
+          (return (rtof x1) y))))
+
+    (case [complexVal]
+      (type-switch [x1 x]
+        (case [int64Val intVal ratVal floatVal]
+          (return (vtoc x1) y)))))
+
+
+
+  ;; force unknown and invalid values into "x position" in callers of match
+  ;; (don't panic here so that callers can provide a better error message)
+  (return x x))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1297} (go/func BinaryOp "BinaryOp returns the result of the binary expression x op y.\nThe operation must be defined for the operands. If one of the\noperands is [Unknown], the result is [Unknown].\nBinaryOp doesn't handle comparisons or shifts; use [Compare]\nor [Shift] instead.\n\nTo force integer division of [Int] operands, use op == [token.QUO_ASSIGN]\ninstead of [token.QUO]; the result is guaranteed to be [Int] in this case.\nDivision by zero leads to a run-time panic.\n" ^Value [^Value x_ ^token/Token op ^Value y_]
+  (let [(values x y) (match x_ y_)]
+
+    (type-switch [x x]
+      (case [unknownVal]
+        (return x))
+
+      (case [boolVal]
+        (let [y (assert boolVal y)]
+          (switch op
+            (case [token/LAND]
+              (return (and x y)))
+            (case [token/LOR]
+              (return (or x y))))))
+
+
+      (case [int64Val]
+        (let [a (conv int64 x)
+            ^{:line 1146} b (conv int64 (assert int64Val y))
+            ^{:line 1147 :tag int64} c (zero int64)]
+          (switch op
+            (case [token/ADD]
+              (when (or (not (is63bit a)) (not (is63bit b)))
+                (return (makeInt (.Add (newInt) (big/NewInt a) (big/NewInt b)))))
+
+              (set! c (+ a b)))
+            (case [token/SUB]
+              (when (or (not (is63bit a)) (not (is63bit b)))
+                (return (makeInt (.Sub (newInt) (big/NewInt a) (big/NewInt b)))))
+
+              (set! c (- a b)))
+            (case [token/MUL]
+              (when (or (not (is32bit a)) (not (is32bit b)))
+                (return (makeInt (.Mul (newInt) (big/NewInt a) (big/NewInt b)))))
+
+              (set! c (* a b)))
+            (case [token/QUO]
+              (return (makeRat (big/NewRat a b))))
+            (case [token/QUO_ASSIGN] ; force integer division
+              (set! c (/ a b)))
+            (case [token/REM]
+              (set! c (% a b)))
+            (case [token/AND]
+              (set! c (bit-and a b)))
+            (case [token/OR]
+              (set! c (bit-or a b)))
+            (case [token/XOR]
+              (set! c (bit-xor a b)))
+            (case [token/AND_NOT]
+              (set! c (bit-and-not a b)))
+            (default
+              (goto :Error)))
+
+          (return (conv int64Val c))))
+
+      (case [intVal]
+        (let [a (.-val x)
+            ^{:line 1185} b (.-val (assert intVal y))
+            ^{:line 1186} c (newInt)]
+          (switch op
+            (case [token/ADD]
+              (.Add c a b))
+            (case [token/SUB]
+              (.Sub c a b))
+            (case [token/MUL]
+              (.Mul c a b))
+            (case [token/QUO]
+              (return (makeRat (.SetFrac (newRat) a b))))
+            (case [token/QUO_ASSIGN] ; force integer division
+              (.Quo c a b))
+            (case [token/REM]
+              (.Rem c a b))
+            (case [token/AND]
+              (.And c a b))
+            (case [token/OR]
+              (.Or c a b))
+            (case [token/XOR]
+              (.Xor c a b))
+            (case [token/AND_NOT]
+              (.AndNot c a b))
+            (default
+              (goto :Error)))
+
+          (return (makeInt c))))
+
+      (case [ratVal]
+        (let [a (.-val x)
+            ^{:line 1215} b (.-val (assert ratVal y))
+            ^{:line 1216} c (newRat)]
+          (switch op
+            (case [token/ADD]
+              (.Add c a b))
+            (case [token/SUB]
+              (.Sub c a b))
+            (case [token/MUL]
+              (.Mul c a b))
+            (case [token/QUO]
+              (.Quo c a b))
+            (default
+              (goto :Error)))
+
+          (return (makeRat c))))
+
+      (case [floatVal]
+        (let [a (.-val x)
+            ^{:line 1233} b (.-val (assert floatVal y))
+            ^{:line 1234} c (newFloat)]
+          (switch op
+            (case [token/ADD]
+              (.Add c a b))
+            (case [token/SUB]
+              (.Sub c a b))
+            (case [token/MUL]
+              (.Mul c a b))
+            (case [token/QUO]
+              (.Quo c a b))
+            (default
+              (goto :Error)))
+
+          (return (makeFloat c))))
+
+      (case [complexVal]
+        (let [y (assert complexVal y)
+            (values a b) (values (.-re x) (.-im x))
+            (values c d) (values (.-re y) (.-im y))
+            (values ^Value re ^Value im) (zero Value)]
+          (switch op
+            (case [token/ADD]
+              ;; (a+c) + i(b+d)
+              (set! re (add a c))
+              (set! im (add b d)))
+            (case [token/SUB]
+              ;; (a-c) + i(b-d)
+              (set! re (sub a c))
+              (set! im (sub b d)))
+            (case [token/MUL]
+              ;; (ac-bd) + i(bc+ad)
+              (let [ac (mul a c)
+                  ^{:line 1266} bd (mul b d)
+                  ^{:line 1267} bc (mul b c)
+                  ^{:line 1268} ad (mul a d)]
+                (set! re (sub ac bd))
+                (set! im (add bc ad))))
+            (case [token/QUO]
+              ;; (ac+bd)/s + i(bc-ad)/s, with s = cc + dd
+              (let [ac (mul a c)
+                  ^{:line 1274} bd (mul b d)
+                  ^{:line 1275} bc (mul b c)
+                  ^{:line 1276} ad (mul a d)
+                  ^{:line 1277} cc (mul c c)
+                  ^{:line 1278} dd (mul d d)
+                  ^{:line 1279} s (add cc dd)]
+                (set! re (add ac bd))
+                (set! re (quo re s))
+                (set! im (sub bc ad))
+                (set! im (quo im s))))
+            (default
+              (goto :Error)))
+
+          (return (makeComplex re im))))
+
+      (case [(* stringVal)]
+        (when (== op token/ADD)
+          (return (addr (lit stringVal :l x :r (assert (* stringVal) y)))))))
+
+
+
+    (label :Error
+      (panic (fmt/Sprintf "invalid binary operation %v %s %v" x_ op y_)))))
+
+
+^{:go/end 1299} (go/func add ^Value [^Value x ^Value y] (BinaryOp x token/ADD y))
+^{:go/end 1300} (go/func sub ^Value [^Value x ^Value y] (BinaryOp x token/SUB y))
+^{:go/end 1301} (go/func mul ^Value [^Value x ^Value y] (BinaryOp x token/MUL y))
+^{:go/end 1302} (go/func quo ^Value [^Value x ^Value y] (BinaryOp x token/QUO y))
+
+
+
+
+^{:go/end 1338} (go/func Shift "Shift returns the result of the shift expression x op s\nwith op == [token.SHL] or [token.SHR] (<< or >>). x must be\nan [Int] or an [Unknown]. If x is [Unknown], the result is x.\n" ^Value [^Value x ^token/Token op ^uint s]
+  (type-switch [x x]
+    (case [unknownVal]
+      (return x))
+
+    (case [int64Val]
+      (when (== s 0)
+        (return x))
+
+      (switch op
+        (case [token/SHL]
+          (let [z (.-val (i64toi x))]
+            (return (makeInt (.Lsh z z s)))))
+        (case [token/SHR]
+          (return (>> x s)))))
+
+
+    (case [intVal]
+      (when (== s 0)
+        (return x))
+
+      (let [z (newInt)]
+        (switch op
+          (case [token/SHL]
+            (return (makeInt (.Lsh z (.-val x) s))))
+          (case [token/SHR]
+            (return (makeInt (.Rsh z (.-val x) s))))))))
+
+
+
+  (panic (fmt/Sprintf "invalid shift %v %s %d" x op s)))
+
+
+^{:go/end 1356} (go/func cmpZero ^bool [^int x ^token/Token op]
+  (switch op
+    (case [token/EQL]
+      (return (== x 0)))
+    (case [token/NEQ]
+      (return (!= x 0)))
+    (case [token/LSS]
+      (return (< x 0)))
+    (case [token/LEQ]
+      (return (<= x 0)))
+    (case [token/GTR]
+      (return (> x 0)))
+    (case [token/GEQ]
+      (return (>= x 0))))
+
+  (panic (fmt/Sprintf "invalid comparison %v %s 0" x op)))
+
+
+
+
+
+
+^{:go/end 1435} (go/func Compare "Compare returns the result of the comparison x op y.\nThe comparison must be defined for the operands.\nIf one of the operands is [Unknown], the result is\nfalse.\n" ^bool [^Value x_ ^token/Token op ^Value y_]
+  (let [(values x y) (match x_ y_)]
+
+    (type-switch [x x]
+      (case [unknownVal]
+        (return false))
+
+      (case [boolVal]
+        (let [y (assert boolVal y)]
+          (switch op
+            (case [token/EQL]
+              (return (== x y)))
+            (case [token/NEQ]
+              (return (!= x y))))))
+
+
+      (case [int64Val]
+        (let [y (assert int64Val y)]
+          (switch op
+            (case [token/EQL]
+              (return (== x y)))
+            (case [token/NEQ]
+              (return (!= x y)))
+            (case [token/LSS]
+              (return (< x y)))
+            (case [token/LEQ]
+              (return (<= x y)))
+            (case [token/GTR]
+              (return (> x y)))
+            (case [token/GEQ]
+              (return (>= x y))))))
+
+
+      (case [intVal]
+        (return (cmpZero (.Cmp (.-val x) (.-val (assert intVal y))) op)))
+
+      (case [ratVal]
+        (return (cmpZero (.Cmp (.-val x) (.-val (assert ratVal y))) op)))
+
+      (case [floatVal]
+        (return (cmpZero (.Cmp (.-val x) (.-val (assert floatVal y))) op)))
+
+      (case [complexVal]
+        (let [y (assert complexVal y)
+            ^{:line 1406} re (Compare (.-re x) token/EQL (.-re y))
+            ^{:line 1407} im (Compare (.-im x) token/EQL (.-im y))]
+          (switch op
+            (case [token/EQL]
+              (return (and re im)))
+            (case [token/NEQ]
+              (return (or (not re) (not im)))))))
+
+
+      (case [(* stringVal)]
+        (let [xs (.string x)
+            ^{:line 1417} ys (.string (assert (* stringVal) y))]
+          (switch op
+            (case [token/EQL]
+              (return (== xs ys)))
+            (case [token/NEQ]
+              (return (!= xs ys)))
+            (case [token/LSS]
+              (return (< xs ys)))
+            (case [token/LEQ]
+              (return (<= xs ys)))
+            (case [token/GTR]
+              (return (> xs ys)))
+            (case [token/GEQ]
+              (return (>= xs ys)))))))
+
+
+
+    (panic (fmt/Sprintf "invalid comparison %v %s %v" x_ op y_))))

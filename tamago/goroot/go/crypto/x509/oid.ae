@@ -1,0 +1,406 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.crypto.x509) (go/file "oid.go" :imports [
+
+
+    ^{:line 8} [bytes "bytes"]
+    ^{:line 9} [asn1 "encoding/asn1"]
+    ^{:line 10} [errors "errors"]
+    ^{:line 11} [math "math"]
+    ^{:line 12} [big "math/big"]
+    ^{:line 13} [bits "math/bits"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]])
+
+
+(go/var
+  ^{:line 19} [errInvalidOID (errors/New "invalid oid")])
+
+
+
+(go/type OID "An OID represents an ASN.1 OBJECT IDENTIFIER.\n" (struct
+    ^{:line 24 :tag (slice byte)} der))
+
+
+
+^{:go/end 31} (go/func ParseOID "ParseOID parses a Object Identifier string, represented by ASCII numbers separated by dots.\n" [^string oid] :results [OID error]
+  (let [^OID o (zero OID)]
+    (return o (.unmarshalOIDText o oid))))
+
+
+^{:go/end 52} (go/func newOIDFromDER [^{:tag (slice byte)} der] :results [OID bool]
+  (when (or (== (len der) 0) (!= (bit-and (aget der (- (len der) 1)) 0x80) 0))
+    (return (lit OID) false))
+
+
+  (let [start 0]
+    (range [i v der]
+      ;; ITU-T X.690, section 8.19.2:
+      ;; The subidentifier shall be encoded in the fewest possible octets,
+      ;; that is, the leading octet of the subidentifier shall not have the value 0x80.
+      (when (and (== i start) (== v 0x80))
+        (return (lit OID) false))
+
+      (when (== (bit-and v 0x80) 0)
+        (set! start (+ i 1))))
+
+
+
+    (return (lit OID der) true)))
+
+
+
+^{:go/end 71} (go/func OIDFromInts "OIDFromInts creates a new OID using ints, each integer is a separate component.\n" [^{:tag (slice uint64)} oid] :results [OID error]
+  (when (or (< (len oid) 2) (> (aget oid 0) 2) ^:go/paren (and (< (aget oid 0) 2) (>= (aget oid 1) 40)))
+    (return (lit OID) errInvalidOID))
+
+
+  (let [length (base128IntLength (+ (* (aget oid 0) 40) (aget oid 1)))]
+    (range [_ v (subslice oid 2)]
+      (set! length + (base128IntLength v)))
+
+
+    (let [der (make (slice byte) 0 length)]
+      (set! der (appendBase128Int der (+ (* (aget oid 0) 40) (aget oid 1))))
+      (range [_ v (subslice oid 2)]
+        (set! der (appendBase128Int der v)))
+
+      (return (lit OID der) nil))))
+
+
+^{:go/end 78} (go/func base128IntLength ^int [^uint64 n]
+  (when (== n 0)
+    (return 1))
+
+  (/ (+ (bits/Len64 n) 6) 7))
+
+
+^{:go/end 90} (go/func appendBase128Int ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^uint64 n]
+  (for [i (- (base128IntLength n) 1)] (>= i 0) (dec! i)
+    (let [o (conv byte (>> n (conv uint (* i 7))))]
+      (set! o bit-and 0x7f)
+      (when (!= i 0)
+        (set! o bit-or 0x80))
+
+      (set! dst (append dst o))))
+
+  ^{:line 89} dst)
+
+
+^{:go/end 97} (go/func base128BigIntLength ^int [^{:tag (* big/Int)} n]
+  (when (== (.Cmp n (big/NewInt 0)) 0)
+    (return 1))
+
+  (/ (+ (.BitLen n) 6) 7))
+
+
+^{:go/end 113} (go/func appendBase128BigInt ^{:tag (slice byte)} [^{:tag (slice byte)} dst ^{:tag (* big/Int)} n]
+  (when (== (.Cmp n (big/NewInt 0)) 0)
+    (return (append dst 0)))
+
+
+  (for [i (- (base128BigIntLength n) 1)] (>= i 0) (dec! i)
+    (let [o (conv byte (aget (.Bits (.Rsh (big/NewInt 0) n (* (conv uint i) 7))) 0))]
+      (set! o bit-and 0x7f)
+      (when (!= i 0)
+        (set! o bit-or 0x80))
+
+      (set! dst (append dst o))))
+
+  ^{:line 112} dst)
+
+
+
+^{:go/end 118} (go/method AppendText "AppendText implements [encoding.TextAppender]\n" [^OID o ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (return (append b (spread (.String o))) nil))
+
+
+
+^{:go/end 123} (go/method MarshalText "MarshalText implements [encoding.TextMarshaler]\n" [^OID o] :results [(slice byte) error]
+  (.AppendText o nil))
+
+
+
+^{:go/end 128} (go/method UnmarshalText "UnmarshalText implements [encoding.TextUnmarshaler]\n" ^error [^{:tag (* OID)} o ^{:tag (slice byte)} text]
+  (.unmarshalOIDText o (conv string text)))
+
+
+^{:go/end 186} (go/method unmarshalOIDText ^error [^{:tag (* OID)} o ^string oid]
+  ;; (*big.Int).SetString allows +/- signs, but we don't want
+  ;; to allow them in the string representation of Object Identifier, so
+  ;; reject such encodings.
+  (range [_ c oid]
+    (let [isDigit (and (>= c \0) (<= c \9))]
+      (when (and (not isDigit) (!= c \.))
+        (return errInvalidOID))))
+
+
+
+  (let [
+      ^{:line 142 :tag string} firstNum (zero string)
+      ^{:line 143 :tag string} secondNum (zero string)
+
+
+      ^{:line 146 :tag bool} nextComponentExists (zero bool)]
+    (set! (values firstNum oid nextComponentExists) (strings/Cut oid "."))
+    (when (not nextComponentExists)
+      (return errInvalidOID))
+
+    (set! (values secondNum oid nextComponentExists) (strings/Cut oid "."))
+
+    (let [
+        ^:var ^{:line 154} first (big/NewInt 0)
+        ^:var ^{:line 155} second (big/NewInt 0)]
+
+
+      (when [(values _ ok) (.SetString first firstNum 10)] (not ok)
+        (return errInvalidOID))
+
+      (when [(values _ ok) (.SetString second secondNum 10)] (not ok)
+        (return errInvalidOID))
+
+
+      (when (or (> (.Cmp first (big/NewInt 2)) 0) ^:go/paren (and (< (.Cmp first (big/NewInt 2)) 0) (>= (.Cmp second (big/NewInt 40)) 0)))
+        (return errInvalidOID))
+
+
+      (let [firstComponent (.Mul first first (big/NewInt 40))]
+        (.Add firstComponent firstComponent second)
+
+        ^{:go/breaks [4]} (let [der (appendBase128BigInt (make (slice byte) 0 32) firstComponent)]
+
+          (while nextComponentExists
+            (let [^string strNum (zero string)]
+              (set! (values strNum oid nextComponentExists) (strings/Cut oid "."))
+              (let [(values b ok) (.SetString (big/NewInt 0) strNum 10)]
+                (when (not ok)
+                  (return errInvalidOID))
+
+                (set! der (appendBase128BigInt der b)))))
+
+
+          (set! (.-der o) der)
+          nil)))))
+
+
+
+^{:go/end 191} (go/method AppendBinary "AppendBinary implements [encoding.BinaryAppender]\n" [^OID o ^{:tag (slice byte)} b] :results [(slice byte) error]
+  (return (append b (spread (.-der o))) nil))
+
+
+
+^{:go/end 196} (go/method MarshalBinary "MarshalBinary implements [encoding.BinaryMarshaler]\n" [^OID o] :results [(slice byte) error]
+  (.AppendBinary o nil))
+
+
+
+^{:go/end 206} (go/method UnmarshalBinary "UnmarshalBinary implements [encoding.BinaryUnmarshaler]\n" ^error [^{:tag (* OID)} o ^{:tag (slice byte)} b]
+  ^{:go/breaks [4]} (let [(values oid ok) (newOIDFromDER (bytes/Clone b))]
+    (when (not ok)
+      (return errInvalidOID))
+
+    (set! @o oid)
+    nil))
+
+
+
+^{:go/end 213} (go/method Equal "Equal returns true when oid and other represents the same Object Identifier.\n" ^bool [^OID oid ^OID other]
+  ;; There is only one possible DER encoding of
+  ;; each unique Object Identifier.
+  (bytes/Equal (.-der oid) (.-der other)))
+
+
+^{:go/end 246} (go/func parseBase128Int [^{:tag (slice byte)} bytes ^int initOffset] :results [^int ret ^int offset ^bool failed]
+  (set! offset initOffset)
+  (let [^int64 ret64 (zero int64)]
+    (for [shifted 0] (< offset (len bytes)) (inc! shifted)
+      ;; 5 * 7 bits per byte == 35 bits of data
+      ;; Thus the representation is either non-minimal or too large for an int32
+      (when (== shifted 5)
+        (set! failed true)
+        (return))
+
+      (set! ret64 << 7)
+      (let [b (aget bytes offset)]
+        ;; integers should be minimally encoded, so the leading octet should
+        ;; never be 0x80
+        (when (and (== shifted 0) (== b 0x80))
+          (set! failed true)
+          (return))
+
+        (set! ret64 bit-or (conv int64 (bit-and b 0x7f)))
+        (inc! offset)
+        (when (== (bit-and b 0x80) 0)
+          (set! ret (conv int ret64))
+          ;; Ensure that the returned value fits in an int on all platforms
+          (when (> ret64 math/MaxInt32)
+            (set! failed true))
+
+          (return))))
+
+
+    (set! failed true)
+    (return)))
+
+
+
+
+
+^{:go/end 287} (go/method EqualASN1OID "EqualASN1OID returns whether an OID equals an asn1.ObjectIdentifier. If\nasn1.ObjectIdentifier cannot represent the OID specified by oid, because\na component of OID requires more than 31 bits, it returns false.\n" ^bool [^OID oid ^asn1/ObjectIdentifier other]
+  (when (< (len other) 2)
+    (return false))
+
+  (let [(values v offset failed) (parseBase128Int (.-der oid) 0)]
+    (when failed
+      ;; This should never happen, since we've already parsed the OID,
+      ;; but just in case.
+      (return false))
+
+    (if (< v 80)
+      (let [(values a b) (values (/ v 40) (% v 40))]
+        (when (or (!= (aget other 0) a) (!= (aget other 1) b))
+          (return false)))
+
+
+      (let [(values a b) (values 2 (- v 80))]
+        (when (or (!= (aget other 0) a) (!= (aget other 1) b))
+          (return false))))
+
+
+
+    (let [i 2]
+      (for [] (< offset (len (.-der oid))) (inc! i)
+        (set! (values v offset failed) (parseBase128Int (.-der oid) offset))
+        (when failed
+          ;; Again, shouldn't happen, since we've already parsed
+          ;; the OID, but better safe than sorry.
+          (return false))
+
+        (when (or (>= i (len other)) (!= v (aget other i)))
+          (return false)))
+
+
+
+      (== i (len other)))))
+
+
+
+^{:go/end 356} (go/method String "String returns the string representation of the Object Identifier.\n" ^string [^OID oid]
+  (let [^strings/Builder b (zero strings/Builder)]
+    (.Grow b 32)
+    (let [
+        ^:const ^{:line 294 :val 64} valSize 64 ; size in bits of val.
+        ^:const ^:go/grouped ^{:line 295 :val 7} bitsPerByte 7
+        ^:const ^:go/grouped ^{:line 296 :val 144115188075855871} maxValSafeShift (- (<< 1 (- valSize bitsPerByte)) 1)
+
+
+        ^:var ^{:line 299} start 0
+        ^:var ^{:line 300} val (conv uint64 0)
+        ^:var ^{:line 301} numBuf (make (slice byte) 0 21)
+        ^{:line 302 :tag (* big/Int)} bigVal (zero (* big/Int))
+        ^{:line 303 :tag bool} overflow (zero bool)]
+
+      (range [i v (.-der oid)]
+        (let [curVal (bit-and v 0x7F)
+            ^{:line 307} valEnd (== (bit-and v 0x80) 0)]
+          (when valEnd
+            (when (!= start 0)
+              (.WriteByte b \.)))
+
+
+          (when (and (not overflow) (> val maxValSafeShift))
+            (when (== bigVal nil)
+              (set! bigVal (new big/Int)))
+
+            (set! bigVal (.SetUint64 bigVal val))
+            (set! overflow true))
+
+          (when overflow
+            (set! bigVal (.Or (.Lsh bigVal bigVal bitsPerByte) bigVal (big/NewInt (conv int64 curVal))))
+            (when valEnd
+              (when (== start 0)
+                (.WriteString b "2.")
+                (set! bigVal (.Sub bigVal bigVal (big/NewInt 80))))
+
+              (set! numBuf (.Append bigVal numBuf 10))
+              (.Write b numBuf)
+              (set! numBuf (subslice numBuf _ 0))
+              (set! val 0)
+              (set! start (+ i 1))
+              (set! overflow false))
+
+            (continue))
+
+          (set! val << bitsPerByte)
+          (set! val bit-or (conv uint64 curVal))
+          (when valEnd
+            (if (== start 0)
+              (if (< val 80) (do
+                  (.Write b (strconv/AppendUint numBuf (/ val 40) 10))
+                  (.WriteByte b \.)
+                  (.Write b (strconv/AppendUint numBuf (% val 40) 10)))
+                (do
+                  (.WriteString b "2.")
+                  (.Write b (strconv/AppendUint numBuf (- val 80) 10))))
+
+
+              (.Write b (strconv/AppendUint numBuf val 10)))
+
+            (set! val 0)
+            (set! start (+ i 1)))))
+
+
+      (.String b))))
+
+
+^{:go/end 395} (go/method toASN1OID [^OID oid] :results [asn1/ObjectIdentifier bool]
+  (let [out (make (slice int) 0 (+ (len (.-der oid)) 1))
+
+
+      ^:const ^{:line 362 :val 31} valSize 31 ; amount of usable bits of val for OIDs.
+      ^:const ^:go/grouped ^{:line 363 :val 7} bitsPerByte 7
+      ^:const ^:go/grouped ^{:line 364 :val 16777215} maxValSafeShift (- (<< 1 (- valSize bitsPerByte)) 1)
+
+
+      ^{:line 367} val 0]
+
+    (range [_ v (.-der oid)]
+      (when (> val maxValSafeShift)
+        (return nil false))
+
+
+      (set! val << bitsPerByte)
+      (set! val bit-or (conv int (bit-and v 0x7F)))
+
+      (when (== (bit-and v 0x80) 0)
+        (when (== (len out) 0)
+          (if (< val 80) (do
+              (set! out (append out (/ val 40)))
+              (set! out (append out (% val 40))))
+            (do
+              (set! out (append out 2))
+              (set! out (append out (- val 80)))))
+
+          (set! val 0)
+          (continue))
+
+        (set! out (append out val))
+        (set! val 0)))
+
+
+
+    (return out true)))
+
+
+
+^{:go/end 407} (go/func OIDFromASN1OID "OIDFromASN1OID creates a new OID using asn1OID.\n" [^asn1/ObjectIdentifier asn1OID] :results [OID error]
+  (let [uint64OID (make (slice uint64) 0 (len asn1OID))]
+    (range [_ component asn1OID]
+      (when (< component 0)
+        (return (lit OID) (errors/New "x509: OID components must be non-negative")))
+
+      (set! uint64OID (append uint64OID (conv uint64 component))))
+
+    (OIDFromInts uint64OID)))

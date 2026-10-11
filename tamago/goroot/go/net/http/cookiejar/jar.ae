@@ -1,0 +1,580 @@
+;; Copyright 2012 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package cookiejar implements an in-memory [RFC 6265]-compliant [http.CookieJar].
+;;
+;; [RFC 6265]: https://www.rfc-editor.org/info/rfc6265
+(in-ns 'go.net.http.cookiejar) (go/file "jar.go" :doc "Package cookiejar implements an in-memory [RFC 6265]-compliant [http.CookieJar].\n\n[RFC 6265]: https://www.rfc-editor.org/info/rfc6265\n" :imports [
+
+
+    ^{:line 11} [cmp "cmp"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [fmt "fmt"]
+    ^{:line 14} [net "net"]
+    ^{:line 15} [http "net/http"]
+    ^{:line 16} [ascii "net/http/internal/ascii"]
+    ^{:line 17} [netip "net/netip"]
+    ^{:line 18} [url "net/url"]
+    ^{:line 19} [slices "slices"]
+    ^{:line 20} [strings "strings"]
+    ^{:line 21} [sync "sync"]
+    ^{:line 22} [time "time"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type PublicSuffixList "PublicSuffixList provides the public suffix of a domain. For example:\n  - the public suffix of \"example.com\" is \"com\",\n  - the public suffix of \"foo1.foo2.foo3.co.uk\" is \"co.uk\", and\n  - the public suffix of \"bar.pvt.k12.ma.us\" is \"pvt.k12.ma.us\".\n\nImplementations of PublicSuffixList must be safe for concurrent use by\nmultiple goroutines.\n\nAn implementation that always returns \"\" is valid and may be useful for\ntesting but it is not secure: it means that the HTTP server for foo.com can\nset a cookie for bar.com.\n\nA public suffix list implementation is in the package\n[golang.org/x/net/publicsuffix].\n" (interface
+
+
+
+
+
+    (^{:doc "PublicSuffix returns the public suffix of domain.\n\nTODO: specify which of the caller and callee is responsible for IP\naddresses, for leading and trailing dots, for case sensitivity, and\nfor IDN/Punycode.\n"} PublicSuffix ^string [^string domain])
+
+
+
+
+    (^{:doc "String returns a description of the source of this public suffix\nlist. The description will typically contain something like a time\nstamp or version number.\n"} String ^string [])))
+
+
+
+(go/type Options "Options are the options for creating a new [Jar].\n" (struct
+
+
+
+
+
+
+    ^{:line 61 :tag PublicSuffixList :doc "PublicSuffixList is the public suffix list that determines whether\nan HTTP server can set a cookie for a domain.\n\nA nil value is valid and may be useful for testing but it is not\nsecure: it means that the HTTP server for foo.co.uk can set a cookie\nfor bar.co.uk.\n"} PublicSuffixList))
+
+
+
+(go/type Jar "Jar implements the [net/http.CookieJar] interface.\n" (struct
+    ^{:line 66 :tag PublicSuffixList} psList
+
+
+    ^{:line 69 :tag sync/Mutex :doc "mu locks the remaining fields.\n"} mu
+
+
+
+    ^{:line 73 :tag (map string (map string entry)) :doc "entries is a set of entries, keyed by their eTLD+1 and subkeyed by\ntheir name/domain/path.\n"} entries
+
+
+
+    ^{:line 77 :tag uint64 :doc "nextSeqNum is the next sequence number assigned to a new cookie\ncreated SetCookies.\n"} nextSeqNum))
+
+
+
+
+^{:go/end 90} (go/func New "New returns a new cookie jar. A nil [*Options] is equivalent to a zero\nOptions.\n" [^{:tag (* Options)} o] :results [(* Jar) error]
+  (let [jar (addr ^{:go/breaks [2]} (lit Jar
+          :entries (make (map string (map string entry)))))]
+
+    (when (!= o nil)
+      (set! (.-psList jar) (.-PublicSuffixList o)))
+
+    (return jar nil)))
+
+
+
+
+
+
+(go/type entry "entry is the internal representation of a cookie.\n\nThis struct type is not used outside of this package per se, but the exported\nfields are those of RFC 6265.\n" (struct
+    ^{:line 97 :tag string} Name
+    ^{:line 98 :tag string} Value
+    ^{:line 99 :tag bool} Quoted
+    ^{:line 100 :tag string} Domain
+    ^{:line 101 :tag string} Path
+    ^{:line 102 :tag string} SameSite
+    ^{:line 103 :tag bool} Secure
+    ^{:line 104 :tag bool} HttpOnly
+    ^{:line 105 :tag bool} Persistent
+    ^{:line 106 :tag bool} HostOnly
+    ^{:line 107 :tag time/Time} Expires
+    ^{:line 108 :tag time/Time} Creation
+    ^{:line 109 :tag time/Time} LastAccess
+
+
+
+
+    ^{:line 114 :tag uint64 :doc "seqNum is a sequence number so that Cookies returns cookies in a\ndeterministic order, even for cookies that have equal Path length and\nequal Creation time. This simplifies testing.\n"} seqNum))
+
+
+
+^{:go/end 120} (go/method id "id returns the domain;path;name triple of e as an id.\n" ^string [^{:tag (* entry)} e]
+  (fmt/Sprintf "%s;%s;%s" (.-Domain e) (.-Path e) (.-Name e)))
+
+
+
+
+
+^{:go/end 127} (go/method shouldSend "shouldSend determines whether e's cookie qualifies to be included in a\nrequest to host/path. It is the caller's responsibility to check if the\ncookie is expired.\n" ^bool [^{:tag (* entry)} e ^bool https ^string host ^string path]
+  (and (.domainMatch e host) (.pathMatch e path) (.secureMatch e https)))
+
+
+
+
+
+^{:go/end 137} (go/method domainMatch "domainMatch checks whether e's Domain allows sending e back to host.\nIt differs from \"domain-match\" of RFC 6265 section 5.1.3 because we treat\na cookie with an IP address in the Domain always as a host cookie.\n" ^bool [^{:tag (* entry)} e ^string host]
+  (when (== (.-Domain e) host)
+    (return true))
+
+  (and (not (.-HostOnly e)) (hasDotSuffix host (.-Domain e))))
+
+
+
+^{:go/breaks [[6 151]] :go/end 152} (go/method pathMatch "pathMatch implements \"path-match\" according to RFC 6265 section 5.1.4.\n" ^bool [^{:tag (* entry)} e ^string requestPath]
+  (when (== requestPath (.-Path e))
+    (return true))
+
+  (when (strings/HasPrefix requestPath (.-Path e))
+    (cond (== (aget (.-Path e) (- (len (.-Path e)) 1)) \/)
+      (return true) ; The "/any/" matches "/any/path" case.
+      (== (aget requestPath (len (.-Path e))) \/)
+      (return true))) ; The "/any" matches "/any/path" case.
+
+
+  false)
+
+
+
+
+
+^{:go/end 176} (go/method secureMatch "secureMatch checks whether a cookie should be sent based on the protocol\nand the Secure flag. Localhost is considered a secure origin regardless\nof protocol, matching browser behavior.\n" ^bool [^{:tag (* entry)} e ^bool https]
+  (when (not (.-Secure e))
+    ;; Cookies not marked secure are always sent.
+    (return true))
+
+  ;; Everything below is about cookies marked secure.
+  (when https
+    ;; HTTPS request matches secure cookies.
+    (return true))
+
+  ;; Consider localhost to be secure like browsers.
+  (when (isLocalhost (.-Domain e))
+    (return true))
+
+  ^{:go/breaks [[3 175]]} (let [(values ip err) (netip/ParseAddr (.-Domain e))]
+    (when (and (== err nil) (.IsLoopback ip))
+      (return true))
+
+    false))
+
+
+^{:go/end 184} (go/func isLocalhost ^bool [^string host]
+  (set! host (strings/TrimSuffix host "."))
+  (when [idx (strings/LastIndex host ".")] (>= idx 0)
+    (set! host (subslice host (+ idx 1))))
+
+  (ascii/EqualFold host "localhost"))
+
+
+
+^{:go/end 189} (go/func hasDotSuffix "hasDotSuffix reports whether s ends in \".\"+suffix.\n" ^bool [^string s ^string suffix]
+  (and (> (len s) (len suffix)) (== (aget s (- (len s) (len suffix) 1)) \.) (== (subslice s (- (len s) (len suffix))) suffix)))
+
+
+
+
+
+^{:go/end 196} (go/method Cookies "Cookies implements the Cookies method of the [http.CookieJar] interface.\n\nIt returns an empty slice if the URL's scheme is not HTTP or HTTPS.\n" [^{:tag (* Jar)} j ^{:tag (* url/URL)} u] :results [^{:tag (slice (* http/Cookie))} cookies]
+  (.cookies j u (time/Now)))
+
+
+
+^{:go/end 263} (go/method cookies "cookies is like Cookies but takes the current time as a parameter.\n" [^{:tag (* Jar)} j ^{:tag (* url/URL)} u ^time/Time now] :results [^{:tag (slice (* http/Cookie))} cookies]
+  (when (and (!= (.-Scheme u) "http") (!= (.-Scheme u) "https"))
+    (return cookies))
+
+  (let [(values host err) (canonicalHost (.-Host u))]
+    (when (!= err nil)
+      (return cookies))
+
+    (let [key (jarKey host (.-psList j))]
+
+      (.Lock (.-mu j))
+      (defer (.Unlock (.-mu j)))
+
+      (let [submap (aget (.-entries j) key)]
+        (when (== submap nil)
+          (return cookies))
+
+
+        (let [https (== (.-Scheme u) "https")
+            ^{:line 218} path (.-Path u)]
+          (when (== path "")
+            (set! path "/"))
+
+
+          (let [modified false
+              ^{:line 224 :tag (slice entry)} selected (zero (slice entry))]
+            (range [id e submap]
+              (when (and (.-Persistent e) (not (.After (.-Expires e) now)))
+                (delete submap id)
+                (set! modified true)
+                (continue))
+
+              (when (not (.shouldSend e https host path))
+                (continue))
+
+              (set! (.-LastAccess e) now)
+              (aset submap id e)
+              (set! selected (append selected e))
+              (set! modified true))
+
+            (when modified
+              (if (== (len submap) 0)
+                (delete (.-entries j) key)
+
+                (aset (.-entries j) key submap)))
+
+
+
+            ;; sort according to RFC 6265 section 5.4 point 2: by longest
+            ;; path and then by earliest creation time.
+            (^{:inst [(slice entry) entry]} slices/SortFunc selected ^{:go/end 257} (fn ^int [^entry a ^entry b]
+                (when [r (^{:inst [string]} cmp/Compare (.-Path b) (.-Path a))] (!= r 0)
+                  (return r))
+
+                (when [r (.Compare (.-Creation a) (.-Creation b))] (!= r 0)
+                  (return r))
+
+                (^{:inst [uint64]} cmp/Compare (.-seqNum a) (.-seqNum b))))
+
+            (range [_ e selected]
+              (set! cookies (append cookies (addr (lit http/Cookie :Name (.-Name e) :Value (.-Value e) :Quoted (.-Quoted e))))))
+
+
+            ^{:line 262} cookies))))))
+
+
+
+
+
+^{:go/end 270} (go/method SetCookies "SetCookies implements the SetCookies method of the [http.CookieJar] interface.\n\nIt does nothing if the URL's scheme is not HTTP or HTTPS.\n" [^{:tag (* Jar)} j ^{:tag (* url/URL)} u ^{:tag (slice (* http/Cookie))} cookies]
+  (.setCookies j u cookies (time/Now)))
+
+
+
+^{:go/end 332} (go/method setCookies "setCookies is like SetCookies but takes the current time as parameter.\n" [^{:tag (* Jar)} j ^{:tag (* url/URL)} u ^{:tag (slice (* http/Cookie))} cookies ^time/Time now]
+  (when (== (len cookies) 0)
+    (return))
+
+  (when (and (!= (.-Scheme u) "http") (!= (.-Scheme u) "https"))
+    (return))
+
+  (let [(values host err) (canonicalHost (.-Host u))]
+    (when (!= err nil)
+      (return))
+
+    (let [key (jarKey host (.-psList j))
+        ^{:line 285} defPath (defaultPath (.-Path u))]
+
+      (.Lock (.-mu j))
+      (defer (.Unlock (.-mu j)))
+
+      (let [submap (aget (.-entries j) key)
+
+          ^{:line 292} modified false]
+        (range [_ cookie cookies]
+          (let [(values e remove err) (.newEntry j cookie now defPath host)]
+            (when (!= err nil)
+              (continue))
+
+            (let [id (.id e)]
+              (when remove
+                (when (!= submap nil)
+                  (when [(values _ ok) (aget submap id)] ok
+                    (delete submap id)
+                    (set! modified true)))
+
+
+                (continue))
+
+              (when (== submap nil)
+                (set! submap (make (map string entry))))
+
+
+              (if [(values old ok) (aget submap id)] ok (do
+                  (set! (.-Creation e) (.-Creation old))
+                  (set! (.-seqNum e) (.-seqNum old)))
+                (do
+                  (set! (.-Creation e) now)
+                  (set! (.-seqNum e) (.-nextSeqNum j))
+                  (inc! (.-nextSeqNum j))))
+
+              (set! (.-LastAccess e) now)
+              (aset submap id e)
+              (set! modified true))))
+
+
+        (when modified
+          (if (== (len submap) 0)
+            (delete (.-entries j) key)
+
+            (aset (.-entries j) key submap)))))))
+
+
+
+
+
+
+^{:go/end 353} (go/func canonicalHost "canonicalHost strips port from host if present and returns the canonicalized\nhost name.\n" [^string host] :results [string error]
+  (let [^error err (zero error)]
+    (when (hasPort host)
+      (set! (values host _ err) (net/SplitHostPort host))
+      (when (!= err nil)
+        (return "" err)))
+
+
+    ;; Strip trailing dot from fully qualified domain names.
+    (set! host (strings/TrimSuffix host "."))
+    (let [(values encoded ^:assign err) (toASCII host)]
+      (when (!= err nil)
+        (return "" err))
+
+      ;; We know this is ascii, no need to check.
+      (let [(values lower _) (ascii/ToLower encoded)]
+        (return lower nil)))))
+
+
+
+
+^{:go/end 366} (go/func hasPort "hasPort reports whether host contains a port number. host may be a host\nname, an IPv4 or an IPv6 address.\n" ^bool [^string host]
+  (let [colons (strings/Count host ":")]
+    (when (== colons 0)
+      (return false))
+
+    (when (== colons 1)
+      (return true))
+
+    (and (== (aget host 0) \[) (strings/Contains host "]:"))))
+
+
+
+^{:go/end 397} (go/func jarKey "jarKey returns the key to use for a jar.\n" ^string [^string host ^PublicSuffixList psl]
+  (when (isIP host)
+    (return host))
+
+
+  (let [^int i (zero int)]
+    (if (== psl nil) (do
+        (set! i (strings/LastIndex host "."))
+        (when (<= i 0)
+          (return host)))
+
+
+      (let [suffix (.PublicSuffix psl host)]
+        (when (== suffix host)
+          (return host))
+
+        (set! i (- (len host) (len suffix)))
+        (when (or (<= i 0) (!= (aget host (- i 1)) \.))
+          ;; The provided public suffix list psl is broken.
+          ;; Storing cookies under host is a safe stopgap.
+          (return host))))
+
+    ;; Only len(suffix) is used to determine the jar key from
+    ;; here on, so it is okay if psl.PublicSuffix("www.buggy.psl")
+    ;; returns "com" as the jar key is generated from host.
+
+    (let [prevDot (strings/LastIndex (subslice host _ (- i 1)) ".")]
+      (subslice host (+ prevDot 1)))))
+
+
+
+^{:go/end 409} (go/func isIP "isIP reports whether host is an IP address.\n" ^bool [^string host]
+  (when (strings/ContainsAny host ":%")
+    ;; Probable IPv6 address.
+    ;; Hostnames can't contain : or %, so this is definitely not a valid host.
+    ;; Treating it as an IP is the more conservative option, and avoids the risk
+    ;; of interpreting ::1%.www.example.com as a subdomain of www.example.com.
+    (return true))
+
+  (!= (net/ParseIP host) nil))
+
+
+
+
+^{:go/end 423} (go/func defaultPath "defaultPath returns the directory part of a URL's path according to\nRFC 6265 section 5.1.4.\n" ^string [^string path]
+  (when (or (== (len path) 0) (!= (aget path 0) \/))
+    (return "/")) ; Path is empty or malformed.
+
+
+  (let [i (strings/LastIndex path "/")] ; Path starts with "/", so i != -1.
+    (when (== i 0)
+      (return "/")) ; Path has the form "/abc".
+
+    (subslice path _ i))) ; Path is either of form "/abc/xyz" or "/abc/xyz/".
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 482} (go/method newEntry "newEntry creates an entry from an http.Cookie c. now is the current time and\nis compared to c.Expires to determine deletion of c. defPath and host are the\ndefault-path and the canonical host name of the URL c was received from.\n\nremove records whether the jar should delete this cookie, as it has already\nexpired with respect to now. In this case, e may be incomplete, but it will\nbe valid to call e.id (which depends on e's Name, Domain and Path).\n\nA malformed c.Domain will result in an error.\n" [^{:tag (* Jar)} j ^{:tag (* http/Cookie)} c ^time/Time now ^string defPath ^string host] :results [^entry e ^bool remove ^error err]
+  (set! (.-Name e) (.-Name c))
+
+  (if (or (== (.-Path c) "") (!= (aget (.-Path c) 0) \/))
+    (set! (.-Path e) defPath)
+
+    (set! (.-Path e) (.-Path c)))
+
+
+  (set! (values (.-Domain e) (.-HostOnly e) err) (.domainAndType j host (.-Domain c)))
+  (when (!= err nil)
+    (return e false err))
+
+
+  ;; MaxAge takes precedence over Expires.
+  (cond (< (.-MaxAge c) 0)
+    (return e true nil)
+    (> (.-MaxAge c) 0) (do
+      (set! (.-Expires e) (.Add now (* (conv time/Duration (.-MaxAge c)) time/Second)))
+      (set! (.-Persistent e) true)) :else
+    (do
+      (if (.IsZero (.-Expires c)) (do
+          (set! (.-Expires e) endOfTime)
+          (set! (.-Persistent e) false))
+        (do
+          (when (not (.After (.-Expires c) now))
+            (return e true nil))
+
+          (set! (.-Expires e) (.-Expires c))
+          (set! (.-Persistent e) true)))))
+
+
+
+  (set! (.-Value e) (.-Value c))
+  (set! (.-Quoted e) (.-Quoted c))
+  (set! (.-Secure e) (.-Secure c))
+  (set! (.-HttpOnly e) (.-HttpOnly c))
+
+  (switch (.-SameSite c)
+    (case [http/SameSiteDefaultMode]
+      (set! (.-SameSite e) "SameSite"))
+    (case [http/SameSiteStrictMode]
+      (set! (.-SameSite e) "SameSite=Strict"))
+    (case [http/SameSiteLaxMode]
+      (set! (.-SameSite e) "SameSite=Lax")))
+
+
+  (return e false nil))
+
+
+(go/var
+  ^{:line 485} [errIllegalDomain (errors/New "cookiejar: illegal cookie domain attribute")]
+  ^{:line 486} [errMalformedDomain (errors/New "cookiejar: malformed cookie domain attribute")])
+
+
+
+
+
+(go/var ^{:doc "endOfTime is the time when session (non-persistent) cookies expire.\nThis instant is representable in most date/time formats (not just\nGo's time.Time) and should be far enough in the future.\n"} endOfTime (time/Date 9999 12 31 23 59 59 0 time/UTC))
+
+
+^{:go/end 581} (go/method domainAndType "domainAndType determines the cookie's domain and hostOnly attribute.\n" [^{:tag (* Jar)} j ^string host ^string domain] :results [string bool error]
+  (when (== domain "")
+    ;; No domain attribute in the SetCookie header indicates a
+    ;; host cookie.
+    (return host true nil))
+
+
+  (when (isIP host)
+    ;; RFC 6265 is not super clear here, a sensible interpretation
+    ;; is that cookies with an IP address in the domain-attribute
+    ;; are allowed.
+
+    ;; RFC 6265 section 5.2.3 mandates to strip an optional leading
+    ;; dot in the domain-attribute before processing the cookie.
+    ;;
+    ;; Most browsers don't do that for IP addresses, only curl
+    ;; (version 7.54) and IE (version 11) do not reject a
+    ;;     Set-Cookie: a=1; domain=.127.0.0.1
+    ;; This leading dot is optional and serves only as hint for
+    ;; humans to indicate that a cookie with "domain=.bbc.co.uk"
+    ;; would be sent to every subdomain of bbc.co.uk.
+    ;; It just doesn't make sense on IP addresses.
+    ;; The other processing and validation steps in RFC 6265 just
+    ;; collapse to:
+    (when (!= host domain)
+      (return "" false errIllegalDomain))
+
+
+    ;; According to RFC 6265 such cookies should be treated as
+    ;; domain cookies.
+    ;; As there are no subdomains of an IP address the treatment
+    ;; according to RFC 6265 would be exactly the same as that of
+    ;; a host-only cookie. Contemporary browsers (and curl) do
+    ;; allows such cookies but treat them as host-only cookies.
+    ;; So do we as it just doesn't make sense to label them as
+    ;; domain cookies when there is no domain; the whole notion of
+    ;; domain cookies requires a domain name to be well defined.
+    (return host true nil))
+
+
+  ;; From here on: If the cookie is valid, it is a domain cookie (with
+  ;; the one exception of a public suffix below).
+  ;; See RFC 6265 section 5.2.3.
+  (set! domain (strings/TrimPrefix domain "."))
+
+  (when (or (== (len domain) 0) (== (aget domain 0) \.))
+    ;; Received either "Domain=." or "Domain=..some.thing",
+    ;; both are illegal.
+    (return "" false errMalformedDomain))
+
+
+  (let [(values ^:assign domain isASCII) (ascii/ToLower domain)]
+    (when (not isASCII)
+      ;; Received non-ASCII domain, e.g. "perché.com" instead of "xn--perch-fsa.com"
+      (return "" false errMalformedDomain))
+
+
+    (when (== (aget domain (- (len domain) 1)) \.)
+      ;; We received stuff like "Domain=www.example.com.".
+      ;; Browsers do handle such stuff (actually differently) but
+      ;; RFC 6265 seems to be clear here (e.g. section 4.1.2.3) in
+      ;; requiring a reject.  4.1.2.3 is not normative, but
+      ;; "Domain Matching" (5.1.3) and "Canonicalized Host Names"
+      ;; (5.1.2) are.
+      (return "" false errMalformedDomain))
+
+
+    ;; See RFC 6265 section 5.3 #5.
+    (when (!= (.-psList j) nil)
+      (when [ps (.PublicSuffix (.-psList j) domain)] (and (!= ps "") (not (hasDotSuffix domain ps)))
+        (when (== host domain)
+          ;; This is the one exception in which a cookie
+          ;; with a domain attribute is a host cookie.
+          (return host true nil))
+
+        (return "" false errIllegalDomain)))
+
+
+
+    ;; The domain must domain-match host: www.mycompany.com cannot
+    ;; set cookies for .ourcompetitors.com.
+    (when (and (!= host domain) (not (hasDotSuffix host domain)))
+      (return "" false errIllegalDomain))
+
+
+    (return domain false nil)))

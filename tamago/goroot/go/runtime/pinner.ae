@@ -1,0 +1,402 @@
+;; Copyright 2023 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "pinner.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [atomic "internal/runtime/atomic"]
+    ^{:line 10} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Pinner "A Pinner is a set of Go objects each pinned to a fixed location in memory. The\n[Pinner.Pin] method pins one object, while [Pinner.Unpin] unpins all pinned\nobjects.\n\nThe purpose of a Pinner is two-fold.\nFirst, it allows C code to safely use Go pointers that have not been passed\nexplicitly to the C code via a cgo call.\nFor example, for safely interacting with a pointer stored inside of a struct\nwhose pointer is passed to a C function.\nSecond, it allows C memory to safely retain that Go pointer even after the\ncgo call returns, provided the object remains pinned.\n\nA Pinner arranges for its objects to be automatically unpinned some time after\nit becomes unreachable, so its referents will not leak. However, this means the\nPinner itself must be kept alive across a cgo call, or as long as C retains a\nreference to the pinned Go pointers.\n\nReusing a Pinner is safe, and in fact encouraged, to avoid the cost of\ninitializing new Pinners on first use.\n\nThe zero value of Pinner is ready to use.\n" (struct
+    (* pinner)))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 82} (go/method Pin "Pin pins a Go object, preventing it from being moved or freed by the garbage\ncollector until the [Pinner.Unpin] method has been called.\n\nA pointer to a pinned object can be directly stored in C memory or can be\ncontained in Go memory passed to C functions. If the pinned object itself\ncontains pointers to Go objects, these objects must be pinned separately if they\nare going to be accessed from C code.\n\nThe argument must be a pointer of any type or an [unsafe.Pointer].\n\nIt's safe to call Pin on non-Go pointers, in which case Pin will do nothing.\n" [^{:tag (* Pinner)} p ^any pointer]
+  (when (== (.-pinner p) nil)
+    ;; Check the pinner cache first.
+    (let [mp (acquirem)]
+      (when [pp (.ptr (.-p mp))] (!= pp nil)
+        (set! (.-pinner p) (.-pinnerCache pp))
+        (set! (.-pinnerCache pp) nil))
+
+      (releasem mp)
+
+      (when (== (.-pinner p) nil)
+        ;; Didn't get anything from the pinner cache.
+        (set! (.-pinner p) (new pinner))
+        (set! ^{:go/via [pinner]} (.-refs p) (subslice ^{:go/via [pinner]} (.-refStore p) _ 0))
+
+        ;; We set this finalizer once and never clear it. Thus, if the
+        ;; pinner gets cached, we'll reuse it, along with its finalizer.
+        ;; This lets us avoid the relatively expensive SetFinalizer call
+        ;; when reusing from the cache. The finalizer however has to be
+        ;; resilient to an empty pinner being finalized, which is done
+        ;; by checking p.refs' length.
+        (SetFinalizer (.-pinner p) ^{:go/end 75} (fn [^{:tag (* pinner)} i]
+            (when (!= (len (.-refs i)) 0)
+              (.unpin i) ; only required to make the test idempotent
+              (pinnerLeakPanic)))))))
+
+
+
+
+  (let [ptr (pinnerGetPtr (addr pointer))]
+    (when (setPinned ptr true)
+      (set! ^{:go/via [pinner]} (.-refs p) (append ^{:go/via [pinner]} (.-refs p) ptr)))))
+
+
+
+
+
+^{:go/end 99} (go/method Unpin "Unpin unpins all pinned objects of the [Pinner].\nIt's safe and encouraged to reuse a Pinner after calling Unpin.\n" [^{:tag (* Pinner)} p]
+  (.unpin (.-pinner p))
+
+  (let [mp (acquirem)]
+    (when [pp (.ptr (.-p mp))] (and (!= pp nil) (== (.-pinnerCache pp) nil))
+      ;; Put the pinner back in the cache, but only if the
+      ;; cache is empty. If application code is reusing Pinners
+      ;; on its own, we want to leave the backing store in place
+      ;; so reuse is more efficient.
+      (set! (.-pinnerCache pp) (.-pinner p))
+      (set! (.-pinner p) nil))
+
+    (releasem mp)))
+
+
+(go/const
+  ^{:line 102} [^{:val 64} pinnerSize 64]
+  ^{:line 103} [^{:val 5} pinnerRefStoreSize (/ (- pinnerSize (unsafe/Sizeof (lit (slice unsafe/Pointer)))) (unsafe/Sizeof (conv unsafe/Pointer nil)))])
+
+
+(go/type pinner (struct
+    ^{:line 107 :tag (slice unsafe/Pointer)} refs
+    ^{:line 108 :tag (array pinnerRefStoreSize unsafe/Pointer)} refStore))
+
+
+^{:go/end 123} (go/method unpin [^{:tag (* pinner)} p]
+  (when (or (== p nil) (== (.-refs p) nil))
+    (return))
+
+  (range [i (.-refs p)]
+    (setPinned (aget (.-refs p) i) false))
+
+  ;; The following two lines make all pointers to references
+  ;; in p.refs unreachable, either by deleting them or dropping
+  ;; p.refs' backing store (if it was not backed by refStore).
+  (set! (.-refStore p) (lit (array pinnerRefStoreSize unsafe/Pointer)))
+  (set! (.-refs p) (subslice (.-refStore p) _ 0)))
+
+
+^{:go/end 139} (go/func pinnerGetPtr ^unsafe/Pointer [^{:tag (* any)} i]
+  (let [e (efaceOf i)
+      ^{:line 127} etyp (.-_type e)]
+    (when (== etyp nil)
+      (panic (conv errorString "runtime.Pinner: argument is nil")))
+
+    (when [kind (.Kind etyp)] (and (!= kind abi/Pointer) (!= kind abi/UnsafePointer))
+      (panic (conv errorString (+ "runtime.Pinner: argument is not a pointer: " (.string (toRType etyp))))))
+
+    (when (inUserArenaChunk (conv uintptr (.-data e)))
+      ;; Arena-allocated objects are not eligible for pinning.
+      (panic (conv errorString "runtime.Pinner: object was allocated into an arena")))
+
+    (.-data e)))
+
+
+
+
+
+
+^{:go/end 163} (go/func ^:go/nosplit isPinned "isPinned checks if a Go pointer is pinned.\nnosplit, because it's called from nosplit code in cgocheck.\n" ^bool [^unsafe/Pointer ptr]
+  (let [span (spanOfHeap (conv uintptr ptr))]
+    (when (== span nil)
+      ;; this code is only called for Go pointer, so this must be a
+      ;; linker-allocated global object.
+      (return true))
+
+    (let [pinnerBits (.getPinnerBits span)]
+      ;; these pinnerBits might get unlinked by a concurrently running sweep, but
+      ;; that's OK because gcBits don't get cleared until the following GC cycle
+      ;; (nextMarkBitArenaEpoch)
+      (when (== pinnerBits nil)
+        (return false))
+
+      (let [objIndex (.objIndex span (conv uintptr ptr))
+          ^{:line 160} pinState (.ofObject pinnerBits objIndex)]
+        (KeepAlive ptr) ; make sure ptr is alive until we are done so the span can't be freed
+        (.isPinned pinState)))))
+
+
+
+
+
+
+^{:go/end 236} (go/func setPinned "setPinned marks or unmarks a Go pointer as pinned, when the ptr is a Go pointer.\nIt will be ignored while trying to pin a non-Go pointer.\nIt will panic while trying to unpin a non-Go pointer,\nwhich should not happen in normal usage.\n" ^bool [^unsafe/Pointer ptr ^bool pin]
+  (let [span (spanOfHeap (conv uintptr ptr))]
+    (when (== span nil)
+      (when (not pin)
+        (panic (conv errorString "tried to unpin non-Go pointer")))
+
+      ;; This is a linker-allocated, zero size object or other object,
+      ;; nothing to do, silently ignore it.
+      (return false))
+
+
+    ;; ensure that the span is swept, b/c sweeping accesses the specials list
+    ;; w/o locks.
+    (let [mp (acquirem)]
+      (.ensureSwept span)
+      (KeepAlive ptr) ; make sure ptr is still alive after span is swept
+
+      (let [objIndex (.objIndex span (conv uintptr ptr))]
+
+        (lock (addr (.-speciallock span))) ; guard against concurrent calls of setPinned on same span
+
+        (let [pinnerBits (.getPinnerBits span)]
+          (when (== pinnerBits nil)
+            (set! pinnerBits (.newPinnerBits span))
+            (.setPinnerBits span pinnerBits))
+
+          ^{:go/breaks [5]} (let [pinState (.ofObject pinnerBits objIndex)]
+            (if pin
+              (if (.isPinned pinState) (do
+                  ;; multiple pins on same object, set multipin bit
+                  (.setMultiPinned pinState true)
+                  ;; and increase the pin counter
+                  ;; TODO(mknyszek): investigate if systemstack is necessary here
+                  (systemstack ^{:go/end 205} (fn []
+                      (let [offset (* objIndex (.-elemsize span))]
+                        (.incPinCounter span offset)))))
+
+
+                ;; set pin bit
+                (.setPinned pinState true))
+
+              (do
+                ;; unpin
+                (if (.isPinned pinState)
+                  (if (.isMultiPinned pinState)
+                    (let [^bool exists (zero bool)]
+                      ;; TODO(mknyszek): investigate if systemstack is necessary here
+                      (systemstack ^{:go/end 219} (fn []
+                          (let [offset (* objIndex (.-elemsize span))]
+                            (set! exists (.decPinCounter span offset)))))
+
+                      (when (not exists)
+                        ;; counter is 0, clear multipin bit
+                        (.setMultiPinned pinState false)))
+
+
+                    ;; no multipins recorded. unpin object.
+                    (.setPinned pinState false))
+
+
+                  ;; unpinning unpinned object, bail out
+                  (throw "runtime.Pinner: object already unpinned"))))
+
+
+            (unlock (addr (.-speciallock span)))
+            (releasem mp)
+            true))))))
+
+
+(go/type pinState (struct
+    ^{:line 239 :tag (* uint8)} bytep
+    ^{:line 240 :tag uint8} byteVal
+    ^{:line 241 :tag uint8} mask))
+
+
+
+
+
+^{:go/end 249} (go/method ^:go/nosplit isPinned "nosplit, because it's called by isPinned, which is nosplit\n" ^bool [^{:tag (* pinState)} v]
+  (!= (bit-and (.-byteVal v) (.-mask v)) 0))
+
+
+^{:go/end 253} (go/method isMultiPinned ^bool [^{:tag (* pinState)} v]
+  (!= (bit-and (.-byteVal v) (<< (.-mask v) 1)) 0))
+
+
+^{:go/end 257} (go/method setPinned [^{:tag (* pinState)} v ^bool val]
+  (.set v val false))
+
+
+^{:go/end 261} (go/method setMultiPinned [^{:tag (* pinState)} v ^bool val]
+  (.set v val true))
+
+
+
+
+^{:go/end 275} (go/method set "set sets the pin bit of the pinState to val. If multipin is true, it\nsets/unsets the multipin bit instead.\n" [^{:tag (* pinState)} v ^bool val ^bool multipin]
+  (let [mask (.-mask v)]
+    (when multipin
+      (set! mask << 1))
+
+    (if val
+      (atomic/Or8 (.-bytep v) mask)
+
+      (atomic/And8 (.-bytep v) (bit-not mask)))))
+
+
+
+
+(go/type pinnerBits "pinnerBits is the same type as gcBits but has different methods.\n" gcBits)
+
+
+
+
+
+^{:go/end 288} (go/method ^:go/nosplit ofObject "ofObject returns the pinState of the n'th object.\nnosplit, because it's called by isPinned, which is nosplit\n" ^pinState [^{:tag (* pinnerBits)} p ^uintptr n]
+  (let [(values bytep mask) (.bitp (conv (* gcBits) p) (* n 2))
+      ^{:line 286} byteVal (atomic/Load8 bytep)]
+    (lit pinState bytep byteVal mask)))
+
+
+^{:go/end 292} (go/method pinnerBitSize ^uintptr [^{:tag (* mspan)} s]
+  (divRoundUp (* (conv uintptr (.-nelems s)) 2) 8))
+
+
+
+
+
+^{:go/end 299} (go/method newPinnerBits "newPinnerBits returns a pointer to 8 byte aligned bytes to be used for this\nspan's pinner bits. newPinnerBits is used to mark objects that are pinned.\nThey are copied when the span is swept.\n" ^{:tag (* pinnerBits)} [^{:tag (* mspan)} s]
+  (conv (* pinnerBits) (newMarkBits (* (conv uintptr (.-nelems s)) 2))))
+
+
+
+
+
+^{:go/end 306} (go/method ^:go/nosplit getPinnerBits "nosplit, because it's called by isPinned, which is nosplit\n" ^{:tag (* pinnerBits)} [^{:tag (* mspan)} s]
+  (conv (* pinnerBits) (atomic/Loadp (conv unsafe/Pointer (addr (.-pinnerBits s))))))
+
+
+^{:go/end 310} (go/method setPinnerBits [^{:tag (* mspan)} s ^{:tag (* pinnerBits)} p]
+  (atomicstorep (conv unsafe/Pointer (addr (.-pinnerBits s))) (conv unsafe/Pointer p)))
+
+
+
+
+
+^{:go/end 342} (go/method refreshPinnerBits "refreshPinnerBits replaces pinnerBits with a fresh copy in the arenas for the\nnext GC cycle. If it does not contain any pinned objects, pinnerBits of the\nspan is set to nil.\n" [^{:tag (* mspan)} s]
+  (let [p (.getPinnerBits s)]
+    (when (== p nil)
+      (return))
+
+
+    (let [hasPins false
+        ^{:line 322} bytes (alignUp (.pinnerBitSize s) 8)]
+
+      ;; Iterate over each 8-byte chunk and check for pins. Note that
+      ;; newPinnerBits guarantees that pinnerBits will be 8-byte aligned, so we
+      ;; don't have to worry about edge cases, irrelevant bits will simply be
+      ;; zero.
+      (range [_ x (unsafe/Slice (conv (* uint64) (conv unsafe/Pointer (addr (.-x p)))) (/ bytes 8))]
+        (when (!= x 0)
+          (set! hasPins true)
+          (break)))
+
+
+
+      (if hasPins
+        (let [newPinnerBits (.newPinnerBits s)]
+          (memmove (conv unsafe/Pointer (addr (.-x newPinnerBits))) (conv unsafe/Pointer (addr (.-x p))) bytes)
+          (.setPinnerBits s newPinnerBits))
+
+        (.setPinnerBits s nil)))))
+
+
+
+
+
+^{:go/end 363} (go/method incPinCounter "incPinCounter is only called for multiple pins of the same object and records\nthe _additional_ pins.\n" [^{:tag (* mspan)} span ^uintptr offset]
+  (let [^{:tag (* specialPinCounter)} rec (zero (* specialPinCounter))
+      (values ref exists) (.specialFindSplicePoint span offset _KindSpecialPinCounter)]
+    (if (not exists) (do
+        (lock (addr (.-speciallock mheap_)))
+        (set! rec (conv (* specialPinCounter) (.alloc (.-specialPinCounterAlloc mheap_))))
+        (unlock (addr (.-speciallock mheap_)))
+        ;; splice in record, fill in offset.
+        (set! (.-offset (.-special rec)) offset)
+        (set! (.-kind (.-special rec)) _KindSpecialPinCounter)
+        (set! (.-next (.-special rec)) @ref)
+        (set! @ref (conv (* special) (conv unsafe/Pointer rec)))
+        (spanHasSpecials span))
+
+      (set! rec (conv (* specialPinCounter) (conv unsafe/Pointer @ref))))
+
+    (inc! (.-counter rec))))
+
+
+
+
+^{:go/end 385} (go/method decPinCounter "decPinCounter decreases the counter. If the counter reaches 0, the counter\nspecial is deleted and false is returned. Otherwise true is returned.\n" ^bool [^{:tag (* mspan)} span ^uintptr offset]
+  (let [(values ref exists) (.specialFindSplicePoint span offset _KindSpecialPinCounter)]
+    (when (not exists)
+      (throw "runtime.Pinner: decreased non-existing pin counter"))
+
+    ^{:go/breaks [[4 384]]} (let [counter (conv (* specialPinCounter) (conv unsafe/Pointer @ref))]
+      (dec! (.-counter counter))
+      (when (== (.-counter counter) 0)
+        (set! @ref (.-next (.-special counter)))
+        (when (== (.-specials span) nil)
+          (spanHasNoSpecials span))
+
+        (lock (addr (.-speciallock mheap_)))
+        (.free (.-specialPinCounterAlloc mheap_) (conv unsafe/Pointer counter))
+        (unlock (addr (.-speciallock mheap_)))
+        (return false))
+
+      true)))
+
+
+
+^{:go/end 397} (go/func pinnerGetPinCounter "only for tests\n" ^{:tag (* uintptr)} [^unsafe/Pointer addr]
+  (let [(values _ span objIndex) (findObject (conv uintptr addr) 0 0)
+      ^{:line 390} offset (* objIndex (.-elemsize span))
+      (values t exists) (.specialFindSplicePoint span offset _KindSpecialPinCounter)]
+    (when (not exists)
+      (return nil))
+
+    (let [counter (conv (* specialPinCounter) (conv unsafe/Pointer @t))]
+      (addr (.-counter counter)))))
+
+
+
+
+(go/var ^{:doc "to be able to test that the GC panics when a pinned pointer is leaking, this\npanic function is a variable, that can be overwritten by a test.\n"} pinnerLeakPanic ^{:go/end 403} (fn []
+    (panic (conv errorString "runtime.Pinner: found leaking pinned pointer; forgot to call Unpin()?"))))

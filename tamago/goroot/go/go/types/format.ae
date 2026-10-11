@@ -1,0 +1,184 @@
+;; Copyright 2024 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements (error and trace) message formatting support.
+
+(in-ns 'go.go.types) (go/file "format.go" :imports [
+
+
+    ^{:line 10} [bytes "bytes"]
+    ^{:line 11} [fmt "fmt"]
+    ^{:line 12} [ast "go/ast"]
+    ^{:line 13} [token "go/token"]
+    ^{:line 14} [strconv "strconv"]
+    ^{:line 15} [strings "strings"]])
+
+
+^{:go/end 88} (go/func sprintf ^string [^{:tag (* token/FileSet)} fset ^Qualifier qf ^bool tpSubscripts ^string format & ^{:tag (slice any)} args]
+  (range [i arg args]
+    (type-switch [a arg]
+      (case [nil]
+        (set! arg "<nil>"))
+      (case [operand]
+        (panic "got operand instead of *operand"))
+      (case [(* operand)]
+        (set! arg (operandString a qf)))
+      (case [(slice (* operand))]
+        (let [^strings/Builder buf (zero strings/Builder)]
+          (.WriteByte buf \[)
+          (range [i x a]
+            (when (> i 0)
+              (.WriteString buf ", "))
+
+            (.WriteString buf (operandString x qf)))
+
+          (.WriteByte buf \])
+          (set! arg (.String buf))))
+      (case [token/Pos]
+        (when (!= fset nil)
+          (set! arg (.String (.Position fset a)))))
+
+      (case [ast/Expr]
+        (set! arg (ExprString a)))
+      (case [(slice ast/Expr)]
+        (let [^bytes/Buffer buf (zero bytes/Buffer)]
+          (.WriteByte buf \[)
+          (writeExprList (addr buf) a)
+          (.WriteByte buf \])
+          (set! arg (.String buf))))
+      (case [Object]
+        (set! arg (ObjectString a qf)))
+      (case [Type]
+        (let [^bytes/Buffer buf (zero bytes/Buffer)
+            ^{:line 54} w (newTypeWriter (addr buf) qf)]
+          (set! (.-tpSubscripts w) tpSubscripts)
+          (.typ w a)
+          (set! arg (.String buf))))
+      (case [(slice Type)]
+        (let [^bytes/Buffer buf (zero bytes/Buffer)
+            ^{:line 60} w (newTypeWriter (addr buf) qf)]
+          (set! (.-tpSubscripts w) tpSubscripts)
+          (.WriteByte buf \[)
+          (range [i x a]
+            (when (> i 0)
+              (.WriteString buf ", "))
+
+            (.typ w x))
+
+          (.WriteByte buf \])
+          (set! arg (.String buf))))
+      (case [(slice (* TypeParam))]
+        (let [^bytes/Buffer buf (zero bytes/Buffer)
+            ^{:line 73} w (newTypeWriter (addr buf) qf)]
+          (set! (.-tpSubscripts w) tpSubscripts)
+          (.WriteByte buf \[)
+          (range [i x a]
+            (when (> i 0)
+              (.WriteString buf ", "))
+
+            (.typ w x))
+
+          (.WriteByte buf \])
+          (set! arg (.String buf)))))
+
+    (aset args i arg))
+
+  (fmt/Sprintf format (spread args)))
+
+
+
+^{:go/end 99} (go/method sprintf "check may be nil.\n" ^string [^{:tag (* Checker)} check ^string format & ^{:tag (slice any)} args]
+  (let [^{:tag (* token/FileSet)} fset (zero (* token/FileSet))
+      ^{:line 93 :tag Qualifier} qf (zero Qualifier)]
+    (when (!= check nil)
+      (set! fset (.-fset check))
+      (set! qf (.-qualifier check)))
+
+    (sprintf fset qf false format (spread args))))
+
+
+^{:go/end 114} (go/method trace [^{:tag (* Checker)} check ^token/Pos pos ^string format & ^{:tag (slice any)} args]
+  (let [pos1 (.Position (.-fset check) pos)
+      ;; Use the width of line and pos values to align the ":" by adding padding before it.
+      ;; Cap padding at 5: 3 digits for the line, 2 digits for the column number, which is
+      ;; ok for most cases.
+      ^{:line 106} w (+ (ndigits (.-Line pos1)) (ndigits (.-Column pos1)))
+      ^{:line 107} pad (subslice "     " _ (max (- 5 w) 0))]
+    (fmt/Printf "%s%s:  %s%s\n"
+      ^{:line 109} pos1
+      ^{:line 110} pad
+      (strings/Repeat ".  " (.-indent check))
+      (sprintf (.-fset check) (.-qualifier check) true format (spread args)))))
+
+
+
+
+
+
+^{:go/end 128} (go/func ndigits "ndigits returns the number of decimal digits in x.\nFor x < 10, the result is always 1.\nFor x > 100, the result is always 3.\n" ^int [^int x]
+  (switch
+    (case [(< x 10)]
+      (return 1))
+    (case [(< x 100)]
+      (return 2))
+    (default
+      (return 3))))
+
+
+
+
+^{:go/end 133} (go/method dump "dump is only needed for debugging\n" [^{:tag (* Checker)} check ^string format & ^{:tag (slice any)} args]
+  (fmt/Println (sprintf (.-fset check) (.-qualifier check) true format (spread args))))
+
+
+^{:go/breaks [[4 149]] :go/end 150} (go/method qualifier ^string [^{:tag (* Checker)} check ^{:tag (* Package)} pkg]
+  ;; Qualify the package unless it's the package being type-checked.
+  (when (!= pkg (.-pkg check))
+    (when (== (.-pkgPathMap check) nil)
+      (set! (.-pkgPathMap check) (make (map string (map string bool))))
+      (set! (.-seenPkgMap check) (make (map (* Package) bool)))
+      (.markImports check (.-pkg check)))
+
+    ;; If the same package name was used by multiple packages, display the full path.
+    (when (> (len (aget (.-pkgPathMap check) (.-name pkg))) 1)
+      (return (strconv/Quote (.-path pkg))))
+
+    (return (.-name pkg)))
+
+  "")
+
+
+
+
+^{:go/end 170} (go/method markImports "markImports recursively walks pkg and its imports, to record unique import\npaths in pkgPathMap.\n" [^{:tag (* Checker)} check ^{:tag (* Package)} pkg]
+  (when (aget (.-seenPkgMap check) pkg)
+    (return))
+
+  (aset (.-seenPkgMap check) pkg true)
+
+  (let [(values forName ok) (aget (.-pkgPathMap check) (.-name pkg))]
+    (when (not ok)
+      (set! forName (make (map string bool)))
+      (aset (.-pkgPathMap check) (.-name pkg) forName))
+
+    (aset forName (.-path pkg) true)
+
+    (range [_ imp (.-imports pkg)]
+      (.markImports check imp))))
+
+
+
+
+^{:go/end 185} (go/func stripAnnotations "stripAnnotations removes internal (type) annotations from s.\n" ^string [^string s]
+  (let [^strings/Builder buf (zero strings/Builder)]
+    (range [_ r s]
+      ;; strip #'s and subscript digits
+      (when (or (< r \₀) (<= (+ \₀ 10) r)) ; '₀' == U+2080
+        (.WriteRune buf r)))
+
+
+    (when (< (.Len buf) (len s))
+      (return (.String buf)))
+
+    ^{:line 184} s))
