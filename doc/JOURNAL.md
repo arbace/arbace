@@ -1617,3 +1617,20 @@ decision (2026-10-08).
   Arbace's own tools, a BSD-3 entry for test/g2c's excerpts of Go's sources, NativePRNG.clj and
   TreeMap.clj recorded as keeping jdk26u code; the known mismatches' reasons (the NaN case: Go
   reuses one boxed NaN, not the fixed dcmpg bug).
+- Licensing records by the rule of B7 (agent, branch `licfix` `cc29b8a`, merged): each of the
+  69 variants in `overlay/jdk/variants` and the 40 files of jrt's own Java compared with jdk26u
+  at `baf63fb`; those keeping jdk26u statements beyond argument checks or one delegating call
+  now say so in their headers (Oracle's notice, GPLv2+CE) and in LICENSE.md: 15 variants newly
+  recorded (AbstractChronology, BitSet, CRC32, Collectors, File, FileHandler, ParseUtil,
+  TimeZone, TzdbZoneRulesProvider, ZoneInfoFile, URI, URL, URLConnection, ZoneOffset, the
+  sockets list gaining Inet6Address.java), four headers that said EPL only corrected
+  (BreakIteratorResourceBundle, CompletableFuture, Executors, TreeMap), and jrt's
+  `Path.java` (verbatim default methods: this corrects LICENSE.md's earlier "written from the
+  documented APIs"), `Files.java`, `StandardStreams.java`, `ThreadPerTaskExecutor.java`,
+  `ForkJoinPools.java` (with Doug Lea's JSR-166 public-domain notice, quoted in LICENSE.md).
+  Borderline cases (a few lines) were recorded, to be safe. Go's copyright notice added to
+  test/g2c's excerpts of Go's sources (`s14_3_sort.go`, `s02_search.go`, `convert/search.go`)
+  and as `;;` lines in their forms (lines shifted; `bin/g2c-print-tests` and
+  `bin/g2c-convert-tests` pass; the printer drops `;;` lines, so `s14_3_sort` differs from its
+  original only in the notice). EVAL-NOTES' FX1-FX7 and JRT-NOTES' FX7, JC4, JC8 point to where
+  they are folded.
