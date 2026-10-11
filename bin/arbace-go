@@ -54,11 +54,22 @@ go_env() { # go_env ARCH
     "$( [ "$a" = amd64 ] && echo GOAMD64=v1 || echo GOARM64=v8.0 )"
 }
 
-# the linker's flags of the executables: without the symbol table and DWARF (-s -w; amendment
-# SZ1): Go's own tables (pclntab), which panics' traces, jrt's stack traces and profiles read,
-# stay. ARBACE_GO_SYMBOLS=1 keeps them (go tool nm, debuggers).
-ldflags=()
-[ "${ARBACE_GO_SYMBOLS:-}" = 1 ] || ldflags=("-ldflags=-s -w")
+# the linker's flags of the executables' final links (image, pgo_build), set in ldflags by
+# link_flags: without the symbol table and DWARF (-s -w; amendment SZ1): Go's own tables
+# (pclntab), which panics' traces, jrt's stack traces and profiles read, stay;
+# ARBACE_GO_SYMBOLS=1 keeps them (go tool nm, debuggers). And Arbace's version
+# (bin/lib/version.bash; C2G-SPEC §10.6): the main package's arbaceVersion, set with -X, read
+# from the checkout (or VERSION in a tarball) at link time, so c2g's output and the image of
+# prepared namespaces hold none. The first link (bin/g2c build) leaves it empty: its executable
+# only prepares the image
+. "$root/bin/lib/version.bash"
+link_flags() {
+  local v f
+  v=$(arbace_version "$root") || return 1
+  f="-X 'main.arbaceVersion=$v'"
+  [ "${ARBACE_GO_SYMBOLS:-}" = 1 ] || f="-s -w $f"
+  ldflags=("-ldflags=$f")
+}
 
 # the seconds since $1 (date +%s)
 since() { echo "$(( $(date +%s) - $1 )) s"; }
@@ -102,6 +113,7 @@ build() {
 pgo_build() {
   local overlay t0 a
   overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
+  link_flags || return 1
   t0=$(date +%s)
   echo "== the training run (test/arbace-go-pgo.ae)" >&2
   rm -f "$dir/pgo.pprof"
@@ -137,6 +149,7 @@ image() {
   local t0
   t0=$(date +%s)
   prepare "$dir/$(host_arch)/$exe" "$main/image.bin" || return 1
+  link_flags || return 1
   echo "   prepare: $(since "$t0")" >&2
   for a in $(build_order); do
     t0=$(date +%s)
@@ -223,7 +236,7 @@ EOF
   printf '(+ 1 2)\n(* *1 10)\n(defn twice\n  "Doubles x."\n  [x]\n  (* 2 x))\n(twice 21)\n(doc twice)\n(/ 1 0)\n(class *e)\n(ex-message *e)\n[*1 *2 *3]\n"multi\nline"\n' \
     > "$t/repl.in"
   cat > "$t/repl.expected" <<'EOF'
-Clojure 1.13.0-master-SNAPSHOT
+Arbace DESCRIBE (HASH)
 user=> 3
 user=> 30
 user=> #'user/twice
@@ -255,7 +268,14 @@ EOF
     # *2 *3 and *e, end of input ending it with status 0 (the transcript is the JVM's,
     # bin/arbace-j's, but for the eval class's number)
     run "$a" < "$t/repl.in" > "$t/repl.out" 2>&1; st=$?
-    check "a REPL session" "$(cat "$t/repl.expected")" "$(sed -e 's/user\/eval[0-9]*/user\/evalN/' "$t/repl.out")"
+    check "a REPL session" "$(cat "$t/repl.expected")" \
+      "$(sed -e 's/user\/eval[0-9]*/user\/evalN/' -e '1s/^Arbace [^ ]* ([0-9a-f]\{7\})$/Arbace DESCRIBE (HASH)/' "$t/repl.out")"
+    # Arbace's version (the link's -X; doc/VENDOR-NOTES.md, hand change 20): the banner says
+    # the describe and the commit of *arbace-version* (a cached gate executable keeps the
+    # commit it was built at: gate_key), *clojure-version* stays
+    check "the banner is *arbace-version*'s" "$(head -1 "$t/repl.out")" \
+      "$(run "$a" -e '(let [{:keys [describe commit dirty]} *arbace-version*] (if (and (string? commit) (re-matches #"[0-9a-f]{40}" commit) (boolean? dirty) (= describe (arbace-version))) (println "Arbace" describe (str "(" (subs commit 0 7) ")")) (prn *arbace-version*)))' 2>&1)"
+    check "(clojure-version)" "1.13.0-master-SNAPSHOT" "$(run "$a" -e '(print (clojure-version))' 2>&1)"
     check "the REPL's exit status at end of input" "0" "$st"
     run "$a" -e '(/ 1 0)' > "$t/err.txt" 2>&1; local st=$?
     check "an error's exit status" "1" "$st"
@@ -286,7 +306,10 @@ EOF
   return $status
 }
 
-# gate_key: the hash of what the executable is built from: Arbace's sources (the runtime's
+# gate_key: the hash of what the executable is built from (not the commit: a commit that
+# changes none of these keeps the cached executable, whose *arbace-version* then names the
+# commit it was built at; right for the smoke test, which checks only that the banner shows
+# the executable's own version, and it keeps the gate's hits; a release builds anew): Arbace's sources (the runtime's
 # class forms and their Go variants, the embedded namespaces, c2g, j2c, g2c, the class forms
 # compiler), jrt's forms and the overlays, the measured Java surface, the scripts of the build,
 # the seed, and the toolchains (Go, the JDK and jdk26u's checkout that bin/jrt-convert reads)
