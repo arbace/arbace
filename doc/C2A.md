@@ -29,15 +29,22 @@ bin/c2a --rules                      # the rules and the dialect divergences
   both there, `x.clj` is translated, as Clojure's reader prefers it, and `x.cljc` is skipped
   with a message. An `x.ae` that is already there is kept, and `x.clj` is skipped, since
   Arbace's loader takes the `.ae` first.
-- `data_readers.clj`, `data_readers.cljc` and `project.clj` keep their names, because they are
-  found by those names. Their text is renamed, and the conditionals are kept.
+- `data_readers.clj` and `data_readers.cljc` become `data_readers.ae` by the same rules (a
+  `.cljc`'s conditionals resolved for `:clj`), since Arbace reads `data_readers.ae` at the
+  class path's roots before the other two (VENDOR-NOTES.md, hand change 21). Arbace reads and
+  merges all three, so a file that would collide keeps its name rather than being left out:
+  a `data_readers.clj` beside a `data_readers.ae`, a `data_readers.cljc` beside either. Its text
+  is renamed, and a kept `.cljc` keeps its conditionals. The rule is per directory: two
+  libraries merged into one `OUT` by `-o` still overwrite each other's `data_readers.ae`, as
+  any two files at the same path do.
+- `project.clj` keeps its name, because Leiningen finds it by that name. Its text is renamed.
 - `.java` files are renamed as text and keep their names, since j2a reads them
   ([classes/CONVERTER-NOTES.md](classes/CONVERTER-NOTES.md)): `import clojure.lang.IFn;`
   becomes `import arbace.lang.IFn;`.
 - With `-o`, other files are copied as they are, except class files. In place, they stay as
   they are.
-- `--keep-ext` keeps the `.clj` and `.cljc` names, and with them a `.cljc` file's
-  conditionals. Arbace's reader selects their `:clj` branches, as Clojure's does.
+- `--keep-ext` keeps the `.clj` and `.cljc` names (`data_readers` files' too), and with them a
+  `.cljc` file's conditionals. Arbace's reader selects their `:clj` branches, as Clojure's does.
   `bin/clojure-tests` uses it, because the reference results name the suite's files.
 - `--text EXT` renames files ending in `EXT` as text too, keeping their names (`--text .edn`).
 - `--skip ID,...` leaves rules out. `-q` drops the summary line, which counts the files
@@ -124,7 +131,9 @@ bin/c2a-check --libs      # the suite's test libraries as .ae, run on the JVM an
   then ran on c2a's trees with the reference results (below).
 - `--libs`: test.check, test.generative, tools.namespace and data.generators, with
   tools.reader and java.classpath on which they depend (the jars `bin/clojure-tests`
-  downloads), become `.ae` files under `.tmp/c2a-check/ae`, and no `.clj` or `.cljc` is left.
+  downloads), and a small library the check writes with a `data_readers.cljc` (`#c2a/point`,
+  its reader selected by a conditional) and a `.cljc` namespace, become `.ae` files under
+  `.tmp/c2a-check/ae`, and no `.clj` or `.cljc` is left.
   `test/c2a/libs.ae` then runs on them on the JVM build (`target/stage2`) and on the Go build
   (`target/arbace-go/amd64/arbace`, `ARBACE_PATH`). It runs:
   - test.check: a property that holds; one that fails and shrinks to `[0 0 0 0]`; values
@@ -132,10 +141,11 @@ bin/c2a-check --libs      # the suite's test libraries as .ae, run on the JVM an
   - data.generators on a fixed `Random`;
   - tools.reader and its EDN reader, with syntax-quote resolving to `arbace.core`;
   - tools.namespace: `ns` declarations parsed, a dependency graph sorted, a tracker;
-  - test.generative: a spec's inputs from a fixed seed, and a short `run-suite`.
+  - test.generative: a spec's inputs from a fixed seed, and a short `run-suite`;
+  - the `data_readers.ae`: its tag known at start, read once its namespace is loaded.
 
   Every check must hold, and the two builds' standard outputs must be equal. On 2026-10-11
-  they were, 14 of 14 checks on each. Standard error is shown, not compared: the Go build
+  they were, 14 of 14 checks on each, and 15 of 15 with the `data_readers` library. Standard error is shown, not compared: the Go build
   warns once more, about reflection on `JarFile.getName` in tools.namespace's `find`, which
   is a gap in its reflection data, not a translation problem.
 
