@@ -9,30 +9,31 @@ not translate ([JRT-SOURCES.md](JRT-SOURCES.md), [JRT-NOTES.md](JRT-NOTES.md),
 Measured on the branch `jbase` (2026-10-10), first from main at `6a33be8`, then after
 "java.util completed" (from main at `8ace8b1`); measured again on the branch `go-juc` from main
 at `d97e0f9` (2026-10-10: sockets, the JDK's resource data, java.time and java.util.concurrent
-merged), and on the branch `gosec` (2026-10-10, java.security's basics, with main at
-`7cc3637` merged: processes): c2g's program output made there (`bin/c2g --program`), JDK
-26.0.2.1 built from `/root/jdk26u`. The numbers below are the last measurement's (`gosec`).
+merged), on the branch `gosec` (2026-10-10, java.security's basics, with main at `7cc3637`
+merged: processes), and last on the branch `gotext` (2026-10-11, java.text and the locales,
+with main at `6cbed45` merged: gosec and gofix's resources by URL; the default `JRT_LOCALES=none`
+build): c2g's program output made there (`bin/c2g --program`), JDK 26.0.2.1 built from
+`/root/jdk26u`. The numbers below are the last measurement's (`gotext`), as in
+`doc/go/java-base-coverage.edn`, unless a section says otherwise.
 
 Summary: java.base exports **1,636 API classes with 17,546 members** (public and protected
-methods, constructors and fields, of its 58 exported packages). The Go build has **612 of the
-classes (37.4%)**, and 91 more as names only, and provides **9,124 of the members (52.0%)**:
-7,958 translated with their bodies, 47 translated with an operation that throws (it names
-something outside the build), 1,119 hand-written in jrt; 27 more exist as stubs that throw.
-The classes the Go build has are nearly complete (94.8% of their members); the rest is whole
+methods, constructors and fields, of its 58 exported packages). The Go build has **666 of the
+classes (40.7%)**, and 79 more as names only, and provides **9,807 of the members (55.9%)**:
+8,709 translated with their bodies, 47 translated with an operation that throws (it names
+something outside the build), 1,051 hand-written in jrt; 35 more exist as stubs that throw.
+The classes the Go build has are nearly complete (95.6% of their members); the rest is whole
 packages left out: `java.lang.classfile`, most of `java.security` (its basics are in:
 JRT-NOTES.md, "Security") and of `javax.*`,
 `java.nio`'s channels, `java.lang.invoke`, most of `java.lang.foreign`. Of the **896 members
-Arbace's runtime and REPL namespaces reference, 827 are provided (92.3%)**; the others are
+Arbace's runtime and REPL namespaces reference, 833 are provided (93.0%)**; the others are
 D6's cuts and reworks (method handles, class loading). The first measurement (main
 at `6a33be8`: 5,598 members, 31.9%) found primitive `Arrays.sort` and
 `Comparator.naturalOrder` throwing on Go; the branch `jbase` fixed them and added java.util's
 plain Java ("java.util completed": 5,787 members, 33.0%); sockets, java.time and
-java.util.concurrent followed (JRT-NOTES.md, "Sockets (go-net)", "Time", "Concurrency").
-Since the branch `gotext` (2026-10-11; JRT-NOTES.md, "Text and locales"), with java.text whole,
-jdk26u's `Locale` and `Currency`, the measurement (`bin/jrt-coverage`, the default `JRT_LOCALES=none`
-build, main at `6cbed45` merged) is **9,807 of 17,546 members (55.9%)**, 666 classes in Go; `java.text`
-575 of 580 (99.1%; was 50, 8.6%), `java.util` 2,203 of 2,695 (81.7%); the tables below are the
-earlier measurement's, `doc/go/java-base-coverage.edn` this one.
+java.util.concurrent followed (JRT-NOTES.md, "Sockets (go-net)", "Time", "Concurrency"), then
+java.security's basics (9,124 members, 52.0%, on `gosec`) and, on `gotext`
+(JRT-NOTES.md, "Text and locales"), java.text whole with jdk26u's `Locale` and `Currency`:
+`java.text` 575 of 580 members (99.1%; was 50, 8.6%), `java.util` 2,203 of 2,695 (81.7%).
 
 ## Method
 
@@ -107,45 +108,45 @@ status ("cut or absent" together).
 
 |  | classes | in Go | cut | members | provided | % | translated | partial | hand-written | stub | outside type | cut or absent |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| **java.base** | 1,636 | 612 | 91 | 17,546 | 9,124 | 52.0% | 7,958 | 47 | 1,119 | 27 | 111 | 8,284 |
+| **java.base** | 1,636 | 666 | 79 | 17,546 | 9,807 | 55.9% | 8,709 | 47 | 1,051 | 35 | 104 | 7,600 |
 
-The 612 classes in Go have 9,620 API members, of which 9,124 (94.8%) are provided. Of the
-translated classes, 11 are jrt's own Java rather than jdk26u's (provided of members):
+The 666 classes in Go have 10,258 API members, of which 9,807 (95.6%) are provided. Of the
+translated classes, 13 are jrt's own Java rather than jdk26u's (provided of members):
 `FileDescriptor` 6/6, `FileInputStream` 13/14, `FileOutputStream` 10/11, `InputStreamReader`
-9/10, `OutputStreamWriter` 11/12, `java.nio.file.Files` 41/70, `Path` 30/33, `Calendar`
-110/111, `GregorianCalendar` 35/35, `ResourceBundle` 12/23, `java.util.zip.InflaterInputStream`
-11/15.
+9/10, `OutputStreamWriter` 11/12, `java.net.URLClassLoader` 13/16, `java.nio.file.Files` 44/70,
+`Path` 30/33, `Calendar` 110/111, `GregorianCalendar` 35/35, `ResourceBundle` 12/23 and its
+`Control` 14/16, `java.util.zip.InflaterInputStream` 11/15.
 
 | kind | members | provided | % |
 |---|---:|---:|---:|
-| ctor | 1,597 | 752 | 47.1% |
-| field | 2,300 | 1,102 | 47.9% |
-| method | 13,649 | 7,270 | 53.3% |
+| ctor | 1,597 | 815 | 51.0% |
+| field | 2,300 | 1,202 | 52.3% |
+| method | 13,649 | 7,790 | 57.1% |
 
 ### The big packages
 
 |  | classes | in Go | cut | members | provided | % | translated | partial | hand-written | stub | outside type | cut or absent |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | `java.io` | 86 | 45 | 3 | 922 | 493 | 53.5% | 490 | 3 | 0 | 5 | 4 | 420 |
-| `java.lang` | 129 | 85 | 28 | 2,226 | 1,847 | 83.0% | 1,206 | 4 | 637 | 0 | 4 | 375 |
+| `java.lang` | 129 | 87 | 26 | 2,226 | 1,857 | 83.4% | 1,215 | 4 | 638 | 0 | 4 | 365 |
 | `java.lang.invoke` | 25 | 0 | 2 | 331 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 331 |
 | `java.lang.ref` | 7 | 4 | 1 | 22 | 15 | 68.2% | 0 | 0 | 15 | 0 | 0 | 7 |
 | `java.lang.reflect` | 34 | 12 | 7 | 347 | 119 | 34.3% | 37 | 0 | 82 | 0 | 0 | 228 |
 | `java.math` | 4 | 4 | 0 | 177 | 177 | 100.0% | 177 | 0 | 0 | 0 | 0 | 0 |
-| `java.net` | 66 | 29 | 5 | 760 | 374 | 49.2% | 371 | 3 | 0 | 3 | 10 | 373 |
+| `java.net` | 66 | 30 | 4 | 760 | 387 | 50.9% | 384 | 3 | 0 | 3 | 12 | 358 |
 | `java.nio` | 14 | 9 | 4 | 365 | 190 | 52.1% | 179 | 11 | 0 | 0 | 4 | 171 |
 | `java.nio.charset` | 12 | 4 | 0 | 106 | 24 | 22.6% | 4 | 0 | 20 | 0 | 0 | 82 |
-| `java.nio.file` | 47 | 15 | 0 | 252 | 114 | 45.2% | 114 | 0 | 0 | 0 | 20 | 118 |
-| `java.security` | 206 | 30 | 6 | 1,307 | 199 | 15.2% | 199 | 0 | 0 | 5 | 2 | 1,101 |
-| `java.text` | 35 | 5 | 7 | 559 | 50 | 8.9% | 27 | 0 | 23 | 0 | 0 | 509 |
+| `java.nio.file` | 47 | 18 | 0 | 252 | 120 | 47.6% | 120 | 0 | 0 | 0 | 17 | 115 |
+| `java.security` | 98 | 27 | 5 | 663 | 198 | 29.9% | 198 | 0 | 0 | 5 | 2 | 458 |
+| `java.text` | 35 | 35 | 0 | 559 | 554 | 99.1% | 554 | 0 | 0 | 5 | 0 | 0 |
 | `java.time` | 19 | 19 | 0 | 794 | 794 | 100.0% | 794 | 0 | 0 | 0 | 0 | 0 |
-| `java.util` | 180 | 131 | 5 | 2,695 | 2,089 | 77.5% | 2,007 | 10 | 72 | 3 | 9 | 594 |
+| `java.util` | 134 | 126 | 0 | 2,239 | 2,089 | 93.3% | 2,059 | 4 | 26 | 3 | 3 | 144 |
 | `java.util.concurrent` | 81 | 72 | 0 | 1,199 | 1,107 | 92.3% | 1,009 | 4 | 94 | 5 | 3 | 84 |
 | `java.util.concurrent.atomic` | 16 | 13 | 0 | 319 | 259 | 81.2% | 151 | 0 | 108 | 0 | 0 | 60 |
 | `java.util.concurrent.locks` | 14 | 14 | 0 | 201 | 170 | 84.6% | 102 | 0 | 68 | 6 | 0 | 25 |
 | `java.util.function` | 43 | 43 | 0 | 79 | 79 | 100.0% | 79 | 0 | 0 | 0 | 0 | 0 |
 | `java.util.random` | 7 | 6 | 0 | 90 | 70 | 77.8% | 64 | 6 | 0 | 0 | 0 | 20 |
-| `java.util.regex` | 4 | 3 | 1 | 82 | 69 | 84.1% | 69 | 0 | 0 | 0 | 1 | 12 |
+| `java.util.regex` | 4 | 4 | 0 | 82 | 82 | 100.0% | 82 | 0 | 0 | 0 | 0 | 0 |
 | `java.util.stream` | 21 | 21 | 0 | 300 | 300 | 100.0% | 300 | 0 | 0 | 0 | 0 | 0 |
 
 ### By package family
@@ -156,22 +157,22 @@ Each package with its subpackages, except those counted as families of their own
 
 |  | classes | in Go | cut | members | provided | % | translated | partial | hand-written | stub | outside type | cut or absent |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `java.util` | 134 | 120 | 0 | 2,239 | 1,991 | 88.9% | 1,915 | 4 | 72 | 3 | 6 | 239 |
-| `java.lang` | 129 | 85 | 28 | 2,226 | 1,847 | 83.0% | 1,206 | 4 | 637 | 0 | 4 | 375 |
+| `java.util` | 180 | 142 | 5 | 2,695 | 2,203 | 81.7% | 2,167 | 10 | 26 | 6 | 6 | 480 |
+| `java.lang` | 129 | 87 | 26 | 2,226 | 1,857 | 83.4% | 1,215 | 4 | 638 | 0 | 4 | 365 |
 | `java.util.concurrent` | 111 | 99 | 0 | 1,719 | 1,536 | 89.4% | 1,262 | 4 | 270 | 11 | 3 | 169 |
-| `java.lang.classfile` | 102 | 0 | 0 | 1,104 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 1,104 |
-| `java.time` | 70 | 58 | 0 | 1,565 | 1,353 | 86.5% | 1,353 | 0 | 0 | 0 | 2 | 210 |
-| `java.security` | 98 | 27 | 5 | 663 | 198 | 29.9% | 198 | 0 | 0 | 5 | 2 | 458 |
+| `java.lang.classfile` | 220 | 0 | 0 | 1,628 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 1,628 |
+| `java.time` | 70 | 58 | 0 | 1,565 | 1,355 | 86.6% | 1,355 | 0 | 0 | 0 | 0 | 210 |
+| `java.security` | 206 | 30 | 6 | 1,307 | 199 | 15.2% | 199 | 0 | 0 | 5 | 2 | 1,101 |
 | `java.io` | 86 | 45 | 3 | 922 | 493 | 53.5% | 490 | 3 | 0 | 5 | 4 | 420 |
-| `java.net` | 71 | 31 | 5 | 774 | 382 | 49.4% | 379 | 3 | 0 | 3 | 10 | 379 |
-| `java.text` | 41 | 5 | 8 | 580 | 50 | 8.6% | 27 | 0 | 23 | 0 | 0 | 530 |
-| `javax.crypto` | 35 | 5 | 0 | 269 | 30 | 11.2% | 29 | 1 | 0 | 0 | 0 | 239 |
-| `java.nio.file` | 74 | 16 | 1 | 405 | 116 | 28.6% | 116 | 0 | 0 | 0 | 20 | 269 |
+| `java.net` | 71 | 32 | 4 | 774 | 395 | 51.0% | 392 | 3 | 0 | 3 | 12 | 364 |
+| `java.text` | 41 | 41 | 0 | 580 | 575 | 99.1% | 575 | 0 | 0 | 5 | 0 | 0 |
+| `javax.crypto` | 62 | 6 | 1 | 407 | 37 | 9.1% | 36 | 1 | 0 | 0 | 0 | 370 |
+| `java.nio.file` | 74 | 19 | 1 | 405 | 122 | 30.1% | 122 | 0 | 0 | 0 | 17 | 266 |
 | `java.nio` | 14 | 9 | 4 | 365 | 190 | 52.1% | 179 | 11 | 0 | 0 | 4 | 171 |
 | `java.lang.reflect` | 34 | 12 | 7 | 347 | 119 | 34.3% | 37 | 0 | 82 | 0 | 0 | 228 |
-| `javax.net` | 2 | 0 | 0 | 13 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 13 |
+| `javax.net` | 45 | 0 | 0 | 338 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 338 |
 | `java.lang.invoke` | 25 | 0 | 2 | 331 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 331 |
-| `java.nio.channels` | 56 | 0 | 2 | 276 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 276 |
+| `java.nio.channels` | 62 | 0 | 2 | 323 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 323 |
 | `java.util.stream` | 21 | 21 | 0 | 300 | 300 | 100.0% | 300 | 0 | 0 | 0 | 0 | 0 |
 | `java.lang.foreign` | 25 | 2 | 12 | 261 | 44 | 16.9% | 33 | 11 | 0 | 0 | 51 | 166 |
 | `javax.security` | 43 | 2 | 0 | 209 | 4 | 1.9% | 4 | 0 | 0 | 0 | 0 | 205 |
@@ -179,7 +180,7 @@ Each package with its subpackages, except those counted as families of their own
 | `java.lang.constant` | 12 | 2 | 0 | 168 | 1 | 0.6% | 1 | 0 | 0 | 0 | 1 | 166 |
 | `java.lang.module` | 19 | 0 | 0 | 148 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 148 |
 | `java.nio.charset` | 13 | 4 | 0 | 109 | 24 | 22.0% | 4 | 0 | 20 | 0 | 0 | 85 |
-| `java.util.regex` | 4 | 3 | 1 | 82 | 69 | 84.1% | 69 | 0 | 0 | 0 | 1 | 12 |
+| `java.util.regex` | 4 | 4 | 0 | 82 | 82 | 100.0% | 82 | 0 | 0 | 0 | 0 | 0 |
 | `java.util.function` | 43 | 43 | 0 | 79 | 79 | 100.0% | 79 | 0 | 0 | 0 | 0 | 0 |
 | `java.lang.annotation` | 12 | 0 | 5 | 35 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 35 |
 | `java.lang.runtime` | 3 | 0 | 0 | 24 | 0 | 0.0% | 0 | 0 | 0 | 0 | 0 | 24 |
@@ -192,20 +193,23 @@ exported API:
 
 | members used | translated | partial | hand-written | stub | outside type | cut | absent |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 896 | 580 | 0 | 247 | 0 | 2 | 30 | 37 |
+| 896 | 585 | 0 | 248 | 0 | 2 | 23 | 38 |
 
-827 of 896 (92.3%) are provided (805 at the measurement on `go-juc`, 793 at the first). The others are cut or reworked by decision: method
-handles and call sites (`java.lang.invoke`, 35: the evaluator replaces `invokedynamic`),
-processes (`Process`, `ProcessBuilder`, its `Redirect`, 21: translated since 2026-10-10,
-amendments PR1-PR7, counted since the measurement on `gosec`), class loading and resources
-(`ClassLoader` 7, `URLClassLoader` 3, `JarURLConnection`, `JarFile`, `ZipEntry`), sockets
-(`Socket`, `ServerSocket`, `InetAddress`, 9), channels (`FileChannel`, `getChannel`,
-`Reader.read(CharBuffer)`, `Readable`, 7), `DateFormat`/`SimpleDateFormat` (3), annotations
-(`Retention`, `RetentionPolicy`, `getAnnotation` twice, 4), modules (`Class.getModule`,
-`Module.getName`), `Runtime.exec`/`version`/`Version.feature`, `System.getProperties`/
-`loadLibrary`, `Thread$Builder.factory`, `URLEncoder.encode`, serialization's
+833 of 896 (93.0%) are provided (827 at the measurement on `gosec`, 805 on `go-juc`, 793 at
+the first). The 63 others are cut or reworked by decision: method handles and call sites
+(`java.lang.invoke`, 35: the evaluator replaces `invokedynamic`), class loading (`ClassLoader`'s
+`defineClass`, `findClass`, `findLoadedClass`, `resolveClass`, `getSystemResource` and
+`getSystemResourceAsStream`, 6; `URLClassLoader.findClass`; jars: `JarURLConnection.getJarFile`,
+`JarFile.getEntry`, `ZipEntry.getTime`), channels (`FileChannel`, `getChannel`,
+`Reader.read(CharBuffer)`, `AbstractInterruptibleChannel.close`, 6), annotations (`Retention`,
+`RetentionPolicy`, `getAnnotation` twice, 4), modules (`Class.getModule`, `Module.getName`),
+`Runtime.version`/`Version.feature`, `System.loadLibrary`, `URLEncoder.encode`, serialization's
 `defaultWriteObject`, and `Executable.getName` (declared abstract there; `Method` and
-`Constructor` provide it).
+`Constructor` provide it). Processes (`Process`, `ProcessBuilder`, its `Redirect`, 21; amendments
+PR1-PR7), sockets (`Socket`, `ServerSocket`, `InetAddress`; NT1-NT5), `Runtime.exec`,
+`System.getProperties`, `Thread$Builder.factory`, `DateFormat`/`SimpleDateFormat` (TL) and
+`ClassLoader.getResource*` with most of `URLClassLoader` (gofix, "Resources by URL") are
+provided since the earlier measurements.
 
 ## What is implemented
 
@@ -224,26 +228,50 @@ amendments PR1-PR7, counted since the measurement on `gosec`), class loading and
   executors, `ThreadLocalRandom`, the atomic arrays, adders and accumulators, `StampedLock`,
   `AbstractQueuedSynchronizer`; JRT-NOTES.md, "Concurrency");
   `java.io`'s readers, writers and streams, `File` and the Unix file system; `java.net.URI`,
-  `URL` with the `file:` connection, `URLDecoder`; `java.time.Instant`;
+  `URL` with the `file:` connection, `URLDecoder`, `Socket`, `ServerSocket`, `InetAddress`
+  (JRT-NOTES.md, "Sockets (go-net)"); `Process`, `ProcessBuilder`, `ProcessHandle`
+  ("Processes"); `java.time` with its ISO chronology, formats and zone rules, and
+  `java.util.TimeZone`/`SimpleTimeZone` ("Time"); `java.text` whole, `Locale` and `Currency`
+  ("Text and locales"); `java.nio`'s heap buffers (amendment RD4), `CRC32`, `ZipException`;
   `java.nio.file`'s `Paths`, options and exceptions; java.security's basics (`MessageDigest`
   and its streams, `SecureRandom`, `Provider`, `Security`, `javax.crypto.Mac`, `SecretKeySpec`,
   the SUN and SunJCE providers' digests, generators and HMACs; JRT-NOTES.md, "Security").
 - **jrt's own Java** (overlay, translated by c2g): `FileDescriptor`, `FileInputStream`,
   `FileOutputStream`, `InputStreamReader`, `OutputStreamWriter`, `java.nio.file.Path` and
-  `Files` (a subset), `Calendar`, `GregorianCalendar`, `TimeZone` (fixed offsets).
+  `Files` (a subset), `Calendar`, `GregorianCalendar`, `ResourceBundle` and its `Control`,
+  `java.util.zip.InflaterInputStream`, `URLClassLoader` (over directories), and outside the API
+  `jdk.internal.jrt.ClassPathResources` (the class path's resources; "Resources by URL").
 - **Hand-written Go**: `Object`, `Class` and `java.lang.reflect` (over c2g's member tables),
   `String`, `StringBuilder`, `StringBuffer` (UTF-16, D4), `Math`, `StrictMath`, `System`,
   `Runtime`, `Thread`, `ThreadLocal`, `Throwable`, `StackTraceElement`, `Enum`, `Record`;
   references; atomics (`AtomicBoolean`, `Integer`, `Long`, `Reference`), locks
   (`ReentrantLock`, `ReentrantReadWriteLock`, `Condition`, `LockSupport`), the executors'
   interfaces, `ForkJoinPool`/`ForkJoinTask`, `CountDownLatch`, `Semaphore`; `Charset`
-  (six charsets), `Locale`, `DecimalFormatSymbols`, `Date`.
+  (six charsets), `Date`.
 
 ## Stubbed and partial
 
-This section's lists are the measurement after "java.util completed"; at the last measurement
-there are 22 stubs, 47 partial members and 109 outside type, each listed with its status in
-`.tmp/jrt-coverage/members.edn` (`bin/jrt-coverage`).
+At the last measurement (`gotext`) there are 35 stubs, 47 partial members and 104 outside type,
+each listed with its status in `.tmp/jrt-coverage/members.edn` (`bin/jrt-coverage`); per class,
+`doc/go/java-base-coverage.edn`'s `:classes` counts them. By class: the stubs are
+`ForkJoinWorkerThread` (3), `AbstractQueuedSynchronizer` (3), `AbstractQueuedLongSynchronizer`,
+`PrintStream`, `PrintWriter`, `Provider`, `SocketImpl`, `AttributedCharacterIterator$Attribute`
+(2 each), and one each in `ObjectStreamException`, `ServerSocket`, `MessageDigest`,
+`SecureRandom`, `SecureRandomSpi`, `DateFormat$Field`, `MessageFormat$Field`,
+`NumberFormat$Field`, `Calendar`, `Observable`, `ResourceBundle`, `CompletionException`,
+`TimeUnit`, `AbstractOwnableSynchronizer` and three `java.util.spi` providers; the partial
+members are `MemorySegment`'s 11, the heap buffers' 11 (`ByteBuffer`, `CharBuffer`,
+`IntBuffer`), the `RandomGenerator` family's 6 (`of(String)`), and 19 in `DataInputStream` (2),
+`ByteArrayInputStream`, the four `describeConstable`, `InetAddress`, `URLConnection`,
+`URLStreamHandler`, `List`, `Map`, `Properties` (2), `CountedCompleter`,
+`ForkJoinWorkerThread` (3) and `MacSpi`; the outside-type
+members are `MemorySegment`'s 51, `Files`' 14 and `Path`'s 3, `ByteBuffer`'s 4, and one or two in
+the file streams, readers and writers (`getChannel`), the boxed numbers (`resolveConstantDesc`),
+the sockets and `URL`'s classes (`Proxy`, `NetworkInterface`), `InflaterInputStream`,
+`ResourceBundle`, `Executors`, `BitSet`, `AlgorithmConstraints`. The lists that follow are the
+measurement after "java.util completed" (2026-10-10), kept as that record: several of their
+members are provided since (`Instant.parse` and `Instant`'s `java.time.temporal` members,
+`TimeUnit`'s and `TimeZone`'s `java.time` conversions, `UUID.ofEpochMillis`).
 
 **Stubs (12 members).** Every public member of a translated class is a root, so the stubs are
 protected members and constructors nothing reaches: `ObjectStreamException`'s two cause
@@ -286,12 +314,12 @@ cut classes Arbace names exist as names whose members throw; everything else is 
 | class loading, `java.lang.invoke`, `java.lang.classfile`, `java.lang.constant` (but `Constable`, `ConstantDesc`) | absent or cut | the evaluator replaces bytecode, call sites and method handles (D2); no class files |
 | `java.lang.reflect`'s generic and annotated types, annotations at run time | absent | closed world over c2g's member tables (JAVA-SURFACE.md decision 1; amendment R16) |
 | processes (`Process`, `ProcessBuilder`), `ProcessHandle` | translated (since 2026-10-10) | D6 reversed for them (amendments PR1-PR7; JRT-NOTES.md, "Processes"): over the host's `HostProc`; `sh` and `arbace.java.process` are in |
-| `java.net` sockets, `InetAddress`, `URLClassLoader`, other URL connections | cut or absent | D6 (sockets and the socket REPL are in progress on another branch) |
-| `java.nio` buffers, channels, charset coders, most of `java.nio.file` | absent | D6; the file system is reached through `File` and jrt's `Path`/`Files` (FS2) |
-| `java.time`, `java.text` | translated (since 2026-10-10, 2026-10-11) | D6 reversed for them (JRT-NOTES.md, "Time", "Text and locales"); the shipped build's locale data are java.base's root and English (`JRT_LOCALES=none`), `common` or `all` add jdk.localedata's |
+| `java.net`'s URL connections but `file:`, `HttpURLConnection`, `DatagramSocket`, `NetworkInterface`, `Proxy`, `URLEncoder` | cut or absent | D6; sockets, `InetAddress` and the socket REPL are translated since 2026-10-10 (amendments NT1-NT5; JRT-NOTES.md, "Sockets (go-net)"), `URLClassLoader` over directories is jrt's own Java ("Resources by URL") |
+| `java.nio`'s direct and mapped buffers and the `Long`, `Short`, `Float`, `Double` buffers, channels, charset coders, most of `java.nio.file` | absent or cut | D6; the heap `ByteBuffer`, `CharBuffer` and `IntBuffer` are translated (amendment RD4); the file system is reached through `File` and jrt's `Path`/`Files` (FS2) |
+| `java.time` (but its non-ISO chronologies, absent), `java.text` | translated (since 2026-10-10, 2026-10-11) | D6 reversed for them (amendments TM1-TM9, TL1-TL8; JRT-NOTES.md, "Time", "Text and locales"); the shipped build's locale data are java.base's root and English (`JRT_LOCALES=none`), `common` or `all` add jdk.localedata's |
 | serialization (`ObjectInputStream`, `ObjectOutputStream`) | absent | D6, C2G-SPEC §12 |
 | `java.security`, `javax.crypto` beyond their basics (signatures, ciphers, keys, key stores, certificates, the providers but SUN and SunJCE); `javax.net`, `javax.security` (but `Destroyable`) | absent | not used by Arbace; the basics (`MessageDigest`, `SecureRandom`, `Mac`, `SecretKeySpec`, `Provider`, `Security`) are translated since 2026-10-10 (amendments SC1-SC7; JRT-NOTES.md, "Security") |
-| `java.util.jar`, `java.util.zip`, `ResourceBundle`, `ServiceLoader`, `java.util.spi`, `java.lang.module`, `Module`, `Package` | absent or cut | no jars or modules in a static executable |
+| `java.util.jar`, `java.util.zip` (but `CRC32`, `Checksum`, `ZipException` and jrt's `InflaterInputStream`), `ServiceLoader`, `java.util.spi` (but the locale service providers), `java.lang.module`, `Module`, `Package` | absent or cut | no jars or modules in a static executable; `ResourceBundle` is jrt's own Java (amendments TM4, TL5), `InflaterInputStream` too (RD3) |
 | `java.lang.foreign`, `ScopedValue`, `StructuredTaskScope`, `StackWalker` | absent or cut | VM features without a Go counterpart yet |
 
 ## Notable gaps
@@ -300,17 +328,19 @@ cut classes Arbace names exist as names whose members throw; everything else is 
   `parallelSort`, `parallelPrefix`, `Comparator.naturalOrder`/`nullsFirst`/`nullsLast`,
   `Comparator.comparing` and every other serializable lambda (they threw
   `ClassCastException`), `SortedSet`, `TreeMap`'s copies from sorted maps.
-- **`java.util`**: no `Scanner` (`CharBuffer`), `Currency` (its data file), `ResourceBundle`,
-  `ServiceLoader`, `Timer` (`Cleaner`), `SimpleTimeZone`, `Locale.Builder`; `Locale` 21 of 75
-  members (no `forLanguageTag`, display names, ISO lists, extensions, `setDefault`, most locale
-  constants); `Date` 26 of 35 (no deprecated setters, `parse`, `toLocaleString`).
+- **`java.util`**: no `Scanner`, `ServiceLoader`, `Timer` (`Cleaner`); `ResourceBundle` 12 of 23
+  (jrt's own: no `getBundle` by module or class loader); `Date` 26 of 35 (no deprecated setters,
+  `parse`, `toLocaleString`). `Locale` (75 of 75), `Locale.Builder`, `Currency`, `TimeZone` and
+  `SimpleTimeZone` are jdk26u's since the branches `go-time` and `gotext` (they were gaps at the
+  first measurements: `Locale` 21 of 75).
 - **`java.util.concurrent`**: 72 of 81 classes (atomic 13 of 16, locks 14 of 14); missing
   are the field updaters, `StructuredTaskScope` and its kin, and most of jrt's hand-written
   `ForkJoinPool` (its work stealing; JRT-NOTES.md, "Concurrency", Decisions).
-- **`java.lang`**: `Class` 56 of 81 members (no annotations, modules, packages, nest, sealed or
-  record reflection, member classes, `getResource*`), `ClassLoader` 10 of 43, `System` 19 of 31 (no `getProperties`,
-  `loadLibrary`, `Logger`), `Thread` 43 of 57 (no thread groups, `getState`, `ofPlatform`, the
-  `Duration` overloads of `join` and `sleep`), `Runtime` 9 of 20 (no `exec`, `version`).
+- **`java.lang`**: `Class` 57 of 81 members (no annotations, modules, packages, nest, sealed or
+  record reflection, member classes, `getResource`), `ClassLoader` 11 of 43, `System` 20 of 31 (no
+  `loadLibrary`, `Logger`), `Thread` 44 of 57 (no thread groups, `ofPlatform`, the `Duration`
+  overloads of `join` and `sleep`), `Runtime` 15 of 20 (no `version`; `exec` since PR4; `System.getProperties`, `Thread.getState`
+  since the sockets (NT) and JC8).
 - **`java.lang.reflect`**: 119 of 347 members; `Field` 12 of 35 (no typed getters and setters),
   `Executable` 7 of 22, no `Parameter`, `RecordComponent`, generic types.
 - **`java.io`**: no `DataOutputStream`/`DataOutput`, `RandomAccessFile`, `PushbackInputStream`,
@@ -323,7 +353,8 @@ What it would take, roughly by cost (agent-assisted days at the pace of B1a):
 
 1. **More plain Java of `java.util`**: done on this branch (below). What is left of
    `java.util` needs other parts: `Scanner` (`CharBuffer`), `Currency` and `ResourceBundle`
-   (data files, class loading), `Timer` (`Cleaner`), `Locale`'s rest (locale data).
+   (data files, class loading), `Timer` (`Cleaner`), `Locale`'s rest (locale data); `Currency`
+   and `Locale` are done since (`gotext`), `ResourceBundle` is jrt's own (TM4, TL5).
 2. **`java.util.concurrent` beyond the shims** (done, branch `go-juc`, 2026-10-10: amendments
    JC1-JC10, JRT-NOTES.md "Concurrency"; as planned here): JDK 26's concurrent classes use
    `VarHandle` (`ConcurrentLinkedQueue`, `ConcurrentSkipListMap`, `CompletableFuture`,
@@ -333,18 +364,20 @@ What it would take, roughly by cost (agent-assisted days at the pace of B1a):
    jrt's `Unsafe` does for `ConcurrentHashMap`; then the classes translate. `ThreadPoolExecutor`,
    `Executors` and `AbstractExecutorService` are plain Java over AQS and could replace the
    hand-written executors (a decision: exact Java semantics against goroutine-native shims).
-3. **`java.time`** (2-4 days): 58,000 lines of plain Java; it needs the time-zone database
+3. **`java.time`** (done, branch `go-time`, 2026-10-10: amendments TM1-TM9, JRT-NOTES.md
+   "Time"; the non-ISO chronologies left out) (2-4 days): 58,000 lines of plain Java; it needs the time-zone database
    (`tzdb.dat` as a resource of the executable, `ZoneRulesProvider`) and `java.text`-free
    formatting paths; `DateTimeFormatter`'s localized text needs locale data.
 4. **`java.text` and locales** (done 2026-10-11, JRT-NOTES.md "Text and locales"): `DecimalFormat`, `SimpleDateFormat`,
    `MessageFormat`, `Collator`, `BreakIterator` need the CLDR locale providers (large generated
    data); a root-and-`en_US`-only provider, as jrt has for `DecimalFormatSymbols` (R17), is the
    small way.
-5. **`java.nio` buffers and channels** (3-5 days): buffers are generated from templates and lean
+5. **`java.nio` buffers and channels** (the heap buffers done, amendment RD4; channels open)
+   (3-5 days): buffers are generated from templates and lean
    on `ScopedMemoryAccess` and `Unsafe`; `FileChannel` and the socket channels need the host
    interface (§9.4) to grow; the charset coders follow.
-6. **Sockets and `InetAddress`** (in progress elsewhere): over Go's `net`, through the host
-   interface.
+6. **Sockets and `InetAddress`** (done, branch `go-net`, 2026-10-10: amendments NT1-NT5,
+   JRT-NOTES.md "Sockets (go-net)"): over Go's `net`, through the host interface.
 7. **Out of reach without a VM** (or by design): `java.lang.invoke` beyond what the evaluator
    needs, `java.lang.classfile` as a run-time loader, `java.lang.foreign`, the rest of `java.security`
    and `javax.crypto` (portable Java, but large: providers in `sun.security.*`; the basics are
@@ -424,3 +457,5 @@ completed"):
 
 - Whether `doc/go/java-base-coverage.edn` is regenerated in the freeze's checklist (it needs
   c2g's output: `bin/arbace-go --build`, then `bin/jrt-coverage`), or kept as this measurement.
+  Decided since: regenerated at the freeze (step 8; [AGENDA.md](../AGENDA.md)), with this
+  document's tables.

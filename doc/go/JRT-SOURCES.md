@@ -205,7 +205,7 @@ by Arbace itself on a translated class that inherits it (`IOException.printStack
 declared in `Throwable`). The closure's 5 natives are the set's 5 natives. Edge from the forms'
 classes and from javac's: identical.
 
-## Next steps
+## Next steps (2026-10-08; done since)
 
 - c2g (`C2G-SPEC.md`) takes `.tmp/jrt/conv` as its input for the JDK part; `bin/jrt-convert`
   regenerates it in about 90 seconds.
@@ -224,8 +224,16 @@ taken.
 
 ## The closure as grown (B1a step 4 phase 2C, step 5 phase 2B)
 
-The 184 files above are the measured closure. `bin/jrt-convert` now translates **424 files**
-(`sources.txt` lines as `MODULE KIND REL`): 383 of `src/java.base/share/classes` (KIND
+**On main now** (2026-10-11, after `gotext`, the default `JRT_LOCALES=none`):
+`bin/jrt-convert` translates **835 files**: 755 of `share`, 6 `unix`, 31 generated (`gensrc`), 2
+of `share:java.sql`, 40 of jrt's own Java (`overlay`) and jrt's generated `LocaleDataIndex`
+(`jrtgen`); 830 identical to javac's class shapes, the 5 known differences (JRT-NOTES.md, "Text
+and locales"). The counts below, here and in the dated sections, are each branch's at the time,
+from its own base.
+
+The 184 files above are the measured closure. At step 5 phase 2B's end, with the files and the
+JDK's resource data merged, `bin/jrt-convert` translated **424 files** (`sources.txt` lines as
+`MODULE KIND REL`): 383 of `src/java.base/share/classes` (KIND
 `share`), 3 of `src/java.base/unix/classes` (`unix`), 19 generated (`gensrc`), 2 of another
 module (`share:java.sql`) and 17 of jrt's own Java (`overlay`); 389 with the files (below), 35
 more with the JDK's resource data (below). Besides the measured closure (`test/g2c/jrt_sources.clj`):
@@ -284,6 +292,31 @@ more with the JDK's resource data (below). Besides the measured closure (`test/g
   `Base64`, `SplittableRandom`, the event classes, `Observable`, and seven exceptions and
   constants). With them `bin/jrt-convert` translates **414 files** (all 414 compiled to
   javac's class shapes; 410 identical, the 4 known differences).
+- **`java.util.concurrent`** (`concurrent-sources`; the user's decision of 2026-10-10, amendment
+  JC3, accepted 2026-10-10, JRT-NOTES.md "Concurrency"): the concurrent collections and queues, the
+  synchronizers, `CompletableFuture`, the executors (`ExecutorService` over jrt's stand-in),
+  `ThreadLocalRandom` with `RandomSupport`, the atomic arrays, adders and accumulators,
+  `StampedLock`, `AbstractQueuedSynchronizer` and its long and ownable kin, `RecursiveAction`,
+  `Flow` and `SubmissionPublisher`, with `PriorityQueue` and `SortedSet` (also in `util-sources`: a file
+  named twice is translated once), and jrt's own Java `ThreadPerTaskExecutor`, `Delays`,
+  `ForkJoinPools`, `ThreadLocalRandomProbes` and `jdk.internal.vm.SharedThreadContainer` (KIND
+  `overlay`). With them `bin/jrt-convert` translates 532 files (528 identical, the 4 known
+  differences), 1,641 classes (on the branch `go-juc` after merging main, 2026-10-10, before
+  java.time's merge: its base was 475 files).
+
+Two options of the conversion (amendment S2):
+
+- **`J2C_PATCH_ALL`** (an environment variable of j2c's `jdk` conversion,
+  `arbace/j2c/main.clj`; `bin/jrt-convert` sets it): each chunk of packages has the other
+  chunks' sources on its patch path, its own first. jrt's own Java in `jdk.internal.jrt` is used
+  across packages (`java.io`), and with more files the chunks split it apart (javac: "package
+  jdk.internal.jrt does not exist"). Opt-in, so `bin/j2c-check --jdk` is unchanged.
+- **`known-differences`** (`g2c.jrt-sources`): files whose classes differ from javac's in known,
+  harmless ways, by file with the kind and the number of differences, count as converted when
+  the number matches (any other difference fails): a lambda constructing a local class passes
+  the class's captured variables in capture order, javac in reverse (`Collectors` 3,
+  `Gatherers` 9, `MatchOps` 12), and an `InnerClasses` entry javac's stack map frames name
+  (`Nodes` 2).
 
 ## The JDK's resource data (2026-10-09)
 
@@ -328,31 +361,6 @@ jdk26u at `baf63fb`:
 - **Result**: 375 files (340 before) convert and compile to javac's shapes (371 identical, the
   4 known differences), 1,249 classes; deterministic (`--twice`). With the files merged: 424
   files, 420 identical and the 4 known differences, 1,321 classes.
-
-- **`java.util.concurrent`** (`concurrent-sources`; the user's decision of 2026-10-10, amendment
-  JC3, accepted 2026-10-10, JRT-NOTES.md "Concurrency"): the concurrent collections and queues, the
-  synchronizers, `CompletableFuture`, the executors (`ExecutorService` over jrt's stand-in),
-  `ThreadLocalRandom` with `RandomSupport`, the atomic arrays, adders and accumulators,
-  `StampedLock`, `AbstractQueuedSynchronizer` and its long and ownable kin, `Flow` and
-  `SubmissionPublisher`, with `PriorityQueue` and `SortedSet` (also in `util-sources`: a file
-  named twice is translated once), and jrt's own Java `ThreadPerTaskExecutor`, `Delays`,
-  `ForkJoinPools`, `ThreadLocalRandomProbes` and `jdk.internal.vm.SharedThreadContainer` (KIND
-  `overlay`). With them `bin/jrt-convert` translates 532 files (528 identical, the 4 known
-  differences), 1,641 classes.
-
-Two options of the conversion (amendment S2):
-
-- **`J2C_PATCH_ALL`** (an environment variable of j2c's `jdk` conversion,
-  `arbace/j2c/main.clj`; `bin/jrt-convert` sets it): each chunk of packages has the other
-  chunks' sources on its patch path, its own first. jrt's own Java in `jdk.internal.jrt` is used
-  across packages (`java.io`), and with more files the chunks split it apart (javac: "package
-  jdk.internal.jrt does not exist"). Opt-in, so `bin/j2c-check --jdk` is unchanged.
-- **`known-differences`** (`g2c.jrt-sources`): files whose classes differ from javac's in known,
-  harmless ways, by file with the kind and the number of differences, count as converted when
-  the number matches (any other difference fails): a lambda constructing a local class passes
-  the class's captured variables in capture order, javac in reverse (`Collectors` 3,
-  `Gatherers` 9, `MatchOps` 12), and an `InnerClasses` entry javac's stack map frames name
-  (`Nodes` 2).
 
 ## Time (2026-10-10)
 
@@ -443,6 +451,21 @@ accepted on 2026-10-10 (C2G-SPEC §4.1, §7.11, §9.1, §9.4, §11; §16, "Proce
 - **Result** (`bin/jrt-convert`): 644 files (637 on main: 6 sources and RuntimeExec added; 581 of `share`, 5 `unix`, 26 generated,
   30 of jrt's own), all converted and compiled to javac's class shapes, 640 identical and the 4
   known differences, 1,880 classes.
+
+## Resources by URL (2026-10-10)
+
+The class loaders' `getResource(s)`, `URLClassLoader` and `Files.newDirectoryStream` in the Go
+build (JRT-NOTES.md, "Resources by URL"; branch `gofix`; amendments FX6 and FX7, accepted
+2026-10-10, EVAL-NOTES.md), from jdk26u at `baf63fb`:
+
+- **Sources added** (`file-sources`): `src/java.base/share/classes/java/nio/file/DirectoryStream.java`,
+  `NotDirectoryException.java` and `sun/nio/fs/Globs.java`.
+- **jrt's own Java** (KIND `overlay`): `java/net/URLClassLoader.java` (jdk26u's public API, its
+  resources found as `URLClassPath.FileLoader` finds them), `jdk/internal/jrt/ClassPathResources.java`
+  and `sun/nio/fs/GlobPatterns.java` (a public helper over `Globs`' package-private
+  `toUnixRegexPattern`), new; `java/nio/file/Files.java` gains `newDirectoryStream`.
+- **Natives** (jrt's Go, `resources.clj`, `resources_linux.clj`): the embedded resources by name,
+  the executable's path (the optional host interface `HostExecutable`), `VM.isSystemDomainLoader`.
 
 ## Security (2026-10-10)
 
