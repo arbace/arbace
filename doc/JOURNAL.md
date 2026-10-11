@@ -63,3 +63,9 @@ the first. The history before it is on the frozen branches and in git history:
   `bin/oracle check jvm` (the known case; a `concurrency` barrier-order flake under load);
   `bin/jrt test` amd64 and arm64; by hand: `.ae` and `.clj` scripts on both launchers, `source`,
   `doc`, stack traces naming `core.ae`.
+- The user's decisions on the rename's open points: Arbace also reads `data_readers.ae`, before
+  `.clj` and `.cljc` (with the version work); the rest as the agent left it (the upstream-run
+  test tools stay `.clj`; the suite's renaming maps source paths to `.ae`, c2a's to take over;
+  upstream file-name comments untouched; `.ae` wins over `.clj`, a dialect divergence).
+- Started in parallel: c2a and the tool renames j2a, g2a, a2g (branch `c2a`); Arbace's own
+  version (branch `version`).
