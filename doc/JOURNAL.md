@@ -1577,3 +1577,30 @@ decision (2026-10-08).
   proposed or unfolded, FX1-FX7 folded nowhere, wrong cross-references, `bin/arbace` as current,
   LICENSE.md silent on the Go executable's translated jdk26u code and Go's runtime). To be fixed
   after gotext's merge.
+
+## 2026-10-11: java.text and the locales on Go
+
+- Agent, branch `gotext` (to `4a8a9b0`), merged; the user accepted TL1-TL8 (JRT-NOTES.md, "Text
+  and locales"; folded into C2G-SPEC §4.1, §4.3, §4.6, §5.9, §9.1, §10.3, §12, §16). java.text
+  translated whole from jdk26u (formats, Collator, BreakIterator, Bidi, Currency, ListFormat,
+  CompactNumberFormat, the spi interfaces and the JDK's providers); jdk26u's `Locale` replaces
+  jrt's hand-written one (scripts, extensions, tags; default en_US through `user.language`/
+  `user.country`); Turkish and Azerbaijani casing. TL1: c2g writes constant array initializers
+  as data (`ConstRefArray`), which brought an all-locales build from 136 to 130 MB. Several c2g
+  and jrt fixes on the way (a record's boolean component in `hashCode`, private interface
+  method calls, `Text_Annotation`).
+- jdk.localedata's CLDR data through `bin/jrt-convert`'s `JRT_LOCALES`: `none` (java.base's root
+  and English), `common` (27 locales, +7.7 MB), `all` (1,531 bundles, about 130 MB in all). The
+  user's decision (2026-10-11): `none` is the default, for the shipped executables and the
+  freeze; the 42 oracle cases that need other locales (`text.clj`, `time.clj`) are recorded as
+  known mismatches with that reason. java.text 99% of its members; java.base 55.9% (9,807 of
+  17,546).
+- Checks (the agent's, on the `none` build with main at `6cbed45`; main since adds only
+  documents): `bin/jrt-convert` 835 files; build and smoke; the Go oracle 22,232 of 22,278, the
+  46 recorded mismatches; Clojure's suite on the test build, no regressions. Executable 66.4 MB
+  (+1.3 MB), start 0.20-0.21 s.
+- Documentation, round 1 of the fixes from the read-through (four agents, merged `3f60897`):
+  the agenda rewritten; README, CLAUDE.md's layout (the Go build), B1-PLAN (D6's reversals and
+  what stays out for good, the step table), EVAL-NOTES/EVAL-PLAN (FX1-FX7 folded), ORACLE.md,
+  VENDOR-NOTES (the dialect divergences), the specs and notes. Round 2 follows: C2G-SPEC, the
+  JRT notes, JAVA-BASE, JAVA-SURFACE, BOX-SURVEY, LICENSE.md (the Go executables' licences).
