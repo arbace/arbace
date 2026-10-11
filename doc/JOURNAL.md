@@ -298,3 +298,6 @@ the first. The history before it is on the frozen branches and in git history:
   roundtrip` 16 of 16 and `kvm-tests` pass. A guest image must not be rewritten in place while a
   box runs from it (the build replaces the launcher by rename).
 - Open for the user: BX11, and the default (mapped, as R1 asked, or copied).
+- The user's decisions: BX11 accepted; the default stays mapped. And the two nondeterminisms
+  noted with the surface's regeneration (a2g's overload order, jrt-convert's headers) are to be
+  fixed now, beside S2, rather than at S6.

@@ -554,15 +554,15 @@ heap and no symbol tables made thrice.
 - The essential `bin/gate` was not run: no source the bootstrap compiles changed (`box/`,
   `bin/arbace-go`).
 
-### Amendment (proposed 2026-10-11)
+### Amendment (proposed 2026-10-11, accepted by the user the same day)
 
 - **BX11 (box/: vmm, the launcher) The image mapped**: `vmm.ImageFile`, `OpenImage`,
   `AppendedFile`, `Config.ImageFile`, `ImageAlign` and `Append`'s padding, the segments mapped
   from the file (copied where they cannot be, on macOS, or with `ImageFile.Copy`), the symbols
   read once; the launcher's `ARBACE_BOX_MAP=0`.
 
-### For the user to decide
+### The user's decisions (2026-10-11)
 
-- The default: mapped (258 MB, 0.55 s here) or copied (293 MB, 0.32 s here). Mapped is what R1
-  asked for, and shares the image's pages between boxes (`bin/box-suite` and the oracle run 12
-  at once); copied starts faster under nested virtualization. One line in the launcher flips it.
+- BX11 accepted. The default stays mapped (258 MB, 0.55 s here; it shares the image's pages
+  between boxes, and the slower start is nested virtualization's); `ARBACE_BOX_MAP=0` copies
+  (293 MB, 0.32 s here).

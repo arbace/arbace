@@ -50,12 +50,13 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   `arbace-box`; REPL, `-e`, `-m`, scripts, four or one vCPUs; amendments BX1-BX10 accepted). Box
   oracle 21,695 of 21,742 (`test/oracle/known-go-box-amd64.edn`), `bin/box-suite` 19,625 of
   19,627 (`test/arbace-box-results.edn`).
-- S2 in progress, hardening: the launcher's resident memory (R1: map the appended image instead
-  of reading and copying it); the rest (the start, the collector, the watchdog, the file tests
+- S2 in progress, hardening: the rest (the start, the collector, the watchdog, the file tests
   and `ARBACE_PATH` in the box, reducers' `fold` on 4 vCPUs). The box's smoke test, oracle and
   suite in `bin/gate --full`: deferred (the user, 2026-10-11).
-- Open, noted: a2g may order same-name overloads unstably in `a2g_classes.ae`; jrt-convert's
-  headers name a numbered temporary directory.
+- R1 done: the launcher maps the guest image (BX11, accepted; mapped by default), 258 MB
+  resident.
+- In progress beside S2: a2g's overload order (possibly unstable in `a2g_classes.ae`) and
+  jrt-convert's headers (a numbered temporary directory), for reproducible builds.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 
