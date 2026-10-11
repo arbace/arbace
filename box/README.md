@@ -37,7 +37,9 @@ Since S1 (doc/go/BOX-NOTES.md) the packages are Arbace's to change and changed: 
 interface of its own (`vmm.Host`, `vmm.TermHost`, `vmm.Exit`) and imports no part of go-whim's
 editor, the ABI carries the environment and the wall clock at entry, the board parks one idle
 vCPU and makes nil dereferences panics on request, and the launcher is new; since S2 the monitor
-maps a guest image's segments from its file (`vmm.ImageFile`). `bin/box-vendor check`'s byte
+maps a guest image's segments from its file (`vmm.ImageFile`). Since S5 it carries TCP streams for the guest
+under its launcher's policy (`vmm.Net`, `vmm.NetPolicy`; the calls 40-52, `abi.NetInfo` ...;
+the launcher's `ARBACE_BOX_NET`). `bin/box-vendor check`'s byte
 identity is S0's record; `bin/box-vendor roundtrip` and `kvm-tests` check `box/` as it is. On
 darwin, `hv` and `libsys` import purego (`github.com/ebitengine/purego` v0.11.1), not vendored.
 

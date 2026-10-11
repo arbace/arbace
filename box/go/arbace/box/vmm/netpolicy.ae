@@ -1,0 +1,247 @@
+(in-ns 'go.arbace.box.vmm) (go/file "netpolicy.go" :imports [
+
+
+    ^{:line 4} [errors "errors"]
+    ^{:line 5} [fmt "fmt"]
+    ^{:line 6} [netip "net/netip"]
+    ^{:line 7} [strconv "strconv"]
+    ^{:line 8} [strings "strings"]])
+
+
+
+
+
+(go/type NetPolicy "A NetPolicy is what a guest's network may do (vmm/net.go): the addresses\nit may listen at and those it may dial, each a list of patterns.  The\nzero policy allows nothing.\n" (struct
+    ^{:line 15 :tag (slice NetPattern)} Listen
+    ^{:line 16 :tag (slice NetPattern)} Dial))
+
+
+
+
+
+
+(go/type NetPattern "A NetPattern is a host and a range of ports.  The host is any host\n(Any), a set of addresses (Prefix: one address, a CIDR prefix, or the\nloopback addresses when Loopback), or a name: Name exactly, or, when\nSuffix, Name and every name ending in \".\"+Name.\n" (struct
+    ^{:line 24 :tag bool} Any
+    ^{:line 25 :tag bool} Loopback
+    ^{:line 26 :tag netip/Prefix} Prefix
+    ^{:line 27 :tag string} Name
+    ^{:line 28 :tag bool} Suffix
+    ^{:line 29 :tag int} Lo ^int Hi))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 77} (go/func ParseNetPolicy "ParseNetPolicy reads a policy: items separated by commas or white space,\neach\n\n\tlisten=PATTERN   the guest may listen at PATTERN's addresses and ports\n\tdial=PATTERN     the guest may connect to them\n\tlisten           listen=loopback:*\n\tloopback         listen=loopback:* and dial=loopback:*\n\toff              nothing (as an empty policy)\n\nA PATTERN is HOST:PORT.  HOST is *, loopback (127.0.0.0/8 and ::1), an\nIP address or a CIDR prefix (IPv6 in brackets: [::1], [fd00::/8]), a\nname (example.org), or *.NAME (NAME and the names under it).  PORT is *,\nN or N-M.  ParseNetPolicy(\"\") is nil: no network.\n" [^string spec] :results [(* NetPolicy) error]
+  (let [^NetPolicy p (zero NetPolicy)
+      ^{:line 47} some false]
+    (range [_ item (strings/FieldsFunc spec ^{:go/end 48} (fn ^bool [^rune r] (or (== r \,) (== r \space) (== r \tab) (== r \newline))))]
+      (let [(values k v hasV) (strings/Cut item "=")]
+        (switch
+          (case [(== item "off")]
+            (continue))
+          (case [(== item "listen")]
+            (set! (.-Listen p) (append (.-Listen p) (loopbackAll))))
+          (case [(== item "loopback")]
+            (set! (.-Listen p) (append (.-Listen p) (loopbackAll)))
+            (set! (.-Dial p) (append (.-Dial p) (loopbackAll))))
+          (case [(and hasV ^:go/paren (or (== k "listen") (== k "dial")))]
+            (let [(values pat err) (ParseNetPattern v)]
+              (when (!= err nil)
+                (return nil (fmt/Errorf "%s: %w" item err)))
+
+              (if (== k "listen")
+                (set! (.-Listen p) (append (.-Listen p) pat))
+
+                (set! (.-Dial p) (append (.-Dial p) pat)))))
+
+          (default
+            (return nil (fmt/Errorf "%q: not listen, loopback, off, listen=PATTERN or dial=PATTERN" item))))
+
+        (set! some true)))
+
+    (when (not some)
+      (return nil nil))
+
+    (return (addr p) nil)))
+
+
+^{:go/end 79} (go/func loopbackAll ^NetPattern [] (lit NetPattern :Loopback true :Lo 0 :Hi 65535))
+
+
+^{:go/end 131} (go/func ParseNetPattern "ParseNetPattern reads one HOST:PORT pattern (ParseNetPolicy).\n" [^string s] :results [NetPattern error]
+  (let [^NetPattern p (zero NetPattern)
+      ^{:line 84} i (strings/LastIndexByte s \:)]
+    (when (< i 0)
+      (return p (errors/New "no :PORT")))
+
+    (let [(values host port) (values (subslice s _ i) (subslice s (+ i 1)))]
+      (switch
+        (case [(== port "*")]
+          (set! (values (.-Lo p) (.-Hi p)) (values 0 65535)))
+        (default
+          (let [(values lo hi isRange) (strings/Cut port "-")]
+            (when (not isRange)
+              (set! hi lo))
+
+            (let [(values a err1) (strconv/Atoi lo)
+                (values b err2) (strconv/Atoi hi)]
+              (when (or (!= err1 nil) (!= err2 nil) (< a 0) (> b 65535) (> a b))
+                (return p (fmt/Errorf "port %q: not *, N or N-M (0 to 65535)" port)))
+
+              (set! (values (.-Lo p) (.-Hi p)) (values a b))))))
+
+      (when (and (strings/HasPrefix host "[") (strings/HasSuffix host "]"))
+        (set! host (subslice host 1 (- (len host) 1))))
+
+      (switch
+        (case [(== host "*")]
+          (set! (.-Any p) true))
+        (case [(== host "loopback")]
+          (set! (.-Loopback p) true))
+        (case [(== host "")]
+          (return p (errors/New "no host")))
+        (default
+          (if [(values pre err) (netip/ParsePrefix host)] (== err nil)
+            (set! (.-Prefix p) (.Masked pre))
+            (if [(values a err) (netip/ParseAddr host)] (== err nil)
+              (set! (.-Prefix p) (netip/PrefixFrom (.Unmap a) (.BitLen (.Unmap a))))
+
+              (let [name (strings/ToLower (strings/TrimSuffix host "."))]
+                (when [(values rest ok) (strings/CutPrefix name "*.")] ok
+                  (set! (values name (.-Suffix p)) (values rest true)))
+
+                (when (not (validName name))
+                  (return p (fmt/Errorf "host %q: not *, loopback, an address, a prefix or a name" host)))
+
+                (set! (.-Name p) name))))))
+
+
+      (return p nil))))
+
+
+
+^{:go/breaks [[6 144]] :go/end 145} (go/func validName "validName is a host name of letters, digits, hyphens and dots.\n" ^bool [^string s]
+  (when (or (== s "") (> (len s) 253))
+    (return false))
+
+  (for [i 0] (< i (len s)) (inc! i)
+    (let [c (aget s i)]
+      (when (not (or (and (>= c \a) (<= c \z)) (and (>= c \0) (<= c \9)) (== c \-) (== c \.) (== c \_)))
+        (return false))))
+
+
+  true)
+
+
+
+^{:go/end 148} (go/method ports "ports says port is in the pattern's range.\n" ^bool [^NetPattern p ^int port] (and (>= port (.-Lo p)) (<= port (.-Hi p))))
+
+
+^{:go/breaks [[6 161]] :go/end 162} (go/method addr "addr says the pattern's host takes address a.\n" ^bool [^NetPattern p ^netip/Addr a]
+  (set! a (.Unmap a))
+  (switch
+    (case [(.-Any p)]
+      (return true))
+    (case [(.-Loopback p)]
+      (return (.IsLoopback a)))
+    (case [(.IsValid (.-Prefix p))]
+      (return (.Contains (.-Prefix p) a))))
+
+  false)
+
+
+
+^{:go/end 175} (go/method name "name says the pattern's host takes name n (lower case, no final dot).\n" ^bool [^NetPattern p ^string n]
+  (switch
+    (case [(.-Any p)]
+      (return true))
+    (case [(== (.-Name p) "")]
+      (return false))
+    (case [(== n (.-Name p))]
+      (return true)))
+
+  (and (.-Suffix p) (strings/HasSuffix n (+ "." (.-Name p)))))
+
+
+
+
+
+
+^{:go/end 201} (go/method listenAddr "listenAddr is where a guest's listen at ap is made, or false when the\npolicy refuses it: a listen at every address (0.0.0.0, ::) is made at\nthe loopback address of its family unless a pattern allows any address\n(* or 0.0.0.0 / :: themselves).\n" [^{:tag (* NetPolicy)} p ^netip/AddrPort ap] :results [netip/AddrPort bool]
+  (let [(values a port) (values (.Unmap (.Addr ap)) (conv int (.Port ap)))]
+    (when (.IsUnspecified a)
+      (range [_ q (.-Listen p)]
+        (when (and (.ports q port) ^:go/paren (or (.-Any q) (and (.IsValid (.-Prefix q)) (.IsUnspecified (.Addr (.-Prefix q))))))
+          (return (netip/AddrPortFrom a (.Port ap)) true)))
+
+
+      (let [lo (netip/AddrFrom4 (lit (array 4 byte) 127 0 0 1))]
+        (when (.Is6 a)
+          (set! lo (netip/IPv6Loopback)))
+
+        (return (.listenAddr p (netip/AddrPortFrom lo (.Port ap))))))
+
+    (range [_ q (.-Listen p)]
+      (when (and (.ports q port) (.addr q a))
+        (return (netip/AddrPortFrom a (.Port ap)) true)))
+
+
+    (return (lit netip/AddrPort) false)))
+
+
+
+
+
+^{:go/end 222} (go/method dialAddr "dialAddr says the policy lets the guest connect to ap, an address the\nguest gave (names were resolved by a lookup the policy allowed: names\nare the names it resolved to ap's address).\n" ^bool [^{:tag (* NetPolicy)} p ^netip/AddrPort ap ^{:tag (slice string)} names]
+  ^{:go/breaks [[3 221]]} (let [(values a port) (values (.Unmap (.Addr ap)) (conv int (.Port ap)))]
+    (range [_ q (.-Dial p)]
+      (when (not (.ports q port))
+        (continue))
+
+      (when (.addr q a)
+        (return true))
+
+      (range [_ n names]
+        (when (.name q n)
+          (return true))))
+
+
+
+    false))
+
+
+
+
+^{:go/breaks [[7 236]] :go/end 237} (go/method lookup "lookup says the policy lets the guest resolve name: a name some dial\npattern names (or *), or localhost.\n" ^bool [^{:tag (* NetPolicy)} p ^string name]
+  (set! name (strings/ToLower (strings/TrimSuffix name ".")))
+  (when (== name "localhost")
+    (return true))
+
+  (range [_ q (.-Dial p)]
+    (when (.name q name)
+      (return true)))
+
+
+  false)
+
+
+
+
+^{:go/breaks [[5 247]] :go/end 248} (go/method reverse "reverse says the policy lets the guest ask the name of an address: only\nwhen it may dial any host.\n" ^bool [^{:tag (* NetPolicy)} p]
+  (range [_ q (.-Dial p)]
+    (when (.-Any q)
+      (return true)))
+
+
+  false)

@@ -130,7 +130,10 @@ native (amendments BX12-BX17 proposed). S6's amd64 half done 2026-10-11 (BOX-NOT
 the guest's own Go, TamaGo's runtime and standard library and its `goos` module, held as Go
 forms in `tamago/` (`bin/tamago-vendor`), the box's guest built from them printed by default,
 byte-identical to the guest built from the originals (without build IDs; amendments BX20-BX24
-proposed).
+proposed). S5 done on amd64 2026-10-11 (BOX-NOTES.md, S5; D12 decided: a stream proxy): TCP streams
+through the monitor's calls under the launcher's `ARBACE_BOX_NET` policy, jrt's `NetHost` in the
+box, the sockets' oracle corpus and `bin/net-check` in the box, the socket REPL from the host
+(amendments BX40-BX44 proposed).
 
 ## Decisions (the user's, 2026-10-08)
 
