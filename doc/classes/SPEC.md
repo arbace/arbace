@@ -1,8 +1,9 @@
 # Class forms: Java's class files written in Clojure
 
 Status: accepted (2026-10-06), with the amendments found while implementing it folded in
-(2026-10-07). Implemented by `arbace/classes/` (the compiler, at stage 0 and, behind the special
-forms of `arbace.lang.Compiler`, at every later stage, §9.5) and `arbace/j2c/` (the converter).
+(2026-10-07 to 2026-10-09, §12). Implemented by `arbace/classes/` (the compiler, behind the
+special forms of `arbace.lang.Compiler` at every stage, the seed's stage 0 included, §9.5, §9.6)
+and `arbace/j2c/` (the converter).
 
 This spec defines the **class forms**: how every construct javac can put into a class file is
 written as idiomatic Clojure, in ordinary `.clj` sources, and compiled by Arbace's own compiler
@@ -45,11 +46,11 @@ Contents: 1 Principles · 2 A first example · 3 Equivalence · 4 Declarations �
    types the way javac does. Generic types appear only in declarations, for `Signature`
    attributes. Erasure casts, narrowing conversions and the overloads Arbace would choose
    differently are written out (§7).
-5. **Plain Clojure syntax.** Everything reads with the reader of the frozen `clojure/` (Clojure 1.12
-   syntax): `^meta`, `^[param-tags]`, array class symbols like `String/1`, qualified symbols like
+5. **Plain Clojure syntax.** Everything reads with Arbace's reader (Clojure 1.12 syntax):
+   `^meta`, `^[param-tags]`, array class symbols like `String/1`, qualified symbols like
    `Outer/this`. There are no reader changes. Class-form files are Clojure source, read by
-   `clojure.core/read` (Clojure 1.12 and later), not EDN: array class symbols and param-tags are not
-   EDN.
+   `arbace.core/read` (as by `clojure.core/read` of Clojure 1.12 and later), not EDN: array class
+   symbols and param-tags are not EDN.
 6. **The Java subset needs no runtime.** A class body that uses only the Java subset compiles to
    bytecode that references nothing of Clojure: no vars, no `clojure.lang.RT`. That is how
    `arbace.lang` itself can be written with these forms.
@@ -253,7 +254,7 @@ Where types are written:
 
 A symbol tag is written the usual way, `^String x`. A generic type needs the map form,
 `^{:tag (List String)} xs`, because `^` takes no list. A list tag is an error in Clojure today,
-so this is a new meaning (§1.1).
+so this is a new meaning (§1, principle 1).
 
 A type is **erased** as in Java: type variables to their first bound, parameterized types to
 their class. Code generation uses erased types only. A `Signature` attribute is emitted where
@@ -1095,7 +1096,7 @@ Class bodies are Clojure, so everything else works too: vars, keywords, collecti
 `<clinit>`, as in `deftype`. `fn` classes created in a class body are added to its nest, so they
 can reach private members.
 
-The **Java subset** is what converted code uses and what stage 0 must compile:
+The **Java subset** is what converted code uses and what needs no runtime (§1, principle 6):
 
 - the forms of this spec and the class forms;
 - `do`, `let`, `loop`, `recur`, `if`, `when`, `when-not`, `if-not`, `cond`, `and`, `or`, `not`,
@@ -1309,7 +1310,8 @@ arbace/lang/RT.clj         (in-ns 'arbace.lang) ...
 
 One file per Java source file, named after its top-level class, holding that file's class forms.
 When the source directory also has a `.clj` file of that name, `_class` is appended:
-`clojure/main.java` (class `clojure.main`) becomes `clojure/main_class.clj`, since
+`clojure/main.java` (class `clojure.main`) becomes `clojure/main_class.clj` (in the converted
+baseline), since
 `clojure/main.clj` is the namespace `clojure.main` (and `(load "clojure/main")` would also pick up
 `clojure/main__init.class`). A package with a single segment gets the single-segment namespace:
 package `clojure` is namespace `clojure`. Same-package classes need no import (§5.2). Java's
@@ -1329,12 +1331,12 @@ from
 1. classes loaded or loadable from the class path (by reflection, plus reading class files for
    `ConstantValue` and generic signatures),
 2. the class forms of the current top-level form, entered before any body is compiled (so a
-   top-level `do` of mutually dependent class forms works, also at the REPL). At stage 0 the
-   frozen compiler evaluates the forms of a top-level `do` one by one, so a `defclass` macro
-   cannot see its siblings; there `(defclasses (defclass A ...) (defclass B ...))` compiles
-   class forms together and evaluates to a vector of the classes. Arbace's own compiler treats a
-   top-level `do` as said: compiling each class form of the `do`, it enters the others as
-   declarations (as for sources, 3). It keeps `defclasses` as the explicit form,
+   top-level `do` of mutually dependent class forms works, also at the REPL). Until 2026-10-08 stage
+   0, the frozen compiler, evaluated the forms of a top-level `do` one by one, so a `defclass` macro
+   could not see its siblings; there `(defclasses (defclass A ...) (defclass B ...))` compiled class
+   forms together and evaluates to a vector of the classes. Arbace's own compiler (every stage
+   since) treats a top-level `do` as said: compiling each class form of the `do`, it enters the
+   others as declarations (as for sources, 3). It keeps `defclasses` as the explicit form,
 3. **sources**: a class name that resolves to nothing is looked up as `p/C.clj` on the source
    path (javac's `-sourcepath` behaviour); the file's namespace form is evaluated and its
    top-level class forms are entered, declarations only, without compiling their bodies or
@@ -1381,17 +1383,17 @@ part of this spec.
 The new names are vars in `arbace.core`, so code can `:exclude` them. The compiler knows a few new
 special forms with starred names, which no namespace can shadow, as `let*` and `fn*` today: `class*`
 (one for every kind of class), `label*`, `break*`, `continue*`, `return*`, `switch*`, `lambda*`,
-`method-ref*`, `java-str*`, `java-assert*`, `for-each*`. The macros `defclass`, `defclasses`,
-`anon`, `letclass`, `defmodule`, `defpackage`, `label`, `break`, `continue`, `return`, `switch`,
-`lambda`, `method-ref`, `java-str`, `java-assert`, `for-each`, `with-resources`, `if-instance` and
-`when-instance` expand to them and to existing forms; `with-resources` and the pattern tests need no
-special form of their own. The operators of §5.4 are functions with `:inline` expansions to
-`Numbers` methods that the compiler emits as instructions where the operands and the result are
-primitive, as Clojure's intrinsics do (a boxed result is a call of the method). Other operands are
-converted as Clojure converts those of `unchecked-add-int`: to `int` or `float` by `RT`'s casts for
-the `-int` and `-float` operators; `unchecked-divide` and `unchecked-remainder` are `long` or
-`double` by the operands' runtime types, `double` when one is a `Double` or `Float`. Extensions of
-existing special forms (`let*`, `loop*`, `set!`, `new`, `.`, `recur`) are listed in §1.1.
+`method-ref*`, `java-str*`, `java-assert*`, `for-each*`, `with-resources*`, `if-instance*`. The
+macros `defclass`, `defclasses`, `anon`, `letclass`, `defmodule`, `defpackage`, `label`, `break`,
+`continue`, `return`, `switch`, `lambda`, `method-ref`, `java-str`, `java-assert`, `for-each`,
+`with-resources`, `if-instance` and `when-instance` expand to them and to existing forms. The
+operators of §5.4 are functions with `:inline` expansions to `Numbers` methods that the compiler
+emits as instructions where the operands and the result are primitive, as Clojure's intrinsics do (a
+boxed result is a call of the method). Other operands are converted as Clojure converts those of
+`unchecked-add-int`: to `int` or `float` by `RT`'s casts for the `-int` and `-float` operators;
+`unchecked-divide` and `unchecked-remainder` are `long` or `double` by the operands' runtime types,
+`double` when one is a `Double` or `Float`. Extensions of existing special forms (`let*`, `loop*`,
+`set!`, `new`, `.`, `recur`) are listed in §1, principle 1.
 
 **One implementation.** Arbace's compiler knows these special forms but compiles none of them
 itself: the class forms compiler (§12, question 17), loaded on first use, does, at this boundary:
@@ -1453,7 +1455,8 @@ forms); its value is `nil`. `import*` imports into the current namespace at run 
   them; `arbace.core` holds the names of §9.5, and the class forms compiler is loaded on first use,
   from classes that each stage AOT-compiles into itself, as it does `arbace.core` and the other
   namespaces (so they too must reproduce). Clojure-level namespaces such as `arbace.core` are
-  compiled by Arbace's own compiler, since the frozen one emits references to `clojure.lang`.
+  compiled by Arbace's own compiler (with the frozen stage 0, because it emitted references to
+  `clojure.lang`).
 - **Stage 2** recompiles with stage 1, and must reproduce itself.
 
 ## 10. The REPL
@@ -1489,11 +1492,14 @@ user=> (let [c (Counter.)] (.inc c) (.inc c))
   `MethodHandles.Lookup.defineClass`: puts classes into an existing class's loader, so no
   redefinition. Hidden classes: cannot be named, so other code cannot refer to them. Widening
   package access to public at the REPL: changes the classes.
-- **Cycles at the REPL**: wrap the class forms in one `do` (`defclasses` at stage 0), or let
+- **Cycles at the REPL**: wrap the class forms in one `do` (or `defclasses`), or let
   source path lookup (§9.2) find the others.
 - AOT-compiled classes are loaded by the application class loader; none of this applies to them.
   A REPL-defined class in the package of an AOT-compiled one has no package access to it, being
   in another loader.
+- **The Go build** has no bytecode and no class loader: its REPL gives the class forms their
+  meaning by the same analysis, classes made at run time and an interpreter of the analyzed code
+  (doc/go/CLASSFORMS-REPL.md, doc/go/C2G-SPEC.md §16).
 
 ## 11. Worked examples
 
@@ -1962,7 +1968,8 @@ public final class Shapes {
 the spec, and where the text above leaves a choice open, the recommendation applies.
 
 **Amendments (2026-10-07, 2026-10-08):** implementing the compiler and the converter raised 33
-proposed amendments (14 in `COMPILER-NOTES.md`, 19 in `CONVERTER-NOTES.md`). The user accepted
+proposed amendments (14 in `COMPILER-NOTES.md`, 19 in `CONVERTER-NOTES.md`; 34 in all with the
+one of 2026-10-09 below). The user accepted
 all of them; they are folded into the text above (§1, §3, §4.4 to §4.8, §4.10, §4.11, §5.2 to §5.8,
 §5.10, §5.12, §6, §7, §9.1, §9.2, §9.5, §10). The last five are marked "amendment, accepted"
 with their date where they apply.

@@ -63,6 +63,8 @@ bin/j2c-check --jdk [MODULE...]
   copied into `--patch-module` directories under `.tmp/j2c-patch/`, in chunks of packages
   converted in parallel (`J2C_THREADS`, default 12). A `module-info.java` cannot be patched in
   and is skipped (modules are converted from ordinary source trees, `test/j2c/module`).
+- `bin/jrt-convert` (doc/go/JRT-SOURCES.md) runs `jdk --check` on java.base's translation
+  closure for the Go build's runtime jrt, then checks the output with `bin/class-forms-check`.
 - `build` compiles converted files with the class forms compiler (`arbace.classes`, the other
   half of the work, loaded through `arbace.classes.boot`) and writes the class files. Classes
   it does not compile are looked up on the class path: `J2C_CP` adds to it (`bin/j2c-check`
@@ -140,16 +142,16 @@ file; Java's comments are not carried over.
 
 ## Results
 
-All on 2026-10-06, jdk26u at the system JDK (26.0.2.1).
+On 2026-10-06 (the table) and 2026-10-07 (as dated below), jdk26u at the system JDK (26.0.2.1).
 
-| corpus | files | converted | failures | unreadable (`clojure.core/read`) |
+| corpus | files | converted | failures | unreadable (the core's `read`) |
 |---|---:|---:|---:|---:|
 | baseline `clojure/` | 183 | 183 | 0 | 0 |
 | jdk26u `src/*/share/classes`, all 68 modules (module-infos skipped) | 12,730 | 12,730 | 0 | 0 |
-| `test/j2c/java`, `test/j2c/module` | 9 | 9 | 0 | 0 |
+| `test/j2c/java`, `test/j2c/module` (14 files since: `Pins`, `TypeAnns`) | 9 | 9 | 0 | 0 |
 
 - **Compiled with the class forms compiler** (`bin/class-forms-check`, compiler at `origin/main`
-  of the same day): every one of the 187 converted baseline files with class forms compiles, and
+  of the same day): every one of the 183 converted baseline files with class forms compiles, and
   every class (812, the same names as javac's) has the same shape as javac's: flags, supertypes,
   signatures, nest and inner class attributes, fields, methods, and the symbolic content of code
   (member and class references, call sites, constants).

@@ -1,10 +1,12 @@
 # Go forms: Go programs written in Clojure
 
-Status: accepted (2026-10-08), milestone G0 of g2c ([G2C-SURVEY.md](../G2C-SURVEY.md) §7),
-with the 28 amendments found while implementing the helper, the printer and the converter folded
-in (2026-10-08, §15). Implemented by `tools/godump` (the helper), `arbace.g2c.convert` (the
-converter) and `arbace.g2c.print` (the printer). The decisions of 2026-10-07 (survey §9) bind
-it; the user accepted the recommendation of each of the 20 questions of §15 on 2026-10-08.
+Status: accepted (2026-10-08), milestone G0 of g2c ([G2C-SURVEY.md](../G2C-SURVEY.md) §7), with the
+37 amendments found while implementing the helper, the printer and the converter and in B1a's step 0
+folded in (2026-10-08, §15). G0-G2 are done (the round trip closed on 2026-10-08,
+[ROUNDTRIP.md](ROUNDTRIP.md)). Implemented by `tools/godump` (the helper), `arbace.g2c.convert` (the
+converter) and `arbace.g2c.print` (the printer); c2g writes Go forms by this spec for the Go
+executable (`bin/arbace-go`, [C2G-SPEC.md](C2G-SPEC.md)). The decisions of 2026-10-07 (survey §9)
+bind it; the user accepted the recommendation of each of the 20 questions of §15 on 2026-10-08.
 
 This spec defines the **Go forms**: how every construct of a Go package, as `go/parser` and
 `go/types` see it, is written as Clojure data in ordinary `.clj` sources. It says what the forms
@@ -15,16 +17,18 @@ same export data and object code. It is the counterpart of the class forms
 
 Words used throughout:
 
-- **the helper**: the Go program under `tools/` (seeded from the survey's `godump`). It loads
+- **the helper**: the Go program `tools/godump` (seeded from the survey's `godump`). It loads
   one package for one build configuration with `go/parser` and `go/types` and emits the typed
   syntax tree generically: every `go/ast` node with its position fields, plus the `types.Info`
   maps (survey §2.2). It decides nothing about forms.
-- **the converter**: `arbace.g2c`, in Clojure. It reads the helper's output and writes Go forms.
-  Every decision about forms is made here.
+- **the converter**: `arbace.g2c.convert`, in Clojure. It reads the helper's output and writes Go
+  forms. Every decision about forms is made here.
 - **the printer**: Go forms → Go source (G2). With the converter it makes the round trip
   *Go → forms → Go* (§3).
 - **a consumer**: anything that reads Go forms for their meaning: the printer, and later
   Arbace's own Go-forms compiler (survey §5.2, steps b2-b4).
+- **other writers**: c2g (`arbace.c2g`), which translates class forms and Clojure into Go forms,
+  and jrt's hand-written Go forms ([C2G-SPEC.md](C2G-SPEC.md)); both are printed by the printer.
 - **Go forms**: the forms of this spec. **Go context**: the inside of a Go declaration form
   (§7.2), where the forms mean Go.
 - **gc**: Go's compiler, `cmd/compile`, as driven by the `go` command of the pinned toolchain.
@@ -44,27 +48,27 @@ what is derived · 12 The printer · 13 Coverage · 14 Worked examples · 15 Ope
    a deliberate exception to class forms principle 1). No Clojure code runs inside Go context:
    there are no vars, no seqs, no Clojure functions there.
 2. **Declarations mirror Go.** One form per Go declaration, in Go's source order, in one file
-   per Go file. Go's identifiers are written verbatim: capitalisation is export, so nothing is
+   per Go file. Go's identifiers are written verbatim: capitalization is export, so nothing is
    munged. Types are tags and type forms, as in the class forms.
 3. **go/types' decisions are written out.** Whatever a consumer could only learn by running a
    Go type checker is in the forms: constant values, inferred type arguments, embedded-field
-   paths of selections, the redeclared names of `:=`, initialisation order, the types of
+   paths of selections, the redeclared names of `:=`, initialization order, the types of
    untyped constants where Go's rules are not local. A consumer needs the declared signatures
    of the package and its imports, never type inference (§11).
 4. **What follows from declarations is not written.** Method sets, struct layout, zero values,
    implicit `&` and `*` on method receivers, implicit conversions to interface types, the
    per-clause variables of a type switch, `range` kinds: a consumer derives them from the
    declarations, as gc does.
-5. **Plain Clojure syntax.** Everything reads with `clojure.core/read` (Arbace's reader,
-   Clojure 1.12 syntax) without data readers or reader changes: metadata, qualified symbols,
-   keywords, BigInts (`N`), BigDecimals (`M`) and ratios. Not EDN (CLAUDE.md, "Clojure reader
-   over EDN"). Where Go syntax cannot be read by the reader (`^`, `~`, `&^`, `'x'`, `` `raw` ``,
+5. **Plain Clojure syntax.** Everything reads with Arbace's reader (`arbace.core/read`, Clojure 1.12
+   syntax, as `clojure.core/read`) without data readers or reader changes: metadata, qualified
+   symbols, keywords, BigInts (`N`), BigDecimals (`M`) and ratios. Not EDN (CLAUDE.md, "Working
+   conventions"). Where Go syntax cannot be read by the reader (`^`, `~`, `&^`, `'x'`, `` `raw` ``,
    `.5`, hex floats), the forms use other spellings (§7.5, §8).
 6. **Lossless for gc.** The forms keep everything gc's output depends on: file names and split,
-   declaration order, every directive, initialisation semantics, and positions (§10). The
+   declaration order, every directive, initialization semantics, and positions (§10). The
    printer can therefore give gc a program it compiles to the same export data and object code
    (§3). Differences that gc cannot see (parentheses, field grouping, literal spelling, ordinary
-   comments) are normalised away and listed (§3.2); where gc does see them (parentheses around
+   comments) are normalized away and listed (§3.2); where gc does see them (parentheses around
    `&&` and `||` operands, field groups of generic declarations, local `const` groups), they
    are kept (amendment, accepted 2026-10-08).
 7. **One configuration per conversion.** Build constraints are resolved by the helper. The forms
@@ -136,7 +140,7 @@ For a package converted under a configuration, compile the original files and th
 with the same toolchain, configuration and flags (§12.4). They are **equivalent** when:
 
 1. **Trees.** Each printed file parses to the same `go/ast` tree as its original, after the
-   normalisations of §3.2, with the same comments where §3.2 keeps them. Positions are compared
+   normalizations of §3.2, with the same comments where §3.2 keeps them. Positions are compared
    as the positions mode says (§10).
 2. **Export data.** The two packages' export data describe the same package: the same objects
    with the same types, constant values, method sets and inlinable bodies. In positions mode
@@ -149,22 +153,28 @@ with the same toolchain, configuration and flags (§12.4). They are **equivalent
    programs (`$GOROOT/test`, `// run`) and package tests, run with `GOOS=tamago` in the box
    (survey §6.3) or on the host configuration where the round trip is also run.
 
-Level 3 implies the others for what gc emits; levels 1 and 2 localise a difference. The gate
-of G2 is levels 1-3 over `$GOROOT/src` and `$GOROOT/test` (the tamago-go tree), and level 4
-for the run programs.
+Level 3 implies the others for what gc emits; levels 1 and 2 localize a difference. The gate
+of G2 was levels 1-3 over `$GOROOT/src` and `$GOROOT/test` (the tamago-go tree), and level 4
+for the run programs. As built, G2 was closed (2026-10-08) on levels 1-3 by the oracle
+(`bin/g2c-check`, `tools/gocmp`, [ROUNDTRIP.md](ROUNDTRIP.md)), which compares no positions at
+any level: neither export data positions nor line tables, in either mode (ROUNDTRIP.md,
+"Positions: what is compared"). Level 4 is not run.
 
-### 3.2 Normalisations
+### 3.2 Normalizations
 
 The forms do not keep the following, because gc's output does not depend on them. The tree
-comparison of level 1 applies them to both trees before comparing:
+comparison of level 1 applies them to both trees before comparing. The oracle as built
+normalizes further ([ROUNDTRIP.md](ROUNDTRIP.md), "Level 1"): imports as a multiset regardless
+of order (its 3), elided composite literal types identified with written ones (its 7); the forms
+keep both all the same:
 
-| N | difference | how it is normalised |
+| N | difference | how it is normalized |
 |---|---|---|
 | N1 | parentheses | `ParenExpr` removed; the printer adds the parentheses Go's grammar needs (§12.2); except around operands of `&&` and `\|\|`, kept as `^:go/paren` (§7.5) |
 | N2 | empty statements | `EmptyStmt` removed from statement lists, except as the target of a label |
 | N3 | grouped names in fields, parameters, results, type parameters (`a, b int`) | one field per name; the printer may regroup; except in generic declarations, where the groups are kept as `^:go/grouped` (§5.3) |
 | N4 | literal spelling | `BasicLit` compared by kind and exact value: radix, `_` separators, exponent form, raw against interpreted strings, escapes |
-| N5 | import grouping | imports compared as one ordered list of specs per file |
+| N5 | import grouping | imports kept as one ordered list of specs per file |
 | N6 | local declaration groups | `var (...)` and `type (...)` inside a function become one declaration per spec; a local `const (...)` group keeps its grouping as `^:go/grouped`, with its implicit repetition written out and marked `^:go/implicit` (§7.3) |
 | N7 | `for ; c ; {}` | the same tree as `for c {}` (Go's parser already makes it one) |
 | N8 | comments | only directives (§9.1), line directives (§10.3) and, when kept, doc comments are compared |
@@ -191,8 +201,10 @@ code levels.
 - Files excluded by the configuration (they are not converted), cgo files (excluded by
   `CGO_ENABLED=0`, §9.4) and assembly (§9.5) are outside the forms; the printer copies the
   non-Go files of the package unchanged (§12.4).
-- Programs that inspect their own column numbers in mode `:lines`; go-lisp excluded 15 such
-  run programs (survey §1.2). Mode `:full` covers them.
+- Programs that inspect their own line numbers (`runtime.Caller`, panics' traces): go-lisp
+  excluded 15 such run programs (survey §1.2, its F12). Mode `:lines` keeps the lines of
+  statements only, and the printer prints no `:full` (§10.2), so the oracle compares no line
+  numbers (ROUNDTRIP.md, "Positions").
 
 ## 4. Packages, files, imports, names
 
@@ -248,9 +260,10 @@ directory has a subdirectory `x`, whose package's own file would be `<pkg-dir>/x
 ```
 
 The forms of each configuration are a separate tree, one per pinned configuration (§1, item
-7), so four: for example `target/go/tamago_amd64/`, `target/go/tamago_arm64/`,
-`target/go/linux_amd64/` and `target/go/linux_arm64/` (amendment, accepted 2026-10-08).
-Converted output is regenerated, not tracked (decision 9).
+7), so four (amendment, accepted 2026-10-08). `bin/g2c` writes them under
+`.tmp/g2c/forms/CORPUS` (`amd64`, `arm64`, `linux-amd64` ...); `bin/arbace-go` writes c2g's
+program under `target/arbace-go/c2g`, one tree for every target (below). Converted output is
+regenerated, not tracked (decision 9).
 
 **Programs written as Go forms** (amendment, accepted 2026-10-08). A program held as forms
 rather than converted (`bin/g2c build`, [BUILD.md](BUILD.md)) is a source root `DIR` with
@@ -414,7 +427,7 @@ Type forms appear only in type positions (§5.2), so `(* T)` is never multiplica
 `(func ...)` never a literal.
 
 A type is written as the source wrote it: an alias stays the alias (`byte`, `rune`, `any`, a
-declared alias), a parenthesised type loses its parentheses (N1). Array lengths are expressions:
+declared alias), a parenthesized type loses its parentheses (N1). Array lengths are expressions:
 a literal, a constant name or a constant expression form (§8.2).
 
 ### 5.2 Where types are written
@@ -592,7 +605,7 @@ target = ^{:tag T? :doc s?} Name | (values A B ...)
 (go/var ^{:tag io/Reader} _ (conv (* T) nil))    ; var _ io.Reader = (*T)(nil)
 ```
 
-Package-level variables stay in **source order**. Their initialisation order is go/types'
+Package-level variables stay in **source order**. Their initialization order is go/types'
 `InitOrder`, recorded in `go/package`'s `:init-order` as a vector with one entry per
 initializer: the variable's symbol, `(values a b)` for an initializer of several variables, and
 for a blank variable `["file.go" line col]` (the position of its `_`), also as an element of
@@ -700,10 +713,10 @@ their types, initializers and bodies, and everything nested in them. There:
 - Every Go variable is a variable: assignable, addressable, captured by reference by function
   literals (Go 1.22 loop variables are per iteration). `^:mutable` is not written (§15 Q3).
 - **Statement forms and expression forms.** The statement heads are `let`, `let-type`, `set!`,
-  `aset`, `inc!`, `dec!`, `>!`, `go`, `defer`, `return`, `break`, `continue`, `goto`,
-  `fallthrough`, `label`, `do`, `if`, `when`, `cond`, `switch`, `type-switch`, `select`, `for`,
-  `while`, `range`. Every other form is an expression; in a statement position it is an
-  expression statement (a call or a receive, as Go allows).
+  `aset`, `inc!`, `dec!`, `>!`, `go`, `defer`, `return`, `break`, `continue`, `goto`, `fallthrough`,
+  `label`, `do`, `if`, `when`, `cond`, `switch`, `type-switch`, `select`, `for`, `while`, `range`,
+  and the qualified `go/directive` (§9.1). Every other form is an expression; in a statement
+  position it is an expression statement (a call or a receive, as Go allows).
 - **Bodies and branches.** A *body* (of a function, `when`, `let`, `do`, a `case` clause, a
   loop) is a statement list. A *branch* (the `then` and `else` of `if`, the values of `cond`)
   is one statement, or `(do ...)` whose forms are the branch's statement list: `(if c (f) (g))`
@@ -802,8 +815,8 @@ concatenates, on `float32` rounds to `float32`; `/` truncates on integers and pa
   same on Go's types) where it does not: `^` is the reader's metadata character and `&^`,
   `~` are not symbols, so the bit operations are Clojure's `bit-*` names and the logic operators
   Clojure's `and`, `or`, `not`.
-- `@p` reads as `(clojure.core/deref p)` (or Arbace's `arbace.core/deref`); in Go context that
-  list is pointer indirection, whatever the qualifier.
+- `@p` reads as `(arbace.core/deref p)` on Arbace (`clojure.core/deref` on Clojure); in Go context
+  that list is pointer indirection, whatever the qualifier.
 - **n-ary forms** are left-nested chains of one operator: `(+ a b c)` is `(a + b) + c`. The
   converter flattens a left-nested chain of the same operator into one form and keeps any other
   nesting: `a + (b + c)` is `(+ a (+ b c))`. A string chain `a + b + c` therefore stays one
@@ -1119,7 +1132,7 @@ added as the compiler is built (§15 Q17).
 
 ### 9.1 `//go:` directives
 
-Every `//go:` directive (and every other `//name:` directive go/ast recognises, such as
+Every `//go:` directive (and every other `//name:` directive go/ast recognizes, such as
 `//export` and `//line`, §10.3) is kept. gc reads two kinds:
 
 1. **Attached** to the declaration that follows: `nosplit`, `noinline`, `noescape`, `norace`,
@@ -1183,11 +1196,11 @@ forms: gc compiles them, and phase b's runtime transcription needs them verbatim
 
 ### 9.4 cgo
 
-Out of scope by configuration, for every configuration (amendment, accepted 2026-10-08): each
-builds with `CGO_ENABLED=0`, `linux` included, so files that import `"C"` are excluded and no
-package has cgo files. The cgo variants of `linux` packages (`net`'s resolver, `os/user`'s
-lookups) are not converted; their pure Go variants are what the configuration builds. The `//go:cgo_*` directives of `runtime`,
-`syscall` and others are ordinary free-standing directives (§9.1).
+Out of scope by configuration, for every configuration (amendment, accepted 2026-10-08): each builds
+with `CGO_ENABLED=0`, `linux` included, so files that import `"C"` are excluded and no package has
+cgo files. The cgo variants of `linux` packages (`net`'s resolver, `os/user`'s lookups) are not
+converted; their pure Go variants are what the configuration builds. The `//go:cgo_*` directives of
+`runtime`, `syscall` and others are ordinary free-standing directives (§9.1).
 
 ### 9.5 Assembly and other files
 
@@ -1289,7 +1302,9 @@ Every position of the syntax tree is kept, for byte-identical export data and li
   of an implicit return (§6.4), of the inner operators of a merged chain (§7.5), and of a
   literal's parts beyond its own position (`:go/apos` holds one position per child).
 
-This mode is for the G2 gate and for tools; it is not meant to be read.
+This mode is for tools; it is not meant to be read. The converter writes it (`bin/g2c convert
+--full`); the printer does not print it yet ([PRINTER-NOTES.md](PRINTER-NOTES.md): a package
+with `:positions :full` is printed in the lines layout), so G2 closed without it (§3.1).
 
 ### 10.3 Line directives
 
@@ -1327,13 +1342,13 @@ warns, and the converter reports it and does not write it (none occurs in std; t
 | new against reused names in `:=` | `Defs` / `Uses` | `^:assign` |
 | package members, dot-imported names, universe names | `Uses` | `pkg/Name`, bare symbols, `go/call`, `go/id` |
 | implicit import names | `Implicits[ImportSpec]` | `[name "path"]` |
-| package initialisation order | `InitOrder` | `:init-order` |
+| package initialization order | `InitOrder` | `:init-order` |
 | per-file language versions | `FileVersions` | `:lang` in `go/file` |
 | comma-ok forms | `Types[e]` mode `commaok` | two-target bindings (the shape suffices) |
 | constant kinds of `:val` | `Types[e].Type` of the constant (helper: `:t`), not the value's kind | `:val`'s representation (§8.2) |
 
 The converter also writes, from the syntax tree rather than go/types, what gc's output depends
-on beyond the normalisations (amendment, accepted 2026-10-08): `^:go/paren` on parenthesized
+on beyond the normalizations (amendment, accepted 2026-10-08): `^:go/paren` on parenthesized
 operands of `and` and `or` (§7.5), `^:go/grouped` in generic declarations (§5.3) and local
 `const` groups with `^:go/implicit` (§7.3), and `:go/label` on labeled declarations (§7.3).
 
@@ -1353,8 +1368,8 @@ operands of `and` and `or` (§7.5), `^:go/grouped` in generic declarations (§5.
 
 ### 11.3 What the helper must give the converter
 
-The helper (developed in parallel under `tools/`) emits the typed tree generically. For this
-spec the converter needs from it:
+The helper (`tools/godump`, [HELPER-NOTES.md](HELPER-NOTES.md)) emits the typed tree generically.
+For this spec the converter needs from it:
 
 1. Every node with all its position fields, raw (not adjusted by line directives), and the
    position of the `.` of each selector and each type assertion (`:dot`, §10.2).
@@ -1421,7 +1436,7 @@ expressions) is for consumers.
   the import declarations where it stands (§4.3).
 - `(- -1)` prints `- -1` (or `-(-1)`): two `-` never touch. A type parameter list with one
   parameter whose constraint begins with `*` or `(` gets a trailing comma (`[P *T,]`).
-- A n-ary form prints as a left-associative chain without parentheses.
+- An n-ary form prints as a left-associative chain without parentheses.
 - `(byte-string ...)` prints as an interpreted string with `\x` escapes for the single bytes;
   other strings print as interpreted strings (printable characters as they are, `\n`, `\t`,
   `\"`, `\\`, other controls as `\x` or `\u`), or as raw strings when that is valid and the
@@ -1477,8 +1492,8 @@ For levels 2-4 of §3.1 the printed package is compiled exactly as the original:
   forms directories (§9.6), and built with the same pinned environment, `GOOS` and `GOARCH`
   from the build's target (§4.2, `:config`) ([BUILD.md](BUILD.md)) (amendment, accepted
   2026-10-08).
-- Comparison of export data and object files is the comparator's (`tools/`, developed in
-  parallel).
+- Comparison of export data and object files is the comparator's (`tools/gocmp`,
+  `bin/g2c-check`, [ROUNDTRIP.md](ROUNDTRIP.md)).
 
 ## 13. Coverage
 
@@ -1592,7 +1607,8 @@ kinds, and the universe's builtins.
 ### 13.5 Reserved heads in Go context
 
 - Statements: `let let-type set! aset inc! dec! >! go defer return break continue goto
-  fallthrough label do if when cond switch type-switch select case default for while range`.
+  fallthrough label do if when cond switch type-switch select case default for while range`,
+  and the qualified `go/directive` (§9.1).
 - Expressions: `+ - * / % << >> == != < <= > >= and or not bit-and bit-or bit-xor bit-not
   bit-and-not addr <! lit conv assert aget subslice spread values inst method-expr fn zero
   rune imaginary byte-string`, and `deref` (from `@`).
@@ -1835,8 +1851,8 @@ func Use() int32 {
 Notes:
 
 - `p.X += dx` is `(set! (.-X p) + dx)`; with `p` a `*Point`, the dereference is derived.
-- `Small` is untyped; `Move`'s parameter makes it `int32` (derived, §8.3). go/types' `:val "4"`
-  at `int32` is what a consumer computes.
+- `Small` is untyped; `Move`'s parameter makes it `int32` (derived, §8.3). `Small`'s `:val` is 4
+  (untyped); its conversion to `int32` at the call is what a consumer computes.
 - `n.Move(Small)` goes through the embedded `Point` (`Selection.Index` `[0 0]`: field 0, then
   method 0), so `:go/via [Point]`; `&n.Point` for the pointer receiver is derived.
 - `&n.Point.Y` spells the path itself and needs no metadata.
@@ -2181,16 +2197,16 @@ Each with the recommendation the spec follows. **Settled (2026-10-08):** the use
 20 recommendations; they are part of the spec.
 
 **Amendments (2026-10-08).** Implementing the helper, the printer and the converter raised 28
-proposed amendments: seven by the helper's author (H1-H7, [HELPER-NOTES.md](HELPER-NOTES.md)),
-ten by the printer (A1-A10, [PRINTER-NOTES.md](PRINTER-NOTES.md)) and eleven by the converter
-(C1-C11, [CONVERTER-NOTES.md](CONVERTER-NOTES.md)), with the converter's corrections of the
-spec's text and the documented choices of its notes that fix the spec. The user accepted all of
-them on 2026-10-08. They are folded into the text above, marked "(amendment, accepted
-2026-10-08)" where they apply. B1a's step 0 raised nine more, five from the round trip for
-`GOOS=linux` (L1-L5, [ROUNDTRIP.md](ROUNDTRIP.md), with [CONVERTER-NOTES.md](CONVERTER-NOTES.md),
-[HELPER-NOTES.md](HELPER-NOTES.md) and [PRINTER-NOTES.md](PRINTER-NOTES.md)) and four from
-`bin/g2c build` (B1-B4, [BUILD.md](BUILD.md)); the user accepted them on 2026-10-08 too, and
-they are folded and marked the same way:
+proposed amendments: seven by the helper's author (H1-H7, [HELPER-NOTES.md](HELPER-NOTES.md)), ten
+by the printer (A1-A10, [PRINTER-NOTES.md](PRINTER-NOTES.md)) and eleven by the converter (C1-C11,
+[CONVERTER-NOTES.md](CONVERTER-NOTES.md)), with the converter's corrections of the spec's text and
+the documented choices of its notes that fix the spec. The user accepted all of them on 2026-10-08.
+They are folded into the text above, marked "(amendment, accepted 2026-10-08)" where they apply.
+B1a's step 0 raised nine more, five from the round trip for `GOOS=linux` (L1-L5,
+[ROUNDTRIP.md](ROUNDTRIP.md), with [CONVERTER-NOTES.md](CONVERTER-NOTES.md),
+[HELPER-NOTES.md](HELPER-NOTES.md) and [PRINTER-NOTES.md](PRINTER-NOTES.md)) and four from `bin/g2c
+build` (amendments B1-B4, [BUILD.md](BUILD.md), not the milestone B1); the user accepted them on
+2026-10-08 too, and they are folded and marked the same way:
 
 - H1 `:dot` on type assertions too: §10.2, §11.3 (1), §13.1. H2 whether a `//go:` line
   attaches across blank lines: settled by C1, §9.1. H3 the type table with ids, local types
@@ -2220,12 +2236,12 @@ they are folded and marked the same way:
   configuration (`net`'s and `os/user`'s cgo variants not converted): §9.4. L4 one tree per
   configuration, four: §4.1, §15 (20). L5 `CGO_ENABLED=0` set explicitly for the round trip:
   §12.4.
-- B1 programs and modules: a program written as Go forms states its module outside the forms,
-  in `DIR/program.edn` (`{:module "example.com/x" :go "1.27"}`, defaults the main package's
-  path and the toolchain's language version), and the packages of the module import each other
-  by path: §4.1, §4.2. B2 other and embedded files of a hand-written package live in its forms
-  directory, hashes checked: §9.5, §9.6, §12.4. B3 the `//line` file name of hand-written forms
-  is the forms file relative to the package's forms directory, which keeps `-trimpath` builds
+- Amendment B1, programs and modules: a program written as Go forms states its module outside the
+  forms, in `DIR/program.edn` (`{:module "example.com/x" :go "1.27"}`, defaults the main package's
+  path and the toolchain's language version), and the packages of the module import each other by
+  path: §4.1, §4.2. B2 other and embedded files of a hand-written package live in its forms
+  directory, hashes checked: §9.5, §9.6, §12.4. B3 the `//line` file name of hand-written forms is
+  the forms file relative to the package's forms directory, which keeps `-trimpath` builds
   reproducible: §12.3. B4 for a program built for several targets, `:goos` and `:goarch` are
   optional and overridden by the build's target, `:tags` and `:goexperiment` taken from the main
   package: §4.2.
@@ -2266,7 +2282,8 @@ printer's over the helper's):
    writes every position as metadata for the gate. The alternative is explicit position
    metadata on every form always, which makes the forms unreadable, or no positions at all,
    which changes line tables and `runtime.Caller`. *Recommendation: `:lines` by default,
-   `:full` for the G2 gate; level 3 of §3.1 compares line tables only in `:full`.*
+   `:full` for the G2 gate; level 3 of §3.1 compares line tables only in `:full`.* (As built: the
+   printer does not print `:full` and the oracle compares no line tables, §3.1, §10.2.)
 2. **Comments.** Doc comments as data (doc strings, `:doc`), directives as data, other comments
    as `;` text comments that reading drops. Alternatives: no comments at all, or every comment
    as data (`(go/comment ...)` forms between statements), which clutters the code forms.
@@ -2294,7 +2311,7 @@ printer's over the helper's):
    skipped) and lose the round trip. *Recommendation: verbatim; a native compiler handles
    them as gc does.*
 10. **Package variables in source order** with `:init-order` as data, instead of the survey's
-    proposal to write variables in initialisation order (which reorders declarations and so
+    proposal to write variables in initialization order (which reorders declarations and so
     gc's output). *Recommendation: source order plus `:init-order`.*
 11. **Constants: source expression plus `:val`**, instead of the value with the expression as
     metadata (the survey's sketch). The expression keeps `iota`, implicit repetition and the
@@ -2330,16 +2347,16 @@ printer's over the helper's):
     amendments, as for the class forms.*
 18. **Helper output.** Types as structured data, not `TypeString` strings; raw positions and the
     selector dot; paths for promoted literal keys (§11.3). *Recommendation: ask the helper for
-    these now, before the converter is written.*
+    these now, before the converter is written.* (Done: the helper's format 2, HELPER-NOTES.md.)
 19. **Embedded files.** Recorded by path and hash and copied by the printer, not stored in the
     forms (the survey proposed resolving them into data). Data in the forms would make the
     forms self-contained but large (`unicode` tables are Go code, but `//go:embed` users embed
-    whole trees). *Recommendation: path and hash for the round trip; revisit for the box (B1),
+    whole trees). *Recommendation: path and hash for the round trip; revisit for the box (B1b),
     where the forms are the source.*
 20. **One tree per configuration.** `tamago/amd64`, `tamago/arm64`, `linux/amd64` and
     `linux/arm64` are four conversions with mostly identical forms (decision 7; amendment,
     accepted 2026-10-08: the text said one tree per architecture, of `tamago` only).
-    *Recommendation: keep them separate; sharing is a later optimisation (a diff of the trees
+    *Recommendation: keep them separate; sharing is a later optimization (a diff of the trees
     shows what differs).* A program written as Go forms is one tree for every target (§4.2).
 
 ## 16. Sources
@@ -2369,9 +2386,9 @@ printer's over the helper's):
 - Arbace's reader (`arbace/lang/LispReader.clj`, `MetaReader`): explicit `:line`/`:column`
   metadata is kept over the reader's; `~` is unquote, `^` metadata, `.5` a symbol, `1e400`
   `##Inf`, and `|`, `%`, `&`, `&&`, `||`, `!=`, `<<`, `>>`, `...`, `<!`, `>!`, `inc!` symbols
-  (checked with `bin/arbace`).
+  (checked with the JVM REPL, then `bin/arbace`, now `bin/arbace-j`).
 - go-lisp `/root/go-lisp` (`2483a496`): `golisp/SPEC.md` (invariants I1-I4, the node tables,
-  directives, round-trip normalisations, end positions F10), `golisp/DESIGN.md` §4.1.
+  directives, round-trip normalizations, end positions F10), `golisp/DESIGN.md` §4.1.
 - The amendments of 2026-10-08: `doc/go/HELPER-NOTES.md`, `doc/go/PRINTER-NOTES.md`,
   `doc/go/CONVERTER-NOTES.md`, the oracle's normalizations and configurations in
   `doc/go/ROUNDTRIP.md`, and the program build in `doc/go/BUILD.md`.
