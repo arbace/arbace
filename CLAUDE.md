@@ -77,6 +77,11 @@ Prior art:
   `bin/jrt-convert`; `bin/jrt`); `overlay/go/` patches Go's runtime. `bin/arbace-go` builds
   (`--build`, `--build-tests`, `--pgo`), smoke-tests and runs it. The oracle (`bin/oracle`,
   `test/oracle/`, `doc/go/ORACLE.md`) checks it against the JVM Arbace. Notes in `doc/go/`.
+- The box (B1b, `doc/go/BOX-SURVEY.md`, `doc/go/BOX-NOTES.md`): the same program built with
+  TamaGo (`GOOS=tamago`) as a guest of a monitor on /dev/kvm (amd64) and Hypervisor.framework
+  (arm64). `box/` holds the hypervisor API, the monitor, the doorbell ABI and the TamaGo board,
+  vendored as Go forms from go-whim (`box/README.md` records the origin; `bin/box-vendor`
+  reproduces and proves it); import paths `arbace/box/*`.
 - `bin/gate` is the check every change to main must pass: the seed's hash, the bootstrap, then
   concurrently Clojure's suite on stage 2, `bin/class-forms-tests` and the Go executable's
   smoke test on amd64 (`bin/arbace-go --gate`; about 4 minutes). The smoke test runs on an

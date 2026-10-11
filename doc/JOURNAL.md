@@ -147,3 +147,30 @@ the first. The history before it is on the frozen branches and in git history:
   stays a Go program on the host.
 - The user's go-ahead for B1b: S0 (vendoring go-whim's box as Go forms, an agent, branch
   `box-s0`), then S1 (the boxed REPL on amd64).
+
+## 2026-10-11: B1b S0: go-whim's box vendored
+
+- Agent, branch `box-s0` (`3fa588c`, `0012914`), fast-forwarded into main. From
+  /root/go-whim at `80c49bf` (read only): `hv/`, `vmm/` (without `cmd/`), `guest/abi`,
+  `guest/tamago/board`, `internal/libsys`, the exact closure (38 Go files, 2 assembly; 4,571 +
+  599 + 432 lines), converted by g2a into Go forms under a source root of its own, `box/`
+  (`box/go/arbace/box/{abi,board,hv,libsys,vmm}`; import paths `arbace/box/*`, only the import
+  specs rewritten; libsys out of `internal/`): one tree for every target (linux/amd64,
+  linux/arm64, darwin/arm64, tamago/amd64, tamago/arm64 gave identical forms for shared files).
+  `bin/box-vendor` (`convert`, `check`) reproduces it from scratch. Proofs: gocmp's round trip
+  on each package in each target (14 of 14); go-whim's monitor and guests built from the
+  printed sources byte-identical to go-whim's own (7 of 7, with a fixed build id); go-whim's
+  `hv`, `vmm` and guest tests on /dev/kvm on the printed copy. No x/sys or seccomp library (raw
+  ioctls, hand-written BPF); purego (Apache-2.0) for darwin only and TamaGo's `goos` module
+  (BSD-3) for linking a guest, neither vendored. `tools/godump` takes a module's `go 1.27.1` as
+  language `go1.27`. LICENSE.md: the vendored parts under EPL-1.0 (D8): the user's own code
+  (one author in their history, `rhz`), not derived from vim, whose licence go-whim's LICENSE
+  is. CLAUDE.md's layout names `box/`.
+- What S1 needs: `vmm.Config.Host` is go-whim's editor host and `vmm.Run` maps the editor's exit
+  panic: a host interface and exit type of `vmm`'s own; Arbace's own launcher (cooked console,
+  the image, its environment names, rlwrap, the watchdog off or long, four vCPUs); D10's clock
+  register; the guest's build (`GOOS=tamago`, `GOOSPKG`, a `require` of TamaGo's module) in
+  `bin/g2a build`.
+- The user's decisions: keep `box/`; pin `goos` at S1 and decide purego at S4 (the Mac); the
+  round trip and go-whim's KVM tests join `bin/gate --full`, the byte-identity proof stays a
+  one-time S0 proof (S1 changes `vmm`).
