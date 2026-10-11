@@ -120,7 +120,7 @@ Prior art:
   slightly, and where in doubt the Clojure reader wins.
 - The translators name Arbace (`a`) as their target or source: c2a, j2a, g2a, a2g (until
   2026-10-11 j2c, g2c, c2g, as the frozen branches and dated records name them).
-- The tools (c2a, j2a, the class forms checks, the suite runner, the bench driver) run on Arbace's
+- The tools (c2a, j2a, the class forms checks, the suite runner) run on Arbace's
   `target/stage2` plus the checkout (`bin/lib/tools.bash`), so build first.
 - Put temporary and scratch files in `.tmp/`, which is gitignored.
 - Never create or modify anything under `.claude/`.
