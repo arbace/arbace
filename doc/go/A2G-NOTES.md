@@ -594,7 +594,9 @@ messages, then `BigInt` and `Numbers` over them: **3,973 pass on both architectu
 prints a `BigInteger` with core's printer (need core).
 
 **The regex corpus** (`bin/a2g-regex`, `A2G_ARCH=amd64,arm64`; a2g translates the closure with
-`RegexCheck` as the root, 352 classes; the Go program runs the 1,233 cases in 0.1 s):
+`RegexCheck` as the root, 352 classes; the Go program runs the 1,233 cases in 0.1 s; on the
+branch `arbace-for-golang` only since 2026-10-11, as `bin/c2g-regex`: the oracle's regex part
+on the executable, `bin/oracle check IMPL regex`, checks the same corpus end to end):
 
 | file | cases | pass | inputs | pass |
 |---|---:|---:|---:|---:|
@@ -740,10 +742,11 @@ two-word field; the atom ends at 16,000 as expected. A `bin/a2g-check` program (
 clean under `-race` (`bin/a2g-race .tmp/a2g/check/prog-Seqs`), and so do jrt's own tests
 (`bin/jrt test --race`, with the changes here).
 
-**5. Performance.** `bin/a2g-perf` runs the workloads of `test/a2g/bench/BnWork.ae` (class
-forms over `arbace.lang` only) on the JVM Arbace and translated to Go (linux/amd64, `GOGC`
-default), and checks that both give the same checksums (they do). ns per element, this
-machine shared with three other agents (±20% between runs):
+**5. Performance.** `bin/a2g-perf` (on the branch `arbace-for-golang` only since 2026-10-11, as
+`bin/c2g-perf`; its later numbers are in SPEED-NOTES.md) runs the workloads of
+`test/a2g/bench/BnWork.ae` (class forms over `arbace.lang` only) on the JVM Arbace and
+translated to Go (linux/amd64, `GOGC` default), and checks that both give the same checksums
+(they do). ns per element, this machine shared with three other agents (±20% between runs):
 
 | workload | JVM | Go | Go/JVM |
 |---|---:|---:|---:|

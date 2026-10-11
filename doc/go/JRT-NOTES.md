@@ -2362,8 +2362,9 @@ code and most of the reflection tables' growth.
 - The data are made, not kept: `bin/jrt-convert` makes them from the jdk26u checkout, as the
   translated sources; LICENSE.md records what the executables carry (ICU4J's and the Unicode
   Character Database's Unicode License V3, as jdk26u's `legal/icu.md` and `unicode.md`).
-- The regex check program (`bin/a2g-regex`, which embeds nothing) finds the data through
-  `ARBACE_PATH`, set to `.tmp/jrt/data` by `test/a2g/regex_check.ae`.
+- The regex check program (`bin/a2g-regex`, which embeds nothing; on `arbace-for-golang` only
+  since 2026-10-11) found the data through `ARBACE_PATH`, set to `.tmp/jrt/data` by
+  `test/a2g/regex_check.ae`.
 
 ## Amendments (accepted by the user 2026-10-10)
 
