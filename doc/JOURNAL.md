@@ -315,3 +315,29 @@ the first. The history before it is on the frozen branches and in git history:
   covers S5's netstack if packets are chosen. With TamaGo's Go as forms first, S3's and S5's
   runtime changes are made on forms, as `box/` is. The order: S2, S6 (amd64), S3, S5, each later
   stage re-running S6's proof.
+
+## 2026-10-11: Reproducible builds: a2g's overload order, jrt-convert's headers
+
+- Agent, branch `determinism` (`fe7e878`, `b4af020`), merged into main; the essential `bin/gate`
+  passed on its tree (6m33s).
+- a2g's member tables: two `bin/a2g --program` runs in separate JVMs from one clean tree gave
+  different `a2g_classes.ae` (jrt and `lang`). HotSpot orders a class's methods by the addresses
+  of their names, which for classes outside the JDK's CDS archive change from process to
+  process, and with them the order of same-name overloads in `getDeclaredMethods`; a2g copied
+  that order (M4, so that the Reflector picks the JVM's overload). Now (`arbace/a2g/out.ae`,
+  amendment RP1, A2G-SPEC §5.11, proposed): the JVM's order only for classes in the archive's
+  list (`$java.home/lib/classlist`) when the JVM runs with sharing, every other class's overloads
+  by descriptor; the cut classes' tables also by return type. One oracle form changed its pick
+  (`concurrency.ae:286`, `.schedule` on an unhinted `ScheduledThreadPoolExecutor` with a fn:
+  Callable before, Runnable now): hinted in the form, its expected output re-recorded.
+- `bin/jrt-convert`'s headers named the scratch copy (`.tmp/j2a-patch/java.base-N`): j2a's `jdk`
+  command takes `--origins FILE` and names each file's source (`jdk26u src/java.base/...`,
+  `overlay/jdk/...`, the generated ones); `--twice` reports the conversion deterministic.
+- Two builds of a clean commit (`fe7e878`, the second with an empty `GOCACHE`) gave identical
+  `amd64/arbace`, `box-amd64/arbace.elf`, `arbace-box` and `image.bin` (hashes in BUILD.md); a
+  dirty tree differs by its version string. Checks: `--smoke`, the oracle (the 46 known),
+  `bin/a2g-check -- --program` 9,022 of 9,022 on amd64 and arm64.
+- Open: RP1 for the user; `test/jrt/tables.ae` (jrt's tracked `reflect_tables.ae`) still takes
+  the JVM's order (given to S6's agent); Clojure's suite on the Go test build after the merge: 20,506 of 20,520, no regressions.
+- S6 started (agent, branch `box-s6`): TamaGo's runtime, std and `goos` module as Go forms, the
+  guest image built from them byte-identical to one from the originals.
