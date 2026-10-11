@@ -3,8 +3,10 @@
 Status: plan, revised at the user's proposal (2026-10-08); the user decided D1, D2, D4, D5 and
 D6 the same day (below); D6 was partly reversed on 2026-10-09 and 2026-10-10 (`proxy`, the
 fork-join pool and streams, dates, `defclass`, files, sockets, processes, java.time,
-java.util.concurrent, java.security's basics, java.text: D6 below). Steps 0-7 are done; step 8,
-the freeze, is next (2026-10-11).
+java.util.concurrent, java.security's basics, java.text: D6 below). Steps 0-8 are done: B1a
+ended with its freeze on 2026-10-11 (the branch `arbace-for-golang`, the tag
+`arbace-for-go1.27.1-v1`). B1b, the box, started the same day (below): S0 done, S1 in
+progress.
 B1 is the milestone after g2a's G0-G2 ([G2C-SURVEY.md](../G2C-SURVEY.md) §5.2, §7). The user's
 decisions of 2026-10-07 put the box built by gc + TamaGo first; on 2026-10-08 the user proposed
 to postpone the box and arm64, and to reach first **a standalone static `linux/amd64` Go
@@ -78,7 +80,7 @@ the pace of the class forms and g2a work, rough, growing with the step number.
 | **5 The evaluator** | `Compiler`'s analyser through a2g, with an `Expr` evaluator in place of bytecode emission (closures for `fn*`, `loop`/`recur`, `try`, `letfn`; `deftype`/`reify` through jrt's dispatch). *Done 2026-10-09 (phase 2B)* | `arbace/core.ae` loads from source; a growing part of Clojure's test suite passes, recorded per namespace | 6-10 |
 | **6 The executable** | `bin/arbace-go` (name to choose): static binaries for `linux/amd64` and `linux/arm64` with `arbace.main`'s REPL, `-e`, scripts; the core namespaces prepared at build time (pre-read or pre-analysed) to start fast. *Done 2026-10-09: pre-analysed, the image of prepared namespaces (EXEC-NOTES.md, amendment U1); start 4.2 s to 0.32 s on amd64* | a REPL as a user process: read, eval, print, `doc`, errors; start time and size measured against the JVM launcher (`bin/arbace`, now `bin/arbace-j`) and Joker; a smoke test in `bin/gate`; the arm64 binary passes the same under `qemu-aarch64` | 2-3 |
 | **7 Speed** | closure compilation of `Expr`s, then AOT of namespaces to Go forms built into the executable. *Done 2026-10-10: 7a the running program's speed (amendments O1, O2, O4, O5; O3 dropped), 7b the evaluator's closure compilation (EC1-EC6) ([SPEED-NOTES.md](SPEED-NOTES.md)); AOT of namespaces to Go not scheduled (the user, 2026-10-10)* | benchmarks (`bin/arbace-bench`'s workload) against the JVM Arbace; the suite still passes | open |
-| **8 The freeze** | the docs, the gate, and a branch and tag for the static executables, as for `arbace-for-java-26`; the READMEs diverge as at that freeze: main's gains a section "Arbace for Golang" after "Arbace for Java 26" (the branch `arbace-for-golang`, its tags, a link to the branch's freeze document), and the branch's README describes it locally (its own freeze document, how to build and run the executables, the releases); main's journal starts over, as at the JVM freeze: the history up to the freeze stays on `arbace-for-golang`, its tag and in git, and main's new journal opens with a pointer to them | the user's confirmation | 1 |
+| **8 The freeze** | the docs, the gate, and a branch and tag for the static executables, as for `arbace-for-java-26`; the READMEs diverge as at that freeze: main's gains a section "Arbace for Golang" after "Arbace for Java 26" (the branch `arbace-for-golang`, its tags, a link to the branch's freeze document), and the branch's README describes it locally (its own freeze document, how to build and run the executables, the releases); main's journal starts over, as at the JVM freeze: the history up to the freeze stays on `arbace-for-golang`, its tag and in git, and main's new journal opens with a pointer to them. *Done 2026-10-11: the branch `arbace-for-golang` and the tag `arbace-for-go1.27.1-v1`* | the user's confirmation | 1 |
 
 The `.ae` rename (Arbace's sources from `.clj` to `.ae`, one self-contained change; the user's
 decision of 2026-10-09) was step 8, the last before the freeze; the user moved it on 2026-10-10 to
@@ -116,7 +118,8 @@ pinned by commit, or vendored) is decided then. The survey and its stages S0-S6:
 [BOX-SURVEY.md](BOX-SURVEY.md). Decided 2026-10-11 (D3, D8-D14, all as recommended): vendored
 as Go forms. S0 done 2026-10-11: go-whim's box copied unchanged as Go forms under `box/`,
 proved by the round trip's oracle, byte-identical builds of go-whim's monitor and guests and
-go-whim's tests on /dev/kvm ([BOX-NOTES.md](BOX-NOTES.md)).
+go-whim's tests on /dev/kvm ([BOX-NOTES.md](BOX-NOTES.md)). S1, the boxed REPL on amd64, in
+progress.
 
 ## Decisions (the user's, 2026-10-08)
 
