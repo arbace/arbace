@@ -248,3 +248,10 @@ the first. The history before it is on the frozen branches and in git history:
 - The user's decisions the same day: BX1-BX10 accepted; the box's checks in `--full` deferred;
   the launcher's memory to be done now (S2's first item); `doc/go/java-surface.edn` to be
   regenerated (the tidy-up's open point).
+- The merged tree's essential `bin/gate` failed twice on the pty test's new check "Ctrl-C without
+  rlwrap", which passed when run alone: `bin/gate` starts the smoke test as a background job of a
+  script, which starts with SIGINT and SIGQUIT ignored, and an ignored signal stays ignored across
+  exec (rlwrap resets it, so the check under rlwrap passed). `test/arbace-go-rlwrap.py` resets
+  both in the pty's child, as a login shell would; the old test fails the same way under
+  `trap '' INT QUIT`, the new one passes. The gate then passed (4m05s); the box's build and
+  `--smoke --box` passed on the merged tree.

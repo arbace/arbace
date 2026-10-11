@@ -43,6 +43,10 @@ class Session:
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            # as from a login shell: a script's background job (bin/gate's) starts with SIGINT
+            # and SIGQUIT ignored, and an ignored signal stays ignored across exec
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            signal.signal(signal.SIGQUIT, signal.SIG_DFL)
             os.execve(exe, [exe] + args, e)
         self.out = b""
 
