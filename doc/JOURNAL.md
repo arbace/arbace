@@ -31,3 +31,12 @@ the first. The history before it is on the frozen branches and in git history:
   checked as before (`bin/gate`, `bin/gate --full`).
 - Next (the agenda): the `.ae` rename; c2a and the tools renamed j2a, g2a, a2g; Arbace's own
   version; then B1b, the box (doc/go/BOX-SURVEY.md).
+
+## 2026-10-11: after the freeze: the .ae rename, c2a, Arbace's version
+
+- The user's decisions: do the agenda's items 1-3 (the `.ae` rename; c2a and the tools renamed
+  j2a, g2a, a2g; Arbace's own version); no `bin/gate --full` until the next milestone (targeted
+  checks and the essential `bin/gate` instead, as before the freeze).
+- The `.ae` rename first, alone (branch `ae`, an agent): it touches the loaders, the bootstrap
+  (the seed reads `.clj` only), every tool, the oracle's case ids and the documents. c2a with
+  the tool renames and the version follow on the renamed tree, in parallel.
