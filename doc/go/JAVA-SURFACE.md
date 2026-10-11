@@ -258,6 +258,8 @@ the plan says.
 
 ## What the cut leaves out (D6), runtime + REPL
 
+As decided on 2026-10-08; most of it was undone since (below the table).
+
 | cut | used by | what breaks |
 |---|---|---|
 | `java.net` (`URL`, `URI`, `Socket`, `ServerSocket`, `InetAddress`, `URLClassLoader`, ...) | `RT`, `DynamicClassLoader`; `java.io`, `core.server`, `repl.deps`, `spec.gen.alpha`, `java.browse` | resources by URL (reworked with loading), `io/as-url` and readers on URLs, the socket REPL, `add-lib` |
@@ -285,6 +287,27 @@ and `TimeZone` are jrt's own Java (fixed-offset zones), so `#inst` reads and pri
 works over reflection (`java.beans` stays cut); `java.net.URI` is translated (the rest of
 `java.net` stays cut). `proxy` itself is back (amendments X1, X2; B1-PLAN.md D6), not through
 `ProxyHandler`.
+
+**Since 2026-10-09 and 2026-10-10** D6 was reversed for most of the rest (B1-PLAN.md, D6;
+JRT-NOTES.md, the part named; JAVA-BASE.md measures the result):
+
+- sockets, `InetAddress` and `arbace.core.server`, the socket REPL (amendments NT1-NT5,
+  "Sockets (go-net)");
+- `java.io.File`, the file system, `java.net.URL` with the `file:` connection and a small
+  `java.nio.file` (FS1-FS7, "Files"), resources by URL and `URLClassLoader` over directories
+  (FX6, "Resources by URL");
+- java.nio's heap buffers (RD4, "The JDK's resource data");
+- `defclass` and the class forms at the REPL (CF3, CLASSFORMS-REPL.md);
+- processes, `arbace.java.process` and `arbace.java.shell` (PR1-PR7, "Processes");
+- `java.time` whole but the non-ISO chronologies, with jdk26u's `TimeZone`, `Calendar` staying
+  jrt's own Java (TM1-TM9, "Time");
+- `java.util.concurrent` translated (JC1-JC10, "Concurrency");
+- java.security's basics (SC1-SC7, "Security");
+- `java.text` with jdk26u's `Locale` (TL1-TL8, "Text and locales"; the default locale data
+  java.base's root and English).
+
+Out for good (the user, 2026-10-10): `org.xml.sax` and `arbace.xml`, `gen-class`, Java
+serialization, `javax.swing` and `java.awt`, loading classes from jars.
 
 ## Effort per treatment
 
@@ -319,7 +342,12 @@ hand-written `Date` on Go's `time`. (Decisions 2, 4 and 7 as applied since B1a s
 closure grew beyond the measured one, streams included, by the files listed in
 JRT-SOURCES.md, "The closure as grown"; the fork-join pool joined the hand-written concurrency
 (C2G-SPEC §8.4, amendment S5); `Calendar`, `Timestamp` and `Instant` joined the world around
-the small `Date`, which became non-leaf (C2G-SPEC §5.3, S3).)
+the small `Date`, which became non-leaf (C2G-SPEC §5.3, S3). Decisions 4, 6 and 7 as applied
+since 2026-10-09 and 2026-10-10: `java.util.concurrent` translated, its executors over AQS
+(amendments JC1-JC10); `core.server`, `java.process` and `java.shell` in the REPL's executable
+(sockets, processes; `repl.deps`, `java.basis`, `tools.deps.interop`, `java.browse` and
+`java.javadoc` stay out); `java.time` translated beside the `Date` (TM1-TM9); the list in "What
+the cut leaves out" above.)
 
 1. **Reflection.** (a) Shim `java.lang.reflect` and `Class` over member tables c2g generates
    for every class built in, translating `Compiler` and `Reflector` unchanged (closed world, as
@@ -345,7 +373,9 @@ the small `Date`, which became non-leaf (C2G-SPEC §5.3, S3).)
    queues over a shim of `Unsafe`'s CAS; (b) translate `java.util.concurrent.locks` (AQS) too,
    over `LockSupport` and `Unsafe` (exact, more code); (c) shim `ConcurrentHashMap` as a locked
    map (less code, different iteration). *Recommended: (a).* `Semaphore` joined the shims in step 5
-   (C2G-SPEC amendment Y3, accepted 2026-10-09): (b) was measured for it and not taken.
+   (C2G-SPEC amendment Y3, accepted 2026-10-09): (b) was measured for it and not taken. Since
+   JC6 (2026-10-10) `AbstractQueuedSynchronizer` is translated, for the translated executors'
+   workers; jrt's locks stay hand-written.
 5. **Thread identity** (`Thread.currentThread`, `ThreadLocal`: `Var`'s dynamic bindings,
    `LockingTransaction`, `Agent`'s nesting; Go has no goroutine-local storage). (a) A
    goroutine-local slot in the Go runtime held as forms (one field of `g` and two functions;
