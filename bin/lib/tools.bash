@@ -16,7 +16,7 @@
 #                   Clojure and ASM sources with their javac classes), extracted once from the
 #                   freeze tag arbace-for-java-26-v1 into .tmp/frozen/: j2a's
 #                   regression corpus, the class forms tests' javac classes, the reference runs
-#                   of Clojure's suite and the benchmarks' baseline. Re-extracted when the tag
+#                   of Clojure's suite. Re-extracted when the tag
 #                   moves. Its classes are dated after its sources, so javac does not recompile
 #                   them.
 

@@ -20,7 +20,7 @@ in the last section.
 
 ## Method
 
-`bin/java-surface` (script) and `test/g2a/java_surface.ae` (the tool, on Arbace's stage 2)
+`bin/java-surface` (script) and `test/jrt/java_surface.ae` (the tool, on Arbace's stage 2)
 read every class file of `target/stage2` (5,740 classes, after `bin/build-arbace`) with the
 JDK's class file API (`java.lang.classfile`), and collect each reference to a class outside
 Arbace (`java.*`, `javax.*`, `jdk.*`, `sun.*`, `org.xml`, `org.w3c`):

@@ -498,6 +498,10 @@ about 8 without) and the training run needs the amd64 executable; the freeze's b
 
 ### `bin/a2g-perf` (ns per element; the JVM's column from the same run)
 
+`bin/a2g-perf` is on the branch `arbace-for-golang` only since 2026-10-11 (as `bin/c2g-perf`).
+Re-run once before it moved (main at `41f31be`, no PGO): Go/JVM 4.7, 4.5, 8.2, 3.6, 33.1, 7.5,
+3.3, 2.4 in the order below, the checksums equal: the after column holds.
+
 | workload | JVM | Go before | Go after | Go/JVM before | Go/JVM after | Go speedup |
 |---|---:|---:|---:|---:|---:|---:|
 | vecConj | 34-46 | 755.7 | 220.3 | 22.0 | 4.8 | 3.4 |

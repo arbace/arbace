@@ -10,8 +10,9 @@ Arbace is a Clojure derivative written entirely in Clojure.
   test suite.
 - **Modernized for Java 26.** `invokedynamic` call sites for reflection, keywords and `str`, the
   JDK's AOT cache (a launch in about 0.2 s), a self-contained `jlink` image, an opt-in
-  virtual-thread executor, and every class checked by the JDK's verifier
-  ([benchmarks](doc/BENCHMARKS.md)).
+  virtual-thread executor, and every class checked by the JDK's verifier (benchmarks:
+  [BENCHMARKS.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/BENCHMARKS.md),
+  on the branch `arbace-for-java-26`).
 - **Evolving to represent its runtime too, down to the bare metal.** Arbace is leaving the JVM
   and the `.class` format behind: a standalone ecosystem whose language is Clojure plus forms for
   Java (kept usable at the source level through j2a) and later Go. Its runtime is already a
@@ -118,7 +119,8 @@ archives) the file `VERSION`, which `git archive` fills with the commit and its 
 - [doc/C2A.md](doc/C2A.md): c2a, Clojure source translated into Arbace's
 - [doc/G2C-SURVEY.md](doc/G2C-SURVEY.md): the survey for g2a (then g2c), Go as Arbace forms
 - [doc/VENDOR-NOTES.md](doc/VENDOR-NOTES.md): how Clojure became Arbace, and every change since
-- [doc/BENCHMARKS.md](doc/BENCHMARKS.md): Arbace on the JVM against Clojure 1.12
+- [doc/BENCHMARKS.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/BENCHMARKS.md)
+  (on the branch `arbace-for-java-26`): Arbace on the JVM against Clojure 1.12
 - [doc/ARBACE.md](doc/ARBACE.md): what `arbace/` holds, and its origin
 - [LICENSE.md](LICENSE.md): the Eclipse Public License 1.0, like Clojure, and the licenses of
   all vendored and translated code (ASM's BSD-3-Clause, the JDK's GPLv2 with the Classpath

@@ -37,8 +37,8 @@ java.security's basics (9,124 members, 52.0%, on `gosec`) and, on `gotext`
 
 ## Method
 
-`bin/jrt-coverage [OUT]` (bash) with its Clojure in `test/g2a/jrt_coverage.ae`
-(`g2a.jrt-coverage`, next to `g2a.java-surface`). It runs on Arbace's `target/stage2`
+`bin/jrt-coverage [OUT]` (bash) with its Clojure in `test/jrt/jrt_coverage.ae`
+(`jrt.jrt-coverage`, next to `jrt.java-surface`). It runs on Arbace's `target/stage2`
 (`bin/lib/tools.bash`), takes about 15 s, and writes:
 
 - `doc/go/java-base-coverage.edn` (OUT; Clojure reader): totals, Arbace's use, per package
@@ -390,7 +390,7 @@ The user's decision of 2026-10-10: close the gaps above and add the plain Java o
 before the freeze (java.time and java.util.concurrent are other branches'). Done, from main at
 `8ace8b1`:
 
-- **25 jdk26u files added to the closure** (`util-sources` in `test/g2a/jrt_sources.ae`,
+- **25 jdk26u files added to the closure** (`util-sources` in `test/jrt/jrt_sources.ae`,
   amendment JB1): `DualPivotQuicksort`, `ArraysParallelSortHelpers`, `ArrayPrefixHelpers`,
   `Comparators`, `SortedSet`, `jdk.internal.util.random.RandomSupport`, `java.math.BitSieve`,
   `BitSet`, `PriorityQueue`, `WeakHashMap`, `StringTokenizer`, `Base64`, `SplittableRandom`,

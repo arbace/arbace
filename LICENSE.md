@@ -253,7 +253,7 @@ covers what.
 
   Likewise jdk.localedata's CLDR locale data of the locales `bin/jrt-convert` selects
   (doc/go/JRT-NOTES.md, "Text and locales"; `JRT_LOCALES`: none by default, the
-  shipped executables' choice; `common`, the 27 locales of `test/g2a/jrt_sources.ae`'s
+  shipped executables' choice; `common`, the 27 locales of `test/jrt/jrt_sources.ae`'s
   `text-locales` with their parent locales; `all`), generated as
   `make/modules/jdk.localedata/Gensrc.gmk` generates it (the same `CLDRConverter`, on the same
   CLDR 48 data) into the bundles `sun.text.resources.cldr.ext.FormatData_*` and
@@ -286,7 +286,7 @@ covers what.
   `ResourceBundleBasedAdapter.java`, `sun/util/cldr/CLDRLocaleProviderAdapter.java`; each file's
   header names the parts): under the GNU General Public License version 2 with the Classpath
   Exception, by the rule of B7; the rest of those files is Arbace's own.
-  `test/g2a/jrt_sources.ae`'s `default-list` and `cldr-candidates` (the candidate locales of
+  `test/jrt/jrt_sources.ae`'s `default-list` and `cldr-candidates` (the candidate locales of
   the locale selection) follow `ResourceBundle.java`'s and `CLDRLocaleProviderAdapter.java`'s
   candidate lists likewise. `overlay/jdk/variants/BreakIteratorResourceBundle.ae` keeps the
   code of the method it replaces (`sun/util/resources/BreakIteratorResourceBundle.java`), likewise.
