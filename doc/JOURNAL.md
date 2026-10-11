@@ -40,3 +40,26 @@ the first. The history before it is on the frozen branches and in git history:
 - The `.ae` rename first, alone (branch `ae`, an agent): it touches the loaders, the bootstrap
   (the seed reads `.clj` only), every tool, the oracle's case ids and the documents. c2a with
   the tool renames and the version follow on the renamed tree, in parallel.
+- The `.ae` rename done (agent, branch `ae`: `8913648` the `git mv` of 688 files, `c76b468`
+  loaders, bootstrap, tools, documents, `d36a19d`; fast-forwarded into main). Renamed: all of
+  `arbace/`, `go/`, `overlay/`, and Arbace's test sources and data under `test/` (class forms,
+  native, oracle forms and tools, g2c cases and expected forms, c2g, jrt, j2c, net, the PGO and
+  AOT training scripts); kept `.clj`: what upstream Clojure also runs (Clojure's suite and its
+  libraries, copied and renamed by `bin/clojure-tests`; `test/run_clojure_tests.clj`; the
+  benchmarks' `workload.clj` and `repl-session.clj`), `data_readers.clj`/`.cljc`, the reader's
+  `:clj` feature. `RT.load` (JVM and the Go variant) looks for `.ae`, then `.clj`, then `.cljc`;
+  `user.ae` before `user.clj`; stack traces demunge all three; the tools read and write `.ae`
+  (six places that cut a 4-character extension fixed). The bootstrap: the seed reads `.clj`
+  only, so `bin/build-arbace` gives stage 1 `target/seed-view`, `.clj` symlinks to the sources;
+  every stage's AOT names `core.ae`; stage 2 = stage 3 (5,772 classes). The oracle's case ids are
+  `forms/x.ae:LINE`. `arbace.j2c.rename` maps a vendored namespace's source path to `.ae` (the
+  suite's java.io `test-resource` needed it). VENDOR-NOTES hand change 19 and a dialect
+  divergence (a library with both `x.ae` and `x.clj` loads the `.ae`); `.gitattributes`
+  highlights `.ae` as Clojure.
+- Checks (the agent's; targeted, no `--full`): `bin/gate` (the suite on stage 2 20,750 of
+  20,750 after the java.io fix); class forms tests; `bin/j2c-check` 183 of 183; g2c print and
+  convert tests and `bin/g2c roundtrip amd64` without regressions; the Go build, smoke and test
+  build; the Go oracle 22,232 of 22,278 as recorded; Clojure's suite on Go 20,506 of 20,520;
+  `bin/oracle check jvm` (the known case; a `concurrency` barrier-order flake under load);
+  `bin/jrt test` amd64 and arm64; by hand: `.ae` and `.clj` scripts on both launchers, `source`,
+  `doc`, stack traces naming `core.ae`.
