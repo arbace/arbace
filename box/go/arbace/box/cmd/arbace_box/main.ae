@@ -1,0 +1,169 @@
+;; Command arbace-box is Arbace in the box (doc/go/BOX-NOTES.md, S1): the
+;; monitor (package vmm) running Arbace's Go program, built for TamaGo
+;; (GOOS=tamago, the board arbace/box/board), as a guest of /dev/kvm, with
+;; the guest's console on this process's standard streams.  Its arguments
+;; are arbace.main's, as for the executable bin/arbace-go builds: -e, -m, a
+;; script (one the guest's image or its in-memory file system holds), - or
+;; none for the REPL.  The guest's exit code is the process's.
+;;
+;; The image is ARBACE_BOX_IMAGE=FILE when that is set, else the one
+;; appended to the program (vmm.Append), else the file beside it named as
+;; it is with .elf added.
+;;
+;; The guest's command line is "arbace" and this program's arguments; its
+;; environment, written at its entry (guest/abi), the variables TZ, LANG,
+;; LANGUAGE, LC_*, GOGC, GOMEMLIMIT, JAVA_TOOL_OPTIONS and ARBACE_* but
+;; ARBACE_BOX_*, and those ARBACE_BOX_ENV names (separated by commas).
+;;
+;; ARBACE_BOX_CPUS=N gives the guest N vCPUs (1 to vmm.MaxCPUs, "host" the
+;; host's CPUs so capped; by default 4, or the host's CPUs when fewer).
+;; ARBACE_BOX_WATCHDOG=DURATION ends a guest that runs that long without a
+;; hypercall (by default none: an evaluation may compute without output for
+;; as long as it takes).  ARBACE_BOX_STATS=FILE appends the run's counts to
+;; FILE when it ends; ARBACE_BOX_SECCOMP=0 leaves the system-call filter off;
+;; ARBACE_BOX_PARK=DURATION is the longest a parked vCPU waits while another
+;; runs (vmm.DefaultPark); ARBACE_BOX_STORE=DIR is the store (vmm.DirStore;
+;; without it the store's calls answer -1).
+;;
+;; The console is cooked: the terminal stays as the host has it, so that
+;; Ctrl-C ends this process (and the guest) as it ends the JVM.  The REPL
+;; runs under rlwrap as the executable's does (ARBACE_RLWRAP;
+;; doc/go/EXEC-NOTES.md, "Line editing: rlwrap"): this program is what runs
+;; under it.
+(in-ns 'go.arbace.box.cmd.arbace_box) (go/file "main.go" :doc "Command arbace-box is Arbace in the box (doc/go/BOX-NOTES.md, S1): the\nmonitor (package vmm) running Arbace's Go program, built for TamaGo\n(GOOS=tamago, the board arbace/box/board), as a guest of /dev/kvm, with\nthe guest's console on this process's standard streams.  Its arguments\nare arbace.main's, as for the executable bin/arbace-go builds: -e, -m, a\nscript (one the guest's image or its in-memory file system holds), - or\nnone for the REPL.  The guest's exit code is the process's.\n\nThe image is ARBACE_BOX_IMAGE=FILE when that is set, else the one\nappended to the program (vmm.Append), else the file beside it named as\nit is with .elf added.\n\nThe guest's command line is \"arbace\" and this program's arguments; its\nenvironment, written at its entry (guest/abi), the variables TZ, LANG,\nLANGUAGE, LC_*, GOGC, GOMEMLIMIT, JAVA_TOOL_OPTIONS and ARBACE_* but\nARBACE_BOX_*, and those ARBACE_BOX_ENV names (separated by commas).\n\nARBACE_BOX_CPUS=N gives the guest N vCPUs (1 to vmm.MaxCPUs, \"host\" the\nhost's CPUs so capped; by default 4, or the host's CPUs when fewer).\nARBACE_BOX_WATCHDOG=DURATION ends a guest that runs that long without a\nhypercall (by default none: an evaluation may compute without output for\nas long as it takes).  ARBACE_BOX_STATS=FILE appends the run's counts to\nFILE when it ends; ARBACE_BOX_SECCOMP=0 leaves the system-call filter off;\nARBACE_BOX_PARK=DURATION is the longest a parked vCPU waits while another\nruns (vmm.DefaultPark); ARBACE_BOX_STORE=DIR is the store (vmm.DirStore;\nwithout it the store's calls answer -1).\n\nThe console is cooked: the terminal stays as the host has it, so that\nCtrl-C ends this process (and the guest) as it ends the JVM.  The REPL\nruns under rlwrap as the executable's does (ARBACE_RLWRAP;\ndoc/go/EXEC-NOTES.md, \"Line editing: rlwrap\"): this program is what runs\nunder it.\n" :imports [
+
+
+    ^{:line 36} [errors "errors"]
+    ^{:line 37} [fmt "fmt"]
+    ^{:line 38} [os "os"]
+    ^{:line 39} [runtime "runtime"]
+    ^{:line 40} [strconv "strconv"]
+    ^{:line 41} [strings "strings"]
+    ^{:line 42} [time "time"]
+
+    ^{:line 44} [vmm "arbace/box/vmm"]])
+
+
+^{:go/end 115} (go/func main []
+  (execRlwrap)
+  (let [(values exe err) (os/Executable)]
+    (when (!= err nil)
+      (fail err))
+
+    (let [(values img ^:assign err) (image exe)]
+      (when (!= err nil)
+        (fail err))
+
+      (let [cfg ^{:go/breaks [2 4 6 8 10]} (lit vmm/Config
+            :Image img
+            :Host (newConsole)
+            :Args (append (lit (slice string) "arbace") (spread (subslice os/Args 1)))
+            :Env (guestEnv (os/Environ))
+            :CPUs (defaultCPUs))]
+
+        (when [p (os/Getenv "ARBACE_BOX_STATS")] (!= p "")
+          (let [(values f err) (os/OpenFile p (bit-or os/O_WRONLY os/O_CREATE os/O_APPEND) 0644)]
+            (when (!= err nil)
+              (fail err))
+
+            (set! (.-Stats cfg) f)))
+
+        (when [dir (os/Getenv "ARBACE_BOX_STORE")] (!= dir "")
+          (let [(values st err) (vmm/OpenDirStore dir)]
+            (when (!= err nil)
+              (fail err))
+
+            (set! (.-Store cfg) st)))
+
+        (when (!= (os/Getenv "ARBACE_BOX_SECCOMP") "0")
+          (set! (.-Seccomp cfg) vmm/Seccomp))
+
+        (when [w (os/Getenv "ARBACE_BOX_WATCHDOG")] (!= w "")
+          (let [(values d err) (time/ParseDuration w)]
+            (when (or (!= err nil) (< d 0))
+              (fail (fmt/Errorf "ARBACE_BOX_WATCHDOG=%s: not a duration" w)))
+
+            (set! (.-Watchdog cfg) d)))
+
+        (when [c (os/Getenv "ARBACE_BOX_CPUS")] (!= c "")
+          (let [(values n err) (strconv/Atoi c)]
+            (when (== c "host")
+              (set! (values n err) (values (min (runtime/NumCPU) vmm/MaxCPUs) nil)))
+
+            (when (or (!= err nil) (< n 1) (> n vmm/MaxCPUs))
+              (fail (fmt/Errorf "ARBACE_BOX_CPUS=%s: not 1 to %d, or host" c vmm/MaxCPUs)))
+
+            (set! (.-CPUs cfg) n)))
+
+        (when [p (os/Getenv "ARBACE_BOX_PARK")] (!= p "")
+          (let [(values d err) (time/ParseDuration p)]
+            (when (or (!= err nil) (<= d 0))
+              (fail (fmt/Errorf "ARBACE_BOX_PARK=%s: not a positive duration" p)))
+
+            (set! (.-Park cfg) d)))
+
+        (let [(values code ^:assign err) (vmm/Run cfg)]
+          (when (!= err nil)
+            (fmt/Fprintln os/Stderr "arbace-box:" err)
+            (let [^{:tag (* vmm/Fault)} f (zero (* vmm/Fault))]
+              (when (errors/As err (addr f))
+                (vmm/Die))
+
+              (os/Exit 1)))
+
+          (os/Exit code))))))
+
+
+^{:go/end 120} (go/func fail [^error err]
+  (fmt/Fprintln os/Stderr "arbace-box:" err)
+  (os/Exit 1))
+
+
+
+
+^{:go/end 124} (go/func defaultCPUs "defaultCPUs is the guest's vCPUs when ARBACE_BOX_CPUS does not say: four\n(go-whim's measured default, D9), or the host's CPUs when fewer.\n" ^int [] (min (runtime/NumCPU) 4))
+
+
+
+^{:go/end 140} (go/func image "image is the guest: ARBACE_BOX_IMAGE's file, the image appended to exe,\nor exe.elf.\n" [^string exe] :results [(slice byte) error]
+  (when [p (os/Getenv "ARBACE_BOX_IMAGE")] (!= p "")
+    (return (os/ReadFile p)))
+
+  (let [(values img err) (vmm/Appended exe)]
+    (when (not (errors/Is err vmm/ErrNoImage))
+      (return img err))
+
+    (when [(values b rerr) (os/ReadFile (+ exe ".elf"))] (== rerr nil)
+      (return b nil))
+
+    (return nil (errors/New (+ "no guest image: none appended to this program, no ARBACE_BOX_IMAGE, no " exe ".elf (bin/arbace-go --build --box builds one)")))))
+
+
+
+
+
+^{:go/end 170} (go/func guestEnv "guestEnv is the guest's environment: of env, the variables the guest\nreads (the time zone, the locale, the collector, the JVM's options,\nArbace's own) but the launcher's, and those ARBACE_BOX_ENV names.\n" ^{:tag (slice string)} [^{:tag (slice string)} env]
+  (let [extra (lit (map string bool))]
+    (range [_ n (strings/Split (os/Getenv "ARBACE_BOX_ENV") ",")]
+      (when (!= n "")
+        (aset extra n true)))
+
+
+    (let [^{:tag (slice string)} out (zero (slice string))]
+      (range [_ kv env]
+        (let [(values name _ ok) (strings/Cut kv "=")]
+          (when (not ok)
+            (continue))
+
+          (switch
+            (case [(aget extra name)])
+            (case [(strings/HasPrefix name "ARBACE_BOX_")]
+              (continue))
+            (case [(strings/HasPrefix name "ARBACE_") (strings/HasPrefix name "LC_")])
+            (case [(or (== name "TZ") (== name "LANG") (== name "LANGUAGE") (== name "GOGC") (== name "GOMEMLIMIT") (== name "JAVA_TOOL_OPTIONS"))])
+            (default
+              (continue)))
+
+          (set! out (append out kv))))
+
+      ^{:line 169} out)))

@@ -68,7 +68,9 @@ covers what.
   build's main package (`go/arbace/cmd/arbace/`): Arbace's own, under the Eclipse Public License
   1.0, except the parts of `go/arbace/jrt/` listed below.
 - `box/` (`box/go/arbace/box.../`, the packages `arbace/box/hv`, `vmm`, `abi`, `board` and
-  `libsys`, with `board/boot_amd64.s` and `boot_arm64.s`; box/README.md, doc/go/BOX-NOTES.md):
+  `libsys`, with `board/boot_amd64.s` and `boot_arm64.s`; box/README.md, doc/go/BOX-NOTES.md;
+  the launcher `arbace/box/cmd/arbace-box`, added in S1, is Arbace's own, under the Eclipse
+  Public License 1.0):
   the box of go-whim, https://github.com/arbace/go-whim at
   `80c49bf53cd6340487ac623f3d6d135b77ac1db6`, its `hv/`, `vmm/` (without `vmm/cmd/`),
   `guest/abi/`, `guest/tamago/board/` and `internal/libsys/`, converted to Go forms by
@@ -84,8 +86,8 @@ covers what.
   (https://github.com/ebitengine/purego v0.11.1, under the Apache License 2.0, text below), and
   a guest built on `board` links TamaGo's `goos` module (https://github.com/usbarmory/tamago
   v1.27.1, BSD 3-Clause License, Copyright (c) The TamaGo Authors) and TamaGo's Go tree (Go's
-  BSD 3-Clause License, below); their entries here are made when a build of Arbace's contains
-  them.
+  BSD 3-Clause License, below): the box's build (below) has the latter two; purego's entry is
+  made when a build of Arbace's contains it (the darwin monitor, stage S4).
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"), written for Arbace in place of jdk26u's files of the same names (from their
   documented APIs, without their code): Arbace's own, under the Eclipse Public License 1.0. The
@@ -350,6 +352,19 @@ covers what.
   as a whole be distributed under terms of the distributor's choice, provided that the license
   of each linked independent module is also met; jdk26u's parts stay under the GNU General
   Public License version 2 with the Classpath Exception.
+- The box (doc/go/BOX-NOTES.md, S1), `target/arbace-go/box-<arch>/`, which `bin/arbace-go --build
+  --box` makes: the guest image `arbace.elf`, the same program as the executables above built
+  with `GOOS=tamago`, and the launcher `arbace-box` (the monitor, a static Linux program, with
+  the guest image appended). The guest holds what the executables hold (above), and besides:
+  `box/`'s `arbace/box/board` and `abi` (the Eclipse Public License 1.0, as above), and TamaGo's
+  `goos` module, https://github.com/usbarmory/tamago v1.27.1 (go.sum
+  `h1:Zl4w3hu5DaogGvcLzunS4gjwNEqdjFFJedMO3pDQa5k=`; its `goos` package, the `runtime/goos`
+  the build names as `GOOSPKG`, linked from Go's module cache, not held here): Copyright (c) The
+  TamaGo Authors, under the BSD 3-Clause License (text below); its Go is TamaGo's go1.27.1 tree
+  built for `GOOS=tamago` (Go's BSD 3-Clause License). The launcher holds `box/`'s `hv`, `vmm`,
+  `abi` and the launcher's own package (the Eclipse Public License 1.0) and Go's runtime and
+  standard library (Go's BSD 3-Clause License). A distribution of the box carries this file, as
+  for the executables above.
 - `seed/arbace-seed.jar`: the binary seed of the bootstrap, Arbace as built at the tag
   `arbace-for-java-26-v1` (doc/VENDOR-NOTES.md, "The binary seed"): the `arbace/` sources of
   that tag and the classes compiled from them. Each entry is under the license of the `arbace/`
@@ -498,6 +513,40 @@ copyright notice, this list of conditions and the following disclaimer
 in the documentation and/or other materials provided with the
 distribution.
    * Neither the name of Google LLC nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## TamaGo's goos module: BSD 3-Clause License
+
+From the `LICENSE` of https://github.com/usbarmory/tamago v1.27.1 (Go's module cache):
+
+```
+Copyright (c) The TamaGo Authors. All Rights Reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Reversec Consulting AB nor the names of its
 contributors may be used to endorse or promote products derived from
 this software without specific prior written permission.
 

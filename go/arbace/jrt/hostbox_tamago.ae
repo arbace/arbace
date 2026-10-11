@@ -1,0 +1,128 @@
+;; jrt: the box's host (doc/go/BOX-NOTES.md, S1; BOX-SURVEY.md §4): the program built with
+;; GOOS=tamago as a guest of the monitor (arbace/box/vmm), its host the monitor's calls through
+;; the board (arbace/box/board, abi). The console is WaitRead, Write and Message; entropy Random;
+;; the end Exit. Files are TamaGo's in-memory file system through Go's os (OSHost's file calls,
+;; D11), the wall clock the board's (offset by the host's at the entry, D10), the command line
+;; and the environment what the monitor wrote at the entry. No optional interface: no HostFS,
+;; HostLinks, NetHost, HostProc or HostExecutable, so those features fail as on a host without
+;; them.
+(in-ns 'go.arbace.jrt)
+
+(go/file "hostbox_tamago.go"
+  :build ["//go:build tamago"]
+  :imports [[io "io"] [fs "io/fs"] [os "os"] [runtime "runtime"] [debug "runtime/debug"]
+            [strconv "strconv"] [strings "strings"] [syscall "syscall"] [time "time"]
+            [abi "arbace/box/abi"] [board "arbace/box/board"]])
+
+(go/const ^{:tag bool :val true
+            :doc "boxYield: the evaluator yields every yieldEvery calls and recurs (Compiler$CodeRun.tick): TamaGo's\nruntime has no preemption.\n"}
+  boxYield true)
+
+(go/func init
+  "init makes the command line and the environment the monitor wrote at the entry the program's
+(os.Args, os.Getenv: TamaGo's runtime gives it neither), before jrt's other inits (tuning.go's
+reads the environment), and applies GOGC, which TamaGo's runtime read before it was set.\n"
+  []
+  (set! os/Args (board/Args))
+  (range [_ kv (board/Env)]
+    (let [(values k v ok) (strings/Cut kv "=")]
+      (when ok
+        (syscall/Setenv k v))))
+  (let [g (os/Getenv "GOGC")]
+    (if (== g "off")
+      (debug/SetGCPercent -1)
+      (let [(values n err) (strconv/Atoi g)]
+        (when (== err nil)
+          (debug/SetGCPercent n))))))
+
+(go/func ProgramHost
+  "ProgramHost is the program's host (the main package's): the box's, with the program's embedded
+resources.\n"
+  ^Host [^{:tag fs/FS} resources]
+  (lit boxHost :files (lit OSHost :Resources resources) :in (addr (lit boxConsole))))
+
+(go/type boxHost
+  "boxHost is the box's Host: the monitor's calls, and files in TamaGo's in-memory file system
+through OSHost's.\n"
+  (struct ^OSHost files ^{:tag (* boxConsole)} in))
+
+(go/method Stdin ^{:tag io/Reader} [^boxHost h] (.-in h))
+(go/method Stdout ^{:tag io/Writer} [^boxHost h] (lit boxOut))
+(go/method Stderr ^{:tag io/Writer} [^boxHost h] (lit boxOut :err true))
+(go/method Open [^boxHost h ^string name ^int flag ^uint32 perm] :results [HostFile error]
+  (.Open (.-files h) name flag perm))
+(go/method Stat [^boxHost h ^string name] :results [HostFileInfo error] (.Stat (.-files h) name))
+(go/method ReadDir [^boxHost h ^string name] :results [(slice string) error] (.ReadDir (.-files h) name))
+(go/method Remove ^error [^boxHost h ^string name] (.Remove (.-files h) name))
+(go/method Mkdir ^error [^boxHost h ^string name ^uint32 perm] (.Mkdir (.-files h) name perm))
+(go/method Rename ^error [^boxHost h ^string from ^string to] (.Rename (.-files h) from to))
+(go/method Getwd [^boxHost h] :results [string error] (.Getwd (.-files h)))
+(go/method Now
+  "Now is the board's clock, the host's wall clock at the entry onward (D10).\n"
+  ^{:tag time/Time} [^boxHost h] (time/Now))
+(go/method Nanotime ^int64 [^boxHost h] (.Nanotime (.-files h)))
+(go/method Getenv [^boxHost h ^string name] :results [string bool] (os/LookupEnv name))
+(go/method Environ ^{:tag (slice string)} [^boxHost h] (os/Environ))
+(go/method Args ^{:tag (slice string)} [^boxHost h] os/Args)
+(go/method NumCPU "NumCPU is the guest's vCPUs (the board's GOMAXPROCS).\n" ^int [^boxHost h]
+  (runtime/GOMAXPROCS 0))
+(go/method RandomBytes "RandomBytes is the host's entropy (abi.Random).\n" [^boxHost h ^{:tag (slice byte)} b]
+  (when (> (len b) 0)
+    (board/Call abi/Random (board/Addr b) (conv int64 (len b)) 0 0 0)))
+(go/method Resource [^boxHost h ^string name] :results [(slice byte) bool] (.Resource (.-files h) name))
+(go/method Exit "Exit ends the guest (abi.Exit, the console flushed).\n" [^boxHost h ^int code]
+  (StopProfile)
+  (board/Exit (conv int32 code)))
+
+(go/type boxOut
+  "boxOut is the guest's standard output (abi.Write) or error (abi.Message to the error stream).\n"
+  (struct ^bool err))
+
+(go/method Write [^boxOut o ^{:tag (slice byte)} p] :results [int error]
+  (when (== (len p) 0)
+    (return 0 nil))
+  (when (.-err o)
+    (board/Call abi/Message (board/Addr p) (conv int64 (len p)) 1 0 0)
+    (return (len p) nil))
+  (let [n (.-Ret (board/Call abi/Write (board/Addr p) (conv int64 (len p)) 0 0 0))]
+    (when (< n 0)
+      (return 0 io/ErrClosedPipe))
+    (return (conv int n) nil)))
+
+(go/const ^{:tag time/Duration :val 1000000
+            :doc "consoleFirstWait is the console's first wait between two polls of the monitor.\n"}
+  consoleFirstWait time/Millisecond)
+
+(go/const ^{:tag time/Duration :val 10000000
+            :doc "consoleMaxWait is the console's longest wait between two polls: the latency of a line typed.\n"}
+  consoleMaxWait (* 10 time/Millisecond))
+
+(go/type boxConsole
+  "boxConsole is the guest's standard input: abi.WaitRead into a buffer of the guest's. The read
+does not stop the guest (BOX-SURVEY R3): the monitor is asked without a wait, and while there is
+no input the reading goroutine sleeps, from consoleFirstWait to consoleMaxWait, so that other
+goroutines run, the collector stops the world and other vCPUs' output goes; an idle guest parks
+in the monitor meanwhile (the board's Idle).\n"
+  (struct ^{:tag (array 4096 byte)} buf ^int n ^int at ^bool eof))
+
+(go/method Read [^{:tag (* boxConsole)} c ^{:tag (slice byte)} p] :results [int error]
+  (when (== (.-at c) (.-n c))
+    (when (.-eof c)
+      (return 0 io/EOF))
+    (let [wait consoleFirstWait]
+      (while true
+        (let [b (board/Call abi/WaitRead 0 (board/Addr (subslice (.-buf c))) (conv int64 (len (.-buf c))) 0 0)]
+          (when (!= (.-Ret b) 0)
+            (let [m (conv int (aget (.-A b) 0))]
+              (when (== m 0)
+                (set! (.-eof c) true)
+                (return 0 io/EOF))
+              (when (> m 0)
+                (set! (.-n c) m)
+                (set! (.-at c) 0)
+                (break)))))
+        (time/Sleep wait)
+        (set! wait (min (* wait 2) consoleMaxWait)))))
+  (let [k (copy p (subslice (.-buf c) (.-at c) (.-n c)))]
+    (set! (.-at c) + k)
+    (return k nil)))

@@ -21,6 +21,7 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOVQ	R8, runtime∕goos·RamStackOffset(SB)
 	MOVQ	R9, ·tickKHz(SB)
 	MOVQ	R10, ·ncpu(SB)
+	MOVQ	R11, ·wallBase(SB)
 	LEAQ	whim_vectors(SB), AX	// kept by the linker: the monitor's IDT names it
 	MOVQ	AX, ·vectors(SB)
 	LEAQ	whim_apentry(SB), AX	// and the monitor starts an AP here
