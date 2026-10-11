@@ -1,0 +1,172 @@
+(ns c2a.c2a-test
+  "The unit tests of c2a (bin/c2a-check, doc/C2A.md): the lexical reader, each rule, the
+  plan of what becomes of a file, and a tree translated."
+  (:require [arbace.test :refer :all]
+            [arbace.c2a.text :as text]
+            [arbace.c2a.rename :as rename]
+            [arbace.c2a.rules :as rules]
+            [arbace.c2a.main :as main]
+            [arbace.java.io :as io]
+            [arbace.string :as str])
+  (:import [java.io File]
+           [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]))
+
+(defn- clj [s] (rules/translate s {:kind :clj :to-ae true :features #{:clj}}))
+(defn- cljc [s] (rules/translate s {:kind :cljc :to-ae true :features #{:clj}}))
+(defn- cljc-kept [s] (rules/translate s {:kind :cljc :to-ae false :features #{:clj}}))
+
+(deftest form-ends
+  (are [s] (= (count s) (text/form-end s 0))
+    "foo" ":a/b" "123" "\"a \\\" b\"" "#\"re\\\"x\"" "\\(" "\\newline" "\\u0041"
+    "(a [b {:c d}] #{e} #(f %))" "'x" "`(a ~b ~@c)" "@a" "^:m x" "^{:a 1} [x]" "#'v"
+    "#inst \"2020\"" "#:a{:b 1}" "#::{:b 1}" "##Inf" "#?(:clj 1 :cljs 2)" "#?@(:clj [1])"
+    "#? (:clj 1)" "(a #_ (b c) d)" "(a ; c )\n b)" "#=(+ 1 2)" "(a #! x)\n)")
+  (is (= 3 (text/form-end "abc def" 0)))
+  (is (= 11 (text/skip-ws "  ; c\n,#_x y" 0)))
+  (is (thrown-with-msg? Exception #"EOF" (text/form-end "(a [b" 0)))
+  (is (thrown-with-msg? Exception #"Unmatched" (text/form-end "(a ]" 0))))
+
+(deftest code-tokens
+  (is (= ["a" "b/c" ":d" "inst" "e"]
+         (map (fn [[a b]] (subs "(a \"x y\" b/c) ; z\n:d \\q #inst \"s\" 'e #\"r\"" a b))
+              (text/code-tokens "(a \"x y\" b/c) ; z\n:d \\q #inst \"s\" 'e #\"r\"")))))
+
+(deftest reader-conditionals
+  (testing "the :clj branch, :default, none"
+    (is (= "(f 1)" (cljc "(f #?(:cljs 2 :clj 1))")))
+    (is (= "(f 3)" (cljc "(f #?(:cljs 2 :default 3))")))
+    (is (= "(f 1)" (cljc "(f #?(:clj 1 :default 3))")))
+    (is (= "(f )" (cljc "(f #?(:cljs 2))")))
+    (is (= "(f 1)" (cljc "(f #? (:clj 1))"))))
+  (testing "spliced"
+    (is (= "[a b c d]" (cljc "[a #?@(:clj [b c] :cljs [x]) d]")))
+    (is (= "(a b c)" (cljc "(a #?@(:clj (b c)))")))
+    (is (= "[a ]" (cljc "[a #?@(:cljs [x])]")))
+    (is (thrown-with-msg? Exception #"top level" (cljc "#?@(:clj [a])")))
+    (is (thrown-with-msg? Exception #"java.util.List" (cljc "[#?@(:clj a)]"))))
+  (testing "nested, layout and comments of the branch kept"
+    (is (= "(x (y\n   ;; c\n   z))" (cljc "(x #?(:clj (y\n   ;; c\n   #?(:clj z :cljs w)) :cljs v))")))
+    (is (= "(ns a (:require [b] ))" (cljc "(ns a (:require [b] #?(:cljs [goog.string])))"))))
+  (testing "not in strings, comments, characters, regexes"
+    (is (= "\"#?(:cljs 1)\" ; #?(:cljs 2)\n\\# #\"#?(\" 1"
+           (cljc "\"#?(:cljs 1)\" ; #?(:cljs 2)\n\\# #\"#?(\" #?(:clj 1)"))))
+  (testing "branches with discarded forms, metadata, odd forms"
+    (is (= "^:m [1]" (cljc "#?(:cljs #_ x 2 :clj ^:m [1])")))
+    (is (thrown-with-msg? Exception #"even number" (cljc "#?(:clj)")))
+    (is (thrown-with-msg? Exception #"keyword" (cljc "#?(clj 1)"))))
+  (testing "kept when the file stays .cljc, and in .clj files"
+    (is (= "#?(:clj arbace.core :cljs cljs.core)" (cljc-kept "#?(:clj clojure.core :cljs cljs.core)")))
+    (is (= "(f 1)" (rules/translate "(f #?(:cljs 2 :arbace 1))"
+                                     {:kind :cljc :to-ae true :features #{:arbace}})))))
+
+(deftest rename
+  (are [from to] (= to (rename/rename from))
+    "clojure.core/map" "arbace.core/map"
+    ":clojure.core/x" ":arbace.core/x"
+    "(require '[clojure.string :as str])" "(require '[arbace.string :as str])"
+    "clojure.lang.RT" "arbace.lang.RT"
+    "Lclojure/lang/Var;" "Larbace/lang/Var;"
+    "[Lclojure.lang.Var;" "[Larbace.lang.Var;"
+    "#\"clojure\\.lang\\.Agent\"" "#\"arbace\\.lang\\.Agent\""
+    "clojure.asm.commons.Method" "arbace.asm.commons.Method"
+    ":clojure.error/phase" ":arbace.error/phase"
+    "-Dclojure.compiler.direct-linking=true" "-Darbace.compiler.direct-linking=true"
+    "clojure.core$map" "arbace.core$map"
+    "\"clojure/core.clj\"" "\"arbace/core.ae\""
+    "clojure/core__init" "arbace/core__init"
+    "clojure.spec.alpha" "arbace.spec.alpha"
+    "clojure.core.specs.alpha" "arbace.core.specs.alpha"
+    ;; left alone
+    "clojure.test.check" "clojure.test.check"
+    "clojure.tools.namespace.find" "clojure.tools.namespace.find"
+    "clojure.core.async" "clojure.core.async"
+    "clojure.test-clojure.reader" "clojure.test-clojure.reader"
+    "refer-clojure *clojure-version*" "refer-clojure *clojure-version*"
+    "https://clojure.org" "https://clojure.org"))
+
+(deftest proxy-methods
+  (is (= "(.__getArbaceFnMappings p) \"__initArbaceFnMappings\" __updateArbaceFnMappings __arbaceFnMap"
+         (clj "(.__getClojureFnMappings p) \"__initClojureFnMappings\" __updateClojureFnMappings __clojureFnMap")))
+  (is (= "x__getClojureFnMappings __clojureFnMapX" (clj "x__getClojureFnMappings __clojureFnMapX"))))
+
+(deftest security-manager
+  (is (= "(java.lang.SecurityManager.) (java.lang.SecurityManager/x) ^java.lang.SecurityManager s"
+         (clj "(SecurityManager.) (SecurityManager/x) ^SecurityManager s")))
+  (testing "strings, comments, keywords, qualified names left alone"
+    (is (= "\"SecurityManager\" ; SecurityManager\n:SecurityManager java.lang.SecurityManager"
+           (clj "\"SecurityManager\" ; SecurityManager\n:SecurityManager java.lang.SecurityManager"))))
+  (testing "a file that imports it is left alone"
+    (are [s] (= s (clj s))
+      "(ns a (:import (java.io File) (java.lang SecurityManager)))\n(SecurityManager.)"
+      "(ns a (:import [java.lang SecurityManager]))\n(SecurityManager.)"
+      "(import 'java.lang.SecurityManager)\n(SecurityManager.)"))
+  (testing "not in .java files"
+    (is (= "SecurityManager s;" (rules/translate "SecurityManager s;" {:kind :java})))))
+
+(deftest core-names
+  (let [cn (fn [s] (rules/core-names s #{"return" "switch" "label"}))]
+    (is (= "(ns a\n  (:require b)\n  (:refer-clojure :exclude [return switch]))\n(defn ^:private return [])\n(defmacro ^{:m 1} switch [])\n(def other 1)"
+           (cn "(ns a\n  (:require b))\n(defn ^:private return [])\n(defmacro ^{:m 1} switch [])\n(def other 1)")))
+    (is (= "(ns a (:refer-clojure :exclude [map label])) (def label 1)"
+           (cn "(ns a (:refer-clojure :exclude [map])) (def label 1)")))
+    (is (= "(ns a (:refer-clojure :rename {map m} :exclude [label])) (def label 1)"
+           (cn "(ns a (:refer-clojure :rename {map m})) (def label 1)")))
+    (are [s] (= s (cn s))
+      "(ns a (:refer-clojure :only [map])) (def label 1)"
+      "(in-ns 'a) (def label 1)"
+      "(ns a) (def labels 1) (let [return 1] return)"))
+  (is (contains? (rules/arbace-core-names) "return"))
+  (is (not (contains? (rules/arbace-core-names) "map"))))
+
+(deftest the-table
+  (is (= [:reader-conditionals :rename :proxy-methods :core-names :security-manager]
+         (map :id rules/rules)))
+  (is (every? #(or (= :none (:rule %)) (some #{(:rule %)} (map :id rules/rules)))
+              rules/divergences))
+  (is (= "clojure.core" (rules/translate "clojure.core" {:kind :clj} #{:rename}))))
+
+(deftest plans
+  (let [p #(main/plan %1 (set %2) (merge {:text []} %3))]
+    (is (= {:kind :clj :to-ae true :out "a.ae"} (p "a.clj" ["a.clj"] {})))
+    (is (= {:kind :cljc :to-ae true :out "a.ae"} (p "a.cljc" ["a.cljc"] {})))
+    (is (:skip (p "a.cljc" ["a.clj" "a.cljc"] {})))
+    (is (:skip (p "a.clj" ["a.clj" "a.ae"] {})))
+    (is (= {:kind :cljc :to-ae false :out "a.cljc"} (p "a.cljc" ["a.cljc"] {:keep-ext true})))
+    (is (= {:kind :clj :to-ae false :out "data_readers.clj"} (p "data_readers.clj" [] {})))
+    (is (= {:kind :java :to-ae false :out "A.java"} (p "A.java" [] {})))
+    (is (:skip (p "a__init.class" [] {})))
+    (is (= {:copy true} (p "deps.edn" [] {})))
+    (is (= {:kind :text :to-ae false :out "deps.edn"} (p "deps.edn" [] {:text [".edn"]})))))
+
+(defn- temp-dir []
+  (let [d (io/file (System/getProperty "c2a.work" ".tmp/c2a-check"))]
+    (.mkdirs d)
+    (.toFile (Files/createTempDirectory (.toPath d) "unit" (make-array FileAttribute 0)))))
+
+(deftest trees
+  (let [d (temp-dir) src (io/file d "src") out (io/file d "out")
+        put (fn [path s] (let [f (io/file src path)] (io/make-parents f) (spit f s)))]
+    (put "a/b.cljc" "(ns a.b (:require [clojure.string :as s] #?(:cljs [goog.string])))\n;; clojure.set\n")
+    (put "a/c.clj" "(ns a.c)\n(clojure.set/union)\n")
+    (put "a/c.cljc" "(ns a.c)\n")
+    (put "a/C.java" "import clojure.lang.IFn;\n")
+    (put "a/d__init.class" "x")
+    (put "res/x.txt" "clojure.core\n")
+    (let [stats (main/run [(str src)] (str out) {:text []})]
+      (is (= {:translated 3 :to-ae 2 :copied 1 :skipped 2 :unchanged 0 :errors 0} stats))
+      (is (= "(ns a.b (:require [arbace.string :as s] ))\n;; arbace.set\n" (slurp (io/file out "a/b.ae"))))
+      (is (= "(ns a.c)\n(arbace.set/union)\n" (slurp (io/file out "a/c.ae"))))
+      (is (= "import arbace.lang.IFn;\n" (slurp (io/file out "a/C.java"))))
+      (is (= "clojure.core\n" (slurp (io/file out "res/x.txt"))))
+      (is (not (.exists (io/file out "a/d__init.class")))))
+    (testing "in place"
+      (let [stats (main/run [(str src)] nil {:text []})]
+        (is (= 2 (:to-ae stats)))
+        (is (.exists (io/file src "a/b.ae")))
+        (is (not (.exists (io/file src "a/b.cljc"))))
+        (is (.exists (io/file src "a/c.cljc")) "the .cljc shadowed by the .clj stays")))
+    (testing "in place, names kept"
+      (put "k/e.cljc" "#?(:clj clojure.core)\n")
+      (main/run [(str (io/file src "k"))] nil {:keep-ext true :text []})
+      (is (= "#?(:clj arbace.core)\n" (slurp (io/file src "k/e.cljc")))))))

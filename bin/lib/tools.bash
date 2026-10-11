@@ -5,7 +5,7 @@
 #                   `java -cp "$ARBACE_CP:..." arbace.lang.Main`: target/stageN (default stage 2,
 #                   ARBACE_STAGE=N for another), built by bin/build-arbace, then the repository
 #                   root. The stage holds the class forms (arbace.lang, arbace.asm, ...) and its
-#                   namespaces AOT-compiled; the tools' own namespaces (arbace.j2a, test/) load
+#                   namespaces AOT-compiled; the tools' own namespaces (arbace.j2a, arbace.c2a, test/) load
 #                   from source. RT.load takes a namespace's __init class only when it is newer
 #                   than its source, so a namespace edited since the build (arbace.classes when
 #                   working on the compiler) loads from the checkout's source, the rest from the
@@ -28,7 +28,7 @@ arbace_runtime() {
     return 1
   fi
   # The class forms of the runtime itself never load from source: say when they are stale
-  newer=$(cd "$root" && find arbace -name '*.ae' ! -path 'arbace/classes/*' ! -path 'arbace/j2a/*' ! -path 'arbace/g2a/*' ! -path 'arbace/a2g/*' ! -path 'arbace/lang/go/*' \
+  newer=$(cd "$root" && find arbace -name '*.ae' ! -path 'arbace/classes/*' ! -path 'arbace/j2a/*' ! -path 'arbace/c2a/*' ! -path 'arbace/g2a/*' ! -path 'arbace/a2g/*' ! -path 'arbace/lang/go/*' \
             -newer "$dir/arbace/core__init.class" -print -quit)
   if [ -n "$newer" ]; then
     echo "warning: $newer is newer than target/stage$stage; run bin/build-arbace" >&2

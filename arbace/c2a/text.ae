@@ -1,0 +1,241 @@
+(ns arbace.c2a.text
+  "Clojure source text, read lexically as the reader would, for c2a's rules: they rewrite text
+  and keep everything else (layout, comments) as it is. The scanner knows the reader's
+  lexical syntax (doc/C2A.md, \"How it reads\"): strings, regex literals, character literals,
+  comments (`;`, `#!`), discarded forms (`#_`), dispatch macros, tagged literals, metadata,
+  the quoting macros and tokens (symbols, keywords, numbers), which run until whitespace or a
+  terminating macro character, as LispReader's do. It does not build forms: it finds where
+  they begin and end.
+
+  - `form-end`: the end of the form beginning at an index;
+  - `resolve-conditionals`: reader conditionals (`#?`, `#?@`) replaced by their selected
+    branch's text, for a .cljc file becoming a .ae file (which the reader reads without
+    conditionals);
+  - `code-tokens`: the spans of the tokens outside strings, comments and character literals,
+    for rules that rewrite symbols; `list-spans`: the spans of the lists a token heads."
+  (:require [arbace.string :as str]))
+
+(defn- fail [^String s i msg]
+  (let [line (inc (count (filter #(= \newline %) (subs s 0 (min i (count s))))))]
+    (throw (ex-info (str msg " (line " line ")") {:index i :line line}))))
+
+(defn- ws? [c] (or (Character/isWhitespace (char c)) (= c \,)))
+
+(defn- terminating?
+  "Whether c ends a token: whitespace or a terminating macro character of LispReader (`#`
+  and `'` are not: they may occur inside a symbol)."
+  [c]
+  (or (ws? c) (case c (\" \; \@ \^ \` \~ \( \) \[ \] \{ \} \\) true false)))
+
+(defn- at [^String s i] (when (< i (count s)) (.charAt s (int i))))
+
+(defn- line-end [^String s i]
+  (let [j (.indexOf s "\n" (int i))] (if (neg? j) (count s) j)))
+
+(defn token-end
+  "The end of the token beginning at i."
+  [^String s i]
+  (let [n (count s)]
+    (loop [j i] (if (and (< j n) (not (terminating? (.charAt s (int j))))) (recur (inc j)) j))))
+
+(defn- string-end
+  "The end of the string (or regex) literal whose opening quote is at i."
+  [^String s i]
+  (let [n (count s)]
+    (loop [j (inc i)]
+      (cond (>= j n) (fail s i "EOF while reading a string")
+            (= \\ (.charAt s (int j))) (recur (+ j 2))
+            (= \" (.charAt s (int j))) (inc j)
+            :else (recur (inc j))))))
+
+(defn- char-end
+  "The end of the character literal whose backslash is at i: the character after it, then a
+  token's characters (`\\newline`, `\\u0041`)."
+  [^String s i]
+  (when (>= (inc i) (count s)) (fail s i "EOF while reading a character"))
+  (token-end s (+ i 2)))
+
+(declare form-end cond-open)
+
+(defn skip-ws
+  "The index of the next form at or after i: whitespace, commas, comments (`;`, `#!`) and
+  discarded forms (`#_`) skipped."
+  [^String s i]
+  (let [n (count s)]
+    (loop [i i]
+      (if (>= i n)
+        i
+        (let [c (.charAt s (int i))]
+          (cond (ws? c) (recur (inc i))
+                (= c \;) (recur (line-end s i))
+                (and (= c \#) (= \! (at s (inc i)))) (recur (line-end s i))
+                (and (= c \#) (= \_ (at s (inc i)))) (recur (form-end s (skip-ws s (+ i 2))))
+                :else i))))))
+
+(def ^:private closer {\( \), \[ \], \{ \}})
+
+(defn- coll-end
+  "The end of the collection whose opening delimiter is at i."
+  [^String s i]
+  (let [close (closer (.charAt s (int i)))]
+    (loop [j (skip-ws s (inc i))]
+      (let [c (at s j)]
+        (cond (nil? c) (fail s i (str "EOF while reading, expected " close))
+              (= c close) (inc j)
+              (#{\) \] \}} c) (fail s j (str "Unmatched delimiter: " c))
+              :else (recur (skip-ws s (form-end s j))))))))
+
+(defn- next-form-end [s i]
+  (let [j (skip-ws s i)]
+    (when (>= j (count s)) (fail s i "EOF while reading"))
+    (form-end s j)))
+
+(defn form-end
+  "The end of the form beginning at i (not whitespace)."
+  [^String s i]
+  (let [c (at s i)]
+    (case c
+      nil (fail s i "EOF while reading")
+      (\( \[ \{) (coll-end s i)
+      \" (string-end s i)
+      \\ (char-end s i)
+      (\' \` \@) (next-form-end s (inc i))
+      \~ (next-form-end s (if (= \@ (at s (inc i))) (+ i 2) (inc i)))
+      \^ (next-form-end s (next-form-end s (inc i)))
+      (\) \] \}) (fail s i (str "Unmatched delimiter: " c))
+      \# (let [d (at s (inc i))]
+           (case d
+             nil (fail s i "EOF while reading a dispatch macro")
+             (\{ \() (coll-end s (inc i))
+             \" (string-end s (inc i))
+             (\' \=) (next-form-end s (+ i 2))
+             \^ (next-form-end s (next-form-end s (+ i 2)))
+             \_ (next-form-end s (next-form-end s (+ i 2)))
+             \! (next-form-end s (line-end s i))
+             \? (coll-end s (cond-open s i))
+             \# (token-end s (+ i 2))
+             \: (let [j (skip-ws s (token-end s (inc i)))]
+                  (when-not (= \{ (at s j)) (fail s i "Namespaced map must specify a map"))
+                  (coll-end s j))
+             ;; a tagged literal: the tag, then its form
+             (next-form-end s (token-end s (inc i)))))
+      (token-end s i))))
+
+;; Reader conditionals
+
+(defn- cond-open
+  "The index of the list of the reader conditional at i (`#?` or `#?@`, then whitespace, as
+  ConditionalReader allows)."
+  [^String s i]
+  (let [j (loop [j (if (= \@ (at s (+ i 2))) (+ i 3) (+ i 2))]
+            (if (and (< j (count s)) (ws? (.charAt s (int j)))) (recur (inc j)) j))]
+    (when-not (= \( (at s j)) (fail s i "read-cond body must be a list"))
+    j))
+
+(defn- branches
+  "The branches of the reader conditional whose list opens at i: [feature value-start
+  value-end] for each."
+  [^String s i]
+  (loop [j (skip-ws s (inc i)) bs []]
+    (if (= \) (at s j))
+      bs
+      (let [fe (form-end s j)
+            feature (subs s j fe)
+            v (skip-ws s fe)]
+        (when-not (str/starts-with? feature ":") (fail s j "Feature should be a keyword"))
+        (when (= \) (at s v)) (fail s v "read-cond requires an even number of forms"))
+        (let [ve (form-end s v)]
+          (recur (skip-ws s ve) (conj bs [(keyword (subs feature 1)) v ve])))))))
+
+(declare resolve-conditionals)
+
+(defn- selected
+  "The text a reader conditional at i reads as, for the platform features: the first branch
+  whose feature is one of them or :default (as LispReader chooses), with its own conditionals
+  resolved; spliced (`#?@`), the contents of its list or vector; none: empty."
+  [^String s i features depth]
+  (let [splice? (= \@ (at s (+ i 2)))
+        open (cond-open s i)
+        [_ v ve] (first (filter (fn [[f]] (or (contains? features f) (= f :default)))
+                                (branches s open)))]
+    (when (and splice? (zero? depth))
+      (fail s i "Reader conditional splicing not allowed at the top level."))
+    (cond (nil? v) ""
+          (not splice?) (resolve-conditionals (subs s v ve) features)
+          (#{\( \[} (at s v)) (resolve-conditionals (subs s (inc v) (dec ve)) features)
+          :else (fail s v "Spliced form list in read-conditional must implement java.util.List"))))
+
+(defn resolve-conditionals
+  "Source text s with each reader conditional replaced by the text it reads as on a platform
+  with the features (a set of keywords, Arbace's #{:clj}): its selected branch, verbatim
+  (spliced: the contents of its list), or nothing. Everything else is kept as it is."
+  ([s] (resolve-conditionals s #{:clj}))
+  ([^String s features]
+   (if-not (str/includes? s "#?")
+     s
+     (let [n (count s) sb (StringBuilder.)]
+       (loop [i 0 depth 0]
+         (if (>= i n)
+           (str sb)
+           (let [c (.charAt s (int i))
+                 copy (fn [j] (.append sb s (int i) (int j)) j)]
+             (case c
+               \" (recur (copy (string-end s i)) depth)
+               \; (recur (copy (line-end s i)) depth)
+               \\ (recur (copy (char-end s i)) depth)
+               (\( \[ \{) (recur (copy (inc i)) (inc depth))
+               (\) \] \}) (recur (copy (inc i)) (max 0 (dec depth)))
+               \# (case (at s (inc i))
+                    \" (recur (copy (string-end s (inc i))) depth)
+                    \! (recur (copy (line-end s i)) depth)
+                    \? (let [e (form-end s i)]
+                         (.append sb ^String (selected s i features depth))
+                         (recur e depth))
+                    (recur (copy (inc i)) depth))
+               (recur (copy (if (terminating? c) (inc i) (token-end s i))) depth)))))))))
+
+;; Tokens
+
+(defn code-tokens
+  "The [start end] spans of the tokens of s (symbols, keywords, numbers, the tags of tagged
+  literals) outside strings, regex and character literals and comments, in order."
+  [^String s]
+  (let [n (count s)]
+    (loop [i 0 out (transient [])]
+      (if (>= i n)
+        (persistent! out)
+        (let [c (.charAt s (int i))]
+          (cond
+            (= c \") (recur (string-end s i) out)
+            (= c \;) (recur (line-end s i) out)
+            (= c \\) (recur (char-end s i) out)
+            (= c \#) (case (at s (inc i))
+                       \" (recur (string-end s (inc i)) out)
+                       \! (recur (line-end s i) out)
+                       (recur (inc i) out))
+            (terminating? c) (recur (inc i) out)
+            (#{\' \`} c) (recur (inc i) out)
+            :else (let [e (token-end s i)] (recur e (conj! out [i e])))))))))
+
+(defn list-spans
+  "The [start end] spans of the lists of s whose head token satisfies pred."
+  [^String s pred]
+  (let [n (count s)]
+    (loop [i 0 out []]
+      (if (>= i n)
+        out
+        (let [c (.charAt s (int i))]
+          (cond
+            (= c \") (recur (string-end s i) out)
+            (= c \;) (recur (line-end s i) out)
+            (= c \\) (recur (char-end s i) out)
+            (and (= c \#) (= \" (at s (inc i)))) (recur (string-end s (inc i)) out)
+            (and (= c \#) (= \! (at s (inc i)))) (recur (line-end s i) out)
+            (= c \()
+            (let [h (skip-ws s (inc i))
+                  head (when (and (< h n) (not (terminating? (.charAt s (int h)))))
+                         (subs s h (token-end s h)))]
+              (if (and head (pred head))
+                (let [e (form-end s i)] (recur e (conj out [i e])))
+                (recur (inc i) out)))
+            :else (recur (inc i) out)))))))
