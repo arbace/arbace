@@ -763,7 +763,7 @@ The whole suite, 12 at a time: the box's subset (67 namespaces, 685 tests, 19,64
 - `bin/box-vendor roundtrip` (16 of 16) and `kvm-tests` (all pass): `box/` is unchanged.
 - The essential `bin/gate` was not run: no source the bootstrap compiles changed.
 
-### Amendments (proposed 2026-10-11)
+### Amendments (proposed 2026-10-11, accepted by the user the same day)
 
 - **BX12 (BUILD.md; bin/arbace-go) The guest's symbol table cut** to the monitor's three
   symbols by `tools/elfsyms` (`ARBACE_GO_SYMBOLS=1` keeps it).
@@ -780,11 +780,9 @@ The whole suite, 12 at a time: the box's subset (67 namespaces, 685 tests, 19,64
   working directory**; reducers in `test/arbace-box-results.edn` and in the box oracle's
   reference; the smoke tests' new checks.
 
-### For the user to decide
+### The user's decisions (2026-10-11)
 
-- BX12-BX17.
-- The watchdog stays off by default (above): agree, or a default for non-interactive runs.
-- `tools/elfsyms` is a new Go helper beside godump and gocmp (BX12): its gain is smaller since
-  BX11 reads the symbol table once (11 MB of image and 12 MB resident, 10 ms of start copied);
-  keep it, or keep the whole table.
-- BX11's mapped start and the page cache (above): copy the read-only data, prefault, or keep.
+- BX12-BX17 accepted (`tools/elfsyms` kept).
+- The watchdog stays off by default; `ARBACE_BOX_WATCHDOG` sets one.
+- BX11's mapped start: measured first on a host without nested KVM before any change in the
+  monitor (copying the read-only data, or prefaulting).

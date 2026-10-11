@@ -341,3 +341,37 @@ the first. The history before it is on the frozen branches and in git history:
   the JVM's order (given to S6's agent); Clojure's suite on the Go test build after the merge: 20,506 of 20,520, no regressions.
 - S6 started (agent, branch `box-s6`): TamaGo's runtime, std and `goos` module as Go forms, the
   guest image built from them byte-identical to one from the originals.
+
+## 2026-10-11: B1b S2 done: the box measured and hardened
+
+- Agent, branch `box-s2` (`3410525`, `ef5bc28`), merged into main (BOX-NOTES' two S2 sections
+  kept, R1's and the rest's). Details: BOX-NOTES.md, S2; amendments BX12-BX17.
+- Reducers' 4.9 GB, natively too: the evaluator kept the reducer's `reify` in the method's frame
+  through the tail call into `coll-reduce`, and with it the head of the `Range`; a call in tail
+  position now clears the method's object, as the JVM's `emitClearThis` (CLJ-1250) (BX14): 4.9 →
+  0.30 GB natively, and it runs in the box. The reducers tests failing when their namespace is
+  loaded alone: the Go build's `RT.load` re-evaluated `arbace.core` when
+  `clojure.data.generators` required it, and `defprotocol` made a new `CollReduce`; an embedded
+  namespace now loads once (BX15), sources on `ARBACE_PATH` still reload.
+- `fold` on 4 vCPUs: the evaluator's yield counted calls in one global written by every vCPU;
+  per thread now (BX16): 3.2x (allocating) and 3.4x (computing) on 4 vCPUs, native 3.5x and
+  3.2x.
+- The collector: `GOMEMLIMIT` was read by TamaGo's runtime before jrt set the environment; now
+  applied, default the guest's RAM less 1 GiB (BX13): live data before running out 1,152 →
+  2,432 MiB; GOGC stays 200 (100 was 5% slower, 400 400 MB more). The watchdog stays off: an
+  evaluation makes no hypercall while it computes. The suite's file tests: `bin/box-suite`
+  writes the suite directory's files into the guest's working directory (BX17); `ARBACE_PATH`
+  checked by the smoke test. The guest's symbol table cut to the monitor's three symbols by
+  `tools/elfsyms` (BX12): guest 76.8 → 65.9 MB.
+- Numbers (nested KVM): start 330 ms on 4 vCPUs (copied; native 200-210), evaluation within noise
+  of native; the box's suite in 222 s at 12 at a time (native test build 214 s).
+- Checks on the branch: `--smoke` 42, `--smoke --box` 70, the native oracle (the 46 known), the
+  box oracle 21,696 of 21,742 (the reducers case matches: its `:incomplete` removed),
+  `bin/box-suite` 19,645 of 19,646 (the socket test), the suite on the native test build without
+  regressions, `bin/jrt test` on both architectures, `bin/box-vendor roundtrip` and `kvm-tests`.
+- The user's decisions: BX12-BX17 accepted (`tools/elfsyms` kept); the watchdog off by default;
+  the mapped start measured on a host without nested KVM before changing the monitor; RP1
+  accepted, with the hint on the oracle's ambiguous `.schedule` form.
+- On merged main (with RP1): `--build`, `--build --box`, `--smoke`, `--smoke --box` pass; the
+  native oracle and the box oracle as recorded (46 each, 0 new); `bin/box-suite` 19,645 of
+  19,646.
