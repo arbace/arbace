@@ -463,3 +463,106 @@ Numbered BX (a prefix not used in `doc/`); proposed 2026-10-11, accepted by the 
   the slot (it was 445 MB resident): to do, first in S2.
 - Open for S4: `board.NilPanics` and the vectors' return to `sigpanic` need their arm64 form
   (ELR_EL1, the link register) before the box's arm64 oracle can pass.
+
+## S2: the launcher maps the guest's image (2026-10-11)
+
+Branch `box-mmap`, R1's first item, decided by the user 2026-10-11 (above): the launcher read
+the 77 MB image appended to it into its own heap (`vmm.Appended`), and the monitor copied its
+segments into the guest's slot, so that both copies stayed resident beside the guest's memory
+(445 MB against the native executable's 163 MB). The box's packages were changed as in S1: Go
+in a printed copy of `box/`, converted back by `bin/g2a convert`; the converted forms of the
+changed files merged into `box/`'s by line, so that their comments and literals' text stay, and
+the line numbers after an edit follow it (`git diff` shows them).
+
+### What changed (BX11)
+
+- **`vmm.ImageFile`** (`vmm/imagefile.go`, new): a guest image in a file, `Size` bytes from
+  `Offset`; `vmm.OpenImage(path)` (a whole ELF file) and `vmm.AppendedFile(path)` (the image
+  appended to a program, found by its trailer as `Appended` finds it, which now reads through
+  it). `Config.ImageFile`, when set, is the image in place of `Config.Image` (which go-whim's
+  tests and monitor still use).
+- **The segments mapped from the file**: the monitor parses the ELF through an
+  `io.SectionReader` of the file (nothing read whole), and maps each `PT_LOAD` segment's file
+  bytes over the slot (`mmap` with `MAP_PRIVATE|MAP_FIXED` at the segment's address, from the
+  image's offset plus the segment's; `vmm/mapfixed_linux.go`), the rest of its last page cleared
+  where the file has bytes there (the bss beyond is the slot's anonymous memory, zero). Text and
+  read-only data are the page cache's, read into the guest as it touches them and shared between
+  boxes; a page the guest writes (data) is copied then. A segment whose address or offset is not
+  on a host page, or that shares a page with another, is read into the slot instead (`pread`
+  through the section reader: one copy, none in the heap); so is every segment on macOS, whose
+  `syscall` package has no `mmap` at an address (`mapfixed_darwin.go`, a compile check; S4), and
+  with `ImageFile.Copy`.
+- **The image on a 64 KiB boundary**: `vmm.Append` and `bin/arbace-go`'s `box_append` pad the
+  launcher with zeros to a multiple of `vmm.ImageAlign` (64 KiB, the largest host page) before
+  the image, so that the image's segments, on 4 KiB pages of the ELF (`-R 0x1000`), are on pages
+  of the launcher's file. A launcher appended without the padding still runs (copied).
+- **The symbols read once, without a `Symbol` each**: `loadImage` and `isTamaGo` each called
+  `elf.File.Symbols`, three times in all, each making 150,000 `Symbol`s and their names (about
+  30 MB of the launcher's heap, 65 MB resident at the end); `imageSymbols` reads the symbol table
+  and its strings once and keeps the three values the monitor needs (`whim_vectors`,
+  `whim_apentry`, `runtime/goos.RamStart`, which marks a TamaGo image: `image.tamago`, which
+  replaces `isTamaGo`).
+- **The launcher** passes the image as an `ImageFile` (appended, `ARBACE_BOX_IMAGE`, or beside
+  it); **`ARBACE_BOX_MAP=0`** copies the segments instead of mapping them (below).
+- Tests (`vmm/imagefile_test.go`, in `kvm-tests` and the round trip): `Append`'s alignment and
+  `AppendedFile`; `loadSegments` on the test's own executable, mapped and copied, byte for byte
+  equal, the first segment's mapping the file's (`/proc/self/maps`); `imageSymbols` against
+  `elf.File.Symbols` on an ELF file made by the test (`go test` strips its executable).
+
+The file stays open and mapped for the run. A guest image must not be rewritten in place while a
+box runs from it (a private mapping still reads the file's pages it has not copied): the build
+replaces `arbace-box` by a rename; `ARBACE_BOX_IMAGE` or `arbace-box.elf` written over in place
+would change the guest under it.
+
+### Measured (amd64, nested KVM on the shared 64-core machine; best of 9, interleaved)
+
+| `-e nil` | before (S1) | mapped (default) | copied (`ARBACE_BOX_MAP=0`) | native |
+|---|---:|---:|---:|---:|
+| start to done, 4 vCPUs | 0.36 s | 0.55 s | 0.32 s | 0.20 s |
+| start to done, 1 vCPU | 0.33 s | 0.53 s | 0.28 s | |
+| max resident, 4 vCPUs | 445-448 MB | 257-262 MB | 293-295 MB | 161-164 MB |
+| max resident, 1 vCPU | 443-450 MB | 258-265 MB | 291-295 MB | |
+
+Of the mapped run's 258 MB: the guest's memory 214 MB anonymous (the heap and stacks it touched,
+the data it wrote), 33 MB of the image's 66 MB of segments from the file (the text and read-only
+data the start touches), the launcher's heap 18 MB (the symbol table's 11 MB read once). The
+copied run has the whole 66 MB in the slot. Evaluation is unchanged either way (S1's three
+measures, three runs each: the `reduce` 934-1,118 ms, `fib 25` 61-69 ms, the `sort` 268-319 ms).
+
+The mapped start is slower here: the guest's first touch of each mapped page is a 4 KiB fault
+through two levels of nested paging (no huge page: the page cache's pages are mapped one by one),
+about 8,400 of them for 33 MB, where the copy's memory is anonymous and in 2 MiB pages
+(transparent huge pages `always`), a few dozen faults. Mapping the text only and copying the
+rest measured between the two (0.44 s, 281 MB); the read-only data's faults cost the most. On
+/dev/kvm without nesting a fault is a few microseconds, and the difference should be tens of
+milliseconds; not measured here. The copied start is faster than S1's: no 77 MB read into the
+heap and no symbol tables made thrice.
+
+### Checks
+
+- `bin/arbace-go --build` (amd64; the executable 66,523,296 bytes, as main's) and `--build
+  --box`: the guest 76,774,351 bytes, as before; the launcher 3.7 MB, 80,509,919 bytes with the
+  image (the padding included).
+- `bin/arbace-go --smoke --box`: 64 of 64 checks on 4 and 1 vCPUs and on a terminal, mapped and
+  with `ARBACE_BOX_MAP=0`. `ARBACE_BOX_IMAGE`, `arbace-box.elf` beside the launcher and a
+  launcher appended without the padding (copied) run.
+- The oracle's box subset (`-j 12`): 21,695 of 21,742 cases match, the 47 mismatches those of
+  `known-go-box-amd64.edn`, `harvest/reducers.ae`'s run incomplete as recorded (R1's other item:
+  the guest's 3 GiB).
+- `bin/box-vendor roundtrip`: 16 of 16; `bin/box-vendor kvm-tests`: hv, vmm (with the new
+  tests) and the guest tests pass.
+- The essential `bin/gate` was not run: no source the bootstrap compiles changed (`box/`,
+  `bin/arbace-go`).
+
+### Amendment (proposed 2026-10-11)
+
+- **BX11 (box/: vmm, the launcher) The image mapped**: `vmm.ImageFile`, `OpenImage`,
+  `AppendedFile`, `Config.ImageFile`, `ImageAlign` and `Append`'s padding, the segments mapped
+  from the file (copied where they cannot be, on macOS, or with `ImageFile.Copy`), the symbols
+  read once; the launcher's `ARBACE_BOX_MAP=0`.
+
+### For the user to decide
+
+- The default: mapped (258 MB, 0.55 s here) or copied (293 MB, 0.32 s here). Mapped is what R1
+  asked for, and shares the image's pages between boxes (`bin/box-suite` and the oracle run 12
+  at once); copied starts faster under nested virtualization. One line in the launcher flips it.
