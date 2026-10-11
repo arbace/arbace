@@ -7,7 +7,7 @@ and folded in: the 25 found while implementing jrt (J1-J10, R11-R19, T11-T16,
 E1-E8, [C2G-NOTES.md](C2G-NOTES.md)) with the evaluator's decisions Q1-Q7
 ([EVAL-PLAN.md](EVAL-PLAN.md)) that touch §10, and the 9 of c2g's phase 2 parts C and D (K1-K3,
 W1-W6), part D's performance work deferred to step 7 (§13.4); the evaluator's, B1a step 5
-(M1-M8, X1-X3, S1, S3-S6, Y1-Y4, [EVAL-NOTES.md](EVAL-NOTES.md)), and the executable's, step 6
+(M1-M8, X1-X4, S1-S8, Y1-Y4, [EVAL-NOTES.md](EVAL-NOTES.md)), and the executable's, step 6
 (U1-U5, [EXEC-NOTES.md](EXEC-NOTES.md)), all of 2026-10-09; and, of 2026-10-10 and 2026-10-11,
 Z1, FS1-FS7, NT1-NT5, RD1-RD5, CF1-CF6 ([CLASSFORMS-REPL.md](CLASSFORMS-REPL.md)), SL1-SL3,
 SL6-SL7, EC1-EC6 and O1-O7 (step 7; [SPEED-NOTES.md](SPEED-NOTES.md)), JB1-JB5
