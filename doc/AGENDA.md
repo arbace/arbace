@@ -192,7 +192,9 @@ gate: CLAUDE.md.)
      --tags --always --dirty` in a checkout; from a file `git archive` fills through
      `export-subst` in a tarball); written as a constant into the Go program and a resource
      into the jar (stage 2 = stage 3 still holds); `*clojure-version*` stays, for libraries.
-  4. TamaGo, B1b (the box): [go/BOX-SURVEY.md](go/BOX-SURVEY.md), stages S0-S6, its decisions
+  1-3 done (2026-10-11): the `.ae` rename, c2a and the tools renamed j2a, g2a, a2g, Arbace's own
+     version and `data_readers.ae`.
+  4. Now: TamaGo, B1b (the box), decisions D3, D8-D14 taken (all as recommended); S0 in progress: [go/BOX-SURVEY.md](go/BOX-SURVEY.md), stages S0-S6, its decisions
      D3, D8-D14 for the user.
 
 ## Later

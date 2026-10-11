@@ -145,3 +145,5 @@ the first. The history before it is on the frozen branches and in git history:
   (no new call); D11 files in memory, then the content-addressed store (S3), no host file
   system; D12 the network decided at S5; D13 processes cut for good in the box; D14 the monitor
   stays a Go program on the host.
+- The user's go-ahead for B1b: S0 (vendoring go-whim's box as Go forms, an agent, branch
+  `box-s0`), then S1 (the boxed REPL on amd64).
