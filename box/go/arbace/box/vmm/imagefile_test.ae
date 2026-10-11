@@ -1,0 +1,175 @@
+(in-ns 'go.arbace.box.vmm) (go/file "imagefile_test.go" :imports [
+
+
+    ^{:line 4} [bytes "bytes"]
+    ^{:line 5} [elf "debug/elf"]
+    ^{:line 6} [binary "encoding/binary"]
+    ^{:line 7} [fmt "fmt"]
+    ^{:line 8} [os "os"]
+    ^{:line 9} [filepath "path/filepath"]
+    ^{:line 10} [runtime "runtime"]
+    ^{:line 11} [strings "strings"]
+    ^{:line 12} [syscall "syscall"]
+    ^{:line 13} [testing "testing"]
+    ^{:line 14} [unsafe "unsafe"]])
+
+
+
+
+^{:go/end 46} (go/func TestAppendedFile "TestAppendedFile: Append puts the image at a multiple of ImageAlign, and\nAppendedFile and Appended find it.\n" [^{:tag (* testing/T)} t]
+  (let [img (bytes/Repeat (conv (slice byte) "guest") 1000)]
+    (range [_ n (lit (slice int) 0 1 1000 ImageAlign (+ ImageAlign 1))]
+      (let [p (filepath/Join ^{:go/via [common]} (.TempDir t) "launcher")]
+        (when [err (os/WriteFile p (Append (bytes/Repeat (lit (slice byte) 1) n) img) 0644)] (!= err nil)
+          ^{:go/via [common]} (.Fatal t err))
+
+        (let [(values src err) (AppendedFile p)]
+          (when (!= err nil)
+            ^{:go/via [common]} (.Fatal t err))
+
+          (when (or (!= (% (.-Offset src) ImageAlign) 0) (< (.-Offset src) (conv int64 n)) (!= (.-Size src) (conv int64 (len img))))
+            ^{:go/via [common]} (.Errorf t "program of %d bytes: the image at %d, %d bytes" n (.-Offset src) (.-Size src)))
+
+          (.Close (.-File src))
+          (let [(values b ^:assign err) (Appended p)]
+            (when (or (!= err nil) (not (bytes/Equal b img)))
+              ^{:go/via [common]} (.Errorf t "program of %d bytes: Appended %d bytes, %v" n (len b) err))))))
+
+
+    (let [p (filepath/Join ^{:go/via [common]} (.TempDir t) "plain")]
+      (when [err (os/WriteFile p (conv (slice byte) "no image here, only a program") 0644)] (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (when [(values _ err) (AppendedFile p)] (!= err ErrNoImage)
+        ^{:go/via [common]} (.Errorf t "a program without an image: %v" err)))))
+
+
+
+
+
+
+^{:go/end 115} (go/func TestLoadSegments "TestLoadSegments: the test's own executable, an ELF whose segments are on\npages of its file, loaded by loadSegments (mapped, on Linux) and by\ncopying: the same bytes, the bss and the rest of each last page zero.\n" [^{:tag (* testing/T)} t]
+  (let [(values exe err) (os/Executable)]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (let [(values src ^:assign err) (OpenImage exe)]
+      (when (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (defer (.Close (.-File src)))
+      (let [(values f ^:assign err) (elf/NewFile (.imageAt (addr (lit Config :ImageFile src))))]
+        (when (!= err nil)
+          ^{:go/via [common]} (.Fatal t err))
+
+        (let [pg (conv uint64 (os/Getpagesize))
+            ^{:line 66 :tag (slice (* elf/Prog))} loads (zero (slice (* elf/Prog)))
+            ^{:line 67 :tag uint64} size (zero uint64)]
+          (range [_ p (.-Progs f)]
+            (when (and (== ^{:go/via [ProgHeader]} (.-Type p) elf/PT_LOAD) (> ^{:go/via [ProgHeader]} (.-Memsz p) 0))
+              (set! loads (append loads p))
+              (set! size (max size (roundUp (+ ^{:go/via [ProgHeader]} (.-Vaddr p) ^{:go/via [ProgHeader]} (.-Memsz p)) pg)))))
+
+
+          (when (== (len loads) 0)
+            ^{:go/via [common]} (.Skip t "no segments"))
+
+          (let [alloc ^{:go/end 84} (fn ^{:tag (slice byte)} []
+                (let [(values b err) (syscall/Mmap -1 0 (conv int size) (bit-or syscall/PROT_READ syscall/PROT_WRITE) (bit-or syscall/MAP_PRIVATE syscall/MAP_ANON syscall/MAP_NORESERVE))]
+                  (when (!= err nil)
+                    ^{:go/via [common]} (.Fatal t err))
+
+                  ^{:go/via [common]} (.Cleanup t ^{:go/end 82} (fn [] (syscall/Munmap b)))
+                  ^{:line 83} b))
+
+              (values mem want) (values (alloc) (alloc))]
+            (when [err (loadSegments mem loads src)] (!= err nil)
+              ^{:go/via [common]} (.Fatal t err))
+
+            (when [err (.load (addr (lit image :loads loads)) want)] (!= err nil)
+              ^{:go/via [common]} (.Fatal t err))
+
+            (range [_ p loads]
+              (let [(values lo hi) (values (bit-and-not ^{:go/via [ProgHeader]} (.-Vaddr p) (- pg 1)) (roundUp (+ ^{:go/via [ProgHeader]} (.-Vaddr p) ^{:go/via [ProgHeader]} (.-Memsz p)) pg))]
+                (when (not (bytes/Equal (subslice mem lo hi) (subslice want lo hi)))
+                  ^{:go/via [common]} (.Errorf t "the segment at %#x differs" ^{:go/via [ProgHeader]} (.-Vaddr p)))))
+
+
+            (when (!= runtime/GOOS "linux")
+              (return))
+
+            (let [(values maps ^:assign err) (os/ReadFile "/proc/self/maps")]
+              (when (!= err nil)
+                ^{:go/via [common]} (.Fatal t err))
+
+              (let [at (fmt/Sprintf "%x-" (conv uintptr (conv unsafe/Pointer (addr (aget mem ^{:go/via [ProgHeader]} (.-Vaddr (aget loads 0)))))))]
+                (range [_ l (strings/Split (conv string maps) "\n")]
+                  (when (strings/HasPrefix l at)
+                    (when (not (strings/HasSuffix l (filepath/Base exe)))
+                      ^{:go/via [common]} (.Errorf t "the first segment is not mapped from the file: %s" l))
+
+                    (return)))
+
+
+                ^{:go/via [common]} (.Errorf t "no mapping at the first segment (%s)" at)))))))))
+
+
+
+
+
+^{:go/end 142} (go/func TestImageSymbols "TestImageSymbols: imageSymbols finds what f.Symbols does, in an ELF\nfile with a symbol table (go test's executable has none), and not a\nname it does not define.\n" [^{:tag (* testing/T)} t]
+  (let [want (lit (map string uint64) ["whim_vectors" 0x201000] ["whim_apentry" 0x202000] ["runtime/goos.RamStart" 0x403000] ["other" 7])
+      (values f err) (elf/NewFile (bytes/NewReader (symbolsELF want)))]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (let [(values all ^:assign err) (.Symbols f)]
+      (when (or (!= err nil) (!= (len all) (len want)))
+        ^{:go/via [common]} (.Fatalf t "f.Symbols: %d, %v" (len all) err))
+
+      (let [(values got ^:assign err) (imageSymbols f "whim_vectors" "whim_apentry" tamagoSymbol "no such symbol")]
+        (when (!= err nil)
+          ^{:go/via [common]} (.Fatal t err))
+
+        (when (!= (len got) 3)
+          ^{:go/via [common]} (.Errorf t "imageSymbols: %v" got))
+
+        (range [_ s all]
+          (when [(values v ok) (aget got (.-Name s))] (and ^:go/paren (or ok (!= (.-Name s) "other")) (!= v (.-Value s)))
+            ^{:go/via [common]} (.Errorf t "imageSymbols: %s %#x, f.Symbols %#x" (.-Name s) v (.-Value s))))))))
+
+
+
+
+
+
+^{:go/end 176} (go/func symbolsELF "symbolsELF is a 64-bit ELF file with no segments and a symbol table of\nsyms: sections null, .symtab, .strtab, .shstrtab.\n" ^{:tag (slice byte)} [^{:tag (map string uint64)} syms]
+  (let [(values ^bytes/Buffer strtab ^bytes/Buffer symtab) (zero bytes/Buffer)]
+    (.WriteByte strtab 0)
+    (binary/Write (addr symtab) binary/LittleEndian (lit elf/Sym64))
+    (range [name v syms]
+      (binary/Write (addr symtab) binary/LittleEndian (lit elf/Sym64 :Name (conv uint32 (.Len strtab)) :Info (elf/ST_INFO elf/STB_GLOBAL elf/STT_OBJECT) :Shndx (conv uint16 elf/SHN_ABS) :Value v))
+      (.WriteString strtab (+ name "\u0000")))
+
+    (let [shstrtab "\u0000.symtab\u0000.strtab\u0000.shstrtab\u0000"
+        ^{:line 155} off (conv uint64 64)
+        ^{:line 156} data (lit (slice (slice byte)) (.Bytes symtab) (.Bytes strtab) (conv (slice byte) shstrtab))
+        ^{:line 157} shs (lit (slice elf/Section64) (lit _))]
+      (range [i d data]
+        (let [s (lit elf/Section64 :Name (aget (lit (slice uint32) 1 9 17) i) :Type (conv uint32 elf/SHT_STRTAB) :Off off :Size (conv uint64 (len d)) :Addralign 1)]
+          (when (== i 0)
+            (set! (values (.-Type s) (.-Link s) (.-Info s) (.-Entsize s) (.-Addralign s)) (values (conv uint32 elf/SHT_SYMTAB) 2 1 elf/Sym64Size 8)))
+
+          (set! shs (append shs s))
+          (set! off + (conv uint64 (len d)))))
+
+      (let [^bytes/Buffer out (zero bytes/Buffer)
+          ^{:line 167} h (lit elf/Header64 :Type (conv uint16 elf/ET_EXEC) :Machine (conv uint16 elf/EM_X86_64) :Version 1 :Shoff off :Ehsize 64 :Shentsize 64 :Shnum (conv uint16 (len shs)) :Shstrndx 3)]
+        (copy (subslice (.-Ident h)) elf/ELFMAG)
+        (set! (values (aget (.-Ident h) elf/EI_CLASS) (aget (.-Ident h) elf/EI_DATA) (aget (.-Ident h) elf/EI_VERSION)) (values (conv byte elf/ELFCLASS64) (conv byte elf/ELFDATA2LSB) (conv byte elf/EV_CURRENT)))
+        (binary/Write (addr out) binary/LittleEndian h)
+        (range [_ d data]
+          (.Write out d))
+
+        (binary/Write (addr out) binary/LittleEndian shs)
+        (.Bytes out)))))

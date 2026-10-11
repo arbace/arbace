@@ -36,10 +36,10 @@ go-whim's own (without build IDs), and go-whim's tests pass on them, on /dev/kvm
 Since S1 (doc/go/BOX-NOTES.md) the packages are Arbace's to change and changed: `vmm` has a host
 interface of its own (`vmm.Host`, `vmm.TermHost`, `vmm.Exit`) and imports no part of go-whim's
 editor, the ABI carries the environment and the wall clock at entry, the board parks one idle
-vCPU and makes nil dereferences panics on request, and the launcher is new. `bin/box-vendor
-check`'s byte identity is S0's record; `bin/box-vendor roundtrip` and `kvm-tests` check `box/`
-as it is. On darwin, `hv` and `libsys` import purego (`github.com/ebitengine/purego` v0.11.1),
-not vendored.
+vCPU and makes nil dereferences panics on request, and the launcher is new; since S2 the monitor
+maps a guest image's segments from its file (`vmm.ImageFile`). `bin/box-vendor check`'s byte
+identity is S0's record; `bin/box-vendor roundtrip` and `kvm-tests` check `box/` as it is. On
+darwin, `hv` and `libsys` import purego (`github.com/ebitengine/purego` v0.11.1), not vendored.
 
 Licence: the Eclipse Public License 1.0, as Arbace ([LICENSE.md](../LICENSE.md)): the user's own
 code, licensed so by the user on 2026-10-11 (D8). Maintained by hand from here on; go-whim keeps

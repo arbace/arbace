@@ -1,0 +1,195 @@
+(in-ns 'go.arbace.box.vmm) (go/file "imagefile.go" :imports [
+
+
+    ^{:line 4} [bytes "bytes"]
+    ^{:line 5} [elf "debug/elf"]
+    ^{:line 6} [binary "encoding/binary"]
+    ^{:line 7} [errors "errors"]
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [io "io"]
+    ^{:line 10} [os "os"]])
+
+
+
+
+
+
+
+
+(go/type ImageFile "ImageFile is a guest image in a file, Size bytes from Offset: the\nlauncher's own (AppendedFile), or an ELF file (OpenImage).  A run from\none maps the image's segments into the guest's memory from the file\nrather than copying them (loadSegments): text and read-only data are\nthe page cache's, shared and paged in as the guest touches them, and a\npage the guest writes is its own copy.\n" (struct
+    ^{:line 20 :tag (* os/File)} File
+    ^{:line 21 :tag int64} Offset
+    ^{:line 22 :tag int64} Size
+
+
+
+
+
+    ^{:line 28 :tag bool :doc "Copy reads the segments into the guest's memory rather than mapping\nthem: a faster start where a guest's first touch of a page is dear\n(nested virtualization: the mapped pages are 4 KiB to the guest, a\ncopy's 2 MiB when the host makes its memory huge pages), for the\nimage's pages in the process.\n"} Copy))
+
+
+
+
+
+(go/const ^{:val 65536 :doc "ImageAlign is where Append puts the image: at a multiple of 64 KiB of\nthe launcher's file, the largest page of the hosts (arm64's may be 16\nor 64 KiB), so that its segments can be mapped from the file.\n"} ImageAlign 65536)
+
+
+^{:go/end 48} (go/func OpenImage "OpenImage is the guest image in the ELF file at path, the whole file.\n" [^string path] :results [(* ImageFile) error]
+  (let [(values f err) (os/Open path)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values st ^:assign err) (.Stat f)]
+      (when (!= err nil)
+        (.Close f)
+        (return nil err))
+
+      (return (addr (lit ImageFile :File f :Size (.Size st))) nil))))
+
+
+
+
+^{:go/end 77} (go/func AppendedFile "AppendedFile is the guest image appended to the program at path, if\nany (Append), in the program's file, which it keeps open.\n" [^string path] :results [(* ImageFile) error]
+  (let [(values f err) (os/Open path)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values st ^:assign err) (.Stat f)]
+      (when (!= err nil)
+        (.Close f)
+        (return nil err))
+
+      (let [^{:tag (array 16 byte)} tr (zero (array 16 byte))]
+        (when (< (.Size st) 16)
+          (.Close f)
+          (return nil ErrNoImage))
+
+        (when [(values _ err) (.ReadAt f (subslice tr) (- (.Size st) 16))] (!= err nil)
+          (.Close f)
+          (return nil err))
+
+        (let [n (conv int64 (.Uint64 binary/LittleEndian (subslice tr _ 8)))]
+          (when (or (!= (conv string (subslice tr 8)) trailerMagic) (<= n 0) (> n (- (.Size st) 16)))
+            (.Close f)
+            (return nil ErrNoImage))
+
+          (return (addr (lit ImageFile :File f :Offset (- (.Size st) 16 n) :Size n)) nil))))))
+
+
+
+
+^{:go/end 86} (go/method imageAt "imageAt is the run's image to read: its ImageFile when it has one, else\nits Image.\n" ^io/ReaderAt [^{:tag (* Config)} cfg]
+  (when (!= (.-ImageFile cfg) nil)
+    (return (io/NewSectionReader (.-File (.-ImageFile cfg)) (.-Offset (.-ImageFile cfg)) (.-Size (.-ImageFile cfg)))))
+
+  (bytes/NewReader (.-Image cfg)))
+
+
+
+
+^{:go/end 95} (go/method loadFrom "loadFrom puts the image's segments into mem: mapped from src when there\nis one (loadSegments), else copied (load).\n" ^error [^{:tag (* image)} im ^{:tag (slice byte)} mem ^{:tag (* ImageFile)} src]
+  (when (== src nil)
+    (return (.load im mem)))
+
+  (loadSegments mem (.-loads im) src))
+
+
+
+
+
+
+
+
+
+^{:go/end 135} (go/func loadSegments "loadSegments puts the segments loads of the image in src into mem: each\nmapped from the file (private: a page written is copied), with the rest\nof its last page cleared, or copied from it where it cannot be -- its\naddress or its offset in the file not on a host page, a page shared\nwith another segment, a host without the mapping (mapFixed) -- or is\nnot to be (src.Copy).  Bss\npast the file's bytes is mem's, already zero.\n" ^error [^{:tag (slice byte)} mem ^{:tag (slice (* elf/Prog))} loads ^{:tag (* ImageFile)} src]
+  ^{:go/breaks [3]} (let [pg (conv uint64 (os/Getpagesize))]
+    (range [_ p loads]
+      (when (== ^{:go/via [ProgHeader]} (.-Filesz p) 0)
+        (continue))
+
+      (let [off (+ (conv uint64 (.-Offset src)) ^{:go/via [ProgHeader]} (.-Off p))
+          ^{:line 111} end (roundUp (+ ^{:go/via [ProgHeader]} (.-Vaddr p) ^{:go/via [ProgHeader]} (.-Filesz p)) pg)]
+        (when (or (.-Copy src) (!= (% ^{:go/via [ProgHeader]} (.-Vaddr p) pg) 0) (!= (% off pg) 0) (shared loads p end))
+          (when [(values _ err) ^{:go/via [ReaderAt]} (.ReadAt p (subslice mem ^{:go/via [ProgHeader]} (.-Vaddr p) (+ ^{:go/via [ProgHeader]} (.-Vaddr p) ^{:go/via [ProgHeader]} (.-Filesz p))) 0)] (!= err nil)
+            (return (fmt/Errorf "the guest image's segment at %#x: %w" ^{:go/via [ProgHeader]} (.-Vaddr p) err)))
+
+          (continue))
+
+        (let [err (mapFixed (subslice mem ^{:go/via [ProgHeader]} (.-Vaddr p) end) (.Fd (.-File src)) (conv int64 off))]
+          (when (== err errNoMapFixed)
+            (when [(values _ err) ^{:go/via [ReaderAt]} (.ReadAt p (subslice mem ^{:go/via [ProgHeader]} (.-Vaddr p) (+ ^{:go/via [ProgHeader]} (.-Vaddr p) ^{:go/via [ProgHeader]} (.-Filesz p))) 0)] (!= err nil)
+              (return (fmt/Errorf "the guest image's segment at %#x: %w" ^{:go/via [ProgHeader]} (.-Vaddr p) err)))
+
+            (continue))
+
+          (when (!= err nil)
+            (return (fmt/Errorf "the guest image's segment at %#x, mapped: %w" ^{:go/via [ProgHeader]} (.-Vaddr p) err)))
+
+          ;; the file's bytes past the segment's: zeros, as a copy leaves them
+          ;; (written only where they are not, not to copy a page for nothing)
+          (when [tail (subslice mem (+ ^{:go/via [ProgHeader]} (.-Vaddr p) ^{:go/via [ProgHeader]} (.-Filesz p)) end)] (not (go/call zero tail))
+            (clear tail)))))
+
+
+    nil))
+
+
+
+
+^{:go/breaks [5] :go/end 146} (go/func shared "shared is whether a segment of loads other than p has memory in\n[p.Vaddr, end).\n" ^bool [^{:tag (slice (* elf/Prog))} loads ^{:tag (* elf/Prog)} p ^uint64 end]
+  (range [_ q loads]
+    (when (and (!= q p) (< ^{:go/via [ProgHeader]} (.-Vaddr q) end) (< ^{:go/via [ProgHeader]} (.-Vaddr p) (+ ^{:go/via [ProgHeader]} (.-Vaddr q) ^{:go/via [ProgHeader]} (.-Memsz q))))
+      (return true)))
+
+
+  false)
+
+
+^{:go/breaks [4] :go/end 155} (go/func zero ^bool [^{:tag (slice byte)} b]
+  (range [_ c b]
+    (when (!= c 0)
+      (return false)))
+
+
+  true)
+
+
+
+
+
+
+^{:go/end 196} (go/func imageSymbols "imageSymbols is the values of the symbols of the 64-bit ELF image f\nnamed in names, of those it defines: one pass over its symbol table,\nread with its strings, that makes no Symbol of each (f.Symbols makes\none of each of Arbace's 150,000, 30 MB the launcher kept to the end).\n" [^{:tag (* elf/File)} f & ^{:tag (slice string)} names] :results [(map string uint64) error]
+  (let [symtab (.SectionByType f elf/SHT_SYMTAB)]
+    (when (== symtab nil)
+      (return nil elf/ErrNoSymbols))
+
+    (when (>= (conv int ^{:go/via [SectionHeader]} (.-Link symtab)) (len (.-Sections f)))
+      (return nil (errors/New "the symbol table's strings are not a section")))
+
+    (let [(values syms err) (.Data symtab)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [(values strs ^:assign err) (.Data (aget (.-Sections f) ^{:go/via [SectionHeader]} (.-Link symtab)))]
+        (when (!= err nil)
+          (return nil err))
+
+        (let [found (lit (map string uint64))]
+          ;; each symbol: its name's offset (4 bytes), info, other, section (2),
+          ;; value (8), size (8); the first is the null symbol
+          (for [i elf/Sym64Size] (<= (+ i elf/Sym64Size) (len syms)) (set! i + elf/Sym64Size)
+            (let [at (.Uint32 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice syms i))]
+              (when (>= (conv int at) (len strs))
+                (continue))
+
+              (let [name (subslice strs at)]
+                (when [n (bytes/IndexByte name 0)] (>= n 0)
+                  (set! name (subslice name _ n)))
+
+                (range [_ w names]
+                  (when (== (conv string name) w)
+                    (aset found w (.Uint64 ^{:go/via [FileHeader]} (.-ByteOrder f) (subslice syms (+ i 8)))))))))
+
+
+
+          (return found nil))))))
