@@ -11,10 +11,10 @@ full in this file. Source files keep the copyright and license notices they came
 §3 and the BSD 3-Clause License require it); this file is the one place that states which license
 covers what.
 
-- `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`, `arbace/j2c/` and `arbace/g2c/`)
-  is derived from Clojure, https://github.com/clojure/clojure at
-  `98d735fab02f337cee654cb0629bddc09883a75a`, with ASM, https://gitlab.ow2.org/asm/asm at
-  `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
+- `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`,
+  `arbace/j2c/`, `arbace/g2c/` and `arbace/c2g/`, which are Arbace's own) is derived from
+  Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
+  with ASM, https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
   with its Java converted to Clojure class forms (doc/VENDOR-NOTES.md). Each file stays under its
   source's license:
@@ -30,6 +30,8 @@ covers what.
 
   Files there that are Arbace's own, not derived from Clojure (they say so in their header, such
   as `arbace/lang/KeywordInvokeSite.clj`), are under the Eclipse Public License 1.0 as Arbace.
+  The Go-build variants of vendored files (`arbace/lang/go/`, read by c2g only) are derived
+  from the files they vary, under their licenses.
 - `arbace/spec/` (`arbace/spec/alpha.clj`, `gen/alpha.clj`, `test/alpha.clj`): spec.alpha,
   https://github.com/clojure/spec.alpha at `v0.6.249`
   (`3d1efb353b8a95c699b4051ba8273568c21f874e`), Copyright (c) Rich Hickey, under the Eclipse
@@ -50,6 +52,15 @@ covers what.
   (doc/go/JRT-NOTES.md, phase 2a): Copyright 2009 The Go Authors, under Go's BSD 3-Clause
   License (text below). `overlay/go/runtime/arbace_local.clj` and `overlay/go/runtime.clj` are
   Arbace's own.
+- Excerpts of Go's standard library in g2c's cases and spec: `test/g2c/cases/s14_2_utf8.go`
+  (from `src/unicode/utf8/utf8.go`), `s14_3_sort.go` (from `src/sort/sort.go` and
+  `zsortinterface.go`), `s02_search.go` (`sort.Search`, from `src/sort/search.go`), the Go forms
+  of the same names (`.clj`) that hold them converted, and their code and forms in
+  doc/go/SPEC.md §2 (`sort.Search`), §14.2 and §14.3: from TamaGo's go1.27.1 tree, as above,
+  Copyright 2009 The Go Authors, under Go's BSD 3-Clause License (text below).
+- `go/`: jrt's hand-written Go forms (`go/arbace/jrt.clj`, `go/arbace/jrt/`) and the Go
+  build's main package (`go/arbace/cmd/arbace/`): Arbace's own, under the Eclipse Public License
+  1.0, except the parts of `go/arbace/jrt/` listed below.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"), written for Arbace in place of jdk26u's files of the same names (from their
   documented APIs, without their code): Arbace's own, under the Eclipse Public License 1.0. The
@@ -88,13 +99,14 @@ covers what.
   `overlay/jdk/java.base/sun/security/provider/SeedGenerator.java` its `getSystemEntropy` and
   `longToByteArray` (`sun/security/provider/SeedGenerator.java`), and the variants
   `overlay/jdk/variants/Provider.clj`, `Security.clj`, `ProviderConfig.clj`, `SunEntries.clj`,
-  `SunJCE.clj` and `DigestBase.clj` keep the code of the jdk26u methods they replace
-  (`java/security/Provider.java`, `Security.java`, `sun/security/jca/ProviderConfig.java`,
+  `SunJCE.clj`, `DigestBase.clj` and `NativePRNG.clj` keep the code of the jdk26u methods they
+  replace (`java/security/Provider.java`, `Security.java`, `sun/security/jca/ProviderConfig.java`,
   `sun/security/provider/SunEntries.java`, `com/sun/crypto/provider/SunJCE.java`,
-  `sun/security/provider/DigestBase.java`) where they keep it: Copyright (c) Oracle and/or its
-  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text
-  below); the rest of those files, `NativePRNG.clj`, the digests' variants (`MD5.clj`, `SHA.clj`, `SHA2.clj`,
-  `SHA5.clj`, `SHA3.clj`), `jdk/internal/jrt/HostRandom.java`,
+  `sun/security/provider/DigestBase.java`,
+  `src/java.base/unix/classes/sun/security/provider/NativePRNG.java`) where they keep it:
+  Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
+  with the Classpath Exception (text below); the rest of those files, the digests' variants
+  (`MD5.clj`, `SHA.clj`, `SHA2.clj`, `SHA5.clj`, `SHA3.clj`), `jdk/internal/jrt/HostRandom.java`,
   `sun/security/provider/JrtServices.java` and `com/sun/crypto/provider/JceServices.java` are Arbace's
   own.
 - `overlay/jdk/java.base/jdk/internal/jrt/HostPath.java` (doc/go/JRT-NOTES.md, "Files") holds
@@ -136,6 +148,12 @@ covers what.
   its affiliates, under the GNU General Public License version 2 with the Classpath Exception
   (text below); recorded as ports to be safe, by the rule of B7. The rest of the concurrency
   work's files (the other variants and overlay classes, `varhandle.clj`) is Arbace's own.
+- `overlay/jdk/variants/TreeMap.clj` (doc/go/JAVA-BASE.md, amendment JB2): its two
+  `buildFromIterator` methods are jdk26u's `buildFromSorted` (https://github.com/openjdk/jdk26u
+  at `baf63fb`, `src/java.base/share/classes/java/util/TreeMap.java`) without the deserializing
+  branch, and its other members keep the code of the members they replace: Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath
+  Exception (text below), by the rule of B7; the rest of the file is Arbace's own.
 - `go/arbace/jrt/fdlibm.clj` and the `FdLibm` part of `go/arbace/jrt/math.clj` (`Log`, `Cbrt`,
   `Pow`): jrt's hand-written Go forms porting, as written, https://github.com/openjdk/jdk26u at
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1
@@ -230,6 +248,61 @@ covers what.
   `CharacterData*` tables generated from the Unicode Character Database, `jdk.internal.icu`'s
   normalizer, ported from ICU4J): those files carry their notices, and are covered by jdk26u's
   GPLv2 with the Classpath Exception and, for their Unicode and ICU parts, by the licenses below.
+- The Go build's executables, `target/arbace-go/<arch>/arbace` (amd64 and arm64), which
+  `bin/arbace-go --build` makes (doc/go/EVAL-NOTES.md, doc/go/EXEC-NOTES.md): `bin/c2g --program`
+  translates the program into Go forms and `bin/g2c build` builds them with TamaGo's go1.27.1
+  toolchain (`G2C_GOROOT`) into static executables (`CGO_ENABLED=0`: no C code, no libc). Each
+  combines works under several licenses, each covering its part:
+  - Arbace: the `arbace/` namespaces the executable carries (the vendored Clojure, spec.alpha,
+    core.specs.alpha and Arbace's own, translated by c2g and embedded as sources with the image
+    of their analyzed forms), jrt (`go/`, and `overlay/jdk/` translated with jdk26u's Java) and
+    the main package (`go/arbace/cmd/arbace/` with what c2g writes): under the licenses given
+    above for their files, the Eclipse Public License 1.0 but for `arbace/lang/Murmur3.clj`
+    (the Apache License 2.0) and the parts derived from jdk26u (the GNU General Public License
+    version 2 with the Classpath Exception). ASM (`arbace/asm/`) is not in them.
+  - jdk26u: the classes of java.base that `bin/jrt-convert` converts to class forms from
+    https://github.com/openjdk/jdk26u at `baf63fb` (835 files with the default locale set, the
+    sources the JDK build generates among them; with `JRT_LOCALES`, jdk.localedata's bundles of
+    the locales selected) and c2g translates into Go, with the generic signatures c2g writes from
+    them (`arbace/classes/generics.edn`, embedded): Copyright (c) Oracle and/or its affiliates,
+    under the GNU General Public License version 2 with the Classpath Exception (text below).
+    With them, the third-party data and code the JDK bundles that they hold or embed, under
+    their own licenses as listed above ("The JDK's resource data"): the Unicode Character
+    Database's (`CharacterData*`, `uniName.dat`, the break iterators' data), ICU4J's (the
+    normalizer, `nfc.nrm`, `nfkc.nrm`, `ubidi.icu`) and CLDR's (the locale bundles) under the
+    Unicode License V3; the IANA time zone database's (`tzdb.dat`), in the public domain (in
+    jdk26u's copies under its license). Of the JDK's other bundled third-party code (jdk26u's
+    `src/java.base/share/legal/`), none is in them: zlib's is native code that the Go build
+    does not translate (Go's `compress/zlib` inflates instead), nor are the public suffix list,
+    SipHash, libutl, GCC's or the Thai dictionary (jdk.localedata).
+  - Go: the runtime and the packages of the standard library the program imports (among them
+    `runtime`, `os`, `syscall`, `net`, `time`, `compress/zlib`, `hash/crc32`, `crypto/md5`,
+    `crypto/sha1`, `crypto/sha256`, `crypto/sha512`, `crypto/sha3`, `math`, `reflect`, `embed`),
+    statically linked from TamaGo's go1.27.1 tree (https://github.com/usbarmory/tamago-go,
+    `VERSION` "go1.27.1", 2026-08-28), with jrt's overlay of the runtime (`overlay/go/`, above):
+    Copyright 2009 The Go Authors, under Go's BSD 3-Clause License (text below); the tree's
+    `PATENTS` grants Google's patent license for it. A few of its files keep the notice of the
+    code they derive from (as `src/math/log.go`, `exp.go` and the others from FreeBSD's msun:
+    Copyright (C) 1993 by Sun Microsystems, Inc., "Permission to use, copy, modify, and
+    distribute this software is freely granted, provided that this notice is preserved").
+
+  The test build, `target/arbace-go/<arch>/arbace-tests` (`bin/arbace-go --build-tests`), adds
+  Clojure's suite's Java fixtures (`test/java` of https://github.com/clojure/clojure at
+  `98d735fab02f337cee654cb0629bddc09883a75a`, renamed and converted by j2c): under the Eclipse
+  Public License 1.0, as Clojure.
+
+  So a distribution of an executable carries this file (the texts of the Eclipse Public License
+  1.0, the GNU General Public License version 2 with the Classpath Exception, Go's BSD 3-Clause
+  License, the Apache License 2.0 and the Unicode License V3, and the notices above), as the BSD
+  3-Clause License, the Apache License 2.0 (§4) and the Unicode License V3 require for binary
+  copies, and makes the source available: under the GNU General Public License version 2 (§3),
+  the complete corresponding source of jdk26u's parts, with the executable or by a written
+  offer (jdk26u at `baf63fb` and this repository at the revision built, whose tools convert and
+  translate it); under the Eclipse Public License 1.0 (§3), a statement that the source of
+  Arbace's parts is available and how to obtain it. The Classpath Exception lets the executable
+  as a whole be distributed under terms of the distributor's choice, provided that the license
+  of each linked independent module is also met; jdk26u's parts stay under the GNU General
+  Public License version 2 with the Classpath Exception.
 - `seed/arbace-seed.jar`: the binary seed of the bootstrap, Arbace as built at the tag
   `arbace-for-java-26-v1` (doc/VENDOR-NOTES.md, "The binary seed"): the `arbace/` sources of
   that tag and the classes compiled from them. Each entry is under the license of the `arbace/`
