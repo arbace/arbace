@@ -1380,7 +1380,7 @@ through the class loaders, JRT-NOTES.md "Resources by URL"), and two oracle diff
   throws `InstantiationError` naming the class, before evaluating the arguments, as the JVM's
   `new` instruction does; the reflective path keeps `Constructor.newInstance`'s
   `InstantiationException`, as the JVM's `Reflector.invokeConstructor` gives it. This needed
-  `java.lang.InstantiationError` in the closure (`test/g2a/jrt_sources.ae`).
+  `java.lang.InstantiationError` in the closure (`test/jrt/jrt_sources.ae`).
 - `(eval (quote (deftype Foo/2 [a])))`: the JVM's error comes from `deftype*`'s analysis, the
   stub's `defineClass`, whose `ClassLoader.preDefineClass` refuses a binary name with `/` (or a
   leading `[`): `NoClassDefFoundError: IllegalName: compile__stub.user.Foo/2`. The Go build's

@@ -19,8 +19,8 @@ comparison of float constants).
 
 ## The tool
 
-`bin/jrt-convert [--twice]` (bash) with its Clojure in `test/g2a/jrt_sources.ae`
-(`g2a.jrt-sources`, next to `g2a.java-surface`, whose class reading and treatments it reuses).
+`bin/jrt-convert [--twice]` (bash) with its Clojure in `test/jrt/jrt_sources.ae`
+(`jrt.jrt-sources`, next to `jrt.java-surface`, whose class reading and treatments it reuses).
 It runs on Arbace's `target/stage2` (`bin/build-arbace` first) and writes only under
 `.tmp/jrt/` (`JRT_WORK`), regenerated on every run and not tracked (the user's decision for
 j2a's output). Steps (`JRT_STEPS`, default all):
@@ -32,7 +32,7 @@ j2a's output). Steps (`JRT_STEPS`, default all):
 | convert | `bin/j2a -m arbace.j2a.main jdk --check conv java.base src/java.base`: attributed as `java.base` with `--patch-module` against the running JDK (built from the same sources), run from `.tmp/jrt` so its patch directories stay there | `conv/` (184 class-form files and 17 package files, 70,146 lines) |
 | javac | the same tree compiled twice by javac with `java.base`'s build options (`-XDstringConcat=inline`, `--patch-module`, `-implicit:none`, as `bin/j2a-check --jdk`) | `ref1/`, `ref2/` (591 classes) |
 | check | `bin/class-forms-check` on chunks of about 8 files, `JRT_JOBS` JVMs (default 4, `-Xmx3g` each), `REF=ref1:ref2` (classes javac made from a file that the forms did not make count as differences), the compiled classes written out | `res/`, `forms-classes/` |
-| edge | `g2a.jrt-sources/write-edge` on the forms' classes, and on javac's for a cross-check (the two must be the same) | `edge.edn`, `edge-javac.edn` |
+| edge | `jrt.jrt-sources/write-edge` on the forms' classes, and on javac's for a cross-check (the two must be the same) | `edge.edn`, `edge-javac.edn` |
 | report | the counts and the edge's tables; a hash of every file of `src/`, `conv/`, `forms-classes/` | `report.md`, `report.edn`, `manifest.sha256` |
 
 `--twice` then makes the sources, runs the generators and j2a a second time into
@@ -236,7 +236,7 @@ JDK's resource data merged, `bin/jrt-convert` translated **424 files** (`sources
 `MODULE KIND REL`): 383 of `src/java.base/share/classes` (KIND
 `share`), 3 of `src/java.base/unix/classes` (`unix`), 19 generated (`gensrc`), 2 of another
 module (`share:java.sql`) and 17 of jrt's own Java (`overlay`); 389 with the files (below), 35
-more with the JDK's resource data (below). Besides the measured closure (`test/g2a/jrt_sources.ae`):
+more with the JDK's resource data (below). Besides the measured closure (`test/jrt/jrt_sources.ae`):
 
 - `added-sources`: java.base files added, each with its reason there: phase 2C's 31 (the
   stand-ins jrt had without sources, the standard streams' `PrintStream` and interfaces,
@@ -311,7 +311,7 @@ Two options of the conversion (amendment S2):
   chunks' sources on its patch path, its own first. jrt's own Java in `jdk.internal.jrt` is used
   across packages (`java.io`), and with more files the chunks split it apart (javac: "package
   jdk.internal.jrt does not exist"). Opt-in, so `bin/j2a-check --jdk` is unchanged.
-- **`known-differences`** (`g2a.jrt-sources`): files whose classes differ from javac's in known,
+- **`known-differences`** (`jrt.jrt-sources`): files whose classes differ from javac's in known,
   harmless ways, by file with the kind and the number of differences, count as converted when
   the number matches (any other difference fails): a lambda constructing a local class passes
   the class's captured variables in capture order, javac in reverse (`Collectors` 3,
@@ -365,7 +365,7 @@ jdk26u at `baf63fb`:
 ## Time (2026-10-10)
 
 java.time in the Go build (JRT-NOTES.md, "Time"; the user's decision of 2026-10-10), from jdk26u
-at `baf63fb`, `test/g2a/jrt_sources.ae`'s `time-sources` and `added-gensrc`. Amendments TM2,
+at `baf63fb`, `test/jrt/jrt_sources.ae`'s `time-sources` and `added-gensrc`. Amendments TM2,
 TM3 and TM9 (the time-zone database as an image file of the resource data, java.base's CLDR data
 as generated sources, the shape check's `FROM_SOURCE`) were accepted on 2026-10-10 and are folded
 here and in A2G-SPEC §4.1, §10.3:
@@ -434,7 +434,7 @@ here and in A2G-SPEC §4.1, §10.3:
 ## Processes (2026-10-10)
 
 Processes in the Go build (JRT-NOTES.md, "Processes"; the user's decision of 2026-10-10), from
-jdk26u at `baf63fb`, `test/g2a/jrt_sources.ae`'s `process-sources`. Amendments PR1-PR7 were
+jdk26u at `baf63fb`, `test/jrt/jrt_sources.ae`'s `process-sources`. Amendments PR1-PR7 were
 accepted on 2026-10-10 (A2G-SPEC §4.1, §7.11, §9.1, §9.4, §11; §16, "Processes"):
 
 - **Sources added**: `src/java.base/share/classes/java/lang/Process.java`, `ProcessBuilder.java`,
@@ -470,7 +470,7 @@ build (JRT-NOTES.md, "Resources by URL"; branch `gofix`; amendments FX6 and FX7,
 ## Security (2026-10-10)
 
 java.security's basics in the Go build (JRT-NOTES.md, "Security"; amendments SC4,
-SC5, accepted 2026-10-10; A2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`: `test/g2a/jrt_sources.ae`'s `security-sources`, 75 files (74 of
+SC5, accepted 2026-10-10; A2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`: `test/jrt/jrt_sources.ae`'s `security-sources`, 75 files (74 of
 `src/java.base/share/classes`, `NativePRNG` of `src/java.base/unix/classes`), and jrt's own
 `javax/crypto/JceSecurity.java`, `sun/security/provider/SeedGenerator.java`,
 `sun/security/provider/JrtServices.java`, `com/sun/crypto/provider/JceServices.java` and
@@ -486,7 +486,7 @@ converted and compiled to javac's class shapes, 713 identical and the 4 known di
 java.text and jdk.localedata's locales in the Go build (JRT-NOTES.md, "Text and locales"; the
 user's decision of 2026-10-10; amendments TL4, TL5 and TL8, accepted 2026-10-11 and folded
 here and in A2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`,
-`test/g2a/jrt_sources.ae`'s `text-sources`, `text-locales` and `added-gensrc`:
+`test/jrt/jrt_sources.ae`'s `text-sources`, `text-locales` and `added-gensrc`:
 
 - **Sources added** (`text-sources`, paths below `src/java.base/share/classes`): `java/text/` but
   the classes already in (`CharacterIterator`, `Normalizer`, `ParsePosition`): `Annotation`,
@@ -530,7 +530,7 @@ here and in A2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`,
   `support/gensrc/jdk.localedata`); the JRE collation data of the selected locales,
   `src/jdk.localedata/share/classes/sun/text/resources/ext/CollationData_X.java` (KIND
   `share:jdk.localedata`); and jrt's `jdk/internal/jrt/LocaleDataIndex.java` (KIND `jrtgen`,
-  written by `g2a.jrt-sources/write-locale-data`). The selection is `JRT_LOCALES`: unset or
+  written by `jrt.jrt-sources/write-locale-data`). The selection is `JRT_LOCALES`: unset or
   `none` (the default, the user's decision of 2026-10-11: no jdk.localedata bundle), `common`
   (`text-locales`, 27 locales), `all`, or language tags. `sources.txt`'s line `java.base locales SPEC`
   (`JRT_LOCALES`) is expanded into these by the generate step (`expand-locales`). **All generated

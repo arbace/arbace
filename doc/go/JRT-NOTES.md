@@ -1437,7 +1437,7 @@ checked, and the `java.util.regex` port run on the oracle's regex corpus.
 `bin/jrt-convert` now translates **223 files** (215 of jdk26u, 8 generated), all compiled from
 their class forms to javac's class shapes (630 classes), against the measured closure's 184:
 
-- **31 jdk26u files added** (`g2a.jrt-sources/added-sources`, outside the measured closure,
+- **31 jdk26u files added** (`jrt.jrt-sources/added-sources`, outside the measured closure,
   each for a reason recorded there):
   - the 26 classes jrt had as stand-ins without sources (all plain Java: the exceptions
     `AbstractMethodError`, `ArrayStoreException`, `CloneNotSupportedException`,
@@ -1591,7 +1591,7 @@ hand-written `Date`; the other classes join the world around it.
 |---|---|---|
 | `java.time.Instant` | translated from jdk26u (`added-sources`), with `DateTimeException`; a Go-build variant (`overlay/jdk/variants/Instant.ae`) for `toString` and `now()` | plain Java over two fields; what it needs of the rest of `java.time` (`DateTimeFormatter` for `toString` and `parse`, `Clock` for `now`, `ChronoField`/`ChronoUnit` for the temporal accessors) stays outside the world as operation-level stubs. `toString` calls jrt's own `jdk.internal.jrt.TimeText.instant`, `ISO_INSTANT`'s text (10,000-year periods, signed years beyond 9999, the fraction in groups of three); `now()` is `ofEpochMilli(currentTimeMillis)` (millisecond precision) |
 | `java.util.Date` | hand-written (decision 7), now **non-leaf** (`Date_I`, `Impl_` methods, `Ctor_...`; manifest) | `Timestamp` extends it. Its implementations call `getTime()` virtually where the JDK's do (`equals`, `hashCode`, `compareTo`, `before`, `after`); `clone` copies the whole object (a subclass's `CloneShallow`). `toInstant` and `from(Instant)` name the translated `Instant`, which jrt's own build cannot: a2g writes their table entries (`arbace/a2g/out.ae`, `support-table-forms`, as for `String.format`), so reflection (the REPL) finds them; translated code calling them would be a missing operation (none does) |
-| `java.sql.Timestamp` | translated from jdk26u (`src/java.sql/share/classes/java/sql/Timestamp.java`), with `java.sql.Date` (its `toString` uses `Date.formatDecimalInt`) | plain Java over `Date`'s deprecated fields. Both are another module's files: `bin/jrt-convert` copies them into the java.base tree (KIND `share:java.sql` in `sources.txt`, `added-module-sources` in `test/g2a/jrt_sources.ae`), and javac's `--patch-module java.base` takes them. `java.sql.Date`'s Go name would collide with jrt's `Date`: a2g's rename table names it `Sql_Date` |
+| `java.sql.Timestamp` | translated from jdk26u (`src/java.sql/share/classes/java/sql/Timestamp.java`), with `java.sql.Date` (its `toString` uses `Date.formatDecimalInt`) | plain Java over `Date`'s deprecated fields. Both are another module's files: `bin/jrt-convert` copies them into the java.base tree (KIND `share:java.sql` in `sources.txt`, `added-module-sources` in `test/jrt/jrt_sources.ae`), and javac's `--patch-module java.base` takes them. `java.sql.Date`'s Go name would collide with jrt's `Date`: a2g's rename table names it `Sql_Date` |
 | `java.util.Calendar`, `GregorianCalendar`, `TimeZone`, `sun.util.calendar.ZoneInfo` | jrt's own Java (`overlay/jdk/java.base/`), behaving as the JDK's | jdk26u's `Calendar`, `GregorianCalendar`, `TimeZone` and `SimpleTimeZone` are 9,600 lines and need `sun.util.calendar` (12 files, 4,700 lines), the time zone database (`ZoneInfoFile` reads `tzdb.dat`) and the locale providers (`CalendarDataUtility` for the first day of the week): too much for fixed-offset zones. jrt's are 2,300 lines |
 
 **jrt's calendar** (`Calendar.java`, `GregorianCalendar.java`, `TimeZone.java`, `ZoneInfo.java`):
@@ -1679,7 +1679,7 @@ The other causes of EVAL-NOTES.md's "Failure causes" that are jrt's, and the blo
 Clojure's test suite on the Go build (EVAL-NOTES.md, "Phase 2C") that are jrt's surface. Per
 item, what was done; the oracle and suite results are in EVAL-NOTES.md, "Phase 2B".
 
-### The closure, grown again (`test/g2a/jrt_sources.ae`, `added-sources`)
+### The closure, grown again (`test/jrt/jrt_sources.ae`, `added-sources`)
 
 `bin/jrt-convert` now translates 340 files (was 223), all converted and compiled to javac's
 shapes but four of known kinds (below):
@@ -2164,7 +2164,7 @@ All accepted by the user 2026-10-10 and folded where they belong (A2G-SPEC §16,
 
 - **FS1 (JRT-SOURCES.md, the tool) Files of `src/java.base/unix/classes`.** `bin/jrt-convert`
   copies them like the shared ones; `sources.txt` gives them KIND `unix`
-  (`g2a.jrt-sources/print-sources`). For `UnixFileSystem`, `DefaultFileSystem` and the `file:`
+  (`jrt.jrt-sources/print-sources`). For `UnixFileSystem`, `DefaultFileSystem` and the `file:`
   handler, whose shared counterparts are abstract or absent. *Accepted 2026-10-10, folded into
   JRT-SOURCES.md ("The closure as grown", Files).*
 - **FS2 (decision) `java.nio.file` as jrt's own `Path`, `Files` and `HostPath`** (above,
@@ -2804,7 +2804,7 @@ operations a2g cannot write as the atomic types' own methods are jrt's (`varhand
 code is what one would write by hand: `NEXT.compareAndSet(p, null, newNode)` is
 `(.CompareAndSwap (.-F_next p) nil newNode)` on an `atomic.Pointer[ConcurrentLinkedQueue_Node]`.
 
-**Translated from jdk26u** (JRT-SOURCES.md, `concurrent-sources` in `test/g2a/jrt_sources.ae`):
+**Translated from jdk26u** (JRT-SOURCES.md, `concurrent-sources` in `test/jrt/jrt_sources.ae`):
 `ConcurrentLinkedQueue`, `ConcurrentLinkedDeque`, `ConcurrentSkipListMap`,
 `ConcurrentSkipListSet`, `CopyOnWriteArrayList`, `CopyOnWriteArraySet`, `LinkedBlockingDeque`,
 `PriorityBlockingQueue`, `DelayQueue`, `SynchronousQueue`, `LinkedTransferQueue`, `Exchanger`,
@@ -2963,7 +2963,7 @@ All accepted by the user 2026-10-10 and folded where they belong (A2G-SPEC §16,
 - **JC2 (A2G-SPEC §7.8) A `switch` over an enum outside the closed world** switches on an
   operation-level stub (above). *Accepted 2026-10-10, folded into A2G-SPEC §7.8.*
 - **JC3 (JRT-SOURCES.md, the closure) The concurrent classes**: `concurrent-sources` in
-  `test/g2a/jrt_sources.ae` (the list above, with `PriorityQueue`, `SortedSet` and
+  `test/jrt/jrt_sources.ae` (the list above, with `PriorityQueue`, `SortedSet` and
   `RandomSupport`), jrt's own Java `ThreadPerTaskExecutor`, `Delays`, `ForkJoinPools`,
   `ThreadLocalRandomProbes` and `jdk.internal.vm.SharedThreadContainer`, and the variants above. *Accepted 2026-10-10, folded into JRT-SOURCES.md ("The closure as grown").*
 - **JC4 (A2G-SPEC §8.4, §9.2) `ThreadLocalRandom` translated**: jrt's `Thread` has the JDK's
@@ -2992,7 +2992,7 @@ All accepted by the user 2026-10-10 and folded where they belong (A2G-SPEC §16,
   ticker pending for the program's life, so a program whose threads all wait forever waits, as
   on the JVM; `bin/arbace-go --smoke` checks main's end (a non-daemon thread outliving main,
   agents without and with `shutdown-agents`). *Accepted 2026-10-10, folded into A2G-SPEC §8.4 (`RunMain`).*
-- **JC10 (`bin/arbace-go`) The gate's key** includes `test/g2a/jrt_sources.ae`, which says
+- **JC10 (`bin/arbace-go`) The gate's key** includes `test/jrt/jrt_sources.ae`, which says
   what the executable is built from (it changes the conversion, but the key did not see it). *Accepted 2026-10-10, it stays here, `bin/arbace-go` holds it.*
 
 # Size: trimming the executable
@@ -3427,7 +3427,7 @@ at a time (single blocks), and short digests are unchanged, 3 to 8 times slower 
 
 ## What was done
 
-- **The closure** (`test/g2a/jrt_sources.ae`, `security-sources`; amendment SC4): 75 files of
+- **The closure** (`test/jrt/jrt_sources.ae`, `security-sources`; amendment SC4): 75 files of
   jdk26u at `baf63fb`: `java/security/`'s `MessageDigest`, `MessageDigestSpi`,
   `DigestInputStream`, `DigestOutputStream`, `SecureRandom`, `SecureRandomSpi`,
   `SecureRandomParameters`, `DrbgParameters`, `Provider`, `Security`, `Key`,
@@ -3677,7 +3677,7 @@ is looked for right after the `I` (the JDK skips other combining marks between t
 `bin/jrt-convert`'s generate step runs `CLDRConverter` a second time as
 `make/modules/jdk.localedata/Gensrc.gmk` does (`-baselocales en-US`, without `-basemodule`: every
 locale's bundles, 1,531 files), and takes the selection: `JRT_LOCALES` (unset or `default`:
-`text-locales` of `test/g2a/jrt_sources.ae`; `all`; `none`; or comma-separated language tags; since the user's decision of 2026-10-11 the
+`text-locales` of `test/jrt/jrt_sources.ae`; `all`; `none`; or comma-separated language tags; since the user's decision of 2026-10-11 the
 default is `none`, and `text-locales` is the named set `common`).
 The selection is expanded in the generate step (`expand-locales`): each tag's candidate
 locales, with CLDR's parent locales read from the generated `CLDRBaseLocaleDataMetaInfo` (en-GB

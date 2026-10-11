@@ -2535,7 +2535,7 @@ class before evaluating its arguments, as the JVM's `new` instruction does (the 
 keeps `Constructor.newInstance`'s `InstantiationException`); a `deftype*` stub whose name has
 `/` or a leading `[` is `NoClassDefFoundError: IllegalName: NAME`, as
 `ClassLoader.preDefineClass` refuses it. `java.lang.InstantiationError` joins the closure
-(`test/g2a/jrt_sources.ae`).
+(`test/jrt/jrt_sources.ae`).
 
 ### 10.3 Classes and resources by name
 
@@ -4160,7 +4160,7 @@ the closure: JRT-SOURCES.md. JC4 `ThreadLocalRandom` translated over the Thread'
 `ForkJoinPool` an `ExecutorService`, `CompletableFuture`'s delays on threads: §8.4. JC8 the
 additions to jrt's hand-written classes (`Thread.State`, `Thread.Builder`, `Future.State`,
 `LockSupport`'s blockers, `Unsafe`): §11. JC9 no Go deadlock crash at main's end: §8.4. JC10
-`bin/arbace-go`'s gate key covers `test/g2a/jrt_sources.ae`.
+`bin/arbace-go`'s gate key covers `test/jrt/jrt_sources.ae`.
 
 **Time** (JRT-NOTES.md, "Time"; accepted by the user 2026-10-10): TM1 java.time in the world,
 the ISO chronology alone, its variants: §4.1. TM2 `lib/tzdb.dat` as resource data, an image

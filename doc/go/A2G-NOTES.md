@@ -563,7 +563,7 @@ and the `java.util.regex` port run on the oracle's regex corpus. jrt's side is J
 
 | where | what |
 |---|---|
-| `bin/jrt-convert`, `test/g2a/jrt_sources.ae` | 31 jdk26u files added to the closure (`added-sources`) and jrt's own Java (`overlay/jdk/java.base`, KIND `overlay`): 223 files, all shape-identical to javac's; jrt's own files checked in one chunk |
+| `bin/jrt-convert`, `test/jrt/jrt_sources.ae` | 31 jdk26u files added to the closure (`added-sources`) and jrt's own Java (`overlay/jdk/java.base`, KIND `overlay`): 223 files, all shape-identical to javac's; jrt's own files checked in one chunk |
 | `overlay/jdk/` (new) | jrt's Java (`FileDescriptor`, `FileInputStream`, `FileOutputStream`, `OutputStreamWriter`, `InputStreamReader`, `jdk.internal.jrt.HostFiles`, `StandardStreams`, `CaseInsensitiveComparator`) and the JDK's Go-build variants (`variants/CaseFolding.ae`) |
 | `arbace/a2g/main.ae` (shared, small) | the JDK's variant files (`overlay/jdk/variants`) when the JDK is an input; jrt's statics a2g writes (below) declared to the scan, their classes' members rooted |
 | `arbace/a2g/out.ae` (shared, small) | a2g's support writes `System_in`/`out`/`err`, `System.setIn`/`setOut`/`setErr` and their initialization (by `StandardStreams`), `StderrPrint` through `System.err`, `String_CASE_INSENSITIVE_ORDER`, and `String`'s `split` (2), `replaceAll`, `replaceFirst`, `matches` over `Pattern` (`string-regex-methods`), each only when its classes are translated; `java-names`: a class of jrt's Java registered under the JDK's name it stands for |

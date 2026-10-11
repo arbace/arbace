@@ -285,7 +285,7 @@ every change that can change it, and costs nothing on the others.
 check `go` runs `bin/arbace-go --gate`, concurrently with the suite on stage 2 and the class
 forms tests (not with `--full`, whose Go chain builds and smoke-tests anew). It computes a key,
 the SHA-256 of the contents of `arbace/`, `go/`, `overlay/` and `bin/lib/`, of
-`doc/go/java-surface.edn` and `test/g2a/jrt_sources.ae` (JC10), the seed's hash and the
+`doc/go/java-surface.edn` and `test/jrt/jrt_sources.ae` (JC10), the seed's hash and the
 scripts of the build (`bin/arbace-go`, `a2g`, `g2a`, `j2a`, `jrt`, `jrt-convert`, `arbace-j`
 (then `arbace`), `build-arbace`), and of the toolchains (TamaGo's
 `VERSION`, `java -version`, jdk26u's commit): about 0.1 s. When `.tmp/arbace-go-gate/key` holds
