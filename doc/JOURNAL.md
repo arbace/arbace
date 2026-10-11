@@ -421,3 +421,16 @@ the first. The history before it is on the frozen branches and in git history:
   scripts by `ref:NAME`, rather than an explicit call only; the in-memory fs saved to and seeded
   from a ref as a tar, explicitly (`save-fs!`, `ARBACE_BOX_FS`), rather than EDN or not in S3;
   a host tool in the launcher (`arbace-box --store DIR put|get|ref|ls`).
+
+## 2026-10-11: B1b S5 started: the network; D12 decided
+
+- Agent, branch `box-s5`, beside S3 (new hypercalls numbered from 40). The user's decisions, all
+  as recommended: D12, a stream proxy (TCP streams through hypercalls, the launcher dialing and
+  listening on the host under a policy), rather than packets with gVisor's netstack in the guest
+  (not in std: a large new third-party vendoring; the host would see only packets); the policy:
+  no network unless the launcher allows it, listening on loopback by default, dialing by an
+  allow-list of host:port patterns, rather than one unrestricted switch or loopback always on;
+  the scope: TCP only, names resolved by the host under the same policy, TLS in the guest only if
+  jrt's Linux build already has it, rather than UDP too or TLS required; the socket REPL by the
+  same `arbace.server.repl` mechanism as natively, its port on the host's loopback, rather than a
+  launcher flag.

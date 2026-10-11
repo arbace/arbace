@@ -65,8 +65,11 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   unless `ARBACE_BOX_STORE` names a directory; namespaces and scripts from refs (`store:` in
   `ARBACE_PATH`, `ref:NAME`); the in-memory fs saved to and seeded from a tar in a ref; a host
   tool `arbace-box --store DIR put|get|ref|ls` (the user's decisions, 2026-10-11).
-- Then S5, the network (D12 decided there); each re-runs S6's proof. Then this milestone's
-  freeze (`bin/gate --full`).
+- S5 in progress, the network (D12 decided: a stream proxy): TCP streams through hypercalls,
+  the launcher dials and listens on the host; no network unless the launcher allows it, listening
+  on loopback by default, dialing by an allow-list; DNS by the host; TLS only if jrt has it; the
+  socket REPL as natively, its port on the host's loopback. S3 and S5 each re-run S6's proof.
+  Then this milestone's freeze (`bin/gate --full`).
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 
