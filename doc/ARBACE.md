@@ -26,7 +26,7 @@ https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`
 the two seed fixes recorded in the journal on that branch
 ([JOURNAL.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/JOURNAL.md),
 2026-10-06). It was derived on 2026-10-07 by `bin/vendor-arbace` (on that branch; converter
-`arbace.j2a`, renaming `arbace.j2a.rename`) and is maintained by hand since.
+`arbace.j2c`, renaming `arbace.j2c.rename`; since renamed `arbace.j2a` and `arbace.c2a.rename`) and is maintained by hand since.
 
 Also vendored, renamed alike: clojure.spec, the two libraries upstream Clojure at that revision
 depends on (`pom.xml`), as `arbace.spec.alpha`, `arbace.spec.gen.alpha`, `arbace.spec.test.alpha`

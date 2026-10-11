@@ -53,7 +53,7 @@ bin/j2a-check --jdk [MODULE...]
   under `.tmp/`.
 - `--rename clojure=arbace` renames the package prefix in every class name, namespace and path
   (agenda step 4). String literals are left alone (`"clojure.core"` in `RT` stays); step 4
-  renamed them afterwards with `arbace.j2a.rename` (`doc/VENDOR-NOTES.md`; `bin/vendor-arbace`
+  renamed them afterwards with `arbace.j2c.rename` (now `arbace.c2a.rename`) (`doc/VENDOR-NOTES.md`; `bin/vendor-arbace`
   on the branch `arbace-for-java-26`).
 - `--check` reads every output file back with the core's `read` and the EDN reader (on Arbace
   `arbace.core/read`, `arbace.edn/read`), and
