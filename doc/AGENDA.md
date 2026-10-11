@@ -168,12 +168,11 @@ gate: CLAUDE.md.)
     55.9% of members, Arbace's own use 93.0%. The documents reviewed and fixed (about 330
     findings, 2026-10-10/11), the licensing records completed (LICENSE.md's entry for the Go
     executables; the overlay files keeping jdk26u code).
-  - Step 8, the freeze (2026-10-11): `bin/gate --full` passed (19m34s, `e09139d`); the PGO
-    executables built and checked (smoke on both architectures, arm64 under qemu; jrt's tests on
-    both); the coverage is this code's; [go/FREEZE.md](go/FREEZE.md); the README's "Arbace for
-    Golang". The branch `arbace-for-golang` and the tag `arbace-for-go1.27.1-v1` on the freeze
-    commit, on the user's confirmation; then main's journal starts over and FREEZE.md moves to
-    the branch only.
+  - Step 8, the freeze, done (2026-10-11): `bin/gate --full` passed (19m34s, `e09139d`); the PGO
+    executables built and checked (smoke on both architectures, arm64 under qemu; jrt's tests
+    on both); the branch `arbace-for-golang` and the tag `arbace-for-go1.27.1-v1` on `e358a78`
+    ([FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-golang/doc/go/FREEZE.md) on the
+    branch); main's journal started over.
 
 - After the freeze (the user, 2026-10-10), in order:
   1. The `.ae` file extension (the user's decision, 2026-10-09; first after the freeze by the

@@ -9,10 +9,14 @@ parts of it is always allowed. The work is a derivation done once by hand, so it
 reproducible from the record we keep.
 
 Direction:
-- Short term: Arbace is excellent on the modern JVM (Java 26), binary compatible with it.
-- Before breaking away from the JVM and the `.class` format, the JVM state of the art was frozen
-  on the branch `arbace-for-java-26` (tag `arbace-for-java-26-v1`, 2026-10-08), advertised in
-  the README.
+- Two states of the art are frozen, each on a well-known branch advertised in the README, which
+  takes fixes only (tags `-v2`, `-v3`...):
+  - the JVM: `arbace-for-java-26` (tag `arbace-for-java-26-v1`, 2026-10-08), Arbace on Java 26,
+    binary compatible with it;
+  - Go: `arbace-for-golang` (tag `arbace-for-go1.27.1-v1`, 2026-10-11), Arbace as one static
+    executable for Linux, its runtime and the part of jdk26u it needs translated into Go.
+- Now: the `.ae` rename, the Arbace dialect's tools (c2a, j2a, g2a), Arbace's own version, then
+  the box: Arbace built with TamaGo, as a guest of go-whim's monitor (doc/AGENDA.md).
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through j2c. The language is Clojure extended with an idiomatic
   representation of Java (the class forms), and later of Go: the Arbace language. The goal is a
@@ -93,9 +97,9 @@ Prior art:
 - `doc/JOURNAL.md` is append-only. Add a dated entry for every important decision or action: what
   was done, why, and what alternatives were considered. Name sources precisely, including
   repo, path and commit/tag for anything studied or vendored. Never edit or delete past entries.
-  Correct them with a new entry. Write it so the progress could be recreated from it. At the
-  freeze (2026-10-08) main's journal started over, by the user's decision; the history up to
-  it is on `arbace-for-java-26` and in git.
+  Correct them with a new entry. Write it so the progress could be recreated from it. At each
+  freeze main's journal started over, by the user's decision: the history up to 2026-10-08 is
+  on `arbace-for-java-26`, from then to 2026-10-11 on `arbace-for-golang`, and all of it in git.
 - When vendoring code from prior art, record its origin (repo, path, revision) in the journal and
   next to the vendored code (for `arbace/`, which holds only `.clj` files: `doc/ARBACE.md`), and
   its license in `LICENSE.md`.

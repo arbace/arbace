@@ -56,8 +56,9 @@ s. On amd64 it is about 66 MB, passes Clojure's test suite as far as it runs (on
 with the suite's Java fixtures: 76 namespaces, 20,506 of 20,520 assertions) and matches the JVM
 on 22,232 of the oracle's 22,278 cases (42 of the rest need locale data beyond root and English,
 which the default build leaves out); it leaves out `gen-class`, XML, Java serialization and
-Swing. [doc/go/FREEZE.md](doc/go/FREEZE.md) describes what it holds, how to build, run and
-verify it, and its known limits.
+Swing. [doc/go/FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-golang/doc/go/FREEZE.md)
+on the branch describes what it holds, how to build, run and verify it, and its known limits.
+Main still builds it: the commands below, now leading to what comes next.
 
 ```sh
 bin/build-arbace               # the JVM Arbace first: the bootstrap and the tools run on it
@@ -69,7 +70,8 @@ bin/arbace-go                  # a REPL (with rlwrap on a terminal); also -e '(+
 ## Documentation
 
 - [doc/AGENDA.md](doc/AGENDA.md): where the work stands and what comes next
-- [doc/go/FREEZE.md](doc/go/FREEZE.md): Arbace for Golang: build, run, verify, the frozen branch
+- [doc/go/FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-golang/doc/go/FREEZE.md)
+  (on `arbace-for-golang`): Arbace for Golang: build, run, verify, the frozen branch
 - [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only
 - [doc/classes/SPEC.md](doc/classes/SPEC.md): the class forms
 - [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/C2G-SPEC.md](doc/go/C2G-SPEC.md),
