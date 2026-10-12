@@ -22,32 +22,43 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 | `arbace/j2a/names.ae` | `arbace.j2a.names` | one namespace per package: which class gets which simple name, imports, file layout |
 | `arbace/j2a/print.ae` | `arbace.j2a.print` | printing with metadata and a Clojure-style layout |
 | `arbace/j2a/main.ae` | `arbace.j2a.main` | command line: `convert`, `jdk` |
-| `arbace/j2a/build.ae` | `arbace.j2a.build` | compiles converted files with the class forms compiler into class files |
 | `arbace/j2a/coverage.ae` | `arbace.j2a.coverage` | coverage summary from run reports |
 | `arbace/j2a/resolve.ae` | `arbace.j2a.resolve` | asks the class forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
-| `bin/j2a` | | starts Arbace (`target/stage2`, `bin/lib/tools.bash`) with access to javac's internals |
+| `bin/j2a` | | starts the frozen JVM Arbace (`bin/lib/frozen.bash`) with access to javac's internals, j2a and the class forms' front end loaded from the checkout's sources |
 | `bin/j2a-check` | | the checks (below) |
+| `test/j2a/expected/` | | the expected output of the checks: `java/` and `module/` (the samples' forms), `baseline.sha256` (the baseline's, by hash) |
+| `test/j2a/build.ae` | `j2a.build` | compiles converted files with the frozen jar's own class forms compiler into class files (`bin/j2a-check --suite`; until S4 `arbace.j2a.build`) |
 | `test/j2a/java/sample/` | | Java constructs the baseline does not use (records, sealed types, patterns, switch expressions, lambdas, method references, local and anonymous classes, annotation types), including §11.4; `Pins.java`: overloads that need pins and that must not get them, constructor calls of every kind, `o.new Inner(...) {...}` |
 | `test/j2a/module/` | | a module declaration and package annotations |
 
-The converted files are not kept in the repository: they are regenerated (the user's decision).
+The converted files are not kept in the repository: they are regenerated (the user's decision);
+what the checks expect of them is (`test/j2a/expected/`, since S4), and so are the converted
+JDK closure (`jdk/forms`, S1) and the suite's Java fixtures (`test/java-fixtures/`).
 
-Since the freeze the converter runs on Arbace: `bin/lib/tools.bash` puts `target/stage2` (built
-by `bin/build-arbace`) before the checkout on the class path, so the converter and an edited
-compiler namespace load from source and the rest from the stage's classes. Until then it ran on
-the frozen Clojure. Its output names the running core: a head shadowed by a local or field is
-qualified `arbace.core/` (before, `clojure.core/` for Clojure's own names). The baseline
-`clojure/` is no longer in main's tree: `bin/j2a-check` extracts it from the tag
-`arbace-for-java-26-v1` into `.tmp/frozen/` once (`frozen_clojure` in `bin/lib/tools.bash`).
+Where the converter runs. Since standalone S4 (doc/STANDALONE-NOTES.md, "S4: the JVM removed",
+open point O1 (a)): on the frozen JVM Arbace, the jar of `arbace-for-java-26-v4` built from its
+tag and pinned by hash (`bin/lib/frozen.bash`, `test/oracle/frozen-jar.sha256`), since main has
+no JVM build any more and javac, j2a's front end, needs a JVM. The jar's loader reads `.clj`
+only and loads a namespace from its source when the source is newer than its `__init` class (the
+jar's entries are dated 2000-01-01): `frozen_view tools` puts `.clj` links to the checkout's
+`arbace.j2a`, the class forms' front end (`arbace.classes.types`, `env`, `parse`, `lower`,
+`analyze`: `arbace.j2a.resolve` asks its overload resolution) and every namespace the jar lacks
+before the jar on the class path, so those load from the checkout's sources and the rest
+(`arbace.core`, the runtime, the jar's own back end) is the jar's. The converter's output is the
+same as on main's stage 2 (`jdk/forms`, `test/java-fixtures` and the samples, byte for byte).
+From the freeze to S4 it ran on `target/stage2`, before the freeze on the frozen Clojure. Its
+output names the running core: a head shadowed by a local or field is qualified `arbace.core/`
+(before, `clojure.core/` for Clojure's own names). The baseline `clojure/` is no longer in
+main's tree: `bin/j2a-check` extracts it from the tag `arbace-for-java-26-v1` into
+`.tmp/frozen/` once (`frozen_clojure` in `bin/lib/tools.bash`).
 
 ## Use
 
 ```
 bin/j2a -m arbace.j2a.main convert [--rename FROM=TO] [--javac OPT]... [--check] OUT ROOT [PATH...]
 bin/j2a -m arbace.j2a.main jdk [--check] [--origins FILE] OUT MODULE MODULE-SRC [PATH...]
-bin/j2a -m arbace.j2a.build CONVERTED-DIR CLASSES-DIR [PACKAGE-DIR...]
 bin/j2a -m arbace.j2a.coverage REPORT.edn...
-bin/j2a-check [--suite]
+bin/j2a-check [--suite | --update]
 bin/j2a-check --jdk [MODULE...]
 ```
 
@@ -73,11 +84,14 @@ bin/j2a-check --jdk [MODULE...]
   output does not depend on where the tree was made (`bin/jrt-convert` names each by its
   jdk26u path, 2026-10-11; before, the headers named the copy, `.tmp/j2a-patch/java.base-N`).
 - `bin/jrt-convert` (doc/go/JRT-SOURCES.md) runs `jdk --check` on java.base's translation
-  closure for the Go build's runtime jrt, then checks the output with `bin/class-forms-check`.
-- `build` compiles converted files with the class forms compiler (`arbace.classes`, the other
-  half of the work, loaded through `arbace.classes.boot`) and writes the class files. Classes
-  it does not compile are looked up on the class path: `J2A_CP` adds to it (`bin/j2a-check`
-  passes the frozen tree's javac classes).
+  closure for the Go build's runtime jrt, then compares the output with the committed forms
+  (`jdk/forms`; until S4 it compiled them with `bin/class-forms-check` and compared the classes
+  with javac's).
+- `test/j2a/build.ae` (`j2a.build`, run by `bin/j2a-check --suite` on the frozen jar with the
+  jar's own `arbace.classes`; until S4 `bin/j2a -m arbace.j2a.build`, the checkout's compiler)
+  compiles converted files with the class forms compiler and writes the class files. Classes it
+  does not compile are looked up on the class path (`FROZEN_CP`: `bin/j2a-check` passes the
+  frozen tree's javac classes).
 
 Output layout (§9.1): for package `p.q`, `p/q.ae` holds `(ns p.q)` and a `(load "q/File")` per
 Java file, supertypes in the same package first; `p/q/File.ae` holds `(in-ns 'p.q)`, an
@@ -192,13 +206,44 @@ On 2026-10-06 (the table) and 2026-10-07 (as dated below), jdk26u at the system 
 - `clojure.edn/read` reads none of the files that use Clojure 1.12 syntax: array class
   symbols (`int/1`) and param-tags (`^[int]`) are not EDN (amendment 2).
 
-`bin/j2a-check` reruns the baseline, compiler and sample checks (one minute); with `--suite` it
-also builds the converted baseline and runs Clojure's test suite on it.
+Until standalone S4, `bin/j2a-check` reran the baseline, compiler and sample checks above (one
+minute), the compiler's against javac's classes; with `--suite` it also built the converted
+baseline and ran Clojure's test suite on it.
+
+### The checks since S4: forms-level
+
+Main has no class forms back end since S4 (it compiled to JVM bytecode, which only the JVM
+build used), so j2a's checks no longer compile its output and compare the classes with javac's
+(doc/STANDALONE-NOTES.md, "S4: the JVM removed", open point O2: (b) forms-level, with (a), the
+frozen jar's own compiler, for the suite). `bin/j2a-check`:
+
+1. converts the baseline (183 files) with `--check` (no failures, every file read back) and
+   compares the converted files with `test/j2a/expected/baseline.sha256`, their SHA-256 by path
+   (the forms are 3.5 MB; the suite of step 4 is their semantic check, and a change shows as the
+   files whose hash moved, to diff against a conversion made before it);
+2. converts `test/j2a/java` and compares the output with `test/j2a/expected/java/`, byte for
+   byte (the samples' forms are small and are what a change to j2a should be reviewed by);
+3. the same for `test/j2a/module` and `test/j2a/expected/module/`;
+4. with `--suite`: compiles the converted baseline with the frozen jar's own class forms
+   compiler (`test/j2a/build.ae`, on the jar alone: its `arbace.classes` at the freeze, which
+   compiled these forms to javac's shapes) and runs Clojure's suite on the classes against
+   `test/baseline-results.edn` (no regressions).
+
+The first line of each converted file names its source; the checkout's path is left out of it
+(`clojure/lang/RT.java`, `test/j2a/java/sample/Shapes.java`), so that the expected files do not
+depend on where the check runs. `bin/j2a-check --update` rewrites `test/j2a/expected/` after a
+change to j2a or the samples (commit it with the change). What the converted forms mean is
+checked downstream as well: a2g compiles `jdk/forms` (the JDK closure) and the suite's fixtures
+through the class forms' front end into the Go build, and the oracle and Clojure's suite run it.
 
 ### The converted JDK
 
-`bin/j2a-check --jdk [MODULE...]` (about 10 minutes on 64 cores; not part of the default
-checks) converts every module of jdk26u's `src/*/share/classes` with `bin/j2a ... jdk`,
+Since S4 `bin/j2a-check --jdk [MODULE...]` only converts the modules (`--check`: no failures,
+every file read back; `test/j2a/jdk.bash`, two conversions at a time, `JDK_JOBS`); the
+compilation and comparison with javac below went with the back end.
+
+Until S4, `bin/j2a-check --jdk [MODULE...]` (about 10 minutes on 64 cores; not part of the default
+checks) converted every module of jdk26u's `src/*/share/classes` with `bin/j2a ... jdk`,
 compiles the same Java files twice with javac (`--patch-module` against the running JDK, which
 is built from the same sources, with the options of the JDK build for the module:
 `-XDstringConcat=inline` for `java.base`, `jdk.compiler`, `jdk.jfr`, `jdk.jartool`,

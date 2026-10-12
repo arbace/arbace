@@ -3,8 +3,13 @@
 # the forms (the JDK's classes jrt hand-writes or the world does not hold, the cut classes,
 # Arbace's runtime classes on the JVM), as data. a2g reads it by default and then loads no class,
 # reflects on none and runs no ASM (arbace.a2g.edge; arbace.classes.env's *declared*). This
-# script records it on the JVM (update), proves it (verify) and proves a2g's run free of the
-# JVM's reflection and ASM (trace).
+# script records it on a JVM (update), proves it (verify) and proves a2g's run free of the
+# JVM's reflection and ASM (trace). The JVM is the frozen JVM Arbace since standalone S4
+# (bin/lib/frozen.bash; doc/STANDALONE-NOTES.md, "S4: the JVM removed"): its jar, with a2g and
+# the class forms' front end loaded from the checkout's sources (frozen_view tools); its
+# runtime's classes (arbace.lang, arbace.asm) are the frozen release's, which the answers
+# about the classes the world does not hold do not depend on (the world's own classes are
+# compiled from the checkout's forms).
 #
 # Usage: bin/a2g-edge update|verify|trace
 #   update   bin/a2g --record-edge for the builds' two worlds, the program (bin/a2g --program)
@@ -26,26 +31,25 @@
 #            A2G_EDGE_TRACE_ARGS=--jvm-reflection it lists what the edge replaces. The
 #            recording and the listing: $A2G_EDGE_WORK/trace.jfr, trace-a2g.txt
 # Environment: A2G_EDGE_WORK (default .tmp/a2g-edge), A2G_FIXTURES (the suite's Java fixtures as
-# class forms: default target/arbace-go/java-fixtures, else made by bin/clojure-tests
-# --java-fixtures), A2G_JVM_OPTS (bin/a2g's).
-# Runs on Arbace (bin/lib/tools.bash: target/stage2, from bin/build-arbace).
+# class forms: default the committed test/java-fixtures/forms), A2G_JVM_OPTS (a2g's JVM options,
+# default -Xmx12g), JRT_CONV (as bin/a2g's).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-. bin/lib/tools.bash
-arbace_runtime || exit 1
+. bin/lib/frozen.bash
+frozen_jar > /dev/null || exit 1
+# a2g ARGS...: a2g on the frozen JVM Arbace (bin/a2g runs it on the Go executable)
+a2g() {
+  # shellcheck disable=SC2086
+  frozen_java tools -Xss64m ${A2G_JVM_OPTS:--Xmx12g} --add-modules ALL-SYSTEM -- -m arbace.a2g.main "$@"
+}
 work=${A2G_EDGE_WORK:-$root/.tmp/a2g-edge}
 case "$work" in /*) ;; *) work=$root/$work ;; esac
 mkdir -p "$work"
 
 fixtures() {
-  local fx=${A2G_FIXTURES:-$root/target/arbace-go/java-fixtures}
-  if [ ! -d "$fx" ]; then
-    fx=$work/java-fixtures
-    echo "== the suite's Java fixtures (bin/clojure-tests --java-fixtures)" >&2
-    bin/clojure-tests --java-fixtures "$fx" > "$work/java-fixtures.log" 2>&1 ||
-      { tail -20 "$work/java-fixtures.log" >&2; return 1; }
-  fi
+  local fx=${A2G_FIXTURES:-$root/test/java-fixtures/forms}
+  [ -d "$fx" ] || { echo "a2g-edge: no fixtures $fx" >&2; return 1; }
   (cd "$fx" && pwd)
 }
 
@@ -53,13 +57,13 @@ fixtures() {
 record() {
   local out=$1 fx
   fx=$(fixtures) || return 1
-  echo "== bin/a2g --program --record-edge" >&2
-  bin/a2g --program --record-edge "$work/edge-program.edn" --out "$work/a2g" > "$work/record-program.log" 2>&1 ||
+  echo "== a2g --program --record-edge (on the frozen JVM Arbace)" >&2
+  a2g --program --record-edge "$work/edge-program.edn" --out "$work/a2g" > "$work/record-program.log" 2>&1 ||
     { tail -20 "$work/record-program.log" >&2; return 1; }
-  echo "== bin/a2g --program --input $fx --record-edge" >&2
-  bin/a2g --program --input "$fx" --record-edge "$work/edge-tests.edn" --out "$work/a2g-tests" > "$work/record-tests.log" 2>&1 ||
+  echo "== a2g --program --input $fx --record-edge" >&2
+  a2g --program --input "$fx" --record-edge "$work/edge-tests.edn" --out "$work/a2g-tests" > "$work/record-tests.log" 2>&1 ||
     { tail -20 "$work/record-tests.log" >&2; return 1; }
-  java -Xss64m -Xmx4g -cp "$ARBACE_CP" arbace.lang.Main -m arbace.a2g.edge merge "$out" \
+  frozen_java tools -Xss64m -Xmx4g -- -m arbace.a2g.edge merge "$out" \
     "$work/edge-program.edn" "$work/edge-tests.edn"
 }
 
@@ -85,14 +89,14 @@ traced=(
 trace() {
   local filter jfr=$work/trace.jfr
   filter=$(IFS=';'; echo "${traced[*]}")
-  echo "== bin/a2g --program ${A2G_EDGE_TRACE_ARGS:-} under JFR's method tracing" >&2
+  echo "== a2g --program ${A2G_EDGE_TRACE_ARGS:-} under JFR's method tracing" >&2
   rm -f "$jfr"
   # shellcheck disable=SC2086
   A2G_JVM_OPTS="${A2G_JVM_OPTS:--Xmx12g} -XX:FlightRecorderOptions:stackdepth=2048 -XX:StartFlightRecording:method-trace=$filter,maxsize=0,filename=$jfr" \
-    bin/a2g --program ${A2G_EDGE_TRACE_ARGS:-} --out "$work/a2g-trace" > "$work/trace-a2g.log" 2>&1 ||
+    a2g --program ${A2G_EDGE_TRACE_ARGS:-} --out "$work/a2g-trace" > "$work/trace-a2g.log" 2>&1 ||
     { tail -20 "$work/trace-a2g.log" >&2; return 1; }
   # each traced call inside a2g's run, by what made it (test/a2g/edge_trace.ae)
-  java -Xmx4g -cp "$ARBACE_CP:$root/test" arbace.lang.Main -m a2g.edge-trace "$jfr" "$work/trace-a2g.txt"
+  frozen_java test -Xmx4g -- -m a2g.edge-trace "$jfr" "$work/trace-a2g.txt"
   local status=$?
   if [ -s "$work/trace-a2g.txt" ]; then head -40 "$work/trace-a2g.txt"; fi
   return $status
