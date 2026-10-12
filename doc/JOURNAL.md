@@ -934,3 +934,39 @@ All as recommended in doc/STANDALONE-SURVEY.md:
     inventory, the gate's oracle on the frozen reference.
   - Then `bin/gate --full`, the annotated tag `arbace-seed-is-go-v1` pushed, and a ping. A
     failing gate stops before the tag.
+
+## 2026-10-12: S3, the Go-hosted fixpoint, merged
+
+- Agent, branch `s3-fixpoint` (head `91aa0b0`, main `aea0b98` merged), merged as `5bf08af`.
+  - `bin/arbace-go --fixpoint` on amd64 (48m46s, at `f293ba7`): G1 is built by the JVM chain,
+    G2 by G1 with a2g and g2a on the Go executable, G3 by G2. a2g's trees and the printed
+    modules are equal for all three (`diff -r`, `report.edn`'s times aside).
+  - G1 = G2 = G3 byte for byte: 69,202,080 bytes,
+    `2f19b3d1c64525db0b11e71c58a7aca750d95f35da8fb6a0ad3f9b6388540f8d`.
+  - A seed packed from G3 by `ARBACE_SEED_GO_BUILD=... bin/seed --go-make` (dry run, not
+    committed): 3,069,608 bytes, 1,148 files. G3's build is kept in `.tmp/s3-fixpoint/g3` for
+    S4.
+- What kept a2g off Go:
+  - javac's constructor helpers lived in the bytecode back end; they move to
+    `arbace.classes.analyze` (SA22: stage 2's other classes unchanged, stage 2 = stage 3).
+  - The JVM's module-layer query moves to `arbace.a2g.jvm`, loaded on demand (SA23).
+  - `java.util.zip.Deflater`, whose zlib bytes Go cannot reproduce, is replaced by a DEFLATE
+    compressor in Arbace, `arbace.a2g.zlib` (SA21): 0.5-0.7% larger output, the executable
+    +8 KB.
+- Speed: a2g on Go is 1,365-1,377 s against 79 s on the JVM, peaking at 9.6 GB (`GOGC=400`,
+  `GOMEMLIMIT=12GiB`). Two evaluator faults were found:
+  - calls through a seq recompiling, the same as SA32 (the agent's identical fix dropped at the
+    merge);
+  - static fields looked up by name on every read, 4%; `CodeStaticField` fixes it (SA24).
+  - The rest is the evaluator, spread thin; S6 is the remedy.
+- Checks: `--smoke` 83 ok; the oracle on G3 22,232 of 22,278 (the 46 known); the essential gate
+  passed on the branch (5m19s).
+- Amendments SA20 (`A2G_HOST`, `ARBACE_GO_HOST`), SA21 (the compressor), SA22 (the helpers in
+  analyze), SA23 (`arbace.a2g.jvm`), SA24 (static field reads) and SA25 (`--fixpoint`, the seed
+  from a named build): the recommended choice applied, provisional per the user's overnight
+  decision.
+- Left for S4:
+  - the Go-hosted build as the default, the chain starting from the seed's stage 0;
+  - `--build-tests` and `--build --box` on Go;
+  - A2G-SPEC §10.3 and JRT-NOTES SZ2 to name the new compressor.
+- On main after the merge (`5bf08af`): the essential gate passed (5m21s).

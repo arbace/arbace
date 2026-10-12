@@ -79,6 +79,10 @@ Prior art:
   - `arbace/g2a/`: Go as Go forms and back (spec `doc/go/SPEC.md`; helpers `tools/godump`,
     `tools/gocmp`; `bin/g2a`; hosted on the JVM, or with `G2A_HOST=go` on the Go executable,
     `G2A_GO_EXE`, byte-identical, for every caller of `bin/g2a`).
+  - `arbace/a2g/`'s host likewise: `A2G_HOST=jvm|go` (`A2G_GO_EXE`); `bin/arbace-go`'s
+    `ARBACE_GO_HOST=go` sets both; `bin/arbace-go --fixpoint` builds G1 → G2 → G3 into
+    `target/arbace-go/fixpoint/` (S3), and `ARBACE_SEED_GO_BUILD` names the build `bin/seed
+    --go-make` packs. The resources are compressed by `arbace/a2g/zlib.ae` (SA21).
   - `arbace/a2g/`: the class forms → Go forms translator (spec `doc/go/A2G-SPEC.md`; `bin/a2g`).
 - The Go build (B1a, `doc/go/B1-PLAN.md`): Arbace as a static Go executable. a2g translates
   the runtime, with the Go-build variants of Clojure's classes and namespaces in
