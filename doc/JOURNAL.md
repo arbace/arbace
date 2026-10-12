@@ -875,3 +875,20 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   fixpoint; parallel printing of files and chunks; the cache fix).
 - On main after the merge (`d9aaf0a`): the essential gate passed (5m43s; stage 2 = stage 3,
   5,787 classes).
+
+## 2026-10-12: no use of the host's Go
+
+- The user: make Arbace independent of the system's Go (Alpine's `golang` package, today
+  go1.27.1; an upgrade to 1.27.2 should change nothing). Survey: every build, the seed's tooling,
+  g2a (`$G2A_GOROOT/bin/go`, `gofmt`), godump and gocmp (`-go`), `bin/arbace-go`, `bin/jrt`,
+  `bin/tamago-vendor`, the TLS checks and `bin/box-mac-bundle` name TamaGo's go1.27.1
+  (`/root/tamago-go`, pinned by `seed/goroot.sha256`) explicitly with `GOTOOLCHAIN=local`. The
+  one exception was `bin/box-vendor`: go-whim's monitor builds (`bins`), its KVM tests and the
+  arm64 test binaries ran the host's `go` from PATH. Now it exports `GOROOT=$tg` and puts
+  `$tg/bin` first on PATH (TamaGo's linux and darwin builds are upstream Go's). Considered:
+  keeping the host's Go there to test go-whim with upstream Go; rejected, since a host upgrade
+  would silently change what the gate tests.
+- Checked with a failing `go` first on PATH and `GOROOT=/usr/lib/go`: `bin/box-vendor
+  roundtrip` and `kvm-tests` passed, the stub never called. Found on the way, not caused by
+  this: `bin/box-vendor convert` (S0's vendoring, outside the gate) fails on
+  `cmd/arbace-box`, the launcher added in S1, which go-whim's clone lacks; the same at `f8e95e4`.

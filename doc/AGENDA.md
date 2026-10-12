@@ -103,6 +103,10 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   removed, the gate's oracle on the frozen reference; `bin/gate --full`, the tag.
   `bin/gate --full` runs the amd64 box smoke test (`box-smoke`). The Mac: a bundle per box
   milestone, the user's run following the tag.
+- The milestone's `bin/gate --full` runs with a failing `go` first on PATH, proving no use of
+  the host's Go (`bin/box-vendor` was the last, fixed 2026-10-12).
+- `bin/box-vendor convert` fails on the launcher (`cmd/arbace-box`, not in go-whim's clone):
+  S0's replay, outside the gate; to fix with the box's next work.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 
