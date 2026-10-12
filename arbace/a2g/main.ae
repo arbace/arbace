@@ -37,7 +37,6 @@
             [arbace.classes.types :as t]
             [arbace.classes.env :as env]
             [arbace.classes.analyze :as a]
-            [arbace.classes.emit :as e]
             [arbace.a2g.world :as w]
             [arbace.a2g.jrt :as jrt]
             [arbace.a2g.model :as m]
@@ -54,6 +53,7 @@
             [arbace.a2g.checks :as chk]
             [arbace.a2g.embed :as embed]
             [arbace.a2g.edge :as edge]
+            [arbace.a2g.zlib :as zlib]
             [arbace.g2a.print :as gp]
             [arbace.pprint]))
 
@@ -96,9 +96,6 @@
                [n {:go (nm/go-class-name n) :var (str (nm/go-class-name n) "_class") :standin false :file nil}]))
     (into {} (for [[jn v] (:classes scan)] [(internal jn) v]))))
 
-(def ^:private boot-packages
-  (delay (into {} (for [^java.lang.Module m (.modules (ModuleLayer/boot)) p (.getPackages m)] [p m]))))
-
 (defn- repl-visible?
   "Can the REPL name class n's public members (internal name)? Not when n is in a JDK module's
   package that the module does not export (jdk.internal.misc, sun.nio.cs ...): the JVM refuses
@@ -109,9 +106,7 @@
   (let [i (.lastIndexOf n "/")
         pkg (.replace (subs n 0 (max i 0)) \/ \.)]
     ;; the packages a JDK module does not export: the edge's :unexported
-    (not (edge/jvm? :unexported pkg
-                    #(when-let [^java.lang.Module m (get @boot-packages pkg)]
-                       (not (.isExported m pkg)))))))
+    (not (edge/jvm? :unexported pkg #((requiring-resolve 'arbace.a2g.jvm/unexported?) pkg)))))
 
 (defn- root-keys
   "Method keys of a root spec. CLASS$* is the class and every named class nested in it (the
@@ -155,7 +150,7 @@
               funcs (:funcs fs)
               meths (get-in fs [:methods g] #{})]
         mm (:methods (a/decl n))
-        :let [gn (cond (= "<init>" (:name mm)) (nm/new-name g (e/ctor-real-desc n mm))
+        :let [gn (cond (= "<init>" (:name mm)) (nm/new-name g (a/ctor-real-desc n mm))
                        (m/static? mm) (str g "_" (nm/method-base (:name mm) (:desc mm)))
                        :else (nm/method-base (:name mm) (:desc mm)))]
         :when (or (contains? funcs gn) (contains? meths gn))]
@@ -235,22 +230,12 @@
   (io/make-parents (io/file to))
   (io/copy (io/file from) (io/file to)))
 
-(defn- deflate
-  "bytes b as a zlib stream (RFC 1950, the best compression): deterministic, as Deflater is."
-  ^bytes [^bytes b]
-  (let [bo (java.io.ByteArrayOutputStream.)
-        d (java.util.zip.Deflater. 9)]
-    (with-open [o (java.util.zip.DeflaterOutputStream. bo d)]
-      (.write o b))
-    (.end d)
-    (.toByteArray bo)))
-
 (defn- write-resource!
   "Writes the embedded resource p (bytes b) under dir: as p.z, zlib-compressed, when that saves a
   quarter or more (the sources, generics.edn, tzdb.dat), else as it is; jrt's OSHost.Resource
   inflates a p.z when asked for p (amendment SZ2). Returns the name written."
   [dir p ^bytes b]
-  (let [z (deflate b)
+  (let [z (zlib/deflate b)
         [nme data] (if (<= (* 4 (alength z)) (* 3 (alength b))) [(str p ".z") z] [p b])
         f (io/file dir nme)]
     (io/make-parents f)
