@@ -2336,3 +2336,15 @@ BX70-BX73 accepted as built; BX74 accepted (no `javax.net.ssl` in the Go build f
 accepted. The roots' licence: LICENSE.md records `bundle.der`'s certificates under NSS's
 Mozilla Public License 2.0 as well as x/crypto's BSD 3-Clause (rather than BSD-3 only). The
 branch merged after the printer's case-list fix (`g2a-cases`), so `box-forms` stays identical.
+
+## After standalone S4: the JVM's host layers gone (2026-10-12)
+
+With the JVM Arbace off main (doc/STANDALONE-NOTES.md, "S4: the JVM removed"), BX37's and BX71's
+JVM halves are on the frozen branch only: `arbace/box/host.ae` and `arbace/tls/host.ae` are the
+Go build's host layers (jrt's `HostStore` and `TlsSocket`), moved from `arbace/lang/go/ns/` with
+`git mv`; the JVM's (java.nio, `javax.net.ssl`) left. `arbace.box`, `arbace.tls` and
+`arbace.http` are one source for the native executable and the box. `bin/arbace-go --smoke` no
+longer runs the store's and TLS's checks on the JVM (`jvm_store_checks`, the JVM's
+`tls_checks`), nor `test/native/box_test.ae` (`bin/native-tests` left too); the native and boxed
+checks are unchanged. The default TLS roots are Mozilla's everywhere (BX72's "the JVM's own on the
+JVM" no longer applies).

@@ -3061,6 +3061,10 @@ and behaviour are unchanged; only their construction moved from the start to the
 **SZ2: compressed resources.** a2g writes an embedded resource as `P.z` (zlib) when that is at
 least a quarter smaller (the namespaces' sources, `generics.edn`, `tzdb.dat`, ICU's data; not
 `uniName.dat`, already deflated), and jrt's `OSHost.Resource` inflates `P.z` when asked for `P`.
+The compressor was the JDK's `Deflater` (zlib's C code, level 9) while a2g ran on the JVM; since
+standalone S3 it is a2g's own `arbace/a2g/zlib.ae`, a DEFLATE writer in Arbace that writes the
+same bytes on every host (0.5-0.7% larger than zlib's level 9; amendment SA21,
+doc/STANDALONE-NOTES.md), read by jrt's inflater (Go's `compress/zlib`) as before.
 The image step takes the embedded namespaces from a list a2g writes (`prog/namespaces.txt`)
 instead of reading the sources.
 
@@ -3104,7 +3108,8 @@ Numbered SZ (size); no other series uses SZ.
   are unchanged; `ARBACE_GO_SYMBOLS=1` keeps them.
 - **SZ2 (A2G-SPEC §10.3, RD1)** An embedded resource is stored zlib-compressed as `P.z` when that
   saves a quarter, and the host's `Resource` inflates it; `bin/arbace-go`'s image step takes the
-  namespaces from a2g's `namespaces.txt`.
+  namespaces from a2g's `namespaces.txt`. (The compressor: the JDK's `Deflater` until standalone
+  S3, then `arbace/a2g/zlib.ae`, SA21.)
 - **SZ3 (A2G-SPEC §5.11, the member tables; R12)** A translated or cut class's member table is a
   `MemberTable`: its members as text and one dispatch function per kind, decoded into the
   `ClassInfo`'s slices at reflection's first use (`jrt.EnsureMembers`); absent and cut members

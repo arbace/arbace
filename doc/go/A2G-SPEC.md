@@ -2654,6 +2654,10 @@ JVM gives Clojure code nil for `java.base`'s; jdk26u's own classes read them as 
 An embedded resource is stored zlib-compressed as `P.z` when that is at least a quarter smaller
 (the namespaces' sources, `generics.edn`, `tzdb.dat`, ICU's data), and the host's `Resource`
 inflates `P.z` when asked for `P` (amendment SZ2, accepted 2026-10-10; JRT-NOTES.md, "Size"). The
+compressor is a2g's own, `arbace/a2g/zlib.ae` (a DEFLATE writer in Arbace: the same bytes on
+every host, so that a2g on the Go executable writes the JVM's tree; amendment SA21 of
+doc/STANDALONE-NOTES.md, "S3: the Go-hosted fixpoint"); until then a2g used the JDK's
+`Deflater`, zlib's level 9, which the Go build does not have. The
 data include an image file, `lib/tzdb.dat`, the time-zone database made as the JDK build's
 `GendataTZDB.gmk` makes it and compared with the image's `jdk/lib` (a data file under `lib/` is
 the image's, the others are module resources): `TzdbZoneRulesProvider` and `ZoneInfoFile` read it
