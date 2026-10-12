@@ -1339,6 +1339,9 @@ through the class loaders, JRT-NOTES.md "Resources by URL"), and two oracle diff
   `arbace.test`'s `AdapterExerciser`, `FIConstructor`, `FIStatic`, `FunctionalTester`,
   `SwissArmy`, `ConcreteClass`, `GenericInterface`, `ReflectorTryCatchFixture`) into class forms
   with j2a (javac's class path: stage 2, for `IFn` and the Java API): 12 of 12, no error.
+  (2026-10-12, after standalone S1: the forms are committed in `test/java-fixtures/`, which
+  `--build-tests` reads by default, without javac; `--java-fixtures verify` and `update` prove
+  and regenerate them: test/java-fixtures/README.md.)
 - `bin/arbace-go --build-tests [DIR]` translates them with the program (`bin/a2g --program --input
   DIR`, every public member a root as for the rest of the REPL's world) into
   `target/arbace-go/<arch>/arbace-tests`, with its own a2g output, work modules and image

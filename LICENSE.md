@@ -45,6 +45,12 @@ covers what.
   assertions of Clojure's test suite, https://github.com/clojure/clojure at
   `98d735fab02f337cee654cb0629bddc09883a75a`, `test/clojure/test_clojure/`, renamed to
   `arbace.*`; under the Eclipse Public License 1.0, as Clojure.
+- `test/java-fixtures/forms/` (test/java-fixtures/README.md): the class forms of Clojure's
+  suite's Java fixtures, `test/java` of https://github.com/clojure/clojure at
+  `98d735fab02f337cee654cb0629bddc09883a75a` (the files carry no notice of their own), renamed
+  by c2a and converted by j2a: Copyright (c) Rich Hickey (Clojure's readme.txt), under the Eclipse
+  Public License 1.0, as Clojure. `test/java-fixtures/provenance.edn` and `README.md`: Arbace's
+  own, under the Eclipse Public License 1.0.
 - `overlay/go/runtime/proc.ae` and `overlay/go/runtime/runtime2.ae`: Go's runtime, the files
   `src/runtime/proc.go` and `runtime2.go` of TamaGo's go1.27.1 tree
   (https://github.com/usbarmory/tamago-go, `VERSION` "go1.27.1", 2026-08-28; the Go
@@ -398,8 +404,8 @@ covers what.
 
   The test build, `target/arbace-go/<arch>/arbace-tests` (`bin/arbace-go --build-tests`), adds
   Clojure's suite's Java fixtures (`test/java` of https://github.com/clojure/clojure at
-  `98d735fab02f337cee654cb0629bddc09883a75a`, renamed by c2a and converted by j2a): under the Eclipse
-  Public License 1.0, as Clojure.
+  `98d735fab02f337cee654cb0629bddc09883a75a`, renamed by c2a and converted by j2a, as committed in
+  `test/java-fixtures/forms/`): under the Eclipse Public License 1.0, as Clojure.
 
   So a distribution of an executable carries this file (the texts of the Eclipse Public License
   1.0, the GNU General Public License version 2 with the Classpath Exception, Go's BSD 3-Clause
