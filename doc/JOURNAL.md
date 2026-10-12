@@ -826,3 +826,6 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   j2a; the test executables identical to those from today's conversion; the suite on the test
   build 20,506 of 20,520, no regressions; the essential gate passed (6m32s). The test build
   needs no javac.
+- On main after both merges (`a3f3913`): the essential gate passed (5m50s; a first run failed when
+  the kernel killed a2g's JVM for memory, beside the suite's JVMs and two agents' builds, 36 GB),
+  `bin/a2g-edge verify` and `bin/clojure-tests --java-fixtures verify` passed.
