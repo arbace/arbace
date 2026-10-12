@@ -98,7 +98,8 @@ seed_go_make() {
   nss=$dir/a2g/prog/namespaces.txt
   [ -f "$mod/go.mod" ] && [ -f "$nss" ] && [ -x "$dir/$host/arbace" ] \
     || { echo "bin/seed: no build in $dir: run bin/arbace-go --build first" >&2; return 1; }
-  ovl=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
+  # the overlay printed by g2a, on the packed build's own executable when no host is named
+  ovl=$(cd "$root" && ARBACE_HOST_EXE=${ARBACE_HOST_EXE:-$dir/$host/arbace} bin/jrt overlay | tail -1) || return 1
   rt=$(dirname "$ovl")/runtime
   [ -d "$rt" ] || { echo "bin/seed: no patched runtime in $rt" >&2; return 1; }
   . "$root/bin/lib/version.bash"
