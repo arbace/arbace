@@ -1887,3 +1887,119 @@ and the FIPS `cpu`'s) in ten, and in `poly1305.go` the embedded field a selector
 | BX61, BX62, BX66, purego, the darwin launcher, the bundle | 4-5 h | the round trip and proofs, minutes |
 
 The whole, with the checks: about two days of this machine's time.
+
+## S4: arm64 and the Mac, done (2026-10-12)
+
+Branch `box-s4`, phase 2 of S4 as designed above (BX60-BX66, accepted). What was made, in the
+order of the commits:
+
+### The arm64 guest: nil dereferences (BX60)
+
+`boot_arm64.s`: the vectors' first entry (a synchronous exception at EL1 on SP_EL0, where Go code
+runs) branches to `vector_sync_sp0`, which keeps R0 and R1 on SP_EL1 and, when `sigpanicPC` is
+set (`board.NilPanics`), ESR_EL1's class is 0x25 (a data abort at the current EL) and FAR_EL1 is
+below 0x1000, makes the faulting instruction call `sigpanic` as the runtime's `preparePanic` does
+for a SIGSEGV on arm64: SP_EL0 lowered by 16, the interrupted LR stored at the new SP and the frame
+pointer below it, LR the faulting PC (ELR_EL1), ELR_EL1 `sigpanic`, `ERET` (SPSR_EL1 returns to
+EL1t, the flags with it). Any other exception is reported by `Fault` as vector 0, as before. The
+board's doc strings name both ISAs. In the VM, `(aget ^ints (identity nil) 0)`, `alength`,
+`.length` and `locking` on nil are `NullPointerException`s (the first ended the guest before:
+"exception 0 (code 0x96000007) ... address 0x8"). Nothing else of the guest is arm64's.
+
+### The aarch64 VM and the smoke test there (BX64, BX65)
+
+- **`bin/box-arm64-vm`** (`fetch`, `start`, `put`, `exec`, `sh`, `stop`, `status`, `smoke`, `hv`,
+  `oracle`, `check`; its state in `.tmp/box-arm64-vm/`): Alpine 3.24.2's aarch64 netboot files
+  (`netboot-3.24.2`: `vmlinuz-virt`, `initramfs-virt`, `modloop-virt`, Linux 6.18.52-0-virt),
+  their SHA-256 pinned in the script; `qemu-system-aarch64 -machine
+  virt,virtualization=on,gic-version=3 -cpu max -accel tcg,thread=multi -smp 16 -m 12288`; an
+  apkovl served by the script through QEMU's `guestfwd` (go-whim's mechanism) that installs
+  `bash python3 rlwrap dropbear coreutils procps` from the release's repositories at boot, brings
+  `lo` up (`/etc/network/interfaces`) and starts dropbear with a key made for the VM; the commands
+  go in by ssh through `hostfwd` on a free port of the host's loopback. Booted to ssh in 50 s. A
+  step that starts the VM stops it at its end; `check` (start, smoke, hv, stop) stops it however it
+  ends.
+- **`bin/box-smoke LAUNCHER`**: `bin/arbace-go`'s `box_smoke` made a script of its own (the store's
+  checks, shared with the native smoke test, in `bin/lib/store-checks.bash`), so that it runs where
+  the launcher is: `bin/arbace-go --smoke --box` calls it for the host's architecture,
+  `bin/box-arm64-vm smoke` copies it, the store's checks, `test/arbace-go-rlwrap.py`, the arm64
+  launcher and the native arm64 executable (`--native`, for the shared store directory) into the
+  VM and runs it there with `--slow 30`: the times it waits and tolerates multiplied (the launcher's
+  timeout, the wall clock's tolerance, the waits before input; the pty test's timeouts by
+  `ARBACE_SMOKE_SLOW`), and S2's 1e7-element reduction over a reducer made 1e5 (15 minutes and more
+  emulated). Unchanged on the host: 103 of 103.
+- **Emulation's cost**: everything in the VM is emulated (TCG), and KVM/arm64 runs nested in it:
+  the box starts in 13-20 s (0.3 s natively in nested KVM here), `(reduce + 0 (map inc (range
+  1000000)))` takes 86 s on one vCPU (about 0.9 s natively): 40x to 100x.
+- **`bin/box-vendor kvm-tests-arm64 DIR`**: go-whim's renamed clone with `box/` printed, as
+  `kvm-tests`, and `hv`'s and `vmm`'s tests compiled for linux/arm64; `bin/box-arm64-vm hv` runs
+  them in the VM (go-whim's guest tests build their guests as they run: not there).
+
+### tamago/ for both architectures (BX63)
+
+`bin/tamago-vendor convert` converts std and the goos module for tamago/amd64 and tamago/arm64 and
+merges them (`merge_trees`): std, 371 and 370 packages, 1,759 files once, the 11 that differ by the
+configuration's facts in `tamago/goroot/arch/{amd64,arm64}/go/`, 371 package files merged; the goos
+module, 69 and 62 packages, 75 merged, 189 files, none differing; the headers
+`runtime/cgo/abi_amd64.h` and `abi_arm64.h`. 2,416 forms files, 2,567 files, 32.6 MB (32.2 MB for
+amd64 alone): arm64 adds 0.4 MB. `print` lays `arch/amd64` over the shared tree; one printing
+serves both guests (`check`'s step 0 proves arm64's files print the same Go). `check [ARCH]` runs
+S6's proofs for each architecture: the goos module's packages that build for it (`go list
+-export`), std against `roundtrip-ARCH.edn`, and the guest images. `bin/arbace-go --build --box`
+builds the arm64 guest from the forms too; the gate's `box-forms` builds and checks both.
+
+| `bin/tamago-vendor check` | amd64 | arm64 |
+|---|---|---|
+| std printed (g2a-check, the round trip's reference) | no regression (371 + `unsafe`) | no regression (370 + `unsafe`) |
+| the goos module (gocmp, three levels) | 69 of 69 | 62 of 62 |
+| the guest as linked, from the originals and from the forms | 77,080,005 bytes, identical | 74,904,477 bytes, identical |
+| the guest as shipped (symbols cut) | 66,199,850 bytes, identical | 64,037,162 bytes, identical |
+
+The amd64 image is the bytes it was on main (S6's proof holds); `bin/tamago-vendor verify`: the
+tree is a fresh conversion, byte for byte.
+
+### purego and the launcher on darwin/arm64 (BX61, BX62)
+
+- **purego** (`bin/box-vendor purego`; box/README.md): its packages' darwin/arm64 files, 41 files
+  with the assembly and headers, 0.24 MB of forms, at `arbace/box/purego`; `hv/hvf_darwin` and
+  `libsys` import it there (their import specs edited). The risk named in phase 1 is cleared:
+  `internal/fakecgo`'s `go:linkname`s name the runtime's and libc's symbols, not its own path, and
+  the renamed package links (the linker's `-checklinkname` passes). `bin/box-vendor purego-check`:
+  the three packages printed against the renamed originals pass gocmp at all three levels; the
+  darwin/arm64 launcher (3,492,882 bytes without DWARF) from the printed forms is identical to
+  one from the renamed originals, and at purego's own path (3,494,034 bytes) to one from
+  purego's module, both by a `replace` to the same directory (the build information names it).
+  Found on the way: with DWARF the launchers differ in four `DW_AT_decl_line`s: in purego's
+  `collectStackArgs` (`struct_arm64.go:442-444`) the parameter list spans three lines, and the
+  printer, in the lines layout, puts every parameter name on the list's first line and places
+  the types by `/*line*/` directives, so the names' declaration lines move (the code and the line
+  tables do not). So the proofs link with `-w`, as the box's guests are (S6); the printer's
+  placement of a parameter group's names is left as a note for g2a (the round trip's levels do
+  not see it).
+- **The launcher for macOS**: `console.go` builds for Linux and macOS, its `select` through
+  `selectRead` (`console_linux.go`; `console_darwin.go` counts the ready descriptors, as macOS's
+  `select` returns none, go-whim's `editor/term` `sel`) and `tcgetattr`'s request `tcgets`
+  (`TCGETS`, `TIOCGETA`); `rlwrap_linux.go` became `rlwrap_unix.go` (`linux || darwin`; the parent's
+  name from `/proc` on Linux only: on macOS `ARBACE_RLWRAP=wrapped` alone keeps the child from
+  wrapping again); `vmm/net_linux.go` became `net_unix.go` (`linux || darwin`), `SO_REUSEPORT` in
+  `net_linux.go` (15) and `net_darwin.go` (macOS's 0x200), `net_other.go` for neither. The forms
+  were edited by hand where a file was renamed or a call changed (the lines kept), the new files'
+  forms converted from their Go. `bin/g2a build --goos darwin` builds it (cgo off). Not run on a
+  Mac here: built, vetted (linux/amd64, linux/arm64, darwin/arm64) and its round trip passes.
+
+### The Mac bundle (BX66)
+
+`bin/box-mac-bundle` makes `target/arbace-go/arbace-box-mac-arm64.tar.gz` (21.7 MB): the
+darwin/arm64 launcher (4,896,434 bytes), the arm64 guest as `arbace-box.elf` beside it
+(64,037,198), `hv.test` for darwin/arm64, `arbace-box.entitlements`, `README.txt`, `VERSION` (the
+describe and the files' SHA-256) and `mac.sh` (`box/mac/`, after go-whim's `guest/mac/mac.sh`):
+`check` (macOS, the chip, `kern.hv_support`), `sign` (ad hoc, the hypervisor entitlement), `hv`
+(the framework's tests), `checklist` (on 4 and 1 vCPUs: `-e`, the wall clock, the REPL on standard
+input, a script and `-m` from memory, an error's status, `System/exit`, files in memory, nil
+dereferences, a future and `send`, R2, R3, no processes; the network: none by default, a loopback
+connection, socket options, a socket REPL from the Mac by `nc`; the idle REPL's CPU over 20 s
+(under 0.5 s), the times of the start and three evaluations, best of 5; the store: the tool, a
+guest's `load`, `get`, `ls`, a script by `ref:`, compare-and-set), `all` (the four, then
+`mac-results.tar.gz` to send back) and `run`. Linux's `timeout` and `shasum` are not assumed on
+the Mac (perl's alarm; `shasum`). The checklist ran here on Linux with the amd64 launcher: 42 of
+42. The user's run on the M2 Max is the follow-up after the tag (decision d).
