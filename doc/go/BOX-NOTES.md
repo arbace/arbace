@@ -1698,6 +1698,11 @@ the design and the amendments proposed (BX60 onward); the implementation follows
 - (d) **The milestone's gate is `bin/gate --full` plus the arm64 VM's box checks.** The Mac run is
   a follow-up after the tag: the bundle and its script are prepared in S4 but do not block it.
 
+- **BX60-BX66 accepted** (2026-10-12, after phase 1): phase 2 as designed. The VM's Alpine pinned to
+  a release by the files' SHA-256 (3.24.2). **Before the tag only the box's smoke test in the
+  arm64 VM must pass**; the arm64 oracle subset and `bin/box-suite` are run once if the time
+  allows, and are not a condition.
+
 ### Where arm64 stands (tried here, 2026-10-12)
 
 Much of arm64 was written with S1-S5: the board's entry (`boot_arm64.s`) takes the wall clock
