@@ -2841,7 +2841,9 @@ a class of the program, not an embedded namespace's source.
 fixtures"; it supersedes SL4). `bin/arbace-go --build-tests` makes a second program,
 `target/arbace-go/<arch>/arbace-tests`: the shipped program plus the suite's Java fixtures,
 converted by j2a from the renamed `test/java` (`bin/clojure-tests --java-fixtures`) and given to
-a2g as one more input. `bin/clojure-tests` requires it of `CLOJURE_TESTS_GO`, and `bin/gate
+a2g as one more input; since 2026-10-12 the converted forms are committed in
+`test/java-fixtures/` (its README.md), which the test build reads without javac, and
+`bin/clojure-tests --java-fixtures verify` (in `bin/gate --full`) proves them j2a's output. `bin/clojure-tests` requires it of `CLOJURE_TESTS_GO`, and `bin/gate
 --full`'s suite on Go uses it; `test/arbace-go-results.edn` is its reference, with the
 namespaces that need the fixtures (`compilation`, `generated-*`, `java-interop`, `param-tags`,
 `reflect`, `try-catch`) no longer skipped. The shipped executables do not hold the fixtures.
