@@ -572,6 +572,11 @@
       (when (nil? cljURL)
         (set! scriptfile cljcfile)
         (set! cljURL (RT/getResource (RT/baseLoader) scriptfile)))
+      ;; Arbace (hand change 22): a source the class path finds in one of ARBACE_PATH's
+      ;; directories (bin/arbace-j appends them to it) is left to loadFromPath, below, which
+      ;; takes ARBACE_PATH's entries in order, its store entries among them, as the Go build
+      (when (and (some? cljURL) (RT/inArbacePath cljURL))
+        (set! cljURL nil))
       (let [^:mutable loaded false]
         (when (or (and (some? classURL)
                        (or (nil? cljURL)
@@ -591,10 +596,11 @@
               (some? (RT/loadClassForName (java-str (.replace scriptbase \/ \.) LOADER_SUFFIX))))
             (finally (Var/popThreadBindings))))
         ;; Arbace (hand change 22, doc/VENDOR-NOTES.md; doc/go/BOX-NOTES.md, S3, BX37): a
-        ;; namespace the class path has neither as a class nor as a source is looked for in the
-        ;; store's entries of ARBACE_PATH (store:PREFIX), as the Go build's RT.load finds it
+        ;; namespace the class path has neither as a class nor as a source is looked for in
+        ;; ARBACE_PATH's entries, its directories and its store entries (store:PREFIX), as the Go
+        ;; build's RT.load finds it there
         (when (and (not loaded) (nil? cljURL))
-          (set! loaded (RT/loadFromStore scriptbase)))
+          (set! loaded (RT/loadFromPath scriptbase)))
         (cond
           (and (not loaded) (some? cljURL))
             (if (RT/booleanCast (.deref arbace.lang.Compiler/COMPILE_FILES))
@@ -615,12 +621,33 @@
                          " Please check that namespaces with dashes use underscores in the Clojure file name."
                          "")]))))))))
 
-  ;; Arbace (hand change 22): RT.load's last resort, arbace.box.host/load-from-path, when
-  ;; ARBACE_PATH has a store entry (the class path is the JVM's ARBACE_PATH: its directories are
-  ;; not read)
-  (method ^:static loadFromStore :throws [IOException] ^boolean [^String scriptbase]
+  ;; Arbace (hand change 22): RT.load's last resort when ARBACE_PATH is set,
+  ;; arbace.box.host/load-from-path (its entries in order, directories and store entries)
+  ;; Is url (a file: URL the class path gave) a file under one of ARBACE_PATH's directories
+  ;; (its entries split as jdk.internal.jrt.HostStore.pathEntries splits them)? In Java, not
+  ;; through arbace.box.host: RT.load asks it while arbace.core loads
+  (method ^:static inArbacePath ^boolean [^URL url]
     (let [path (System/getenv "ARBACE_PATH")]
-      (if (and (some? path) (.contains path "store:"))
+      (when (and (some? path) (.equals "file" (.getProtocol url)))
+        (try
+          (let [file (.getCanonicalPath (File. (.toURI url)))]
+            (loop [^int i 0]
+              (when (<= i (.length path))
+                (let [store (.startsWith path "store:" i)
+                      from (if store (unchecked-add-int i 6) i)
+                      colon (.indexOf path ":" from)
+                      end (if (< colon 0) (.length path) colon)]
+                  (when (and (not store)
+                             (> end i)
+                             (.startsWith file (java-str (.getCanonicalPath (File. (.substring path i end))) "/")))
+                    (return true))
+                  (recur (unchecked-add-int end 1))))))
+          (catch Exception e nil)))
+      false))
+
+  (method ^:static loadFromPath :throws [IOException] ^boolean [^String scriptbase]
+    (let [path (System/getenv "ARBACE_PATH")]
+      (if (and (some? path) (not (.isEmpty path)))
           (do
             (.invoke (RT/var "arbace.core" "require") (Symbol/intern "arbace.box.host"))
             (RT/booleanCast (.invoke (RT/var "arbace.box.host" "load-from-path") scriptbase)))

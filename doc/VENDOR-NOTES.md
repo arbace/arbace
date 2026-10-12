@@ -907,14 +907,17 @@ step 4 (2026-10-07); the others came with later work, as each says:
       the store's ref NAME holds, `arbace.box/load-ref`), on both builds: the Go build's
       `main.subst.ae` no longer substitutes it.
     - `RT.load` (`arbace/lang/RT.ae`): a namespace found neither as a class nor as a source on
-      the class path is looked for, last, in the store entries `store:PREFIX` of `ARBACE_PATH`
-      (`RT.loadFromStore`, which requires `arbace.box.host` and calls its `load-from-path`:
-      `.ae`, then `.clj`, then `.cljc`, each in the entries in order), only when `ARBACE_PATH`
-      has a store entry. `ARBACE_PATH`'s directories stay the Go build's (the JVM's
-      counterpart is the class path, `ARBACE_CLASSPATH` for `bin/arbace-j`), and resources
-      (`io/resource`, `getResourceAsStream`) do not see store entries on the JVM. The Go
-      build's `RT` variant cuts `loadFromStore` (its `pathResource` reads the entries in order
-      with the directories).
+      the class path is looked for, last, in `ARBACE_PATH` as the Go build reads it (the user's
+      decision with BX37: `ARBACE_PATH` works the same on all three): its entries in order,
+      directories and store entries `store:PREFIX`, the `.ae` in all of them, then the `.clj`,
+      then the `.cljc` (`RT.loadFromPath`, when `ARBACE_PATH` is set: it requires
+      `arbace.box.host` and calls its `load-from-path`). A source the class path finds in one
+      of `ARBACE_PATH`'s directories is left to that last resort too (`RT.inArbacePath`, in
+      Java), so that an earlier store entry wins as natively. `bin/arbace-j` appends
+      `ARBACE_PATH`'s directories to the class path (after `ARBACE_CLASSPATH`), for resources
+      (`io/resource`, `data_readers.ae`), as the Go build's class loaders see them; store
+      entries have no resources on the JVM (natively only `RT`'s own reads see them). The Go
+      build's `RT` variant cuts both methods (its `pathResource` reads the entries itself).
     `arbace.box` is not AOT-compiled (it loads from its source, as on the Go build, where it is
     not in the image of prepared namespaces). Tests: `test/native/box_test.ae` (JVM),
     `bin/arbace-go --smoke` (the JVM's checks beside the native executable's, one directory
@@ -961,8 +964,9 @@ the runtime-visible renames are listed once, as c2a's mechanical part.
   `data_readers.clj` and `.cljc`; upstream ignores it.
 - **The store** (hand change 22): `arbace.box`, a namespace upstream lacks; `arbace.main`
   takes `ref:NAME` for a script or an `-i` file (upstream would look for a file of that name);
-  with a `store:` entry in `ARBACE_PATH`, a namespace the class path lacks is looked for in the
-  store before `require` fails.
+  with `ARBACE_PATH` set, a namespace the class path lacks is looked for in its directories and
+  store entries before `require` fails, and a source of the class path inside one of its
+  directories loads in `ARBACE_PATH`'s order.
 - **Runtime-visible names** (hand change 2, step 4's cleanups): agent, socket server and process
   thread names, the error report files' prefix and the proxy methods (`__initArbaceFnMappings`
   and the rest, the field `__arbaceFnMap`) say `arbace`, not `clojure`.
