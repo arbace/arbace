@@ -12,8 +12,7 @@ of runtime + REPL kept its 422 classes and 184 files).
 Retired with standalone S4 (2026-10-12): `bin/java-surface` and `test/jrt/java_surface.ae`
 measured the JVM's compiled classes of `target/stage2`, which left main with the JVM Arbace;
 their last output, `doc/go/java-surface.edn`, stays as data (`bin/jrt-convert`'s closure,
-`bin/jrt-coverage`). The tools are on the branch `arbace-for-java-26`'s successors' history
-(main before S4).
+`bin/jrt-coverage`). The tools remain in main's history before S4.
 
 Summary for the reader in a hurry: the runtime plus the namespaces loaded at a REPL's start use
 **274 JDK classes and 970 distinct members**. Of these, 150 classes (511 members) are plain Java
