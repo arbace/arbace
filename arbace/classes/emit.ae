@@ -199,17 +199,6 @@
 
 (defn- arg-types [m] (first (t/parse-method-desc (:desc m))))
 
-(defn- outer-level
-  "How many enclosing instances class o has (javac's nesting level of the outer type)."
-  [o]
-  (let [i (env/info o)]
-    (if (and i (:outer-instance? i)) (inc (outer-level (:outer i))) 0)))
-
-(defn this0-name
-  "javac's name of class n's outer instance field: this$N, N the outer class's nesting level."
-  [n]
-  (str "this$" (outer-level (:outer (a/decl! n)))))
-
 (defn- this-field-path [gen path]
   (loop [[c & more] path first? true]
     (when c
@@ -217,7 +206,7 @@
             od (t/internal->desc (:outer d))]
         (if (and first? (:outer-slot gen) (= c (:class gen)))
           (.visitVarInsn (mv gen) Opcodes/ALOAD (:outer-slot gen))
-          (.visitFieldInsn (mv gen) Opcodes/GETFIELD c (this0-name c) od))
+          (.visitFieldInsn (mv gen) Opcodes/GETFIELD c (a/this0-name c) od))
         (recur more false)))))
 
 (defn- emit-this-path [gen node]
@@ -256,25 +245,6 @@
      (when (and d (#{:local :anon} (:nesting d)))
        (for [b (:captures @(:state d))] (fn [] (load-binding gen b))))]))
 
-(defn ctor-real-desc
-  "The descriptor of a constructor of class cn with all implicit parameters."
-  [cn m]
-  (let [d (a/decl cn)]
-    (if-not d
-      (let [i (env/info cn)]
-        (if (:outer-instance? i)
-          (let [[ps _] (t/parse-method-desc (:desc m))]
-            (t/method-desc (cons (t/internal->desc (:outer i)) ps) "V"))
-          (:desc m)))
-      (let [[ps _] (t/parse-method-desc (:desc m))]
-        (t/method-desc (concat (when (:outer-instance? d) [(t/internal->desc (:outer d))])
-                               (when-let [so (:super-outer d)] [so])
-                               (when (or (= :enum (:kind d)) (:enum-body d)) ["Ljava/lang/String;" "I"])
-                               ps
-                               (when (#{:local :anon} (:nesting d))
-                                 (map :type (:captures @(:state d)))))
-                       "V")))))
-
 (defn- emit-new [gen node]
   (let [cn (:class node)
         m (:ctor node)
@@ -292,7 +262,7 @@
                    (emit-const gen "I" (:ordinal ec))))]
     (spill-operands gen (:args node) (arg-types m) before)
     (doseq [f trail] (f))
-    (.visitMethodInsn (mv gen) Opcodes/INVOKESPECIAL cn "<init>" (ctor-real-desc cn m) false)))
+    (.visitMethodInsn (mv gen) Opcodes/INVOKESPECIAL cn "<init>" (a/ctor-real-desc cn m) false)))
 
 (defn- emit-arith [gen {:keys [family o args type]}]
   (let [t type]
@@ -370,7 +340,7 @@
       :this-path (emit-this-path gen node)
       :outer-param-path (do (emit gen (:base node) :expr)
                             (doseq [c (:path node)]
-                              (.visitFieldInsn (mv gen) Opcodes/GETFIELD c (this0-name c)
+                              (.visitFieldInsn (mv gen) Opcodes/GETFIELD c (a/this0-name c)
                                                (t/internal->desc (:outer (a/decl! c))))))
       :class-lit (let [d (:class node)]
                    (if (t/prim? d)
@@ -1028,13 +998,13 @@
           (when-let [p (:super-outer-path d)]
             (.visitVarInsn m Opcodes/ALOAD (:outer-slot gen))
             (doseq [c p]
-              (.visitFieldInsn m Opcodes/GETFIELD c (this0-name c) (t/internal->desc (:outer (a/decl! c))))))
+              (.visitFieldInsn m Opcodes/GETFIELD c (a/this0-name c) (t/internal->desc (:outer (a/decl! c))))))
           (when (:enum-slot gen)
             (.visitVarInsn m Opcodes/ALOAD (:enum-slot gen))
             (.visitVarInsn m Opcodes/ILOAD (inc (:enum-slot gen))))
           (doseq [b (:params ab)] (load-binding gen b))
           (.visitMethodInsn m Opcodes/INVOKESPECIAL (:class call) "<init>"
-                            (ctor-real-desc (:class call) (:ctor call)) false))
+                            (a/ctor-real-desc (:class call) (:ctor call)) false))
 
       (= :this (:kind call))
       (let [self (:name d)]
@@ -1047,7 +1017,7 @@
                             (.visitVarInsn m Opcodes/ILOAD (inc (:enum-slot gen))))))
         (when (#{:local :anon} (:nesting d))
           (doseq [b (:captures @(:state d))] (load-binding gen b)))
-        (.visitMethodInsn m Opcodes/INVOKESPECIAL self "<init>" (ctor-real-desc self (:ctor call)) false))
+        (.visitMethodInsn m Opcodes/INVOKESPECIAL self "<init>" (a/ctor-real-desc self (:ctor call)) false))
 
       :else
       (let [cn (:class call)
@@ -1055,7 +1025,7 @@
         (spill-operands gen (:args call) (arg-types (:ctor call))
                         (fn [] (.visitVarInsn m Opcodes/ALOAD 0) (doseq [f lead] (f))))
         (doseq [f trail] (f))
-        (.visitMethodInsn m Opcodes/INVOKESPECIAL cn "<init>" (ctor-real-desc cn (:ctor call)) false)))))
+        (.visitMethodInsn m Opcodes/INVOKESPECIAL cn "<init>" (a/ctor-real-desc cn (:ctor call)) false)))))
 
 (defn- emit-ctor-code [^MethodVisitor mv d m ab]
   (let [n (:name d)
@@ -1087,7 +1057,7 @@
                             "(Ljava/lang/Object;)Ljava/lang/Object;" false)
           (.visitInsn mv Opcodes/POP)
           (when store?
-            (.visitFieldInsn mv Opcodes/PUTFIELD n (this0-name n) (t/internal->desc (:outer d)))))))
+            (.visitFieldInsn mv Opcodes/PUTFIELD n (a/this0-name n) (t/internal->desc (:outer d)))))))
     ;; before the superclass constructor call captured values come from the parameters, after
     ;; it from the val$ fields, as javac does
     (doseq [[b s] cap-slots] (swap! (:slots gen) assoc (:id b) s))
@@ -1119,7 +1089,7 @@
   (let [ctor? (= "<init>" (:name m))
         names? (and ctor? (= :record (:kind d)) (:canonical m))
         extra (when ctor?
-                (concat (when (:outer-instance? d) [[(this0-name (:name d)) (bit-or Opcodes/ACC_FINAL Opcodes/ACC_MANDATED)]])
+                (concat (when (:outer-instance? d) [[(a/this0-name (:name d)) (bit-or Opcodes/ACC_FINAL Opcodes/ACC_MANDATED)]])
                         (when (:super-outer d) [["x0" (bit-or Opcodes/ACC_FINAL Opcodes/ACC_MANDATED)]])
                         (when (or (= :enum (:kind d)) (:enum-body d)) [["$enum$name" Opcodes/ACC_SYNTHETIC]
                                                    ["$enum$ordinal" Opcodes/ACC_SYNTHETIC]])))
@@ -1214,7 +1184,7 @@
   (let [n (:name d)
         st @(:state d)
         ctor? (= "<init>" (:name m))
-        desc (if ctor? (ctor-real-desc n m) (:desc m))
+        desc (if ctor? (a/ctor-real-desc n m) (:desc m))
         exc (when (seq (:throws m)) (into-array String (:throws m)))
         ;; javac gives constructors with captured locals a Signature of the declared parameters,
         ;; except those of anonymous subclasses of classes and anonymous classes written with
@@ -1418,7 +1388,7 @@
       (let [em (:enclosing-method d)
             m (:method em)]
         (.visitOuterClass cw (:outer d) (when m (:name m))
-                          (when m (if (= "<init>" (:name m)) (ctor-real-desc (:outer d) m) (:desc m))))))
+                          (when m (if (= "<init>" (:name m)) (a/ctor-real-desc (:outer d) m) (:desc m))))))
     (write-annotations #(.visitAnnotation cw %1 %2) (:annotations d))
     (write-type-annotations #(.visitTypeAnnotation cw %1 %2 %3 %4) (:type-annotations d))
     (doseq [p (:permits-final d)] (.visitPermittedSubclass cw p))
@@ -1434,7 +1404,7 @@
         (write-type-annotations #(.visitTypeAnnotation fv %1 %2 %3 %4) (:type-annotations f))
         (.visitEnd fv)))
     (when (this0-field? d)
-      (.visitEnd (.visitField cw (bit-or Opcodes/ACC_FINAL Opcodes/ACC_SYNTHETIC) (this0-name n)
+      (.visitEnd (.visitField cw (bit-or Opcodes/ACC_FINAL Opcodes/ACC_SYNTHETIC) (a/this0-name n)
                               (t/internal->desc (:outer d)) nil nil)))
     (when (#{:local :anon} (:nesting d))
       (doseq [b (:captures st)]

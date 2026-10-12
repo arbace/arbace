@@ -2,7 +2,7 @@
 
 Working notes of the standalone stages ([STANDALONE-SURVEY.md](STANDALONE-SURVEY.md), §9.1; the
 user's decisions D1-D13 of 2026-10-12): what each stage did, how it is checked, and its
-amendments (SA1-SA9 for S4's preparation, SA10... for S2, SA30... for S3), proposed to the user, the
+amendments (SA1-SA9 for S4's preparation, SA10... for S2, SA20... for S3's fixpoint, SA30... for S3's g2a), proposed to the user, the
 recommended choice applied meanwhile. S1 (the
 JDK's forms committed in `jdk/`) is recorded in [go/JRT-SOURCES.md](go/JRT-SOURCES.md), "The
 committed forms", and `jdk/README.md`.
@@ -778,3 +778,165 @@ The user accepted SA30-SA32 as recommended (2026-10-12, after the merge into mai
   *Recommended: (a)*; the JVM gains too (the program 23.8 → 12.1 s).
 - **SA32 The evaluator's method cache on calls through a seq** (runtime, `Compiler.ae`): a fix,
   recorded as an amendment because it changes the Go build's runtime. *Recommended: accept.*
+
+## S3: the Go-hosted fixpoint
+
+The other half of S3 (branch `s3-fixpoint`, 2026-10-12; g2a's half is "S3: g2a on Go" above):
+a2g (`arbace/a2g`, with the class forms' analysis `arbace.classes.*`) run by the native Go
+executable, so that the whole build of the Go program runs on Arbace's Go build: a2g, g2a's
+printing and `bin/g2a build`'s driver on the executable, `go build` as a host process. The exit
+criterion (survey §9.1): G1, built by today's JVM chain, builds G2; G2 builds G3; G2 = G3, and
+a2g's program tree on Go equal to the JVM's.
+
+### What kept a2g off the Go executable
+
+S2 had removed a2g's questions to the JVM (the edge); what remained were names and classes the
+Go build does not have, found by loading a2g's namespaces on the executable:
+
+1. **The bytecode back end.** a2g required `arbace.classes.emit` (ASM's visitors, proxies of
+   `arbace.asm` classes the Go world does not hold) for two functions of javac's rules:
+   `ctor-real-desc` (a constructor's descriptor with its implicit parameters: the outer
+   instance, the enum's name and ordinal, captured locals) and `this0-name` (the outer instance
+   field, `this$N`). They are analysis, not emission: they move to `arbace.classes.analyze`
+   (with `outer-level`), `emit` and a2g call them there, and a2g no longer requires `emit`
+   (SA22). `analyze.ae` is embedded in the executable (the REPL's class forms), so its source
+   and the image change; the JVM's class forms compiler compiles the same code.
+2. **The JVM's module layer.** `repl-visible?` named `java.lang.Module` and `ModuleLayer` in a
+   fallback only `--record-edge` and `--jvm-reflection` call; the Go build has neither class, and
+   a hint or a class name the compiler cannot resolve fails the namespace's load. The question
+   moves to `arbace.a2g.jvm`, loaded on demand (`requiring-resolve`) by that fallback (SA23).
+3. **`java.util.zip.Deflater`.** a2g compresses the embedded resources (SZ2) with the JDK's
+   Deflater, zlib's C code: the Go build has no Deflater (jrt inflates with Go's
+   `compress/zlib`), and Go's compressor writes other bytes than zlib's, so a2g on Go could not
+   write the JVM's tree. a2g now writes them with `arbace.a2g.zlib`, a DEFLATE compressor in
+   Arbace (LZ77 over a 32 KB window with hash chains searched 64 deep and one step of lazy
+   matching, dynamic Huffman blocks of 16,384 symbols, lengths limited by halving the
+   frequencies, ties by symbol): the same bytes on every host, read by jrt's inflater and the
+   JDK's. Its output is 0.5-0.7% larger than zlib's level 9 (the resources 666,535 bytes against
+   662,014; the executable +8 KB); 35 ms for `core.ae` (286 KB) on the JVM (SA21).
+
+With these, a2g on the executable translates the program exactly as on the JVM, from the first
+run: every Go form identical (`diff -r` of a2g's output trees).
+
+### Speed (and what the evaluator was doing)
+
+a2g on the JVM: about 80 s (load 12-14 s, reach 4-7, translate 33-50, write 7-9). On Go, main's
+executable: 34 min 46 s (load 228 s, reach 74, translate 995, write 265), 9.6 GB of RSS, 26 times
+the JVM. Go's profiles (`ARBACE_CPUPROFILE`) showed two faults of the evaluator, not of a2g:
+
+- **Calls through a seq compiled the method every time** (`Evaluator.invokeFn` of a variadic fn
+  or `apply`): 15% of the CPU time. Fixed on `s3-g2a` as SA32 (the same fix was made here and
+  dropped at the merge).
+- **Static fields were looked up by name at every read** (`StaticFieldExpr` evaluated by
+  `evalIn`: `Reflector.getStaticField` lists the class's fields, building a `Field` per member,
+  at each read; a2g and the analyzer read `Opcodes/ACC_*` everywhere): 4%. The closure compiler
+  now compiles it into `CodeStaticField`, which reads the analyzer's resolved `Field`, a static
+  final field of a primitive type or `String` (a constant) once (SA24).
+
+After both (the fixpoint's runs): a2g on Go 1,365 s (load 113, reach 56, translate 742-747, write
+160), 9.6 GB of RSS at most (GOGC 400; a live heap of 1.1-1.6 GB), against 79 s on the JVM (12,
+4.5, 33.5, 6.9): 17 times, the translation 22 times, the reach and the load 9-12. The rest is the evaluator itself, spread thin (frames, `Code` dispatch, calls
+through member tables, lazy seqs, boxing); the collector marks on other cores (GOGC 400: about
+105 collections of a 1.1 GB live heap, 25% of the CPU samples, under 1% of the wall time).
+The ratio, 15-20x, is the evaluator's on this kind of code (SPEED-NOTES: 5-500x, 54x geometric
+mean on benchmarks); what closes it is compiling Arbace to Go (S6): a2g, the analyzer and g2a
+built into the executable as Go rather than evaluated.
+
+### The build on Go: `ARBACE_GO_HOST`, `A2G_HOST`
+
+- `bin/a2g` takes `A2G_HOST=jvm|go` (as `bin/g2a`'s `G2A_HOST`, SA30): `go` runs `-m
+  arbace.a2g.main` on `A2G_GO_EXE`, else `target/arbace-go/<host arch>/arbace`, from a copy in
+  `.tmp/a2g-host/`, the checkout first on `ARBACE_PATH` (a2g's namespaces are not embedded: they
+  load from source; the analysis is the executable's own, embedded and prepared), with
+  `GOGC=400` and `GOMEMLIMIT=12GiB` unless set (the JVM's heap is 12 GB) (SA20).
+- `ARBACE_GO_HOST=go bin/arbace-go --build` sets both: the build's Arbace tools run on the
+  executable of the previous build. The JVM stays the default until S4.
+- `bin/arbace-go --fixpoint` runs the chain (amd64): G1 by the JVM chain, G2 by G1, G3 by G2,
+  each a whole `--build` (a2g, `bin/g2a build`, the image, the final link) in
+  `target/arbace-go/fixpoint/g{1,2,3}`; then it compares a2g's trees (`diff -r`, `report.edn`
+  without its times) and the executables byte for byte, prints their hashes, and writes
+  `g3/printed-by`. `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --go-make` packs
+  G3's printed module as the seed (SA7), its `SEED.edn`'s `:printed-by` from that file (SA25).
+
+### The fixpoint (2026-10-12)
+
+On `s3-fixpoint` with main at `aea0b98` merged (commit `f293ba7`), `bin/arbace-go --fixpoint`,
+48 min 46 s:
+
+| | built by | a2g | `bin/g2a build` | the build |
+|---|---|---:|---:|---:|
+| G1 | the JVM chain (a2g and g2a on `target/stage2`) | 79 s | 9 s | 100 s |
+| G2 | G1 (`A2G_HOST=go`, `G2A_HOST=go`) | 1,365 s | 31 s | 1,407 s |
+| G3 | G2 | 1,377 s | 31 s | 1,419 s |
+
+- a2g's program trees (`a2g/`: the generated forms, the program root with jrt's files, the
+  embedded resources, `namespaces.txt`, `report.edn` but its times): G1 = G2 = G3 (`diff -r`). So
+  a2g on Go writes the JVM's tree.
+- The printed modules (`work-amd64/mod`, what the seed packs): G1 = G2 = G3 (`diff -r`).
+- The executables: **G1 = G2 = G3 byte for byte**, SHA-256
+  `2f19b3d1c64525db0b11e71c58a7aca750d95f35da8fb6a0ad3f9b6388540f8d`, 69,202,080 bytes.
+- `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --go-make` packs G3: 3,069,608
+  bytes, 1,148 files, 29,168,488 bytes unpacked, `:printed-by` the fixpoint (SHA-256
+  `2471d77c…`, a dry run in `.tmp`, not committed: SA7).
+
+Before the fixes of the speed section, a2g on main's executable (with the three changes above
+loaded over it) already wrote the JVM's translation (every Go form; the resources then
+uncompressed, the zlib not yet written).
+
+### Checks
+
+- `bin/arbace-go --smoke` (amd64, G1): 83 ok, none failed.
+- The oracle on G3 (the runtime changed: SA24), `--expected test/oracle/known-go-amd64.edn`:
+  22,232 of 22,278, the 46 recorded mismatches, 0 new, 0 now passing.
+- `bin/build-arbace`: stage 2 = stage 3; stage 2's `arbace/lang`, `arbace/asm`, `arbace/java/api`
+  byte-identical to main's (moving the two functions changes no class the compiler emits).
+- `arbace.a2g.zlib` on the JVM: its streams inflate to their input (the JDK's `Inflater`, Python's
+  zlib) for the sources, `tzdb.dat`, the empty input and runs; on Go the executable's image step
+  reads every compressed source through jrt's inflater (`prepare`).
+- The essential `bin/gate` (main at `aea0b98` merged): passed (5m19s).
+
+### Left for S4
+
+- The default: `ARBACE_GO_HOST=go` (and `A2G_HOST`, `G2A_HOST`) becomes the build's, the seed's
+  executable as G1 (`bin/seed --build`, then `--fixpoint` from it, not from the JVM); the
+  `--fixpoint`'s first step then is stage 0 instead of the JVM chain.
+- The time: a Go-hosted `--build` takes about 24 minutes against 2 on the JVM (a2g 23 of them).
+  `bin/gate`'s cached executable hides it when nothing changed; a change to `arbace/` costs a
+  full a2g run. S6 (Arbace compiled to Go) is the remedy; until then, a2g's phases could run in
+  parallel (translation per class is independent but for the shared literal pools).
+- The edge (`bin/a2g-edge`) and its recording stay on the JVM (D4).
+- `bin/arbace-go --build-tests` (the test build) and `--build --box` on Go: the same a2g and g2a,
+  not separately proven here.
+
+### Amendments
+
+Provisional: the user, away, asked for the recommended choice applied and marked so (2026-10-12).
+
+- **SA20 a2g's host chosen by `A2G_HOST`; `ARBACE_GO_HOST` for the build.** (a) `A2G_HOST=jvm|go`
+  in `bin/a2g` as SA30's `G2A_HOST`, and `ARBACE_GO_HOST=go` in `bin/arbace-go` setting both;
+  the JVM the default until S4; (b) one variable for both tools only; (c) Go the default now (24
+  minutes a build). *Recommended: (a)*. Provisional.
+- **SA21 The embedded resources compressed by a DEFLATE compressor in Arbace.** (a)
+  `arbace.a2g.zlib`, the same bytes on every host (output 0.5-0.7% larger than zlib's; the
+  executable +8 KB); (b) a2g writes the resources plain and the image step compresses them with
+  Go's `compress/zlib` in the executable (a jrt native; a2g's tree then differs from today's
+  shape, the build's steps change, the box's too); (c) no compression (+1.2 MB, SZ2 undone);
+  (d) zlib's C algorithm ported to give the JDK's bytes (large, fragile). *Recommended: (a)*.
+  Provisional.
+- **SA22 javac's implicit constructor parameters in the analysis.** (a) `ctor-real-desc`,
+  `this0-name` (and `outer-level`) move from `arbace.classes.emit` to `arbace.classes.analyze`;
+  a2g no longer loads the bytecode back end; the embedded `analyze.ae` and the image change;
+  (b) a copy in a2g (two definitions of javac's rule); (c) `emit` loadable on Go (ASM in the Go
+  world). *Recommended: (a)*. Provisional.
+- **SA23 The JVM-only question in `arbace.a2g.jvm`, loaded on demand.** (a) the module layer's
+  exports asked through `requiring-resolve` when recording the edge or with `--jvm-reflection`;
+  (b) reflection by name (`Class/forName` of `java.lang.ModuleLayer`). *Recommended: (a)*: S4's
+  removal of the JVM paths then deletes one file. Provisional.
+- **SA24 The evaluator's static field reads** (runtime, `arbace/lang/go/CompilerCode.ae`):
+  `CodeStaticField` reads the resolved `Field` (`Reflector.prepRet` as `getStaticField` does), a
+  primitive or `String` static final once. *Recommended: accept* (a fix, as SA32). Provisional.
+- **SA25 `bin/arbace-go --fixpoint` and the seed from G3.** (a) the chain as a mode of
+  `bin/arbace-go` into `target/arbace-go/fixpoint/`, and `bin/seed --go-make` packing a named
+  build (`ARBACE_SEED_GO_BUILD`, its `printed-by`); (b) a separate `bin/fixpoint` script; (c)
+  the chain in `target/arbace-go` itself, each build replacing the previous (no comparison of
+  G1 and G2 after the fact). *Recommended: (a)*. Provisional.
