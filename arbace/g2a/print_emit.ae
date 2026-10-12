@@ -30,20 +30,21 @@
    :ws (volatile! nil)        ; pending whitespace: nil, \space or \u000B
    :opens (volatile! [])      ; indentation of the lines where open brackets were written
    :mark (volatile! 0)        ; the last line a form was recorded to begin on (mode :lines)
+   :min-line (volatile! 1)    ; the lowest line set-line! set (start-at!'s chunks)
    :lines? (boolean (:lines? opts))
    :directives? (:line-directives? opts true)})
 
-(defn lines? [] (:lines? *p*))
-(defn line [] @(:line *p*))
-(defn bol? [] @(:bol *p*))
+(definline lines? [] `(:lines? *p*))
+(definline line [] `@(:line *p*))
+(definline bol? [] `@(:bol *p*))
 
-(defn target
+(definline target
   "The recorded line of a form (mode :lines): :line metadata on lists, and on symbols and
   vectors that begin a Go line."
   [f]
-  (when (lines? )
-    (let [l (:line (meta f))]
-      (when (integer? l) (long l)))))
+  `(when (lines?)
+     (let [l# (:line (meta ~f))]
+       (when (integer? l#) (long l#)))))
 
 (defn room?
   "Whether n more lines fit before *next* (always, when it is unknown or out of mode
@@ -125,14 +126,14 @@
   "A blank before the next token on this line."
   []
   (when-not (bol?)
-    (when-not (= @(:ws *p*) (char 11)) (vreset! (:ws *p*) \space))))
+    (when-not (= \u000B @(:ws *p*)) (vreset! (:ws *p*) \space))))
 
 (defn vtab
   "An alignment separator before the next token (gofmt's vtab)."
   []
   (when-not (bol?)
     ;; a second separator in a row is an empty cell
-    (when (= @(:ws *p*) (char 11)) (.append ^StringBuilder (:sb *p*) (char 11)))
+    (when (= \u000B @(:ws *p*)) (.append ^StringBuilder (:sb *p*) (char 11)))
     (vreset! (:ws *p*) (char 11))))
 
 (defn nl
@@ -148,7 +149,7 @@
      (vreset! (:indent p) indent)
      nil)))
 
-(defn cur-indent [] @(:cur-indent *p*))
+(definline cur-indent [] `@(:cur-indent *p*))
 
 (defn push-open!
   "Records an open bracket (or a statement) whose continuation lines indent one more than
@@ -182,7 +183,61 @@
 
 (defn set-line!
   "Sets the line of the cursor as gc will see it (after a //line directive)."
-  [l] (vreset! (:line *p*) l))
+  [l]
+  (vreset! (:line *p*) l)
+  (vswap! (:min-line *p*) min (long l)))
+
+;; ---------------------------------------------------------------------------------------
+;; Chunks: declarations printed apart, in parallel, then joined (arbace.g2a.print/print-file)
+;;
+;; A chunk of a file's declarations is printed in a state of its own, from the start of a line
+;; at the line its first declaration is placed on (start-at!), as if all before it had been
+;; printed; join! appends it to the file's state when the file reaches that line in the same
+;; state, which the chunk's text then continues exactly as printing it there would have:
+;; - at the start of a line at indentation 0 with no pending whitespace or open bracket, what
+;;   was written before is not read (the last token and the semicolon rule only between
+;;   tokens of a line, a line's indentation only after its first token);
+;; - the mark (break-to!) is read only as (max (inc mark) line): when the file's mark is
+;;   below the chunk's first line and the chunk's line never went below it (min-line: //line
+;;   directives move the line back), the mark before the chunk changes nothing in it.
+
+(defn start-at!
+  "Starts a chunk's state at line l (start of a line, indentation 0)."
+  [l]
+  (vreset! (:line *p*) l)
+  (vreset! (:min-line *p*) l))
+
+(defn chunk-state
+  "The state after a chunk was printed (in its own state, *p*): its text and its emitter
+  state."
+  []
+  (let [p *p*]
+    {:text (.toString ^StringBuilder (:sb p))
+     :line @(:line p) :bol @(:bol p) :indent @(:indent p) :cur-indent @(:cur-indent p)
+     :last @(:last p) :semi @(:semi p) :ws @(:ws p) :opens @(:opens p) :mark @(:mark p)
+     :min-line @(:min-line p)}))
+
+(defn join!
+  "Appends the chunk c (chunk-state), printed from line l (start-at!), to *p* when *p*'s state
+  is where c's printing assumed it: true when joined, false when the chunk must be printed
+  again in *p*."
+  [c l]
+  (let [p *p* l (long l)]
+    (if (and @(:bol p) (== (long @(:line p)) l) (zero? (long @(:indent p))) (nil? @(:ws p))
+             (empty? @(:opens p)) (< (long @(:mark p)) l) (>= (long (:min-line c)) l))
+      (do (.append ^StringBuilder (:sb p) ^String (:text c))
+          (vreset! (:line p) (:line c))
+          (vreset! (:bol p) (:bol c))
+          (vreset! (:indent p) (:indent c))
+          (vreset! (:cur-indent p) (:cur-indent c))
+          (vreset! (:last p) (:last c))
+          (vreset! (:semi p) (:semi c))
+          (vreset! (:ws p) (:ws c))
+          (vreset! (:opens p) (:opens c))
+          (vswap! (:mark p) max (long (:mark c)))
+          (vswap! (:min-line p) min (long (:min-line c)))
+          true)
+      false)))
 
 (defn line-directive-inline
   "/*line :N:1*/ before the next token: gc puts it on line N (a column keeps the file name)."

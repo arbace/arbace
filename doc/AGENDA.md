@@ -94,10 +94,19 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   `test/java-fixtures/` (no javac in any build). S4's preparation merged: the Go-source seed's
   tooling (`bin/seed --go-*`, `seed/goroot.sha256`), the oracle's frozen v4 reference, S4's
   inventory (doc/STANDALONE-NOTES.md; SA1-SA9 accepted).
-- Now: S3, the Go-hosted fixpoint: g2a on the Go executable (agent, branch `s3-g2a`), then a2g
-  on it.
+- S3's g2a half merged (2026-10-12): g2a's printer, `bin/g2a build` and the converter run on
+  the Go executable (`G2A_HOST=go`), byte-identical to the JVM's (all 8 executables, `tamago/`);
+  the program printed in 32 s on Go (was 378 s), 12 s on the JVM; the evaluator's method cache
+  for variadic calls fixed. SA30-SA32 accepted.
+- Now: S3, the Go-hosted fixpoint: a2g on the Go executable, G1 → G2 → G3 with `G2A_HOST=go`
+  (agent, branch `s3-fixpoint`). Then S4: the seed printed and committed, the JVM's products
+  removed, the gate's oracle on the frozen reference; `bin/gate --full`, the tag.
   `bin/gate --full` runs the amd64 box smoke test (`box-smoke`). The Mac: a bundle per box
   milestone, the user's run following the tag.
+- The milestone's `bin/gate --full` runs with a failing `go` first on PATH, proving no use of
+  the host's Go (`bin/box-vendor` was the last, fixed 2026-10-12).
+- `bin/box-vendor convert` fails on the launcher (`cmd/arbace-box`, not in go-whim's clone):
+  S0's replay, outside the gate; to fix with the box's next work.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 

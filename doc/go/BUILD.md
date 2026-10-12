@@ -97,6 +97,11 @@ Alpine's own go1.27.1 (`/usr/lib/go`, `G2A_GOROOT=/usr/lib/go`) works too and pa
 tests, but its executables differ from TamaGo's (code and data, not only the build ID: the two
 trees differ in `cmd/` and std, TamaGo's additions and Alpine's patches); each is reproducible.
 
+**Host.** `bin/g2a build` (and `bin/g2a print`) runs on the JVM by default; `G2A_HOST=go` runs
+it on the native Go executable instead (`target/arbace-go/<arch>/arbace`, or `G2A_GO_EXE`),
+with the same output byte for byte (standalone S3, [../STANDALONE-NOTES.md](../STANDALONE-NOTES.md),
+"S3: g2a on Go"; `bin/lib/g2a-host.bash`).
+
 **Static.** `CGO_ENABLED=0` makes gc's internal linker write a static executable: `file` says
 "statically linked", `readelf -l` shows no `INTERP` segment and `readelf -d` no dynamic
 section. (The executables keep their symbols and DWARF; `-ldflags=-s -w` would strip them.

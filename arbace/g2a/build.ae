@@ -78,9 +78,10 @@
        (sort-by #(.getPath ^File %))))
 
 (defn- package-file?
-  "Whether a forms file is a package file: it holds an ns form and a go/package form."
-  [^File f]
-  (let [forms (p/read-forms f)
+  "Whether a forms file is a package file: it holds an ns form and a go/package form.
+  read-fn gives its forms."
+  [^File f read-fn]
+  (let [forms (read-fn f)
         ns-form (first (filter #(and (seq? %) (= 'ns (first %))) forms))
         aliases (when ns-form (#'p/go-ns-aliases ns-form))]
     (boolean
@@ -112,14 +113,27 @@
                   (str/join ", " (map #(.getPath ^File (:file %)) ps)))))
      pkgs)))
 
+(defn- read-all
+  "A function of a forms file giving its forms (p/read-forms), the files given read
+  beforehand, in parallel, each once: reading is most of collecting a large program on the Go
+  executable, whose reader is slower than the JVM's (doc/STANDALONE-NOTES.md)."
+  [files]
+  (let [cache (zipmap (map #(.getAbsolutePath ^File %) files)
+                      (pmap p/read-forms files))]
+    (fn [^File f]
+      (let [k (.getAbsolutePath f)]
+        (if (contains? cache k) (get cache k) (p/read-forms f))))))
+
 (defn- root-packages
   "The package files under DIR/go, collected."
   [^File dir]
   (let [root (File. dir "go")]
     (when-not (.isDirectory root)
       (fail (str "no " (.getPath root) ": the program's forms go under DIR/go (doc/go/BUILD.md)")))
-    (let [pkgs (for [f (clj-files root) :when (package-file? f)]
-                 (let [pkg (p/collect f)
+    (let [files (clj-files root)
+          read-fn (read-all files)
+          pkgs (for [f files :when (package-file? f read-fn)]
+                 (let [pkg (p/collect f read-fn)
                        path (:path (:package pkg))]
                    (when-not (string? path)
                      (fail (str (rel-path dir f) ": go/package without :path")))

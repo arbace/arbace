@@ -105,13 +105,6 @@
 (defn- bin-op [f] (first (binary-ops (op f))))
 (defn- bin-prec [f] (second (binary-ops (op f))))
 
-(defn- bin-x
-  "The left operand: (+ a b c) is (+ (+ a b) c)."
-  [f]
-  (if (> (count f) 3) (with-meta (apply list (butlast f)) (dissoc (meta f) :go/paren)) (second f)))
-
-(defn- bin-y [f] (last f))
-
 (defn prec-of
   "The precedence of the Go expression a form prints as: 1-5 binary, 6 unary, 7 primary."
   [f]
@@ -623,31 +616,52 @@
 ;; ---------------------------------------------------------------------------------------
 ;; Expressions (§7.5-7.7)
 
+(declare walk-binary)
+
+(defn- walk-right
+  "go/printer's walkBinary, the part of a right operand r of the operator o (precedence
+  prec): [has4 has5 max-problem]."
+  [o prec r]
+  (cond
+    (binary? r) (if (> (long (bin-prec r)) (long prec)) (walk-binary r) [false false 0])
+    (and (seq? r) (= (op r) "deref") (= 2 (count r)))
+    [false false (if (= o "/") 5 0)]
+    (unary? r)
+    (let [s (str o (unary-op r))]
+      [false false (cond (#{"/*" "&&" "&^"} s) 5 (#{"++" "--"} s) 4 :else 0)])
+    :else [false false 0]))
+
+(defn- walk-prefixes
+  "go/printer's walkBinary of each left-nested prefix of f: (+ a b c d) is (+ (+ (+ a b) c) d),
+  whose prefixes (+ a b), (+ a b c) and f are walked in one pass (each prefix's walk is its
+  left prefix's and its right operand's): a vector, f's last."
+  [f]
+  (let [prec (bin-prec f)
+        o (bin-op f)
+        xs (vec (rest f))
+        x1 (nth xs 0)
+        [h4 h5 mp] (if (and (binary? x1) (>= (long (bin-prec x1)) (long prec))) (walk-binary x1) [false false 0])]
+    (loop [i 1 acc [(or (= prec 4) h4) (or (= prec 5) h5) mp] out []]
+      (if (< i (count xs))
+        (let [[rh4 rh5 rmp] (walk-right o prec (nth xs i))
+              [a4 a5 amp] acc
+              w [(or a4 rh4) (or a5 rh5) (max (long amp) (long rmp))]]
+          (recur (inc i) w (conj out w)))
+        out))))
+
 (defn- walk-binary
   "go/printer's walkBinary: [has4 has5 max-problem]."
   [f]
-  (let [prec (bin-prec f)
-        has4 (= prec 4) has5 (= prec 5)
-        l (bin-x f) r (bin-y f)
-        [h4 h5 mp] (if (and (binary? l) (>= (bin-prec l) prec)) (walk-binary l) [false false 0])
-        [has4 has5 mp] [(or has4 h4) (or has5 h5) mp]
-        [rh4 rh5 rmp] (cond
-                        (binary? r) (if (> (bin-prec r) prec) (walk-binary r) [false false 0])
-                        (and (seq? r) (= (op r) "deref") (= 2 (count r)))
-                        [false false (if (= (bin-op f) "/") 5 0)]
-                        (unary? r)
-                        (let [s (str (bin-op f) (unary-op r))]
-                          [false false (cond (#{"/*" "&&" "&^"} s) 5 (#{"++" "--"} s) 4 :else 0)])
-                        :else [false false 0])]
-    [(or has4 rh4) (or has5 rh5) (max mp rmp)]))
+  (peek (walk-prefixes f)))
 
-(defn- cutoff [f depth]
-  (let [[has4 has5 mp] (walk-binary f)]
-    (cond
-      (pos? mp) (inc mp)
-      (and has4 has5) (if (= depth 1) 5 4)
-      (= depth 1) 6
-      :else 4)))
+(defn- cutoff-of [[has4 has5 mp] depth]
+  (cond
+    (pos? mp) (inc mp)
+    (and has4 has5) (if (= depth 1) 5 4)
+    (= depth 1) 6
+    :else 4))
+
+(defn- cutoff [f depth] (cutoff-of (walk-binary f) depth))
 
 (defn- diff-prec [x prec]
   (if (and (binary? x) (= prec (bin-prec x))) 0 1))
@@ -663,26 +677,42 @@
   (binding [*header* false] (expr0 x 1))
   (tok ")"))
 
-(defn- binary-expr [f prec1 cut depth]
+(defn- binary-expr
+  "go/printer's binaryExpr. An n-ary form is a left-nested chain, (+ a b c) printed as
+  (+ (+ a b) c): its prefixes are printed in one pass, each with its own cutoff, as the
+  recursion through them would (each prefix's expr1 first moving to f's line, then its left
+  operand, then its operator and right operand), without making the prefixes."
+  [f prec1 cut depth]
   (let [prec (bin-prec f)]
     (if (< prec prec1)
       (do (tok "(")
           (binding [*header* false] (expr0 f (reduce-depth depth)))
           (tok ")"))
-      (let [blank? (< prec cut)
-            x (bin-x f) y (bin-y f)]
-        (if (:go/paren (meta x))
-          (paren-operand x)
-          (expr1 x prec (+ depth (diff-prec x prec))))
-        (when blank? (sp))
-        (tok (bin-op f))
-        (let [yt (child-target f (dec (count f)) y)]
-          (if (and yt (or (= yt :break) (> (long yt) (e/line))))
-            (e/break-to! yt)
-            (when blank? (sp))))
-        (if (:go/paren (meta y))
-          (paren-operand y)
-          (expr1 y (inc prec) (inc depth)))))))
+      (let [xs (vec (rest f))
+            k (count xs)
+            o (bin-op f)
+            ;; the cutoff of each prefix (op x1 .. xj), j = 2 .. k (f's is cut)
+            cuts (if (> k 2)
+                   (conj (mapv #(cutoff-of % depth) (pop (walk-prefixes f))) cut)
+                   [cut])
+            t (line-of f)
+            x1 (nth xs 0)]
+        (dotimes [_ (- k 2)] (e/break-to! t))
+        (if (:go/paren (meta x1))
+          (paren-operand x1)
+          (expr1 x1 prec (+ depth (diff-prec x1 prec))))
+        (dotimes [i (dec k)]
+          (let [blank? (< (long prec) (long (nth cuts i)))
+                y (nth xs (inc i))]
+            (when blank? (sp))
+            (tok o)
+            (let [yt (child-target f (+ i 2) y)]
+              (if (and yt (or (= yt :break) (> (long yt) (e/line))))
+                (e/break-to! yt)
+                (when blank? (sp))))
+            (if (:go/paren (meta y))
+              (paren-operand y)
+              (expr1 y (inc prec) (inc depth)))))))))
 
 (defn- call-args
   "(args) of a call; a final (spread xs) is xs...."

@@ -77,7 +77,8 @@ Prior art:
     dialects' divergences; `bin/clojure-tests` translates Clojure's suite with it.
   - `arbace/j2a/`: the Java → class forms converter.
   - `arbace/g2a/`: Go as Go forms and back (spec `doc/go/SPEC.md`; helpers `tools/godump`,
-    `tools/gocmp`; `bin/g2a`).
+    `tools/gocmp`; `bin/g2a`; hosted on the JVM, or with `G2A_HOST=go` on the Go executable,
+    `G2A_GO_EXE`, byte-identical, for every caller of `bin/g2a`).
   - `arbace/a2g/`: the class forms → Go forms translator (spec `doc/go/A2G-SPEC.md`; `bin/a2g`).
 - The Go build (B1a, `doc/go/B1-PLAN.md`): Arbace as a static Go executable. a2g translates
   the runtime, with the Go-build variants of Clojure's classes and namespaces in
@@ -110,6 +111,9 @@ Prior art:
   `bin/box-mac-bundle` packs the Mac's launcher, guest and checklist (`box/mac/`). The store (S3):
   blobs and refs in a host directory (`ARBACE_BOX_STORE`, `arbace-box --store DIR`, which is also
   its tool), the namespace `arbace.box` over it in the box, natively and on the JVM (BX37).
+- `doc/ALPINE.md`: the host's Alpine packages as one minimal `apk add` line (`bin/alpine-env
+  world`, `check`, `simulate`), the subset Arbace uses, and what apk does not provide (jdk26u,
+  TamaGo's Go, go-whim, Go's module cache).
 - `bin/gate` is the check every change to main must pass: the seed's hash, the bootstrap, then
   concurrently Clojure's suite on stage 2, `bin/class-forms-tests` and the Go executable's
   smoke test on amd64 (`bin/arbace-go --gate`; about 4 minutes). The smoke test runs on an

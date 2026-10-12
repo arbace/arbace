@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# The host's Alpine packages as one minimal `apk add` line (doc/ALPINE.md).
+#
+#   bin/alpine-env world       the line: /etc/apk/world less every entry another entry's
+#                              dependencies already install (from /lib/apk/db/installed)
+#   bin/alpine-env check       the line's closure, with install_if, equals the installed set
+#                              (offline, from the database)
+#   bin/alpine-env simulate    `apk add --simulate` of the line into an empty root in .tmp/
+#                              (the repositories of /etc/apk/repositories, network): the
+#                              packages it would install against the installed ones, by name
+#                              and by version
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cmd=${1:-world}
+
+# min_world MODE: the line (world) or the checks (check), on stdout
+min_world() {
+  python3 -I - "$1" <<'EOF'
+import re, sys
+mode = sys.argv[1]
+pk, cur = {}, {}
+for line in open('/lib/apk/db/installed'):
+    line = line.rstrip('\n')
+    if not line:
+        if cur: pk[cur['P']] = cur
+        cur = {}
+        continue
+    k, v = line[0], line[2:]
+    if k in 'PDpi': cur[k] = v
+if cur: pk[cur['P']] = cur
+def nm(t): return re.split(r'[<>=~]', t.lstrip('!'), maxsplit=1)[0]
+prov = {}
+for p, c in pk.items():
+    prov.setdefault(p, set()).add(p)
+    for t in c.get('p', '').split(): prov.setdefault(nm(t), set()).add(p)
+def deps(p):
+    return set().union(*[prov.get(nm(t), set()) for t in pk[p].get('D', '').split() if not t.startswith('!')])
+def closure(roots):
+    seen, st = set(), list(roots)
+    while st:
+        x = st.pop()
+        if x not in seen: seen.add(x); st.extend(deps(x))
+    return seen
+def provs(names): return set().union(*[prov[nm(w)] for w in names])
+world = open('/etc/apk/world').read().split()
+missing = [w for w in world if not prov.get(nm(w))]
+if missing: sys.exit('alpine-env: world entries not installed: ' + ' '.join(missing))
+keep = [w for w in world if not prov[nm(w)] <= closure(provs([o for o in world if o != w]))]
+if mode == 'world':
+    print(' '.join(keep)); sys.exit()
+have = closure(provs(keep))
+ok = have == closure(provs(world))
+while True:  # install_if, to a fixpoint
+    add = {p for p, c in pk.items() if p not in have and 'i' in c
+           and all(prov.get(nm(t), set()) & have for t in c['i'].split())}
+    add = closure(add) - have
+    if not add: break
+    have |= add
+print(f'world {len(world)} entries, the line {len(keep)}; its closure {len(closure(provs(keep)))}'
+      f' packages, with install_if {len(have)}; installed {len(pk)}')
+extra, short = sorted(have - set(pk)), sorted(set(pk) - have)
+if extra: print('  not installed: ' + ' '.join(extra))
+if short: print('  not reached: ' + ' '.join(short))
+sys.exit(0 if ok and not extra and not short else 1)
+EOF
+}
+
+case $cmd in
+  world) min_world world ;;
+  check) min_world check ;;
+  simulate)
+    w=$root/.tmp/alpine-env; r=$w/root
+    rm -rf "$w"; mkdir -p "$r"
+    a=(--root "$r" --keys-dir /etc/apk/keys --repositories-file /etc/apk/repositories --arch "$(apk --print-arch)")
+    apk add "${a[@]}" --initdb --no-scripts --quiet
+    # shellcheck disable=SC2046
+    apk add "${a[@]}" --simulate $(min_world world) > "$w/simulate.log"
+    sed -nE 's/^\( *[0-9]+\/[0-9]+\) Installing ([^ ]+) \((.*)\)$/\1-\2/p' "$w/simulate.log" | sort > "$w/line.txt"
+    apk info -v 2>/dev/null | sort > "$w/host.txt"
+    sed -E 's/-[^-]+-r[0-9]+$//' "$w/line.txt" > "$w/line-names.txt"
+    sed -E 's/-[^-]+-r[0-9]+$//' "$w/host.txt" > "$w/host-names.txt"
+    n=$(comm -3 "$w/host-names.txt" "$w/line-names.txt" | wc -l)
+    v=$(comm -23 "$w/line.txt" "$w/host.txt" | sed -E 's/-[^-]+-r[0-9]+$//' | tr '\n' ' ')
+    echo "the line installs $(wc -l < "$w/line.txt") packages, the host has $(wc -l < "$w/host.txt");" \
+      "by name: $n differ$( [ "$n" = 0 ] && echo ', identical')"
+    [ -z "$v" ] || echo "  other versions in the repositories now: $v"
+    [ "$n" = 0 ] ;;
+  *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac
