@@ -1,0 +1,391 @@
+;; SPDX-License-Identifier: Apache-2.0
+;; SPDX-FileCopyrightText: 2022 The Ebitengine Authors
+
+
+
+(in-ns 'go.arbace.box.purego) (go/file "syscall_unix.go" :build ["//go:build darwin || freebsd || (linux && (386 || amd64 || arm || arm64 || loong64 || ppc64le || riscv64 || (s390x && (cgo || go1.27)))) || netbsd"] :imports [
+
+
+    ^{:line 9} [math "math"]
+    ^{:line 10} [reflect "reflect"]
+    ^{:line 11} [runtime "runtime"]
+    ^{:line 12} [sync "sync"]
+    ^{:line 13} [unsafe "unsafe"]])
+
+
+(go/var ^uintptr syscallXABI0)
+
+^{:go/end 20} (go/func syscall_syscallN [^uintptr fn & ^{:tag (slice uintptr)} args] :results [^uintptr r1 ^uintptr r2 ^uintptr err]
+  (panic "purego: syscall_syscallN is only supported on windows"))
+
+
+
+
+
+
+
+
+^{:go/end 40} (go/func NewCallback "NewCallback converts a Go function to a function pointer conforming to the C calling convention.\nThis is useful when interoperating with C code requiring callbacks. The argument is expected to be a\nfunction with zero or one uintptr-sized result. The function must not have arguments with size larger than the size\nof uintptr. Only a limited number of callbacks may be created in a single Go process, and any memory allocated\nfor these callbacks is never released. At least 2000 callbacks can always be created. Although this function\nprovides similar functionality to windows.NewCallback it is distinct.\n" ^uintptr [^any fn]
+  (let [ty (reflect/TypeOf fn)]
+    (range [i (.NumIn ty)]
+      (let [in (.In ty i)]
+        (when (not (.AssignableTo in ((inst reflect/TypeFor CDecl))))
+          (continue))
+
+        (when (!= i 0)
+          (panic "purego: CDecl must be the first argument"))))
+
+
+    (compileCallback fn)))
+
+
+
+
+(go/const ^{:val 2000 :doc "maxCb is the maximum number of callbacks\nonly increase this if you have added more to the callbackasm function\n"} maxCB 2000)
+
+(go/var ^{:tag (struct ^sync/Mutex lock ^int numFn ^{:tag (array maxCB reflect/Value)} funcs)} cbs)
+
+;; the number of functions currently in cbs.funcs
+;; the saved callbacks
+
+
+^{:go/end 102} (go/func compileCallback ^uintptr [^any fn]
+  (let [val (reflect/ValueOf fn)]
+    (when (!= (.Kind val) reflect/Func)
+      (panic "purego: the type must be a function but was not"))
+
+    (when (.IsNil val)
+      (panic "purego: function must not be nil"))
+
+    (let [ty (.Type val)]
+      (range [i (.NumIn ty)]
+        (let [in (.In ty i)]
+          (switch (.Kind in)
+            (case [reflect/Struct]
+              (when (and (== i 0) (.AssignableTo in ((inst reflect/TypeFor CDecl))))
+                (continue))
+
+              (ensureCallbackStructSupported)
+              (checkStructFieldsSupported in)
+              (continue))
+            (case [reflect/Interface reflect/Func reflect/Slice
+                ^{:line 72} reflect/Chan reflect/Complex64 reflect/Complex128
+                ^{:line 73} reflect/String reflect/Map reflect/Invalid]
+              (panic (+ "purego: unsupported argument type: " (.String (.Kind in))))))))
+
+
+      (label :output
+        (switch
+          (case [(== (.NumOut ty) 1)]
+            (switch (.Kind (.Out ty 0))
+              (case [reflect/Struct]
+                (ensureCallbackStructSupported)
+                (checkStructFieldsSupported (.Out ty 0))
+                (break :output))
+              (case [reflect/Pointer reflect/Int reflect/Int8 reflect/Int16 reflect/Int32 reflect/Int64
+                  ^{:line 86} reflect/Uint reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Uint64 reflect/Uintptr
+                  ^{:line 87} reflect/Bool reflect/UnsafePointer]
+                (break :output)))
+
+            (panic (+ "purego: unsupported return type: " (.String ty))))
+          (case [(> (.NumOut ty) 1)]
+            (panic "purego: callbacks can only have one return"))))
+
+      (.Lock (.-lock cbs))
+      (defer (.Unlock (.-lock cbs)))
+      (when (>= (.-numFn cbs) maxCB)
+        (panic "purego: the maximum number of callbacks has been reached"))
+
+      (aset (.-funcs cbs) (.-numFn cbs) val)
+      (inc! (.-numFn cbs))
+      (callbackasmAddr (- (.-numFn cbs) 1)))))
+
+
+(go/const ^{:val 8} ptrSize (unsafe/Sizeof (conv (* int) nil)))
+
+(go/const ^{:val 512} callbackMaxFrame (* 64 ptrSize))
+
+
+
+
+(go/var ^{:tag byte :doc "callbackasm is implemented in zcallback_GOOS_GOARCH.s\n" :go/linkname "__callbackasm callbackasm"} __callbackasm)
+(go/var callbackasmABI0 (conv uintptr (conv unsafe/Pointer (addr __callbackasm))))
+
+
+
+
+
+(go/var ^{:doc "callbackWrap_call allows the calling of the ABIInternal wrapper\nwhich is required for runtime.cgocallback without the\n<ABIInternal> tag which is only allowed in the runtime.\nThis closure is used inside sys_darwin_GOARCH.s\n"} callbackWrap_call callbackWrap)
+
+
+
+^{:go/end 305} (go/func callbackWrap "callbackWrap is called by assembly code which determines which Go function to call.\nThis function takes the arguments and passes them to the Go function and returns the result.\n" [^{:tag (* callbackArgs)} a]
+  (.Lock (.-lock cbs))
+  (let [fn (aget (.-funcs cbs) (.-index a))]
+    (.Unlock (.-lock cbs))
+    (let [fnType (.Type fn)
+        ^{:line 127} args (make (slice reflect/Value) (.NumIn fnType))
+        ^{:line 128} frame (conv (* (array callbackMaxFrame uintptr)) (.-args a))
+        ;; stackFrame points to stack-passed arguments. On most architectures this is
+        ;; contiguous with frame (after register args), but on ppc64le it's separate.
+        ^{:line 131 :tag (* (array callbackMaxFrame uintptr))} stackFrame (zero (* (array callbackMaxFrame uintptr)))
+        ^{:line 132 :tag (* (array callbackMaxFrame uintptr))} intFrame (zero (* (array callbackMaxFrame uintptr)))]
+      (when [sf (.stackFrame a)] (!= sf nil)
+        ;; Only ppc64le uses separate stackArgs pointer due to NOSPLIT constraints
+        (set! stackFrame (conv (* (array callbackMaxFrame uintptr)) sf)))
+
+      (when [intf (.intFrame a)] (!= intf nil)
+        (set! intFrame (conv (* (array callbackMaxFrame uintptr)) intf)))
+
+      ;; floatsN and intsN track the number of register slots used, not argument count.
+      ;; This distinction matters on ARM32 where float64 uses 2 slots (32-bit registers).
+      (let [^int floatsN (zero int)
+          ^{:line 143 :tag int} intsN (zero int)]
+        ;; On amd64/loong64/ppc64le/riscv64/s390x, when returning a struct larger than
+        ;; maxRegAllocStructSize, the caller passes a hidden pointer in the first integer
+        ;; register. Skip it to avoid misreading it as the first function argument.
+        (when (and ^:go/paren (or (== runtime/GOARCH "amd64") (== runtime/GOARCH "loong64") (== runtime/GOARCH "riscv64") (== runtime/GOARCH "s390x"))
+            (== (.NumOut fnType) 1) (== (.Kind (.Out fnType 0)) reflect/Struct)
+            (> (.Size (.Out fnType 0)) maxRegAllocStructSize))
+          (set! intsN 1))
+
+        ;; stackSlot points to the index into frame (or stackFrame) of the current stack element.
+        ;; When stackFrame is nil, stack begins after float and integer registers in frame.
+        ;; When stackFrame is not nil (ppc64le), stackSlot indexes into stackFrame starting at 0.
+        (let [stackSlot (+ (numOfIntegerRegisters) (numOfFloatRegisters))]
+          (when (!= stackFrame nil)
+            ;; ppc64le: stackArgs is a separate pointer, indices start at 0
+            (set! stackSlot 0))
+
+          ;; stackByteOffset tracks the byte offset within the stack area for Darwin ARM64
+          ;; tight packing. On Darwin ARM64, C passes small types packed on the stack.
+          (let [stackByteOffset (conv uintptr 0)]
+            (range [i args]
+              ;; slots is the number of pointer-sized slots the argument takes
+              (let [inType (.In fnType i)
+                  ^{:line 166} slots (conv int (/ (- (+ (.Size inType) ptrSize) 1) ptrSize))]
+                (switch (.Kind inType)
+                  (case [reflect/Float32 reflect/Float64]
+                    (when (isARMSoftFloat)
+                      ;; we should restore from integer slot, can skip unnecessary branching here
+                      (when (isARMPaddingNeeded inType -1 intsN)
+                        (inc! intsN))
+
+                      (when (<= (+ intsN slots) (numOfIntegerRegisters))
+                        ;; the integers begin after the floats in frame
+                        (aset args i (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget frame (+ intsN (numOfFloatRegisters))))))))
+                        (set! intsN + slots)
+                        (continue))
+
+                      (when (isARMPaddingNeeded inType -1 stackSlot)
+                        (inc! stackSlot))
+
+                      (aset args i (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget frame stackSlot))))))
+                      (set! stackSlot + slots)
+                      (set! intsN + slots)
+                      (continue))
+
+
+                    (if (> (+ floatsN slots) (numOfFloatRegisters))
+                      (cond (and isDarwin (== runtime/GOARCH "arm64"))
+                        ;; Darwin ARM64: read from packed stack with proper alignment
+                        (aset args i (callbackArgFromStack (.-args a) stackSlot (addr stackByteOffset) inType))
+                        (!= stackFrame nil) (do
+                          ;; ppc64le/s390x: stack args are in separate stackFrame
+                          (switch runtime/GOARCH
+                            (case ["ppc64le"]
+                              (aset args i (callbackFloatFromDoubleSlot (conv unsafe/Pointer (addr (aget stackFrame stackSlot))) inType)))
+                            (case ["s390x"]
+                              ;; s390x big-endian: sub-8-byte values are right-justified
+                              (aset args i (callbackArgFromSlotBigEndian (conv unsafe/Pointer (addr (aget stackFrame stackSlot))) inType)))
+                            (default
+                              (aset args i (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget stackFrame stackSlot))))))))
+
+                          (set! stackSlot + slots))
+                        (isARMFloatPaddingNeeded inType -1 stackSlot) (do
+                          (inc! stackSlot)
+                          (aset args i (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget frame stackSlot))))))
+                          (set! stackSlot + slots)) :else
+                        (do
+                          (aset args i (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget frame stackSlot))))))
+                          (set! stackSlot + slots)))
+
+
+                      (switch runtime/GOARCH
+                        (case ["ppc64le"]
+                          (aset args i (callbackFloatFromDoubleSlot (conv unsafe/Pointer (addr (aget frame floatsN))) inType)))
+                        (case ["s390x"]
+                          ;; s390x big-endian: float32 is right-justified in 8-byte FPR slot
+                          (aset args i (callbackArgFromSlotBigEndian (conv unsafe/Pointer (addr (aget frame floatsN))) inType)))
+                        (default
+                          (aset args i (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget frame floatsN)))))))))
+
+
+                    (set! floatsN + slots))
+                  (case [reflect/Struct]
+                    (when (and (== i 0) (.AssignableTo inType ((inst reflect/TypeFor CDecl))))
+                      (aset args i (reflect/Zero inType))
+                      (continue))
+
+                    (when (== (.Size inType) 0)
+                      (aset args i (.Elem (reflect/New inType)))
+                      (continue))
+
+                    (aset args i (getCallbackStruct inType (.-args a) (addr floatsN) (addr intsN) (addr stackSlot) (addr stackByteOffset)))
+                    (continue))
+                  (default
+                    (when (isARMPaddingNeeded inType -1 intsN)
+                      (inc! intsN))
+
+                    (if (> (+ intsN slots) (numOfIntegerRegisters))
+                      (cond (and isDarwin (== runtime/GOARCH "arm64"))
+                        ;; Darwin ARM64: read from packed stack with proper alignment
+                        (aset args i (callbackArgFromStack (.-args a) stackSlot (addr stackByteOffset) inType))
+                        (!= stackFrame nil) (do
+                          ;; ppc64le/s390x: stack args are in separate stackFrame
+                          (if (== runtime/GOARCH "s390x")
+                            ;; s390x big-endian: sub-8-byte values are right-justified
+                            (aset args i (callbackArgFromSlotBigEndian (conv unsafe/Pointer (addr (aget stackFrame stackSlot))) inType))
+
+                            (aset args i (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget stackFrame stackSlot)))))))
+
+                          (set! stackSlot + slots))
+                        (isARMPaddingNeeded inType -1 stackSlot) (do
+                          (inc! stackSlot)
+                          (aset args i (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget frame stackSlot))))))
+                          (set! stackSlot + slots)) :else
+                        (do
+                          (aset args i (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget frame stackSlot))))))
+                          (set! stackSlot + slots)))
+
+                      (do
+                        (if (!= intFrame nil)
+                          (aset args i (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget intFrame intsN))))))
+
+                          ;; the integers begin after the floats in frame
+                          (let [pos (+ intsN (numOfFloatRegisters))]
+                            (if (== runtime/GOARCH "s390x")
+                              ;; s390x big-endian: sub-8-byte values are right-justified in GPR slot
+                              (aset args i (callbackArgFromSlotBigEndian (conv unsafe/Pointer (addr (aget frame pos))) inType))
+
+                              (aset args i (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget frame pos)))))))))))
+
+
+
+                    (set! intsN + slots)))))
+
+
+            (let [ret (.Call fn args)]
+              (when (> (len ret) 0)
+                (switch [k (.Kind (aget ret 0))] k
+                  (case [reflect/Uint64]
+                    (.setUint64Result a (.Uint (aget ret 0))))
+                  (case [reflect/Uint reflect/Uint32 reflect/Uint16 reflect/Uint8 reflect/Uintptr]
+                    (aset (.-result a) 0 (conv uintptr (.Uint (aget ret 0)))))
+                  (case [reflect/Int64]
+                    (.setInt64Result a (.Int (aget ret 0))))
+                  (case [reflect/Int reflect/Int32 reflect/Int16 reflect/Int8]
+                    (aset (.-result a) 0 (conv uintptr (.Int (aget ret 0)))))
+                  (case [reflect/Bool]
+                    (if (.Bool (aget ret 0))
+                      (aset (.-result a) 0 1)
+
+                      (aset (.-result a) 0 0)))
+
+                  (case [reflect/Pointer]
+                    (aset (.-result a) 0 (.Pointer (aget ret 0))))
+                  (case [reflect/UnsafePointer]
+                    (aset (.-result a) 0 (.Pointer (aget ret 0))))
+                  (case [reflect/Struct]
+                    (setStruct a (aget ret 0)))
+                  (default
+                    (panic (+ "purego: unsupported kind: " (.String k)))))))))))))
+
+
+
+
+
+
+
+^{:go/end 328} (go/func callbackArgFromStack "callbackArgFromStack reads an argument from the tightly-packed stack area on Darwin ARM64.\nThe C ABI on Darwin ARM64 packs small types on the stack without padding to 8 bytes.\nThis function handles proper alignment and advances stackByteOffset accordingly.\n" ^reflect/Value [^unsafe/Pointer argsBase ^int stackSlot ^{:tag (* uintptr)} stackByteOffset ^reflect/Type inType]
+  ;; Calculate base address of stack area (after float and int registers)
+  (let [stackBase (unsafe/Add argsBase (* stackSlot (conv int ptrSize)))
+
+      ;; Get type's natural alignment
+      ^{:line 315} align (conv uintptr (.Align inType))
+      ^{:line 316} size (.Size inType)]
+
+    ;; Align the offset
+    (when (!= (% @stackByteOffset align) 0)
+      (set! @stackByteOffset (bit-and-not (- (+ @stackByteOffset align) 1) (- align 1))))
+
+
+    ;; Read value at aligned offset
+    (let [ptr (unsafe/Add stackBase @stackByteOffset)]
+      (set! @stackByteOffset + size)
+
+      (.Elem (reflect/NewAt inType ptr)))))
+
+
+
+
+
+^{:go/end 340} (go/func callbackFloatFromDoubleSlot "callbackFloatFromDoubleSlot reads a floating-point callback argument from an\n8-byte register or stack slot on ppc64le, where a single-precision value is\nheld in double-precision format.\n" ^reflect/Value [^unsafe/Pointer slotPtr ^reflect/Type inType]
+  (when (!= (.Kind inType) reflect/Float32)
+    (return (.Elem (reflect/NewAt inType slotPtr))))
+
+  (let [v (.Elem (reflect/New inType))]
+    (.SetFloat v (math/Float64frombits @(conv (* uint64) slotPtr)))
+    ^{:line 339} v))
+
+
+
+
+
+
+
+^{:go/end 361} (go/func callbackArgFromSlotBigEndian "callbackArgFromSlotBigEndian reads an argument from an 8-byte slot on big-endian architectures.\nOn s390x:\n- Integer types are right-justified in GPRs: sub-8-byte values are at offset (8 - size)\n- Float32 in FPRs is left-justified: stored in upper 32 bits, so at offset 0\n- Float64 occupies the full 8-byte slot\n" ^reflect/Value [^unsafe/Pointer slotPtr ^reflect/Type inType]
+  (let [size (.Size inType)]
+    (when (>= size 8)
+      ;; 8-byte values occupy the entire slot
+      (return (.Elem (reflect/NewAt inType slotPtr))))
+
+    ;; Float32 is left-justified in FPRs (upper 32 bits), so offset is 0
+    (when (== (.Kind inType) reflect/Float32)
+      (return (.Elem (reflect/NewAt inType slotPtr))))
+
+    ;; Integer types are right-justified: offset = 8 - size
+    (let [offset (- 8 size)
+        ^{:line 359} ptr (unsafe/Add slotPtr offset)]
+      (.Elem (reflect/NewAt inType ptr)))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 392} (go/func callbackasmAddr "callbackasmAddr returns address of runtime.callbackasm\nfunction adjusted by i.\nOn x86 and amd64, runtime.callbackasm is a series of CALL instructions,\nand we want callback to arrive at\ncorrespondent call instruction instead of start of\nruntime.callbackasm.\nOn ARM, runtime.callbackasm is a series of mov and branch instructions.\nR12 is loaded with the callback index. Each entry is two instructions,\nhence 8 bytes.\n" ^uintptr [^int i]
+  (let [^int entrySize (zero int)]
+    (switch runtime/GOARCH
+      (default
+        (panic "purego: unsupported architecture"))
+      (case ["amd64"]
+        ;; On amd64, each callback entry is just a CALL instruction (5 bytes)
+        (set! entrySize 5))
+      (case ["386"]
+        ;; On 386, each callback entry is MOVL $imm, CX (5 bytes) + JMP (5 bytes)
+        (set! entrySize 10))
+      (case ["arm" "arm64" "loong64" "ppc64le" "riscv64"]
+        ;; On ARM, ARM64, Loong64, PPC64LE and RISCV64, each entry is a MOV instruction
+        ;; followed by a branch instruction
+        (set! entrySize 8))
+      (case ["s390x"]
+        ;; On S390X, each entry is LGHI (4 bytes) + JG (6 bytes)
+        (set! entrySize 10)))
+
+    (+ callbackasmABI0 (conv uintptr (* i entrySize)))))
