@@ -88,9 +88,12 @@ seed_go_tar() {
 }
 
 seed_go_make() {
-  local archive=$1 host dir mod ovl rt nss version goversion goroothash t files bytes
+  local archive=$1 host dir mod ovl rt nss version goversion goroothash t files bytes printedby
   host=$(seed_go_host_arch)
-  dir=$root/target/arbace-go
+  # the build packed: the last bin/arbace-go --build, or ARBACE_SEED_GO_BUILD (the Go-hosted
+  # fixpoint's G3, target/arbace-go/fixpoint/g3: bin/arbace-go --fixpoint, S3), whose file
+  # printed-by, when present, says what printed it
+  dir=${ARBACE_SEED_GO_BUILD:-$root/target/arbace-go}
   mod=$dir/work-$host/mod
   nss=$dir/a2g/prog/namespaces.txt
   [ -f "$mod/go.mod" ] && [ -f "$nss" ] && [ -x "$dir/$host/arbace" ] \
@@ -103,6 +106,8 @@ seed_go_make() {
   case $version in *':dirty true'*) echo "bin/seed: warning: the checkout is dirty; the seed records it" >&2 ;; esac
   goversion=$(head -1 "$(seed_go_goroot)/VERSION")
   goroothash=$(seed_go_toolchain_check) || return 1
+  printedby="the JVM chain: bin/build-arbace, then bin/arbace-go --build (a2g and g2a on target/stage2)"
+  [ -s "$dir/printed-by" ] && printedby=$(cat "$dir/printed-by")
   t=$(mktemp -d "$root/.tmp/seed-go-make.XXXXXX") || return 1
   mkdir -p "$t/$seed_go_top/overlay"
   cp -r "$mod" "$t/$seed_go_top/mod"
@@ -131,7 +136,7 @@ seed_go_make() {
  :ldflags "-s -w -X 'main.arbaceVersion=<:version>'"
  :overlay "overlay/runtime/*.go replace GOROOT/src/runtime/*.go"
  :image "prepared by the executable built without it: ARBACE_PREPARE, requiring namespaces.txt"
- :printed-by "the JVM chain: bin/build-arbace, then bin/arbace-go --build (a2g and g2a on target/stage2)"
+ :printed-by "$printedby"
  :files $files
  :bytes $bytes}
 EOF
