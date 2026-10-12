@@ -4,7 +4,9 @@ B1a builds Arbace as a static Go executable ([B1-PLAN.md](B1-PLAN.md)); its step
 the a2g-translated runtime, the evaluator) are each checked against the JVM Arbace, the
 oracle. This document describes the oracle's corpora, their formats, the runner `bin/oracle`
 and how to extend it. It depends on nothing of the Go work: the expected results are recorded
-from `bin/arbace-j` (built by `bin/build-arbace`) and, for regex, from its JDK.
+from the frozen JVM Arbace (since standalone S4 the jar of `arbace-for-java-26-v4`, "The
+reference" below; until then `bin/arbace-j`, built by `bin/build-arbace`) and, for regex, from
+its JDK.
 
 ## Contents
 
@@ -91,11 +93,12 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
                           [--exclude PART]... [SEL...]
     bin/oracle harvest [SUITE]
 
-- `record` regenerates the expected files of the selected parts from the JVM Arbace
-  (`bin/arbace-j -`). The result is byte-identical across runs (checked: two records, same
+- `record` regenerates the expected files of the selected parts from the frozen JVM Arbace
+  (its jar's `arbace.lang.Main -`; until S4 `bin/arbace-j -`). The result is byte-identical across runs (checked: two records, same
   files). It fails when a run does not complete or a class script step cannot be resolved.
-- `check IMPL` runs every expected file against `IMPL` and compares; `jvm` stands for `bin/arbace-j
-  -`, and `bin/oracle check jvm` passes on a build of the same tree (22,118 cases, 2026-10-10). It
+- `check IMPL` runs every expected file against `IMPL` and compares; `jvm` stands for the
+  reference (until S4 `bin/arbace-j -`, and `bin/oracle check jvm` passed on a build of the same
+  tree, 22,118 cases, 2026-10-10). It
   prints a line per file, the first mismatches of each, and writes all of them to
   `.tmp/oracle/check.txt`; the exit status is 0 when every case matches.
 - `check IMPL --expected FILE` passes instead when the set of mismatching cases equals the one
@@ -210,17 +213,24 @@ The expected files hold 55 marked entries (53 forms, 2 class script steps; 2026-
 `defclass.edn` added one to the 54 of 2026-10-09). On the Go build (2026-10-09) the 52 forms of then
 all matched by the rule; `bin/oracle check jvm` matches all cases with none of them needing it.
 
-### The reference: main's JVM or the frozen jar
+### The reference: the frozen jar
 
-The JVM Arbace the runner runs on, and that `record` and `check jvm` use, is chosen by
-`ARBACE_ORACLE_REF`: `main` (the default), `target/arbace.jar` through `bin/arbace-j`; or
-`frozen`, the jar of the frozen branch's last release (`ARBACE_ORACLE_TAG`, default
-`arbace-for-java-26-v4`), built once from its tag into `.tmp/oracle-frozen/` and checked against
-`test/oracle/frozen-jar.sha256`, run by `java` alone, with the runner's namespaces given to it as
-`.clj` links (`.tmp/oracle-view`). `ARBACE_ORACLE_EXPECTED` names the expected files' directory
-(default `test/oracle/expected`). The frozen reference is what stays when the JVM stages leave
-main (the standalone survey's D4; [../STANDALONE-NOTES.md](../STANDALONE-NOTES.md), "S4: the
-oracle's reference", for the differences and `known-go-amd64-frozen.edn`).
+Since standalone S4 the JVM Arbace the runner runs on, and that `record` and `check jvm` use,
+is the frozen one alone (the survey's D4; [../STANDALONE-NOTES.md](../STANDALONE-NOTES.md), "S4:
+the oracle's reference", "S4: the JVM removed"): the jar of the frozen branch's last release
+(`ARBACE_ORACLE_TAG`, default `arbace-for-java-26-v4`), built once from its tag into
+`.tmp/oracle-frozen/` and checked against `test/oracle/frozen-jar.sha256`, run by `java` alone
+(`bin/lib/frozen.bash`, shared with the other tools that stay on a JVM), with the runner's
+namespaces given to it as `.clj` links (`frozen_view test`, `.tmp/frozen-view/test`).
+`ARBACE_ORACLE_JAR` (or `FROZEN_JAR`) takes an already built jar, unchecked;
+`ARBACE_ORACLE_EXPECTED` names the expected files' directory (default `test/oracle/expected`).
+Until S4 `ARBACE_ORACLE_REF` chose between `main`, `target/arbace.jar` through `bin/arbace-j`
+(the default), and `frozen`; `main` went with main's JVM build.
+
+The expected files were recorded from v4 at S4 (SA60): the cases where main had diverged from v4
+are v4's, and the Go build's reference of known mismatches, `test/oracle/known-go-amd64-frozen.edn`,
+records them with their reasons (the gate's reference since S4; `known-go-amd64.edn`, against
+main's JVM, is gone); the noisy cases keep their stable values (below).
 
 ## Formats
 
@@ -312,8 +322,8 @@ not compile. Positions are in UTF-16 units.
   file together.
 - Class scripts and regex: the same, under `classes/` and `regex/`; a class step that cannot be
   resolved is recorded as `:error` and fails `record`.
-- The harvest: `bin/clojure-tests` in rename mode (run by `bin/build-arbace --suite` or
-  `bin/gate`) leaves the renamed suite in `.tmp/clojure-tests/stage2/suite`; `bin/oracle
+- The harvest: `bin/clojure-tests` in rename mode (since S4 the Go run, `CLOJURE_TESTS_GO`, run
+  by `bin/gate`) leaves the renamed suite in `.tmp/clojure-tests/go/suite`; `bin/oracle
   harvest [SUITE]` then rewrites `forms/harvest/` (about 5 minutes), and `bin/oracle record
   harvest` records it. The harvest takes the expressions of `is` (the non-literal arguments of
   `=`, `==`, `not=`; the body of `thrown?`, `thrown-with-msg?`; otherwise the assertion) and of

@@ -219,7 +219,7 @@ frozen jar's own compiler, for the suite). `bin/j2a-check`:
 
 1. converts the baseline (183 files) with `--check` (no failures, every file read back) and
    compares the converted files with `test/j2a/expected/baseline.sha256`, their SHA-256 by path
-   (the forms are 3.5 MB; the suite of step 4 is their semantic check, and a change shows as the
+   (the forms are 2.2 MB; the suite of step 4 is their semantic check, and a change shows as the
    files whose hash moved, to diff against a conversion made before it);
 2. converts `test/j2a/java` and compares the output with `test/j2a/expected/java/`, byte for
    byte (the samples' forms are small and are what a change to j2a should be reviewed by);
