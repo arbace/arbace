@@ -203,6 +203,7 @@ new) replaces text found exactly once. Each file's header says why; as of 2026-1
 | `instant.ae` | decision 7: `#inst` read and printed over `java.util.Date`'s milliseconds, with GregorianCalendar's arithmetic (Julian before 1582-10-15, years of era); Calendar and Timestamp instants as `arbace/instant.ae` has them (phase 2B; they threw in phase 1) |
 | `main.after.ae` | the REPL's requires trimmed (decision 6: no javadoc, no repl.deps; no pprint, whose load took about 8 s on the evaluator, phase 2A) |
 | `main.subst.ae` | no `DynamicClassLoader` for the REPL's thread; the error report printed with `prn`, to a temporary file as on the JVM |
+| `box/host.ae` | `arbace.box`'s host layer over jrt's `jdk.internal.jrt.HostStore` (the JVM's, `arbace/box/host.ae`, is over java.nio; `arbace/box.ae` is shared since 2026-10-12, BOX-NOTES.md S3, BX37) |
 | `java/io.subst.ae` | no reflection warnings at every start; the escape of `+` written out (`URLEncoder` is outside the world); `copy` between files through streams, not channels |
 | `core/server.subst.ae` | prepl makes no `DynamicClassLoader` for its thread (sockets, JRT-NOTES.md "Sockets") |
 | `reflect/java.subst.ae` | `arbace.reflect` without ASM: the names ASM's `Type` gives, computed (FX5, "The suite's Java fixtures") |

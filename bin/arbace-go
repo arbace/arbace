@@ -272,6 +272,59 @@ store_checks() {
     "$(ARBACE_BOX_STORE=$s ARBACE_PATH=/none:store:p.:store: $run -e '(require (quote st.two)) (prn ((resolve (quote st.two/g))))' 2>&1)"
 }
 
+# jvm_store_checks T: the JVM's arbace.box (doc/go/BOX-NOTES.md, S3, BX37) beside the native
+# executable's (the function native, amd64): store_checks on the JVM Arbace (target/arbace.jar, as
+# bin/build-arbace left it; bin/arbace-j), then one directory used by both: each reads the other's
+# blobs and refs, a snapshot of the same files is the same tar from both and each restores the
+# other's, compare-and-set counters run by two JVMs and two native processes at once lose no
+# update, and the refs' lock held by the JVM keeps the native ref! waiting (both take fcntl's
+# POSIX record lock of refs/.lock). Uses the caller's check
+jvm_store_checks() {
+  local t=$1 s=$1/shared e='(require (quote [arbace.box :as box]))' x hj hn
+  jvm() { "$root/bin/arbace-j" "$@"; }
+  echo "  -- the JVM's arbace.box (target/arbace.jar)"
+  mkdir -p "$t/jvm"
+  store_checks jvm "$t/jvm"
+  ARBACE_BOX_STORE=$s jvm -e "$e" -e '(box/put! "from-jvm" "written by the JVM")' > /dev/null 2>&1
+  ARBACE_BOX_STORE=$s native -e "$e" -e '(box/put! "from-go" "written natively")' > /dev/null 2>&1
+  check "one store directory: the JVM's ref read natively, the native one on the JVM" \
+    "written by the JVM|written natively" \
+    "$(ARBACE_BOX_STORE=$s native -e "$e" -e '(print (box/load "from-jvm"))' 2>&1)|$(ARBACE_BOX_STORE=$s jvm -e "$e" -e '(print (box/load "from-go"))' 2>&1)"
+  # a tree with a name that is not ASCII, one too long for USTAR and one it splits
+  x=$t/xsrc
+  mkdir -p "$x/d" "$x/empty" "$x/$(printf 'p%.0s' $(seq 60))/$(printf 'q%.0s' $(seq 60))"
+  echo A > "$x/a.txt"; printf '\xc3\xa9' > "$x/d/$(printf '\xc3\xa9').txt"; echo L > "$x/d/$(printf 'n%.0s' $(seq 120))"
+  echo deep > "$x/$(printf 'p%.0s' $(seq 60))/$(printf 'q%.0s' $(seq 60))/$(printf 'r%.0s' $(seq 30))"
+  chmod 600 "$x/a.txt"; chmod 700 "$x/empty"
+  hj=$(ARBACE_BOX_STORE=$s jvm -e "$e" -e "(print (box/save-fs! \"snap-jvm\" \"$x\"))" 2>&1)
+  hn=$(ARBACE_BOX_STORE=$s native -e "$e" -e "(print (box/save-fs! \"snap-go\" \"$x\"))" 2>&1)
+  check "a snapshot of the same files: the same tar on the JVM and natively" "$hn" "$hj"
+  ARBACE_BOX_STORE=$s jvm -e "$e" -e "(box/load-fs! \"snap-go\" \"$t/xj\")" > /dev/null 2>&1
+  ARBACE_BOX_STORE=$s native -e "$e" -e "(box/load-fs! \"snap-jvm\" \"$t/xn\")" > /dev/null 2>&1
+  check "each restores the other's snapshot" "same same" \
+    "$(diff -r "$x" "$t/xj" > /dev/null && echo same) $(diff -r "$x" "$t/xn" > /dev/null && echo same)"
+  cat > "$t/cas.ae" <<'EOF2'
+(require '[arbace.box :as box])
+(dotimes [_ 50]
+  (loop []
+    (let [old (box/ref "counter")
+          h (box/put (str (inc (if old (parse-long (box/get old)) 0))))]
+      (when-not (box/ref! "counter" h old) (recur)))))
+EOF2
+  ARBACE_BOX_STORE=$s jvm "$t/cas.ae" & ARBACE_BOX_STORE=$s native "$t/cas.ae" &
+  ARBACE_BOX_STORE=$s jvm "$t/cas.ae" & ARBACE_BOX_STORE=$s native "$t/cas.ae" &
+  wait
+  check "compare-and-set counters, two JVMs and two native processes at once" "200" \
+    "$(ARBACE_BOX_STORE=$s native -e "$e" -e '(print (box/load "counter"))' 2>&1)"
+  rm -f "$t/held"
+  ARBACE_BOX_STORE=$s jvm -e "$e" -e "(#'arbace.box.host/with-refs-lock (arbace.box.host/current) false (fn [] (spit \"$t/held\" \"\") (Thread/sleep 3000) (print (if (.exists (java.io.File. \"$s/refs/locked\")) :written :absent))))" > "$t/held.out" 2>&1 &
+  for _ in $(seq 300); do [ -e "$t/held" ] && break; sleep 0.1; done
+  ARBACE_BOX_STORE=$s native -e "$e" -e '(print (box/ref! "locked" (box/ref "from-go")))' > "$t/locked.out" 2>&1 &
+  wait
+  check "the JVM's refs lock keeps the native ref! waiting (fcntl's lock, both)" ":absent true" \
+    "$(cat "$t/held.out") $(cat "$t/locked.out")"
+}
+
 smoke() {
   local status=0 t
   t=$(mktemp -d "$root/.tmp/arbace-go-smoke.XXXXXX")
@@ -363,6 +416,12 @@ EOF
       "$(ARBACE_BOX_STORE=$t/store run "$a" -e "(require (quote [arbace.box :as box])) (let [h (box/save-fs! \"snap\" \"$t/fsrc\")] (box/load-fs! \"snap\" \"$t/fdst\") (prn [(slurp \"$t/fdst/a.txt\") (slurp \"$t/fdst/d/b.ae\") (= h (box/save-fs! \"snap2\" \"$t/fdst\"))]))" 2>&1)"
     check "natively, a snapshot names its directory" "java.lang.IllegalArgumentException" \
       "$(ARBACE_BOX_STORE=$t/store run "$a" -e '(require (quote arbace.box))' -e '(try (arbace.box/save-fs! "snap") (catch Exception e (print (.getName (class e)))))' 2>&1)"
+    # the JVM's arbace.box beside the native one (BX37), when the JVM Arbace is built
+    if [ "$a" = amd64 ] && [ -f "$root/target/arbace.jar" ]; then
+      jvm_store_checks "$t"
+    else
+      echo "  skip the JVM's arbace.box beside the native one (amd64 and target/arbace.jar needed)"
+    fi
     # the interactive REPL under rlwrap (doc/go/EXEC-NOTES.md, "Line editing: rlwrap"), on a
     # pseudo-terminal: amd64 only (under qemu-aarch64 rlwrap would run the arm64 executable
     # directly), when python3 and rlwrap are installed. The checks above run without a

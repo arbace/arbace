@@ -1,0 +1,281 @@
+(ns native.box-test
+  "The store on the JVM (arbace.box over arbace.box.host; doc/go/BOX-NOTES.md, S3, BX37), on the
+  stage bin/native-tests runs: blobs and refs, compare-and-set, the refusals, the limit, the
+  directory's format (the monitor's and the native executable's), snapshots (Go's archive/tar's
+  bytes: a tree's hash as the native executable takes it), restoring tars, ARBACE_PATH's
+  splitting; then in fresh JVMs on the same class path: no store, ARBACE_BOX_STORE_MAX, a script
+  and an -i file from a ref (ref:NAME), namespaces from ARBACE_PATH's store entries, and the refs'
+  lock held by this JVM keeping another JVM's ref! waiting (a POSIX record lock between
+  processes). The checks against the native executable, the same directory used by both, are in
+  bin/arbace-go --smoke."
+  (:require [arbace.test :refer [deftest is testing]]
+            [arbace.box :as box]
+            [arbace.box.host :as host]
+            [arbace.java.io :as io]
+            [arbace.string :as str])
+  (:import (java.io File)
+           (java.nio.charset StandardCharsets)
+           (java.nio.file Files Path)
+           (java.nio.file.attribute FileAttribute PosixFilePermissions)
+           (java.security MessageDigest)
+           (java.util.concurrent TimeUnit)))
+
+(defn- temp-dir ^File [prefix]
+  (let [base (io/file (or (System/getProperty "arbace.tmp") (System/getProperty "java.io.tmpdir")))]
+    (.mkdirs base)
+    (.toFile (Files/createTempDirectory (.toPath base) prefix (make-array FileAttribute 0)))))
+
+(defn- sha256-hex [^bytes b]
+  (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest (MessageDigest/getInstance "SHA-256") b))))
+
+(defn- error-of
+  "The :arbace.box/error of what f throws, :ok when it does not."
+  [f]
+  (try (f) :ok (catch Exception e (:arbace.box/error (ex-data e)))))
+
+(defmacro ^:private with-store
+  "body with arbace.box's store the one in directory dir (limit: the largest blob, 0 any)."
+  [[st dir limit] & body]
+  `(let [~st (host/open-store ~dir ~limit)]
+     (with-redefs [host/current (constantly ~st)]
+       ~@body)))
+
+(deftest names-sizes-and-paths
+  (testing "ref names: 1 to 64 of [A-Za-z0-9._-], no leading dot"
+    (is (every? host/store-name? ["a" "A.b_c-9" (apply str (repeat 64 "x")) "a."]))
+    (is (not-any? host/store-name? ["" ".a" ".lock" "a/b" "a:b" "é" (apply str (repeat 65 "x"))])))
+  (testing "ARBACE_BOX_STORE_MAX, as GOMEMLIMIT reads it"
+    (is (= [(* 256 1024 1024) 0 16 10 1024 (* 3 1024 1024 1024) nil nil nil nil]
+           (map host/store-max ["" "off" "16" "10B" "1KiB" "3GiB" "0" "-1" "x" "1 KiB"]))))
+  (testing "ARBACE_PATH's entries (jrt's TestPathEntries' cases)"
+    (is (= [["/a" "/b"] ["store:"] ["store:" "/a"] ["/a" "store:lib." "/b"] ["/a"] ["store"] []]
+           (map host/path-entries ["/a:/b" "store:" "store::/a" "/a:store:lib.:/b" "::/a::" "store" ""])))))
+
+(deftest blobs-and-refs
+  (let [dir (temp-dir "box-test")]
+    (with-store [st dir 16]
+      (is (box/store?))
+      (let [h (box/put "hello")]
+        (testing "put, get, get-bytes, size: a blob by its SHA-256"
+          (is (= "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" h))
+          (is (= h (box/put (.getBytes "hello" StandardCharsets/UTF_8))) "the same bytes, the same blob")
+          (is (= "hello" (box/get h)))
+          (is (= [104 101 108 108 111] (vec (box/get-bytes h))))
+          (is (= 5 (box/size h)))
+          (is (nil? (box/get (apply str (repeat 64 "0")))))
+          (is (nil? (box/size (apply str (repeat 64 "0"))))))
+        (testing "ref!, ref, put!, load"
+          (is (true? (box/ref! "greeting" h)))
+          (is (= h (box/ref "greeting")))
+          (is (nil? (box/ref "none")))
+          (is (= (box/put "(+ 1 2)") (box/put! "three.ae" "(+ 1 2)")))
+          (is (= "(+ 1 2)" (box/load "three.ae")))
+          (is (nil? (box/load "none")))
+          (is (= 3 (box/load-ref "three.ae"))))
+        (testing "compare-and-set"
+          (let [a (box/put "a") b (box/put "b")]
+            (is (= [true false true false "b"]
+                   [(box/ref! "c" a nil) (box/ref! "c" b nil) (box/ref! "c" b a) (box/ref! "c" a a)
+                    (box/load "c")]))))
+        (testing "the refusals"
+          (is (= [:bad-name :bad-name :bad-name :ok :bad-hash :bad-hash :no-blob :no-ref :too-large]
+                 [(error-of #(box/ref ".x")) (error-of #(box/ref! "a/b" h))
+                  (error-of #(box/ref (apply str (repeat 65 "a"))))
+                  (error-of #(box/ref (apply str (repeat 64 "a"))))
+                  (error-of #(box/get "ABC")) (error-of #(box/get (str/upper-case h)))
+                  (error-of #(box/ref! "r" (apply str (repeat 64 "0"))))
+                  (error-of #(box/load-ref "none"))
+                  (error-of #(box/put (apply str (repeat 17 "x"))))]))
+          (is (= :ok (error-of #(box/put (apply str (repeat 16 "x")))))))
+        (testing "the directory: the monitor's format, 0644 files"
+          (is (= "hello" (slurp (io/file dir "blobs" h))))
+          (is (= (str h "\n") (slurp (io/file dir "refs" "greeting"))))
+          (is (.exists (io/file dir "refs" ".lock")))
+          (is (= "rw-r--r--" (PosixFilePermissions/toString
+                               (Files/getPosixFilePermissions (.toPath (io/file dir "refs" "greeting"))
+                                                              (make-array java.nio.file.LinkOption 0)))))
+          (is (not-any? #(str/starts-with? % ".") (remove #{".lock"} (seq (.list (io/file dir "refs")))))
+              "no temporary file left"))
+        (testing "a blob a write left short, or changed, is none"
+          (spit (io/file dir "blobs" h) "hell")
+          (is (nil? (box/get h)))
+          (is (nil? (box/size h)))
+          (is (= :no-blob (error-of #(box/ref! "g2" h))))
+          (is (= h (box/put "hello")) "put writes it again")
+          (is (= "hello" (box/get h))))
+        (testing "a second store on the directory sees the first's refs"
+          (let [st2 (host/open-store dir 0)]
+            (with-redefs [host/current (constantly st2)]
+              (is (= h (box/ref "greeting")))
+              (is (false? (box/ref! "c" h nil))))))))
+    (with-redefs [host/current (constantly nil)]
+      (is (= [false :no-store :no-store :no-store]
+             [(box/store?) (error-of #(box/put "x")) (error-of #(box/ref "x"))
+              (error-of #(box/get (apply str (repeat 64 "0"))))])))))
+
+(defn- make-tree!
+  "A tree of files with fixed contents and permissions: a name that is not ASCII, one too long for
+  USTAR's name field and one split into its prefix, an empty directory."
+  [^File root]
+  (let [perm (fn [^File f s]
+               (Files/setPosixFilePermissions (.toPath f) (PosixFilePermissions/fromString s)))
+        file (fn [rel text p]
+               (let [f (io/file root rel)]
+                 (io/make-parents f)
+                 (spit f text)
+                 (perm f p)))
+        deep (str (apply str (repeat 60 "p")) "/" (apply str (repeat 60 "q")))]
+    (file "a.txt" "A\n" "rw-r--r--")
+    (file "d/b.ae" "(ns b)\n" "rw-------")
+    (file "d/\u00e9.txt" "\u00e9" "rw-r--r--")
+    (file (str "d/" (apply str (repeat 120 "n"))) "L" "rw-r--r--")
+    (file (str deep "/" (apply str (repeat 30 "r"))) "deep\n" "rw-r-----")
+    (file "x.sh" "#!/bin/sh\n" "rwxr-xr-x")
+    (.mkdirs (io/file root "empty"))
+    (perm (io/file root "empty") "rwx------")
+    (perm (io/file root "d") "rwxr-xr-x")
+    (perm (io/file root (apply str (repeat 60 "p"))) "rwxr-x---")
+    (perm (io/file root deep) "rwxr-x---")
+    root))
+
+(def ^:private tree-hash
+  "The snapshot of make-tree!'s tree as the native executable takes it (jrt's SnapshotTar, Go's
+  archive/tar), measured with bin/arbace-go's executable of 2026-10-12."
+  "1f5be6f01f0fb7363fd1cdc137c1545bea87332012c0e5e1fe67e5ba323d417a")
+
+(deftest snapshots
+  (let [dir (temp-dir "box-snap")
+        src (make-tree! (io/file dir "src"))
+        err (make-array String 1)
+        tar (host/tar (str src) err)]
+    (testing "the tar's bytes are Go's (the native executable's snapshot)"
+      (is (some? tar) (aget err 0))
+      (is (= tree-hash (sha256-hex tar)))
+      (is (java.util.Arrays/equals ^bytes tar ^bytes (host/tar (str src) err)) "the same files, the same tar"))
+    (with-store [st (io/file dir "store") 0]
+      (testing "save-fs!, load-fs! and save-fs! again: the same blob"
+        (let [h (box/save-fs! "snap" (str src))]
+          (is (= tree-hash h))
+          (is (nil? (box/load-fs! "snap" (str (io/file dir "dst")))))
+          (is (= "(ns b)\n" (slurp (io/file dir "dst" "d" "b.ae"))))
+          (is (= "\u00e9" (slurp (io/file dir "dst" "d" "\u00e9.txt"))))
+          (is (= h (box/save-fs! "snap2" (str (io/file dir "dst")))))))
+      (testing "the refusals"
+        (is (= [:refused :refused :no-ref]
+               [(error-of #(box/save-fs! "s" (str (io/file dir "none"))))
+                (error-of #(box/save-fs! "s" (str (io/file src "a.txt"))))
+                (error-of #(box/load-fs! "none" (str dir)))]))
+        (is (thrown? IllegalArgumentException (box/save-fs! "s")) "a directory must be named")))))
+
+(defn- tar-of
+  "A tar of entries [name text] (regular files) by the tar command, the format given."
+  ^bytes [^File dir fmt entries]
+  (doseq [[n text] entries] (let [f (io/file dir "in" n)] (io/make-parents f) (spit f text)))
+  (let [out (io/file dir (str fmt ".tar"))
+        p (.start (doto (ProcessBuilder. ^java.util.List
+                                         (into ["tar" (str "--format=" fmt) "-cf" (str out) "-C" (str (io/file dir "in"))]
+                                               (map first entries)))
+                    (.redirectErrorStream true)))]
+    (slurp (.getInputStream p))
+    (.waitFor p)
+    (Files/readAllBytes (.toPath out))))
+
+(deftest restoring-tars
+  (let [dir (temp-dir "box-untar")
+        long-name (str "a/" (apply str (repeat 150 "b")))]
+    (doseq [fmt ["gnu" "posix" "ustar"]]
+      (testing (str "a tar of GNU tar's, " fmt " format")
+        (let [entries (cond-> [["x.txt" "X"] ["d/y.txt" "Y"]] (not= fmt "ustar") (conj [long-name "Z"]))
+              out (io/file dir (str "out-" fmt))]
+          (is (nil? (host/untar (tar-of (io/file dir fmt) fmt entries) (str out))))
+          (doseq [[n text] entries]
+            (is (= text (slurp (io/file out n))) n)))))
+    (testing "names outside the directory, and not a tar"
+      (let [evil (io/file dir "evil")]
+        (.mkdirs evil)
+        (spit (io/file evil "f") "f")
+        (let [p (.start (ProcessBuilder. ^java.util.List ["tar" "--format=posix" "-cf" (str (io/file dir "evil.tar"))
+                                                          "-C" (str evil) "--transform" "s|^f$|../f|" "f"]))]
+          (.waitFor p))
+        (is (= "tar: ../f: a name outside the directory"
+               (host/untar (Files/readAllBytes (.toPath (io/file dir "evil.tar"))) (str (io/file dir "o")))))
+        (is (= "archive/tar: invalid tar header" (host/untar (byte-array 600 (byte 65)) (str dir))))
+        (is (= "unexpected EOF" (host/untar (.getBytes "not a tar") (str dir))))))))
+
+;; ---------------------------------------------------------------------------------------
+;; In fresh JVMs: the environment
+
+(defn- start-java
+  "Starts arbace.lang.Main in a new JVM on this one's class path with env (a map, nil removing)
+  and args; the process (standard error into its output)."
+  ^Process [env & args]
+  (let [java (str (System/getProperty "java.home") "/bin/java")
+        pb (doto (ProcessBuilder. ^java.util.List (into [java "-cp" (System/getProperty "java.class.path")
+                                                        "arbace.lang.Main"] args))
+             (.redirectErrorStream true))
+        e (.environment pb)]
+    (doseq [k ["ARBACE_BOX_STORE" "ARBACE_BOX_STORE_MAX" "ARBACE_PATH"]] (.remove e k))
+    (doseq [[k v] env] (if v (.put e k v) (.remove e k)))
+    (let [p (.start pb)]
+      (.close (.getOutputStream p))
+      p)))
+
+(defn- run-java
+  "Runs it to its end: [exit-status output]."
+  [env & args]
+  (let [p (apply start-java env args)
+        out (slurp (.getInputStream p))]
+    [(.waitFor p) out]))
+
+(deftest the-environment
+  (let [dir (temp-dir "box-env")
+        s (str (io/file dir "store"))
+        req "(require (quote [arbace.box :as box]))"]
+    (testing "no store unless ARBACE_BOX_STORE names one"
+      (is (= [0 "[false :no-store]\n"]
+             (run-java {} "-e" req "-e" "(prn [(box/store?) (try (box/put \"x\") (catch Exception e (:arbace.box/error (ex-data e))))])"))))
+    (testing "ARBACE_BOX_STORE_MAX"
+      (is (= [0 "[:ok :too-large]\n"]
+             (run-java {"ARBACE_BOX_STORE" s "ARBACE_BOX_STORE_MAX" "16"} "-e" req "-e"
+                       "(let [e (fn [f] (try (f) :ok (catch Exception x (:arbace.box/error (ex-data x)))))] (prn [(e #(box/put (apply str (repeat 16 \"x\")))) (e #(box/put (apply str (repeat 17 \"x\"))))]))")))
+      (is (= [0 "arbace: ARBACE_BOX_STORE_MAX: not a size (bytes, KiB, MiB, GiB, TiB) or off\nfalse\n"]
+             (run-java {"ARBACE_BOX_STORE" s "ARBACE_BOX_STORE_MAX" "lots"} "-e" req "-e" "(prn (box/store?))"))))
+    (run-java {"ARBACE_BOX_STORE" s} "-e" req "-e"
+              (str "(box/put! \"hello.ae\" \"(prn [:from-ref *command-line-args*])\")"
+                   "(box/put! \"st.lib.ae\" \"(ns st.lib) (defn f [] :lib)\")"
+                   "(box/put! \"p.st.two.ae\" \"(ns st.two (:require [st.lib])) (defn g [] [:two (st.lib/f)])\")"))
+    (testing "a script and an -i file from a ref (ref:NAME)"
+      (is (= [0 "[:from-ref (\"a\" \"b\")]\n"] (run-java {"ARBACE_BOX_STORE" s} "ref:hello.ae" "a" "b")))
+      (is (= [0 "[:from-ref nil]\n:after\n"] (run-java {"ARBACE_BOX_STORE" s} "-i" "ref:hello.ae" "-e" "(prn :after)")))
+      (let [[st out] (run-java {"ARBACE_BOX_STORE" s} "ref:nope")]
+        (is (= 1 st))
+        (is (str/includes? out "no ref nope"))))
+    (testing "namespaces from ARBACE_PATH's store entries, after the class path"
+      (is (= [0 "[:two :lib]\n"]
+             (run-java {"ARBACE_BOX_STORE" s "ARBACE_PATH" "/none:store:p.:store:"}
+                       "-e" "(require (quote st.two)) (prn ((resolve (quote st.two/g))))")))
+      (let [[st out] (run-java {"ARBACE_BOX_STORE" s} "-e" "(require (quote st.two))")]
+        (is (= 1 st) "not without a store entry")
+        (is (str/includes? out "Could not locate st/two__init.class"))))))
+
+(deftest the-refs-lock-between-processes
+  (let [dir (temp-dir "box-lock")
+        s (str (io/file dir "store"))]
+    (with-store [st s 0]
+      (let [h (box/put "x")
+            ;; this JVM holds the refs' exclusive lock; another starts, says it is ready, and
+            ;; its ref! waits for the lock until this one lets it go
+            [waited proc r]
+            (#'host/with-refs-lock st false
+              (fn []
+                (let [proc (start-java {"ARBACE_BOX_STORE" s} "-e"
+                                       (str "(require (quote arbace.box)) (println :ready)"
+                                            " (prn (arbace.box/ref! \"locked\" \"" h "\"))"))
+                      r (java.io.BufferedReader. (java.io.InputStreamReader. (.getInputStream proc)))
+                      ready (.readLine r)]
+                  (Thread/sleep 3000)
+                  [[ready (.isAlive proc) (.ready r)] proc r])))]
+        (is (= [":ready" true false] waited) "the other JVM's ref! waits while this one holds the lock")
+        (is (.waitFor ^Process proc 60 TimeUnit/SECONDS))
+        (is (= "true" (.readLine ^java.io.BufferedReader r)))
+        (is (= h (box/ref "locked")))))))

@@ -1137,3 +1137,68 @@ launcher converted from its Go. `box/` printed again and the edited Go compared:
 - Confirmed: snapshot tars with epoch times; no transactions (`ref!` with an old hash is the
   compare-and-set); a `store:` entry of `ARBACE_PATH` runs to the next `:` (ref names hold no
   `:`).
+
+### The JVM's `arbace.box` (2026-10-12; amendment BX37, proposed)
+
+Branch `box-jvm`, the user's decision above. **One source, two host layers.** `arbace/box.ae`
+(BX34's namespace, moved from `arbace/lang/go/ns/box.ae` with `git mv`) is now shared: what it
+asked of `jdk.internal.jrt.HostStore` it asks of `arbace.box.host`, whose functions (`status`,
+`put`, `size`, `read`, `ref`, `set-ref`, `tar`, `untar`) answer as `HostStore`'s statics do (0,
+or -1 to -5 as in the table above). The Go build's variant `arbace/lang/go/ns/box/host.ae` is
+`HostStore` itself, one call each; the JVM's `arbace/box/host.ae` is `store_linux.ae` and
+`store.ae` again over java.nio. So the API, the refusals and their messages are one text, not two
+kept alike (the alternative, two copies of `arbace.box` or a `.subst.ae` swapping its calls,
+would leave the parity to review). On the JVM: `ARBACE_BOX_STORE` (opened once, the directories
+and `refs/.lock` made when missing, a store that cannot be opened said once on standard error),
+`ARBACE_BOX_STORE_MAX` read as jrt's `StoreMax`; blobs and refs written to a temporary name
+(`.put-*`, `.set-*`) and renamed, 0644; a blob held to its hash when read (streamed, so `size`
+holds a blob of any length; `get-bytes` beyond an array's length is `HostStore.read`'s
+`IllegalStateException`); refs read and written under the process's lock and
+`FileChannel.lock(0, Long.MAX_VALUE, shared)` of `refs/.lock`, which jdk26u's
+`UnixFileDispatcherImpl.lock0` (`src/java.base/unix/native/libnio/ch/UnixFileDispatcherImpl.c`)
+takes as `fcntl(F_SETLKW)` with `l_whence SEEK_SET, l_start 0, l_len 0` and `F_RDLCK`/`F_WRLCK`,
+the call jrt's `lockRefs` makes (checked with strace on both: the same arguments). The lock's
+channel stays open (closing any descriptor of the file would drop the process's POSIX locks) and
+is opened again if an interrupt closed it. Snapshots are written as Go's `archive/tar` writes
+jrt's (`WriteHeader` with `Format: FormatPAX` and the epoch: USTAR when its fields hold the
+entry, a name split into USTAR's prefix when it can be, else a PAX extended header named
+`PaxHeaders.0`, its `path` and `size` records sorted; directories' entries in byte order; the
+same `toASCII`, field formats and checksum) and read as its reader reads (USTAR, PAX local and
+global headers, GNU long names, a legacy NUL type, base-256 numbers), with `RestoreTar`'s rules
+and Go's error texts (`archive/tar: invalid tar header`, `unexpected EOF`, `stat DIR: no such
+file or directory`).
+
+**Loading from refs.** `arbace.main`'s `ref:NAME` is now in `arbace/main.ae` itself (VENDOR-NOTES
+hand change 22), for both builds (`main.subst.ae` lost that substitution). `ARBACE_PATH` is the
+Go build's: the JVM's counterpart is its class path (`ARBACE_CLASSPATH` for `bin/arbace-j`). So
+on the JVM only its store entries are read, as `RT.load`'s last resort: a namespace the class
+path has neither as a class nor as a source is looked for in the `store:PREFIX` entries in order
+(`.ae`, `.clj`, `.cljc`, as the Go build's), only when `ARBACE_PATH` has one; its directories are
+not read, and resources (`io/resource`, `getResourceAsStream`) do not see store entries on the
+JVM. The same program and the same `ARBACE_BOX_STORE`/`ARBACE_PATH` thus run on the JVM, natively
+and in the box (with the JVM's libraries on its class path).
+
+**Checks.** `test/native/box_test.ae` (in `bin/native-tests`, so in `bin/build-arbace` and the
+gate; 6 tests, 73 assertions, about 17 s): the API, compare-and-set, every refusal, the limit,
+the directory's format and modes, a blob left short, a second store on the directory, the
+snapshot of a tree with a name that is not ASCII, one longer than USTAR's name and one it splits
+(its hash is the native executable's, measured), tars of GNU tar's `gnu`, `posix` and `ustar`
+formats restored, names outside the directory and a tar that is not refused; in fresh JVMs, no
+store, `ARBACE_BOX_STORE_MAX`, `ref:NAME` and `-i ref:NAME`, `ARBACE_PATH`'s store entries, and
+the refs' lock held by the test's JVM keeping another JVM's `ref!` waiting.
+`bin/arbace-go --smoke` (amd64, when `target/arbace.jar` is built: in the gate it is) runs
+`store_checks` on the JVM too (`bin/arbace-j`), then one directory used by the JVM and the native
+executable: each reads the other's refs; the same tree's snapshot is the same tar from both, and
+each restores the other's; compare-and-set counters run by two JVMs and two native processes at
+once end at 200 (no update lost); the JVM holding the refs' lock keeps the native `ref!` waiting.
+The essential `bin/gate` passed (6m46s): the bootstrap (stage 2 = stage 3, 5,777 classes
+verified; the native tests 60 of 60, the six new included), Clojure's suite on stage 2 without
+regressions, `bin/class-forms-tests`, and the Go executable built again (a2g with the shared
+`arbace.box`, its host variant and `RT`'s cut; 66,814,112 bytes) and smoke-tested: 67 of 67 on
+amd64, fourteen new (the nine store checks on the JVM, the five shared-directory checks).
+
+- **BX37 (BX34, EVAL-NOTES' namespace variants; VENDOR-NOTES hand change 22) `arbace.box` on
+  the JVM**: `arbace/box.ae` shared, its host layer `arbace.box.host` (the JVM's over java.nio,
+  the Go build's variant over `HostStore`); `ref:NAME` scripts in `arbace/main.ae`; `RT.load`'s
+  last resort, `ARBACE_PATH`'s store entries on the JVM (`RT.loadFromStore`, cut in the Go
+  build's `RT`); the checks above.
