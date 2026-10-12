@@ -69,8 +69,11 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   polling; idle host CPU 0.00 s per 20 s.
 - The milestone reached (2026-10-12): `bin/gate --full` passed (19m47s) and the tag
   `arbace-box-amd64-v1` is on main (a milestone, not a freeze: no branch, the journal continues).
-- Next milestone: S4, arm64 (KVM/arm64, then Hypervisor.framework on the Mac; purego,
-  `board.NilPanics` for arm64, S6's arm64 half).
+- Now, towards the milestone `arbace-box-arm64-v1` (a tag on main after `bin/gate --full`, not a
+  freeze): S4, arm64: the arm64 guest with everything the amd64 box does (`board.NilPanics` for
+  arm64, the event area, the store, the network), KVM/arm64 in an emulated aarch64 VM here, S6's
+  arm64 half (one `tamago/` tree), purego vendored as Go forms, a Mac bundle (a tarball and a
+  checklist script) for the user's run on Hypervisor.framework, which follows the tag.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 
@@ -82,13 +85,8 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux host) and
   Hypervisor.framework on arm64 (macOS host). Open: the runtime's design, Go-inspired (scheduler,
   GC), with proper tail calls possible.
-- The milestone now (the user, 2026-10-11): the box on amd64, in this order: S2; S6 (the image's
-  Go as forms: TamaGo's runtime and std converted by g2a, the image built from the printed forms
-  byte-identical to one built from the originals), started once two builds of the same tree are
-  identical; then S3 (the store) and S5 (the network, D12), each re-running S6's proof. It
-  ends with `bin/gate --full` and the tag `arbace-box-amd64-v1` on main: a milestone, not a
-  freeze (no branch).
-- The next milestone: S4, arm64 (KVM/arm64, then Hypervisor.framework on the Mac; purego,
-  `board.NilPanics` for arm64, S6's arm64 identity).
+- After `arbace-box-arm64-v1`: the Mac run on Hypervisor.framework (the user's, from the bundle);
+  the box's own checks in `bin/gate --full` (deferred); the mapped start measured without nested
+  KVM; TLS once jrt has JSSE.
 - g2a's open ends: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s
   directory tests.
