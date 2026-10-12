@@ -1,0 +1,59 @@
+# g2a's host: what runs g2a's namespaces (arbace.g2a.build, .print, .main, .read) for bin/g2a and
+# bin/g2a-print. Sourced, with $root set to the repository root. Defines:
+#
+#   g2a_exec HEAP NS ARG...  replaces the shell by -m NS ARG... on the host G2A_HOST names:
+#                   jvm (the default): Arbace on the JVM, target/stage2 plus the checkout
+#                   (bin/lib/tools.bash), with G2A_JVM_OPTS or else HEAP (e.g. -Xmx2g) and a 64 MB
+#                   stack;
+#                   go: the native Go executable (standalone S3, doc/STANDALONE-NOTES.md), the
+#                   checkout first on ARBACE_PATH, so that arbace.g2a (not embedded in the
+#                   executable) loads from the checkout's sources, as on the JVM. The executable
+#                   is G2A_GO_EXE (default target/arbace-go/<host arch>/arbace, built by
+#                   bin/arbace-go --build), run from a copy in .tmp/g2a-host/ refreshed when it
+#                   differs: a build of the executable (bin/arbace-go --build on this host)
+#                   replaces it while the copy runs. GOGC is 400 unless set (the printer
+#                   allocates much and keeps little: the collector's work, not memory, bounds
+#                   it; doc/STANDALONE-NOTES.md).
+#   g2a_host        prints the host: jvm or go (fails on another value of G2A_HOST)
+
+g2a_host() {
+  case ${G2A_HOST:-jvm} in
+    jvm|go) echo "${G2A_HOST:-jvm}" ;;
+    *) echo "G2A_HOST is jvm or go, not $G2A_HOST" >&2; return 2 ;;
+  esac
+}
+
+# g2a_go_exe: prints the path of the copy of the Go executable to run (made or refreshed)
+g2a_go_exe() {
+  local exe arch dir=$root/.tmp/g2a-host
+  case $(uname -m) in aarch64) arch=arm64 ;; *) arch=amd64 ;; esac
+  exe=${G2A_GO_EXE:-$root/target/arbace-go/$arch/arbace}
+  if [ ! -x "$exe" ]; then
+    echo "G2A_HOST=go: no executable $exe (bin/arbace-go --build with G2A_HOST=jvm first, or set G2A_GO_EXE)" >&2
+    return 1
+  fi
+  mkdir -p "$dir"
+  (
+    # one refresh at a time (concurrent printings share the copy); a running copy is replaced
+    # by a rename, never written in place
+    flock 9
+    if ! cmp -s "$exe" "$dir/arbace"; then
+      cp "$exe" "$dir/arbace.new.$$" && mv -f "$dir/arbace.new.$$" "$dir/arbace"
+    fi
+  ) 9> "$dir/lock" || return 1
+  echo "$dir/arbace"
+}
+
+g2a_exec() {
+  local heap=$1 ns=$2 host exe
+  shift 2
+  host=$(g2a_host) || exit 2
+  if [ "$host" = go ]; then
+    exe=$(g2a_go_exe) || exit 1
+    ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} GOGC=${GOGC:-400} exec "$exe" -m "$ns" "$@"
+  fi
+  . "$root/bin/lib/tools.bash"
+  arbace_runtime || exit 1
+  # shellcheck disable=SC2086
+  exec java ${G2A_JVM_OPTS:-$heap} -Xss64m -cp "$ARBACE_CP" arbace.lang.Main -m "$ns" "$@"
+}
