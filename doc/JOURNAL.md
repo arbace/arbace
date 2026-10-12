@@ -916,3 +916,10 @@ All as recommended in doc/STANDALONE-SURVEY.md:
     fallback and go-whim's requirements;
   - the jars and netboot fetched into `.tmp/`;
   - /dev/kvm.
+
+## 2026-10-12: the host upgraded
+
+- The user ran `apk update && apk upgrade`: 18 packages (util-linux's, libcap2, fakeroot,
+  abuild, libfdt, linux-virt 6.18.55 → 6.18.56), none of Arbace's inputs (the JDKs, TamaGo's
+  Go, gcc, qemu-aarch64, python3, git unchanged). Still 560 packages; `bin/alpine-env check`
+  holds, the line unchanged (67). The kernel runs 6.18.52 until the reboot after the milestone.
