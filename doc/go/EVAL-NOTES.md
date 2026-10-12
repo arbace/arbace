@@ -204,6 +204,7 @@ new) replaces text found exactly once. Each file's header says why; as of 2026-1
 | `main.after.ae` | the REPL's requires trimmed (decision 6: no javadoc, no repl.deps; no pprint, whose load took about 8 s on the evaluator, phase 2A) |
 | `main.subst.ae` | no `DynamicClassLoader` for the REPL's thread; the error report printed with `prn`, to a temporary file as on the JVM |
 | `box/host.ae` | `arbace.box`'s host layer over jrt's `jdk.internal.jrt.HostStore` (the JVM's, `arbace/box/host.ae`, is over java.nio; `arbace/box.ae` is shared since 2026-10-12, BOX-NOTES.md S3, BX37) |
+| `tls/host.ae` | `arbace.tls`'s host layer over jrt's `jdk.internal.jrt.TlsSocket`, Go's `crypto/tls` (the JVM's, `arbace/tls/host.ae`, is over `javax.net.ssl`; `arbace/tls.ae` and `arbace/http.ae` are shared; BOX-NOTES.md "TLS (option 2)", BX71) |
 | `java/io.subst.ae` | no reflection warnings at every start; the escape of `+` written out (`URLEncoder` is outside the world); `copy` between files through streams, not channels |
 | `core/server.subst.ae` | prepl makes no `DynamicClassLoader` for its thread (sockets, JRT-NOTES.md "Sockets") |
 | `reflect/java.subst.ae` | `arbace.reflect` without ASM: the names ASM's `Type` gives, computed (FX5, "The suite's Java fixtures") |

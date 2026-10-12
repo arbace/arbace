@@ -1,0 +1,98 @@
+;; The JVM's host layer of arbace.tls (doc/go/BOX-NOTES.md, "TLS (option 2)", BX70): javax.net.ssl,
+;; answering as the Go build's arbace/lang/go/ns/tls/host.ae answers over jrt's TlsSocket.
+(ns arbace.tls.host
+  "arbace.tls's host layer on the JVM: javax.net.ssl's SSLSocket, layered over a connected
+  java.net.Socket."
+  (:import (java.io ByteArrayInputStream)
+           (java.net InetSocketAddress Socket)
+           (java.security KeyStore)
+           (java.security.cert CertificateException CertificateFactory CertPathValidatorException)
+           (javax.net.ssl SNIHostName SSLContext SSLException SSLSocket SSLSocketFactory
+                          TrustManagerFactory)))
+
+(def ^:private factories
+  "The socket factory of each roots given (their text), made once."
+  (atom {}))
+
+(defn- factory
+  "The socket factory trusting roots (PEM bytes; nil: the JVM's default), or [:roots message]."
+  [^bytes roots]
+  (if (nil? roots)
+    (SSLSocketFactory/getDefault)
+    (let [k (String. roots "ISO-8859-1")]
+      (or (get @factories k)
+          (let [certs (try (seq (.generateCertificates (CertificateFactory/getInstance "X.509")
+                                                       (ByteArrayInputStream. roots)))
+                           (catch CertificateException _ nil))]
+            (if (empty? certs)
+              [:roots "no certificate in the roots given"]
+              (let [ks (doto (KeyStore/getInstance (KeyStore/getDefaultType)) (.load nil nil))
+                    _ (doseq [[i c] (map-indexed vector certs)]
+                        (.setCertificateEntry ks (str "root" i) c))
+                    tmf (doto (TrustManagerFactory/getInstance (TrustManagerFactory/getDefaultAlgorithm))
+                          (.init ks))
+                    ctx (doto (SSLContext/getInstance "TLS") (.init nil (.getTrustManagers tmf) nil))
+                    f (.getSocketFactory ctx)]
+                (swap! factories assoc k f)
+                f)))))))
+
+(defn- ip-literal? [^String s]
+  (boolean (or (re-matches #"[0-9]+(\.[0-9]+){3}" s) (.contains s ":"))))
+
+(defn- kind
+  "The failure's kind: :verify when a certificate's check is among its causes, else :handshake."
+  [^Throwable e]
+  (if (some #(or (instance? CertificateException %) (instance? CertPathValidatorException %))
+            (take-while some? (iterate #(.getCause ^Throwable %) e)))
+    :verify
+    :handshake))
+
+(defn connect
+  "An SSLSocket connected to host and port, the handshake made for server-name, alpn (the
+  protocols separated by commas, or nil), roots (PEM bytes, or nil: the JVM's), waiting up to
+  timeout ms for each (0: no limit); or [kind message] for TLS's failures, kind :verify,
+  :handshake or :roots. The network's errors throw as java.net's."
+  [^String host port ^String server-name ^String alpn ^bytes roots timeout]
+  (let [f (factory roots)]
+    (if (vector? f)
+      f
+      (let [raw (Socket.)]
+        (try
+          (.connect raw (InetSocketAddress. host (int port)) (int timeout))
+          (catch Throwable t
+            (.close raw)
+            (throw t)))
+        (let [^SSLSocket s (.createSocket ^SSLSocketFactory f raw server-name (int port) true)
+              p (.getSSLParameters s)]
+          (when-not (ip-literal? server-name)
+            (.setServerNames p [(SNIHostName. server-name)]))
+          (.setEndpointIdentificationAlgorithm p "HTTPS")
+          (when alpn
+            (.setApplicationProtocols p (into-array String (.split alpn ","))))
+          (.setSSLParameters s p)
+          (.setSoTimeout s (int timeout))
+          (try
+            (.startHandshake s)
+            (.setSoTimeout s 0)
+            s
+            (catch SSLException e
+              (.close s)
+              [(kind e) (.getMessage e)])
+            (catch Throwable t
+              (.close s)
+              (throw t))))))))
+
+(defn session
+  "The session of SSLSocket s as a map (:application-protocol \"\" when none)."
+  [^SSLSocket s]
+  (let [ss (.getSession s)]
+    {:protocol (.getProtocol ss) :cipher-suite (.getCipherSuite ss)
+     :application-protocol (or (.getApplicationProtocol s) "")
+     :server-name (or (some-> (.getSSLParameters s) .getServerNames first
+                              (#(.getAsciiName ^SNIHostName %)))
+                      "")}))
+
+(defn peer-certificates
+  "The peer's certificates of SSLSocket s, DER, its own first."
+  [^SSLSocket s]
+  (map #(.getEncoded ^java.security.cert.Certificate %) (.getPeerCertificates (.getSession s))))

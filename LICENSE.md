@@ -110,6 +110,21 @@ covers what.
     `tamago/amd64` or `tamago/arm64` and its `go.mod`: Copyright (c) The TamaGo Authors, under the BSD 3-Clause
     License (text below).
   Each Go file's notice is kept, as `;;` lines of its forms.
+- `x509roots/` (`x509roots/go/arbace/x509roots/fallback/bundle.ae` and `bundle/`, with
+  `bundle/bundle.der`; x509roots/README.md, doc/go/BOX-NOTES.md "TLS (option 2)"): the package
+  `bundle` of the module `golang.org/x/crypto/x509roots/fallback`, https://go.googlesource.com/crypto
+  at `3b414e3e8284a71c817c4d1009acdd5d3a464ff9` (version
+  `v0.0.0-20261011195143-3b414e3e8284`, go.sum `h1:vbII1qQTqQ3ya1k/bfJWuHiUNzCkFD7LRbGiO3gSwVE=`,
+  from Go's module cache), its import path renamed to `arbace/x509roots/fallback/bundle`, converted
+  to Go forms by `bin/g2a convert` (`bin/x509roots-vendor`), its embedded `bundle.der` unchanged:
+  Copyright 2023-2026 The Go Authors (each file's notice, kept as `;;` lines; the generated
+  `bundle.go` carries none), under Go's BSD 3-Clause License (the module's `LICENSE` is the text
+  below, "Go: BSD 3-Clause License", byte for byte). The certificates in `bundle.der` are the
+  roots of Mozilla's NSS trust store, as the module's generator (`gen_fallback_bundle.go`, over
+  `x509roots/nss`) extracted them from NSS's `certdata.txt`; the module distributes them under
+  its own licence only. The Go build's executables and the box's guest contain them.
+- `tools/tlsserver/`: the TLS test server of the TLS checks: Arbace's own, under the Eclipse
+  Public License 1.0.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"), written for Arbace in place of jdk26u's files of the same names (from their
   documented APIs, without their code): Arbace's own, under the Eclipse Public License 1.0. The

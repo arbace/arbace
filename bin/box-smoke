@@ -8,19 +8,23 @@
 # pseudo-terminal. Run by bin/arbace-go --smoke --box on the host (amd64, /dev/kvm) and by
 # bin/box-arm64-vm smoke in the aarch64 VM (KVM/arm64), from a copy of bin/ and test/.
 #
-#   bin/box-smoke [--arch ARCH] [--native EXE] [--slow N] LAUNCHER
+#   bin/box-smoke [--arch ARCH] [--native EXE] [--tls-server EXE] [--slow N] LAUNCHER
 #
 # --native: the native executable of the same architecture, which writes a store directory the
-# box then reads (skipped without it); --slow N (or ARBACE_SMOKE_SLOW): times waited and
+# box then reads (skipped without it); --tls-server EXE: tools/tlsserver for the host, the TLS
+# checks' server (by default built here with Go's toolchain; the TLS checks skipped when there is
+# none); --slow N (or ARBACE_SMOKE_SLOW): times waited and
 # tolerated multiplied by N (the aarch64 VM's emulation: 30). Exit 0 when every check passed.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/store-checks.bash"
-a=$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac) native="" slow=${ARBACE_SMOKE_SLOW:-1}
+. "$root/bin/lib/tls-checks.bash"
+a=$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac) native="" slow=${ARBACE_SMOKE_SLOW:-1} tls_exe=""
 while [ $# -gt 0 ]; do
   case $1 in
     --arch) a=$2; shift 2 ;;
     --native) native=$2; shift 2 ;;
+    --tls-server) tls_exe=$2; shift 2 ;;
     --slow) slow=$2; shift 2 ;;
     *) break ;;
   esac
@@ -177,6 +181,25 @@ PY
       ARBACE_BOX_STORE=$s "$native" -e '(require (quote arbace.box))' -e '(arbace.box/put! "native" "from the native executable")' > /dev/null 2>&1
       check "a store directory shared with the native executable" "from the native executable" \
         "$(box --store "$s" -e '(require (quote arbace.box))' -e '(print (arbace.box/load "native"))' 2>&1)"
+    fi
+    [ $fails -eq 0 ] || status=1
+    # TLS (doc/go/BOX-NOTES.md, "TLS (option 2)"), on 4 vCPUs: Go's crypto/tls in the guest over
+    # the launcher's stream (ARBACE_BOX_NET=loopback), against the test server on the host's
+    # loopback, its CA given in the forms or by ARBACE_TLS_ROOTS=ref:NAME (the launcher's store)
+    fails=0
+    echo "== box $a: TLS"
+    if [ -z "$tls_exe" ] && tls_build_server "$t/tlsserver" > "$t/tlsserver.log" 2>&1; then tls_exe=$t/tlsserver; fi
+    if [ -n "$tls_exe" ] && tls_server "$tls_exe" "$t/tls"; then
+      "$b" --store "$s" put "$t/tls/ca.pem" test-ca.pem > /dev/null
+      tlsbox() { ARBACE_BOX_NET=loopback box --store "$s" "$@"; }
+      tls_checks tlsbox "$t/tls" ref:test-ca.pem
+      # wake on events under TLS: a read waiting 2 s on a TLS stream makes no more than a few
+      # network calls (the guest parks until the host's event), then reads what comes
+      check "TLS: a read waiting 2 s polls nothing, then reads" "[:written true] yes" \
+        "$(ARBACE_BOX_STATS=$t/tls.stats tlsbox -e '(require (quote [arbace.tls :as tls]) (quote arbace.box))' -e "(let [s (tls/connect \"localhost\" $(cat "$t/tls/echo.port") {:roots (arbace.box/load \"test-ca.pem\")}) o (.getOutputStream s) f (future (Thread/sleep $((2000 * slow))) (.write o (.getBytes \"late\")) (.flush o) (.shutdownOutput s) :written)] (prn [@f (= \"late\" (slurp (.getInputStream s)))]) (.close s) (shutdown-agents))" 2>&1) $(awk '$1=="call" && $2 ~ /^net_(read|events|status)$/ {n+=$3} END {print (n+0 <= 60) ? "yes" : "no: " n}' "$t/tls.stats")"
+      tls_server_stop
+    else
+      echo "  skip TLS (no tools/tlsserver: --tls-server, or Go's toolchain to build it)"
     fi
     [ $fails -eq 0 ] || status=1
     # the launcher's REPL under rlwrap, and Ctrl-C, on a pseudo-terminal
