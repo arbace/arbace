@@ -1,7 +1,9 @@
 // Command golines compares the lines of two Go files as g2a's printer promises them in
 // positions mode :lines (doc/go/SPEC.md §10.1, §12.3): the line, as gc sees it (after
 // //line directives), of every declaration, spec, struct field, statement, case clause and
-// function closing brace, and of every name a field list or a spec declares, in source order.
+// function closing brace, of every name a field list or a spec declares, and of every
+// element of a case clause's list, a return's results and an assignment's sides, in source
+// order.
 //
 // Usage: golines ORIGINAL PRINTED
 //
@@ -31,6 +33,13 @@ func lines(path string) ([]item, error) {
 	var out []item
 	add := func(kind string, p token.Pos) {
 		out = append(out, item{kind, fset.PositionFor(p, true).Line})
+	}
+	// the elements of an expression list (case values, a return's results, an assignment's
+	// sides): each at its line, a list that spans lines keeping its breaks
+	exprs := func(kind string, xs []ast.Expr) {
+		for _, x := range xs {
+			add(kind, x.Pos())
+		}
 	}
 	var stack []ast.Node
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -82,11 +91,19 @@ func lines(path string) ([]item, error) {
 		case *ast.EmptyStmt:
 		case *ast.CaseClause:
 			add("case", n.Pos())
+			exprs("case value", n.List)
 		case *ast.CommClause:
 			add("comm", n.Pos())
 		case *ast.BlockStmt:
 		case ast.Stmt:
 			add(fmt.Sprintf("%T", n)[5:], n.Pos())
+			switch n := n.(type) {
+			case *ast.ReturnStmt:
+				exprs("result", n.Results)
+			case *ast.AssignStmt:
+				exprs("lhs", n.Lhs)
+				exprs("rhs", n.Rhs)
+			}
 		}
 		return true
 	})

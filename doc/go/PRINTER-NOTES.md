@@ -94,6 +94,17 @@ from text) and `gofmt` otherwise (forms built by a program):
     parameter's); the body of a function whose signature spans lines is indented from the
     line `func` began on. The values of a spec or return after the first follow their
     `:go/breaks` too.
+  - Expression lists (2026-10-12, BOX-NOTES S4): a case clause's values or types, a return's
+    results, a `:=`'s targets, a range's variables and a spec's values keep their recorded
+    breaks (`:go/breaks`, or their own `:line`), as calls and composite literals did; a case
+    list that begins on the line after `case` goes there. A break (`:go/breaks` index) is the
+    line after the last one a form began on (the converter's count, SPEC §10.1), not after
+    the cursor's: a closing bracket the layout put on a line of its own does not count, so
+    `}, nil` stays one line (before, `nil` went a line further where a return's breaks were
+    followed). A call's `)` after a function literal follows its `}` (`})`), as gofmt writes.
+    Found by `bin/tamago-vendor check` on the TLS branch: `net/url`'s `validUserinfo`, whose
+    `case` list spans two lines, was printed on one, which moved a line of `.gopclntab` (the
+    function is inlined into `parseAuthority`).
   - Strings with line breaks are interpreted strings (`"a\nb"`): the forms do not say whether
     the source spelled them raw, and a raw string would push what follows to later lines.
     (The gofmt layout writes them raw where Go allows it.)
@@ -159,7 +170,8 @@ forms (A6 as accepted), covered by `s09_directives`.
 - for cases marked `lines`, `golines` compares the lines gc sees (after `//line` directives)
   of every declaration, spec, embedded struct field, statement, clause and function closing
   brace, and of every name a field list or a spec declares (since 2026-10-12: case
-  `s10_names`, the names of lists that span lines).
+  `s10_names`, the names of lists that span lines), and of every element of a case clause's
+  list, a return's results and an assignment's sides (case `s10_breaks`).
 
 Other tests: `package-build` (§12.4), `forms-in-memory` (the converter's path: forms without
 lines through `collect-forms`, printed in the gofmt layout, gocmp all levels), `line-file`

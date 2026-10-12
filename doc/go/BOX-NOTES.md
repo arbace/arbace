@@ -2109,3 +2109,31 @@ that `bin/box-vendor purego-check` compares the launchers with DWARF.
   and the round trip's code level passes.
 - The essential `bin/gate` (the bootstrap compiles `arbace/g2a`): passed in 6 min 46 s (Clojure's
   suite on stage 2 with no regressions, the class forms tests, the Go executable's smoke test).
+
+### The printer's expression lists: a case list over two lines (2026-10-12)
+
+Found on the TLS branch (`box-tls`, `7561fb6`): its guest links `net/url` (through
+`crypto/x509`), and `bin/tamago-vendor check amd64` reported the guest from the forms different
+from the originals': in `validUserinfo` (`net/url/url.go:1295-1296`) the `case` list spans two
+lines, the forms record the break (`(case ^{:go/breaks [9]} [\- ... \' \( ... \%] ...)`), and
+the printer wrote the list on one line, which moved one `.gopclntab` line (the function is
+inlined into `parseAuthority`).
+
+- **The change** (`arbace/g2a/print_code.ae`, `print_emit.ae`; the forms are unchanged): case
+  values and types, a return's results, `:=` targets and range variables follow `:go/breaks`
+  and their own lines, as calls and composite literals did (`comma-list`); a case list may
+  begin on the line after `case` (`go/parser`'s `case\n\ttoken.DEFINE, ...`). A break is now
+  resolved as the converter counts it, the line after the last one a form began on, not the
+  line after the cursor: otherwise `}, nil` (a composite literal's `}` the layout puts on its
+  own line, then a result the forms record as a break) got `nil` a line further. A call's `)`
+  after a function literal follows its `}`. PRINTER-NOTES.md, Layout.
+- **Checks** (`g2a-cases`, from main `cc76fbf`): `bin/g2a-print-tests` 5 tests, 268
+  assertions (golines also compares case values, return results and assignment sides; the case
+  `s10_breaks`), all pass; `bin/g2a roundtrip amd64` and `linux/amd64` no regressions;
+  `bin/box-vendor roundtrip` 20 of 20; `bin/tamago-vendor verify` identical, and after
+  `bin/arbace-go --build --box` for amd64 and arm64 `check`: both guests identical. On the TLS
+  branch with this merged (a scratch branch, not kept): `bin/tamago-vendor check amd64`, the
+  guest identical, as linked and with the symbol table cut. golines over std printed for
+  tamago/amd64: 1,622 of 1,742 files with the original's lines throughout, with golines as it
+  was and with the new items alike (the same 120 files under both: no list item differs). The
+  essential `bin/gate` passed (5 min 17 s).
