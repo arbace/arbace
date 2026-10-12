@@ -1678,3 +1678,207 @@ evaluator's next `Gosched`, as the poller's timer was. A `-e` that used a future
   polling kept only without an area.
 - **BX54 (box/: vmm, the launcher) `vmm.InputWatcher`**: a Host whose input the monitor may
   watch from its own goroutine; the launcher's console's `WatchInput`.
+
+## S4: arm64, KVM/arm64 and the Mac (design, 2026-10-12)
+
+Branch `box-s4`, from main `b6824c7` (the tag `arbace-box-amd64-v1`). BOX-SURVEY §6, S4: "the
+same image for arm64; KVM/arm64 in the emulated aarch64 VM here; Hypervisor.framework on the
+Mac", with S6's arm64 half. It leads to the milestone `arbace-box-arm64-v1`, a tag on main as
+`arbace-box-amd64-v1` (not a freeze). This section is phase 1: the study, what was tried here,
+the design and the amendments proposed (BX60 onward); the implementation follows.
+
+### The user's decisions (2026-10-12)
+
+- (a) **purego vendored as Go forms**, like `box/`, reproducible by a script, its Apache-2.0
+  licence in `LICENSE.md`.
+- (b) **`tamago/` for arm64 as one tree**: the files both architectures share held once, the
+  architecture-specific ones beside them, selected by Go's build constraints.
+- (c) **The Mac bundle a tarball built here**, with a checklist script (ad-hoc codesigning with
+  the hypervisor entitlement, its output saved for review).
+- (d) **The milestone's gate is `bin/gate --full` plus the arm64 VM's box checks.** The Mac run is
+  a follow-up after the tag: the bundle and its script are prepared in S4 but do not block it.
+
+### Where arm64 stands (tried here, 2026-10-12)
+
+Much of arm64 was written with S1-S5: the board's entry (`boot_arm64.s`) takes the wall clock
+from X6 and the monitor sets it (`vmm/tamago_arm64.go`, `setWallClock`); the event area, the
+store, the network, the console's wake and the environment are the ISA's neither in the board
+nor in jrt (`hostbox_tamago.ae`, `netbox_tamago.ae` have no architecture of their own); and
+`ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box` builds both (arm64's guest from the
+toolchain's tree: `tamago/` is amd64's): the arm64 guest 64,037,198 bytes, the launcher with it
+68,559,198, 97 s for the guest's compile.
+
+**The aarch64 VM works here.** go-whim's `guest/vm/aarch64.sh` (copied into the branch's
+`.tmp/`; go-whim only read): QEMU 11.1.2's `qemu-system-aarch64 -machine
+virt,virtualization=on,gic-version=3 -cpu max -accel tcg,thread=multi -smp 8 -m 6144`, Alpine
+edge's aarch64 netboot files (Linux 6.18.42-0-virt, 36 MB) fetched from dl-cdn.alpinelinux.org,
+booted in 32 s to its job agent, `/dev/kvm` there (KVM in VHE mode under the emulated EL2). On
+this machine (AMD EPYC 7763, 64 cores, 33 GB; the disk at 49%):
+
+- go-whim's `hv` arm64 tests (`TestDoorbellARM64`, `TestStoreAgainARM64`, `TestSysRegsARM64`,
+  `TestCounterVCPUsARM64`), cross-compiled from a clone at `80c49bf`: **all pass** (0.4 s).
+- **The arm64 box as built, unchanged, runs on KVM/arm64**: `arbace-box -e '(println (+ 1 2)
+  (java.util.Date.))'` prints `3` and the host's date, status 0, in 13 s on one vCPU and 14 s
+  on four (native amd64 in nested KVM: 0.3 s; under TCG everything is emulated, about 40x); the
+  REPL on standard input (a future, `spit`/`slurp` in memory), the store's tool (`--store DIR
+  put`), a `ServerSocket` under `ARBACE_BOX_NET=loopback` (once the VM's `lo` is up: Alpine's
+  netboot brings up `eth0` only), the X6 wall clock: all as on amd64.
+- **The one defect found: nil dereferences** (S1's open point). `(aget ^ints (identity nil) 0)`
+  ends the guest: "the guest took exception 0 (code 0x96000007) at pc 0x1236250, address 0x8"
+  (ESR EC 0x25, a data abort at the current EL, a level-3 translation fault on page 0). Natively
+  and in the amd64 box it is a `NullPointerException`. Cases where jrt checks nil itself (a
+  `String`'s method, `hashCode`, `locking`) already throw it on arm64.
+
+**purego.** go-whim's `hv/hvf_darwin.go` and `libsys` import `github.com/ebitengine/purego`
+v0.11.1 (module cache, `h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=`); for darwin/arm64 with
+cgo off its closure is three packages, `purego` (12 Go files, 4 assembly), `internal/fakecgo`
+(14, 4) and `internal/strings` (1): 7,462 lines (S0's 8,052 and 34,081 counted every
+configuration). No file names its own import path in a string; only the import specs do.
+
+**The launcher for darwin/arm64.** `box/` printed and built `GOOS=darwin GOARCH=arm64
+CGO_ENABLED=0` against purego from the module cache: `hv`, `vmm` and `libsys` compile; the
+launcher fails on two names only, `execRlwrap` and `newConsole`, whose files are Linux's
+(`rlwrap_linux.go`, `console.go`). `vmm` on darwin already has: no system-call filter, the
+parker over a channel (`park_other.go`, which the events' posts end), the image's segments
+copied (`mapfixed_darwin.go`), the guest's signal death by libsys; socket options answer
+`ENOPROTOOPT` (`net_other.go`).
+
+**`tamago/` for arm64.** std converted for tamago/arm64 (`bin/g2a convert --corpus arm64`: 378
+packages, 1,738 files, 9 s) against `tamago/goroot/go` (amd64): of the file forms both have,
+**1,683 are identical** and 11 differ; 41 files are amd64's only and 52 arm64's only (their
+build constraints: `_amd64`, `_arm64`, `_noasm`, `_generic` ...); all 370 package files differ
+(`:config`, `:init-order`, the file lists). The 11 differ only by facts of the configuration
+that the converter records and the printer does not print: constants' values (`^{:val ...}`:
+`goarch.IsAmd64`, `defaultGOARCH`, `runtime/internal/sys`'s, `cpuflags`, `bytealg`, `chacha8`'s
+and the FIPS `cpu`'s) in ten, and in `poly1305.go` the embedded field a selector goes through
+(`^{:go/via [macGeneric]}`: `mac` is another type on arm64). The goos module for tamago/arm64
+(its `arm64`, `arm64/gic`, `arm/...` and the arm64 boards and SoCs) is to be counted as amd64's
+69 were.
+
+### The design
+
+1. **The arm64 guest (BX60).** `board.NilPanics` on arm64: the vectors' synchronous entry
+   from the current EL on SP_EL0 (entry 0, where Go code runs: EL1t) checks, before it reports,
+   for a data abort at the current EL (ESR_EL1's EC 0x25) at an address below 0x1000 with
+   `sigpanicPC` set; then it makes the faulting instruction's frame call `sigpanic` as Linux's
+   signal handler does on arm64 (the runtime's `sigctxt.preparePanic`, `signal_arm64.go`):
+   SP_EL0 lowered by 16, the interrupted LR (X30) stored at the new SP and the frame pointer
+   (X29) below it, LR set to ELR_EL1 (the faulting PC), ELR_EL1 set to `sigpanicPC`, and `ERET`
+   (SPSR_EL1 returns to EL1t, every other register as it was; R28, `g`, is Go's). The vector's
+   scratch registers are saved on SP_EL1 and restored on this path; every other exception is
+   reported by `Fault` as before. Written in the Go assembly of `boot_arm64.s`, carried into
+   `box/` as the `.s` files are (copied). Nothing else of the guest is arm64's: the clock (X6),
+   the environment, the event area, the store and the network are shared and already run.
+   `bin/arbace-go --build --box` with `ARBACE_BOX_ARCHES=arm64` (or both) as today; the default
+   stays amd64 (an arm64 guest's compile adds about 100 s), the gate's box step building both.
+2. **KVM/arm64 here (BX64, BX65).** `bin/box-arm64-vm`, after go-whim's `aarch64.sh` (the same
+   commands: `fetch`, `start`, `put`, `run`, `stop`, the job agent over QEMU's `guestfwd`, nothing
+   installed on the host), its state in `.tmp/box-arm64-vm/`, with:
+   - the netboot files of a **pinned Alpine release** (a `vX.Y` release's `netboot-X.Y.Z`
+     directory, the files' SHA-256 pinned in the script), not edge, whose files change daily;
+     the VM's packages (`bash`, `python3`, `rlwrap`, `dropbear`) from that release's repository;
+   - `lo` brought up, and **an `exec` channel**: dropbear in the VM, QEMU's `hostfwd` from the
+     host's loopback to it, a key made under `.tmp/`, so that `bin/box-arm64-vm exec CMD` runs a
+     command in the VM with standard streams and status (the job agent's batch polling, 1-2 s a
+     job, does for `put` and long jobs only); the oracle's candidate then is `bin/box-arm64-vm
+     exec /h/arbace-box -`;
+   - `smoke`: the box's smoke test run in the VM. `box_smoke` moves out of `bin/arbace-go` into a
+     script of its own (`bin/box-smoke LAUNCHER`; `bin/arbace-go --smoke --box` calls it), so that
+     it runs where the launcher is, with the checks that need the host's JVM skipped when there
+     is none (the shared store's JVM half) and the native arm64 executable, which runs in the VM,
+     in place of the amd64 one for the native half;
+   - `hv`: `bin/box-vendor kvm-tests`' tests cross-compiled for linux/arm64 (`hv`, `vmm`, and
+     go-whim's arm64 guest tests where they build) and run in the VM;
+   - `oracle`: the box's oracle subset on arm64, against `test/oracle/known-go-box-arm64.edn`
+     (expected the amd64 box's 46, the arm64 executable's own differences, and timeouts set for
+     emulation); `suite`: `bin/box-suite` with the launcher in the VM, if the time allows.
+   - The VM's size: `-smp 16 -m 12288` (8 and 6 GiB in go-whim's): the oracle runs a box per
+     corpus file, each touching about 260 MB, at `-j 8`. Started and stopped by the script, never
+     left running (`stop`, and `run`'s callers stop it on exit).
+3. **The Mac (BX61, BX62, BX66).**
+   - **purego as Go forms** (decision a): `box/go/arbace/box/purego.ae` and its directory,
+     `purego/internal/fakecgo`, `purego/internal/strings`: the import path renamed to
+     `arbace/box/purego` as go-whim's packages were (S0), the import specs the only change to the
+     text; converted for darwin/arm64 only (the one configuration that imports it), the assembly
+     copied; `bin/box-vendor` gains the step (the module from Go's module cache at v0.11.1, its
+     hash checked) and its proofs: gocmp of each printed package at the three levels, and the
+     darwin/arm64 launcher built from the printed forms byte-identical to one built against the
+     module with the imports renamed back (`-trimpath -buildvcs=false -ldflags=-buildid=`, as
+     S0). `LICENSE.md` names purego's files under its Apache-2.0 section. Alternative, not
+     recommended: keep the path `github.com/ebitengine/purego` (a `replace` to a printed
+     directory; no rename to prove, but a second module in the launcher's build).
+   - **The launcher on darwin/arm64**: the console for darwin (`console.go`'s `select` with
+     darwin's `FdSet`, which `syscall` has: the file tagged `unix` or a darwin twin), rlwrap on
+     the Mac (Homebrew's rlwrap; the file made `unix` with each system's `TIOCGWINSZ` and
+     `isatty`), socket options on darwin (`vmm/net_darwin.go`: `java.net.SocketOptions`' numbers
+     mapped to darwin's `setsockopt`, so that `forms/net.ae`'s options answer as natively), the
+     image beside the launcher (`arbace-box.elf`: the code signature covers the Mach-O, so the
+     image is not appended there, as go-whim's Mac runs). Built here: `bin/g2a build --module
+     arbace --goos darwin --arch arm64` (`--goos darwin`, cgo off: new for the launcher).
+   - **The bundle** (decision c): `bin/box-mac-bundle` makes
+     `target/arbace-go/arbace-box-mac-arm64.tar.gz`: the launcher, the arm64 guest
+     (`arbace-box.elf`), `hv.test` for darwin/arm64, the entitlements plist
+     (`com.apple.security.hypervisor`), a `README` and `mac.sh`, modelled on go-whim's
+     `guest/mac/mac.sh`: `check` (`sw_vers`, `uname -m`, `sysctl kern.hv_support`), `sign`
+     (`codesign --sign - --entitlements ... --force` on the launcher and `hv.test`, displayed), `hv`
+     (the framework's tests), then the checklist, each step's output and status saved under
+     `mac-results/` and packed into `mac-results.tar.gz` for the user to send back: `-e` with the
+     wall clock, the REPL's session on standard input (the smoke test's transcript), a script and
+     `-m` from memory, a nil dereference, a future during a long evaluation (R2), the store (put,
+     ref, a script by `ref:NAME`, the tool), the network on loopback (a connection within the
+     box, the socket REPL from the host by `nc`), idle CPU (the launcher's CPU time over 20 s at
+     the prompt, 1 and 4 vCPUs: the events' wake on macOS's parker), the start's and three
+     evaluations' times, on 1 and 4 vCPUs; and `run [ARGS]`, the REPL. Not a gate (decision d):
+     the follow-up after the tag.
+4. **S6's arm64 half (BX63).** One tree (decision b): `tamago/goroot/go` holds each file's forms
+   once where both configurations convert it alike (1,683 of std's), and the files only one
+   architecture builds beside them, as their build constraints select (41 amd64's, 52 arm64's);
+   the package files are merged as `box/`'s were (the union of the files, sorted; no `:config` or
+   `:init-order`: the printer and gc derive them). The 11 files whose forms differ only by the
+   configuration's facts are held once per architecture, as the converter writes them, in
+   `tamago/goroot/arch/amd64/go/` and `.../arm64/go/` (same paths), which `print` lays over the
+   shared tree for the architecture it prints (the shared tree has no copy of them). Not chosen:
+   dropping the annotations in the shared copy (one file, but the tree no longer the converter's
+   output); a second tree (32 MB more, 99% the same). The goos module likewise (the union of its
+   amd64 and arm64 packages). `bin/tamago-vendor` gains `--arch` (`convert`, `print`, `check`
+   for each of amd64 and arm64; `verify` converts both and merges as `convert` does); `check`
+   proves the arm64 guest image too (built from the forms and from the originals, identical as
+   linked and cut); `bin/arbace-go --build --box` builds arm64's guest from the forms too.
+   S6's amd64 proof must keep holding (`verify`, `check`), and the amd64 image's bytes are
+   unchanged by the merge (the printed amd64 tree is the same Go).
+
+### Amendments (proposed 2026-10-12)
+
+- **BX60 (box/: board) `board.NilPanics` on arm64**: the vectors' return to `sigpanic` on a data
+  abort below the first page, as `preparePanic` on arm64 (SP_EL0, LR, FP, ELR_EL1); the smoke
+  test's nil check and the oracle on arm64.
+- **BX61 (box/: the launcher, vmm) The launcher on darwin/arm64**: the console and rlwrap for
+  darwin, `vmm/net_darwin.go`'s socket options, the image beside the launcher on the Mac;
+  `bin/g2a build --goos darwin` for the launcher.
+- **BX62 (box/, `bin/box-vendor`, LICENSE.md) purego v0.11.1 as Go forms**: `arbace/box/purego`
+  (with `internal/fakecgo`, `internal/strings`), darwin/arm64, renamed imports; its proofs in
+  `bin/box-vendor check`/`roundtrip` (gocmp; the darwin launcher byte-identical to the module's).
+- **BX63 (`tamago/`, `bin/tamago-vendor`, BX23's extension) tamago/arm64 in the same tree**: the
+  shared files once, each architecture's beside them, the package files merged, the 11 files
+  differing by the configuration's facts under `tamago/goroot/arch/ARCH/`; the goos module's
+  arm64 packages; `--arch`; the arm64 guest from the forms and its byte identity.
+- **BX64 (bin/) `bin/box-arm64-vm`**: the aarch64 VM after go-whim's `aarch64.sh`, a pinned
+  Alpine release, the `exec` channel (dropbear, `hostfwd` on the loopback), `smoke`, `hv`,
+  `oracle`, `suite`; state in `.tmp/box-arm64-vm/`.
+- **BX65 (checks) The box's checks on KVM/arm64**: `bin/box-smoke LAUNCHER` (out of
+  `bin/arbace-go`), run in the VM; `test/oracle/known-go-box-arm64.edn`; the arm64 KVM tests;
+  together the milestone's arm64 gate beside `bin/gate --full` (decision d), run by
+  `bin/box-arm64-vm check` (not inside `bin/gate --full`: it takes an hour or more).
+- **BX66 (bin/) The Mac bundle**: `bin/box-mac-bundle`, `mac.sh` and its checklist, its saved
+  results; the user's run, after the tag.
+
+### Estimates (this machine)
+
+| item | work | runs |
+|---|---|---|
+| BX60, the arm64 nil panics | 1-2 h | the VM's checks |
+| BX64/BX65, the VM's script and the smoke test moved | 3-4 h | a smoke run in the VM: about 1 h (13-30 s a box, about 100 boxes, some in parallel); the oracle subset: 1-2 h at `-j 8`; `bin/box-suite`: about 3 h (natively 222 s at `-j 12`, about 40x), if time allows |
+| BX63, `tamago/` for arm64 | 3-4 h | `convert`/`verify` about 1 min, `check` about 4 min (two guests) |
+| BX61, BX62, BX66, purego, the darwin launcher, the bundle | 4-5 h | the round trip and proofs, minutes |
+
+The whole, with the checks: about two days of this machine's time.
