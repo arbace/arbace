@@ -174,6 +174,18 @@
   [forms]
   (or (some line-of forms) e/*next*))
 
+(defn- comma-list
+  "x1, x2, ...: the children of parent from index offset on, each by (print-one x), each after
+  the first on its recorded line (its own, or parent's :go/breaks: Go allows a break after the
+  comma)."
+  [parent offset xs print-one]
+  (let [xs (vec xs)
+        ts (mapv (fn [i x] (child-target parent (+ i offset) x)) (range (count xs)) xs)]
+    (dotimes [i (count xs)]
+      (when (pos? i) (tok ",") (sp) (e/break-to! (nth ts i)))
+      (binding [e/*next* (let [t (get ts (inc i))] (if (integer? t) t e/*next*))]
+        (print-one (nth xs i))))))
+
 ;; ---------------------------------------------------------------------------------------
 ;; Names and literals
 
@@ -249,7 +261,11 @@
           (print-one x i))))
     (let [indent (e/pop-open!)
           multi? (> (e/line) start)
-          end (if (= end :here) (e/line) end)]
+          ;; a function literal's closing brace is followed by the bracket on its line, as
+          ;; gofmt writes `})` (the forms do not record a trailing comma)
+          end (if (or (= end :here) (and (pos? n) (= (op (peek xs)) "fn") (:go/end (meta (peek xs)))))
+                (e/line)
+                end)]
       (when (and (e/lines?) (pos? n)
                  (or (and (integer? end) (> (long end) (e/line)))
                      (and (nil? end) multi? (e/room? 1))))
@@ -871,14 +887,13 @@
 (defn expr0 [f depth] (expr1 f 0 depth))
 
 (defn- expr-list
-  "e1, e2, ...: (values ...) or one expression; a value after the first on its recorded line
-  (its own, or the values' :go/breaks)."
+  "e1, e2, ...: (values ...) or one expression; the values on the line of the values form,
+  each after the first on its recorded line (its own, or the values' :go/breaks)."
   [f depth]
   (let [vs? (and (seq? f) (= (op f) "values"))
         xs (if vs? (rest f) [f])]
-    (doseq [[i x] (map-indexed vector xs)]
-      (when (pos? i) (tok ",") (sp) (e/break-to! (child-target f (inc i) x)))
-      (expr0 x depth))))
+    (when vs? (e/break-to! (line-of f)))
+    (comma-list f 1 xs #(expr0 % depth))))
 
 (defn- n-values [f] (if (and (seq? f) (= (op f) "values")) (count (rest f)) 1))
 
@@ -908,9 +923,7 @@
                         (when-not (zero-form? init)
                           (sp) (tok "=") (sp) (expr-list init 1)))
       :else (let [depth (if (and (> (count ts) 1) (> (n-values init) 1)) 2 1)]
-              (doseq [[i t] (map-indexed vector ts)]
-                (when (pos? i) (tok ",") (sp))
-                (expr0 t depth))
+              (comma-list target 1 ts #(expr0 % depth))
               (sp) (tok ":=") (sp) (expr-list init depth)))))
 
 (defn- type-binding-stmt [nm t]
@@ -1056,15 +1069,13 @@
 
 (defn- case-exprs [v]
   (when-not (vector? v) (fail "case needs a vector" v))
-  (doseq [[i x] (map-indexed vector v)]
-    (when (pos? i) (tok ",") (sp))
-    (expr0 x 1)))
+  (e/break-to! (line-of v))
+  (comma-list v 0 v #(expr0 % 1)))
 
 (defn- case-types [v]
   (when-not (vector? v) (fail "case needs a vector" v))
-  (doseq [[i x] (map-indexed vector v)]
-    (when (pos? i) (tok ",") (sp))
-    (if (nil? x) (tok "nil") (type-expr x))))
+  (e/break-to! (line-of v))
+  (comma-list v 0 v #(if (nil? %) (tok "nil") (type-expr %))))
 
 (defn- switch-stmt [f]
   (let [xs (rest f)
@@ -1127,9 +1138,7 @@
     (binding [*header* true]
       (let [x (peek v) vars (pop v)]
         (when (seq vars)
-          (doseq [[i k] (map-indexed vector vars)]
-            (when (pos? i) (tok ",") (sp))
-            (expr0 k 1))
+          (comma-list v 0 vars #(expr0 % 1))
           (sp) (tok (if assign? "=" ":=")) (sp))
         (tok "range") (sp) (expr0 x 1)))
     (block-body (vec body) {:parent f :offset 2})))
@@ -1147,9 +1156,7 @@
       "return" (do (tok "return")
                    (when (seq (rest f))
                      (sp)
-                     (doseq [[i x] (map-indexed vector (rest f))]
-                       (when (pos? i) (tok ",") (sp))
-                       (expr0 x 1))))
+                     (comma-list f 1 (rest f) #(expr0 % 1))))
       "break" (do (tok "break") (when-let [l (second f)] (sp) (tok (label-name l))))
       "continue" (do (tok "continue") (when-let [l (second f)] (sp) (tok (label-name l))))
       "goto" (do (tok "goto") (sp) (tok (label-name (second f))))
