@@ -742,3 +742,33 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   the essential gate passed (5m23s), `jrt-convert verify` passed (175 s) and fails on a tampered
   file. Left for S2: a2g on the JVM (reflection, ASM); the test build's fixtures still through j2a.
 - The essential `bin/gate` on main after the merge (S1 with the g2a printer fix): passed (5m36s).
+
+## 2026-10-12: TLS in the box merged (BX70-BX75); the printer's expression lists
+
+- `g2a-cases` merged (`6a6d1ab`, `8665f81`): the printer keeps recorded breaks in case lists,
+  returns, `:=` targets and range variables (`comma-list`); a plain `:go/breaks` entry means the
+  line after the last line a form began on, as the converter means it; `})` stays on the
+  literal's line. Found by the TLS branch: its guest links `net/url` (through `crypto/x509`), whose
+  `validUserinfo` case list spans two lines, so the guest from forms differed by one
+  `.gopclntab` line. Checks: printer tests, g2a's round trips, `box-vendor roundtrip`,
+  `tamago-vendor verify`/`check` (also on the TLS branch merged with it), the essential gate.
+- `box-tls` merged (`b080c18`, `7c0b994`, `6b4c44f`; BOX-NOTES "TLS (option 2)"). The user's
+  decisions: BX70-BX73 accepted as built (TLS in jrt's socket table over the host's connection,
+  `jdk.internal.jrt.TlsSocket` upgraded in place, no new hypercalls, the launcher carries
+  ciphertext; namespaces `arbace.tls` and `arbace.http` on the JVM, natively and in the box,
+  verification always on; Mozilla's roots embedded, replaced by `ARBACE_TLS_ROOTS` or `:roots`;
+  `x509roots/`, golang.org/x/crypto/x509roots/fallback's `bundle` at `3b414e3e8284` as Go forms,
+  `bin/x509roots-vendor`); BX74 no `javax.net.ssl` in the Go build for now; BX75 the checks
+  (`tools/tlsserver`, `bin/lib/tls-checks.bash`). LICENSE.md: the certificates also under NSS's
+  MPL-2.0 (the user, rather than BSD-3 only); merged after the printer fix (the user).
+- The branch's checks: a request to https://api.anthropic.com/v1/messages without a key answered
+  401 (`authentication_error`) from the box, natively and on arm64 under qemu, TLSv1.3 verified by
+  the embedded roots; `--smoke` 83 of 83, `--smoke --box` 111 of 111, the native and box oracles
+  their 46 known mismatches; idle CPU unchanged; the executables +2.4 MB (crypto/tls and x509
+  linked for the first time, 128 KB of roots).
+- On main after both merges (`2035f7b`): the essential gate passed (5m59s), `jrt-convert verify`
+  and `x509roots-vendor verify` byte for byte; `tamago-vendor check` first reported both guests
+  DIFFERENT: the printed tree's cache key (`bin/tamago-vendor`'s `tree_key`) hashed the forms and
+  TamaGo's version but not the printer, so a tree printed before the printer's fixes was reused.
+  Fixed: the key also hashes `arbace/g2a` and `bin/g2a`. Then both guests identical, as linked and
+  cut; `--smoke --box` 111 of 111.

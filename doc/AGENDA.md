@@ -87,9 +87,9 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   main after `bin/gate --full`, not a freeze.
 - Standalone S1 done (2026-10-12): the JDK's forms committed in `jdk/`, `bin/jrt-convert verify`
   in `--full`; the build reaches no javac or jdk26u.
+- TLS in the box (2026-10-12, BX70-BX75): Go's crypto/tls in jrt, `arbace.tls`, `arbace.http`,
+  Mozilla's roots (`x509roots/`); the Claude API reachable from the box.
 - Now: standalone S2, a2g without the JVM's reflection and ASM (agent, branch `standalone-s2`);
-  TLS in the box through Go's crypto/tls, for the Claude API from the box (agent, branch
-  `box-tls`; the user: option 2, now).
   `bin/gate --full` runs the amd64 box smoke test (`box-smoke`). The Mac: a bundle per box
   milestone, the user's run following the tag.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
