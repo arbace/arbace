@@ -1,17 +1,18 @@
 #!/bin/bash
 # Run Clojure's upstream test suite against a Clojure, by default the frozen baseline clojure/
-# (CLOJURE_SRC; extracted from the freeze tag into .tmp/frozen/, bin/lib/tools.bash), and compare the outcome with the recorded reference,
-# test/baseline-results.edn (in rename mode, against Arbace: test/arbace-results.edn). Writes
+# on the JVM (CLOJURE_SRC; extracted from the freeze tag into .tmp/frozen/, bin/lib/tools.bash),
+# or against Arbace's Go build (CLOJURE_TESTS_GO), and compare the outcome with the recorded
+# reference, test/baseline-results.edn (the Go build's: test/arbace-go-results.edn). Writes
 # only under .tmp/clojure-tests/.
 #
 # Usage: bin/clojure-tests [-j JOBS] [--no-generative|--generative] [NAMESPACE...]
 #        bin/clojure-tests --java-fixtures verify|update|OUT
-#   -j JOBS          parallel test JVMs (default: number of CPUs)
+#   -j JOBS          parallel test processes (default: number of CPUs)
 #   --no-generative  skip the test.generative phase (upstream's `ant test-generative`)
 #   --generative     run it (the default, with CLOJURE_TESTS_GO too)
 #   NAMESPACE...     run only these test namespaces (the totals then cover only them)
-#   --java-fixtures OUT  only convert the suite's Java fixtures (test/java), renamed as in
-#                    rename mode, into class forms under OUT with j2a (run CLOJURE_TESTS_RUN,
+#   --java-fixtures OUT  only convert the suite's Java fixtures (test/java), renamed as for
+#                    the Go build, into class forms under OUT with j2a (run CLOJURE_TESTS_RUN,
 #                    default java-fixtures; javac's class path CLOJURE_SRC, default
 #                    target/stage2): the forms committed in test/java-fixtures/forms
 #                    (test/java-fixtures/README.md), which bin/arbace-go --build-tests
@@ -33,27 +34,25 @@
 #   CLOJURE_TESTS_RUN       name of the run, its files go to .tmp/clojure-tests/RUN
 #                           (default: baseline)
 #   CLOJURE_TESTS_EXPECTED  the reference results (default: test/baseline-results.edn, the
-#                           frozen baseline's, with spec stubbed out; in rename mode
-#                           test/arbace-results.edn, Arbace's, with spec: everything passes)
+#                           frozen baseline's, with spec stubbed out; with CLOJURE_TESTS_GO
+#                           test/arbace-go-results.edn)
 #   CLOJURE_TESTS_GEN_MSEC  test.generative run time in ms (default 60000, as upstream)
-#   CLOJURE_TESTS_TIMEOUT   per-JVM timeout in seconds (default 900); the reference's
+#   CLOJURE_TESTS_TIMEOUT   per-process timeout in seconds (default 900); the reference's
 #                           :timeouts {ns seconds} gives single namespaces their own (the Go
 #                           build's: a namespace slower there than the default allows)
-#   CLOJURE_TESTS_RENAME    "arbace": the Clojure under test is Arbace's, renamed clojure.* ->
-#                           arbace.* (doc/VENDOR-NOTES.md). The suite, its test libraries, the
-#                           runner, the class and namespace names and the system properties
-#                           used here are translated alike by c2a (doc/C2A.md; bin/c2a
-#                           --in-place --keep-ext, on Arbace, bin/lib/tools.bash, which needs
-#                           bin/build-arbace's target/stage2), into RUN/suite and
-#                           .tmp/clojure-tests/lib-arbace/.
-#                           The test namespaces keep their names, so the reference applies.
 #   CLOJURE_TESTS_GO        the Go build (B1a, doc/go/EVAL-NOTES.md, "Phase 2C"): the command that
-#                           runs it, e.g. target/arbace-go/amd64/arbace or
-#                           "qemu-aarch64 target/arbace-go/arm64/arbace". Implies rename mode; the
+#                           runs it, e.g. target/arbace-go/amd64/arbace-tests or
+#                           "qemu-aarch64 target/arbace-go/arm64/arbace-tests". Rename mode: the
+#                           Clojure under test is Arbace's, renamed clojure.* -> arbace.*
+#                           (doc/VENDOR-NOTES.md); the suite, its test libraries, the runner and
+#                           the names used here are translated alike by c2a (doc/C2A.md; bin/c2a
+#                           --in-place --keep-ext) into RUN/suite and .tmp/clojure-tests/lib-arbace/
+#                           (the test namespaces keep their names, so the reference applies). The
 #                           test namespaces (step 5) and test.generative (step 6) run on it, each
 #                           in its own process, the renamed suite and test libraries on ARBACE_PATH;
-#                           listing and reporting run on the JVM Arbace of CLOJURE_SRC (default
-#                           target/stage2). Steps 3 and 4 are skipped: the Go build loads no class
+#                           c2a, the listing and the report run on the tools' host, the Go
+#                           executable of bin/lib/host.bash (ARBACE_HOST_EXE, else stage 0): no
+#                           JVM at all. Steps 3 and 4 are skipped: the Go build loads no class
 #                           files, so the AOT fixtures load from source, and the Java fixtures
 #                           (test/java) are translated into the executable: it must be the test
 #                           build, bin/arbace-go --build-tests's target/arbace-go/<arch>/arbace-tests
@@ -62,20 +61,19 @@
 #                           process loads every test namespace first, as upstream does: about
 #                           a minute; GOGC defaults to 400 for them (half the CPU time of the
 #                           default 100, about 650 MB resident each instead of 300)
-#   CLOJURE_TESTS_PRECOMPILED  1: the Clojure under test already holds its namespaces
-#                           AOT-compiled with direct linking, as a release jar does (Arbace's
-#                           stages, bin/build-arbace); step 3 is skipped and the suite runs
-#                           against those classes
+# (Until standalone S4 the renamed suite also ran on Arbace's JVM stages, CLOJURE_TESTS_RENAME
+# and CLOJURE_TESTS_PRECOMPILED with CLOJURE_SRC=target/stageN, against test/arbace-results.edn;
+# the JVM Arbace left main with S4, and with it those runs.)
 #
 # Steps, mirroring upstream's build.xml and pom.xml at the pinned revision:
 #   1. fetch     clojure/clojure at $rev into RUN/clojure (only test/ and src/script/ are used)
 #   2. deps      the pure-Clojure test libraries from Maven Central, checked by SHA-1
-#   3. build     AOT-compile the Clojure namespaces of the Clojure under test with direct linking
+#   3. build     (the baseline) AOT-compile the Clojure namespaces of the Clojure under test with direct linking
 #                into RUN/classes (ant compile-clojure). Needed: AOT test fixtures compiled with
 #                direct linking call clojure.core's fn classes, which must exist as class files.
-#   4. fixtures  javac test/java and AOT-compile the fixture namespaces into
+#   4. fixtures  (the baseline) javac test/java and AOT-compile the fixture namespaces into
 #                RUN/clojure/target/test-classes (ant compile-tests)
-#   5. test      each test namespace in its own JVM (ant test-example), in parallel: each JVM
+#   5. test      each test namespace in its own process (ant test-example), in parallel: each
 #                requires all test namespaces first, as upstream's single JVM does, then runs
 #                the tests of its namespace
 #   6. gen       the test.generative specs (ant test-generative)
@@ -94,31 +92,27 @@ if [ "${1:-}" = --java-fixtures ]; then
     /*) ;;
     *) java_fixtures=$PWD/$java_fixtures ;;
   esac
-  CLOJURE_TESTS_RENAME=arbace
   : "${CLOJURE_TESTS_RUN:=java-fixtures}" "${CLOJURE_SRC:=$root/target/stage2:$root}"
   unset CLOJURE_TESTS_GO
   set --
 fi
+# rename mode (the Clojure under test is Arbace's): the Go build and the Java fixtures
+rename=
 go_exe=${CLOJURE_TESTS_GO:-}
 if [ -n "$go_exe" ]; then
-  CLOJURE_TESTS_RENAME=arbace
-  CLOJURE_TESTS_PRECOMPILED=1
   : "${CLOJURE_TESTS_RUN:=go}" "${CLOJURE_TESTS_EXPECTED:=$root/test/arbace-go-results.edn}"
-  : "${CLOJURE_SRC:=$root/target/stage2:$root}"
-  export CLOJURE_TESTS_GO CLOJURE_TESTS_RENAME CLOJURE_TESTS_PRECOMPILED
+  export CLOJURE_TESTS_GO
 fi
+[ -n "$go_exe$java_fixtures$fixtures_mode" ] && rename=arbace
 run=${CLOJURE_TESTS_RUN:-baseline}
 work=$base/$run
 src=$work/clojure
-rename=${CLOJURE_TESTS_RENAME:-}
-case $rename in
-  "") suite=$src ;;
-  arbace) suite=$work/suite ;;
-  *) echo "CLOJURE_TESTS_RENAME: only arbace is known" >&2; exit 2 ;;
-esac
+suite=$src
+[ -n "$rename" ] && suite=$work/suite
 . "$root/bin/lib/tools.bash"
-# c2a ARGS... (bin/c2a), on Arbace
-c2a() { [ -n "${ARBACE_CP:-}" ] || arbace_runtime; java -Xss16m -cp "$ARBACE_CP" arbace.lang.Main -m arbace.c2a.main "$@"; }
+. "$root/bin/lib/host.bash"
+# c2a ARGS... (bin/c2a), on the tools' host
+c2a() { arbace_tool "${c2a_sources[@]}" -m arbace.c2a.main "$@"; }
 # Translate a tree in place for the Clojure under test: the suite's and libraries' files keep
 # their names (.clj, .cljc, .java), as the reference results name them
 c2a_tree() { c2a -q --in-place --keep-ext "$1"; }
@@ -127,11 +121,9 @@ rn() { if [ -n "$rename" ]; then c2a --stdin; else cat; fi; }
 rev=98d735fab02f337cee654cb0629bddc09883a75a
 runner=$root/test/run_clojure_tests.clj
 [ -n "$rename" ] && runner=$work/run_clojure_tests.clj
-default_expected=$root/test/baseline-results.edn
-[ -n "$rename" ] && default_expected=$root/test/arbace-results.edn
-expected=${CLOJURE_TESTS_EXPECTED:-$default_expected}
+expected=${CLOJURE_TESTS_EXPECTED:-$root/test/baseline-results.edn}
 clojure_src=${CLOJURE_SRC:-}
-if [ -z "$clojure_src" ]; then clojure_src=$(frozen_clojure); fi
+if [ -z "$clojure_src" ] && [ -z "$go_exe" ]; then clojure_src=$(frozen_clojure); fi
 gen_msec=${CLOJURE_TESTS_GEN_MSEC:-60000}
 timeout_s=${CLOJURE_TESTS_TIMEOUT:-900}
 
@@ -191,6 +183,13 @@ go_run() {
   local t=$1; shift
   # shellcheck disable=SC2086
   (cd "$suite" && ARBACE_PATH=$(go_path) TMPDIR=$work/tmp GOGC=${GOGC:-400} timeout "$t" $go_exe "$@")
+}
+# host_run ARG...: the tools' host (bin/lib/host.bash), in the suite, on the suite's ARBACE_PATH:
+# the listing and the report with the Go build, whatever the build under test
+host_run() {
+  local exe
+  exe=$(arbace_host_exe) || return 1
+  (cd "$suite" && ARBACE_PATH=$(go_path) TMPDIR=$work/tmp "$exe" "$@")
 }
 
 # The names of the Clojure under test, renamed in rename mode (computed once, passed on to the
@@ -340,7 +339,7 @@ while read -r coord sha; do
     step "translate $coord into $lib with c2a"
     rm -rf "$lib" "$lib.tmp"
     mkdir -p "$lib.tmp"
-    (cd "$lib.tmp" && jar xf "$jar")
+    unzip -q "$jar" -d "$lib.tmp"
     c2a_tree "$lib.tmp"
     mv "$lib.tmp" "$lib"
     echo "$c2a_stamp" > "$lib.c2a"
@@ -351,8 +350,8 @@ flock -u 9
 # 3. build
 rm -rf "${work:?}/classes" "${suite:?}/target" "${work:?}/tmp"
 mkdir -p "$work/classes" "$suite/target/test-classes" "$work/tmp"
-if [ "${CLOJURE_TESTS_PRECOMPILED:-}" = 1 ]; then
-  step "[$run] the Clojure under test holds its namespaces AOT-compiled"
+if [ -n "$go_exe" ]; then
+  step "[$run] nothing to compile: the Go build holds its namespaces, prepared in its image"
 else
   step "[$run] AOT-compile the Clojure under test into $work/classes"
   # shellcheck disable=SC2086
@@ -385,16 +384,19 @@ fi
 # 5. test
 rm -rf "${work:?}/out"
 mkdir -p "$work/out"
-(cd "$suite" && java -cp "$(test_cp)" $main_class "$runner" list test "$expected" "$work/timeouts.txt") \
-  > "$work/namespaces.txt"
+if [ -n "$go_exe" ]; then
+  host_run "$runner" list test "$expected" "$work/timeouts.txt" > "$work/namespaces.txt"
+else
+  (cd "$suite" && java -cp "$(test_cp)" $main_class "$runner" list test "$expected" "$work/timeouts.txt") \
+    > "$work/namespaces.txt"
+fi
 if [ ${#only[@]} -gt 0 ]; then
   printf '%s\n' "${only[@]}" > "$work/selected.txt"
 else
   cp "$work/namespaces.txt" "$work/selected.txt"
 fi
 step "[$run] run $(wc -l < "$work/selected.txt") test namespaces, $jobs at a time (logs in $work/out)$([ -n "$go_exe" ] && echo ", on $go_exe")"
-export CLOJURE_SRC=$clojure_src CLOJURE_TESTS_RUN=$run CLOJURE_TESTS_TIMEOUT=$timeout_s \
-  CLOJURE_TESTS_RENAME=$rename
+export CLOJURE_SRC=$clojure_src CLOJURE_TESTS_RUN=$run CLOJURE_TESTS_TIMEOUT=$timeout_s
 xargs -P "$jobs" -n 1 "$0" --run-one < "$work/selected.txt" | grep -v ' exit 0$' || true
 
 # 6. gen
@@ -415,5 +417,9 @@ if [ $generative = 1 ] && [ ${#only[@]} -eq 0 ]; then
 fi
 
 # 7. report
-(cd "$suite" && java -cp "$(test_cp)" $main_class "$runner" report "$work/out" "$expected" \
-  "$work/results.edn" "$(tr '\n' ' ' < "$work/selected.txt")")
+if [ -n "$go_exe" ]; then
+  host_run "$runner" report "$work/out" "$expected" "$work/results.edn" "$(tr '\n' ' ' < "$work/selected.txt")"
+else
+  (cd "$suite" && java -cp "$(test_cp)" $main_class "$runner" report "$work/out" "$expected" \
+    "$work/results.edn" "$(tr '\n' ' ' < "$work/selected.txt")")
+fi
