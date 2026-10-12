@@ -300,6 +300,101 @@
       (str (subs top 0 (inc (.lastIndexOf ^String top "/"))) (subs b 0 (- (count b) 3))))
     top))
 
+;; ---------------------------------------------------------------------------------------
+;; the parallel translation and writing (A2G-SPEC §4.5)
+
+(defn jobs
+  "How many threads translate and write: A2G_JOBS, else the number of processors."
+  []
+  (let [e (System/getenv "A2G_JOBS")]
+    (max 1 (if (seq e) (Long/parseLong e) (.availableProcessors (Runtime/getRuntime))))))
+
+(defn par-mapv
+  "(mapv f xs), f applied on up to n threads, each taking the next element (in xs' order, or
+  in the order of the indices `order`: the longest first); the results in xs' order. f's
+  dynamic bindings are the caller's (future's conveyance)."
+  [n f xs & [order]]
+  (let [xs (vec xs)
+        cnt (count xs)
+        n (min n cnt)
+        order (if order (vec order) (vec (range cnt)))]
+    (if (<= n 1)
+      (mapv f xs)
+      (let [res (object-array cnt)
+            next-i (atom -1)
+            work (fn [] (loop []
+                          (let [k (swap! next-i inc)]
+                            (when (< k cnt)
+                              (let [i (nth order k)]
+                                (aset res i (f (nth xs i))))
+                              (recur)))))
+            ws (doall (repeatedly n #(future (work))))]
+        (run! deref ws)
+        (vec res)))))
+
+(defn- translate-one
+  "Translates class n (the i-th in order) on its own: its forms, or its error, with the effects
+  the sequential translation has on the package's state recorded rather than applied: its
+  literals named apart (Lit?i_k, in first-use order), what it conj'ed into the package's ups,
+  lambdas and cuts and into the races, in order, and its printed output."
+  [i n]
+  (let [t0 (now)
+        ps {:lits (atom {}) :lit-prefix (str "Lit?" i "_")
+            :ups (atom []) :lambdas (atom []) :cuts (atom [])}
+        races (atom [])
+        sw (java.io.StringWriter.)
+        r (binding [c/*pkgstate* ps c/*races* races *out* sw]
+            (try
+              {:forms (if (m/reflected? n) (d/reflected-forms n) (d/class-forms n))}
+              (catch Throwable ex
+                (println "a2g: error in" n ":" (.getMessage ex))
+                (when (System/getenv "A2G_TRACE") (.printStackTrace ex))
+                {:error [n (.getMessage ex)]})))]
+    (assoc r :lits @(:lits ps) :lit-prefix (:lit-prefix ps) :ups @(:ups ps) :lambdas @(:lambdas ps)
+           :cuts @(:cuts ps) :races @races :out (str sw) :secs (secs t0))))
+
+(defn translate-classes
+  "Translates the classes ns (in order) in parallel (jobs threads) and merges what each did, in
+  their order, as the sequential translation would have done it class after class: the forms
+  into files ([pkg go-file] -> forms; file-of gives a class's), its errors, its printed output,
+  its conj's into the package states' sets (ups, lambdas, cuts; c/*races*) replayed one by
+  one, its literals given their names in the package's pool (Lit_n, numbered in order of
+  first use). cost-of estimates a class's translation time (the costliest start first).
+  Returns the renames of the classes' literals (out/*renames*)."
+  [ns file-of cost-of pkgstates files errors]
+  (let [results (par-mapv (jobs) (fn [[i n]] (translate-one i n)) (map-indexed vector ns)
+                          ;; the costliest first, so that none is left to the end alone
+                          (sort-by #(- (cost-of (nth ns %))) (range (count ns))))
+        conj-all (fn [a xs] (when (seq xs) (swap! a #(reduce conj % xs))))
+        _ (when (System/getenv "A2G_CLASS_TIMES")
+            (doseq [[n r] (take 25 (sort-by (comp - :secs second) (map vector ns results)))]
+              (println "a2g: class time" n (:secs r))))]
+    (reduce
+      (fn [renames [n r]]
+        (let [[pkg fname] (file-of n)
+              ps (get pkgstates pkg)
+              plen (count (:lit-prefix r))
+              renames (reduce (fn [renames [s sym]]
+                                (let [lits (:lits ps)
+                                      g (or (get @lits s)
+                                            (let [g (symbol (str "Lit_" (count @lits)))]
+                                              (swap! lits assoc s g)
+                                              g))]
+                                  (assoc renames sym g)))
+                              renames
+                              (sort-by #(Long/parseLong (subs (name (val %)) plen)) (:lits r)))]
+          (print (:out r))
+          (conj-all (:ups ps) (:ups r))
+          (conj-all (:lambdas ps) (:lambdas r))
+          (conj-all (:cuts ps) (:cuts r))
+          (conj-all c/*races* (:races r))
+          (if-let [e (:error r)]
+            (swap! errors conj e)
+            (swap! files update [pkg fname] (fnil into []) (:forms r)))
+          renames))
+      {}
+      (map vector ns results))))
+
 (def default-edge "jdk/edge.edn")
 
 (defn run*
@@ -453,6 +548,8 @@
             T (:T res)
             wst (assoc wst :T T :vmethods-cache (atom {}) :trivial-cache (atom {}))
             wst (assoc wst :subclass-index (m/make-subclass-index wst))
+            ;; built once here rather than by the first threads of the translation to ask
+            _ ((:subclass-index wst))
             t-reach (secs t1)
             _ (println (str "a2g: reachability: " (count T) " classes, " (count (:reached res)) " methods reached, "
                             (count (:unavailable res)) " with missing parts (" t-reach " s)"))
@@ -463,23 +560,29 @@
             pkgstates {:jrt {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts cuts}
                        :lang {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts cuts}}
             files (atom {})   ; [pkg go-file] -> forms
-            errors (atom [])]
+            errors (atom [])
+            lit-renames (atom {})
+            ;; the steps' times (report.edn's :times :steps)
+            steps (atom [])
+            lap (let [t (atom (now))]
+                  (fn [k] (let [x (now)]
+                            (swap! steps conj [k (/ (Math/round (/ (- x @t) 1e7)) 100.0)])
+                            (reset! t x))))]
         (binding [m/*w* wst
                   out/*absent-members* (boolean (:program opts))
                   d/*reached* (:reached res)
                   c/*races* (atom #{})]
-          ;; classes, grouped by the file of their top-level class
-          (doseq [n (sort T)]
-            (let [pkg (m/pkg n)
-                  fname (out/go-file-name pkg (source-top world pkg (top-of n)))]
-              (binding [c/*pkgstate* (get pkgstates pkg)]
-                (try
-                  (let [forms (if (m/reflected? n) (d/reflected-forms n) (d/class-forms n))]
-                    (swap! files update [pkg fname] (fnil into []) forms))
-                  (catch Throwable ex
-                    (swap! errors conj [n (.getMessage ex)])
-                    (println "a2g: error in" n ":" (.getMessage ex))
-                    (when (System/getenv "A2G_TRACE") (.printStackTrace ex)))))))
+          ;; classes, grouped by the file of their top-level class: translated in parallel,
+          ;; each with state of its own, merged in class order (translate-classes)
+          (reset! lit-renames
+                  (translate-classes (vec (sort T))
+                                     (fn [n] (let [pkg (m/pkg n)]
+                                               [pkg (out/go-file-name pkg (source-top world pkg (top-of n)))]))
+                                     ;; a class's cost, roughly: the size of its class forms file
+                                     (let [size (memoize (fn [f] (.length (io/file f))))]
+                                       (fn [n] (if-let [f (get (:source-of world) (top-of n))] (size f) 0)))
+                                     pkgstates files errors))
+          (lap :classes)
           ;; the type of the objects of classes made at run time (A2G-SPEC §5.12)
           (when (dyn/enabled?)
             (binding [c/*pkgstate* (get pkgstates :lang)]
@@ -488,11 +591,13 @@
           (when (and (dyn/enabled?) (dyncf/enabled?))
             (binding [c/*pkgstate* (get pkgstates :lang)]
               (swap! files assoc [:lang "a2g_cf.go"] (vec (dyncf/forms T)))))
+          (lap :dyn)
           ;; FromFn of the functional interfaces (A2G-SPEC §7.11), their adapters with the lambdas'
           (let [fis (filter #(contains? T %) (fromfn/fis T))]
             (when (seq fis)
               (swap! (:lambdas (get pkgstates :lang)) into fis)
               (swap! files assoc [:lang "a2g_fromfn.go"] (vec (fromfn/forms fis)))))
+          (lap :fromfn)
           ;; adapters of the functional interfaces lambdas target (in the interface's package)
           (loop [done #{}]
             (let [todo (doall (distinct (remove done (for [[pkg ps] pkgstates fi @(:lambdas ps)] fi))))]
@@ -502,6 +607,7 @@
                     (binding [c/*pkgstate* (get pkgstates pkg)]
                       (swap! files update [pkg "a2g_lambdas.go"] (fnil into []) (out/adapter-forms pkg fi)))))
                 (recur (into done todo)))))
+          (lap :adapters)
           ;; per package: registrations first (their member tables may name cut classes of
           ;; either package), then the literal pool, conversions, frames, support, cut classes
           (doseq [pkg [:jrt :lang]
@@ -510,6 +616,7 @@
                   :when (or (seq classes) (= pkg :jrt))]
             (binding [c/*pkgstate* ps]
               (swap! files assoc [pkg "a2g_classes.go"] (vec (mapcat #(out/class-registration pkg %) classes)))))
+          (lap :registrations)
           (doseq [pkg [:jrt :lang]
                   :let [ps (get pkgstates pkg)
                         classes (sort (filter #(= pkg (m/pkg %)) T))]
@@ -554,26 +661,38 @@
                                  (for [n eager] (list (symbol (str (m/go-name n) "_Init")))))]))))
             (swap! files assoc [pkg "a2g_strings.go"] (vec (out/strings-forms pkg @(:lits ps))))
             (swap! files assoc [pkg "a2g_up.go"] (vec (out/ups-forms pkg @(:ups ps)))))
+          (lap :packages)
           (let [t-trans (secs t2)
                 ;; §4.4: duplicate Go names, package-private methods Go would override; §8.3
                 collisions (chk/collisions @files scan)
+                _ (lap :collisions)
                 _ (doseq [c collisions]
                     (swap! errors conj [(str "Go name " (:name c)) (str "declared more than once in " (name (:pkg c)) ": " (str/join ", " (:sources c)))])
                     (println (str "a2g: error: Go name " (:name c) " declared more than once in package " (name (:pkg c)) ": " (str/join ", " (:sources c)))))
                 pp-overrides (chk/package-private-overrides T)
+                _ (lap :overrides)
                 _ (doseq [o pp-overrides]
                     (swap! errors conj [(:method o) (str "package-private, redeclared by " (:hidden-by o) " in another package (A2G-SPEC §4.4: rename table)")])
                     (println (str "a2g: error: package-private " (:method o) " is redeclared by " (:hidden-by o) " in another Java package; Go would override it")))
                 races (chk/race-report @c/*races*)
+                _ (lap :checks)
                 t3 (now)
                 ;; write the generated tree
                 _ (when (.exists (io/file gen-dir)) (doseq [f (reverse (file-seq (io/file gen-dir)))] (io/delete-file f true)))
+                ;; the files' texts computed in parallel, written in order
+                to-write (vec (for [[[pkg fname] forms] (sort @files)
+                                    :when (seq forms)]
+                                [pkg fname forms]))
+                texts (binding [out/*renames* @lit-renames]
+                        (par-mapv (jobs) (fn [[pkg fname forms]] (out/file-text pkg fname forms)) to-write
+                                  ;; the files of most declarations first
+                                  (sort-by #(- (count (nth (nth to-write %) 2))) (range (count to-write)))))
+                _ (lap :texts)
                 written (doall
-                          (for [[[pkg fname] forms] (sort @files)
-                                :when (seq forms)]
+                          (for [[[pkg fname _] text] (map vector to-write texts)]
                             (let [stem (subs fname 0 (- (count fname) 3))
                                   path (str gen-dir "/go/arbace/" (nm/pkg-name pkg) "/" stem ".ae")]
-                              (write! path (out/file-text pkg fname forms))
+                              (write! path text)
                               [pkg fname stem])))
                 ;; the program root: jrt's hand-written files (stand-ins filtered) and the generated ones
                 _ (when (.exists (io/file prog-dir)) (doseq [f (reverse (file-seq (io/file prog-dir)))] (io/delete-file f true)))
@@ -689,8 +808,11 @@
                           ;; construction without a lock
                           :race-candidates races
                           :package-private-overrides pp-overrides
-                          :times {:load t-load :reach t-reach :translate t-trans :write (secs t3)}}]
+                          :times {:load t-load :reach t-reach :translate t-trans :write (secs t3)
+                                  :steps (do (lap :files) @steps)}}]
               (write! (str (:out opts) "/report.edn") (with-out-str (arbace.pprint/pprint report)))
+              (println (str "a2g: steps (s): " (str/join ", " (for [[k v] @steps] (str (name k) " " v)))
+                            " (" (jobs) " jobs)"))
               (println (str "a2g: translated in " t-trans " s, written in " (secs t3) " s: "
                             (count written) " files; program root " prog-dir))
               (println (str "a2g: " (reduce + (map count (vals races))) " candidate two-word race fields in "
