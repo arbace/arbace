@@ -548,3 +548,18 @@ the first. The history before it is on the frozen branches and in git history:
   `check` (identical), the essential `bin/gate`.
 - The user: BX38, BX50-BX54 and the `NetClose` fix accepted. Next, `bin/gate --full` and the
   tag `arbace-box-amd64-v1`.
+
+## 2026-10-12: The milestone `arbace-box-amd64-v1`
+
+- `bin/gate --full` passed on `ac9e54d` in 19m47s: stage 2 = stage 3 (5,777 classes); Clojure's
+  suite on stages 1 and 2 20,750 of 20,750; j2a's suite without regressions; g2a's round trip
+  for tamago/amd64 and linux/amd64; `box/`'s round trip, go-whim's KVM tests and
+  `tamago-vendor verify`; the Go build: smoke, Clojure's suite on its test build 20,506 of
+  20,520 without regressions, the oracle with its 46 known mismatches; `box-forms` (its first run
+  in `--full`): the guest from `tamago/`'s forms identical to the originals', as linked and cut.
+- The annotated tag `arbace-box-amd64-v1` on `ac9e54d`, pushed; its message names the gate's
+  result and the toolchains (JDK 26.0.2.1, jdk26u `baf63fb`, TamaGo go1.27.1, goos v1.27.1). No
+  branch, no freeze: main's journal continues (the user's decision).
+- README: a section "Arbace in the box" (its commands tried: the store's host tool, a script
+  run by ref); CLAUDE.md's direction names the milestone and S4 as now; the agenda follows.
+- Next milestone: S4, arm64.

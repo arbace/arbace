@@ -67,8 +67,10 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   under `ARBACE_BOX_NET`'s policy; the socket REPL from the host; TLS later, with JSSE.
 - Wake on events (BX50-BX54): the guest parks until console, network or timer events instead of
   polling; idle host CPU 0.00 s per 20 s.
-- Next: `bin/gate --full`, then the tag `arbace-box-amd64-v1` on main (a milestone, not a freeze:
-  no branch, the journal continues).
+- The milestone reached (2026-10-12): `bin/gate --full` passed (19m47s) and the tag
+  `arbace-box-amd64-v1` is on main (a milestone, not a freeze: no branch, the journal continues).
+- Next milestone: S4, arm64 (KVM/arm64, then Hypervisor.framework on the Mac; purego,
+  `board.NilPanics` for arm64, S6's arm64 half).
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 

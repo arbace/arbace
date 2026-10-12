@@ -15,8 +15,9 @@ Direction:
     binary compatible with it;
   - Go: `arbace-for-golang` (tag `arbace-for-go1.27.1-v1`, 2026-10-11), Arbace as one static
     executable for Linux, its runtime and the part of jdk26u it needs translated into Go.
-- Now: the `.ae` rename, the Arbace dialect's tools (c2a, j2a, g2a), Arbace's own version, then
-  the box: Arbace built with TamaGo, as a guest of go-whim's monitor (doc/AGENDA.md).
+- The box on amd64, Arbace built with TamaGo as a guest of go-whim's monitor on /dev/kvm, is a
+  milestone on main (tag `arbace-box-amd64-v1`, 2026-10-12; not a freeze: no branch).
+- Now: the box on arm64 (B1b S4: KVM/arm64, Hypervisor.framework on the Mac; doc/AGENDA.md).
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through j2a. The language is Clojure extended with an idiomatic
   representation of Java (the class forms), and later of Go: the Arbace language. The goal is a

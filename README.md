@@ -68,6 +68,28 @@ bin/arbace-go --build --pgo    # target/arbace-go/{amd64,arm64}/arbace, profile-
 bin/arbace-go                  # a REPL (with rlwrap on a terminal); also -e '(+ 1 2)', a script
 ```
 
+## Arbace in the box
+
+The tag `arbace-box-amd64-v1` (2026-10-12, on main) marks the same program built with TamaGo
+(`GOOS=tamago`) as the guest of a small monitor on /dev/kvm, with no operating system inside:
+go-whim's monitor vendored as Go forms in `box/`, TamaGo's runtime and standard library as Go
+forms in `tamago/`, the guest built from them byte-identical to one built from TamaGo's own
+sources. The REPL, `-e`, `-m` and scripts run on one to four vCPUs; files live in memory; a
+content-addressed store (`arbace.box`, also natively and on the JVM) and TCP streams proxied by
+the launcher under a policy are its only ways out ([doc/go/BOX-NOTES.md](doc/go/BOX-NOTES.md),
+[doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md)). amd64 only, on a Linux host with /dev/kvm; arm64
+and the Mac's Hypervisor.framework are the next milestone.
+
+```sh
+bin/arbace-go --build && bin/arbace-go --build --box   # target/arbace-go/box-amd64/arbace-box
+target/arbace-go/box-amd64/arbace-box                  # a REPL in the box (rlwrap on a terminal)
+B=target/arbace-go/box-amd64/arbace-box
+$B --store st put hello.ae                             # prints the blob's hash
+$B --store st ref hello HASH; $B --store st ls         # a ref names it
+ARBACE_BOX_STORE=st $B ref:hello                       # run the script from the store
+ARBACE_BOX_NET=loopback $B                             # with a network: loopback only
+```
+
 ## Clojure code on Arbace
 
 c2a translates Clojure source into Arbace's: the names of the Clojure Arbace vendors
@@ -115,8 +137,8 @@ archives) the file `VERSION`, which `git archive` fills with the commit and its 
 - [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/A2G-SPEC.md](doc/go/A2G-SPEC.md),
   its translation; [doc/go/EXEC-NOTES.md](doc/go/EXEC-NOTES.md), the executable;
   [doc/go/JAVA-BASE.md](doc/go/JAVA-BASE.md), how much of `java.base` it implements;
-  [doc/go/SPEED-NOTES.md](doc/go/SPEED-NOTES.md), its speed; [doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md),
-  the box (B1b, after the freeze); the rest of `doc/go/`, the notes of each part
+  [doc/go/SPEED-NOTES.md](doc/go/SPEED-NOTES.md), its speed; [doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md)
+  and [doc/go/BOX-NOTES.md](doc/go/BOX-NOTES.md), the box (B1b); the rest of `doc/go/`, the notes of each part
 - [doc/C2A.md](doc/C2A.md): c2a, Clojure source translated into Arbace's
 - [doc/G2C-SURVEY.md](doc/G2C-SURVEY.md): the survey for g2a (then g2c), Go as Arbace forms
 - [doc/VENDOR-NOTES.md](doc/VENDOR-NOTES.md): how Clojure became Arbace, and every change since
