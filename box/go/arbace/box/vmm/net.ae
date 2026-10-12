@@ -1,0 +1,781 @@
+(in-ns 'go.arbace.box.vmm) (go/file "net.go" :imports [
+
+
+    ^{:line 4} [context "context"]
+    ^{:line 5} [errors "errors"]
+    ^{:line 6} [fmt "fmt"]
+    ^{:line 7} [io "io"]
+    ^{:line 8} [net "net"]
+    ^{:line 9} [netip "net/netip"]
+    ^{:line 10} [os "os"]
+    ^{:line 11} [strings "strings"]
+    ^{:line 12} [sync "sync"]
+    ^{:line 13} [atomic "sync/atomic"]
+    ^{:line 14} [syscall "syscall"]
+    ^{:line 15} [time "time"]])
+
+
+;; The network (doc/go/BOX-NOTES.md, S5; guest/abi's NetInfo and the rest):
+;; TCP streams the monitor makes on the guest's behalf, under a NetPolicy.
+;; The guest names its sockets by handles; nothing it asks blocks its vCPU:
+;; a connection's bytes are read into a buffer of the monitor's by a
+;; goroutine of its own and written from another, a listener's connections
+;; accepted by a third, a dial and a name's lookup made by one each, and the
+;; guest's calls take what is there or answer EAGAIN.  Every change a guest
+;; might wait for adds one to a count (NetEvents), which the guest polls
+;; while it waits, as it polls the console.
+
+
+
+(go/const "The calls' error answers besides -errno (Linux's numbers, which TamaGo's\nsyscall package has too).\n"
+  ^{:line 31} [^{:val -11} netEAGAIN -11] ; nothing yet: wait for an event and ask again
+  ^{:line 32} [^{:val -9} netEBADF -9] ; no such handle: closed
+  ^{:line 33} [^{:val -115} netEINPROGRESS -115] ; a dial or a lookup not done yet
+  ^{:line 34} [^{:val -1000} netErrTimeout -1000] ; a dial's time ran out
+  ^{:line 35} [^{:val -1001} netErrNotFound -1001] ; a lookup: no such name
+  ^{:line 36} [^{:val -1002} netErrTemp -1002] ; a lookup: a temporary failure
+  ^{:line 37} [^{:val -1003} netErrOther -1003]) ; any other error
+
+
+
+
+
+
+(go/const "netReadBuf is the most a connection's buffer holds before its reading\ngoroutine waits for the guest; netWriteBuf the most the guest's writes\nqueue before NetWrite answers EAGAIN; netBacklog the most connections a\nlistener holds before the guest accepts them.\n"
+  ^{:line 45} [^{:val 262144} netReadBuf (<< 256 10)]
+  ^{:line 46} [^{:val 262144} netWriteBuf (<< 256 10)]
+  ^{:line 47} [^{:val 128} netBacklog 128])
+
+
+;; java.net.SocketOptions' numbers (jrt's net.ae)
+
+
+(go/const "java.net.SocketOptions' numbers (jrt's net.ae): NetOption's options.\n"
+  ^{:line 54} [^{:val 1} optTcpNoDelay 1]
+  ^{:line 55} [^{:val 3} optIpTos 3]
+  ^{:line 56} [^{:val 4} optReuseAddr 4]
+  ^{:line 57} [^{:val 8} optKeepAlive 8]
+  ^{:line 58} [^{:val 14} optReusePort 14]
+  ^{:line 59} [^{:val 128} optLinger 128]
+  ^{:line 60} [^{:val 4097} optSndBuf 4097]
+  ^{:line 61} [^{:val 4098} optRcvBuf 4098]
+  ^{:line 62} [^{:val 4099} optOOBInline 4099])
+
+
+
+(go/type Net "A Net is a guest's network: the policy and the open handles.\n" (struct
+    ^{:line 67 :tag (* NetPolicy)} Policy
+
+    ^{:line 69 :tag sync/Mutex} mu
+    ^{:line 70 :tag (map int64 (* netHandle))} handles
+    ^{:line 71 :tag int64} next
+    ^{:line 72 :tag (map netip/Addr (slice string))} resolved ; what allowed lookups gave: an address's names
+    ^{:line 73 :tag atomic/Int64} events
+
+    ^{:line 75 :tag (func []) :doc "notify, when set (the machine's postEvent), is told each change\n"} notify))
+
+
+
+^{:go/end 81} (go/func NewNet "NewNet is a network under policy p.\n" ^{:tag (* Net)} [^{:tag (* NetPolicy)} p]
+  (addr (lit Net :Policy p :handles (lit (map int64 (* netHandle))) :resolved (lit (map netip/Addr (slice string))))))
+
+
+(go/const
+  ^{:line 84} [^{:val 1} hListener (+ iota 1)]
+  ^{:line 85} [^{:val 2} hConn]
+  ^{:line 86} [^{:val 3} hLookup])
+
+
+
+
+(go/type netHandle "A netHandle is a listener, a connection (dialled or accepted) or a\nlookup.  Its fields after kind are under mu.\n" (struct
+    ^{:line 92 :tag (* Net)} n
+    ^{:line 93 :tag int} kind
+    ^{:line 94 :tag sync/Mutex} mu
+    ^{:line 95 :tag (* sync/Cond)} cond
+
+    ^{:line 97 :tag bool} closed
+    ^{:line 98 :tag bool} pending ; a dial or a lookup under way
+
+
+
+    ^{:line 102 :tag bool :doc "lingering: closed with bytes queued or being written, which the\nwriter writes before it closes the connection; writing: the writer\nhas bytes taken from out\n"} lingering
+    ^{:line 103 :tag bool} writing
+    ^{:line 104 :tag error} err ; its failure
+
+    ^{:line 106 :tag net/Listener} l
+    ^{:line 107 :tag (slice net/Conn)} accepted
+    ^{:line 108 :tag error} lerr ; the listener's Accept failed
+
+    ^{:line 110 :tag net/Conn} c
+    ^{:line 111 :tag (slice byte)} in ; read from the connection, not yet by the guest
+    ^{:line 112 :tag bool} eof
+    ^{:line 113 :tag error} rerr
+    ^{:line 114 :tag (slice byte)} out ; written by the guest, not yet to the connection
+    ^{:line 115 :tag bool} shut ; shut down for writing once out is written
+    ^{:line 116 :tag bool} shutDone
+    ^{:line 117 :tag error} werr
+
+    ^{:line 119 :tag (slice byte)} answer)) ; a lookup's: 16-byte addresses, or names separated by newlines
+
+
+^{:go/end 127} (go/method event [^{:tag (* Net)} n]
+  (.Add (.-events n) 1)
+  (when [f (.-notify n)] (!= f nil)
+    (f)))
+
+
+
+^{:go/end 138} (go/method add ^int64 [^{:tag (* Net)} n ^{:tag (* netHandle)} h]
+  (set! (.-n h) n)
+  (set! (.-cond h) (sync/NewCond (addr (.-mu h))))
+  (.Lock (.-mu n))
+  (defer (.Unlock (.-mu n)))
+  (let [id (.-next n)]
+    (inc! (.-next n))
+    (aset (.-handles n) id h)
+    ^{:line 137} id))
+
+
+^{:go/end 144} (go/method get ^{:tag (* netHandle)} [^{:tag (* Net)} n ^int64 id]
+  (.Lock (.-mu n))
+  (defer (.Unlock (.-mu n)))
+  (aget (.-handles n) id))
+
+
+
+^{:go/end 155} (go/method Close "Close closes every handle: the end of the run.\n" [^{:tag (* Net)} n]
+  (.Lock (.-mu n))
+  (let [hs (.-handles n)]
+    (set! (.-handles n) (lit (map int64 (* netHandle))))
+    (.Unlock (.-mu n))
+    (range [_ h hs]
+      (.closeAt h true))))
+
+
+
+
+^{:go/end 178} (go/func errCode "errCode is a host error as a call's answer.\n" ^int64 [^error err]
+  (let [^syscall/Errno errno (zero syscall/Errno)
+      ^{:line 160 :tag (* net/DNSError)} de (zero (* net/DNSError))]
+    (switch
+      (case [(or (errors/Is err os/ErrDeadlineExceeded) (errors/Is err context/DeadlineExceeded))]
+        (return netErrTimeout))
+      (case [(errors/As err (addr de))]
+        (when (.-IsNotFound de)
+          (return netErrNotFound))
+
+        (when (or (.-IsTemporary de) (.-IsTimeout de))
+          (return netErrTemp))
+
+        (return netErrOther))
+      (case [(errors/As err (addr errno))]
+        (return (- (conv int64 errno))))
+      (case [(errors/Is err net/ErrClosed)]
+        (return netEBADF)))
+
+    ^{:line 177} netErrOther))
+
+
+
+^{:go/end 190} (go/method start "start makes the connection's reading and writing goroutines.\n" [^{:tag (* netHandle)} h ^net/Conn c]
+  (set! (.-c h) c)
+  (when [(values tc ok) (assert (* net/TCPConn) c)] ok
+    ;; the JVM's defaults (jrt's newConn): Go sets both on its connections
+    (.SetNoDelay tc false)
+    (.SetKeepAlive tc false))
+
+  (go (.reader h))
+  (go (.writer h)))
+
+
+^{:go/end 223} (go/method reader [^{:tag (* netHandle)} h]
+  (let [buf (make (slice byte) (<< 64 10))]
+    (while true
+      (.Lock (.-mu h))
+      (while (and (not (.-closed h)) (>= (len (.-in h)) netReadBuf))
+        (.Wait (.-cond h)))
+
+      (let [closed (.-closed h)]
+        (.Unlock (.-mu h))
+        (when closed
+          (return))
+
+        (let [(values k err) (.Read (.-c h) buf)]
+          (.Lock (.-mu h))
+          (set! (.-in h) (append (.-in h) (spread (subslice buf _ k))))
+          (when (!= err nil)
+            (cond (errors/Is err os/ErrDeadlineExceeded)
+              (set! err nil) ; not ours: nothing sets a deadline
+              (errors/Is err io/EOF)
+              (set! (.-eof h) true) :else
+
+              (set! (.-rerr h) err)))
+
+
+          (let [done (or (.-eof h) (!= (.-rerr h) nil) (.-closed h))]
+            (.Unlock (.-mu h))
+            (.event (.-n h))
+            (when done
+              (return))))))))
+
+
+
+
+^{:go/end 265} (go/method writer [^{:tag (* netHandle)} h]
+  (while true
+    (.Lock (.-mu h))
+    (while (and (not (.-closed h)) (== (len (.-out h)) 0) (not (and (.-shut h) (not (.-shutDone h)))))
+      (.Wait (.-cond h)))
+
+    (when (and (.-closed h) ^:go/paren (or (== (len (.-out h)) 0) (not (.-lingering h))))
+      (let [linger (.-lingering h)]
+        (.Unlock (.-mu h))
+        (when linger
+          (.Close (.-c h)))
+
+        (return)))
+
+    (when (== (len (.-out h)) 0)
+      ;; shut down for writing, all written
+      (set! (.-shutDone h) true)
+      (.Unlock (.-mu h))
+      (when [(values cw ok) (assert (interface (CloseWrite ^error [])) (.-c h))] ok
+        (.CloseWrite cw))
+
+      (.event (.-n h))
+      (continue))
+
+    (let [p (.-out h)]
+      (set! (.-out h) nil)
+      (set! (.-writing h) true)
+      (.Unlock (.-mu h))
+      (let [(values _ err) (.Write (.-c h) p)]
+        (.Lock (.-mu h))
+        (set! (.-writing h) false)
+        (when (and (!= err nil) (== (.-werr h) nil))
+          (set! (.-werr h) err))
+
+        (.Broadcast (.-cond h))
+        (.Unlock (.-mu h))
+        (.event (.-n h))))))
+;; after an error the loop waits for the close, and closes the
+;; connection if it lingered
+
+
+
+^{:go/end 286} (go/method acceptor [^{:tag (* netHandle)} h]
+  (while true
+    (let [(values c err) (.Accept (.-l h))]
+      (.Lock (.-mu h))
+      (when (!= err nil)
+        (set! (.-lerr h) err)
+        (.Unlock (.-mu h))
+        (.event (.-n h))
+        (return))
+
+      (when (or (.-closed h) (>= (len (.-accepted h)) netBacklog))
+        (.Unlock (.-mu h))
+        (.Close c)
+        (continue))
+
+      (set! (.-accepted h) (append (.-accepted h) c))
+      (.Unlock (.-mu h))
+      (.event (.-n h)))))
+
+
+
+
+
+
+
+^{:go/end 292} (go/method close "close closes the handle.  A connection with bytes queued lingers: its\nwriter writes them, then closes it, as a socket's close sends what was\nwritten to it (doc/go/BOX-NOTES.md, S5, \"Merged with S3\"); the end of\nthe run (now) closes it at once.\n" [^{:tag (* netHandle)} h] (.closeAt h false))
+
+^{:go/end 318} (go/method closeAt [^{:tag (* netHandle)} h ^bool now]
+  (.Lock (.-mu h))
+  (when (and (.-closed h) (not (and now (.-lingering h))))
+    (.Unlock (.-mu h))
+    (return))
+
+  (set! (.-closed h) true)
+  (.Broadcast (.-cond h))
+  (let [(values l c acc) (values (.-l h) (.-c h) (.-accepted h))]
+    (set! (.-accepted h) nil)
+    (set! (.-lingering h) (and (not now) (!= c nil) ^:go/paren (or (> (len (.-out h)) 0) (.-writing h)) (== (.-werr h) nil)))
+    (when (.-lingering h)
+      (set! c nil))
+
+    (.Unlock (.-mu h))
+    (when (!= l nil)
+      (.Close l))
+
+    (when (!= c nil)
+      (.Close c))
+
+    (range [_ a acc]
+      (.Close a))))
+
+
+
+
+
+^{:go/end 414} (go/method netCall "netCall answers a network call, its answers in a (NetStatus, NetOption\nwrite a[0]); without a network every call answers -1 (EPERM).\n" [^{:tag (* machine)} m ^uint64 nr ^{:tag (* (array 5 int64))} a] :results [int64 error]
+  (let [n (.-Net (.-cfg m))]
+    (when (== n nil)
+      (return -1 nil))
+
+    (let [at ^{:go/end 333} (fn [^int64 addr ^int64 size ^string what] :results [(slice byte) error]
+          (let [(values p ok) (.guest m addr size)]
+            (when (not ok)
+              (return nil (.fault m (fmt/Sprintf "a network call's %s at %#x+%d, outside the guest's memory" what addr size))))
+
+            (return p nil)))
+
+        ^{:line 334} str ^{:go/end 340} (fn [^int64 addr ^int64 size ^string what] :results [string error]
+          (when (or (< size 0) (> size 1024))
+            (return "" (.fault m (fmt/Sprintf "a network call's %s of %d bytes" what size))))
+
+          (let [(values p err) (at addr size what)]
+            (return (conv string p) err)))]
+
+      (switch nr
+        (case [callNetInfo]
+          (aset a 0 (netFamilies))
+          (return 0 nil))
+        (case [callNetEvents]
+          (return (.Load (.-events n)) nil))
+        (case [callNetListen]
+          (let [(values s err) (str (aget a 0) (aget a 1) "address")]
+            (when (!= err nil)
+              (return 0 err))
+
+            (return (.listen n s) nil)))
+        (case [callNetDial]
+          (let [(values remote err) (str (aget a 0) (aget a 1) "address")]
+            (when (!= err nil)
+              (return 0 err))
+
+            (let [(values local ^:assign err) (str (aget a 2) (aget a 3) "local address")]
+              (when (!= err nil)
+                (return 0 err))
+
+              (return (.dial n local remote (* (conv time/Duration (aget a 4)) time/Millisecond)) nil))))
+        (case [callNetLookup]
+          (let [(values s err) (str (aget a 0) (aget a 1) "name")]
+            (when (!= err nil)
+              (return 0 err))
+
+            (return (.lookup n s (!= (aget a 2) 0)) nil))))
+
+      (let [h (.get n (aget a 0))]
+        (when (== h nil)
+          (return netEBADF nil))
+
+        (switch nr
+          (case [callNetAccept]
+            (return (.accept h) nil))
+          (case [callNetRead]
+            (let [(values p err) (at (aget a 1) (aget a 2) "buffer")]
+              (when (!= err nil)
+                (return 0 err))
+
+              (return (.read h p) nil)))
+          (case [callNetWrite]
+            (let [(values p err) (at (aget a 1) (aget a 2) "bytes")]
+              (when (!= err nil)
+                (return 0 err))
+
+              (return (.write h p) nil)))
+          (case [callNetClose]
+            (.Lock (.-mu n))
+            (delete (.-handles n) (aget a 0))
+            (.Unlock (.-mu n))
+            (.close h)
+            (.event n)
+            (return 0 nil))
+          (case [callNetShutdown]
+            (return (.shutdown h (aget a 1)) nil))
+          (case [callNetStatus]
+            (let [(values ret avail) (.status h)]
+              (aset a 0 avail)
+              (return ret nil)))
+          (case [callNetAddr]
+            (let [(values p err) (at (aget a 2) (aget a 3) "buffer")]
+              (when (!= err nil)
+                (return 0 err))
+
+              (return (.addr h (!= (aget a 1) 0) p) nil)))
+          (case [callNetOption]
+            (let [(values v ret) (.option h (conv int (aget a 1)) (conv int (aget a 2)) (!= (aget a 3) 0))]
+              (aset a 0 (conv int64 v))
+              (return ret nil))))
+
+        (return 0 (.fault m (fmt/Sprintf "an unknown network call %d" nr)))))))
+
+
+
+
+^{:go/end 434} (go/func netFamilies "netFamilies is NetInfo's a[0]: 1 when the host has IPv4 addresses, 2\nwhen IPv6, as their sum.\n" ^int64 []
+  (let [(values addrs err) (net/InterfaceAddrs)]
+    (when (!= err nil)
+      (return 1))
+
+    (let [f (conv int64 0)]
+      (range [_ a addrs]
+        (when [(values ipn ok) (assert (* net/IPNet) a)] ok
+          (if (!= (.To4 (.-IP ipn)) nil)
+            (set! f bit-or 1)
+
+            (set! f bit-or 2))))
+
+
+
+      ^{:line 433} f)))
+
+
+
+
+^{:go/end 457} (go/func parseAddrPort "parseAddrPort is a guest's host:port with an address literal (\"\" for\nevery address).\n" [^string s ^bool family6] :results [netip/AddrPort bool]
+  (let [(values host port err) (net/SplitHostPort s)]
+    (when (!= err nil)
+      (return (lit netip/AddrPort) false))
+
+    (let [^netip/Addr a (zero netip/Addr)]
+      (if (== host "") (do
+          (set! a (netip/IPv4Unspecified))
+          (when family6
+            (set! a (netip/IPv6Unspecified))))
+
+        (when [(set! (values a err) (netip/ParseAddr host))] (!= err nil)
+          (return (lit netip/AddrPort) false)))
+
+      (let [(values pn ^:assign err) (net/LookupPort "tcp" port)]
+        (when (!= err nil)
+          (return (lit netip/AddrPort) false))
+
+        (return (netip/AddrPortFrom (.Unmap a) (conv uint16 pn)) true)))))
+
+
+^{:go/end 481} (go/method listen ^int64 [^{:tag (* Net)} n ^string s]
+  (let [(values ap ok) (parseAddrPort s false)]
+    (when (not ok)
+      (return (- (conv int64 syscall/EINVAL))))
+
+    (let [(values at ^:assign ok) (.listenAddr (.-Policy n) ap)]
+      (when (not ok)
+        (return (- (conv int64 syscall/EACCES))))
+
+      (let [addr (.String at)]
+        (when [(values host _ _) (net/SplitHostPort s)] (and (== host "") (.IsUnspecified (.Addr at)))
+          (set! addr (+ ":" (fmt/Sprint (.Port at))))) ; both families, as the guest asked
+
+        ;; no keep-alive on accepted connections (the JVM's default; Go's is 15 s)
+        (let [(values l err) (.Listen (addr (lit net/ListenConfig :KeepAlive -1)) (context/Background) "tcp" addr)]
+          (when (!= err nil)
+            (return (errCode err)))
+
+          (let [h (addr (lit netHandle :kind hListener :l l))
+              ^{:line 478} id (.add n h)]
+            (go (.acceptor h))
+            ^{:line 480} id))))))
+
+
+
+^{:go/breaks [[7 506]] :go/end 507} (go/method ownListener "ownListener says ap is the address of one of the guest's listeners.\n" ^bool [^{:tag (* Net)} n ^netip/AddrPort ap]
+  (.Lock (.-mu n))
+  (defer (.Unlock (.-mu n)))
+  (range [_ h (.-handles n)]
+    (when (!= (.-kind h) hListener)
+      (continue))
+
+    (.Lock (.-mu h))
+    (let [closed (.-closed h)]
+      (.Unlock (.-mu h))
+      (when closed
+        (continue))
+
+      (let [(values la ok) (assert (* net/TCPAddr) (.Addr (.-l h)))]
+        (when (or (not ok) (!= (.-Port la) (conv int (.Port ap))))
+          (continue))
+
+        (let [(values l _) (netip/AddrFromSlice (.-IP la))]
+          (when (or (== (.Unmap l) (.Addr ap)) (and (.IsUnspecified l) (.IsLoopback (.Addr ap))))
+            (return true))))))
+
+
+  false)
+
+
+^{:go/end 550} (go/method dial ^int64 [^{:tag (* Net)} n ^string local ^string remote ^time/Duration timeout]
+  (let [(values ap ok) (parseAddrPort remote false)]
+    (when (or (not ok) (.IsUnspecified (.Addr ap)))
+      (return (- (conv int64 syscall/EINVAL))))
+
+    (.Lock (.-mu n))
+    (let [names (aget (.-resolved n) (.Addr ap))]
+      (.Unlock (.-mu n))
+      (when (and (not (.dialAddr (.-Policy n) ap names)) (not (.ownListener n ap)))
+        (return (- (conv int64 syscall/EPERM))))
+
+      (let [d (addr (lit net/Dialer :Timeout timeout :KeepAlive -1))]
+        (when (!= local "")
+          (let [(values lp ok) (parseAddrPort local false)]
+            (when (not ok)
+              (return (- (conv int64 syscall/EINVAL))))
+
+            (when (or (!= (.Port lp) 0) (not (or (.IsUnspecified (.Addr lp)) (.IsLoopback (.Addr lp)))))
+              (when [(values _ ok) (.listenAddr (.-Policy n) lp)] (not ok)
+                (return (- (conv int64 syscall/EACCES)))))
+
+
+            (set! (.-LocalAddr d) (net/TCPAddrFromAddrPort lp))))
+
+        (let [h (addr (lit netHandle :kind hConn :pending true))
+            ^{:line 534} id (.add n h)]
+          (go (^{:go/end 548} (fn []
+                (let [(values c err) (.Dial d "tcp" (.String ap))]
+                  (.Lock (.-mu h))
+                  (set! (.-pending h) false)
+                  (cond (!= err nil)
+                    (set! (.-err h) err)
+                    (.-closed h)
+                    (.Close c) :else
+
+                    (.start h c))
+
+                  (.Unlock (.-mu h))
+                  (.event n)))))
+
+          ^{:line 549} id)))))
+
+
+^{:go/end 598} (go/method lookup ^int64 [^{:tag (* Net)} n ^string s ^bool reverse]
+  (let [h (addr (lit netHandle :kind hLookup :pending true))]
+    (when reverse
+      (let [(values a err) (netip/ParseAddr s)]
+        (when (!= err nil)
+          (return (- (conv int64 syscall/EINVAL))))
+
+        (when (not (.reverse (.-Policy n)))
+          (return netErrNotFound))
+
+        (let [id (.add n h)]
+          (go (^{:go/end 570} (fn []
+                (let [(values names err) (net/LookupAddr (.String a))]
+                  (.Lock (.-mu h))
+                  (set! (values (.-pending h) (.-err h)) (values false err))
+                  (set! (.-answer h) (conv (slice byte) (strings/Join names "\n")))
+                  (.Unlock (.-mu h))
+                  (.event n)))))
+
+          (return id))))
+
+    (when (not (.lookup (.-Policy n) s))
+      (return netErrNotFound))
+
+    (let [name (strings/ToLower (strings/TrimSuffix s "."))
+        ^{:line 577} id (.add n h)]
+      (go (^{:go/end 596} (fn []
+            (let [(values ips err) (net/LookupIP name)
+                ^{:line 580 :tag (slice byte)} ans (zero (slice byte))]
+              (.Lock (.-mu n))
+              (range [_ ip ips]
+                (let [(values a _) (netip/AddrFromSlice ip)]
+                  (set! a (.Unmap a))
+                  (when (not (containsString (aget (.-resolved n) a) name))
+                    (aset (.-resolved n) a (append (aget (.-resolved n) a) name)))
+
+                  (let [b (.As16 a)]
+                    (set! ans (append ans (spread (subslice b)))))))
+
+              (.Unlock (.-mu n))
+              (.Lock (.-mu h))
+              (set! (values (.-pending h) (.-err h) (.-answer h)) (values false err ans))
+              (.Unlock (.-mu h))
+              (.event n)))))
+
+      ^{:line 597} id)))
+
+
+^{:go/breaks [[4 606]] :go/end 607} (go/func containsString ^bool [^{:tag (slice string)} ss ^string s]
+  (range [_ x ss]
+    (when (== x s)
+      (return true)))
+
+
+  false)
+
+
+^{:go/end 632} (go/method accept ^int64 [^{:tag (* netHandle)} h]
+  (.Lock (.-mu h))
+  (when (!= (.-kind h) hListener)
+    (.Unlock (.-mu h))
+    (return (- (conv int64 syscall/EINVAL))))
+
+  (when (== (len (.-accepted h)) 0)
+    (let [err (.-lerr h)]
+      (.Unlock (.-mu h))
+      (when (!= err nil)
+        (return (errCode err)))
+
+      (return netEAGAIN)))
+
+  (let [c (aget (.-accepted h) 0)]
+    (set! (.-accepted h) (subslice (.-accepted h) 1))
+    (.Unlock (.-mu h))
+    (let [a (addr (lit netHandle :kind hConn))
+        ^{:line 627} id (.add (.-n h) a)]
+      (.Lock (.-mu a))
+      (.start a c)
+      (.Unlock (.-mu a))
+      ^{:line 631} id)))
+
+
+
+
+^{:go/end 669} (go/method read "read answers NetRead: bytes the buffer has, 0 at the end, or an error\n(a connection's, or a lookup's answer read as its bytes).\n" ^int64 [^{:tag (* netHandle)} h ^{:tag (slice byte)} p]
+  (.Lock (.-mu h))
+  (defer (.Unlock (.-mu h)))
+  (when (.-pending h)
+    (return netEAGAIN))
+
+  (when (== (.-kind h) hLookup)
+    (let [k (copy p (.-answer h))]
+      (set! (.-answer h) (subslice (.-answer h) k))
+      (return (conv int64 k))))
+
+  (when (or (!= (.-kind h) hConn) (== (.-c h) nil))
+    (return (- (conv int64 syscall/ENOTCONN))))
+
+  (when (> (len (.-in h)) 0)
+    (let [full (>= (len (.-in h)) netReadBuf)
+        ^{:line 652} k (copy p (.-in h))]
+      (set! (.-in h) (subslice (.-in h) k))
+      (when (== (len (.-in h)) 0)
+        (set! (.-in h) nil))
+
+      (when full
+        (.Broadcast (.-cond h)))
+
+      (return (conv int64 k))))
+
+  (when (!= (.-rerr h) nil)
+    (return (errCode (.-rerr h))))
+
+  (when (.-eof h)
+    (return 0))
+
+  ^{:line 668} netEAGAIN)
+
+
+^{:go/end 696} (go/method write ^int64 [^{:tag (* netHandle)} h ^{:tag (slice byte)} p]
+  (.Lock (.-mu h))
+  (defer (.Unlock (.-mu h)))
+  (when (.-pending h)
+    (return netEAGAIN))
+
+  (when (or (!= (.-kind h) hConn) (== (.-c h) nil))
+    (return (- (conv int64 syscall/ENOTCONN))))
+
+  (when (!= (.-werr h) nil)
+    (return (errCode (.-werr h))))
+
+  (when (.-shut h)
+    (return (- (conv int64 syscall/EPIPE))))
+
+  (let [room (- netWriteBuf (len (.-out h)))]
+    (when (<= room 0)
+      (return netEAGAIN))
+
+    (when (> (len p) room)
+      (set! p (subslice p _ room)))
+
+    (set! (.-out h) (append (.-out h) (spread p)))
+    (.Broadcast (.-cond h))
+    (conv int64 (len p))))
+
+
+^{:go/breaks [9] :go/end 717} (go/method shutdown ^int64 [^{:tag (* netHandle)} h ^int64 how]
+  (.Lock (.-mu h))
+  (defer (.Unlock (.-mu h)))
+  (when (or (!= (.-kind h) hConn) (== (.-c h) nil))
+    (return (- (conv int64 syscall/ENOTCONN))))
+
+  (when (== how 0)
+    ;; reading: what comes is dropped, the guest reads the end
+    (when [(values cr ok) (assert (interface (CloseRead ^error [])) (.-c h))] ok
+      (when [err (.CloseRead cr)] (!= err nil)
+        (return (errCode err))))
+
+
+    (set! (values (.-in h) (.-eof h)) (values nil true))
+    (return 0))
+
+  (set! (.-shut h) true)
+  (.Broadcast (.-cond h))
+  0)
+
+
+
+
+^{:go/end 735} (go/method status "status answers NetStatus: 0, EINPROGRESS while a dial or a lookup is\nunder way, or its failure; and the bytes the guest can read at once.\n" [^{:tag (* netHandle)} h] :results [int64 int64]
+  (.Lock (.-mu h))
+  (defer (.Unlock (.-mu h)))
+  (switch
+    (case [(.-pending h)]
+      (return netEINPROGRESS 0))
+    (case [(!= (.-err h) nil)]
+      (return (errCode (.-err h)) 0))
+    (case [(== (.-kind h) hLookup)]
+      (return 0 (conv int64 (len (.-answer h)))))
+    (case [(== (.-kind h) hListener)]
+      (return 0 (conv int64 (len (.-accepted h))))))
+
+  (return 0 (conv int64 (len (.-in h)))))
+
+
+
+
+^{:go/end 754} (go/method addr "addr answers NetAddr: the local (or remote) address as host:port into p,\nits length.\n" ^int64 [^{:tag (* netHandle)} h ^bool remote ^{:tag (slice byte)} p]
+  (.Lock (.-mu h))
+  (defer (.Unlock (.-mu h)))
+  (let [^net/Addr a (zero net/Addr)]
+    (switch
+      (case [(!= (.-l h) nil)]
+        (set! a (.Addr (.-l h))))
+      (case [(== (.-c h) nil)]
+        (return (- (conv int64 syscall/ENOTCONN))))
+      (case [remote]
+        (set! a (.RemoteAddr (.-c h))))
+      (default
+        (set! a (.LocalAddr (.-c h)))))
+
+    (conv int64 (copy p (.String a)))))
+
+
+
+
+^{:go/end 782} (go/method option "option answers NetOption: java.net.SocketOptions' option opt set to value\n(set), or its value.\n" [^{:tag (* netHandle)} h ^int opt ^int value ^bool set] :results [int int64]
+  (.Lock (.-mu h))
+  (let [^any s (zero any)]
+    (switch
+      (case [(!= (.-l h) nil)]
+        (set! s (.-l h)))
+      (case [(!= (.-c h) nil)]
+        (set! s (.-c h))))
+
+    (.Unlock (.-mu h))
+    (when (== s nil)
+      (return 0 (- (conv int64 syscall/ENOTCONN))))
+
+    (when set
+      (when [err (setOption s opt value)] (!= err nil)
+        (return 0 (errCode err)))
+
+      (return 0 0))
+
+    (let [(values v err) (getOption s opt)]
+      (when (!= err nil)
+        (return 0 (errCode err)))
+
+      (return v 0))))

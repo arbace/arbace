@@ -3,16 +3,17 @@
 ;; the board (arbace/box/board, abi). The console is WaitRead, Write and Message; entropy Random;
 ;; the end Exit. Files are TamaGo's in-memory file system through Go's os (OSHost's file calls,
 ;; D11), the wall clock the board's (offset by the host's at the entry, D10), the command line
-;; and the environment what the monitor wrote at the entry. No optional interface: no HostFS,
-;; HostLinks, NetHost, HostProc or HostExecutable, so those features fail as on a host without
-;; them. Its store (StoreHost, S3) is the monitor's: the calls BlobPut ... RefSet.
+;; and the environment what the monitor wrote at the entry. No optional interface but StoreHost
+;; and, when the launcher allows a network, NetHost (netbox_tamago.ae, S5): no HostFS, HostLinks,
+;; HostProc or HostExecutable, so those features fail as on a host without them. Its store
+;; (StoreHost, S3) is the monitor's: the calls BlobPut ... RefSet.
 (in-ns 'go.arbace.jrt)
 
 (go/file "hostbox_tamago.go"
   :build ["//go:build tamago"]
   :imports [[errors "errors"] [io "io"] [fs "io/fs"] [os "os"] [runtime "runtime"] [debug "runtime/debug"]
-            [strconv "strconv"] [strings "strings"] [sync "sync"] [syscall "syscall"] [time "time"]
-            [goos "runtime/goos"] [abi "arbace/box/abi"] [board "arbace/box/board"]])
+            [strconv "strconv"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"] [syscall "syscall"]
+            [time "time"] [goos "runtime/goos"] [abi "arbace/box/abi"] [board "arbace/box/board"]])
 
 (go/const ^{:tag uint :val 1073741824
             :doc "boxMemoryHeadroom is what the box's default memory limit leaves of the guest's RAM (goos.RamSize):
@@ -29,18 +30,30 @@ goal, which a large allocation may pass for a while (doc/go/BOX-NOTES.md, S2).
   "init makes the command line and the environment the monitor wrote at the entry the program's
 (os.Args, os.Getenv: TamaGo's runtime gives it neither), before jrt's other inits (tuning.go's
 reads the environment), and applies GOGC and GOMEMLIMIT, which TamaGo's runtime read before
-they were set; seeds the in-memory file system from the snapshot ARBACE_BOX_FS names (seedFS); and makes a nil dereference the run-time panic it is on Linux (board.NilPanics:
+they were set; seeds the in-memory file system from the snapshot ARBACE_BOX_FS names (seedFS);
+names the event area to the monitor and starts the event goroutine (boxEventLoop: the guest
+waits for its host without polling); and makes a nil dereference the run-time panic it is on Linux (board.NilPanics:
 jrt's implicit NullPointerException, A2G-SPEC §7.9.5). Without GOMEMLIMIT the memory limit is the
 guest's RAM less boxMemoryHeadroom: the RAM is fixed and the host has no swap for it, and with
 GOGC's goal alone (DefaultGOGC: three times the live heap) a guest holding a third of its RAM
 would run out of memory (doc/go/BOX-NOTES.md, S2).\n"
   []
   (board/NilPanics)
+  (when (board/EventArea (addr boxEventArea))
+    (set! boxEventsOn true)
+    (setEventHook boxEventsPending)
+    (go (boxEventLoop)))
   (set! os/Args (board/Args))
   (range [_ kv (board/Env)]
     (let [(values k v ok) (strings/Cut kv "=")]
       (when ok
         (syscall/Setenv k v))))
+  ;; the system properties some package variable's initializer made before (they run before this
+  ;; init), without the environment: made again from it at their next use (JAVA_TOOL_OPTIONS' -D
+  ;; options, TMPDIR, HOME, USER; S5: arbace.server.repl)
+  (.Lock propMu)
+  (set! props nil)
+  (.Unlock propMu)
   (let [g (os/Getenv "GOGC")]
     (if (== g "off")
       (debug/SetGCPercent -1)
@@ -56,9 +69,12 @@ would run out of memory (doc/go/BOX-NOTES.md, S2).\n"
 
 (go/func ProgramHost
   "ProgramHost is the program's host (the main package's): the box's, with the program's embedded
-resources.\n"
+resources, and with a network when the monitor gives one (boxNetHost, netbox_tamago.ae).\n"
   ^Host [^{:tag fs/FS} resources]
-  (lit boxHost :files (lit OSHost :Resources resources) :in (addr (lit boxConsole))))
+  (let [h (lit boxHost :files (lit OSHost :Resources resources) :in (addr (lit boxConsole)))]
+    (when (boxNetwork)
+      (return (lit boxNetHost :boxHost h)))
+    h))
 
 (go/type boxHost
   "boxHost is the box's Host: the monitor's calls, and files in TamaGo's in-memory file system
@@ -109,39 +125,118 @@ through OSHost's.\n"
     (return (conv int n) nil)))
 
 (go/const ^{:tag time/Duration :val 1000000
-            :doc "consoleFirstWait is the console's first wait between two polls of the monitor.\n"}
+            :doc "consoleFirstWait is the first wait between two polls of the monitor, without an event area.\n"}
   consoleFirstWait time/Millisecond)
 
 (go/const ^{:tag time/Duration :val 10000000
-            :doc "consoleMaxWait is the console's longest wait between two polls: the latency of a line typed.\n"}
+            :doc "consoleMaxWait is the longest wait between two polls, without an event area.\n"}
   consoleMaxWait (* 10 time/Millisecond))
+
+;; ---------------------------------------------------------------------------------------
+;; Waiting for the host (doc/go/BOX-NOTES.md, "Wake on events"; BX50-BX54): the monitor posts
+;; an event into the guest's event area when the console has input for a reader that found none,
+;; or the network a change; an idle vCPU parks in the monitor until one (or its scheduler's next
+;; timer), and the runtime's findRunnable runs boxEventLoop's goroutine once one is posted, which
+;; wakes the waiters. No goroutine polls.
+
+(go/var ^{:tag (array 2 uint64)
+          :doc "boxEventArea is the guest's event area (abi.EventArea): [0] the events the monitor posted,
+[1] those the guest took.\n"}
+  boxEventArea)
+
+(go/var ^{:tag bool :doc "boxEventsOn: the monitor took the event area; without it the waiters poll.\n"} boxEventsOn)
+
+(go/func ^:go/nosplit boxEventsPending
+  "boxEventsPending says whether the monitor posted an event the guest has not taken: the runtime's
+event hook, asked at the scheduler's every look for work.\n"
+  ^bool []
+  (!= (atomic/LoadUint64 (addr (aget boxEventArea 0))) (atomic/LoadUint64 (addr (aget boxEventArea 1)))))
+
+(go/func boxEventLoop
+  "boxEventLoop is the goroutine the monitor's events wake: parked in the runtime (eventPark) until
+findRunnable sees an event posted (boxEventsPending), it takes the events and wakes the
+waiters, which ask the monitor again.\n"
+  []
+  (while true
+    (eventPark)
+    (atomic/StoreUint64 (addr (aget boxEventArea 1)) (atomic/LoadUint64 (addr (aget boxEventArea 0))))
+    (.wake (addr boxEvents))))
+
+(go/type boxWaiters
+  "boxWaiters are the goroutines waiting for the host: the console's reader, the network's
+operations. Each takes ch (arm), asks the monitor, and when it has nothing yet waits for ch,
+which is closed, and replaced, at the next event (boxEventLoop) -- or, when the monitor took no
+event area, at the next poll (poll: every consoleFirstWait to consoleMaxWait while some wait).\n"
+  (struct ^{:tag sync/Mutex} mu ^{:tag (chan (struct))} ch ^int waiters ^bool polling))
+
+(go/var ^{:tag boxWaiters} boxEvents (lit boxWaiters :ch (make (chan (struct)))))
+
+(go/method arm "arm counts a waiter and is the channel its wait ends on.\n"
+  ^{:tag (chan (struct))} [^{:tag (* boxWaiters)} w]
+  (.Lock (.-mu w))
+  (defer (.Unlock (.-mu w)))
+  (inc! (.-waiters w))
+  (when (and (not boxEventsOn) (not (.-polling w)))
+    (set! (.-polling w) true)
+    (go (.poll w)))
+  (.-ch w))
+
+(go/method disarm "disarm uncounts a waiter.\n" [^{:tag (* boxWaiters)} w]
+  (.Lock (.-mu w))
+  (dec! (.-waiters w))
+  (.Unlock (.-mu w)))
+
+(go/method wake "wake ends the waits: ch closed, and replaced.\n" [^{:tag (* boxWaiters)} w]
+  (.Lock (.-mu w))
+  (close (.-ch w))
+  (set! (.-ch w) (make (chan (struct))))
+  (.Unlock (.-mu w)))
+
+(go/method poll
+  "poll wakes the waiters while there are any, from consoleFirstWait to consoleMaxWait apart:
+without an event area they ask the monitor again so.\n"
+  [^{:tag (* boxWaiters)} w]
+  (let [wait consoleFirstWait]
+    (while true
+      (time/Sleep wait)
+      (set! wait (min (* wait 2) consoleMaxWait))
+      (.Lock (.-mu w))
+      (when (== (.-waiters w) 0)
+        (set! (.-polling w) false)
+        (.Unlock (.-mu w))
+        (return))
+      (close (.-ch w))
+      (set! (.-ch w) (make (chan (struct))))
+      (.Unlock (.-mu w)))))
 
 (go/type boxConsole
   "boxConsole is the guest's standard input: abi.WaitRead into a buffer of the guest's. The read
 does not stop the guest (BOX-SURVEY R3): the monitor is asked without a wait, and while there is
-no input the reading goroutine sleeps, from consoleFirstWait to consoleMaxWait, so that other
-goroutines run, the collector stops the world and other vCPUs' output goes; an idle guest parks
-in the monitor meanwhile (the board's Idle).\n"
+no input the reading goroutine waits for the host's next event (boxEvents: the monitor posts one
+when input comes), so that other goroutines run, the collector stops the world and other vCPUs'
+output goes; an idle guest parks in the monitor meanwhile (the board's Idle) until the input.\n"
   (struct ^{:tag (array 4096 byte)} buf ^int n ^int at ^bool eof))
 
 (go/method Read [^{:tag (* boxConsole)} c ^{:tag (slice byte)} p] :results [int error]
   (when (== (.-at c) (.-n c))
     (when (.-eof c)
       (return 0 io/EOF))
-    (let [wait consoleFirstWait]
-      (while true
-        (let [b (board/Call abi/WaitRead 0 (board/Addr (subslice (.-buf c))) (conv int64 (len (.-buf c))) 0 0)]
-          (when (!= (.-Ret b) 0)
-            (let [m (conv int (aget (.-A b) 0))]
-              (when (== m 0)
-                (set! (.-eof c) true)
-                (return 0 io/EOF))
-              (when (> m 0)
-                (set! (.-n c) m)
-                (set! (.-at c) 0)
-                (break)))))
-        (time/Sleep wait)
-        (set! wait (min (* wait 2) consoleMaxWait)))))
+    (while true
+      (let [ch (.arm (addr boxEvents))
+            b (board/Call abi/WaitRead 0 (board/Addr (subslice (.-buf c))) (conv int64 (len (.-buf c))) 0 0)]
+        (when (!= (.-Ret b) 0)
+          (let [m (conv int (aget (.-A b) 0))]
+            (when (== m 0)
+              (.disarm (addr boxEvents))
+              (set! (.-eof c) true)
+              (return 0 io/EOF))
+            (when (> m 0)
+              (.disarm (addr boxEvents))
+              (set! (.-n c) m)
+              (set! (.-at c) 0)
+              (break))))
+        (<! ch)
+        (.disarm (addr boxEvents)))))
   (let [k (copy p (subslice (.-buf c) (.-at c) (.-n c)))]
     (set! (.-at c) + k)
     (return k nil)))

@@ -1,0 +1,333 @@
+;; jrt: the box's network (doc/go/BOX-NOTES.md, S5): net.ae's NetHost over the monitor's
+;; network calls (arbace/box/abi's NetInfo to NetLookup), TCP streams the monitor makes on the
+;; host under its launcher's policy (ARBACE_BOX_NET). A box whose launcher allows no network has
+;; none: ProgramHost's host is then boxHost alone, without NetHost, as in S1. No call waits in
+;; the monitor (BOX-SURVEY R3): an operation that has nothing yet waits in the guest for the
+;; host's next event (boxEvents: the monitor posts one at each change of the network's, BX50), up
+;; to the operation's deadline, and asks again.
+(in-ns 'go.arbace.jrt)
+
+(go/file "netbox_tamago.go"
+  :build ["//go:build tamago"]
+  :imports [[errors "errors"] [io "io"] [net "net"] [netip "net/netip"] [os "os"] [strings "strings"]
+            [sync "sync"] [atomic "sync/atomic"] [syscall "syscall"] [time "time"]
+            [abi "arbace/box/abi"] [board "arbace/box/board"]])
+
+;; the monitor's answers besides -errno (abi's network calls)
+(go/const
+  [^{:tag int64 :val -11} boxEAGAIN -11]
+  [^{:tag int64 :val -9} boxEBADF -9]
+  [^{:tag int64 :val -115} boxEINPROGRESS -115])
+
+(go/const ^{:tag int :val 1048576
+            :doc "boxNetChunk is the most one read or write asks of the monitor.\n"}
+  boxNetChunk (<< 1 20))
+
+(go/var ^{:tag int64 :doc "boxNetFamilies is NetInfo's answer: 1 the host has IPv4, 2 IPv6.\n"} boxNetFamilies)
+
+(go/func boxNetwork
+  "boxNetwork tells whether the monitor gives the guest a network (abi.NetInfo).\n"
+  ^bool []
+  (let [b (board/Call abi/NetInfo 0 0 0 0 0)]
+    (when (!= (.-Ret b) 0)
+      (return false))
+    (set! boxNetFamilies (aget (.-A b) 0))
+    true))
+
+(go/type boxNetHost
+  "boxNetHost is the box's host with a network: boxHost and NetHost over the monitor's calls.\n"
+  (struct boxHost))
+
+(go/func boxNetErr
+  "boxNetErr is the error of a monitor's answer below 0: the deadline's, a closed socket's,
+or the errno (net.ae's netErrorKind reads them as the Linux host's).\n"
+  ^error [^int64 r]
+  (switch r
+    (case [abi/NetErrTimeout] (return os/ErrDeadlineExceeded))
+    (case [boxEBADF] (return net/ErrClosed))
+    (case [abi/NetErrOther abi/NetErrNotFound abi/NetErrTemp] (return (errors/New "network error"))))
+  (conv syscall/Errno (- r)))
+
+;; ---------------------------------------------------------------------------------------
+;; Waiting: for the host's next event (boxEvents, hostbox_tamago.ae), which the monitor posts at
+;; each change of the network's (the count NetEvents answers)
+
+(go/func boxRetry
+  "boxRetry asks op until it answers other than EAGAIN or EINPROGRESS, waiting for an event
+between two questions, up to deadline (none when zero): op's answer, or NetErrTimeout.\n"
+  ^int64 [^{:tag time/Time} deadline ^{:tag (func [] [int64])} op]
+  (while true
+    (let [ch (.arm (addr boxEvents))
+          r (op)]
+      (when (and (!= r boxEAGAIN) (!= r boxEINPROGRESS))
+        (.disarm (addr boxEvents))
+        (return r))
+      (let [ok true]
+        (if (.IsZero deadline)
+          (<! ch)
+          (let [d (time/Until deadline)]
+            (if (<= d 0)
+              (set! ok false)
+              (let [tm (time/NewTimer d)]
+                (select
+                  (case (<! ch))
+                  (case (<! (.-C tm)) (set! ok false)))
+                (.Stop tm)))))
+        (.disarm (addr boxEvents))
+        (when (not ok)
+          (return abi/NetErrTimeout))))))
+
+(go/func boxStatus
+  "boxStatus waits for handle h's dial or lookup: 0, or its failure; and what there is to read.\n"
+  [^int64 h] :results [int64 int64]
+  (let [^int64 avail 0
+        r (boxRetry (lit time/Time)
+                    (fn ^int64 []
+                      (let [b (board/Call abi/NetStatus h 0 0 0 0)]
+                        (set! avail (aget (.-A b) 0))
+                        (return (.-Ret b)))))]
+    (return r avail)))
+
+(go/func boxAddr
+  "boxAddr is handle h's local (or remote) address.\n"
+  ^{:tag (* net/TCPAddr)} [^int64 h ^bool remote]
+  (let [^{:tag (array 64 byte)} buf (zero (array 64 byte))
+        ^int64 which 0]
+    (when remote
+      (set! which 1))
+    (let [n (.-Ret (board/Call abi/NetAddr h which (board/Addr (subslice buf)) (conv int64 (len buf)) 0))]
+      (when (<= n 0)
+        (return (addr (lit net/TCPAddr))))
+      (let [(values ap err) (netip/ParseAddrPort (conv string (subslice buf 0 n)))]
+        (when (!= err nil)
+          (return (addr (lit net/TCPAddr))))
+        (net/TCPAddrFromAddrPort ap)))))
+
+(go/func boxString "boxString is s's bytes for a call: its address and length.\n"
+  [^string s] :results [int64 int64]
+  (let [b (conv (slice byte) s)]
+    (return (board/Addr b) (conv int64 (len b)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Connections and listeners
+
+(go/type boxConn
+  "boxConn is a connection the monitor made: net.Conn over its handle h.\n"
+  (struct ^int64 h ^{:tag sync/Mutex} mu ^{:tag time/Time} rd ^{:tag time/Time} wd
+          ^{:tag atomic/Bool} closed))
+
+(go/method Read [^{:tag (* boxConn)} c ^{:tag (slice byte)} p] :results [int error]
+  (when (.Load (.-closed c))
+    (return 0 net/ErrClosed))
+  (when (== (len p) 0)
+    (return 0 nil))
+  (when (> (len p) boxNetChunk)
+    (set! p (subslice p 0 boxNetChunk)))
+  (.Lock (.-mu c))
+  (let [dl (.-rd c)]
+    (.Unlock (.-mu c))
+    (let [r (boxRetry dl (fn ^int64 [] (return (.-Ret (board/Call abi/NetRead (.-h c) (board/Addr p) (conv int64 (len p)) 0 0)))))]
+      (cond (> r 0) (return (conv int r) nil)
+            (== r 0) (return 0 io/EOF)
+            (.Load (.-closed c)) (return 0 net/ErrClosed))
+      (return 0 (boxNetErr r)))))
+
+(go/method Write [^{:tag (* boxConn)} c ^{:tag (slice byte)} p] :results [int error]
+  (.Lock (.-mu c))
+  (let [dl (.-wd c)
+        off 0]
+    (.Unlock (.-mu c))
+    (while (< off (len p))
+      (when (.Load (.-closed c))
+        (return off net/ErrClosed))
+      (let [q (subslice p off (min (len p) (+ off boxNetChunk)))
+            r (boxRetry dl (fn ^int64 [] (return (.-Ret (board/Call abi/NetWrite (.-h c) (board/Addr q) (conv int64 (len q)) 0 0)))))]
+        (when (< r 0)
+          (return off (boxNetErr r)))
+        (set! off + (conv int r))))
+    (return off nil)))
+
+(go/method Close ^error [^{:tag (* boxConn)} c]
+  (when (not (.Swap (.-closed c) true))
+    (board/Call abi/NetClose (.-h c) 0 0 0 0))
+  nil)
+
+(go/method CloseRead ^error [^{:tag (* boxConn)} c]
+  (let [r (.-Ret (board/Call abi/NetShutdown (.-h c) 0 0 0 0))]
+    (when (< r 0)
+      (return (boxNetErr r)))
+    nil))
+
+(go/method CloseWrite ^error [^{:tag (* boxConn)} c]
+  (let [r (.-Ret (board/Call abi/NetShutdown (.-h c) 1 0 0 0))]
+    (when (< r 0)
+      (return (boxNetErr r)))
+    nil))
+
+(go/method LocalAddr ^{:tag net/Addr} [^{:tag (* boxConn)} c] (boxAddr (.-h c) false))
+(go/method RemoteAddr ^{:tag net/Addr} [^{:tag (* boxConn)} c] (boxAddr (.-h c) true))
+
+(go/method SetDeadline ^error [^{:tag (* boxConn)} c ^{:tag time/Time} t]
+  (.Lock (.-mu c))
+  (set! (.-rd c) t)
+  (set! (.-wd c) t)
+  (.Unlock (.-mu c))
+  nil)
+
+(go/method SetReadDeadline ^error [^{:tag (* boxConn)} c ^{:tag time/Time} t]
+  (.Lock (.-mu c))
+  (set! (.-rd c) t)
+  (.Unlock (.-mu c))
+  nil)
+
+(go/method SetWriteDeadline ^error [^{:tag (* boxConn)} c ^{:tag time/Time} t]
+  (.Lock (.-mu c))
+  (set! (.-wd c) t)
+  (.Unlock (.-mu c))
+  nil)
+
+(go/type boxListener
+  "boxListener is a listener the monitor made: net.Listener over its handle h.\n"
+  (struct ^int64 h ^{:tag sync/Mutex} mu ^{:tag time/Time} dl ^{:tag atomic/Bool} closed))
+
+(go/method Accept [^{:tag (* boxListener)} l] :results [net/Conn error]
+  (when (.Load (.-closed l))
+    (return nil net/ErrClosed))
+  (.Lock (.-mu l))
+  (let [dl (.-dl l)]
+    (.Unlock (.-mu l))
+    (let [r (boxRetry dl (fn ^int64 [] (return (.-Ret (board/Call abi/NetAccept (.-h l) 0 0 0 0)))))]
+      (when (< r 0)
+        (when (.Load (.-closed l))
+          (return nil net/ErrClosed))
+        (return nil (boxNetErr r)))
+      (return (addr (lit boxConn :h r)) nil))))
+
+(go/method Close ^error [^{:tag (* boxListener)} l]
+  (when (not (.Swap (.-closed l) true))
+    (board/Call abi/NetClose (.-h l) 0 0 0 0))
+  nil)
+
+(go/method Addr ^{:tag net/Addr} [^{:tag (* boxListener)} l] (boxAddr (.-h l) false))
+
+(go/method SetDeadline ^error [^{:tag (* boxListener)} l ^{:tag time/Time} t]
+  (.Lock (.-mu l))
+  (set! (.-dl l) t)
+  (.Unlock (.-mu l))
+  nil)
+
+(go/func boxHandle "boxHandle is the monitor's handle of a listener or a connection of the box's.\n"
+  [^any s] :results [int64 bool]
+  (let [(values c ok) (assert (* boxConn) s)]
+    (when ok
+      (return (.-h c) true)))
+  (let [(values l ok) (assert (* boxListener) s)]
+    (when ok
+      (return (.-h l) true)))
+  (return 0 false))
+
+;; ---------------------------------------------------------------------------------------
+;; NetHost
+
+(go/method Listen [^boxNetHost h ^string address] :results [net/Listener error]
+  (let [(values p n) (boxString address)
+        r (.-Ret (board/Call abi/NetListen p n 0 0 0))]
+    (when (< r 0)
+      (return nil (boxNetErr r)))
+    (return (addr (lit boxListener :h r)) nil)))
+
+(go/method Dial [^boxNetHost h ^string local ^string remote ^{:tag time/Duration} timeout]
+  :results [net/Conn error]
+  (let [(values rp rn) (boxString remote)
+        (values lp ln) (boxString local)
+        r (.-Ret (board/Call abi/NetDial rp rn lp ln (.Milliseconds timeout)))]
+    (when (< r 0)
+      (return nil (boxNetErr r)))
+    (let [(values st _) (boxStatus r)]
+      (when (!= st 0)
+        (board/Call abi/NetClose r 0 0 0 0)
+        (return nil (boxNetErr st)))
+      (return (addr (lit boxConn :h r)) nil))))
+
+(go/func boxLookup
+  "boxLookup is the monitor's answer to a lookup of name (an address's names when reverse).\n"
+  [^string name ^bool reverse] :results [(slice byte) error]
+  (let [(values p n) (boxString name)
+        ^int64 rev 0]
+    (when reverse
+      (set! rev 1))
+    (let [r (.-Ret (board/Call abi/NetLookup p n rev 0 0))
+          dnsErr (fn ^error [^int64 code]
+                   (return (addr (lit net/DNSError :Err "no such host" :Name name
+                                      :IsNotFound (== code abi/NetErrNotFound)
+                                      :IsTemporary (== code abi/NetErrTemp)))))]
+      (when (< r 0)
+        (return nil (dnsErr r)))
+      (defer (board/Call abi/NetClose r 0 0 0 0))
+      (let [(values st avail) (boxStatus r)]
+        (when (!= st 0)
+          (return nil (dnsErr st)))
+        (let [ans (make (slice byte) avail)
+              k (.-Ret (board/Call abi/NetRead r (board/Addr ans) (conv int64 (len ans)) 0 0))]
+          (when (< k 0)
+            (return nil (dnsErr k)))
+          (return (subslice ans 0 k) nil))))))
+
+(go/method LookupIP [^boxNetHost h ^string host] :results [(slice net/IP) error]
+  (let [(values a err) (netip/ParseAddr host)]
+    (when (== err nil)
+      (return (lit (slice net/IP) (conv net/IP (.AsSlice a))) nil)))
+  (let [(values ans err) (boxLookup host false)]
+    (when (!= err nil)
+      (return nil err))
+    (let [ips (make (slice net/IP) 0 (/ (len ans) 16))]
+      (while (>= (len ans) 16)
+        (set! ips (append ips (conv net/IP (subslice ans 0 16))))
+        (set! ans (subslice ans 16)))
+      (return ips nil))))
+
+(go/method LookupAddr [^boxNetHost h ^{:tag net/IP} ip] :results [(slice string) error]
+  (let [(values ans err) (boxLookup (.String ip) true)]
+    (when (!= err nil)
+      (return nil err))
+    (when (== (len ans) 0)
+      (return nil nil))
+    (return (strings/Split (conv string ans) "\n") nil)))
+
+(go/method Hostname
+  "Hostname is localhost: the box has no name of its own, and the host's is not the guest's to
+know.\n"
+  [^boxNetHost h] :results [string error]
+  (return "localhost" nil))
+
+(go/method HasFamily ^bool [^boxNetHost h ^bool ipv6]
+  (when ipv6
+    (return (!= (bit-and boxNetFamilies 2) 0)))
+  (!= (bit-and boxNetFamilies 1) 0))
+
+(go/method SetOption ^error [^boxNetHost h ^any s ^int opt ^int value]
+  (let [(values hd ok) (boxHandle s)]
+    (when (not ok)
+      (return (errors/New "Socket has no handle")))
+    (let [r (.-Ret (board/Call abi/NetOption hd (conv int64 opt) (conv int64 value) 1 0))]
+      (when (< r 0)
+        (return (boxNetErr r)))
+      nil)))
+
+(go/method GetOption [^boxNetHost h ^any s ^int opt] :results [int error]
+  (let [(values hd ok) (boxHandle s)]
+    (when (not ok)
+      (return 0 (errors/New "Socket has no handle")))
+    (let [b (board/Call abi/NetOption hd (conv int64 opt) 0 0 0)]
+      (when (< (.-Ret b) 0)
+        (return 0 (boxNetErr (.-Ret b))))
+      (return (conv int (aget (.-A b) 0)) nil))))
+
+(go/method Available ^int [^boxNetHost h ^{:tag net/Conn} c]
+  (let [(values hd ok) (boxHandle c)]
+    (when (not ok)
+      (return 0))
+    (let [b (board/Call abi/NetStatus hd 0 0 0 0)]
+      (when (< (.-Ret b) 0)
+        (return 0))
+      (conv int (aget (.-A b) 0)))))

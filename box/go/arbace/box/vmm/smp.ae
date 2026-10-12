@@ -61,7 +61,7 @@
 
 
 
-^{:go/end 101} (go/method smpCall "smpCall answers the vCPUs' own calls.\n" [^{:tag (* vcpu)} c ^uint64 nr ^{:tag (array 5 int64)} a] :results [int64 error]
+^{:go/end 102} (go/method smpCall "smpCall answers the vCPUs' own calls.\n" [^{:tag (* vcpu)} c ^uint64 nr ^{:tag (array 5 int64)} a] :results [int64 error]
   (let [m (.-m c)]
     (switch nr
       (case [callCPUSelf]
@@ -92,10 +92,11 @@
           (>! (.-start t) a)
           (return 0 nil)))
       (case [callCPUPark]
-        (when [err (.parkFor c (aget a 0))] (!= err nil)
-          (return 0 err))
+        (let [(values woken err) (.parkFor c (aget a 0))]
+          (when (!= err nil)
+            (return 0 err))
 
-        (return 0 nil)))
+          (return (b2i woken) nil))))
 
     (return 0 (.fault m (fmt/Sprintf "an unknown call %d" nr)))))
 
@@ -103,7 +104,7 @@
 
 
 
-^{:go/end 112} (go/method release "release gives the pages of guest memory [lo, hi) back to the host: what\nthe guest says it will not use (abi.CPUStart's a[4]), read as zeros if\nit does.  A range not wholly in the slot is left alone.\n" [^{:tag (* machine)} m ^int64 lo ^int64 hi]
+^{:go/end 113} (go/method release "release gives the pages of guest memory [lo, hi) back to the host: what\nthe guest says it will not use (abi.CPUStart's a[4]), read as zeros if\nit does.  A range not wholly in the slot is left alone.\n" [^{:tag (* machine)} m ^int64 lo ^int64 hi]
   (set! (values lo hi) (values (bit-and-not (- (+ lo page) 1) (- page 1)) (bit-and-not hi (- page 1))))
   (when (or (< lo imageBase) (<= hi lo) (> (conv uint64 hi) (.-size (.-l m))))
     (return))
@@ -115,7 +116,7 @@
 
 
 
-^{:go/end 124} (go/method wakeParked "wakeParked ends the park of every vCPU but c, or its next: a stop of\nthe world's, which TamaGo makes wait for every idle vCPU to look again\n(guest/tamago/board/smp.go).  A vCPU about to park is given the token\ntoo, so that it looks again at once rather than at the next call.\n" [^{:tag (* machine)} m ^{:tag (* vcpu)} c]
+^{:go/end 125} (go/method wakeParked "wakeParked ends the park of every vCPU but c, or its next: a stop of\nthe world's, which TamaGo makes wait for every idle vCPU to look again\n(guest/tamago/board/smp.go).  A vCPU about to park is given the token\ntoo, so that it looks again at once rather than at the next call.\n" [^{:tag (* machine)} m ^{:tag (* vcpu)} c]
   (range [_ o (.-cpus m)]
     (when (!= o c)
       (.wake o))))
@@ -124,16 +125,18 @@
 
 
 
-^{:go/end 127} (go/method wake "wake ends c's park, or its next.\n" [^{:tag (* vcpu)} c] (.wake (.-p (.-park c))))
+^{:go/end 128} (go/method wake "wake ends c's park, or its next.\n" [^{:tag (* vcpu)} c] (.wake (.-p (.-park c))))
 
 
 
 
 
-^{:go/end 186} (go/method parkFor "parkFor parks c: until a wake, ns nanoseconds of the guest's (ns < 0: no\nlimit of its own), and at most the machine's limit while another vCPU\nruns the guest.  A park the limit ends while none runs it goes on, until\na wake: the guest is idle.\n" ^error [^{:tag (* vcpu)} c ^int64 ns]
+
+
+^{:go/end 193} (go/method parkFor "parkFor parks c: until a wake, ns nanoseconds of the guest's (ns < 0: no\nlimit of its own), and at most the machine's limit while another vCPU\nruns the guest.  A park the limit ends while none runs it goes on, until\na wake: the guest is idle.  An event the guest has not taken\n(vmm/events.go) ends it, or does not let it begin.  woken is whether a\nwake or an event ended it.\n" [^{:tag (* vcpu)} c ^int64 ns] :results [^bool woken ^error err]
   (let [m (.-m c)
-      ^{:line 135} t0 (time/Now)]
-    (defer (^{:go/end 136} (fn [] (set! (.-parked c) + (time/Since t0)))))
+      ^{:line 138} t0 (time/Now)]
+    (defer (^{:go/end 139} (fn [] (set! (.-parked c) + (time/Since t0)))))
     (let [^time/Time deadline (zero time/Time)]
       (when (>= ns 0)
         (set! deadline (.Add t0 (conv time/Duration ns))))
@@ -145,8 +148,12 @@
         (set! (.-state (.-park c)) parkedLimited))
 
       ^{:go/via [Mutex]} (.Unlock (.-smp m))
-      ^{:go/breaks [4]} (let [^time/Time limit (zero time/Time)]
+      (let [^time/Time limit (zero time/Time)]
         (while true
+          (when (.eventsPending m)
+            (set! woken true)
+            (break))
+
           ^{:go/via [Mutex]} (.Lock (.-smp m))
           (let [limited (== (.-state (.-park c)) parkedLimited)]
             (when (and limited (.IsZero limit))
@@ -157,38 +164,38 @@
               (when (and limited ^:go/paren (or (.IsZero until) (.Before limit until)))
                 (set! until limit))
 
-              (let [woken (.wait (.-p (.-park c)) until)]
-                (select
-                  (case (<! (.-quit m))
-                    (return errStopped))
-                  (default))
+              (set! woken (.wait (.-p (.-park c)) until))
+              (select
+                (case (<! (.-quit m))
+                  (return false errStopped))
+                (default))
 
-                (when woken
+              (when woken
+                (break))
+
+              (let [now (time/Now)]
+                (when (and (not (.IsZero deadline)) (not (.Before now deadline)))
                   (break))
 
-                (let [now (time/Now)]
-                  (when (and (not (.IsZero deadline)) (not (.Before now deadline)))
-                    (break))
-
-                  (when (and limited (not (.Before now limit)))
-                    ^{:go/via [Mutex]} (.Lock (.-smp m))
-                    (when (== (.-running (.-smp m)) 0)
-                      (set! (.-state (.-park c)) parkedUntilWoken)
-                      ^{:go/via [Mutex]} (.Unlock (.-smp m))
-                      (continue))
-
+                (when (and limited (not (.Before now limit)))
+                  ^{:go/via [Mutex]} (.Lock (.-smp m))
+                  (when (== (.-running (.-smp m)) 0)
+                    (set! (.-state (.-park c)) parkedUntilWoken)
                     ^{:go/via [Mutex]} (.Unlock (.-smp m))
-                    (break)))))))
+                    (continue))
+
+                  ^{:go/via [Mutex]} (.Unlock (.-smp m))
+                  (break))))))
 
 
         (.resume m c)
-        nil))))
+        (return woken nil)))))
 
 
 
 
 
-^{:go/end 205} (go/method resume "resume counts c running the guest again, after a park or a Host call:\nwhen it is the only one, every vCPU parked until woken is woken -- now\nthat one runs, their parks are limited, and they look again.\n" [^{:tag (* machine)} m ^{:tag (* vcpu)} c]
+^{:go/end 212} (go/method resume "resume counts c running the guest again, after a park or a Host call:\nwhen it is the only one, every vCPU parked until woken is woken -- now\nthat one runs, their parks are limited, and they look again.\n" [^{:tag (* machine)} m ^{:tag (* vcpu)} c]
   ^{:go/via [Mutex]} (.Lock (.-smp m))
   (defer ^{:go/via [Mutex]} (.Unlock (.-smp m)))
   (set! (.-state (.-park c)) notParked)
@@ -206,7 +213,7 @@
 
 
 
-^{:go/end 222} (go/method lockHost "lockHost waits for the Host, counting c out of the guest meanwhile;\nfalse when the run ended first.\n" ^bool [^{:tag (* vcpu)} c]
+^{:go/end 229} (go/method lockHost "lockHost waits for the Host, counting c out of the guest meanwhile;\nfalse when the run ended first.\n" ^bool [^{:tag (* vcpu)} c]
   (let [m (.-m c)]
     (when (> (len (.-cpus m)) 1)
       ^{:go/via [Mutex]} (.Lock (.-smp m))
@@ -223,7 +230,7 @@
 
 
 
-^{:go/end 231} (go/method unlockHost "unlockHost lets the next vCPU's call to the Host go, and counts c in the\nguest again.\n" [^{:tag (* vcpu)} c]
+^{:go/end 238} (go/method unlockHost "unlockHost lets the next vCPU's call to the Host go, and counts c in the\nguest again.\n" [^{:tag (* vcpu)} c]
   (<! (.-host (.-m c)))
   (when (> (len (.-cpus (.-m c))) 1)
     (.resume (.-m c) c)))
@@ -232,7 +239,7 @@
 
 
 
-^{:go/end 245} (go/method stopOthers "stopOthers ends the run for every vCPU but c, and waits for their loops\nto end: an exit's report counts them all.\n" [^{:tag (* vcpu)} c]
+^{:go/end 252} (go/method stopOthers "stopOthers ends the run for every vCPU but c, and waits for their loops\nto end: an exit's report counts them all.\n" [^{:tag (* vcpu)} c]
   (when (== (len (.-cpus (.-m c))) 1)
     (return))
 
@@ -246,11 +253,11 @@
 
 
 
-^{:go/end 257} (go/method startedCPUs "startedCPUs is how many vCPUs ran the guest: the boot vCPU and those\nstarted.\n" ^int [^{:tag (* machine)} m]
+^{:go/end 264} (go/method startedCPUs "startedCPUs is how many vCPUs ran the guest: the boot vCPU and those\nstarted.\n" ^int [^{:tag (* machine)} m]
   (let [n 1]
     (range [_ c (subslice (.-cpus m) 1)]
       (when (.Load (.-started c))
         (inc! n)))
 
 
-    ^{:line 256} n))
+    ^{:line 263} n))

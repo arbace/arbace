@@ -1,0 +1,128 @@
+(in-ns 'go.arbace.box.vmm) (go/file "events.go" :imports [
+
+
+    ^{:line 4} [atomic "sync/atomic"]
+    ^{:line 5} [unsafe "unsafe"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type events "Waking on events (Arbace's addition, doc/go/BOX-NOTES.md, \"Wake on\nevents\"): the guest names an area of its memory (abi.EventArea), two\ncounts, the events posted, which the monitor writes, and those taken,\nwhich the guest writes.  The monitor posts an event when the console\nhas input for a guest whose last WaitRead without a wait found none\n(watchInputs, for a Host that is an InputWatcher) and at each change of\nthe network's (Net's notify); a post ends the parks of the vCPUs, and\nno park begins while an event is not taken.  So an idle guest parks\nuntil its scheduler's next timer or the host's next event, and polls\nnothing: the guest's runtime runs the goroutine that takes the events\nat its next look for work (jrt's boxEventLoop).\n" (struct
+
+
+
+    ^{:line 23 :tag int64 :doc "area is the guest-physical address of the guest's area, 0 none;\nunder the machine's smp lock, so that a post never writes it once\nthe memory is gone\n"} area
+
+    ^{:line 25 :tag atomic/Uint64 :doc "posted is the count of events posted\n"} posted
+
+
+    ^{:line 28 :tag (chan (struct)) :doc "watch, a token, asks watchInputs' goroutine to watch the Host's\ninput; watching is whether it runs\n"} watch
+    ^{:line 29 :tag atomic/Bool} watching))
+
+
+
+
+
+
+
+(go/type InputWatcher "An InputWatcher is a Host whose input the monitor may watch from a\ngoroutine of its own, besides the guest's calls: WatchInput waits up to\nms milliseconds for input, as WaitForInput, and reads nothing.  Arbace's\nlauncher's console is one (select on its standard input); go-whim's\nterminal host is not.\n" (interface
+    (WatchInput ^bool [^int64 ms])))
+
+
+
+
+(go/const ^{:val 500 :doc "watchMs is the longest WatchInput the watching goroutine waits before it\nlooks whether the run has ended.\n"} watchMs 500)
+
+
+^{:go/breaks [[10 61]] :go/end 62} (go/method eventArea "eventArea answers EventArea: the area at gpa, or none (0).\n" ^int64 [^{:tag (* machine)} m ^int64 gpa]
+  (when (!= gpa 0)
+    (when [(values _ ok) (.guest m gpa 16)] (or (not ok) (!= (% gpa 8) 0))
+      (return -1)))
+
+
+  ^{:go/via [Mutex]} (.Lock (.-smp m))
+  (set! (.-area (.-ev m)) gpa)
+  (when (!= gpa 0)
+    (atomic/StoreUint64 (.word m gpa) (.Load (.-posted (.-ev m)))))
+
+  ^{:go/via [Mutex]} (.Unlock (.-smp m))
+  (when [(values w ok) (assert InputWatcher (.-Host (.-cfg m)))] (and ok (!= gpa 0) (not (.Swap (.-watching (.-ev m)) true)))
+    (go (.watchInputs m w)))
+
+  0)
+
+
+
+
+^{:go/end 70} (go/method dropEventArea "dropEventArea forgets the area: the end of the run, before the guest's\nmemory is unmapped.\n" [^{:tag (* machine)} m]
+  ^{:go/via [Mutex]} (.Lock (.-smp m))
+  (set! (.-area (.-ev m)) 0)
+  ^{:go/via [Mutex]} (.Unlock (.-smp m)))
+
+
+
+^{:go/end 73} (go/method word "word is the 64-bit word of guest memory at gpa, in the slot.\n" ^{:tag (* uint64)} [^{:tag (* machine)} m ^int64 gpa] (conv (* uint64) (conv unsafe/Pointer (addr (aget (.-mem m) gpa)))))
+
+
+
+
+^{:go/end 91} (go/method postEvent "postEvent posts an event: the count written to the guest's area, and\nevery parked vCPU woken, so that the guest's scheduler looks for work.\nWithout an area it is counted only.\n" [^{:tag (* machine)} m]
+  (let [n (.Add (.-posted (.-ev m)) 1)]
+    ^{:go/via [Mutex]} (.Lock (.-smp m))
+    (defer ^{:go/via [Mutex]} (.Unlock (.-smp m)))
+    (when (== (.-area (.-ev m)) 0)
+      (return))
+
+    (atomic/StoreUint64 (.word m (.-area (.-ev m))) n)
+    (range [_ c (.-cpus m)]
+      (when (!= (.-state (.-park c)) notParked)
+        (.wake c)))))
+
+
+
+
+
+
+^{:go/end 100} (go/method eventsPending "eventsPending is whether an event is posted that the guest has not\ntaken.\n" ^bool [^{:tag (* machine)} m]
+  ^{:go/via [Mutex]} (.Lock (.-smp m))
+  (defer ^{:go/via [Mutex]} (.Unlock (.-smp m)))
+  (let [a (.-area (.-ev m))]
+    (and (!= a 0) (!= (atomic/LoadUint64 (.word m a)) (atomic/LoadUint64 (.word m (+ a 8)))))))
+
+
+
+
+^{:go/end 109} (go/method watchInput "watchInput asks the watching goroutine to post an event when input\ncomes: a WaitRead found none.\n" [^{:tag (* machine)} m]
+  (select
+    (case (>! (.-watch (.-ev m)) (lit (struct))))
+    (default)))
+
+
+
+
+
+^{:go/end 130} (go/method watchInputs "watchInputs is the watching goroutine: for each request, it waits for\nthe Host's input and posts an event when it comes, until the run ends.\n" [^{:tag (* machine)} m ^InputWatcher w]
+  (while true
+    (select
+      (case (<! (.-watch (.-ev m))))
+      (case (<! (.-quit m))
+        (return)))
+
+    (while (not (.WatchInput w watchMs))
+      (when (.stopped m)
+        (return)))
+
+
+    (when (.stopped m)
+      (return))
+
+    (.postEvent m)))

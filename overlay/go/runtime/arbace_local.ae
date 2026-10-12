@@ -2,8 +2,14 @@
 ;; the goroutine-local slot. With the field arbaceLocal of g (runtime2.go) and its clearing in
 ;; gdestroy (proc.go), this file is the whole patch; the three files enter a build as an
 ;; overlay (bin/jrt overlay). jrt pulls the two functions with //go:linkname.
+;;
+;; And the box's event goroutine (doc/go/BOX-NOTES.md, "Wake on events"; amendment BX51): with
+;; findRunnable's one line marked Arbace (proc.go), the goroutine parked in arbace_eventPark is
+;; made runnable when the hook jrt sets says the monitor posted an event, at the scheduler's every
+;; look for work, idle or not -- as wasm's beforeIdle returns its event handler's goroutine. On
+;; Linux no hook is set: findRunnable's line is a nil check.
 
-(in-ns 'go.runtime) (go/file "arbace_local.go" :imports [[unsafe "unsafe"]])
+(in-ns 'go.runtime) (go/file "arbace_local.go" :imports [[atomic "internal/runtime/atomic"] [unsafe "unsafe"]])
 
 (go/func ^:go/nosplit ^{:go/linkname "arbace_getLocal"} arbace_getLocal
   "arbace_getLocal returns the current goroutine's slot: nil in a new goroutine.\n"
@@ -15,3 +21,44 @@
 pointer field of g, and gdestroy clears it.\n"
   [^unsafe/Pointer p]
   (set! (.-arbaceLocal (getg)) p))
+
+(go/var ^{:tag (func [] [bool])
+          :doc "arbaceEventHook, when set (arbace_setEventHook), says whether an event came that the goroutine\nparked in arbace_eventPark has not taken.\n"}
+  arbaceEventHook)
+
+(go/var ^{:tag guintptr :doc "arbaceEventG is the goroutine parked in arbace_eventPark, or 0.\n"} arbaceEventG)
+
+(go/func ^{:go/linkname "arbace_setEventHook"} arbace_setEventHook
+  "arbace_setEventHook sets the hook findRunnable asks (arbaceEventReady).\n"
+  [^{:tag (func [] [bool])} f]
+  (set! arbaceEventHook f))
+
+(go/func ^{:go/linkname "arbace_eventPark"} arbace_eventPark
+  "arbace_eventPark parks the calling goroutine until findRunnable sees the hook say an event came.\n"
+  []
+  (gopark arbaceEventParkCommit nil waitReasonIOWait traceBlockForever 1))
+
+(go/func arbaceEventParkCommit
+  "arbaceEventParkCommit is arbace_eventPark's unlockf: gp is the parked goroutine, unless an event\ncame meanwhile and no findRunnable took gp: then it runs on.\n"
+  ^bool [^{:tag (* g)} gp ^unsafe/Pointer lock]
+  (let [p (conv uintptr (conv unsafe/Pointer gp))
+        w (conv (* uintptr) (conv unsafe/Pointer (addr arbaceEventG)))]
+    (atomic/Storeuintptr w p)
+    (let [h arbaceEventHook]
+      (when (and (!= h nil) (h) (atomic/Casuintptr w p 0))
+        (return false)))
+    true))
+
+(go/func arbaceEventReady
+  "arbaceEventReady is the goroutine parked in arbace_eventPark, made runnable, when the hook says an\nevent came; else nil. findRunnable runs it.\n"
+  ^{:tag (* g)} []
+  (let [h arbaceEventHook
+        w (conv (* uintptr) (conv unsafe/Pointer (addr arbaceEventG)))]
+    (when (or (== h nil) (== (atomic/Loaduintptr w) 0) (not (h)))
+      (return nil))
+    (let [p (atomic/Loaduintptr w)]
+      (when (or (== p 0) (not (atomic/Casuintptr w p 0)))
+        (return nil))
+      (let [gp (.ptr (conv guintptr p))]
+        (casgstatus gp _Gwaiting _Grunnable)
+        gp))))
