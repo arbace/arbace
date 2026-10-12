@@ -49,7 +49,12 @@ bin/c2a --rules                      # the rules and the dialect divergences
 - `--text EXT` renames files ending in `EXT` as text too, keeping their names (`--text .edn`).
 - `--skip ID,...` leaves rules out. `-q` drops the summary line, which counts the files
   translated, those turned into `.ae`, those unchanged, copied and skipped, and the errors.
-- `bin/c2a` runs on `target/stage2` (`bin/lib/tools.bash`; build first).
+- `bin/c2a` runs on Arbace's Go executable, the tools' host (`bin/lib/tools.bash`'s
+  `arbace_tool`, `bin/lib/host.bash`: `ARBACE_HOST_EXE`, else stage 0 built from the Go seed;
+  standalone S4; `target/stage2` until then). c2a is embedded in the executable, whose embedded
+  sources come before `ARBACE_PATH`: `bin/c2a` loads its four namespaces from the checkout
+  (`load-file`, then marked loaded: `c2a_sources`), so the checked-out c2a runs, not the one
+  the executable was built with.
 - The namespaces are `arbace.c2a.main` (the command line and the trees), `arbace.c2a.rules`
   (the table), `arbace.c2a.text` (the lexical reader) and `arbace.c2a.rename` (the rename's
   patterns).
@@ -119,7 +124,7 @@ expressions over the whole text, comments and strings included, as names in stri
 ```sh
 bin/c2a-check             # the unit tests (test/c2a/c2a_test.ae): the reader, each rule, the file plans, trees
 bin/c2a-check --suite     # Clojure's suite translated, against the digest test/c2a/suite.sha256
-bin/c2a-check --libs      # the suite's test libraries as .ae, run on the JVM and the Go build
+bin/c2a-check --libs      # the suite's test libraries as .ae, run on the tools' host and a Go build
 ```
 
 - `--suite`: the suite at the revision `bin/clojure-tests` pins (`98d735f`: `test/`,
@@ -134,8 +139,10 @@ bin/c2a-check --libs      # the suite's test libraries as .ae, run on the JVM an
   downloads), and a small library the check writes with a `data_readers.cljc` (`#c2a/point`,
   its reader selected by a conditional) and a `.cljc` namespace, become `.ae` files under
   `.tmp/c2a-check/ae`, and no `.clj` or `.cljc` is left.
-  `test/c2a/libs.ae` then runs on them on the JVM build (`target/stage2`) and on the Go build
-  (`target/arbace-go/amd64/arbace`, `ARBACE_PATH`). It runs:
+  `test/c2a/libs.ae` then runs on them on the tools' host and on a Go build
+  (`target/arbace-go/<arch>/arbace` or the argument, `ARBACE_PATH`), whose outputs must be equal
+  (until standalone S4 the first was the JVM build, `target/stage2`; on 2026-10-12 the host's
+  output was still the JVM's byte for byte). It runs:
   - test.check: a property that holds; one that fails and shrinks to `[0 0 0 0]`; values
     generated from a fixed seed; a `defspec` under `arbace.test`;
   - data.generators on a fixed `Random`;
