@@ -81,6 +81,7 @@ it.
 bin/c2a -o lib/ae path/to/library/src                       # .clj/.cljc -> .ae, into lib/ae
 ARBACE_CLASSPATH=lib/ae bin/arbace-j -e "(require 'my.lib)"  # the JVM build
 ARBACE_PATH=lib/ae bin/arbace-go -e "(require 'my.lib)"      # the Go build
+ARBACE_PATH=lib/ae bin/arbace-j -e "(require 'my.lib)"       # the JVM build reads it too
 ```
 
 The translators name Arbace (`a`) as their target or source: c2a (Clojure → Arbace), j2a

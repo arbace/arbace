@@ -4,9 +4,9 @@
   directory's format (the monitor's and the native executable's), snapshots (Go's archive/tar's
   bytes: a tree's hash as the native executable takes it), restoring tars, ARBACE_PATH's
   splitting; then in fresh JVMs on the same class path: no store, ARBACE_BOX_STORE_MAX, a script
-  and an -i file from a ref (ref:NAME), namespaces from ARBACE_PATH's store entries, and the refs'
-  lock held by this JVM keeping another JVM's ref! waiting (a POSIX record lock between
-  processes). The checks against the native executable, the same directory used by both, are in
+  and an -i file from a ref (ref:NAME), namespaces from ARBACE_PATH's directories and store
+  entries (in order, as the Go build), and the refs' lock held by this JVM keeping another
+  JVM's ref! waiting (a POSIX record lock between processes). The checks against the native executable, the same directory used by both, are in
   bin/arbace-go --smoke."
   (:require [arbace.test :refer [deftest is testing]]
             [arbace.box :as box]
@@ -256,7 +256,26 @@
                        "-e" "(require (quote st.two)) (prn ((resolve (quote st.two/g))))")))
       (let [[st out] (run-java {"ARBACE_BOX_STORE" s} "-e" "(require (quote st.two))")]
         (is (= 1 st) "not without a store entry")
-        (is (str/includes? out "Could not locate st/two__init.class"))))))
+        (is (str/includes? out "Could not locate st/two__init.class"))))
+    (testing "ARBACE_PATH's directories and store entries, in order, as the Go build reads them"
+      (let [d (io/file dir "lib")
+            src (fn [rel text] (let [f (io/file d rel)] (io/make-parents f) (spit f text)))]
+        (src "pd/one.ae" "(ns pd.one (:require [st.lib])) (defn f [] [:dir (st.lib/f)])")
+        (src "pq/x.ae" "(ns pq.x) (def v :dir)")
+        (src "pq/y.clj" "(ns pq.y) (def v :dir-clj)")
+        (src "pq/z.cljc" "(ns pq.z) (def v #?(:clj :cljc :default :other))")
+        (run-java {"ARBACE_BOX_STORE" s} "-e" req "-e"
+                  (str "(box/put! \"q.pq.x.ae\" \"(ns pq.x) (def v :store)\")"
+                       "(box/put! \"q.pq.y.ae\" \"(ns pq.y) (def v :store-ae)\")"))
+        (is (= [0 "[[:dir :lib] :store :store-ae :cljc]\n"]
+               (run-java {"ARBACE_BOX_STORE" s "ARBACE_PATH" (str "store:q.:" d ":store:")}
+                         "-e" (str "(require 'pd.one 'pq.x 'pq.y 'pq.z)"
+                                   " (prn [((resolve 'pd.one/f)) @(resolve 'pq.x/v) @(resolve 'pq.y/v) @(resolve 'pq.z/v)])")))
+            "a directory's namespace, one requiring a store's; an earlier store entry first; .ae before .clj")
+        (is (= [0 "[:dir :dir-clj]\n"]
+               (run-java {"ARBACE_PATH" (str "/none::" d)}
+                         "-e" "(require 'pq.x 'pq.y) (prn [@(resolve 'pq.x/v) @(resolve 'pq.y/v)])"))
+            "directories without a store")))))
 
 (deftest the-refs-lock-between-processes
   (let [dir (temp-dir "box-lock")
