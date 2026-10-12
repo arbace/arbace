@@ -9,15 +9,53 @@
 #                            worktree under .tmp/, removed afterwards) and check that the
 #                            rebuilt jar has the pinned hash: the seed is the tag's jar (slow,
 #                            a few minutes; needs the tag in the repository)
+#
+# The Go-source seed (doc/STANDALONE-NOTES.md, "S4: the Go-source seed"; the standalone survey's
+# D3): Arbace's Go program as a2g and g2a print it, the module bin/arbace-go --build compiles,
+# in one deterministic tar.xz (bin/lib/seed-go.bash) pinned by its SHA-256 in ARCHIVE.sha256.
+# Until S4 replaces the jar it stands beside it, under the --go-* modes:
+#        bin/seed --go-check   ARCHIVE has its pinned hash (fast)
+#        bin/seed --go-make [ARCHIVE]
+#                              pack this checkout's last bin/arbace-go --build into ARCHIVE and
+#                              pin its hash in ARCHIVE.sha256 (seconds; xz about a minute)
+#        bin/seed --go-build [-o DIR] [--arch A[,B]]
+#                              stage 0: build the executables from ARCHIVE (checked first) with
+#                              Go's toolchain, into DIR/<arch>/arbace (default target/seed-go;
+#                              architectures default amd64,arm64); the image of prepared
+#                              namespaces made by the executable itself (a few minutes)
+#        bin/seed --go-verify [REV]
+#                              print the seed again from REV (default the commit SEED.edn
+#                              names) in a temporary git worktree under .tmp/ (its build, then
+#                              its bin/seed --go-make) and compare: the tars byte for byte, then
+#                              the archives (slow: the commit's whole build)
 # Environment:
 #   ARBACE_SEED_TAG   the tag rebuilt by --verify (default arbace-for-java-26-v1)
-# Exit status: 0 when the hash matches.
+#   ARBACE_SEED_GO    the Go-source seed's archive (default seed/arbace-seed-go.tar.xz)
+#   G2A_GOROOT        Go's toolchain (default /root/tamago-go, TamaGo's go1.27.1): its VERSION
+#                     must be the one SEED.edn names
+# Exit status: 0 when the hash matches (and, for --go-build, the executables are built;
+# for --go-verify, the seed printed again is identical).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 jar=seed/arbace-seed.jar
 pinned=$(cut -d' ' -f1 "$jar.sha256")
 tag=${ARBACE_SEED_TAG:-arbace-for-java-26-v1}
+. "$root/bin/lib/seed-go.bash"
+goseed=${ARBACE_SEED_GO:-seed/arbace-seed-go.tar.xz}
+case $goseed in /*) ;; *) goseed=$root/$goseed ;; esac
+
+# go_check: the Go-source seed has its pinned hash
+go_check() {
+  [ -f "$goseed" ] && [ -f "$goseed.sha256" ] || { echo "no Go-source seed $goseed (or its .sha256)" >&2; return 1; }
+  local want got
+  want=$(cut -d' ' -f1 "$goseed.sha256"); got=$(sha256sum "$goseed" | cut -d' ' -f1)
+  if [ "$want" = "$got" ]; then
+    echo "$goseed: $want, as pinned"
+  else
+    echo "$goseed: SHA-256 $got, pinned $want" >&2; return 1
+  fi
+}
 
 case ${1:-} in
   --check)
@@ -46,5 +84,63 @@ case ${1:-} in
     else
       echo "rebuilt jar: $got, pinned $pinned: they differ" >&2; exit 1
     fi ;;
-  *) echo "usage: bin/seed --check | --verify" >&2; exit 2 ;;
+  --go-check) go_check ;;
+  --go-make)
+    [ -n "${2:-}" ] && { goseed=$2; case $goseed in /*) ;; *) goseed=$PWD/$goseed ;; esac; }
+    mkdir -p "$root/.tmp"
+    seed_go_make "$goseed" || exit 1
+    (cd "$(dirname "$goseed")" && sha256sum "$(basename "$goseed")") > "$goseed.sha256"
+    echo "pinned in $goseed.sha256" ;;
+  --go-build)
+    shift
+    out=$root/target/seed-go archs=amd64,arm64
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -o) out=$2; shift 2 ;;
+        --arch) archs=$2; shift 2 ;;
+        *) echo "usage: bin/seed --go-build [-o DIR] [--arch A[,B]]" >&2; exit 2 ;;
+      esac
+    done
+    case $out in /*) ;; *) out=$PWD/$out ;; esac
+    go_check || exit 1
+    seed_go_build "$goseed" "$out" ${archs//,/ } ;;
+  --go-verify)
+    go_check || exit 1
+    rev=${2:-$(xz -dc "$goseed" | tar -xOf - "$seed_go_top/SEED.edn" | sed -n 's/.*:commit "\([0-9a-f]*\)".*/\1/p' | head -1)}
+    [ -n "$rev" ] || { echo "bin/seed: no commit to print the seed from" >&2; exit 1; }
+    wt=$root/.tmp/seed-go-verify
+    git worktree remove --force "$wt" 2> /dev/null; rm -rf "$wt"
+    git worktree add --detach "$wt" "$rev" > /dev/null 2>&1 || { echo "no worktree of $rev" >&2; exit 1; }
+    log=$root/.tmp/seed-go-verify.log
+    # the commit's own build of its Go program (until S3: the JVM chain; from S3 on, the
+    # Go-hosted chain from the previous seed), then its own --go-make
+    echo "== the build at $(git rev-parse --short "$rev^{commit}"), in $wt (log $log)"
+    (cd "$wt" && bin/build-arbace && ARBACE_GO_ARCHES=$(seed_go_host_arch) bin/arbace-go --build \
+       && bin/seed --go-make "$wt/.tmp/seed-go/arbace-seed-go.tar.xz") > "$log" 2>&1
+    st=$?
+    again=$wt/.tmp/seed-go/arbace-seed-go.tar.xz
+    if [ $st != 0 ] || [ ! -f "$again" ]; then
+      git worktree remove --force "$wt"; echo "the build failed (exit $st), see $log" >&2; exit 1
+    fi
+    if cmp -s <(xz -dc "$goseed") <(xz -dc "$again"); then
+      echo "printed again at $rev: the same tree, byte for byte ($(xz -dc "$again" | sha256sum | cut -d' ' -f1), the tar)"
+      if cmp -s "$goseed" "$again"; then echo "and the same archive: $(sha256sum "$again" | cut -d' ' -f1)"
+      else echo "the archives differ (xz $(xz --version | head -1 | cut -d' ' -f4)): the tree is what counts"; fi
+      # stage 0 from the seed is the commit's own executable, byte for byte
+      h=$(seed_go_host_arch)
+      if ARBACE_SEED_GO=$again "$root/bin/seed" --go-build -o "$wt/.tmp/seed-go/stage0" --arch "$h" >> "$log" 2>&1 \
+         && cmp -s "$wt/.tmp/seed-go/stage0/$h/arbace" "$wt/target/arbace-go/$h/arbace"; then
+        st=0; echo "stage 0 from it ($h) is the commit's bin/arbace-go --build executable, byte for byte: $(sha256sum "$wt/target/arbace-go/$h/arbace" | cut -d' ' -f1)"
+      else
+        st=1; echo "stage 0 from it ($h) is not the commit's bin/arbace-go --build executable (log $log)" >&2
+      fi
+    else
+      st=1; echo "printed again at $rev: the trees differ" >&2
+      mkdir -p "$root/.tmp/seed-go-diff/a" "$root/.tmp/seed-go-diff/b"
+      xz -dc "$goseed" | tar -C "$root/.tmp/seed-go-diff/a" -xf -; xz -dc "$again" | tar -C "$root/.tmp/seed-go-diff/b" -xf -
+      diff -rq "$root/.tmp/seed-go-diff/a" "$root/.tmp/seed-go-diff/b" | head -20 >&2
+    fi
+    git worktree remove --force "$wt"
+    exit $st ;;
+  *) echo "usage: bin/seed --check | --verify | --go-check | --go-make [ARCHIVE] | --go-build [-o DIR] [--arch A,B] | --go-verify [REV]" >&2; exit 2 ;;
 esac
