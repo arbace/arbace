@@ -383,6 +383,13 @@ On the worktree `s4-seed` at `7498921` (main `b0f5730` plus the tooling), a clea
   main's reference on that executable: the 46 known mismatches, as recorded (with `files.edn`
   re-recorded). The first candidate, without `:goroot-sha256`, is now refused by `--go-build`;
   a GOROOT with one file of `src/runtime` changed is refused (checked).
+- **After S2 and the test fixtures merged** (`26885c6`, clean): the essential `bin/gate` passed
+  (6m06s); a fresh `--build` (amd64, arm64), the candidate 3,063,800 bytes (SHA-256
+  `d70fd40604cafebba23fe93491e055f6a66cda75519c7d528398b2dfc72e0e58`), `--go-check` as pinned,
+  stage 0 from it identical to the build's executables (below),
+  and the oracle with main's reference: the 46 known, as recorded. Stage 0: amd64
+  `c4fe6b02cac31d127ce0de1311130f306b6c218130a963a1443f01d6080e90cd`, arm64
+  `dddeb311ca319dd17cb1e328b7e32b81900722a9cbd48ad8908c681c947824ad`.
 
 ### The amendments
 
