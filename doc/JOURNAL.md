@@ -892,3 +892,27 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   roundtrip` and `kvm-tests` passed, the stub never called. Found on the way, not caused by
   this: `bin/box-vendor convert` (S0's vendoring, outside the gate) fails on
   `cmd/arbace-box`, the launcher added in S1, which go-whim's clone lacks; the same at `f8e95e4`.
+
+## 2026-10-12: the Alpine environment written down
+
+- The user: a minimal `apk add` line mirroring this host's 560 packages, and a doc of the
+  environment. `doc/ALPINE.md` and `bin/alpine-env`.
+  - The line is `/etc/apk/world` (84 entries) less the 17 that other entries' dependencies
+    install: 67 names. Their closure is 485 packages; the other 75 come by `install_if`
+    (`-openrc`, `-pyc`, `git-perl`, `gcc-gdb`...).
+  - `bin/alpine-env check` proves it offline from `/lib/apk/db/installed`.
+  - `simulate` (`apk add --simulate` into an empty root against edge) gave the same 560 names;
+    18 had newer versions, edge having moved since the host's upgrade of 2026-10-10. Edge has no
+    snapshots, so the line mirrors names, not versions.
+  - Considered: world as is (84 names, 17 redundant), and `apk info -v` with versions (not
+    installable from edge once it moves).
+- The doc also gives the subset Arbace's scripts use, as one line, derived from `bin/` but not
+  tried on a fresh host. It also lists the inputs apk does not provide:
+  - jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259`, built headless with openjdk25 as the
+    boot JDK;
+  - TamaGo's go1.27.1, pinned by `seed/goroot.sha256`;
+  - go-whim at `80c49bf`;
+  - Go's module cache under `GOPROXY=off`: tamago v1.27.1, purego v0.11.1, x509roots'
+    fallback and go-whim's requirements;
+  - the jars and netboot fetched into `.tmp/`;
+  - /dev/kvm.
