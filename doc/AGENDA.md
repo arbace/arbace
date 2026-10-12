@@ -69,8 +69,11 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   polling; idle host CPU 0.00 s per 20 s.
 - The milestone reached (2026-10-12): `bin/gate --full` passed (19m47s) and the tag
   `arbace-box-amd64-v1` is on main (a milestone, not a freeze: no branch, the journal continues).
-- Next milestone: S4, arm64 (KVM/arm64, then Hypervisor.framework on the Mac; purego,
-  `board.NilPanics` for arm64, S6's arm64 half).
+- Now, towards the milestone `arbace-box-arm64-v1` (a tag on main after `bin/gate --full`, not a
+  freeze): S4, arm64: the arm64 guest with everything the amd64 box does (`board.NilPanics` for
+  arm64, the event area, the store, the network), KVM/arm64 in an emulated aarch64 VM here, S6's
+  arm64 half (one `tamago/` tree), purego vendored as Go forms, a Mac bundle (a tarball and a
+  checklist script) for the user's run on Hypervisor.framework, which follows the tag.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 

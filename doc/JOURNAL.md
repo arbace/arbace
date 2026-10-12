@@ -563,3 +563,15 @@ the first. The history before it is on the frozen branches and in git history:
 - README: a section "Arbace in the box" (its commands tried: the store's host tool, a script
   run by ref); CLAUDE.md's direction names the milestone and S4 as now; the agenda follows.
 - Next milestone: S4, arm64.
+
+## 2026-10-12: B1b S4 started: arm64, towards `arbace-box-arm64-v1`
+
+- The user: S4 leads to the milestone `arbace-box-arm64-v1` (a tag on main after `bin/gate
+  --full`, as `arbace-box-amd64-v1`). Agent, branch `box-s4`: the arm64 guest with all the amd64
+  box does; KVM/arm64 in an emulated aarch64 VM here (go-whim's `guest/vm/aarch64.sh` the model);
+  S6's arm64 half; the Mac.
+- The user's decisions: purego vendored as Go forms like `box/` (rather than a pinned module or a
+  binding of our own); `tamago/` one tree for both architectures, shared files once (rather than
+  a second tree); the Mac's binaries as a tarball built here with a checklist script (rather than
+  building on the Mac); the milestone's gate `bin/gate --full` plus the box's checks in the arm64
+  VM, the user's Mac run following the tag rather than blocking it (not as recommended).
