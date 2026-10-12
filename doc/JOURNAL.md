@@ -772,3 +772,60 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   TamaGo's version but not the printer, so a tree printed before the printer's fixes was reused.
   Fixed: the key also hashes `arbace/g2a` and `bin/g2a`. Then both guests identical, as linked and
   cut; `--smoke --box` 111 of 111.
+
+## 2026-10-12: Work beside S2; S4's preparation and the user's decisions SA1-SA9
+
+- Beside S2, by the user's question ("any steps doable concurrently?"), three agents: g2a on the
+  Go executable, S3's half that does not wait for S2 (branch `s3-g2a`); the test build's Java
+  fixtures committed as forms (branch `test-fixtures-forms`); S4's preparation (branch `s4-seed`).
+  The TLS agent's leftover wait (an arm64 VM smoke in its removed worktree) was stopped; the TLS
+  checks run in `bin/box-arm64-vm smoke` at the next box check.
+- S4's preparation (`7498921`, `6aac846`; doc/STANDALONE-NOTES.md "S4: the Go-source seed"): the
+  seed `arbace-seed-go/` (1,148 files, 29.2 MB: `SEED.edn`, the printed module, the overlaid
+  runtime files, `namespaces.txt`; one seed for amd64 and arm64), `bin/seed --go-check`,
+  `--go-make`, `--go-build`, `--go-verify`; from today's main, two generations byte-identical
+  (3,063,796 bytes as tar.xz), stage 0 from it identical to `--build` on amd64 and arm64.
+  `bin/oracle` takes `ARBACE_ORACLE_REF=frozen`: the seed jar (v1) is unsuitable (the NaN
+  comparison fixed in v2, 8 cases), so the reference is `arbace-for-java-26-v4` built from its
+  tag, pinned (`test/oracle/frozen-jar.sha256`); against it the native executable shows two real
+  divergences of main (loaders' `.ae` message; MultiFn's ordering since `ac8b971`), recorded in
+  `test/oracle/known-go-amd64-frozen.edn`. An inventory of what leaves main at S4.
+- The user: SA1-SA3, SA5-SA7 accepted (one deterministic `seed/arbace-seed-go.tar.xz` with its
+  hash, the image not carried, the version map recorded, the modes renamed at S4's end, the seed
+  committed once at S4's end, printed by the Go-hosted fixpoint); SA4 the toolchain pinned by
+  version and a hash of GOROOT's sources (rather than the version only); SA8 v4 built from the tag
+  (rather than its jar committed); SA9 the frozen reference the gate's at S4, the expected files
+  re-recorded then, and the stale `test/oracle/expected/forms/files.edn` fixed now.
+
+## 2026-10-12: Standalone S2: a2g without the JVM's reflection and ASM; the test fixtures as forms
+
+- Agent, branch `standalone-s2` (`adc9216`, `17f3a81`, `f80c5c2`, `c9857ac`), merged (`2b0c249`).
+  The edge `jdk/edge.edn` (1.40 MB, 403 classes, about 10,300 members, in `arbace.classes.env`'s
+  shape, with the analyzer's other facts and a2g's own questions): the JVM's answers a2g needs,
+  recorded from the builds' two a2g runs; a2g reads it by default (`--edge`, `--record-edge`,
+  `--jvm-reflection`); a class in neither the forms nor the edge does not exist. Accessors as
+  data in the class state, read by `arbace/a2g/access.ae` without ASM. The id floor: a2g sets
+  `RT/nextID` to 100000 before it starts. `bin/a2g-edge update|verify|trace` (`trace`: JFR's
+  method tracing; 25,763 calls inside a2g's run, 0 by a2g, against 13.3 million with
+  `--jvm-reflection`). a2g's run 79-89 s against 93-96 s.
+- Proofs: against main's a2g with the floor alone, a2g's output identical apart from the two
+  embedded analyzer sources, all eight executables identical (native, test, box launcher and
+  guest, amd64 and arm64); two builds reproducible; stage 2's `arbace/lang`, `asm` and
+  `java/api` unchanged; `--smoke` 117 ok, `--smoke --box` 111, the oracle its 46 known
+  mismatches, the essential gate passed; edge drift from the TLS merge caught and updated.
+- The user: SA10-SA15 accepted as recommended (the notes in doc/STANDALONE-NOTES.md; the edge
+  recorded from a2g's real runs, in `jdk/`; whole classes with the JVM's order where stable; the
+  id floor 100000; the exit criterion met as proven, rather than literal identity; `bin/a2g-edge
+  verify` in `bin/gate --full`). The branch numbered them SA1-SA6; renumbered at the merge, since
+  S4's preparation's amendments are SA1-SA9.
+- Agent, branch `test-fixtures-forms` (`f56e3d3`), merged: Clojure's suite's Java fixtures as
+  class forms in `test/java-fixtures/` (15 files, 32 KB; from clojure/clojure `98d735f`
+  `test/java`, renamed by c2a; `provenance.edn`, README; EPL-1.0 in LICENSE.md);
+  `bin/clojure-tests --java-fixtures verify|update`; `--build-tests` reads them; `bin/gate
+  --full` verifies them before the test build. With javac stubbed and execs traced: no javac or
+  j2a; the test executables identical to those from today's conversion; the suite on the test
+  build 20,506 of 20,520, no regressions; the essential gate passed (6m32s). The test build
+  needs no javac.
+- On main after both merges (`a3f3913`): the essential gate passed (5m50s; a first run failed when
+  the kernel killed a2g's JVM for memory, beside the suite's JVMs and two agents' builds, 36 GB),
+  `bin/a2g-edge verify` and `bin/clojure-tests --java-fixtures verify` passed.
