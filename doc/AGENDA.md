@@ -84,7 +84,6 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   recommended: the Go-hosted bootstrap first (S1-S4), then the box (S5-S8).
 - Now (the user, 2026-10-12): standalone S1, the JDK's forms committed and `bin/jrt-convert` a
   verify check (agent, branch `standalone-s1`);
-  g2a's printer keeping a multi-line parameter list's lines (agent, branch `g2a-params`).
   TLS in the box through Go's crypto/tls, for the Claude API from the box (agent, branch
   `box-tls`; the user: option 2, now).
   `bin/gate --full` runs the amd64 box smoke test (`box-smoke`). The Mac: a bundle per box

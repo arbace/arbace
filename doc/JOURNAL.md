@@ -696,3 +696,20 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   D12 j2a a host tool now, javac translated after S6. D13 divergence from Clojure recorded, each as
   an amendment and a known oracle mismatch, Clojure's suite through c2a the yardstick.
 - S1 started now (the user), as one agent beside the TLS and g2a agents: branch `standalone-s1`.
+
+## 2026-10-12: g2a's printer: names of lists that span lines; purego-check with DWARF
+
+- Agent, branch `g2a-params` (`5e0889e`, `1e61959`), merged. Cause: the forms already record a
+  name's `:line` where it begins a Go line, but `arbace/g2a/print_code.ae` printed a group's names
+  on its first line (gc declares a parameter at its name's line, so DWARF's `decl_line` moved).
+  The printer now puts each name of parameter, result, type parameter and struct field groups and
+  const/var specs on its recorded line; names of equal type, doc and tag group (a doc no longer
+  printed twice); a signature keeps `)` on the results' line; a spec's or return's values follow
+  their `:go/breaks`. The forms are unchanged (SPEC.md, `box/`, `tamago/` too).
+- `bin/box-vendor purego-check` links with DWARF (no `-w`): the darwin launcher identical to the
+  originals'. `test/g2a/golines` compares every declared name's line; new printer case
+  `test/g2a/cases/s10_names`. Checks: g2a's printer tests, the round trip for tamago/amd64 and
+  linux/amd64 without regressions, `box-vendor roundtrip` 20/20, `tamago-vendor verify` and
+  `check` identical, the essential `bin/gate` passed (6m46s). Left: golines over std 1,622 of
+  1,742 files (from 1,574); the 120 others are local `var ( )` groups and labels one line off and
+  members of types held in a declaration's `:tag`, none affecting `decl_line`.
