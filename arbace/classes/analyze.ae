@@ -44,7 +44,7 @@
   true)
 
 (defn- class-exists? [n]
-  (boolean (or (decl n) (env/load-class n)
+  (boolean (or (decl n) (env/known? n)
                (and *source-lookup* *unit* (enter-from-source! n)))))
 
 (defn- default-import?
@@ -114,8 +114,10 @@
 (defn- class-tparams [n]
   (if-let [d (decl n)]
     (mapv :sym (or (:tparams d) (map #(if (symbol? %) % (first %)) (get-in d [:opts :type-params]))))
+    (env/reflected n :tparams
+      (fn [_]
     (when-let [c ^Class (env/load-class n)]
-      (mapv #(symbol (.getName ^java.lang.reflect.TypeVariable %)) (.getTypeParameters c)))))
+      (mapv #(symbol (.getName ^java.lang.reflect.TypeVariable %)) (.getTypeParameters c)))))))
 
 (defn implicit-outer
   "Inside a generic class, the simple name of one of its inner (non-static) member classes
@@ -155,11 +157,12 @@
                                 v))
                   (:meta d))]
       (if r (keyword (str/lower-case (name r))) :class))
-    (if-let [c (env/load-class n)]
-      (if-let [r (.getAnnotation ^Class c java.lang.annotation.Retention)]
-        (keyword (str/lower-case (str (.value ^java.lang.annotation.Retention r))))
-        :class)
-      :class)))
+    (or (env/reflected n :retention
+                       (fn [^Class c]
+                         (if-let [r (.getAnnotation c java.lang.annotation.Retention)]
+                           (keyword (str/lower-case (str (.value ^java.lang.annotation.Retention r))))
+                           :class)))
+        :class)))
 
 (defn- element-type
   "The return descriptor of annotation element `el` of annotation type n."
@@ -213,9 +216,10 @@
                                                 (resolve-class-sym (class-scope n) k)))
                         (set (map name (if (vector? v) v [v])))))
           (:meta d))
-    (when-let [c (env/load-class n)]
-      (when-let [t (.getAnnotation ^Class c java.lang.annotation.Target)]
-        (set (map str (.value ^java.lang.annotation.Target t)))))))
+    (env/reflected n :targets
+                   (fn [^Class c]
+                     (when-let [t (.getAnnotation c java.lang.annotation.Target)]
+                       (set (map str (.value ^java.lang.annotation.Target t))))))))
 
 (defn for-target
   "Annotations applicable to declaration context `target` (an ElementType name), as javac
@@ -1267,7 +1271,7 @@
       (resolve-class actx sym)
       (class-lit actx (t/internal->desc (resolve-class actx sym)))
 
-      (and (nil? ns-part) (re-find #"\." (name sym)) (env/load-class (str/replace (name sym) "." "/")))
+      (and (nil? ns-part) (re-find #"\." (name sym)) (env/known? (str/replace (name sym) "." "/")))
       (class-lit actx (t/internal->desc (str/replace (name sym) "." "/")))
 
       (resolve-var actx sym)
@@ -1876,16 +1880,18 @@
   [desc]
   (when (and (t/class-desc? desc) (not (clj-fi-excluded (t/desc->internal desc))))
     (let [n (t/desc->internal desc)]
-      (if-let [^Class c (env/load-class n)]
-        (when (.isAnnotationPresent c java.lang.FunctionalInterface)
-          (when-let [^java.lang.reflect.Method m
-                     (first (filter (fn [^java.lang.reflect.Method m]
-                                      (and (<= (.getParameterCount m) 10)
-                                           (java.lang.reflect.Modifier/isAbstract (.getModifiers m))
-                                           (not (#{"equals" "toString" "hashCode"} (.getName m)))))
-                                    (.getMethods c)))]
-            {:name (.getName m) :ps (mapv t/class->desc (.getParameterTypes m))
-             :ret (t/class->desc (.getReturnType m))}))
+      (if (env/known? n)
+        (env/reflected n :fi-method
+          (fn [^Class c]
+            (when (.isAnnotationPresent c java.lang.FunctionalInterface)
+              (when-let [^java.lang.reflect.Method m
+                         (first (filter (fn [^java.lang.reflect.Method m]
+                                          (and (<= (.getParameterCount m) 10)
+                                               (java.lang.reflect.Modifier/isAbstract (.getModifiers m))
+                                               (not (#{"equals" "toString" "hashCode"} (.getName m)))))
+                                        (.getMethods c)))]
+                {:name (.getName m) :ps (mapv t/class->desc (.getParameterTypes m))
+                 :ret (t/class->desc (.getReturnType m))}))))
         (when-let [d (and (env/from-source? n) (decl n))]
           (when (some #(= "Ljava/lang/FunctionalInterface;" (:type %)) (force (:annotations d)))
             (when-let [sam (try (find-sam n) (catch Exception _ nil))]
@@ -2079,14 +2085,16 @@
             params (map ip (:ps sam))
             iname (apply str "invoke" (concat (map code params)
                                               [(code (if (<= pc 2) (:ret sam) t/object-desc))]))
-            fn-invokers (Class/forName (str/replace (t/lang-class "FnInvokers") "/" "."))
-            ^java.lang.reflect.Method im (.getMethod fn-invokers iname
-                                                     (into-array Class (cons (Class/forName (str/replace (t/lang-class "IFn") "/" "."))
-                                                                             (map {"J" Long/TYPE "D" Double/TYPE t/object-desc Object} params))))]
+            ;; FnInvokers' method iname(IFn, params...), by its class info (from its class forms
+            ;; when they are compiled, as in a2g's world)
+            ips (str "(" (t/lang-desc "IFn") (apply str params) ")")
+            im (or (first (filter #(and (= iname (:name %)) (str/starts-with? (:desc %) ips))
+                                  (:methods (env/info! (t/lang-class "FnInvokers")))))
+                   (fail (str "No method " iname " in FnInvokers")))]
         {:op :fi-adapter :expr node :type to :sam-name (:name sam)
          :sam-desc (t/method-desc (:ps sam) (:ret sam))
          :invoker iname
-         :invoker-desc (t/method-desc (map t/class->desc (.getParameterTypes im)) (t/class->desc (.getReturnType im)))})
+         :invoker-desc (:desc im)})
       (and (t/ref? from) (cast-fn to))
       {:op :invoke :kind :static :owner rt :itf false :name (cast-fn to)
        :desc (str "(Ljava/lang/Object;)" to) :target nil :args [node] :type to}
@@ -3196,6 +3204,8 @@
                  :type-annotations (:type-annotations m)
                  :params (mapv #(or (:tn %) (t/desc->tnode (:desc %))) (:params m))
                  :bounds (:bounds (:scope m))})}
+    (env/reflected n :generics
+      (fn [_]
     (when-let [c ^Class (env/load-class n)]
       {:tparams (mapv #(symbol (.getName ^java.lang.reflect.TypeVariable %)) (.getTypeParameters c))
        :supers (remove nil? (cons (some-> (.getGenericSuperclass c) t/reflect->tnode)
@@ -3207,7 +3217,7 @@
                    :throws (mapv #(str/replace (.getName ^Class %) "." "/") (.getExceptionTypes m))
                    :params (mapv t/reflect->tnode (.getGenericParameterTypes m))
                    :bounds (into {} (for [^java.lang.reflect.TypeVariable tv (.getTypeParameters m)]
-                                      [(symbol (.getName tv)) (mapv t/reflect->tnode (.getBounds tv))]))})})))
+                                      [(symbol (.getName tv)) (mapv t/reflect->tnode (.getBounds tv))]))})})))))
 
 (defn- supertype-envs
   "For every supertype S of class n: S -> substitution of S's type variables in n's terms (nil
@@ -3904,11 +3914,12 @@
           rd (t/internal->desc rn)
           info (env/info! rn)
           comps (or (:components info)
-                    (when-let [c (env/load-class rn)]
-                      (when (.isRecord ^Class c)
-                        (for [rc (.getRecordComponents ^Class c)]
-                          {:name (.getName ^java.lang.reflect.RecordComponent rc)
-                           :desc (t/class->desc (.getType ^java.lang.reflect.RecordComponent rc))})))
+                    (env/reflected rn :record-components
+                                   (fn [^Class c]
+                                     (when (.isRecord c)
+                                       (vec (for [rc (.getRecordComponents c)]
+                                              {:name (.getName ^java.lang.reflect.RecordComponent rc)
+                                               :desc (t/class->desc (.getType ^java.lang.reflect.RecordComponent rc))})))))
                     (fail (str (first form) " is not a record")))
           _ (when-not (= (count comps) (count (rest form)))
               (fail (str "Record pattern " (first form) " needs " (count comps) " component patterns")))
@@ -4143,10 +4154,14 @@
 (defn- xop [d base] (.getOpcode (Type/getType (if (keyword? d) t/object-desc d)) (int base)))
 
 (defn- add-accessor!
-  "Registers accessor method code (emitted with the class); returns its name."
-  [o code desc emit-body]
+  "Registers accessor method code (emitted with the class) and, as data, the one member
+  instruction it holds, target {:insn :owner :name :desc :itf} (:insn :getfield, :putfield,
+  :getstatic, :putstatic, :invokevirtual, :invokestatic or :invokespecial: what a2g reads,
+  arbace.a2g.access); returns its name."
+  [o code desc target emit-body]
   (let [anum (dec (get (swap! (state o) update :access-count (fnil inc 0)) :access-count))
         nm (str "access$" anum (quot code 10) (mod code 10))]
+    (swap! (state o) update :accessors assoc nm target)
     (swap! (state o) update :extra-methods (fnil conj [])
            (fn [^ClassWriter cw]
              (let [mv (.visitMethod cw (bit-or Opcodes/ACC_STATIC Opcodes/ACC_SYNTHETIC) nm desc nil nil)]
@@ -4198,6 +4213,10 @@
               ps (cond-> [] (not static?) (conj od) write? (conj fd))
               desc (t/method-desc ps fd)
               nm (add-accessor! o (if write? 2 0) desc
+                                {:insn (if static?
+                                         (if write? :putstatic :getstatic)
+                                         (if write? :putfield :getfield))
+                                 :owner o :name (:name f) :desc fd}
                                 (fn [^MethodVisitor mv]
                                   (load-params mv ps 0)
                                   (when write?
@@ -4223,6 +4242,8 @@
               ps (if static? mps (into [od] mps))
               desc (t/method-desc ps r)
               nm (add-accessor! o 0 desc
+                                {:insn (if static? :invokestatic :invokevirtual)
+                                 :owner o :name (:name node) :desc (:desc node) :itf false}
                                 (fn [^MethodVisitor mv]
                                   (load-params mv ps 0)
                                   (.visitMethodInsn mv (if static? Opcodes/INVOKESTATIC Opcodes/INVOKEVIRTUAL)
@@ -4247,6 +4268,7 @@
         ps (into [od] mps)
         desc (t/method-desc ps r)
         nm (add-accessor! o 1 desc
+                          {:insn :invokespecial :owner sup :name mname :desc (:desc m) :itf false}
                           (fn [^MethodVisitor mv]
                             (load-params mv ps 0)
                             (.visitMethodInsn mv Opcodes/INVOKESPECIAL sup mname (:desc m) false)
