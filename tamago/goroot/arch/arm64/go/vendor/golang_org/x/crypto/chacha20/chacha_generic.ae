@@ -1,0 +1,397 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; Package chacha20 implements the ChaCha20 and XChaCha20 encryption algorithms
+;; as specified in RFC 8439 and draft-irtf-cfrg-xchacha-01.
+(in-ns 'go.vendor.golang_org.x.crypto.chacha20) (go/file "chacha_generic.go" :doc "Package chacha20 implements the ChaCha20 and XChaCha20 encryption algorithms\nas specified in RFC 8439 and draft-irtf-cfrg-xchacha-01.\n" :imports [
+
+
+    ^{:line 10} [cipher "crypto/cipher"]
+    ^{:line 11} [binary "encoding/binary"]
+    ^{:line 12} [errors "errors"]
+    ^{:line 13} [bits "math/bits"]
+
+    ^{:line 15} [alias "golang.org/x/crypto/internal/alias"]])
+
+
+(go/const
+
+  ^{:line 20} [^{:val 32 :doc "KeySize is the size of the key used by this cipher, in bytes.\n"} KeySize 32]
+
+
+
+
+
+
+  ^{:line 27} [^{:val 12 :doc "NonceSize is the size of the nonce used with the standard variant of this\ncipher, in bytes.\n\nNote that this is too short to be safely generated at random if the same\nkey is reused more than 2³² times.\n"} NonceSize 12]
+
+
+
+  ^{:line 31} [^{:val 24 :doc "NonceSizeX is the size of the nonce used with the XChaCha20 variant of\nthis cipher, in bytes.\n"} NonceSizeX 24])
+
+
+
+
+(go/type Cipher "Cipher is a stateful instance of ChaCha20 or XChaCha20 using a particular key\nand nonce. A *Cipher implements the cipher.Stream interface.\n" (struct
+
+
+    ^{:line 39 :tag (array 8 uint32) :doc "The ChaCha20 state is 16 words: 4 constant, 8 of key, 1 of counter\n(incremented after each block), and 3 of nonce.\n"} key
+    ^{:line 40 :tag uint32} counter
+    ^{:line 41 :tag (array 3 uint32)} nonce
+
+
+
+
+    ^{:line 46 :tag (array bufSize byte) :doc "The last len bytes of buf are leftover key stream bytes from the previous\nXORKeyStream invocation. The size of buf depends on how many blocks are\ncomputed at a time by xorKeyStreamBlocks.\n"} buf
+    ^{:line 47 :tag int} len
+
+
+
+    ^{:line 51 :tag bool :doc "overflow is set when the counter overflowed, no more blocks can be\ngenerated, and the next XORKeyStream call should panic.\n"} overflow
+
+
+
+    ^{:line 55 :tag bool :doc "The counter-independent results of the first round are cached after they\nare computed the first time.\n"} precompDone
+    ^{:line 56 :tag uint32} p1 ^uint32 p5 ^uint32 p9 ^uint32 p13
+    ^{:line 57 :tag uint32} p2 ^uint32 p6 ^uint32 p10 ^uint32 p14
+    ^{:line 58 :tag uint32} p3 ^uint32 p7 ^uint32 p11 ^uint32 p15))
+
+
+(go/var ^cipher/Stream _ (conv (* Cipher) nil))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 78} (go/func NewUnauthenticatedCipher "NewUnauthenticatedCipher creates a new ChaCha20 stream cipher with the given\n32 bytes key and a 12 or 24 bytes nonce. If a nonce of 24 bytes is provided,\nthe XChaCha20 construction will be used. It returns an error if key or nonce\nhave any other length.\n\nNote that ChaCha20, like all stream ciphers, is not authenticated and allows\nattackers to silently tamper with the plaintext. For this reason, it is more\nappropriate as a building block than as a standalone encryption mechanism.\nInstead, consider using package golang.org/x/crypto/chacha20poly1305.\n" [^{:tag (slice byte)} key ^{:tag (slice byte)} nonce] :results [(* Cipher) error]
+  ;; This function is split into a wrapper so that the Cipher allocation will
+  ;; be inlined, and depending on how the caller uses the return value, won't
+  ;; escape to the heap.
+  (let [c (addr (lit Cipher))]
+    (newUnauthenticatedCipher c key nonce)))
+
+
+^{:go/end 113} (go/func newUnauthenticatedCipher [^{:tag (* Cipher)} c ^{:tag (slice byte)} key ^{:tag (slice byte)} nonce] :results [(* Cipher) error]
+  (when (!= (len key) KeySize)
+    (return nil (errors/New "chacha20: wrong key size")))
+
+  (cond (== (len nonce) NonceSizeX) (do
+      ;; XChaCha20 uses the ChaCha20 core to mix 16 bytes of the nonce into a
+      ;; derived key, allowing it to operate on a nonce of 24 bytes. See
+      ;; draft-irtf-cfrg-xchacha-01, Section 2.3.
+      (set! (values key _) (HChaCha20 key (subslice nonce 0 16)))
+      (let [cNonce (make (slice byte) NonceSize)]
+        (copy (subslice cNonce 4 12) (subslice nonce 16 24))
+        (set! nonce cNonce)))
+    (!= (len nonce) NonceSize)
+    (return nil (errors/New "chacha20: wrong nonce size")))
+
+
+  (set! (values key nonce) (values (subslice key _ KeySize) (subslice nonce _ NonceSize))) ; bounds check elimination hint
+  (set! (.-key c) (lit (array 8 uint32)
+      (.Uint32 binary/LittleEndian (subslice key 0 4))
+      (.Uint32 binary/LittleEndian (subslice key 4 8))
+      (.Uint32 binary/LittleEndian (subslice key 8 12))
+      (.Uint32 binary/LittleEndian (subslice key 12 16))
+      (.Uint32 binary/LittleEndian (subslice key 16 20))
+      (.Uint32 binary/LittleEndian (subslice key 20 24))
+      (.Uint32 binary/LittleEndian (subslice key 24 28))
+      (.Uint32 binary/LittleEndian (subslice key 28 32))))
+
+  (set! (.-nonce c) (lit (array 3 uint32)
+      (.Uint32 binary/LittleEndian (subslice nonce 0 4))
+      (.Uint32 binary/LittleEndian (subslice nonce 4 8))
+      (.Uint32 binary/LittleEndian (subslice nonce 8 12))))
+
+  (return c nil))
+
+
+
+(go/const "The constant first 4 words of the ChaCha20 state.\n"
+  ^{:line 117} [^{:tag uint32 :val 1634760805} j0 0x61707865] ; expa
+  ^{:line 118} [^{:tag uint32 :val 857760878} j1 0x3320646e] ; nd 3
+  ^{:line 119} [^{:tag uint32 :val 2036477234} j2 0x79622d32] ; 2-by
+  ^{:line 120} [^{:tag uint32 :val 1797285236} j3 0x6b206574]) ; te k
+
+
+(go/const ^{:val 64} blockSize 64)
+
+
+
+
+^{:go/end 142} (go/func quarterRound "quarterRound is the core of ChaCha20. It shuffles the bits of 4 state words.\nIt's executed 4 times for each of the 20 ChaCha20 rounds, operating on all 16\nwords each round, in columnar or diagonal groups of 4 at a time.\n" [^uint32 a ^uint32 b ^uint32 c ^uint32 d] :results [uint32 uint32 uint32 uint32]
+  (set! a + b)
+  (set! d bit-xor a)
+  (set! d (bits/RotateLeft32 d 16))
+  (set! c + d)
+  (set! b bit-xor c)
+  (set! b (bits/RotateLeft32 b 12))
+  (set! a + b)
+  (set! d bit-xor a)
+  (set! d (bits/RotateLeft32 d 8))
+  (set! c + d)
+  (set! b bit-xor c)
+  (set! b (bits/RotateLeft32 b 7))
+  (return a b c d))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 172} (go/method SetCounter "SetCounter sets the Cipher counter. The next invocation of XORKeyStream will\nbehave as if (64 * counter) bytes had been encrypted so far.\n\nTo prevent accidental counter reuse, SetCounter panics if counter is less\nthan the current value.\n\nNote that the execution time of XORKeyStream is not independent of the\ncounter value.\n" [^{:tag (* Cipher)} s ^uint32 counter]
+  ;; Internally, s may buffer multiple blocks, which complicates this
+  ;; implementation slightly. When checking whether the counter has rolled
+  ;; back, we must use both s.counter and s.len to determine how many blocks
+  ;; we have already output.
+  (let [outputCounter (- (.-counter s) (/ (conv uint32 (.-len s)) blockSize))]
+    (when (or (.-overflow s) (< counter outputCounter))
+      (panic "chacha20: SetCounter attempted to rollback counter"))
+
+
+    ;; In the general case, we set the new counter value and reset s.len to 0,
+    ;; causing the next call to XORKeyStream to refill the buffer. However, if
+    ;; we're advancing within the existing buffer, we can save work by simply
+    ;; setting s.len.
+    (if (< counter (.-counter s))
+      (set! (.-len s) (* (conv int (- (.-counter s) counter)) blockSize))
+      (do
+        (set! (.-counter s) counter)
+        (set! (.-len s) 0)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 254} (go/method XORKeyStream "XORKeyStream XORs each byte in the given slice with a byte from the\ncipher's key stream. Dst and src must overlap entirely or not at all.\n\nIf len(dst) < len(src), XORKeyStream will panic. It is acceptable\nto pass a dst bigger than src, and in that case, XORKeyStream will\nonly update dst[:len(src)] and will not touch the rest of dst.\n\nMultiple calls to XORKeyStream behave as if the concatenation of\nthe src buffers was passed in a single run. That is, Cipher\nmaintains state and does not reset at each XORKeyStream call.\n" [^{:tag (* Cipher)} s ^{:tag (slice byte)} dst ^{:tag (slice byte)} src]
+  (when (== (len src) 0)
+    (return))
+
+  (when (< (len dst) (len src))
+    (panic "chacha20: output smaller than input"))
+
+  (set! dst (subslice dst _ (len src)))
+  (when (alias/InexactOverlap dst src)
+    (panic "chacha20: invalid buffer overlap"))
+
+
+  ;; First, drain any remaining key stream from a previous XORKeyStream.
+  (when (!= (.-len s) 0)
+    (let [keyStream (subslice (.-buf s) (- bufSize (.-len s)))]
+      (when (< (len src) (len keyStream))
+        (set! keyStream (subslice keyStream _ (len src))))
+
+      (set! _ (aget src (- (len keyStream) 1))) ; bounds check elimination hint
+      (range [i b keyStream]
+        (aset dst i (bit-xor (aget src i) b)))
+
+      (set! (.-len s) - (len keyStream))
+      (set! (values dst src) (values (subslice dst (len keyStream)) (subslice src (len keyStream))))))
+
+  (when (== (len src) 0)
+    (return))
+
+
+  ;; If we'd need to let the counter overflow and keep generating output,
+  ;; panic immediately. If instead we'd only reach the last block, remember
+  ;; not to generate any more output after the buffer is drained.
+  (let [numBlocks (/ (- (+ (conv uint64 (len src)) blockSize) 1) blockSize)]
+    (cond (or (.-overflow s) (> (+ (conv uint64 (.-counter s)) numBlocks) (<< 1 32)))
+      (panic "chacha20: counter overflow")
+      (== (+ (conv uint64 (.-counter s)) numBlocks) (<< 1 32))
+      (set! (.-overflow s) true))
+
+
+    ;; xorKeyStreamBlocks implementations expect input lengths that are a
+    ;; multiple of bufSize. Platform-specific ones process multiple blocks at a
+    ;; time, so have bufSizes that are a multiple of blockSize.
+
+    (let [full (- (len src) (% (len src) bufSize))]
+      (when (> full 0)
+        (.xorKeyStreamBlocks s (subslice dst _ full) (subslice src _ full)))
+
+      (set! (values dst src) (values (subslice dst full) (subslice src full)))
+
+      ;; If using a multi-block xorKeyStreamBlocks would overflow, use the generic
+      ;; one that does one block at a time.
+      (let [^:const ^{:val 4} blocksPerBuf (/ bufSize blockSize)]
+        (when (> (+ (conv uint64 (.-counter s)) blocksPerBuf) (<< 1 32))
+          (set! (.-buf s) (lit (array bufSize byte)))
+          (let [numBlocks (/ (- (+ (len src) blockSize) 1) blockSize)
+              ^{:line 239} buf (subslice (.-buf s) (- bufSize (* numBlocks blockSize)))]
+            (copy buf src)
+            (.xorKeyStreamBlocksGeneric s buf buf)
+            (set! (.-len s) (- (len buf) (copy dst buf)))
+            (return)))
+
+
+        ;; If we have a partial (multi-)block, pad it for xorKeyStreamBlocks, and
+        ;; keep the leftover keystream for the next XORKeyStream invocation.
+        (when (> (len src) 0)
+          (set! (.-buf s) (lit (array bufSize byte)))
+          (copy (subslice (.-buf s)) src)
+          (.xorKeyStreamBlocks s (subslice (.-buf s)) (subslice (.-buf s)))
+          (set! (.-len s) (- bufSize (copy dst (subslice (.-buf s))))))))))
+
+
+
+^{:go/end 339} (go/method xorKeyStreamBlocksGeneric [^{:tag (* Cipher)} s ^{:tag (slice byte)} dst ^{:tag (slice byte)} src]
+  (when (or (!= (len dst) (len src)) (!= (% (len dst) blockSize) 0))
+    (panic "chacha20: internal error: wrong dst and/or src length"))
+
+
+  ;; To generate each block of key stream, the initial cipher state
+  ;; (represented below) is passed through 20 rounds of shuffling,
+  ;; alternatively applying quarterRounds by columns (like 1, 5, 9, 13)
+  ;; or by diagonals (like 1, 6, 11, 12).
+  ;;
+  ;;      0:cccccccc   1:cccccccc   2:cccccccc   3:cccccccc
+  ;;      4:kkkkkkkk   5:kkkkkkkk   6:kkkkkkkk   7:kkkkkkkk
+  ;;      8:kkkkkkkk   9:kkkkkkkk  10:kkkkkkkk  11:kkkkkkkk
+  ;;     12:bbbbbbbb  13:nnnnnnnn  14:nnnnnnnn  15:nnnnnnnn
+  ;;
+  ;;            c=constant k=key b=blockcount n=nonce
+  (let [
+      ^:var (values c0 c1 c2 c3) (values j0 j1 j2 j3)
+      ^:var (values c4 c5 c6 c7) (values (aget (.-key s) 0) (aget (.-key s) 1) (aget (.-key s) 2) (aget (.-key s) 3))
+      ^:var (values c8 c9 c10 c11) (values (aget (.-key s) 4) (aget (.-key s) 5) (aget (.-key s) 6) (aget (.-key s) 7))
+      ^:var (values _ c13 c14 c15) (values (.-counter s) (aget (.-nonce s) 0) (aget (.-nonce s) 1) (aget (.-nonce s) 2))]
+
+
+    ;; Three quarters of the first round don't depend on the counter, so we can
+    ;; calculate them here, and reuse them for multiple blocks in the loop, and
+    ;; for future XORKeyStream invocations.
+    (when (not (.-precompDone s))
+      (set! (values (.-p1 s) (.-p5 s) (.-p9 s) (.-p13 s)) (quarterRound c1 c5 c9 c13))
+      (set! (values (.-p2 s) (.-p6 s) (.-p10 s) (.-p14 s)) (quarterRound c2 c6 c10 c14))
+      (set! (values (.-p3 s) (.-p7 s) (.-p11 s) (.-p15 s)) (quarterRound c3 c7 c11 c15))
+      (set! (.-precompDone s) true))
+
+
+    ;; A condition of len(src) > 0 would be sufficient, but this also
+    ;; acts as a bounds check elimination hint.
+    (while (and (>= (len src) 64) (>= (len dst) 64))
+      ;; The remainder of the first column round.
+      (let [(values fcr0 fcr4 fcr8 fcr12) (quarterRound c0 c4 c8 (.-counter s))
+
+          ;; The second diagonal round.
+          (values x0 x5 x10 x15) (quarterRound fcr0 (.-p5 s) (.-p10 s) (.-p15 s))
+          (values x1 x6 x11 x12) (quarterRound (.-p1 s) (.-p6 s) (.-p11 s) fcr12)
+          (values x2 x7 x8 x13) (quarterRound (.-p2 s) (.-p7 s) fcr8 (.-p13 s))
+          (values x3 x4 x9 x14) (quarterRound (.-p3 s) fcr4 (.-p9 s) (.-p14 s))]
+
+        ;; The remaining 18 rounds.
+        (for [i 0] (< i 9) (inc! i)
+          ;; Column round.
+          (set! (values x0 x4 x8 x12) (quarterRound x0 x4 x8 x12))
+          (set! (values x1 x5 x9 x13) (quarterRound x1 x5 x9 x13))
+          (set! (values x2 x6 x10 x14) (quarterRound x2 x6 x10 x14))
+          (set! (values x3 x7 x11 x15) (quarterRound x3 x7 x11 x15))
+
+          ;; Diagonal round.
+          (set! (values x0 x5 x10 x15) (quarterRound x0 x5 x10 x15))
+          (set! (values x1 x6 x11 x12) (quarterRound x1 x6 x11 x12))
+          (set! (values x2 x7 x8 x13) (quarterRound x2 x7 x8 x13))
+          (set! (values x3 x4 x9 x14) (quarterRound x3 x4 x9 x14)))
+
+
+        ;; Add back the initial state to generate the key stream, then
+        ;; XOR the key stream with the source and write out the result.
+        (addXor (subslice dst 0 4) (subslice src 0 4) x0 c0)
+        (addXor (subslice dst 4 8) (subslice src 4 8) x1 c1)
+        (addXor (subslice dst 8 12) (subslice src 8 12) x2 c2)
+        (addXor (subslice dst 12 16) (subslice src 12 16) x3 c3)
+        (addXor (subslice dst 16 20) (subslice src 16 20) x4 c4)
+        (addXor (subslice dst 20 24) (subslice src 20 24) x5 c5)
+        (addXor (subslice dst 24 28) (subslice src 24 28) x6 c6)
+        (addXor (subslice dst 28 32) (subslice src 28 32) x7 c7)
+        (addXor (subslice dst 32 36) (subslice src 32 36) x8 c8)
+        (addXor (subslice dst 36 40) (subslice src 36 40) x9 c9)
+        (addXor (subslice dst 40 44) (subslice src 40 44) x10 c10)
+        (addXor (subslice dst 44 48) (subslice src 44 48) x11 c11)
+        (addXor (subslice dst 48 52) (subslice src 48 52) x12 (.-counter s))
+        (addXor (subslice dst 52 56) (subslice src 52 56) x13 c13)
+        (addXor (subslice dst 56 60) (subslice src 56 60) x14 c14)
+        (addXor (subslice dst 60 64) (subslice src 60 64) x15 c15)
+
+        (set! (.-counter s) + 1)
+
+        (set! (values src dst) (values (subslice src blockSize) (subslice dst blockSize)))))))
+
+
+
+
+
+
+^{:go/end 350} (go/func HChaCha20 "HChaCha20 uses the ChaCha20 core to generate a derived key from a 32 bytes\nkey and a 16 bytes nonce. It returns an error if key or nonce have any other\nlength. It is used as part of the XChaCha20 construction.\n" [^{:tag (slice byte)} key ^{:tag (slice byte)} nonce] :results [(slice byte) error]
+  ;; This function is split into a wrapper so that the slice allocation will
+  ;; be inlined, and depending on how the caller uses the return value, won't
+  ;; escape to the heap.
+  (let [out (make (slice byte) 32)]
+    (hChaCha20 out key nonce)))
+
+
+^{:go/end 398} (go/func hChaCha20 [^{:tag (slice byte)} out ^{:tag (slice byte)} key ^{:tag (slice byte)} nonce] :results [(slice byte) error]
+  (when (!= (len key) KeySize)
+    (return nil (errors/New "chacha20: wrong HChaCha20 key size")))
+
+  (when (!= (len nonce) 16)
+    (return nil (errors/New "chacha20: wrong HChaCha20 nonce size")))
+
+
+  (let [(values x0 x1 x2 x3) (values j0 j1 j2 j3)
+      ^{:line 361} x4 (.Uint32 binary/LittleEndian (subslice key 0 4))
+      ^{:line 362} x5 (.Uint32 binary/LittleEndian (subslice key 4 8))
+      ^{:line 363} x6 (.Uint32 binary/LittleEndian (subslice key 8 12))
+      ^{:line 364} x7 (.Uint32 binary/LittleEndian (subslice key 12 16))
+      ^{:line 365} x8 (.Uint32 binary/LittleEndian (subslice key 16 20))
+      ^{:line 366} x9 (.Uint32 binary/LittleEndian (subslice key 20 24))
+      ^{:line 367} x10 (.Uint32 binary/LittleEndian (subslice key 24 28))
+      ^{:line 368} x11 (.Uint32 binary/LittleEndian (subslice key 28 32))
+      ^{:line 369} x12 (.Uint32 binary/LittleEndian (subslice nonce 0 4))
+      ^{:line 370} x13 (.Uint32 binary/LittleEndian (subslice nonce 4 8))
+      ^{:line 371} x14 (.Uint32 binary/LittleEndian (subslice nonce 8 12))
+      ^{:line 372} x15 (.Uint32 binary/LittleEndian (subslice nonce 12 16))]
+
+    (for [i 0] (< i 10) (inc! i)
+      ;; Diagonal round.
+      (set! (values x0 x4 x8 x12) (quarterRound x0 x4 x8 x12))
+      (set! (values x1 x5 x9 x13) (quarterRound x1 x5 x9 x13))
+      (set! (values x2 x6 x10 x14) (quarterRound x2 x6 x10 x14))
+      (set! (values x3 x7 x11 x15) (quarterRound x3 x7 x11 x15))
+
+      ;; Column round.
+      (set! (values x0 x5 x10 x15) (quarterRound x0 x5 x10 x15))
+      (set! (values x1 x6 x11 x12) (quarterRound x1 x6 x11 x12))
+      (set! (values x2 x7 x8 x13) (quarterRound x2 x7 x8 x13))
+      (set! (values x3 x4 x9 x14) (quarterRound x3 x4 x9 x14)))
+
+
+    (set! _ (aget out 31)) ; bounds check elimination hint
+    (.PutUint32 binary/LittleEndian (subslice out 0 4) x0)
+    (.PutUint32 binary/LittleEndian (subslice out 4 8) x1)
+    (.PutUint32 binary/LittleEndian (subslice out 8 12) x2)
+    (.PutUint32 binary/LittleEndian (subslice out 12 16) x3)
+    (.PutUint32 binary/LittleEndian (subslice out 16 20) x12)
+    (.PutUint32 binary/LittleEndian (subslice out 20 24) x13)
+    (.PutUint32 binary/LittleEndian (subslice out 24 28) x14)
+    (.PutUint32 binary/LittleEndian (subslice out 28 32) x15)
+    (return out nil)))

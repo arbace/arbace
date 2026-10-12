@@ -1,0 +1,56 @@
+#!/bin/bash
+# The box on the Mac (B1b S4, doc/go/BOX-NOTES.md, "S4", BX66): a tarball for a Mac with Apple
+# silicon (Hypervisor.framework), built here, that the user copies to the Mac and runs there:
+#
+#   target/arbace-go/arbace-box-mac-arm64.tar.gz
+#     arbace-box-mac-arm64/arbace-box               the launcher, darwin/arm64, cgo off (purego,
+#                                                   box/go/arbace/box/purego: BX62)
+#     arbace-box-mac-arm64/arbace-box.elf           the arm64 guest (bin/arbace-go --build --box,
+#                                                   ARBACE_BOX_ARCHES=arm64), beside the launcher:
+#                                                   the code signature covers the Mach-O alone
+#     arbace-box-mac-arm64/hv.test                  hv's tests for darwin/arm64 (the framework's)
+#     arbace-box-mac-arm64/arbace-box.entitlements  com.apple.security.hypervisor
+#     arbace-box-mac-arm64/mac.sh                   the checklist (box/mac/mac.sh), after go-whim's
+#                                                   guest/mac/mac.sh
+#     arbace-box-mac-arm64/README.txt, VERSION
+#
+#   bin/box-mac-bundle            build the arm64 guest when missing, the launcher and hv.test,
+#                                 and the tarball
+#
+# On the Mac: tar xzf arbace-box-mac-arm64.tar.gz && cd arbace-box-mac-arm64 && ./mac.sh all;
+# then send back mac-results.tar.gz (README.txt).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+dir=$root/target/arbace-go
+tg=${G2A_GOROOT:-/root/tamago-go}
+name=arbace-box-mac-arm64
+b=$dir/$name
+. "$root/bin/lib/version.bash"
+v=$(arbace_version "$root")
+
+if [ ! -s "$dir/box-arm64/arbace.elf" ]; then
+  echo "== the arm64 guest (ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box)" >&2
+  (cd "$root" && ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box) >&2
+fi
+rm -rf "$b" "$dir/$name.tar.gz"
+mkdir -p "$b"
+echo "== the launcher for darwin/arm64 (bin/g2a build --goos darwin)" >&2
+(cd "$root" && bin/g2a build --module arbace --goos darwin --arch arm64 --work "$dir/work-box-launcher-darwin" \
+   -o "$b/arbace-box" "$root/box") > "$dir/build-box-mac.log" 2>&1 \
+  || { tail -20 "$dir/build-box-mac.log" >&2; exit 1; }
+echo "== hv's tests for darwin/arm64" >&2
+(cd "$root" && bin/g2a build --print-only --tests --module arbace --layout lines --work "$dir/work-box-mac-tests" box) \
+  >> "$dir/build-box-mac.log" 2>&1
+(cd "$dir/work-box-mac-tests/mod" && env GOOS=darwin GOARCH=arm64 GOARM64=v8.0 CGO_ENABLED=0 GOROOT="$tg" \
+   GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOPROXY=off "$tg/bin/go" test -c -o "$b/hv.test" arbace/box/hv) \
+  >> "$dir/build-box-mac.log" 2>&1 || { tail -20 "$dir/build-box-mac.log" >&2; exit 1; }
+cp "$dir/box-arm64/arbace.elf" "$b/arbace-box.elf"
+cp "$root/box/mac/mac.sh" "$root/box/mac/arbace-box.entitlements" "$root/box/mac/README.txt" "$b/"
+chmod +x "$b/mac.sh" "$b/arbace-box" "$b/hv.test"
+{
+  echo "arbace $v"
+  echo "built $(date -u +%Y-%m-%dT%H:%M:%SZ) on $(uname -m) Linux"
+  (cd "$b" && sha256sum arbace-box arbace-box.elf hv.test mac.sh)
+} > "$b/VERSION"
+tar -C "$dir" --owner=0 --group=0 -czf "$dir/$name.tar.gz" "$name"
+echo "box-mac-bundle: $dir/$name.tar.gz ($(stat -c %s "$dir/$name.tar.gz") bytes): the launcher $(stat -c %s "$b/arbace-box"), the guest $(stat -c %s "$b/arbace-box.elf"), hv.test $(stat -c %s "$b/hv.test")" >&2

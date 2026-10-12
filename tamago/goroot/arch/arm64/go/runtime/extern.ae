@@ -1,0 +1,386 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; /*
+;; Package runtime contains operations that interact with Go's runtime system,
+;; such as functions to control goroutines. It also includes the low-level type information
+;; used by the reflect package; see [reflect]'s documentation for the programmable
+;; interface to the run-time type system.
+;; 
+;; # Environment Variables
+;; 
+;; The following environment variables ($name or %name%, depending on the host
+;; operating system) control the run-time behavior of Go programs. The meanings
+;; and use may change from release to release.
+;; 
+;; The GOGC variable sets the initial garbage collection target percentage.
+;; A collection is triggered when the ratio of freshly allocated data to live data
+;; remaining after the previous collection reaches this percentage. The default
+;; is GOGC=100. Setting GOGC=off disables the garbage collector entirely.
+;; [runtime/debug.SetGCPercent] allows changing this percentage at run time.
+;; 
+;; The GOMEMLIMIT variable sets a soft memory limit for the runtime. This memory limit
+;; includes the Go heap and all other memory managed by the runtime, and excludes
+;; external memory sources such as mappings of the binary itself, memory managed in
+;; other languages, and memory held by the operating system on behalf of the Go
+;; program. GOMEMLIMIT is a numeric value in bytes with an optional unit suffix.
+;; The supported suffixes include B, KiB, MiB, GiB, and TiB. These suffixes
+;; represent quantities of bytes as defined by the IEC 80000-13 standard. That is,
+;; they are based on powers of two: KiB means 2^10 bytes, MiB means 2^20 bytes,
+;; and so on. The default setting is [math.MaxInt64], which effectively disables the
+;; memory limit. [runtime/debug.SetMemoryLimit] allows changing this limit at run
+;; time.
+;; 
+;; The GODEBUG variable controls debugging variables within the runtime.
+;; It is a comma-separated list of name=val pairs setting these named variables:
+;; 
+;; clobberfree: setting clobberfree=1 causes the garbage collector to
+;; clobber the memory content of an object with bad content when it frees
+;; the object.
+;; 
+;; cpu.*: cpu.all=off disables the use of all optional instruction set extensions.
+;; cpu.extension=off disables use of instructions from the specified instruction set extension.
+;; extension is the lower case name for the instruction set extension such as sse41 or avx
+;; as listed in internal/cpu package. As an example cpu.avx=off disables runtime detection
+;; and thereby use of AVX instructions.
+;; 
+;; cgocheck: setting cgocheck=0 disables all checks for packages
+;; using cgo to incorrectly pass Go pointers to non-Go code.
+;; Setting cgocheck=1 (the default) enables relatively cheap
+;; checks that may miss some errors. A more complete, but slow,
+;; cgocheck mode can be enabled using GOEXPERIMENT (which
+;; requires a rebuild), see https://pkg.go.dev/internal/goexperiment for details.
+;; 
+;; checkfinalizers: setting checkfinalizers=1 causes the garbage collector to run
+;; multiple partial non-parallel stop-the-world collections to identify common issues with
+;; finalizers and cleanups, like those listed at
+;; https://go.dev/doc/gc-guide#Finalizers_cleanups_and_weak_pointers. If a potential issue
+;; is found, the program will terminate with a description of all potential issues, the
+;; associated values, and a list of those values' finalizers and cleanups, including where
+;; they were created. It also adds tracking for tiny blocks to help diagnose issues with
+;; those as well. The analysis performed during the partial collection is conservative.
+;; Notably, it flags any path back to the original object from the cleanup function,
+;; cleanup arguments, or finalizer function as a potential issue, even if that path might
+;; be severed sometime later during execution (though this is not a recommended pattern).
+;; This mode also produces one line of output to stderr every GC cycle with information
+;; about the finalizer and cleanup queue lengths. Lines produced by this mode start with
+;; "checkfinalizers:".
+;; 
+;; decoratemappings: controls whether the Go runtime annotates OS
+;; anonymous memory mappings with context about their purpose. These
+;; annotations appear in /proc/self/maps and /proc/self/smaps as
+;; "[anon: Go: ...]". This setting is only used on Linux. For Go 1.25, it
+;; defaults to `decoratemappings=1`, enabling annotations. Using
+;; `decoratemappings=0` reverts to the pre-Go 1.25 behavior.
+;; 
+;; disablethp: setting disablethp=1 on Linux disables transparent huge pages for the heap.
+;; It has no effect on other platforms. disablethp is meant for compatibility with versions
+;; of Go before 1.21, which stopped working around a Linux kernel default that can result
+;; in significant memory overuse. See https://go.dev/issue/64332. This setting will be
+;; removed in a future release, so operators should tweak their Linux configuration to suit
+;; their needs before then. See https://go.dev/doc/gc-guide#Linux_transparent_huge_pages.
+;; 
+;; dontfreezetheworld: by default, the start of a fatal panic or throw
+;; "freezes the world", preempting all threads to stop all running
+;; goroutines, which makes it possible to traceback all goroutines, and
+;; keeps their state close to the point of panic. Setting
+;; dontfreezetheworld=1 disables this preemption, allowing goroutines to
+;; continue executing during panic processing. Note that goroutines that
+;; naturally enter the scheduler will still stop. This can be useful when
+;; debugging the runtime scheduler, as freezetheworld perturbs scheduler
+;; state and thus may hide problems.
+;; 
+;; efence: setting efence=1 causes the allocator to run in a mode
+;; where each object is allocated on a unique page and addresses are
+;; never recycled.
+;; 
+;; gccheckmark: setting gccheckmark=1 enables verification of the
+;; garbage collector's concurrent mark phase by performing a
+;; second mark pass while the world is stopped.  If the second
+;; pass finds a reachable object that was not found by concurrent
+;; mark, the garbage collector will panic.
+;; 
+;; gcpacertrace: setting gcpacertrace=1 causes the garbage collector to
+;; print information about the internal state of the concurrent pacer.
+;; 
+;; gcshrinkstackoff: setting gcshrinkstackoff=1 disables moving goroutines
+;; onto smaller stacks. In this mode, a goroutine's stack can only grow.
+;; 
+;; gcstoptheworld: setting gcstoptheworld=1 disables concurrent garbage collection,
+;; making every garbage collection a stop-the-world event. Setting gcstoptheworld=2
+;; also disables concurrent sweeping after the garbage collection finishes.
+;; 
+;; gctrace: setting gctrace=1 causes the garbage collector to emit a single line to standard
+;; error at each collection, summarizing the amount of memory collected and the
+;; length of the pause. The format of this line is subject to change. Included in
+;; the explanation below is also the relevant runtime/metrics metric for each field.
+;; Currently, it is:
+;; gc # @#s #%: #+#+# ms clock, #+#/#/#+# ms cpu, #->#-># MB, # MB goal, # MB stacks, #MB globals, # P
+;; where the fields are as follows:
+;; gc #         the GC number, incremented at each GC
+;; @#s          time in seconds since program start
+;; #%           percentage of time spent in GC since program start
+;; #+...+#      wall-clock/CPU times for the phases of the GC
+;; #->#-># MB   heap size at GC start, at GC end, and live heap, or /gc/scan/heap:bytes
+;; # MB goal    goal heap size, or /gc/heap/goal:bytes
+;; # MB stacks  estimated scannable stack size, or /gc/scan/stack:bytes
+;; # MB globals scannable global size, or /gc/scan/globals:bytes
+;; # P          number of processors used, or /sched/gomaxprocs:threads
+;; The phases are stop-the-world (STW) sweep termination, concurrent
+;; mark and scan, and STW mark termination. The CPU times
+;; for mark/scan are broken down in to assist time (GC performed in
+;; line with allocation), background GC time, and idle GC time.
+;; If the line ends with "(forced)", this GC was forced by a
+;; runtime.GC() call.
+;; 
+;; harddecommit: setting harddecommit=1 causes memory that is returned to the OS to
+;; also have protections removed on it. This is the only mode of operation on Windows,
+;; but is helpful in debugging scavenger-related issues on other platforms. Currently,
+;; only supported on Linux.
+;; 
+;; inittrace: setting inittrace=1 causes the runtime to emit a single line to standard
+;; error for each package with init work, summarizing the execution time and memory
+;; allocation. No information is printed for inits executed as part of plugin loading
+;; and for packages without both user defined and compiler generated init work.
+;; The format of this line is subject to change. Currently, it is:
+;; init # @#ms, # ms clock, # bytes, # allocs
+;; where the fields are as follows:
+;; init #      the package name
+;; @# ms       time in milliseconds when the init started since program start
+;; # clock     wall-clock time for package initialization work
+;; # bytes     memory allocated on the heap
+;; # allocs    number of heap allocations
+;; 
+;; madvdontneed: setting madvdontneed=0 will use MADV_FREE
+;; instead of MADV_DONTNEED on Linux when returning memory to the
+;; kernel. This is more efficient, but means RSS numbers will
+;; drop only when the OS is under memory pressure. On the BSDs and
+;; Illumos/Solaris, setting madvdontneed=1 will use MADV_DONTNEED instead
+;; of MADV_FREE. This is less efficient, but causes RSS numbers to drop
+;; more quickly.
+;; 
+;; memprofilerate: setting memprofilerate=X will update the value of runtime.MemProfileRate.
+;; When set to 0 memory profiling is disabled.  Refer to the description of
+;; MemProfileRate for the default value.
+;; 
+;; profstackdepth: profstackdepth=128 (the default) will set the maximum stack
+;; depth used by all pprof profilers except for the CPU profiler to 128 frames.
+;; Stack traces that exceed this limit will be truncated to the limit starting
+;; from the leaf frame. Setting profstackdepth to any value above 1024 will
+;; silently default to 1024. Future versions of Go may remove this limitation
+;; and extend profstackdepth to apply to the CPU profiler and execution tracer.
+;; 
+;; panicnil: setting panicnil=1 disables the runtime error when calling panic with nil
+;; interface value or an untyped nil.
+;; 
+;; invalidptr: invalidptr=1 (the default) causes the garbage collector and stack
+;; copier to crash the program if an invalid pointer value (for example, 1)
+;; is found in a pointer-typed location. Setting invalidptr=0 disables this check.
+;; This should only be used as a temporary workaround to diagnose buggy code.
+;; The real fix is to not store integers in pointer-typed locations.
+;; 
+;; sbrk: setting sbrk=1 replaces the memory allocator and garbage collector
+;; with a trivial allocator that obtains memory from the operating system and
+;; never reclaims any memory.
+;; 
+;; scavtrace: setting scavtrace=1 causes the runtime to emit a single line to standard
+;; error, roughly once per GC cycle, summarizing the amount of work done by the
+;; scavenger as well as the total amount of memory returned to the operating system
+;; and an estimate of physical memory utilization. The format of this line is subject
+;; to change, but currently it is:
+;; scav # KiB work (bg), # KiB work (eager), # KiB total, #% util
+;; where the fields are as follows:
+;; # KiB work (bg)    the amount of memory returned to the OS in the background since
+;; the last line
+;; # KiB work (eager) the amount of memory returned to the OS eagerly since the last line
+;; # KiB now          the amount of address space currently returned to the OS
+;; #% util            the fraction of all unscavenged heap memory which is in-use
+;; If the line ends with "(forced)", then scavenging was forced by a
+;; debug.FreeOSMemory() call.
+;; 
+;; scheddetail: setting schedtrace=X and scheddetail=1 causes the scheduler to emit
+;; detailed multiline info every X milliseconds, describing state of the scheduler,
+;; processors, threads and goroutines.
+;; 
+;; schedtrace: setting schedtrace=X causes the scheduler to emit a single line to standard
+;; error every X milliseconds, summarizing the scheduler state.
+;; 
+;; tracebackancestors: setting tracebackancestors=N extends tracebacks with the stacks at
+;; which goroutines were created, where N limits the number of ancestor goroutines to
+;; report. This also extends the information returned by runtime.Stack.
+;; Setting N to 0 will report no ancestry information.
+;; 
+;; tracefpunwindoff: setting tracefpunwindoff=1 forces the execution tracer
+;; and block and mutex profilers to use the runtime's default stack
+;; unwinder instead of frame pointer unwinding. This increases their
+;; overhead, but could be helpful as a workaround or for debugging
+;; unexpected regressions caused by frame pointer unwinding.
+;; 
+;; traceadvanceperiod: the approximate period in nanoseconds between trace generations. Only
+;; applies if a program is built with GOEXPERIMENT=exectracer2. Used primarily for testing
+;; and debugging the execution tracer.
+;; 
+;; tracecheckstackownership: setting tracecheckstackownership=1 enables a debug check in the
+;; execution tracer to double-check stack ownership before taking a stack trace.
+;; 
+;; asyncpreemptoff: asyncpreemptoff=1 disables signal-based
+;; asynchronous goroutine preemption. This makes some loops
+;; non-preemptible for long periods, which may delay GC and
+;; goroutine scheduling. This is useful for debugging GC issues
+;; because it also disables the conservative stack scanning used
+;; for asynchronously preempted goroutines.
+;; 
+;; The [net] and [net/http] packages also refer to debugging variables in GODEBUG.
+;; See the documentation for those packages for details.
+;; 
+;; The GOMAXPROCS variable limits the number of operating system threads that
+;; can execute user-level Go code simultaneously. There is no limit to the number of threads
+;; that can be blocked in system calls on behalf of Go code; those do not count against
+;; the GOMAXPROCS limit. This package's [GOMAXPROCS] function queries and changes
+;; the limit.
+;; 
+;; The GORACE variable configures the race detector, for programs built using -race.
+;; See the [Race Detector article] for details.
+;; 
+;; The GOTRACEBACK variable controls the amount of output generated when a Go
+;; program fails due to an unrecovered panic or an unexpected runtime condition.
+;; By default, a failure prints a stack trace for the current goroutine,
+;; eliding functions internal to the run-time system, and then exits with exit code 2.
+;; The failure prints stack traces for all goroutines if there is no current goroutine
+;; or the failure is internal to the run-time.
+;; GOTRACEBACK=none omits the goroutine stack traces entirely.
+;; GOTRACEBACK=single (the default) behaves as described above.
+;; GOTRACEBACK=all adds stack traces for all user-created goroutines.
+;; GOTRACEBACK=system is like “all” but adds stack frames for run-time functions
+;; and shows goroutines created internally by the run-time.
+;; GOTRACEBACK=crash is like “system” but crashes in an operating system-specific
+;; manner instead of exiting. For example, on Unix systems, the crash raises
+;; SIGABRT to trigger a core dump.
+;; GOTRACEBACK=wer is like “crash” but doesn't disable Windows Error Reporting (WER).
+;; For historical reasons, the GOTRACEBACK settings 0, 1, and 2 are synonyms for
+;; none, all, and system, respectively.
+;; The [runtime/debug.SetTraceback] function allows increasing the
+;; amount of output at run time, but it cannot reduce the amount below that
+;; specified by the environment variable.
+;; 
+;; The GOARCH, GOOS, GOPATH, and GOROOT environment variables complete
+;; the set of Go environment variables. They influence the building of Go programs
+;; (see [cmd/go] and [go/build]).
+;; GOARCH, GOOS, and GOROOT are recorded at compile time and made available by
+;; constants or functions in this package, but they do not influence the execution
+;; of the run-time system.
+;; 
+;; # Security
+;; 
+;; On Unix platforms, Go's runtime system behaves slightly differently when a
+;; binary is setuid/setgid or executed with setuid/setgid-like properties, in order
+;; to prevent dangerous behaviors. On Linux this is determined by checking for the
+;; AT_SECURE flag in the auxiliary vector, on the BSDs and Solaris/Illumos it is
+;; determined by checking the issetugid syscall, and on AIX it is determined by
+;; checking if the uid/gid match the effective uid/gid.
+;; 
+;; When the runtime determines the binary is setuid/setgid-like, it does two main
+;; things:
+;; - The value of the GOTRACEBACK environment variable is set to 'none'.
+;; - When a signal is received that terminates the program, or the program
+;; encounters an unrecoverable panic that would otherwise override the value
+;; of GOTRACEBACK, the goroutine stack, registers, and other memory related
+;; information are omitted.
+;; 
+;; Additinally on Unix platforms the Go runtime automatically checks whether
+;; the standard input/output file descriptors (0, 1, 2) are open. If any of them are
+;; closed, they are opened pointing at /dev/null.
+;; 
+;; [Race Detector article]: https://go.dev/doc/articles/race_detector
+;; */
+(in-ns 'go.runtime) (go/file "extern.go" :doc "Package runtime contains operations that interact with Go's runtime system,\nsuch as functions to control goroutines. It also includes the low-level type information\nused by the reflect package; see [reflect]'s documentation for the programmable\ninterface to the run-time type system.\n\n# Environment Variables\n\nThe following environment variables ($name or %name%, depending on the host\noperating system) control the run-time behavior of Go programs. The meanings\nand use may change from release to release.\n\nThe GOGC variable sets the initial garbage collection target percentage.\nA collection is triggered when the ratio of freshly allocated data to live data\nremaining after the previous collection reaches this percentage. The default\nis GOGC=100. Setting GOGC=off disables the garbage collector entirely.\n[runtime/debug.SetGCPercent] allows changing this percentage at run time.\n\nThe GOMEMLIMIT variable sets a soft memory limit for the runtime. This memory limit\nincludes the Go heap and all other memory managed by the runtime, and excludes\nexternal memory sources such as mappings of the binary itself, memory managed in\nother languages, and memory held by the operating system on behalf of the Go\nprogram. GOMEMLIMIT is a numeric value in bytes with an optional unit suffix.\nThe supported suffixes include B, KiB, MiB, GiB, and TiB. These suffixes\nrepresent quantities of bytes as defined by the IEC 80000-13 standard. That is,\nthey are based on powers of two: KiB means 2^10 bytes, MiB means 2^20 bytes,\nand so on. The default setting is [math.MaxInt64], which effectively disables the\nmemory limit. [runtime/debug.SetMemoryLimit] allows changing this limit at run\ntime.\n\nThe GODEBUG variable controls debugging variables within the runtime.\nIt is a comma-separated list of name=val pairs setting these named variables:\n\n\tclobberfree: setting clobberfree=1 causes the garbage collector to\n\tclobber the memory content of an object with bad content when it frees\n\tthe object.\n\n\tcpu.*: cpu.all=off disables the use of all optional instruction set extensions.\n\tcpu.extension=off disables use of instructions from the specified instruction set extension.\n\textension is the lower case name for the instruction set extension such as sse41 or avx\n\tas listed in internal/cpu package. As an example cpu.avx=off disables runtime detection\n\tand thereby use of AVX instructions.\n\n\tcgocheck: setting cgocheck=0 disables all checks for packages\n\tusing cgo to incorrectly pass Go pointers to non-Go code.\n\tSetting cgocheck=1 (the default) enables relatively cheap\n\tchecks that may miss some errors. A more complete, but slow,\n\tcgocheck mode can be enabled using GOEXPERIMENT (which\n\trequires a rebuild), see https://pkg.go.dev/internal/goexperiment for details.\n\n\tcheckfinalizers: setting checkfinalizers=1 causes the garbage collector to run\n\tmultiple partial non-parallel stop-the-world collections to identify common issues with\n\tfinalizers and cleanups, like those listed at\n\thttps://go.dev/doc/gc-guide#Finalizers_cleanups_and_weak_pointers. If a potential issue\n\tis found, the program will terminate with a description of all potential issues, the\n\tassociated values, and a list of those values' finalizers and cleanups, including where\n\tthey were created. It also adds tracking for tiny blocks to help diagnose issues with\n\tthose as well. The analysis performed during the partial collection is conservative.\n\tNotably, it flags any path back to the original object from the cleanup function,\n\tcleanup arguments, or finalizer function as a potential issue, even if that path might\n\tbe severed sometime later during execution (though this is not a recommended pattern).\n\tThis mode also produces one line of output to stderr every GC cycle with information\n\tabout the finalizer and cleanup queue lengths. Lines produced by this mode start with\n\t\"checkfinalizers:\".\n\n\tdecoratemappings: controls whether the Go runtime annotates OS\n\tanonymous memory mappings with context about their purpose. These\n\tannotations appear in /proc/self/maps and /proc/self/smaps as\n\t\"[anon: Go: ...]\". This setting is only used on Linux. For Go 1.25, it\n\tdefaults to `decoratemappings=1`, enabling annotations. Using\n\t`decoratemappings=0` reverts to the pre-Go 1.25 behavior.\n\n\tdisablethp: setting disablethp=1 on Linux disables transparent huge pages for the heap.\n\tIt has no effect on other platforms. disablethp is meant for compatibility with versions\n\tof Go before 1.21, which stopped working around a Linux kernel default that can result\n\tin significant memory overuse. See https://go.dev/issue/64332. This setting will be\n\tremoved in a future release, so operators should tweak their Linux configuration to suit\n\ttheir needs before then. See https://go.dev/doc/gc-guide#Linux_transparent_huge_pages.\n\n\tdontfreezetheworld: by default, the start of a fatal panic or throw\n\t\"freezes the world\", preempting all threads to stop all running\n\tgoroutines, which makes it possible to traceback all goroutines, and\n\tkeeps their state close to the point of panic. Setting\n\tdontfreezetheworld=1 disables this preemption, allowing goroutines to\n\tcontinue executing during panic processing. Note that goroutines that\n\tnaturally enter the scheduler will still stop. This can be useful when\n\tdebugging the runtime scheduler, as freezetheworld perturbs scheduler\n\tstate and thus may hide problems.\n\n\tefence: setting efence=1 causes the allocator to run in a mode\n\twhere each object is allocated on a unique page and addresses are\n\tnever recycled.\n\n\tgccheckmark: setting gccheckmark=1 enables verification of the\n\tgarbage collector's concurrent mark phase by performing a\n\tsecond mark pass while the world is stopped.  If the second\n\tpass finds a reachable object that was not found by concurrent\n\tmark, the garbage collector will panic.\n\n\tgcpacertrace: setting gcpacertrace=1 causes the garbage collector to\n\tprint information about the internal state of the concurrent pacer.\n\n\tgcshrinkstackoff: setting gcshrinkstackoff=1 disables moving goroutines\n\tonto smaller stacks. In this mode, a goroutine's stack can only grow.\n\n\tgcstoptheworld: setting gcstoptheworld=1 disables concurrent garbage collection,\n\tmaking every garbage collection a stop-the-world event. Setting gcstoptheworld=2\n\talso disables concurrent sweeping after the garbage collection finishes.\n\n\tgctrace: setting gctrace=1 causes the garbage collector to emit a single line to standard\n\terror at each collection, summarizing the amount of memory collected and the\n\tlength of the pause. The format of this line is subject to change. Included in\n\tthe explanation below is also the relevant runtime/metrics metric for each field.\n\tCurrently, it is:\n\t\tgc # @#s #%: #+#+# ms clock, #+#/#/#+# ms cpu, #->#-># MB, # MB goal, # MB stacks, #MB globals, # P\n\twhere the fields are as follows:\n\t\tgc #         the GC number, incremented at each GC\n\t\t@#s          time in seconds since program start\n\t\t#%           percentage of time spent in GC since program start\n\t\t#+...+#      wall-clock/CPU times for the phases of the GC\n\t\t#->#-># MB   heap size at GC start, at GC end, and live heap, or /gc/scan/heap:bytes\n\t\t# MB goal    goal heap size, or /gc/heap/goal:bytes\n\t\t# MB stacks  estimated scannable stack size, or /gc/scan/stack:bytes\n\t\t# MB globals scannable global size, or /gc/scan/globals:bytes\n\t\t# P          number of processors used, or /sched/gomaxprocs:threads\n\tThe phases are stop-the-world (STW) sweep termination, concurrent\n\tmark and scan, and STW mark termination. The CPU times\n\tfor mark/scan are broken down in to assist time (GC performed in\n\tline with allocation), background GC time, and idle GC time.\n\tIf the line ends with \"(forced)\", this GC was forced by a\n\truntime.GC() call.\n\n\tharddecommit: setting harddecommit=1 causes memory that is returned to the OS to\n\talso have protections removed on it. This is the only mode of operation on Windows,\n\tbut is helpful in debugging scavenger-related issues on other platforms. Currently,\n\tonly supported on Linux.\n\n\tinittrace: setting inittrace=1 causes the runtime to emit a single line to standard\n\terror for each package with init work, summarizing the execution time and memory\n\tallocation. No information is printed for inits executed as part of plugin loading\n\tand for packages without both user defined and compiler generated init work.\n\tThe format of this line is subject to change. Currently, it is:\n\t\tinit # @#ms, # ms clock, # bytes, # allocs\n\twhere the fields are as follows:\n\t\tinit #      the package name\n\t\t@# ms       time in milliseconds when the init started since program start\n\t\t# clock     wall-clock time for package initialization work\n\t\t# bytes     memory allocated on the heap\n\t\t# allocs    number of heap allocations\n\n\tmadvdontneed: setting madvdontneed=0 will use MADV_FREE\n\tinstead of MADV_DONTNEED on Linux when returning memory to the\n\tkernel. This is more efficient, but means RSS numbers will\n\tdrop only when the OS is under memory pressure. On the BSDs and\n\tIllumos/Solaris, setting madvdontneed=1 will use MADV_DONTNEED instead\n\tof MADV_FREE. This is less efficient, but causes RSS numbers to drop\n\tmore quickly.\n\n\tmemprofilerate: setting memprofilerate=X will update the value of runtime.MemProfileRate.\n\tWhen set to 0 memory profiling is disabled.  Refer to the description of\n\tMemProfileRate for the default value.\n\n\tprofstackdepth: profstackdepth=128 (the default) will set the maximum stack\n\tdepth used by all pprof profilers except for the CPU profiler to 128 frames.\n\tStack traces that exceed this limit will be truncated to the limit starting\n\tfrom the leaf frame. Setting profstackdepth to any value above 1024 will\n\tsilently default to 1024. Future versions of Go may remove this limitation\n\tand extend profstackdepth to apply to the CPU profiler and execution tracer.\n\n\tpanicnil: setting panicnil=1 disables the runtime error when calling panic with nil\n\tinterface value or an untyped nil.\n\n\tinvalidptr: invalidptr=1 (the default) causes the garbage collector and stack\n\tcopier to crash the program if an invalid pointer value (for example, 1)\n\tis found in a pointer-typed location. Setting invalidptr=0 disables this check.\n\tThis should only be used as a temporary workaround to diagnose buggy code.\n\tThe real fix is to not store integers in pointer-typed locations.\n\n\tsbrk: setting sbrk=1 replaces the memory allocator and garbage collector\n\twith a trivial allocator that obtains memory from the operating system and\n\tnever reclaims any memory.\n\n\tscavtrace: setting scavtrace=1 causes the runtime to emit a single line to standard\n\terror, roughly once per GC cycle, summarizing the amount of work done by the\n\tscavenger as well as the total amount of memory returned to the operating system\n\tand an estimate of physical memory utilization. The format of this line is subject\n\tto change, but currently it is:\n\t\tscav # KiB work (bg), # KiB work (eager), # KiB total, #% util\n\twhere the fields are as follows:\n\t\t# KiB work (bg)    the amount of memory returned to the OS in the background since\n\t\t                   the last line\n\t\t# KiB work (eager) the amount of memory returned to the OS eagerly since the last line\n\t\t# KiB now          the amount of address space currently returned to the OS\n\t\t#% util            the fraction of all unscavenged heap memory which is in-use\n\tIf the line ends with \"(forced)\", then scavenging was forced by a\n\tdebug.FreeOSMemory() call.\n\n\tscheddetail: setting schedtrace=X and scheddetail=1 causes the scheduler to emit\n\tdetailed multiline info every X milliseconds, describing state of the scheduler,\n\tprocessors, threads and goroutines.\n\n\tschedtrace: setting schedtrace=X causes the scheduler to emit a single line to standard\n\terror every X milliseconds, summarizing the scheduler state.\n\n\ttracebackancestors: setting tracebackancestors=N extends tracebacks with the stacks at\n\twhich goroutines were created, where N limits the number of ancestor goroutines to\n\treport. This also extends the information returned by runtime.Stack.\n\tSetting N to 0 will report no ancestry information.\n\n\ttracefpunwindoff: setting tracefpunwindoff=1 forces the execution tracer\n\tand block and mutex profilers to use the runtime's default stack\n\tunwinder instead of frame pointer unwinding. This increases their\n\toverhead, but could be helpful as a workaround or for debugging\n\tunexpected regressions caused by frame pointer unwinding.\n\n\ttraceadvanceperiod: the approximate period in nanoseconds between trace generations. Only\n\tapplies if a program is built with GOEXPERIMENT=exectracer2. Used primarily for testing\n\tand debugging the execution tracer.\n\n\ttracecheckstackownership: setting tracecheckstackownership=1 enables a debug check in the\n\texecution tracer to double-check stack ownership before taking a stack trace.\n\n\tasyncpreemptoff: asyncpreemptoff=1 disables signal-based\n\tasynchronous goroutine preemption. This makes some loops\n\tnon-preemptible for long periods, which may delay GC and\n\tgoroutine scheduling. This is useful for debugging GC issues\n\tbecause it also disables the conservative stack scanning used\n\tfor asynchronously preempted goroutines.\n\nThe [net] and [net/http] packages also refer to debugging variables in GODEBUG.\nSee the documentation for those packages for details.\n\nThe GOMAXPROCS variable limits the number of operating system threads that\ncan execute user-level Go code simultaneously. There is no limit to the number of threads\nthat can be blocked in system calls on behalf of Go code; those do not count against\nthe GOMAXPROCS limit. This package's [GOMAXPROCS] function queries and changes\nthe limit.\n\nThe GORACE variable configures the race detector, for programs built using -race.\nSee the [Race Detector article] for details.\n\nThe GOTRACEBACK variable controls the amount of output generated when a Go\nprogram fails due to an unrecovered panic or an unexpected runtime condition.\nBy default, a failure prints a stack trace for the current goroutine,\neliding functions internal to the run-time system, and then exits with exit code 2.\nThe failure prints stack traces for all goroutines if there is no current goroutine\nor the failure is internal to the run-time.\nGOTRACEBACK=none omits the goroutine stack traces entirely.\nGOTRACEBACK=single (the default) behaves as described above.\nGOTRACEBACK=all adds stack traces for all user-created goroutines.\nGOTRACEBACK=system is like “all” but adds stack frames for run-time functions\nand shows goroutines created internally by the run-time.\nGOTRACEBACK=crash is like “system” but crashes in an operating system-specific\nmanner instead of exiting. For example, on Unix systems, the crash raises\nSIGABRT to trigger a core dump.\nGOTRACEBACK=wer is like “crash” but doesn't disable Windows Error Reporting (WER).\nFor historical reasons, the GOTRACEBACK settings 0, 1, and 2 are synonyms for\nnone, all, and system, respectively.\nThe [runtime/debug.SetTraceback] function allows increasing the\namount of output at run time, but it cannot reduce the amount below that\nspecified by the environment variable.\n\nThe GOARCH, GOOS, GOPATH, and GOROOT environment variables complete\nthe set of Go environment variables. They influence the building of Go programs\n(see [cmd/go] and [go/build]).\nGOARCH, GOOS, and GOROOT are recorded at compile time and made available by\nconstants or functions in this package, but they do not influence the execution\nof the run-time system.\n\n# Security\n\nOn Unix platforms, Go's runtime system behaves slightly differently when a\nbinary is setuid/setgid or executed with setuid/setgid-like properties, in order\nto prevent dangerous behaviors. On Linux this is determined by checking for the\nAT_SECURE flag in the auxiliary vector, on the BSDs and Solaris/Illumos it is\ndetermined by checking the issetugid syscall, and on AIX it is determined by\nchecking if the uid/gid match the effective uid/gid.\n\nWhen the runtime determines the binary is setuid/setgid-like, it does two main\nthings:\n  - The value of the GOTRACEBACK environment variable is set to 'none'.\n  - When a signal is received that terminates the program, or the program\n    encounters an unrecoverable panic that would otherwise override the value\n    of GOTRACEBACK, the goroutine stack, registers, and other memory related\n    information are omitted.\n\nAdditinally on Unix platforms the Go runtime automatically checks whether\nthe standard input/output file descriptors (0, 1, 2) are open. If any of them are\nclosed, they are opened pointing at /dev/null.\n\n[Race Detector article]: https://go.dev/doc/articles/race_detector\n" :imports [
+
+
+    ^{:line 300} [goarch "internal/goarch"]
+    ^{:line 301} [goos "internal/goos"]])
+
+
+
+
+
+
+
+
+
+^{:go/end 319} (go/func Caller "Caller reports file and line number information about function invocations on\nthe calling goroutine's stack. The argument skip is the number of stack frames\nto ascend, with 0 identifying the caller of Caller. (For historical reasons the\nmeaning of skip differs between Caller and [Callers].) The return values report\nthe program counter, the file name (using forward slashes as path separator, even\non Windows), and the line number within the file of the corresponding call.\nThe boolean ok is false if it was not possible to recover the information.\n" [^int skip] :results [^uintptr pc ^string file ^int line ^bool ok]
+  (let [rpc (make (slice uintptr) 1)
+      ^{:line 313} n (callers (+ skip 1) rpc)]
+    (when (< n 1)
+      (return))
+
+    (let [(values frame _) (.Next (CallersFrames rpc))]
+      (return (.-PC frame) (.-File frame) (.-Line frame) (!= (.-PC frame) 0)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 342} (go/func Callers "Callers fills the slice pc with the return program counters of function invocations\non the calling goroutine's stack. The argument skip is the number of stack frames\nto skip before recording in pc, with 0 identifying the frame for Callers itself and\n1 identifying the caller of Callers.\nIt returns the number of entries written to pc.\n\nTo translate these PCs into symbolic information such as function\nnames and line numbers, use [CallersFrames]. CallersFrames accounts\nfor inlined functions and adjusts the return program counters into\ncall program counters. Iterating over the returned slice of PCs\ndirectly is discouraged, as is using [FuncForPC] on any of the\nreturned PCs, since these cannot account for inlining or return\nprogram counter adjustment.\n" ^int [^int skip ^{:tag (slice uintptr)} pc]
+  ;; runtime.callers uses pc.array==nil as a signal
+  ;; to print a stack trace. Pick off 0-length pc here
+  ;; so that we don't let a nil pc slice get to it.
+  (when (== (len pc) 0)
+    (return 0))
+
+  (callers skip pc))
+
+
+(go/var ^string defaultGOROOT) ; set by cmd/link
+
+
+
+
+
+
+
+
+
+^{:go/end 360} (go/func GOROOT "GOROOT returns the root of the Go tree. It uses the\nGOROOT environment variable, if set at process start,\nor else the root used during the Go build.\n\nDeprecated: The root used during the Go build will not be\nmeaningful if the binary is copied to another machine.\nUse the system path to locate the “go” binary, and use\n“go env GOROOT” to find its GOROOT.\n" ^string []
+  (let [s (gogetenv "GOROOT")]
+    (when (!= s "")
+      (return s))
+
+    ^{:line 359} defaultGOROOT))
+
+
+
+
+
+
+
+
+
+
+(go/var ^{:tag string :doc "buildVersion is the Go tree's version string at build time.\n\nIf any GOEXPERIMENTs are set to non-default values, it will include\n\"X:<GOEXPERIMENT>\".\n\nThis is set by the linker.\n\nThis is accessed by \"go version <binary>\".\n"} buildVersion)
+
+
+
+
+^{:go/end 377} (go/func Version "Version returns the Go tree's version string.\nIt is either the commit hash and date at the time of the build or,\nwhen possible, a release tag like \"go1.3\".\n" ^string []
+  ^{:line 376} buildVersion)
+
+
+
+
+
+(go/const ^{:tag string :val "tamago" :doc "GOOS is the running program's operating system target:\none of darwin, freebsd, linux, and so on.\nTo view possible combinations of GOOS and GOARCH, run \"go tool dist list\".\n"} GOOS goos/GOOS)
+
+
+
+(go/const ^{:tag string :val "arm64" :doc "GOARCH is the running program's architecture target:\none of 386, amd64, arm, s390x, and so on.\n"} GOARCH goarch/GOARCH)

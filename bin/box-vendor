@@ -37,6 +37,12 @@
 #                            vmm.Run recovers since S1 (vmm no longer imports the editor); then
 #                            hv's, vmm's and the guest tests (C and TamaGo guests on the monitor;
 #                            the Go editor guest on the board). In bin/gate --full
+#   bin/box-vendor kvm-tests-arm64 DIR
+#                            the same clone, hv's and vmm's tests compiled for linux/arm64
+#                            into DIR (hv.test, vmm.test), to run on KVM/arm64: in the
+#                            aarch64 VM (bin/box-arm64-vm hv; doc/go/BOX-NOTES.md, S4). The guest
+#                            tests build their guests with TamaGo and a C compiler as they run:
+#                            not compiled (the box's smoke test runs Arbace's guest there)
 #
 # Options (before the command): --src DIR (default /root/go-whim, read only: cloned), --commit REV
 # (default 80c49bf, S0's), --work DIR (default .tmp/box-vendor), --out DIR (default box/, the
@@ -65,7 +71,12 @@ case $work in /*) ;; *) work=$root/$work ;; esac
 case $out in /*) ;; *) out=$root/$out ;; esac
 tg=${TAMAGO_ROOT:-${G2A_GOROOT:-/root/tamago-go}}
 export GOPROXY=off GOFLAGS= GOTOOLCHAIN=local
-pkgs="abi board hv libsys vmm cmd/arbace-box"
+# go-whim's packages (and the launcher, Arbace's own), and purego's (BX62: vendored from its
+# module for darwin/arm64, the one configuration that imports it)
+whim_pkgs="abi board hv libsys vmm cmd/arbace-box"
+purego_pkgs="purego purego/internal/fakecgo purego/internal/strings"
+pkgs="$whim_pkgs $purego_pkgs"
+purego_mod=github.com/ebitengine/purego purego_ver=v0.11.1 purego_zip=h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=
 
 # clone DIR: go-whim at the commit, read only from its repository
 clone() {
@@ -123,6 +134,8 @@ EOF
 
 # the configurations converted, and the packages each holds files of
 configs="linux/amd64:abi,hv,vmm,cmd/arbace-box linux/arm64:abi,hv,vmm,cmd/arbace-box darwin/arm64:abi,hv,libsys,vmm tamago/amd64:abi,board tamago/arm64:abi,board"
+# box/'s configurations as it is (the round trip): go-whim's, the launcher on darwin (BX61), purego
+rt_configs="linux/amd64:abi,hv,vmm,cmd/arbace-box linux/arm64:abi,hv,vmm,cmd/arbace-box darwin/arm64:abi,hv,libsys,vmm,cmd/arbace-box,purego,purego/internal/fakecgo,purego/internal/strings tamago/amd64:abi,board tamago/arm64:abi,board"
 
 convert() {
   local c goos goarch list args p dir f b
@@ -150,14 +163,65 @@ convert() {
       echo "convert $goos/$goarch: a package did not dump" >&2; return 1
     fi
   done
-  merge
+  merge_pkgs=$whim_pkgs merge
+  purego_convert
+}
+
+# purego_dir: purego's module in Go's module cache, its hash checked
+purego_dir() {
+  local c
+  c=$(env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" env GOMODCACHE)
+  [ "$(cat "$c/cache/download/$purego_mod/@v/$purego_ver.ziphash" 2>/dev/null)" = "$purego_zip" ] \
+    || { echo "box-vendor: $purego_mod@$purego_ver is not in Go's module cache with the pinned hash $purego_zip" >&2; return 1; }
+  echo "$c/$purego_mod@$purego_ver"
+}
+
+# purego_renamed DIR: purego's files that build for darwin/arm64 (its packages purego,
+# internal/fakecgo and internal/strings: their Go files, assembly and headers) in DIR/box/purego of
+# a module arbace (DIR/go.mod), every import of them rewritten to arbace/box/purego (the only
+# change to their text, as go-whim's packages were renamed)
+purego_renamed() {
+  local d=$1 m p f
+  m=$(purego_dir) || return 1
+  rm -rf "$d"; mkdir -p "$d/box/purego"
+  printf 'module arbace\n\ngo 1.27\n' > "$d/go.mod"
+  for p in . internal/fakecgo internal/strings; do
+    mkdir -p "$d/box/purego/$p"
+    for f in $(cd "$m/$p" && env GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 GOFLAGS=-mod=mod GOROOT="$tg" "$tg/bin/go" list \
+                 -f '{{range .GoFiles}}{{.}} {{end}}{{range .SFiles}}{{.}} {{end}}{{range .HFiles}}{{.}} {{end}}' .); do
+      cp "$m/$p/$f" "$d/box/purego/$p/$f"
+    done
+  done
+  chmod -R u+w "$d"
+  find "$d/box/purego" -type f \( -name '*.go' -o -name '*.s' \) -print0 \
+    | xargs -0 sed -i "s#\"$purego_mod/internal/#\"arbace/box/purego/internal/#; s#\"$purego_mod\"#\"arbace/box/purego\"#"
+}
+
+# purego_convert: purego (BX62) converted for darwin/arm64 into OUT/go/arbace/box/purego*, as
+# go-whim's packages are: from WORK/purego (purego_renamed), merged as one configuration
+purego_convert() {
+  local args=() p
+  purego_renamed "$work/purego" || return 1
+  rm -rf "$work/purego-forms"
+  for p in $purego_pkgs; do args+=("arbace/box/$p"); done
+  echo "== convert darwin/arm64: ${args[*]} (purego $purego_ver)" >&2
+  (cd "$work/purego" && "$root/bin/g2a" convert --goos darwin --goarch arm64 --out "$work/purego-forms/darwin-arm64" "${args[@]}") >&2
+  if grep -v '^ok' "$root/.tmp/g2a/dumps.tsv" >&2; then
+    echo "convert purego: a package did not dump" >&2; return 1
+  fi
+  rm -rf "$work/purego-merged"
+  merge_pkgs=$purego_pkgs merge_src=$work/purego/box merge_forms=$work/purego-forms \
+    merge_dst=$work/purego-merged/go/arbace/box merge || return 1
+  rm -rf "$out/go/arbace/box/purego" "$out/go/arbace/box/purego.ae"
+  cp -r "$work/purego-merged/go/arbace/box/purego" "$work/purego-merged/go/arbace/box/purego.ae" "$out/go/arbace/box/"
+  echo "purego: $(find "$out/go/arbace/box/purego" "$out/go/arbace/box/purego.ae" -type f | wc -l) files into ${out#$root/}/go/arbace/box/purego" >&2
 }
 
 # merge: the configurations' trees into one, OUT/go/arbace/box
 merge() {
   local dst=${merge_dst:-$out/go/arbace/box} src=${merge_src:-$work/renamed/_arbace/box} p fp c f b files tests others
   rm -rf "$dst"; mkdir -p "$dst"
-  for p in $pkgs; do
+  for p in ${merge_pkgs:-$pkgs}; do
     [ -d "$src/$p" ] || continue
     # the forms' directory and file names: the path's, - as _ (SPEC §4.1, as the converter writes)
     fp=${p//-/_}
@@ -174,7 +238,7 @@ merge() {
       done
     done
     files=() tests=() others=()
-    for f in $(cd "$dst/$fp" && LC_ALL=C ls *.ae); do
+    for f in $(cd "$dst/$fp" && LC_ALL=C ls | grep '\.ae$'); do
       b=${f%.ae}
       case $b in *_test) tests+=("$b") ;; *) files+=("$b") ;; esac
     done
@@ -185,6 +249,8 @@ merge() {
     {
       case $p in
         cmd/*) echo ";; The box's launcher (doc/go/BOX-NOTES.md, S1): the package arbace/box/$p, Arbace's own." ;;
+        purego*) echo ";; purego $purego_ver, vendored (box/README.md; doc/go/BOX-NOTES.md, S4, BX62): the package"
+                 echo ";; arbace/box/$p, its files for darwin/arm64." ;;
         *) echo ";; go-whim's box, vendored (box/README.md): the package arbace/box/$p, one tree for"
            echo ";; every target (its files' build constraints select them)." ;;
       esac
@@ -209,7 +275,7 @@ wp=github.com/arbace/go-whim
 
 # pkg_name P: the Go package name of the box's package P (a command's is main)
 pkg_name() {
-  case $1 in cmd/*) echo main ;; *) echo "$1" ;; esac
+  case $1 in cmd/*) echo main ;; *) basename "$1" ;; esac
 }
 
 # orig_dir PKG: the package's directory in go-whim
@@ -256,20 +322,23 @@ check() {
   "$root/bin/g2a" build --print-only --tests --module arbace --layout lines --work "$work/print" "$out" >&2
   clone "$work/printed"
   rename "$work/printed"
-  for p in $pkgs; do
+  for p in $whim_pkgs; do
     rm -f "$work/printed/_arbace/box/$p"/*
     cp "$work/print/mod/box/$p"/* "$work/printed/_arbace/box/$p/"
   done
+  # purego, vendored since S4 (BX62), which the printed hv and libsys import on darwin
+  cp -r "$work/print/mod/box/purego" "$work/printed/_arbace/box/"
   # and at go-whim's own paths: the printed files, their imports renamed back, in a clone of
   # go-whim itself
   clone "$work/printed-orig"
-  for p in $pkgs; do
+  for p in $whim_pkgs; do
     f=$(orig_dir $p)
     rm -f "$work/printed-orig/$f"/*.go "$work/printed-orig/$f"/*.s
     cp "$work/print/mod/box/$p"/* "$work/printed-orig/$f/"
     sed -i -e "s#\"arbace/box/hv\"#\"$wp/hv\"#" -e "s#\"arbace/box/vmm\"#\"$wp/vmm\"#" \
       -e "s#\"arbace/box/abi\"#\"$wp/guest/abi\"#" -e "s#\"arbace/box/board\"#\"$wp/guest/tamago/board\"#" \
-      -e "s#\"arbace/box/libsys\"#\"$wp/internal/libsys\"#" "$work/printed-orig/$f"/*.go
+      -e "s#\"arbace/box/libsys\"#\"$wp/internal/libsys\"#" -e "s#\"arbace/box/purego\"#\"$purego_mod\"#" \
+      "$work/printed-orig/$f"/*.go
   done
   echo "== the printed packages against the renamed originals (gocmp: tree, export, code; with tests)" >&2
   (cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" build -o "$gocmp" .)
@@ -319,12 +388,10 @@ go_sum() {
 }
 
 # print_box DIR: box/ printed with its tests into DIR/mod, a module arbace that builds and
-# type-checks every configuration (purego for darwin from Go's module cache)
+# type-checks every configuration (purego for darwin vendored in it since S4, BX62)
 print_box() {
   rm -rf "$1"
   "$root/bin/g2a" build --print-only --tests --module arbace --layout lines --work "$1" "$2" >&2 || return 1
-  printf '\nrequire github.com/ebitengine/purego v0.11.1\n' >> "$1/mod/go.mod"
-  go_sum github.com/ebitengine/purego v0.11.1 > "$1/mod/go.sum"
 }
 
 # roundtrip: box/ printed, converted back and printed again; the two printings compared (gocmp)
@@ -334,7 +401,7 @@ roundtrip() {
   echo "== print ${out#$root/}" >&2
   print_box "$work/rt-print" "$out" || return 1
   rm -rf "$work/rt-forms"
-  for c in $configs; do
+  for c in $rt_configs; do
     goos=${c%%/*}; goarch=${c#*/}; goarch=${goarch%%:*}; list=${c#*:}
     args=(); for p in ${list//,/ }; do args+=("arbace/box/$p"); done
     echo "== convert $goos/$goarch: ${args[*]}" >&2
@@ -350,7 +417,7 @@ roundtrip() {
   print_box "$work/rt-print2" "$work/rt-box" || return 1
   (cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" build -o "$gocmp" .)
   echo "== the printings compared (gocmp: tree, export, code; with tests)" >&2
-  for c in $configs; do
+  for c in $rt_configs; do
     goos=${c%%/*}; goarch=${c#*/}; goarch=${goarch%%:*}; list=${c#*:}
     for p in ${list//,/ }; do
       f=$work/rt-gocmp-$goos-$goarch-${p//\//_}.log
@@ -366,15 +433,72 @@ roundtrip() {
   return $status
 }
 
+# purego_check: purego's forms (BX62) proved, after purego_convert's WORK/purego exists (the
+# renamed originals): 1. each package printed against its renamed original, gocmp (tree, export,
+# code) for darwin/arm64; 2. the darwin/arm64 launcher built from box/ printed is byte-identical
+# to one built with the renamed originals in place of the printed purego; 3. at purego's own
+# path (hv's and libsys' imports renamed back): the launcher built against purego's module (its
+# files from Go's module cache) is byte-identical to one built against the printed purego (its
+# imports renamed back, its go.mod purego's), each by a replace to the same directory. Builds -trimpath -buildvcs=false -ldflags='-buildid= -w':
+# without DWARF, as the box's guests are linked (S6), since a parameter list that spans lines is
+# printed with its names on the list's first line, which moves their DWARF declaration lines
+# (doc/go/BOX-NOTES.md, S4: purego's collectStackArgs); the code and its line tables are the same
+purego_check() {
+  local status=0 p f r gocmp=$work/gocmp pc=$work/purego-check m b
+  [ -d "$work/purego/box/purego" ] || purego_renamed "$work/purego" || return 1
+  m=$(purego_dir) || return 1
+  print_box "$work/purego-print" "$out" || return 1
+  (cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" build -o "$gocmp" .)
+  echo "== 1. purego printed against its renamed original (gocmp: tree, export, code; darwin/arm64)" >&2
+  for p in $purego_pkgs; do
+    f=$work/purego-gocmp-${p//\//_}.log
+    if (cd "$work/purego" && env GOOS=darwin GOARCH=arm64 GOROOT="$tg" CGO_ENABLED=0 \
+          "$gocmp" "$work/purego/box/$p" "$work/purego-print/mod/box/$p") > "$f" 2>&1; then
+      r=pass
+    else
+      r=FAIL; status=1
+    fi
+    printf '%-14s %-26s %s  %s\n' darwin/arm64 "$p" "$r" "$(tail -1 "$f")"
+  done
+  launcher() { # MODULE-DIR OUT
+    (cd "$1" && env GOOS=darwin GOARCH=arm64 GOARM64=v8.0 CGO_ENABLED=0 GOROOT="$tg" GOTOOLCHAIN=local GOFLAGS= \
+       GOWORK=off GOPROXY=off "$tg/bin/go" build -trimpath -buildvcs=false '-ldflags=-buildid= -w' -o "$2" ./box/cmd/arbace-box)
+  }
+  rm -rf "$pc"; mkdir -p "$pc"
+  echo "== 2. the darwin/arm64 launcher: printed purego, renamed originals" >&2
+  launcher "$work/purego-print/mod" "$pc/printed" || return 1
+  cp -r "$work/purego-print/mod" "$pc/renamed-mod"
+  rm -rf "$pc/renamed-mod/box/purego"; cp -r "$work/purego/box/purego" "$pc/renamed-mod/box/purego"
+  launcher "$pc/renamed-mod" "$pc/renamed" || return 1
+  if cmp -s "$pc/printed" "$pc/renamed"; then r=identical; else r=DIFFERENT; status=1; fi
+  printf 'arbace-box darwin/arm64, arbace/box/purego: %d bytes, printed %s\n' "$(stat -c %s "$pc/renamed")" "$r"
+  echo "== 3. at purego's path: its module's files and the printed ones, by a replace (one directory)" >&2
+  cp -r "$work/purego-print/mod" "$pc/at-mod"
+  rm -rf "$pc/at-mod/box/purego"
+  sed -i "s#\"arbace/box/purego\"#\"$purego_mod\"#" "$pc/at-mod/box/hv/hvf_darwin.go" "$pc/at-mod/box/libsys/libsys.go"
+  printf '\nrequire %s %s\n\nreplace %s %s => %s\n' "$purego_mod" "$purego_ver" "$purego_mod" "$purego_ver" "$pc/purego-at" \
+    >> "$pc/at-mod/go.mod"
+  # the module's own files (Go's module cache), then the printed ones, at the same directory
+  rm -rf "$pc/purego-at"; cp -r "$m" "$pc/purego-at"; chmod -R u+w "$pc/purego-at"
+  launcher "$pc/at-mod" "$pc/at-module" || return 1
+  rm -rf "$pc/purego-at"; cp -r "$work/purego-print/mod/box/purego" "$pc/purego-at"
+  find "$pc/purego-at" -name '*.go' -print0 | xargs -0 sed -i "s#\"arbace/box/purego#\"$purego_mod#"
+  cp "$m/go.mod" "$pc/purego-at/go.mod"
+  launcher "$pc/at-mod" "$pc/at-printed" || return 1
+  if cmp -s "$pc/at-module" "$pc/at-printed"; then r=identical; else r=DIFFERENT; status=1; fi
+  printf 'arbace-box darwin/arm64, %s %s: %d bytes, printed %s\n' "$purego_mod" "$purego_ver" "$(stat -c %s "$pc/at-module")" "$r"
+  return $status
+}
+
 # kvm_tests: go-whim's tests on box/ (printed) in a renamed clone of go-whim, on /dev/kvm
 kvm_tests() {
-  local p d=$work/kvm
+  local p d=$work/kvm arm64=${1:-}
   mkdir -p "$work"
   echo "== print ${out#$root/}" >&2
   print_box "$work/kvm-print" "$out" || return 1
   clone "$d"
   rename "$d"
-  for p in $pkgs; do
+  for p in $whim_pkgs; do
     [ -d "$work/kvm-print/mod/box/$p" ] || continue
     mkdir -p "$d/_arbace/box/$p"
     rm -f "$d/_arbace/box/$p"/*
@@ -384,6 +508,14 @@ kvm_tests() {
   # its tests' recording hosts panic with (they serve editor.Main too), given it
   printf '\n// ExitCode is the code, for arbace/box/vmm.Run (bin/box-vendor kvm-tests).\nfunc (e Exit) ExitCode() int { return int(e) }\n' \
     >> "$d/editor/host.go"
+  if [ -n "$arm64" ]; then
+    mkdir -p "$arm64"
+    echo "== go-whim's hv and vmm tests on box/, compiled for linux/arm64 into $arm64" >&2
+    (cd "$d" && for p in hv vmm; do
+       GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -o "$arm64/$p.test" arbace/box/$p || exit 1
+     done)
+    return
+  fi
   echo "== go-whim's tests on box/ (/dev/kvm)" >&2
   (
     cd "$d"
@@ -404,5 +536,9 @@ case $cmd in
   all) convert && check ;;
   roundtrip) roundtrip ;;
   kvm-tests) kvm_tests ;;
+  purego) purego_convert ;;
+  purego-check) purego_check ;;
+  kvm-tests-arm64) [ $# -ge 2 ] || { echo "box-vendor: kvm-tests-arm64 DIR" >&2; exit 2; }
+    kvm_tests "$(mkdir -p "$2" && cd "$2" && pwd)" ;;
   *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
 esac

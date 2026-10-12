@@ -1,0 +1,228 @@
+;; LAN969x 24-port EVB support for tamago/arm64
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.board.microchip.lan9696evb) (go/file "mgmt.go" :imports [
+
+
+    ^{:line 12} [fmt "fmt"]
+    ^{:line 13} [time "time"]
+
+    ^{:line 15} [bits "github.com/usbarmory/tamago/bits"]
+    ^{:line 16} [reg "github.com/usbarmory/tamago/internal/reg"]
+    ^{:line 17} [lan8840 "github.com/usbarmory/tamago/phy/microchip/lan8840"]
+    ^{:line 18} [devcpu "github.com/usbarmory/tamago/soc/microchip/devcpu"]
+    ^{:line 19} [lan969x "github.com/usbarmory/tamago/soc/microchip/lan969x"]])
+
+
+(go/const
+  ^{:line 23} [^{:val 3} PHY_ADDR 0x03]
+  ^{:line 24} [^{:val 1} MAC_FID 1]
+  ^{:line 25} [^{:val 3795925504} ManagementPortIndex PORT29])
+
+
+(go/var
+
+
+  ^{:line 31} [^{:doc "LinkTimeout represents the timeout for management port link\nestablishment.\n"} LinkTimeout (* 10 time/Second)]
+
+
+
+  ^{:line 35} [^{:doc "LinkPollInterval represents the grace time between management port\nlink establishment attempts.\n"} LinkPollInterval (* 10 time/Millisecond)])
+
+
+
+
+
+
+(go/var ^{:doc "On the LAN969x 24-port EVB the management network interface is port D29,\nconnected through DEV_RGMII1 with a Microchip LAN8840 PHY.\n\nCPU port 0 (D30) is used for injection and extraction of frames.\n"} ManagementPort (addr ^{:go/breaks [2 4 6 8 10 12]} (lit devcpu/Port
+      :Index PORT29
+      :IRQ lan969x/XTR_READY_IRQ
+      :Queue lan969x/DEVCPU_QS
+      :Analyzer lan969x/ANA
+      :Enable enablePort
+      :FID MAC_FID)))
+
+
+^{:go/end 59} (go/func initGPIO [^int num ^int fn]
+  (let [(values pin err) (.Init lan969x/GPIO num)]
+
+    (when (!= err nil)
+      (return))
+
+
+    (.Function pin fn)))
+
+
+^{:go/end 63} (go/func resetInjectionFlowControl [^uint32 port]
+  (reg/Set (+ DEV_TX_STOP_WM_CFG (* port 4)) DEV_TX_CNT_CLR))
+
+
+^{:go/end 94} (go/func waitManagementLink [^{:tag (* lan8840/PHY)} phy] :results [^lan8840/Status status ^error err]
+  (let [deadline (.Add (time/Now) LinkTimeout)]
+
+    (while true
+      (when [(set! (values status err) (.Status phy))] (!= err nil)
+        (return))
+
+
+      (when (and (.-Link status) (.-AutoNegotiationComplete status))
+        (break))
+
+
+      (when (.After (time/Now) deadline)
+        (return status (fmt/Errorf "timed out waiting for management PHY link")))
+
+
+      (time/Sleep LinkPollInterval))
+
+
+    (switch
+      (case [(== (.-Speed status) 10)]
+        (return status (fmt/Errorf "unsupported 10 Mbps management link")))
+      (case [(not (.-FullDuplex status))]
+        (return status (fmt/Errorf "unsupported half-duplex management link")))
+      (case [(and (!= (.-Speed status) 100) (!= (.-Speed status) 1000))]
+        (return status (fmt/Errorf "management PHY has no common advertised mode"))))
+
+
+    (return)))
+
+
+^{:go/end 145} (go/func enablePort [] :results [^error err]
+  ;; Table 2-7: GPIO alternate function assignments
+  ;;
+  ;; GPIO_9:  ALT1 - MIIM0_MDC
+  ;; GPIO_10: ALT1 - MIIM0_MDIO
+  (initGPIO 9 1)
+  (initGPIO 10 1)
+
+  (let [phy (addr (lit lan8840/PHY))
+      ^{:line 105} miim lan969x/MIIM0]
+
+    (when [(set! err (.Init miim))] (!= err nil)
+      (return))
+
+
+    ;; initialize LAN8840 PHY
+    (when [(set! err (.Init phy PHY_ADDR miim))] (!= err nil)
+      (return))
+
+
+    (when [(set! err (.Reset phy))] (!= err nil)
+      (return))
+
+
+    (when [(set! err (.Negotiate phy))] (!= err nil)
+      (return))
+
+
+    ^{:go/breaks [[8 144]]} (let [(values status ^:assign err) (waitManagementLink phy)]
+      (when (!= err nil)
+        (return err))
+
+
+      ;; initialize MAC controller
+      (when [(set! err (initRGMII (.-Speed status)))] (!= err nil)
+        (return))
+
+
+      ;; initialize VLAN on physical and CPU port
+      (initVLAN PORT29)
+      (initVLAN PORT30)
+
+      ;; initialize capture on CPU port 0 (D30)
+      (initCapture PORT_CFG30)
+
+      ;; reset injection flow control
+      (resetInjectionFlowControl PORT29)
+
+      nil)))
+
+
+^{:go/end 206} (go/func initRGMII [^int speed] :results [^error err]
+  (let [^uint32 val (zero uint32)
+      ^{:line 149 :tag uint32} txClock (zero uint32)
+      ^{:line 150 :tag uint32} macSpeed (zero uint32)]
+
+    (switch speed
+      (case [100]
+        (set! txClock 2)
+        (set! macSpeed SPEED_100M))
+      (case [1000]
+        (set! txClock 1)
+        (set! macSpeed SPEED_1G))
+      (default
+        (return (fmt/Errorf "invalid management link speed (%d)" speed))))
+
+
+    ;; take RGMII out of reset and match the negotiated link speed
+    (bits/SetN (addr val) TX_CLK_CFG 2r111 txClock)
+    (bits/Clear (addr val) RGMII_TX_RST)
+    (bits/Clear (addr val) RGMII_RX_RST)
+    (reg/Write (+ XMIICFG1 RGMII_CFG) val)
+
+    ;; enable RGMII0 on the GPIOs
+    (reg/SetN (+ XMIICFG0 XMII_CFG) GPIO_XMII_CFG 2r11 CFG_RGMII)
+
+    ;; rx delay lines
+    (set! val (reg/Read (+ XMIICFG1 DLL_CFG0)))
+    (bits/Set (addr val) DLL_ENA) ; start delay tuning state machine
+    (bits/Clear (addr val) DLL_CLK_ENA) ; bypass DLL
+    (bits/SetN (addr val) DLL_CLK_SEL 2r111 4) ; DLL phase shift 90º or 2ns at 125MHz
+    (bits/Clear (addr val) DLL_RST) ; bring DLL out of reset
+    (reg/Write (+ XMIICFG1 DLL_CFG0) val)
+
+    ;; tx delay lines
+    (set! val (reg/Read (+ XMIICFG1 DLL_CFG1)))
+    (bits/Set (addr val) DLL_ENA) ; start delay tuning state machine
+    (bits/Set (addr val) DLL_CLK_ENA) ; use DLL
+    (bits/SetN (addr val) DLL_CLK_SEL 2r111 4) ; DLL phase shift 90º or 2ns at 125MHz
+    (bits/Clear (addr val) DLL_RST) ; bring DLL out of reset
+    (reg/Write (+ XMIICFG1 DLL_CFG1) val)
+
+    ;; enable MAC rx/tx, Full-Duplex
+    (reg/Set (+ DEVRGMII1 MAC_ENA_CFG) RX_ENA)
+    (reg/Set (+ DEVRGMII1 MAC_ENA_CFG) TX_ENA)
+    (reg/Set (+ DEVRGMII1 MAC_MODE_CFG) FDX_ENA)
+
+    ;; set inter frame gaps
+    (reg/SetN (+ DEVRGMII1 MAC_IFG_CFG) TX_IFG 0x1f 4) ; tx inter frame gap
+    (reg/SetN (+ DEVRGMII1 MAC_IFG_CFG) RX_IFG2 0x0f 1) ; rx inter frame gap (second part)
+    (reg/SetN (+ DEVRGMII1 MAC_IFG_CFG) RX_IFG1 0x0f 5) ; rx inter frame gap (first part)
+
+    ;; set MAC speed
+    (reg/SetN (+ DEVRGMII1 DEV_RST_CTRL) SPEED_SEL 2r111 macSpeed)
+
+    ;; clear reset from clock domains
+    (reg/Clear (+ DEVRGMII1 DEV_RST_CTRL) MAC_TX_RST)
+    (reg/Clear (+ DEVRGMII1 DEV_RST_CTRL) MAC_RX_RST)
+
+    (return)))
+
+
+^{:go/end 212} (go/func initVLAN [^uint32 port]
+  (reg/Set (+ port VLAN_CTRL) VLAN_AWARE_ENA) ; enable VLAN awareness
+  (reg/SetN (+ port VLAN_CTRL) VLAN_POP_CNT 2r11 1) ; number of VLAN tags to remove
+  (reg/SetN (+ port VLAN_CTRL) PORT_VID 0xfff 1)) ; set VLAN ID
+
+
+^{:go/end 229} (go/func initCapture [^uint32 port]
+  ;; enable ports for any frame transfer
+  (reg/Set SWITCH_PORT_MODE29 PORT_ENA) ; mgmt port
+  (reg/Set SWITCH_PORT_MODE30 PORT_ENA) ; cpu port
+
+  ;; configure CPU port
+  (reg/Set port NO_PREAMBLE_ENA) ; no preamble
+  (reg/Set port PAD_ENA) ; enable padding
+  (reg/SetN port INJ_FORMAT_CFG 2r11 0) ; no internal frame header
+
+  ;; recalc injected frame FCS
+  (reg/Set (+ PORT30 FILTER_CTRL) FORCE_FCS_UPDATE_ENA)
+
+  ;; CPU copy of frames found in MAC table
+  (reg/Set FWD_CFG CPU_DMAC_COPY_ENA))

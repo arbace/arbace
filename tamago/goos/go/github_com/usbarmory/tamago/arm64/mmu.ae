@@ -1,0 +1,327 @@
+;; ARM64 processor support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.arm64) (go/file "mmu.go" :imports [
+
+
+    ^{:line 12} [runtime "runtime"]
+
+    ^{:line 14} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+(go/const
+  ^{:line 18} [^{:val 16384} l1pageTableOffset 0x4000]
+  ^{:line 19} [^{:val 20480} l2pageTableOffset 0x5000]
+  ^{:line 20} [^{:val 24576} l3pageTableOffset 0x6000]
+  ^{:line 21} [^{:val 28672} pageTableArenaOffset 0x7000]
+
+  ^{:line 23} [^{:val 512} entriesPerTable 512]
+  ^{:line 24} [^{:val 4096} pageTableSize (* entriesPerTable 8)])
+
+
+(go/type mmuMap (struct
+    ^{:line 28 :tag uint64} ramStart
+    ^{:line 29 :tag uint64} ramEnd
+    ^{:line 30 :tag uint64} textStart
+    ^{:line 31 :tag uint64} textEnd
+
+    ^{:line 33 :tag uint64} arenaNext
+    ^{:line 34 :tag uint64} arenaEnd))
+
+
+(go/type mappingAction uint8)
+
+(go/const
+  ^{:line 40} [^{:tag mappingAction :val 0} mappingDevice iota]
+  ^{:line 41} [^{:val 1} mappingMemoryExec]
+  ^{:line 42} [^{:val 2} mappingMemoryXN]
+  ^{:line 43} [^{:val 3} mappingSplit])
+
+
+^{:go/end 48} (go/func alignDown ^uint64 [^uint64 addr ^uint64 align]
+  (bit-and-not addr (- align 1)))
+
+
+^{:go/end 52} (go/func alignUp ^uint64 [^uint64 addr ^uint64 align]
+  (alignDown (- (+ addr align) 1) align))
+
+
+^{:go/end 79} (go/method init [^{:tag (* mmuMap)} m]
+  (let [(values ramStart ramEnd) (runtime/MemRegion)
+      (values textStart textEnd) (runtime/TextRegion)]
+
+    (when (or (!= (bit-and ramStart (- pageTableSize 1)) 0) (!= (bit-and ramEnd (- pageTableSize 1)) 0))
+      (panic "RAM region not 4KB aligned"))
+
+
+    (set! (.-ramStart m) ramStart)
+    (set! (.-ramEnd m) ramEnd)
+    (set! (.-textStart m) (alignDown textStart pageTableSize))
+    (set! (.-textEnd m) (alignUp textEnd pageTableSize))
+
+    (when (or (< (.-textStart m) ramStart) (> (.-textEnd m) ramEnd))
+      (panic "text region outside RAM"))
+
+
+    (set! (.-arenaNext m) (+ ramStart pageTableArenaOffset))
+    (set! (.-arenaEnd m) (.-textStart m))
+
+    (when (>= (.-arenaNext m) (.-arenaEnd m))
+      (panic "empty early page table space; link binary higher in RAM"))
+
+
+    (return)))
+
+
+^{:go/end 91} (go/method alloc [^{:tag (* mmuMap)} m] :results [^uint64 addr]
+  (set! addr (.-arenaNext m))
+
+  (when (> (+ addr pageTableSize) (.-arenaEnd m))
+    (panic "out of early page table space; link binary higher in RAM"))
+
+
+  (set! (.-arenaNext m) + pageTableSize)
+
+  (return))
+
+
+^{:go/end 112} (go/method classifyBlock [^{:tag (* mmuMap)} m ^uint64 addr ^uint64 end] :results [^mappingAction action]
+  (switch
+    (case [(and (>= addr (.-ramStart m)) (<= end (.-textEnd m)))]
+      ;; exception vector table
+      (set! action mappingMemoryExec))
+    (case [(and (>= addr (.-textEnd m)) (<= end (.-ramEnd m)))]
+      ;; runtime memory
+      (set! action mappingMemoryXN))
+    (case [(and (>= addr (.-ramStart m)) (<= end (.-ramEnd m)))]
+      ;; text/runtime boundary cross
+      (set! action mappingSplit))
+    (case [(and (< addr (.-ramEnd m)) (> end (.-ramStart m)))]
+      ;; RAM boundary cross
+      (set! action mappingSplit))
+    (default
+      (set! action mappingDevice)))
+
+
+  (return))
+
+
+^{:go/end 123} (go/method classifyPage [^{:tag (* mmuMap)} m ^uint64 addr] :results [^mappingAction action]
+  (let [end (+ addr pageTableSize)]
+    (set! action (.classifyBlock m addr end))
+
+    (when (== action mappingSplit)
+      (panic "MMU boundary is not 4KB aligned"))
+
+
+    (return)))
+
+
+^{:go/end 136} (go/func writeMapping [^uint64 page ^uint64 addr ^uint64 memoryRegion ^uint64 deviceRegion ^mappingAction action]
+  (switch action
+    (case [mappingMemoryExec]
+      (reg/Write64 page (bit-or addr memoryRegion)))
+    (case [mappingMemoryXN]
+      (reg/Write64 page (bit-or addr memoryRegion TTE_EXECUTE_NEVER)))
+    (case [mappingDevice]
+      (reg/Write64 page (bit-or addr deviceRegion TTE_EXECUTE_NEVER)))
+    (default
+      (panic "invalid MMU mapping action"))))
+
+
+
+
+
+
+
+(go/const "Memory region attributes\n\nARM Architecture Reference Manual ARMv8, for ARMv8-A architecture profile\nG5.7.\n"
+  ^{:line 143} [^{:val 53} TTE_XN 53]
+  ^{:line 144} [^{:val 10} TTE_AF 10]
+  ^{:line 145} [^{:val 8} TTE_SH 8]
+  ^{:line 146} [^{:val 6} TTE_AP 6]
+  ^{:line 147} [^{:val 2} TTE_ATTR 2]
+  ^{:line 148} [^{:val 0} TTE_DESC 0]
+
+  ^{:line 150} [^{:tag uint64 :val 1} TTE_BLOCK (<< 2r01 TTE_DESC)]
+  ^{:line 151} [^{:tag uint64 :val 3} TTE_TABLE (<< 2r11 TTE_DESC)]
+  ^{:line 152} [^{:tag uint64 :val 3} TTE_PAGE (<< 2r11 TTE_DESC)]
+  ^{:line 153} [^{:tag uint64 :val 0} TTE_NON_SH (<< 2r00 TTE_SH)]
+  ^{:line 154} [^{:tag uint64 :val 512} TTE_OUTER_SH (<< 2r10 TTE_SH)]
+  ^{:line 155} [^{:tag uint64 :val 768} TTE_INNER_SH (<< 2r11 TTE_SH)]
+  ^{:line 156} [^{:tag uint64 :val 27021597764222976} TTE_EXECUTE_NEVER (<< 2r11 TTE_XN)]
+
+
+  ^{:line 159} [^{:tag uint64 :val 0 :doc "Device-nGnRnE\n"} DeviceRegion 2r00000000]
+
+  ^{:line 161} [^{:tag uint64 :val 255 :doc "Normal, Inner/Outer WB/WA/RA\n"} MemoryRegion 2r11111111]
+
+  ^{:line 163} [^{:val 0} deviceAttributeIndex 0]
+  ^{:line 164} [^{:val 1} memoryAttributeIndex 1]
+
+  ^{:line 166} [^{:val 1536} deviceAttributes (bit-or (<< 1 TTE_AF) TTE_OUTER_SH (<< TTE_AP_00 TTE_AP) (<< deviceAttributeIndex TTE_ATTR))]
+  ^{:line 167} [^{:val 1796} memoryAttributes (bit-or (<< 1 TTE_AF) TTE_INNER_SH (<< TTE_AP_00 TTE_AP) (<< memoryAttributeIndex TTE_ATTR))])
+
+
+
+
+
+
+(go/const "MMU access permissions\n\nARM Architecture Reference Manual ARMv8,for ARMv8-A architecture profile\nTable D5-25, Data access permissions for stage 1 translations.\n"
+
+  ^{:line 176} [^{:val 0 :doc "EL1 or above: read/write, EL0: none\n"} TTE_AP_00 2r00]
+
+  ^{:line 178} [^{:val 1 :doc "EL1 or above: read/write, EL0: read/write\n"} TTE_AP_01 2r01]
+
+  ^{:line 180} [^{:val 2 :doc "EL1 or above: read-only, EL0: none\n"} TTE_AP_10 2r10]
+
+  ^{:line 182} [^{:val 3 :doc "EL1 or above: read-only, EL0: read-only\n"} TTE_AP_11 2r11])
+
+
+
+
+(go/const "ARM Architecture Reference Manual ARMv8, for ARMv8-A architecture profile\nD12.2.103 TCR_EL1, Translation Control Register (EL1).\n"
+  ^{:line 188} [^{:val 32} TCR_IPS 32]
+  ^{:line 189} [^{:val 29} TCR_TBID 29]
+  ^{:line 190} [^{:val 23} TCR_EPD1 23]
+  ^{:line 191} [^{:val 14} TCR_TG0 14]
+  ^{:line 192} [^{:val 12} TCR_SH0 12]
+  ^{:line 193} [^{:val 10} TCR_ORGN0 10]
+  ^{:line 194} [^{:val 8} TCR_IRGN0 8]
+  ^{:line 195} [^{:val 0} TCR_T0SZ 0]
+
+
+  ^{:line 198} [^{:tag uint64 :val 8598336793 :doc "32-bit or 40-bit intermediate physical address size\n"} tcr (bit-or (<< 2r010 TCR_IPS)
+      ;; disable TTBR1_EL1 translation table walks
+      (<< 2r1 TCR_EPD1)
+      ;; 4KB granule
+      (<< 2r00 TCR_TG0)
+      ;; inner shareable
+      (<< 2r11 TCR_SH0)
+      ;; outer cacheability (normal, cacheable)
+      (<< 2r01 TCR_ORGN0)
+      ;; inner cacheability (normal, cacheable)
+      (<< 2r01 TCR_IRGN0)
+      ;; memory region size offset 0:5 (39-bits VA space)
+      (<< 25 TCR_T0SZ))])
+
+
+
+(go/func ^:extern flush_tlb "defined in mmu.s\n" [])
+(go/func ^:extern write_mair_el1 [^uint64 val])
+(go/func ^:extern write_tcr_el1 [^uint64 val])
+(go/func ^:extern set_ttbr0_el1 [^uint64 addr])
+
+
+
+^{:go/end 241} (go/method initL1Table "ARM Architecture Reference Manual ARMv8, for ARMv8-A architecture profile\nD5.3.1 Translation table level 0, level 1, and level 2 descriptor formats.\n" [^{:tag (* mmuMap)} m ^int entry ^uint64 ttbr ^uint64 section]
+  (let [n 30 ; 1GB
+
+      ^{:line 224} memoryRegion (bit-or memoryAttributes TTE_BLOCK)
+      ^{:line 225} deviceRegion (bit-or deviceAttributes TTE_BLOCK)]
+
+    (for [i (conv uint64 entry)] (< i entriesPerTable) (inc! i)
+      (let [page (+ ttbr (* 8 i))
+          ^{:line 229} addr (+ section (<< i n))
+          ^{:line 230} end (+ addr ^uint64 (<< 1 n))
+          ^{:line 231} action (.classifyBlock m addr end)]
+
+        (if (== action mappingSplit)
+          (let [next (.alloc m)]
+            (reg/Write64 page (bit-or next TTE_TABLE))
+            (.initL2Table m 0 next addr))
+
+          (writeMapping page addr memoryRegion deviceRegion action))))))
+
+
+
+
+
+
+^{:go/end 265} (go/method initL2Table "ARM Architecture Reference Manual ARMv8, for ARMv8-A architecture profile\nD5.3.1 Translation table level 0, level 1, and level 2 descriptor formats.\n" [^{:tag (* mmuMap)} m ^int entry ^uint64 base ^uint64 section]
+  (let [n 21 ; 2MB
+
+      ^{:line 248} memoryRegion (bit-or memoryAttributes TTE_BLOCK)
+      ^{:line 249} deviceRegion (bit-or deviceAttributes TTE_BLOCK)]
+
+    (for [i (conv uint64 entry)] (< i entriesPerTable) (inc! i)
+      (let [page (+ base (* 8 i))
+          ^{:line 253} addr (+ section (<< i n))
+          ^{:line 254} end (+ addr ^uint64 (<< 1 n))
+          ^{:line 255} action (.classifyBlock m addr end)]
+
+        (if (== action mappingSplit)
+          (let [next (.alloc m)]
+            (reg/Write64 page (bit-or next TTE_TABLE))
+            (.initL3Table m 0 next addr))
+
+          (writeMapping page addr memoryRegion deviceRegion action))))))
+
+
+
+
+
+
+^{:go/end 281} (go/method initL3Table "ARM Architecture Reference Manual ARMv8, for ARMv8-A architecture profile\nD5.3.2 ARMv8 translation table level 3 descriptor formats.\n" [^{:tag (* mmuMap)} m ^int entry ^uint64 base ^uint64 section]
+  (let [n 12 ; 4KB
+
+      ^{:line 272} memoryRegion (bit-or memoryAttributes TTE_PAGE)
+      ^{:line 273} deviceRegion (bit-or deviceAttributes TTE_PAGE)]
+
+    (for [i (conv uint64 entry)] (< i entriesPerTable) (inc! i)
+      (let [page (+ base (* 8 i))
+          ^{:line 277} addr (+ section (<< i n))]
+
+        (writeMapping page addr memoryRegion deviceRegion (.classifyPage m addr))))))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 328} (go/method InitMMU "InitMMU initializes translation tables for all available memory with a flat\nmapping.\n\nThe first 4096 bytes (0x00000000 - 0x00001000) are flagged as invalid to\ntrap null pointers.\n\nAll available memory is marked as non-executable except for the range\nreturned by runtime.TextRegion().\n" [^{:tag (* CPU)} cpu]
+  (let [m (addr (lit mmuMap))]
+    (.init m)
+
+    (let [l1pageTableStart (+ (.-ramStart m) l1pageTableOffset)
+        ^{:line 296} l2pageTableStart (+ (.-ramStart m) l2pageTableOffset)
+        ^{:line 297} l3pageTableStart (+ (.-ramStart m) l3pageTableOffset)
+
+        ;; Map the first L1 entry to an L2 table.
+        ^{:line 300} tte (bit-or l2pageTableStart TTE_TABLE)]
+      (reg/Write64 l1pageTableStart tte)
+
+      ;; Map the first L2 entry to an L3 table to trap null pointers within
+      ;; the smallest possible section (4KB starting from 0x00000000).
+      (set! tte (bit-or l3pageTableStart TTE_TABLE))
+      (reg/Write64 l2pageTableStart tte)
+
+      ;; set first L3 entry as invalid
+      (reg/Write64 l3pageTableStart 0)
+
+      ;; set remaining entries with flat mapping
+      (.initL1Table m 1 l1pageTableStart 0)
+      (.initL2Table m 1 l2pageTableStart 0)
+      (.initL3Table m 1 l3pageTableStart 0)
+
+      ;; set memory region attributes
+      ;;   * attr0: device
+      ;;   * attr1: memory
+      (write_mair_el1
+        (bit-or (<< MemoryRegion (* 8 memoryAttributeIndex))
+          (<< DeviceRegion (* 8 deviceAttributeIndex))))
+
+      ;; set translation control register
+      (write_tcr_el1 tcr)
+
+      ;; enable MMU
+      (set_ttbr0_el1 l1pageTableStart))))

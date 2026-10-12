@@ -173,6 +173,11 @@ command resolves through `GOOSPKG`), and `-trimpath` names the files by import p
 GOROOT or directory they are in. Packages are printed in parallel (`pmap`): std, 373 packages,
 in about 20 s. No form changes, so SPEC is not amended by this.
 
+`--goos darwin` (amendment BX61, doc/go/BOX-NOTES.md, S4) builds a program for macOS, cgo off:
+the box's launcher for the Mac (`bin/box-mac-bundle`), whose Hypervisor.framework and libSystem
+calls go through purego, vendored in `box/`; the build's environment is otherwise the Linux
+build's (`GOOS=darwin`).
+
 ## Cross-compilation and arm64
 
 gc cross-compiles without a C toolchain: `--arch arm64` gives an `ARM aarch64` executable on

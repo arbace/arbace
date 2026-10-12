@@ -76,14 +76,12 @@ TEXT ·pause(SB),NOSPLIT,$0-0
 	RET
 
 // whim_vectors is VBAR_EL1's table: 16 entries of 128 bytes, 2 KiB
-// aligned, each reporting its number, ESR_EL1, ELR_EL1 and FAR_EL1.
+// aligned, each reporting its number, ESR_EL1, ELR_EL1 and FAR_EL1 --
+// but the first, a synchronous exception at EL1t, where Go code runs,
+// which may be a nil dereference (vector_sync_sp0).
 TEXT whim_vectors(SB),NOSPLIT|NOFRAME,$0
 	PCALIGN	$2048
-	MOVD	$0, R0
-	MRS	ESR_EL1, R1
-	MRS	ELR_EL1, R2
-	MRS	FAR_EL1, R3
-	B	vector_common<>(SB)
+	B	vector_sync_sp0<>(SB)
 	PCALIGN	$128
 	MOVD	$1, R0
 	MRS	ESR_EL1, R1
@@ -175,6 +173,47 @@ TEXT whim_vectors(SB),NOSPLIT|NOFRAME,$0
 	MRS	FAR_EL1, R3
 	B	vector_common<>(SB)
 	PCALIGN	$128
+
+// vector_sync_sp0 is the first vector's: a data abort at EL1 (ESR_EL1's
+// EC 0x25) below the first page once NilPanics has set sigpanicPC (a nil
+// dereference, Arbace's addition) returns to sigpanic, as if the
+// faulting instruction had called it, as Linux's signal handler makes a
+// SIGSEGV a run-time panic on arm64 (the runtime's preparePanic): SP_EL0
+// lowered by 16, the interrupted LR stored at it and the frame pointer
+// below it, LR the faulting PC (ELR_EL1), ELR_EL1 sigpanic, every other
+// register as it was (R0 kept on SP_EL1 meanwhile).  Anything else is
+// reported as vector 0.
+TEXT vector_sync_sp0<>(SB),NOSPLIT|NOFRAME,$0
+	SUB	$16, RSP, RSP
+	STP	(R0, R1), 0(RSP)
+	MOVD	·sigpanicPC(SB), R0
+	CBZ	R0, report
+	MRS	ESR_EL1, R0
+	LSR	$26, R0, R0
+	CMP	$0x25, R0
+	BNE	report
+	MRS	FAR_EL1, R0
+	CMP	$0x1000, R0
+	BHS	report
+	MRS	SP_EL0, R0
+	SUB	$16, R0, R0
+	MOVD	R30, 0(R0)
+	MOVD	R29, -8(R0)
+	MSR	R0, SP_EL0
+	MRS	ELR_EL1, R30
+	MOVD	·sigpanicPC(SB), R0
+	MSR	R0, ELR_EL1
+	LDP	0(RSP), (R0, R1)
+	ADD	$16, RSP, RSP
+	ERET
+report:
+	LDP	0(RSP), (R0, R1)
+	ADD	$16, RSP, RSP
+	MOVD	$0, R0
+	MRS	ESR_EL1, R1
+	MRS	ELR_EL1, R2
+	MRS	FAR_EL1, R3
+	B	vector_common<>(SB)
 
 // vector_common reports the exception by abi.Fault from a block of its own,
 // and never returns: the monitor ends the guest as the C editor dies of a

@@ -1,0 +1,191 @@
+#!/bin/bash
+# The box's smoke test (doc/go/BOX-NOTES.md, S1-S5, S4): a launcher (arbace-box, its guest
+# appended or beside it) on 4 vCPUs and on 1: what the native executable's checks, the REPL
+# session included, say of the box, its files in memory, its clock, its exit codes and its
+# concurrency (the evaluator's yield, R2; the console's read that does not stop the guest, R3;
+# the wake on events), the network under the launcher's policy (S5), what it has not (host
+# files, processes); then the store (S3) on 4 vCPUs, and the REPL under rlwrap on a
+# pseudo-terminal. Run by bin/arbace-go --smoke --box on the host (amd64, /dev/kvm) and by
+# bin/box-arm64-vm smoke in the aarch64 VM (KVM/arm64), from a copy of bin/ and test/.
+#
+#   bin/box-smoke [--arch ARCH] [--native EXE] [--slow N] LAUNCHER
+#
+# --native: the native executable of the same architecture, which writes a store directory the
+# box then reads (skipped without it); --slow N (or ARBACE_SMOKE_SLOW): times waited and
+# tolerated multiplied by N (the aarch64 VM's emulation: 30). Exit 0 when every check passed.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/store-checks.bash"
+a=$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac) native="" slow=${ARBACE_SMOKE_SLOW:-1}
+while [ $# -gt 0 ]; do
+  case $1 in
+    --arch) a=$2; shift 2 ;;
+    --native) native=$2; shift 2 ;;
+    --slow) slow=$2; shift 2 ;;
+    *) break ;;
+  esac
+done
+[ $# -eq 1 ] || { sed -n '/^#   bin/p' "$0" >&2; exit 2; }
+b=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+[ -x "$b" ] || { echo "box-smoke: no launcher $1" >&2; exit 2; }
+[ -w /dev/kvm ] || { echo "== box $a: no /dev/kvm"; exit 1; }
+status=0 st=""
+# the reduction over a reducer (S2's 1e7 elements: about 1 s natively, 15 min or more emulated)
+big=1e7; [ "$slow" = 1 ] || big=1e5
+mkdir -p "${TMPDIR:-$root/.tmp}"
+t=$(mktemp -d "${TMPDIR:-$root/.tmp}/arbace-box-smoke.XXXXXX")
+  printf '(+ 1 2)\n(* *1 10)\n(defn twice\n  "Doubles x."\n  [x]\n  (* 2 x))\n(twice 21)\n(doc twice)\n(/ 1 0)\n(class *e)\n(ex-message *e)\n[*1 *2 *3]\n"multi\nline"\n' \
+    > "$t/repl.in"
+  cat > "$t/repl.expected" <<'EOF'
+Arbace DESCRIBE (HASH)
+user=> 3
+user=> 30
+user=> #'user/twice
+user=> 42
+user=> -------------------------
+user/twice
+([x])
+  Doubles x.
+nil
+user=> Execution error (ArithmeticException) at user/evalN (REPL:1).
+Divide by zero
+user=> java.lang.ArithmeticException
+user=> "Divide by zero"
+user=> ["Divide by zero" java.lang.ArithmeticException nil]
+user=> "multi\nline"
+user=> 
+EOF
+{
+    for cpus in 4 1; do
+      fails=0
+      check() { # check NAME EXPECTED ACTUAL
+        if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  FAIL $1"; echo "    expected: $2"; echo "    got:      $3"; fails=$((fails+1)); fi
+      }
+      box() { ARBACE_BOX_CPUS=$cpus timeout $((120 * slow)) "$b" "$@"; }
+      echo "== box $a, $cpus vCPUs"
+      check "-e (+ 1 2)" "3" "$(box -e '(+ 1 2)' 2>&1)"
+      check "the REPL on stdin" "$(printf 'user=> 3\nuser=> #'"'"'user/sq\nuser=> 49\nuser=> ')" \
+        "$(printf '(+ 1 2)\n(defn sq [x] (* x x))\n(sq 7)\n' | box 2>&1 | tail -n +2)"
+      box < "$t/repl.in" > "$t/repl.out" 2>&1; st=$?
+      check "a REPL session" "$(cat "$t/repl.expected")" \
+        "$(sed -e 's/user\/eval[0-9]*/user\/evalN/' -e '1s/^Arbace [^ ]* ([0-9a-f]\{7\})$/Arbace DESCRIBE (HASH)/' "$t/repl.out")"
+      check "the REPL's exit status at end of input" "0" "$st"
+      check "stdin as a script (-)" "6" "$(echo '(println (* 2 3))' | box - 2>&1)"
+      check "a script from the in-memory file system" "[:script (1 2)]" \
+        "$(box -e '(spit "/tmp/s.ae" "(prn [:script (map inc [0 1])])")' /tmp/s.ae 2>&1)"
+      check "-m, its namespace from the in-memory file system (ARBACE_PATH)" '("a" "b")' \
+        "$(ARBACE_PATH=/tmp box -e '(spit "/tmp/hello.ae" "(ns hello) (defn -main [& args] (prn args))")' -m hello a b 2>&1)"
+      check "namespaces on ARBACE_PATH, one requiring another, in directories" "[:b 2]" \
+        "$(ARBACE_PATH=/x:/p box -e '(do (.mkdirs (java.io.File. "/p/pa")) (spit "/p/pa/b.ae" "(ns pa.b) (defn f [] [:b 2])") (spit "/p/pa/a.ae" "(ns pa.a (:require [pa.b :as b])) (defn f [] (b/f))") (require (quote pa.a)) (prn ((resolve (quote pa.a/f)))))' 2>&1)"
+      check "an embedded namespace loaded once (a require of arbace.core keeps its protocols)" "true" \
+        "$(box -e '(let [c arbace.core.protocols.CollReduce] (require (quote arbace.core) :reload) (print (identical? c arbace.core.protocols.CollReduce)))' 2>&1)"
+      check "a resource of the image" "true" \
+        "$(box -e '(print (some? (arbace.java.io/resource "arbace/set.ae")))' 2>&1)"
+      check "reducers' fold, and a reduction over a reducer holding no collection (S2)" "[5000050000 true]" \
+        "$(box -e '(do (require (quote [arbace.core.reducers :as r])) (prn [(r/fold + (r/map inc (vec (range 100000)))) (number? (reduce + 0 (r/map identity (range '"$big"'))))]))' 2>&1)"
+      box -e '(/ 1 0)' > "$t/err.txt" 2>&1; st=$?
+      check "an error's exit status" "1" "$st"
+      check "an error's message" "Divide by zero" "$(grep -o 'Divide by zero' "$t/err.txt" | head -1)"
+      box -e '(System/exit 7)' > /dev/null 2>&1; st=$?
+      check "System/exit's status" "7" "$st"
+      check "a future and send" "[42 2]" \
+        "$(box -e '(let [a (agent 1)] (send a inc) (await a) (prn [@(future (+ 40 2)) @a]) (shutdown-agents))' 2>&1)"
+      check "the wall clock (new Date(), currentTimeMillis) is the host's" "true true" \
+        "$(box -e "(let [h $(date +%s)000 d (.getTime (java.util.Date.)) m (System/currentTimeMillis)] (print (< (abs (- d h)) $((10000 * slow))) (< (abs (- m h)) $((10000 * slow)))))" 2>&1)"
+      check "files in memory, none of the host's" "[in memory false]" \
+        "$(box -e '(do (spit "/tmp/x.txt" "in memory") (prn [(symbol (slurp "/tmp/x.txt")) (.exists (java.io.File. "/etc/passwd"))]))' 2>&1)"
+      check "a nil dereference is a NullPointerException" ":npe" \
+        "$(box -e '(print (try (.length ^String (identity nil)) (catch NullPointerException e :npe)))' 2>&1)"
+      check "no network" "java.net.SocketException" \
+        "$(box -e '(try (java.net.ServerSocket. 0) (catch Exception e (print (.getName (class e)))))' 2>&1)"
+      # S5: the network, as the launcher's policy allows it (ARBACE_BOX_NET)
+      check "ARBACE_BOX_NET=listen: a connection on the loopback address" "hi" \
+        "$(ARBACE_BOX_NET=listen box -e '(let [ss (java.net.ServerSocket. 0 50 (java.net.InetAddress/getLoopbackAddress)) c (java.net.Socket. (.getInetAddress ss) (.getLocalPort ss)) s (.accept ss)] (.write (.getOutputStream c) (.getBytes "hi\n")) (print (.readLine (java.io.BufferedReader. (java.io.InputStreamReader. (.getInputStream s))))))' 2>&1)"
+      check "ARBACE_BOX_NET=listen: no dial but to the box's own listeners" "Operation not permitted" \
+        "$(ARBACE_BOX_NET=listen box -e '(try (java.net.Socket. "127.0.0.1" 9) (catch java.net.SocketException e (print (.getMessage e))))' 2>&1)"
+      check "ARBACE_BOX_NET=listen: no listen but on the loopback addresses" "java.net.BindException" \
+        "$(ARBACE_BOX_NET=listen box -e '(try (java.net.ServerSocket. 0 50 (java.net.InetAddress/getByName "10.1.2.3")) (catch Exception e (print (.getName (class e)))))' 2>&1)"
+      check "ARBACE_BOX_NET=listen: no name the policy does not name" "example.org: Name does not resolve" \
+        "$(ARBACE_BOX_NET=listen box -e '(try (java.net.InetAddress/getByName "example.org") (catch java.net.UnknownHostException e (print (.getMessage e))))' 2>&1)"
+      check "ARBACE_BOX_NET=loopback: localhost resolved by the host, a refused connection" "true Connection refused" \
+        "$(ARBACE_BOX_NET=loopback box -e '(print (.isLoopbackAddress (java.net.InetAddress/getByName "localhost")) (try (java.net.Socket. "127.0.0.1" 9) (catch java.net.ConnectException e (.getMessage e))))' 2>&1)"
+      check "an ARBACE_BOX_NET the launcher does not take" "1" \
+        "$(ARBACE_BOX_NET=everything box -e nil > /dev/null 2>&1; echo $?)"
+      rp=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+      check "a socket REPL session from the host (arbace.server.repl, ARBACE_BOX_NET=listen)" "$(printf 'user=> 3\nuser=> [:box 7]\nuser=> ')" \
+        "$(ARBACE_BOX_NET=listen ARBACE_BOX_CPUS=$cpus JAVA_TOOL_OPTIONS="-Darbace.server.repl=\"{:port $rp :accept arbace.core.server/repl}\"" "$b" -e "(Thread/sleep $((60000 * slow)))" > /dev/null 2>&1 & bp=$!
+           python3 - "$rp" "$slow" <<'PY'
+import socket, sys, time
+port = int(sys.argv[1])
+for i in range(600 * int(sys.argv[2])):
+    try:
+        s = socket.create_connection(("127.0.0.1", port)); break
+    except OSError:
+        time.sleep(0.1)
+s.sendall(b'(+ 1 2)\n[:box (+ 3 4)]\n:repl/quit\n')
+out = b''
+while True:
+    d = s.recv(4096)
+    if not d: break
+    out += d
+sys.stdout.write(out.decode())
+PY
+           kill $bp 2>/dev/null)"
+      check "no processes" "java.io.IOException" \
+        "$(box -e '(try (.start (ProcessBuilder. ["ls"])) (catch Exception e (print (.getName (class e)))))' 2>&1)"
+      # R2: a future runs during a long evaluation (the evaluator's yield), even on one vCPU
+      check "a future during a long evaluation" "true" \
+        "$(box -e '(let [p (promise) f (future (deliver p (System/nanoTime)))] (loop [i 0] (when (< i 3000000) (recur (inc i)))) (print (< @p (System/nanoTime))))' 2>&1)"
+      # R3: a future's output while the REPL waits for a line, before the next one is read
+      check "a future while the REPL waits for input" "$(printf 'late\n2')" \
+        "$( { printf '(future (Thread/sleep 300) (println "late"))\n'; sleep $((2 * slow)); printf '(+ 1 1)\n'; } | box 2>&1 | sed -e 's/user=> //g' | grep -v '^#object\|^Arbace' | grep .)"
+      # wake on events (BX50-BX54): a REPL waiting 2 s for its next line polls nothing (before:
+      # about 100 WaitReads a second); the line, when it comes, is read
+      { sleep $((2 * slow)); printf '(+ 2 2)\n'; } | ARBACE_BOX_STATS=$t/idle.stats box > "$t/idle.out" 2>&1
+      check "an idle REPL polls nothing: the input's event wakes it" "4 yes" \
+        "$(grep -o '^user=> 4' "$t/idle.out" | cut -c8-) $(awk '$1=="call" && $2=="wait_read" {n=$3} END {print (n+0 <= 6) ? "yes" : "no: " n}' "$t/idle.stats")"
+      rm -f "$t/idle.stats"
+      [ $fails -eq 0 ] || status=1
+    done
+    # the store (doc/go/BOX-NOTES.md, S3), on 4 vCPUs: arbace.box over the monitor's calls, the
+    # launcher's --store and its tool, the in-memory file system's snapshot (ARBACE_BOX_FS), a
+    # directory shared with the native executable
+    cpus=4
+    fails=0
+    echo "== box $a: the store"
+    store_checks box "$t"
+    s=$t/store
+    printf 'from the host' > "$t/tool.txt"
+    check "the launcher's tool: put, then the guest's arbace.box/load" "$(sha256sum < "$t/tool.txt" | cut -c1-64) from the host" \
+      "$("$b" --store "$s" put "$t/tool.txt" tool) $(box --store "$s" -e '(require (quote arbace.box))' -e '(print (arbace.box/load "tool"))' 2>&1)"
+    box --store "$s" -e '(require (quote arbace.box))' -e '(arbace.box/put! "back" "from the guest")' > /dev/null 2>&1
+    check "the launcher's tool: get by ref, ref, ls" "from the guest $("$b" --store "$s" ref back) yes" \
+      "$("$b" --store "$s" get back) $("$b" --store "$s" ref back) $("$b" --store "$s" ls | grep -q ' tool$' && echo yes)"
+    "$b" --store "$s" ref .bad > /dev/null 2>&1; st=$?
+    check "the launcher's tool refuses a bad name" "1" "$st"
+    box --store "$s" -e '(require (quote arbace.box))' -e '(do (spit "/tmp/a.txt" "A") (.mkdirs (java.io.File. "/w/d")) (spit "/w/d/b.ae" "(ns b)") (arbace.box/save-fs! "fs") nil)' > /dev/null 2>&1
+    check "the in-memory file system seeded from its snapshot (ARBACE_BOX_FS)" '["A" "(ns b)"]' \
+      "$(ARBACE_BOX_FS=fs box --store "$s" -e '(prn [(slurp "/tmp/a.txt") (slurp "/w/d/b.ae")])' 2>&1)"
+    check "the snapshot is a tar the host reads" "tmp/a.txt w/d/b.ae" \
+      "$("$b" --store "$s" get fs | tar tf - | grep -x 'tmp/a.txt\|w/d/b.ae' | sort | paste -sd' ')"
+    # the monitor's blob cache, bounded (BX38): blobs dropped and read again from their files
+    check "the monitor's blob cache bounded (ARBACE_BOX_STORE_CACHE=1KiB): blobs read again, as put" "true" \
+      "$(ARBACE_BOX_STORE_CACHE=1KiB box --store "$s" -e '(require (quote [arbace.box :as box]))' -e '(let [bs (mapv #(apply str (repeat 600 (char (+ 97 %)))) (range 5)) hs (mapv box/put bs)] (print (every? true? (for [_ (range 2) i (range 5)] (= (bs i) (box/get (hs i)))))))' 2>&1)"
+    ARBACE_BOX_FS=nofs box --store "$s" -e '(print :ran)' > "$t/fs.err" 2>&1; st=$?
+    check "a snapshot that is not: status 1, the reason" "1 ARBACE_BOX_FS=nofs: no such ref" "$st $(grep -o 'ARBACE_BOX_FS=nofs: no such ref' "$t/fs.err")"
+    if [ -n "$native" ] && [ -x "$native" ]; then
+      ARBACE_BOX_STORE=$s "$native" -e '(require (quote arbace.box))' -e '(arbace.box/put! "native" "from the native executable")' > /dev/null 2>&1
+      check "a store directory shared with the native executable" "from the native executable" \
+        "$(box --store "$s" -e '(require (quote arbace.box))' -e '(print (arbace.box/load "native"))' 2>&1)"
+    fi
+    [ $fails -eq 0 ] || status=1
+    # the launcher's REPL under rlwrap, and Ctrl-C, on a pseudo-terminal
+    if command -v python3 > /dev/null && command -v rlwrap > /dev/null; then
+      echo "== box $a on a terminal"
+      ARBACE_SMOKE_SLOW=$slow "$root/test/arbace-go-rlwrap.py" "$b" "$t" || status=1
+    else
+      echo "  skip the REPL under rlwrap (python3 and rlwrap needed)"
+    fi
+}
+rm -rf "$t"
+exit $status

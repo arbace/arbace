@@ -16,6 +16,11 @@ the box into a program.
 | `arbace/box/board` | `go/arbace/box/board.ae`, `board/` (with `boot_amd64.s`, `boot_arm64.s`) | `guest/tamago/board/` |
 | `arbace/box/libsys` | `go/arbace/box/libsys.ae`, `libsys/` | `internal/libsys/` |
 | `arbace/box/cmd/arbace-box` | `go/arbace/box/cmd/arbace_box.ae`, `arbace_box/` | Arbace's own (S1): the launcher, modelled on `vmm/cmd/whim-guest` |
+| `arbace/box/purego`, `.../internal/fakecgo`, `.../internal/strings` | `go/arbace/box/purego.ae`, `purego/` | not go-whim's: purego v0.11.1 (S4, below) |
+
+`mac/` (S4): the Mac's checklist `mac.sh` (after go-whim's `guest/mac/mac.sh`), the hypervisor
+entitlement and the README that `bin/box-mac-bundle` packs beside the darwin/arm64 launcher and
+the arm64 guest.
 
 Origin: https://github.com/arbace/go-whim (local clone `/root/go-whim`) at
 `80c49bf53cd6340487ac623f3d6d135b77ac1db6` (2026-10-06; the box's files last changed at
@@ -43,7 +48,21 @@ processes, and the launcher has `--store DIR` and the store's tool; since S5 it 
 streams for the guest under its launcher's policy (`vmm.Net`, `vmm.NetPolicy`; the calls 40-52,
 `abi.NetInfo` ...; the launcher's `ARBACE_BOX_NET`). `bin/box-vendor check`'s byte
 identity is S0's record; `bin/box-vendor roundtrip` and `kvm-tests` check `box/` as it is. On
-darwin, `hv` and `libsys` import purego (`github.com/ebitengine/purego` v0.11.1), not vendored.
+darwin, `hv` and `libsys` import purego, vendored since S4 (below); since S4 the board's arm64
+vectors make a nil dereference a run-time panic (`board.NilPanics`, BX60) and the launcher builds
+for darwin/arm64 (its console and rlwrap in `console_OS.go`, `rlwrap_unix.go`; the socket options
+in `vmm/net_unix.go`, BX61).
+
+purego (S4, BX62): https://github.com/ebitengine/purego v0.11.1 (go.sum
+`h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=`, from Go's module cache), the files of its
+packages `purego`, `internal/fakecgo` and `internal/strings` that build for darwin/arm64 (the one
+configuration that imports it), their import paths renamed to `arbace/box/purego` (the only change
+to their text), converted by `bin/box-vendor purego` (`bin/g2a convert --goos darwin --goarch
+arm64`) and merged as go-whim's packages are, the assembly and headers copied. `bin/box-vendor
+purego-check` proves them: each package printed against its renamed original (gocmp, three
+levels), and the darwin/arm64 launcher built from the printed forms byte-identical to one built
+from the renamed originals, and, at purego's own path, to one built from purego's module (both
+without DWARF and build IDs). Apache License 2.0 ([LICENSE.md](../LICENSE.md)).
 
 Licence: the Eclipse Public License 1.0, as Arbace ([LICENSE.md](../LICENSE.md)): the user's own
 code, licensed so by the user on 2026-10-11 (D8). Maintained by hand from here on; go-whim keeps

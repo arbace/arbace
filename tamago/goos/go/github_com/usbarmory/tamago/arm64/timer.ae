@@ -1,0 +1,120 @@
+;; ARM64 processor support
+;; https://github.com/usbarmory/tamago
+;;
+;; Copyright (c) The TamaGo Authors. All Rights Reserved.
+;;
+;; Use of this source code is governed by the license
+;; that can be found in the LICENSE file.
+
+(in-ns 'go.github_com.usbarmory.tamago.arm64) (go/file "timer.go" :imports [
+
+
+    ^{:line 12} [math "math"]
+
+    ^{:line 14} [reg "github.com/usbarmory/tamago/internal/reg"]])
+
+
+
+
+(go/const "ARM timer register constants\n(ARM Architecture Reference Manual ARMv8, for ARMv8-A architecture profile)\n"
+
+  ^{:line 21} [^{:val 0 :doc "p6721, Table 12-2\n"} CNTCR 0]
+
+  ^{:line 23} [^{:val 32 :doc "base frequency\n"} CNTFID0 0x20]
+
+
+  ^{:line 26} [^{:val 8 :doc "p6855, I5.7.2 CNTCR, Counter Control Register\n"} CNTCR_FCREQ 8]
+  ^{:line 27} [^{:val 1} CNTCR_HDBG 1]
+  ^{:line 28} [^{:val 0} CNTCR_EN 0]
+
+  ^{:line 30} [^{:val 0} CNTKCTL_PL0PCTEN 0]
+
+
+  ^{:line 33} [^{:tag int64 :val 1000000000 :doc "nanoseconds\n"} refFreq 1.0E9])
+
+
+
+(go/const ^{:val 30 :doc "Interrupts\n"} TIMER_IRQ 30)
+
+
+(go/func ^:extern read_cntfrq "defined in timer.s\n" ^uint32 [])
+(go/func ^:extern write_cntkctl [^uint32 val])
+(go/func ^:extern read_cntpct ^uint64 [])
+(go/func ^:extern write_cntptval [^uint32 val ^bool enable])
+
+
+^{:go/end 64} (go/method InitGenericTimers "InitGenericTimers initializes ARMv8 Generic Timers.\n" [^{:tag (* CPU)} cpu ^uint32 base ^uint32 freq]
+  (when (!= freq 0)
+    (when (!= base 0)
+      (reg/Write (+ base CNTFID0) freq)
+
+      ;; set system counter to base frequency
+      (reg/Set (+ base CNTCR) CNTCR_FCREQ)
+      ;; stop system counter on debug
+      (reg/Set (+ base CNTCR) CNTCR_HDBG)
+      ;; start system counter
+      (reg/Set (+ base CNTCR) CNTCR_EN))
+
+
+    ;; grant PL0 access
+    (write_cntkctl (<< 1 CNTKCTL_PL0PCTEN)))
+
+
+  (set! (.-TimerMultiplier cpu) (/ (conv float64 refFreq) (conv float64 (read_cntfrq)))))
+
+
+
+^{:go/end 69} (go/method Counter "Counter returns the CPU Counter-timer Physical Count (CNTPCT).\n" ^uint64 [^{:tag (* CPU)} cpu]
+  (read_cntpct))
+
+
+
+^{:go/end 74} (go/method GetTime "GetTime returns the system time in nanoseconds.\n" ^int64 [^{:tag (* CPU)} cpu]
+  (+ (conv int64 (* (conv float64 (.Counter cpu)) (.-TimerMultiplier cpu))) (.-TimerOffset cpu)))
+
+
+
+^{:go/end 83} (go/method SetTime "SetTime adjusts the system time to the argument nanoseconds value.\n" [^{:tag (* CPU)} cpu ^int64 ns]
+  (when (== (.-TimerMultiplier cpu) 0)
+    (return))
+
+
+  (set! (.-TimerOffset cpu) (- ns (conv int64 (* (conv float64 (read_cntpct)) (.-TimerMultiplier cpu))))))
+
+
+
+
+^{:go/end 108} (go/method SetAlarm "SetAlarm sets a physical timer to the absolute time matching the argument\nnanoseconds value, an interrupt is generated at expiration.\n" [^{:tag (* CPU)} cpu ^int64 ns]
+  (when (== ns 0)
+    (write_cntptval 0 false)
+    (return))
+
+
+  (when (== (.-TimerMultiplier cpu) 0)
+    (return))
+
+
+  (let [set (/ (conv uint64 ns) (conv uint64 (.-TimerMultiplier cpu)))
+      ^{:line 98} now (read_cntpct)
+      ^{:line 99} cnt (- set now)]
+
+    (cond (<= set now)
+      (set! cnt 1)
+      (> cnt math/MaxInt32)
+      (set! cnt math/MaxInt32))
+
+
+    (write_cntptval (conv uint32 cnt) true)))
+
+
+
+
+^{:go/end 116} (go/method Idle "Idle suspends execution until an interrupt is received tracking idle time\nfor reporting by [CPU.IdleTime].\n" [^{:tag (* CPU)} cpu]
+  (let [start (read_cntpct)]
+    (wfi)
+    (set! (.-idle cpu) + (- (read_cntpct) start))))
+
+
+
+^{:go/end 121} (go/method IdleTime "IdleTime returns the cumulative time spent halted, in nanoseconds. along\n" ^int64 [^{:tag (* CPU)} cpu]
+  (conv int64 (* (conv float64 (.-idle cpu)) (.-TimerMultiplier cpu))))

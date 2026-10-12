@@ -1,0 +1,755 @@
+;; SPDX-License-Identifier: Apache-2.0
+;; SPDX-FileCopyrightText: 2024 The Ebitengine Authors
+
+(in-ns 'go.arbace.box.purego) (go/file "struct_arm64.go" :imports [
+
+
+    ^{:line 7} [math "math"]
+    ^{:line 8} [reflect "reflect"]
+    ^{:line 9} [runtime "runtime"]
+    ^{:line 10} [strconv "strconv"]
+    ^:alias ^{:line 11} [stdstrings "strings"]
+    ^{:line 12} [unsafe "unsafe"]
+
+    ^{:line 14} [strings "arbace/box/purego/internal/strings"]])
+
+
+
+
+
+^{:go/breaks [4] :go/end 22} (go/func structReturnInMemory "structReturnInMemory always reports false on arm64: a struct returned in\nmemory is passed through the dedicated indirect result register (R8), not as\nan ordinary integer argument, so it is handled separately.\n" ^bool [reflect/Type]
+  false)
+
+
+^{:go/end 71} (go/func getStruct [^reflect/Type outType ^syscallArgs syscall] :results [^reflect/Value v]
+  (let [outSize (.Size outType)]
+    (switch
+      (case [(== outSize 0)]
+        (return (.Elem (reflect/New outType))))
+      (case [(<= outSize 8)]
+        (let [r1 (.-a1 syscall)]
+          (when [(values isAllFloats numFields) (isAllSameFloat outType)] isAllFloats
+            (set! r1 (.-f1 syscall))
+            (when (== numFields 2)
+              (set! r1 (bit-or (<< (.-f2 syscall) 32) (bit-and (.-f1 syscall) math/MaxUint32)))))
+
+
+          (return (.Elem (reflect/NewAt outType (conv unsafe/Pointer (addr (lit (struct ^uintptr a) r1))))))))
+      (case [(<= outSize 16)]
+        (let [(values r1 r2) (values (.-a1 syscall) (.-a2 syscall))]
+          (when [(values isAllFloats numFields) (isAllSameFloat outType)] isAllFloats
+            (switch numFields
+              (case [4]
+                (set! r1 (bit-or (<< (.-f2 syscall) 32) (bit-and (.-f1 syscall) math/MaxUint32)))
+                (set! r2 (bit-or (<< (.-f4 syscall) 32) (bit-and (.-f3 syscall) math/MaxUint32))))
+              (case [3]
+                (set! r1 (bit-or (<< (.-f2 syscall) 32) (bit-and (.-f1 syscall) math/MaxUint32)))
+                (set! r2 (.-f3 syscall)))
+              (case [2]
+                (set! r1 (.-f1 syscall))
+                (set! r2 (.-f2 syscall)))
+              (default
+                (panic "not reached"))))
+
+
+          (return (.Elem (reflect/NewAt outType (conv unsafe/Pointer (addr (lit (struct ^uintptr a ^uintptr b) r1 r2))))))))
+      (default
+        (when [(values isAllFloats numFields) (isAllSameFloat outType)] (and isAllFloats (<= numFields 4))
+          (switch numFields
+            (case [4]
+              (return (.Elem (reflect/NewAt outType (conv unsafe/Pointer (addr (lit (struct ^uintptr a ^uintptr b ^uintptr c ^uintptr d) (.-f1 syscall) (.-f2 syscall) (.-f3 syscall) (.-f4 syscall))))))))
+            (case [3]
+              (return (.Elem (reflect/NewAt outType (conv unsafe/Pointer (addr (lit (struct ^uintptr a ^uintptr b ^uintptr c) (.-f1 syscall) (.-f2 syscall) (.-f3 syscall))))))))
+            (default
+              (panic "not reached"))))
+
+
+        ;; create struct from the Go pointer created in arm64_r8
+        ;; weird pointer dereference to circumvent go vet
+        (return (.Elem (reflect/NewAt outType @(conv (* unsafe/Pointer) (conv unsafe/Pointer (addr (.-arm64_r8 syscall)))))))))))
+
+
+
+
+(go/const "https://github.com/ARM-software/abi-aa/blob/main/sysvabi64/sysvabi64.rst\n"
+  ^{:line 75} [^{:val 0} _NO_CLASS 2r00]
+  ^{:line 76} [^{:val 1} _FLOAT 2r01]
+  ^{:line 77} [^{:val 3} _INT 2r11])
+
+
+^{:go/end 99} (go/func addStruct ^{:tag (slice any)} [^reflect/Value v ^{:tag (* int)} numInts ^{:tag (* int)} numFloats ^{:tag (* int)} numStack ^{:tag (func [uintptr])} addInt ^{:tag (func [uintptr])} addFloat ^{:tag (func [uintptr])} addStack ^{:tag (slice any)} keepAlive]
+  (when (== (.Size (.Type v)) 0)
+    (return keepAlive))
+
+
+  (if [(values hva hfa size) (values (isHVA (.Type v)) (isHFA (.Type v)) (.Size (.Type v)))] (or hva hfa (<= size 16)) (do
+      ;; if this doesn't fit entirely in registers then
+      ;; each element goes onto the stack
+      (cond (and hfa (> (+ @numFloats (numABIFields (.Type v))) (numOfFloatRegisters)))
+        (set! @numFloats (numOfFloatRegisters))
+        (and hva (> (+ @numInts (numABIFields (.Type v))) (numOfIntegerRegisters)))
+        (set! @numInts (numOfIntegerRegisters)))
+
+
+      (placeRegisters v addFloat addInt))
+
+    (set! keepAlive (placeStack v keepAlive addInt)))
+
+  ^{:line 98} keepAlive) ; the struct was allocated so don't panic
+
+
+^{:go/end 107} (go/func placeRegisters [^reflect/Value v ^{:tag (func [uintptr])} addFloat ^{:tag (func [uintptr])} addInt]
+  (when isDarwin
+    (placeRegistersDarwin v addFloat addInt)
+    (return))
+
+  (placeRegistersArm64 v addFloat addInt))
+
+
+^{:go/end 223} (go/func placeRegistersArm64 [^reflect/Value v ^{:tag (func [uintptr])} addFloat ^{:tag (func [uintptr])} addInt]
+  (let [^uint64 val (zero uint64)
+      ^{:line 111 :tag byte} shift (zero byte)
+      ^{:line 112 :tag bool} flushed (zero bool)
+      ^{:line 113} class _NO_CLASS
+      ^{:line 114 :tag (func [^reflect/Value v])} place (zero (func [^reflect/Value v]))]
+    (set! place ^{:go/end 214} (fn [^reflect/Value v]
+        (let [^int numFields (zero int)]
+          (if (== (.Kind v) reflect/Struct)
+            (set! numFields (.NumField (.Type v)))
+
+            (set! numFields (.Len (.Type v))))
+
+          (range [k numFields]
+            (when (and (== (.Kind v) reflect/Struct) (not (isABIField (.Field (.Type v) k))))
+              (continue))
+
+            (set! flushed false)
+            (let [^reflect/Value f (zero reflect/Value)]
+              (if (== (.Kind v) reflect/Struct)
+                (set! f (.Field v k))
+
+                (set! f (.Index v k)))
+
+              (let [align (conv byte (- (* (.Align (.Type f)) 8) 1))]
+                (set! shift (bit-and-not (+ shift align) align))
+                (when (>= shift 64)
+                  (set! shift 0)
+                  (set! flushed true)
+                  (if (== class _FLOAT)
+                    (addFloat (conv uintptr val))
+
+                    (addInt (conv uintptr val)))
+
+                  (set! val 0)
+                  (set! class _NO_CLASS))
+
+                (switch (.Kind (.Type f))
+                  (case [reflect/Struct]
+                    (place f))
+                  (case [reflect/Bool]
+                    (when (.Bool f)
+                      (set! val bit-or ^uint64 (<< 1 shift)))
+
+                    (set! shift + 8)
+                    (set! class bit-or _INT))
+                  (case [reflect/Uint8]
+                    (set! val bit-or (<< (.Uint f) shift))
+                    (set! shift + 8)
+                    (set! class bit-or _INT))
+                  (case [reflect/Uint16]
+                    (set! val bit-or (<< (.Uint f) shift))
+                    (set! shift + 16)
+                    (set! class bit-or _INT))
+                  (case [reflect/Uint32]
+                    (set! val bit-or (<< (.Uint f) shift))
+                    (set! shift + 32)
+                    (set! class bit-or _INT))
+                  (case [reflect/Uint64 reflect/Uint reflect/Uintptr]
+                    (addInt (conv uintptr (.Uint f)))
+                    (set! shift 0)
+                    (set! flushed true)
+                    (set! class _NO_CLASS))
+                  (case [reflect/Int8]
+                    (set! val bit-or (<< (conv uint64 (bit-and (.Int f) 0xFF)) shift))
+                    (set! shift + 8)
+                    (set! class bit-or _INT))
+                  (case [reflect/Int16]
+                    (set! val bit-or (<< (conv uint64 (bit-and (.Int f) 0xFFFF)) shift))
+                    (set! shift + 16)
+                    (set! class bit-or _INT))
+                  (case [reflect/Int32]
+                    (set! val bit-or (<< (conv uint64 (bit-and (.Int f) 0xFFFFFFFF)) shift))
+                    (set! shift + 32)
+                    (set! class bit-or _INT))
+                  (case [reflect/Int64 reflect/Int]
+                    (addInt (conv uintptr (.Int f)))
+                    (set! shift 0)
+                    (set! flushed true)
+                    (set! class _NO_CLASS))
+                  (case [reflect/Float32]
+                    (when (== class _FLOAT)
+                      (addFloat (conv uintptr val))
+                      (set! val 0)
+                      (set! shift 0))
+
+                    (set! val bit-or (<< (conv uint64 (math/Float32bits (conv float32 (.Float f)))) shift))
+                    (set! shift + 32)
+                    (set! class bit-or _FLOAT))
+                  (case [reflect/Float64]
+                    (addFloat (conv uintptr (math/Float64bits (conv float64 (.Float f)))))
+                    (set! shift 0)
+                    (set! flushed true)
+                    (set! class _NO_CLASS))
+                  (case [reflect/Pointer reflect/UnsafePointer]
+                    (addInt (.Pointer f))
+                    (set! shift 0)
+                    (set! flushed true)
+                    (set! class _NO_CLASS))
+                  (case [reflect/Array]
+                    (place f))
+                  (default
+                    (panic (+ "purego: unsupported kind " (.String (.Kind f))))))))))))
+
+
+
+    (place v)
+    (when (not flushed)
+      (if (== class _FLOAT)
+        (addFloat (conv uintptr val))
+
+        (addInt (conv uintptr val))))))
+
+
+
+
+^{:go/end 234} (go/func placeStack ^{:tag (slice any)} [^reflect/Value v ^{:tag (slice any)} keepAlive ^{:tag (func [uintptr])} addInt]
+  ;; Struct is too big to be placed in registers.
+  ;; Copy to heap and place the pointer in register
+  (let [ptrStruct (reflect/New (.Type v))]
+    (.Set (.Elem ptrStruct) v)
+    (let [ptr (.UnsafePointer (.Addr (.Elem ptrStruct)))]
+      (set! keepAlive (append keepAlive ptr))
+      (addInt (conv uintptr ptr))
+      ^{:line 233} keepAlive)))
+
+
+
+
+
+
+
+^{:go/end 275} (go/func isHFA "isHFA reports a Homogeneous Floating-point Aggregate (HFA) which is a Fundamental Data Type that is a\nFloating-Point type and at most four uniquely addressable members (5.9.5.1 in [Arm64 Calling Convention]).\nThis type of struct will be placed more compactly than the individual fields.\n\n[Arm64 Calling Convention]: https://github.com/ARM-software/abi-aa/blob/main/sysvabi64/sysvabi64.rst\n" ^bool [^reflect/Type t]
+  ;; round up struct size to nearest 8 see section B.4
+  (let [structSize (roundUpTo8 (.Size t))
+      ^{:line 244} numFields (numABIFields t)]
+    (when (or (== structSize 0) (> numFields 4))
+      (return false))
+
+    (let [first (abiField t 0)]
+      (switch (.Kind (.-Type first))
+        (case [reflect/Float32 reflect/Float64]
+          (let [firstKind (.Kind (.-Type first))]
+            (range [i numFields]
+              (when (!= (.Kind (.-Type (abiField t i))) firstKind)
+                (return false)))
+
+
+            (return true)))
+        (case [reflect/Array]
+          (switch (.Kind (.Elem (.-Type first)))
+            (case [reflect/Float32 reflect/Float64]
+              (return true))
+            (default
+              (return false))))
+
+        (case [reflect/Struct]
+          (range [(numABIFields (.-Type first))]
+            (when (not (isHFA (.-Type first)))
+              (return false)))
+
+
+          (return true))
+        (default
+          (return false))))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 311} (go/func isHVA "isHVA reports a Homogeneous Aggregate with a Fundamental Data Type that is a Short-Vector type\nand at most four uniquely addressable members (5.9.5.2 in [Arm64 Calling Convention]).\nA short vector is a machine type that is composed of repeated instances of one fundamental integral or\nfloating-point type. It may be 8 or 16 bytes in total size (5.4 in [Arm64 Calling Convention]).\nThis type of struct will be placed more compactly than the individual fields.\n\n[Arm64 Calling Convention]: https://github.com/ARM-software/abi-aa/blob/main/sysvabi64/sysvabi64.rst\n" ^bool [^reflect/Type t]
+  ;; round up struct size to nearest 8 see section B.4
+  (let [structSize (roundUpTo8 (.Size t))]
+    (when (or (== structSize 0) ^:go/paren (and (!= structSize 8) (!= structSize 16)))
+      (return false))
+
+    (let [numFields (numABIFields t)
+        ^{:line 291} first (abiField t 0)]
+      (switch (.Kind (.-Type first))
+        (case [reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Int8 reflect/Int16 reflect/Int32]
+          (let [firstKind (.Kind (.-Type first))]
+            (range [i numFields]
+              (when (!= (.Kind (.-Type (abiField t i))) firstKind)
+                (return false)))
+
+
+            (return true)))
+        (case [reflect/Array]
+          (switch (.Kind (.Elem (.-Type first)))
+            (case [reflect/Uint8 reflect/Uint16 reflect/Uint32 reflect/Int8 reflect/Int16 reflect/Int32]
+              (return true))
+            (default
+              (return false))))
+
+        (default
+          (return false))))))
+
+
+
+
+
+^{:go/end 333} (go/func copyStruct8ByteChunks "copyStruct8ByteChunks copies struct memory in 8-byte chunks to the provided callback.\nThis is used for Darwin ARM64's byte-level packing of non-HFA/HVA structs.\n" [^unsafe/Pointer ptr ^uintptr size ^{:tag (func [uintptr])} addChunk]
+  (when (not isDarwin)
+    (panic "purego: should only be called on darwin"))
+
+  (for [offset (conv uintptr 0)] (< offset size) (set! offset + 8)
+    (let [^uintptr chunk (zero uintptr)
+        ^{:line 321} remaining (- size offset)]
+      (if (>= remaining 8)
+        (set! chunk @(conv (* uintptr) (unsafe/Add ptr offset)))
+
+        ;; Read byte-by-byte to avoid reading beyond allocation
+        (range [i remaining]
+          (let [b @(conv (* byte) (unsafe/Add ptr (+ offset i)))]
+            (set! chunk bit-or (<< (conv uintptr b) (* i 8))))))
+
+
+      (addChunk chunk))))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 366} (go/func placeRegistersDarwin "placeRegisters implements Darwin ARM64 calling convention for struct arguments.\n\nFor HFA/HVA structs, each element must go in a separate register (or stack slot for elements\nthat don't fit in registers). We use placeRegistersArm64 for this.\n\nFor non-HFA/HVA structs, Darwin uses byte-level packing. We copy the struct memory in\n8-byte chunks, which works correctly for both register and stack placement.\n" [^reflect/Value v ^{:tag (func [uintptr])} addFloat ^{:tag (func [uintptr])} addInt]
+  (when (not isDarwin)
+    (panic "purego: placeRegistersDarwin should only be called on darwin"))
+
+  ;; Check if this is an HFA/HVA
+  (let [hfa (isHFA (.Type v))
+      ^{:line 348} hva (isHVA (.Type v))]
+
+    ;; For HFA/HVA structs, use the standard ARM64 logic which places each element separately
+    (when (or hfa hva)
+      (placeRegistersArm64 v addFloat addInt)
+      (return))
+
+
+    ;; For non-HFA/HVA structs, use byte-level copying
+    ;; If the value is not addressable, create an addressable copy
+    (when (not (.CanAddr v))
+      (let [addressable (.Elem (reflect/New (.Type v)))]
+        (.Set addressable v)
+        (set! v addressable)))
+
+    (let [ptr (conv unsafe/Pointer (.Pointer (.Addr v)))
+        ^{:line 364} size (.Size (.Type v))]
+      (copyStruct8ByteChunks ptr size addInt))))
+
+
+
+
+^{:go/end 407} (go/func shouldBundleStackArgs "shouldBundleStackArgs determines if we need to start C-style packing for\nDarwin ARM64 stack arguments. This happens when registers are exhausted.\n" ^bool [^reflect/Value v ^int numInts ^int numFloats]
+  (when (not isDarwin)
+    (return false))
+
+
+  (let [kind (.Kind v)
+      ^{:line 376} isFloat (or (== kind reflect/Float32) (== kind reflect/Float64))
+      ^{:line 377} isInt (and (not isFloat) (!= kind reflect/Struct))
+      ^{:line 378} primitiveOnStack
+      (or ^:go/paren (and isInt (>= numInts (numOfIntegerRegisters)))
+        ^:go/paren (and isFloat (>= numFloats (numOfFloatRegisters))))]
+    (when primitiveOnStack
+      (return true))
+
+    (when (!= kind reflect/Struct)
+      (return false))
+
+    (let [hfa (isHFA (.Type v))
+        ^{:line 388} hva (isHVA (.Type v))
+        ^{:line 389} size (.Size (.Type v))
+        ^{:line 390} eligible (or hfa hva (<= size 16))]
+      (when (not eligible)
+        (return false))
+
+
+      (when hfa
+        (let [need (numABIFields (.Type v))]
+          (return (> (+ numFloats need) (numOfFloatRegisters)))))
+
+
+      (when hva
+        (let [need (numABIFields (.Type v))]
+          (return (> (+ numInts need) (numOfIntegerRegisters)))))
+
+
+      (let [slotsNeeded (conv int (/ (+ size align8ByteMask) align8ByteSize))]
+        (> (+ numInts slotsNeeded) (numOfIntegerRegisters))))))
+
+
+
+
+
+^{:go/end 439} (go/func structFitsInRegisters "structFitsInRegisters determines if a struct can still fit in remaining\nregisters, used during stack argument bundling to decide if a struct\nshould go through normal register allocation or be bundled with stack args.\n" [^reflect/Value val ^int tempNumInts ^int tempNumFloats] :results [bool int int]
+  (when (not isDarwin)
+    (panic "purego: structFitsInRegisters should only be called on darwin"))
+
+  (let [hfa (isHFA (.Type val))
+      ^{:line 417} hva (isHVA (.Type val))
+      ^{:line 418} size (.Size (.Type val))]
+
+    (cond hfa
+      ;; HFA: check if elements fit in float registers
+      (when [numFields (numABIFields (.Type val))] (<= (+ tempNumFloats numFields) (numOfFloatRegisters))
+        (return true tempNumInts (+ tempNumFloats numFields)))
+
+      ^{:line 425} hva
+      ;; HVA: check if elements fit in int registers
+      (when [numFields (numABIFields (.Type val))] (<= (+ tempNumInts numFields) (numOfIntegerRegisters))
+        (return true (+ tempNumInts numFields) tempNumFloats))
+
+      (<= size 16)
+      ;; Non-HFA/HVA small structs use int registers for byte-packing
+      (let [slotsNeeded (conv int (/ (+ size align8ByteMask) align8ByteSize))]
+        (when (<= (+ tempNumInts slotsNeeded) (numOfIntegerRegisters))
+          (return true (+ tempNumInts slotsNeeded) tempNumFloats))))
+
+
+
+    (return false tempNumInts tempNumFloats)))
+
+
+
+
+^{:go/end 494} (go/func collectStackArgs "collectStackArgs separates remaining arguments into those that fit in registers vs those that go on stack.\nIt returns the stack arguments and processes register arguments through addValue.\n" [^{:tag (slice reflect/Value)} args ^int startIdx ^int numInts ^int numFloats
+    ^{:line 444 :tag (slice any)} keepAlive ^{:tag (func [uintptr])} addInt ^{:tag (func [uintptr])} addFloat ^{:tag (func [uintptr])} addStack
+    ^{:line 445 :tag (* int)} pNumInts ^{:tag (* int)} pNumFloats ^{:tag (* int)} pNumStack] :results [(slice reflect/Value) (slice any)]
+  (when (not isDarwin)
+    (panic "purego: collectStackArgs should only be called on darwin"))
+
+
+  (let [^{:tag (slice reflect/Value)} stackArgs (zero (slice reflect/Value))
+      ^{:line 451} tempNumInts numInts
+      ^{:line 452} tempNumFloats numFloats]
+
+    (range [j val (subslice args startIdx)]
+      ;; Determine if this argument goes to register or stack
+      (let [^bool fitsInRegister (zero bool)
+          (values ^int newNumInts ^int newNumFloats) (zero int)]
+
+        (if (== (.Kind val) reflect/Struct)
+          ;; Check if struct still fits in remaining registers
+          (set! (values fitsInRegister newNumInts newNumFloats) (structFitsInRegisters val tempNumInts tempNumFloats))
+
+          ;; Primitive argument
+          (let [isFloat (or (== (.Kind val) reflect/Float32) (== (.Kind val) reflect/Float64))]
+            (if isFloat (do
+                (set! fitsInRegister (< tempNumFloats (numOfFloatRegisters)))
+                (set! newNumFloats (+ tempNumFloats 1))
+                (set! newNumInts tempNumInts))
+              (do
+                (set! fitsInRegister (< tempNumInts (numOfIntegerRegisters)))
+                (set! newNumInts (+ tempNumInts 1))
+                (set! newNumFloats tempNumFloats)))))
+
+
+
+        (if fitsInRegister (do
+            ;; Process through normal register allocation
+            (set! tempNumInts newNumInts)
+            (set! tempNumFloats newNumFloats)
+            (set! keepAlive (addValue val keepAlive addInt addFloat addStack pNumInts pNumFloats pNumStack)))
+          (do
+            ;; Convert strings to C strings before bundling
+            (when (== (.Kind val) reflect/String)
+              (let [ptr (strings/CString (.String val))]
+                (set! keepAlive (append keepAlive ptr))
+                (set! val (reflect/ValueOf ptr))
+                (aset args (+ startIdx j) val)))
+
+            (set! stackArgs (append stackArgs val))))))
+
+
+
+    (return stackArgs keepAlive)))
+
+
+(go/const
+  ^{:line 497} [^{:val "Pad"} paddingFieldPrefix "Pad"])
+
+
+
+
+^{:go/end 561} (go/func bundleStackArgs "bundleStackArgs bundles remaining arguments for Darwin ARM64 C-style stack packing.\nIt creates a packed struct with proper alignment and copies it to the stack in 8-byte chunks.\n" [^{:tag (slice reflect/Value)} stackArgs ^{:tag (func [uintptr])} addStack]
+  (when (not isDarwin)
+    (panic "purego: bundleStackArgs should only be called on darwin"))
+
+  (when (== (len stackArgs) 0)
+    (return))
+
+
+  ;; Build struct fields with proper C alignment and padding
+  (let [^{:tag (slice reflect/StructField)} fields (zero (slice reflect/StructField))
+      ^{:line 512} currentOffset (conv uintptr 0)
+      ^{:line 513} fieldIndex 0]
+
+    (range [j val stackArgs]
+      (let [valSize (.Size (.Type val))
+          ^{:line 517} valAlign (.Align (.Type val))]
+
+        ;; ARM64 requires 8-byte alignment for 8-byte or larger structs
+        (when (and (== (.Kind val) reflect/Struct) (>= valSize 8))
+          (set! valAlign 8))
+
+
+        ;; Add padding field if needed for alignment
+        (when (!= (% currentOffset (conv uintptr valAlign)) 0)
+          (let [paddingNeeded (- (conv uintptr valAlign) (% currentOffset (conv uintptr valAlign)))]
+            (set! fields (append fields ^{:go/breaks [2 4]} (lit reflect/StructField
+                  :Name (+ paddingFieldPrefix (strconv/Itoa fieldIndex))
+                  :Type (reflect/ArrayOf (conv int paddingNeeded) ((inst reflect/TypeFor byte))))))
+
+            (set! currentOffset + paddingNeeded)
+            (inc! fieldIndex)))
+
+
+        (set! fields (append fields ^{:go/breaks [2 4]} (lit reflect/StructField
+              :Name (+ "X" (strconv/Itoa j))
+              :Type (.Type val))))
+
+        (set! currentOffset + valSize)
+        (inc! fieldIndex)))
+
+
+    ;; Create and populate the packed struct
+    (let [structType (reflect/StructOf fields)
+        ^{:line 545} structInstance (.Elem (reflect/New structType))
+
+        ;; Set values (skip padding fields)
+        ^{:line 548} argIndex 0]
+      (range [j (.NumField structInstance)]
+        (let [fieldName (.-Name (.Field structType j))]
+          (when (stdstrings/HasPrefix fieldName paddingFieldPrefix)
+            (continue))
+
+          (.Set (.Field structInstance j) (aget stackArgs argIndex))
+          (inc! argIndex)))
+
+
+      (let [ptr (conv unsafe/Pointer (.Pointer (.Addr structInstance)))
+          ^{:line 559} size (.Size structType)]
+        (copyStruct8ByteChunks ptr size addStack)))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 632} (go/func getCallbackStruct "getCallbackStruct reads a struct argument from the callback frame on arm64.\nIt mirrors the AAPCS64 rules used by addStruct for the Go→C path.\n\ngetCallbackStruct is only used on Unix. On Windows, callbacks are handled by\nthe runtime's own callback mechanism, so this function is compiled but unused.\n\nAAPCS64 struct argument passing rules:\n  - HFA (Homogeneous Float Aggregate): each float field in a separate float register\n  - Non-HFA ≤ 16 bytes: packed into 1–2 integer registers\n  - > 16 bytes (not HFA): passed by pointer in integer register\n  - Register overflow: struct goes on the stack\n  - Darwin ARM64: byte-level packing on the stack\n" ^reflect/Value [^reflect/Type inType ^unsafe/Pointer frame ^{:tag (* int)} floatsN ^{:tag (* int)} intsN ^{:tag (* int)} stackSlot ^{:tag (* uintptr)} stackByteOffset]
+  (switch runtime/GOOS
+    (case ["android" "darwin" "freebsd" "ios" "linux" "netbsd"])
+    (default
+      (panic (+ "purego: getCallbackStruct is not supported on " runtime/GOOS))))
+
+
+  (let [f (conv (* (array callbackMaxFrame uintptr)) frame)]
+
+    (when (isHFA inType)
+      (let [(values _ numFloatFields) (isAllSameFloat inType)]
+        (when (<= (+ @floatsN numFloatFields) (numOfFloatRegisters))
+          (return (readHFAFromRegisters inType f floatsN numFloatFields)))
+
+        ;; Not enough float registers: entire struct goes on stack.
+        ;; Exhaust float registers per AAPCS64.
+        (set! @floatsN (numOfFloatRegisters))
+        (return (readStructFromStackArm64 inType f frame stackSlot stackByteOffset))))
+
+
+    (when [size (.Size inType)] (<= size 16)
+      ;; Non-HFA composite ≤ 16 bytes: packed into 1–2 integer registers.
+      (let [numSlots (conv int (/ (+ size 7) 8))]
+        (when (<= (+ @intsN numSlots) (numOfIntegerRegisters))
+          (let [pos (+ (numOfFloatRegisters) @intsN)
+              (values ^uintptr r1 ^uintptr r2) (zero uintptr)]
+            (set! r1 (aget f pos))
+            (inc! @intsN)
+            (when (== numSlots 2)
+              (set! r2 (aget f (+ pos 1)))
+              (inc! @intsN))
+
+            (when (== numSlots 1)
+              (return (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (lit (struct ^uintptr a) r1)))))))
+
+            (return (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (lit (struct ^uintptr a ^uintptr b) r1 r2))))))))
+
+        ;; Not enough int registers: goes on stack.
+        (return (readStructFromStackArm64 inType f frame stackSlot stackByteOffset))))
+
+
+    ;; > 16 bytes, not HFA: passed by pointer in integer register.
+    (when (< @intsN (numOfIntegerRegisters))
+      (let [ptr (aget f (+ (numOfFloatRegisters) @intsN))]
+        (inc! @intsN)
+        (return (.Elem (reflect/NewAt inType @(conv (* unsafe/Pointer) (conv unsafe/Pointer (addr ptr))))))))
+
+
+    ;; Pointer on stack (rare: all integer registers exhausted).
+    (when isDarwin
+      (let [ptrVal (callbackArgFromStack frame @stackSlot stackByteOffset ((inst reflect/TypeFor uintptr)))
+          ^{:line 626} ptr (conv uintptr (.Uint ptrVal))]
+        (return (.Elem (reflect/NewAt inType @(conv (* unsafe/Pointer) (conv unsafe/Pointer (addr ptr))))))))
+
+    (let [ptr (aget f @stackSlot)]
+      (inc! @stackSlot)
+      (.Elem (reflect/NewAt inType @(conv (* unsafe/Pointer) (conv unsafe/Pointer (addr ptr))))))))
+
+
+
+
+
+^{:go/end 699} (go/func readHFAFromRegisters "readHFAFromRegisters reads an HFA (Homogeneous Float Aggregate) struct from\nfloat registers. Each float field occupies one float register slot.\nFor float32, the value is in the low 32 bits of the register.\n" ^reflect/Value [^reflect/Type inType ^{:tag (* (array callbackMaxFrame uintptr))} f ^{:tag (* int)} floatsN ^int numFields]
+  (let [size (.Size inType)
+
+      ;; Determine the element type
+      ^{:line 641} root (.-Type (abiField inType 0))]
+    (while (== (.Kind root) reflect/Struct)
+      (set! root (.-Type (abiField root 0))))
+
+    (let [isFloat32 (== (.Kind root) reflect/Float32)]
+
+      (when isFloat32
+        ;; Each float32 is in a separate register (low 32 bits).
+        ;; Pack pairs into uintptrs to match the struct memory layout.
+        (switch
+          (case [(<= size 8)]
+            (let [^uintptr r1 (zero uintptr)]
+              (switch numFields
+                (case [1]
+                  (set! r1 (aget f @floatsN)))
+                (case [2]
+                  (set! r1 (bit-or (<< (aget f (+ @floatsN 1)) 32) (bit-and (aget f @floatsN) math/MaxUint32)))))
+
+              (set! @floatsN + numFields)
+              (return (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (lit (struct ^uintptr a) r1))))))))
+          (case [(<= size 16)]
+            (let [(values ^uintptr r1 ^uintptr r2) (zero uintptr)]
+              (switch numFields
+                (case [3]
+                  (set! r1 (bit-or (<< (aget f (+ @floatsN 1)) 32) (bit-and (aget f @floatsN) math/MaxUint32)))
+                  (set! r2 (aget f (+ @floatsN 2))))
+                (case [4]
+                  (set! r1 (bit-or (<< (aget f (+ @floatsN 1)) 32) (bit-and (aget f @floatsN) math/MaxUint32)))
+                  (set! r2 (bit-or (<< (aget f (+ @floatsN 3)) 32) (bit-and (aget f (+ @floatsN 2)) math/MaxUint32)))))
+
+              (set! @floatsN + numFields)
+              (return (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (lit (struct ^uintptr a ^uintptr b) r1 r2))))))))
+          (default
+            (panic "not reached"))))
+
+
+
+      ;; float64: each field occupies one full register.
+      (switch numFields
+        (case [1]
+          (let [r1 (aget f @floatsN)]
+            (inc! @floatsN)
+            (return (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (lit (struct ^uintptr a) r1))))))))
+        (case [2]
+          (let [(values r1 r2) (values (aget f @floatsN) (aget f (+ @floatsN 1)))]
+            (set! @floatsN + 2)
+            (return (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (lit (struct ^uintptr a ^uintptr b) r1 r2))))))))
+        (case [3]
+          (let [(values r1 r2 r3) (values (aget f @floatsN) (aget f (+ @floatsN 1)) (aget f (+ @floatsN 2)))]
+            (set! @floatsN + 3)
+            (return (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (lit (struct ^uintptr a ^uintptr b ^uintptr c) r1 r2 r3))))))))
+        (case [4]
+          (let [(values r1 r2 r3 r4) (values (aget f @floatsN) (aget f (+ @floatsN 1)) (aget f (+ @floatsN 2)) (aget f (+ @floatsN 3)))]
+            (set! @floatsN + 4)
+            (return (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (lit (struct ^uintptr a ^uintptr b ^uintptr c ^uintptr d) r1 r2 r3 r4))))))))
+        (default
+          (panic "purego: HFA with more than 4 fields is not supported"))))))
+
+
+
+
+
+
+^{:go/end 713} (go/func readStructFromStackArm64 "readStructFromStackArm64 reads a struct argument from the stack area of the\ncallback frame. On Darwin ARM64, arguments are byte-packed on the stack.\nOn Linux ARM64, arguments are 8-byte aligned.\n" ^reflect/Value [^reflect/Type inType ^{:tag (* (array callbackMaxFrame uintptr))} f ^unsafe/Pointer frame ^{:tag (* int)} stackSlot ^{:tag (* uintptr)} stackByteOffset]
+  (when isDarwin
+    (return (callbackArgFromStack frame @stackSlot stackByteOffset inType)))
+
+  ;; Linux ARM64: 8-byte aligned slots.
+  (let [numSlots (conv int (/ (+ (.Size inType) 7) 8))
+      ^{:line 710} v (.Elem (reflect/NewAt inType (conv unsafe/Pointer (addr (aget f @stackSlot)))))]
+    (set! @stackSlot + numSlots)
+    ^{:line 712} v))
+
+
+^{:go/end 757} (go/func setStruct [^{:tag (* callbackArgs)} a ^reflect/Value ret]
+  (let [outSize (.Size (.Type ret))]
+    (switch
+      (case [(== outSize 0)]
+        (return))
+      (case [(<= outSize 8)]
+        (.Set (.Elem (reflect/NewAt (.Type ret) (conv unsafe/Pointer (addr (.-result a))))) ret)
+        (when [(values isAllFloats numFields) (isAllSameFloat (.Type ret))] (and isAllFloats (== numFields 2))
+          (aset (.-result a) 1 (>> (aget (.-result a) 0) 32)) ; expanding two float32s into a.result[0] and a.result[1]
+          (set! (aget (.-result a) 0) bit-and math/MaxUint32)) ; clear the top bits since they contain the second argument
+
+        (return))
+      (case [(<= outSize 16)]
+        (.Set (.Elem (reflect/NewAt (.Type ret) (conv unsafe/Pointer (addr (.-result a))))) ret)
+        (when [(values isAllFloats numFields) (isAllSameFloat (.Type ret))] isAllFloats
+          (switch numFields
+            (case [4]
+              (aset (.-result a) 3 (>> (aget (.-result a) 1) 32))
+              (aset (.-result a) 2 (bit-and (aget (.-result a) 1) math/MaxUint32))
+              (aset (.-result a) 1 (>> (aget (.-result a) 0) 32))
+              (set! (aget (.-result a) 0) bit-and math/MaxUint32))
+            (case [3]
+              (aset (.-result a) 2 (bit-and (aget (.-result a) 1) math/MaxUint32))
+              (aset (.-result a) 1 (>> (aget (.-result a) 0) 32))
+              (set! (aget (.-result a) 0) bit-and math/MaxUint32))
+            (case [2])
+            ;; two float64s are already in a.result[0] and a.result[1]
+            (default
+              (panic "not reached"))))
+
+
+        (return))
+      (default
+        (when [(values isAllFloats numFields) (isAllSameFloat (.Type ret))] (and isAllFloats (<= numFields 4))
+          (.Set (.Elem (reflect/NewAt (.Type ret) (conv unsafe/Pointer (addr (.-result a))))) ret)
+          (return))
+
+        ;; The caller passed the address to place the return struct,
+        ;; so copy the Go struct into the provided memory.
+        (.Set (.Elem (reflect/NewAt (.Type ret) @(conv (* unsafe/Pointer) (conv unsafe/Pointer (addr (aget (.-result a) 0)))))) ret)
+        (return)))))
