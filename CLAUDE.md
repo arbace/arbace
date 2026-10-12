@@ -79,8 +79,10 @@ Prior art:
 - The Go build (B1a, `doc/go/B1-PLAN.md`): Arbace as a static Go executable. a2g translates
   the runtime, with the Go-build variants of Clojure's classes and namespaces in
   `arbace/lang/go/`, and jrt, the Java runtime on Go (`go/arbace/jrt`, hand-written Go forms;
-  `overlay/jdk/`, its own Java and variants of JDK classes; the jdk26u sources converted by
-  `bin/jrt-convert`; `bin/jrt`); `overlay/go/` patches Go's runtime. `bin/arbace-go` builds
+  `overlay/jdk/`, its own Java and variants of JDK classes; `jdk/`, the JDK's class forms and
+  resource data committed (j2a's output from jdk26u and `overlay/jdk/java.base`, provenance in
+  `jdk/provenance.edn`; `bin/jrt-convert update` regenerates them, `verify` checks them; standalone
+  S1); `bin/jrt`); `overlay/go/` patches Go's runtime. `bin/arbace-go` builds
   (`--build`, `--build-tests`, `--pgo`), smoke-tests and runs it. The oracle (`bin/oracle`,
   `test/oracle/`, `doc/go/ORACLE.md`) checks it against the JVM Arbace. Notes in `doc/go/`.
 - The box (B1b, `doc/go/BOX-SURVEY.md`, `doc/go/BOX-NOTES.md`): the same program built with
@@ -104,14 +106,15 @@ Prior art:
   concurrently Clojure's suite on stage 2, `bin/class-forms-tests` and the Go executable's
   smoke test on amd64 (`bin/arbace-go --gate`; about 4 minutes). The smoke test runs on an
   executable cached in `.tmp/arbace-go-gate`, keyed by a hash of what it is built from
-  (`arbace/`, `go/`, `overlay/`, the build's scripts, the seed, the toolchains): seconds when
-  they are unchanged, else it is built again beside the suite (`bin/jrt-convert`'s conversion,
-  a2g, the Go build, the image: the gate then takes about 7 minutes).
+  (`arbace/`, `go/`, `overlay/`, `jdk/`, the build's scripts, the seed, the toolchains): seconds when
+  they are unchanged, else it is built again beside the suite (a2g, the Go build, the image:
+  the gate then takes about 7 minutes).
   `bin/gate --full` adds, concurrently, the suite on stage 1, `bin/j2a-check --suite`, the
   g2a round trip on amd64 for tamago and linux (`bin/g2a roundtrip amd64`, `linux/amd64`), the
   box's round trip and go-whim's KVM tests on it (`bin/box-vendor roundtrip`, `kvm-tests`),
   `tamago/` converted afresh and compared (`bin/tamago-vendor verify`) and
-  the Go build on amd64: `bin/jrt-convert`, `bin/arbace-go --build`, then its smoke test,
+  the Go build on amd64: `bin/jrt-convert verify` (`jdk/` converted afresh and compared byte
+  for byte), `bin/arbace-go --build`, then its smoke test,
   Clojure's suite on its test build (`bin/arbace-go --build-tests`: the program with the
   suite's Java fixtures; `test/arbace-go-results.edn`) and the oracle on it, against its known
   mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`) and the box's
@@ -119,7 +122,8 @@ Prior art:
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), then its smoke test (`--smoke --box`); g2a and the
   Go chain start when the three suites are done, for memory (about 21 minutes, Clojure's suite
   on Go the longest): run it when
-  the class forms compiler, j2a, g2a, a2g or jrt change. Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build
+  the class forms compiler, j2a, g2a, a2g or jrt change (after a change to `overlay/jdk/java.base`,
+  jrt's closure or j2a, `bin/jrt-convert update` first). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build
   cache of entries unused for six hours (`bin/lib/gocache.bash`, `ARBACE_GOCACHE_KEEP_MIN`).
 
 ## Records

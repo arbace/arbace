@@ -63,7 +63,6 @@ Main still builds it: the commands below, now leading to what comes next.
 
 ```sh
 bin/build-arbace               # the JVM Arbace first: the bootstrap and the tools run on it
-bin/jrt-convert                # the JDK sources jrt needs, converted to class forms
 bin/arbace-go --build --pgo    # target/arbace-go/{amd64,arm64}/arbace, profile-guided
 bin/arbace-go                  # a REPL (with rlwrap on a terminal); also -e '(+ 1 2)', a script
 ```
