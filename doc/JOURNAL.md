@@ -772,3 +772,27 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   TamaGo's version but not the printer, so a tree printed before the printer's fixes was reused.
   Fixed: the key also hashes `arbace/g2a` and `bin/g2a`. Then both guests identical, as linked and
   cut; `--smoke --box` 111 of 111.
+
+## 2026-10-12: Work beside S2; S4's preparation and the user's decisions SA1-SA9
+
+- Beside S2, by the user's question ("any steps doable concurrently?"), three agents: g2a on the
+  Go executable, S3's half that does not wait for S2 (branch `s3-g2a`); the test build's Java
+  fixtures committed as forms (branch `test-fixtures-forms`); S4's preparation (branch `s4-seed`).
+  The TLS agent's leftover wait (an arm64 VM smoke in its removed worktree) was stopped; the TLS
+  checks run in `bin/box-arm64-vm smoke` at the next box check.
+- S4's preparation (`7498921`, `6aac846`; doc/STANDALONE-NOTES.md "S4: the Go-source seed"): the
+  seed `arbace-seed-go/` (1,148 files, 29.2 MB: `SEED.edn`, the printed module, the overlaid
+  runtime files, `namespaces.txt`; one seed for amd64 and arm64), `bin/seed --go-check`,
+  `--go-make`, `--go-build`, `--go-verify`; from today's main, two generations byte-identical
+  (3,063,796 bytes as tar.xz), stage 0 from it identical to `--build` on amd64 and arm64.
+  `bin/oracle` takes `ARBACE_ORACLE_REF=frozen`: the seed jar (v1) is unsuitable (the NaN
+  comparison fixed in v2, 8 cases), so the reference is `arbace-for-java-26-v4` built from its
+  tag, pinned (`test/oracle/frozen-jar.sha256`); against it the native executable shows two real
+  divergences of main (loaders' `.ae` message; MultiFn's ordering since `ac8b971`), recorded in
+  `test/oracle/known-go-amd64-frozen.edn`. An inventory of what leaves main at S4.
+- The user: SA1-SA3, SA5-SA7 accepted (one deterministic `seed/arbace-seed-go.tar.xz` with its
+  hash, the image not carried, the version map recorded, the modes renamed at S4's end, the seed
+  committed once at S4's end, printed by the Go-hosted fixpoint); SA4 the toolchain pinned by
+  version and a hash of GOROOT's sources (rather than the version only); SA8 v4 built from the tag
+  (rather than its jar committed); SA9 the frozen reference the gate's at S4, the expected files
+  re-recorded then, and the stale `test/oracle/expected/forms/files.edn` fixed now.
