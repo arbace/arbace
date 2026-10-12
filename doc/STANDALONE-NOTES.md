@@ -128,7 +128,46 @@ output depends on its inputs alone.
 
 ### Results (2026-10-12)
 
-RESULTS
+On the branch `standalone-s2`, with main at `2035f7b` (TLS merged) merged in; "main+floor" is
+main's a2g with the same `id-floor` added to its `run` (eight lines, nothing else), in a second
+worktree.
+
+- **The translation.** a2g with the edge against main+floor (JVM reflection, ASM): the program
+  trees (`bin/a2g --program`, and with `--input` the suite's Java fixtures) identical but for the
+  two embedded sources the stage changes (`res/arbace/classes/analyze.ae.z`, `env.ae.z`); with
+  S2's two sources on main+floor's side as well, identical, `report.edn` too (but the times).
+  a2g in `--record-edge` mode and with the edge give the same tree; a2g-check's fixture world
+  and a2g-evalproof's roots give the same tree with the edge as with `--jvm-reflection`.
+- **The executables** (`--build` amd64, arm64; `--build-tests`; `--build --box` amd64, arm64),
+  S2 against main+floor with S2's two sources, both linked with one version string (the -X
+  version is the checkout's): byte-identical, sha256 `656fa77e…` (amd64), `574dc30c…` (arm64),
+  `8b581a03…`/`1aa47d7f…` (tests), `5ef3ba3c…`/`1fc238c7…` (box amd64 launcher/guest),
+  `e1384a59…`/`0b591ba5…` (box arm64). Two builds of the branch are identical (RP1): amd64
+  `ed6c6de0…`, arm64 `8712ab5c…`.
+- **The JVM's class forms compiler** is unchanged: stage 2's `arbace/lang` (774 classes),
+  `arbace/asm` (45) and `arbace/java/api` byte-identical to main's; stage 2 = stage 3.
+- **The trace** (`bin/a2g-edge trace`): 305,188 traced calls, 25,763 inside a2g's run: 8,466
+  `TypeReference` objects, 17,162 `getInterfaces` of protocol dispatch, 15 by `Reflector`'s
+  lookup, 120 by the JVM's linkage, stack traces and class constants; by a2g: **0**. With
+  `--jvm-reflection` the same trace counts 13.3 million calls by a2g (4.4 million class loads by
+  `env/load-class` alone).
+- **The edge's drift is caught**: main's TLS merge made the embedded namespaces name
+  `java.io.IOException` and `java.net.InetSocketAddress`, two more cut candidates;
+  `bin/a2g-edge update` added them (`:exists`), and `verify` then passed.
+- `bin/arbace-go --smoke`: 117 ok (amd64, arm64), none failed; `--smoke --box` (amd64): 111 ok;
+  the oracle on amd64: 22,232 of 22,278, the 46 known mismatches, 0 new;
+  `bin/jrt-convert verify` passed (`edge.edn` left to `bin/a2g-edge`); `bin/a2g-edge verify`
+  passed (3 min 14 s).
+- **Time** (`bin/a2g --program`, three runs each, alternated): main 93.1-95.8 s (analysis
+  15.1-16.2 s); S2 78.6-89.2 s (reading the edge 0.2 s, analysis 11.4-12.5 s: no class loading
+  nor reflection).
+
+Left for S3: a2g, its namespaces and the analyzer loaded and run by the Go executable (the edge
+read there as here; `Opcodes` and `TypeReference` are the Go build's already); the analyzer's
+own reflective interop on its values (`arbace.classes.types/parse-method-desc`) works on Go's
+`Reflector` but is slow; `bin/a2g-edge` itself and the edge's recording stay on the JVM (D4).
+`jrt-convert`'s step `edge` (the members jrt hand-writes, `.tmp/jrt/edge.edn`) is another list,
+of the translated JDK classes' references across the edge.
 
 ### Amendments
 
