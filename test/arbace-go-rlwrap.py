@@ -4,7 +4,8 @@
 # installed; and the box's launcher's (bin/arbace-go --smoke --box; doc/go/BOX-NOTES.md, S1),
 # which follows the same convention. Usage: arbace-go-rlwrap.py EXECUTABLE TMPDIR (rlwrap's
 # HOME, for its history file, is made in TMPDIR). Prints one line per check, exit status 1 when
-# one fails.
+# one fails. ARBACE_SMOKE_SLOW=N (bin/box-smoke --slow) multiplies the times waited (the aarch64
+# VM's emulation; doc/go/BOX-NOTES.md, S4).
 import os, pty, select, shutil, signal, struct, sys, tempfile, termios, fcntl, time
 
 exe = os.path.abspath(sys.argv[1])
@@ -16,6 +17,12 @@ base_env["TERM"] = "xterm"
 home = tempfile.mkdtemp(prefix="rlwrap-home.", dir=sys.argv[2])
 base_env["HOME"] = home
 fails = 0
+SLOW = float(os.environ.get("ARBACE_SMOKE_SLOW") or 1)
+PAUSE = 1 if SLOW <= 1 else 5
+
+
+def pause(t):
+    time.sleep(t * PAUSE)
 
 
 def comm(pid):
@@ -51,7 +58,7 @@ class Session:
         self.out = b""
 
     def read_until(self, pattern, timeout=20.0, count=1):
-        end = time.time() + timeout
+        end = time.time() + timeout * SLOW
         while self.out.count(pattern) < count and time.time() < end:
             r, _, _ = select.select([self.fd], [], [], 0.1)
             if r:
@@ -68,7 +75,7 @@ class Session:
         os.write(self.fd, data)
 
     def finish(self, timeout=20.0):
-        end = time.time() + timeout
+        end = time.time() + timeout * SLOW
         while time.time() < end:
             pid, st = os.waitpid(self.pid, os.WNOHANG)
             if pid:
@@ -99,16 +106,16 @@ def repl(label, env, expect_rlwrap, args=()):
     kids = [comm(c) for c in children(s.pid)]
     s.send(b'(System/getenv "ARBACE_RLWRAP")\r')
     s.read_until(b'"wrapped"\r' if expect_rlwrap else b"user=> ", count=1 if expect_rlwrap else 2)
-    time.sleep(0.2)
+    pause(0.2)
     s.send(b"(+ 40 2)\r")
     got42 = s.read_until(b"42\r", count=1)
     if expect_rlwrap:
-        time.sleep(0.3)
+        pause(0.3)
         s.send(b"\x1b[A")  # the up arrow: rlwrap recalls (+ 40 2)
-        time.sleep(0.3)
+        pause(0.3)
         s.send(b"\r")
         recalled = s.read_until(b"42\r", count=2)
-    time.sleep(0.2)
+    pause(0.2)
     s.send(b"\x04")  # end of input
     status = s.finish()
     text = s.out.decode("utf-8", "replace")
@@ -132,7 +139,7 @@ def ctrl_c(label, env):
     """Ctrl-C at the prompt ends the REPL (the terminal's SIGINT), as it ends the JVM's."""
     s = Session([], env)
     prompted = s.read_until(b"user=> ")
-    time.sleep(0.2)
+    pause(0.2)
     s.send(b"\x03")
     status = s.finish(timeout=10.0)
     check(f"{label}: Ctrl-C ends it", prompted and status is not None, f"status {status}")

@@ -1,0 +1,247 @@
+#!/bin/bash
+# The aarch64 VM for the box on KVM/arm64 (B1b S4, doc/go/BOX-NOTES.md, "S4"; BX64): Alpine Linux
+# 3.24.2 for aarch64, netbooted by qemu-system-aarch64 with an emulated EL2 (-machine
+# virt,virtualization=on), so that /dev/kvm is there and the arm64 box runs on KVM/arm64 inside
+# it. Modelled on go-whim's guest/vm/aarch64.sh (https://github.com/arbace/go-whim at 80c49bf):
+# the netboot files and an apkovl served to the VM by this script through QEMU's user networking
+# (guestfwd: one process a connection, no server left running), nothing installed on the host;
+# then, unlike it, the commands go in by ssh (dropbear in the VM, QEMU's hostfwd from a port of
+# the host's loopback, a key made for the VM), so that a command has its standard streams and
+# status at once, and several run together. Every instruction is emulated: the box starts in
+# about 13 s there (0.3 s natively).
+#
+#   bin/box-arm64-vm fetch          the pinned netboot files (SHA-256 checked) into the state dir
+#   bin/box-arm64-vm start          boot the VM in the background (about 1 min to its ssh)
+#   bin/box-arm64-vm put [--to DIR] FILE...
+#                                   copy files into the VM's DIR (default /h), keeping their names
+#   bin/box-arm64-vm exec CMD [ARG...]
+#                                   run a command in the VM (in /h), standard streams and status
+#   bin/box-arm64-vm sh 'CMDS'      run CMDS by sh in the VM, in /h
+#   bin/box-arm64-vm stop           power the VM off (killed after 60 s)
+#   bin/box-arm64-vm status         whether it runs
+#   bin/box-arm64-vm smoke          the box's smoke test (bin/box-smoke --slow 30) on the arm64
+#                                   launcher (target/arbace-go/box-arm64/arbace-box; the native
+#                                   arm64 executable beside it when built), in the VM
+#   bin/box-arm64-vm hv             go-whim's hv and vmm tests on box/ (bin/box-vendor
+#                                   kvm-tests-arm64), in the VM
+#   bin/box-arm64-vm oracle [ARGS]  the box's oracle subset on arm64 (bin/oracle check, its
+#                                   candidate the launcher in the VM), against
+#                                   test/oracle/known-go-box-arm64.edn (ARGS: bin/oracle's)
+#   bin/box-arm64-vm check          the milestone's arm64 gate: start, smoke, hv, stop (the VM
+#                                   stopped however it ends); logs in the state dir
+#
+# The state is .tmp/box-arm64-vm (BOX_ARM64_VM to change it): the netboot files, the key, the
+# apkovl, the console's log, QEMU's pid and the ssh port. SMP and MEM size the VM (16, 12288). A
+# step that starts the VM itself (smoke, hv, oracle) stops it at its end; one started by
+# `start` is left to `stop`.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+vm=${BOX_ARM64_VM:-$root/.tmp/box-arm64-vm}
+mkdir -p "$vm"
+vm=$(cd "$vm" && pwd)
+self=$root/bin/box-arm64-vm
+rel=3.24.2
+repo=https://dl-cdn.alpinelinux.org/alpine/v3.24
+netboot=$repo/releases/aarch64/netboot-$rel
+# the netboot files of Alpine 3.24.2 (2026-09-17), as fetched on 2026-10-12
+pins="vmlinuz-virt e45e1f6083d1ed45db6647b422e32b6ae6dc54de7b8190b7b97744fb293412e3
+initramfs-virt ffe65ec5a0c0bf470042ad28f7ce7aa5f842ce8090e4230fb2703a7a34e1bebe
+modloop-virt 32a189d5e4ae4417cf65bfcc91d2cc8ffdf5957fbbc1f055b037861c595b7328"
+# what the VM installs at boot (the apkovl's world), from the release's repositories
+packages="alpine-base bash python3 rlwrap dropbear coreutils procps"
+www=$vm/www
+
+running() { [ -f "$vm/qemu.pid" ] && kill -0 "$(cat "$vm/qemu.pid")" 2>/dev/null; }
+ssh_vm() {
+  ssh -i "$vm/key" -p "$(cat "$vm/port")" -o StrictHostKeyChecking=no -o UserKnownHostsFile="$vm/known_hosts" \
+    -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveInterval=30 root@127.0.0.1 "$@"
+}
+
+fetch() {
+  local f h
+  mkdir -p "$vm/dl"
+  while read -r f h; do
+    if [ ! -s "$vm/dl/$f" ] || [ "$(sha256sum < "$vm/dl/$f" | cut -c1-64)" != "$h" ]; then
+      curl -fsSL -o "$vm/dl/$f.part" "$netboot/$f" || { echo "box-arm64-vm: $f not fetched" >&2; return 1; }
+      mv -f "$vm/dl/$f.part" "$vm/dl/$f"
+    fi
+    [ "$(sha256sum < "$vm/dl/$f" | cut -c1-64)" = "$h" ] || { echo "box-arm64-vm: $f: not the pinned SHA-256" >&2; return 1; }
+  done <<< "$pins"
+}
+
+# serve: one HTTP/1.0 GET on standard input and output, from QEMU's guestfwd: the files of $www
+serve() {
+  local cr method path _ line f
+  cr=$(printf '\r')
+  read -r method path _
+  while read -r line; do line=${line%"$cr"}; [ -z "$line" ] && break; done
+  path=${path%%\?*}
+  f=$www$path
+  case $path in *..*) f=/nonexistent ;; esac
+  if [ "$method" = GET ] && [ -f "$f" ]; then
+    printf 'HTTP/1.0 200 OK\r\nContent-Length: %d\r\n\r\n' "$(stat -L -c %s "$f")"
+    cat "$f"
+  else
+    printf 'HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n'
+  fi
+}
+
+start() {
+  local o s port i
+  running && { echo "box-arm64-vm: already running" >&2; return 0; }
+  fetch || return 1
+  [ -s "$vm/key" ] || ssh-keygen -q -t ed25519 -N '' -C box-arm64-vm -f "$vm/key" || return 1
+  rm -rf "$www" "$vm/ovl" && mkdir -p "$www"
+  ln -s "$vm/dl/modloop-virt" "$www/modloop-virt"
+  # the apkovl: the default runlevels, the packages, dropbear with the key, lo up
+  o=$vm/ovl
+  mkdir -p "$o/etc/local.d" "$o/etc/apk" "$o/etc/conf.d" "$o/root/.ssh" "$o/etc/runlevels/sysinit" \
+    "$o/etc/runlevels/boot" "$o/etc/runlevels/default" "$o/etc/runlevels/shutdown"
+  for s in sysinit:devfs sysinit:dmesg sysinit:mdev sysinit:hwdrivers sysinit:modloop \
+    boot:modules boot:sysctl boot:hostname boot:bootmisc \
+    default:local default:dropbear shutdown:mount-ro shutdown:killprocs; do
+    ln -s "/etc/init.d/${s#*:}" "$o/etc/runlevels/${s%%:*}/${s#*:}"
+  done
+  echo "$packages" | tr ' ' '\n' > "$o/etc/apk/world"
+  printf '%s/main\n%s/community\n' "$repo" "$repo" > "$o/etc/apk/repositories"
+  echo arbace-arm64 > "$o/etc/hostname"
+  mkdir -p "$o/etc/network"
+  printf 'auto lo\niface lo inet loopback\n' > "$o/etc/network/interfaces"
+  echo 'DROPBEAR_OPTS="-s -g"' > "$o/etc/conf.d/dropbear"
+  cp "$vm/key.pub" "$o/root/.ssh/authorized_keys"
+  chmod 700 "$o/root/.ssh"; chmod 600 "$o/root/.ssh/authorized_keys"
+  cat > "$o/etc/local.d/box.start" <<'EOF'
+#!/bin/sh
+# lo up (the netboot brings up eth0 alone); /h, the commands' directory
+ip link set lo up
+echo nameserver 10.0.2.3 > /etc/resolv.conf
+mkdir -p /h /h/tmp
+EOF
+  chmod +x "$o/etc/local.d/box.start"
+  tar -C "$o" --owner=0 --group=0 -czf "$www/box.apkovl.tar.gz" etc root
+  port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+  echo "$port" > "$vm/port"
+  rm -f "$vm/known_hosts"
+  setsid qemu-system-aarch64 -machine virt,virtualization=on,gic-version=3 -cpu max \
+    -accel tcg,thread=multi -smp "${SMP:-16}" -m "${MEM:-12288}" -nographic \
+    -kernel "$vm/dl/vmlinuz-virt" -initrd "$vm/dl/initramfs-virt" \
+    -append "console=ttyAMA0 ip=dhcp alpine_repo=$repo/main modloop=http://10.0.2.100/modloop-virt apkovl=http://10.0.2.100/box.apkovl.tar.gz" \
+    -netdev "user,id=n,hostfwd=tcp:127.0.0.1:$port-:22,guestfwd=tcp:10.0.2.100:80-cmd:$self serve" \
+    -device virtio-net-pci,netdev=n \
+    -pidfile "$vm/qemu.pid" > "$vm/console.log" 2>&1 < /dev/null &
+  echo "box-arm64-vm: booting Alpine $rel (console: ${vm#$root/}/console.log)" >&2
+  for i in $(seq 120); do
+    sleep 5
+    running || { echo "box-arm64-vm: QEMU ended (console: $vm/console.log)" >&2; return 1; }
+    if ssh_vm true 2> /dev/null; then
+      ssh_vm 'uname -a; ls -l /dev/kvm; nproc; free -m | sed -n 2p' >&2
+      return 0
+    fi
+  done
+  echo "box-arm64-vm: no ssh after 10 min (console: $vm/console.log)" >&2
+  stop
+  return 1
+}
+
+stop() {
+  local p i
+  [ -f "$vm/qemu.pid" ] || return 0
+  p=$(cat "$vm/qemu.pid")
+  if kill -0 "$p" 2>/dev/null; then
+    ssh_vm poweroff > /dev/null 2>&1 || true
+    for i in $(seq 30); do kill -0 "$p" 2>/dev/null || break; sleep 2; done
+    kill "$p" 2>/dev/null || true
+    for i in $(seq 10); do kill -0 "$p" 2>/dev/null || break; sleep 1; done
+    kill -9 "$p" 2>/dev/null || true
+  fi
+  rm -f "$vm/qemu.pid"
+}
+
+# put [--to DIR] FILE...: by tar over ssh, the files' names kept
+put() {
+  local to=/h f
+  [ "${1:-}" = --to ] && { to=$2; shift 2; }
+  for f; do
+    tar -C "$(dirname "$f")" -chf - "$(basename "$f")" | ssh_vm "mkdir -p '$to' && tar -C '$to' -xf -" || return 1
+  done
+}
+
+# up: start the VM unless it runs; records whether this step started it
+started=""
+up() { running && return 0; start && started=1; }
+down() { [ -z "$started" ] || stop; }
+
+smoke() {
+  local b=$root/target/arbace-go/box-arm64/arbace-box n=$root/target/arbace-go/arm64/arbace s native=()
+  [ -x "$b" ] || { echo "box-arm64-vm: no $b (ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box)" >&2; return 1; }
+  up || return 1
+  ssh_vm 'rm -rf /h/s && mkdir -p /h/s/bin/lib /h/s/test /h/tmp'
+  put --to /h/s/bin "$root/bin/box-smoke" && put --to /h/s/bin/lib "$root/bin/lib/store-checks.bash" \
+    && put --to /h/s/test "$root/test/arbace-go-rlwrap.py" && put --to /h/s "$b" || { down; return 1; }
+  if [ -x "$n" ]; then put --to /h/s "$n" && native=(--native ./arbace); fi
+  echo "== the box's smoke test on KVM/arm64 (the aarch64 VM)" >&2
+  ssh_vm "cd /h/s && TMPDIR=/h/tmp bin/box-smoke --arch arm64 --slow ${SMOKE_SLOW:-30} ${native[*]} ./arbace-box" 2>&1 | tee "$vm/smoke.log"
+  s=${PIPESTATUS[0]}
+  echo "box-arm64-vm: smoke: $(grep -c '^  ok' "$vm/smoke.log") ok, $(grep -c '^  FAIL' "$vm/smoke.log") failed (${vm#$root/}/smoke.log)" >&2
+  down
+  return "$s"
+}
+
+hv() {
+  local d=$vm/hv s=0 t
+  "$root/bin/box-vendor" kvm-tests-arm64 "$d" > "$vm/hv-build.log" 2>&1 || { tail -5 "$vm/hv-build.log" >&2; return 1; }
+  up || return 1
+  put --to /h/hv "$d/hv.test" "$d/vmm.test" || { down; return 1; }
+  echo "== go-whim's hv and vmm tests on box/, on KVM/arm64 (the aarch64 VM)" >&2
+  for t in hv vmm; do
+    ssh_vm "cd /h/hv && ./$t.test -test.v -test.count=1" > "$vm/hv-$t.log" 2>&1 || s=1
+    grep -E '^(--- |ok|PASS|FAIL|panic)' "$vm/hv-$t.log"
+  done
+  down
+  return $s
+}
+
+oracle() {
+  local b=$root/target/arbace-go/box-arm64/arbace-box s
+  [ -x "$b" ] || { echo "box-arm64-vm: no $b" >&2; return 1; }
+  up || return 1
+  put --to /h/o "$b" || { down; return 1; }
+  # the candidate: the launcher in the VM, the corpus file on its standard input
+  cat > "$vm/candidate" <<EOF
+#!/bin/sh
+exec "$self" exec env ARBACE_BOX_NET=loopback /h/o/arbace-box "\$@"
+EOF
+  chmod +x "$vm/candidate"
+  (cd "$root" && BOX_ARM64_VM=$vm bin/oracle check "$vm/candidate -" --timeout 7200 -j "${ORACLE_JOBS:-8}" \
+     --exclude forms/files. --exclude forms/processes. --expected test/oracle/known-go-box-arm64.edn "$@") 2>&1 \
+    | tee "$vm/oracle.log"
+  s=${PIPESTATUS[0]}
+  down
+  return "$s"
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  fetch) fetch ;;
+  serve) serve ;;
+  start) start ;;
+  stop) stop ;;
+  status) if running; then echo "running (pid $(cat "$vm/qemu.pid"), ssh port $(cat "$vm/port"))"; else echo stopped; exit 1; fi ;;
+  put) put "$@" ;;
+  exec) running || { echo "box-arm64-vm: not running" >&2; exit 1; }
+    q=$(printf '%q ' "$@"); ssh_vm "cd /h && $q" ;;
+  sh) running || { echo "box-arm64-vm: not running" >&2; exit 1; }
+    ssh_vm "cd /h && sh -c $(printf '%q' "$1")" ;;
+  smoke) trap down EXIT; smoke ;;
+  hv) trap down EXIT; hv ;;
+  oracle) trap down EXIT; oracle "$@" ;;
+  check)
+    trap stop EXIT
+    s=0
+    start || exit 1
+    smoke || s=1
+    hv || s=1
+    exit $s ;;
+  *) sed -n '/^#   bin/,/^#$/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac
