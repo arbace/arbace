@@ -1,7 +1,7 @@
 // Command golines compares the lines of two Go files as g2a's printer promises them in
 // positions mode :lines (doc/go/SPEC.md §10.1, §12.3): the line, as gc sees it (after
 // //line directives), of every declaration, spec, struct field, statement, case clause and
-// function closing brace, in source order.
+// function closing brace, and of every name a field list or a spec declares, in source order.
 //
 // Usage: golines ORIGINAL PRINTED
 //
@@ -62,14 +62,22 @@ func lines(path string) ([]item, error) {
 			}
 		case *ast.ValueSpec:
 			add("spec "+n.Names[0].Name, n.Pos())
+			for _, nm := range n.Names[1:] {
+				add("name "+nm.Name, nm.Pos())
+			}
 		case *ast.TypeSpec:
 			add("type "+n.Name.Name, n.Pos())
 		case *ast.Field:
-			// struct fields only (one per line: same-line groups may be regrouped, N3)
-			if _, ok := stack[len(stack)-3].(*ast.StructType); ok {
-				if l := fset.PositionFor(n.Pos(), true).Line; len(out) == 0 || out[len(out)-1] != (item{"field", l}) {
-					add("field", n.Pos())
-				}
+			// embedded struct fields; a named field is its names, below (groups may be
+			// regrouped, N3: `a, b T` and `a T; b T` give the same items)
+			if _, ok := stack[len(stack)-3].(*ast.StructType); ok && len(n.Names) == 0 {
+				add("field", n.Pos())
+			}
+			// every name of a field list (parameters, results, type parameters, struct
+			// fields, interface methods), each at its line: gc declares it there (DWARF's
+			// decl_line)
+			for _, nm := range n.Names {
+				add("name "+nm.Name, nm.Pos())
 			}
 		case *ast.EmptyStmt:
 		case *ast.CaseClause:

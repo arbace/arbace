@@ -185,6 +185,20 @@
     (go-sym? f) (str (second f))
     :else (fail "not a name" f)))
 
+(defn- name-list
+  "Names separated by commas (a group of parameters, results, fields, type parameters, or a
+  spec's names), each on its recorded line: a name list may span lines (Go allows a break
+  after a comma), and gc declares each name at its own line (DWARF's decl_line)."
+  [nms]
+  (doseq [[i nm] (map-indexed vector nms)]
+    (when (pos? i) (tok ",") (sp) (e/break-to! (line-of nm)))
+    (tok (ident-string nm))))
+
+(defn- group-line
+  "The recorded line of a group of entries: its first name's, else its type's."
+  [g]
+  (line-of (or (first (:names g)) (:src g))))
+
 (defn- label-name [k]
   (if (keyword? k) (name k) (fail "not a label" k)))
 
@@ -211,15 +225,20 @@
   "Prints xs between open and close, separated by commas, each by (print-one x i); keeps
   the recorded lines of the elements, and puts close on a line of its own after a trailing
   comma when the elements span lines and there is room. parent and offset give the
-  elements' indexes in their parent list (for :go/breaks)."
-  [open close xs print-one {:keys [parent offset end] :or {offset 1}}]
+  elements' indexes in their parent list (for :go/breaks); end, the line of close (:here:
+  the line of the last element); target, when given, the recorded line of an element (for
+  elements that are not forms: groups of parameters)."
+  [open close xs print-one {:keys [parent offset end target] :or {offset 1}}]
   (tok open)
   (e/push-open!)
   (let [start (e/line)
         xs (vec xs)
         n (count xs)
         brk (breaks-of parent)
-        ts (mapv (fn [i x] (if parent (child-target parent (+ i offset) x brk) (line-of x))) (range n) xs)
+        ts (mapv (fn [i x] (cond parent (child-target parent (+ i offset) x brk)
+                                 target (target x)
+                                 :else (line-of x)))
+                 (range n) xs)
         nxt (next-targets ts)]
     (dotimes [i n]
       (let [x (nth xs i)
@@ -229,7 +248,8 @@
         (binding [e/*next* (or (nth nxt i) e/*next*)]
           (print-one x i))))
     (let [indent (e/pop-open!)
-          multi? (> (e/line) start)]
+          multi? (> (e/line) start)
+          end (if (= end :here) (e/line) end)]
       (when (and (e/lines?) (pos? n)
                  (or (and (integer? end) (> (long end) (e/line)))
                      (and (nil? end) multi? (e/room? 1))))
@@ -261,22 +281,29 @@
                              {:name nil :type x :variadic? variadic :meta (meta x) :src x}))
                  variadic))))))
 
-(defn- groupable? [prev cur]
+(defn- groupable?
+  "Whether cur may join prev's group: names of one type, doc and struct tag (a field's doc and
+  tag are its every name's, so equal ones are one field's), cur not beginning a line of its
+  own (a name that does keeps its line: gc declares it there)."
+  [prev cur]
   (and prev (:name prev) (:name cur)
        (not (:variadic? prev)) (not (:variadic? cur))
        (= (:type prev) (:type cur))
-       (not (:doc (:meta cur))) (not (:go/tag (:meta cur)))
-       (not (:doc (:meta prev))) (not (:go/tag (:meta prev)))
-       (let [t (line-of (:src cur))] (or (nil? t) (= t (line-of (:src prev))) (nil? (line-of (:src prev)))))))
+       (= (:doc (:meta prev)) (:doc (:meta cur)))
+       (= (:go/tag (:meta prev)) (:go/tag (:meta cur)))
+       (let [t (line-of (:src cur))] (or (nil? t) (= t (line-of (:src prev)))))))
 
 (defn group-entries
-  "Consecutive named entries of equal type (and no doc or tag, on one line) as one group
+  "Consecutive named entries of equal type, doc and tag (groupable?) as one group
   {:names [...] ...}: Go's `a, b T`. Inside generic declarations the grouping must be the
   source's: when a name of the list carries :go/grouped (the amendment proposed in
   PRINTER-NOTES: each name declared together with the one before it), exactly those names
-  join the group before them; otherwise the source is assumed to group what it can."
+  join the group before them (in a file that marks them, *explicit-groups*, a generic
+  declaration's list without marks has no groups); otherwise the source is assumed to group
+  what it can (outside generic declarations the converter marks nothing: grouping is N3's)."
   [entries]
-  (let [explicit? (or *explicit-groups* (some #(contains? (:meta %) :go/grouped) entries))]
+  (let [explicit? (or (and *explicit-groups* *generic*)
+                      (some #(contains? (:meta %) :go/grouped) entries))]
     (reduce (fn [groups cur]
               (let [prev (peek groups)]
                 (if (and prev
@@ -293,20 +320,19 @@
   (if (and (seq? t) (= (op t) "slice")) (second t) (fail "variadic parameter not a slice" t)))
 
 (defn- param-list
-  "(a, b int, c ...T): the parameters of a vector."
-  [v]
+  "(a, b int, c ...T): the parameters of a vector; end, the line of the closing bracket when
+  known."
+  [v & [end]]
   (let [groups (group-entries (param-entries v))]
     (element-list "(" ")" groups
                   (fn [g _]
                     (when (seq (:names g))
-                      (doseq [[i nm] (map-indexed vector (:names g))]
-                        (when (pos? i) (tok ",") (sp))
-                        (tok (ident-string nm)))
+                      (name-list (:names g))
                       (sp))
                     (if (:variadic? g)
                       (do (tok "...") (type-expr (variadic-elem (:type g))))
                       (type-expr (:type g))))
-                  {})))
+                  {:target group-line :end end})))
 
 (defn- results-entries
   "The results of a signature: a vector's :tag (one unnamed result) or :results."
@@ -323,11 +349,26 @@
     (do (sp) (type-expr (:type (first entries))))
     :else (do (sp) (param-list (vec (map (fn [en] (or (:src en) (:type en))) entries))))))
 
+(defn- line-indent
+  "The indentation of the line being written."
+  []
+  (if (e/bol?) @(:indent e/*p*) (e/cur-indent)))
+
+(defn- signature
+  "(params) results. The parameters' closing bracket goes on the line of the results (their
+  first token follows it on its line: the line they record, else the last parameter's), and
+  without results, when the parameters span lines, on a line of its own only if there is room
+  before the body (its first recorded line)."
+  [params res body]
+  (let [r (when (seq res) (let [en (first res)] (or (line-of (or (:src en) (:type en))) :here)))]
+    (binding [e/*next* (next-line body)]
+      (param-list params r)
+      (print-results res))))
+
 (defn- func-type-sig
   "(params) results of (func [params] [results]): the results vector holds names or types."
   [params results]
-  (param-list params)
-  (print-results (if results (param-entries results) [])))
+  (signature params (if results (param-entries results) []) nil))
 
 (defn- struct-tag [s]
   (if (and (string? s) (not (str/includes? s "\n")) (text/raw-string-ok? s))
@@ -383,8 +424,7 @@
   vector's tag."
   [params more]
   (let [results (when (= (first more) :results) (second more))]
-    (param-list params)
-    (print-results (results-entries params results))))
+    (signature params (results-entries params results) nil)))
 
 (declare type-expr)
 
@@ -418,9 +458,7 @@
   (if struct?
     (do
       (if (seq (:names g))
-        (do (doseq [[i nm] (map-indexed vector (:names g))]
-              (when (pos? i) (tok ",") (sp))
-              (tok (ident-string nm)))
+        (do (name-list (:names g))
             (sep)
             (type-expr (:type g)))
         (type-expr (:type g)))
@@ -557,10 +595,8 @@
         groups (group-entries entries)]
     (tok "[")
     (doseq [[i g] (map-indexed vector groups)]
-      (when (pos? i) (tok ",") (sp))
-      (doseq [[j nm] (map-indexed vector (:names g))]
-        (when (pos? j) (tok ",") (sp))
-        (tok (ident-string nm)))
+      (when (pos? i) (tok ",") (sp) (e/break-to! (group-line g)))
+      (name-list (:names g))
       (sp)
       (type-expr (:type g)))
     (when (and (= 1 (count groups)) (= 1 (count (:names (first groups))))
@@ -736,12 +772,12 @@
         [results body] (if (= (first more) :results) [(second more) (nnext more)] [nil more])
         res (results-entries params results)]
     (when-not (vector? params) (fail "fn needs a parameter vector" f))
-    (tok "func")
-    (binding [*header* false]
-      (param-list params)
-      (print-results res)
-      (block-body body {:results? (seq res) :end (:go/end (meta f)) :func? true :sep sp
-                        :parent f :offset (body-offset f body)}))))
+    (let [indent (line-indent)]
+      (tok "func")
+      (binding [*header* false]
+        (signature params res body)
+        (block-body body {:results? (seq res) :end (:go/end (meta f)) :func? true :sep sp
+                          :parent f :offset (body-offset f body) :indent indent})))))
 
 (defn- new-arg [x]
   ;; new(T) or Go 1.26's new(value): a type unless the operand is clearly an expression
@@ -835,11 +871,13 @@
 (defn expr0 [f depth] (expr1 f 0 depth))
 
 (defn- expr-list
-  "e1, e2, ...: (values ...) or one expression."
+  "e1, e2, ...: (values ...) or one expression; a value after the first on its recorded line
+  (its own, or the values' :go/breaks)."
   [f depth]
-  (let [xs (if (and (seq? f) (= (op f) "values")) (rest f) [f])]
+  (let [vs? (and (seq? f) (= (op f) "values"))
+        xs (if vs? (rest f) [f])]
     (doseq [[i x] (map-indexed vector xs)]
-      (when (pos? i) (tok ",") (sp))
+      (when (pos? i) (tok ",") (sp) (e/break-to! (child-target f (inc i) x)))
       (expr0 x depth))))
 
 (defn- n-values [f] (if (and (seq? f) (= (op f) "values")) (count (rest f)) 1))
@@ -860,9 +898,7 @@
         const? (or (:const tm) (some :const ms))
         var? (or (:var tm) (some :var ms))
         typ (some #(when (contains? % :tag) (:tag %)) ms)
-        names (fn [] (doseq [[i t] (map-indexed vector ts)]
-                       (when (pos? i) (tok ",") (sp))
-                       (tok (ident-string t))))]
+        names (fn [] (name-list ts))]
     (cond
       const? (do (tok "const") (sp) (names)
                  (when typ (sp) (type-expr typ))
@@ -1216,9 +1252,7 @@
   (let [ts (targets target)
         implicit? (:go/implicit (meta target))
         typ (some #(when (contains? (meta %) :tag) (:tag (meta %))) ts)]
-    (doseq [[i t] (map-indexed vector ts)]
-      (when (pos? i) (tok ",") (sp))
-      (tok (ident-string t)))
+    (name-list ts)
     (when-not implicit?
       (when (or typ keep-type) (vtab))
       (when typ (type-expr typ))
@@ -1295,9 +1329,10 @@
   "{ statements } at one more indentation than the line of the brace. opts: :results?,
   :end (the recorded line of the closing brace), :func? (a function body: gofmt keeps it on
   one line when the source has it so), :sep (whitespace before the brace), :next (the line
-  of what follows the brace), :else-follows?."
+  of what follows the brace), :else-follows?, :indent (the indentation of the line the
+  construct began on, when its header may span lines: a function's parameters)."
   [forms {:keys [results? end func? sep next parent offset] :as opts}]
-  (let [indent (if (e/bol?) @(:indent e/*p*) (e/cur-indent))
+  (let [indent (or (:indent opts) (if (e/bol?) @(:indent e/*p*) (e/cur-indent)))
         start (e/line)
         forms (vec forms)
         one-line? (if (e/lines?)
@@ -1378,21 +1413,21 @@
         [recv params] (if method? [(first params) (with-meta (vec (rest params)) (meta params))] [nil params])
         res (results-entries params results)]
     (binding [*generic* (boolean (or tps (and recv (generic-type? (if (tagged? recv) (:tag (meta recv)) recv)))))]
-      (tok "func") (sp)
-      (when method?
-        (tok "(")
-        (if (tagged? recv)
-          (do (tok (ident-string recv)) (sp) (type-expr (:tag (meta recv))))
-          (type-expr recv))
-        (tok ")") (sp))
-      (tok (ident-string nm))
-      (when tps (type-params tps))
-      (param-list params)
-      (print-results res)
-      (when-not extern?
-        (block-body (vec body) {:results? (seq res) :end (:go/end (meta f)) :func? true
-                                :parent f :offset (body-offset f body)
-                                :sep (if (e/lines?) vtab sp)})))))
+      (let [indent (line-indent)]
+        (tok "func") (sp)
+        (when method?
+          (tok "(")
+          (if (tagged? recv)
+            (do (tok (ident-string recv)) (sp) (type-expr (:tag (meta recv))))
+            (type-expr recv))
+          (tok ")") (sp))
+        (tok (ident-string nm))
+        (when tps (type-params tps))
+        (signature params res (when-not extern? body))
+        (when-not extern?
+          (block-body (vec body) {:results? (seq res) :end (:go/end (meta f)) :func? true
+                                  :parent f :offset (body-offset f body) :indent indent
+                                  :sep (if (e/lines?) vtab sp)}))))))
 
 (defn- spec-name [t] (if (and (seq? t) (= (op t) "values")) (second t) t))
 
@@ -1402,9 +1437,7 @@
   (let [ts (targets target)
         typ (some #(when (contains? (meta %) :tag) (:tag (meta %))) ts)
         sep (if group? vtab sp)]
-    (doseq [[i t] (map-indexed vector ts)]
-      (when (pos? i) (tok ",") (sp))
-      (tok (ident-string t)))
+    (name-list ts)
     (when (or typ (and group? keep-type)) (sep))
     (when typ (type-expr typ))
     (when (not= init ::none)
