@@ -9,10 +9,11 @@ were taken on the first measurement; what changed: `bean` by reflection, without
 the version, `data_readers.ae`, the class forms compiler's own changes; the translation closure
 of runtime + REPL kept its 422 classes and 184 files).
 
-Retired with standalone S4 (2026-10-12): `bin/java-surface` and `test/jrt/java_surface.ae`
-measured the JVM's compiled classes of `target/stage2`, which left main with the JVM Arbace;
-their last output, `doc/go/java-surface.edn`, stays as data (`bin/jrt-convert`'s closure,
-`bin/jrt-coverage`). The tools remain in main's history before S4.
+Retired with standalone S4 (2026-10-12): `bin/java-surface` measured the JVM's compiled classes
+of `target/stage2`, which left main with the JVM Arbace; its last output,
+`doc/go/java-surface.edn`, stays as data (`bin/jrt-convert`'s closure, `bin/jrt-coverage`), and
+`test/jrt/java_surface.ae` stays as the library `test/jrt/jrt_sources.ae` reads the closure with
+(its `run` measured stage 2's classes). The script remains in main's history before S4.
 
 Summary for the reader in a hurry: the runtime plus the namespaces loaded at a REPL's start use
 **274 JDK classes and 970 distinct members**. Of these, 150 classes (511 members) are plain Java
