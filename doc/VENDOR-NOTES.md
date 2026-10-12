@@ -889,6 +889,36 @@ step 4 (2026-10-07); the others came with later work, as each says:
     sources (hand change 19); it is read as a `.clj` is (no reader conditionals). On the Go
     build the same code finds it on `ARBACE_PATH`. Tests: `test/native/version_test.ae`
     (JVM), `bin/arbace-go --smoke` (Go). Listed under "Dialect divergences".
+22. **The store on the JVM: `arbace.box`, `ref:NAME` scripts, `ARBACE_PATH`'s store entries**
+    (2026-10-12, the user's decision of 2026-10-11 that `arbace.box` runs on the JVM Arbace too;
+    doc/go/BOX-NOTES.md, S3, amendment BX37). Not upstream code, but changes to two vendored
+    files and two new namespaces of Arbace's own:
+    - `arbace/box.ae`, `arbace.box`, until now the Go build's variant
+      (`arbace/lang/go/ns/box.ae`, moved with `git mv`), is shared by both builds; its calls of
+      `jdk.internal.jrt.HostStore` go through a host layer, `arbace.box.host`, with the same
+      answers (0, or -1 to -5): on the JVM `arbace/box/host.ae`, the directory store over
+      java.nio in the box monitor's format (refs under `FileChannel.lock` of `refs/.lock`, which
+      the JDK takes as `fcntl(F_SETLKW)` over the whole file, the lock the monitor and jrt take;
+      blobs and refs written to a temporary name and renamed, 0644; blobs held to their hash),
+      and snapshots written byte for byte as Go's `archive/tar` writes jrt's (`SnapshotTar`),
+      tars read as Go's reader does (USTAR, PAX, GNU long names); on the Go build its variant
+      `arbace/lang/go/ns/box/host.ae`, over `HostStore`.
+    - `arbace/main.ae`'s `load-script` takes `ref:NAME` (a script or an `-i` file: the source
+      the store's ref NAME holds, `arbace.box/load-ref`), on both builds: the Go build's
+      `main.subst.ae` no longer substitutes it.
+    - `RT.load` (`arbace/lang/RT.ae`): a namespace found neither as a class nor as a source on
+      the class path is looked for, last, in the store entries `store:PREFIX` of `ARBACE_PATH`
+      (`RT.loadFromStore`, which requires `arbace.box.host` and calls its `load-from-path`:
+      `.ae`, then `.clj`, then `.cljc`, each in the entries in order), only when `ARBACE_PATH`
+      has a store entry. `ARBACE_PATH`'s directories stay the Go build's (the JVM's
+      counterpart is the class path, `ARBACE_CLASSPATH` for `bin/arbace-j`), and resources
+      (`io/resource`, `getResourceAsStream`) do not see store entries on the JVM. The Go
+      build's `RT` variant cuts `loadFromStore` (its `pathResource` reads the entries in order
+      with the directories).
+    `arbace.box` is not AOT-compiled (it loads from its source, as on the Go build, where it is
+    not in the image of prepared namespaces). Tests: `test/native/box_test.ae` (JVM),
+    `bin/arbace-go --smoke` (the JVM's checks beside the native executable's, one directory
+    used by both). Listed under "Dialect divergences".
 
 ## Dialect divergences
 
@@ -929,6 +959,10 @@ the runtime-visible renames are listed once, as c2a's mechanical part.
   `*clojure-version*` is upstream's.
 - **`data_readers.ae`** (hand change 21) at a class path root is read, before
   `data_readers.clj` and `.cljc`; upstream ignores it.
+- **The store** (hand change 22): `arbace.box`, a namespace upstream lacks; `arbace.main`
+  takes `ref:NAME` for a script or an `-i` file (upstream would look for a file of that name);
+  with a `store:` entry in `ARBACE_PATH`, a namespace the class path lacks is looked for in the
+  store before `require` fails.
 - **Runtime-visible names** (hand change 2, step 4's cleanups): agent, socket server and process
   thread names, the error report files' prefix and the proxy methods (`__initArbaceFnMappings`
   and the rest, the field `__arbaceFnMap`) say `arbace`, not `clojure`.
