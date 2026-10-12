@@ -575,3 +575,16 @@ the first. The history before it is on the frozen branches and in git history:
   a second tree); the Mac's binaries as a tarball built here with a checklist script (rather than
   building on the Mac); the milestone's gate `bin/gate --full` plus the box's checks in the arm64
   VM, the user's Mac run following the tag rather than blocking it (not as recommended).
+- S4's phase 1 (the agent, `6724fa1` on `box-s4`; BOX-NOTES.md, "S4"): no blocker. go-whim's
+  `aarch64.sh` (QEMU 11.1.2, `virtualization=on`, Alpine netboot, Linux 6.18.42) boots in 32 s
+  with /dev/kvm; go-whim's arm64 `hv` tests pass in it; the arm64 box as built since S1 runs on
+  KVM/arm64 there (`-e`, the REPL, a future, files, the store tool, a loopback socket; start 13-14
+  s against 0.3 s on amd64: emulation about 40x), its one defect nil dereferences (a data abort
+  ends the guest). purego for darwin/arm64 is 3 packages, 7,462 lines; std for tamago/arm64
+  shares 1,683 file forms with amd64's (41 amd64-only, 52 arm64-only, 11 differing only in
+  annotations the printer does not use).
+- The user: BX60-BX66 accepted (arm64 nil panics; the darwin launcher, the guest beside it for
+  codesigning; purego as `arbace/box/purego` forms; `tamago/`'s arm64 in one tree, the 11 files
+  per architecture; `bin/box-arm64-vm`; `bin/box-smoke`; `bin/box-mac-bundle`); the VM's Alpine
+  pinned to a release by SHA-256 rather than edge; before the tag only the box's smoke test in
+  the arm64 VM must pass (not the oracle subset, about 1-2 h, nor `box-suite`, about 3 h).
