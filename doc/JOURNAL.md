@@ -843,3 +843,35 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   (6m06s); a candidate seed (3,063,800 bytes) as pinned, stage 0 from it byte-identical to
   `--build` on amd64 and arm64 (19 s); the oracle its 46 known mismatches. The candidate is not
   committed (SA7).
+
+## 2026-10-12: S3's g2a half merged
+
+- Agent, branch `s3-g2a` (`b07b644`, main merged at `9770f9a`, `b152043`, `43073ad`,
+  `1a5f1d5`), merged as `d9aaf0a` (doc/STANDALONE-NOTES.md: both sides' sections kept). g2a's
+  printer, `bin/g2a build`'s driver and the converter run on the native Go executable:
+  `G2A_HOST=jvm|go` (`bin/lib/g2a-host.bash`; the JVM the default), the executable `G2A_GO_EXE`
+  or `target/arbace-go/<arch>/arbace`, run from a copy in `.tmp/g2a-host/`, g2a loaded from
+  source (`arbace -m`). Proofs: `bin/arbace-go --build` and `--build --box` for amd64 and arm64
+  under both hosts print equal modules and give 8 identical executables; `tamago/` prints equal
+  on Go, on the JVM and by main's printer; `bin/tamago-vendor check` both guests identical;
+  `bin/g2a-print-tests` 268/268; the round trips no regressions; the essential gate passed on
+  the branch (5m36s).
+- Speed: the program's printing 378 s / 6.2 GB → 32.3 s / 4.6 GB on Go, 23.8 → 12.1 s on the
+  JVM; `tamago/` std 235 → 21-24 s on Go. Causes fixed in `arbace/g2a`: forms read twice and
+  serially (now once, in parallel); files of a package and chunks of a long file printed in
+  parallel, a chunk joined only when the printer's state matches what it assumed, else printed
+  again in place (so equal to the sequential text); a cubic rebuild of operator chains
+  (`butlast` per prefix: x/text's tables 178 s → 8.9 s on Go); smaller costs in
+  `go-printable?`, escaping, `sp`/`vtab`, alignment. The converter on Go passes the round trip
+  but takes 207 s (36.7 s on the JVM), peaking at 13 GB: not tuned.
+- Runtime fix (`arbace/lang/go/Compiler.ae`): the evaluator recompiled a function's method on
+  every variadic call or `apply` instead of using its cache (9% of std's printing); the native
+  oracle unchanged (22,232 of 22,278, the 46 known).
+- Amendments SA30 (`G2A_HOST`), SA31 (parallel printing), SA32 (the cache fix) proposed to the
+  user. Left: a2g on Go and the G1 → G2 → G3 chain (branch `s3-fixpoint`); the remaining 2-3×
+  over the JVM is the evaluator itself (AOT-compiling the tools would need a2g to embed
+  `arbace/g2a`); the reader on Go is the slowest part of reading.
+- The user: SA30-SA32 accepted as recommended (`G2A_HOST`, the JVM the default until the
+  fixpoint; parallel printing of files and chunks; the cache fix).
+- On main after the merge (`d9aaf0a`): the essential gate passed (5m43s; stage 2 = stage 3,
+  5,787 classes).

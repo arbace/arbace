@@ -77,7 +77,8 @@ Prior art:
     dialects' divergences; `bin/clojure-tests` translates Clojure's suite with it.
   - `arbace/j2a/`: the Java → class forms converter.
   - `arbace/g2a/`: Go as Go forms and back (spec `doc/go/SPEC.md`; helpers `tools/godump`,
-    `tools/gocmp`; `bin/g2a`).
+    `tools/gocmp`; `bin/g2a`; hosted on the JVM, or with `G2A_HOST=go` on the Go executable,
+    `G2A_GO_EXE`, byte-identical, for every caller of `bin/g2a`).
   - `arbace/a2g/`: the class forms → Go forms translator (spec `doc/go/A2G-SPEC.md`; `bin/a2g`).
 - The Go build (B1a, `doc/go/B1-PLAN.md`): Arbace as a static Go executable. a2g translates
   the runtime, with the Go-build variants of Clojure's classes and namespaces in

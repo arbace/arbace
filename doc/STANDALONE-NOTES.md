@@ -627,6 +627,7 @@ oracle's reference or j2a). Counts at `b0f5730`.
 - **O5** Done: the Go suite's Java fixtures are committed as forms (`test/java-fixtures/`), so the
   test build needs no javac or j2a; `bin/clojure-tests --java-fixtures verify` (j2a on the JVM)
   is a `--full` check, as `bin/a2g-edge verify` is.
+
 ## S3: g2a on Go
 
 The part of S3 that is g2a's (branch `s3-g2a`, 2026-10-12): g2a's printer, `bin/g2a build`'s
@@ -761,6 +762,8 @@ instrumentation (wrapped vars: its cost hid the costs measured).
 ### Amendments
 
 Proposed to the user; the recommended choice is applied on the branch `s3-g2a`.
+
+The user accepted SA30-SA32 as recommended (2026-10-12, after the merge into main).
 
 - **SA30 g2a's host chosen by `G2A_HOST`.** (a) `G2A_HOST=jvm|go` in `bin/lib/g2a-host.bash`
   for `bin/g2a build`, `print`, `convert` (and everything built on them: `bin/arbace-go`,
