@@ -18,19 +18,19 @@
 #   g2a_host        prints the host: jvm or go (fails on another value of G2A_HOST)
 
 g2a_host() {
-  case ${G2A_HOST:-jvm} in
-    jvm|go) echo "${G2A_HOST:-jvm}" ;;
+  case ${G2A_HOST:-go} in
+    jvm|go) echo "${G2A_HOST:-go}" ;;
     *) echo "G2A_HOST is jvm or go, not $G2A_HOST" >&2; return 2 ;;
   esac
 }
 
 # g2a_go_exe: prints the path of the copy of the Go executable to run (made or refreshed)
 g2a_go_exe() {
-  local exe arch dir=$root/.tmp/g2a-host
-  case $(uname -m) in aarch64) arch=arm64 ;; *) arch=amd64 ;; esac
-  exe=${G2A_GO_EXE:-$root/target/arbace-go/$arch/arbace}
+  local exe dir=$root/.tmp/g2a-host
+  . "$root/bin/lib/host.bash"
+  exe=${G2A_GO_EXE:-$(arbace_host_exe)} || return 1
   if [ ! -x "$exe" ]; then
-    echo "G2A_HOST=go: no executable $exe (bin/arbace-go --build with G2A_HOST=jvm first, or set G2A_GO_EXE)" >&2
+    echo "g2a: no executable $exe (G2A_GO_EXE)" >&2
     return 1
   fi
   mkdir -p "$dir"

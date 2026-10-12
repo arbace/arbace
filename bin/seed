@@ -39,9 +39,6 @@
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-jar=seed/arbace-seed.jar
-pinned=$(cut -d' ' -f1 "$jar.sha256")
-tag=${ARBACE_SEED_TAG:-arbace-for-java-26-v1}
 . "$root/bin/lib/seed-go.bash"
 goseed=${ARBACE_SEED_GO:-seed/arbace-seed-go.tar.xz}
 case $goseed in /*) ;; *) goseed=$root/$goseed ;; esac
@@ -59,53 +56,30 @@ go_check() {
 }
 
 case ${1:-} in
-  --check)
-    if (cd seed && sha256sum --quiet -c arbace-seed.jar.sha256 > /dev/null 2>&1); then
-      echo "$jar: $pinned, as pinned"
-    else
-      echo "$jar: SHA-256 $(sha256sum "$jar" | cut -d' ' -f1), pinned $pinned" >&2
-      exit 1
-    fi ;;
-  --verify)
-    wt=$root/.tmp/seed-verify
-    git worktree remove --force "$wt" 2> /dev/null; rm -rf "$wt"
-    git worktree add --detach "$wt" "$tag" > /dev/null 2>&1 || { echo "no worktree of $tag" >&2; exit 1; }
-    # checkout leaves the frozen clojure/ sources newer than their tracked classes (CLAUDE.md)
-    find "$wt/clojure" -name '*.class' -exec touch {} +
-    echo "== bin/build-arbace at $tag ($(git rev-parse --short "$tag^{commit}")), in $wt"
-    "$wt/bin/build-arbace" > "$root/.tmp/seed-verify.log" 2>&1
-    st=$?
-    got=$( [ -f "$wt/target/arbace.jar" ] && sha256sum "$wt/target/arbace.jar" | cut -d' ' -f1)
-    git worktree remove --force "$wt"
-    if [ $st != 0 ]; then
-      echo "the build failed (exit $st), see .tmp/seed-verify.log" >&2; exit 1
-    fi
-    if [ "$got" = "$pinned" ]; then
-      echo "rebuilt jar: $got, as pinned: $jar is the jar of $tag"
-    else
-      echo "rebuilt jar: $got, pinned $pinned: they differ" >&2; exit 1
-    fi ;;
-  --go-check) go_check ;;
-  --go-make)
+  --check) go_check ;;
+  --make)
     [ -n "${2:-}" ] && { goseed=$2; case $goseed in /*) ;; *) goseed=$PWD/$goseed ;; esac; }
     mkdir -p "$root/.tmp"
     seed_go_make "$goseed" || exit 1
     (cd "$(dirname "$goseed")" && sha256sum "$(basename "$goseed")") > "$goseed.sha256"
     echo "pinned in $goseed.sha256" ;;
-  --go-build)
+  --build)
     shift
-    out=$root/target/seed-go archs=amd64,arm64
+    out=$root/target/seed archs=$(seed_go_host_arch)
     while [ $# -gt 0 ]; do
       case $1 in
         -o) out=$2; shift 2 ;;
         --arch) archs=$2; shift 2 ;;
-        *) echo "usage: bin/seed --go-build [-o DIR] [--arch A[,B]]" >&2; exit 2 ;;
+        *) echo "usage: bin/seed --build [-o DIR] [--arch A[,B]]" >&2; exit 2 ;;
       esac
     done
     case $out in /*) ;; *) out=$PWD/$out ;; esac
     go_check || exit 1
-    seed_go_build "$goseed" "$out" ${archs//,/ } ;;
-  --go-verify)
+    rm -f "$out/seed.sha256"
+    seed_go_build "$goseed" "$out" ${archs//,/ } || exit 1
+    # what stage 0 was built from (bin/lib/host.bash rebuilds it when the seed changes)
+    cut -d' ' -f1 "$goseed.sha256" > "$out/seed.sha256" ;;
+  --verify)
     go_check || exit 1
     # the pinned toolchain, the one the seed names (SA4)
     xz -dc "$goseed" | tar -xOf - "$seed_go_top/SEED.edn" > "$root/.tmp/seed-go-verify.edn"
@@ -120,7 +94,7 @@ case ${1:-} in
     # Go-hosted chain from the previous seed), then its own --go-make
     echo "== the build at $(git rev-parse --short "$rev^{commit}"), in $wt (log $log)"
     (cd "$wt" && bin/build-arbace && ARBACE_GO_ARCHES=$(seed_go_host_arch) bin/arbace-go --build \
-       && bin/seed --go-make "$wt/.tmp/seed-go/arbace-seed-go.tar.xz") > "$log" 2>&1
+       && bin/seed --make "$wt/.tmp/seed-go/arbace-seed-go.tar.xz") > "$log" 2>&1
     st=$?
     again=$wt/.tmp/seed-go/arbace-seed-go.tar.xz
     if [ $st != 0 ] || [ ! -f "$again" ]; then
@@ -132,7 +106,7 @@ case ${1:-} in
       else echo "the archives differ (xz $(xz --version | head -1 | cut -d' ' -f4)): the tree is what counts"; fi
       # stage 0 from the seed is the commit's own executable, byte for byte
       h=$(seed_go_host_arch)
-      if ARBACE_SEED_GO=$again "$root/bin/seed" --go-build -o "$wt/.tmp/seed-go/stage0" --arch "$h" >> "$log" 2>&1 \
+      if ARBACE_SEED_GO=$again "$root/bin/seed" --build -o "$wt/.tmp/seed-go/stage0" --arch "$h" >> "$log" 2>&1 \
          && cmp -s "$wt/.tmp/seed-go/stage0/$h/arbace" "$wt/target/arbace-go/$h/arbace"; then
         st=0; echo "stage 0 from it ($h) is the commit's bin/arbace-go --build executable, byte for byte: $(sha256sum "$wt/target/arbace-go/$h/arbace" | cut -d' ' -f1)"
       else
@@ -146,5 +120,5 @@ case ${1:-} in
     fi
     git worktree remove --force "$wt"
     exit $st ;;
-  *) echo "usage: bin/seed --check | --verify | --go-check | --go-make [ARCHIVE] | --go-build [-o DIR] [--arch A,B] | --go-verify [REV]" >&2; exit 2 ;;
+  *) echo "usage: bin/seed --check | --make [ARCHIVE] | --build [-o DIR] [--arch A,B] | --verify [REV]" >&2; exit 2 ;;
 esac
