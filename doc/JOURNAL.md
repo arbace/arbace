@@ -466,3 +466,11 @@ the first. The history before it is on the frozen branches and in git history:
 - S5: agent, branch `box-s5` (`b6addbc`), done; its merge with S3 conflicts in `box/`'s forms
   (abi, the launcher, vmm), jrt's box host and the docs, so it is merged by an agent that prints
   both sides, merges the Go and converts back, together with S3's two follow-ups.
+- S5's decisions by the user: BX40-BX44 accepted; its network semantics kept as built (host name
+  `localhost`, wildcard listens bound to loopback unless a pattern allows `*`, a dial to a closed
+  own listener refused by policy under `listen` alone, reverse lookups only with `dial=*`); the
+  guest's polling (console and network, an idle listening server ~99 polls a second) replaced by
+  a wake-on-event in the monitor before the milestone, rather than later; the box's own checks in
+  `bin/gate --full` stay deferred.
+- Two agents: `box-net-merge` (S5 merged with S3, the monitor's blob cache bounded, the
+  wake-on-event) and `box-jvm` (`arbace.box` on the JVM Arbace).
