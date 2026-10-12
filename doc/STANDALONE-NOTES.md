@@ -2,7 +2,7 @@
 
 Working notes of the standalone stages ([STANDALONE-SURVEY.md](STANDALONE-SURVEY.md), §9.1; the
 user's decisions D1-D13 of 2026-10-12): what each stage did, how it is checked, and its
-amendments (SA1-SA9 for S4's preparation, SA10... for S2), proposed to the user, the
+amendments (SA1-SA9 for S4's preparation, SA10... for S2, SA30... for S3), proposed to the user, the
 recommended choice applied meanwhile. S1 (the
 JDK's forms committed in `jdk/`) is recorded in [go/JRT-SOURCES.md](go/JRT-SOURCES.md), "The
 committed forms", and `jdk/README.md`.
@@ -219,3 +219,152 @@ branch; renumbered at the merge, since S4's preparation had taken SA1-SA9.
   (two a2g runs, about 3.5 minutes, sequential for memory); (b) only by hand, like `trace`.
   *Recommended: (a)*: a change that asks the JVM something new must update the edge, and only
   the JVM can tell.
+
+## S3: g2a on Go
+
+The part of S3 that is g2a's (branch `s3-g2a`, 2026-10-12): g2a's printer, `bin/g2a build`'s
+driver (printing a program's packages into a module, then `go build` as a host process through
+`ProcessBuilder`) and its converter run on the native Go executable, with the same output byte
+for byte. a2g on Go is the other half of S3 (branch `s3-fixpoint`).
+
+### The host: `G2A_HOST`
+
+`bin/lib/g2a-host.bash` runs g2a's namespaces for `bin/g2a build`, `bin/g2a print`
+(`bin/g2a-print`) and `bin/g2a convert` (so the round trip) on the host `G2A_HOST` names:
+
+- `jvm`, the default: Arbace on the JVM, `target/stage2` plus the checkout, as before.
+- `go`: the native executable, `G2A_GO_EXE` or else `target/arbace-go/<host arch>/arbace` (built by
+  `bin/arbace-go --build`), run as `arbace -m NS ARGS` with the checkout first on `ARBACE_PATH`.
+  `arbace.g2a` is not embedded in the executable (a2g's `embed.ae` leaves the tools out), so it
+  loads from the checkout's sources, as on the JVM. The executable runs from a copy in
+  `.tmp/g2a-host/`, refreshed (by a rename, under a lock) when it differs: `bin/arbace-go
+  --build` replaces `target/arbace-go/<arch>/arbace` while its own printing runs.
+
+So `G2A_HOST=go bin/arbace-go --build` builds the Go executable with the Go executable, and
+`G2A_HOST=go bin/arbace-go --build --box` the box (`bin/tamago-vendor print`, the guest and the
+launcher through `bin/g2a build`). The JVM stays the default until S3's fixpoint replaces it.
+
+### Byte for byte
+
+Proofs (main at `329af1a` merged; `.tmp/proof/`, removed after):
+
+- `bin/arbace-go --build` and `--build --box` for amd64 and arm64, once with `G2A_HOST=jvm` and
+  once with `G2A_HOST=go`: the printed modules (`work-amd64/mod`, `work-arm64/mod`: a2g's
+  program with `x509roots/`; `work-box-<arch>/mod`, the guests with `box/`;
+  `work-box-launcher-<arch>/mod`; the printed `tamago/` tree, `target/arbace-go/tamago`) equal by
+  `diff -r`, and the eight executables identical: `amd64/arbace`, `arm64/arbace`, and for amd64
+  and arm64 the guest `arbace.elf` and the launcher `arbace-box`.
+- `tamago/`'s std and goos module, each architecture's forms root (`tamago/goroot/go` with
+  `arch/<arch>/go` over it, as `bin/tamago-vendor` lays it): printed on Go, on the JVM, and on
+  the JVM by main's printer (`329af1a`), all equal, for amd64 and for arm64.
+- a2g's program printed by main's printer on the JVM equals the new printer's (both hosts);
+  `box/` and `x509roots/` printed alone on both hosts and by main's printer, equal.
+- `bin/tamago-vendor check`: both guests identical to TamaGo's originals' (linked and cut).
+- `bin/g2a roundtrip amd64` and `linux/amd64`: no regressions; `G2A_HOST=go bin/g2a roundtrip
+  amd64` (converter and printer on Go) too.
+
+### Speed
+
+Wall times on the shared 64-core host (other agents' builds running; differences under 10-20%
+are noise). "Before" is main's printer (`329af1a`); on Go, main's executable of the time.
+The program's line includes `go build` from a warm cache (a few seconds).
+
+| tree | JVM before | Go before | JVM after | Go after |
+|---|---:|---:|---:|---:|
+| a2g's program, amd64 (`bin/g2a build`, 34 MB of forms, 1,070 files) | 23.8 s | 378 s (6.2 GB) | 12.1 s | 32.3 s (4.6 GB) |
+| `tamago/` std, amd64 (print only, 371 packages) | 20.1 s | 235 s | 6.2 s | 21-24 s (3.7 GB) |
+| `tamago/` std, arm64 | 18.1 s | | 6.6 s | 24.1 s |
+| `tamago/` goos module | 2.5 s | 4.4 s | 2.2 s | 2.7 s |
+| `box/` (print only) | 2.3 s | 4.4 s | 2.2 s | 2.4 s |
+| `x509roots/` (print only) | 1.9 s | 3.5 s | 2.0 s | 2.4 s |
+| `net/http` alone (`bin/g2a-print`, 29 files) | 2.7 s | 10.1 s | | 3.8 s |
+| `bin/arbace-go --build`, amd64 and arm64 (a2g on the JVM in both) | | | 137 s | 153 s |
+| `bin/arbace-go --build --box`, amd64 and arm64 | | | 85 s | 97 s |
+| the round trip's conversion and printing (`bin/g2a roundtrip amd64`) | | | 36.7 s | 207 s (13 GB) |
+
+Go after is about 3 times the JVM's wall time on the large trees (CPU: about 2 times the JVM's
+on the program, 488 s against 237 s), against 16 times before; on small trees the
+executable's start (no JVM to start, but the printer loaded from source, 1.6 s) evens them.
+The converter was not tuned (left for S3's fixpoint, which needs only the printer and the driver).
+
+### What changed
+
+The survey's measure (§8.3, about 7 times slower) was of one package; the whole program was
+16 times slower, for reasons in g2a, mostly sequential work the evaluator makes long:
+
+1. **Reading once, in parallel.** `bin/g2a build` read every forms file twice (`package-file?`,
+   then `collect`), one at a time: 42 s of the 97 s left on Go once printing was parallel (the
+   reader is Go code, but slower than the JVM's: `LispReader` through four `Reader` layers and
+   jrt's regex for each symbol). Now `arbace.g2a.build/read-all` reads the files once, in
+   parallel (`pmap`), and `print/collect` takes a reading function: 7 s.
+2. **Printing in parallel.** Packages were printed in parallel, but each package's files one
+   after another, and a file whole: jrt's 910 files in a row, and `a2g_classes.ae` (4 MB, 8,249
+   declarations) alone took 44 s on Go. Now `print-forms` prints a package's files in parallel,
+   and `print-file` a long file's declarations in chunks (mode `:lines`, about two per
+   processor): each chunk is printed in an emitter state of its own, started at the line its
+   first declaration is placed on (`print-emit/start-at!`), then joined to the file's state in
+   order (`join!`) when the file's printing reaches that line in the state the chunk assumed: at
+   the start of a line, indentation 0, no pending blank or open bracket, the mark below the line
+   and the chunk's own line never below it (`:min-line`, which `set-line!` keeps); at the start
+   of a line the emitter reads nothing written before (the last token and the semicolon rule
+   only between tokens of a line; the mark only as `(max (inc mark) line)`). Otherwise the chunk
+   is printed again in the file's state: the text is the sequential printing's in every case.
+   gofmt's alignment (`print-text/align`) aligns a long text's sections (form feeds end them)
+   in parallel too.
+3. **Binary chains in linear time.** An n-ary operator form `(+ a b c ...)` is printed as the
+   left-nested chain go/printer sees; the printer made each prefix with `butlast` and walked it
+   again for its cutoff (go/printer's `walkBinary`) at each level: cubic in the operands.
+   x/text's normalization tables (a long concatenation) took 178 s on Go and 11 s on the JVM,
+   the whole std's critical path. Now `walk-prefixes` walks all prefixes in one pass and
+   `binary-expr` prints the chain in one loop, doing what the recursion did at each level (the
+   repeated `break-to!` of f's line, each prefix's cutoff): 8.9 s and 2.6 s.
+4. **Smaller things**: `go-printable?` made a set of 22 character types at each code point (now
+   once); `escape`/`unescape` mapped every character of the file through a map (now
+   `String.replace`); `sp` and `vtab` compared with `(char 11)` through a reflective
+   `Util.equiv` (the only reflection warnings of the printer's hot path; on Go each call listed
+   `Util`'s methods); `parse-lines` (alignment) compares chars as ints and shares the empty
+   indentation cell; the emitter's accessors (`lines?`, `line`, `bol?`, `cur-indent`,
+   `target`) are `definline` (measured: no gain, kept as harmless).
+5. **The evaluator (runtime, `arbace/lang/go/Compiler.ae`)**: `Evaluator.invokeFn` of a call
+   through a seq (variadic fns, `apply`, `RestFn`) compiled the method to `Code` at every call
+   (`CodeRun/cmethod` unconditionally, with a binding of `*ns*`), where the calls of a fixed
+   arity take the cached `ObjMethod.evalCM`: 9% of std's printing on Go. It now takes the cache
+   too. The one runtime change; the oracle (`known-go-amd64.edn`: 22,232 of 22,278, the 46
+   recorded mismatches, 0 new) and `--smoke` pass.
+
+Profiles (Go's pprof, `ARBACE_CPUPROFILE`) attribute the rest to the evaluator itself, spread
+thin (frames, `Code` dispatch, boxing, allocation; the collector 7-16%): no single hot spot
+remains in g2a. Tried and not kept: `GOGC=400` for g2a's runs (13% less CPU time, the same wall
+time, a third more memory: the executable's own setting, 200, is used); per-function
+instrumentation (wrapped vars: its cost hid the costs measured).
+
+### Left for S3
+
+- a2g on the Go executable (S2's a2g, `s3-fixpoint`), then the chain G1 → G2 → G3 with
+  `G2A_HOST=go`.
+- g2a embedded in the executable and prepared in its image would save its load from source (1.6
+  s per run); compiling the tools' namespaces to Go (B1-PLAN step 7's second half, AOT to Go
+  forms) is what would close most of the remaining 2-3x: it needs a2g's embedding (`embed.ae`
+  excludes `arbace/g2a/`).
+- The converter on Go (5.6x the JVM's time, 13 GB) is untuned; the round trip is not part of
+  the build.
+- The reader on Go (`LispReader` through `LineNumberingPushbackReader`, jrt's regex per token)
+  is the slowest part left of reading; a faster path would serve every tool.
+
+### Amendments
+
+Proposed to the user; the recommended choice is applied on the branch `s3-g2a`.
+
+- **SA30 g2a's host chosen by `G2A_HOST`.** (a) `G2A_HOST=jvm|go` in `bin/lib/g2a-host.bash`
+  for `bin/g2a build`, `print`, `convert` (and everything built on them: `bin/arbace-go`,
+  `bin/jrt`, `bin/tamago-vendor`), the JVM the default until the fixpoint; the executable
+  `G2A_GO_EXE`, else the host architecture's `target/arbace-go`, run from a copy; (b) a separate
+  `bin/g2a-go`; (c) Go the default now. *Recommended: (a)*: one switch for every caller, which
+  S3's chain sets; the default moves with the fixpoint (S3/S4).
+- **SA31 The printer parallel within a package and a file.** (a) files of a package in
+  parallel, a long file's declarations in chunks joined when the state matches, else printed
+  again (exact by construction, proven on every tree above); (b) files only (the critical path
+  then a2g's `a2g_classes.ae`, 44 s on Go); (c) splitting a2g's large files in a2g instead.
+  *Recommended: (a)*; the JVM gains too (the program 23.8 → 12.1 s).
+- **SA32 The evaluator's method cache on calls through a seq** (runtime, `Compiler.ae`): a fix,
+  recorded as an amendment because it changes the Go build's runtime. *Recommended: accept.*

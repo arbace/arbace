@@ -11,9 +11,9 @@
 #                   is G2A_GO_EXE (default target/arbace-go/<host arch>/arbace, built by
 #                   bin/arbace-go --build), run from a copy in .tmp/g2a-host/ refreshed when it
 #                   differs: a build of the executable (bin/arbace-go --build on this host)
-#                   replaces it while the copy runs. GOGC is 400 unless set (the printer
-#                   allocates much and keeps little: the collector's work, not memory, bounds
-#                   it; doc/STANDALONE-NOTES.md).
+#                   replaces it while the copy runs. The collector's settings are the
+#                   executable's (GOGC 200 unless set: GOGC=400 saves about 13% of the CPU
+#                   time, not of the wall time, for a third more memory; doc/STANDALONE-NOTES.md).
 #   g2a_run HEAP NS ARG...  the same, as a command of the shell (not replacing it)
 #   g2a_host        prints the host: jvm or go (fails on another value of G2A_HOST)
 
@@ -51,7 +51,7 @@ g2a_run() {
   host=$(g2a_host) || return 2
   if [ "$host" = go ]; then
     exe=$(g2a_go_exe) || return 1
-    ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} GOGC=${GOGC:-400} "$exe" -m "$ns" "$@"
+    ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} "$exe" -m "$ns" "$@"
     return
   fi
   . "$root/bin/lib/tools.bash"
