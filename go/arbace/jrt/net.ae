@@ -138,8 +138,10 @@ connection.\n"}
 ;; The socket table
 
 (go/type netSock
-  "netSock is an open socket of the table: a listener or a connection.\n"
-  (struct ^{:tag net/Listener} l ^{:tag net/Conn} c))
+  "netSock is an open socket of the table: a listener or a connection; once TLS is started on a
+connection (tls.ae) c is the TLS connection and raw the host's under it, which options,
+addresses and Available ask (both under socksMu).\n"
+  (struct ^{:tag net/Listener} l ^{:tag net/Conn} c ^{:tag net/Conn} raw))
 
 (go/var ^{:tag sync/Mutex} socksMu)
 (go/var ^{:tag (map int32 (* netSock))} openSocks (make (map int32 (* netSock))))
@@ -224,12 +226,27 @@ handle, or an error kind.\n"
           (return (failed errs err false)))
         (newConn c)))))
 
-(go/func conn "conn is the connection of handle h, or nil when it is closed.\n"
+(go/func conn "conn is the connection of handle h (its TLS connection once started), or nil when it
+is closed.\n"
   ^{:tag net/Conn} [^int32 h]
-  (let [s (sock h)]
+  (.Lock socksMu)
+  (defer (.Unlock socksMu))
+  (let [s (aget openSocks h)]
     (when (== s nil)
       (return nil))
     (.-c s)))
+
+(go/func rawOf "rawOf is the host's connection of s (under TLS too), or nil.\n"
+  ^{:tag net/Conn} [^{:tag (* netSock)} s]
+  (.Lock socksMu)
+  (defer (.Unlock socksMu))
+  (cond (== s nil) (return nil)
+        (!= (.-raw s) nil) (return (.-raw s)))
+  (.-c s))
+
+(go/func hostConn "hostConn is the host's connection of handle h (under TLS too), or nil.\n"
+  ^{:tag net/Conn} [^int32 h]
+  (rawOf (sock h)))
 
 (go/func HostNet_Read0_I_B1_I_I_I_String1__I_native
   "HostNet_Read0_I_B1_I_I_I_String1__I_native reads up to len (> 0) bytes of connection h into
@@ -270,6 +287,9 @@ b at off, waiting up to timeout ms (0: no limit): the count, -1 at the end, or a
         (values nh ok) (netHost)]
     (when (or (== c nil) (not ok))
       (return 0))
+    ;; under TLS the host's count is of the cipher text: what the plain text holds is not known
+    (when (isTLS c)
+      (return 0))
     (conv int32 (.Available nh c))))
 
 (go/func HostNet_Close0_I__V_native
@@ -290,9 +310,13 @@ net.ErrClosed (HostNet.CLOSED).\n"
   "HostNet_Shutdown0_I_I_String1__I_native shuts connection h down for reading (0) or writing
 (1): 0, or an error kind.\n"
   ^int32 [^int32 h ^int32 how ^{:tag (* RefArray)} errs]
-  (let [c (conn h)]
+  (let [c (hostConn h)]
     (when (== c nil)
       (return (setError errs netClosed "Socket closed")))
+    ;; under TLS, the end of the output is its close_notify alert first (tls.ae)
+    (when (== how 1)
+      (when [err (tlsCloseWrite (conn h))] (!= err nil)
+        (return (failed errs err false))))
     (let [(values tc ok) (assert (interface (CloseRead ^error []) (CloseWrite ^error [])) c)]
       (when (not ok)
         (return 0))
@@ -310,8 +334,8 @@ net.ErrClosed (HostNet.CLOSED).\n"
         ^{:tag net/Addr} a nil]
     (cond (== s nil) (return nil)
           (!= (.-l s) nil) (set! a (.Addr (.-l s)))
-          local (set! a (.LocalAddr (.-c s)))
-          :else (set! a (.RemoteAddr (.-c s))))
+          local (set! a (.LocalAddr (rawOf s)))
+          :else (set! a (.RemoteAddr (rawOf s))))
     (let [(values ta ok) (assert (* net/TCPAddr) a)]
       (when (not ok)
         (return nil))
@@ -349,7 +373,7 @@ it is closed).\n"
   (let [s (sock h)]
     (cond (== s nil) (return nil)
           (!= (.-l s) nil) (return (.-l s)))
-    (.-c s)))
+    (rawOf s)))
 
 (go/func HostNet_SetOption0_I_I_I_String1__I_native
   "HostNet_SetOption0_I_I_I_String1__I_native sets option opt of handle h: 0, or an error kind.\n"

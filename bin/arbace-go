@@ -123,7 +123,7 @@ build() {
     mkdir -p "$dir/$a"
     t0=$(date +%s)
     (cd "$root" && bin/g2a build --line-file --arch "$a" --work "$dir/work$variant-$a" -o "$dir/$a/$exe" \
-       --overlay "$overlay" "$dir/a2g$variant/prog") > "$dir/build$variant-$a.log" 2>&1 \
+       --overlay "$overlay" --root "$root/x509roots" "$dir/a2g$variant/prog") > "$dir/build$variant-$a.log" 2>&1 \
       || { grep -v '^==' "$dir/build$variant-$a.log" | tail -20 >&2; echo "arbace-go: $a: build failed" >&2; return 1; }
     echo "   g2a build $a: $(since "$t0")" >&2
   done
@@ -247,6 +247,8 @@ run_for() { # run_for SECONDS ARCH ARG...: run, killed after SECONDS (status 124
 
 # store_checks: bin/lib/store-checks.bash (shared with bin/box-smoke)
 . "$root/bin/lib/store-checks.bash"
+# tls_checks, tls_server: bin/lib/tls-checks.bash (shared with bin/box-smoke)
+. "$root/bin/lib/tls-checks.bash"
 
 # jvm_store_checks T: the JVM's arbace.box (doc/go/BOX-NOTES.md, S3, BX37) beside the native
 # executable's (the function native, amd64): store_checks on the JVM Arbace (target/arbace.jar, as
@@ -348,6 +350,10 @@ user=> ["Divide by zero" java.lang.ArithmeticException nil]
 user=> "multi\nline"
 user=> 
 EOF
+  # TLS's test server (bin/lib/tls-checks.bash), when Go's toolchain builds it
+  if tls_build_server "$t/tlsserver" > "$t/tlsserver.log" 2>&1; then
+    tls_server "$t/tlsserver" "$t/tls" || TLS_SERVER_PID=""
+  fi
   for a in ${arches//,/ }; do
     local fails=0
     check() { # check NAME EXPECTED ACTUAL
@@ -401,6 +407,18 @@ EOF
       "$(ARBACE_BOX_STORE=$t/store run "$a" -e "(require (quote [arbace.box :as box])) (let [h (box/save-fs! \"snap\" \"$t/fsrc\")] (box/load-fs! \"snap\" \"$t/fdst\") (prn [(slurp \"$t/fdst/a.txt\") (slurp \"$t/fdst/d/b.ae\") (= h (box/save-fs! \"snap2\" \"$t/fdst\"))]))" 2>&1)"
     check "natively, a snapshot names its directory" "java.lang.IllegalArgumentException" \
       "$(ARBACE_BOX_STORE=$t/store run "$a" -e '(require (quote arbace.box))' -e '(try (arbace.box/save-fs! "snap") (catch Exception e (print (.getName (class e)))))' 2>&1)"
+    # TLS (doc/go/BOX-NOTES.md, "TLS (option 2)"): arbace.tls and arbace.http against the test
+    # server on the loopback (tools/tlsserver), natively, and on the JVM (amd64, its jar built)
+    if [ -n "${TLS_SERVER_PID:-}" ]; then
+      tls_checks native "$t/tls" "$t/tls/ca.pem"
+      if [ "$a" = amd64 ] && [ -f "$root/target/arbace.jar" ]; then
+        echo "  -- the JVM's arbace.tls (target/arbace.jar)"
+        jvm() { "$root/bin/arbace-j" "$@"; }
+        tls_checks jvm "$t/tls" "$t/tls/ca.pem"
+      fi
+    else
+      echo "  skip TLS (tools/tlsserver not built: Go's toolchain needed)"
+    fi
     # the JVM's arbace.box beside the native one (BX37), when the JVM Arbace is built
     if [ "$a" = amd64 ] && [ -f "$root/target/arbace.jar" ]; then
       jvm_store_checks "$t"
@@ -418,6 +436,7 @@ EOF
     fi
     [ $fails -eq 0 ] || status=1
   done
+  tls_server_stop
   rm -rf "$t"
   return $status
 }
@@ -432,7 +451,7 @@ EOF
 # scripts of the build, the seed, and the toolchains (Go, and the JDK a2g runs on)
 gate_key() {
   (cd "$root" && {
-    find arbace go overlay jdk bin/lib -type f | sort
+    find arbace go overlay jdk x509roots bin/lib -type f | sort
     printf '%s\n' seed/arbace-seed.jar.sha256 bin/arbace-go bin/a2g bin/g2a bin/jrt bin/arbace-j bin/build-arbace
   } | xargs sha256sum
     cat "${G2A_GOROOT:-/root/tamago-go}/VERSION"
@@ -509,7 +528,7 @@ box_build() {
       goroot=$dir/tamago/goroot overlay=$dir/tamago/overlay.json goos=(--goos-dir "$dir/tamago/goos") go=forms
     fi
     echo "== bin/g2a build --goos tamago $a (the guest; its Go: $go)" >&2
-    (cd "$root" && G2A_GOROOT=$goroot bin/g2a build --goos tamago ${goos[@]+"${goos[@]}"} --root "$root/box" --line-file \
+    (cd "$root" && G2A_GOROOT=$goroot bin/g2a build --goos tamago ${goos[@]+"${goos[@]}"} --root "$root/box" --root "$root/x509roots" --line-file \
        --arch "$a" --work "$dir/work-box-$a" -o "$dir/box-$a/arbace.elf" --overlay "$overlay" "$dir/a2g/prog") \
        > "$dir/build-box-$a.log" 2>&1 \
       || { grep -v '^==' "$dir/build-box-$a.log" | tail -20 >&2; echo "arbace-go: box $a: build failed" >&2; return 1; }

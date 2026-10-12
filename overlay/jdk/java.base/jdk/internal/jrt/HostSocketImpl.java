@@ -674,6 +674,48 @@ public final class HostSocketImpl extends SocketImpl implements PlatformSocketIm
         }
     }
 
+    // -- TLS (TlsSocket; doc/go/BOX-NOTES.md, "TLS (option 2)")
+
+    /**
+     * Starts TLS as a client on the connection (HostNet.tls0), neither reading nor writing
+     * meanwhile: 0, or HostNet's error kind with the reason in error[0].
+     */
+    int startTls(String serverName, String alpn, byte[] roots, int timeout, String[] error)
+            throws IOException {
+        readLock.lock();
+        try {
+            writeLock.lock();
+            try {
+                int h;
+                synchronized (stateLock) {
+                    ensureOpenAndConnected();
+                    h = handle;
+                }
+                return HostNet.tls0(h, serverName, alpn, roots, timeout, error);
+            } finally {
+                writeLock.unlock();
+            }
+        } finally {
+            readLock.unlock();
+        }
+    }
+
+    /** The TLS session (HostNet.tlsInfo0) into info: 0, or HostNet.CLOSED. */
+    int tlsInfo(String[] info) throws IOException {
+        synchronized (stateLock) {
+            ensureOpenAndConnected();
+            return HostNet.tlsInfo0(handle, info);
+        }
+    }
+
+    /** The peer's certificates, DER (HostNet.tlsPeer0). */
+    byte[][] tlsPeer() throws IOException {
+        synchronized (stateLock) {
+            ensureOpenAndConnected();
+            return HostNet.tlsPeer0(handle);
+        }
+    }
+
     @Override
     protected boolean supportsUrgentData() {
         return false;

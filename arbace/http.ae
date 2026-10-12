@@ -1,0 +1,181 @@
+;; Arbace's own namespace (doc/go/BOX-NOTES.md, "TLS (option 2)", BX71): a small HTTP/1.1 client
+;; written in Arbace over java.net's sockets and arbace.tls, the same on the JVM, natively and in
+;; the box.
+(ns arbace.http
+  "A small HTTP/1.1 client: one request per connection, over TLS for https: URLs (arbace.tls) and
+  a plain socket for http: ones. Enough to call a JSON API, e.g. from the box:
+
+    ARBACE_BOX_NET=dial=api.anthropic.com:443 arbace-box
+    (arbace.http/request {:method :post :url \"https://api.anthropic.com/v1/messages\"
+                          :headers {\"content-type\" \"application/json\" ...}
+                          :body \"{...}\"})
+    ;=> {:status 200 :reason \"OK\" :headers {\"content-type\" \"application/json\" ...}
+    ;    :body \"{...}\"}
+
+  (request opts): opts
+    :url      http://HOST[:PORT]/PATH?QUERY or https://... (required)
+    :method   a keyword or a string (default :get)
+    :headers  a map of names to values (strings); they replace the defaults by name (any case):
+              Host, User-Agent (arbace/VERSION), Content-Length when there is a body,
+              Connection: close
+    :body     a string (sent as UTF-8) or bytes
+    :as       :string (the default: the body decoded as UTF-8) or :bytes
+    :timeout  ms for the connection, the handshake and each read (0, the default: no limit)
+    :tls      arbace.tls/connect's options (:roots, :server-name ...); :alpn defaults to
+              [\"http/1.1\"]
+  It answers {:status :reason :headers :body}, the headers' names in lower case (a repeated one's
+  values joined by \", \"), the body read by its Content-Length, as chunks (Transfer-Encoding:
+  chunked), or to the connection's end; none for HEAD, 1xx, 204 and 304. Redirects are not
+  followed. The connection's and TLS's failures throw as arbace.tls/connect's; a response that
+  is not HTTP/1.x, or ends early, throws an IOException."
+  (:refer-clojure :exclude [get])
+  (:require [arbace.string :as str]
+            [arbace.tls :as tls])
+  (:import (java.io BufferedInputStream BufferedOutputStream ByteArrayOutputStream IOException
+                    InputStream OutputStream)
+           (java.net InetSocketAddress Socket URI)
+           (java.nio.charset StandardCharsets)))
+
+(defn- latin1 ^bytes [^String s] (.getBytes s StandardCharsets/ISO_8859_1))
+
+(defn- read-line*
+  "A line of in up to LF, without its CR LF, as ISO-8859-1; nil at the end before any byte."
+  [^InputStream in]
+  (let [b (ByteArrayOutputStream.)]
+    (loop []
+      (let [c (.read in)]
+        (cond
+          (== c -1) (when (pos? (.size b)) (String. (.toByteArray b) StandardCharsets/ISO_8859_1))
+          (== c 10) (let [s (String. (.toByteArray b) StandardCharsets/ISO_8859_1)]
+                      (if (str/ends-with? s "\r") (subs s 0 (dec (count s))) s))
+          :else (do (.write b c) (recur)))))))
+
+(defn- read-n
+  "n bytes of in into out; an IOException when it ends before."
+  [^InputStream in ^OutputStream out ^long n]
+  (let [buf (byte-array 65536)]
+    (loop [left n]
+      (when (pos? left)
+        (let [k (.read in buf 0 (int (min left 65536)))]
+          (when (neg? k)
+            (throw (IOException. (str "HTTP: the connection ended " left " bytes before the body's end"))))
+          (.write out buf 0 k)
+          (recur (- left k)))))))
+
+(defn- read-all [^InputStream in ^OutputStream out]
+  (let [buf (byte-array 65536)]
+    (loop []
+      (let [k (.read in buf)]
+        (when-not (neg? k)
+          (.write out buf 0 k)
+          (recur))))))
+
+(defn- read-headers
+  "The header lines up to the empty line: {lower-case-name value}."
+  [^InputStream in]
+  (loop [h {}]
+    (let [line (read-line* in)]
+      (cond
+        (nil? line) (throw (IOException. "HTTP: the connection ended in the headers"))
+        (= line "") h
+        :else (let [i (str/index-of line ":")]
+                (if (nil? i)
+                  (recur h)
+                  (let [k (str/lower-case (str/trim (subs line 0 i)))
+                        v (str/trim (subs line (inc i)))]
+                    (recur (assoc h k (if-let [old (h k)] (str old ", " v) v))))))))))
+
+(defn- read-chunked [^InputStream in ^OutputStream out]
+  (loop []
+    (let [line (read-line* in)
+          _ (when (nil? line) (throw (IOException. "HTTP: the connection ended in a chunk's size")))
+          size (Long/parseLong (str/trim (first (str/split line #";"))) 16)]
+      (if (zero? size)
+        (read-headers in)                   ; the trailer, left out
+        (do (read-n in out size)
+            (read-line* in)
+            (recur))))))
+
+(defn- default-port [scheme] (if (= scheme "https") 443 80))
+
+(defn- open
+  "The connection for uri: TLS for https."
+  ^Socket [^URI uri timeout tls-opts]
+  (let [scheme (str/lower-case (.getScheme uri))
+        host (.getHost uri)
+        port (let [p (.getPort uri)] (if (neg? p) (default-port scheme) p))]
+    (case scheme
+      "https" (tls/connect host port (merge {:alpn ["http/1.1"] :timeout timeout} tls-opts))
+      "http" (let [s (Socket.)]
+               (try
+                 (.connect s (InetSocketAddress. host (int port)) (int timeout))
+                 s
+                 (catch Throwable t (.close s) (throw t))))
+      (throw (IllegalArgumentException. (str "HTTP: not an http: or https: URL: " uri))))))
+
+(defn- request-head
+  "The request's line and headers."
+  ^String [method ^URI uri headers]
+  (let [scheme (str/lower-case (.getScheme uri))
+        p (.getPort uri)
+        host (str (let [h (.getHost uri)] (if (str/includes? h ":") (str "[" h "]") h))
+                  (when-not (or (neg? p) (= p (default-port scheme))) (str ":" p)))
+        target (str (let [path (.getRawPath uri)] (if (str/blank? path) "/" path))
+                    (when-let [q (.getRawQuery uri)] (str "?" q)))
+        given (into {} (map (fn [[k v]] [(str/lower-case (name k)) [(name k) (str v)]])) headers)
+        defaults [["host" "Host" host]
+                  ["user-agent" "User-Agent" (str "arbace/" (arbace-version))]
+                  ["connection" "Connection" "close"]]]
+    (str (str/upper-case (name method)) " " target " HTTP/1.1\r\n"
+         (str/join (for [[k n v] defaults :when (not (given k))] (str n ": " v "\r\n")))
+         (str/join (for [[_ [n v]] (sort-by key given)] (str n ": " v "\r\n")))
+         "\r\n")))
+
+(defn request
+  "Sends one HTTP/1.1 request and reads its response (see the namespace's doc)."
+  [{:keys [url method headers body as timeout tls] :or {method :get as :string timeout 0}}]
+  (let [uri (URI. url)
+        ^bytes body (cond (nil? body) nil
+                          (string? body) (.getBytes ^String body StandardCharsets/UTF_8)
+                          (bytes? body) body
+                          :else (throw (IllegalArgumentException. (str "HTTP: a body is a string or bytes, not " (class body)))))
+        method-name (str/upper-case (name method))
+        headers (cond-> (or headers {})
+                  (and (or body (#{"POST" "PUT" "PATCH"} method-name))
+                       (not-any? #(= "content-length" (str/lower-case (name %))) (keys headers)))
+                  (assoc "Content-Length" (str (if body (alength body) 0))))
+        s (open uri timeout tls)]
+    (try
+      (.setSoTimeout s (int timeout))
+      (let [out (BufferedOutputStream. (.getOutputStream s) 65536)
+            in (BufferedInputStream. (.getInputStream s) 65536)]
+        (.write out (latin1 (request-head method uri headers)))
+        (when body (.write out body))
+        (.flush out)
+        (loop []
+          (let [status-line (read-line* in)
+                _ (when (nil? status-line)
+                    (throw (IOException. "HTTP: the connection ended before the response")))
+                [_ version code reason] (re-matches #"(HTTP/1\.[01]) ([0-9]{3})(?: (.*))?" status-line)
+                _ (when-not version
+                    (throw (IOException. (str "HTTP: not an HTTP/1.x response: " (pr-str status-line)))))
+                code (Integer/parseInt code)
+                hs (read-headers in)]
+            (if (and (<= 100 code 199) (not= code 101))
+              (recur)                       ; an interim response (100 Continue)
+              (let [b (ByteArrayOutputStream.)
+                    te (str/lower-case (or (hs "transfer-encoding") ""))
+                    cl (hs "content-length")]
+                (cond
+                  (or (= method-name "HEAD") (<= 100 code 199) (= code 204) (= code 304)) nil
+                  (str/includes? te "chunked") (read-chunked in b)
+                  cl (read-n in b (Long/parseLong (str/trim (first (str/split cl #",")))))
+                  :else (read-all in b))
+                {:status code
+                 :reason (or reason "")
+                 :headers hs
+                 :body (if (= as :bytes)
+                         (.toByteArray b)
+                         (String. (.toByteArray b) StandardCharsets/UTF_8))})))))
+      (finally
+        (.close s)))))

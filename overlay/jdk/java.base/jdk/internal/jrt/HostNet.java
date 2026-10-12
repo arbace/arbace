@@ -40,6 +40,12 @@ public final class HostNet {
     public static final int RESET = -9;
     /** The host has no network (jrt's host lacks NetHost). */
     public static final int UNSUPPORTED = -10;
+    /** tls0: the peer's certificate is not trusted, or not for the server name. */
+    public static final int TLS_VERIFY = -11;
+    /** tls0: the handshake failed otherwise (an alert, the protocol, no common parameters). */
+    public static final int TLS = -12;
+    /** tls0: the roots given hold no certificate. */
+    public static final int TLS_ROOTS = -13;
 
     /** shutdown0's how. */
     public static final int SHUT_RD = 0;
@@ -148,4 +154,26 @@ public final class HostNet {
 
     /** Whether the host has IPv4 (or IPv6) addresses. */
     public static native boolean hasFamily0(boolean ipv6);
+
+    // -- TLS (doc/go/BOX-NOTES.md, "TLS (option 2)"): Go's crypto/tls over the connection
+
+    /**
+     * Starts TLS as a client on connection h, which then carries the plain text: serverName is
+     * sent (SNI) and the peer's certificate verified for it, alpn the protocols offered (separated
+     * by commas; null or "" for none), roots the trusted certificates as PEM (null: jrt's own,
+     * Mozilla's), the handshake waiting up to timeout ms (0: no limit): 0, or an error kind
+     * (TLS_VERIFY, TLS, TLS_ROOTS, or the network's) with the reason in error[0].
+     */
+    public static native int tls0(int h, String serverName, String alpn, byte[] roots, int timeout,
+                                  String[] error);
+
+    /**
+     * Connection h's TLS session into info (4 or more): the protocol (TLSv1.3), the cipher suite,
+     * the application protocol (ALPN; "" for none), the server name: 0, or CLOSED when h is not
+     * a TLS connection.
+     */
+    public static native int tlsInfo0(int h, String[] info);
+
+    /** The peer's certificates of TLS connection h, DER, the peer's own first; null if none. */
+    public static native byte[][] tlsPeer0(int h);
 }
