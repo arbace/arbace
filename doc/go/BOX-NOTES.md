@@ -1203,6 +1203,46 @@ amd64, fourteen new (the nine store checks on the JVM, the five shared-directory
   last resort, `ARBACE_PATH`'s store entries on the JVM (`RT.loadFromStore`, cut in the Go
   build's `RT`); the checks above.
 
+### The blob cache bounded (2026-10-12, the user's decision above)
+
+Branch `box-net-merge`. go-whim's `DirStore` kept every blob it read, verified, for the whole
+run (`cache map[[32]byte][]byte`): a box reading many large blobs grew the launcher's heap by
+their sum, beside the guest's memory. The cache is now bounded by its total size, the least
+recently used blob dropped first (BX38):
+
+- **`DirStore.CacheMax`** (`vmm/store.go`): the most bytes of blobs kept; `OpenDirStore` sets
+  `vmm.DefaultCacheMax`, **256 MiB** (the largest blob the launcher's store takes by default,
+  `ARBACE_BOX_STORE_MAX`, so that any blob it takes fits; the cache costs nothing until blobs are
+  read). A blob read (`Size`, `Get`, the existence check of `Put` and `SetRef`) goes to the
+  front of a list (`container/list`); keeping one drops blobs from the back until the total fits.
+  A blob larger than `CacheMax` is served and not kept: each `Size` and `Get` of it reads its file
+  again (the filter allows no `pread`: a whole read) and holds it to its hash again. A blob
+  dropped and read again is verified again, so a file changed under the store since is refused
+  (`StoreRefused`), as a short write always was. `CacheMax` 0 keeps none. `DirStore.Cached()`
+  says how many blobs and bytes it keeps.
+- **The launcher's `ARBACE_BOX_STORE_CACHE=SIZE`**: bytes, or with `B`, `KiB`, `MiB`, `GiB`,
+  `TiB` as `ARBACE_BOX_STORE_MAX` (the same parser, `storeSize`); `off` keeps none; by default
+  256 MiB.
+- **`TestDirStoreCache`** (`vmm/store_test.go`, run by `bin/box-vendor kvm-tests` with vmm's
+  other tests): the default; nothing kept by `Put`; three blobs filling a 30-byte cache; the least
+  recently used dropped first (a blob used again stays); a blob larger than the cache served and
+  not kept, the others left; a dropped blob read again from its file; a kept blob served from the
+  cache after its file changed, and refused once dropped and read again; `CacheMax` 0 keeps
+  nothing new.
+- **The smoke test** (`--smoke --box`): with `ARBACE_BOX_STORE_CACHE=1KiB`, a guest puts five
+  blobs of 600 bytes and reads each back twice (all but the last read from their files again):
+  their bytes as put.
+
+Checks (after main `a8d59a0` merged): `bin/arbace-go --build` and `--build --box` (the launcher
+4,705,915 bytes, with the guest 70,914,398), `--smoke --box` 101 of 101 (the new check
+included), `bin/box-vendor kvm-tests` (`TestDirStoreCache` with vmm's tests) and `roundtrip` (16
+of 16) pass; the rest of the checks with the wake on events' (below).
+
+Amendment (proposed 2026-10-12): **BX38 (box/: vmm, the launcher) The blob cache bounded**:
+`DirStore.CacheMax`, `vmm.DefaultCacheMax` (256 MiB), least recently used dropped first, a blob
+larger than the cache read from its file at each use; the launcher's `ARBACE_BOX_STORE_CACHE`;
+`TestDirStoreCache` and the smoke test's check.
+
 ## S5: the network, amd64 (2026-10-11)
 
 Branch `box-s5`. BOX-SURVEY §6, S5: "the design first (R5): a stream proxy (`NetHost` over

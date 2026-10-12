@@ -111,3 +111,111 @@
 
           (when [err (.SetRef s "r" h (addr h))] (!= err ErrConflict)
             ^{:go/via [common]} (.Fatalf t "a stale compare and set: %v" err)))))))
+
+
+
+
+
+
+
+^{:go/end 222} (go/func TestDirStoreCache "TestDirStoreCache: the blobs read are kept up to CacheMax bytes in all,\nthe least recently used dropped first; a blob larger than CacheMax is\nserved and not kept; a blob dropped is read again from its file and held\nto its hash again (doc/go/BOX-NOTES.md, S3).\n" [^{:tag (* testing/T)} t]
+  (let [dir ^{:go/via [common]} (.TempDir t)
+      (values s err) (OpenDirStore dir)]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (when (!= (.-CacheMax s) DefaultCacheMax)
+      ^{:go/via [common]} (.Fatalf t "CacheMax %d, not DefaultCacheMax" (.-CacheMax s)))
+
+    (set! (.-CacheMax s) 30)
+    (let [blob ^{:go/end 137} (fn ^{:tag (slice byte)} [^byte c ^int n]
+          (let [b (make (slice byte) n)]
+            (range [i b]
+              (aset b i c))
+
+            ^{:line 136} b))
+
+        (values a b c big) (values (blob \a 10) (blob \b 10) (blob \c 10) (blob \z 31))
+        (values ^{:tag (array 32 byte)} ha ^{:tag (array 32 byte)} hb ^{:tag (array 32 byte)} hc ^{:tag (array 32 byte)} hbig) (zero (array 32 byte))]
+      (range [_ x (lit (slice (struct
+                ^{:line 141 :tag (* (array 32 byte))} h
+                ^{:line 142 :tag (slice byte)} b))
+            (lit _ (addr ha) a) (lit _ (addr hb) b) (lit _ (addr hc) c) (lit _ (addr hbig) big))]
+        (let [(values h err) (.Put s (.-b x))]
+          (when (!= err nil)
+            ^{:go/via [common]} (.Fatal t err))
+
+          (set! @(.-h x) h)))
+
+      (let [cached ^{:go/end 155} (fn [^int want ^int64 wantBytes]
+            ^{:go/via [common]} (.Helper t)
+            (when [(values n nb) (.Cached s)] (or (!= n want) (!= nb wantBytes))
+              ^{:go/via [common]} (.Fatalf t "cached %d blobs, %d bytes; want %d, %d" n nb want wantBytes)))]
+
+
+        ;; Put reads nothing back: nothing kept yet
+        (cached 0 0)
+        (range [_ h (lit (slice (array 32 byte)) ha hb hc)]
+          (when [(values n ok) (.Size s h)] (or (not ok) (!= n 10))
+            ^{:go/via [common]} (.Fatalf t "size: %d %v" n ok)))
+
+
+        (cached 3 30)
+        ;; a used last: b is the least recently used, and goes first
+        (when [(values _ ok) (.Size s ha)] (not ok)
+          ^{:go/via [common]} (.Fatal t "size of a"))
+
+        (let [d (blob \d 10)
+            (values hd ^:assign err) (.Put s d)]
+          (when (!= err nil)
+            ^{:go/via [common]} (.Fatal t err))
+
+          (when [(values _ ok) (.Size s hd)] (not ok)
+            ^{:go/via [common]} (.Fatal t "size of d"))
+
+          (cached 3 30)
+          (.Lock (.-mu s))
+          (let [(values _ keptA) (aget (.-cache s) ha)
+              (values _ keptB) (aget (.-cache s) hb)]
+            (.Unlock (.-mu s))
+            (when (or (not keptA) keptB)
+              ^{:go/via [common]} (.Fatalf t "a kept %v, b kept %v: want a, not b" keptA keptB))
+
+            ;; larger than the cache: served, not kept, the others left alone
+            (let [buf (make (slice byte) 64)]
+              (when [(values n ok) (.Get s hbig 0 buf)] (or (not ok) (!= n 31) (!= (aget buf 30) \z))
+                ^{:go/via [common]} (.Fatalf t "get of a blob larger than the cache: %d %v" n ok))
+
+              (cached 3 30)
+              ;; b, dropped, is read again from its file, and held to its hash: a file
+              ;; changed under it is refused
+              (when [(values n ok) (.Get s hb 0 buf)] (or (not ok) (!= n 10) (!= (aget buf 0) \b))
+                ^{:go/via [common]} (.Fatalf t "get of a dropped blob: %d %v" n ok))
+
+              ;; now b, d, a, the most recently used first; a's file changed under it
+              (when [err (os/WriteFile (.blob s ha) (conv (slice byte) "changed!!!") 420)] (!= err nil)
+                ^{:go/via [common]} (.Fatal t err))
+
+              (when [(values _ ok) (.Size s ha)] (not ok)
+                ^{:go/via [common]} (.Fatal t "a kept blob not served from the cache"))
+
+              ;; a, b, d: c read again drops d, and d read again drops a
+              (when [(values _ ok) (.Size s hc)] (not ok)
+                ^{:go/via [common]} (.Fatal t "size of c"))
+
+              (when [(values _ ok) (.Size s hb)] (not ok)
+                ^{:go/via [common]} (.Fatal t "size of b"))
+
+              (when [(values _ ok) (.Size s hd)] (not ok)
+                ^{:go/via [common]} (.Fatal t "size of d"))
+
+              (cached 3 30)
+              (when [(values _ ok) (.Size s ha)] ok
+                ^{:go/via [common]} (.Fatal t "a changed blob served once dropped"))
+
+              ;; CacheMax 0 keeps nothing new
+              (set! (.-CacheMax s) 0)
+              (.Lock (.-mu s))
+              (.keep s hd d)
+              (.Unlock (.-mu s))
+              (cached 3 30))))))))
