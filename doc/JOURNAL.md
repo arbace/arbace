@@ -721,3 +721,24 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   hash (D3), the build reaches the fixpoint on the Go executable (S3), and the JVM stays on main
   only as the oracle's reference and j2a's front end (D4). As the box milestones: a tag on main
   after `bin/gate --full`, not a freeze (no branch; the journal continues).
+
+## 2026-10-12: Standalone S1: the JDK's forms committed in `jdk/`
+
+- Agent, branch `standalone-s1` (`78d2ee0`, `1a28937`), merged (`ff53e17`). j2a's output is
+  committed (D2) in a new top-level `jdk/` (beside `tamago/`, rather than under `overlay/`, which
+  holds hand-written input): `jdk/forms/` 909 class-forms files (202,034 lines, 10.4 MB),
+  `jdk/data/` the 10 resource data files, `jdk/sources.txt`, `jdk/provenance.edn` (jdk26u
+  `baf63fbe42b8758448fee570a9d9bb914272d259`, clean; JDK 26.0.2.1 for j2a, 25.0.4 for the
+  generators; j2a's version as a SHA-256 over `arbace/j2a` and `bin/j2a`), `jdk/README.md`;
+  `.gitattributes` marks them generated and binary. Packed: 2.2 MB.
+- a2g and `bin/a2g` read `jdk/forms` by default (`JRT_CONV` overrides); `bin/jrt-convert` gains
+  `verify` (afresh into `.tmp/jrt/jdk`, `diff -r`) and `update`; `bin/gate --full`'s step is now
+  `jrt-convert verify`; the gate's cache key hashes `jdk/` and drops what only the conversion
+  read; LICENSE.md covers `jdk/`.
+- Proof: the builds (`--build`, `--build-tests`, `--build --box` for amd64 and arm64) in a mount
+  namespace with jdk26u's sources and build hidden and javac a failing stub, all 539 execs traced:
+  no javac; the 8 executables byte-identical to those from a fresh conversion; against main's
+  unchanged pipeline a2g's program tree identical. `--smoke` 96 of 96, `--smoke --box` 103 of 103,
+  the essential gate passed (5m23s), `jrt-convert verify` passed (175 s) and fails on a tampered
+  file. Left for S2: a2g on the JVM (reflection, ASM); the test build's fixtures still through j2a.
+- The essential `bin/gate` on main after the merge (S1 with the g2a printer fix): passed (5m36s).

@@ -2109,3 +2109,230 @@ that `bin/box-vendor purego-check` compares the launchers with DWARF.
   and the round trip's code level passes.
 - The essential `bin/gate` (the bootstrap compiles `arbace/g2a`): passed in 6 min 46 s (Clojure's
   suite on stage 2 with no regressions, the class forms tests, the Go executable's smoke test).
+
+### The printer's expression lists: a case list over two lines (2026-10-12)
+
+Found on the TLS branch (`box-tls`, `7561fb6`): its guest links `net/url` (through
+`crypto/x509`), and `bin/tamago-vendor check amd64` reported the guest from the forms different
+from the originals': in `validUserinfo` (`net/url/url.go:1295-1296`) the `case` list spans two
+lines, the forms record the break (`(case ^{:go/breaks [9]} [\- ... \' \( ... \%] ...)`), and
+the printer wrote the list on one line, which moved one `.gopclntab` line (the function is
+inlined into `parseAuthority`).
+
+- **The change** (`arbace/g2a/print_code.ae`, `print_emit.ae`; the forms are unchanged): case
+  values and types, a return's results, `:=` targets and range variables follow `:go/breaks`
+  and their own lines, as calls and composite literals did (`comma-list`); a case list may
+  begin on the line after `case` (`go/parser`'s `case\n\ttoken.DEFINE, ...`). A break is now
+  resolved as the converter counts it, the line after the last one a form began on, not the
+  line after the cursor: otherwise `}, nil` (a composite literal's `}` the layout puts on its
+  own line, then a result the forms record as a break) got `nil` a line further. A call's `)`
+  after a function literal follows its `}`. PRINTER-NOTES.md, Layout.
+- **Checks** (`g2a-cases`, from main `cc76fbf`): `bin/g2a-print-tests` 5 tests, 268
+  assertions (golines also compares case values, return results and assignment sides; the case
+  `s10_breaks`), all pass; `bin/g2a roundtrip amd64` and `linux/amd64` no regressions;
+  `bin/box-vendor roundtrip` 20 of 20; `bin/tamago-vendor verify` identical, and after
+  `bin/arbace-go --build --box` for amd64 and arm64 `check`: both guests identical. On the TLS
+  branch with this merged (a scratch branch, not kept): `bin/tamago-vendor check amd64`, the
+  guest identical, as linked and with the symbol table cut. golines over std printed for
+  tamago/amd64: 1,622 of 1,742 files with the original's lines throughout, with golines as it
+  was and with the new items alike (the same 120 files under both: no list item differs). The
+  essential `bin/gate` passed (5 min 17 s).
+
+## TLS (option 2): Go's crypto/tls in jrt (2026-10-12)
+
+Branch `box-tls`, the user's decision of 2026-10-12 ("do option 2 now"): TLS for Arbace through
+Go's `crypto/tls`, already in TamaGo's std (`tamago/goroot/go/crypto/tls`), rather than
+converting jdk26u's JSSE (S5's decision "TLS later, with JSSE" set aside). The motivating use: the
+Claude API (`https://api.anthropic.com`, port 443) called from a REPL in the box, the key and the
+encryption inside the guest, the launcher carrying only cipher text over its stream proxy
+(`ARBACE_BOX_NET=dial=api.anthropic.com:443`).
+
+One correction to the premise: `crypto/tls` was in `tamago/`'s forms but **not linked** into the
+guest (nor into the native executable): no symbol or string of `crypto/tls` or `crypto/x509` in
+either (`target/arbace-go/box-amd64/arbace.elf`, `amd64/arbace` at `a6a6b86`). It is linked now,
+which is most of the size below.
+
+### The design
+
+**Where TLS runs.** In jrt, over the same Go-level stream the java.net sockets use: the socket
+table's `net.Conn` (`net.ae`), which in the box is `netbox_tamago.ae`'s `boxConn` over the
+monitor's handle and natively `OSHost`'s TCP connection. A client handshake replaces the table's
+connection by `tls.Client(conn, cfg)` and keeps the host's under it (`netSock.raw`): reads and
+writes (`HostNet.read0`, `write0`) then carry plain text through the TLS connection, while socket
+options, addresses and `available` ask the host's. Nothing new crosses the monitor: the launcher
+proxies the cipher text as any stream (its policy, its name resolution); the keys, the session and
+the plain text never leave the guest. Wake on events is kept as it is: `tls.Conn` reads and writes
+`boxConn`, whose waits are the box's waiters (BX53), so a TLS read parks as a plain one does.
+
+**The Java side (jrt's own Java, overlay/jdk).** `jdk.internal.jrt.TlsSocket extends
+java.net.Socket` over a `HostSocketImpl` of its own (Socket's protected constructor): it is
+connected as any socket (`connect`, the box's policy and the host's resolver), then
+`startTls(serverName, alpn, roots, timeout, error)` makes the handshake in place
+(`HostSocketImpl.startTls`, holding the read and write locks, then `HostNet.tls0`); its
+`getInputStream`/`getOutputStream` are Socket's own, so everything that takes a Socket
+(`arbace.java.io/reader`, `with-open`) takes it. `session()` (protocol, cipher suite, ALPN, server
+name: `HostNet.tlsInfo0`) and `peerCertificates()` (DER: `tlsPeer0`). New error kinds of `HostNet`:
+`TLS_VERIFY` -11 (the peer's certificate: `tls.CertificateVerificationError`), `TLS` -12 (any other
+handshake failure: an alert, no common version or suite, the peer's end), `TLS_ROOTS` -13 (roots
+given without a certificate); the network's errors during the handshake keep their kinds
+(timeouts, resets, refusals). Under TLS `available()` is 0 (the host's count is of cipher text;
+Go's `tls.Conn` does not tell what plain text it holds; 0 is always a correct answer),
+`shutdownOutput` sends `close_notify` before the host's half-close, `close` sends `close_notify`
+then closes.
+
+**The Arbace surface.** Two namespaces, one source each for the JVM, natively and the box, as
+`arbace.box` (BX37):
+
+- `arbace.tls` (`arbace/tls.ae`): `(connect host port opts)` a connected `java.net.Socket`, the
+  handshake made; opts `:server-name` (default the host; sent as SNI and verified; an IP literal is
+  verified against the certificate's addresses and not sent, on both builds), `:alpn` (a sequence
+  of protocols), `:roots` (PEM, a string or bytes), `:timeout` (ms, the connection and the
+  handshake each); `session` (`:protocol "TLSv1.3"`, `:cipher-suite`, `:application-protocol`,
+  `:server-name`, the JVM's names on both builds), `peer-certificates` (DER byte arrays).
+  Verification is always on; there is no option to turn it off. Failures: java.net's exceptions for
+  the network, an `ex-info` whose `:arbace.tls/error` is `:verify`, `:handshake` or `:roots` for
+  TLS. Its host layer `arbace.tls.host`: the Go build's variant (`arbace/lang/go/ns/tls/host.ae`)
+  over `TlsSocket`, the JVM's (`arbace/tls/host.ae`) over `javax.net.ssl` (an `SSLSocket` layered
+  over a connected Socket, `SNIHostName`, endpoint identification `HTTPS`, ALPN by
+  `SSLParameters`, a `TrustManagerFactory` over a `KeyStore` of the given roots).
+- `arbace.http` (`arbace/http.ae`): `(request {:url :method :headers :body :as :timeout :tls})`,
+  HTTP/1.1 written in Arbace, one request per connection (`Connection: close`), over
+  `arbace.tls` for `https:` (ALPN `http/1.1`) and a plain Socket for `http:`; the response's body by
+  `Content-Length`, chunked (trailers read and left out), or to the connection's end; none for HEAD,
+  1xx, 204, 304; interim 1xx skipped; `{:status :reason :headers :body}` with lower-case header
+  names. Enough to POST JSON to `https://api.anthropic.com/v1/messages`.
+
+**Roots.** The guest has no files, so the Go build carries Mozilla's roots: the package `bundle` of
+`golang.org/x/crypto/x509roots/fallback` (Go's extraction of NSS's store: 120 roots as DER with
+their distrust-after constraints), vendored as Go forms under a new forms root `x509roots/`
+(`x509roots/README.md`, `bin/x509roots-vendor`), import path `arbace/x509roots/fallback/bundle`.
+jrt parses them once at the first handshake (`jrt.TLSRoots`) into a `CertPool` given to each
+connection (`AddCertWithConstraint` for the constrained ones); the module's package `fallback`
+(`x509.SetFallbackRoots` in an `init`) is not taken. The same roots natively (not the host's
+`/etc/ssl`: the executable behaves as the box does, and is self-contained); the JVM keeps its own
+(`cacerts`). The override, for private CAs and tests: `ARBACE_TLS_ROOTS` (read once per process by
+`arbace.tls`; the launcher passes `ARBACE_*` to the guest) names a PEM bundle, `ref:NAME` in the
+store (in the box the launcher's `--store`) or a file (natively the host's; in the box its in-memory
+file system, e.g. from `ARBACE_BOX_FS`); `:roots` per connection. Either replaces the default roots
+(not adds to them), so that a test's CA alone is trusted.
+
+**Not offered: `javax.net.ssl` in the Go build.** An `SSLSocketFactory`/`SSLSocket` backed by
+`crypto/tls` would let translated Java (j2a) use TLS unchanged, but `javax.net.ssl` is not in the
+closed world: `SSLSocket` and `SSLSocketFactory` are abstract classes whose API names
+`SSLSession`, `SSLParameters`, `SNIServerName`, `HandshakeCompletedListener`,
+`java.security.cert.Certificate`/`X509Certificate` (and through them `java.security.cert`'s
+parsing), `SSLContext` and its SPI with the providers' machinery; a minimal subset (the factory,
+a socket with `startHandshake`, a session with protocol, suite and DER certificates) is perhaps
+1,000-1,500 lines of variants and stand-ins and a few hundred classes more in the program, for no
+present user (Arbace code has `arbace.tls`). Recommended: not now; revisit when a Java library
+translated by j2a needs it (`TlsSocket` is the place it would sit on).
+
+### What was built
+
+- `go/arbace/jrt/tls.ae` (new, jrt's file list): `HostNet`'s natives `tls0`, `tlsInfo0`,
+  `tlsPeer0`, `TLSRoots`; `net.ae`: `netSock.raw`, the table's connection read under its lock
+  (`conn`, `rawOf`), `available` 0 under TLS, `shutdown` with `close_notify`, options and addresses
+  from the host's connection.
+- `overlay/jdk/java.base/jdk/internal/jrt/TlsSocket.java` (new); `HostNet.java` (the kinds, the
+  three natives), `HostSocketImpl.java` (`startTls`, `tlsInfo`, `tlsPeer`).
+- `arbace/tls.ae`, `arbace/tls/host.ae`, `arbace/lang/go/ns/tls/host.ae`, `arbace/http.ae` (new;
+  not AOT-compiled by the bootstrap, loaded from source as `arbace.box` is; embedded in the Go
+  build).
+- `x509roots/` (new forms root) and `bin/x509roots-vendor` (`convert`, `verify`, `check`); the
+  builds give it as a root (`bin/g2a build --root x509roots`): `bin/arbace-go` (the executables,
+  the box's guest; `gate_key` hashes it), `bin/jrt`, `bin/a2g-race`, `bin/a2g-evalproof`,
+  `test/a2g/check.ae`; `bin/gate --full`'s `box` step runs `x509roots-vendor verify` and `check`.
+  `LICENSE.md` records it (Go's BSD 3-Clause; the certificates are NSS's, as the module ships them).
+- `tools/tlsserver` (new, Go): the checks' TLS server on the loopback, a test CA and a wrong CA made
+  at each start (no key kept in the repository), HTTPS (`/hello`, `/echo`, `/big`, `/chunked`,
+  `/eof`, `/json` 401) and a raw TLS echo; `bin/lib/tls-checks.bash` (new): `tls_server`,
+  `tls_checks`, shared by `bin/box-smoke` (a section "TLS" on 4 vCPUs, `ARBACE_BOX_NET=loopback`,
+  the CA by `ARBACE_TLS_ROOTS=ref:test-ca.pem` from the launcher's store, plus a wake-on-events
+  check: a TLS read waiting 2 s polls nothing), `bin/arbace-go --smoke` (natively, and on the JVM
+  with `target/arbace.jar`) and `bin/box-arm64-vm smoke` (the server cross-built for arm64:
+  `--tls-server`).
+
+### Measured (amd64, nested KVM, the shared machine)
+
+| | before (`a6a6b86`) | with TLS | change |
+|---|---:|---:|---:|
+| the native executable (`amd64/arbace`) | 66,814,112 | 69,169,312 | +2,355,200 (3.5%) |
+| the box's guest (`arbace.elf`, symbols cut) | 66,199,886 | 68,604,238 | +2,404,352 (3.6%) |
+| the launcher (`arbace-box.bin`) | 4,713,159 | 4,713,023 | none (main's merge) |
+
+The growth is `crypto/tls`, `crypto/x509` and what they pull (`net/url`, the ECDH, RSA, AES-GCM,
+ChaCha20 code, the HPKE/ECH code), not linked before, and the roots (128 KB of DER, parsed at the
+first handshake, not at the start). A handshake to `api.anthropic.com` (TLS 1.3, ECDHE, from
+here): natively 79 ms the first (the roots parsed), then 10-11 ms; in the box 119 ms, then 61-64
+ms (the name resolved by the host, the dial through the monitor, the handshake's crypto in the
+guest under nested paging). Idle (wake on events): a box waiting 20 s on a TLS read costs the host
+what a box sleeping 20 s does: 1 vCPU 0.63 s of CPU against 0.69 (the start's), 4 vCPUs 0.92 s
+against 1.58; 8 `net_read` calls in the whole run (1 vCPU). `bin/box-smoke`'s check: a read
+waiting 2 s makes at most a few network calls.
+
+### The real request (no key)
+
+`ARBACE_BOX_NET=dial=api.anthropic.com:443 arbace-box -` with `arbace.http/request` POSTing a
+messages request to `https://api.anthropic.com/v1/messages` without any API key: `401
+"application/json"`, body `{"type":"error","error":{"type":"authentication_error","message":"x-api-key
+header is required"},...}`; `arbace.tls/session`: TLSv1.3, `TLS_AES_128_GCM_SHA256`, ALPN `h2`
+when offered (`http/1.1` by `arbace.http`), 3 certificates, verified by the built-in Mozilla roots.
+The same natively. A name the policy does not dial (`example.org`) is `UnknownHostException`.
+
+### Checks (the branch with main `ff53e17` merged, amd64)
+
+- `bin/jrt build` (jrt with `tls.ae`); `bin/jrt-convert update` (jrt's three Java files: `jdk/`
+  committed).
+- `bin/arbace-go --build` and `--build --box` (sizes above); `--smoke` 83 of 83 (69 before; 7
+  TLS checks natively and 7 on the JVM, `target/arbace.jar`); `--smoke --box` 111 of 111 (103
+  before; 8 TLS checks).
+- The native oracle 22,232 of 22,278 and the box's subset (`ARBACE_BOX_NET=loopback`, with
+  `forms/net.ae`) 21,779 of 21,825: the 46 known mismatches each, as recorded.
+- `bin/x509roots-vendor verify` (byte for byte) and `check` (gocmp at three levels for
+  linux/amd64, linux/arm64, tamago/amd64, tamago/arm64; the package's tests on the printed copy).
+- `bin/tamago-vendor check amd64`: std and the goos module pass as before, but **the guest image
+  from the forms differs from the one from TamaGo's originals** (same size, 4 MB of `.gopclntab`):
+  the guest now links `net/url` (through `crypto/x509`), whose `validUserinfo` has a `case` list
+  over two lines (`net/url/url.go:1295-1296`); its forms record the break (`:go/breaks [9]` on the
+  case's vector) but the printer writes the list on one line, so the inlined code's line in
+  `parseAuthority` is 1295 where gc says 1296. Proven the only difference: with that one line split
+  by hand in the printed tree, the two images are identical (as linked and cut). A printer defect
+  (g2a's `print`, the kind the `g2a-params` branch fixes for parameter lists), not of these forms or
+  of this change; `bin/gate --full`'s `box-forms` step will fail on it until the printer keeps a
+  case list's breaks.
+- The real request above; the loopback checks in `.tmp` before they went into the smoke tests.
+- arm64: `bin/arbace-go --build` and `--build --box` (the guest 66,191,694 bytes, the launcher
+  with it 70,713,694); the native arm64 executable under qemu-aarch64 made the real request above
+  (401, TLSv1.3, the roots verified). Not run: `bin/box-arm64-vm smoke` (the box's TLS checks on
+  KVM/arm64; about 40 min emulated), which now ships `tools/tlsserver` built for arm64.
+- The essential `bin/gate`: passed (6m19s): stage 2 = stage 3 (5,777 classes), the native tests 60 of 60, Clojure's suite on stage 2 20,750 of 20,750, `bin/class-forms-tests`, the Go executable built again and its smoke test 83 of 83.
+
+### Amendments (proposed 2026-10-12)
+
+- **BX70 (A2G-SPEC §9.1, §9.4; jrt, overlay/jdk) TLS in jrt over the socket table**: Go's
+  `crypto/tls` as a client over the table's connection (`netSock.raw` under the `tls.Conn`), the
+  natives `HostNet.tls0`, `tlsInfo0`, `tlsPeer0`, the kinds `TLS_VERIFY`, `TLS`, `TLS_ROOTS`;
+  jrt's own `TlsSocket` (a `java.net.Socket` upgraded in place); under TLS `available()` 0,
+  `shutdownOutput` with `close_notify`. In the box the launcher carries cipher text only; no new
+  call, no change to `box/`.
+- **BX71 (EVAL-NOTES' namespace variants) `arbace.tls` and `arbace.http`**: one source each for
+  the JVM, the native executable and the box; `arbace.tls.host` over `TlsSocket` (Go build) and
+  `javax.net.ssl` (JVM); `connect`, `session`, `peer-certificates`; verification always on; the
+  errors `:verify`, `:handshake`, `:roots`; `arbace.http/request`, HTTP/1.1 in Arbace.
+- **BX72 (jrt, `arbace.tls`) The roots**: Mozilla's built into the Go build (natively too, rather
+  than the host's `/etc/ssl`), the JVM's own on the JVM; `ARBACE_TLS_ROOTS` (`ref:NAME` or a file)
+  and `:roots` replace them.
+- **BX73 (LICENSE.md; a new forms root) `x509roots/`**: `golang.org/x/crypto/x509roots/fallback`'s
+  package `bundle` at `3b414e3e8284` vendored as Go forms (import path
+  `arbace/x509roots/fallback/bundle`), `bin/x509roots-vendor`, given to the builds as
+  `--root x509roots`; in `bin/gate --full`'s `box` step.
+- **BX74 (scope) No `javax.net.ssl` in the Go build for now**: recommended deferral (above).
+- **BX75 (checks)** `tools/tlsserver`, `bin/lib/tls-checks.bash`: TLS's checks in `bin/box-smoke`
+  (also in the arm64 VM), `bin/arbace-go --smoke` (natively and on the JVM).
+
+### TLS: the user's decisions (2026-10-12)
+
+BX70-BX73 accepted as built; BX74 accepted (no `javax.net.ssl` in the Go build for now); BX75
+accepted. The roots' licence: LICENSE.md records `bundle.der`'s certificates under NSS's
+Mozilla Public License 2.0 as well as x/crypto's BSD 3-Clause (rather than BSD-3 only). The
+branch merged after the printer's case-list fix (`g2a-cases`), so `box-forms` stays identical.

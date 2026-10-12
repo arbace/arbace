@@ -1,0 +1,105 @@
+;; Arbace's own namespace (doc/go/BOX-NOTES.md, "TLS (option 2)", BX70-BX72): TLS client
+;; connections, on the JVM, in the native executable and in the box. One source for both builds;
+;; what differs is its host layer, arbace.tls.host: on the JVM javax.net.ssl (arbace/tls/host.ae),
+;; on the Go build jrt's TlsSocket over Go's crypto/tls (its variant
+;; arbace/lang/go/ns/tls/host.ae), with the same answers.
+(ns arbace.tls
+  "TLS client connections. (connect host port) is a java.net.Socket whose streams carry the plain
+  text of a TLS connection to host: the peer's certificate verified for the server name (host,
+  unless :server-name says another), which is also sent (SNI). In the box the guest does TLS
+  itself (Go's crypto/tls) over the launcher's stream (ARBACE_BOX_NET must allow the dial, e.g.
+  dial=api.anthropic.com:443): the keys and the plain text stay in the guest, the launcher
+  carries only the cipher text. Natively the same, over the host's socket; on the JVM through
+  javax.net.ssl.
+
+    (connect host port)        a connected socket, the handshake made
+    (connect host port opts)   opts:
+        :server-name  the name sent and verified (default host; an IP literal is verified
+                      against the certificate's addresses and not sent)
+        :alpn         the application protocols offered, a sequence of strings (\"http/1.1\")
+        :roots        the trusted certificates, PEM (a string or bytes), in place of the default
+        :timeout      ms for the connection and for the handshake (0, the default: no limit)
+    (session s)                {:protocol \"TLSv1.3\" :cipher-suite ... :application-protocol
+                               (nil when none was agreed) :server-name ...}
+    (peer-certificates s)      the peer's certificates, DER byte arrays, its own first
+
+  The trusted roots, by default: in the Go build (natively and in the box) Mozilla's, built into
+  the program (golang.org/x/crypto/x509roots/fallback's bundle); on the JVM its own (cacerts).
+  ARBACE_TLS_ROOTS replaces them for the process: ref:NAME, a PEM bundle in the store
+  (arbace.box; in the box, the launcher's store), or a file's path (in the box, a file of its
+  in-memory file system). :roots replaces them for one connection.
+
+  What fails throws: the network's errors as java.net's exceptions (ConnectException,
+  UnknownHostException, SocketTimeoutException ...); TLS's as an ex-info whose data's
+  :arbace.tls/error is :verify (the peer's certificate is not trusted, has expired, or is not for
+  the server name), :handshake (the handshake failed otherwise: an alert, no common protocol or
+  cipher) or :roots (the roots given hold no certificate, or ARBACE_TLS_ROOTS names none)."
+  (:require [arbace.string :as str]
+            [arbace.tls.host :as host])
+  (:import (java.io File)
+           (java.net Socket)
+           (java.nio.charset StandardCharsets)
+           (java.nio.file Files)))
+
+(defn- fail [kind ^String msg data]
+  (throw (ex-info msg (assoc data ::error kind))))
+
+(defn- pem-bytes
+  "The bytes of PEM text x (a string or bytes)."
+  ^bytes [x]
+  (cond (string? x) (.getBytes ^String x StandardCharsets/UTF_8)
+        (bytes? x) x
+        :else (throw (IllegalArgumentException.
+                      (str ":roots is PEM, a string or bytes, not " (class x))))))
+
+(defn read-roots
+  "The PEM bytes source names: ref:NAME, the blob ref NAME points at in the store (arbace.box), or
+  a file's path."
+  ^bytes [^String source]
+  (if (str/starts-with? source "ref:")
+    (let [name (subs source 4)
+          load-ref (requiring-resolve 'arbace.box/load)
+          text (load-ref name)]
+      (when (nil? text)
+        (fail :roots (str "ARBACE_TLS_ROOTS: no such ref in the store: " name) {:roots source}))
+      (pem-bytes text))
+    (let [f (File. source)]
+      (when-not (.isFile f)
+        (fail :roots (str "ARBACE_TLS_ROOTS: no such file: " source) {:roots source}))
+      (Files/readAllBytes (.toPath f)))))
+
+(def ^:private env-roots
+  (delay (let [s (System/getenv "ARBACE_TLS_ROOTS")]
+           (when-not (str/blank? s)
+             (read-roots s)))))
+
+(defn connect
+  "A socket connected to host and port whose streams carry TLS's plain text, the handshake made
+  (see the namespace's doc for opts and failures)."
+  (^Socket [host port] (connect host port nil))
+  (^Socket [^String host port {:keys [server-name alpn roots timeout]}]
+   (let [server-name (or server-name host)
+         timeout (int (or timeout 0))
+         alpn (when (seq alpn) (str/join "," alpn))
+         roots (if (some? roots) (pem-bytes roots) @env-roots)
+         data {:host host :port port :server-name server-name}
+         r (host/connect host (int port) server-name alpn roots timeout)]
+     (if (instance? Socket r)
+       r
+       (let [[kind msg] r]
+         (fail kind (str "TLS with " host ":" port
+                         (when (not= server-name host) (str " (as " server-name ")"))
+                         ": " msg)
+               data))))))
+
+(defn session
+  "The TLS session of socket s (from connect): :protocol, :cipher-suite, :application-protocol
+  (nil when none was agreed), :server-name."
+  [^Socket s]
+  (let [{:keys [application-protocol] :as m} (host/session s)]
+    (assoc m :application-protocol (when-not (str/blank? application-protocol) application-protocol))))
+
+(defn peer-certificates
+  "The peer's certificates of socket s (from connect), DER byte arrays, its own first."
+  [^Socket s]
+  (vec (host/peer-certificates s)))

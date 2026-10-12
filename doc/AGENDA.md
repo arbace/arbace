@@ -85,8 +85,9 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
 - Next milestone (the user): `arbace-seed-is-go-v1`, at the end of the standalone S4 (the seed
   Go source pinned by hash, the Go-hosted fixpoint, the JVM only for the oracle and j2a); a tag on
   main after `bin/gate --full`, not a freeze.
-- Now (the user, 2026-10-12): standalone S1, the JDK's forms committed and `bin/jrt-convert` a
-  verify check (agent, branch `standalone-s1`);
+- Standalone S1 done (2026-10-12): the JDK's forms committed in `jdk/`, `bin/jrt-convert verify`
+  in `--full`; the build reaches no javac or jdk26u.
+- Now: standalone S2, a2g without the JVM's reflection and ASM (agent, branch `standalone-s2`);
   TLS in the box through Go's crypto/tls, for the Claude API from the box (agent, branch
   `box-tls`; the user: option 2, now).
   `bin/gate --full` runs the amd64 box smoke test (`box-smoke`). The Mac: a bundle per box

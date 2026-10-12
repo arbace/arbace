@@ -1,0 +1,138 @@
+#!/bin/bash
+# Mozilla's trusted roots for jrt's TLS (doc/go/BOX-NOTES.md, "TLS (option 2)"; x509roots/README.md):
+# the package bundle of golang.org/x/crypto/x509roots/fallback (Go's own extraction of the NSS
+# trust store: 120 roots as DER, with their distrust-after constraints) vendored as Go forms
+# under x509roots/, import path arbace/x509roots/fallback/bundle, the only change to its text.
+#
+#   bin/x509roots-vendor convert  the pinned module version from Go's module cache (fetched
+#                                 when missing: GOPROXY), its zip hash checked; its package
+#                                 bundle copied into WORK/renamed (a module arbace), the import
+#                                 path rewritten, converted (bin/g2a convert --tests linux/amd64:
+#                                 the files build for every target alike) into OUT/go (default
+#                                 x509roots/), the package file written as bin/box-vendor writes
+#                                 box/'s (no :config, no :init-order), bundle.der copied into
+#                                 the forms directory (SPEC §9.6)
+#   bin/x509roots-vendor verify   convert into WORK/fresh and compare with OUT (diff -r, README.md
+#                                 aside): the tree is the conversion, byte for byte
+#   bin/x509roots-vendor check    OUT printed (bin/g2a build --print-only --tests --layout lines)
+#                                 against WORK/renamed with gocmp (tree, export, code; with
+#                                 tests), and the package's tests run on the printed copy
+#
+# Options (before the command): --work DIR (default .tmp/x509roots-vendor), --out DIR (default
+# x509roots/). To move to a newer bundle: change mod_ver and mod_zip below, convert, check, and
+# record it (x509roots/README.md, LICENSE.md, the journal).
+# Environment: G2A_GOROOT (default /root/tamago-go, go1.27.1). Runs on Arbace (bin/lib/tools.bash:
+# target/stage2, from bin/build-arbace).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+work=$root/.tmp/x509roots-vendor out=$root/x509roots
+while [ $# -gt 0 ]; do
+  case $1 in
+    --work) work=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    *) break ;;
+  esac
+done
+cmd=${1:-}
+case $work in /*) ;; *) work=$root/$work ;; esac
+case $out in /*) ;; *) out=$root/$out ;; esac
+tg=${G2A_GOROOT:-/root/tamago-go}
+export GOFLAGS= GOTOOLCHAIN=local
+mod=golang.org/x/crypto/x509roots/fallback
+mod_ver=v0.0.0-20261011195143-3b414e3e8284
+mod_zip=h1:vbII1qQTqQ3ya1k/bfJWuHiUNzCkFD7LRbGiO3gSwVE=
+pkg=arbace/x509roots/fallback/bundle
+
+# mod_dir: the module in Go's module cache (downloaded when missing), its hash checked
+mod_dir() {
+  local c
+  c=$(env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" env GOMODCACHE)
+  if [ ! -f "$c/cache/download/$mod/@v/$mod_ver.ziphash" ]; then
+    (mkdir -p "$work/dl" && cd "$work/dl" && env -u GOOS -u GOARCH GOROOT="$tg" GOPROXY=${GOPROXY:-https://proxy.golang.org} \
+       "$tg/bin/go" mod download "$mod@$mod_ver") >&2
+  fi
+  [ "$(cat "$c/cache/download/$mod/@v/$mod_ver.ziphash" 2>/dev/null)" = "$mod_zip" ] \
+    || { echo "x509roots-vendor: $mod@$mod_ver is not in Go's module cache with the pinned hash $mod_zip" >&2; return 1; }
+  echo "$c/$mod@$mod_ver"
+}
+
+# renamed DIR: the package bundle in DIR/x509roots/fallback/bundle of a module arbace, its
+# import path rewritten (the package imports none of the module's: only its own tests name it)
+renamed() {
+  local d=$1 m
+  m=$(mod_dir) || return 1
+  rm -rf "$d"; mkdir -p "$d/x509roots/fallback"
+  printf 'module arbace\n\ngo 1.27\n' > "$d/go.mod"
+  cp -r "$m/bundle" "$d/x509roots/fallback/bundle"
+  chmod -R u+w "$d"
+  find "$d" -name '*.go' -print0 | xargs -0 sed -i "s#\"$mod/bundle\"#\"$pkg\"#; s#\"$mod\"#\"arbace/x509roots/fallback\"#"
+}
+
+# convert DST: the forms of the renamed package into DST/go
+convert() {
+  local dst=$1 f files=() tests=() fd=$1/go/arbace/x509roots/fallback
+  renamed "$work/renamed" || return 1
+  rm -rf "$work/forms"
+  (cd "$work/renamed" && GOPROXY=off "$root/bin/g2a" convert --tests --goos linux --goarch amd64 --out "$work/forms" "$pkg") \
+    > "$work/convert.log" 2>&1 || { tail -20 "$work/convert.log" >&2; return 1; }
+  if grep -v '^ok' "$root/.tmp/g2a/dumps.tsv" >&2; then
+    echo "x509roots-vendor: the package did not dump" >&2; return 1
+  fi
+  rm -rf "$dst/go"; mkdir -p "$fd/bundle"
+  cp "$work/forms/go/arbace/x509roots/fallback/bundle"/*.ae "$fd/bundle/"
+  cp "$work/renamed/x509roots/fallback/bundle/bundle.der" "$fd/bundle/"
+  for f in $(cd "$fd/bundle" && LC_ALL=C ls | grep '\.ae$'); do
+    case ${f%.ae} in *_test) tests+=("\"${f%.ae}.go\"") ;; *) files+=("\"${f%.ae}.go\"") ;; esac
+  done
+  {
+    echo ";; Mozilla's trusted roots, vendored (x509roots/README.md; doc/go/BOX-NOTES.md, \"TLS (option 2)\"):"
+    echo ";; the package bundle of $mod $mod_ver, as $pkg."
+    echo "(ns go.arbace.x509roots.fallback.bundle"
+    echo "  (:require [arbace.go :as go]))"
+    echo
+    echo "(go/package bundle"
+    echo "  :path \"$pkg\""
+    echo "  :files [${files[*]}]"
+    grep -o ':embed-files \[.*\]\]' "$work/forms/go/arbace/x509roots/fallback/bundle.ae" | sed 's/^/  /'
+    echo "  :test-files [${tests[*]}]"
+    echo "  :positions :lines)"
+    echo
+    for f in "${files[@]}" "${tests[@]}"; do f=${f//\"/}; echo "(load \"bundle/${f%.go}\")"; done
+  } > "$fd/bundle.ae"
+  echo "x509roots-vendor: $(find "$dst/go" -type f | wc -l) files into ${dst#$root/}/go" >&2
+}
+
+check() {
+  local status=0 gocmp=$work/gocmp p=$work/print
+  [ -d "$work/renamed" ] || renamed "$work/renamed"
+  rm -rf "$p"
+  "$root/bin/g2a" build --print-only --tests --module arbace --layout lines --work "$p" "$out" >&2
+  (cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$tg" GOPROXY=off "$tg/bin/go" build -o "$gocmp" .)
+  echo "== the printed package against the renamed original (gocmp: tree, export, code; with tests)" >&2
+  local c goos goarch r
+  for c in linux/amd64 linux/arm64 tamago/amd64 tamago/arm64; do
+    goos=${c%/*} goarch=${c#*/}
+    if (cd "$work/renamed" && env GOOS=$goos GOARCH=$goarch GOROOT="$tg" GOPROXY=off CGO_ENABLED=0 \
+          "$gocmp" -tests "$work/renamed/x509roots/fallback/bundle" "$p/mod/x509roots/fallback/bundle") \
+          > "$work/gocmp-$goos-$goarch.log" 2>&1; then r=pass; else r=FAIL; status=1; fi
+    printf '%-14s %s  %s\n' "$c" "$r" "$(tail -1 "$work/gocmp-$goos-$goarch.log")"
+  done
+  echo "== the package's tests on the printed copy" >&2
+  (cd "$p/mod" && env -u GOOS -u GOARCH GOROOT="$tg" GOPROXY=off CGO_ENABLED=0 "$tg/bin/go" test -count=1 "./x509roots/fallback/bundle") \
+    || status=1
+  return $status
+}
+
+mkdir -p "$work"
+case $cmd in
+  convert) convert "$out" ;;
+  verify)
+    convert "$work/fresh"
+    if diff -r -x README.md "$out" "$work/fresh" > "$work/verify.diff"; then
+      echo "verify: ${out#$root/} is the conversion, byte for byte"
+    else
+      echo "verify: ${out#$root/} differs from a fresh conversion ($work/verify.diff)"; exit 1
+    fi ;;
+  check) check ;;
+  *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac

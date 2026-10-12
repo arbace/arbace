@@ -1,0 +1,142 @@
+;; jrt: TLS (doc/go/BOX-NOTES.md, "TLS (option 2)"): the natives of jdk.internal.jrt.HostNet's
+;; tls0, tlsInfo0 and tlsPeer0 (overlay/jdk/java.base/jdk/internal/jrt/HostNet.java), under jrt's
+;; TlsSocket: Go's crypto/tls as a client over a connection of the socket table (net.ae), the
+;; host's net.Conn, which the table then holds under the TLS connection. In the box the host's
+;; connection is the monitor's stream (netbox_tamago.ae), so the launcher carries only the cipher
+;; text and the keys stay in the guest; natively it is OSHost's. The trusted roots are jrt's own,
+;; Mozilla's (golang.org/x/crypto/x509roots/fallback's bundle, vendored as Go forms under
+;; x509roots/: x509roots/README.md), unless the caller gives its own as PEM.
+(in-ns 'go.arbace.jrt)
+
+(go/file "tls.go"
+  :imports [[tls "crypto/tls"] [x509 "crypto/x509"] [errors "errors"] [net "net"] [os "os"]
+            [strings "strings"] [sync "sync"] [syscall "syscall"] [time "time"]
+            [bundle "arbace/x509roots/fallback/bundle"]])
+
+;; HostNet's TLS error kinds (HostNet.java)
+(go/const
+  [^{:tag int32 :val -11} netTLSVerify -11]
+  [^{:tag int32 :val -12} netTLS -12]
+  [^{:tag int32 :val -13} netTLSRoots -13])
+
+(go/var ^{:tag sync/Once} tlsRootsOnce)
+(go/var ^{:tag (* x509/CertPool)} tlsRoots)
+
+(go/func TLSRoots
+  "TLSRoots is jrt's trusted roots: Mozilla's (the bundle of x509roots/fallback), with their
+constraints (a distrust-after date), parsed once at the first use.\n"
+  ^{:tag (* x509/CertPool)} []
+  (.Do tlsRootsOnce
+       (fn []
+         (let [p (x509/NewCertPool)]
+           (range [r (bundle/Roots)]
+             (let [(values c err) (x509/ParseCertificate (.-Certificate r))]
+               (when (== err nil)
+                 (if (== (.-Constraint r) nil)
+                   (.AddCert p c)
+                   (.AddCertWithConstraint p c (.-Constraint r))))))
+           (set! tlsRoots p))))
+  tlsRoots)
+
+(go/func isTLS "isTLS tells whether c is a TLS connection of the table.\n" ^bool [^{:tag net/Conn} c]
+  (let [(values _ ok) (assert (* tls/Conn) c)]
+    ok))
+
+(go/func tlsCloseWrite
+  "tlsCloseWrite ends a TLS connection's output with its close_notify alert (nothing for another
+connection).\n"
+  ^error [^{:tag net/Conn} c]
+  (let [(values tc ok) (assert (* tls/Conn) c)]
+    (when (not ok)
+      (return nil))
+    (.CloseWrite tc)))
+
+(go/func tlsFailed
+  "tlsFailed is setError of a handshake's error: the network's kinds for the connection's, else
+TLS_VERIFY for the peer's certificate, TLS for the rest.\n"
+  ^int32 [^{:tag (* RefArray)} errs ^error err]
+  (let [^{:tag (* tls/CertificateVerificationError)} ve nil]
+    (when (errors/As err (addr ve))
+      (return (setError errs netTLSVerify (.Error err)))))
+  (let [^syscall/Errno errno 0]
+    (when (or (errors/Is err net/ErrClosed) (errors/Is err os/ErrDeadlineExceeded) (errors/As err (addr errno)))
+      (return (failed errs err false))))
+  (setError errs netTLS (.Error err)))
+
+(go/func HostNet_Tls0_I_String_String_B1_I_String1__I_native
+  "HostNet_Tls0_I_String_String_B1_I_String1__I_native starts TLS as a client on connection h:
+serverName sent and verified, alpn the protocols offered (separated by commas), roots the
+trusted certificates as PEM (null: TLSRoots), the handshake waiting up to timeout ms (0: no
+limit): 0, or an error kind with its text in error[0].\n"
+  ^int32 [^int32 h ^{:tag (* String)} serverName ^{:tag (* String)} alpn ^{:tag (* ByteArray)} roots
+          ^int32 timeout ^{:tag (* RefArray)} errs]
+  (let [s (sock h)]
+    (when (or (== s nil) (!= (.-l s) nil))
+      (return (setError errs netClosed "Socket closed")))
+    (when (isTLS (conn h))
+      (return (setError errs netTLS "TLS already started")))
+    (let [pool (TLSRoots)]
+      (when (!= roots nil)
+        (set! pool (x509/NewCertPool))
+        (when (not (.AppendCertsFromPEM pool (byteView roots 0 (conv int32 (len (.-A roots))))))
+          (return (setError errs netTLSRoots "no certificate in the roots given"))))
+      (let [cfg (addr (lit tls/Config :RootCAs pool :MinVersion tls/VersionTLS12))]
+        (when (!= serverName nil)
+          (set! (.-ServerName cfg) (.String serverName)))
+        (when (and (!= alpn nil) (!= (.String alpn) ""))
+          (set! (.-NextProtos cfg) (strings/Split (.String alpn) ",")))
+        (let [raw (rawOf s)
+              tc (tls/Client raw cfg)]
+          (if (> timeout 0)
+            (.SetDeadline raw (.Add (time/Now) (millis timeout)))
+            (.SetDeadline raw (lit time/Time)))
+          (let [err (.Handshake tc)]
+            (.SetDeadline raw (lit time/Time))
+            (when (!= err nil)
+              (return (tlsFailed errs err)))
+            (.Lock socksMu)
+            (set! (.-raw s) raw)
+            (set! (.-c s) tc)
+            (.Unlock socksMu)
+            0))))))
+
+(go/func tlsVersionName
+  "tlsVersionName is the JVM's name of a TLS version (SSLSession.getProtocol).\n"
+  ^string [^uint16 v]
+  (switch v
+    (case [tls/VersionTLS13] (return "TLSv1.3"))
+    (case [tls/VersionTLS12] (return "TLSv1.2"))
+    (case [tls/VersionTLS11] (return "TLSv1.1"))
+    (case [tls/VersionTLS10] (return "TLSv1")))
+  (tls/VersionName v))
+
+(go/func HostNet_TlsInfo0_I_String1__I_native
+  "HostNet_TlsInfo0_I_String1__I_native puts connection h's TLS session into info: the protocol,
+the cipher suite, the application protocol, the server name: 0, or HostNet.CLOSED when h is not
+a TLS connection.\n"
+  ^int32 [^int32 h ^{:tag (* RefArray)} info]
+  (let [(values tc ok) (assert (* tls/Conn) (conn h))]
+    (when (or (not ok) (< (len (.-A info)) 4))
+      (return netClosed))
+    (let [st (.ConnectionState tc)]
+      (aset (.-A info) 0 (Str (tlsVersionName (.-Version st))))
+      (aset (.-A info) 1 (Str (tls/CipherSuiteName (.-CipherSuite st))))
+      (aset (.-A info) 2 (Str (.-NegotiatedProtocol st)))
+      (aset (.-A info) 3 (Str (.-ServerName st)))
+      0)))
+
+(go/func HostNet_TlsPeer0_I__B2_native
+  "HostNet_TlsPeer0_I__B2_native is the peer's certificates of TLS connection h, DER, its own
+first; null when h is not a TLS connection.\n"
+  ^{:tag (* RefArray)} [^int32 h]
+  (let [(values tc ok) (assert (* tls/Conn) (conn h))]
+    (when (not ok)
+      (return nil))
+    (let [certs (.-PeerCertificates (.ConnectionState tc))
+          r (NewRefArray (.ArrayClass Prim_byte) (conv int32 (len certs)))]
+      (range [i c certs]
+        (let [b (NewByteArray (conv int32 (len (.-Raw c))))]
+          (range [j x (.-Raw c)]
+            (aset (.-A b) j (conv int8 x)))
+          (aset (.-A r) i b)))
+      r)))
