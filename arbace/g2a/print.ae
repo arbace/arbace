@@ -97,12 +97,14 @@
   "The package of a forms file: {:package {opts} :name sym :files [{:name :file :opts
   :decls}]}, following load forms (relative to the loading file's directory, which is
   Clojure's rule for the package file's namespace, or with a leading / to the root the ns
-  name implies)."
-  [path]
+  name implies). read-fn (default read-forms) gives a file's forms: a cache of files read
+  beforehand (arbace.g2a.build reads a program's files once, in parallel)."
+  ([path] (collect path read-forms))
+  ([path read-fn]
   (let [state (new-package-state)
         root (volatile! nil)]
     (letfn [(walk [^File file]
-              (doseq [f (binding [*src* (.getPath file)] (read-forms file))]
+              (doseq [f (binding [*src* (.getPath file)] (read-fn file))]
                 (when (and (nil? @root) (seq? f) (= 'ns (first f)))
                   (let [depth (count (re-seq #"\." (str (second f))))]
                     (vreset! root (nth (iterate #(.getParentFile ^File %) (.getAbsoluteFile file))
@@ -114,7 +116,7 @@
                                     (File. ^File @root (str (subs p 1) ".ae"))
                                     (File. (.getParentFile (.getAbsoluteFile file)) (str p ".ae")))))))))]
       (walk (File. (str path)))
-      (dissoc @state :aliases))))
+      (dissoc @state :aliases)))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; Files (§4.3, §12.2)
@@ -170,13 +172,80 @@
                body (if (= (first body) :results) (nnext body) body)]
            (and (empty? body) (not (:extern (meta nm))))))))
 
+(defn- decl-pre
+  "[directive? doc directives pre-lines] of a top-level declaration."
+  [f]
+  (let [directive? (= (code/op f) "go/directive")
+        [doc dirs] (if directive? [nil []] (code/decl-doc-and-directives f))]
+    [directive? doc dirs (code/pre-lines doc dirs)]))
+
+(defn- next-target
+  "The line the declaration after decls' i-th is placed on (its doc first), when known."
+  [decls i]
+  (some (fn [d] (when-let [t (e/target d)]
+                  (- (long t) (long (nth (decl-pre d) 3)))))
+        (subvec decls (inc i))))
+
+(defn- decl-sep!
+  "The separation of a declaration (recorded line t, pre comment lines before it) from what
+  precedes it: a new alignment section (form feed) unless a one-line function follows a line
+  at the left margin (go/printer's declList: one-line functions in a row align their
+  bodies); in mode :lines down to its line."
+  [f t pre lines?]
+  (let [ff (or (not (one-line-func? f lines? t)) (pos? (e/cur-indent)))]
+    (cond
+      (or (not lines?) (nil? t)) (do (when-not (e/bol?) (e/nl 0 ff)) (e/nl 0 ff))
+      :else (let [want (- (long t) (long pre))]
+              (when-not (e/bol?) (e/nl 0 ff))
+              (while (< (e/line) want) (e/nl 0 ff))))))
+
+(defn- print-decl!
+  "Prints decls' i-th declaration, after its separation from what precedes it unless
+  sep? is false (a chunk's first: start-at! placed it)."
+  [decls i lines? popts sep?]
+  (let [f (nth decls i)
+        t (e/target f)
+        [directive? doc dirs pre] (decl-pre f)]
+    (binding [e/*next* (next-target decls i)]
+      (when sep? (decl-sep! f t pre lines?))
+      (if directive?
+        (e/comment-line (str (second f)) 0)
+        (do
+          (code/write-pre doc dirs 0)
+          (when (and lines? t (not= (long t) (e/line)) (:line-directives? (or popts {}) true))
+            (cond
+              (> (long t) (e/line)) (while (< (e/line) (long t)) (e/nl 0))
+              :else (e/line-directive-own t)))
+          (code/top-decl f))))))
+
+(def ^:private chunk-min
+  "The fewest declarations of a chunk: a file of fewer than twice as many is printed whole."
+  48)
+
+(defn- chunk-starts
+  "The first declarations of decls' chunks (mode :lines): about two chunks per processor,
+  each starting at a declaration with a recorded line; none for a file of few declarations."
+  [decls]
+  (let [n (count decls)
+        k (min (* 2 (.availableProcessors (Runtime/getRuntime))) (quot n chunk-min))]
+    (when (>= k 2)
+      (let [size (quot (+ n (dec k)) k)]
+        (into []
+              (comp (map (fn [a] (first (filter #(e/target (nth decls %)) (range a n)))))
+                    (remove nil?)
+                    (distinct))
+              (range 0 n size))))))
+
 (defn print-file
   "The Go text of one file: {:name :opts :decls} as collect gives it. pkg-name is the
-  package clause's name unless the file's :package says otherwise."
+  package clause's name unless the file's :package says otherwise. In mode :lines a file of
+  many declarations is printed in chunks, in parallel (print-emit's join!); the text is the
+  same."
   [{:keys [opts decls file src]} pkg-name {:keys [layout line-directives? line-file] :as popts}]
   (let [lines? (case layout :lines true :gofmt false
-                 (boolean (:line (meta file))))]
-    (binding [e/*p* (e/new-state {:lines? lines? :line-directives? (if (nil? line-directives?) true line-directives?)})
+                 (boolean (:line (meta file))))
+        state-opts {:lines? lines? :line-directives? (if (nil? line-directives?) true line-directives?)}]
+    (binding [e/*p* (e/new-state state-opts)
               e/*next* nil
               code/*explicit-groups* (code/uses-grouped? decls)]
       ;; §12.3: gc's positions name the forms file (lines are the forms' in this layout)
@@ -191,46 +260,41 @@
       (e/tok "package") (e/sp) (e/tok (str (or (:package opts) pkg-name)))
       (e/nl 0)
       (write-imports (:imports opts))
-      (let [decls (vec decls)]
-        (dotimes [i (count decls)]
-          (let [f (nth decls i)
-                t (e/target f)
-                directive? (= (code/op f) "go/directive")
-                [doc dirs] (if directive? [nil []] (code/decl-doc-and-directives f))
-                pre (code/pre-lines doc dirs)]
-            (binding [e/*next* (some (fn [d] (when-let [t (e/target d)]
-                                               (let [[doc dirs] (if (= (code/op d) "go/directive")
-                                                                  [nil []]
-                                                                  (code/decl-doc-and-directives d))]
-                                                 (- (long t) (code/pre-lines doc dirs)))))
-                                     (subvec decls (inc i)))]
-              ;; a new alignment section (form feed) unless a one-line function follows a
-              ;; line at the left margin (go/printer's declList): one-line functions in a row
-              ;; align their bodies
-              (let [ff (or (not (one-line-func? f lines? t)) (pos? (e/cur-indent)))]
-                (cond
-                  (or (not lines?) (nil? t)) (do (when-not (e/bol?) (e/nl 0 ff)) (e/nl 0 ff))
-                  :else (let [want (- (long t) pre)]
-                          (when-not (e/bol?) (e/nl 0 ff))
-                          (while (< (e/line) want) (e/nl 0 ff)))))
-              (if directive?
-                (e/comment-line (str (second f)) 0)
-                (do
-                  (code/write-pre doc dirs 0)
-                  (when (and lines? t (not= (long t) (e/line)) (:line-directives? (or popts {}) true))
-                    (cond
-                      (> (long t) (e/line)) (while (< (e/line) (long t)) (e/nl 0))
-                      :else (e/line-directive-own t)))
-                  (code/top-decl f)))))))
+      (let [decls (vec decls)
+            n (count decls)
+            starts (when lines? (chunk-starts decls))]
+        (if (empty? starts)
+          (dotimes [i n] (print-decl! decls i lines? popts true))
+          (let [chunks (map vector starts (conj (subvec starts 1) n))
+                ;; the line a chunk starts at: its first declaration's (doc first)
+                first-line (fn [a] (let [f (nth decls a)]
+                                     (- (long (e/target f)) (long (nth (decl-pre f) 3)))))
+                printed (pmap (fn [[a b]]
+                                (binding [e/*p* (e/new-state state-opts)]
+                                  (e/start-at! (first-line a))
+                                  (print-decl! decls a lines? popts false)
+                                  (doseq [i (range (inc a) b)] (print-decl! decls i lines? popts true))
+                                  (e/chunk-state)))
+                              chunks)]
+            ;; the declarations before the first with a recorded line, in the file's state
+            (dotimes [i (first starts)] (print-decl! decls i lines? popts true))
+            ;; then each chunk joined, or printed again in the file's state
+            (doseq [[[a b] c] (map vector chunks printed)]
+              (let [f (nth decls a)]
+                (decl-sep! f (e/target f) (nth (decl-pre f) 3) lines?))
+              (when-not (e/join! c (first-line a))
+                (print-decl! decls a lines? popts false)
+                (doseq [i (range (inc a) b)] (print-decl! decls i lines? popts true)))))))
       (when-not (e/bol?) (e/nl 0))
       (e/result))))
 
 (defn print-forms
-  "The Go files of a collected package: {name text}."
+  "The Go files of a collected package: {name text}, printed in parallel (each file's
+  printing is independent: its own emitter state)."
   [pkg opts]
   (into (sorted-map)
-        (for [fl (:files pkg)]
-          [(str (:name fl)) (print-file fl (:name pkg) opts)])))
+        (pmap (fn [fl] [(str (:name fl)) (print-file fl (:name pkg) opts)])
+              (:files pkg))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; The package build (§12.4)
