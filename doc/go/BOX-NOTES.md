@@ -1643,9 +1643,25 @@ evaluator's next `Gosched`, as the poller's timer was. A `-e` that used a future
 (Measured by `.tmp/bench/bench.py` of the branch's work: the launcher's process CPU from
 `/proc`, its `ARBACE_BOX_STATS`.)
 
-### Checks
+### The final checks (the branch with main `b76ad91` merged, amd64)
 
-The wake on events' checks are the merged branch's final checks (below, "The final checks").
+- `bin/build-arbace` (stage 2 rebuilds itself), `bin/jrt-convert`, `bin/jrt overlay --check`
+  (proc.go is its conversion plus the three marked lines).
+- `bin/arbace-go --build` (66,814,112 bytes) and `--build --box` (the guest 66,199,886 bytes, the
+  launcher with it 70,918,494); `--smoke` 69 of 69; `--smoke --box` 103 of 103 (new: the bounded
+  blob cache, and an idle REPL that makes no more than 6 `WaitRead`s in 2 s: before this change
+  it made 132).
+- `bin/net-check` and `bin/net-check --box`: 5 of 5 each.
+- The box's oracle with `forms/net.ae` (`ARBACE_BOX_NET=loopback`): 21,779 of 21,825, the 46 of
+  `known-go-box-amd64.edn`; the native oracle: 22,232 of 22,278, the 46 of `known-go-amd64.edn`.
+- `bin/box-suite`: 67 namespaces, 685 tests, 19,647 of 19,647 assertions.
+- `bin/box-vendor roundtrip`: 16 of 16 at all three levels; `kvm-tests`: hv, vmm (with
+  `TestDirStoreCache`, `TestNetCloseLingers`) and go-whim's guest tests (its C and Go guests on
+  the changed monitor and board) pass.
+- `bin/tamago-vendor verify` (identical) and `check` (std 371 of 371, the goos module 69 of 69,
+  the guest image from the forms and from the originals identical: 77,080,005 bytes as linked,
+  66,199,850 cut): S6's proof holds.
+- The essential `bin/gate`: passed (6 min 30 s).
 
 ### Amendments (BX50-BX54, proposed 2026-10-12)
 
