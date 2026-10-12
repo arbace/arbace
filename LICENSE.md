@@ -69,8 +69,8 @@ covers what.
   1.0, except the parts of `go/arbace/jrt/` listed below.
 - `box/` (`box/go/arbace/box.../`, the packages `arbace/box/hv`, `vmm`, `abi`, `board` and
   `libsys`, with `board/boot_amd64.s` and `boot_arm64.s`; box/README.md, doc/go/BOX-NOTES.md;
-  the launcher `arbace/box/cmd/arbace-box`, added in S1, is Arbace's own, under the Eclipse
-  Public License 1.0):
+  the launcher `arbace/box/cmd/arbace-box`, added in S1, and `box/mac/`, added in S4, are
+  Arbace's own, under the Eclipse Public License 1.0; purego is the next entry):
   the box of go-whim, https://github.com/arbace/go-whim at
   `80c49bf53cd6340487ac623f3d6d135b77ac1db6`, its `hv/`, `vmm/` (without `vmm/cmd/`),
   `guest/abi/`, `guest/tamago/board/` and `internal/libsys/`, converted to Go forms by
@@ -82,25 +82,32 @@ covers what.
   go-whim, and the files carry no other copyright or licence notice. The user stated on
   2026-10-11 that these parts are licensed to Arbace under the Eclipse Public License 1.0
   (decision D8, doc/go/BOX-SURVEY.md §10). go-whim keeps its own copy under its own terms.
-  What these packages build with is not held here: on darwin, `hv` and `libsys` import purego
-  (https://github.com/ebitengine/purego v0.11.1, under the Apache License 2.0, text below), and
-  a guest built on `board` links TamaGo's `goos` module (https://github.com/usbarmory/tamago
+  What these packages build with: on darwin, `hv` and `libsys` import purego (the next entry),
+  and a guest built on `board` links TamaGo's `goos` module (https://github.com/usbarmory/tamago
   v1.27.1, BSD 3-Clause License, Copyright (c) The TamaGo Authors) and TamaGo's Go tree (Go's
-  BSD 3-Clause License, below): the box's build (below) has the latter two; purego's entry is
-  made when a build of Arbace's contains it (the darwin monitor, stage S4).
+  BSD 3-Clause License, below), both held in `tamago/` (below).
+- `box/go/arbace/box/purego.ae` and `box/go/arbace/box/purego/` (the packages
+  `arbace/box/purego`, `purego/internal/fakecgo` and `purego/internal/strings`, with their
+  assembly and headers; box/README.md, doc/go/BOX-NOTES.md, S4, BX62): purego,
+  https://github.com/ebitengine/purego v0.11.1 (go.sum
+  `h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=`), its files that build for darwin/arm64,
+  their import paths renamed to `arbace/box/purego`, converted to Go forms by `bin/g2a convert`
+  (`bin/box-vendor purego`): Copyright 2022 The Ebitengine Authors (each file's SPDX notice,
+  kept as `;;` lines), under the Apache License 2.0 (section "purego" below). The box's launcher
+  for macOS (`bin/box-mac-bundle`) contains it.
 - `tamago/` (tamago/README.md, doc/go/BOX-NOTES.md, S6): the box guest's own Go as Go forms,
   converted by `bin/g2a convert` (`bin/tamago-vendor`), with the assembly, headers, embedded
   files and module files they came with, unchanged:
   - `tamago/goroot/`: the standard library of TamaGo's go1.27.1 tree
     (https://github.com/usbarmory/tamago-go, `VERSION` "go1.27.1", 2026-08-28; the Go
     distribution with TamaGo's changes), every package of `go list std` with Go files for
-    `tamago/amd64` from its `src/` (but `internal/trace/traceviewer` and
+    `tamago/amd64` or `tamago/arm64` from its `src/` (but `internal/trace/traceviewer` and
     `encoding/json/internal/jsontest`, which embed third-party data: not held here), and the
-    header `src/runtime/cgo/abi_amd64.h`: Copyright The Go Authors (and, for TamaGo's
+    headers `src/runtime/cgo/abi_amd64.h` and `abi_arm64.h`: Copyright The Go Authors (and, for TamaGo's
     additions, their authors as the files state), under Go's BSD 3-Clause License (text below).
   - `tamago/goos/`: TamaGo's `goos` module, https://github.com/usbarmory/tamago v1.27.1 (go.sum
     `h1:Zl4w3hu5DaogGvcLzunS4gjwNEqdjFFJedMO3pDQa5k=`), its packages that build for
-    `tamago/amd64` and its `go.mod`: Copyright (c) The TamaGo Authors, under the BSD 3-Clause
+    `tamago/amd64` or `tamago/arm64` and its `go.mod`: Copyright (c) The TamaGo Authors, under the BSD 3-Clause
     License (text below).
   Each Go file's notice is kept, as `;;` lines of its forms.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
@@ -762,6 +769,13 @@ Copyright (C) 2011 The Guava Authors
 
    END OF TERMS AND CONDITIONS
 ```
+
+## purego: Apache License 2.0
+
+Copyright 2022 The Ebitengine Authors (https://github.com/ebitengine/purego, v0.11.1). purego's
+`LICENSE` is the Apache License, Version 2.0, January 2004, whose text is given in full in the
+section "Murmur3 (Guava): Apache License 2.0" above (purego's file also carries the license's
+appendix, "How to apply the Apache License to your work", which states no further terms).
 
 ## OpenJDK (jdk26u): GNU General Public License version 2 with the Classpath Exception
 
