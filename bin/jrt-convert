@@ -3,10 +3,23 @@
 # translation closure that bin/java-surface measured (doc/go/java-surface.edn, :closure :repl
 # :sources; 184 files of java.base), converted by j2a into class forms, compiled back with the
 # class forms compiler and compared with javac's classes, and the edge the translated classes
-# call into (what jrt hand-writes). Writes only under $JRT_WORK (default .tmp/jrt), regenerated
-# on every run (not tracked: the user's decision for j2a's output).
+# call into (what jrt hand-writes). Since standalone S1 (doc/STANDALONE-SURVEY.md, D2) its
+# output is a source of the repository: jdk/ (jdk/README.md) holds the converted forms
+# (jdk/forms), the resource data (jdk/data), the source list (jdk/sources.txt) and the
+# provenance (jdk/provenance.edn), and the Go build (bin/a2g) reads them from there, without
+# javac or jdk26u's checkout. This script regenerates them (update) and proves them (verify).
+# It writes under $JRT_WORK (default .tmp/jrt) and, with update, jdk/.
 #
-# Usage: bin/jrt-convert [--twice]
+# Usage: bin/jrt-convert [verify|update] [--twice]
+#   (none)    every step into $JRT_WORK (the checks), jdk/ untouched
+#   verify    the same, then $JRT_WORK's conv (without j2a's report), data, sources.txt and
+#             provenance.edn compared with jdk/forms, jdk/data, jdk/sources.txt and
+#             jdk/provenance.edn (diff -r, $JRT_WORK/verify.diff): jdk/ is what the conversion
+#             gives, byte for byte (bin/gate --full)
+#   update    the same, then, when every step passed, jdk/forms, jdk/data, jdk/sources.txt and
+#             jdk/provenance.edn replaced by them: after a change to what the conversion reads
+#             (jrt's own Java, overlay/jdk/java.base; the closure, test/jrt/jrt_sources.ae and
+#             doc/go/java-surface.edn; j2a; jdk26u's checkout) commit jdk/ with it
 #   --twice   afterwards run the generators and j2a a second time into $JRT_WORK/again and
 #             require the same files (determinism)
 # Steps ($JRT_STEPS, default all, comma-separated: sources,generate,convert,javac,check,edge,report):
@@ -49,7 +62,8 @@
 #   JRT_WORK   work directory (default .tmp/jrt);  JRT_JOBS check JVMs (default 4, -Xmx3g each)
 #   J2A_JVM_OPTS  j2a's heap (default here -Xmx8g)
 # Runs on Arbace (bin/lib/tools.bash: target/stage2, from bin/build-arbace). Exit status 0 when
-# every file converts and compiles to javac's class shapes (and, with --twice, is deterministic).
+# every file converts and compiles to javac's class shapes (with --twice, is deterministic; with
+# verify, jdk/ is the conversion's output).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
@@ -61,8 +75,11 @@ work=${JRT_WORK:-$root/.tmp/jrt}
 case "$work" in /*) ;; *) work=$root/$work ;; esac
 jobs=${JRT_JOBS:-4}
 steps=${JRT_STEPS:-sources,generate,convert,javac,check,edge,report}
-twice=0
+twice=0 mode=
+case ${1:-} in verify|update) mode=$1; shift ;; esac
 [ "${1:-}" = "--twice" ] && twice=1
+# the committed tree (jdk/README.md)
+committed=$root/jdk
 has() { case ",$steps," in *",$1,"*) return 0 ;; esac; return 1; }
 clj() { java -Xss64m -Xmx4g -cp "$ARBACE_CP:$root/test" arbace.lang.Main -e "(require 'jrt.jrt-sources) $1"; }
 status=0
@@ -403,10 +420,31 @@ if has generate; then
   echo "$nsame of $(grep -c ' gensrc' "$work/sources.txt") generated sources equal to $gensrc_ref, $((dsame - nsame)) of $(find "$work/data" -type f | wc -l) data files to the build's jdk/modules ($(( $(date +%s) - t0 )) s)"
 fi
 
+# provenance: what the forms and the data are made from, $work/provenance.edn (jdk/'s
+# provenance.edn): jdk26u's repository and commit (and whether its checkout is clean), the JDK
+# whose javac attributes the sources for j2a, the JDK that runs the generators, the locales, the
+# converter (a hash of j2a's sources, arbace/j2a, and of bin/j2a) and the counts; nothing of the
+# run's place or time, so that verify compares it too
+provenance() {
+  local q='s/\\/\\\\/g; s/"/\\"/g' url commit clean
+  url=$(git -C "$jdk" remote get-url origin 2>/dev/null | sed "$q")
+  commit=$(git -C "$jdk" rev-parse HEAD 2>/dev/null)
+  if [ -n "$commit" ] && [ -z "$(git -C "$jdk" status --porcelain --untracked-files=no -- src make 2>/dev/null)" ]; then clean=true; else clean=false; fi
+  echo ";; The provenance of jdk/ (jdk/README.md): what bin/jrt-convert made its forms and data from."
+  echo ";; Written by bin/jrt-convert update; bin/jrt-convert verify compares it with a fresh run's."
+  echo "{:jdk26u {:repo \"$url\" :commit \"$commit\" :clean $clean}"
+  echo " :jdk \"$(java -version 2>&1 | head -1 | sed "$q")\""
+  echo " :gen-jdk \"$("$GEN_JDK/bin/java" -version 2>&1 | head -1 | sed "$q")\""
+  echo " :locales \"${JRT_LOCALES:-none}\""
+  echo " :converter {:j2a \"$( (find arbace/j2a -type f | LC_ALL=C sort; echo bin/j2a) | xargs sha256sum | sha256sum | cut -c1-64)\"}"
+  echo " :files {:sources $(grep -vc " locales " "$work/sources.txt") :forms $(find "$work/conv" -name '*.ae' | wc -l) :data $(find "$work/data" -type f | wc -l)}}"
+}
+
 if has convert; then
   echo "== convert"
   t0=$(date +%s)
   convert "$work/src" "$work/conv" "$work/log/convert.log" || status=1
+  provenance > "$work/provenance.edn" || status=1
   echo "($(( $(date +%s) - t0 )) s)"
 fi
 
@@ -480,6 +518,36 @@ if [ $twice = 1 ]; then
     echo "deterministic: $(find "$work/again/src" -type f | wc -l) sources and $(find "$work/again/conv" -type f | wc -l) converted files identical ($(( $(date +%s) - t0 )) s)"
   else
     echo "NOT deterministic: see $work/log/again-*.diff"; status=1
+  fi
+fi
+# jdk/'s tree as this run makes it, $work/jdk: the forms (j2a's report left out), the data, the
+# source list and the provenance; verify compares it with jdk/, update replaces jdk/'s with it
+# (README.md and .gitattributes, hand-written, stay)
+if [ -n "$mode" ]; then
+  echo "== $mode (${committed#$root/})"
+  fresh=$work/jdk
+  rm -rf "$fresh"
+  mkdir -p "$fresh"
+  if [ -d "$work/conv" ] && [ -d "$work/data" ] && [ -f "$work/provenance.edn" ]; then
+    cp -r "$work/conv" "$fresh/forms" && rm -f "$fresh/forms/j2a-report.edn" &&
+      cp -r "$work/data" "$fresh/data" && cp "$work/sources.txt" "$work/provenance.edn" "$fresh/" || status=1
+  else
+    echo "no conversion in $work (the steps sources, generate and convert)"; status=1
+  fi
+  if [ "$mode" = verify ]; then
+    if [ $status = 0 ] && diff -r -x README.md -x .gitattributes "$committed" "$fresh" > "$work/verify.diff"; then
+      echo "verify: ${committed#$root/} is the conversion, byte for byte ($(find "$fresh/forms" -type f | wc -l) forms files, $(find "$fresh/data" -type f | wc -l) data files)"
+    else
+      [ -s "$work/verify.diff" ] && echo "verify: ${committed#$root/} differs from a fresh conversion ($work/verify.diff: $(wc -l < "$work/verify.diff") lines)"
+      status=1
+    fi
+  elif [ $status = 0 ]; then
+    mkdir -p "$committed"
+    rm -rf "$committed/forms" "$committed/data"
+    cp -r "$fresh/forms" "$fresh/data" "$fresh/sources.txt" "$fresh/provenance.edn" "$committed/" || status=1
+    echo "update: ${committed#$root/} written ($(find "$committed/forms" -type f | wc -l) forms files, $(find "$committed/data" -type f | wc -l) data files): commit it"
+  else
+    echo "update: a step failed, ${committed#$root/} left as it was"
   fi
 fi
 echo "jrt-convert: $(( $(date +%s) - t00 )) s, status $status"

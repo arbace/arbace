@@ -1,0 +1,698 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/locks/StampedLock.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent.locks)
+
+(import '(java.io IOException ObjectInputStream Serializable)
+        '(java.util.concurrent TimeUnit)
+        '(jdk.internal.misc Unsafe)
+        '(jdk.internal.vm.annotation ReservedStackAccess))
+
+(defclass ^:public StampedLock
+  :implements [Serializable]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID -6001602636862214147)
+
+  (field ^:private ^:static ^:final ^int LG_READERS 7)
+
+  (field ^:private ^:static ^:final ^long RUNIT 1)
+
+  (field ^:private ^:static ^:final ^long WBIT (bit-shift-left 1 LG_READERS))
+
+  (field ^:private ^:static ^:final ^long RBITS (unchecked-subtract WBIT 1))
+
+  (field ^:private ^:static ^:final ^long RFULL (unchecked-subtract RBITS 1))
+
+  (field ^:private ^:static ^:final ^long ABITS (bit-or RBITS WBIT))
+
+  (field ^:private ^:static ^:final ^long SBITS (bit-not RBITS))
+
+  (field ^:private ^:static ^:final ^long RSAFE
+    (bit-not (bit-shift-left 3 (unchecked-subtract-int LG_READERS 1))))
+
+  (field ^:private ^:static ^:final ^long ORIGIN (bit-shift-left WBIT 1))
+
+  (field ^:private ^:static ^:final ^long INTERRUPTED 1)
+
+  (field ^:static ^:final ^int WAITING 1)
+
+  (field ^:static ^:final ^int CANCELLED (unchecked-int 0x80000000))
+
+  (defclass ^:abstract ^:static Node
+    (field ^:volatile ^Node prev)
+
+    (field ^:volatile ^Node next)
+
+    (field ^Thread waiter)
+
+    (field ^:volatile ^int status)
+
+    (method ^:final casPrev ^boolean [this ^Node c ^Node v]
+      (.weakCompareAndSetReference U this PREV c v))
+
+    (method ^:final casNext ^boolean [this ^Node c ^Node v]
+      (.weakCompareAndSetReference U this NEXT c v))
+
+    (method ^:final getAndUnsetStatus ^int [this ^int v]
+      (.getAndBitwiseAndInt U this STATUS (bit-not-int v)))
+
+    (method ^:final setPrevRelaxed ^void [this ^Node p]
+      (.putReference U this PREV p))
+
+    (method ^:final setStatusRelaxed ^void [this ^int s]
+      (.putInt U this STATUS s))
+
+    (method ^:final clearStatus ^void [this]
+      (.putIntOpaque U this STATUS 0))
+
+    (field ^:private ^:static ^:final ^long STATUS (.objectFieldOffset U Node "status"))
+
+    (field ^:private ^:static ^:final ^long NEXT (.objectFieldOffset U Node "next"))
+
+    (field ^:private ^:static ^:final ^long PREV (.objectFieldOffset U Node "prev")))
+
+  (defclass ^:static ^:final WriterNode
+    :extends Node)
+
+  (defclass ^:static ^:final ReaderNode
+    :extends Node
+
+    (field ^:volatile ^ReaderNode cowaiters)
+
+    (method ^:final casCowaiters ^boolean [this ^ReaderNode c ^ReaderNode v]
+      (.weakCompareAndSetReference U this COWAITERS c v))
+
+    (method ^:final setCowaitersRelaxed ^void [this ^ReaderNode p]
+      (.putReference U this COWAITERS p))
+
+    (field ^:private ^:static ^:final ^long COWAITERS (.objectFieldOffset U ReaderNode "cowaiters")))
+
+  (field ^:private ^:transient ^:volatile ^Node head)
+
+  (field ^:private ^:transient ^:volatile ^Node tail)
+
+  (field ^:transient ^ReadLockView readLockView)
+
+  (field ^:transient ^WriteLockView writeLockView)
+
+  (field ^:transient ^ReadWriteLockView readWriteLockView)
+
+  (field ^:private ^:transient ^:volatile ^long state)
+
+  (field ^:private ^:transient ^int readerOverflow)
+
+  (constructor ^:public [this] (set! state ORIGIN))
+
+  (method ^:private casState ^boolean [this ^long expect ^long update]
+    (.compareAndSetLong U this STATE expect update))
+
+  (method ^:private ^{ReservedStackAccess true} tryAcquireWrite ^long [this]
+    (let [^:mutable ^long s 0
+          ^:mutable ^long nextState 0]
+      (if (and (== (bit-and (set! s state) ABITS) 0)
+               (.casState this s (set! nextState (bit-or s WBIT))))
+          (do (.storeStoreFence U) nextState)
+          0)))
+
+  (method ^:private ^{ReservedStackAccess true} tryAcquireRead ^long [this]
+    (let [^:mutable ^long s 0
+          ^:mutable ^long m 0
+          ^:mutable ^long nextState 0]
+      (while true
+        (cond
+          (< (set! m (bit-and (set! s state) ABITS)) RFULL)
+            (when (.casState this s (set! nextState (unchecked-add s RUNIT))) (return nextState))
+          (== m WBIT) (return 0)
+          :else (when-not (== (set! nextState (.tryIncReaderOverflow this s)) 0) (return nextState))))))
+
+  (method ^:private ^:static unlockWriteState ^long [^:mutable ^long s]
+    (if (== (set! s (unchecked-add s WBIT)) 0) ORIGIN s))
+
+  (method ^:private releaseWrite ^long [this ^long s]
+    (let [nextState (set! state (StampedLock/unlockWriteState s))]
+      (StampedLock/signalNext head)
+      nextState))
+
+  (method ^:public ^{ReservedStackAccess true} writeLock ^long [this]
+    (let [s (bit-and (.getLongOpaque U this STATE) (bit-not ABITS))
+          ^:mutable ^long nextState 0]
+      (if (.casState this s (set! nextState (bit-or s WBIT)))
+          (do (.storeStoreFence U) nextState)
+          (.acquireWrite this false false 0))))
+
+  (method ^:public tryWriteLock ^long [this] (.tryAcquireWrite this))
+
+  (method ^:public tryWriteLock :throws [InterruptedException] ^long [this ^long time ^TimeUnit unit]
+    (let [nanos (.toNanos unit time)]
+      (when-not (Thread/interrupted)
+        (let [^:mutable ^long nextState 0]
+          (when-not (== (set! nextState (.tryAcquireWrite this)) 0) (return nextState))
+          (when (<= nanos 0) (return 0))
+          (set! nextState (.acquireWrite this true true (unchecked-add (System/nanoTime) nanos)))
+          (when-not (== nextState INTERRUPTED) (return nextState))))
+      (throw (InterruptedException.))))
+
+  (method ^:public writeLockInterruptibly :throws [InterruptedException] ^long [this]
+    (let [^:mutable ^long nextState 0]
+      (if (and (not (Thread/interrupted))
+               (or (not (== (set! nextState (.tryAcquireWrite this)) 0))
+                   (not (== (set! nextState (.acquireWrite this true false 0)) INTERRUPTED))))
+          nextState
+          (throw (InterruptedException.)))))
+
+  (method ^:public ^{ReservedStackAccess true} readLock ^long [this]
+    (let [s (bit-and (.getLongOpaque U this STATE) RSAFE)
+          ^:mutable ^long nextState 0]
+      (if (.casState this s (set! nextState (unchecked-add s RUNIT)))
+          nextState
+          (.acquireRead this false false 0))))
+
+  (method ^:public tryReadLock ^long [this] (.tryAcquireRead this))
+
+  (method ^:public tryReadLock :throws [InterruptedException] ^long [this ^long time ^TimeUnit unit]
+    (let [nanos (.toNanos unit time)]
+      (when-not (Thread/interrupted)
+        (let [^:mutable ^long nextState 0]
+          (when (and (identical? tail head) (not (== (set! nextState (.tryAcquireRead this)) 0)))
+            (return nextState))
+          (when (<= nanos 0) (return 0))
+          (set! nextState (.acquireRead this true true (unchecked-add (System/nanoTime) nanos)))
+          (when-not (== nextState INTERRUPTED) (return nextState))))
+      (throw (InterruptedException.))))
+
+  (method ^:public readLockInterruptibly :throws [InterruptedException] ^long [this]
+    (let [^:mutable ^long nextState 0]
+      (if (and (not (Thread/interrupted))
+               (or (not (== (set! nextState (.tryAcquireRead this)) 0))
+                   (not (== (set! nextState (.acquireRead this true false 0)) INTERRUPTED))))
+          nextState
+          (throw (InterruptedException.)))))
+
+  (method ^:public tryOptimisticRead ^long [this]
+    (let [^:mutable ^long s 0] (if (== (bit-and (set! s state) WBIT) 0) (bit-and s SBITS) 0)))
+
+  (method ^:public validate ^boolean [this ^long stamp]
+    (.loadFence U)
+    (== (bit-and stamp SBITS) (bit-and state SBITS)))
+
+  (method ^:public ^{ReservedStackAccess true} unlockWrite ^void [this ^long stamp]
+    (when (or (not (== state stamp)) (== (bit-and stamp WBIT) 0))
+      (throw (IllegalMonitorStateException.)))
+    (.releaseWrite this stamp))
+
+  (method ^:public ^{ReservedStackAccess true} unlockRead ^void [this ^long stamp]
+    (let [^:mutable ^long s 0
+          ^:mutable ^long m 0]
+      (when-not (== (bit-and stamp RBITS) 0)
+        (while (and (== (bit-and (set! s state) SBITS) (bit-and stamp SBITS))
+                    (not (== (set! m (bit-and s RBITS)) 0)))
+          (if (< m RFULL)
+              (when (.casState this s (unchecked-subtract s RUNIT))
+                (when (== m RUNIT) (StampedLock/signalNext head))
+                (return))
+              (when-not (== (.tryDecReaderOverflow this s) 0) (return)))))
+      (throw (IllegalMonitorStateException.))))
+
+  (method ^:public unlock ^void [this ^long stamp]
+    (if (not (== (bit-and stamp WBIT) 0)) (.unlockWrite this stamp) (.unlockRead this stamp)))
+
+  (method ^:public tryConvertToWriteLock ^long [this ^long stamp]
+    (let [a (bit-and stamp ABITS)
+          ^:mutable ^long m 0
+          ^:mutable ^long s 0
+          ^:mutable ^long nextState 0]
+      (while (== (bit-and (set! s state) SBITS) (bit-and stamp SBITS))
+        (cond
+          (== (set! m (bit-and s ABITS)) 0)
+            (do
+              (when-not (== a 0) (break))
+              (when (.casState this s (set! nextState (bit-or s WBIT)))
+                (.storeStoreFence U)
+                (return nextState)))
+          (== m WBIT) (do (when-not (== a m) (break)) (return stamp))
+          (and (== m RUNIT) (not (== a 0)))
+            (when (.casState this
+                             s
+                             (set! nextState (unchecked-add (unchecked-subtract s RUNIT) WBIT)))
+              (return nextState))
+          :else (break)))
+      0))
+
+  (method ^:public tryConvertToReadLock ^long [this ^long stamp]
+    (let [^:mutable ^long a 0
+          ^:mutable ^long s 0
+          ^:mutable ^long nextState 0]
+      (while (== (bit-and (set! s state) SBITS) (bit-and stamp SBITS))
+        (cond
+          (>= (set! a (bit-and stamp ABITS)) WBIT)
+            (do
+              (when-not (== s stamp) (break))
+              (set! nextState (set! state (unchecked-add (StampedLock/unlockWriteState s) RUNIT)))
+              (StampedLock/signalNext head)
+              (return nextState))
+          (== a 0)
+            (if (< (bit-and s ABITS) RFULL)
+                (when (.casState this s (set! nextState (unchecked-add s RUNIT)))
+                  (return nextState))
+                (when-not (== (set! nextState (.tryIncReaderOverflow this s)) 0) (return nextState)))
+          :else (do (when (== (bit-and s ABITS) 0) (break)) (return stamp))))
+      0))
+
+  (method ^:public tryConvertToOptimisticRead ^long [this ^long stamp]
+    (let [^:mutable ^long a 0
+          ^:mutable ^long m 0
+          ^:mutable ^long s 0
+          ^:mutable ^long nextState 0]
+      (.loadFence U)
+      (while (== (bit-and (set! s state) SBITS) (bit-and stamp SBITS))
+        (cond
+          (>= (set! a (bit-and stamp ABITS)) WBIT)
+            (do (when-not (== s stamp) (break)) (return (.releaseWrite this s)))
+          (== a 0) (return stamp)
+          (== (set! m (bit-and s ABITS)) 0) (break)
+          (< m RFULL)
+            (when (.casState this s (set! nextState (unchecked-subtract s RUNIT)))
+              (when (== m RUNIT) (StampedLock/signalNext head))
+              (return (bit-and nextState SBITS)))
+          :else
+            (when-not (== (set! nextState (.tryDecReaderOverflow this s)) 0)
+              (return (bit-and nextState SBITS)))))
+      0))
+
+  (method ^:public ^{ReservedStackAccess true} tryUnlockWrite ^boolean [this]
+    (let [^:mutable ^long s 0]
+      (if (not (== (bit-and (set! s state) WBIT) 0)) (do (.releaseWrite this s) true) false)))
+
+  (method ^:public ^{ReservedStackAccess true} tryUnlockRead ^boolean [this]
+    (let [^:mutable ^long s 0
+          ^:mutable ^long m 0]
+      (while (and (not (== (set! m (bit-and (set! s state) ABITS)) 0)) (< m WBIT))
+        (if (< m RFULL)
+            (when (.casState this s (unchecked-subtract s RUNIT))
+              (when (== m RUNIT) (StampedLock/signalNext head))
+              (return true))
+            (when-not (== (.tryDecReaderOverflow this s) 0) (return true))))
+      false))
+
+  (method ^:private getReadLockCount ^int [this ^long s]
+    (let [^:mutable ^long readers 0]
+      (when (>= (set! readers (bit-and s RBITS)) RFULL)
+        (set! readers (unchecked-add RFULL readerOverflow)))
+      (unchecked-int readers)))
+
+  (method ^:public isWriteLocked ^boolean [this]
+    (not (== (bit-and state WBIT) 0)))
+
+  (method ^:public isReadLocked ^boolean [this]
+    (not (== (bit-and state RBITS) 0)))
+
+  (method ^:public ^:static isWriteLockStamp ^boolean [^long stamp]
+    (== (bit-and stamp ABITS) WBIT))
+
+  (method ^:public ^:static isReadLockStamp ^boolean [^long stamp]
+    (not (== (bit-and stamp RBITS) 0)))
+
+  (method ^:public ^:static isLockStamp ^boolean [^long stamp]
+    (not (== (bit-and stamp ABITS) 0)))
+
+  (method ^:public ^:static isOptimisticReadStamp ^boolean [^long stamp]
+    (and (== (bit-and stamp ABITS) 0) (not (== stamp 0))))
+
+  (method ^:public getReadLockCount ^int [this]
+    (.getReadLockCount this state))
+
+  (method ^:public toString ^String [this]
+    (let [s state]
+      (java-str (.toString super)
+                (cond
+                  (== (bit-and s ABITS) 0) "[Unlocked]"
+                  (not (== (bit-and s WBIT) 0)) "[Write-locked]"
+                  :else (java-str "[Read-locks:" (.getReadLockCount this s) "]")))))
+
+  (method ^:public asReadLock ^Lock [this]
+    (let [^:mutable ^ReadLockView v nil]
+      (if (some? (set! v readLockView)) v (set! readLockView (ReadLockView.)))))
+
+  (method ^:public asWriteLock ^Lock [this]
+    (let [^:mutable ^WriteLockView v nil]
+      (if (some? (set! v writeLockView)) v (set! writeLockView (WriteLockView.)))))
+
+  (method ^:public asReadWriteLock ^ReadWriteLock [this]
+    (let [^:mutable ^ReadWriteLockView v nil]
+      (if (some? (set! v readWriteLockView)) v (set! readWriteLockView (ReadWriteLockView.)))))
+
+  (defclass ^:final ReadLockView
+    :implements [Lock]
+
+    (method ^:public lock ^void [this] (.readLock StampedLock/this))
+
+    (method ^:public lockInterruptibly :throws [InterruptedException] ^void [this]
+      (.readLockInterruptibly StampedLock/this))
+
+    (method ^:public tryLock ^boolean [this]
+      (not (== (.tryReadLock StampedLock/this) 0)))
+
+    (method ^:public tryLock :throws [InterruptedException] ^boolean [this ^long time ^TimeUnit unit]
+      (not (== (.tryReadLock StampedLock/this time unit) 0)))
+
+    (method ^:public unlock ^void [this]
+      (.unstampedUnlockRead StampedLock/this))
+
+    (method ^:public newCondition ^Condition [this]
+      (throw (UnsupportedOperationException.))))
+
+  (defclass ^:final WriteLockView
+    :implements [Lock]
+
+    (method ^:public lock ^void [this] (.writeLock StampedLock/this))
+
+    (method ^:public lockInterruptibly :throws [InterruptedException] ^void [this]
+      (.writeLockInterruptibly StampedLock/this))
+
+    (method ^:public tryLock ^boolean [this]
+      (not (== (.tryWriteLock StampedLock/this) 0)))
+
+    (method ^:public tryLock :throws [InterruptedException] ^boolean [this ^long time ^TimeUnit unit]
+      (not (== (.tryWriteLock StampedLock/this time unit) 0)))
+
+    (method ^:public unlock ^void [this]
+      (.unstampedUnlockWrite StampedLock/this))
+
+    (method ^:public newCondition ^Condition [this]
+      (throw (UnsupportedOperationException.))))
+
+  (defclass ^:final ReadWriteLockView
+    :implements [ReadWriteLock]
+
+    (method ^:public readLock ^Lock [this] (.asReadLock StampedLock/this))
+
+    (method ^:public writeLock ^Lock [this] (.asWriteLock StampedLock/this)))
+
+  (method ^:final unstampedUnlockWrite ^void [this]
+    (let [^:mutable ^long s 0]
+      (when (== (bit-and (set! s state) WBIT) 0) (throw (IllegalMonitorStateException.)))
+      (.releaseWrite this s)))
+
+  (method ^:final unstampedUnlockRead ^void [this]
+    (let [^:mutable ^long s 0
+          ^:mutable ^long m 0]
+      (while (> (set! m (bit-and (set! s state) RBITS)) 0)
+        (if (< m RFULL)
+            (when (.casState this s (unchecked-subtract s RUNIT))
+              (when (== m RUNIT) (StampedLock/signalNext head))
+              (return))
+            (when-not (== (.tryDecReaderOverflow this s) 0) (return))))
+      (throw (IllegalMonitorStateException.))))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream s]
+    (.defaultReadObject s)
+    (set! state ORIGIN))
+
+  (method ^:private tryIncReaderOverflow ^long [this ^long s]
+    (if (not (== (bit-and s ABITS) RFULL))
+        (Thread/onSpinWait)
+        (when (.casState this s (bit-or s RBITS))
+          (set! readerOverflow (unchecked-inc-int readerOverflow))
+          (return (set! state s))))
+    0)
+
+  (method ^:private tryDecReaderOverflow ^long [this ^long s]
+    (cond
+      (not (== (bit-and s ABITS) RFULL)) (Thread/onSpinWait)
+      (.casState this s (bit-or s RBITS))
+        (let [^:mutable ^int r 0
+              ^:mutable ^long nextState 0]
+          (if (> (set! r readerOverflow) 0)
+              (do (set! readerOverflow (unchecked-subtract-int r 1)) (set! nextState s))
+              (set! nextState (unchecked-subtract s RUNIT)))
+          (return (set! state nextState))))
+    0)
+
+  (method ^:static ^:final signalNext ^void [^Node h]
+    (let [^:mutable ^Node s nil]
+      (when (and (and (some? h) (some? (set! s (.-next h)))) (> (.-status s) 0))
+        (.getAndUnsetStatus s WAITING)
+        (LockSupport/unpark (.-waiter s)))))
+
+  (method ^:private ^:static signalCowaiters ^void [^ReaderNode node]
+    (when (some? node)
+      (let [^:mutable ^ReaderNode c nil]
+        (while (some? (set! c (.-cowaiters node)))
+          (when (.casCowaiters node c (.-cowaiters c)) (LockSupport/unpark (.-waiter c)))))))
+
+  (method ^:private casTail ^boolean [this ^Node c ^Node v]
+    (.compareAndSetReference U this TAIL c v))
+
+  (method ^:private tryInitializeHead ^void [this ^Node h]
+    (when (.compareAndSetReference U this HEAD nil h) (set! tail h)))
+
+  (method ^:private acquireWrite ^long [this ^boolean interruptible ^boolean timed ^long time]
+    (let [^:mutable ^byte spins 0
+          ^:mutable ^byte postSpins 0
+          ^:mutable interrupted false
+          ^:mutable first false
+          ^:mutable ^WriterNode node nil
+          ^:mutable ^Node pred nil
+          ^:mutable nanos 0]
+      (let [^:mutable ^long s 0
+            ^:mutable ^long nextState 0]
+        (while true
+          (when (and (and (not first) (some? (set! pred (when (some? node) (.-prev node)))))
+                     (not (set! first (identical? head pred))))
+            (if (< (.-status pred) 0)
+                (do (.cleanQueue this) (continue))
+                (when (nil? (.-prev pred)) (Thread/onSpinWait) (continue))))
+          (cond
+            (and (and (or first (nil? pred)) (== (bit-and (set! s state) ABITS) 0))
+                 (.casState this s (set! nextState (bit-or s WBIT))))
+              (do
+                (.storeStoreFence U)
+                (when first
+                  (set! (.-prev node) nil)
+                  (set! head node)
+                  (set! (.-next pred) nil)
+                  (set! (.-waiter node) nil)
+                  (when interrupted (.interrupt (Thread/currentThread))))
+                (return nextState))
+            (nil? node)
+              (try
+                (set! node (WriterNode.))
+                (catch OutOfMemoryError oome
+                  (return (.spinLockOnOOME this true interruptible timed time))))
+            (nil? pred)
+              (let [t tail]
+                (.setPrevRelaxed node t)
+                (cond
+                  (nil? t)
+                    (let [^:mutable ^Node h nil]
+                      (try
+                        (set! h (WriterNode.))
+                        (catch OutOfMemoryError oome
+                          (return (.spinLockOnOOME this true interruptible timed time))))
+                      (.tryInitializeHead this h))
+                  (not (.casTail this t node)) (.setPrevRelaxed node nil)
+                  :else (set! (.-next t) node)))
+            (and first (not (== spins 0)))
+              (do (set! spins (unchecked-byte (unchecked-dec-int spins))) (Thread/onSpinWait))
+            (== (.-status node) 0)
+              (do
+                (when (nil? (.-waiter node)) (set! (.-waiter node) (Thread/currentThread)))
+                (set! (.-status node) WAITING))
+            (or (not timed) (> (set! nanos (unchecked-subtract time (System/nanoTime))) 0))
+              (do
+                (try
+                  (if (not timed) (LockSupport/park this) (LockSupport/parkNanos this nanos))
+                  (catch [Error RuntimeException] ex (.cancelAcquire this node) (throw ex)))
+                (.clearStatus node)
+                (when (and (set! interrupted
+                                 (let [a-1 interrupted b-2 (Thread/interrupted)] (or a-1 b-2)))
+                           interruptible)
+                  (break))
+                (set! spins
+                      (set! postSpins
+                            (unchecked-byte (bit-or-int (bit-shift-left-int postSpins 1) 1)))))
+            :else (break))))
+      (.cancelAcquire this node)
+      (if (or interrupted (Thread/interrupted)) INTERRUPTED 0)))
+
+  (method ^:private acquireRead ^long [this ^boolean interruptible ^boolean timed ^long time]
+    (let [^:mutable interrupted false
+          ^:mutable ^ReaderNode node nil]
+      (while true
+        (let [^:mutable ^ReaderNode leader nil
+              ^:mutable ^long nextState 0
+              ^:mutable ^Node tailPred nil
+              t tail]
+          (cond
+            (and (or (nil? t) (nil? (set! tailPred (.-prev t))))
+                 (not (== (set! nextState (.tryAcquireRead this)) 0)))
+              (return nextState)
+            (nil? t)
+              (let [^:mutable ^Node h nil]
+                (try
+                  (set! h (WriterNode.))
+                  (catch OutOfMemoryError oome
+                    (return (.spinLockOnOOME this false interruptible timed time))))
+                (.tryInitializeHead this h))
+            (or (nil? tailPred) (not (instance? ReaderNode t)))
+              (do
+                (when (nil? node)
+                  (try
+                    (set! node (ReaderNode.))
+                    (catch OutOfMemoryError oome
+                      (return (.spinLockOnOOME this false interruptible timed time)))))
+                (when (identical? tail t)
+                  (.setPrevRelaxed node t)
+                  (when (.casTail this t node) (set! (.-next t) node) (break))
+                  (.setPrevRelaxed node nil)))
+            :else
+              (when (identical? (set! leader (cast ReaderNode t)) tail)
+                (let [^:mutable attached false]
+                  (while true
+                    (cond
+                      (or (< (.-status leader) 0) (nil? (.-prev leader))) (break)
+                      (nil? node)
+                        (try
+                          (set! node (ReaderNode.))
+                          (catch OutOfMemoryError oome
+                            (return (.spinLockOnOOME this false interruptible timed time))))
+                      (nil? (.-waiter node)) (set! (.-waiter node) (Thread/currentThread))
+                      (not attached)
+                        (let [c (.-cowaiters leader)]
+                          (.setCowaitersRelaxed node c)
+                          (set! attached (.casCowaiters leader c node))
+                          (when-not attached (.setCowaitersRelaxed node nil)))
+                      :else
+                        (let [nanos (if timed (unchecked-subtract time (System/nanoTime)) 0)]
+                          (try
+                            (cond
+                              (not timed) (LockSupport/park this)
+                              (> nanos 0) (LockSupport/parkNanos this nanos))
+                            (catch [Error RuntimeException] ex
+                              (.cancelCowaiter this node leader)
+                              (throw ex)))
+                          (set! interrupted
+                                (let [a-3 interrupted b-4 (Thread/interrupted)] (or a-3 b-4)))
+                          (when (or (and interrupted interruptible) (and timed (<= nanos 0)))
+                            (.cancelCowaiter this node leader)
+                            (return (if interrupted INTERRUPTED 0)))))))
+                (when (some? node) (set! (.-waiter node) nil))
+                (let [ns (.tryAcquireRead this)]
+                  (StampedLock/signalCowaiters leader)
+                  (when interrupted (.interrupt (Thread/currentThread)))
+                  (if (not (== ns 0)) (return ns) (set! node nil)))))))
+      (let [^:mutable ^byte spins 0
+            ^:mutable ^byte postSpins 0
+            ^:mutable first false
+            ^:mutable ^Node pred nil
+            ^:mutable nanos 0]
+        (let [^:mutable ^long nextState 0]
+          (while true
+            (when (and (and (not first) (some? (set! pred (.-prev node))))
+                       (not (set! first (identical? head pred))))
+              (if (< (.-status pred) 0)
+                  (do (.cleanQueue this) (continue))
+                  (when (nil? (.-prev pred)) (Thread/onSpinWait) (continue))))
+            (cond
+              (and (or first (nil? pred)) (not (== (set! nextState (.tryAcquireRead this)) 0)))
+                (do
+                  (when first
+                    (set! (.-prev node) nil)
+                    (set! head node)
+                    (set! (.-next pred) nil)
+                    (set! (.-waiter node) nil))
+                  (StampedLock/signalCowaiters node)
+                  (when interrupted (.interrupt (Thread/currentThread)))
+                  (return nextState))
+              (and first (not (== spins 0)))
+                (do (set! spins (unchecked-byte (unchecked-dec-int spins))) (Thread/onSpinWait))
+              (== (.-status node) 0)
+                (do
+                  (when (nil? (.-waiter node)) (set! (.-waiter node) (Thread/currentThread)))
+                  (set! (.-status node) WAITING))
+              (or (not timed) (> (set! nanos (unchecked-subtract time (System/nanoTime))) 0))
+                (do
+                  (try
+                    (if (not timed) (LockSupport/park this) (LockSupport/parkNanos this nanos))
+                    (catch [Error RuntimeException] ex (.cancelAcquire this node) (throw ex)))
+                  (.clearStatus node)
+                  (when (and (set! interrupted
+                                   (let [a-5 interrupted b-6 (Thread/interrupted)] (or a-5 b-6)))
+                             interruptible)
+                    (break))
+                  (set! spins
+                        (set! postSpins
+                              (unchecked-byte (bit-or-int (bit-shift-left-int postSpins 1) 1)))))
+              :else (break))))
+        (.cancelAcquire this node)
+        (if (or interrupted (Thread/interrupted)) INTERRUPTED 0))))
+
+  (method ^:private cleanQueue ^void [this]
+    (while true
+      (let [^:mutable q tail
+            ^:mutable ^Node s nil
+            ^:mutable ^Node p nil
+            ^:mutable ^Node n nil]
+        (while true
+          (when (or (nil? q) (nil? (set! p (.-prev q)))) (return))
+          (when (if (nil? s)
+                    (not (identical? tail q))
+                    (or (not (identical? (.-prev s) q)) (< (.-status s) 0)))
+            (break))
+          (when (< (.-status q) 0)
+            (when (and (if (nil? s) (.casTail this q p) (.casPrev s q p)) (identical? (.-prev q) p))
+              (.casNext p q s)
+              (when (nil? (.-prev p)) (StampedLock/signalNext p)))
+            (break))
+          (when-not (identical? (set! n (.-next p)) q)
+            (when (and (and (some? n) (identical? (.-prev q) p)) (>= (.-status q) 0))
+              (.casNext p n q)
+              (when (nil? (.-prev p)) (StampedLock/signalNext p)))
+            (break))
+          (set! s q)
+          (set! q (.-prev q))))))
+
+  (method ^:private unlinkCowaiter ^void [this ^ReaderNode node ^ReaderNode leader]
+    (when (some? leader)
+      (while (and (some? (.-prev leader)) (>= (.-status leader) 0))
+        (let [^:mutable p leader
+              ^:mutable ^ReaderNode q nil]
+          (while true
+            (when (nil? (set! q (.-cowaiters p))) (return))
+            (when (identical? q node) (.casCowaiters p q (.-cowaiters q)) (break))
+            (set! p q))))))
+
+  (method ^:private cancelAcquire ^void [this ^Node node]
+    (when (some? node)
+      (set! (.-waiter node) nil)
+      (set! (.-status node) CANCELLED)
+      (.cleanQueue this)
+      (when (instance? ReaderNode node) (StampedLock/signalCowaiters (cast ReaderNode node)))))
+
+  (method ^:private cancelCowaiter ^void [this ^ReaderNode node ^ReaderNode leader]
+    (when (some? node)
+      (set! (.-waiter node) nil)
+      (set! (.-status node) CANCELLED)
+      (.unlinkCowaiter this node leader)))
+
+  (method ^:private spinLockOnOOME ^long [this ^boolean write ^boolean interruptible ^boolean timed
+                                          ^long time]
+    (let [startTime (if timed (System/nanoTime) 0)
+          ^:mutable ^int spins 0]
+      (while true
+        (let [s (if write (.tryAcquireWrite this) (.tryAcquireRead this))]
+          (when-not (== s 0) (return s))
+          (Thread/onSpinWait)
+          (when (== (bit-and-int (set! spins (unchecked-inc-int spins)) (bit-shift-left-int 1 8)) 0)
+            (when (and interruptible (Thread/interrupted)) (return INTERRUPTED))
+            (when (and timed (> (unchecked-subtract (System/nanoTime) startTime) time)) (return 0)))))))
+
+  (field ^:private ^:static ^:final ^Unsafe U (Unsafe/getUnsafe))
+
+  (field ^:private ^:static ^:final ^long STATE (.objectFieldOffset U StampedLock "state"))
+
+  (field ^:private ^:static ^:final ^long HEAD (.objectFieldOffset U StampedLock "head"))
+
+  (field ^:private ^:static ^:final ^long TAIL (.objectFieldOffset U StampedLock "tail"))
+
+  (static-initializer (let [^{:tag (Class ?)} ensureLoaded LockSupport] nil)))

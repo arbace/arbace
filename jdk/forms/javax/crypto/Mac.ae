@@ -1,0 +1,232 @@
+;; Converted from jdk26u src/java.base/share/classes/javax/crypto/Mac.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'javax.crypto)
+
+(import '(java.nio ByteBuffer)
+        '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        NoSuchProviderException
+                        Provider
+                        Provider$Service
+                        ProviderException)
+        '(java.security.spec AlgorithmParameterSpec)
+        '(java.util Arrays Iterator Objects)
+        '(sun.security.jca GetInstance)
+        '(sun.security.util Debug))
+
+(defclass ^:public Mac
+  :implements [Cloneable]
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "jca" "Mac"))
+
+  (field ^:private ^:static ^:final ^Debug pdebug (Debug/getInstance "provider" "Provider"))
+
+  (field ^:private ^:static ^:final ^boolean skipDebug
+    (and (Debug/isOn "engine=") (not (Debug/isOn "mac"))))
+
+  (field ^:private ^Provider provider)
+
+  (field ^:private ^MacSpi spi)
+
+  (field ^:private ^:final ^String algorithm)
+
+  (field ^:private ^boolean initialized false)
+
+  (field ^:private ^Provider$Service firstService)
+
+  (field ^:private ^{:tag (Iterator Provider$Service)} serviceIterator)
+
+  (field ^:private ^:final lock)
+
+  (constructor ^:protected [this ^MacSpi macSpi ^Provider provider ^String algorithm]
+    (set! (.-spi this) macSpi)
+    (set! (.-provider this) provider)
+    (set! (.-algorithm this) algorithm)
+    (set! serviceIterator nil)
+    (set! lock nil))
+
+  (constructor ^:private [this ^Provider$Service s ^{:tag (Iterator Provider$Service)} t
+                          ^String algorithm]
+    (set! firstService s)
+    (set! serviceIterator t)
+    (set! (.-algorithm this) algorithm)
+    (set! lock (Object.)))
+
+  (method ^:public ^:final getAlgorithm ^String [this] (.-algorithm this))
+
+  (method ^:public ^:static ^:final getInstance :throws [NoSuchAlgorithmException] ^Mac [^String algorithm]
+    (Objects/requireNonNull algorithm "null algorithm name")
+    (let [^{:tag (Iterator Provider$Service)} t (GetInstance/getServices "Mac" algorithm)]
+      (while (.hasNext t)
+        (let [s (cast Provider$Service (.next t))]
+          (when-not (not (JceSecurity/canUseProvider (.getProvider s)))
+            (return (Mac. s t algorithm)))))
+      (throw (NoSuchAlgorithmException. (java-str "Algorithm " algorithm " not available")))))
+
+  (method ^:public ^:static ^:final getInstance :throws [NoSuchAlgorithmException
+                                                         NoSuchProviderException] ^Mac [^String algorithm
+                                                                                        ^String provider]
+    (Objects/requireNonNull algorithm "null algorithm name")
+    (let [instance (JceSecurity/getInstance "Mac" MacSpi algorithm provider)]
+      (Mac. (cast MacSpi (.-impl instance)) (.-provider instance) algorithm)))
+
+  (method ^:public ^:static ^:final getInstance :throws [NoSuchAlgorithmException] ^Mac [^String algorithm
+                                                                                         ^Provider provider]
+    (Objects/requireNonNull algorithm "null algorithm name")
+    (let [instance (JceSecurity/getInstance "Mac" MacSpi algorithm provider)]
+      (Mac. (cast MacSpi (.-impl instance)) (.-provider instance) algorithm)))
+
+  (field ^:private ^:static ^int warnCount 10)
+
+  (method chooseFirstProvider ^void [this]
+    (when-not (or (some? spi) (nil? serviceIterator))
+      (locking lock
+        (when-not (some? spi)
+          (when (some? debug)
+            (let [w (set! warnCount (unchecked-dec-int warnCount))]
+              (when (>= w 0)
+                (.println
+                  debug
+                  "Mac.init() not first method called, disabling delayed provider selection")
+                (when (== w 0) (.println debug "Further warnings of this type will be suppressed"))
+                (.printStackTrace (Exception. "Call trace")))))
+          (let [^:mutable ^Exception lastException nil]
+            (while (or (some? firstService) (.hasNext serviceIterator))
+              (let [^:mutable ^Provider$Service s nil]
+                (if (some? firstService)
+                    (do (set! s firstService) (set! firstService nil))
+                    (set! s (cast Provider$Service (.next serviceIterator))))
+                (when-not (not (JceSecurity/canUseProvider (.getProvider s)))
+                  (try
+                    (let [obj (.newInstance s nil)]
+                      (when-not (not (instance? MacSpi obj))
+                        (set! spi (cast MacSpi obj))
+                        (set! provider (.getProvider s))
+                        (set! firstService nil)
+                        (set! serviceIterator nil)
+                        (return)))
+                    (catch NoSuchAlgorithmException e (set! lastException e))))))
+            (let [e (ProviderException. "Could not construct MacSpi instance")]
+              (when (some? lastException) (.initCause e lastException))
+              (throw e)))))))
+
+  (method ^:private chooseProvider :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                           ^Key key
+                                                                                                           ^AlgorithmParameterSpec params]
+    (locking lock
+      (if (some? spi)
+          (.engineInit spi key params)
+          (let [^:mutable ^Exception lastException nil]
+            (while (or (some? firstService) (.hasNext serviceIterator))
+              (let [^:mutable ^Provider$Service s nil]
+                (if (some? firstService)
+                    (do (set! s firstService) (set! firstService nil))
+                    (set! s (cast Provider$Service (.next serviceIterator))))
+                (when-not (not (.supportsParameter s key))
+                  (when-not (not (JceSecurity/canUseProvider (.getProvider s)))
+                    (try
+                      (let [spi (cast MacSpi (.newInstance s nil))]
+                        (.engineInit spi key params)
+                        (set! provider (.getProvider s))
+                        (set! (.-spi this) spi)
+                        (set! firstService nil)
+                        (set! serviceIterator nil)
+                        (return))
+                      (catch Exception e (when (nil? lastException) (set! lastException e))))))))
+            (when (instance? InvalidKeyException lastException)
+              (throw (cast InvalidKeyException lastException)))
+            (when (instance? InvalidAlgorithmParameterException lastException)
+              (throw (cast InvalidAlgorithmParameterException lastException)))
+            (when (instance? RuntimeException lastException)
+              (throw (cast RuntimeException lastException)))
+            (let [^String kName (if (some? key) (.getName (.getClass key)) "(null)")]
+              (throw (InvalidKeyException.
+                       (java-str "No installed provider supports this key: " kName)
+                       lastException)))))))
+
+  (method ^:public ^:final getProvider ^Provider [this]
+    (.chooseFirstProvider this)
+    (.-provider this))
+
+  (method ^:public ^:final getMacLength ^int [this]
+    (.chooseFirstProvider this)
+    (.engineGetMacLength spi))
+
+  (method ^:private getProviderName ^String [this]
+    (if (nil? provider) "(no provider)" (.getName provider)))
+
+  (method ^:public ^:final init :throws [InvalidKeyException] ^void [this ^Key key]
+    (try
+      (if (some? spi) (.engineInit spi key nil) (.chooseProvider this key nil))
+      (catch InvalidAlgorithmParameterException e (throw (InvalidKeyException. "init() failed" e))))
+    (set! initialized true)
+    (when (and (not skipDebug) (some? pdebug))
+      (.println pdebug (java-str "Mac." algorithm " algorithm from: " (.getProviderName this)))))
+
+  (method ^:public ^:final init :throws [InvalidKeyException InvalidAlgorithmParameterException] ^void [this
+                                                                                                        ^Key key
+                                                                                                        ^AlgorithmParameterSpec params]
+    (if (some? spi) (.engineInit spi key params) (.chooseProvider this key params))
+    (set! initialized true)
+    (when (and (not skipDebug) (some? pdebug))
+      (.println pdebug (java-str "Mac." algorithm " algorithm from: " (.getProviderName this)))))
+
+  (method ^:public ^:final update :throws [IllegalStateException] ^void [this ^byte input]
+    (.chooseFirstProvider this)
+    (when-not initialized (throw (IllegalStateException. "MAC not initialized")))
+    (.engineUpdate spi input))
+
+  (method ^:public ^:final update :throws [IllegalStateException] ^void [this ^byte/1 input]
+    (.chooseFirstProvider this)
+    (when-not initialized (throw (IllegalStateException. "MAC not initialized")))
+    (when (some? input) (.engineUpdate spi input 0 (alength input))))
+
+  (method ^:public ^:final update :throws [IllegalStateException] ^void [this ^byte/1 input
+                                                                         ^int offset ^int len]
+    (.chooseFirstProvider this)
+    (when-not initialized (throw (IllegalStateException. "MAC not initialized")))
+    (when (some? input)
+      (when (or (or (< offset 0) (> len (unchecked-subtract-int (alength input) offset))) (< len 0))
+        (throw (IllegalArgumentException. "Bad arguments")))
+      (.engineUpdate spi input offset len)))
+
+  (method ^:public ^:final update ^void [this ^ByteBuffer input]
+    (.chooseFirstProvider this)
+    (when-not initialized (throw (IllegalStateException. "MAC not initialized")))
+    (when (nil? input) (throw (IllegalArgumentException. "Buffer must not be null")))
+    (.engineUpdate spi input))
+
+  (method ^:public ^:final doFinal :throws [IllegalStateException] ^byte/1 [this]
+    (.chooseFirstProvider this)
+    (when-not initialized (throw (IllegalStateException. "MAC not initialized")))
+    (let [mac (.engineDoFinal spi)] (.engineReset spi) mac))
+
+  (method ^:public ^:final doFinal :throws [ShortBufferException IllegalStateException] ^void [this
+                                                                                               ^byte/1 output
+                                                                                               ^int outOffset]
+    (.chooseFirstProvider this)
+    (when-not initialized (throw (IllegalStateException. "MAC not initialized")))
+    (let [macLen (.getMacLength this)]
+      (when (or (nil? output) (< (unchecked-subtract-int (alength output) outOffset) macLen))
+        (throw (ShortBufferException. "Cannot store MAC in output buffer")))
+      (let [mac (.doFinal this)]
+        (System/arraycopy mac 0 output outOffset macLen)
+        (Arrays/fill mac (unchecked-byte 0)))))
+
+  (method ^:public ^:final doFinal :throws [IllegalStateException] ^byte/1 [this ^byte/1 input]
+    (.chooseFirstProvider this)
+    (when-not initialized (throw (IllegalStateException. "MAC not initialized")))
+    (.update this input)
+    (.doFinal this))
+
+  (method ^:public ^:final reset ^void [this]
+    (.chooseFirstProvider this)
+    (.engineReset spi))
+
+  (method ^:public ^:final clone :throws [CloneNotSupportedException] [this]
+    (.chooseFirstProvider this)
+    (let [that (cast Mac (.clone super))]
+      (set! (.-spi that) (cast MacSpi (.clone (.-spi this))))
+      that)))

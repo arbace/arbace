@@ -1,0 +1,179 @@
+;; Converted from jdk26u src/java.base/share/classes/java/io/BufferedInputStream.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.io)
+
+(import '(java.util Arrays Objects)
+        '(jdk.internal.misc Unsafe)
+        '(jdk.internal.util ArraysSupport))
+
+(defclass ^:public BufferedInputStream
+  :extends FilterInputStream
+
+  (field ^:private ^:static ^:final ^int DEFAULT_BUFFER_SIZE 8192)
+
+  (field ^:private ^:static ^:final ^byte/1 EMPTY (new byte/1 0))
+
+  (field ^:private ^:static ^:final ^Unsafe U (Unsafe/getUnsafe))
+
+  (field ^:private ^:static ^:final ^long BUF_OFFSET
+    (.objectFieldOffset U BufferedInputStream "buf"))
+
+  (field ^:private ^:final ^int initialSize)
+
+  (field ^:protected ^:volatile ^byte/1 buf)
+
+  (field ^:protected ^int count)
+
+  (field ^:protected ^int pos)
+
+  (field ^:protected ^int markpos -1)
+
+  (field ^:protected ^int marklimit)
+
+  (method ^:private getInIfOpen :throws [IOException] ^InputStream [this]
+    (let [input (.-in this)] (when (nil? input) (throw (IOException. "Stream closed"))) input))
+
+  (method ^:private getBufIfOpen :throws [IOException] ^byte/1 [this ^boolean allocateIfEmpty]
+    (let [^:mutable buffer buf]
+      (when (and allocateIfEmpty (identical? buffer EMPTY))
+        (set! buffer (new byte/1 initialSize))
+        (when-not (.compareAndSetReference U this BUF_OFFSET EMPTY buffer) (set! buffer buf)))
+      (when (nil? buffer) (throw (IOException. "Stream closed")))
+      buffer))
+
+  (method ^:private getBufIfOpen :throws [IOException] ^byte/1 [this]
+    (.getBufIfOpen this true))
+
+  (method ^:private ensureOpen :throws [IOException] ^void [this]
+    (when (nil? buf) (throw (IOException. "Stream closed"))))
+
+  (constructor ^:public [this ^InputStream in]
+    (this. in DEFAULT_BUFFER_SIZE))
+
+  (constructor ^:public [this ^InputStream in ^int size]
+    (super. in)
+    (when (<= size 0) (throw (IllegalArgumentException. "Buffer size <= 0")))
+    (set! initialSize size)
+    (if (identical? (.getClass this) BufferedInputStream)
+        (set! buf EMPTY)
+        (set! buf (new byte/1 size))))
+
+  (method ^:private fill :throws [IOException] ^void [this]
+    (let [^:mutable buffer (.getBufIfOpen this)]
+      (cond
+        (== markpos -1) (set! pos 0)
+        (>= pos (alength buffer))
+          (cond
+            (> markpos 0)
+              (let [sz (unchecked-subtract-int pos markpos)]
+                (System/arraycopy buffer markpos buffer 0 sz)
+                (set! pos sz)
+                (set! markpos 0))
+            (>= (alength buffer) marklimit) (do (set! markpos -1) (set! pos 0))
+            :else
+              (let [^:mutable nsz (ArraysSupport/newLength pos 1 pos)]
+                (when (> nsz marklimit) (set! nsz marklimit))
+                (let [nbuf (new byte/1 nsz)]
+                  (System/arraycopy buffer 0 nbuf 0 pos)
+                  (when-not (.compareAndSetReference U this BUF_OFFSET buffer nbuf)
+                    (throw (IOException. "Stream closed")))
+                  (set! buffer nbuf)))))
+      (set! count pos)
+      (let [n (.read (.getInIfOpen this) buffer pos (unchecked-subtract-int (alength buffer) pos))]
+        (when (> n 0) (set! count (unchecked-add-int n pos))))))
+
+  (method ^:public ^:synchronized read :throws [IOException] ^int [this]
+    (when (>= pos count) (.fill this) (when (>= pos count) (return -1)))
+    (bit-and-int (aget (.getBufIfOpen this)
+                       (let [old-1 pos] (set! pos (unchecked-inc-int pos)) old-1))
+                 0xff))
+
+  (method ^:private read1 :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (let [^:mutable avail (unchecked-subtract-int count pos)]
+      (when (<= avail 0)
+        (let [size (Math/max (alength (.getBufIfOpen this false)) initialSize)]
+          (when (and (>= len size) (== markpos -1)) (return (.read (.getInIfOpen this) b off len)))
+          (.fill this)
+          (set! avail (unchecked-subtract-int count pos))
+          (when (<= avail 0) (return -1))))
+      (let [^int cnt (if (< avail len) avail len)]
+        (System/arraycopy (.getBufIfOpen this) pos b off cnt)
+        (set! pos (unchecked-add-int pos cnt))
+        cnt)))
+
+  (method ^:public ^:synchronized read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (.ensureOpen this)
+    (cond
+      (< (bit-or-int (bit-or-int (bit-or-int off len) (unchecked-add-int off len))
+                     (unchecked-subtract-int (alength b) (unchecked-add-int off len)))
+         0)
+        (throw (IndexOutOfBoundsException.))
+      (== len 0) (return 0))
+    (let [^:mutable ^int n 0]
+      (while true
+        (let [nread (.read1 this b (unchecked-add-int off n) (unchecked-subtract-int len n))]
+          (when (<= nread 0) (return (if (== n 0) nread n)))
+          (set! n (unchecked-add-int n nread))
+          (when (>= n len) (return n))
+          (let [input (.-in this)] (when (and (some? input) (<= (.available input) 0)) (return n)))))))
+
+  (method ^:public ^:synchronized skip :throws [IOException] ^long [this ^long n]
+    (.ensureOpen this)
+    (if (<= n 0)
+        0
+        (let [^:mutable ^long avail (unchecked-subtract-int count pos)]
+          (when (<= avail 0)
+            (when (== markpos -1) (return (.skip (.getInIfOpen this) n)))
+            (.fill this)
+            (set! avail (unchecked-subtract-int count pos))
+            (when (<= avail 0) (return 0)))
+          (let [skipped (if (< avail n) avail n)]
+            (set! pos (unchecked-add-int pos (unchecked-int skipped)))
+            skipped))))
+
+  (method ^:public ^:synchronized available :throws [IOException] ^int [this]
+    (let [n (unchecked-subtract-int count pos)
+          avail (.available (.getInIfOpen this))]
+      (if (> n (unchecked-subtract-int Integer/MAX_VALUE avail))
+          Integer/MAX_VALUE
+          (unchecked-add-int n avail))))
+
+  (method ^:public ^:synchronized mark ^void [this ^int readlimit]
+    (set! marklimit readlimit)
+    (set! markpos pos))
+
+  (method ^:public ^:synchronized reset :throws [IOException] ^void [this]
+    (.ensureOpen this)
+    (when (< markpos 0) (throw (IOException. "Resetting to invalid mark")))
+    (set! pos markpos))
+
+  (method ^:public markSupported ^boolean [this] true)
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (let [^:mutable ^byte/1 buffer nil]
+      (while (some? (set! buffer buf))
+        (when (.compareAndSetReference U this BUF_OFFSET buffer nil)
+          (let [input (.-in this)]
+            (set! (.-in this) nil)
+            (when (some? input) (.close input))
+            (return))))))
+
+  (method ^:public ^:synchronized transferTo :throws [IOException] ^long [this ^OutputStream out]
+    (Objects/requireNonNull out "out")
+    (if (and (identical? (.getClass this) BufferedInputStream) (== markpos -1))
+        (let [avail (unchecked-subtract-int count pos)]
+          (when (> avail 0)
+            (if (BufferedInputStream/isTrusted out)
+                (.write out (.getBufIfOpen this) pos avail)
+                (let [buffer (Arrays/copyOfRange (.getBufIfOpen this) pos count)]
+                  (.write out buffer)))
+            (set! pos count))
+          (try
+            (Math/addExact avail (.transferTo (.getInIfOpen this) out))
+            (catch ArithmeticException ignore Long/MAX_VALUE)))
+        (.transferTo super out)))
+
+  (method ^:private ^:static isTrusted ^boolean [^OutputStream os]
+    (let [clazz (.getClass os)]
+      (or (or (identical? clazz ByteArrayOutputStream) (identical? clazz FileOutputStream))
+          (identical? clazz PipedOutputStream)))))

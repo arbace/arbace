@@ -23,7 +23,9 @@ comparison of float constants).
 (`jrt.jrt-sources`, next to `jrt.java-surface`, whose class reading and treatments it reuses).
 It runs on Arbace's `target/stage2` (`bin/build-arbace` first) and writes only under
 `.tmp/jrt/` (`JRT_WORK`), regenerated on every run and not tracked (the user's decision for
-j2a's output). Steps (`JRT_STEPS`, default all):
+j2a's output; reversed by standalone S1's D2, 2026-10-12: the output is committed as `jdk/`, and
+`bin/jrt-convert update` and `verify` write and check it, "The committed forms" below). Steps
+(`JRT_STEPS`, default all):
 
 | step | what | output |
 |---|---|---|
@@ -548,3 +550,43 @@ here and in A2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`,
 - **The shape check**: `java/util/Locale.ae` is a known difference (one checkcast, TL8).
 - **Result**: 867 files with `JRT_LOCALES=common` (2,310 with `all`), all converted and compiled to
   javac's class shapes, 862 identical and the 5 known differences, 2,144 classes.
+
+## The committed forms (standalone S1, 2026-10-12)
+
+The user's decision D2 (doc/STANDALONE-SURVEY.md §4.2, §9.1 S1) reverses "regenerated on every
+run and not tracked": `bin/jrt-convert`'s output is a source of the repository, under the new
+top-level directory `jdk/` (jdk/README.md), as `tamago/` holds TamaGo's Go as forms:
+
+| path | what |
+|---|---|
+| `jdk/forms/` | `conv/` without j2a's report `j2a-report.edn`: 909 class forms files (836 Java files: 755 of `share`, 6 `unix`, 2 of java.sql, 31 generated, `LocaleDataIndex`, 41 of jrt's own `overlay/jdk/java.base`), 202,034 lines, 11 MB |
+| `jdk/data/` | `data/`: the 10 resource data files the program embeds (545 KB) |
+| `jdk/sources.txt` | `sources.txt`, each file's module, kind and path (`bin/jrt-coverage` reads it by default) |
+| `jdk/provenance.edn` | jdk26u's repository, commit and clean state, the JDK attributing for j2a, the generators' JDK, `JRT_LOCALES`, a hash of j2a's sources (`arbace/j2a`, `bin/j2a`), the counts: written by every run's convert step into `provenance.edn`, nothing of the run's place or time |
+
+`bin/a2g` (`arbace/a2g/main.ae`) takes `--jdk`, else `JRT_CONV`, else `jdk/forms`, and embeds the
+data from the directory `data` beside it (`jdk/data`). So `bin/arbace-go --build`,
+`--build-tests`, `--build --box` and the essential gate's cached executable read no jdk26u
+checkout and run neither javac nor the JDK's build tools (the test build's fixtures, Clojure's
+suite's Java, are still converted by j2a). The gate's key (`bin/arbace-go`, `gate_key`) hashes
+`jdk/` and no longer the conversion's inputs (`doc/go/java-surface.edn`,
+`test/jrt/jrt_sources.ae`, `bin/j2a`, `bin/jrt-convert`, jdk26u's commit).
+
+`bin/jrt-convert` keeps its steps and checks, and gains two modes, after them:
+
+- `bin/jrt-convert verify`: `$JRT_WORK`'s conversion (`conv/` without the report, `data/`,
+  `sources.txt`, `provenance.edn`, assembled in `$JRT_WORK/jdk`) compared with `jdk/` by `diff -r`
+  (`$JRT_WORK/verify.diff`); `bin/gate --full`'s step `jrt-convert` runs it in place of the plain
+  run.
+- `bin/jrt-convert update`: when every step passed, `jdk/forms`, `jdk/data`, `jdk/sources.txt`
+  and `jdk/provenance.edn` replaced by them (`README.md` stays).
+
+What makes `jdk/` stale, so that `verify` fails until `update` and a commit: jrt's own Java
+(`overlay/jdk/java.base`: its 41 files are converted into `jdk/forms`; `overlay/jdk/variants` is
+read by a2g directly and is not), the closure (`test/jrt/jrt_sources.ae`,
+`doc/go/java-surface.edn`), j2a (its hash is in `provenance.edn`), jdk26u's checkout and the
+JDKs, `JRT_LOCALES`.
+
+First made at main `61dc18b`: a full run (189 s; 836 files, 831 shape-identical and the 5
+known) wrote `jdk/`, identical to a run of the unchanged script's steps `sources,generate,convert`
+in a separate checkout (the conversion is deterministic).

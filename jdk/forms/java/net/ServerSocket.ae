@@ -1,0 +1,247 @@
+;; Converted from jdk26u src/java.base/share/classes/java/net/ServerSocket.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.net)
+
+(import '(java.io Closeable FileDescriptor IOException InterruptedIOException)
+        '(java.nio.channels ServerSocketChannel)
+        '(java.util Collections Objects Set)
+        '(sun.net PlatformSocketImpl))
+
+(defclass ^:public ServerSocket
+  :implements [Closeable]
+
+  (field ^:private ^:final ^SocketImpl impl)
+
+  (field ^:private ^:volatile ^boolean created)
+
+  (field ^:private ^:volatile ^boolean bound)
+
+  (field ^:private ^:volatile ^boolean closed)
+
+  (field ^:private ^:final socketLock (Object.))
+
+  (constructor ^:protected [this ^SocketImpl impl]
+    (set! (.-impl this) (cast SocketImpl (Objects/requireNonNull impl))))
+
+  (constructor :throws [IOException] ^:public [this]
+    (set! (.-impl this) (ServerSocket/createImpl)))
+
+  (constructor :throws [IOException] ^:public [this ^int port]
+    (this. port 50 nil))
+
+  (constructor :throws [IOException] ^:public [this ^int port ^int backlog]
+    (this. port backlog nil))
+
+  (constructor :throws [IOException] ^:public [this ^int port ^:mutable ^int backlog
+                                               ^InetAddress bindAddr]
+    (when (or (< port 0) (> port 0xFFFF))
+      (throw (IllegalArgumentException. (java-str "Port value out of range: " port))))
+    (when (< backlog 1) (set! backlog 50))
+    (set! (.-impl this) (ServerSocket/createImpl))
+    (try
+      (.bind this (InetSocketAddress. bindAddr port) backlog)
+      (catch IOException e (.close this) (throw e))))
+
+  (method ^:private ^:static createImpl ^SocketImpl []
+    (let [factory ServerSocket/factory]
+      (if (some? factory) (.createSocketImpl factory) (SocketImpl/createPlatformSocketImpl true))))
+
+  (method ^:private getImpl :throws [SocketException] ^SocketImpl [this]
+    (when-not created
+      (locking socketLock
+        (when-not created
+          (when closed (throw (SocketException. "Socket is closed")))
+          (try
+            (.create impl true)
+            (catch SocketException e (throw e))
+            (catch IOException e (throw (SocketException. (.getMessage e) e))))
+          (set! created true))))
+    impl)
+
+  (method ^:public bind :throws [IOException] ^void [this ^SocketAddress endpoint]
+    (.bind this endpoint 50))
+
+  (method ^:public bind :throws [IOException] ^void [this ^:mutable ^SocketAddress endpoint
+                                                     ^:mutable ^int backlog]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (when (.isBound this) (throw (SocketException. "Already bound")))
+    (when (nil? endpoint) (set! endpoint (InetSocketAddress. 0)))
+    (if-instance [^InetSocketAddress epoint endpoint]
+      (do
+        (when (.isUnresolved epoint) (throw (SocketException. "Unresolved address")))
+        (when (< backlog 1) (set! backlog 50))
+        (let [impl (.getImpl this)]
+          (.bind impl (.getAddress epoint) (.getPort epoint))
+          (.listen impl backlog)
+          (set! bound true)))
+      (throw (IllegalArgumentException. "Unsupported address type"))))
+
+  (method ^:public getInetAddress ^InetAddress [this]
+    (when-not (not (.isBound this))
+      (try (return (.getInetAddress (.getImpl this))) (catch SocketException e))
+      nil))
+
+  (method ^:public getLocalPort ^int [this]
+    (if (not (.isBound this))
+        -1
+        (do (try (return (.getLocalPort (.getImpl this))) (catch SocketException e)) -1)))
+
+  (method ^:public getLocalSocketAddress ^SocketAddress [this]
+    (when-not (not (.isBound this))
+      (InetSocketAddress. (.getInetAddress this) (.getLocalPort this))))
+
+  (method ^:public accept :throws [IOException] ^Socket [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (when-not (.isBound this) (throw (SocketException. "Socket is not bound yet")))
+    (let [s (Socket. (cast SocketImpl nil))] (.implAccept this s) s))
+
+  (method ^:protected ^:final implAccept :throws [IOException] ^void [this ^Socket s]
+    (let [^:mutable si (.impl s)]
+      (if (nil? si)
+          (do
+            (set! si (.implAccept this))
+            (try (.setConnectedImpl s si) (catch SocketException e (.closeQuietly si) (throw e))))
+          (do
+            (when-instance [^DelegatingSocketImpl dsi si]
+              (set! si (.delegate dsi))
+              (java-assert (instance? PlatformSocketImpl si)))
+            (.ensureCompatible this si)
+            (if (instance? PlatformSocketImpl impl)
+                (let [psi (.platformImplAccept this)]
+                  (.copyOptionsTo si psi)
+                  (try
+                    (.setConnectedImpl s psi)
+                    (catch SocketException e (.closeQuietly psi) (throw e))))
+                (do
+                  (.setImpl s nil)
+                  (try (.customImplAccept this si) (finally (.setImpl s si)))
+                  (.setConnected s)))))))
+
+  (method ^:private implAccept :throws [IOException] ^SocketImpl [this]
+    (if (instance? PlatformSocketImpl impl)
+        (.platformImplAccept this)
+        (let [factory (Socket/socketImplFactory)]
+          (when (nil? factory)
+            (throw
+              (IOException.
+                (java-str
+                  "An instance of "
+                  (.getClass impl)
+                  " cannot accept connection with 'null' SocketImpl: client socket implementation factory not set"))))
+          (let [si (.createSocketImpl factory)] (.customImplAccept this si) si))))
+
+  (method ^:private platformImplAccept :throws [IOException] ^SocketImpl [this]
+    (java-assert (instance? PlatformSocketImpl impl))
+    (let [psi (SocketImpl/createPlatformSocketImpl false)] (.implAccept this psi) psi))
+
+  (method ^:private customImplAccept :throws [IOException] ^void [this ^SocketImpl si]
+    (java-assert (and (not (instance? PlatformSocketImpl impl))
+                      (not (instance? PlatformSocketImpl si))))
+    (.reset si)
+    (try
+      (set! (.-fd si) (FileDescriptor.))
+      (set! (.-address si) (InetAddress.))
+      (.implAccept this si)
+      (catch Exception e (.reset si) (throw e))))
+
+  (method ^:private implAccept :throws [IOException] ^void [this ^SocketImpl si]
+    (java-assert (not (instance? DelegatingSocketImpl si)))
+    (try
+      (.accept impl si)
+      (catch SocketTimeoutException e (throw e))
+      (catch InterruptedIOException e
+        (let [thread (Thread/currentThread)]
+          (when (and (.isVirtual thread) (.isInterrupted thread))
+            (.close this)
+            (throw (SocketException. "Closed by interrupt")))
+          (throw e)))))
+
+  (method ^:private ensureCompatible :throws [IOException] ^void [this ^SocketImpl si]
+    (when-not (= (instance? PlatformSocketImpl impl) (instance? PlatformSocketImpl si))
+      (throw (IOException. (java-str "An instance of "
+                                     (.getClass impl)
+                                     " cannot accept a connection with an instance of "
+                                     (.getClass si))))))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (locking socketLock (when-not closed (set! closed true) (when created (.close impl)))))
+
+  (method ^:public getChannel ^ServerSocketChannel [this] nil)
+
+  (method ^:public isBound ^boolean [this] bound)
+
+  (method ^:public isClosed ^boolean [this] closed)
+
+  (method ^:public setSoTimeout :throws [SocketException] ^void [this ^int timeout]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (when (< timeout 0) (throw (IllegalArgumentException. "timeout < 0")))
+    (.setOption (.getImpl this) SocketOptions/SO_TIMEOUT timeout))
+
+  (method ^:public getSoTimeout :throws [IOException] ^int [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (let [o (.getOption (.getImpl this) SocketOptions/SO_TIMEOUT)]
+      (if-instance [^Integer i o] (.intValue i) 0)))
+
+  (method ^:public setReuseAddress :throws [SocketException] ^void [this ^boolean on]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.setOption (.getImpl this) SocketOptions/SO_REUSEADDR (Boolean/valueOf on)))
+
+  (method ^:public getReuseAddress :throws [SocketException] ^boolean [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.booleanValue (cast Boolean (.getOption (.getImpl this) SocketOptions/SO_REUSEADDR))))
+
+  (method ^:public toString ^String [this]
+    (if (not (.isBound this))
+        "ServerSocket[unbound]"
+        (let [in (.getInetAddress impl)]
+          (java-str "ServerSocket[addr=" in ",localport=" (.getLocalPort impl) "]"))))
+
+  (field ^:private ^:static ^:volatile ^SocketImplFactory factory)
+
+  (method ^:public ^:static ^:synchronized ^{Deprecated {:since "17"}} setSocketFactory :throws [IOException] ^void [^SocketImplFactory fac]
+    (when (some? factory) (throw (SocketException. "factory already defined")))
+    (set! factory fac))
+
+  (method ^:public setReceiveBufferSize :throws [SocketException] ^void [this ^int size]
+    (when (<= size 0) (throw (IllegalArgumentException. "negative receive size")))
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.setOption (.getImpl this) SocketOptions/SO_RCVBUF size))
+
+  (method ^:public getReceiveBufferSize :throws [SocketException] ^int [this]
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (let [^:mutable ^int result 0
+          o (.getOption (.getImpl this) SocketOptions/SO_RCVBUF)]
+      (when (instance? Integer o) (set! result (.intValue (cast Integer o))))
+      result))
+
+  (method ^:public ^{Deprecated {:since "26" :forRemoval true}} setPerformancePreferences ^void [this
+                                                                                                 ^int connectionTime
+                                                                                                 ^int latency
+                                                                                                 ^int bandwidth])
+
+  (method ^:public setOption :type-params [T] :throws [IOException] ^ServerSocket [this
+                                                                                   ^{:tag (SocketOption T)} name
+                                                                                   ^T value]
+    (Objects/requireNonNull name)
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.setOption (.getImpl this) name value)
+    this)
+
+  (method ^:public getOption :type-params [T] :throws [IOException] ^T [this
+                                                                        ^{:tag (SocketOption T)} name]
+    (Objects/requireNonNull name)
+    (when (.isClosed this) (throw (SocketException. "Socket is closed")))
+    (.getOption (.getImpl this) name))
+
+  (field ^:private ^:volatile ^{:tag (Set (SocketOption ?))} options)
+
+  (method ^:public supportedOptions ^{:tag (Set (SocketOption ?))} [this]
+    (let [^{:tag (Set (SocketOption ?))} so options]
+      (if (some? so)
+          so
+          (do
+            (try
+              (let [impl (.getImpl this)]
+                (set! options (Collections/unmodifiableSet (.supportedOptions impl))))
+              (catch IOException e (set! options (Collections/emptySet))))
+            options)))))

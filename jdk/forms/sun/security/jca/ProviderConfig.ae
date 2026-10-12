@@ -1,0 +1,211 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/jca/ProviderConfig.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'sun.security.jca)
+
+(import '(com.sun.crypto.provider SunJCE)
+        '(java.io File)
+        '(java.lang.reflect InvocationTargetException)
+        '(java.security GeneralSecurityException
+                        InvalidParameterException
+                        Provider
+                        ProviderException)
+        '(java.util Iterator Objects ServiceConfigurationError ServiceLoader)
+        '(sun.security.ec SunEC)
+        '(sun.security.provider Sun)
+        '(sun.security.rsa SunRsaSign)
+        '(sun.security.ssl SunJSSE)
+        '(sun.security.util Debug PropertyExpander))
+
+(defclass ^:final ProviderConfig
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "jca" "ProviderConfig"))
+
+  (field ^:private ^:static ^:final ^String P11_SOL_NAME "SunPKCS11")
+
+  (field ^:private ^:static ^:final ^String P11_SOL_ARG
+    "${java.home}/conf/security/sunpkcs11-solaris.cfg")
+
+  (field ^:private ^:static ^:final ^int MAX_LOAD_TRIES 30)
+
+  (field ^:private ^:final ^String provName)
+
+  (field ^:private ^:final ^String argument)
+
+  (field ^:private ^int tries)
+
+  (field ^:private ^:volatile ^Provider provider)
+
+  (field ^:private ^boolean isLoading)
+
+  (constructor [this ^String provName ^String argument]
+    (when (and (.endsWith provName P11_SOL_NAME) (.equals argument P11_SOL_ARG))
+      (.checkSunPKCS11Solaris this))
+    (set! (.-provName this) provName)
+    (set! (.-argument this) (ProviderConfig/expand argument)))
+
+  (constructor [this ^String provName] (this. provName ""))
+
+  (constructor [this ^Provider provider]
+    (set! (.-provName this) (.getName provider))
+    (set! (.-argument this) "")
+    (set! (.-provider this) provider))
+
+  (method ^:private checkSunPKCS11Solaris ^void [this]
+    (let [file (File. "/usr/lib/libpkcs11.so")]
+      (when (or (= (.exists file) false)
+                (.equalsIgnoreCase "false"
+                                   (System/getProperty "sun.security.pkcs11.enable-solaris")))
+        (set! tries MAX_LOAD_TRIES))))
+
+  (method ^:private hasArgument ^boolean [this] (not (.isEmpty argument)))
+
+  (method ^:private shouldLoad ^boolean [this] (< tries MAX_LOAD_TRIES))
+
+  (method ^:private disableLoad ^void [this] (set! tries MAX_LOAD_TRIES))
+
+  (method isLoaded ^boolean [this] (some? provider))
+
+  (method ^:public equals ^boolean [this obj]
+    (if (identical? this obj)
+        true
+        (if-instance [^ProviderConfig other obj]
+          (and (.equals (.-provName this) (.-provName other))
+               (.equals (.-argument this) (.-argument other)))
+          false)))
+
+  (method ^:public hashCode ^int [this] (Objects/hash provName argument))
+
+  (method ^:public toString ^String [this]
+    (if (.hasArgument this) (java-str provName "('" argument "')") provName))
+
+  (method getProvider ^Provider [this]
+    (let [^:mutable p provider]
+      (if (some? p)
+          p
+          (do
+            (locking this
+              (set! p provider)
+              (when (some? p) (return p))
+              (when-not (.shouldLoad this) (return nil))
+              (set! p
+                    (label :switch
+                      (switch provName
+                        ("SUN" "sun.security.provider.Sun") (Sun.)
+                        ("SunRsaSign" "sun.security.rsa.SunRsaSign") (SunRsaSign.)
+                        ("SunJCE" "com.sun.crypto.provider.SunJCE") (SunJCE.)
+                        "SunJSSE" (SunJSSE.)
+                        "SunEC" (SunEC.)
+                        ("Apple" "apple.security.AppleProvider")
+                          (let [^:mutable ^Provider ap nil]
+                            (try
+                              (let [^{:tag (Class ?)} c (Class/forName
+                                                          "apple.security.AppleProvider")]
+                                (when (.isAssignableFrom Provider c)
+                                  (let [tmp (.newInstance c)] (set! ap (cast Provider tmp)))))
+                              (catch Exception ex
+                                (when (some? debug)
+                                  (.println debug "Error loading provider Apple")
+                                  (.printStackTrace ex))))
+                            ap)
+                        (do
+                          (when isLoading
+                            (when (some? debug)
+                              (.println debug (java-str "Recursion loading provider: " this))
+                              (.printStackTrace (Exception. "Call trace")))
+                            (break :switch nil))
+                          (try
+                            (set! isLoading true)
+                            (set! tries (unchecked-inc-int tries))
+                            (.doLoadProvider this)
+                            (finally (set! isLoading false)))))))
+              (set! provider p))
+            p))))
+
+  (method ^:private doLoadProvider ^Provider [this]
+    (when (some? debug) (.println debug (java-str "Loading provider " this)))
+    (try
+      (let [^:mutable p (.load ProviderLoader/INSTANCE provName)]
+        (if (some? p)
+            (do
+              (when (.hasArgument this) (set! p (.configure p argument)))
+              (when (some? debug) (.println debug (java-str "Loaded provider " (.getName p)))))
+            (do
+              (when (some? debug) (.println debug (java-str "Error loading provider " this)))
+              (.disableLoad this)))
+        p)
+      (catch Exception e
+        (if (instance? ProviderException e)
+            (throw e)
+            (do
+              (when (some? debug)
+                (.println debug (java-str "Error loading provider " this))
+                (.printStackTrace e))
+              (.disableLoad this)
+              nil)))
+      (catch ExceptionInInitializerError err
+        (when (some? debug)
+          (.println debug (java-str "Error loading provider " this))
+          (.printStackTrace err))
+        (.disableLoad this)
+        nil)))
+
+  (method ^:private ^:static expand ^String [^:final ^String value]
+    (if (= (.contains value "${") false)
+        value
+        (try
+          (PropertyExpander/expand value)
+          (catch GeneralSecurityException e (throw (ProviderException. e))))))
+
+  (defclass ^:private ^:static ^:final ProviderLoader
+    (field ^:static ^:final ^ProviderLoader INSTANCE (ProviderLoader.))
+
+    (field ^:private ^:final ^{:tag (ServiceLoader Provider)} services)
+
+    (constructor ^:private [this]
+      (set! services (ServiceLoader/load Provider (ClassLoader/getSystemClassLoader))))
+
+    (method ^:public load ^Provider [this ^String pn]
+      (when (some? debug) (.println debug (java-str "Attempt to load " pn " using SL")))
+      (let [^{:tag (Iterator Provider)} iter (.iterator services)]
+        (while (.hasNext iter)
+          (try
+            (let [p (cast Provider (.next iter))
+                  pName (.getName p)]
+              (when (some? debug) (.println debug (java-str "Found SL Provider named " pName)))
+              (when (.equals pName pn) (return p)))
+            (catch [ServiceConfigurationError InvalidParameterException] ex
+              (when (some? debug)
+                (.println debug
+                          (java-str "Encountered "
+                                    ex
+                                    " while iterating through SL, ignore and move on"))
+                (.printStackTrace ex)))))
+        (try
+          (.legacyLoad this pn)
+          (catch ProviderException pe (throw pe))
+          (catch Exception ex
+            (when (some? debug)
+              (.println debug (java-str "Encountered " ex " during legacy load of " pn))
+              (.printStackTrace ex))
+            nil))))
+
+    (method ^:private legacyLoad ^Provider [this ^String classname]
+      (when (some? debug) (.println debug (java-str "Loading legacy provider: " classname)))
+      (try
+        (let [^{:tag (Class ?)} provClass (.loadClass (ClassLoader/getSystemClassLoader) classname)]
+          (if (not (.isAssignableFrom Provider provClass))
+              (do
+                (when (some? debug) (.println debug (java-str classname " is not a provider")))
+                nil)
+              (cast Provider (.newInstance provClass))))
+        (catch Exception e
+          (let [^Throwable t (if (instance? InvocationTargetException e) (.getCause e) e)]
+            (when (some? debug)
+              (.println debug (java-str "Error loading legacy provider " classname))
+              (.printStackTrace t))
+            (when (instance? ProviderException t) (throw (cast ProviderException t)))
+            nil))
+        (catch [ExceptionInInitializerError NoClassDefFoundError] err
+          (when (some? debug)
+            (.println debug (java-str "Error loading legacy provider " classname))
+            (.printStackTrace err))
+          nil)))))

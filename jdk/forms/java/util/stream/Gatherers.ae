@@ -1,0 +1,418 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/stream/Gatherers.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.stream)
+
+(import '(java.util ArrayDeque List Objects)
+        '(java.util.concurrent ExecutionException FutureTask)
+        '(java.util.function BiConsumer BiFunction BinaryOperator Function Supplier)
+        '(jdk.internal.access SharedSecrets)
+        '(jdk.internal.vm.annotation ForceInline))
+
+(defclass ^:public ^:final Gatherers
+  (constructor ^:private [this])
+
+  (method ^:public ^:static windowFixed :type-params [TR] ^{:tag (Gatherer TR ? (List TR))} [^int windowSize]
+    (when (< windowSize 1)
+      (throw (IllegalArgumentException. "'windowSize' must be greater than zero")))
+    (letclass [(FixedWindow
+                 (field ^Object/1 window)
+
+                 (field ^int at)
+
+                 (constructor [this] (set! at 0) (set! window (new Object/1 windowSize)))
+
+                 (method integrate ^boolean [this ^TR element
+                                             ^{:tag (Gatherer$Downstream (? super (List TR)))} downstream]
+                   (aset window (let [old-1 at] (set! at (unchecked-inc-int at)) old-1) element)
+                   (if (< at windowSize)
+                       true
+                       (let [oldWindow window]
+                         (set! window (new Object/1 windowSize))
+                         (set! at 0)
+                         (.push downstream
+                                (.listFromTrustedArrayNullsAllowed
+                                  (SharedSecrets/getJavaUtilCollectionAccess)
+                                  oldWindow)))))
+
+                 (method finish ^void [this
+                                       ^{:tag (Gatherer$Downstream (? super (List TR)))} downstream]
+                   (when (and (> at 0) (not (.isRejecting downstream)))
+                     (let [lastWindow (new Object/1 at)]
+                       (System/arraycopy window 0 lastWindow 0 at)
+                       (set! window nil)
+                       (set! at 0)
+                       (.push downstream
+                              (.listFromTrustedArrayNullsAllowed
+                                (SharedSecrets/getJavaUtilCollectionAccess)
+                                lastWindow))))))]
+      (Gatherer/ofSequential (method-ref Supplier ^FixedWindow [] FixedWindow/new)
+                             (Gatherer$Integrator/ofGreedy
+                               (method-ref Gatherer$Integrator$Greedy
+                                           [FixedWindow Object Gatherer$Downstream]
+                                           FixedWindow/.integrate))
+                             (method-ref BiConsumer
+                                         [FixedWindow Gatherer$Downstream]
+                                         FixedWindow/.finish))))
+
+  (method ^:public ^:static windowSliding :type-params [TR] ^{:tag (Gatherer TR ? (List TR))} [^int windowSize]
+    (when (< windowSize 1)
+      (throw (IllegalArgumentException. "'windowSize' must be greater than zero")))
+    (letclass [(SlidingWindow
+                 (field ^Object/1 window)
+
+                 (field ^int at)
+
+                 (field ^boolean firstWindow)
+
+                 (constructor [this]
+                   (set! firstWindow true)
+                   (set! at 0)
+                   (set! window (new Object/1 windowSize)))
+
+                 (method integrate ^boolean [this ^TR element
+                                             ^{:tag (Gatherer$Downstream (? super (List TR)))} downstream]
+                   (aset window (let [old-2 at] (set! at (unchecked-inc-int at)) old-2) element)
+                   (if (< at windowSize)
+                       true
+                       (let [oldWindow window
+                             newWindow (new Object/1 windowSize)]
+                         (System/arraycopy oldWindow
+                                           1
+                                           newWindow
+                                           0
+                                           (unchecked-subtract-int windowSize 1))
+                         (set! window newWindow)
+                         (set! at (unchecked-subtract-int at 1))
+                         (set! firstWindow false)
+                         (.push downstream
+                                (.listFromTrustedArrayNullsAllowed
+                                  (SharedSecrets/getJavaUtilCollectionAccess)
+                                  oldWindow)))))
+
+                 (method finish ^void [this
+                                       ^{:tag (Gatherer$Downstream (? super (List TR)))} downstream]
+                   (when (and (and firstWindow (> at 0)) (not (.isRejecting downstream)))
+                     (let [lastWindow (new Object/1 at)]
+                       (System/arraycopy window 0 lastWindow 0 at)
+                       (set! window nil)
+                       (set! at 0)
+                       (.push downstream
+                              (.listFromTrustedArrayNullsAllowed
+                                (SharedSecrets/getJavaUtilCollectionAccess)
+                                lastWindow))))))]
+      (Gatherer/ofSequential (method-ref Supplier ^SlidingWindow [] SlidingWindow/new)
+                             (Gatherer$Integrator/ofGreedy
+                               (method-ref Gatherer$Integrator$Greedy
+                                           [SlidingWindow Object Gatherer$Downstream]
+                                           SlidingWindow/.integrate))
+                             (method-ref BiConsumer
+                                         [SlidingWindow Gatherer$Downstream]
+                                         SlidingWindow/.finish))))
+
+  (method ^:public ^:static fold :type-params [T R] ^{:tag (Gatherer T ? R)} [^{:tag (Supplier R)} initial
+                                                                              ^{:tag (BiFunction (? super R) (? super T) (? extends R))} folder]
+    (Objects/requireNonNull initial "'initial' must not be null")
+    (Objects/requireNonNull folder "'folder' must not be null")
+    (letclass [(State (field ^R value (.get initial)) (constructor [this]))]
+      (Gatherer/ofSequential
+        (method-ref Supplier ^State [] State/new)
+        (Gatherer$Integrator/ofGreedy
+          (lambda Gatherer$Integrator$Greedy ^boolean [^State state element
+                                                       ^Gatherer$Downstream downstream]
+            (set! (.-value state) (.apply folder (.-value state) element))
+            true))
+        (lambda BiConsumer ^void [^State state ^Gatherer$Downstream downstream]
+          (.push downstream (.-value state))))))
+
+  (method ^:public ^:static scan :type-params [T R] ^{:tag (Gatherer T ? R)} [^{:tag (Supplier R)} initial
+                                                                              ^{:tag (BiFunction (? super R) (? super T) (? extends R))} scanner]
+    (Objects/requireNonNull initial "'initial' must not be null")
+    (Objects/requireNonNull scanner "'scanner' must not be null")
+    (letclass [(State
+                 (field ^R current (.get initial))
+
+                 (method integrate ^boolean [this ^T element
+                                             ^{:tag (Gatherer$Downstream (? super R))} downstream]
+                   (.push downstream (set! current (.apply scanner current element)))))]
+      (Gatherer/ofSequential (method-ref Supplier ^State [] State/new)
+                             (Gatherer$Integrator/ofGreedy
+                               (method-ref Gatherer$Integrator$Greedy
+                                           [State Object Gatherer$Downstream]
+                                           State/.integrate)))))
+
+  (method ^:public ^:static mapConcurrent :type-params [T R] ^{:tag (Gatherer T ? R)} [^:final ^int maxConcurrency
+                                                                                       ^:final ^{:tag (Function (? super T) (? extends R))} mapper]
+    (when (< maxConcurrency 1)
+      (throw (IllegalArgumentException. "'maxConcurrency' must be greater than 0")))
+    (Objects/requireNonNull mapper "'mapper' must not be null")
+    (letclass [(^:final MapConcurrentTask
+                 :extends (FutureTask R)
+
+                 (field ^:final ^Thread thread)
+
+                 (constructor ^:private [this ^{:tag (Callable R)} callable]
+                   (super. callable)
+                   (set! (.-thread this) (.unstarted (Thread/ofVirtual) this))))
+               (^:final State
+                 (field ^:private ^:final ^{:tag (ArrayDeque MapConcurrentTask)} wip
+                   (ArrayDeque. (^[int int] Math/min maxConcurrency 16)))
+
+                 (method integrate ^boolean [this ^T element
+                                             ^{:tag (Gatherer$Downstream (? super R))} downstream]
+                   (let [task (MapConcurrentTask. (lambda Callable [] (.apply mapper element)))]
+                     (.addLast wip task)
+                     (java-assert (identical? (.peekLast wip) task))
+                     (java-assert (<= (.size wip) maxConcurrency))
+                     (.start (.-thread task))
+                     (.flush this (if (< (.size wip) maxConcurrency) 0 1) downstream)))
+
+                 (method flush ^boolean [this ^:mutable ^long atLeastN
+                                         ^{:tag (Gatherer$Downstream (? super R))} downstream]
+                   (let [^:mutable success false
+                         ^:mutable interrupted false]
+                     (try
+                       (let [^:mutable proceed (not (.isRejecting downstream))
+                             ^:mutable ^MapConcurrentTask current nil]
+                         (while (and (and
+                                       proceed
+                                       (some? (set!
+                                                current
+                                                (cast MapConcurrentTask (.peekFirst wip)))))
+                                     (or (.isDone current) (> atLeastN 0)))
+                           (let [^:mutable ^R result nil]
+                             (while true
+                               (try
+                                 (set! result (.get current))
+                                 (break)
+                                 (catch InterruptedException ie (set! interrupted true))))
+                             (set! proceed
+                                   (let [a-3 proceed b-4 (.push downstream result)] (and a-3 b-4)))
+                             (set! atLeastN (unchecked-subtract atLeastN 1))
+                             (let [correctRemoval (identical? (.pollFirst wip) current)]
+                               (java-assert correctRemoval))))
+                         (set! success proceed))
+                       (catch ExecutionException e
+                         (let [cause (.getCause e)]
+                           (throw (if-instance [^RuntimeException re cause]
+                                    re
+                                    (RuntimeException.
+                                      ^Throwable (if (nil? cause) ^Throwable e cause))))))
+                       (finally
+                         (when (and (not success) (not (.isEmpty wip)))
+                           (for-each [^MapConcurrentTask task wip] (.cancel task true))
+                           (let [^:mutable ^MapConcurrentTask next nil]
+                             (while (some? (set! next (cast MapConcurrentTask (.pollFirst wip))))
+                               (while (.isAlive (.-thread next))
+                                 (try
+                                   (.join (.-thread next))
+                                   (catch InterruptedException ie (set! interrupted true)))))))
+                         (when interrupted (.interrupt (Thread/currentThread))))))))]
+      (Gatherer/ofSequential (method-ref Supplier ^State [] State/new)
+                             (Gatherer$Integrator/ofGreedy
+                               (method-ref Gatherer$Integrator$Greedy
+                                           [State Object Gatherer$Downstream]
+                                           State/.integrate))
+                             (lambda BiConsumer ^void [^State state ^Gatherer$Downstream downstream]
+                               (.flush state Long/MAX_VALUE downstream)))))
+
+  (defclass ^:enum Value
+    :implements [Supplier BinaryOperator BiConsumer]
+
+    (constants DEFAULT)
+
+    (field ^:final ^{:tag (BinaryOperator Void)} statelessCombiner
+      (anon ^:diamond (BinaryOperator Void) []
+        (method ^:public apply ^Void [this ^Void left ^Void right] nil)))
+
+    (method ^:public accept ^void [this state downstream])
+
+    (method ^:public apply [this left right]
+      (throw (UnsupportedOperationException. "This combiner cannot be used!")))
+
+    (method ^:public get [this] nil)
+
+    (method ^{ForceInline true} initializer :type-params [A] ^{:tag (Supplier A)} [this]
+      ^Supplier this)
+
+    (method ^{ForceInline true} combiner :type-params [T] ^{:tag (BinaryOperator T)} [this]
+      ^BinaryOperator this)
+
+    (method ^{ForceInline true} finisher :type-params [T R] ^{:tag (BiConsumer T (Gatherer$Downstream (? super R)))} [this]
+      ^BiConsumer this))
+
+  (defclass ^:record GathererImpl [^{:tag (Supplier A)} initializer
+                                   ^{:tag (Gatherer$Integrator A T R)} integrator
+                                   ^{:tag (BinaryOperator A)} combiner
+                                   ^{:tag (BiConsumer A (Gatherer$Downstream (? super R)))} finisher]
+    :implements [(Gatherer T A R)]
+    :type-params [T A R]
+
+    (method ^:static of :type-params [T A R] ^{:tag (GathererImpl T A R)} [^{:tag (Supplier A)} initializer
+                                                                           ^{:tag (Gatherer$Integrator A T R)} integrator
+                                                                           ^{:tag (BinaryOperator A)} combiner
+                                                                           ^{:tag (BiConsumer A (Gatherer$Downstream (? super R)))} finisher]
+      (GathererImpl. (cast Supplier (Objects/requireNonNull initializer "initializer"))
+                     (cast Gatherer$Integrator (Objects/requireNonNull integrator "integrator"))
+                     (cast BinaryOperator (Objects/requireNonNull combiner "combiner"))
+                     (cast BiConsumer (Objects/requireNonNull finisher "finisher")))))
+
+  (defclass ^:static ^:final Composite
+    :implements [(Gatherer T Object RR)]
+    :type-params [T A R AA RR]
+
+    (field ^:private ^:final ^{:tag (Gatherer T A (? extends R))} left)
+
+    (field ^:private ^:final ^{:tag (Gatherer (? super R) AA (? extends RR))} right)
+
+    (field ^:private ^{:tag (GathererImpl T Object RR)} impl)
+
+    (method ^:static of :type-params [T A R AA RR] ^{:tag (Composite T A R AA RR)} [^{:tag (Gatherer T A (? extends R))} left
+                                                                                    ^{:tag (Gatherer (? super R) AA (? extends RR))} right]
+      (Composite. left right))
+
+    (constructor ^:private [this ^{:tag (Gatherer T A (? extends R))} left
+                            ^{:tag (Gatherer (? super R) AA (? extends RR))} right]
+      (set! (.-left this) left)
+      (set! (.-right this) right))
+
+    (method ^:private impl ^{:tag (GathererImpl T Object RR)} [this]
+      (let [i impl] (if (some? i) i (set! impl (Composite/impl left right)))))
+
+    (method ^:public initializer ^{:tag (Supplier Object)} [this]
+      (.initializer (.impl this)))
+
+    (method ^:public integrator ^{:tag (Gatherer$Integrator Object T RR)} [this]
+      (.integrator (.impl this)))
+
+    (method ^:public combiner ^{:tag (BinaryOperator Object)} [this]
+      (.combiner (.impl this)))
+
+    (method ^:public finisher ^{:tag (BiConsumer Object (Gatherer$Downstream (? super RR)))} [this]
+      (.finisher (.impl this)))
+
+    (method ^:public andThen :type-params [RRR] ^{:tag (Gatherer T ? RRR)} [this
+                                                                            ^{:tag (Gatherer (? super RR) ? (? extends RRR))} that]
+      (if (identical? (.getClass that) Composite)
+          (let [c (cast Composite that)]
+            (.andThen left (.andThen (.andThen right (.-left c)) (.-right c))))
+          (.andThen left (.andThen right that))))
+
+    (method ^:static ^:final impl :type-params [T A R AA RR] ^{:tag (GathererImpl T ? RR)} [^{:tag (Gatherer T A R)} left
+                                                                                            ^{:tag (Gatherer (? super R) AA RR)} right]
+      (let [leftInitializer (.initializer left)
+            leftIntegrator (.integrator left)
+            leftCombiner (.combiner left)
+            leftFinisher (.finisher left)
+            rightInitializer (.initializer right)
+            rightIntegrator (.integrator right)
+            rightCombiner (.combiner right)
+            rightFinisher (.finisher right)
+            leftStateless (identical? leftInitializer (Gatherer/defaultInitializer))
+            rightStateless (identical? rightInitializer (Gatherer/defaultInitializer))
+            leftGreedy (instance? Gatherer$Integrator$Greedy leftIntegrator)
+            rightGreedy (instance? Gatherer$Integrator$Greedy rightIntegrator)]
+        (if (and (and (and leftStateless rightStateless) leftGreedy) rightGreedy)
+            (GathererImpl.
+              (Gatherer/defaultInitializer)
+              (Gatherer$Integrator/ofGreedy
+                (lambda Gatherer$Integrator$Greedy ^boolean [^Void unused element
+                                                             ^Gatherer$Downstream downstream]
+                  (.integrate leftIntegrator
+                              nil
+                              element
+                              (lambda Gatherer$Downstream ^boolean [r]
+                                (.integrate rightIntegrator nil r downstream)))))
+              ^BinaryOperator (if (or (identical? leftCombiner (Gatherer/defaultCombiner))
+                                      (identical? rightCombiner (Gatherer/defaultCombiner)))
+                                  (Gatherer/defaultCombiner)
+                                  (.-statelessCombiner Value/DEFAULT))
+              ^BiConsumer (if (and (identical? leftFinisher (Gatherer/defaultFinisher))
+                                   (identical? rightFinisher (Gatherer/defaultFinisher)))
+                              (Gatherer/defaultFinisher)
+                              (lambda BiConsumer ^void [^Void unused ^Gatherer$Downstream downstream]
+                                (when-not (identical? leftFinisher (Gatherer/defaultFinisher))
+                                  (.accept leftFinisher
+                                           nil
+                                           (lambda Gatherer$Downstream ^boolean [r]
+                                             (.integrate rightIntegrator nil r downstream))))
+                                (when-not (identical? rightFinisher (Gatherer/defaultFinisher))
+                                  (.accept rightFinisher nil downstream)))))
+            (letclass [(State
+                         (field ^:final ^A leftState)
+
+                         (field ^:final ^AA rightState)
+
+                         (field ^boolean leftProceed)
+
+                         (field ^boolean rightProceed)
+
+                         (constructor ^:private [this ^A leftState ^AA rightState
+                                                 ^boolean leftProceed ^boolean rightProceed]
+                           (set! (.-leftState this) leftState)
+                           (set! (.-rightState this) rightState)
+                           (set! (.-leftProceed this) leftProceed)
+                           (set! (.-rightProceed this) rightProceed))
+
+                         (constructor [this]
+                           (this. (when-not leftStateless (.get leftInitializer))
+                                  (when-not rightStateless (.get rightInitializer))
+                                  true
+                                  true))
+
+                         (method joinLeft ^State [this ^State right]
+                           (State.
+                             (when-not leftStateless
+                               (.apply leftCombiner (.-leftState this) (.-leftState right)))
+                             (when-not rightStateless
+                               (.apply rightCombiner (.-rightState this) (.-rightState right)))
+                             (and (.-leftProceed this) (.-rightProceed this))
+                             (and (.-leftProceed right) (.-rightProceed right))))
+
+                         (method integrate ^boolean [this ^T t
+                                                     ^{:tag (Gatherer$Downstream (? super RR))} c]
+                           (and (or (or (.integrate
+                                          leftIntegrator
+                                          leftState
+                                          t
+                                          (lambda Gatherer$Downstream ^boolean [r]
+                                            (.rightIntegrate this r c)))
+                                        leftGreedy)
+                                    (set! leftProceed false))
+                                (or rightGreedy rightProceed)))
+
+                         (method finish ^void [this ^{:tag (Gatherer$Downstream (? super RR))} c]
+                           (when-not (identical? leftFinisher (Gatherer/defaultFinisher))
+                             (.accept leftFinisher
+                                      leftState
+                                      (lambda Gatherer$Downstream ^boolean [r]
+                                        (.rightIntegrate this r c))))
+                           (when-not (identical? rightFinisher (Gatherer/defaultFinisher))
+                             (.accept rightFinisher rightState c)))
+
+                         (method ^:public rightIntegrate ^boolean [this ^R r
+                                                                   ^{:tag (Gatherer$Downstream (? super RR))} downstream]
+                           (and (or rightGreedy rightProceed)
+                                (or (or (.integrate rightIntegrator rightState r downstream)
+                                        rightGreedy)
+                                    (set! rightProceed false)))))]
+              (GathererImpl.
+                (method-ref Supplier ^State [] State/new)
+                ^Gatherer$Integrator (if (and leftGreedy rightGreedy)
+                                         ^Gatherer$Integrator (Gatherer$Integrator/ofGreedy
+                                                                (method-ref
+                                                                  Gatherer$Integrator$Greedy
+                                                                  [State Object Gatherer$Downstream]
+                                                                  State/.integrate))
+                                         (Gatherer$Integrator/of
+                                           (method-ref
+                                             Gatherer$Integrator
+                                             [State Object Gatherer$Downstream]
+                                             State/.integrate)))
+                ^BinaryOperator (if (or (identical? leftCombiner (Gatherer/defaultCombiner))
+                                        (identical? rightCombiner (Gatherer/defaultCombiner)))
+                                    (Gatherer/defaultCombiner)
+                                    (method-ref BinaryOperator ^State [State State] State/.joinLeft))
+                ^BiConsumer (if (and (identical? leftFinisher (Gatherer/defaultFinisher))
+                                     (identical? rightFinisher (Gatherer/defaultFinisher)))
+                                (Gatherer/defaultFinisher)
+                                (method-ref BiConsumer [State Gatherer$Downstream] State/.finish)))))))))

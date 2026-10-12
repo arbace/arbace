@@ -1,0 +1,269 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/FutureTask.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.lang.invoke MethodHandles VarHandle)
+        '(java.util.concurrent.locks LockSupport)
+        '(jdk.internal.invoke MhUtil))
+
+(defclass ^:public FutureTask
+  :implements [(RunnableFuture V)]
+  :type-params [V]
+
+  (field ^:private ^:volatile ^int state)
+
+  (field ^:private ^:static ^:final ^int NEW 0)
+
+  (field ^:private ^:static ^:final ^int COMPLETING 1)
+
+  (field ^:private ^:static ^:final ^int NORMAL 2)
+
+  (field ^:private ^:static ^:final ^int EXCEPTIONAL 3)
+
+  (field ^:private ^:static ^:final ^int CANCELLED 4)
+
+  (field ^:private ^:static ^:final ^int INTERRUPTING 5)
+
+  (field ^:private ^:static ^:final ^int INTERRUPTED 6)
+
+  (field ^:private ^{:tag (Callable V)} callable)
+
+  (field ^:private outcome)
+
+  (field ^:private ^:volatile ^Thread runner)
+
+  (field ^:private ^:volatile ^WaitNode waiters)
+
+  (method ^:private report :throws [ExecutionException] ^V [this ^int s]
+    (let [x outcome]
+      (if (== s NORMAL)
+          x
+          (do
+            (when (>= s CANCELLED) (throw (CancellationException.)))
+            (throw (ExecutionException. (cast Throwable x)))))))
+
+  (constructor ^:public [this ^{:tag (Callable V)} callable]
+    (when (nil? callable) (throw (NullPointerException.)))
+    (set! (.-callable this) callable)
+    (set! (.-state this) NEW))
+
+  (constructor ^:public [this ^Runnable runnable ^V result]
+    (set! (.-callable this) (Executors/callable runnable result))
+    (set! (.-state this) NEW))
+
+  (method ^:public isCancelled ^boolean [this] (>= state CANCELLED))
+
+  (method ^:public isDone ^boolean [this] (not (== state NEW)))
+
+  (method ^:public cancel ^boolean [this ^boolean mayInterruptIfRunning]
+    (if (not (and (== state NEW)
+                  ^boolean (^[FutureTask int int] VarHandle/.compareAndSet
+                             STATE
+                             this
+                             NEW
+                             (if mayInterruptIfRunning INTERRUPTING CANCELLED))))
+        false
+        (do
+          (try
+            (when mayInterruptIfRunning
+              (try
+                (let [t runner] (when (some? t) (.interrupt t)))
+                (finally ^void (^[FutureTask int] VarHandle/.setRelease STATE this INTERRUPTED))))
+            (finally (.finishCompletion this)))
+          true)))
+
+  (method ^:public get :throws [InterruptedException ExecutionException] ^V [this]
+    (let [^:mutable s state]
+      (when (<= s COMPLETING) (set! s (.awaitDone this false 0)))
+      (.report this s)))
+
+  (method ^:public get :throws [InterruptedException ExecutionException TimeoutException] ^V [this
+                                                                                              ^long timeout
+                                                                                              ^TimeUnit unit]
+    (when (nil? unit) (throw (NullPointerException.)))
+    (let [^:mutable s state]
+      (when (and (<= s COMPLETING)
+                 (<= (set! s (.awaitDone this true (.toNanos unit timeout))) COMPLETING))
+        (throw (TimeoutException.)))
+      (.report this s)))
+
+  (method ^:public resultNow ^V [this]
+    (switch (.state this)
+      SUCCESS (let [^V result outcome] result)
+      FAILED (throw (IllegalStateException. "Task completed with exception"))
+      CANCELLED (throw (IllegalStateException. "Task was cancelled"))
+      (throw (IllegalStateException. "Task has not completed"))))
+
+  (method ^:public exceptionNow ^Throwable [this]
+    (switch (.state this)
+      SUCCESS (throw (IllegalStateException. "Task completed with a result"))
+      FAILED (let [x outcome] (cast Throwable x))
+      CANCELLED (throw (IllegalStateException. "Task was cancelled"))
+      (throw (IllegalStateException. "Task has not completed"))))
+
+  (method ^:public state ^Future$State [this]
+    (let [^:mutable s state]
+      (while (== s COMPLETING) (Thread/yield) (set! s state))
+      (switch s
+        NORMAL Future$State/SUCCESS
+        EXCEPTIONAL Future$State/FAILED
+        (CANCELLED INTERRUPTING INTERRUPTED) Future$State/CANCELLED
+        Future$State/RUNNING)))
+
+  (method ^:protected done ^void [this])
+
+  (method ^:protected set ^void [this ^V v]
+    (when ^boolean (^[FutureTask int int] VarHandle/.compareAndSet STATE this NEW COMPLETING)
+      (set! outcome v)
+      ^void (^[FutureTask int] VarHandle/.setRelease STATE this NORMAL)
+      (.finishCompletion this)))
+
+  (method ^:protected setException ^void [this ^Throwable t]
+    (when ^boolean (^[FutureTask int int] VarHandle/.compareAndSet STATE this NEW COMPLETING)
+      (set! outcome t)
+      ^void (^[FutureTask int] VarHandle/.setRelease STATE this EXCEPTIONAL)
+      (.finishCompletion this)))
+
+  (method ^:public run ^void [this]
+    (when-not (or (not (== state NEW))
+                  (not ^boolean (^[FutureTask Void Thread] VarHandle/.compareAndSet
+                                  RUNNER
+                                  this
+                                  nil
+                                  (Thread/currentThread))))
+      (try
+        (let [^{:tag (Callable V)} c callable]
+          (when (and (some? c) (== state NEW))
+            (let [^:mutable ^V result nil
+                  ^:mutable ^boolean ran false]
+              (try
+                (set! result (.call c))
+                (set! ran true)
+                (catch Throwable ex (set! result nil) (set! ran false) (.setException this ex)))
+              (when ran (.set this result)))))
+        (finally
+          (set! runner nil)
+          (let [s state] (when (>= s INTERRUPTING) (.handlePossibleCancellationInterrupt this s)))))))
+
+  (method ^:protected runAndReset ^boolean [this]
+    (if (or (not (== state NEW))
+            (not ^boolean (^[FutureTask Void Thread] VarHandle/.compareAndSet
+                            RUNNER
+                            this
+                            nil
+                            (Thread/currentThread))))
+        false
+        (let [^:mutable ran false
+              ^:mutable s state]
+          (try
+            (let [^{:tag (Callable V)} c callable]
+              (when (and (some? c) (== s NEW))
+                (try (.call c) (set! ran true) (catch Throwable ex (.setException this ex)))))
+            (finally
+              (set! runner nil)
+              (set! s state)
+              (when (>= s INTERRUPTING) (.handlePossibleCancellationInterrupt this s))))
+          (and ran (== s NEW)))))
+
+  (method ^:private handlePossibleCancellationInterrupt ^void [this ^int s]
+    (when (== s INTERRUPTING) (while (== state INTERRUPTING) (Thread/yield))))
+
+  (defclass ^:static ^:final WaitNode
+    (field ^:volatile ^Thread thread)
+
+    (field ^:volatile ^WaitNode next)
+
+    (constructor [this] (set! thread (Thread/currentThread))))
+
+  (method ^:private finishCompletion ^void [this]
+    (let [^:mutable ^WaitNode q nil]
+      (while (some? (set! q waiters))
+        (when ^boolean (^[FutureTask WaitNode Void] VarHandle/.weakCompareAndSet WAITERS this q nil)
+          (while true
+            (let [t (.-thread q)]
+              (when (some? t) (set! (.-thread q) nil) (LockSupport/unpark t))
+              (let [next (.-next q)] (when (nil? next) (break)) (set! (.-next q) nil) (set! q next))))
+          (break))))
+    (.done this)
+    (set! callable nil))
+
+  (method ^:private awaitDone :throws [InterruptedException] ^int [this ^boolean timed ^long nanos]
+    (let [^:mutable startTime 0
+          ^:mutable ^WaitNode q nil
+          ^:mutable queued false]
+      (while true
+        (let [s state]
+          (cond
+            (> s COMPLETING) (do (when (some? q) (set! (.-thread q) nil)) (return s))
+            (== s COMPLETING) (Thread/yield)
+            (Thread/interrupted) (do (.removeWaiter this q) (throw (InterruptedException.)))
+            (nil? q) (do (when (and timed (<= nanos 0)) (return s)) (set! q (WaitNode.)))
+            (not queued)
+              (set! queued
+                    ^boolean (^[FutureTask WaitNode WaitNode] VarHandle/.weakCompareAndSet
+                               WAITERS
+                               this
+                               (set! (.-next q) waiters)
+                               q))
+            timed
+              (let [^:mutable ^long parkNanos 0]
+                (if (== startTime 0)
+                    (do
+                      (set! startTime (System/nanoTime))
+                      (when (== startTime 0) (set! startTime 1))
+                      (set! parkNanos nanos))
+                    (let [elapsed (unchecked-subtract (System/nanoTime) startTime)]
+                      (when (>= elapsed nanos) (.removeWaiter this q) (return state))
+                      (set! parkNanos (unchecked-subtract nanos elapsed))))
+                (when (< state COMPLETING) (LockSupport/parkNanos this parkNanos)))
+            :else (LockSupport/park this))))))
+
+  (method ^:private removeWaiter ^void [this ^WaitNode node]
+    (when (some? node)
+      (set! (.-thread node) nil)
+      (label :retry
+        (while true
+          (let [^:mutable ^WaitNode pred nil
+                ^:mutable q waiters
+                ^:mutable ^WaitNode s nil]
+            (while (some? q)
+              (set! s (.-next q))
+              (cond
+                (some? (.-thread q)) (set! pred q)
+                (some? pred)
+                  (do (set! (.-next pred) s) (when (nil? (.-thread pred)) (continue :retry)))
+                :else
+                  (when-not ^boolean (^[FutureTask WaitNode WaitNode] VarHandle/.compareAndSet
+                                       WAITERS
+                                       this
+                                       q
+                                       s)
+                    (continue :retry)))
+              (set! q s)))
+          (break)))))
+
+  (method ^:public toString ^String [this]
+    (let [^:mutable ^String status nil]
+      (switch state
+        NORMAL (set! status "[Completed normally]")
+        EXCEPTIONAL (set! status (java-str "[Completed exceptionally: " outcome "]"))
+        (CANCELLED INTERRUPTING INTERRUPTED) (set! status "[Cancelled]")
+        (let [^{:tag (Callable ?)} callable (.-callable this)]
+          (set! status
+                (if (nil? callable)
+                    "[Not completed]"
+                    (java-str "[Not completed, task = " callable "]")))))
+      (java-str (.toString super) status)))
+
+  (field ^:private ^:static ^:final ^VarHandle STATE)
+
+  (field ^:private ^:static ^:final ^VarHandle RUNNER)
+
+  (field ^:private ^:static ^:final ^VarHandle WAITERS)
+
+  (static-initializer
+    (let [l (MethodHandles/lookup)]
+      (set! STATE (MhUtil/findVarHandle l "state" Integer/TYPE))
+      (set! RUNNER (MhUtil/findVarHandle l "runner" Thread))
+      (set! WAITERS (MhUtil/findVarHandle l "waiters" WaitNode))
+      (let [^{:tag (Class ?)} ensureLoaded LockSupport] nil))))

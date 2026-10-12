@@ -1,0 +1,729 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/WeakHashMap.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util)
+
+(import '(java.lang.ref ReferenceQueue WeakReference)
+        '(java.util.function BiConsumer BiFunction Consumer)
+        '(jdk.internal RequiresIdentity))
+
+(defclass ^:public WeakHashMap
+  :extends (AbstractMap K V)
+  :implements [(Map K V)]
+  :type-params [^{RequiresIdentity true} K V]
+
+  (field ^:private ^:static ^:final ^int DEFAULT_INITIAL_CAPACITY 16)
+
+  (field ^:private ^:static ^:final ^int MAXIMUM_CAPACITY (bit-shift-left-int 1 30))
+
+  (field ^:private ^:static ^:final ^float DEFAULT_LOAD_FACTOR (float 0.75))
+
+  (field ^{:tag (array (Entry K V))} table)
+
+  (field ^:private ^int size)
+
+  (field ^:private ^int threshold)
+
+  (field ^:private ^:final ^float loadFactor)
+
+  (field ^:private ^:final ^{:tag (ReferenceQueue Object)} queue (ReferenceQueue.))
+
+  (field ^int modCount)
+
+  (method ^:private newTable ^{:tag (array (Entry K V))} [this ^int n]
+    (new Entry/1 n))
+
+  (constructor ^:public [this ^:mutable ^int initialCapacity ^float loadFactor]
+    (when (< initialCapacity 0)
+      (throw (IllegalArgumentException. (java-str "Illegal Initial Capacity: " initialCapacity))))
+    (when (> initialCapacity MAXIMUM_CAPACITY) (set! initialCapacity MAXIMUM_CAPACITY))
+    (when (or (<= loadFactor (unchecked-float 0)) (Float/isNaN loadFactor))
+      (throw (IllegalArgumentException. (java-str "Illegal Load factor: " loadFactor))))
+    (let [capacity (HashMap/tableSizeFor initialCapacity)]
+      (set! table (.newTable this capacity))
+      (set! (.-loadFactor this) loadFactor)
+      (set! threshold (unchecked-int (unchecked-multiply-float capacity loadFactor)))))
+
+  (constructor ^:public [this ^int initialCapacity]
+    (this. initialCapacity DEFAULT_LOAD_FACTOR))
+
+  (constructor ^:public [this]
+    (this. DEFAULT_INITIAL_CAPACITY DEFAULT_LOAD_FACTOR))
+
+  (constructor ^:public [this ^{:tag (Map (? extends K) (? extends V))} m]
+    (this. (Math/max (unchecked-int
+                       (Math/ceil (unchecked-divide (.size m) (double DEFAULT_LOAD_FACTOR))))
+                     DEFAULT_INITIAL_CAPACITY)
+           DEFAULT_LOAD_FACTOR)
+    (.putAll this m))
+
+  (field ^:private ^:static ^:final NULL_KEY (Object.))
+
+  (method ^:private ^:static maskNull [key] (if (nil? key) NULL_KEY key))
+
+  (method ^:static unmaskNull [key]
+    (when-not (identical? key NULL_KEY) key))
+
+  (method ^:private matchesKey ^boolean [this ^{:tag (Entry K V)} e key]
+    (if (.refersTo e key) true (let [k (.get e)] (and (some? k) (.equals key k)))))
+
+  (method ^:final hash ^int [this k]
+    (let [^:mutable h (.hashCode k)]
+      (set! h
+            (bit-xor-int h
+                         (bit-xor-int (unsigned-bit-shift-right-int h 20)
+                                      (unsigned-bit-shift-right-int h 12))))
+      (bit-xor-int (bit-xor-int h (unsigned-bit-shift-right-int h 7))
+                   (unsigned-bit-shift-right-int h 4))))
+
+  (method ^:private ^:static indexFor ^int [^int h ^int length]
+    (bit-and-int h (unchecked-subtract-int length 1)))
+
+  (method ^:private expungeStaleEntries ^void [this]
+    (let [^:mutable ^Object x nil]
+      (while (some? (set! x (.poll queue)))
+        (locking queue
+          (let [^{:tag (Entry K V)} e (cast Entry x)
+                i (WeakHashMap/indexFor (.-hash e) (alength table))
+                ^:mutable ^{:tag (Entry K V)} prev (aget table i)
+                ^:mutable ^{:tag (Entry K V)} p prev]
+            (while (some? p)
+              (let [^{:tag (Entry K V)} next (.-next p)]
+                (when (identical? p e)
+                  (if (identical? prev e) (aset table i next) (set! (.-next prev) next))
+                  (set! (.-value e) nil)
+                  (set! size (unchecked-dec-int size))
+                  (break))
+                (set! prev p)
+                (set! p next))))))))
+
+  (method ^:private getTable ^{:tag (array (Entry K V))} [this]
+    (.expungeStaleEntries this)
+    table)
+
+  (method ^:public size ^int [this]
+    (if (== size 0) 0 (do (.expungeStaleEntries this) size)))
+
+  (method ^:public isEmpty ^boolean [this] (== (.size this) 0))
+
+  (method ^:public get ^V [this key]
+    (let [k (WeakHashMap/maskNull key)
+          h (.hash this k)
+          ^{:tag (array (Entry K V))} tab (.getTable this)
+          index (WeakHashMap/indexFor h (alength tab))
+          ^:mutable ^{:tag (Entry K V)} e (aget tab index)]
+      (while (some? e)
+        (when (and (== (.-hash e) h) (.matchesKey this e k)) (return (.-value e)))
+        (set! e (.-next e)))
+      nil))
+
+  (method ^:public containsKey ^boolean [this key]
+    (some? (.getEntry this key)))
+
+  (method getEntry ^{:tag (Entry K V)} [this key]
+    (let [k (WeakHashMap/maskNull key)
+          h (.hash this k)
+          ^{:tag (array (Entry K V))} tab (.getTable this)
+          index (WeakHashMap/indexFor h (alength tab))
+          ^:mutable ^{:tag (Entry K V)} e (aget tab index)]
+      (while (and (some? e) (not (and (== (.-hash e) h) (.matchesKey this e k))))
+        (set! e (.-next e)))
+      e))
+
+  (method ^:public put ^V [this ^{RequiresIdentity true} ^K key ^V value]
+    (let [k (WeakHashMap/maskNull key)
+          h (.hash this k)
+          ^{:tag (array (Entry K V))} tab (.getTable this)
+          i (WeakHashMap/indexFor h (alength tab))]
+      (loop [^{:tag (Entry K V)} e (aget tab i)]
+        (if (some? e)
+            (if (and (== h (.-hash e)) (.matchesKey this e k))
+                (let [^V oldValue (.-value e)]
+                  (when-not (identical? value oldValue) (set! (.-value e) value))
+                  (return oldValue))
+                (recur (.-next e)))
+            nil))
+      (set! modCount (unchecked-inc-int modCount))
+      (let [^{:tag (Entry K V)} e (aget tab i)]
+        (aset tab i (Entry. k value queue h e))
+        (when (> (set! size (unchecked-inc-int size)) threshold)
+          (.resize this (unchecked-multiply-int (alength tab) 2)))
+        nil)))
+
+  (method resize ^void [this ^int newCapacity]
+    (let [^{:tag (array (Entry K V))} oldTable (.getTable this)
+          oldCapacity (alength oldTable)]
+      (if (== oldCapacity MAXIMUM_CAPACITY)
+          (set! threshold Integer/MAX_VALUE)
+          (let [^{:tag (array (Entry K V))} newTable (.newTable this newCapacity)]
+            (.transfer this oldTable newTable)
+            (set! table newTable)
+            (if (>= size (unchecked-divide-int threshold 2))
+                (set! threshold (unchecked-int (unchecked-multiply-float newCapacity loadFactor)))
+                (do
+                  (.expungeStaleEntries this)
+                  (.transfer this newTable oldTable)
+                  (set! table oldTable)))))))
+
+  (method ^:private transfer ^void [this ^{:tag (array (Entry K V))} src
+                                    ^{:tag (array (Entry K V))} dest]
+    (loop [^int j 0]
+      (when (< j (alength src))
+        (let [^:mutable ^{:tag (Entry K V)} e (aget src j)]
+          (aset src j nil)
+          (while (some? e)
+            (let [^{:tag (Entry K V)} next (.-next e)]
+              (if (.refersTo e nil)
+                  (do
+                    (set! (.-next e) nil)
+                    (set! (.-value e) nil)
+                    (set! size (unchecked-dec-int size)))
+                  (let [i (WeakHashMap/indexFor (.-hash e) (alength dest))]
+                    (set! (.-next e) (aget dest i))
+                    (aset dest i e)))
+              (set! e next)))
+          (recur (unchecked-inc-int j))))))
+
+  (method ^:public putAll ^void [this ^{:tag (Map (? extends K) (? extends V))} m]
+    (let [numKeysToBeAdded (.size m)]
+      (when-not (== numKeysToBeAdded 0)
+        (when (> numKeysToBeAdded threshold)
+          (let [^:mutable targetCapacity (unchecked-int
+                                           (Math/ceil
+                                             (unchecked-divide numKeysToBeAdded (double loadFactor))))]
+            (when (> targetCapacity MAXIMUM_CAPACITY) (set! targetCapacity MAXIMUM_CAPACITY))
+            (let [^:mutable newCapacity (alength table)]
+              (while (< newCapacity targetCapacity)
+                (set! newCapacity (bit-shift-left-int newCapacity 1)))
+              (when (> newCapacity (alength table)) (.resize this newCapacity)))))
+        (for-each [^{:tag (Map$Entry (? extends K) (? extends V))} e (.entrySet m)]
+          (.put this (.getKey e) (.getValue e))))))
+
+  (method ^:public remove ^V [this key]
+    (let [k (WeakHashMap/maskNull key)
+          h (.hash this k)
+          ^{:tag (array (Entry K V))} tab (.getTable this)
+          i (WeakHashMap/indexFor h (alength tab))
+          ^:mutable ^{:tag (Entry K V)} prev (aget tab i)
+          ^:mutable ^{:tag (Entry K V)} e prev]
+      (while (some? e)
+        (let [^{:tag (Entry K V)} next (.-next e)]
+          (when (and (== h (.-hash e)) (.matchesKey this e k))
+            (set! modCount (unchecked-inc-int modCount))
+            (set! size (unchecked-dec-int size))
+            (if (identical? prev e) (aset tab i next) (set! (.-next prev) next))
+            (return (.-value e)))
+          (set! prev e)
+          (set! e next)))
+      nil))
+
+  (method removeMapping ^boolean [this o]
+    (if-instance [^{:tag (Map$Entry ? ?)} entry o]
+      (let [^{:tag (array (Entry K V))} tab (.getTable this)
+            k (WeakHashMap/maskNull (.getKey entry))
+            h (.hash this k)
+            i (WeakHashMap/indexFor h (alength tab))
+            ^:mutable ^{:tag (Entry K V)} prev (aget tab i)
+            ^:mutable ^{:tag (Entry K V)} e prev]
+        (while (some? e)
+          (let [^{:tag (Entry K V)} next (.-next e)]
+            (when (and (== h (.-hash e)) (.equals e entry))
+              (set! modCount (unchecked-inc-int modCount))
+              (set! size (unchecked-dec-int size))
+              (if (identical? prev e) (aset tab i next) (set! (.-next prev) next))
+              (return true))
+            (set! prev e)
+            (set! e next)))
+        false)
+      false))
+
+  (method ^:public clear ^void [this]
+    (while (some? (.poll queue)))
+    (set! modCount (unchecked-inc-int modCount))
+    (Arrays/fill table nil)
+    (set! size 0)
+    (while (some? (.poll queue))))
+
+  (method ^:public containsValue ^boolean [this value]
+    (if (nil? value)
+        (.containsNullValue this)
+        (let [^{:tag (array (Entry K V))} tab (.getTable this)]
+          (let [^:mutable i (alength tab)]
+            (while (> (let [old-1 i] (set! i (unchecked-dec-int i)) old-1) 0)
+              (loop [^{:tag (Entry K V)} e (aget tab i)]
+                (if (some? e) (if (.equals value (.-value e)) (return true) (recur (.-next e))) nil))))
+          false)))
+
+  (method ^:private containsNullValue ^boolean [this]
+    (let [^{:tag (array (Entry K V))} tab (.getTable this)]
+      (let [^:mutable i (alength tab)]
+        (while (> (let [old-2 i] (set! i (unchecked-dec-int i)) old-2) 0)
+          (loop [^{:tag (Entry K V)} e (aget tab i)]
+            (if (some? e) (if (nil? (.-value e)) (return true) (recur (.-next e))) nil))))
+      false))
+
+  (defclass ^:private ^:static Entry
+    :extends (WeakReference Object)
+    :implements [(Map$Entry K V)]
+    :type-params [K V]
+
+    (field ^V value)
+
+    (field ^:final ^int hash)
+
+    (field ^{:tag (Entry K V)} next)
+
+    (constructor [this key ^V value ^{:tag (ReferenceQueue Object)} queue ^int hash
+                  ^{:tag (Entry K V)} next]
+      (super. key queue)
+      (set! (.-value this) value)
+      (set! (.-hash this) hash)
+      (set! (.-next this) next))
+
+    (method ^:public getKey ^K [this] (WeakHashMap/unmaskNull (.get this)))
+
+    (method ^:public getValue ^V [this] value)
+
+    (method ^:public setValue ^V [this ^V newValue]
+      (let [^V oldValue value] (set! value newValue) oldValue))
+
+    (method ^:public equals ^boolean [this o]
+      (if-instance [^{:tag (Map$Entry ? ?)} e o]
+        (let [^K k1 (.getKey this)
+              k2 (.getKey e)]
+          (when (or (identical? k1 k2) (and (some? k1) (.equals k1 k2)))
+            (let [^V v1 (.getValue this)
+                  v2 (.getValue e)]
+              (when (or (identical? v1 v2) (and (some? v1) (.equals v1 v2))) (return true))))
+          false)
+        false))
+
+    (method ^:public hashCode ^int [this]
+      (let [^K k (.getKey this)
+            ^V v (.getValue this)]
+        (bit-xor-int (Objects/hashCode k) (Objects/hashCode v))))
+
+    (method ^:public toString ^String [this]
+      (java-str (.getKey this) "=" (.getValue this))))
+
+  (defclass ^:private ^:abstract HashIterator
+    :implements [(Iterator T)]
+    :type-params [T]
+
+    (field ^:private ^int index)
+
+    (field ^:private ^{:tag (Entry K V)} entry)
+
+    (field ^:private ^{:tag (Entry K V)} lastReturned)
+
+    (field ^:private ^int expectedModCount modCount)
+
+    (field ^:private nextKey)
+
+    (field ^:private currentKey)
+
+    (constructor [this]
+      (set! index (if (.isEmpty WeakHashMap/this) 0 (alength table))))
+
+    (method ^:public hasNext ^boolean [this]
+      (let [^{:tag (array (Entry K V))} t table]
+        (while (nil? nextKey)
+          (let [^:mutable ^{:tag (Entry K V)} e entry
+                ^:mutable i index]
+            (while (and (nil? e) (> i 0)) (set! e (aget t (set! i (unchecked-dec-int i)))))
+            (set! entry e)
+            (set! index i)
+            (when (nil? e) (set! currentKey nil) (return false))
+            (set! nextKey (.get e))
+            (when (nil? nextKey) (set! entry (.-next entry)))))
+        true))
+
+    (method ^:protected nextEntry ^{:tag (Entry K V)} [this]
+      (when-not (== modCount expectedModCount) (throw (ConcurrentModificationException.)))
+      (when (and (nil? nextKey) (not (.hasNext this))) (throw (NoSuchElementException.)))
+      (set! lastReturned entry)
+      (set! entry (.-next entry))
+      (set! currentKey nextKey)
+      (set! nextKey nil)
+      lastReturned)
+
+    (method ^:public remove ^void [this]
+      (when (nil? lastReturned) (throw (IllegalStateException.)))
+      (when-not (== modCount expectedModCount) (throw (ConcurrentModificationException.)))
+      (.remove WeakHashMap/this currentKey)
+      (set! expectedModCount modCount)
+      (set! lastReturned nil)
+      (set! currentKey nil)))
+
+  (defclass ^:private ValueIterator
+    :extends (HashIterator V)
+
+    (method ^:public next ^V [this] (.-value (.nextEntry this))))
+
+  (defclass ^:private KeyIterator
+    :extends (HashIterator K)
+
+    (method ^:public next ^K [this] (.getKey (.nextEntry this))))
+
+  (defclass ^:private EntryIterator
+    :extends (HashIterator (Map$Entry K V))
+
+    (method ^:public next ^{:tag (Map$Entry K V)} [this] (.nextEntry this)))
+
+  (field ^:private ^:transient ^{:tag (Set (Map$Entry K V))} entrySet)
+
+  (method ^:public keySet ^{:tag (Set K)} [this]
+    (let [^:mutable ^{:tag (Set K)} ks (.-keySet this)]
+      (when (nil? ks) (set! ks (KeySet.)) (set! (.-keySet this) ks))
+      ks))
+
+  (defclass ^:private KeySet
+    :extends (AbstractSet K)
+
+    (method ^:public iterator ^{:tag (Iterator K)} [this] (KeyIterator.))
+
+    (method ^:public size ^int [this] (.size WeakHashMap/this))
+
+    (method ^:public contains ^boolean [this o]
+      (.containsKey WeakHashMap/this o))
+
+    (method ^:public remove ^boolean [this o]
+      (if (.containsKey WeakHashMap/this o) (do (.remove WeakHashMap/this o) true) false))
+
+    (method ^:public clear ^void [this] (.clear WeakHashMap/this))
+
+    (method ^:public spliterator ^{:tag (Spliterator K)} [this]
+      (KeySpliterator. WeakHashMap/this 0 -1 0 0)))
+
+  (method ^:public values ^{:tag (Collection V)} [this]
+    (let [^:mutable ^{:tag (Collection V)} vs (.-values this)]
+      (when (nil? vs) (set! vs (Values.)) (set! (.-values this) vs))
+      vs))
+
+  (defclass ^:private Values
+    :extends (AbstractCollection V)
+
+    (method ^:public iterator ^{:tag (Iterator V)} [this] (ValueIterator.))
+
+    (method ^:public size ^int [this] (.size WeakHashMap/this))
+
+    (method ^:public contains ^boolean [this o]
+      (.containsValue WeakHashMap/this o))
+
+    (method ^:public clear ^void [this] (.clear WeakHashMap/this))
+
+    (method ^:public spliterator ^{:tag (Spliterator V)} [this]
+      (ValueSpliterator. WeakHashMap/this 0 -1 0 0)))
+
+  (method ^:public entrySet ^{:tag (Set (Map$Entry K V))} [this]
+    (let [^{:tag (Set (Map$Entry K V))} es entrySet] (if (some? es) es (set! entrySet (EntrySet.)))))
+
+  (defclass ^:private EntrySet
+    :extends (AbstractSet (Map$Entry K V))
+
+    (method ^:public iterator ^{:tag (Iterator (Map$Entry K V))} [this]
+      (EntryIterator.))
+
+    (method ^:public contains ^boolean [this o]
+      (if-instance [^{:tag (Map$Entry ? ?)} e o]
+        (if (some? (.getEntry WeakHashMap/this (.getKey e)))
+            (.equals (.getEntry WeakHashMap/this (.getKey e)) e)
+            false)
+        false))
+
+    (method ^:public remove ^boolean [this o]
+      (.removeMapping WeakHashMap/this o))
+
+    (method ^:public size ^int [this] (.size WeakHashMap/this))
+
+    (method ^:public clear ^void [this] (.clear WeakHashMap/this))
+
+    (method ^:private deepCopy ^{:tag (List (Map$Entry K V))} [this]
+      (let [^{:tag (List (Map$Entry K V))} list (ArrayList. (.size this))]
+        (for-each [^{:tag (Map$Entry K V)} e this] (.add list (AbstractMap$SimpleEntry. e)))
+        list))
+
+    (method ^:public toArray ^Object/1 [this] (.toArray (.deepCopy this)))
+
+    (method ^:public toArray :type-params [T] ^T/1 [this ^T/1 a]
+      (.toArray (.deepCopy this) a))
+
+    (method ^:public spliterator ^{:tag (Spliterator (Map$Entry K V))} [this]
+      (EntrySpliterator. WeakHashMap/this 0 -1 0 0)))
+
+  (method ^:public forEach ^void [this ^{:tag (BiConsumer (? super K) (? super V))} action]
+    (Objects/requireNonNull action)
+    (let [expectedModCount modCount
+          ^{:tag (array (Entry K V))} tab (.getTable this)]
+      (for-each [^:mutable ^{:tag (Entry K V)} entry tab]
+        (while (some? entry)
+          (let [key (.get entry)]
+            (when (some? key) (.accept action (WeakHashMap/unmaskNull key) (.-value entry)))
+            (set! entry (.-next entry))
+            (when-not (== expectedModCount modCount) (throw (ConcurrentModificationException.))))))))
+
+  (method ^:public replaceAll ^void [this
+                                     ^{:tag (BiFunction (? super K) (? super V) (? extends V))} function]
+    (Objects/requireNonNull function)
+    (let [expectedModCount modCount
+          ^{:tag (array (Entry K V))} tab (.getTable this)]
+      (for-each [^:mutable ^{:tag (Entry K V)} entry tab]
+        (while (some? entry)
+          (let [key (.get entry)]
+            (when (some? key)
+              (set! (.-value entry) (.apply function (WeakHashMap/unmaskNull key) (.-value entry))))
+            (set! entry (.-next entry))
+            (when-not (== expectedModCount modCount) (throw (ConcurrentModificationException.))))))))
+
+  (defclass ^:static WeakHashMapSpliterator
+    :type-params [K V]
+
+    (field ^:final ^{:tag (WeakHashMap K V)} map)
+
+    (field ^{:tag (Entry K V)} current)
+
+    (field ^int index)
+
+    (field ^int fence)
+
+    (field ^int est)
+
+    (field ^int expectedModCount)
+
+    (constructor [this ^{:tag (WeakHashMap K V)} m ^int origin ^int fence ^int est
+                  ^int expectedModCount]
+      (set! (.-map this) m)
+      (set! (.-index this) origin)
+      (set! (.-fence this) fence)
+      (set! (.-est this) est)
+      (set! (.-expectedModCount this) expectedModCount))
+
+    (method ^:final getFence ^int [this]
+      (let [^:mutable ^int hi 0]
+        (when (< (set! hi fence) 0)
+          (let [^{:tag (WeakHashMap K V)} m map]
+            (set! est (.size m))
+            (set! expectedModCount (.-modCount m))
+            (set! hi (set! fence (alength (.-table m))))))
+        hi))
+
+    (method ^:public ^:final estimateSize ^long [this]
+      (.getFence this)
+      (long est)))
+
+  (defclass ^:static ^:final KeySpliterator
+    :extends (WeakHashMapSpliterator K V)
+    :implements [(Spliterator K)]
+    :type-params [K V]
+
+    (constructor [this ^{:tag (WeakHashMap K V)} m ^int origin ^int fence ^int est
+                  ^int expectedModCount]
+      (super. m origin fence est expectedModCount))
+
+    (method ^:public trySplit ^{:tag (KeySpliterator K V)} [this]
+      (let [hi (.getFence this)
+            lo (.-index this)
+            mid (unsigned-bit-shift-right-int (unchecked-add-int lo hi) 1)]
+        (when-not (>= lo mid)
+          (KeySpliterator. (.-map this)
+                           lo
+                           (set! (.-index this) mid)
+                           (set! (.-est this) (unsigned-bit-shift-right-int (.-est this) 1))
+                           (.-expectedModCount this)))))
+
+    (method ^:public forEachRemaining ^void [this ^{:tag (Consumer (? super K))} action]
+      (let [^:mutable ^int i 0
+            ^:mutable ^int hi 0
+            ^:mutable ^int mc 0]
+        (when (nil? action) (throw (NullPointerException.)))
+        (let [^{:tag (WeakHashMap K V)} m (.-map this)
+              ^{:tag (array (Entry K V))} tab (.-table m)]
+          (if (< (set! hi (.-fence this)) 0)
+              (do
+                (set! mc (set! (.-expectedModCount this) (.-modCount m)))
+                (set! hi (set! (.-fence this) (alength tab))))
+              (set! mc (.-expectedModCount this)))
+          (when (and (and (>= (alength tab) hi) (>= (set! i (.-index this)) 0))
+                     (or (< i (set! (.-index this) hi)) (some? (.-current this))))
+            (let [^:mutable ^{:tag (Entry K V)} p (.-current this)]
+              (set! (.-current this) nil)
+              (loop []
+                (if (nil? p)
+                    (do (set! p (aget tab i)) (set! i (unchecked-inc-int i)))
+                    (let [x (.get p)]
+                      (set! p (.-next p))
+                      (when (some? x) (let [^K k (WeakHashMap/unmaskNull x)] (.accept action k)))))
+                (when (or (some? p) (< i hi)) (recur)))))
+          (when-not (== (.-modCount m) mc) (throw (ConcurrentModificationException.))))))
+
+    (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super K))} action]
+      (let [^:mutable ^int hi 0]
+        (when (nil? action) (throw (NullPointerException.)))
+        (let [^{:tag (array (Entry K V))} tab (.-table (.-map this))]
+          (when (and (>= (alength tab) (set! hi (.getFence this))) (>= (.-index this) 0))
+            (while (or (some? (.-current this)) (< (.-index this) hi))
+              (if (nil? (.-current this))
+                  (set! (.-current this)
+                        (aget tab
+                              (let [old-3 (.-index this)]
+                                (set! (.-index this) (unchecked-inc-int (.-index this)))
+                                old-3)))
+                  (let [x (.get (.-current this))]
+                    (set! (.-current this) (.-next (.-current this)))
+                    (when (some? x)
+                      (let [^K k (WeakHashMap/unmaskNull x)]
+                        (.accept action k)
+                        (when-not (== (.-modCount (.-map this)) (.-expectedModCount this))
+                          (throw (ConcurrentModificationException.)))
+                        (return true)))))))
+          false)))
+
+    (method ^:public characteristics ^int [this] Spliterator/DISTINCT))
+
+  (defclass ^:static ^:final ValueSpliterator
+    :extends (WeakHashMapSpliterator K V)
+    :implements [(Spliterator V)]
+    :type-params [K V]
+
+    (constructor [this ^{:tag (WeakHashMap K V)} m ^int origin ^int fence ^int est
+                  ^int expectedModCount]
+      (super. m origin fence est expectedModCount))
+
+    (method ^:public trySplit ^{:tag (ValueSpliterator K V)} [this]
+      (let [hi (.getFence this)
+            lo (.-index this)
+            mid (unsigned-bit-shift-right-int (unchecked-add-int lo hi) 1)]
+        (when-not (>= lo mid)
+          (ValueSpliterator. (.-map this)
+                             lo
+                             (set! (.-index this) mid)
+                             (set! (.-est this) (unsigned-bit-shift-right-int (.-est this) 1))
+                             (.-expectedModCount this)))))
+
+    (method ^:public forEachRemaining ^void [this ^{:tag (Consumer (? super V))} action]
+      (let [^:mutable ^int i 0
+            ^:mutable ^int hi 0
+            ^:mutable ^int mc 0]
+        (when (nil? action) (throw (NullPointerException.)))
+        (let [^{:tag (WeakHashMap K V)} m (.-map this)
+              ^{:tag (array (Entry K V))} tab (.-table m)]
+          (if (< (set! hi (.-fence this)) 0)
+              (do
+                (set! mc (set! (.-expectedModCount this) (.-modCount m)))
+                (set! hi (set! (.-fence this) (alength tab))))
+              (set! mc (.-expectedModCount this)))
+          (when (and (and (>= (alength tab) hi) (>= (set! i (.-index this)) 0))
+                     (or (< i (set! (.-index this) hi)) (some? (.-current this))))
+            (let [^:mutable ^{:tag (Entry K V)} p (.-current this)]
+              (set! (.-current this) nil)
+              (loop []
+                (if (nil? p)
+                    (do (set! p (aget tab i)) (set! i (unchecked-inc-int i)))
+                    (let [x (.get p)
+                          ^V v (.-value p)]
+                      (set! p (.-next p))
+                      (when (some? x) (.accept action v))))
+                (when (or (some? p) (< i hi)) (recur)))))
+          (when-not (== (.-modCount m) mc) (throw (ConcurrentModificationException.))))))
+
+    (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super V))} action]
+      (let [^:mutable ^int hi 0]
+        (when (nil? action) (throw (NullPointerException.)))
+        (let [^{:tag (array (Entry K V))} tab (.-table (.-map this))]
+          (when (and (>= (alength tab) (set! hi (.getFence this))) (>= (.-index this) 0))
+            (while (or (some? (.-current this)) (< (.-index this) hi))
+              (if (nil? (.-current this))
+                  (set! (.-current this)
+                        (aget tab
+                              (let [old-4 (.-index this)]
+                                (set! (.-index this) (unchecked-inc-int (.-index this)))
+                                old-4)))
+                  (let [x (.get (.-current this))
+                        ^V v (.-value (.-current this))]
+                    (set! (.-current this) (.-next (.-current this)))
+                    (when (some? x)
+                      (.accept action v)
+                      (when-not (== (.-modCount (.-map this)) (.-expectedModCount this))
+                        (throw (ConcurrentModificationException.)))
+                      (return true))))))
+          false)))
+
+    (method ^:public characteristics ^int [this] 0))
+
+  (defclass ^:static ^:final EntrySpliterator
+    :extends (WeakHashMapSpliterator K V)
+    :implements [(Spliterator (Map$Entry K V))]
+    :type-params [K V]
+
+    (constructor [this ^{:tag (WeakHashMap K V)} m ^int origin ^int fence ^int est
+                  ^int expectedModCount]
+      (super. m origin fence est expectedModCount))
+
+    (method ^:public trySplit ^{:tag (EntrySpliterator K V)} [this]
+      (let [hi (.getFence this)
+            lo (.-index this)
+            mid (unsigned-bit-shift-right-int (unchecked-add-int lo hi) 1)]
+        (when-not (>= lo mid)
+          (EntrySpliterator. (.-map this)
+                             lo
+                             (set! (.-index this) mid)
+                             (set! (.-est this) (unsigned-bit-shift-right-int (.-est this) 1))
+                             (.-expectedModCount this)))))
+
+    (method ^:public forEachRemaining ^void [this
+                                             ^{:tag (Consumer (? super (Map$Entry K V)))} action]
+      (let [^:mutable ^int i 0
+            ^:mutable ^int hi 0
+            ^:mutable ^int mc 0]
+        (when (nil? action) (throw (NullPointerException.)))
+        (let [^{:tag (WeakHashMap K V)} m (.-map this)
+              ^{:tag (array (Entry K V))} tab (.-table m)]
+          (if (< (set! hi (.-fence this)) 0)
+              (do
+                (set! mc (set! (.-expectedModCount this) (.-modCount m)))
+                (set! hi (set! (.-fence this) (alength tab))))
+              (set! mc (.-expectedModCount this)))
+          (when (and (and (>= (alength tab) hi) (>= (set! i (.-index this)) 0))
+                     (or (< i (set! (.-index this) hi)) (some? (.-current this))))
+            (let [^:mutable ^{:tag (Entry K V)} p (.-current this)]
+              (set! (.-current this) nil)
+              (loop []
+                (if (nil? p)
+                    (do (set! p (aget tab i)) (set! i (unchecked-inc-int i)))
+                    (let [x (.get p)
+                          ^V v (.-value p)]
+                      (set! p (.-next p))
+                      (when (some? x)
+                        (let [^K k (WeakHashMap/unmaskNull x)]
+                          (.accept action (AbstractMap$SimpleImmutableEntry. k v))))))
+                (when (or (some? p) (< i hi)) (recur)))))
+          (when-not (== (.-modCount m) mc) (throw (ConcurrentModificationException.))))))
+
+    (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super (Map$Entry K V)))} action]
+      (let [^:mutable ^int hi 0]
+        (when (nil? action) (throw (NullPointerException.)))
+        (let [^{:tag (array (Entry K V))} tab (.-table (.-map this))]
+          (when (and (>= (alength tab) (set! hi (.getFence this))) (>= (.-index this) 0))
+            (while (or (some? (.-current this)) (< (.-index this) hi))
+              (if (nil? (.-current this))
+                  (set! (.-current this)
+                        (aget tab
+                              (let [old-5 (.-index this)]
+                                (set! (.-index this) (unchecked-inc-int (.-index this)))
+                                old-5)))
+                  (let [x (.get (.-current this))
+                        ^V v (.-value (.-current this))]
+                    (set! (.-current this) (.-next (.-current this)))
+                    (when (some? x)
+                      (let [^K k (WeakHashMap/unmaskNull x)]
+                        (.accept action (AbstractMap$SimpleImmutableEntry. k v))
+                        (when-not (== (.-modCount (.-map this)) (.-expectedModCount this))
+                          (throw (ConcurrentModificationException.)))
+                        (return true)))))))
+          false)))
+
+    (method ^:public characteristics ^int [this] Spliterator/DISTINCT))
+
+  (method ^:public ^:static newWeakHashMap :type-params [K V] ^{:tag (WeakHashMap K V)} [^int numMappings]
+    (when (< numMappings 0)
+      (throw (IllegalArgumentException. (java-str "Negative number of mappings: " numMappings))))
+    (WeakHashMap. (HashMap/calculateHashMapCapacity numMappings))))

@@ -1,0 +1,89 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/HmacDrbg.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.security InvalidKeyException
+                        NoSuchAlgorithmException
+                        NoSuchProviderException
+                        SecureRandomParameters)
+        '(java.util Arrays Collections HexFormat List)
+        '(javax.crypto Mac)
+        '(javax.crypto.spec SecretKeySpec))
+
+(defclass ^:public HmacDrbg
+  :extends AbstractHashDrbg
+
+  (field ^:private ^Mac mac)
+
+  (field ^:private ^String macAlg)
+
+  (field ^:private ^byte/1 v)
+
+  (field ^:private ^byte/1 k)
+
+  (constructor ^:public [this ^SecureRandomParameters params]
+    (set! (.-mechName this) "HMAC_DRBG")
+    (.configure this params))
+
+  (method ^:private status ^void [this]
+    (when (some? HmacDrbg/debug)
+      (.println HmacDrbg/debug this (java-str "V = " (.formatHex (HexFormat/of) v)))
+      (.println HmacDrbg/debug this (java-str "Key = " (.formatHex (HexFormat/of) k)))
+      (.println HmacDrbg/debug this (java-str "reseed counter = " (.-reseedCounter this)))))
+
+  (method ^:private update ^void [this ^{:tag (List byte/1)} inputs]
+    (try
+      (.init mac (SecretKeySpec. k macAlg))
+      (.update mac v)
+      (.update mac (unchecked-byte 0))
+      (for-each [^byte/1 input inputs] (.update mac input))
+      (set! k (.doFinal mac))
+      (.init mac (SecretKeySpec. k macAlg))
+      (set! v (.doFinal mac v))
+      (when-not (.isEmpty inputs)
+        (.update mac v)
+        (.update mac (unchecked-byte 1))
+        (for-each [^byte/1 input inputs] (.update mac input))
+        (set! k (.doFinal mac))
+        (.init mac (SecretKeySpec. k macAlg))
+        (set! v (.doFinal mac v)))
+      (catch InvalidKeyException e (throw (InternalError. e)))))
+
+  (method ^:protected initEngine ^void [this]
+    (set! macAlg (java-str "HmacSHA" (.substring (.-algorithm this) 4)))
+    (try
+      (set! mac (Mac/getInstance macAlg "SunJCE"))
+      (catch [NoSuchProviderException NoSuchAlgorithmException] e
+        (try
+          (set! mac (Mac/getInstance macAlg))
+          (catch NoSuchAlgorithmException exc
+            (throw (InternalError. (java-str "internal error: " macAlg " not available.") exc)))))))
+
+  (method ^:protected ^:final ^:synchronized hashReseedInternal ^void [this
+                                                                       ^{:tag (List byte/1)} input]
+    (when (nil? v)
+      (set! k (new byte/1 (.-outLen this)))
+      (set! v (new byte/1 (.-outLen this)))
+      (Arrays/fill v (unchecked-byte 1)))
+    (.update this input)
+    (set! (.-reseedCounter this) 1))
+
+  (method ^:public ^:synchronized generateAlgorithm ^void [this ^byte/1 result
+                                                           ^byte/1 additionalInput]
+    (when (some? HmacDrbg/debug) (.println HmacDrbg/debug this "generateAlgorithm"))
+    (when (some? additionalInput) (.update this (Collections/singletonList additionalInput)))
+    (let [^:mutable ^int pos 0
+          ^:mutable len (alength result)]
+      (while (> len 0)
+        (try
+          (.init mac (SecretKeySpec. k macAlg))
+          (catch InvalidKeyException e (throw (InternalError. e))))
+        (set! v (.doFinal mac v))
+        (System/arraycopy v 0 result pos (Math/min len (.-outLen this)))
+        (set! len (unchecked-subtract-int len (.-outLen this)))
+        (when (<= len 0) (break))
+        (set! pos (unchecked-add-int pos (.-outLen this))))
+      (if (some? additionalInput)
+          (.update this (Collections/singletonList additionalInput))
+          (.update this (Collections/emptyList)))
+      (set! (.-reseedCounter this) (unchecked-inc-int (.-reseedCounter this))))))

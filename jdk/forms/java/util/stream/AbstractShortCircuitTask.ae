@@ -1,0 +1,99 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/stream/AbstractShortCircuitTask.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.stream)
+
+(import '(java.util Spliterator)
+        '(java.util.concurrent.atomic AtomicReference))
+
+(defclass ^:abstract AbstractShortCircuitTask
+  :extends (AbstractTask P_IN P_OUT R K)
+  :type-params [P_IN P_OUT R (K extends (AbstractShortCircuitTask P_IN P_OUT R K))]
+
+  (field ^:protected ^:final ^{:tag (AtomicReference R)} sharedResult)
+
+  (field ^:protected ^:volatile ^boolean canceled)
+
+  (constructor ^:protected [this ^{:tag (PipelineHelper P_OUT)} helper
+                            ^{:tag (Spliterator P_IN)} spliterator]
+    (super. helper spliterator)
+    (set! sharedResult (AtomicReference.)))
+
+  (constructor ^:protected [this ^K parent ^{:tag (Spliterator P_IN)} spliterator]
+    (super. parent spliterator)
+    (set! sharedResult (.-sharedResult parent)))
+
+  (method ^:protected ^:abstract getEmptyResult ^R [this])
+
+  (method ^:public compute ^void [this]
+    (let [^:mutable ^{:tag (Spliterator P_IN)} rs (.-spliterator this)
+          ^:mutable ^{:tag (Spliterator P_IN)} ls nil
+          ^:mutable sizeEstimate (.estimateSize rs)
+          sizeThreshold (.getTargetSize this sizeEstimate)
+          ^:mutable forkRight false
+          ^:mutable ^K task this
+          ^{:tag (AtomicReference R)} sr sharedResult
+          ^:mutable ^R result nil]
+      (while (nil? (set! result (.get sr)))
+        (when (.taskCanceled task) (set! result (.getEmptyResult task)) (break))
+        (when (or (<= sizeEstimate sizeThreshold) (nil? (set! ls (.trySplit rs))))
+          (set! result (.doLeaf task))
+          (break))
+        (let [^:mutable ^K leftChild nil
+              ^:mutable ^K rightChild nil
+              ^:mutable ^K taskToFork nil]
+          (set! (.-leftChild task)
+                (set! leftChild (cast AbstractShortCircuitTask (.makeChild task ls))))
+          (set! (.-rightChild task)
+                (set! rightChild (cast AbstractShortCircuitTask (.makeChild task rs))))
+          (.setPendingCount task 1)
+          (if forkRight
+              (do
+                (set! forkRight false)
+                (set! rs ls)
+                (set! task leftChild)
+                (set! taskToFork rightChild))
+              (do (set! forkRight true) (set! task rightChild) (set! taskToFork leftChild)))
+          (.fork taskToFork)
+          (set! sizeEstimate (.estimateSize rs))))
+      (.setLocalResult task result)
+      (.tryComplete task)))
+
+  (method ^:protected shortCircuit ^void [this ^R result]
+    (when (some? result) (.compareAndSet sharedResult nil result)))
+
+  (method ^:protected setLocalResult ^void [this ^R localResult]
+    (if (.isRoot this)
+        (when (some? localResult) (.compareAndSet sharedResult nil localResult))
+        (.setLocalResult super localResult)))
+
+  (method ^:public getRawResult ^R [this] (.getLocalResult this))
+
+  (method ^:public getLocalResult ^R [this]
+    (if (.isRoot this)
+        (let [^R answer (.get sharedResult)] (if (nil? answer) (.getEmptyResult this) answer))
+        (.getLocalResult super)))
+
+  (method ^:protected cancel ^void [this] (set! canceled true))
+
+  (method ^:protected taskCanceled ^boolean [this]
+    (let [^:mutable cancel canceled]
+      (when-not cancel
+        (loop [^K parent (cast AbstractShortCircuitTask (.getParent this))]
+          (when (and (not cancel) (some? parent))
+            (set! cancel (.-canceled parent))
+            (recur (cast AbstractShortCircuitTask (.getParent parent))))))
+      cancel))
+
+  (method ^:protected cancelLaterNodes ^void [this]
+    (loop [^K parent (cast AbstractShortCircuitTask (.getParent this))
+           ^K node this]
+      (if (some? parent)
+          (if (identical? (.-leftChild parent) node)
+              (let [^K rightSibling (cast AbstractShortCircuitTask (.-rightChild parent))]
+                (if (not (.-canceled rightSibling))
+                    (do
+                      (.cancel rightSibling)
+                      (recur (cast AbstractShortCircuitTask (.getParent parent)) parent))
+                    (recur (cast AbstractShortCircuitTask (.getParent parent)) parent)))
+              (recur (cast AbstractShortCircuitTask (.getParent parent)) parent))
+          nil))))

@@ -1,0 +1,284 @@
+;; Converted from jdk26u src/java.base/share/classes/java/text/DigitList.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.text)
+
+(import '(java.math RoundingMode)
+        '(java.nio.charset StandardCharsets)
+        '(jdk.internal.access SharedSecrets)
+        '(jdk.internal.math FloatingDecimal)
+        '(jdk.internal.util ArraysSupport)
+        '(jdk.internal.vm.annotation Stable))
+
+(defclass ^:final DigitList
+  :implements [Cloneable]
+
+  (field ^:public ^:static ^:final ^int MAX_COUNT 19)
+
+  (field ^:public ^int decimalAt 0)
+
+  (field ^:public ^int count 0)
+
+  (field ^:public ^byte/1 digits (new byte/1 MAX_COUNT))
+
+  (field ^:private ^RoundingMode roundingMode RoundingMode/HALF_EVEN)
+
+  (field ^:private ^boolean isNegative false)
+
+  (method isZero ^boolean [this] (not (.nonZeroAfterIndex this 0)))
+
+  (method ^:private nonZeroAfterIndex ^boolean [this ^int index]
+    (loop [^int i index]
+      (if (< i count)
+          (if (not (== (aget digits i) \0)) (return true) (recur (unchecked-inc-int i)))
+          nil))
+    false)
+
+  (method setRoundingMode ^void [this ^RoundingMode r]
+    (set! roundingMode r))
+
+  (method ^:public clear ^void [this] (set! decimalAt 0) (set! count 0))
+
+  (method ^:public append ^void [this ^char digit]
+    (when (== count (alength digits))
+      (let [data (new byte/1 (ArraysSupport/newLength count 1 count))]
+        (System/arraycopy digits 0 data 0 count)
+        (set! digits data)))
+    (aset digits
+          (let [old-1 count] (set! count (unchecked-inc-int count)) old-1)
+          (unchecked-byte digit)))
+
+  (method ^:public getDouble ^double [this]
+    (if (== count 0) 0.0 (FloatingDecimal/parseDoubleSignlessDigits decimalAt digits count)))
+
+  (method ^:public getLong ^long [this]
+    (if (== count 0)
+        0
+        (let [v (Long/parseUnsignedLong (String. digits 0 count StandardCharsets/ISO_8859_1))]
+          (when (< v 0)
+            (when (== v Long/MIN_VALUE) (return Long/MIN_VALUE))
+            (throw (NumberFormatException. "Unexpected negative value")))
+          (try
+            (let [pow10 (Math/powExact 10
+                                       (^[int int] Math/max
+                                         0
+                                         (unchecked-subtract-int decimalAt count)))]
+              (Math/multiplyExact v pow10))
+            (catch ArithmeticException e
+              (throw (NumberFormatException. "Value does not fit into a long")))))))
+
+  (method ^:public getBigDecimal ^BigDecimal [this]
+    (let [count (.-count this)]
+      (if (== count 0)
+          (BigDecimal/valueOf 0 (unchecked-negate-int decimalAt))
+          (let [chars (new char/1 count)]
+            (.inflateBytesToChars (SharedSecrets/getJavaLangAccess) digits 0 chars 0 count)
+            (let [value (BigDecimal. chars 0 count)]
+              (if (== decimalAt count)
+                  value
+                  (.scaleByPowerOfTen value (unchecked-subtract-int decimalAt count))))))))
+
+  (method fitsIntoLong ^boolean [this ^boolean isPositive ^boolean ignoreNegativeZero]
+    (while (and (> count 0) (== (aget digits (unchecked-subtract-int count 1)) \0))
+      (set! count (unchecked-dec-int count)))
+    (cond
+      (== count 0) (or isPositive ignoreNegativeZero)
+      (or (< decimalAt count) (> decimalAt MAX_COUNT)) false
+      (< decimalAt MAX_COUNT) true
+      :else
+        (do
+          (loop [^int i 0]
+            (when (< i count)
+              (let [dig (aget digits i)
+                    max (aget LONG_MIN_REP i)]
+                (when (> dig max) (return false))
+                (if (< dig max) (return true) (recur (unchecked-inc-int i))))))
+          (if (< count decimalAt) true (not isPositive)))))
+
+  (method set ^void [this ^boolean isNegative ^double source ^int maximumFractionDigits]
+    (.set this isNegative source maximumFractionDigits true))
+
+  (field ^:private ^:static ^:final ^boolean COMPAT (Boolean/getBoolean "jdk.compat.DecimalFormat"))
+
+  (method set ^void [this ^boolean isNegative ^double source ^int maximumDigits ^boolean fixedPoint]
+    (java-assert (Double/isFinite source))
+    (let [fdConverter (FloatingDecimal/getBinaryToASCIIConverter source COMPAT)
+          hasBeenRoundedUp (.digitsRoundedUp fdConverter)
+          valueExactAsDecimal (.decimalDigitsExact fdConverter)]
+      (set! count (.getDigits fdConverter digits))
+      (let [exp (unchecked-subtract-int (.getDecimalExponent fdConverter) count)]
+        (.set this isNegative exp hasBeenRoundedUp valueExactAsDecimal maximumDigits fixedPoint))))
+
+  (method ^:private set ^void [this ^boolean isNegative ^int exp ^boolean roundedUp
+                               ^boolean valueExactAsDecimal ^int maximumDigits ^boolean fixedPoint]
+    (set! (.-isNegative this) isNegative)
+    (if (not (.nonZeroAfterIndex this 0))
+        (do (set! count 0) (set! decimalAt 0))
+        (do
+          (set! decimalAt (unchecked-add-int count exp))
+          (while (and (> count 1) (== (aget digits (unchecked-subtract-int count 1)) \0))
+            (set! count (unchecked-dec-int count)))
+          (when fixedPoint
+            (if (> (unchecked-negate-int decimalAt) maximumDigits)
+                (do (set! count 0) (return))
+                (when (== (unchecked-negate-int decimalAt) maximumDigits)
+                  (if (.shouldRoundUp this 0 roundedUp valueExactAsDecimal)
+                      (do
+                        (set! count 1)
+                        (set! decimalAt (unchecked-inc-int decimalAt))
+                        (aset digits 0 (unchecked-byte \1)))
+                      (set! count 0))
+                  (return))))
+          (.round this
+                  (if fixedPoint (unchecked-add-int maximumDigits decimalAt) maximumDigits)
+                  roundedUp
+                  valueExactAsDecimal))))
+
+  (method ^:private roundInt ^void [this ^int maximumDigits]
+    (.round this maximumDigits false true))
+
+  (method ^:private round ^void [this ^:mutable ^int maximumDigits ^boolean alreadyRounded
+                                 ^boolean valueExactAsDecimal]
+    (when (and (>= maximumDigits 0) (< maximumDigits count))
+      (when (.shouldRoundUp this maximumDigits alreadyRounded valueExactAsDecimal)
+        (set! maximumDigits (.roundUp this maximumDigits)))
+      (set! count maximumDigits)
+      (while (and (> count 1) (== (aget digits (unchecked-subtract-int count 1)) \0))
+        (set! count (unchecked-dec-int count)))))
+
+  (method ^:private shouldRoundUp ^boolean [this ^int maximumDigits ^boolean alreadyRounded
+                                            ^boolean valueExactAsDecimal]
+    (when (< maximumDigits count)
+      (switch roundingMode
+        UP (return (.nonZeroAfterIndex this maximumDigits))
+        DOWN nil
+        CEILING (return (and (.nonZeroAfterIndex this maximumDigits) (not isNegative)))
+        FLOOR (return (and (.nonZeroAfterIndex this maximumDigits) isNegative))
+        (HALF_UP HALF_DOWN HALF_EVEN)
+          (cond
+            (> (aget digits maximumDigits) \5) (return true)
+            (== (aget digits maximumDigits) \5)
+              (if (== maximumDigits (unchecked-subtract-int count 1))
+                  (if valueExactAsDecimal
+                      (return (or (identical? roundingMode RoundingMode/HALF_UP)
+                                  (and (and (identical? roundingMode RoundingMode/HALF_EVEN)
+                                            (> maximumDigits 0))
+                                       (not (== (unchecked-remainder-int
+                                                  (aget
+                                                    digits
+                                                    (unchecked-subtract-int maximumDigits 1))
+                                                  2)
+                                                0)))))
+                      (return (not alreadyRounded)))
+                  (return (.nonZeroAfterIndex this (unchecked-add-int maximumDigits 1)))))
+        UNNECESSARY
+          (when (.nonZeroAfterIndex this maximumDigits)
+            (throw
+              (ArithmeticException.
+                "Rounding needed with the rounding mode being set to RoundingMode.UNNECESSARY")))
+        (java-assert false)))
+    false)
+
+  (method ^:private roundUp ^int [this ^:mutable ^int maximumDigits]
+    (loop []
+      (set! maximumDigits (unchecked-dec-int maximumDigits))
+      (when (< maximumDigits 0)
+        (aset digits 0 (unchecked-byte \1))
+        (set! decimalAt (unchecked-inc-int decimalAt))
+        (set! maximumDigits 0)
+        (break))
+      (aset digits maximumDigits (unchecked-byte (unchecked-inc-int (aget digits maximumDigits))))
+      (when (> (aget digits maximumDigits) \9) (recur)))
+    (set! maximumDigits (unchecked-inc-int maximumDigits)))
+
+  (method set ^void [this ^boolean isNegative ^long source]
+    (.set this isNegative source 0))
+
+  (method set ^void [this ^boolean isNegative ^:mutable ^long source ^int maximumDigits]
+    (set! (.-isNegative this) isNegative)
+    (if (<= source 0)
+        (if (== source Long/MIN_VALUE)
+            (do
+              (set! decimalAt (set! count MAX_COUNT))
+              (System/arraycopy LONG_MIN_REP 0 digits 0 count))
+            (set! decimalAt (set! count 0)))
+        (let [^:mutable left MAX_COUNT
+              ^:mutable ^int right 0]
+          (while (> source 0)
+            (aset digits
+                  (set! left (unchecked-dec-int left))
+                  (unchecked-byte (unchecked-add \0 (unchecked-remainder source 10))))
+            (set! source (unchecked-divide source 10)))
+          (set! decimalAt (unchecked-subtract-int MAX_COUNT left))
+          (set! right (unchecked-subtract-int MAX_COUNT 1))
+          (while (== (aget digits right) \0) (set! right (unchecked-dec-int right)))
+          (set! count (unchecked-add-int (unchecked-subtract-int right left) 1))
+          (System/arraycopy digits left digits 0 count)))
+    (when (> maximumDigits 0) (.roundInt this maximumDigits)))
+
+  (method set ^void [this ^boolean isNegative ^BigDecimal source ^int maximumDigits
+                     ^boolean fixedPoint]
+    (let [s (.toString (.unscaledValue source))
+          len (.length s)]
+      (.extendDigits this len)
+      (.getBytes s 0 len digits 0)
+      (set! count len)
+      (.set this
+            isNegative
+            (unchecked-negate-int (.scale source))
+            false
+            true
+            maximumDigits
+            fixedPoint)))
+
+  (method set ^void [this ^boolean isNegative ^BigInteger source ^int maximumDigits]
+    (set! (.-isNegative this) isNegative)
+    (let [s (.toString source)
+          len (.length s)]
+      (.extendDigits this len)
+      (.getBytes s 0 len digits 0)
+      (set! decimalAt len)
+      (let [^:mutable right (unchecked-subtract-int len 1)]
+        (while (and (>= right 0) (== (aget digits right) \0))
+          (set! right (unchecked-dec-int right)))
+        (set! count (unchecked-add-int right 1))
+        (when (> maximumDigits 0) (.roundInt this maximumDigits)))))
+
+  (method ^:public equals ^boolean [this obj]
+    (if (identical? this obj)
+        true
+        (if-instance [^DigitList other obj]
+          (if (or (not (== count (.-count other))) (not (== decimalAt (.-decimalAt other))))
+              false
+              (do
+                (loop [^int i 0]
+                  (if (< i count)
+                      (if (not (== (aget digits i) (aget (.-digits other) i)))
+                          (return false)
+                          (recur (unchecked-inc-int i)))
+                      nil))
+                true))
+          false)))
+
+  (method ^:public hashCode ^int [this]
+    (let [^:mutable hashcode decimalAt]
+      (loop [^int i 0]
+        (when (< i count)
+          (set! hashcode (unchecked-add-int (unchecked-multiply-int hashcode 37) (aget digits i)))
+          (recur (unchecked-inc-int i))))
+      hashcode))
+
+  (method ^:public clone [this]
+    (try
+      (let [other (cast DigitList (.clone super))] (set! (.-digits other) (.clone digits)) other)
+      (catch CloneNotSupportedException e (throw (InternalError. e)))))
+
+  (field ^:private ^:static ^:final ^{Stable true} ^byte/1 LONG_MIN_REP
+    (.getBytes "9223372036854775808" StandardCharsets/ISO_8859_1))
+
+  (method ^:public toString ^String [this]
+    (if (.isZero this)
+        "0"
+        (java-str "0." (String. digits 0 count StandardCharsets/ISO_8859_1) "x10^" decimalAt)))
+
+  (method ^:private extendDigits ^void [this ^int len]
+    (when (> len (alength digits)) (set! digits (new byte/1 len)))))

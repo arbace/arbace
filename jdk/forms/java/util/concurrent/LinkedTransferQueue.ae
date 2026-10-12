@@ -1,0 +1,767 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/LinkedTransferQueue.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.io IOException ObjectInputStream ObjectOutputStream Serializable)
+        '(java.lang.invoke MethodHandles VarHandle)
+        '(java.util AbstractQueue
+                    Arrays
+                    Collection
+                    Iterator
+                    NoSuchElementException
+                    Objects
+                    Spliterator
+                    Spliterators)
+        '(java.util.concurrent.locks LockSupport)
+        '(java.util.function Consumer Predicate))
+
+(defclass ^:public LinkedTransferQueue
+  :extends (AbstractQueue E)
+  :implements [(TransferQueue E) Serializable]
+  :type-params [E]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID -3223113410248163686)
+
+  (defclass ^:static ^:final DualNode
+    :implements [ForkJoinPool$ManagedBlocker]
+
+    (field ^:volatile item)
+
+    (field ^DualNode next)
+
+    (field ^Thread waiter)
+
+    (field ^:final ^boolean isData)
+
+    (constructor [this item ^boolean isData]
+      ^void (^[DualNode Object] VarHandle/.set ITEM this item)
+      (set! (.-isData this) isData))
+
+    (method ^:final cmpExItem [this cmp val]
+      (^[DualNode Object Object] VarHandle/.compareAndExchange ITEM this cmp val))
+
+    (method ^:final cmpExNext ^DualNode [this ^DualNode cmp ^DualNode val]
+      ^DualNode (^[DualNode DualNode DualNode] VarHandle/.compareAndExchange NEXT this cmp val))
+
+    (method ^:final matched ^boolean [this] (not (= isData (some? item))))
+
+    (method ^:final selfLinkItem ^void [this]
+      ^void (^[DualNode DualNode] VarHandle/.set ITEM this this))
+
+    (field ^:private ^:static ^:final ^int SPINS (bit-shift-left-int 1 7))
+
+    (field ^:private ^:static ^:final ^long SPIN_FOR_TIMEOUT_THRESHOLD (bit-shift-left 1 10))
+
+    (field ^:private ^:static ^boolean isUniprocessor
+      (== (.availableProcessors (Runtime/getRuntime)) 1))
+
+    (field ^:private ^:static ^:final ^int UNIPROCESSOR_REFRESH_RATE
+      (unchecked-subtract-int (bit-shift-left-int 1 5) 1))
+
+    (method ^:final await [this e ^:mutable ^long ns blocker ^:mutable ^boolean spin]
+      (let [^:mutable ^Object m nil
+            timed (not (== ns Long/MAX_VALUE))
+            deadline (if timed (unchecked-add (System/nanoTime) ns) 0)
+            upc isUniprocessor
+            w (Thread/currentThread)]
+        (when (and spin (ForkJoinWorkerThread/hasKnownQueuedWork)) (set! spin false))
+        (let [^:mutable ^int spins (if (let [a-1 spin b-2 (not upc)] (and a-1 b-2)) SPINS 0)]
+          (while (identical? (set! m item) e)
+            (cond
+              (>= spins 0)
+                (if (>= (set! spins (unchecked-dec-int spins)) 0)
+                    (Thread/onSpinWait)
+                    (do
+                      (when spin (.checkForUniprocessor this upc))
+                      (LockSupport/setCurrentBlocker blocker)
+                      (set! waiter w)
+                      (VarHandle/fullFence)))
+              (or (.isInterrupted w)
+                  (and timed (<= (set! ns (unchecked-subtract deadline (System/nanoTime))) 0)))
+                (do (set! m (.cmpExItem this e (when (nil? e) ^Object this))) (break))
+              timed
+                (if (< ns SPIN_FOR_TIMEOUT_THRESHOLD)
+                    (Thread/onSpinWait)
+                    (LockSupport/parkNanos ns))
+              (instance? ForkJoinWorkerThread w)
+                (try (ForkJoinPool/managedBlock this) (catch InterruptedException cannotHappen))
+              :else (LockSupport/park)))
+          (when (< spins 0) (LockSupport/setCurrentBlocker nil) (set! waiter nil))
+          m)))
+
+    (method ^:private checkForUniprocessor ^void [this ^boolean prev]
+      (let [r (ThreadLocalRandom/nextSecondarySeed)]
+        (when (== (bit-and-int r UNIPROCESSOR_REFRESH_RATE) 0)
+          (let [u (== (.availableProcessors (Runtime/getRuntime)) 1)]
+            (when-not (= u prev) (set! isUniprocessor u))))))
+
+    (method ^:public ^:final isReleasable ^boolean [this]
+      (or (.matched this) (.isInterrupted (Thread/currentThread))))
+
+    (method ^:public ^:final block ^boolean [this]
+      (while (not (.isReleasable this)) (LockSupport/park))
+      true)
+
+    (field ^:static ^:final ^VarHandle ITEM)
+
+    (field ^:static ^:final ^VarHandle NEXT)
+
+    (static-initializer
+      (try
+        (let [^{:tag (Class ?)} tn DualNode
+              l (MethodHandles/lookup)]
+          (set! ITEM (.findVarHandle l tn "item" Object))
+          (set! NEXT (.findVarHandle l tn "next" tn)))
+        (catch ReflectiveOperationException e (throw (ExceptionInInitializerError. e))))
+      (let [^{:tag (Class ?)} ensureLoaded LockSupport] nil)))
+
+  (field ^:transient ^:volatile ^DualNode head)
+
+  (field ^:transient ^:volatile ^DualNode tail)
+
+  (field ^:transient ^:volatile ^int sweepVotes)
+
+  (method ^:final cmpExTail ^DualNode [this ^DualNode cmp ^DualNode val]
+    ^DualNode (^[LinkedTransferQueue DualNode DualNode] VarHandle/.compareAndExchange
+                TAIL
+                this
+                cmp
+                val))
+
+  (method ^:final cmpExHead ^DualNode [this ^DualNode cmp ^DualNode val]
+    ^DualNode (^[LinkedTransferQueue DualNode DualNode] VarHandle/.compareAndExchange
+                HEAD
+                this
+                cmp
+                val))
+
+  (field ^:static ^:final ^int SWEEP_THRESHOLD (unchecked-subtract-int (bit-shift-left-int 1 4) 1))
+
+  (method ^:final sweepNow ^boolean [this]
+    (== SWEEP_THRESHOLD
+        (bit-and-int ^int (^[LinkedTransferQueue int] VarHandle/.getAndAdd SWEEPVOTES this 1)
+                     SWEEP_THRESHOLD)))
+
+  (method ^:final xfer [this e ^long ns]
+    (let [haveData (some? e)
+          ^:mutable ^Object m nil
+          ^:mutable ^DualNode s nil
+          ^:mutable ^DualNode p nil]
+      (let [^:mutable ^DualNode prevp nil]
+        (label :restart
+          (while true
+            (let [^:mutable ^DualNode h nil
+                  ^:mutable ^DualNode t nil
+                  ^:mutable ^DualNode q nil]
+              (when (and (nil? (set! h head))
+                         (or (== ns 0)
+                             (nil? (set! h (.cmpExHead this nil (set! s (DualNode. e haveData)))))))
+                (set! p nil)
+                (break))
+              (set! p
+                    (if (and (and (some? (set! t tail)) (= (.-isData t) haveData))
+                             (not (identical? t prevp)))
+                        t
+                        h))
+              (set! prevp p)
+              (loop []
+                (set! m (.-item p))
+                (set! q (.-next p))
+                (if (and (not (= (.-isData p) haveData)) (not (= haveData (some? m))))
+                    (do
+                      (when (identical? (.cmpExItem p m e) m)
+                        (let [w (.-waiter p)]
+                          (when (and (not (identical? p h))
+                                     (identical? h (.cmpExHead this h ^DualNode (if (nil? q) p q))))
+                            (set! (.-next h) h))
+                          (LockSupport/unpark w)
+                          (return m)))
+                      (continue :restart))
+                    (when (nil? q)
+                      (when (== ns 0) (break :restart))
+                      (when (nil? s) (set! s (DualNode. e haveData)))
+                      (when (nil? (set! q (.cmpExNext p nil s)))
+                        (when-not (identical? p t) (.cmpExTail this t s))
+                        (break :restart))))
+                (when-not (identical? p (set! p q)) (recur)))))))
+      (cond
+        (or (nil? s) (<= ns 0)) (set! m e)
+        (identical? (set! m (.await s e ns this (or (nil? p) (nil? (.-waiter p))))) e)
+          (.unsplice this p s)
+        (some? m) (.selfLinkItem s))
+      m))
+
+  (method ^:private unsplice ^void [this ^DualNode pred ^DualNode s]
+    (let [^:mutable seen false]
+      (let [^:mutable h head
+            ^:mutable p h
+            ^:mutable ^DualNode f nil]
+        (while (some? p)
+          (let [^boolean matched (if (identical? p s) (set! seen true) (.matched p))]
+            (cond
+              (identical? (set! f (.-next p)) p) (set! p (set! h head))
+              (and (some? f) matched) (set! p f)
+              :else
+                (do
+                  (when (and (not (identical? p h)) (identical? (.cmpExHead this h p) h))
+                    (set! (.-next h) h))
+                  (break))))))
+      (let [^:mutable ^DualNode sn nil]
+        (when (and (and (and (and (and (and (not seen) (some? pred)) (identical? (.-next pred) s))
+                                  (some? s))
+                             (not (identical? (set! sn (.-next s)) s)))
+                        (or (or (nil? sn) (not (identical? (.cmpExNext pred s sn) s)))
+                            (.matched pred)))
+                   (.sweepNow this))
+          (let [^:mutable p head
+                ^:mutable ^DualNode f nil
+                ^:mutable ^DualNode n nil
+                ^:mutable ^DualNode u nil]
+            (while (and (and (some? p) (some? (set! f (.-next p)))) (some? (set! n (.-next f))))
+              (set! p
+                    (cond
+                      (identical? f p) head
+                      (not (.matched f)) f
+                      (identical? f (set! u (.cmpExNext p f n))) n
+                      :else u))))))))
+
+  (method ^:final tryCasSuccessor ^boolean [this ^DualNode pred ^DualNode c ^DualNode p]
+    (cond
+      (some? pred) (identical? (.cmpExNext pred c p) c)
+      (not (identical? (.cmpExHead this c p) c)) false
+      :else (do (when (some? c) (set! (.-next c) c)) true)))
+
+  (method ^:final skipDeadNodes ^DualNode [this ^DualNode pred ^DualNode c ^DualNode p
+                                           ^:mutable ^DualNode q]
+    (when (nil? q) (when (identical? c p) (return pred)) (set! q p))
+    (if (and (.tryCasSuccessor this pred c q) (or (nil? pred) (not (.matched pred)))) pred p))
+
+  (method ^:final tryMatchData ^boolean [this ^DualNode p x]
+    (if (and (and (and (some? p) (.-isData p)) (some? x)) (identical? (.cmpExItem p x nil) x))
+        (do (LockSupport/unpark (.-waiter p)) true)
+        false))
+
+  (method ^:final firstDataNode ^DualNode [this]
+    (let [^:mutable h head
+          ^:mutable p h
+          ^:mutable ^DualNode q nil
+          ^:mutable ^DualNode u nil]
+      (while (some? p)
+        (let [isData (.-isData p)
+              item (.-item p)]
+          (cond
+            (and isData (some? item)) (return p)
+            (and (not isData) (nil? item)) (break)
+            (nil? (set! q (.-next p))) (break)
+            (identical? p q) (set! p (set! h head))
+            (identical? p h) (set! p q)
+            (not (identical? (set! u (.cmpExHead this h q)) h)) (set! p (set! h u))
+            :else (do (set! (.-next h) h) (set! p (set! h q)))))))
+    nil)
+
+  (method ^:final countOfMode ^int [this ^boolean data]
+    (label :restartFromHead
+      (while true
+        (let [^:mutable ^int count 0]
+          (let [^:mutable p head]
+            (while (some? p)
+              (when-not (.matched p)
+                (when-not (= (.-isData p) data) (return 0))
+                (when (== (set! count (unchecked-inc-int count)) Integer/MAX_VALUE) (break)))
+              (when (identical? p (set! p (.-next p))) (continue :restartFromHead))))
+          (return count)))))
+
+  (method ^:public toString ^String [this]
+    (let [^:mutable ^String/1 a nil]
+      (label :restartFromHead
+        (while true
+          (let [^:mutable ^int charLength 0
+                ^:mutable ^int size 0]
+            (let [^:mutable p head]
+              (while (some? p)
+                (let [item (.-item p)]
+                  (cond
+                    (.-isData p)
+                      (when (some? item)
+                        (cond
+                          (nil? a) (set! a (new String/1 4))
+                          (== size (alength a))
+                            (set! a
+                                  (cast String/1 (Arrays/copyOf a (unchecked-multiply-int 2 size)))))
+                        (let [s (.toString item)]
+                          (aset a size s)
+                          (set! size (unchecked-inc-int size))
+                          (set! charLength (unchecked-add-int charLength (.length s)))))
+                    (nil? item) (break))
+                  (when (identical? p (set! p (.-next p))) (continue :restartFromHead)))))
+            (when (== size 0) (return "[]"))
+            (return (Helpers/toString a size charLength)))))))
+
+  (method ^:private toArrayInternal ^Object/1 [this ^Object/1 a]
+    (let [^:mutable x a]
+      (label :restartFromHead
+        (while true
+          (let [^:mutable ^int size 0]
+            (let [^:mutable p head]
+              (while (some? p)
+                (let [item (.-item p)]
+                  (cond
+                    (.-isData p)
+                      (when (some? item)
+                        (cond
+                          (nil? x) (set! x (new Object/1 4))
+                          (== size (alength x))
+                            (set! x
+                                  (Arrays/copyOf
+                                    x
+                                    (unchecked-multiply-int 2 (unchecked-add-int size 4)))))
+                        (aset x size item)
+                        (set! size (unchecked-inc-int size)))
+                    (nil? item) (break))
+                  (when (identical? p (set! p (.-next p))) (continue :restartFromHead)))))
+            (if (nil? x)
+                (return (new Object/1 0))
+                (when (and (some? a) (<= size (alength a)))
+                  (when-not (identical? a x) (System/arraycopy x 0 a 0 size))
+                  (when (< size (alength a)) (aset a size nil))
+                  (return a)))
+            (return (if (== size (alength x)) x (Arrays/copyOf x size))))))))
+
+  (method ^:public toArray ^Object/1 [this] (.toArrayInternal this nil))
+
+  (method ^:public toArray :type-params [T] ^T/1 [this ^T/1 a]
+    (Objects/requireNonNull a)
+    (.toArrayInternal this a))
+
+  (defclass ^:final Itr
+    :implements [(Iterator E)]
+
+    (field ^:private ^DualNode nextNode)
+
+    (field ^:private ^E nextItem)
+
+    (field ^:private ^DualNode lastRet)
+
+    (field ^:private ^DualNode ancestor)
+
+    (method ^:private advance ^void [this ^:mutable ^DualNode pred]
+      (let [^:mutable ^DualNode p (if (nil? pred) head (.-next pred))
+            ^:mutable c p]
+        (while (some? p)
+          (let [isData (.-isData p)
+                item (.-item p)]
+            (cond
+              (and isData (some? item))
+                (do
+                  (set! nextNode p)
+                  (set! nextItem item)
+                  (when-not (identical? c p) (.tryCasSuccessor LinkedTransferQueue/this pred c p))
+                  (return))
+              (and (not isData) (nil? item)) (break))
+            (if (and (not (identical? c p))
+                     (not (.tryCasSuccessor LinkedTransferQueue/this pred c (set! c p))))
+                (do (set! pred p) (set! c (set! p (.-next p))))
+                (when (identical? p (set! p (.-next p))) (set! pred nil) (set! c (set! p head)))))))
+      (set! nextItem nil)
+      (set! nextNode nil))
+
+    (constructor [this] (.advance this nil))
+
+    (method ^:public ^:final hasNext ^boolean [this] (some? nextNode))
+
+    (method ^:public ^:final next ^E [this]
+      (let [^:mutable ^DualNode p nil]
+        (when (nil? (set! p nextNode)) (throw (NoSuchElementException.)))
+        (let [^E e nextItem] (.advance this (set! lastRet p)) e)))
+
+    (method ^:public forEachRemaining ^void [this ^{:tag (Consumer (? super E))} action]
+      (Objects/requireNonNull action)
+      (let [^:mutable ^DualNode q nil]
+        (let [^:mutable ^DualNode p nil]
+          (while (some? (set! p nextNode)) (.accept action nextItem) (.advance this (set! q p))))
+        (when (some? q) (set! lastRet q))))
+
+    (method ^:public ^:final remove ^void [this]
+      (let [lastRet (.-lastRet this)]
+        (when (nil? lastRet) (throw (IllegalStateException.)))
+        (set! (.-lastRet this) nil)
+        (when (some? (.-item lastRet))
+          (let [^:mutable pred ancestor
+                ^:mutable ^DualNode p (if (nil? pred) head (.-next pred))
+                ^:mutable c p
+                ^:mutable ^DualNode q nil]
+            (while (some? p)
+              (when (identical? p lastRet)
+                (.tryMatchData LinkedTransferQueue/this p (.-item p))
+                (when (nil? (set! q (.-next p))) (set! q p))
+                (when-not (identical? c q) (.tryCasSuccessor LinkedTransferQueue/this pred c q))
+                (set! ancestor pred)
+                (return))
+              (let [^:mutable ^Object item nil
+                    ^:mutable ^boolean pAlive false]
+                (when-not (set! pAlive (and (some? (set! item (.-item p))) (.-isData p)))
+                  (when (and (not (.-isData p)) (nil? item)) (break)))
+                (if (or (and (not (identical? c p))
+                             (not (.tryCasSuccessor LinkedTransferQueue/this pred c (set! c p))))
+                        pAlive)
+                    (do (set! pred p) (set! c (set! p (.-next p))))
+                    (when (identical? p (set! p (.-next p))) (set! pred nil) (set! c (set! p head)))))))))))
+
+  (defclass ^:final LTQSpliterator
+    :implements [(Spliterator E)]
+
+    (field ^:static ^:final ^int MAX_BATCH (bit-shift-left-int 1 25))
+
+    (field ^DualNode current)
+
+    (field ^int batch)
+
+    (field ^boolean exhausted)
+
+    (constructor [this])
+
+    (method ^:public trySplit ^{:tag (Spliterator E)} [this]
+      (let [^:mutable ^DualNode p nil
+            ^:mutable ^DualNode q nil]
+        (when-not (or (nil? (set! p (.current this))) (nil? (set! q (.-next p))))
+          (let [^:mutable ^int i 0
+                n (set! batch (Math/min (unchecked-add-int batch 1) MAX_BATCH))
+                ^:mutable ^Object/1 a nil]
+            (loop []
+              (let [item (.-item p)]
+                (if (.-isData p)
+                    (when (some? item)
+                      (when (nil? a) (set! a (new Object/1 n)))
+                      (aset a i item)
+                      (set! i (unchecked-inc-int i)))
+                    (when (nil? item) (set! p nil) (break)))
+                (when (identical? p (set! p q)) (set! p (.firstDataNode LinkedTransferQueue/this))))
+              (when (and (and (some? p) (some? (set! q (.-next p)))) (< i n)) (recur)))
+            (.setCurrent this p)
+            (when-not (== i 0)
+              (Spliterators/spliterator a
+                                        0
+                                        i
+                                        (bit-or-int
+                                          (bit-or-int Spliterator/ORDERED Spliterator/NONNULL)
+                                          Spliterator/CONCURRENT)))))))
+
+    (method ^:public forEachRemaining ^void [this ^{:tag (Consumer (? super E))} action]
+      (Objects/requireNonNull action)
+      (let [^:mutable ^DualNode p nil]
+        (when (some? (set! p (.current this)))
+          (set! current nil)
+          (set! exhausted true)
+          (.forEachFrom LinkedTransferQueue/this action p))))
+
+    (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super E))} action]
+      (Objects/requireNonNull action)
+      (let [^:mutable ^DualNode p nil]
+        (when (some? (set! p (.current this)))
+          (let [^:mutable ^E e nil]
+            (loop []
+              (let [isData (.-isData p)
+                    item (.-item p)]
+                (when (identical? p (set! p (.-next p))) (set! p head))
+                (cond isData (when (some? item) (set! e item) (break)) (nil? item) (set! p nil)))
+              (when (some? p) (recur)))
+            (.setCurrent this p)
+            (when (some? e) (.accept action e) (return true))))
+        false))
+
+    (method ^:private setCurrent ^void [this ^DualNode p]
+      (when (nil? (set! current p)) (set! exhausted true)))
+
+    (method ^:private current ^DualNode [this]
+      (let [^:mutable ^DualNode p nil]
+        (when (and (nil? (set! p current)) (not exhausted))
+          (.setCurrent this (set! p (.firstDataNode LinkedTransferQueue/this))))
+        p))
+
+    (method ^:public estimateSize ^long [this] Long/MAX_VALUE)
+
+    (method ^:public characteristics ^int [this]
+      (bit-or-int (bit-or-int Spliterator/ORDERED Spliterator/NONNULL) Spliterator/CONCURRENT)))
+
+  (method ^:public spliterator ^{:tag (Spliterator E)} [this]
+    (LTQSpliterator.))
+
+  (constructor ^:public [this])
+
+  (constructor ^:public [this ^{:tag (Collection (? extends E))} c]
+    (let [^:mutable ^DualNode h nil
+          ^:mutable ^DualNode t nil]
+      (for-each [e c]
+        (let [newNode (DualNode. (Objects/requireNonNull e) true)]
+          (if (nil? t) (set! h newNode) (set! (.-next t) newNode))
+          (set! t newNode)))
+      (set! head h)
+      (set! tail t)))
+
+  (method ^:public put ^void [this ^E e]
+    (Objects/requireNonNull e)
+    (.xfer this e -1))
+
+  (method ^:public offer ^boolean [this ^E e ^long timeout ^TimeUnit unit]
+    (Objects/requireNonNull e)
+    (.xfer this e -1)
+    true)
+
+  (method ^:public offer ^boolean [this ^E e]
+    (Objects/requireNonNull e)
+    (.xfer this e -1)
+    true)
+
+  (method ^:public add ^boolean [this ^E e]
+    (Objects/requireNonNull e)
+    (.xfer this e -1)
+    true)
+
+  (method ^:public tryTransfer ^boolean [this ^E e]
+    (Objects/requireNonNull e)
+    (nil? (.xfer this e 0)))
+
+  (method ^:public transfer :throws [InterruptedException] ^void [this ^E e]
+    (Objects/requireNonNull e)
+    (when-not (Thread/interrupted)
+      (when (nil? (.xfer this e Long/MAX_VALUE)) (return))
+      (Thread/interrupted))
+    (throw (InterruptedException.)))
+
+  (method ^:public tryTransfer :throws [InterruptedException] ^boolean [this ^E e ^long timeout
+                                                                        ^TimeUnit unit]
+    (Objects/requireNonNull e)
+    (let [nanos (Math/max (.toNanos unit timeout) 0)]
+      (cond
+        (nil? (.xfer this e nanos)) true
+        (not (Thread/interrupted)) false
+        :else (throw (InterruptedException.)))))
+
+  (method ^:public take :throws [InterruptedException] ^E [this]
+    (let [^:mutable ^Object e nil]
+      (when-not (Thread/interrupted)
+        (when (some? (set! e (.xfer this nil Long/MAX_VALUE))) (return e))
+        (Thread/interrupted))
+      (throw (InterruptedException.))))
+
+  (method ^:public poll :throws [InterruptedException] ^E [this ^long timeout ^TimeUnit unit]
+    (let [^:mutable ^Object e nil
+          nanos (Math/max (.toNanos unit timeout) 0)]
+      (if (or (some? (set! e (.xfer this nil nanos))) (not (Thread/interrupted)))
+          e
+          (throw (InterruptedException.)))))
+
+  (method ^:public poll ^E [this] (.xfer this nil 0))
+
+  (method ^:public drainTo ^int [this ^{:tag (Collection (? super E))} c]
+    (Objects/requireNonNull c)
+    (when (identical? c this) (throw (IllegalArgumentException.)))
+    (let [^:mutable ^int n 0]
+      (let [^:mutable ^E e nil]
+        (while (some? (set! e (.poll this))) (.add c e) (set! n (unchecked-inc-int n))))
+      n))
+
+  (method ^:public drainTo ^int [this ^{:tag (Collection (? super E))} c ^int maxElements]
+    (Objects/requireNonNull c)
+    (when (identical? c this) (throw (IllegalArgumentException.)))
+    (let [^:mutable ^int n 0]
+      (let [^:mutable ^E e nil]
+        (while (and (< n maxElements) (some? (set! e (.poll this))))
+          (.add c e)
+          (set! n (unchecked-inc-int n))))
+      n))
+
+  (method ^:public iterator ^{:tag (Iterator E)} [this] (Itr.))
+
+  (method ^:public peek ^E [this]
+    (label :restartFromHead
+      (while true
+        (let [^:mutable p head]
+          (while (some? p)
+            (let [item (.-item p)]
+              (cond
+                (.-isData p) (when (some? item) (let [^E e item] (return e)))
+                (nil? item) (break))
+              (when (identical? p (set! p (.-next p))) (continue :restartFromHead)))))
+        (return nil))))
+
+  (method ^:public isEmpty ^boolean [this] (nil? (.firstDataNode this)))
+
+  (method ^:public hasWaitingConsumer ^boolean [this]
+    (label :restartFromHead
+      (while true
+        (let [^:mutable p head]
+          (while (some? p)
+            (let [item (.-item p)]
+              (cond (.-isData p) (when (some? item) (break)) (nil? item) (return true))
+              (when (identical? p (set! p (.-next p))) (continue :restartFromHead)))))
+        (return false))))
+
+  (method ^:public size ^int [this] (.countOfMode this true))
+
+  (method ^:public getWaitingConsumerCount ^int [this]
+    (.countOfMode this false))
+
+  (method ^:public remove ^boolean [this o]
+    (if (nil? o)
+        false
+        (label :restartFromHead
+          (while true
+            (let [^:mutable p head
+                  ^:mutable ^DualNode pred nil]
+              (while (some? p)
+                (let [isData (.-isData p)
+                      item (.-item p)
+                      ^:mutable q (.-next p)]
+                  (if (some? item)
+                      (when isData
+                        (when (and (.equals o item) (.tryMatchData this p item))
+                          (.skipDeadNodes this pred p p q)
+                          (return true))
+                        (set! pred p)
+                        (set! p q)
+                        (continue))
+                      (when-not isData (break)))
+                  (let [c p]
+                    (while true
+                      (when (or (nil? q) (not (.matched q)))
+                        (set! pred (.skipDeadNodes this pred c p q))
+                        (set! p q)
+                        (break))
+                      (when (identical? p (set! p q)) (continue :restartFromHead))
+                      (set! q (.-next p)))))))
+            (return false)))))
+
+  (method ^:public contains ^boolean [this o]
+    (if (nil? o)
+        false
+        (label :restartFromHead
+          (while true
+            (let [^:mutable p head
+                  ^:mutable ^DualNode pred nil]
+              (while (some? p)
+                (let [isData (.-isData p)
+                      item (.-item p)
+                      ^:mutable q (.-next p)]
+                  (if (some? item)
+                      (when isData
+                        (when (.equals o item) (return true))
+                        (set! pred p)
+                        (set! p q)
+                        (continue))
+                      (when-not isData (break)))
+                  (let [c p]
+                    (while true
+                      (when (or (nil? q) (not (.matched q)))
+                        (set! pred (.skipDeadNodes this pred c p q))
+                        (set! p q)
+                        (break))
+                      (when (identical? p (set! p q)) (continue :restartFromHead))
+                      (set! q (.-next p)))))))
+            (return false)))))
+
+  (method ^:public remainingCapacity ^int [this] Integer/MAX_VALUE)
+
+  (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream s]
+    (.defaultWriteObject s)
+    (for-each [e this] (.writeObject s e))
+    (.writeObject s nil))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream s]
+    (let [^:mutable ^DualNode h nil
+          ^:mutable ^DualNode t nil]
+      (let [^:mutable ^Object item nil]
+        (while (some? (set! item (.readObject s)))
+          (let [newNode (DualNode. item true)]
+            (if (nil? t) (set! h newNode) (set! (.-next t) newNode))
+            (set! t newNode))))
+      (set! head h)
+      (set! tail t)))
+
+  (method ^:public removeIf ^boolean [this ^{:tag (Predicate (? super E))} filter]
+    (Objects/requireNonNull filter)
+    (.bulkRemove this filter))
+
+  (method ^:public removeAll ^boolean [this ^{:tag (Collection ?)} c]
+    (Objects/requireNonNull c)
+    (.bulkRemove this (lambda Predicate ^boolean [e] (.contains c e))))
+
+  (method ^:public retainAll ^boolean [this ^{:tag (Collection ?)} c]
+    (Objects/requireNonNull c)
+    (.bulkRemove this (lambda Predicate ^boolean [e] (not (.contains c e)))))
+
+  (method ^:public clear ^void [this]
+    (.bulkRemove this (lambda Predicate ^boolean [e] true)))
+
+  (field ^:private ^:static ^:final ^int MAX_HOPS 8)
+
+  (method ^:private bulkRemove ^boolean [this ^{:tag (Predicate (? super E))} filter]
+    (let [^:mutable removed false]
+      (label :restartFromHead
+        (while true
+          (let [^:mutable hops MAX_HOPS]
+            (let [^:mutable p head
+                  ^:mutable c p
+                  ^:mutable ^DualNode pred nil
+                  ^:mutable ^DualNode q nil]
+              (while (some? p)
+                (let [isData (.-isData p)
+                      ^:mutable ^boolean pAlive false
+                      item (.-item p)]
+                  (set! q (.-next p))
+                  (cond
+                    (set! pAlive (and (some? item) isData))
+                      (when (.test filter item)
+                        (when (.tryMatchData this p item) (set! removed true))
+                        (set! pAlive false))
+                    (and (not isData) (nil? item)) (break))
+                  (cond
+                    (or (or pAlive (nil? q)) (== (set! hops (unchecked-dec-int hops)) 0))
+                      (when (or (and (not (identical? c p))
+                                     (not (.tryCasSuccessor this pred c (set! c p))))
+                                pAlive)
+                        (set! hops MAX_HOPS)
+                        (set! pred p)
+                        (set! c q))
+                    (identical? p q) (continue :restartFromHead)))
+                (set! p q)))
+            (return removed))))))
+
+  (method forEachFrom ^void [this ^{:tag (Consumer (? super E))} action ^:mutable ^DualNode p]
+    (let [^:mutable ^DualNode pred nil]
+      (while (some? p)
+        (let [isData (.-isData p)
+              item (.-item p)
+              ^:mutable q (.-next p)]
+          (if (some? item)
+              (when isData (.accept action item) (set! pred p) (set! p q) (continue))
+              (when-not isData (break)))
+          (let [c p]
+            (while true
+              (when (or (nil? q) (not (.matched q)))
+                (set! pred (.skipDeadNodes this pred c p q))
+                (set! p q)
+                (break))
+              (when (identical? p (set! p q)) (set! pred nil) (set! p head) (break))
+              (set! q (.-next p))))))))
+
+  (method ^:public forEach ^void [this ^{:tag (Consumer (? super E))} action]
+    (Objects/requireNonNull action)
+    (.forEachFrom this action head))
+
+  (field ^:static ^:final ^VarHandle HEAD)
+
+  (field ^:static ^:final ^VarHandle TAIL)
+
+  (field ^:static ^:final ^VarHandle SWEEPVOTES)
+
+  (static-initializer
+    (try
+      (let [^{:tag (Class ?)} ltq LinkedTransferQueue
+            ^{:tag (Class ?)} tn DualNode
+            l (MethodHandles/lookup)]
+        (set! HEAD (.findVarHandle l ltq "head" tn))
+        (set! TAIL (.findVarHandle l ltq "tail" tn))
+        (set! SWEEPVOTES (.findVarHandle l ltq "sweepVotes" Integer/TYPE)))
+      (catch ReflectiveOperationException e (throw (ExceptionInInitializerError. e))))))

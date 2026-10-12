@@ -786,8 +786,10 @@ The user's decision (2026-10-09): `bin/gate --full` runs one more chain (each st
 `.tmp/gate/` and line in the summary), concurrently with g2a's round trips once the three suites
 (stages 1 and 2, j2a's) are done:
 
-1. `jrt-convert`: `bin/jrt-convert`, then `go-build`: `ARBACE_GO_ARCHES=amd64 bin/arbace-go
-   --build` (a2g and the Go build, the Go cache warm);
+1. `jrt-convert`: `bin/jrt-convert` (since standalone S1, 2026-10-12, `bin/jrt-convert verify`:
+   the same run, then compared with the committed `jdk/`, which the build reads), then
+   `go-build`: `ARBACE_GO_ARCHES=amd64 bin/arbace-go --build` (a2g and the Go build, the Go cache
+   warm);
 2. then concurrently: `go-smoke` (`ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke`); `suite-go`
    (`CLOJURE_TESTS_GO=target/arbace-go/amd64/arbace bin/clojure-tests -j 12`, against
    `test/arbace-go-results.edn`); and `oracle-go` (`bin/oracle check 'target/arbace-go/amd64/arbace

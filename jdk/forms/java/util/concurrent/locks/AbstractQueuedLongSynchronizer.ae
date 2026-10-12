@@ -1,0 +1,716 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/locks/AbstractQueuedLongSynchronizer.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent.locks)
+
+(import '(java.io Serializable)
+        '(java.util ArrayList Collection Date)
+        '(java.util.concurrent ForkJoinPool
+                               ForkJoinPool$ManagedBlocker
+                               RejectedExecutionException
+                               TimeUnit)
+        '(jdk.internal.misc Unsafe))
+
+(defclass ^:public ^:abstract AbstractQueuedLongSynchronizer
+  :extends AbstractOwnableSynchronizer
+  :implements [Serializable]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 7373984972572414692)
+
+  (constructor ^:public [this])
+
+  (field ^:static ^:final ^int WAITING 1)
+
+  (field ^:static ^:final ^int CANCELLED (unchecked-int 0x80000000))
+
+  (field ^:static ^:final ^int COND 2)
+
+  (defclass ^:abstract ^:static Node
+    (field ^:volatile ^Node prev)
+
+    (field ^:volatile ^Node next)
+
+    (field ^Thread waiter)
+
+    (field ^:volatile ^int status)
+
+    (method ^:final casPrev ^boolean [this ^Node c ^Node v]
+      (.weakCompareAndSetReference U this PREV c v))
+
+    (method ^:final casNext ^boolean [this ^Node c ^Node v]
+      (.weakCompareAndSetReference U this NEXT c v))
+
+    (method ^:final getAndUnsetStatus ^int [this ^int v]
+      (.getAndBitwiseAndInt U this STATUS (bit-not-int v)))
+
+    (method ^:final setPrevRelaxed ^void [this ^Node p]
+      (.putReference U this PREV p))
+
+    (method ^:final setStatusRelaxed ^void [this ^int s]
+      (.putInt U this STATUS s))
+
+    (method ^:final clearStatus ^void [this]
+      (.putIntOpaque U this STATUS 0))
+
+    (field ^:private ^:static ^:final ^long STATUS (.objectFieldOffset U Node "status"))
+
+    (field ^:private ^:static ^:final ^long NEXT (.objectFieldOffset U Node "next"))
+
+    (field ^:private ^:static ^:final ^long PREV (.objectFieldOffset U Node "prev")))
+
+  (defclass ^:static ^:final ExclusiveNode
+    :extends Node)
+
+  (defclass ^:static ^:final SharedNode
+    :extends Node)
+
+  (defclass ^:static ^:final ConditionNode
+    :extends Node
+    :implements [ForkJoinPool$ManagedBlocker]
+
+    (field ^ConditionNode nextWaiter)
+
+    (method ^:public ^:final isReleasable ^boolean [this]
+      (or (<= (.-status this) 1) (.isInterrupted (Thread/currentThread))))
+
+    (method ^:public ^:final block ^boolean [this]
+      (while (not (.isReleasable this)) (LockSupport/park))
+      true))
+
+  (field ^:private ^:transient ^:volatile ^Node head)
+
+  (field ^:private ^:transient ^:volatile ^Node tail)
+
+  (field ^:private ^:volatile ^long state)
+
+  (method ^:protected ^:final getState ^long [this] state)
+
+  (method ^:protected ^:final setState ^void [this ^long newState]
+    (set! state newState))
+
+  (method ^:protected ^:final compareAndSetState ^boolean [this ^long expect ^long update]
+    (.compareAndSetLong U this STATE expect update))
+
+  (method ^:private casTail ^boolean [this ^Node c ^Node v]
+    (.compareAndSetReference U this TAIL c v))
+
+  (method ^:private tryInitializeHead ^Node [this]
+    (let [^:mutable ^Node h nil
+          ^:mutable ^Node t nil]
+      (while true
+        (cond
+          (some? (set! t tail)) (return t)
+          (some? head) (Thread/onSpinWait)
+          :else
+            (do
+              (when (nil? h)
+                (try (set! h (ExclusiveNode.)) (catch OutOfMemoryError oome (return nil))))
+              (when (.compareAndSetReference U this HEAD nil h) (return (set! tail h))))))))
+
+  (method ^:final enqueue ^void [this ^ConditionNode node]
+    (when (some? node)
+      (let [^:mutable unpark false]
+        (let [^:mutable ^Node t nil]
+          (while true
+            (when (and (nil? (set! t tail)) (nil? (set! t (.tryInitializeHead this))))
+              (set! unpark true)
+              (break))
+            (.setPrevRelaxed node t)
+            (when (.casTail this t node)
+              (set! (.-next t) node)
+              (when (< (.-status t) 0) (set! unpark true))
+              (break))))
+        (when unpark (LockSupport/unpark (.-waiter node))))))
+
+  (method ^:final isEnqueued ^boolean [this ^Node node]
+    (loop [t tail] (if (some? t) (if (identical? t node) (return true) (recur (.-prev t))) nil))
+    false)
+
+  (method ^:private ^:static signalNext ^void [^Node h]
+    (let [^:mutable ^Node s nil]
+      (when (and (and (some? h) (some? (set! s (.-next h)))) (not (== (.-status s) 0)))
+        (.getAndUnsetStatus s WAITING)
+        (LockSupport/unpark (.-waiter s)))))
+
+  (method ^:private ^:static signalNextIfShared ^void [^Node h]
+    (let [^:mutable ^Node s nil]
+      (when (and (and (and (some? h) (some? (set! s (.-next h)))) (instance? SharedNode s))
+                 (not (== (.-status s) 0)))
+        (.getAndUnsetStatus s WAITING)
+        (LockSupport/unpark (.-waiter s)))))
+
+  (method ^:private ^:final reacquire ^void [this ^Node node ^long arg]
+    (try
+      (.acquire this node arg false false false 0)
+      (catch [Error RuntimeException] firstEx
+        (let [^:mutable nanos 1]
+          (while true
+            (.park U false nanos)
+            (when (< nanos (bit-shift-left 1 30)) (set! nanos (bit-shift-left nanos 1)))
+            (try
+              (.acquire this node arg false false false 0)
+              (catch [Error RuntimeException] ignored (continue)))
+            (throw firstEx))))))
+
+  (method ^:final acquire ^int [this ^:mutable ^Node node ^long arg ^boolean shared
+                                ^boolean interruptible ^boolean timed ^long time]
+    (let [current (Thread/currentThread)
+          ^:mutable ^byte spins 0
+          ^:mutable ^byte postSpins 0
+          ^:mutable interrupted false
+          ^:mutable first false
+          ^:mutable ^Node pred nil]
+      (while true
+        (when (and (and (not first) (some? (set! pred (when (some? node) (.-prev node)))))
+                   (not (set! first (identical? head pred))))
+          (if (< (.-status pred) 0)
+              (do (.cleanQueue this) (continue))
+              (when (nil? (.-prev pred)) (Thread/onSpinWait) (continue))))
+        (when (or first (nil? pred))
+          (let [^:mutable ^boolean acquired false]
+            (try
+              (if shared
+                  (set! acquired (>= (.tryAcquireShared this arg) 0))
+                  (set! acquired (.tryAcquire this arg)))
+              (catch Throwable ex (.cancelAcquire this node interrupted false) (throw ex)))
+            (when acquired
+              (when first
+                (set! (.-prev node) nil)
+                (set! head node)
+                (set! (.-next pred) nil)
+                (set! (.-waiter node) nil)
+                (when shared (AbstractQueuedLongSynchronizer/signalNextIfShared node))
+                (when interrupted (.interrupt current)))
+              (return 1))))
+        (let [^:mutable ^Node t nil]
+          (cond
+            (nil? (set! t tail))
+              (when (nil? (.tryInitializeHead this)) (return (.acquireOnOOME this shared arg)))
+            (nil? node)
+              (try
+                (set! node (if shared ^Node (SharedNode.) ^Node (ExclusiveNode.)))
+                (catch OutOfMemoryError oome (return (.acquireOnOOME this shared arg))))
+            (nil? pred)
+              (do
+                (set! (.-waiter node) current)
+                (.setPrevRelaxed node t)
+                (if (not (.casTail this t node)) (.setPrevRelaxed node nil) (set! (.-next t) node)))
+            (and first (not (== spins 0)))
+              (do (set! spins (unchecked-byte (unchecked-dec-int spins))) (Thread/onSpinWait))
+            (== (.-status node) 0) (set! (.-status node) WAITING)
+            :else
+              (do
+                (set! spins
+                      (set! postSpins
+                            (unchecked-byte (bit-or-int (bit-shift-left-int postSpins 1) 1))))
+                (try
+                  (let [^:mutable ^long nanos 0]
+                    (cond
+                      (not timed) (LockSupport/park this)
+                      (> (set! nanos (unchecked-subtract time (System/nanoTime))) 0)
+                        (LockSupport/parkNanos this nanos)
+                      :else (break)))
+                  (catch [Error RuntimeException] ex
+                    (.cancelAcquire this node interrupted interruptible)
+                    (throw ex)))
+                (.clearStatus node)
+                (when (and (set! interrupted
+                                 (let [a-1 interrupted b-2 (Thread/interrupted)] (or a-1 b-2)))
+                           interruptible)
+                  (break))))))
+      (.cancelAcquire this node interrupted interruptible)))
+
+  (method ^:private acquireOnOOME ^int [this ^boolean shared ^long arg]
+    (let [^:mutable nanos 1]
+      (while true
+        (when (if shared (>= (.tryAcquireShared this arg) 0) (.tryAcquire this arg)) (return 1))
+        (.park U false nanos)
+        (when (< nanos (bit-shift-left 1 30)) (set! nanos (bit-shift-left nanos 1))))))
+
+  (method ^:private cleanQueue ^void [this]
+    (while true
+      (let [^:mutable q tail
+            ^:mutable ^Node s nil
+            ^:mutable ^Node p nil
+            ^:mutable ^Node n nil]
+        (while true
+          (when (or (nil? q) (nil? (set! p (.-prev q)))) (return))
+          (when (if (nil? s)
+                    (not (identical? tail q))
+                    (or (not (identical? (.-prev s) q)) (< (.-status s) 0)))
+            (break))
+          (when (< (.-status q) 0)
+            (when (and (if (nil? s) (.casTail this q p) (.casPrev s q p)) (identical? (.-prev q) p))
+              (.casNext p q s)
+              (when (nil? (.-prev p)) (AbstractQueuedLongSynchronizer/signalNext p)))
+            (break))
+          (when-not (identical? (set! n (.-next p)) q)
+            (when (and (some? n) (identical? (.-prev q) p))
+              (.casNext p n q)
+              (when (nil? (.-prev p)) (AbstractQueuedLongSynchronizer/signalNext p)))
+            (break))
+          (set! s q)
+          (set! q (.-prev q))))))
+
+  (method ^:private cancelAcquire ^int [this ^Node node ^boolean interrupted ^boolean interruptible]
+    (when (some? node)
+      (set! (.-waiter node) nil)
+      (set! (.-status node) CANCELLED)
+      (when (some? (.-prev node)) (.cleanQueue this)))
+    (when interrupted (if interruptible (return CANCELLED) (.interrupt (Thread/currentThread))))
+    0)
+
+  (method ^:protected tryAcquire ^boolean [this ^long arg]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:protected tryRelease ^boolean [this ^long arg]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:protected tryAcquireShared ^long [this ^long arg]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:protected tryReleaseShared ^boolean [this ^long arg]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:protected isHeldExclusively ^boolean [this]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:public ^:final acquire ^void [this ^long arg]
+    (when-not (.tryAcquire this arg) (.acquire this nil arg false false false 0)))
+
+  (method ^:public ^:final acquireInterruptibly :throws [InterruptedException] ^void [this ^long arg]
+    (when (or (Thread/interrupted)
+              (and (not (.tryAcquire this arg)) (< (.acquire this nil arg false true false 0) 0)))
+      (throw (InterruptedException.))))
+
+  (method ^:public ^:final tryAcquireNanos :throws [InterruptedException] ^boolean [this ^long arg
+                                                                                    ^long nanosTimeout]
+    (when-not (Thread/interrupted)
+      (when (.tryAcquire this arg) (return true))
+      (when (<= nanosTimeout 0) (return false))
+      (let [stat (.acquire this
+                           nil
+                           arg
+                           false
+                           true
+                           true
+                           (unchecked-add (System/nanoTime) nanosTimeout))]
+        (when (> stat 0) (return true))
+        (when (== stat 0) (return false))))
+    (throw (InterruptedException.)))
+
+  (method ^:public ^:final release ^boolean [this ^long arg]
+    (if (.tryRelease this arg) (do (AbstractQueuedLongSynchronizer/signalNext head) true) false))
+
+  (method ^:public ^:final acquireShared ^void [this ^long arg]
+    (when (< (.tryAcquireShared this arg) 0) (.acquire this nil arg true false false 0)))
+
+  (method ^:public ^:final acquireSharedInterruptibly :throws [InterruptedException] ^void [this
+                                                                                            ^long arg]
+    (when (or (Thread/interrupted)
+              (and (< (.tryAcquireShared this arg) 0)
+                   (< (.acquire this nil arg true true false 0) 0)))
+      (throw (InterruptedException.))))
+
+  (method ^:public ^:final tryAcquireSharedNanos :throws [InterruptedException] ^boolean [this
+                                                                                          ^long arg
+                                                                                          ^long nanosTimeout]
+    (when-not (Thread/interrupted)
+      (when (>= (.tryAcquireShared this arg) 0) (return true))
+      (when (<= nanosTimeout 0) (return false))
+      (let [stat (.acquire this
+                           nil
+                           arg
+                           true
+                           true
+                           true
+                           (unchecked-add (System/nanoTime) nanosTimeout))]
+        (when (> stat 0) (return true))
+        (when (== stat 0) (return false))))
+    (throw (InterruptedException.)))
+
+  (method ^:public ^:final releaseShared ^boolean [this ^long arg]
+    (if (.tryReleaseShared this arg)
+        (do (AbstractQueuedLongSynchronizer/signalNext head) true)
+        false))
+
+  (method ^:public ^:final hasQueuedThreads ^boolean [this]
+    (loop [p tail
+           h head]
+      (if (and (not (identical? p h)) (some? p))
+          (if (>= (.-status p) 0) (return true) (recur (.-prev p) h))
+          nil))
+    false)
+
+  (method ^:public ^:final hasContended ^boolean [this] (some? head))
+
+  (method ^:public ^:final getFirstQueuedThread ^Thread [this]
+    (let [^:mutable ^Thread first nil
+          ^:mutable ^Thread w nil
+          ^:mutable ^Node h nil
+          ^:mutable ^Node s nil]
+      (when (and (some? (set! h head))
+                 (or (or (nil? (set! s (.-next h))) (nil? (set! first (.-waiter s))))
+                     (nil? (.-prev s))))
+        (let [^:mutable p tail
+              ^:mutable ^Node q nil]
+          (while (and (some? p) (some? (set! q (.-prev p))))
+            (when (some? (set! w (.-waiter p))) (set! first w))
+            (set! p q))))
+      first))
+
+  (method ^:public ^:final isQueued ^boolean [this ^Thread thread]
+    (when (nil? thread) (throw (NullPointerException.)))
+    (loop [p tail]
+      (if (some? p) (if (identical? (.-waiter p) thread) (return true) (recur (.-prev p))) nil))
+    false)
+
+  (method ^:final apparentlyFirstQueuedIsExclusive ^boolean [this]
+    (let [^:mutable ^Node h nil
+          ^:mutable ^Node s nil]
+      (and (and (and (some? (set! h head)) (some? (set! s (.-next h))))
+                (not (instance? SharedNode s)))
+           (some? (.-waiter s)))))
+
+  (method ^:public ^:final hasQueuedPredecessors ^boolean [this]
+    (let [^:mutable ^Thread first nil
+          ^:mutable ^Node h nil
+          ^:mutable ^Node s nil]
+      (when (and (some? (set! h head))
+                 (or (or (nil? (set! s (.-next h))) (nil? (set! first (.-waiter s))))
+                     (nil? (.-prev s))))
+        (set! first (.getFirstQueuedThread this)))
+      (and (some? first) (not (identical? first (Thread/currentThread))))))
+
+  (method ^:public ^:final getQueueLength ^int [this]
+    (let [^:mutable ^int n 0]
+      (loop [p tail]
+        (if (some? p)
+            (if (some? (.-waiter p))
+                (do (set! n (unchecked-inc-int n)) (recur (.-prev p)))
+                (recur (.-prev p)))
+            nil))
+      n))
+
+  (method ^:public ^:final getQueuedThreads ^{:tag (Collection Thread)} [this]
+    (let [^{:tag (ArrayList Thread)} list (ArrayList.)]
+      (loop [p tail]
+        (when (some? p)
+          (let [t (.-waiter p)]
+            (if (some? t) (do (.add list t) (recur (.-prev p))) (recur (.-prev p))))))
+      list))
+
+  (method ^:public ^:final getExclusiveQueuedThreads ^{:tag (Collection Thread)} [this]
+    (let [^{:tag (ArrayList Thread)} list (ArrayList.)]
+      (loop [p tail]
+        (if (some? p)
+            (if (not (instance? SharedNode p))
+                (let [t (.-waiter p)]
+                  (if (some? t) (do (.add list t) (recur (.-prev p))) (recur (.-prev p))))
+                (recur (.-prev p)))
+            nil))
+      list))
+
+  (method ^:public ^:final getSharedQueuedThreads ^{:tag (Collection Thread)} [this]
+    (let [^{:tag (ArrayList Thread)} list (ArrayList.)]
+      (loop [p tail]
+        (if (some? p)
+            (if (instance? SharedNode p)
+                (let [t (.-waiter p)]
+                  (if (some? t) (do (.add list t) (recur (.-prev p))) (recur (.-prev p))))
+                (recur (.-prev p)))
+            nil))
+      list))
+
+  (method ^:public toString ^String [this]
+    (java-str (.toString super)
+              "[State = "
+              (.getState this)
+              ", "
+              (if (.hasQueuedThreads this) "non" "")
+              "empty queue]"))
+
+  (method ^:public ^:final owns ^boolean [this ^ConditionObject condition]
+    (.isOwnedBy condition this))
+
+  (method ^:public ^:final hasWaiters ^boolean [this ^ConditionObject condition]
+    (when-not (.owns this condition) (throw (IllegalArgumentException. "Not owner")))
+    (.hasWaiters condition))
+
+  (method ^:public ^:final getWaitQueueLength ^int [this ^ConditionObject condition]
+    (when-not (.owns this condition) (throw (IllegalArgumentException. "Not owner")))
+    (.getWaitQueueLength condition))
+
+  (method ^:public ^:final getWaitingThreads ^{:tag (Collection Thread)} [this
+                                                                          ^ConditionObject condition]
+    (when-not (.owns this condition) (throw (IllegalArgumentException. "Not owner")))
+    (.getWaitingThreads condition))
+
+  (defclass ^:public ConditionObject
+    :implements [Condition Serializable]
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 1173984872572414699)
+
+    (field ^:private ^:transient ^ConditionNode firstWaiter)
+
+    (field ^:private ^:transient ^ConditionNode lastWaiter)
+
+    (field ^:static ^:final ^long OOME_COND_WAIT_DELAY
+      (unchecked-multiply (unchecked-multiply 10 1000) 1000))
+
+    (constructor ^:public [this])
+
+    (method ^:private doSignal ^void [this ^:mutable ^ConditionNode first ^boolean all]
+      (while (some? first)
+        (let [next (.-nextWaiter first)]
+          (if (nil? (set! firstWaiter next)) (set! lastWaiter nil) (set! (.-nextWaiter first) nil))
+          (when-not (== (bit-and-int (.getAndUnsetStatus first COND) COND) 0)
+            (.enqueue AbstractQueuedLongSynchronizer/this first)
+            (when-not all (break)))
+          (set! first next))))
+
+    (method ^:public ^:final signal ^void [this]
+      (let [first firstWaiter]
+        (cond
+          (not (.isHeldExclusively AbstractQueuedLongSynchronizer/this))
+            (throw (IllegalMonitorStateException.))
+          (some? first) (.doSignal this first false))))
+
+    (method ^:public ^:final signalAll ^void [this]
+      (let [first firstWaiter]
+        (cond
+          (not (.isHeldExclusively AbstractQueuedLongSynchronizer/this))
+            (throw (IllegalMonitorStateException.))
+          (some? first) (.doSignal this first true))))
+
+    (method ^:private enableWait ^long [this ^ConditionNode node]
+      (when (.isHeldExclusively AbstractQueuedLongSynchronizer/this)
+        (set! (.-waiter node) (Thread/currentThread))
+        (.setStatusRelaxed node (bit-or-int COND WAITING))
+        (let [last lastWaiter]
+          (if (nil? last) (set! firstWaiter node) (set! (.-nextWaiter last) node))
+          (set! lastWaiter node)
+          (let [savedState (.getState AbstractQueuedLongSynchronizer/this)]
+            (when (.release AbstractQueuedLongSynchronizer/this savedState) (return savedState)))))
+      (set! (.-status node) CANCELLED)
+      (throw (IllegalMonitorStateException.)))
+
+    (method ^:private canReacquire ^boolean [this ^ConditionNode node]
+      (let [^:mutable ^Node p nil]
+        (and (and (some? node) (some? (set! p (.-prev node))))
+             (or (identical? (.-next p) node)
+                 (.isEnqueued AbstractQueuedLongSynchronizer/this node)))))
+
+    (method ^:private unlinkCancelledWaiters ^void [this ^ConditionNode node]
+      (when (or (or (nil? node) (some? (.-nextWaiter node))) (identical? node lastWaiter))
+        (let [^:mutable w firstWaiter
+              ^:mutable ^ConditionNode trail nil]
+          (while (some? w)
+            (let [next (.-nextWaiter w)]
+              (if (== (bit-and-int (.-status w) COND) 0)
+                  (do
+                    (set! (.-nextWaiter w) nil)
+                    (if (nil? trail) (set! firstWaiter next) (set! (.-nextWaiter trail) next))
+                    (when (nil? next) (set! lastWaiter trail)))
+                  (set! trail w))
+              (set! w next))))))
+
+    (method ^:private newConditionNode ^ConditionNode [this]
+      (let [^:mutable ^long savedState 0]
+        (when (some? (.tryInitializeHead AbstractQueuedLongSynchronizer/this))
+          (try (return (ConditionNode.)) (catch OutOfMemoryError oome)))
+        (when (or
+                (not (.isHeldExclusively AbstractQueuedLongSynchronizer/this))
+                (not (.release AbstractQueuedLongSynchronizer/this
+                               (set! savedState (.getState AbstractQueuedLongSynchronizer/this)))))
+          (throw (IllegalMonitorStateException.)))
+        (.park U false OOME_COND_WAIT_DELAY)
+        (.acquireOnOOME AbstractQueuedLongSynchronizer/this false savedState)
+        nil))
+
+    (method ^:public ^:final awaitUninterruptibly ^void [this]
+      (let [node (.newConditionNode this)]
+        (when (some? node)
+          (let [savedState (.enableWait this node)]
+            (LockSupport/setCurrentBlocker this)
+            (let [^:mutable interrupted false
+                  ^:mutable rejected false]
+              (while (not (.canReacquire this node))
+                (cond
+                  (Thread/interrupted) (set! interrupted true)
+                  (not (== (bit-and-int (.-status node) COND) 0))
+                    (try
+                      (if rejected (.block node) (ForkJoinPool/managedBlock node))
+                      (catch RejectedExecutionException ex (set! rejected true))
+                      (catch InterruptedException ie (set! interrupted true)))
+                  :else (Thread/onSpinWait)))
+              (LockSupport/setCurrentBlocker nil)
+              (.clearStatus node)
+              (.reacquire AbstractQueuedLongSynchronizer/this node savedState)
+              (when interrupted (.interrupt (Thread/currentThread))))))))
+
+    (method ^:public ^:final await :throws [InterruptedException] ^void [this]
+      (when (Thread/interrupted) (throw (InterruptedException.)))
+      (let [node (.newConditionNode this)]
+        (when (some? node)
+          (let [savedState (.enableWait this node)]
+            (LockSupport/setCurrentBlocker this)
+            (let [^:mutable interrupted false
+                  ^:mutable cancelled false
+                  ^:mutable rejected false]
+              (while (not (.canReacquire this node))
+                (cond
+                  (set! interrupted (let [a-3 interrupted b-4 (Thread/interrupted)] (or a-3 b-4)))
+                    (when (set! cancelled
+                                (not (== (bit-and-int (.getAndUnsetStatus node COND) COND) 0)))
+                      (break))
+                  (not (== (bit-and-int (.-status node) COND) 0))
+                    (try
+                      (if rejected (.block node) (ForkJoinPool/managedBlock node))
+                      (catch RejectedExecutionException ex (set! rejected true))
+                      (catch InterruptedException ie (set! interrupted true)))
+                  :else (Thread/onSpinWait)))
+              (LockSupport/setCurrentBlocker nil)
+              (.clearStatus node)
+              (.reacquire AbstractQueuedLongSynchronizer/this node savedState)
+              (when interrupted
+                (when cancelled (.unlinkCancelledWaiters this node) (throw (InterruptedException.)))
+                (.interrupt (Thread/currentThread))))))))
+
+    (method ^:public ^:final awaitNanos :throws [InterruptedException] ^long [this
+                                                                              ^long nanosTimeout]
+      (when (Thread/interrupted) (throw (InterruptedException.)))
+      (let [node (.newConditionNode this)]
+        (if (nil? node)
+            (unchecked-subtract nanosTimeout OOME_COND_WAIT_DELAY)
+            (let [savedState (.enableWait this node)
+                  ^:mutable nanos (if (< nanosTimeout 0) 0 nanosTimeout)
+                  deadline (unchecked-add (System/nanoTime) nanos)
+                  ^:mutable cancelled false
+                  ^:mutable interrupted false]
+              (while (not (.canReacquire this node))
+                (if (or (set! interrupted
+                              (let [a-5 interrupted b-6 (Thread/interrupted)] (or a-5 b-6)))
+                        (<= (set! nanos (unchecked-subtract deadline (System/nanoTime))) 0))
+                    (when (set! cancelled
+                                (not (== (bit-and-int (.getAndUnsetStatus node COND) COND) 0)))
+                      (break))
+                    (LockSupport/parkNanos this nanos)))
+              (.clearStatus node)
+              (.reacquire AbstractQueuedLongSynchronizer/this node savedState)
+              (cond
+                cancelled
+                  (do
+                    (.unlinkCancelledWaiters this node)
+                    (when interrupted (throw (InterruptedException.))))
+                interrupted (.interrupt (Thread/currentThread)))
+              (let [remaining (unchecked-subtract deadline (System/nanoTime))]
+                (if (<= remaining nanosTimeout) remaining Long/MIN_VALUE))))))
+
+    (method ^:public ^:final awaitUntil :throws [InterruptedException] ^boolean [this ^Date deadline]
+      (let [abstime (.getTime deadline)]
+        (when (Thread/interrupted) (throw (InterruptedException.)))
+        (let [node (.newConditionNode this)]
+          (if (nil? node)
+              false
+              (let [savedState (.enableWait this node)
+                    ^:mutable cancelled false
+                    ^:mutable interrupted false]
+                (while (not (.canReacquire this node))
+                  (if (or (set! interrupted
+                                (let [a-7 interrupted b-8 (Thread/interrupted)] (or a-7 b-8)))
+                          (>= (System/currentTimeMillis) abstime))
+                      (when (set! cancelled
+                                  (not (== (bit-and-int (.getAndUnsetStatus node COND) COND) 0)))
+                        (break))
+                      (LockSupport/parkUntil this abstime)))
+                (.clearStatus node)
+                (.reacquire AbstractQueuedLongSynchronizer/this node savedState)
+                (cond
+                  cancelled
+                    (do
+                      (.unlinkCancelledWaiters this node)
+                      (when interrupted (throw (InterruptedException.))))
+                  interrupted (.interrupt (Thread/currentThread)))
+                (not cancelled))))))
+
+    (method ^:public ^:final await :throws [InterruptedException] ^boolean [this ^long time
+                                                                            ^TimeUnit unit]
+      (let [nanosTimeout (.toNanos unit time)]
+        (when (Thread/interrupted) (throw (InterruptedException.)))
+        (let [node (.newConditionNode this)]
+          (if (nil? node)
+              false
+              (let [savedState (.enableWait this node)
+                    ^:mutable nanos (if (< nanosTimeout 0) 0 nanosTimeout)
+                    deadline (unchecked-add (System/nanoTime) nanos)
+                    ^:mutable cancelled false
+                    ^:mutable interrupted false]
+                (while (not (.canReacquire this node))
+                  (if (or (set! interrupted
+                                (let [a-9 interrupted b-10 (Thread/interrupted)] (or a-9 b-10)))
+                          (<= (set! nanos (unchecked-subtract deadline (System/nanoTime))) 0))
+                      (when (set! cancelled
+                                  (not (== (bit-and-int (.getAndUnsetStatus node COND) COND) 0)))
+                        (break))
+                      (LockSupport/parkNanos this nanos)))
+                (.clearStatus node)
+                (.reacquire AbstractQueuedLongSynchronizer/this node savedState)
+                (cond
+                  cancelled
+                    (do
+                      (.unlinkCancelledWaiters this node)
+                      (when interrupted (throw (InterruptedException.))))
+                  interrupted (.interrupt (Thread/currentThread)))
+                (not cancelled))))))
+
+    (method ^:final isOwnedBy ^boolean [this ^AbstractQueuedLongSynchronizer sync]
+      (identical? sync AbstractQueuedLongSynchronizer/this))
+
+    (method ^:protected ^:final hasWaiters ^boolean [this]
+      (when-not (.isHeldExclusively AbstractQueuedLongSynchronizer/this)
+        (throw (IllegalMonitorStateException.)))
+      (loop [w firstWaiter]
+        (if (some? w)
+            (if (not (== (bit-and-int (.-status w) COND) 0)) (return true) (recur (.-nextWaiter w)))
+            nil))
+      false)
+
+    (method ^:protected ^:final getWaitQueueLength ^int [this]
+      (when-not (.isHeldExclusively AbstractQueuedLongSynchronizer/this)
+        (throw (IllegalMonitorStateException.)))
+      (let [^:mutable ^int n 0]
+        (loop [w firstWaiter]
+          (if (some? w)
+              (if (not (== (bit-and-int (.-status w) COND) 0))
+                  (do (set! n (unchecked-inc-int n)) (recur (.-nextWaiter w)))
+                  (recur (.-nextWaiter w)))
+              nil))
+        n))
+
+    (method ^:protected ^:final getWaitingThreads ^{:tag (Collection Thread)} [this]
+      (when-not (.isHeldExclusively AbstractQueuedLongSynchronizer/this)
+        (throw (IllegalMonitorStateException.)))
+      (let [^{:tag (ArrayList Thread)} list (ArrayList.)]
+        (loop [w firstWaiter]
+          (if (some? w)
+              (if (not (== (bit-and-int (.-status w) COND) 0))
+                  (let [t (.-waiter w)]
+                    (if (some? t)
+                        (do (.add list t) (recur (.-nextWaiter w)))
+                        (recur (.-nextWaiter w))))
+                  (recur (.-nextWaiter w)))
+              nil))
+        list)))
+
+  (field ^:private ^:static ^:final ^Unsafe U (Unsafe/getUnsafe))
+
+  (field ^:private ^:static ^:final ^long STATE
+    (.objectFieldOffset U AbstractQueuedLongSynchronizer "state"))
+
+  (field ^:private ^:static ^:final ^long HEAD
+    (.objectFieldOffset U AbstractQueuedLongSynchronizer "head"))
+
+  (field ^:private ^:static ^:final ^long TAIL
+    (.objectFieldOffset U AbstractQueuedLongSynchronizer "tail"))
+
+  (static-initializer (let [^{:tag (Class ?)} ensureLoaded LockSupport] nil)))

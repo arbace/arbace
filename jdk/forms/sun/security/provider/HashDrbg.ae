@@ -1,0 +1,148 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/HashDrbg.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.security DigestException
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        NoSuchProviderException
+                        SecureRandomParameters)
+        '(java.util ArrayList Arrays HexFormat List))
+
+(defclass ^:public HashDrbg
+  :extends AbstractHashDrbg
+
+  (field ^:private ^:static ^:final ^byte/1 ZERO (new byte/1 1))
+
+  (field ^:private ^:static ^:final ^byte/1 ONE (new byte/1 [1]))
+
+  (field ^:private ^MessageDigest digest)
+
+  (field ^:private ^byte/1 v)
+
+  (field ^:private ^byte/1 c)
+
+  (constructor ^:public [this ^SecureRandomParameters params]
+    (set! (.-mechName this) "Hash_DRBG")
+    (.configure this params))
+
+  (method ^:protected initEngine ^void [this]
+    (try
+      (set! digest (MessageDigest/getInstance (.-algorithm this) "SUN"))
+      (catch [NoSuchProviderException NoSuchAlgorithmException] e
+        (try
+          (set! digest (MessageDigest/getInstance (.-algorithm this)))
+          (catch NoSuchAlgorithmException exc
+            (throw (InternalError.
+                     (java-str "internal error: " (.-algorithm this) " not available.")
+                     exc)))))))
+
+  (method ^:private hashDf ^byte/1 [this ^int requested ^{:tag (List byte/1)} inputs]
+    (HashDrbg/hashDf digest (.-outLen this) requested inputs))
+
+  (method ^:public ^:static hashDf ^byte/1 [^MessageDigest digest ^int outLen ^int requested
+                                            ^{:tag (List byte/1)} inputs]
+    (let [len (unchecked-divide-int (unchecked-subtract-int (unchecked-add-int requested outLen) 1)
+                                    outLen)
+          temp (new byte/1 (unchecked-multiply-int len outLen))
+          ^:mutable ^int counter 1]
+      (loop [^int i 0]
+        (when (< i len)
+          (.update digest (unchecked-byte counter))
+          (.update digest (unchecked-byte (bit-shift-right-int requested 21)))
+          (.update digest (unchecked-byte (bit-shift-right-int requested 13)))
+          (.update digest (unchecked-byte (bit-shift-right-int requested 5)))
+          (.update digest (unchecked-byte (bit-shift-left-int requested 3)))
+          (for-each [^byte/1 input inputs] (.update digest input))
+          (try
+            (.digest digest temp (unchecked-multiply-int i outLen) outLen)
+            (catch DigestException e (throw (AssertionError. "will not happen" e))))
+          (set! counter (unchecked-inc-int counter))
+          (recur (unchecked-inc-int i))))
+      (if (== (alength temp) requested) temp (Arrays/copyOf temp requested))))
+
+  (method ^:protected ^:final ^:synchronized hashReseedInternal ^void [this
+                                                                       ^:mutable ^{:tag (List byte/1)} inputs]
+    (let [^:mutable ^byte/1 seed nil]
+      (when (some? v) (.add inputs 0 ONE) (.add inputs 1 v))
+      (set! seed (.hashDf this (.-seedLen this) inputs))
+      (set! v seed)
+      (set! inputs (ArrayList. 2))
+      (.add inputs ZERO)
+      (.add inputs v)
+      (set! c (.hashDf this (.-seedLen this) inputs))
+      (set! (.-reseedCounter this) 1)))
+
+  (method ^:private status ^void [this]
+    (when (some? HashDrbg/debug)
+      (.println HashDrbg/debug this (java-str "V = " (.formatHex (HexFormat/of) v)))
+      (.println HashDrbg/debug this (java-str "C = " (.formatHex (HexFormat/of) c)))
+      (.println HashDrbg/debug this (java-str "reseed counter = " (.-reseedCounter this)))))
+
+  (method ^:private ^:static addBytes ^void [^byte/1 out ^int len & ^byte/2 data]
+    (for-each [^byte/1 d data]
+      (let [dlen (alength d)
+            ^:mutable ^int carry 0]
+        (loop [^int i 0]
+          (when (< i len)
+            (let [^:mutable sum (unchecked-add-int
+                                  (bit-and-int (aget
+                                                 out
+                                                 (unchecked-subtract-int
+                                                   (unchecked-subtract-int len i)
+                                                   1))
+                                               0xff)
+                                  carry)]
+              (when (< i dlen)
+                (set! sum
+                      (unchecked-add-int sum
+                                         (bit-and-int
+                                           (aget
+                                             d
+                                             (unchecked-subtract-int
+                                               (unchecked-subtract-int dlen i)
+                                               1))
+                                           0xff))))
+              (aset out
+                    (unchecked-subtract-int (unchecked-subtract-int len i) 1)
+                    (unchecked-byte sum))
+              (set! carry (bit-shift-right-int sum 8))
+              (when-not (and (>= i (unchecked-subtract-int dlen 1)) (== carry 0))
+                (recur (unchecked-inc-int i)))))))))
+
+  (method ^:public ^:final ^:synchronized generateAlgorithm ^void [this ^byte/1 result
+                                                                   ^byte/1 additionalInput]
+    (when (some? HashDrbg/debug) (.println HashDrbg/debug this "generateAlgorithm"))
+    (when (some? additionalInput)
+      (.update digest (unchecked-byte 2))
+      (.update digest v)
+      (.update digest additionalInput)
+      (HashDrbg/addBytes v (.-seedLen this) (.digest digest)))
+    (.hashGen this result v)
+    (.update digest (unchecked-byte 3))
+    (.update digest v)
+    (let [h (.digest digest)
+          ^byte/1 rcBytes (if (< (.-reseedCounter this) 256)
+                              (new byte/1 [(unchecked-byte (.-reseedCounter this))])
+                              (.toByteArray (BigInteger/valueOf (.-reseedCounter this))))]
+      (HashDrbg/addBytes v (.-seedLen this) h c rcBytes)
+      (set! (.-reseedCounter this) (unchecked-inc-int (.-reseedCounter this)))))
+
+  (method ^:private hashGen ^void [this ^byte/1 output ^byte/1 v]
+    (let [^:mutable data v
+          ^:mutable ^int pos 0
+          ^:mutable len (alength output)]
+      (while (> len 0)
+        (.update digest data)
+        (if (< len (.-outLen this))
+            (let [out (.digest digest)]
+              (System/arraycopy out 0 output pos len)
+              (Arrays/fill out (unchecked-byte 0)))
+            (try
+              (.digest digest output pos (.-outLen this))
+              (catch DigestException e (throw (AssertionError. "will not happen" e)))))
+        (set! len (unchecked-subtract-int len (.-outLen this)))
+        (when (<= len 0) (break))
+        (when (identical? data v) (set! data (Arrays/copyOf v (alength v))))
+        (HashDrbg/addBytes data (.-seedLen this) ONE)
+        (set! pos (unchecked-add-int pos (.-outLen this)))))))

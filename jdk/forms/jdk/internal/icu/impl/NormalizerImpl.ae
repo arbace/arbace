@@ -1,0 +1,1624 @@
+;; Converted from jdk26u src/java.base/share/classes/jdk/internal/icu/impl/NormalizerImpl.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.icu.impl)
+
+(import '(java.io IOException)
+        '(java.nio ByteBuffer)
+        '(jdk.internal.icu.lang UCharacter)
+        '(jdk.internal.icu.text Normalizer2 UTF16)
+        '(jdk.internal.icu.util CodePointTrie$Fast16 VersionInfo))
+
+(defclass ^:public ^:final NormalizerImpl
+  (defclass ^:public ^:static ^:final Hangul
+    (field ^:public ^:static ^:final ^int JAMO_L_BASE 0x1100)
+
+    (field ^:public ^:static ^:final ^int JAMO_V_BASE 0x1161)
+
+    (field ^:public ^:static ^:final ^int JAMO_T_BASE 0x11a7)
+
+    (field ^:public ^:static ^:final ^int HANGUL_BASE 0xac00)
+
+    (field ^:public ^:static ^:final ^int HANGUL_END 0xd7a3)
+
+    (field ^:public ^:static ^:final ^int JAMO_L_COUNT 19)
+
+    (field ^:public ^:static ^:final ^int JAMO_V_COUNT 21)
+
+    (field ^:public ^:static ^:final ^int JAMO_T_COUNT 28)
+
+    (field ^:public ^:static ^:final ^int HANGUL_COUNT
+      (unchecked-multiply-int (unchecked-multiply-int JAMO_L_COUNT JAMO_V_COUNT) JAMO_T_COUNT))
+
+    (field ^:public ^:static ^:final ^int HANGUL_LIMIT (unchecked-add-int HANGUL_BASE HANGUL_COUNT))
+
+    (method ^:public ^:static isHangul ^boolean [^int c]
+      (and (<= HANGUL_BASE c) (< c HANGUL_LIMIT)))
+
+    (method ^:public ^:static isHangulLV ^boolean [^:mutable ^int c]
+      (set! c (unchecked-subtract-int c HANGUL_BASE))
+      (and (and (<= 0 c) (< c HANGUL_COUNT)) (== (unchecked-remainder-int c JAMO_T_COUNT) 0)))
+
+    (method ^:public ^:static decompose ^int [^:mutable ^int c ^Appendable buffer]
+      (try
+        (set! c (unchecked-subtract-int c HANGUL_BASE))
+        (let [c2 (unchecked-remainder-int c JAMO_T_COUNT)]
+          (set! c (unchecked-divide-int c JAMO_T_COUNT))
+          (.append buffer
+                   (unchecked-char
+                     (unchecked-add-int JAMO_L_BASE (unchecked-divide-int c JAMO_V_COUNT))))
+          (.append buffer
+                   (unchecked-char
+                     (unchecked-add-int JAMO_V_BASE (unchecked-remainder-int c JAMO_V_COUNT))))
+          (if (== c2 0)
+              2
+              (do (.append buffer (unchecked-char (unchecked-add-int JAMO_T_BASE c2))) 3)))
+        (catch IOException e (throw (InternalError. e))))))
+
+  (defclass ^:public ^:static ^:final ReorderingBuffer
+    :implements [Appendable]
+
+    (constructor ^:public [this ^NormalizerImpl ni ^Appendable dest ^int destCapacity]
+      (set! impl ni)
+      (set! app dest)
+      (if (instance? StringBuilder app)
+          (do
+            (set! appIsStringBuilder true)
+            (set! str (cast StringBuilder dest))
+            (.ensureCapacity str destCapacity)
+            (set! reorderStart 0)
+            (if (== (.length str) 0)
+                (set! lastCC 0)
+                (do
+                  (.setIterator this)
+                  (set! lastCC (.previousCC this))
+                  (when (> lastCC 1) (while (> (.previousCC this) 1)))
+                  (set! reorderStart codePointLimit))))
+          (do
+            (set! appIsStringBuilder false)
+            (set! str (StringBuilder.))
+            (set! reorderStart 0)
+            (set! lastCC 0))))
+
+    (method ^:public isEmpty ^boolean [this] (== (.length str) 0))
+
+    (method ^:public length ^int [this] (.length str))
+
+    (method ^:public getLastCC ^int [this] lastCC)
+
+    (method ^:public getStringBuilder ^StringBuilder [this] str)
+
+    (method ^:public equals ^boolean [this ^CharSequence s ^int start ^int limit]
+      (UTF16Plus/equal str 0 (.length str) s start limit))
+
+    (method ^:public append ^void [this ^int c ^int cc]
+      (if (or (<= lastCC cc) (== cc 0))
+          (do
+            (.appendCodePoint str c)
+            (set! lastCC cc)
+            (when (<= cc 1) (set! reorderStart (.length str))))
+          (.insert this c cc)))
+
+    (method ^:public append ^void [this ^CharSequence s ^:mutable ^int start ^int limit
+                                   ^boolean isNFD ^:mutable ^int leadCC ^int trailCC]
+      (when-not (== start limit)
+        (if (or (<= lastCC leadCC) (== leadCC 0))
+            (do
+              (cond
+                (<= trailCC 1)
+                  (set! reorderStart
+                        (unchecked-add-int (.length str) (unchecked-subtract-int limit start)))
+                (<= leadCC 1) (set! reorderStart (unchecked-add-int (.length str) 1)))
+              (.append str s start limit)
+              (set! lastCC trailCC))
+            (let [^:mutable c (Character/codePointAt s start)]
+              (set! start (unchecked-add-int start (Character/charCount c)))
+              (.insert this c leadCC)
+              (while (< start limit)
+                (set! c (Character/codePointAt s start))
+                (set! start (unchecked-add-int start (Character/charCount c)))
+                (if (< start limit)
+                    (if isNFD
+                        (set! leadCC (NormalizerImpl/getCCFromYesOrMaybeYes (.getNorm16 impl c)))
+                        (set! leadCC (.getCC impl (.getNorm16 impl c))))
+                    (set! leadCC trailCC))
+                (.append this c leadCC))))))
+
+    (method ^:public append ^ReorderingBuffer [this ^char c]
+      (.append str c)
+      (set! lastCC 0)
+      (set! reorderStart (.length str))
+      this)
+
+    (method ^:public appendZeroCC ^void [this ^int c]
+      (.appendCodePoint str c)
+      (set! lastCC 0)
+      (set! reorderStart (.length str)))
+
+    (method ^:public append ^ReorderingBuffer [this ^CharSequence s]
+      (when-not (== (.length s) 0)
+        (.append str s)
+        (set! lastCC 0)
+        (set! reorderStart (.length str)))
+      this)
+
+    (method ^:public append ^ReorderingBuffer [this ^CharSequence s ^int start ^int limit]
+      (when-not (== start limit)
+        (.append str s start limit)
+        (set! lastCC 0)
+        (set! reorderStart (.length str)))
+      this)
+
+    (method ^:public flush ^void [this]
+      (if appIsStringBuilder
+          (set! reorderStart (.length str))
+          (try
+            (.append app str)
+            (.setLength str 0)
+            (set! reorderStart 0)
+            (catch IOException e (throw (InternalError. e)))))
+      (set! lastCC 0))
+
+    (method ^:public flushAndAppendZeroCC ^ReorderingBuffer [this ^CharSequence s ^int start
+                                                             ^int limit]
+      (if appIsStringBuilder
+          (do (.append str s start limit) (set! reorderStart (.length str)))
+          (try
+            (.append (.append app str) s start limit)
+            (.setLength str 0)
+            (set! reorderStart 0)
+            (catch IOException e (throw (InternalError. e)))))
+      (set! lastCC 0)
+      this)
+
+    (method ^:public remove ^void [this]
+      (.setLength str 0)
+      (set! lastCC 0)
+      (set! reorderStart 0))
+
+    (method ^:public removeSuffix ^void [this ^int suffixLength]
+      (let [oldLength (.length str)]
+        (.delete str (unchecked-subtract-int oldLength suffixLength) oldLength)
+        (set! lastCC 0)
+        (set! reorderStart (.length str))))
+
+    (method ^:private insert ^void [this ^int c ^int cc]
+      (.setIterator this)
+      (.skipPrevious this)
+      (while (> (.previousCC this) cc))
+      (if (<= c 0xffff)
+          (do
+            (.insert str codePointLimit (unchecked-char c))
+            (when (<= cc 1) (set! reorderStart (unchecked-add-int codePointLimit 1))))
+          (do
+            (.insert str codePointLimit (Character/toChars c))
+            (when (<= cc 1) (set! reorderStart (unchecked-add-int codePointLimit 2))))))
+
+    (field ^:private ^:final ^NormalizerImpl impl)
+
+    (field ^:private ^:final ^Appendable app)
+
+    (field ^:private ^:final ^StringBuilder str)
+
+    (field ^:private ^:final ^boolean appIsStringBuilder)
+
+    (field ^:private ^int reorderStart)
+
+    (field ^:private ^int lastCC)
+
+    (method ^:private setIterator ^void [this]
+      (set! codePointStart (.length str)))
+
+    (method ^:private skipPrevious ^void [this]
+      (set! codePointLimit codePointStart)
+      (set! codePointStart (.offsetByCodePoints str codePointStart -1)))
+
+    (method ^:private previousCC ^int [this]
+      (set! codePointLimit codePointStart)
+      (if (>= reorderStart codePointStart)
+          0
+          (let [c (.codePointBefore str codePointStart)]
+            (set! codePointStart (unchecked-subtract-int codePointStart (Character/charCount c)))
+            (.getCCFromYesOrMaybeYesCP impl c))))
+
+    (field ^:private ^int codePointStart)
+
+    (field ^:private ^int codePointLimit))
+
+  (defclass ^:public ^:static ^:final UTF16Plus
+    (method ^:public ^:static isLeadSurrogate ^boolean [^int c]
+      (== (bit-and-int c (unchecked-int 0xfffffc00)) 0xd800))
+
+    (method ^:public ^:static isSurrogateLead ^boolean [^int c]
+      (== (bit-and-int c 0x400) 0))
+
+    (method ^:public ^:static equal ^boolean [^CharSequence s1 ^:mutable ^int start1 ^int limit1
+                                              ^CharSequence s2 ^:mutable ^int start2 ^int limit2]
+      (cond
+        (not (== (unchecked-subtract-int limit1 start1) (unchecked-subtract-int limit2 start2)))
+          false
+        (and (identical? s1 s2) (== start1 start2)) true
+        :else
+          (do
+            (while (< start1 limit1)
+              (when-not (== (.charAt s1
+                                     (let [old-1 start1]
+                                       (set! start1 (unchecked-inc-int start1))
+                                       old-1))
+                            (.charAt s2
+                                     (let [old-2 start2]
+                                       (set! start2 (unchecked-inc-int start2))
+                                       old-2)))
+                (return false)))
+            true))))
+
+  (constructor ^:public [this])
+
+  (defclass ^:private ^:static ^:final IsAcceptable
+    :implements [ICUBinary$Authenticate]
+
+    (method ^:public isDataVersionAcceptable ^boolean [this ^byte/1 version]
+      (== (aget version 0) 5)))
+
+  (field ^:private ^:static ^:final ^IsAcceptable IS_ACCEPTABLE (IsAcceptable.))
+
+  (field ^:private ^:static ^:final ^int DATA_FORMAT 0x4e726d32)
+
+  (method ^:public load ^NormalizerImpl [this ^ByteBuffer bytes]
+    (try
+      (set! dataVersion (ICUBinary/readHeaderAndDataVersion bytes DATA_FORMAT IS_ACCEPTABLE))
+      (let [indexesLength (unchecked-divide-int (.getInt bytes) 4)]
+        (when (<= indexesLength IX_MIN_LCCC_CP)
+          (throw (InternalError. "Normalizer2 data: not enough indexes")))
+        (let [inIndexes (new int/1 indexesLength)]
+          (aset inIndexes 0 (unchecked-multiply-int indexesLength 4))
+          (loop [^int i 1]
+            (when (< i indexesLength)
+              (aset inIndexes i (.getInt bytes))
+              (recur (unchecked-inc-int i))))
+          (set! minDecompNoCP (aget inIndexes IX_MIN_DECOMP_NO_CP))
+          (set! minCompNoMaybeCP (aget inIndexes IX_MIN_COMP_NO_MAYBE_CP))
+          (set! minLcccCP (aget inIndexes IX_MIN_LCCC_CP))
+          (set! minYesNo (aget inIndexes IX_MIN_YES_NO))
+          (set! minYesNoMappingsOnly (aget inIndexes IX_MIN_YES_NO_MAPPINGS_ONLY))
+          (set! minNoNo (aget inIndexes IX_MIN_NO_NO))
+          (set! minNoNoCompBoundaryBefore (aget inIndexes IX_MIN_NO_NO_COMP_BOUNDARY_BEFORE))
+          (set! minNoNoCompNoMaybeCC (aget inIndexes IX_MIN_NO_NO_COMP_NO_MAYBE_CC))
+          (set! minNoNoEmpty (aget inIndexes IX_MIN_NO_NO_EMPTY))
+          (set! limitNoNo (aget inIndexes IX_LIMIT_NO_NO))
+          (set! minMaybeNo (aget inIndexes IX_MIN_MAYBE_NO))
+          (set! minMaybeNoCombinesFwd (aget inIndexes IX_MIN_MAYBE_NO_COMBINES_FWD))
+          (set! minMaybeYes (aget inIndexes IX_MIN_MAYBE_YES))
+          (java-assert (== (bit-and-int minMaybeNo 7) 0))
+          (set! centerNoNoDelta
+                (unchecked-subtract-int
+                  (unchecked-subtract-int (bit-shift-right-int minMaybeNo DELTA_SHIFT) MAX_DELTA)
+                  1))
+          (let [^:mutable offset (aget inIndexes IX_NORM_TRIE_OFFSET)
+                ^:mutable nextOffset (aget inIndexes IX_EXTRA_DATA_OFFSET)
+                triePosition (.position bytes)]
+            (set! normTrie (CodePointTrie$Fast16/fromBinary bytes))
+            (let [trieLength (unchecked-subtract-int (.position bytes) triePosition)]
+              (when (> trieLength (unchecked-subtract-int nextOffset offset))
+                (throw (InternalError. "Normalizer2 data: not enough bytes for normTrie")))
+              (ICUBinary/skipBytes bytes
+                                   (unchecked-subtract-int
+                                     (unchecked-subtract-int nextOffset offset)
+                                     trieLength))
+              (set! offset nextOffset)
+              (set! nextOffset (aget inIndexes IX_SMALL_FCD_OFFSET))
+              (let [numChars (unchecked-divide-int (unchecked-subtract-int nextOffset offset) 2)]
+                (when-not (== numChars 0) (set! extraData (ICUBinary/getString bytes numChars 0)))
+                (set! offset nextOffset)
+                (set! smallFCD (new byte/1 0x100))
+                (.get bytes smallFCD)
+                this)))))
+      (catch IOException e (throw (InternalError. e)))))
+
+  (method ^:public load ^NormalizerImpl [this ^String name]
+    (.load this (ICUBinary/getRequiredData name)))
+
+  (method ^:public getNorm16 ^int [this ^int c]
+    (if (UTF16Plus/isLeadSurrogate c) INERT (.get normTrie c)))
+
+  (method ^:public getRawNorm16 ^int [this ^int c] (.get normTrie c))
+
+  (method ^:public isAlgorithmicNoNo ^boolean [this ^int norm16]
+    (and (<= limitNoNo norm16) (< norm16 minMaybeNo)))
+
+  (method ^:public isCompNo ^boolean [this ^int norm16]
+    (and (<= minNoNo norm16) (< norm16 minMaybeNo)))
+
+  (method ^:public isDecompYes ^boolean [this ^int norm16]
+    (or (< norm16 minYesNo) (<= minMaybeYes norm16)))
+
+  (method ^:public getCC ^int [this ^int norm16]
+    (cond
+      (>= norm16 MIN_NORMAL_MAYBE_YES) (NormalizerImpl/getCCFromNormalYesOrMaybe norm16)
+      (or (< norm16 minNoNo) (<= limitNoNo norm16)) 0
+      :else (.getCCFromNoNo this norm16)))
+
+  (method ^:public ^:static getCCFromNormalYesOrMaybe ^int [^int norm16]
+    (bit-and-int (bit-shift-right-int norm16 OFFSET_SHIFT) 0xff))
+
+  (method ^:public ^:static getCCFromYesOrMaybeYes ^int [^int norm16]
+    (if (>= norm16 MIN_NORMAL_MAYBE_YES) (NormalizerImpl/getCCFromNormalYesOrMaybe norm16) 0))
+
+  (method ^:public getCCFromYesOrMaybeYesCP ^int [this ^int c]
+    (if (< c minCompNoMaybeCP) 0 (NormalizerImpl/getCCFromYesOrMaybeYes (.getNorm16 this c))))
+
+  (method ^:public getFCD16 ^int [this ^int c]
+    (if (< c minDecompNoCP)
+        0
+        (do
+          (when (<= c 0xffff) (when-not (.singleLeadMightHaveNonZeroFCD16 this c) (return 0)))
+          (.getFCD16FromNormData this c))))
+
+  (method ^:public singleLeadMightHaveNonZeroFCD16 ^boolean [this ^int lead]
+    (let [bits (aget smallFCD (bit-shift-right-int lead 8))]
+      (if (== bits 0)
+          false
+          (not (== (bit-and-int (bit-shift-right-int
+                                  bits
+                                  (bit-and-int (bit-shift-right-int lead 5) 7))
+                                1)
+                   0)))))
+
+  (method ^:public getFCD16FromNormData ^int [this ^:mutable ^int c]
+    (let [^:mutable norm16 (.getNorm16 this c)]
+      (when (>= norm16 limitNoNo)
+        (cond
+          (>= norm16 MIN_NORMAL_MAYBE_YES)
+            (do
+              (set! norm16 (NormalizerImpl/getCCFromNormalYesOrMaybe norm16))
+              (return (bit-or-int norm16 (bit-shift-left-int norm16 8))))
+          (>= norm16 minMaybeYes) (return 0)
+          (< norm16 minMaybeNo)
+            (let [deltaTrailCC (bit-and-int norm16 DELTA_TCCC_MASK)]
+              (when (<= deltaTrailCC DELTA_TCCC_1)
+                (return (bit-shift-right-int deltaTrailCC OFFSET_SHIFT)))
+              (set! c (.mapAlgorithmic this c norm16))
+              (set! norm16 (.getRawNorm16 this c)))))
+      (if (or (<= norm16 minYesNo) (.isHangulLVT this norm16))
+          0
+          (let [mapping (.getData this norm16)
+                ^int firstUnit (.charAt extraData mapping)
+                ^:mutable fcd16 (bit-shift-right-int firstUnit 8)]
+            (when-not (== (bit-and-int firstUnit MAPPING_HAS_CCC_LCCC_WORD) 0)
+              (set! fcd16
+                    (bit-or-int fcd16
+                                (bit-and-int (.charAt extraData (unchecked-subtract-int mapping 1))
+                                             0xff00))))
+            fcd16))))
+
+  (method ^:private getFCD16FromMaybeOrNonZeroCC ^int [this ^:mutable ^int norm16]
+    (java-assert (>= norm16 minMaybeNo))
+    (cond
+      (>= norm16 MIN_NORMAL_MAYBE_YES)
+        (do
+          (set! norm16 (NormalizerImpl/getCCFromNormalYesOrMaybe norm16))
+          (bit-or-int norm16 (bit-shift-left-int norm16 8)))
+      (>= norm16 minMaybeYes) 0
+      :else
+        (let [mapping (.getDataForMaybe this norm16)
+              ^int firstUnit (.charAt extraData mapping)]
+          (java-assert (or (== (bit-and-int firstUnit MAPPING_HAS_CCC_LCCC_WORD) 0)
+                           (== (bit-and-int (.charAt extraData (unchecked-subtract-int mapping 1))
+                                            0xff00)
+                               0)))
+          (bit-shift-right-int firstUnit 8))))
+
+  (method ^:public getDecomposition ^String [this ^:mutable ^int c]
+    (let [^:mutable ^int norm16 0]
+      (when-not (or (< c minDecompNoCP)
+                    (.isMaybeYesOrNonZeroCC this (set! norm16 (.getNorm16 this c))))
+        (let [^:mutable ^int decomp -1]
+          (when (.isDecompNoAlgorithmic this norm16)
+            (set! decomp (set! c (.mapAlgorithmic this c norm16)))
+            (set! norm16 (.getRawNorm16 this c)))
+          (cond
+            (< norm16 minYesNo) (when-not (< decomp 0) (UTF16/valueOf decomp))
+            (or (.isHangulLV this norm16) (.isHangulLVT this norm16))
+              (let [buffer (StringBuilder.)] (Hangul/decompose c buffer) (.toString buffer))
+            :else
+              (let [^:mutable mapping (.getData this norm16)
+                    length (bit-and-int (.charAt
+                                          extraData
+                                          (let [old-3 mapping]
+                                            (set! mapping (unchecked-inc-int mapping))
+                                            old-3))
+                                        MAPPING_LENGTH_MASK)]
+                (.substring extraData mapping (unchecked-add-int mapping length))))))))
+
+  (field ^:public ^:static ^:final ^int MIN_YES_YES_WITH_CC 0xfe02)
+
+  (field ^:public ^:static ^:final ^int JAMO_VT 0xfe00)
+
+  (field ^:public ^:static ^:final ^int MIN_NORMAL_MAYBE_YES 0xfc00)
+
+  (field ^:public ^:static ^:final ^int JAMO_L 2)
+
+  (field ^:public ^:static ^:final ^int INERT 1)
+
+  (field ^:public ^:static ^:final ^int HAS_COMP_BOUNDARY_AFTER 1)
+
+  (field ^:public ^:static ^:final ^int OFFSET_SHIFT 1)
+
+  (field ^:public ^:static ^:final ^int DELTA_TCCC_0 0)
+
+  (field ^:public ^:static ^:final ^int DELTA_TCCC_1 2)
+
+  (field ^:public ^:static ^:final ^int DELTA_TCCC_GT_1 4)
+
+  (field ^:public ^:static ^:final ^int DELTA_TCCC_MASK 6)
+
+  (field ^:public ^:static ^:final ^int DELTA_SHIFT 3)
+
+  (field ^:public ^:static ^:final ^int MAX_DELTA 0x40)
+
+  (field ^:public ^:static ^:final ^int IX_NORM_TRIE_OFFSET 0)
+
+  (field ^:public ^:static ^:final ^int IX_EXTRA_DATA_OFFSET 1)
+
+  (field ^:public ^:static ^:final ^int IX_SMALL_FCD_OFFSET 2)
+
+  (field ^:public ^:static ^:final ^int IX_RESERVED3_OFFSET 3)
+
+  (field ^:public ^:static ^:final ^int IX_TOTAL_SIZE 7)
+
+  (field ^:public ^:static ^:final ^int MIN_CCC_LCCC_CP 0x300)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_DECOMP_NO_CP 8)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_COMP_NO_MAYBE_CP 9)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_YES_NO 10)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_NO_NO 11)
+
+  (field ^:public ^:static ^:final ^int IX_LIMIT_NO_NO 12)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_MAYBE_YES 13)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_YES_NO_MAPPINGS_ONLY 14)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_NO_NO_COMP_BOUNDARY_BEFORE 15)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_NO_NO_COMP_NO_MAYBE_CC 16)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_NO_NO_EMPTY 17)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_LCCC_CP 18)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_MAYBE_NO 20)
+
+  (field ^:public ^:static ^:final ^int IX_MIN_MAYBE_NO_COMBINES_FWD 21)
+
+  (field ^:public ^:static ^:final ^int MAPPING_HAS_CCC_LCCC_WORD 0x80)
+
+  (field ^:public ^:static ^:final ^int MAPPING_HAS_RAW_MAPPING 0x40)
+
+  (field ^:public ^:static ^:final ^int MAPPING_LENGTH_MASK 0x1f)
+
+  (field ^:public ^:static ^:final ^int COMP_1_LAST_TUPLE 0x8000)
+
+  (field ^:public ^:static ^:final ^int COMP_1_TRIPLE 1)
+
+  (field ^:public ^:static ^:final ^int COMP_1_TRAIL_LIMIT 0x3400)
+
+  (field ^:public ^:static ^:final ^int COMP_1_TRAIL_MASK 0x7ffe)
+
+  (field ^:public ^:static ^:final ^int COMP_1_TRAIL_SHIFT 9)
+
+  (field ^:public ^:static ^:final ^int COMP_2_TRAIL_SHIFT 6)
+
+  (field ^:public ^:static ^:final ^int COMP_2_TRAIL_MASK 0xffc0)
+
+  (method ^:public decompose ^void [this ^CharSequence s ^int src ^int limit ^StringBuilder dest
+                                    ^:mutable ^int destLengthEstimate]
+    (when (< destLengthEstimate 0) (set! destLengthEstimate (unchecked-subtract-int limit src)))
+    (.setLength dest 0)
+    (let [buffer (ReorderingBuffer. this dest destLengthEstimate)]
+      (.decompose this s src limit buffer)))
+
+  (method ^:public decompose ^int [this ^CharSequence s ^:mutable ^int src ^int limit
+                                   ^ReorderingBuffer buffer]
+    (let [minNoCP minDecompNoCP
+          ^:mutable ^int prevSrc 0
+          ^:mutable ^int c 0
+          ^:mutable ^int norm16 0
+          ^:mutable prevBoundary src
+          ^:mutable ^int prevCC 0]
+      (while true
+        (set! prevSrc src)
+        (while (not (== src limit))
+          (cond
+            (or (< (set! c (.charAt s src)) minNoCP)
+                (.isMostDecompYesAndZeroCC this (set! norm16 (.bmpGet normTrie c))))
+              (set! src (unchecked-inc-int src))
+            (not (UTF16Plus/isLeadSurrogate c)) (break)
+            :else
+              (let [^:mutable ^char c2 (unchecked-char 0)]
+                (if (and (not (== (unchecked-add-int src 1) limit))
+                         (Character/isLowSurrogate (set! c2 (.charAt s (unchecked-add-int src 1)))))
+                    (do
+                      (set! c (Character/toCodePoint (unchecked-char c) c2))
+                      (set! norm16 (.suppGet normTrie c))
+                      (if (.isMostDecompYesAndZeroCC this norm16)
+                          (set! src (unchecked-add-int src 2))
+                          (break)))
+                    (set! src (unchecked-inc-int src))))))
+        (when-not (== src prevSrc)
+          (if (some? buffer)
+              (.flushAndAppendZeroCC buffer s prevSrc src)
+              (do (set! prevCC 0) (set! prevBoundary src))))
+        (when (== src limit) (break))
+        (set! src (unchecked-add-int src (Character/charCount c)))
+        (if (some? buffer)
+            (.decompose this c norm16 buffer)
+            (do
+              (when (.isDecompYes this norm16)
+                (let [cc (NormalizerImpl/getCCFromYesOrMaybeYes norm16)]
+                  (when (or (<= prevCC cc) (== cc 0))
+                    (set! prevCC cc)
+                    (when (<= cc 1) (set! prevBoundary src))
+                    (continue))))
+              (return prevBoundary))))
+      src))
+
+  (method ^:public decomposeAndAppend ^void [this ^CharSequence s ^boolean doDecompose
+                                             ^ReorderingBuffer buffer]
+    (let [limit (.length s)]
+      (when-not (== limit 0)
+        (if doDecompose
+            (.decompose this s 0 limit buffer)
+            (let [^:mutable c (Character/codePointAt s 0)
+                  ^:mutable ^int src 0
+                  ^:mutable ^int firstCC 0
+                  ^:mutable ^int prevCC 0
+                  ^:mutable ^int cc 0]
+              (set! firstCC (set! prevCC (set! cc (.getCC this (.getNorm16 this c)))))
+              (while (not (== cc 0))
+                (set! prevCC cc)
+                (set! src (unchecked-add-int src (Character/charCount c)))
+                (when (>= src limit) (break))
+                (set! c (Character/codePointAt s src))
+                (set! cc (.getCC this (.getNorm16 this c))))
+              (.append buffer s 0 src false firstCC prevCC)
+              (.append buffer s src limit))))))
+
+  (method ^:public compose ^boolean [this ^CharSequence s ^:mutable ^int src ^int limit
+                                     ^boolean onlyContiguous ^boolean doCompose
+                                     ^ReorderingBuffer buffer]
+    (let [^:mutable prevBoundary src
+          minNoMaybeCP minCompNoMaybeCP]
+      (while true
+        (let [^:mutable ^int prevSrc 0
+              ^:mutable ^int c 0
+              ^:mutable ^int norm16 0]
+          (while true
+            (when (== src limit)
+              (when (and (not (== prevBoundary limit)) doCompose)
+                (.append buffer s prevBoundary limit))
+              (return true))
+            (if (or (< (set! c (.charAt s src)) minNoMaybeCP)
+                    (.isCompYesAndZeroCC this (set! norm16 (.bmpGet normTrie c))))
+                (set! src (unchecked-inc-int src))
+                (do
+                  (set! prevSrc src)
+                  (set! src (unchecked-inc-int src))
+                  (if (not (UTF16Plus/isLeadSurrogate c))
+                      (break)
+                      (let [^:mutable ^char c2 (unchecked-char 0)]
+                        (when (and (not (== src limit))
+                                   (Character/isLowSurrogate (set! c2 (.charAt s src))))
+                          (set! src (unchecked-inc-int src))
+                          (set! c (Character/toCodePoint (unchecked-char c) c2))
+                          (set! norm16 (.suppGet normTrie c))
+                          (when-not (.isCompYesAndZeroCC this norm16) (break))))))))
+          (cond
+            (< norm16 minMaybeNo)
+              (do
+                (when-not doCompose (return false))
+                (cond
+                  (.isDecompNoAlgorithmic this norm16)
+                    (when (or (.norm16HasCompBoundaryAfter this norm16 onlyContiguous)
+                              (.hasCompBoundaryBefore this s src limit))
+                      (when-not (== prevBoundary prevSrc) (.append buffer s prevBoundary prevSrc))
+                      (.append buffer (.mapAlgorithmic this c norm16) 0)
+                      (set! prevBoundary src)
+                      (continue))
+                  (< norm16 minNoNoCompBoundaryBefore)
+                    (when (or (.norm16HasCompBoundaryAfter this norm16 onlyContiguous)
+                              (.hasCompBoundaryBefore this s src limit))
+                      (when-not (== prevBoundary prevSrc) (.append buffer s prevBoundary prevSrc))
+                      (let [^:mutable mapping (.getDataForYesOrNo this norm16)
+                            length (bit-and-int (.charAt
+                                                  extraData
+                                                  (let [old-4 mapping]
+                                                    (set! mapping (unchecked-inc-int mapping))
+                                                    old-4))
+                                                MAPPING_LENGTH_MASK)]
+                        (.append buffer extraData mapping (unchecked-add-int mapping length))
+                        (set! prevBoundary src)
+                        (continue)))
+                  (>= norm16 minNoNoEmpty)
+                    (when (or (.hasCompBoundaryBefore this s src limit)
+                              (.hasCompBoundaryAfter this s prevBoundary prevSrc onlyContiguous))
+                      (when-not (== prevBoundary prevSrc) (.append buffer s prevBoundary prevSrc))
+                      (set! prevBoundary src)
+                      (continue))))
+            (and (NormalizerImpl/isJamoVT norm16) (not (== prevBoundary prevSrc)))
+              (let [prev (.charAt s (unchecked-subtract-int prevSrc 1))]
+                (if (< c Hangul/JAMO_T_BASE)
+                    (let [l (unchecked-char (unchecked-subtract-int prev Hangul/JAMO_L_BASE))]
+                      (when (< l Hangul/JAMO_L_COUNT)
+                        (when-not doCompose (return false))
+                        (let [^:mutable ^int t 0]
+                          (cond
+                            (and (and (not (== src limit))
+                                      (< 0
+                                         (set! t
+                                               (unchecked-subtract-int
+                                                 (.charAt s src)
+                                                 Hangul/JAMO_T_BASE))))
+                                 (< t Hangul/JAMO_T_COUNT))
+                              (set! src (unchecked-inc-int src))
+                            (.hasCompBoundaryBefore this s src limit) (set! t 0)
+                            :else (set! t -1))
+                          (when (>= t 0)
+                            (let [syllable (unchecked-add-int
+                                             (unchecked-add-int
+                                               Hangul/HANGUL_BASE
+                                               (unchecked-multiply-int
+                                                 (unchecked-add-int
+                                                   (unchecked-multiply-int l Hangul/JAMO_V_COUNT)
+                                                   (unchecked-subtract-int c Hangul/JAMO_V_BASE))
+                                                 Hangul/JAMO_T_COUNT))
+                                             t)]
+                              (set! prevSrc (unchecked-dec-int prevSrc))
+                              (when-not (== prevBoundary prevSrc)
+                                (.append buffer s prevBoundary prevSrc))
+                              (.append buffer (unchecked-char syllable))
+                              (set! prevBoundary src)
+                              (continue))))))
+                    (when (Hangul/isHangulLV prev)
+                      (when-not doCompose (return false))
+                      (let [syllable (unchecked-subtract-int
+                                       (unchecked-add-int prev c)
+                                       Hangul/JAMO_T_BASE)]
+                        (set! prevSrc (unchecked-dec-int prevSrc))
+                        (when-not (== prevBoundary prevSrc) (.append buffer s prevBoundary prevSrc))
+                        (.append buffer (unchecked-char syllable))
+                        (set! prevBoundary src)
+                        (continue)))))
+            (> norm16 JAMO_VT)
+              (let [^:mutable cc (NormalizerImpl/getCCFromNormalYesOrMaybe norm16)]
+                (if (and onlyContiguous (> (.getPreviousTrailCC this s prevBoundary prevSrc) cc))
+                    (when-not doCompose (return false))
+                    (let [^:mutable ^int n16 0]
+                      (while true
+                        (when (== src limit)
+                          (when doCompose (.append buffer s prevBoundary limit))
+                          (return true))
+                        (let [prevCC cc]
+                          (set! c (Character/codePointAt s src))
+                          (set! n16 (.get normTrie c))
+                          (if (>= n16 MIN_YES_YES_WITH_CC)
+                              (do
+                                (set! cc (NormalizerImpl/getCCFromNormalYesOrMaybe n16))
+                                (when (> prevCC cc) (when-not doCompose (return false)) (break)))
+                              (break))
+                          (set! src (unchecked-add-int src (Character/charCount c)))))
+                      (when (.norm16HasCompBoundaryBefore this n16)
+                        (when (.isCompYesAndZeroCC this n16)
+                          (set! src (unchecked-add-int src (Character/charCount c))))
+                        (continue))))))
+          (when (and (not (== prevBoundary prevSrc))
+                     (not (.norm16HasCompBoundaryBefore this norm16)))
+            (set! c (Character/codePointBefore s prevSrc))
+            (set! norm16 (.get normTrie c))
+            (when-not (.norm16HasCompBoundaryAfter this norm16 onlyContiguous)
+              (set! prevSrc (unchecked-subtract-int prevSrc (Character/charCount c)))))
+          (when (and doCompose (not (== prevBoundary prevSrc)))
+            (.append buffer s prevBoundary prevSrc))
+          (let [recomposeStartIndex (.length buffer)]
+            (.decomposeShort this s prevSrc src false onlyContiguous buffer)
+            (set! src (.decomposeShort this s src limit true onlyContiguous buffer))
+            (.recompose this buffer recomposeStartIndex onlyContiguous)
+            (when-not doCompose
+              (when-not (.equals buffer s prevSrc src) (return false))
+              (.remove buffer))
+            (set! prevBoundary src))))))
+
+  (method ^:public composeQuickCheck ^int [this ^CharSequence s ^:mutable ^int src ^int limit
+                                           ^boolean onlyContiguous ^boolean doSpan]
+    (let [^:mutable ^int qcResult 0
+          ^:mutable prevBoundary src
+          minNoMaybeCP minCompNoMaybeCP]
+      (while true
+        (let [^:mutable ^int prevSrc 0
+              ^:mutable ^int c 0
+              ^:mutable ^int norm16 0]
+          (while true
+            (when (== src limit) (return (bit-or-int (bit-shift-left-int src 1) qcResult)))
+            (if (or (< (set! c (.charAt s src)) minNoMaybeCP)
+                    (.isCompYesAndZeroCC this (set! norm16 (.bmpGet normTrie c))))
+                (set! src (unchecked-inc-int src))
+                (do
+                  (set! prevSrc src)
+                  (set! src (unchecked-inc-int src))
+                  (if (not (UTF16Plus/isLeadSurrogate c))
+                      (break)
+                      (let [^:mutable ^char c2 (unchecked-char 0)]
+                        (when (and (not (== src limit))
+                                   (Character/isLowSurrogate (set! c2 (.charAt s src))))
+                          (set! src (unchecked-inc-int src))
+                          (set! c (Character/toCodePoint (unchecked-char c) c2))
+                          (set! norm16 (.suppGet normTrie c))
+                          (when-not (.isCompYesAndZeroCC this norm16) (break))))))))
+          (let [^:mutable prevNorm16 INERT]
+            (when-not (== prevBoundary prevSrc)
+              (set! prevBoundary prevSrc)
+              (when-not (.norm16HasCompBoundaryBefore this norm16)
+                (set! c (Character/codePointBefore s prevSrc))
+                (let [n16 (.getNorm16 this c)]
+                  (when-not (.norm16HasCompBoundaryAfter this n16 onlyContiguous)
+                    (set! prevBoundary
+                          (unchecked-subtract-int prevBoundary (Character/charCount c)))
+                    (set! prevNorm16 n16)))))
+            (when (>= norm16 minMaybeNo)
+              (let [^:mutable fcd16 (.getFCD16FromMaybeOrNonZeroCC this norm16)
+                    ^:mutable cc (bit-and-int (bit-shift-right-int fcd16 8) 0xff)]
+                (when-not (and (and onlyContiguous (not (== cc 0)))
+                               (> (.getTrailCCFromCompYesAndZeroCC this prevNorm16) cc))
+                  (while true
+                    (when (< norm16 MIN_YES_YES_WITH_CC)
+                      (if (not doSpan)
+                          (set! qcResult 1)
+                          (return (bit-shift-left-int prevBoundary 1))))
+                    (when (== src limit) (return (bit-or-int (bit-shift-left-int src 1) qcResult)))
+                    (let [prevCC (bit-and-int fcd16 0xff)]
+                      (set! c (Character/codePointAt s src))
+                      (set! norm16 (.getNorm16 this c))
+                      (if (>= norm16 minMaybeNo)
+                          (do
+                            (set! fcd16 (.getFCD16FromMaybeOrNonZeroCC this norm16))
+                            (set! cc (bit-and-int (bit-shift-right-int fcd16 8) 0xff))
+                            (when-not (or (<= prevCC cc) (== cc 0)) (break)))
+                          (break))
+                      (set! src (unchecked-add-int src (Character/charCount c)))))
+                  (when (.isCompYesAndZeroCC this norm16)
+                    (set! prevBoundary src)
+                    (set! src (unchecked-add-int src (Character/charCount c)))
+                    (continue)))))
+            (return (bit-shift-left-int prevBoundary 1)))))))
+
+  (method ^:public composeAndAppend ^void [this ^CharSequence s ^boolean doCompose
+                                           ^boolean onlyContiguous ^ReorderingBuffer buffer]
+    (let [^:mutable ^int src 0
+          limit (.length s)]
+      (when-not (.isEmpty buffer)
+        (let [firstStarterInSrc (.findNextCompBoundary this s 0 limit onlyContiguous)]
+          (when-not (== 0 firstStarterInSrc)
+            (let [lastStarterInDest (.findPreviousCompBoundary
+                                      this
+                                      (.getStringBuilder buffer)
+                                      (.length buffer)
+                                      onlyContiguous)
+                  middle (StringBuilder.
+                           (unchecked-add-int
+                             (unchecked-add-int
+                               (unchecked-subtract-int (.length buffer) lastStarterInDest)
+                               firstStarterInSrc)
+                             16))]
+              (.append middle (.getStringBuilder buffer) lastStarterInDest (.length buffer))
+              (.removeSuffix buffer (unchecked-subtract-int (.length buffer) lastStarterInDest))
+              (.append middle s 0 firstStarterInSrc)
+              (.compose this middle 0 (.length middle) onlyContiguous true buffer)
+              (set! src firstStarterInSrc)))))
+      (if doCompose
+          (.compose this s src limit onlyContiguous true buffer)
+          (.append buffer s src limit))))
+
+  (method ^:public makeFCD ^int [this ^CharSequence s ^:mutable ^int src ^int limit
+                                 ^ReorderingBuffer buffer]
+    (let [^:mutable prevBoundary src
+          ^:mutable ^int prevSrc 0
+          ^:mutable ^int c 0
+          ^:mutable ^int prevFCD16 0
+          ^:mutable ^int fcd16 0]
+      (while true
+        (set! prevSrc src)
+        (while (not (== src limit))
+          (cond
+            (< (set! c (.charAt s src)) minLcccCP)
+              (do (set! prevFCD16 (bit-not-int c)) (set! src (unchecked-inc-int src)))
+            (not (.singleLeadMightHaveNonZeroFCD16 this c))
+              (do (set! prevFCD16 0) (set! src (unchecked-inc-int src)))
+            :else
+              (do
+                (when (UTF16Plus/isLeadSurrogate c)
+                  (let [^:mutable ^char c2 (unchecked-char 0)]
+                    (when (and (not (== (unchecked-add-int src 1) limit))
+                               (Character/isLowSurrogate
+                                 (set! c2 (.charAt s (unchecked-add-int src 1)))))
+                      (set! c (Character/toCodePoint (unchecked-char c) c2)))))
+                (if (<= (set! fcd16 (.getFCD16FromNormData this c)) 0xff)
+                    (do
+                      (set! prevFCD16 fcd16)
+                      (set! src (unchecked-add-int src (Character/charCount c))))
+                    (break)))))
+        (cond
+          (not (== src prevSrc))
+            (do
+              (when (== src limit)
+                (when (some? buffer) (.flushAndAppendZeroCC buffer s prevSrc src))
+                (break))
+              (set! prevBoundary src)
+              (if (< prevFCD16 0)
+                  (let [prev (bit-not-int prevFCD16)]
+                    (if (< prev minDecompNoCP)
+                        (set! prevFCD16 0)
+                        (do
+                          (set! prevFCD16 (.getFCD16FromNormData this prev))
+                          (when (> prevFCD16 1)
+                            (set! prevBoundary (unchecked-dec-int prevBoundary))))))
+                  (let [^:mutable p (unchecked-subtract-int src 1)]
+                    (when (and (and (Character/isLowSurrogate (.charAt s p)) (< prevSrc p))
+                               (Character/isHighSurrogate (.charAt s (unchecked-subtract-int p 1))))
+                      (set! p (unchecked-dec-int p))
+                      (set! prevFCD16
+                            (.getFCD16FromNormData
+                              this
+                              (Character/toCodePoint
+                                (.charAt s p)
+                                (.charAt s (unchecked-add-int p 1))))))
+                    (when (> prevFCD16 1) (set! prevBoundary p))))
+              (when (some? buffer)
+                (.flushAndAppendZeroCC buffer s prevSrc prevBoundary)
+                (.append buffer s prevBoundary src))
+              (set! prevSrc src))
+          (== src limit) (break))
+        (set! src (unchecked-add-int src (Character/charCount c)))
+        (cond
+          (<= (bit-and-int prevFCD16 0xff) (bit-shift-right-int fcd16 8))
+            (do
+              (when (<= (bit-and-int fcd16 0xff) 1) (set! prevBoundary src))
+              (when (some? buffer) (.appendZeroCC buffer c))
+              (set! prevFCD16 fcd16))
+          (nil? buffer) (return prevBoundary)
+          :else
+            (do
+              (.removeSuffix buffer (unchecked-subtract-int prevSrc prevBoundary))
+              (set! src (.findNextFCDBoundary this s src limit))
+              (.decomposeShort this s prevBoundary src false false buffer)
+              (set! prevBoundary src)
+              (set! prevFCD16 0))))
+      src))
+
+  (method ^:public hasDecompBoundaryBefore ^boolean [this ^int c]
+    (or (or (< c minLcccCP) (and (<= c 0xffff) (not (.singleLeadMightHaveNonZeroFCD16 this c))))
+        (.norm16HasDecompBoundaryBefore this (.getNorm16 this c))))
+
+  (method ^:public norm16HasDecompBoundaryBefore ^boolean [this ^int norm16]
+    (cond
+      (< norm16 minNoNoCompNoMaybeCC) true
+      (>= norm16 limitNoNo) (or (<= norm16 MIN_NORMAL_MAYBE_YES) (== norm16 JAMO_VT))
+      :else
+        (let [mapping (.getDataForYesOrNo this norm16)
+              ^int firstUnit (.charAt extraData mapping)]
+          (or (== (bit-and-int firstUnit MAPPING_HAS_CCC_LCCC_WORD) 0)
+              (== (bit-and-int (.charAt extraData (unchecked-subtract-int mapping 1)) 0xff00) 0)))))
+
+  (method ^:public hasDecompBoundaryAfter ^boolean [this ^int c]
+    (cond
+      (< c minDecompNoCP) true
+      (and (<= c 0xffff) (not (.singleLeadMightHaveNonZeroFCD16 this c))) true
+      :else (.norm16HasDecompBoundaryAfter this (.getNorm16 this c))))
+
+  (method ^:public norm16HasDecompBoundaryAfter ^boolean [this ^int norm16]
+    (if (or (<= norm16 minYesNo) (.isHangulLVT this norm16))
+        true
+        (do
+          (when (>= norm16 limitNoNo)
+            (cond
+              (.isMaybeYesOrNonZeroCC this norm16)
+                (return (or (<= norm16 MIN_NORMAL_MAYBE_YES) (== norm16 JAMO_VT)))
+              (< norm16 minMaybeNo) (return (<= (bit-and-int norm16 DELTA_TCCC_MASK) DELTA_TCCC_1))))
+          (let [mapping (.getData this norm16)
+                ^int firstUnit (.charAt extraData mapping)]
+            (cond
+              (> firstUnit 0x1ff) false
+              (<= firstUnit 0xff) true
+              :else
+                (or (== (bit-and-int firstUnit MAPPING_HAS_CCC_LCCC_WORD) 0)
+                    (== (bit-and-int (.charAt extraData (unchecked-subtract-int mapping 1)) 0xff00)
+                        0)))))))
+
+  (method ^:public isDecompInert ^boolean [this ^int c]
+    (.isDecompYesAndZeroCC this (.getNorm16 this c)))
+
+  (method ^:public hasCompBoundaryBefore ^boolean [this ^int c]
+    (or (< c minCompNoMaybeCP) (.norm16HasCompBoundaryBefore this (.getNorm16 this c))))
+
+  (method ^:public hasCompBoundaryAfter ^boolean [this ^int c ^boolean onlyContiguous]
+    (.norm16HasCompBoundaryAfter this (.getNorm16 this c) onlyContiguous))
+
+  (method ^:private isMaybe ^boolean [this ^int norm16]
+    (and (<= minMaybeNo norm16) (<= norm16 JAMO_VT)))
+
+  (method ^:private isMaybeYesOrNonZeroCC ^boolean [this ^int norm16]
+    (>= norm16 minMaybeYes))
+
+  (method ^:private ^:static isInert ^boolean [^int norm16]
+    (== norm16 INERT))
+
+  (method ^:private ^:static isJamoVT ^boolean [^int norm16]
+    (== norm16 JAMO_VT))
+
+  (method ^:private hangulLVT ^int [this]
+    (bit-or-int minYesNoMappingsOnly HAS_COMP_BOUNDARY_AFTER))
+
+  (method ^:private isHangulLV ^boolean [this ^int norm16]
+    (== norm16 minYesNo))
+
+  (method ^:private isHangulLVT ^boolean [this ^int norm16]
+    (== norm16 (.hangulLVT this)))
+
+  (method ^:private isCompYesAndZeroCC ^boolean [this ^int norm16]
+    (< norm16 minNoNo))
+
+  (method ^:private isDecompYesAndZeroCC ^boolean [this ^int norm16]
+    (or (or (< norm16 minYesNo) (== norm16 JAMO_VT))
+        (and (<= minMaybeYes norm16) (<= norm16 MIN_NORMAL_MAYBE_YES))))
+
+  (method ^:private isMostDecompYesAndZeroCC ^boolean [this ^int norm16]
+    (or (or (< norm16 minYesNo) (== norm16 MIN_NORMAL_MAYBE_YES)) (== norm16 JAMO_VT)))
+
+  (method ^:private isDecompNoAlgorithmic ^boolean [this ^int norm16]
+    (and (<= limitNoNo norm16) (< norm16 minMaybeNo)))
+
+  (method ^:private getCCFromNoNo ^int [this ^int norm16]
+    (let [mapping (.getDataForYesOrNo this norm16)]
+      (if (not (== (bit-and-int (.charAt extraData mapping) MAPPING_HAS_CCC_LCCC_WORD) 0))
+          (bit-and-int (.charAt extraData (unchecked-subtract-int mapping 1)) 0xff)
+          0)))
+
+  (method getTrailCCFromCompYesAndZeroCC ^int [this ^int norm16]
+    (if (<= norm16 minYesNo)
+        0
+        (bit-shift-right-int (.charAt extraData (.getDataForYesOrNo this norm16)) 8)))
+
+  (method ^:private mapAlgorithmic ^int [this ^int c ^int norm16]
+    (unchecked-subtract-int (unchecked-add-int c (bit-shift-right-int norm16 DELTA_SHIFT))
+                            centerNoNoDelta))
+
+  (method ^:private getDataForYesOrNo ^int [this ^int norm16]
+    (bit-shift-right-int norm16 OFFSET_SHIFT))
+
+  (method ^:private getDataForMaybe ^int [this ^int norm16]
+    (bit-shift-right-int (unchecked-add-int (unchecked-subtract-int norm16 minMaybeNo) limitNoNo)
+                         OFFSET_SHIFT))
+
+  (method ^:private getData ^int [this ^:mutable ^int norm16]
+    (when (>= norm16 minMaybeNo)
+      (set! norm16 (unchecked-add-int (unchecked-subtract-int norm16 minMaybeNo) limitNoNo)))
+    (bit-shift-right-int norm16 OFFSET_SHIFT))
+
+  (method ^:private getCompositionsListForDecompYes ^int [this ^int norm16]
+    (if (or (< norm16 JAMO_L) (<= MIN_NORMAL_MAYBE_YES norm16)) -1 (.getData this norm16)))
+
+  (method ^:private getCompositionsListForComposite ^int [this ^int norm16]
+    (let [list (.getData this norm16)
+          ^int firstUnit (.charAt extraData list)]
+      (unchecked-add-int (unchecked-add-int list 1) (bit-and-int firstUnit MAPPING_LENGTH_MASK))))
+
+  (method ^:private decomposeShort ^int [this ^CharSequence s ^:mutable ^int src ^int limit
+                                         ^boolean stopAtCompBoundary ^boolean onlyContiguous
+                                         ^ReorderingBuffer buffer]
+    (while (< src limit)
+      (let [c (Character/codePointAt s src)]
+        (when (and stopAtCompBoundary (< c minCompNoMaybeCP)) (return src))
+        (let [norm16 (.getNorm16 this c)]
+          (when (and stopAtCompBoundary (.norm16HasCompBoundaryBefore this norm16)) (return src))
+          (set! src (unchecked-add-int src (Character/charCount c)))
+          (.decompose this c norm16 buffer)
+          (when (and stopAtCompBoundary (.norm16HasCompBoundaryAfter this norm16 onlyContiguous))
+            (return src)))))
+    src)
+
+  (method ^:private decompose ^void [this ^:mutable ^int c ^:mutable ^int norm16
+                                     ^ReorderingBuffer buffer]
+    (when (>= norm16 limitNoNo)
+      (if (.isMaybeYesOrNonZeroCC this norm16)
+          (do (.append buffer c (NormalizerImpl/getCCFromYesOrMaybeYes norm16)) (return))
+          (when (< norm16 minMaybeNo)
+            (set! c (.mapAlgorithmic this c norm16))
+            (set! norm16 (.getRawNorm16 this c)))))
+    (cond
+      (< norm16 minYesNo) (.append buffer c 0)
+      (or (.isHangulLV this norm16) (.isHangulLVT this norm16)) (Hangul/decompose c buffer)
+      :else
+        (let [^:mutable mapping (.getData this norm16)
+              ^int firstUnit (.charAt extraData mapping)
+              length (bit-and-int firstUnit MAPPING_LENGTH_MASK)
+              ^:mutable ^int leadCC 0
+              ^:mutable ^int trailCC 0]
+          (set! trailCC (bit-shift-right-int firstUnit 8))
+          (if (not (== (bit-and-int firstUnit MAPPING_HAS_CCC_LCCC_WORD) 0))
+              (set! leadCC
+                    (bit-shift-right-int (.charAt extraData (unchecked-subtract-int mapping 1)) 8))
+              (set! leadCC 0))
+          (set! mapping (unchecked-inc-int mapping))
+          (.append buffer extraData mapping (unchecked-add-int mapping length) true leadCC trailCC))))
+
+  (method ^:private combine ^int [this ^:mutable ^int list ^int trail]
+    (let [^:mutable ^int key1 0
+          ^:mutable ^int firstUnit 0]
+      (if (< trail COMP_1_TRAIL_LIMIT)
+          (do
+            (set! key1 (bit-shift-left-int trail 1))
+            (while (> key1 (set! firstUnit (.charAt extraData list)))
+              (set! list
+                    (unchecked-add-int list
+                                       (unchecked-add-int 2 (bit-and-int firstUnit COMP_1_TRIPLE)))))
+            (when (== key1 (bit-and-int firstUnit COMP_1_TRAIL_MASK))
+              (if (not (== (bit-and-int firstUnit COMP_1_TRIPLE) 0))
+                  (return (bit-or-int (bit-shift-left-int
+                                        (.charAt extraData (unchecked-add-int list 1))
+                                        16)
+                                      (.charAt extraData (unchecked-add-int list 2))))
+                  (return (.charAt extraData (unchecked-add-int list 1))))))
+          (do
+            (set! key1
+                  (unchecked-add-int COMP_1_TRAIL_LIMIT
+                                     (bit-and-int
+                                       (bit-shift-right-int trail COMP_1_TRAIL_SHIFT)
+                                       (bit-not-int COMP_1_TRIPLE))))
+            (let [key2 (bit-and-int (bit-shift-left-int trail COMP_2_TRAIL_SHIFT) 0xffff)
+                  ^:mutable ^int secondUnit 0]
+              (while true
+                (cond
+                  (> key1 (set! firstUnit (.charAt extraData list)))
+                    (set! list
+                          (unchecked-add-int list
+                                             (unchecked-add-int
+                                               2
+                                               (bit-and-int firstUnit COMP_1_TRIPLE))))
+                  (== key1 (bit-and-int firstUnit COMP_1_TRAIL_MASK))
+                    (cond
+                      (> key2 (set! secondUnit (.charAt extraData (unchecked-add-int list 1))))
+                        (if (not (== (bit-and-int firstUnit COMP_1_LAST_TUPLE) 0))
+                            (break)
+                            (set! list (unchecked-add-int list 3)))
+                      (== key2 (bit-and-int secondUnit COMP_2_TRAIL_MASK))
+                        (return (bit-or-int (bit-shift-left-int
+                                              (bit-and-int
+                                                secondUnit
+                                                (bit-not-int COMP_2_TRAIL_MASK))
+                                              16)
+                                            (.charAt extraData (unchecked-add-int list 2))))
+                      :else (break))
+                  :else (break))))))
+      -1))
+
+  (method ^:private recompose ^void [this ^ReorderingBuffer buffer ^int recomposeStartIndex
+                                     ^boolean onlyContiguous]
+    (let [sb (.getStringBuilder buffer)
+          ^:mutable p recomposeStartIndex]
+      (when-not (== p (.length sb))
+        (let [^:mutable ^int starter 0
+              ^:mutable ^int pRemove 0
+              ^:mutable ^int compositionsList 0
+              ^:mutable ^int c 0
+              ^:mutable ^int compositeAndFwd 0
+              ^:mutable ^int norm16 0
+              ^:mutable ^int cc 0
+              ^:mutable ^int prevCC 0
+              ^:mutable ^boolean starterIsSupplementary false]
+          (set! compositionsList -1)
+          (set! starter -1)
+          (set! starterIsSupplementary false)
+          (set! prevCC 0)
+          (while true
+            (set! c (.codePointAt sb p))
+            (set! p (unchecked-add-int p (Character/charCount c)))
+            (set! norm16 (.getNorm16 this c))
+            (set! cc (NormalizerImpl/getCCFromYesOrMaybeYes norm16))
+            (when (and (and (.isMaybe this norm16) (>= compositionsList 0))
+                       (or (< prevCC cc) (== prevCC 0)))
+              (cond
+                (NormalizerImpl/isJamoVT norm16)
+                  (do
+                    (when (< c Hangul/JAMO_T_BASE)
+                      (let [prev (unchecked-char
+                                   (unchecked-subtract-int (.charAt sb starter) Hangul/JAMO_L_BASE))]
+                        (when (< prev Hangul/JAMO_L_COUNT)
+                          (set! pRemove (unchecked-subtract-int p 1))
+                          (let [^:mutable syllable (unchecked-char
+                                                     (unchecked-add-int
+                                                       Hangul/HANGUL_BASE
+                                                       (unchecked-multiply-int
+                                                         (unchecked-add-int
+                                                           (unchecked-multiply-int
+                                                             prev
+                                                             Hangul/JAMO_V_COUNT)
+                                                           (unchecked-subtract-int
+                                                             c
+                                                             Hangul/JAMO_V_BASE))
+                                                         Hangul/JAMO_T_COUNT)))
+                                ^:mutable ^char t (unchecked-char 0)]
+                            (when (and (not (== p (.length sb)))
+                                       (< (set! t
+                                                (unchecked-char
+                                                  (unchecked-subtract-int
+                                                    (.charAt sb p)
+                                                    Hangul/JAMO_T_BASE)))
+                                          Hangul/JAMO_T_COUNT))
+                              (set! p (unchecked-inc-int p))
+                              (set! syllable (unchecked-char (unchecked-add-int syllable t))))
+                            (.setCharAt sb starter syllable)
+                            (.delete sb pRemove p)
+                            (set! p pRemove)))))
+                    (when (== p (.length sb)) (break))
+                    (set! compositionsList -1)
+                    (continue))
+                (>= (set! compositeAndFwd (.combine this compositionsList c)) 0)
+                  (let [composite (bit-shift-right-int compositeAndFwd 1)]
+                    (set! pRemove (unchecked-subtract-int p (Character/charCount c)))
+                    (.delete sb pRemove p)
+                    (set! p pRemove)
+                    (cond
+                      starterIsSupplementary
+                        (if (> composite 0xffff)
+                            (do
+                              (.setCharAt sb starter (UTF16/getLeadSurrogate composite))
+                              (.setCharAt sb
+                                          (unchecked-add-int starter 1)
+                                          (UTF16/getTrailSurrogate composite)))
+                            (do
+                              (.setCharAt sb starter (unchecked-char c))
+                              (.deleteCharAt sb (unchecked-add-int starter 1))
+                              (set! starterIsSupplementary false)
+                              (set! p (unchecked-dec-int p))))
+                      (> composite 0xffff)
+                        (do
+                          (set! starterIsSupplementary true)
+                          (.setCharAt sb starter (UTF16/getLeadSurrogate composite))
+                          (.insert sb
+                                   (unchecked-add-int starter 1)
+                                   (UTF16/getTrailSurrogate composite))
+                          (set! p (unchecked-inc-int p)))
+                      :else (.setCharAt sb starter (unchecked-char composite)))
+                    (when (== p (.length sb)) (break))
+                    (if (not (== (bit-and-int compositeAndFwd 1) 0))
+                        (set!
+                          compositionsList
+                          (.getCompositionsListForComposite this (.getRawNorm16 this composite)))
+                        (set! compositionsList -1))
+                    (continue))))
+            (set! prevCC cc)
+            (when (== p (.length sb)) (break))
+            (cond
+              (== cc 0)
+                (when (>= (set! compositionsList (.getCompositionsListForDecompYes this norm16)) 0)
+                  (if (<= c 0xffff)
+                      (do
+                        (set! starterIsSupplementary false)
+                        (set! starter (unchecked-subtract-int p 1)))
+                      (do
+                        (set! starterIsSupplementary true)
+                        (set! starter (unchecked-subtract-int p 2)))))
+              onlyContiguous (set! compositionsList -1)))
+          (.flush buffer)))))
+
+  (method ^:private hasCompBoundaryBefore ^boolean [this ^int c ^int norm16]
+    (or (< c minCompNoMaybeCP) (.norm16HasCompBoundaryBefore this norm16)))
+
+  (method ^:private norm16HasCompBoundaryBefore ^boolean [this ^int norm16]
+    (or (< norm16 minNoNoCompNoMaybeCC) (.isAlgorithmicNoNo this norm16)))
+
+  (method ^:private hasCompBoundaryBefore ^boolean [this ^CharSequence s ^int src ^int limit]
+    (or (== src limit) (.hasCompBoundaryBefore this (Character/codePointAt s src))))
+
+  (method ^:private norm16HasCompBoundaryAfter ^boolean [this ^int norm16 ^boolean onlyContiguous]
+    (and (not (== (bit-and-int norm16 HAS_COMP_BOUNDARY_AFTER) 0))
+         (or (not onlyContiguous) (.isTrailCC01ForCompBoundaryAfter this norm16))))
+
+  (method ^:private hasCompBoundaryAfter ^boolean [this ^CharSequence s ^int start ^int p
+                                                   ^boolean onlyContiguous]
+    (or (== start p) (.hasCompBoundaryAfter this (Character/codePointBefore s p) onlyContiguous)))
+
+  (method ^:private isTrailCC01ForCompBoundaryAfter ^boolean [this ^int norm16]
+    (or (NormalizerImpl/isInert norm16)
+        (if (.isDecompNoAlgorithmic this norm16)
+            (<= (bit-and-int norm16 DELTA_TCCC_MASK) DELTA_TCCC_1)
+            (<= (.charAt extraData (.getDataForYesOrNo this norm16)) 0x1ff))))
+
+  (method ^:private findPreviousCompBoundary ^int [this ^CharSequence s ^:mutable ^int p
+                                                   ^boolean onlyContiguous]
+    (while (> p 0)
+      (let [c (Character/codePointBefore s p)
+            norm16 (.getNorm16 this c)]
+        (when (.norm16HasCompBoundaryAfter this norm16 onlyContiguous) (break))
+        (set! p (unchecked-subtract-int p (Character/charCount c)))
+        (when (.hasCompBoundaryBefore this c norm16) (break))))
+    p)
+
+  (method ^:private findNextCompBoundary ^int [this ^CharSequence s ^:mutable ^int p ^int limit
+                                               ^boolean onlyContiguous]
+    (while (< p limit)
+      (let [c (Character/codePointAt s p)
+            norm16 (.get normTrie c)]
+        (when (.hasCompBoundaryBefore this c norm16) (break))
+        (set! p (unchecked-add-int p (Character/charCount c)))
+        (when (.norm16HasCompBoundaryAfter this norm16 onlyContiguous) (break))))
+    p)
+
+  (method ^:private findNextFCDBoundary ^int [this ^CharSequence s ^:mutable ^int p ^int limit]
+    (while (< p limit)
+      (let [c (Character/codePointAt s p)
+            ^:mutable ^int norm16 0]
+        (when (or (< c minLcccCP)
+                  (.norm16HasDecompBoundaryBefore this (set! norm16 (.getNorm16 this c))))
+          (break))
+        (set! p (unchecked-add-int p (Character/charCount c)))
+        (when (.norm16HasDecompBoundaryAfter this norm16) (break))))
+    p)
+
+  (method ^:public ^:static getDecompose ^int [^int/1 chars ^String/1 decomps]
+    (let [impl (Normalizer2/getNFDInstance)
+          ^int length 0
+          ^int norm16 0
+          ^:mutable ^int ch -1
+          ^:mutable ^int i 0]
+      (while (< (set! ch (unchecked-inc-int ch)) 0x2fa1e)
+        (cond
+          (== ch 0x30ff) (set! ch 0xf900)
+          (== ch 0x115bc) (set! ch 0x1d15e)
+          (== ch 0x1d1c1) (set! ch 0x2f800))
+        (let [s (.getDecomposition impl ch)]
+          (when (and (some? s) (< i (alength chars)))
+            (aset chars i ch)
+            (aset decomps i s)
+            (set! i (unchecked-inc-int i)))))
+      i))
+
+  (method ^:private ^:static needSingleQuotation ^boolean [^char c]
+    (or (or (or (or (and (>= c 0x0009) (<= c 0x000D)) (and (>= c 0x0020) (<= c 0x002F)))
+                (and (>= c 0x003A) (<= c 0x0040)))
+            (and (>= c 0x005B) (<= c 0x0060)))
+        (and (>= c 0x007B) (<= c 0x007E))))
+
+  (method ^:public ^:static canonicalDecomposeWithSingleQuotation ^String [^String string]
+    (let [impl (Normalizer2/getNFDInstance)
+          src (.toCharArray string)
+          ^:mutable ^int srcIndex 0
+          srcLimit (alength src)
+          ^:mutable dest (new char/1 (unchecked-multiply-int (alength src) 3))
+          ^:mutable ^int destIndex 0
+          ^:mutable destLimit (alength dest)
+          ^:mutable ^int prevSrc 0
+          ^:mutable ^String norm nil
+          ^:mutable ^int reorderStartIndex 0
+          ^:mutable ^int length 0
+          ^:mutable ^char c1 (unchecked-char 0)
+          ^:mutable ^char c2 (unchecked-char 0)
+          ^:mutable ^int cp 0
+          ^int minNoMaybe 0x00c0
+          ^:mutable ^int cc 0
+          ^:mutable ^int prevCC 0
+          ^:mutable ^int trailCC 0
+          ^:mutable ^char/1 p nil
+          ^:mutable ^int pStart 0]
+      (set! reorderStartIndex 0)
+      (set! prevCC 0)
+      (set! norm nil)
+      (set! cp 0)
+      (set! pStart 0)
+      (set! cc (set! trailCC -1))
+      (set! c1 0)
+      (while true
+        (set! prevSrc srcIndex)
+        (while (and (not (== srcIndex srcLimit))
+                    (or (or (< (set! c1 (aget src srcIndex)) minNoMaybe)
+                            (nil? (set! norm
+                                        (.getDecomposition
+                                          impl
+                                          (set! cp (.codePointAt string srcIndex))))))
+                        (and (>= c1 \가) (<= c1 \힣))))
+          (set! prevCC 0)
+          (set! srcIndex (unchecked-add-int srcIndex (if (< cp 0x10000) 1 2))))
+        (when-not (== srcIndex prevSrc)
+          (set! length (unchecked-subtract-int srcIndex prevSrc))
+          (when (<= (unchecked-add-int destIndex length) destLimit)
+            (System/arraycopy src prevSrc dest destIndex length))
+          (set! destIndex (unchecked-add-int destIndex length))
+          (set! reorderStartIndex destIndex))
+        (when (== srcIndex srcLimit) (break))
+        (set! srcIndex (unchecked-add-int srcIndex (if (< cp 0x10000) 1 2)))
+        (if (< cp Character/MIN_SUPPLEMENTARY_CODE_POINT)
+            (do
+              (set! c2 0)
+              (set! length 1)
+              (when (or (Character/isHighSurrogate c1) (Character/isLowSurrogate c1))
+                (set! norm nil)))
+            (do (set! length 2) (set! c2 (aget src (unchecked-subtract-int srcIndex 1)))))
+        (if (nil? norm)
+            (do
+              (set! cc (set! trailCC (UCharacter/getCombiningClass cp)))
+              (set! p nil)
+              (set! pStart -1))
+            (do
+              (set! pStart 0)
+              (set! p (.toCharArray norm))
+              (set! length (alength p))
+              (let [cpNum (.codePointCount norm 0 length)]
+                (set! cc (UCharacter/getCombiningClass (.codePointAt norm 0)))
+                (set! trailCC
+                      (UCharacter/getCombiningClass
+                        (.codePointAt norm (unchecked-subtract-int cpNum 1))))
+                (when (== length 1)
+                  (set! c1 (aget p pStart))
+                  (set! c2 0)
+                  (set! p nil)
+                  (set! pStart -1)))))
+        (when (>= (unchecked-add-int destIndex (unchecked-multiply-int length 3)) destLimit)
+          (let [tmpBuf (new char/1 (unchecked-multiply-int destLimit 2))]
+            (System/arraycopy dest 0 tmpBuf 0 destIndex)
+            (set! dest tmpBuf)
+            (set! destLimit (alength dest))))
+        (let [reorderSplit destIndex]
+          (cond
+            (nil? p)
+              (cond
+                (NormalizerImpl/needSingleQuotation c1)
+                  (do
+                    (aset dest destIndex \')
+                    (set! destIndex (unchecked-inc-int destIndex))
+                    (aset dest destIndex c1)
+                    (set! destIndex (unchecked-inc-int destIndex))
+                    (aset dest destIndex \')
+                    (set! destIndex (unchecked-inc-int destIndex))
+                    (set! trailCC 0))
+                (and (not (== cc 0)) (< cc prevCC))
+                  (do
+                    (set! destIndex (unchecked-add-int destIndex length))
+                    (set! trailCC
+                          (NormalizerImpl/insertOrdered
+                            dest
+                            reorderStartIndex
+                            reorderSplit
+                            destIndex
+                            c1
+                            c2
+                            cc)))
+                :else
+                  (do
+                    (aset dest destIndex c1)
+                    (set! destIndex (unchecked-inc-int destIndex))
+                    (when-not (== c2 0)
+                      (aset dest destIndex c2)
+                      (set! destIndex (unchecked-inc-int destIndex)))))
+            (NormalizerImpl/needSingleQuotation (aget p pStart))
+              (do
+                (aset dest destIndex \')
+                (set! destIndex (unchecked-inc-int destIndex))
+                (aset dest destIndex (aget p pStart))
+                (set! destIndex (unchecked-inc-int destIndex))
+                (set! pStart (unchecked-inc-int pStart))
+                (aset dest destIndex \')
+                (set! destIndex (unchecked-inc-int destIndex))
+                (set! length (unchecked-dec-int length))
+                (loop []
+                  (aset dest destIndex (aget p pStart))
+                  (set! destIndex (unchecked-inc-int destIndex))
+                  (set! pStart (unchecked-inc-int pStart))
+                  (when (> (set! length (unchecked-dec-int length)) 0) (recur))))
+            (and (not (== cc 0)) (< cc prevCC))
+              (do
+                (set! destIndex (unchecked-add-int destIndex length))
+                (set! trailCC
+                      (NormalizerImpl/mergeOrdered
+                        dest
+                        reorderStartIndex
+                        reorderSplit
+                        p
+                        pStart
+                        (unchecked-add-int pStart length))))
+            :else
+              (loop []
+                (aset dest destIndex (aget p pStart))
+                (set! destIndex (unchecked-inc-int destIndex))
+                (set! pStart (unchecked-inc-int pStart))
+                (when (> (set! length (unchecked-dec-int length)) 0) (recur)))))
+        (set! prevCC trailCC)
+        (when (== prevCC 0) (set! reorderStartIndex destIndex)))
+      (String. dest 0 destIndex)))
+
+  (method ^:private ^:static insertOrdered ^int [^char/1 source ^int start ^:mutable ^int current
+                                                 ^int p ^char c1 ^char c2 ^int cc]
+    (let [^:mutable ^int back 0
+          ^:mutable ^int preBack 0
+          ^:mutable ^int r 0
+          ^:mutable ^int prevCC 0
+          ^:mutable trailCC cc]
+      (when (and (< start current) (not (== cc 0)))
+        (set! preBack (set! back current))
+        (let [prevArgs (PrevArgs.)]
+          (set! (.-current prevArgs) current)
+          (set! (.-start prevArgs) start)
+          (set! (.-src prevArgs) source)
+          (set! (.-c1 prevArgs) c1)
+          (set! (.-c2 prevArgs) c2)
+          (set! prevCC (NormalizerImpl/getPrevCC prevArgs))
+          (set! preBack (.-current prevArgs))
+          (when (< cc prevCC)
+            (set! trailCC prevCC)
+            (set! back preBack)
+            (while (< start preBack)
+              (set! prevCC (NormalizerImpl/getPrevCC prevArgs))
+              (set! preBack (.-current prevArgs))
+              (when (>= cc prevCC) (break))
+              (set! back preBack))
+            (set! r p)
+            (loop []
+              (aset source
+                    (set! r (unchecked-dec-int r))
+                    (aget source (set! current (unchecked-dec-int current))))
+              (when-not (== back current) (recur))))))
+      (aset source current c1)
+      (when-not (== c2 0) (aset source (unchecked-add-int current 1) c2))
+      trailCC))
+
+  (method ^:private ^:static mergeOrdered ^int [^char/1 source ^int start ^:mutable ^int current
+                                                ^char/1 data ^int next ^int limit]
+    (let [^:mutable ^int r 0
+          ^:mutable ^int cc 0
+          ^:mutable ^int trailCC 0
+          ^:mutable ^boolean adjacent false]
+      (set! adjacent (== current next))
+      (let [ncArgs (NextCCArgs.)]
+        (set! (.-source ncArgs) data)
+        (set! (.-next ncArgs) next)
+        (set! (.-limit ncArgs) limit)
+        (when-not (== start current)
+          (while (< (.-next ncArgs) (.-limit ncArgs))
+            (set! cc (NormalizerImpl/getNextCC ncArgs))
+            (if (== cc 0)
+                (do
+                  (set! trailCC 0)
+                  (if adjacent
+                      (set! current (.-next ncArgs))
+                      (do
+                        (aset data current (.-c1 ncArgs))
+                        (set! current (unchecked-inc-int current))
+                        (when-not (== (.-c2 ncArgs) 0)
+                          (aset data current (.-c2 ncArgs))
+                          (set! current (unchecked-inc-int current)))))
+                  (break))
+                (do
+                  (set! r (unchecked-add-int current (if (== (.-c2 ncArgs) 0) 1 2)))
+                  (set! trailCC
+                        (NormalizerImpl/insertOrdered
+                          source
+                          start
+                          current
+                          r
+                          (.-c1 ncArgs)
+                          (.-c2 ncArgs)
+                          cc))
+                  (set! current r)))))
+        (if (== (.-next ncArgs) (.-limit ncArgs))
+            trailCC
+            (do
+              (when-not adjacent
+                (loop []
+                  (aset source
+                        current
+                        (aget data
+                              (let [old-5 (.-next ncArgs)]
+                                (set! (.-next ncArgs) (unchecked-inc-int (.-next ncArgs)))
+                                old-5)))
+                  (set! current (unchecked-inc-int current))
+                  (when-not (== (.-next ncArgs) (.-limit ncArgs)) (recur)))
+                (set! (.-limit ncArgs) current))
+              (let [prevArgs (PrevArgs.)]
+                (set! (.-src prevArgs) data)
+                (set! (.-start prevArgs) start)
+                (set! (.-current prevArgs) (.-limit ncArgs))
+                (NormalizerImpl/getPrevCC prevArgs)))))))
+
+  (defclass ^:private ^:static ^:final PrevArgs
+    (field ^char/1 src)
+
+    (field ^int start)
+
+    (field ^int current)
+
+    (field ^char c1)
+
+    (field ^char c2))
+
+  (defclass ^:private ^:static ^:final NextCCArgs
+    (field ^char/1 source)
+
+    (field ^int next)
+
+    (field ^int limit)
+
+    (field ^char c1)
+
+    (field ^char c2))
+
+  (method ^:private ^:static getNextCC ^int [^NextCCArgs args]
+    (set! (.-c1 args)
+          (aget (.-source args)
+                (let [old-6 (.-next args)]
+                  (set! (.-next args) (unchecked-inc-int (.-next args)))
+                  old-6)))
+    (set! (.-c2 args) 0)
+    (cond
+      (UTF16/isTrailSurrogate (.-c1 args)) 0
+      (not (UTF16/isLeadSurrogate (.-c1 args))) (UCharacter/getCombiningClass (.-c1 args))
+      (and (not (== (.-next args) (.-limit args)))
+           (UTF16/isTrailSurrogate (set! (.-c2 args) (aget (.-source args) (.-next args)))))
+        (do
+          (set! (.-next args) (unchecked-inc-int (.-next args)))
+          (UCharacter/getCombiningClass (Character/toCodePoint (.-c1 args) (.-c2 args))))
+      :else (do (set! (.-c2 args) 0) 0)))
+
+  (method ^:private ^:static getPrevCC ^int [^PrevArgs args]
+    (set! (.-c1 args)
+          (aget (.-src args) (set! (.-current args) (unchecked-dec-int (.-current args)))))
+    (set! (.-c2 args) 0)
+    (cond
+      (< (.-c1 args) MIN_CCC_LCCC_CP) 0
+      (UTF16/isLeadSurrogate (.-c1 args)) 0
+      (not (UTF16/isTrailSurrogate (.-c1 args))) (UCharacter/getCombiningClass (.-c1 args))
+      (and (not (== (.-current args) (.-start args)))
+           (UTF16/isLeadSurrogate
+             (set! (.-c2 args) (aget (.-src args) (unchecked-subtract-int (.-current args) 1)))))
+        (do
+          (set! (.-current args) (unchecked-dec-int (.-current args)))
+          (UCharacter/getCombiningClass (Character/toCodePoint (.-c2 args) (.-c1 args))))
+      :else (do (set! (.-c2 args) 0) 0)))
+
+  (method ^:private getPreviousTrailCC ^int [this ^CharSequence s ^int start ^int p]
+    (if (== start p) 0 (.getFCD16 this (Character/codePointBefore s p))))
+
+  (field ^:private ^VersionInfo dataVersion)
+
+  (field ^:private ^int minDecompNoCP)
+
+  (field ^:private ^int minCompNoMaybeCP)
+
+  (field ^:private ^int minLcccCP)
+
+  (field ^:private ^int minYesNo)
+
+  (field ^:private ^int minYesNoMappingsOnly)
+
+  (field ^:private ^int minNoNo)
+
+  (field ^:private ^int minNoNoCompBoundaryBefore)
+
+  (field ^:private ^int minNoNoCompNoMaybeCC)
+
+  (field ^:private ^int minNoNoEmpty)
+
+  (field ^:private ^int limitNoNo)
+
+  (field ^:private ^int centerNoNoDelta)
+
+  (field ^:private ^int minMaybeNo)
+
+  (field ^:private ^int minMaybeNoCombinesFwd)
+
+  (field ^:private ^int minMaybeYes)
+
+  (field ^:private ^CodePointTrie$Fast16 normTrie)
+
+  (field ^:private ^String extraData)
+
+  (field ^:private ^byte/1 smallFCD))

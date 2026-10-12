@@ -1,0 +1,554 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/ScheduledThreadPoolExecutor.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.util AbstractQueue Arrays Collection Iterator List NoSuchElementException Objects)
+        '(java.util.concurrent.atomic AtomicLong)
+        '(java.util.concurrent.locks Condition ReentrantLock))
+
+(defclass ^:public ScheduledThreadPoolExecutor
+  :extends ThreadPoolExecutor
+  :implements [ScheduledExecutorService]
+
+  (field ^:private ^:volatile ^boolean continueExistingPeriodicTasksAfterShutdown)
+
+  (field ^:private ^:volatile ^boolean executeExistingDelayedTasksAfterShutdown true)
+
+  (field ^:volatile ^boolean removeOnCancel)
+
+  (field ^:private ^:static ^:final ^AtomicLong sequencer (AtomicLong.))
+
+  (field ^:private ^:static ^:final ^long MAX_NANOS
+    (unchecked-subtract (unsigned-bit-shift-right Long/MAX_VALUE 1) 1))
+
+  (defclass ^:private ScheduledFutureTask
+    :extends (FutureTask V)
+    :implements [(RunnableScheduledFuture V)]
+    :type-params [V]
+
+    (field ^:private ^:final ^long sequenceNumber)
+
+    (field ^:private ^:volatile ^long time)
+
+    (field ^:private ^:final ^long period)
+
+    (field ^{:tag (RunnableScheduledFuture V)} outerTask this)
+
+    (field ^int heapIndex)
+
+    (constructor [this ^Runnable r ^V result ^long triggerTime ^long sequenceNumber]
+      (super. r result)
+      (set! (.-time this) triggerTime)
+      (set! (.-period this) 0)
+      (set! (.-sequenceNumber this) sequenceNumber))
+
+    (constructor [this ^Runnable r ^V result ^long triggerTime ^long period ^long sequenceNumber]
+      (super. r result)
+      (set! (.-time this) triggerTime)
+      (set! (.-period this) period)
+      (set! (.-sequenceNumber this) sequenceNumber))
+
+    (constructor [this ^{:tag (Callable V)} callable ^long triggerTime ^long sequenceNumber]
+      (super. callable)
+      (set! (.-time this) triggerTime)
+      (set! (.-period this) 0)
+      (set! (.-sequenceNumber this) sequenceNumber))
+
+    (method ^:public getDelay ^long [this ^TimeUnit unit]
+      (.convert unit (unchecked-subtract time (System/nanoTime)) TimeUnit/NANOSECONDS))
+
+    (method ^:public compareTo ^int [this ^Delayed other]
+      (cond
+        (identical? other this) 0
+        (instance? ScheduledFutureTask other)
+          (let [^{:tag (ScheduledFutureTask ?)} x (cast ScheduledFutureTask other)
+                diff (unchecked-subtract time (.-time x))]
+            (cond (< diff 0) -1 (> diff 0) 1 (< sequenceNumber (.-sequenceNumber x)) -1 :else 1))
+        :else
+          (let [diff (unchecked-subtract (.getDelay this TimeUnit/NANOSECONDS)
+                                         (.getDelay other TimeUnit/NANOSECONDS))]
+            (cond (< diff 0) -1 (> diff 0) 1 :else 0))))
+
+    (method ^:public isPeriodic ^boolean [this] (not (== period 0)))
+
+    (method ^:private setNextRunTime ^void [this]
+      (let [p period]
+        (if (> p 0)
+            (set! time (unchecked-add time p))
+            (set! time (.triggerTime ScheduledThreadPoolExecutor/this (unchecked-negate p))))))
+
+    (method ^:public cancel ^boolean [this ^boolean mayInterruptIfRunning]
+      (let [cancelled (.cancel super mayInterruptIfRunning)]
+        (when (and (and cancelled removeOnCancel) (>= heapIndex 0))
+          (.remove ScheduledThreadPoolExecutor/this this))
+        cancelled))
+
+    (method ^:public run ^void [this]
+      (cond
+        (not (.canRunInCurrentRunState ScheduledThreadPoolExecutor/this this)) (.cancel this false)
+        (not (.isPeriodic this)) (.run super)
+        :else
+          (when (.runAndReset super)
+            (.setNextRunTime this)
+            (.reExecutePeriodic ScheduledThreadPoolExecutor/this outerTask)))))
+
+  (method canRunInCurrentRunState ^boolean [this ^{:tag (RunnableScheduledFuture ?)} task]
+    (cond
+      (not (.isShutdown this)) true
+      (.isStopped this) false
+      (.isPeriodic task) continueExistingPeriodicTasksAfterShutdown
+      :else
+        (or executeExistingDelayedTasksAfterShutdown (<= (.getDelay task TimeUnit/NANOSECONDS) 0))))
+
+  (method ^:private delayedExecute ^void [this ^{:tag (RunnableScheduledFuture ?)} task]
+    (if (.isShutdown this)
+        (.reject this task)
+        (do
+          (.add (.getQueue super) task)
+          (if (and (not (.canRunInCurrentRunState this task)) (.remove this task))
+              (.cancel task false)
+              (.ensurePrestart this)))))
+
+  (method reExecutePeriodic ^void [this ^{:tag (RunnableScheduledFuture ?)} task]
+    (when (.canRunInCurrentRunState this task)
+      (.add (.getQueue super) task)
+      (when (or (.canRunInCurrentRunState this task) (not (.remove this task)))
+        (.ensurePrestart this)
+        (return)))
+    (.cancel task false))
+
+  (method onShutdown ^void [this]
+    (let [^{:tag (BlockingQueue Runnable)} q (.getQueue super)
+          keepDelayed (.getExecuteExistingDelayedTasksAfterShutdownPolicy this)
+          keepPeriodic (.getContinueExistingPeriodicTasksAfterShutdownPolicy this)]
+      (for-each [e (.toArray q)]
+        (when (instance? RunnableScheduledFuture e)
+          (let [^{:tag (RunnableScheduledFuture ?)} t (cast RunnableScheduledFuture e)]
+            (when (or (if (.isPeriodic t)
+                          (not keepPeriodic)
+                          (and (not keepDelayed) (> (.getDelay t TimeUnit/NANOSECONDS) 0)))
+                      (.isCancelled t))
+              (when (.remove q t) (.cancel t false))))))
+      (.tryTerminate this)))
+
+  (method ^:protected decorateTask :type-params [V] ^{:tag (RunnableScheduledFuture V)} [this
+                                                                                         ^Runnable runnable
+                                                                                         ^{:tag (RunnableScheduledFuture V)} task]
+    task)
+
+  (method ^:protected decorateTask :type-params [V] ^{:tag (RunnableScheduledFuture V)} [this
+                                                                                         ^{:tag (Callable V)} callable
+                                                                                         ^{:tag (RunnableScheduledFuture V)} task]
+    task)
+
+  (field ^:private ^:static ^:final ^long DEFAULT_KEEPALIVE_MILLIS 10)
+
+  (constructor ^:public [this ^int corePoolSize]
+    (super. corePoolSize
+            Integer/MAX_VALUE
+            DEFAULT_KEEPALIVE_MILLIS
+            TimeUnit/MILLISECONDS
+            (DelayedWorkQueue.)))
+
+  (constructor ^:public [this ^int corePoolSize ^ThreadFactory threadFactory]
+    (super. corePoolSize
+            Integer/MAX_VALUE
+            DEFAULT_KEEPALIVE_MILLIS
+            TimeUnit/MILLISECONDS
+            (DelayedWorkQueue.)
+            threadFactory))
+
+  (constructor ^:public [this ^int corePoolSize ^RejectedExecutionHandler handler]
+    (super. corePoolSize
+            Integer/MAX_VALUE
+            DEFAULT_KEEPALIVE_MILLIS
+            TimeUnit/MILLISECONDS
+            (DelayedWorkQueue.)
+            handler))
+
+  (constructor ^:public [this ^int corePoolSize ^ThreadFactory threadFactory
+                         ^RejectedExecutionHandler handler]
+    (super. corePoolSize
+            Integer/MAX_VALUE
+            DEFAULT_KEEPALIVE_MILLIS
+            TimeUnit/MILLISECONDS
+            (DelayedWorkQueue.)
+            threadFactory
+            handler))
+
+  (method ^:private triggerTime ^long [this ^long delay ^TimeUnit unit]
+    (.triggerTime this (.toNanos unit (if (< delay 0) 0 delay))))
+
+  (method triggerTime ^long [this ^long delay]
+    (unchecked-add (System/nanoTime) (Math/min delay MAX_NANOS)))
+
+  (method ^:public schedule ^{:tag (ScheduledFuture ?)} [this ^Runnable command ^long delay
+                                                         ^TimeUnit unit]
+    (when (or (nil? command) (nil? unit)) (throw (NullPointerException.)))
+    (let [^{:tag (RunnableScheduledFuture Void)} t (.decorateTask
+                                                     this
+                                                     command
+                                                     (ScheduledFutureTask.
+                                                       command
+                                                       nil
+                                                       (.triggerTime this delay unit)
+                                                       (.getAndIncrement sequencer)))]
+      (.delayedExecute this t)
+      t))
+
+  (method ^:public schedule :type-params [V] ^{:tag (ScheduledFuture V)} [this
+                                                                          ^{:tag (Callable V)} callable
+                                                                          ^long delay ^TimeUnit unit]
+    (when (or (nil? callable) (nil? unit)) (throw (NullPointerException.)))
+    (let [^{:tag (RunnableScheduledFuture V)} t (.decorateTask
+                                                  this
+                                                  callable
+                                                  (ScheduledFutureTask.
+                                                    callable
+                                                    (.triggerTime this delay unit)
+                                                    (.getAndIncrement sequencer)))]
+      (.delayedExecute this t)
+      t))
+
+  (method ^:public scheduleAtFixedRate ^{:tag (ScheduledFuture ?)} [this ^Runnable command
+                                                                    ^long initialDelay ^long period
+                                                                    ^TimeUnit unit]
+    (when (or (nil? command) (nil? unit)) (throw (NullPointerException.)))
+    (when (<= period 0) (throw (IllegalArgumentException.)))
+    (let [^{:tag (ScheduledFutureTask Void)} sft (ScheduledFutureTask.
+                                                   command
+                                                   nil
+                                                   (.triggerTime this initialDelay unit)
+                                                   (.toNanos unit period)
+                                                   (.getAndIncrement sequencer))
+          ^{:tag (RunnableScheduledFuture Void)} t (.decorateTask this command sft)]
+      (set! (.-outerTask sft) t)
+      (.delayedExecute this t)
+      t))
+
+  (method ^:public scheduleWithFixedDelay ^{:tag (ScheduledFuture ?)} [this ^Runnable command
+                                                                       ^long initialDelay
+                                                                       ^long delay ^TimeUnit unit]
+    (when (or (nil? command) (nil? unit)) (throw (NullPointerException.)))
+    (when (<= delay 0) (throw (IllegalArgumentException.)))
+    (let [^{:tag (ScheduledFutureTask Void)} sft (ScheduledFutureTask.
+                                                   command
+                                                   nil
+                                                   (.triggerTime this initialDelay unit)
+                                                   (unchecked-negate (.toNanos unit delay))
+                                                   (.getAndIncrement sequencer))
+          ^{:tag (RunnableScheduledFuture Void)} t (.decorateTask this command sft)]
+      (set! (.-outerTask sft) t)
+      (.delayedExecute this t)
+      t))
+
+  (method ^:public execute ^void [this ^Runnable command]
+    (.schedule this command 0 TimeUnit/NANOSECONDS))
+
+  (method ^:public submit ^{:tag (Future ?)} [this ^Runnable task]
+    (.schedule this task 0 TimeUnit/NANOSECONDS))
+
+  (method ^:public submit :type-params [T] ^{:tag (Future T)} [this ^Runnable task ^T result]
+    (.schedule this (Executors/callable task result) 0 TimeUnit/NANOSECONDS))
+
+  (method ^:public submit :type-params [T] ^{:tag (Future T)} [this ^{:tag (Callable T)} task]
+    (.schedule this task 0 TimeUnit/NANOSECONDS))
+
+  (method ^:public setContinueExistingPeriodicTasksAfterShutdownPolicy ^void [this ^boolean value]
+    (set! continueExistingPeriodicTasksAfterShutdown value)
+    (when (and (not value) (.isShutdown this)) (.onShutdown this)))
+
+  (method ^:public getContinueExistingPeriodicTasksAfterShutdownPolicy ^boolean [this]
+    continueExistingPeriodicTasksAfterShutdown)
+
+  (method ^:public setExecuteExistingDelayedTasksAfterShutdownPolicy ^void [this ^boolean value]
+    (set! executeExistingDelayedTasksAfterShutdown value)
+    (when (and (not value) (.isShutdown this)) (.onShutdown this)))
+
+  (method ^:public getExecuteExistingDelayedTasksAfterShutdownPolicy ^boolean [this]
+    executeExistingDelayedTasksAfterShutdown)
+
+  (method ^:public setRemoveOnCancelPolicy ^void [this ^boolean value]
+    (set! removeOnCancel value))
+
+  (method ^:public getRemoveOnCancelPolicy ^boolean [this] removeOnCancel)
+
+  (method ^:public shutdown ^void [this] (.shutdown super))
+
+  (method ^:public shutdownNow ^{:tag (List Runnable)} [this]
+    (.shutdownNow super))
+
+  (method ^:public getQueue ^{:tag (BlockingQueue Runnable)} [this]
+    (.getQueue super))
+
+  (defclass ^:static DelayedWorkQueue
+    :extends (AbstractQueue Runnable)
+    :implements [(BlockingQueue Runnable)]
+
+    (field ^:private ^:static ^:final ^int INITIAL_CAPACITY 16)
+
+    (field ^:private ^{:tag (array (RunnableScheduledFuture ?))} queue
+      (new RunnableScheduledFuture/1 INITIAL_CAPACITY))
+
+    (field ^:private ^:final ^ReentrantLock lock (ReentrantLock.))
+
+    (field ^:private ^int size)
+
+    (field ^:private ^Thread leader)
+
+    (field ^:private ^:final ^Condition available (.newCondition lock))
+
+    (method ^:private ^:static setIndex ^void [^{:tag (RunnableScheduledFuture ?)} f ^int idx]
+      (when (instance? ScheduledFutureTask f) (set! (.-heapIndex (cast ScheduledFutureTask f)) idx)))
+
+    (method ^:private siftUp ^void [this ^:mutable ^int k ^{:tag (RunnableScheduledFuture ?)} key]
+      (while (> k 0)
+        (let [parent (unsigned-bit-shift-right-int (unchecked-subtract-int k 1) 1)
+              ^{:tag (RunnableScheduledFuture ?)} e (aget queue parent)]
+          (when (>= (.compareTo key e) 0) (break))
+          (aset queue k e)
+          (DelayedWorkQueue/setIndex e k)
+          (set! k parent)))
+      (aset queue k key)
+      (DelayedWorkQueue/setIndex key k))
+
+    (method ^:private siftDown ^void [this ^:mutable ^int k ^{:tag (RunnableScheduledFuture ?)} key]
+      (let [half (unsigned-bit-shift-right-int size 1)]
+        (while (< k half)
+          (let [^:mutable child (unchecked-add-int (bit-shift-left-int k 1) 1)
+                ^:mutable ^{:tag (RunnableScheduledFuture ?)} c (aget queue child)
+                right (unchecked-add-int child 1)]
+            (when (and (< right size) (> (.compareTo c (aget queue right)) 0))
+              (set! c (aget queue (set! child right))))
+            (when (<= (.compareTo key c) 0) (break))
+            (aset queue k c)
+            (DelayedWorkQueue/setIndex c k)
+            (set! k child)))
+        (aset queue k key)
+        (DelayedWorkQueue/setIndex key k)))
+
+    (method ^:private grow ^void [this]
+      (let [oldCapacity (alength queue)
+            ^:mutable newCapacity (unchecked-add-int
+                                    oldCapacity
+                                    (bit-shift-right-int oldCapacity 1))]
+        (when (< newCapacity 0) (set! newCapacity Integer/MAX_VALUE))
+        (set! queue (cast RunnableScheduledFuture/1 (Arrays/copyOf queue newCapacity)))))
+
+    (method ^:private indexOf ^int [this x]
+      (when (some? x)
+        (if (instance? ScheduledFutureTask x)
+            (let [i (.-heapIndex (cast ScheduledFutureTask x))]
+              (when (and (and (>= i 0) (< i size)) (identical? (aget queue i) x)) (return i)))
+            (loop [^int i 0]
+              (if (< i size)
+                  (if (.equals x (aget queue i)) (return i) (recur (unchecked-inc-int i)))
+                  nil))))
+      -1)
+
+    (method ^:public contains ^boolean [this x]
+      (let [lock (.-lock this)]
+        (.lock lock)
+        (try (not (== (.indexOf this x) -1)) (finally (.unlock lock)))))
+
+    (method ^:public remove ^boolean [this x]
+      (let [lock (.-lock this)]
+        (.lock lock)
+        (try
+          (let [i (.indexOf this x)]
+            (if (< i 0)
+                false
+                (do
+                  (DelayedWorkQueue/setIndex (aget queue i) -1)
+                  (let [s (set! size (unchecked-dec-int size))
+                        ^{:tag (RunnableScheduledFuture ?)} replacement (aget queue s)]
+                    (aset queue s nil)
+                    (when-not (== s i)
+                      (.siftDown this i replacement)
+                      (when (identical? (aget queue i) replacement) (.siftUp this i replacement)))
+                    true))))
+          (finally (.unlock lock)))))
+
+    (method ^:public size ^int [this]
+      (let [lock (.-lock this)] (.lock lock) (try size (finally (.unlock lock)))))
+
+    (method ^:public isEmpty ^boolean [this] (== (.size this) 0))
+
+    (method ^:public remainingCapacity ^int [this] Integer/MAX_VALUE)
+
+    (method ^:public peek ^{:tag (RunnableScheduledFuture ?)} [this]
+      (let [lock (.-lock this)] (.lock lock) (try (aget queue 0) (finally (.unlock lock)))))
+
+    (method ^:public offer ^boolean [this ^Runnable x]
+      (when (nil? x) (throw (NullPointerException.)))
+      (let [^{:tag (RunnableScheduledFuture ?)} e (cast RunnableScheduledFuture x)
+            lock (.-lock this)]
+        (.lock lock)
+        (try
+          (let [i size]
+            (when (>= i (alength queue)) (.grow this))
+            (set! size (unchecked-add-int i 1))
+            (if (== i 0) (do (aset queue 0 e) (DelayedWorkQueue/setIndex e 0)) (.siftUp this i e))
+            (when (identical? (aget queue 0) e) (set! leader nil) (.signal available)))
+          (finally (.unlock lock)))
+        true))
+
+    (method ^:public put ^void [this ^Runnable e] (.offer this e))
+
+    (method ^:public add ^boolean [this ^Runnable e] (.offer this e))
+
+    (method ^:public offer ^boolean [this ^Runnable e ^long timeout ^TimeUnit unit]
+      (.offer this e))
+
+    (method ^:private finishPoll ^{:tag (RunnableScheduledFuture ?)} [this
+                                                                      ^{:tag (RunnableScheduledFuture ?)} f]
+      (let [s (set! size (unchecked-dec-int size))
+            ^{:tag (RunnableScheduledFuture ?)} x (aget queue s)]
+        (aset queue s nil)
+        (when-not (== s 0) (.siftDown this 0 x))
+        (DelayedWorkQueue/setIndex f -1)
+        f))
+
+    (method ^:public poll ^{:tag (RunnableScheduledFuture ?)} [this]
+      (let [lock (.-lock this)]
+        (.lock lock)
+        (try
+          (let [^{:tag (RunnableScheduledFuture ?)} first (aget queue 0)]
+            (when-not (or (nil? first) (> (.getDelay first TimeUnit/NANOSECONDS) 0))
+              (.finishPoll this first)))
+          (finally (.unlock lock)))))
+
+    (method ^:public take :throws [InterruptedException] ^{:tag (RunnableScheduledFuture ?)} [this]
+      (let [lock (.-lock this)]
+        (.lockInterruptibly lock)
+        (try
+          (while true
+            (let [^:mutable ^{:tag (RunnableScheduledFuture ?)} first (aget queue 0)]
+              (if (nil? first)
+                  (.await available)
+                  (let [delay (.getDelay first TimeUnit/NANOSECONDS)]
+                    (when (<= delay 0) (return (.finishPoll this first)))
+                    (set! first nil)
+                    (if (some? leader)
+                        (.await available)
+                        (let [thisThread (Thread/currentThread)]
+                          (set! leader thisThread)
+                          (try
+                            (.awaitNanos available delay)
+                            (finally (when (identical? leader thisThread) (set! leader nil))))))))))
+          (finally
+            (when (and (nil? leader) (some? (aget queue 0))) (.signal available))
+            (.unlock lock)))))
+
+    (method ^:public poll :throws [InterruptedException] ^{:tag (RunnableScheduledFuture ?)} [this
+                                                                                              ^long timeout
+                                                                                              ^TimeUnit unit]
+      (let [^:mutable nanos (.toNanos unit timeout)
+            lock (.-lock this)]
+        (.lockInterruptibly lock)
+        (try
+          (while true
+            (let [^:mutable ^{:tag (RunnableScheduledFuture ?)} first (aget queue 0)]
+              (if (nil? first)
+                  (if (<= nanos 0) (return nil) (set! nanos (.awaitNanos available nanos)))
+                  (let [delay (.getDelay first TimeUnit/NANOSECONDS)]
+                    (when (<= delay 0) (return (.finishPoll this first)))
+                    (when (<= nanos 0) (return nil))
+                    (set! first nil)
+                    (if (or (< nanos delay) (some? leader))
+                        (set! nanos (.awaitNanos available nanos))
+                        (let [thisThread (Thread/currentThread)]
+                          (set! leader thisThread)
+                          (try
+                            (let [timeLeft (.awaitNanos available delay)]
+                              (set! nanos
+                                    (unchecked-subtract nanos (unchecked-subtract delay timeLeft))))
+                            (finally (when (identical? leader thisThread) (set! leader nil))))))))))
+          (finally
+            (when (and (nil? leader) (some? (aget queue 0))) (.signal available))
+            (.unlock lock)))))
+
+    (method ^:public clear ^void [this]
+      (let [lock (.-lock this)]
+        (.lock lock)
+        (try
+          (loop [^int i 0]
+            (when (< i size)
+              (let [^{:tag (RunnableScheduledFuture ?)} t (aget queue i)]
+                (if (some? t)
+                    (do
+                      (aset queue i nil)
+                      (DelayedWorkQueue/setIndex t -1)
+                      (recur (unchecked-inc-int i)))
+                    (recur (unchecked-inc-int i))))))
+          (set! size 0)
+          (finally (.unlock lock)))))
+
+    (method ^:public drainTo ^int [this ^{:tag (Collection (? super Runnable))} c]
+      (.drainTo this c Integer/MAX_VALUE))
+
+    (method ^:public drainTo ^int [this ^{:tag (Collection (? super Runnable))} c ^int maxElements]
+      (Objects/requireNonNull c)
+      (when (identical? c this) (throw (IllegalArgumentException.)))
+      (if (<= maxElements 0)
+          0
+          (let [lock (.-lock this)]
+            (.lock lock)
+            (try
+              (let [^:mutable ^int n 0]
+                (let [^:mutable ^{:tag (RunnableScheduledFuture ?)} first nil]
+                  (while (and (and (< n maxElements) (some? (set! first (aget queue 0))))
+                              (<= (.getDelay first TimeUnit/NANOSECONDS) 0))
+                    (.add c first)
+                    (.finishPoll this first)
+                    (set! n (unchecked-inc-int n))))
+                n)
+              (finally (.unlock lock))))))
+
+    (method ^:public toArray ^Object/1 [this]
+      (let [lock (.-lock this)]
+        (.lock lock)
+        (try (Arrays/copyOf queue size Object/1) (finally (.unlock lock)))))
+
+    (method ^:public toArray :type-params [T] ^T/1 [this ^T/1 a]
+      (let [lock (.-lock this)]
+        (.lock lock)
+        (try
+          (if (< (alength a) size)
+              (Arrays/copyOf queue size (.getClass a))
+              (do
+                (System/arraycopy queue 0 a 0 size)
+                (when (> (alength a) size) (aset a size nil))
+                a))
+          (finally (.unlock lock)))))
+
+    (method ^:public iterator ^{:tag (Iterator Runnable)} [this]
+      (let [lock (.-lock this)]
+        (.lock lock)
+        (try
+          (Itr. (cast RunnableScheduledFuture/1 (Arrays/copyOf queue size)))
+          (finally (.unlock lock)))))
+
+    (defclass ^:private Itr
+      :implements [(Iterator Runnable)]
+
+      (field ^:final ^{:tag (array (RunnableScheduledFuture ?))} array)
+
+      (field ^int cursor)
+
+      (field ^int lastRet -1)
+
+      (constructor [this ^{:tag (array (RunnableScheduledFuture ?))} array]
+        (set! (.-array this) array))
+
+      (method ^:public hasNext ^boolean [this] (< cursor (alength array)))
+
+      (method ^:public next ^Runnable [this]
+        (when (>= cursor (alength array)) (throw (NoSuchElementException.)))
+        (aget array
+              (set! lastRet (let [old-1 cursor] (set! cursor (unchecked-inc-int cursor)) old-1))))
+
+      (method ^:public remove ^void [this]
+        (when (< lastRet 0) (throw (IllegalStateException.)))
+        (.remove DelayedWorkQueue/this (aget array lastRet))
+        (set! lastRet -1)))))
