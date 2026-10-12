@@ -1,0 +1,164 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/protocol/jar/Handler.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.protocol.jar)
+
+(import '(java.io IOException)
+        '(java.net MalformedURLException URL URLConnection URLStreamHandler)
+        '(jdk.internal.util Exceptions Exceptions$SensitiveInfo))
+
+(defclass ^:public Handler
+  :extends URLStreamHandler
+
+  (field ^:private ^:static ^:final ^String separator "!/")
+
+  (method ^:protected openConnection :throws [IOException] ^URLConnection [this ^URL u]
+    (JarURLConnection. u this))
+
+  (method ^:private ^:static indexOfBangSlash ^int [^String spec]
+    (let [^:mutable indexOfBang (.length spec)]
+      (while (not (== (set! indexOfBang (.lastIndexOf spec \! indexOfBang)) -1))
+        (if (and (not (== indexOfBang (unchecked-subtract-int (.length spec) 1)))
+                 (== (.charAt spec (unchecked-add-int indexOfBang 1)) \/))
+            (return (unchecked-add-int indexOfBang 1))
+            (set! indexOfBang (unchecked-dec-int indexOfBang))))
+      -1))
+
+  (method ^:protected sameFile ^boolean [this ^URL u1 ^URL u2]
+    (if (or (not (.equals (.getProtocol u1) "jar")) (not (.equals (.getProtocol u2) "jar")))
+        false
+        (let [file1 (.getFile u1)
+              file2 (.getFile u2)
+              sep1 (.indexOf file1 separator)
+              sep2 (.indexOf file2 separator)]
+          (if (or (== sep1 -1) (== sep2 -1))
+              (.sameFile super u1 u2)
+              (let [entry1 (.substring file1 (unchecked-add-int sep1 2))
+                    entry2 (.substring file2 (unchecked-add-int sep2 2))]
+                (if (not (.equals entry1 entry2))
+                    false
+                    (let [^:mutable ^URL enclosedURL1 nil
+                          ^:mutable ^URL enclosedURL2 nil]
+                      (try
+                        (set! enclosedURL1 (Handler/newURL (.substring file1 0 sep1)))
+                        (set! enclosedURL2 (Handler/newURL (.substring file2 0 sep2)))
+                        (catch MalformedURLException unused (return (.sameFile super u1 u2))))
+                      (if (not (.sameFile super enclosedURL1 enclosedURL2)) false true))))))))
+
+  (method ^:protected hashCode ^int [this ^URL u]
+    (let [^:mutable ^int h 0
+          protocol (.getProtocol u)]
+      (when (some? protocol) (set! h (unchecked-add-int h (.hashCode protocol))))
+      (let [file (.getFile u)
+            sep (.indexOf file separator)]
+        (if (== sep -1)
+            (unchecked-add-int h (.hashCode file))
+            (let [^:mutable ^URL enclosedURL nil
+                  fileWithoutEntry (.substring file 0 sep)]
+              (try
+                (set! enclosedURL (Handler/newURL fileWithoutEntry))
+                (set! h (unchecked-add-int h (.hashCode enclosedURL)))
+                (catch MalformedURLException unused
+                  (set! h (unchecked-add-int h (.hashCode fileWithoutEntry)))))
+              (let [entry (.substring file (unchecked-add-int sep 2))]
+                (set! h (unchecked-add-int h (.hashCode entry)))
+                h))))))
+
+  (method ^:public checkNestedProtocol ^String [this ^String spec]
+    (when (.regionMatches spec true 0 "jar:" 0 4) "Nested JAR URLs are not supported"))
+
+  (method ^:protected parseURL ^void [this ^URL url ^:mutable ^String spec ^int start ^int limit]
+    (let [^:mutable ^String file nil
+          ^:mutable ^String ref nil
+          refPos (.indexOf spec \# limit)
+          refOnly (== refPos start)]
+      (when (> refPos -1)
+        (set! ref (.substring spec (unchecked-add-int refPos 1) (.length spec)))
+        (when refOnly (set! file (.getFile url))))
+      (let [absoluteSpec (if (>= (.length spec) 4) (.regionMatches spec true 0 "jar:" 0 4) false)]
+        (set! spec (.substring spec start limit))
+        (let [exceptionMessage (.checkNestedProtocol this spec)]
+          (when (some? exceptionMessage) (throw (NullPointerException. exceptionMessage)))
+          (if absoluteSpec
+              (set! file (.parseAbsoluteSpec this spec))
+              (when-not refOnly
+                (set! file (.parseContextSpec this url spec))
+                (let [bangSlash (Handler/indexOfBangSlash file)]
+                  (set! file (Handler/canonicalizeString file bangSlash)))))
+          (.setURL this url "jar" "" -1 file ref)))))
+
+  (method ^:private parseAbsoluteSpec ^String [this ^String spec]
+    (let [^:mutable ^int index 0]
+      (when (== (set! index (Handler/indexOfBangSlash spec)) -1)
+        (throw (NullPointerException. "no !/ in spec")))
+      (try
+        (let [innerSpec (.substring spec 0 (unchecked-subtract-int index 1))]
+          (Handler/newURL innerSpec))
+        (catch MalformedURLException e
+          (throw (NullPointerException.
+                   (Exceptions/formatMsg "invalid url: %s %s"
+                                         (new Exceptions$SensitiveInfo/1
+                                              [(Exceptions/filterJarName spec)
+                                               (.suffixWith
+                                                 (.prefixWith
+                                                   (Exceptions/filterJarName (.getMessage e))
+                                                   "(")
+                                                 ")")]))))))
+      spec))
+
+  (method ^:private parseContextSpec ^String [this ^URL url ^String spec]
+    (let [^:mutable ctxFile (.getFile url)]
+      (if (.startsWith spec "/")
+          (let [bangSlash (Handler/indexOfBangSlash ctxFile)]
+            (when (== bangSlash -1)
+              (throw (NullPointerException.
+                       (Exceptions/formatMsg "malformed context url%s : no !/"
+                                             (new
+                                               Exceptions$SensitiveInfo/1
+                                               [(.prefixWith
+                                                  (Exceptions/filterJarName (String/valueOf url))
+                                                  ": ")])))))
+            (set! ctxFile (.substring ctxFile 0 bangSlash)))
+          (let [lastSlash (.lastIndexOf ctxFile \/)]
+            (cond
+              (== lastSlash -1)
+                (throw (NullPointerException.
+                         (Exceptions/formatMsg "malformed context url%s"
+                                               (new
+                                                 Exceptions$SensitiveInfo/1
+                                                 [(.prefixWith
+                                                    (Exceptions/filterJarName (String/valueOf url))
+                                                    ": ")]))))
+              (< lastSlash (unchecked-subtract-int (.length ctxFile) 1))
+                (set! ctxFile (.substring ctxFile 0 (unchecked-add-int lastSlash 1))))))
+      (java-str ctxFile spec)))
+
+  (method ^:private ^:static canonicalizeString ^String [^String file ^int off]
+    (let [len (.length file)]
+      (if (or (>= off len)
+              (and (== (.indexOf file "./" off) -1)
+                   (not (== (.charAt file (unchecked-subtract-int len 1)) \.))))
+          file
+          (let [before (.substring file 0 off)
+                after (.substring file off)]
+            (java-str before (Handler/doCanonicalize after))))))
+
+  (method ^:private ^:static doCanonicalize ^String [^:mutable ^String file]
+    (let [^:mutable ^int i 0
+          ^:mutable ^int lim 0]
+      (while (>= (set! i (.indexOf file "/../")) 0)
+        (if (>= (set! lim (.lastIndexOf file \/ (unchecked-subtract-int i 1))) 0)
+            (set! file (java-str (.substring file 0 lim) (.substring file (unchecked-add-int i 3))))
+            (set! file (.substring file (unchecked-add-int i 3)))))
+      (while (>= (set! i (.indexOf file "/./")) 0)
+        (set! file (java-str (.substring file 0 i) (.substring file (unchecked-add-int i 2)))))
+      (while (.endsWith file "/..")
+        (set! i (.indexOf file "/.."))
+        (if (>= (set! lim (.lastIndexOf file \/ (unchecked-subtract-int i 1))) 0)
+            (set! file (.substring file 0 (unchecked-add-int lim 1)))
+            (set! file (.substring file 0 i))))
+      (when (.endsWith file "/.")
+        (set! file (.substring file 0 (unchecked-subtract-int (.length file) 1))))
+      file))
+
+  (method ^:private ^:static newURL :throws [MalformedURLException] ^URL [^String spec]
+    (URL. spec)))

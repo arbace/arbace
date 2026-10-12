@@ -1,0 +1,783 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/ArrayBlockingQueue.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.io IOException
+                  InvalidObjectException
+                  ObjectInputStream
+                  ObjectOutputStream
+                  Serializable)
+        '(java.lang.ref WeakReference)
+        '(java.util AbstractQueue
+                    Arrays
+                    Collection
+                    Iterator
+                    NoSuchElementException
+                    Objects
+                    Spliterator
+                    Spliterators)
+        '(java.util.concurrent.locks Condition ReentrantLock)
+        '(java.util.function Consumer Predicate))
+
+(defclass ^:public ArrayBlockingQueue
+  :extends (AbstractQueue E)
+  :implements [(BlockingQueue E) Serializable]
+  :type-params [E]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID -817911632652898426)
+
+  (field ^:final ^Object/1 items)
+
+  (field ^int takeIndex)
+
+  (field ^int putIndex)
+
+  (field ^int count)
+
+  (field ^:final ^ReentrantLock lock)
+
+  (field ^:private ^:final ^Condition notEmpty)
+
+  (field ^:private ^:final ^Condition notFull)
+
+  (field ^:transient ^Itrs itrs)
+
+  (method ^:static ^:final inc ^int [^:mutable ^int i ^int modulus]
+    (when (>= (set! i (unchecked-inc-int i)) modulus) (set! i 0))
+    i)
+
+  (method ^:static ^:final dec ^int [^:mutable ^int i ^int modulus]
+    (when (< (set! i (unchecked-dec-int i)) 0) (set! i (unchecked-subtract-int modulus 1)))
+    i)
+
+  (method ^:final itemAt ^E [this ^int i] (aget items i))
+
+  (method ^:static itemAt :type-params [E] ^E [^Object/1 items ^int i]
+    (aget items i))
+
+  (method ^:private enqueue ^void [this ^E e]
+    (let [items (.-items this)]
+      (aset items putIndex e)
+      (when (== (set! putIndex (unchecked-inc-int putIndex)) (alength items)) (set! putIndex 0))
+      (set! count (unchecked-inc-int count))
+      (.signal notEmpty)))
+
+  (method ^:private dequeue ^E [this]
+    (let [items (.-items this)
+          ^E e (aget items takeIndex)]
+      (aset items takeIndex nil)
+      (when (== (set! takeIndex (unchecked-inc-int takeIndex)) (alength items)) (set! takeIndex 0))
+      (set! count (unchecked-dec-int count))
+      (when (some? itrs) (.elementDequeued itrs))
+      (.signal notFull)
+      e))
+
+  (method removeAt ^void [this ^:final ^int removeIndex]
+    (let [items (.-items this)]
+      (if (== removeIndex takeIndex)
+          (do
+            (aset items takeIndex nil)
+            (when (== (set! takeIndex (unchecked-inc-int takeIndex)) (alength items))
+              (set! takeIndex 0))
+            (set! count (unchecked-dec-int count))
+            (when (some? itrs) (.elementDequeued itrs)))
+          (do
+            (let [^:mutable i removeIndex
+                  putIndex (.-putIndex this)]
+              (while true
+                (let [pred i]
+                  (when (== (set! i (unchecked-inc-int i)) (alength items)) (set! i 0))
+                  (when (== i putIndex) (aset items pred nil) (set! (.-putIndex this) pred) (break))
+                  (aset items pred (aget items i)))))
+            (set! count (unchecked-dec-int count))
+            (when (some? itrs) (.removedAt itrs removeIndex))))
+      (.signal notFull)))
+
+  (constructor ^:public [this ^int capacity] (this. capacity false))
+
+  (constructor ^:public [this ^int capacity ^boolean fair]
+    (when (<= capacity 0) (throw (IllegalArgumentException.)))
+    (set! (.-items this) (new Object/1 capacity))
+    (set! lock (ReentrantLock. fair))
+    (set! notEmpty (.newCondition lock))
+    (set! notFull (.newCondition lock)))
+
+  (constructor ^:public [this ^int capacity ^boolean fair ^{:tag (Collection (? extends E))} c]
+    (this. capacity fair)
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try
+        (let [items (.-items this)
+              ^:mutable ^int i 0]
+          (try
+            (for-each [e c]
+              (aset items i (Objects/requireNonNull e))
+              (set! i (unchecked-inc-int i)))
+            (catch ArrayIndexOutOfBoundsException ex (throw (IllegalArgumentException.))))
+          (set! count i)
+          (set! putIndex (if (== i capacity) 0 i)))
+        (finally (.unlock lock)))))
+
+  (method ^:public add ^boolean [this ^E e] (.add super e))
+
+  (method ^:public offer ^boolean [this ^E e]
+    (Objects/requireNonNull e)
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try
+        (if (== count (alength items)) false (do (.enqueue this e) true))
+        (finally (.unlock lock)))))
+
+  (method ^:public put :throws [InterruptedException] ^void [this ^E e]
+    (Objects/requireNonNull e)
+    (let [lock (.-lock this)]
+      (.lockInterruptibly lock)
+      (try
+        (while (== count (alength items)) (.await notFull))
+        (.enqueue this e)
+        (finally (.unlock lock)))))
+
+  (method ^:public offer :throws [InterruptedException] ^boolean [this ^E e ^long timeout
+                                                                  ^TimeUnit unit]
+    (Objects/requireNonNull e)
+    (let [^:mutable nanos (.toNanos unit timeout)
+          lock (.-lock this)]
+      (.lockInterruptibly lock)
+      (try
+        (while (== count (alength items))
+          (when (<= nanos 0) (return false))
+          (set! nanos (.awaitNanos notFull nanos)))
+        (.enqueue this e)
+        true
+        (finally (.unlock lock)))))
+
+  (method ^:public poll ^E [this]
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try (when-not (== count 0) (.dequeue this)) (finally (.unlock lock)))))
+
+  (method ^:public take :throws [InterruptedException] ^E [this]
+    (let [lock (.-lock this)]
+      (.lockInterruptibly lock)
+      (try (while (== count 0) (.await notEmpty)) (.dequeue this) (finally (.unlock lock)))))
+
+  (method ^:public poll :throws [InterruptedException] ^E [this ^long timeout ^TimeUnit unit]
+    (let [^:mutable nanos (.toNanos unit timeout)
+          lock (.-lock this)]
+      (.lockInterruptibly lock)
+      (try
+        (while (== count 0)
+          (when (<= nanos 0) (return nil))
+          (set! nanos (.awaitNanos notEmpty nanos)))
+        (.dequeue this)
+        (finally (.unlock lock)))))
+
+  (method ^:public peek ^E [this]
+    (let [lock (.-lock this)] (.lock lock) (try (.itemAt this takeIndex) (finally (.unlock lock)))))
+
+  (method ^:public size ^int [this]
+    (let [lock (.-lock this)] (.lock lock) (try count (finally (.unlock lock)))))
+
+  (method ^:public remainingCapacity ^int [this]
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try (unchecked-subtract-int (alength items) count) (finally (.unlock lock)))))
+
+  (method ^:public remove ^boolean [this o]
+    (if (nil? o)
+        false
+        (let [lock (.-lock this)]
+          (.lock lock)
+          (try
+            (when (> count 0)
+              (let [items (.-items this)
+                    ^:mutable i takeIndex
+                    end putIndex
+                    ^:mutable ^int to (if (< i end) end (alength items))]
+                (while true
+                  (while (< i to)
+                    (when (.equals o (aget items i)) (.removeAt this i) (return true))
+                    (set! i (unchecked-inc-int i)))
+                  (when (== to end) (break))
+                  (set! i 0)
+                  (set! to end))))
+            false
+            (finally (.unlock lock))))))
+
+  (method ^:public contains ^boolean [this o]
+    (if (nil? o)
+        false
+        (let [lock (.-lock this)]
+          (.lock lock)
+          (try
+            (when (> count 0)
+              (let [items (.-items this)
+                    ^:mutable i takeIndex
+                    end putIndex
+                    ^:mutable ^int to (if (< i end) end (alength items))]
+                (while true
+                  (while (< i to)
+                    (when (.equals o (aget items i)) (return true))
+                    (set! i (unchecked-inc-int i)))
+                  (when (== to end) (break))
+                  (set! i 0)
+                  (set! to end))))
+            false
+            (finally (.unlock lock))))))
+
+  (method ^:public toArray ^Object/1 [this]
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try
+        (let [items (.-items this)
+              end (unchecked-add-int takeIndex count)
+              a (Arrays/copyOfRange items takeIndex end)]
+          (when-not (== end putIndex)
+            (System/arraycopy items 0 a (unchecked-subtract-int (alength items) takeIndex) putIndex))
+          a)
+        (finally (.unlock lock)))))
+
+  (method ^:public toArray :type-params [T] ^T/1 [this ^:mutable ^T/1 a]
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try
+        (let [items (.-items this)
+              count (.-count this)
+              firstLeg (Math/min (unchecked-subtract-int (alength items) takeIndex) count)]
+          (if (< (alength a) count)
+              (set! a
+                    (Arrays/copyOfRange items
+                                        takeIndex
+                                        (unchecked-add-int takeIndex count)
+                                        (.getClass a)))
+              (do
+                (System/arraycopy items takeIndex a 0 firstLeg)
+                (when (> (alength a) count) (aset a count nil))))
+          (when (< firstLeg count) (System/arraycopy items 0 a firstLeg putIndex))
+          a)
+        (finally (.unlock lock)))))
+
+  (method ^:public toString ^String [this]
+    (Helpers/collectionToString this))
+
+  (method ^:public clear ^void [this]
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try
+        (let [^:mutable ^int k 0]
+          (when (> (set! k count) 0)
+            (ArrayBlockingQueue/circularClear items takeIndex putIndex)
+            (set! takeIndex putIndex)
+            (set! count 0)
+            (when (some? itrs) (.queueIsEmpty itrs))
+            (while (and (> k 0) (.hasWaiters lock notFull))
+              (.signal notFull)
+              (set! k (unchecked-dec-int k)))))
+        (finally (.unlock lock)))))
+
+  (method ^:private ^:static circularClear ^void [^Object/1 items ^:mutable ^int i ^int end]
+    (let [^:mutable ^int to (if (< i end) end (alength items))]
+      (while true
+        (while (< i to) (aset items i nil) (set! i (unchecked-inc-int i)))
+        (when (== to end) (break))
+        (set! i 0)
+        (set! to end))))
+
+  (method ^:public drainTo ^int [this ^{:tag (Collection (? super E))} c]
+    (.drainTo this c Integer/MAX_VALUE))
+
+  (method ^:public drainTo ^int [this ^{:tag (Collection (? super E))} c ^int maxElements]
+    (Objects/requireNonNull c)
+    (when (identical? c this) (throw (IllegalArgumentException.)))
+    (if (<= maxElements 0)
+        0
+        (let [items (.-items this)
+              lock (.-lock this)]
+          (.lock lock)
+          (try
+            (let [n (Math/min maxElements count)
+                  ^:mutable take takeIndex
+                  ^:mutable ^int i 0]
+              (try
+                (while (< i n)
+                  (let [^E e (aget items take)]
+                    (.add c e)
+                    (aset items take nil)
+                    (when (== (set! take (unchecked-inc-int take)) (alength items)) (set! take 0))
+                    (set! i (unchecked-inc-int i))))
+                n
+                (finally
+                  (when (> i 0)
+                    (set! count (unchecked-subtract-int count i))
+                    (set! takeIndex take)
+                    (when (some? itrs)
+                      (cond (== count 0) (.queueIsEmpty itrs) (> i take) (.takeIndexWrapped itrs)))
+                    (while (and (> i 0) (.hasWaiters lock notFull))
+                      (.signal notFull)
+                      (set! i (unchecked-dec-int i)))))))
+            (finally (.unlock lock))))))
+
+  (method ^:public iterator ^{:tag (Iterator E)} [this] (Itr.))
+
+  (defclass Itrs
+    (defclass ^:private Node
+      :extends (WeakReference Itr)
+
+      (field ^Node next)
+
+      (constructor [this ^Itr iterator ^Node next]
+        (super. iterator)
+        (set! (.-next this) next)))
+
+    (field ^int cycles)
+
+    (field ^:private ^Node head)
+
+    (field ^:private ^Node sweeper)
+
+    (field ^:private ^:static ^:final ^int SHORT_SWEEP_PROBES 4)
+
+    (field ^:private ^:static ^:final ^int LONG_SWEEP_PROBES 16)
+
+    (constructor [this ^Itr initial] (.register this initial))
+
+    (method doSomeSweeping ^void [this ^boolean tryHarder]
+      (let [^:mutable ^int probes (if tryHarder LONG_SWEEP_PROBES SHORT_SWEEP_PROBES)
+            ^:mutable ^Node o nil
+            ^:mutable ^Node p nil
+            ^Node sweeper (.-sweeper this)
+            ^:mutable ^boolean passedGo false]
+        (if (nil? sweeper)
+            (do (set! o nil) (set! p head) (set! passedGo true))
+            (do (set! o sweeper) (set! p (.-next o)) (set! passedGo false)))
+        (while (> probes 0)
+          (when (nil? p) (when passedGo (break)) (set! o nil) (set! p head) (set! passedGo true))
+          (let [^Itr it (cast Itr (.get p))
+                ^Node next (.-next p)]
+            (if (or (nil? it) (.isDetached it))
+                (do
+                  (set! probes LONG_SWEEP_PROBES)
+                  (.clear p)
+                  (set! (.-next p) nil)
+                  (if (nil? o)
+                      (do (set! head next) (when (nil? next) (set! itrs nil) (return)))
+                      (set! (.-next o) next)))
+                (set! o p))
+            (set! p next))
+          (set! probes (unchecked-dec-int probes)))
+        (set! (.-sweeper this) (when (some? p) o))))
+
+    (method register ^void [this ^Itr itr] (set! head (Node. itr head)))
+
+    (method takeIndexWrapped ^void [this]
+      (set! cycles (unchecked-inc-int cycles))
+      (let [^:mutable ^Node o nil
+            ^:mutable ^Node p head]
+        (while (some? p)
+          (let [^Itr it (cast Itr (.get p))
+                ^Node next (.-next p)]
+            (if (or (nil? it) (.takeIndexWrapped it))
+                (do
+                  (.clear p)
+                  (set! (.-next p) nil)
+                  (if (nil? o) (set! head next) (set! (.-next o) next)))
+                (set! o p))
+            (set! p next))))
+      (when (nil? head) (set! itrs nil)))
+
+    (method removedAt ^void [this ^int removedIndex]
+      (let [^:mutable ^Node o nil
+            ^:mutable ^Node p head]
+        (while (some? p)
+          (let [^Itr it (cast Itr (.get p))
+                ^Node next (.-next p)]
+            (if (or (nil? it) (.removedAt it removedIndex))
+                (do
+                  (.clear p)
+                  (set! (.-next p) nil)
+                  (if (nil? o) (set! head next) (set! (.-next o) next)))
+                (set! o p))
+            (set! p next))))
+      (when (nil? head) (set! itrs nil)))
+
+    (method queueIsEmpty ^void [this]
+      (loop [^Node p head]
+        (when (some? p)
+          (let [^Itr it (cast Itr (.get p))]
+            (if (some? it) (do (.clear p) (.shutdown it) (recur (.-next p))) (recur (.-next p))))))
+      (set! head nil)
+      (set! itrs nil))
+
+    (method elementDequeued ^void [this]
+      (cond (== count 0) (.queueIsEmpty this) (== takeIndex 0) (.takeIndexWrapped this))))
+
+  (defclass ^:private Itr
+    :implements [(Iterator E)]
+
+    (field ^:private ^int cursor)
+
+    (field ^:private ^E nextItem)
+
+    (field ^:private ^int nextIndex)
+
+    (field ^:private ^E lastItem)
+
+    (field ^:private ^int lastRet)
+
+    (field ^:private ^int prevTakeIndex)
+
+    (field ^:private ^int prevCycles)
+
+    (field ^:private ^:static ^:final ^int NONE -1)
+
+    (field ^:private ^:static ^:final ^int REMOVED -2)
+
+    (field ^:private ^:static ^:final ^int DETACHED -3)
+
+    (constructor [this]
+      (set! lastRet NONE)
+      (let [lock (.-lock ArrayBlockingQueue/this)]
+        (.lock lock)
+        (try
+          (if (== count 0)
+              (do (set! cursor NONE) (set! nextIndex NONE) (set! prevTakeIndex DETACHED))
+              (let [takeIndex (.-takeIndex ArrayBlockingQueue/this)]
+                (set! prevTakeIndex takeIndex)
+                (set! nextItem (.itemAt ArrayBlockingQueue/this (set! nextIndex takeIndex)))
+                (set! cursor (.incCursor this takeIndex))
+                (if (nil? itrs)
+                    (set! itrs (Itrs. this))
+                    (do (.register itrs this) (.doSomeSweeping itrs false)))
+                (set! prevCycles (.-cycles itrs))))
+          (finally (.unlock lock)))))
+
+    (method isDetached ^boolean [this] (< prevTakeIndex 0))
+
+    (method ^:private incCursor ^int [this ^:mutable ^int index]
+      (when (== (set! index (unchecked-inc-int index)) (alength items)) (set! index 0))
+      (when (== index putIndex) (set! index NONE))
+      index)
+
+    (method ^:private invalidated ^boolean [this ^int index ^int prevTakeIndex ^long dequeues
+                                            ^int length]
+      (if (< index 0)
+          false
+          (let [^:mutable distance (unchecked-subtract-int index prevTakeIndex)]
+            (when (< distance 0) (set! distance (unchecked-add-int distance length)))
+            (> dequeues distance))))
+
+    (method ^:private incorporateDequeues ^void [this]
+      (let [cycles (.-cycles itrs)
+            takeIndex (.-takeIndex ArrayBlockingQueue/this)
+            prevCycles (.-prevCycles this)
+            prevTakeIndex (.-prevTakeIndex this)]
+        (when (or (not (== cycles prevCycles)) (not (== takeIndex prevTakeIndex)))
+          (let [len (alength items)
+                dequeues (unchecked-add
+                           (unchecked-multiply (long (unchecked-subtract-int cycles prevCycles))
+                                               len)
+                           (unchecked-subtract-int takeIndex prevTakeIndex))]
+            (when (.invalidated this lastRet prevTakeIndex dequeues len) (set! lastRet REMOVED))
+            (when (.invalidated this nextIndex prevTakeIndex dequeues len) (set! nextIndex REMOVED))
+            (when (.invalidated this cursor prevTakeIndex dequeues len) (set! cursor takeIndex))
+            (if (and (and (< cursor 0) (< nextIndex 0)) (< lastRet 0))
+                (.detach this)
+                (do (set! (.-prevCycles this) cycles) (set! (.-prevTakeIndex this) takeIndex)))))))
+
+    (method ^:private detach ^void [this]
+      (when (>= prevTakeIndex 0) (set! prevTakeIndex DETACHED) (.doSomeSweeping itrs true)))
+
+    (method ^:public hasNext ^boolean [this]
+      (if (some? nextItem) true (do (.noNext this) false)))
+
+    (method ^:private noNext ^void [this]
+      (let [lock (.-lock ArrayBlockingQueue/this)]
+        (.lock lock)
+        (try
+          (when-not (.isDetached this)
+            (.incorporateDequeues this)
+            (when (>= lastRet 0)
+              (set! lastItem (.itemAt ArrayBlockingQueue/this lastRet))
+              (.detach this)))
+          (finally (.unlock lock)))))
+
+    (method ^:public next ^E [this]
+      (let [^E e nextItem]
+        (when (nil? e) (throw (NoSuchElementException.)))
+        (let [lock (.-lock ArrayBlockingQueue/this)]
+          (.lock lock)
+          (try
+            (when-not (.isDetached this) (.incorporateDequeues this))
+            (set! lastRet nextIndex)
+            (let [cursor (.-cursor this)]
+              (if (>= cursor 0)
+                  (do
+                    (set! nextItem (.itemAt ArrayBlockingQueue/this (set! nextIndex cursor)))
+                    (set! (.-cursor this) (.incCursor this cursor)))
+                  (do
+                    (set! nextIndex NONE)
+                    (set! nextItem nil)
+                    (when (== lastRet REMOVED) (.detach this)))))
+            (finally (.unlock lock)))
+          e)))
+
+    (method ^:public forEachRemaining ^void [this ^{:tag (Consumer (? super E))} action]
+      (Objects/requireNonNull action)
+      (let [lock (.-lock ArrayBlockingQueue/this)]
+        (.lock lock)
+        (try
+          (let [^E e nextItem]
+            (when (some? e)
+              (when-not (.isDetached this) (.incorporateDequeues this))
+              (.accept action e)
+              (when-not (or (.isDetached this) (< cursor 0))
+                (let [items (.-items ArrayBlockingQueue/this)
+                      ^:mutable i cursor
+                      end putIndex
+                      ^:mutable ^int to (if (< i end) end (alength items))]
+                  (while true
+                    (while (< i to)
+                      (.accept action (ArrayBlockingQueue/itemAt items i))
+                      (set! i (unchecked-inc-int i)))
+                    (when (== to end) (break))
+                    (set! i 0)
+                    (set! to end))))))
+          (finally
+            (set! cursor (set! nextIndex (set! lastRet NONE)))
+            (set! nextItem (set! lastItem nil))
+            (.detach this)
+            (.unlock lock)))))
+
+    (method ^:public remove ^void [this]
+      (let [lock (.-lock ArrayBlockingQueue/this)]
+        (.lock lock)
+        (try
+          (when-not (.isDetached this) (.incorporateDequeues this))
+          (let [lastRet (.-lastRet this)]
+            (set! (.-lastRet this) NONE)
+            (cond
+              (>= lastRet 0)
+                (if (not (.isDetached this))
+                    (.removeAt ArrayBlockingQueue/this lastRet)
+                    (let [^E lastItem (.-lastItem this)]
+                      (set! (.-lastItem this) nil)
+                      (when (identical? (.itemAt ArrayBlockingQueue/this lastRet) lastItem)
+                        (.removeAt ArrayBlockingQueue/this lastRet))))
+              (== lastRet NONE) (throw (IllegalStateException.)))
+            (when (and (< cursor 0) (< nextIndex 0)) (.detach this)))
+          (finally (.unlock lock)))))
+
+    (method shutdown ^void [this]
+      (set! cursor NONE)
+      (when (>= nextIndex 0) (set! nextIndex REMOVED))
+      (when (>= lastRet 0) (set! lastRet REMOVED) (set! lastItem nil))
+      (set! prevTakeIndex DETACHED))
+
+    (method ^:private distance ^int [this ^int index ^int prevTakeIndex ^int length]
+      (let [^:mutable distance (unchecked-subtract-int index prevTakeIndex)]
+        (when (< distance 0) (set! distance (unchecked-add-int distance length)))
+        distance))
+
+    (method removedAt ^boolean [this ^int removedIndex]
+      (if (.isDetached this)
+          true
+          (let [takeIndex (.-takeIndex ArrayBlockingQueue/this)
+                prevTakeIndex (.-prevTakeIndex this)
+                len (alength items)
+                removedDistance (unchecked-add-int
+                                  (unchecked-multiply-int
+                                    len
+                                    (unchecked-add-int
+                                      (unchecked-subtract-int (.-cycles itrs) (.-prevCycles this))
+                                      (if (< removedIndex takeIndex) 1 0)))
+                                  (unchecked-subtract-int removedIndex prevTakeIndex))
+                ^:mutable cursor (.-cursor this)]
+            (when (>= cursor 0)
+              (let [x (.distance this cursor prevTakeIndex len)]
+                (cond
+                  (== x removedDistance)
+                    (when (== cursor putIndex) (set! (.-cursor this) (set! cursor NONE)))
+                  (> x removedDistance)
+                    (set! (.-cursor this) (set! cursor (ArrayBlockingQueue/dec cursor len))))))
+            (let [^:mutable lastRet (.-lastRet this)]
+              (when (>= lastRet 0)
+                (let [x (.distance this lastRet prevTakeIndex len)]
+                  (cond
+                    (== x removedDistance) (set! (.-lastRet this) (set! lastRet REMOVED))
+                    (> x removedDistance)
+                      (set! (.-lastRet this) (set! lastRet (ArrayBlockingQueue/dec lastRet len))))))
+              (let [^:mutable nextIndex (.-nextIndex this)]
+                (when (>= nextIndex 0)
+                  (let [x (.distance this nextIndex prevTakeIndex len)]
+                    (cond
+                      (== x removedDistance) (set! (.-nextIndex this) (set! nextIndex REMOVED))
+                      (> x removedDistance)
+                        (set! (.-nextIndex this)
+                              (set! nextIndex (ArrayBlockingQueue/dec nextIndex len))))))
+                (if (and (and (< cursor 0) (< nextIndex 0)) (< lastRet 0))
+                    (do (set! (.-prevTakeIndex this) DETACHED) true)
+                    false))))))
+
+    (method takeIndexWrapped ^boolean [this]
+      (cond
+        (.isDetached this) true
+        (> (unchecked-subtract-int (.-cycles itrs) prevCycles) 1) (do (.shutdown this) true)
+        :else false)))
+
+  (method ^:public spliterator ^{:tag (Spliterator E)} [this]
+    (Spliterators/spliterator this
+                              (bit-or-int (bit-or-int Spliterator/ORDERED Spliterator/NONNULL)
+                                          Spliterator/CONCURRENT)))
+
+  (method ^:public forEach ^void [this ^{:tag (Consumer (? super E))} action]
+    (Objects/requireNonNull action)
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try
+        (when (> count 0)
+          (let [items (.-items this)
+                ^:mutable i takeIndex
+                end putIndex
+                ^:mutable ^int to (if (< i end) end (alength items))]
+            (while true
+              (while (< i to)
+                (.accept action (ArrayBlockingQueue/itemAt items i))
+                (set! i (unchecked-inc-int i)))
+              (when (== to end) (break))
+              (set! i 0)
+              (set! to end))))
+        (finally (.unlock lock)))))
+
+  (method ^:public removeIf ^boolean [this ^{:tag (Predicate (? super E))} filter]
+    (Objects/requireNonNull filter)
+    (.bulkRemove this filter))
+
+  (method ^:public removeAll ^boolean [this ^{:tag (Collection ?)} c]
+    (Objects/requireNonNull c)
+    (.bulkRemove this (lambda Predicate ^boolean [e] (.contains c e))))
+
+  (method ^:public retainAll ^boolean [this ^{:tag (Collection ?)} c]
+    (Objects/requireNonNull c)
+    (.bulkRemove this (lambda Predicate ^boolean [e] (not (.contains c e)))))
+
+  (method ^:private bulkRemove ^boolean [this ^{:tag (Predicate (? super E))} filter]
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try
+        (when (nil? itrs)
+          (when (> count 0)
+            (let [items (.-items this)
+                  ^:mutable i takeIndex
+                  end putIndex
+                  ^:mutable ^int to (if (< i end) end (alength items))]
+              (while true
+                (while (< i to)
+                  (when (.test filter (ArrayBlockingQueue/itemAt items i))
+                    (return (.bulkRemoveModified this filter i)))
+                  (set! i (unchecked-inc-int i)))
+                (when (== to end) (break))
+                (set! i 0)
+                (set! to end))))
+          (return false))
+        (finally (.unlock lock)))
+      (.removeIf super filter)))
+
+  (method ^:private ^:static nBits ^long/1 [^int n]
+    (new long/1 (unchecked-add-int (bit-shift-right-int (unchecked-subtract-int n 1) 6) 1)))
+
+  (method ^:private ^:static setBit ^void [^long/1 bits ^int i]
+    (let [i-1 (bit-shift-right-int i 6)]
+      (aset bits i-1 (bit-or (aget bits i-1) (bit-shift-left 1 i)))))
+
+  (method ^:private ^:static isClear ^boolean [^long/1 bits ^int i]
+    (== (bit-and (aget bits (bit-shift-right-int i 6)) (bit-shift-left 1 i)) 0))
+
+  (method ^:private distanceNonEmpty ^int [this ^int i ^:mutable ^int j]
+    (when (<= (set! j (unchecked-subtract-int j i)) 0)
+      (set! j (unchecked-add-int j (alength items))))
+    j)
+
+  (method ^:private bulkRemoveModified ^boolean [this ^{:tag (Predicate (? super E))} filter
+                                                 ^:final ^int beg]
+    (let [es items
+          capacity (alength items)
+          end putIndex
+          deathRow (ArrayBlockingQueue/nBits (.distanceNonEmpty this beg putIndex))]
+      (aset deathRow 0 1)
+      (let [^:mutable i (unchecked-add-int beg 1)
+            ^:mutable ^int to (if (<= i end) end (alength es))
+            ^:mutable k beg]
+        (while true
+          (while (< i to)
+            (when (.test filter (ArrayBlockingQueue/itemAt es i))
+              (ArrayBlockingQueue/setBit deathRow (unchecked-subtract-int i k)))
+            (set! i (unchecked-inc-int i)))
+          (when (== to end) (break))
+          (set! i 0)
+          (set! to end)
+          (set! k (unchecked-subtract-int k capacity))))
+      (let [^:mutable w beg]
+        (let [^:mutable i (unchecked-add-int beg 1)
+              ^:mutable ^int to (if (<= i end) end (alength es))
+              ^:mutable k beg]
+          (while true
+            (while (< i to)
+              (when (ArrayBlockingQueue/isClear deathRow (unchecked-subtract-int i k))
+                (aset es w (aget es i))
+                (set! w (unchecked-inc-int w)))
+              (set! i (unchecked-inc-int i)))
+            (when (== to end) (break))
+            (set! i 0)
+            (set! to end)
+            (set! k (unchecked-subtract-int k capacity))
+            (while (and (< i to) (< w capacity))
+              (when (ArrayBlockingQueue/isClear deathRow (unchecked-subtract-int i k))
+                (aset es w (aget es i))
+                (set! w (unchecked-inc-int w)))
+              (set! i (unchecked-inc-int i)))
+            (when (>= i to) (when (== w capacity) (set! w 0)) (break))
+            (set! w 0)))
+        (set! count (unchecked-subtract-int count (.distanceNonEmpty this w end)))
+        (ArrayBlockingQueue/circularClear es (set! putIndex w) end)
+        true)))
+
+  (method checkInvariants ^void [this]
+    (when-not (.invariantsSatisfied this)
+      (let [detail (String/format "takeIndex=%d putIndex=%d count=%d capacity=%d items=%s"
+                                  (new Object/1
+                                       [takeIndex
+                                        putIndex
+                                        count
+                                        (alength items)
+                                        (Arrays/toString items)]))]
+        (.println System/err detail)
+        (throw (AssertionError. detail)))))
+
+  (method ^:private invariantsSatisfied ^boolean [this]
+    (let [capacity (alength items)]
+      (and (and (and (and (and (and (and (and (and
+                                                (> capacity 0)
+                                                (identical? (.getClass items) Object/1))
+                                              (>=
+                                                (bit-or-int (bit-or-int takeIndex putIndex) count)
+                                                0))
+                                         (< takeIndex capacity))
+                                    (< putIndex capacity))
+                               (<= count capacity))
+                          (== (unchecked-remainder-int
+                                (unchecked-subtract-int
+                                  (unchecked-subtract-int putIndex takeIndex)
+                                  count)
+                                capacity)
+                              0))
+                     (or (== count 0) (some? (aget items takeIndex))))
+                (or (== count capacity) (nil? (aget items putIndex))))
+           (or (== count 0) (some? (aget items (ArrayBlockingQueue/dec putIndex capacity)))))))
+
+  (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream s]
+    (let [lock (.-lock this)] (.lock lock) (try (.defaultWriteObject s) (finally (.unlock lock)))))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream s]
+    (.defaultReadObject s)
+    (when-not (.invariantsSatisfied this) (throw (InvalidObjectException. "invariants violated")))))

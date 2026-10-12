@@ -1,0 +1,243 @@
+;; Converted from jdk26u src/java.base/share/classes/java/io/BufferedReader.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.io)
+
+(import '(java.util Iterator NoSuchElementException Objects Spliterator Spliterators)
+        '(java.util.stream Stream StreamSupport))
+
+(defclass ^:public BufferedReader
+  :extends Reader
+
+  (field ^:private ^Reader in)
+
+  (field ^:private ^char/1 cb)
+
+  (field ^:private ^int nChars)
+
+  (field ^:private ^int nextChar)
+
+  (field ^:private ^:static ^:final ^int INVALIDATED -2)
+
+  (field ^:private ^:static ^:final ^int UNMARKED -1)
+
+  (field ^:private ^int markedChar UNMARKED)
+
+  (field ^:private ^int readAheadLimit 0)
+
+  (field ^:private ^boolean skipLF false)
+
+  (field ^:private ^boolean markedSkipLF false)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_CHAR_BUFFER_SIZE 8192)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_EXPECTED_LINE_LENGTH 80)
+
+  (constructor ^:public [this ^Reader in ^int sz]
+    (super. in)
+    (when (<= sz 0) (throw (IllegalArgumentException. "Buffer size <= 0")))
+    (set! (.-in this) in)
+    (set! cb (new char/1 sz))
+    (set! nextChar (set! nChars 0)))
+
+  (constructor ^:public [this ^Reader in]
+    (this. in DEFAULT_CHAR_BUFFER_SIZE))
+
+  (method ^:private ensureOpen :throws [IOException] ^void [this]
+    (when (nil? in) (throw (IOException. "Stream closed"))))
+
+  (method ^:private fill :throws [IOException] ^void [this]
+    (let [^:mutable ^int dst 0]
+      (if (<= markedChar UNMARKED)
+          (set! dst 0)
+          (let [delta (unchecked-subtract-int nextChar markedChar)]
+            (if (>= delta readAheadLimit)
+                (do (set! markedChar INVALIDATED) (set! readAheadLimit 0) (set! dst 0))
+                (do
+                  (if (<= readAheadLimit (alength cb))
+                      (do
+                        (System/arraycopy cb markedChar cb 0 delta)
+                        (set! markedChar 0)
+                        (set! dst delta))
+                      (let [ncb (new char/1 readAheadLimit)]
+                        (System/arraycopy cb markedChar ncb 0 delta)
+                        (set! cb ncb)
+                        (set! markedChar 0)
+                        (set! dst delta)))
+                  (set! nextChar (set! nChars delta))))))
+      (let [^:mutable ^int n 0]
+        (loop []
+          (set! n (.read in cb dst (unchecked-subtract-int (alength cb) dst)))
+          (when (== n 0) (recur)))
+        (when (> n 0) (set! nChars (unchecked-add-int dst n)) (set! nextChar dst)))))
+
+  (method ^:public read :throws [IOException] ^int [this]
+    (locking (.-lock this)
+      (.ensureOpen this)
+      (while true
+        (when (>= nextChar nChars) (.fill this) (when (>= nextChar nChars) (return -1)))
+        (when skipLF
+          (set! skipLF false)
+          (when (== (aget cb nextChar) \newline)
+            (set! nextChar (unchecked-inc-int nextChar))
+            (continue)))
+        (let [nextChar-1 nextChar]
+          (set! nextChar (unchecked-inc-int nextChar))
+          (return (aget cb nextChar-1))))))
+
+  (method ^:private read1 :throws [IOException] ^int [this ^char/1 cbuf ^int off ^int len]
+    (when (>= nextChar nChars)
+      (when (and (and (>= len (alength cb)) (<= markedChar UNMARKED)) (not skipLF))
+        (return (.read in cbuf off len)))
+      (.fill this))
+    (if (>= nextChar nChars)
+        -1
+        (do
+          (when skipLF
+            (set! skipLF false)
+            (when (== (aget cb nextChar) \newline)
+              (set! nextChar (unchecked-inc-int nextChar))
+              (when (>= nextChar nChars) (.fill this))
+              (when (>= nextChar nChars) (return -1))))
+          (let [n (Math/min len (unchecked-subtract-int nChars nextChar))]
+            (System/arraycopy cb nextChar cbuf off n)
+            (set! nextChar (unchecked-add-int nextChar n))
+            n))))
+
+  (method ^:public read :throws [IOException] ^int [this ^char/1 cbuf ^int off ^int len]
+    (locking (.-lock this)
+      (.ensureOpen this)
+      (Objects/checkFromIndexSize off len (alength cbuf))
+      (if (== len 0)
+          0
+          (let [^:mutable n (.read1 this cbuf off len)]
+            (if (<= n 0)
+                n
+                (do
+                  (while (and (< n len) (.ready in))
+                    (let [n1 (.read1 this
+                                     cbuf
+                                     (unchecked-add-int off n)
+                                     (unchecked-subtract-int len n))]
+                      (when (<= n1 0) (break))
+                      (set! n (unchecked-add-int n n1))))
+                  n))))))
+
+  (method readLine :throws [IOException] ^String [this ^boolean ignoreLF ^boolean/1 term]
+    (locking (.-lock this)
+      (let [^:mutable ^StringBuilder s nil
+            ^:mutable ^int startChar 0]
+        (.ensureOpen this)
+        (let [^:mutable omitLF (or ignoreLF skipLF)]
+          (when (some? term) (aset term 0 false))
+          (while true
+            (when (>= nextChar nChars) (.fill this))
+            (when (>= nextChar nChars)
+              (if (and (some? s) (> (.length s) 0)) (return (.toString s)) (return nil)))
+            (let [^:mutable eol false
+                  ^:mutable ^char c 0
+                  ^:mutable ^int i 0]
+              (when (and omitLF (== (aget cb nextChar) \newline))
+                (set! nextChar (unchecked-inc-int nextChar)))
+              (set! skipLF false)
+              (set! omitLF false)
+              (set! i nextChar)
+              (while (< i nChars)
+                (set! c (aget cb i))
+                (when (or (== c \newline) (== c \return))
+                  (when (some? term) (aset term 0 true))
+                  (set! eol true)
+                  (break))
+                (set! i (unchecked-inc-int i)))
+              (set! startChar nextChar)
+              (set! nextChar i)
+              (when eol
+                (let [^:mutable ^String str nil]
+                  (if (nil? s)
+                      (set! str (String. cb startChar (unchecked-subtract-int i startChar)))
+                      (do
+                        (.append s cb startChar (unchecked-subtract-int i startChar))
+                        (set! str (.toString s))))
+                  (set! nextChar (unchecked-inc-int nextChar))
+                  (when (== c \return) (set! skipLF true))
+                  (return str)))
+              (when (nil? s) (set! s (StringBuilder. DEFAULT_EXPECTED_LINE_LENGTH)))
+              (.append s cb startChar (unchecked-subtract-int i startChar))))))))
+
+  (method ^:public readLine :throws [IOException] ^String [this]
+    (.readLine this false nil))
+
+  (method ^:public skip :throws [IOException] ^long [this ^long n]
+    (when (< n 0) (throw (IllegalArgumentException. "skip value is negative")))
+    (locking (.-lock this)
+      (.ensureOpen this)
+      (let [^:mutable r n]
+        (while (> r 0)
+          (when (>= nextChar nChars) (.fill this))
+          (when (>= nextChar nChars) (break))
+          (when skipLF
+            (set! skipLF false)
+            (when (== (aget cb nextChar) \newline) (set! nextChar (unchecked-inc-int nextChar))))
+          (let [^long d (unchecked-subtract-int nChars nextChar)]
+            (if (<= r d)
+                (do
+                  (set! nextChar (unchecked-add-int nextChar (unchecked-int r)))
+                  (set! r 0)
+                  (break))
+                (do (set! r (unchecked-subtract r d)) (set! nextChar nChars)))))
+        (unchecked-subtract n r))))
+
+  (method ^:public ready :throws [IOException] ^boolean [this]
+    (locking (.-lock this)
+      (.ensureOpen this)
+      (when skipLF
+        (when (and (>= nextChar nChars) (.ready in)) (.fill this))
+        (when (< nextChar nChars)
+          (when (== (aget cb nextChar) \newline) (set! nextChar (unchecked-inc-int nextChar)))
+          (set! skipLF false)))
+      (or (< nextChar nChars) (.ready in))))
+
+  (method ^:public markSupported ^boolean [this] true)
+
+  (method ^:public mark :throws [IOException] ^void [this ^int readAheadLimit]
+    (when (< readAheadLimit 0) (throw (IllegalArgumentException. "Read-ahead limit < 0")))
+    (locking (.-lock this)
+      (.ensureOpen this)
+      (set! (.-readAheadLimit this) readAheadLimit)
+      (set! markedChar nextChar)
+      (set! markedSkipLF skipLF)))
+
+  (method ^:public reset :throws [IOException] ^void [this]
+    (locking (.-lock this)
+      (.ensureOpen this)
+      (when (< markedChar 0)
+        (throw (IOException. ^String (if (== markedChar INVALIDATED)
+                                         "Mark invalid"
+                                         "Stream not marked"))))
+      (set! nextChar markedChar)
+      (set! skipLF markedSkipLF)))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (locking (.-lock this)
+      (when (some? in) (try (.close in) (finally (set! in nil) (set! cb nil))))))
+
+  (method ^:public lines ^{:tag (Stream String)} [this]
+    (let [^{:tag (Iterator String)} iter (anon ^:diamond (Iterator String) []
+                                           (field ^String nextLine nil)
+
+                                           (method ^:public hasNext ^boolean [this]
+                                             (if (some? nextLine)
+                                                 true
+                                                 (try
+                                                   (set! nextLine (.readLine BufferedReader/this))
+                                                   (some? nextLine)
+                                                   (catch IOException e
+                                                     (throw (UncheckedIOException. e))))))
+
+                                           (method ^:public next ^String [this]
+                                             (if (or (some? nextLine) (.hasNext this))
+                                                 (let [line nextLine] (set! nextLine nil) line)
+                                                 (throw (NoSuchElementException.)))))]
+      (StreamSupport/stream
+        (Spliterators/spliteratorUnknownSize iter
+                                             (bit-or-int Spliterator/ORDERED Spliterator/NONNULL))
+        false))))

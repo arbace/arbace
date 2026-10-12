@@ -1,0 +1,112 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/jrt/ForkJoinPools.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.jrt)
+
+(import '(java.util ArrayList Collection Collections List)
+        '(java.util.concurrent CancellationException
+                               ExecutionException
+                               ExecutorCompletionService
+                               ForkJoinPool
+                               ForkJoinTask
+                               Future
+                               TimeUnit
+                               TimeoutException))
+
+(defclass ^:public ^:final ForkJoinPools
+  (constructor ^:private [this])
+
+  (method ^:public ^:static shutdownNow ^{:tag (List Runnable)} [^ForkJoinPool pool]
+    (.shutdown pool)
+    (Collections/emptyList))
+
+  (method ^:public ^:static invokeAll :type-params [T] ^{:tag (List (Future T))} [^ForkJoinPool pool
+                                                                                  ^{:tag (Collection (? extends (Callable T)))} tasks]
+    (let [^{:tag (ArrayList (Future T))} futures (ArrayList. (.size tasks))]
+      (try
+        (for-each [^{:tag (Callable T)} t tasks]
+          (let [^{:tag (ForkJoinTask T)} f (ForkJoinTask/adapt t)]
+            (.add futures f)
+            (.execute pool f)))
+        (for-each [^{:tag (Future T)} f futures] (.quietlyJoin (cast ForkJoinTask f)))
+        futures
+        (catch Throwable t (for-each [^{:tag (Future T)} f futures] (.cancel f false)) (throw t)))))
+
+  (method ^:public ^:static invokeAll :type-params [T] :throws [InterruptedException] ^{:tag (List (Future T))} [^ForkJoinPool pool
+                                                                                                                 ^{:tag (Collection (? extends (Callable T)))} tasks
+                                                                                                                 ^long timeout
+                                                                                                                 ^TimeUnit unit]
+    (let [deadline (unchecked-add (System/nanoTime) (.toNanos unit timeout))
+          ^{:tag (ArrayList (Future T))} futures (ArrayList. (.size tasks))]
+      (try
+        (for-each [^{:tag (Callable T)} t tasks]
+          (let [^{:tag (ForkJoinTask T)} f (ForkJoinTask/adapt t)]
+            (.add futures f)
+            (.execute pool f)))
+        (loop [^int i 0]
+          (when (< i (.size futures))
+            (let [^{:tag (Future T)} f (cast Future (.get futures i))]
+              (if (not (.isDone f))
+                  (do
+                    (try
+                      (.get f (unchecked-subtract deadline (System/nanoTime)) TimeUnit/NANOSECONDS)
+                      (catch [CancellationException ExecutionException] ignore)
+                      (catch TimeoutException timedOut
+                        (loop [^int j i]
+                          (when (< j (.size futures))
+                            (.cancel (cast Future (.get futures j)) true)
+                            (recur (unchecked-inc-int j))))
+                        (return futures)))
+                    (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i))))))
+        futures
+        (catch Throwable t (for-each [^{:tag (Future T)} f futures] (.cancel f true)) (throw t)))))
+
+  (method ^:public ^:static invokeAny :type-params [T] :throws [InterruptedException
+                                                                ExecutionException] ^T [^ForkJoinPool pool
+                                                                                        ^{:tag (Collection (? extends (Callable T)))} tasks]
+    (try
+      (ForkJoinPools/doInvokeAny pool tasks false 0)
+      (catch TimeoutException cannotHappen (throw (AssertionError. cannotHappen)))))
+
+  (method ^:public ^:static invokeAny :type-params [T] :throws [InterruptedException
+                                                                ExecutionException
+                                                                TimeoutException] ^T [^ForkJoinPool pool
+                                                                                      ^{:tag (Collection (? extends (Callable T)))} tasks
+                                                                                      ^long timeout
+                                                                                      ^TimeUnit unit]
+    (ForkJoinPools/doInvokeAny pool tasks true (.toNanos unit timeout)))
+
+  (method ^:private ^:static doInvokeAny :type-params [T] :throws [InterruptedException
+                                                                   ExecutionException
+                                                                   TimeoutException] ^T [^ForkJoinPool pool
+                                                                                         ^{:tag (Collection (? extends (Callable T)))} tasks
+                                                                                         ^boolean timed
+                                                                                         ^long nanos]
+    (when (nil? tasks) (throw (NullPointerException.)))
+    (let [n (.size tasks)]
+      (when (== n 0) (throw (IllegalArgumentException.)))
+      (let [^{:tag (ArrayList (Future T))} futures (ArrayList. n)
+            ^{:tag (ExecutorCompletionService T)} ecs (ExecutorCompletionService. pool)
+            deadline (if timed (unchecked-add (System/nanoTime) nanos) 0)]
+        (try
+          (for-each [^{:tag (Callable T)} t tasks] (.add futures (.submit ecs t)))
+          (let [^:mutable ^ExecutionException ee nil]
+            (loop [^int left n]
+              (when (> left 0)
+                (let [^:mutable ^{:tag (Future T)} f nil]
+                  (if timed
+                      (do
+                        (set! f
+                              (.poll ecs
+                                     (unchecked-subtract deadline (System/nanoTime))
+                                     TimeUnit/NANOSECONDS))
+                        (when (nil? f) (throw (TimeoutException.))))
+                      (set! f (.take ecs)))
+                  (try
+                    (return (.get f))
+                    (catch ExecutionException eex (set! ee eex))
+                    (catch RuntimeException rex (set! ee (ExecutionException. rex))))
+                  (recur (unchecked-dec-int left)))))
+            (when (nil? ee) (set! ee (ExecutionException. nil)))
+            (throw ee))
+          (finally (for-each [^{:tag (Future T)} f futures] (.cancel f true))))))))

@@ -1,0 +1,820 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/ConcurrentLinkedDeque.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.io IOException ObjectInputStream ObjectOutputStream Serializable)
+        '(java.lang.invoke MethodHandles VarHandle)
+        '(java.util AbstractCollection
+                    Arrays
+                    Collection
+                    Deque
+                    Iterator
+                    NoSuchElementException
+                    Objects
+                    Spliterator
+                    Spliterators)
+        '(java.util.function Consumer Predicate))
+
+(defclass ^:public ConcurrentLinkedDeque
+  :extends (AbstractCollection E)
+  :implements [(Deque E) Serializable]
+  :type-params [E]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 876323262645176354)
+
+  (field ^:private ^:transient ^:volatile ^{:tag (Node E)} head)
+
+  (field ^:private ^:transient ^:volatile ^{:tag (Node E)} tail)
+
+  (field ^:private ^:static ^:final ^{:tag (Node Object)} PREV_TERMINATOR)
+
+  (field ^:private ^:static ^:final ^{:tag (Node Object)} NEXT_TERMINATOR)
+
+  (method prevTerminator ^{:tag (Node E)} [this] PREV_TERMINATOR)
+
+  (method nextTerminator ^{:tag (Node E)} [this] NEXT_TERMINATOR)
+
+  (defclass ^:static ^:final Node
+    :type-params [E]
+
+    (field ^:volatile ^{:tag (Node E)} prev)
+
+    (field ^:volatile ^E item)
+
+    (field ^:volatile ^{:tag (Node E)} next))
+
+  (method ^:static newNode :type-params [E] ^{:tag (Node E)} [^E item]
+    (let [^{:tag (Node E)} node (Node.)] ^void (^[Node Object] VarHandle/.set ITEM node item) node))
+
+  (method ^:private linkFirst ^void [this ^E e]
+    (let [^{:tag (Node E)} newNode (ConcurrentLinkedDeque/newNode (Objects/requireNonNull e))]
+      (label :restartFromHead
+        (while true
+          (let [^:mutable ^{:tag (Node E)} h head
+                ^:mutable ^{:tag (Node E)} p h
+                ^:mutable ^{:tag (Node E)} q nil]
+            (while true
+              (cond
+                (and (some? (set! q (.-prev p))) (some? (set! q (.-prev (set! p q)))))
+                  (set! p (if (not (identical? h (set! h head))) h q))
+                (identical? (.-next p) p) (continue :restartFromHead)
+                :else
+                  (do
+                    ^void (^[Node Node] VarHandle/.set NEXT newNode p)
+                    (when ^boolean (^[Node Void Node] VarHandle/.compareAndSet PREV p nil newNode)
+                      (when-not (identical? p h)
+                        ^boolean ^void (^[ConcurrentLinkedDeque Node Node] VarHandle/.weakCompareAndSet
+                                         HEAD
+                                         this
+                                         h
+                                         newNode))
+                      (return))))))))))
+
+  (method ^:private linkLast ^void [this ^E e]
+    (let [^{:tag (Node E)} newNode (ConcurrentLinkedDeque/newNode (Objects/requireNonNull e))]
+      (label :restartFromTail
+        (while true
+          (let [^:mutable ^{:tag (Node E)} t tail
+                ^:mutable ^{:tag (Node E)} p t
+                ^:mutable ^{:tag (Node E)} q nil]
+            (while true
+              (cond
+                (and (some? (set! q (.-next p))) (some? (set! q (.-next (set! p q)))))
+                  (set! p (if (not (identical? t (set! t tail))) t q))
+                (identical? (.-prev p) p) (continue :restartFromTail)
+                :else
+                  (do
+                    ^void (^[Node Node] VarHandle/.set PREV newNode p)
+                    (when ^boolean (^[Node Void Node] VarHandle/.compareAndSet NEXT p nil newNode)
+                      (when-not (identical? p t)
+                        ^boolean ^void (^[ConcurrentLinkedDeque Node Node] VarHandle/.weakCompareAndSet
+                                         TAIL
+                                         this
+                                         t
+                                         newNode))
+                      (return))))))))))
+
+  (field ^:private ^:static ^:final ^int HOPS 2)
+
+  (method unlink ^void [this ^{:tag (Node E)} x]
+    (let [^{:tag (Node E)} prev (.-prev x)
+          ^{:tag (Node E)} next (.-next x)]
+      (cond
+        (nil? prev) (.unlinkFirst this x next)
+        (nil? next) (.unlinkLast this x prev)
+        :else
+          (let [^:mutable ^{:tag (Node E)} activePred nil
+                ^:mutable ^{:tag (Node E)} activeSucc nil
+                ^:mutable ^boolean isFirst false
+                ^:mutable ^boolean isLast false
+                ^:mutable ^int hops 1]
+            (let [^:mutable ^{:tag (Node E)} p prev]
+              (while true
+                (when (some? (.-item p)) (set! activePred p) (set! isFirst false) (break))
+                (let [^{:tag (Node E)} q (.-prev p)]
+                  (cond
+                    (nil? q)
+                      (do
+                        (when (identical? (.-next p) p) (return))
+                        (set! activePred p)
+                        (set! isFirst true)
+                        (break))
+                    (identical? p q) (return)
+                    :else (set! p q)))
+                (set! hops (unchecked-inc-int hops))))
+            (let [^:mutable ^{:tag (Node E)} p next]
+              (while true
+                (when (some? (.-item p)) (set! activeSucc p) (set! isLast false) (break))
+                (let [^{:tag (Node E)} q (.-next p)]
+                  (cond
+                    (nil? q)
+                      (do
+                        (when (identical? (.-prev p) p) (return))
+                        (set! activeSucc p)
+                        (set! isLast true)
+                        (break))
+                    (identical? p q) (return)
+                    :else (set! p q)))
+                (set! hops (unchecked-inc-int hops))))
+            (when-not (and (< hops HOPS) (or isFirst isLast))
+              (.skipDeletedSuccessors this activePred)
+              (.skipDeletedPredecessors this activeSucc)
+              (when (and (and (and (and (or isFirst isLast)
+                                        (identical? (.-next activePred) activeSucc))
+                                   (identical? (.-prev activeSucc) activePred))
+                              (if isFirst (nil? (.-prev activePred)) (some? (.-item activePred))))
+                         (if isLast (nil? (.-next activeSucc)) (some? (.-item activeSucc))))
+                (.updateHead this)
+                (.updateTail this)
+                ^void (^[Node Object] VarHandle/.setRelease
+                        PREV
+                        x
+                        (if isFirst ^Object (.prevTerminator this) ^Object x))
+                ^void (^[Node Object] VarHandle/.setRelease
+                        NEXT
+                        x
+                        (if isLast ^Object (.nextTerminator this) ^Object x))))))))
+
+  (method ^:private unlinkFirst ^void [this ^{:tag (Node E)} first ^{:tag (Node E)} next]
+    (let [^:mutable ^{:tag (Node E)} o nil
+          ^:mutable ^{:tag (Node E)} p next
+          ^:mutable ^{:tag (Node E)} q nil]
+      (while true
+        (cond
+          (or (some? (.-item p)) (nil? (set! q (.-next p))))
+            (do
+              (when (and (and (some? o) (not (identical? (.-prev p) p)))
+                         ^boolean (^[Node Node Node] VarHandle/.compareAndSet NEXT first next p))
+                (.skipDeletedPredecessors this p)
+                (when (and (and (nil? (.-prev first)) (or (nil? (.-next p)) (some? (.-item p))))
+                           (identical? (.-prev p) first))
+                  (.updateHead this)
+                  (.updateTail this)
+                  ^void (^[Node Node] VarHandle/.setRelease NEXT o o)
+                  ^void (^[Node Node] VarHandle/.setRelease PREV o (.prevTerminator this))))
+              (return))
+          (identical? p q) (return)
+          :else (do (set! o p) (set! p q))))))
+
+  (method ^:private unlinkLast ^void [this ^{:tag (Node E)} last ^{:tag (Node E)} prev]
+    (let [^:mutable ^{:tag (Node E)} o nil
+          ^:mutable ^{:tag (Node E)} p prev
+          ^:mutable ^{:tag (Node E)} q nil]
+      (while true
+        (cond
+          (or (some? (.-item p)) (nil? (set! q (.-prev p))))
+            (do
+              (when (and (and (some? o) (not (identical? (.-next p) p)))
+                         ^boolean (^[Node Node Node] VarHandle/.compareAndSet PREV last prev p))
+                (.skipDeletedSuccessors this p)
+                (when (and (and (nil? (.-next last)) (or (nil? (.-prev p)) (some? (.-item p))))
+                           (identical? (.-next p) last))
+                  (.updateHead this)
+                  (.updateTail this)
+                  ^void (^[Node Node] VarHandle/.setRelease PREV o o)
+                  ^void (^[Node Node] VarHandle/.setRelease NEXT o (.nextTerminator this))))
+              (return))
+          (identical? p q) (return)
+          :else (do (set! o p) (set! p q))))))
+
+  (method ^:private ^:final updateHead ^void [this]
+    (let [^:mutable ^{:tag (Node E)} h nil
+          ^:mutable ^{:tag (Node E)} p nil
+          ^:mutable ^{:tag (Node E)} q nil]
+      (label :restartFromHead
+        (while (and (nil? (.-item (set! h head))) (some? (set! p (.-prev h))))
+          (while true
+            (cond
+              (or (nil? (set! q (.-prev p))) (nil? (set! q (.-prev (set! p q)))))
+                (if ^boolean (^[ConcurrentLinkedDeque Node Node] VarHandle/.compareAndSet
+                               HEAD
+                               this
+                               h
+                               p)
+                    (return)
+                    (continue :restartFromHead))
+              (not (identical? h head)) (continue :restartFromHead)
+              :else (set! p q)))))))
+
+  (method ^:private ^:final updateTail ^void [this]
+    (let [^:mutable ^{:tag (Node E)} t nil
+          ^:mutable ^{:tag (Node E)} p nil
+          ^:mutable ^{:tag (Node E)} q nil]
+      (label :restartFromTail
+        (while (and (nil? (.-item (set! t tail))) (some? (set! p (.-next t))))
+          (while true
+            (cond
+              (or (nil? (set! q (.-next p))) (nil? (set! q (.-next (set! p q)))))
+                (if ^boolean (^[ConcurrentLinkedDeque Node Node] VarHandle/.compareAndSet
+                               TAIL
+                               this
+                               t
+                               p)
+                    (return)
+                    (continue :restartFromTail))
+              (not (identical? t tail)) (continue :restartFromTail)
+              :else (set! p q)))))))
+
+  (method ^:private skipDeletedPredecessors ^void [this ^{:tag (Node E)} x]
+    (label :whileActive
+      (loop []
+        (label :do-body
+          (let [^{:tag (Node E)} prev (.-prev x)
+                ^:mutable ^{:tag (Node E)} p prev]
+            (while true
+              (when (some? (.-item p)) (break))
+              (let [^{:tag (Node E)} q (.-prev p)]
+                (cond
+                  (nil? q) (do (when (identical? (.-next p) p) (break :do-body)) (break))
+                  (identical? p q) (break :do-body)
+                  :else (set! p q))))
+            (when (or (identical? prev p)
+                      ^boolean (^[Node Node Node] VarHandle/.compareAndSet PREV x prev p))
+              (return))))
+        (when (or (some? (.-item x)) (nil? (.-next x))) (recur)))))
+
+  (method ^:private skipDeletedSuccessors ^void [this ^{:tag (Node E)} x]
+    (label :whileActive
+      (loop []
+        (label :do-body
+          (let [^{:tag (Node E)} next (.-next x)
+                ^:mutable ^{:tag (Node E)} p next]
+            (while true
+              (when (some? (.-item p)) (break))
+              (let [^{:tag (Node E)} q (.-next p)]
+                (cond
+                  (nil? q) (do (when (identical? (.-prev p) p) (break :do-body)) (break))
+                  (identical? p q) (break :do-body)
+                  :else (set! p q))))
+            (when (or (identical? next p)
+                      ^boolean (^[Node Node Node] VarHandle/.compareAndSet NEXT x next p))
+              (return))))
+        (when (or (some? (.-item x)) (nil? (.-prev x))) (recur)))))
+
+  (method ^:final succ ^{:tag (Node E)} [this ^:mutable ^{:tag (Node E)} p]
+    (when (identical? p (set! p (.-next p))) (set! p (.first this)))
+    p)
+
+  (method ^:final pred ^{:tag (Node E)} [this ^:mutable ^{:tag (Node E)} p]
+    (when (identical? p (set! p (.-prev p))) (set! p (.last this)))
+    p)
+
+  (method first ^{:tag (Node E)} [this]
+    (label :restartFromHead
+      (while true
+        (let [^:mutable ^{:tag (Node E)} h head
+              ^:mutable ^{:tag (Node E)} p h
+              ^:mutable ^{:tag (Node E)} q nil]
+          (while true
+            (cond
+              (and (some? (set! q (.-prev p))) (some? (set! q (.-prev (set! p q)))))
+                (set! p (if (not (identical? h (set! h head))) h q))
+              (or (identical? p h)
+                  ^boolean (^[ConcurrentLinkedDeque Node Node] VarHandle/.compareAndSet
+                             HEAD
+                             this
+                             h
+                             p))
+                (return p)
+              :else (continue :restartFromHead)))))))
+
+  (method last ^{:tag (Node E)} [this]
+    (label :restartFromTail
+      (while true
+        (let [^:mutable ^{:tag (Node E)} t tail
+              ^:mutable ^{:tag (Node E)} p t
+              ^:mutable ^{:tag (Node E)} q nil]
+          (while true
+            (cond
+              (and (some? (set! q (.-next p))) (some? (set! q (.-next (set! p q)))))
+                (set! p (if (not (identical? t (set! t tail))) t q))
+              (or (identical? p t)
+                  ^boolean (^[ConcurrentLinkedDeque Node Node] VarHandle/.compareAndSet
+                             TAIL
+                             this
+                             t
+                             p))
+                (return p)
+              :else (continue :restartFromTail)))))))
+
+  (method ^:private screenNullResult ^E [this ^E v]
+    (when (nil? v) (throw (NoSuchElementException.)))
+    v)
+
+  (constructor ^:public [this] (set! head (set! tail (Node.))))
+
+  (constructor ^:public [this ^{:tag (Collection (? extends E))} c]
+    (let [^:mutable ^{:tag (Node E)} h nil
+          ^:mutable ^{:tag (Node E)} t nil]
+      (for-each [e c]
+        (let [^{:tag (Node E)} newNode (ConcurrentLinkedDeque/newNode (Objects/requireNonNull e))]
+          (if (nil? h)
+              (set! h (set! t newNode))
+              (do
+                ^void (^[Node Node] VarHandle/.set NEXT t newNode)
+                ^void (^[Node Node] VarHandle/.set PREV newNode t)
+                (set! t newNode)))))
+      (.initHeadTail this h t)))
+
+  (method ^:private initHeadTail ^void [this ^:mutable ^{:tag (Node E)} h
+                                        ^:mutable ^{:tag (Node E)} t]
+    (when (identical? h t)
+      (if (nil? h)
+          (set! h (set! t (Node.)))
+          (let [^{:tag (Node E)} newNode (Node.)]
+            ^void (^[Node Node] VarHandle/.set NEXT t newNode)
+            ^void (^[Node Node] VarHandle/.set PREV newNode t)
+            (set! t newNode))))
+    (set! head h)
+    (set! tail t))
+
+  (method ^:public addFirst ^void [this ^E e] (.linkFirst this e))
+
+  (method ^:public addLast ^void [this ^E e] (.linkLast this e))
+
+  (method ^:public offerFirst ^boolean [this ^E e]
+    (.linkFirst this e)
+    true)
+
+  (method ^:public offerLast ^boolean [this ^E e] (.linkLast this e) true)
+
+  (method ^:public peekFirst ^E [this]
+    (label :restart
+      (while true
+        (let [^:mutable ^E item nil
+              ^{:tag (Node E)} first (.first this)
+              ^:mutable ^{:tag (Node E)} p first]
+          (while (nil? (set! item (.-item p)))
+            (when (identical? p (set! p (.-next p))) (continue :restart))
+            (when (nil? p) (break)))
+          (when-not (some? (.-prev first)) (return item))))))
+
+  (method ^:public peekLast ^E [this]
+    (label :restart
+      (while true
+        (let [^:mutable ^E item nil
+              ^{:tag (Node E)} last (.last this)
+              ^:mutable ^{:tag (Node E)} p last]
+          (while (nil? (set! item (.-item p)))
+            (when (identical? p (set! p (.-prev p))) (continue :restart))
+            (when (nil? p) (break)))
+          (when-not (some? (.-next last)) (return item))))))
+
+  (method ^:public getFirst ^E [this]
+    (.screenNullResult this (.peekFirst this)))
+
+  (method ^:public getLast ^E [this]
+    (.screenNullResult this (.peekLast this)))
+
+  (method ^:public pollFirst ^E [this]
+    (label :restart
+      (while true
+        (let [^{:tag (Node E)} first (.first this)
+              ^:mutable ^{:tag (Node E)} p first]
+          (while true
+            (let [^:mutable ^E item nil]
+              (when (some? (set! item (.-item p)))
+                (when (some? (.-prev first)) (continue :restart))
+                (when ^boolean (^[Node Object Void] VarHandle/.compareAndSet ITEM p item nil)
+                  (.unlink this p)
+                  (return item)))
+              (when (identical? p (set! p (.-next p))) (continue :restart))
+              (when (nil? p) (when (some? (.-prev first)) (continue :restart)) (return nil))))))))
+
+  (method ^:public pollLast ^E [this]
+    (label :restart
+      (while true
+        (let [^{:tag (Node E)} last (.last this)
+              ^:mutable ^{:tag (Node E)} p last]
+          (while true
+            (let [^:mutable ^E item nil]
+              (when (some? (set! item (.-item p)))
+                (when (some? (.-next last)) (continue :restart))
+                (when ^boolean (^[Node Object Void] VarHandle/.compareAndSet ITEM p item nil)
+                  (.unlink this p)
+                  (return item)))
+              (when (identical? p (set! p (.-prev p))) (continue :restart))
+              (when (nil? p) (when (some? (.-next last)) (continue :restart)) (return nil))))))))
+
+  (method ^:public removeFirst ^E [this]
+    (.screenNullResult this (.pollFirst this)))
+
+  (method ^:public removeLast ^E [this]
+    (.screenNullResult this (.pollLast this)))
+
+  (method ^:public offer ^boolean [this ^E e] (.offerLast this e))
+
+  (method ^:public add ^boolean [this ^E e] (.offerLast this e))
+
+  (method ^:public poll ^E [this] (.pollFirst this))
+
+  (method ^:public peek ^E [this] (.peekFirst this))
+
+  (method ^:public remove ^E [this] (.removeFirst this))
+
+  (method ^:public pop ^E [this] (.removeFirst this))
+
+  (method ^:public element ^E [this] (.getFirst this))
+
+  (method ^:public push ^void [this ^E e] (.addFirst this e))
+
+  (method ^:public removeFirstOccurrence ^boolean [this o]
+    (Objects/requireNonNull o)
+    (loop [^{:tag (Node E)} p (.first this)]
+      (when (some? p)
+        (let [^:mutable ^E item nil]
+          (if (and (and (some? (set! item (.-item p))) (.equals o item))
+                   ^boolean (^[Node Object Void] VarHandle/.compareAndSet ITEM p item nil))
+              (do (.unlink this p) (return true))
+              (recur (.succ this p))))))
+    false)
+
+  (method ^:public removeLastOccurrence ^boolean [this o]
+    (Objects/requireNonNull o)
+    (loop [^{:tag (Node E)} p (.last this)]
+      (when (some? p)
+        (let [^:mutable ^E item nil]
+          (if (and (and (some? (set! item (.-item p))) (.equals o item))
+                   ^boolean (^[Node Object Void] VarHandle/.compareAndSet ITEM p item nil))
+              (do (.unlink this p) (return true))
+              (recur (.pred this p))))))
+    false)
+
+  (method ^:public contains ^boolean [this o]
+    (when (some? o)
+      (loop [^{:tag (Node E)} p (.first this)]
+        (when (some? p)
+          (let [^:mutable ^E item nil]
+            (if (and (some? (set! item (.-item p))) (.equals o item))
+                (return true)
+                (recur (.succ this p)))))))
+    false)
+
+  (method ^:public isEmpty ^boolean [this] (nil? (.peekFirst this)))
+
+  (method ^:public size ^int [this]
+    (label :restart
+      (while true
+        (let [^:mutable ^int count 0]
+          (let [^:mutable ^{:tag (Node E)} p (.first this)]
+            (while (some? p)
+              (when (some? (.-item p))
+                (when (== (set! count (unchecked-inc-int count)) Integer/MAX_VALUE) (break)))
+              (when (identical? p (set! p (.-next p))) (continue :restart))))
+          (return count)))))
+
+  (method ^:public remove ^boolean [this o]
+    (.removeFirstOccurrence this o))
+
+  (method ^:public addAll ^boolean [this ^{:tag (Collection (? extends E))} c]
+    (when (identical? c this) (throw (IllegalArgumentException.)))
+    (let [^:mutable ^{:tag (Node E)} beginningOfTheEnd nil
+          ^:mutable ^{:tag (Node E)} last nil]
+      (for-each [e c]
+        (let [^{:tag (Node E)} newNode (ConcurrentLinkedDeque/newNode (Objects/requireNonNull e))]
+          (if (nil? beginningOfTheEnd)
+              (set! beginningOfTheEnd (set! last newNode))
+              (do
+                ^void (^[Node Node] VarHandle/.set NEXT last newNode)
+                ^void (^[Node Node] VarHandle/.set PREV newNode last)
+                (set! last newNode)))))
+      (if (nil? beginningOfTheEnd)
+          false
+          (label :restartFromTail
+            (while true
+              (let [^:mutable ^{:tag (Node E)} t tail
+                    ^:mutable ^{:tag (Node E)} p t
+                    ^:mutable ^{:tag (Node E)} q nil]
+                (while true
+                  (cond
+                    (and (some? (set! q (.-next p))) (some? (set! q (.-next (set! p q)))))
+                      (set! p (if (not (identical? t (set! t tail))) t q))
+                    (identical? (.-prev p) p) (continue :restartFromTail)
+                    :else
+                      (do
+                        ^void (^[Node Node] VarHandle/.set PREV beginningOfTheEnd p)
+                        (when ^boolean (^[Node Void Node] VarHandle/.compareAndSet
+                                         NEXT
+                                         p
+                                         nil
+                                         beginningOfTheEnd)
+                          (when-not ^boolean (^[ConcurrentLinkedDeque Node Node] VarHandle/.weakCompareAndSet
+                                               TAIL
+                                               this
+                                               t
+                                               last)
+                            (set! t tail)
+                            (when (nil? (.-next last))
+                              ^boolean ^void (^[ConcurrentLinkedDeque Node Node] VarHandle/.weakCompareAndSet
+                                               TAIL
+                                               this
+                                               t
+                                               last)))
+                          (return true)))))))))))
+
+  (method ^:public clear ^void [this] (while (some? (.pollFirst this))))
+
+  (method ^:public toString ^String [this]
+    (let [^:mutable ^String/1 a nil]
+      (label :restart
+        (while true
+          (let [^:mutable ^int charLength 0
+                ^:mutable ^int size 0]
+            (let [^:mutable ^{:tag (Node E)} p (.first this)]
+              (while (some? p)
+                (let [^:mutable ^E item nil]
+                  (when (some? (set! item (.-item p)))
+                    (cond
+                      (nil? a) (set! a (new String/1 4))
+                      (== size (alength a))
+                        (set! a (cast String/1 (Arrays/copyOf a (unchecked-multiply-int 2 size)))))
+                    (let [s (.toString item)]
+                      (aset a size s)
+                      (set! size (unchecked-inc-int size))
+                      (set! charLength (unchecked-add-int charLength (.length s)))))
+                  (when (identical? p (set! p (.-next p))) (continue :restart)))))
+            (when (== size 0) (return "[]"))
+            (return (Helpers/toString a size charLength)))))))
+
+  (method ^:private toArrayInternal ^Object/1 [this ^Object/1 a]
+    (let [^:mutable x a]
+      (label :restart
+        (while true
+          (let [^:mutable ^int size 0]
+            (let [^:mutable ^{:tag (Node E)} p (.first this)]
+              (while (some? p)
+                (let [^:mutable ^E item nil]
+                  (when (some? (set! item (.-item p)))
+                    (cond
+                      (nil? x) (set! x (new Object/1 4))
+                      (== size (alength x))
+                        (set! x
+                              (Arrays/copyOf x
+                                             (unchecked-multiply-int 2 (unchecked-add-int size 4)))))
+                    (aset x size item)
+                    (set! size (unchecked-inc-int size)))
+                  (when (identical? p (set! p (.-next p))) (continue :restart)))))
+            (if (nil? x)
+                (return (new Object/1 0))
+                (when (and (some? a) (<= size (alength a)))
+                  (when-not (identical? a x) (System/arraycopy x 0 a 0 size))
+                  (when (< size (alength a)) (aset a size nil))
+                  (return a)))
+            (return (if (== size (alength x)) x (Arrays/copyOf x size))))))))
+
+  (method ^:public toArray ^Object/1 [this] (.toArrayInternal this nil))
+
+  (method ^:public toArray :type-params [T] ^T/1 [this ^T/1 a]
+    (when (nil? a) (throw (NullPointerException.)))
+    (.toArrayInternal this a))
+
+  (method ^:public iterator ^{:tag (Iterator E)} [this] (Itr.))
+
+  (method ^:public descendingIterator ^{:tag (Iterator E)} [this]
+    (DescendingItr.))
+
+  (defclass ^:private ^:abstract AbstractItr
+    :implements [(Iterator E)]
+
+    (field ^:private ^{:tag (Node E)} nextNode)
+
+    (field ^:private ^E nextItem)
+
+    (field ^:private ^{:tag (Node E)} lastRet)
+
+    (method ^:abstract startNode ^{:tag (Node E)} [this])
+
+    (method ^:abstract nextNode ^{:tag (Node E)} [this ^{:tag (Node E)} p])
+
+    (constructor [this] (.advance this))
+
+    (method ^:private advance ^void [this]
+      (set! lastRet nextNode)
+      (let [^:mutable ^{:tag (Node E)} p (if (nil? nextNode)
+                                             (.startNode this)
+                                             (.nextNode this nextNode))]
+        (while true
+          (when (nil? p) (set! nextNode nil) (set! nextItem nil) (break))
+          (let [^:mutable ^E item nil]
+            (when (some? (set! item (.-item p))) (set! nextNode p) (set! nextItem item) (break)))
+          (set! p (.nextNode this p)))))
+
+    (method ^:public hasNext ^boolean [this] (some? nextItem))
+
+    (method ^:public next ^E [this]
+      (let [^E item nextItem]
+        (when (nil? item) (throw (NoSuchElementException.)))
+        (.advance this)
+        item))
+
+    (method ^:public remove ^void [this]
+      (let [^{:tag (Node E)} l lastRet]
+        (when (nil? l) (throw (IllegalStateException.)))
+        (set! (.-item l) nil)
+        (.unlink ConcurrentLinkedDeque/this l)
+        (set! lastRet nil))))
+
+  (defclass ^:private Itr
+    :extends AbstractItr
+
+    (constructor [this])
+
+    (method startNode ^{:tag (Node E)} [this]
+      (.first ConcurrentLinkedDeque/this))
+
+    (method nextNode ^{:tag (Node E)} [this ^{:tag (Node E)} p]
+      (.succ ConcurrentLinkedDeque/this p)))
+
+  (defclass ^:private DescendingItr
+    :extends AbstractItr
+
+    (constructor [this])
+
+    (method startNode ^{:tag (Node E)} [this]
+      (.last ConcurrentLinkedDeque/this))
+
+    (method nextNode ^{:tag (Node E)} [this ^{:tag (Node E)} p]
+      (.pred ConcurrentLinkedDeque/this p)))
+
+  (defclass ^:final CLDSpliterator
+    :implements [(Spliterator E)]
+
+    (field ^:static ^:final ^int MAX_BATCH (bit-shift-left-int 1 25))
+
+    (field ^{:tag (Node E)} current)
+
+    (field ^int batch)
+
+    (field ^boolean exhausted)
+
+    (method ^:public trySplit ^{:tag (Spliterator E)} [this]
+      (let [^:mutable ^{:tag (Node E)} p nil
+            ^:mutable ^{:tag (Node E)} q nil]
+        (when-not (or (nil? (set! p (.current this))) (nil? (set! q (.-next p))))
+          (let [^:mutable ^int i 0
+                n (set! batch (Math/min (unchecked-add-int batch 1) MAX_BATCH))
+                ^:mutable ^Object/1 a nil]
+            (loop []
+              (let [^:mutable ^E e nil]
+                (when (some? (set! e (.-item p)))
+                  (when (nil? a) (set! a (new Object/1 n)))
+                  (aset a i e)
+                  (set! i (unchecked-inc-int i)))
+                (when (identical? p (set! p q)) (set! p (.first ConcurrentLinkedDeque/this))))
+              (when (and (and (some? p) (some? (set! q (.-next p)))) (< i n)) (recur)))
+            (.setCurrent this p)
+            (when-not (== i 0)
+              (Spliterators/spliterator a
+                                        0
+                                        i
+                                        (bit-or-int
+                                          (bit-or-int Spliterator/ORDERED Spliterator/NONNULL)
+                                          Spliterator/CONCURRENT)))))))
+
+    (method ^:public forEachRemaining ^void [this ^{:tag (Consumer (? super E))} action]
+      (Objects/requireNonNull action)
+      (let [^:mutable ^{:tag (Node E)} p nil]
+        (when (some? (set! p (.current this)))
+          (set! current nil)
+          (set! exhausted true)
+          (loop []
+            (let [^:mutable ^E e nil]
+              (when (some? (set! e (.-item p))) (.accept action e))
+              (when (identical? p (set! p (.-next p))) (set! p (.first ConcurrentLinkedDeque/this))))
+            (when (some? p) (recur))))))
+
+    (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super E))} action]
+      (Objects/requireNonNull action)
+      (let [^:mutable ^{:tag (Node E)} p nil]
+        (when (some? (set! p (.current this)))
+          (let [^:mutable ^E e nil]
+            (loop []
+              (set! e (.-item p))
+              (when (identical? p (set! p (.-next p))) (set! p (.first ConcurrentLinkedDeque/this)))
+              (when (and (nil? e) (some? p)) (recur)))
+            (.setCurrent this p)
+            (when (some? e) (.accept action e) (return true))))
+        false))
+
+    (method ^:private setCurrent ^void [this ^{:tag (Node E)} p]
+      (when (nil? (set! current p)) (set! exhausted true)))
+
+    (method ^:private current ^{:tag (Node E)} [this]
+      (let [^:mutable ^{:tag (Node E)} p nil]
+        (when (and (nil? (set! p current)) (not exhausted))
+          (.setCurrent this (set! p (.first ConcurrentLinkedDeque/this))))
+        p))
+
+    (method ^:public estimateSize ^long [this] Long/MAX_VALUE)
+
+    (method ^:public characteristics ^int [this]
+      (bit-or-int (bit-or-int Spliterator/ORDERED Spliterator/NONNULL) Spliterator/CONCURRENT)))
+
+  (method ^:public spliterator ^{:tag (Spliterator E)} [this]
+    (CLDSpliterator.))
+
+  (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream s]
+    (.defaultWriteObject s)
+    (loop [^{:tag (Node E)} p (.first this)]
+      (when (some? p)
+        (let [^:mutable ^E item nil]
+          (if (some? (set! item (.-item p)))
+              (do (.writeObject s item) (recur (.succ this p)))
+              (recur (.succ this p))))))
+    (.writeObject s nil))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream s]
+    (.defaultReadObject s)
+    (let [^:mutable ^{:tag (Node E)} h nil
+          ^:mutable ^{:tag (Node E)} t nil]
+      (let [^:mutable ^Object item nil]
+        (while (some? (set! item (.readObject s)))
+          (let [^{:tag (Node E)} newNode (ConcurrentLinkedDeque/newNode item)]
+            (if (nil? h)
+                (set! h (set! t newNode))
+                (do
+                  ^void (^[Node Node] VarHandle/.set NEXT t newNode)
+                  ^void (^[Node Node] VarHandle/.set PREV newNode t)
+                  (set! t newNode))))))
+      (.initHeadTail this h t)))
+
+  (method ^:public removeIf ^boolean [this ^{:tag (Predicate (? super E))} filter]
+    (Objects/requireNonNull filter)
+    (.bulkRemove this filter))
+
+  (method ^:public removeAll ^boolean [this ^{:tag (Collection ?)} c]
+    (Objects/requireNonNull c)
+    (.bulkRemove this (lambda Predicate ^boolean [e] (.contains c e))))
+
+  (method ^:public retainAll ^boolean [this ^{:tag (Collection ?)} c]
+    (Objects/requireNonNull c)
+    (.bulkRemove this (lambda Predicate ^boolean [e] (not (.contains c e)))))
+
+  (method ^:private bulkRemove ^boolean [this ^{:tag (Predicate (? super E))} filter]
+    (let [^:mutable removed false]
+      (let [^:mutable ^{:tag (Node E)} p (.first this)
+            ^:mutable ^{:tag (Node E)} succ nil]
+        (while (some? p)
+          (set! succ (.succ this p))
+          (let [^:mutable ^E item nil]
+            (when (and (and (some? (set! item (.-item p))) (.test filter item))
+                       ^boolean (^[Node Object Void] VarHandle/.compareAndSet ITEM p item nil))
+              (.unlink this p)
+              (set! removed true)))
+          (set! p succ)))
+      removed))
+
+  (method ^:public forEach ^void [this ^{:tag (Consumer (? super E))} action]
+    (Objects/requireNonNull action)
+    (let [^:mutable ^E item nil]
+      (loop [^{:tag (Node E)} p (.first this)]
+        (if (some? p)
+            (if (some? (set! item (.-item p)))
+                (do (.accept action item) (recur (.succ this p)))
+                (recur (.succ this p)))
+            nil))))
+
+  (field ^:private ^:static ^:final ^VarHandle HEAD)
+
+  (field ^:private ^:static ^:final ^VarHandle TAIL)
+
+  (field ^:private ^:static ^:final ^VarHandle PREV)
+
+  (field ^:private ^:static ^:final ^VarHandle NEXT)
+
+  (field ^:private ^:static ^:final ^VarHandle ITEM)
+
+  (static-initializer
+    (set! PREV_TERMINATOR (Node.))
+    (set! (.-next PREV_TERMINATOR) PREV_TERMINATOR)
+    (set! NEXT_TERMINATOR (Node.))
+    (set! (.-prev NEXT_TERMINATOR) NEXT_TERMINATOR)
+    (try
+      (let [l (MethodHandles/lookup)]
+        (set! HEAD (.findVarHandle l ConcurrentLinkedDeque "head" Node))
+        (set! TAIL (.findVarHandle l ConcurrentLinkedDeque "tail" Node))
+        (set! PREV (.findVarHandle l Node "prev" Node))
+        (set! NEXT (.findVarHandle l Node "next" Node))
+        (set! ITEM (.findVarHandle l Node "item" Object)))
+      (catch ReflectiveOperationException e (throw (ExceptionInInitializerError. e))))))

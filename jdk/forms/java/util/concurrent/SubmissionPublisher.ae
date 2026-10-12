@@ -1,0 +1,743 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/SubmissionPublisher.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.lang.invoke MethodHandles VarHandle)
+        '(java.util ArrayList Arrays List)
+        '(java.util.concurrent.locks LockSupport ReentrantLock)
+        '(java.util.function BiConsumer BiPredicate Consumer)
+        '(jdk.internal.invoke MhUtil)
+        '(jdk.internal.vm.annotation Contended))
+
+(defclass ^:public SubmissionPublisher
+  :implements [(Flow$Publisher T) AutoCloseable]
+  :type-params [T]
+
+  (field ^:static ^:final ^int BUFFER_CAPACITY_LIMIT (bit-shift-left-int 1 30))
+
+  (field ^:static ^:final ^int INITIAL_CAPACITY 32)
+
+  (method ^:static ^:final roundCapacity ^int [^int cap]
+    (let [^:mutable n (unchecked-subtract-int cap 1)]
+      (set! n (bit-or-int n (unsigned-bit-shift-right-int n 1)))
+      (set! n (bit-or-int n (unsigned-bit-shift-right-int n 2)))
+      (set! n (bit-or-int n (unsigned-bit-shift-right-int n 4)))
+      (set! n (bit-or-int n (unsigned-bit-shift-right-int n 8)))
+      (set! n (bit-or-int n (unsigned-bit-shift-right-int n 16)))
+      (cond
+        (<= n 0) 1
+        (>= n BUFFER_CAPACITY_LIMIT) BUFFER_CAPACITY_LIMIT
+        :else (unchecked-add-int n 1))))
+
+  (field ^{:tag (BufferedSubscription T)} clients)
+
+  (field ^:final ^ReentrantLock lock)
+
+  (field ^:volatile ^boolean closed)
+
+  (field ^boolean subscribed)
+
+  (field ^Thread owner)
+
+  (field ^:volatile ^Throwable closedException)
+
+  (field ^:final ^Executor executor)
+
+  (field ^:final ^{:tag (BiConsumer (? super (Flow$Subscriber (? super T))) (? super Throwable))} onNextHandler)
+
+  (field ^:final ^int maxBufferCapacity)
+
+  (constructor ^:public [this ^Executor executor ^int maxBufferCapacity
+                         ^{:tag (BiConsumer (? super (Flow$Subscriber (? super T))) (? super Throwable))} handler]
+    (when (nil? executor) (throw (NullPointerException.)))
+    (when (<= maxBufferCapacity 0) (throw (IllegalArgumentException. "capacity must be positive")))
+    (set! (.-lock this) (ReentrantLock.))
+    (set! (.-executor this) executor)
+    (set! (.-onNextHandler this) handler)
+    (set! (.-maxBufferCapacity this) (SubmissionPublisher/roundCapacity maxBufferCapacity)))
+
+  (constructor ^:public [this ^Executor executor ^int maxBufferCapacity]
+    (this. executor maxBufferCapacity nil))
+
+  (constructor ^:public [this]
+    (this. (ForkJoinPool/asyncCommonPool) (Flow/defaultBufferSize) nil))
+
+  (method ^:public subscribe ^void [this ^{:tag (Flow$Subscriber (? super T))} subscriber]
+    (when (nil? subscriber) (throw (NullPointerException.)))
+    (let [lock (.-lock this)
+          max maxBufferCapacity
+          array (new Object/1 (if (< max INITIAL_CAPACITY) max INITIAL_CAPACITY))
+          ^{:tag (BufferedSubscription T)} subscription (BufferedSubscription.
+                                                          subscriber
+                                                          executor
+                                                          onNextHandler
+                                                          array
+                                                          max)]
+      (.lock lock)
+      (try
+        (when-not subscribed (set! subscribed true) (set! owner (Thread/currentThread)))
+        (let [^:mutable ^{:tag (BufferedSubscription T)} b clients
+              ^:mutable ^{:tag (BufferedSubscription T)} pred nil]
+          (while true
+            (when (nil? b)
+              (let [^:mutable ^Throwable ex nil]
+                (.onSubscribe subscription)
+                (cond
+                  (some? (set! ex closedException)) (.onError subscription ex)
+                  closed (.onComplete subscription)
+                  (nil? pred) (set! clients subscription)
+                  :else (set! (.-next pred) subscription))
+                (break)))
+            (let [^{:tag (BufferedSubscription T)} next (.-next b)]
+              (cond
+                (.isClosed b)
+                  (do
+                    (set! (.-next b) nil)
+                    (if (nil? pred) (set! clients next) (set! (.-next pred) next)))
+                (.equals subscriber (.-subscriber b))
+                  (do (.onError b (IllegalStateException. "Duplicate subscribe")) (break))
+                :else (set! pred b))
+              (set! b next))))
+        (finally (.unlock lock)))))
+
+  (method ^:private doOffer ^int [this ^T item ^long nanos
+                                  ^{:tag (BiPredicate (Flow$Subscriber (? super T)) (? super T))} onDrop]
+    (when (nil? item) (throw (NullPointerException.)))
+    (let [^:mutable ^int lag 0
+          ^:mutable ^boolean complete false
+          ^:mutable ^boolean unowned false
+          lock (.-lock this)]
+      (.lock lock)
+      (try
+        (let [t (Thread/currentThread)
+              ^:mutable ^Thread o nil
+              ^:mutable ^{:tag (BufferedSubscription T)} b clients]
+          (when (and (set! unowned (not (identical? (set! o owner) t))) (some? o)) (set! owner nil))
+          (if (nil? b)
+              (set! complete closed)
+              (do
+                (set! complete false)
+                (let [^:mutable cleanMe false
+                      ^:mutable ^{:tag (BufferedSubscription T)} retries nil
+                      ^:mutable ^{:tag (BufferedSubscription T)} rtail nil
+                      ^:mutable ^{:tag (BufferedSubscription T)} next nil]
+                  (loop []
+                    (set! next (.-next b))
+                    (let [stat (.offer b item unowned)]
+                      (cond
+                        (== stat 0)
+                          (do
+                            (set! (.-nextRetry b) nil)
+                            (if (nil? rtail) (set! retries b) (set! (.-nextRetry rtail) b))
+                            (set! rtail b))
+                        (< stat 0) (set! cleanMe true)
+                        (> stat lag) (set! lag stat)))
+                    (when (some? (set! b next)) (recur)))
+                  (when (or (some? retries) cleanMe)
+                    (set! lag (.retryOffer this item nanos onDrop retries lag cleanMe)))))))
+        (finally (.unlock lock)))
+      (if complete (throw (IllegalStateException. "Closed")) lag)))
+
+  (method ^:private retryOffer ^int [this ^T item ^long nanos
+                                     ^{:tag (BiPredicate (Flow$Subscriber (? super T)) (? super T))} onDrop
+                                     ^{:tag (BufferedSubscription T)} retries ^:mutable ^int lag
+                                     ^:mutable ^boolean cleanMe]
+    (let [^:mutable ^{:tag (BufferedSubscription T)} r retries]
+      (while (some? r)
+        (let [^{:tag (BufferedSubscription T)} nextRetry (.-nextRetry r)]
+          (set! (.-nextRetry r) nil)
+          (when (> nanos 0) (.awaitSpace r nanos))
+          (let [^:mutable stat (.retryOffer r item)]
+            (when (and (and (== stat 0) (some? onDrop)) (.test onDrop (.-subscriber r) item))
+              (set! stat (.retryOffer r item)))
+            (cond
+              (== stat 0) (set! lag (if (>= lag 0) -1 (unchecked-subtract-int lag 1)))
+              (< stat 0) (set! cleanMe true)
+              (and (>= lag 0) (> stat lag)) (set! lag stat))
+            (set! r nextRetry)))))
+    (when cleanMe (.cleanAndCount this))
+    lag)
+
+  (method ^:private cleanAndCount ^int [this]
+    (let [^:mutable ^int count 0
+          ^:mutable ^{:tag (BufferedSubscription T)} pred nil
+          ^:mutable ^{:tag (BufferedSubscription T)} next nil]
+      (loop [^{:tag (BufferedSubscription T)} b clients]
+        (when (some? b)
+          (set! next (.-next b))
+          (if (.isClosed b)
+              (do
+                (set! (.-next b) nil)
+                (if (nil? pred)
+                    (do (set! clients next) (recur next))
+                    (do (set! (.-next pred) next) (recur next))))
+              (do (set! pred b) (set! count (unchecked-inc-int count)) (recur next)))))
+      count))
+
+  (method ^:public submit ^int [this ^T item]
+    (.doOffer this item Long/MAX_VALUE nil))
+
+  (method ^:public offer ^int [this ^T item
+                               ^{:tag (BiPredicate (Flow$Subscriber (? super T)) (? super T))} onDrop]
+    (.doOffer this item 0 onDrop))
+
+  (method ^:public offer ^int [this ^T item ^long timeout ^TimeUnit unit
+                               ^{:tag (BiPredicate (Flow$Subscriber (? super T)) (? super T))} onDrop]
+    (let [^:mutable nanos (.toNanos unit timeout)]
+      (when (== nanos Long/MAX_VALUE) (set! nanos (unchecked-dec nanos)))
+      (.doOffer this item nanos onDrop)))
+
+  (method ^:public close ^void [this]
+    (let [lock (.-lock this)]
+      (when-not closed
+        (let [^:mutable ^{:tag (BufferedSubscription T)} b nil]
+          (.lock lock)
+          (try
+            (set! b clients)
+            (set! clients nil)
+            (set! owner nil)
+            (set! closed true)
+            (finally (.unlock lock)))
+          (while (some? b)
+            (let [^{:tag (BufferedSubscription T)} next (.-next b)]
+              (set! (.-next b) nil)
+              (.onComplete b)
+              (set! b next)))))))
+
+  (method ^:public closeExceptionally ^void [this ^Throwable error]
+    (when (nil? error) (throw (NullPointerException.)))
+    (let [lock (.-lock this)]
+      (when-not closed
+        (let [^:mutable ^{:tag (BufferedSubscription T)} b nil]
+          (.lock lock)
+          (try
+            (set! b clients)
+            (when-not closed
+              (set! closedException error)
+              (set! clients nil)
+              (set! owner nil)
+              (set! closed true))
+            (finally (.unlock lock)))
+          (while (some? b)
+            (let [^{:tag (BufferedSubscription T)} next (.-next b)]
+              (set! (.-next b) nil)
+              (.onError b error)
+              (set! b next)))))))
+
+  (method ^:public isClosed ^boolean [this] closed)
+
+  (method ^:public getClosedException ^Throwable [this] closedException)
+
+  (method ^:public hasSubscribers ^boolean [this]
+    (let [^:mutable nonEmpty false
+          lock (.-lock this)]
+      (.lock lock)
+      (try
+        (let [^:mutable ^{:tag (BufferedSubscription T)} b clients]
+          (while (some? b)
+            (let [^{:tag (BufferedSubscription T)} next (.-next b)]
+              (if (.isClosed b)
+                  (do (set! (.-next b) nil) (set! b (set! clients next)))
+                  (do (set! nonEmpty true) (break))))))
+        (finally (.unlock lock)))
+      nonEmpty))
+
+  (method ^:public getNumberOfSubscribers ^int [this]
+    (let [^:mutable ^int n 0
+          lock (.-lock this)]
+      (.lock lock)
+      (try (set! n (.cleanAndCount this)) (finally (.unlock lock)))
+      n))
+
+  (method ^:public getExecutor ^Executor [this] executor)
+
+  (method ^:public getMaxBufferCapacity ^int [this] maxBufferCapacity)
+
+  (method ^:public getSubscribers ^{:tag (List (Flow$Subscriber (? super T)))} [this]
+    (let [^{:tag (ArrayList (Flow$Subscriber (? super T)))} subs (ArrayList.)
+          lock (.-lock this)]
+      (.lock lock)
+      (try
+        (let [^:mutable ^{:tag (BufferedSubscription T)} pred nil
+              ^:mutable ^{:tag (BufferedSubscription T)} next nil]
+          (loop [^{:tag (BufferedSubscription T)} b clients]
+            (when (some? b)
+              (set! next (.-next b))
+              (if (.isClosed b)
+                  (do
+                    (set! (.-next b) nil)
+                    (if (nil? pred)
+                        (do (set! clients next) (recur next))
+                        (do (set! (.-next pred) next) (recur next))))
+                  (do (.add subs (.-subscriber b)) (set! pred b) (recur next))))))
+        (finally (.unlock lock)))
+      subs))
+
+  (method ^:public isSubscribed ^boolean [this ^{:tag (Flow$Subscriber (? super T))} subscriber]
+    (when (nil? subscriber) (throw (NullPointerException.)))
+    (let [^:mutable subscribed false
+          lock (.-lock this)]
+      (when-not closed
+        (.lock lock)
+        (try
+          (let [^:mutable ^{:tag (BufferedSubscription T)} pred nil
+                ^:mutable ^{:tag (BufferedSubscription T)} next nil]
+            (loop [^{:tag (BufferedSubscription T)} b clients]
+              (when (some? b)
+                (set! next (.-next b))
+                (if (.isClosed b)
+                    (do
+                      (set! (.-next b) nil)
+                      (if (nil? pred)
+                          (do (set! clients next) (recur next))
+                          (do (set! (.-next pred) next) (recur next))))
+                    (when-not (set! subscribed (.equals subscriber (.-subscriber b)))
+                      (set! pred b)
+                      (recur next))))))
+          (finally (.unlock lock))))
+      subscribed))
+
+  (method ^:public estimateMinimumDemand ^long [this]
+    (let [^:mutable min Long/MAX_VALUE
+          ^:mutable nonEmpty false
+          lock (.-lock this)]
+      (.lock lock)
+      (try
+        (let [^:mutable ^{:tag (BufferedSubscription T)} pred nil
+              ^:mutable ^{:tag (BufferedSubscription T)} next nil]
+          (loop [^{:tag (BufferedSubscription T)} b clients]
+            (when (some? b)
+              (let [^:mutable ^int n 0
+                    ^:mutable ^long d 0]
+                (set! next (.-next b))
+                (if (< (set! n (.estimateLag b)) 0)
+                    (do
+                      (set! (.-next b) nil)
+                      (if (nil? pred)
+                          (do (set! clients next) (recur next))
+                          (do (set! (.-next pred) next) (recur next))))
+                    (do
+                      (when (< (set! d (unchecked-subtract (.-demand b) n)) min) (set! min d))
+                      (set! nonEmpty true)
+                      (set! pred b)
+                      (recur next)))))))
+        (finally (.unlock lock)))
+      (if nonEmpty min 0)))
+
+  (method ^:public estimateMaximumLag ^int [this]
+    (let [^:mutable ^int max 0
+          lock (.-lock this)]
+      (.lock lock)
+      (try
+        (let [^:mutable ^{:tag (BufferedSubscription T)} pred nil
+              ^:mutable ^{:tag (BufferedSubscription T)} next nil]
+          (loop [^{:tag (BufferedSubscription T)} b clients]
+            (when (some? b)
+              (let [^:mutable ^int n 0]
+                (set! next (.-next b))
+                (if (< (set! n (.estimateLag b)) 0)
+                    (do
+                      (set! (.-next b) nil)
+                      (if (nil? pred)
+                          (do (set! clients next) (recur next))
+                          (do (set! (.-next pred) next) (recur next))))
+                    (do (when (> n max) (set! max n)) (set! pred b) (recur next)))))))
+        (finally (.unlock lock)))
+      max))
+
+  (method ^:public consume ^{:tag (CompletableFuture Void)} [this
+                                                             ^{:tag (Consumer (? super T))} consumer]
+    (when (nil? consumer) (throw (NullPointerException.)))
+    (let [^{:tag (CompletableFuture Void)} status (CompletableFuture.)]
+      (.subscribe this (ConsumerSubscriber. status consumer))
+      status))
+
+  (defclass ^:static ^:final ConsumerSubscriber
+    :implements [(Flow$Subscriber T)]
+    :type-params [T]
+
+    (field ^:final ^{:tag (CompletableFuture Void)} status)
+
+    (field ^:final ^{:tag (Consumer (? super T))} consumer)
+
+    (field ^Flow$Subscription subscription)
+
+    (constructor [this ^{:tag (CompletableFuture Void)} status
+                  ^{:tag (Consumer (? super T))} consumer]
+      (set! (.-status this) status)
+      (set! (.-consumer this) consumer))
+
+    (method ^:public ^:final onSubscribe ^void [this ^Flow$Subscription subscription]
+      (set! (.-subscription this) subscription)
+      (.whenComplete status (lambda BiConsumer ^void [^Void v ^Throwable e] (.cancel subscription)))
+      (when-not (.isDone status) (.request subscription Long/MAX_VALUE)))
+
+    (method ^:public ^:final onError ^void [this ^Throwable ex]
+      (.completeExceptionally status ex))
+
+    (method ^:public ^:final onComplete ^void [this] (.complete status nil))
+
+    (method ^:public ^:final onNext ^void [this ^T item]
+      (try
+        (.accept consumer item)
+        (catch Throwable ex (.cancel subscription) (.completeExceptionally status ex)))))
+
+  (defclass ^:static ^:final ConsumerTask
+    :extends (ForkJoinTask Void)
+    :implements [Runnable CompletableFuture$AsynchronousCompletionTask]
+    :type-params [T]
+
+    (field ^:final ^{:tag (BufferedSubscription T)} consumer)
+
+    (constructor [this ^{:tag (BufferedSubscription T)} consumer]
+      (set! (.-consumer this) consumer))
+
+    (method ^:public ^:final getRawResult ^Void [this] nil)
+
+    (method ^:public ^:final setRawResult ^void [this ^Void v])
+
+    (method ^:public ^:final exec ^boolean [this] (.consume consumer) false)
+
+    (method ^:public ^:final run ^void [this] (.consume consumer)))
+
+  (defclass ^:static ^:final ^{Contended true} BufferedSubscription
+    :implements [Flow$Subscription ForkJoinPool$ManagedBlocker]
+    :type-params [T]
+
+    (field ^long timeout)
+
+    (field ^int head)
+
+    (field ^int tail)
+
+    (field ^:final ^int maxCapacity)
+
+    (field ^:volatile ^int ctl)
+
+    (field ^Object/1 array)
+
+    (field ^:final ^{:tag (Flow$Subscriber (? super T))} subscriber)
+
+    (field ^:final ^{:tag (BiConsumer (? super (Flow$Subscriber (? super T))) (? super Throwable))} onNextHandler)
+
+    (field ^Executor executor)
+
+    (field ^:volatile ^Thread waiter)
+
+    (field ^Throwable pendingError)
+
+    (field ^{:tag (BufferedSubscription T)} next)
+
+    (field ^{:tag (BufferedSubscription T)} nextRetry)
+
+    (field ^:volatile ^{Contended "c"} ^long demand)
+
+    (field ^:volatile ^{Contended "c"} ^int waiting)
+
+    (field ^:static ^:final ^int CLOSED 0x01)
+
+    (field ^:static ^:final ^int ACTIVE 0x02)
+
+    (field ^:static ^:final ^int REQS 0x04)
+
+    (field ^:static ^:final ^int ERROR 0x08)
+
+    (field ^:static ^:final ^int COMPLETE 0x10)
+
+    (field ^:static ^:final ^int RUN 0x20)
+
+    (field ^:static ^:final ^int OPEN 0x40)
+
+    (field ^:static ^:final ^long INTERRUPTED -1)
+
+    (constructor [this ^{:tag (Flow$Subscriber (? super T))} subscriber ^Executor executor
+                  ^{:tag (BiConsumer (? super (Flow$Subscriber (? super T))) (? super Throwable))} onNextHandler
+                  ^Object/1 array ^int maxBufferCapacity]
+      (set! (.-subscriber this) subscriber)
+      (set! (.-executor this) executor)
+      (set! (.-onNextHandler this) onNextHandler)
+      (set! (.-array this) array)
+      (set! (.-maxCapacity this) maxBufferCapacity))
+
+    (method ^:final weakCasCtl ^boolean [this ^int cmp ^int val]
+      ^boolean (^[BufferedSubscription int int] VarHandle/.weakCompareAndSet CTL this cmp val))
+
+    (method ^:final getAndBitwiseOrCtl ^int [this ^int bits]
+      ^int (^[BufferedSubscription int] VarHandle/.getAndBitwiseOr CTL this bits))
+
+    (method ^:final subtractDemand ^long [this ^int k]
+      (let [n (long (unchecked-negate-int k))]
+        (unchecked-add n ^long (^[BufferedSubscription long] VarHandle/.getAndAdd DEMAND this n))))
+
+    (method ^:final casDemand ^boolean [this ^long cmp ^long val]
+      ^boolean (^[BufferedSubscription long long] VarHandle/.compareAndSet DEMAND this cmp val))
+
+    (method ^:final isClosed ^boolean [this]
+      (not (== (bit-and-int ctl CLOSED) 0)))
+
+    (method ^:final estimateLag ^int [this]
+      (let [c ctl
+            n (unchecked-subtract-int tail head)]
+        (cond (not (== (bit-and-int c CLOSED) 0)) -1 (< n 0) 0 :else n)))
+
+    (method ^:final offer ^int [this ^T item ^boolean unowned]
+      (let [^:mutable ^Object/1 a nil
+            ^:mutable ^int stat 0
+            ^int cap (if (nil? (set! a array)) 0 (alength a))
+            t tail
+            i (bit-and-int t (unchecked-subtract-int cap 1))
+            n (unchecked-subtract-int (unchecked-add-int t 1) head)]
+        (when (> cap 0)
+          (let [^:mutable ^boolean added false]
+            (cond
+              (and (>= n cap) (< cap maxCapacity)) (set! added (.growAndOffer this item a t))
+              (or (>= n cap) unowned)
+                (set! added
+                      ^boolean (^[Object/1 int Void Object] VarHandle/.compareAndSet
+                                 QA
+                                 a
+                                 i
+                                 nil
+                                 item))
+              :else
+                (do
+                  ^void (^[Object/1 int Object] VarHandle/.setRelease QA a i item)
+                  (set! added true)))
+            (when added (set! tail (unchecked-add-int t 1)) (set! stat n))))
+        (.startOnOffer this stat)))
+
+    (method ^:final growAndOffer ^boolean [this ^T item ^Object/1 a ^:mutable ^int t]
+      (let [^:mutable ^int cap 0
+            ^:mutable ^int newCap 0
+            ^:mutable ^Object/1 newArray nil]
+        (when (and (and (some? a) (> (set! cap (alength a)) 0))
+                   (> (set! newCap (bit-shift-left-int cap 1)) 0))
+          (try (set! newArray (new Object/1 newCap)) (catch OutOfMemoryError ex)))
+        (if (nil? newArray)
+            false
+            (let [newMask (unchecked-subtract-int newCap 1)]
+              (aset newArray (bit-and-int t newMask) item)
+              (set! t (unchecked-dec-int t))
+              (loop [^int mask (unchecked-subtract-int cap 1)
+                     ^int k mask]
+                (when (>= k 0)
+                  (let [x (^[Object/1 int Void] VarHandle/.getAndSet QA a (bit-and-int t mask) nil)]
+                    (when (some? x)
+                      (aset newArray (bit-and-int t newMask) x)
+                      (set! t (unchecked-dec-int t))
+                      (recur mask (unchecked-dec-int k))))))
+              (set! array newArray)
+              (VarHandle/releaseFence)
+              true))))
+
+    (method ^:final retryOffer ^int [this ^T item]
+      (let [^:mutable ^Object/1 a nil
+            ^:mutable ^int stat 0
+            t tail
+            h head
+            ^:mutable ^int cap 0]
+        (when (and (and (some? (set! a array)) (> (set! cap (alength a)) 0))
+                   ^boolean (^[Object/1 int Void Object] VarHandle/.compareAndSet
+                              QA
+                              a
+                              (bit-and-int (unchecked-subtract-int cap 1) t)
+                              nil
+                              item))
+          (set! stat (unchecked-subtract-int (set! tail (unchecked-add-int t 1)) h)))
+        (.startOnOffer this stat)))
+
+    (method ^:final startOnOffer ^int [this ^:mutable ^int stat]
+      (let [^:mutable ^int c 0]
+        (if (and (== (bit-and-int (set! c ctl) (bit-or-int REQS ACTIVE)) REQS)
+                 (== (bit-and-int (set! c (.getAndBitwiseOrCtl this (bit-or-int RUN ACTIVE)))
+                                  (bit-or-int RUN CLOSED))
+                     0))
+            (.tryStart this)
+            (when-not (== (bit-and-int c CLOSED) 0) (set! stat -1)))
+        stat))
+
+    (method ^:final tryStart ^void [this]
+      (try
+        (let [^:mutable ^Executor e nil
+              ^{:tag (ConsumerTask T)} task (ConsumerTask. this)]
+          (when (some? (set! e executor)) (.execute e task)))
+        (catch [RuntimeException Error] ex
+          (.getAndBitwiseOrCtl this (bit-or-int ERROR CLOSED))
+          (throw ex))))
+
+    (method ^:final startOnSignal ^void [this ^int bits]
+      (when (and (not (== (bit-and-int ctl bits) bits))
+                 (== (bit-and-int (.getAndBitwiseOrCtl this bits) (bit-or-int RUN CLOSED)) 0))
+        (.tryStart this)))
+
+    (method ^:final onSubscribe ^void [this]
+      (.startOnSignal this (bit-or-int RUN ACTIVE)))
+
+    (method ^:final onComplete ^void [this]
+      (.startOnSignal this (bit-or-int (bit-or-int RUN ACTIVE) COMPLETE)))
+
+    (method ^:final onError ^void [this ^Throwable ex]
+      (let [^:mutable ^int c 0
+            ^:mutable ^Object/1 a nil]
+        (when (some? ex) (set! pendingError ex))
+        (when (== (bit-and-int (set! c
+                                     (.getAndBitwiseOrCtl
+                                       this
+                                       (bit-or-int (bit-or-int ERROR RUN) ACTIVE)))
+                               CLOSED)
+                  0)
+          (cond
+            (== (bit-and-int c RUN) 0) (.tryStart this)
+            (some? (set! a array)) (Arrays/fill a nil)))))
+
+    (method ^:public ^:final cancel ^void [this] (.onError this nil))
+
+    (method ^:public ^:final request ^void [this ^long n]
+      (if (> n 0)
+          (do
+            (while true
+              (let [p demand
+                    d (unchecked-add p n)]
+                (when (.casDemand this p (if (< d p) Long/MAX_VALUE d)) (break))))
+            (.startOnSignal this (bit-or-int (bit-or-int RUN ACTIVE) REQS)))
+          (.onError this (IllegalArgumentException. "non-positive subscription request"))))
+
+    (method ^:final consume ^void [this]
+      (let [^:mutable ^{:tag (Flow$Subscriber (? super T))} s nil]
+        (when (some? (set! s subscriber))
+          (.subscribeOnOpen this s)
+          (let [^:mutable d demand
+                ^:mutable h head
+                ^:mutable t tail]
+            (while true
+              (let [^:mutable ^int c 0
+                    ^:mutable ^int taken 0
+                    ^:mutable ^boolean empty false]
+                (cond
+                  (not (== (bit-and-int (set! c ctl) ERROR) 0))
+                    (do (.closeOnError this s nil) (break))
+                  (> (set! taken (.takeItems this s d h)) 0)
+                    (do
+                      (set! head (set! h (unchecked-add-int h taken)))
+                      (set! d (.subtractDemand this taken)))
+                  (and (== (set! d demand) 0) (not (== (bit-and-int c REQS) 0)))
+                    (.weakCasCtl this c (bit-and-int c (bit-not-int REQS)))
+                  (and (not (== d 0)) (== (bit-and-int c REQS) 0))
+                    (.weakCasCtl this c (bit-or-int c REQS))
+                  (== t (set! t tail))
+                    (cond
+                      (and (set! empty (== t h)) (not (== (bit-and-int c COMPLETE) 0)))
+                        (do (.closeOnComplete this s) (break))
+                      (or empty (== d 0))
+                        (let [^int bit (if (not (== (bit-and-int c ACTIVE) 0)) ACTIVE RUN)]
+                          (when (and (.weakCasCtl this c (bit-and-int c (bit-not-int bit)))
+                                     (== bit RUN))
+                            (break)))))))))))
+
+    (method ^:final takeItems ^int [this ^{:tag (Flow$Subscriber (? super T))} s ^long d
+                                    ^:mutable ^int h]
+      (let [^:mutable ^Object/1 a nil
+            ^:mutable ^int k 0
+            ^:mutable ^int cap 0]
+        (when (and (some? (set! a array)) (> (set! cap (alength a)) 0))
+          (let [m (unchecked-subtract-int cap 1)
+                b (unchecked-add-int (unsigned-bit-shift-right-int m 3) 1)
+                ^int n (if (< d (long b)) (unchecked-int d) b)]
+            (while (< k n)
+              (let [x (^[Object/1 int Void] VarHandle/.getAndSet QA a (bit-and-int h m) nil)]
+                (when-not (== waiting 0) (.signalWaiter this))
+                (if (nil? x) (break) (when-not (.consumeNext this s x) (break))))
+              (set! h (unchecked-inc-int h))
+              (set! k (unchecked-inc-int k)))))
+        k))
+
+    (method ^:final consumeNext ^boolean [this ^{:tag (Flow$Subscriber (? super T))} s x]
+      (try
+        (let [^T y x] (when (some? s) (.onNext s y)) true)
+        (catch Throwable ex (.handleOnNext this s ex) false)))
+
+    (method ^:final handleOnNext ^void [this ^{:tag (Flow$Subscriber (? super T))} s ^Throwable ex]
+      (let [^:mutable ^{:tag (BiConsumer (? super (Flow$Subscriber (? super T))) (? super Throwable))} h
+              nil]
+        (try (when (some? (set! h onNextHandler)) (.accept h s ex)) (catch Throwable ignore))
+        (.closeOnError this s ex)))
+
+    (method ^:final subscribeOnOpen ^void [this ^{:tag (Flow$Subscriber (? super T))} s]
+      (when (and (== (bit-and-int ctl OPEN) 0)
+                 (== (bit-and-int (.getAndBitwiseOrCtl this OPEN) OPEN) 0))
+        (.consumeSubscribe this s)))
+
+    (method ^:final consumeSubscribe ^void [this ^{:tag (Flow$Subscriber (? super T))} s]
+      (try (when (some? s) (.onSubscribe s this)) (catch Throwable ex (.closeOnError this s ex))))
+
+    (method ^:final closeOnComplete ^void [this ^{:tag (Flow$Subscriber (? super T))} s]
+      (when (== (bit-and-int (.getAndBitwiseOrCtl this CLOSED) CLOSED) 0) (.consumeComplete this s)))
+
+    (method ^:final consumeComplete ^void [this ^{:tag (Flow$Subscriber (? super T))} s]
+      (try (when (some? s) (.onComplete s)) (catch Throwable ignore)))
+
+    (method ^:final closeOnError ^void [this ^{:tag (Flow$Subscriber (? super T))} s
+                                        ^:mutable ^Throwable ex]
+      (when (== (bit-and-int (.getAndBitwiseOrCtl this (bit-or-int ERROR CLOSED)) CLOSED) 0)
+        (when (nil? ex) (set! ex pendingError))
+        (set! pendingError nil)
+        (set! executor nil)
+        (.signalWaiter this)
+        (.consumeError this s ex)))
+
+    (method ^:final consumeError ^void [this ^{:tag (Flow$Subscriber (? super T))} s ^Throwable ex]
+      (try (when (and (some? ex) (some? s)) (.onError s ex)) (catch Throwable ignore)))
+
+    (method ^:final signalWaiter ^void [this]
+      (let [^:mutable ^Thread w nil]
+        (set! waiting 0)
+        (when (some? (set! w waiter)) (LockSupport/unpark w))))
+
+    (method ^:public ^:final isReleasable ^boolean [this]
+      (let [^:mutable ^Object/1 a nil
+            ^:mutable ^int cap 0]
+        (or (not (== (bit-and-int ctl CLOSED) 0))
+            (and (and (some? (set! a array)) (> (set! cap (alength a)) 0))
+                 (nil? (^[Object/1 int] VarHandle/.getAcquire
+                         QA
+                         a
+                         (bit-and-int (unchecked-subtract-int cap 1) tail)))))))
+
+    (method ^:final awaitSpace ^void [this ^long nanos]
+      (when-not (.isReleasable this)
+        (ForkJoinPool/helpAsyncBlocker executor this)
+        (when-not (.isReleasable this)
+          (set! timeout nanos)
+          (try
+            (ForkJoinPool/managedBlock this)
+            (catch InterruptedException ie (set! timeout INTERRUPTED)))
+          (when (== timeout INTERRUPTED) (.interrupt (Thread/currentThread))))))
+
+    (method ^:public ^:final block ^boolean [this]
+      (let [^:mutable nanos timeout
+            timed (< nanos Long/MAX_VALUE)
+            deadline (if timed (unchecked-add (System/nanoTime) nanos) 0)]
+        (while (not (.isReleasable this))
+          (cond
+            (Thread/interrupted) (do (set! timeout INTERRUPTED) (when timed (break)))
+            (and timed (<= (set! nanos (unchecked-subtract deadline (System/nanoTime))) 0)) (break)
+            (nil? waiter) (set! waiter (Thread/currentThread))
+            (== waiting 0) (set! waiting 1)
+            timed (LockSupport/parkNanos this nanos)
+            :else (LockSupport/park this)))
+        (set! waiter nil)
+        (set! waiting 0)
+        true))
+
+    (field ^:static ^:final ^VarHandle CTL)
+
+    (field ^:static ^:final ^VarHandle DEMAND)
+
+    (field ^:static ^:final ^VarHandle QA)
+
+    (static-initializer
+      (let [l (MethodHandles/lookup)]
+        (set! CTL (MhUtil/findVarHandle l "ctl" Integer/TYPE))
+        (set! DEMAND (MhUtil/findVarHandle l "demand" Long/TYPE))
+        (set! QA (MethodHandles/arrayElementVarHandle Object/1))
+        (let [^{:tag (Class ?)} ensureLoaded LockSupport] nil)))))

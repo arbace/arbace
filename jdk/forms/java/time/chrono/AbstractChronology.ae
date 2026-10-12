@@ -1,0 +1,464 @@
+;; Converted from jdk26u src/java.base/share/classes/java/time/chrono/AbstractChronology.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.time.chrono)
+
+(import '(java.io DataInput
+                  DataOutput
+                  IOException
+                  InvalidObjectException
+                  ObjectInputStream
+                  ObjectStreamException
+                  Serializable)
+        '(java.time DateTimeException DayOfWeek)
+        '(java.time.format ResolverStyle)
+        '(java.time.temporal ChronoField ChronoUnit TemporalAdjusters TemporalField)
+        '(java.util HashSet List Locale Map Objects ServiceLoader Set)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(sun.util.logging PlatformLogger))
+
+(defclass ^:public ^:abstract AbstractChronology
+  :implements [Chronology]
+
+  (field ^:private ^:static ^:final ^{:tag (ConcurrentHashMap String Chronology)} CHRONOS_BY_ID
+    (ConcurrentHashMap.))
+
+  (field ^:private ^:static ^:final ^{:tag (ConcurrentHashMap String Chronology)} CHRONOS_BY_TYPE
+    (ConcurrentHashMap.))
+
+  (method ^:static registerChrono ^Chronology [^Chronology chrono]
+    (AbstractChronology/registerChrono chrono (.getId chrono)))
+
+  (method ^:static registerChrono ^Chronology [^Chronology chrono ^String id]
+    (let [prev (cast Chronology (.putIfAbsent CHRONOS_BY_ID id chrono))]
+      (when (nil? prev)
+        (let [type (.getCalendarType chrono)]
+          (when (some? type) (.putIfAbsent CHRONOS_BY_TYPE type chrono))))
+      prev))
+
+  (method ^:private ^:static initCache ^boolean []
+    (if (nil? (.get CHRONOS_BY_ID "ISO"))
+        (do
+          (AbstractChronology/registerChrono HijrahChronology/INSTANCE)
+          (AbstractChronology/registerChrono JapaneseChronology/INSTANCE)
+          (AbstractChronology/registerChrono MinguoChronology/INSTANCE)
+          (AbstractChronology/registerChrono ThaiBuddhistChronology/INSTANCE)
+          (let [^{:tag (ServiceLoader AbstractChronology)} loader (ServiceLoader/load
+                                                                    AbstractChronology
+                                                                    nil)]
+            (for-each [^AbstractChronology chrono loader]
+              (let [id (.getId chrono)]
+                (when (or (.equals id "ISO") (some? (AbstractChronology/registerChrono chrono)))
+                  (let [logger (PlatformLogger/getLogger "java.time.chrono")]
+                    (.warning logger
+                              (java-str
+                                "Ignoring duplicate Chronology, from ServiceLoader configuration "
+                                id))))))
+            (AbstractChronology/registerChrono IsoChronology/INSTANCE)
+            true))
+        false))
+
+  (method ^:static ofLocale ^Chronology [^Locale locale]
+    (Objects/requireNonNull locale "locale")
+    (let [type (.getUnicodeLocaleType locale "ca")]
+      (if (or (or (nil? type) (.equals "iso" type)) (.equals "iso8601" type))
+          IsoChronology/INSTANCE
+          (do
+            (loop []
+              (let [chrono (cast Chronology (.get CHRONOS_BY_TYPE type))]
+                (when (some? chrono) (return chrono)))
+              (when (AbstractChronology/initCache) (recur)))
+            (let [^{:tag (ServiceLoader Chronology)} loader (ServiceLoader/load Chronology)]
+              (for-each [^Chronology chrono loader]
+                (when (.equals type (.getCalendarType chrono)) (return chrono)))
+              (throw (DateTimeException. (java-str "Unknown calendar system: " type))))))))
+
+  (method ^:static of ^Chronology [^String id]
+    (Objects/requireNonNull id "id")
+    (loop []
+      (let [chrono (AbstractChronology/of0 id)] (when (some? chrono) (return chrono)))
+      (when (AbstractChronology/initCache) (recur)))
+    (let [^{:tag (ServiceLoader Chronology)} loader (ServiceLoader/load Chronology)]
+      (for-each [^Chronology chrono loader]
+        (when (or (.equals id (.getId chrono)) (.equals id (.getCalendarType chrono)))
+          (return chrono)))
+      (throw (DateTimeException. (java-str "Unknown chronology: " id)))))
+
+  (method ^:private ^:static of0 ^Chronology [^String id]
+    (let [^:mutable chrono (cast Chronology (.get CHRONOS_BY_ID id))]
+      (when (nil? chrono) (set! chrono (cast Chronology (.get CHRONOS_BY_TYPE id))))
+      chrono))
+
+  (method ^:static getAvailableChronologies ^{:tag (Set Chronology)} []
+    (AbstractChronology/initCache)
+    (let [^{:tag (HashSet Chronology)} chronos (HashSet. (.values CHRONOS_BY_ID))
+          ^{:tag (ServiceLoader Chronology)} loader (ServiceLoader/load Chronology)]
+      (for-each [^Chronology chrono loader] (.add chronos chrono))
+      chronos))
+
+  (constructor ^:protected [this])
+
+  (method ^:public resolveDate ^ChronoLocalDate [this ^{:tag (Map TemporalField Long)} fieldValues
+                                                 ^ResolverStyle resolverStyle]
+    (if (.containsKey fieldValues ChronoField/EPOCH_DAY)
+        (.dateEpochDay this (.longValue (cast Long (.remove fieldValues ChronoField/EPOCH_DAY))))
+        (do
+          (.resolveProlepticMonth this fieldValues resolverStyle)
+          (let [resolved (.resolveYearOfEra this fieldValues resolverStyle)]
+            (if (some? resolved)
+                resolved
+                (do
+                  (when (.containsKey fieldValues ChronoField/YEAR)
+                    (when (.containsKey fieldValues ChronoField/MONTH_OF_YEAR)
+                      (when (.containsKey fieldValues ChronoField/DAY_OF_MONTH)
+                        (return (.resolveYMD this fieldValues resolverStyle)))
+                      (when (.containsKey fieldValues ChronoField/ALIGNED_WEEK_OF_MONTH)
+                        (when (.containsKey fieldValues ChronoField/ALIGNED_DAY_OF_WEEK_IN_MONTH)
+                          (return (.resolveYMAA this fieldValues resolverStyle)))
+                        (when (.containsKey fieldValues ChronoField/DAY_OF_WEEK)
+                          (return (.resolveYMAD this fieldValues resolverStyle)))))
+                    (when (.containsKey fieldValues ChronoField/DAY_OF_YEAR)
+                      (return (.resolveYD this fieldValues resolverStyle)))
+                    (when (.containsKey fieldValues ChronoField/ALIGNED_WEEK_OF_YEAR)
+                      (when (.containsKey fieldValues ChronoField/ALIGNED_DAY_OF_WEEK_IN_YEAR)
+                        (return (.resolveYAA this fieldValues resolverStyle)))
+                      (when (.containsKey fieldValues ChronoField/DAY_OF_WEEK)
+                        (return (.resolveYAD this fieldValues resolverStyle)))))
+                  nil))))))
+
+  (method resolveProlepticMonth ^void [this ^{:tag (Map TemporalField Long)} fieldValues
+                                       ^ResolverStyle resolverStyle]
+    (let [pMonth (cast Long (.remove fieldValues ChronoField/PROLEPTIC_MONTH))]
+      (when (some? pMonth)
+        (when-not (identical? resolverStyle ResolverStyle/LENIENT)
+          (.checkValidValue ChronoField/PROLEPTIC_MONTH pMonth))
+        (let [chronoDate (.with (.with (.dateNow this) ChronoField/DAY_OF_MONTH 1)
+                                ChronoField/PROLEPTIC_MONTH
+                                pMonth)]
+          (.addFieldValue this
+                          fieldValues
+                          ChronoField/MONTH_OF_YEAR
+                          (.get chronoDate ChronoField/MONTH_OF_YEAR))
+          (.addFieldValue this fieldValues ChronoField/YEAR (.get chronoDate ChronoField/YEAR))))))
+
+  (method resolveYearOfEra ^ChronoLocalDate [this ^{:tag (Map TemporalField Long)} fieldValues
+                                             ^ResolverStyle resolverStyle]
+    (let [yoeLong (cast Long (.remove fieldValues ChronoField/YEAR_OF_ERA))]
+      (cond
+        (some? yoeLong)
+          (let [eraLong (cast Long (.remove fieldValues ChronoField/ERA))
+                ^int yoe (if (not (identical? resolverStyle ResolverStyle/LENIENT))
+                             (.checkValidIntValue
+                               (.range this ChronoField/YEAR_OF_ERA)
+                               yoeLong
+                               ChronoField/YEAR_OF_ERA)
+                             (Math/toIntExact yoeLong))]
+            (cond
+              (some? eraLong)
+                (let [eraObj (.eraOf this
+                                     (.checkValidIntValue
+                                       (.range this ChronoField/ERA)
+                                       eraLong
+                                       ChronoField/ERA))]
+                  (.addFieldValue this
+                                  fieldValues
+                                  ChronoField/YEAR
+                                  (.prolepticYear this eraObj yoe)))
+              (.containsKey fieldValues ChronoField/YEAR)
+                (let [year (.checkValidIntValue (.range this ChronoField/YEAR)
+                                                (.longValue
+                                                  (cast Long (.get fieldValues ChronoField/YEAR)))
+                                                ChronoField/YEAR)
+                      chronoDate (.dateYearDay this year 1)]
+                  (.addFieldValue this
+                                  fieldValues
+                                  ChronoField/YEAR
+                                  (.prolepticYear this (.getEra chronoDate) yoe)))
+              (identical? resolverStyle ResolverStyle/STRICT)
+                (.put fieldValues ChronoField/YEAR_OF_ERA yoeLong)
+              :else
+                (let [^{:tag (List Era)} eras (.eras this)]
+                  (if (.isEmpty eras)
+                      (.addFieldValue this fieldValues ChronoField/YEAR yoe)
+                      (let [eraObj (cast Era (.get eras (unchecked-subtract-int (.size eras) 1)))]
+                        (.addFieldValue this
+                                        fieldValues
+                                        ChronoField/YEAR
+                                        (.prolepticYear this eraObj yoe)))))))
+        (.containsKey fieldValues ChronoField/ERA)
+          (.checkValidValue (.range this ChronoField/ERA)
+                            (.longValue (cast Long (.get fieldValues ChronoField/ERA)))
+                            ChronoField/ERA))
+      nil))
+
+  (method resolveYMD ^ChronoLocalDate [this ^{:tag (Map TemporalField Long)} fieldValues
+                                       ^ResolverStyle resolverStyle]
+    (let [y (.checkValidIntValue (.range this ChronoField/YEAR)
+                                 (.longValue (cast Long (.remove fieldValues ChronoField/YEAR)))
+                                 ChronoField/YEAR)]
+      (if (identical? resolverStyle ResolverStyle/LENIENT)
+          (let [months (Math/subtractExact
+                         (.longValue (cast Long (.remove fieldValues ChronoField/MONTH_OF_YEAR)))
+                         1)
+                days (Math/subtractExact
+                       (.longValue (cast Long (.remove fieldValues ChronoField/DAY_OF_MONTH)))
+                       1)]
+            (.plus (.plus (.date this y 1 1) months ChronoUnit/MONTHS) days ChronoUnit/DAYS))
+          (let [moy (.checkValidIntValue (.range this ChronoField/MONTH_OF_YEAR)
+                                         (.longValue
+                                           (cast
+                                             Long
+                                             (.remove fieldValues ChronoField/MONTH_OF_YEAR)))
+                                         ChronoField/MONTH_OF_YEAR)
+                domRange (.range this ChronoField/DAY_OF_MONTH)
+                dom (.checkValidIntValue domRange
+                                         (.longValue
+                                           (cast
+                                             Long
+                                             (.remove fieldValues ChronoField/DAY_OF_MONTH)))
+                                         ChronoField/DAY_OF_MONTH)]
+            (when (identical? resolverStyle ResolverStyle/SMART)
+              (try
+                (return (.date this y moy dom))
+                (catch DateTimeException ex
+                  (return (.with (.date this y moy 1) (TemporalAdjusters/lastDayOfMonth))))))
+            (.date this y moy dom)))))
+
+  (method resolveYD ^ChronoLocalDate [this ^{:tag (Map TemporalField Long)} fieldValues
+                                      ^ResolverStyle resolverStyle]
+    (let [y (.checkValidIntValue (.range this ChronoField/YEAR)
+                                 (.longValue (cast Long (.remove fieldValues ChronoField/YEAR)))
+                                 ChronoField/YEAR)]
+      (if (identical? resolverStyle ResolverStyle/LENIENT)
+          (let [days (Math/subtractExact
+                       (.longValue (cast Long (.remove fieldValues ChronoField/DAY_OF_YEAR)))
+                       1)]
+            (.plus (.dateYearDay this y 1) days ChronoUnit/DAYS))
+          (let [doy (.checkValidIntValue
+                      (.range this ChronoField/DAY_OF_YEAR)
+                      (.longValue (cast Long (.remove fieldValues ChronoField/DAY_OF_YEAR)))
+                      ChronoField/DAY_OF_YEAR)]
+            (.dateYearDay this y doy)))))
+
+  (method resolveYMAA ^ChronoLocalDate [this ^{:tag (Map TemporalField Long)} fieldValues
+                                        ^ResolverStyle resolverStyle]
+    (let [y (.checkValidIntValue (.range this ChronoField/YEAR)
+                                 (.longValue (cast Long (.remove fieldValues ChronoField/YEAR)))
+                                 ChronoField/YEAR)]
+      (if (identical? resolverStyle ResolverStyle/LENIENT)
+          (let [months (Math/subtractExact
+                         (.longValue (cast Long (.remove fieldValues ChronoField/MONTH_OF_YEAR)))
+                         1)
+                weeks (Math/subtractExact
+                        (.longValue (cast Long
+                                          (.remove fieldValues ChronoField/ALIGNED_WEEK_OF_MONTH)))
+                        1)
+                days (Math/subtractExact
+                       (.longValue (cast Long
+                                         (.remove
+                                           fieldValues
+                                           ChronoField/ALIGNED_DAY_OF_WEEK_IN_MONTH)))
+                       1)]
+            (.plus (.plus (.plus (.date this y 1 1) months ChronoUnit/MONTHS)
+                          weeks
+                          ChronoUnit/WEEKS)
+                   days
+                   ChronoUnit/DAYS))
+          (let [moy (.checkValidIntValue (.range this ChronoField/MONTH_OF_YEAR)
+                                         (.longValue
+                                           (cast
+                                             Long
+                                             (.remove fieldValues ChronoField/MONTH_OF_YEAR)))
+                                         ChronoField/MONTH_OF_YEAR)
+                aw (.checkValidIntValue (.range this ChronoField/ALIGNED_WEEK_OF_MONTH)
+                                        (.longValue
+                                          (cast Long
+                                                (.remove
+                                                  fieldValues
+                                                  ChronoField/ALIGNED_WEEK_OF_MONTH)))
+                                        ChronoField/ALIGNED_WEEK_OF_MONTH)
+                ad (.checkValidIntValue (.range this ChronoField/ALIGNED_DAY_OF_WEEK_IN_MONTH)
+                                        (.longValue
+                                          (cast Long
+                                                (.remove
+                                                  fieldValues
+                                                  ChronoField/ALIGNED_DAY_OF_WEEK_IN_MONTH)))
+                                        ChronoField/ALIGNED_DAY_OF_WEEK_IN_MONTH)
+                date (.plus (.date this y moy 1)
+                            (unchecked-add-int
+                              (unchecked-multiply-int (unchecked-subtract-int aw 1) 7)
+                              (unchecked-subtract-int ad 1))
+                            ChronoUnit/DAYS)]
+            (when (and (identical? resolverStyle ResolverStyle/STRICT)
+                       (not (== (.get date ChronoField/MONTH_OF_YEAR) moy)))
+              (throw (DateTimeException.
+                       "Strict mode rejected resolved date as it is in a different month")))
+            date))))
+
+  (method resolveYMAD ^ChronoLocalDate [this ^{:tag (Map TemporalField Long)} fieldValues
+                                        ^ResolverStyle resolverStyle]
+    (let [y (.checkValidIntValue (.range this ChronoField/YEAR)
+                                 (.longValue (cast Long (.remove fieldValues ChronoField/YEAR)))
+                                 ChronoField/YEAR)]
+      (if (identical? resolverStyle ResolverStyle/LENIENT)
+          (let [months (Math/subtractExact
+                         (.longValue (cast Long (.remove fieldValues ChronoField/MONTH_OF_YEAR)))
+                         1)
+                weeks (Math/subtractExact
+                        (.longValue (cast Long
+                                          (.remove fieldValues ChronoField/ALIGNED_WEEK_OF_MONTH)))
+                        1)
+                dow (Math/subtractExact
+                      (.longValue (cast Long (.remove fieldValues ChronoField/DAY_OF_WEEK)))
+                      1)]
+            (.resolveAligned this (.date this y 1 1) months weeks dow))
+          (let [moy (.checkValidIntValue (.range this ChronoField/MONTH_OF_YEAR)
+                                         (.longValue
+                                           (cast
+                                             Long
+                                             (.remove fieldValues ChronoField/MONTH_OF_YEAR)))
+                                         ChronoField/MONTH_OF_YEAR)
+                aw (.checkValidIntValue (.range this ChronoField/ALIGNED_WEEK_OF_MONTH)
+                                        (.longValue
+                                          (cast Long
+                                                (.remove
+                                                  fieldValues
+                                                  ChronoField/ALIGNED_WEEK_OF_MONTH)))
+                                        ChronoField/ALIGNED_WEEK_OF_MONTH)
+                dow (.checkValidIntValue
+                      (.range this ChronoField/DAY_OF_WEEK)
+                      (.longValue (cast Long (.remove fieldValues ChronoField/DAY_OF_WEEK)))
+                      ChronoField/DAY_OF_WEEK)
+                date (.with (.plus (.date this y moy 1)
+                                   (unchecked-multiply-int (unchecked-subtract-int aw 1) 7)
+                                   ChronoUnit/DAYS)
+                            (TemporalAdjusters/nextOrSame (DayOfWeek/of dow)))]
+            (when (and (identical? resolverStyle ResolverStyle/STRICT)
+                       (not (== (.get date ChronoField/MONTH_OF_YEAR) moy)))
+              (throw (DateTimeException.
+                       "Strict mode rejected resolved date as it is in a different month")))
+            date))))
+
+  (method resolveYAA ^ChronoLocalDate [this ^{:tag (Map TemporalField Long)} fieldValues
+                                       ^ResolverStyle resolverStyle]
+    (let [y (.checkValidIntValue (.range this ChronoField/YEAR)
+                                 (.longValue (cast Long (.remove fieldValues ChronoField/YEAR)))
+                                 ChronoField/YEAR)]
+      (if (identical? resolverStyle ResolverStyle/LENIENT)
+          (let [weeks (Math/subtractExact
+                        (.longValue (cast Long
+                                          (.remove fieldValues ChronoField/ALIGNED_WEEK_OF_YEAR)))
+                        1)
+                days (Math/subtractExact
+                       (.longValue (cast Long
+                                         (.remove
+                                           fieldValues
+                                           ChronoField/ALIGNED_DAY_OF_WEEK_IN_YEAR)))
+                       1)]
+            (.plus (.plus (.dateYearDay this y 1) weeks ChronoUnit/WEEKS) days ChronoUnit/DAYS))
+          (let [aw (.checkValidIntValue (.range this ChronoField/ALIGNED_WEEK_OF_YEAR)
+                                        (.longValue
+                                          (cast Long
+                                                (.remove
+                                                  fieldValues
+                                                  ChronoField/ALIGNED_WEEK_OF_YEAR)))
+                                        ChronoField/ALIGNED_WEEK_OF_YEAR)
+                ad (.checkValidIntValue (.range this ChronoField/ALIGNED_DAY_OF_WEEK_IN_YEAR)
+                                        (.longValue
+                                          (cast Long
+                                                (.remove
+                                                  fieldValues
+                                                  ChronoField/ALIGNED_DAY_OF_WEEK_IN_YEAR)))
+                                        ChronoField/ALIGNED_DAY_OF_WEEK_IN_YEAR)
+                date (.plus (.dateYearDay this y 1)
+                            (unchecked-add-int
+                              (unchecked-multiply-int (unchecked-subtract-int aw 1) 7)
+                              (unchecked-subtract-int ad 1))
+                            ChronoUnit/DAYS)]
+            (when (and (identical? resolverStyle ResolverStyle/STRICT)
+                       (not (== (.get date ChronoField/YEAR) y)))
+              (throw (DateTimeException.
+                       "Strict mode rejected resolved date as it is in a different year")))
+            date))))
+
+  (method resolveYAD ^ChronoLocalDate [this ^{:tag (Map TemporalField Long)} fieldValues
+                                       ^ResolverStyle resolverStyle]
+    (let [y (.checkValidIntValue (.range this ChronoField/YEAR)
+                                 (.longValue (cast Long (.remove fieldValues ChronoField/YEAR)))
+                                 ChronoField/YEAR)]
+      (if (identical? resolverStyle ResolverStyle/LENIENT)
+          (let [weeks (Math/subtractExact
+                        (.longValue (cast Long
+                                          (.remove fieldValues ChronoField/ALIGNED_WEEK_OF_YEAR)))
+                        1)
+                dow (Math/subtractExact
+                      (.longValue (cast Long (.remove fieldValues ChronoField/DAY_OF_WEEK)))
+                      1)]
+            (.resolveAligned this (.dateYearDay this y 1) 0 weeks dow))
+          (let [aw (.checkValidIntValue (.range this ChronoField/ALIGNED_WEEK_OF_YEAR)
+                                        (.longValue
+                                          (cast Long
+                                                (.remove
+                                                  fieldValues
+                                                  ChronoField/ALIGNED_WEEK_OF_YEAR)))
+                                        ChronoField/ALIGNED_WEEK_OF_YEAR)
+                dow (.checkValidIntValue
+                      (.range this ChronoField/DAY_OF_WEEK)
+                      (.longValue (cast Long (.remove fieldValues ChronoField/DAY_OF_WEEK)))
+                      ChronoField/DAY_OF_WEEK)
+                date (.with (.plus (.dateYearDay this y 1)
+                                   (unchecked-multiply-int (unchecked-subtract-int aw 1) 7)
+                                   ChronoUnit/DAYS)
+                            (TemporalAdjusters/nextOrSame (DayOfWeek/of dow)))]
+            (when (and (identical? resolverStyle ResolverStyle/STRICT)
+                       (not (== (.get date ChronoField/YEAR) y)))
+              (throw (DateTimeException.
+                       "Strict mode rejected resolved date as it is in a different year")))
+            date))))
+
+  (method resolveAligned ^ChronoLocalDate [this ^ChronoLocalDate base ^long months ^long weeks
+                                           ^:mutable ^long dow]
+    (let [^:mutable date (.plus (.plus base months ChronoUnit/MONTHS) weeks ChronoUnit/WEEKS)]
+      (if (> dow 7)
+          (do
+            (set! date
+                  (.plus date (unchecked-divide (unchecked-subtract dow 1) 7) ChronoUnit/WEEKS))
+            (set! dow (unchecked-add (unchecked-remainder (unchecked-subtract dow 1) 7) 1)))
+          (when (< dow 1)
+            (set! date
+                  (.plus date (unchecked-divide (Math/subtractExact dow 7) 7) ChronoUnit/WEEKS))
+            (set! dow (unchecked-add (unchecked-remainder (unchecked-add dow 6) 7) 1))))
+      (.with date (TemporalAdjusters/nextOrSame (DayOfWeek/of (unchecked-int dow))))))
+
+  (method addFieldValue ^void [this ^{:tag (Map TemporalField Long)} fieldValues ^ChronoField field
+                               ^long value]
+    (let [old (cast Long (.get fieldValues field))]
+      (when (and (some? old) (not (== (.longValue old) value)))
+        (throw (DateTimeException.
+                 (java-str "Conflict found: " field " " old " differs from " field " " value))))
+      (.put fieldValues field value)))
+
+  (method ^:public compareTo ^int [this ^Chronology other]
+    (.compareTo (.getId this) (.getId other)))
+
+  (method ^:public equals ^boolean [this obj]
+    (cond
+      (identical? this obj) true
+      (instance? AbstractChronology obj) (== (.compareTo this (cast AbstractChronology obj)) 0)
+      :else false))
+
+  (method ^:public hashCode ^int [this]
+    (bit-xor-int (.hashCode (.getClass this)) (.hashCode (.getId this))))
+
+  (method ^:public toString ^String [this] (.getId this))
+
+  (method writeReplace [this]
+    (Ser. Ser/CHRONO_TYPE (cast Serializable this)))
+
+  (method ^:private readObject :throws [ObjectStreamException] ^void [this ^ObjectInputStream s]
+    (throw (InvalidObjectException. "Deserialization via serialization delegate")))
+
+  (method writeExternal :throws [IOException] ^void [this ^DataOutput out]
+    (.writeUTF out (.getId this)))
+
+  (method ^:static readExternal :throws [IOException] ^Chronology [^DataInput in]
+    (let [id (.readUTF in)] (Chronology/of id))))

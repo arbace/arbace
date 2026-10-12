@@ -1,0 +1,262 @@
+;; Converted from jdk26u src/java.base/unix/classes/sun/security/provider/NativePRNG.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.io EOFException File FileOutputStream IOException InputStream OutputStream)
+        '(java.net MalformedURLException URL)
+        '(java.security ProviderException SecureRandomParameters SecureRandomSpi)
+        '(java.util Arrays)
+        '(sun.security.util Debug))
+
+(defclass ^:public ^:final NativePRNG
+  :extends SecureRandomSpi
+
+  (field ^:private ^:static ^:final ^long serialVersionUID -6599091113397072932)
+
+  (field ^:private ^:static ^:final ^Debug debug (Debug/getInstance "provider"))
+
+  (field ^:private ^:static ^:final ^String NAME_RANDOM "/dev/random")
+
+  (field ^:private ^:static ^:final ^String NAME_URANDOM "/dev/urandom")
+
+  (defclass ^:private ^:enum Variant
+    (constants MIXED BLOCKING NONBLOCKING))
+
+  (field ^:private ^:static ^:final ^RandomIO INSTANCE (NativePRNG/initIO Variant/MIXED))
+
+  (method ^:private ^:static getEgdUrl ^URL []
+    (let [egdSource (SunEntries/getSeedSource)
+          ^:mutable ^URL egdUrl nil]
+      (if (not (== (.length egdSource) 0))
+          (do
+            (when (some? debug) (.println debug (java-str "NativePRNG egdUrl: " egdSource)))
+            (try
+              (let [_unused (set! egdUrl (URL. egdSource))]
+                (when-not (.equalsIgnoreCase (.getProtocol egdUrl) "file") (return nil)))
+              (catch MalformedURLException e (return nil))))
+          (set! egdUrl nil))
+      egdUrl))
+
+  (method ^:private ^:static initIO ^RandomIO [^:final ^Variant v]
+    (let [^:mutable ^File seedFile nil
+          ^:mutable ^File nextFile nil]
+      (switch v
+        MIXED
+          (let [^:mutable ^URL egdUrl nil
+                ^:mutable ^File egdFile nil]
+            (when (some? (set! egdUrl (NativePRNG/getEgdUrl)))
+              (try (set! egdFile (SunEntries/getDeviceFile egdUrl)) (catch IOException e)))
+            (if (and (some? egdFile) (.canRead egdFile))
+                (set! seedFile egdFile)
+                (set! seedFile (File. NAME_RANDOM)))
+            (set! nextFile (File. NAME_URANDOM)))
+        BLOCKING (do (set! seedFile (File. NAME_RANDOM)) (set! nextFile (File. NAME_RANDOM)))
+        NONBLOCKING (do (set! seedFile (File. NAME_URANDOM)) (set! nextFile (File. NAME_URANDOM)))
+        (return nil))
+      (when (some? debug)
+        (.println debug (java-str "NativePRNG." v " seedFile: " seedFile " nextFile: " nextFile)))
+      (if (or (not (.canRead seedFile)) (not (.canRead nextFile)))
+          (do
+            (when (some? debug) (.println debug (java-str "NativePRNG." v " Couldn't read Files.")))
+            nil)
+          (try (RandomIO. seedFile nextFile) (catch Exception e nil)))))
+
+  (method ^:static isAvailable ^boolean [] (some? INSTANCE))
+
+  (constructor ^:public [this ^SecureRandomParameters params]
+    (when (nil? INSTANCE) (throw (AssertionError. "NativePRNG not available")))
+    (when (some? params)
+      (throw (IllegalArgumentException. (java-str "Unsupported params: " (.getClass params))))))
+
+  (method ^:protected engineSetSeed ^void [this ^byte/1 seed]
+    (.implSetSeed INSTANCE seed))
+
+  (method ^:protected engineNextBytes ^void [this ^byte/1 bytes]
+    (.implNextBytes INSTANCE bytes))
+
+  (method ^:protected engineGenerateSeed ^byte/1 [this ^int numBytes]
+    (.implGenerateSeed INSTANCE numBytes))
+
+  (defclass ^:public ^:static ^:final Blocking
+    :extends SecureRandomSpi
+
+    (field ^:private ^:static ^:final ^long serialVersionUID -6396183145759983347)
+
+    (field ^:private ^:static ^:final ^RandomIO INSTANCE (NativePRNG/initIO Variant/BLOCKING))
+
+    (method ^:static isAvailable ^boolean [] (some? INSTANCE))
+
+    (constructor ^:public [this ^SecureRandomParameters params]
+      (when (nil? INSTANCE) (throw (AssertionError. "NativePRNG$Blocking not available")))
+      (when (some? params)
+        (throw (IllegalArgumentException. (java-str "Unsupported params: " (.getClass params))))))
+
+    (method ^:protected engineSetSeed ^void [this ^byte/1 seed]
+      (.implSetSeed INSTANCE seed))
+
+    (method ^:protected engineNextBytes ^void [this ^byte/1 bytes]
+      (.implNextBytes INSTANCE bytes))
+
+    (method ^:protected engineGenerateSeed ^byte/1 [this ^int numBytes]
+      (.implGenerateSeed INSTANCE numBytes)))
+
+  (defclass ^:public ^:static ^:final NonBlocking
+    :extends SecureRandomSpi
+
+    (field ^:private ^:static ^:final ^long serialVersionUID -1102062982994105487)
+
+    (field ^:private ^:static ^:final ^RandomIO INSTANCE (NativePRNG/initIO Variant/NONBLOCKING))
+
+    (method ^:static isAvailable ^boolean [] (some? INSTANCE))
+
+    (constructor ^:public [this ^SecureRandomParameters params]
+      (when (nil? INSTANCE) (throw (AssertionError. "NativePRNG$NonBlocking not available")))
+      (when (some? params)
+        (throw (IllegalArgumentException. (java-str "Unsupported params: " (.getClass params))))))
+
+    (method ^:protected engineSetSeed ^void [this ^byte/1 seed]
+      (.implSetSeed INSTANCE seed))
+
+    (method ^:protected engineNextBytes ^void [this ^byte/1 bytes]
+      (.implNextBytes INSTANCE bytes))
+
+    (method ^:protected engineGenerateSeed ^byte/1 [this ^int numBytes]
+      (.implGenerateSeed INSTANCE numBytes)))
+
+  (defclass ^:private ^:static RandomIO
+    (field ^:private ^:static ^:final ^long MAX_BUFFER_TIME 100)
+
+    (field ^:private ^:static ^:final ^int MAX_BUFFER_SIZE 65536)
+
+    (field ^:private ^:static ^:final ^int MIN_BUFFER_SIZE 32)
+
+    (field ^:private ^int bufferSize 256)
+
+    (field ^File seedFile)
+
+    (field ^:private ^:final ^InputStream seedIn)
+
+    (field ^:private ^:final ^InputStream nextIn)
+
+    (field ^:private ^OutputStream seedOut)
+
+    (field ^:private ^boolean seedOutInitialized)
+
+    (field ^:private ^:volatile ^SecureRandom mixRandom)
+
+    (field ^:private ^byte/1 nextBuffer)
+
+    (field ^:private ^int buffered)
+
+    (field ^:private ^long lastRead)
+
+    (field ^:private ^int change_buffer 0)
+
+    (field ^:private ^:static ^:final ^int REQ_LIMIT_INC 1000)
+
+    (field ^:private ^:static ^:final ^int REQ_LIMIT_DEC -100)
+
+    (field ^:private ^:final LOCK_GET_BYTES (Object.))
+
+    (field ^:private ^:final LOCK_GET_SEED (Object.))
+
+    (field ^:private ^:final LOCK_SET_SEED (Object.))
+
+    (constructor :throws [IOException] ^:private [this ^File seedFile ^File nextFile]
+      (set! (.-seedFile this) seedFile)
+      (set! seedIn (FileInputStreamPool/getInputStream seedFile))
+      (set! nextIn (FileInputStreamPool/getInputStream nextFile))
+      (set! nextBuffer (new byte/1 bufferSize)))
+
+    (method ^:private getMixRandom ^SecureRandom [this]
+      (let [^:mutable r mixRandom]
+        (when (nil? r)
+          (locking LOCK_GET_BYTES
+            (set! r mixRandom)
+            (when (nil? r)
+              (set! r (SecureRandom.))
+              (try
+                (let [b (new byte/1 20)] (RandomIO/readFully nextIn b) (.engineSetSeed r b))
+                (catch IOException e (throw (ProviderException. "init failed" e))))
+              (set! mixRandom r))))
+        r))
+
+    (method ^:private ^:static readFully :throws [IOException] ^void [^InputStream in ^byte/1 data]
+      (let [^:mutable len (alength data)
+            ^:mutable ^int ofs 0]
+        (while (> len 0)
+          (let [k (.read in data ofs len)]
+            (when (<= k 0) (throw (EOFException. "File(s) closed?")))
+            (set! ofs (unchecked-add-int ofs k))
+            (set! len (unchecked-subtract-int len k))))
+        (when (> len 0) (throw (IOException. "Could not read from file(s)")))))
+
+    (method ^:private implGenerateSeed ^byte/1 [this ^int numBytes]
+      (locking LOCK_GET_SEED
+        (try
+          (let [b (new byte/1 numBytes)] (RandomIO/readFully seedIn b) b)
+          (catch IOException e (throw (ProviderException. "generateSeed() failed" e))))))
+
+    (method ^:private implSetSeed ^void [this ^byte/1 seed]
+      (locking LOCK_SET_SEED
+        (when (= seedOutInitialized false)
+          (set! seedOutInitialized true)
+          (try
+            (set! seedOut (FileOutputStream. seedFile true))
+            (catch Exception e (set! seedOut nil))))
+        (when (some? seedOut) (try (.write seedOut seed) (catch IOException e)))
+        (.engineSetSeed (.getMixRandom this) seed)))
+
+    (method ^:private ensureBufferValid :throws [IOException] ^void [this]
+      (let [time (System/currentTimeMillis)
+            ^:mutable ^int new_buffer_size 0]
+        (if (> buffered 0)
+            (if (< (unchecked-subtract time lastRead) MAX_BUFFER_TIME)
+                (return)
+                (set! change_buffer (unchecked-dec-int change_buffer)))
+            (set! change_buffer (unchecked-inc-int change_buffer)))
+        (cond
+          (> change_buffer REQ_LIMIT_INC)
+            (set! new_buffer_size (unchecked-multiply-int (alength nextBuffer) 2))
+          (< change_buffer REQ_LIMIT_DEC)
+            (set! new_buffer_size (unchecked-divide-int (alength nextBuffer) 2)))
+        (when (> new_buffer_size 0)
+          (cond
+            (and (<= new_buffer_size MAX_BUFFER_SIZE) (>= new_buffer_size MIN_BUFFER_SIZE))
+              (do
+                (set! nextBuffer (new byte/1 new_buffer_size))
+                (when (some? debug)
+                  (.println debug (java-str "Buffer size changed to " new_buffer_size))))
+            (some? debug) (.println debug (java-str "Buffer reached limit: " (alength nextBuffer))))
+          (set! change_buffer 0))
+        (set! lastRead time)
+        (RandomIO/readFully nextIn nextBuffer)
+        (set! buffered (alength nextBuffer))))
+
+    (method ^:private implNextBytes ^void [this ^byte/1 data]
+      (try
+        (.engineNextBytes (.getMixRandom this) data)
+        (let [^:mutable data_len (alength data)
+              ^:mutable ^int ofs 0
+              ^:mutable ^int len 0
+              ^:mutable ^int buf_pos 0
+              ^:mutable ^int localofs 0
+              ^:mutable ^byte/1 localBuffer nil]
+          (while (> data_len 0)
+            (locking LOCK_GET_BYTES
+              (.ensureBufferValid this)
+              (set! buf_pos (unchecked-subtract-int (alength nextBuffer) buffered))
+              (if (> data_len buffered)
+                  (do (set! len buffered) (set! buffered 0))
+                  (do (set! len data_len) (set! buffered (unchecked-subtract-int buffered len))))
+              (set! localBuffer
+                    (Arrays/copyOfRange nextBuffer buf_pos (unchecked-add-int buf_pos len))))
+            (set! localofs 0)
+            (while (> len localofs)
+              (aset data
+                    ofs
+                    (unchecked-byte (bit-xor-int (aget data ofs) (aget localBuffer localofs))))
+              (set! ofs (unchecked-inc-int ofs))
+              (set! localofs (unchecked-inc-int localofs)))
+            (set! data_len (unchecked-subtract-int data_len len))))
+        (catch IOException e (throw (ProviderException. "nextBytes() failed" e)))))))

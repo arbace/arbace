@@ -1,0 +1,192 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/Exchanger.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.lang.invoke MethodHandles VarHandle)
+        '(java.util.concurrent.locks LockSupport)
+        '(jdk.internal.invoke MhUtil)
+        '(jdk.internal.vm.annotation Contended))
+
+(defclass ^:public Exchanger
+  :type-params [V]
+
+  (field ^:private ^:static ^:final ^int MMASK 0xff)
+
+  (field ^:private ^:static ^:final ^int SEQ (unchecked-add-int MMASK 1))
+
+  (field ^:private ^:static ^:final ^int SPINS (bit-shift-left-int 1 10))
+
+  (defclass ^:static ^:final ^{Contended true} Slot
+    (field ^Node entry))
+
+  (defclass ^:static ^:final Node
+    (field ^long seed)
+
+    (field ^int index)
+
+    (field item)
+
+    (field ^:volatile match)
+
+    (field ^:volatile ^Thread parked)
+
+    (constructor [this]
+      (set! index -1)
+      (set! seed (.threadId (Thread/currentThread)))))
+
+  (defclass ^:static ^:final Participant
+    :extends (ThreadLocal Node)
+
+    (method ^:public initialValue ^Node [this] (Node.)))
+
+  (field ^:private ^:static ^:final ^Participant participant (Participant.))
+
+  (field ^:private ^:final ^Slot/1 arena)
+
+  (field ^:private ^:final ^int ncpu)
+
+  (field ^:private ^:volatile ^int bound)
+
+  (method ^:private ^:final xchg :throws [InterruptedException TimeoutException] ^V [this ^V x
+                                                                                     ^long deadline]
+    (let [a arena
+          alen (alength a)
+          ps participant
+          item (if (nil? x) ^Object ps x)
+          p (cast Node (.get ps))
+          ^:mutable i (.-index p)
+          ^:mutable ^int misses 0
+          ^:mutable ^Object offered nil
+          ^:mutable ^Object v nil]
+      (label :outer
+        (while true
+          (let [^:mutable ^int b 0
+                ^:mutable ^int m 0
+                ^:mutable ^Slot s nil
+                ^:mutable ^Node q nil]
+            (when (== (set! m (bit-and-int (set! b bound) MMASK)) 0) (set! i 0))
+            (cond
+              (or (or (or (< i 0) (> i m)) (>= i alen)) (nil? (set! s (aget a i))))
+                (let [^:mutable r (.-seed p)]
+                  (set! r (bit-xor r (bit-shift-left r 13)))
+                  (set! r (bit-xor r (unsigned-bit-shift-right r 7)))
+                  (set! r (bit-xor r (bit-shift-left r 17)))
+                  (set! i
+                        (set! (.-index p)
+                              (unchecked-int
+                                (unchecked-remainder (set! (.-seed p) r) (unchecked-add-int m 1))))))
+              (some? (set! q (.-entry s)))
+                (if ^boolean (^[Slot Node Void] VarHandle/.compareAndSet ENTRY s q nil)
+                    (let [^:mutable ^Thread w nil]
+                      (set! v (.-item q))
+                      (set! (.-match q) item)
+                      (when (and (== i 0) (some? (set! w (.-parked q)))) (LockSupport/unpark w))
+                      (break))
+                    (let [^:mutable ^int nb 0]
+                      (set! i -1)
+                      (cond
+                        (not (== b bound)) (set! misses 0)
+                        (<= misses 2) (set! misses (unchecked-inc-int misses))
+                        :else
+                          (when (< (set! nb (bit-and-int (unchecked-add-int b 1) MMASK)) alen)
+                            (set! misses 0)
+                            (when (and ^boolean (^[Exchanger int int] VarHandle/.compareAndSet
+                                                  BOUND
+                                                  this
+                                                  b
+                                                  (unchecked-add-int (unchecked-add-int b 1) SEQ))
+                                       (nil? (aget a (set! i (set! (.-index p) nb)))))
+                              ^boolean ^void (^[Slot/1 int Void Slot] VarHandle/.compareAndSet
+                                               AA
+                                               a
+                                               nb
+                                               nil
+                                               (Slot.)))))))
+              :else
+                (do
+                  (when (nil? offered) (set! offered (set! (.-item p) item)))
+                  (when ^boolean (^[Slot Void Node] VarHandle/.compareAndSet ENTRY s nil p)
+                    (let [^:mutable ^boolean tryCancel false
+                          t (Thread/currentThread)]
+                      (when (and
+                              (and (not (set! tryCancel (.isInterrupted t))) (> ncpu 1))
+                              (or (not (== i 0)) (not (ForkJoinWorkerThread/hasKnownQueuedWork))))
+                        (loop [^int j SPINS]
+                          (when (> j 0)
+                            (when (some? (set! v (.-match p)))
+                              ^void (^[Node Void] VarHandle/.set MATCH p nil)
+                              (break :outer))
+                            (Thread/onSpinWait)
+                            (recur (unchecked-dec-int j)))))
+                      (let [^:mutable ns 1]
+                        (while true
+                          (when (some? (set! v (.-match p)))
+                            ^void (^[Node Void] VarHandle/.set MATCH p nil)
+                            (break :outer))
+                          (if (and (and (== i 0) (not tryCancel))
+                                   (or (== deadline 0)
+                                       (> (set! ns (unchecked-subtract deadline (System/nanoTime)))
+                                          0)))
+                              (do
+                                (set! (.-parked p) t)
+                                (when (nil? (.-match p))
+                                  (if (== deadline 0)
+                                      (LockSupport/park this)
+                                      (LockSupport/parkNanos this ns))
+                                  (set! tryCancel (.isInterrupted t)))
+                                (set! (.-parked p) nil))
+                              (when ^boolean (^[Slot Node Void] VarHandle/.compareAndSet
+                                               ENTRY
+                                               s
+                                               p
+                                               nil)
+                                (set! offered (set! (.-item p) nil))
+                                (when (Thread/interrupted) (throw (InterruptedException.)))
+                                (when (and (not (== deadline 0)) (<= ns 0))
+                                  (throw (TimeoutException.)))
+                                (set! i -1)
+                                (cond
+                                  (not (== bound b)) (set! misses 0)
+                                  (>= misses 0) (set! misses (unchecked-dec-int misses))
+                                  :else
+                                    (when-not (== (bit-and-int b MMASK) 0)
+                                      (set! misses 0)
+                                      ^boolean ^void (^[Exchanger int int] VarHandle/.compareAndSet
+                                                       BOUND
+                                                       this
+                                                       b
+                                                       (unchecked-add-int
+                                                         (unchecked-subtract-int b 1)
+                                                         SEQ))))
+                                (continue :outer))))))))))))
+      (when (some? offered) (set! (.-item p) nil))
+      (let [^V ret (when-not (identical? v participant) v)] ret)))
+
+  (constructor ^:public [this]
+    (let [h (unsigned-bit-shift-right-int (set! ncpu (.availableProcessors (Runtime/getRuntime))) 1)
+          ^int size (cond (== h 0) 1 (> h MMASK) (unchecked-add-int MMASK 1) :else h)]
+      (aset (set! arena (new Slot/1 size)) 0 (Slot.))))
+
+  (method ^:public exchange :throws [InterruptedException] ^V [this ^V x]
+    (try (.xchg this x 0) (catch TimeoutException cannotHappen nil)))
+
+  (method ^:public exchange :throws [InterruptedException TimeoutException] ^V [this ^V x
+                                                                                ^long timeout
+                                                                                ^TimeUnit unit]
+    (let [d (unchecked-add (.toNanos unit timeout) (System/nanoTime))]
+      (.xchg this x (if (== d 0) 1 d))))
+
+  (field ^:private ^:static ^:final ^VarHandle BOUND)
+
+  (field ^:private ^:static ^:final ^VarHandle MATCH)
+
+  (field ^:private ^:static ^:final ^VarHandle ENTRY)
+
+  (field ^:private ^:static ^:final ^VarHandle AA)
+
+  (static-initializer
+    (let [l (MethodHandles/lookup)]
+      (set! BOUND (MhUtil/findVarHandle l "bound" Integer/TYPE))
+      (set! MATCH (MhUtil/findVarHandle l Node "match" Object))
+      (set! ENTRY (MhUtil/findVarHandle l Slot "entry" Node))
+      (set! AA (MethodHandles/arrayElementVarHandle Slot/1)))))

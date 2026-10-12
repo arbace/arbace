@@ -1,0 +1,137 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/DRBG.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.io IOException ObjectInputStream)
+        '(java.security DrbgParameters
+                        DrbgParameters$Capability
+                        DrbgParameters$Instantiation
+                        SecureRandomParameters
+                        SecureRandomSpi
+                        Security)
+        '(java.util Locale))
+
+(defclass ^:public ^:final DRBG
+  :extends SecureRandomSpi
+
+  (field ^:private ^:static ^:final ^String PROP_NAME "securerandom.drbg.config")
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 9)
+
+  (field ^:private ^:transient ^AbstractDrbg impl)
+
+  (field ^:private ^:final ^MoreDrbgParameters mdp)
+
+  (constructor ^:public [this ^:mutable ^SecureRandomParameters params]
+    (let [^:mutable ^String mech nil
+          ^:mutable ^Boolean usedf nil
+          ^:mutable ^String algorithm nil
+          ^:mutable ^int strength -1
+          ^:mutable ^DrbgParameters$Capability cap nil
+          ^:mutable ^byte/1 ps nil
+          ^:mutable ^EntropySource es nil
+          ^:mutable ^byte/1 nonce nil
+          config (Security/getProperty PROP_NAME)]
+      (when (and (some? config) (not (.isEmpty config)))
+        (for-each [^:mutable ^String part (.split config ",")]
+          (set! part (.trim part))
+          (switch (.toLowerCase part Locale/ROOT)
+            ""
+              (throw (IllegalArgumentException.
+                       (java-str (java-str "aspect in " PROP_NAME) " cannot be empty")))
+            "pr_and_reseed"
+              (do
+                (DRBG/checkTwice (some? cap) "capability")
+                (set! cap DrbgParameters$Capability/PR_AND_RESEED))
+            "reseed_only"
+              (do
+                (DRBG/checkTwice (some? cap) "capability")
+                (set! cap DrbgParameters$Capability/RESEED_ONLY))
+            "none"
+              (do
+                (DRBG/checkTwice (some? cap) "capability")
+                (set! cap DrbgParameters$Capability/NONE))
+            ("hash_drbg" "hmac_drbg" "ctr_drbg")
+              (do (DRBG/checkTwice (some? mech) "mechanism name") (set! mech part))
+            "no_df" (do (DRBG/checkTwice (some? usedf) "usedf flag") (set! usedf false))
+            "use_df" (do (DRBG/checkTwice (some? usedf) "usedf flag") (set! usedf true))
+            (try
+              (let [tmp (Integer/parseInt part)]
+                (when (< tmp 0)
+                  (throw (IllegalArgumentException.
+                           (java-str (java-str (java-str "strength in " PROP_NAME)
+                                               " cannot be negative: ")
+                                     part))))
+                (DRBG/checkTwice (>= strength 0) "strength")
+                (set! strength tmp))
+              (catch NumberFormatException e
+                (DRBG/checkTwice (some? algorithm) "algorithm name")
+                (set! algorithm part))))))
+      (when (some? params)
+        (when-instance [^MoreDrbgParameters m params]
+          (set! params
+                (DrbgParameters/instantiation (.-strength m)
+                                              (.-capability m)
+                                              (.-personalizationString m)))
+          (set! es (.-es m))
+          (set! nonce (.-nonce m))
+          (when (some? (.-mech m)) (set! mech (.-mech m)))
+          (when (some? (.-algorithm m)) (set! algorithm (.-algorithm m)))
+          (set! usedf (.-usedf m)))
+        (if-instance [^DrbgParameters$Instantiation dp params]
+          (do
+            (set! ps (.getPersonalizationString dp))
+            (let [tmp (.getStrength dp)]
+              (when-not (== tmp -1) (set! strength tmp))
+              (set! cap (.getCapability dp))))
+          (throw (IllegalArgumentException. (java-str "Unsupported params: " (.getClass params))))))
+      (when (nil? cap) (set! cap DrbgParameters$Capability/NONE))
+      (when (nil? mech) (set! mech "Hash_DRBG"))
+      (when (nil? usedf) (set! usedf true))
+      (set! mdp
+            (MoreDrbgParameters. es
+                                 mech
+                                 algorithm
+                                 nonce
+                                 usedf
+                                 (DrbgParameters/instantiation strength cap ps)))
+      (.createImpl this)))
+
+  (method ^:private createImpl ^void [this]
+    (switch (.toLowerCase (.-mech mdp) Locale/ROOT)
+      "hash_drbg" (set! impl (HashDrbg. mdp))
+      "hmac_drbg" (set! impl (HmacDrbg. mdp))
+      "ctr_drbg" (set! impl (CtrDrbg. mdp))
+      (throw (IllegalArgumentException. (java-str "Unsupported mech: " (.-mech mdp))))))
+
+  (method ^:protected engineSetSeed ^void [this ^byte/1 seed]
+    (.engineSetSeed impl seed))
+
+  (method ^:protected engineNextBytes ^void [this ^byte/1 bytes]
+    (.engineNextBytes impl bytes))
+
+  (method ^:protected engineGenerateSeed ^byte/1 [this ^int numBytes]
+    (.engineGenerateSeed impl numBytes))
+
+  (method ^:protected engineNextBytes ^void [this ^byte/1 bytes ^SecureRandomParameters params]
+    (.engineNextBytes impl bytes params))
+
+  (method ^:protected engineReseed ^void [this ^SecureRandomParameters params]
+    (.engineReseed impl params))
+
+  (method ^:protected engineGetParameters ^SecureRandomParameters [this]
+    (.engineGetParameters impl))
+
+  (method ^:public toString ^String [this] (.toString impl))
+
+  (method ^:private ^:static checkTwice ^void [^boolean flag ^String name]
+    (when flag
+      (throw (IllegalArgumentException.
+               (java-str name " cannot be provided more than once in " PROP_NAME)))))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream s]
+    (.defaultReadObject s)
+    (when (or (nil? mdp) (nil? (.-mech mdp)))
+      (throw (IllegalArgumentException. "Input data is corrupted")))
+    (.createImpl this)))

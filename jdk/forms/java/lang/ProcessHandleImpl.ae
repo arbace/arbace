@@ -1,0 +1,341 @@
+;; Converted from jdk26u src/java.base/share/classes/java/lang/ProcessHandleImpl.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.lang)
+
+(import '(java.time Duration Instant)
+        '(java.util Arrays Optional)
+        '(java.util.concurrent CompletableFuture
+                               ConcurrentHashMap
+                               ConcurrentMap
+                               Executor
+                               Executors
+                               ThreadFactory
+                               ThreadLocalRandom)
+        '(java.util.function BiFunction IntFunction Predicate)
+        '(java.util.stream IntStream Stream)
+        '(jdk.internal ValueBased)
+        '(jdk.internal.misc InnocuousThread))
+
+(defclass ^:final ^{ValueBased true} ProcessHandleImpl
+  :implements [ProcessHandle]
+
+  (field ^:private ^:static ^:final ^long REAPER_DEFAULT_STACKSIZE
+    (unchecked-multiply-int 128 1024))
+
+  (field ^:private ^:static ^:final ^int NOT_A_CHILD -2)
+
+  (field ^:private ^:static ^:final ^ProcessHandleImpl current)
+
+  (field ^:private ^:static ^:final ^{:tag (ConcurrentMap Long ExitCompletion)} completions
+    (ConcurrentHashMap.))
+
+  (static-initializer
+    (ProcessHandleImpl/initNative)
+    (let [pid (ProcessHandleImpl/getCurrentPid0)]
+      (set! current (ProcessHandleImpl. pid (ProcessHandleImpl/isAlive0 pid)))))
+
+  (method ^:private ^:static ^:native initNative ^void [])
+
+  (field ^:private ^:static ^:final ^Executor processReaperExecutor (ProcessHandleImpl/initReaper))
+
+  (method ^:private ^:static initReaper ^Executor []
+    (ThreadLocalRandom/current)
+    (let [^int debugDelta (if (.equals "release" (System/getProperty "jdk.debug"))
+                              0
+                              (unchecked-multiply-int 4 4096))
+          stackSize (if (Boolean/getBoolean "jdk.lang.processReaperUseDefaultStackSize")
+                        0
+                        (unchecked-add REAPER_DEFAULT_STACKSIZE debugDelta))
+          threadFactory (lambda ThreadFactory ^Thread [^Runnable grimReaper]
+                          (let [t (InnocuousThread/newSystemThread
+                                    "process reaper"
+                                    grimReaper
+                                    stackSize
+                                    Thread/MAX_PRIORITY)]
+                            (.setDaemon t true)
+                            t))]
+      (Executors/newCachedThreadPool threadFactory)))
+
+  (defclass ^:private ^:static ExitCompletion
+    :extends (CompletableFuture Integer)
+
+    (field ^:final ^boolean isReaping)
+
+    (constructor [this ^boolean isReaping]
+      (set! (.-isReaping this) isReaping)))
+
+  (method ^:static completion ^{:tag (CompletableFuture Integer)} [^long pid ^boolean shouldReap]
+    (let [^:mutable completion (cast ExitCompletion (.get completions pid))]
+      (while (or (nil? completion) (and shouldReap (not (.-isReaping completion))))
+        (let [newCompletion (ExitCompletion. shouldReap)]
+          (if (nil? completion)
+              (set! completion (cast ExitCompletion (.putIfAbsent completions pid newCompletion)))
+              (set! completion
+                    (when-not (.replace completions pid completion newCompletion)
+                      (cast ExitCompletion (.get completions pid)))))
+          (when (nil? completion)
+            (set! completion newCompletion)
+            (.execute processReaperExecutor
+                      (anon Runnable []
+                        (method ^:public run ^void [this]
+                          (let [t (Thread/currentThread)
+                                threadName (.getName t)]
+                            (.setName t (java-str "process reaper (pid " pid ")"))
+                            (try
+                              (let [^:mutable exitValue (ProcessHandleImpl/waitForProcessExit0
+                                                          pid
+                                                          shouldReap)]
+                                (when (== exitValue NOT_A_CHILD)
+                                  (let [^:mutable sleep 300
+                                        ^int incr 30
+                                        ^:mutable startTime (ProcessHandleImpl/isAlive0 pid)
+                                        origStart startTime]
+                                    (while (>= startTime 0)
+                                      (try
+                                        (Thread/sleep (Math/min sleep 5000))
+                                        (set! sleep (unchecked-add sleep incr))
+                                        (catch InterruptedException ie))
+                                      (set! startTime (ProcessHandleImpl/isAlive0 pid))
+                                      (when (and
+                                              (and (> startTime 0) (> origStart 0))
+                                              (not (== startTime origStart)))
+                                        (break)))
+                                    (set! exitValue 0)))
+                                (.complete newCompletion exitValue)
+                                (.remove completions pid newCompletion))
+                              (finally (.setName t threadName))))))))))
+      completion))
+
+  (method ^:public onExit ^{:tag (CompletableFuture ProcessHandle)} [this]
+    (when (.equals this current)
+      (throw (IllegalStateException. "onExit for current process not allowed")))
+    (.handleAsync (ProcessHandleImpl/completion (.pid this) false)
+                  (lambda BiFunction ^ProcessHandle [^Integer exitStatus ^Throwable unusedThrowable]
+                    this)))
+
+  (method ^:private ^:static ^:native waitForProcessExit0 ^int [^long pid ^boolean reapvalue])
+
+  (field ^:private ^:final ^long pid)
+
+  (field ^:private ^:final ^long startTime)
+
+  (field ^:private ^:static ^:final ^long STARTTIME_ANY 0)
+
+  (field ^:private ^:static ^:final ^long STARTTIME_PROCESS_UNKNOWN -1)
+
+  (constructor ^:private [this ^long pid ^long startTime]
+    (set! (.-pid this) pid)
+    (set! (.-startTime this) startTime))
+
+  (method ^:static get ^{:tag (Optional ProcessHandle)} [^long pid]
+    (let [start (ProcessHandleImpl/isAlive0 pid)]
+      (if (>= start 0) (Optional/of (ProcessHandleImpl. pid start)) (Optional/empty))))
+
+  (method ^:static getInternal ^ProcessHandleImpl [^long pid]
+    (ProcessHandleImpl. pid (ProcessHandleImpl/isAlive0 pid)))
+
+  (method ^:public pid ^long [this] pid)
+
+  (method ^:public ^:static current ^ProcessHandleImpl [] current)
+
+  (method ^:private ^:static ^:native getCurrentPid0 ^long [])
+
+  (method ^:public parent ^{:tag (Optional ProcessHandle)} [this]
+    (let [ppid (ProcessHandleImpl/parent0 pid startTime)]
+      (if (<= ppid 0) (Optional/empty) (ProcessHandleImpl/get ppid))))
+
+  (method ^:private ^:static ^:native parent0 ^long [^long pid ^long startTime])
+
+  (method ^:private ^:static ^:native getProcessPids0 ^int [^long pid ^long/1 pids ^long/1 ppids
+                                                            ^long/1 starttimes])
+
+  (method destroyProcess ^boolean [this ^boolean force]
+    (when (.equals this current)
+      (throw (IllegalStateException. "destroy of current process not allowed")))
+    (ProcessHandleImpl/destroy0 pid startTime force))
+
+  (method ^:private ^:static ^:native destroy0 ^boolean [^long pid ^long startTime ^boolean forcibly])
+
+  (method ^:public destroy ^boolean [this] (.destroyProcess this false))
+
+  (method ^:public destroyForcibly ^boolean [this]
+    (.destroyProcess this true))
+
+  (method ^:public supportsNormalTermination ^boolean [this]
+    ProcessImpl/SUPPORTS_NORMAL_TERMINATION)
+
+  (method ^:public isAlive ^boolean [this]
+    (let [start (ProcessHandleImpl/isAlive0 pid)]
+      (and (>= start 0) (or (or (== start startTime) (== start 0)) (== startTime 0)))))
+
+  (method ^:private ^:static ^:native isAlive0 ^long [^long pid])
+
+  (method ^:public children ^{:tag (Stream ProcessHandle)} [this]
+    (.filter (ProcessHandleImpl/children pid)
+             (lambda Predicate ^boolean [^ProcessHandle ph]
+               (<= startTime (.-startTime (cast ProcessHandleImpl ph))))))
+
+  (method ^:static children ^{:tag (Stream ProcessHandle)} [^long pid]
+    (let [^:mutable ^int size 100
+          ^:mutable ^long/1 childpids nil
+          ^:mutable ^long/1 starttimes nil]
+      (while (or (nil? childpids) (> size (alength childpids)))
+        (set! childpids (new long/1 size))
+        (set! starttimes (new long/1 size))
+        (set! size (ProcessHandleImpl/getProcessPids0 pid childpids nil starttimes)))
+      (let [cpids childpids
+            stimes starttimes]
+        (.mapToObj (IntStream/range 0 size)
+                   (lambda IntFunction ^ProcessHandle [^int i]
+                     (ProcessHandleImpl. (aget cpids i) (aget stimes i)))))))
+
+  (method ^:public descendants ^{:tag (Stream ProcessHandle)} [this]
+    (let [^:mutable ^int size 100
+          ^:mutable ^long/1 pids nil
+          ^:mutable ^long/1 ppids nil
+          ^:mutable ^long/1 starttimes nil]
+      (while (or (nil? pids) (> size (alength pids)))
+        (set! pids (new long/1 size))
+        (set! ppids (new long/1 size))
+        (set! starttimes (new long/1 size))
+        (set! size (ProcessHandleImpl/getProcessPids0 0 pids ppids starttimes)))
+      (let [^:mutable ^int next 0
+            ^:mutable ^int count -1
+            ^:mutable ppid pid
+            ^:mutable ppStart 0]
+        (loop [^int i 0]
+          (if (< i size)
+              (if (== (aget pids i) ppid)
+                  (set! ppStart (aget starttimes i))
+                  (recur (unchecked-inc-int i)))
+              nil))
+        (loop []
+          (loop [^int i next]
+            (if (< i size)
+                (if (and (== (aget ppids i) ppid) (<= ppStart (aget starttimes i)))
+                    (do
+                      (ProcessHandleImpl/swap pids i next)
+                      (ProcessHandleImpl/swap ppids i next)
+                      (ProcessHandleImpl/swap starttimes i next)
+                      (set! next (unchecked-inc-int next))
+                      (recur (unchecked-inc-int i)))
+                    (recur (unchecked-inc-int i)))
+                nil))
+          (set! ppid (aget pids (set! count (unchecked-inc-int count))))
+          (set! ppStart (aget starttimes count))
+          (when (< count next) (recur)))
+        (let [cpids pids
+              stimes starttimes]
+          (.mapToObj (IntStream/range 0 count)
+                     (lambda IntFunction ^ProcessHandle [^int i]
+                       (ProcessHandleImpl. (aget cpids i) (aget stimes i))))))))
+
+  (method ^:private ^:static swap ^void [^long/1 array ^int x ^int y]
+    (let [v (aget array x)] (aset array x (aget array y)) (aset array y v)))
+
+  (method ^:public info ^ProcessHandle$Info [this]
+    (Info/info pid startTime))
+
+  (method ^:public compareTo ^int [this ^ProcessHandle other]
+    (Long/compare pid (.-pid (cast ProcessHandleImpl other))))
+
+  (method ^:public toString ^String [this] (Long/toString pid))
+
+  (method ^:public hashCode ^int [this] (Long/hashCode pid))
+
+  (method ^:public equals ^boolean [this obj]
+    (if (identical? this obj)
+        true
+        (if-instance [^ProcessHandleImpl other obj]
+          (if (== pid (.-pid other))
+              (or (or (== startTime (.-startTime other)) (== startTime 0))
+                  (== (.-startTime other) 0))
+              false)
+          false)))
+
+  (defclass ^:static Info
+    :implements [ProcessHandle$Info]
+
+    (static-initializer (Info/initIDs))
+
+    (method ^:private ^:static ^:native initIDs ^void [])
+
+    (method ^:private ^:native info0 ^void [this ^long pid])
+
+    (field ^String command)
+
+    (field ^String commandLine)
+
+    (field ^String/1 arguments)
+
+    (field ^long startTime)
+
+    (field ^long totalTime)
+
+    (field ^String user)
+
+    (constructor [this]
+      (set! command nil)
+      (set! commandLine nil)
+      (set! arguments nil)
+      (set! startTime -1)
+      (set! totalTime -1)
+      (set! user nil))
+
+    (method ^:public ^:static info ^ProcessHandle$Info [^long pid ^long startTime]
+      (let [info (Info.)]
+        (.info0 info pid)
+        (when-not (== startTime (.-startTime info))
+          (set! (.-command info) nil)
+          (set! (.-arguments info) nil)
+          (set! (.-startTime info) -1)
+          (set! (.-totalTime info) -1)
+          (set! (.-user info) nil))
+        info))
+
+    (method ^:public command ^{:tag (Optional String)} [this]
+      (Optional/ofNullable command))
+
+    (method ^:public commandLine ^{:tag (Optional String)} [this]
+      (if (and (some? command) (some? arguments))
+          (Optional/of (java-str command " " (String/join " " arguments)))
+          (Optional/ofNullable commandLine)))
+
+    (method ^:public arguments ^{:tag (Optional String/1)} [this]
+      (Optional/ofNullable arguments))
+
+    (method ^:public startInstant ^{:tag (Optional Instant)} [this]
+      (if (> startTime 0) (Optional/of (Instant/ofEpochMilli startTime)) (Optional/empty)))
+
+    (method ^:public totalCpuDuration ^{:tag (Optional Duration)} [this]
+      (if (not (== totalTime -1)) (Optional/of (Duration/ofNanos totalTime)) (Optional/empty)))
+
+    (method ^:public user ^{:tag (Optional String)} [this]
+      (Optional/ofNullable user))
+
+    (method ^:public toString ^String [this]
+      (let [sb (StringBuilder. 60)]
+        (.append sb \[)
+        (when (some? user) (.append sb "user: ") (.append sb (.user this)))
+        (when (some? command)
+          (when (> (.length sb) 1) (.append sb ", "))
+          (.append sb "cmd: ")
+          (.append sb command))
+        (when (and (some? arguments) (> (alength arguments) 0))
+          (when (> (.length sb) 1) (.append sb ", "))
+          (.append sb "args: ")
+          (.append sb (Arrays/toString arguments)))
+        (when (some? commandLine)
+          (when (> (.length sb) 1) (.append sb ", "))
+          (.append sb "cmdLine: ")
+          (.append sb commandLine))
+        (when (> startTime 0)
+          (when (> (.length sb) 1) (.append sb ", "))
+          (.append sb "startTime: ")
+          (.append sb (.startInstant this)))
+        (when-not (== totalTime -1)
+          (when (> (.length sb) 1) (.append sb ", "))
+          (.append sb "totalTime: ")
+          (.append sb (.toString (.totalCpuDuration this))))
+        (.append sb \])
+        (.toString sb)))))

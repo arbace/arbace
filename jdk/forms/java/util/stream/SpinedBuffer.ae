@@ -1,0 +1,800 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/stream/SpinedBuffer.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.stream)
+
+(import '(java.util ArrayList
+                    Arrays
+                    Iterator
+                    List
+                    Objects
+                    PrimitiveIterator$OfDouble
+                    PrimitiveIterator$OfInt
+                    PrimitiveIterator$OfLong
+                    Spliterator
+                    Spliterator$OfDouble
+                    Spliterator$OfInt
+                    Spliterator$OfLong
+                    Spliterator$OfPrimitive
+                    Spliterators)
+        '(java.util.function Consumer DoubleConsumer IntConsumer IntFunction LongConsumer))
+
+(defclass SpinedBuffer
+  :extends AbstractSpinedBuffer
+  :implements [(Consumer E) (Iterable E)]
+  :type-params [E]
+
+  (field ^:protected ^E/1 curChunk)
+
+  (field ^:protected ^E/2 spine)
+
+  (constructor [this ^int initialCapacity]
+    (super. initialCapacity)
+    (set! curChunk (new Object/1 (bit-shift-left-int 1 (.-initialChunkPower this)))))
+
+  (constructor [this]
+    (super.)
+    (set! curChunk (new Object/1 (bit-shift-left-int 1 (.-initialChunkPower this)))))
+
+  (method ^:protected capacity ^long [this]
+    (if (== (.-spineIndex this) 0)
+        (long (alength curChunk))
+        (unchecked-add (aget (.-priorElementCount this) (.-spineIndex this))
+                       (alength (aget spine (.-spineIndex this))))))
+
+  (method ^:private inflateSpine ^void [this]
+    (when (nil? spine)
+      (set! spine (new Object/2 SpinedBuffer/MIN_SPINE_SIZE))
+      (set! (.-priorElementCount this) (new long/1 SpinedBuffer/MIN_SPINE_SIZE))
+      (aset spine 0 curChunk)))
+
+  (method ^:protected ^:final ensureCapacity ^void [this ^long targetSize]
+    (let [^:mutable capacity (.capacity this)]
+      (when (> targetSize capacity)
+        (.inflateSpine this)
+        (loop [^int i (unchecked-add-int (.-spineIndex this) 1)]
+          (when (> targetSize capacity)
+            (when (>= i (alength spine))
+              (let [newSpineSize (unchecked-multiply-int (alength spine) 2)]
+                (set! spine (cast Object/2 (Arrays/copyOf spine newSpineSize)))
+                (set! (.-priorElementCount this)
+                      (Arrays/copyOf (.-priorElementCount this) newSpineSize))))
+            (let [nextChunkSize (.chunkSize this i)]
+              (aset spine i (new Object/1 nextChunkSize))
+              (aset (.-priorElementCount this)
+                    i
+                    (unchecked-add (aget (.-priorElementCount this) (unchecked-subtract-int i 1))
+                                   (alength (aget spine (unchecked-subtract-int i 1)))))
+              (set! capacity (unchecked-add capacity nextChunkSize))
+              (recur (unchecked-inc-int i))))))))
+
+  (method ^:protected increaseCapacity ^void [this]
+    (.ensureCapacity this (unchecked-add (.capacity this) 1)))
+
+  (method ^:public get ^E [this ^long index]
+    (if (== (.-spineIndex this) 0)
+        (if (< index (.-elementIndex this))
+            (aget curChunk (unchecked-int index))
+            (throw (IndexOutOfBoundsException. (Long/toString index))))
+        (do
+          (when (>= index (.count this)) (throw (IndexOutOfBoundsException. (Long/toString index))))
+          (loop [^int j 0]
+            (if (<= j (.-spineIndex this))
+                (if (< index
+                       (unchecked-add (aget (.-priorElementCount this) j) (alength (aget spine j))))
+                    (return
+                      (aget spine
+                            j
+                            (unchecked-int
+                              (unchecked-subtract index (aget (.-priorElementCount this) j)))))
+                    (recur (unchecked-inc-int j)))
+                nil))
+          (throw (IndexOutOfBoundsException. (Long/toString index))))))
+
+  (method ^:public copyInto ^void [this ^E/1 array ^:mutable ^int offset]
+    (let [finalOffset (unchecked-add offset (.count this))]
+      (when (or (> finalOffset (alength array)) (< finalOffset offset))
+        (throw (IndexOutOfBoundsException. "does not fit")))
+      (if (== (.-spineIndex this) 0)
+          (System/arraycopy curChunk 0 array offset (.-elementIndex this))
+          (do
+            (loop [^int i 0]
+              (when (< i (.-spineIndex this))
+                (System/arraycopy (aget spine i) 0 array offset (alength (aget spine i)))
+                (set! offset (unchecked-add-int offset (alength (aget spine i))))
+                (recur (unchecked-inc-int i))))
+            (when (> (.-elementIndex this) 0)
+              (System/arraycopy curChunk 0 array offset (.-elementIndex this)))))))
+
+  (method ^:public asArray ^E/1 [this ^{:tag (IntFunction E/1)} arrayFactory]
+    (let [size (.count this)]
+      (when (>= size Nodes/MAX_ARRAY_SIZE) (throw (IllegalArgumentException. Nodes/BAD_SIZE)))
+      (let [^E/1 result (cast Object/1 (.apply arrayFactory (unchecked-int size)))]
+        (.copyInto this result 0)
+        result)))
+
+  (method ^:public clear ^void [this]
+    (if (some? spine)
+        (do
+          (set! curChunk (aget spine 0))
+          (loop [^int i 0]
+            (when (< i (alength curChunk)) (aset curChunk i nil) (recur (unchecked-inc-int i))))
+          (set! spine nil)
+          (set! (.-priorElementCount this) nil))
+        (loop [^int i 0]
+          (when (< i (.-elementIndex this)) (aset curChunk i nil) (recur (unchecked-inc-int i)))))
+    (set! (.-elementIndex this) 0)
+    (set! (.-spineIndex this) 0))
+
+  (method ^:public iterator ^{:tag (Iterator E)} [this]
+    (Spliterators/iterator (.spliterator this)))
+
+  (method ^:public forEach ^void [this ^{:tag (Consumer (? super E))} consumer]
+    (loop [^int j 0]
+      (when (< j (.-spineIndex this))
+        (for-each [t (aget spine j)] (.accept consumer t))
+        (recur (unchecked-inc-int j))))
+    (loop [^int i 0]
+      (when (< i (.-elementIndex this))
+        (.accept consumer (aget curChunk i))
+        (recur (unchecked-inc-int i)))))
+
+  (method ^:public accept ^void [this ^E e]
+    (when (== (.-elementIndex this) (alength curChunk))
+      (.inflateSpine this)
+      (when (or (>= (unchecked-add-int (.-spineIndex this) 1) (alength spine))
+                (nil? (aget spine (unchecked-add-int (.-spineIndex this) 1))))
+        (.increaseCapacity this))
+      (set! (.-elementIndex this) 0)
+      (set! (.-spineIndex this) (unchecked-inc-int (.-spineIndex this)))
+      (set! curChunk (aget spine (.-spineIndex this))))
+    (aset curChunk
+          (let [old-1 (.-elementIndex this)]
+            (set! (.-elementIndex this) (unchecked-inc-int (.-elementIndex this)))
+            old-1)
+          e))
+
+  (method ^:public toString ^String [this]
+    (let [^{:tag (List E)} list (ArrayList.)]
+      (.forEach this (method-ref Consumer list List/.add))
+      (java-str "SpinedBuffer:" (.toString list))))
+
+  (field ^:private ^:static ^:final ^int SPLITERATOR_CHARACTERISTICS
+    (bit-or-int (bit-or-int Spliterator/SIZED Spliterator/ORDERED) Spliterator/SUBSIZED))
+
+  (method ^:public spliterator ^{:tag (Spliterator E)} [this]
+    (letclass [(Splitr
+                 :implements [(Spliterator E)]
+
+                 (field ^int splSpineIndex)
+
+                 (field ^:final ^int lastSpineIndex)
+
+                 (field ^int splElementIndex)
+
+                 (field ^:final ^int lastSpineElementFence)
+
+                 (field ^E/1 splChunk)
+
+                 (constructor [this ^int firstSpineIndex ^int lastSpineIndex
+                               ^int firstSpineElementIndex ^int lastSpineElementFence]
+                   (set! (.-splSpineIndex this) firstSpineIndex)
+                   (set! (.-lastSpineIndex this) lastSpineIndex)
+                   (set! (.-splElementIndex this) firstSpineElementIndex)
+                   (set! (.-lastSpineElementFence this) lastSpineElementFence)
+                   (java-assert (or (some? spine)
+                                    (and (== firstSpineIndex 0) (== lastSpineIndex 0))))
+                   (set! splChunk (if (nil? spine) curChunk (aget spine firstSpineIndex))))
+
+                 (method ^:public estimateSize ^long [this]
+                   (if (== splSpineIndex lastSpineIndex)
+                       (unchecked-subtract (long lastSpineElementFence) splElementIndex)
+                       (unchecked-subtract
+                         (unchecked-subtract
+                           (unchecked-add
+                             (aget (.-priorElementCount SpinedBuffer/this) lastSpineIndex)
+                             lastSpineElementFence)
+                           (aget (.-priorElementCount SpinedBuffer/this) splSpineIndex))
+                         splElementIndex)))
+
+                 (method ^:public characteristics ^int [this]
+                   SPLITERATOR_CHARACTERISTICS)
+
+                 (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super E))} consumer]
+                   (Objects/requireNonNull consumer)
+                   (if (or (< splSpineIndex lastSpineIndex)
+                           (and (== splSpineIndex lastSpineIndex)
+                                (< splElementIndex lastSpineElementFence)))
+                       (do
+                         (.accept consumer
+                                  (aget splChunk
+                                        (let [old-2 splElementIndex]
+                                          (set! splElementIndex (unchecked-inc-int splElementIndex))
+                                          old-2)))
+                         (when (== splElementIndex (alength splChunk))
+                           (set! splElementIndex 0)
+                           (set! splSpineIndex (unchecked-inc-int splSpineIndex))
+                           (when (and (some? spine) (<= splSpineIndex lastSpineIndex))
+                             (set! splChunk (aget spine splSpineIndex))))
+                         true)
+                       false))
+
+                 (method ^:public forEachRemaining ^void [this
+                                                          ^{:tag (Consumer (? super E))} consumer]
+                   (Objects/requireNonNull consumer)
+                   (when (or (< splSpineIndex lastSpineIndex)
+                             (and (== splSpineIndex lastSpineIndex)
+                                  (< splElementIndex lastSpineElementFence)))
+                     (let [^:mutable i splElementIndex]
+                       (loop [^int sp splSpineIndex]
+                         (when (< sp lastSpineIndex)
+                           (let [^E/1 chunk (aget spine sp)]
+                             (while (< i (alength chunk))
+                               (.accept consumer (aget chunk i))
+                               (set! i (unchecked-inc-int i)))
+                             (set! i 0)
+                             (recur (unchecked-inc-int sp)))))
+                       (let [^E/1 chunk (if (== splSpineIndex lastSpineIndex)
+                                            splChunk
+                                            (aget spine lastSpineIndex))
+                             hElementIndex lastSpineElementFence]
+                         (while (< i hElementIndex)
+                           (.accept consumer (aget chunk i))
+                           (set! i (unchecked-inc-int i)))
+                         (set! splSpineIndex lastSpineIndex)
+                         (set! splElementIndex lastSpineElementFence)))))
+
+                 (method ^:public trySplit ^{:tag (Spliterator E)} [this]
+                   (cond
+                     (< splSpineIndex lastSpineIndex)
+                       (let [^{:tag (Spliterator E)} ret (Splitr.
+                                                           splSpineIndex
+                                                           (unchecked-subtract-int lastSpineIndex 1)
+                                                           splElementIndex
+                                                           (alength
+                                                             (aget
+                                                               spine
+                                                               (unchecked-subtract-int
+                                                                 lastSpineIndex
+                                                                 1))))]
+                         (set! splSpineIndex lastSpineIndex)
+                         (set! splElementIndex 0)
+                         (set! splChunk (aget spine splSpineIndex))
+                         ret)
+                     (== splSpineIndex lastSpineIndex)
+                       (let [t (unchecked-divide-int
+                                 (unchecked-subtract-int lastSpineElementFence splElementIndex)
+                                 2)]
+                         (when-not (== t 0)
+                           (let [^{:tag (Spliterator E)} ret (Arrays/spliterator
+                                                               splChunk
+                                                               splElementIndex
+                                                               (unchecked-add-int splElementIndex t))]
+                             (set! splElementIndex (unchecked-add-int splElementIndex t))
+                             ret))))))]
+      (Splitr. 0 (.-spineIndex this) 0 (.-elementIndex this))))
+
+  (defclass ^:abstract ^:static OfPrimitive
+    :extends AbstractSpinedBuffer
+    :implements [(Iterable E)]
+    :type-params [E T_ARR T_CONS]
+
+    (field ^T_ARR curChunk)
+
+    (field ^T_ARR/1 spine)
+
+    (constructor [this ^int initialCapacity]
+      (super. initialCapacity)
+      (set! curChunk (.newArray this (bit-shift-left-int 1 (.-initialChunkPower this)))))
+
+    (constructor [this]
+      (super.)
+      (set! curChunk (.newArray this (bit-shift-left-int 1 (.-initialChunkPower this)))))
+
+    (method ^:public ^:abstract iterator ^{:tag (Iterator E)} [this])
+
+    (method ^:public ^:abstract forEach ^void [this ^{:tag (Consumer (? super E))} consumer])
+
+    (method ^:protected ^:abstract newArrayArray ^T_ARR/1 [this ^int size])
+
+    (method ^:public ^:abstract newArray ^T_ARR [this ^int size])
+
+    (method ^:protected ^:abstract arrayLength ^int [this ^T_ARR array])
+
+    (method ^:protected ^:abstract arrayForEach ^void [this ^T_ARR array ^int from ^int to
+                                                       ^T_CONS consumer])
+
+    (method ^:protected capacity ^long [this]
+      (if (== (.-spineIndex this) 0)
+          (long (.arrayLength this curChunk))
+          (unchecked-add (aget (.-priorElementCount this) (.-spineIndex this))
+                         (.arrayLength this (aget spine (.-spineIndex this))))))
+
+    (method ^:private inflateSpine ^void [this]
+      (when (nil? spine)
+        (set! spine (.newArrayArray this OfPrimitive/MIN_SPINE_SIZE))
+        (set! (.-priorElementCount this) (new long/1 OfPrimitive/MIN_SPINE_SIZE))
+        (aset spine 0 curChunk)))
+
+    (method ^:protected ^:final ensureCapacity ^void [this ^long targetSize]
+      (let [^:mutable capacity (.capacity this)]
+        (when (> targetSize capacity)
+          (.inflateSpine this)
+          (loop [^int i (unchecked-add-int (.-spineIndex this) 1)]
+            (when (> targetSize capacity)
+              (when (>= i (alength spine))
+                (let [newSpineSize (unchecked-multiply-int (alength spine) 2)]
+                  (set! spine (Arrays/copyOf spine newSpineSize))
+                  (set! (.-priorElementCount this)
+                        (Arrays/copyOf (.-priorElementCount this) newSpineSize))))
+              (let [nextChunkSize (.chunkSize this i)]
+                (aset spine i (.newArray this nextChunkSize))
+                (aset (.-priorElementCount this)
+                      i
+                      (unchecked-add (aget (.-priorElementCount this) (unchecked-subtract-int i 1))
+                                     (.arrayLength this (aget spine (unchecked-subtract-int i 1)))))
+                (set! capacity (unchecked-add capacity nextChunkSize))
+                (recur (unchecked-inc-int i))))))))
+
+    (method ^:protected increaseCapacity ^void [this]
+      (.ensureCapacity this (unchecked-add (.capacity this) 1)))
+
+    (method ^:protected chunkFor ^int [this ^long index]
+      (if (== (.-spineIndex this) 0)
+          (if (< index (.-elementIndex this))
+              0
+              (throw (IndexOutOfBoundsException. (Long/toString index))))
+          (do
+            (when (>= index (.count this))
+              (throw (IndexOutOfBoundsException. (Long/toString index))))
+            (loop [^int j 0]
+              (if (<= j (.-spineIndex this))
+                  (if (< index
+                         (unchecked-add (aget (.-priorElementCount this) j)
+                                        (.arrayLength this (aget spine j))))
+                      (return j)
+                      (recur (unchecked-inc-int j)))
+                  nil))
+            (throw (IndexOutOfBoundsException. (Long/toString index))))))
+
+    (method ^:public copyInto ^void [this ^T_ARR array ^:mutable ^int offset]
+      (let [finalOffset (unchecked-add offset (.count this))]
+        (when (or (> finalOffset (.arrayLength this array)) (< finalOffset offset))
+          (throw (IndexOutOfBoundsException. "does not fit")))
+        (if (== (.-spineIndex this) 0)
+            (System/arraycopy curChunk 0 array offset (.-elementIndex this))
+            (do
+              (loop [^int i 0]
+                (when (< i (.-spineIndex this))
+                  (System/arraycopy (aget spine i)
+                                    0
+                                    array
+                                    offset
+                                    (.arrayLength this (aget spine i)))
+                  (set! offset (unchecked-add-int offset (.arrayLength this (aget spine i))))
+                  (recur (unchecked-inc-int i))))
+              (when (> (.-elementIndex this) 0)
+                (System/arraycopy curChunk 0 array offset (.-elementIndex this)))))))
+
+    (method ^:public asPrimitiveArray ^T_ARR [this]
+      (let [size (.count this)]
+        (when (>= size Nodes/MAX_ARRAY_SIZE) (throw (IllegalArgumentException. Nodes/BAD_SIZE)))
+        (let [^T_ARR result (.newArray this (unchecked-int size))] (.copyInto this result 0) result)))
+
+    (method ^:protected preAccept ^void [this]
+      (when (== (.-elementIndex this) (.arrayLength this curChunk))
+        (.inflateSpine this)
+        (when (or (>= (unchecked-add-int (.-spineIndex this) 1) (alength spine))
+                  (nil? (aget spine (unchecked-add-int (.-spineIndex this) 1))))
+          (.increaseCapacity this))
+        (set! (.-elementIndex this) 0)
+        (set! (.-spineIndex this) (unchecked-inc-int (.-spineIndex this)))
+        (set! curChunk (aget spine (.-spineIndex this)))))
+
+    (method ^:public clear ^void [this]
+      (when (some? spine)
+        (set! curChunk (aget spine 0))
+        (set! spine nil)
+        (set! (.-priorElementCount this) nil))
+      (set! (.-elementIndex this) 0)
+      (set! (.-spineIndex this) 0))
+
+    (method ^:public forEach ^void [this ^T_CONS consumer]
+      (loop [^int j 0]
+        (when (< j (.-spineIndex this))
+          (.arrayForEach this (aget spine j) 0 (.arrayLength this (aget spine j)) consumer)
+          (recur (unchecked-inc-int j))))
+      (.arrayForEach this curChunk 0 (.-elementIndex this) consumer))
+
+    (defclass ^:abstract BaseSpliterator
+      :implements [(Spliterator$OfPrimitive E T_CONS T_SPLITR)]
+      :type-params [(T_SPLITR extends (Spliterator$OfPrimitive E T_CONS T_SPLITR))]
+
+      (field ^int splSpineIndex)
+
+      (field ^:final ^int lastSpineIndex)
+
+      (field ^int splElementIndex)
+
+      (field ^:final ^int lastSpineElementFence)
+
+      (field ^T_ARR splChunk)
+
+      (constructor [this ^int firstSpineIndex ^int lastSpineIndex ^int firstSpineElementIndex
+                    ^int lastSpineElementFence]
+        (set! (.-splSpineIndex this) firstSpineIndex)
+        (set! (.-lastSpineIndex this) lastSpineIndex)
+        (set! (.-splElementIndex this) firstSpineElementIndex)
+        (set! (.-lastSpineElementFence this) lastSpineElementFence)
+        (java-assert (or (some? spine) (and (== firstSpineIndex 0) (== lastSpineIndex 0))))
+        (set! splChunk (if (nil? spine) curChunk (aget spine firstSpineIndex))))
+
+      (method ^:abstract newSpliterator ^T_SPLITR [this ^int firstSpineIndex ^int lastSpineIndex
+                                                   ^int firstSpineElementIndex
+                                                   ^int lastSpineElementFence])
+
+      (method ^:abstract arrayForOne ^void [this ^T_ARR array ^int index ^T_CONS consumer])
+
+      (method ^:abstract arraySpliterator ^T_SPLITR [this ^T_ARR array ^int offset ^int len])
+
+      (method ^:public estimateSize ^long [this]
+        (if (== splSpineIndex lastSpineIndex)
+            (unchecked-subtract (long lastSpineElementFence) splElementIndex)
+            (unchecked-subtract
+              (unchecked-subtract
+                (unchecked-add (aget (.-priorElementCount OfPrimitive/this) lastSpineIndex)
+                               lastSpineElementFence)
+                (aget (.-priorElementCount OfPrimitive/this) splSpineIndex))
+              splElementIndex)))
+
+      (method ^:public characteristics ^int [this]
+        SPLITERATOR_CHARACTERISTICS)
+
+      (method ^:public tryAdvance ^boolean [this ^T_CONS consumer]
+        (Objects/requireNonNull consumer)
+        (if (or (< splSpineIndex lastSpineIndex)
+                (and (== splSpineIndex lastSpineIndex) (< splElementIndex lastSpineElementFence)))
+            (do
+              (.arrayForOne this
+                            splChunk
+                            (let [old-3 splElementIndex]
+                              (set! splElementIndex (unchecked-inc-int splElementIndex))
+                              old-3)
+                            consumer)
+              (when (== splElementIndex (.arrayLength OfPrimitive/this splChunk))
+                (set! splElementIndex 0)
+                (set! splSpineIndex (unchecked-inc-int splSpineIndex))
+                (when (and (some? spine) (<= splSpineIndex lastSpineIndex))
+                  (set! splChunk (aget spine splSpineIndex))))
+              true)
+            false))
+
+      (method ^:public forEachRemaining ^void [this ^T_CONS consumer]
+        (Objects/requireNonNull consumer)
+        (when (or (< splSpineIndex lastSpineIndex)
+                  (and (== splSpineIndex lastSpineIndex) (< splElementIndex lastSpineElementFence)))
+          (let [^:mutable i splElementIndex]
+            (loop [^int sp splSpineIndex]
+              (when (< sp lastSpineIndex)
+                (let [^T_ARR chunk (aget spine sp)]
+                  (.arrayForEach OfPrimitive/this
+                                 chunk
+                                 i
+                                 (.arrayLength OfPrimitive/this chunk)
+                                 consumer)
+                  (set! i 0)
+                  (recur (unchecked-inc-int sp)))))
+            (let [^T_ARR chunk (if (== splSpineIndex lastSpineIndex)
+                                   splChunk
+                                   (aget spine lastSpineIndex))]
+              (.arrayForEach OfPrimitive/this chunk i lastSpineElementFence consumer)
+              (set! splSpineIndex lastSpineIndex)
+              (set! splElementIndex lastSpineElementFence)))))
+
+      (method ^:public trySplit ^T_SPLITR [this]
+        (cond
+          (< splSpineIndex lastSpineIndex)
+            (let [^T_SPLITR ret (.newSpliterator
+                                  this
+                                  splSpineIndex
+                                  (unchecked-subtract-int lastSpineIndex 1)
+                                  splElementIndex
+                                  (.arrayLength OfPrimitive/this
+                                                (aget
+                                                  spine
+                                                  (unchecked-subtract-int lastSpineIndex 1))))]
+              (set! splSpineIndex lastSpineIndex)
+              (set! splElementIndex 0)
+              (set! splChunk (aget spine splSpineIndex))
+              ret)
+          (== splSpineIndex lastSpineIndex)
+            (let [t (unchecked-divide-int
+                      (unchecked-subtract-int lastSpineElementFence splElementIndex)
+                      2)]
+              (when-not (== t 0)
+                (let [^T_SPLITR ret (.arraySpliterator this splChunk splElementIndex t)]
+                  (set! splElementIndex (unchecked-add-int splElementIndex t))
+                  ret)))))))
+
+  (defclass ^:static OfInt
+    :extends (OfPrimitive Integer int/1 IntConsumer)
+    :implements [IntConsumer]
+
+    (constructor [this])
+
+    (constructor [this ^int initialCapacity] (super. initialCapacity))
+
+    (method ^:public forEach ^void [this ^{:tag (Consumer (? super Integer))} consumer]
+      (if (instance? IntConsumer consumer)
+          (.forEach this (cast IntConsumer consumer))
+          (do
+            (when Tripwire/ENABLED
+              (Tripwire/trip (.getClass this) "{0} calling SpinedBuffer.OfInt.forEach(Consumer)"))
+            (.forEachRemaining (.spliterator this) consumer))))
+
+    (method ^:protected newArrayArray ^int/2 [this ^int size]
+      (new int/2 size))
+
+    (method ^:public newArray ^int/1 [this ^int size] (new int/1 size))
+
+    (method ^:protected arrayLength ^int [this ^int/1 array]
+      (alength array))
+
+    (method ^:protected arrayForEach ^void [this ^int/1 array ^int from ^int to
+                                            ^IntConsumer consumer]
+      (loop [^int i from]
+        (when (< i to) (.accept consumer (aget array i)) (recur (unchecked-inc-int i)))))
+
+    (method ^:public accept ^void [this ^int i]
+      (.preAccept this)
+      (aset (cast int/1 (.-curChunk this))
+            (let [old-4 (.-elementIndex this)]
+              (set! (.-elementIndex this) (unchecked-inc-int (.-elementIndex this)))
+              old-4)
+            i))
+
+    (method ^:public get ^int [this ^long index]
+      (let [ch (.chunkFor this index)]
+        (if (and (== (.-spineIndex this) 0) (== ch 0))
+            (aget (cast int/1 (.-curChunk this)) (unchecked-int index))
+            (aget (cast int/2 (.-spine this))
+                  ch
+                  (unchecked-int (unchecked-subtract index (aget (.-priorElementCount this) ch)))))))
+
+    (method ^:public iterator ^PrimitiveIterator$OfInt [this]
+      (Spliterators/iterator (.spliterator this)))
+
+    (method ^:public spliterator ^Spliterator$OfInt [this]
+      (letclass [(Splitr
+                   :extends (.. (OfPrimitive Integer int/1 IntConsumer)
+                                (BaseSpliterator Spliterator$OfInt))
+                   :implements [Spliterator$OfInt]
+
+                   (constructor [this ^int firstSpineIndex ^int lastSpineIndex
+                                 ^int firstSpineElementIndex ^int lastSpineElementFence]
+                     (super. firstSpineIndex
+                             lastSpineIndex
+                             firstSpineElementIndex
+                             lastSpineElementFence))
+
+                   (method newSpliterator ^Splitr [this ^int firstSpineIndex ^int lastSpineIndex
+                                                   ^int firstSpineElementIndex
+                                                   ^int lastSpineElementFence]
+                     (Splitr. firstSpineIndex
+                              lastSpineIndex
+                              firstSpineElementIndex
+                              lastSpineElementFence))
+
+                   (method arrayForOne ^void [this ^int/1 array ^int index ^IntConsumer consumer]
+                     (.accept consumer (aget array index)))
+
+                   (method arraySpliterator ^Spliterator$OfInt [this ^int/1 array ^int offset
+                                                                ^int len]
+                     (Arrays/spliterator array offset (unchecked-add-int offset len))))]
+        (Splitr. 0 (.-spineIndex this) 0 (.-elementIndex this))))
+
+    (method ^:public toString ^String [this]
+      (let [array (cast int/1 (.asPrimitiveArray this))]
+        (if (< (alength array) 200)
+            (String/format "%s[length=%d, chunks=%d]%s"
+                           (new Object/1
+                                [(.getSimpleName (.getClass this))
+                                 (alength array)
+                                 (.-spineIndex this)
+                                 (Arrays/toString array)]))
+            (let [array2 (Arrays/copyOf array 200)]
+              (String/format "%s[length=%d, chunks=%d]%s..."
+                             (new Object/1
+                                  [(.getSimpleName (.getClass this))
+                                   (alength array)
+                                   (.-spineIndex this)
+                                   (Arrays/toString array2)])))))))
+
+  (defclass ^:static OfLong
+    :extends (OfPrimitive Long long/1 LongConsumer)
+    :implements [LongConsumer]
+
+    (constructor [this])
+
+    (constructor [this ^int initialCapacity] (super. initialCapacity))
+
+    (method ^:public forEach ^void [this ^{:tag (Consumer (? super Long))} consumer]
+      (if (instance? LongConsumer consumer)
+          (.forEach this (cast LongConsumer consumer))
+          (do
+            (when Tripwire/ENABLED
+              (Tripwire/trip (.getClass this) "{0} calling SpinedBuffer.OfLong.forEach(Consumer)"))
+            (.forEachRemaining (.spliterator this) consumer))))
+
+    (method ^:protected newArrayArray ^long/2 [this ^int size]
+      (new long/2 size))
+
+    (method ^:public newArray ^long/1 [this ^int size] (new long/1 size))
+
+    (method ^:protected arrayLength ^int [this ^long/1 array]
+      (alength array))
+
+    (method ^:protected arrayForEach ^void [this ^long/1 array ^int from ^int to
+                                            ^LongConsumer consumer]
+      (loop [^int i from]
+        (when (< i to) (.accept consumer (aget array i)) (recur (unchecked-inc-int i)))))
+
+    (method ^:public accept ^void [this ^long i]
+      (.preAccept this)
+      (aset (cast long/1 (.-curChunk this))
+            (let [old-5 (.-elementIndex this)]
+              (set! (.-elementIndex this) (unchecked-inc-int (.-elementIndex this)))
+              old-5)
+            i))
+
+    (method ^:public get ^long [this ^long index]
+      (let [ch (.chunkFor this index)]
+        (if (and (== (.-spineIndex this) 0) (== ch 0))
+            (aget (cast long/1 (.-curChunk this)) (unchecked-int index))
+            (aget (cast long/2 (.-spine this))
+                  ch
+                  (unchecked-int (unchecked-subtract index (aget (.-priorElementCount this) ch)))))))
+
+    (method ^:public iterator ^PrimitiveIterator$OfLong [this]
+      (Spliterators/iterator (.spliterator this)))
+
+    (method ^:public spliterator ^Spliterator$OfLong [this]
+      (letclass [(Splitr
+                   :extends (.. (OfPrimitive Long long/1 LongConsumer)
+                                (BaseSpliterator Spliterator$OfLong))
+                   :implements [Spliterator$OfLong]
+
+                   (constructor [this ^int firstSpineIndex ^int lastSpineIndex
+                                 ^int firstSpineElementIndex ^int lastSpineElementFence]
+                     (super. firstSpineIndex
+                             lastSpineIndex
+                             firstSpineElementIndex
+                             lastSpineElementFence))
+
+                   (method newSpliterator ^Splitr [this ^int firstSpineIndex ^int lastSpineIndex
+                                                   ^int firstSpineElementIndex
+                                                   ^int lastSpineElementFence]
+                     (Splitr. firstSpineIndex
+                              lastSpineIndex
+                              firstSpineElementIndex
+                              lastSpineElementFence))
+
+                   (method arrayForOne ^void [this ^long/1 array ^int index ^LongConsumer consumer]
+                     (.accept consumer (aget array index)))
+
+                   (method arraySpliterator ^Spliterator$OfLong [this ^long/1 array ^int offset
+                                                                 ^int len]
+                     (Arrays/spliterator array offset (unchecked-add-int offset len))))]
+        (Splitr. 0 (.-spineIndex this) 0 (.-elementIndex this))))
+
+    (method ^:public toString ^String [this]
+      (let [array (cast long/1 (.asPrimitiveArray this))]
+        (if (< (alength array) 200)
+            (String/format "%s[length=%d, chunks=%d]%s"
+                           (new Object/1
+                                [(.getSimpleName (.getClass this))
+                                 (alength array)
+                                 (.-spineIndex this)
+                                 (Arrays/toString array)]))
+            (let [array2 (Arrays/copyOf array 200)]
+              (String/format "%s[length=%d, chunks=%d]%s..."
+                             (new Object/1
+                                  [(.getSimpleName (.getClass this))
+                                   (alength array)
+                                   (.-spineIndex this)
+                                   (Arrays/toString array2)])))))))
+
+  (defclass ^:static OfDouble
+    :extends (OfPrimitive Double double/1 DoubleConsumer)
+    :implements [DoubleConsumer]
+
+    (constructor [this])
+
+    (constructor [this ^int initialCapacity] (super. initialCapacity))
+
+    (method ^:public forEach ^void [this ^{:tag (Consumer (? super Double))} consumer]
+      (if (instance? DoubleConsumer consumer)
+          (.forEach this (cast DoubleConsumer consumer))
+          (do
+            (when Tripwire/ENABLED
+              (Tripwire/trip (.getClass this) "{0} calling SpinedBuffer.OfDouble.forEach(Consumer)"))
+            (.forEachRemaining (.spliterator this) consumer))))
+
+    (method ^:protected newArrayArray ^double/2 [this ^int size]
+      (new double/2 size))
+
+    (method ^:public newArray ^double/1 [this ^int size]
+      (new double/1 size))
+
+    (method ^:protected arrayLength ^int [this ^double/1 array]
+      (alength array))
+
+    (method ^:protected arrayForEach ^void [this ^double/1 array ^int from ^int to
+                                            ^DoubleConsumer consumer]
+      (loop [^int i from]
+        (when (< i to) (.accept consumer (aget array i)) (recur (unchecked-inc-int i)))))
+
+    (method ^:public accept ^void [this ^double i]
+      (.preAccept this)
+      (aset (cast double/1 (.-curChunk this))
+            (let [old-6 (.-elementIndex this)]
+              (set! (.-elementIndex this) (unchecked-inc-int (.-elementIndex this)))
+              old-6)
+            i))
+
+    (method ^:public get ^double [this ^long index]
+      (let [ch (.chunkFor this index)]
+        (if (and (== (.-spineIndex this) 0) (== ch 0))
+            (aget (cast double/1 (.-curChunk this)) (unchecked-int index))
+            (aget (cast double/2 (.-spine this))
+                  ch
+                  (unchecked-int (unchecked-subtract index (aget (.-priorElementCount this) ch)))))))
+
+    (method ^:public iterator ^PrimitiveIterator$OfDouble [this]
+      (Spliterators/iterator (.spliterator this)))
+
+    (method ^:public spliterator ^Spliterator$OfDouble [this]
+      (letclass [(Splitr
+                   :extends (.. (OfPrimitive Double double/1 DoubleConsumer)
+                                (BaseSpliterator Spliterator$OfDouble))
+                   :implements [Spliterator$OfDouble]
+
+                   (constructor [this ^int firstSpineIndex ^int lastSpineIndex
+                                 ^int firstSpineElementIndex ^int lastSpineElementFence]
+                     (super. firstSpineIndex
+                             lastSpineIndex
+                             firstSpineElementIndex
+                             lastSpineElementFence))
+
+                   (method newSpliterator ^Splitr [this ^int firstSpineIndex ^int lastSpineIndex
+                                                   ^int firstSpineElementIndex
+                                                   ^int lastSpineElementFence]
+                     (Splitr. firstSpineIndex
+                              lastSpineIndex
+                              firstSpineElementIndex
+                              lastSpineElementFence))
+
+                   (method arrayForOne ^void [this ^double/1 array ^int index
+                                              ^DoubleConsumer consumer]
+                     (.accept consumer (aget array index)))
+
+                   (method arraySpliterator ^Spliterator$OfDouble [this ^double/1 array ^int offset
+                                                                   ^int len]
+                     (Arrays/spliterator array offset (unchecked-add-int offset len))))]
+        (Splitr. 0 (.-spineIndex this) 0 (.-elementIndex this))))
+
+    (method ^:public toString ^String [this]
+      (let [array (cast double/1 (.asPrimitiveArray this))]
+        (if (< (alength array) 200)
+            (String/format "%s[length=%d, chunks=%d]%s"
+                           (new Object/1
+                                [(.getSimpleName (.getClass this))
+                                 (alength array)
+                                 (.-spineIndex this)
+                                 (Arrays/toString array)]))
+            (let [array2 (Arrays/copyOf array 200)]
+              (String/format "%s[length=%d, chunks=%d]%s..."
+                             (new Object/1
+                                  [(.getSimpleName (.getClass this))
+                                   (alength array)
+                                   (.-spineIndex this)
+                                   (Arrays/toString array2)]))))))))

@@ -1,0 +1,2290 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/DualPivotQuicksort.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util)
+
+(import '(java.util.concurrent CountedCompleter RecursiveTask)
+        '(jdk.internal.misc Unsafe)
+        '(jdk.internal.vm.annotation ForceInline IntrinsicCandidate))
+
+(defclass ^:final DualPivotQuicksort
+  (constructor ^:private [this])
+
+  (field ^:private ^:static ^:final ^int MAX_MIXED_INSERTION_SORT_SIZE 65)
+
+  (field ^:private ^:static ^:final ^int MAX_INSERTION_SORT_SIZE 44)
+
+  (field ^:private ^:static ^:final ^int MIN_PARALLEL_SORT_SIZE (bit-shift-left-int 4 10))
+
+  (field ^:private ^:static ^:final ^int MIN_TRY_MERGE_SIZE (bit-shift-left-int 4 10))
+
+  (field ^:private ^:static ^:final ^int MIN_FIRST_RUN_SIZE 16)
+
+  (field ^:private ^:static ^:final ^int MIN_FIRST_RUNS_FACTOR 7)
+
+  (field ^:private ^:static ^:final ^int MAX_RUN_CAPACITY (bit-shift-left-int 5 10))
+
+  (field ^:private ^:static ^:final ^int MIN_RUN_COUNT 4)
+
+  (field ^:private ^:static ^:final ^int MIN_PARALLEL_MERGE_PARTS_SIZE (bit-shift-left-int 4 10))
+
+  (field ^:private ^:static ^:final ^int MIN_BYTE_COUNTING_SORT_SIZE 64)
+
+  (field ^:private ^:static ^:final ^int MIN_SHORT_OR_CHAR_COUNTING_SORT_SIZE 1750)
+
+  (field ^:private ^:static ^:final ^int DELTA (bit-shift-left-int 3 1))
+
+  (field ^:private ^:static ^:final ^int MAX_RECURSION_DEPTH (unchecked-multiply-int 64 DELTA))
+
+  (defclass ^:private ^:static ^{FunctionalInterface true} ^:interface SortOperation
+    :type-params [A]
+
+    (method sort ^void [this ^A a ^int low ^int high]))
+
+  (method ^:private ^:static ^{IntrinsicCandidate true} ^{ForceInline true} sort :type-params [A] ^void [^{:tag (Class ?)} elemType
+                                                                                                         ^A array
+                                                                                                         ^long offset
+                                                                                                         ^int low
+                                                                                                         ^int high
+                                                                                                         ^{:tag (SortOperation A)} so]
+    (.sort so array low high))
+
+  (defclass ^{FunctionalInterface true} ^:interface PartitionOperation
+    :type-params [A]
+
+    (method partition ^int/1 [this ^A a ^int low ^int high ^int pivotIndex1 ^int pivotIndex2]))
+
+  (method ^:private ^:static ^{IntrinsicCandidate true} ^{ForceInline true} partition :type-params [A] ^int/1 [^{:tag (Class ?)} elemType
+                                                                                                               ^A array
+                                                                                                               ^long offset
+                                                                                                               ^int low
+                                                                                                               ^int high
+                                                                                                               ^int pivotIndex1
+                                                                                                               ^int pivotIndex2
+                                                                                                               ^{:tag (PartitionOperation A)} po]
+    (.partition po array low high pivotIndex1 pivotIndex2))
+
+  (method ^:private ^:static getDepth ^int [^:mutable ^int parallelism ^:mutable ^int size]
+    (let [^:mutable ^int depth 0]
+      (while (and (> (set! parallelism (bit-shift-right-int parallelism 3)) 0)
+                  (> (set! size (bit-shift-right-int size 2)) 0))
+        (set! depth (unchecked-subtract-int depth 2)))
+      depth))
+
+  (method ^:static sort ^void [^int/1 a ^int parallelism ^int low ^int high]
+    (let [size (unchecked-subtract-int high low)]
+      (if (and (> parallelism 1) (> size MIN_PARALLEL_SORT_SIZE))
+          (let [depth (DualPivotQuicksort/getDepth parallelism (bit-shift-right-int size 12))
+                ^int/1 b (when-not (== depth 0) (new int/1 size))]
+            (.invoke (Sorter. nil a b low size low depth)))
+          (DualPivotQuicksort/sort nil a 0 low high))))
+
+  (method ^:static sort ^void [^Sorter sorter ^int/1 a ^:mutable ^int bits ^int low
+                               ^:mutable ^int high]
+    (while true
+      (let [end (unchecked-subtract-int high 1)
+            size (unchecked-subtract-int high low)]
+        (when (and (< size (unchecked-add-int MAX_MIXED_INSERTION_SORT_SIZE bits))
+                   (> (bit-and-int bits 1) 0))
+          (DualPivotQuicksort/sort Integer/TYPE
+                                   a
+                                   Unsafe/ARRAY_INT_BASE_OFFSET
+                                   low
+                                   high
+                                   (method-ref SortOperation
+                                               [int/1 int int]
+                                               DualPivotQuicksort/mixedInsertionSort))
+          (return))
+        (when (< size MAX_INSERTION_SORT_SIZE)
+          (DualPivotQuicksort/sort Integer/TYPE
+                                   a
+                                   Unsafe/ARRAY_INT_BASE_OFFSET
+                                   low
+                                   high
+                                   (method-ref SortOperation
+                                               [int/1 int int]
+                                               DualPivotQuicksort/insertionSort))
+          (return))
+        (when (and (or (== bits 0) (and (> size MIN_TRY_MERGE_SIZE) (> (bit-and-int bits 1) 0)))
+                   (DualPivotQuicksort/tryMergeRuns sorter a low size))
+          (return))
+        (when (> (set! bits (unchecked-add-int bits DELTA)) MAX_RECURSION_DEPTH)
+          (DualPivotQuicksort/heapSort a low high)
+          (return))
+        (let [step (unchecked-add-int (unchecked-multiply-int (bit-shift-right-int size 3) 3) 3)
+              e1 (unchecked-add-int low step)
+              e5 (unchecked-subtract-int end step)
+              e3 (unsigned-bit-shift-right-int (unchecked-add-int e1 e5) 1)
+              e2 (unsigned-bit-shift-right-int (unchecked-add-int e1 e3) 1)
+              e4 (unsigned-bit-shift-right-int (unchecked-add-int e3 e5) 1)
+              a3 (aget a e3)]
+          (when (< (aget a e5) (aget a e2))
+            (let [t (aget a e5)] (aset a e5 (aget a e2)) (aset a e2 t)))
+          (when (< (aget a e4) (aget a e1))
+            (let [t (aget a e4)] (aset a e4 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e5) (aget a e4))
+            (let [t (aget a e5)] (aset a e5 (aget a e4)) (aset a e4 t)))
+          (when (< (aget a e2) (aget a e1))
+            (let [t (aget a e2)] (aset a e2 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e4) (aget a e2))
+            (let [t (aget a e4)] (aset a e4 (aget a e2)) (aset a e2 t)))
+          (cond
+            (< a3 (aget a e2))
+              (if (< a3 (aget a e1))
+                  (do (aset a e3 (aget a e2)) (aset a e2 (aget a e1)) (aset a e1 a3))
+                  (do (aset a e3 (aget a e2)) (aset a e2 a3)))
+            (> a3 (aget a e4))
+              (if (> a3 (aget a e5))
+                  (do (aset a e3 (aget a e4)) (aset a e4 (aget a e5)) (aset a e5 a3))
+                  (do (aset a e3 (aget a e4)) (aset a e4 a3))))
+          (let [^:mutable ^int lower 0
+                ^:mutable ^int upper 0]
+            (if (and (and (and (< (aget a e1) (aget a e2)) (< (aget a e2) (aget a e3)))
+                          (< (aget a e3) (aget a e4)))
+                     (< (aget a e4) (aget a e5)))
+                (let [pivotIndices (DualPivotQuicksort/partition
+                                     Integer/TYPE
+                                     a
+                                     Unsafe/ARRAY_INT_BASE_OFFSET
+                                     low
+                                     high
+                                     e1
+                                     e5
+                                     (method-ref
+                                       PartitionOperation
+                                       [int/1 int int int int]
+                                       DualPivotQuicksort/partitionDualPivot))]
+                  (set! lower (aget pivotIndices 0))
+                  (set! upper (aget pivotIndices 1))
+                  (if (and (> size MIN_PARALLEL_SORT_SIZE) (some? sorter))
+                      (do
+                        (.forkSorter sorter (bit-or-int bits 1) (unchecked-add-int lower 1) upper)
+                        (.forkSorter sorter (bit-or-int bits 1) (unchecked-add-int upper 1) high))
+                      (do
+                        (DualPivotQuicksort/sort
+                          sorter
+                          a
+                          (bit-or-int bits 1)
+                          (unchecked-add-int lower 1)
+                          upper)
+                        (DualPivotQuicksort/sort
+                          sorter
+                          a
+                          (bit-or-int bits 1)
+                          (unchecked-add-int upper 1)
+                          high))))
+                (let [pivotIndices (DualPivotQuicksort/partition
+                                     Integer/TYPE
+                                     a
+                                     Unsafe/ARRAY_INT_BASE_OFFSET
+                                     low
+                                     high
+                                     e3
+                                     e3
+                                     (method-ref
+                                       PartitionOperation
+                                       [int/1 int int int int]
+                                       DualPivotQuicksort/partitionSinglePivot))]
+                  (set! lower (aget pivotIndices 0))
+                  (set! upper (aget pivotIndices 1))
+                  (if (and (> size MIN_PARALLEL_SORT_SIZE) (some? sorter))
+                      (.forkSorter sorter (bit-or-int bits 1) upper high)
+                      (DualPivotQuicksort/sort sorter a (bit-or-int bits 1) upper high))))
+            (set! high lower))))))
+
+  (method ^:private ^:static ^{ForceInline true} partitionDualPivot ^int/1 [^int/1 a ^int low
+                                                                            ^int high
+                                                                            ^int pivotIndex1
+                                                                            ^int pivotIndex2]
+    (let [end (unchecked-subtract-int high 1)
+          ^:mutable lower low
+          ^:mutable upper end
+          e1 pivotIndex1
+          e5 pivotIndex2
+          pivot1 (aget a e1)
+          pivot2 (aget a e5)]
+      (aset a e1 (aget a lower))
+      (aset a e5 (aget a upper))
+      (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot1))
+      (while (> (aget a (set! upper (unchecked-dec-int upper))) pivot2))
+      (let [unused (set! lower (unchecked-dec-int lower))
+            ^:mutable k (set! upper (unchecked-inc-int upper))]
+        (while (> (set! k (unchecked-dec-int k)) lower)
+          (let [ak (aget a k)]
+            (if (< ak pivot1)
+                (while (< lower k)
+                  (when (>= (aget a (set! lower (unchecked-inc-int lower))) pivot1)
+                    (if (> (aget a lower) pivot2)
+                        (do
+                          (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                          (aset a upper (aget a lower)))
+                        (aset a k (aget a lower)))
+                    (aset a lower ak)
+                    (break)))
+                (when (> ak pivot2)
+                  (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                  (aset a upper ak))))))
+      (aset a low (aget a lower))
+      (aset a lower pivot1)
+      (aset a end (aget a upper))
+      (aset a upper pivot2)
+      (new int/1 [lower upper])))
+
+  (method ^:private ^:static ^{ForceInline true} partitionSinglePivot ^int/1 [^int/1 a ^int low
+                                                                              ^int high
+                                                                              ^int pivotIndex1
+                                                                              ^int pivotIndex2]
+    (let [end (unchecked-subtract-int high 1)
+          ^:mutable lower low
+          ^:mutable upper end
+          e3 pivotIndex1
+          pivot (aget a e3)]
+      (aset a e3 (aget a lower))
+      (let [^:mutable k (set! upper (unchecked-inc-int upper))]
+        (while (> (set! k (unchecked-dec-int k)) lower)
+          (let [ak (aget a k)]
+            (when-not (== ak pivot)
+              (aset a k pivot)
+              (if (< ak pivot)
+                  (do
+                    (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot))
+                    (when (> (aget a lower) pivot)
+                      (aset a (set! upper (unchecked-dec-int upper)) (aget a lower)))
+                    (aset a lower ak))
+                  (aset a (set! upper (unchecked-dec-int upper)) ak))))))
+      (aset a low (aget a lower))
+      (aset a lower pivot)
+      (new int/1 [lower upper])))
+
+  (method ^:private ^:static mixedInsertionSort ^void [^int/1 a ^:mutable ^int low ^int high]
+    (let [size (unchecked-subtract-int high low)
+          end (unchecked-subtract-int high
+                                      (unchecked-multiply-int
+                                        3
+                                        (bit-shift-left-int (bit-shift-right-int size 5) 3)))]
+      (if (== end high)
+          (let [^:mutable ^int i 0]
+            (while (< (set! low (unchecked-inc-int low)) end)
+              (let [ai (aget a (set! i low))]
+                (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                  (aset a (unchecked-add-int i 1) (aget a i)))
+                (aset a (unchecked-add-int i 1) ai))))
+          (let [pin (aget a end)]
+            (let [^:mutable ^int i 0
+                  ^:mutable p high]
+              (while (< (set! low (unchecked-inc-int low)) end)
+                (let [^:mutable ai (aget a (set! i low))]
+                  (if (< ai (aget a (unchecked-subtract-int i 1)))
+                      (do
+                        (aset a i (aget a (set! i (unchecked-dec-int i))))
+                        (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) ai))
+                      (when (and (> p i) (> ai pin))
+                        (while (> (aget a (set! p (unchecked-dec-int p))) pin))
+                        (when (> p i) (set! ai (aget a p)) (aset a p (aget a i)))
+                        (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) ai))))))
+            (let [^:mutable ^int i 0]
+              (while (< low high)
+                (let [a1 (aget a (set! i low))
+                      a2 (aget a (set! low (unchecked-inc-int low)))]
+                  (if (> a1 a2)
+                      (do
+                        (while (< a1 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 2) (aget a i)))
+                        (aset a (unchecked-add-int (set! i (unchecked-inc-int i)) 1) a1)
+                        (while (< a2 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) a2))
+                      (when (< a1 (aget a (unchecked-subtract-int i 1)))
+                        (while (< a2 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 2) (aget a i)))
+                        (aset a (unchecked-add-int (set! i (unchecked-inc-int i)) 1) a2)
+                        (while (< a1 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) a1))))
+                (set! low (unchecked-inc-int low))))))))
+
+  (method ^:private ^:static insertionSort ^void [^int/1 a ^int low ^int high]
+    (let [^:mutable ^int i 0
+          ^:mutable k low]
+      (while (< (set! k (unchecked-inc-int k)) high)
+        (let [ai (aget a (set! i k))]
+          (when (< ai (aget a (unchecked-subtract-int i 1)))
+            (while (and (>= (set! i (unchecked-dec-int i)) low) (< ai (aget a i)))
+              (aset a (unchecked-add-int i 1) (aget a i)))
+            (aset a (unchecked-add-int i 1) ai))))))
+
+  (method ^:private ^:static heapSort ^void [^int/1 a ^int low ^:mutable ^int high]
+    (let [^:mutable k (unsigned-bit-shift-right-int (unchecked-add-int low high) 1)]
+      (while (> k low)
+        (DualPivotQuicksort/pushDown a (set! k (unchecked-dec-int k)) (aget a k) low high)))
+    (while (> (set! high (unchecked-dec-int high)) low)
+      (let [max (aget a low)]
+        (DualPivotQuicksort/pushDown a low (aget a high) low high)
+        (aset a high max))))
+
+  (method ^:private ^:static pushDown ^void [^int/1 a ^:mutable ^int p ^int value ^int low ^int high]
+    (let [^:mutable ^int k 0]
+      (while true
+        (set! k (unchecked-add-int (unchecked-subtract-int (bit-shift-left-int p 1) low) 2))
+        (when (> k high) (break))
+        (when (or (== k high) (< (aget a k) (aget a (unchecked-subtract-int k 1))))
+          (set! k (unchecked-dec-int k)))
+        (when (<= (aget a k) value) (break))
+        (aset a p (aget a (set! p k)))))
+    (aset a p value))
+
+  (method ^:private ^:static tryMergeRuns ^boolean [^Sorter sorter ^int/1 a ^int low ^int size]
+    (let [^:mutable ^int/1 run nil
+          high (unchecked-add-int low size)
+          ^:mutable ^int count 1
+          ^:mutable last low]
+      (let [^:mutable k (unchecked-add-int low 1)]
+        (while (< k high)
+          (cond
+            (< (aget a (unchecked-subtract-int k 1)) (aget a k))
+              (while (and (< (set! k (unchecked-inc-int k)) high)
+                          (<= (aget a (unchecked-subtract-int k 1)) (aget a k))))
+            (> (aget a (unchecked-subtract-int k 1)) (aget a k))
+              (do
+                (while (and (< (set! k (unchecked-inc-int k)) high)
+                            (>= (aget a (unchecked-subtract-int k 1)) (aget a k))))
+                (let [^:mutable i (unchecked-subtract-int last 1)
+                      ^:mutable j k]
+                  (while (and (< (set! i (unchecked-inc-int i)) (set! j (unchecked-dec-int j)))
+                              (> (aget a i) (aget a j)))
+                    (let [ai (aget a i)] (aset a i (aget a j)) (aset a j ai)))))
+            :else
+              (do
+                (loop [^int ak (aget a k)]
+                  (when (and (< (set! k (unchecked-inc-int k)) high) (== ak (aget a k))) (recur ak)))
+                (when (< k high) (continue))))
+          (if (nil? run)
+              (do
+                (when (== k high) (return true))
+                (when (< (unchecked-subtract-int k low) MIN_FIRST_RUN_SIZE) (return false))
+                (set! run
+                      (new int/1
+                           (bit-and-int (bit-or-int (bit-shift-right-int size 10) 0x7F) 0x3FF)))
+                (aset run 0 low))
+              (when (> (aget a (unchecked-subtract-int last 1)) (aget a last))
+                (when (> count
+                         (bit-shift-right-int (unchecked-subtract-int k low) MIN_FIRST_RUNS_FACTOR))
+                  (return false))
+                (when (== (set! count (unchecked-inc-int count)) MAX_RUN_CAPACITY) (return false))
+                (when (== count (alength run))
+                  (set! run (Arrays/copyOf run (bit-shift-left-int count 1))))))
+          (aset run count (set! last k))))
+      (when (> count 1)
+        (let [^:mutable ^int/1 b nil
+              ^:mutable offset low]
+          (if (or (nil? sorter) (nil? (set! b (cast int/1 (.-b sorter)))))
+              (set! b (new int/1 size))
+              (set! offset (.-offset sorter)))
+          (DualPivotQuicksort/mergeRuns a b offset 1 (some? sorter) run 0 count)))
+      true))
+
+  (method ^:private ^:static mergeRuns ^int/1 [^int/1 a ^int/1 b ^int offset ^int aim
+                                               ^boolean parallel ^int/1 run ^int lo ^int hi]
+    (if (== (unchecked-subtract-int hi lo) 1)
+        (if (>= aim 0)
+            a
+            (do
+              (let [^:mutable i (aget run hi)
+                    ^:mutable j (unchecked-subtract-int i offset)
+                    low (aget run lo)]
+                (while (> i low)
+                  (aset b (set! j (unchecked-dec-int j)) (aget a (set! i (unchecked-dec-int i))))))
+              b))
+        (let [^:mutable mi lo
+              rmi (unsigned-bit-shift-right-int (unchecked-add-int (aget run lo) (aget run hi)) 1)]
+          (while (<= (aget run (unchecked-add-int (set! mi (unchecked-inc-int mi)) 1)) rmi))
+          (let [^:mutable ^int/1 a1 nil
+                ^:mutable ^int/1 a2 nil]
+            (if (and parallel (> (unchecked-subtract-int hi lo) MIN_RUN_COUNT))
+                (let [merger (.forkMe (RunMerger. a b offset 0 run mi hi))]
+                  (set! a1
+                        (DualPivotQuicksort/mergeRuns
+                          a
+                          b
+                          offset
+                          (unchecked-negate-int aim)
+                          true
+                          run
+                          lo
+                          mi))
+                  (set! a2 (cast int/1 (.getDestination merger))))
+                (do
+                  (set! a1
+                        (DualPivotQuicksort/mergeRuns
+                          a
+                          b
+                          offset
+                          (unchecked-negate-int aim)
+                          false
+                          run
+                          lo
+                          mi))
+                  (set! a2 (DualPivotQuicksort/mergeRuns a b offset 0 false run mi hi))))
+            (let [^int/1 dst (if (identical? a1 a) b a)
+                  ^int k (if (identical? a1 a)
+                             (unchecked-subtract-int (aget run lo) offset)
+                             (aget run lo))
+                  ^int lo1 (if (identical? a1 b)
+                               (unchecked-subtract-int (aget run lo) offset)
+                               (aget run lo))
+                  ^int hi1 (if (identical? a1 b)
+                               (unchecked-subtract-int (aget run mi) offset)
+                               (aget run mi))
+                  ^int lo2 (if (identical? a2 b)
+                               (unchecked-subtract-int (aget run mi) offset)
+                               (aget run mi))
+                  ^int hi2 (if (identical? a2 b)
+                               (unchecked-subtract-int (aget run hi) offset)
+                               (aget run hi))]
+              (if parallel
+                  (.invoke (Merger. nil dst k a1 lo1 hi1 a2 lo2 hi2))
+                  (DualPivotQuicksort/mergeParts nil dst k a1 lo1 hi1 a2 lo2 hi2))
+              dst)))))
+
+  (method ^:private ^:static mergeParts ^void [^Merger merger ^int/1 dst ^:mutable ^int k ^int/1 a1
+                                               ^:mutable ^int lo1 ^:mutable ^int hi1 ^int/1 a2
+                                               ^:mutable ^int lo2 ^:mutable ^int hi2]
+    (when (and (some? merger) (identical? a1 a2))
+      (while true
+        (when (< (unchecked-subtract-int hi1 lo1) (unchecked-subtract-int hi2 lo2))
+          (let [lo lo1] (set! lo1 lo2) (set! lo2 lo) (let [hi hi1] (set! hi1 hi2) (set! hi2 hi))))
+        (when (< (unchecked-subtract-int hi1 lo1) MIN_PARALLEL_MERGE_PARTS_SIZE) (break))
+        (let [mi1 (unsigned-bit-shift-right-int (unchecked-add-int lo1 hi1) 1)
+              key (aget a1 mi1)
+              ^:mutable mi2 hi2]
+          (let [^:mutable loo lo2]
+            (while (< loo mi2)
+              (let [t (unsigned-bit-shift-right-int (unchecked-add-int loo mi2) 1)]
+                (if (> key (aget a2 t)) (set! loo (unchecked-add-int t 1)) (set! mi2 t)))))
+          (let [d (unchecked-subtract-int (unchecked-add-int (unchecked-subtract-int mi2 lo2) mi1)
+                                          lo1)]
+            (.forkMerger merger dst (unchecked-add-int k d) a1 mi1 hi1 a2 mi2 hi2)
+            (set! hi1 mi1)
+            (set! hi2 mi2)))))
+    (while (and (< lo1 hi1) (< lo2 hi2))
+      (aset dst
+            k
+            (if (< (aget a1 lo1) (aget a2 lo2))
+                (aget a1 (let [old-1 lo1] (set! lo1 (unchecked-inc-int lo1)) old-1))
+                (aget a2 (let [old-2 lo2] (set! lo2 (unchecked-inc-int lo2)) old-2))))
+      (set! k (unchecked-inc-int k)))
+    (when (or (not (identical? dst a1)) (< k lo1))
+      (while (< lo1 hi1)
+        (aset dst k (aget a1 lo1))
+        (set! k (unchecked-inc-int k))
+        (set! lo1 (unchecked-inc-int lo1))))
+    (when (or (not (identical? dst a2)) (< k lo2))
+      (while (< lo2 hi2)
+        (aset dst k (aget a2 lo2))
+        (set! k (unchecked-inc-int k))
+        (set! lo2 (unchecked-inc-int lo2)))))
+
+  (method ^:static sort ^void [^long/1 a ^int parallelism ^int low ^int high]
+    (let [size (unchecked-subtract-int high low)]
+      (if (and (> parallelism 1) (> size MIN_PARALLEL_SORT_SIZE))
+          (let [depth (DualPivotQuicksort/getDepth parallelism (bit-shift-right-int size 12))
+                ^long/1 b (when-not (== depth 0) (new long/1 size))]
+            (.invoke (Sorter. nil a b low size low depth)))
+          (DualPivotQuicksort/sort nil a 0 low high))))
+
+  (method ^:static sort ^void [^Sorter sorter ^long/1 a ^:mutable ^int bits ^int low
+                               ^:mutable ^int high]
+    (while true
+      (let [end (unchecked-subtract-int high 1)
+            size (unchecked-subtract-int high low)]
+        (when (and (< size (unchecked-add-int MAX_MIXED_INSERTION_SORT_SIZE bits))
+                   (> (bit-and-int bits 1) 0))
+          (DualPivotQuicksort/sort Long/TYPE
+                                   a
+                                   Unsafe/ARRAY_LONG_BASE_OFFSET
+                                   low
+                                   high
+                                   (method-ref SortOperation
+                                               [long/1 int int]
+                                               DualPivotQuicksort/mixedInsertionSort))
+          (return))
+        (when (< size MAX_INSERTION_SORT_SIZE)
+          (DualPivotQuicksort/sort Long/TYPE
+                                   a
+                                   Unsafe/ARRAY_LONG_BASE_OFFSET
+                                   low
+                                   high
+                                   (method-ref SortOperation
+                                               [long/1 int int]
+                                               DualPivotQuicksort/insertionSort))
+          (return))
+        (when (and (or (== bits 0) (and (> size MIN_TRY_MERGE_SIZE) (> (bit-and-int bits 1) 0)))
+                   (DualPivotQuicksort/tryMergeRuns sorter a low size))
+          (return))
+        (when (> (set! bits (unchecked-add-int bits DELTA)) MAX_RECURSION_DEPTH)
+          (DualPivotQuicksort/heapSort a low high)
+          (return))
+        (let [step (unchecked-add-int (unchecked-multiply-int (bit-shift-right-int size 3) 3) 3)
+              e1 (unchecked-add-int low step)
+              e5 (unchecked-subtract-int end step)
+              e3 (unsigned-bit-shift-right-int (unchecked-add-int e1 e5) 1)
+              e2 (unsigned-bit-shift-right-int (unchecked-add-int e1 e3) 1)
+              e4 (unsigned-bit-shift-right-int (unchecked-add-int e3 e5) 1)
+              a3 (aget a e3)]
+          (when (< (aget a e5) (aget a e2))
+            (let [t (aget a e5)] (aset a e5 (aget a e2)) (aset a e2 t)))
+          (when (< (aget a e4) (aget a e1))
+            (let [t (aget a e4)] (aset a e4 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e5) (aget a e4))
+            (let [t (aget a e5)] (aset a e5 (aget a e4)) (aset a e4 t)))
+          (when (< (aget a e2) (aget a e1))
+            (let [t (aget a e2)] (aset a e2 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e4) (aget a e2))
+            (let [t (aget a e4)] (aset a e4 (aget a e2)) (aset a e2 t)))
+          (cond
+            (< a3 (aget a e2))
+              (if (< a3 (aget a e1))
+                  (do (aset a e3 (aget a e2)) (aset a e2 (aget a e1)) (aset a e1 a3))
+                  (do (aset a e3 (aget a e2)) (aset a e2 a3)))
+            (> a3 (aget a e4))
+              (if (> a3 (aget a e5))
+                  (do (aset a e3 (aget a e4)) (aset a e4 (aget a e5)) (aset a e5 a3))
+                  (do (aset a e3 (aget a e4)) (aset a e4 a3))))
+          (let [^:mutable ^int lower 0
+                ^:mutable ^int upper 0]
+            (if (and (and (and (< (aget a e1) (aget a e2)) (< (aget a e2) (aget a e3)))
+                          (< (aget a e3) (aget a e4)))
+                     (< (aget a e4) (aget a e5)))
+                (let [pivotIndices (DualPivotQuicksort/partition
+                                     Long/TYPE
+                                     a
+                                     Unsafe/ARRAY_LONG_BASE_OFFSET
+                                     low
+                                     high
+                                     e1
+                                     e5
+                                     (method-ref
+                                       PartitionOperation
+                                       [long/1 int int int int]
+                                       DualPivotQuicksort/partitionDualPivot))]
+                  (set! lower (aget pivotIndices 0))
+                  (set! upper (aget pivotIndices 1))
+                  (if (and (> size MIN_PARALLEL_SORT_SIZE) (some? sorter))
+                      (do
+                        (.forkSorter sorter (bit-or-int bits 1) (unchecked-add-int lower 1) upper)
+                        (.forkSorter sorter (bit-or-int bits 1) (unchecked-add-int upper 1) high))
+                      (do
+                        (DualPivotQuicksort/sort
+                          sorter
+                          a
+                          (bit-or-int bits 1)
+                          (unchecked-add-int lower 1)
+                          upper)
+                        (DualPivotQuicksort/sort
+                          sorter
+                          a
+                          (bit-or-int bits 1)
+                          (unchecked-add-int upper 1)
+                          high))))
+                (let [pivotIndices (DualPivotQuicksort/partition
+                                     Long/TYPE
+                                     a
+                                     Unsafe/ARRAY_LONG_BASE_OFFSET
+                                     low
+                                     high
+                                     e3
+                                     e3
+                                     (method-ref
+                                       PartitionOperation
+                                       [long/1 int int int int]
+                                       DualPivotQuicksort/partitionSinglePivot))]
+                  (set! lower (aget pivotIndices 0))
+                  (set! upper (aget pivotIndices 1))
+                  (if (and (> size MIN_PARALLEL_SORT_SIZE) (some? sorter))
+                      (.forkSorter sorter (bit-or-int bits 1) upper high)
+                      (DualPivotQuicksort/sort sorter a (bit-or-int bits 1) upper high))))
+            (set! high lower))))))
+
+  (method ^:private ^:static ^{ForceInline true} partitionDualPivot ^int/1 [^long/1 a ^int low
+                                                                            ^int high
+                                                                            ^int pivotIndex1
+                                                                            ^int pivotIndex2]
+    (let [end (unchecked-subtract-int high 1)
+          ^:mutable lower low
+          ^:mutable upper end
+          e1 pivotIndex1
+          e5 pivotIndex2
+          pivot1 (aget a e1)
+          pivot2 (aget a e5)]
+      (aset a e1 (aget a lower))
+      (aset a e5 (aget a upper))
+      (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot1))
+      (while (> (aget a (set! upper (unchecked-dec-int upper))) pivot2))
+      (let [unused (set! lower (unchecked-dec-int lower))
+            ^:mutable k (set! upper (unchecked-inc-int upper))]
+        (while (> (set! k (unchecked-dec-int k)) lower)
+          (let [ak (aget a k)]
+            (if (< ak pivot1)
+                (while (< lower k)
+                  (when (>= (aget a (set! lower (unchecked-inc-int lower))) pivot1)
+                    (if (> (aget a lower) pivot2)
+                        (do
+                          (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                          (aset a upper (aget a lower)))
+                        (aset a k (aget a lower)))
+                    (aset a lower ak)
+                    (break)))
+                (when (> ak pivot2)
+                  (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                  (aset a upper ak))))))
+      (aset a low (aget a lower))
+      (aset a lower pivot1)
+      (aset a end (aget a upper))
+      (aset a upper pivot2)
+      (new int/1 [lower upper])))
+
+  (method ^:private ^:static ^{ForceInline true} partitionSinglePivot ^int/1 [^long/1 a ^int low
+                                                                              ^int high
+                                                                              ^int pivotIndex1
+                                                                              ^int pivotIndex2]
+    (let [end (unchecked-subtract-int high 1)
+          ^:mutable lower low
+          ^:mutable upper end
+          e3 pivotIndex1
+          pivot (aget a e3)]
+      (aset a e3 (aget a lower))
+      (let [^:mutable k (set! upper (unchecked-inc-int upper))]
+        (while (> (set! k (unchecked-dec-int k)) lower)
+          (let [ak (aget a k)]
+            (when-not (== ak pivot)
+              (aset a k pivot)
+              (if (< ak pivot)
+                  (do
+                    (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot))
+                    (when (> (aget a lower) pivot)
+                      (aset a (set! upper (unchecked-dec-int upper)) (aget a lower)))
+                    (aset a lower ak))
+                  (aset a (set! upper (unchecked-dec-int upper)) ak))))))
+      (aset a low (aget a lower))
+      (aset a lower pivot)
+      (new int/1 [lower upper])))
+
+  (method ^:private ^:static mixedInsertionSort ^void [^long/1 a ^:mutable ^int low ^int high]
+    (let [size (unchecked-subtract-int high low)
+          end (unchecked-subtract-int high
+                                      (unchecked-multiply-int
+                                        3
+                                        (bit-shift-left-int (bit-shift-right-int size 5) 3)))]
+      (if (== end high)
+          (let [^:mutable ^int i 0]
+            (while (< (set! low (unchecked-inc-int low)) end)
+              (let [ai (aget a (set! i low))]
+                (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                  (aset a (unchecked-add-int i 1) (aget a i)))
+                (aset a (unchecked-add-int i 1) ai))))
+          (let [pin (aget a end)]
+            (let [^:mutable ^int i 0
+                  ^:mutable p high]
+              (while (< (set! low (unchecked-inc-int low)) end)
+                (let [^:mutable ai (aget a (set! i low))]
+                  (if (< ai (aget a (unchecked-subtract-int i 1)))
+                      (do
+                        (aset a i (aget a (set! i (unchecked-dec-int i))))
+                        (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) ai))
+                      (when (and (> p i) (> ai pin))
+                        (while (> (aget a (set! p (unchecked-dec-int p))) pin))
+                        (when (> p i) (set! ai (aget a p)) (aset a p (aget a i)))
+                        (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) ai))))))
+            (let [^:mutable ^int i 0]
+              (while (< low high)
+                (let [a1 (aget a (set! i low))
+                      a2 (aget a (set! low (unchecked-inc-int low)))]
+                  (if (> a1 a2)
+                      (do
+                        (while (< a1 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 2) (aget a i)))
+                        (aset a (unchecked-add-int (set! i (unchecked-inc-int i)) 1) a1)
+                        (while (< a2 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) a2))
+                      (when (< a1 (aget a (unchecked-subtract-int i 1)))
+                        (while (< a2 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 2) (aget a i)))
+                        (aset a (unchecked-add-int (set! i (unchecked-inc-int i)) 1) a2)
+                        (while (< a1 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) a1))))
+                (set! low (unchecked-inc-int low))))))))
+
+  (method ^:private ^:static insertionSort ^void [^long/1 a ^int low ^int high]
+    (let [^:mutable ^int i 0
+          ^:mutable k low]
+      (while (< (set! k (unchecked-inc-int k)) high)
+        (let [ai (aget a (set! i k))]
+          (when (< ai (aget a (unchecked-subtract-int i 1)))
+            (while (and (>= (set! i (unchecked-dec-int i)) low) (< ai (aget a i)))
+              (aset a (unchecked-add-int i 1) (aget a i)))
+            (aset a (unchecked-add-int i 1) ai))))))
+
+  (method ^:private ^:static heapSort ^void [^long/1 a ^int low ^:mutable ^int high]
+    (let [^:mutable k (unsigned-bit-shift-right-int (unchecked-add-int low high) 1)]
+      (while (> k low)
+        (DualPivotQuicksort/pushDown a (set! k (unchecked-dec-int k)) (aget a k) low high)))
+    (while (> (set! high (unchecked-dec-int high)) low)
+      (let [max (aget a low)]
+        (DualPivotQuicksort/pushDown a low (aget a high) low high)
+        (aset a high max))))
+
+  (method ^:private ^:static pushDown ^void [^long/1 a ^:mutable ^int p ^long value ^int low
+                                             ^int high]
+    (let [^:mutable ^int k 0]
+      (while true
+        (set! k (unchecked-add-int (unchecked-subtract-int (bit-shift-left-int p 1) low) 2))
+        (when (> k high) (break))
+        (when (or (== k high) (< (aget a k) (aget a (unchecked-subtract-int k 1))))
+          (set! k (unchecked-dec-int k)))
+        (when (<= (aget a k) value) (break))
+        (aset a p (aget a (set! p k)))))
+    (aset a p value))
+
+  (method ^:private ^:static tryMergeRuns ^boolean [^Sorter sorter ^long/1 a ^int low ^int size]
+    (let [^:mutable ^int/1 run nil
+          high (unchecked-add-int low size)
+          ^:mutable ^int count 1
+          ^:mutable last low]
+      (let [^:mutable k (unchecked-add-int low 1)]
+        (while (< k high)
+          (cond
+            (< (aget a (unchecked-subtract-int k 1)) (aget a k))
+              (while (and (< (set! k (unchecked-inc-int k)) high)
+                          (<= (aget a (unchecked-subtract-int k 1)) (aget a k))))
+            (> (aget a (unchecked-subtract-int k 1)) (aget a k))
+              (do
+                (while (and (< (set! k (unchecked-inc-int k)) high)
+                            (>= (aget a (unchecked-subtract-int k 1)) (aget a k))))
+                (let [^:mutable i (unchecked-subtract-int last 1)
+                      ^:mutable j k]
+                  (while (and (< (set! i (unchecked-inc-int i)) (set! j (unchecked-dec-int j)))
+                              (> (aget a i) (aget a j)))
+                    (let [ai (aget a i)] (aset a i (aget a j)) (aset a j ai)))))
+            :else
+              (do
+                (loop [ak (aget a k)]
+                  (when (and (< (set! k (unchecked-inc-int k)) high) (== ak (aget a k))) (recur ak)))
+                (when (< k high) (continue))))
+          (if (nil? run)
+              (do
+                (when (== k high) (return true))
+                (when (< (unchecked-subtract-int k low) MIN_FIRST_RUN_SIZE) (return false))
+                (set! run
+                      (new int/1
+                           (bit-and-int (bit-or-int (bit-shift-right-int size 10) 0x7F) 0x3FF)))
+                (aset run 0 low))
+              (when (> (aget a (unchecked-subtract-int last 1)) (aget a last))
+                (when (> count
+                         (bit-shift-right-int (unchecked-subtract-int k low) MIN_FIRST_RUNS_FACTOR))
+                  (return false))
+                (when (== (set! count (unchecked-inc-int count)) MAX_RUN_CAPACITY) (return false))
+                (when (== count (alength run))
+                  (set! run (Arrays/copyOf run (bit-shift-left-int count 1))))))
+          (aset run count (set! last k))))
+      (when (> count 1)
+        (let [^:mutable ^long/1 b nil
+              ^:mutable offset low]
+          (if (or (nil? sorter) (nil? (set! b (cast long/1 (.-b sorter)))))
+              (set! b (new long/1 size))
+              (set! offset (.-offset sorter)))
+          (DualPivotQuicksort/mergeRuns a b offset 1 (some? sorter) run 0 count)))
+      true))
+
+  (method ^:private ^:static mergeRuns ^long/1 [^long/1 a ^long/1 b ^int offset ^int aim
+                                                ^boolean parallel ^int/1 run ^int lo ^int hi]
+    (if (== (unchecked-subtract-int hi lo) 1)
+        (if (>= aim 0)
+            a
+            (do
+              (let [^:mutable i (aget run hi)
+                    ^:mutable j (unchecked-subtract-int i offset)
+                    low (aget run lo)]
+                (while (> i low)
+                  (aset b (set! j (unchecked-dec-int j)) (aget a (set! i (unchecked-dec-int i))))))
+              b))
+        (let [^:mutable mi lo
+              rmi (unsigned-bit-shift-right-int (unchecked-add-int (aget run lo) (aget run hi)) 1)]
+          (while (<= (aget run (unchecked-add-int (set! mi (unchecked-inc-int mi)) 1)) rmi))
+          (let [^:mutable ^long/1 a1 nil
+                ^:mutable ^long/1 a2 nil]
+            (if (and parallel (> (unchecked-subtract-int hi lo) MIN_RUN_COUNT))
+                (let [merger (.forkMe (RunMerger. a b offset 0 run mi hi))]
+                  (set! a1
+                        (DualPivotQuicksort/mergeRuns
+                          a
+                          b
+                          offset
+                          (unchecked-negate-int aim)
+                          true
+                          run
+                          lo
+                          mi))
+                  (set! a2 (cast long/1 (.getDestination merger))))
+                (do
+                  (set! a1
+                        (DualPivotQuicksort/mergeRuns
+                          a
+                          b
+                          offset
+                          (unchecked-negate-int aim)
+                          false
+                          run
+                          lo
+                          mi))
+                  (set! a2 (DualPivotQuicksort/mergeRuns a b offset 0 false run mi hi))))
+            (let [^long/1 dst (if (identical? a1 a) b a)
+                  ^int k (if (identical? a1 a)
+                             (unchecked-subtract-int (aget run lo) offset)
+                             (aget run lo))
+                  ^int lo1 (if (identical? a1 b)
+                               (unchecked-subtract-int (aget run lo) offset)
+                               (aget run lo))
+                  ^int hi1 (if (identical? a1 b)
+                               (unchecked-subtract-int (aget run mi) offset)
+                               (aget run mi))
+                  ^int lo2 (if (identical? a2 b)
+                               (unchecked-subtract-int (aget run mi) offset)
+                               (aget run mi))
+                  ^int hi2 (if (identical? a2 b)
+                               (unchecked-subtract-int (aget run hi) offset)
+                               (aget run hi))]
+              (if parallel
+                  (.invoke (Merger. nil dst k a1 lo1 hi1 a2 lo2 hi2))
+                  (DualPivotQuicksort/mergeParts nil dst k a1 lo1 hi1 a2 lo2 hi2))
+              dst)))))
+
+  (method ^:private ^:static mergeParts ^void [^Merger merger ^long/1 dst ^:mutable ^int k
+                                               ^long/1 a1 ^:mutable ^int lo1 ^:mutable ^int hi1
+                                               ^long/1 a2 ^:mutable ^int lo2 ^:mutable ^int hi2]
+    (when (and (some? merger) (identical? a1 a2))
+      (while true
+        (when (< (unchecked-subtract-int hi1 lo1) (unchecked-subtract-int hi2 lo2))
+          (let [lo lo1] (set! lo1 lo2) (set! lo2 lo) (let [hi hi1] (set! hi1 hi2) (set! hi2 hi))))
+        (when (< (unchecked-subtract-int hi1 lo1) MIN_PARALLEL_MERGE_PARTS_SIZE) (break))
+        (let [mi1 (unsigned-bit-shift-right-int (unchecked-add-int lo1 hi1) 1)
+              key (aget a1 mi1)
+              ^:mutable mi2 hi2]
+          (let [^:mutable loo lo2]
+            (while (< loo mi2)
+              (let [t (unsigned-bit-shift-right-int (unchecked-add-int loo mi2) 1)]
+                (if (> key (aget a2 t)) (set! loo (unchecked-add-int t 1)) (set! mi2 t)))))
+          (let [d (unchecked-subtract-int (unchecked-add-int (unchecked-subtract-int mi2 lo2) mi1)
+                                          lo1)]
+            (.forkMerger merger dst (unchecked-add-int k d) a1 mi1 hi1 a2 mi2 hi2)
+            (set! hi1 mi1)
+            (set! hi2 mi2)))))
+    (while (and (< lo1 hi1) (< lo2 hi2))
+      (aset dst
+            k
+            (if (< (aget a1 lo1) (aget a2 lo2))
+                (aget a1 (let [old-3 lo1] (set! lo1 (unchecked-inc-int lo1)) old-3))
+                (aget a2 (let [old-4 lo2] (set! lo2 (unchecked-inc-int lo2)) old-4))))
+      (set! k (unchecked-inc-int k)))
+    (when (or (not (identical? dst a1)) (< k lo1))
+      (while (< lo1 hi1)
+        (aset dst k (aget a1 lo1))
+        (set! k (unchecked-inc-int k))
+        (set! lo1 (unchecked-inc-int lo1))))
+    (when (or (not (identical? dst a2)) (< k lo2))
+      (while (< lo2 hi2)
+        (aset dst k (aget a2 lo2))
+        (set! k (unchecked-inc-int k))
+        (set! lo2 (unchecked-inc-int lo2)))))
+
+  (method ^:static sort ^void [^byte/1 a ^int low ^int high]
+    (if (> (unchecked-subtract-int high low) MIN_BYTE_COUNTING_SORT_SIZE)
+        (DualPivotQuicksort/countingSort a low high)
+        (DualPivotQuicksort/insertionSort a low high)))
+
+  (method ^:private ^:static insertionSort ^void [^byte/1 a ^int low ^int high]
+    (let [^:mutable ^int i 0
+          ^:mutable k low]
+      (while (< (set! k (unchecked-inc-int k)) high)
+        (let [ai (aget a (set! i k))]
+          (when (< ai (aget a (unchecked-subtract-int i 1)))
+            (while (and (>= (set! i (unchecked-dec-int i)) low) (< ai (aget a i)))
+              (aset a (unchecked-add-int i 1) (aget a i)))
+            (aset a (unchecked-add-int i 1) ai))))))
+
+  (field ^:private ^:static ^:final ^int NUM_BYTE_VALUES (bit-shift-left-int 1 8))
+
+  (field ^:private ^:static ^:final ^int MAX_BYTE_INDEX
+    (unchecked-add-int (unchecked-add-int Byte/MAX_VALUE NUM_BYTE_VALUES) 1))
+
+  (method ^:private ^:static countingSort ^void [^byte/1 a ^:mutable ^int low ^:mutable ^int high]
+    (let [count (new int/1 NUM_BYTE_VALUES)]
+      (let [^:mutable i high]
+        (while (> i low)
+          (let [i-5 (bit-and-int (aget a (set! i (unchecked-dec-int i))) 0xFF)]
+            (aset count i-5 (unchecked-inc-int (aget count i-5))))))
+      (if (> (unchecked-subtract-int high low) NUM_BYTE_VALUES)
+          (let [^:mutable i MAX_BYTE_INDEX]
+            (while (> (set! i (unchecked-dec-int i)) Byte/MAX_VALUE)
+              (let [value (bit-and-int i 0xFF)]
+                (set! low (unchecked-subtract-int high (aget count value)))
+                (while (> high low)
+                  (aset a (set! high (unchecked-dec-int high)) (unchecked-byte value))))))
+          (let [^:mutable i MAX_BYTE_INDEX]
+            (while (> high low)
+              (while (== (aget count (bit-and-int (set! i (unchecked-dec-int i)) 0xFF)) 0))
+              (let [value (bit-and-int i 0xFF)
+                    ^:mutable c (aget count value)]
+                (loop []
+                  (aset a (set! high (unchecked-dec-int high)) (unchecked-byte value))
+                  (when (> (set! c (unchecked-dec-int c)) 0) (recur)))))))))
+
+  (method ^:static sort ^void [^char/1 a ^int low ^int high]
+    (if (> (unchecked-subtract-int high low) MIN_SHORT_OR_CHAR_COUNTING_SORT_SIZE)
+        (DualPivotQuicksort/countingSort a low high)
+        (DualPivotQuicksort/sort a 0 low high)))
+
+  (method ^:static sort ^void [^char/1 a ^:mutable ^int bits ^int low ^:mutable ^int high]
+    (while true
+      (let [end (unchecked-subtract-int high 1)
+            size (unchecked-subtract-int high low)]
+        (when (< size MAX_INSERTION_SORT_SIZE)
+          (DualPivotQuicksort/insertionSort a low high)
+          (return))
+        (when (> (set! bits (unchecked-add-int bits DELTA)) MAX_RECURSION_DEPTH)
+          (DualPivotQuicksort/countingSort a low high)
+          (return))
+        (let [step (unchecked-add-int (unchecked-multiply-int (bit-shift-right-int size 3) 3) 3)
+              e1 (unchecked-add-int low step)
+              e5 (unchecked-subtract-int end step)
+              e3 (unsigned-bit-shift-right-int (unchecked-add-int e1 e5) 1)
+              e2 (unsigned-bit-shift-right-int (unchecked-add-int e1 e3) 1)
+              e4 (unsigned-bit-shift-right-int (unchecked-add-int e3 e5) 1)
+              a3 (aget a e3)]
+          (when (< (aget a e5) (aget a e2))
+            (let [t (aget a e5)] (aset a e5 (aget a e2)) (aset a e2 t)))
+          (when (< (aget a e4) (aget a e1))
+            (let [t (aget a e4)] (aset a e4 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e5) (aget a e4))
+            (let [t (aget a e5)] (aset a e5 (aget a e4)) (aset a e4 t)))
+          (when (< (aget a e2) (aget a e1))
+            (let [t (aget a e2)] (aset a e2 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e4) (aget a e2))
+            (let [t (aget a e4)] (aset a e4 (aget a e2)) (aset a e2 t)))
+          (cond
+            (< a3 (aget a e2))
+              (if (< a3 (aget a e1))
+                  (do (aset a e3 (aget a e2)) (aset a e2 (aget a e1)) (aset a e1 a3))
+                  (do (aset a e3 (aget a e2)) (aset a e2 a3)))
+            (> a3 (aget a e4))
+              (if (> a3 (aget a e5))
+                  (do (aset a e3 (aget a e4)) (aset a e4 (aget a e5)) (aset a e5 a3))
+                  (do (aset a e3 (aget a e4)) (aset a e4 a3))))
+          (let [^:mutable lower low
+                ^:mutable upper end]
+            (if (and (and (and (< (aget a e1) (aget a e2)) (< (aget a e2) (aget a e3)))
+                          (< (aget a e3) (aget a e4)))
+                     (< (aget a e4) (aget a e5)))
+                (let [pivot1 (aget a e1)
+                      pivot2 (aget a e5)]
+                  (aset a e1 (aget a lower))
+                  (aset a e5 (aget a upper))
+                  (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot1))
+                  (while (> (aget a (set! upper (unchecked-dec-int upper))) pivot2))
+                  (let [unused (set! lower (unchecked-dec-int lower))
+                        ^:mutable k (set! upper (unchecked-inc-int upper))]
+                    (while (> (set! k (unchecked-dec-int k)) lower)
+                      (let [ak (aget a k)]
+                        (if (< ak pivot1)
+                            (while (< lower k)
+                              (when (>= (aget a (set! lower (unchecked-inc-int lower))) pivot1)
+                                (if (> (aget a lower) pivot2)
+                                    (do
+                                      (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                                      (aset a upper (aget a lower)))
+                                    (aset a k (aget a lower)))
+                                (aset a lower ak)
+                                (break)))
+                            (when (> ak pivot2)
+                              (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                              (aset a upper ak))))))
+                  (aset a low (aget a lower))
+                  (aset a lower pivot1)
+                  (aset a end (aget a upper))
+                  (aset a upper pivot2)
+                  (DualPivotQuicksort/sort a (bit-or-int bits 1) (unchecked-add-int lower 1) upper)
+                  (DualPivotQuicksort/sort a (bit-or-int bits 1) (unchecked-add-int upper 1) high))
+                (let [pivot (aget a e3)]
+                  (aset a e3 (aget a lower))
+                  (let [^:mutable k (set! upper (unchecked-inc-int upper))]
+                    (while (> (set! k (unchecked-dec-int k)) lower)
+                      (let [ak (aget a k)]
+                        (when-not (== ak pivot)
+                          (aset a k pivot)
+                          (if (< ak pivot)
+                              (do
+                                (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot))
+                                (when (> (aget a lower) pivot)
+                                  (aset a (set! upper (unchecked-dec-int upper)) (aget a lower)))
+                                (aset a lower ak))
+                              (aset a (set! upper (unchecked-dec-int upper)) ak))))))
+                  (aset a low (aget a lower))
+                  (aset a lower pivot)
+                  (DualPivotQuicksort/sort a (bit-or-int bits 1) upper high)))
+            (set! high lower))))))
+
+  (method ^:private ^:static insertionSort ^void [^char/1 a ^int low ^int high]
+    (let [^:mutable ^int i 0
+          ^:mutable k low]
+      (while (< (set! k (unchecked-inc-int k)) high)
+        (let [ai (aget a (set! i k))]
+          (when (< ai (aget a (unchecked-subtract-int i 1)))
+            (while (and (>= (set! i (unchecked-dec-int i)) low) (< ai (aget a i)))
+              (aset a (unchecked-add-int i 1) (aget a i)))
+            (aset a (unchecked-add-int i 1) ai))))))
+
+  (field ^:private ^:static ^:final ^int NUM_CHAR_VALUES (bit-shift-left-int 1 16))
+
+  (method ^:private ^:static countingSort ^void [^char/1 a ^:mutable ^int low ^:mutable ^int high]
+    (let [count (new int/1 NUM_CHAR_VALUES)]
+      (let [^:mutable i high]
+        (while (> i low)
+          (let [i-6 (aget a (set! i (unchecked-dec-int i)))]
+            (aset count i-6 (unchecked-inc-int (aget count i-6))))))
+      (if (> (unchecked-subtract-int high low) NUM_CHAR_VALUES)
+          (let [^:mutable i NUM_CHAR_VALUES]
+            (while (> i 0)
+              (set! low (unchecked-subtract-int high (aget count (set! i (unchecked-dec-int i)))))
+              (while (> high low) (aset a (set! high (unchecked-dec-int high)) (unchecked-char i)))))
+          (let [^:mutable i NUM_CHAR_VALUES]
+            (while (> high low)
+              (while (== (aget count (set! i (unchecked-dec-int i))) 0))
+              (let [^:mutable c (aget count i)]
+                (loop []
+                  (aset a (set! high (unchecked-dec-int high)) (unchecked-char i))
+                  (when (> (set! c (unchecked-dec-int c)) 0) (recur)))))))))
+
+  (method ^:static sort ^void [^short/1 a ^int low ^int high]
+    (if (> (unchecked-subtract-int high low) MIN_SHORT_OR_CHAR_COUNTING_SORT_SIZE)
+        (DualPivotQuicksort/countingSort a low high)
+        (DualPivotQuicksort/sort a 0 low high)))
+
+  (method ^:static sort ^void [^short/1 a ^:mutable ^int bits ^int low ^:mutable ^int high]
+    (while true
+      (let [end (unchecked-subtract-int high 1)
+            size (unchecked-subtract-int high low)]
+        (when (< size MAX_INSERTION_SORT_SIZE)
+          (DualPivotQuicksort/insertionSort a low high)
+          (return))
+        (when (> (set! bits (unchecked-add-int bits DELTA)) MAX_RECURSION_DEPTH)
+          (DualPivotQuicksort/countingSort a low high)
+          (return))
+        (let [step (unchecked-add-int (unchecked-multiply-int (bit-shift-right-int size 3) 3) 3)
+              e1 (unchecked-add-int low step)
+              e5 (unchecked-subtract-int end step)
+              e3 (unsigned-bit-shift-right-int (unchecked-add-int e1 e5) 1)
+              e2 (unsigned-bit-shift-right-int (unchecked-add-int e1 e3) 1)
+              e4 (unsigned-bit-shift-right-int (unchecked-add-int e3 e5) 1)
+              a3 (aget a e3)]
+          (when (< (aget a e5) (aget a e2))
+            (let [t (aget a e5)] (aset a e5 (aget a e2)) (aset a e2 t)))
+          (when (< (aget a e4) (aget a e1))
+            (let [t (aget a e4)] (aset a e4 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e5) (aget a e4))
+            (let [t (aget a e5)] (aset a e5 (aget a e4)) (aset a e4 t)))
+          (when (< (aget a e2) (aget a e1))
+            (let [t (aget a e2)] (aset a e2 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e4) (aget a e2))
+            (let [t (aget a e4)] (aset a e4 (aget a e2)) (aset a e2 t)))
+          (cond
+            (< a3 (aget a e2))
+              (if (< a3 (aget a e1))
+                  (do (aset a e3 (aget a e2)) (aset a e2 (aget a e1)) (aset a e1 a3))
+                  (do (aset a e3 (aget a e2)) (aset a e2 a3)))
+            (> a3 (aget a e4))
+              (if (> a3 (aget a e5))
+                  (do (aset a e3 (aget a e4)) (aset a e4 (aget a e5)) (aset a e5 a3))
+                  (do (aset a e3 (aget a e4)) (aset a e4 a3))))
+          (let [^:mutable lower low
+                ^:mutable upper end]
+            (if (and (and (and (< (aget a e1) (aget a e2)) (< (aget a e2) (aget a e3)))
+                          (< (aget a e3) (aget a e4)))
+                     (< (aget a e4) (aget a e5)))
+                (let [pivot1 (aget a e1)
+                      pivot2 (aget a e5)]
+                  (aset a e1 (aget a lower))
+                  (aset a e5 (aget a upper))
+                  (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot1))
+                  (while (> (aget a (set! upper (unchecked-dec-int upper))) pivot2))
+                  (let [unused (set! lower (unchecked-dec-int lower))
+                        ^:mutable k (set! upper (unchecked-inc-int upper))]
+                    (while (> (set! k (unchecked-dec-int k)) lower)
+                      (let [ak (aget a k)]
+                        (if (< ak pivot1)
+                            (while (< lower k)
+                              (when (>= (aget a (set! lower (unchecked-inc-int lower))) pivot1)
+                                (if (> (aget a lower) pivot2)
+                                    (do
+                                      (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                                      (aset a upper (aget a lower)))
+                                    (aset a k (aget a lower)))
+                                (aset a lower ak)
+                                (break)))
+                            (when (> ak pivot2)
+                              (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                              (aset a upper ak))))))
+                  (aset a low (aget a lower))
+                  (aset a lower pivot1)
+                  (aset a end (aget a upper))
+                  (aset a upper pivot2)
+                  (DualPivotQuicksort/sort a (bit-or-int bits 1) (unchecked-add-int lower 1) upper)
+                  (DualPivotQuicksort/sort a (bit-or-int bits 1) (unchecked-add-int upper 1) high))
+                (let [pivot (aget a e3)]
+                  (aset a e3 (aget a lower))
+                  (let [^:mutable k (set! upper (unchecked-inc-int upper))]
+                    (while (> (set! k (unchecked-dec-int k)) lower)
+                      (let [ak (aget a k)]
+                        (when-not (== ak pivot)
+                          (aset a k pivot)
+                          (if (< ak pivot)
+                              (do
+                                (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot))
+                                (when (> (aget a lower) pivot)
+                                  (aset a (set! upper (unchecked-dec-int upper)) (aget a lower)))
+                                (aset a lower ak))
+                              (aset a (set! upper (unchecked-dec-int upper)) ak))))))
+                  (aset a low (aget a lower))
+                  (aset a lower pivot)
+                  (DualPivotQuicksort/sort a (bit-or-int bits 1) upper high)))
+            (set! high lower))))))
+
+  (method ^:private ^:static insertionSort ^void [^short/1 a ^int low ^int high]
+    (let [^:mutable ^int i 0
+          ^:mutable k low]
+      (while (< (set! k (unchecked-inc-int k)) high)
+        (let [ai (aget a (set! i k))]
+          (when (< ai (aget a (unchecked-subtract-int i 1)))
+            (while (and (>= (set! i (unchecked-dec-int i)) low) (< ai (aget a i)))
+              (aset a (unchecked-add-int i 1) (aget a i)))
+            (aset a (unchecked-add-int i 1) ai))))))
+
+  (field ^:private ^:static ^:final ^int NUM_SHORT_VALUES (bit-shift-left-int 1 16))
+
+  (field ^:private ^:static ^:final ^int MAX_SHORT_INDEX
+    (unchecked-add-int (unchecked-add-int Short/MAX_VALUE NUM_SHORT_VALUES) 1))
+
+  (method ^:private ^:static countingSort ^void [^short/1 a ^:mutable ^int low ^:mutable ^int high]
+    (let [count (new int/1 NUM_SHORT_VALUES)]
+      (let [^:mutable i high]
+        (while (> i low)
+          (let [i-7 (bit-and-int (aget a (set! i (unchecked-dec-int i))) 0xFFFF)]
+            (aset count i-7 (unchecked-inc-int (aget count i-7))))))
+      (if (> (unchecked-subtract-int high low) NUM_SHORT_VALUES)
+          (let [^:mutable i MAX_SHORT_INDEX]
+            (while (> (set! i (unchecked-dec-int i)) Short/MAX_VALUE)
+              (let [value (bit-and-int i 0xFFFF)]
+                (set! low (unchecked-subtract-int high (aget count value)))
+                (while (> high low)
+                  (aset a (set! high (unchecked-dec-int high)) (unchecked-short value))))))
+          (let [^:mutable i MAX_SHORT_INDEX]
+            (while (> high low)
+              (while (== (aget count (bit-and-int (set! i (unchecked-dec-int i)) 0xFFFF)) 0))
+              (let [value (bit-and-int i 0xFFFF)
+                    ^:mutable c (aget count value)]
+                (loop []
+                  (aset a (set! high (unchecked-dec-int high)) (unchecked-short value))
+                  (when (> (set! c (unchecked-dec-int c)) 0) (recur)))))))))
+
+  (method ^:static sort ^void [^float/1 a ^int parallelism ^:mutable ^int low ^:mutable ^int high]
+    (let [^:mutable ^int numNegativeZero 0]
+      (let [^:mutable k high]
+        (while (> k low)
+          (let [ak (aget a (set! k (unchecked-dec-int k)))]
+            (if (and (== ak (float 0.0)) (< (Float/floatToRawIntBits ak) 0))
+                (do
+                  (set! numNegativeZero (unchecked-add-int numNegativeZero 1))
+                  (aset a k (float 0.0)))
+                (when-not (== ak ak)
+                  (aset a k (aget a (set! high (unchecked-dec-int high))))
+                  (aset a high ak))))))
+      (let [size (unchecked-subtract-int high low)]
+        (if (and (> parallelism 1) (> size MIN_PARALLEL_SORT_SIZE))
+            (let [depth (DualPivotQuicksort/getDepth parallelism (bit-shift-right-int size 12))
+                  ^float/1 b (when-not (== depth 0) (new float/1 size))]
+              (.invoke (Sorter. nil a b low size low depth)))
+            (DualPivotQuicksort/sort nil a 0 low high))
+        (when-not (== (set! numNegativeZero (unchecked-inc-int numNegativeZero)) 1)
+          (while (<= low high)
+            (let [middle (unsigned-bit-shift-right-int (unchecked-add-int low high) 1)]
+              (if (< (aget a middle) (unchecked-float 0))
+                  (set! low (unchecked-add-int middle 1))
+                  (set! high (unchecked-subtract-int middle 1)))))
+          (while (> (set! numNegativeZero (unchecked-dec-int numNegativeZero)) 0)
+            (aset a (set! high (unchecked-inc-int high)) (unchecked-negate-float (float 0.0))))))))
+
+  (method ^:static sort ^void [^Sorter sorter ^float/1 a ^:mutable ^int bits ^int low
+                               ^:mutable ^int high]
+    (while true
+      (let [end (unchecked-subtract-int high 1)
+            size (unchecked-subtract-int high low)]
+        (when (and (< size (unchecked-add-int MAX_MIXED_INSERTION_SORT_SIZE bits))
+                   (> (bit-and-int bits 1) 0))
+          (DualPivotQuicksort/sort Float/TYPE
+                                   a
+                                   Unsafe/ARRAY_FLOAT_BASE_OFFSET
+                                   low
+                                   high
+                                   (method-ref SortOperation
+                                               [float/1 int int]
+                                               DualPivotQuicksort/mixedInsertionSort))
+          (return))
+        (when (< size MAX_INSERTION_SORT_SIZE)
+          (DualPivotQuicksort/sort Float/TYPE
+                                   a
+                                   Unsafe/ARRAY_FLOAT_BASE_OFFSET
+                                   low
+                                   high
+                                   (method-ref SortOperation
+                                               [float/1 int int]
+                                               DualPivotQuicksort/insertionSort))
+          (return))
+        (when (and (or (== bits 0) (and (> size MIN_TRY_MERGE_SIZE) (> (bit-and-int bits 1) 0)))
+                   (DualPivotQuicksort/tryMergeRuns sorter a low size))
+          (return))
+        (when (> (set! bits (unchecked-add-int bits DELTA)) MAX_RECURSION_DEPTH)
+          (DualPivotQuicksort/heapSort a low high)
+          (return))
+        (let [step (unchecked-add-int (unchecked-multiply-int (bit-shift-right-int size 3) 3) 3)
+              e1 (unchecked-add-int low step)
+              e5 (unchecked-subtract-int end step)
+              e3 (unsigned-bit-shift-right-int (unchecked-add-int e1 e5) 1)
+              e2 (unsigned-bit-shift-right-int (unchecked-add-int e1 e3) 1)
+              e4 (unsigned-bit-shift-right-int (unchecked-add-int e3 e5) 1)
+              a3 (aget a e3)]
+          (when (< (aget a e5) (aget a e2))
+            (let [t (aget a e5)] (aset a e5 (aget a e2)) (aset a e2 t)))
+          (when (< (aget a e4) (aget a e1))
+            (let [t (aget a e4)] (aset a e4 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e5) (aget a e4))
+            (let [t (aget a e5)] (aset a e5 (aget a e4)) (aset a e4 t)))
+          (when (< (aget a e2) (aget a e1))
+            (let [t (aget a e2)] (aset a e2 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e4) (aget a e2))
+            (let [t (aget a e4)] (aset a e4 (aget a e2)) (aset a e2 t)))
+          (cond
+            (< a3 (aget a e2))
+              (if (< a3 (aget a e1))
+                  (do (aset a e3 (aget a e2)) (aset a e2 (aget a e1)) (aset a e1 a3))
+                  (do (aset a e3 (aget a e2)) (aset a e2 a3)))
+            (> a3 (aget a e4))
+              (if (> a3 (aget a e5))
+                  (do (aset a e3 (aget a e4)) (aset a e4 (aget a e5)) (aset a e5 a3))
+                  (do (aset a e3 (aget a e4)) (aset a e4 a3))))
+          (let [^:mutable ^int lower 0
+                ^:mutable ^int upper 0]
+            (if (and (and (and (< (aget a e1) (aget a e2)) (< (aget a e2) (aget a e3)))
+                          (< (aget a e3) (aget a e4)))
+                     (< (aget a e4) (aget a e5)))
+                (let [pivotIndices (DualPivotQuicksort/partition
+                                     Float/TYPE
+                                     a
+                                     Unsafe/ARRAY_FLOAT_BASE_OFFSET
+                                     low
+                                     high
+                                     e1
+                                     e5
+                                     (method-ref
+                                       PartitionOperation
+                                       [float/1 int int int int]
+                                       DualPivotQuicksort/partitionDualPivot))]
+                  (set! lower (aget pivotIndices 0))
+                  (set! upper (aget pivotIndices 1))
+                  (if (and (> size MIN_PARALLEL_SORT_SIZE) (some? sorter))
+                      (do
+                        (.forkSorter sorter (bit-or-int bits 1) (unchecked-add-int lower 1) upper)
+                        (.forkSorter sorter (bit-or-int bits 1) (unchecked-add-int upper 1) high))
+                      (do
+                        (DualPivotQuicksort/sort
+                          sorter
+                          a
+                          (bit-or-int bits 1)
+                          (unchecked-add-int lower 1)
+                          upper)
+                        (DualPivotQuicksort/sort
+                          sorter
+                          a
+                          (bit-or-int bits 1)
+                          (unchecked-add-int upper 1)
+                          high))))
+                (let [pivotIndices (DualPivotQuicksort/partition
+                                     Float/TYPE
+                                     a
+                                     Unsafe/ARRAY_FLOAT_BASE_OFFSET
+                                     low
+                                     high
+                                     e3
+                                     e3
+                                     (method-ref
+                                       PartitionOperation
+                                       [float/1 int int int int]
+                                       DualPivotQuicksort/partitionSinglePivot))]
+                  (set! lower (aget pivotIndices 0))
+                  (set! upper (aget pivotIndices 1))
+                  (if (and (> size MIN_PARALLEL_SORT_SIZE) (some? sorter))
+                      (.forkSorter sorter (bit-or-int bits 1) upper high)
+                      (DualPivotQuicksort/sort sorter a (bit-or-int bits 1) upper high))))
+            (set! high lower))))))
+
+  (method ^:private ^:static ^{ForceInline true} partitionDualPivot ^int/1 [^float/1 a ^int low
+                                                                            ^int high
+                                                                            ^int pivotIndex1
+                                                                            ^int pivotIndex2]
+    (let [end (unchecked-subtract-int high 1)
+          ^:mutable lower low
+          ^:mutable upper end
+          e1 pivotIndex1
+          e5 pivotIndex2
+          pivot1 (aget a e1)
+          pivot2 (aget a e5)]
+      (aset a e1 (aget a lower))
+      (aset a e5 (aget a upper))
+      (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot1))
+      (while (> (aget a (set! upper (unchecked-dec-int upper))) pivot2))
+      (let [unused (set! lower (unchecked-dec-int lower))
+            ^:mutable k (set! upper (unchecked-inc-int upper))]
+        (while (> (set! k (unchecked-dec-int k)) lower)
+          (let [ak (aget a k)]
+            (if (< ak pivot1)
+                (while (< lower k)
+                  (when (>= (aget a (set! lower (unchecked-inc-int lower))) pivot1)
+                    (if (> (aget a lower) pivot2)
+                        (do
+                          (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                          (aset a upper (aget a lower)))
+                        (aset a k (aget a lower)))
+                    (aset a lower ak)
+                    (break)))
+                (when (> ak pivot2)
+                  (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                  (aset a upper ak))))))
+      (aset a low (aget a lower))
+      (aset a lower pivot1)
+      (aset a end (aget a upper))
+      (aset a upper pivot2)
+      (new int/1 [lower upper])))
+
+  (method ^:private ^:static ^{ForceInline true} partitionSinglePivot ^int/1 [^float/1 a ^int low
+                                                                              ^int high
+                                                                              ^int pivotIndex1
+                                                                              ^int pivotIndex2]
+    (let [end (unchecked-subtract-int high 1)
+          ^:mutable lower low
+          ^:mutable upper end
+          e3 pivotIndex1
+          pivot (aget a e3)]
+      (aset a e3 (aget a lower))
+      (let [^:mutable k (set! upper (unchecked-inc-int upper))]
+        (while (> (set! k (unchecked-dec-int k)) lower)
+          (let [ak (aget a k)]
+            (when-not (== ak pivot)
+              (aset a k pivot)
+              (if (< ak pivot)
+                  (do
+                    (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot))
+                    (when (> (aget a lower) pivot)
+                      (aset a (set! upper (unchecked-dec-int upper)) (aget a lower)))
+                    (aset a lower ak))
+                  (aset a (set! upper (unchecked-dec-int upper)) ak))))))
+      (aset a low (aget a lower))
+      (aset a lower pivot)
+      (new int/1 [lower upper])))
+
+  (method ^:private ^:static mixedInsertionSort ^void [^float/1 a ^:mutable ^int low ^int high]
+    (let [size (unchecked-subtract-int high low)
+          end (unchecked-subtract-int high
+                                      (unchecked-multiply-int
+                                        3
+                                        (bit-shift-left-int (bit-shift-right-int size 5) 3)))]
+      (if (== end high)
+          (let [^:mutable ^int i 0]
+            (while (< (set! low (unchecked-inc-int low)) end)
+              (let [ai (aget a (set! i low))]
+                (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                  (aset a (unchecked-add-int i 1) (aget a i)))
+                (aset a (unchecked-add-int i 1) ai))))
+          (let [pin (aget a end)]
+            (let [^:mutable ^int i 0
+                  ^:mutable p high]
+              (while (< (set! low (unchecked-inc-int low)) end)
+                (let [^:mutable ai (aget a (set! i low))]
+                  (if (< ai (aget a (unchecked-subtract-int i 1)))
+                      (do
+                        (aset a i (aget a (set! i (unchecked-dec-int i))))
+                        (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) ai))
+                      (when (and (> p i) (> ai pin))
+                        (while (> (aget a (set! p (unchecked-dec-int p))) pin))
+                        (when (> p i) (set! ai (aget a p)) (aset a p (aget a i)))
+                        (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) ai))))))
+            (let [^:mutable ^int i 0]
+              (while (< low high)
+                (let [a1 (aget a (set! i low))
+                      a2 (aget a (set! low (unchecked-inc-int low)))]
+                  (if (> a1 a2)
+                      (do
+                        (while (< a1 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 2) (aget a i)))
+                        (aset a (unchecked-add-int (set! i (unchecked-inc-int i)) 1) a1)
+                        (while (< a2 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) a2))
+                      (when (< a1 (aget a (unchecked-subtract-int i 1)))
+                        (while (< a2 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 2) (aget a i)))
+                        (aset a (unchecked-add-int (set! i (unchecked-inc-int i)) 1) a2)
+                        (while (< a1 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) a1))))
+                (set! low (unchecked-inc-int low))))))))
+
+  (method ^:private ^:static insertionSort ^void [^float/1 a ^int low ^int high]
+    (let [^:mutable ^int i 0
+          ^:mutable k low]
+      (while (< (set! k (unchecked-inc-int k)) high)
+        (let [ai (aget a (set! i k))]
+          (when (< ai (aget a (unchecked-subtract-int i 1)))
+            (while (and (>= (set! i (unchecked-dec-int i)) low) (< ai (aget a i)))
+              (aset a (unchecked-add-int i 1) (aget a i)))
+            (aset a (unchecked-add-int i 1) ai))))))
+
+  (method ^:private ^:static heapSort ^void [^float/1 a ^int low ^:mutable ^int high]
+    (let [^:mutable k (unsigned-bit-shift-right-int (unchecked-add-int low high) 1)]
+      (while (> k low)
+        (DualPivotQuicksort/pushDown a (set! k (unchecked-dec-int k)) (aget a k) low high)))
+    (while (> (set! high (unchecked-dec-int high)) low)
+      (let [max (aget a low)]
+        (DualPivotQuicksort/pushDown a low (aget a high) low high)
+        (aset a high max))))
+
+  (method ^:private ^:static pushDown ^void [^float/1 a ^:mutable ^int p ^float value ^int low
+                                             ^int high]
+    (let [^:mutable ^int k 0]
+      (while true
+        (set! k (unchecked-add-int (unchecked-subtract-int (bit-shift-left-int p 1) low) 2))
+        (when (> k high) (break))
+        (when (or (== k high) (< (aget a k) (aget a (unchecked-subtract-int k 1))))
+          (set! k (unchecked-dec-int k)))
+        (when (<= (aget a k) value) (break))
+        (aset a p (aget a (set! p k)))))
+    (aset a p value))
+
+  (method ^:private ^:static tryMergeRuns ^boolean [^Sorter sorter ^float/1 a ^int low ^int size]
+    (let [^:mutable ^int/1 run nil
+          high (unchecked-add-int low size)
+          ^:mutable ^int count 1
+          ^:mutable last low]
+      (let [^:mutable k (unchecked-add-int low 1)]
+        (while (< k high)
+          (cond
+            (< (aget a (unchecked-subtract-int k 1)) (aget a k))
+              (while (and (< (set! k (unchecked-inc-int k)) high)
+                          (<= (aget a (unchecked-subtract-int k 1)) (aget a k))))
+            (> (aget a (unchecked-subtract-int k 1)) (aget a k))
+              (do
+                (while (and (< (set! k (unchecked-inc-int k)) high)
+                            (>= (aget a (unchecked-subtract-int k 1)) (aget a k))))
+                (let [^:mutable i (unchecked-subtract-int last 1)
+                      ^:mutable j k]
+                  (while (and (< (set! i (unchecked-inc-int i)) (set! j (unchecked-dec-int j)))
+                              (> (aget a i) (aget a j)))
+                    (let [ai (aget a i)] (aset a i (aget a j)) (aset a j ai)))))
+            :else
+              (do
+                (loop [^float ak (aget a k)]
+                  (when (and (< (set! k (unchecked-inc-int k)) high) (== ak (aget a k))) (recur ak)))
+                (when (< k high) (continue))))
+          (if (nil? run)
+              (do
+                (when (== k high) (return true))
+                (when (< (unchecked-subtract-int k low) MIN_FIRST_RUN_SIZE) (return false))
+                (set! run
+                      (new int/1
+                           (bit-and-int (bit-or-int (bit-shift-right-int size 10) 0x7F) 0x3FF)))
+                (aset run 0 low))
+              (when (> (aget a (unchecked-subtract-int last 1)) (aget a last))
+                (when (> count
+                         (bit-shift-right-int (unchecked-subtract-int k low) MIN_FIRST_RUNS_FACTOR))
+                  (return false))
+                (when (== (set! count (unchecked-inc-int count)) MAX_RUN_CAPACITY) (return false))
+                (when (== count (alength run))
+                  (set! run (Arrays/copyOf run (bit-shift-left-int count 1))))))
+          (aset run count (set! last k))))
+      (when (> count 1)
+        (let [^:mutable ^float/1 b nil
+              ^:mutable offset low]
+          (if (or (nil? sorter) (nil? (set! b (cast float/1 (.-b sorter)))))
+              (set! b (new float/1 size))
+              (set! offset (.-offset sorter)))
+          (DualPivotQuicksort/mergeRuns a b offset 1 (some? sorter) run 0 count)))
+      true))
+
+  (method ^:private ^:static mergeRuns ^float/1 [^float/1 a ^float/1 b ^int offset ^int aim
+                                                 ^boolean parallel ^int/1 run ^int lo ^int hi]
+    (if (== (unchecked-subtract-int hi lo) 1)
+        (if (>= aim 0)
+            a
+            (do
+              (let [^:mutable i (aget run hi)
+                    ^:mutable j (unchecked-subtract-int i offset)
+                    low (aget run lo)]
+                (while (> i low)
+                  (aset b (set! j (unchecked-dec-int j)) (aget a (set! i (unchecked-dec-int i))))))
+              b))
+        (let [^:mutable mi lo
+              rmi (unsigned-bit-shift-right-int (unchecked-add-int (aget run lo) (aget run hi)) 1)]
+          (while (<= (aget run (unchecked-add-int (set! mi (unchecked-inc-int mi)) 1)) rmi))
+          (let [^:mutable ^float/1 a1 nil
+                ^:mutable ^float/1 a2 nil]
+            (if (and parallel (> (unchecked-subtract-int hi lo) MIN_RUN_COUNT))
+                (let [merger (.forkMe (RunMerger. a b offset 0 run mi hi))]
+                  (set! a1
+                        (DualPivotQuicksort/mergeRuns
+                          a
+                          b
+                          offset
+                          (unchecked-negate-int aim)
+                          true
+                          run
+                          lo
+                          mi))
+                  (set! a2 (cast float/1 (.getDestination merger))))
+                (do
+                  (set! a1
+                        (DualPivotQuicksort/mergeRuns
+                          a
+                          b
+                          offset
+                          (unchecked-negate-int aim)
+                          false
+                          run
+                          lo
+                          mi))
+                  (set! a2 (DualPivotQuicksort/mergeRuns a b offset 0 false run mi hi))))
+            (let [^float/1 dst (if (identical? a1 a) b a)
+                  ^int k (if (identical? a1 a)
+                             (unchecked-subtract-int (aget run lo) offset)
+                             (aget run lo))
+                  ^int lo1 (if (identical? a1 b)
+                               (unchecked-subtract-int (aget run lo) offset)
+                               (aget run lo))
+                  ^int hi1 (if (identical? a1 b)
+                               (unchecked-subtract-int (aget run mi) offset)
+                               (aget run mi))
+                  ^int lo2 (if (identical? a2 b)
+                               (unchecked-subtract-int (aget run mi) offset)
+                               (aget run mi))
+                  ^int hi2 (if (identical? a2 b)
+                               (unchecked-subtract-int (aget run hi) offset)
+                               (aget run hi))]
+              (if parallel
+                  (.invoke (Merger. nil dst k a1 lo1 hi1 a2 lo2 hi2))
+                  (DualPivotQuicksort/mergeParts nil dst k a1 lo1 hi1 a2 lo2 hi2))
+              dst)))))
+
+  (method ^:private ^:static mergeParts ^void [^Merger merger ^float/1 dst ^:mutable ^int k
+                                               ^float/1 a1 ^:mutable ^int lo1 ^:mutable ^int hi1
+                                               ^float/1 a2 ^:mutable ^int lo2 ^:mutable ^int hi2]
+    (when (and (some? merger) (identical? a1 a2))
+      (while true
+        (when (< (unchecked-subtract-int hi1 lo1) (unchecked-subtract-int hi2 lo2))
+          (let [lo lo1] (set! lo1 lo2) (set! lo2 lo) (let [hi hi1] (set! hi1 hi2) (set! hi2 hi))))
+        (when (< (unchecked-subtract-int hi1 lo1) MIN_PARALLEL_MERGE_PARTS_SIZE) (break))
+        (let [mi1 (unsigned-bit-shift-right-int (unchecked-add-int lo1 hi1) 1)
+              key (aget a1 mi1)
+              ^:mutable mi2 hi2]
+          (let [^:mutable loo lo2]
+            (while (< loo mi2)
+              (let [t (unsigned-bit-shift-right-int (unchecked-add-int loo mi2) 1)]
+                (if (> key (aget a2 t)) (set! loo (unchecked-add-int t 1)) (set! mi2 t)))))
+          (let [d (unchecked-subtract-int (unchecked-add-int (unchecked-subtract-int mi2 lo2) mi1)
+                                          lo1)]
+            (.forkMerger merger dst (unchecked-add-int k d) a1 mi1 hi1 a2 mi2 hi2)
+            (set! hi1 mi1)
+            (set! hi2 mi2)))))
+    (while (and (< lo1 hi1) (< lo2 hi2))
+      (aset dst
+            k
+            (if (< (aget a1 lo1) (aget a2 lo2))
+                (aget a1 (let [old-8 lo1] (set! lo1 (unchecked-inc-int lo1)) old-8))
+                (aget a2 (let [old-9 lo2] (set! lo2 (unchecked-inc-int lo2)) old-9))))
+      (set! k (unchecked-inc-int k)))
+    (when (or (not (identical? dst a1)) (< k lo1))
+      (while (< lo1 hi1)
+        (aset dst k (aget a1 lo1))
+        (set! k (unchecked-inc-int k))
+        (set! lo1 (unchecked-inc-int lo1))))
+    (when (or (not (identical? dst a2)) (< k lo2))
+      (while (< lo2 hi2)
+        (aset dst k (aget a2 lo2))
+        (set! k (unchecked-inc-int k))
+        (set! lo2 (unchecked-inc-int lo2)))))
+
+  (method ^:static sort ^void [^double/1 a ^int parallelism ^:mutable ^int low ^:mutable ^int high]
+    (let [^:mutable ^int numNegativeZero 0]
+      (let [^:mutable k high]
+        (while (> k low)
+          (let [ak (aget a (set! k (unchecked-dec-int k)))]
+            (if (and (== ak 0.0) (< (Double/doubleToRawLongBits ak) 0))
+                (do (set! numNegativeZero (unchecked-add-int numNegativeZero 1)) (aset a k 0.0))
+                (when-not (== ak ak)
+                  (aset a k (aget a (set! high (unchecked-dec-int high))))
+                  (aset a high ak))))))
+      (let [size (unchecked-subtract-int high low)]
+        (if (and (> parallelism 1) (> size MIN_PARALLEL_SORT_SIZE))
+            (let [depth (DualPivotQuicksort/getDepth parallelism (bit-shift-right-int size 12))
+                  ^double/1 b (when-not (== depth 0) (new double/1 size))]
+              (.invoke (Sorter. nil a b low size low depth)))
+            (DualPivotQuicksort/sort nil a 0 low high))
+        (when-not (== (set! numNegativeZero (unchecked-inc-int numNegativeZero)) 1)
+          (while (<= low high)
+            (let [middle (unsigned-bit-shift-right-int (unchecked-add-int low high) 1)]
+              (if (< (aget a middle) 0.0)
+                  (set! low (unchecked-add-int middle 1))
+                  (set! high (unchecked-subtract-int middle 1)))))
+          (while (> (set! numNegativeZero (unchecked-dec-int numNegativeZero)) 0)
+            (aset a (set! high (unchecked-inc-int high)) (unchecked-negate 0.0)))))))
+
+  (method ^:static sort ^void [^Sorter sorter ^double/1 a ^:mutable ^int bits ^int low
+                               ^:mutable ^int high]
+    (while true
+      (let [end (unchecked-subtract-int high 1)
+            size (unchecked-subtract-int high low)]
+        (when (and (< size (unchecked-add-int MAX_MIXED_INSERTION_SORT_SIZE bits))
+                   (> (bit-and-int bits 1) 0))
+          (DualPivotQuicksort/sort Double/TYPE
+                                   a
+                                   Unsafe/ARRAY_DOUBLE_BASE_OFFSET
+                                   low
+                                   high
+                                   (method-ref SortOperation
+                                               [double/1 int int]
+                                               DualPivotQuicksort/mixedInsertionSort))
+          (return))
+        (when (< size MAX_INSERTION_SORT_SIZE)
+          (DualPivotQuicksort/sort Double/TYPE
+                                   a
+                                   Unsafe/ARRAY_DOUBLE_BASE_OFFSET
+                                   low
+                                   high
+                                   (method-ref SortOperation
+                                               [double/1 int int]
+                                               DualPivotQuicksort/insertionSort))
+          (return))
+        (when (and (or (== bits 0) (and (> size MIN_TRY_MERGE_SIZE) (> (bit-and-int bits 1) 0)))
+                   (DualPivotQuicksort/tryMergeRuns sorter a low size))
+          (return))
+        (when (> (set! bits (unchecked-add-int bits DELTA)) MAX_RECURSION_DEPTH)
+          (DualPivotQuicksort/heapSort a low high)
+          (return))
+        (let [step (unchecked-add-int (unchecked-multiply-int (bit-shift-right-int size 3) 3) 3)
+              e1 (unchecked-add-int low step)
+              e5 (unchecked-subtract-int end step)
+              e3 (unsigned-bit-shift-right-int (unchecked-add-int e1 e5) 1)
+              e2 (unsigned-bit-shift-right-int (unchecked-add-int e1 e3) 1)
+              e4 (unsigned-bit-shift-right-int (unchecked-add-int e3 e5) 1)
+              a3 (aget a e3)]
+          (when (< (aget a e5) (aget a e2))
+            (let [t (aget a e5)] (aset a e5 (aget a e2)) (aset a e2 t)))
+          (when (< (aget a e4) (aget a e1))
+            (let [t (aget a e4)] (aset a e4 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e5) (aget a e4))
+            (let [t (aget a e5)] (aset a e5 (aget a e4)) (aset a e4 t)))
+          (when (< (aget a e2) (aget a e1))
+            (let [t (aget a e2)] (aset a e2 (aget a e1)) (aset a e1 t)))
+          (when (< (aget a e4) (aget a e2))
+            (let [t (aget a e4)] (aset a e4 (aget a e2)) (aset a e2 t)))
+          (cond
+            (< a3 (aget a e2))
+              (if (< a3 (aget a e1))
+                  (do (aset a e3 (aget a e2)) (aset a e2 (aget a e1)) (aset a e1 a3))
+                  (do (aset a e3 (aget a e2)) (aset a e2 a3)))
+            (> a3 (aget a e4))
+              (if (> a3 (aget a e5))
+                  (do (aset a e3 (aget a e4)) (aset a e4 (aget a e5)) (aset a e5 a3))
+                  (do (aset a e3 (aget a e4)) (aset a e4 a3))))
+          (let [^:mutable ^int lower 0
+                ^:mutable ^int upper 0]
+            (if (and (and (and (< (aget a e1) (aget a e2)) (< (aget a e2) (aget a e3)))
+                          (< (aget a e3) (aget a e4)))
+                     (< (aget a e4) (aget a e5)))
+                (let [pivotIndices (DualPivotQuicksort/partition
+                                     Double/TYPE
+                                     a
+                                     Unsafe/ARRAY_DOUBLE_BASE_OFFSET
+                                     low
+                                     high
+                                     e1
+                                     e5
+                                     (method-ref
+                                       PartitionOperation
+                                       [double/1 int int int int]
+                                       DualPivotQuicksort/partitionDualPivot))]
+                  (set! lower (aget pivotIndices 0))
+                  (set! upper (aget pivotIndices 1))
+                  (if (and (> size MIN_PARALLEL_SORT_SIZE) (some? sorter))
+                      (do
+                        (.forkSorter sorter (bit-or-int bits 1) (unchecked-add-int lower 1) upper)
+                        (.forkSorter sorter (bit-or-int bits 1) (unchecked-add-int upper 1) high))
+                      (do
+                        (DualPivotQuicksort/sort
+                          sorter
+                          a
+                          (bit-or-int bits 1)
+                          (unchecked-add-int lower 1)
+                          upper)
+                        (DualPivotQuicksort/sort
+                          sorter
+                          a
+                          (bit-or-int bits 1)
+                          (unchecked-add-int upper 1)
+                          high))))
+                (let [pivotIndices (DualPivotQuicksort/partition
+                                     Double/TYPE
+                                     a
+                                     Unsafe/ARRAY_DOUBLE_BASE_OFFSET
+                                     low
+                                     high
+                                     e3
+                                     e3
+                                     (method-ref
+                                       PartitionOperation
+                                       [double/1 int int int int]
+                                       DualPivotQuicksort/partitionSinglePivot))]
+                  (set! lower (aget pivotIndices 0))
+                  (set! upper (aget pivotIndices 1))
+                  (if (and (> size MIN_PARALLEL_SORT_SIZE) (some? sorter))
+                      (.forkSorter sorter (bit-or-int bits 1) upper high)
+                      (DualPivotQuicksort/sort sorter a (bit-or-int bits 1) upper high))))
+            (set! high lower))))))
+
+  (method ^:private ^:static ^{ForceInline true} partitionDualPivot ^int/1 [^double/1 a ^int low
+                                                                            ^int high
+                                                                            ^int pivotIndex1
+                                                                            ^int pivotIndex2]
+    (let [end (unchecked-subtract-int high 1)
+          ^:mutable lower low
+          ^:mutable upper end
+          e1 pivotIndex1
+          e5 pivotIndex2
+          pivot1 (aget a e1)
+          pivot2 (aget a e5)]
+      (aset a e1 (aget a lower))
+      (aset a e5 (aget a upper))
+      (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot1))
+      (while (> (aget a (set! upper (unchecked-dec-int upper))) pivot2))
+      (let [unused (set! lower (unchecked-dec-int lower))
+            ^:mutable k (set! upper (unchecked-inc-int upper))]
+        (while (> (set! k (unchecked-dec-int k)) lower)
+          (let [ak (aget a k)]
+            (if (< ak pivot1)
+                (while (< lower k)
+                  (when (>= (aget a (set! lower (unchecked-inc-int lower))) pivot1)
+                    (if (> (aget a lower) pivot2)
+                        (do
+                          (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                          (aset a upper (aget a lower)))
+                        (aset a k (aget a lower)))
+                    (aset a lower ak)
+                    (break)))
+                (when (> ak pivot2)
+                  (aset a k (aget a (set! upper (unchecked-dec-int upper))))
+                  (aset a upper ak))))))
+      (aset a low (aget a lower))
+      (aset a lower pivot1)
+      (aset a end (aget a upper))
+      (aset a upper pivot2)
+      (new int/1 [lower upper])))
+
+  (method ^:private ^:static ^{ForceInline true} partitionSinglePivot ^int/1 [^double/1 a ^int low
+                                                                              ^int high
+                                                                              ^int pivotIndex1
+                                                                              ^int pivotIndex2]
+    (let [end (unchecked-subtract-int high 1)
+          ^:mutable lower low
+          ^:mutable upper end
+          e3 pivotIndex1
+          pivot (aget a e3)]
+      (aset a e3 (aget a lower))
+      (let [^:mutable k (set! upper (unchecked-inc-int upper))]
+        (while (> (set! k (unchecked-dec-int k)) lower)
+          (let [ak (aget a k)]
+            (when-not (== ak pivot)
+              (aset a k pivot)
+              (if (< ak pivot)
+                  (do
+                    (while (< (aget a (set! lower (unchecked-inc-int lower))) pivot))
+                    (when (> (aget a lower) pivot)
+                      (aset a (set! upper (unchecked-dec-int upper)) (aget a lower)))
+                    (aset a lower ak))
+                  (aset a (set! upper (unchecked-dec-int upper)) ak))))))
+      (aset a low (aget a lower))
+      (aset a lower pivot)
+      (new int/1 [lower upper])))
+
+  (method ^:private ^:static mixedInsertionSort ^void [^double/1 a ^:mutable ^int low ^int high]
+    (let [size (unchecked-subtract-int high low)
+          end (unchecked-subtract-int high
+                                      (unchecked-multiply-int
+                                        3
+                                        (bit-shift-left-int (bit-shift-right-int size 5) 3)))]
+      (if (== end high)
+          (let [^:mutable ^int i 0]
+            (while (< (set! low (unchecked-inc-int low)) end)
+              (let [ai (aget a (set! i low))]
+                (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                  (aset a (unchecked-add-int i 1) (aget a i)))
+                (aset a (unchecked-add-int i 1) ai))))
+          (let [pin (aget a end)]
+            (let [^:mutable ^int i 0
+                  ^:mutable p high]
+              (while (< (set! low (unchecked-inc-int low)) end)
+                (let [^:mutable ai (aget a (set! i low))]
+                  (if (< ai (aget a (unchecked-subtract-int i 1)))
+                      (do
+                        (aset a i (aget a (set! i (unchecked-dec-int i))))
+                        (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) ai))
+                      (when (and (> p i) (> ai pin))
+                        (while (> (aget a (set! p (unchecked-dec-int p))) pin))
+                        (when (> p i) (set! ai (aget a p)) (aset a p (aget a i)))
+                        (while (< ai (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) ai))))))
+            (let [^:mutable ^int i 0]
+              (while (< low high)
+                (let [a1 (aget a (set! i low))
+                      a2 (aget a (set! low (unchecked-inc-int low)))]
+                  (if (> a1 a2)
+                      (do
+                        (while (< a1 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 2) (aget a i)))
+                        (aset a (unchecked-add-int (set! i (unchecked-inc-int i)) 1) a1)
+                        (while (< a2 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) a2))
+                      (when (< a1 (aget a (unchecked-subtract-int i 1)))
+                        (while (< a2 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 2) (aget a i)))
+                        (aset a (unchecked-add-int (set! i (unchecked-inc-int i)) 1) a2)
+                        (while (< a1 (aget a (set! i (unchecked-dec-int i))))
+                          (aset a (unchecked-add-int i 1) (aget a i)))
+                        (aset a (unchecked-add-int i 1) a1))))
+                (set! low (unchecked-inc-int low))))))))
+
+  (method ^:private ^:static insertionSort ^void [^double/1 a ^int low ^int high]
+    (let [^:mutable ^int i 0
+          ^:mutable k low]
+      (while (< (set! k (unchecked-inc-int k)) high)
+        (let [ai (aget a (set! i k))]
+          (when (< ai (aget a (unchecked-subtract-int i 1)))
+            (while (and (>= (set! i (unchecked-dec-int i)) low) (< ai (aget a i)))
+              (aset a (unchecked-add-int i 1) (aget a i)))
+            (aset a (unchecked-add-int i 1) ai))))))
+
+  (method ^:private ^:static heapSort ^void [^double/1 a ^int low ^:mutable ^int high]
+    (let [^:mutable k (unsigned-bit-shift-right-int (unchecked-add-int low high) 1)]
+      (while (> k low)
+        (DualPivotQuicksort/pushDown a (set! k (unchecked-dec-int k)) (aget a k) low high)))
+    (while (> (set! high (unchecked-dec-int high)) low)
+      (let [max (aget a low)]
+        (DualPivotQuicksort/pushDown a low (aget a high) low high)
+        (aset a high max))))
+
+  (method ^:private ^:static pushDown ^void [^double/1 a ^:mutable ^int p ^double value ^int low
+                                             ^int high]
+    (let [^:mutable ^int k 0]
+      (while true
+        (set! k (unchecked-add-int (unchecked-subtract-int (bit-shift-left-int p 1) low) 2))
+        (when (> k high) (break))
+        (when (or (== k high) (< (aget a k) (aget a (unchecked-subtract-int k 1))))
+          (set! k (unchecked-dec-int k)))
+        (when (<= (aget a k) value) (break))
+        (aset a p (aget a (set! p k)))))
+    (aset a p value))
+
+  (method ^:private ^:static tryMergeRuns ^boolean [^Sorter sorter ^double/1 a ^int low ^int size]
+    (let [^:mutable ^int/1 run nil
+          high (unchecked-add-int low size)
+          ^:mutable ^int count 1
+          ^:mutable last low]
+      (let [^:mutable k (unchecked-add-int low 1)]
+        (while (< k high)
+          (cond
+            (< (aget a (unchecked-subtract-int k 1)) (aget a k))
+              (while (and (< (set! k (unchecked-inc-int k)) high)
+                          (<= (aget a (unchecked-subtract-int k 1)) (aget a k))))
+            (> (aget a (unchecked-subtract-int k 1)) (aget a k))
+              (do
+                (while (and (< (set! k (unchecked-inc-int k)) high)
+                            (>= (aget a (unchecked-subtract-int k 1)) (aget a k))))
+                (let [^:mutable i (unchecked-subtract-int last 1)
+                      ^:mutable j k]
+                  (while (and (< (set! i (unchecked-inc-int i)) (set! j (unchecked-dec-int j)))
+                              (> (aget a i) (aget a j)))
+                    (let [ai (aget a i)] (aset a i (aget a j)) (aset a j ai)))))
+            :else
+              (do
+                (loop [ak (aget a k)]
+                  (when (and (< (set! k (unchecked-inc-int k)) high) (== ak (aget a k))) (recur ak)))
+                (when (< k high) (continue))))
+          (if (nil? run)
+              (do
+                (when (== k high) (return true))
+                (when (< (unchecked-subtract-int k low) MIN_FIRST_RUN_SIZE) (return false))
+                (set! run
+                      (new int/1
+                           (bit-and-int (bit-or-int (bit-shift-right-int size 10) 0x7F) 0x3FF)))
+                (aset run 0 low))
+              (when (> (aget a (unchecked-subtract-int last 1)) (aget a last))
+                (when (> count
+                         (bit-shift-right-int (unchecked-subtract-int k low) MIN_FIRST_RUNS_FACTOR))
+                  (return false))
+                (when (== (set! count (unchecked-inc-int count)) MAX_RUN_CAPACITY) (return false))
+                (when (== count (alength run))
+                  (set! run (Arrays/copyOf run (bit-shift-left-int count 1))))))
+          (aset run count (set! last k))))
+      (when (> count 1)
+        (let [^:mutable ^double/1 b nil
+              ^:mutable offset low]
+          (if (or (nil? sorter) (nil? (set! b (cast double/1 (.-b sorter)))))
+              (set! b (new double/1 size))
+              (set! offset (.-offset sorter)))
+          (DualPivotQuicksort/mergeRuns a b offset 1 (some? sorter) run 0 count)))
+      true))
+
+  (method ^:private ^:static mergeRuns ^double/1 [^double/1 a ^double/1 b ^int offset ^int aim
+                                                  ^boolean parallel ^int/1 run ^int lo ^int hi]
+    (if (== (unchecked-subtract-int hi lo) 1)
+        (if (>= aim 0)
+            a
+            (do
+              (let [^:mutable i (aget run hi)
+                    ^:mutable j (unchecked-subtract-int i offset)
+                    low (aget run lo)]
+                (while (> i low)
+                  (aset b (set! j (unchecked-dec-int j)) (aget a (set! i (unchecked-dec-int i))))))
+              b))
+        (let [^:mutable mi lo
+              rmi (unsigned-bit-shift-right-int (unchecked-add-int (aget run lo) (aget run hi)) 1)]
+          (while (<= (aget run (unchecked-add-int (set! mi (unchecked-inc-int mi)) 1)) rmi))
+          (let [^:mutable ^double/1 a1 nil
+                ^:mutable ^double/1 a2 nil]
+            (if (and parallel (> (unchecked-subtract-int hi lo) MIN_RUN_COUNT))
+                (let [merger (.forkMe (RunMerger. a b offset 0 run mi hi))]
+                  (set! a1
+                        (DualPivotQuicksort/mergeRuns
+                          a
+                          b
+                          offset
+                          (unchecked-negate-int aim)
+                          true
+                          run
+                          lo
+                          mi))
+                  (set! a2 (cast double/1 (.getDestination merger))))
+                (do
+                  (set! a1
+                        (DualPivotQuicksort/mergeRuns
+                          a
+                          b
+                          offset
+                          (unchecked-negate-int aim)
+                          false
+                          run
+                          lo
+                          mi))
+                  (set! a2 (DualPivotQuicksort/mergeRuns a b offset 0 false run mi hi))))
+            (let [^double/1 dst (if (identical? a1 a) b a)
+                  ^int k (if (identical? a1 a)
+                             (unchecked-subtract-int (aget run lo) offset)
+                             (aget run lo))
+                  ^int lo1 (if (identical? a1 b)
+                               (unchecked-subtract-int (aget run lo) offset)
+                               (aget run lo))
+                  ^int hi1 (if (identical? a1 b)
+                               (unchecked-subtract-int (aget run mi) offset)
+                               (aget run mi))
+                  ^int lo2 (if (identical? a2 b)
+                               (unchecked-subtract-int (aget run mi) offset)
+                               (aget run mi))
+                  ^int hi2 (if (identical? a2 b)
+                               (unchecked-subtract-int (aget run hi) offset)
+                               (aget run hi))]
+              (if parallel
+                  (.invoke (Merger. nil dst k a1 lo1 hi1 a2 lo2 hi2))
+                  (DualPivotQuicksort/mergeParts nil dst k a1 lo1 hi1 a2 lo2 hi2))
+              dst)))))
+
+  (method ^:private ^:static mergeParts ^void [^Merger merger ^double/1 dst ^:mutable ^int k
+                                               ^double/1 a1 ^:mutable ^int lo1 ^:mutable ^int hi1
+                                               ^double/1 a2 ^:mutable ^int lo2 ^:mutable ^int hi2]
+    (when (and (some? merger) (identical? a1 a2))
+      (while true
+        (when (< (unchecked-subtract-int hi1 lo1) (unchecked-subtract-int hi2 lo2))
+          (let [lo lo1] (set! lo1 lo2) (set! lo2 lo) (let [hi hi1] (set! hi1 hi2) (set! hi2 hi))))
+        (when (< (unchecked-subtract-int hi1 lo1) MIN_PARALLEL_MERGE_PARTS_SIZE) (break))
+        (let [mi1 (unsigned-bit-shift-right-int (unchecked-add-int lo1 hi1) 1)
+              key (aget a1 mi1)
+              ^:mutable mi2 hi2]
+          (let [^:mutable loo lo2]
+            (while (< loo mi2)
+              (let [t (unsigned-bit-shift-right-int (unchecked-add-int loo mi2) 1)]
+                (if (> key (aget a2 t)) (set! loo (unchecked-add-int t 1)) (set! mi2 t)))))
+          (let [d (unchecked-subtract-int (unchecked-add-int (unchecked-subtract-int mi2 lo2) mi1)
+                                          lo1)]
+            (.forkMerger merger dst (unchecked-add-int k d) a1 mi1 hi1 a2 mi2 hi2)
+            (set! hi1 mi1)
+            (set! hi2 mi2)))))
+    (while (and (< lo1 hi1) (< lo2 hi2))
+      (aset dst
+            k
+            (if (< (aget a1 lo1) (aget a2 lo2))
+                (aget a1 (let [old-10 lo1] (set! lo1 (unchecked-inc-int lo1)) old-10))
+                (aget a2 (let [old-11 lo2] (set! lo2 (unchecked-inc-int lo2)) old-11))))
+      (set! k (unchecked-inc-int k)))
+    (when (or (not (identical? dst a1)) (< k lo1))
+      (while (< lo1 hi1)
+        (aset dst k (aget a1 lo1))
+        (set! k (unchecked-inc-int k))
+        (set! lo1 (unchecked-inc-int lo1))))
+    (when (or (not (identical? dst a2)) (< k lo2))
+      (while (< lo2 hi2)
+        (aset dst k (aget a2 lo2))
+        (set! k (unchecked-inc-int k))
+        (set! lo2 (unchecked-inc-int lo2)))))
+
+  (defclass ^:private ^:static ^:final Sorter
+    :extends (CountedCompleter Void)
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 20180818)
+
+    (field ^:private ^:final a)
+
+    (field ^:private ^:final b)
+
+    (field ^:private ^:final ^int low)
+
+    (field ^:private ^:final ^int size)
+
+    (field ^:private ^:final ^int offset)
+
+    (field ^:private ^:final ^int depth)
+
+    (constructor ^:private [this ^{:tag (CountedCompleter ?)} parent a b ^int low ^int size
+                            ^int offset ^int depth]
+      (super. parent)
+      (set! (.-a this) a)
+      (set! (.-b this) b)
+      (set! (.-low this) low)
+      (set! (.-size this) size)
+      (set! (.-offset this) offset)
+      (set! (.-depth this) depth))
+
+    (method ^:public ^:final compute ^void [this]
+      (cond
+        (< depth 0)
+          (do
+            (.setPendingCount this 2)
+            (let [half (bit-shift-right-int size 1)]
+              (.fork (Sorter. this b a low half offset (unchecked-add-int depth 1)))
+              (.compute (Sorter. this
+                                 b
+                                 a
+                                 (unchecked-add-int low half)
+                                 (unchecked-subtract-int size half)
+                                 offset
+                                 (unchecked-add-int depth 1)))))
+        (instance? int/1 a)
+          (DualPivotQuicksort/sort this (cast int/1 a) depth low (unchecked-add-int low size))
+        (instance? long/1 a)
+          (DualPivotQuicksort/sort this (cast long/1 a) depth low (unchecked-add-int low size))
+        (instance? float/1 a)
+          (DualPivotQuicksort/sort this (cast float/1 a) depth low (unchecked-add-int low size))
+        (instance? double/1 a)
+          (DualPivotQuicksort/sort this (cast double/1 a) depth low (unchecked-add-int low size))
+        :else
+          (throw (IllegalArgumentException.
+                   (java-str "Unknown type of array: " (.getName (.getClass a))))))
+      (.tryComplete this))
+
+    (method ^:public ^:final onCompletion ^void [this ^{:tag (CountedCompleter ?)} caller]
+      (when (< depth 0)
+        (let [mi (unchecked-add-int low (bit-shift-right-int size 1))
+              src (== (bit-and-int depth 1) 0)]
+          (.invoke (Merger. nil
+                            a
+                            (if src low (unchecked-subtract-int low offset))
+                            b
+                            (if src (unchecked-subtract-int low offset) low)
+                            (if src (unchecked-subtract-int mi offset) mi)
+                            b
+                            (if src (unchecked-subtract-int mi offset) mi)
+                            (if src
+                                (unchecked-subtract-int (unchecked-add-int low size) offset)
+                                (unchecked-add-int low size)))))))
+
+    (method ^:private forkSorter ^void [this ^int depth ^int low ^int high]
+      (.addToPendingCount this 1)
+      (let [a (.-a this)]
+        (.fork (Sorter. this a b low (unchecked-subtract-int high low) offset depth)))))
+
+  (defclass ^:private ^:static ^:final Merger
+    :extends (CountedCompleter Void)
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 20180818)
+
+    (field ^:private ^:final dst)
+
+    (field ^:private ^:final a1)
+
+    (field ^:private ^:final a2)
+
+    (field ^:private ^:final ^int k)
+
+    (field ^:private ^:final ^int lo1)
+
+    (field ^:private ^:final ^int hi1)
+
+    (field ^:private ^:final ^int lo2)
+
+    (field ^:private ^:final ^int hi2)
+
+    (constructor ^:private [this ^{:tag (CountedCompleter ?)} parent dst ^int k a1 ^int lo1 ^int hi1
+                            a2 ^int lo2 ^int hi2]
+      (super. parent)
+      (set! (.-dst this) dst)
+      (set! (.-k this) k)
+      (set! (.-a1 this) a1)
+      (set! (.-lo1 this) lo1)
+      (set! (.-hi1 this) hi1)
+      (set! (.-a2 this) a2)
+      (set! (.-lo2 this) lo2)
+      (set! (.-hi2 this) hi2))
+
+    (method ^:public ^:final compute ^void [this]
+      (cond
+        (instance? int/1 dst)
+          (DualPivotQuicksort/mergeParts this
+                                         (cast int/1 dst)
+                                         k
+                                         (cast int/1 a1)
+                                         lo1
+                                         hi1
+                                         (cast int/1 a2)
+                                         lo2
+                                         hi2)
+        (instance? long/1 dst)
+          (DualPivotQuicksort/mergeParts this
+                                         (cast long/1 dst)
+                                         k
+                                         (cast long/1 a1)
+                                         lo1
+                                         hi1
+                                         (cast long/1 a2)
+                                         lo2
+                                         hi2)
+        (instance? float/1 dst)
+          (DualPivotQuicksort/mergeParts this
+                                         (cast float/1 dst)
+                                         k
+                                         (cast float/1 a1)
+                                         lo1
+                                         hi1
+                                         (cast float/1 a2)
+                                         lo2
+                                         hi2)
+        (instance? double/1 dst)
+          (DualPivotQuicksort/mergeParts this
+                                         (cast double/1 dst)
+                                         k
+                                         (cast double/1 a1)
+                                         lo1
+                                         hi1
+                                         (cast double/1 a2)
+                                         lo2
+                                         hi2)
+        :else
+          (throw (IllegalArgumentException.
+                   (java-str "Unknown type of array: " (.getName (.getClass dst))))))
+      (.propagateCompletion this))
+
+    (method ^:private forkMerger ^void [this dst ^int k a1 ^int lo1 ^int hi1 a2 ^int lo2 ^int hi2]
+      (.addToPendingCount this 1)
+      (.fork (Merger. this dst k a1 lo1 hi1 a2 lo2 hi2))))
+
+  (defclass ^:private ^:static ^:final RunMerger
+    :extends (RecursiveTask Object)
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 20180818)
+
+    (field ^:private ^:final a)
+
+    (field ^:private ^:final b)
+
+    (field ^:private ^:final ^int/1 run)
+
+    (field ^:private ^:final ^int offset)
+
+    (field ^:private ^:final ^int aim)
+
+    (field ^:private ^:final ^int lo)
+
+    (field ^:private ^:final ^int hi)
+
+    (constructor ^:private [this a b ^int offset ^int aim ^int/1 run ^int lo ^int hi]
+      (set! (.-a this) a)
+      (set! (.-b this) b)
+      (set! (.-offset this) offset)
+      (set! (.-aim this) aim)
+      (set! (.-run this) run)
+      (set! (.-lo this) lo)
+      (set! (.-hi this) hi))
+
+    (method ^:protected ^:final compute [this]
+      (cond
+        (instance? int/1 a)
+          (DualPivotQuicksort/mergeRuns (cast int/1 a) (cast int/1 b) offset aim true run lo hi)
+        (instance? long/1 a)
+          (DualPivotQuicksort/mergeRuns (cast long/1 a) (cast long/1 b) offset aim true run lo hi)
+        (instance? float/1 a)
+          (DualPivotQuicksort/mergeRuns (cast float/1 a) (cast float/1 b) offset aim true run lo hi)
+        (instance? double/1 a)
+          (DualPivotQuicksort/mergeRuns (cast double/1 a)
+                                        (cast double/1 b)
+                                        offset
+                                        aim
+                                        true
+                                        run
+                                        lo
+                                        hi)
+        :else
+          (throw (IllegalArgumentException.
+                   (java-str "Unknown type of array: " (.getName (.getClass a)))))))
+
+    (method ^:private forkMe ^RunMerger [this] (.fork this) this)
+
+    (method ^:private getDestination [this]
+      (.join this)
+      (.getRawResult this))))

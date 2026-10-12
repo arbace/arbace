@@ -188,7 +188,8 @@ and the amd64 ones natively, against the same expected files.
 
 ## Reproducibility of Arbace's executables (2026-10-11)
 
-The whole chain from a clean checkout is deterministic: `bin/jrt-convert` (its `--twice`),
+The whole chain from a clean checkout is deterministic: `bin/jrt-convert` (its `--twice`; since
+standalone S1 its output is committed, `jdk/`, and the chain starts at a2g),
 `bin/a2g --program` (two runs, separate JVMs, give identical trees but `report.edn`'s timings),
 the image of prepared namespaces, and `go build -trimpath`. Two removed nondeterminisms: a2g's
 member tables followed the JVM's overload order for classes whose order changes from one JVM

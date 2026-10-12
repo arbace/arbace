@@ -1,0 +1,479 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/jrt/HostSocketImpl.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.jrt)
+
+(import '(java.io FileDescriptor IOException InputStream OutputStream)
+        '(java.net InetAddress
+                   InetSocketAddress
+                   SocketAddress
+                   SocketException
+                   SocketImpl
+                   SocketOption
+                   StandardSocketOptions
+                   UnknownHostException)
+        '(java.util Collections HashMap HashSet Map$Entry Objects Set)
+        '(java.util.concurrent.locks ReentrantLock)
+        '(sun.net PlatformSocketImpl))
+
+(defclass ^:public ^:final HostSocketImpl
+  :extends SocketImpl
+  :implements [PlatformSocketImpl]
+
+  (field ^:private ^:static ^:final ^int MAX_BUFFER_SIZE (unchecked-multiply-int 128 1024))
+
+  (field ^:private ^:final ^boolean server)
+
+  (field ^:private ^:final ^ReentrantLock readLock (ReentrantLock.))
+
+  (field ^:private ^:final ^ReentrantLock writeLock (ReentrantLock.))
+
+  (field ^:private ^:final stateLock (Object.))
+
+  (field ^:private ^:static ^:final ^int ST_NEW 0)
+
+  (field ^:private ^:static ^:final ^int ST_UNCONNECTED 1)
+
+  (field ^:private ^:static ^:final ^int ST_CONNECTING 2)
+
+  (field ^:private ^:static ^:final ^int ST_CONNECTED 3)
+
+  (field ^:private ^:static ^:final ^int ST_CLOSED 5)
+
+  (field ^:private ^:volatile ^int state)
+
+  (field ^:private ^:volatile ^int handle -1)
+
+  (field ^:private ^InetAddress bindAddress)
+
+  (field ^:private ^int bindPort)
+
+  (field ^:private ^:final ^{:tag (HashMap Integer Integer)} pending (HashMap.))
+
+  (field ^:private ^:volatile ^int timeout)
+
+  (field ^:private ^:volatile ^boolean isInputClosed)
+
+  (field ^:private ^:volatile ^boolean isOutputClosed)
+
+  (field ^:private ^boolean readEOF)
+
+  (field ^:private ^boolean connectionReset)
+
+  (constructor ^:public [this ^boolean server]
+    (set! (.-server this) server))
+
+  (method ^:private isOpen ^boolean [this] (< state ST_CLOSED))
+
+  (method ^:private ensureOpen :throws [SocketException] ^void [this]
+    (let [state (.-state this)]
+      (when (== state ST_NEW) (throw (SocketException. "Socket not created")))
+      (when (>= state ST_CLOSED) (throw (SocketException. "Socket closed")))))
+
+  (method ^:private ensureOpenAndConnected :throws [SocketException] ^void [this]
+    (let [state (.-state this)]
+      (when (< state ST_CONNECTED) (throw (SocketException. "Not connected")))
+      (when (> state ST_CONNECTED) (throw (SocketException. "Socket closed")))))
+
+  (method ^:private failure ^IOException [this ^int kind ^String text ^String timeoutText]
+    (if (not (.isOpen this))
+        (SocketException. "Socket closed")
+        (HostNet/exception kind text timeoutText)))
+
+  (method ^:private ^:static literal ^String [^InetAddress a]
+    (if (nil? a) "" (.getHostAddress a)))
+
+  (method ^:private ^:static inetAddress :throws [IOException] ^InetAddress [^byte/1 b]
+    (try
+      (InetAddress/getByAddress b)
+      (catch UnknownHostException e (throw (SocketException. (.getMessage e))))))
+
+  (method ^:private read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (Objects/checkFromIndexSize off len (alength b))
+    (if (== len 0)
+        0
+        (do
+          (.lock readLock)
+          (try
+            (if readEOF
+                -1
+                (let [^:mutable ^int h 0]
+                  (locking stateLock (.ensureOpenAndConnected this) (set! h handle))
+                  (when connectionReset (throw (SocketException. "Connection reset")))
+                  (if isInputClosed
+                      -1
+                      (let [error (new String/1 1)
+                            n (HostNet/read0 h b off (Math/min len MAX_BUFFER_SIZE) timeout error)]
+                        (if (== n HostNet/EOF)
+                            (do (set! readEOF true) -1)
+                            (do
+                              (when (< n 0)
+                                (when isInputClosed (return -1))
+                                (when (== n HostNet/RESET) (set! connectionReset true))
+                                (throw (.failure this n (aget error 0) "Read timed out")))
+                              n))))))
+            (finally (.unlock readLock))))))
+
+  (method ^:private write :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+    (Objects/checkFromIndexSize off len (alength b))
+    (when (> len 0)
+      (.lock writeLock)
+      (try
+        (let [^:mutable ^int h 0]
+          (locking stateLock (.ensureOpenAndConnected this) (set! h handle))
+          (let [error (new String/1 1)
+                r (HostNet/write0 h b off len error)]
+            (when (< r 0) (throw (.failure this r (aget error 0) "Write timed out")))))
+        (finally (.unlock writeLock)))))
+
+  (method ^:protected create :throws [IOException] ^void [this ^boolean stream]
+    (when-not stream (throw (IOException. "Datagram socket creation not supported")))
+    (locking stateLock
+      (when-not (== state ST_NEW) (throw (IOException. "Already created")))
+      (set! (.-fd this) (FileDescriptor.))
+      (set! (.-state this) ST_UNCONNECTED)))
+
+  (method ^:protected connect :throws [IOException] ^void [this ^SocketAddress remote ^int millis]
+    (when-not (instance? InetSocketAddress remote)
+      (throw (IOException. "Unsupported address type")))
+    (let [isa (cast InetSocketAddress remote)]
+      (when (.isUnresolved isa) (throw (UnknownHostException. (.getHostName isa))))
+      (let [^:mutable address (.getAddress isa)]
+        (when (.isAnyLocalAddress address) (set! address (InetAddress/getLocalHost)))
+        (let [port (.getPort isa)]
+          (.lock readLock)
+          (try
+            (let [^:mutable ^InetAddress local nil
+                  ^:mutable ^int localPort 0]
+              (locking stateLock
+                (let [state (.-state this)]
+                  (when-not (== state ST_UNCONNECTED)
+                    (when (== state ST_NEW) (throw (SocketException. "Not created")))
+                    (when (== state ST_CONNECTING)
+                      (throw (SocketException. "Connection in progress")))
+                    (when (== state ST_CONNECTED) (throw (SocketException. "Already connected")))
+                    (throw (SocketException. "Socket closed")))
+                  (set! (.-state this) ST_CONNECTING)
+                  (set! (.-address this) address)
+                  (set! (.-port this) port)
+                  (set! local bindAddress)
+                  (set! localPort bindPort)))
+              (let [error (new String/1 1)
+                    h (HostNet/connect0 (HostSocketImpl/literal address)
+                                        port
+                                        ^String (when-not (and (nil? local) (== localPort 0))
+                                                  (HostSocketImpl/literal local))
+                                        localPort
+                                        millis
+                                        error)
+                    ^:mutable ^boolean closedMeanwhile false]
+                (locking stateLock
+                  (when (and (>= h 0) (== state ST_CONNECTING))
+                    (set! handle h)
+                    (set! state ST_CONNECTED)
+                    (set! (.-localport this) (HostNet/port0 h true))
+                    (.applyPending this h)
+                    (return))
+                  (when (>= h 0) (HostNet/close0 h))
+                  (set! closedMeanwhile (>= state ST_CLOSED)))
+                (.close this)
+                (when closedMeanwhile (throw (SocketException. "Socket closed")))
+                (throw (HostNet/exception h (aget error 0) "Connect timed out"))))
+            (finally (.unlock readLock)))))))
+
+  (method ^:protected connect :throws [IOException] ^void [this ^String host ^int port]
+    (.connect this (InetSocketAddress. host port) 0))
+
+  (method ^:protected connect :throws [IOException] ^void [this ^InetAddress address ^int port]
+    (.connect this (InetSocketAddress. address port) 0))
+
+  (method ^:protected bind :throws [IOException] ^void [this ^InetAddress host ^int port]
+    (locking stateLock
+      (.ensureOpen this)
+      (when (or (or (not (== (.-localport this) 0)) (>= handle 0)) (some? bindAddress))
+        (throw (SocketException. "Already bound")))
+      (if server
+          (let [error (new String/1 1)
+                h (HostNet/listen0
+                    ^String (if (or (nil? host) (.isAnyLocalAddress host))
+                                ""
+                                (HostSocketImpl/literal host))
+                    port
+                    error)]
+            (when (< h 0) (throw (HostNet/exception h (aget error 0) "Bind timed out")))
+            (set! handle h)
+            (set! (.-localport this) (HostNet/port0 h true))
+            (.applyPending this h))
+          (do (set! bindAddress host) (set! bindPort port) (set! (.-localport this) port)))
+      (set! (.-address this) host)))
+
+  (method ^:protected listen :throws [IOException] ^void [this ^int backlog]
+    (locking stateLock
+      (.ensureOpen this)
+      (when (and (== (.-localport this) 0) (< handle 0)) (throw (SocketException. "Not bound")))))
+
+  (method ^:protected accept :throws [IOException] ^void [this ^SocketImpl si]
+    (let [nsi (cast HostSocketImpl si)]
+      (when-not (== (.-state nsi) ST_NEW)
+        (throw (SocketException. "Not a newly created SocketImpl")))
+      (let [^:mutable ^int h 0]
+        (.lock readLock)
+        (try
+          (let [^:mutable ^int lh 0]
+            (locking stateLock
+              (.ensureOpen this)
+              (when (< handle 0) (throw (SocketException. "Not bound")))
+              (set! lh handle))
+            (let [error (new String/1 1)]
+              (set! h (HostNet/accept0 lh timeout error))
+              (when (< h 0) (throw (.failure this h (aget error 0) "Accept timed out")))))
+          (finally (.unlock readLock)))
+        (locking (.-stateLock nsi)
+          (set! (.-fd nsi) (FileDescriptor.))
+          (set! (.-handle nsi) h)
+          (set! (.-localport nsi) (HostNet/port0 h true))
+          (set! (.-address nsi) (HostSocketImpl/inetAddress (HostNet/address0 h false)))
+          (set! (.-port nsi) (HostNet/port0 h false))
+          (set! (.-state nsi) ST_CONNECTED)))))
+
+  (method ^:protected getInputStream ^InputStream [this]
+    (anon InputStream []
+      (method ^:public read :throws [IOException] ^int [this]
+        (let [a (new byte/1 1) n (.read this a 0 1)] (if (> n 0) (bit-and-int (aget a 0) 0xff) -1)))
+
+      (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+        (.read HostSocketImpl/this b off len))
+
+      (method ^:public available :throws [IOException] ^int [this]
+        (.available HostSocketImpl/this))
+
+      (method ^:public close :throws [IOException] ^void [this]
+        (.close HostSocketImpl/this))))
+
+  (method ^:protected getOutputStream ^OutputStream [this]
+    (anon OutputStream []
+      (method ^:public write :throws [IOException] ^void [this ^int b]
+        (let [a (new byte/1 [(unchecked-byte b)])] (.write this a 0 1)))
+
+      (method ^:public write :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+        (.write HostSocketImpl/this b off len))
+
+      (method ^:public close :throws [IOException] ^void [this]
+        (.close HostSocketImpl/this))))
+
+  (method ^:protected available :throws [IOException] ^int [this]
+    (locking stateLock
+      (.ensureOpenAndConnected this)
+      (if isInputClosed 0 (HostNet/available0 handle))))
+
+  (method ^:protected close :throws [IOException] ^void [this]
+    (locking stateLock
+      (let [state (.-state this)]
+        (when-not (>= state ST_CLOSED)
+          (set! (.-state this) ST_CLOSED)
+          (let [h handle] (when (>= h 0) (HostNet/close0 h)))))))
+
+  (field ^:private ^:static ^:volatile ^{:tag (Set (SocketOption ?))} clientSocketOptions)
+
+  (field ^:private ^:static ^:volatile ^{:tag (Set (SocketOption ?))} serverSocketOptions)
+
+  (method ^:protected supportedOptions ^{:tag (Set (SocketOption ?))} [this]
+    (let [^:mutable ^{:tag (Set (SocketOption ?))} options (if server
+                                                               serverSocketOptions
+                                                               clientSocketOptions)]
+      (when (nil? options)
+        (set! options (HashSet.))
+        (.add options StandardSocketOptions/SO_RCVBUF)
+        (.add options StandardSocketOptions/SO_REUSEADDR)
+        (.add options StandardSocketOptions/IP_TOS)
+        (when-not server
+          (.add options StandardSocketOptions/SO_KEEPALIVE)
+          (.add options StandardSocketOptions/SO_SNDBUF)
+          (.add options StandardSocketOptions/SO_LINGER)
+          (.add options StandardSocketOptions/TCP_NODELAY))
+        (.add options StandardSocketOptions/SO_REUSEPORT)
+        (set! options (Collections/unmodifiableSet options))
+        (if server (set! serverSocketOptions options) (set! clientSocketOptions options)))
+      options))
+
+  (method ^:private ^:static number ^int [^{:tag (SocketOption ?)} opt]
+    (cond
+      (identical? opt StandardSocketOptions/SO_RCVBUF) HostSocketImpl/SO_RCVBUF
+      (identical? opt StandardSocketOptions/SO_SNDBUF) HostSocketImpl/SO_SNDBUF
+      (identical? opt StandardSocketOptions/SO_REUSEADDR) HostSocketImpl/SO_REUSEADDR
+      (identical? opt StandardSocketOptions/SO_REUSEPORT) HostSocketImpl/SO_REUSEPORT
+      (identical? opt StandardSocketOptions/SO_KEEPALIVE) HostSocketImpl/SO_KEEPALIVE
+      (identical? opt StandardSocketOptions/SO_LINGER) HostSocketImpl/SO_LINGER
+      (identical? opt StandardSocketOptions/TCP_NODELAY) HostSocketImpl/TCP_NODELAY
+      (identical? opt StandardSocketOptions/IP_TOS) HostSocketImpl/IP_TOS
+      :else -1))
+
+  (method ^:private ^:static isBoolean ^boolean [^int opt]
+    (or (or (or (or (== opt HostSocketImpl/SO_REUSEADDR) (== opt HostSocketImpl/SO_REUSEPORT))
+                (== opt HostSocketImpl/SO_KEEPALIVE))
+            (== opt HostSocketImpl/TCP_NODELAY))
+        (== opt HostSocketImpl/SO_OOBINLINE)))
+
+  (method ^:protected setOption :type-params [T] :throws [IOException] ^void [this
+                                                                              ^{:tag (SocketOption T)} opt
+                                                                              ^T value]
+    (when-not (.contains (.supportedOptions this) opt)
+      (throw (UnsupportedOperationException. (java-str "'" opt "' not supported"))))
+    (when-not (.isInstance (.type opt) value)
+      (throw (IllegalArgumentException. (java-str "Invalid value '" value "'"))))
+    (let [n (HostSocketImpl/number opt)
+          ^int v (if (HostSocketImpl/isBoolean n)
+                     (if (.booleanValue (cast Boolean value)) 1 0)
+                     (.intValue (cast Integer value)))]
+      (locking stateLock (.ensureOpen this) (.hostSet this n v))))
+
+  (method ^:protected getOption :type-params [T] :throws [IOException] ^T [this
+                                                                           ^{:tag (SocketOption T)} opt]
+    (when-not (.contains (.supportedOptions this) opt)
+      (throw (UnsupportedOperationException. (java-str "'" opt "' not supported"))))
+    (let [n (HostSocketImpl/number opt)]
+      (locking stateLock
+        (.ensureOpen this)
+        (let [v (.hostGet this n)]
+          (if (HostSocketImpl/isBoolean n)
+              ^Object (Boolean/valueOf (not (== v 0)))
+              ^Object (Integer/valueOf v))))))
+
+  (method ^:private hostSet :throws [SocketException] ^void [this ^int n ^int v]
+    (let [h handle]
+      (if (< h 0)
+          (.put pending n v)
+          (let [error (new String/1 1)
+                r (HostNet/setOption0 h n v error)]
+            (when (< r 0) (throw (SocketException. (aget error 0))))))))
+
+  (method ^:private hostGet :throws [SocketException] ^int [this ^int n]
+    (let [h handle]
+      (if (< h 0)
+          (let [v (cast Integer (.get pending n))]
+            (cond
+              (some? v) v
+              (== n HostSocketImpl/SO_LINGER) -1
+              (== n HostSocketImpl/SO_REUSEADDR) (if server 1 0)
+              (or (== n HostSocketImpl/SO_RCVBUF) (== n HostSocketImpl/SO_SNDBUF))
+                (HostSocketImpl/hostDefault n)
+              :else 0))
+          (let [value (new int/1 1)
+                error (new String/1 1)
+                r (HostNet/getOption0 h n value error)]
+            (when (< r 0) (throw (SocketException. (aget error 0))))
+            (aget value 0)))))
+
+  (method ^:private ^:static hostDefault ^int [^int n]
+    (if (== n HostSocketImpl/SO_RCVBUF) 131072 16384))
+
+  (method ^:private applyPending :throws [SocketException] ^void [this ^int h]
+    (for-each [^Map$Entry e (.entrySet pending)]
+      (let [error (new String/1 1)]
+        (HostNet/setOption0 h
+                            (.intValue (cast Integer (.getKey e)))
+                            (.intValue (cast Integer (.getValue e)))
+                            error)))
+    (.clear pending))
+
+  (method ^:private booleanValue :throws [SocketException] ^boolean [this value ^String desc]
+    (when-not (instance? Boolean value) (throw (SocketException. (java-str "Bad value for " desc))))
+    (.booleanValue (cast Boolean value)))
+
+  (method ^:private intValue :throws [SocketException] ^int [this value ^String desc]
+    (when-not (instance? Integer value) (throw (SocketException. (java-str "Bad value for " desc))))
+    (.intValue (cast Integer value)))
+
+  (method ^:public setOption :throws [SocketException] ^void [this ^int opt value]
+    (locking stateLock
+      (.ensureOpen this)
+      (switch opt
+        HostSocketImpl/SO_LINGER
+          (let [^int i (if (and (instance? Boolean value)
+                                (= (.booleanValue (cast Boolean value)) false))
+                           -1
+                           (.intValue this value "SO_LINGER"))]
+            (.hostSet this HostSocketImpl/SO_LINGER i))
+        HostSocketImpl/SO_TIMEOUT
+          (let [i (.intValue this value "SO_TIMEOUT")]
+            (when (< i 0) (throw (IllegalArgumentException. "timeout < 0")))
+            (set! timeout i))
+        HostSocketImpl/IP_TOS (.hostSet this HostSocketImpl/IP_TOS (.intValue this value "IP_TOS"))
+        HostSocketImpl/TCP_NODELAY
+          (.hostSet this
+                    HostSocketImpl/TCP_NODELAY
+                    (if (.booleanValue this value "TCP_NODELAY") 1 0))
+        HostSocketImpl/SO_SNDBUF
+          (let [i (.intValue this value "SO_SNDBUF")]
+            (when (<= i 0) (throw (SocketException. "SO_SNDBUF <= 0")))
+            (.hostSet this HostSocketImpl/SO_SNDBUF i))
+        HostSocketImpl/SO_RCVBUF
+          (let [i (.intValue this value "SO_RCVBUF")]
+            (when (<= i 0) (throw (SocketException. "SO_RCVBUF <= 0")))
+            (.hostSet this HostSocketImpl/SO_RCVBUF i))
+        HostSocketImpl/SO_KEEPALIVE
+          (.hostSet this
+                    HostSocketImpl/SO_KEEPALIVE
+                    (if (.booleanValue this value "SO_KEEPALIVE") 1 0))
+        HostSocketImpl/SO_OOBINLINE
+          (.hostSet this
+                    HostSocketImpl/SO_OOBINLINE
+                    (if (.booleanValue this value "SO_OOBINLINE") 1 0))
+        HostSocketImpl/SO_REUSEADDR
+          (.hostSet this
+                    HostSocketImpl/SO_REUSEADDR
+                    (if (.booleanValue this value "SO_REUSEADDR") 1 0))
+        HostSocketImpl/SO_REUSEPORT
+          (.hostSet this
+                    HostSocketImpl/SO_REUSEPORT
+                    (if (.booleanValue this value "SO_REUSEPORT") 1 0))
+        (throw (SocketException. (java-str "Unknown option " opt))))))
+
+  (method ^:public getOption :throws [SocketException] [this ^int opt]
+    (locking stateLock
+      (.ensureOpen this)
+      (switch opt
+        HostSocketImpl/SO_TIMEOUT timeout
+        (HostSocketImpl/TCP_NODELAY HostSocketImpl/SO_OOBINLINE
+                                    HostSocketImpl/SO_REUSEADDR
+                                    HostSocketImpl/SO_KEEPALIVE
+                                    HostSocketImpl/SO_REUSEPORT)
+          (not (== (.hostGet this opt) 0))
+        HostSocketImpl/SO_LINGER
+          (let [i (.hostGet this HostSocketImpl/SO_LINGER)] (if (== i -1) Boolean/FALSE i))
+        HostSocketImpl/SO_BINDADDR
+          (let [h handle]
+            (when (< h 0)
+              (try
+                (return (if (some? bindAddress)
+                            ^Object bindAddress
+                            ^Object (InetAddress/getByName "0.0.0.0")))
+                (catch UnknownHostException e (throw (SocketException. (.getMessage e))))))
+            (try
+              (HostSocketImpl/inetAddress (HostNet/address0 h true))
+              (catch IOException e (throw (SocketException. (.getMessage e))))))
+        (HostSocketImpl/SO_SNDBUF HostSocketImpl/SO_RCVBUF HostSocketImpl/IP_TOS)
+          (.hostGet this opt)
+        (throw (SocketException. (java-str "Unknown option " opt))))))
+
+  (method ^:protected shutdownInput :throws [IOException] ^void [this]
+    (locking stateLock
+      (.ensureOpenAndConnected this)
+      (when-not isInputClosed
+        (let [error (new String/1 1)
+              r (HostNet/shutdown0 handle HostNet/SHUT_RD error)]
+          (when (< r 0) (throw (HostNet/exception r (aget error 0) "")))
+          (set! isInputClosed true)))))
+
+  (method ^:protected shutdownOutput :throws [IOException] ^void [this]
+    (locking stateLock
+      (.ensureOpenAndConnected this)
+      (when-not isOutputClosed
+        (let [error (new String/1 1)
+              r (HostNet/shutdown0 handle HostNet/SHUT_WR error)]
+          (when (< r 0) (throw (HostNet/exception r (aget error 0) "")))
+          (set! isOutputClosed true)))))
+
+  (method ^:protected supportsUrgentData ^boolean [this] false)
+
+  (method ^:protected sendUrgentData :throws [IOException] ^void [this ^int data]
+    (throw (SocketException. "Urgent data not supported"))))

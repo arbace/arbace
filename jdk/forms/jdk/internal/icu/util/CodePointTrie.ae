@@ -1,0 +1,840 @@
+;; Converted from jdk26u src/java.base/share/classes/jdk/internal/icu/util/CodePointTrie.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.icu.util)
+
+(import '(java.io DataOutputStream IOException OutputStream UncheckedIOException)
+        '(java.nio ByteBuffer ByteOrder)
+        '(jdk.internal.icu.impl ICUBinary NormalizerImpl$UTF16Plus))
+
+(defclass ^:public ^:abstract CodePointTrie
+  :extends CodePointMap
+
+  (defclass ^:public ^:enum Type
+    (constants FAST SMALL))
+
+  (defclass ^:public ^:enum ValueWidth
+    (constants BITS_16 BITS_32 BITS_8))
+
+  (constructor ^:private [this ^char/1 index ^Data data ^int highStart ^int index3NullOffset
+                          ^int dataNullOffset]
+    (set! (.-ascii this) (new int/1 ASCII_LIMIT))
+    (set! (.-index this) index)
+    (set! (.-data this) data)
+    (set! (.-dataLength this) (.getDataLength data))
+    (set! (.-highStart this) highStart)
+    (set! (.-index3NullOffset this) index3NullOffset)
+    (set! (.-dataNullOffset this) dataNullOffset)
+    (loop [^int c 0]
+      (when (< c ASCII_LIMIT) (aset ascii c (.getFromIndex data c)) (recur (unchecked-inc-int c))))
+    (let [^:mutable nullValueOffset dataNullOffset]
+      (when (>= nullValueOffset dataLength)
+        (set! nullValueOffset (unchecked-subtract-int dataLength HIGH_VALUE_NEG_DATA_OFFSET)))
+      (set! nullValue (.getFromIndex data nullValueOffset))))
+
+  (method ^:public ^:static fromBinary ^CodePointTrie [^:mutable ^Type type
+                                                       ^:mutable ^ValueWidth valueWidth
+                                                       ^ByteBuffer bytes]
+    (let [outerByteOrder (.order bytes)]
+      (try
+        (when (< (.remaining bytes) 16)
+          (throw (InternalError. "Buffer too short for a CodePointTrie header")))
+        (let [^:mutable signature (.getInt bytes)]
+          (switch signature
+            0x54726933 nil
+            0x33697254
+              (let [isBigEndian (identical? outerByteOrder ByteOrder/BIG_ENDIAN)]
+                (.order bytes
+                        ^ByteOrder (if isBigEndian ByteOrder/LITTLE_ENDIAN ByteOrder/BIG_ENDIAN))
+                (set! signature 0x54726933))
+            (throw (InternalError. "Buffer does not contain a serialized CodePointTrie")))
+          (let [^int options (.getChar bytes)
+                ^int indexLength (.getChar bytes)
+                ^:mutable ^int dataLength (.getChar bytes)
+                ^int index3NullOffset (.getChar bytes)
+                ^:mutable ^int dataNullOffset (.getChar bytes)
+                ^int shiftedHighStart (.getChar bytes)
+                typeInt (bit-and-int (bit-shift-right-int options 6) 3)
+                ^:mutable ^Type actualType nil]
+            (switch typeInt
+              0 (set! actualType Type/FAST)
+              1 (set! actualType Type/SMALL)
+              (throw (InternalError. "CodePointTrie data header has an unsupported type")))
+            (let [valueWidthInt (bit-and-int options OPTIONS_VALUE_BITS_MASK)
+                  ^:mutable ^ValueWidth actualValueWidth nil]
+              (switch valueWidthInt
+                0 (set! actualValueWidth ValueWidth/BITS_16)
+                1 (set! actualValueWidth ValueWidth/BITS_32)
+                2 (set! actualValueWidth ValueWidth/BITS_8)
+                (throw (InternalError. "CodePointTrie data header has an unsupported value width")))
+              (when-not (== (bit-and-int options OPTIONS_RESERVED_MASK) 0)
+                (throw (InternalError. "CodePointTrie data header has unsupported options")))
+              (when (nil? type) (set! type actualType))
+              (when (nil? valueWidth) (set! valueWidth actualValueWidth))
+              (when (or (not (identical? type actualType))
+                        (not (identical? valueWidth actualValueWidth)))
+                (throw
+                  (InternalError.
+                    "CodePointTrie data header has a different type or value width than required")))
+              (set! dataLength
+                    (bit-or-int dataLength
+                                (bit-shift-left-int
+                                  (bit-and-int options OPTIONS_DATA_LENGTH_MASK)
+                                  4)))
+              (set! dataNullOffset
+                    (bit-or-int dataNullOffset
+                                (bit-shift-left-int
+                                  (bit-and-int options OPTIONS_DATA_NULL_OFFSET_MASK)
+                                  8)))
+              (let [highStart (bit-shift-left-int shiftedHighStart SHIFT_2)
+                    ^:mutable actualLength (unchecked-multiply-int indexLength 2)]
+                (cond
+                  (identical? valueWidth ValueWidth/BITS_16)
+                    (set! actualLength
+                          (unchecked-add-int actualLength (unchecked-multiply-int dataLength 2)))
+                  (identical? valueWidth ValueWidth/BITS_32)
+                    (set! actualLength
+                          (unchecked-add-int actualLength (unchecked-multiply-int dataLength 4)))
+                  :else (set! actualLength (unchecked-add-int actualLength dataLength)))
+                (when (< (.remaining bytes) actualLength)
+                  (throw (InternalError. "Buffer too short for the CodePointTrie data")))
+                (let [index (ICUBinary/getChars bytes indexLength 0)]
+                  (switch valueWidth
+                    BITS_16
+                      (let [data16 (ICUBinary/getChars bytes dataLength 0)]
+                        (if (identical? type Type/FAST)
+                            ^CodePointTrie (Fast16.
+                                             index
+                                             data16
+                                             highStart
+                                             index3NullOffset
+                                             dataNullOffset)
+                            ^CodePointTrie (Small16.
+                                             index
+                                             data16
+                                             highStart
+                                             index3NullOffset
+                                             dataNullOffset)))
+                    BITS_32
+                      (let [data32 (ICUBinary/getInts bytes dataLength 0)]
+                        (if (identical? type Type/FAST)
+                            ^CodePointTrie (Fast32.
+                                             index
+                                             data32
+                                             highStart
+                                             index3NullOffset
+                                             dataNullOffset)
+                            ^CodePointTrie (Small32.
+                                             index
+                                             data32
+                                             highStart
+                                             index3NullOffset
+                                             dataNullOffset)))
+                    BITS_8
+                      (let [data8 (ICUBinary/getBytes bytes dataLength 0)]
+                        (if (identical? type Type/FAST)
+                            ^CodePointTrie (Fast8.
+                                             index
+                                             data8
+                                             highStart
+                                             index3NullOffset
+                                             dataNullOffset)
+                            ^CodePointTrie (Small8.
+                                             index
+                                             data8
+                                             highStart
+                                             index3NullOffset
+                                             dataNullOffset)))
+                    (throw (AssertionError. "should be unreachable"))))))))
+        (finally (.order bytes outerByteOrder)))))
+
+  (method ^:public ^:abstract getType ^Type [this])
+
+  (method ^:public ^:final getValueWidth ^ValueWidth [this]
+    (.getValueWidth data))
+
+  (method ^:public get ^int [this ^int c]
+    (.getFromIndex data (.cpIndex this c)))
+
+  (method ^:public ^:final asciiGet ^int [this ^int c] (aget ascii c))
+
+  (field ^:private ^:static ^:final ^int MAX_UNICODE 0x10ffff)
+
+  (field ^:private ^:static ^:final ^int ASCII_LIMIT 0x80)
+
+  (method ^:private ^:static ^:final maybeFilterValue ^int [^:mutable ^int value ^int trieNullValue
+                                                            ^int nullValue
+                                                            ^CodePointMap$ValueFilter filter]
+    (cond
+      (== value trieNullValue) (set! value nullValue)
+      (some? filter) (set! value (.apply filter value)))
+    value)
+
+  (method ^:public ^:final getRange ^boolean [this ^int start ^CodePointMap$ValueFilter filter
+                                              ^CodePointMap$Range range]
+    (cond
+      (or (< start 0) (< MAX_UNICODE start)) false
+      (>= start highStart)
+        (let [di (unchecked-subtract-int dataLength HIGH_VALUE_NEG_DATA_OFFSET)
+              ^:mutable value (.getFromIndex data di)]
+          (when (some? filter) (set! value (.apply filter value)))
+          (.set range start MAX_UNICODE value)
+          true)
+      :else
+        (let [^:mutable nullValue (.-nullValue this)]
+          (when (some? filter) (set! nullValue (.apply filter nullValue)))
+          (let [type (.getType this)
+                ^:mutable ^int prevI3Block -1
+                ^:mutable ^int prevBlock -1
+                ^:mutable c start
+                ^:mutable ^int trieValue 0
+                ^:mutable ^int value 0
+                ^:mutable haveValue false]
+            (loop []
+              (label :do-body
+                (let [^:mutable ^int i3Block 0
+                      ^:mutable ^int i3 0
+                      ^:mutable ^int i3BlockLength 0
+                      ^:mutable ^int dataBlockLength 0]
+                  (if (and (<= c 0xffff) (or (identical? type Type/FAST) (<= c SMALL_MAX)))
+                      (do
+                        (set! i3Block 0)
+                        (set! i3 (bit-shift-right-int c FAST_SHIFT))
+                        (set! i3BlockLength
+                              (if (identical? type Type/FAST) BMP_INDEX_LENGTH SMALL_INDEX_LENGTH))
+                        (set! dataBlockLength FAST_DATA_BLOCK_LENGTH))
+                      (let [^:mutable i1 (bit-shift-right-int c SHIFT_1)]
+                        (if (identical? type Type/FAST)
+                            (do
+                              (java-assert (and (< 0xffff c) (< c highStart)))
+                              (set! i1
+                                    (unchecked-add-int
+                                      i1
+                                      (unchecked-subtract-int
+                                        BMP_INDEX_LENGTH
+                                        OMITTED_BMP_INDEX_1_LENGTH))))
+                            (do
+                              (java-assert (and (< c highStart) (> highStart SMALL_LIMIT)))
+                              (set! i1 (unchecked-add-int i1 SMALL_INDEX_LENGTH))))
+                        (set! i3Block
+                              (aget index
+                                    (unchecked-add-int
+                                      (aget index i1)
+                                      (bit-and-int (bit-shift-right-int c SHIFT_2) INDEX_2_MASK))))
+                        (when (and (== i3Block prevI3Block)
+                                   (>= (unchecked-subtract-int c start) CP_PER_INDEX_2_ENTRY))
+                          (java-assert (== (bit-and-int
+                                             c
+                                             (unchecked-subtract-int CP_PER_INDEX_2_ENTRY 1))
+                                           0))
+                          (set! c (unchecked-add-int c CP_PER_INDEX_2_ENTRY))
+                          (break :do-body))
+                        (set! prevI3Block i3Block)
+                        (when (== i3Block index3NullOffset)
+                          (if haveValue
+                              (when-not (== nullValue value)
+                                (.set range start (unchecked-subtract-int c 1) value)
+                                (return true))
+                              (do
+                                (set! trieValue (.-nullValue this))
+                                (set! value nullValue)
+                                (set! haveValue true)))
+                          (set! prevBlock dataNullOffset)
+                          (set! c
+                                (bit-and-int (unchecked-add-int c CP_PER_INDEX_2_ENTRY)
+                                             (bit-not-int
+                                               (unchecked-subtract-int CP_PER_INDEX_2_ENTRY 1))))
+                          (break :do-body))
+                        (set! i3 (bit-and-int (bit-shift-right-int c SHIFT_3) INDEX_3_MASK))
+                        (set! i3BlockLength INDEX_3_BLOCK_LENGTH)
+                        (set! dataBlockLength SMALL_DATA_BLOCK_LENGTH)))
+                  (loop []
+                    (let [^:mutable ^int block 0]
+                      (if (== (bit-and-int i3Block 0x8000) 0)
+                          (set! block (aget index (unchecked-add-int i3Block i3)))
+                          (let [^:mutable group (unchecked-add-int
+                                                  (unchecked-add-int
+                                                    (bit-and-int i3Block 0x7fff)
+                                                    (bit-and-int i3 (bit-not-int 7)))
+                                                  (bit-shift-right-int i3 3))
+                                gi (bit-and-int i3 7)]
+                            (set! block
+                                  (bit-and-int
+                                    (bit-shift-left-int
+                                      (aget index group)
+                                      (unchecked-add-int 2 (unchecked-multiply-int 2 gi)))
+                                    0x30000))
+                            (set! group (unchecked-inc-int group))
+                            (set! block
+                                  (bit-or-int block (aget index (unchecked-add-int group gi))))))
+                      (if (and (== block prevBlock)
+                               (>= (unchecked-subtract-int c start) dataBlockLength))
+                          (do
+                            (java-assert (== (bit-and-int
+                                               c
+                                               (unchecked-subtract-int dataBlockLength 1))
+                                             0))
+                            (set! c (unchecked-add-int c dataBlockLength)))
+                          (let [dataMask (unchecked-subtract-int dataBlockLength 1)]
+                            (set! prevBlock block)
+                            (if (== block dataNullOffset)
+                                (do
+                                  (if haveValue
+                                      (when-not (== nullValue value)
+                                        (.set range start (unchecked-subtract-int c 1) value)
+                                        (return true))
+                                      (do
+                                        (set! trieValue (.-nullValue this))
+                                        (set! value nullValue)
+                                        (set! haveValue true)))
+                                  (set! c
+                                        (bit-and-int
+                                          (unchecked-add-int c dataBlockLength)
+                                          (bit-not-int dataMask))))
+                                (let [^:mutable di (unchecked-add-int
+                                                     block
+                                                     (bit-and-int c dataMask))
+                                      ^:mutable trieValue2 (.getFromIndex data di)]
+                                  (if haveValue
+                                      (when-not (== trieValue2 trieValue)
+                                        (when (or
+                                                (nil? filter)
+                                                (not
+                                                  (==
+                                                    (CodePointTrie/maybeFilterValue
+                                                      trieValue2
+                                                      (.-nullValue this)
+                                                      nullValue
+                                                      filter)
+                                                    value)))
+                                          (.set range start (unchecked-subtract-int c 1) value)
+                                          (return true))
+                                        (set! trieValue trieValue2))
+                                      (do
+                                        (set! trieValue trieValue2)
+                                        (set! value
+                                              (CodePointTrie/maybeFilterValue
+                                                trieValue2
+                                                (.-nullValue this)
+                                                nullValue
+                                                filter))
+                                        (set! haveValue true)))
+                                  (while (not (==
+                                                (bit-and-int
+                                                  (set! c (unchecked-inc-int c))
+                                                  dataMask)
+                                                0))
+                                    (set! trieValue2
+                                          (.getFromIndex data (set! di (unchecked-inc-int di))))
+                                    (when-not (== trieValue2 trieValue)
+                                      (when (or (nil? filter)
+                                                (not
+                                                  (==
+                                                    (CodePointTrie/maybeFilterValue
+                                                      trieValue2
+                                                      (.-nullValue this)
+                                                      nullValue
+                                                      filter)
+                                                    value)))
+                                        (.set range start (unchecked-subtract-int c 1) value)
+                                        (return true))
+                                      (set! trieValue trieValue2))))))))
+                    (when (< (set! i3 (unchecked-inc-int i3)) i3BlockLength) (recur)))))
+              (when (< c highStart) (recur)))
+            (java-assert haveValue)
+            (let [di (unchecked-subtract-int dataLength HIGH_VALUE_NEG_DATA_OFFSET)
+                  highValue (.getFromIndex data di)]
+              (if (not (== (CodePointTrie/maybeFilterValue
+                             highValue
+                             (.-nullValue this)
+                             nullValue
+                             filter)
+                           value))
+                  (set! c (unchecked-dec-int c))
+                  (set! c MAX_UNICODE))
+              (.set range start c value)
+              true)))))
+
+  (method ^:public ^:final toBinary ^int [this ^OutputStream os]
+    (try
+      (let [dos (DataOutputStream. os)]
+        (.writeInt dos 0x54726933)
+        (.writeChar dos
+                    (bit-or-int (bit-or-int (bit-or-int
+                                              (bit-shift-right-int
+                                                (bit-and-int dataLength 0xf0000)
+                                                4)
+                                              (bit-shift-right-int
+                                                (bit-and-int dataNullOffset 0xf0000)
+                                                8))
+                                            (bit-shift-left-int (.ordinal (.getType this)) 6))
+                                (.ordinal (.getValueWidth this))))
+        (.writeChar dos (alength index))
+        (.writeChar dos dataLength)
+        (.writeChar dos index3NullOffset)
+        (.writeChar dos dataNullOffset)
+        (.writeChar dos (bit-shift-right-int highStart SHIFT_2))
+        (let [^:mutable ^int length 16]
+          (for-each [^char i index] (.writeChar dos i))
+          (set! length (unchecked-add-int length (unchecked-multiply-int (alength index) 2)))
+          (set! length (unchecked-add-int length (.write data dos)))
+          length))
+      (catch IOException e (throw (UncheckedIOException. e)))))
+
+  (field ^:static ^:final ^int FAST_SHIFT 6)
+
+  (field ^:static ^:final ^int FAST_DATA_BLOCK_LENGTH (bit-shift-left-int 1 FAST_SHIFT))
+
+  (field ^:private ^:static ^:final ^int FAST_DATA_MASK
+    (unchecked-subtract-int FAST_DATA_BLOCK_LENGTH 1))
+
+  (field ^:private ^:static ^:final ^int SMALL_MAX 0xfff)
+
+  (field ^:private ^:static ^:final ^int ERROR_VALUE_NEG_DATA_OFFSET 1)
+
+  (field ^:private ^:static ^:final ^int HIGH_VALUE_NEG_DATA_OFFSET 2)
+
+  (field ^:private ^:static ^:final ^int BMP_INDEX_LENGTH (bit-shift-right-int 0x10000 FAST_SHIFT))
+
+  (field ^:static ^:final ^int SMALL_LIMIT 0x1000)
+
+  (field ^:private ^:static ^:final ^int SMALL_INDEX_LENGTH
+    (bit-shift-right-int SMALL_LIMIT FAST_SHIFT))
+
+  (field ^:static ^:final ^int SHIFT_3 4)
+
+  (field ^:private ^:static ^:final ^int SHIFT_2 (unchecked-add-int 5 SHIFT_3))
+
+  (field ^:private ^:static ^:final ^int SHIFT_1 (unchecked-add-int 5 SHIFT_2))
+
+  (field ^:static ^:final ^int SHIFT_2_3 (unchecked-subtract-int SHIFT_2 SHIFT_3))
+
+  (field ^:static ^:final ^int SHIFT_1_2 (unchecked-subtract-int SHIFT_1 SHIFT_2))
+
+  (field ^:private ^:static ^:final ^int OMITTED_BMP_INDEX_1_LENGTH
+    (bit-shift-right-int 0x10000 SHIFT_1))
+
+  (field ^:static ^:final ^int INDEX_2_BLOCK_LENGTH (bit-shift-left-int 1 SHIFT_1_2))
+
+  (field ^:static ^:final ^int INDEX_2_MASK (unchecked-subtract-int INDEX_2_BLOCK_LENGTH 1))
+
+  (field ^:static ^:final ^int CP_PER_INDEX_2_ENTRY (bit-shift-left-int 1 SHIFT_2))
+
+  (field ^:static ^:final ^int INDEX_3_BLOCK_LENGTH (bit-shift-left-int 1 SHIFT_2_3))
+
+  (field ^:private ^:static ^:final ^int INDEX_3_MASK
+    (unchecked-subtract-int INDEX_3_BLOCK_LENGTH 1))
+
+  (field ^:static ^:final ^int SMALL_DATA_BLOCK_LENGTH (bit-shift-left-int 1 SHIFT_3))
+
+  (field ^:static ^:final ^int SMALL_DATA_MASK (unchecked-subtract-int SMALL_DATA_BLOCK_LENGTH 1))
+
+  (field ^:private ^:static ^:final ^int OPTIONS_DATA_LENGTH_MASK 0xf000)
+
+  (field ^:private ^:static ^:final ^int OPTIONS_DATA_NULL_OFFSET_MASK 0xf00)
+
+  (field ^:private ^:static ^:final ^int OPTIONS_RESERVED_MASK 0x38)
+
+  (field ^:private ^:static ^:final ^int OPTIONS_VALUE_BITS_MASK 7)
+
+  (field ^:static ^:final ^int NO_INDEX3_NULL_OFFSET 0x7fff)
+
+  (field ^:static ^:final ^int NO_DATA_NULL_OFFSET 0xfffff)
+
+  (defclass ^:private ^:abstract ^:static Data
+    (method ^:abstract getValueWidth ^ValueWidth [this])
+
+    (method ^:abstract getDataLength ^int [this])
+
+    (method ^:abstract getFromIndex ^int [this ^int index])
+
+    (method ^:abstract write :throws [IOException] ^int [this ^DataOutputStream dos]))
+
+  (defclass ^:private ^:static ^:final Data16
+    :extends Data
+
+    (field ^char/1 array)
+
+    (constructor [this ^char/1 a] (set! array a))
+
+    (method getValueWidth ^ValueWidth [this] ValueWidth/BITS_16)
+
+    (method getDataLength ^int [this] (alength array))
+
+    (method getFromIndex ^int [this ^int index] (aget array index))
+
+    (method write :throws [IOException] ^int [this ^DataOutputStream dos]
+      (for-each [^char v array] (.writeChar dos v))
+      (unchecked-multiply-int (alength array) 2)))
+
+  (defclass ^:private ^:static ^:final Data32
+    :extends Data
+
+    (field ^int/1 array)
+
+    (constructor [this ^int/1 a] (set! array a))
+
+    (method getValueWidth ^ValueWidth [this] ValueWidth/BITS_32)
+
+    (method getDataLength ^int [this] (alength array))
+
+    (method getFromIndex ^int [this ^int index] (aget array index))
+
+    (method write :throws [IOException] ^int [this ^DataOutputStream dos]
+      (for-each [^int v array] (.writeInt dos v))
+      (unchecked-multiply-int (alength array) 4)))
+
+  (defclass ^:private ^:static ^:final Data8
+    :extends Data
+
+    (field ^byte/1 array)
+
+    (constructor [this ^byte/1 a] (set! array a))
+
+    (method getValueWidth ^ValueWidth [this] ValueWidth/BITS_8)
+
+    (method getDataLength ^int [this] (alength array))
+
+    (method getFromIndex ^int [this ^int index]
+      (bit-and-int (aget array index) 0xff))
+
+    (method write :throws [IOException] ^int [this ^DataOutputStream dos]
+      (for-each [^byte v array] (.writeByte dos v))
+      (alength array)))
+
+  (field ^:private ^:final ^int/1 ascii)
+
+  (field ^:private ^:final ^char/1 index)
+
+  (field ^:protected ^:final ^{Deprecated true} ^Data data)
+
+  (field ^:protected ^:final ^{Deprecated true} ^int dataLength)
+
+  (field ^:protected ^:final ^{Deprecated true} ^int highStart)
+
+  (field ^:private ^:final ^int index3NullOffset)
+
+  (field ^:private ^:final ^int dataNullOffset)
+
+  (field ^:private ^:final ^int nullValue)
+
+  (method ^:protected ^:final ^{Deprecated true} fastIndex ^int [this ^int c]
+    (unchecked-add-int (aget index (bit-shift-right-int c FAST_SHIFT))
+                       (bit-and-int c FAST_DATA_MASK)))
+
+  (method ^:protected ^:final ^{Deprecated true} smallIndex ^int [this ^Type type ^int c]
+    (if (>= c highStart)
+        (unchecked-subtract-int dataLength HIGH_VALUE_NEG_DATA_OFFSET)
+        (.internalSmallIndex this type c)))
+
+  (method ^:private ^:final internalSmallIndex ^int [this ^Type type ^int c]
+    (let [^:mutable i1 (bit-shift-right-int c SHIFT_1)]
+      (if (identical? type Type/FAST)
+          (do
+            (java-assert (and (< 0xffff c) (< c highStart)))
+            (set! i1
+                  (unchecked-add-int i1
+                                     (unchecked-subtract-int
+                                       BMP_INDEX_LENGTH
+                                       OMITTED_BMP_INDEX_1_LENGTH))))
+          (do
+            (java-assert (and (and (<= 0 c) (< c highStart)) (> highStart SMALL_LIMIT)))
+            (set! i1 (unchecked-add-int i1 SMALL_INDEX_LENGTH))))
+      (let [^:mutable ^int i3Block (aget index
+                                         (unchecked-add-int
+                                           (aget index i1)
+                                           (bit-and-int
+                                             (bit-shift-right-int c SHIFT_2)
+                                             INDEX_2_MASK)))
+            ^:mutable i3 (bit-and-int (bit-shift-right-int c SHIFT_3) INDEX_3_MASK)
+            ^:mutable ^int dataBlock 0]
+        (if (== (bit-and-int i3Block 0x8000) 0)
+            (set! dataBlock (aget index (unchecked-add-int i3Block i3)))
+            (do
+              (set! i3Block
+                    (unchecked-add-int
+                      (unchecked-add-int (bit-and-int i3Block 0x7fff)
+                                         (bit-and-int i3 (bit-not-int 7)))
+                      (bit-shift-right-int i3 3)))
+              (set! i3 (bit-and-int i3 7))
+              (set! dataBlock
+                    (bit-and-int (bit-shift-left-int
+                                   (aget index i3Block)
+                                   (unchecked-add-int 2 (unchecked-multiply-int 2 i3)))
+                                 0x30000))
+              (set! i3Block (unchecked-inc-int i3Block))
+              (set! dataBlock (bit-or-int dataBlock (aget index (unchecked-add-int i3Block i3))))))
+        (unchecked-add-int dataBlock (bit-and-int c SMALL_DATA_MASK)))))
+
+  (method ^:protected ^:abstract ^{Deprecated true} cpIndex ^int [this ^int c])
+
+  (defclass ^:public ^:abstract ^:static Fast
+    :extends CodePointTrie
+
+    (constructor ^:private [this ^char/1 index ^Data data ^int highStart ^int index3NullOffset
+                            ^int dataNullOffset]
+      (super. index data highStart index3NullOffset dataNullOffset))
+
+    (method ^:public ^:static fromBinary ^Fast [^ValueWidth valueWidth ^ByteBuffer bytes]
+      (cast Fast (CodePointTrie/fromBinary Type/FAST valueWidth bytes)))
+
+    (method ^:public ^:final getType ^Type [this] Type/FAST)
+
+    (method ^:public ^:abstract bmpGet ^int [this ^int c])
+
+    (method ^:public ^:abstract suppGet ^int [this ^int c])
+
+    (method ^:protected ^:final ^{Deprecated true} cpIndex ^int [this ^int c]
+      (when (>= c 0)
+        (cond
+          (<= c 0xffff) (return (.fastIndex this c))
+          (<= c 0x10ffff) (return (.smallIndex this Type/FAST c))))
+      (unchecked-subtract-int (.-dataLength this) ERROR_VALUE_NEG_DATA_OFFSET))
+
+    (method ^:public ^:final stringIterator ^CodePointMap$StringIterator [this ^CharSequence s
+                                                                          ^int sIndex]
+      (FastStringIterator. s sIndex))
+
+    (defclass ^:private ^:final FastStringIterator
+      :extends CodePointMap$StringIterator
+
+      (constructor ^:private [this ^CharSequence s ^int sIndex]
+        (super. s sIndex))
+
+      (method ^:public next ^boolean [this]
+        (if (>= (.-sIndex this) (.length (.-s this)))
+            false
+            (let [lead (.charAt (.-s this)
+                                (let [old-1 (.-sIndex this)]
+                                  (set! (.-sIndex this) (unchecked-inc-int (.-sIndex this)))
+                                  old-1))]
+              (set! (.-c this) lead)
+              (let [^:mutable ^int dataIndex 0]
+                (if (not (Character/isSurrogate lead))
+                    (set! dataIndex (.fastIndex Fast/this (.-c this)))
+                    (let [^:mutable ^char trail (unchecked-char 0)]
+                      (if (and (and (NormalizerImpl$UTF16Plus/isSurrogateLead lead)
+                                    (< (.-sIndex this) (.length (.-s this))))
+                               (Character/isLowSurrogate
+                                 (set! trail (.charAt (.-s this) (.-sIndex this)))))
+                          (do
+                            (set! (.-sIndex this) (unchecked-inc-int (.-sIndex this)))
+                            (set! (.-c this) (Character/toCodePoint lead trail))
+                            (set! dataIndex (.smallIndex Fast/this Type/FAST (.-c this))))
+                          (set! dataIndex
+                                (unchecked-subtract-int
+                                  (.-dataLength Fast/this)
+                                  ERROR_VALUE_NEG_DATA_OFFSET)))))
+                (set! (.-value this) (.getFromIndex (.-data Fast/this) dataIndex))
+                true))))
+
+      (method ^:public previous ^boolean [this]
+        (if (<= (.-sIndex this) 0)
+            false
+            (let [trail (.charAt (.-s this)
+                                 (set! (.-sIndex this) (unchecked-dec-int (.-sIndex this))))]
+              (set! (.-c this) trail)
+              (let [^:mutable ^int dataIndex 0]
+                (if (not (Character/isSurrogate trail))
+                    (set! dataIndex (.fastIndex Fast/this (.-c this)))
+                    (let [^:mutable ^char lead (unchecked-char 0)]
+                      (if (and (and (not (NormalizerImpl$UTF16Plus/isSurrogateLead trail))
+                                    (> (.-sIndex this) 0))
+                               (Character/isHighSurrogate
+                                 (set! lead
+                                       (.charAt (.-s this)
+                                                (unchecked-subtract-int (.-sIndex this) 1)))))
+                          (do
+                            (set! (.-sIndex this) (unchecked-dec-int (.-sIndex this)))
+                            (set! (.-c this) (Character/toCodePoint lead trail))
+                            (set! dataIndex (.smallIndex Fast/this Type/FAST (.-c this))))
+                          (set! dataIndex
+                                (unchecked-subtract-int
+                                  (.-dataLength Fast/this)
+                                  ERROR_VALUE_NEG_DATA_OFFSET)))))
+                (set! (.-value this) (.getFromIndex (.-data Fast/this) dataIndex))
+                true))))))
+
+  (defclass ^:public ^:abstract ^:static Small
+    :extends CodePointTrie
+
+    (constructor ^:private [this ^char/1 index ^Data data ^int highStart ^int index3NullOffset
+                            ^int dataNullOffset]
+      (super. index data highStart index3NullOffset dataNullOffset))
+
+    (method ^:public ^:static fromBinary ^Small [^ValueWidth valueWidth ^ByteBuffer bytes]
+      (cast Small (CodePointTrie/fromBinary Type/SMALL valueWidth bytes)))
+
+    (method ^:public ^:final getType ^Type [this] Type/SMALL)
+
+    (method ^:protected ^:final ^{Deprecated true} cpIndex ^int [this ^int c]
+      (when (>= c 0)
+        (cond
+          (<= c SMALL_MAX) (return (.fastIndex this c))
+          (<= c 0x10ffff) (return (.smallIndex this Type/SMALL c))))
+      (unchecked-subtract-int (.-dataLength this) ERROR_VALUE_NEG_DATA_OFFSET))
+
+    (method ^:public ^:final stringIterator ^CodePointMap$StringIterator [this ^CharSequence s
+                                                                          ^int sIndex]
+      (SmallStringIterator. s sIndex))
+
+    (defclass ^:private ^:final SmallStringIterator
+      :extends CodePointMap$StringIterator
+
+      (constructor ^:private [this ^CharSequence s ^int sIndex]
+        (super. s sIndex))
+
+      (method ^:public next ^boolean [this]
+        (if (>= (.-sIndex this) (.length (.-s this)))
+            false
+            (let [lead (.charAt (.-s this)
+                                (let [old-2 (.-sIndex this)]
+                                  (set! (.-sIndex this) (unchecked-inc-int (.-sIndex this)))
+                                  old-2))]
+              (set! (.-c this) lead)
+              (let [^:mutable ^int dataIndex 0]
+                (if (not (Character/isSurrogate lead))
+                    (set! dataIndex (.cpIndex Small/this (.-c this)))
+                    (let [^:mutable ^char trail (unchecked-char 0)]
+                      (if (and (and (NormalizerImpl$UTF16Plus/isSurrogateLead lead)
+                                    (< (.-sIndex this) (.length (.-s this))))
+                               (Character/isLowSurrogate
+                                 (set! trail (.charAt (.-s this) (.-sIndex this)))))
+                          (do
+                            (set! (.-sIndex this) (unchecked-inc-int (.-sIndex this)))
+                            (set! (.-c this) (Character/toCodePoint lead trail))
+                            (set! dataIndex (.smallIndex Small/this Type/SMALL (.-c this))))
+                          (set! dataIndex
+                                (unchecked-subtract-int
+                                  (.-dataLength Small/this)
+                                  ERROR_VALUE_NEG_DATA_OFFSET)))))
+                (set! (.-value this) (.getFromIndex (.-data Small/this) dataIndex))
+                true))))
+
+      (method ^:public previous ^boolean [this]
+        (if (<= (.-sIndex this) 0)
+            false
+            (let [trail (.charAt (.-s this)
+                                 (set! (.-sIndex this) (unchecked-dec-int (.-sIndex this))))]
+              (set! (.-c this) trail)
+              (let [^:mutable ^int dataIndex 0]
+                (if (not (Character/isSurrogate trail))
+                    (set! dataIndex (.cpIndex Small/this (.-c this)))
+                    (let [^:mutable ^char lead (unchecked-char 0)]
+                      (if (and (and (not (NormalizerImpl$UTF16Plus/isSurrogateLead trail))
+                                    (> (.-sIndex this) 0))
+                               (Character/isHighSurrogate
+                                 (set! lead
+                                       (.charAt (.-s this)
+                                                (unchecked-subtract-int (.-sIndex this) 1)))))
+                          (do
+                            (set! (.-sIndex this) (unchecked-dec-int (.-sIndex this)))
+                            (set! (.-c this) (Character/toCodePoint lead trail))
+                            (set! dataIndex (.smallIndex Small/this Type/SMALL (.-c this))))
+                          (set! dataIndex
+                                (unchecked-subtract-int
+                                  (.-dataLength Small/this)
+                                  ERROR_VALUE_NEG_DATA_OFFSET)))))
+                (set! (.-value this) (.getFromIndex (.-data Small/this) dataIndex))
+                true))))))
+
+  (defclass ^:public ^:static ^:final Fast16
+    :extends Fast
+
+    (field ^:private ^:final ^char/1 dataArray)
+
+    (constructor [this ^char/1 index ^char/1 data16 ^int highStart ^int index3NullOffset
+                  ^int dataNullOffset]
+      (super. index (Data16. data16) highStart index3NullOffset dataNullOffset)
+      (set! (.-dataArray this) data16))
+
+    (method ^:public ^:static fromBinary ^Fast16 [^ByteBuffer bytes]
+      (cast Fast16 (CodePointTrie/fromBinary Type/FAST ValueWidth/BITS_16 bytes)))
+
+    (method ^:public ^:final get ^int [this ^int c]
+      (aget dataArray (.cpIndex this c)))
+
+    (method ^:public ^:final bmpGet ^int [this ^int c]
+      (java-assert (and (<= 0 c) (<= c 0xffff)))
+      (aget dataArray (.fastIndex this c)))
+
+    (method ^:public ^:final suppGet ^int [this ^int c]
+      (java-assert (and (<= 0x10000 c) (<= c 0x10ffff)))
+      (aget dataArray (.smallIndex this Type/FAST c))))
+
+  (defclass ^:public ^:static ^:final Fast32
+    :extends Fast
+
+    (field ^:private ^:final ^int/1 dataArray)
+
+    (constructor [this ^char/1 index ^int/1 data32 ^int highStart ^int index3NullOffset
+                  ^int dataNullOffset]
+      (super. index (Data32. data32) highStart index3NullOffset dataNullOffset)
+      (set! (.-dataArray this) data32))
+
+    (method ^:public ^:static fromBinary ^Fast32 [^ByteBuffer bytes]
+      (cast Fast32 (CodePointTrie/fromBinary Type/FAST ValueWidth/BITS_32 bytes)))
+
+    (method ^:public ^:final get ^int [this ^int c]
+      (aget dataArray (.cpIndex this c)))
+
+    (method ^:public ^:final bmpGet ^int [this ^int c]
+      (java-assert (and (<= 0 c) (<= c 0xffff)))
+      (aget dataArray (.fastIndex this c)))
+
+    (method ^:public ^:final suppGet ^int [this ^int c]
+      (java-assert (and (<= 0x10000 c) (<= c 0x10ffff)))
+      (aget dataArray (.smallIndex this Type/FAST c))))
+
+  (defclass ^:public ^:static ^:final Fast8
+    :extends Fast
+
+    (field ^:private ^:final ^byte/1 dataArray)
+
+    (constructor [this ^char/1 index ^byte/1 data8 ^int highStart ^int index3NullOffset
+                  ^int dataNullOffset]
+      (super. index (Data8. data8) highStart index3NullOffset dataNullOffset)
+      (set! (.-dataArray this) data8))
+
+    (method ^:public ^:static fromBinary ^Fast8 [^ByteBuffer bytes]
+      (cast Fast8 (CodePointTrie/fromBinary Type/FAST ValueWidth/BITS_8 bytes)))
+
+    (method ^:public ^:final get ^int [this ^int c]
+      (bit-and-int (aget dataArray (.cpIndex this c)) 0xff))
+
+    (method ^:public ^:final bmpGet ^int [this ^int c]
+      (java-assert (and (<= 0 c) (<= c 0xffff)))
+      (bit-and-int (aget dataArray (.fastIndex this c)) 0xff))
+
+    (method ^:public ^:final suppGet ^int [this ^int c]
+      (java-assert (and (<= 0x10000 c) (<= c 0x10ffff)))
+      (bit-and-int (aget dataArray (.smallIndex this Type/FAST c)) 0xff)))
+
+  (defclass ^:public ^:static ^:final Small16
+    :extends Small
+
+    (constructor [this ^char/1 index ^char/1 data16 ^int highStart ^int index3NullOffset
+                  ^int dataNullOffset]
+      (super. index (Data16. data16) highStart index3NullOffset dataNullOffset))
+
+    (method ^:public ^:static fromBinary ^Small16 [^ByteBuffer bytes]
+      (cast Small16 (CodePointTrie/fromBinary Type/SMALL ValueWidth/BITS_16 bytes))))
+
+  (defclass ^:public ^:static ^:final Small32
+    :extends Small
+
+    (constructor [this ^char/1 index ^int/1 data32 ^int highStart ^int index3NullOffset
+                  ^int dataNullOffset]
+      (super. index (Data32. data32) highStart index3NullOffset dataNullOffset))
+
+    (method ^:public ^:static fromBinary ^Small32 [^ByteBuffer bytes]
+      (cast Small32 (CodePointTrie/fromBinary Type/SMALL ValueWidth/BITS_32 bytes))))
+
+  (defclass ^:public ^:static ^:final Small8
+    :extends Small
+
+    (constructor [this ^char/1 index ^byte/1 data8 ^int highStart ^int index3NullOffset
+                  ^int dataNullOffset]
+      (super. index (Data8. data8) highStart index3NullOffset dataNullOffset))
+
+    (method ^:public ^:static fromBinary ^Small8 [^ByteBuffer bytes]
+      (cast Small8 (CodePointTrie/fromBinary Type/SMALL ValueWidth/BITS_8 bytes)))))

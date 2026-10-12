@@ -1,0 +1,549 @@
+;; Converted from jdk26u src/java.base/share/classes/java/time/format/Parsed.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.time.format)
+
+(import '(java.time DateTimeException Instant LocalDate LocalTime Period ZoneId ZoneOffset)
+        '(java.time.chrono ChronoLocalDate ChronoLocalDateTime ChronoZonedDateTime Chronology)
+        '(java.time.temporal ChronoField
+                             TemporalAccessor
+                             TemporalField
+                             TemporalQueries
+                             TemporalQuery
+                             UnsupportedTemporalTypeException)
+        '(java.util HashMap Iterator Map Map$Entry Objects Set))
+
+(defclass ^:final Parsed
+  :implements [TemporalAccessor]
+
+  (field ^:final ^{:tag (Map TemporalField Long)} fieldValues (HashMap.))
+
+  (field ^ZoneId zone)
+
+  (field ^int zoneNameType DateTimeFormatterBuilder$ZoneTextPrinterParser/UNDEFINED)
+
+  (field ^Chronology chrono)
+
+  (field ^boolean leapSecond)
+
+  (field ^:private ^ResolverStyle resolverStyle)
+
+  (field ^:private ^ChronoLocalDate date)
+
+  (field ^:private ^LocalTime time)
+
+  (field ^Period excessDays Period/ZERO)
+
+  (field ^DateTimeFormatterBuilder$DayPeriod dayPeriod)
+
+  (constructor [this])
+
+  (method copy ^Parsed [this]
+    (let [cloned (Parsed.)]
+      (.putAll (.-fieldValues cloned) (.-fieldValues this))
+      (set! (.-zone cloned) (.-zone this))
+      (set! (.-zoneNameType cloned) (.-zoneNameType this))
+      (set! (.-chrono cloned) (.-chrono this))
+      (set! (.-leapSecond cloned) (.-leapSecond this))
+      (set! (.-dayPeriod cloned) (.-dayPeriod this))
+      cloned))
+
+  (method ^:public isSupported ^boolean [this ^TemporalField field]
+    (if (or (or (.containsKey fieldValues field) (and (some? date) (.isSupported date field)))
+            (and (some? time) (.isSupported time field)))
+        true
+        (and (and (some? field) (not (instance? ChronoField field))) (.isSupportedBy field this))))
+
+  (method ^:public getLong ^long [this ^TemporalField field]
+    (Objects/requireNonNull field "field")
+    (let [value (cast Long (.get fieldValues field))]
+      (cond
+        (some? value) value
+        (and (some? date) (.isSupported date field)) (.getLong date field)
+        (and (some? time) (.isSupported time field)) (.getLong time field)
+        :else
+          (do
+            (when (instance? ChronoField field)
+              (throw (UnsupportedTemporalTypeException. (java-str "Unsupported field: " field))))
+            (.getFrom field this)))))
+
+  (method ^:public query :type-params [R] ^R [this ^{:tag (TemporalQuery R)} query]
+    (cond
+      (identical? query (TemporalQueries/zoneId)) ^Object zone
+      (identical? query (TemporalQueries/chronology)) ^Object chrono
+      (identical? query (TemporalQueries/localDate))
+        ^Object (when (some? date) (LocalDate/from date))
+      (identical? query (TemporalQueries/localTime)) ^Object time
+      (identical? query (TemporalQueries/offset))
+        (let [offsetSecs (cast Long (.get fieldValues ChronoField/OFFSET_SECONDS))]
+          (cond
+            (some? offsetSecs) ^Object (ZoneOffset/ofTotalSeconds (.intValue offsetSecs))
+            (instance? ZoneOffset zone) ^Object zone
+            :else (.queryFrom query this)))
+      (identical? query (TemporalQueries/zone)) (.queryFrom query this)
+      :else (when-not (identical? query (TemporalQueries/precision)) (.queryFrom query this))))
+
+  (method resolve ^TemporalAccessor [this ^ResolverStyle resolverStyle
+                                     ^{:tag (Set TemporalField)} resolverFields]
+    (when (some? resolverFields) (.retainAll (.keySet fieldValues) resolverFields))
+    (set! (.-resolverStyle this) resolverStyle)
+    (.resolveFields this)
+    (.resolveTimeLenient this)
+    (.crossCheck this)
+    (.resolvePeriod this)
+    (.resolveFractional this)
+    (.resolveInstant this)
+    this)
+
+  (method ^:private resolveFields ^void [this]
+    (.resolveInstantFields this)
+    (.resolveDateFields this)
+    (.resolveTimeFields this)
+    (when (> (.size fieldValues) 0)
+      (let [^:mutable ^int changedCount 0]
+        (label :outer
+          (while (< changedCount 50)
+            (for-each [^{:tag (Map$Entry TemporalField Long)} entry (.entrySet fieldValues)]
+              (let [targetField (cast TemporalField (.getKey entry))
+                    ^:mutable resolvedObject (.resolve targetField fieldValues this resolverStyle)]
+                (if (some? resolvedObject)
+                    (do
+                      (when-instance [^{:tag (ChronoZonedDateTime ?)} czdt resolvedObject]
+                        (cond
+                          (nil? zone) (set! zone (.getZone czdt))
+                          (= (.equals zone (.getZone czdt)) false)
+                            (throw (DateTimeException.
+                                     (java-str
+                                       "ChronoZonedDateTime must use the effective parsed zone: "
+                                       zone))))
+                        (set! resolvedObject (.toLocalDateTime czdt)))
+                      (when-instance [^{:tag (ChronoLocalDateTime ?)} cldt resolvedObject]
+                        (.updateCheckConflict this (.toLocalTime cldt) Period/ZERO)
+                        (.updateCheckConflict this (.toLocalDate cldt))
+                        (set! changedCount (unchecked-inc-int changedCount))
+                        (continue :outer))
+                      (when (instance? ChronoLocalDate resolvedObject)
+                        (.updateCheckConflict this (cast ChronoLocalDate resolvedObject))
+                        (set! changedCount (unchecked-inc-int changedCount))
+                        (continue :outer))
+                      (when (instance? LocalTime resolvedObject)
+                        (.updateCheckConflict this (cast LocalTime resolvedObject) Period/ZERO)
+                        (set! changedCount (unchecked-inc-int changedCount))
+                        (continue :outer))
+                      (throw
+                        (DateTimeException.
+                          "Method resolve() can only return ChronoZonedDateTime, ChronoLocalDateTime, ChronoLocalDate or LocalTime")))
+                    (when (= (.containsKey fieldValues targetField) false)
+                      (set! changedCount (unchecked-inc-int changedCount))
+                      (continue :outer)))))
+            (break)))
+        (when (== changedCount 50)
+          (throw (DateTimeException.
+                   "One of the parsed fields has an incorrectly implemented resolve method")))
+        (when (> changedCount 0)
+          (.resolveInstantFields this)
+          (.resolveDateFields this)
+          (.resolveTimeFields this)))))
+
+  (method ^:private updateCheckConflict ^void [this ^TemporalField targetField
+                                               ^TemporalField changeField ^Long changeValue]
+    (let [old (cast Long (.put fieldValues changeField changeValue))]
+      (when (and (some? old) (not (== (.longValue old) (.longValue changeValue))))
+        (throw (DateTimeException.
+                 (java-str "Conflict found: "
+                           changeField
+                           " "
+                           old
+                           " differs from "
+                           changeField
+                           " "
+                           changeValue
+                           " while resolving  "
+                           targetField))))))
+
+  (method ^:private resolveInstantFields ^void [this]
+    (when (.containsKey fieldValues ChronoField/INSTANT_SECONDS)
+      (if (some? zone)
+          (.resolveInstantFields0 this zone)
+          (let [offsetSecs (cast Long (.get fieldValues ChronoField/OFFSET_SECONDS))]
+            (when (some? offsetSecs)
+              (let [offset (ZoneOffset/ofTotalSeconds (.intValue offsetSecs))]
+                (.resolveInstantFields0 this offset)))))))
+
+  (method ^:private resolveInstantFields0 ^void [this ^ZoneId selectedZone]
+    (let [instant (Instant/ofEpochSecond
+                    (.longValue (cast Long (.get fieldValues ChronoField/INSTANT_SECONDS))))
+          ^{:tag (ChronoZonedDateTime ?)} zdt (.zonedDateTime chrono instant selectedZone)]
+      (.updateCheckConflict this (.toLocalDate zdt))
+      (.updateCheckConflict this
+                            ChronoField/INSTANT_SECONDS
+                            ChronoField/SECOND_OF_DAY
+                            (long (.toSecondOfDay (.toLocalTime zdt))))
+      (.updateCheckConflict this
+                            ChronoField/INSTANT_SECONDS
+                            ChronoField/OFFSET_SECONDS
+                            (long (.getTotalSeconds (.getOffset zdt))))))
+
+  (method ^:private resolveDateFields ^void [this]
+    (.updateCheckConflict this (.resolveDate chrono fieldValues resolverStyle)))
+
+  (method ^:private updateCheckConflict ^void [this ^ChronoLocalDate cld]
+    (if (some? date)
+        (when (and (some? cld) (= (.equals date cld) false))
+          (throw (DateTimeException.
+                   (java-str "Conflict found: Fields resolved to two different dates: "
+                             date
+                             " "
+                             cld))))
+        (when (some? cld)
+          (when (= (.equals chrono (.getChronology cld)) false)
+            (throw
+              (DateTimeException.
+                (java-str "ChronoLocalDate must use the effective parsed chronology: " chrono))))
+          (set! date cld))))
+
+  (method ^:private resolveTimeFields ^void [this]
+    (when (.containsKey fieldValues ChronoField/CLOCK_HOUR_OF_DAY)
+      (let [ch (.longValue (cast Long (.remove fieldValues ChronoField/CLOCK_HOUR_OF_DAY)))]
+        (when (or (identical? resolverStyle ResolverStyle/STRICT)
+                  (and (identical? resolverStyle ResolverStyle/SMART) (not (== ch 0))))
+          (.checkValidValue ChronoField/CLOCK_HOUR_OF_DAY ch))
+        (.updateCheckConflict this
+                              ChronoField/CLOCK_HOUR_OF_DAY
+                              ChronoField/HOUR_OF_DAY
+                              ^Long (if (== ch 24) 0 ch))))
+    (when (.containsKey fieldValues ChronoField/CLOCK_HOUR_OF_AMPM)
+      (let [ch (.longValue (cast Long (.remove fieldValues ChronoField/CLOCK_HOUR_OF_AMPM)))]
+        (when (or (identical? resolverStyle ResolverStyle/STRICT)
+                  (and (identical? resolverStyle ResolverStyle/SMART) (not (== ch 0))))
+          (.checkValidValue ChronoField/CLOCK_HOUR_OF_AMPM ch))
+        (.updateCheckConflict this
+                              ChronoField/CLOCK_HOUR_OF_AMPM
+                              ChronoField/HOUR_OF_AMPM
+                              ^Long (if (== ch 12) 0 ch))))
+    (when (and (.containsKey fieldValues ChronoField/AMPM_OF_DAY)
+               (.containsKey fieldValues ChronoField/HOUR_OF_AMPM))
+      (let [ap (.longValue (cast Long (.remove fieldValues ChronoField/AMPM_OF_DAY)))
+            hap (.longValue (cast Long (.remove fieldValues ChronoField/HOUR_OF_AMPM)))]
+        (if (identical? resolverStyle ResolverStyle/LENIENT)
+            (.updateCheckConflict this
+                                  ChronoField/AMPM_OF_DAY
+                                  ChronoField/HOUR_OF_DAY
+                                  (Math/addExact (^[long int] Math/multiplyExact ap 12) hap))
+            (do
+              (.checkValidValue ChronoField/AMPM_OF_DAY ap)
+              (.checkValidValue ChronoField/HOUR_OF_AMPM hap)
+              (.updateCheckConflict this
+                                    ChronoField/AMPM_OF_DAY
+                                    ChronoField/HOUR_OF_DAY
+                                    (unchecked-add (unchecked-multiply ap 12) hap))))))
+    (when (.containsKey fieldValues ChronoField/NANO_OF_DAY)
+      (let [nod (.longValue (cast Long (.remove fieldValues ChronoField/NANO_OF_DAY)))]
+        (when-not (identical? resolverStyle ResolverStyle/LENIENT)
+          (.checkValidValue ChronoField/NANO_OF_DAY nod))
+        (.updateCheckConflict this
+                              ChronoField/NANO_OF_DAY
+                              ChronoField/HOUR_OF_DAY
+                              (unchecked-divide nod 3600000000000))
+        (.updateCheckConflict this
+                              ChronoField/NANO_OF_DAY
+                              ChronoField/MINUTE_OF_HOUR
+                              (unchecked-remainder (unchecked-divide nod 60000000000) 60))
+        (.updateCheckConflict this
+                              ChronoField/NANO_OF_DAY
+                              ChronoField/SECOND_OF_MINUTE
+                              (unchecked-remainder (unchecked-divide nod 1000000000) 60))
+        (.updateCheckConflict this
+                              ChronoField/NANO_OF_DAY
+                              ChronoField/NANO_OF_SECOND
+                              (unchecked-remainder nod 1000000000))))
+    (when (.containsKey fieldValues ChronoField/MICRO_OF_DAY)
+      (let [cod (.longValue (cast Long (.remove fieldValues ChronoField/MICRO_OF_DAY)))]
+        (when-not (identical? resolverStyle ResolverStyle/LENIENT)
+          (.checkValidValue ChronoField/MICRO_OF_DAY cod))
+        (.updateCheckConflict this
+                              ChronoField/MICRO_OF_DAY
+                              ChronoField/SECOND_OF_DAY
+                              (unchecked-divide cod 1000000))
+        (.updateCheckConflict this
+                              ChronoField/MICRO_OF_DAY
+                              ChronoField/MICRO_OF_SECOND
+                              (unchecked-remainder cod 1000000))))
+    (when (.containsKey fieldValues ChronoField/MILLI_OF_DAY)
+      (let [lod (.longValue (cast Long (.remove fieldValues ChronoField/MILLI_OF_DAY)))]
+        (when-not (identical? resolverStyle ResolverStyle/LENIENT)
+          (.checkValidValue ChronoField/MILLI_OF_DAY lod))
+        (.updateCheckConflict this
+                              ChronoField/MILLI_OF_DAY
+                              ChronoField/SECOND_OF_DAY
+                              (unchecked-divide lod 1000))
+        (.updateCheckConflict this
+                              ChronoField/MILLI_OF_DAY
+                              ChronoField/MILLI_OF_SECOND
+                              (unchecked-remainder lod 1000))))
+    (when (.containsKey fieldValues ChronoField/SECOND_OF_DAY)
+      (let [sod (.longValue (cast Long (.remove fieldValues ChronoField/SECOND_OF_DAY)))]
+        (when-not (identical? resolverStyle ResolverStyle/LENIENT)
+          (.checkValidValue ChronoField/SECOND_OF_DAY sod))
+        (.updateCheckConflict this
+                              ChronoField/SECOND_OF_DAY
+                              ChronoField/HOUR_OF_DAY
+                              (unchecked-divide sod 3600))
+        (.updateCheckConflict this
+                              ChronoField/SECOND_OF_DAY
+                              ChronoField/MINUTE_OF_HOUR
+                              (unchecked-remainder (unchecked-divide sod 60) 60))
+        (.updateCheckConflict this
+                              ChronoField/SECOND_OF_DAY
+                              ChronoField/SECOND_OF_MINUTE
+                              (unchecked-remainder sod 60))))
+    (when (.containsKey fieldValues ChronoField/MINUTE_OF_DAY)
+      (let [mod (.longValue (cast Long (.remove fieldValues ChronoField/MINUTE_OF_DAY)))]
+        (when-not (identical? resolverStyle ResolverStyle/LENIENT)
+          (.checkValidValue ChronoField/MINUTE_OF_DAY mod))
+        (.updateCheckConflict this
+                              ChronoField/MINUTE_OF_DAY
+                              ChronoField/HOUR_OF_DAY
+                              (unchecked-divide mod 60))
+        (.updateCheckConflict this
+                              ChronoField/MINUTE_OF_DAY
+                              ChronoField/MINUTE_OF_HOUR
+                              (unchecked-remainder mod 60))))
+    (when (.containsKey fieldValues ChronoField/NANO_OF_SECOND)
+      (let [^:mutable nos (.longValue (cast Long (.get fieldValues ChronoField/NANO_OF_SECOND)))]
+        (when-not (identical? resolverStyle ResolverStyle/LENIENT)
+          (.checkValidValue ChronoField/NANO_OF_SECOND nos))
+        (when (.containsKey fieldValues ChronoField/MICRO_OF_SECOND)
+          (let [cos (.longValue (cast Long (.remove fieldValues ChronoField/MICRO_OF_SECOND)))]
+            (when-not (identical? resolverStyle ResolverStyle/LENIENT)
+              (.checkValidValue ChronoField/MICRO_OF_SECOND cos))
+            (set! nos (unchecked-add (unchecked-multiply cos 1000) (unchecked-remainder nos 1000)))
+            (.updateCheckConflict this ChronoField/MICRO_OF_SECOND ChronoField/NANO_OF_SECOND nos)))
+        (when (.containsKey fieldValues ChronoField/MILLI_OF_SECOND)
+          (let [los (.longValue (cast Long (.remove fieldValues ChronoField/MILLI_OF_SECOND)))]
+            (when-not (identical? resolverStyle ResolverStyle/LENIENT)
+              (.checkValidValue ChronoField/MILLI_OF_SECOND los))
+            (.updateCheckConflict this
+                                  ChronoField/MILLI_OF_SECOND
+                                  ChronoField/NANO_OF_SECOND
+                                  (unchecked-add
+                                    (unchecked-multiply los 1000000)
+                                    (unchecked-remainder nos 1000000)))))))
+    (when (and (some? dayPeriod) (.containsKey fieldValues ChronoField/HOUR_OF_AMPM))
+      (let [hoap (.longValue (cast Long (.remove fieldValues ChronoField/HOUR_OF_AMPM)))]
+        (when-not (identical? resolverStyle ResolverStyle/LENIENT)
+          (.checkValidValue ChronoField/HOUR_OF_AMPM hoap))
+        (let [mohObj (cast Long (.get fieldValues ChronoField/MINUTE_OF_HOUR))
+              ^long moh (if (some? mohObj) (^[long int] Math/floorMod mohObj 60) 0)
+              excessHours (if (.includes dayPeriod
+                                         (unchecked-add
+                                           (unchecked-multiply-int
+                                             (unchecked-add-int
+                                               (^[long int] Math/floorMod hoap 12)
+                                               12)
+                                             60)
+                                           moh))
+                              12
+                              0)
+              hod (Math/addExact hoap excessHours)]
+          (.updateCheckConflict this ChronoField/HOUR_OF_AMPM ChronoField/HOUR_OF_DAY hod)
+          (set! dayPeriod nil))))
+    (when (and (and (and (.containsKey fieldValues ChronoField/HOUR_OF_DAY)
+                         (.containsKey fieldValues ChronoField/MINUTE_OF_HOUR))
+                    (.containsKey fieldValues ChronoField/SECOND_OF_MINUTE))
+               (.containsKey fieldValues ChronoField/NANO_OF_SECOND))
+      (let [hod (.longValue (cast Long (.remove fieldValues ChronoField/HOUR_OF_DAY)))
+            moh (.longValue (cast Long (.remove fieldValues ChronoField/MINUTE_OF_HOUR)))
+            som (.longValue (cast Long (.remove fieldValues ChronoField/SECOND_OF_MINUTE)))
+            nos (.longValue (cast Long (.remove fieldValues ChronoField/NANO_OF_SECOND)))]
+        (.resolveTime this hod moh som nos))))
+
+  (method ^:private resolveTimeLenient ^void [this]
+    (when (nil? time)
+      (cond
+        (.containsKey fieldValues ChronoField/MILLI_OF_SECOND)
+          (let [los (.longValue (cast Long (.remove fieldValues ChronoField/MILLI_OF_SECOND)))]
+            (if (.containsKey fieldValues ChronoField/MICRO_OF_SECOND)
+                (let [cos (unchecked-add (unchecked-multiply los 1000)
+                                         (unchecked-remainder
+                                           (.longValue
+                                             (cast
+                                               Long
+                                               (.get fieldValues ChronoField/MICRO_OF_SECOND)))
+                                           1000))]
+                  (.updateCheckConflict this
+                                        ChronoField/MILLI_OF_SECOND
+                                        ChronoField/MICRO_OF_SECOND
+                                        cos)
+                  (.remove fieldValues ChronoField/MICRO_OF_SECOND)
+                  (.put fieldValues ChronoField/NANO_OF_SECOND (unchecked-multiply cos 1000)))
+                (.put fieldValues ChronoField/NANO_OF_SECOND (unchecked-multiply los 1000000))))
+        (.containsKey fieldValues ChronoField/MICRO_OF_SECOND)
+          (let [cos (.longValue (cast Long (.remove fieldValues ChronoField/MICRO_OF_SECOND)))]
+            (.put fieldValues ChronoField/NANO_OF_SECOND (unchecked-multiply cos 1000))))
+      (when (and (and (and (and (not (.containsKey fieldValues ChronoField/HOUR_OF_DAY))
+                                (not (.containsKey fieldValues ChronoField/MINUTE_OF_HOUR)))
+                           (not (.containsKey fieldValues ChronoField/SECOND_OF_MINUTE)))
+                      (not (.containsKey fieldValues ChronoField/NANO_OF_SECOND)))
+                 (not (identical? resolverStyle ResolverStyle/STRICT)))
+        (cond
+          (some? dayPeriod)
+            (let [midpoint (.mid dayPeriod)]
+              (.resolveTime this
+                            (unchecked-divide midpoint 60)
+                            (unchecked-remainder midpoint 60)
+                            0
+                            0)
+              (set! dayPeriod nil))
+          (.containsKey fieldValues ChronoField/AMPM_OF_DAY)
+            (let [ap (.longValue (cast Long (.remove fieldValues ChronoField/AMPM_OF_DAY)))]
+              (if (identical? resolverStyle ResolverStyle/LENIENT)
+                  (.resolveTime this (Math/addExact (^[long int] Math/multiplyExact ap 12) 6) 0 0 0)
+                  (do
+                    (.checkValidValue ChronoField/AMPM_OF_DAY ap)
+                    (.resolveTime this (unchecked-add (unchecked-multiply ap 12) 6) 0 0 0))))))
+      (let [hod (cast Long (.get fieldValues ChronoField/HOUR_OF_DAY))]
+        (when (some? hod)
+          (let [moh (cast Long (.get fieldValues ChronoField/MINUTE_OF_HOUR))
+                som (cast Long (.get fieldValues ChronoField/SECOND_OF_MINUTE))
+                nos (cast Long (.get fieldValues ChronoField/NANO_OF_SECOND))]
+            (when (or (and (nil? moh) (or (some? som) (some? nos)))
+                      (and (and (some? moh) (nil? som)) (some? nos)))
+              (return))
+            (let [mohVal (if (some? moh) (.longValue moh) 0)
+                  somVal (if (some? som) (.longValue som) 0)
+                  nosVal (if (some? nos) (.longValue nos) 0)]
+              (when (and (some? dayPeriod) (not (identical? resolverStyle ResolverStyle/LENIENT)))
+                (when-not (.includes dayPeriod (unchecked-add (unchecked-multiply hod 60) mohVal))
+                  (throw (DateTimeException.
+                           (java-str (.formatted
+                                       "Conflict found: Resolved time %02d:%02d"
+                                       hod
+                                       mohVal)
+                                     " conflicts with "
+                                     dayPeriod)))))
+              (.resolveTime this hod mohVal somVal nosVal)
+              (.remove fieldValues ChronoField/HOUR_OF_DAY)
+              (.remove fieldValues ChronoField/MINUTE_OF_HOUR)
+              (.remove fieldValues ChronoField/SECOND_OF_MINUTE)
+              (.remove fieldValues ChronoField/NANO_OF_SECOND))))))
+    (when (and (not (identical? resolverStyle ResolverStyle/LENIENT)) (> (.size fieldValues) 0))
+      (for-each [^{:tag (Map$Entry TemporalField Long)} entry (.entrySet fieldValues)]
+        (let [field (cast TemporalField (.getKey entry))]
+          (when (and (instance? ChronoField field) (.isTimeBased field))
+            (.checkValidValue (cast ChronoField field) (.longValue (cast Long (.getValue entry)))))))))
+
+  (method ^:private resolveTime ^void [this ^long hod ^long moh ^long som ^long nos]
+    (if (identical? resolverStyle ResolverStyle/LENIENT)
+        (let [^:mutable totalNanos (Math/multiplyExact hod 3600000000000)]
+          (set! totalNanos (Math/addExact totalNanos (Math/multiplyExact moh 60000000000)))
+          (set! totalNanos (Math/addExact totalNanos (Math/multiplyExact som 1000000000)))
+          (set! totalNanos (Math/addExact totalNanos nos))
+          (let [excessDays (unchecked-int (Math/floorDiv totalNanos 86400000000000))
+                nod (Math/floorMod totalNanos 86400000000000)]
+            (.updateCheckConflict this (LocalTime/ofNanoOfDay nod) (Period/ofDays excessDays))))
+        (let [mohVal (.checkValidIntValue ChronoField/MINUTE_OF_HOUR moh)
+              nosVal (.checkValidIntValue ChronoField/NANO_OF_SECOND nos)]
+          (if (and (and (and (and (identical? resolverStyle ResolverStyle/SMART) (== hod 24))
+                             (== mohVal 0))
+                        (== som 0))
+                   (== nosVal 0))
+              (.updateCheckConflict this LocalTime/MIDNIGHT (Period/ofDays 1))
+              (let [hodVal (.checkValidIntValue ChronoField/HOUR_OF_DAY hod)
+                    somVal (.checkValidIntValue ChronoField/SECOND_OF_MINUTE som)]
+                (.updateCheckConflict this (LocalTime/of hodVal mohVal somVal nosVal) Period/ZERO))))))
+
+  (method ^:private resolvePeriod ^void [this]
+    (when (and (and (some? date) (some? time)) (= (.isZero excessDays) false))
+      (set! date (.plus date excessDays))
+      (set! excessDays Period/ZERO)))
+
+  (method ^:private resolveFractional ^void [this]
+    (when (and (nil? time)
+               (or (or (.containsKey fieldValues ChronoField/INSTANT_SECONDS)
+                       (.containsKey fieldValues ChronoField/SECOND_OF_DAY))
+                   (.containsKey fieldValues ChronoField/SECOND_OF_MINUTE)))
+      (if (.containsKey fieldValues ChronoField/NANO_OF_SECOND)
+          (let [nos (.longValue (cast Long (.get fieldValues ChronoField/NANO_OF_SECOND)))]
+            (.put fieldValues ChronoField/MICRO_OF_SECOND (unchecked-divide nos 1000))
+            (.put fieldValues ChronoField/MILLI_OF_SECOND (unchecked-divide nos 1000000)))
+          (do
+            (.put fieldValues ChronoField/NANO_OF_SECOND 0)
+            (.put fieldValues ChronoField/MICRO_OF_SECOND 0)
+            (.put fieldValues ChronoField/MILLI_OF_SECOND 0)))))
+
+  (method ^:private resolveInstant ^void [this]
+    (when (and (and (not (.containsKey fieldValues ChronoField/INSTANT_SECONDS)) (some? date))
+               (some? time))
+      (let [offsetSecs (cast Long (.get fieldValues ChronoField/OFFSET_SECONDS))]
+        (cond
+          (some? offsetSecs)
+            (let [offset (ZoneOffset/ofTotalSeconds (.intValue offsetSecs))
+                  instant (.toEpochSecond (.atZone (.atTime date time) offset))]
+              (.put fieldValues ChronoField/INSTANT_SECONDS instant))
+          (some? zone)
+            (let [^:mutable czdt (.atZone (.atTime date time) zone)]
+              (when (or (== zoneNameType DateTimeFormatterBuilder$ZoneTextPrinterParser/STD)
+                        (== zoneNameType DateTimeFormatterBuilder$ZoneTextPrinterParser/GENERIC))
+                (set! czdt (.withLaterOffsetAtOverlap czdt)))
+              (.put fieldValues ChronoField/INSTANT_SECONDS (.toEpochSecond czdt)))))))
+
+  (method ^:private updateCheckConflict ^void [this ^LocalTime timeToSet ^Period periodToSet]
+    (if (some? time)
+        (do
+          (when (= (.equals time timeToSet) false)
+            (throw (DateTimeException.
+                     (java-str "Conflict found: Fields resolved to different times: "
+                               time
+                               " "
+                               timeToSet))))
+          (if (and (and (= (.isZero excessDays) false) (= (.isZero periodToSet) false))
+                   (= (.equals excessDays periodToSet) false))
+              (throw (DateTimeException.
+                       (java-str "Conflict found: Fields resolved to different excess periods: "
+                                 excessDays
+                                 " "
+                                 periodToSet)))
+              (set! excessDays periodToSet)))
+        (do (set! time timeToSet) (set! excessDays periodToSet))))
+
+  (method ^:private crossCheck ^void [this]
+    (when (some? date) (.crossCheck this date))
+    (when (some? time)
+      (.crossCheck this time)
+      (when (and (some? date) (> (.size fieldValues) 0)) (.crossCheck this (.atTime date time)))))
+
+  (method ^:private crossCheck ^void [this ^TemporalAccessor target]
+    (loop [^{:tag (Iterator (Map$Entry TemporalField Long))} it (.iterator (.entrySet fieldValues))]
+      (when (.hasNext it)
+        (let [^{:tag (Map$Entry TemporalField Long)} entry (cast Map$Entry (.next it))
+              field (cast TemporalField (.getKey entry))]
+          (if (.isSupported target field)
+              (let [^:mutable ^long val1 0]
+                (try (set! val1 (.getLong target field)) (catch RuntimeException ex (continue it)))
+                (let [val2 (.longValue (cast Long (.getValue entry)))]
+                  (when-not (== val1 val2)
+                    (throw (DateTimeException.
+                             (java-str "Conflict found: Field "
+                                       field
+                                       " "
+                                       val1
+                                       " differs from "
+                                       field
+                                       " "
+                                       val2
+                                       " derived from "
+                                       target))))
+                  (.remove it)
+                  (recur it)))
+              (recur it))))))
+
+  (method ^:public toString ^String [this]
+    (let [buf (StringBuilder. 64)]
+      (.append (.append (.append buf fieldValues) \,) chrono)
+      (when (some? zone) (.append (.append buf \,) zone) (.append (.append buf \,) zoneNameType))
+      (when (or (some? date) (some? time))
+        (.append buf " resolved to ")
+        (if (some? date)
+            (do (.append buf date) (when (some? time) (.append (.append buf \T) time)))
+            (.append buf time)))
+      (.toString buf))))

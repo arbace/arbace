@@ -1,0 +1,625 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/ThreadPoolExecutor.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.util ArrayList ConcurrentModificationException HashSet Iterator List Objects)
+        '(java.util.concurrent.atomic AtomicInteger)
+        '(java.util.concurrent.locks AbstractQueuedSynchronizer Condition ReentrantLock)
+        '(jdk.internal.vm SharedThreadContainer))
+
+(defclass ^:public ThreadPoolExecutor
+  :extends AbstractExecutorService
+
+  (field ^:private ^:final ^AtomicInteger ctl (AtomicInteger. (ThreadPoolExecutor/ctlOf RUNNING 0)))
+
+  (field ^:private ^:static ^:final ^int COUNT_BITS (unchecked-subtract-int Integer/SIZE 3))
+
+  (field ^:private ^:static ^:final ^int COUNT_MASK
+    (unchecked-subtract-int (bit-shift-left-int 1 COUNT_BITS) 1))
+
+  (field ^:private ^:static ^:final ^int RUNNING (bit-shift-left-int -1 COUNT_BITS))
+
+  (field ^:private ^:static ^:final ^int SHUTDOWN (bit-shift-left-int 0 COUNT_BITS))
+
+  (field ^:private ^:static ^:final ^int STOP (bit-shift-left-int 1 COUNT_BITS))
+
+  (field ^:private ^:static ^:final ^int TIDYING (bit-shift-left-int 2 COUNT_BITS))
+
+  (field ^:private ^:static ^:final ^int TERMINATED (bit-shift-left-int 3 COUNT_BITS))
+
+  (method ^:private ^:static runStateOf ^int [^int c]
+    (bit-and-int c (bit-not-int COUNT_MASK)))
+
+  (method ^:private ^:static workerCountOf ^int [^int c]
+    (bit-and-int c COUNT_MASK))
+
+  (method ^:private ^:static ctlOf ^int [^int rs ^int wc]
+    (bit-or-int rs wc))
+
+  (method ^:private ^:static runStateLessThan ^boolean [^int c ^int s]
+    (< c s))
+
+  (method ^:private ^:static runStateAtLeast ^boolean [^int c ^int s]
+    (>= c s))
+
+  (method ^:private ^:static isRunning ^boolean [^int c] (< c SHUTDOWN))
+
+  (method ^:private compareAndIncrementWorkerCount ^boolean [this ^int expect]
+    (.compareAndSet ctl expect (unchecked-add-int expect 1)))
+
+  (method ^:private compareAndDecrementWorkerCount ^boolean [this ^int expect]
+    (.compareAndSet ctl expect (unchecked-subtract-int expect 1)))
+
+  (method ^:private decrementWorkerCount ^void [this] (.addAndGet ctl -1))
+
+  (field ^:private ^:final ^{:tag (BlockingQueue Runnable)} workQueue)
+
+  (field ^:private ^:final ^ReentrantLock mainLock (ReentrantLock.))
+
+  (field ^:private ^:final ^{:tag (HashSet Worker)} workers (HashSet.))
+
+  (field ^:private ^:final ^Condition termination (.newCondition mainLock))
+
+  (field ^:private ^:final ^SharedThreadContainer container)
+
+  (field ^:private ^int largestPoolSize)
+
+  (field ^:private ^long completedTaskCount)
+
+  (field ^:private ^:volatile ^ThreadFactory threadFactory)
+
+  (field ^:private ^:volatile ^RejectedExecutionHandler handler)
+
+  (field ^:private ^:volatile ^long keepAliveTime)
+
+  (field ^:private ^:volatile ^boolean allowCoreThreadTimeOut)
+
+  (field ^:private ^:volatile ^int corePoolSize)
+
+  (field ^:private ^:volatile ^int maximumPoolSize)
+
+  (field ^:private ^:static ^:final ^RejectedExecutionHandler defaultHandler (AbortPolicy.))
+
+  (defclass ^:private ^:final Worker
+    :extends AbstractQueuedSynchronizer
+    :implements [Runnable]
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 6138294804551838833)
+
+    (field ^:final ^Thread thread)
+
+    (field ^Runnable firstTask)
+
+    (field ^:volatile ^long completedTasks)
+
+    (constructor [this ^Runnable firstTask]
+      (.setState this -1)
+      (set! (.-firstTask this) firstTask)
+      (set! (.-thread this) (.newThread (.getThreadFactory ThreadPoolExecutor/this) this)))
+
+    (method ^:public run ^void [this]
+      (.runWorker ThreadPoolExecutor/this this))
+
+    (method ^:protected isHeldExclusively ^boolean [this]
+      (not (== (.getState this) 0)))
+
+    (method ^:protected tryAcquire ^boolean [this ^int unused]
+      (if (.compareAndSetState this 0 1)
+          (do (.setExclusiveOwnerThread this (Thread/currentThread)) true)
+          false))
+
+    (method ^:protected tryRelease ^boolean [this ^int unused]
+      (.setExclusiveOwnerThread this nil)
+      (.setState this 0)
+      true)
+
+    (method ^:public lock ^void [this] (.acquire this 1))
+
+    (method ^:public tryLock ^boolean [this] (.tryAcquire this 1))
+
+    (method ^:public unlock ^void [this] (.release this 1))
+
+    (method ^:public isLocked ^boolean [this] (.isHeldExclusively this))
+
+    (method interruptIfStarted ^void [this]
+      (let [^:mutable ^Thread t nil]
+        (when (and (and (>= (.getState this) 0) (some? (set! t thread))) (not (.isInterrupted t)))
+          (.interrupt t)))))
+
+  (method ^:private advanceRunState ^void [this ^int targetState]
+    (while true
+      (let [c (.get ctl)]
+        (when (or (ThreadPoolExecutor/runStateAtLeast c targetState)
+                  (.compareAndSet ctl
+                                  c
+                                  (ThreadPoolExecutor/ctlOf
+                                    targetState
+                                    (ThreadPoolExecutor/workerCountOf c))))
+          (break)))))
+
+  (method ^:final tryTerminate ^void [this]
+    (while true
+      (let [c (.get ctl)]
+        (when (or (or (ThreadPoolExecutor/isRunning c)
+                      (ThreadPoolExecutor/runStateAtLeast c TIDYING))
+                  (and (ThreadPoolExecutor/runStateLessThan c STOP) (not (.isEmpty workQueue))))
+          (return))
+        (when-not (== (ThreadPoolExecutor/workerCountOf c) 0)
+          (.interruptIdleWorkers this ONLY_ONE)
+          (return))
+        (let [mainLock (.-mainLock this)]
+          (.lock mainLock)
+          (try
+            (when (.compareAndSet ctl c (ThreadPoolExecutor/ctlOf TIDYING 0))
+              (try
+                (.terminated this)
+                (finally
+                  (.set ctl (ThreadPoolExecutor/ctlOf TERMINATED 0))
+                  (.signalAll termination)
+                  (.close container)))
+              (return))
+            (finally (.unlock mainLock)))))))
+
+  (method ^:private interruptWorkers ^void [this]
+    (for-each [^Worker w workers] (.interruptIfStarted w)))
+
+  (method ^:private interruptIdleWorkers ^void [this ^boolean onlyOne]
+    (let [mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try
+        (for-each [^Worker w workers]
+          (let [t (.-thread w)]
+            (when (and (not (.isInterrupted t)) (.tryLock w))
+              (try (.interrupt t) (finally (.unlock w))))
+            (when onlyOne (break))))
+        (finally (.unlock mainLock)))))
+
+  (method ^:private interruptIdleWorkers ^void [this]
+    (.interruptIdleWorkers this false))
+
+  (field ^:private ^:static ^:final ^boolean ONLY_ONE true)
+
+  (method ^:final reject ^void [this ^Runnable command]
+    (.rejectedExecution handler command this))
+
+  (method onShutdown ^void [this])
+
+  (method ^:private drainQueue ^{:tag (List Runnable)} [this]
+    (let [^{:tag (BlockingQueue Runnable)} q workQueue
+          ^{:tag (ArrayList Runnable)} taskList (ArrayList.)]
+      (.drainTo q taskList)
+      (when-not (.isEmpty q)
+        (for-each [^Runnable r (cast Runnable/1 (.toArray q (new Runnable/1 0)))]
+          (when (.remove q r) (.add taskList r))))
+      taskList))
+
+  (method ^:private addWorker ^boolean [this ^Runnable firstTask ^boolean core]
+    (let [^:mutable c (.get ctl)]
+      (label :retry
+        (while true
+          (when (and (ThreadPoolExecutor/runStateAtLeast c SHUTDOWN)
+                     (or (or (ThreadPoolExecutor/runStateAtLeast c STOP) (some? firstTask))
+                         (.isEmpty workQueue)))
+            (return false))
+          (while true
+            (when (>= (ThreadPoolExecutor/workerCountOf c)
+                      (bit-and-int (if core corePoolSize maximumPoolSize) COUNT_MASK))
+              (return false))
+            (when (.compareAndIncrementWorkerCount this c) (break :retry))
+            (set! c (.get ctl))
+            (when (ThreadPoolExecutor/runStateAtLeast c SHUTDOWN) (continue :retry))))))
+    (let [^:mutable workerStarted false
+          ^:mutable workerAdded false
+          ^:mutable ^Worker w nil]
+      (try
+        (set! w (Worker. firstTask))
+        (let [t (.-thread w)]
+          (when (some? t)
+            (let [mainLock (.-mainLock this)]
+              (.lock mainLock)
+              (try
+                (let [c (.get ctl)]
+                  (when (or (ThreadPoolExecutor/isRunning c)
+                            (and (ThreadPoolExecutor/runStateLessThan c STOP) (nil? firstTask)))
+                    (when-not (identical? (.getState t) Thread$State/NEW)
+                      (throw (IllegalThreadStateException.)))
+                    (.add workers w)
+                    (set! workerAdded true)
+                    (let [s (.size workers)] (when (> s largestPoolSize) (set! largestPoolSize s)))))
+                (finally (.unlock mainLock)))
+              (when workerAdded (.start container t) (set! workerStarted true)))))
+        (finally (when-not workerStarted (.addWorkerFailed this w))))
+      workerStarted))
+
+  (method ^:private addWorkerFailed ^void [this ^Worker w]
+    (let [mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try
+        (when (some? w) (.remove workers w))
+        (.decrementWorkerCount this)
+        (.tryTerminate this)
+        (finally (.unlock mainLock)))))
+
+  (method ^:private processWorkerExit ^void [this ^Worker w ^boolean completedAbruptly]
+    (when completedAbruptly (.decrementWorkerCount this))
+    (let [mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try
+        (set! completedTaskCount (unchecked-add completedTaskCount (.-completedTasks w)))
+        (.remove workers w)
+        (finally (.unlock mainLock)))
+      (.tryTerminate this)
+      (let [c (.get ctl)]
+        (when (ThreadPoolExecutor/runStateLessThan c STOP)
+          (when-not completedAbruptly
+            (let [^:mutable ^int min (if allowCoreThreadTimeOut 0 corePoolSize)]
+              (when (and (== min 0) (not (.isEmpty workQueue))) (set! min 1))
+              (when (>= (ThreadPoolExecutor/workerCountOf c) min) (return))))
+          (.addWorker this nil false)))))
+
+  (method ^:private getTask ^Runnable [this]
+    (let [^:mutable timedOut false]
+      (while true
+        (let [c (.get ctl)]
+          (when (and (ThreadPoolExecutor/runStateAtLeast c SHUTDOWN)
+                     (or (ThreadPoolExecutor/runStateAtLeast c STOP) (.isEmpty workQueue)))
+            (.decrementWorkerCount this)
+            (return nil))
+          (let [wc (ThreadPoolExecutor/workerCountOf c)
+                timed (or allowCoreThreadTimeOut (> wc corePoolSize))]
+            (if (and (or (> wc maximumPoolSize) (and timed timedOut))
+                     (or (> wc 1) (.isEmpty workQueue)))
+                (when (.compareAndDecrementWorkerCount this c) (return nil))
+                (try
+                  (let [^Runnable r (if timed
+                                        (cast Runnable
+                                              (.poll workQueue keepAliveTime TimeUnit/NANOSECONDS))
+                                        (cast Runnable (.take workQueue)))]
+                    (when (some? r) (return r))
+                    (set! timedOut true))
+                  (catch InterruptedException retry (set! timedOut false)))))))))
+
+  (method ^:final runWorker ^void [this ^Worker w]
+    (let [wt (Thread/currentThread)
+          ^:mutable task (.-firstTask w)]
+      (set! (.-firstTask w) nil)
+      (.unlock w)
+      (let [^:mutable completedAbruptly true]
+        (try
+          (while (or (some? task) (some? (set! task (.getTask this))))
+            (.lock w)
+            (when (and (or (ThreadPoolExecutor/runStateAtLeast (.get ctl) STOP)
+                           (and (Thread/interrupted)
+                                (ThreadPoolExecutor/runStateAtLeast (.get ctl) STOP)))
+                       (not (.isInterrupted wt)))
+              (.interrupt wt))
+            (try
+              (.beforeExecute this wt task)
+              (try
+                (.run task)
+                (.afterExecute this task nil)
+                (catch Throwable ex (.afterExecute this task ex) (throw ex)))
+              (finally
+                (set! task nil)
+                (set! (.-completedTasks w) (unchecked-inc (.-completedTasks w)))
+                (.unlock w))))
+          (set! completedAbruptly false)
+          (finally (.processWorkerExit this w completedAbruptly))))))
+
+  (constructor ^:public [this ^int corePoolSize ^int maximumPoolSize ^long keepAliveTime
+                         ^TimeUnit unit ^{:tag (BlockingQueue Runnable)} workQueue]
+    (this. corePoolSize
+           maximumPoolSize
+           keepAliveTime
+           unit
+           workQueue
+           (Executors/defaultThreadFactory)
+           defaultHandler))
+
+  (constructor ^:public [this ^int corePoolSize ^int maximumPoolSize ^long keepAliveTime
+                         ^TimeUnit unit ^{:tag (BlockingQueue Runnable)} workQueue
+                         ^ThreadFactory threadFactory]
+    (this. corePoolSize maximumPoolSize keepAliveTime unit workQueue threadFactory defaultHandler))
+
+  (constructor ^:public [this ^int corePoolSize ^int maximumPoolSize ^long keepAliveTime
+                         ^TimeUnit unit ^{:tag (BlockingQueue Runnable)} workQueue
+                         ^RejectedExecutionHandler handler]
+    (this. corePoolSize
+           maximumPoolSize
+           keepAliveTime
+           unit
+           workQueue
+           (Executors/defaultThreadFactory)
+           handler))
+
+  (constructor ^:public [this ^int corePoolSize ^int maximumPoolSize ^long keepAliveTime
+                         ^TimeUnit unit ^{:tag (BlockingQueue Runnable)} workQueue
+                         ^ThreadFactory threadFactory ^RejectedExecutionHandler handler]
+    (cond
+      (< corePoolSize 0) (throw (IllegalArgumentException. "corePoolSize must be non-negative"))
+      (<= maximumPoolSize 0) (throw (IllegalArgumentException. "maximumPoolSize must be positive"))
+      (< maximumPoolSize corePoolSize)
+        (throw (IllegalArgumentException.
+                 "maximumPoolSize must be greater than or equal to corePoolSize"))
+      (< keepAliveTime 0) (throw (IllegalArgumentException. "keepAliveTime must be non-negative")))
+    (Objects/requireNonNull unit "unit")
+    (Objects/requireNonNull workQueue "workQueue")
+    (Objects/requireNonNull threadFactory "threadFactory")
+    (Objects/requireNonNull handler "handler")
+    (set! (.-corePoolSize this) corePoolSize)
+    (set! (.-maximumPoolSize this) maximumPoolSize)
+    (set! (.-workQueue this) workQueue)
+    (set! (.-keepAliveTime this) (.toNanos unit keepAliveTime))
+    (set! (.-threadFactory this) threadFactory)
+    (set! (.-handler this) handler)
+    (let [name (Objects/toIdentityString this)]
+      (set! (.-container this) (SharedThreadContainer/create name))))
+
+  (method ^:public execute ^void [this ^Runnable command]
+    (Objects/requireNonNull command "command")
+    (let [^:mutable c (.get ctl)]
+      (when (< (ThreadPoolExecutor/workerCountOf c) corePoolSize)
+        (when (.addWorker this command true) (return))
+        (set! c (.get ctl)))
+      (if (and (ThreadPoolExecutor/isRunning c) (.offer workQueue command))
+          (let [recheck (.get ctl)]
+            (cond
+              (and (not (ThreadPoolExecutor/isRunning recheck)) (.remove this command))
+                (.reject this command)
+              (== (ThreadPoolExecutor/workerCountOf recheck) 0) (.addWorker this nil false)))
+          (when-not (.addWorker this command false) (.reject this command)))))
+
+  (method ^:public shutdown ^void [this]
+    (let [mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try
+        (.advanceRunState this SHUTDOWN)
+        (.interruptIdleWorkers this)
+        (.onShutdown this)
+        (finally (.unlock mainLock)))
+      (.tryTerminate this)))
+
+  (method ^:public shutdownNow ^{:tag (List Runnable)} [this]
+    (let [^:mutable ^{:tag (List Runnable)} tasks nil
+          mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try
+        (.advanceRunState this STOP)
+        (.interruptWorkers this)
+        (set! tasks (.drainQueue this))
+        (finally (.unlock mainLock)))
+      (.tryTerminate this)
+      tasks))
+
+  (method ^:public isShutdown ^boolean [this]
+    (ThreadPoolExecutor/runStateAtLeast (.get ctl) SHUTDOWN))
+
+  (method isStopped ^boolean [this]
+    (ThreadPoolExecutor/runStateAtLeast (.get ctl) STOP))
+
+  (method ^:public isTerminating ^boolean [this]
+    (let [c (.get ctl)]
+      (and (ThreadPoolExecutor/runStateAtLeast c SHUTDOWN)
+           (ThreadPoolExecutor/runStateLessThan c TERMINATED))))
+
+  (method ^:public isTerminated ^boolean [this]
+    (ThreadPoolExecutor/runStateAtLeast (.get ctl) TERMINATED))
+
+  (method ^:public awaitTermination :throws [InterruptedException] ^boolean [this ^long timeout
+                                                                             ^TimeUnit unit]
+    (let [^:mutable nanos (.toNanos unit timeout)
+          mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try
+        (while (ThreadPoolExecutor/runStateLessThan (.get ctl) TERMINATED)
+          (when (<= nanos 0) (return false))
+          (set! nanos (.awaitNanos termination nanos)))
+        true
+        (finally (.unlock mainLock)))))
+
+  (method ^:protected ^{Deprecated {:since "9" :forRemoval true}} finalize ^void [this])
+
+  (method ^:public setThreadFactory ^void [this ^ThreadFactory threadFactory]
+    (Objects/requireNonNull threadFactory "threadFactory")
+    (set! (.-threadFactory this) threadFactory))
+
+  (method ^:public getThreadFactory ^ThreadFactory [this] threadFactory)
+
+  (method ^:public setRejectedExecutionHandler ^void [this ^RejectedExecutionHandler handler]
+    (Objects/requireNonNull handler "handler")
+    (set! (.-handler this) handler))
+
+  (method ^:public getRejectedExecutionHandler ^RejectedExecutionHandler [this]
+    handler)
+
+  (method ^:public setCorePoolSize ^void [this ^int corePoolSize]
+    (cond
+      (< corePoolSize 0) (throw (IllegalArgumentException. "corePoolSize must be non-negative"))
+      (> corePoolSize maximumPoolSize)
+        (throw (IllegalArgumentException.
+                 "corePoolSize must be less than or equal to maximumPoolSize")))
+    (let [delta (unchecked-subtract-int corePoolSize (.-corePoolSize this))]
+      (set! (.-corePoolSize this) corePoolSize)
+      (cond
+        (> (ThreadPoolExecutor/workerCountOf (.get ctl)) corePoolSize) (.interruptIdleWorkers this)
+        (> delta 0)
+          (let [^:mutable k (Math/min delta (.size workQueue))]
+            (while (and (> (let [old-1 k] (set! k (unchecked-dec-int k)) old-1) 0)
+                        (.addWorker this nil true))
+              (when (.isEmpty workQueue) (break)))))))
+
+  (method ^:public getCorePoolSize ^int [this] corePoolSize)
+
+  (method ^:public prestartCoreThread ^boolean [this]
+    (and (< (ThreadPoolExecutor/workerCountOf (.get ctl)) corePoolSize) (.addWorker this nil true)))
+
+  (method ensurePrestart ^void [this]
+    (let [wc (ThreadPoolExecutor/workerCountOf (.get ctl))]
+      (cond (< wc corePoolSize) (.addWorker this nil true) (== wc 0) (.addWorker this nil false))))
+
+  (method ^:public prestartAllCoreThreads ^int [this]
+    (let [^:mutable ^int n 0] (while (.addWorker this nil true) (set! n (unchecked-inc-int n))) n))
+
+  (method ^:public allowsCoreThreadTimeOut ^boolean [this]
+    allowCoreThreadTimeOut)
+
+  (method ^:public allowCoreThreadTimeOut ^void [this ^boolean value]
+    (when (and value (<= keepAliveTime 0))
+      (throw (IllegalArgumentException. "Core threads must have nonzero keep alive times")))
+    (when-not (= value allowCoreThreadTimeOut)
+      (set! allowCoreThreadTimeOut value)
+      (when value (.interruptIdleWorkers this))))
+
+  (method ^:public setMaximumPoolSize ^void [this ^int maximumPoolSize]
+    (cond
+      (<= maximumPoolSize 0) (throw (IllegalArgumentException. "maximumPoolSize must be positive"))
+      (< maximumPoolSize corePoolSize)
+        (throw (IllegalArgumentException.
+                 "maximumPoolSize must be greater than or equal to corePoolSize")))
+    (set! (.-maximumPoolSize this) maximumPoolSize)
+    (when (> (ThreadPoolExecutor/workerCountOf (.get ctl)) maximumPoolSize)
+      (.interruptIdleWorkers this)))
+
+  (method ^:public getMaximumPoolSize ^int [this] maximumPoolSize)
+
+  (method ^:public setKeepAliveTime ^void [this ^long time ^TimeUnit unit]
+    (when (< time 0) (throw (IllegalArgumentException. "time must be non-negative")))
+    (when (and (== time 0) (.allowsCoreThreadTimeOut this))
+      (throw (IllegalArgumentException. "Core threads must have nonzero keep alive times")))
+    (Objects/requireNonNull unit "unit")
+    (let [keepAliveTime (.toNanos unit time)
+          delta (unchecked-subtract keepAliveTime (.-keepAliveTime this))]
+      (set! (.-keepAliveTime this) keepAliveTime)
+      (when (< delta 0) (.interruptIdleWorkers this))))
+
+  (method ^:public getKeepAliveTime ^long [this ^TimeUnit unit]
+    (.convert unit keepAliveTime TimeUnit/NANOSECONDS))
+
+  (method ^:public getQueue ^{:tag (BlockingQueue Runnable)} [this]
+    workQueue)
+
+  (method ^:public remove ^boolean [this ^Runnable task]
+    (let [removed (.remove workQueue task)] (.tryTerminate this) removed))
+
+  (method ^:public purge ^void [this]
+    (let [^{:tag (BlockingQueue Runnable)} q workQueue]
+      (try
+        (let [^{:tag (Iterator Runnable)} it (.iterator q)]
+          (while (.hasNext it)
+            (let [r (cast Runnable (.next it))]
+              (when (and (instance? Future r) (.isCancelled (cast Future r))) (.remove it)))))
+        (catch ConcurrentModificationException fallThrough
+          (for-each [r (.toArray q)]
+            (when (and (instance? Future r) (.isCancelled (cast Future r))) (.remove q r)))))
+      (.tryTerminate this)))
+
+  (method ^:public getPoolSize ^int [this]
+    (let [mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try
+        (if (ThreadPoolExecutor/runStateAtLeast (.get ctl) TIDYING) 0 (.size workers))
+        (finally (.unlock mainLock)))))
+
+  (method ^:public getActiveCount ^int [this]
+    (let [mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try
+        (let [^:mutable ^int n 0]
+          (for-each [^Worker w workers] (when (.isLocked w) (set! n (unchecked-inc-int n))))
+          n)
+        (finally (.unlock mainLock)))))
+
+  (method ^:public getLargestPoolSize ^int [this]
+    (let [mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try largestPoolSize (finally (.unlock mainLock)))))
+
+  (method ^:public getTaskCount ^long [this]
+    (let [mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try
+        (let [^:mutable n completedTaskCount]
+          (for-each [^Worker w workers]
+            (set! n (unchecked-add n (.-completedTasks w)))
+            (when (.isLocked w) (set! n (unchecked-inc n))))
+          (unchecked-add n (.size workQueue)))
+        (finally (.unlock mainLock)))))
+
+  (method ^:public getCompletedTaskCount ^long [this]
+    (let [mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try
+        (let [^:mutable n completedTaskCount]
+          (for-each [^Worker w workers] (set! n (unchecked-add n (.-completedTasks w))))
+          n)
+        (finally (.unlock mainLock)))))
+
+  (method ^:public toString ^String [this]
+    (let [^:mutable ^long ncompleted 0
+          ^:mutable ^int nworkers 0
+          ^:mutable ^int nactive 0
+          mainLock (.-mainLock this)]
+      (.lock mainLock)
+      (try
+        (set! ncompleted completedTaskCount)
+        (set! nactive 0)
+        (set! nworkers (.size workers))
+        (for-each [^Worker w workers]
+          (set! ncompleted (unchecked-add ncompleted (.-completedTasks w)))
+          (when (.isLocked w) (set! nactive (unchecked-inc-int nactive))))
+        (finally (.unlock mainLock)))
+      (let [c (.get ctl)
+            ^String runState (cond
+                               (ThreadPoolExecutor/isRunning c) "Running"
+                               (ThreadPoolExecutor/runStateAtLeast c TERMINATED) "Terminated"
+                               :else "Shutting down")]
+        (java-str (.toString super)
+                  "["
+                  runState
+                  ", pool size = "
+                  nworkers
+                  ", active threads = "
+                  nactive
+                  ", queued tasks = "
+                  (.size workQueue)
+                  ", completed tasks = "
+                  ncompleted
+                  "]"))))
+
+  (method ^:protected beforeExecute ^void [this ^Thread t ^Runnable r])
+
+  (method ^:protected afterExecute ^void [this ^Runnable r ^Throwable t])
+
+  (method ^:protected terminated ^void [this])
+
+  (defclass ^:public ^:static CallerRunsPolicy
+    :implements [RejectedExecutionHandler]
+
+    (constructor ^:public [this])
+
+    (method ^:public rejectedExecution ^void [this ^Runnable r ^ThreadPoolExecutor e]
+      (when-not (.isShutdown e) (.run r))))
+
+  (defclass ^:public ^:static AbortPolicy
+    :implements [RejectedExecutionHandler]
+
+    (constructor ^:public [this])
+
+    (method ^:public rejectedExecution ^void [this ^Runnable r ^ThreadPoolExecutor e]
+      (throw (RejectedExecutionException.
+               (java-str "Task " (.toString r) " rejected from " (.toString e))))))
+
+  (defclass ^:public ^:static DiscardPolicy
+    :implements [RejectedExecutionHandler]
+
+    (constructor ^:public [this])
+
+    (method ^:public rejectedExecution ^void [this ^Runnable r ^ThreadPoolExecutor e]))
+
+  (defclass ^:public ^:static DiscardOldestPolicy
+    :implements [RejectedExecutionHandler]
+
+    (constructor ^:public [this])
+
+    (method ^:public rejectedExecution ^void [this ^Runnable r ^ThreadPoolExecutor e]
+      (when-not (.isShutdown e) (.poll (.getQueue e)) (.execute e r)))))

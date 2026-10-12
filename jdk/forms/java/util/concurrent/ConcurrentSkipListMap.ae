@@ -1,0 +1,2052 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/ConcurrentSkipListMap.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.io IOException ObjectInputStream ObjectOutputStream Serializable)
+        '(java.lang.invoke MethodHandles VarHandle)
+        '(java.util AbstractCollection
+                    AbstractMap
+                    AbstractMap$SimpleImmutableEntry
+                    AbstractSet
+                    ArrayList
+                    Collection
+                    Collections
+                    Comparator
+                    Iterator
+                    List
+                    Map
+                    Map$Entry
+                    NavigableSet
+                    NoSuchElementException
+                    Set
+                    SortedMap
+                    Spliterator)
+        '(java.util.concurrent.atomic LongAdder)
+        '(java.util.function BiConsumer BiFunction Consumer Function Predicate))
+
+(defclass ^:public ConcurrentSkipListMap
+  :extends (AbstractMap K V)
+  :implements [(ConcurrentNavigableMap K V) Cloneable Serializable]
+  :type-params [K V]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID -8627078645895051609)
+
+  (field ^:final ^{:tag (Comparator (? super K))} comparator)
+
+  (field ^:private ^:transient ^{:tag (Index K V)} head)
+
+  (field ^:private ^:transient ^LongAdder adder)
+
+  (field ^:private ^:transient ^{:tag (KeySet K V)} keySet)
+
+  (field ^:private ^:transient ^{:tag (Values K V)} values)
+
+  (field ^:private ^:transient ^{:tag (EntrySet K V)} entrySet)
+
+  (field ^:private ^:transient ^{:tag (SubMap K V)} descendingMap)
+
+  (defclass ^:static ^:final Node
+    :type-params [K V]
+
+    (field ^:final ^K key)
+
+    (field ^V val)
+
+    (field ^{:tag (Node K V)} next)
+
+    (constructor [this ^K key ^V value ^{:tag (Node K V)} next]
+      (set! (.-key this) key)
+      (set! (.-val this) value)
+      (set! (.-next this) next)))
+
+  (defclass ^:static ^:final Index
+    :type-params [K V]
+
+    (field ^:final ^{:tag (Node K V)} node)
+
+    (field ^:final ^{:tag (Index K V)} down)
+
+    (field ^{:tag (Index K V)} right)
+
+    (constructor [this ^{:tag (Node K V)} node ^{:tag (Index K V)} down ^{:tag (Index K V)} right]
+      (set! (.-node this) node)
+      (set! (.-down this) down)
+      (set! (.-right this) right)))
+
+  (method ^:static cpr ^int [^Comparator c x y]
+    (if (some? c) (.compare c x y) (.compareTo (cast Comparable x) y)))
+
+  (method ^:final baseHead ^{:tag (Node K V)} [this]
+    (let [^:mutable ^{:tag (Index K V)} h nil]
+      (VarHandle/acquireFence)
+      (when (some? (set! h head)) (.-node h))))
+
+  (method ^:static unlinkNode :type-params [K V] ^void [^{:tag (Node K V)} b ^{:tag (Node K V)} n]
+    (when (and (some? b) (some? n))
+      (let [^:mutable ^{:tag (Node K V)} f nil
+            ^:mutable ^{:tag (Node K V)} p nil]
+        (while true
+          (if (and (some? (set! f (.-next n))) (nil? (.-key f)))
+              (do (set! p (.-next f)) (break))
+              (when ^boolean (^[Node Node Node] VarHandle/.compareAndSet NEXT n f (Node. nil nil f))
+                (set! p f)
+                (break))))
+        ^boolean ^void (^[Node Node Node] VarHandle/.compareAndSet NEXT b n p))))
+
+  (method ^:private addCount ^void [this ^long c]
+    (let [^:mutable ^LongAdder a nil]
+      (loop []
+        (when (and (nil? (set! a adder))
+                   (not ^boolean (^[ConcurrentSkipListMap Void LongAdder] VarHandle/.compareAndSet
+                                   ADDER
+                                   this
+                                   nil
+                                   (set! a (LongAdder.)))))
+          (recur)))
+      (.add a c)))
+
+  (method ^:final getAdderCount ^long [this]
+    (let [^:mutable ^LongAdder a nil
+          ^:mutable ^long c 0]
+      (loop []
+        (when (and (nil? (set! a adder))
+                   (not ^boolean (^[ConcurrentSkipListMap Void LongAdder] VarHandle/.compareAndSet
+                                   ADDER
+                                   this
+                                   nil
+                                   (set! a (LongAdder.)))))
+          (recur)))
+      (if (<= (set! c (.sum a)) 0) 0 c)))
+
+  (method ^:private findPredecessor ^{:tag (Node K V)} [this key
+                                                        ^{:tag (Comparator (? super K))} cmp]
+    (let [^:mutable ^{:tag (Index K V)} q nil]
+      (VarHandle/acquireFence)
+      (when-not (or (nil? (set! q head)) (nil? key))
+        (let [^:mutable ^{:tag (Index K V)} r nil
+              ^:mutable ^{:tag (Index K V)} d nil]
+          (while true
+            (while (some? (set! r (.-right q)))
+              (let [^:mutable ^{:tag (Node K V)} p nil
+                    ^:mutable ^K k nil]
+                (cond
+                  (or (or (nil? (set! p (.-node r))) (nil? (set! k (.-key p)))) (nil? (.-val p)))
+                    ^boolean ^void (^[Index Index Index] VarHandle/.compareAndSet
+                                     RIGHT
+                                     q
+                                     r
+                                     (.-right r))
+                  (> (ConcurrentSkipListMap/cpr cmp key k) 0) (set! q r)
+                  :else (break))))
+            (if (some? (set! d (.-down q))) (set! q d) (return (.-node q))))))))
+
+  (method ^:private findNode ^{:tag (Node K V)} [this key]
+    (when (nil? key) (throw (NullPointerException.)))
+    (let [^{:tag (Comparator (? super K))} cmp comparator
+          ^:mutable ^{:tag (Node K V)} b nil]
+      (label :outer
+        (while (some? (set! b (.findPredecessor this key cmp)))
+          (while true
+            (let [^:mutable ^{:tag (Node K V)} n nil
+                  ^:mutable ^K k nil
+                  ^:mutable ^V v nil
+                  ^:mutable ^int c 0]
+              (cond
+                (nil? (set! n (.-next b))) (break :outer)
+                (nil? (set! k (.-key n))) (break)
+                (nil? (set! v (.-val n))) (ConcurrentSkipListMap/unlinkNode b n)
+                (> (set! c (ConcurrentSkipListMap/cpr cmp key k)) 0) (set! b n)
+                (== c 0) (return n)
+                :else (break :outer))))))
+      nil))
+
+  (method ^:private doGet ^V [this key]
+    (let [^:mutable ^{:tag (Index K V)} q nil]
+      (VarHandle/acquireFence)
+      (when (nil? key) (throw (NullPointerException.)))
+      (let [^{:tag (Comparator (? super K))} cmp comparator
+            ^:mutable ^V result nil]
+        (when (some? (set! q head))
+          (let [^:mutable ^{:tag (Index K V)} r nil
+                ^:mutable ^{:tag (Index K V)} d nil]
+            (label :outer
+              (while true
+                (while (some? (set! r (.-right q)))
+                  (let [^:mutable ^{:tag (Node K V)} p nil
+                        ^:mutable ^K k nil
+                        ^:mutable ^V v nil
+                        ^:mutable ^int c 0]
+                    (cond
+                      (or (or (nil? (set! p (.-node r))) (nil? (set! k (.-key p))))
+                          (nil? (set! v (.-val p))))
+                        ^boolean ^void (^[Index Index Index] VarHandle/.compareAndSet
+                                         RIGHT
+                                         q
+                                         r
+                                         (.-right r))
+                      (> (set! c (ConcurrentSkipListMap/cpr cmp key k)) 0) (set! q r)
+                      (== c 0) (do (set! result v) (break :outer))
+                      :else (break))))
+                (if (some? (set! d (.-down q)))
+                    (set! q d)
+                    (let [^:mutable ^{:tag (Node K V)} b nil
+                          ^:mutable ^{:tag (Node K V)} n nil]
+                      (when (some? (set! b (.-node q)))
+                        (while (some? (set! n (.-next b)))
+                          (let [^:mutable ^V v nil
+                                ^:mutable ^int c 0
+                                ^K k (.-key n)]
+                            (if (or (or (nil? (set! v (.-val n))) (nil? k))
+                                    (> (set! c (ConcurrentSkipListMap/cpr cmp key k)) 0))
+                                (set! b n)
+                                (do (when (== c 0) (set! result v)) (break))))))
+                      (break)))))))
+        result)))
+
+  (method ^:private doPut ^V [this ^K key ^V value ^boolean onlyIfAbsent]
+    (when (nil? key) (throw (NullPointerException.)))
+    (let [^{:tag (Comparator (? super K))} cmp comparator]
+      (while true
+        (let [^:mutable ^{:tag (Index K V)} h nil
+              ^:mutable ^{:tag (Node K V)} b nil]
+          (VarHandle/acquireFence)
+          (let [^:mutable ^int levels 0]
+            (if (nil? (set! h head))
+                (let [^{:tag (Node K V)} base (Node. nil nil nil)]
+                  (set! h (Index. base nil nil))
+                  (set! b
+                        (when ^boolean (^[ConcurrentSkipListMap Void Index] VarHandle/.compareAndSet
+                                         HEAD
+                                         this
+                                         nil
+                                         h)
+                          base)))
+                (let [^:mutable ^{:tag (Index K V)} q h
+                      ^:mutable ^{:tag (Index K V)} r nil
+                      ^:mutable ^{:tag (Index K V)} d nil]
+                  (while true
+                    (while (some? (set! r (.-right q)))
+                      (let [^:mutable ^{:tag (Node K V)} p nil
+                            ^:mutable ^K k nil]
+                        (cond
+                          (or (or (nil? (set! p (.-node r))) (nil? (set! k (.-key p))))
+                              (nil? (.-val p)))
+                            ^boolean ^void (^[Index Index Index] VarHandle/.compareAndSet
+                                             RIGHT
+                                             q
+                                             r
+                                             (.-right r))
+                          (> (ConcurrentSkipListMap/cpr cmp key k) 0) (set! q r)
+                          :else (break))))
+                    (if (some? (set! d (.-down q)))
+                        (do (set! levels (unchecked-inc-int levels)) (set! q d))
+                        (do (set! b (.-node q)) (break))))))
+            (when (some? b)
+              (let [^:mutable ^{:tag (Node K V)} z nil]
+                (while true
+                  (let [^:mutable ^{:tag (Node K V)} n nil
+                        ^:mutable ^{:tag (Node K V)} p nil
+                        ^:mutable ^K k nil
+                        ^:mutable ^V v nil
+                        ^:mutable ^int c 0]
+                    (cond
+                      (nil? (set! n (.-next b)))
+                        (do
+                          (when (nil? (.-key b)) (ConcurrentSkipListMap/cpr cmp key key))
+                          (set! c -1))
+                      (nil? (set! k (.-key n))) (break)
+                      (nil? (set! v (.-val n)))
+                        (do (ConcurrentSkipListMap/unlinkNode b n) (set! c 1))
+                      (> (set! c (ConcurrentSkipListMap/cpr cmp key k)) 0) (set! b n)
+                      (and (== c 0)
+                           (or onlyIfAbsent
+                               ^boolean (^[Node Object Object] VarHandle/.compareAndSet
+                                          VAL
+                                          n
+                                          v
+                                          value)))
+                        (return v))
+                    (when (and (< c 0)
+                               ^boolean (^[Node Node Node] VarHandle/.compareAndSet
+                                          NEXT
+                                          b
+                                          n
+                                          (set! p (Node. key value n))))
+                      (set! z p)
+                      (break))))
+                (when (some? z)
+                  (let [lr (ThreadLocalRandom/nextSecondarySeed)]
+                    (when (== (bit-and-int lr 0x3) 0)
+                      (let [hr (ThreadLocalRandom/nextSecondarySeed)
+                            ^:mutable rnd (bit-or
+                                            (bit-shift-left (long hr) 32)
+                                            (bit-and (long lr) 0xffffffff))
+                            ^:mutable skips levels
+                            ^:mutable ^{:tag (Index K V)} x nil]
+                        (while true
+                          (set! x (Index. z x nil))
+                          (if (or (>= rnd 0) (< (set! skips (unchecked-dec-int skips)) 0))
+                              (break)
+                              (set! rnd (bit-shift-left rnd 1))))
+                        (when (and (and (ConcurrentSkipListMap/addIndices h skips x cmp)
+                                        (< skips 0))
+                                   (identical? head h))
+                          (let [^{:tag (Index K V)} hx (Index. z x nil)
+                                ^{:tag (Index K V)} nh (Index. (.-node h) h hx)]
+                            ^boolean ^void (^[ConcurrentSkipListMap Index Index] VarHandle/.compareAndSet
+                                             HEAD
+                                             this
+                                             h
+                                             nh)))
+                        (when (nil? (.-val z)) (.findPredecessor this key cmp))))
+                    (.addCount this 1)
+                    (return nil))))))))))
+
+  (method ^:static addIndices :type-params [K V] ^boolean [^:mutable ^{:tag (Index K V)} q
+                                                           ^:mutable ^int skips
+                                                           ^{:tag (Index K V)} x
+                                                           ^{:tag (Comparator (? super K))} cmp]
+    (let [^:mutable ^{:tag (Node K V)} z nil
+          ^:mutable ^K key nil]
+      (when (and (and (and (some? x) (some? (set! z (.-node x)))) (some? (set! key (.-key z))))
+                 (some? q))
+        (let [^:mutable retrying false]
+          (while true
+            (let [^:mutable ^{:tag (Index K V)} r nil
+                  ^:mutable ^{:tag (Index K V)} d nil
+                  ^:mutable ^int c 0]
+              (if (some? (set! r (.-right q)))
+                  (let [^:mutable ^{:tag (Node K V)} p nil
+                        ^:mutable ^K k nil]
+                    (cond
+                      (or (or (nil? (set! p (.-node r))) (nil? (set! k (.-key p))))
+                          (nil? (.-val p)))
+                        (do
+                          ^boolean ^void (^[Index Index Index] VarHandle/.compareAndSet
+                                           RIGHT
+                                           q
+                                           r
+                                           (.-right r))
+                          (set! c 0))
+                      (> (set! c (ConcurrentSkipListMap/cpr cmp key k)) 0) (set! q r)
+                      (== c 0) (break)))
+                  (set! c -1))
+              (when (< c 0)
+                (cond
+                  (and (some? (set! d (.-down q))) (> skips 0))
+                    (do (set! skips (unchecked-dec-int skips)) (set! q d))
+                  (and (and (some? d) (not retrying))
+                       (not (ConcurrentSkipListMap/addIndices d 0 (.-down x) cmp)))
+                    (break)
+                  :else
+                    (do
+                      (set! (.-right x) r)
+                      (if ^boolean (^[Index Index Index] VarHandle/.compareAndSet RIGHT q r x)
+                          (return true)
+                          (set! retrying true)))))))))
+      false))
+
+  (method ^:final doRemove ^V [this key value]
+    (when (nil? key) (throw (NullPointerException.)))
+    (let [^{:tag (Comparator (? super K))} cmp comparator
+          ^:mutable ^V result nil
+          ^:mutable ^{:tag (Node K V)} b nil]
+      (label :outer
+        (while (and (some? (set! b (.findPredecessor this key cmp))) (nil? result))
+          (while true
+            (let [^:mutable ^{:tag (Node K V)} n nil
+                  ^:mutable ^K k nil
+                  ^:mutable ^V v nil
+                  ^:mutable ^int c 0]
+              (cond
+                (nil? (set! n (.-next b))) (break :outer)
+                (nil? (set! k (.-key n))) (break)
+                (nil? (set! v (.-val n))) (ConcurrentSkipListMap/unlinkNode b n)
+                (> (set! c (ConcurrentSkipListMap/cpr cmp key k)) 0) (set! b n)
+                (< c 0) (break :outer)
+                (and (some? value) (not (.equals value v))) (break :outer)
+                :else
+                  (when ^boolean (^[Node Object Void] VarHandle/.compareAndSet VAL n v nil)
+                    (set! result v)
+                    (ConcurrentSkipListMap/unlinkNode b n)
+                    (break)))))))
+      (when (some? result) (.tryReduceLevel this) (.addCount this -1))
+      result))
+
+  (method ^:private tryReduceLevel ^void [this]
+    (let [^:mutable ^{:tag (Index K V)} h nil
+          ^:mutable ^{:tag (Index K V)} d nil
+          ^:mutable ^{:tag (Index K V)} e nil]
+      (when (and (and (and (and (and (and (and (some? (set! h head)) (nil? (.-right h)))
+                                          (some? (set! d (.-down h))))
+                                     (nil? (.-right d)))
+                                (some? (set! e (.-down d))))
+                           (nil? (.-right e)))
+                      ^boolean (^[ConcurrentSkipListMap Index Index] VarHandle/.compareAndSet
+                                 HEAD
+                                 this
+                                 h
+                                 d))
+                 (some? (.-right h)))
+        ^boolean ^void (^[ConcurrentSkipListMap Index Index] VarHandle/.compareAndSet HEAD this d h))))
+
+  (method ^:final findFirst ^{:tag (Node K V)} [this]
+    (let [^:mutable ^{:tag (Node K V)} b nil
+          ^:mutable ^{:tag (Node K V)} n nil]
+      (when (some? (set! b (.baseHead this)))
+        (while (some? (set! n (.-next b)))
+          (if (nil? (.-val n)) (ConcurrentSkipListMap/unlinkNode b n) (return n))))
+      nil))
+
+  (method ^:final findFirstEntry ^{:tag (AbstractMap$SimpleImmutableEntry K V)} [this]
+    (let [^:mutable ^{:tag (Node K V)} b nil
+          ^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^V v nil]
+      (when (some? (set! b (.baseHead this)))
+        (while (some? (set! n (.-next b)))
+          (if (nil? (set! v (.-val n)))
+              (ConcurrentSkipListMap/unlinkNode b n)
+              (return (AbstractMap$SimpleImmutableEntry. (.-key n) v)))))
+      nil))
+
+  (method ^:private doRemoveFirstEntry ^{:tag (AbstractMap$SimpleImmutableEntry K V)} [this]
+    (let [^:mutable ^{:tag (Node K V)} b nil
+          ^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^V v nil]
+      (when (some? (set! b (.baseHead this)))
+        (while (some? (set! n (.-next b)))
+          (when (or (nil? (set! v (.-val n)))
+                    ^boolean (^[Node Object Void] VarHandle/.compareAndSet VAL n v nil))
+            (let [^K k (.-key n)]
+              (ConcurrentSkipListMap/unlinkNode b n)
+              (when (some? v)
+                (.tryReduceLevel this)
+                (.findPredecessor this k comparator)
+                (.addCount this -1)
+                (return (AbstractMap$SimpleImmutableEntry. k v)))))))
+      nil))
+
+  (method ^:final findLast ^{:tag (Node K V)} [this]
+    (label :outer
+      (while true
+        (let [^:mutable ^{:tag (Index K V)} q nil
+              ^:mutable ^{:tag (Node K V)} b nil]
+          (VarHandle/acquireFence)
+          (when (nil? (set! q head)) (break))
+          (let [^:mutable ^{:tag (Index K V)} r nil
+                ^:mutable ^{:tag (Index K V)} d nil]
+            (while true
+              (while (some? (set! r (.-right q)))
+                (let [^:mutable ^{:tag (Node K V)} p nil]
+                  (if (or (nil? (set! p (.-node r))) (nil? (.-val p)))
+                      ^boolean ^void (^[Index Index Index] VarHandle/.compareAndSet
+                                       RIGHT
+                                       q
+                                       r
+                                       (.-right r))
+                      (set! q r))))
+              (if (some? (set! d (.-down q))) (set! q d) (do (set! b (.-node q)) (break)))))
+          (when (some? b)
+            (while true
+              (let [^:mutable ^{:tag (Node K V)} n nil]
+                (cond
+                  (nil? (set! n (.-next b))) (if (nil? (.-key b)) (break :outer) (return b))
+                  (nil? (.-key n)) (break)
+                  (nil? (.-val n)) (ConcurrentSkipListMap/unlinkNode b n)
+                  :else (set! b n))))))))
+    nil)
+
+  (method ^:final findLastEntry ^{:tag (AbstractMap$SimpleImmutableEntry K V)} [this]
+    (while true
+      (let [^:mutable ^{:tag (Node K V)} n nil
+            ^:mutable ^V v nil]
+        (when (nil? (set! n (.findLast this))) (return nil))
+        (when (some? (set! v (.-val n))) (return (AbstractMap$SimpleImmutableEntry. (.-key n) v))))))
+
+  (method ^:private doRemoveLastEntry ^{:tag (Map$Entry K V)} [this]
+    (label :outer
+      (while true
+        (let [^:mutable ^{:tag (Index K V)} q nil
+              ^:mutable ^{:tag (Node K V)} b nil]
+          (VarHandle/acquireFence)
+          (when (nil? (set! q head)) (break))
+          (while true
+            (let [^:mutable ^{:tag (Index K V)} d nil
+                  ^:mutable ^{:tag (Index K V)} r nil
+                  ^:mutable ^{:tag (Node K V)} p nil]
+              (while (some? (set! r (.-right q)))
+                (cond
+                  (or (nil? (set! p (.-node r))) (nil? (.-val p)))
+                    ^boolean ^void (^[Index Index Index] VarHandle/.compareAndSet
+                                     RIGHT
+                                     q
+                                     r
+                                     (.-right r))
+                  (some? (.-next p)) (set! q r)
+                  :else (break)))
+              (if (some? (set! d (.-down q))) (set! q d) (do (set! b (.-node q)) (break)))))
+          (when (some? b)
+            (while true
+              (let [^:mutable ^{:tag (Node K V)} n nil
+                    ^:mutable ^K k nil
+                    ^:mutable ^V v nil]
+                (cond
+                  (nil? (set! n (.-next b))) (if (nil? (.-key b)) (break :outer) (break))
+                  (nil? (set! k (.-key n))) (break)
+                  (nil? (set! v (.-val n))) (ConcurrentSkipListMap/unlinkNode b n)
+                  (some? (.-next n)) (set! b n)
+                  :else
+                    (when ^boolean (^[Node Object Void] VarHandle/.compareAndSet VAL n v nil)
+                      (ConcurrentSkipListMap/unlinkNode b n)
+                      (.tryReduceLevel this)
+                      (.findPredecessor this k comparator)
+                      (.addCount this -1)
+                      (return (AbstractMap$SimpleImmutableEntry. k v))))))))))
+    nil)
+
+  (field ^:private ^:static ^:final ^int EQ 1)
+
+  (field ^:private ^:static ^:final ^int LT 2)
+
+  (field ^:private ^:static ^:final ^int GT 0)
+
+  (method ^:final findNear ^{:tag (Node K V)} [this ^K key ^int rel
+                                               ^{:tag (Comparator (? super K))} cmp]
+    (when (nil? key) (throw (NullPointerException.)))
+    (let [^:mutable ^{:tag (Node K V)} result nil]
+      (let [^:mutable ^{:tag (Node K V)} b nil]
+        (label :outer
+          (while true
+            (when (nil? (set! b (.findPredecessor this key cmp))) (set! result nil) (break))
+            (while true
+              (let [^:mutable ^{:tag (Node K V)} n nil
+                    ^:mutable ^K k nil
+                    ^:mutable ^int c 0]
+                (cond
+                  (nil? (set! n (.-next b)))
+                    (do
+                      (set! result
+                            (when (and (not (== (bit-and-int rel LT) 0)) (some? (.-key b))) b))
+                      (break :outer))
+                  (nil? (set! k (.-key n))) (break)
+                  (nil? (.-val n)) (ConcurrentSkipListMap/unlinkNode b n)
+                  (or (and (== (set! c (ConcurrentSkipListMap/cpr cmp key k)) 0)
+                           (not (== (bit-and-int rel EQ) 0)))
+                      (and (< c 0) (== (bit-and-int rel LT) 0)))
+                    (do (set! result n) (break :outer))
+                  (and (<= c 0) (not (== (bit-and-int rel LT) 0)))
+                    (do (set! result (when (some? (.-key b)) b)) (break :outer))
+                  :else (set! b n)))))))
+      result))
+
+  (method ^:final findNearEntry ^{:tag (AbstractMap$SimpleImmutableEntry K V)} [this ^K key ^int rel
+                                                                                ^{:tag (Comparator (? super K))} cmp]
+    (while true
+      (let [^:mutable ^{:tag (Node K V)} n nil
+            ^:mutable ^V v nil]
+        (when (nil? (set! n (.findNear this key rel cmp))) (return nil))
+        (when (some? (set! v (.-val n))) (return (AbstractMap$SimpleImmutableEntry. (.-key n) v))))))
+
+  (constructor ^:public [this] (set! (.-comparator this) nil))
+
+  (constructor ^:public [this ^{:tag (Comparator (? super K))} comparator]
+    (set! (.-comparator this) comparator))
+
+  (constructor ^:public [this ^{:tag (Map (? extends K) (? extends V))} m]
+    (set! (.-comparator this) nil)
+    (.putAll this m))
+
+  (constructor ^:public [this ^{:tag (SortedMap K (? extends V))} m]
+    (set! (.-comparator this) (.comparator m))
+    (.buildFromSorted this m))
+
+  (method ^:public clone ^{:tag (ConcurrentSkipListMap K V)} [this]
+    (try
+      (let [^{:tag (ConcurrentSkipListMap K V)} clone (cast ConcurrentSkipListMap (.clone super))]
+        (set! (.-keySet clone) nil)
+        (set! (.-entrySet clone) nil)
+        (set! (.-values clone) nil)
+        (set! (.-descendingMap clone) nil)
+        (set! (.-adder clone) nil)
+        (.buildFromSorted clone this)
+        clone)
+      (catch CloneNotSupportedException e (throw (InternalError.)))))
+
+  (method ^:private buildFromSorted ^void [this ^{:tag (SortedMap K (? extends V))} map]
+    (when (nil? map) (throw (NullPointerException.)))
+    (let [^{:tag (Iterator (? extends (Map$Entry (? extends K) (? extends V))))} it (.iterator
+                                                                                      (.entrySet
+                                                                                        map))
+          ^{:tag (array (Index K V))} preds (new Index/1 64)
+          ^:mutable ^{:tag (Node K V)} bp (Node. nil nil nil)
+          ^:mutable ^{:tag (Index K V)} h (aset preds 0 (Index. bp nil nil))
+          ^:mutable count 0]
+      (while (.hasNext it)
+        (let [^{:tag (Map$Entry (? extends K) (? extends V))} e (cast Map$Entry (.next it))
+              ^K k (.getKey e)
+              ^V v (.getValue e)]
+          (when (or (nil? k) (nil? v)) (throw (NullPointerException.)))
+          (let [^{:tag (Node K V)} z (Node. k v nil)]
+            (set! bp (set! (.-next bp) z))
+            (when (== (bit-and (set! count (unchecked-inc count)) 3) 0)
+              (let [^:mutable m (unsigned-bit-shift-right count 2)
+                    ^:mutable ^int i 0
+                    ^:mutable ^{:tag (Index K V)} idx nil
+                    ^:mutable ^{:tag (Index K V)} q nil]
+                (loop []
+                  (set! idx (Index. z idx nil))
+                  (if (nil? (set! q (aget preds i)))
+                      (aset preds i (set! h (Index. (.-node h) h idx)))
+                      (aset preds i (set! (.-right q) idx)))
+                  (when (and (< (set! i (unchecked-inc-int i)) (alength preds))
+                             (not (== (bit-and (set! m (unsigned-bit-shift-right m 1)) 1) 0)))
+                    (recur))))))))
+      (when-not (== count 0)
+        (VarHandle/releaseFence)
+        (.addCount this count)
+        (set! head h)
+        (VarHandle/fullFence))))
+
+  (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream s]
+    (.defaultWriteObject s)
+    (let [^:mutable ^{:tag (Node K V)} b nil
+          ^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^V v nil]
+      (when (some? (set! b (.baseHead this)))
+        (while (some? (set! n (.-next b)))
+          (when (some? (set! v (.-val n))) (.writeObject s (.-key n)) (.writeObject s v))
+          (set! b n)))
+      (.writeObject s nil)))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^:final ^ObjectInputStream s]
+    (.defaultReadObject s)
+    (let [^{:tag (array (Index K V))} preds (new Index/1 64)
+          ^:mutable ^{:tag (Node K V)} bp (Node. nil nil nil)
+          ^:mutable ^{:tag (Index K V)} h (aset preds 0 (Index. bp nil nil))
+          ^{:tag (Comparator (? super K))} cmp comparator
+          ^:mutable ^K prevKey nil
+          ^:mutable count 0]
+      (while true
+        (let [^K k (.readObject s)]
+          (when (nil? k) (break))
+          (let [^V v (.readObject s)]
+            (when (nil? v) (throw (NullPointerException.)))
+            (when (and (some? prevKey) (> (ConcurrentSkipListMap/cpr cmp prevKey k) 0))
+              (throw (IllegalStateException. "out of order")))
+            (set! prevKey k)
+            (let [^{:tag (Node K V)} z (Node. k v nil)]
+              (set! bp (set! (.-next bp) z))
+              (when (== (bit-and (set! count (unchecked-inc count)) 3) 0)
+                (let [^:mutable m (unsigned-bit-shift-right count 2)
+                      ^:mutable ^int i 0
+                      ^:mutable ^{:tag (Index K V)} idx nil
+                      ^:mutable ^{:tag (Index K V)} q nil]
+                  (loop []
+                    (set! idx (Index. z idx nil))
+                    (if (nil? (set! q (aget preds i)))
+                        (aset preds i (set! h (Index. (.-node h) h idx)))
+                        (aset preds i (set! (.-right q) idx)))
+                    (when (and (< (set! i (unchecked-inc-int i)) (alength preds))
+                               (not (== (bit-and (set! m (unsigned-bit-shift-right m 1)) 1) 0)))
+                      (recur)))))))))
+      (when-not (== count 0)
+        (VarHandle/releaseFence)
+        (.addCount this count)
+        (set! head h)
+        (VarHandle/fullFence))))
+
+  (method ^:public containsKey ^boolean [this key]
+    (some? (.doGet this key)))
+
+  (method ^:public get ^V [this key] (.doGet this key))
+
+  (method ^:public getOrDefault ^V [this key ^V defaultValue]
+    (let [^:mutable ^V v nil] (if (nil? (set! v (.doGet this key))) defaultValue v)))
+
+  (method ^:public put ^V [this ^K key ^V value]
+    (when (nil? value) (throw (NullPointerException.)))
+    (.doPut this key value false))
+
+  (method ^:public remove ^V [this key] (.doRemove this key nil))
+
+  (method ^:public containsValue ^boolean [this value]
+    (when (nil? value) (throw (NullPointerException.)))
+    (let [^:mutable ^{:tag (Node K V)} b nil
+          ^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^V v nil]
+      (when (some? (set! b (.baseHead this)))
+        (while (some? (set! n (.-next b)))
+          (if (and (some? (set! v (.-val n))) (.equals value v)) (return true) (set! b n))))
+      false))
+
+  (method ^:public size ^int [this]
+    (let [^:mutable ^long c 0]
+      (cond
+        (nil? (.baseHead this)) 0
+        (>= (set! c (.getAdderCount this)) Integer/MAX_VALUE) Integer/MAX_VALUE
+        :else (unchecked-int c))))
+
+  (method ^:public isEmpty ^boolean [this] (nil? (.findFirst this)))
+
+  (method ^:public clear ^void [this]
+    (let [^:mutable ^{:tag (Index K V)} h nil
+          ^:mutable ^{:tag (Index K V)} r nil
+          ^:mutable ^{:tag (Index K V)} d nil
+          ^:mutable ^{:tag (Node K V)} b nil]
+      (VarHandle/acquireFence)
+      (while (some? (set! h head))
+        (cond
+          (some? (set! r (.-right h)))
+            ^boolean ^void (^[Index Index Void] VarHandle/.compareAndSet RIGHT h r nil)
+          (some? (set! d (.-down h)))
+            ^boolean ^void (^[ConcurrentSkipListMap Index Index] VarHandle/.compareAndSet
+                             HEAD
+                             this
+                             h
+                             d)
+          :else
+            (let [^:mutable count 0]
+              (when (some? (set! b (.-node h)))
+                (let [^:mutable ^{:tag (Node K V)} n nil
+                      ^:mutable ^V v nil]
+                  (while (some? (set! n (.-next b)))
+                    (when (and (some? (set! v (.-val n)))
+                               ^boolean (^[Node Object Void] VarHandle/.compareAndSet VAL n v nil))
+                      (set! count (unchecked-dec count))
+                      (set! v nil))
+                    (when (nil? v) (ConcurrentSkipListMap/unlinkNode b n)))))
+              (if (not (== count 0)) (.addCount this count) (break)))))))
+
+  (method ^:public computeIfAbsent ^V [this ^K key
+                                       ^{:tag (Function (? super K) (? extends V))} mappingFunction]
+    (when (or (nil? key) (nil? mappingFunction)) (throw (NullPointerException.)))
+    (let [^:mutable ^V v nil
+          ^:mutable ^V p nil
+          ^:mutable ^V r nil]
+      (when (and (nil? (set! v (.doGet this key))) (some? (set! r (.apply mappingFunction key))))
+        (set! v (if (nil? (set! p (.doPut this key r true))) r p)))
+      v))
+
+  (method ^:public computeIfPresent ^V [this ^K key
+                                        ^{:tag (BiFunction (? super K) (? super V) (? extends V))} remappingFunction]
+    (when (or (nil? key) (nil? remappingFunction)) (throw (NullPointerException.)))
+    (let [^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^V v nil]
+      (while (some? (set! n (.findNode this key)))
+        (when (some? (set! v (.-val n)))
+          (let [^V r (.apply remappingFunction key v)]
+            (cond
+              (some? r)
+                (when ^boolean (^[Node Object Object] VarHandle/.compareAndSet VAL n v r)
+                  (return r))
+              (some? (.doRemove this key v)) (break)))))
+      nil))
+
+  (method ^:public compute ^V [this ^K key
+                               ^{:tag (BiFunction (? super K) (? super V) (? extends V))} remappingFunction]
+    (when (or (nil? key) (nil? remappingFunction)) (throw (NullPointerException.)))
+    (while true
+      (let [^:mutable ^{:tag (Node K V)} n nil
+            ^:mutable ^V v nil
+            ^:mutable ^V r nil]
+        (cond
+          (nil? (set! n (.findNode this key)))
+            (do
+              (when (nil? (set! r (.apply remappingFunction key nil))) (break))
+              (when (nil? (.doPut this key r true)) (return r)))
+          (some? (set! v (.-val n)))
+            (cond
+              (some? (set! r (.apply remappingFunction key v)))
+                (when ^boolean (^[Node Object Object] VarHandle/.compareAndSet VAL n v r)
+                  (return r))
+              (some? (.doRemove this key v)) (break)))))
+    nil)
+
+  (method ^:public merge ^V [this ^K key ^V value
+                             ^{:tag (BiFunction (? super V) (? super V) (? extends V))} remappingFunction]
+    (when (or (or (nil? key) (nil? value)) (nil? remappingFunction))
+      (throw (NullPointerException.)))
+    (while true
+      (let [^:mutable ^{:tag (Node K V)} n nil
+            ^:mutable ^V v nil
+            ^:mutable ^V r nil]
+        (cond
+          (nil? (set! n (.findNode this key)))
+            (when (nil? (.doPut this key value true)) (return value))
+          (some? (set! v (.-val n)))
+            (cond
+              (some? (set! r (.apply remappingFunction v value)))
+                (when ^boolean (^[Node Object Object] VarHandle/.compareAndSet VAL n v r)
+                  (return r))
+              (some? (.doRemove this key v)) (return nil))))))
+
+  (method ^:public keySet ^{:tag (NavigableSet K)} [this]
+    (let [^:mutable ^{:tag (KeySet K V)} ks nil]
+      (if (some? (set! ks keySet)) ks (set! keySet (KeySet. this)))))
+
+  (method ^:public navigableKeySet ^{:tag (NavigableSet K)} [this]
+    (let [^:mutable ^{:tag (KeySet K V)} ks nil]
+      (if (some? (set! ks keySet)) ks (set! keySet (KeySet. this)))))
+
+  (method ^:public values ^{:tag (Collection V)} [this]
+    (let [^:mutable ^{:tag (Values K V)} vs nil]
+      (if (some? (set! vs values)) vs (set! values (Values. this)))))
+
+  (method ^:public entrySet ^{:tag (Set (Map$Entry K V))} [this]
+    (let [^:mutable ^{:tag (EntrySet K V)} es nil]
+      (if (some? (set! es entrySet)) es (set! entrySet (EntrySet. this)))))
+
+  (method ^:public descendingMap ^{:tag (ConcurrentNavigableMap K V)} [this]
+    (let [^:mutable ^{:tag (ConcurrentNavigableMap K V)} dm nil]
+      (if (some? (set! dm descendingMap))
+          dm
+          (set! descendingMap (SubMap. this nil false nil false true)))))
+
+  (method ^:public descendingKeySet ^{:tag (NavigableSet K)} [this]
+    (.navigableKeySet (.descendingMap this)))
+
+  (method ^:public equals ^boolean [this o]
+    (cond
+      (identical? o this) true
+      (not (instance? Map o)) false
+      :else
+        (let [^{:tag (Map ? ?)} m (cast Map o)]
+          (try
+            (let [^{:tag (Comparator (? super K))} cmp comparator
+                  ^{:tag (Iterator (? extends (Map$Entry ? ?)))} it (.iterator (.entrySet m))]
+              (if (and (instance? SortedMap m) (identical? (.comparator (cast SortedMap m)) cmp))
+                  (let [^:mutable ^{:tag (Node K V)} b nil
+                        ^:mutable ^{:tag (Node K V)} n nil]
+                    (when (some? (set! b (.baseHead this)))
+                      (while (some? (set! n (.-next b)))
+                        (let [^:mutable ^K k nil
+                              ^:mutable ^V v nil]
+                          (when (and (some? (set! v (.-val n))) (some? (set! k (.-key n))))
+                            (when-not (.hasNext it) (return false))
+                            (let [^{:tag (Map$Entry ? ?)} e (cast Map$Entry (.next it))
+                                  mk (.getKey e)
+                                  mv (.getValue e)]
+                              (when (or (nil? mk) (nil? mv)) (return false))
+                              (try
+                                (when-not (== (ConcurrentSkipListMap/cpr cmp k mk) 0)
+                                  (return false))
+                                (catch ClassCastException cce (return false)))
+                              (when-not (.equals mv v) (return false))))
+                          (set! b n))))
+                    (not (.hasNext it)))
+                  (do
+                    (while (.hasNext it)
+                      (let [^:mutable ^V v nil
+                            ^{:tag (Map$Entry ? ?)} e (cast Map$Entry (.next it))
+                            mk (.getKey e)
+                            mv (.getValue e)]
+                        (when (or (or (or (nil? mk) (nil? mv)) (nil? (set! v (.get this mk))))
+                                  (not (.equals v mv)))
+                          (return false))))
+                    (let [^:mutable ^{:tag (Node K V)} b nil
+                          ^:mutable ^{:tag (Node K V)} n nil]
+                      (when (some? (set! b (.baseHead this)))
+                        (let [^:mutable ^K k nil
+                              ^:mutable ^V v nil
+                              ^:mutable ^Object mv nil]
+                          (while (some? (set! n (.-next b)))
+                            (when (and (and (some? (set! v (.-val n))) (some? (set! k (.-key n))))
+                                       (or (nil? (set! mv (.get m k))) (not (.equals mv v))))
+                              (return false))
+                            (set! b n))))
+                      true))))
+            (catch [ClassCastException NullPointerException] unused false)))))
+
+  (method ^:public putIfAbsent ^V [this ^K key ^V value]
+    (when (nil? value) (throw (NullPointerException.)))
+    (.doPut this key value true))
+
+  (method ^:public remove ^boolean [this key value]
+    (when (nil? key) (throw (NullPointerException.)))
+    (and (some? value) (some? (.doRemove this key value))))
+
+  (method ^:public replace ^boolean [this ^K key ^V oldValue ^V newValue]
+    (when (or (or (nil? key) (nil? oldValue)) (nil? newValue)) (throw (NullPointerException.)))
+    (while true
+      (let [^:mutable ^{:tag (Node K V)} n nil
+            ^:mutable ^V v nil]
+        (when (nil? (set! n (.findNode this key))) (return false))
+        (when (some? (set! v (.-val n)))
+          (when-not (.equals oldValue v) (return false))
+          (when ^boolean (^[Node Object Object] VarHandle/.compareAndSet VAL n v newValue)
+            (return true))))))
+
+  (method ^:public replace ^V [this ^K key ^V value]
+    (when (or (nil? key) (nil? value)) (throw (NullPointerException.)))
+    (while true
+      (let [^:mutable ^{:tag (Node K V)} n nil
+            ^:mutable ^V v nil]
+        (when (nil? (set! n (.findNode this key))) (return nil))
+        (when (and (some? (set! v (.-val n)))
+                   ^boolean (^[Node Object Object] VarHandle/.compareAndSet VAL n v value))
+          (return v)))))
+
+  (method ^:public comparator ^{:tag (Comparator (? super K))} [this]
+    comparator)
+
+  (method ^:public firstKey ^K [this]
+    (let [^{:tag (Node K V)} n (.findFirst this)]
+      (when (nil? n) (throw (NoSuchElementException.)))
+      (.-key n)))
+
+  (method ^:public lastKey ^K [this]
+    (let [^{:tag (Node K V)} n (.findLast this)]
+      (when (nil? n) (throw (NoSuchElementException.)))
+      (.-key n)))
+
+  (method ^:public putFirst ^V [this ^K k ^V v]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:public putLast ^V [this ^K k ^V v]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:public subMap ^{:tag (ConcurrentNavigableMap K V)} [this ^K fromKey
+                                                                ^boolean fromInclusive ^K toKey
+                                                                ^boolean toInclusive]
+    (when (or (nil? fromKey) (nil? toKey)) (throw (NullPointerException.)))
+    (SubMap. this fromKey fromInclusive toKey toInclusive false))
+
+  (method ^:public headMap ^{:tag (ConcurrentNavigableMap K V)} [this ^K toKey ^boolean inclusive]
+    (when (nil? toKey) (throw (NullPointerException.)))
+    (SubMap. this nil false toKey inclusive false))
+
+  (method ^:public tailMap ^{:tag (ConcurrentNavigableMap K V)} [this ^K fromKey ^boolean inclusive]
+    (when (nil? fromKey) (throw (NullPointerException.)))
+    (SubMap. this fromKey inclusive nil false false))
+
+  (method ^:public subMap ^{:tag (ConcurrentNavigableMap K V)} [this ^K fromKey ^K toKey]
+    (.subMap this fromKey true toKey false))
+
+  (method ^:public headMap ^{:tag (ConcurrentNavigableMap K V)} [this ^K toKey]
+    (.headMap this toKey false))
+
+  (method ^:public tailMap ^{:tag (ConcurrentNavigableMap K V)} [this ^K fromKey]
+    (.tailMap this fromKey true))
+
+  (method ^:public lowerEntry ^{:tag (Map$Entry K V)} [this ^K key]
+    (.findNearEntry this key LT comparator))
+
+  (method ^:public lowerKey ^K [this ^K key]
+    (let [^{:tag (Node K V)} n (.findNear this key LT comparator)] (when (some? n) (.-key n))))
+
+  (method ^:public floorEntry ^{:tag (Map$Entry K V)} [this ^K key]
+    (.findNearEntry this key (bit-or-int LT EQ) comparator))
+
+  (method ^:public floorKey ^K [this ^K key]
+    (let [^{:tag (Node K V)} n (.findNear this key (bit-or-int LT EQ) comparator)]
+      (when (some? n) (.-key n))))
+
+  (method ^:public ceilingEntry ^{:tag (Map$Entry K V)} [this ^K key]
+    (.findNearEntry this key (bit-or-int GT EQ) comparator))
+
+  (method ^:public ceilingKey ^K [this ^K key]
+    (let [^{:tag (Node K V)} n (.findNear this key (bit-or-int GT EQ) comparator)]
+      (when (some? n) (.-key n))))
+
+  (method ^:public higherEntry ^{:tag (Map$Entry K V)} [this ^K key]
+    (.findNearEntry this key GT comparator))
+
+  (method ^:public higherKey ^K [this ^K key]
+    (let [^{:tag (Node K V)} n (.findNear this key GT comparator)] (when (some? n) (.-key n))))
+
+  (method ^:public firstEntry ^{:tag (Map$Entry K V)} [this]
+    (.findFirstEntry this))
+
+  (method ^:public lastEntry ^{:tag (Map$Entry K V)} [this]
+    (.findLastEntry this))
+
+  (method ^:public pollFirstEntry ^{:tag (Map$Entry K V)} [this]
+    (.doRemoveFirstEntry this))
+
+  (method ^:public pollLastEntry ^{:tag (Map$Entry K V)} [this]
+    (.doRemoveLastEntry this))
+
+  (defclass ^:abstract Iter
+    :implements [(Iterator T)]
+    :type-params [T]
+
+    (field ^{:tag (Node K V)} lastReturned)
+
+    (field ^{:tag (Node K V)} next)
+
+    (field ^V nextValue)
+
+    (constructor [this]
+      (.advance this (.baseHead ConcurrentSkipListMap/this)))
+
+    (method ^:public ^:final hasNext ^boolean [this] (some? next))
+
+    (method ^:final advance ^void [this ^:mutable ^{:tag (Node K V)} b]
+      (let [^:mutable ^{:tag (Node K V)} n nil
+            ^:mutable ^V v nil]
+        (when (some? (set! lastReturned b))
+          (while (and (some? (set! n (.-next b))) (nil? (set! v (.-val n)))) (set! b n)))
+        (set! nextValue v)
+        (set! next n)))
+
+    (method ^:public ^:final remove ^void [this]
+      (let [^:mutable ^{:tag (Node K V)} n nil
+            ^:mutable ^K k nil]
+        (when (or (nil? (set! n lastReturned)) (nil? (set! k (.-key n))))
+          (throw (IllegalStateException.)))
+        (.remove ConcurrentSkipListMap/this k)
+        (set! lastReturned nil))))
+
+  (defclass ^:final ValueIterator
+    :extends (Iter V)
+
+    (method ^:public next ^V [this]
+      (let [^:mutable ^V v nil]
+        (when (nil? (set! v (.-nextValue this))) (throw (NoSuchElementException.)))
+        (.advance this (.-next this))
+        v)))
+
+  (defclass ^:final KeyIterator
+    :extends (Iter K)
+
+    (method ^:public next ^K [this]
+      (let [^:mutable ^{:tag (Node K V)} n nil]
+        (when (nil? (set! n (.-next this))) (throw (NoSuchElementException.)))
+        (let [^K k (.-key n)] (.advance this n) k))))
+
+  (defclass ^:final EntryIterator
+    :extends (Iter (Map$Entry K V))
+
+    (method ^:public next ^{:tag (Map$Entry K V)} [this]
+      (let [^:mutable ^{:tag (Node K V)} n nil]
+        (when (nil? (set! n (.-next this))) (throw (NoSuchElementException.)))
+        (let [^K k (.-key n)
+              ^V v (.-nextValue this)]
+          (.advance this n)
+          (AbstractMap$SimpleImmutableEntry. k v)))))
+
+  (method ^:static ^:final toList :type-params [E] ^{:tag (List E)} [^{:tag (Collection E)} c]
+    (let [^{:tag (ArrayList E)} list (ArrayList.)] (for-each [e c] (.add list e)) list))
+
+  (defclass ^:static ^:final KeySet
+    :extends (AbstractSet K)
+    :implements [(NavigableSet K)]
+    :type-params [K V]
+
+    (field ^:final ^{:tag (ConcurrentNavigableMap K V)} m)
+
+    (constructor [this ^{:tag (ConcurrentNavigableMap K V)} map]
+      (set! m map))
+
+    (method ^:public size ^int [this] (.size m))
+
+    (method ^:public isEmpty ^boolean [this] (.isEmpty m))
+
+    (method ^:public contains ^boolean [this o] (.containsKey m o))
+
+    (method ^:public remove ^boolean [this o] (some? (.remove m o)))
+
+    (method ^:public clear ^void [this] (.clear m))
+
+    (method ^:public lower ^K [this ^K e] (.lowerKey m e))
+
+    (method ^:public floor ^K [this ^K e] (.floorKey m e))
+
+    (method ^:public ceiling ^K [this ^K e] (.ceilingKey m e))
+
+    (method ^:public higher ^K [this ^K e] (.higherKey m e))
+
+    (method ^:public comparator ^{:tag (Comparator (? super K))} [this]
+      (.comparator m))
+
+    (method ^:public first ^K [this] (.firstKey m))
+
+    (method ^:public last ^K [this] (.lastKey m))
+
+    (method ^:public pollFirst ^K [this]
+      (let [^{:tag (Map$Entry K V)} e (.pollFirstEntry m)] (when (some? e) (.getKey e))))
+
+    (method ^:public pollLast ^K [this]
+      (let [^{:tag (Map$Entry K V)} e (.pollLastEntry m)] (when (some? e) (.getKey e))))
+
+    (method ^:public iterator ^{:tag (Iterator K)} [this]
+      (if (instance? ConcurrentSkipListMap m)
+          ^Iterator (.new (cast ConcurrentSkipListMap m) KeyIterator)
+          ^Iterator (.new (cast SubMap m) ConcurrentSkipListMap$SubMap$SubMapKeyIterator)))
+
+    (method ^:public equals ^boolean [this o]
+      (cond
+        (identical? o this) true
+        (not (instance? Set o)) false
+        :else
+          (let [^{:tag (Collection ?)} c (cast Collection o)]
+            (try
+              (and (.containsAll this c) (.containsAll c this))
+              (catch [ClassCastException NullPointerException] unused false)))))
+
+    (method ^:public toArray ^Object/1 [this]
+      (.toArray (ConcurrentSkipListMap/toList this)))
+
+    (method ^:public toArray :type-params [T] ^T/1 [this ^T/1 a]
+      (.toArray (ConcurrentSkipListMap/toList this) a))
+
+    (method ^:public descendingIterator ^{:tag (Iterator K)} [this]
+      (.iterator (.descendingSet this)))
+
+    (method ^:public subSet ^{:tag (NavigableSet K)} [this ^K fromElement ^boolean fromInclusive
+                                                      ^K toElement ^boolean toInclusive]
+      (KeySet. (.subMap m fromElement fromInclusive toElement toInclusive)))
+
+    (method ^:public headSet ^{:tag (NavigableSet K)} [this ^K toElement ^boolean inclusive]
+      (KeySet. (.headMap m toElement inclusive)))
+
+    (method ^:public tailSet ^{:tag (NavigableSet K)} [this ^K fromElement ^boolean inclusive]
+      (KeySet. (.tailMap m fromElement inclusive)))
+
+    (method ^:public subSet ^{:tag (NavigableSet K)} [this ^K fromElement ^K toElement]
+      (.subSet this fromElement true toElement false))
+
+    (method ^:public headSet ^{:tag (NavigableSet K)} [this ^K toElement]
+      (.headSet this toElement false))
+
+    (method ^:public tailSet ^{:tag (NavigableSet K)} [this ^K fromElement]
+      (.tailSet this fromElement true))
+
+    (method ^:public descendingSet ^{:tag (NavigableSet K)} [this]
+      (KeySet. (.descendingMap m)))
+
+    (method ^:public spliterator ^{:tag (Spliterator K)} [this]
+      (if (instance? ConcurrentSkipListMap m)
+          ^Spliterator (.keySpliterator (cast ConcurrentSkipListMap m))
+          ^Spliterator (.new (cast SubMap m) ConcurrentSkipListMap$SubMap$SubMapKeyIterator))))
+
+  (defclass ^:static ^:final Values
+    :extends (AbstractCollection V)
+    :type-params [K V]
+
+    (field ^:final ^{:tag (ConcurrentNavigableMap K V)} m)
+
+    (constructor [this ^{:tag (ConcurrentNavigableMap K V)} map]
+      (set! m map))
+
+    (method ^:public iterator ^{:tag (Iterator V)} [this]
+      (if (instance? ConcurrentSkipListMap m)
+          ^Iterator (.new (cast ConcurrentSkipListMap m) ValueIterator)
+          ^Iterator (.new (cast SubMap m) ConcurrentSkipListMap$SubMap$SubMapValueIterator)))
+
+    (method ^:public size ^int [this] (.size m))
+
+    (method ^:public isEmpty ^boolean [this] (.isEmpty m))
+
+    (method ^:public contains ^boolean [this o] (.containsValue m o))
+
+    (method ^:public clear ^void [this] (.clear m))
+
+    (method ^:public toArray ^Object/1 [this]
+      (.toArray (ConcurrentSkipListMap/toList this)))
+
+    (method ^:public toArray :type-params [T] ^T/1 [this ^T/1 a]
+      (.toArray (ConcurrentSkipListMap/toList this) a))
+
+    (method ^:public spliterator ^{:tag (Spliterator V)} [this]
+      (if (instance? ConcurrentSkipListMap m)
+          ^Spliterator (.valueSpliterator (cast ConcurrentSkipListMap m))
+          ^Spliterator (.new (cast SubMap m) ConcurrentSkipListMap$SubMap$SubMapValueIterator)))
+
+    (method ^:public removeIf ^boolean [this ^{:tag (Predicate (? super V))} filter]
+      (when (nil? filter) (throw (NullPointerException.)))
+      (if (instance? ConcurrentSkipListMap m)
+          (.removeValueIf (cast ConcurrentSkipListMap m) filter)
+          (let [^{:tag (Iterator (Map$Entry K V))} it (.new
+                                                        (cast SubMap m)
+                                                        ConcurrentSkipListMap$SubMap$SubMapEntryIterator)
+                ^:mutable removed false]
+            (while (.hasNext it)
+              (let [^{:tag (Map$Entry K V)} e (cast Map$Entry (.next it))
+                    ^V v (.getValue e)]
+                (when (and (.test filter v) (.remove m (.getKey e) v)) (set! removed true))))
+            removed))))
+
+  (defclass ^:static ^:final EntrySet
+    :extends (AbstractSet (Map$Entry K V))
+    :type-params [K V]
+
+    (field ^:final ^{:tag (ConcurrentNavigableMap K V)} m)
+
+    (constructor [this ^{:tag (ConcurrentNavigableMap K V)} map]
+      (set! m map))
+
+    (method ^:public iterator ^{:tag (Iterator (Map$Entry K V))} [this]
+      (if (instance? ConcurrentSkipListMap m)
+          ^Iterator (.new (cast ConcurrentSkipListMap m) EntryIterator)
+          ^Iterator (.new (cast SubMap m) ConcurrentSkipListMap$SubMap$SubMapEntryIterator)))
+
+    (method ^:public contains ^boolean [this o]
+      (if (not (instance? Map$Entry o))
+          false
+          (let [^{:tag (Map$Entry ? ?)} e (cast Map$Entry o)
+                ^V v (.get m (.getKey e))]
+            (and (some? v) (.equals v (.getValue e))))))
+
+    (method ^:public remove ^boolean [this o]
+      (if (not (instance? Map$Entry o))
+          false
+          (let [^{:tag (Map$Entry ? ?)} e (cast Map$Entry o)] (.remove m (.getKey e) (.getValue e)))))
+
+    (method ^:public isEmpty ^boolean [this] (.isEmpty m))
+
+    (method ^:public size ^int [this] (.size m))
+
+    (method ^:public clear ^void [this] (.clear m))
+
+    (method ^:public equals ^boolean [this o]
+      (cond
+        (identical? o this) true
+        (not (instance? Set o)) false
+        :else
+          (let [^{:tag (Collection ?)} c (cast Collection o)]
+            (try
+              (and (.containsAll this c) (.containsAll c this))
+              (catch [ClassCastException NullPointerException] unused false)))))
+
+    (method ^:public toArray ^Object/1 [this]
+      (.toArray (ConcurrentSkipListMap/toList this)))
+
+    (method ^:public toArray :type-params [T] ^T/1 [this ^T/1 a]
+      (.toArray (ConcurrentSkipListMap/toList this) a))
+
+    (method ^:public spliterator ^{:tag (Spliterator (Map$Entry K V))} [this]
+      (if (instance? ConcurrentSkipListMap m)
+          ^Spliterator (.entrySpliterator (cast ConcurrentSkipListMap m))
+          ^Spliterator (.new (cast SubMap m) ConcurrentSkipListMap$SubMap$SubMapEntryIterator)))
+
+    (method ^:public removeIf ^boolean [this ^{:tag (Predicate (? super (Map$Entry K V)))} filter]
+      (when (nil? filter) (throw (NullPointerException.)))
+      (if (instance? ConcurrentSkipListMap m)
+          (.removeEntryIf (cast ConcurrentSkipListMap m) filter)
+          (let [^{:tag (Iterator (Map$Entry K V))} it (.new
+                                                        (cast SubMap m)
+                                                        ConcurrentSkipListMap$SubMap$SubMapEntryIterator)
+                ^:mutable removed false]
+            (while (.hasNext it)
+              (let [^{:tag (Map$Entry K V)} e (cast Map$Entry (.next it))]
+                (when (and (.test filter e) (.remove m (.getKey e) (.getValue e)))
+                  (set! removed true))))
+            removed))))
+
+  (defclass ^:static ^:final SubMap
+    :extends (AbstractMap K V)
+    :implements [(ConcurrentNavigableMap K V) Serializable]
+    :type-params [K V]
+
+    (field ^:private ^:static ^:final ^long serialVersionUID -7647078645895051609)
+
+    (field ^:final ^{:tag (ConcurrentSkipListMap K V)} m)
+
+    (field ^:private ^:final ^K lo)
+
+    (field ^:private ^:final ^K hi)
+
+    (field ^:private ^:final ^boolean loInclusive)
+
+    (field ^:private ^:final ^boolean hiInclusive)
+
+    (field ^:final ^boolean isDescending)
+
+    (field ^:private ^:transient ^{:tag (KeySet K V)} keySetView)
+
+    (field ^:private ^:transient ^{:tag (Values K V)} valuesView)
+
+    (field ^:private ^:transient ^{:tag (EntrySet K V)} entrySetView)
+
+    (constructor [this ^{:tag (ConcurrentSkipListMap K V)} map ^K fromKey ^boolean fromInclusive
+                  ^K toKey ^boolean toInclusive ^boolean isDescending]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator map)]
+        (when (and (and (some? fromKey) (some? toKey))
+                   (> (ConcurrentSkipListMap/cpr cmp fromKey toKey) 0))
+          (throw (IllegalArgumentException. "inconsistent range")))
+        (set! (.-m this) map)
+        (set! (.-lo this) fromKey)
+        (set! (.-hi this) toKey)
+        (set! (.-loInclusive this) fromInclusive)
+        (set! (.-hiInclusive this) toInclusive)
+        (set! (.-isDescending this) isDescending)))
+
+    (method tooLow ^boolean [this key ^{:tag (Comparator (? super K))} cmp]
+      (let [^:mutable ^int c 0]
+        (and (some? lo)
+             (or (< (set! c (ConcurrentSkipListMap/cpr cmp key lo)) 0)
+                 (and (== c 0) (not loInclusive))))))
+
+    (method tooHigh ^boolean [this key ^{:tag (Comparator (? super K))} cmp]
+      (let [^:mutable ^int c 0]
+        (and (some? hi)
+             (or (> (set! c (ConcurrentSkipListMap/cpr cmp key hi)) 0)
+                 (and (== c 0) (not hiInclusive))))))
+
+    (method inBounds ^boolean [this key ^{:tag (Comparator (? super K))} cmp]
+      (and (not (.tooLow this key cmp)) (not (.tooHigh this key cmp))))
+
+    (method checkKeyBounds ^void [this ^K key ^{:tag (Comparator (? super K))} cmp]
+      (when (nil? key) (throw (NullPointerException.)))
+      (when-not (.inBounds this key cmp) (throw (IllegalArgumentException. "key out of range"))))
+
+    (method isBeforeEnd ^boolean [this ^{:tag (Node K V)} n ^{:tag (Comparator (? super K))} cmp]
+      (cond
+        (nil? n) false
+        (nil? hi) true
+        :else
+          (let [^K k (.-key n)]
+            (if (nil? k)
+                true
+                (let [c (ConcurrentSkipListMap/cpr cmp k hi)]
+                  (or (< c 0) (and (== c 0) hiInclusive)))))))
+
+    (method loNode ^{:tag (Node K V)} [this ^{:tag (Comparator (? super K))} cmp]
+      (cond
+        (nil? lo) (.findFirst m)
+        loInclusive (.findNear m lo (bit-or-int GT EQ) cmp)
+        :else (.findNear m lo GT cmp)))
+
+    (method hiNode ^{:tag (Node K V)} [this ^{:tag (Comparator (? super K))} cmp]
+      (cond
+        (nil? hi) (.findLast m)
+        hiInclusive (.findNear m hi (bit-or-int LT EQ) cmp)
+        :else (.findNear m hi LT cmp)))
+
+    (method lowestKey ^K [this]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)
+            ^{:tag (Node K V)} n (.loNode this cmp)]
+        (if (.isBeforeEnd this n cmp) (.-key n) (throw (NoSuchElementException.)))))
+
+    (method highestKey ^K [this]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)
+            ^{:tag (Node K V)} n (.hiNode this cmp)]
+        (when (some? n) (let [^K last (.-key n)] (when (.inBounds this last cmp) (return last))))
+        (throw (NoSuchElementException.))))
+
+    (method lowestEntry ^{:tag (Map$Entry K V)} [this]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+        (while true
+          (let [^:mutable ^{:tag (Node K V)} n nil
+                ^:mutable ^V v nil]
+            (cond
+              (or (nil? (set! n (.loNode this cmp))) (not (.isBeforeEnd this n cmp))) (return nil)
+              (some? (set! v (.-val n))) (return (AbstractMap$SimpleImmutableEntry. (.-key n) v)))))))
+
+    (method highestEntry ^{:tag (Map$Entry K V)} [this]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+        (while true
+          (let [^:mutable ^{:tag (Node K V)} n nil
+                ^:mutable ^V v nil]
+            (cond
+              (or (nil? (set! n (.hiNode this cmp))) (not (.inBounds this (.-key n) cmp)))
+                (return nil)
+              (some? (set! v (.-val n))) (return (AbstractMap$SimpleImmutableEntry. (.-key n) v)))))))
+
+    (method removeLowest ^{:tag (Map$Entry K V)} [this]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+        (while true
+          (let [^:mutable ^{:tag (Node K V)} n nil
+                ^:mutable ^K k nil
+                ^:mutable ^V v nil]
+            (cond
+              (nil? (set! n (.loNode this cmp))) (return nil)
+              (not (.inBounds this (set! k (.-key n)) cmp)) (return nil)
+              (some? (set! v (.doRemove m k nil))) (return (AbstractMap$SimpleImmutableEntry. k v)))))))
+
+    (method removeHighest ^{:tag (Map$Entry K V)} [this]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+        (while true
+          (let [^:mutable ^{:tag (Node K V)} n nil
+                ^:mutable ^K k nil
+                ^:mutable ^V v nil]
+            (cond
+              (nil? (set! n (.hiNode this cmp))) (return nil)
+              (not (.inBounds this (set! k (.-key n)) cmp)) (return nil)
+              (some? (set! v (.doRemove m k nil))) (return (AbstractMap$SimpleImmutableEntry. k v)))))))
+
+    (method getNearEntry ^{:tag (Map$Entry K V)} [this ^K key ^:mutable ^int rel]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+        (when isDescending
+          (if (== (bit-and-int rel LT) 0)
+              (set! rel (bit-or-int rel LT))
+              (set! rel (bit-and-int rel (bit-not-int LT)))))
+        (cond
+          (.tooLow this key cmp) (when-not (not (== (bit-and-int rel LT) 0)) (.lowestEntry this))
+          (.tooHigh this key cmp) (when-not (== (bit-and-int rel LT) 0) (.highestEntry this))
+          :else
+            (let [^{:tag (AbstractMap$SimpleImmutableEntry K V)} e (.findNearEntry m key rel cmp)]
+              (when-not (or (nil? e) (not (.inBounds this (.getKey e) cmp))) e)))))
+
+    (method getNearKey ^K [this ^K key ^:mutable ^int rel]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+        (when isDescending
+          (if (== (bit-and-int rel LT) 0)
+              (set! rel (bit-or-int rel LT))
+              (set! rel (bit-and-int rel (bit-not-int LT)))))
+        (cond
+          (.tooLow this key cmp)
+            (do
+              (when (== (bit-and-int rel LT) 0)
+                (let [^{:tag (Node K V)} n (.loNode this cmp)]
+                  (when (.isBeforeEnd this n cmp) (return (.-key n)))))
+              nil)
+          (.tooHigh this key cmp)
+            (do
+              (when-not (== (bit-and-int rel LT) 0)
+                (let [^{:tag (Node K V)} n (.hiNode this cmp)]
+                  (when (some? n)
+                    (let [^K last (.-key n)] (when (.inBounds this last cmp) (return last))))))
+              nil)
+          :else
+            (while true
+              (let [^{:tag (Node K V)} n (.findNear m key rel cmp)]
+                (when (or (nil? n) (not (.inBounds this (.-key n) cmp))) (return nil))
+                (when (some? (.-val n)) (return (.-key n))))))))
+
+    (method ^:public containsKey ^boolean [this key]
+      (when (nil? key) (throw (NullPointerException.)))
+      (and (.inBounds this key (.-comparator m)) (.containsKey m key)))
+
+    (method ^:public get ^V [this key]
+      (when (nil? key) (throw (NullPointerException.)))
+      (when-not (not (.inBounds this key (.-comparator m))) (.get m key)))
+
+    (method ^:public put ^V [this ^K key ^V value]
+      (.checkKeyBounds this key (.-comparator m))
+      (.put m key value))
+
+    (method ^:public remove ^V [this key]
+      (when-not (not (.inBounds this key (.-comparator m))) (.remove m key)))
+
+    (method ^:public size ^int [this]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)
+            ^:mutable count 0]
+        (loop [^{:tag (Node K V)} n (.loNode this cmp)]
+          (if (.isBeforeEnd this n cmp)
+              (if (some? (.-val n))
+                  (do (set! count (unchecked-inc count)) (recur (.-next n)))
+                  (recur (.-next n)))
+              nil))
+        (if (>= count Integer/MAX_VALUE) Integer/MAX_VALUE (unchecked-int count))))
+
+    (method ^:public isEmpty ^boolean [this]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+        (not (.isBeforeEnd this (.loNode this cmp) cmp))))
+
+    (method ^:public containsValue ^boolean [this value]
+      (when (nil? value) (throw (NullPointerException.)))
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+        (loop [^{:tag (Node K V)} n (.loNode this cmp)]
+          (when (.isBeforeEnd this n cmp)
+            (let [^V v (.-val n)]
+              (if (and (some? v) (.equals value v)) (return true) (recur (.-next n))))))
+        false))
+
+    (method ^:public clear ^void [this]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+        (loop [^{:tag (Node K V)} n (.loNode this cmp)]
+          (if (.isBeforeEnd this n cmp)
+              (if (some? (.-val n))
+                  (do (.remove m (.-key n)) (recur (.-next n)))
+                  (recur (.-next n)))
+              nil))))
+
+    (method ^:public putIfAbsent ^V [this ^K key ^V value]
+      (.checkKeyBounds this key (.-comparator m))
+      (.putIfAbsent m key value))
+
+    (method ^:public remove ^boolean [this key value]
+      (and (.inBounds this key (.-comparator m)) (.remove m key value)))
+
+    (method ^:public replace ^boolean [this ^K key ^V oldValue ^V newValue]
+      (.checkKeyBounds this key (.-comparator m))
+      (.replace m key oldValue newValue))
+
+    (method ^:public replace ^V [this ^K key ^V value]
+      (.checkKeyBounds this key (.-comparator m))
+      (.replace m key value))
+
+    (method ^:public comparator ^{:tag (Comparator (? super K))} [this]
+      (let [^{:tag (Comparator (? super K))} cmp (.comparator m)]
+        (if isDescending (Collections/reverseOrder cmp) cmp)))
+
+    (method newSubMap ^{:tag (SubMap K V)} [this ^:mutable ^K fromKey
+                                            ^:mutable ^boolean fromInclusive ^:mutable ^K toKey
+                                            ^:mutable ^boolean toInclusive]
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+        (when isDescending
+          (let [^K tk fromKey]
+            (set! fromKey toKey)
+            (set! toKey tk)
+            (let [ti fromInclusive] (set! fromInclusive toInclusive) (set! toInclusive ti))))
+        (when (some? lo)
+          (if (nil? fromKey)
+              (do (set! fromKey lo) (set! fromInclusive loInclusive))
+              (let [c (ConcurrentSkipListMap/cpr cmp fromKey lo)]
+                (when (or (< c 0) (and (and (== c 0) (not loInclusive)) fromInclusive))
+                  (throw (IllegalArgumentException. "key out of range"))))))
+        (when (some? hi)
+          (if (nil? toKey)
+              (do (set! toKey hi) (set! toInclusive hiInclusive))
+              (let [c (ConcurrentSkipListMap/cpr cmp toKey hi)]
+                (when (or (> c 0) (and (and (== c 0) (not hiInclusive)) toInclusive))
+                  (throw (IllegalArgumentException. "key out of range"))))))
+        (SubMap. m fromKey fromInclusive toKey toInclusive isDescending)))
+
+    (method ^:public subMap ^{:tag (SubMap K V)} [this ^K fromKey ^boolean fromInclusive ^K toKey
+                                                  ^boolean toInclusive]
+      (when (or (nil? fromKey) (nil? toKey)) (throw (NullPointerException.)))
+      (.newSubMap this fromKey fromInclusive toKey toInclusive))
+
+    (method ^:public headMap ^{:tag (SubMap K V)} [this ^K toKey ^boolean inclusive]
+      (when (nil? toKey) (throw (NullPointerException.)))
+      (.newSubMap this nil false toKey inclusive))
+
+    (method ^:public tailMap ^{:tag (SubMap K V)} [this ^K fromKey ^boolean inclusive]
+      (when (nil? fromKey) (throw (NullPointerException.)))
+      (.newSubMap this fromKey inclusive nil false))
+
+    (method ^:public subMap ^{:tag (SubMap K V)} [this ^K fromKey ^K toKey]
+      (.subMap this fromKey true toKey false))
+
+    (method ^:public headMap ^{:tag (SubMap K V)} [this ^K toKey]
+      (.headMap this toKey false))
+
+    (method ^:public tailMap ^{:tag (SubMap K V)} [this ^K fromKey]
+      (.tailMap this fromKey true))
+
+    (method ^:public descendingMap ^{:tag (SubMap K V)} [this]
+      (SubMap. m lo loInclusive hi hiInclusive (not isDescending)))
+
+    (method ^:public ceilingEntry ^{:tag (Map$Entry K V)} [this ^K key]
+      (.getNearEntry this key (bit-or-int GT EQ)))
+
+    (method ^:public ceilingKey ^K [this ^K key]
+      (.getNearKey this key (bit-or-int GT EQ)))
+
+    (method ^:public lowerEntry ^{:tag (Map$Entry K V)} [this ^K key]
+      (.getNearEntry this key LT))
+
+    (method ^:public lowerKey ^K [this ^K key] (.getNearKey this key LT))
+
+    (method ^:public floorEntry ^{:tag (Map$Entry K V)} [this ^K key]
+      (.getNearEntry this key (bit-or-int LT EQ)))
+
+    (method ^:public floorKey ^K [this ^K key]
+      (.getNearKey this key (bit-or-int LT EQ)))
+
+    (method ^:public higherEntry ^{:tag (Map$Entry K V)} [this ^K key]
+      (.getNearEntry this key GT))
+
+    (method ^:public higherKey ^K [this ^K key] (.getNearKey this key GT))
+
+    (method ^:public firstKey ^K [this]
+      (if isDescending (.highestKey this) (.lowestKey this)))
+
+    (method ^:public lastKey ^K [this]
+      (if isDescending (.lowestKey this) (.highestKey this)))
+
+    (method ^:public firstEntry ^{:tag (Map$Entry K V)} [this]
+      (if isDescending (.highestEntry this) (.lowestEntry this)))
+
+    (method ^:public lastEntry ^{:tag (Map$Entry K V)} [this]
+      (if isDescending (.lowestEntry this) (.highestEntry this)))
+
+    (method ^:public pollFirstEntry ^{:tag (Map$Entry K V)} [this]
+      (if isDescending (.removeHighest this) (.removeLowest this)))
+
+    (method ^:public pollLastEntry ^{:tag (Map$Entry K V)} [this]
+      (if isDescending (.removeLowest this) (.removeHighest this)))
+
+    (method ^:public keySet ^{:tag (NavigableSet K)} [this]
+      (let [^:mutable ^{:tag (KeySet K V)} ks nil]
+        (if (some? (set! ks keySetView)) ks (set! keySetView (KeySet. this)))))
+
+    (method ^:public navigableKeySet ^{:tag (NavigableSet K)} [this]
+      (let [^:mutable ^{:tag (KeySet K V)} ks nil]
+        (if (some? (set! ks keySetView)) ks (set! keySetView (KeySet. this)))))
+
+    (method ^:public values ^{:tag (Collection V)} [this]
+      (let [^:mutable ^{:tag (Values K V)} vs nil]
+        (if (some? (set! vs valuesView)) vs (set! valuesView (Values. this)))))
+
+    (method ^:public entrySet ^{:tag (Set (Map$Entry K V))} [this]
+      (let [^:mutable ^{:tag (EntrySet K V)} es nil]
+        (if (some? (set! es entrySetView)) es (set! entrySetView (EntrySet. this)))))
+
+    (method ^:public descendingKeySet ^{:tag (NavigableSet K)} [this]
+      (.navigableKeySet (.descendingMap this)))
+
+    (defclass ^:abstract SubMapIter
+      :implements [(Iterator T) (Spliterator T)]
+      :type-params [T]
+
+      (field ^{:tag (Node K V)} lastReturned)
+
+      (field ^{:tag (Node K V)} next)
+
+      (field ^V nextValue)
+
+      (constructor [this]
+        (VarHandle/acquireFence)
+        (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+          (while true
+            (set! next (if isDescending (.hiNode SubMap/this cmp) (.loNode SubMap/this cmp)))
+            (when (nil? next) (break))
+            (let [^V x (.-val next)]
+              (when (some? x)
+                (if (not (.inBounds SubMap/this (.-key next) cmp))
+                    (set! next nil)
+                    (set! nextValue x))
+                (break))))))
+
+      (method ^:public ^:final hasNext ^boolean [this] (some? next))
+
+      (method ^:final advance ^void [this]
+        (when (nil? next) (throw (NoSuchElementException.)))
+        (set! lastReturned next)
+        (if isDescending (.descend this) (.ascend this)))
+
+      (method ^:private ascend ^void [this]
+        (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+          (while true
+            (set! next (.-next next))
+            (when (nil? next) (break))
+            (let [^V x (.-val next)]
+              (when (some? x)
+                (if (.tooHigh SubMap/this (.-key next) cmp) (set! next nil) (set! nextValue x))
+                (break))))))
+
+      (method ^:private descend ^void [this]
+        (let [^{:tag (Comparator (? super K))} cmp (.-comparator m)]
+          (while true
+            (set! next (.findNear m (.-key lastReturned) LT cmp))
+            (when (nil? next) (break))
+            (let [^V x (.-val next)]
+              (when (some? x)
+                (if (.tooLow SubMap/this (.-key next) cmp) (set! next nil) (set! nextValue x))
+                (break))))))
+
+      (method ^:public remove ^void [this]
+        (let [^{:tag (Node K V)} l lastReturned]
+          (when (nil? l) (throw (IllegalStateException.)))
+          (.remove m (.-key l))
+          (set! lastReturned nil)))
+
+      (method ^:public trySplit ^{:tag (Spliterator T)} [this] nil)
+
+      (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super T))} action]
+        (if (.hasNext this) (do (.accept action (.next this)) true) false))
+
+      (method ^:public forEachRemaining ^void [this ^{:tag (Consumer (? super T))} action]
+        (while (.hasNext this) (.accept action (.next this))))
+
+      (method ^:public estimateSize ^long [this] Long/MAX_VALUE))
+
+    (defclass ^:final SubMapValueIterator
+      :extends (SubMapIter V)
+
+      (method ^:public next ^V [this]
+        (let [^V v (.-nextValue this)] (.advance this) v))
+
+      (method ^:public characteristics ^int [this] 0))
+
+    (defclass ^:final SubMapKeyIterator
+      :extends (SubMapIter K)
+
+      (method ^:public next ^K [this]
+        (let [^{:tag (Node K V)} n (.-next this)] (.advance this) (.-key n)))
+
+      (method ^:public characteristics ^int [this]
+        (bit-or-int (bit-or-int Spliterator/DISTINCT Spliterator/ORDERED) Spliterator/SORTED))
+
+      (method ^:public ^:final getComparator ^{:tag (Comparator (? super K))} [this]
+        (.comparator SubMap/this)))
+
+    (defclass ^:final SubMapEntryIterator
+      :extends (SubMapIter (Map$Entry K V))
+
+      (method ^:public next ^{:tag (Map$Entry K V)} [this]
+        (let [^{:tag (Node K V)} n (.-next this)
+              ^V v (.-nextValue this)]
+          (.advance this)
+          (AbstractMap$SimpleImmutableEntry. (.-key n) v)))
+
+      (method ^:public characteristics ^int [this] Spliterator/DISTINCT)))
+
+  (method ^:public forEach ^void [this ^{:tag (BiConsumer (? super K) (? super V))} action]
+    (when (nil? action) (throw (NullPointerException.)))
+    (let [^:mutable ^{:tag (Node K V)} b nil
+          ^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^V v nil]
+      (when (some? (set! b (.baseHead this)))
+        (while (some? (set! n (.-next b)))
+          (when (some? (set! v (.-val n))) (.accept action (.-key n) v))
+          (set! b n)))))
+
+  (method ^:public replaceAll ^void [this
+                                     ^{:tag (BiFunction (? super K) (? super V) (? extends V))} function]
+    (when (nil? function) (throw (NullPointerException.)))
+    (let [^:mutable ^{:tag (Node K V)} b nil
+          ^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^V v nil]
+      (when (some? (set! b (.baseHead this)))
+        (while (some? (set! n (.-next b)))
+          (while (some? (set! v (.-val n)))
+            (let [^V r (.apply function (.-key n) v)]
+              (when (nil? r) (throw (NullPointerException.)))
+              (when ^boolean (^[Node Object Object] VarHandle/.compareAndSet VAL n v r) (break))))
+          (set! b n)))))
+
+  (method removeEntryIf ^boolean [this ^{:tag (Predicate (? super (Map$Entry K V)))} function]
+    (when (nil? function) (throw (NullPointerException.)))
+    (let [^:mutable removed false
+          ^:mutable ^{:tag (Node K V)} b nil
+          ^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^V v nil]
+      (when (some? (set! b (.baseHead this)))
+        (while (some? (set! n (.-next b)))
+          (when (some? (set! v (.-val n)))
+            (let [^K k (.-key n)
+                  ^{:tag (Map$Entry K V)} e (AbstractMap$SimpleImmutableEntry. k v)]
+              (when (and (.test function e) (.remove this k v)) (set! removed true))))
+          (set! b n)))
+      removed))
+
+  (method removeValueIf ^boolean [this ^{:tag (Predicate (? super V))} function]
+    (when (nil? function) (throw (NullPointerException.)))
+    (let [^:mutable removed false
+          ^:mutable ^{:tag (Node K V)} b nil
+          ^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^V v nil]
+      (when (some? (set! b (.baseHead this)))
+        (while (some? (set! n (.-next b)))
+          (when (and (and (some? (set! v (.-val n))) (.test function v)) (.remove this (.-key n) v))
+            (set! removed true))
+          (set! b n)))
+      removed))
+
+  (defclass ^:abstract ^:static CSLMSpliterator
+    :type-params [K V]
+
+    (field ^:final ^{:tag (Comparator (? super K))} comparator)
+
+    (field ^:final ^K fence)
+
+    (field ^{:tag (Index K V)} row)
+
+    (field ^{:tag (Node K V)} current)
+
+    (field ^long est)
+
+    (constructor [this ^{:tag (Comparator (? super K))} comparator ^{:tag (Index K V)} row
+                  ^{:tag (Node K V)} origin ^K fence ^long est]
+      (set! (.-comparator this) comparator)
+      (set! (.-row this) row)
+      (set! (.-current this) origin)
+      (set! (.-fence this) fence)
+      (set! (.-est this) est))
+
+    (method ^:public ^:final estimateSize ^long [this] est))
+
+  (defclass ^:static ^:final KeySpliterator
+    :extends (CSLMSpliterator K V)
+    :implements [(Spliterator K)]
+    :type-params [K V]
+
+    (constructor [this ^{:tag (Comparator (? super K))} comparator ^{:tag (Index K V)} row
+                  ^{:tag (Node K V)} origin ^K fence ^long est]
+      (super. comparator row origin fence est))
+
+    (method ^:public trySplit ^{:tag (KeySpliterator K V)} [this]
+      (let [^:mutable ^{:tag (Node K V)} e nil
+            ^:mutable ^K ek nil
+            ^{:tag (Comparator (? super K))} cmp (.-comparator this)
+            ^K f (.-fence this)]
+        (when (and (some? (set! e (.-current this))) (some? (set! ek (.-key e))))
+          (loop [^{:tag (Index K V)} q (.-row this)]
+            (when (some? q)
+              (let [^:mutable ^{:tag (Index K V)} s nil
+                    ^:mutable ^{:tag (Node K V)} b nil
+                    ^:mutable ^{:tag (Node K V)} n nil
+                    ^:mutable ^K sk nil]
+                (if (and (and (and (and (and (and
+                                               (some? (set! s (.-right q)))
+                                               (some? (set! b (.-node s))))
+                                             (some? (set! n (.-next b))))
+                                        (some? (.-val n)))
+                                   (some? (set! sk (.-key n))))
+                              (> (ConcurrentSkipListMap/cpr cmp sk ek) 0))
+                         (or (nil? f) (< (ConcurrentSkipListMap/cpr cmp sk f) 0)))
+                    (do
+                      (set! (.-current this) n)
+                      (let [^{:tag (Index K V)} r (.-down q)]
+                        (set! (.-row this) (if (some? (.-right s)) s (.-down s)))
+                        (set! (.-est this) (unsigned-bit-shift-right (.-est this) 1))
+                        (return (KeySpliterator. cmp r e sk (.-est this)))))
+                    (recur (set! (.-row this) (.-down q))))))))
+        nil))
+
+    (method ^:public forEachRemaining ^void [this ^{:tag (Consumer (? super K))} action]
+      (when (nil? action) (throw (NullPointerException.)))
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator this)
+            ^K f (.-fence this)
+            ^:mutable ^{:tag (Node K V)} e (.-current this)]
+        (set! (.-current this) nil)
+        (while (some? e)
+          (let [^:mutable ^K k nil]
+            (when (and (and (some? (set! k (.-key e))) (some? f))
+                       (<= (ConcurrentSkipListMap/cpr cmp f k) 0))
+              (break))
+            (when (some? (.-val e)) (.accept action k)))
+          (set! e (.-next e)))))
+
+    (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super K))} action]
+      (when (nil? action) (throw (NullPointerException.)))
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator this)
+            ^K f (.-fence this)
+            ^:mutable ^{:tag (Node K V)} e (.-current this)]
+        (while (some? e)
+          (let [^:mutable ^K k nil]
+            (when (and (and (some? (set! k (.-key e))) (some? f))
+                       (<= (ConcurrentSkipListMap/cpr cmp f k) 0))
+              (set! e nil)
+              (break))
+            (when (some? (.-val e))
+              (set! (.-current this) (.-next e))
+              (.accept action k)
+              (return true)))
+          (set! e (.-next e)))
+        (set! (.-current this) e)
+        false))
+
+    (method ^:public characteristics ^int [this]
+      (bit-or-int (bit-or-int (bit-or-int (bit-or-int Spliterator/DISTINCT Spliterator/SORTED)
+                                          Spliterator/ORDERED)
+                              Spliterator/CONCURRENT)
+                  Spliterator/NONNULL))
+
+    (method ^:public ^:final getComparator ^{:tag (Comparator (? super K))} [this]
+      (.-comparator this)))
+
+  (method ^:final keySpliterator ^{:tag (KeySpliterator K V)} [this]
+    (let [^:mutable ^{:tag (Index K V)} h nil
+          ^:mutable ^{:tag (Node K V)} hn nil
+          ^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^long est 0]
+      (VarHandle/acquireFence)
+      (if (or (nil? (set! h head)) (nil? (set! hn (.-node h))))
+          (do (set! n nil) (set! est 0))
+          (do (set! n (.-next hn)) (set! est (.getAdderCount this))))
+      (KeySpliterator. comparator h n nil est)))
+
+  (defclass ^:static ^:final ValueSpliterator
+    :extends (CSLMSpliterator K V)
+    :implements [(Spliterator V)]
+    :type-params [K V]
+
+    (constructor [this ^{:tag (Comparator (? super K))} comparator ^{:tag (Index K V)} row
+                  ^{:tag (Node K V)} origin ^K fence ^long est]
+      (super. comparator row origin fence est))
+
+    (method ^:public trySplit ^{:tag (ValueSpliterator K V)} [this]
+      (let [^:mutable ^{:tag (Node K V)} e nil
+            ^:mutable ^K ek nil
+            ^{:tag (Comparator (? super K))} cmp (.-comparator this)
+            ^K f (.-fence this)]
+        (when (and (some? (set! e (.-current this))) (some? (set! ek (.-key e))))
+          (loop [^{:tag (Index K V)} q (.-row this)]
+            (when (some? q)
+              (let [^:mutable ^{:tag (Index K V)} s nil
+                    ^:mutable ^{:tag (Node K V)} b nil
+                    ^:mutable ^{:tag (Node K V)} n nil
+                    ^:mutable ^K sk nil]
+                (if (and (and (and (and (and (and
+                                               (some? (set! s (.-right q)))
+                                               (some? (set! b (.-node s))))
+                                             (some? (set! n (.-next b))))
+                                        (some? (.-val n)))
+                                   (some? (set! sk (.-key n))))
+                              (> (ConcurrentSkipListMap/cpr cmp sk ek) 0))
+                         (or (nil? f) (< (ConcurrentSkipListMap/cpr cmp sk f) 0)))
+                    (do
+                      (set! (.-current this) n)
+                      (let [^{:tag (Index K V)} r (.-down q)]
+                        (set! (.-row this) (if (some? (.-right s)) s (.-down s)))
+                        (set! (.-est this) (unsigned-bit-shift-right (.-est this) 1))
+                        (return (ValueSpliterator. cmp r e sk (.-est this)))))
+                    (recur (set! (.-row this) (.-down q))))))))
+        nil))
+
+    (method ^:public forEachRemaining ^void [this ^{:tag (Consumer (? super V))} action]
+      (when (nil? action) (throw (NullPointerException.)))
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator this)
+            ^K f (.-fence this)
+            ^:mutable ^{:tag (Node K V)} e (.-current this)]
+        (set! (.-current this) nil)
+        (while (some? e)
+          (let [^:mutable ^K k nil
+                ^:mutable ^V v nil]
+            (when (and (and (some? (set! k (.-key e))) (some? f))
+                       (<= (ConcurrentSkipListMap/cpr cmp f k) 0))
+              (break))
+            (when (some? (set! v (.-val e))) (.accept action v)))
+          (set! e (.-next e)))))
+
+    (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super V))} action]
+      (when (nil? action) (throw (NullPointerException.)))
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator this)
+            ^K f (.-fence this)
+            ^:mutable ^{:tag (Node K V)} e (.-current this)]
+        (while (some? e)
+          (let [^:mutable ^K k nil
+                ^:mutable ^V v nil]
+            (when (and (and (some? (set! k (.-key e))) (some? f))
+                       (<= (ConcurrentSkipListMap/cpr cmp f k) 0))
+              (set! e nil)
+              (break))
+            (when (some? (set! v (.-val e)))
+              (set! (.-current this) (.-next e))
+              (.accept action v)
+              (return true)))
+          (set! e (.-next e)))
+        (set! (.-current this) e)
+        false))
+
+    (method ^:public characteristics ^int [this]
+      (bit-or-int (bit-or-int Spliterator/CONCURRENT Spliterator/ORDERED) Spliterator/NONNULL)))
+
+  (method ^:final valueSpliterator ^{:tag (ValueSpliterator K V)} [this]
+    (let [^:mutable ^{:tag (Index K V)} h nil
+          ^:mutable ^{:tag (Node K V)} hn nil
+          ^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^long est 0]
+      (VarHandle/acquireFence)
+      (if (or (nil? (set! h head)) (nil? (set! hn (.-node h))))
+          (do (set! n nil) (set! est 0))
+          (do (set! n (.-next hn)) (set! est (.getAdderCount this))))
+      (ValueSpliterator. comparator h n nil est)))
+
+  (defclass ^:static ^:final EntrySpliterator
+    :extends (CSLMSpliterator K V)
+    :implements [(Spliterator (Map$Entry K V))]
+    :type-params [K V]
+
+    (constructor [this ^{:tag (Comparator (? super K))} comparator ^{:tag (Index K V)} row
+                  ^{:tag (Node K V)} origin ^K fence ^long est]
+      (super. comparator row origin fence est))
+
+    (method ^:public trySplit ^{:tag (EntrySpliterator K V)} [this]
+      (let [^:mutable ^{:tag (Node K V)} e nil
+            ^:mutable ^K ek nil
+            ^{:tag (Comparator (? super K))} cmp (.-comparator this)
+            ^K f (.-fence this)]
+        (when (and (some? (set! e (.-current this))) (some? (set! ek (.-key e))))
+          (loop [^{:tag (Index K V)} q (.-row this)]
+            (when (some? q)
+              (let [^:mutable ^{:tag (Index K V)} s nil
+                    ^:mutable ^{:tag (Node K V)} b nil
+                    ^:mutable ^{:tag (Node K V)} n nil
+                    ^:mutable ^K sk nil]
+                (if (and (and (and (and (and (and
+                                               (some? (set! s (.-right q)))
+                                               (some? (set! b (.-node s))))
+                                             (some? (set! n (.-next b))))
+                                        (some? (.-val n)))
+                                   (some? (set! sk (.-key n))))
+                              (> (ConcurrentSkipListMap/cpr cmp sk ek) 0))
+                         (or (nil? f) (< (ConcurrentSkipListMap/cpr cmp sk f) 0)))
+                    (do
+                      (set! (.-current this) n)
+                      (let [^{:tag (Index K V)} r (.-down q)]
+                        (set! (.-row this) (if (some? (.-right s)) s (.-down s)))
+                        (set! (.-est this) (unsigned-bit-shift-right (.-est this) 1))
+                        (return (EntrySpliterator. cmp r e sk (.-est this)))))
+                    (recur (set! (.-row this) (.-down q))))))))
+        nil))
+
+    (method ^:public forEachRemaining ^void [this
+                                             ^{:tag (Consumer (? super (Map$Entry K V)))} action]
+      (when (nil? action) (throw (NullPointerException.)))
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator this)
+            ^K f (.-fence this)
+            ^:mutable ^{:tag (Node K V)} e (.-current this)]
+        (set! (.-current this) nil)
+        (while (some? e)
+          (let [^:mutable ^K k nil
+                ^:mutable ^V v nil]
+            (when (and (and (some? (set! k (.-key e))) (some? f))
+                       (<= (ConcurrentSkipListMap/cpr cmp f k) 0))
+              (break))
+            (when (some? (set! v (.-val e)))
+              (.accept action (AbstractMap$SimpleImmutableEntry. k v))))
+          (set! e (.-next e)))))
+
+    (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super (Map$Entry K V)))} action]
+      (when (nil? action) (throw (NullPointerException.)))
+      (let [^{:tag (Comparator (? super K))} cmp (.-comparator this)
+            ^K f (.-fence this)
+            ^:mutable ^{:tag (Node K V)} e (.-current this)]
+        (while (some? e)
+          (let [^:mutable ^K k nil
+                ^:mutable ^V v nil]
+            (when (and (and (some? (set! k (.-key e))) (some? f))
+                       (<= (ConcurrentSkipListMap/cpr cmp f k) 0))
+              (set! e nil)
+              (break))
+            (when (some? (set! v (.-val e)))
+              (set! (.-current this) (.-next e))
+              (.accept action (AbstractMap$SimpleImmutableEntry. k v))
+              (return true)))
+          (set! e (.-next e)))
+        (set! (.-current this) e)
+        false))
+
+    (method ^:public characteristics ^int [this]
+      (bit-or-int (bit-or-int (bit-or-int (bit-or-int Spliterator/DISTINCT Spliterator/SORTED)
+                                          Spliterator/ORDERED)
+                              Spliterator/CONCURRENT)
+                  Spliterator/NONNULL))
+
+    (method ^:public ^:final getComparator ^{:tag (Comparator (Map$Entry K V))} [this]
+      (if (some? (.-comparator this))
+          (Map$Entry/comparingByKey (.-comparator this))
+          (cast Comparator
+                (cast Serializable
+                      (lambda (& Comparator Serializable) ^int [^Map$Entry e1 ^Map$Entry e2]
+                        (let [^{:tag (Comparable (? super K))} k1 (cast Comparable (.getKey e1))]
+                          (.compareTo k1 (.getKey e2)))))))))
+
+  (method ^:final entrySpliterator ^{:tag (EntrySpliterator K V)} [this]
+    (let [^:mutable ^{:tag (Index K V)} h nil
+          ^:mutable ^{:tag (Node K V)} hn nil
+          ^:mutable ^{:tag (Node K V)} n nil
+          ^:mutable ^long est 0]
+      (VarHandle/acquireFence)
+      (if (or (nil? (set! h head)) (nil? (set! hn (.-node h))))
+          (do (set! n nil) (set! est 0))
+          (do (set! n (.-next hn)) (set! est (.getAdderCount this))))
+      (EntrySpliterator. comparator h n nil est)))
+
+  (field ^:private ^:static ^:final ^VarHandle HEAD)
+
+  (field ^:private ^:static ^:final ^VarHandle ADDER)
+
+  (field ^:private ^:static ^:final ^VarHandle NEXT)
+
+  (field ^:private ^:static ^:final ^VarHandle VAL)
+
+  (field ^:private ^:static ^:final ^VarHandle RIGHT)
+
+  (static-initializer
+    (try
+      (let [l (MethodHandles/lookup)]
+        (set! HEAD (.findVarHandle l ConcurrentSkipListMap "head" Index))
+        (set! ADDER (.findVarHandle l ConcurrentSkipListMap "adder" LongAdder))
+        (set! NEXT (.findVarHandle l Node "next" Node))
+        (set! VAL (.findVarHandle l Node "val" Object))
+        (set! RIGHT (.findVarHandle l Index "right" Index)))
+      (catch ReflectiveOperationException e (throw (ExceptionInInitializerError. e))))))

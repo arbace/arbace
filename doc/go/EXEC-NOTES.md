@@ -304,6 +304,13 @@ At the first miss the machine's peak memory use was 25 GB of 62 (the suite's 24 
 forms tests, and the build's JVMs and `go build` beside them); during the second pair of runs,
 with other agents' work beside, it reached 40 GB, 6 GB left available.
 
+**Since standalone S1** (2026-10-12; JRT-SOURCES.md, "The committed forms"): the JDK's class forms
+and resource data are sources, `jdk/`, and `bin/a2g` reads them there. A miss no longer runs
+`bin/jrt-convert` (about 75 s less); the key hashes `jdk/` with `arbace/`, `go/`, `overlay/` and
+`bin/lib/`, and drops what only the conversion read: `doc/go/java-surface.edn`,
+`test/jrt/jrt_sources.ae`, `bin/j2a`, `bin/jrt-convert` and jdk26u's commit (a change to them
+changes the build only through `bin/jrt-convert update`, which rewrites `jdk/`).
+
 ## Results
 
 - **Oracle on Go** (`bin/oracle check 'target/arbace-go/amd64/arbace -'`), on this branch before

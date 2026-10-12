@@ -1,0 +1,93 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/jrt/ThreadPerTaskExecutor.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.jrt)
+
+(import '(java.util List Objects Set)
+        '(java.util.concurrent AbstractExecutorService
+                               ConcurrentHashMap
+                               CountDownLatch
+                               RejectedExecutionException
+                               ThreadFactory
+                               TimeUnit)
+        '(java.util.concurrent.atomic AtomicInteger))
+
+(defclass ^:public ^:final ThreadPerTaskExecutor
+  :extends AbstractExecutorService
+
+  (field ^:private ^:static ^:final ^int RUNNING 0)
+
+  (field ^:private ^:static ^:final ^int SHUTDOWN 1)
+
+  (field ^:private ^:static ^:final ^int TERMINATED 2)
+
+  (field ^:private ^:final ^ThreadFactory factory)
+
+  (field ^:private ^:final ^{:tag (Set Thread)} threads (ConcurrentHashMap/newKeySet))
+
+  (field ^:private ^:final ^CountDownLatch terminationSignal (CountDownLatch. 1))
+
+  (field ^:private ^:final ^AtomicInteger state (AtomicInteger. RUNNING))
+
+  (constructor ^:private [this ^ThreadFactory factory]
+    (set! (.-factory this) (cast ThreadFactory (Objects/requireNonNull factory))))
+
+  (method ^:public ^:static create ^ThreadPerTaskExecutor [^ThreadFactory factory]
+    (ThreadPerTaskExecutor. factory))
+
+  (method ^:private ensureNotShutdown ^void [this]
+    (when (>= (.get state) SHUTDOWN) (throw (RejectedExecutionException.))))
+
+  (method ^:private tryTerminate ^void [this]
+    (when (and (.isEmpty threads) (.compareAndSet state SHUTDOWN TERMINATED))
+      (.countDown terminationSignal)))
+
+  (method ^:private tryShutdownAndTerminate ^void [this ^boolean interruptThreads]
+    (when (.compareAndSet state RUNNING SHUTDOWN) (.tryTerminate this))
+    (when interruptThreads (for-each [^Thread t threads] (.interrupt t))))
+
+  (method ^:public shutdown ^void [this]
+    (when-not (.isShutdown this) (.tryShutdownAndTerminate this false)))
+
+  (method ^:public shutdownNow ^{:tag (List Runnable)} [this]
+    (when-not (.isTerminated this) (.tryShutdownAndTerminate this true))
+    (List/of))
+
+  (method ^:public isShutdown ^boolean [this] (>= (.get state) SHUTDOWN))
+
+  (method ^:public isTerminated ^boolean [this]
+    (>= (.get state) TERMINATED))
+
+  (method ^:public awaitTermination :throws [InterruptedException] ^boolean [this ^long timeout
+                                                                             ^TimeUnit unit]
+    (Objects/requireNonNull unit)
+    (if (.isTerminated this) true (.await terminationSignal timeout unit)))
+
+  (method ^:private newThread ^Thread [this ^Runnable task]
+    (let [thread (.newThread factory task)]
+      (when (nil? thread) (throw (RejectedExecutionException.)))
+      thread))
+
+  (method ^:private taskComplete ^void [this ^Thread thread]
+    (.remove threads thread)
+    (when (== (.get state) SHUTDOWN) (.tryTerminate this)))
+
+  (method ^:private start ^void [this ^Thread thread]
+    (.add threads thread)
+    (let [^:mutable started false]
+      (try
+        (when (== (.get state) RUNNING) (.start thread) (set! started true))
+        (finally (when-not started (.taskComplete this thread))))
+      (when-not started (throw (RejectedExecutionException.)))))
+
+  (method ^:public execute ^void [this ^Runnable task]
+    (Objects/requireNonNull task)
+    (.ensureNotShutdown this)
+    (let [self (new Thread/1 1)
+          thread (.newThread this
+                             (lambda Runnable ^void []
+                               (try (.run task) (finally (.taskComplete this (aget self 0))))))]
+      (aset self 0 thread)
+      (.start this thread)))
+
+  (method ^:public toString ^String [this]
+    (java-str (.getName (.getClass this)) "@" (Integer/toHexString (System/identityHashCode this)))))
