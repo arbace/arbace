@@ -159,6 +159,14 @@ On the worktree `s4-seed` at `7498921` (main `b0f5730` plus the tooling), a clea
 - An earlier generation from the same tree with a dirty checkout differed only in `SEED.edn`'s
   version map, and its stage 0 equalled that build's executables too (the version linked is the
   only input outside the tree).
+- **Again with SA4's toolchain pin**, after main was merged (`3d3a13b`, clean; a fresh
+  `ARBACE_GO_ARCHES=amd64,arm64 bin/arbace-go --build`): the candidate 3,063,232 bytes, SHA-256
+  `311420be5f7fb60d195550d033f17b60b593dc94738caba8b389fd88b4aeb2a2` (its `SEED.edn` with
+  `:goroot-sha256`), `--go-check` as pinned; stage 0 from it identical to the build's
+  executables, amd64 `27b438c5…fe892ad`, arm64 `bfb2136b…c3f59a7`, built in 18 s; the oracle with
+  main's reference on that executable: the 46 known mismatches, as recorded (with `files.edn`
+  re-recorded). The first candidate, without `:goroot-sha256`, is now refused by `--go-build`;
+  a GOROOT with one file of `src/runtime` changed is refused (checked).
 
 ### The amendments
 
