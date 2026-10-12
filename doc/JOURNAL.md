@@ -466,3 +466,36 @@ the first. The history before it is on the frozen branches and in git history:
 - S5: agent, branch `box-s5` (`b6addbc`), done; its merge with S3 conflicts in `box/`'s forms
   (abi, the launcher, vmm), jrt's box host and the docs, so it is merged by an agent that prints
   both sides, merges the Go and converts back, together with S3's two follow-ups.
+- S5's decisions by the user: BX40-BX44 accepted; its network semantics kept as built (host name
+  `localhost`, wildcard listens bound to loopback unless a pattern allows `*`, a dial to a closed
+  own listener refused by policy under `listen` alone, reverse lookups only with `dial=*`); the
+  guest's polling (console and network, an idle listening server ~99 polls a second) replaced by
+  a wake-on-event in the monitor before the milestone, rather than later; the box's own checks in
+  `bin/gate --full` stay deferred.
+- Two agents: `box-net-merge` (S5 merged with S3, the monitor's blob cache bounded, the
+  wake-on-event) and `box-jvm` (`arbace.box` on the JVM Arbace).
+
+## 2026-10-12: `arbace.box` on the JVM
+
+- Agent, branch `box-jvm` (`af262d9`), merged into main; the essential `bin/gate` passed on its
+  tree and again on merged main. Details: BOX-NOTES.md, S3, "The JVM's `arbace.box`"; amendment
+  BX37; VENDOR-NOTES hand change 22.
+- One shared source, `arbace/box.ae` (the Go-only namespace moved), over a host layer per build
+  with the same answer codes: `arbace/box/host.ae` on the JVM (java.nio: temp file and rename,
+  hash checked on read, refs under `FileChannel.lock` of `refs/.lock`, which is `fcntl(F_SETLKW)`
+  over the whole file in jdk26u's `UnixFileDispatcherImpl.c`, the same POSIX record lock as the
+  Go side's, as strace showed; snapshots written byte for byte as Go's `archive/tar` writes
+  them), and `arbace/lang/go/ns/box/host.ae` over `HostStore` on Go. `ref:NAME` scripts moved
+  into `arbace/main.ae`; the JVM's `RT.load` looks in `ARBACE_PATH`'s `store:` entries as a last
+  resort.
+- Tests: `test/native/box_test.ae` (6 tests, 73 assertions, run by `bin/native-tests`, so by
+  the build and the gate); in `bin/arbace-go --smoke`, the store checks again on the JVM, one
+  directory used by both, equal snapshot hashes, CAS counters from two JVMs and two native
+  processes ending at exactly 200, the JVM's lock holding a native `ref!`.
+- On merged main the first `bin/arbace-go --build` failed in Go's compile of `arbace/lang`
+  (undefined `RT_IntCast_O__I` and others): stale build state in the checkout; after the gate
+  (which refreshed jrt's conversion) it built (66,814,112 bytes), and the box built and passed
+  `--smoke --box`, 86 of 86, with the shared namespace.
+- The user: BX37 accepted, and on the JVM `ARBACE_PATH`'s directories are read too, not only its
+  `store:` entries, so that it works the same on all three (the same agent, branch
+  `box-jvm-path`).
