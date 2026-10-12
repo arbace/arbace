@@ -916,3 +916,21 @@ All as recommended in doc/STANDALONE-SURVEY.md:
     fallback and go-whim's requirements;
   - the jars and netboot fetched into `.tmp/`;
   - /dev/kvm.
+
+## 2026-10-12: the host upgraded
+
+- The user ran `apk update && apk upgrade`: 18 packages (util-linux's, libcap2, fakeroot,
+  abuild, libfdt, linux-virt 6.18.55 → 6.18.56), none of Arbace's inputs (the JDKs, TamaGo's
+  Go, gcc, qemu-aarch64, python3, git unchanged). Still 560 packages; `bin/alpine-env check`
+  holds, the line unchanged (67). The kernel runs 6.18.52 until the reboot after the milestone.
+
+## 2026-10-12: overnight authorization (the user)
+
+- The user, before a night away, as recommended:
+  - Amendments from SA20 are merged with each agent's recommended choice applied and recorded
+    as provisional, for the user to confirm or revise.
+  - S4's final step may run unattended once S3 is merged and the essential gate passes: the
+    seed printed by the fixpoint committed, the JVM's products removed per the accepted
+    inventory, the gate's oracle on the frozen reference.
+  - Then `bin/gate --full`, the annotated tag `arbace-seed-is-go-v1` pushed, and a ping. A
+    failing gate stops before the tag.
