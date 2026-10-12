@@ -590,3 +590,15 @@ JDKs, `JRT_LOCALES`.
 First made at main `61dc18b`: a full run (189 s; 836 files, 831 shape-identical and the 5
 known) wrote `jdk/`, identical to a run of the unchanged script's steps `sources,generate,convert`
 in a separate checkout (the conversion is deterministic).
+
+Checks (2026-10-12, this branch at `78d2ee0`): the builds from `jdk/` run with jdk26u's `src`,
+`make`, `test` and its build's `support`, `jdk`, `buildtools` and `hotspot` hidden (empty
+directories bound over them in a private mount namespace), `javac` replaced by a stub that logs
+and fails, `JDK` and `GEN_JDK` pointing nowhere, every `execve` traced: no javac call, nothing
+of the hidden trees reached. `bin/arbace-go --build` (amd64, arm64), `--build-tests` (amd64,
+arm64) and `--build --box` (amd64, arm64) so built are byte-identical to the same commit's
+builds from a fresh conversion (`JRT_CONV=.tmp/jrt/conv`), and a2g's program is identical to
+the one main's unchanged chain (`61dc18b`, in its own checkout) gives; its executables differ
+from these only by Arbace's version and the build IDs. `--smoke` (amd64, arm64: 96 checks),
+`--smoke --box` (103), the essential `bin/gate` (its executable rebuilt under the new key) and
+`bin/jrt-convert verify` pass.
