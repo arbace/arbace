@@ -634,3 +634,19 @@ the first. The history before it is on the frozen branches and in git history:
   `(fib 25)` 29 ms. What was untested before (the launcher on macOS, purego's `fakecgo` under the
   renamed path, HVF with this guest) works. Details in doc/go/BOX-NOTES.md, "The Mac run".
 - No new tag: the milestone's tag already names this code; the run completes S4. Next: to be set.
+
+## 2026-10-12: The user's decisions after S4
+
+- Next main line: a survey of the standalone Arbace (as BOX-SURVEY before the box): its own
+  runtime instead of jrt and Java binary compatibility, the runtime's design (scheduler, GC,
+  tail calls), what the box must hold for Arbace to rebuild itself inside it; stages for the user
+  to decide before any code (rather than self-hosting in the box at once, TLS/JSSE first, or the
+  small items first).
+- The box's checks in `bin/gate --full`: the amd64 smoke test only (`box-smoke`, after
+  `box-forms`: `ARBACE_BOX_ARCHES=amd64 bin/arbace-go --smoke --box`, 103 checks, about 2
+  min); the box's oracle and `box-suite` stay manual (rather than the oracle too, or deferred
+  again). Tried alone on main: 103 of 103.
+- g2a's printer: fix now the placement of a multi-line parameter list's names (DWARF's
+  `decl_line`), so `purego-check` compares with DWARF (rather than leaving it for later).
+- The Mac: each box milestone ships a bundle and its checklist; the user's run follows the tag
+  (rather than before the tag, or only on request).

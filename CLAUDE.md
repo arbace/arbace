@@ -19,7 +19,7 @@ Direction:
   (not freezes: no branch): on amd64 with /dev/kvm (tag `arbace-box-amd64-v1`, 2026-10-12) and
   on arm64 (tag `arbace-box-arm64-v1`, 2026-10-12): KVM/arm64, checked in an emulated aarch64
   VM, and Hypervisor.framework on an M2 Max (the bundle of `bin/box-mac-bundle`, 42 of 42).
-- Next: to be set (doc/AGENDA.md).
+- Now: a survey of the standalone Arbace (below), its stages for the user to decide; doc/AGENDA.md.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through j2a. The language is Clojure extended with an idiomatic
   representation of Java (the class forms), and later of Go: the Arbace language. The goal is a
@@ -113,7 +113,7 @@ Prior art:
   suite's Java fixtures; `test/arbace-go-results.edn`) and the oracle on it, against its known
   mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`) and the box's
   guest built from `tamago/`'s forms, byte-identical to one from TamaGo's originals
-  (`bin/arbace-go --build --box`, `bin/tamago-vendor check`); g2a and the
+  (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), then its smoke test (`--smoke --box`); g2a and the
   Go chain start when the three suites are done, for memory (about 21 minutes, Clojure's suite
   on Go the longest): run it when
   the class forms compiler, j2a, g2a, a2g or jrt change. Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build

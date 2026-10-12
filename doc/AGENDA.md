@@ -80,7 +80,10 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   42 on Hypervisor.framework with 4 and 1 vCPUs (the REPL, scripts, `-m`, nil dereferences as
   NullPointerException, futures, R2/R3, the loopback network and a socket REPL from the Mac, the
   store), go-whim's hv tests 4 of 4, idle 0.01 s of CPU per 20 s, start about 0.17 s.
-- Next: to be set by the user (Later below).
+- Now (the user, 2026-10-12): a survey of the standalone Arbace (agent, branch `standalone-survey`);
+  g2a's printer keeping a multi-line parameter list's lines (agent, branch `g2a-params`).
+  `bin/gate --full` runs the amd64 box smoke test (`box-smoke`). The Mac: a bundle per box
+  milestone, the user's run following the tag.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 
@@ -92,9 +95,8 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux host) and
   Hypervisor.framework on arm64 (macOS host). Open: the runtime's design, Go-inspired (scheduler,
   GC), with proper tail calls possible.
-- After `arbace-box-arm64-v1`: the box's own checks in `bin/gate --full` (deferred); the mapped start measured without nested
+- After `arbace-box-arm64-v1`: the box's oracle and `box-suite` in `bin/gate --full` (manual); the mapped start measured without nested
   KVM; TLS once jrt has JSSE; the arm64 box's oracle subset and
-  `box-suite` (hours in the emulated VM; an arm64 host with KVM); g2a's printer placing a
-  multi-line parameter list's names on its first line (DWARF's `decl_line` only).
+  `box-suite` (hours in the emulated VM; an arm64 host with KVM).
 - g2a's open ends: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s
   directory tests.
