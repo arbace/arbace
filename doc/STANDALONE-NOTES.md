@@ -6,7 +6,7 @@ are the user's to accept.
 
 ## S4: the Go-source seed
 
-Status: preparation, 2026-10-12, branch `s4-seed` (beside S2 and S3, which it does not depend
+Status: preparation, 2026-10-12, amendments SA1-SA9 accepted by the user the same day, branch `s4-seed` (beside S2 and S3, which it does not depend
 on). The JVM bootstrap stays as it is; nothing here removes it. The tooling, a candidate seed
 printed by today's JVM chain, and the proofs below.
 
@@ -85,13 +85,21 @@ About 20 s with Go's build cache warm; minutes cold (gc needs 7-8 GB for `jrt`, 
   put 6.3 MB of opaque bytes in a seed meant to be readable source. Stage 0 prepares it, as every
   `--build` does; the result is the same image, byte for byte (checked). Alternative: carry it
   (one `go build` fewer, about 11 s; the archive 4.4 MB).
-- **SA4 The toolchain.** The seed names Go's version (`:go "go1.27.1"`), and `--go-build`
-  refuses a GOROOT whose `VERSION` differs; the toolchain is TamaGo's Go distribution
-  (`/root/tamago-go`, https://github.com/usbarmory/tamago-go, go1.27.1, 2026-08-28), the one
-  every Arbace build uses (`G2A_GOROOT`). Its binaries are not hashed: Go's toolchain bootstraps
-  itself from source and its own builds are reproducible, so pinning a version is what the
-  survey's R4 asks. Open for the user: also pin a hash of GOROOT's `src/` (a line in `SEED.edn`,
-  checked by `--go-build`), if a version string is not trust enough.
+- **SA4 The toolchain**, pinned by its version and its sources. The toolchain is TamaGo's Go
+  distribution (`/root/tamago-go`, https://github.com/usbarmory/tamago-go, go1.27.1,
+  2026-08-28), the one every Arbace build uses (`G2A_GOROOT`). `seed/goroot.sha256` pins it as
+  `<SHA-256>  go1.27.1`, and `SEED.edn` records the same as `:go` and `:goroot-sha256`. The hash
+  of GOROOT's sources is defined as: sha256sum's lines (`<SHA-256>  <path relative to GOROOT>`)
+  of `VERSION` and every file under `src/`, sorted by path in the C locale's byte order, hashed
+  again; `src/` must hold only regular files and directories (a symbolic link or other file is
+  refused); `pkg/`, `bin/`, `lib/`, `misc/`, `test/`, caches and the rest of GOROOT do not count
+  (they are built or not compiled into Arbace). TamaGo's go1.27.1: 12,175 files,
+  `5745170fd3c83cb77ec88bc50aee8606f0436e718c222b48376b5943ac0cebe5`. `--go-make` refuses to
+  pack with another toolchain; `--go-build` and `--go-verify` refuse a GOROOT whose version or
+  hash differs from the pin or from `SEED.edn` (a seed without `:goroot-sha256`, as the first
+  candidate, is refused). The check takes 0.65 s with the files in the page cache, 3.6 s cold.
+  The toolchain's binaries are not hashed: they are built from these sources, and Go's builds are
+  reproducible.
 - **SA5 Stage 0's version** is the version map of the commit the seed was printed from
   (`SEED.edn`'s `:version`, `git describe` there), so stage 0 *is* that commit's Arbace: its
   banner and `*arbace-version*` name that commit, not the checkout building it. A seed made from
@@ -152,7 +160,10 @@ On the worktree `s4-seed` at `7498921` (main `b0f5730` plus the tooling), a clea
   version map, and its stage 0 equalled that build's executables too (the version linked is the
   only input outside the tree).
 
-### The amendments (for the user)
+### The amendments
+
+Accepted by the user 2026-10-12: SA1-SA3 and SA5-SA9 as proposed, SA4 with the hash of GOROOT's
+sources (as above, rather than the version alone).
 
 - **SA1 The seed's form**: one deterministic `tar.xz` committed as `seed/arbace-seed-go.tar.xz`
   with `.sha256` beside it (3.1 MB), not the printed tree committed as files (29 MB) nor a gzip
@@ -160,8 +171,9 @@ On the worktree `s4-seed` at `7498921` (main `b0f5730` plus the tooling), a clea
 - **SA2 Its determinism and pin**: the tar's settings above, `xz -9e -T1`; the pin is the
   archive's SHA-256; `--go-verify` compares the tar, so only the tree must reproduce.
 - **SA3** The image of prepared namespaces not carried; stage 0 prepares it.
-- **SA4** The toolchain pinned by version (TamaGo's go1.27.1), checked by `--go-build`; a hash
-  of GOROOT's sources optional (the user's choice).
+- **SA4** The toolchain pinned by version (TamaGo's go1.27.1) and by the SHA-256 of GOROOT's
+  `VERSION` and `src/` (`seed/goroot.sha256`, `SEED.edn`'s `:goroot-sha256`), checked by
+  `--go-make`, `--go-build` and `--go-verify`.
 - **SA5** Stage 0 carries the version of the commit the seed was printed from.
 - **SA6** `bin/seed`'s `--go-check`, `--go-make`, `--go-build`, `--go-verify` now, beside the
   jar's modes; renamed `--check`, `--make`, `--build`, `--verify` when the jar leaves (S4's end).
@@ -237,7 +249,8 @@ The existing `test/oracle/known-go-amd64.edn` is unchanged. The two divergences 
 separate reference, `test/oracle/known-go-amd64-frozen.edn` (48 cases: the 46 plus a group for
 the two, with their reasons), for the check against v4's expected files (SA9); with it the check
 passes (22,230 of 22,278 match, the 48 as recorded, the frozen jar matching its pin). The expected files from v4 are not committed (they are 5 of 84 files
-different, of which `files.edn`'s is a stale file to fix on main anyway); recording them into
+different, of which `files.edn`'s was a stale file: re-recorded from main's JVM reference on
+this branch, the diff only its six `.ae`-rename cases); recording them into
 `test/oracle/expected` is S4's step, with `known-go-amd64-frozen.edn` becoming the gate's.
 
 ## S4: inventory for the JVM's removal

@@ -33,6 +33,42 @@ seed_go_format=1
 # the Go toolchain: TamaGo's Go distribution, the one bin/arbace-go builds with (G2A_GOROOT)
 seed_go_goroot() { echo "${G2A_GOROOT:-/root/tamago-go}"; }
 
+# the toolchain's pin (SA4): seed/goroot.sha256 names Go's version and the SHA-256 of GOROOT's
+# sources, defined as sha256sum's lines (SHA-256, two spaces, the path relative to GOROOT) of
+# VERSION and every file under src/, in the C locale's byte order of their paths, hashed again
+# (pkg/, bin/, caches and the rest of GOROOT do not count; src/ must hold only regular files and
+# directories). The pin file's line: "<sha256>  <version>"
+seed_go_pin=$root/seed/goroot.sha256
+
+# seed_go_goroot_hash GOROOT: that hash (about 1-4 s for TamaGo's 12,175 files)
+seed_go_goroot_hash() {
+  local g=$1 odd
+  [ -f "$g/VERSION" ] && [ -d "$g/src" ] || { echo "bin/seed: $g is not a GOROOT" >&2; return 1; }
+  odd=$(cd "$g" && find src ! -type f ! -type d -print -quit)
+  [ -z "$odd" ] || { echo "bin/seed: $g/$odd is neither a file nor a directory" >&2; return 1; }
+  (cd "$g" && find VERSION src -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)
+}
+
+# seed_go_toolchain_check [SEED.EDN]: GOROOT is the pinned toolchain (seed/goroot.sha256), and
+# the one SEED.edn names when given; prints the hash
+seed_go_toolchain_check() {
+  local goroot have hv pv ph sv sh
+  goroot=$(seed_go_goroot)
+  [ -f "$seed_go_pin" ] || { echo "bin/seed: no toolchain pin $seed_go_pin" >&2; return 1; }
+  ph=$(grep -v '^#' "$seed_go_pin" | awk 'NF {print $1; exit}'); pv=$(grep -v '^#' "$seed_go_pin" | awk 'NF {print $2; exit}')
+  hv=$(head -1 "$goroot/VERSION"); have=$(seed_go_goroot_hash "$goroot") || return 1
+  if [ "$hv" != "$pv" ] || [ "$have" != "$ph" ]; then
+    echo "bin/seed: $goroot is $hv with sources $have; pinned $pv, $ph (seed/goroot.sha256)" >&2; return 1
+  fi
+  if [ -n "${1:-}" ]; then
+    sv=$(seed_go_field "$1" go | tr -d '"'); sh=$(seed_go_field "$1" goroot-sha256 | tr -d '"')
+    if [ "$sv" != "$hv" ] || [ "$sh" != "$have" ]; then
+      echo "bin/seed: the seed wants Go $sv with sources ${sh:-(none recorded)}; $goroot is $hv, $have" >&2; return 1
+    fi
+  fi
+  echo "$have"
+}
+
 # go_env ARCH: the build's environment for linux/ARCH (bin/arbace-go's go_env, GOOS linux)
 seed_go_env() {
   local a=$1
@@ -52,7 +88,7 @@ seed_go_tar() {
 }
 
 seed_go_make() {
-  local archive=$1 host dir mod ovl rt nss version goversion t files bytes
+  local archive=$1 host dir mod ovl rt nss version goversion goroothash t files bytes
   host=$(seed_go_host_arch)
   dir=$root/target/arbace-go
   mod=$dir/work-$host/mod
@@ -66,6 +102,7 @@ seed_go_make() {
   version=$(arbace_version "$root") || return 1
   case $version in *':dirty true'*) echo "bin/seed: warning: the checkout is dirty; the seed records it" >&2 ;; esac
   goversion=$(head -1 "$(seed_go_goroot)/VERSION")
+  goroothash=$(seed_go_toolchain_check) || return 1
   t=$(mktemp -d "$root/.tmp/seed-go-make.XXXXXX") || return 1
   mkdir -p "$t/$seed_go_top/overlay"
   cp -r "$mod" "$t/$seed_go_top/mod"
@@ -83,6 +120,8 @@ seed_go_make() {
  :version $version
  ;; the toolchain: TamaGo's Go distribution (github.com/usbarmory/tamago-go), GOROOT's VERSION
  :go "$goversion"
+ ;; the SHA-256 of GOROOT's sources: VERSION and src/ (seed/goroot.sha256, bin/lib/seed-go.bash)
+ :goroot-sha256 "$goroothash"
  :module "arbace"
  :main "arbace/cmd/arbace"
  :goos "linux"
@@ -115,8 +154,7 @@ seed_go_build() {
   mv "$out/$seed_go_top" "$src"
   s=$src/SEED.edn
   [ "$(seed_go_field "$s" format)" = "$seed_go_format" ] || { echo "bin/seed: $archive: format $(seed_go_field "$s" format), not $seed_go_format" >&2; return 1; }
-  want=$(seed_go_field "$s" go | tr -d '"'); have=$(head -1 "$goroot/VERSION")
-  [ "$want" = "$have" ] || { echo "bin/seed: the seed wants Go $want, $goroot is $have" >&2; return 1; }
+  seed_go_toolchain_check "$s" > /dev/null || return 1
   version=$(seed_go_field "$s" version)
   # the overlay file for this GOROOT (bin/jrt overlay's, with the seed's runtime files)
   ovl=$src/overlay/overlay.json
