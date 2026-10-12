@@ -441,3 +441,28 @@ the first. The history before it is on the frozen branches and in git history:
   main; no branch, no freeze, and so the journal does not start over (unlike the freezes of
   `arbace-for-java-26` and `arbace-for-golang`).
 - The tag's name, accepted by the user: `arbace-box-amd64-v1`.
+
+## 2026-10-11: B1b S3 done: the store; S5 done on its branch
+
+- S3: agent, branch `box-s3` (`57d360d`), merged into main (main had moved by docs only). Details:
+  BOX-NOTES.md, S3; amendments BX30-BX36. go-whim's directory format (`blobs/HASH`, `refs/NAME`,
+  names of 1-64 `[A-Za-z0-9._-]`, compare-and-set); no store unless `--store DIR` or
+  `ARBACE_BOX_STORE`; the box and the native executable share a directory, refs written under an
+  `fcntl` lock on `refs/.lock` (the monitor's filter allows `fcntl`, not `rename`, `flock` or
+  `mkdir`). The store's failures have codes of their own in `abi` (-3 no store, -4 too large, -5
+  bad name; go-whim's -1 and -2 kept). jrt: `jrt.StoreHost`, the box's over the hypercalls (its
+  buffers on the heap: goroutine stacks move), `OSHost`'s in `store_linux.ae`; the Java class
+  `jdk.internal.jrt.HostStore`. `arbace.box` (`arbace/lang/go/ns/box.ae`): `put`, `get`,
+  `get-bytes`, `size`, `ref`, `ref!`, `put!`, `load`, `load-ref`, `save-fs!`, `load-fs!`,
+  `store?`, refusals as `ex-info` with `:arbace.box/error`. `store:PREFIX` entries in
+  `ARBACE_PATH`, `ref:NAME` scripts; snapshots as deterministic tars; `ARBACE_BOX_FS` seeds the
+  in-memory fs. The launcher's host tool `--store DIR put|get|ref|ls`.
+- Checks on the branch: `--smoke` 53, `--smoke --box` 86, both oracles as recorded (46),
+  `bin/box-suite` as its reference, `bin/jrt test`, `box-vendor roundtrip` and `kvm-tests`,
+  `tamago-vendor verify` and `check` (S6's proof holds).
+- The user's decisions: BX30-BX36 accepted; the blob limit 256 MiB, the monitor's blob cache to
+  be bounded; `arbace.box` on the JVM Arbace too; epoch times in snapshots, no transactions, the
+  `store:` path rule confirmed.
+- S5: agent, branch `box-s5` (`b6addbc`), done; its merge with S3 conflicts in `box/`'s forms
+  (abi, the launcher, vmm), jrt's box host and the docs, so it is merged by an agent that prints
+  both sides, merges the Go and converts back, together with S3's two follow-ups.

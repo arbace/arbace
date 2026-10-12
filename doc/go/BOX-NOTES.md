@@ -1105,7 +1105,7 @@ converted forms merged with `box/`'s comments and literals' spellings; the new `
 launcher converted from its Go. `box/` printed again and the edited Go compared: the same code
 (comments and literal spellings apart).
 
-### Amendments (proposed 2026-10-11)
+### Amendments (proposed 2026-10-11, accepted by the user the same day)
 
 - **BX30 (box/: abi, vmm) The store's answers and the shared directory**: `abi.StoreRefused`,
   `StoreConflict`, `StoreNone`, `StoreTooLarge`, `StoreBadName` (-1 to -5); the monitor answers
@@ -1127,16 +1127,13 @@ launcher converted from its Go. `box/` printed again and the edited Go compared:
 - **BX36 (checks) The store's checks** in `--smoke` and `--smoke --box`, jrt's `store_test.ae`,
   vmm's `TestDirStoreLimits`.
 
-### Open points for the user
+### The user's decisions on the open points (2026-10-11)
 
-- The default limit, 256 MiB a blob (`ARBACE_BOX_STORE_MAX`): the guest's RAM is 3 GiB, and a
-  blob is read whole into it.
-- The monitor keeps every blob it reads for the run (go-whim's cache, which made the Joker
-  graph's many reads cheap): host memory grows with the distinct blobs a box reads. Keep, or
-  bound it (by size, or no cache above some size)?
-- `arbace.box` is the Go build's only; the JVM Arbace could have the same namespace over the
-  same directory format (jrt's `dirStore` is about 150 lines), for tools on the JVM.
-- Snapshot tars carry epoch times (the same files, the same blob); real times are the
-  alternative, at the price of a new blob for each save.
-- Joker's transactions (`box/txn`, `commit!`, `abort!`: a ref's write as a capability used
-  once) were not carried over; `ref!` with an old hash is the compare-and-set they wrap.
+- BX30-BX36 accepted.
+- The blob limit stays 256 MiB; the monitor's blob cache is to be bounded (least recently used,
+  by total size) rather than kept for the whole run.
+- `arbace.box` on the JVM Arbace too, over the same directory format, so that programs using the
+  store run on the JVM, natively and in the box.
+- Confirmed: snapshot tars with epoch times; no transactions (`ref!` with an old hash is the
+  compare-and-set); a `store:` entry of `ARBACE_PATH` runs to the next `:` (ref names hold no
+  `:`).
