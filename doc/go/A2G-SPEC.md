@@ -224,6 +224,16 @@ that names the class and the referring member; the cure is a variant (§4.6) or 
 (JAVA-SURFACE.md, "cut": a class that must exist as a name, whose members throw
 `UnsupportedOperationException`).
 
+**The edge** (standalone S2, [STANDALONE-NOTES.md](../STANDALONE-NOTES.md); amendments SA1-SA6).
+What a2g knows of the classes outside the forms (jrt's hand-written classes, the JDK's classes
+the world names without holding them, the cut classes) it does not ask the running JVM: it
+reads it from `jdk/edge.edn`, the JVM's answers recorded by `bin/a2g-edge update` (`bin/a2g
+--record-edge`), class infos in `arbace.classes.env`'s shape and the analyzer's and a2g's other
+questions as data. With it a2g loads no class, reflects on none and writes no class file
+(javac's accessors are the analyzer's data); a class neither in the forms nor in the edge does
+not exist. `--jvm-reflection` asks the JVM instead. a2g first advances the runtime's id counter
+to a fixed value (`id-floor`), so that its output depends on its inputs alone.
+
 **jrt's own Java and the JDK's variants** (amendment K1, accepted 2026-10-09). The JDK input is
 `bin/jrt-convert`'s output (committed as `jdk/forms` since standalone S1, 2026-10-12; `--jdk`'s
 default, or `JRT_CONV`): the closure's jdk26u files, the jdk26u files added to it (the

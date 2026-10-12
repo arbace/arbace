@@ -1,0 +1,281 @@
+(ns arbace.a2g.edge
+  "a2g's edge (doc/STANDALONE-NOTES.md, S2): what a2g knows of the classes outside the forms
+  (the JDK's classes jrt hand-writes or the world does not hold, the cut classes, Arbace's
+  runtime classes on the JVM), as data instead of the JVM's reflection and ASM. The declaration
+  file (jdk/edge.edn, Clojure-reader data) is written by recording what one a2g run asks the
+  JVM (--record-edge: arbace.classes.env's facets, and a2g's own questions below), and read back
+  by every other run, which then loads no class and reflects on nothing (arbace.classes.env's
+  *declared*). bin/a2g-edge updates and verifies it.
+
+  The file: {:classes {internal-name {:exists true :info class-info facet value ...}}
+  :method-order {internal-name {method-name [[param binary names] ...]}} :cut {internal-name
+  {:methods :fields :ctors}} :exists #{binary-name} :member-types {internal-name
+  [internal-name]} :unexported #{package}}."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.classes.types :as t]
+            [arbace.classes.env :as env]))
+
+(declare info-value canonical)
+
+(def ^:dynamic *edge*
+  "The declared edge being used (sealed: no reflection), or nil."
+  nil)
+
+(def ^:dynamic *recording*
+  "nil, or an atom of a2g's own sections being recorded: {section {key value}}."
+  nil)
+
+(defn jvm
+  "a2g's question k of section about the JVM: with an edge, its declared answer (nil when it has
+  none); else (f) on this JVM, recorded when not nil."
+  [section k f]
+  (if *edge*
+    (get-in *edge* [section k])
+    (let [v (f)]
+      (when (and *recording* (some? v)) (swap! *recording* assoc-in [section k] v))
+      v)))
+
+(defn jvm?
+  "A yes-or-no question k of section (a set in the edge: the keys answered yes)."
+  [section k f]
+  (if *edge*
+    (contains? (get *edge* section) k)
+    (let [v (boolean (f))]
+      (when (and *recording* v) (swap! *recording* update section (fnil conj #{}) k))
+      v)))
+
+;; ---------------------------------------------------------------------------------------
+;; writing: Clojure-reader data, one class per entry, a member per line; strings with \uXXXX
+;; escapes outside printable ASCII
+
+(defn- pr-string [^String s]
+  (let [sb (StringBuilder. "\"")]
+    (dotimes [i (count s)]
+      (let [c (.charAt s i)]
+        (cond (= c \") (.append sb "\\\"")
+              (= c \\) (.append sb "\\\\")
+              (<= 0x20 (int c) 0x7e) (.append sb c)
+              :else (.append sb (format "\\u%04x" (int c))))))
+    (str (.append sb "\""))))
+
+(defn- pr-double [^double d]
+  (cond (Double/isNaN d) "##NaN"
+        (= d Double/POSITIVE_INFINITY) "##Inf"
+        (= d Double/NEGATIVE_INFINITY) "##-Inf"
+        :else (Double/toString d)))
+
+(defn pr-data
+  "x as Clojure-reader text: maps with their keys sorted, sets sorted, every sequence a vector."
+  [x]
+  (cond
+    (nil? x) "nil"
+    (boolean? x) (str x)
+    (string? x) (pr-string x)
+    (keyword? x) (str x)
+    (symbol? x) (str x)
+    (or (instance? Long x) (instance? Integer x) (instance? Short x) (instance? Byte x)) (str x)
+    (or (instance? Double x) (instance? Float x)) (pr-double (double x))
+    (instance? Character x) (str (int (char x)))
+    (map? x) (str "{" (str/join " " (for [[k v] (sort-by (comp pr-data key) x)] (str (pr-data k) " " (pr-data v)))) "}")
+    (set? x) (str "#{" (str/join " " (sort (map pr-data x))) "}")
+    (sequential? x) (str "[" (str/join " " (map pr-data x)) "]")
+    :else (throw (ex-info (str "a2g edge: cannot write " (pr-str (class x))) {:x x}))))
+
+(defn- const-data
+  "A constant value as data: a char as its code (read back by its descriptor)."
+  [v]
+  (if (instance? Character v) (long (int (char v))) v))
+
+(defn- ann-data
+  "Annotation values ({:const {:val v :type d}} ...) with chars as codes."
+  [x]
+  (cond (and (map? x) (contains? x :const) (map? (:const x)))
+        (update-in x [:const :val] const-data)
+        (map? x) (into {} (map (fn [[k v]] [k (ann-data v)]) x))
+        (sequential? x) (mapv ann-data x)
+        :else x))
+
+(def archived-classes
+  "The classes of the running JDK's default CDS archive (its lib/classlist, the archive's
+  input; internal names), when the JVM maps the archive (java.vm.info says sharing), else
+  #{}. HotSpot sorts a class's methods by the address of their name's Symbol, so the order of
+  getDeclaredMethods, a name's overloads included, varies from one JVM process to the next
+  for a class it loads and parses (Arbace's own, the JDK's outside the archive); an archived
+  class keeps the order of the archive, fixed for the JDK build."
+  (delay
+    (let [f (io/file (System/getProperty "java.home") "lib" "classlist")]
+      (if (and (.isFile f) (str/includes? (str (System/getProperty "java.vm.info")) "sharing"))
+        (into #{} (remove #(re-find #"[\s@#]" %)) (str/split-lines (slurp f)))
+        (do (binding [*out* *err*]
+              (println "a2g: warning: the JVM does not use the JDK's CDS archive: member tables order"
+                       "every class's overloads by descriptor"))
+            #{})))))
+
+(defn- method-key
+  "The order of the methods of a class outside the JDK's CDS archive in the edge: by name, then
+  descriptor (getDeclaredMethods's order varies from one process to the next for them; an
+  archived class's methods keep the JVM's order, on which a2g's output depends)."
+  [m]
+  [(:name m) (:desc m)])
+
+(defn- info-data
+  "A class info of reflection (env/reflect-info) as data: no Class, no :owner (the class's
+  name), the delayed annotations forced, the methods in method-key's order; what reflect-info
+  always has left out: a field's nil :const, a method's empty :throws, :annotations and
+  :param-annotations (a constructor has neither)."
+  [info]
+  (-> (dissoc info :class)
+      (update :fields (fn [fs] (mapv #(cond-> (-> % (dissoc :owner) (update :const const-data))
+                                        (nil? (:const %)) (dissoc :const))
+                                     fs)))
+      (update :methods (fn [ms]
+                         (mapv (fn [m]
+                                 (let [a (when (contains? m :annotations) (ann-data (force (:annotations m))))
+                                       pa (when (contains? m :param-annotations)
+                                            (mapv (comp ann-data force) (:param-annotations m)))]
+                                   (cond-> (dissoc m :owner :annotations :param-annotations)
+                                     (empty? (:throws m)) (dissoc :throws)
+                                     (seq a) (assoc :annotations a)
+                                     (some seq pa) (assoc :param-annotations pa))))
+                               ms)))))
+
+(defn- class-entry-text [n facets]
+  (let [info (:info facets)
+        rest-text (pr-data (dissoc facets :info))]
+    (str (pr-data n) "\n  "
+         (if info
+           (str "{:info {"
+                (str/join "\n          "
+                          (for [[k v] (sort-by (comp pr-data key) info)]
+                            (case k
+                              (:fields :methods)
+                              (str (pr-data k) " [" (str/join "\n            " (map pr-data v)) "]")
+                              (str (pr-data k) " " (pr-data v)))))
+                "}"
+                (let [more (dissoc facets :info)]
+                  (when (seq more) (str "\n   " (subs rest-text 1 (dec (count rest-text))))))
+                "}")
+           rest-text))))
+
+(defn edge-text
+  "The edge's file text."
+  [{:keys [classes] :as edge}]
+  (str ";; a2g's edge (doc/STANDALONE-NOTES.md, S2): the classes outside the forms as a2g sees them\n"
+       ";; on the JVM, written by bin/a2g-edge update (bin/a2g --record-edge); do not edit.\n"
+       "{:classes\n {"
+       (str/join "\n  " (for [[n facets] (sort-by key classes)] (class-entry-text n facets)))
+       "}\n"
+       (str/join (for [[k v] (sort-by key (dissoc edge :classes))]
+                   (str " " (pr-data k) "\n "
+                        (if (map? v)
+                          (str "{" (str/join "\n  " (for [[kk vv] (sort-by (comp pr-data key) v)] (str (pr-data kk) " " (pr-data vv)))) "}")
+                          (pr-data v))
+                        "\n")))
+       "}\n"))
+
+(defn recorded-edge
+  "The edge of what this run recorded: env's facets with each class's info (by reflection,
+  now), and a2g's sections."
+  [env-rec a2g-rec]
+  (let [classes (binding [env/*recorded* nil]
+                  (into {} (for [[n facets] env-rec
+                                 :let [c (when-not (str/starts-with? n "[") (env/load-class n))]]
+                             [n (canonical n (cond-> facets
+                                               c (assoc :info (info-data (env/reflect-info c)))))])))]
+    (merge {:classes classes} a2g-rec)))
+
+(defn merge-edges
+  "The union of edges (the same JVM answers: their entries agree)."
+  [edges]
+  (apply merge-with (fn [a b] (cond (set? a) (into a b)
+                                    (map? a) (merge-with (fn [x y] (if (and (map? x) (map? y)) (merge x y) y)) a b)
+                                    :else b))
+         edges))
+
+;; ---------------------------------------------------------------------------------------
+;; reading
+
+(defn- coerce-const [desc v]
+  (when (some? v)
+    (case desc
+      "I" (int v) "J" (long v) "S" (short v) "B" (byte v) "C" (char (int v))
+      "F" (float v) "D" (double v) "Z" (boolean v)
+      v)))
+
+(defn- ann-value [x]
+  (cond (and (map? x) (map? (:const x)) (contains? (:const x) :val))
+        (update-in x [:const :val] #(coerce-const (get-in x [:const :type]) %))
+        (map? x) (into {} (map (fn [[k v]] [k (ann-value v)]) x))
+        (vector? x) (mapv ann-value x)
+        :else x))
+
+(defn- info-value
+  "A declared class info in env's own shape (reflect-info's): owners, int flags, constants of
+  their field's type, annotations delayed, what info-data leaves out restored."
+  [info]
+  (let [n (:name info)]
+    (-> info
+        (update :flags int)
+        (update :fields (fn [fs] (mapv #(-> % (assoc :owner n) (update :flags int)
+                                            (assoc :const (coerce-const (:desc %) (:const %))))
+                                       fs)))
+        (update :methods (fn [ms]
+                           (mapv (fn [m]
+                                   (let [m (-> m (assoc :owner n) (update :flags int) (update :throws #(or % [])))]
+                                     (if (= "<init>" (:name m))
+                                       m
+                                       (let [a (ann-value (or (:annotations m) []))
+                                             pa (or (some-> (:param-annotations m) ann-value)
+                                                    (vec (repeat (count (first (t/parse-method-desc (:desc m)))) [])))]
+                                         (assoc m
+                                                :annotations (delay a)
+                                                :param-annotations (map (fn [x] (delay x)) pa))))))
+                                 ms))))))
+
+(defn- generics-value [g]
+  (when g
+    (update g :methods (fn [ms] (map #(update % :flags int) ms)))))
+
+(defn- canonical
+  "A class's facets with the methods of its info and generics in method-key's order when the
+  class is outside the JDK's CDS archive."
+  [n facets]
+  (if (contains? @archived-classes n)
+    facets
+    (cond-> facets
+      (:info facets) (update-in [:info :methods] #(vec (sort-by method-key %)))
+      (:generics facets) (update-in [:generics :methods] #(vec (sort-by method-key %))))))
+
+(defn read-edge
+  "The edge of file f, ready for binding: :classes in env's shape (env/*declared*)."
+  [f]
+  (let [e (binding [*read-eval* false] (read-string (slurp f)))]
+    (update e :classes
+            (fn [cs]
+              (into {} (for [[n facets] cs]
+                         [n (cond-> facets
+                              (:info facets) (update :info info-value)
+                              (contains? facets :generics) (update :generics generics-value))]))))))
+
+(defn read-edge-data
+  "The edge of file f as data, as edge-text writes it (its infos in info-data's form)."
+  [f]
+  (let [e (binding [*read-eval* false] (read-string (slurp f)))]
+    (update e :classes
+            (fn [cs]
+              (into {} (for [[n facets] cs]
+                         [n (canonical n (cond-> facets
+                                           (:info facets) (update :info (comp info-data info-value))))]))))))
+
+(defn write-edge! [f edge]
+  (io/make-parents f)
+  (spit f (edge-text edge)))
+
+(defn -main
+  "merge OUT IN...: writes the union of the edges IN to OUT."
+  [cmd & args]
+  (case cmd
+    "merge" (let [[out & ins] args]
+              (write-edge! out (merge-edges (map read-edge-data ins))))
+    (throw (ex-info (str "a2g edge: unknown command " cmd) {}))))

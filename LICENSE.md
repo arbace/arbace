@@ -146,6 +146,12 @@ covers what.
     converted from jrt's own Java (the first line names `overlay/jdk/java.base/...`) are under
     `overlay/jdk/`'s licenses, given in the next item.
   - `jdk/data/`: the JDK's resource data, as listed below ("The JDK's resource data").
+  - `jdk/edge.edn` (a2g's edge, recorded by `bin/a2g-edge`: doc/STANDALONE-NOTES.md, S2): the
+    declarations (names, modifiers, signatures, constants, annotations) of the classes outside
+    the forms, as the JVM reports them: of the JDK's classes (JDK 26.0.2.1, built from jdk26u at
+    `baf63fb`) under the GNU General Public License version 2 with the Classpath Exception; of
+    ASM's (`arbace/asm`, Arbace's ASM) and Arbace's runtime classes, their sources' licenses
+    (ASM's BSD 3-Clause License, the Eclipse Public License 1.0).
   - `jdk/sources.txt` and `jdk/provenance.edn` (lists made by `bin/jrt-convert`) and
     `jdk/README.md`: Arbace's own, under the Eclipse Public License 1.0.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,

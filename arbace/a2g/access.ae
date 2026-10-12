@@ -1,57 +1,21 @@
 (ns arbace.a2g.access
   "javac's accessor methods (access$NNN, arbace.classes.analyze's accessorize and
   outer-super-call): the analyzer turns a private member access across a nest into a call of a
-  synthetic static method whose code it keeps only as a bytecode-writing function. Go has no
-  private members across the classes of one package, so a2g undoes the indirection: it writes
-  each accessor's code with ASM, reads back the one member instruction it holds, and gives the
-  access node it stands for."
+  synthetic static method, whose code it keeps as a bytecode-writing function and, as data, the
+  one member instruction it holds (the class state's :accessors). Go has no private members
+  across the classes of one package, so a2g undoes the indirection: it gives the access node
+  the accessor stands for (no class file is written: doc/STANDALONE-NOTES.md, S2)."
   (:require [arbace.string :as str]
             [arbace.classes.types :as t]
             [arbace.classes.env :as env]
-            [arbace.classes.analyze :as a])
-  (:import (arbace.asm ClassWriter ClassReader ClassVisitor MethodVisitor Opcodes)))
-
-(def ^:private cache (atom {}))
-
-(defn- decode-class
-  "{accessor-name {:insn kw :owner :name :desc}} of class o's accessors."
-  [o]
-  (let [st @(a/state o)
-        fs (:extra-methods st)]
-    (if (empty? fs)
-      {}
-      (let [cw (ClassWriter. 0)
-            _ (.visit cw Opcodes/V1_8 Opcodes/ACC_PUBLIC o nil "java/lang/Object" nil)
-            _ (doseq [f fs] (f cw))
-            _ (.visitEnd cw)
-            bytes (.toByteArray cw)
-            out (atom {})]
-        (.accept (ClassReader. bytes)
-                 (proxy [ClassVisitor] [Opcodes/ASM9]
-                   (visitMethod [acc mname desc sig exs]
-                     (let [rec (fn [m] (swap! out update mname #(or % m)))]
-                       (proxy [MethodVisitor] [Opcodes/ASM9]
-                         (visitFieldInsn [op owner fname fdesc]
-                           (rec {:insn (condp = op Opcodes/GETFIELD :getfield Opcodes/PUTFIELD :putfield
-                                              Opcodes/GETSTATIC :getstatic Opcodes/PUTSTATIC :putstatic)
-                                 :owner owner :name fname :desc fdesc}))
-                         (visitMethodInsn [op owner mn mdesc itf]
-                           (rec {:insn (condp = op Opcodes/INVOKEVIRTUAL :invokevirtual
-                                              Opcodes/INVOKESTATIC :invokestatic
-                                              Opcodes/INVOKESPECIAL :invokespecial
-                                              Opcodes/INVOKEINTERFACE :invokeinterface)
-                                 :owner owner :name mn :desc mdesc :itf itf}))))))
-                 0)
-        @out))))
+            [arbace.classes.analyze :as a]))
 
 (defn accessor
-  "The member instruction of accessor method mname of class o, or nil."
+  "The member instruction of accessor method mname of class o, {:insn kw :owner :name :desc
+  :itf}, or nil."
   [o mname]
   (when (and (string? mname) (str/starts-with? mname "access$") (a/decl o))
-    (let [m (or (get @cache o) (let [m (decode-class o)] (swap! cache assoc o m) m))]
-      (get m mname))))
-
-(defn reset-cache! [] (reset! cache {}))
+    (get (:accessors @(a/state o)) mname)))
 
 (defn- find-field [owner fname]
   (or (env/find-field owner fname)
