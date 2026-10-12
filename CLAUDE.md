@@ -20,7 +20,8 @@ Direction:
   on arm64 (tag `arbace-box-arm64-v1`, 2026-10-12): KVM/arm64, checked in an emulated aarch64
   VM, and Hypervisor.framework on an M2 Max (the bundle of `bin/box-mac-bundle`, 42 of 42).
 - Now: the standalone Arbace (doc/STANDALONE-SURVEY.md, D1-D13 decided): first the Go-hosted
-  bootstrap (S1-S4: no JVM in the build but the oracle's reference and j2a), then the box
+  bootstrap (S1-S4: no JVM in the build but the oracle's reference and j2a; the milestone
+  `arbace-seed-is-go-v1`), then the box
   rebuilding Arbace inside itself (S5-S8); doc/AGENDA.md.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through j2a. The language is Clojure extended with an idiomatic

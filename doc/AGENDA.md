@@ -82,6 +82,9 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   store), go-whim's hv tests 4 of 4, idle 0.01 s of CPU per 20 s, start about 0.17 s.
 - The standalone survey done ([STANDALONE-SURVEY.md](STANDALONE-SURVEY.md)); D1-D13 decided as
   recommended: the Go-hosted bootstrap first (S1-S4), then the box (S5-S8).
+- Next milestone (the user): `arbace-seed-is-go-v1`, at the end of the standalone S4 (the seed
+  Go source pinned by hash, the Go-hosted fixpoint, the JVM only for the oracle and j2a); a tag on
+  main after `bin/gate --full`, not a freeze.
 - Now (the user, 2026-10-12): standalone S1, the JDK's forms committed and `bin/jrt-convert` a
   verify check (agent, branch `standalone-s1`);
   TLS in the box through Go's crypto/tls, for the Claude API from the box (agent, branch

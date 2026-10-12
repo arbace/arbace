@@ -713,3 +713,11 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   `check` identical, the essential `bin/gate` passed (6m46s). Left: golines over std 1,622 of
   1,742 files (from 1,574); the 120 others are local `var ( )` groups and labels one line off and
   members of types held in a declaration's `:tag`, none affecting `decl_line`.
+
+## 2026-10-12: The next milestone: `arbace-seed-is-go-v1`
+
+- The user: the next milestone is the completion of the standalone survey's S4, tagged
+  `arbace-seed-is-go-v1`: the seed of the bootstrap is the fixpoint's printed Go source pinned by
+  hash (D3), the build reaches the fixpoint on the Go executable (S3), and the JVM stays on main
+  only as the oracle's reference and j2a's front end (D4). As the box milestones: a tag on main
+  after `bin/gate --full`, not a freeze (no branch; the journal continues).
