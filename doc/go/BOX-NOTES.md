@@ -2003,3 +2003,41 @@ guest's `load`, `get`, `ls`, a script by `ref:`, compare-and-set), `all` (the fo
 `mac-results.tar.gz` to send back) and `run`. Linux's `timeout` and `shasum` are not assumed on
 the Mac (perl's alarm; `shasum`). The checklist ran here on Linux with the amd64 launcher: 42 of
 42. The user's run on the M2 Max is the follow-up after the tag (decision d).
+
+### Checks (the branch with main `5f8a469` merged)
+
+- **The milestone's arm64 gate, `bin/box-arm64-vm check`** (decision d): the box's smoke test on
+  KVM/arm64 in the VM, **103 of 103** on 4 and 1 vCPUs, the store, the shared directory with the
+  native arm64 executable and the REPL under rlwrap on a pseudo-terminal (38 minutes); go-whim's
+  `hv` tests (4: `TestDoorbellARM64`, `TestStoreAgainARM64`, `TestSysRegsARM64`,
+  `TestCounterVCPUsARM64`) and `vmm`'s (15) on box/: all pass; the VM stopped at the end.
+- **amd64 unchanged**: `bin/arbace-go --build` (66,814,112 bytes, as main's) and `--build --box`
+  (the guest 66,199,886 bytes, as main's; the launcher 4,715,847), `--smoke` (96: amd64's 69 and
+  arm64's under qemu-aarch64), `--smoke --box` 103 of 103 (through `bin/box-smoke`); the box's
+  oracle subset (`ARBACE_BOX_NET=loopback`) 21,779 of 21,825, the 46 of `known-go-box-amd64.edn`;
+  the native oracle 22,232 of 22,278, the 46 of `known-go-amd64.edn`.
+- `bin/box-vendor roundtrip`: **20 of 20** at all three levels (16 before: darwin/arm64 gained the
+  launcher and purego's three packages); `kvm-tests`: hv, vmm and go-whim's guest tests pass on
+  /dev/kvm; `purego-check` as above; `kvm-tests-arm64` as above.
+- `bin/tamago-vendor verify` (identical) and `check` (both architectures, as tabled above).
+- `bin/box-mac-bundle`: the tarball; the checklist on Linux amd64: 42 of 42.
+- Not run (the user's decision: not conditions of the tag): **the arm64 oracle subset** was
+  started once (`bin/box-arm64-vm oracle`, `-j 12`, four vCPUs a box) and stopped after 1 h 40 min
+  with no corpus file reported: under emulation a file took 30 to 60 minutes (the amd64 box's whole
+  subset is 352 s of runs; `harvest/reducers.ae` alone 61 s natively, beyond the run's 2-hour
+  timeout emulated); estimated at 4 to 5 hours or more. `bin/box-suite` in the VM was not tried
+  (natively 222 s at `-j 12`: some hours there). `test/oracle/known-go-box-arm64.edn` is not
+  made: the script writes it on a first complete run.
+- The essential `bin/gate` was not run: no source the bootstrap compiles changed (`box/`,
+  `tamago/`, `bin/`, `test/`, the docs; `arbace/g2a`, a tool's).
+
+### For the milestone
+
+- `bin/gate --full` (the user's; its `box` step now also runs `bin/box-vendor purego-check`, and
+  `box-forms` builds and checks both guests: about 100 s more) and `bin/box-arm64-vm check`.
+- The Mac: `bin/box-mac-bundle`, then on the M2 Max `./mac.sh all`, and `mac-results.tar.gz` back:
+  the follow-up after the tag. Untested before it: the launcher on macOS at all (its console's
+  `select`, the image read beside it, purego's `fakecgo` under the renamed path, HVF with this
+  guest), and `board.NilPanics` on Hypervisor.framework (the same vectors as KVM/arm64's).
+- Left for later: the printer's placement of a multi-line parameter list's names (DWARF only);
+  the arm64 oracle in the VM with fewer vCPUs a box, or on an arm64 host with KVM.
