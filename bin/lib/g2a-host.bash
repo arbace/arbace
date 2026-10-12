@@ -14,6 +14,7 @@
 #                   replaces it while the copy runs. GOGC is 400 unless set (the printer
 #                   allocates much and keeps little: the collector's work, not memory, bounds
 #                   it; doc/STANDALONE-NOTES.md).
+#   g2a_run HEAP NS ARG...  the same, as a command of the shell (not replacing it)
 #   g2a_host        prints the host: jvm or go (fails on another value of G2A_HOST)
 
 g2a_host() {
@@ -44,16 +45,23 @@ g2a_go_exe() {
   echo "$dir/arbace"
 }
 
-g2a_exec() {
+g2a_run() {
   local heap=$1 ns=$2 host exe
   shift 2
-  host=$(g2a_host) || exit 2
+  host=$(g2a_host) || return 2
   if [ "$host" = go ]; then
-    exe=$(g2a_go_exe) || exit 1
-    ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} GOGC=${GOGC:-400} exec "$exe" -m "$ns" "$@"
+    exe=$(g2a_go_exe) || return 1
+    ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} GOGC=${GOGC:-400} "$exe" -m "$ns" "$@"
+    return
   fi
   . "$root/bin/lib/tools.bash"
-  arbace_runtime || exit 1
+  arbace_runtime || return 1
   # shellcheck disable=SC2086
-  exec java ${G2A_JVM_OPTS:-$heap} -Xss64m -cp "$ARBACE_CP" arbace.lang.Main -m "$ns" "$@"
+  java ${G2A_JVM_OPTS:-$heap} -Xss64m -cp "$ARBACE_CP" arbace.lang.Main -m "$ns" "$@"
+}
+
+g2a_exec() {
+  local s=0
+  g2a_run "$@" || s=$?
+  exit $s
 }
