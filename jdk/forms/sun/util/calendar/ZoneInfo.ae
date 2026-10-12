@@ -1,0 +1,329 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/util/calendar/ZoneInfo.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'sun.util.calendar)
+
+(import '(java.io IOException ObjectInputStream)
+        '(java.util Date GregorianCalendar Map SimpleTimeZone TimeZone)
+        '(java.util.stream Stream))
+
+(defclass ^:public ZoneInfo
+  :extends TimeZone
+
+  (field ^:private ^:static ^:final ^int UTC_TIME 0)
+
+  (field ^:private ^:static ^:final ^int STANDARD_TIME 1)
+
+  (field ^:private ^:static ^:final ^int WALL_TIME 2)
+
+  (field ^:private ^:static ^:final ^long OFFSET_MASK 0x0f)
+
+  (field ^:private ^:static ^:final ^long DST_MASK 0xf0)
+
+  (field ^:private ^:static ^:final ^int DST_NSHIFT 4)
+
+  (field ^:private ^:static ^:final ^int TRANSITION_NSHIFT 12)
+
+  (field ^:private ^int rawOffset)
+
+  (field ^:private ^int rawOffsetDiff 0)
+
+  (field ^:private ^int checksum)
+
+  (field ^:private ^int dstSavings)
+
+  (field ^:private ^long/1 transitions)
+
+  (field ^:private ^int/1 offsets)
+
+  (field ^:private ^int/1 simpleTimeZoneParams)
+
+  (field ^:private ^boolean willGMTOffsetChange false)
+
+  (field ^:private ^:transient ^boolean dirty false)
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 2653134537216586139)
+
+  (constructor ^:public [this])
+
+  (constructor ^:public [this ^String ID ^int rawOffset]
+    (this. ID rawOffset 0 0 nil nil nil false))
+
+  (constructor [this ^String ID ^int rawOffset ^int dstSavings ^int checksum ^long/1 transitions
+                ^int/1 offsets ^int/1 simpleTimeZoneParams ^boolean willGMTOffsetChange]
+    (.setID this ID)
+    (set! (.-rawOffset this) rawOffset)
+    (set! (.-dstSavings this) dstSavings)
+    (set! (.-checksum this) checksum)
+    (set! (.-transitions this) transitions)
+    (set! (.-offsets this) offsets)
+    (set! (.-simpleTimeZoneParams this) simpleTimeZoneParams)
+    (set! (.-willGMTOffsetChange this) willGMTOffsetChange))
+
+  (method ^:public getOffset ^int [this ^long date]
+    (.getOffsets this date nil UTC_TIME))
+
+  (method ^:public getOffsets ^int [this ^long utc ^int/1 offsets]
+    (.getOffsets this utc offsets UTC_TIME))
+
+  (method ^:public getOffsetsByStandard ^int [this ^long standard ^int/1 offsets]
+    (.getOffsets this standard offsets STANDARD_TIME))
+
+  (method ^:public getOffsetsByWall ^int [this ^long wall ^int/1 offsets]
+    (.getOffsets this wall offsets WALL_TIME))
+
+  (method ^:private getOffsets ^int [this ^:mutable ^long date ^int/1 offsets ^int type]
+    (if (nil? transitions)
+        (let [offset (.getLastRawOffset this)]
+          (when (some? offsets) (aset offsets 0 offset) (aset offsets 1 0))
+          offset)
+        (do
+          (set! date (unchecked-subtract date rawOffsetDiff))
+          (let [index (.getTransitionIndex this date type)]
+            (cond
+              (< index 0)
+                (let [offset (.getLastRawOffset this)]
+                  (when (some? offsets) (aset offsets 0 offset) (aset offsets 1 0))
+                  offset)
+              (< index (alength transitions))
+                (let [val (aget transitions index)
+                      offset (unchecked-add-int
+                               (aget (.-offsets this) (unchecked-int (bit-and val OFFSET_MASK)))
+                               rawOffsetDiff)]
+                  (when (some? offsets)
+                    (let [dst (unchecked-int
+                                (bit-and (unsigned-bit-shift-right val DST_NSHIFT) 0xf))
+                          ^int save (if (== dst 0) 0 (aget (.-offsets this) dst))]
+                      (aset offsets 0 (unchecked-subtract-int offset save))
+                      (aset offsets 1 save)))
+                  offset)
+              :else
+                (let [tz (.getLastRule this)]
+                  (if (some? tz)
+                      (let [rawoffset (.getRawOffset tz)
+                            ^:mutable msec date]
+                        (when-not (== type UTC_TIME)
+                          (set! msec (unchecked-subtract msec rawOffset)))
+                        (let [^:mutable dstoffset (unchecked-subtract-int
+                                                    (.getOffset tz msec)
+                                                    rawOffset)]
+                          (when (and (and (> dstoffset 0)
+                                          (== (.getOffset tz (unchecked-subtract msec dstoffset))
+                                              rawoffset))
+                                     (== type WALL_TIME))
+                            (set! dstoffset 0))
+                          (when (some? offsets)
+                            (aset offsets 0 rawoffset)
+                            (aset offsets 1 dstoffset))
+                          (unchecked-add-int rawoffset dstoffset)))
+                      (let [val (aget transitions (unchecked-subtract-int (alength transitions) 1))
+                            offset (unchecked-add-int
+                                     (aget (.-offsets this)
+                                           (unchecked-int (bit-and val OFFSET_MASK)))
+                                     rawOffsetDiff)]
+                        (when (some? offsets)
+                          (let [dst (unchecked-int
+                                      (bit-and (unsigned-bit-shift-right val DST_NSHIFT) 0xf))
+                                ^int save (if (== dst 0) 0 (aget (.-offsets this) dst))]
+                            (aset offsets 0 (unchecked-subtract-int offset save))
+                            (aset offsets 1 save)))
+                        offset))))))))
+
+  (method ^:private getTransitionIndex ^int [this ^long date ^int type]
+    (let [^:mutable ^int low 0
+          ^:mutable high (unchecked-subtract-int (alength transitions) 1)]
+      (while (<= low high)
+        (let [mid (unchecked-divide-int (unchecked-add-int low high) 2)
+              val (aget transitions mid)
+              ^:mutable midVal (bit-shift-right val TRANSITION_NSHIFT)]
+          (when-not (== type UTC_TIME)
+            (set! midVal
+                  (unchecked-add midVal (aget offsets (unchecked-int (bit-and val OFFSET_MASK))))))
+          (when (== type STANDARD_TIME)
+            (let [dstIndex (unchecked-int (bit-and (unsigned-bit-shift-right val DST_NSHIFT) 0xf))]
+              (when-not (== dstIndex 0)
+                (set! midVal (unchecked-subtract midVal (aget offsets dstIndex))))))
+          (cond
+            (< midVal date) (set! low (unchecked-add-int mid 1))
+            (> midVal date) (set! high (unchecked-subtract-int mid 1))
+            :else (return mid))))
+      (if (>= low (alength transitions)) low (unchecked-subtract-int low 1))))
+
+  (method ^:public getOffset ^int [this ^int era ^:mutable ^int year ^int month ^int day
+                                   ^int dayOfWeek ^int milliseconds]
+    (when (or (< milliseconds 0) (>= milliseconds AbstractCalendar/DAY_IN_MILLIS))
+      (throw (IllegalArgumentException.)))
+    (if (== era GregorianCalendar/BC)
+        (set! year (unchecked-subtract-int 1 year))
+        (when-not (== era GregorianCalendar/AD) (throw (IllegalArgumentException.))))
+    (let [gcal (CalendarSystem/getGregorianCalendar)
+          ^CalendarDate date (.newCalendarDate gcal nil)]
+      (.setDate date year (unchecked-add-int month 1) day)
+      (when (= (.validate gcal date) false) (throw (IllegalArgumentException.)))
+      (when (or (< dayOfWeek GregorianCalendar/SUNDAY) (> dayOfWeek GregorianCalendar/SATURDAY))
+        (throw (IllegalArgumentException.)))
+      (if (nil? transitions)
+          (.getLastRawOffset this)
+          (let [^:mutable dateInMillis (unchecked-add (.getTime gcal date) milliseconds)]
+            (set! dateInMillis (unchecked-subtract dateInMillis rawOffset))
+            (.getOffsets this dateInMillis nil UTC_TIME)))))
+
+  (method ^:public ^:synchronized setRawOffset ^void [this ^int offsetMillis]
+    (when-not (== offsetMillis (unchecked-add-int rawOffset rawOffsetDiff))
+      (set! rawOffsetDiff (unchecked-subtract-int offsetMillis rawOffset))
+      (when (some? lastRule) (.setRawOffset lastRule offsetMillis))
+      (set! dirty true)))
+
+  (method ^:public getRawOffset ^int [this]
+    (if (not willGMTOffsetChange)
+        (unchecked-add-int rawOffset rawOffsetDiff)
+        (let [offsets (new int/1 2)]
+          (.getOffsets this (System/currentTimeMillis) offsets UTC_TIME)
+          (aget offsets 0))))
+
+  (method ^:public isDirty ^boolean [this] dirty)
+
+  (method ^:private getLastRawOffset ^int [this]
+    (unchecked-add-int rawOffset rawOffsetDiff))
+
+  (method ^:public useDaylightTime ^boolean [this]
+    (some? simpleTimeZoneParams))
+
+  (method ^:public observesDaylightTime ^boolean [this]
+    (cond
+      (some? simpleTimeZoneParams) true
+      (nil? transitions) false
+      :else
+        (let [utc (unchecked-subtract (System/currentTimeMillis) rawOffsetDiff)
+              index (.getTransitionIndex this utc UTC_TIME)]
+          (if (< index 0)
+              false
+              (do
+                (loop [^int i index]
+                  (if (< i (alength transitions))
+                      (if (not (== (bit-and (aget transitions i) DST_MASK) 0))
+                          (return true)
+                          (recur (unchecked-inc-int i)))
+                      nil))
+                false)))))
+
+  (method ^:public inDaylightTime ^boolean [this ^Date date]
+    (when (nil? date) (throw (NullPointerException.)))
+    (if (nil? transitions)
+        false
+        (let [utc (unchecked-subtract (.getTime date) rawOffsetDiff)
+              index (.getTransitionIndex this utc UTC_TIME)]
+          (cond
+            (< index 0) false
+            (< index (alength transitions)) (not (== (bit-and (aget transitions index) DST_MASK) 0))
+            :else
+              (let [tz (.getLastRule this)]
+                (if (some? tz)
+                    (.inDaylightTime tz date)
+                    (not (== (bit-and (aget transitions
+                                            (unchecked-subtract-int (alength transitions) 1))
+                                      DST_MASK)
+                             0))))))))
+
+  (method ^:public getDSTSavings ^int [this] dstSavings)
+
+  (method ^:public toString ^String [this]
+    (java-str (.getName (.getClass this))
+              "[id=\""
+              (.getID this)
+              "\",offset="
+              (.getLastRawOffset this)
+              ",dstSavings="
+              dstSavings
+              ",useDaylight="
+              (.useDaylightTime this)
+              ",transitions="
+              (if (some? transitions) (alength transitions) 0)
+              ",lastRule="
+              (if (nil? lastRule) (.getLastRuleInstance this) lastRule)
+              "]"))
+
+  (method ^:public ^:static getAvailableIDs ^String/1 []
+    (ZoneInfoFile/getZoneIds))
+
+  (method ^:public ^:static getAvailableIDs ^String/1 [^int rawOffset]
+    (ZoneInfoFile/getZoneIds rawOffset))
+
+  (method ^:public ^:static availableIDs ^{:tag (Stream String)} []
+    (ZoneInfoFile/zoneIds))
+
+  (method ^:public ^:static availableIDs ^{:tag (Stream String)} [^int rawOffset]
+    (ZoneInfoFile/zoneIds rawOffset))
+
+  (method ^:public ^:static getTimeZone ^TimeZone [^String ID]
+    (ZoneInfoFile/getZoneInfo ID))
+
+  (field ^:private ^:transient ^SimpleTimeZone lastRule)
+
+  (method ^:private ^:synchronized getLastRule ^SimpleTimeZone [this]
+    (when (nil? lastRule) (set! lastRule (.getLastRuleInstance this)))
+    lastRule)
+
+  (method ^:public getLastRuleInstance ^SimpleTimeZone [this]
+    (when (some? simpleTimeZoneParams)
+      (if (== (alength simpleTimeZoneParams) 10)
+          (SimpleTimeZone. (.getLastRawOffset this)
+                           (.getID this)
+                           (aget simpleTimeZoneParams 0)
+                           (aget simpleTimeZoneParams 1)
+                           (aget simpleTimeZoneParams 2)
+                           (aget simpleTimeZoneParams 3)
+                           (aget simpleTimeZoneParams 4)
+                           (aget simpleTimeZoneParams 5)
+                           (aget simpleTimeZoneParams 6)
+                           (aget simpleTimeZoneParams 7)
+                           (aget simpleTimeZoneParams 8)
+                           (aget simpleTimeZoneParams 9)
+                           dstSavings)
+          (SimpleTimeZone. (.getLastRawOffset this)
+                           (.getID this)
+                           (aget simpleTimeZoneParams 0)
+                           (aget simpleTimeZoneParams 1)
+                           (aget simpleTimeZoneParams 2)
+                           (aget simpleTimeZoneParams 3)
+                           (aget simpleTimeZoneParams 4)
+                           (aget simpleTimeZoneParams 5)
+                           (aget simpleTimeZoneParams 6)
+                           (aget simpleTimeZoneParams 7)
+                           dstSavings))))
+
+  (method ^:public clone [this]
+    (let [zi (cast ZoneInfo (.clone super))] (set! (.-lastRule zi) nil) zi))
+
+  (method ^:public hashCode ^int [this]
+    (bit-xor-int (.getLastRawOffset this) checksum))
+
+  (method ^:public equals ^boolean [this obj]
+    (if (identical? this obj)
+        true
+        (if-instance [^ZoneInfo that obj]
+          (and (and (.equals (.getID this) (.getID that))
+                    (== (.getLastRawOffset this) (.getLastRawOffset that)))
+               (== checksum (.-checksum that)))
+          false)))
+
+  (method ^:public hasSameRules ^boolean [this ^TimeZone other]
+    (cond
+      (identical? this other) true
+      (nil? other) false
+      (not (instance? ZoneInfo other))
+        (cond
+          (not (== (.getRawOffset this) (.getRawOffset other))) false
+          (and (and (nil? transitions) (= (.useDaylightTime this) false))
+               (= (.useDaylightTime other) false))
+            true
+          :else false)
+      (not (== (.getLastRawOffset this) (.getLastRawOffset (cast ZoneInfo other)))) false
+      :else (== checksum (.-checksum (cast ZoneInfo other)))))
+
+  (method ^:public ^:static getAliasTable ^{:tag (Map String String)} []
+    (ZoneInfoFile/getAliasMap))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream stream]
+    (.defaultReadObject stream)
+    (set! dirty true)))

@@ -650,3 +650,74 @@ the first. The history before it is on the frozen branches and in git history:
   `decl_line`), so `purego-check` compares with DWARF (rather than leaving it for later).
 - The Mac: each box milestone ships a bundle and its checklist; the user's run follows the tag
   (rather than before the tag, or only on request).
+
+## 2026-10-12: TLS in the box through Go's crypto/tls (the user: "do option 2 now")
+
+- The user asked whether TLS (then "once jrt has JSSE") is needed to reach the Claude API from the
+  box: yes, the API is HTTPS only. Three ways were put: (1) JSSE converted into jrt, TLS in the
+  guest with the Java API (large); (2) Go's crypto/tls, already in TamaGo's std and the guest,
+  bound for Arbace, TLS in the guest (small; the key and the encryption stay in the box, the
+  launcher carries ciphertext); (3) TLS by the launcher on the host (smallest; the key in clear
+  on the host). Recommended and chosen: (2), now, before the standalone survey's decisions.
+- Agent, branch `box-tls`: the Arbace surface (a namespace, an HTTPS helper enough for the Claude
+  API's messages endpoint), crypto/tls over the guest's stream path with wake on events, root
+  certificates embedded (Mozilla's, via golang.org/x/crypto/x509roots/fallback as Go forms,
+  likely) with an override for private CAs; natively and on the JVM if cheap; amendments BX70..
+  for the user.
+
+## 2026-10-12: The standalone survey (doc/STANDALONE-SURVEY.md)
+
+- Agent, branch `standalone-survey` (`86406a5`), merged. Measured: every Arbace program is still
+  built by the JVM (j2a with javac's front end over 836 jdk26u files, a2g over 3,040 classes,
+  g2a's printing, gc as a host process); the runtime and the REPL's namespaces use 274 JDK
+  classes (closure 422 from 184 files) of jrt's 2,134; the blockers to a Go-hosted bootstrap are
+  j2a's javac, a2g's JVM reflection and ASM, and g2a's ProcessBuilder build; g2a's printer runs on
+  the Go executable byte-identically (about 7x slower than the JVM); cmd/compile, link and asm
+  build for GOOS=tamago unchanged (not run in a guest); gc needs 7-8 GB for `arbace/jrt`, more
+  than a guest's 3 GiB. Stages S1-S9 (about 40-70 days; the Go-hosted bootstrap S1-S4 11-21) and
+  decisions D1-D13 for the user, recommendations in the document.
+
+## 2026-10-12: The user's decisions on the standalone survey (D1-D13)
+
+All as recommended in doc/STANDALONE-SURVEY.md:
+- D1 the Go-hosted bootstrap first (S1-S4), then the box (S5-S8), rather than the box or the
+  runtime first. D2 j2a's output (the JDK's forms, 909 files, 11 MB) committed as sources,
+  `bin/jrt-convert` a verify check (reversing "regenerated each build, untracked"). D3 the seed
+  becomes the fixpoint's printed Go source pinned by hash (rather than executables per
+  architecture or the jar). D4 after S4 the JVM stays on main only as the oracle's reference (the
+  frozen jar) and j2a's front end.
+- D5 R1: Go's runtime kept, `arbace.lang` by a2g, jrt slimmed, Arbace compiled to Go forms
+  (rather than a new Go-shaped runtime, or Arbace's own collector and scheduler now). D6 tail calls
+  staged: T1 now, T3 measured in S6, T4 with an own back end. D7 jrt as a core and a library, in
+  Go packages split by the dependency graph. D8 smaller packages first; a larger guest slot only
+  if needed.
+- D9 Go's tools in the box as tool guests through a spawn call. D10 source trees in the store as
+  a blob per file plus EDN tree maps, to and from git by the host tool. D11 `String` stays UTF-16.
+  D12 j2a a host tool now, javac translated after S6. D13 divergence from Clojure recorded, each as
+  an amendment and a known oracle mismatch, Clojure's suite through c2a the yardstick.
+- S1 started now (the user), as one agent beside the TLS and g2a agents: branch `standalone-s1`.
+
+## 2026-10-12: g2a's printer: names of lists that span lines; purego-check with DWARF
+
+- Agent, branch `g2a-params` (`5e0889e`, `1e61959`), merged. Cause: the forms already record a
+  name's `:line` where it begins a Go line, but `arbace/g2a/print_code.ae` printed a group's names
+  on its first line (gc declares a parameter at its name's line, so DWARF's `decl_line` moved).
+  The printer now puts each name of parameter, result, type parameter and struct field groups and
+  const/var specs on its recorded line; names of equal type, doc and tag group (a doc no longer
+  printed twice); a signature keeps `)` on the results' line; a spec's or return's values follow
+  their `:go/breaks`. The forms are unchanged (SPEC.md, `box/`, `tamago/` too).
+- `bin/box-vendor purego-check` links with DWARF (no `-w`): the darwin launcher identical to the
+  originals'. `test/g2a/golines` compares every declared name's line; new printer case
+  `test/g2a/cases/s10_names`. Checks: g2a's printer tests, the round trip for tamago/amd64 and
+  linux/amd64 without regressions, `box-vendor roundtrip` 20/20, `tamago-vendor verify` and
+  `check` identical, the essential `bin/gate` passed (6m46s). Left: golines over std 1,622 of
+  1,742 files (from 1,574); the 120 others are local `var ( )` groups and labels one line off and
+  members of types held in a declaration's `:tag`, none affecting `decl_line`.
+
+## 2026-10-12: The next milestone: `arbace-seed-is-go-v1`
+
+- The user: the next milestone is the completion of the standalone survey's S4, tagged
+  `arbace-seed-is-go-v1`: the seed of the bootstrap is the fixpoint's printed Go source pinned by
+  hash (D3), the build reaches the fixpoint on the Go executable (S3), and the JVM stays on main
+  only as the oracle's reference and j2a's front end (D4). As the box milestones: a tag on main
+  after `bin/gate --full`, not a freeze (no branch; the journal continues).

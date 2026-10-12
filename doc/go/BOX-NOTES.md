@@ -2062,6 +2062,53 @@ Apple M2 Max (12 cores, 96 GB, `kern.hv_support: 1`): `./mac.sh all`, every step
 - Times, best of 5 (4 vCPUs / 1 vCPU): `nil` 171 / 162 ms (the start), `(reduce + (map inc
   (range 1000000)))` 449 / 525 ms, `(fib 25)` 29 / 28 ms, sorting 200,000 strings 135 / 151 ms.
 
+### The printer's name lists: purego-check with DWARF (2026-10-12)
+
+The user's decision after S4: fix the placement of a multi-line parameter list's names now, so
+that `bin/box-vendor purego-check` compares the launchers with DWARF.
+
+- **Cause.** The forms already record the lines (SPEC §10.1: a name that begins a Go line
+  carries `:line`, `^{:line 444 :tag (slice any)} keepAlive`); the printer did not use them.
+  `param-list` handed `element-list` groups of entries (maps, which carry no `:line`), so no
+  group broke its line, and the names of a group were written without looking at theirs; only
+  the type forms, lists with the reader's `:line`, reached their lines, by `/*line :N:1*/`
+  directives (no line break is allowed after a name). gc declares a parameter at its name's
+  line, so DWARF's `decl_line` moved (`collectStackArgs`' `keepAlive` and `pNumInts`... at 442
+  instead of 444 and 445: the four differences); the code and line tables did not.
+- **The change** (`arbace/g2a/print_code.ae`; the forms are unchanged, so SPEC.md is, and so
+  are `box/` and `tamago/`): each name of a parameter, result, type parameter or struct field
+  group and of a const or var spec goes on its recorded line (`name-list`; a break after the
+  comma); `element-list` takes the line of a group (its first name's, else its type's); a name
+  that begins a line starts a group of its own outside `:go/grouped` (`a,\n b int` prints as
+  `a int,\n b int`: N3, gc's output is the same); outside generic declarations names of equal
+  type, doc and tag group (a field's doc is each of its names': `h1, h2 huffmanDecoder` under a
+  doc comment had been split in two fields with the doc twice, the second name lines below its
+  own), and `*explicit-groups*` (a file with `:go/grouped` marks) now applies to generic
+  declarations only, where the converter marks. The parameters' `)` stays on the line of the
+  results; a function whose signature spans lines indents its body from the line `func` began
+  on; the values of a spec or a return after the first follow their `:go/breaks` (`= 1, 2,\n
+  3`). Notes: PRINTER-NOTES.md, Layout. `test/g2a/golines` now also compares the line of every
+  name a field list or a spec declares (named struct fields as their names), and the printer's
+  case `test/g2a/cases/s10_names` (struct fields, a var spec, parameters, results, a function
+  literal, an interface method, type parameters spanning lines) checks it.
+- **purego-check with DWARF**: the launcher links with `-ldflags=-buildid=` (no `-w`): the
+  darwin/arm64 launcher from the printed purego is identical to one from the renamed originals
+  (4,896,402 bytes with DWARF), and at purego's path to one from purego's module (4,897,554).
+- **Checks** (`g2a-params`, from main `a6a6b86`): `bin/g2a-print-tests` 5 tests, 262 assertions,
+  all pass; `bin/g2a roundtrip amd64` and `linux/amd64`: no regressions (std 373 and 376, the
+  programs 1,707 and 1,713, every level as recorded); `bin/box-vendor roundtrip` 20 of 20;
+  `bin/tamago-vendor verify` identical; `bin/arbace-go --build --box` for amd64 and arm64, then
+  `bin/tamago-vendor check`: both guest images identical to the originals', as linked and with
+  the symbol table cut. golines over std printed for tamago/amd64 (1,742 files against
+  GOROOT/src): 1,622 have the original's lines throughout (1,574 before); of the rest, 70 are
+  the known `var ( ... )` groups and labels in function bodies printed a line off, and 50 the
+  fields and methods of struct and interface types written inside a declaration's `:tag` (a
+  `var x struct { ... }`, an interface parameter type): the forms put such a type on the
+  declaration's line (SPEC §10.1, lists inside metadata), so its fields are a line or more off.
+  Neither carries a `decl_line` (struct members and interface methods have none in gc's DWARF),
+  and the round trip's code level passes.
+- The essential `bin/gate` (the bootstrap compiles `arbace/g2a`): passed in 6 min 46 s (Clojure's
+  suite on stage 2 with no regressions, the class forms tests, the Go executable's smoke test).
 ## TLS (option 2): Go's crypto/tls in jrt (2026-10-12)
 
 Branch `box-tls`, the user's decision of 2026-10-12 ("do option 2 now"): TLS for Arbace through

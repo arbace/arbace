@@ -1,0 +1,654 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/Properties.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util)
+
+(import '(java.io BufferedWriter
+                  IOException
+                  InputStream
+                  ObjectInputStream
+                  ObjectOutputStream
+                  OutputStream
+                  OutputStreamWriter
+                  PrintStream
+                  PrintWriter
+                  Reader
+                  StreamCorruptedException
+                  UnsupportedEncodingException
+                  Writer)
+        '(java.nio.charset Charset IllegalCharsetNameException UnsupportedCharsetException)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(java.util.function BiConsumer BiFunction Function)
+        '(jdk.internal.access SharedSecrets)
+        '(jdk.internal.misc Unsafe)
+        '(jdk.internal.util ArraysSupport StaticProperty)
+        '(jdk.internal.util.xml PropertiesDefaultHandler)
+        '(sun.nio.cs ISO_8859_1 UTF_8))
+
+(defclass ^:public Properties
+  :extends (Hashtable Object Object)
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 4112578634029874840)
+
+  (field ^:private ^:static ^:final ^Unsafe UNSAFE (Unsafe/getUnsafe))
+
+  (field ^:protected ^:volatile ^Properties defaults)
+
+  (field ^:private ^:transient ^:volatile ^{:tag (ConcurrentHashMap Object Object)} map)
+
+  (constructor ^:public [this] (this. nil 8))
+
+  (constructor ^:public [this ^int initialCapacity]
+    (this. nil initialCapacity))
+
+  (constructor ^:public [this ^Properties defaults] (this. defaults 8))
+
+  (constructor ^:private [this ^Properties defaults ^int initialCapacity]
+    (super. (cast Void nil))
+    (set! map (ConcurrentHashMap. initialCapacity))
+    (set! (.-defaults this) defaults)
+    (.storeFence UNSAFE))
+
+  (method ^:public ^:synchronized setProperty [this ^String key ^String value]
+    (.put this key value))
+
+  (method ^:public ^:synchronized load :throws [IOException] ^void [this ^Reader reader]
+    (Objects/requireNonNull reader "reader parameter is null")
+    (.load0 this (LineReader. reader)))
+
+  (method ^:public ^:synchronized load :throws [IOException] ^void [this ^InputStream inStream]
+    (Objects/requireNonNull inStream "inStream parameter is null")
+    (.load0 this (LineReader. inStream)))
+
+  (method ^:private load0 :throws [IOException] ^void [this ^LineReader lr]
+    (let [outBuffer (StringBuilder.)
+          ^:mutable ^int limit 0
+          ^:mutable ^int keyLen 0
+          ^:mutable ^int valueStart 0
+          ^:mutable ^boolean hasSep false
+          ^:mutable ^boolean precedingBackslash false]
+      (while (>= (set! limit (.readLine lr)) 0)
+        (set! keyLen 0)
+        (set! valueStart limit)
+        (set! hasSep false)
+        (set! precedingBackslash false)
+        (while (< keyLen limit)
+          (let [c (aget (.-lineBuf lr) keyLen)]
+            (if (and (or (== c \=) (== c \:)) (not precedingBackslash))
+                (do (set! valueStart (unchecked-add-int keyLen 1)) (set! hasSep true) (break))
+                (when (and (or (or (== c \space) (== c \tab)) (== c \formfeed))
+                           (not precedingBackslash))
+                  (set! valueStart (unchecked-add-int keyLen 1))
+                  (break)))
+            (if (== c \\)
+                (set! precedingBackslash (not precedingBackslash))
+                (set! precedingBackslash false))
+            (set! keyLen (unchecked-inc-int keyLen))))
+        (while (< valueStart limit)
+          (let [c (aget (.-lineBuf lr) valueStart)]
+            (when (and (and (not (== c \space)) (not (== c \tab))) (not (== c \formfeed)))
+              (if (and (not hasSep) (or (== c \=) (== c \:))) (set! hasSep true) (break)))
+            (set! valueStart (unchecked-inc-int valueStart))))
+        (let [key (.loadConvert this (.-lineBuf lr) 0 keyLen outBuffer)
+              value (.loadConvert this
+                                  (.-lineBuf lr)
+                                  valueStart
+                                  (unchecked-subtract-int limit valueStart)
+                                  outBuffer)]
+          (.put this key value)))))
+
+  (defclass ^:private ^:static LineReader
+    (constructor [this ^InputStream inStream]
+      (set! (.-inStream this) inStream)
+      (set! inByteBuf (new byte/1 8192)))
+
+    (constructor [this ^Reader reader]
+      (set! (.-reader this) reader)
+      (set! inCharBuf (new char/1 8192)))
+
+    (field ^char/1 lineBuf (new char/1 1024))
+
+    (field ^:private ^byte/1 inByteBuf)
+
+    (field ^:private ^char/1 inCharBuf)
+
+    (field ^:private ^int inLimit 0)
+
+    (field ^:private ^int inOff 0)
+
+    (field ^:private ^InputStream inStream)
+
+    (field ^:private ^Reader reader)
+
+    (method readLine :throws [IOException] ^int [this]
+      (let [^:mutable ^int len 0
+            ^:mutable off inOff
+            ^:mutable limit inLimit
+            ^:mutable skipWhiteSpace true
+            ^:mutable appendedLineBegin false
+            ^:mutable precedingBackslash false
+            fromStream (some? inStream)
+            byteBuf inByteBuf
+            charBuf inCharBuf
+            ^:mutable lineBuf (.-lineBuf this)
+            ^:mutable ^char c (unchecked-char 0)]
+        (while true
+          (when (>= off limit)
+            (set! inLimit
+                  (set! limit (if fromStream (.read inStream byteBuf) (.read reader charBuf))))
+            (when (<= limit 0)
+              (when (== len 0) (return -1))
+              (return (if precedingBackslash (unchecked-subtract-int len 1) len)))
+            (set! off 0))
+          (set! c
+                (if fromStream
+                    (unchecked-char
+                      (bit-and-int (aget byteBuf
+                                         (let [old-1 off] (set! off (unchecked-inc-int off)) old-1))
+                                   0xFF))
+                    (aget charBuf (let [old-2 off] (set! off (unchecked-inc-int off)) old-2))))
+          (when skipWhiteSpace
+            (when (or (or (== c \space) (== c \tab)) (== c \formfeed)) (continue))
+            (when (and (not appendedLineBegin) (or (== c \return) (== c \newline))) (continue))
+            (set! skipWhiteSpace false)
+            (set! appendedLineBegin false))
+          (when (== len 0)
+            (when (or (== c \#) (== c \!))
+              (label :commentLoop
+                (while true
+                  (if fromStream
+                      (let [^:mutable ^byte b 0]
+                        (while (< off limit)
+                          (set! b (aget byteBuf off))
+                          (set! off (unchecked-inc-int off))
+                          (when (and (<= b \return) (or (== b \return) (== b \newline)))
+                            (break :commentLoop)))
+                        (when (== off limit)
+                          (set! inLimit (set! limit (.read inStream byteBuf)))
+                          (when (<= limit 0) (return -1))
+                          (set! off 0)))
+                      (do
+                        (while (< off limit)
+                          (set! c (aget charBuf off))
+                          (set! off (unchecked-inc-int off))
+                          (when (and (<= c \return) (or (== c \return) (== c \newline)))
+                            (break :commentLoop)))
+                        (when (== off limit)
+                          (set! inLimit (set! limit (.read reader charBuf)))
+                          (when (<= limit 0) (return -1))
+                          (set! off 0))))))
+              (set! skipWhiteSpace true)
+              (continue)))
+          (cond
+            (and (not (== c \newline)) (not (== c \return)))
+              (do
+                (aset lineBuf len c)
+                (set! len (unchecked-inc-int len))
+                (when (== len (alength lineBuf))
+                  (set! lineBuf (new char/1 (ArraysSupport/newLength len 1 len)))
+                  (System/arraycopy (.-lineBuf this) 0 lineBuf 0 len)
+                  (set! (.-lineBuf this) lineBuf))
+                (set! precedingBackslash (if (== c \\) (not precedingBackslash) false)))
+            (== len 0) (set! skipWhiteSpace true)
+            :else
+              (do
+                (when (>= off limit)
+                  (set!
+                    inLimit
+                    (set! limit (if fromStream (.read inStream byteBuf) (.read reader charBuf))))
+                  (set! off 0)
+                  (when (<= limit 0)
+                    (return (if precedingBackslash (unchecked-subtract-int len 1) len))))
+                (if precedingBackslash
+                    (do
+                      (set! len (unchecked-subtract-int len 1))
+                      (set! skipWhiteSpace true)
+                      (set! appendedLineBegin true)
+                      (set! precedingBackslash false)
+                      (when (== c \return)
+                        (cond
+                          fromStream
+                            (when (== (aget byteBuf off) \newline)
+                              (set! off (unchecked-inc-int off)))
+                          (== (aget charBuf off) \newline) (set! off (unchecked-inc-int off)))))
+                    (do (set! inOff off) (return len)))))))))
+
+  (method ^:private loadConvert ^String [this ^char/1 in ^:mutable ^int off ^int len
+                                         ^StringBuilder out]
+    (let [^:mutable ^char aChar (unchecked-char 0)
+          end (unchecked-add-int off len)
+          start off]
+      (while (< off end)
+        (set! aChar (aget in off))
+        (set! off (unchecked-inc-int off))
+        (when (== aChar \\) (break)))
+      (if (== off end)
+          (String. in start len)
+          (do
+            (.setLength out 0)
+            (set! off (unchecked-dec-int off))
+            (.append out in start (unchecked-subtract-int off start))
+            (while (< off end)
+              (set! aChar (aget in off))
+              (set! off (unchecked-inc-int off))
+              (if (== aChar \\)
+                  (do
+                    (set! aChar (aget in off))
+                    (set! off (unchecked-inc-int off))
+                    (if (== aChar \u)
+                        (do
+                          (when (> off (unchecked-subtract-int end 4))
+                            (throw (IllegalArgumentException. "Malformed \\uxxxx encoding.")))
+                          (let [^:mutable ^int value 0]
+                            (loop [^int i 0]
+                              (when (< i 4)
+                                (set! aChar (aget in off))
+                                (set! off (unchecked-inc-int off))
+                                (set! value
+                                      (switch aChar
+                                        (\0 \1 \2 \3 \4 \5 \6 \7 \8 \9)
+                                          (unchecked-subtract-int
+                                            (unchecked-add-int (bit-shift-left-int value 4) aChar)
+                                            \0)
+                                        (\a \b \c \d \e \f)
+                                          (unchecked-subtract-int
+                                            (unchecked-add-int
+                                              (unchecked-add-int (bit-shift-left-int value 4) 10)
+                                              aChar)
+                                            \a)
+                                        (\A \B \C \D \E \F)
+                                          (unchecked-subtract-int
+                                            (unchecked-add-int
+                                              (unchecked-add-int (bit-shift-left-int value 4) 10)
+                                              aChar)
+                                            \A)
+                                        (throw (IllegalArgumentException.
+                                                 "Malformed \\uxxxx encoding."))))
+                                (recur (unchecked-inc-int i))))
+                            (.append out (unchecked-char value))))
+                        (do
+                          (cond
+                            (== aChar \t) (set! aChar \tab)
+                            (== aChar \r) (set! aChar \return)
+                            (== aChar \n) (set! aChar \newline)
+                            (== aChar \f) (set! aChar \formfeed))
+                          (.append out aChar))))
+                  (.append out aChar)))
+            (.toString out)))))
+
+  (method ^:private saveConvert ^String [this ^String theString ^boolean escapeSpace
+                                         ^boolean escapeUnicode]
+    (let [len (.length theString)
+          ^:mutable bufLen (unchecked-multiply-int len 2)]
+      (when (< bufLen 0) (set! bufLen Integer/MAX_VALUE))
+      (let [outBuffer (StringBuilder. bufLen)
+            hex (.withUpperCase (HexFormat/of))]
+        (loop [^int x 0]
+          (when (< x len)
+            (let [aChar (.charAt theString x)]
+              (if (and (> aChar 61) (< aChar 127))
+                  (if (== aChar \\)
+                      (do
+                        (.append outBuffer \\)
+                        (.append outBuffer \\)
+                        (recur (unchecked-inc-int x)))
+                      (do (.append outBuffer aChar) (recur (unchecked-inc-int x))))
+                  (switch aChar
+                    \space
+                      (do
+                        (when (or (== x 0) escapeSpace) (.append outBuffer \\))
+                        (.append outBuffer \space)
+                        (recur (unchecked-inc-int x)))
+                    \tab
+                      (do
+                        (.append outBuffer \\)
+                        (.append outBuffer \t)
+                        (recur (unchecked-inc-int x)))
+                    \newline
+                      (do
+                        (.append outBuffer \\)
+                        (.append outBuffer \n)
+                        (recur (unchecked-inc-int x)))
+                    \return
+                      (do
+                        (.append outBuffer \\)
+                        (.append outBuffer \r)
+                        (recur (unchecked-inc-int x)))
+                    \formfeed
+                      (do
+                        (.append outBuffer \\)
+                        (.append outBuffer \f)
+                        (recur (unchecked-inc-int x)))
+                    (\= \: \# \!)
+                      (do
+                        (.append outBuffer \\)
+                        (.append outBuffer aChar)
+                        (recur (unchecked-inc-int x)))
+                    (if (let [a-3 (or (< aChar 0x0020) (> aChar 0x007e))
+                              b-4 escapeUnicode]
+                          (and a-3 b-4))
+                        (do
+                          (.append outBuffer "\\u")
+                          (.append outBuffer (.toHexDigits hex aChar))
+                          (recur (unchecked-inc-int x)))
+                        (do (.append outBuffer aChar) (recur (unchecked-inc-int x)))))))))
+        (.toString outBuffer))))
+
+  (method ^:private ^:static writeComments :throws [IOException] ^void [^BufferedWriter bw
+                                                                        ^String comments]
+    (let [hex (.withUpperCase (HexFormat/of))]
+      (.write bw "#")
+      (let [len (.length comments)
+            ^:mutable ^int current 0
+            ^:mutable ^int last 0]
+        (while (< current len)
+          (let [c (.charAt comments current)]
+            (when (or (or (> c \ÿ) (== c \newline)) (== c \return))
+              (when-not (== last current) (.write bw (.substring comments last current)))
+              (if (> c \ÿ)
+                  (do (.write bw "\\u") (.write bw (.toHexDigits hex c)))
+                  (do
+                    (.newLine bw)
+                    (when (and (and (== c \return)
+                                    (not (== current (unchecked-subtract-int len 1))))
+                               (== (.charAt comments (unchecked-add-int current 1)) \newline))
+                      (set! current (unchecked-inc-int current)))
+                    (when (or (== current (unchecked-subtract-int len 1))
+                              (and (not (== (.charAt comments (unchecked-add-int current 1)) \#))
+                                   (not (== (.charAt comments (unchecked-add-int current 1)) \!))))
+                      (.write bw "#"))))
+              (set! last (unchecked-add-int current 1)))
+            (set! current (unchecked-inc-int current))))
+        (when-not (== last current) (.write bw (.substring comments last current)))
+        (.newLine bw))))
+
+  (method ^:public ^{Deprecated true} save ^void [this ^OutputStream out ^String comments]
+    (try (.store this out comments) (catch IOException e)))
+
+  (method ^:public store :throws [IOException] ^void [this ^Writer writer ^String comments]
+    (.store0 this
+             ^BufferedWriter (if (instance? BufferedWriter writer)
+                                 (cast BufferedWriter writer)
+                                 (BufferedWriter. writer))
+             comments
+             false))
+
+  (method ^:public store :throws [IOException] ^void [this ^OutputStream out ^String comments]
+    (.store0 this (BufferedWriter. (OutputStreamWriter. out ISO_8859_1/INSTANCE)) comments true))
+
+  (method ^:private store0 :throws [IOException] ^void [this ^BufferedWriter bw ^String comments
+                                                        ^boolean escUnicode]
+    (when (some? comments) (Properties/writeComments bw comments))
+    (Properties/writeDateComment bw)
+    (locking this
+      (let [^:mutable ^{:tag (Collection (Map$Entry String String))} entries (.entrySet this)]
+        (when-instance [^{:tag (Collections$SynchronizedSet ?)} ss entries]
+          (when (instance? EntrySet (.-c ss))
+            (set! entries (ArrayList. entries))
+            (.sort (cast List entries) (Map$Entry/comparingByKey))))
+        (for-each [^{:tag (Map$Entry String String)} e entries]
+          (let [^:mutable key (cast String (.getKey e))
+                ^:mutable val (cast String (.getValue e))]
+            (set! key (.saveConvert this key true escUnicode))
+            (set! val (.saveConvert this val false escUnicode))
+            (.write bw (java-str key "=" val))
+            (.newLine bw)))))
+    (.flush bw))
+
+  (method ^:private ^:static writeDateComment :throws [IOException] ^void [^BufferedWriter bw]
+    (let [sysPropVal (StaticProperty/javaPropertiesDate)]
+      (if (and (some? sysPropVal) (not (.isEmpty sysPropVal)))
+          (Properties/writeComments bw sysPropVal)
+          (do (.write bw (java-str "#" (Date.))) (.newLine bw)))))
+
+  (method ^:public ^:synchronized loadFromXML :throws [IOException InvalidPropertiesFormatException] ^void [this
+                                                                                                            ^InputStream in]
+    (Objects/requireNonNull in)
+    (let [handler (PropertiesDefaultHandler.)] (.load handler this in) (.close in)))
+
+  (method ^:public storeToXML :throws [IOException] ^void [this ^OutputStream os ^String comment]
+    (.storeToXML this os comment UTF_8/INSTANCE))
+
+  (method ^:public storeToXML :throws [IOException] ^void [this ^OutputStream os ^String comment
+                                                           ^String encoding]
+    (Objects/requireNonNull os)
+    (Objects/requireNonNull encoding)
+    (try
+      (let [charset (Charset/forName encoding)] (.storeToXML this os comment charset))
+      (catch [IllegalCharsetNameException UnsupportedCharsetException] e
+        (throw (UnsupportedEncodingException. encoding)))))
+
+  (method ^:public storeToXML :throws [IOException] ^void [this ^OutputStream os ^String comment
+                                                           ^Charset charset]
+    (Objects/requireNonNull os "OutputStream")
+    (Objects/requireNonNull charset "Charset")
+    (let [handler (PropertiesDefaultHandler.)] (.store handler this os comment charset)))
+
+  (method ^:public getProperty ^String [this ^String key]
+    (let [oval (.get map key)
+          ^String sval (when (instance? String oval) (cast String oval))
+          ^:mutable ^Properties defaults nil]
+      (if (and (nil? sval) (some? (set! defaults (.-defaults this))))
+          (.getProperty defaults key)
+          sval)))
+
+  (method ^:public getProperty ^String [this ^String key ^String defaultValue]
+    (let [val (.getProperty this key)] (if (nil? val) defaultValue val)))
+
+  (method ^:public propertyNames ^{:tag (Enumeration ?)} [this]
+    (let [^{:tag (Hashtable String Object)} h (Hashtable.)] (.enumerate this h) (.keys h)))
+
+  (method ^:public stringPropertyNames ^{:tag (Set String)} [this]
+    (let [^{:tag (Map String String)} h (HashMap.)]
+      (.enumerateStringProperties this h)
+      (Collections/unmodifiableSet (.keySet h))))
+
+  (method ^:public list ^void [this ^PrintStream out]
+    (.println out "-- listing properties --")
+    (let [^{:tag (Map String Object)} h (HashMap.)]
+      (.enumerate this h)
+      (for-each [^{:tag (Map$Entry String Object)} e (.entrySet h)]
+        (let [key (cast String (.getKey e))
+              ^:mutable val (cast String (.getValue e))]
+          (when (> (.length val) 40) (set! val (java-str (.substring val 0 37) "...")))
+          (.println out (java-str key "=" val))))))
+
+  (method ^:public list ^void [this ^PrintWriter out]
+    (.println out "-- listing properties --")
+    (let [^{:tag (Map String Object)} h (HashMap.)]
+      (.enumerate this h)
+      (for-each [^{:tag (Map$Entry String Object)} e (.entrySet h)]
+        (let [key (cast String (.getKey e))
+              ^:mutable val (cast String (.getValue e))]
+          (when (> (.length val) 40) (set! val (java-str (.substring val 0 37) "...")))
+          (.println out (java-str key "=" val))))))
+
+  (method ^:private enumerate ^void [this ^{:tag (Map String Object)} h]
+    (when (some? defaults) (.enumerate defaults h))
+    (for-each [^{:tag (Map$Entry Object Object)} e (.entrySet this)]
+      (let [key (cast String (.getKey e))] (.put h key (.getValue e)))))
+
+  (method ^:private enumerateStringProperties ^void [this ^{:tag (Map String String)} h]
+    (when (some? defaults) (.enumerateStringProperties defaults h))
+    (for-each [^{:tag (Map$Entry Object Object)} e (.entrySet this)]
+      (let [k (.getKey e)
+            v (.getValue e)]
+        (when (and (instance? String k) (instance? String v))
+          (.put h (cast String k) (cast String v))))))
+
+  (method ^:public size ^int [this] (.size map))
+
+  (method ^:public isEmpty ^boolean [this] (.isEmpty map))
+
+  (method ^:public keys ^{:tag (Enumeration Object)} [this]
+    (Collections/enumeration (.keySet map)))
+
+  (method ^:public elements ^{:tag (Enumeration Object)} [this]
+    (Collections/enumeration (.values map)))
+
+  (method ^:public contains ^boolean [this value] (.contains map value))
+
+  (method ^:public containsValue ^boolean [this value]
+    (.containsValue map value))
+
+  (method ^:public containsKey ^boolean [this key] (.containsKey map key))
+
+  (method ^:public get [this key] (.get map key))
+
+  (method ^:public ^:synchronized put [this key value]
+    (.put map key value))
+
+  (method ^:public ^:synchronized remove [this key] (.remove map key))
+
+  (method ^:public ^:synchronized putAll ^void [this ^{:tag (Map ? ?)} t]
+    (.putAll map t))
+
+  (method ^:public ^:synchronized clear ^void [this] (.clear map))
+
+  (method ^:public ^:synchronized toString ^String [this] (.toString map))
+
+  (method ^:public keySet ^{:tag (Set Object)} [this]
+    (Collections/synchronizedSet (.keySet map) this))
+
+  (method ^:public values ^{:tag (Collection Object)} [this]
+    (Collections/synchronizedCollection (.values map) this))
+
+  (method ^:public entrySet ^{:tag (Set (Map$Entry Object Object))} [this]
+    (Collections/synchronizedSet (EntrySet. (.entrySet map)) this))
+
+  (defclass ^:private ^:static EntrySet
+    :implements [(Set (Map$Entry Object Object))]
+
+    (field ^:private ^{:tag (Set (Map$Entry Object Object))} entrySet)
+
+    (constructor ^:private [this ^{:tag (Set (Map$Entry Object Object))} entrySet]
+      (set! (.-entrySet this) entrySet))
+
+    (method ^:public size ^int [this] (.size entrySet))
+
+    (method ^:public isEmpty ^boolean [this] (.isEmpty entrySet))
+
+    (method ^:public contains ^boolean [this o] (.contains entrySet o))
+
+    (method ^:public toArray ^Object/1 [this] (.toArray entrySet))
+
+    (method ^:public toArray :type-params [T] ^T/1 [this ^T/1 a]
+      (.toArray entrySet a))
+
+    (method ^:public clear ^void [this] (.clear entrySet))
+
+    (method ^:public remove ^boolean [this o] (.remove entrySet o))
+
+    (method ^:public add ^boolean [this ^{:tag (Map$Entry Object Object)} e]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public addAll ^boolean [this
+                                      ^{:tag (Collection (? extends (Map$Entry Object Object)))} c]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public containsAll ^boolean [this ^{:tag (Collection ?)} c]
+      (.containsAll entrySet c))
+
+    (method ^:public equals ^boolean [this o]
+      (or (identical? o this) (.equals entrySet o)))
+
+    (method ^:public hashCode ^int [this] (.hashCode entrySet))
+
+    (method ^:public toString ^String [this] (.toString entrySet))
+
+    (method ^:public removeAll ^boolean [this ^{:tag (Collection ?)} c]
+      (.removeAll entrySet c))
+
+    (method ^:public retainAll ^boolean [this ^{:tag (Collection ?)} c]
+      (.retainAll entrySet c))
+
+    (method ^:public iterator ^{:tag (Iterator (Map$Entry Object Object))} [this]
+      (.iterator entrySet)))
+
+  (method ^:public ^:synchronized equals ^boolean [this o]
+    (.equals map o))
+
+  (method ^:public ^:synchronized hashCode ^int [this] (.hashCode map))
+
+  (method ^:public getOrDefault [this key defaultValue]
+    (.getOrDefault map key defaultValue))
+
+  (method ^:public ^:synchronized forEach ^void [this
+                                                 ^{:tag (BiConsumer (? super Object) (? super Object))} action]
+    (.forEach map action))
+
+  (method ^:public ^:synchronized replaceAll ^void [this
+                                                    ^{:tag (BiFunction (? super Object) (? super Object) ?)} function]
+    (.replaceAll map function))
+
+  (method ^:public ^:synchronized putIfAbsent [this key value]
+    (.putIfAbsent map key value))
+
+  (method ^:public ^:synchronized remove ^boolean [this key value]
+    (.remove map key value))
+
+  (method ^:public ^:synchronized replace ^boolean [this key oldValue newValue]
+    (.replace map key oldValue newValue))
+
+  (method ^:public ^:synchronized replace [this key value]
+    (.replace map key value))
+
+  (method ^:public ^:synchronized computeIfAbsent [this key
+                                                   ^{:tag (Function (? super Object) ?)} mappingFunction]
+    (.computeIfAbsent map key mappingFunction))
+
+  (method ^:public ^:synchronized computeIfPresent [this key
+                                                    ^{:tag (BiFunction (? super Object) (? super Object) ?)} remappingFunction]
+    (.computeIfPresent map key remappingFunction))
+
+  (method ^:public ^:synchronized compute [this key
+                                           ^{:tag (BiFunction (? super Object) (? super Object) ?)} remappingFunction]
+    (.compute map key remappingFunction))
+
+  (method ^:public ^:synchronized merge [this key value
+                                         ^{:tag (BiFunction (? super Object) (? super Object) ?)} remappingFunction]
+    (.merge map key value remappingFunction))
+
+  (method ^:protected rehash ^void [this])
+
+  (method ^:public ^:synchronized clone [this]
+    (let [clone (cast Properties (.cloneHashtable this))]
+      (set! (.-map clone) (ConcurrentHashMap. map))
+      clone))
+
+  (method writeHashtable :throws [IOException] ^void [this ^ObjectOutputStream s]
+    (let [map (.-map this)
+          ^{:tag (List Object)} entryStack (ArrayList. (unchecked-multiply-int (.size map) 2))]
+      (for-each [^{:tag (Map$Entry Object Object)} entry (.entrySet map)]
+        (.add entryStack (.getValue entry))
+        (.add entryStack (.getKey entry)))
+      (let [loadFactor (float 0.75)
+            count (unchecked-divide-int (.size entryStack) 2)
+            ^:mutable length (unchecked-add-int
+                               (unchecked-add-int
+                                 (unchecked-int (unchecked-divide-float count loadFactor))
+                                 (unchecked-divide-int count 20))
+                               3)]
+        (when (and (> length count) (== (bit-and-int length 1) 0))
+          (set! length (unchecked-dec-int length)))
+        (locking map (.defaultWriteHashtable this s length loadFactor))
+        (.writeInt s length)
+        (.writeInt s count)
+        (loop [^int i (unchecked-subtract-int (.size entryStack) 1)]
+          (when (>= i 0) (.writeObject s (.get entryStack i)) (recur (unchecked-dec-int i)))))))
+
+  (method readHashtable :throws [IOException ClassNotFoundException] ^void [this
+                                                                            ^ObjectInputStream s]
+    (.defaultReadObject s)
+    (let [origlength (.readInt s)
+          ^:mutable elements (.readInt s)]
+      (when (< elements 0)
+        (throw (StreamCorruptedException. (java-str "Illegal # of Elements: " elements))))
+      (.checkArray (SharedSecrets/getJavaObjectInputStreamAccess)
+                   s
+                   Map$Entry/1
+                   (HashMap/tableSizeFor (unchecked-int (unchecked-divide elements 0.75))))
+      (let [map (ConcurrentHashMap. elements)]
+        (while (> elements 0)
+          (let [key (.readObject s) value (.readObject s)] (.put map key value))
+          (set! elements (unchecked-dec-int elements)))
+        (set! (.-map this) map)))))

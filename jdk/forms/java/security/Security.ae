@@ -1,0 +1,463 @@
+;; Converted from jdk26u src/java.base/share/classes/java/security/Security.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.security)
+
+(import '(java.io FileNotFoundException IOException)
+        '(java.net MalformedURLException URI URL)
+        '(java.nio.file Files InvalidPathException Path)
+        '(java.util ArrayList
+                    Arrays
+                    Collections
+                    Enumeration
+                    HashSet
+                    Hashtable
+                    LinkedList
+                    List
+                    Locale
+                    Map
+                    Map$Entry
+                    Properties
+                    Set)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(java.util.function Predicate)
+        '(jdk.internal.access JavaSecurityPropertiesAccess SharedSecrets)
+        '(jdk.internal.event EventHelper SecurityPropertyModificationEvent)
+        '(jdk.internal.util StaticProperty)
+        '(sun.security.jca GetInstance ProviderList Providers)
+        '(sun.security.util Debug PropertyExpander))
+
+(defclass ^:public ^:final Security
+  (field ^:private ^:static ^:final ^Debug sdebug (Debug/getInstance "properties"))
+
+  (field ^:private ^:static ^:final ^Properties props
+    (anon Properties []
+      (method ^:public ^:synchronized put [this key val]
+        (when-instance [^String strKey key]
+          (when-instance [^String strVal val]
+            (when (SecPropLoader/isInclude strKey) (SecPropLoader/loadInclude strVal) (return nil))))
+        (.put super key val))))
+
+  (field ^:private ^:static ^Properties initialSecurityProperties)
+
+  (defclass ^:private ^:static ProviderProperty
+    (field ^String className)
+
+    (field ^Provider provider))
+
+  (defclass ^:private ^:static ^:final SecPropLoader
+    (defclass ^:private ^:enum LoadingMode
+      (constants OVERRIDE APPEND))
+
+    (field ^:private ^:static ^:final ^String OVERRIDE_SEC_PROP "security.overridePropertiesFile")
+
+    (field ^:private ^:static ^:final ^String EXTRA_SYS_PROP "java.security.properties")
+
+    (field ^:private ^:static ^Path currentPath)
+
+    (field ^:private ^:static ^:final ^{:tag (List Path)} activePaths (ArrayList.))
+
+    (method ^:static loadAll ^void []
+      (SecPropLoader/loadMaster)
+      (SecPropLoader/loadExtra))
+
+    (method ^:static isInclude ^boolean [^String key]
+      (.equals "include" key))
+
+    (method ^:static checkReservedKey :throws [IllegalArgumentException] ^void [^String key]
+      (when (SecPropLoader/isInclude key)
+        (throw (IllegalArgumentException.
+                 (java-str "Key '"
+                           key
+                           "' is reserved and cannot be used as a Security property name.")))))
+
+    (method ^:private ^:static loadMaster ^void []
+      (try
+        (SecPropLoader/loadFromPath
+          (Path/of (StaticProperty/javaHome) (new String/1 ["conf" "security" "java.security"]))
+          LoadingMode/APPEND)
+        (catch IOException e (throw (InternalError. "Error loading java.security file" e)))))
+
+    (method ^:private ^:static loadExtra ^void []
+      (when (.equalsIgnoreCase "true" (.getProperty props OVERRIDE_SEC_PROP))
+        (let [^:mutable propFile (System/getProperty EXTRA_SYS_PROP)]
+          (when (some? propFile)
+            (let [^:mutable mode LoadingMode/APPEND]
+              (when (.startsWith propFile "=")
+                (set! mode LoadingMode/OVERRIDE)
+                (set! propFile (.substring propFile 1)))
+              (try
+                (SecPropLoader/loadExtraHelper propFile mode)
+                (catch Exception e
+                  (when (some? sdebug)
+                    (.println sdebug (java-str "unable to load security properties from " propFile))
+                    (.printStackTrace e)))))))))
+
+    (method ^:private ^:static loadExtraHelper :throws [Exception] ^void [^:mutable ^String propFile
+                                                                          ^LoadingMode mode]
+      (set! propFile (PropertyExpander/expand propFile))
+      (when (.isEmpty propFile) (throw (IOException. "Empty extra properties file path")))
+      (let [^:mutable ^Exception error nil]
+        (when (some? (set! error (SecPropLoader/loadExtraFromPath propFile mode)))
+          (let [^:mutable ^URI uri nil]
+            (try (set! uri (URI. propFile)) (catch Exception ignore))
+            (when-not (and (and (some? uri) (.equalsIgnoreCase "file" (.getScheme uri)))
+                           (nil? (set! error (SecPropLoader/loadExtraFromFileUrl uri mode))))
+              (let [^:mutable ^URL url nil]
+                (try
+                  (set! url (Security/newURL propFile))
+                  (catch MalformedURLException ignore (throw error)))
+                (SecPropLoader/loadFromUrl url mode)))))))
+
+    (method ^:private ^:static loadExtraFromPath :throws [Exception] ^Exception [^String propFile
+                                                                                 ^LoadingMode mode]
+      (let [^:mutable ^Path path nil]
+        (try
+          (set! path (Path/of propFile (new String/1 [])))
+          (when-not (Files/exists path) (return (FileNotFoundException. propFile)))
+          (catch InvalidPathException e (return e)))
+        (SecPropLoader/loadFromPath path mode)
+        nil))
+
+    (method ^:private ^:static loadExtraFromFileUrl :throws [Exception] ^Exception [^URI uri
+                                                                                    ^LoadingMode mode]
+      (let [^:mutable ^Path path nil]
+        (try (set! path (Path/of uri)) (catch Exception e (return e)))
+        (SecPropLoader/loadFromPath path mode)
+        nil))
+
+    (method ^:private ^:static reset ^void [^LoadingMode mode]
+      (when (identical? mode LoadingMode/OVERRIDE)
+        (when (some? sdebug) (.println sdebug "overriding other security properties files!"))
+        (.clear props)))
+
+    (method ^:static loadInclude ^void [^String propFile]
+      (let [expPropFile (PropertyExpander/expandNonStrict propFile)]
+        (when (some? sdebug)
+          (.println sdebug
+                    (java-str "processing include: '"
+                              propFile
+                              "'"
+                              (if (.equals propFile expPropFile)
+                                  ""
+                                  (java-str " (expanded to '" expPropFile "')")))))
+        (try
+          (let [^:mutable path (Path/of expPropFile (new String/1 []))]
+            (when-not (.isAbsolute path)
+              (when (nil? currentPath)
+                (throw
+                  (InternalError.
+                    (java-str
+                      "Cannot resolve '"
+                      expPropFile
+                      "' relative path when included from a non-regular properties file (e.g. HTTP served file)"))))
+              (set! path (.resolveSibling currentPath path)))
+            (SecPropLoader/loadFromPath path LoadingMode/APPEND))
+          (catch [IOException InvalidPathException] e
+            (throw (InternalError. (java-str "Unable to include '" expPropFile "'") e))))))
+
+    (method ^:private ^:static checkCyclicInclude ^void [^Path path]
+      (for-each [^Path activePath activePaths]
+        (try
+          (when (Files/isSameFile path activePath)
+            (throw (InternalError. (java-str "Cyclic include of '" path "'"))))
+          (catch IOException e
+            (when (some? sdebug)
+              (.println sdebug
+                        (java-str "skipped exception when checking for cyclic inclusion of "
+                                  path
+                                  ":"))
+              (.printStackTrace e))))))
+
+    (method ^:private ^:static loadFromPath :throws [IOException] ^void [^Path path
+                                                                         ^LoadingMode mode]
+      (when (Files/isDirectory path) (throw (IOException. "Is a directory")))
+      (with-resources [is (Files/newInputStream path)]
+        (SecPropLoader/checkCyclicInclude path)
+        (SecPropLoader/reset mode)
+        (let [previousPath currentPath]
+          (set! currentPath (when (Files/isRegularFile path) path))
+          (.add activePaths path)
+          (try
+            (SecPropLoader/debugLoad true path)
+            (.load props is)
+            (SecPropLoader/debugLoad false path)
+            (finally (.removeLast activePaths) (set! currentPath previousPath))))))
+
+    (method ^:private ^:static loadFromUrl :throws [IOException] ^void [^URL url ^LoadingMode mode]
+      (with-resources [is (.openStream url)]
+        (SecPropLoader/reset mode)
+        (SecPropLoader/debugLoad true url)
+        (.load props is)
+        (SecPropLoader/debugLoad false url)))
+
+    (method ^:private ^:static debugLoad ^void [^boolean start source]
+      (when (some? sdebug)
+        (let [^int level (if (.isEmpty activePaths) 1 (.size activePaths))]
+          (.println sdebug
+                    (java-str (if start
+                                  (java-str (.repeat ">" level) " starting to process ")
+                                  (java-str (.repeat "<" level) " finished processing "))
+                              source))))))
+
+  (static-initializer
+    (Security/initialize)
+    (SharedSecrets/setJavaSecurityPropertiesAccess
+      (anon JavaSecurityPropertiesAccess []
+        (method ^:public getInitialProperties ^Properties [this]
+          initialSecurityProperties))))
+
+  (method ^:private ^:static initialize ^void []
+    (SecPropLoader/loadAll)
+    (set! initialSecurityProperties (cast Properties (.clone props)))
+    (when (some? sdebug)
+      (for-each [^String key (.stringPropertyNames props)]
+        (.println sdebug (java-str "Initial security property: " key "=" (.getProperty props key))))))
+
+  (constructor ^:private [this])
+
+  (method ^:private ^:static getProviderProperty ^ProviderProperty [^String key]
+    (let [^{:tag (List Provider)} providers (.providers (Providers/getProviderList))]
+      (loop [^int i 0]
+        (when (< i (.size providers))
+          (let [^:mutable ^String matchKey nil
+                prov (cast Provider (.get providers i))
+                ^:mutable prop (.getProperty prov key)]
+            (when (nil? prop)
+              (loop [^{:tag (Enumeration Object)} e (.keys prov)]
+                (when (.hasMoreElements e)
+                  (set! matchKey (cast String (.nextElement e)))
+                  (if (.equalsIgnoreCase key matchKey)
+                      (set! prop (.getProperty prov matchKey))
+                      (recur e)))))
+            (if (some? prop)
+                (let [newEntry (ProviderProperty.)]
+                  (set! (.-className newEntry) prop)
+                  (set! (.-provider newEntry) prov)
+                  (return newEntry))
+                (recur (unchecked-inc-int i))))))
+      nil))
+
+  (method ^:private ^:static getProviderProperty ^String [^String key ^Provider provider]
+    (let [^:mutable prop (.getProperty provider key)]
+      (when (nil? prop)
+        (loop [^{:tag (Enumeration Object)} e (.keys provider)]
+          (when (.hasMoreElements e)
+            (let [matchKey (cast String (.nextElement e))]
+              (if (.equalsIgnoreCase key matchKey)
+                  (set! prop (.getProperty provider matchKey))
+                  (recur e))))))
+      prop))
+
+  (method ^:public ^:static ^{Deprecated true} getAlgorithmProperty ^String [^String algName
+                                                                             ^String propName]
+    (let [entry (Security/getProviderProperty (java-str "Alg." propName "." algName))]
+      (when (some? entry) (.-className entry))))
+
+  (method ^:public ^:static ^:synchronized insertProviderAt ^int [^Provider provider ^int position]
+    (let [list (Providers/getFullProviderList)
+          newList (ProviderList/insertAt list provider (unchecked-subtract-int position 1))]
+      (if (identical? list newList)
+          -1
+          (do
+            (Providers/setProviderList newList)
+            (unchecked-add-int (.getIndex newList (.getName provider)) 1)))))
+
+  (method ^:public ^:static addProvider ^int [^Provider provider]
+    (Security/insertProviderAt provider 0))
+
+  (method ^:public ^:static ^:synchronized removeProvider ^void [^String name]
+    (let [list (Providers/getFullProviderList)
+          newList (ProviderList/remove list name)]
+      (Providers/setProviderList newList)))
+
+  (method ^:public ^:static getProviders ^Provider/1 []
+    (.toArray (Providers/getFullProviderList)))
+
+  (method ^:public ^:static getProvider ^Provider [^String name]
+    (.getProvider (Providers/getProviderList) name))
+
+  (method ^:public ^:static getProviders ^Provider/1 [^String filter]
+    (let [^:mutable ^String key nil
+          ^:mutable ^String value nil
+          index (.indexOf filter \:)]
+      (if (== index -1)
+          (do (set! key (.trim filter)) (set! value ""))
+          (do
+            (set! key (.trim (.substring filter 0 index)))
+            (set! value (.trim (.substring filter (unchecked-add-int index 1))))
+            (when (.isEmpty value) (throw (InvalidParameterException. "Invalid filter")))))
+      (let [^{:tag (Hashtable String String)} hashtableFilter (Hashtable. 1)]
+        (.put hashtableFilter key value)
+        (Security/getProviders hashtableFilter))))
+
+  (method ^:public ^:static getProviders ^Provider/1 [^{:tag (Map String String)} filter]
+    (let [allProviders (Security/getProviders)
+          ^{:tag (Set (Map$Entry String String))} entries (.entrySet filter)]
+      (when-not (or (nil? allProviders) (== (alength allProviders) 0))
+        (if (nil? entries)
+            allProviders
+            (when-not (.isEmpty entries)
+              (let [^{:tag (LinkedList Provider)} candidates (LinkedList.
+                                                               (Arrays/asList allProviders))]
+                (for-each [^Map$Entry e entries]
+                  (let [cr (Criteria. (cast String (.getKey e)) (cast String (.getValue e)))]
+                    (.removeIf candidates
+                               (lambda Predicate ^boolean [^Provider p]
+                                 (not (.isCriterionSatisfied cr p))))
+                    (when (.isEmpty candidates) (return nil))))
+                (cast Provider/1 (.toArray candidates (new Provider/1 0)))))))))
+
+  (field ^:private ^:static ^:final ^{:tag (Map String (Class ?))} spiMap (ConcurrentHashMap.))
+
+  (method ^:private ^:static getSpiClass ^{:tag (Class ?)} [^String type]
+    (let [^:mutable ^{:tag (Class ?)} clazz (cast Class (.get spiMap type))]
+      (if (some? clazz)
+          clazz
+          (try
+            (set! clazz (Class/forName (java-str "java.security." type "Spi")))
+            (.put spiMap type clazz)
+            clazz
+            (catch ClassNotFoundException e (throw (AssertionError. "Spi class not found" e)))))))
+
+  (method ^:static getImpl :throws [NoSuchAlgorithmException NoSuchProviderException] ^Object/1 [^String algorithm
+                                                                                                 ^String type
+                                                                                                 ^String provider]
+    (if (nil? provider)
+        (.toArray (GetInstance/getInstance type (Security/getSpiClass type) algorithm))
+        (.toArray (GetInstance/getInstance type (Security/getSpiClass type) algorithm provider))))
+
+  (method ^:static getImpl :throws [NoSuchAlgorithmException
+                                    NoSuchProviderException
+                                    InvalidAlgorithmParameterException] ^Object/1 [^String algorithm
+                                                                                   ^String type
+                                                                                   ^String provider
+                                                                                   params]
+    (if (nil? provider)
+        (.toArray (GetInstance/getInstance type (Security/getSpiClass type) algorithm params))
+        (.toArray (GetInstance/getInstance type
+                                           (Security/getSpiClass type)
+                                           algorithm
+                                           params
+                                           provider))))
+
+  (method ^:static getImpl :throws [NoSuchAlgorithmException] ^Object/1 [^String algorithm
+                                                                         ^String type
+                                                                         ^Provider provider]
+    (.toArray (GetInstance/getInstance type (Security/getSpiClass type) algorithm provider)))
+
+  (method ^:static getImpl :throws [NoSuchAlgorithmException InvalidAlgorithmParameterException] ^Object/1 [^String algorithm
+                                                                                                            ^String type
+                                                                                                            ^Provider provider
+                                                                                                            params]
+    (.toArray (GetInstance/getInstance type (Security/getSpiClass type) algorithm params provider)))
+
+  (method ^:public ^:static getProperty ^String [^String key]
+    (SecPropLoader/checkReservedKey key)
+    (let [^:mutable name (.getProperty props key)]
+      (when (some? name) (set! name (.trim name)))
+      name))
+
+  (method ^:public ^:static setProperty ^void [^String key ^String datum]
+    (SecPropLoader/checkReservedKey key)
+    (.put props key datum)
+    (let [spe (SecurityPropertyModificationEvent.)]
+      (set! (.-key spe) key)
+      (set! (.-value spe) datum)
+      (.commit spe)
+      (when (EventHelper/isLoggingSecurity) (EventHelper/logSecurityPropertyEvent key datum))))
+
+  (defclass ^:private ^:static Criteria
+    (field ^:private ^:final ^String serviceName)
+
+    (field ^:private ^:final ^String algName)
+
+    (field ^:private ^:final ^String attrName)
+
+    (field ^:private ^:final ^String attrValue)
+
+    (constructor :throws [InvalidParameterException] [this ^String key ^String value]
+      (let [snEndIndex (.indexOf key \.)]
+        (when (<= snEndIndex 0) (throw (InvalidParameterException. "Invalid filter")))
+        (set! serviceName (.substring key 0 snEndIndex))
+        (set! attrValue value)
+        (if (.isEmpty value)
+            (do
+              (set! algName (.substring key (unchecked-add-int snEndIndex 1)))
+              (set! attrName nil))
+            (let [algEndIndex (.indexOf key \space snEndIndex)]
+              (when (== algEndIndex -1)
+                (throw (InvalidParameterException. "Invalid filter - need algorithm name")))
+              (set! algName (.substring key (unchecked-add-int snEndIndex 1) algEndIndex))
+              (set! attrName (.trim (.substring key (unchecked-add-int algEndIndex 1))))
+              (cond
+                (.isEmpty attrName)
+                  (throw (InvalidParameterException. "Invalid filter - need attribute name"))
+                (and (.isCompositeValue this) (not (== (.indexOf attrValue \|) -1)))
+                  (throw (InvalidParameterException.
+                           "Invalid filter - composite values unsupported")))))
+        (when (or (.isEmpty serviceName) (.isEmpty algName))
+          (throw (InvalidParameterException. "Invalid filter - need service and algorithm")))))
+
+    (method ^:private isCompositeValue ^boolean [this]
+      (and (some? attrName)
+           (or (or (or (.equalsIgnoreCase attrName "SupportedKeyClasses")
+                       (.equalsIgnoreCase attrName "SupportedPaddings"))
+                   (.equalsIgnoreCase attrName "SupportedModes"))
+               (.equalsIgnoreCase attrName "SupportedKeyFormats"))))
+
+    (method ^:private isCriterionSatisfied ^boolean [this ^Provider prov]
+      (let [^:mutable key (java-str serviceName
+                                    \.
+                                    algName
+                                    (if (some? attrName) (java-str \space attrName) ""))
+            ^:mutable propValue (Security/getProviderProperty key prov)]
+        (when (nil? propValue)
+          (let [standardName (Security/getProviderProperty
+                               (java-str "Alg.Alias." serviceName "." algName)
+                               prov)]
+            (when (some? standardName)
+              (set! key
+                    (java-str serviceName
+                              "."
+                              standardName
+                              (if (some? attrName) (java-str \space attrName) "")))
+              (set! propValue (Security/getProviderProperty key prov)))
+            (when (nil? propValue) (return false))))
+        (cond
+          (nil? attrName) true
+          (.equalsIgnoreCase attrName "KeySize")
+            (let [requestedSize (Integer/parseInt attrValue)
+                  maxSize (Integer/parseInt propValue)]
+              (<= requestedSize maxSize))
+          (.isCompositeValue this)
+            (let [attrValue2 (.toUpperCase attrValue Locale/ENGLISH)]
+              (set! propValue (.toUpperCase propValue Locale/ENGLISH))
+              (let [propComponents (.split propValue "\\|")]
+                (for-each [^String pc propComponents] (when (.equals attrValue2 pc) (return true)))
+                false))
+          :else (.equalsIgnoreCase attrValue propValue)))))
+
+  (method ^:public ^:static getAlgorithms ^{:tag (Set String)} [^String serviceName]
+    (if (or (or (nil? serviceName) (.isEmpty serviceName)) (.endsWith serviceName "."))
+        (Collections/emptySet)
+        (let [^{:tag (HashSet String)} result (HashSet.)
+              providers (Security/getProviders)]
+          (loop [^int i 0]
+            (when (< i (alength providers))
+              (loop [^{:tag (Enumeration Object)} e (.keys (aget providers i))]
+                (when (.hasMoreElements e)
+                  (let [currentKey (.toUpperCase (cast String (.nextElement e)) Locale/ENGLISH)]
+                    (if (.startsWith currentKey (.toUpperCase serviceName Locale/ENGLISH))
+                        (if (< (.indexOf currentKey \space) 0)
+                            (do
+                              (.add result
+                                    (.substring currentKey
+                                                (unchecked-add-int (.length serviceName) 1)))
+                              (recur e))
+                            (recur e))
+                        (recur e)))))
+              (recur (unchecked-inc-int i))))
+          (Collections/unmodifiableSet result))))
+
+  (method ^:private ^:static newURL :throws [MalformedURLException] ^URL [^String spec]
+    (URL. spec)))

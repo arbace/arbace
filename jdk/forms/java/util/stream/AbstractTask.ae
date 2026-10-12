@@ -1,0 +1,112 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/stream/AbstractTask.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.stream)
+
+(import '(java.util Spliterator)
+        '(java.util.concurrent CountedCompleter ForkJoinPool ForkJoinWorkerThread))
+
+(defclass ^:abstract AbstractTask
+  :extends (CountedCompleter R)
+  :type-params [P_IN P_OUT R (K extends (AbstractTask P_IN P_OUT R K))]
+
+  (field ^:private ^:static ^:final ^int LEAF_TARGET
+    (bit-shift-left-int (ForkJoinPool/getCommonPoolParallelism) 2))
+
+  (field ^:protected ^:final ^{:tag (PipelineHelper P_OUT)} helper)
+
+  (field ^:protected ^{:tag (Spliterator P_IN)} spliterator)
+
+  (field ^:protected ^long targetSize)
+
+  (field ^:protected ^K leftChild)
+
+  (field ^:protected ^K rightChild)
+
+  (field ^:private ^R localResult)
+
+  (constructor ^:protected [this ^{:tag (PipelineHelper P_OUT)} helper
+                            ^{:tag (Spliterator P_IN)} spliterator]
+    (super. nil)
+    (set! (.-helper this) helper)
+    (set! (.-spliterator this) spliterator)
+    (set! (.-targetSize this) 0))
+
+  (constructor ^:protected [this ^K parent ^{:tag (Spliterator P_IN)} spliterator]
+    (super. parent)
+    (set! (.-spliterator this) spliterator)
+    (set! (.-helper this) (.-helper parent))
+    (set! (.-targetSize this) (.-targetSize parent)))
+
+  (method ^:public ^:static getLeafTarget ^int []
+    (let [t (Thread/currentThread)]
+      (if (instance? ForkJoinWorkerThread t)
+          (bit-shift-left-int (.getParallelism (.getPool (cast ForkJoinWorkerThread t))) 2)
+          LEAF_TARGET)))
+
+  (method ^:protected ^:abstract makeChild ^K [this ^{:tag (Spliterator P_IN)} spliterator])
+
+  (method ^:protected ^:abstract doLeaf ^R [this])
+
+  (method ^:public ^:static suggestTargetSize ^long [^long sizeEstimate]
+    (let [est (unchecked-divide sizeEstimate (AbstractTask/getLeafTarget))] (if (> est 0) est 1)))
+
+  (method ^:protected ^:final getTargetSize ^long [this ^long sizeEstimate]
+    (let [^:mutable ^long s 0]
+      (if (not (== (set! s targetSize) 0))
+          s
+          (set! targetSize (AbstractTask/suggestTargetSize sizeEstimate)))))
+
+  (method ^:public getRawResult ^R [this] localResult)
+
+  (method ^:protected setRawResult ^void [this ^R result]
+    (when (some? result) (throw (IllegalStateException.))))
+
+  (method ^:protected getLocalResult ^R [this] localResult)
+
+  (method ^:protected setLocalResult ^void [this ^R localResult]
+    (set! (.-localResult this) localResult))
+
+  (method ^:protected isLeaf ^boolean [this] (nil? leftChild))
+
+  (method ^:protected isRoot ^boolean [this] (nil? (.getParent this)))
+
+  (method ^:protected getParent ^K [this]
+    (cast AbstractTask (.getCompleter this)))
+
+  (method ^:public compute ^void [this]
+    (let [^:mutable ^{:tag (Spliterator P_IN)} rs spliterator
+          ^:mutable ^{:tag (Spliterator P_IN)} ls nil
+          ^:mutable sizeEstimate (.estimateSize rs)
+          sizeThreshold (.getTargetSize this sizeEstimate)
+          ^:mutable forkRight false
+          ^:mutable ^K task this]
+      (while (and (> sizeEstimate sizeThreshold) (some? (set! ls (.trySplit rs))))
+        (let [^:mutable ^K leftChild nil
+              ^:mutable ^K rightChild nil
+              ^:mutable ^K taskToFork nil]
+          (set! (.-leftChild task) (set! leftChild (.makeChild task ls)))
+          (set! (.-rightChild task) (set! rightChild (.makeChild task rs)))
+          (.setPendingCount task 1)
+          (if forkRight
+              (do
+                (set! forkRight false)
+                (set! rs ls)
+                (set! task leftChild)
+                (set! taskToFork rightChild))
+              (do (set! forkRight true) (set! task rightChild) (set! taskToFork leftChild)))
+          (.fork taskToFork)
+          (set! sizeEstimate (.estimateSize rs))))
+      (.setLocalResult task (.doLeaf task))
+      (.tryComplete task)))
+
+  (method ^:public onCompletion ^void [this ^{:tag (CountedCompleter ?)} caller]
+    (set! spliterator nil)
+    (set! leftChild (set! rightChild nil)))
+
+  (method ^:protected isLeftmostNode ^boolean [this]
+    (let [^:mutable ^K node this]
+      (while (some? node)
+        (let [^K parent (.getParent node)]
+          (when (and (some? parent) (not (identical? (.-leftChild parent) node))) (return false))
+          (set! node parent)))
+      true)))

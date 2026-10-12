@@ -1,0 +1,605 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/util/IPAddressUtil.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'sun.net.util)
+
+(import '(java.io UncheckedIOException)
+        '(java.net Inet6Address InetAddress InetSocketAddress NetworkInterface SocketException URL)
+        '(java.nio CharBuffer)
+        '(java.util Arrays List)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(java.util.function Function Predicate)
+        '(java.util.stream Stream)
+        '(jdk.internal.util Exceptions Exceptions$SensitiveInfo))
+
+(defclass ^:public IPAddressUtil
+  (field ^:private ^:static ^:final ^int INADDR4SZ 4)
+
+  (field ^:private ^:static ^:final ^int INADDR16SZ 16)
+
+  (field ^:private ^:static ^:final ^int INT16SZ 2)
+
+  (method ^:public ^:static textToNumericFormatV4 ^byte/1 [^String src]
+    (let [res (new byte/1 INADDR4SZ)
+          ^:mutable tmpValue 0
+          ^:mutable ^int currByte 0
+          ^:mutable newOctet true
+          len (.length src)]
+      (when-not (or (== len 0) (> len 15))
+        (loop [^int i 0]
+          (when (< i len)
+            (let [c (.charAt src i)]
+              (if (== c \.)
+                  (do
+                    (when (or (or (or newOctet (< tmpValue 0)) (> tmpValue 0xff)) (== currByte 3))
+                      (return nil))
+                    (aset res currByte (unchecked-byte (bit-and tmpValue 0xff)))
+                    (set! currByte (unchecked-inc-int currByte))
+                    (set! tmpValue 0)
+                    (set! newOctet true)
+                    (recur (unchecked-inc-int i)))
+                  (let [digit (IPAddressUtil/digit c 10)]
+                    (when (< digit 0) (return nil))
+                    (set! tmpValue (unchecked-multiply tmpValue 10))
+                    (set! tmpValue (unchecked-add tmpValue digit))
+                    (set! newOctet false)
+                    (recur (unchecked-inc-int i)))))))
+        (when-not (or (or newOctet (< tmpValue 0))
+                      (>= tmpValue
+                          (bit-shift-left 1
+                                          (unchecked-multiply-int
+                                            (unchecked-subtract-int 4 currByte)
+                                            8))))
+          (switch currByte
+            0
+              (do
+                (aset res 0 (unchecked-byte (bit-and (bit-shift-right tmpValue 24) 0xff)))
+                (aset res 1 (unchecked-byte (bit-and (bit-shift-right tmpValue 16) 0xff)))
+                (aset res 2 (unchecked-byte (bit-and (bit-shift-right tmpValue 8) 0xff)))
+                (aset res 3 (unchecked-byte (bit-and (bit-shift-right tmpValue 0) 0xff))))
+            1
+              (do
+                (aset res 1 (unchecked-byte (bit-and (bit-shift-right tmpValue 16) 0xff)))
+                (aset res 2 (unchecked-byte (bit-and (bit-shift-right tmpValue 8) 0xff)))
+                (aset res 3 (unchecked-byte (bit-and (bit-shift-right tmpValue 0) 0xff))))
+            2
+              (do
+                (aset res 2 (unchecked-byte (bit-and (bit-shift-right tmpValue 8) 0xff)))
+                (aset res 3 (unchecked-byte (bit-and (bit-shift-right tmpValue 0) 0xff))))
+            3 (aset res 3 (unchecked-byte (bit-and (bit-shift-right tmpValue 0) 0xff))))
+          res))))
+
+  (method ^:public ^:static validateNumericFormatV4 ^byte/1 [^String src ^boolean throwIAE]
+    (let [parsedBytes (IPAddressUtil/textToNumericFormatV4 src)]
+      (when (and (and (not ALLOW_AMBIGUOUS_IPADDRESS_LITERALS_SP_VALUE) (nil? parsedBytes))
+                 (IPAddressUtil/isBsdParsableV4 src))
+        (throw (IPAddressUtil/invalidIpAddressLiteral src)))
+      (when (and (nil? parsedBytes) throwIAE) (throw (IPAddressUtil/invalidIpAddressLiteral src)))
+      parsedBytes))
+
+  (method ^:public ^:static invalidIpAddressLiteral ^IllegalArgumentException [^String src]
+    (IllegalArgumentException.
+      (Exceptions/formatMsg "Invalid IP address literal%s"
+                            (new Exceptions$SensitiveInfo/1
+                                 [(.prefixWith (Exceptions/filterNonSocketInfo src) ": ")]))))
+
+  (method ^:public ^:static textToNumericFormatV6 ^byte/1 [^String src]
+    (when-not (< (.length src) 2)
+      (let [^:mutable ^int colonp 0
+            ^:mutable ^char ch (unchecked-char 0)
+            ^:mutable ^boolean saw_xdigit false
+            ^:mutable ^int val 0
+            srcb (.toCharArray src)
+            dst (new byte/1 INADDR16SZ)
+            ^:mutable srcb_length (alength srcb)
+            pc (.indexOf src \%)]
+        (when-not (== pc (unchecked-subtract-int srcb_length 1))
+          (when-not (== pc -1) (set! srcb_length pc))
+          (set! colonp -1)
+          (let [^:mutable ^int i 0
+                ^:mutable ^int j 0]
+            (when (== (aget srcb i) \:)
+              (when-not (== (aget srcb (set! i (unchecked-inc-int i))) \:) (return nil)))
+            (let [^:mutable curtok i]
+              (set! saw_xdigit false)
+              (set! val 0)
+              (while (< i srcb_length)
+                (set! ch (aget srcb i))
+                (set! i (unchecked-inc-int i))
+                (let [chval (IPAddressUtil/digit ch 16)]
+                  (cond
+                    (not (== chval -1))
+                      (do
+                        (set! val (bit-shift-left-int val 4))
+                        (set! val (bit-or-int val chval))
+                        (when (> val 0xffff) (return nil))
+                        (set! saw_xdigit true))
+                    (== ch \:)
+                      (do
+                        (set! curtok i)
+                        (if (not saw_xdigit)
+                            (do (when-not (== colonp -1) (return nil)) (set! colonp j))
+                            (do
+                              (when (== i srcb_length) (return nil))
+                              (when (> (unchecked-add-int j INT16SZ) INADDR16SZ) (return nil))
+                              (aset dst
+                                    j
+                                    (unchecked-byte (bit-and-int (bit-shift-right-int val 8) 0xff)))
+                              (set! j (unchecked-inc-int j))
+                              (aset dst j (unchecked-byte (bit-and-int val 0xff)))
+                              (set! j (unchecked-inc-int j))
+                              (set! saw_xdigit false)
+                              (set! val 0))))
+                    :else
+                      (do
+                        (when (and (== ch \.) (<= (unchecked-add-int j INADDR4SZ) INADDR16SZ))
+                          (let [ia4 (.substring src curtok srcb_length)
+                                ^:mutable ^int dot_count 0
+                                ^:mutable ^int index 0]
+                            (while (not (== (set! index (.indexOf ia4 \. index)) -1))
+                              (set! dot_count (unchecked-inc-int dot_count))
+                              (set! index (unchecked-inc-int index)))
+                            (when-not (== dot_count 3) (return nil))
+                            (let [v4addr (IPAddressUtil/textToNumericFormatV4 ia4)]
+                              (when (nil? v4addr) (return nil))
+                              (loop [^int k 0]
+                                (when (< k INADDR4SZ)
+                                  (aset dst j (aget v4addr k))
+                                  (set! j (unchecked-inc-int j))
+                                  (recur (unchecked-inc-int k))))
+                              (set! saw_xdigit false)
+                              (break))))
+                        (return nil)))))
+              (when saw_xdigit
+                (when (> (unchecked-add-int j INT16SZ) INADDR16SZ) (return nil))
+                (aset dst j (unchecked-byte (bit-and-int (bit-shift-right-int val 8) 0xff)))
+                (set! j (unchecked-inc-int j))
+                (aset dst j (unchecked-byte (bit-and-int val 0xff)))
+                (set! j (unchecked-inc-int j)))
+              (when-not (== colonp -1)
+                (let [n (unchecked-subtract-int j colonp)]
+                  (when (== j INADDR16SZ) (return nil))
+                  (set! i 1)
+                  (while (<= i n)
+                    (aset dst
+                          (unchecked-subtract-int INADDR16SZ i)
+                          (aget dst (unchecked-subtract-int (unchecked-add-int colonp n) i)))
+                    (aset dst (unchecked-subtract-int (unchecked-add-int colonp n) i) 0)
+                    (set! i (unchecked-inc-int i)))
+                  (set! j INADDR16SZ)))
+              (when-not (not (== j INADDR16SZ))
+                (let [newdst (IPAddressUtil/convertFromIPv4MappedAddress dst)]
+                  (if (some? newdst) newdst dst)))))))))
+
+  (method ^:public ^:static isIPv4LiteralAddress ^boolean [^String src]
+    (some? (IPAddressUtil/textToNumericFormatV4 src)))
+
+  (method ^:public ^:static isIPv6LiteralAddress ^boolean [^String src]
+    (some? (IPAddressUtil/textToNumericFormatV6 src)))
+
+  (method ^:public ^:static convertFromIPv4MappedAddress ^byte/1 [^byte/1 addr]
+    (when (IPAddressUtil/isIPv4MappedAddress addr)
+      (let [newAddr (new byte/1 INADDR4SZ)] (System/arraycopy addr 12 newAddr 0 INADDR4SZ) newAddr)))
+
+  (method ^:private ^:static isIPv4MappedAddress ^boolean [^byte/1 addr]
+    (cond
+      (< (alength addr) INADDR16SZ) false
+      (and (and (and (and (and (and (and (and (and
+                                                (and
+                                                  (and
+                                                    (== (aget addr 0) 0x00)
+                                                    (== (aget addr 1) 0x00))
+                                                  (== (aget addr 2) 0x00))
+                                                (== (aget addr 3) 0x00))
+                                              (== (aget addr 4) 0x00))
+                                         (== (aget addr 5) 0x00))
+                                    (== (aget addr 6) 0x00))
+                               (== (aget addr 7) 0x00))
+                          (== (aget addr 8) 0x00))
+                     (== (aget addr 9) 0x00))
+                (== (aget addr 10) (unchecked-byte 0xff)))
+           (== (aget addr 11) (unchecked-byte 0xff)))
+        true
+      :else false))
+
+  (field ^:private ^:static ^:final ^{:tag (ConcurrentHashMap InetAddress InetAddress)} cache
+    (ConcurrentHashMap.))
+
+  (method ^:public ^:static toScopedAddress :throws [SocketException] ^InetAddress [^InetAddress address]
+    (if (and (and (instance? Inet6Address address) (.isLinkLocalAddress address))
+             (== (.getScopeId (cast Inet6Address address)) 0))
+        (let [^:mutable ^InetAddress cached nil]
+          (try
+            (set! cached
+                  (cast InetAddress
+                        (.computeIfAbsent cache
+                                          address
+                                          (lambda Function ^InetAddress [^InetAddress k]
+                                            (IPAddressUtil/findScopedAddress k)))))
+            (catch UncheckedIOException e (throw (cast SocketException (.getCause e)))))
+          (if (some? cached) cached address))
+        address))
+
+  (method ^:public ^:static toScopedAddress :throws [SocketException] ^InetSocketAddress [^InetSocketAddress address]
+    (let [^:mutable ^InetAddress addr nil
+          orig (.getAddress address)]
+      (if (identical? (set! addr (IPAddressUtil/toScopedAddress orig)) orig)
+          address
+          (InetSocketAddress. addr (.getPort address)))))
+
+  (method ^:private ^:static findScopedAddress ^InetAddress [^InetAddress address]
+    (try
+      (let [^{:tag (List InetAddress)} result (.toList
+                                                (.filter
+                                                  (.flatMap
+                                                    (NetworkInterface/networkInterfaces)
+                                                    (method-ref
+                                                      Function
+                                                      ^Stream [NetworkInterface]
+                                                      NetworkInterface/.inetAddresses))
+                                                  (lambda Predicate ^boolean [^InetAddress a]
+                                                    (and
+                                                      (and
+                                                        (instance? Inet6Address a)
+                                                        (.equals address a))
+                                                      (not
+                                                        (== (.getScopeId (cast Inet6Address a)) 0))))))
+            sz (.size result)]
+        (when-not (== sz 0)
+          (when (> sz 1)
+            (throw (UncheckedIOException.
+                     (SocketException. "Duplicate link local addresses: must specify scope-id"))))
+          (cast InetAddress (.get result 0))))
+      (catch SocketException socketException nil)))
+
+  (field ^:private ^:static ^:final ^long L_IPV6_DELIMS 0x0)
+
+  (field ^:private ^:static ^:final ^long H_IPV6_DELIMS 0x28000000)
+
+  (field ^:private ^:static ^:final ^long L_GEN_DELIMS (unchecked-long 0x8400800800000000))
+
+  (field ^:private ^:static ^:final ^long H_GEN_DELIMS 0x28000001)
+
+  (field ^:private ^:static ^:final ^long L_AUTH_DELIMS 0x400000000000000)
+
+  (field ^:private ^:static ^:final ^long H_AUTH_DELIMS 0x28000001)
+
+  (field ^:private ^:static ^:final ^long L_COLON 0x400000000000000)
+
+  (field ^:private ^:static ^:final ^long H_COLON 0x0)
+
+  (field ^:private ^:static ^:final ^long L_SLASH 0x800000000000)
+
+  (field ^:private ^:static ^:final ^long H_SLASH 0x0)
+
+  (field ^:private ^:static ^:final ^long L_BACKSLASH 0x0)
+
+  (field ^:private ^:static ^:final ^long H_BACKSLASH 0x10000000)
+
+  (field ^:private ^:static ^:final ^long L_NON_PRINTABLE 0xffffffff)
+
+  (field ^:private ^:static ^:final ^long H_NON_PRINTABLE (unchecked-long 0x8000000000000000))
+
+  (field ^:private ^:static ^:final ^long L_EXCLUDE (unchecked-long 0x84008008ffffffff))
+
+  (field ^:private ^:static ^:final ^long H_EXCLUDE (unchecked-long 0x8000000038000001))
+
+  (field ^:private ^:static ^:final ^long L_EXCLUDED_DELIMS 0x5000000500000000)
+
+  (field ^:private ^:static ^:final ^long H_EXCLUDED_DELIMS 0x0)
+
+  (field ^:private ^:static ^:final ^long L_UNWISE 0x0)
+
+  (field ^:private ^:static ^:final ^long H_UNWISE 0x3800000178000000)
+
+  (field ^:private ^:static ^:final ^long L_FRAGMENT 0x0000000800000000)
+
+  (field ^:private ^:static ^:final ^long H_FRAGMENT 0x0)
+
+  (field ^:private ^:static ^:final ^long L_QUERY (unchecked-long 0x8000000000000000))
+
+  (field ^:private ^:static ^:final ^long H_QUERY 0x0)
+
+  (field ^:private ^:static ^:final ^char/1 OTHERS
+    (new char/1
+         [8263 8264 8265 8448 8449 8453 8454 10868 65109 65110 65119 65131 65283 65295 65306 65311
+          65312]))
+
+  (method ^:public ^:static match ^boolean [^char c ^long lowMask ^long highMask]
+    (cond
+      (< c 64) (not (== (bit-and (bit-shift-left 1 c) lowMask) 0))
+      (< c 128) (not (== (bit-and (bit-shift-left 1 (unchecked-subtract-int c 64)) highMask) 0))
+      :else false))
+
+  (method ^:public ^:static scan ^int [^String s ^long lowMask ^long highMask]
+    (let [^:mutable ^int i -1
+          ^:mutable ^int len 0]
+      (if (or (nil? s) (== (set! len (.length s)) 0))
+          -1
+          (let [^:mutable match false]
+            (while (and (< (set! i (unchecked-inc-int i)) len)
+                        (not (set! match (IPAddressUtil/match (.charAt s i) lowMask highMask)))))
+            (if match i -1)))))
+
+  (method ^:public ^:static scan ^int [^String s ^long lowMask ^long highMask ^char/1 others]
+    (let [^:mutable ^int i -1
+          ^:mutable ^int len 0]
+      (if (or (nil? s) (== (set! len (.length s)) 0))
+          -1
+          (let [^:mutable match false
+                ^:mutable ^char c (unchecked-char 0)
+                c0 (aget others 0)]
+            (while (and (< (set! i (unchecked-inc-int i)) len)
+                        (not (set! match
+                                   (IPAddressUtil/match (set! c (.charAt s i)) lowMask highMask))))
+              (when (and (>= c c0) (> (Arrays/binarySearch others c) -1)) (set! match true) (break)))
+            (if match i -1)))))
+
+  (method ^:private ^:static describeChar ^String [^char c]
+    (cond
+      (or (< c 32) (== c 127))
+        (cond
+          (== c \newline) "LF"
+          (== c \return) "CR"
+          :else (java-str "control char (code=" (int c) ")"))
+      (== c \\) "'\\'"
+      :else (java-str "'" c "'")))
+
+  (method ^:public ^:static checkUserInfo ^String [^String str]
+    (let [index (IPAddressUtil/scan str MASKS/L_USERINFO_MASK MASKS/H_USERINFO_MASK)]
+      (when (>= index 0)
+        (java-str "Illegal character found in user-info: "
+                  (IPAddressUtil/describeChar (.charAt str index))))))
+
+  (method ^:private ^:static checkHost ^String [^:mutable ^String str]
+    (let [^:mutable ^int index 0]
+      (if (and (.startsWith str "[") (.endsWith str "]"))
+          (do
+            (set! str (.substring str 1 (unchecked-subtract-int (.length str) 1)))
+            (if (IPAddressUtil/isIPv6LiteralAddress str)
+                (do
+                  (set! index (.indexOf str \%))
+                  (when (>= index 0)
+                    (set! index
+                          (IPAddressUtil/scan (set! str (.substring str index))
+                                              MASKS/L_SCOPE_MASK
+                                              MASKS/H_SCOPE_MASK))
+                    (when (>= index 0)
+                      (return (java-str "Illegal character found in IPv6 scoped address: "
+                                        (IPAddressUtil/describeChar (.charAt str index))))))
+                  nil)
+                "Unrecognized IPv6 address format"))
+          (do
+            (set! index
+                  (IPAddressUtil/scan str
+                                      (bit-or L_EXCLUDE MASKS/L_HOSTNAME_MASK)
+                                      (bit-or H_EXCLUDE MASKS/H_HOSTNAME_MASK)
+                                      OTHERS))
+            (when (>= index 0)
+              (return (java-str "Illegal character found in host: "
+                                (IPAddressUtil/describeChar (.charAt str index)))))
+            nil))))
+
+  (method ^:public ^:static checkAuth ^String [^String str]
+    (let [index (IPAddressUtil/scan str
+                                    (bit-and L_EXCLUDE (bit-not L_AUTH_DELIMS))
+                                    (bit-and H_EXCLUDE (bit-not H_AUTH_DELIMS)))]
+      (when (>= index 0)
+        (java-str "Illegal character found in authority: "
+                  (IPAddressUtil/describeChar (.charAt str index))))))
+
+  (method ^:public ^:static checkAuthority ^String [^URL url]
+    (let [^:mutable ^String s nil
+          ^:mutable ^String u nil
+          ^:mutable ^String h nil]
+      (when (some? url)
+        (cond
+          (some? (set! s (IPAddressUtil/checkUserInfo (set! u (.getUserInfo url))))) s
+          (some? (set! s (IPAddressUtil/checkHost (set! h (.getHost url))))) s
+          (and (nil? h) (nil? u)) (IPAddressUtil/checkAuth (.getAuthority url))))))
+
+  (method ^:public ^:static checkExternalForm ^String [^URL url]
+    (let [^:mutable ^String s nil]
+      (when (some? url)
+        (let [earlyURLParsing (IPAddressUtil/earlyURLParsing)
+              userInfo (.getUserInfo url)]
+          (if earlyURLParsing
+              (when (some? (set! s (IPAddressUtil/checkUserInfo userInfo))) (return s))
+              (let [index (IPAddressUtil/scan (set! s userInfo)
+                                              (bit-or L_NON_PRINTABLE L_SLASH)
+                                              (bit-or H_NON_PRINTABLE H_SLASH))]
+                (when (>= index 0)
+                  (return (java-str "Illegal character found in authority: "
+                                    (IPAddressUtil/describeChar (.charAt s index)))))))
+          (let [host (.getHost url)] (when (some? (set! s (IPAddressUtil/checkHostString host))) s))))))
+
+  (method ^:public ^:static checkHostString ^String [^String host]
+    (when (some? host)
+      (if (IPAddressUtil/earlyURLParsing)
+          (IPAddressUtil/checkHost host)
+          (do
+            (let [index (IPAddressUtil/scan host MASKS/L_HOSTNAME_MASK MASKS/H_HOSTNAME_MASK OTHERS)]
+              (when (>= index 0)
+                (return (java-str "Illegal character found in host: "
+                                  (IPAddressUtil/describeChar (.charAt host index))))))
+            nil))))
+
+  (method ^:public ^:static digit ^int [^char ch ^int radix]
+    (if ALLOW_AMBIGUOUS_IPADDRESS_LITERALS_SP_VALUE
+        (Character/digit ch radix)
+        (IPAddressUtil/parseAsciiDigit ch radix)))
+
+  (method ^:public ^:static isBsdParsableV4 ^boolean [^String input]
+    (some? (IPAddressUtil/parseBsdLiteralV4 input)))
+
+  (method ^:public ^:static parseBsdLiteralV4 ^byte/1 [^String input]
+    (let [res (new byte/1 [0 0 0 0])
+          len (.length input)]
+      (when-not (== len 0)
+        (let [firstSymbol (.charAt input 0)]
+          (when-not (== (IPAddressUtil/parseAsciiDigit firstSymbol DECIMAL) -1)
+            (let [lastSymbol (.charAt input (unchecked-subtract-int len 1))]
+              (when-not (or (== lastSymbol \.)
+                            (== (IPAddressUtil/parseAsciiHexDigit lastSymbol) -1))
+                (let [charBuffer (CharBuffer/wrap input)
+                      ^:mutable ^int fieldNumber 0
+                      ^:mutable fieldValue -1]
+                  (while (.hasRemaining charBuffer)
+                    (set! fieldValue -1)
+                    (for-each [^int radix SUPPORTED_RADIXES]
+                      (set! fieldValue (IPAddressUtil/parseV4FieldBsd radix charBuffer fieldNumber))
+                      (cond
+                        (>= fieldValue 0)
+                          (do
+                            (when (< fieldValue 256)
+                              (aset res fieldNumber (unchecked-byte fieldValue)))
+                            (set! fieldNumber (unchecked-inc-int fieldNumber))
+                            (break))
+                        (== fieldValue TERMINAL_PARSE_ERROR) (return nil)))
+                    (when (< fieldValue 0) (return nil)))
+                  (when-not (< fieldValue 0)
+                    (when (< fieldNumber 4)
+                      (loop [^int i 3]
+                        (when (>= i (unchecked-subtract-int fieldNumber 1))
+                          (aset res i (unchecked-byte (bit-and fieldValue 255)))
+                          (set! fieldValue (bit-shift-right fieldValue 8))
+                          (recur (unchecked-dec-int i)))))
+                    res)))))))))
+
+  (method ^:private ^:static parseV4FieldBsd ^long [^int radix ^CharBuffer buffer ^int fieldNumber]
+    (let [initialPos (.position buffer)
+          ^:mutable val 0
+          ^:mutable ^int digitsCount 0]
+      (when-not (IPAddressUtil/checkPrefix buffer radix) (set! val CANT_PARSE_IN_RADIX))
+      (let [^:mutable dotSeen false]
+        (while (and (and (.hasRemaining buffer) (not (== val CANT_PARSE_IN_RADIX))) (not dotSeen))
+          (let [c (.get buffer)]
+            (if (== c \.)
+                (do
+                  (set! dotSeen true)
+                  (when (== fieldNumber 3) (return TERMINAL_PARSE_ERROR))
+                  (when (== digitsCount 0) (return TERMINAL_PARSE_ERROR))
+                  (when (> val 255) (return TERMINAL_PARSE_ERROR)))
+                (let [dv (IPAddressUtil/parseAsciiDigit c radix)]
+                  (if (>= dv 0)
+                      (do
+                        (set! digitsCount (unchecked-inc-int digitsCount))
+                        (set! val (unchecked-multiply val radix))
+                        (set! val (unchecked-add val dv)))
+                      (return TERMINAL_PARSE_ERROR))))))
+        (if (== val CANT_PARSE_IN_RADIX)
+            (.position buffer initialPos)
+            (when-not dotSeen
+              (let [maxValue (unchecked-subtract
+                               (bit-shift-left 1
+                                               (unchecked-multiply-int
+                                                 (unchecked-subtract-int 4 fieldNumber)
+                                                 8))
+                               1)]
+                (when (> val maxValue) (return TERMINAL_PARSE_ERROR)))))
+        val)))
+
+  (method ^:private ^:static checkPrefix ^boolean [^CharBuffer buffer ^int radix]
+    (switch radix
+      OCTAL (IPAddressUtil/isOctalFieldStart buffer)
+      DECIMAL (IPAddressUtil/isDecimalFieldStart buffer)
+      HEXADECIMAL (IPAddressUtil/isHexFieldStart buffer)
+      (throw (AssertionError. "Not supported radix"))))
+
+  (method ^:private ^:static isOctalFieldStart ^boolean [^CharBuffer cb]
+    (if (< (.remaining cb) 2)
+        false
+        (let [position (.position cb)
+              first (.get cb)
+              second (.get cb)
+              isOctalPrefix (and (== first \0) (not (== second \.)))]
+          (when isOctalPrefix (.position cb (unchecked-add-int position 1)))
+          isOctalPrefix)))
+
+  (method ^:private ^:static isDecimalFieldStart ^boolean [^CharBuffer cb]
+    (.hasRemaining cb))
+
+  (method ^:private ^:static isHexFieldStart ^boolean [^CharBuffer cb]
+    (if (< (.remaining cb) 2)
+        false
+        (let [first (.get cb)
+              second (.get cb)]
+          (and (== first \0) (or (== second \x) (== second \X))))))
+
+  (method ^:public ^:static parseAsciiDigit ^int [^char c ^int radix]
+    (java-assert (or (or (== radix OCTAL) (== radix DECIMAL)) (== radix HEXADECIMAL)))
+    (if (== radix HEXADECIMAL)
+        (IPAddressUtil/parseAsciiHexDigit c)
+        (let [val (unchecked-subtract-int c \0)] (if (or (< val 0) (>= val radix)) -1 val))))
+
+  (method ^:private ^:static parseAsciiHexDigit ^int [^char digit]
+    (let [c (Character/toLowerCase digit)]
+      (if (and (>= c \a) (<= c \f))
+          (unchecked-add-int (unchecked-subtract-int c \a) 10)
+          (IPAddressUtil/parseAsciiDigit c DECIMAL))))
+
+  (method ^:public ^:static earlyURLParsing ^boolean []
+    (not MASKS/DELAY_URL_PARSING_SP_VALUE))
+
+  (method ^:public ^:static delayURLParsing ^boolean []
+    MASKS/DELAY_URL_PARSING_SP_VALUE)
+
+  (field ^:private ^:static ^:final ^int HEXADECIMAL 16)
+
+  (field ^:private ^:static ^:final ^int DECIMAL 10)
+
+  (field ^:private ^:static ^:final ^int OCTAL 8)
+
+  (field ^:private ^:static ^:final ^int/1 SUPPORTED_RADIXES
+    (new int/1 [HEXADECIMAL OCTAL DECIMAL]))
+
+  (field ^:private ^:static ^:final ^long CANT_PARSE_IN_RADIX -1)
+
+  (field ^:private ^:static ^:final ^long TERMINAL_PARSE_ERROR -2)
+
+  (field ^:private ^:static ^:final ^String ALLOW_AMBIGUOUS_IPADDRESS_LITERALS_SP
+    "jdk.net.allowAmbiguousIPAddressLiterals")
+
+  (field ^:private ^:static ^:final ^boolean ALLOW_AMBIGUOUS_IPADDRESS_LITERALS_SP_VALUE
+    (Boolean/getBoolean ALLOW_AMBIGUOUS_IPADDRESS_LITERALS_SP))
+
+  (defclass ^:private ^:static MASKS
+    (field ^:private ^:static ^:final ^String DELAY_URL_PARSING_SP "jdk.net.url.delayParsing")
+
+    (field ^:private ^:static ^:final ^boolean DELAY_URL_PARSING_SP_VALUE)
+
+    (field ^:static ^:final ^long L_USERINFO_MASK (bit-and L_EXCLUDE (bit-not L_COLON)))
+
+    (field ^:static ^:final ^long H_USERINFO_MASK (bit-and H_EXCLUDE (bit-not H_COLON)))
+
+    (field ^:static ^:final ^long L_HOSTNAME_MASK)
+
+    (field ^:static ^:final ^long H_HOSTNAME_MASK)
+
+    (field ^:static ^:final ^long L_SCOPE_MASK)
+
+    (field ^:static ^:final ^long H_SCOPE_MASK)
+
+    (static-initializer
+      (let [value (System/getProperty DELAY_URL_PARSING_SP "false")]
+        (set! DELAY_URL_PARSING_SP_VALUE (or (.isEmpty value) (Boolean/parseBoolean value)))
+        (if DELAY_URL_PARSING_SP_VALUE
+            (do
+              (set! L_HOSTNAME_MASK (bit-or L_NON_PRINTABLE L_SLASH))
+              (set! H_HOSTNAME_MASK (bit-or H_NON_PRINTABLE H_SLASH))
+              (set! L_SCOPE_MASK (bit-or L_NON_PRINTABLE L_IPV6_DELIMS))
+              (set! H_SCOPE_MASK (bit-or H_NON_PRINTABLE H_IPV6_DELIMS)))
+            (do
+              (set! L_HOSTNAME_MASK
+                    (bit-or (bit-or (bit-or L_NON_PRINTABLE L_SLASH) L_UNWISE) L_EXCLUDED_DELIMS))
+              (set! H_HOSTNAME_MASK
+                    (bit-or (bit-or (bit-or H_NON_PRINTABLE H_SLASH) H_UNWISE) H_EXCLUDED_DELIMS))
+              (set! L_SCOPE_MASK
+                    (bit-or (bit-or (bit-or (bit-or (bit-or L_NON_PRINTABLE L_IPV6_DELIMS) L_SLASH)
+                                            L_BACKSLASH)
+                                    L_FRAGMENT)
+                            L_QUERY))
+              (set! H_SCOPE_MASK
+                    (bit-or (bit-or (bit-or (bit-or (bit-or H_NON_PRINTABLE H_IPV6_DELIMS) H_SLASH)
+                                            H_BACKSLASH)
+                                    H_FRAGMENT)
+                            H_QUERY))))))))

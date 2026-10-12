@@ -1,0 +1,553 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/stream/SliceOps.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.stream)
+
+(import '(java.util Spliterator Spliterator$OfDouble Spliterator$OfInt Spliterator$OfLong)
+        '(java.util.concurrent CountedCompleter)
+        '(java.util.function IntFunction))
+
+(defclass ^:final SliceOps
+  (constructor ^:private [this])
+
+  (method ^:private ^:static calcSize ^long [^long size ^long skip ^long limit]
+    (if (>= size 0) (Math/clamp (unchecked-subtract size skip) 0 limit) -1))
+
+  (method ^:private ^:static calcSliceFence ^long [^long skip ^long limit]
+    (let [sliceFence (if (>= limit 0) (unchecked-add skip limit) Long/MAX_VALUE)]
+      (if (>= sliceFence 0) sliceFence Long/MAX_VALUE)))
+
+  (method ^:private ^:static sliceSpliterator :type-params [P_IN] ^{:tag (Spliterator P_IN)} [^StreamShape shape
+                                                                                              ^{:tag (Spliterator P_IN)} s
+                                                                                              ^long skip
+                                                                                              ^long limit]
+    (java-assert (.hasCharacteristics s Spliterator/SUBSIZED))
+    (let [sliceFence (SliceOps/calcSliceFence skip limit)
+          ^{:tag (Spliterator P_IN)} sliceSpliterator (cast
+                                                        Spliterator
+                                                        (switch shape
+                                                          REFERENCE
+                                                            (StreamSpliterators$SliceSpliterator$OfRef.
+                                                              s
+                                                              skip
+                                                              sliceFence)
+                                                          INT_VALUE
+                                                            (StreamSpliterators$SliceSpliterator$OfInt.
+                                                              (cast Spliterator$OfInt s)
+                                                              skip
+                                                              sliceFence)
+                                                          LONG_VALUE
+                                                            (StreamSpliterators$SliceSpliterator$OfLong.
+                                                              (cast Spliterator$OfLong s)
+                                                              skip
+                                                              sliceFence)
+                                                          DOUBLE_VALUE
+                                                            (StreamSpliterators$SliceSpliterator$OfDouble.
+                                                              (cast Spliterator$OfDouble s)
+                                                              skip
+                                                              sliceFence)
+                                                          (throw (MatchException. nil nil))))]
+      sliceSpliterator))
+
+  (method ^:public ^:static makeRef :type-params [T] ^{:tag (Stream T)} [^{:tag (AbstractPipeline ? T ?)} upstream
+                                                                         ^long skip ^long limit]
+    (when (< skip 0)
+      (throw (IllegalArgumentException. (java-str "Skip must be non-negative: " skip))))
+    (let [normalizedLimit (if (>= limit 0) limit Long/MAX_VALUE)]
+      (anon (ReferencePipeline$StatefulOp T T) [upstream
+                                                StreamShape/REFERENCE
+                                                (SliceOps/flags limit)]
+        (method exactOutputSize ^long [this ^long previousSize]
+          (SliceOps/calcSize previousSize skip normalizedLimit))
+
+        (method unorderedSkipLimitSpliterator ^{:tag (Spliterator T)} [this
+                                                                       ^{:tag (Spliterator T)} s
+                                                                       ^:mutable ^long skip
+                                                                       ^:mutable ^long limit
+                                                                       ^long sizeIfKnown]
+          (when (<= skip sizeIfKnown)
+            (set! limit
+                  (if (>= limit 0)
+                      (Math/min limit (unchecked-subtract sizeIfKnown skip))
+                      (unchecked-subtract sizeIfKnown skip)))
+            (set! skip 0))
+          (StreamSpliterators$UnorderedSliceSpliterator$OfRef. s skip limit))
+
+        (method opEvaluateParallelLazy :type-params [P_IN] ^{:tag (Spliterator T)} [this
+                                                                                    ^{:tag (PipelineHelper T)} helper
+                                                                                    ^{:tag (Spliterator P_IN)} spliterator]
+          (let [size (.exactOutputSizeIfKnown helper spliterator)]
+            (cond
+              (and (> size 0) (.hasCharacteristics spliterator Spliterator/SUBSIZED))
+                (StreamSpliterators$SliceSpliterator$OfRef.
+                  (.wrapSpliterator helper spliterator)
+                  skip
+                  (SliceOps/calcSliceFence skip limit))
+              (not (.isKnown StreamOpFlag/ORDERED (.getStreamAndOpFlags helper)))
+                (.unorderedSkipLimitSpliterator this
+                                                (.wrapSpliterator helper spliterator)
+                                                skip
+                                                limit
+                                                size)
+              :else
+                (.spliterator (cast Node
+                                    (.invoke (SliceTask.
+                                               this
+                                               helper
+                                               spliterator
+                                               (Nodes/castingArray)
+                                               skip
+                                               limit)))))))
+
+        (method opEvaluateParallel :type-params [P_IN] ^{:tag (Node T)} [this
+                                                                         ^{:tag (PipelineHelper T)} helper
+                                                                         ^{:tag (Spliterator P_IN)} spliterator
+                                                                         ^{:tag (IntFunction T/1)} generator]
+          (let [size (.exactOutputSizeIfKnown helper spliterator)]
+            (cond
+              (and (> size 0) (.hasCharacteristics spliterator Spliterator/SUBSIZED))
+                (let [^{:tag (Spliterator P_IN)} s (SliceOps/sliceSpliterator
+                                                     (.getSourceShape helper)
+                                                     spliterator
+                                                     skip
+                                                     limit)]
+                  (Nodes/collect helper s true generator))
+              (not (.isKnown StreamOpFlag/ORDERED (.getStreamAndOpFlags helper)))
+                (let [^{:tag (Spliterator T)} s (.unorderedSkipLimitSpliterator
+                                                  this
+                                                  (.wrapSpliterator helper spliterator)
+                                                  skip
+                                                  limit
+                                                  size)]
+                  (Nodes/collect this s true generator))
+              :else (cast Node (.invoke (SliceTask. this helper spliterator generator skip limit))))))
+
+        (method opWrapSink ^{:tag (Sink T)} [this1 ^int flags ^{:tag (Sink T)} sink]
+          (anon (Sink$ChainedReference T T) [sink]
+            (field ^long n skip)
+
+            (field ^long m normalizedLimit)
+
+            (method ^:public begin ^void [this ^long size]
+              (.begin (.-downstream this) (SliceOps/calcSize size skip m)))
+
+            (method ^:public accept ^void [this ^T t]
+              (if (== n 0)
+                  (when (> m 0) (set! m (unchecked-dec m)) (.accept (.-downstream this) t))
+                  (set! n (unchecked-dec n))))
+
+            (method ^:public cancellationRequested ^boolean [this]
+              (or (== m 0) (.cancellationRequested (.-downstream this)))))))))
+
+  (method ^:public ^:static makeInt ^IntStream [^{:tag (AbstractPipeline ? Integer ?)} upstream
+                                                ^long skip ^long limit]
+    (when (< skip 0)
+      (throw (IllegalArgumentException. (java-str "Skip must be non-negative: " skip))))
+    (let [normalizedLimit (if (>= limit 0) limit Long/MAX_VALUE)]
+      (anon (IntPipeline$StatefulOp Integer) [upstream StreamShape/INT_VALUE (SliceOps/flags limit)]
+        (method exactOutputSize ^long [this ^long previousSize]
+          (SliceOps/calcSize previousSize skip normalizedLimit))
+
+        (method unorderedSkipLimitSpliterator ^Spliterator$OfInt [this ^Spliterator$OfInt s
+                                                                  ^:mutable ^long skip
+                                                                  ^:mutable ^long limit
+                                                                  ^long sizeIfKnown]
+          (when (<= skip sizeIfKnown)
+            (set! limit
+                  (if (>= limit 0)
+                      (Math/min limit (unchecked-subtract sizeIfKnown skip))
+                      (unchecked-subtract sizeIfKnown skip)))
+            (set! skip 0))
+          (StreamSpliterators$UnorderedSliceSpliterator$OfInt. s skip limit))
+
+        (method opEvaluateParallelLazy :type-params [P_IN] ^{:tag (Spliterator Integer)} [this
+                                                                                          ^{:tag (PipelineHelper Integer)} helper
+                                                                                          ^{:tag (Spliterator P_IN)} spliterator]
+          (let [size (.exactOutputSizeIfKnown helper spliterator)]
+            (cond
+              (and (> size 0) (.hasCharacteristics spliterator Spliterator/SUBSIZED))
+                (StreamSpliterators$SliceSpliterator$OfInt.
+                  (cast Spliterator$OfInt (.wrapSpliterator helper spliterator))
+                  skip
+                  (SliceOps/calcSliceFence skip limit))
+              (not (.isKnown StreamOpFlag/ORDERED (.getStreamAndOpFlags helper)))
+                (.unorderedSkipLimitSpliterator this
+                                                (cast
+                                                  Spliterator$OfInt
+                                                  (.wrapSpliterator helper spliterator))
+                                                skip
+                                                limit
+                                                size)
+              :else
+                (.spliterator (cast Node
+                                    (.invoke
+                                      (SliceTask.
+                                        this
+                                        helper
+                                        spliterator
+                                        (lambda IntFunction ^Integer/1 ^:method-ref [^int n-1]
+                                          (new Integer/1 n-1))
+                                        skip
+                                        limit)))))))
+
+        (method opEvaluateParallel :type-params [P_IN] ^{:tag (Node Integer)} [this
+                                                                               ^{:tag (PipelineHelper Integer)} helper
+                                                                               ^{:tag (Spliterator P_IN)} spliterator
+                                                                               ^{:tag (IntFunction Integer/1)} generator]
+          (let [size (.exactOutputSizeIfKnown helper spliterator)]
+            (cond
+              (and (> size 0) (.hasCharacteristics spliterator Spliterator/SUBSIZED))
+                (let [^{:tag (Spliterator P_IN)} s (SliceOps/sliceSpliterator
+                                                     (.getSourceShape helper)
+                                                     spliterator
+                                                     skip
+                                                     limit)]
+                  (Nodes/collectInt helper s true))
+              (not (.isKnown StreamOpFlag/ORDERED (.getStreamAndOpFlags helper)))
+                (let [s (.unorderedSkipLimitSpliterator
+                          this
+                          (cast Spliterator$OfInt (.wrapSpliterator helper spliterator))
+                          skip
+                          limit
+                          size)]
+                  (Nodes/collectInt this s true))
+              :else (cast Node (.invoke (SliceTask. this helper spliterator generator skip limit))))))
+
+        (method opWrapSink ^{:tag (Sink Integer)} [this1 ^int flags ^{:tag (Sink Integer)} sink]
+          (anon (Sink$ChainedInt Integer) [sink]
+            (field ^long n skip)
+
+            (field ^long m normalizedLimit)
+
+            (method ^:public begin ^void [this ^long size]
+              (.begin (.-downstream this) (SliceOps/calcSize size skip m)))
+
+            (method ^:public accept ^void [this ^int t]
+              (if (== n 0)
+                  (when (> m 0) (set! m (unchecked-dec m)) (.accept (.-downstream this) t))
+                  (set! n (unchecked-dec n))))
+
+            (method ^:public cancellationRequested ^boolean [this]
+              (or (== m 0) (.cancellationRequested (.-downstream this)))))))))
+
+  (method ^:public ^:static makeLong ^LongStream [^{:tag (AbstractPipeline ? Long ?)} upstream
+                                                  ^long skip ^long limit]
+    (when (< skip 0)
+      (throw (IllegalArgumentException. (java-str "Skip must be non-negative: " skip))))
+    (let [normalizedLimit (if (>= limit 0) limit Long/MAX_VALUE)]
+      (anon (LongPipeline$StatefulOp Long) [upstream StreamShape/LONG_VALUE (SliceOps/flags limit)]
+        (method exactOutputSize ^long [this ^long previousSize]
+          (SliceOps/calcSize previousSize skip normalizedLimit))
+
+        (method unorderedSkipLimitSpliterator ^Spliterator$OfLong [this ^Spliterator$OfLong s
+                                                                   ^:mutable ^long skip
+                                                                   ^:mutable ^long limit
+                                                                   ^long sizeIfKnown]
+          (when (<= skip sizeIfKnown)
+            (set! limit
+                  (if (>= limit 0)
+                      (Math/min limit (unchecked-subtract sizeIfKnown skip))
+                      (unchecked-subtract sizeIfKnown skip)))
+            (set! skip 0))
+          (StreamSpliterators$UnorderedSliceSpliterator$OfLong. s skip limit))
+
+        (method opEvaluateParallelLazy :type-params [P_IN] ^{:tag (Spliterator Long)} [this
+                                                                                       ^{:tag (PipelineHelper Long)} helper
+                                                                                       ^{:tag (Spliterator P_IN)} spliterator]
+          (let [size (.exactOutputSizeIfKnown helper spliterator)]
+            (cond
+              (and (> size 0) (.hasCharacteristics spliterator Spliterator/SUBSIZED))
+                (StreamSpliterators$SliceSpliterator$OfLong.
+                  (cast Spliterator$OfLong (.wrapSpliterator helper spliterator))
+                  skip
+                  (SliceOps/calcSliceFence skip limit))
+              (not (.isKnown StreamOpFlag/ORDERED (.getStreamAndOpFlags helper)))
+                (.unorderedSkipLimitSpliterator this
+                                                (cast
+                                                  Spliterator$OfLong
+                                                  (.wrapSpliterator helper spliterator))
+                                                skip
+                                                limit
+                                                size)
+              :else
+                (.spliterator (cast Node
+                                    (.invoke (SliceTask.
+                                               this
+                                               helper
+                                               spliterator
+                                               (lambda IntFunction ^Long/1 ^:method-ref [^int n-2]
+                                                 (new Long/1 n-2))
+                                               skip
+                                               limit)))))))
+
+        (method opEvaluateParallel :type-params [P_IN] ^{:tag (Node Long)} [this
+                                                                            ^{:tag (PipelineHelper Long)} helper
+                                                                            ^{:tag (Spliterator P_IN)} spliterator
+                                                                            ^{:tag (IntFunction Long/1)} generator]
+          (let [size (.exactOutputSizeIfKnown helper spliterator)]
+            (cond
+              (and (> size 0) (.hasCharacteristics spliterator Spliterator/SUBSIZED))
+                (let [^{:tag (Spliterator P_IN)} s (SliceOps/sliceSpliterator
+                                                     (.getSourceShape helper)
+                                                     spliterator
+                                                     skip
+                                                     limit)]
+                  (Nodes/collectLong helper s true))
+              (not (.isKnown StreamOpFlag/ORDERED (.getStreamAndOpFlags helper)))
+                (let [s (.unorderedSkipLimitSpliterator
+                          this
+                          (cast Spliterator$OfLong (.wrapSpliterator helper spliterator))
+                          skip
+                          limit
+                          size)]
+                  (Nodes/collectLong this s true))
+              :else (cast Node (.invoke (SliceTask. this helper spliterator generator skip limit))))))
+
+        (method opWrapSink ^{:tag (Sink Long)} [this1 ^int flags ^{:tag (Sink Long)} sink]
+          (anon (Sink$ChainedLong Long) [sink]
+            (field ^long n skip)
+
+            (field ^long m normalizedLimit)
+
+            (method ^:public begin ^void [this ^long size]
+              (.begin (.-downstream this) (SliceOps/calcSize size skip m)))
+
+            (method ^:public accept ^void [this ^long t]
+              (if (== n 0)
+                  (when (> m 0) (set! m (unchecked-dec m)) (.accept (.-downstream this) t))
+                  (set! n (unchecked-dec n))))
+
+            (method ^:public cancellationRequested ^boolean [this]
+              (or (== m 0) (.cancellationRequested (.-downstream this)))))))))
+
+  (method ^:public ^:static makeDouble ^DoubleStream [^{:tag (AbstractPipeline ? Double ?)} upstream
+                                                      ^long skip ^long limit]
+    (when (< skip 0)
+      (throw (IllegalArgumentException. (java-str "Skip must be non-negative: " skip))))
+    (let [normalizedLimit (if (>= limit 0) limit Long/MAX_VALUE)]
+      (anon (DoublePipeline$StatefulOp Double) [upstream
+                                                StreamShape/DOUBLE_VALUE
+                                                (SliceOps/flags limit)]
+        (method exactOutputSize ^long [this ^long previousSize]
+          (SliceOps/calcSize previousSize skip normalizedLimit))
+
+        (method unorderedSkipLimitSpliterator ^Spliterator$OfDouble [this ^Spliterator$OfDouble s
+                                                                     ^:mutable ^long skip
+                                                                     ^:mutable ^long limit
+                                                                     ^long sizeIfKnown]
+          (when (<= skip sizeIfKnown)
+            (set! limit
+                  (if (>= limit 0)
+                      (Math/min limit (unchecked-subtract sizeIfKnown skip))
+                      (unchecked-subtract sizeIfKnown skip)))
+            (set! skip 0))
+          (StreamSpliterators$UnorderedSliceSpliterator$OfDouble. s skip limit))
+
+        (method opEvaluateParallelLazy :type-params [P_IN] ^{:tag (Spliterator Double)} [this
+                                                                                         ^{:tag (PipelineHelper Double)} helper
+                                                                                         ^{:tag (Spliterator P_IN)} spliterator]
+          (let [size (.exactOutputSizeIfKnown helper spliterator)]
+            (cond
+              (and (> size 0) (.hasCharacteristics spliterator Spliterator/SUBSIZED))
+                (StreamSpliterators$SliceSpliterator$OfDouble.
+                  (cast Spliterator$OfDouble (.wrapSpliterator helper spliterator))
+                  skip
+                  (SliceOps/calcSliceFence skip limit))
+              (not (.isKnown StreamOpFlag/ORDERED (.getStreamAndOpFlags helper)))
+                (.unorderedSkipLimitSpliterator this
+                                                (cast
+                                                  Spliterator$OfDouble
+                                                  (.wrapSpliterator helper spliterator))
+                                                skip
+                                                limit
+                                                size)
+              :else
+                (.spliterator (cast Node
+                                    (.invoke (SliceTask.
+                                               this
+                                               helper
+                                               spliterator
+                                               (lambda IntFunction ^Double/1 ^:method-ref [^int n-3]
+                                                 (new Double/1 n-3))
+                                               skip
+                                               limit)))))))
+
+        (method opEvaluateParallel :type-params [P_IN] ^{:tag (Node Double)} [this
+                                                                              ^{:tag (PipelineHelper Double)} helper
+                                                                              ^{:tag (Spliterator P_IN)} spliterator
+                                                                              ^{:tag (IntFunction Double/1)} generator]
+          (let [size (.exactOutputSizeIfKnown helper spliterator)]
+            (cond
+              (and (> size 0) (.hasCharacteristics spliterator Spliterator/SUBSIZED))
+                (let [^{:tag (Spliterator P_IN)} s (SliceOps/sliceSpliterator
+                                                     (.getSourceShape helper)
+                                                     spliterator
+                                                     skip
+                                                     limit)]
+                  (Nodes/collectDouble helper s true))
+              (not (.isKnown StreamOpFlag/ORDERED (.getStreamAndOpFlags helper)))
+                (let [s (.unorderedSkipLimitSpliterator
+                          this
+                          (cast Spliterator$OfDouble (.wrapSpliterator helper spliterator))
+                          skip
+                          limit
+                          size)]
+                  (Nodes/collectDouble this s true))
+              :else (cast Node (.invoke (SliceTask. this helper spliterator generator skip limit))))))
+
+        (method opWrapSink ^{:tag (Sink Double)} [this1 ^int flags ^{:tag (Sink Double)} sink]
+          (anon (Sink$ChainedDouble Double) [sink]
+            (field ^long n skip)
+
+            (field ^long m normalizedLimit)
+
+            (method ^:public begin ^void [this ^long size]
+              (.begin (.-downstream this) (SliceOps/calcSize size skip m)))
+
+            (method ^:public accept ^void [this ^double t]
+              (if (== n 0)
+                  (when (> m 0) (set! m (unchecked-dec m)) (.accept (.-downstream this) t))
+                  (set! n (unchecked-dec n))))
+
+            (method ^:public cancellationRequested ^boolean [this]
+              (or (== m 0) (.cancellationRequested (.-downstream this)))))))))
+
+  (method ^:private ^:static flags ^int [^long limit]
+    (bit-or-int StreamOpFlag/IS_SIZE_ADJUSTING
+                (if (not (== limit -1)) StreamOpFlag/IS_SHORT_CIRCUIT 0)))
+
+  (defclass ^:private ^:static ^:final SliceTask
+    :extends (AbstractShortCircuitTask P_IN P_OUT (Node P_OUT) (SliceTask P_IN P_OUT))
+    :type-params [P_IN P_OUT]
+
+    (field ^:private ^:final ^{:tag (AbstractPipeline P_OUT P_OUT ?)} op)
+
+    (field ^:private ^:final ^{:tag (IntFunction P_OUT/1)} generator)
+
+    (field ^:private ^:final ^long targetOffset)
+
+    (field ^:private ^:final ^long targetSize)
+
+    (field ^:private ^long thisNodeSize)
+
+    (field ^:private ^:volatile ^boolean completed)
+
+    (constructor [this ^{:tag (AbstractPipeline P_OUT P_OUT ?)} op
+                  ^{:tag (PipelineHelper P_OUT)} helper ^{:tag (Spliterator P_IN)} spliterator
+                  ^{:tag (IntFunction P_OUT/1)} generator ^long offset ^long size]
+      (super. helper spliterator)
+      (set! (.-op this) op)
+      (set! (.-generator this) generator)
+      (set! (.-targetOffset this) offset)
+      (set! (.-targetSize this) size))
+
+    (constructor [this ^{:tag (SliceTask P_IN P_OUT)} parent ^{:tag (Spliterator P_IN)} spliterator]
+      (super. parent spliterator)
+      (set! (.-op this) (.-op parent))
+      (set! (.-generator this) (.-generator parent))
+      (set! (.-targetOffset this) (.-targetOffset parent))
+      (set! (.-targetSize this) (.-targetSize parent)))
+
+    (method ^:protected makeChild ^{:tag (SliceTask P_IN P_OUT)} [this
+                                                                  ^{:tag (Spliterator P_IN)} spliterator]
+      (SliceTask. this spliterator))
+
+    (method ^:protected ^:final getEmptyResult ^{:tag (Node P_OUT)} [this]
+      (Nodes/emptyNode (.getOutputShape op)))
+
+    (method ^:protected ^:final doLeaf ^{:tag (Node P_OUT)} [this]
+      (if (.isRoot this)
+          (let [sizeIfKnown (if (.isPreserved StreamOpFlag/SIZED (.-sourceOrOpFlags op))
+                                (.exactOutputSizeIfKnown op (.-spliterator this))
+                                -1)
+                ^{:tag (Node$Builder P_OUT)} nb (.makeNodeBuilder op sizeIfKnown generator)
+                ^{:tag (Sink P_OUT)} opSink (.opWrapSink
+                                              op
+                                              (.getStreamAndOpFlags (.-helper this))
+                                              nb)]
+            (.copyIntoWithCancel (.-helper this)
+                                 (.wrapSink (.-helper this) opSink)
+                                 (.-spliterator this))
+            (.build nb))
+          (let [^{:tag (Node$Builder P_OUT)} nb (.makeNodeBuilder op -1 generator)]
+            (if (== targetOffset 0)
+                (let [^{:tag (Sink P_OUT)} opSink (.opWrapSink
+                                                    op
+                                                    (.getStreamAndOpFlags (.-helper this))
+                                                    nb)]
+                  (.copyIntoWithCancel (.-helper this)
+                                       (.wrapSink (.-helper this) opSink)
+                                       (.-spliterator this)))
+                (.wrapAndCopyInto (.-helper this) nb (.-spliterator this)))
+            (let [^{:tag (Node P_OUT)} node (.build nb)]
+              (set! thisNodeSize (.count node))
+              (set! completed true)
+              (set! (.-spliterator this) nil)
+              node))))
+
+    (method ^:public ^:final onCompletion ^void [this ^{:tag (CountedCompleter ?)} caller]
+      (when-not (.isLeaf this)
+        (let [^:mutable ^{:tag (Node P_OUT)} result nil]
+          (set! thisNodeSize
+                (unchecked-add (.-thisNodeSize (cast SliceTask (.-leftChild this)))
+                               (.-thisNodeSize (cast SliceTask (.-rightChild this)))))
+          (cond
+            (.-canceled this) (do (set! thisNodeSize 0) (set! result (.getEmptyResult this)))
+            (== thisNodeSize 0) (set! result (.getEmptyResult this))
+            (== (.-thisNodeSize (cast SliceTask (.-leftChild this))) 0)
+              (set! result (cast Node (.getLocalResult (cast SliceTask (.-rightChild this)))))
+            :else
+              (set! result
+                    (Nodes/conc (.getOutputShape op)
+                                (cast Node (.getLocalResult (cast SliceTask (.-leftChild this))))
+                                (cast Node (.getLocalResult (cast SliceTask (.-rightChild this)))))))
+          (.setLocalResult this ^Node (if (.isRoot this) (.doTruncate this result) result))
+          (set! completed true)))
+      (when (and (and (>= targetSize 0) (not (.isRoot this)))
+                 (.isLeftCompleted this (unchecked-add targetOffset targetSize)))
+        (.cancelLaterNodes this))
+      (.onCompletion super caller))
+
+    (method ^:protected cancel ^void [this]
+      (.cancel super)
+      (when completed (.setLocalResult this (.getEmptyResult this))))
+
+    (method ^:private doTruncate ^{:tag (Node P_OUT)} [this ^{:tag (Node P_OUT)} input]
+      (let [to (if (>= targetSize 0)
+                   (Math/min (.count input) (unchecked-add targetOffset targetSize))
+                   thisNodeSize)]
+        (.truncate input targetOffset to generator)))
+
+    (method ^:private isLeftCompleted ^boolean [this ^long target]
+      (let [^:mutable size (if completed thisNodeSize (.completedSize this target))]
+        (if (>= size target)
+            true
+            (do
+              (loop [^{:tag (SliceTask P_IN P_OUT)} parent (cast SliceTask (.getParent this))
+                     ^{:tag (SliceTask P_IN P_OUT)} node this]
+                (if (some? parent)
+                    (if (identical? node (.-rightChild parent))
+                        (let [^{:tag (SliceTask P_IN P_OUT)} left (cast
+                                                                    SliceTask
+                                                                    (.-leftChild parent))]
+                          (if (some? left)
+                              (do
+                                (set! size (unchecked-add size (.completedSize left target)))
+                                (if (>= size target)
+                                    (return true)
+                                    (recur (cast SliceTask (.getParent parent)) parent)))
+                              (recur (cast SliceTask (.getParent parent)) parent)))
+                        (recur (cast SliceTask (.getParent parent)) parent))
+                    nil))
+              (>= size target)))))
+
+    (method ^:private completedSize ^long [this ^long target]
+      (if completed
+          thisNodeSize
+          (let [^{:tag (SliceTask P_IN P_OUT)} left (cast SliceTask (.-leftChild this))
+                ^{:tag (SliceTask P_IN P_OUT)} right (cast SliceTask (.-rightChild this))]
+            (if (or (nil? left) (nil? right))
+                thisNodeSize
+                (let [leftSize (.completedSize left target)]
+                  (if (>= leftSize target)
+                      leftSize
+                      (unchecked-add leftSize (.completedSize right target))))))))))

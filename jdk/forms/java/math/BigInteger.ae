@@ -1,0 +1,2978 @@
+;; Converted from jdk26u src/java.base/share/classes/java/math/BigInteger.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.math)
+
+(import '(java.io IOException
+                  InvalidObjectException
+                  ObjectInputStream
+                  ObjectInputStream$GetField
+                  ObjectOutputStream
+                  ObjectOutputStream$PutField
+                  ObjectStreamException
+                  ObjectStreamField
+                  StreamCorruptedException)
+        '(java.util Arrays Objects Random)
+        '(java.util.concurrent ForkJoinPool ForkJoinWorkerThread RecursiveTask ThreadLocalRandom)
+        '(jdk.internal.math DoubleConsts FloatConsts)
+        '(jdk.internal.misc Unsafe)
+        '(jdk.internal.util ArraysSupport)
+        '(jdk.internal.vm.annotation ForceInline IntrinsicCandidate Stable))
+
+(defclass ^:public BigInteger
+  :extends Number
+  :implements [(Comparable BigInteger)]
+
+  (field ^:final ^int signum)
+
+  (field ^:final ^int/1 mag)
+
+  (field ^:private ^int bitCountPlusOne)
+
+  (field ^:private ^int magBitLengthPlusOne)
+
+  (field ^:private ^int lowestSetBitPlusTwo)
+
+  (field ^:private ^int numberOfTrailingZeroIntsPlusTwo)
+
+  (field ^:static ^:final ^long LONG_MASK 0xffffffff)
+
+  (field ^:private ^:static ^:final ^int MAX_MAG_LENGTH
+    (unchecked-add-int (unchecked-divide-int Integer/MAX_VALUE Integer/SIZE) 1))
+
+  (field ^:private ^:static ^:final ^int PRIME_SEARCH_BIT_LENGTH_LIMIT 500000000)
+
+  (field ^:private ^:static ^:final ^int KARATSUBA_THRESHOLD 80)
+
+  (field ^:private ^:static ^:final ^int TOOM_COOK_THRESHOLD 240)
+
+  (field ^:private ^:static ^:final ^int KARATSUBA_SQUARE_THRESHOLD 128)
+
+  (field ^:private ^:static ^:final ^int TOOM_COOK_SQUARE_THRESHOLD 216)
+
+  (field ^:static ^:final ^int BURNIKEL_ZIEGLER_THRESHOLD 80)
+
+  (field ^:static ^:final ^int BURNIKEL_ZIEGLER_OFFSET 40)
+
+  (field ^:private ^:static ^:final ^int SCHOENHAGE_BASE_CONVERSION_THRESHOLD 20)
+
+  (field ^:private ^:static ^:final ^int MULTIPLY_SQUARE_THRESHOLD 20)
+
+  (field ^:private ^:static ^:final ^int MONTGOMERY_INTRINSIC_THRESHOLD 512)
+
+  (constructor ^:public [this ^byte/1 val ^int off ^int len]
+    (when (== (alength val) 0) (throw (NumberFormatException. "Zero length BigInteger")))
+    (Objects/checkFromIndexSize off len (alength val))
+    (if (== len 0)
+        (do (set! mag (.-mag ZERO)) (set! signum (.-signum ZERO)))
+        (let [^int b (aget val off)]
+          (if (< b 0)
+              (do (set! mag (BigInteger/makePositive b val off len)) (set! signum -1))
+              (do
+                (set! mag (BigInteger/stripLeadingZeroBytes b val off len))
+                (set! signum (if (== (alength mag) 0) 0 1))))
+          (when (>= (alength mag) MAX_MAG_LENGTH) (.checkRange this)))))
+
+  (constructor ^:public [this ^byte/1 val] (this. val 0 (alength val)))
+
+  (constructor ^:private [this ^int/1 val]
+    (when (== (alength val) 0) (throw (NumberFormatException. "Zero length BigInteger")))
+    (if (< (aget val 0) 0)
+        (do (set! mag (BigInteger/makePositive val)) (set! signum -1))
+        (do
+          (set! mag (BigInteger/trustedStripLeadingZeroInts val))
+          (set! signum (if (== (alength mag) 0) 0 1))))
+    (when (>= (alength mag) MAX_MAG_LENGTH) (.checkRange this)))
+
+  (constructor ^:public [this ^int signum ^byte/1 magnitude ^int off ^int len]
+    (when (or (< signum -1) (> signum 1)) (throw (NumberFormatException. "Invalid signum value")))
+    (Objects/checkFromIndexSize off len (alength magnitude))
+    (set! (.-mag this) (BigInteger/stripLeadingZeroBytes magnitude off len))
+    (if (== (alength (.-mag this)) 0)
+        (set! (.-signum this) 0)
+        (do
+          (when (== signum 0) (throw (NumberFormatException. "signum-magnitude mismatch")))
+          (set! (.-signum this) signum)))
+    (when (>= (alength mag) MAX_MAG_LENGTH) (.checkRange this)))
+
+  (constructor ^:public [this ^int signum ^byte/1 magnitude]
+    (this. signum magnitude 0 (alength magnitude)))
+
+  (constructor ^:private [this ^int signum ^int/1 magnitude]
+    (set! (.-mag this) (BigInteger/stripLeadingZeroInts magnitude false))
+    (when (or (< signum -1) (> signum 1)) (throw (NumberFormatException. "Invalid signum value")))
+    (if (== (alength (.-mag this)) 0)
+        (set! (.-signum this) 0)
+        (do
+          (when (== signum 0) (throw (NumberFormatException. "signum-magnitude mismatch")))
+          (set! (.-signum this) signum)))
+    (when (>= (alength mag) MAX_MAG_LENGTH) (.checkRange this)))
+
+  (constructor ^:public [this ^String val ^int radix]
+    (let [^:mutable ^int cursor 0
+          ^:mutable ^int numDigits 0
+          len (.length val)]
+      (when (or (< radix Character/MIN_RADIX) (> radix Character/MAX_RADIX))
+        (throw (NumberFormatException. "Radix out of range")))
+      (when (== len 0) (throw (NumberFormatException. "Zero length BigInteger")))
+      (let [^:mutable ^int sign 1
+            index1 (.lastIndexOf val \-)
+            index2 (.lastIndexOf val \+)]
+        (if (>= index1 0)
+            (do
+              (when (or (not (== index1 0)) (>= index2 0))
+                (throw (NumberFormatException. "Illegal embedded sign character")))
+              (set! sign -1)
+              (set! cursor 1))
+            (when (>= index2 0)
+              (when-not (== index2 0)
+                (throw (NumberFormatException. "Illegal embedded sign character")))
+              (set! cursor 1)))
+        (when (== cursor len) (throw (NumberFormatException. "Zero length BigInteger")))
+        (while (and (< cursor len) (== (Character/digit (.charAt val cursor) radix) 0))
+          (set! cursor (unchecked-inc-int cursor)))
+        (if (== cursor len)
+            (do (set! signum 0) (set! mag (.-mag ZERO)))
+            (do
+              (set! numDigits (unchecked-subtract-int len cursor))
+              (set! signum sign)
+              (let [numBits (unchecked-add
+                              (unsigned-bit-shift-right
+                                (unchecked-multiply numDigits (aget bitsPerDigit radix))
+                                10)
+                              1)]
+                (when (>= (unchecked-add numBits 31) (bit-shift-left 1 32))
+                  (BigInteger/reportOverflow))
+                (let [numWords (unsigned-bit-shift-right-int
+                                 (unchecked-int (unchecked-add numBits 31))
+                                 5)
+                      magnitude (new int/1 numWords)
+                      ^:mutable firstGroupLen (unchecked-remainder-int
+                                                numDigits
+                                                (aget digitsPerInt radix))]
+                  (when (== firstGroupLen 0) (set! firstGroupLen (aget digitsPerInt radix)))
+                  (let [^:mutable group (.substring
+                                          val
+                                          cursor
+                                          (set! cursor (unchecked-add-int cursor firstGroupLen)))]
+                    (aset magnitude
+                          (unchecked-subtract-int numWords 1)
+                          (Integer/parseInt group radix))
+                    (when (< (aget magnitude (unchecked-subtract-int numWords 1)) 0)
+                      (throw (NumberFormatException. "Illegal digit")))
+                    (let [superRadix (aget intRadix radix)
+                          ^:mutable ^int groupVal 0]
+                      (while (< cursor len)
+                        (set! group
+                              (.substring val
+                                          cursor
+                                          (set!
+                                            cursor
+                                            (unchecked-add-int cursor (aget digitsPerInt radix)))))
+                        (set! groupVal (Integer/parseInt group radix))
+                        (when (< groupVal 0) (throw (NumberFormatException. "Illegal digit")))
+                        (BigInteger/destructiveMulAdd magnitude superRadix groupVal))
+                      (set! mag (BigInteger/trustedStripLeadingZeroInts magnitude))
+                      (when (>= (alength mag) MAX_MAG_LENGTH) (.checkRange this)))))))))))
+
+  (constructor [this ^char/1 val ^int sign ^int len]
+    (let [^:mutable ^int cursor 0
+          ^:mutable ^int numDigits 0]
+      (while (and (< cursor len) (== (Character/digit (aget val cursor) 10) 0))
+        (set! cursor (unchecked-inc-int cursor)))
+      (if (== cursor len)
+          (do (set! signum 0) (set! mag (.-mag ZERO)))
+          (do
+            (set! numDigits (unchecked-subtract-int len cursor))
+            (set! signum sign)
+            (let [^:mutable ^int numWords 0]
+              (if (< len 10)
+                  (set! numWords 1)
+                  (let [numBits (unchecked-add
+                                  (unsigned-bit-shift-right
+                                    (unchecked-multiply numDigits (aget bitsPerDigit 10))
+                                    10)
+                                  1)]
+                    (when (>= (unchecked-add numBits 31) (bit-shift-left 1 32))
+                      (BigInteger/reportOverflow))
+                    (set! numWords
+                          (unsigned-bit-shift-right-int
+                            (unchecked-int (unchecked-add numBits 31))
+                            5))))
+              (let [magnitude (new int/1 numWords)
+                    ^:mutable firstGroupLen (unchecked-remainder-int
+                                              numDigits
+                                              (aget digitsPerInt 10))]
+                (when (== firstGroupLen 0) (set! firstGroupLen (aget digitsPerInt 10)))
+                (aset magnitude
+                      (unchecked-subtract-int numWords 1)
+                      (.parseInt this
+                                 val
+                                 cursor
+                                 (set! cursor (unchecked-add-int cursor firstGroupLen))))
+                (while (< cursor len)
+                  (let [groupVal (.parseInt this
+                                            val
+                                            cursor
+                                            (set!
+                                              cursor
+                                              (unchecked-add-int cursor (aget digitsPerInt 10))))]
+                    (BigInteger/destructiveMulAdd magnitude (aget intRadix 10) groupVal)))
+                (set! mag (BigInteger/trustedStripLeadingZeroInts magnitude))
+                (when (>= (alength mag) MAX_MAG_LENGTH) (.checkRange this))))))))
+
+  (method ^:private parseInt ^int [this ^char/1 source ^:mutable ^int start ^int end]
+    (let [^:mutable result (Character/digit
+                             (aget source
+                                   (let [old-1 start] (set! start (unchecked-inc-int start)) old-1))
+                             10)]
+      (when (== result -1) (throw (NumberFormatException. (String. source))))
+      (loop [^int index start]
+        (when (< index end)
+          (let [nextVal (Character/digit (aget source index) 10)]
+            (when (== nextVal -1) (throw (NumberFormatException. (String. source))))
+            (set! result (unchecked-add-int (unchecked-multiply-int 10 result) nextVal))
+            (recur (unchecked-inc-int index)))))
+      result))
+
+  (field ^:private ^:static ^long/1 bitsPerDigit
+    (new
+      long/1
+      [0 0 1024 1624 2048 2378 2648 2875 3072 3247 3402 3543 3672 3790 3899 4001 4096 4186 4271 4350
+       4426 4498 4567 4633 4696 4756 4814 4870 4923 4975 5025 5074 5120 5166 5210 5253 5295]))
+
+  (method ^:private ^:static destructiveMulAdd ^void [^int/1 x ^int y ^int z]
+    (let [ylong (bit-and y LONG_MASK)
+          zlong (bit-and z LONG_MASK)
+          len (alength x)
+          ^:mutable product 0
+          ^:mutable carry 0]
+      (loop [^int i (unchecked-subtract-int len 1)]
+        (when (>= i 0)
+          (set! product
+                (unchecked-add (unchecked-multiply ylong (bit-and (aget x i) LONG_MASK)) carry))
+          (aset x i (unchecked-int product))
+          (set! carry (unsigned-bit-shift-right product 32))
+          (recur (unchecked-dec-int i))))
+      (let [^:mutable sum (unchecked-add (bit-and (aget x (unchecked-subtract-int len 1)) LONG_MASK)
+                                         zlong)]
+        (aset x (unchecked-subtract-int len 1) (unchecked-int sum))
+        (set! carry (unsigned-bit-shift-right sum 32))
+        (loop [^int i (unchecked-subtract-int len 2)]
+          (when (>= i 0)
+            (set! sum (unchecked-add (bit-and (aget x i) LONG_MASK) carry))
+            (aset x i (unchecked-int sum))
+            (set! carry (unsigned-bit-shift-right sum 32))
+            (recur (unchecked-dec-int i)))))))
+
+  (constructor ^:public [this ^String val] (this. val 10))
+
+  (constructor ^:public [this ^int numBits ^Random rnd]
+    (let [magnitude (BigInteger/randomBits numBits rnd)]
+      (try
+        (set! (.-mag this) (BigInteger/stripLeadingZeroBytes magnitude 0 (alength magnitude)))
+        (if (== (alength (.-mag this)) 0) (set! (.-signum this) 0) (set! (.-signum this) 1))
+        (when (>= (alength mag) MAX_MAG_LENGTH) (.checkRange this))
+        (finally (Arrays/fill magnitude (unchecked-byte 0))))))
+
+  (method ^:private ^:static randomBits ^byte/1 [^int numBits ^Random rnd]
+    (when (< numBits 0) (throw (IllegalArgumentException. "numBits must be non-negative")))
+    (let [numBytes (unchecked-int (unchecked-divide (unchecked-add (long numBits) 7) 8))
+          randomBits (new byte/1 numBytes)]
+      (when (> numBytes 0)
+        (.nextBytes rnd randomBits)
+        (let [excessBits (unchecked-subtract-int (unchecked-multiply-int 8 numBytes) numBits)]
+          (aset randomBits
+                0
+                (unchecked-byte
+                  (bit-and-int (aget randomBits 0)
+                               (unchecked-byte
+                                 (unchecked-subtract-int
+                                   (bit-shift-left-int 1 (unchecked-subtract-int 8 excessBits))
+                                   1)))))))
+      randomBits))
+
+  (constructor ^:public [this ^int bitLength ^int certainty ^Random rnd]
+    (let [^:mutable ^BigInteger prime nil]
+      (when (< bitLength 2) (throw (ArithmeticException. "bitLength < 2")))
+      (set! prime
+            (if (< bitLength SMALL_PRIME_THRESHOLD)
+                (BigInteger/smallPrime bitLength certainty rnd)
+                (BigInteger/largePrime bitLength certainty rnd)))
+      (set! signum 1)
+      (set! mag (.-mag prime))))
+
+  (field ^:private ^:static ^:final ^int SMALL_PRIME_THRESHOLD 95)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_PRIME_CERTAINTY 100)
+
+  (method ^:public ^:static probablePrime ^BigInteger [^int bitLength ^Random rnd]
+    (when (< bitLength 2) (throw (ArithmeticException. "bitLength < 2")))
+    (if (< bitLength SMALL_PRIME_THRESHOLD)
+        (BigInteger/smallPrime bitLength DEFAULT_PRIME_CERTAINTY rnd)
+        (BigInteger/largePrime bitLength DEFAULT_PRIME_CERTAINTY rnd)))
+
+  (method ^:private ^:static smallPrime ^BigInteger [^int bitLength ^int certainty ^Random rnd]
+    (let [magLen (unsigned-bit-shift-right-int (unchecked-add-int bitLength 31) 5)
+          temp (new int/1 magLen)
+          highBit (bit-shift-left-int 1 (unchecked-subtract-int bitLength 1))
+          highMask (unchecked-subtract-int (bit-shift-left-int highBit 1) 1)]
+      (while true
+        (loop [^int i 0]
+          (when (< i magLen) (aset temp i (.nextInt rnd)) (recur (unchecked-inc-int i))))
+        (aset temp 0 (bit-or-int (bit-and-int (aget temp 0) highMask) highBit))
+        (when (> bitLength 2)
+          (let [i-2 (unchecked-subtract-int magLen 1)]
+            (aset temp i-2 (bit-or-int (aget temp i-2) 1))))
+        (let [p (BigInteger. temp 1)]
+          (when (> bitLength 6)
+            (let [r (.longValue (.remainder p SMALL_PRIME_PRODUCT))]
+              (when (or (or (or (or (or (or (or (or
+                                                  (or
+                                                    (or
+                                                      (or
+                                                        (== (unchecked-remainder r 3) 0)
+                                                        (== (unchecked-remainder r 5) 0))
+                                                      (== (unchecked-remainder r 7) 0))
+                                                    (== (unchecked-remainder r 11) 0))
+                                                  (== (unchecked-remainder r 13) 0))
+                                                (== (unchecked-remainder r 17) 0))
+                                            (== (unchecked-remainder r 19) 0))
+                                        (== (unchecked-remainder r 23) 0))
+                                    (== (unchecked-remainder r 29) 0))
+                                (== (unchecked-remainder r 31) 0))
+                            (== (unchecked-remainder r 37) 0))
+                        (== (unchecked-remainder r 41) 0))
+                (continue))))
+          (when (< bitLength 4) (return p))
+          (when (.primeToCertainty p certainty rnd) (return p))))))
+
+  (field ^:private ^:static ^:final ^BigInteger SMALL_PRIME_PRODUCT
+    (BigInteger/valueOf
+      (unchecked-multiply
+        (unchecked-multiply
+          (unchecked-multiply
+            (unchecked-multiply
+              (unchecked-multiply
+                (unchecked-multiply
+                  (unchecked-multiply
+                    (unchecked-multiply
+                      (unchecked-multiply (unchecked-multiply (unchecked-multiply 3 5) 7) 11)
+                      13)
+                    17)
+                  19)
+                23)
+              29)
+            31)
+          37)
+        41)))
+
+  (method ^:private ^:static largePrime ^BigInteger [^int bitLength ^int certainty ^Random rnd]
+    (let [^:mutable ^BigInteger p nil]
+      (set! p (.setBit (BigInteger. bitLength rnd) (unchecked-subtract-int bitLength 1)))
+      (let [arr-3 (.-mag p)
+            i-4 (unchecked-subtract-int (alength (.-mag p)) 1)]
+        (aset arr-3 i-4 (bit-and-int (aget arr-3 i-4) (bit-not-int 1))))
+      (let [searchLen (BigInteger/getPrimeSearchLen bitLength)
+            ^:mutable searchSieve (BitSieve. p searchLen)
+            ^:mutable candidate (.retrieve searchSieve p certainty rnd)]
+        (while (or (nil? candidate) (not (== (.bitLength candidate) bitLength)))
+          (set! p (.add p (BigInteger/valueOf (unchecked-multiply-int 2 searchLen))))
+          (when-not (== (.bitLength p) bitLength)
+            (set! p (.setBit (BigInteger. bitLength rnd) (unchecked-subtract-int bitLength 1))))
+          (let [arr-5 (.-mag p)
+                i-6 (unchecked-subtract-int (alength (.-mag p)) 1)]
+            (aset arr-5 i-6 (bit-and-int (aget arr-5 i-6) (bit-not-int 1))))
+          (set! searchSieve (BitSieve. p searchLen))
+          (set! candidate (.retrieve searchSieve p certainty rnd)))
+        candidate)))
+
+  (method ^:public nextProbablePrime ^BigInteger [this]
+    (when (< (.-signum this) 0) (throw (ArithmeticException. (java-str "start < 0: " this))))
+    (if (or (== (.-signum this) 0) (.equals this ONE))
+        TWO
+        (let [^:mutable result (.add this ONE)]
+          (when (< (.bitLength result) SMALL_PRIME_THRESHOLD)
+            (when-not (.testBit result 0) (set! result (.add result ONE)))
+            (while true
+              (when (> (.bitLength result) 6)
+                (let [r (.longValue (.remainder result SMALL_PRIME_PRODUCT))]
+                  (when (or (or (or (or (or (or (or
+                                                  (or
+                                                    (or
+                                                      (or
+                                                        (or
+                                                          (== (unchecked-remainder r 3) 0)
+                                                          (== (unchecked-remainder r 5) 0))
+                                                        (== (unchecked-remainder r 7) 0))
+                                                      (== (unchecked-remainder r 11) 0))
+                                                    (== (unchecked-remainder r 13) 0))
+                                                  (== (unchecked-remainder r 17) 0))
+                                                (== (unchecked-remainder r 19) 0))
+                                            (== (unchecked-remainder r 23) 0))
+                                        (== (unchecked-remainder r 29) 0))
+                                    (== (unchecked-remainder r 31) 0))
+                                (== (unchecked-remainder r 37) 0))
+                            (== (unchecked-remainder r 41) 0))
+                    (set! result (.add result TWO))
+                    (continue))))
+              (when (< (.bitLength result) 4) (return result))
+              (when (.primeToCertainty result DEFAULT_PRIME_CERTAINTY nil) (return result))
+              (set! result (.add result TWO))))
+          (when (.testBit result 0) (set! result (.subtract result ONE)))
+          (let [searchLen (BigInteger/getPrimeSearchLen (.bitLength result))]
+            (while true
+              (let [searchSieve (BitSieve. result searchLen)
+                    candidate (.retrieve searchSieve result DEFAULT_PRIME_CERTAINTY nil)]
+                (when (some? candidate) (return candidate))
+                (set! result
+                      (.add result (BigInteger/valueOf (unchecked-multiply-int 2 searchLen))))))))))
+
+  (method ^:private ^:static getPrimeSearchLen ^int [^int bitLength]
+    (when (> bitLength (unchecked-add-int PRIME_SEARCH_BIT_LENGTH_LIMIT 1))
+      (throw (ArithmeticException. "Prime search implementation restriction on bitLength")))
+    (unchecked-multiply-int (unchecked-divide-int bitLength 20) 64))
+
+  (method primeToCertainty ^boolean [this ^int certainty ^Random random]
+    (let [^:mutable ^int rounds 0
+          n (unchecked-divide-int
+              (unchecked-add-int (Math/min certainty (unchecked-subtract-int Integer/MAX_VALUE 1))
+                                 1)
+              2)
+          sizeInBits (.bitLength this)]
+      (if (< sizeInBits 100)
+          (do
+            (set! rounds 50)
+            (set! rounds (if (< n rounds) n rounds))
+            (.passesMillerRabin this rounds random))
+          (do
+            (cond
+              (< sizeInBits 256) (set! rounds 27)
+              (< sizeInBits 512) (set! rounds 15)
+              (< sizeInBits 768) (set! rounds 8)
+              (< sizeInBits 1024) (set! rounds 4)
+              :else (set! rounds 2))
+            (set! rounds (if (< n rounds) n rounds))
+            (and (.passesMillerRabin this rounds random) (.passesLucasLehmer this))))))
+
+  (method ^:private passesLucasLehmer ^boolean [this]
+    (let [thisPlusOne (.add this ONE)
+          ^:mutable ^int d 5]
+      (while (not (== (BigInteger/jacobiSymbol d this) -1))
+        (set! d
+              (if (< d 0)
+                  (unchecked-add-int (Math/abs d) 2)
+                  (unchecked-negate-int (unchecked-add-int d 2)))))
+      (let [u (BigInteger/lucasLehmerSequence d thisPlusOne this)] (.equals (.mod u this) ZERO))))
+
+  (method ^:private ^:static jacobiSymbol ^int [^:mutable ^int p ^BigInteger n]
+    (if (== p 0)
+        0
+        (let [^:mutable ^int j 1
+              ^:mutable u (aget (.-mag n) (unchecked-subtract-int (alength (.-mag n)) 1))]
+          (when (< p 0)
+            (set! p (unchecked-negate-int p))
+            (let [n8 (bit-and-int u 7)]
+              (when (or (== n8 3) (== n8 7)) (set! j (unchecked-negate-int j)))))
+          (while (== (bit-and-int p 3) 0) (set! p (bit-shift-right-int p 2)))
+          (when (== (bit-and-int p 1) 0)
+            (set! p (bit-shift-right-int p 1))
+            (when-not (== (bit-and-int (bit-xor-int u (bit-shift-right-int u 1)) 2) 0)
+              (set! j (unchecked-negate-int j))))
+          (if (== p 1)
+              j
+              (do
+                (when-not (== (bit-and-int (bit-and-int p u) 2) 0)
+                  (set! j (unchecked-negate-int j)))
+                (set! u (.intValue (.mod n (BigInteger/valueOf p))))
+                (while (not (== u 0))
+                  (while (== (bit-and-int u 3) 0) (set! u (bit-shift-right-int u 2)))
+                  (when (== (bit-and-int u 1) 0)
+                    (set! u (bit-shift-right-int u 1))
+                    (when-not (== (bit-and-int (bit-xor-int p (bit-shift-right-int p 1)) 2) 0)
+                      (set! j (unchecked-negate-int j))))
+                  (when (== u 1) (return j))
+                  (java-assert (< u p))
+                  (let [t u]
+                    (set! u p)
+                    (set! p t)
+                    (when-not (== (bit-and-int (bit-and-int u p) 2) 0)
+                      (set! j (unchecked-negate-int j)))
+                    (set! u (unchecked-remainder-int u p))))
+                0)))))
+
+  (method ^:private ^:static lucasLehmerSequence ^BigInteger [^int z ^BigInteger k ^BigInteger n]
+    (let [d (BigInteger/valueOf z)
+          ^:mutable u ONE
+          ^:mutable ^BigInteger u2 nil
+          ^:mutable v ONE
+          ^:mutable ^BigInteger v2 nil]
+      (loop [^int i (unchecked-subtract-int (.bitLength k) 2)]
+        (when (>= i 0)
+          (set! u2 (.mod (.multiply u v) n))
+          (set! v2 (.mod (.add (.square v) (.multiply d (.square u))) n))
+          (when (.testBit v2 0) (set! v2 (.subtract v2 n)))
+          (set! v2 (.shiftRight v2 1))
+          (set! u u2)
+          (set! v v2)
+          (if (.testBit k i)
+              (do
+                (set! u2 (.mod (.add u v) n))
+                (when (.testBit u2 0) (set! u2 (.subtract u2 n)))
+                (set! u2 (.shiftRight u2 1))
+                (set! v2 (.mod (.add v (.multiply d u)) n))
+                (when (.testBit v2 0) (set! v2 (.subtract v2 n)))
+                (set! v2 (.shiftRight v2 1))
+                (set! u u2)
+                (set! v v2)
+                (recur (unchecked-dec-int i)))
+              (recur (unchecked-dec-int i)))))
+      u))
+
+  (method ^:private passesMillerRabin ^boolean [this ^int iterations ^:mutable ^Random rnd]
+    (let [thisMinusOne (.subtract this ONE)
+          ^:mutable m thisMinusOne
+          a (.getLowestSetBit m)]
+      (set! m (.shiftRight m a))
+      (when (nil? rnd) (set! rnd (ThreadLocalRandom/current)))
+      (loop [^int i 0]
+        (when (< i iterations)
+          (let [^:mutable ^BigInteger b nil]
+            (loop []
+              (set! b (BigInteger. (.bitLength this) rnd))
+              (when (or (<= (.compareTo b ONE) 0) (>= (.compareTo b this) 0)) (recur)))
+            (let [^:mutable ^int j 0
+                  ^:mutable z (.modPow b m this)]
+              (while (not (or (and (== j 0) (.equals z ONE)) (.equals z thisMinusOne)))
+                (when (or (and (> j 0) (.equals z ONE)) (== (set! j (unchecked-inc-int j)) a))
+                  (return false))
+                (set! z (.modPow z TWO this)))
+              (recur (unchecked-inc-int i))))))
+      true))
+
+  (constructor [this ^int/1 magnitude ^int signum]
+    (set! (.-signum this) (if (== (alength magnitude) 0) 0 signum))
+    (set! (.-mag this) magnitude)
+    (when (>= (alength mag) MAX_MAG_LENGTH) (.checkRange this)))
+
+  (constructor ^:private [this ^byte/1 magnitude ^int signum]
+    (set! (.-signum this) (if (== (alength magnitude) 0) 0 signum))
+    (set! (.-mag this) (BigInteger/stripLeadingZeroBytes magnitude 0 (alength magnitude)))
+    (when (>= (alength mag) MAX_MAG_LENGTH) (.checkRange this)))
+
+  (method ^:private checkRange ^void [this]
+    (when (or (> (alength mag) MAX_MAG_LENGTH)
+              (and (== (alength mag) MAX_MAG_LENGTH) (< (aget mag 0) 0)))
+      (BigInteger/reportOverflow)))
+
+  (method ^:private ^:static reportOverflow ^void []
+    (throw (ArithmeticException. "BigInteger would overflow supported range")))
+
+  (method ^:public ^:static valueOf ^BigInteger [^long val]
+    (cond
+      (== val 0) ZERO
+      (and (> val 0) (<= val MAX_CONSTANT)) (aget posConst (unchecked-int val))
+      (and (< val 0) (>= val (unchecked-negate-int MAX_CONSTANT)))
+        (aget negConst (unchecked-int (unchecked-negate val)))
+      :else (BigInteger. val)))
+
+  (constructor ^:private [this ^long mag ^int signum]
+    (java-assert (and (not (== mag 0)) (not (== signum 0))))
+    (set! (.-signum this) signum)
+    (set! (.-mag this) (BigInteger/toMagArray mag)))
+
+  (constructor ^:private [this ^:mutable ^long val]
+    (if (< val 0) (do (set! val (unchecked-negate val)) (set! signum -1)) (set! signum 1))
+    (set! mag (BigInteger/toMagArray val)))
+
+  (method ^:private ^:static toMagArray ^int/1 [^long mag]
+    (let [highWord (unchecked-int (unsigned-bit-shift-right mag 32))]
+      (if (== highWord 0)
+          (new int/1 [(unchecked-int mag)])
+          (new int/1 [highWord (unchecked-int mag)]))))
+
+  (method ^:private ^:static valueOf ^BigInteger [^int/1 val]
+    (if (> (aget val 0) 0) (BigInteger. val 1) (BigInteger. val)))
+
+  (field ^:private ^:static ^:final ^int MAX_CONSTANT 16)
+
+  (field ^:private ^:static ^:final ^{Stable true} ^BigInteger/1 posConst
+    (new BigInteger/1 (unchecked-add-int MAX_CONSTANT 1)))
+
+  (field ^:private ^:static ^:final ^{Stable true} ^BigInteger/1 negConst
+    (new BigInteger/1 (unchecked-add-int MAX_CONSTANT 1)))
+
+  (field ^:private ^:static ^:volatile ^BigInteger/2 powerCache)
+
+  (field ^:private ^:static ^:final ^{Stable true} ^double/1 logCache)
+
+  (field ^:private ^:static ^:final ^double LOG_TWO (Math/log 2.0))
+
+  (static-initializer
+    (java-assert (and (and (and (and (and (< 0 KARATSUBA_THRESHOLD)
+                                          (< KARATSUBA_THRESHOLD TOOM_COOK_THRESHOLD))
+                                     (< TOOM_COOK_THRESHOLD Integer/MAX_VALUE))
+                                (< 0 KARATSUBA_SQUARE_THRESHOLD))
+                           (< KARATSUBA_SQUARE_THRESHOLD TOOM_COOK_SQUARE_THRESHOLD))
+                      (< TOOM_COOK_SQUARE_THRESHOLD Integer/MAX_VALUE))
+      "Algorithm thresholds are inconsistent")
+    (loop [^int i 1]
+      (when (<= i MAX_CONSTANT)
+        (let [magnitude (new int/1 1)]
+          (aset magnitude 0 i)
+          (aset posConst i (BigInteger. magnitude 1))
+          (aset negConst i (BigInteger. magnitude -1))
+          (recur (unchecked-inc-int i)))))
+    (let [cache (new BigInteger/2 (unchecked-add-int Character/MAX_RADIX 1))]
+      (set! logCache (new double/1 (unchecked-add-int Character/MAX_RADIX 1)))
+      (loop [^int i Character/MIN_RADIX]
+        (when (<= i Character/MAX_RADIX)
+          (aset cache i (new BigInteger/1 [(BigInteger/valueOf i)]))
+          (aset logCache i (Math/log i))
+          (recur (unchecked-inc-int i))))
+      (set! BigInteger/powerCache cache)))
+
+  (field ^:public ^:static ^:final ^BigInteger ZERO (BigInteger. (new int/1 0) 0))
+
+  (field ^:public ^:static ^:final ^BigInteger ONE (BigInteger/valueOf 1))
+
+  (field ^:public ^:static ^:final ^BigInteger TWO (BigInteger/valueOf 2))
+
+  (field ^:private ^:static ^:final ^BigInteger NEGATIVE_ONE (BigInteger/valueOf -1))
+
+  (field ^:public ^:static ^:final ^BigInteger TEN (BigInteger/valueOf 10))
+
+  (method ^:public add ^BigInteger [this ^BigInteger val]
+    (cond
+      (== (.-signum val) 0) this
+      (== signum 0) val
+      (== (.-signum val) signum) (BigInteger. (BigInteger/add mag (.-mag val)) signum)
+      :else
+        (let [cmp (.compareMagnitude this val)]
+          (if (== cmp 0)
+              ZERO
+              (let [^:mutable ^int/1 resultMag (if (> cmp 0)
+                                                   (BigInteger/subtract mag (.-mag val))
+                                                   (BigInteger/subtract (.-mag val) mag))]
+                (set! resultMag (BigInteger/trustedStripLeadingZeroInts resultMag))
+                (BigInteger. resultMag (if (== cmp signum) 1 -1)))))))
+
+  (method add ^BigInteger [this ^long val]
+    (cond
+      (== val 0) this
+      (== signum 0) (BigInteger/valueOf val)
+      (== (Long/signum val) signum) (BigInteger. (BigInteger/add mag (Math/abs val)) signum)
+      :else
+        (let [cmp (.compareMagnitude this val)]
+          (if (== cmp 0)
+              ZERO
+              (let [^:mutable ^int/1 resultMag (if (> cmp 0)
+                                                   (BigInteger/subtract mag (Math/abs val))
+                                                   (BigInteger/subtract (Math/abs val) mag))]
+                (set! resultMag (BigInteger/trustedStripLeadingZeroInts resultMag))
+                (BigInteger. resultMag (if (== cmp signum) 1 -1)))))))
+
+  (method ^:private ^:static add ^int/1 [^int/1 x ^long val]
+    (let [^:mutable ^int/1 y nil
+          ^:mutable sum 0
+          ^:mutable xIndex (alength x)
+          ^:mutable ^int/1 result nil
+          highWord (unchecked-int (unsigned-bit-shift-right val 32))]
+      (cond
+        (== highWord 0)
+          (do
+            (set! result (new int/1 xIndex))
+            (set! sum
+                  (unchecked-add
+                    (bit-and (aget x (set! xIndex (unchecked-dec-int xIndex))) LONG_MASK)
+                    val))
+            (aset result xIndex (unchecked-int sum)))
+        (== xIndex 1)
+          (do
+            (set! result (new int/1 2))
+            (set! sum (unchecked-add val (bit-and (aget x 0) LONG_MASK)))
+            (aset result 1 (unchecked-int sum))
+            (aset result 0 (unchecked-int (unsigned-bit-shift-right sum 32)))
+            (return result))
+        :else
+          (do
+            (set! result (new int/1 xIndex))
+            (set! sum
+                  (unchecked-add
+                    (bit-and (aget x (set! xIndex (unchecked-dec-int xIndex))) LONG_MASK)
+                    (bit-and val LONG_MASK)))
+            (aset result xIndex (unchecked-int sum))
+            (set! sum
+                  (unchecked-add
+                    (unchecked-add
+                      (bit-and (aget x (set! xIndex (unchecked-dec-int xIndex))) LONG_MASK)
+                      (bit-and highWord LONG_MASK))
+                    (unsigned-bit-shift-right sum 32)))
+            (aset result xIndex (unchecked-int sum))))
+      (let [^:mutable carry (not (== (unsigned-bit-shift-right sum 32) 0))]
+        (while (and (> xIndex 0) carry)
+          (set! carry
+                (== (aset result
+                          (set! xIndex (unchecked-dec-int xIndex))
+                          (unchecked-add-int (aget x xIndex) 1))
+                    0)))
+        (while (> xIndex 0) (aset result (set! xIndex (unchecked-dec-int xIndex)) (aget x xIndex)))
+        (if carry
+            (let [bigger (new int/1 (unchecked-add-int (alength result) 1))]
+              (System/arraycopy result 0 bigger 1 (alength result))
+              (aset bigger 0 0x01)
+              bigger)
+            result))))
+
+  (method ^:private ^:static add ^int/1 [^:mutable ^int/1 x ^:mutable ^int/1 y]
+    (when (< (alength x) (alength y)) (let [tmp x] (set! x y) (set! y tmp)))
+    (let [^:mutable xIndex (alength x)
+          ^:mutable yIndex (alength y)
+          result (new int/1 xIndex)
+          ^:mutable sum 0]
+      (if (== yIndex 1)
+          (do
+            (set! sum
+                  (unchecked-add
+                    (bit-and (aget x (set! xIndex (unchecked-dec-int xIndex))) LONG_MASK)
+                    (bit-and (aget y 0) LONG_MASK)))
+            (aset result xIndex (unchecked-int sum)))
+          (while (> yIndex 0)
+            (set! sum
+                  (unchecked-add
+                    (unchecked-add
+                      (bit-and (aget x (set! xIndex (unchecked-dec-int xIndex))) LONG_MASK)
+                      (bit-and (aget y (set! yIndex (unchecked-dec-int yIndex))) LONG_MASK))
+                    (unsigned-bit-shift-right sum 32)))
+            (aset result xIndex (unchecked-int sum))))
+      (let [^:mutable carry (not (== (unsigned-bit-shift-right sum 32) 0))]
+        (while (and (> xIndex 0) carry)
+          (set! carry
+                (== (aset result
+                          (set! xIndex (unchecked-dec-int xIndex))
+                          (unchecked-add-int (aget x xIndex) 1))
+                    0)))
+        (while (> xIndex 0) (aset result (set! xIndex (unchecked-dec-int xIndex)) (aget x xIndex)))
+        (if carry
+            (let [bigger (new int/1 (unchecked-add-int (alength result) 1))]
+              (System/arraycopy result 0 bigger 1 (alength result))
+              (aset bigger 0 0x01)
+              bigger)
+            result))))
+
+  (method ^:private ^:static subtract ^int/1 [^long val ^int/1 little]
+    (let [highWord (unchecked-int (unsigned-bit-shift-right val 32))]
+      (if (== highWord 0)
+          (let [result (new int/1 1)]
+            (aset result
+                  0
+                  (unchecked-int (unchecked-subtract val (bit-and (aget little 0) LONG_MASK))))
+            result)
+          (let [result (new int/1 2)]
+            (if (== (alength little) 1)
+                (let [difference (unchecked-subtract
+                                   (bit-and (unchecked-int val) LONG_MASK)
+                                   (bit-and (aget little 0) LONG_MASK))]
+                  (aset result 1 (unchecked-int difference))
+                  (let [borrow (not (== (bit-shift-right difference 32) 0))]
+                    (if borrow
+                        (aset result 0 (unchecked-subtract-int highWord 1))
+                        (aset result 0 highWord))
+                    result))
+                (let [^:mutable difference (unchecked-subtract
+                                             (bit-and (unchecked-int val) LONG_MASK)
+                                             (bit-and (aget little 1) LONG_MASK))]
+                  (aset result 1 (unchecked-int difference))
+                  (set! difference
+                        (unchecked-add
+                          (unchecked-subtract (bit-and highWord LONG_MASK)
+                                              (bit-and (aget little 0) LONG_MASK))
+                          (bit-shift-right difference 32)))
+                  (aset result 0 (unchecked-int difference))
+                  result))))))
+
+  (method ^:private ^:static subtract ^int/1 [^int/1 big ^long val]
+    (let [highWord (unchecked-int (unsigned-bit-shift-right val 32))
+          ^:mutable bigIndex (alength big)
+          result (new int/1 bigIndex)
+          ^:mutable difference 0]
+      (if (== highWord 0)
+          (do
+            (set! difference
+                  (unchecked-subtract
+                    (bit-and (aget big (set! bigIndex (unchecked-dec-int bigIndex))) LONG_MASK)
+                    val))
+            (aset result bigIndex (unchecked-int difference)))
+          (do
+            (set! difference
+                  (unchecked-subtract
+                    (bit-and (aget big (set! bigIndex (unchecked-dec-int bigIndex))) LONG_MASK)
+                    (bit-and val LONG_MASK)))
+            (aset result bigIndex (unchecked-int difference))
+            (set! difference
+                  (unchecked-add
+                    (unchecked-subtract
+                      (bit-and (aget big (set! bigIndex (unchecked-dec-int bigIndex))) LONG_MASK)
+                      (bit-and highWord LONG_MASK))
+                    (bit-shift-right difference 32)))
+            (aset result bigIndex (unchecked-int difference))))
+      (let [^:mutable borrow (not (== (bit-shift-right difference 32) 0))]
+        (while (and (> bigIndex 0) borrow)
+          (set! borrow
+                (== (aset result
+                          (set! bigIndex (unchecked-dec-int bigIndex))
+                          (unchecked-subtract-int (aget big bigIndex) 1))
+                    -1)))
+        (while (> bigIndex 0)
+          (aset result (set! bigIndex (unchecked-dec-int bigIndex)) (aget big bigIndex)))
+        result)))
+
+  (method ^:public subtract ^BigInteger [this ^BigInteger val]
+    (cond
+      (== (.-signum val) 0) this
+      (== signum 0) (.negate val)
+      (not (== (.-signum val) signum)) (BigInteger. (BigInteger/add mag (.-mag val)) signum)
+      :else
+        (let [cmp (.compareMagnitude this val)]
+          (if (== cmp 0)
+              ZERO
+              (let [^:mutable ^int/1 resultMag (if (> cmp 0)
+                                                   (BigInteger/subtract mag (.-mag val))
+                                                   (BigInteger/subtract (.-mag val) mag))]
+                (set! resultMag (BigInteger/trustedStripLeadingZeroInts resultMag))
+                (BigInteger. resultMag (if (== cmp signum) 1 -1)))))))
+
+  (method ^:private ^:static subtract ^int/1 [^int/1 big ^int/1 little]
+    (let [^:mutable bigIndex (alength big)
+          result (new int/1 bigIndex)
+          ^:mutable littleIndex (alength little)
+          ^:mutable difference 0]
+      (while (> littleIndex 0)
+        (set! difference
+              (unchecked-add
+                (unchecked-subtract
+                  (bit-and (aget big (set! bigIndex (unchecked-dec-int bigIndex))) LONG_MASK)
+                  (bit-and (aget little (set! littleIndex (unchecked-dec-int littleIndex)))
+                           LONG_MASK))
+                (bit-shift-right difference 32)))
+        (aset result bigIndex (unchecked-int difference)))
+      (let [^:mutable borrow (not (== (bit-shift-right difference 32) 0))]
+        (while (and (> bigIndex 0) borrow)
+          (set! borrow
+                (== (aset result
+                          (set! bigIndex (unchecked-dec-int bigIndex))
+                          (unchecked-subtract-int (aget big bigIndex) 1))
+                    -1)))
+        (while (> bigIndex 0)
+          (aset result (set! bigIndex (unchecked-dec-int bigIndex)) (aget big bigIndex)))
+        result)))
+
+  (method ^:public multiply ^BigInteger [this ^BigInteger val]
+    (.multiply this val false false 0))
+
+  (method ^:public parallelMultiply ^BigInteger [this ^BigInteger val]
+    (.multiply this val false true 0))
+
+  (method ^:private multiply ^BigInteger [this ^BigInteger val ^boolean isRecursion
+                                          ^boolean parallel ^int depth]
+    (if (or (== (.-signum val) 0) (== signum 0))
+        ZERO
+        (let [xlen (alength mag)]
+          (if (and (identical? val this) (> xlen MULTIPLY_SQUARE_THRESHOLD))
+              (.square this true parallel depth)
+              (let [ylen (alength (.-mag val))]
+                (cond
+                  (or (< xlen KARATSUBA_THRESHOLD) (< ylen KARATSUBA_THRESHOLD))
+                    (let [^int resultSign (if (== signum (.-signum val)) 1 -1)]
+                      (cond
+                        (== (alength (.-mag val)) 1)
+                          (BigInteger/multiplyByInt mag (aget (.-mag val) 0) resultSign)
+                        (== (alength mag) 1)
+                          (BigInteger/multiplyByInt (.-mag val) (aget mag 0) resultSign)
+                        :else
+                          (let [^:mutable result (BigInteger/multiplyToLen
+                                                   mag
+                                                   xlen
+                                                   (.-mag val)
+                                                   ylen
+                                                   nil)]
+                            (set! result (BigInteger/trustedStripLeadingZeroInts result))
+                            (BigInteger. result resultSign))))
+                  (and (< xlen TOOM_COOK_THRESHOLD) (< ylen TOOM_COOK_THRESHOLD))
+                    (BigInteger/multiplyKaratsuba this val)
+                  :else
+                    (do
+                      (when-not isRecursion
+                        (when (> (unchecked-add (long (.magBitLength this)) (.magBitLength val))
+                                 (unchecked-multiply (long Integer/SIZE) MAX_MAG_LENGTH))
+                          (BigInteger/reportOverflow)))
+                      (BigInteger/multiplyToomCook3 this val parallel depth))))))))
+
+  (method ^:private ^:static multiplyByInt ^BigInteger [^int/1 x ^int y ^int sign]
+    (if (== (Integer/lowestOneBit y) y)
+        (BigInteger. (BigInteger/shiftLeft x (Integer/numberOfTrailingZeros y)) sign)
+        (let [xlen (alength x)
+              ^:mutable rmag (new int/1 (unchecked-add-int xlen 1))
+              ^:mutable carry 0
+              yl (bit-and y LONG_MASK)
+              ^:mutable rstart (unchecked-subtract-int (alength rmag) 1)]
+          (loop [^int i (unchecked-subtract-int xlen 1)]
+            (when (>= i 0)
+              (let [product (unchecked-add (unchecked-multiply (bit-and (aget x i) LONG_MASK) yl)
+                                           carry)]
+                (aset rmag rstart (unchecked-int product))
+                (set! rstart (unchecked-dec-int rstart))
+                (set! carry (unsigned-bit-shift-right product 32))
+                (recur (unchecked-dec-int i)))))
+          (if (== carry 0)
+              (set! rmag (Arrays/copyOfRange rmag 1 (alength rmag)))
+              (aset rmag rstart (unchecked-int carry)))
+          (BigInteger. rmag sign))))
+
+  (method multiply ^BigInteger [this ^:mutable ^long v]
+    (cond
+      (or (== v 0) (== signum 0)) ZERO
+      (== v BigDecimal/INFLATED) (.multiply this (BigInteger/valueOf v))
+      :else
+        (let [^int rsign (if (> v 0) signum (unchecked-negate-int signum))]
+          (when (< v 0) (set! v (unchecked-negate v)))
+          (let [dh (unsigned-bit-shift-right v 32)
+                dl (bit-and v LONG_MASK)
+                xlen (alength mag)
+                value mag
+                ^:mutable ^int/1 rmag (if (== dh 0)
+                                          (new int/1 (unchecked-add-int xlen 1))
+                                          (new int/1 (unchecked-add-int xlen 2)))
+                ^:mutable carry 0
+                ^:mutable rstart (unchecked-subtract-int (alength rmag) 1)]
+            (loop [^int i (unchecked-subtract-int xlen 1)]
+              (when (>= i 0)
+                (let [product (unchecked-add
+                                (unchecked-multiply (bit-and (aget value i) LONG_MASK) dl)
+                                carry)]
+                  (aset rmag rstart (unchecked-int product))
+                  (set! rstart (unchecked-dec-int rstart))
+                  (set! carry (unsigned-bit-shift-right product 32))
+                  (recur (unchecked-dec-int i)))))
+            (aset rmag rstart (unchecked-int carry))
+            (when-not (== dh 0)
+              (set! carry 0)
+              (set! rstart (unchecked-subtract-int (alength rmag) 2))
+              (loop [^int i (unchecked-subtract-int xlen 1)]
+                (when (>= i 0)
+                  (let [product (unchecked-add
+                                  (unchecked-add
+                                    (unchecked-multiply (bit-and (aget value i) LONG_MASK) dh)
+                                    (bit-and (aget rmag rstart) LONG_MASK))
+                                  carry)]
+                    (aset rmag rstart (unchecked-int product))
+                    (set! rstart (unchecked-dec-int rstart))
+                    (set! carry (unsigned-bit-shift-right product 32))
+                    (recur (unchecked-dec-int i)))))
+              (aset rmag 0 (unchecked-int carry)))
+            (when (== carry 0) (set! rmag (Arrays/copyOfRange rmag 1 (alength rmag))))
+            (BigInteger. rmag rsign)))))
+
+  (method ^:private ^:static multiplyToLen ^int/1 [^int/1 x ^int xlen ^int/1 y ^int ylen
+                                                   ^:mutable ^int/1 z]
+    (BigInteger/multiplyToLenCheck x xlen)
+    (BigInteger/multiplyToLenCheck y ylen)
+    (when (or (nil? z) (< (alength z) (unchecked-add-int xlen ylen)))
+      (set! z (new int/1 (unchecked-add-int xlen ylen))))
+    (BigInteger/implMultiplyToLen x xlen y ylen z))
+
+  (method ^:private ^:static ^{IntrinsicCandidate true} implMultiplyToLen ^int/1 [^int/1 x ^int xlen
+                                                                                  ^int/1 y ^int ylen
+                                                                                  ^int/1 z]
+    (let [xstart (unchecked-subtract-int xlen 1)
+          ystart (unchecked-subtract-int ylen 1)
+          ^:mutable carry 0]
+      (loop [^int j ystart
+             ^int k (unchecked-add-int (unchecked-add-int ystart 1) xstart)]
+        (when (>= j 0)
+          (let [product (unchecked-add
+                          (unchecked-multiply (bit-and (aget y j) LONG_MASK)
+                                              (bit-and (aget x xstart) LONG_MASK))
+                          carry)]
+            (aset z k (unchecked-int product))
+            (set! carry (unsigned-bit-shift-right product 32))
+            (recur (unchecked-dec-int j) (unchecked-dec-int k)))))
+      (aset z xstart (unchecked-int carry))
+      (loop [^int i (unchecked-subtract-int xstart 1)]
+        (when (>= i 0)
+          (set! carry 0)
+          (loop [^int j ystart
+                 ^int k (unchecked-add-int (unchecked-add-int ystart 1) i)]
+            (when (>= j 0)
+              (let [product (unchecked-add
+                              (unchecked-add
+                                (unchecked-multiply
+                                  (bit-and (aget y j) LONG_MASK)
+                                  (bit-and (aget x i) LONG_MASK))
+                                (bit-and (aget z k) LONG_MASK))
+                              carry)]
+                (aset z k (unchecked-int product))
+                (set! carry (unsigned-bit-shift-right product 32))
+                (recur (unchecked-dec-int j) (unchecked-dec-int k)))))
+          (aset z i (unchecked-int carry))
+          (recur (unchecked-dec-int i))))
+      z))
+
+  (method ^:private ^:static multiplyToLenCheck ^void [^int/1 array ^int length]
+    (when-not (<= length 0)
+      (Objects/requireNonNull array)
+      (when (> length (alength array))
+        (throw (ArrayIndexOutOfBoundsException. (unchecked-subtract-int length 1))))))
+
+  (method ^:private ^:static multiplyKaratsuba ^BigInteger [^BigInteger x ^BigInteger y]
+    (let [xlen (alength (.-mag x))
+          ylen (alength (.-mag y))
+          half (unchecked-divide-int (unchecked-add-int (Math/max xlen ylen) 1) 2)
+          xl (.getLower x half)
+          xh (.getUpper x half)
+          yl (.getLower y half)
+          yh (.getUpper y half)
+          p1 (.multiply xh yh)
+          p2 (.multiply xl yl)
+          p3 (.multiply (.add xh xl) (.add yh yl))
+          result (.add (.shiftLeft (.add (.shiftLeft p1 (unchecked-multiply-int 32 half))
+                                         (.subtract (.subtract p3 p1) p2))
+                                   (unchecked-multiply-int 32 half))
+                       p2)]
+      (if (not (== (.-signum x) (.-signum y))) (.negate result) result)))
+
+  (defclass ^:private ^:abstract ^:static ^:sealed RecursiveOp
+    :extends (RecursiveTask BigInteger)
+
+    (field ^:private ^:static ^:final ^int PARALLEL_FORK_DEPTH_THRESHOLD
+      (RecursiveOp/calculateMaximumDepth (ForkJoinPool/getCommonPoolParallelism)))
+
+    (method ^:private ^:static ^:final calculateMaximumDepth ^int [^int parallelism]
+      (unchecked-subtract-int 32 (Integer/numberOfLeadingZeros parallelism)))
+
+    (field ^:final ^boolean parallel)
+
+    (field ^:final ^byte depth)
+
+    (constructor ^:private [this ^boolean parallel ^int depth]
+      (set! (.-parallel this) parallel)
+      (set! (.-depth this) (unchecked-byte depth)))
+
+    (method ^:private ^:static getParallelForkDepthThreshold ^int []
+      (if-instance [^ForkJoinWorkerThread fjwt (Thread/currentThread)]
+        (RecursiveOp/calculateMaximumDepth (.getParallelism (.getPool fjwt)))
+        PARALLEL_FORK_DEPTH_THRESHOLD))
+
+    (method ^:protected forkOrInvoke ^{:tag (RecursiveTask BigInteger)} [this]
+      (if (and parallel (<= depth (RecursiveOp/getParallelForkDepthThreshold)))
+          (.fork this)
+          (.invoke this))
+      this)
+
+    (defclass ^:private ^:static ^:final RecursiveMultiply
+      :extends RecursiveOp
+
+      (field ^:private ^:final ^BigInteger a)
+
+      (field ^:private ^:final ^BigInteger b)
+
+      (constructor ^:public [this ^BigInteger a ^BigInteger b ^boolean parallel ^int depth]
+        (super. parallel depth)
+        (set! (.-a this) a)
+        (set! (.-b this) b))
+
+      (method ^:public compute ^BigInteger [this]
+        (.multiply a b true (.-parallel this) (.-depth this))))
+
+    (defclass ^:private ^:static ^:final RecursiveSquare
+      :extends RecursiveOp
+
+      (field ^:private ^:final ^BigInteger a)
+
+      (constructor ^:public [this ^BigInteger a ^boolean parallel ^int depth]
+        (super. parallel depth)
+        (set! (.-a this) a))
+
+      (method ^:public compute ^BigInteger [this]
+        (.square a true (.-parallel this) (.-depth this))))
+
+    (method ^:private ^:static multiply ^{:tag (RecursiveTask BigInteger)} [^BigInteger a
+                                                                            ^BigInteger b
+                                                                            ^boolean parallel
+                                                                            ^int depth]
+      (.forkOrInvoke (RecursiveMultiply. a b parallel depth)))
+
+    (method ^:private ^:static square ^{:tag (RecursiveTask BigInteger)} [^BigInteger a
+                                                                          ^boolean parallel
+                                                                          ^int depth]
+      (.forkOrInvoke (RecursiveSquare. a parallel depth))))
+
+  (method ^:private ^:static multiplyToomCook3 ^BigInteger [^BigInteger a ^BigInteger b
+                                                            ^boolean parallel ^:mutable ^int depth]
+    (let [alen (alength (.-mag a))
+          blen (alength (.-mag b))
+          largest (Math/max alen blen)
+          k (unchecked-divide-int (unchecked-add-int largest 2) 3)
+          r (unchecked-subtract-int largest (unchecked-multiply-int 2 k))
+          ^:mutable ^BigInteger a0 nil
+          ^:mutable ^BigInteger a1 nil
+          ^:mutable ^BigInteger a2 nil
+          ^:mutable ^BigInteger b0 nil
+          ^:mutable ^BigInteger b1 nil
+          ^:mutable ^BigInteger b2 nil]
+      (set! a2 (.getToomSlice a k r 0 largest))
+      (set! a1 (.getToomSlice a k r 1 largest))
+      (set! a0 (.getToomSlice a k r 2 largest))
+      (set! b2 (.getToomSlice b k r 0 largest))
+      (set! b1 (.getToomSlice b k r 1 largest))
+      (set! b0 (.getToomSlice b k r 2 largest))
+      (let [^:mutable ^BigInteger v0 nil
+            ^:mutable ^BigInteger v1 nil
+            ^:mutable ^BigInteger v2 nil
+            ^:mutable ^BigInteger vm1 nil
+            ^:mutable ^BigInteger vinf nil
+            ^:mutable ^BigInteger t1 nil
+            ^:mutable ^BigInteger t2 nil
+            ^:mutable ^BigInteger tm1 nil
+            ^:mutable ^BigInteger da1 nil
+            ^:mutable ^BigInteger db1 nil]
+        (set! depth (unchecked-inc-int depth))
+        (let [v0_task (RecursiveOp/multiply a0 b0 parallel depth)]
+          (set! da1 (.add a2 a0))
+          (set! db1 (.add b2 b0))
+          (let [vm1_task (RecursiveOp/multiply (.subtract da1 a1) (.subtract db1 b1) parallel depth)]
+            (set! da1 (.add da1 a1))
+            (set! db1 (.add db1 b1))
+            (let [v1_task (RecursiveOp/multiply da1 db1 parallel depth)]
+              (set! v2
+                    (.multiply (.subtract (.shiftLeft (.add da1 a2) 1) a0)
+                               (.subtract (.shiftLeft (.add db1 b2) 1) b0)
+                               true
+                               parallel
+                               depth))
+              (set! vinf (.multiply a2 b2 true parallel depth))
+              (set! v0 (cast BigInteger (.join v0_task)))
+              (set! vm1 (cast BigInteger (.join vm1_task)))
+              (set! v1 (cast BigInteger (.join v1_task)))
+              (set! t2 (.exactDivideBy3 (.subtract v2 vm1)))
+              (set! tm1 (.shiftRight (.subtract v1 vm1) 1))
+              (set! t1 (.subtract v1 v0))
+              (set! t2 (.shiftRight (.subtract t2 t1) 1))
+              (set! t1 (.subtract (.subtract t1 tm1) vinf))
+              (set! t2 (.subtract t2 (.shiftLeft vinf 1)))
+              (set! tm1 (.subtract tm1 t2))
+              (let [ss (unchecked-multiply-int k 32)
+                    result (.add (.shiftLeft (.add
+                                               (.shiftLeft
+                                                 (.add
+                                                   (.shiftLeft (.add (.shiftLeft vinf ss) t2) ss)
+                                                   t1)
+                                                 ss)
+                                               tm1)
+                                             ss)
+                                 v0)]
+                (if (not (== (.-signum a) (.-signum b))) (.negate result) result))))))))
+
+  (method ^:private getToomSlice ^BigInteger [this ^int lowerSize ^int upperSize ^int slice
+                                              ^int fullsize]
+    (let [^:mutable ^int start 0
+          ^:mutable ^int end 0
+          ^:mutable ^int sliceSize 0
+          ^:mutable ^int len 0
+          ^:mutable ^int offset 0]
+      (set! len (alength mag))
+      (set! offset (unchecked-subtract-int fullsize len))
+      (if (== slice 0)
+          (do
+            (set! start (unchecked-subtract-int 0 offset))
+            (set! end (unchecked-subtract-int (unchecked-subtract-int upperSize 1) offset)))
+          (do
+            (set! start
+                  (unchecked-subtract-int
+                    (unchecked-add-int upperSize
+                                       (unchecked-multiply-int
+                                         (unchecked-subtract-int slice 1)
+                                         lowerSize))
+                    offset))
+            (set! end (unchecked-subtract-int (unchecked-add-int start lowerSize) 1))))
+      (when (< start 0) (set! start 0))
+      (if (< end 0)
+          ZERO
+          (do
+            (set! sliceSize (unchecked-add-int (unchecked-subtract-int end start) 1))
+            (cond
+              (<= sliceSize 0) ZERO
+              (and (== start 0) (>= sliceSize len)) (.abs this)
+              :else
+                (let [intSlice (new int/1 sliceSize)]
+                  (System/arraycopy mag start intSlice 0 sliceSize)
+                  (BigInteger. (BigInteger/trustedStripLeadingZeroInts intSlice) 1)))))))
+
+  (method ^:private exactDivideBy3 ^BigInteger [this]
+    (let [len (alength mag)
+          ^:mutable result (new int/1 len)
+          ^:mutable ^long x 0
+          ^:mutable ^long w 0
+          ^:mutable ^long q 0
+          ^:mutable ^long borrow 0]
+      (set! borrow 0)
+      (loop [^int i (unchecked-subtract-int len 1)]
+        (when (>= i 0)
+          (set! x (bit-and (aget mag i) LONG_MASK))
+          (set! w (unchecked-subtract x borrow))
+          (if (> borrow x) (set! borrow 1) (set! borrow 0))
+          (set! q (bit-and (unchecked-multiply w 0xAAAAAAAB) LONG_MASK))
+          (aset result i (unchecked-int q))
+          (if (>= q 0x55555556)
+              (do
+                (set! borrow (unchecked-inc borrow))
+                (if (>= q 0xAAAAAAAB)
+                    (do (set! borrow (unchecked-inc borrow)) (recur (unchecked-dec-int i)))
+                    (recur (unchecked-dec-int i))))
+              (recur (unchecked-dec-int i)))))
+      (set! result (BigInteger/trustedStripLeadingZeroInts result))
+      (BigInteger. result signum)))
+
+  (method ^:private getLower ^BigInteger [this ^int n]
+    (let [len (alength mag)]
+      (if (<= len n)
+          (.abs this)
+          (let [lowerInts (new int/1 n)]
+            (System/arraycopy mag (unchecked-subtract-int len n) lowerInts 0 n)
+            (BigInteger. (BigInteger/trustedStripLeadingZeroInts lowerInts) 1)))))
+
+  (method ^:private getUpper ^BigInteger [this ^int n]
+    (let [len (alength mag)]
+      (if (<= len n)
+          ZERO
+          (let [upperLen (unchecked-subtract-int len n)
+                upperInts (new int/1 upperLen)]
+            (System/arraycopy mag 0 upperInts 0 upperLen)
+            (BigInteger. (BigInteger/trustedStripLeadingZeroInts upperInts) 1)))))
+
+  (method ^:private square ^BigInteger [this]
+    (.square this false false 0))
+
+  (method ^:private square ^BigInteger [this ^boolean isRecursion ^boolean parallel ^int depth]
+    (if (== signum 0)
+        ZERO
+        (let [len (alength mag)]
+          (cond
+            (< len KARATSUBA_SQUARE_THRESHOLD)
+              (let [z (BigInteger/squareToLen mag len nil)]
+                (BigInteger. (BigInteger/trustedStripLeadingZeroInts z) 1))
+            (< len TOOM_COOK_SQUARE_THRESHOLD) (.squareKaratsuba this)
+            :else
+              (do
+                (when-not isRecursion
+                  (when (> (.magBitLength this)
+                           (unchecked-multiply-int
+                             (unchecked-divide-int Integer/SIZE 2)
+                             MAX_MAG_LENGTH))
+                    (BigInteger/reportOverflow)))
+                (.squareToomCook3 this parallel depth))))))
+
+  (method ^:private ^:static ^:final squareToLen ^int/1 [^int/1 x ^int len ^:mutable ^int/1 z]
+    (let [zlen (bit-shift-left-int len 1)]
+      (when (or (nil? z) (< (alength z) zlen)) (set! z (new int/1 zlen)))
+      (BigInteger/implSquareToLenChecks x len z zlen)
+      (BigInteger/implSquareToLen x len z zlen)))
+
+  (method ^:private ^:static implSquareToLenChecks :throws [RuntimeException] ^void [^int/1 x
+                                                                                     ^int len
+                                                                                     ^int/1 z
+                                                                                     ^int zlen]
+    (when (< len 1) (throw (IllegalArgumentException. (java-str "invalid input length: " len))))
+    (when (> len (alength x))
+      (throw (IllegalArgumentException.
+               (java-str "input length out of bound: " len " > " (alength x)))))
+    (when (> (unchecked-multiply-int len 2) (alength z))
+      (throw (IllegalArgumentException.
+               (java-str "input length out of bound: "
+                         (unchecked-multiply-int len 2)
+                         " > "
+                         (alength z)))))
+    (when (< zlen 1) (throw (IllegalArgumentException. (java-str "invalid input length: " zlen))))
+    (when (> zlen (alength z))
+      (throw (IllegalArgumentException.
+               (java-str "input length out of bound: " len " > " (alength z))))))
+
+  (method ^:private ^:static ^:final ^{IntrinsicCandidate true} implSquareToLen ^int/1 [^int/1 x
+                                                                                        ^int len
+                                                                                        ^int/1 z
+                                                                                        ^int zlen]
+    (let [^:mutable ^int lastProductLowWord 0]
+      (let [^:mutable ^int j 0
+            ^:mutable ^int i 0]
+        (while (< j len)
+          (let [piece (bit-and (aget x j) LONG_MASK)
+                product (unchecked-multiply piece piece)]
+            (aset z
+                  i
+                  (bit-or-int (bit-shift-left-int lastProductLowWord 31)
+                              (unchecked-int (unsigned-bit-shift-right product 33))))
+            (set! i (unchecked-inc-int i))
+            (aset z i (unchecked-int (unsigned-bit-shift-right product 1)))
+            (set! i (unchecked-inc-int i))
+            (set! lastProductLowWord (unchecked-int product)))
+          (set! j (unchecked-inc-int j))))
+      (loop [^int i len
+             ^int offset 1]
+        (when (> i 0)
+          (let [^:mutable t (aget x (unchecked-subtract-int i 1))]
+            (set! t (BigInteger/mulAdd z x offset (unchecked-subtract-int i 1) t))
+            (BigInteger/addOne z (unchecked-subtract-int offset 1) i t)
+            (recur (unchecked-dec-int i) (unchecked-add-int offset 2)))))
+      (BigInteger/primitiveLeftShift z zlen 1)
+      (let [i-7 (unchecked-subtract-int zlen 1)]
+        (aset z
+              i-7
+              (bit-or-int (aget z i-7) (bit-and-int (aget x (unchecked-subtract-int len 1)) 1))))
+      z))
+
+  (method ^:private squareKaratsuba ^BigInteger [this]
+    (let [half (unchecked-divide-int (unchecked-add-int (alength mag) 1) 2)
+          xl (.getLower this half)
+          xh (.getUpper this half)
+          xhs (.square xh)
+          xls (.square xl)]
+      (.add (.shiftLeft (.add (.shiftLeft xhs (unchecked-multiply-int half 32))
+                              (.subtract (.square (.add xl xh)) (.add xhs xls)))
+                        (unchecked-multiply-int half 32))
+            xls)))
+
+  (method ^:private squareToomCook3 ^BigInteger [this ^boolean parallel ^:mutable ^int depth]
+    (let [len (alength mag)
+          k (unchecked-divide-int (unchecked-add-int len 2) 3)
+          r (unchecked-subtract-int len (unchecked-multiply-int 2 k))
+          ^:mutable ^BigInteger a0 nil
+          ^:mutable ^BigInteger a1 nil
+          ^:mutable ^BigInteger a2 nil]
+      (set! a2 (.getToomSlice this k r 0 len))
+      (set! a1 (.getToomSlice this k r 1 len))
+      (set! a0 (.getToomSlice this k r 2 len))
+      (let [^:mutable ^BigInteger v0 nil
+            ^:mutable ^BigInteger v1 nil
+            ^:mutable ^BigInteger v2 nil
+            ^:mutable ^BigInteger vm1 nil
+            ^:mutable ^BigInteger vinf nil
+            ^:mutable ^BigInteger t1 nil
+            ^:mutable ^BigInteger t2 nil
+            ^:mutable ^BigInteger tm1 nil
+            ^:mutable ^BigInteger da1 nil]
+        (set! depth (unchecked-inc-int depth))
+        (let [v0_fork (RecursiveOp/square a0 parallel depth)]
+          (set! da1 (.add a2 a0))
+          (let [vm1_fork (RecursiveOp/square (.subtract da1 a1) parallel depth)]
+            (set! da1 (.add da1 a1))
+            (let [v1_fork (RecursiveOp/square da1 parallel depth)]
+              (set! vinf (.square a2 true parallel depth))
+              (set! v2 (.square (.subtract (.shiftLeft (.add da1 a2) 1) a0) true parallel depth))
+              (set! v0 (cast BigInteger (.join v0_fork)))
+              (set! vm1 (cast BigInteger (.join vm1_fork)))
+              (set! v1 (cast BigInteger (.join v1_fork)))
+              (set! t2 (.exactDivideBy3 (.subtract v2 vm1)))
+              (set! tm1 (.shiftRight (.subtract v1 vm1) 1))
+              (set! t1 (.subtract v1 v0))
+              (set! t2 (.shiftRight (.subtract t2 t1) 1))
+              (set! t1 (.subtract (.subtract t1 tm1) vinf))
+              (set! t2 (.subtract t2 (.shiftLeft vinf 1)))
+              (set! tm1 (.subtract tm1 t2))
+              (let [ss (unchecked-multiply-int k 32)]
+                (.add (.shiftLeft (.add (.shiftLeft
+                                          (.add (.shiftLeft (.add (.shiftLeft vinf ss) t2) ss) t1)
+                                          ss)
+                                        tm1)
+                                  ss)
+                      v0))))))))
+
+  (method ^:public divide ^BigInteger [this ^BigInteger val]
+    (if (or
+          (< (alength (.-mag val)) BURNIKEL_ZIEGLER_THRESHOLD)
+          (< (unchecked-subtract-int (alength mag) (alength (.-mag val))) BURNIKEL_ZIEGLER_OFFSET))
+        (.divideKnuth this val)
+        (.divideBurnikelZiegler this val)))
+
+  (method ^:private divideKnuth ^BigInteger [this ^BigInteger val]
+    (let [q (MutableBigInteger.)
+          a (MutableBigInteger. (.-mag this))
+          b (MutableBigInteger. (.-mag val))]
+      (.divideKnuth a b q false)
+      (.toBigInteger q (unchecked-multiply-int (.-signum this) (.-signum val)))))
+
+  (method ^:public divideAndRemainder ^BigInteger/1 [this ^BigInteger val]
+    (if (or
+          (< (alength (.-mag val)) BURNIKEL_ZIEGLER_THRESHOLD)
+          (< (unchecked-subtract-int (alength mag) (alength (.-mag val))) BURNIKEL_ZIEGLER_OFFSET))
+        (.divideAndRemainderKnuth this val)
+        (.divideAndRemainderBurnikelZiegler this val)))
+
+  (method ^:private divideAndRemainderKnuth ^BigInteger/1 [this ^BigInteger val]
+    (let [result (new BigInteger/1 2)
+          q (MutableBigInteger.)
+          a (MutableBigInteger. (.-mag this))
+          b (MutableBigInteger. (.-mag val))
+          r (.divideKnuth a b q)]
+      (aset result 0 (.toBigInteger q (if (== (.-signum this) (.-signum val)) 1 -1)))
+      (aset result 1 (.toBigInteger r (.-signum this)))
+      result))
+
+  (method ^:public remainder ^BigInteger [this ^BigInteger val]
+    (if (or
+          (< (alength (.-mag val)) BURNIKEL_ZIEGLER_THRESHOLD)
+          (< (unchecked-subtract-int (alength mag) (alength (.-mag val))) BURNIKEL_ZIEGLER_OFFSET))
+        (.remainderKnuth this val)
+        (.remainderBurnikelZiegler this val)))
+
+  (method ^:private remainderKnuth ^BigInteger [this ^BigInteger val]
+    (let [q (MutableBigInteger.)
+          a (MutableBigInteger. (.-mag this))
+          b (MutableBigInteger. (.-mag val))]
+      (.toBigInteger (.divideKnuth a b q) (.-signum this))))
+
+  (method ^:private divideBurnikelZiegler ^BigInteger [this ^BigInteger val]
+    (aget (.divideAndRemainderBurnikelZiegler this val) 0))
+
+  (method ^:private remainderBurnikelZiegler ^BigInteger [this ^BigInteger val]
+    (aget (.divideAndRemainderBurnikelZiegler this val) 1))
+
+  (method ^:private divideAndRemainderBurnikelZiegler ^BigInteger/1 [this ^BigInteger val]
+    (let [q (MutableBigInteger.)
+          r (.divideAndRemainderBurnikelZiegler (MutableBigInteger. this)
+                                                (MutableBigInteger. val)
+                                                q)
+          ^BigInteger qBigInt (if (.isZero q)
+                                  ZERO
+                                  (.toBigInteger q (unchecked-multiply-int signum (.-signum val))))
+          ^BigInteger rBigInt (if (.isZero r) ZERO (.toBigInteger r signum))]
+      (new BigInteger/1 [qBigInt rBigInt])))
+
+  (method ^:public pow ^BigInteger [this ^int exponent]
+    (when (< exponent 0) (throw (ArithmeticException. "Negative exponent")))
+    (cond
+      (or (== exponent 0) (.equals this ONE)) ONE
+      (or (== signum 0) (== exponent 1)) this
+      :else
+        (let [^:mutable base (.abs this)
+              negative (and (< signum 0) (== (bit-and-int exponent 1) 1))
+              powersOfTwo (.getLowestSetBit base)
+              bitsToShiftLong (unchecked-multiply (long powersOfTwo) exponent)
+              bitsToShift (unchecked-int bitsToShiftLong)]
+          (when-not (== bitsToShift bitsToShiftLong) (BigInteger/reportOverflow))
+          (set! base (.shiftRight base powersOfTwo))
+          (let [remainingBits (.bitLength base)]
+            (if (== remainingBits 1)
+                (.shiftLeft (if negative NEGATIVE_ONE ONE) bitsToShift)
+                (let [scaleFactor (unchecked-multiply (long remainingBits) exponent)]
+                  (if (<= scaleFactor Long/SIZE)
+                      (let [^int newSign (if negative -1 1)
+                            result (BigInteger/unsignedLongPow
+                                     (bit-and (aget (.-mag base) 0) LONG_MASK)
+                                     exponent)]
+                        (if (<= (unchecked-add bitsToShift scaleFactor) Long/SIZE)
+                            (BigInteger. (bit-shift-left result bitsToShift) newSign)
+                            (.shiftLeft (BigInteger. result newSign) bitsToShift)))
+                      (do
+                        (when (>= (unchecked-subtract
+                                    (unchecked-add scaleFactor bitsToShift)
+                                    exponent)
+                                  Integer/MAX_VALUE)
+                          (BigInteger/reportOverflow))
+                        (let [^:mutable answer ONE
+                              expZeros (Integer/numberOfLeadingZeros exponent)
+                              ^:mutable workingExp (bit-shift-left-int exponent expZeros)]
+                          (loop [^int expLen (unchecked-subtract-int Integer/SIZE expZeros)]
+                            (when (> expLen 0)
+                              (set! answer (.multiply answer answer))
+                              (when (< workingExp 0) (set! answer (.multiply answer base)))
+                              (set! workingExp (bit-shift-left-int workingExp 1))
+                              (recur (unchecked-dec-int expLen))))
+                          (set! answer (.shiftLeft answer bitsToShift))
+                          (if negative (.negate answer) answer))))))))))
+
+  (method ^:static unsignedLongPow ^long [^:mutable ^long x ^:mutable ^int n]
+    (cond
+      (or (== x 1) (== n 0)) 1
+      (== x 2) (bit-shift-left 1 n)
+      :else
+        (let [^:mutable pow 1]
+          (while (not (== n 1))
+            (when-not (== (bit-and-int n 1) 0) (set! pow (unchecked-multiply pow x)))
+            (set! x (unchecked-multiply x x))
+            (set! n (unsigned-bit-shift-right-int n 1)))
+          (unchecked-multiply pow x))))
+
+  (method ^:public sqrt ^BigInteger [this]
+    (when (< (.-signum this) 0) (throw (ArithmeticException. "Negative BigInteger")))
+    (.toBigInteger (aget (.sqrtRem (MutableBigInteger. (.-mag this)) false) 0)))
+
+  (method ^:public sqrtAndRemainder ^BigInteger/1 [this]
+    (when (< (.-signum this) 0) (throw (ArithmeticException. "Negative BigInteger")))
+    (let [sqrtRem (.sqrtRem (MutableBigInteger. (.-mag this)) true)]
+      (new BigInteger/1 [(.toBigInteger (aget sqrtRem 0)) (.toBigInteger (aget sqrtRem 1))])))
+
+  (method ^:public rootn ^BigInteger [this ^int n]
+    (cond
+      (== n 1) this
+      (== n 2) (.sqrt this)
+      :else
+        (do
+          (.checkRootDegree this n)
+          (.toBigInteger (aget (.rootnRem (MutableBigInteger. (.-mag this)) n) 0) signum))))
+
+  (method ^:public rootnAndRemainder ^BigInteger/1 [this ^int n]
+    (cond
+      (== n 1) (new BigInteger/1 [this ZERO])
+      (== n 2) (.sqrtAndRemainder this)
+      :else
+        (do
+          (.checkRootDegree this n)
+          (let [rootRem (.rootnRem (MutableBigInteger. (.-mag this)) n)]
+            (new BigInteger/1
+                 [(.toBigInteger (aget rootRem 0) signum) (.toBigInteger (aget rootRem 1) signum)])))))
+
+  (method ^:private checkRootDegree ^void [this ^int n]
+    (when (<= n 0) (throw (ArithmeticException. "Non-positive root degree")))
+    (when (and (== (bit-and-int n 1) 0) (< (.-signum this) 0))
+      (throw (ArithmeticException. "Negative radicand with even root degree"))))
+
+  (method ^:public gcd ^BigInteger [this ^BigInteger val]
+    (cond
+      (== (.-signum val) 0) (.abs this)
+      (== (.-signum this) 0) (.abs val)
+      :else
+        (let [a (MutableBigInteger. this)
+              b (MutableBigInteger. val)
+              result (.hybridGCD a b)]
+          (.toBigInteger result 1))))
+
+  (method ^:static bitLengthForInt ^int [^int n]
+    (unchecked-subtract-int 32 (Integer/numberOfLeadingZeros n)))
+
+  (method ^:static bitLengthForLong ^int [^long n]
+    (unchecked-subtract-int 64 (Long/numberOfLeadingZeros n)))
+
+  (method ^:private ^:static leftShift ^int/1 [^int/1 a ^int len ^int n]
+    (let [nInts (unsigned-bit-shift-right-int n 5)
+          nBits (bit-and-int n 0x1F)
+          bitsInHighWord (BigInteger/bitLengthForInt (aget a 0))]
+      (cond
+        (<= n (unchecked-subtract-int 32 bitsInHighWord))
+          (do (BigInteger/primitiveLeftShift a len nBits) a)
+        (<= nBits (unchecked-subtract-int 32 bitsInHighWord))
+          (let [result (new int/1 (unchecked-add-int nInts len))]
+            (System/arraycopy a 0 result 0 len)
+            (BigInteger/primitiveLeftShift result (alength result) nBits)
+            result)
+        :else
+          (let [result (new int/1 (unchecked-add-int (unchecked-add-int nInts len) 1))]
+            (System/arraycopy a 0 result 0 len)
+            (BigInteger/primitiveRightShift result
+                                            (alength result)
+                                            (unchecked-subtract-int 32 nBits))
+            result))))
+
+  (method ^:static primitiveRightShift ^void [^int/1 a ^int len ^int n]
+    (^[int int int] Objects/checkFromToIndex 0 len (alength a))
+    (BigInteger/shiftRightImplWorker a a 1 n (unchecked-subtract-int len 1))
+    (aset a 0 (unsigned-bit-shift-right-int (aget a 0) n)))
+
+  (method ^:static primitiveLeftShift ^void [^int/1 a ^int len ^int n]
+    (when-not (or (== len 0) (== n 0))
+      (^[int int int] Objects/checkFromToIndex 0 len (alength a))
+      (BigInteger/shiftLeftImplWorker a a 0 n (unchecked-subtract-int len 1))
+      (let [i-8 (unchecked-subtract-int len 1)] (aset a i-8 (bit-shift-left-int (aget a i-8) n)))))
+
+  (method ^:private magBitLength ^int [this]
+    (let [^:mutable n (unchecked-subtract-int magBitLengthPlusOne 1)]
+      (when (== n -1)
+        (set! n
+              (if (== (alength mag) 0)
+                  0
+                  (unchecked-subtract-int (unchecked-multiply-int (alength mag) Integer/SIZE)
+                                          (Integer/numberOfLeadingZeros (aget mag 0)))))
+        (set! magBitLengthPlusOne (unchecked-add-int n 1)))
+      n))
+
+  (method ^:public abs ^BigInteger [this]
+    (if (>= signum 0) this (.negate this)))
+
+  (method ^:public negate ^BigInteger [this]
+    (BigInteger. (.-mag this) (unchecked-negate-int (.-signum this))))
+
+  (method ^:public signum ^int [this] (.-signum this))
+
+  (method ^:public mod ^BigInteger [this ^BigInteger m]
+    (when (<= (.-signum m) 0) (throw (ArithmeticException. "BigInteger: modulus not positive")))
+    (let [result (.remainder this m)] (if (>= (.-signum result) 0) result (.add result m))))
+
+  (method ^:public modPow ^BigInteger [this ^:mutable ^BigInteger exponent ^BigInteger m]
+    (when (<= (.-signum m) 0) (throw (ArithmeticException. "BigInteger: modulus not positive")))
+    (cond
+      (== (.-signum exponent) 0) (if (.equals m ONE) ZERO ONE)
+      (.equals this ONE) (if (.equals m ONE) ZERO ONE)
+      (and (.equals this ZERO) (>= (.-signum exponent) 0)) ZERO
+      (and (.equals this (aget negConst 1)) (not (.testBit exponent 0)))
+        (if (.equals m ONE) ZERO ONE)
+      :else
+        (let [^:mutable ^boolean invertResult false]
+          (when (set! invertResult (< (.-signum exponent) 0)) (set! exponent (.negate exponent)))
+          (let [^BigInteger base (if (or (< (.-signum this) 0) (>= (.compareTo this m) 0))
+                                     (.mod this m)
+                                     this)
+                ^:mutable ^BigInteger result nil]
+            (if (.testBit m 0)
+                (set! result (.oddModPow base exponent m))
+                (let [p (.getLowestSetBit m)
+                      m1 (.shiftRight m p)
+                      m2 (.shiftLeft ONE p)
+                      ^BigInteger base2 (if (or (< (.-signum this) 0) (>= (.compareTo this m1) 0))
+                                            (.mod this m1)
+                                            this)
+                      ^BigInteger a1 (if (.equals m1 ONE) ZERO (.oddModPow base2 exponent m1))
+                      a2 (.modPow2 base exponent p)
+                      y1 (.modInverse m2 m1)
+                      y2 (.modInverse m1 m2)]
+                  (if (< (alength (.-mag m)) (unchecked-divide-int MAX_MAG_LENGTH 2))
+                      (set! result
+                            (.mod (.add (.multiply (.multiply a1 m2) y1)
+                                        (.multiply (.multiply a2 m1) y2))
+                                  m))
+                      (let [t1 (MutableBigInteger.)]
+                        (.multiply (MutableBigInteger. (.multiply a1 m2))
+                                   (MutableBigInteger. y1)
+                                   t1)
+                        (let [t2 (MutableBigInteger.)]
+                          (.multiply (MutableBigInteger. (.multiply a2 m1))
+                                     (MutableBigInteger. y2)
+                                     t2)
+                          (.add t1 t2)
+                          (let [q (MutableBigInteger.)]
+                            (set! result (.toBigInteger (.divide t1 (MutableBigInteger. m) q)))))))))
+            (if invertResult (.modInverse result m) result)))))
+
+  (method ^:private ^:static montgomeryMultiply ^int/1 [^int/1 a ^int/1 b ^int/1 n ^int len
+                                                        ^long inv ^:mutable ^int/1 product]
+    (BigInteger/implMontgomeryMultiplyChecks a b n len product)
+    (if (> len MONTGOMERY_INTRINSIC_THRESHOLD)
+        (do
+          (set! product (BigInteger/multiplyToLen a len b len product))
+          (BigInteger/montReduce product n len (unchecked-int inv)))
+        (BigInteger/implMontgomeryMultiply a b n len inv (BigInteger/materialize product len))))
+
+  (method ^:private ^:static montgomerySquare ^int/1 [^int/1 a ^int/1 n ^int len ^long inv
+                                                      ^:mutable ^int/1 product]
+    (BigInteger/implMontgomeryMultiplyChecks a a n len product)
+    (if (> len MONTGOMERY_INTRINSIC_THRESHOLD)
+        (do
+          (set! product (BigInteger/squareToLen a len product))
+          (BigInteger/montReduce product n len (unchecked-int inv)))
+        (BigInteger/implMontgomerySquare a n len inv (BigInteger/materialize product len))))
+
+  (method ^:private ^:static implMontgomeryMultiplyChecks :throws [RuntimeException] ^void [^int/1 a
+                                                                                            ^int/1 b
+                                                                                            ^int/1 n
+                                                                                            ^int len
+                                                                                            ^int/1 product]
+    (when-not (== (unchecked-remainder-int len 2) 0)
+      (throw (IllegalArgumentException. (java-str "input array length must be even: " len))))
+    (when (< len 1) (throw (IllegalArgumentException. (java-str "invalid input length: " len))))
+    (when (or (or (or (> len (alength a)) (> len (alength b))) (> len (alength n)))
+              (and (some? product) (> len (alength product))))
+      (throw (IllegalArgumentException. (java-str "input array length out of bound: " len)))))
+
+  (method ^:private ^:static materialize ^int/1 [^:mutable ^int/1 z ^int len]
+    (when (or (nil? z) (< (alength z) len)) (set! z (new int/1 len)))
+    z)
+
+  (method ^:private ^:static ^{IntrinsicCandidate true} implMontgomeryMultiply ^int/1 [^int/1 a
+                                                                                       ^int/1 b
+                                                                                       ^int/1 n
+                                                                                       ^int len
+                                                                                       ^long inv
+                                                                                       ^:mutable ^int/1 product]
+    (set! product (BigInteger/multiplyToLen a len b len product))
+    (BigInteger/montReduce product n len (unchecked-int inv)))
+
+  (method ^:private ^:static ^{IntrinsicCandidate true} implMontgomerySquare ^int/1 [^int/1 a
+                                                                                     ^int/1 n
+                                                                                     ^int len
+                                                                                     ^long inv
+                                                                                     ^:mutable ^int/1 product]
+    (set! product (BigInteger/squareToLen a len product))
+    (BigInteger/montReduce product n len (unchecked-int inv)))
+
+  (field ^:static ^int/1 bnExpModThreshTable (new int/1 [7 25 81 241 673 1793 Integer/MAX_VALUE]))
+
+  (method ^:private oddModPow ^BigInteger [this ^BigInteger y ^BigInteger z]
+    (cond
+      (.equals y ONE) this
+      (== signum 0) ZERO
+      :else
+        (let [base (.clone mag)
+              exp (.-mag y)
+              ^:mutable mod (.-mag z)
+              ^:mutable modLen (alength mod)]
+          (when-not (== (bit-and-int modLen 1) 0)
+            (let [x (new int/1 (unchecked-add-int modLen 1))]
+              (System/arraycopy mod 0 x 1 modLen)
+              (set! mod x)
+              (set! modLen (unchecked-inc-int modLen))))
+          (let [^:mutable ^int wbits 0
+                ^:mutable ebits (.magBitLength y)]
+            (when (or (not (== ebits 17)) (not (== (aget exp 0) 65537)))
+              (while (> ebits (aget bnExpModThreshTable wbits))
+                (set! wbits (unchecked-inc-int wbits))))
+            (let [tblmask (bit-shift-left-int 1 wbits)
+                  table (new int/2 tblmask)]
+              (loop [^int i 0]
+                (when (< i tblmask) (aset table i (new int/1 modLen)) (recur (unchecked-inc-int i))))
+              (let [n0 (unchecked-add
+                         (bit-and (aget mod (unchecked-subtract-int modLen 1)) LONG_MASK)
+                         (bit-shift-left
+                           (bit-and (aget mod (unchecked-subtract-int modLen 2)) LONG_MASK)
+                           32))
+                    inv (unchecked-negate (MutableBigInteger/inverseMod64 n0))
+                    ^:mutable a (BigInteger/leftShift
+                                  base
+                                  (alength base)
+                                  (bit-shift-left-int modLen 5))
+                    q (MutableBigInteger.)
+                    a2 (MutableBigInteger. a)
+                    b2 (MutableBigInteger. mod)]
+                (.normalize b2)
+                (let [r (.divide a2 b2 q)]
+                  (aset table 0 (.toIntArray r))
+                  (when (< (alength (aget table 0)) modLen)
+                    (let [offset (unchecked-subtract-int modLen (alength (aget table 0)))
+                          t2 (new int/1 modLen)]
+                      (System/arraycopy (aget table 0) 0 t2 offset (alength (aget table 0)))
+                      (aset table 0 t2)))
+                  (let [^:mutable b (BigInteger/montgomerySquare (aget table 0) mod modLen inv nil)
+                        ^:mutable t (Arrays/copyOf b modLen)]
+                    (loop [^int i 1]
+                      (when (< i tblmask)
+                        (aset table
+                              i
+                              (BigInteger/montgomeryMultiply
+                                t
+                                (aget table (unchecked-subtract-int i 1))
+                                mod
+                                modLen
+                                inv
+                                nil))
+                        (recur (unchecked-inc-int i))))
+                    (let [^:mutable bitpos (bit-shift-left-int
+                                             1
+                                             (bit-and-int (unchecked-subtract-int ebits 1) 0x1f))
+                          ^:mutable ^int buf 0
+                          ^:mutable elen (alength exp)
+                          ^:mutable ^int eIndex 0]
+                      (loop [^int i 0]
+                        (when (<= i wbits)
+                          (set! buf
+                                (bit-or-int (bit-shift-left-int buf 1)
+                                            (if (not (== (bit-and-int (aget exp eIndex) bitpos) 0))
+                                                1
+                                                0)))
+                          (set! bitpos (unsigned-bit-shift-right-int bitpos 1))
+                          (if (== bitpos 0)
+                              (do
+                                (set! eIndex (unchecked-inc-int eIndex))
+                                (set! bitpos (bit-shift-left-int 1 0x1f))
+                                (set! elen (unchecked-dec-int elen))
+                                (recur (unchecked-inc-int i)))
+                              (recur (unchecked-inc-int i)))))
+                      (let [^:mutable multpos ebits]
+                        (set! ebits (unchecked-dec-int ebits))
+                        (let [^:mutable isone true]
+                          (set! multpos (unchecked-subtract-int ebits wbits))
+                          (while (== (bit-and-int buf 1) 0)
+                            (set! buf (unsigned-bit-shift-right-int buf 1))
+                            (set! multpos (unchecked-inc-int multpos)))
+                          (let [^:mutable mult (aget table (unsigned-bit-shift-right-int buf 1))]
+                            (set! buf 0)
+                            (when (== multpos ebits) (set! isone false))
+                            (while true
+                              (set! ebits (unchecked-dec-int ebits))
+                              (set! buf (bit-shift-left-int buf 1))
+                              (when-not (== elen 0)
+                                (set!
+                                  buf
+                                  (bit-or-int buf
+                                              (if (not
+                                                    (== (bit-and-int (aget exp eIndex) bitpos) 0))
+                                                  1
+                                                  0)))
+                                (set! bitpos (unsigned-bit-shift-right-int bitpos 1))
+                                (when (== bitpos 0)
+                                  (set! eIndex (unchecked-inc-int eIndex))
+                                  (set! bitpos (bit-shift-left-int 1 0x1f))
+                                  (set! elen (unchecked-dec-int elen))))
+                              (when-not (== (bit-and-int buf tblmask) 0)
+                                (set! multpos (unchecked-subtract-int ebits wbits))
+                                (while (== (bit-and-int buf 1) 0)
+                                  (set! buf (unsigned-bit-shift-right-int buf 1))
+                                  (set! multpos (unchecked-inc-int multpos)))
+                                (set! mult (aget table (unsigned-bit-shift-right-int buf 1)))
+                                (set! buf 0))
+                              (when (== ebits multpos)
+                                (if isone
+                                    (do (set! b (.clone mult)) (set! isone false))
+                                    (do
+                                      (set! t b)
+                                      (set! a
+                                            (BigInteger/montgomeryMultiply t mult mod modLen inv a))
+                                      (set! t a)
+                                      (set! a b)
+                                      (set! b t))))
+                              (when (== ebits 0) (break))
+                              (when-not isone
+                                (set! t b)
+                                (set! a (BigInteger/montgomerySquare t mod modLen inv a))
+                                (set! t a)
+                                (set! a b)
+                                (set! b t)))
+                            (let [^:mutable t2 (new int/1 (unchecked-multiply-int 2 modLen))]
+                              (System/arraycopy b 0 t2 modLen modLen)
+                              (set! b (BigInteger/montReduce t2 mod modLen (unchecked-int inv)))
+                              (set! t2 (Arrays/copyOf b modLen))
+                              (BigInteger. 1 t2))))))))))))))
+
+  (method ^:private ^:static montReduce ^int/1 [^int/1 n ^int/1 mod ^int mlen ^int inv]
+    (let [^:mutable ^int c 0
+          ^:mutable len mlen
+          ^:mutable ^int offset 0]
+      (loop []
+        (let [nEnd (aget n (unchecked-subtract-int (unchecked-subtract-int (alength n) 1) offset))
+              carry (BigInteger/mulAdd n mod offset mlen (unchecked-multiply-int inv nEnd))]
+          (set! c (unchecked-add-int c (BigInteger/addOne n offset mlen carry)))
+          (set! offset (unchecked-inc-int offset)))
+        (when (> (set! len (unchecked-dec-int len)) 0) (recur)))
+      (while (> c 0) (set! c (unchecked-add-int c (BigInteger/subN n mod mlen))))
+      (while (>= (BigInteger/intArrayCmpToLen n mod mlen) 0) (BigInteger/subN n mod mlen))
+      n))
+
+  (method ^:private ^:static intArrayCmpToLen ^int [^int/1 arg1 ^int/1 arg2 ^int len]
+    (loop [^int i 0]
+      (when (< i len)
+        (let [b1 (bit-and (aget arg1 i) LONG_MASK)
+              b2 (bit-and (aget arg2 i) LONG_MASK)]
+          (when (< b1 b2) (return -1))
+          (if (> b1 b2) (return 1) (recur (unchecked-inc-int i))))))
+    0)
+
+  (method ^:private ^:static subN ^int [^int/1 a ^int/1 b ^:mutable ^int len]
+    (let [^:mutable sum 0]
+      (while (>= (set! len (unchecked-dec-int len)) 0)
+        (set! sum
+              (unchecked-add
+                (unchecked-subtract (bit-and (aget a len) LONG_MASK)
+                                    (bit-and (aget b len) LONG_MASK))
+                (bit-shift-right sum 32)))
+        (aset a len (unchecked-int sum)))
+      (unchecked-int (bit-shift-right sum 32))))
+
+  (method ^:static mulAdd ^int [^int/1 out ^int/1 in ^int offset ^int len ^int k]
+    (BigInteger/implMulAddCheck out in offset len k)
+    (BigInteger/implMulAdd out in offset len k))
+
+  (method ^:private ^:static implMulAddCheck ^void [^int/1 out ^int/1 in ^int offset ^int len ^int k]
+    (when (> len (alength in))
+      (throw (IllegalArgumentException.
+               (java-str "input length is out of bound: " len " > " (alength in)))))
+    (when (< offset 0)
+      (throw (IllegalArgumentException. (java-str "input offset is invalid: " offset))))
+    (when (> offset (unchecked-subtract-int (alength out) 1))
+      (throw (IllegalArgumentException.
+               (java-str "input offset is out of bound: "
+                         offset
+                         " > "
+                         (unchecked-subtract-int (alength out) 1)))))
+    (when (> len (unchecked-subtract-int (alength out) offset))
+      (throw (IllegalArgumentException.
+               (java-str "input len is out of bound: "
+                         len
+                         " > "
+                         (unchecked-subtract-int (alength out) offset))))))
+
+  (method ^:private ^:static ^{IntrinsicCandidate true} implMulAdd ^int [^int/1 out ^int/1 in
+                                                                         ^:mutable ^int offset
+                                                                         ^int len ^int k]
+    (let [kLong (bit-and k LONG_MASK)
+          ^:mutable carry 0]
+      (set! offset (unchecked-subtract-int (unchecked-subtract-int (alength out) offset) 1))
+      (loop [^int j (unchecked-subtract-int len 1)]
+        (when (>= j 0)
+          (let [product (unchecked-add
+                          (unchecked-add (unchecked-multiply (bit-and (aget in j) LONG_MASK) kLong)
+                                         (bit-and (aget out offset) LONG_MASK))
+                          carry)]
+            (aset out offset (unchecked-int product))
+            (set! offset (unchecked-dec-int offset))
+            (set! carry (unsigned-bit-shift-right product 32))
+            (recur (unchecked-dec-int j)))))
+      (unchecked-int carry)))
+
+  (method ^:static addOne ^int [^int/1 a ^:mutable ^int offset ^:mutable ^int mlen ^int carry]
+    (set! offset
+          (unchecked-subtract-int
+            (unchecked-subtract-int (unchecked-subtract-int (alength a) 1) mlen)
+            offset))
+    (let [t (unchecked-add (bit-and (aget a offset) LONG_MASK) (bit-and carry LONG_MASK))]
+      (aset a offset (unchecked-int t))
+      (if (== (unsigned-bit-shift-right t 32) 0)
+          0
+          (do
+            (while (>= (set! mlen (unchecked-dec-int mlen)) 0)
+              (if (< (set! offset (unchecked-dec-int offset)) 0)
+                  (return 1)
+                  (do
+                    (aset a offset (unchecked-inc-int (aget a offset)))
+                    (when-not (== (aget a offset) 0) (return 0)))))
+            1))))
+
+  (method ^:private modPow2 ^BigInteger [this ^BigInteger exponent ^int p]
+    (let [^:mutable result ONE
+          ^:mutable baseToPow2 (.mod2 this p)
+          ^:mutable ^int expOffset 0
+          ^:mutable limit (.bitLength exponent)]
+      (when (.testBit this 0)
+        (set! limit (if (< (unchecked-subtract-int p 1) limit) (unchecked-subtract-int p 1) limit)))
+      (while (< expOffset limit)
+        (when (.testBit exponent expOffset) (set! result (.mod2 (.multiply result baseToPow2) p)))
+        (set! expOffset (unchecked-inc-int expOffset))
+        (when (< expOffset limit) (set! baseToPow2 (.mod2 (.square baseToPow2) p))))
+      result))
+
+  (method ^:private mod2 ^BigInteger [this ^int p]
+    (if (<= (.bitLength this) p)
+        this
+        (let [numInts (unsigned-bit-shift-right-int (unchecked-add-int p 31) 5)
+              mag (new int/1 numInts)]
+          (System/arraycopy (.-mag this)
+                            (unchecked-subtract-int (alength (.-mag this)) numInts)
+                            mag
+                            0
+                            numInts)
+          (let [excessBits (unchecked-subtract-int (bit-shift-left-int numInts 5) p)]
+            (aset mag
+                  0
+                  (bit-and-int (aget mag 0)
+                               (unchecked-int
+                                 (unchecked-subtract
+                                   (bit-shift-left 1 (unchecked-subtract-int 32 excessBits))
+                                   1))))
+            (if (== (aget mag 0) 0) (BigInteger. 1 mag) (BigInteger. mag 1))))))
+
+  (method ^:public modInverse ^BigInteger [this ^BigInteger m]
+    (when-not (== (.-signum m) 1) (throw (ArithmeticException. "BigInteger: modulus not positive")))
+    (if (.equals m ONE)
+        ZERO
+        (let [^:mutable modVal this]
+          (when (or (< signum 0) (>= (.compareMagnitude this m) 0)) (set! modVal (.mod this m)))
+          (if (.equals modVal ONE)
+              ONE
+              (let [a (MutableBigInteger. modVal)
+                    b (MutableBigInteger. m)
+                    result (.mutableModInverse a b)]
+                (.toBigInteger result 1))))))
+
+  (method ^:public shiftLeft ^BigInteger [this ^int n]
+    (cond
+      (== signum 0) ZERO
+      (> n 0) (BigInteger. (BigInteger/shiftLeft mag n) signum)
+      (== n 0) this
+      :else (.shiftRightImpl this (unchecked-negate-int n))))
+
+  (method ^:private ^:static shiftLeft ^int/1 [^int/1 mag ^int n]
+    (let [nInts (unsigned-bit-shift-right-int n 5)
+          nBits (bit-and-int n 0x1f)
+          magLen (alength mag)
+          ^:mutable ^int/1 newMag nil]
+      (if (== nBits 0)
+          (do
+            (set! newMag (new int/1 (unchecked-add-int magLen nInts)))
+            (System/arraycopy mag 0 newMag 0 magLen))
+          (let [^:mutable ^int i 0
+                nBits2 (unchecked-subtract-int 32 nBits)
+                highBits (unsigned-bit-shift-right-int (aget mag 0) nBits2)]
+            (if (not (== highBits 0))
+                (do
+                  (set! newMag (new int/1 (unchecked-add-int (unchecked-add-int magLen nInts) 1)))
+                  (aset newMag i highBits)
+                  (set! i (unchecked-inc-int i)))
+                (set! newMag (new int/1 (unchecked-add-int magLen nInts))))
+            (let [numIter (unchecked-subtract-int magLen 1)]
+              (^[int int int] Objects/checkFromToIndex
+                0
+                (unchecked-add-int numIter 1)
+                (alength mag))
+              (Objects/checkFromToIndex i
+                                        (unchecked-add-int (unchecked-add-int numIter i) 1)
+                                        (alength newMag))
+              (BigInteger/shiftLeftImplWorker newMag mag i nBits numIter)
+              (aset newMag
+                    (unchecked-add-int numIter i)
+                    (bit-shift-left-int (aget mag numIter) nBits)))))
+      newMag))
+
+  (method ^:private ^:static ^{ForceInline true} ^{IntrinsicCandidate true} shiftLeftImplWorker ^void [^int/1 newArr
+                                                                                                       ^int/1 oldArr
+                                                                                                       ^:mutable ^int newIdx
+                                                                                                       ^int shiftCount
+                                                                                                       ^int numIter]
+    (let [shiftCountRight (unchecked-subtract-int 32 shiftCount)
+          ^:mutable ^int oldIdx 0]
+      (while (< oldIdx numIter)
+        (aset newArr
+              newIdx
+              (bit-or-int (bit-shift-left-int
+                            (aget oldArr
+                                  (let [old-9 oldIdx]
+                                    (set! oldIdx (unchecked-inc-int oldIdx))
+                                    old-9))
+                            shiftCount)
+                          (unsigned-bit-shift-right-int (aget oldArr oldIdx) shiftCountRight)))
+        (set! newIdx (unchecked-inc-int newIdx)))))
+
+  (method ^:public shiftRight ^BigInteger [this ^int n]
+    (cond
+      (== signum 0) ZERO
+      (> n 0) (.shiftRightImpl this n)
+      (== n 0) this
+      :else (BigInteger. (BigInteger/shiftLeft mag (unchecked-negate-int n)) signum)))
+
+  (method ^:private shiftRightImpl ^BigInteger [this ^int n]
+    (let [nInts (unsigned-bit-shift-right-int n 5)
+          nBits (bit-and-int n 0x1f)
+          magLen (alength mag)
+          ^:mutable ^int/1 newMag nil]
+      (if (>= nInts magLen)
+          (if (>= signum 0) ZERO (aget negConst 1))
+          (do
+            (if (== nBits 0)
+                (let [newMagLen (unchecked-subtract-int magLen nInts)]
+                  (set! newMag (Arrays/copyOf mag newMagLen)))
+                (let [^:mutable ^int i 0
+                      highBits (unsigned-bit-shift-right-int (aget mag 0) nBits)]
+                  (if (not (== highBits 0))
+                      (do
+                        (set! newMag (new int/1 (unchecked-subtract-int magLen nInts)))
+                        (aset newMag i highBits)
+                        (set! i (unchecked-inc-int i)))
+                      (set! newMag
+                            (new int/1
+                                 (unchecked-subtract-int (unchecked-subtract-int magLen nInts) 1))))
+                  (let [numIter (unchecked-subtract-int (unchecked-subtract-int magLen nInts) 1)]
+                    (^[int int int] Objects/checkFromToIndex
+                      0
+                      (unchecked-add-int numIter 1)
+                      (alength mag))
+                    (Objects/checkFromToIndex i (unchecked-add-int numIter i) (alength newMag))
+                    (BigInteger/shiftRightImplWorker newMag mag i nBits numIter))))
+            (when (< signum 0)
+              (let [nzInts (.numberOfTrailingZeroInts this)]
+                (when (or (> nInts nzInts)
+                          (and (== nInts nzInts)
+                               (not (== (bit-and-int
+                                          (aget mag
+                                                (unchecked-subtract-int
+                                                  (unchecked-subtract-int magLen nzInts)
+                                                  1))
+                                          (unchecked-subtract-int (bit-shift-left-int 1 nBits) 1))
+                                        0))))
+                  (set! newMag (BigInteger/javaIncrement newMag)))))
+            (BigInteger. newMag signum)))))
+
+  (method ^:private ^:static ^{ForceInline true} ^{IntrinsicCandidate true} shiftRightImplWorker ^void [^int/1 newArr
+                                                                                                        ^int/1 oldArr
+                                                                                                        ^int newIdx
+                                                                                                        ^int shiftCount
+                                                                                                        ^int numIter]
+    (let [shiftCountLeft (unchecked-subtract-int 32 shiftCount)
+          ^:mutable idx numIter
+          ^:mutable ^int nidx (if (== newIdx 0) (unchecked-subtract-int numIter 1) numIter)]
+      (while (>= nidx newIdx)
+        (aset newArr
+              nidx
+              (bit-or-int (unsigned-bit-shift-right-int
+                            (aget oldArr
+                                  (let [old-10 idx] (set! idx (unchecked-dec-int idx)) old-10))
+                            shiftCount)
+                          (bit-shift-left-int (aget oldArr idx) shiftCountLeft)))
+        (set! nidx (unchecked-dec-int nidx)))))
+
+  (method ^:static javaIncrement ^int/1 [^:mutable ^int/1 val]
+    (let [^:mutable ^int lastSum 0]
+      (loop [^int i (unchecked-subtract-int (alength val) 1)]
+        (when (and (>= i 0) (== lastSum 0))
+          (set! lastSum (aset val i (unchecked-add-int (aget val i) 1)))
+          (recur (unchecked-dec-int i))))
+      (when (== lastSum 0)
+        (set! val (new int/1 (unchecked-add-int (alength val) 1)))
+        (aset val 0 1))
+      val))
+
+  (method ^:public and ^BigInteger [this ^BigInteger val]
+    (let [result (new int/1 (Math/max (.intLength this) (.intLength val)))]
+      (loop [^int i 0]
+        (when (< i (alength result))
+          (aset result
+                i
+                (bit-and-int (.getInt this
+                                      (unchecked-subtract-int
+                                        (unchecked-subtract-int (alength result) i)
+                                        1))
+                             (.getInt val
+                                      (unchecked-subtract-int
+                                        (unchecked-subtract-int (alength result) i)
+                                        1))))
+          (recur (unchecked-inc-int i))))
+      (BigInteger/valueOf result)))
+
+  (method ^:public or ^BigInteger [this ^BigInteger val]
+    (let [result (new int/1 (Math/max (.intLength this) (.intLength val)))]
+      (loop [^int i 0]
+        (when (< i (alength result))
+          (aset result
+                i
+                (bit-or-int (.getInt this
+                                     (unchecked-subtract-int
+                                       (unchecked-subtract-int (alength result) i)
+                                       1))
+                            (.getInt val
+                                     (unchecked-subtract-int
+                                       (unchecked-subtract-int (alength result) i)
+                                       1))))
+          (recur (unchecked-inc-int i))))
+      (BigInteger/valueOf result)))
+
+  (method ^:public xor ^BigInteger [this ^BigInteger val]
+    (let [result (new int/1 (Math/max (.intLength this) (.intLength val)))]
+      (loop [^int i 0]
+        (when (< i (alength result))
+          (aset result
+                i
+                (bit-xor-int (.getInt this
+                                      (unchecked-subtract-int
+                                        (unchecked-subtract-int (alength result) i)
+                                        1))
+                             (.getInt val
+                                      (unchecked-subtract-int
+                                        (unchecked-subtract-int (alength result) i)
+                                        1))))
+          (recur (unchecked-inc-int i))))
+      (BigInteger/valueOf result)))
+
+  (method ^:public not ^BigInteger [this]
+    (let [result (new int/1 (.intLength this))]
+      (loop [^int i 0]
+        (when (< i (alength result))
+          (aset result
+                i
+                (bit-not-int (.getInt this
+                                      (unchecked-subtract-int
+                                        (unchecked-subtract-int (alength result) i)
+                                        1))))
+          (recur (unchecked-inc-int i))))
+      (BigInteger/valueOf result)))
+
+  (method ^:public andNot ^BigInteger [this ^BigInteger val]
+    (let [result (new int/1 (Math/max (.intLength this) (.intLength val)))]
+      (loop [^int i 0]
+        (when (< i (alength result))
+          (aset result
+                i
+                (bit-and-int (.getInt this
+                                      (unchecked-subtract-int
+                                        (unchecked-subtract-int (alength result) i)
+                                        1))
+                             (bit-not-int (.getInt
+                                            val
+                                            (unchecked-subtract-int
+                                              (unchecked-subtract-int (alength result) i)
+                                              1)))))
+          (recur (unchecked-inc-int i))))
+      (BigInteger/valueOf result)))
+
+  (method ^:public testBit ^boolean [this ^int n]
+    (when (< n 0) (throw (ArithmeticException. "Negative bit address")))
+    (not (== (bit-and-int (.getInt this (unsigned-bit-shift-right-int n 5))
+                          (bit-shift-left-int 1 (bit-and-int n 0x1f)))
+             0)))
+
+  (method ^:public setBit ^BigInteger [this ^int n]
+    (when (< n 0) (throw (ArithmeticException. "Negative bit address")))
+    (let [intNum (unsigned-bit-shift-right-int n 5)
+          result (new int/1 (Math/max (.intLength this) (unchecked-add-int intNum 2)))]
+      (loop [^int i 0]
+        (when (< i (alength result))
+          (aset result
+                (unchecked-subtract-int (unchecked-subtract-int (alength result) i) 1)
+                (.getInt this i))
+          (recur (unchecked-inc-int i))))
+      (let [i-11 (unchecked-subtract-int (unchecked-subtract-int (alength result) intNum) 1)]
+        (aset result
+              i-11
+              (bit-or-int (aget result i-11) (bit-shift-left-int 1 (bit-and-int n 0x1f)))))
+      (BigInteger/valueOf result)))
+
+  (method ^:public clearBit ^BigInteger [this ^int n]
+    (when (< n 0) (throw (ArithmeticException. "Negative bit address")))
+    (let [intNum (unsigned-bit-shift-right-int n 5)
+          result (new int/1
+                      (Math/max (.intLength this)
+                                (unchecked-add-int
+                                  (unsigned-bit-shift-right-int (unchecked-add-int n 1) 5)
+                                  1)))]
+      (loop [^int i 0]
+        (when (< i (alength result))
+          (aset result
+                (unchecked-subtract-int (unchecked-subtract-int (alength result) i) 1)
+                (.getInt this i))
+          (recur (unchecked-inc-int i))))
+      (let [i-12 (unchecked-subtract-int (unchecked-subtract-int (alength result) intNum) 1)]
+        (aset result
+              i-12
+              (bit-and-int (aget result i-12)
+                           (bit-not-int (bit-shift-left-int 1 (bit-and-int n 0x1f))))))
+      (BigInteger/valueOf result)))
+
+  (method ^:public flipBit ^BigInteger [this ^int n]
+    (when (< n 0) (throw (ArithmeticException. "Negative bit address")))
+    (let [intNum (unsigned-bit-shift-right-int n 5)
+          result (new int/1 (Math/max (.intLength this) (unchecked-add-int intNum 2)))]
+      (loop [^int i 0]
+        (when (< i (alength result))
+          (aset result
+                (unchecked-subtract-int (unchecked-subtract-int (alength result) i) 1)
+                (.getInt this i))
+          (recur (unchecked-inc-int i))))
+      (let [i-13 (unchecked-subtract-int (unchecked-subtract-int (alength result) intNum) 1)]
+        (aset result
+              i-13
+              (bit-xor-int (aget result i-13) (bit-shift-left-int 1 (bit-and-int n 0x1f)))))
+      (BigInteger/valueOf result)))
+
+  (method ^:public getLowestSetBit ^int [this]
+    (let [^:mutable lsb (unchecked-subtract-int lowestSetBitPlusTwo 2)]
+      (when (== lsb -2)
+        (if (== signum 0)
+            (set! lsb -1)
+            (let [tz (.numberOfTrailingZeroInts this)]
+              (set! lsb
+                    (unchecked-add-int (unchecked-multiply-int tz Integer/SIZE)
+                                       (Integer/numberOfTrailingZeros
+                                         (aget mag
+                                               (unchecked-subtract-int
+                                                 (unchecked-subtract-int (alength mag) 1)
+                                                 tz)))))))
+        (set! lowestSetBitPlusTwo (unchecked-add-int lsb 2)))
+      lsb))
+
+  (method ^:public bitLength ^int [this]
+    (if (and (and (< signum 0) (== (Integer/lowestOneBit (aget mag 0)) (aget mag 0)))
+             (== (.numberOfTrailingZeroInts this) (unchecked-subtract-int (alength mag) 1)))
+        (unchecked-subtract-int (.magBitLength this) 1)
+        (.magBitLength this)))
+
+  (method ^:public bitCount ^int [this]
+    (let [^:mutable bc (unchecked-subtract-int bitCountPlusOne 1)]
+      (when (== bc -1)
+        (set! bc 0)
+        (let [firstZeroInt (unchecked-subtract-int (alength mag) (.numberOfTrailingZeroInts this))]
+          (loop [^int i 0]
+            (when (< i firstZeroInt)
+              (set! bc (unchecked-add-int bc (Integer/bitCount (aget mag i))))
+              (recur (unchecked-inc-int i))))
+          (when (< signum 0)
+            (set! bc (unchecked-add-int bc (unchecked-subtract-int (.getLowestSetBit this) 1))))
+          (set! bitCountPlusOne (unchecked-add-int bc 1))))
+      bc))
+
+  (method ^:public isProbablePrime ^boolean [this ^int certainty]
+    (if (<= certainty 0)
+        true
+        (let [w (.abs this)]
+          (cond
+            (.equals w TWO) true
+            (or (not (.testBit w 0)) (.equals w ONE)) false
+            :else
+              (do
+                (when (> (.bitLength w) (unchecked-add-int PRIME_SEARCH_BIT_LENGTH_LIMIT 1))
+                  (throw (ArithmeticException.
+                           "Primality test implementation restriction on bitLength")))
+                (.primeToCertainty w certainty nil))))))
+
+  (method ^:public compareTo ^int [this ^BigInteger val]
+    (cond
+      (== signum (.-signum val))
+        (switch signum 1 (.compareMagnitude this val) -1 (.compareMagnitude val this) 0)
+      (> signum (.-signum val)) 1
+      :else -1))
+
+  (method ^:final compareMagnitude ^int [this ^BigInteger val]
+    (let [m1 mag
+          len1 (alength m1)
+          m2 (.-mag val)
+          len2 (alength m2)]
+      (cond
+        (< len1 len2) -1
+        (> len1 len2) 1
+        :else
+          (let [i (ArraysSupport/mismatch m1 m2 len1)]
+            (if (not (== i -1)) (if (< (Integer/compareUnsigned (aget m1 i) (aget m2 i)) 0) -1 1) 0)))))
+
+  (method ^:final compareMagnitude ^int [this ^:mutable ^long val]
+    (java-assert (not (== val Long/MIN_VALUE)))
+    (let [m1 mag
+          len (alength m1)]
+      (if (> len 2)
+          1
+          (do
+            (when (< val 0) (set! val (unchecked-negate val)))
+            (let [highWord (unchecked-int (unsigned-bit-shift-right val 32))]
+              (cond
+                (== highWord 0)
+                  (cond
+                    (< len 1) -1
+                    (> len 1) 1
+                    :else
+                      (let [a (aget m1 0)
+                            b (unchecked-int val)]
+                        (if (not (== a b)) (if (< (Integer/compareUnsigned a b) 0) -1 1) 0)))
+                (< len 2) -1
+                :else
+                  (let [^:mutable a (aget m1 0)
+                        ^:mutable b highWord]
+                    (if (not (== a b))
+                        (if (< (Integer/compareUnsigned a b) 0) -1 1)
+                        (do
+                          (set! a (aget m1 1))
+                          (set! b (unchecked-int val))
+                          (if (not (== a b)) (if (< (Integer/compareUnsigned a b) 0) -1 1) 0))))))))))
+
+  (method ^:public equals ^boolean [this x]
+    (if (identical? x this)
+        true
+        (if-instance [^BigInteger xInt x]
+          (cond
+            (not (== (.-signum xInt) signum)) false
+            (not (== (alength mag) (alength (.-mag xInt)))) false
+            :else (== (ArraysSupport/mismatch mag (.-mag xInt) (alength mag)) -1))
+          false)))
+
+  (method ^:public min ^BigInteger [this ^BigInteger val]
+    (if (< (.compareTo this val) 0) this val))
+
+  (method ^:public max ^BigInteger [this ^BigInteger val]
+    (if (> (.compareTo this val) 0) this val))
+
+  (method ^:public hashCode ^int [this]
+    (unchecked-multiply-int (ArraysSupport/hashCode mag 0 (alength mag) 0) signum))
+
+  (method ^:public toString ^String [this ^:mutable ^int radix]
+    (if (== signum 0)
+        "0"
+        (do
+          (when (or (< radix Character/MIN_RADIX) (> radix Character/MAX_RADIX)) (set! radix 10))
+          (if (.fitsIntoLong this)
+              (Long/toString (.longValue this) radix)
+              (let [abs (.abs this)
+                    b (.bitLength abs)
+                    numChars (unchecked-add-int
+                               (unchecked-int
+                                 (unchecked-add
+                                   (Math/floor (unchecked-divide
+                                                 (unchecked-multiply b LOG_TWO)
+                                                 (aget logCache radix)))
+                                   1.0))
+                               (if (< signum 0) 1 0))
+                    sb (StringBuilder. numChars)]
+                (when (< signum 0) (.append sb \-))
+                (BigInteger/toString abs sb radix 0)
+                (.toString sb))))))
+
+  (method ^:private ^:static padWithZeros ^void [^StringBuilder buf ^:mutable ^int numZeros]
+    (while (>= numZeros NUM_ZEROS)
+      (.append buf ZEROS)
+      (set! numZeros (unchecked-subtract-int numZeros NUM_ZEROS)))
+    (when (> numZeros 0) (.append buf ZEROS 0 numZeros)))
+
+  (method ^:private smallToString ^void [this ^int radix ^StringBuilder buf ^int digits]
+    (java-assert (>= signum 0))
+    (if (== signum 0)
+        (BigInteger/padWithZeros buf digits)
+        (let [maxNumDigitGroups (unchecked-divide-int
+                                  (unchecked-add-int (unchecked-multiply-int 4 (alength mag)) 6)
+                                  7)
+              digitGroups (new long/1 maxNumDigitGroups)
+              ^:mutable tmp this
+              ^:mutable ^int numGroups 0]
+          (while (not (== (.-signum tmp) 0))
+            (let [d (aget longRadix radix)
+                  q (MutableBigInteger.)
+                  a (MutableBigInteger. (.-mag tmp))
+                  b (MutableBigInteger. (.-mag d))
+                  r (.divide a b q)
+                  q2 (.toBigInteger q (unchecked-multiply-int (.-signum tmp) (.-signum d)))
+                  r2 (.toBigInteger r (unchecked-multiply-int (.-signum tmp) (.-signum d)))]
+              (aset digitGroups numGroups (.longValue r2))
+              (set! numGroups (unchecked-inc-int numGroups))
+              (set! tmp q2)))
+          (let [^:mutable s (Long/toString (aget digitGroups (unchecked-subtract-int numGroups 1))
+                                           radix)]
+            (BigInteger/padWithZeros buf
+                                     (unchecked-subtract-int
+                                       digits
+                                       (unchecked-add-int
+                                         (.length s)
+                                         (unchecked-multiply-int
+                                           (unchecked-subtract-int numGroups 1)
+                                           (aget digitsPerLong radix)))))
+            (.append buf s)
+            (loop [^int i (unchecked-subtract-int numGroups 2)]
+              (when (>= i 0)
+                (set! s (Long/toString (aget digitGroups i) radix))
+                (let [numLeadingZeros (unchecked-subtract-int
+                                        (aget digitsPerLong radix)
+                                        (.length s))]
+                  (when-not (== numLeadingZeros 0) (.append buf ZEROS 0 numLeadingZeros))
+                  (.append buf s)
+                  (recur (unchecked-dec-int i)))))))))
+
+  (method ^:private ^:static toString ^void [^BigInteger u ^StringBuilder sb ^int radix ^int digits]
+    (java-assert (>= (.signum u) 0))
+    (if (<= (alength (.-mag u)) SCHOENHAGE_BASE_CONVERSION_THRESHOLD)
+        (.smallToString u radix sb digits)
+        (let [b (.bitLength u)
+              n (unchecked-int
+                  (Math/round (unchecked-subtract
+                                (unchecked-divide
+                                  (Math/log (unchecked-divide
+                                              (unchecked-multiply b LOG_TWO)
+                                              (aget logCache radix)))
+                                  LOG_TWO)
+                                1.0)))
+              v (BigInteger/getRadixConversionCache radix n)
+              ^:mutable ^BigInteger/1 results nil]
+          (set! results (.divideAndRemainder u v))
+          (let [expectedDigits (bit-shift-left-int 1 n)]
+            (BigInteger/toString (aget results 0)
+                                 sb
+                                 radix
+                                 (unchecked-subtract-int digits expectedDigits))
+            (BigInteger/toString (aget results 1) sb radix expectedDigits)))))
+
+  (method ^:private ^:static getRadixConversionCache ^BigInteger [^int radix ^int exponent]
+    (let [^:mutable cacheLine (aget powerCache radix)]
+      (if (< exponent (alength cacheLine))
+          (aget cacheLine exponent)
+          (let [oldLength (alength cacheLine)]
+            (set! cacheLine
+                  (cast BigInteger/1 (Arrays/copyOf cacheLine (unchecked-add-int exponent 1))))
+            (loop [^int i oldLength]
+              (when (<= i exponent)
+                (aset cacheLine i (.pow (aget cacheLine (unchecked-subtract-int i 1)) 2))
+                (recur (unchecked-inc-int i))))
+            (let [^:mutable pc powerCache]
+              (when (>= exponent (alength (aget pc radix)))
+                (set! pc (.clone pc))
+                (aset pc radix cacheLine)
+                (set! powerCache pc))
+              (aget cacheLine exponent))))))
+
+  (field ^:private ^:static ^int NUM_ZEROS 63)
+
+  (field ^:private ^:static ^:final ^String ZEROS (.repeat "0" NUM_ZEROS))
+
+  (method ^:public toString ^String [this] (.toString this 10))
+
+  (method ^:public toByteArray ^byte/1 [this]
+    (let [byteArray (new byte/1
+                         (unchecked-add-int (unsigned-bit-shift-right-int (.bitLength this) 3) 1))]
+      (let [^:mutable i (unchecked-subtract-int (alength byteArray) 1)
+            ^:mutable ^int bytesCopied 4
+            ^:mutable ^int nextInt 0
+            ^:mutable ^int intIndex 0]
+        (while (>= i 0)
+          (if (== bytesCopied 4)
+              (do
+                (set! nextInt (.getInt this intIndex))
+                (set! intIndex (unchecked-inc-int intIndex))
+                (set! bytesCopied 1))
+              (do
+                (set! nextInt (unsigned-bit-shift-right-int nextInt 8))
+                (set! bytesCopied (unchecked-inc-int bytesCopied))))
+          (aset byteArray i (unchecked-byte nextInt))
+          (set! i (unchecked-dec-int i))))
+      byteArray))
+
+  (method ^:public intValue ^int [this] (.getInt this 0))
+
+  (method ^:public longValue ^long [this]
+    (bit-or (bit-shift-left (long (.getInt this 1)) Integer/SIZE)
+            (bit-and (.getInt this 0) LONG_MASK)))
+
+  (method ^:public floatValue ^float [this]
+    (if (== signum 0)
+        (float 0.0)
+        (let [exponent (unchecked-subtract-int (.magBitLength this) 1)]
+          (cond
+            (< exponent (unchecked-subtract-int Long/SIZE 1)) (.longValue this)
+            (> exponent Float/MAX_EXPONENT)
+              (if (> signum 0) Float/POSITIVE_INFINITY Float/NEGATIVE_INFINITY)
+            :else
+              (let [shift (unchecked-subtract-int exponent FloatConsts/SIGNIFICAND_WIDTH)
+                    ^:mutable ^int twiceSignifFloor 0
+                    nBits (bit-and-int shift 0x1f)
+                    nBits2 (unchecked-subtract-int 32 nBits)]
+                (if (== nBits 0)
+                    (set! twiceSignifFloor (aget mag 0))
+                    (do
+                      (set! twiceSignifFloor (unsigned-bit-shift-right-int (aget mag 0) nBits))
+                      (when (== twiceSignifFloor 0)
+                        (set! twiceSignifFloor
+                              (bit-or-int (bit-shift-left-int (aget mag 0) nBits2)
+                                          (unsigned-bit-shift-right-int (aget mag 1) nBits))))))
+                (let [^:mutable signifFloor (bit-shift-right-int twiceSignifFloor 1)]
+                  (set! signifFloor (bit-and-int signifFloor FloatConsts/SIGNIF_BIT_MASK))
+                  (let [increment (and (not (== (bit-and-int twiceSignifFloor 1) 0))
+                                       (or (not (== (bit-and-int signifFloor 1) 0))
+                                           (< (.getLowestSetBit (.abs this)) shift)))
+                        ^int signifRounded (if increment
+                                               (unchecked-add-int signifFloor 1)
+                                               signifFloor)
+                        ^:mutable bits (bit-shift-left-int
+                                         (unchecked-add-int exponent FloatConsts/EXP_BIAS)
+                                         (unchecked-subtract-int FloatConsts/SIGNIFICAND_WIDTH 1))]
+                    (set! bits (unchecked-add-int bits signifRounded))
+                    (set! bits (bit-or-int bits (bit-and-int signum FloatConsts/SIGN_BIT_MASK)))
+                    (Float/intBitsToFloat bits))))))))
+
+  (method ^:public doubleValue ^double [this]
+    (if (== signum 0)
+        0.0
+        (let [exponent (unchecked-subtract-int (.magBitLength this) 1)]
+          (cond
+            (< exponent (unchecked-subtract-int Long/SIZE 1)) (.longValue this)
+            (> exponent Double/MAX_EXPONENT)
+              (if (> signum 0) Double/POSITIVE_INFINITY Double/NEGATIVE_INFINITY)
+            :else
+              (let [shift (unchecked-subtract-int exponent DoubleConsts/SIGNIFICAND_WIDTH)
+                    ^:mutable ^long twiceSignifFloor 0
+                    nBits (bit-and-int shift 0x1f)
+                    nBits2 (unchecked-subtract-int 32 nBits)
+                    ^:mutable ^int highBits 0
+                    ^:mutable ^int lowBits 0]
+                (if (== nBits 0)
+                    (do (set! highBits (aget mag 0)) (set! lowBits (aget mag 1)))
+                    (do
+                      (set! highBits (unsigned-bit-shift-right-int (aget mag 0) nBits))
+                      (set! lowBits
+                            (bit-or-int (bit-shift-left-int (aget mag 0) nBits2)
+                                        (unsigned-bit-shift-right-int (aget mag 1) nBits)))
+                      (when (== highBits 0)
+                        (set! highBits lowBits)
+                        (set! lowBits
+                              (bit-or-int (bit-shift-left-int (aget mag 1) nBits2)
+                                          (unsigned-bit-shift-right-int (aget mag 2) nBits))))))
+                (set! twiceSignifFloor
+                      (bit-or (bit-shift-left (bit-and highBits LONG_MASK) 32)
+                              (bit-and lowBits LONG_MASK)))
+                (let [^:mutable signifFloor (bit-shift-right twiceSignifFloor 1)]
+                  (set! signifFloor (bit-and signifFloor DoubleConsts/SIGNIF_BIT_MASK))
+                  (let [increment (and (not (== (bit-and twiceSignifFloor 1) 0))
+                                       (or (not (== (bit-and signifFloor 1) 0))
+                                           (< (.getLowestSetBit (.abs this)) shift)))
+                        signifRounded (if increment (unchecked-add signifFloor 1) signifFloor)
+                        ^:mutable bits (bit-shift-left
+                                         (long (unchecked-add-int exponent DoubleConsts/EXP_BIAS))
+                                         (unchecked-subtract-int DoubleConsts/SIGNIFICAND_WIDTH 1))]
+                    (set! bits (unchecked-add bits signifRounded))
+                    (set! bits (bit-or bits (bit-and signum DoubleConsts/SIGN_BIT_MASK)))
+                    (Double/longBitsToDouble bits))))))))
+
+  (method ^:private ^:static stripLeadingZeroInts ^int/1 [^int/1 val ^boolean trusted]
+    (let [^:mutable ^int keep 0]
+      (set! keep 0)
+      (while (and (< keep (alength val)) (== (aget val keep) 0))
+        (set! keep (unchecked-inc-int keep)))
+      (if (and trusted (== keep 0)) val (Arrays/copyOfRange val keep (alength val)))))
+
+  (method ^:private ^:static trustedStripLeadingZeroInts ^int/1 [^int/1 val]
+    (BigInteger/stripLeadingZeroInts val true))
+
+  (method ^:private ^:static stripLeadingZeroBytes ^int/1 [^byte/1 a ^int from ^int len]
+    (BigInteger/stripLeadingZeroBytes Integer/MIN_VALUE a from len))
+
+  (method ^:private ^:static stripLeadingZeroBytes ^int/1 [^:mutable ^int b ^byte/1 a
+                                                           ^:mutable ^int from ^int len]
+    (if (== len 0)
+        (.-mag ZERO)
+        (let [to (unchecked-add-int from len)]
+          (when (< b -128) (set! b (aget a from)))
+          (set! from (unchecked-inc-int from))
+          (while (and (== b 0) (< from to))
+            (set! b (aget a (let [old-14 from] (set! from (unchecked-inc-int from)) old-14))))
+          (if (== b 0)
+              (.-mag ZERO)
+              (let [res (new int/1
+                             (unchecked-add-int
+                               (bit-shift-right-int (unchecked-subtract-int to from) 2)
+                               1))
+                    ^:mutable d0 (bit-and-int b 0xFF)]
+                (while (not (== (bit-and-int (unchecked-subtract-int to from) 0x3) 0))
+                  (set! d0 (bit-or-int (bit-shift-left-int d0 8) (bit-and-int (aget a from) 0xFF)))
+                  (set! from (unchecked-inc-int from)))
+                (aset res 0 d0)
+                (let [^:mutable ^int i 1]
+                  (while (< from to)
+                    (aset res
+                          i
+                          (bit-or-int (bit-or-int
+                                        (bit-or-int
+                                          (bit-shift-left-int
+                                            (aget
+                                              a
+                                              (let [old-15 from]
+                                                (set! from (unchecked-inc-int from))
+                                                old-15))
+                                            24)
+                                          (bit-shift-left-int
+                                            (bit-and-int
+                                              (aget
+                                                a
+                                                (let [old-16 from]
+                                                  (set! from (unchecked-inc-int from))
+                                                  old-16))
+                                              0xFF)
+                                            16))
+                                        (bit-shift-left-int
+                                          (bit-and-int
+                                            (aget
+                                              a
+                                              (let [old-17 from]
+                                                (set! from (unchecked-inc-int from))
+                                                old-17))
+                                            0xFF)
+                                          8))
+                                      (bit-and-int
+                                        (aget a
+                                              (let [old-18 from]
+                                                (set! from (unchecked-inc-int from))
+                                                old-18))
+                                        0xFF)))
+                    (set! i (unchecked-inc-int i)))
+                  res))))))
+
+  (method ^:private ^:static makePositive ^int/1 [^:mutable ^int b ^byte/1 a ^:mutable ^int from
+                                                  ^int len]
+    (let [to (unchecked-add-int from len)]
+      (set! from (unchecked-inc-int from))
+      (while (and (== b -1) (< from to))
+        (set! b (aget a (let [old-19 from] (set! from (unchecked-inc-int from)) old-19))))
+      (let [^:mutable d0 (bit-or-int (bit-shift-left-int -1 8) (bit-and-int b 0xFF))]
+        (while (not (== (bit-and-int (unchecked-subtract-int to from) 0x3) 0))
+          (set! d0 (bit-or-int (bit-shift-left-int d0 8) (bit-and-int (set! b (aget a from)) 0xFF)))
+          (set! from (unchecked-inc-int from)))
+        (let [f from]
+          (while (and (== b 0) (< from to))
+            (set! b (aget a (let [old-20 from] (set! from (unchecked-inc-int from)) old-20))))
+          (let [^:mutable d (bit-and-int b 0xFF)]
+            (while (not (== (bit-and-int (unchecked-subtract-int to from) 0x3) 0))
+              (set! d (bit-or-int (bit-shift-left-int d 8) (bit-and-int (aget a from) 0xFF)))
+              (set! from (unchecked-inc-int from)))
+            (let [^int c (if (== (bit-or-int (bit-or-int (unchecked-subtract-int to from) d0) d) 0)
+                             1
+                             0)
+                  res (new
+                        int/1
+                        (unchecked-add-int (unchecked-add-int c 1)
+                                           (bit-shift-right-int (unchecked-subtract-int to f) 2)))]
+              (aset res 0 (if (== c 0) d0 -1))
+              (let [^:mutable i (unchecked-subtract-int
+                                  (alength res)
+                                  (bit-shift-right-int (unchecked-subtract-int to from) 2))]
+                (when (> i 1) (aset res (unchecked-subtract-int i 1) d))
+                (while (< from to)
+                  (aset res
+                        i
+                        (bit-or-int (bit-or-int (bit-or-int
+                                                  (bit-shift-left-int
+                                                    (aget
+                                                      a
+                                                      (let [old-21 from]
+                                                        (set! from (unchecked-inc-int from))
+                                                        old-21))
+                                                    24)
+                                                  (bit-shift-left-int
+                                                    (bit-and-int
+                                                      (aget
+                                                        a
+                                                        (let [old-22 from]
+                                                          (set! from (unchecked-inc-int from))
+                                                          old-22))
+                                                      0xFF)
+                                                    16))
+                                                (bit-shift-left-int
+                                                  (bit-and-int
+                                                    (aget
+                                                      a
+                                                      (let [old-23 from]
+                                                        (set! from (unchecked-inc-int from))
+                                                        old-23))
+                                                    0xFF)
+                                                  8))
+                                    (bit-and-int
+                                      (aget a
+                                            (let [old-24 from]
+                                              (set! from (unchecked-inc-int from))
+                                              old-24))
+                                      0xFF)))
+                  (set! i (unchecked-inc-int i)))
+                (while (and (>= (set! i (unchecked-dec-int i)) 0) (== (aget res i) 0)))
+                (aset res i (unchecked-negate-int (aget res i)))
+                (while (>= (set! i (unchecked-dec-int i)) 0)
+                  (aset res i (bit-not-int (aget res i))))
+                res)))))))
+
+  (method ^:private ^:static makePositive ^int/1 [^int/1 a]
+    (let [^:mutable ^int keep 0
+          ^:mutable ^int i 0]
+      (set! keep 0)
+      (while (and (< keep (alength a)) (== (aget a keep) -1)) (set! keep (unchecked-inc-int keep)))
+      (set! i (unchecked-subtract-int (alength a) 1))
+      (while (== (aget a i) 0) (set! i (unchecked-dec-int i)))
+      (let [^:mutable ^int/1 result nil]
+        (if (< i keep)
+            (do
+              (set! result
+                    (new int/1 (unchecked-add-int (unchecked-subtract-int (alength a) keep) 1)))
+              (aset result 0 1))
+            (do
+              (set! result (new int/1 (unchecked-subtract-int (alength a) keep)))
+              (aset result (unchecked-subtract-int i keep) (unchecked-negate-int (aget a i)))
+              (set! i (unchecked-dec-int i))
+              (while (>= i keep)
+                (aset result (unchecked-subtract-int i keep) (bit-not-int (aget a i)))
+                (set! i (unchecked-dec-int i)))))
+        result)))
+
+  (field ^:private ^:static ^int/1 digitsPerLong
+    (new int/1
+         [0 0 62 39 31 27 24 22 20 19 18 18 17 17 16 16 15 15 15 14 14 14 14 13 13 13 13 13 13 12 12
+          12 12 12 12 12 12]))
+
+  (field ^:private ^:static ^BigInteger/1 longRadix
+    (new BigInteger/1
+         [nil
+          nil
+          (BigInteger/valueOf 0x4000000000000000)
+          (BigInteger/valueOf 0x383d9170b85ff80b)
+          (BigInteger/valueOf 0x4000000000000000)
+          (BigInteger/valueOf 0x6765c793fa10079d)
+          (BigInteger/valueOf 0x41c21cb8e1000000)
+          (BigInteger/valueOf 0x3642798750226111)
+          (BigInteger/valueOf 0x1000000000000000)
+          (BigInteger/valueOf 0x12bf307ae81ffd59)
+          (BigInteger/valueOf 0xde0b6b3a7640000)
+          (BigInteger/valueOf 0x4d28cb56c33fa539)
+          (BigInteger/valueOf 0x1eca170c00000000)
+          (BigInteger/valueOf 0x780c7372621bd74d)
+          (BigInteger/valueOf 0x1e39a5057d810000)
+          (BigInteger/valueOf 0x5b27ac993df97701)
+          (BigInteger/valueOf 0x1000000000000000)
+          (BigInteger/valueOf 0x27b95e997e21d9f1)
+          (BigInteger/valueOf 0x5da0e1e53c5c8000)
+          (BigInteger/valueOf 0xb16a458ef403f19)
+          (BigInteger/valueOf 0x16bcc41e90000000)
+          (BigInteger/valueOf 0x2d04b7fdd9c0ef49)
+          (BigInteger/valueOf 0x5658597bcaa24000)
+          (BigInteger/valueOf 0x6feb266931a75b7)
+          (BigInteger/valueOf 0xc29e98000000000)
+          (BigInteger/valueOf 0x14adf4b7320334b9)
+          (BigInteger/valueOf 0x226ed36478bfa000)
+          (BigInteger/valueOf 0x383d9170b85ff80b)
+          (BigInteger/valueOf 0x5a3c23e39c000000)
+          (BigInteger/valueOf 0x4e900abb53e6b71)
+          (BigInteger/valueOf 0x7600ec618141000)
+          (BigInteger/valueOf 0xaee5720ee830681)
+          (BigInteger/valueOf 0x1000000000000000)
+          (BigInteger/valueOf 0x172588ad4f5f0981)
+          (BigInteger/valueOf 0x211e44f7d02c1000)
+          (BigInteger/valueOf 0x2ee56725f06e5c71)
+          (BigInteger/valueOf 0x41c21cb8e1000000)]))
+
+  (field ^:private ^:static ^int/1 digitsPerInt
+    (new int/1 [0 0 30 19 15 13 11 11 10 9 9 8 8 8 8 7 7 7 7 7 7 7 6 6 6 6 6 6 6 6 6 6 6 6 6 6 5]))
+
+  (field ^:private ^:static ^int/1 intRadix
+    (new int/1
+         [0
+          0
+          0x40000000
+          0x4546b3db
+          0x40000000
+          0x48c27395
+          0x159fd800
+          0x75db9c97
+          0x40000000
+          0x17179149
+          0x3b9aca00
+          0xcc6db61
+          0x19a10000
+          0x309f1021
+          0x57f6c100
+          0xa2f1b6f
+          0x10000000
+          0x18754571
+          0x247dbc80
+          0x3547667b
+          0x4c4b4000
+          0x6b5a6e1d
+          0x6c20a40
+          0x8d2d931
+          0xb640000
+          0xe8d4a51
+          0x1269ae40
+          0x17179149
+          0x1cb91000
+          0x23744899
+          0x2b73a840
+          0x34e63b41
+          0x40000000
+          0x4cfa3cc1
+          0x5c13d840
+          0x6d91b519
+          0x39aa400]))
+
+  (method ^:private intLength ^int [this]
+    (unchecked-add-int (unsigned-bit-shift-right-int (.bitLength this) 5) 1))
+
+  (method ^:private signBit ^int [this] (if (< signum 0) 1 0))
+
+  (method ^:private signInt ^int [this] (if (< signum 0) -1 0))
+
+  (method ^:private getInt ^int [this ^int n]
+    (cond
+      (< n 0) 0
+      (>= n (alength mag)) (.signInt this)
+      :else
+        (let [magInt (aget mag (unchecked-subtract-int (unchecked-subtract-int (alength mag) n) 1))]
+          (cond
+            (>= signum 0) magInt
+            (<= n (.numberOfTrailingZeroInts this)) (unchecked-negate-int magInt)
+            :else (bit-not-int magInt)))))
+
+  (method ^:private numberOfTrailingZeroInts ^int [this]
+    (let [^:mutable nz (unchecked-subtract-int numberOfTrailingZeroIntsPlusTwo 2)]
+      (when (== nz -2)
+        (let [^:mutable ^int i 0
+              lowest (unchecked-subtract-int (alength mag) 1)]
+          (set! i lowest)
+          (while (and (>= i 0) (== (aget mag i) 0)) (set! i (unchecked-dec-int i)))
+          (set! nz (unchecked-subtract-int lowest i))
+          (set! numberOfTrailingZeroIntsPlusTwo (unchecked-add-int nz 2))))
+      nz))
+
+  (field ^:private ^:static ^:final ^long serialVersionUID -8287574255936472291)
+
+  (field ^:private ^:static ^:final ^ObjectStreamField/1 serialPersistentFields
+    (new ObjectStreamField/1
+         [(ObjectStreamField. "signum" Integer/TYPE)
+          (ObjectStreamField. "magnitude" byte/1)
+          (ObjectStreamField. "bitCount" Integer/TYPE)
+          (ObjectStreamField. "bitLength" Integer/TYPE)
+          (ObjectStreamField. "firstNonzeroByteNum" Integer/TYPE)
+          (ObjectStreamField. "lowestSetBit" Integer/TYPE)]))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream s]
+    (let [fields (.readFields s)
+          sign (^[String int] ObjectInputStream$GetField/.get fields "signum" -2)]
+      (when (or (< sign -1) (> sign 1))
+        (let [^:mutable message "BigInteger: Invalid signum value"]
+          (when (.defaulted fields "signum")
+            (set! message "BigInteger: Signum not present in stream"))
+          (throw (StreamCorruptedException. message))))
+      (let [^:mutable magnitude (cast byte/1 (.get fields "magnitude" nil))]
+        (set! magnitude (.clone magnitude))
+        (let [mag (BigInteger/stripLeadingZeroBytes magnitude 0 (alength magnitude))]
+          (when-not (= (== (alength mag) 0) (== sign 0))
+            (let [^:mutable message "BigInteger: signum-magnitude mismatch"]
+              (when (.defaulted fields "magnitude")
+                (set! message "BigInteger: Magnitude not present in stream"))
+              (throw (StreamCorruptedException. message))))
+          (when (or (> (alength mag) MAX_MAG_LENGTH)
+                    (and (== (alength mag) MAX_MAG_LENGTH) (< (aget mag 0) 0)))
+            (throw (StreamCorruptedException. "BigInteger: Out of the supported range")))
+          (UnsafeHolder/putSignAndMag this sign mag)))))
+
+  (method ^:private readObjectNoData :throws [ObjectStreamException] ^void [this]
+    (throw (InvalidObjectException. "Deserialized BigInteger objects need data")))
+
+  (defclass ^:private ^:static UnsafeHolder
+    (field ^:private ^:static ^:final ^Unsafe unsafe (Unsafe/getUnsafe))
+
+    (field ^:private ^:static ^:final ^long signumOffset
+      (.objectFieldOffset unsafe BigInteger "signum"))
+
+    (field ^:private ^:static ^:final ^long magOffset (.objectFieldOffset unsafe BigInteger "mag"))
+
+    (method ^:static putSignAndMag ^void [^BigInteger bi ^int sign ^int/1 magnitude]
+      (.putInt unsafe bi signumOffset sign)
+      (.putReference unsafe bi magOffset magnitude)))
+
+  (method ^:private writeObject :throws [IOException] ^void [this ^ObjectOutputStream s]
+    (let [fields (.putFields s)]
+      (.put fields "signum" signum)
+      (.put fields "magnitude" (.magSerializedForm this))
+      (^[String int] ObjectOutputStream$PutField/.put fields "bitCount" -1)
+      (^[String int] ObjectOutputStream$PutField/.put fields "bitLength" -1)
+      (^[String int] ObjectOutputStream$PutField/.put fields "lowestSetBit" -2)
+      (^[String int] ObjectOutputStream$PutField/.put fields "firstNonzeroByteNum" -2)
+      (.writeFields s)))
+
+  (method ^:private magSerializedForm ^byte/1 [this]
+    (let [result (new byte/1
+                      (unsigned-bit-shift-right-int (unchecked-add-int (.magBitLength this) 7) 3))]
+      (let [^:mutable i (unchecked-subtract-int (alength result) 1)
+            ^:mutable ^int bytesCopied 4
+            ^:mutable intIndex (unchecked-subtract-int (alength mag) 1)
+            ^:mutable ^int nextInt 0]
+        (while (>= i 0)
+          (if (== bytesCopied 4)
+              (do
+                (set! nextInt (aget mag intIndex))
+                (set! intIndex (unchecked-dec-int intIndex))
+                (set! bytesCopied 1))
+              (do
+                (set! nextInt (unsigned-bit-shift-right-int nextInt 8))
+                (set! bytesCopied (unchecked-inc-int bytesCopied))))
+          (aset result i (unchecked-byte nextInt))
+          (set! i (unchecked-dec-int i))))
+      result))
+
+  (method ^:public longValueExact ^long [this]
+    (if (.fitsIntoLong this)
+        (.longValue this)
+        (throw (ArithmeticException. "BigInteger out of long range"))))
+
+  (method ^:private fitsIntoLong ^boolean [this]
+    (and (<= (alength mag) 2) (< (.bitLength this) Long/SIZE)))
+
+  (method ^:public intValueExact ^int [this]
+    (if (and (<= (alength mag) 1) (< (.bitLength this) Integer/SIZE))
+        (.intValue this)
+        (throw (ArithmeticException. "BigInteger out of int range"))))
+
+  (method ^:public shortValueExact ^short [this]
+    (if (and (<= (alength mag) 1) (< (.bitLength this) Short/SIZE))
+        (.shortValue this)
+        (throw (ArithmeticException. "BigInteger out of short range"))))
+
+  (method ^:public byteValueExact ^byte [this]
+    (if (and (<= (alength mag) 1) (< (.bitLength this) Byte/SIZE))
+        (.byteValue this)
+        (throw (ArithmeticException. "BigInteger out of byte range")))))

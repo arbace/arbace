@@ -1,0 +1,326 @@
+;; Converted from jdk26u src/java.base/share/classes/java/text/RBTableBuilder.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.text)
+
+(import '(java.util Vector)
+        '(jdk.internal.icu.impl NormalizerImpl)
+        '(sun.text ComposedCharIter IntHashtable UCompactIntArray))
+
+(defclass ^:final RBTableBuilder
+  (constructor ^:public [this ^RBCollationTables$BuildAPI tables]
+    (set! (.-tables this) tables))
+
+  (method ^:public build :throws [ParseException] ^void [this ^:mutable ^String pattern ^int decmp]
+    (let [^:mutable ^String expChars nil
+          ^:mutable ^String groupChars nil]
+      (when (.isEmpty pattern) (throw (ParseException. "Build rules empty." 0)))
+      (set! mapping (UCompactIntArray. RBCollationTables/UNMAPPED))
+      (set! pattern (NormalizerImpl/canonicalDecomposeWithSingleQuotation pattern))
+      (set! mPattern (MergeCollation. pattern))
+      (let [^:mutable ^int order 0]
+        (loop [^int i 0]
+          (when (< i (.getCount mPattern))
+            (let [entry (.getItemAt mPattern i)]
+              (if (some? entry)
+                  (do
+                    (set! groupChars (.getChars entry))
+                    (when (> (.length groupChars) 1)
+                      (switch (.charAt groupChars (unchecked-subtract-int (.length groupChars) 1))
+                        \@
+                          (do
+                            (set! frenchSec true)
+                            (set! groupChars
+                                  (.substring groupChars
+                                              0
+                                              (unchecked-subtract-int (.length groupChars) 1))))
+                        \!
+                          (do
+                            (set! seAsianSwapping true)
+                            (set! groupChars
+                                  (.substring groupChars
+                                              0
+                                              (unchecked-subtract-int (.length groupChars) 1))))))
+                    (set! order (.increment this (.getStrength entry) order))
+                    (set! expChars (.getExtension entry))
+                    (cond
+                      (not (.isEmpty expChars))
+                        (do
+                          (.addExpandOrder this groupChars expChars order)
+                          (recur (unchecked-inc-int i)))
+                      (> (.length groupChars) 1)
+                        (let [ch (.charAt groupChars 0)]
+                          (if (and (Character/isHighSurrogate ch) (== (.length groupChars) 2))
+                              (do
+                                (.addOrder this
+                                           (Character/toCodePoint ch (.charAt groupChars 1))
+                                           order)
+                                (recur (unchecked-inc-int i)))
+                              (do
+                                (.addContractOrder this groupChars order)
+                                (recur (unchecked-inc-int i)))))
+                      :else
+                        (let [ch (.charAt groupChars 0)]
+                          (.addOrder this ch order)
+                          (recur (unchecked-inc-int i)))))
+                  (recur (unchecked-inc-int i))))))
+        (.addComposedChars this)
+        (.commit this)
+        (.compact mapping)
+        (.fillInTables tables
+                       frenchSec
+                       seAsianSwapping
+                       mapping
+                       contractTable
+                       expandTable
+                       contractFlags
+                       maxSecOrder
+                       maxTerOrder))))
+
+  (method ^:private addComposedChars :throws [ParseException] ^void [this]
+    (let [iter (ComposedCharIter.)
+          ^:mutable ^int c 0]
+      (while (not (== (set! c (.next iter)) ComposedCharIter/DONE))
+        (when (== (.getCharOrder this c) RBCollationTables/UNMAPPED)
+          (let [s (.decomposition iter)]
+            (if (== (.length s) 1)
+                (let [order (.getCharOrder this (.charAt s 0))]
+                  (when-not (== order RBCollationTables/UNMAPPED) (.addOrder this c order)))
+                (do
+                  (when (== (.length s) 2)
+                    (let [ch0 (.charAt s 0)]
+                      (when (Character/isHighSurrogate ch0)
+                        (let [order (.getCharOrder this (.codePointAt s 0))]
+                          (when-not (== order RBCollationTables/UNMAPPED) (.addOrder this c order))
+                          (continue)))))
+                  (let [contractOrder (.getContractOrder this s)]
+                    (if (not (== contractOrder RBCollationTables/UNMAPPED))
+                        (.addOrder this c contractOrder)
+                        (let [^:mutable allThere true]
+                          (loop [^int i 0]
+                            (if (< i (.length s))
+                                (if (== (.getCharOrder this (.charAt s i))
+                                        RBCollationTables/UNMAPPED)
+                                    (set! allThere false)
+                                    (recur (unchecked-inc-int i)))
+                                nil))
+                          (when allThere (.addExpandOrder this c s RBCollationTables/UNMAPPED))))))))))))
+
+  (method ^:private ^:final commit ^void [this]
+    (when (some? expandTable)
+      (loop [^int i 0]
+        (when (< i (.size expandTable))
+          (let [valueList (cast int/1 (.elementAt expandTable i))]
+            (loop [^int j 0]
+              (when (< j (alength valueList))
+                (let [order (aget valueList j)]
+                  (if (and (< order RBCollationTables/EXPANDCHARINDEX) (> order CHARINDEX))
+                      (let [ch (unchecked-subtract-int order CHARINDEX)
+                            realValue (.getCharOrder this ch)]
+                        (if (== realValue RBCollationTables/UNMAPPED)
+                            (do
+                              (aset valueList j (bit-and-int IGNORABLEMASK ch))
+                              (recur (unchecked-inc-int j)))
+                            (do (aset valueList j realValue) (recur (unchecked-inc-int j)))))
+                      (recur (unchecked-inc-int j))))))
+            (recur (unchecked-inc-int i)))))))
+
+  (method ^:private ^:final increment ^int [this ^int aStrength ^:mutable ^int lastValue]
+    (switch aStrength
+      Collator/PRIMARY
+        (do
+          (set! lastValue (unchecked-add-int lastValue PRIMARYORDERINCREMENT))
+          (set! lastValue (bit-and-int lastValue RBCollationTables/PRIMARYORDERMASK))
+          (set! isOverIgnore true))
+      Collator/SECONDARY
+        (do
+          (set! lastValue (unchecked-add-int lastValue SECONDARYORDERINCREMENT))
+          (set! lastValue (bit-and-int lastValue RBCollationTables/SECONDARYDIFFERENCEONLY))
+          (when-not isOverIgnore
+            (set! maxSecOrder (unchecked-short (unchecked-inc-int maxSecOrder)))))
+      Collator/TERTIARY
+        (do
+          (set! lastValue (unchecked-add-int lastValue TERTIARYORDERINCREMENT))
+          (when-not isOverIgnore
+            (set! maxTerOrder (unchecked-short (unchecked-inc-int maxTerOrder))))))
+    lastValue)
+
+  (method ^:private ^:final addOrder ^void [this ^int ch ^int anOrder]
+    (let [order (.elementAt mapping ch)]
+      (if (>= order RBCollationTables/CONTRACTCHARINDEX)
+          (let [^:mutable ^int length 1]
+            (if (Character/isSupplementaryCodePoint ch)
+                (set! length (Character/toChars ch keyBuf 0))
+                (aset keyBuf 0 (unchecked-char ch)))
+            (.addContractOrder this (String. keyBuf 0 length) anOrder))
+          (.setElementAt mapping ch anOrder))))
+
+  (method ^:private ^:final addContractOrder ^void [this ^String groupChars ^int anOrder]
+    (.addContractOrder this groupChars anOrder true))
+
+  (method ^:private ^:final addContractOrder ^void [this ^String groupChars ^int anOrder
+                                                    ^boolean fwd]
+    (when (nil? contractTable) (set! contractTable (Vector. INITIALTABLESIZE)))
+    (let [ch (.codePointAt groupChars 0)
+          entry (.elementAt mapping ch)
+          ^:mutable ^{:tag (Vector EntryPair)} entryTable (.getContractValuesImpl
+                                                            this
+                                                            (unchecked-subtract-int
+                                                              entry
+                                                              RBCollationTables/CONTRACTCHARINDEX))]
+      (when (nil? entryTable)
+        (let [tableIndex (unchecked-add-int RBCollationTables/CONTRACTCHARINDEX
+                                            (.size contractTable))]
+          (set! entryTable (Vector. INITIALTABLESIZE))
+          (.addElement contractTable entryTable)
+          (.addElement entryTable
+                       (EntryPair. (.substring groupChars 0 (Character/charCount ch)) entry))
+          (.setElementAt mapping ch tableIndex)))
+      (let [index (RBCollationTables/getEntry entryTable groupChars fwd)]
+        (if (not (== index RBCollationTables/UNMAPPED))
+            (let [pair (cast EntryPair (.elementAt entryTable index))]
+              (set! (.-value pair) anOrder))
+            (let [pair (cast EntryPair (.lastElement entryTable))]
+              (if (> (.length groupChars) (.length (.-entryName pair)))
+                  (.addElement entryTable (EntryPair. groupChars anOrder fwd))
+                  (.insertElementAt entryTable
+                                    (EntryPair. groupChars anOrder fwd)
+                                    (unchecked-subtract-int (.size entryTable) 1)))))
+        (when (and fwd (> (.length groupChars) 1))
+          (.addContractFlags this groupChars)
+          (.addContractOrder this (.toString (.reverse (StringBuilder. groupChars))) anOrder false)))))
+
+  (method ^:private getContractOrder ^int [this ^String groupChars]
+    (let [^:mutable result RBCollationTables/UNMAPPED]
+      (when (some? contractTable)
+        (let [ch (.codePointAt groupChars 0)
+              ^{:tag (Vector EntryPair)} entryTable (.getContractValues this ch)]
+          (when (some? entryTable)
+            (let [index (RBCollationTables/getEntry entryTable groupChars true)]
+              (when-not (== index RBCollationTables/UNMAPPED)
+                (let [pair (cast EntryPair (.elementAt entryTable index))]
+                  (set! result (.-value pair))))))))
+      result))
+
+  (method ^:private ^:final getCharOrder ^int [this ^int ch]
+    (let [^:mutable order (.elementAt mapping ch)]
+      (when (>= order RBCollationTables/CONTRACTCHARINDEX)
+        (let [^{:tag (Vector EntryPair)} groupList (.getContractValuesImpl
+                                                     this
+                                                     (unchecked-subtract-int
+                                                       order
+                                                       RBCollationTables/CONTRACTCHARINDEX))
+              pair (cast EntryPair (.firstElement groupList))]
+          (set! order (.-value pair))))
+      order))
+
+  (method ^:private getContractValues ^{:tag (Vector EntryPair)} [this ^int ch]
+    (let [index (.elementAt mapping ch)]
+      (.getContractValuesImpl this
+                              (unchecked-subtract-int index RBCollationTables/CONTRACTCHARINDEX))))
+
+  (method ^:private getContractValuesImpl ^{:tag (Vector EntryPair)} [this ^int index]
+    (when (>= index 0) (cast Vector (.elementAt contractTable index))))
+
+  (method ^:private ^:final addExpandOrder :throws [ParseException] ^void [this
+                                                                           ^String contractChars
+                                                                           ^String expandChars
+                                                                           ^int anOrder]
+    (let [tableIndex (.addExpansion this anOrder expandChars)]
+      (if (> (.length contractChars) 1)
+          (let [ch (.charAt contractChars 0)]
+            (if (and (Character/isHighSurrogate ch) (== (.length contractChars) 2))
+                (let [ch2 (.charAt contractChars 1)]
+                  (when (Character/isLowSurrogate ch2)
+                    (.addOrder this (Character/toCodePoint ch ch2) tableIndex)))
+                (.addContractOrder this contractChars tableIndex)))
+          (.addOrder this (.charAt contractChars 0) tableIndex))))
+
+  (method ^:private ^:final addExpandOrder :throws [ParseException] ^void [this ^int ch
+                                                                           ^String expandChars
+                                                                           ^int anOrder]
+    (let [tableIndex (.addExpansion this anOrder expandChars)] (.addOrder this ch tableIndex)))
+
+  (method ^:private addExpansion ^int [this ^int anOrder ^String expandChars]
+    (when (nil? expandTable) (set! expandTable (Vector. INITIALTABLESIZE)))
+    (let [^int offset (if (== anOrder RBCollationTables/UNMAPPED) 0 1)
+          ^:mutable valueList (new int/1 (unchecked-add-int (.length expandChars) offset))]
+      (when (== offset 1) (aset valueList 0 anOrder))
+      (let [^:mutable j offset]
+        (let [^:mutable ^int i 0]
+          (while (< i (.length expandChars))
+            (let [ch0 (.charAt expandChars i)
+                  ^:mutable ^char ch1 (unchecked-char 0)
+                  ^:mutable ^int ch 0]
+              (if (Character/isHighSurrogate ch0)
+                  (do
+                    (when (or (== (set! i (unchecked-inc-int i)) (.length expandChars))
+                              (not (Character/isLowSurrogate (set! ch1 (.charAt expandChars i)))))
+                      (break))
+                    (set! ch (Character/toCodePoint ch0 ch1)))
+                  (set! ch ch0))
+              (let [mapValue (.getCharOrder this ch)]
+                (if (not (== mapValue RBCollationTables/UNMAPPED))
+                    (do (aset valueList j mapValue) (set! j (unchecked-inc-int j)))
+                    (do
+                      (aset valueList j (unchecked-add-int CHARINDEX ch))
+                      (set! j (unchecked-inc-int j))))))
+            (set! i (unchecked-inc-int i))))
+        (when (< j (alength valueList))
+          (let [tmpBuf (new int/1 j)]
+            (while (>= (set! j (unchecked-dec-int j)) 0) (aset tmpBuf j (aget valueList j)))
+            (set! valueList tmpBuf)))
+        (let [tableIndex (unchecked-add-int RBCollationTables/EXPANDCHARINDEX (.size expandTable))]
+          (.addElement expandTable valueList)
+          tableIndex))))
+
+  (method ^:private addContractFlags ^void [this ^String chars]
+    (let [^:mutable ^char c0 (unchecked-char 0)
+          ^:mutable ^int c 0
+          len (.length chars)
+          ^:mutable ^int i 0]
+      (while (< i len)
+        (set! c0 (.charAt chars i))
+        (set! c
+              (if (Character/isHighSurrogate c0)
+                  (Character/toCodePoint c0 (.charAt chars (set! i (unchecked-inc-int i))))
+                  (int c0)))
+        (.put contractFlags c 1)
+        (set! i (unchecked-inc-int i)))))
+
+  (field ^:static ^:final ^int CHARINDEX 0x70000000)
+
+  (field ^:private ^:static ^:final ^int IGNORABLEMASK 0x0000ffff)
+
+  (field ^:private ^:static ^:final ^int PRIMARYORDERINCREMENT 0x00010000)
+
+  (field ^:private ^:static ^:final ^int SECONDARYORDERINCREMENT 0x00000100)
+
+  (field ^:private ^:static ^:final ^int TERTIARYORDERINCREMENT 0x00000001)
+
+  (field ^:private ^:static ^:final ^int INITIALTABLESIZE 20)
+
+  (field ^:private ^:static ^:final ^int MAXKEYSIZE 5)
+
+  (field ^:private ^RBCollationTables$BuildAPI tables nil)
+
+  (field ^:private ^MergeCollation mPattern nil)
+
+  (field ^:private ^boolean isOverIgnore false)
+
+  (field ^:private ^char/1 keyBuf (new char/1 MAXKEYSIZE))
+
+  (field ^:private ^IntHashtable contractFlags (IntHashtable. 100))
+
+  (field ^:private ^boolean frenchSec false)
+
+  (field ^:private ^boolean seAsianSwapping false)
+
+  (field ^:private ^UCompactIntArray mapping nil)
+
+  (field ^:private ^{:tag (Vector (Vector EntryPair))} contractTable nil)
+
+  (field ^:private ^{:tag (Vector int/1)} expandTable nil)
+
+  (field ^:private ^short maxSecOrder 0)
+
+  (field ^:private ^short maxTerOrder 0))

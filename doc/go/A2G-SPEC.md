@@ -225,7 +225,8 @@ that names the class and the referring member; the cure is a variant (§4.6) or 
 `UnsupportedOperationException`).
 
 **jrt's own Java and the JDK's variants** (amendment K1, accepted 2026-10-09). The JDK input is
-`bin/jrt-convert`'s output: the closure's jdk26u files, the jdk26u files added to it (the
+`bin/jrt-convert`'s output (committed as `jdk/forms` since standalone S1, 2026-10-12; `--jdk`'s
+default, or `JRT_CONV`): the closure's jdk26u files, the jdk26u files added to it (the
 classes jrt had as stand-ins, the standard streams' `PrintStream` and its interfaces,
 `SignedMutableBigInteger`), and **jrt's own Java**, `overlay/jdk/java.base/` (under the JDK's
 paths), which replaces or adds to jdk26u's files where a JDK class's source needs what is cut
@@ -2630,7 +2631,8 @@ The executable's path comes from an optional host interface `HostExecutable` (§
 
 **The JDK's resource data** (amendment RD1, accepted 2026-10-10; JRT-NOTES.md, "The JDK's
 resource data"). Besides the sources, `--program` embeds the data that `bin/jrt-convert` makes
-(the directory `data` beside the `--jdk` input, `.tmp/jrt/data`: `java/lang/uniName.dat`,
+(the directory `data` beside the `--jdk` input: `jdk/data` beside the default `jdk/forms`, the
+committed tree since standalone S1, JRT-SOURCES.md; `.tmp/jrt/data` before: `java/lang/uniName.dat`,
 `jdk/internal/icu/impl/data/icudata/nfc.nrm` and `nfkc.nrm`), as binary files under their
 resource paths (`arbace.a2g.embed/data`). `Class.getResourceAsStream` is a method a2g writes on
 jrt's `Class` (in `a2g_support`, when `ByteArrayInputStream` is translated; jrt cannot name the

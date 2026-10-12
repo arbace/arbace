@@ -1,0 +1,187 @@
+;; Converted from jdk26u src/java.base/share/classes/jdk/internal/foreign/MemorySessionImpl.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.foreign)
+
+(import '(java.lang.foreign Arena MemorySegment MemorySegment$Scope)
+        '(java.lang.invoke MethodHandles VarHandle)
+        '(java.lang.ref Cleaner)
+        '(java.util Objects)
+        '(java.util.function Supplier)
+        '(jdk.internal.invoke MhUtil)
+        '(jdk.internal.misc ScopedMemoryAccess$ScopedAccessError)
+        '(jdk.internal.vm.annotation ForceInline Stable))
+
+(defclass ^:public ^:abstract ^:sealed MemorySessionImpl
+  :implements [MemorySegment$Scope]
+  :permits [ConfinedSession GlobalSession SharedSession]
+
+  (field ^:static ^:final ^int OPEN 0)
+
+  (field ^:static ^:final ^int CLOSED -1)
+
+  (field ^:static ^:final ^int NONCLOSEABLE 1)
+
+  (field ^:static ^:final ^VarHandle STATE
+    (MhUtil/findVarHandle (MethodHandles/lookup) "state" Integer/TYPE))
+
+  (field ^:static ^:final ^VarHandle ACQUIRE_COUNT
+    (MhUtil/findVarHandle (MethodHandles/lookup) "acquireCount" Integer/TYPE))
+
+  (field ^:static ^:final ^int MAX_FORKS Integer/MAX_VALUE)
+
+  (field ^:static ^:final ^ScopedMemoryAccess$ScopedAccessError ALREADY_CLOSED
+    (ScopedMemoryAccess$ScopedAccessError.
+      (method-ref Supplier ^RuntimeException [] MemorySessionImpl/alreadyClosed)))
+
+  (field ^:static ^:final ^ScopedMemoryAccess$ScopedAccessError WRONG_THREAD
+    (ScopedMemoryAccess$ScopedAccessError.
+      (method-ref Supplier ^RuntimeException [] MemorySessionImpl/wrongThread)))
+
+  (field ^:public ^:static ^:final ^MemorySessionImpl GLOBAL_SESSION (GlobalSession.))
+
+  (field ^:final ^ResourceList resourceList)
+
+  (field ^:final ^Thread owner)
+
+  (field ^{Stable true} ^int state)
+
+  (field ^int acquireCount)
+
+  (method ^:public asArena ^ArenaImpl [this] (ArenaImpl. this))
+
+  (method ^:public ^:static ^{ForceInline true} toMemorySession ^MemorySessionImpl [^Arena arena]
+    (cast MemorySessionImpl (.scope arena)))
+
+  (method ^:public ^:final isCloseableBy ^boolean [this ^Thread thread]
+    (Objects/requireNonNull thread)
+    (and (.isCloseable this) (or (nil? owner) (identical? owner thread))))
+
+  (method ^:public addCloseAction ^void [this ^Runnable runnable]
+    (Objects/requireNonNull runnable)
+    (.addInternal this (MemorySessionImpl$ResourceList$ResourceCleanup/ofRunnable runnable)))
+
+  (method ^:public addOrCleanupIfFail ^void [this
+                                             ^MemorySessionImpl$ResourceList$ResourceCleanup resource]
+    (try (.addInternal this resource) (catch Throwable ex (.cleanup resource) (throw ex))))
+
+  (method addInternal ^void [this ^MemorySessionImpl$ResourceList$ResourceCleanup resource]
+    (.checkValidState this)
+    (.add resourceList resource))
+
+  (constructor ^:protected [this ^Thread owner ^ResourceList resourceList]
+    (set! (.-owner this) owner)
+    (set! (.-resourceList this) resourceList))
+
+  (method ^:public ^:static createConfined ^MemorySessionImpl [^Thread thread]
+    (ConfinedSession. thread))
+
+  (method ^:public ^:static createShared ^MemorySessionImpl []
+    (SharedSession.))
+
+  (method ^:public ^:static createImplicit ^MemorySessionImpl [^Cleaner cleaner]
+    (ImplicitSession. cleaner))
+
+  (method ^:public ^:static createHeap ^MemorySessionImpl [ref]
+    (GlobalSession$HeapSession. ref))
+
+  (method ^:public ^:abstract release0 ^void [this])
+
+  (method ^:public ^:abstract acquire0 ^void [this])
+
+  (method ^:public whileAlive ^void [this ^Runnable action]
+    (Objects/requireNonNull action)
+    (.acquire0 this)
+    (try (.run action) (finally (.release0 this))))
+
+  (method ^:public ^:final ownerThread ^Thread [this] owner)
+
+  (method ^:public ^:final isAccessibleBy ^boolean [this ^Thread thread]
+    (Objects/requireNonNull thread)
+    (or (nil? owner) (identical? owner thread)))
+
+  (method ^:public isAlive ^boolean [this] (>= state OPEN))
+
+  (method ^:public ^{ForceInline true} checkValidStateRaw ^void [this]
+    (when (and (some? owner) (not (identical? owner (Thread/currentThread)))) (throw WRONG_THREAD))
+    (when (< state OPEN) (throw ALREADY_CLOSED)))
+
+  (method ^:public checkValidState ^void [this]
+    (try
+      (.checkValidStateRaw this)
+      (catch ScopedMemoryAccess$ScopedAccessError error (throw (.newRuntimeException error)))))
+
+  (method ^:public ^:static checkValidState ^void [^MemorySegment segment]
+    (.checkValidState (.sessionImpl (cast AbstractMemorySegmentImpl segment))))
+
+  (method ^:protected clone :throws [CloneNotSupportedException] [this]
+    (throw (CloneNotSupportedException.)))
+
+  (method ^:public ^:final isCloseable ^boolean [this] (<= state OPEN))
+
+  (method ^:public close ^void [this]
+    (.justClose this)
+    (.cleanup resourceList))
+
+  (method ^:abstract justClose ^void [this])
+
+  (defclass ^:public ^:abstract ^:static ResourceList
+    :implements [Runnable]
+
+    (field ^ResourceCleanup fst)
+
+    (method ^:abstract add ^void [this ^ResourceCleanup cleanup])
+
+    (method ^:abstract cleanup ^void [this])
+
+    (method ^:public ^:final run ^void [this] (.cleanup this))
+
+    (method ^:static cleanup ^void [^ResourceCleanup first]
+      (ResourceList/cleanup first nil))
+
+    (method ^:static cleanup ^void [^ResourceCleanup first
+                                    ^:mutable ^RuntimeException pendingException]
+      (let [^:mutable current first]
+        (while (some? current)
+          (set! pendingException (ResourceList/cleanupSingle current pendingException))
+          (set! current (.-next current)))
+        (when (some? pendingException) (throw pendingException))))
+
+    (method ^:static cleanupSingle ^RuntimeException [^ResourceCleanup resource
+                                                      ^:mutable ^RuntimeException pendingException]
+      (try
+        (.cleanup resource)
+        (catch RuntimeException ex
+          (if (nil? pendingException)
+              (set! pendingException ex)
+              (when-not (identical? ex pendingException) (.addSuppressed pendingException ex)))))
+      pendingException)
+
+    (defclass ^:public ^:abstract ^:static ResourceCleanup
+      (field ^ResourceCleanup next)
+
+      (method ^:public ^:abstract cleanup ^void [this])
+
+      (field ^:static ^:final ^ResourceCleanup CLOSED_LIST
+        (anon ResourceCleanup []
+          (method ^:public cleanup ^void [this]
+            (throw (IllegalStateException. "This resource list has already been closed!")))))
+
+      (method ^:static ofRunnable ^ResourceCleanup [^Runnable cleanupAction]
+        (anon ResourceCleanup []
+          (method ^:public cleanup ^void [this] (.run cleanupAction))))))
+
+  (method ^:static tooManyAcquires ^IllegalStateException []
+    (IllegalStateException. "Session acquire limit exceeded"))
+
+  (method ^:static alreadyAcquired ^IllegalStateException [^int acquires]
+    (IllegalStateException.
+      (String/format "Session is acquired by %d clients" (new Object/1 [acquires]))))
+
+  (method ^:static alreadyClosed ^IllegalStateException []
+    (IllegalStateException. "Already closed"))
+
+  (method ^:static wrongThread ^WrongThreadException []
+    (WrongThreadException. "Attempted access outside owning thread"))
+
+  (method ^:static nonCloseable ^UnsupportedOperationException []
+    (UnsupportedOperationException. "Attempted to close a non-closeable session")))

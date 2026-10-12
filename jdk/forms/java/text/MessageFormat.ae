@@ -1,0 +1,785 @@
+;; Converted from jdk26u src/java.base/share/classes/java/text/MessageFormat.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.text)
+
+(import '(java.io IOException
+                  InvalidObjectException
+                  ObjectInputStream
+                  ObjectInputStream$GetField
+                  ObjectStreamException)
+        '(java.time.format DateTimeFormatter)
+        '(java.util ArrayList Arrays Date List Locale Locale$Category Objects))
+
+(defclass ^:public MessageFormat
+  :extends Format
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 6479157306784022952)
+
+  (constructor ^:public [this ^String pattern]
+    (set! (.-locale this) (Locale/getDefault Locale$Category/FORMAT))
+    (.applyPatternImpl this pattern))
+
+  (constructor ^:public [this ^String pattern ^Locale locale]
+    (set! (.-locale this) locale)
+    (.applyPatternImpl this pattern))
+
+  (method ^:public setLocale ^void [this ^Locale locale]
+    (set! (.-locale this) locale))
+
+  (method ^:public getLocale ^Locale [this] locale)
+
+  (method ^:public applyPattern ^void [this ^String pattern]
+    (.applyPatternImpl this pattern))
+
+  (method ^:private applyPatternImpl ^void [this ^String pattern]
+    (let [segments (new StringBuilder/1 4)]
+      (aset segments SEG_RAW (StringBuilder.))
+      (let [^:mutable part SEG_RAW
+            ^:mutable ^int formatNumber 0
+            ^:mutable inQuote false
+            ^:mutable ^int braceStack 0]
+        (set! maxOffset -1)
+        (let [^:mutable ^int i 0]
+          (while (< i (.length pattern))
+            (let [ch (.charAt pattern i)]
+              (cond
+                (== part SEG_RAW)
+                  (cond
+                    (== ch \')
+                      (if (and (< (unchecked-add-int i 1) (.length pattern))
+                               (== (.charAt pattern (unchecked-add-int i 1)) \'))
+                          (do (.append (aget segments part) ch) (set! i (unchecked-inc-int i)))
+                          (set! inQuote (not inQuote)))
+                    (and (== ch \{) (not inQuote))
+                      (do
+                        (set! part SEG_INDEX)
+                        (when (nil? (aget segments SEG_INDEX))
+                          (aset segments SEG_INDEX (StringBuilder.))))
+                    :else (.append (aget segments part) ch))
+                inQuote
+                  (do (.append (aget segments part) ch) (when (== ch \') (set! inQuote false)))
+                :else
+                  (switch ch
+                    \,
+                      (if (< part SEG_MODIFIER)
+                          (when (nil? (aget segments (set! part (unchecked-inc-int part))))
+                            (aset segments part (StringBuilder.)))
+                          (.append (aget segments part) ch))
+                    \{
+                      (do
+                        (set! braceStack (unchecked-inc-int braceStack))
+                        (.append (aget segments part) ch))
+                    \}
+                      (if (== braceStack 0)
+                          (do
+                            (set! part SEG_RAW)
+                            (.setFormatFromPattern this i formatNumber segments)
+                            (set! formatNumber (unchecked-inc-int formatNumber))
+                            (aset segments SEG_INDEX nil)
+                            (aset segments SEG_TYPE nil)
+                            (aset segments SEG_MODIFIER nil))
+                          (do
+                            (set! braceStack (unchecked-dec-int braceStack))
+                            (.append (aget segments part) ch)))
+                    \space
+                      (when (or (not (== part SEG_TYPE)) (> (.length (aget segments SEG_TYPE)) 0))
+                        (.append (aget segments part) ch))
+                    \' (do (set! inQuote true) (.append (aget segments part) ch))
+                    (.append (aget segments part) ch))))
+            (set! i (unchecked-inc-int i))))
+        (when (and (== braceStack 0) (not (== part 0)))
+          (set! maxOffset -1)
+          (throw (IllegalArgumentException. "Unmatched braces in the pattern.")))
+        (set! (.-pattern this) (.toString (aget segments 0))))))
+
+  (method ^:public toPattern ^String [this]
+    (let [^:mutable ^int lastOffset 0
+          result (StringBuilder.)]
+      (loop [^int i 0]
+        (when (<= i maxOffset)
+          (MessageFormat/copyAndFixQuotes pattern lastOffset (aget offsets i) result)
+          (set! lastOffset (aget offsets i))
+          (.append (.append (.append (.append result \{) (aget argumentNumbers i))
+                            (.patternFromFormat this (aget formats i)))
+                   \})
+          (recur (unchecked-inc-int i))))
+      (MessageFormat/copyAndFixQuotes pattern lastOffset (.length pattern) result)
+      (.toString result)))
+
+  (method ^:private patternFromFormat ^String [this ^Format fmt]
+    (if-instance [^NumberFormat nFmt fmt]
+      (let [nStyle (NumberFormat/matchToStyle nFmt locale)]
+        (when (some? nStyle)
+          (return (java-str ",number" (if (.isEmpty nStyle) nStyle (java-str "," nStyle)))))
+        (if-instance [^DecimalFormat dFmt fmt]
+          (return (java-str ",number," (MessageFormat/copyAndQuoteBraces (.toPattern dFmt))))
+          (when-instance [^ChoiceFormat cFmt fmt]
+            (return (java-str ",choice," (MessageFormat/copyAndQuoteBraces (.toPattern cFmt)))))))
+      (cond
+        (instance? DateFormat fmt)
+          (do
+            (for-each [^DateFormat$Style style (DateFormat$Style/values)]
+              (when (.equals fmt (DateFormat/getDateInstance (.getValue style) locale))
+                (return (java-str ",date"
+                                  (if (not (== (.getValue style) DateFormat/DEFAULT))
+                                      (java-str "," (.toLowerCase (.name style) Locale/ROOT))
+                                      ""))))
+              (when (.equals fmt (DateFormat/getTimeInstance (.getValue style) locale))
+                (return (java-str ",time"
+                                  (if (not (== (.getValue style) DateFormat/DEFAULT))
+                                      (java-str "," (.toLowerCase (.name style) Locale/ROOT))
+                                      "")))))
+            (when-instance [^SimpleDateFormat sdFmt fmt]
+              (return (java-str ",date," (MessageFormat/copyAndQuoteBraces (.toPattern sdFmt))))))
+        (instance? ListFormat fmt)
+          (for-each [^ListFormat$Type type (ListFormat$Type/values)]
+            (when (.equals fmt (ListFormat/getInstance locale type ListFormat$Style/FULL))
+              (return (java-str ",list"
+                                (if (not (identical? type ListFormat$Type/STANDARD))
+                                    (java-str "," (.toLowerCase (.name type) Locale/ROOT))
+                                    "")))))))
+    "")
+
+  (method ^:public setFormatsByArgumentIndex ^void [this ^Format/1 newFormats]
+    (loop [^int i 0]
+      (when (<= i maxOffset)
+        (let [j (aget argumentNumbers i)]
+          (if (< j (alength newFormats))
+              (do (aset formats i (aget newFormats j)) (recur (unchecked-inc-int i)))
+              (recur (unchecked-inc-int i)))))))
+
+  (method ^:public setFormats ^void [this ^Format/1 newFormats]
+    (let [^:mutable runsToCopy (alength newFormats)]
+      (when (> runsToCopy (unchecked-add-int maxOffset 1))
+        (set! runsToCopy (unchecked-add-int maxOffset 1)))
+      (when (>= runsToCopy 0) (System/arraycopy newFormats 0 formats 0 runsToCopy))))
+
+  (method ^:public setFormatByArgumentIndex ^void [this ^int argumentIndex ^Format newFormat]
+    (loop [^int j 0]
+      (if (<= j maxOffset)
+          (if (== (aget argumentNumbers j) argumentIndex)
+              (do (aset formats j newFormat) (recur (unchecked-inc-int j)))
+              (recur (unchecked-inc-int j)))
+          nil)))
+
+  (method ^:public setFormat ^void [this ^int formatElementIndex ^Format newFormat]
+    (when (> formatElementIndex maxOffset)
+      (throw (ArrayIndexOutOfBoundsException. formatElementIndex)))
+    (aset formats formatElementIndex newFormat))
+
+  (method ^:public getFormatsByArgumentIndex ^Format/1 [this]
+    (let [^:mutable ^int maximumArgumentNumber -1]
+      (loop [^int i 0]
+        (if (<= i maxOffset)
+            (if (> (aget argumentNumbers i) maximumArgumentNumber)
+                (do
+                  (set! maximumArgumentNumber (aget argumentNumbers i))
+                  (recur (unchecked-inc-int i)))
+                (recur (unchecked-inc-int i)))
+            nil))
+      (let [resultArray (new Format/1 (unchecked-add-int maximumArgumentNumber 1))]
+        (loop [^int i 0]
+          (when (<= i maxOffset)
+            (aset resultArray (aget argumentNumbers i) (aget formats i))
+            (recur (unchecked-inc-int i))))
+        resultArray)))
+
+  (method ^:public getFormats ^Format/1 [this]
+    (let [resultArray (new Format/1 (unchecked-add-int maxOffset 1))]
+      (System/arraycopy formats 0 resultArray 0 (unchecked-add-int maxOffset 1))
+      resultArray))
+
+  (method ^:public ^:final format ^StringBuffer [this ^Object/1 arguments ^StringBuffer result
+                                                 ^FieldPosition pos]
+    (.asStringBuffer (.subformat this arguments (StringBufFactory/of result) pos nil)))
+
+  (method ^:public ^:static format ^String [^String pattern & ^Object/1 arguments]
+    (let [temp (MessageFormat. pattern)] (.format temp arguments)))
+
+  (method ^:public ^:final format ^StringBuffer [this arguments ^StringBuffer result
+                                                 ^FieldPosition pos]
+    (.asStringBuffer
+      (.subformat this (cast Object/1 arguments) (StringBufFactory/of result) pos nil)))
+
+  (method ^:final format ^Format$StringBuf [this arguments ^Format$StringBuf result
+                                            ^FieldPosition pos]
+    (.subformat this (cast Object/1 arguments) result pos nil))
+
+  (method ^:public formatToCharacterIterator ^AttributedCharacterIterator [this arguments]
+    (Objects/requireNonNull arguments "arguments must not be null")
+    (let [result (StringBufFactory/of)
+          ^{:tag (ArrayList AttributedCharacterIterator)} iterators (ArrayList.)]
+      (.subformat this (cast Object/1 arguments) result nil iterators)
+      (if (== (.size iterators) 0)
+          (.createAttributedCharacterIterator this "")
+          (.createAttributedCharacterIterator this
+                                              (cast
+                                                AttributedCharacterIterator/1
+                                                (.toArray
+                                                  iterators
+                                                  (new AttributedCharacterIterator/1 0)))))))
+
+  (method ^:public parse ^Object/1 [this ^String source ^ParsePosition pos]
+    (if (nil? source)
+        (let [empty (new Object/1 [])] empty)
+        (let [^:mutable ^int maximumArgumentNumber -1]
+          (loop [^int i 0]
+            (if (<= i maxOffset)
+                (if (> (aget argumentNumbers i) maximumArgumentNumber)
+                    (do
+                      (set! maximumArgumentNumber (aget argumentNumbers i))
+                      (recur (unchecked-inc-int i)))
+                    (recur (unchecked-inc-int i)))
+                nil))
+          (let [resultArray (new Object/1 (unchecked-add-int maximumArgumentNumber 1))
+                ^:mutable ^int patternOffset 0
+                ^:mutable sourceOffset (.-index pos)
+                tempStatus (ParsePosition. 0)]
+            (loop [^int i 0]
+              (when (<= i maxOffset)
+                (let [len (unchecked-subtract-int (aget offsets i) patternOffset)]
+                  (if (or (== len 0) (.regionMatches pattern patternOffset source sourceOffset len))
+                      (do
+                        (set! sourceOffset (unchecked-add-int sourceOffset len))
+                        (set! patternOffset (unchecked-add-int patternOffset len)))
+                      (do (set! (.-errorIndex pos) sourceOffset) (return nil)))
+                  (if (nil? (aget formats i))
+                      (let [^int tempLength (if (not (== i maxOffset))
+                                                (aget offsets (unchecked-add-int i 1))
+                                                (.length pattern))
+                            ^int next (if (>= patternOffset tempLength)
+                                          (.length source)
+                                          (.indexOf
+                                            source
+                                            (.substring pattern patternOffset tempLength)
+                                            sourceOffset))]
+                        (if (< next 0)
+                            (do (set! (.-errorIndex pos) sourceOffset) (return nil))
+                            (let [strValue (.substring source sourceOffset next)]
+                              (when-not (.equals
+                                          strValue
+                                          (java-str "{" (aget argumentNumbers i) "}"))
+                                (aset resultArray
+                                      (aget argumentNumbers i)
+                                      (.substring source sourceOffset next)))
+                              (set! sourceOffset next)
+                              (recur (unchecked-inc-int i)))))
+                      (do
+                        (set! (.-index tempStatus) sourceOffset)
+                        (aset resultArray
+                              (aget argumentNumbers i)
+                              (.parseObject (aget formats i) source tempStatus))
+                        (when (== (.-index tempStatus) sourceOffset)
+                          (set! (.-errorIndex pos) sourceOffset)
+                          (return nil))
+                        (set! sourceOffset (.-index tempStatus))
+                        (recur (unchecked-inc-int i)))))))
+            (let [len (unchecked-subtract-int (.length pattern) patternOffset)]
+              (if (or (== len 0) (.regionMatches pattern patternOffset source sourceOffset len))
+                  (do (set! (.-index pos) (unchecked-add-int sourceOffset len)) resultArray)
+                  (do (set! (.-errorIndex pos) sourceOffset) nil)))))))
+
+  (method ^:public parse :throws [ParseException] ^Object/1 [this ^String source]
+    (let [pos (ParsePosition. 0)
+          result (.parse this source pos)]
+      (when (== (.-index pos) 0)
+        (throw (ParseException. "MessageFormat parse error!" (.-errorIndex pos))))
+      result))
+
+  (method ^:public parseObject [this ^String source ^ParsePosition pos]
+    (.parse this source pos))
+
+  (method ^:public clone [this]
+    (let [other (cast MessageFormat (.clone super))]
+      (set! (.-formats other) (.clone formats))
+      (loop [^int i 0]
+        (if (< i (alength formats))
+            (if (some? (aget formats i))
+                (do
+                  (aset (.-formats other) i (cast Format (.clone (aget formats i))))
+                  (recur (unchecked-inc-int i)))
+                (recur (unchecked-inc-int i)))
+            nil))
+      (set! (.-offsets other) (.clone offsets))
+      (set! (.-argumentNumbers other) (.clone argumentNumbers))
+      other))
+
+  (method ^:public equals ^boolean [this obj]
+    (cond
+      (identical? this obj) true
+      (or (nil? obj) (not (identical? (.getClass this) (.getClass obj)))) false
+      :else
+        (let [other (cast MessageFormat obj)]
+          (and (and (and (and (and (== maxOffset (.-maxOffset other))
+                                   (.equals pattern (.-pattern other)))
+                              (Objects/equals locale (.-locale other)))
+                         (Arrays/equals offsets (.-offsets other)))
+                    (Arrays/equals argumentNumbers (.-argumentNumbers other)))
+               (Arrays/equals formats (.-formats other))))))
+
+  (method ^:public hashCode ^int [this] (.hashCode pattern))
+
+  (method ^:public toString ^String [this]
+    (.formatted "MessageFormat [locale: %s, pattern: \"%s\"]\n"
+                (when (some? locale) ^Object (java-str \" (.getDisplayName locale) \"))
+                (.toPattern this)))
+
+  (defclass ^:public ^:static Field
+    :extends Format$Field
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 7899943957617360810)
+
+    (constructor ^:protected [this ^String name] (super. name))
+
+    (method ^:protected readResolve :throws [InvalidObjectException] [this]
+      (when-not (identical? (.getClass this) Field)
+        (throw (InvalidObjectException. "subclass didn't correctly implement readResolve")))
+      ARGUMENT)
+
+    (field ^:public ^:static ^:final ^Field ARGUMENT (Field. "message argument field")))
+
+  (field ^:private ^Locale locale)
+
+  (field ^:private ^String pattern "")
+
+  (field ^:private ^:static ^:final ^int INITIAL_FORMATS 10)
+
+  (field ^:private ^Format/1 formats (new Format/1 INITIAL_FORMATS))
+
+  (field ^:private ^int/1 offsets (new int/1 INITIAL_FORMATS))
+
+  (field ^:private ^int/1 argumentNumbers (new int/1 INITIAL_FORMATS))
+
+  (field ^:private ^:static ^:final ^int MAX_ARGUMENT_INDEX 10000)
+
+  (field ^:private ^int maxOffset -1)
+
+  (method ^:private subformat ^Format$StringBuf [this ^Object/1 arguments ^Format$StringBuf result
+                                                 ^FieldPosition fp
+                                                 ^{:tag (List AttributedCharacterIterator)} characterIterators]
+    (let [^:mutable ^int lastOffset 0
+          ^:mutable last (.length result)]
+      (loop [^int i 0]
+        (when (<= i maxOffset)
+          (.append result pattern lastOffset (aget offsets i))
+          (set! lastOffset (aget offsets i))
+          (let [argumentNumber (aget argumentNumbers i)]
+            (cond
+              (or (nil? arguments) (>= argumentNumber (alength arguments)))
+                (do
+                  (.append (.append (.append result \{) argumentNumber) \})
+                  (recur (unchecked-inc-int i)))
+              false (do (.append result \�) (recur (unchecked-inc-int i)))
+              :else
+                (let [^:mutable obj (aget arguments argumentNumber)
+                      ^:mutable ^String arg nil
+                      ^:mutable ^Format subFormatter nil]
+                  (cond
+                    (nil? obj) (set! arg "null")
+                    (some? (aget formats i))
+                      (do
+                        (set! subFormatter (aget formats i))
+                        (when (instance? ChoiceFormat subFormatter)
+                          (set! arg (.format (aget formats i) obj))
+                          (when (>= (.indexOf arg \{) 0)
+                            (set! subFormatter (MessageFormat. arg locale))
+                            (set! obj arguments)
+                            (set! arg nil))))
+                    (instance? Number obj) (set! subFormatter (NumberFormat/getInstance locale))
+                    (instance? Date obj)
+                      (set! subFormatter
+                            (DateFormat/getDateTimeInstance
+                              DateFormat/SHORT
+                              DateFormat/SHORT
+                              locale))
+                    (instance? String obj) (set! arg (cast String obj))
+                    :else (do (set! arg (.toString obj)) (when (nil? arg) (set! arg "null"))))
+                  (if (some? characterIterators)
+                      (do
+                        (when-not (== last (.length result))
+                          (.add characterIterators
+                                (.createAttributedCharacterIterator this (.substring result last)))
+                          (set! last (.length result)))
+                        (when (some? subFormatter)
+                          (let [subIterator (.formatToCharacterIterator subFormatter obj)]
+                            (.append this result subIterator)
+                            (when-not (== last (.length result))
+                              (.add characterIterators
+                                    (.createAttributedCharacterIterator
+                                      this
+                                      subIterator
+                                      Field/ARGUMENT
+                                      (Integer/valueOf argumentNumber)))
+                              (set! last (.length result)))
+                            (set! arg nil)))
+                        (if (and (some? arg) (not (.isEmpty arg)))
+                            (do
+                              (.append result arg)
+                              (.add characterIterators
+                                    (.createAttributedCharacterIterator
+                                      this
+                                      arg
+                                      Field/ARGUMENT
+                                      (Integer/valueOf argumentNumber)))
+                              (set! last (.length result))
+                              (recur (unchecked-inc-int i)))
+                            (recur (unchecked-inc-int i))))
+                      (do
+                        (when (some? subFormatter) (set! arg (.format subFormatter obj)))
+                        (set! last (.length result))
+                        (.append result arg)
+                        (when (and (and (== i 0) (some? fp))
+                                   (.equals Field/ARGUMENT (.getFieldAttribute fp)))
+                          (.setBeginIndex fp last)
+                          (.setEndIndex fp (.length result)))
+                        (set! last (.length result))
+                        (recur (unchecked-inc-int i)))))))))
+      (.append result pattern lastOffset (.length pattern))
+      (when (and (some? characterIterators) (not (== last (.length result))))
+        (.add characterIterators (.createAttributedCharacterIterator this (.substring result last))))
+      result))
+
+  (method ^:private append ^void [this ^Format$StringBuf result ^CharacterIterator iterator]
+    (when-not (== (.first iterator) CharacterIterator/DONE)
+      (let [^:mutable ^char aChar (unchecked-char 0)]
+        (.append result (.first iterator))
+        (while (not (== (set! aChar (.next iterator)) CharacterIterator/DONE))
+          (.append result aChar)))))
+
+  (field ^:private ^:static ^:final ^int SEG_RAW 0)
+
+  (field ^:private ^:static ^:final ^int SEG_INDEX 1)
+
+  (field ^:private ^:static ^:final ^int SEG_TYPE 2)
+
+  (field ^:private ^:static ^:final ^int SEG_MODIFIER 3)
+
+  (method ^:private setFormatFromPattern ^void [this ^int position ^int offsetNumber
+                                                ^StringBuilder/1 textSegments]
+    (let [segments (new String/1 (alength textSegments))]
+      (loop [^int i 0]
+        (when (< i (alength textSegments))
+          (let [oneseg (aget textSegments i)]
+            (aset segments i (if (some? oneseg) (.toString oneseg) ""))
+            (recur (unchecked-inc-int i)))))
+      (let [^:mutable ^int argumentNumber 0]
+        (try
+          (set! argumentNumber (Integer/parseInt (aget segments SEG_INDEX)))
+          (catch NumberFormatException e
+            (throw (IllegalArgumentException.
+                     (java-str "can't parse argument number: " (aget segments SEG_INDEX))
+                     e))))
+        (when (< argumentNumber 0)
+          (throw (IllegalArgumentException. (java-str "negative argument number: " argumentNumber))))
+        (when (>= argumentNumber MAX_ARGUMENT_INDEX)
+          (throw (IllegalArgumentException.
+                   (java-str argumentNumber " exceeds the ArgumentIndex implementation limit"))))
+        (when (>= offsetNumber (alength formats))
+          (let [newLength (unchecked-multiply-int (alength formats) 2)
+                newFormats (new Format/1 newLength)
+                newOffsets (new int/1 newLength)
+                newArgumentNumbers (new int/1 newLength)]
+            (System/arraycopy formats 0 newFormats 0 (unchecked-add-int maxOffset 1))
+            (System/arraycopy offsets 0 newOffsets 0 (unchecked-add-int maxOffset 1))
+            (System/arraycopy argumentNumbers
+                              0
+                              newArgumentNumbers
+                              0
+                              (unchecked-add-int maxOffset 1))
+            (set! formats newFormats)
+            (set! offsets newOffsets)
+            (set! argumentNumbers newArgumentNumbers)))
+        (let [oldMaxOffset maxOffset]
+          (set! maxOffset offsetNumber)
+          (aset offsets offsetNumber (.length (aget segments SEG_RAW)))
+          (aset argumentNumbers offsetNumber argumentNumber)
+          (if (not (.isEmpty (aget segments SEG_TYPE)))
+              (try
+                (aset formats
+                      offsetNumber
+                      (.formatFromPattern this
+                                          (aget segments SEG_TYPE)
+                                          (aget segments SEG_MODIFIER)))
+                (catch Exception e (set! maxOffset oldMaxOffset) (throw e)))
+              (aset formats offsetNumber nil))))))
+
+  (method ^:private formatFromPattern ^Format [this ^String type ^String style]
+    (let [^:mutable ^FormatType fType nil]
+      (try
+        (set! fType (FormatType/valueOf (.toUpperCase (.trim type) Locale/ROOT)))
+        (catch IllegalArgumentException iae
+          (throw (IllegalArgumentException. (java-str "unknown format type: " type)))))
+      (let [^:mutable ^FormatStyle fStyle nil]
+        (try
+          (set! fStyle (FormatStyle/fromString style))
+          (catch IllegalArgumentException iae (set! fStyle FormatStyle/SUBFORMATPATTERN)))
+        (switch fType
+          NUMBER
+            (switch fStyle
+              DEFAULT (NumberFormat/getInstance locale)
+              CURRENCY (NumberFormat/getCurrencyInstance locale)
+              PERCENT (NumberFormat/getPercentInstance locale)
+              INTEGER (NumberFormat/getIntegerInstance locale)
+              COMPACT_SHORT (NumberFormat/getCompactNumberInstance locale NumberFormat$Style/SHORT)
+              COMPACT_LONG (NumberFormat/getCompactNumberInstance locale NumberFormat$Style/LONG)
+              (.formatFromSubformatPattern this fType style))
+          DATE
+            (switch fStyle
+              DEFAULT (DateFormat/getDateInstance DateFormat/DEFAULT locale)
+              SHORT (DateFormat/getDateInstance DateFormat/SHORT locale)
+              MEDIUM (DateFormat/getDateInstance DateFormat/MEDIUM locale)
+              LONG (DateFormat/getDateInstance DateFormat/LONG locale)
+              FULL (DateFormat/getDateInstance DateFormat/FULL locale)
+              (.formatFromSubformatPattern this fType style))
+          TIME
+            (switch fStyle
+              DEFAULT (DateFormat/getTimeInstance DateFormat/DEFAULT locale)
+              SHORT (DateFormat/getTimeInstance DateFormat/SHORT locale)
+              MEDIUM (DateFormat/getTimeInstance DateFormat/MEDIUM locale)
+              LONG (DateFormat/getTimeInstance DateFormat/LONG locale)
+              FULL (DateFormat/getTimeInstance DateFormat/FULL locale)
+              (.formatFromSubformatPattern this fType style))
+          DTF_DATE
+            (switch fStyle
+              (DEFAULT MEDIUM)
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedDate
+                                          java.time.format.FormatStyle/MEDIUM)
+                                        locale))
+              SHORT
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedDate
+                                          java.time.format.FormatStyle/SHORT)
+                                        locale))
+              LONG
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedDate
+                                          java.time.format.FormatStyle/LONG)
+                                        locale))
+              FULL
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedDate
+                                          java.time.format.FormatStyle/FULL)
+                                        locale))
+              (.formatFromSubformatPattern this fType style))
+          DTF_TIME
+            (switch fStyle
+              (DEFAULT MEDIUM)
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedTime
+                                          java.time.format.FormatStyle/MEDIUM)
+                                        locale))
+              SHORT
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedTime
+                                          java.time.format.FormatStyle/SHORT)
+                                        locale))
+              LONG
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedTime
+                                          java.time.format.FormatStyle/LONG)
+                                        locale))
+              FULL
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedTime
+                                          java.time.format.FormatStyle/FULL)
+                                        locale))
+              (.formatFromSubformatPattern this fType style))
+          DTF_DATETIME
+            (switch fStyle
+              (DEFAULT MEDIUM)
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedDateTime
+                                          java.time.format.FormatStyle/MEDIUM)
+                                        locale))
+              SHORT
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedDateTime
+                                          java.time.format.FormatStyle/SHORT)
+                                        locale))
+              LONG
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedDateTime
+                                          java.time.format.FormatStyle/LONG)
+                                        locale))
+              FULL
+                (.toFormat (.withLocale (DateTimeFormatter/ofLocalizedDateTime
+                                          java.time.format.FormatStyle/FULL)
+                                        locale))
+              (.formatFromSubformatPattern this fType style))
+          CHOICE (.formatFromSubformatPattern this fType style)
+          LIST
+            (switch fStyle
+              DEFAULT (ListFormat/getInstance locale ListFormat$Type/STANDARD ListFormat$Style/FULL)
+              OR (ListFormat/getInstance locale ListFormat$Type/OR ListFormat$Style/FULL)
+              UNIT (ListFormat/getInstance locale ListFormat$Type/UNIT ListFormat$Style/FULL)
+              (.formatFromSubformatPattern this fType style))
+          BASIC_ISO_DATE (.toFormat DateTimeFormatter/BASIC_ISO_DATE)
+          ISO_LOCAL_DATE (.toFormat DateTimeFormatter/ISO_LOCAL_DATE)
+          ISO_OFFSET_DATE (.toFormat DateTimeFormatter/ISO_OFFSET_DATE)
+          ISO_DATE (.toFormat DateTimeFormatter/ISO_DATE)
+          ISO_LOCAL_TIME (.toFormat DateTimeFormatter/ISO_LOCAL_TIME)
+          ISO_OFFSET_TIME (.toFormat DateTimeFormatter/ISO_OFFSET_TIME)
+          ISO_TIME (.toFormat DateTimeFormatter/ISO_TIME)
+          ISO_LOCAL_DATE_TIME (.toFormat DateTimeFormatter/ISO_LOCAL_DATE_TIME)
+          ISO_OFFSET_DATE_TIME (.toFormat DateTimeFormatter/ISO_OFFSET_DATE_TIME)
+          ISO_ZONED_DATE_TIME (.toFormat DateTimeFormatter/ISO_ZONED_DATE_TIME)
+          ISO_DATE_TIME (.toFormat DateTimeFormatter/ISO_DATE_TIME)
+          ISO_ORDINAL_DATE (.toFormat DateTimeFormatter/ISO_ORDINAL_DATE)
+          ISO_WEEK_DATE (.toFormat DateTimeFormatter/ISO_WEEK_DATE)
+          ISO_INSTANT (.toFormat DateTimeFormatter/ISO_INSTANT)
+          RFC_1123_DATE_TIME (.toFormat DateTimeFormatter/RFC_1123_DATE_TIME)
+          (throw (MatchException. nil nil))))))
+
+  (method ^:private formatFromSubformatPattern ^Format [this ^FormatType fType ^String pattern]
+    (let [type (java-str (.charAt (.name fType) 0)
+                         (.toLowerCase (.substring (.name fType) 1) Locale/ROOT))]
+      (try
+        (switch fType
+          NUMBER (DecimalFormat. pattern (DecimalFormatSymbols/getInstance locale))
+          (DATE TIME) (SimpleDateFormat. pattern locale)
+          (DTF_DATE DTF_TIME DTF_DATETIME) (.toFormat (DateTimeFormatter/ofPattern pattern))
+          CHOICE (ChoiceFormat. pattern)
+          (throw (IllegalArgumentException.
+                   (String/format "Unexpected modifier for %s: %s" (new Object/1 [type pattern])))))
+        (catch Exception e
+          (if (or (identical? (.getClass e) IllegalArgumentException)
+                  (identical? (.getClass e) NullPointerException))
+              (throw e)
+              (throw (IllegalArgumentException.
+                       (String/format "%s pattern incorrect: %s" (new Object/1 [type pattern]))
+                       e)))))))
+
+  (method ^:private ^:static copyAndFixQuotes ^void [^String source ^int start ^int end
+                                                     ^StringBuilder target]
+    (let [^:mutable quoted false]
+      (loop [^int i start]
+        (when (< i end)
+          (let [ch (.charAt source i)]
+            (cond
+              (== ch \{)
+                (do
+                  (when-not quoted (.append target \') (set! quoted true))
+                  (.append target ch)
+                  (recur (unchecked-inc-int i)))
+              (== ch \') (do (.append target "''") (recur (unchecked-inc-int i)))
+              :else
+                (do
+                  (when quoted (.append target \') (set! quoted false))
+                  (.append target ch)
+                  (recur (unchecked-inc-int i)))))))
+      (when quoted (.append target \'))))
+
+  (method ^:private ^:static copyAndQuoteBraces ^String [^String source]
+    (letclass [(^:record Qchar [^char ch ^boolean quoted])]
+      (let [^{:tag (ArrayList Qchar)} qchars (ArrayList.)
+            ^:mutable quoted false
+            ^:mutable anyChangeNeeded false
+            quotedSource (StringBuilder.)]
+        (let [^:mutable ^int i 0]
+          (while (< i (.length source))
+            (let [ch (.charAt source i)]
+              (if (== ch \')
+                  (if (and (< (unchecked-add-int i 1) (.length source))
+                           (== (.charAt source (unchecked-add-int i 1)) \'))
+                      (do (.add qchars (Qchar. \' quoted)) (set! i (unchecked-inc-int i)))
+                      (set! quoted (not quoted)))
+                  (let [quotable (or (== ch \{) (== ch \}))]
+                    (set! anyChangeNeeded
+                          (let [a-1 anyChangeNeeded b-2 (and quotable (not quoted))] (or a-1 b-2)))
+                    (.add qchars (Qchar. ch (or quoted quotable))))))
+            (set! i (unchecked-inc-int i))))
+        (if (not anyChangeNeeded)
+            source
+            (do
+              (set! quoted false)
+              (for-each [^Qchar qchar qchars]
+                (let [ch (.-ch qchar)]
+                  (if (== ch \')
+                      (.append quotedSource ch)
+                      (when-not (= (.quoted qchar) quoted)
+                        (.append quotedSource \')
+                        (set! quoted (.quoted qchar))))
+                  (.append quotedSource ch)))
+              (when quoted (.append quotedSource \'))
+              (.toString quotedSource))))))
+
+  (defclass ^:private ^:enum FormatType
+    (constants
+      NUMBER
+      DATE
+      TIME
+      DTF_DATE
+      DTF_TIME
+      DTF_DATETIME
+      CHOICE
+      LIST
+      BASIC_ISO_DATE
+      ISO_LOCAL_DATE
+      ISO_OFFSET_DATE
+      ISO_DATE
+      ISO_LOCAL_TIME
+      ISO_OFFSET_TIME
+      ISO_TIME
+      ISO_LOCAL_DATE_TIME
+      ISO_OFFSET_DATE_TIME
+      ISO_ZONED_DATE_TIME
+      ISO_DATE_TIME
+      ISO_ORDINAL_DATE
+      ISO_WEEK_DATE
+      ISO_INSTANT
+      RFC_1123_DATE_TIME))
+
+  (defclass ^:private ^:enum FormatStyle
+    (constants
+      (DEFAULT [""])
+      (SHORT ["short"])
+      (MEDIUM ["medium"])
+      (LONG ["long"])
+      (FULL ["full"])
+      (INTEGER ["integer"])
+      (CURRENCY ["currency"])
+      (PERCENT ["percent"])
+      (COMPACT_SHORT ["compact_short"])
+      (COMPACT_LONG ["compact_long"])
+      (OR ["or"])
+      (UNIT ["unit"])
+      (SUBFORMATPATTERN [nil]))
+
+    (field ^:private ^:final ^String text)
+
+    (constructor [this ^String text] (set! (.-text this) text))
+
+    (method ^:private ^:static fromString ^FormatStyle [^String text]
+      (for-each [^FormatStyle style (FormatStyle/values)]
+        (when (and (not (identical? style FormatStyle/SUBFORMATPATTERN))
+                   (== (.compareToIgnoreCase (.trim text) (.-text style)) 0))
+          (return style)))
+      (throw (IllegalArgumentException.))))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream in]
+    (let [fields (.readFields in)]
+      (when (or (or (or (or (or (.defaulted fields "argumentNumbers") (.defaulted fields "offsets"))
+                            (.defaulted fields "formats"))
+                        (.defaulted fields "locale"))
+                    (.defaulted fields "pattern"))
+                (.defaulted fields "maxOffset"))
+        (throw (InvalidObjectException. "Stream has missing data")))
+      (set! locale (cast Locale (.get fields "locale" nil)))
+      (let [patt (cast String (.get fields "pattern" nil))
+            maxOff (^[String int] ObjectInputStream$GetField/.get fields "maxOffset" -2)
+            argNums (.clone (cast int/1 (.get fields "argumentNumbers" nil)))
+            offs (.clone (cast int/1 (.get fields "offsets" nil)))
+            fmts (.clone (cast Format/1 (.get fields "formats" nil)))
+            ^:mutable isValid (and (and (and (>= maxOff -1) (> (alength argNums) maxOff))
+                                        (> (alength offs) maxOff))
+                                   (> (alength fmts) maxOff))]
+        (when isValid
+          (let [^:mutable lastOffset (.length patt)]
+            (loop [^int i maxOff]
+              (if (>= i 0)
+                  (if (or (or (or (< (aget argNums i) 0) (>= (aget argNums i) MAX_ARGUMENT_INDEX))
+                              (< (aget offs i) 0))
+                          (> (aget offs i) lastOffset))
+                      (set! isValid false)
+                      (do (set! lastOffset (aget offs i)) (recur (unchecked-dec-int i))))
+                  nil))))
+        (when-not isValid (throw (InvalidObjectException. "Stream has invalid data")))
+        (set! maxOffset maxOff)
+        (set! pattern patt)
+        (set! offsets offs)
+        (set! formats fmts)
+        (set! argumentNumbers argNums))))
+
+  (method ^:private readObjectNoData :throws [ObjectStreamException] ^void [this]
+    (throw (InvalidObjectException. "Deserialized MessageFormat objects need data"))))

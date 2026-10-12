@@ -1,0 +1,369 @@
+;; Converted from jdk26u src/java.base/share/classes/jdk/internal/misc/CDS.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.misc)
+
+(import '(java.io BufferedReader File IOException InputStream InputStreamReader PrintStream)
+        '(java.nio.file Files Path)
+        '(java.util ArrayList Arrays HashMap List Map Map$Entry Objects)
+        '(java.util.jar JarFile)
+        '(java.util.stream Stream)
+        '(jdk.internal.access SharedSecrets)
+        '(jdk.internal.util StaticProperty))
+
+(defclass ^:public CDS
+  (field ^:private ^:static ^:final ^int IS_DUMPING_AOT_LINKED_CLASSES (bit-shift-left-int 1 0))
+
+  (field ^:private ^:static ^:final ^int IS_DUMPING_ARCHIVE (bit-shift-left-int 1 1))
+
+  (field ^:private ^:static ^:final ^int IS_DUMPING_METHOD_HANDLES (bit-shift-left-int 1 2))
+
+  (field ^:private ^:static ^:final ^int IS_DUMPING_STATIC_ARCHIVE (bit-shift-left-int 1 3))
+
+  (field ^:private ^:static ^:final ^int IS_LOGGING_LAMBDA_FORM_INVOKERS (bit-shift-left-int 1 4))
+
+  (field ^:private ^:static ^:final ^int IS_USING_ARCHIVE (bit-shift-left-int 1 5))
+
+  (field ^:private ^:static ^:final ^int configStatus (CDS/getCDSConfigStatus))
+
+  (method ^:public ^:static isLoggingLambdaFormInvokers ^boolean []
+    (not (== (bit-and-int configStatus IS_LOGGING_LAMBDA_FORM_INVOKERS) 0)))
+
+  (method ^:public ^:static isDumpingArchive ^boolean []
+    (not (== (bit-and-int configStatus IS_DUMPING_ARCHIVE) 0)))
+
+  (method ^:public ^:static isUsingArchive ^boolean []
+    (not (== (bit-and-int configStatus IS_USING_ARCHIVE) 0)))
+
+  (method ^:public ^:static isDumpingStaticArchive ^boolean []
+    (not (== (bit-and-int configStatus IS_DUMPING_STATIC_ARCHIVE) 0)))
+
+  (method ^:public ^:static isDumpingAOTLinkedClasses ^boolean []
+    (not (== (bit-and-int configStatus IS_DUMPING_AOT_LINKED_CLASSES) 0)))
+
+  (method ^:public ^:static isSingleThreadVM ^boolean []
+    (CDS/isDumpingStaticArchive))
+
+  (method ^:private ^:static ^:native getCDSConfigStatus ^int [])
+
+  (method ^:private ^:static ^:native logLambdaFormInvoker ^void [^String line])
+
+  (field ^:private ^:static ^{:tag (ArrayList Object)} keepAliveList)
+
+  (method ^:public ^:static keepAlive ^void [s]
+    (java-assert (CDS/isSingleThreadVM))
+    (java-assert (CDS/isDumpingStaticArchive))
+    (when (nil? keepAliveList) (set! keepAliveList (ArrayList.)))
+    (.add keepAliveList s))
+
+  (method ^:private ^:static getKeepAliveObjects ^Object/1 []
+    (.toArray keepAliveList))
+
+  (method ^:public ^:static ^:native initializeFromArchive ^void [^{:tag (Class ?)} c])
+
+  (method ^:public ^:static ^:native defineArchivedModules ^void [^ClassLoader platformLoader
+                                                                  ^ClassLoader systemLoader])
+
+  (method ^:public ^:static ^:native getRandomSeedForDumping ^long [])
+
+  (method ^:public ^:static logLambdaFormInvoker ^void [^String prefix ^String holder ^String name
+                                                        ^String type]
+    (when (CDS/isLoggingLambdaFormInvokers)
+      (CDS/logLambdaFormInvoker (java-str prefix " " holder " " name " " type))))
+
+  (method ^:public ^:static logSpeciesType ^void [^String prefix ^String cn]
+    (when (CDS/isLoggingLambdaFormInvokers) (CDS/logLambdaFormInvoker (java-str prefix " " cn))))
+
+  (field ^:static ^:final ^String DIRECT_HOLDER_CLASS_NAME
+    "java.lang.invoke.DirectMethodHandle$Holder")
+
+  (field ^:static ^:final ^String DELEGATING_HOLDER_CLASS_NAME
+    "java.lang.invoke.DelegatingMethodHandle$Holder")
+
+  (field ^:static ^:final ^String BASIC_FORMS_HOLDER_CLASS_NAME
+    "java.lang.invoke.LambdaForm$Holder")
+
+  (field ^:static ^:final ^String INVOKERS_HOLDER_CLASS_NAME "java.lang.invoke.Invokers$Holder")
+
+  (method ^:private ^:static isValidHolderName ^boolean [^String name]
+    (or (or (or (.equals name DIRECT_HOLDER_CLASS_NAME) (.equals name DELEGATING_HOLDER_CLASS_NAME))
+            (.equals name BASIC_FORMS_HOLDER_CLASS_NAME))
+        (.equals name INVOKERS_HOLDER_CLASS_NAME)))
+
+  (method ^:private ^:static isBasicTypeChar ^boolean [^char c]
+    (>= (.indexOf "LIJFDV" c) 0))
+
+  (method ^:private ^:static isValidMethodType ^boolean [^String type]
+    (let [typeParts (.split type "_")]
+      (cond
+        (or (or (not (== (alength typeParts) 2)) (not (== (.length (aget typeParts 1)) 1)))
+            (not (CDS/isBasicTypeChar (.charAt (aget typeParts 1) 0))))
+          false
+        (not (CDS/isBasicTypeChar (.charAt (aget typeParts 0) 0))) false
+        :else
+          (do
+            (loop [^int i 1]
+              (when (< i (.length (aget typeParts 0)))
+                (let [c (.charAt (aget typeParts 0) i)]
+                  (if (not (CDS/isBasicTypeChar c))
+                      (if (not (and (>= c \0) (<= c \9)))
+                          (return false)
+                          (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i))))))
+            true))))
+
+  (method ^:private ^:static validateInputLines ^void [^String/1 lines]
+    (for-each [^String s lines]
+      (when (and (not (.startsWith s "[LF_RESOLVE]")) (not (.startsWith s "[SPECIES_RESOLVE]")))
+        (throw (IllegalArgumentException. (java-str "Wrong prefix: " s))))
+      (let [parts (.split s " ")
+            isLF (.startsWith s "[LF_RESOLVE]")]
+        (if isLF
+            (do
+              (when-not (== (alength parts) 4)
+                (throw (IllegalArgumentException.
+                         (java-str "Incorrect number of items in the line: " (alength parts)))))
+              (when-not (CDS/isValidHolderName (aget parts 1))
+                (throw (IllegalArgumentException.
+                         (java-str "Invalid holder class name: " (aget parts 1)))))
+              (when-not (CDS/isValidMethodType (aget parts 3))
+                (throw
+                  (IllegalArgumentException. (java-str "Invalid method type: " (aget parts 3))))))
+            (when-not (== (alength parts) 2)
+              (throw (IllegalArgumentException.
+                       (java-str "Incorrect number of items in the line: " (alength parts)))))))))
+
+  (method ^:private ^:static generateLambdaFormHolderClasses ^Object/1 [^String/1 lines]
+    (Objects/requireNonNull lines)
+    (CDS/validateInputLines lines)
+    (let [^{:tag (Stream String)} lineStream (Arrays/stream lines)
+          ^{:tag (Map String byte/1)} result (.generateHolderClasses
+                                               (SharedSecrets/getJavaLangInvokeAccess)
+                                               lineStream)
+          size (.size result)
+          retArray (new Object/1 (unchecked-multiply-int size 2))
+          ^:mutable ^int index 0]
+      (for-each [^{:tag (Map$Entry String byte/1)} entry (.entrySet result)]
+        (aset retArray index (.getKey entry))
+        (set! index (unchecked-inc-int index))
+        (aset retArray index (.getValue entry))
+        (set! index (unchecked-inc-int index)))
+      retArray))
+
+  (method ^:private ^:static ^:native dumpClassList ^void [^String listFileName])
+
+  (method ^:private ^:static ^:native dumpDynamicArchive ^void [^String archiveFileName])
+
+  (method ^:private ^:static drainOutput ^String [^InputStream stream ^long pid ^String tail
+                                                  ^{:tag (List String)} cmds]
+    (let [fileName (java-str "java_pid" pid "_" tail)]
+      (.start (Thread. (lambda Runnable ^void []
+                         (try
+                           (with-resources [isr (InputStreamReader. stream)
+                                            rdr (BufferedReader. isr)
+                                            prt (PrintStream. fileName)]
+                             (.println prt "Command:")
+                             (for-each [^String s cmds] (.print prt (java-str s " ")))
+                             (.println prt "")
+                             (let [^:mutable ^String line nil]
+                               (while (some? (set! line (.readLine rdr))) (.println prt line))))
+                           (catch IOException e
+                             (throw (RuntimeException.
+                                      (java-str "IOException happens during drain stream to file "
+                                                fileName
+                                                ": "
+                                                (.getMessage e)))))))))
+      fileName))
+
+  (field ^:private ^:static ^String/1 excludeFlags
+    (new String/1
+         ["-XX:DumpLoadedClassList=" "-XX:+RecordDynamicDumpInfo" "-Xshare:"
+          "-XX:SharedClassListFile=" "-XX:SharedArchiveFile=" "-XX:ArchiveClassesAtExit="]))
+
+  (method ^:private ^:static containsExcludedFlags ^boolean [^String testStr]
+    (for-each [^String e excludeFlags] (when (.contains testStr e) (return true)))
+    false)
+
+  (method ^:private ^:static dumpSharedArchive :throws [Exception] ^String [^boolean isStatic
+                                                                            ^String fileName]
+    (let [cwd (.getAbsolutePath (File. ""))
+          currentPid (String/valueOf (.pid (ProcessHandle/current)))
+          ^String archiveFileName (if (some? fileName)
+                                      fileName
+                                      (java-str "java_pid"
+                                                currentPid
+                                                (if isStatic "_static.jsa" "_dynamic.jsa")))
+          tempArchiveFileName (java-str archiveFileName ".temp")
+          tempArchiveFile (File. tempArchiveFileName)]
+      (when-not (.exists tempArchiveFile) (.createNewFile tempArchiveFile))
+      (.delete tempArchiveFile)
+      (if isStatic
+          (let [listFileName (java-str archiveFileName ".classlist")
+                listFile (File. listFileName)]
+            (when (.exists listFile) (.delete listFile))
+            (CDS/dumpClassList listFileName)
+            (let [jdkHome (StaticProperty/javaHome)
+                  classPath (System/getProperty "java.class.path")
+                  ^{:tag (List String)} cmds (ArrayList.)]
+              (.add cmds (java-str jdkHome File/separator "bin" File/separator "java"))
+              (.add cmds "-cp")
+              (.add cmds classPath)
+              (.add cmds "-Xlog:cds")
+              (.add cmds "-Xshare:dump")
+              (.add cmds (java-str "-XX:SharedClassListFile=" listFileName))
+              (.add cmds (java-str "-XX:SharedArchiveFile=" tempArchiveFileName))
+              (let [vmArgs (VM/getRuntimeArguments)]
+                (when (some? vmArgs)
+                  (for-each [^String arg vmArgs]
+                    (when (and (some? arg) (not (CDS/containsExcludedFlags arg))) (.add cmds arg))))
+                (let [proc (.exec (Runtime/getRuntime)
+                                  (cast String/1 (.toArray cmds (new String/1 0))))
+                      stdOutFileName (CDS/drainOutput
+                                       (.getInputStream proc)
+                                       (.pid proc)
+                                       "stdout"
+                                       cmds)
+                      stdErrFileName (CDS/drainOutput
+                                       (.getErrorStream proc)
+                                       (.pid proc)
+                                       "stderr"
+                                       cmds)]
+                  (.waitFor proc)
+                  (.delete listFile)
+                  (when-not (.exists tempArchiveFile)
+                    (throw (RuntimeException.
+                             (java-str "Archive file "
+                                       tempArchiveFileName
+                                       " is not created, please check stdout file "
+                                       cwd
+                                       File/separator
+                                       stdOutFileName
+                                       " or stderr file "
+                                       cwd
+                                       File/separator
+                                       stdErrFileName
+                                       " for more detail"))))))))
+          (do
+            (CDS/dumpDynamicArchive tempArchiveFileName)
+            (when-not (.exists tempArchiveFile)
+              (throw (RuntimeException.
+                       (java-str "Archive file "
+                                 tempArchiveFileName
+                                 " is not created, please check current working directory "
+                                 cwd
+                                 " for process "
+                                 currentPid
+                                 " output for more detail"))))))
+      (let [archiveFile (File. archiveFileName)]
+        (when (.exists archiveFile) (.delete archiveFile))
+        (when-not (.renameTo tempArchiveFile archiveFile)
+          (throw (RuntimeException.
+                   (java-str "Cannot rename temp file "
+                             tempArchiveFileName
+                             " to archive file"
+                             archiveFileName))))
+        (let [archiveFilePath (.getAbsolutePath (File. archiveFileName))]
+          (.println System/out
+                    (java-str "The process was attached by jcmd and dumped a "
+                              (if isStatic "static" "dynamic")
+                              " archive "
+                              archiveFilePath))
+          archiveFilePath))))
+
+  (method ^:public ^:static needsClassInitBarrier ^boolean [^{:tag (Class ?)} c]
+    (when (nil? c) (throw (NullPointerException.)))
+    (if (== (bit-and-int configStatus IS_DUMPING_METHOD_HANDLES) 0)
+        false
+        (CDS/needsClassInitBarrier0 c)))
+
+  (method ^:private ^:static ^:native needsClassInitBarrier0 ^boolean [^{:tag (Class ?)} c])
+
+  (defclass ^:private ^:static UnregisteredClassLoader
+    :extends ClassLoader
+
+    (static-initializer (UnregisteredClassLoader/registerAsParallelCapable))
+
+    (defclass ^:static ^:interface Source
+      (method ^:public readClassFile :throws [IOException] ^byte/1 [this ^String className]))
+
+    (defclass ^:static JarSource
+      :implements [Source]
+
+      (field ^:private ^:final ^JarFile jar)
+
+      (constructor :throws [IOException] [this ^File file]
+        (set! jar (JarFile. file)))
+
+      (method ^:public readClassFile :throws [IOException] ^byte/1 [this ^String className]
+        (let [entryName (.concat (.replace className \. \/) ".class")
+              entry (.getEntry jar entryName)]
+          (when (nil? entry)
+            (throw (IOException. (java-str "No such entry: " entryName " in " (.getName jar)))))
+          (with-resources [in (.getInputStream jar entry)] (.readAllBytes in)))))
+
+    (defclass ^:static DirSource
+      :implements [Source]
+
+      (field ^:private ^:final ^String basePath)
+
+      (constructor [this ^File dir]
+        (java-assert (.isDirectory dir))
+        (set! basePath (.toString dir)))
+
+      (method ^:public readClassFile :throws [IOException] ^byte/1 [this ^String className]
+        (let [subPath (.concat (.replace className \. File/separatorChar) ".class")
+              fullPath (Path/of basePath (new String/1 [subPath]))]
+          (Files/readAllBytes fullPath))))
+
+    (field ^:private ^:final ^{:tag (HashMap String Source)} sources (HashMap.))
+
+    (method ^:private resolveSource :throws [IOException] ^Source [this ^String path]
+      (let [^:mutable source (cast Source (.get sources path))]
+        (if (some? source)
+            source
+            (let [file (File. path)]
+              (when-not (.exists file) (throw (IOException. (java-str "No such file: " path))))
+              (cond
+                (.isFile file) (set! source (JarSource. file))
+                (.isDirectory file) (set! source (DirSource. file))
+                :else (throw (IOException. (java-str "Not a normal file: " path))))
+              (.put sources path source)
+              source))))
+
+    (method ^:private load :throws [IOException] ^{:tag (Class ?)} [this ^String name ^String source]
+      (let [resolvedSource (.resolveSource this source)
+            bytes (.readClassFile resolvedSource name)]
+        (java-assert (identical? (.getParent this) (UnregisteredClassLoader/getSystemClassLoader)))
+        (.defineClass this name bytes 0 (alength bytes)))))
+
+  (defclass ^:private ^:static ProcessLauncher
+    (method ^:static execWithJavaToolOptions :throws [IOException InterruptedException] ^int [^String javaLauncher
+                                                                                              ^String/1 args]
+      (let [pb (.command (.inheritIO (ProcessBuilder. (new String/1 [])))
+                         (new String/1 [javaLauncher]))
+            sb (StringBuilder.)
+            ^:mutable prefix ""]
+        (for-each [^String arg args]
+          (.append sb prefix)
+          (loop [^int i 0]
+            (when (< i (.length arg))
+              (let [c (.charAt arg i)]
+                (cond
+                  (or (== c \") (Character/isWhitespace c))
+                    (do
+                      (.append sb \')
+                      (.append sb c)
+                      (.append sb \')
+                      (recur (unchecked-inc-int i)))
+                  (== c \')
+                    (do
+                      (.append sb \")
+                      (.append sb c)
+                      (.append sb \")
+                      (recur (unchecked-inc-int i)))
+                  :else (do (.append sb c) (recur (unchecked-inc-int i)))))))
+          (set! prefix " "))
+        (let [^{:tag (Map String String)} env (.environment pb)]
+          (.put env "JAVA_TOOL_OPTIONS" (.toString sb))
+          (.remove env "_JAVA_OPTIONS")
+          (.remove env "CLASSPATH")
+          (let [process (.start pb)] (.waitFor process)))))))

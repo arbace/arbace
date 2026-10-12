@@ -1,0 +1,174 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/DelayQueue.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.util AbstractQueue Collection Iterator NoSuchElementException Objects PriorityQueue)
+        '(java.util.concurrent.locks Condition ReentrantLock))
+
+(defclass ^:public DelayQueue
+  :extends (AbstractQueue E)
+  :implements [(BlockingQueue E)]
+  :type-params [(E extends Delayed)]
+
+  (field ^:private ^:final ^:transient ^ReentrantLock lock (ReentrantLock.))
+
+  (field ^:private ^:final ^{:tag (PriorityQueue E)} q (PriorityQueue.))
+
+  (field ^:private ^Thread leader)
+
+  (field ^:private ^:final ^Condition available (.newCondition lock))
+
+  (constructor ^:public [this])
+
+  (constructor ^:public [this ^{:tag (Collection (? extends E))} c]
+    (.addAll this c))
+
+  (method ^:public add ^boolean [this ^E e] (.offer this e))
+
+  (method ^:public offer ^boolean [this ^E e]
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try
+        (.offer q e)
+        (when (identical? (.peek q) e) (set! leader nil) (.signal available))
+        true
+        (finally (.unlock lock)))))
+
+  (method ^:public put ^void [this ^E e] (.offer this e))
+
+  (method ^:public offer ^boolean [this ^E e ^long timeout ^TimeUnit unit]
+    (.offer this e))
+
+  (method ^:public poll ^E [this]
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try
+        (let [^E first (cast Delayed (.peek q))]
+          (when-not (or (nil? first) (> (.getDelay first TimeUnit/NANOSECONDS) 0))
+            (cast Delayed (.poll q))))
+        (finally (.unlock lock)))))
+
+  (method ^:public take :throws [InterruptedException] ^E [this]
+    (let [lock (.-lock this)]
+      (.lockInterruptibly lock)
+      (try
+        (while true
+          (let [^:mutable ^E first (cast Delayed (.peek q))]
+            (if (nil? first)
+                (.await available)
+                (let [delay (.getDelay first TimeUnit/NANOSECONDS)]
+                  (when (<= delay 0) (return (cast Delayed (.poll q))))
+                  (set! first nil)
+                  (if (some? leader)
+                      (.await available)
+                      (let [thisThread (Thread/currentThread)]
+                        (set! leader thisThread)
+                        (try
+                          (.awaitNanos available delay)
+                          (finally (when (identical? leader thisThread) (set! leader nil))))))))))
+        (finally (when (and (nil? leader) (some? (.peek q))) (.signal available)) (.unlock lock)))))
+
+  (method ^:public poll :throws [InterruptedException] ^E [this ^long timeout ^TimeUnit unit]
+    (let [^:mutable nanos (.toNanos unit timeout)
+          lock (.-lock this)]
+      (.lockInterruptibly lock)
+      (try
+        (while true
+          (let [^:mutable ^E first (cast Delayed (.peek q))]
+            (if (nil? first)
+                (if (<= nanos 0) (return nil) (set! nanos (.awaitNanos available nanos)))
+                (let [delay (.getDelay first TimeUnit/NANOSECONDS)]
+                  (when (<= delay 0) (return (cast Delayed (.poll q))))
+                  (when (<= nanos 0) (return nil))
+                  (set! first nil)
+                  (if (or (< nanos delay) (some? leader))
+                      (set! nanos (.awaitNanos available nanos))
+                      (let [thisThread (Thread/currentThread)]
+                        (set! leader thisThread)
+                        (try
+                          (let [timeLeft (.awaitNanos available delay)]
+                            (set! nanos
+                                  (unchecked-subtract nanos (unchecked-subtract delay timeLeft))))
+                          (finally (when (identical? leader thisThread) (set! leader nil))))))))))
+        (finally (when (and (nil? leader) (some? (.peek q))) (.signal available)) (.unlock lock)))))
+
+  (method ^:public remove ^E [this] (cast Delayed (.remove super)))
+
+  (method ^:public peek ^E [this]
+    (let [lock (.-lock this)] (.lock lock) (try (cast Delayed (.peek q)) (finally (.unlock lock)))))
+
+  (method ^:public size ^int [this]
+    (let [lock (.-lock this)] (.lock lock) (try (.size q) (finally (.unlock lock)))))
+
+  (method ^:public drainTo ^int [this ^{:tag (Collection (? super E))} c]
+    (.drainTo this c Integer/MAX_VALUE))
+
+  (method ^:public drainTo ^int [this ^{:tag (Collection (? super E))} c ^int maxElements]
+    (Objects/requireNonNull c)
+    (when (identical? c this) (throw (IllegalArgumentException.)))
+    (if (<= maxElements 0)
+        0
+        (let [lock (.-lock this)]
+          (.lock lock)
+          (try
+            (let [^:mutable ^int n 0]
+              (let [^:mutable ^E first nil]
+                (while (and (and (< n maxElements) (some? (set! first (cast Delayed (.peek q)))))
+                            (<= (.getDelay first TimeUnit/NANOSECONDS) 0))
+                  (.add c first)
+                  (.poll q)
+                  (set! n (unchecked-inc-int n))))
+              n)
+            (finally (.unlock lock))))))
+
+  (method ^:public clear ^void [this]
+    (let [lock (.-lock this)] (.lock lock) (try (.clear q) (finally (.unlock lock)))))
+
+  (method ^:public remainingCapacity ^int [this] Integer/MAX_VALUE)
+
+  (method ^:public toArray ^Object/1 [this]
+    (let [lock (.-lock this)] (.lock lock) (try (.toArray q) (finally (.unlock lock)))))
+
+  (method ^:public toArray :type-params [T] ^T/1 [this ^T/1 a]
+    (let [lock (.-lock this)] (.lock lock) (try (.toArray q a) (finally (.unlock lock)))))
+
+  (method ^:public remove ^boolean [this o]
+    (let [lock (.-lock this)] (.lock lock) (try (.remove q o) (finally (.unlock lock)))))
+
+  (method removeEQ ^void [this o]
+    (let [lock (.-lock this)]
+      (.lock lock)
+      (try
+        (loop [^{:tag (Iterator E)} it (.iterator q)]
+          (if (.hasNext it) (if (identical? o (.next it)) (.remove it) (recur it)) nil))
+        (finally (.unlock lock)))))
+
+  (method ^:public iterator ^{:tag (Iterator E)} [this]
+    (Itr. (.toArray this)))
+
+  (defclass ^:private Itr
+    :implements [(Iterator E)]
+
+    (field ^:final ^Object/1 array)
+
+    (field ^int cursor)
+
+    (field ^int lastRet)
+
+    (constructor [this ^Object/1 array]
+      (set! lastRet -1)
+      (set! (.-array this) array))
+
+    (method ^:public hasNext ^boolean [this] (< cursor (alength array)))
+
+    (method ^:public next ^E [this]
+      (when (>= cursor (alength array)) (throw (NoSuchElementException.)))
+      (cast Delayed
+            (aget
+              array
+              (set! lastRet (let [old-1 cursor] (set! cursor (unchecked-inc-int cursor)) old-1)))))
+
+    (method ^:public remove ^void [this]
+      (when (< lastRet 0) (throw (IllegalStateException.)))
+      (.removeEQ DelayQueue/this (aget array lastRet))
+      (set! lastRet -1))))

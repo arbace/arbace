@@ -81,6 +81,19 @@ from text) and `gofmt` otherwise (forms built by a program):
     A closing brace followed by `else` goes to the line of the `else if` (its recorded line)
     or, before a plain `else` block, to the line before the block's first statement, when
     free. Inside a function body kept on one line nothing breaks the line.
+  - Name lists (2026-10-12, BOX-NOTES S4): each name of a parameter, result, type parameter
+    or struct field list, and of a spec, goes on its recorded line (a name that begins a Go
+    line carries `:line`; Go allows a break after the comma), and a name that begins a line
+    starts a group of its own unless `:go/grouped` joins it, since gc declares each name at its
+    line (DWARF's `decl_line`). Until then a parameter list's names all went on the list's
+    first line and only their types reached their lines, by `/*line*/` directives: code and
+    line tables were the original's, DWARF was not (purego's `collectStackArgs`). Outside
+    generic declarations names of equal type, doc and tag are grouped (the converter gives a
+    field's doc to each of its names), so `h1, h2 T` under a doc comment prints as one field.
+    The parameters' `)` stays on the line of the results (the line they record, else the last
+    parameter's); the body of a function whose signature spans lines is indented from the
+    line `func` began on. The values of a spec or return after the first follow their
+    `:go/breaks` too.
   - Strings with line breaks are interpreted strings (`"a\nb"`): the forms do not say whether
     the source spelled them raw, and a raw string would push what follows to later lines.
     (The gofmt layout writes them raw where Go allows it.)
@@ -144,7 +157,9 @@ forms (A6 as accepted), covered by `s09_directives`.
   compares it with the printed files at the levels tree, export and code (`levels=`
   restricts them), for both layouts;
 - for cases marked `lines`, `golines` compares the lines gc sees (after `//line` directives)
-  of every declaration, spec, struct field, statement, clause and function closing brace.
+  of every declaration, spec, embedded struct field, statement, clause and function closing
+  brace, and of every name a field list or a spec declares (since 2026-10-12: case
+  `s10_names`, the names of lists that span lines).
 
 Other tests: `package-build` (§12.4), `forms-in-memory` (the converter's path: forms without
 lines through `collect-forms`, printed in the gofmt layout, gocmp all levels), `line-file`

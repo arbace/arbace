@@ -1,0 +1,459 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/Phaser.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.lang.invoke MethodHandles VarHandle)
+        '(java.util.concurrent.atomic AtomicReference)
+        '(java.util.concurrent.locks LockSupport)
+        '(jdk.internal.invoke MhUtil))
+
+(defclass ^:public Phaser
+  (field ^:private ^:volatile ^long state)
+
+  (field ^:private ^:static ^:final ^int MAX_PARTIES 0xffff)
+
+  (field ^:private ^:static ^:final ^int MAX_PHASE Integer/MAX_VALUE)
+
+  (field ^:private ^:static ^:final ^int PARTIES_SHIFT 16)
+
+  (field ^:private ^:static ^:final ^int PHASE_SHIFT 32)
+
+  (field ^:private ^:static ^:final ^int UNARRIVED_MASK 0xffff)
+
+  (field ^:private ^:static ^:final ^long PARTIES_MASK 0xffff0000)
+
+  (field ^:private ^:static ^:final ^long COUNTS_MASK 0xffffffff)
+
+  (field ^:private ^:static ^:final ^long TERMINATION_BIT (bit-shift-left 1 63))
+
+  (field ^:private ^:static ^:final ^int ONE_ARRIVAL 1)
+
+  (field ^:private ^:static ^:final ^int ONE_PARTY (bit-shift-left-int 1 PARTIES_SHIFT))
+
+  (field ^:private ^:static ^:final ^int ONE_DEREGISTER (bit-or-int ONE_ARRIVAL ONE_PARTY))
+
+  (field ^:private ^:static ^:final ^int EMPTY 1)
+
+  (method ^:private ^:static unarrivedOf ^int [^long s]
+    (let [counts (unchecked-int s)] (if (== counts EMPTY) 0 (bit-and-int counts UNARRIVED_MASK))))
+
+  (method ^:private ^:static partiesOf ^int [^long s]
+    (unsigned-bit-shift-right-int (unchecked-int s) PARTIES_SHIFT))
+
+  (method ^:private ^:static phaseOf ^int [^long s]
+    (unchecked-int (unsigned-bit-shift-right s PHASE_SHIFT)))
+
+  (method ^:private ^:static arrivedOf ^int [^long s]
+    (let [counts (unchecked-int s)]
+      (if (== counts EMPTY)
+          0
+          (unchecked-subtract-int (unsigned-bit-shift-right-int counts PARTIES_SHIFT)
+                                  (bit-and-int counts UNARRIVED_MASK)))))
+
+  (field ^:private ^:final ^Phaser parent)
+
+  (field ^:private ^:final ^Phaser root)
+
+  (field ^:private ^:final ^{:tag (AtomicReference QNode)} evenQ)
+
+  (field ^:private ^:final ^{:tag (AtomicReference QNode)} oddQ)
+
+  (method ^:private badArrive ^String [this ^long s]
+    (java-str "Attempted arrival of unregistered party for " (.stateToString this s)))
+
+  (method ^:private badRegister ^String [this ^long s]
+    (java-str (java-str (java-str "Attempt to register more than " MAX_PARTIES) " parties for ")
+              (.stateToString this s)))
+
+  (method ^:private doArrive ^int [this ^int adjust]
+    (let [root (.-root this)]
+      (while true
+        (let [^:mutable s (if (identical? root this) state (.reconcileState this))
+              ^:mutable phase (unchecked-int (unsigned-bit-shift-right s PHASE_SHIFT))]
+          (when (< phase 0) (return phase))
+          (let [counts (unchecked-int s)
+                ^int unarrived (if (== counts EMPTY) 0 (bit-and-int counts UNARRIVED_MASK))]
+            (when (<= unarrived 0) (throw (IllegalStateException. (.badArrive this s))))
+            (when ^boolean (^[Phaser long long] VarHandle/.compareAndSet
+                             STATE
+                             this
+                             s
+                             (set! s (unchecked-subtract s adjust)))
+              (when (== unarrived 1)
+                (let [^:mutable n (bit-and s PARTIES_MASK)
+                      nextUnarrived (unsigned-bit-shift-right-int (unchecked-int n) PARTIES_SHIFT)]
+                  (cond
+                    (identical? root this)
+                      (do
+                        (cond
+                          (.onAdvance this phase nextUnarrived) (set! n (bit-or n TERMINATION_BIT))
+                          (== nextUnarrived 0) (set! n (bit-or n EMPTY))
+                          :else (set! n (bit-or n nextUnarrived)))
+                        (let [nextPhase (bit-and-int (unchecked-add-int phase 1) MAX_PHASE)]
+                          (set! n (bit-or n (bit-shift-left (long nextPhase) PHASE_SHIFT)))
+                          ^boolean ^void (^[Phaser long long] VarHandle/.compareAndSet
+                                           STATE
+                                           this
+                                           s
+                                           n)
+                          (.releaseWaiters this phase)))
+                    (== nextUnarrived 0)
+                      (do
+                        (set! phase (.doArrive parent ONE_DEREGISTER))
+                        ^boolean ^void (^[Phaser long long] VarHandle/.compareAndSet
+                                         STATE
+                                         this
+                                         s
+                                         (bit-or s EMPTY)))
+                    :else (set! phase (.doArrive parent ONE_ARRIVAL)))))
+              (return phase)))))))
+
+  (method ^:private doRegister ^int [this ^int registrations]
+    (let [adjust (bit-or (bit-shift-left (long registrations) PARTIES_SHIFT) registrations)
+          parent (.-parent this)
+          ^:mutable ^int phase 0]
+      (while true
+        (let [^:mutable s (if (nil? parent) state (.reconcileState this))
+              counts (unchecked-int s)
+              parties (unsigned-bit-shift-right-int counts PARTIES_SHIFT)
+              unarrived (bit-and-int counts UNARRIVED_MASK)]
+          (when (> registrations (unchecked-subtract-int MAX_PARTIES parties))
+            (throw (IllegalStateException. (.badRegister this s))))
+          (set! phase (unchecked-int (unsigned-bit-shift-right s PHASE_SHIFT)))
+          (when (< phase 0) (break))
+          (cond
+            (not (== counts EMPTY))
+              (when (or (nil? parent) (== (.reconcileState this) s))
+                (cond
+                  (== unarrived 0) (.internalAwaitAdvance root phase nil)
+                  ^boolean (^[Phaser long long] VarHandle/.compareAndSet
+                             STATE
+                             this
+                             s
+                             (unchecked-add s adjust))
+                    (break)))
+            (nil? parent)
+              (let [next (bit-or (bit-shift-left (long phase) PHASE_SHIFT) adjust)]
+                (when ^boolean (^[Phaser long long] VarHandle/.compareAndSet STATE this s next)
+                  (break)))
+            :else
+              (locking this
+                (when (== state s)
+                  (set! phase (.doRegister parent 1))
+                  (when (< phase 0) (break))
+                  (while (not ^boolean (^[Phaser long long] VarHandle/.weakCompareAndSet
+                                         STATE
+                                         this
+                                         s
+                                         (bit-or (bit-shift-left (long phase) PHASE_SHIFT) adjust)))
+                    (set! s state)
+                    (set! phase
+                          (unchecked-int (unsigned-bit-shift-right (.-state root) PHASE_SHIFT))))
+                  (break))))))
+      phase))
+
+  (method ^:private reconcileState ^long [this]
+    (let [root (.-root this)
+          ^:mutable s state]
+      (when-not (identical? root this)
+        (let [^:mutable ^int phase 0
+              ^:mutable ^int p 0]
+          (while (and (not (== (set! phase
+                                     (unchecked-int
+                                       (unsigned-bit-shift-right (.-state root) PHASE_SHIFT)))
+                               (unchecked-int (unsigned-bit-shift-right s PHASE_SHIFT))))
+                      (not ^boolean (^[Phaser long long] VarHandle/.weakCompareAndSet
+                                      STATE
+                                      this
+                                      s
+                                      (set! s
+                                            (bit-or
+                                              (bit-shift-left (long phase) PHASE_SHIFT)
+                                              (cond
+                                                (< phase 0) (bit-and s COUNTS_MASK)
+                                                (==
+                                                  (set!
+                                                    p
+                                                    (unsigned-bit-shift-right-int
+                                                      (unchecked-int s)
+                                                      PARTIES_SHIFT))
+                                                  0)
+                                                  (long EMPTY)
+                                                :else (bit-or (bit-and s PARTIES_MASK) p)))))))
+            (set! s state))))
+      s))
+
+  (constructor ^:public [this] (this. nil 0))
+
+  (constructor ^:public [this ^int parties] (this. nil parties))
+
+  (constructor ^:public [this ^Phaser parent] (this. parent 0))
+
+  (constructor ^:public [this ^Phaser parent ^int parties]
+    (when-not (== (unsigned-bit-shift-right-int parties PARTIES_SHIFT) 0)
+      (throw (IllegalArgumentException. "Illegal number of parties")))
+    (let [^:mutable ^int phase 0]
+      (set! (.-parent this) parent)
+      (if (some? parent)
+          (let [root (.-root parent)]
+            (set! (.-root this) root)
+            (set! (.-evenQ this) (.-evenQ root))
+            (set! (.-oddQ this) (.-oddQ root))
+            (when-not (== parties 0) (set! phase (.doRegister parent 1))))
+          (do
+            (set! (.-root this) this)
+            (set! (.-evenQ this) (AtomicReference.))
+            (set! (.-oddQ this) (AtomicReference.))))
+      (set! (.-state this)
+            (if (== parties 0)
+                (long EMPTY)
+                (bit-or (bit-or (bit-shift-left (long phase) PHASE_SHIFT)
+                                (bit-shift-left (long parties) PARTIES_SHIFT))
+                        (long parties))))))
+
+  (method ^:public register ^int [this] (.doRegister this 1))
+
+  (method ^:public bulkRegister ^int [this ^int parties]
+    (when (< parties 0) (throw (IllegalArgumentException.)))
+    (if (== parties 0) (.getPhase this) (.doRegister this parties)))
+
+  (method ^:public arrive ^int [this] (.doArrive this ONE_ARRIVAL))
+
+  (method ^:public arriveAndDeregister ^int [this]
+    (.doArrive this ONE_DEREGISTER))
+
+  (method ^:public arriveAndAwaitAdvance ^int [this]
+    (let [root (.-root this)]
+      (while true
+        (let [^:mutable s (if (identical? root this) state (.reconcileState this))
+              phase (unchecked-int (unsigned-bit-shift-right s PHASE_SHIFT))]
+          (when (< phase 0) (return phase))
+          (let [counts (unchecked-int s)
+                ^int unarrived (if (== counts EMPTY) 0 (bit-and-int counts UNARRIVED_MASK))]
+            (when (<= unarrived 0) (throw (IllegalStateException. (.badArrive this s))))
+            (when ^boolean (^[Phaser long long] VarHandle/.compareAndSet
+                             STATE
+                             this
+                             s
+                             (set! s (unchecked-subtract s ONE_ARRIVAL)))
+              (when (> unarrived 1) (return (.internalAwaitAdvance root phase nil)))
+              (when-not (identical? root this) (return (.arriveAndAwaitAdvance parent)))
+              (let [^:mutable n (bit-and s PARTIES_MASK)
+                    nextUnarrived (unsigned-bit-shift-right-int (unchecked-int n) PARTIES_SHIFT)]
+                (cond
+                  (.onAdvance this phase nextUnarrived) (set! n (bit-or n TERMINATION_BIT))
+                  (== nextUnarrived 0) (set! n (bit-or n EMPTY))
+                  :else (set! n (bit-or n nextUnarrived)))
+                (let [nextPhase (bit-and-int (unchecked-add-int phase 1) MAX_PHASE)]
+                  (set! n (bit-or n (bit-shift-left (long nextPhase) PHASE_SHIFT)))
+                  (when-not ^boolean (^[Phaser long long] VarHandle/.compareAndSet STATE this s n)
+                    (return (unchecked-int (unsigned-bit-shift-right state PHASE_SHIFT))))
+                  (.releaseWaiters this phase)
+                  (return nextPhase)))))))))
+
+  (method ^:public awaitAdvance ^int [this ^int phase]
+    (let [root (.-root this)
+          s (if (identical? root this) state (.reconcileState this))
+          p (unchecked-int (unsigned-bit-shift-right s PHASE_SHIFT))]
+      (cond (< phase 0) phase (== p phase) (.internalAwaitAdvance root phase nil) :else p)))
+
+  (method ^:public awaitAdvanceInterruptibly :throws [InterruptedException] ^int [this ^int phase]
+    (let [root (.-root this)
+          s (if (identical? root this) state (.reconcileState this))
+          ^:mutable p (unchecked-int (unsigned-bit-shift-right s PHASE_SHIFT))]
+      (if (< phase 0)
+          phase
+          (do
+            (when (== p phase)
+              (let [node (QNode. this phase true false 0)]
+                (set! p (.internalAwaitAdvance root phase node))
+                (when (.-wasInterrupted node) (throw (InterruptedException.)))))
+            p))))
+
+  (method ^:public awaitAdvanceInterruptibly :throws [InterruptedException TimeoutException] ^int [this
+                                                                                                   ^int phase
+                                                                                                   ^long timeout
+                                                                                                   ^TimeUnit unit]
+    (let [nanos (.toNanos unit timeout)
+          root (.-root this)
+          s (if (identical? root this) state (.reconcileState this))
+          ^:mutable p (unchecked-int (unsigned-bit-shift-right s PHASE_SHIFT))]
+      (if (< phase 0)
+          phase
+          (do
+            (when (== p phase)
+              (let [node (QNode. this phase true true nanos)]
+                (set! p (.internalAwaitAdvance root phase node))
+                (cond
+                  (.-wasInterrupted node) (throw (InterruptedException.))
+                  (== p phase) (throw (TimeoutException.)))))
+            p))))
+
+  (method ^:public forceTermination ^void [this]
+    (let [root (.-root this)
+          ^:mutable ^long s 0]
+      (while (>= (set! s (.-state root)) 0)
+        (when ^boolean (^[Phaser long long] VarHandle/.compareAndSet
+                         STATE
+                         root
+                         s
+                         (bit-or s TERMINATION_BIT))
+          (.releaseWaiters this 0)
+          (.releaseWaiters this 1)
+          (return)))))
+
+  (method ^:public ^:final getPhase ^int [this]
+    (unchecked-int (unsigned-bit-shift-right (.-state root) PHASE_SHIFT)))
+
+  (method ^:public getRegisteredParties ^int [this]
+    (Phaser/partiesOf state))
+
+  (method ^:public getArrivedParties ^int [this]
+    (Phaser/arrivedOf (.reconcileState this)))
+
+  (method ^:public getUnarrivedParties ^int [this]
+    (Phaser/unarrivedOf (.reconcileState this)))
+
+  (method ^:public getParent ^Phaser [this] parent)
+
+  (method ^:public getRoot ^Phaser [this] root)
+
+  (method ^:public isTerminated ^boolean [this] (< (.-state root) 0))
+
+  (method ^:protected onAdvance ^boolean [this ^int phase ^int registeredParties]
+    (== registeredParties 0))
+
+  (method ^:public toString ^String [this]
+    (.stateToString this (.reconcileState this)))
+
+  (method ^:private stateToString ^String [this ^long s]
+    (java-str (.toString super)
+              "[phase = "
+              (Phaser/phaseOf s)
+              " parties = "
+              (Phaser/partiesOf s)
+              " arrived = "
+              (Phaser/arrivedOf s)
+              "]"))
+
+  (method ^:private releaseWaiters ^void [this ^int phase]
+    (let [^:mutable ^QNode q nil
+          ^:mutable ^Thread t nil
+          ^{:tag (AtomicReference QNode)} head (if (== (bit-and-int phase 1) 0) evenQ oddQ)]
+      (while (and (some? (set! q (cast QNode (.get head))))
+                  (not (== (.-phase q)
+                           (unchecked-int (unsigned-bit-shift-right (.-state root) PHASE_SHIFT)))))
+        (when (and (.compareAndSet head q (.-next q)) (some? (set! t (.-thread q))))
+          (set! (.-thread q) nil)
+          (LockSupport/unpark t)))))
+
+  (method ^:private abortWait ^int [this ^int phase]
+    (let [^{:tag (AtomicReference QNode)} head (if (== (bit-and-int phase 1) 0) evenQ oddQ)]
+      (while true
+        (let [^:mutable ^Thread t nil
+              q (cast QNode (.get head))
+              p (unchecked-int (unsigned-bit-shift-right (.-state root) PHASE_SHIFT))]
+          (when (or (nil? q) (and (some? (set! t (.-thread q))) (== (.-phase q) p))) (return p))
+          (when (and (.compareAndSet head q (.-next q)) (some? t))
+            (set! (.-thread q) nil)
+            (LockSupport/unpark t))))))
+
+  (field ^:private ^:static ^:final ^int NCPU (.availableProcessors (Runtime/getRuntime)))
+
+  (field ^:static ^:final ^int SPINS_PER_ARRIVAL (if (< NCPU 2) 1 (bit-shift-left-int 1 8)))
+
+  (method ^:private internalAwaitAdvance ^int [this ^int phase ^:mutable ^QNode node]
+    (.releaseWaiters this (unchecked-subtract-int phase 1))
+    (let [^:mutable queued false
+          ^:mutable ^int lastUnarrived 0
+          ^:mutable spins SPINS_PER_ARRIVAL
+          ^:mutable ^long s 0
+          ^:mutable ^int p 0]
+      (while (== (set! p (unchecked-int (unsigned-bit-shift-right (set! s state) PHASE_SHIFT)))
+                 phase)
+        (cond
+          (nil? node)
+            (let [unarrived (bit-and-int (unchecked-int s) UNARRIVED_MASK)]
+              (when (and (not (== unarrived lastUnarrived)) (< (set! lastUnarrived unarrived) NCPU))
+                (set! spins (unchecked-add-int spins SPINS_PER_ARRIVAL)))
+              (let [interrupted (Thread/interrupted)]
+                (if (or interrupted (< (set! spins (unchecked-dec-int spins)) 0))
+                    (do
+                      (set! node (QNode. this phase false false 0))
+                      (set! (.-wasInterrupted node) interrupted))
+                    (Thread/onSpinWait))))
+          (.isReleasable node) (break)
+          (not queued)
+            (let [^{:tag (AtomicReference QNode)} head (if (== (bit-and-int phase 1) 0) evenQ oddQ)
+                  q (set! (.-next node) (cast QNode (.get head)))]
+              (when (and (or (nil? q) (== (.-phase q) phase))
+                         (== (unchecked-int (unsigned-bit-shift-right state PHASE_SHIFT)) phase))
+                (set! queued (.compareAndSet head q node))))
+          :else
+            (try
+              (ForkJoinPool/managedBlock node)
+              (catch InterruptedException cantHappen (set! (.-wasInterrupted node) true)))))
+      (when (some? node)
+        (when (some? (.-thread node)) (set! (.-thread node) nil))
+        (when (and (.-wasInterrupted node) (not (.-interruptible node)))
+          (.interrupt (Thread/currentThread)))
+        (when (and (== p phase)
+                   (== (set! p (unchecked-int (unsigned-bit-shift-right state PHASE_SHIFT))) phase))
+          (return (.abortWait this phase))))
+      (.releaseWaiters this phase)
+      p))
+
+  (defclass ^:static ^:final QNode
+    :implements [ForkJoinPool$ManagedBlocker]
+
+    (field ^:final ^Phaser phaser)
+
+    (field ^:final ^int phase)
+
+    (field ^:final ^boolean interruptible)
+
+    (field ^:final ^boolean timed)
+
+    (field ^boolean wasInterrupted)
+
+    (field ^long nanos)
+
+    (field ^:final ^long deadline)
+
+    (field ^:volatile ^Thread thread)
+
+    (field ^QNode next)
+
+    (constructor [this ^Phaser phaser ^int phase ^boolean interruptible ^boolean timed ^long nanos]
+      (set! (.-phaser this) phaser)
+      (set! (.-phase this) phase)
+      (set! (.-interruptible this) interruptible)
+      (set! (.-nanos this) nanos)
+      (set! (.-timed this) timed)
+      (set! (.-deadline this) (if timed (unchecked-add (System/nanoTime) nanos) 0))
+      (set! thread (Thread/currentThread)))
+
+    (method ^:public isReleasable ^boolean [this]
+      (cond
+        (nil? thread) true
+        (not (== (.getPhase phaser) phase)) (do (set! thread nil) true)
+        :else
+          (do
+            (when (Thread/interrupted) (set! wasInterrupted true))
+            (cond
+              (and wasInterrupted interruptible) (do (set! thread nil) true)
+              (and timed
+                   (or (<= nanos 0)
+                       (<= (set! nanos (unchecked-subtract deadline (System/nanoTime))) 0)))
+                (do (set! thread nil) true)
+              :else false))))
+
+    (method ^:public block ^boolean [this]
+      (while (not (.isReleasable this))
+        (if timed (LockSupport/parkNanos this nanos) (LockSupport/park this)))
+      true))
+
+  (field ^:private ^:static ^:final ^VarHandle STATE
+    (MhUtil/findVarHandle (MethodHandles/lookup) "state" Long/TYPE))
+
+  (static-initializer (let [^{:tag (Class ?)} ensureLoaded LockSupport] nil)))

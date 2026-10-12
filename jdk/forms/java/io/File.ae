@@ -1,0 +1,449 @@
+;; Converted from jdk26u src/java.base/share/classes/java/io/File.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.io)
+
+(import '(java.net MalformedURLException URI URISyntaxException URL)
+        '(java.nio.file FileSystems Path)
+        '(java.security SecureRandom)
+        '(java.util ArrayList List)
+        '(jdk.internal.misc Unsafe)
+        '(jdk.internal.util StaticProperty))
+
+(defclass ^:public File
+  :implements [Serializable (Comparable File)]
+
+  (field ^:private ^:static ^:final ^FileSystem FS (DefaultFileSystem/getFileSystem))
+
+  (field ^:private ^:final ^String path)
+
+  (defclass ^:private ^:static ^:enum PathStatus
+    (constants INVALID CHECKED))
+
+  (field ^:private ^:transient ^PathStatus status nil)
+
+  (method ^:final isInvalid ^boolean [this]
+    (let [^:mutable s status]
+      (when (nil? s)
+        (set! s (if (.isInvalid FS this) PathStatus/INVALID PathStatus/CHECKED))
+        (set! status s))
+      (identical? s PathStatus/INVALID)))
+
+  (field ^:private ^:final ^:transient ^int prefixLength)
+
+  (method getPrefixLength ^int [this] prefixLength)
+
+  (field ^:public ^:static ^:final ^char separatorChar (.getSeparator FS))
+
+  (field ^:public ^:static ^:final ^String separator (String/valueOf separatorChar))
+
+  (field ^:public ^:static ^:final ^char pathSeparatorChar (.getPathSeparator FS))
+
+  (field ^:public ^:static ^:final ^String pathSeparator (String/valueOf pathSeparatorChar))
+
+  (constructor ^:private [this ^String pathname ^int prefixLength]
+    (set! (.-path this) pathname)
+    (set! (.-prefixLength this) prefixLength))
+
+  (constructor ^:private [this ^String child ^File parent]
+    (java-assert (some? (.-path parent)))
+    (java-assert (not (.isEmpty (.-path parent))))
+    (set! (.-path this) (.resolve FS (.-path parent) child))
+    (set! (.-prefixLength this) (.-prefixLength parent)))
+
+  (constructor ^:public [this ^String pathname]
+    (when (nil? pathname) (throw (NullPointerException.)))
+    (set! (.-path this) (.normalize FS pathname))
+    (set! (.-prefixLength this) (.prefixLength FS (.-path this))))
+
+  (constructor ^:public [this ^String parent ^String child]
+    (when (nil? child) (throw (NullPointerException.)))
+    (if (some? parent)
+        (if (.isEmpty parent)
+            (set! (.-path this) (.resolve FS (.getDefaultParent FS) (.normalize FS child)))
+            (set! (.-path this) (.resolve FS (.normalize FS parent) (.normalize FS child))))
+        (set! (.-path this) (.normalize FS child)))
+    (set! (.-prefixLength this) (.prefixLength FS (.-path this))))
+
+  (constructor ^:public [this ^File parent ^String child]
+    (when (nil? child) (throw (NullPointerException.)))
+    (if (some? parent)
+        (if (.isEmpty (.-path parent))
+            (set! (.-path this) (.resolve FS (.getDefaultParent FS) (.normalize FS child)))
+            (set! (.-path this) (.resolve FS (.-path parent) (.normalize FS child))))
+        (set! (.-path this) (.normalize FS child)))
+    (set! (.-prefixLength this) (.prefixLength FS (.-path this))))
+
+  (constructor ^:public [this ^URI uri]
+    (when-not (.isAbsolute uri) (throw (IllegalArgumentException. "URI is not absolute")))
+    (when (.isOpaque uri) (throw (IllegalArgumentException. "URI is not hierarchical")))
+    (let [scheme (.getScheme uri)]
+      (when (or (nil? scheme) (not (.equalsIgnoreCase scheme "file")))
+        (throw (IllegalArgumentException. "URI scheme is not \"file\"")))
+      (when (some? (.getRawAuthority uri))
+        (throw (IllegalArgumentException. "URI has an authority component")))
+      (when (some? (.getRawFragment uri))
+        (throw (IllegalArgumentException. "URI has a fragment component")))
+      (when (some? (.getRawQuery uri))
+        (throw (IllegalArgumentException. "URI has a query component")))
+      (let [^:mutable p (.getPath uri)]
+        (when (.isEmpty p) (throw (IllegalArgumentException. "URI path component is empty")))
+        (set! p (.fromURIPath FS p))
+        (when-not (== File/separatorChar \/) (set! p (.replace p \/ File/separatorChar)))
+        (set! (.-path this) (.normalize FS p))
+        (set! (.-prefixLength this) (.prefixLength FS (.-path this))))))
+
+  (method ^:public getName ^String [this]
+    (let [index (.lastIndexOf path separatorChar)]
+      (if (< index prefixLength)
+          (.substring path prefixLength)
+          (.substring path (unchecked-add-int index 1)))))
+
+  (method ^:public getParent ^String [this]
+    (let [index (.lastIndexOf path separatorChar)]
+      (if (< index prefixLength)
+          (when (and (> prefixLength 0) (> (.length path) prefixLength))
+            (.substring path 0 prefixLength))
+          (.substring path 0 index))))
+
+  (method ^:public getParentFile ^File [this]
+    (let [^:mutable p (.getParent this)]
+      (when (some? p)
+        (when-not (identical? (.getClass this) File) (set! p (.normalize FS p)))
+        (File. p (.-prefixLength this)))))
+
+  (method ^:public getPath ^String [this] path)
+
+  (method ^:public isAbsolute ^boolean [this] (.isAbsolute FS this))
+
+  (method ^:public getAbsolutePath ^String [this] (.resolve FS this))
+
+  (method ^:public getAbsoluteFile ^File [this]
+    (let [^:mutable absPath (.getAbsolutePath this)]
+      (when-not (identical? (.getClass this) File) (set! absPath (.normalize FS absPath)))
+      (File. absPath (.prefixLength FS absPath))))
+
+  (method ^:public getCanonicalPath :throws [IOException] ^String [this]
+    (when (.isInvalid this) (throw (IOException. "Invalid file path")))
+    (.canonicalize FS (.resolve FS this)))
+
+  (method ^:public getCanonicalFile :throws [IOException] ^File [this]
+    (let [^:mutable canonPath (.getCanonicalPath this)]
+      (when-not (identical? (.getClass this) File) (set! canonPath (.normalize FS canonPath)))
+      (File. canonPath (.prefixLength FS canonPath))))
+
+  (method ^:private ^:static slashify ^String [^String path ^boolean isDirectory]
+    (let [^:mutable p path]
+      (when-not (== File/separatorChar \/) (set! p (.replace p File/separatorChar \/)))
+      (when-not (.startsWith p "/") (set! p (java-str "/" p)))
+      (when (and (not (.endsWith p "/")) isDirectory) (set! p (java-str p "/")))
+      p))
+
+  (method ^:public ^{Deprecated true} toURL :throws [MalformedURLException] ^URL [this]
+    (when (.isInvalid this) (throw (MalformedURLException. "Invalid file path")))
+    (let [result (URL. "file" "" (File/slashify (.getAbsolutePath this) (.isDirectory this)))]
+      result))
+
+  (method ^:public toURI ^URI [this]
+    (try
+      (let [f (.getAbsoluteFile this)
+            ^:mutable sp (File/slashify (.getPath f) (.isDirectory f))]
+        (when (.startsWith sp "//") (set! sp (java-str "//" sp)))
+        (URI. "file" nil sp nil))
+      (catch URISyntaxException x (throw (Error. x)))))
+
+  (method ^:public canRead ^boolean [this]
+    (if (.isInvalid this) false (.checkAccess FS this FileSystem/ACCESS_READ)))
+
+  (method ^:public canWrite ^boolean [this]
+    (if (.isInvalid this) false (.checkAccess FS this FileSystem/ACCESS_WRITE)))
+
+  (method ^:public exists ^boolean [this]
+    (if (.isInvalid this) false (.hasBooleanAttributes FS this FileSystem/BA_EXISTS)))
+
+  (method ^:public isDirectory ^boolean [this]
+    (if (.isInvalid this) false (.hasBooleanAttributes FS this FileSystem/BA_DIRECTORY)))
+
+  (method ^:public isFile ^boolean [this]
+    (if (.isInvalid this) false (.hasBooleanAttributes FS this FileSystem/BA_REGULAR)))
+
+  (method ^:public isHidden ^boolean [this]
+    (if (.isInvalid this) false (.hasBooleanAttributes FS this FileSystem/BA_HIDDEN)))
+
+  (method ^:public lastModified ^long [this]
+    (if (.isInvalid this) 0 (.getLastModifiedTime FS this)))
+
+  (method ^:public length ^long [this]
+    (if (.isInvalid this) 0 (.getLength FS this)))
+
+  (method ^:public createNewFile :throws [IOException] ^boolean [this]
+    (when (.isInvalid this) (throw (IOException. "Invalid file path")))
+    (.createFileExclusively FS path))
+
+  (method ^:public delete ^boolean [this]
+    (if (.isInvalid this) false (.delete FS this)))
+
+  (method ^:public deleteOnExit ^void [this]
+    (when-not (.isInvalid this) (DeleteOnExitHook/add path)))
+
+  (method ^:public list ^String/1 [this] (.normalizedList this))
+
+  (method ^:private ^:final normalizedList ^String/1 [this]
+    (when-not (.isInvalid this)
+      (let [^:mutable s (.list FS this)]
+        (when (and (some? s) (not (identical? (.getClass this) File)))
+          (let [normalized (new String/1 (alength s))]
+            (loop [^int i 0]
+              (when (< i (alength s))
+                (aset normalized i (.normalize FS (aget s i)))
+                (recur (unchecked-inc-int i))))
+            (set! s normalized)))
+        s)))
+
+  (method ^:public list ^String/1 [this ^FilenameFilter filter]
+    (let [names (.normalizedList this)]
+      (if (or (nil? names) (nil? filter))
+          names
+          (let [^{:tag (List String)} v (ArrayList.)]
+            (loop [^int i 0]
+              (if (< i (alength names))
+                  (if (.accept filter this (aget names i))
+                      (do (.add v (aget names i)) (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i)))
+                  nil))
+            (cast String/1 (.toArray v (new String/1 (.size v))))))))
+
+  (method ^:public listFiles ^File/1 [this]
+    (let [ss (.normalizedList this)]
+      (when (some? ss)
+        (let [n (alength ss)
+              fs (new File/1 n)
+              isEmpty (.isEmpty path)]
+          (loop [^int i 0]
+            (when (< i n)
+              (aset fs i (if isEmpty (File. (aget ss i)) (File. (aget ss i) this)))
+              (recur (unchecked-inc-int i))))
+          fs))))
+
+  (method ^:public listFiles ^File/1 [this ^FilenameFilter filter]
+    (let [ss (.normalizedList this)]
+      (when (some? ss)
+        (let [^{:tag (ArrayList File)} files (ArrayList.)
+              isEmpty (.isEmpty path)]
+          (for-each [^String s ss]
+            (when (or (nil? filter) (.accept filter this s))
+              (.add files ^File (if isEmpty (File. s) (File. s this)))))
+          (cast File/1 (.toArray files (new File/1 (.size files))))))))
+
+  (method ^:public listFiles ^File/1 [this ^FileFilter filter]
+    (let [ss (.normalizedList this)]
+      (when (some? ss)
+        (let [^{:tag (ArrayList File)} files (ArrayList.)
+              isEmpty (.isEmpty path)]
+          (for-each [^String s ss]
+            (let [^File f (if isEmpty (File. s) (File. s this))]
+              (when (or (nil? filter) (.accept filter f)) (.add files f))))
+          (cast File/1 (.toArray files (new File/1 (.size files))))))))
+
+  (method ^:public mkdir ^boolean [this]
+    (if (.isInvalid this) false (.createDirectory FS this)))
+
+  (method ^:public mkdirs ^boolean [this]
+    (cond
+      (.exists this) false
+      (.mkdir this) true
+      :else
+        (let [^:mutable ^File canonFile nil]
+          (try (set! canonFile (.getCanonicalFile this)) (catch IOException e (return false)))
+          (let [parent (.getParentFile canonFile)]
+            (and (and (some? parent) (or (.mkdirs parent) (.exists parent))) (.mkdir canonFile))))))
+
+  (method ^:public renameTo ^boolean [this ^File dest]
+    (when (nil? dest) (throw (NullPointerException.)))
+    (if (or (.isInvalid this) (.isInvalid dest)) false (.rename FS this dest)))
+
+  (method ^:public setLastModified ^boolean [this ^long time]
+    (when (< time 0) (throw (IllegalArgumentException. "Negative time")))
+    (if (.isInvalid this) false (.setLastModifiedTime FS this time)))
+
+  (method ^:public setReadOnly ^boolean [this]
+    (if (.isInvalid this) false (.setReadOnly FS this)))
+
+  (method ^:public setWritable ^boolean [this ^boolean writable ^boolean ownerOnly]
+    (if (.isInvalid this) false (.setPermission FS this FileSystem/ACCESS_WRITE writable ownerOnly)))
+
+  (method ^:public setWritable ^boolean [this ^boolean writable]
+    (.setWritable this writable true))
+
+  (method ^:public setReadable ^boolean [this ^boolean readable ^boolean ownerOnly]
+    (if (.isInvalid this) false (.setPermission FS this FileSystem/ACCESS_READ readable ownerOnly)))
+
+  (method ^:public setReadable ^boolean [this ^boolean readable]
+    (.setReadable this readable true))
+
+  (method ^:public setExecutable ^boolean [this ^boolean executable ^boolean ownerOnly]
+    (if (.isInvalid this)
+        false
+        (.setPermission FS this FileSystem/ACCESS_EXECUTE executable ownerOnly)))
+
+  (method ^:public setExecutable ^boolean [this ^boolean executable]
+    (.setExecutable this executable true))
+
+  (method ^:public canExecute ^boolean [this]
+    (if (.isInvalid this) false (.checkAccess FS this FileSystem/ACCESS_EXECUTE)))
+
+  (method ^:public ^:static listRoots ^File/1 [] (.listRoots FS))
+
+  (method ^:public getTotalSpace ^long [this]
+    (if (.isInvalid this)
+        0
+        (let [space (.getSpace FS this FileSystem/SPACE_TOTAL)]
+          (if (>= space 0) space Long/MAX_VALUE))))
+
+  (method ^:public getFreeSpace ^long [this]
+    (if (.isInvalid this)
+        0
+        (let [space (.getSpace FS this FileSystem/SPACE_FREE)]
+          (if (>= space 0) space Long/MAX_VALUE))))
+
+  (method ^:public getUsableSpace ^long [this]
+    (if (.isInvalid this)
+        0
+        (let [space (.getSpace FS this FileSystem/SPACE_USABLE)]
+          (if (>= space 0) space Long/MAX_VALUE))))
+
+  (defclass ^:private ^:static TempDirectory
+    (constructor ^:private [this])
+
+    (field ^:private ^:static ^:final ^File TMPDIR (File. (StaticProperty/javaIoTmpDir)))
+
+    (method ^:static location ^File [] TMPDIR)
+
+    (field ^:private ^:static ^:final ^SecureRandom RANDOM (SecureRandom.))
+
+    (method ^:private ^:static shortenSubName ^int [^int subNameLength ^int excess ^int nameMin]
+      (let [newLength (Math/max nameMin (unchecked-subtract-int subNameLength excess))]
+        (if (< newLength subNameLength) newLength subNameLength)))
+
+    (method ^:static generateFile :throws [IOException] ^File [^:mutable ^String prefix
+                                                               ^String suffix ^File dir]
+      (let [n (.nextLong RANDOM)
+            nus (Long/toUnsignedString n)]
+        (set! prefix (.getName (File. prefix)))
+        (let [^:mutable prefixLength (.length prefix)
+              ^:mutable nusLength (.length nus)
+              ^:mutable suffixLength (.length suffix)
+              ^:mutable ^String name nil
+              nameMax (.getNameMax FS (.getPath dir))
+              ^:mutable excess (unchecked-subtract-int
+                                 (unchecked-add-int
+                                   (unchecked-add-int prefixLength nusLength)
+                                   suffixLength)
+                                 nameMax)]
+          (if (<= excess 0)
+              (set! name (java-str prefix nus suffix))
+              (do
+                (set! prefixLength (TempDirectory/shortenSubName prefixLength excess 3))
+                (set! excess
+                      (unchecked-subtract-int
+                        (unchecked-add-int (unchecked-add-int prefixLength nusLength) suffixLength)
+                        nameMax))
+                (when (> excess 0)
+                  (set! suffixLength
+                        (TempDirectory/shortenSubName
+                          suffixLength
+                          excess
+                          (if (== (.indexOf suffix ".") 0) 4 0)))
+                  (set! suffixLength (TempDirectory/shortenSubName suffixLength excess 3))
+                  (set! excess
+                        (unchecked-subtract-int
+                          (unchecked-add-int (unchecked-add-int prefixLength nusLength)
+                                             suffixLength)
+                          nameMax)))
+                (when (and (> excess 0) (<= excess (unchecked-subtract-int nusLength 5)))
+                  (set! nusLength (TempDirectory/shortenSubName nusLength excess 5)))
+                (let [sb (StringBuilder.
+                           (unchecked-add-int (unchecked-add-int prefixLength nusLength)
+                                              suffixLength))]
+                  (.append sb
+                           ^String (if (< prefixLength (.length prefix))
+                                       (.substring prefix 0 prefixLength)
+                                       prefix))
+                  (.append
+                    sb
+                    ^String (if (< nusLength (.length nus)) (.substring nus 0 nusLength) nus))
+                  (.append sb
+                           ^String (if (< suffixLength (.length suffix))
+                                       (.substring suffix 0 suffixLength)
+                                       suffix))
+                  (set! name (.toString sb)))))
+          (set! name (.normalize FS name))
+          (let [f (File. dir name)]
+            (when (or (not (.equals name (.getName f))) (.isInvalid f))
+              (throw (IOException. (java-str "Unable to create temporary file, " name))))
+            f)))))
+
+  (method ^:public ^:static createTempFile :throws [IOException] ^File [^String prefix
+                                                                        ^:mutable ^String suffix
+                                                                        ^File directory]
+    (when (< (.length prefix) 3)
+      (throw (IllegalArgumentException.
+               (java-str "Prefix string \"" prefix "\" too short: length must be at least 3"))))
+    (when (nil? suffix) (set! suffix ".tmp"))
+    (let [^File tmpdir (if (some? directory) directory (TempDirectory/location))
+          ^:mutable ^File f nil]
+      (loop []
+        (set! f (TempDirectory/generateFile prefix suffix tmpdir))
+        (when (.hasBooleanAttributes FS f FileSystem/BA_EXISTS) (recur)))
+      (when-not (.createFileExclusively FS (.getPath f))
+        (throw (IOException. "Unable to create temporary file")))
+      f))
+
+  (method ^:public ^:static createTempFile :throws [IOException] ^File [^String prefix
+                                                                        ^String suffix]
+    (File/createTempFile prefix suffix nil))
+
+  (method ^:public compareTo ^int [this ^File pathname]
+    (.compare FS this pathname))
+
+  (method ^:public equals ^boolean [this obj]
+    (if-instance [^File file obj] (== (.compareTo this file) 0) false))
+
+  (method ^:public hashCode ^int [this] (.hashCode FS this))
+
+  (method ^:public toString ^String [this] (.getPath this))
+
+  (method ^:private ^:synchronized writeObject :throws [IOException] ^void [this
+                                                                            ^ObjectOutputStream s]
+    (.defaultWriteObject s)
+    (.writeChar s separatorChar))
+
+  (method ^:private ^:synchronized readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                                  ^ObjectInputStream s]
+    (let [fields (.readFields s)
+          ^:mutable pathField (cast String (.get fields "path" nil))
+          sep (.readChar s)]
+      (when-not (== sep separatorChar) (set! pathField (.replace pathField sep separatorChar)))
+      (let [path (.normalize FS pathField)]
+        (.putReference UNSAFE this PATH_OFFSET path)
+        (.putIntVolatile UNSAFE this PREFIX_LENGTH_OFFSET (.prefixLength FS path)))))
+
+  (field ^:private ^:static ^:final ^Unsafe UNSAFE (Unsafe/getUnsafe))
+
+  (field ^:private ^:static ^:final ^long PATH_OFFSET (.objectFieldOffset UNSAFE File "path"))
+
+  (field ^:private ^:static ^:final ^long PREFIX_LENGTH_OFFSET
+    (.objectFieldOffset UNSAFE File "prefixLength"))
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 301077366599181567)
+
+  (field ^:private ^:transient ^:volatile ^Path filePath)
+
+  (method ^:public toPath ^Path [this]
+    (let [^:mutable result filePath]
+      (when (nil? result)
+        (locking this
+          (set! result filePath)
+          (when (nil? result)
+            (set! result (.getPath (FileSystems/getDefault) path))
+            (set! filePath result))))
+      result)))

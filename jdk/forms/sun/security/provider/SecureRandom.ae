@@ -1,0 +1,132 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/security/provider/SecureRandom.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'sun.security.provider)
+
+(import '(java.io IOException InvalidObjectException ObjectInputStream Serializable)
+        '(java.security MessageDigest
+                        NoSuchAlgorithmException
+                        NoSuchProviderException
+                        SecureRandomSpi)
+        '(java.util Arrays))
+
+(defclass ^:public ^:final SecureRandom
+  :extends SecureRandomSpi
+  :implements [Serializable]
+
+  (field ^:private ^:static ^:final ^long serialVersionUID 3581829991155417889)
+
+  (field ^:private ^:static ^:final ^int DIGEST_SIZE 20)
+
+  (field ^:private ^:transient ^MessageDigest digest)
+
+  (field ^:private ^byte/1 state)
+
+  (field ^:private ^byte/1 remainder)
+
+  (field ^:private ^int remCount)
+
+  (constructor ^:public [this] (.init this nil))
+
+  (constructor ^:private [this ^byte/1 seed] (.init this seed))
+
+  (method ^:private init ^void [this ^byte/1 seed]
+    (try
+      (set! digest (MessageDigest/getInstance "SHA" "SUN"))
+      (catch [NoSuchProviderException NoSuchAlgorithmException] e
+        (try
+          (set! digest (MessageDigest/getInstance "SHA"))
+          (catch NoSuchAlgorithmException exc
+            (throw (InternalError. "internal error: SHA-1 not available." exc))))))
+    (when (some? seed) (.engineSetSeed this seed)))
+
+  (method ^:public engineGenerateSeed ^byte/1 [this ^int numBytes]
+    (let [b (new byte/1 numBytes)] (SeedGenerator/generateSeed b) b))
+
+  (method ^:public ^:synchronized engineSetSeed ^void [this ^byte/1 seed]
+    (when (some? state) (.update digest state) (Arrays/fill state (unchecked-byte 0)))
+    (set! state (.digest digest seed))
+    (set! remCount 0))
+
+  (method ^:private ^:static updateState ^void [^byte/1 state ^byte/1 output]
+    (let [^:mutable ^int last 1
+          ^:mutable ^int v 0
+          ^:mutable ^byte t 0
+          ^:mutable zf false]
+      (loop [^int i 0]
+        (when (< i (alength state))
+          (set! v
+                (unchecked-add-int (unchecked-add-int (int (aget state i)) (int (aget output i)))
+                                   last))
+          (set! t (unchecked-byte v))
+          (set! zf (let [a-1 zf b-2 (not (== (aget state i) t))] (or a-1 b-2)))
+          (aset state i t)
+          (set! last (bit-shift-right-int v 8))
+          (recur (unchecked-inc-int i))))
+      (when-not zf (aset state 0 (unchecked-byte (unchecked-inc-int (aget state 0)))))))
+
+  (defclass ^:private ^:static SeederHolder
+    (field ^:private ^:static ^:final ^SecureRandom seeder)
+
+    (static-initializer
+      (set! seeder (SecureRandom. (SeedGenerator/getSystemEntropy)))
+      (let [b (new byte/1 DIGEST_SIZE)] (SeedGenerator/generateSeed b) (.engineSetSeed seeder b))))
+
+  (method ^:public ^:synchronized engineNextBytes ^void [this ^byte/1 result]
+    (let [^:mutable ^int index 0
+          ^:mutable ^int todo 0
+          ^:mutable output remainder]
+      (when (nil? state)
+        (let [seed (new byte/1 DIGEST_SIZE)]
+          (.engineNextBytes SeederHolder/seeder seed)
+          (set! state (.digest digest seed))))
+      (let [^:mutable r remCount]
+        (when (> r 0)
+          (set! todo
+                (Math/min (unchecked-subtract-int (alength result) index)
+                          (unchecked-subtract-int DIGEST_SIZE r)))
+          (loop [^int i 0]
+            (when (< i todo)
+              (aset result i (aget output r))
+              (aset output r 0)
+              (set! r (unchecked-inc-int r))
+              (recur (unchecked-inc-int i))))
+          (set! remCount (unchecked-add-int remCount todo))
+          (set! index (unchecked-add-int index todo)))
+        (while (< index (alength result))
+          (.update digest state)
+          (set! output (.digest digest))
+          (SecureRandom/updateState state output)
+          (set! todo (Math/min (unchecked-subtract-int (alength result) index) DIGEST_SIZE))
+          (loop [^int i 0]
+            (when (< i todo)
+              (aset result index (aget output i))
+              (set! index (unchecked-inc-int index))
+              (aset output i 0)
+              (recur (unchecked-inc-int i))))
+          (set! remCount (unchecked-add-int remCount todo)))
+        (set! remainder output)
+        (set! remCount (unchecked-remainder-int remCount DIGEST_SIZE)))))
+
+  (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                   ^ObjectInputStream s]
+    (.defaultReadObject s)
+    (try
+      (set! digest (MessageDigest/getInstance "SHA" "SUN"))
+      (catch [NoSuchProviderException NoSuchAlgorithmException] e
+        (try
+          (set! digest (MessageDigest/getInstance "SHA"))
+          (catch NoSuchAlgorithmException exc
+            (throw (InternalError. "internal error: SHA-1 not available." exc))))))
+    (when (and (nil? remainder) (> remCount 0))
+      (throw (InvalidObjectException. "Remainder indicated, but no data available")))
+    (when (nil? state)
+      (if (nil? remainder)
+          (return)
+          (throw (InvalidObjectException. "Inconsistent buffer allocations"))))
+    (when (or (or (or (not (== (alength state) DIGEST_SIZE))
+                      (and (some? remainder) (not (== (alength remainder) DIGEST_SIZE))))
+                  (< remCount 0))
+              (>= remCount DIGEST_SIZE))
+      (throw (InvalidObjectException. "Inconsistent buffer sizes/state")))
+    (set! state (.clone state))
+    (when (some? remainder) (set! remainder (.clone remainder)))))

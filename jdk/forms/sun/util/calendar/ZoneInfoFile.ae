@@ -1,0 +1,831 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/util/calendar/ZoneInfoFile.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'sun.util.calendar)
+
+(import '(java.io BufferedInputStream
+                  ByteArrayInputStream
+                  DataInput
+                  DataInputStream
+                  File
+                  FileInputStream
+                  IOException
+                  StreamCorruptedException)
+        '(java.time LocalDateTime ZoneId ZoneOffset)
+        '(java.util ArrayList Arrays Calendar Collections HashMap List Map SimpleTimeZone)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(java.util.function Predicate)
+        '(java.util.stream Stream)
+        '(java.util.zip CRC32)
+        '(jdk.internal.util StaticProperty))
+
+(defclass ^:public ^:final ZoneInfoFile
+  (method ^:public ^:static getZoneIds ^String/1 []
+    (let [shortIDs (.keySet ZoneId/SHORT_IDS)
+          len (unchecked-add-int (alength regions) (.size shortIDs))
+          ids (cast String/1 (Arrays/copyOf regions len))
+          ^:mutable i (alength regions)]
+      (for-each [^String id shortIDs] (aset ids i id) (set! i (unchecked-inc-int i)))
+      ids))
+
+  (method ^:public ^:static getZoneIds ^String/1 [^int rawOffset]
+    (let [^{:tag (List String)} ids (ArrayList.)]
+      (for-each [^String id (ZoneInfoFile/getZoneIds)]
+        (let [zi (ZoneInfoFile/getZoneInfo id)]
+          (when (== (.getRawOffset zi) rawOffset) (.add ids id))))
+      (let [list (cast String/1 (.toArray ids (new String/1 0)))] (Arrays/sort list) list)))
+
+  (method ^:public ^:static zoneIds ^{:tag (Stream String)} []
+    (Stream/concat (Arrays/stream regions) (.stream (.keySet ZoneId/SHORT_IDS))))
+
+  (method ^:public ^:static zoneIds ^{:tag (Stream String)} [^int rawOffset]
+    (.sorted (.filter (ZoneInfoFile/zoneIds)
+                      (lambda Predicate ^boolean [^String id]
+                        (== (.getRawOffset (ZoneInfoFile/getZoneInfo id)) rawOffset)))))
+
+  (method ^:public ^:static getZoneInfo ^ZoneInfo [^String zoneId]
+    (when (some? zoneId)
+      (let [^:mutable zi (ZoneInfoFile/getZoneInfo0 zoneId)]
+        (when (some? zi) (set! zi (cast ZoneInfo (.clone zi))) (.setID zi zoneId))
+        zi)))
+
+  (method ^:private ^:static getZoneInfo0 ^ZoneInfo [^String zoneId]
+    (try
+      (let [^:mutable zi (cast ZoneInfo (.get zones zoneId))]
+        (if (some? zi)
+            zi
+            (let [zid (cast String (.getOrDefault aliases zoneId zoneId))
+                  index (Arrays/binarySearch regions zid)]
+              (when-not (< index 0)
+                (let [bytes (aget ruleArray (aget indices index))
+                      dis (DataInputStream. (ByteArrayInputStream. bytes))]
+                  (set! zi (ZoneInfoFile/getZoneInfo dis zid))
+                  (.put zones zoneId zi)
+                  zi)))))
+      (catch Exception ex
+        (throw (RuntimeException.
+                 (java-str "Invalid binary time-zone data: TZDB:" zoneId ", version: " versionId)
+                 ex)))))
+
+  (method ^:public ^:static getAliasMap ^{:tag (Map String String)} []
+    (Collections/unmodifiableMap aliases))
+
+  (method ^:public ^:static getVersion ^String [] versionId)
+
+  (method ^:public ^:static getCustomTimeZone ^ZoneInfo [^String originalId ^int gmtOffset]
+    (let [id (ZoneInfoFile/toCustomID gmtOffset)] (ZoneInfo. id gmtOffset)))
+
+  (method ^:public ^:static toCustomID ^String [^int gmtOffset]
+    (let [^:mutable ^char sign (unchecked-char 0)
+          ^:mutable offset (unchecked-divide-int gmtOffset 1000)]
+      (if (>= offset 0)
+          (set! sign \+)
+          (do (set! sign \-) (set! offset (unchecked-negate-int offset))))
+      (let [hh (unchecked-divide-int offset 3600)
+            mm (unchecked-divide-int (unchecked-remainder-int offset 3600) 60)
+            ss (unchecked-remainder-int offset 60)
+            buf (new char/1 [\G \M \T sign \0 \0 \: \0 \0])]
+        (when (>= hh 10)
+          (aset buf
+                4
+                (unchecked-char
+                  (unchecked-add-int (aget buf 4) (unchecked-char (unchecked-divide-int hh 10))))))
+        (aset buf
+              5
+              (unchecked-char
+                (unchecked-add-int (aget buf 5) (unchecked-char (unchecked-remainder-int hh 10)))))
+        (when-not (== mm 0)
+          (aset buf
+                7
+                (unchecked-char
+                  (unchecked-add-int (aget buf 7) (unchecked-char (unchecked-divide-int mm 10)))))
+          (aset
+            buf
+            8
+            (unchecked-char
+              (unchecked-add-int (aget buf 8) (unchecked-char (unchecked-remainder-int mm 10))))))
+        (let [^:mutable id (String. buf)]
+          (when-not (== ss 0)
+            (aset buf 7 (unchecked-char (unchecked-add-int \0 (unchecked-divide-int ss 10))))
+            (aset buf 8 (unchecked-char (unchecked-add-int \0 (unchecked-remainder-int ss 10))))
+            (set! id (java-str id (String. buf 6 3))))
+          id))))
+
+  (constructor ^:private [this])
+
+  (field ^:private ^:static ^String versionId)
+
+  (field ^:private ^:static ^:final ^{:tag (Map String ZoneInfo)} zones (ConcurrentHashMap.))
+
+  (field ^:private ^:static ^:final ^{:tag (Map String String)} aliases (HashMap.))
+
+  (field ^:private ^:static ^byte/2 ruleArray)
+
+  (field ^:private ^:static ^String/1 regions)
+
+  (field ^:private ^:static ^int/1 indices)
+
+  (static-initializer (ZoneInfoFile/loadTZDB))
+
+  (method ^:private ^:static loadTZDB ^void []
+    (try
+      (let [libDir (java-str (StaticProperty/javaHome) File/separator "lib")]
+        (with-resources [dis (DataInputStream.
+                               (BufferedInputStream. (FileInputStream. (File. libDir "tzdb.dat"))))]
+          (ZoneInfoFile/load dis)))
+      (catch Exception x (throw (Error. x)))))
+
+  (method ^:private ^:static load :throws [IOException] ^void [^DataInputStream dis]
+    (when-not (== (.readByte dis) 1)
+      (throw (StreamCorruptedException. "File format not recognised")))
+    (let [groupId (.readUTF dis)]
+      (when (= (.equals "TZDB" groupId) false)
+        (throw (StreamCorruptedException. "File format not recognised")))
+      (let [^int versionCount (.readShort dis)]
+        (loop [^int i 0]
+          (when (< i versionCount) (set! versionId (.readUTF dis)) (recur (unchecked-inc-int i))))
+        (let [^:mutable ^int regionCount (.readShort dis)
+              regionArray (new String/1 regionCount)]
+          (loop [^int i 0]
+            (when (< i regionCount)
+              (aset regionArray i (.readUTF dis))
+              (recur (unchecked-inc-int i))))
+          (let [^int ruleCount (.readShort dis)]
+            (set! ruleArray (new byte/2 ruleCount))
+            (loop [^int i 0]
+              (when (< i ruleCount)
+                (let [bytes (new byte/1 (.readShort dis))]
+                  (.readFully dis bytes)
+                  (aset ruleArray i bytes)
+                  (recur (unchecked-inc-int i)))))
+            (loop [^int i 0]
+              (when (< i versionCount)
+                (set! regionCount (.readShort dis))
+                (set! regions (new String/1 regionCount))
+                (set! indices (new int/1 regionCount))
+                (loop [^int j 0]
+                  (when (< j regionCount)
+                    (aset regions j (aget regionArray (.readShort dis)))
+                    (aset indices j (.readShort dis))
+                    (recur (unchecked-inc-int j))))
+                (recur (unchecked-inc-int i))))
+            (.remove zones "ROC")
+            (loop [^int i 0]
+              (when (< i versionCount)
+                (let [^int aliasCount (.readShort dis)]
+                  (.clear aliases)
+                  (loop [^int j 0]
+                    (when (< j aliasCount)
+                      (let [alias (aget regionArray (.readShort dis))
+                            region (aget regionArray (.readShort dis))]
+                        (.put aliases alias region)
+                        (recur (unchecked-inc-int j)))))
+                  (recur (unchecked-inc-int i)))))
+            (.putAll aliases ZoneId/SHORT_IDS))))))
+
+  (method ^:public ^:static getZoneInfo :throws [Exception] ^ZoneInfo [^DataInput in ^String zoneId]
+    (let [type (.readByte in)
+          stdSize (.readInt in)
+          stdTrans (new long/1 stdSize)]
+      (loop [^int i 0]
+        (when (< i stdSize)
+          (aset stdTrans i (ZoneInfoFile/readEpochSec in))
+          (recur (unchecked-inc-int i))))
+      (let [stdOffsets (new int/1 (unchecked-add-int stdSize 1))]
+        (loop [^int i 0]
+          (when (< i (alength stdOffsets))
+            (aset stdOffsets i (ZoneInfoFile/readOffset in))
+            (recur (unchecked-inc-int i))))
+        (let [savSize (.readInt in)
+              savTrans (new long/1 savSize)]
+          (loop [^int i 0]
+            (when (< i savSize)
+              (aset savTrans i (ZoneInfoFile/readEpochSec in))
+              (recur (unchecked-inc-int i))))
+          (let [savOffsets (new int/1 (unchecked-add-int savSize 1))]
+            (loop [^int i 0]
+              (when (< i (alength savOffsets))
+                (aset savOffsets i (ZoneInfoFile/readOffset in))
+                (recur (unchecked-inc-int i))))
+            (let [^int ruleSize (.readByte in)
+                  rules (new ZoneOffsetTransitionRule/1 ruleSize)]
+              (loop [^int i 0]
+                (when (< i ruleSize)
+                  (aset rules i (ZoneOffsetTransitionRule. in))
+                  (recur (unchecked-inc-int i))))
+              (ZoneInfoFile/getZoneInfo zoneId stdTrans stdOffsets savTrans savOffsets rules)))))))
+
+  (method ^:public ^:static readOffset :throws [IOException] ^int [^DataInput in]
+    (let [^int offsetByte (.readByte in)]
+      (if (== offsetByte 127) (.readInt in) (unchecked-multiply-int offsetByte 900))))
+
+  (method ^:static readEpochSec :throws [IOException] ^long [^DataInput in]
+    (let [hiByte (bit-and-int (.readByte in) 255)]
+      (if (== hiByte 255)
+          (.readLong in)
+          (let [midByte (bit-and-int (.readByte in) 255)
+                loByte (bit-and-int (.readByte in) 255)
+                ^long tot (unchecked-add-int
+                            (unchecked-add-int (bit-shift-left-int hiByte 16)
+                                               (bit-shift-left-int midByte 8))
+                            loByte)]
+            (unchecked-subtract (unchecked-multiply tot 900) 4575744000)))))
+
+  (field ^:private ^:static ^:final ^long UTC1900 -2208988800)
+
+  (field ^:private ^:static ^:final ^long UTC2100 4133980799)
+
+  (field ^:private ^:static ^:final ^long LDT2100 4102444800)
+
+  (field ^:private ^:static ^:final ^long CURRT (unchecked-divide (System/currentTimeMillis) 1000))
+
+  (method ^:private ^:static getZoneInfo ^ZoneInfo [^String zoneId ^long/1 standardTransitions
+                                                    ^int/1 standardOffsets
+                                                    ^long/1 savingsInstantTransitions
+                                                    ^int/1 wallOffsets
+                                                    ^ZoneOffsetTransitionRule/1 lastRules]
+    (let [^:mutable ^int rawOffset 0
+          ^:mutable ^int dstSavings 0
+          ^:mutable ^int checksum 0
+          ^:mutable ^int/1 params nil
+          ^:mutable willGMTOffsetChange false]
+      (if (> (alength standardTransitions) 0)
+          (do
+            (set! rawOffset
+                  (unchecked-multiply-int
+                    (aget standardOffsets (unchecked-subtract-int (alength standardOffsets) 1))
+                    1000))
+            (set! willGMTOffsetChange
+                  (> (aget standardTransitions
+                           (unchecked-subtract-int (alength standardTransitions) 1))
+                     CURRT)))
+          (set! rawOffset (unchecked-multiply-int (aget standardOffsets 0) 1000)))
+      (let [^:mutable ^long/1 transitions nil
+            ^:mutable ^int/1 offsets nil
+            ^:mutable ^int nOffsets 0
+            ^:mutable ^int nTrans 0]
+        (when-not (== (alength savingsInstantTransitions) 0)
+          (set! transitions (new long/1 250))
+          (set! offsets (new int/1 100))
+          (let [^:mutable lastyear (ZoneInfoFile/getYear
+                                     (aget savingsInstantTransitions
+                                           (unchecked-subtract-int
+                                             (alength savingsInstantTransitions)
+                                             1))
+                                     (aget wallOffsets
+                                           (unchecked-subtract-int
+                                             (alength savingsInstantTransitions)
+                                             1)))
+                ^:mutable ^int i 0
+                ^:mutable ^int k 1]
+            (while (and (< i (alength savingsInstantTransitions))
+                        (< (aget savingsInstantTransitions i) UTC1900))
+              (set! i (unchecked-inc-int i)))
+            (when (< i (alength savingsInstantTransitions))
+              (aset offsets
+                    0
+                    (unchecked-multiply-int
+                      (aget standardOffsets (unchecked-subtract-int (alength standardOffsets) 1))
+                      1000))
+              (set! nOffsets 1)
+              (set! nOffsets
+                    (ZoneInfoFile/addTrans transitions
+                                           nTrans
+                                           offsets
+                                           nOffsets
+                                           UTC1900
+                                           (aget wallOffsets i)
+                                           (ZoneInfoFile/getStandardOffset
+                                             standardTransitions
+                                             standardOffsets
+                                             UTC1900)))
+              (set! nTrans (unchecked-inc-int nTrans)))
+            (while (< i (alength savingsInstantTransitions))
+              (let [trans (aget savingsInstantTransitions i)]
+                (when (> trans UTC2100) (set! lastyear LASTYEAR) (break))
+                (while (< k (alength standardTransitions))
+                  (let [trans_s (aget standardTransitions k)]
+                    (when (>= trans_s UTC1900)
+                      (when (> trans_s trans) (break))
+                      (when (< trans_s trans)
+                        (when (>= (unchecked-add-int nOffsets 2) (alength offsets))
+                          (set! offsets
+                                (Arrays/copyOf offsets (unchecked-add-int (alength offsets) 100))))
+                        (when (>= (unchecked-add-int nTrans 1) (alength transitions))
+                          (set! transitions
+                                (Arrays/copyOf transitions
+                                               (unchecked-add-int (alength transitions) 100))))
+                        (set! nOffsets
+                              (ZoneInfoFile/addTrans
+                                transitions
+                                nTrans
+                                offsets
+                                nOffsets
+                                trans_s
+                                (aget wallOffsets i)
+                                (aget standardOffsets (unchecked-add-int k 1))))
+                        (set! nTrans (unchecked-inc-int nTrans))))
+                    (set! k (unchecked-inc-int k))))
+                (when (>= (unchecked-add-int nOffsets 2) (alength offsets))
+                  (set! offsets (Arrays/copyOf offsets (unchecked-add-int (alength offsets) 100))))
+                (when (>= (unchecked-add-int nTrans 1) (alength transitions))
+                  (set! transitions
+                        (Arrays/copyOf transitions (unchecked-add-int (alength transitions) 100))))
+                (set! nOffsets
+                      (ZoneInfoFile/addTrans transitions
+                                             nTrans
+                                             offsets
+                                             nOffsets
+                                             trans
+                                             (aget wallOffsets (unchecked-add-int i 1))
+                                             (ZoneInfoFile/getStandardOffset
+                                               standardTransitions
+                                               standardOffsets
+                                               trans)))
+                (set! nTrans (unchecked-inc-int nTrans)))
+              (set! i (unchecked-inc-int i)))
+            (while (< k (alength standardTransitions))
+              (let [trans (aget standardTransitions k)]
+                (when (>= trans UTC1900)
+                  (let [offset (aget wallOffsets i)
+                        offsetIndex (ZoneInfoFile/indexOf offsets 0 nOffsets offset)]
+                    (when (== offsetIndex nOffsets) (set! nOffsets (unchecked-inc-int nOffsets)))
+                    (aset transitions
+                          nTrans
+                          (bit-or (bit-shift-left (unchecked-multiply trans 1000) TRANSITION_NSHIFT)
+                                  (bit-and offsetIndex OFFSET_MASK)))
+                    (set! nTrans (unchecked-inc-int nTrans))))
+                (set! k (unchecked-inc-int k))))
+            (cond
+              (> (alength lastRules) 1)
+                (do
+                  (while (< (let [old-1 lastyear]
+                              (set! lastyear (unchecked-inc-int lastyear))
+                              old-1)
+                            LASTYEAR)
+                    (for-each [^ZoneOffsetTransitionRule zotr lastRules]
+                      (let [trans (.getTransitionEpochSecond zotr lastyear)]
+                        (when (>= (unchecked-add-int nOffsets 2) (alength offsets))
+                          (set! offsets
+                                (Arrays/copyOf offsets (unchecked-add-int (alength offsets) 100))))
+                        (when (>= (unchecked-add-int nTrans 1) (alength transitions))
+                          (set! transitions
+                                (Arrays/copyOf transitions
+                                               (unchecked-add-int (alength transitions) 100))))
+                        (set! nOffsets
+                              (ZoneInfoFile/addTrans
+                                transitions
+                                nTrans
+                                offsets
+                                nOffsets
+                                trans
+                                (.-offsetAfter zotr)
+                                (.-standardOffset zotr)))
+                        (set! nTrans (unchecked-inc-int nTrans)))))
+                  (let [^:mutable startRule (aget
+                                              lastRules
+                                              (unchecked-subtract-int (alength lastRules) 2))
+                        ^:mutable endRule (aget lastRules
+                                                (unchecked-subtract-int (alength lastRules) 1))]
+                    (set! params (new int/1 10))
+                    (when (and (< (unchecked-subtract-int
+                                    (.-offsetAfter startRule)
+                                    (.-offsetBefore startRule))
+                                  0)
+                               (> (unchecked-subtract-int
+                                    (.-offsetAfter endRule)
+                                    (.-offsetBefore endRule))
+                                  0))
+                      (let [^:mutable ^ZoneOffsetTransitionRule tmp nil]
+                        (set! tmp startRule)
+                        (set! startRule endRule)
+                        (set! endRule tmp)))
+                    (aset params 0 (unchecked-subtract-int (.-month startRule) 1))
+                    (let [^:mutable ^int dom (.-dom startRule)
+                          ^:mutable dow (.-dow startRule)]
+                      (cond
+                        (== dow -1) (do (aset params 1 dom) (aset params 2 0))
+                        (or (< dom 0) (>= dom 24))
+                          (do (aset params 1 -1) (aset params 2 (aget toCalendarDOW dow)))
+                        :else
+                          (do
+                            (aset params 1 dom)
+                            (aset params 2 (unchecked-negate-int (aget toCalendarDOW dow)))))
+                      (aset params 3 (unchecked-multiply-int (.-secondOfDay startRule) 1000))
+                      (aset params 4 (aget toSTZTime (.-timeDefinition startRule)))
+                      (aset params 5 (unchecked-subtract-int (.-month endRule) 1))
+                      (set! dom (.-dom endRule))
+                      (set! dow (.-dow endRule))
+                      (cond
+                        (== dow -1) (do (aset params 6 dom) (aset params 7 0))
+                        (or (< dom 0) (>= dom 24))
+                          (do (aset params 6 -1) (aset params 7 (aget toCalendarDOW dow)))
+                        :else
+                          (do
+                            (aset params 6 dom)
+                            (aset params 7 (unchecked-negate-int (aget toCalendarDOW dow)))))
+                      (aset params 8 (unchecked-multiply-int (.-secondOfDay endRule) 1000))
+                      (aset params 9 (aget toSTZTime (.-timeDefinition endRule)))
+                      (set! dstSavings
+                            (unchecked-multiply-int
+                              (unchecked-subtract-int
+                                (.-offsetAfter startRule)
+                                (.-offsetBefore startRule))
+                              1000))
+                      (when (and (and (.equals zoneId "Africa/Cairo")
+                                      (== (aget params 7) Calendar/FRIDAY))
+                                 (== (aget params 8) 0))
+                        (aset params 7 Calendar/THURSDAY)
+                        (aset params 8 (unchecked-multiply-int SECONDS_PER_DAY 1000))))))
+              (> nTrans 0)
+                (cond
+                  (< lastyear LASTYEAR)
+                    (let [trans (unchecked-subtract LDT2100 (unchecked-divide-int rawOffset 1000))
+                          offsetIndex (ZoneInfoFile/indexOf
+                                        offsets
+                                        0
+                                        nOffsets
+                                        (unchecked-divide-int rawOffset 1000))]
+                      (when (== offsetIndex nOffsets) (set! nOffsets (unchecked-inc-int nOffsets)))
+                      (aset transitions
+                            nTrans
+                            (bit-or (bit-shift-left
+                                      (unchecked-multiply trans 1000)
+                                      TRANSITION_NSHIFT)
+                                    (bit-and offsetIndex OFFSET_MASK)))
+                      (set! nTrans (unchecked-inc-int nTrans)))
+                  (> (alength savingsInstantTransitions) 2)
+                    (let [^:mutable m (alength savingsInstantTransitions)
+                          startTrans (aget savingsInstantTransitions (unchecked-subtract-int m 2))
+                          startOffset (aget wallOffsets
+                                            (unchecked-add-int (unchecked-subtract-int m 2) 1))
+                          startStd (ZoneInfoFile/getStandardOffset
+                                     standardTransitions
+                                     standardOffsets
+                                     startTrans)
+                          endTrans (aget savingsInstantTransitions (unchecked-subtract-int m 1))
+                          endOffset (aget wallOffsets
+                                          (unchecked-add-int (unchecked-subtract-int m 1) 1))
+                          endStd (ZoneInfoFile/getStandardOffset
+                                   standardTransitions
+                                   standardOffsets
+                                   endTrans)]
+                      (when (and (> startOffset startStd) (== endOffset endStd))
+                        (set! m (unchecked-subtract-int (alength savingsInstantTransitions) 2))
+                        (let [^:mutable before (ZoneOffset/ofTotalSeconds (aget wallOffsets m))
+                              ^:mutable after (ZoneOffset/ofTotalSeconds
+                                                (aget wallOffsets (unchecked-add-int m 1)))
+                              ^:mutable ldt (LocalDateTime/ofEpochSecond
+                                              (aget savingsInstantTransitions m)
+                                              0
+                                              before)
+                              ^LocalDateTime startLDT (if (>
+                                                            (.getTotalSeconds after)
+                                                            (.getTotalSeconds before))
+                                                          ldt
+                                                          (.plusSeconds
+                                                            ldt
+                                                            (unchecked-subtract-int
+                                                              (aget
+                                                                wallOffsets
+                                                                (unchecked-add-int m 1))
+                                                              (aget wallOffsets m))))]
+                          (set! m (unchecked-subtract-int (alength savingsInstantTransitions) 1))
+                          (set! before (ZoneOffset/ofTotalSeconds (aget wallOffsets m)))
+                          (set! after
+                                (ZoneOffset/ofTotalSeconds
+                                  (aget wallOffsets (unchecked-add-int m 1))))
+                          (set! ldt
+                                (LocalDateTime/ofEpochSecond
+                                  (aget savingsInstantTransitions m)
+                                  0
+                                  before))
+                          (let [^LocalDateTime endLDT (if (>
+                                                            (.getTotalSeconds after)
+                                                            (.getTotalSeconds before))
+                                                          (.plusSeconds
+                                                            ldt
+                                                            (unchecked-subtract-int
+                                                              (aget
+                                                                wallOffsets
+                                                                (unchecked-add-int m 1))
+                                                              (aget wallOffsets m)))
+                                                          ldt)]
+                            (set! params (new int/1 10))
+                            (aset params 0 (unchecked-subtract-int (.getMonthValue startLDT) 1))
+                            (aset params 1 (.getDayOfMonth startLDT))
+                            (aset params 2 0)
+                            (aset params
+                                  3
+                                  (unchecked-multiply-int
+                                    (.toSecondOfDay (.toLocalTime startLDT))
+                                    1000))
+                            (aset params 4 SimpleTimeZone/WALL_TIME)
+                            (aset params 5 (unchecked-subtract-int (.getMonthValue endLDT) 1))
+                            (aset params 6 (.getDayOfMonth endLDT))
+                            (aset params 7 0)
+                            (aset params
+                                  8
+                                  (unchecked-multiply-int
+                                    (.toSecondOfDay (.toLocalTime endLDT))
+                                    1000))
+                            (aset params 9 SimpleTimeZone/WALL_TIME)
+                            (set! dstSavings
+                                  (unchecked-multiply-int
+                                    (unchecked-subtract-int startOffset startStd)
+                                    1000))))))))
+            (when (and (some? transitions) (not (== (alength transitions) nTrans)))
+              (if (== nTrans 0)
+                  (set! transitions nil)
+                  (set! transitions (Arrays/copyOf transitions nTrans))))
+            (when (and (some? offsets) (not (== (alength offsets) nOffsets)))
+              (if (== nOffsets 0)
+                  (set! offsets nil)
+                  (set! offsets (Arrays/copyOf offsets nOffsets))))
+            (when (some? transitions)
+              (let [sum (Checksum.)]
+                (set! i 0)
+                (while (< i (alength transitions))
+                  (let [val (aget transitions i)
+                        dst (unchecked-int (bit-and (unsigned-bit-shift-right val DST_NSHIFT) 0xf))
+                        index (unchecked-int (bit-and val OFFSET_MASK))
+                        second (bit-shift-right val TRANSITION_NSHIFT)]
+                    (.update sum (unchecked-add second index))
+                    (.update sum index)
+                    (.update sum (if (== dst 0) -1 dst)))
+                  (set! i (unchecked-inc-int i)))
+                (set! checksum (unchecked-int (.getValue sum)))))))
+        (ZoneInfo. zoneId
+                   rawOffset
+                   dstSavings
+                   checksum
+                   transitions
+                   offsets
+                   params
+                   willGMTOffsetChange))))
+
+  (method ^:private ^:static getStandardOffset ^int [^long/1 standardTransitions
+                                                     ^int/1 standardOffsets ^long epochSec]
+    (let [^:mutable ^int index 0]
+      (while (< index (alength standardTransitions))
+        (when (< epochSec (aget standardTransitions index)) (break))
+        (set! index (unchecked-inc-int index)))
+      (aget standardOffsets index)))
+
+  (field ^:static ^:final ^int SECONDS_PER_DAY 86400)
+
+  (field ^:static ^:final ^int DAYS_PER_CYCLE 146097)
+
+  (field ^:static ^:final ^long DAYS_0000_TO_1970
+    (unchecked-subtract (unchecked-multiply DAYS_PER_CYCLE 5)
+                        (unchecked-add (unchecked-multiply 30 365) 7)))
+
+  (method ^:private ^:static getYear ^int [^long epochSecond ^int offset]
+    (let [second (unchecked-add epochSecond offset)
+          epochDay (Math/floorDiv second SECONDS_PER_DAY)
+          ^:mutable zeroDay (unchecked-add epochDay DAYS_0000_TO_1970)]
+      (set! zeroDay (unchecked-subtract zeroDay 60))
+      (let [^:mutable adjust 0]
+        (when (< zeroDay 0)
+          (let [adjustCycles (unchecked-subtract
+                               (unchecked-divide (unchecked-add zeroDay 1) DAYS_PER_CYCLE)
+                               1)]
+            (set! adjust (unchecked-multiply adjustCycles 400))
+            (set! zeroDay
+                  (unchecked-add
+                    zeroDay
+                    (unchecked-multiply (unchecked-negate adjustCycles) DAYS_PER_CYCLE)))))
+        (let [^:mutable yearEst (unchecked-divide
+                                  (unchecked-add (unchecked-multiply 400 zeroDay) 591)
+                                  DAYS_PER_CYCLE)
+              ^:mutable doyEst (unchecked-subtract
+                                 zeroDay
+                                 (unchecked-add
+                                   (unchecked-subtract
+                                     (unchecked-add
+                                       (unchecked-multiply 365 yearEst)
+                                       (unchecked-divide yearEst 4))
+                                     (unchecked-divide yearEst 100))
+                                   (unchecked-divide yearEst 400)))]
+          (when (< doyEst 0)
+            (set! yearEst (unchecked-dec yearEst))
+            (set! doyEst
+                  (unchecked-subtract zeroDay
+                                      (unchecked-add
+                                        (unchecked-subtract
+                                          (unchecked-add
+                                            (unchecked-multiply 365 yearEst)
+                                            (unchecked-divide yearEst 4))
+                                          (unchecked-divide yearEst 100))
+                                        (unchecked-divide yearEst 400)))))
+          (set! yearEst (unchecked-add yearEst adjust))
+          (let [marchDoy0 (unchecked-int doyEst)
+                marchMonth0 (unchecked-divide-int
+                              (unchecked-add-int (unchecked-multiply-int marchDoy0 5) 2)
+                              153)]
+            (set! yearEst (unchecked-add yearEst (unchecked-divide-int marchMonth0 10)))
+            (unchecked-int yearEst))))))
+
+  (field ^:private ^:static ^:final ^int/1 toCalendarDOW
+    (new int/1
+         [-1
+          Calendar/MONDAY
+          Calendar/TUESDAY
+          Calendar/WEDNESDAY
+          Calendar/THURSDAY
+          Calendar/FRIDAY
+          Calendar/SATURDAY
+          Calendar/SUNDAY]))
+
+  (field ^:private ^:static ^:final ^int/1 toSTZTime
+    (new int/1 [SimpleTimeZone/UTC_TIME SimpleTimeZone/WALL_TIME SimpleTimeZone/STANDARD_TIME]))
+
+  (field ^:private ^:static ^:final ^long OFFSET_MASK 0x0f)
+
+  (field ^:private ^:static ^:final ^long DST_MASK 0xf0)
+
+  (field ^:private ^:static ^:final ^int DST_NSHIFT 4)
+
+  (field ^:private ^:static ^:final ^int TRANSITION_NSHIFT 12)
+
+  (field ^:private ^:static ^:final ^int LASTYEAR 2100)
+
+  (method ^:private ^:static indexOf ^int [^int/1 offsets ^:mutable ^int from ^int nOffsets
+                                           ^:mutable ^int offset]
+    (set! offset (unchecked-multiply-int offset 1000))
+    (while (< from nOffsets)
+      (when (== (aget offsets from) offset) (return from))
+      (set! from (unchecked-inc-int from)))
+    (aset offsets from offset)
+    from)
+
+  (method ^:private ^:static addTrans ^int [^long/1 transitions ^int nTrans ^int/1 offsets
+                                            ^:mutable ^int nOffsets ^long trans ^int offset
+                                            ^int stdOffset]
+    (let [offsetIndex (ZoneInfoFile/indexOf offsets 0 nOffsets offset)]
+      (when (== offsetIndex nOffsets) (set! nOffsets (unchecked-inc-int nOffsets)))
+      (let [^:mutable ^int dstIndex 0]
+        (when-not (== offset stdOffset)
+          (set! dstIndex
+                (ZoneInfoFile/indexOf offsets 1 nOffsets (unchecked-subtract-int offset stdOffset)))
+          (when (== dstIndex nOffsets) (set! nOffsets (unchecked-inc-int nOffsets))))
+        (aset transitions
+              nTrans
+              (bit-or (bit-or (bit-shift-left (unchecked-multiply trans 1000) TRANSITION_NSHIFT)
+                              (bit-and (bit-shift-left-int dstIndex DST_NSHIFT) DST_MASK))
+                      (bit-and offsetIndex OFFSET_MASK)))
+        nOffsets)))
+
+  (defclass ^:private ^:static Checksum
+    :extends CRC32
+
+    (method ^:public update ^void [this ^int val]
+      (let [b (new byte/1 4)]
+        (aset b 0 (unchecked-byte (unsigned-bit-shift-right-int val 24)))
+        (aset b 1 (unchecked-byte (unsigned-bit-shift-right-int val 16)))
+        (aset b 2 (unchecked-byte (unsigned-bit-shift-right-int val 8)))
+        (aset b 3 (unchecked-byte val))
+        (.update this b)))
+
+    (method update ^void [this ^long val]
+      (let [b (new byte/1 8)]
+        (aset b 0 (unchecked-byte (unsigned-bit-shift-right val 56)))
+        (aset b 1 (unchecked-byte (unsigned-bit-shift-right val 48)))
+        (aset b 2 (unchecked-byte (unsigned-bit-shift-right val 40)))
+        (aset b 3 (unchecked-byte (unsigned-bit-shift-right val 32)))
+        (aset b 4 (unchecked-byte (unsigned-bit-shift-right val 24)))
+        (aset b 5 (unchecked-byte (unsigned-bit-shift-right val 16)))
+        (aset b 6 (unchecked-byte (unsigned-bit-shift-right val 8)))
+        (aset b 7 (unchecked-byte val))
+        (.update this b))))
+
+  (defclass ^:private ^:static ZoneOffsetTransitionRule
+    (field ^:private ^:final ^int month)
+
+    (field ^:private ^:final ^byte dom)
+
+    (field ^:private ^:final ^int dow)
+
+    (field ^:private ^:final ^int secondOfDay)
+
+    (field ^:private ^:final ^int timeDefinition)
+
+    (field ^:private ^:final ^int standardOffset)
+
+    (field ^:private ^:final ^int offsetBefore)
+
+    (field ^:private ^:final ^int offsetAfter)
+
+    (constructor :throws [IOException] [this ^DataInput in]
+      (let [data (.readInt in)
+            dowByte (unsigned-bit-shift-right-int (bit-and-int data (bit-shift-left-int 7 19)) 19)
+            timeByte (unsigned-bit-shift-right-int (bit-and-int data (bit-shift-left-int 31 14)) 14)
+            stdByte (unsigned-bit-shift-right-int (bit-and-int data (bit-shift-left-int 255 4)) 4)
+            beforeByte (unsigned-bit-shift-right-int (bit-and-int data (bit-shift-left-int 3 2)) 2)
+            afterByte (bit-and-int data 3)]
+        (set! (.-month this) (unsigned-bit-shift-right-int data 28))
+        (set! (.-dom this)
+              (unchecked-byte
+                (unchecked-subtract-int
+                  (unsigned-bit-shift-right-int (bit-and-int data (bit-shift-left-int 63 22)) 22)
+                  32)))
+        (set! (.-dow this) (if (== dowByte 0) -1 dowByte))
+        (set! (.-secondOfDay this)
+              (if (== timeByte 31) (.readInt in) (unchecked-multiply-int timeByte 3600)))
+        (set! (.-timeDefinition this)
+              (unsigned-bit-shift-right-int (bit-and-int data (bit-shift-left-int 3 12)) 12))
+        (set! (.-standardOffset this)
+              (if (== stdByte 255)
+                  (.readInt in)
+                  (unchecked-multiply-int (unchecked-subtract-int stdByte 128) 900)))
+        (set! (.-offsetBefore this)
+              (if (== beforeByte 3)
+                  (.readInt in)
+                  (unchecked-add-int standardOffset (unchecked-multiply-int beforeByte 1800))))
+        (set! (.-offsetAfter this)
+              (if (== afterByte 3)
+                  (.readInt in)
+                  (unchecked-add-int standardOffset (unchecked-multiply-int afterByte 1800))))))
+
+    (method getTransitionEpochSecond ^long [this ^int year]
+      (let [^:mutable epochDay 0]
+        (if (< dom 0)
+            (do
+              (set! epochDay
+                    (ZoneOffsetTransitionRule/toEpochDay
+                      year
+                      month
+                      (unchecked-add-int
+                        (unchecked-add-int (ZoneOffsetTransitionRule/lengthOfMonth year month) 1)
+                        dom)))
+              (when-not (== dow -1)
+                (set! epochDay (ZoneOffsetTransitionRule/previousOrSame epochDay dow))))
+            (do
+              (set! epochDay (ZoneOffsetTransitionRule/toEpochDay year month dom))
+              (when-not (== dow -1)
+                (set! epochDay (ZoneOffsetTransitionRule/nextOrSame epochDay dow)))))
+        (let [^:mutable ^int difference 0]
+          (switch timeDefinition
+            0 (set! difference 0)
+            1 (set! difference (unchecked-negate-int offsetBefore))
+            2 (set! difference (unchecked-negate-int standardOffset)))
+          (unchecked-add (unchecked-add (unchecked-multiply epochDay 86400) secondOfDay) difference))))
+
+    (method ^:static ^:final isLeapYear ^boolean [^int year]
+      (CalendarUtils/isGregorianLeapYear year))
+
+    (method ^:static ^:final lengthOfMonth ^int [^int year ^int month]
+      (switch month 2 (if (ZoneOffsetTransitionRule/isLeapYear year) 29 28) (4 6 9 11) 30 31))
+
+    (method ^:static ^:final toEpochDay ^long [^int year ^int month ^int day]
+      (let [^long y year
+            ^long m month
+            ^:mutable total 0]
+        (set! total (unchecked-add total (unchecked-multiply 365 y)))
+        (if (>= y 0)
+            (set! total
+                  (unchecked-add total
+                                 (unchecked-add
+                                   (unchecked-subtract
+                                     (unchecked-divide (unchecked-add y 3) 4)
+                                     (unchecked-divide (unchecked-add y 99) 100))
+                                   (unchecked-divide (unchecked-add y 399) 400))))
+            (set! total
+                  (unchecked-subtract total
+                                      (unchecked-add
+                                        (unchecked-subtract
+                                          (unchecked-divide y -4)
+                                          (unchecked-divide y -100))
+                                        (unchecked-divide y -400)))))
+        (set! total
+              (unchecked-add total
+                             (unchecked-divide (unchecked-subtract (unchecked-multiply 367 m) 362)
+                                               12)))
+        (set! total (unchecked-add total (unchecked-subtract-int day 1)))
+        (when (> m 2)
+          (set! total (unchecked-dec total))
+          (when-not (ZoneOffsetTransitionRule/isLeapYear year) (set! total (unchecked-dec total))))
+        (unchecked-subtract total DAYS_0000_TO_1970)))
+
+    (method ^:static ^:final previousOrSame ^long [^long epochDay ^int dayOfWeek]
+      (ZoneOffsetTransitionRule/adjust epochDay dayOfWeek 1))
+
+    (method ^:static ^:final nextOrSame ^long [^long epochDay ^int dayOfWeek]
+      (ZoneOffsetTransitionRule/adjust epochDay dayOfWeek 0))
+
+    (method ^:static ^:final adjust ^long [^long epochDay ^int dow ^int relative]
+      (let [calDow (unchecked-add-int (unchecked-int (Math/floorMod (unchecked-add epochDay 3) 7))
+                                      1)]
+        (cond
+          (and (< relative 2) (== calDow dow)) epochDay
+          (== (bit-and-int relative 1) 0)
+            (let [daysDiff (unchecked-subtract-int calDow dow)]
+              (unchecked-add epochDay
+                             (if (>= daysDiff 0)
+                                 (unchecked-subtract-int 7 daysDiff)
+                                 (unchecked-negate-int daysDiff))))
+          :else
+            (let [daysDiff (unchecked-subtract-int dow calDow)]
+              (unchecked-subtract epochDay
+                                  (if (>= daysDiff 0)
+                                      (unchecked-subtract-int 7 daysDiff)
+                                      (unchecked-negate-int daysDiff)))))))))

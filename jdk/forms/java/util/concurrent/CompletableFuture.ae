@@ -1,0 +1,1999 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/concurrent/CompletableFuture.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util.concurrent)
+
+(import '(java.lang.invoke MethodHandles VarHandle)
+        '(java.util Objects)
+        '(java.util.concurrent.locks LockSupport)
+        '(java.util.function BiConsumer BiFunction Consumer Function Supplier)
+        '(jdk.internal.invoke MhUtil))
+
+(defclass ^:public CompletableFuture
+  :implements [(Future T) (CompletionStage T)]
+  :type-params [T]
+
+  (field ^:volatile result)
+
+  (field ^:volatile ^Completion stack)
+
+  (method ^:final internalComplete ^boolean [this r]
+    ^boolean (^[CompletableFuture Void Object] VarHandle/.compareAndSet RESULT this nil r))
+
+  (method ^:final tryPushStack ^boolean [this ^Completion c]
+    (let [h stack]
+      ^void (^[Completion Completion] VarHandle/.set NEXT c h)
+      ^boolean (^[CompletableFuture Completion Completion] VarHandle/.compareAndSet STACK this h c)))
+
+  (method ^:final pushStack ^void [this ^Completion c]
+    (loop [] (when-not (.tryPushStack this c) (recur))))
+
+  (defclass ^:static ^:final AltResult
+    (field ^:final ^Throwable ex)
+
+    (constructor [this ^Throwable x] (set! (.-ex this) x)))
+
+  (field ^:static ^:final ^AltResult NIL (AltResult. nil))
+
+  (method ^:final completeNull ^boolean [this]
+    ^boolean (^[CompletableFuture Void AltResult] VarHandle/.compareAndSet RESULT this nil NIL))
+
+  (method ^:final encodeValue [this ^T t] (if (nil? t) ^Object NIL t))
+
+  (method ^:final completeValue ^boolean [this ^T t]
+    ^boolean (^[CompletableFuture Void Object] VarHandle/.compareAndSet
+               RESULT
+               this
+               nil
+               (if (nil? t) ^Object NIL t)))
+
+  (method ^:static wrapInCompletionException ^CompletionException [^Throwable t]
+    (if (nil? t)
+        (CompletionException.)
+        (let [^:mutable ^String message nil
+              ^:mutable ^Throwable suppressed nil]
+          (try
+            (set! message (.toString t))
+            (set! suppressed nil)
+            (catch Throwable unknown (set! message "") (set! suppressed unknown)))
+          (let [wrapping (CompletionException. message t)]
+            (when (some? suppressed) (.addSuppressed wrapping suppressed))
+            wrapping))))
+
+  (method ^:static wrapInExecutionException ^ExecutionException [^Throwable t]
+    (if (nil? t)
+        (ExecutionException.)
+        (let [^:mutable ^String message nil
+              ^:mutable ^Throwable suppressed nil]
+          (try
+            (set! message (.toString t))
+            (set! suppressed nil)
+            (catch Throwable unknown (set! message "") (set! suppressed unknown)))
+          (let [wrapping (ExecutionException. message t)]
+            (when (some? suppressed) (.addSuppressed wrapping suppressed))
+            wrapping))))
+
+  (method ^:static encodeThrowable ^AltResult [^Throwable x]
+    (AltResult. ^Throwable (if (instance? CompletionException x)
+                               x
+                               ^Throwable (CompletableFuture/wrapInCompletionException x))))
+
+  (method ^:final completeThrowable ^boolean [this ^Throwable x]
+    ^boolean (^[CompletableFuture Void AltResult] VarHandle/.compareAndSet
+               RESULT
+               this
+               nil
+               (CompletableFuture/encodeThrowable x)))
+
+  (method ^:static encodeThrowable [^:mutable ^Throwable x r]
+    (cond
+      (not (instance? CompletionException x))
+        (set! x (CompletableFuture/wrapInCompletionException x))
+      (and (instance? AltResult r) (identical? x (.-ex (cast AltResult r)))) (return r))
+    (AltResult. x))
+
+  (method ^:final completeThrowable ^boolean [this ^Throwable x r]
+    ^boolean (^[CompletableFuture Void Object] VarHandle/.compareAndSet
+               RESULT
+               this
+               nil
+               (CompletableFuture/encodeThrowable x r)))
+
+  (method encodeOutcome [this ^T t ^Throwable x]
+    (if (nil? x) (if (nil? t) ^Object NIL t) ^Object (CompletableFuture/encodeThrowable x)))
+
+  (method ^:static encodeRelay [^:mutable r]
+    (let [^:mutable ^Throwable x nil]
+      (when (and (and (instance? AltResult r) (some? (set! x (.-ex (cast AltResult r)))))
+                 (not (instance? CompletionException x)))
+        (set! r (AltResult. (CompletableFuture/wrapInCompletionException x))))
+      r))
+
+  (method ^:final completeRelay ^boolean [this r]
+    ^boolean (^[CompletableFuture Void Object] VarHandle/.compareAndSet
+               RESULT
+               this
+               nil
+               (CompletableFuture/encodeRelay r)))
+
+  (method ^:private ^:static reportGet :throws [InterruptedException ExecutionException] [r
+                                                                                          ^String details]
+    (when (nil? r) (throw (InterruptedException.)))
+    (when (instance? AltResult r)
+      (let [^:mutable ^Throwable x nil
+            ^:mutable ^Throwable cause nil]
+        (when (nil? (set! x (.-ex (cast AltResult r)))) (return nil))
+        (when (instance? CancellationException x)
+          (throw (CancellationException. details (cast CancellationException x))))
+        (when (and (instance? CompletionException x) (some? (set! cause (.getCause x))))
+          (set! x cause))
+        (throw (CompletableFuture/wrapInExecutionException x))))
+    r)
+
+  (method ^:private ^:static reportJoin [r ^String details]
+    (when (instance? AltResult r)
+      (let [^:mutable ^Throwable x nil]
+        (when (nil? (set! x (.-ex (cast AltResult r)))) (return nil))
+        (when (instance? CancellationException x)
+          (throw (CancellationException. details (cast CancellationException x))))
+        (when (instance? CompletionException x) (throw (cast CompletionException x)))
+        (throw (CompletableFuture/wrapInCompletionException x))))
+    r)
+
+  (defclass ^:public ^:static ^:interface AsynchronousCompletionTask)
+
+  (field ^:private ^:static ^:final ^ForkJoinPool ASYNC_POOL (ForkJoinPool/asyncCommonPool))
+
+  (field ^:static ^:final ^int SYNC 0)
+
+  (field ^:static ^:final ^int ASYNC 1)
+
+  (field ^:static ^:final ^int NESTED -1)
+
+  (defclass ^:abstract ^:static Completion
+    :extends (ForkJoinTask Void)
+    :implements [Runnable AsynchronousCompletionTask]
+
+    (field ^:volatile ^Completion next)
+
+    (method ^:abstract tryFire ^{:tag (CompletableFuture ?)} [this ^int mode])
+
+    (method ^:abstract isLive ^boolean [this])
+
+    (method ^:public ^:final run ^void [this] (.tryFire this ASYNC))
+
+    (method ^:public ^:final exec ^boolean [this]
+      (.tryFire this ASYNC)
+      false)
+
+    (method ^:public ^:final getRawResult ^Void [this] nil)
+
+    (method ^:public ^:final setRawResult ^void [this ^Void v]))
+
+  (method ^:final postComplete ^void [this]
+    (let [^:mutable ^{:tag (CompletableFuture ?)} f this
+          ^:mutable ^Completion h nil]
+      (while (or (some? (set! h (.-stack f)))
+                 (and (not (identical? f this)) (some? (set! h (.-stack (set! f this))))))
+        (let [^:mutable ^{:tag (CompletableFuture ?)} d nil
+              ^:mutable ^Completion t nil]
+          (when ^boolean (^[CompletableFuture Completion Completion] VarHandle/.compareAndSet
+                           STACK
+                           f
+                           h
+                           (set! t (.-next h)))
+            (when (some? t)
+              (when-not (identical? f this) (.pushStack this h) (continue))
+              ^boolean ^void (^[Completion Completion Void] VarHandle/.compareAndSet NEXT h t nil))
+            (set! f (if (nil? (set! d (.tryFire h NESTED))) this d)))))))
+
+  (method ^:final cleanStack ^void [this]
+    (let [^:mutable p stack]
+      (let [^:mutable unlinked false]
+        (while true
+          (cond
+            (nil? p) (return)
+            (.isLive p) (if unlinked (return) (break))
+            ^boolean (^[CompletableFuture Completion Completion] VarHandle/.weakCompareAndSet
+                       STACK
+                       this
+                       p
+                       (set! p (.-next p)))
+              (set! unlinked true)
+            :else (set! p stack))))
+      (let [^:mutable q (.-next p)]
+        (while (some? q)
+          (let [s (.-next q)]
+            (cond
+              (.isLive q) (do (set! p q) (set! q s))
+              ^boolean (^[Completion Completion Completion] VarHandle/.weakCompareAndSet NEXT p q s)
+                (break)
+              :else (set! q (.-next p))))))))
+
+  (defclass ^:abstract ^:static UniCompletion
+    :extends Completion
+    :type-params [T V]
+
+    (field ^Executor executor)
+
+    (field ^{:tag (CompletableFuture V)} dep)
+
+    (field ^{:tag (CompletableFuture T)} src)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture V)} dep
+                  ^{:tag (CompletableFuture T)} src]
+      (set! (.-executor this) executor)
+      (set! (.-dep this) dep)
+      (set! (.-src this) src))
+
+    (method ^:final claim ^boolean [this]
+      (let [e executor]
+        (when (.compareAndSetForkJoinTaskTag this (unchecked-short 0) (unchecked-short 1))
+          (when (nil? e) (return true))
+          (set! executor nil)
+          (.execute e this))
+        false))
+
+    (method ^:final isLive ^boolean [this] (some? dep)))
+
+  (method ^:final unipush ^void [this ^Completion c]
+    (when (some? c)
+      (while (not (.tryPushStack this c))
+        (when (some? result) ^void (^[Completion Void] VarHandle/.set NEXT c nil) (break)))
+      (when (some? result) (.tryFire c SYNC))))
+
+  (method ^:final postFire ^{:tag (CompletableFuture T)} [this ^{:tag (CompletableFuture ?)} a
+                                                          ^int mode]
+    (when (and (some? a) (some? (.-stack a)))
+      (let [^:mutable ^Object r nil]
+        (when (nil? (set! r (.-result a))) (.cleanStack a))
+        (when (and (>= mode 0) (or (some? r) (some? (.-result a)))) (.postComplete a))))
+    (when (and (some? result) (some? stack)) (if (< mode 0) (return this) (.postComplete this)))
+    nil)
+
+  (defclass ^:static ^:final UniApply
+    :extends (UniCompletion T V)
+    :type-params [T V]
+
+    (field ^{:tag (Function (? super T) (? extends V))} fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture V)} dep
+                  ^{:tag (CompletableFuture T)} src ^{:tag (Function (? super T) (? extends V))} fn]
+      (super. executor dep src)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture V)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture V)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Throwable x nil
+            ^:mutable ^{:tag (Function (? super T) (? extends V))} f nil]
+        (when-not (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                          (nil? (set! d (.-dep this))))
+                      (nil? (set! f fn)))
+          (label :tryComplete
+            (when (nil? (.-result d))
+              (when (instance? AltResult r)
+                (when (some? (set! x (.-ex (cast AltResult r))))
+                  (.completeThrowable d x r)
+                  (break :tryComplete))
+                (set! r nil))
+              (try
+                (if (and (<= mode 0) (not (.claim this)))
+                    (return nil)
+                    (let [^T t r] (.completeValue d (.apply f t))))
+                (catch Throwable ex (.completeThrowable d ex)))))
+          (set! (.-src this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a mode)))))
+
+  (method ^:private uniApplyStage :type-params [V] ^{:tag (CompletableFuture V)} [this ^Executor e
+                                                                                  ^{:tag (Function (? super T) (? extends V))} f]
+    (let [^:mutable ^Object r nil]
+      (Objects/requireNonNull f)
+      (if (some? (set! r result))
+          (.uniApplyNow this r e f)
+          (let [^{:tag (CompletableFuture V)} d (.newIncompleteFuture this)]
+            (.unipush this (UniApply. e d this f))
+            d))))
+
+  (method ^:private uniApplyNow :type-params [V] ^{:tag (CompletableFuture V)} [this ^:mutable r
+                                                                                ^Executor e
+                                                                                ^{:tag (Function (? super T) (? extends V))} f]
+    (let [^:mutable ^Throwable x nil
+          ^{:tag (CompletableFuture V)} d (.newIncompleteFuture this)]
+      (when (instance? AltResult r)
+        (when (some? (set! x (.-ex (cast AltResult r))))
+          (set! (.-result d) (CompletableFuture/encodeThrowable x r))
+          (return d))
+        (set! r nil))
+      (try
+        (if (some? e)
+            (.execute e (UniApply. nil d this f))
+            (let [^T t r] (set! (.-result d) (.encodeValue d (.apply f t)))))
+        (catch Throwable ex (set! (.-result d) (CompletableFuture/encodeThrowable ex))))
+      d))
+
+  (defclass ^:static ^:final UniAccept
+    :extends (UniCompletion T Void)
+    :type-params [T]
+
+    (field ^{:tag (Consumer (? super T))} fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture Void)} dep
+                  ^{:tag (CompletableFuture T)} src ^{:tag (Consumer (? super T))} fn]
+      (super. executor dep src)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture Void)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture Void)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Throwable x nil
+            ^:mutable ^{:tag (Consumer (? super T))} f nil]
+        (when-not (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                          (nil? (set! d (.-dep this))))
+                      (nil? (set! f fn)))
+          (label :tryComplete
+            (when (nil? (.-result d))
+              (when (instance? AltResult r)
+                (when (some? (set! x (.-ex (cast AltResult r))))
+                  (.completeThrowable d x r)
+                  (break :tryComplete))
+                (set! r nil))
+              (try
+                (if (and (<= mode 0) (not (.claim this)))
+                    (return nil)
+                    (let [^T t r] (.accept f t) (.completeNull d)))
+                (catch Throwable ex (.completeThrowable d ex)))))
+          (set! (.-src this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a mode)))))
+
+  (method ^:private uniAcceptStage ^{:tag (CompletableFuture Void)} [this ^Executor e
+                                                                     ^{:tag (Consumer (? super T))} f]
+    (let [^:mutable ^Object r nil]
+      (Objects/requireNonNull f)
+      (if (some? (set! r result))
+          (.uniAcceptNow this r e f)
+          (let [^{:tag (CompletableFuture Void)} d (.newIncompleteFuture this)]
+            (.unipush this (UniAccept. e d this f))
+            d))))
+
+  (method ^:private uniAcceptNow ^{:tag (CompletableFuture Void)} [this ^:mutable r ^Executor e
+                                                                   ^{:tag (Consumer (? super T))} f]
+    (let [^:mutable ^Throwable x nil
+          ^{:tag (CompletableFuture Void)} d (.newIncompleteFuture this)]
+      (when (instance? AltResult r)
+        (when (some? (set! x (.-ex (cast AltResult r))))
+          (set! (.-result d) (CompletableFuture/encodeThrowable x r))
+          (return d))
+        (set! r nil))
+      (try
+        (if (some? e)
+            (.execute e (UniAccept. nil d this f))
+            (let [^T t r] (.accept f t) (set! (.-result d) NIL)))
+        (catch Throwable ex (set! (.-result d) (CompletableFuture/encodeThrowable ex))))
+      d))
+
+  (defclass ^:static ^:final UniRun
+    :extends (UniCompletion T Void)
+    :type-params [T]
+
+    (field ^Runnable fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture Void)} dep
+                  ^{:tag (CompletableFuture T)} src ^Runnable fn]
+      (super. executor dep src)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture Void)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture Void)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Throwable x nil
+            ^:mutable ^Runnable f nil]
+        (when-not (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                          (nil? (set! d (.-dep this))))
+                      (nil? (set! f fn)))
+          (when (nil? (.-result d))
+            (if (and (instance? AltResult r) (some? (set! x (.-ex (cast AltResult r)))))
+                (.completeThrowable d x r)
+                (try
+                  (if (and (<= mode 0) (not (.claim this)))
+                      (return nil)
+                      (do (.run f) (.completeNull d)))
+                  (catch Throwable ex (.completeThrowable d ex)))))
+          (set! (.-src this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a mode)))))
+
+  (method ^:private uniRunStage ^{:tag (CompletableFuture Void)} [this ^Executor e ^Runnable f]
+    (let [^:mutable ^Object r nil]
+      (Objects/requireNonNull f)
+      (if (some? (set! r result))
+          (.uniRunNow this r e f)
+          (let [^{:tag (CompletableFuture Void)} d (.newIncompleteFuture this)]
+            (.unipush this (UniRun. e d this f))
+            d))))
+
+  (method ^:private uniRunNow ^{:tag (CompletableFuture Void)} [this r ^Executor e ^Runnable f]
+    (let [^:mutable ^Throwable x nil
+          ^{:tag (CompletableFuture Void)} d (.newIncompleteFuture this)]
+      (if (and (instance? AltResult r) (some? (set! x (.-ex (cast AltResult r)))))
+          (set! (.-result d) (CompletableFuture/encodeThrowable x r))
+          (try
+            (if (some? e) (.execute e (UniRun. nil d this f)) (do (.run f) (set! (.-result d) NIL)))
+            (catch Throwable ex (set! (.-result d) (CompletableFuture/encodeThrowable ex)))))
+      d))
+
+  (defclass ^:static ^:final UniWhenComplete
+    :extends (UniCompletion T T)
+    :type-params [T]
+
+    (field ^{:tag (BiConsumer (? super T) (? super Throwable))} fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture T)} dep
+                  ^{:tag (CompletableFuture T)} src
+                  ^{:tag (BiConsumer (? super T) (? super Throwable))} fn]
+      (super. executor dep src)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture T)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture T)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^Object r nil
+            ^:mutable ^{:tag (BiConsumer (? super T) (? super Throwable))} f nil]
+        (when-not (or (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                              (nil? (set! d (.-dep this))))
+                          (nil? (set! f fn)))
+                      (not (.uniWhenComplete d r f ^UniWhenComplete (when-not (> mode 0) this))))
+          (set! (.-src this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a mode)))))
+
+  (method ^:final uniWhenComplete ^boolean [this r
+                                            ^{:tag (BiConsumer (? super T) (? super Throwable))} f
+                                            ^{:tag (UniWhenComplete T)} c]
+    (let [^:mutable ^T t nil
+          ^:mutable ^Throwable x nil]
+      (when (nil? result)
+        (try
+          (when (and (some? c) (not (.claim c))) (return false))
+          (if (instance? AltResult r)
+              (do (set! x (.-ex (cast AltResult r))) (set! t nil))
+              (let [^T tr r] (set! t tr)))
+          (.accept f t x)
+          (when (nil? x) (.internalComplete this r) (return true))
+          (catch Throwable ex
+            (if (nil? x) (set! x ex) (when-not (identical? x ex) (.addSuppressed x ex)))))
+        (.completeThrowable this x r))
+      true))
+
+  (method ^:private uniWhenCompleteStage ^{:tag (CompletableFuture T)} [this ^Executor e
+                                                                        ^{:tag (BiConsumer (? super T) (? super Throwable))} f]
+    (Objects/requireNonNull f)
+    (let [^{:tag (CompletableFuture T)} d (.newIncompleteFuture this)
+          ^:mutable ^Object r nil]
+      (cond
+        (nil? (set! r result)) (.unipush this (UniWhenComplete. e d this f))
+        (nil? e) (.uniWhenComplete d r f nil)
+        :else
+          (try
+            (.execute e (UniWhenComplete. nil d this f))
+            (catch Throwable ex (set! (.-result d) (CompletableFuture/encodeThrowable ex)))))
+      d))
+
+  (defclass ^:static ^:final UniHandle
+    :extends (UniCompletion T V)
+    :type-params [T V]
+
+    (field ^{:tag (BiFunction (? super T) Throwable (? extends V))} fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture V)} dep
+                  ^{:tag (CompletableFuture T)} src
+                  ^{:tag (BiFunction (? super T) Throwable (? extends V))} fn]
+      (super. executor dep src)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture V)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture V)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^Object r nil
+            ^:mutable ^{:tag (BiFunction (? super T) Throwable (? extends V))} f nil]
+        (when-not (or (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                              (nil? (set! d (.-dep this))))
+                          (nil? (set! f fn)))
+                      (not (.uniHandle d r f ^UniHandle (when-not (> mode 0) this))))
+          (set! (.-src this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a mode)))))
+
+  (method ^:final uniHandle :type-params [S] ^boolean [this r
+                                                       ^{:tag (BiFunction (? super S) Throwable (? extends T))} f
+                                                       ^{:tag (UniHandle S T)} c]
+    (let [^:mutable ^S s nil
+          ^:mutable ^Throwable x nil]
+      (when (nil? result)
+        (try
+          (when (and (some? c) (not (.claim c))) (return false))
+          (if (instance? AltResult r)
+              (do (set! x (.-ex (cast AltResult r))) (set! s nil))
+              (do (set! x nil) (let [^S ss r] (set! s ss))))
+          (.completeValue this (.apply f s x))
+          (catch Throwable ex (.completeThrowable this ex))))
+      true))
+
+  (method ^:private uniHandleStage :type-params [V] ^{:tag (CompletableFuture V)} [this ^Executor e
+                                                                                   ^{:tag (BiFunction (? super T) Throwable (? extends V))} f]
+    (Objects/requireNonNull f)
+    (let [^{:tag (CompletableFuture V)} d (.newIncompleteFuture this)
+          ^:mutable ^Object r nil]
+      (cond
+        (nil? (set! r result)) (.unipush this (UniHandle. e d this f))
+        (nil? e) (.uniHandle d r f nil)
+        :else
+          (try
+            (.execute e (UniHandle. nil d this f))
+            (catch Throwable ex (set! (.-result d) (CompletableFuture/encodeThrowable ex)))))
+      d))
+
+  (defclass ^:static ^:final UniExceptionally
+    :extends (UniCompletion T T)
+    :type-params [T]
+
+    (field ^{:tag (Function (? super Throwable) (? extends T))} fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture T)} dep
+                  ^{:tag (CompletableFuture T)} src
+                  ^{:tag (Function (? super Throwable) (? extends T))} fn]
+      (super. executor dep src)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture T)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture T)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^Object r nil
+            ^:mutable ^{:tag (Function (? super Throwable) (? extends T))} f nil]
+        (when-not (or (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                              (nil? (set! d (.-dep this))))
+                          (nil? (set! f fn)))
+                      (not (.uniExceptionally d r f ^UniExceptionally (when-not (> mode 0) this))))
+          (set! (.-src this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a mode)))))
+
+  (method ^:final uniExceptionally ^boolean [this r
+                                             ^{:tag (Function (? super Throwable) (? extends T))} f
+                                             ^{:tag (UniExceptionally T)} c]
+    (let [^:mutable ^Throwable x nil]
+      (when (nil? result)
+        (try
+          (when (and (some? c) (not (.claim c))) (return false))
+          (if (and (instance? AltResult r) (some? (set! x (.-ex (cast AltResult r)))))
+              (.completeValue this (.apply f x))
+              (.internalComplete this r))
+          (catch Throwable ex (.completeThrowable this ex))))
+      true))
+
+  (method ^:private uniExceptionallyStage ^{:tag (CompletableFuture T)} [this ^Executor e
+                                                                         ^{:tag (Function Throwable (? extends T))} f]
+    (Objects/requireNonNull f)
+    (let [^{:tag (CompletableFuture T)} d (.newIncompleteFuture this)
+          ^:mutable ^Object r nil]
+      (cond
+        (nil? (set! r result)) (.unipush this (UniExceptionally. e d this f))
+        (nil? e) (.uniExceptionally d r f nil)
+        :else
+          (try
+            (.execute e (UniExceptionally. nil d this f))
+            (catch Throwable ex (set! (.-result d) (CompletableFuture/encodeThrowable ex)))))
+      d))
+
+  (defclass ^:static ^:final UniComposeExceptionally
+    :extends (UniCompletion T T)
+    :type-params [T]
+
+    (field ^{:tag (Function Throwable (? extends (CompletionStage T)))} fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture T)} dep
+                  ^{:tag (CompletableFuture T)} src
+                  ^{:tag (Function Throwable (? extends (CompletionStage T)))} fn]
+      (super. executor dep src)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture T)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture T)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^{:tag (Function Throwable (? extends (CompletionStage T)))} f nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Throwable x nil]
+        (when-not (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                          (nil? (set! d (.-dep this))))
+                      (nil? (set! f fn)))
+          (when (nil? (.-result d))
+            (if (and (instance? AltResult r) (some? (set! x (.-ex (cast AltResult r)))))
+                (try
+                  (when (and (<= mode 0) (not (.claim this))) (return nil))
+                  (let [^{:tag (CompletableFuture T)} g (.toCompletableFuture
+                                                          (cast CompletionStage (.apply f x)))]
+                    (if (some? (set! r (.-result g)))
+                        (.completeRelay d r)
+                        (do (.unipush g (UniRelay. d g)) (when (nil? (.-result d)) (return nil)))))
+                  (catch Throwable ex (.completeThrowable d ex)))
+                (.internalComplete d r)))
+          (set! (.-src this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a mode)))))
+
+  (method ^:private uniComposeExceptionallyStage ^{:tag (CompletableFuture T)} [this ^Executor e
+                                                                                ^{:tag (Function Throwable (? extends (CompletionStage T)))} f]
+    (Objects/requireNonNull f)
+    (let [^{:tag (CompletableFuture T)} d (.newIncompleteFuture this)
+          ^:mutable ^Object r nil
+          ^:mutable ^Object s nil
+          ^:mutable ^Throwable x nil]
+      (cond
+        (nil? (set! r result)) (.unipush this (UniComposeExceptionally. e d this f))
+        (or (not (instance? AltResult r)) (nil? (set! x (.-ex (cast AltResult r)))))
+          (.internalComplete d r)
+        :else
+          (try
+            (if (some? e)
+                (.execute e (UniComposeExceptionally. nil d this f))
+                (let [^{:tag (CompletableFuture T)} g (.toCompletableFuture
+                                                        (cast CompletionStage (.apply f x)))]
+                  (if (some? (set! s (.-result g)))
+                      (set! (.-result d) (CompletableFuture/encodeRelay s))
+                      (.unipush g (UniRelay. d g)))))
+            (catch Throwable ex (set! (.-result d) (CompletableFuture/encodeThrowable ex)))))
+      d))
+
+  (defclass ^:static ^:final UniRelay
+    :extends (UniCompletion T U)
+    :type-params [U (T extends U)]
+
+    (constructor [this ^{:tag (CompletableFuture U)} dep ^{:tag (CompletableFuture T)} src]
+      (super. nil dep src))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture U)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture U)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^Object r nil]
+        (when-not (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                      (nil? (set! d (.-dep this))))
+          (when (nil? (.-result d)) (.completeRelay d r))
+          (set! (.-src this) nil)
+          (set! (.-dep this) nil)
+          (.postFire d a mode)))))
+
+  (method ^:private ^:static uniCopyStage :type-params [U (T extends U)] ^{:tag (CompletableFuture U)} [^{:tag (CompletableFuture T)} src]
+    (let [^:mutable ^Object r nil
+          ^{:tag (CompletableFuture U)} d (.newIncompleteFuture src)]
+      (if (some? (set! r (.-result src)))
+          (set! (.-result d) (CompletableFuture/encodeRelay r))
+          (.unipush src (UniRelay. d src)))
+      d))
+
+  (method ^:private uniAsMinimalStage ^{:tag (MinimalStage T)} [this]
+    (let [^:mutable ^Object r nil]
+      (if (some? (set! r result))
+          (MinimalStage. (CompletableFuture/encodeRelay r))
+          (let [^{:tag (MinimalStage T)} d (MinimalStage.)] (.unipush this (UniRelay. d this)) d))))
+
+  (defclass ^:static ^:final UniCompose
+    :extends (UniCompletion T V)
+    :type-params [T V]
+
+    (field ^{:tag (Function (? super T) (? extends (CompletionStage V)))} fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture V)} dep
+                  ^{:tag (CompletableFuture T)} src
+                  ^{:tag (Function (? super T) (? extends (CompletionStage V)))} fn]
+      (super. executor dep src)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture V)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture V)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^{:tag (Function (? super T) (? extends (CompletionStage V)))} f nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Throwable x nil]
+        (when-not (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                          (nil? (set! d (.-dep this))))
+                      (nil? (set! f fn)))
+          (label :tryComplete
+            (when (nil? (.-result d))
+              (when (instance? AltResult r)
+                (when (some? (set! x (.-ex (cast AltResult r))))
+                  (.completeThrowable d x r)
+                  (break :tryComplete))
+                (set! r nil))
+              (try
+                (when (and (<= mode 0) (not (.claim this))) (return nil))
+                (let [^T t r
+                      ^{:tag (CompletableFuture V)} g (.toCompletableFuture
+                                                        (cast CompletionStage (.apply f t)))]
+                  (if (some? (set! r (.-result g)))
+                      (.completeRelay d r)
+                      (do (.unipush g (UniRelay. d g)) (when (nil? (.-result d)) (return nil)))))
+                (catch Throwable ex (.completeThrowable d ex)))))
+          (set! (.-src this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a mode)))))
+
+  (method ^:private uniComposeStage :type-params [V] ^{:tag (CompletableFuture V)} [this ^Executor e
+                                                                                    ^{:tag (Function (? super T) (? extends (CompletionStage V)))} f]
+    (Objects/requireNonNull f)
+    (let [^{:tag (CompletableFuture V)} d (.newIncompleteFuture this)
+          ^:mutable ^Object r nil
+          ^:mutable ^Object s nil
+          ^:mutable ^Throwable x nil]
+      (if (nil? (set! r result))
+          (.unipush this (UniCompose. e d this f))
+          (do
+            (when (instance? AltResult r)
+              (when (some? (set! x (.-ex (cast AltResult r))))
+                (set! (.-result d) (CompletableFuture/encodeThrowable x r))
+                (return d))
+              (set! r nil))
+            (try
+              (if (some? e)
+                  (.execute e (UniCompose. nil d this f))
+                  (let [^T t r
+                        ^{:tag (CompletableFuture V)} g (.toCompletableFuture
+                                                          (cast CompletionStage (.apply f t)))]
+                    (if (some? (set! s (.-result g)))
+                        (set! (.-result d) (CompletableFuture/encodeRelay s))
+                        (.unipush g (UniRelay. d g)))))
+              (catch Throwable ex (set! (.-result d) (CompletableFuture/encodeThrowable ex))))))
+      d))
+
+  (defclass ^:abstract ^:static BiCompletion
+    :extends (UniCompletion T V)
+    :type-params [T U V]
+
+    (field ^{:tag (CompletableFuture U)} snd)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture V)} dep
+                  ^{:tag (CompletableFuture T)} src ^{:tag (CompletableFuture U)} snd]
+      (super. executor dep src)
+      (set! (.-snd this) snd)))
+
+  (defclass ^:static ^:final CoCompletion
+    :extends Completion
+
+    (field ^{:tag (BiCompletion ? ? ?)} base)
+
+    (constructor [this ^{:tag (BiCompletion ? ? ?)} base]
+      (set! (.-base this) base))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture ?)} [this ^int mode]
+      (let [^:mutable ^{:tag (BiCompletion ? ? ?)} c nil
+            ^:mutable ^{:tag (CompletableFuture ?)} d nil]
+        (when-not (or (nil? (set! c base)) (nil? (set! d (.tryFire c mode)))) (set! base nil) d)))
+
+    (method ^:final isLive ^boolean [this]
+      (let [^:mutable ^{:tag (BiCompletion ? ? ?)} c nil]
+        (and (some? (set! c base)) (some? (.-dep c))))))
+
+  (method ^:final bipush ^void [this ^{:tag (CompletableFuture ?)} b ^{:tag (BiCompletion ? ? ?)} c]
+    (when (some? c)
+      (while (nil? result)
+        (when (.tryPushStack this c)
+          (cond (nil? (.-result b)) (.unipush b (CoCompletion. c)) (some? result) (.tryFire c SYNC))
+          (return)))
+      (.unipush b c)))
+
+  (method ^:final postFire ^{:tag (CompletableFuture T)} [this ^{:tag (CompletableFuture ?)} a
+                                                          ^{:tag (CompletableFuture ?)} b ^int mode]
+    (when (and (some? b) (some? (.-stack b)))
+      (let [^:mutable ^Object r nil]
+        (when (nil? (set! r (.-result b))) (.cleanStack b))
+        (when (and (>= mode 0) (or (some? r) (some? (.-result b)))) (.postComplete b))))
+    (.postFire this a mode))
+
+  (defclass ^:static ^:final BiApply
+    :extends (BiCompletion T U V)
+    :type-params [T U V]
+
+    (field ^{:tag (BiFunction (? super T) (? super U) (? extends V))} fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture V)} dep
+                  ^{:tag (CompletableFuture T)} src ^{:tag (CompletableFuture U)} snd
+                  ^{:tag (BiFunction (? super T) (? super U) (? extends V))} fn]
+      (super. executor dep src snd)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture V)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture V)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^{:tag (CompletableFuture U)} b nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Object s nil
+            ^:mutable ^{:tag (BiFunction (? super T) (? super U) (? extends V))} f nil]
+        (when-not (or (or (or (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                                      (nil? (set! b (.-snd this))))
+                                  (nil? (set! s (.-result b))))
+                              (nil? (set! d (.-dep this))))
+                          (nil? (set! f fn)))
+                      (not (.biApply d r s f ^BiApply (when-not (> mode 0) this))))
+          (set! (.-src this) nil)
+          (set! (.-snd this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a b mode)))))
+
+  (method ^:final biApply :type-params [R S] ^boolean [this ^:mutable r ^:mutable s
+                                                       ^{:tag (BiFunction (? super R) (? super S) (? extends T))} f
+                                                       ^{:tag (BiApply R S T)} c]
+    (let [^:mutable ^Throwable x nil]
+      (label :tryComplete
+        (when (nil? result)
+          (when (instance? AltResult r)
+            (when (some? (set! x (.-ex (cast AltResult r))))
+              (.completeThrowable this x r)
+              (break :tryComplete))
+            (set! r nil))
+          (when (instance? AltResult s)
+            (when (some? (set! x (.-ex (cast AltResult s))))
+              (.completeThrowable this x s)
+              (break :tryComplete))
+            (set! s nil))
+          (try
+            (when (and (some? c) (not (.claim c))) (return false))
+            (let [^R rr r ^S ss s] (.completeValue this (.apply f rr ss)))
+            (catch Throwable ex (.completeThrowable this ex)))))
+      true))
+
+  (method ^:private biApplyStage :type-params [U V] ^{:tag (CompletableFuture V)} [this ^Executor e
+                                                                                   ^{:tag (CompletionStage U)} o
+                                                                                   ^{:tag (BiFunction (? super T) (? super U) (? extends V))} f]
+    (let [^:mutable ^{:tag (CompletableFuture U)} b nil
+          ^:mutable ^Object r nil
+          ^:mutable ^Object s nil]
+      (when (or (nil? f) (nil? (set! b (.toCompletableFuture o)))) (throw (NullPointerException.)))
+      (let [^{:tag (CompletableFuture V)} d (.newIncompleteFuture this)]
+        (cond
+          (or (nil? (set! r result)) (nil? (set! s (.-result b))))
+            (.bipush this b (BiApply. e d this b f))
+          (nil? e) (.biApply d r s f nil)
+          :else
+            (try
+              (.execute e (BiApply. nil d this b f))
+              (catch Throwable ex (set! (.-result d) (CompletableFuture/encodeThrowable ex)))))
+        d)))
+
+  (defclass ^:static ^:final BiAccept
+    :extends (BiCompletion T U Void)
+    :type-params [T U]
+
+    (field ^{:tag (BiConsumer (? super T) (? super U))} fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture Void)} dep
+                  ^{:tag (CompletableFuture T)} src ^{:tag (CompletableFuture U)} snd
+                  ^{:tag (BiConsumer (? super T) (? super U))} fn]
+      (super. executor dep src snd)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture Void)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture Void)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^{:tag (CompletableFuture U)} b nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Object s nil
+            ^:mutable ^{:tag (BiConsumer (? super T) (? super U))} f nil]
+        (when-not (or (or (or (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                                      (nil? (set! b (.-snd this))))
+                                  (nil? (set! s (.-result b))))
+                              (nil? (set! d (.-dep this))))
+                          (nil? (set! f fn)))
+                      (not (.biAccept d r s f ^BiAccept (when-not (> mode 0) this))))
+          (set! (.-src this) nil)
+          (set! (.-snd this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a b mode)))))
+
+  (method ^:final biAccept :type-params [R S] ^boolean [this ^:mutable r ^:mutable s
+                                                        ^{:tag (BiConsumer (? super R) (? super S))} f
+                                                        ^{:tag (BiAccept R S)} c]
+    (let [^:mutable ^Throwable x nil]
+      (label :tryComplete
+        (when (nil? result)
+          (when (instance? AltResult r)
+            (when (some? (set! x (.-ex (cast AltResult r))))
+              (.completeThrowable this x r)
+              (break :tryComplete))
+            (set! r nil))
+          (when (instance? AltResult s)
+            (when (some? (set! x (.-ex (cast AltResult s))))
+              (.completeThrowable this x s)
+              (break :tryComplete))
+            (set! s nil))
+          (try
+            (when (and (some? c) (not (.claim c))) (return false))
+            (let [^R rr r ^S ss s] (.accept f rr ss) (.completeNull this))
+            (catch Throwable ex (.completeThrowable this ex)))))
+      true))
+
+  (method ^:private biAcceptStage :type-params [U] ^{:tag (CompletableFuture Void)} [this
+                                                                                     ^Executor e
+                                                                                     ^{:tag (CompletionStage U)} o
+                                                                                     ^{:tag (BiConsumer (? super T) (? super U))} f]
+    (let [^:mutable ^{:tag (CompletableFuture U)} b nil
+          ^:mutable ^Object r nil
+          ^:mutable ^Object s nil]
+      (when (or (nil? f) (nil? (set! b (.toCompletableFuture o)))) (throw (NullPointerException.)))
+      (let [^{:tag (CompletableFuture Void)} d (.newIncompleteFuture this)]
+        (cond
+          (or (nil? (set! r result)) (nil? (set! s (.-result b))))
+            (.bipush this b (BiAccept. e d this b f))
+          (nil? e) (.biAccept d r s f nil)
+          :else
+            (try
+              (.execute e (BiAccept. nil d this b f))
+              (catch Throwable ex (set! (.-result d) (CompletableFuture/encodeThrowable ex)))))
+        d)))
+
+  (defclass ^:static ^:final BiRun
+    :extends (BiCompletion T U Void)
+    :type-params [T U]
+
+    (field ^Runnable fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture Void)} dep
+                  ^{:tag (CompletableFuture T)} src ^{:tag (CompletableFuture U)} snd ^Runnable fn]
+      (super. executor dep src snd)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture Void)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture Void)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^{:tag (CompletableFuture U)} b nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Object s nil
+            ^:mutable ^Runnable f nil]
+        (when-not (or (or (or (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                                      (nil? (set! b (.-snd this))))
+                                  (nil? (set! s (.-result b))))
+                              (nil? (set! d (.-dep this))))
+                          (nil? (set! f fn)))
+                      (not (.biRun d r s f ^BiRun (when-not (> mode 0) this))))
+          (set! (.-src this) nil)
+          (set! (.-snd this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a b mode)))))
+
+  (method ^:final biRun ^boolean [this r s ^Runnable f ^{:tag (BiRun ? ?)} c]
+    (let [^:mutable ^Throwable x nil
+          ^:mutable ^Object z nil]
+      (when (nil? result)
+        (if (or (and (instance? AltResult r) (some? (set! x (.-ex (cast AltResult (set! z r))))))
+                (and (instance? AltResult s) (some? (set! x (.-ex (cast AltResult (set! z s)))))))
+            (.completeThrowable this x z)
+            (try
+              (when (and (some? c) (not (.claim c))) (return false))
+              (.run f)
+              (.completeNull this)
+              (catch Throwable ex (.completeThrowable this ex)))))
+      true))
+
+  (method ^:private biRunStage ^{:tag (CompletableFuture Void)} [this ^Executor e
+                                                                 ^{:tag (CompletionStage ?)} o
+                                                                 ^Runnable f]
+    (let [^:mutable ^{:tag (CompletableFuture ?)} b nil
+          ^:mutable ^Object r nil
+          ^:mutable ^Object s nil]
+      (when (or (nil? f) (nil? (set! b (.toCompletableFuture o)))) (throw (NullPointerException.)))
+      (let [^{:tag (CompletableFuture Void)} d (.newIncompleteFuture this)]
+        (cond
+          (or (nil? (set! r result)) (nil? (set! s (.-result b))))
+            (.bipush this b (BiRun. e d this b f))
+          (nil? e) (.biRun d r s f nil)
+          :else
+            (try
+              (.execute e (BiRun. nil d this b f))
+              (catch Throwable ex (set! (.-result d) (CompletableFuture/encodeThrowable ex)))))
+        d)))
+
+  (defclass ^:static ^:final BiRelay
+    :extends (BiCompletion T U Void)
+    :type-params [T U]
+
+    (constructor [this ^{:tag (CompletableFuture Void)} dep ^{:tag (CompletableFuture T)} src
+                  ^{:tag (CompletableFuture U)} snd]
+      (super. nil dep src snd))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture Void)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture Void)} d nil
+            ^:mutable ^{:tag (CompletableFuture T)} a nil
+            ^:mutable ^{:tag (CompletableFuture U)} b nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Object s nil
+            ^:mutable ^Object z nil
+            ^:mutable ^Throwable x nil]
+        (when-not (or (or (or (or (nil? (set! a (.-src this))) (nil? (set! r (.-result a))))
+                              (nil? (set! b (.-snd this))))
+                          (nil? (set! s (.-result b))))
+                      (nil? (set! d (.-dep this))))
+          (when (nil? (.-result d))
+            (if (or (and (instance? AltResult r)
+                         (some? (set! x (.-ex (cast AltResult (set! z r))))))
+                    (and (instance? AltResult s)
+                         (some? (set! x (.-ex (cast AltResult (set! z s)))))))
+                (.completeThrowable d x z)
+                (.completeNull d)))
+          (set! (.-src this) nil)
+          (set! (.-snd this) nil)
+          (set! (.-dep this) nil)
+          (.postFire d a b mode)))))
+
+  (method ^:static andTree ^{:tag (CompletableFuture Void)} [^{:tag (array (CompletableFuture ?))} cfs
+                                                             ^int lo ^int hi]
+    (let [^{:tag (CompletableFuture Void)} d (CompletableFuture.)]
+      (if (> lo hi)
+          (set! (.-result d) NIL)
+          (let [^:mutable ^{:tag (CompletableFuture ?)} a nil
+                ^:mutable ^{:tag (CompletableFuture ?)} b nil
+                ^:mutable ^Object r nil
+                ^:mutable ^Object s nil
+                ^:mutable ^Object z nil
+                ^:mutable ^Throwable x nil
+                mid (unsigned-bit-shift-right-int (unchecked-add-int lo hi) 1)]
+            (when (or
+                    (nil? (set! a
+                                (if (== lo mid)
+                                    (aget cfs lo)
+                                    (CompletableFuture/andTree cfs lo mid))))
+                    (nil? (set!
+                            b
+                            (cond
+                              (== lo hi) a
+                              (== hi (unchecked-add-int mid 1)) (aget cfs hi)
+                              :else (CompletableFuture/andTree cfs (unchecked-add-int mid 1) hi)))))
+              (throw (NullPointerException.)))
+            (cond
+              (or (nil? (set! r (.-result a))) (nil? (set! s (.-result b))))
+                (.bipush a b (BiRelay. d a b))
+              (or (and (instance? AltResult r) (some? (set! x (.-ex (cast AltResult (set! z r))))))
+                  (and (instance? AltResult s) (some? (set! x (.-ex (cast AltResult (set! z s)))))))
+                (set! (.-result d) (CompletableFuture/encodeThrowable x z))
+              :else (set! (.-result d) NIL))))
+      d))
+
+  (method ^:final orpush ^void [this ^{:tag (CompletableFuture ?)} b ^{:tag (BiCompletion ? ? ?)} c]
+    (when (some? c)
+      (while (not (.tryPushStack this c))
+        (when (some? result) ^void (^[BiCompletion Void] VarHandle/.set NEXT c nil) (break)))
+      (if (some? result) (.tryFire c SYNC) (.unipush b (CoCompletion. c)))))
+
+  (defclass ^:static ^:final OrApply
+    :extends (BiCompletion T U V)
+    :type-params [T (U extends T) V]
+
+    (field ^{:tag (Function (? super T) (? extends V))} fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture V)} dep
+                  ^{:tag (CompletableFuture T)} src ^{:tag (CompletableFuture U)} snd
+                  ^{:tag (Function (? super T) (? extends V))} fn]
+      (super. executor dep src snd)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture V)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture V)} d nil
+            ^:mutable ^{:tag (CompletableFuture (? extends T))} a nil
+            ^:mutable ^{:tag (CompletableFuture (? extends T))} b nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Throwable x nil
+            ^:mutable ^{:tag (Function (? super T) (? extends V))} f nil]
+        (when-not (or (or (or (or (nil? (set! a (.-src this))) (nil? (set! b (.-snd this))))
+                              (and (nil? (set! r (.-result a))) (nil? (set! r (.-result b)))))
+                          (nil? (set! d (.-dep this))))
+                      (nil? (set! f fn)))
+          (label :tryComplete
+            (when (nil? (.-result d))
+              (try
+                (when (and (<= mode 0) (not (.claim this))) (return nil))
+                (when (instance? AltResult r)
+                  (when (some? (set! x (.-ex (cast AltResult r))))
+                    (.completeThrowable d x r)
+                    (break :tryComplete))
+                  (set! r nil))
+                (let [^T t r] (.completeValue d (.apply f t)))
+                (catch Throwable ex (.completeThrowable d ex)))))
+          (set! (.-src this) nil)
+          (set! (.-snd this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a b mode)))))
+
+  (method ^:private orApplyStage :type-params [(U extends T) V] ^{:tag (CompletableFuture V)} [this
+                                                                                               ^Executor e
+                                                                                               ^{:tag (CompletionStage U)} o
+                                                                                               ^{:tag (Function (? super T) (? extends V))} f]
+    (let [^:mutable ^{:tag (CompletableFuture U)} b nil]
+      (when (or (nil? f) (nil? (set! b (.toCompletableFuture o)))) (throw (NullPointerException.)))
+      (let [^:mutable ^Object r nil
+            ^:mutable ^{:tag (CompletableFuture (? extends T))} z nil]
+        (if (or (some? (set! r (.-result (set! z this)))) (some? (set! r (.-result (set! z b)))))
+            (.uniApplyNow z r e f)
+            (let [^{:tag (CompletableFuture V)} d (.newIncompleteFuture this)]
+              (.orpush this b (OrApply. e d this b f))
+              d)))))
+
+  (defclass ^:static ^:final OrAccept
+    :extends (BiCompletion T U Void)
+    :type-params [T (U extends T)]
+
+    (field ^{:tag (Consumer (? super T))} fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture Void)} dep
+                  ^{:tag (CompletableFuture T)} src ^{:tag (CompletableFuture U)} snd
+                  ^{:tag (Consumer (? super T))} fn]
+      (super. executor dep src snd)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture Void)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture Void)} d nil
+            ^:mutable ^{:tag (CompletableFuture (? extends T))} a nil
+            ^:mutable ^{:tag (CompletableFuture (? extends T))} b nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Throwable x nil
+            ^:mutable ^{:tag (Consumer (? super T))} f nil]
+        (when-not (or (or (or (or (nil? (set! a (.-src this))) (nil? (set! b (.-snd this))))
+                              (and (nil? (set! r (.-result a))) (nil? (set! r (.-result b)))))
+                          (nil? (set! d (.-dep this))))
+                      (nil? (set! f fn)))
+          (label :tryComplete
+            (when (nil? (.-result d))
+              (try
+                (when (and (<= mode 0) (not (.claim this))) (return nil))
+                (when (instance? AltResult r)
+                  (when (some? (set! x (.-ex (cast AltResult r))))
+                    (.completeThrowable d x r)
+                    (break :tryComplete))
+                  (set! r nil))
+                (let [^T t r] (.accept f t) (.completeNull d))
+                (catch Throwable ex (.completeThrowable d ex)))))
+          (set! (.-src this) nil)
+          (set! (.-snd this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a b mode)))))
+
+  (method ^:private orAcceptStage :type-params [(U extends T)] ^{:tag (CompletableFuture Void)} [this
+                                                                                                 ^Executor e
+                                                                                                 ^{:tag (CompletionStage U)} o
+                                                                                                 ^{:tag (Consumer (? super T))} f]
+    (let [^:mutable ^{:tag (CompletableFuture U)} b nil]
+      (when (or (nil? f) (nil? (set! b (.toCompletableFuture o)))) (throw (NullPointerException.)))
+      (let [^:mutable ^Object r nil
+            ^:mutable ^{:tag (CompletableFuture (? extends T))} z nil]
+        (if (or (some? (set! r (.-result (set! z this)))) (some? (set! r (.-result (set! z b)))))
+            (.uniAcceptNow z r e f)
+            (let [^{:tag (CompletableFuture Void)} d (.newIncompleteFuture this)]
+              (.orpush this b (OrAccept. e d this b f))
+              d)))))
+
+  (defclass ^:static ^:final OrRun
+    :extends (BiCompletion T U Void)
+    :type-params [T U]
+
+    (field ^Runnable fn)
+
+    (constructor [this ^Executor executor ^{:tag (CompletableFuture Void)} dep
+                  ^{:tag (CompletableFuture T)} src ^{:tag (CompletableFuture U)} snd ^Runnable fn]
+      (super. executor dep src snd)
+      (set! (.-fn this) fn))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture Void)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture Void)} d nil
+            ^:mutable ^{:tag (CompletableFuture ?)} a nil
+            ^:mutable ^{:tag (CompletableFuture ?)} b nil
+            ^:mutable ^Object r nil
+            ^:mutable ^Throwable x nil
+            ^:mutable ^Runnable f nil]
+        (when-not (or (or (or (or (nil? (set! a (.-src this))) (nil? (set! b (.-snd this))))
+                              (and (nil? (set! r (.-result a))) (nil? (set! r (.-result b)))))
+                          (nil? (set! d (.-dep this))))
+                      (nil? (set! f fn)))
+          (when (nil? (.-result d))
+            (try
+              (cond
+                (and (<= mode 0) (not (.claim this))) (return nil)
+                (and (instance? AltResult r) (some? (set! x (.-ex (cast AltResult r)))))
+                  (.completeThrowable d x r)
+                :else (do (.run f) (.completeNull d)))
+              (catch Throwable ex (.completeThrowable d ex))))
+          (set! (.-src this) nil)
+          (set! (.-snd this) nil)
+          (set! (.-dep this) nil)
+          (set! fn nil)
+          (.postFire d a b mode)))))
+
+  (method ^:private orRunStage ^{:tag (CompletableFuture Void)} [this ^Executor e
+                                                                 ^{:tag (CompletionStage ?)} o
+                                                                 ^Runnable f]
+    (let [^:mutable ^{:tag (CompletableFuture ?)} b nil]
+      (when (or (nil? f) (nil? (set! b (.toCompletableFuture o)))) (throw (NullPointerException.)))
+      (let [^:mutable ^Object r nil
+            ^:mutable ^{:tag (CompletableFuture ?)} z nil]
+        (if (or (some? (set! r (.-result (set! z this)))) (some? (set! r (.-result (set! z b)))))
+            (.uniRunNow z r e f)
+            (let [^{:tag (CompletableFuture Void)} d (.newIncompleteFuture this)]
+              (.orpush this b (OrRun. e d this b f))
+              d)))))
+
+  (defclass ^:static AnyOf
+    :extends Completion
+
+    (field ^{:tag (CompletableFuture Object)} dep)
+
+    (field ^{:tag (CompletableFuture ?)} src)
+
+    (field ^{:tag (array (CompletableFuture ?))} srcs)
+
+    (constructor [this ^{:tag (CompletableFuture Object)} dep ^{:tag (CompletableFuture ?)} src
+                  ^{:tag (array (CompletableFuture ?))} srcs]
+      (set! (.-dep this) dep)
+      (set! (.-src this) src)
+      (set! (.-srcs this) srcs))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture Object)} [this ^int mode]
+      (let [^:mutable ^{:tag (CompletableFuture Object)} d nil
+            ^:mutable ^{:tag (CompletableFuture ?)} a nil
+            ^:mutable ^{:tag (array (CompletableFuture ?))} as nil
+            ^:mutable ^Object r nil]
+        (when-not (or (or (or (nil? (set! a src)) (nil? (set! r (.-result a)))) (nil? (set! d dep)))
+                      (nil? (set! as srcs)))
+          (set! src nil)
+          (set! dep nil)
+          (set! srcs nil)
+          (when (.completeRelay d r)
+            (for-each [^{:tag (CompletableFuture ?)} b as]
+              (when-not (identical? b a) (.cleanStack b)))
+            (if (< mode 0) (return d) (.postComplete d)))
+          nil)))
+
+    (method ^:final isLive ^boolean [this]
+      (let [^:mutable ^{:tag (CompletableFuture Object)} d nil]
+        (and (some? (set! d dep)) (nil? (.-result d))))))
+
+  (defclass ^:static ^:final AsyncSupply
+    :extends (ForkJoinTask Void)
+    :implements [Runnable AsynchronousCompletionTask]
+    :type-params [T]
+
+    (field ^{:tag (CompletableFuture T)} dep)
+
+    (field ^{:tag (Supplier (? extends T))} fn)
+
+    (constructor [this ^{:tag (CompletableFuture T)} dep ^{:tag (Supplier (? extends T))} fn]
+      (set! (.-dep this) dep)
+      (set! (.-fn this) fn))
+
+    (method ^:public ^:final getRawResult ^Void [this] nil)
+
+    (method ^:public ^:final setRawResult ^void [this ^Void v])
+
+    (method ^:public ^:final exec ^boolean [this] (.run this) false)
+
+    (method ^:public run ^void [this]
+      (let [^:mutable ^{:tag (CompletableFuture T)} d nil
+            ^:mutable ^{:tag (Supplier (? extends T))} f nil]
+        (when (and (some? (set! d dep)) (some? (set! f fn)))
+          (set! dep nil)
+          (set! fn nil)
+          (when (nil? (.-result d))
+            (try (.completeValue d (.get f)) (catch Throwable ex (.completeThrowable d ex))))
+          (.postComplete d)))))
+
+  (method ^:static asyncSupplyStage :type-params [U] ^{:tag (CompletableFuture U)} [^Executor e
+                                                                                    ^{:tag (Supplier U)} f]
+    (Objects/requireNonNull f)
+    (let [^{:tag (CompletableFuture U)} d (CompletableFuture.)] (.execute e (AsyncSupply. d f)) d))
+
+  (defclass ^:static ^:final AsyncRun
+    :extends (ForkJoinTask Void)
+    :implements [Runnable AsynchronousCompletionTask]
+
+    (field ^{:tag (CompletableFuture Void)} dep)
+
+    (field ^Runnable fn)
+
+    (constructor [this ^{:tag (CompletableFuture Void)} dep ^Runnable fn]
+      (set! (.-dep this) dep)
+      (set! (.-fn this) fn))
+
+    (method ^:public ^:final getRawResult ^Void [this] nil)
+
+    (method ^:public ^:final setRawResult ^void [this ^Void v])
+
+    (method ^:public ^:final exec ^boolean [this] (.run this) false)
+
+    (method ^:public run ^void [this]
+      (let [^:mutable ^{:tag (CompletableFuture Void)} d nil
+            ^:mutable ^Runnable f nil]
+        (when (and (some? (set! d dep)) (some? (set! f fn)))
+          (set! dep nil)
+          (set! fn nil)
+          (when (nil? (.-result d))
+            (try (.run f) (.completeNull d) (catch Throwable ex (.completeThrowable d ex))))
+          (.postComplete d)))))
+
+  (method ^:static asyncRunStage ^{:tag (CompletableFuture Void)} [^Executor e ^Runnable f]
+    (Objects/requireNonNull f)
+    (let [^{:tag (CompletableFuture Void)} d (CompletableFuture.)] (.execute e (AsyncRun. d f)) d))
+
+  (defclass ^:static ^:final Signaller
+    :extends Completion
+    :implements [ForkJoinPool$ManagedBlocker]
+
+    (field ^long nanos)
+
+    (field ^:final ^long deadline)
+
+    (field ^:final ^boolean interruptible)
+
+    (field ^boolean interrupted)
+
+    (field ^:volatile ^Thread thread)
+
+    (constructor [this ^boolean interruptible ^long nanos ^long deadline]
+      (set! (.-thread this) (Thread/currentThread))
+      (set! (.-interruptible this) interruptible)
+      (set! (.-nanos this) nanos)
+      (set! (.-deadline this) deadline))
+
+    (method ^:final tryFire ^{:tag (CompletableFuture ?)} [this ^int ignore]
+      (let [^:mutable ^Thread w nil]
+        (when (some? (set! w thread)) (set! thread nil) (LockSupport/unpark w))
+        nil))
+
+    (method ^:public isReleasable ^boolean [this]
+      (when (Thread/interrupted) (set! interrupted true))
+      (or (or (and interrupted interruptible)
+              (and (not (== deadline 0))
+                   (or (<= nanos 0)
+                       (<= (set! nanos (unchecked-subtract deadline (System/nanoTime))) 0))))
+          (nil? thread)))
+
+    (method ^:public block ^boolean [this]
+      (while (not (.isReleasable this))
+        (if (== deadline 0) (LockSupport/park this) (LockSupport/parkNanos this nanos)))
+      true)
+
+    (method ^:final isLive ^boolean [this] (some? thread)))
+
+  (method ^:private waitingGet [this ^boolean interruptible]
+    (when-not (and interruptible (Thread/interrupted))
+      (let [^:mutable ^Signaller q nil
+            ^:mutable queued false
+            ^:mutable ^Object r nil]
+        (while (nil? (set! r result))
+          (cond
+            (nil? q)
+              (do
+                (set! q (Signaller. interruptible 0 0))
+                (when-instance [^ForkJoinWorkerThread wt (Thread/currentThread)]
+                  (ForkJoinPool/helpAsyncBlocker (.-pool wt) q)))
+            (not queued) (set! queued (.tryPushStack this q))
+            (and interruptible (.-interrupted q))
+              (do (set! (.-thread q) nil) (.cleanStack this) (return nil))
+            :else
+              (try
+                (ForkJoinPool/managedBlock q)
+                (catch InterruptedException ie (set! (.-interrupted q) true)))))
+        (when (some? q)
+          (set! (.-thread q) nil)
+          (when (.-interrupted q) (.interrupt (Thread/currentThread))))
+        (.postComplete this)
+        r)))
+
+  (method ^:private timedGet :throws [TimeoutException] [this ^:mutable ^long nanos]
+    (let [d (unchecked-add (System/nanoTime) nanos)
+          deadline (if (== d 0) 1 d)
+          ^:mutable interrupted false
+          ^:mutable queued false
+          ^:mutable ^Signaller q nil
+          ^:mutable ^Object r nil]
+      (while true
+        (cond
+          (or interrupted (set! interrupted (Thread/interrupted))) (break)
+          (some? (set! r result)) (break)
+          (<= nanos 0) (break)
+          (nil? q)
+            (do
+              (set! q (Signaller. true nanos deadline))
+              (when-instance [^ForkJoinWorkerThread wt (Thread/currentThread)]
+                (ForkJoinPool/helpAsyncBlocker (.-pool wt) q)))
+          (not queued) (set! queued (.tryPushStack this q))
+          :else
+            (try
+              (ForkJoinPool/managedBlock q)
+              (set! interrupted (.-interrupted q))
+              (set! nanos (.-nanos q))
+              (catch InterruptedException ie (set! interrupted true)))))
+      (when (some? q) (set! (.-thread q) nil) (when (nil? r) (.cleanStack this)))
+      (if (some? r)
+          (do (when interrupted (.interrupt (Thread/currentThread))) (.postComplete this) r)
+          (when-not interrupted (throw (TimeoutException.))))))
+
+  (constructor ^:public [this])
+
+  (constructor [this r]
+    ^void (^[CompletableFuture Object] VarHandle/.setRelease RESULT this r))
+
+  (method ^:public ^:static supplyAsync :type-params [U] ^{:tag (CompletableFuture U)} [^{:tag (Supplier U)} supplier]
+    (CompletableFuture/asyncSupplyStage ASYNC_POOL supplier))
+
+  (method ^:public ^:static supplyAsync :type-params [U] ^{:tag (CompletableFuture U)} [^{:tag (Supplier U)} supplier
+                                                                                        ^Executor executor]
+    (CompletableFuture/asyncSupplyStage (cast Executor (Objects/requireNonNull executor)) supplier))
+
+  (method ^:public ^:static runAsync ^{:tag (CompletableFuture Void)} [^Runnable runnable]
+    (CompletableFuture/asyncRunStage ASYNC_POOL runnable))
+
+  (method ^:public ^:static runAsync ^{:tag (CompletableFuture Void)} [^Runnable runnable
+                                                                       ^Executor executor]
+    (CompletableFuture/asyncRunStage (cast Executor (Objects/requireNonNull executor)) runnable))
+
+  (method ^:public ^:static completedFuture :type-params [U] ^{:tag (CompletableFuture U)} [^U value]
+    (CompletableFuture. (if (nil? value) ^Object NIL value)))
+
+  (method ^:public isDone ^boolean [this] (some? result))
+
+  (method ^:public get :throws [InterruptedException ExecutionException] ^T [this]
+    (let [^:mutable ^Object r nil]
+      (when (nil? (set! r result)) (set! r (.waitingGet this true)))
+      (CompletableFuture/reportGet r "get")))
+
+  (method ^:public get :throws [InterruptedException ExecutionException TimeoutException] ^T [this
+                                                                                              ^long timeout
+                                                                                              ^TimeUnit unit]
+    (let [nanos (.toNanos unit timeout)
+          ^:mutable ^Object r nil]
+      (when (nil? (set! r result)) (set! r (.timedGet this nanos)))
+      (CompletableFuture/reportGet r "get")))
+
+  (method ^:public join ^T [this]
+    (let [^:mutable ^Object r nil]
+      (when (nil? (set! r result)) (set! r (.waitingGet this false)))
+      (CompletableFuture/reportJoin r "join")))
+
+  (method ^:public getNow ^T [this ^T valueIfAbsent]
+    (let [^:mutable ^Object r nil]
+      (if (nil? (set! r result)) valueIfAbsent (CompletableFuture/reportJoin r "getNow"))))
+
+  (method ^:public resultNow ^T [this]
+    (let [r result]
+      (when (some? r)
+        (if-instance [^AltResult alt r]
+          (when (nil? (.-ex alt)) (return nil))
+          (let [^T t r] (return t))))
+      (throw (IllegalStateException.))))
+
+  (method ^:public exceptionNow ^Throwable [this]
+    (let [r result
+          ^:mutable ^Throwable x nil]
+      (when-instance [^AltResult alt r]
+        (when (some? (set! x (.-ex alt)))
+          (when-not (instance? CancellationException x)
+            (when (instance? CompletionException x)
+              (let [cause (.getCause x)] (when (some? cause) (set! x cause))))
+            (return x))))
+      (throw (IllegalStateException.))))
+
+  (method ^:public complete ^boolean [this ^T value]
+    (let [triggered (.completeValue this value)] (.postComplete this) triggered))
+
+  (method ^:public completeExceptionally ^boolean [this ^Throwable ex]
+    (Objects/requireNonNull ex)
+    (let [triggered (.internalComplete this (AltResult. ex))] (.postComplete this) triggered))
+
+  (method ^:public thenApply :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                             ^{:tag (Function (? super T) (? extends U))} fn]
+    (.uniApplyStage this nil fn))
+
+  (method ^:public thenApplyAsync :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                                  ^{:tag (Function (? super T) (? extends U))} fn]
+    (.uniApplyStage this (.defaultExecutor this) fn))
+
+  (method ^:public thenApplyAsync :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                                  ^{:tag (Function (? super T) (? extends U))} fn
+                                                                                  ^Executor executor]
+    (.uniApplyStage this (cast Executor (Objects/requireNonNull executor)) fn))
+
+  (method ^:public thenAccept ^{:tag (CompletableFuture Void)} [this
+                                                                ^{:tag (Consumer (? super T))} action]
+    (.uniAcceptStage this nil action))
+
+  (method ^:public thenAcceptAsync ^{:tag (CompletableFuture Void)} [this
+                                                                     ^{:tag (Consumer (? super T))} action]
+    (.uniAcceptStage this (.defaultExecutor this) action))
+
+  (method ^:public thenAcceptAsync ^{:tag (CompletableFuture Void)} [this
+                                                                     ^{:tag (Consumer (? super T))} action
+                                                                     ^Executor executor]
+    (.uniAcceptStage this (cast Executor (Objects/requireNonNull executor)) action))
+
+  (method ^:public thenRun ^{:tag (CompletableFuture Void)} [this ^Runnable action]
+    (.uniRunStage this nil action))
+
+  (method ^:public thenRunAsync ^{:tag (CompletableFuture Void)} [this ^Runnable action]
+    (.uniRunStage this (.defaultExecutor this) action))
+
+  (method ^:public thenRunAsync ^{:tag (CompletableFuture Void)} [this ^Runnable action
+                                                                  ^Executor executor]
+    (.uniRunStage this (cast Executor (Objects/requireNonNull executor)) action))
+
+  (method ^:public thenCombine :type-params [U V] ^{:tag (CompletableFuture V)} [this
+                                                                                 ^{:tag (CompletionStage (? extends U))} other
+                                                                                 ^{:tag (BiFunction (? super T) (? super U) (? extends V))} fn]
+    (.biApplyStage this nil other fn))
+
+  (method ^:public thenCombineAsync :type-params [U V] ^{:tag (CompletableFuture V)} [this
+                                                                                      ^{:tag (CompletionStage (? extends U))} other
+                                                                                      ^{:tag (BiFunction (? super T) (? super U) (? extends V))} fn]
+    (.biApplyStage this (.defaultExecutor this) other fn))
+
+  (method ^:public thenCombineAsync :type-params [U V] ^{:tag (CompletableFuture V)} [this
+                                                                                      ^{:tag (CompletionStage (? extends U))} other
+                                                                                      ^{:tag (BiFunction (? super T) (? super U) (? extends V))} fn
+                                                                                      ^Executor executor]
+    (.biApplyStage this (cast Executor (Objects/requireNonNull executor)) other fn))
+
+  (method ^:public thenAcceptBoth :type-params [U] ^{:tag (CompletableFuture Void)} [this
+                                                                                     ^{:tag (CompletionStage (? extends U))} other
+                                                                                     ^{:tag (BiConsumer (? super T) (? super U))} action]
+    (.biAcceptStage this nil other action))
+
+  (method ^:public thenAcceptBothAsync :type-params [U] ^{:tag (CompletableFuture Void)} [this
+                                                                                          ^{:tag (CompletionStage (? extends U))} other
+                                                                                          ^{:tag (BiConsumer (? super T) (? super U))} action]
+    (.biAcceptStage this (.defaultExecutor this) other action))
+
+  (method ^:public thenAcceptBothAsync :type-params [U] ^{:tag (CompletableFuture Void)} [this
+                                                                                          ^{:tag (CompletionStage (? extends U))} other
+                                                                                          ^{:tag (BiConsumer (? super T) (? super U))} action
+                                                                                          ^Executor executor]
+    (.biAcceptStage this (cast Executor (Objects/requireNonNull executor)) other action))
+
+  (method ^:public runAfterBoth ^{:tag (CompletableFuture Void)} [this
+                                                                  ^{:tag (CompletionStage ?)} other
+                                                                  ^Runnable action]
+    (.biRunStage this nil other action))
+
+  (method ^:public runAfterBothAsync ^{:tag (CompletableFuture Void)} [this
+                                                                       ^{:tag (CompletionStage ?)} other
+                                                                       ^Runnable action]
+    (.biRunStage this (.defaultExecutor this) other action))
+
+  (method ^:public runAfterBothAsync ^{:tag (CompletableFuture Void)} [this
+                                                                       ^{:tag (CompletionStage ?)} other
+                                                                       ^Runnable action
+                                                                       ^Executor executor]
+    (.biRunStage this (cast Executor (Objects/requireNonNull executor)) other action))
+
+  (method ^:public applyToEither :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                                 ^{:tag (CompletionStage (? extends T))} other
+                                                                                 ^{:tag (Function (? super T) U)} fn]
+    (.orApplyStage this nil other fn))
+
+  (method ^:public applyToEitherAsync :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                                      ^{:tag (CompletionStage (? extends T))} other
+                                                                                      ^{:tag (Function (? super T) U)} fn]
+    (.orApplyStage this (.defaultExecutor this) other fn))
+
+  (method ^:public applyToEitherAsync :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                                      ^{:tag (CompletionStage (? extends T))} other
+                                                                                      ^{:tag (Function (? super T) U)} fn
+                                                                                      ^Executor executor]
+    (.orApplyStage this (cast Executor (Objects/requireNonNull executor)) other fn))
+
+  (method ^:public acceptEither ^{:tag (CompletableFuture Void)} [this
+                                                                  ^{:tag (CompletionStage (? extends T))} other
+                                                                  ^{:tag (Consumer (? super T))} action]
+    (.orAcceptStage this nil other action))
+
+  (method ^:public acceptEitherAsync ^{:tag (CompletableFuture Void)} [this
+                                                                       ^{:tag (CompletionStage (? extends T))} other
+                                                                       ^{:tag (Consumer (? super T))} action]
+    (.orAcceptStage this (.defaultExecutor this) other action))
+
+  (method ^:public acceptEitherAsync ^{:tag (CompletableFuture Void)} [this
+                                                                       ^{:tag (CompletionStage (? extends T))} other
+                                                                       ^{:tag (Consumer (? super T))} action
+                                                                       ^Executor executor]
+    (.orAcceptStage this (cast Executor (Objects/requireNonNull executor)) other action))
+
+  (method ^:public runAfterEither ^{:tag (CompletableFuture Void)} [this
+                                                                    ^{:tag (CompletionStage ?)} other
+                                                                    ^Runnable action]
+    (.orRunStage this nil other action))
+
+  (method ^:public runAfterEitherAsync ^{:tag (CompletableFuture Void)} [this
+                                                                         ^{:tag (CompletionStage ?)} other
+                                                                         ^Runnable action]
+    (.orRunStage this (.defaultExecutor this) other action))
+
+  (method ^:public runAfterEitherAsync ^{:tag (CompletableFuture Void)} [this
+                                                                         ^{:tag (CompletionStage ?)} other
+                                                                         ^Runnable action
+                                                                         ^Executor executor]
+    (.orRunStage this (cast Executor (Objects/requireNonNull executor)) other action))
+
+  (method ^:public thenCompose :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                               ^{:tag (Function (? super T) (? extends (CompletionStage U)))} fn]
+    (.uniComposeStage this nil fn))
+
+  (method ^:public thenComposeAsync :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                                    ^{:tag (Function (? super T) (? extends (CompletionStage U)))} fn]
+    (.uniComposeStage this (.defaultExecutor this) fn))
+
+  (method ^:public thenComposeAsync :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                                    ^{:tag (Function (? super T) (? extends (CompletionStage U)))} fn
+                                                                                    ^Executor executor]
+    (.uniComposeStage this (cast Executor (Objects/requireNonNull executor)) fn))
+
+  (method ^:public whenComplete ^{:tag (CompletableFuture T)} [this
+                                                               ^{:tag (BiConsumer (? super T) (? super Throwable))} action]
+    (.uniWhenCompleteStage this nil action))
+
+  (method ^:public whenCompleteAsync ^{:tag (CompletableFuture T)} [this
+                                                                    ^{:tag (BiConsumer (? super T) (? super Throwable))} action]
+    (.uniWhenCompleteStage this (.defaultExecutor this) action))
+
+  (method ^:public whenCompleteAsync ^{:tag (CompletableFuture T)} [this
+                                                                    ^{:tag (BiConsumer (? super T) (? super Throwable))} action
+                                                                    ^Executor executor]
+    (.uniWhenCompleteStage this (cast Executor (Objects/requireNonNull executor)) action))
+
+  (method ^:public handle :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                          ^{:tag (BiFunction (? super T) Throwable (? extends U))} fn]
+    (.uniHandleStage this nil fn))
+
+  (method ^:public handleAsync :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                               ^{:tag (BiFunction (? super T) Throwable (? extends U))} fn]
+    (.uniHandleStage this (.defaultExecutor this) fn))
+
+  (method ^:public handleAsync :type-params [U] ^{:tag (CompletableFuture U)} [this
+                                                                               ^{:tag (BiFunction (? super T) Throwable (? extends U))} fn
+                                                                               ^Executor executor]
+    (.uniHandleStage this (cast Executor (Objects/requireNonNull executor)) fn))
+
+  (method ^:public toCompletableFuture ^{:tag (CompletableFuture T)} [this]
+    this)
+
+  (method ^:public exceptionally ^{:tag (CompletableFuture T)} [this
+                                                                ^{:tag (Function Throwable (? extends T))} fn]
+    (.uniExceptionallyStage this nil fn))
+
+  (method ^:public exceptionallyAsync ^{:tag (CompletableFuture T)} [this
+                                                                     ^{:tag (Function Throwable (? extends T))} fn]
+    (.uniExceptionallyStage this (.defaultExecutor this) fn))
+
+  (method ^:public exceptionallyAsync ^{:tag (CompletableFuture T)} [this
+                                                                     ^{:tag (Function Throwable (? extends T))} fn
+                                                                     ^Executor executor]
+    (.uniExceptionallyStage this (cast Executor (Objects/requireNonNull executor)) fn))
+
+  (method ^:public exceptionallyCompose ^{:tag (CompletableFuture T)} [this
+                                                                       ^{:tag (Function Throwable (? extends (CompletionStage T)))} fn]
+    (.uniComposeExceptionallyStage this nil fn))
+
+  (method ^:public exceptionallyComposeAsync ^{:tag (CompletableFuture T)} [this
+                                                                            ^{:tag (Function Throwable (? extends (CompletionStage T)))} fn]
+    (.uniComposeExceptionallyStage this (.defaultExecutor this) fn))
+
+  (method ^:public exceptionallyComposeAsync ^{:tag (CompletableFuture T)} [this
+                                                                            ^{:tag (Function Throwable (? extends (CompletionStage T)))} fn
+                                                                            ^Executor executor]
+    (.uniComposeExceptionallyStage this (cast Executor (Objects/requireNonNull executor)) fn))
+
+  (method ^:public ^:static allOf ^{:tag (CompletableFuture Void)} [&
+                                                                    ^{:tag (array (CompletableFuture ?))} cfs]
+    (CompletableFuture/andTree cfs 0 (unchecked-subtract-int (alength cfs) 1)))
+
+  (method ^:public ^:static anyOf ^{:tag (CompletableFuture Object)} [&
+                                                                      ^:mutable ^{:tag (array (CompletableFuture ?))} cfs]
+    (let [^:mutable ^int n 0
+          ^:mutable ^Object r nil]
+      (if (<= (set! n (alength cfs)) 1)
+          (if (== n 0) (CompletableFuture.) (CompletableFuture/uniCopyStage (aget cfs 0)))
+          (do
+            (for-each [^{:tag (CompletableFuture ?)} cf cfs]
+              (when (some? (set! r (.-result cf)))
+                (return (CompletableFuture. (CompletableFuture/encodeRelay r)))))
+            (set! cfs (.clone cfs))
+            (let [^{:tag (CompletableFuture Object)} d (CompletableFuture.)]
+              (for-each [^{:tag (CompletableFuture ?)} cf cfs] (.unipush cf (AnyOf. d cf cfs)))
+              (when (some? (.-result d))
+                (let [^:mutable ^int i 0
+                      len (alength cfs)]
+                  (while (< i len)
+                    (when (some? (.-result (aget cfs i)))
+                      (set! i (unchecked-inc-int i))
+                      (while (< i len)
+                        (when (nil? (.-result (aget cfs i))) (.cleanStack (aget cfs i)))
+                        (set! i (unchecked-inc-int i))))
+                    (set! i (unchecked-inc-int i)))))
+              d)))))
+
+  (method ^:public cancel ^boolean [this ^boolean mayInterruptIfRunning]
+    (let [cancelled (and (nil? result)
+                         (.internalComplete this (AltResult. (CancellationException.))))]
+      (.postComplete this)
+      (or cancelled (.isCancelled this))))
+
+  (method ^:public isCancelled ^boolean [this]
+    (let [^:mutable ^Object r nil]
+      (and (instance? AltResult (set! r result))
+           (instance? CancellationException (.-ex (cast AltResult r))))))
+
+  (method ^:public isCompletedExceptionally ^boolean [this]
+    (let [^:mutable ^Object r nil]
+      (and (instance? AltResult (set! r result)) (not (identical? r NIL)))))
+
+  (method ^:public state ^Future$State [this]
+    (let [r result]
+      (if (nil? r)
+          Future$State/RUNNING
+          (do
+            (when-not (identical? r NIL)
+              (when-instance [^AltResult alt r]
+                (if (instance? CancellationException (.-ex alt))
+                    (return Future$State/CANCELLED)
+                    (return Future$State/FAILED))))
+            Future$State/SUCCESS))))
+
+  (method ^:public obtrudeValue ^void [this ^T value]
+    (set! result (if (nil? value) ^Object NIL value))
+    (.postComplete this))
+
+  (method ^:public obtrudeException ^void [this ^Throwable ex]
+    (set! result (AltResult. (cast Throwable (Objects/requireNonNull ex))))
+    (.postComplete this))
+
+  (method ^:public getNumberOfDependents ^int [this]
+    (let [^:mutable ^int count 0]
+      (loop [p stack] (when (some? p) (set! count (unchecked-inc-int count)) (recur (.-next p))))
+      count))
+
+  (method ^:public toString ^String [this]
+    (let [r result
+          ^:mutable ^int count 0]
+      (loop [p stack] (when (some? p) (set! count (unchecked-inc-int count)) (recur (.-next p))))
+      (java-str (.toString super)
+                (cond
+                  (nil? r)
+                    (if (== count 0)
+                        "[Not completed]"
+                        (java-str "[Not completed, " count " dependents]"))
+                  (and (instance? AltResult r) (some? (.-ex (cast AltResult r))))
+                    (java-str "[Completed exceptionally: "
+                              (.getName (.getClass (.-ex (cast AltResult r))))
+                              "]")
+                  :else "[Completed normally]"))))
+
+  (method ^:public newIncompleteFuture :type-params [U] ^{:tag (CompletableFuture U)} [this]
+    (CompletableFuture.))
+
+  (method ^:public defaultExecutor ^Executor [this] ASYNC_POOL)
+
+  (method ^:public copy ^{:tag (CompletableFuture T)} [this]
+    (CompletableFuture/uniCopyStage this))
+
+  (method ^:public minimalCompletionStage ^{:tag (CompletionStage T)} [this]
+    (.uniAsMinimalStage this))
+
+  (method ^:public completeAsync ^{:tag (CompletableFuture T)} [this
+                                                                ^{:tag (Supplier (? extends T))} supplier
+                                                                ^Executor executor]
+    (.execute executor (AsyncSupply. this (cast Supplier (Objects/requireNonNull supplier))))
+    this)
+
+  (method ^:public completeAsync ^{:tag (CompletableFuture T)} [this
+                                                                ^{:tag (Supplier (? extends T))} supplier]
+    (.completeAsync this supplier (.defaultExecutor this)))
+
+  (method ^:public orTimeout ^{:tag (CompletableFuture T)} [this ^long timeout ^TimeUnit unit]
+    (.arrangeTimeout this (.toNanos unit timeout) (Timeout. this nil true))
+    this)
+
+  (method ^:public completeOnTimeout ^{:tag (CompletableFuture T)} [this ^T value ^long timeout
+                                                                    ^TimeUnit unit]
+    (.arrangeTimeout this (.toNanos unit timeout) (Timeout. this value false))
+    this)
+
+  (defclass ^:static ^:final Timeout
+    :implements [Runnable]
+    :type-params [U]
+
+    (field ^:final ^{:tag (CompletableFuture U)} f)
+
+    (field ^:final ^U value)
+
+    (field ^:final ^boolean exceptional)
+
+    (constructor [this ^{:tag (CompletableFuture U)} f ^U value ^boolean exceptional]
+      (set! (.-f this) f)
+      (set! (.-value this) value)
+      (set! (.-exceptional this) exceptional))
+
+    (method ^:public run ^void [this]
+      (when (and (some? f) (not (.isDone f)))
+        (if exceptional (.completeExceptionally f (TimeoutException.)) (.complete f value)))))
+
+  (defclass ^:static ^:final Canceller
+    :implements [(BiConsumer Object Throwable)]
+
+    (field ^:final ^{:tag (Future ?)} f)
+
+    (constructor [this ^{:tag (Future ?)} f] (set! (.-f this) f))
+
+    (method ^:public accept ^void [this ignore ^Throwable ex]
+      (when (some? f) (.cancel f false))))
+
+  (method ^:private arrangeTimeout :type-params [U] ^void [this ^long nanoDelay
+                                                           ^{:tag (Timeout U)} onTimeout]
+    (let [e ASYNC_POOL]
+      (when (nil? result)
+        (let [^{:tag (DelayScheduler$ScheduledForkJoinTask Void)} t
+                (DelayScheduler$ScheduledForkJoinTask. nanoDelay 0 true onTimeout nil e)]
+          (.whenComplete this (Canceller. t))
+          (.scheduleDelayedTask e t)))))
+
+  (method ^:public ^:static delayedExecutor ^Executor [^long delay ^TimeUnit unit ^Executor executor]
+    (DelayedExecutor. (.toNanos unit delay) (cast Executor (Objects/requireNonNull executor))))
+
+  (method ^:public ^:static delayedExecutor ^Executor [^long delay ^TimeUnit unit]
+    (DelayedExecutor. (.toNanos unit delay) ASYNC_POOL))
+
+  (method ^:public ^:static completedStage :type-params [U] ^{:tag (CompletionStage U)} [^U value]
+    (MinimalStage. (if (nil? value) ^Object NIL value)))
+
+  (method ^:public ^:static failedFuture :type-params [U] ^{:tag (CompletableFuture U)} [^Throwable ex]
+    (CompletableFuture. (AltResult. (cast Throwable (Objects/requireNonNull ex)))))
+
+  (method ^:public ^:static failedStage :type-params [U] ^{:tag (CompletionStage U)} [^Throwable ex]
+    (MinimalStage. (AltResult. (cast Throwable (Objects/requireNonNull ex)))))
+
+  (defclass ^:static ^:final DelayedExecutor
+    :implements [Executor]
+
+    (field ^:final ^long nanoDelay)
+
+    (field ^:final ^Executor executor)
+
+    (constructor [this ^long nanoDelay ^Executor executor]
+      (set! (.-nanoDelay this) nanoDelay)
+      (set! (.-executor this) executor))
+
+    (method ^:public execute ^void [this ^Runnable r]
+      (let [e ASYNC_POOL]
+        (.scheduleDelayedTask e
+                              (DelayScheduler$ScheduledForkJoinTask.
+                                nanoDelay
+                                0
+                                true
+                                (TaskSubmitter. executor r)
+                                nil
+                                e)))))
+
+  (defclass ^:static ^:final TaskSubmitter
+    :implements [Runnable]
+
+    (field ^:final ^Executor executor)
+
+    (field ^:final ^Runnable action)
+
+    (constructor [this ^Executor executor ^Runnable action]
+      (set! (.-executor this) executor)
+      (set! (.-action this) action))
+
+    (method ^:public run ^void [this] (.execute executor action)))
+
+  (defclass ^:static ^:final MinimalStage
+    :extends (CompletableFuture T)
+    :type-params [T]
+
+    (constructor [this])
+
+    (constructor [this r] (super. r))
+
+    (method ^:public newIncompleteFuture :type-params [U] ^{:tag (CompletableFuture U)} [this]
+      (MinimalStage.))
+
+    (method ^:public get ^T [this] (throw (UnsupportedOperationException.)))
+
+    (method ^:public get ^T [this ^long timeout ^TimeUnit unit]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public getNow ^T [this ^T valueIfAbsent]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public join ^T [this]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public resultNow ^T [this]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public exceptionNow ^Throwable [this]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public complete ^boolean [this ^T value]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public completeExceptionally ^boolean [this ^Throwable ex]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public cancel ^boolean [this ^boolean mayInterruptIfRunning]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public obtrudeValue ^void [this ^T value]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public obtrudeException ^void [this ^Throwable ex]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public isDone ^boolean [this]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public isCancelled ^boolean [this]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public isCompletedExceptionally ^boolean [this]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public state ^Future$State [this]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public getNumberOfDependents ^int [this]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public completeAsync ^{:tag (CompletableFuture T)} [this
+                                                                  ^{:tag (Supplier (? extends T))} supplier
+                                                                  ^Executor executor]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public completeAsync ^{:tag (CompletableFuture T)} [this
+                                                                  ^{:tag (Supplier (? extends T))} supplier]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public orTimeout ^{:tag (CompletableFuture T)} [this ^long timeout ^TimeUnit unit]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public completeOnTimeout ^{:tag (CompletableFuture T)} [this ^T value ^long timeout
+                                                                      ^TimeUnit unit]
+      (throw (UnsupportedOperationException.)))
+
+    (method ^:public toCompletableFuture ^{:tag (CompletableFuture T)} [this]
+      (let [^:mutable ^Object r nil]
+        (if (some? (set! r (.-result this)))
+            (CompletableFuture. (MinimalStage/encodeRelay r))
+            (let [^{:tag (CompletableFuture T)} d (CompletableFuture.)]
+              (.unipush this (UniRelay. d this))
+              d)))))
+
+  (field ^:private ^:static ^:final ^VarHandle RESULT)
+
+  (field ^:private ^:static ^:final ^VarHandle STACK)
+
+  (field ^:private ^:static ^:final ^VarHandle NEXT)
+
+  (static-initializer
+    (let [l (MethodHandles/lookup)]
+      (set! RESULT (MhUtil/findVarHandle l "result" Object))
+      (set! STACK (MhUtil/findVarHandle l "stack" Completion))
+      (set! NEXT (MhUtil/findVarHandle l Completion "next" Completion))
+      (let [^{:tag (Class ?)} ensureLoaded LockSupport] nil))))

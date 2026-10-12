@@ -1,0 +1,486 @@
+;; Converted from jdk26u src/java.base/unix/classes/java/lang/ProcessImpl.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.lang)
+
+(import '(java.io BufferedInputStream
+                  BufferedOutputStream
+                  ByteArrayInputStream
+                  FileDescriptor
+                  FileInputStream
+                  FileOutputStream
+                  IOException
+                  InputStream
+                  OutputStream)
+        '(java.nio.charset Charset)
+        '(java.util Arrays Locale Map)
+        '(java.util.concurrent CompletableFuture TimeUnit)
+        '(java.util.concurrent.locks Condition ReentrantLock)
+        '(java.util.function BiFunction)
+        '(jdk.internal.access JavaIOFileDescriptorAccess SharedSecrets)
+        '(jdk.internal.util OperatingSystem StaticProperty))
+
+(defclass ^:final ProcessImpl
+  :extends Process
+
+  (field ^:private ^:static ^:final ^JavaIOFileDescriptorAccess fdAccess
+    (SharedSecrets/getJavaIOFileDescriptorAccess))
+
+  (field ^:static ^:final ^boolean SUPPORTS_NORMAL_TERMINATION true)
+
+  (field ^:static ^:final ^Charset JNU_CHARSET (Charset/forName (StaticProperty/jnuEncoding)))
+
+  (field ^:private ^:final ^int pid)
+
+  (field ^:private ^:final ^ProcessHandleImpl processHandle)
+
+  (field ^:private ^int exitcode)
+
+  (field ^:private ^boolean hasExited)
+
+  (field ^:private ^:final ^ReentrantLock lock (ReentrantLock.))
+
+  (field ^:private ^:final ^Condition condition (.newCondition lock))
+
+  (field ^:private ^OutputStream stdin)
+
+  (field ^:private ^InputStream stdout)
+
+  (field ^:private ^InputStream stderr)
+
+  (defclass ^:private ^:static ^:enum LaunchMechanism
+    (constants FORK POSIX_SPAWN VFORK))
+
+  (method ^:private ^:static launchMechanism ^LaunchMechanism []
+    (let [s (System/getProperty "jdk.lang.Process.launchMechanism")]
+      (if (nil? s)
+          LaunchMechanism/POSIX_SPAWN
+          (do
+            (try
+              (let [lm (LaunchMechanism/valueOf (.toUpperCase s Locale/ROOT))]
+                (switch (OperatingSystem/current)
+                  LINUX
+                    (do
+                      (when (identical? lm LaunchMechanism/VFORK)
+                        (.println System/err "VFORK MODE DEPRECATED")
+                        (.println
+                          System/err
+                          "The VFORK launch mechanism has been deprecated for being dangerous.\nIt will be removed in a future java version. Either remove the\njdk.lang.Process.launchMechanism property (preferred) or use FORK mode\ninstead (-Djdk.lang.Process.launchMechanism=FORK).\n"))
+                      (return lm))
+                  (AIX MACOS) (when-not (identical? lm LaunchMechanism/VFORK) (return lm))))
+              (catch IllegalArgumentException e))
+            (throw (Error. (java-str
+                             s
+                             " is not a supported process launch mechanism on this platform: "
+                             (OperatingSystem/current))))))))
+
+  (field ^:private ^:static ^:final ^LaunchMechanism launchMechanism (ProcessImpl/launchMechanism))
+
+  (field ^:private ^:static ^:final ^byte/1 helperpath
+    (ProcessImpl/toCString (java-str (StaticProperty/javaHome) "/lib/jspawnhelper")))
+
+  (method ^:private ^:static toCString ^byte/1 [^String s]
+    (when (some? s)
+      (let [bytes (.getBytes s JNU_CHARSET)
+            result (new byte/1 (unchecked-add-int (alength bytes) 1))]
+        (System/arraycopy bytes 0 result 0 (alength bytes))
+        (aset result (unchecked-subtract-int (alength result) 1) (unchecked-byte 0))
+        result)))
+
+  (method ^:static start :throws [IOException] ^Process [^String/1 cmdarray
+                                                         ^{:tag (Map String String)} environment
+                                                         ^String dir
+                                                         ^ProcessBuilder$Redirect/1 redirects
+                                                         ^boolean redirectErrorStream]
+    (java-assert (and (some? cmdarray) (> (alength cmdarray) 0)))
+    (let [args (new byte/2 (unchecked-subtract-int (alength cmdarray) 1))
+          ^:mutable size (alength args)]
+      (loop [^int i 0]
+        (when (< i (alength args))
+          (aset args i (.getBytes (aget cmdarray (unchecked-add-int i 1)) JNU_CHARSET))
+          (set! size (unchecked-add-int size (alength (aget args i))))
+          (recur (unchecked-inc-int i))))
+      (let [argBlock (new byte/1 size)
+            ^:mutable ^int i 0]
+        (for-each [^byte/1 arg args]
+          (System/arraycopy arg 0 argBlock i (alength arg))
+          (set! i (unchecked-add-int i (unchecked-add-int (alength arg) 1))))
+        (let [envc (new int/1 1)
+              envBlock (ProcessEnvironment/toEnvironmentBlock environment envc)
+              ^:mutable ^int/1 std_fds nil
+              ^:mutable ^FileInputStream f0 nil
+              ^:mutable ^FileOutputStream f1 nil
+              ^:mutable ^FileOutputStream f2 nil]
+          (try
+            (let [^:mutable forceNullOutputStream false]
+              (if (nil? redirects)
+                  (set! std_fds (new int/1 [-1 -1 -1]))
+                  (do
+                    (set! std_fds (new int/1 3))
+                    (cond
+                      (identical? (aget redirects 0) ProcessBuilder$Redirect/PIPE)
+                        (aset std_fds 0 -1)
+                      (identical? (aget redirects 0) ProcessBuilder$Redirect/INHERIT)
+                        (aset std_fds 0 0)
+                      (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 0))
+                        (aset std_fds
+                              0
+                              (.get fdAccess
+                                    (.getFd (cast
+                                              ProcessBuilder$RedirectPipeImpl
+                                              (aget redirects 0)))))
+                      :else
+                        (do
+                          (set! f0 (FileInputStream. (.file (aget redirects 0))))
+                          (aset std_fds 0 (.get fdAccess (.getFD f0)))))
+                    (cond
+                      (identical? (aget redirects 1) ProcessBuilder$Redirect/PIPE)
+                        (aset std_fds 1 -1)
+                      (identical? (aget redirects 1) ProcessBuilder$Redirect/INHERIT)
+                        (aset std_fds 1 1)
+                      (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 1))
+                        (do
+                          (aset std_fds
+                                1
+                                (.get fdAccess
+                                      (.getFd (cast
+                                                ProcessBuilder$RedirectPipeImpl
+                                                (aget redirects 1)))))
+                          (set! forceNullOutputStream true))
+                      :else
+                        (do
+                          (set! f1
+                                (FileOutputStream.
+                                  (.file (aget redirects 1))
+                                  (.append (aget redirects 1))))
+                          (aset std_fds 1 (.get fdAccess (.getFD f1)))))
+                    (cond
+                      (identical? (aget redirects 2) ProcessBuilder$Redirect/PIPE)
+                        (aset std_fds 2 -1)
+                      (identical? (aget redirects 2) ProcessBuilder$Redirect/INHERIT)
+                        (aset std_fds 2 2)
+                      (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 2))
+                        (aset std_fds
+                              2
+                              (.get fdAccess
+                                    (.getFd (cast
+                                              ProcessBuilder$RedirectPipeImpl
+                                              (aget redirects 2)))))
+                      :else
+                        (do
+                          (set! f2
+                                (FileOutputStream.
+                                  (.file (aget redirects 2))
+                                  (.append (aget redirects 2))))
+                          (aset std_fds 2 (.get fdAccess (.getFD f2)))))))
+              (let [^Process p (ProcessImpl. (ProcessImpl/toCString (aget cmdarray 0))
+                                             argBlock
+                                             (alength args)
+                                             envBlock
+                                             (aget envc 0)
+                                             (ProcessImpl/toCString dir)
+                                             std_fds
+                                             forceNullOutputStream
+                                             redirectErrorStream)]
+                (when (some? redirects)
+                  (when (and (>= (aget std_fds 0) 0)
+                             (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 0)))
+                    (.set fdAccess
+                          (.getFd (cast ProcessBuilder$RedirectPipeImpl (aget redirects 0)))
+                          (aget std_fds 0)))
+                  (when (and (>= (aget std_fds 1) 0)
+                             (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 1)))
+                    (.set fdAccess
+                          (.getFd (cast ProcessBuilder$RedirectPipeImpl (aget redirects 1)))
+                          (aget std_fds 1)))
+                  (when (and (>= (aget std_fds 2) 0)
+                             (instance? ProcessBuilder$RedirectPipeImpl (aget redirects 2)))
+                    (.set fdAccess
+                          (.getFd (cast ProcessBuilder$RedirectPipeImpl (aget redirects 2)))
+                          (aget std_fds 2))))
+                p))
+            (finally
+              (try
+                (when (some? f0) (.close f0))
+                (finally
+                  (try (when (some? f1) (.close f1)) (finally (when (some? f2) (.close f2))))))))))))
+
+  (method ^:private ^:native forkAndExec :throws [IOException] ^int [this ^int mode
+                                                                     ^byte/1 helperpath ^byte/1 prog
+                                                                     ^byte/1 argBlock ^int argc
+                                                                     ^byte/1 envBlock ^int envc
+                                                                     ^byte/1 dir ^int/1 fds
+                                                                     ^boolean redirectErrorStream])
+
+  (constructor :throws [IOException] ^:private [this ^:final ^byte/1 prog ^:final ^byte/1 argBlock
+                                                ^:final ^int argc ^:final ^byte/1 envBlock
+                                                ^:final ^int envc ^:final ^byte/1 dir
+                                                ^:final ^int/1 fds
+                                                ^:final ^boolean forceNullOutputStream
+                                                ^:final ^boolean redirectErrorStream]
+    (set! pid
+          (.forkAndExec this
+                        (unchecked-add-int (.ordinal launchMechanism) 1)
+                        helperpath
+                        prog
+                        argBlock
+                        argc
+                        envBlock
+                        envc
+                        dir
+                        fds
+                        redirectErrorStream))
+    (set! processHandle (ProcessHandleImpl/getInternal pid))
+    (.initStreams this fds forceNullOutputStream))
+
+  (method ^:static newFileDescriptor ^FileDescriptor [^int fd]
+    (let [fileDescriptor (FileDescriptor.)] (.set fdAccess fileDescriptor fd) fileDescriptor))
+
+  (method initStreams :throws [IOException] ^void [this ^int/1 fds ^boolean forceNullOutputStream]
+    (switch (OperatingSystem/current)
+      (LINUX MACOS)
+        (do
+          (set! stdin
+                (if (== (aget fds 0) -1)
+                    ProcessBuilder$NullOutputStream/INSTANCE
+                    ^OutputStream (ProcessPipeOutputStream. (aget fds 0))))
+          (set! stdout
+                (if (or (== (aget fds 1) -1) forceNullOutputStream)
+                    ProcessBuilder$NullInputStream/INSTANCE
+                    ^InputStream (ProcessPipeInputStream. (aget fds 1))))
+          (set! stderr
+                (if (== (aget fds 2) -1)
+                    ProcessBuilder$NullInputStream/INSTANCE
+                    ^InputStream (ProcessPipeInputStream. (aget fds 2))))
+          (.handle (ProcessHandleImpl/completion pid true)
+                   (lambda BiFunction [^Integer exitcode ^Throwable throwable]
+                     (.lock lock)
+                     (try
+                       (set! (.-exitcode this) (if (nil? exitcode) -1 (.intValue exitcode)))
+                       (set! (.-hasExited this) true)
+                       (.signalAll condition)
+                       (finally (.unlock lock)))
+                     (when (instance? ProcessPipeInputStream stdout)
+                       (.processExited (cast ProcessPipeInputStream stdout)))
+                     (when (instance? ProcessPipeInputStream stderr)
+                       (.processExited (cast ProcessPipeInputStream stderr)))
+                     (when (instance? ProcessPipeOutputStream stdin)
+                       (.processExited (cast ProcessPipeOutputStream stdin)))
+                     nil)))
+      AIX
+        (do
+          (set! stdin
+                (if (== (aget fds 0) -1)
+                    ProcessBuilder$NullOutputStream/INSTANCE
+                    ^OutputStream (ProcessPipeOutputStream. (aget fds 0))))
+          (set! stdout
+                (if (or (== (aget fds 1) -1) forceNullOutputStream)
+                    ProcessBuilder$NullInputStream/INSTANCE
+                    ^InputStream (DeferredCloseProcessPipeInputStream. (aget fds 1))))
+          (set! stderr
+                (if (== (aget fds 2) -1)
+                    ProcessBuilder$NullInputStream/INSTANCE
+                    ^InputStream (DeferredCloseProcessPipeInputStream. (aget fds 2))))
+          (.handle (ProcessHandleImpl/completion pid true)
+                   (lambda BiFunction [^Integer exitcode ^Throwable throwable]
+                     (.lock lock)
+                     (try
+                       (set! (.-exitcode this) (if (nil? exitcode) -1 (.intValue exitcode)))
+                       (set! (.-hasExited this) true)
+                       (.signalAll condition)
+                       (finally (.unlock lock)))
+                     (when (instance? DeferredCloseProcessPipeInputStream stdout)
+                       (.processExited (cast DeferredCloseProcessPipeInputStream stdout)))
+                     (when (instance? DeferredCloseProcessPipeInputStream stderr)
+                       (.processExited (cast DeferredCloseProcessPipeInputStream stderr)))
+                     (when (instance? ProcessPipeOutputStream stdin)
+                       (.processExited (cast ProcessPipeOutputStream stdin)))
+                     nil)))
+      (throw (AssertionError. (java-str "Unsupported platform: " (OperatingSystem/current))))))
+
+  (method ^:public getOutputStream ^OutputStream [this] stdin)
+
+  (method ^:public getInputStream ^InputStream [this] stdout)
+
+  (method ^:public getErrorStream ^InputStream [this] stderr)
+
+  (method ^:public waitFor :throws [InterruptedException] ^int [this]
+    (.lock lock)
+    (try (while (not hasExited) (.await condition)) exitcode (finally (.unlock lock))))
+
+  (method ^:public waitFor :throws [InterruptedException] ^boolean [this ^long timeout
+                                                                    ^TimeUnit unit]
+    (.lock lock)
+    (try
+      (let [^:mutable remainingNanos (.toNanos unit timeout)]
+        (while (and (> remainingNanos 0) (not hasExited))
+          (set! remainingNanos (.awaitNanos condition remainingNanos)))
+        hasExited)
+      (finally (.unlock lock))))
+
+  (method ^:public exitValue ^int [this]
+    (.lock lock)
+    (try
+      (when-not hasExited (throw (IllegalThreadStateException. "process hasn't exited")))
+      exitcode
+      (finally (.unlock lock))))
+
+  (method ^:private destroy ^void [this ^boolean force]
+    (switch (OperatingSystem/current)
+      (LINUX MACOS AIX)
+        (do
+          (.lock lock)
+          (try (when-not hasExited (.destroyProcess processHandle force)) (finally (.unlock lock)))
+          (try (.close stdin) (catch IOException ignored))
+          (try (.close stdout) (catch IOException ignored))
+          (try (.close stderr) (catch IOException ignored)))
+      (throw (AssertionError. (java-str "Unsupported platform: " (OperatingSystem/current))))))
+
+  (method ^:public onExit ^{:tag (CompletableFuture Process)} [this]
+    (.handleAsync (ProcessHandleImpl/completion pid false)
+                  (lambda BiFunction ^Process [^Integer unusedExitStatus ^Throwable unusedThrowable]
+                    (let [^:mutable interrupted false]
+                      (while true
+                        (try
+                          (.waitFor this)
+                          (break)
+                          (catch InterruptedException ie (set! interrupted true))))
+                      (when interrupted (.interrupt (Thread/currentThread)))
+                      this))))
+
+  (method ^:public toHandle ^ProcessHandle [this] processHandle)
+
+  (method ^:public supportsNormalTermination ^boolean [this]
+    ProcessImpl/SUPPORTS_NORMAL_TERMINATION)
+
+  (method ^:public destroy ^void [this] (.destroy this false))
+
+  (method ^:public destroyForcibly ^Process [this]
+    (.destroy this true)
+    this)
+
+  (method ^:public pid ^long [this] pid)
+
+  (method ^:public isAlive ^boolean [this]
+    (.lock lock)
+    (try (not hasExited) (finally (.unlock lock))))
+
+  (method ^:public toString ^String [this]
+    (.toString (.append (.append (.append (.append (StringBuilder. "Process[pid=") pid)
+                                          ", exitValue=")
+                                 (if hasExited (Integer/valueOf exitcode) "\"not exited\""))
+                        "]")))
+
+  (method ^:private ^:static ^:native init ^void [])
+
+  (static-initializer (ProcessImpl/init))
+
+  (defclass ^:private ^:static ProcessPipeInputStream
+    :extends BufferedInputStream
+
+    (field ^:private ^:final closeLock (Object.))
+
+    (constructor [this ^int fd]
+      (super. (Process$PipeInputStream. (ProcessImpl/newFileDescriptor fd))))
+
+    (method ^:private ^:static drainInputStream :throws [IOException] ^byte/1 [^InputStream in]
+      (let [^:mutable ^int n 0
+            ^:mutable ^int j 0
+            ^:mutable ^byte/1 a nil]
+        (while (> (set! j (.available in)) 0)
+          (set! a (if (nil? a) (new byte/1 j) (Arrays/copyOf a (unchecked-add-int n j))))
+          (set! n (unchecked-add-int n (.read in a n j))))
+        (if (or (nil? a) (== n (alength a))) a (Arrays/copyOf a n))))
+
+    (method ^:synchronized processExited ^void [this]
+      (locking closeLock
+        (try
+          (let [in (.-in this)]
+            (when (some? in)
+              (let [stragglers (ProcessPipeInputStream/drainInputStream in)]
+                (.close in)
+                (set! (.-in this)
+                      (if (nil? stragglers)
+                          ProcessBuilder$NullInputStream/INSTANCE
+                          ^InputStream (ByteArrayInputStream. stragglers))))))
+          (catch IOException ignored))))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (locking closeLock (.close super))))
+
+  (defclass ^:private ^:static ProcessPipeOutputStream
+    :extends BufferedOutputStream
+
+    (constructor [this ^int fd]
+      (super. (Process$PipeOutputStream. (ProcessImpl/newFileDescriptor fd))))
+
+    (method ^:synchronized processExited ^void [this]
+      (let [out (.-out this)]
+        (when (some? out)
+          (try (.close out) (catch IOException ignored))
+          (set! (.-out this) ProcessBuilder$NullOutputStream/INSTANCE)))))
+
+  (defclass ^:private ^:static DeferredCloseProcessPipeInputStream
+    :extends BufferedInputStream
+
+    (field ^:private ^:final closeLock (Object.))
+
+    (field ^:private ^int useCount 0)
+
+    (field ^:private ^boolean closePending false)
+
+    (constructor [this ^int fd]
+      (super. (Process$PipeInputStream. (ProcessImpl/newFileDescriptor fd))))
+
+    (method ^:private drainInputStream :throws [IOException] ^InputStream [this ^InputStream in]
+      (let [^:mutable ^int n 0
+            ^:mutable ^int j 0
+            ^:mutable ^byte/1 a nil]
+        (locking closeLock (when (nil? (.-buf this)) (return nil)) (set! j (.available in)))
+        (while (> j 0)
+          (set! a (if (nil? a) (new byte/1 j) (Arrays/copyOf a (unchecked-add-int n j))))
+          (locking closeLock
+            (when (nil? (.-buf this)) (return nil))
+            (set! n (unchecked-add-int n (.read in a n j)))
+            (set! j (.available in))))
+        (if (nil? a)
+            ProcessBuilder$NullInputStream/INSTANCE
+            ^InputStream (ByteArrayInputStream.
+                           ^byte/1 (if (== n (alength a)) a (Arrays/copyOf a n))))))
+
+    (method ^:synchronized processExited ^void [this]
+      (try
+        (let [in (.-in this)]
+          (when (some? in)
+            (let [stragglers (.drainInputStream this in)] (.close in) (set! (.-in this) stragglers))))
+        (catch IOException ignored)))
+
+    (method ^:private raise ^void [this]
+      (locking closeLock (set! useCount (unchecked-inc-int useCount))))
+
+    (method ^:private lower :throws [IOException] ^void [this]
+      (locking closeLock
+        (set! useCount (unchecked-dec-int useCount))
+        (when (and (== useCount 0) closePending) (set! closePending false) (.close super))))
+
+    (method ^:public read :throws [IOException] ^int [this]
+      (.raise this)
+      (try (.read super) (finally (.lower this))))
+
+    (method ^:public read :throws [IOException] ^int [this ^byte/1 b]
+      (.raise this)
+      (try (.read super b) (finally (.lower this))))
+
+    (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+      (.raise this)
+      (try (.read super b off len) (finally (.lower this))))
+
+    (method ^:public skip :throws [IOException] ^long [this ^long n]
+      (.raise this)
+      (try (.skip super n) (finally (.lower this))))
+
+    (method ^:public available :throws [IOException] ^int [this]
+      (.raise this)
+      (try (.available super) (finally (.lower this))))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (locking closeLock (if (== useCount 0) (.close super) (set! closePending true))))))

@@ -1,0 +1,444 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/jrt/HostPath.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.jrt)
+
+(import '(java.io File IOException)
+        '(java.net URI URISyntaxException)
+        '(java.nio.charset StandardCharsets)
+        '(java.nio.file InvalidPathException
+                        LinkOption
+                        NoSuchFileException
+                        Path
+                        ProviderMismatchException)
+        '(java.util Arrays Objects))
+
+(defclass ^:public ^:final HostPath
+  :implements [Path]
+
+  (field ^:private ^:final ^String path)
+
+  (field ^:private ^:volatile ^int/1 offsets)
+
+  (field ^:private ^int hash)
+
+  (constructor ^:private [this ^String normalized]
+    (set! (.-path this) normalized))
+
+  (method ^:public ^:static of ^Path [^String first & ^String/1 more]
+    (let [^:mutable ^String path nil]
+      (if (== (alength more) 0)
+          (set! path first)
+          (let [sb (StringBuilder.)]
+            (.append sb first)
+            (for-each [^String segment more]
+              (when-not (.isEmpty segment)
+                (when (> (.length sb) 0) (.append sb \/))
+                (.append sb segment)))
+            (set! path (.toString sb))))
+      (HostPath. (HostPath/normalizeAndCheck path))))
+
+  (method ^:public ^:static ofFile ^Path [^String path]
+    (HostPath. (HostPath/normalizeAndCheck path)))
+
+  (method ^:public ^:static of ^Path [^URI uri]
+    (when-not (.isAbsolute uri) (throw (IllegalArgumentException. "URI is not absolute")))
+    (let [scheme (.getScheme uri)]
+      (when-not (.equalsIgnoreCase scheme "file")
+        (throw (IllegalArgumentException. "URI scheme is not \"file\"")))
+      (when (.isOpaque uri) (throw (IllegalArgumentException. "URI is not hierarchical")))
+      (when (some? (.getRawAuthority uri))
+        (throw (IllegalArgumentException. "URI has an authority component")))
+      (when (some? (.getRawFragment uri))
+        (throw (IllegalArgumentException. "URI has a fragment component")))
+      (when (some? (.getRawQuery uri))
+        (throw (IllegalArgumentException. "URI has a query component")))
+      (let [^:mutable p (.getPath uri)]
+        (when (.isEmpty p) (throw (IllegalArgumentException. "URI path component is empty")))
+        (when (and (.endsWith p "/") (> (.length p) 1))
+          (set! p (.substring p 0 (unchecked-subtract-int (.length p) 1))))
+        (HostPath. (HostPath/normalizeAndCheck p)))))
+
+  (method ^:static normalizeAndCheck ^String [^String input]
+    (let [n (.length input)
+          ^:mutable ^char prevChar 0]
+      (loop [^int i 0]
+        (when (< i n)
+          (let [c (.charAt input i)]
+            (when (and (== c \/) (== prevChar \/))
+              (return (HostPath/normalize input n (unchecked-subtract-int i 1))))
+            (HostPath/checkNotNul input c)
+            (set! prevChar c)
+            (recur (unchecked-inc-int i)))))
+      (if (and (== prevChar \/) (> n 1)) (.substring input 0 (unchecked-subtract-int n 1)) input)))
+
+  (method ^:private ^:static checkNotNul ^void [^String input ^char c]
+    (when (== c \u0000) (throw (InvalidPathException. input "Nul character not allowed"))))
+
+  (method ^:private ^:static normalize ^String [^String input ^int len ^int off]
+    (if (== len 0)
+        input
+        (let [^:mutable n len]
+          (while (and (> n 0) (== (.charAt input (unchecked-subtract-int n 1)) \/))
+            (set! n (unchecked-dec-int n)))
+          (if (== n 0)
+              "/"
+              (let [sb (StringBuilder. (.length input))]
+                (when (> off 0) (.append sb input 0 off))
+                (let [^:mutable ^char prevChar 0]
+                  (loop [^int i off]
+                    (when (< i n)
+                      (let [c (.charAt input i)]
+                        (if (and (== c \/) (== prevChar \/))
+                            (recur (unchecked-inc-int i))
+                            (do
+                              (HostPath/checkNotNul input c)
+                              (.append sb c)
+                              (set! prevChar c)
+                              (recur (unchecked-inc-int i)))))))
+                  (.toString sb)))))))
+
+  (method ^:private ^:static toHostPath ^HostPath [^Path obj]
+    (when (nil? obj) (throw (NullPointerException.)))
+    (when-not (instance? HostPath obj) (throw (ProviderMismatchException.)))
+    (cast HostPath obj))
+
+  (method ^:private offsets ^int/1 [this]
+    (let [^:mutable result offsets]
+      (when (nil? result)
+        (let [^:mutable ^int count 0
+              ^:mutable ^int index 0
+              n (.length path)]
+          (if (== n 0)
+              (set! count 1)
+              (while (< index n)
+                (let [c (.charAt path
+                                 (let [old-1 index] (set! index (unchecked-inc-int index)) old-1))]
+                  (when-not (== c \/)
+                    (set! count (unchecked-inc-int count))
+                    (while (and (< index n) (not (== (.charAt path index) \/)))
+                      (set! index (unchecked-inc-int index)))))))
+          (set! result (new int/1 count))
+          (set! count 0)
+          (set! index 0)
+          (while (< index n)
+            (let [c (.charAt path index)]
+              (if (== c \/)
+                  (set! index (unchecked-inc-int index))
+                  (do
+                    (aset result count index)
+                    (set! count (unchecked-inc-int count))
+                    (set! index (unchecked-inc-int index))
+                    (while (and (< index n) (not (== (.charAt path index) \/)))
+                      (set! index (unchecked-inc-int index)))))))
+          (set! offsets result)))
+      result))
+
+  (method ^:private isEmpty ^boolean [this] (.isEmpty path))
+
+  (method ^:private ^:static emptyPath ^HostPath [] (HostPath. ""))
+
+  (method ^:private hasDotOrDotDot ^boolean [this]
+    (let [n (.getNameCount this)]
+      (loop [^int i 0]
+        (when (< i n)
+          (let [name (.-path (cast HostPath (.getName this i)))]
+            (if (or (.equals name ".") (.equals name ".."))
+                (return true)
+                (recur (unchecked-inc-int i))))))
+      false))
+
+  (method ^:public isAbsolute ^boolean [this] (.startsWith path "/"))
+
+  (method ^:public getRoot ^Path [this]
+    (when (.isAbsolute this) ^Path (HostPath. "/")))
+
+  (method ^:public getFileName ^Path [this]
+    (let [offs (.offsets this)
+          count (alength offs)]
+      (when-not (== count 0)
+        (if (and (and (== count 1) (not (.isEmpty path))) (not (== (.charAt path 0) \/)))
+            this
+            (HostPath. (.substring path (aget offs (unchecked-subtract-int count 1))))))))
+
+  (method ^:public getParent ^Path [this]
+    (let [offs (.offsets this)
+          count (alength offs)]
+      (when-not (== count 0)
+        (let [len (unchecked-subtract-int (aget offs (unchecked-subtract-int count 1)) 1)]
+          (if (<= len 0) (.getRoot this) (HostPath. (.substring path 0 len)))))))
+
+  (method ^:public getNameCount ^int [this] (alength (.offsets this)))
+
+  (method ^:public getName ^Path [this ^int index]
+    (let [offs (.offsets this)]
+      (when (or (< index 0) (>= index (alength offs))) (throw (IllegalArgumentException.)))
+      (let [begin (aget offs index)
+            ^int end (if (== index (unchecked-subtract-int (alength offs) 1))
+                         (.length path)
+                         (unchecked-subtract-int (aget offs (unchecked-add-int index 1)) 1))]
+        (HostPath. (.substring path begin end)))))
+
+  (method ^:public subpath ^Path [this ^int beginIndex ^int endIndex]
+    (let [offs (.offsets this)]
+      (when (or (or (or (< beginIndex 0) (>= beginIndex (alength offs)))
+                    (> endIndex (alength offs)))
+                (>= beginIndex endIndex))
+        (throw (IllegalArgumentException.)))
+      (let [begin (aget offs beginIndex)
+            ^int end (if (== endIndex (alength offs))
+                         (.length path)
+                         (unchecked-subtract-int (aget offs endIndex) 1))]
+        (HostPath. (.substring path begin end)))))
+
+  (method ^:public startsWith ^boolean [this ^Path other]
+    (if (not (instance? HostPath (Objects/requireNonNull other)))
+        false
+        (let [that (cast HostPath other)]
+          (if (> (.length (.-path that)) (.length path))
+              false
+              (let [thisOffsetCount (.getNameCount this)
+                    thatOffsetCount (.getNameCount that)]
+                (cond
+                  (and (== thatOffsetCount 0) (.isAbsolute this)) (if (.isEmpty that) false true)
+                  (> thatOffsetCount thisOffsetCount) false
+                  (and (== thatOffsetCount thisOffsetCount)
+                       (not (== (.length path) (.length (.-path that)))))
+                    false
+                  :else
+                    (let [thisOffs (.offsets this)
+                          thatOffs (.offsets that)]
+                      (loop [^int i 0]
+                        (if (< i thatOffsetCount)
+                            (if (not (== (aget thisOffs i) (aget thatOffs i)))
+                                (return false)
+                                (recur (unchecked-inc-int i)))
+                            nil))
+                      (let [^:mutable ^int i 0]
+                        (while (< i (.length (.-path that)))
+                          (when-not (== (.charAt (.-path this) i) (.charAt (.-path that) i))
+                            (return false))
+                          (set! i (unchecked-inc-int i)))
+                        (if (and (< i (.length path)) (not (== (.charAt (.-path this) i) \/)))
+                            false
+                            true)))))))))
+
+  (method ^:public endsWith ^boolean [this ^Path other]
+    (if (not (instance? HostPath (Objects/requireNonNull other)))
+        false
+        (let [that (cast HostPath other)
+              thisLen (.length path)
+              thatLen (.length (.-path that))]
+          (cond
+            (> thatLen thisLen) false
+            (and (> thisLen 0) (== thatLen 0)) false
+            (and (.isAbsolute that) (not (.isAbsolute this))) false
+            :else
+              (let [thisOffsetCount (.getNameCount this)
+                    thatOffsetCount (.getNameCount that)]
+                (if (> thatOffsetCount thisOffsetCount)
+                    false
+                    (do
+                      (cond
+                        (== thatOffsetCount thisOffsetCount)
+                          (do
+                            (when (== thisOffsetCount 0) (return true))
+                            (let [^:mutable expectedLen thisLen]
+                              (when (and (.isAbsolute this) (not (.isAbsolute that)))
+                                (set! expectedLen (unchecked-dec-int expectedLen)))
+                              (when-not (== thatLen expectedLen) (return false))))
+                        (.isAbsolute that) (return false))
+                      (let [thisPos (aget (.offsets this)
+                                          (unchecked-subtract-int thisOffsetCount thatOffsetCount))
+                            thatPos (aget (.offsets that) 0)]
+                        (.equals (.substring path thisPos) (.substring (.-path that) thatPos))))))))))
+
+  (method ^:public normalize ^Path [this]
+    (let [count (.getNameCount this)]
+      (if (or (== count 0) (.isEmpty this))
+          this
+          (let [offs (.offsets this)
+                ignore (new boolean/1 count)
+                size (new int/1 count)
+                ^:mutable remaining count
+                ^:mutable hasDotDot false
+                isAbsolute (.isAbsolute this)]
+            (loop [^int i 0]
+              (when (< i count)
+                (let [begin (aget offs i)
+                      ^int len (if (== i (unchecked-subtract-int (alength offs) 1))
+                                   (unchecked-subtract-int (.length path) begin)
+                                   (unchecked-subtract-int
+                                     (unchecked-subtract-int
+                                       (aget offs (unchecked-add-int i 1))
+                                       begin)
+                                     1))]
+                  (aset size i len)
+                  (if (== (.charAt path begin) \.)
+                      (cond
+                        (== len 1)
+                          (do
+                            (aset ignore i true)
+                            (set! remaining (unchecked-dec-int remaining))
+                            (recur (unchecked-inc-int i)))
+                        (== (.charAt path (unchecked-add-int begin 1)) \.)
+                          (do (set! hasDotDot true) (recur (unchecked-inc-int i)))
+                        :else (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i))))))
+            (when hasDotDot
+              (let [^:mutable ^int prevRemaining 0]
+                (loop []
+                  (set! prevRemaining remaining)
+                  (let [^:mutable ^int prevName -1]
+                    (loop [^int i 0]
+                      (when (< i count)
+                        (cond
+                          (aget ignore i) (recur (unchecked-inc-int i))
+                          (not (== (aget size i) 2))
+                            (do (set! prevName i) (recur (unchecked-inc-int i)))
+                          :else
+                            (let [begin (aget offs i)]
+                              (cond
+                                (or (not (== (.charAt path begin) \.))
+                                    (not (== (.charAt path (unchecked-add-int begin 1)) \.)))
+                                  (do (set! prevName i) (recur (unchecked-inc-int i)))
+                                (>= prevName 0)
+                                  (do
+                                    (aset ignore prevName true)
+                                    (aset ignore i true)
+                                    (set! remaining (unchecked-subtract-int remaining 2))
+                                    (set! prevName -1)
+                                    (recur (unchecked-inc-int i)))
+                                isAbsolute
+                                  (let [^:mutable hasPrevious false]
+                                    (loop [^int j 0]
+                                      (if (< j i)
+                                          (if (not (aget ignore j))
+                                              (set! hasPrevious true)
+                                              (recur (unchecked-inc-int j)))
+                                          nil))
+                                    (if (not hasPrevious)
+                                        (do
+                                          (aset ignore i true)
+                                          (set! remaining (unchecked-dec-int remaining))
+                                          (recur (unchecked-inc-int i)))
+                                        (recur (unchecked-inc-int i))))
+                                :else (recur (unchecked-inc-int i))))))))
+                  (when (> prevRemaining remaining) (recur)))))
+            (cond
+              (== remaining count) this
+              (== remaining 0) (if isAbsolute ^Path (HostPath. "/") ^Path (HostPath/emptyPath))
+              :else
+                (let [sb (StringBuilder. (.length path))]
+                  (when isAbsolute (.append sb \/))
+                  (loop [^int i 0]
+                    (if (< i count)
+                        (if (not (aget ignore i))
+                            (do
+                              (.append sb
+                                       path
+                                       (aget offs i)
+                                       (unchecked-add-int (aget offs i) (aget size i)))
+                              (if (> (set! remaining (unchecked-dec-int remaining)) 0)
+                                  (do (.append sb \/) (recur (unchecked-inc-int i)))
+                                  (recur (unchecked-inc-int i))))
+                            (recur (unchecked-inc-int i)))
+                        nil))
+                  (HostPath. (.toString sb))))))))
+
+  (method ^:public resolve ^Path [this ^Path obj]
+    (let [other (.-path (HostPath/toHostPath obj))]
+      (cond
+        (.startsWith other "/") obj
+        (.isEmpty other) this
+        (.isEmpty path) obj
+        (.equals path "/") (HostPath. (java-str "/" other))
+        :else (HostPath. (java-str path "/" other)))))
+
+  (method ^:public relativize ^Path [this ^Path obj]
+    (let [^:mutable child (HostPath/toHostPath obj)]
+      (if (.equals child this)
+          (HostPath/emptyPath)
+          (do
+            (when-not (= (.isAbsolute this) (.isAbsolute child))
+              (throw (IllegalArgumentException. "'other' is different type of Path")))
+            (if (.isEmpty this)
+                child
+                (let [^:mutable base this]
+                  (when (or (.hasDotOrDotDot base) (.hasDotOrDotDot child))
+                    (set! base (cast HostPath (.normalize base)))
+                    (set! child (cast HostPath (.normalize child))))
+                  (let [baseCount (.getNameCount base)
+                        childCount (.getNameCount child)
+                        n (Math/min baseCount childCount)
+                        ^:mutable ^int i 0]
+                    (while (< i n)
+                      (when-not (.equals (.getName base i) (.getName child i)) (break))
+                      (set! i (unchecked-inc-int i)))
+                    (let [^:mutable ^HostPath childRemaining nil
+                          ^:mutable ^boolean isChildEmpty false]
+                      (if (== i childCount)
+                          (do (set! childRemaining (HostPath/emptyPath)) (set! isChildEmpty true))
+                          (do
+                            (set! childRemaining (cast HostPath (.subpath child i childCount)))
+                            (set! isChildEmpty (.isEmpty childRemaining))))
+                      (if (== i baseCount)
+                          childRemaining
+                          (let [baseRemaining (cast HostPath (.subpath base i baseCount))]
+                            (when (.hasDotOrDotDot baseRemaining)
+                              (throw (IllegalArgumentException.
+                                       (java-str
+                                         "Unable to compute relative  path from "
+                                         this
+                                         " to "
+                                         obj))))
+                            (if (.isEmpty baseRemaining)
+                                childRemaining
+                                (let [^:mutable dotdots (.getNameCount baseRemaining)]
+                                  (if (== dotdots 0)
+                                      childRemaining
+                                      (let [sb (StringBuilder.)]
+                                        (while (> dotdots 0)
+                                          (.append sb "..")
+                                          (if isChildEmpty
+                                              (when (> dotdots 1) (.append sb \/))
+                                              (.append sb \/))
+                                          (set! dotdots (unchecked-dec-int dotdots)))
+                                        (.append sb (.-path childRemaining))
+                                        (HostPath. (.toString sb))))))))))))))))
+
+  (method ^:public toUri ^URI [this]
+    (let [^:mutable abs (.toString (.toAbsolutePath this))]
+      (when (and (not (.endsWith abs "/")) (.isDirectory (File. abs)))
+        (set! abs (java-str abs "/")))
+      (try (URI. "file" "" abs nil nil) (catch URISyntaxException x (throw (AssertionError. x))))))
+
+  (method ^:public toAbsolutePath ^Path [this]
+    (if (.isAbsolute this)
+        this
+        (.resolve (HostPath. (HostPath/normalizeAndCheck (System/getProperty "user.dir"))) this)))
+
+  (method ^:public toRealPath :throws [IOException] ^Path [this & ^LinkOption/1 options]
+    (let [f (File. (.toString (.toAbsolutePath this)))]
+      (when-not (.exists f) (throw (NoSuchFileException. path)))
+      (HostPath. (HostPath/normalizeAndCheck (.getCanonicalPath f)))))
+
+  (method ^:public toFile ^File [this] (File. path))
+
+  (method ^:private bytes ^byte/1 [this]
+    (.getBytes path StandardCharsets/UTF_8))
+
+  (method ^:public compareTo ^int [this ^Path other]
+    (Arrays/compareUnsigned (.bytes this) (.bytes (cast HostPath other))))
+
+  (method ^:public equals ^boolean [this ob]
+    (if-instance [^HostPath p ob] (== (.compareTo this p) 0) false))
+
+  (method ^:public hashCode ^int [this]
+    (let [^:mutable h hash]
+      (when (== h 0)
+        (for-each [^byte b (.bytes this)]
+          (set! h (unchecked-add-int (unchecked-multiply-int 31 h) (bit-and-int b 0xff))))
+        (set! hash h))
+      h))
+
+  (method ^:public toString ^String [this] path))

@@ -1,0 +1,424 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/ParseUtil.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'sun.net.www)
+
+(import '(java.io File)
+        '(java.net MalformedURLException URI URISyntaxException URL)
+        '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.charset CharacterCodingException CharsetEncoder CodingErrorAction)
+        '(java.util HexFormat)
+        '(jdk.internal.util Exceptions Exceptions$SensitiveInfo)
+        '(sun.nio.cs UTF_8))
+
+(defclass ^:public ^:final ParseUtil
+  (field ^:private ^:static ^:final ^HexFormat HEX_UPPERCASE (.withUpperCase (HexFormat/of)))
+
+  (constructor ^:private [this])
+
+  (method ^:public ^:static encodePath ^String [^String path]
+    (ParseUtil/encodePath path true))
+
+  (method ^:public ^:static encodePath ^String [^String path ^boolean flag]
+    (if (and flag (not (== File/separatorChar \/)))
+        (ParseUtil/encodePath path 0 File/separatorChar)
+        (let [index (ParseUtil/firstEncodeIndex path)]
+          (if (> index -1) (ParseUtil/encodePath path index \/) path))))
+
+  (method ^:private ^:static firstEncodeIndex ^int [^String path]
+    (let [len (.length path)]
+      (loop [^int i 0]
+        (when (< i len)
+          (let [c (.charAt path i)]
+            (cond
+              (or (or (and (>= c \a) (<= c \z)) (and (>= c \&) (<= c \:)))
+                  (and (>= c \A) (<= c \Z)))
+                (recur (unchecked-inc-int i))
+              (or (> c 0x007F) (ParseUtil/match c L_ENCODED H_ENCODED)) (return i)
+              :else (recur (unchecked-inc-int i))))))
+      -1))
+
+  (method ^:private ^:static encodePath ^String [^String path ^int index ^char sep]
+    (let [pathCC (.toCharArray path)
+          ^:mutable retCC (new char/1
+                               (unchecked-subtract-int
+                                 (unchecked-add-int (unchecked-multiply-int (alength pathCC) 2) 16)
+                                 index))]
+      (when (> index 0) (System/arraycopy pathCC 0 retCC 0 index))
+      (let [^:mutable retLen index]
+        (loop [^int i index]
+          (when (< i (alength pathCC))
+            (let [c (aget pathCC i)]
+              (cond
+                (== c sep) (do (aset retCC retLen \/) (set! retLen (unchecked-inc-int retLen)))
+                (<= c 0x007F)
+                  (cond
+                    (or (or (and (>= c \a) (<= c \z)) (and (>= c \A) (<= c \Z)))
+                        (and (>= c \0) (<= c \9)))
+                      (do (aset retCC retLen c) (set! retLen (unchecked-inc-int retLen)))
+                    (ParseUtil/match c L_ENCODED H_ENCODED)
+                      (set! retLen (ParseUtil/escape retCC c retLen))
+                    :else (do (aset retCC retLen c) (set! retLen (unchecked-inc-int retLen))))
+                (> c 0x07FF)
+                  (do
+                    (set! retLen
+                          (ParseUtil/escape retCC
+                                            (unchecked-char
+                                              (bit-or-int
+                                                0xE0
+                                                (bit-and-int (bit-shift-right-int c 12) 0x0F)))
+                                            retLen))
+                    (set! retLen
+                          (ParseUtil/escape retCC
+                                            (unchecked-char
+                                              (bit-or-int
+                                                0x80
+                                                (bit-and-int (bit-shift-right-int c 6) 0x3F)))
+                                            retLen))
+                    (set! retLen
+                          (ParseUtil/escape retCC
+                                            (unchecked-char
+                                              (bit-or-int
+                                                0x80
+                                                (bit-and-int (bit-shift-right-int c 0) 0x3F)))
+                                            retLen)))
+                :else
+                  (do
+                    (set! retLen
+                          (ParseUtil/escape retCC
+                                            (unchecked-char
+                                              (bit-or-int
+                                                0xC0
+                                                (bit-and-int (bit-shift-right-int c 6) 0x1F)))
+                                            retLen))
+                    (set! retLen
+                          (ParseUtil/escape retCC
+                                            (unchecked-char
+                                              (bit-or-int
+                                                0x80
+                                                (bit-and-int (bit-shift-right-int c 0) 0x3F)))
+                                            retLen))))
+              (if (> (unchecked-add-int retLen 9) (alength retCC))
+                  (let [^:mutable newLen (unchecked-add-int
+                                           (unchecked-multiply-int (alength retCC) 2)
+                                           16)]
+                    (when (< newLen 0) (set! newLen Integer/MAX_VALUE))
+                    (let [buf (new char/1 newLen)]
+                      (System/arraycopy retCC 0 buf 0 retLen)
+                      (set! retCC buf)
+                      (recur (unchecked-inc-int i))))
+                  (recur (unchecked-inc-int i))))))
+        (String. retCC 0 retLen))))
+
+  (method ^:private ^:static escape ^int [^char/1 cc ^char c ^:mutable ^int index]
+    (aset cc index \%)
+    (set! index (unchecked-inc-int index))
+    (aset cc index (Character/forDigit (bit-and-int (bit-shift-right-int c 4) 0xF) 16))
+    (set! index (unchecked-inc-int index))
+    (aset cc index (Character/forDigit (bit-and-int c 0xF) 16))
+    (set! index (unchecked-inc-int index))
+    index)
+
+  (method ^:private ^:static unescape ^byte [^String s ^int i]
+    (unchecked-byte (Integer/parseInt s (unchecked-add-int i 1) (unchecked-add-int i 3) 16)))
+
+  (method ^:public ^:static decode ^String [^String s]
+    (let [n (.length s)]
+      (if (or (== n 0) (< (.indexOf s \%) 0))
+          s
+          (let [sb (StringBuilder. n)
+                bb (ByteBuffer/allocate n)
+                cb (CharBuffer/allocate n)
+                dec (.onUnmappableCharacter
+                      (.onMalformedInput (.newDecoder UTF_8/INSTANCE) CodingErrorAction/REPORT)
+                      CodingErrorAction/REPORT)
+                ^:mutable c (.charAt s 0)]
+            (let [^:mutable ^int i 0]
+              (while (< i n)
+                (java-assert (== c (.charAt s i)))
+                (if (not (== c \%))
+                    (do
+                      (.append sb c)
+                      (when (>= (set! i (unchecked-inc-int i)) n) (break))
+                      (set! c (.charAt s i)))
+                    (do
+                      (.clear bb)
+                      (let [ui i]
+                        (while true
+                          (when (< (unchecked-subtract-int n i) 2)
+                            (throw (IllegalArgumentException.
+                                     (java-str "Malformed escape pair: " s))))
+                          (try
+                            (.put bb (ParseUtil/unescape s i))
+                            (catch [NumberFormatException IndexOutOfBoundsException] e
+                              (throw (IllegalArgumentException.
+                                       (java-str "Malformed escape pair: " s)))))
+                          (set! i (unchecked-add-int i 3))
+                          (when (>= i n) (break))
+                          (set! c (.charAt s i))
+                          (when-not (== c \%) (break)))
+                        (.flip bb)
+                        (.clear cb)
+                        (.reset dec)
+                        (let [^:mutable cr (.decode dec bb cb true)]
+                          (when (.isError cr)
+                            (throw (IllegalArgumentException.
+                                     "Error decoding percent encoded characters")))
+                          (set! cr (.flush dec cb))
+                          (when (.isError cr)
+                            (throw (IllegalArgumentException.
+                                     "Error decoding percent encoded characters")))
+                          (.append sb (.toString (.flip cb)))))))))
+            (.toString sb)))))
+
+  (method ^:public ^:static fileToEncodedURL :throws [MalformedURLException] ^URL [^File file]
+    (let [^:mutable path (.getAbsolutePath file)]
+      (set! path (ParseUtil/encodePath path))
+      (when-not (.startsWith path "/") (set! path (java-str "/" path)))
+      (when (and (not (.endsWith path "/")) (.isDirectory file)) (set! path (java-str path "/")))
+      (let [result (URL. "file" "" path)] result)))
+
+  (method ^:public ^:static toURI ^URI [^URL url]
+    (let [protocol (.getProtocol url)
+          ^:mutable auth (.getAuthority url)
+          ^:mutable path (.getPath url)
+          query (.getQuery url)
+          ref (.getRef url)]
+      (when (and (some? path) (not (.startsWith path "/"))) (set! path (java-str "/" path)))
+      (when (and (some? auth) (.endsWith auth ":-1"))
+        (set! auth (.substring auth 0 (unchecked-subtract-int (.length auth) 3))))
+      (let [^:mutable ^URI uri nil]
+        (try
+          (set! uri (ParseUtil/createURI protocol auth path query ref))
+          (catch URISyntaxException e (set! uri nil)))
+        uri)))
+
+  (method ^:private ^:static createURI :throws [URISyntaxException] ^URI [^String scheme
+                                                                          ^String authority
+                                                                          ^String path ^String query
+                                                                          ^String fragment]
+    (let [s (ParseUtil/toString scheme nil authority nil nil -1 path query fragment)]
+      (ParseUtil/checkPath s scheme path)
+      (URI. s)))
+
+  (method ^:private ^:static toString ^String [^String scheme ^String opaquePart ^String authority
+                                               ^String userInfo ^String host ^int port ^String path
+                                               ^String query ^String fragment]
+    (let [sb (StringBuilder.)]
+      (when (some? scheme) (.append sb scheme) (.append sb \:))
+      (ParseUtil/appendSchemeSpecificPart sb opaquePart authority userInfo host port path query)
+      (ParseUtil/appendFragment sb fragment)
+      (.toString sb)))
+
+  (method ^:private ^:static appendSchemeSpecificPart ^void [^StringBuilder sb ^String opaquePart
+                                                             ^String authority ^String userInfo
+                                                             ^String host ^int port ^String path
+                                                             ^String query]
+    (if (some? opaquePart)
+        (if (.startsWith opaquePart "//[")
+            (let [end (.indexOf opaquePart \])]
+              (when (and (not (== end -1)) (not (== (.indexOf opaquePart \:) -1)))
+                (let [^:mutable ^String doquote nil
+                      ^:mutable ^String dontquote nil]
+                  (if (== end (.length opaquePart))
+                      (do (set! dontquote opaquePart) (set! doquote ""))
+                      (do
+                        (set! dontquote (.substring opaquePart 0 (unchecked-add-int end 1)))
+                        (set! doquote (.substring opaquePart (unchecked-add-int end 1)))))
+                  (.append sb dontquote)
+                  (.append sb (ParseUtil/quote doquote L_URIC H_URIC)))))
+            (.append sb (ParseUtil/quote opaquePart L_URIC H_URIC)))
+        (do
+          (ParseUtil/appendAuthority sb authority userInfo host port)
+          (when (some? path) (.append sb (ParseUtil/quote path L_PATH H_PATH)))
+          (when (some? query) (.append sb \?) (.append sb (ParseUtil/quote query L_URIC H_URIC))))))
+
+  (method ^:private ^:static appendAuthority ^void [^StringBuilder sb ^String authority
+                                                    ^String userInfo ^String host ^int port]
+    (if (some? host)
+        (do
+          (.append sb "//")
+          (when (some? userInfo)
+            (.append sb (ParseUtil/quote userInfo L_USERINFO H_USERINFO))
+            (.append sb \@))
+          (let [needBrackets (and (and (>= (.indexOf host \:) 0) (not (.startsWith host "[")))
+                                  (not (.endsWith host "]")))]
+            (when needBrackets (.append sb \[))
+            (.append sb host)
+            (when needBrackets (.append sb \]))
+            (when-not (== port -1) (.append sb \:) (.append sb port))))
+        (when (some? authority)
+          (.append sb "//")
+          (if (.startsWith authority "[")
+              (let [end (.indexOf authority \])]
+                (when (and (not (== end -1)) (not (== (.indexOf authority \:) -1)))
+                  (let [^:mutable ^String doquote nil
+                        ^:mutable ^String dontquote nil]
+                    (if (== end (.length authority))
+                        (do (set! dontquote authority) (set! doquote ""))
+                        (do
+                          (set! dontquote (.substring authority 0 (unchecked-add-int end 1)))
+                          (set! doquote (.substring authority (unchecked-add-int end 1)))))
+                    (.append sb dontquote)
+                    (.append sb
+                             (ParseUtil/quote doquote
+                                              (bit-or L_REG_NAME L_SERVER)
+                                              (bit-or H_REG_NAME H_SERVER))))))
+              (.append sb
+                       (ParseUtil/quote authority
+                                        (bit-or L_REG_NAME L_SERVER)
+                                        (bit-or H_REG_NAME H_SERVER)))))))
+
+  (method ^:private ^:static appendFragment ^void [^StringBuilder sb ^String fragment]
+    (when (some? fragment) (.append sb \#) (.append sb (ParseUtil/quote fragment L_URIC H_URIC))))
+
+  (method ^:private ^:static quote ^String [^String s ^long lowMask ^long highMask]
+    (let [n (.length s)
+          ^:mutable ^StringBuilder sb nil
+          ^:mutable ^CharsetEncoder encoder nil
+          allowNonASCII (not (== (bit-and lowMask L_ESCAPED) 0))]
+      (loop [^int i 0]
+        (when (< i (.length s))
+          (let [c (.charAt s i)]
+            (cond
+              (< c \u0080)
+                (cond
+                  (and (not (ParseUtil/match c lowMask highMask)) (not (ParseUtil/isEscaped s i)))
+                    (do
+                      (when (nil? sb) (set! sb (StringBuilder.)) (.append sb s 0 i))
+                      (ParseUtil/appendEscape sb (unchecked-byte c))
+                      (recur (unchecked-inc-int i)))
+                  (some? sb) (do (.append sb c) (recur (unchecked-inc-int i)))
+                  :else (recur (unchecked-inc-int i)))
+              (and allowNonASCII (or (Character/isSpaceChar c) (Character/isISOControl c)))
+                (do
+                  (when (nil? encoder) (set! encoder (.newEncoder UTF_8/INSTANCE)))
+                  (when (nil? sb) (set! sb (StringBuilder.)) (.append sb s 0 i))
+                  (ParseUtil/appendEncoded encoder sb c)
+                  (recur (unchecked-inc-int i)))
+              (some? sb) (do (.append sb c) (recur (unchecked-inc-int i)))
+              :else (recur (unchecked-inc-int i))))))
+      (if (nil? sb) s (.toString sb))))
+
+  (method ^:private ^:static isEscaped ^boolean [^String s ^int pos]
+    (if (or (nil? s) (<= (.length s) (unchecked-add-int pos 2)))
+        false
+        (and (and (== (.charAt s pos) \%)
+                  (ParseUtil/match (.charAt s (unchecked-add-int pos 1)) L_HEX H_HEX))
+             (ParseUtil/match (.charAt s (unchecked-add-int pos 2)) L_HEX H_HEX))))
+
+  (method ^:private ^:static appendEncoded ^void [^CharsetEncoder encoder ^StringBuilder sb ^char c]
+    (let [^:mutable ^ByteBuffer bb nil]
+      (try
+        (set! bb (.encode encoder (CharBuffer/wrap (java-str "" c))))
+        (catch CharacterCodingException x (java-assert false)))
+      (while (.hasRemaining bb)
+        (let [b (bit-and-int (.get bb) 0xff)]
+          (if (>= b 0x80)
+              (ParseUtil/appendEscape sb (unchecked-byte b))
+              (.append sb (unchecked-char b)))))))
+
+  (method ^:private ^:static appendEscape ^void [^StringBuilder sb ^byte b]
+    (.append sb \%)
+    (.toHexDigits HEX_UPPERCASE sb b))
+
+  (method ^:private ^:static match ^boolean [^char c ^long lowMask ^long highMask]
+    (cond
+      (< c 64) (not (== (bit-and (bit-shift-left 1 c) lowMask) 0))
+      (< c 128) (not (== (bit-and (bit-shift-left 1 (unchecked-subtract-int c 64)) highMask) 0))
+      :else false))
+
+  (method ^:private ^:static checkPath :throws [URISyntaxException] ^void [^String s ^String scheme
+                                                                           ^String path]
+    (when (some? scheme)
+      (when (and (and (some? path) (not (.isEmpty path))) (not (== (.charAt path 0) \/)))
+        (throw (URISyntaxException.
+                 (Exceptions/formatMsg "%s"
+                                       (new Exceptions$SensitiveInfo/1
+                                            [(Exceptions/filterNonSocketInfo s)]))
+                 "Relative path in absolute URI")))))
+
+  (method ^:public ^:static isLocalFileURL ^boolean [^URL url]
+    (if (.equalsIgnoreCase (.getProtocol url) "file")
+        (let [host (.getHost url)]
+          (or (or (or (nil? host) (.isEmpty host)) (.equals host "~"))
+              (.equalsIgnoreCase host "localhost")))
+        false))
+
+  (field ^:private ^:static ^:final ^long L_DIGIT 0x3FF000000000000)
+
+  (field ^:private ^:static ^:final ^long H_DIGIT 0)
+
+  (field ^:private ^:static ^:final ^long L_HEX L_DIGIT)
+
+  (field ^:private ^:static ^:final ^long H_HEX 0x7E0000007E)
+
+  (field ^:private ^:static ^:final ^long L_UPALPHA 0)
+
+  (field ^:private ^:static ^:final ^long H_UPALPHA 0x7FFFFFE)
+
+  (field ^:private ^:static ^:final ^long L_LOWALPHA 0)
+
+  (field ^:private ^:static ^:final ^long H_LOWALPHA 0x7FFFFFE00000000)
+
+  (field ^:private ^:static ^:final ^long L_ALPHA (bit-or L_LOWALPHA L_UPALPHA))
+
+  (field ^:private ^:static ^:final ^long H_ALPHA (bit-or H_LOWALPHA H_UPALPHA))
+
+  (field ^:private ^:static ^:final ^long L_ALPHANUM (bit-or L_DIGIT L_ALPHA))
+
+  (field ^:private ^:static ^:final ^long H_ALPHANUM (bit-or H_DIGIT H_ALPHA))
+
+  (field ^:private ^:static ^:final ^long L_MARK 0x678200000000)
+
+  (field ^:private ^:static ^:final ^long H_MARK 0x4000000080000000)
+
+  (field ^:private ^:static ^:final ^long L_UNRESERVED (bit-or L_ALPHANUM L_MARK))
+
+  (field ^:private ^:static ^:final ^long H_UNRESERVED (bit-or H_ALPHANUM H_MARK))
+
+  (field ^:private ^:static ^:final ^long L_RESERVED (unchecked-long 0xAC00985000000000))
+
+  (field ^:private ^:static ^:final ^long H_RESERVED 0x28000001)
+
+  (field ^:private ^:static ^:final ^long L_ESCAPED 1)
+
+  (field ^:private ^:static ^:final ^long H_ESCAPED 0)
+
+  (field ^:private ^:static ^:final ^long L_URIC
+    (bit-or (bit-or L_RESERVED L_UNRESERVED) L_ESCAPED))
+
+  (field ^:private ^:static ^:final ^long H_URIC
+    (bit-or (bit-or H_RESERVED H_UNRESERVED) H_ESCAPED))
+
+  (field ^:private ^:static ^:final ^long L_PCHAR
+    (bit-or (bit-or L_UNRESERVED L_ESCAPED) 0x2400185000000000))
+
+  (field ^:private ^:static ^:final ^long H_PCHAR (bit-or (bit-or H_UNRESERVED H_ESCAPED) 0x1))
+
+  (field ^:private ^:static ^:final ^long L_PATH (bit-or L_PCHAR 0x800800000000000))
+
+  (field ^:private ^:static ^:final ^long H_PATH H_PCHAR)
+
+  (field ^:private ^:static ^:final ^long L_DASH 0x200000000000)
+
+  (field ^:private ^:static ^:final ^long H_DASH 0x0)
+
+  (field ^:private ^:static ^:final ^long L_USERINFO
+    (bit-or (bit-or L_UNRESERVED L_ESCAPED) 0x2C00185000000000))
+
+  (field ^:private ^:static ^:final ^long H_USERINFO (bit-or H_UNRESERVED H_ESCAPED))
+
+  (field ^:private ^:static ^:final ^long L_REG_NAME
+    (bit-or (bit-or L_UNRESERVED L_ESCAPED) 0x2C00185000000000))
+
+  (field ^:private ^:static ^:final ^long H_REG_NAME (bit-or (bit-or H_UNRESERVED H_ESCAPED) 0x1))
+
+  (field ^:private ^:static ^:final ^long L_SERVER
+    (bit-or (bit-or (bit-or L_USERINFO L_ALPHANUM) L_DASH) 0x400400000000000))
+
+  (field ^:private ^:static ^:final ^long H_SERVER
+    (bit-or (bit-or (bit-or H_USERINFO H_ALPHANUM) H_DASH) 0x28000001))
+
+  (field ^:private ^:static ^:final ^long L_ENCODED (unchecked-long 0xF800802DFFFFFFFF))
+
+  (field ^:private ^:static ^:final ^long H_ENCODED (unchecked-long 0xB800000178000000)))

@@ -1,0 +1,92 @@
+;; Converted from jdk26u src/java.base/share/classes/java/time/zone/TzdbZoneRulesProvider.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.time.zone)
+
+(import '(java.io BufferedInputStream
+                  ByteArrayInputStream
+                  DataInputStream
+                  File
+                  FileInputStream
+                  StreamCorruptedException)
+        '(java.util Arrays HashSet List Map NavigableMap Set TreeMap)
+        '(java.util.concurrent ConcurrentHashMap)
+        '(jdk.internal.util StaticProperty))
+
+(defclass ^:final TzdbZoneRulesProvider
+  :extends ZoneRulesProvider
+
+  (field ^:private ^{:tag (List String)} regionIds)
+
+  (field ^:private ^String versionId)
+
+  (field ^:private ^:final ^{:tag (Map String Object)} regionToRules (ConcurrentHashMap.))
+
+  (constructor ^:public [this]
+    (try
+      (let [libDir (java-str (StaticProperty/javaHome) File/separator "lib")]
+        (with-resources [dis (DataInputStream.
+                               (BufferedInputStream. (FileInputStream. (File. libDir "tzdb.dat"))))]
+          (.load this dis)))
+      (catch Exception ex (throw (ZoneRulesException. "Unable to load TZDB time-zone rules" ex)))))
+
+  (method ^:protected provideZoneIds ^{:tag (Set String)} [this]
+    (HashSet. regionIds))
+
+  (method ^:protected provideRules ^ZoneRules [this ^String zoneId ^boolean forCaching]
+    (let [^:mutable obj (.get regionToRules zoneId)]
+      (when (nil? obj) (throw (ZoneRulesException. (java-str "Unknown time-zone ID: " zoneId))))
+      (try
+        (when-instance [^byte/1 bytes obj]
+          (let [dis (DataInputStream. (ByteArrayInputStream. bytes))]
+            (set! obj (Ser/read dis))
+            (.put regionToRules zoneId obj)))
+        (cast ZoneRules obj)
+        (catch Exception ex
+          (throw (ZoneRulesException.
+                   (java-str "Invalid binary time-zone data: TZDB:" zoneId ", version: " versionId)
+                   ex))))))
+
+  (method ^:protected provideVersions ^{:tag (NavigableMap String ZoneRules)} [this ^String zoneId]
+    (let [^{:tag (TreeMap String ZoneRules)} map (TreeMap.)
+          rules (TzdbZoneRulesProvider/getRules zoneId false)]
+      (when (some? rules) (.put map versionId rules))
+      map))
+
+  (method ^:private load :throws [Exception] ^void [this ^DataInputStream dis]
+    (when-not (== (.readByte dis) 1)
+      (throw (StreamCorruptedException. "File format not recognised")))
+    (let [groupId (.readUTF dis)]
+      (when (= (.equals "TZDB" groupId) false)
+        (throw (StreamCorruptedException. "File format not recognised")))
+      (let [^int versionCount (.readShort dis)]
+        (loop [^int i 0]
+          (when (< i versionCount) (set! versionId (.readUTF dis)) (recur (unchecked-inc-int i))))
+        (let [^int regionCount (.readShort dis)
+              regionArray (new String/1 regionCount)]
+          (loop [^int i 0]
+            (when (< i regionCount)
+              (aset regionArray i (.readUTF dis))
+              (recur (unchecked-inc-int i))))
+          (set! regionIds (Arrays/asList regionArray))
+          (let [^int ruleCount (.readShort dis)
+                ruleArray (new Object/1 ruleCount)]
+            (loop [^int i 0]
+              (when (< i ruleCount)
+                (let [bytes (new byte/1 (.readShort dis))]
+                  (.readFully dis bytes)
+                  (aset ruleArray i bytes)
+                  (recur (unchecked-inc-int i)))))
+            (loop [^int i 0]
+              (when (< i versionCount)
+                (let [^int versionRegionCount (.readShort dis)]
+                  (.clear regionToRules)
+                  (loop [^int j 0]
+                    (when (< j versionRegionCount)
+                      (let [region (aget regionArray (.readShort dis))
+                            rule (aget ruleArray (bit-and-int (.readShort dis) 0xffff))]
+                        (.put regionToRules region rule)
+                        (recur (unchecked-inc-int j)))))
+                  (recur (unchecked-inc-int i))))))))))
+
+  (method ^:public toString ^String [this]
+    (java-str "TZDB[" versionId "]")))

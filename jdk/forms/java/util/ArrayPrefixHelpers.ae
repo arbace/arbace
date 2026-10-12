@@ -1,0 +1,716 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/ArrayPrefixHelpers.java by arbace.j2a. Regenerate rather than edit.
+
+(in-ns 'java.util)
+
+(import '(java.util.concurrent CountedCompleter ForkJoinPool)
+        '(java.util.function BinaryOperator
+                             DoubleBinaryOperator
+                             IntBinaryOperator
+                             LongBinaryOperator))
+
+(defclass ArrayPrefixHelpers
+  (constructor ^:private [this])
+
+  (field ^:static ^:final ^int CUMULATE 1)
+
+  (field ^:static ^:final ^int SUMMED 2)
+
+  (field ^:static ^:final ^int FINISHED 4)
+
+  (field ^:static ^:final ^int MIN_PARTITION 16)
+
+  (defclass ^:static ^:final CumulateTask
+    :extends (CountedCompleter Void)
+    :type-params [T]
+
+    (field ^:final ^T/1 array)
+
+    (field ^:final ^{:tag (BinaryOperator T)} function)
+
+    (field ^{:tag (CumulateTask T)} left)
+
+    (field ^{:tag (CumulateTask T)} right)
+
+    (field ^T in)
+
+    (field ^T out)
+
+    (field ^:final ^int lo)
+
+    (field ^:final ^int hi)
+
+    (field ^:final ^int origin)
+
+    (field ^:final ^int fence)
+
+    (field ^:final ^int threshold)
+
+    (constructor ^:public [this ^{:tag (CumulateTask T)} parent ^{:tag (BinaryOperator T)} function
+                           ^T/1 array ^int lo ^int hi]
+      (super. parent)
+      (set! (.-function this) function)
+      (set! (.-array this) array)
+      (set! (.-lo this) (set! (.-origin this) lo))
+      (set! (.-hi this) (set! (.-fence this) hi))
+      (let [^:mutable ^int p 0]
+        (set! (.-threshold this)
+              (if (<= (set! p
+                            (unchecked-divide-int
+                              (unchecked-subtract-int hi lo)
+                              (bit-shift-left-int (ForkJoinPool/getCommonPoolParallelism) 3)))
+                      MIN_PARTITION)
+                  MIN_PARTITION
+                  p))))
+
+    (constructor [this ^{:tag (CumulateTask T)} parent ^{:tag (BinaryOperator T)} function
+                  ^T/1 array ^int origin ^int fence ^int threshold ^int lo ^int hi]
+      (super. parent)
+      (set! (.-function this) function)
+      (set! (.-array this) array)
+      (set! (.-origin this) origin)
+      (set! (.-fence this) fence)
+      (set! (.-threshold this) threshold)
+      (set! (.-lo this) lo)
+      (set! (.-hi this) hi))
+
+    (method ^:public ^:final compute ^void [this]
+      (let [^:mutable ^{:tag (BinaryOperator T)} fn nil
+            ^:mutable ^T/1 a nil]
+        (when (or (nil? (set! fn (.-function this))) (nil? (set! a (.-array this))))
+          (throw (NullPointerException.)))
+        (let [th threshold
+              org origin
+              fnc fence
+              ^:mutable ^int l 0
+              ^:mutable ^int h 0
+              ^:mutable ^{:tag (CumulateTask T)} t this]
+          (label :outer
+            (while (and (>= (set! l (.-lo t)) 0) (<= (set! h (.-hi t)) (alength a)))
+              (if (> (unchecked-subtract-int h l) th)
+                  (let [^:mutable ^{:tag (CumulateTask T)} lt (.-left t)
+                        ^:mutable ^{:tag (CumulateTask T)} rt (.-right t)
+                        ^:mutable ^{:tag (CumulateTask T)} f nil]
+                    (if (nil? lt)
+                        (let [mid (unsigned-bit-shift-right-int (unchecked-add-int l h) 1)]
+                          (set!
+                            f
+                            (set! rt (set! (.-right t) (CumulateTask. t fn a org fnc th mid h))))
+                          (set! t
+                                (set! lt (set! (.-left t) (CumulateTask. t fn a org fnc th l mid)))))
+                        (let [^T pin (.-in t)]
+                          (set! (.-in lt) pin)
+                          (set! f (set! t nil))
+                          (when (some? rt)
+                            (let [^T lout (.-out lt)]
+                              (set! (.-in rt) (if (== l org) lout (.apply fn pin lout)))
+                              (let [^:mutable ^int c 0]
+                                (while true
+                                  (when-not (== (bit-and-int
+                                                  (set! c (.getPendingCount rt))
+                                                  CUMULATE)
+                                                0)
+                                    (break))
+                                  (when (.compareAndSetPendingCount rt c (bit-or-int c CUMULATE))
+                                    (set! t rt)
+                                    (break))))))
+                          (let [^:mutable ^int c 0]
+                            (while true
+                              (when-not (== (bit-and-int (set! c (.getPendingCount lt)) CUMULATE) 0)
+                                (break))
+                              (when (.compareAndSetPendingCount lt c (bit-or-int c CUMULATE))
+                                (when (some? t) (set! f t))
+                                (set! t lt)
+                                (break))))
+                          (when (nil? t) (break))))
+                    (when (some? f) (.fork f)))
+                  (let [^:mutable ^int state 0]
+                    (let [^:mutable ^int b 0]
+                      (while true
+                        (when-not (== (bit-and-int (set! b (.getPendingCount t)) FINISHED) 0)
+                          (break :outer))
+                        (set! state
+                              (cond
+                                (not (== (bit-and-int b CUMULATE) 0)) FINISHED
+                                (> l org) SUMMED
+                                :else (bit-or-int SUMMED FINISHED)))
+                        (when (.compareAndSetPendingCount t b (bit-or-int b state)) (break))))
+                    (let [^:mutable ^T sum nil]
+                      (cond
+                        (not (== state SUMMED))
+                          (let [^:mutable ^int first 0]
+                            (if (== l org)
+                                (do (set! sum (aget a org)) (set! first (unchecked-add-int org 1)))
+                                (do (set! sum (.-in t)) (set! first l)))
+                            (loop [^int i first]
+                              (when (< i h)
+                                (aset a i (set! sum (.apply fn sum (aget a i))))
+                                (recur (unchecked-inc-int i)))))
+                        (< h fnc)
+                          (do
+                            (set! sum (aget a l))
+                            (loop [^int i (unchecked-add-int l 1)]
+                              (when (< i h)
+                                (set! sum (.apply fn sum (aget a i)))
+                                (recur (unchecked-inc-int i)))))
+                        :else (set! sum (.-in t)))
+                      (set! (.-out t) sum)
+                      (let [^:mutable ^{:tag (CumulateTask T)} par nil]
+                        (while true
+                          (let [^{:tag (CumulateTask T)} partmp (cast
+                                                                  CumulateTask
+                                                                  (.getCompleter t))]
+                            (when (nil? (set! par partmp))
+                              (when-not (== (bit-and-int state FINISHED) 0) (.quietlyComplete t))
+                              (break :outer))
+                            (let [b (.getPendingCount par)]
+                              (cond
+                                (not (== (bit-and-int (bit-and-int b state) FINISHED) 0))
+                                  (set! t par)
+                                (not (== (bit-and-int (bit-and-int b state) SUMMED) 0))
+                                  (let [^:mutable ^int nextState 0
+                                        ^:mutable ^{:tag (CumulateTask T)} lt nil
+                                        ^:mutable ^{:tag (CumulateTask T)} rt nil]
+                                    (when (and (some? (set! lt (.-left par)))
+                                               (some? (set! rt (.-right par))))
+                                      (let [^T lout (.-out lt)]
+                                        (set! (.-out par)
+                                              (if (== (.-hi rt) fnc)
+                                                  lout
+                                                  (.apply fn lout (.-out rt))))))
+                                    (let [^int refork (if (and
+                                                            (== (bit-and-int b CUMULATE) 0)
+                                                            (== (.-lo par) org))
+                                                          CUMULATE
+                                                          0)]
+                                      (when (or (==
+                                                  (set!
+                                                    nextState
+                                                    (bit-or-int (bit-or-int b state) refork))
+                                                  b)
+                                                (.compareAndSetPendingCount par b nextState))
+                                        (set! state SUMMED)
+                                        (set! t par)
+                                        (when-not (== refork 0) (.fork par)))))
+                                (.compareAndSetPendingCount par b (bit-or-int b state))
+                                  (break :outer))))))))))))))
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 5293554502939613543))
+
+  (defclass ^:static ^:final LongCumulateTask
+    :extends (CountedCompleter Void)
+
+    (field ^:final ^long/1 array)
+
+    (field ^:final ^LongBinaryOperator function)
+
+    (field ^LongCumulateTask left)
+
+    (field ^LongCumulateTask right)
+
+    (field ^long in)
+
+    (field ^long out)
+
+    (field ^:final ^int lo)
+
+    (field ^:final ^int hi)
+
+    (field ^:final ^int origin)
+
+    (field ^:final ^int fence)
+
+    (field ^:final ^int threshold)
+
+    (constructor ^:public [this ^LongCumulateTask parent ^LongBinaryOperator function ^long/1 array
+                           ^int lo ^int hi]
+      (super. parent)
+      (set! (.-function this) function)
+      (set! (.-array this) array)
+      (set! (.-lo this) (set! (.-origin this) lo))
+      (set! (.-hi this) (set! (.-fence this) hi))
+      (let [^:mutable ^int p 0]
+        (set! (.-threshold this)
+              (if (<= (set! p
+                            (unchecked-divide-int
+                              (unchecked-subtract-int hi lo)
+                              (bit-shift-left-int (ForkJoinPool/getCommonPoolParallelism) 3)))
+                      MIN_PARTITION)
+                  MIN_PARTITION
+                  p))))
+
+    (constructor [this ^LongCumulateTask parent ^LongBinaryOperator function ^long/1 array
+                  ^int origin ^int fence ^int threshold ^int lo ^int hi]
+      (super. parent)
+      (set! (.-function this) function)
+      (set! (.-array this) array)
+      (set! (.-origin this) origin)
+      (set! (.-fence this) fence)
+      (set! (.-threshold this) threshold)
+      (set! (.-lo this) lo)
+      (set! (.-hi this) hi))
+
+    (method ^:public ^:final compute ^void [this]
+      (let [^:mutable ^LongBinaryOperator fn nil
+            ^:mutable ^long/1 a nil]
+        (when (or (nil? (set! fn (.-function this))) (nil? (set! a (.-array this))))
+          (throw (NullPointerException.)))
+        (let [th threshold
+              org origin
+              fnc fence
+              ^:mutable ^int l 0
+              ^:mutable ^int h 0
+              ^:mutable t this]
+          (label :outer
+            (while (and (>= (set! l (.-lo t)) 0) (<= (set! h (.-hi t)) (alength a)))
+              (if (> (unchecked-subtract-int h l) th)
+                  (let [^:mutable lt (.-left t)
+                        ^:mutable rt (.-right t)
+                        ^:mutable ^LongCumulateTask f nil]
+                    (if (nil? lt)
+                        (let [mid (unsigned-bit-shift-right-int (unchecked-add-int l h) 1)]
+                          (set! f
+                                (set!
+                                  rt
+                                  (set! (.-right t) (LongCumulateTask. t fn a org fnc th mid h))))
+                          (set!
+                            t
+                            (set! lt (set! (.-left t) (LongCumulateTask. t fn a org fnc th l mid)))))
+                        (let [pin (.-in t)]
+                          (set! (.-in lt) pin)
+                          (set! f (set! t nil))
+                          (when (some? rt)
+                            (let [lout (.-out lt)]
+                              (set! (.-in rt) (if (== l org) lout (.applyAsLong fn pin lout)))
+                              (let [^:mutable ^int c 0]
+                                (while true
+                                  (when-not (== (bit-and-int
+                                                  (set! c (.getPendingCount rt))
+                                                  CUMULATE)
+                                                0)
+                                    (break))
+                                  (when (.compareAndSetPendingCount rt c (bit-or-int c CUMULATE))
+                                    (set! t rt)
+                                    (break))))))
+                          (let [^:mutable ^int c 0]
+                            (while true
+                              (when-not (== (bit-and-int (set! c (.getPendingCount lt)) CUMULATE) 0)
+                                (break))
+                              (when (.compareAndSetPendingCount lt c (bit-or-int c CUMULATE))
+                                (when (some? t) (set! f t))
+                                (set! t lt)
+                                (break))))
+                          (when (nil? t) (break))))
+                    (when (some? f) (.fork f)))
+                  (let [^:mutable ^int state 0]
+                    (let [^:mutable ^int b 0]
+                      (while true
+                        (when-not (== (bit-and-int (set! b (.getPendingCount t)) FINISHED) 0)
+                          (break :outer))
+                        (set! state
+                              (cond
+                                (not (== (bit-and-int b CUMULATE) 0)) FINISHED
+                                (> l org) SUMMED
+                                :else (bit-or-int SUMMED FINISHED)))
+                        (when (.compareAndSetPendingCount t b (bit-or-int b state)) (break))))
+                    (let [^:mutable ^long sum 0]
+                      (cond
+                        (not (== state SUMMED))
+                          (let [^:mutable ^int first 0]
+                            (if (== l org)
+                                (do (set! sum (aget a org)) (set! first (unchecked-add-int org 1)))
+                                (do (set! sum (.-in t)) (set! first l)))
+                            (loop [^int i first]
+                              (when (< i h)
+                                (aset a i (set! sum (.applyAsLong fn sum (aget a i))))
+                                (recur (unchecked-inc-int i)))))
+                        (< h fnc)
+                          (do
+                            (set! sum (aget a l))
+                            (loop [^int i (unchecked-add-int l 1)]
+                              (when (< i h)
+                                (set! sum (.applyAsLong fn sum (aget a i)))
+                                (recur (unchecked-inc-int i)))))
+                        :else (set! sum (.-in t)))
+                      (set! (.-out t) sum)
+                      (let [^:mutable ^LongCumulateTask par nil]
+                        (while true
+                          (when (nil? (set! par (cast LongCumulateTask (.getCompleter t))))
+                            (when-not (== (bit-and-int state FINISHED) 0) (.quietlyComplete t))
+                            (break :outer))
+                          (let [b (.getPendingCount par)]
+                            (cond
+                              (not (== (bit-and-int (bit-and-int b state) FINISHED) 0)) (set! t par)
+                              (not (== (bit-and-int (bit-and-int b state) SUMMED) 0))
+                                (let [^:mutable ^int nextState 0
+                                      ^:mutable ^LongCumulateTask lt nil
+                                      ^:mutable ^LongCumulateTask rt nil]
+                                  (when (and (some? (set! lt (.-left par)))
+                                             (some? (set! rt (.-right par))))
+                                    (let [lout (.-out lt)]
+                                      (set! (.-out par)
+                                            (if (== (.-hi rt) fnc)
+                                                lout
+                                                (.applyAsLong fn lout (.-out rt))))))
+                                  (let [^int refork (if (and
+                                                          (== (bit-and-int b CUMULATE) 0)
+                                                          (== (.-lo par) org))
+                                                        CUMULATE
+                                                        0)]
+                                    (when (or (==
+                                                (set!
+                                                  nextState
+                                                  (bit-or-int (bit-or-int b state) refork))
+                                                b)
+                                              (.compareAndSetPendingCount par b nextState))
+                                      (set! state SUMMED)
+                                      (set! t par)
+                                      (when-not (== refork 0) (.fork par)))))
+                              (.compareAndSetPendingCount par b (bit-or-int b state)) (break :outer)))))))))))))
+
+    (field ^:private ^:static ^:final ^long serialVersionUID -5074099945909284273))
+
+  (defclass ^:static ^:final DoubleCumulateTask
+    :extends (CountedCompleter Void)
+
+    (field ^:final ^double/1 array)
+
+    (field ^:final ^DoubleBinaryOperator function)
+
+    (field ^DoubleCumulateTask left)
+
+    (field ^DoubleCumulateTask right)
+
+    (field ^double in)
+
+    (field ^double out)
+
+    (field ^:final ^int lo)
+
+    (field ^:final ^int hi)
+
+    (field ^:final ^int origin)
+
+    (field ^:final ^int fence)
+
+    (field ^:final ^int threshold)
+
+    (constructor ^:public [this ^DoubleCumulateTask parent ^DoubleBinaryOperator function
+                           ^double/1 array ^int lo ^int hi]
+      (super. parent)
+      (set! (.-function this) function)
+      (set! (.-array this) array)
+      (set! (.-lo this) (set! (.-origin this) lo))
+      (set! (.-hi this) (set! (.-fence this) hi))
+      (let [^:mutable ^int p 0]
+        (set! (.-threshold this)
+              (if (<= (set! p
+                            (unchecked-divide-int
+                              (unchecked-subtract-int hi lo)
+                              (bit-shift-left-int (ForkJoinPool/getCommonPoolParallelism) 3)))
+                      MIN_PARTITION)
+                  MIN_PARTITION
+                  p))))
+
+    (constructor [this ^DoubleCumulateTask parent ^DoubleBinaryOperator function ^double/1 array
+                  ^int origin ^int fence ^int threshold ^int lo ^int hi]
+      (super. parent)
+      (set! (.-function this) function)
+      (set! (.-array this) array)
+      (set! (.-origin this) origin)
+      (set! (.-fence this) fence)
+      (set! (.-threshold this) threshold)
+      (set! (.-lo this) lo)
+      (set! (.-hi this) hi))
+
+    (method ^:public ^:final compute ^void [this]
+      (let [^:mutable ^DoubleBinaryOperator fn nil
+            ^:mutable ^double/1 a nil]
+        (when (or (nil? (set! fn (.-function this))) (nil? (set! a (.-array this))))
+          (throw (NullPointerException.)))
+        (let [th threshold
+              org origin
+              fnc fence
+              ^:mutable ^int l 0
+              ^:mutable ^int h 0
+              ^:mutable t this]
+          (label :outer
+            (while (and (>= (set! l (.-lo t)) 0) (<= (set! h (.-hi t)) (alength a)))
+              (if (> (unchecked-subtract-int h l) th)
+                  (let [^:mutable lt (.-left t)
+                        ^:mutable rt (.-right t)
+                        ^:mutable ^DoubleCumulateTask f nil]
+                    (if (nil? lt)
+                        (let [mid (unsigned-bit-shift-right-int (unchecked-add-int l h) 1)]
+                          (set! f
+                                (set! rt
+                                      (set! (.-right t)
+                                            (DoubleCumulateTask. t fn a org fnc th mid h))))
+                          (set! t
+                                (set! lt
+                                      (set! (.-left t)
+                                            (DoubleCumulateTask. t fn a org fnc th l mid)))))
+                        (let [pin (.-in t)]
+                          (set! (.-in lt) pin)
+                          (set! f (set! t nil))
+                          (when (some? rt)
+                            (let [lout (.-out lt)]
+                              (set! (.-in rt) (if (== l org) lout (.applyAsDouble fn pin lout)))
+                              (let [^:mutable ^int c 0]
+                                (while true
+                                  (when-not (== (bit-and-int
+                                                  (set! c (.getPendingCount rt))
+                                                  CUMULATE)
+                                                0)
+                                    (break))
+                                  (when (.compareAndSetPendingCount rt c (bit-or-int c CUMULATE))
+                                    (set! t rt)
+                                    (break))))))
+                          (let [^:mutable ^int c 0]
+                            (while true
+                              (when-not (== (bit-and-int (set! c (.getPendingCount lt)) CUMULATE) 0)
+                                (break))
+                              (when (.compareAndSetPendingCount lt c (bit-or-int c CUMULATE))
+                                (when (some? t) (set! f t))
+                                (set! t lt)
+                                (break))))
+                          (when (nil? t) (break))))
+                    (when (some? f) (.fork f)))
+                  (let [^:mutable ^int state 0]
+                    (let [^:mutable ^int b 0]
+                      (while true
+                        (when-not (== (bit-and-int (set! b (.getPendingCount t)) FINISHED) 0)
+                          (break :outer))
+                        (set! state
+                              (cond
+                                (not (== (bit-and-int b CUMULATE) 0)) FINISHED
+                                (> l org) SUMMED
+                                :else (bit-or-int SUMMED FINISHED)))
+                        (when (.compareAndSetPendingCount t b (bit-or-int b state)) (break))))
+                    (let [^:mutable ^double sum 0.0]
+                      (cond
+                        (not (== state SUMMED))
+                          (let [^:mutable ^int first 0]
+                            (if (== l org)
+                                (do (set! sum (aget a org)) (set! first (unchecked-add-int org 1)))
+                                (do (set! sum (.-in t)) (set! first l)))
+                            (loop [^int i first]
+                              (when (< i h)
+                                (aset a i (set! sum (.applyAsDouble fn sum (aget a i))))
+                                (recur (unchecked-inc-int i)))))
+                        (< h fnc)
+                          (do
+                            (set! sum (aget a l))
+                            (loop [^int i (unchecked-add-int l 1)]
+                              (when (< i h)
+                                (set! sum (.applyAsDouble fn sum (aget a i)))
+                                (recur (unchecked-inc-int i)))))
+                        :else (set! sum (.-in t)))
+                      (set! (.-out t) sum)
+                      (let [^:mutable ^DoubleCumulateTask par nil]
+                        (while true
+                          (when (nil? (set! par (cast DoubleCumulateTask (.getCompleter t))))
+                            (when-not (== (bit-and-int state FINISHED) 0) (.quietlyComplete t))
+                            (break :outer))
+                          (let [b (.getPendingCount par)]
+                            (cond
+                              (not (== (bit-and-int (bit-and-int b state) FINISHED) 0)) (set! t par)
+                              (not (== (bit-and-int (bit-and-int b state) SUMMED) 0))
+                                (let [^:mutable ^int nextState 0
+                                      ^:mutable ^DoubleCumulateTask lt nil
+                                      ^:mutable ^DoubleCumulateTask rt nil]
+                                  (when (and (some? (set! lt (.-left par)))
+                                             (some? (set! rt (.-right par))))
+                                    (let [lout (.-out lt)]
+                                      (set! (.-out par)
+                                            (if (== (.-hi rt) fnc)
+                                                lout
+                                                (.applyAsDouble fn lout (.-out rt))))))
+                                  (let [^int refork (if (and
+                                                          (== (bit-and-int b CUMULATE) 0)
+                                                          (== (.-lo par) org))
+                                                        CUMULATE
+                                                        0)]
+                                    (when (or (==
+                                                (set!
+                                                  nextState
+                                                  (bit-or-int (bit-or-int b state) refork))
+                                                b)
+                                              (.compareAndSetPendingCount par b nextState))
+                                      (set! state SUMMED)
+                                      (set! t par)
+                                      (when-not (== refork 0) (.fork par)))))
+                              (.compareAndSetPendingCount par b (bit-or-int b state)) (break :outer)))))))))))))
+
+    (field ^:private ^:static ^:final ^long serialVersionUID -586947823794232033))
+
+  (defclass ^:static ^:final IntCumulateTask
+    :extends (CountedCompleter Void)
+
+    (field ^:final ^int/1 array)
+
+    (field ^:final ^IntBinaryOperator function)
+
+    (field ^IntCumulateTask left)
+
+    (field ^IntCumulateTask right)
+
+    (field ^int in)
+
+    (field ^int out)
+
+    (field ^:final ^int lo)
+
+    (field ^:final ^int hi)
+
+    (field ^:final ^int origin)
+
+    (field ^:final ^int fence)
+
+    (field ^:final ^int threshold)
+
+    (constructor ^:public [this ^IntCumulateTask parent ^IntBinaryOperator function ^int/1 array
+                           ^int lo ^int hi]
+      (super. parent)
+      (set! (.-function this) function)
+      (set! (.-array this) array)
+      (set! (.-lo this) (set! (.-origin this) lo))
+      (set! (.-hi this) (set! (.-fence this) hi))
+      (let [^:mutable ^int p 0]
+        (set! (.-threshold this)
+              (if (<= (set! p
+                            (unchecked-divide-int
+                              (unchecked-subtract-int hi lo)
+                              (bit-shift-left-int (ForkJoinPool/getCommonPoolParallelism) 3)))
+                      MIN_PARTITION)
+                  MIN_PARTITION
+                  p))))
+
+    (constructor [this ^IntCumulateTask parent ^IntBinaryOperator function ^int/1 array ^int origin
+                  ^int fence ^int threshold ^int lo ^int hi]
+      (super. parent)
+      (set! (.-function this) function)
+      (set! (.-array this) array)
+      (set! (.-origin this) origin)
+      (set! (.-fence this) fence)
+      (set! (.-threshold this) threshold)
+      (set! (.-lo this) lo)
+      (set! (.-hi this) hi))
+
+    (method ^:public ^:final compute ^void [this]
+      (let [^:mutable ^IntBinaryOperator fn nil
+            ^:mutable ^int/1 a nil]
+        (when (or (nil? (set! fn (.-function this))) (nil? (set! a (.-array this))))
+          (throw (NullPointerException.)))
+        (let [th threshold
+              org origin
+              fnc fence
+              ^:mutable ^int l 0
+              ^:mutable ^int h 0
+              ^:mutable t this]
+          (label :outer
+            (while (and (>= (set! l (.-lo t)) 0) (<= (set! h (.-hi t)) (alength a)))
+              (if (> (unchecked-subtract-int h l) th)
+                  (let [^:mutable lt (.-left t)
+                        ^:mutable rt (.-right t)
+                        ^:mutable ^IntCumulateTask f nil]
+                    (if (nil? lt)
+                        (let [mid (unsigned-bit-shift-right-int (unchecked-add-int l h) 1)]
+                          (set!
+                            f
+                            (set! rt (set! (.-right t) (IntCumulateTask. t fn a org fnc th mid h))))
+                          (set! t
+                                (set! lt
+                                      (set! (.-left t) (IntCumulateTask. t fn a org fnc th l mid)))))
+                        (let [pin (.-in t)]
+                          (set! (.-in lt) pin)
+                          (set! f (set! t nil))
+                          (when (some? rt)
+                            (let [lout (.-out lt)]
+                              (set! (.-in rt) (if (== l org) lout (.applyAsInt fn pin lout)))
+                              (let [^:mutable ^int c 0]
+                                (while true
+                                  (when-not (== (bit-and-int
+                                                  (set! c (.getPendingCount rt))
+                                                  CUMULATE)
+                                                0)
+                                    (break))
+                                  (when (.compareAndSetPendingCount rt c (bit-or-int c CUMULATE))
+                                    (set! t rt)
+                                    (break))))))
+                          (let [^:mutable ^int c 0]
+                            (while true
+                              (when-not (== (bit-and-int (set! c (.getPendingCount lt)) CUMULATE) 0)
+                                (break))
+                              (when (.compareAndSetPendingCount lt c (bit-or-int c CUMULATE))
+                                (when (some? t) (set! f t))
+                                (set! t lt)
+                                (break))))
+                          (when (nil? t) (break))))
+                    (when (some? f) (.fork f)))
+                  (let [^:mutable ^int state 0]
+                    (let [^:mutable ^int b 0]
+                      (while true
+                        (when-not (== (bit-and-int (set! b (.getPendingCount t)) FINISHED) 0)
+                          (break :outer))
+                        (set! state
+                              (cond
+                                (not (== (bit-and-int b CUMULATE) 0)) FINISHED
+                                (> l org) SUMMED
+                                :else (bit-or-int SUMMED FINISHED)))
+                        (when (.compareAndSetPendingCount t b (bit-or-int b state)) (break))))
+                    (let [^:mutable ^int sum 0]
+                      (cond
+                        (not (== state SUMMED))
+                          (let [^:mutable ^int first 0]
+                            (if (== l org)
+                                (do (set! sum (aget a org)) (set! first (unchecked-add-int org 1)))
+                                (do (set! sum (.-in t)) (set! first l)))
+                            (loop [^int i first]
+                              (when (< i h)
+                                (aset a i (set! sum (.applyAsInt fn sum (aget a i))))
+                                (recur (unchecked-inc-int i)))))
+                        (< h fnc)
+                          (do
+                            (set! sum (aget a l))
+                            (loop [^int i (unchecked-add-int l 1)]
+                              (when (< i h)
+                                (set! sum (.applyAsInt fn sum (aget a i)))
+                                (recur (unchecked-inc-int i)))))
+                        :else (set! sum (.-in t)))
+                      (set! (.-out t) sum)
+                      (let [^:mutable ^IntCumulateTask par nil]
+                        (while true
+                          (when (nil? (set! par (cast IntCumulateTask (.getCompleter t))))
+                            (when-not (== (bit-and-int state FINISHED) 0) (.quietlyComplete t))
+                            (break :outer))
+                          (let [b (.getPendingCount par)]
+                            (cond
+                              (not (== (bit-and-int (bit-and-int b state) FINISHED) 0)) (set! t par)
+                              (not (== (bit-and-int (bit-and-int b state) SUMMED) 0))
+                                (let [^:mutable ^int nextState 0
+                                      ^:mutable ^IntCumulateTask lt nil
+                                      ^:mutable ^IntCumulateTask rt nil]
+                                  (when (and (some? (set! lt (.-left par)))
+                                             (some? (set! rt (.-right par))))
+                                    (let [lout (.-out lt)]
+                                      (set! (.-out par)
+                                            (if (== (.-hi rt) fnc)
+                                                lout
+                                                (.applyAsInt fn lout (.-out rt))))))
+                                  (let [^int refork (if (and
+                                                          (== (bit-and-int b CUMULATE) 0)
+                                                          (== (.-lo par) org))
+                                                        CUMULATE
+                                                        0)]
+                                    (when (or (==
+                                                (set!
+                                                  nextState
+                                                  (bit-or-int (bit-or-int b state) refork))
+                                                b)
+                                              (.compareAndSetPendingCount par b nextState))
+                                      (set! state SUMMED)
+                                      (set! t par)
+                                      (when-not (== refork 0) (.fork par)))))
+                              (.compareAndSetPendingCount par b (bit-or-int b state)) (break :outer)))))))))))))
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 3731755594596840961)))
