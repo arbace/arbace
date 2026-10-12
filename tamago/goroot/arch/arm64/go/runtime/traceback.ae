@@ -1,0 +1,1851 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.runtime) (go/file "traceback.go" :imports [
+
+
+    ^{:line 8} [abi "internal/abi"]
+    ^{:line 9} [bytealg "internal/bytealg"]
+    ^{:line 10} [goarch "internal/goarch"]
+    ^{:line 11} [label "internal/runtime/pprof/label"]
+    ^{:line 12} [sys "internal/runtime/sys"]
+    ^{:line 13} [stringslite "internal/stringslite"]
+    ^{:line 14} [unsafe "unsafe"]])
+
+
+;; The code in this file implements stack trace walking for all architectures.
+;; The most important fact about a given architecture is whether it uses a link register.
+;; On systems with link registers, the prologue for a non-leaf function stores the
+;; incoming value of LR at the bottom of the newly allocated stack frame.
+;; On systems without link registers (x86), the architecture pushes a return PC during
+;; the call instruction, so the return PC ends up above the stack frame.
+;; In this file, the return PC is always called LR, no matter how it was found.
+
+(go/const ^{:val true} usesLR (> sys/MinFrameSize 0))
+
+(go/const
+
+
+
+  ^{:line 31} [^{:val 50 :doc "tracebackInnerFrames is the number of innermost frames to print in a\nstack trace. The total maximum frames is tracebackInnerFrames +\ntracebackOuterFrames.\n"} tracebackInnerFrames 50]
+
+
+
+  ^{:line 35} [^{:val 50 :doc "tracebackOuterFrames is the number of outermost frames to print in a\nstack trace.\n"} tracebackOuterFrames 50])
+
+
+
+(go/type unwindFlags "unwindFlags control the behavior of various unwinders.\n" uint8)
+
+(go/const
+
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 54} [^{:tag unwindFlags :val 1 :doc "unwindPrintErrors indicates that if unwinding encounters an error, it\nshould print a message and stop without throwing. This is used for things\nlike stack printing, where it's better to get incomplete information than\nto crash. This is also used in situations where everything may not be\nstopped nicely and the stack walk may not be able to complete, such as\nduring profiling signals or during a crash.\n\nIf neither unwindPrintErrors or unwindSilentErrors are set, unwinding\nperforms extra consistency checks and throws on any error.\n\nNote that there are a small number of fatal situations that will throw\nregardless of unwindPrintErrors or unwindSilentErrors.\n"} unwindPrintErrors (<< 1 iota)]
+
+
+  ^{:line 57} [^{:val 2 :doc "unwindSilentErrors silently ignores errors during unwinding.\n"} unwindSilentErrors]
+
+
+
+
+
+
+
+
+
+
+
+  ^{:line 69} [^{:val 4 :doc "unwindTrap indicates that the initial PC and SP are from a trap, not a\nreturn PC from a call.\n\nThe unwindTrap flag is updated during unwinding. If set, frame.pc is the\naddress of a faulting instruction instead of the return address of a\ncall. It also means the liveness at pc may not be known.\n\nTODO: Distinguish frame.continpc, which is really the stack map PC, from\nthe actual continuation PC, which is computed differently depending on\nthis flag and a few other things.\n"} unwindTrap]
+
+
+
+
+  ^{:line 74} [^{:val 8 :doc "unwindJumpStack indicates that, if the traceback is on a system stack, it\nshould resume tracing at the user stack when the system stack is\nexhausted.\n"} unwindJumpStack])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type unwinder "An unwinder iterates the physical stack frames of a Go sack.\n\nTypical use of an unwinder looks like:\n\n\tvar u unwinder\n\tfor u.init(gp, 0); u.valid(); u.next() {\n\t\t// ... use frame info in u ...\n\t}\n\nImplementation note: This is carefully structured to be pointer-free because\ntracebacks happen in places that disallow write barriers (e.g., signals).\nEven if this is stack-allocated, its pointer-receiver methods don't know that\ntheir receiver is on the stack, so they still emit write barriers. Here we\naddress that by carefully avoiding any pointers in this type. Another\napproach would be to split this into a mutable part that's passed by pointer\nbut contains no pointers itself and an immutable part that's passed and\nreturned by value and can contain pointers. We could potentially hide that\nwe're doing that in trivial methods that are inlined into the caller that has\nthe stack allocation, but that's fragile.\n" (struct
+
+
+    ^{:line 99 :tag stkframe :doc "frame is the current physical stack frame, or all 0s if\nthere is no frame.\n"} frame
+
+
+
+
+    ^{:line 104 :tag guintptr :doc "g is the G who's stack is being unwound. If the\nunwindJumpStack flag is set and the unwinder jumps stacks,\nthis will be different from the initial G.\n"} g
+
+
+
+    ^{:line 108 :tag int :doc "cgoCtxt is the index into g.cgoCtxt of the next frame on the cgo stack.\nThe cgo stack is unwound in tandem with the Go stack as we find marker frames.\n"} cgoCtxt
+
+
+
+    ^{:line 112 :tag abi/FuncID :doc "calleeFuncID is the function ID of the caller of the current\nframe.\n"} calleeFuncID
+
+
+
+    ^{:line 116 :tag unwindFlags :doc "flags are the flags to this unwind. Some of these are updated as we\nunwind (see the flags documentation).\n"} flags))
+
+
+
+
+
+
+^{:go/end 131} (go/method init "init initializes u to start unwinding gp's stack and positions the\niterator on gp's innermost frame. gp must not be the current G.\n\nA single unwinder can be reused for multiple unwinds.\n" [^{:tag (* unwinder)} u ^{:tag (* g)} gp ^unwindFlags flags]
+  ;; Implementation note: This starts the iterator on the first frame and we
+  ;; provide a "valid" method. Alternatively, this could start in a "before
+  ;; the first frame" state and "next" could return whether it was able to
+  ;; move to the next frame, but that's both more awkward to use in a "for"
+  ;; loop and is harder to implement because we have to do things differently
+  ;; for the first frame.
+  (.initAt u (bit-not (conv uintptr 0)) (bit-not (conv uintptr 0)) (bit-not (conv uintptr 0)) gp flags))
+
+
+^{:go/end 226} (go/method initAt [^{:tag (* unwinder)} u ^uintptr pc0 ^uintptr sp0 ^uintptr lr0 ^{:tag (* g)} gp ^unwindFlags flags]
+  ;; Don't call this "g"; it's too easy get "g" and "gp" confused.
+  (when [ourg (getg)] (and (== ourg gp) (== ourg (.-curg (.-m ourg))))
+    ;; The starting sp has been passed in as a uintptr, and the caller may
+    ;; have other uintptr-typed stack references as well.
+    ;; If during one of the calls that got us here or during one of the
+    ;; callbacks below the stack must be grown, all these uintptr references
+    ;; to the stack will not be updated, and traceback will continue
+    ;; to inspect the old stack memory, which may no longer be valid.
+    ;; Even if all the variables were updated correctly, it is not clear that
+    ;; we want to expose a traceback that begins on one stack and ends
+    ;; on another stack. That could confuse callers quite a bit.
+    ;; Instead, we require that initAt and any other function that
+    ;; accepts an sp for the current goroutine (typically obtained by
+    ;; calling GetCallerSP) must not run on that goroutine's stack but
+    ;; instead on the g0 stack.
+    (throw "cannot trace user goroutine on its own stack"))
+
+
+  (when (and (== pc0 (bit-not (conv uintptr 0))) (== sp0 (bit-not (conv uintptr 0)))) ; Signal to fetch saved values from gp.
+    (if (!= (.-syscallsp gp) 0) (do
+        (set! pc0 (.-syscallpc gp))
+        (set! sp0 (.-syscallsp gp))
+        (when usesLR
+          (set! lr0 0)))
+
+      (do
+        (set! pc0 (.-pc (.-sched gp)))
+        (set! sp0 (.-sp (.-sched gp)))
+        (when usesLR
+          (set! lr0 (.-lr (.-sched gp)))))))
+
+
+
+
+  (let [^stkframe frame (zero stkframe)]
+    (set! (.-pc frame) pc0)
+    (set! (.-sp frame) sp0)
+    (when usesLR
+      (set! (.-lr frame) lr0))
+
+
+    ;; If the PC is zero, it's likely a nil function call.
+    ;; Start in the caller's frame.
+    (when (== (.-pc frame) 0)
+      (if usesLR (do
+          (set! (.-pc frame) @(conv (* uintptr) (conv unsafe/Pointer (.-sp frame))))
+          (set! (.-lr frame) 0))
+        (do
+          (set! (.-pc frame) @(conv (* uintptr) (conv unsafe/Pointer (.-sp frame))))
+          (set! (.-sp frame) + goarch/PtrSize))))
+
+
+
+    ;; internal/runtime/atomic functions call into kernel helpers on
+    ;; arm < 7. See internal/runtime/atomic/sys_linux_arm.s.
+    ;;
+    ;; Start in the caller's frame.
+    (when (and (== GOARCH "arm") (< goarm 7) (== GOOS "linux") (== (bit-and (.-pc frame) 0xffff0000) 0xffff0000))
+      ;; Note that the calls are simple BL without pushing the return
+      ;; address, so we use LR directly.
+      ;;
+      ;; The kernel helpers are frameless leaf functions, so SP and
+      ;; LR are not touched.
+      (set! (.-pc frame) (.-lr frame))
+      (set! (.-lr frame) 0))
+
+
+    (let [f (findfunc (.-pc frame))]
+      (when (not (.valid f))
+        (when (== (bit-and flags unwindSilentErrors) 0)
+          (print "runtime: g " (.-goid gp) " gp=" gp ": unknown pc " (conv hex (.-pc frame)) "\n")
+          (tracebackHexdump (.-stack gp) (addr frame) 0))
+
+        (when (== (bit-and flags (bit-or unwindPrintErrors unwindSilentErrors)) 0)
+          (throw "unknown pc"))
+
+        (set! @u (lit unwinder))
+        (return))
+
+      (set! (.-fn frame) f)
+
+      ;; Populate the unwinder.
+      (set! @u ^{:go/breaks [2 4 6 8 10]} (lit unwinder
+          :frame frame
+          :g (.guintptr gp)
+          :cgoCtxt (- (len (.-cgoCtxt gp)) 1)
+          :calleeFuncID abi/FuncIDNormal
+          :flags flags))
+
+
+      (let [isSyscall (and (== (.-pc frame) pc0) (== (.-sp frame) sp0) (== pc0 (.-syscallpc gp)) (== sp0 (.-syscallsp gp)))]
+        (.resolveInternal u true isSyscall)))))
+
+
+^{:go/end 230} (go/method valid ^bool [^{:tag (* unwinder)} u]
+  (!= (.-pc (.-frame u)) 0))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 439} (go/method resolveInternal "resolveInternal fills in u.frame based on u.frame.fn, pc, and sp.\n\ninnermost indicates that this is the first resolve on this stack. If\ninnermost is set, isSyscall indicates that the PC/SP was retrieved from\ngp.syscall*; this is otherwise ignored.\n\nOn entry, u.frame contains:\n  - fn is the running function.\n  - pc is the PC in the running function.\n  - sp is the stack pointer at that program counter.\n  - For the innermost frame on LR machines, lr is the program counter that called fn.\n\nOn return, u.frame contains:\n  - fp is the stack pointer of the caller.\n  - lr is the program counter that called fn.\n  - varp, argp, and continpc are populated for the current frame.\n\nIf fn is a stack-jumping function, resolveInternal can change the entire\nframe state to follow that stack jump.\n\nThis is internal to unwinder.\n" [^{:tag (* unwinder)} u ^bool innermost ^bool isSyscall]
+  (let [frame (addr (.-frame u))
+      ^{:line 255} gp (.ptr (.-g u))
+
+      ^{:line 257} f (.-fn frame)]
+    (when (== ^{:go/via [_func]} (.-pcsp f) 0)
+      ;; No frame information, must be external function, like race support.
+      ;; See golang.org/issue/13568.
+      (.finishInternal u)
+      (return))
+
+
+    ;; Compute function info flags.
+    (let [flag ^{:go/via [_func]} (.-flag f)]
+      (when (== ^{:go/via [_func]} (.-funcID f) abi/FuncID_cgocallback)
+        ;; cgocallback does write SP to switch from the g0 to the curg stack,
+        ;; but it carefully arranges that during the transition BOTH stacks
+        ;; have cgocallback frame valid for unwinding through.
+        ;; So we don't need to exclude it with the other SP-writing functions.
+        (set! flag bit-and-not abi/FuncFlagSPWrite))
+
+      (when isSyscall
+        ;; Some Syscall functions write to SP, but they do so only after
+        ;; saving the entry PC/SP using entersyscall.
+        ;; Since we are using the entry PC/SP, the later SP write doesn't matter.
+        (set! flag bit-and-not abi/FuncFlagSPWrite))
+
+
+      ;; Found an actual function.
+      ;; Derive frame pointer.
+      (when (== (.-fp frame) 0)
+        ;; Jump over system stack transitions. If we're on g0 and there's a user
+        ;; goroutine, try to jump. Otherwise this is a regular call.
+        ;; We also defensively check that this won't switch M's on us,
+        ;; which could happen at critical points in the scheduler.
+        ;; This ensures gp.m doesn't change from a stack jump.
+        (when (and (!= (bit-and (.-flags u) unwindJumpStack) 0) (== gp (.-g0 (.-m gp))) (!= (.-curg (.-m gp)) nil) (== (.-m (.-curg (.-m gp))) (.-m gp)))
+          (switch ^{:go/via [_func]} (.-funcID f)
+            (case [abi/FuncID_morestack]
+              ;; morestack does not return normally -- newstack()
+              ;; gogo's to curg.sched. Match that.
+              ;; This keeps morestack() from showing up in the backtrace,
+              ;; but that makes some sense since it'll never be returned
+              ;; to.
+              (set! gp (.-curg (.-m gp)))
+              (.set (.-g u) gp)
+              (set! (.-pc frame) (.-pc (.-sched gp)))
+              (set! (.-fn frame) (findfunc (.-pc frame)))
+              (set! f (.-fn frame))
+              (set! flag ^{:go/via [_func]} (.-flag f))
+              (set! (.-lr frame) (.-lr (.-sched gp)))
+              (set! (.-sp frame) (.-sp (.-sched gp)))
+              (set! (.-cgoCtxt u) (- (len (.-cgoCtxt gp)) 1)))
+            (case [abi/FuncID_systemstack]
+              ;; systemstack returns normally, so just follow the
+              ;; stack transition.
+              (when (and usesLR (== (funcspdelta f (.-pc frame)) 0))
+                ;; We're at the function prologue and the stack
+                ;; switch hasn't happened, or epilogue where we're
+                ;; about to return. Just unwind normally.
+                ;; Do this only on LR machines because on x86
+                ;; systemstack doesn't have an SP delta (the CALL
+                ;; instruction opens the frame), therefore no way
+                ;; to check.
+                (set! flag bit-and-not abi/FuncFlagSPWrite)
+                (break))
+
+              (set! gp (.-curg (.-m gp)))
+              (.set (.-g u) gp)
+              (set! (.-sp frame) (.-sp (.-sched gp)))
+              (set! (.-cgoCtxt u) (- (len (.-cgoCtxt gp)) 1))
+              (set! flag bit-and-not abi/FuncFlagSPWrite))))
+
+
+        (set! (.-fp frame) (+ (.-sp frame) (conv uintptr (funcspdelta f (.-pc frame)))))
+        (when (not usesLR)
+          ;; On x86, call instruction pushes return PC before entering new function.
+          (set! (.-fp frame) + goarch/PtrSize)))
+
+
+
+      ;; Derive link register.
+      (cond (!= (bit-and flag abi/FuncFlagTopFrame) 0)
+        ;; This function marks the top of the stack. Stop the traceback.
+        (set! (.-lr frame) 0)
+        (and (!= (bit-and flag abi/FuncFlagSPWrite) 0) ^:go/paren (or (not innermost) (!= (bit-and (.-flags u) (bit-or unwindPrintErrors unwindSilentErrors)) 0))) (do
+          ;; The function we are in does a write to SP that we don't know
+          ;; how to encode in the spdelta table. Examples include context
+          ;; switch routines like runtime.gogo but also any code that switches
+          ;; to the g0 stack to run host C code.
+          ;; We can't reliably unwind the SP (we might not even be on
+          ;; the stack we think we are), so stop the traceback here.
+          ;;
+          ;; The one exception (encoded in the complex condition above) is that
+          ;; we assume if we're doing a precise traceback, and this is the
+          ;; innermost frame, that the SPWRITE function voluntarily preempted itself on entry
+          ;; during the stack growth check. In that case, the function has
+          ;; not yet had a chance to do any writes to SP and is safe to unwind.
+          ;; isAsyncSafePoint does not allow assembly functions to be async preempted,
+          ;; and preemptPark double-checks that SPWRITE functions are not async preempted.
+          ;; So for GC stack traversal, we can safely ignore SPWRITE for the innermost frame,
+          ;; but farther up the stack we'd better not find any.
+          ;; This is somewhat imprecise because we're just guessing that we're in the stack
+          ;; growth check. It would be better if SPWRITE were encoded in the spdelta
+          ;; table so we would know for sure that we were still in safe code.
+          ;;
+          ;; uSE uPE inn | action
+          ;;  T   _   _  | frame.lr = 0
+          ;;  F   T   _  | frame.lr = 0
+          ;;  F   F   F  | print; panic
+          ;;  F   F   T  | ignore SPWrite
+          (when (and (== (bit-and (.-flags u) (bit-or unwindPrintErrors unwindSilentErrors)) 0) (not innermost))
+            (println "traceback: unexpected SPWRITE function" (funcname f))
+            (throw "traceback"))
+
+          (set! (.-lr frame) 0)) :else
+
+        (let [^uintptr lrPtr (zero uintptr)]
+          (if usesLR
+            (when (or (and innermost (< (.-sp frame) (.-fp frame))) (== (.-lr frame) 0))
+              (set! lrPtr (.-sp frame))
+              (set! (.-lr frame) @(conv (* uintptr) (conv unsafe/Pointer lrPtr))))
+
+            (do
+              (when (== (.-lr frame) 0)
+                (set! lrPtr (- (.-fp frame) goarch/PtrSize))
+                (set! (.-lr frame) @(conv (* uintptr) (conv unsafe/Pointer lrPtr))))))))
+
+
+
+
+      (set! (.-varp frame) (.-fp frame))
+      (when (not usesLR)
+        ;; On x86, call instruction pushes return PC before entering new function.
+        (set! (.-varp frame) - goarch/PtrSize))
+
+
+      ;; For architectures with frame pointers, if there's
+      ;; a frame, then there's a saved frame pointer here.
+      ;;
+      ;; NOTE: This code is not as general as it looks.
+      ;; On x86, the ABI is to save the frame pointer word at the
+      ;; top of the stack frame, so we have to back down over it.
+      ;; On arm64, the frame pointer should be at the bottom of
+      ;; the stack (with R29 (aka FP) = RSP), in which case we would
+      ;; not want to do the subtraction here. But we started out without
+      ;; any frame pointer, and when we wanted to add it, we didn't
+      ;; want to break all the assembly doing direct writes to 8(RSP)
+      ;; to set the first parameter to a called function.
+      ;; So we decided to write the FP link *below* the stack pointer
+      ;; (with R29 = RSP - 8 in Go functions).
+      ;; This is technically ABI-compatible but not standard.
+      ;; And it happens to end up mimicking the x86 layout.
+      ;; Other architectures may make different decisions.
+      (when (and (> (.-varp frame) (.-sp frame)) framepointer_enabled)
+        (set! (.-varp frame) - goarch/PtrSize))
+
+
+      (set! (.-argp frame) (+ (.-fp frame) sys/MinFrameSize))
+
+      ;; Determine frame's 'continuation PC', where it can continue.
+      ;; Normally this is the return address on the stack, but if sigpanic
+      ;; is immediately below this function on the stack, then the frame
+      ;; stopped executing due to a trap, and frame.pc is probably not
+      ;; a safe point for looking up liveness information. In this panicking case,
+      ;; the function either doesn't return at all (if it has no defers or if the
+      ;; defers do not recover) or it returns from one of the calls to
+      ;; deferproc a second time (if the corresponding deferred func recovers).
+      ;; In the latter case, use a deferreturn call site as the continuation pc.
+      (set! (.-continpc frame) (.-pc frame))
+      (when (== (.-calleeFuncID u) abi/FuncID_sigpanic)
+        (if (!= ^{:go/via [_func]} (.-deferreturn (.-fn frame)) 0)
+          (set! (.-continpc frame) (+ (.entry (.-fn frame)) (conv uintptr ^{:go/via [_func]} (.-deferreturn (.-fn frame))) 1))
+          ;; Note: this may perhaps keep return variables alive longer than
+          ;; strictly necessary, as we are using "function has a defer statement"
+          ;; as a proxy for "function actually deferred something". It seems
+          ;; to be a minor drawback. (We used to actually look through the
+          ;; gp._defer for a defer corresponding to this function, but that
+          ;; is hard to do with defer records on the stack during a stack copy.)
+          ;; Note: the +1 is to offset the -1 that
+          ;; (*stkframe).getStackMap does to back up a return
+          ;; address make sure the pc is in the CALL instruction.
+
+          (set! (.-continpc frame) 0))))))
+
+
+
+
+^{:go/end 443} (go/func isInjectedCall ^bool [^abi/FuncID id]
+  (or (== id abi/FuncID_sigpanic) (== id abi/FuncID_asyncPreempt) (== id abi/FuncID_debugCallV2)))
+
+
+^{:go/end 520} (go/method next [^{:tag (* unwinder)} u]
+  (let [frame (addr (.-frame u))
+      ^{:line 447} f (.-fn frame)
+      ^{:line 448} gp (.ptr (.-g u))]
+
+    ;; Do not unwind past the bottom of the stack.
+    (when (== (.-lr frame) 0)
+      (.finishInternal u)
+      (return))
+
+    (let [flr (findfunc (.-lr frame))]
+      (when (not (.valid flr))
+        ;; This happens if you get a profiling interrupt at just the wrong time.
+        ;; In that context it is okay to stop early.
+        ;; But if no error flags are set, we're doing a garbage collection and must
+        ;; get everything, so crash loudly.
+        (let [fail (== (bit-and (.-flags u) (bit-or unwindPrintErrors unwindSilentErrors)) 0)
+            ^{:line 462} doPrint (== (bit-and (.-flags u) unwindSilentErrors) 0)]
+          (when (and doPrint (!= (.-m gp) nil) (.-incgo (.-m gp)) (== ^{:go/via [_func]} (.-funcID f) abi/FuncID_sigpanic))
+            ;; We can inject sigpanic
+            ;; calls directly into C code,
+            ;; in which case we'll see a C
+            ;; return PC. Don't complain.
+            (set! doPrint false))
+
+          (when (or fail doPrint)
+            (print "runtime: g " (.-goid gp) ": unexpected return pc for " (funcname f) " called from " (conv hex (.-lr frame)) "\n")
+            (tracebackHexdump (.-stack gp) frame 0))
+
+          (when fail
+            (throw "unknown caller pc"))
+
+          (set! (.-lr frame) 0)
+          (.finishInternal u)
+          (return)))
+
+
+      (when (and (== (.-pc frame) (.-lr frame)) (== (.-sp frame) (.-fp frame)))
+        ;; If the next frame is identical to the current frame, we cannot make progress.
+        (print "runtime: traceback stuck. pc=" (conv hex (.-pc frame)) " sp=" (conv hex (.-sp frame)) "\n")
+        (tracebackHexdump (.-stack gp) frame (.-sp frame))
+        (throw "traceback stuck"))
+
+
+      (let [injectedCall (isInjectedCall ^{:go/via [_func]} (.-funcID f))]
+        (if injectedCall
+          (set! (.-flags u) bit-or unwindTrap)
+
+          (set! (.-flags u) bit-and-not unwindTrap))
+
+
+        ;; Unwind to next frame.
+        (set! (.-calleeFuncID u) ^{:go/via [_func]} (.-funcID f))
+        (set! (.-fn frame) flr)
+        (set! (.-pc frame) (.-lr frame))
+        (set! (.-lr frame) 0)
+        (set! (.-sp frame) (.-fp frame))
+        (set! (.-fp frame) 0)
+
+        ;; On link register architectures, sighandler saves the LR on stack
+        ;; before faking a call.
+        (when (and usesLR injectedCall)
+          (let [x @(conv (* uintptr) (conv unsafe/Pointer (.-sp frame)))]
+            ;; same as the size bump used in scanframeworker.
+            (set! (.-sp frame) + (alignUp sys/MinFrameSize sys/StackAlign))
+            (set! f (findfunc (.-pc frame)))
+            (set! (.-fn frame) f)
+            (cond (not (.valid f))
+              (set! (.-pc frame) x)
+              (== (funcspdelta f (.-pc frame)) 0)
+              (set! (.-lr frame) x))))
+
+
+
+        (.resolveInternal u false false)))))
+
+
+
+
+
+^{:go/end 574} (go/method finishInternal "finishInternal is an unwinder-internal helper called after the stack has been\nexhausted. It sets the unwinder to an invalid state and checks that it\nsuccessfully unwound the entire stack.\n" [^{:tag (* unwinder)} u]
+  (set! (.-pc (.-frame u)) 0)
+
+  ;; Note that panic != nil is okay here: there can be leftover panics,
+  ;; because the defers on the panic stack do not nest in frame order as
+  ;; they do on the defer stack. If you have:
+  ;;
+  ;;	frame 1 defers d1
+  ;;	frame 2 defers d2
+  ;;	frame 3 defers d3
+  ;;	frame 4 panics
+  ;;	frame 4's panic starts running defers
+  ;;	frame 5, running d3, defers d4
+  ;;	frame 5 panics
+  ;;	frame 5's panic starts running defers
+  ;;	frame 6, running d4, garbage collects
+  ;;	frame 6, running d2, garbage collects
+  ;;
+  ;; During the execution of d4, the panic stack is d4 -> d3, which
+  ;; is nested properly, and we'll treat frame 3 as resumable, because we
+  ;; can find d3. (And in fact frame 3 is resumable. If d4 recovers
+  ;; and frame 5 continues running, d3, d3 can recover and we'll
+  ;; resume execution in (returning from) frame 3.)
+  ;;
+  ;; During the execution of d2, however, the panic stack is d2 -> d3,
+  ;; which is inverted. The scan will match d2 to frame 2 but having
+  ;; d2 on the stack until then means it will not match d3 to frame 3.
+  ;; This is okay: if we're running d2, then all the defers after d2 have
+  ;; completed and their corresponding frames are dead. Not finding d3
+  ;; for frame 3 means we'll set frame 3's continpc == 0, which is correct
+  ;; (frame 3 is dead). At the end of the walk the panic stack can thus
+  ;; contain defers (d3 in this case) for dead frames. The inversion here
+  ;; always indicates a dead frame, and the effect of the inversion on the
+  ;; scan is to hide those dead frames, so the scan is still okay:
+  ;; what's left on the panic stack are exactly (and only) the dead frames.
+  ;;
+  ;; We require callback != nil here because only when callback != nil
+  ;; do we know that gentraceback is being called in a "must be correct"
+  ;; context as opposed to a "best effort" context. The tracebacks with
+  ;; callbacks only happen when everything is stopped nicely.
+  ;; At other times, such as when gathering a stack for a profiling signal
+  ;; or when printing a traceback during a crash, everything may not be
+  ;; stopped nicely, and the stack walk may not be able to complete.
+  (let [gp (.ptr (.-g u))]
+    (when (and (== (bit-and (.-flags u) (bit-or unwindPrintErrors unwindSilentErrors)) 0) (!= (.-sp (.-frame u)) (.-stktopsp gp)))
+      (print "runtime: g" (.-goid gp) ": frame.sp=" (conv hex (.-sp (.-frame u))) " top=" (conv hex (.-stktopsp gp)) "\n")
+      (print "\tstack=[" (conv hex (.-lo (.-stack gp))) "-" (conv hex (.-hi (.-stack gp))) "\n")
+      (throw "traceback did not unwind completely"))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 593} (go/method symPC "symPC returns the PC that should be used for symbolizing the current frame.\nSpecifically, this is the PC of the last instruction executed in this frame.\n\nIf this frame did a normal call, then frame.pc is a return PC, so this will\nreturn frame.pc-1, which points into the CALL instruction. If the frame was\ninterrupted by a signal (e.g., profiler, segv, etc) then frame.pc is for the\ntrapped instruction, so this returns frame.pc. See issue #34123. Finally,\nframe.pc can be at function entry when the frame is initialized without\nactually running code, like in runtime.mstart, in which case this returns\nframe.pc because that's the best we can do.\n" ^uintptr [^{:tag (* unwinder)} u]
+  (when (and (== (bit-and (.-flags u) unwindTrap) 0) (> (.-pc (.-frame u)) (.entry (.-fn (.-frame u)))))
+    ;; Regular call.
+    (return (- (.-pc (.-frame u)) 1)))
+
+  ;; Trapping instruction or we're at the function entry point.
+  (.-pc (.-frame u)))
+
+
+
+
+
+
+^{:go/end 615} (go/method cgoCallers "cgoCallers populates pcBuf with the cgo callers of the current frame using\nthe registered cgo unwinder. It returns the number of PCs written to pcBuf.\nIf the current frame is not a cgo frame or if there's no registered cgo\nunwinder, it returns 0.\n" ^int [^{:tag (* unwinder)} u ^{:tag (slice uintptr)} pcBuf]
+  (when (or (not (cgoTracebackAvailable)) (!= ^{:go/via [_func]} (.-funcID (.-fn (.-frame u))) abi/FuncID_cgocallback) (< (.-cgoCtxt u) 0))
+    ;; We don't have a cgo unwinder (typical case), or we do but we're not
+    ;; in a cgo frame or we're out of cgo context.
+    (return 0))
+
+
+  (let [ctxt (aget (.-cgoCtxt (.ptr (.-g u))) (.-cgoCtxt u))]
+    (dec! (.-cgoCtxt u))
+    (cgoContextPCs ctxt pcBuf)
+    (range [i pc pcBuf]
+      (when (== pc 0)
+        (return i)))
+
+
+    (len pcBuf)))
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 659} (go/func tracebackPCs "tracebackPCs populates pcBuf with the return addresses for each frame from u\nand returns the number of PCs written to pcBuf. The returned PCs correspond\nto \"logical frames\" rather than \"physical frames\"; that is if A is inlined\ninto B, this will still return a PCs for both A and B. This also includes PCs\ngenerated by the cgo unwinder, if one is registered.\n\nIf skip != 0, this skips this many logical frames.\n\nCallers should set the unwindSilentErrors flag on u.\n" ^int [^{:tag (* unwinder)} u ^int skip ^{:tag (slice uintptr)} pcBuf]
+  (let [^{:tag (array 32 uintptr)} cgoBuf (zero (array 32 uintptr))
+      ^{:line 628} n 0]
+    (for [] (and (< n (len pcBuf)) (.valid u)) (.next u)
+      (let [f (.-fn (.-frame u))
+          ^{:line 631} cgoN (.cgoCallers u (subslice cgoBuf))]
+
+        ;; TODO: Why does &u.cache cause u to escape? (Same in traceback2)
+        (for [(values iu uf) (newInlineUnwinder f (.symPC u))] (and (< n (len pcBuf)) (.valid uf)) (set! uf (.next iu uf))
+          (let [sf (.srcFunc iu uf)]
+            (cond (and (== (.-funcID sf) abi/FuncIDWrapper) (elideWrapperCalling (.-calleeFuncID u))) (do)
+              ;; ignore wrappers
+              (> skip 0)
+              (dec! skip) :else
+              (do
+                ;; Callers expect the pc buffer to contain return addresses
+                ;; and do the -1 themselves, so we add 1 to the call pc to
+                ;; create a "return pc". Since there is no actual call, here
+                ;; "return pc" just means a pc you subtract 1 from to get
+                ;; the pc of the "call". The actual no-op we insert may or
+                ;; may not be 1 byte.
+                (aset pcBuf n (+ (.-pc uf) 1))
+                (inc! n)))
+
+            (set! (.-calleeFuncID u) (.-funcID sf))))
+
+        ;; Add cgo frames (if we're done skipping over the requested number of
+        ;; Go frames).
+        (when (== skip 0)
+          (set! n + (copy (subslice pcBuf n) (subslice cgoBuf _ cgoN))))))
+
+
+    ^{:line 658} n))
+
+
+
+^{:go/end 742} (go/func printArgs "printArgs prints function arguments in traceback.\n" [^funcInfo f ^unsafe/Pointer argp ^uintptr pc]
+  (let [p (conv (* (array abi/TraceArgsMaxLen uint8)) (funcdata f abi/FUNCDATA_ArgInfo))]
+    (when (== p nil)
+      (return))
+
+
+    (let [liveInfo (funcdata f abi/FUNCDATA_ArgLiveInfo)
+        ^{:line 669} liveIdx (pcdatavalue f abi/PCDATA_ArgLiveIndex pc)
+        ^{:line 670} startOffset (conv uint8 0xff)] ; smallest offset that needs liveness info (slots with a lower offset is always live)
+      (when (!= liveInfo nil)
+        (set! startOffset @(conv (* uint8) liveInfo)))
+
+
+      (let [isLive ^{:go/end 684} (fn ^bool [^uint8 off ^uint8 slotIdx]
+            (when (or (== liveInfo nil) (<= liveIdx 0))
+              (return true)) ; no liveness info, always live
+
+            (when (< off startOffset)
+              (return true))
+
+            (let [bits @(conv (* uint8) (add liveInfo (+ (conv uintptr liveIdx) (conv uintptr (/ slotIdx 8)))))]
+              (!= (bit-and bits ^uint8 (<< 1 (% slotIdx 8))) 0)))
+
+
+          ^{:line 686} print1 ^{:go/end 701} (fn [^uint8 off ^uint8 sz ^uint8 slotIdx]
+            (let [x (readUnaligned64 (add argp (conv uintptr off)))]
+              ;; mask out irrelevant bits
+              (when (< sz 8)
+                (let [shift (- 64 (* sz 8))]
+                  (if goarch/BigEndian
+                    (set! x (>> x shift))
+
+                    (set! x (>> (<< x shift) shift)))))
+
+
+              (print (conv hex x))
+              (when (not (isLive off slotIdx))
+                (print "?"))))
+
+
+
+          ^{:line 703} start true
+          ^{:line 704} printcomma ^{:go/end 708} (fn []
+            (when (not start)
+              (print ", ")))
+
+
+          ^{:line 709} pi 0
+          ^{:line 710} slotIdx (conv uint8 0)] ; register arg spill slot index
+        (label :printloop
+          (while true
+            (let [o (aget p pi)]
+              (inc! pi)
+              (switch o
+                (case [abi/TraceArgsEndSeq]
+                  (break :printloop))
+                (case [abi/TraceArgsStartAgg]
+                  (printcomma)
+                  (print "{")
+                  (set! start true)
+                  (continue))
+                (case [abi/TraceArgsEndAgg]
+                  (print "}"))
+                (case [abi/TraceArgsDotdotdot]
+                  (printcomma)
+                  (print "..."))
+                (case [abi/TraceArgsOffsetTooLarge]
+                  (printcomma)
+                  (print "_"))
+                (default
+                  (printcomma)
+                  (let [sz (aget p pi)]
+                    (inc! pi)
+                    (print1 o sz slotIdx)
+                    (when (>= o startOffset)
+                      (inc! slotIdx)))))
+
+
+              (set! start false))))))))
+
+
+
+
+
+
+^{:go/end 815} (go/func funcNamePiecesForPrint "funcNamePiecesForPrint returns the function name for printing to the user.\nIt returns five pieces so it doesn't need an allocation for string\nconcatenation.\n" [^string name] :results [string string string string string]
+  ;; Replace the shape name in generic function with "...".
+  (let [i (bytealg/IndexByteString name \[)]
+    (when (< i 0)
+      (return name "" "" "" ""))
+
+    (let [j (- (len name) 1)]
+      (while (!= (aget name j) \])
+        (dec! j))
+
+      (when (<= j i)
+        (return name "" "" "" ""))
+
+
+      (let [interior (subslice name (+ i 1) j)] ; '[' interior ']'
+        ;; This is an early-out to skip the more-detailed parsing that
+        ;; follows -- if there's no '[' in the interior, that implies
+        ;; (assuming balanced brackets) no ']' in the interior, and thus
+        ;; this will be the answer. If brackets are not balanced
+        ;; (malformed input, which was already a risk), this will
+        ;; eat/hide the unbalanced "]".
+        (when (< (bytealg/IndexByteString interior \[) 0)
+          (return (subslice name _ i) "[...]" (subslice name (+ j 1)) "" ""))
+
+        ;; Generic method of generic type.
+        ;; know interior contains at least "...[..."
+        ;; expect interior contains "...]___[...".
+        ;; don't know whether "..." contains balanced brackets or not.
+        ;; or the compiler might have a bug in its naming-things department.
+        ;; hope to return name[:i], "[...]", ___, "[...]", name[j+1:]
+        (let [depth 1 ; beginning after first "[", looking for balancing "]"
+            (values rbr lbr) (values -1 -1)]
+          (range [k c interior]
+            (when (== c \[)
+              (inc! depth)
+              (when (!= depth 1)
+                (continue))
+
+              ;; rbr != -1 because rbr is only assigned if depth == 0
+              (set! lbr k)
+              (break)) ; success, depth == 1, rbr >= 0, lbr > rbr
+
+            (when (== c \])
+              (dec! depth)
+              (when (< depth 0)
+                (break)) ; malformed "...]...]"
+
+              (when (!= depth 0)
+                (continue))
+
+              ;; cannot execute this twice; depth == 0 -> { ']' -> malformed, '[' -> success }
+              (set! rbr k)))
+
+
+          (when (== depth 1)
+            (when (and (>= rbr 0) (> lbr rbr))
+              (return (subslice name _ i) "[...]" (subslice interior (+ rbr 1) lbr) "[...]" (subslice name (+ j 1))))
+
+            (when (and (== rbr -1) (== lbr -1))
+              ;; the bracket seen in the interior must have been balanced in a "[]" pattern, not "]["
+              ;; return the single-brackets (not a generic method of a generic type) result
+              (return (subslice name _ i) "[...]" (subslice name (+ j 1)) "" "")))
+
+
+
+          ;; malformed, return the whole name
+          (return name "" "" "" ""))))))
+
+
+
+
+^{:go/end 821} (go/func funcNameForPrint "funcNameForPrint returns the function name for printing to the user.\n" ^string [^string name]
+  (let [(values a b c d e) (funcNamePiecesForPrint name)]
+    (+ a b c d e)))
+
+
+
+
+^{:go/end 832} (go/func printFuncName "printFuncName prints a function name. name is the function name in\nthe binary's func data table.\n" [^string name]
+  (when (== name "runtime.gopanic")
+    (print "panic")
+    (return))
+
+  (let [(values a b c d e) (funcNamePiecesForPrint name)]
+    (print a b c d e)))
+
+
+^{:go/end 841} (go/func printcreatedby [^{:tag (* g)} gp]
+  ;; Show what created goroutine, except main goroutine (goid 1).
+  (let [pc (.-gopc gp)
+      ^{:line 837} f (findfunc pc)]
+    (when (and (.valid f) (showframe (.srcFunc f) gp false abi/FuncIDNormal) (!= (.-goid gp) 1))
+      (printcreatedby1 f pc (.-parentGoid gp)))))
+
+
+
+^{:go/end 860} (go/func printcreatedby1 [^funcInfo f ^uintptr pc ^uint64 goid]
+  (print "created by ")
+  (printFuncName (funcname f))
+  (when (!= goid 0)
+    (print " in goroutine " goid))
+
+  (print "\n")
+  (let [tracepc pc] ; back up to CALL instruction for funcline.
+    (when (> pc (.entry f))
+      (set! tracepc - sys/PCQuantum))
+
+    (let [(values file line) (funcline f tracepc)]
+      (print "\t" file ":" line)
+      (when (> pc (.entry f))
+        (print " +" (conv hex (- pc (.entry f)))))
+
+      (print "\n"))))
+
+
+^{:go/end 864} (go/func traceback [^uintptr pc ^uintptr sp ^uintptr lr ^{:tag (* g)} gp]
+  (traceback1 pc sp lr gp 0))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 881} (go/func tracebacktrap "tracebacktrap is like traceback but expects that the PC and SP were obtained\nfrom a trap, not from gp->sched or gp->syscallpc/gp->syscallsp or GetCallerPC/GetCallerSP.\nBecause they are from a trap instead of from a saved pair,\nthe initial PC must not be rewound to the previous instruction.\n(All the saved pairs record a PC that is a return address, so we\nrewind it into the CALL instruction.)\nIf gp.m.libcall{g,pc,sp} information is available, it uses that information in preference to\nthe pc/sp/lr passed in.\n" [^uintptr pc ^uintptr sp ^uintptr lr ^{:tag (* g)} gp]
+  (when (!= (.-libcallsp (.-m gp)) 0)
+    ;; We're in C code somewhere, traceback from the saved position.
+    (traceback1 (.-libcallpc (.-m gp)) (.-libcallsp (.-m gp)) 0 (.ptr (.-libcallg (.-m gp))) 0)
+    (return))
+
+  (traceback1 pc sp lr gp unwindTrap))
+
+
+^{:go/end 997} (go/func traceback1 [^uintptr pc ^uintptr sp ^uintptr lr ^{:tag (* g)} gp ^unwindFlags flags]
+  ;; If the goroutine is in cgo, and we have a cgo traceback, print that.
+  (when (and iscgo (!= (.-m gp) nil) (> (.-ncgo (.-m gp)) 0) (!= (.-syscallsp gp) 0) (!= (.-cgoCallers (.-m gp)) nil) (!= (aget (.-cgoCallers (.-m gp)) 0) 0))
+    ;; Lock cgoCallers so that a signal handler won't
+    ;; change it, copy the array, reset it, unlock it.
+    ;; We are locked to the thread and are not running
+    ;; concurrently with a signal handler.
+    ;; We just have to stop a signal handler from interrupting
+    ;; in the middle of our copy.
+    (.Store (.-cgoCallersUse (.-m gp)) 1)
+    (let [cgoCallers @(.-cgoCallers (.-m gp))]
+      (aset (.-cgoCallers (.-m gp)) 0 0)
+      (.Store (.-cgoCallersUse (.-m gp)) 0)
+
+      (printCgoTraceback (addr cgoCallers))))
+
+
+  (when (== (bit-and-not (readgstatus gp) _Gscan) _Gsyscall)
+    ;; Override registers if blocked in system call.
+    (set! pc (.-syscallpc gp))
+    (set! sp (.-syscallsp gp))
+    (set! flags bit-and-not unwindTrap))
+
+  (when (and (!= (.-m gp) nil) (!= (.-vdsoSP (.-m gp)) 0))
+    ;; Override registers if running in VDSO. This comes after the
+    ;; _Gsyscall check to cover VDSO calls after entersyscall.
+    (set! pc (.-vdsoPC (.-m gp)))
+    (set! sp (.-vdsoSP (.-m gp)))
+    (set! flags bit-and-not unwindTrap))
+
+
+  ;; Print traceback.
+  ;;
+  ;; We print the first tracebackInnerFrames frames, and the last
+  ;; tracebackOuterFrames frames. There are many possible approaches to this.
+  ;; There are various complications to this:
+  ;;
+  ;; - We'd prefer to walk the stack once because in really bad situations
+  ;;   traceback may crash (and we want as much output as possible) or the stack
+  ;;   may be changing.
+  ;;
+  ;; - Each physical frame can represent several logical frames, so we might
+  ;;   have to pause in the middle of a physical frame and pick up in the middle
+  ;;   of a physical frame.
+  ;;
+  ;; - The cgo symbolizer can expand a cgo PC to more than one logical frame,
+  ;;   and involves juggling state on the C side that we don't manage. Since its
+  ;;   expansion state is managed on the C side, we can't capture the expansion
+  ;;   state part way through, and because the output strings are managed on the
+  ;;   C side, we can't capture the output. Thus, our only choice is to replay a
+  ;;   whole expansion, potentially discarding some of it.
+  ;;
+  ;; Rejected approaches:
+  ;;
+  ;; - Do two passes where the first pass just counts and the second pass does
+  ;;   all the printing. This is undesirable if the stack is corrupted or changing
+  ;;   because we won't see a partial stack if we panic.
+  ;;
+  ;; - Keep a ring buffer of the last N logical frames and use this to print
+  ;;   the bottom frames once we reach the end of the stack. This works, but
+  ;;   requires keeping a surprising amount of state on the stack, and we have
+  ;;   to run the cgo symbolizer twice—once to count frames, and a second to
+  ;;   print them—since we can't retain the strings it returns.
+  ;;
+  ;; Instead, we print the outer frames, and if we reach that limit, we clone
+  ;; the unwinder, count the remaining frames, and then skip forward and
+  ;; finish printing from the clone. This makes two passes over the outer part
+  ;; of the stack, but the single pass over the inner part ensures that's
+  ;; printed immediately and not revisited. It keeps minimal state on the
+  ;; stack. And through a combination of skip counts and limits, we can do all
+  ;; of the steps we need with a single traceback printer implementation.
+  ;;
+  ;; We could be more lax about exactly how many frames we print, for example
+  ;; always stopping and resuming on physical frame boundaries, or at least
+  ;; cgo expansion boundaries. It's not clear that's much simpler.
+  (set! flags bit-or unwindPrintErrors)
+  (let [^unwinder u (zero unwinder)
+      ^{:line 960} tracebackWithRuntime ^{:go/end 983} (fn ^int [^bool showRuntime]
+        (let [^:const ^{:tag int :val 2147483647} maxInt 0x7fffffff]
+          (.initAt u pc sp lr gp flags)
+          (let [(values n lastN) (traceback2 (addr u) showRuntime 0 tracebackInnerFrames)]
+            (when (< n tracebackInnerFrames)
+              ;; We printed the whole stack.
+              (return n))
+
+            ;; Clone the unwinder and figure out how many frames are left. This
+            ;; count will include any logical frames already printed for u's current
+            ;; physical frame.
+            (let [u2 u
+                (values remaining _) (traceback2 (addr u) showRuntime maxInt 0)
+                ^{:line 973} elide (- remaining lastN tracebackOuterFrames)]
+              (cond (> elide 0) (do
+                  (print "..." elide " frames elided...\n")
+                  (traceback2 (addr u2) showRuntime (+ lastN elide) tracebackOuterFrames))
+                (<= elide 0)
+                ;; There are tracebackOuterFrames or fewer frames left to print.
+                ;; Just print the rest of the stack.
+                (traceback2 (addr u2) showRuntime lastN tracebackOuterFrames))
+
+              ^{:line 982} n))))]
+
+    ;; By default, omits runtime frames. If that means we print nothing at all,
+    ;; repeat forcing all frames printed.
+    (when (== (tracebackWithRuntime false) 0)
+      (tracebackWithRuntime true))
+
+    (printcreatedby gp)
+
+    (when (== (.-ancestors gp) nil)
+      (return))
+
+    (range [_ ancestor @(.-ancestors gp)]
+      (printAncestorTraceback ancestor))))
+
+
+
+
+
+
+
+
+^{:go/end 1102} (go/func traceback2 "traceback2 prints a stack trace starting at u. It skips the first \"skip\"\nlogical frames, after which it prints at most \"max\" logical frames. It\nreturns n, which is the number of logical frames skipped and printed, and\nlastN, which is the number of logical frames skipped or printed just in the\nphysical frame that u references.\n" [^{:tag (* unwinder)} u ^bool showRuntime ^int skip ^int max] :results [^int n ^int lastN]
+  ;; commitFrame commits to a logical frame and returns whether this frame
+  ;; should be printed and whether iteration should stop.
+  (let [commitFrame ^{:go/end 1022} (fn [] :results [^bool pr ^bool stop]
+        (when (and (== skip 0) (== max 0))
+          ;; Stop
+          (return false true))
+
+        (inc! n)
+        (inc! lastN)
+        (when (> skip 0)
+          ;; Skip
+          (dec! skip)
+          (return false false))
+
+        ;; Print
+        (dec! max)
+        (return true false))
+
+
+      ^{:line 1024} gp (.ptr (.-g u))
+      (values level _ _) (gotraceback)
+      ^{:line 1026 :tag (array 32 uintptr)} cgoBuf (zero (array 32 uintptr))]
+    (for [] (.valid u) (.next u)
+      (set! lastN 0)
+      (let [f (.-fn (.-frame u))]
+        (for [(values iu uf) (newInlineUnwinder f (.symPC u))] (.valid uf) (set! uf (.next iu uf))
+          (let [sf (.srcFunc iu uf)
+              ^{:line 1032} callee (.-calleeFuncID u)]
+            (set! (.-calleeFuncID u) (.-funcID sf))
+            (when (not (or showRuntime (showframe sf gp (== n 0) callee)))
+              (continue))
+
+
+            (if [(values pr stop) (commitFrame)] stop
+              (return)
+              (when (not pr)
+                (continue)))
+
+
+            (let [name (.name sf)
+                (values file line) (.fileLine iu uf)]
+              ;; Print during crash.
+              ;;	main(0x1, 0x2, 0x3)
+              ;;		/home/rsc/go/src/runtime/x.go:23 +0xf
+              ;;
+              (printFuncName name)
+              (print "(")
+              (if (.isInlined iu uf)
+                (print "...")
+
+                (let [argp (conv unsafe/Pointer (.-argp (.-frame u)))]
+                  (printArgs f argp (.symPC u))))
+
+              (print ")\n")
+              (print "\t" file ":" line)
+              (when (not (.isInlined iu uf))
+                (when (> (.-pc (.-frame u)) (.entry f))
+                  (print " +" (conv hex (- (.-pc (.-frame u)) (.entry f)))))
+
+                (when (or (and (!= (.-m gp) nil) (>= (.-throwing (.-m gp)) throwTypeRuntime) (== gp (.-curg (.-m gp)))) (>= level 2))
+                  (print " fp=" (conv hex (.-fp (.-frame u))) " sp=" (conv hex (.-sp (.-frame u))) " pc=" (conv hex (.-pc (.-frame u))))))
+
+
+              (print "\n"))))
+
+
+        ;; Print cgo frames.
+        (when [cgoN (.cgoCallers u (subslice cgoBuf))] (> cgoN 0)
+          (let [^cgoSymbolizerArg arg (zero cgoSymbolizerArg)
+              ^{:line 1074} anySymbolized false
+              ^{:line 1075} stop false]
+            (range [_ pc (subslice cgoBuf _ cgoN)]
+              (if (not (cgoSymbolizerAvailable))
+                (if [(values pr stop) (commitFrame)] stop
+                  (break)
+                  (when pr
+                    (print "non-Go function at pc=" (conv hex pc) "\n")))
+
+                (do
+                  (set! stop (printOneCgoTraceback pc commitFrame (addr arg)))
+                  (set! anySymbolized true)
+                  (when stop
+                    (break)))))
+
+
+
+            (when anySymbolized
+              ;; Free symbolization state.
+              (set! (.-pc arg) 0)
+              (callCgoSymbolizer (addr arg)))
+
+            (when stop
+              (return))))))
+
+
+
+    (return n 0)))
+
+
+
+
+^{:go/end 1124} (go/func printAncestorTraceback "printAncestorTraceback prints the traceback of the given ancestor.\nTODO: Unify this with gentraceback and CallersFrames.\n" [^ancestorInfo ancestor]
+  (print "[originating from goroutine " (.-goid ancestor) "]:\n")
+  (range [fidx pc (.-pcs ancestor)]
+    (let [f (findfunc pc)] ; f previously validated
+      (when (showfuncinfo (.srcFunc f) (== fidx 0) abi/FuncIDNormal)
+        (printAncestorTracebackFuncInfo f pc))))
+
+
+  (when (== (len (.-pcs ancestor)) tracebackInnerFrames)
+    (print "...additional frames elided...\n"))
+
+  ;; Show what created goroutine, except main goroutine (goid 1).
+  (let [f (findfunc (.-gopc ancestor))]
+    (when (and (.valid f) (showfuncinfo (.srcFunc f) false abi/FuncIDNormal) (!= (.-goid ancestor) 1))
+      ;; In ancestor mode, we'll already print the goroutine ancestor.
+      ;; Pass 0 for the goid parameter so we don't print it again.
+      (printcreatedby1 f (.-gopc ancestor) 0))))
+
+
+
+
+
+
+
+^{:go/end 1140} (go/func printAncestorTracebackFuncInfo "printAncestorTracebackFuncInfo prints the given function info at a given pc\nwithin an ancestor traceback. The precision of this info is reduced\ndue to only have access to the pcs at the time of the caller\ngoroutine being created.\n" [^funcInfo f ^uintptr pc]
+  (let [(values u uf) (newInlineUnwinder f pc)
+      (values file line) (.fileLine u uf)]
+    (printFuncName (.name (.srcFunc u uf)))
+    (print "(...)\n")
+    (print "\t" file ":" line)
+    (when (> pc (.entry f))
+      (print " +" (conv hex (- pc (.entry f)))))
+
+    (print "\n")))
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1163} (go/func ^{:go/linkname "callers"} callers "callers should be an internal detail,\n(and is almost identical to Callers),\nbut widely used packages access it using linkname.\nNotable members of the hall of shame include:\n  - github.com/phuslu/log\n\nDo not remove or change the type signature.\nSee go.dev/issue/67401.\n" ^int [^int skip ^{:tag (slice uintptr)} pcbuf]
+  (let [sp (sys/GetCallerSP)
+      ^{:line 1154} pc (sys/GetCallerPC)
+      ^{:line 1155} gp (getg)
+      ^{:line 1156 :tag int} n (zero int)]
+    (systemstack ^{:go/end 1161} (fn []
+        (let [^unwinder u (zero unwinder)]
+          (.initAt u pc sp 0 gp unwindSilentErrors)
+          (set! n (tracebackPCs (addr u) skip pcbuf)))))
+
+    ^{:line 1162} n))
+
+
+^{:go/end 1169} (go/func gcallers ^int [^{:tag (* g)} gp ^int skip ^{:tag (slice uintptr)} pcbuf]
+  (let [^unwinder u (zero unwinder)]
+    (.init u gp unwindSilentErrors)
+    (tracebackPCs (addr u) skip pcbuf)))
+
+
+
+
+^{:go/end 1179} (go/func showframe "showframe reports whether the frame with the given characteristics should\nbe printed during a traceback.\n" ^bool [^srcFunc sf ^{:tag (* g)} gp ^bool firstFrame ^abi/FuncID calleeID]
+  (let [mp (.-m (getg))]
+    (when (and (>= (.-throwing mp) throwTypeRuntime) (!= gp nil) ^:go/paren (or (== gp (.-curg mp)) (== gp (.ptr (.-caughtsig mp)))))
+      (return true))
+
+    (showfuncinfo sf firstFrame calleeID)))
+
+
+
+
+^{:go/end 1222} (go/func showfuncinfo "showfuncinfo reports whether a function with the given characteristics should\nbe printed during a traceback.\n" ^bool [^srcFunc sf ^bool firstFrame ^abi/FuncID calleeID]
+  (let [(values level _ _) (gotraceback)]
+    (when (> level 1)
+      ;; Show all frames.
+      (return true))
+
+
+    (when (and (== (.-funcID sf) abi/FuncIDWrapper) (elideWrapperCalling calleeID))
+      (return false))
+
+
+    ;; Always show runtime.runFinalizers and runtime.runCleanups as
+    ;; context that this goroutine is running finalizers or cleanups,
+    ;; otherwise there is no obvious indicator.
+    ;;
+    ;; TODO(prattmic): A more general approach would be to always show the
+    ;; outermost frame (besides runtime.goexit), even if it is a runtime.
+    ;; Hiding the outermost frame allows the apparent outermost frame to
+    ;; change across different traces, which seems impossible.
+    ;;
+    ;; Unfortunately, implementing this requires looking ahead at the next
+    ;; frame, which goes against traceback's incremental approach (see big
+    ;; comment in traceback1).
+    (when (or (== (.-funcID sf) abi/FuncID_runFinalizers) (== (.-funcID sf) abi/FuncID_runCleanups))
+      (return true))
+
+
+    (let [name (.name sf)]
+
+      ;; Special case: always show runtime.gopanic frame
+      ;; in the middle of a stack trace, so that we can
+      ;; see the boundary between ordinary code and
+      ;; panic-induced deferred code.
+      ;; See golang.org/issue/5832.
+      (when (and (== name "runtime.gopanic") (not firstFrame))
+        (return true))
+
+
+      (and (>= (bytealg/IndexByteString name \.) 0) ^:go/paren (or (not (stringslite/HasPrefix name "runtime.")) (isExportedRuntime name))))))
+
+
+
+
+^{:go/end 1251} (go/func isExportedRuntime "isExportedRuntime reports whether name is an exported runtime function.\nIt is only for runtime functions, so ASCII A-Z is fine.\n" ^bool [^string name]
+  ;; Check and remove package qualifier.
+  (let [(values ^:assign name found) (stringslite/CutPrefix name "runtime.")]
+    (when (not found)
+      (return false))
+
+    (let [rcvr ""
+
+        ;; Extract receiver type, if any.
+        ;; For example, runtime.(*Func).Entry
+        ^{:line 1236} i (- (len name) 1)]
+      (while (and (>= i 0) (!= (aget name i) \.))
+        (dec! i))
+
+      (when (>= i 0)
+        (set! rcvr (subslice name _ i))
+        (set! name (subslice name (+ i 1)))
+        ;; Remove parentheses and star for pointer receivers.
+        (when (and (>= (len rcvr) 3) (== (aget rcvr 0) \() (== (aget rcvr 1) \*) (== (aget rcvr (- (len rcvr) 1)) \)))
+          (set! rcvr (subslice rcvr 2 (- (len rcvr) 1)))))
+
+
+
+      ;; Exported functions and exported methods on exported types.
+      (and (> (len name) 0) (<= \A (aget name 0)) (<= (aget name 0) \Z) ^:go/paren (or (== (len rcvr) 0) (and (<= \A (aget rcvr 0)) (<= (aget rcvr 0) \Z)))))))
+
+
+
+
+^{:go/end 1259} (go/func elideWrapperCalling "elideWrapperCalling reports whether a wrapper function that called\nfunction id should be elided from stack traces.\n" ^bool [^abi/FuncID id]
+  ;; If the wrapper called a panic function instead of the
+  ;; wrapped function, we want to include it in stacks.
+  (not (or (== id abi/FuncID_gopanic) (== id abi/FuncID_sigpanic) (== id abi/FuncID_panicwrap))))
+
+
+(go/var gStatusStrings (lit (array ... string)
+    ^{:line 1262} [_Gidle "idle"]
+    ^{:line 1263} [_Grunnable "runnable"]
+    ^{:line 1264} [_Grunning "running"]
+    ^{:line 1265} [_Gsyscall "syscall"]
+    ^{:line 1266} [_Gwaiting "waiting"]
+    ^{:line 1267} [_Gdead "dead"]
+    ^{:line 1268} [_Gcopystack "copystack"]
+    ^{:line 1269} [_Gleaked "leaked"]
+    ^{:line 1270} [_Gpreempted "preempted"]
+    ^{:line 1271} [_Gdeadextra "waiting for cgo callback"]))
+
+
+^{:go/end 1358} (go/func goroutineheader [^{:tag (* g)} gp]
+  (let [(values level _ _) (gotraceback)
+
+      ^{:line 1277} gpstatus (readgstatus gp)
+
+      ^{:line 1279} isScan (!= (bit-and gpstatus _Gscan) 0)]
+    (set! gpstatus bit-and-not _Gscan) ; drop the scan bit
+
+    ;; Basic string status
+    (let [^string status (zero string)]
+      (if (and (<= 0 gpstatus) (< gpstatus (conv uint32 (len gStatusStrings))))
+        (set! status (aget gStatusStrings gpstatus))
+
+        (set! status "???"))
+
+
+      ;; Override.
+      (when (and ^:go/paren (or (== gpstatus _Gwaiting) (== gpstatus _Gleaked)) (!= (.-waitreason gp) waitReasonZero))
+        (set! status (.String (.-waitreason gp))))
+
+
+      ;; approx time the G is blocked, in minutes
+      (let [^int64 waitfor (zero int64)]
+        (when (and ^:go/paren (or (== gpstatus _Gwaiting) (== gpstatus _Gsyscall)) (!= (.-waitsince gp) 0))
+          (set! waitfor (/ (- (nanotime) (.-waitsince gp)) 6.0E10)))
+
+        (print "goroutine " (.-goid gp))
+        (when (or (and (!= (.-m gp) nil) (>= (.-throwing (.-m gp)) throwTypeRuntime) (== gp (.-curg (.-m gp)))) (>= level 2))
+          (print " gp=" gp)
+          (if (!= (.-m gp) nil)
+            (print " m=" (.-id (.-m gp)) " mp=" (.-m gp))
+
+            (print " m=nil")))
+
+
+        (print " [" status)
+        (when (== gpstatus _Gleaked)
+          (print " (leaked)"))
+
+        (when isScan
+          (print " (scan)"))
+
+        (when [bubble (.-bubble gp)] (and (!= bubble nil)
+            (== gpstatus _Gwaiting)
+            (.isIdleInSynctest (.-waitreason gp))
+            (not (stringslite/HasSuffix status "(durable)")))
+          ;; If this isn't a status where the name includes a (durable)
+          ;; suffix to distinguish it from the non-durable form, add it here.
+          (print " (durable)"))
+
+        (when (>= waitfor 1)
+          (print ", " waitfor " minutes"))
+
+        (when (!= (.-lockedm gp) 0)
+          (print ", locked to thread"))
+
+        (when [bubble (.-bubble gp)] (!= bubble nil)
+          (print ", synctest bubble " (.-id bubble)))
+
+        (print "]")
+        (when (and (!= (.-labels gp) nil) (== (.Load (.-tracebacklabels debug)) 1))
+          (let [labels (.-List (conv (* label/Set) (.-labels gp)))]
+            (when (> (len labels) 0)
+              (print " {")
+              (range [i kv labels]
+                ;; Try to be nice and only quote the keys/values if one of them has characters that need quoting or escaping.
+                (let [printq ^{:go/end 1346} (fn [^string s]
+                      (if (tracebackStringNeedsQuoting s)
+                        (print (conv quoted s))
+
+                        (print s)))]
+
+
+                  (printq (.-Key kv))
+                  (print ": ")
+                  (printq (.-Value kv))
+                  (when (< i (- (len labels) 1))
+                    (print ", "))))
+
+
+              (print "}"))))
+
+
+        (print ":\n")))))
+
+
+^{:go/breaks [[4 1369]] :go/end 1370} (go/func tracebackStringNeedsQuoting ^bool [^string s]
+  (range [_ r s]
+    (when (not (or (and (<= \a r) (<= r \z))
+          (and (<= \A r) (<= r \Z))
+          (and (<= \0 r) (<= r \9))
+          (== r \.) (== r \/) (== r \_)))
+      (return true)))
+
+
+  false)
+
+
+^{:go/end 1374} (go/func tracebackothers [^{:tag (* g)} me]
+  (tracebacksomeothers me ^{:go/end 1373} (fn ^bool [(* g)] true)))
+
+
+^{:go/end 1429} (go/func tracebacksomeothers [^{:tag (* g)} me ^{:tag (func [(* g)] [bool])} showf]
+  (let [(values level _ _) (gotraceback)
+
+      ;; Show the current goroutine first, if we haven't already.
+      ^{:line 1380} curgp (.-curg (.-m (getg)))]
+    (when (and (!= curgp nil) (!= curgp me))
+      (print "\n")
+      (goroutineheader curgp)
+      (traceback (bit-not (conv uintptr 0)) (bit-not (conv uintptr 0)) 0 curgp))
+
+
+    ;; We can't call locking forEachG here because this may be during fatal
+    ;; throw/panic, where locking could be out-of-order or a direct
+    ;; deadlock.
+    ;;
+    ;; Instead, use forEachGRace, which requires no locking. We don't lock
+    ;; against concurrent creation of new Gs, but even with allglock we may
+    ;; miss Gs created after this loop.
+    (forEachGRace ^{:go/end 1428} (fn [^{:tag (* g)} gp]
+        (when (or (== gp me) (== gp curgp))
+          (return))
+
+        (when [status (readgstatus gp)] (or (== status _Gdead) (== status _Gdeadextra))
+          (return))
+
+        (when (not (showf gp))
+          (return))
+
+        (when (and (isSystemGoroutine gp false) (< level 2))
+          (return))
+
+        (print "\n")
+        (goroutineheader gp)
+        ;; Note: gp.m == getg().m occurs when tracebackothers is called
+        ;; from a signal handler initiated during a systemstack call.
+        ;; The original G is still in the running state, and we want to
+        ;; print its stack.
+        ;;
+        ;; There's a small window of time in exitsyscall where a goroutine could be
+        ;; in _Grunning as it's exiting a syscall. This could be the case even if the
+        ;; world is stopped or frozen.
+        ;;
+        ;; This is OK because the goroutine will not exit the syscall while the world
+        ;; is stopped or frozen. This is also why it's safe to check syscallsp here,
+        ;; and safe to take the goroutine's stack trace. The syscall path mutates
+        ;; syscallsp only just before exiting the syscall.
+        (if (and (!= (.-m gp) (.-m (getg))) (== (bit-and-not (readgstatus gp) _Gscan) _Grunning) (== (.-syscallsp gp) 0)) (do
+            (print "\tgoroutine running on other thread; stack unavailable\n")
+            (printcreatedby gp))
+
+          (traceback (bit-not (conv uintptr 0)) (bit-not (conv uintptr 0)) 0 gp))))))
+
+
+
+
+
+
+
+^{:go/end 1479} (go/func tracebackHexdump "tracebackHexdump hexdumps part of stk around frame.sp and frame.fp\nfor debugging purposes. If the address bad is included in the\nhexdumped range, it will mark it as well.\n" [^stack stk ^{:tag (* stkframe)} frame ^uintptr bad]
+  (let [^:const ^{:val 256} expand (* 32 goarch/PtrSize)
+      ^:const ^{:line 1436 :val 2048} maxExpand (* 256 goarch/PtrSize)
+      ;; Start around frame.sp.
+      (values lo hi) (values (.-sp frame) (.-sp frame))]
+    ;; Expand to include frame.fp.
+    (when (and (!= (.-fp frame) 0) (< (.-fp frame) lo))
+      (set! lo (.-fp frame)))
+
+    (when (and (!= (.-fp frame) 0) (> (.-fp frame) hi))
+      (set! hi (.-fp frame)))
+
+    ;; Expand a bit more.
+    (set! (values lo hi) (values (- lo expand) (+ hi expand)))
+    ;; But don't go too far from frame.sp.
+    (when (< lo (- (.-sp frame) maxExpand))
+      (set! lo (- (.-sp frame) maxExpand)))
+
+    (when (> hi (+ (.-sp frame) maxExpand))
+      (set! hi (+ (.-sp frame) maxExpand)))
+
+    ;; And don't go outside the stack bounds.
+    (when (< lo (.-lo stk))
+      (set! lo (.-lo stk)))
+
+    (when (> hi (.-hi stk))
+      (set! hi (.-hi stk)))
+
+
+    ;; Print the hex dump.
+    (print "stack: frame={sp:" (conv hex (.-sp frame)) ", fp:" (conv hex (.-fp frame)) "} stack=[" (conv hex (.-lo stk)) "," (conv hex (.-hi stk)) ")\n")
+    (hexdumpWords lo (- hi lo) ^{:go/end 1478} (fn [^uintptr p ^hexdumpMarker m]
+        (when (== p (.-fp frame))
+          (.start m)
+          (println "FP"))
+
+        (when (== p (.-sp frame))
+          (.start m)
+          (println "SP"))
+
+        (when (== p bad)
+          (.start m)
+          (println "bad"))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1520} (go/func isSystemGoroutine "isSystemGoroutine reports whether the goroutine g must be omitted\nin stack dumps and deadlock detector. This is any goroutine that\nstarts at a runtime.* entry point, except for runtime.main,\nruntime.handleAsyncEvent (wasm only) and sometimes\nruntime.runFinalizers/runtime.runCleanups.\n\nIf fixed is true, any goroutine that can vary between user and\nsystem (that is, the finalizer goroutine) is considered a user\ngoroutine.\n" ^bool [^{:tag (* g)} gp ^bool fixed]
+  ;; Keep this in sync with internal/trace.IsSystemGoroutine.
+  (let [f (findfunc (.-startpc gp))]
+    (when (not (.valid f))
+      (return false))
+
+    (when (or (== ^{:go/via [_func]} (.-funcID f) abi/FuncID_runtime_main) (== ^{:go/via [_func]} (.-funcID f) abi/FuncID_corostart) (== ^{:go/via [_func]} (.-funcID f) abi/FuncID_handleAsyncEvent))
+      (return false))
+
+    (when (== ^{:go/via [_func]} (.-funcID f) abi/FuncID_runFinalizers)
+      ;; We include the finalizer goroutine if it's calling
+      ;; back into user code.
+      (when fixed
+        ;; This goroutine can vary. In fixed mode,
+        ;; always consider it a user goroutine.
+        (return false))
+
+      (return (== (bit-and (.Load fingStatus) fingRunningFinalizer) 0)))
+
+    (when (== ^{:go/via [_func]} (.-funcID f) abi/FuncID_runCleanups)
+      ;; We include the cleanup goroutines if they're calling
+      ;; back into user code.
+      (when fixed
+        ;; This goroutine can vary. In fixed mode,
+        ;; always consider it a user goroutine.
+        (return false))
+
+      (return (not (.Load (.-runningCleanups gp)))))
+
+    (stringslite/HasPrefix (funcname f) "runtime.")))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1711} (go/func SetCgoTraceback "SetCgoTraceback records three C functions to use to gather\ntraceback information from C code and to convert that traceback\ninformation into symbolic information. These are used when printing\nstack traces for a program that uses cgo.\n\nThe traceback and context functions may be called from a signal\nhandler, and must therefore use only async-signal safe functions.\nThe symbolizer function may be called while the program is\ncrashing, and so must be cautious about using memory.  None of the\nfunctions may call back into Go.\n\nThe context function will be called with a single argument, a\npointer to a struct:\n\n\tstruct {\n\t\tContext uintptr\n\t}\n\nIn C syntax, this struct will be\n\n\tstruct {\n\t\tuintptr_t Context;\n\t};\n\nIf the Context field is 0, the context function is being called to\nrecord the current traceback context. It should record in the\nContext field whatever information is needed about the current\npoint of execution to later produce a stack trace, probably the\nstack pointer and PC. In this case the context function will be\ncalled from C code.\n\nIf the Context field is not 0, then it is a value returned by a\nprevious call to the context function. This case is called when the\ncontext is no longer needed; that is, when the Go code is returning\nto its C code caller. This permits the context function to release\nany associated resources.\n\nWhile it would be correct for the context function to record a\ncomplete a stack trace whenever it is called, and simply copy that\nout in the traceback function, in a typical program the context\nfunction will be called many times without ever recording a\ntraceback for that context. Recording a complete stack trace in a\ncall to the context function is likely to be inefficient.\n\nThe traceback function will be called with a single argument, a\npointer to a struct:\n\n\tstruct {\n\t\tContext    uintptr\n\t\tSigContext uintptr\n\t\tBuf        *uintptr\n\t\tMax        uintptr\n\t}\n\nIn C syntax, this struct will be\n\n\tstruct {\n\t\tuintptr_t  Context;\n\t\tuintptr_t  SigContext;\n\t\tuintptr_t* Buf;\n\t\tuintptr_t  Max;\n\t};\n\nThe Context field will be zero to gather a traceback from the\ncurrent program execution point. In this case, the traceback\nfunction will be called from C code.\n\nOtherwise Context will be a value previously returned by a call to\nthe context function. The traceback function should gather a stack\ntrace from that saved point in the program execution. The traceback\nfunction may be called from an execution thread other than the one\nthat recorded the context, but only when the context is known to be\nvalid and unchanging. The traceback function may also be called\ndeeper in the call stack on the same thread that recorded the\ncontext. The traceback function may be called multiple times with\nthe same Context value; it will usually be appropriate to cache the\nresult, if possible, the first time this is called for a specific\ncontext value.\n\nIf the traceback function is called from a signal handler on a Unix\nsystem, SigContext will be the signal context argument passed to\nthe signal handler (a C ucontext_t* cast to uintptr_t). This may be\nused to start tracing at the point where the signal occurred. If\nthe traceback function is not called from a signal handler,\nSigContext will be zero.\n\nBuf is where the traceback information should be stored. It should\nbe PC values, such that Buf[0] is the PC of the caller, Buf[1] is\nthe PC of that function's caller, and so on.  Max is the maximum\nnumber of entries to store.  The function should store a zero to\nindicate the top of the stack, or that the caller is on a different\nstack, presumably a Go stack.\n\nUnlike runtime.Callers, the PC values returned should, when passed\nto the symbolizer function, return the file/line of the call\ninstruction.  No additional subtraction is required or appropriate.\n\nOn all platforms, the traceback function is invoked when a call from\nGo to C to Go requests a stack trace. On linux/amd64, linux/ppc64le,\nlinux/arm64, and freebsd/amd64, the traceback function is also invoked\nwhen a signal is received by a thread that is executing a cgo call.\nThe traceback function should not make assumptions about when it is\ncalled, as future versions of Go may make additional calls.\n\nThe symbolizer function will be called with a single argument, a\npointer to a struct:\n\n\tstruct {\n\t\tPC      uintptr // program counter to fetch information for\n\t\tFile    *byte   // file name (NUL terminated)\n\t\tLineno  uintptr // line number\n\t\tFunc    *byte   // function name (NUL terminated)\n\t\tEntry   uintptr // function entry point\n\t\tMore    uintptr // set non-zero if more info for this PC\n\t\tData    uintptr // unused by runtime, available for function\n\t}\n\nIn C syntax, this struct will be\n\n\tstruct {\n\t\tuintptr_t PC;\n\t\tchar*     File;\n\t\tuintptr_t Lineno;\n\t\tchar*     Func;\n\t\tuintptr_t Entry;\n\t\tuintptr_t More;\n\t\tuintptr_t Data;\n\t};\n\nThe PC field will be a value returned by a call to the traceback\nfunction.\n\nThe first time the function is called for a particular traceback,\nall the fields except PC will be 0. The function should fill in the\nother fields if possible, setting them to 0/nil if the information\nis not available. The Data field may be used to store any useful\ninformation across calls. The More field should be set to non-zero\nif there is more information for this PC, zero otherwise. If More\nis set non-zero, the function will be called again with the same\nPC, and may return different information (this is intended for use\nwith inlined functions). If More is zero, the function will be\ncalled with the next PC value in the traceback. When the traceback\nis complete, the function will be called once more with PC set to\nzero; this may be used to free any information. Each call will\nleave the fields of the struct set to the same values they had upon\nreturn, except for the PC field when the More field is zero. The\nfunction must not keep a copy of the struct pointer between calls.\n\nWhen calling SetCgoTraceback, the version argument is the version\nnumber of the structs that the functions expect to receive.\nCurrently this must be zero.\n\nThe symbolizer function may be nil, in which case the results of\nthe traceback function will be displayed as numbers. If the\ntraceback function is nil, the symbolizer function will never be\ncalled. The context function may be nil, in which case the\ntraceback function will only be called with the context field set\nto zero.  If the context function is nil, then calls from Go to C\nto Go will not show a traceback for the C portion of the call stack.\n\nSetCgoTraceback should be called only once, ideally from an init function.\n" [^int version ^unsafe/Pointer traceback ^unsafe/Pointer context ^unsafe/Pointer symbolizer]
+  (when (!= version 0)
+    (panic "unsupported version"))
+
+
+  (when (or (and (!= cgoTraceback nil) (!= cgoTraceback traceback))
+      (and (!= cgoContext nil) (!= cgoContext context))
+      (and (!= cgoSymbolizer nil) (!= cgoSymbolizer symbolizer)))
+    (panic "call SetCgoTraceback only once"))
+
+
+  (set! cgoTraceback traceback)
+  (set! cgoContext context)
+  (set! cgoSymbolizer symbolizer)
+
+  (when (!= _cgo_set_traceback_functions nil)
+    (let-type [cgoSetTracebackFunctionsArg (struct
+          ^{:line 1700 :tag unsafe/Pointer} traceback
+          ^{:line 1701 :tag unsafe/Pointer} context
+          ^{:line 1702 :tag unsafe/Pointer} symbolizer)]
+
+      (let [arg ^{:go/breaks [2 4 6]} (lit cgoSetTracebackFunctionsArg
+            :traceback traceback
+            :context context
+            :symbolizer symbolizer)]
+
+        (cgocall _cgo_set_traceback_functions (noescape (conv unsafe/Pointer (addr arg))))))))
+
+
+
+(go/var ^unsafe/Pointer cgoTraceback)
+(go/var ^unsafe/Pointer cgoContext)
+(go/var ^unsafe/Pointer cgoSymbolizer)
+
+^{:go/end 1721} (go/func cgoTracebackAvailable ^bool []
+  ;; - The traceback function must be registered via SetCgoTraceback.
+  ;; - This must be a cgo binary (providing _cgo_call_traceback_function).
+  (and (!= cgoTraceback nil) (!= _cgo_call_traceback_function nil)))
+
+
+^{:go/end 1727} (go/func cgoSymbolizerAvailable ^bool []
+  ;; - The symbolizer function must be registered via SetCgoTraceback.
+  ;; - This must be a cgo binary (providing _cgo_call_symbolizer_function).
+  (and (!= cgoSymbolizer nil) (!= _cgo_call_symbolizer_function nil)))
+
+
+
+(go/type cgoTracebackArg "cgoTracebackArg is the type passed to cgoTraceback.\n" (struct
+    ^{:line 1731 :tag uintptr} context
+    ^{:line 1732 :tag uintptr} sigContext
+    ^{:line 1733 :tag (* uintptr)} buf
+    ^{:line 1734 :tag uintptr} max))
+
+
+
+(go/type cgoContextArg "cgoContextArg is the type passed to the context function.\n" (struct
+    ^{:line 1739 :tag uintptr} context))
+
+
+
+(go/type cgoSymbolizerArg "cgoSymbolizerArg is the type passed to cgoSymbolizer.\n" (struct
+    ^{:line 1744 :tag uintptr} pc
+    ^{:line 1745 :tag (* byte)} file
+    ^{:line 1746 :tag uintptr} lineno
+    ^{:line 1747 :tag (* byte)} funcName
+    ^{:line 1748 :tag uintptr} entry
+    ^{:line 1749 :tag uintptr} more
+    ^{:line 1750 :tag uintptr} data))
+
+
+
+^{:go/end 1775} (go/func printCgoTraceback "printCgoTraceback prints a traceback of callers.\n" [^{:tag (* cgoCallers)} callers]
+  (when (not (cgoSymbolizerAvailable))
+    (range [_ c callers]
+      (when (== c 0)
+        (break))
+
+      (print "non-Go function at pc=" (conv hex c) "\n"))
+
+    (return))
+
+
+  (let [commitFrame ^{:go/end 1765} (fn [] :results [^bool pr ^bool stop] (return true false))
+      ^{:line 1766 :tag cgoSymbolizerArg} arg (zero cgoSymbolizerArg)]
+    (range [_ c callers]
+      (when (== c 0)
+        (break))
+
+      (printOneCgoTraceback c commitFrame (addr arg)))
+
+    (set! (.-pc arg) 0)
+    (callCgoSymbolizer (addr arg))))
+
+
+
+
+
+
+
+^{:go/end 1809} (go/func printOneCgoTraceback "printOneCgoTraceback prints the traceback of a single cgo caller.\nThis can print more than one line because of inlining.\nIt returns the \"stop\" result of commitFrame.\n\nPreconditions: cgoSymbolizerAvailable returns true.\n" ^bool [^uintptr pc ^{:tag (func [] [^bool pr ^bool stop])} commitFrame ^{:tag (* cgoSymbolizerArg)} arg]
+  (set! (.-pc arg) pc)
+  (while true
+    (if [(values pr stop) (commitFrame)] stop
+      (return true)
+      (when (not pr)
+        (continue)))
+
+
+    (callCgoSymbolizer arg)
+    (if (!= (.-funcName arg) nil)
+      ;; Note that we don't print any argument
+      ;; information here, not even parentheses.
+      ;; The symbolizer must add that if appropriate.
+      (println (gostringnocopy (.-funcName arg)))
+
+      (println "non-Go function"))
+
+    (print "\t")
+    (when (!= (.-file arg) nil)
+      (print (gostringnocopy (.-file arg)) ":" (.-lineno arg) " "))
+
+    (print "pc=" (conv hex pc) "\n")
+    (when (== (.-more arg) 0)
+      (return false))))
+
+
+
+
+
+
+
+^{:go/end 1828} (go/func callCgoSymbolizer "callCgoSymbolizer calls the cgoSymbolizer function.\n\nPreconditions: cgoSymbolizerAvailable returns true.\n" [^{:tag (* cgoSymbolizerArg)} arg]
+  (let [call cgocall]
+    (when (or (> (.Load panicking) 0) (!= (.-curg (.-m (getg))) (getg)))
+      ;; We do not want to call into the scheduler when panicking
+      ;; or when on the system stack.
+      (set! call asmcgocall))
+
+    (when msanenabled
+      (msanwrite (conv unsafe/Pointer arg) (unsafe/Sizeof (lit cgoSymbolizerArg))))
+
+    (when asanenabled
+      (asanwrite (conv unsafe/Pointer arg) (unsafe/Sizeof (lit cgoSymbolizerArg))))
+
+    (call _cgo_call_symbolizer_function (noescape (conv unsafe/Pointer arg)))))
+
+
+
+
+
+^{:go/end 1852} (go/func cgoContextPCs "cgoContextPCs gets the PC values from a cgo traceback.\n\nPreconditions: cgoTracebackAvailable returns true.\n" [^uintptr ctxt ^{:tag (slice uintptr)} buf]
+  (let [call cgocall]
+    (when (or (> (.Load panicking) 0) (!= (.-curg (.-m (getg))) (getg)))
+      ;; We do not want to call into the scheduler when panicking
+      ;; or when on the system stack.
+      (set! call asmcgocall))
+
+    (let [arg ^{:go/breaks [2 4 6]} (lit cgoTracebackArg
+          :context ctxt
+          :buf (conv (* uintptr) (noescape (conv unsafe/Pointer (addr (aget buf 0)))))
+          :max (conv uintptr (len buf)))]
+
+      (when msanenabled
+        (msanwrite (conv unsafe/Pointer (addr arg)) (unsafe/Sizeof arg)))
+
+      (when asanenabled
+        (asanwrite (conv unsafe/Pointer (addr arg)) (unsafe/Sizeof arg)))
+
+      (call _cgo_call_traceback_function (noescape (conv unsafe/Pointer (addr arg)))))))
