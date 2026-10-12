@@ -6,8 +6,21 @@
 ;   the terms of this license.
 ;   You must not remove this notice, or any other, from this software.
 
+
+;; Arbace's instant.ae (the Go build's variant until S4, doc/STANDALONE-NOTES.md; doc/go/
+;; EVAL-NOTES.md, "Namespace variants"; JAVA-SURFACE.md decision 7; JRT-NOTES.md, phase 2B
+;; "Dates"): java.util.Date read and printed over its milliseconds, in UTC, with the calendar
+;; arithmetic written out as GregorianCalendar counts (H. Hinnant's civil-from-days and
+;; days-from-civil for the Gregorian calendar, the Julian before 1582-10-15), where Clojure's
+;; instant.clj formats with SimpleDateFormat in a proxy'd ThreadLocal. Calendar instants are
+;; Clojure's (jrt's own GregorianCalendar and TimeZone, String.format's %t over them);
+;; Timestamp instants too (java.sql.Timestamp translated from jdk26u), printed with the Date
+;; arithmetic plus the nanoseconds, in this file (Clojure loads instant_timestamp.clj). The
+;; parsing and validation (up to "print integration") are Clojure's, unchanged (as of af29cc6).
+
 (ns arbace.instant
-  (:import [java.util Calendar Date GregorianCalendar TimeZone]))
+  (:import [java.util Calendar Date GregorianCalendar TimeZone]
+           [java.sql Timestamp]))
 
 (set! *warn-on-reflection* true)
 
@@ -154,22 +167,65 @@ with invalid arguments."
 
 ;;; ------------------------------------------------------------------------
 ;;; print integration
+;;; ------------------------------------------------------------------------
+;;; print integration (the Go build: UTC arithmetic on the milliseconds)
 
-(def ^:private ^ThreadLocal thread-local-utc-date-format
-  ;; SimpleDateFormat is not thread-safe, so we use a ThreadLocal proxy for access.
-  ;; http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=4228335
-  (proxy [ThreadLocal] []
-    (initialValue []
-      (doto (java.text.SimpleDateFormat. "yyyy-MM-dd'T'HH:mm:ss.SSS-00:00")
-        ;; RFC3339 says to use -00:00 when the timezone is unknown (+00:00 implies a known GMT)
-        (.setTimeZone (java.util.TimeZone/getTimeZone "GMT"))))))
+(def ^:private gregorian-cutover-day
+  "The first day of the Gregorian calendar, 1582-10-15, in days since 1970-01-01, as
+  java.util.GregorianCalendar's default cutover (the Julian calendar before it)."
+  -141427)
+
+(defn- days->civil
+  "[year month day] of a count of days since 1970-01-01: the Gregorian calendar from its
+  cutover, the Julian before (GregorianCalendar's); the year astronomical (0 is 1 BC)."
+  [z]
+  (if (>= z gregorian-cutover-day)
+    (let [z (+ z 719468)
+          era (quot (if (>= z 0) z (- z 146096)) 146097)
+          doe (- z (* era 146097))
+          yoe (quot (- doe (quot doe 1460) (- (quot doe 36524)) (quot doe 146096)) 365)
+          y (+ yoe (* era 400))
+          doy (- doe (- (+ (* 365 yoe) (quot yoe 4)) (quot yoe 100)))
+          mp (quot (+ (* 5 doy) 2) 153)
+          d (inc (- doy (quot (+ (* 153 mp) 2) 5)))
+          m (if (< mp 10) (+ mp 3) (- mp 9))]
+      [(if (<= m 2) (inc y) y) m d])
+    (let [c (+ z 2440588 32082)
+          d (Math/floorDiv (long (+ (* 4 c) 3)) 1461)
+          e (- c (Math/floorDiv (long (* 1461 d)) 4))
+          m (quot (+ (* 5 e) 2) 153)]
+      [(+ (- d 4800) (quot m 10))
+       (- (+ m 3) (* 12 (quot m 10)))
+       (inc (- e (quot (+ (* 153 m) 2) 5)))])))
+
+(defn- civil->days
+  "The count of days since 1970-01-01 of a (astronomical) year, month, day, as
+  GregorianCalendar counts it: Gregorian from the cutover, Julian before."
+  [y m d]
+  (let [g (let [y (if (<= m 2) (dec y) y)
+                era (quot (if (>= y 0) y (- y 399)) 400)
+                yoe (- y (* era 400))
+                doy (+ (quot (+ (* 153 (if (> m 2) (- m 3) (+ m 9))) 2) 5) (dec d))
+                doe (- (+ (* yoe 365) (quot yoe 4) doy) (quot yoe 100))]
+            (+ (* era 146097) doe -719468))]
+    (if (>= g gregorian-cutover-day)
+      g
+      (let [a (quot (- 14 m) 12)
+            yy (- (+ y 4800) a)
+            mm (- (+ m (* 12 a)) 3)]
+        (- (+ d (quot (+ (* 153 mm) 2) 5) (* 365 yy) (Math/floorDiv (long yy) 4) -32083) 2440588)))))
 
 (defn- print-date
   "Print a java.util.Date as RFC3339 timestamp, always in UTC."
   [^java.util.Date d, ^java.io.Writer w]
-  (let [^java.text.DateFormat utc-format (.get thread-local-utc-date-format)]
+  (let [ms (.getTime d)
+        days (Math/floorDiv ms 86400000)
+        msd (Math/floorMod ms 86400000)
+        [y m dd] (days->civil days)]
     (.write w "#inst \"")
-    (.write w (.format utc-format d))
+    (.write w (format "%04d-%02d-%02dT%02d:%02d:%02d.%03d-00:00"
+                      (if (<= y 0) (- 1 y) y) m dd (quot msd 3600000) (rem (quot msd 60000) 60)
+                      (rem (quot msd 1000) 60) (rem msd 1000)))
     (.write w "\"")))
 
 (defmethod print-method java.util.Date
@@ -200,8 +256,49 @@ with invalid arguments."
   [^java.util.Calendar c, ^java.io.Writer w]
   (print-calendar c w))
 
+(defn- print-timestamp
+  "Print a java.sql.Timestamp as RFC3339 timestamp, always in UTC."
+  [^java.sql.Timestamp ts, ^java.io.Writer w]
+  (let [ms (.getTime ts)
+        days (Math/floorDiv ms 86400000)
+        msd (Math/floorMod ms 86400000)
+        [y m dd] (days->civil days)]
+    (.write w "#inst \"")
+    (.write w (format "%04d-%02d-%02dT%02d:%02d:%02d"
+                      (if (<= y 0) (- 1 y) y) m dd (quot msd 3600000) (rem (quot msd 60000) 60)
+                      (rem (quot msd 1000) 60)))
+    ;; add on nanos and offset
+    ;; RFC3339 says to use -00:00 when the timezone is unknown (+00:00 implies a known GMT)
+    (.write w (format ".%09d-00:00" (.getNanos ts)))
+    (.write w "\"")))
+
+(defmethod print-method java.sql.Timestamp
+  [^java.sql.Timestamp ts, ^java.io.Writer w]
+  (print-timestamp ts w))
+
+(defmethod print-dup java.sql.Timestamp
+  [^java.sql.Timestamp ts, ^java.io.Writer w]
+  (print-timestamp ts w))
+
 ;;; ------------------------------------------------------------------------
 ;;; reader integration
+
+(defn- construct-date
+  "Construct a java.util.Date, which expresses the original instant as
+milliseconds since the epoch, UTC."
+  [years months days hours minutes seconds nanoseconds
+   offset-sign offset-hours offset-minutes]
+  (Date. (long (- (+ (* (civil->days years months days) 86400000)
+                     (* hours 3600000) (* minutes 60000) (* seconds 1000)
+                     (quot nanoseconds 1000000))
+                  (* offset-sign (+ (* offset-hours 60) offset-minutes) 60000)))))
+
+(defn read-instant-date
+  "To read an instant as a java.util.Date, bind *data-readers* to a map with
+this var as the value for the 'inst key. The timezone offset will be used
+to convert into UTC."
+  [^CharSequence cs]
+  (parse-timestamp (validated construct-date) cs))
 
 (defn- construct-calendar
   "Construct a java.util.Calendar, preserving the timezone
@@ -216,21 +313,17 @@ offset, but truncating the subsecond fraction to milliseconds."
                            (if (neg? offset-sign) "-" "+")
                            offset-hours offset-minutes)))))
 
-(defn- construct-date
-  "Construct a java.util.Date, which expresses the original instant as
-milliseconds since the epoch, UTC."
+(defn- construct-timestamp
+  "Construct a java.sql.Timestamp, which has nanosecond precision."
   [years months days hours minutes seconds nanoseconds
    offset-sign offset-hours offset-minutes]
-  (.getTime (construct-calendar years months days
-                                hours minutes seconds nanoseconds
-                                offset-sign offset-hours offset-minutes)))
-
-(defn read-instant-date
-  "To read an instant as a java.util.Date, bind *data-readers* to a map with
-this var as the value for the 'inst key. The timezone offset will be used
-to convert into UTC."
-  [^CharSequence cs]
-  (parse-timestamp (validated construct-date) cs))
+  (doto (Timestamp.
+         (.getTimeInMillis
+          (construct-calendar years months days
+                              hours minutes seconds 0
+                              offset-sign offset-hours offset-minutes)))
+    ;; nanos must be set separately, pass 0 above for the base calendar
+    (.setNanos nanoseconds)))
 
 (defn read-instant-calendar
   "To read an instant as a java.util.Calendar, bind *data-readers* to a map with
@@ -239,8 +332,10 @@ offset."
   [^CharSequence cs]
   (parse-timestamp (validated construct-calendar) cs))
 
-;; Arbace (hand change 16, doc/VENDOR-NOTES.md): java.sql.Timestamp's printing and reader, only
-;; when the runtime has java.sql (a runtime image of java.base has not); #inst as
-;; java.util.Date, above, needs only java.base
-(when (try (Class/forName "java.sql.Timestamp") (catch ClassNotFoundException _ nil))
-  (load "instant_timestamp"))
+(defn read-instant-timestamp
+  "To read an instant as a java.sql.Timestamp, bind *data-readers* to a
+map with this var as the value for the 'inst key. Timestamp preserves
+fractional seconds with nanosecond precision. The timezone offset will
+be used to convert into UTC."
+  [^CharSequence cs]
+  (parse-timestamp (validated construct-timestamp) cs))
