@@ -664,3 +664,15 @@ the first. The history before it is on the frozen branches and in git history:
   certificates embedded (Mozilla's, via golang.org/x/crypto/x509roots/fallback as Go forms,
   likely) with an override for private CAs; natively and on the JVM if cheap; amendments BX70..
   for the user.
+
+## 2026-10-12: The standalone survey (doc/STANDALONE-SURVEY.md)
+
+- Agent, branch `standalone-survey` (`86406a5`), merged. Measured: every Arbace program is still
+  built by the JVM (j2a with javac's front end over 836 jdk26u files, a2g over 3,040 classes,
+  g2a's printing, gc as a host process); the runtime and the REPL's namespaces use 274 JDK
+  classes (closure 422 from 184 files) of jrt's 2,134; the blockers to a Go-hosted bootstrap are
+  j2a's javac, a2g's JVM reflection and ASM, and g2a's ProcessBuilder build; g2a's printer runs on
+  the Go executable byte-identically (about 7x slower than the JVM); cmd/compile, link and asm
+  build for GOOS=tamago unchanged (not run in a guest); gc needs 7-8 GB for `arbace/jrt`, more
+  than a guest's 3 GiB. Stages S1-S9 (about 40-70 days; the Go-hosted bootstrap S1-S4 11-21) and
+  decisions D1-D13 for the user, recommendations in the document.
