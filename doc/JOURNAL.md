@@ -474,3 +474,28 @@ the first. The history before it is on the frozen branches and in git history:
   `bin/gate --full` stay deferred.
 - Two agents: `box-net-merge` (S5 merged with S3, the monitor's blob cache bounded, the
   wake-on-event) and `box-jvm` (`arbace.box` on the JVM Arbace).
+
+## 2026-10-12: `arbace.box` on the JVM
+
+- Agent, branch `box-jvm` (`af262d9`), merged into main; the essential `bin/gate` passed on its
+  tree and again on merged main. Details: BOX-NOTES.md, S3, "The JVM's `arbace.box`"; amendment
+  BX37; VENDOR-NOTES hand change 22.
+- One shared source, `arbace/box.ae` (the Go-only namespace moved), over a host layer per build
+  with the same answer codes: `arbace/box/host.ae` on the JVM (java.nio: temp file and rename,
+  hash checked on read, refs under `FileChannel.lock` of `refs/.lock`, which is `fcntl(F_SETLKW)`
+  over the whole file in jdk26u's `UnixFileDispatcherImpl.c`, the same POSIX record lock as the
+  Go side's, as strace showed; snapshots written byte for byte as Go's `archive/tar` writes
+  them), and `arbace/lang/go/ns/box/host.ae` over `HostStore` on Go. `ref:NAME` scripts moved
+  into `arbace/main.ae`; the JVM's `RT.load` looks in `ARBACE_PATH`'s `store:` entries as a last
+  resort.
+- Tests: `test/native/box_test.ae` (6 tests, 73 assertions, run by `bin/native-tests`, so by
+  the build and the gate); in `bin/arbace-go --smoke`, the store checks again on the JVM, one
+  directory used by both, equal snapshot hashes, CAS counters from two JVMs and two native
+  processes ending at exactly 200, the JVM's lock holding a native `ref!`.
+- On merged main the first `bin/arbace-go --build` failed in Go's compile of `arbace/lang`
+  (undefined `RT_IntCast_O__I` and others): stale build state in the checkout; after the gate
+  (which refreshed jrt's conversion) it built (66,814,112 bytes), and the box built and passed
+  `--smoke --box`, 86 of 86, with the shared namespace.
+- The user: BX37 accepted, and on the JVM `ARBACE_PATH`'s directories are read too, not only its
+  `store:` entries, so that it works the same on all three (the same agent, branch
+  `box-jvm-path`).
