@@ -224,7 +224,7 @@ that names the class and the referring member; the cure is a variant (§4.6) or 
 (JAVA-SURFACE.md, "cut": a class that must exist as a name, whose members throw
 `UnsupportedOperationException`).
 
-**The edge** (standalone S2, [STANDALONE-NOTES.md](../STANDALONE-NOTES.md); amendments SA1-SA6).
+**The edge** (standalone S2, [STANDALONE-NOTES.md](../STANDALONE-NOTES.md); amendments SA10-SA15).
 What a2g knows of the classes outside the forms (jrt's hand-written classes, the JDK's classes
 the world names without holding them, the cut classes) it does not ask the running JVM: it
 reads it from `jdk/edge.edn`, the JVM's answers recorded by `bin/a2g-edge update` (`bin/a2g

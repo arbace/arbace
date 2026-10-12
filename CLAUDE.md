@@ -82,8 +82,11 @@ Prior art:
   `overlay/jdk/`, its own Java and variants of JDK classes; `jdk/`, the JDK's class forms and
   resource data committed (j2a's output from jdk26u and `overlay/jdk/java.base`, provenance in
   `jdk/provenance.edn`; `bin/jrt-convert update` regenerates them, `verify` checks them; standalone
-  S1); `bin/jrt`); `overlay/go/` patches Go's runtime. `bin/arbace-go` builds
-  (`--build`, `--build-tests`, `--pgo`), smoke-tests and runs it. The oracle (`bin/oracle`,
+  S1); `jdk/edge.edn`, the JVM's answers a2g needs, so a2g uses no JVM reflection or ASM
+  (`bin/a2g-edge update`, `verify`, `trace`; S2, doc/STANDALONE-NOTES.md); `bin/jrt`); `overlay/go/` patches Go's runtime. `bin/arbace-go` builds
+  (`--build`, `--build-tests`, `--pgo`; the test build's Java fixtures committed as forms in
+  `test/java-fixtures/`, `bin/clojure-tests --java-fixtures update`, `verify`), smoke-tests and
+  runs it. The oracle (`bin/oracle`,
   `test/oracle/`, `doc/go/ORACLE.md`) checks it against the JVM Arbace. Notes in `doc/go/`.
 - The box (B1b, `doc/go/BOX-SURVEY.md`, `doc/go/BOX-NOTES.md`): the same program built with
   TamaGo (`GOOS=tamago`) as a guest of a monitor on /dev/kvm (amd64) and Hypervisor.framework
@@ -114,8 +117,9 @@ Prior art:
   box's round trip and go-whim's KVM tests on it (`bin/box-vendor roundtrip`, `kvm-tests`),
   `tamago/` converted afresh and compared (`bin/tamago-vendor verify`) and
   the Go build on amd64: `bin/jrt-convert verify` (`jdk/` converted afresh and compared byte
-  for byte), `bin/arbace-go --build`, then its smoke test,
-  Clojure's suite on its test build (`bin/arbace-go --build-tests`: the program with the
+  for byte), `bin/a2g-edge verify`, `bin/arbace-go --build`, then its smoke test,
+  Clojure's suite on its test build (`bin/clojure-tests --java-fixtures verify`, then
+  `bin/arbace-go --build-tests`: the program with the
   suite's Java fixtures; `test/arbace-go-results.edn`) and the oracle on it, against its known
   mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`) and the box's
   guest built from `tamago/`'s forms, byte-identical to one from TamaGo's originals
@@ -123,7 +127,8 @@ Prior art:
   Go chain start when the three suites are done, for memory (about 21 minutes, Clojure's suite
   on Go the longest): run it when
   the class forms compiler, j2a, g2a, a2g or jrt change (after a change to `overlay/jdk/java.base`,
-  jrt's closure or j2a, `bin/jrt-convert update` first). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build
+  jrt's closure or j2a, `bin/jrt-convert update` first; after a change to what a2g asks of the
+  JVM, `bin/a2g-edge update`). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build
   cache of entries unused for six hours (`bin/lib/gocache.bash`, `ARBACE_GOCACHE_KEEP_MIN`).
 
 ## Records
