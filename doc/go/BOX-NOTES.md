@@ -1521,3 +1521,125 @@ of `known-go-box-amd64.edn`; the native oracle 22,232 of 22,278, the 46 of `know
 at all three levels and `kvm-tests` (with `TestNetCloseLingers`) pass; `bin/tamago-vendor verify`
 (identical) and `check` (the guest image from the forms and from the originals identical:
 77,067,117 bytes as linked, 66,187,562 cut). No source the bootstrap compiles changed.
+
+## Wake on events, amd64 (2026-10-12)
+
+Branch `box-net-merge`, the user's decision of 2026-10-11 (S5's open points): replace the
+guest's polling -- the console's `WaitRead` without a wait, retried 1 to 10 ms apart (S1, R3),
+and the network's EAGAIN loop over `NetEvents`, the same (S5) -- by a wait in the monitor that a
+host event ends. Polled, an idle box made about 99 `wait_read` or `net_events` calls and as many
+`cpu_park` exits a second: 0.5 s of host CPU per 20 s on one vCPU and 1.2 s on four at the
+prompt or with a listening server.
+
+### The design (BX50-BX54, proposed)
+
+What a wait must keep (BOX-SURVEY R2, R3): the guest's scheduler runs its timers and its other
+goroutines (TamaGo's sleeping goroutines, a future's output while the REPL waits for a line),
+the collector stops the world, and on four vCPUs the others run on. So no goroutine may stop its
+vCPU in a call to wait; the wait belongs where the vCPU is idle anyway, the board's `Idle`
+(`goos.Idle`, the scheduler's `beforeIdle`), which already parks in the monitor until the next
+timer (S1, BX8). What was missing is a way for the host to end that park, and for the guest's
+runtime to know, after it, which goroutine to run. Three parts:
+
+1. **An event area and posts (BX50; `abi.EventArea`, call 53, `abi.NCalls` 54).** The guest
+   names 16 bytes of its memory, two counts: `[0]` the events the monitor has posted (the
+   monitor's to write), `[1]` those the guest has taken (the guest's). The monitor posts an event
+   (`vmm/events.go`, `postEvent`): adds one to `[0]` in guest memory and ends every parked
+   vCPU's park (the vCPUs' futex tokens, `vmm/park_linux.go`). It posts:
+   - for the console, when input comes for a guest whose last `WaitRead` without a wait found
+     none: that `WaitRead` asks a goroutine of the monitor's to watch the host's input
+     (`watchInputs`), which waits for it (`select` on standard input, by the launcher's console's
+     new `WatchInput`, the `vmm.InputWatcher` a Host may be; 500 ms at a time, to see the run's
+     end) and posts once; input that comes while nobody waits for it posts nothing (the next
+     `WaitRead` takes it);
+   - for the network, at each change NetEvents counts (data come, a connection accepted, a dial
+     or a lookup done, room to write, a handle closed): `Net`'s `notify`.
+
+   **`CPUPark`** ends at once, or does not begin, while `[0]` and `[1]` differ, and answers 1
+   when a wake or an event ended it (0 at its deadline or the machine's limit). An event that
+   finds every vCPU running ends no park and is seen by the guest at its next look for work
+   (below); one posted after a vCPU decided to park is seen by the park's first check (the post's
+   count is written before the monitor's lock it takes to wake, which the park takes first).
+
+2. **The board (BX51; `board.EventArea`).** `EventArea(area)` names the area (and says whether
+   the monitor took it). One idle vCPU then parks until the next timer *or an event*: after a
+   `CPUPark` that answers 1 it returns to the scheduler rather than spin to the deadline, and
+   with no timer at all (the scheduler's `pollUntil` 0 or `MaxInt64`) it parks without a limit
+   (`CPUPark(-1)`) where it returned at once before (a guest without timers could only spin, as
+   nothing else woke it: go-whim's guests still do, having no area). Several vCPUs park as before
+   (`idleSMP`), their parks ended by events too.
+
+3. **The guest's runtime and jrt (BX52, BX53).** After a park the scheduler looks for work; the
+   goroutines waiting for the host must then be runnable. TamaGo's runtime has no netpoll and
+   its `beforeIdle` returns no goroutine; the board's `Idle` cannot ready one (it runs in the
+   scheduler, on g0, without the runtime's internals). So jrt's runtime overlay (A2G-SPEC §9.3,
+   the goroutine-local slot's) gains the mechanism wasm's runtime has for its event handler
+   (`beforeIdle` returning the handler's goroutine): `arbace_local.go` keeps one goroutine parked
+   in `arbace_eventPark` (`gopark`) and a hook (`arbace_setEventHook`); one line of
+   `findRunnable` (proc.go, marked `; Arbace`), right after it runs the P's due timers, makes
+   that goroutine runnable and runs it when the hook says an event came. At every look for work,
+   idle or not: a vCPU that yields (the evaluator's `Gosched`, BX5) sees the event too. On Linux
+   no hook is set: the line is one nil check per `findRunnable` (the executable's bytes change by
+   the overlay; its speed does not, below). jrt (`hostbox_tamago.ae`): at `init` the box's host
+   names `boxEventArea` (`board.EventArea`), sets the hook (`boxEventsPending`: the two counts
+   differ, two atomic loads) and starts `boxEventLoop`, the goroutine that parks in
+   `eventPark`, and when run takes the events (`[1] = [0]`) and closes the waiters' channel
+   (`boxWaiters.wake`). A waiter takes the channel (`arm`), asks the monitor once (`WaitRead`
+   without a wait, `NetRead`, `NetAccept`, `NetStatus`...), and when there is nothing yet waits
+   for the channel (and the operation's deadline, a timer of its own: the guest's scheduler
+   parks only until it). The console's reader (`boxConsole`) and the network's `boxRetry` are
+   both such waiters; S5's `boxPoller` is gone. Without an area (a monitor that refuses it) the
+   waiters are woken by a polling goroutine 1 to 10 ms apart, as before.
+
+Not chosen: a blocking call (`WaitRead(-1)`, or a `NetWait`) on a goroutine of its own -- it
+stops its vCPU in the monitor, so on one vCPU nothing else runs and on four the collector's
+stops of the world wait for it (S1's R3 finding); a netpoll for TamaGo in the runtime overlay
+(`netpoll_tamago.go`, the runtime's own blocking path) -- TamaGo's `findRunnable` never reaches
+it (`beforeIdle` always answers `otherReady`), and it would be a larger patch of the runtime for
+the same single goroutine; the board readying a goroutine from `Idle` by `go:linkname` into the
+runtime's `goready` -- not allowed to a package outside the runtime (the linker's
+`-checklinkname`), and unsafe from the scheduler.
+
+### Measured (amd64, nested KVM, the shared machine; the same build before and after but for
+this change)
+
+| | 1 vCPU, before | 1 vCPU, after | 4 vCPUs, before | 4 vCPUs, after |
+|---|---:|---:|---:|---:|
+| host CPU over 20 s idle, the REPL at its prompt | 0.25 s | 0.00 s | 1.10 s | 0.00 s |
+| the same with a socket REPL server listening | 0.39 s | 0.01 s | 1.26 s | 0.01 s |
+| exits over the whole run (start, 22 s idle, end), prompt / server | 4,348 / 7,397 | 11 / 26 | 12,410 / 16,384 | 1,196 / 1,325 |
+| a future's line printed while the REPL waits, after the guest's clock (10 lines, median) | 1.1-1.9 ms (1.6) | 1.4-2.4 ms (1.9) | 1.0-1.9 ms (1.5) | 1.2-2.1 ms (1.6) |
+| a socket REPL's `(+ 1 2)` from the host, median (p90) of 200 | 47.0 ms (47.1) | 42.0 ms (42.0) | 47.0 ms (48.0) | 42.0 ms (42.0) |
+| 64 MiB through a loopback connection within the program, ms (5 runs) | 207-255 | 191-239 | 164-183 | 147-183 |
+| `(+ 1 2)` from the host while the evaluator computes for 2.1 s (1 vCPU) | 54 ms | 53 ms | | |
+
+Before, polled: about 108 `wait_read` (and with a server as many `net_events`) and as many
+`cpu_park` calls a second; after, an idle box makes no exit at all (the counts are the start's
+and the end's: on 4 vCPUs the start's parks). The future's output was never polled (it is a
+timer's), so its latency is unchanged; the socket REPL's round trip loses the poller's waits and
+is now the native executable's (41 ms, TCP's delayed acknowledgement against Nagle's). With the
+evaluator computing on one vCPU, the server still answers at once: the event is seen at the
+evaluator's next `Gosched`, as the poller's timer was. A `-e` that used a future still ends
+60 s later, as natively and on the JVM (the agents' pool), so the guest's timers run as before.
+(Measured by `.tmp/bench/bench.py` of the branch's work: the launcher's process CPU from
+`/proc`, its `ARBACE_BOX_STATS`.)
+
+### Checks
+
+The wake on events' checks are the merged branch's final checks (below, "The final checks").
+
+### Amendments (BX50-BX54, proposed 2026-10-12)
+
+- **BX50 (box/: abi, vmm) The event area**: `abi.EventArea` (call 53, `abi.NCalls` 54), the
+  monitor's posts (`vmm/events.go`: console input for a reader that found none, the network's
+  changes), a park ended by an event or not begun while one is not taken, `CPUPark`'s answer 1
+  when a wake or an event ended it; `Stats.Events`.
+- **BX51 (box/: board) `board.EventArea`**: one idle vCPU parks without a timer until an event
+  once there is an area, and returns to the scheduler after a park an event ended.
+- **BX52 (A2G-SPEC §9.3; overlay/go/runtime) The box's event goroutine in the runtime overlay**:
+  `arbace_eventPark`, `arbace_setEventHook`, `findRunnable`'s line (`arbaceEventReady`).
+- **BX53 (A2G-SPEC §9.4; jrt) The box's waiters**: `boxEventArea`, `boxEventLoop`,
+  `boxWaiters` for the console's reader and the network's `boxRetry` (S5's `boxPoller` gone),
+  polling kept only without an area.
+- **BX54 (box/: vmm, the launcher) `vmm.InputWatcher`**: a Host whose input the monitor may
+  watch from its own goroutine; the launcher's console's `WatchInput`.

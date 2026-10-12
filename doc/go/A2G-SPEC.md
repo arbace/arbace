@@ -2334,6 +2334,17 @@ the forms to equal the conversion but for the marked lines, so a toolchain updat
 failure. Without the overlay jrt fails to link (`relocation target runtime.arbace_setLocal not
 defined`), so a build cannot silently miss the patch.
 
+**The box's event goroutine** (amendment BX52, proposed 2026-10-12; BOX-NOTES.md, "Wake on
+events"). The patch also holds what lets the box's guest wait for its host without polling:
+`arbace_local.go` keeps one goroutine parked in `arbace_eventPark` (`gopark`, as `IO wait`) and
+a hook set by `arbace_setEventHook` (both pushed by `//go:linkname`, pulled by jrt's
+`hostbox_tamago.ae`), and one line of `findRunnable` (proc.go, marked `; Arbace`), right after
+the P's due timers are run, makes that goroutine runnable and returns it when the hook says an
+event came (`arbaceEventReady`) -- the mechanism wasm's runtime has for its event handler, whose
+`beforeIdle` returns the handler's goroutine, at every look for work rather than only when idle,
+so that a vCPU that only yields (`Gosched`) sees an event too. On Linux no hook is set: the line
+is a nil check.
+
 ### 9.4 The host interface
 
 jrt's use of the operating system is one Go interface, `jrt.Host` (B1-PLAN.md, point 4):
@@ -2403,8 +2414,9 @@ main package's `main` sets (§10.6) and which is `theHost`'s default (with no re
 operating system (`programhost.ae`, `//go:build !tamago`) `OSHost`, as before; built with
 `GOOS=tamago` (B1b's box) `hostbox_tamago.ae`'s box host, over the monitor's calls through the
 board (`arbace/box/board`, `abi`): the standard streams over `WaitRead`, `Write` and `Message`
-(the input polled without a wait, the reading goroutine sleeping 1 to 10 ms between polls, so
-that a read never stops the guest: BOX-SURVEY R3), `RandomBytes` over `Random`, `Exit` over the
+(the input asked for without a wait, the reading goroutine then waiting for the host's next
+event, which the monitor posts when input comes, so that a read never stops the guest:
+BOX-SURVEY R3; until BX50-BX54 it slept 1 to 10 ms between polls), `RandomBytes` over `Random`, `Exit` over the
 board's (the console flushed), the files `OSHost`'s over Go's `os`, which TamaGo answers from its
 in-memory file system (D11), `Now` Go's clock, which the board offsets by the host's wall clock
 at the entry (D10), `NumCPU` the vCPUs (`GOMAXPROCS`), and the command line and the environment

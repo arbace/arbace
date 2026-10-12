@@ -3,8 +3,8 @@
 ;; host under its launcher's policy (ARBACE_BOX_NET). A box whose launcher allows no network has
 ;; none: ProgramHost's host is then boxHost alone, without NetHost, as in S1. No call waits in
 ;; the monitor (BOX-SURVEY R3): an operation that has nothing yet waits in the guest for the
-;; monitor's count of network events to change (boxNetPoller, which polls it as the console polls
-;; its input), up to the operation's deadline, and asks again.
+;; host's next event (boxEvents: the monitor posts one at each change of the network's, BX50), up
+;; to the operation's deadline, and asks again.
 (in-ns 'go.arbace.jrt)
 
 (go/file "netbox_tamago.go"
@@ -49,61 +49,18 @@ or the errno (net.ae's netErrorKind reads them as the Linux host's).\n"
   (conv syscall/Errno (- r)))
 
 ;; ---------------------------------------------------------------------------------------
-;; Waiting: the monitor's count of events, polled
-
-(go/type boxPoller
-  "boxPoller polls the monitor's count of network events (abi.NetEvents) while some goroutine
-waits for one: ch is closed, and replaced, when the count changes. A waiter takes ch before it
-asks the monitor, so that a change after its question wakes it.\n"
-  (struct ^{:tag sync/Mutex} mu ^{:tag (chan (struct))} ch ^int64 last ^int waiters ^bool running))
-
-(go/var ^{:tag boxPoller} netPoller (lit boxPoller :ch (make (chan (struct)))))
-
-(go/method arm "arm counts a waiter and is the channel its wait ends on.\n"
-  ^{:tag (chan (struct))} [^{:tag (* boxPoller)} p]
-  (.Lock (.-mu p))
-  (defer (.Unlock (.-mu p)))
-  (inc! (.-waiters p))
-  (when (not (.-running p))
-    (set! (.-running p) true)
-    (go (.run p)))
-  (.-ch p))
-
-(go/method disarm "disarm uncounts a waiter.\n" [^{:tag (* boxPoller)} p]
-  (.Lock (.-mu p))
-  (dec! (.-waiters p))
-  (.Unlock (.-mu p)))
-
-(go/method run
-  "run polls while there are waiters: from consoleFirstWait to consoleMaxWait between two polls,
-from the first again after a change.\n"
-  [^{:tag (* boxPoller)} p]
-  (let [wait consoleFirstWait]
-    (while true
-      (let [seq (.-Ret (board/Call abi/NetEvents 0 0 0 0 0))]
-        (.Lock (.-mu p))
-        (when (!= seq (.-last p))
-          (set! (.-last p) seq)
-          (close (.-ch p))
-          (set! (.-ch p) (make (chan (struct))))
-          (set! wait consoleFirstWait))
-        (when (== (.-waiters p) 0)
-          (set! (.-running p) false)
-          (.Unlock (.-mu p))
-          (return))
-        (.Unlock (.-mu p))
-        (time/Sleep wait)
-        (set! wait (min (* wait 2) consoleMaxWait))))))
+;; Waiting: for the host's next event (boxEvents, hostbox_tamago.ae), which the monitor posts at
+;; each change of the network's (the count NetEvents answers)
 
 (go/func boxRetry
   "boxRetry asks op until it answers other than EAGAIN or EINPROGRESS, waiting for an event
 between two questions, up to deadline (none when zero): op's answer, or NetErrTimeout.\n"
   ^int64 [^{:tag time/Time} deadline ^{:tag (func [] [int64])} op]
   (while true
-    (let [ch (.arm (addr netPoller))
+    (let [ch (.arm (addr boxEvents))
           r (op)]
       (when (and (!= r boxEAGAIN) (!= r boxEINPROGRESS))
-        (.disarm (addr netPoller))
+        (.disarm (addr boxEvents))
         (return r))
       (let [ok true]
         (if (.IsZero deadline)
@@ -116,7 +73,7 @@ between two questions, up to deadline (none when zero): op's answer, or NetErrTi
                   (case (<! ch))
                   (case (<! (.-C tm)) (set! ok false)))
                 (.Stop tm)))))
-        (.disarm (addr netPoller))
+        (.disarm (addr boxEvents))
         (when (not ok)
           (return abi/NetErrTimeout))))))
 
