@@ -7,6 +7,15 @@
 > Since 2026-10-11 Arbace's sources are `.ae` files (hand change 19). The layout, the bootstrap
 > and spec's sections below name the current files; the derivation and the records of hand
 > changes 1 to 18 name them as they were then, `.clj`.
+>
+> Since standalone S4 (2026-10-12; doc/STANDALONE-NOTES.md, "S4: the JVM removed") main builds
+> no JVM Arbace: the three-stage bootstrap (`bin/build-arbace`), the jar and its AOT cache, the
+> runtime image, Clojure's suite on stages 1 and 2, the binary seed (`seed/arbace-seed.jar`),
+> ASM and the bytecode back ends are on the branch `arbace-for-java-26`; the sections below that
+> describe them ("The bootstrap", "Compiled namespaces, the jar and the AOT cache", "The runtime
+> image", "Clojure's test suite on stages 1 and 2", "The binary seed") are the record of that
+> path. Main's bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (hand change
+> 23).
 
 The frozen baseline `clojure/` is vendored under `arbace/`, renamed `clojure.*` → `arbace.*`, all
 of it `.clj`: the Java files as class forms (doc/classes/SPEC.md), Clojure's own `.clj` renamed.
@@ -153,6 +162,9 @@ Left alone (with the reason):
    `arbace.server.*` properties.
 
 ## The bootstrap
+
+(The JVM's, until standalone S4; on the branch `arbace-for-java-26` since. Main's bootstrap:
+doc/STANDALONE-NOTES.md, "S4: the JVM removed".)
 
 `bin/build-arbace` (about 1.5 minutes):
 
@@ -1051,6 +1063,10 @@ default run of `bin/clojure-tests`), with its 32 spec failures. Result on stages
 the renamed test.check 1.1.3) pass on stage 2: 13 tests, 174 assertions.
 
 ## The binary seed (2026-10-08)
+
+(Replaced at standalone S4, 2026-10-12, by the Go-source seed `seed/arbace-seed-go.tar.xz`:
+doc/STANDALONE-NOTES.md, "S4: the Go-source seed" and "S4: the JVM removed". The jar and
+`bin/seed`'s jar modes are on the branch `arbace-for-java-26`.)
 
 After the freeze (doc/FREEZE.md), main's stage 0 is no longer the frozen `clojure/` but a binary
 seed, as Go bootstraps from a previous Go toolchain: `seed/arbace-seed.jar`, the
