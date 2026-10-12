@@ -2223,6 +2223,61 @@ translated by j2a needs it (`TlsSocket` is the place it would sit on).
   with `target/arbace.jar`) and `bin/box-arm64-vm smoke` (the server cross-built for arm64:
   `--tls-server`).
 
+### Measured (amd64, nested KVM, the shared machine)
+
+| | before (`a6a6b86`) | with TLS | change |
+|---|---:|---:|---:|
+| the native executable (`amd64/arbace`) | 66,814,112 | 69,169,312 | +2,355,200 (3.5%) |
+| the box's guest (`arbace.elf`, symbols cut) | 66,199,886 | 68,604,238 | +2,404,352 (3.6%) |
+| the launcher (`arbace-box.bin`) | 4,713,159 | 4,713,023 | none (main's merge) |
+
+The growth is `crypto/tls`, `crypto/x509` and what they pull (`net/url`, the ECDH, RSA, AES-GCM,
+ChaCha20 code, the HPKE/ECH code), not linked before, and the roots (128 KB of DER, parsed at the
+first handshake, not at the start). A handshake to `api.anthropic.com` (TLS 1.3, ECDHE, from
+here): natively 79 ms the first (the roots parsed), then 10-11 ms; in the box 119 ms, then 61-64
+ms (the name resolved by the host, the dial through the monitor, the handshake's crypto in the
+guest under nested paging). Idle (wake on events): a box waiting 20 s on a TLS read costs the host
+what a box sleeping 20 s does: 1 vCPU 0.63 s of CPU against 0.69 (the start's), 4 vCPUs 0.92 s
+against 1.58; 8 `net_read` calls in the whole run (1 vCPU). `bin/box-smoke`'s check: a read
+waiting 2 s makes at most a few network calls.
+
+### The real request (no key)
+
+`ARBACE_BOX_NET=dial=api.anthropic.com:443 arbace-box -` with `arbace.http/request` POSTing a
+messages request to `https://api.anthropic.com/v1/messages` without any API key: `401
+"application/json"`, body `{"type":"error","error":{"type":"authentication_error","message":"x-api-key
+header is required"},...}`; `arbace.tls/session`: TLSv1.3, `TLS_AES_128_GCM_SHA256`, ALPN `h2`
+when offered (`http/1.1` by `arbace.http`), 3 certificates, verified by the built-in Mozilla roots.
+The same natively. A name the policy does not dial (`example.org`) is `UnknownHostException`.
+
+### Checks (the branch with main `ff53e17` merged, amd64)
+
+- `bin/jrt build` (jrt with `tls.ae`); `bin/jrt-convert update` (jrt's three Java files: `jdk/`
+  committed).
+- `bin/arbace-go --build` and `--build --box` (sizes above); `--smoke` 83 of 83 (69 before; 7
+  TLS checks natively and 7 on the JVM, `target/arbace.jar`); `--smoke --box` 111 of 111 (103
+  before; 8 TLS checks).
+- The native oracle 22,232 of 22,278 and the box's subset (`ARBACE_BOX_NET=loopback`, with
+  `forms/net.ae`) 21,779 of 21,825: the 46 known mismatches each, as recorded.
+- `bin/x509roots-vendor verify` (byte for byte) and `check` (gocmp at three levels for
+  linux/amd64, linux/arm64, tamago/amd64, tamago/arm64; the package's tests on the printed copy).
+- `bin/tamago-vendor check amd64`: std and the goos module pass as before, but **the guest image
+  from the forms differs from the one from TamaGo's originals** (same size, 4 MB of `.gopclntab`):
+  the guest now links `net/url` (through `crypto/x509`), whose `validUserinfo` has a `case` list
+  over two lines (`net/url/url.go:1295-1296`); its forms record the break (`:go/breaks [9]` on the
+  case's vector) but the printer writes the list on one line, so the inlined code's line in
+  `parseAuthority` is 1295 where gc says 1296. Proven the only difference: with that one line split
+  by hand in the printed tree, the two images are identical (as linked and cut). A printer defect
+  (g2a's `print`, the kind the `g2a-params` branch fixes for parameter lists), not of these forms or
+  of this change; `bin/gate --full`'s `box-forms` step will fail on it until the printer keeps a
+  case list's breaks.
+- The real request above; the loopback checks in `.tmp` before they went into the smoke tests.
+- arm64: `bin/arbace-go --build` and `--build --box` (the guest 66,191,694 bytes, the launcher
+  with it 70,713,694); the native arm64 executable under qemu-aarch64 made the real request above
+  (401, TLSv1.3, the roots verified). Not run: `bin/box-arm64-vm smoke` (the box's TLS checks on
+  KVM/arm64; about 40 min emulated), which now ships `tools/tlsserver` built for arm64.
+- The essential `bin/gate`: passed (6m19s): stage 2 = stage 3 (5,777 classes), the native tests 60 of 60, Clojure's suite on stage 2 20,750 of 20,750, `bin/class-forms-tests`, the Go executable built again and its smoke test 83 of 83.
+
 ### Amendments (proposed 2026-10-12)
 
 - **BX70 (A2G-SPEC §9.1, §9.4; jrt, overlay/jdk) TLS in jrt over the socket table**: Go's
