@@ -91,8 +91,9 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   Mozilla's roots (`x509roots/`); the Claude API reachable from the box.
 - Standalone S2 done (2026-10-12): a2g reads `jdk/edge.edn` instead of the JVM's reflection,
   accessors as data, the id floor (SA10-SA15 accepted); the test build's fixtures as forms in
-  `test/java-fixtures/` (no javac in any build). S4's preparation: the Go-source seed proven
-  (SA1-SA9 accepted; branch `s4-seed`, finishing).
+  `test/java-fixtures/` (no javac in any build). S4's preparation merged: the Go-source seed's
+  tooling (`bin/seed --go-*`, `seed/goroot.sha256`), the oracle's frozen v4 reference, S4's
+  inventory (doc/STANDALONE-NOTES.md; SA1-SA9 accepted).
 - Now: S3, the Go-hosted fixpoint: g2a on the Go executable (agent, branch `s3-g2a`), then a2g
   on it.
   `bin/gate --full` runs the amd64 box smoke test (`box-smoke`). The Mac: a bundle per box

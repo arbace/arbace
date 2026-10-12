@@ -43,7 +43,10 @@ Prior art:
 
 - `seed/arbace-seed.jar` is the binary seed of the bootstrap: Arbace's jar as built at the tag
   `arbace-for-java-26-v1`, pinned by `seed/arbace-seed.jar.sha256`. `bin/seed --check` checks
-  the hash; `bin/seed --verify` rebuilds it from the tag. It replaced the frozen reference tree
+  the hash; `bin/seed --verify` rebuilds it from the tag. Its successor (standalone S4,
+  doc/STANDALONE-NOTES.md): the Go-source seed `seed/arbace-seed-go.tar.xz`, the printed Go
+  program pinned by hash, the toolchain pinned by `seed/goroot.sha256` (`bin/seed --go-check`,
+  `--go-make`, `--go-build`, `--go-verify`; committed at S4's end). It replaced the frozen reference tree
   `clojure/` (upstream Clojure and ASM), which remains on the branch `arbace-for-java-26`. The
   tools take what they need of that tree as data (j2a's corpus, the baseline of Clojure's suite)
   from the tag, extracted into `.tmp/frozen/` by `bin/lib/tools.bash`.
@@ -87,7 +90,9 @@ Prior art:
   (`--build`, `--build-tests`, `--pgo`; the test build's Java fixtures committed as forms in
   `test/java-fixtures/`, `bin/clojure-tests --java-fixtures update`, `verify`), smoke-tests and
   runs it. The oracle (`bin/oracle`,
-  `test/oracle/`, `doc/go/ORACLE.md`) checks it against the JVM Arbace. Notes in `doc/go/`.
+  `test/oracle/`, `doc/go/ORACLE.md`) checks it against the JVM Arbace (`ARBACE_ORACLE_REF=frozen`:
+  the frozen `arbace-for-java-26-v4` built from its tag, pinned by `test/oracle/frozen-jar.sha256`,
+  against `test/oracle/known-go-amd64-frozen.edn`; the gate's reference from S4). Notes in `doc/go/`.
 - The box (B1b, `doc/go/BOX-SURVEY.md`, `doc/go/BOX-NOTES.md`): the same program built with
   TamaGo (`GOOS=tamago`) as a guest of a monitor on /dev/kvm (amd64) and Hypervisor.framework
   (arm64; KVM/arm64 too). `box/` holds the hypervisor API, the monitor, the doorbell ABI and the

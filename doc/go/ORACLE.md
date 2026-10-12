@@ -210,6 +210,18 @@ The expected files hold 55 marked entries (53 forms, 2 class script steps; 2026-
 `defclass.edn` added one to the 54 of 2026-10-09). On the Go build (2026-10-09) the 52 forms of then
 all matched by the rule; `bin/oracle check jvm` matches all cases with none of them needing it.
 
+### The reference: main's JVM or the frozen jar
+
+The JVM Arbace the runner runs on, and that `record` and `check jvm` use, is chosen by
+`ARBACE_ORACLE_REF`: `main` (the default), `target/arbace.jar` through `bin/arbace-j`; or
+`frozen`, the jar of the frozen branch's last release (`ARBACE_ORACLE_TAG`, default
+`arbace-for-java-26-v4`), built once from its tag into `.tmp/oracle-frozen/` and checked against
+`test/oracle/frozen-jar.sha256`, run by `java` alone, with the runner's namespaces given to it as
+`.clj` links (`.tmp/oracle-view`). `ARBACE_ORACLE_EXPECTED` names the expected files' directory
+(default `test/oracle/expected`). The frozen reference is what stays when the JVM stages leave
+main (the standalone survey's D4; [../STANDALONE-NOTES.md](../STANDALONE-NOTES.md), "S4: the
+oracle's reference", for the differences and `known-go-amd64-frozen.edn`).
+
 ## Formats
 
 All files are read with the Clojure reader (not strict EDN). An expected file is

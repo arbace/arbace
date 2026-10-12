@@ -829,3 +829,17 @@ All as recommended in doc/STANDALONE-SURVEY.md:
 - On main after both merges (`a3f3913`): the essential gate passed (5m50s; a first run failed when
   the kernel killed a2g's JVM for memory, beside the suite's JVMs and two agents' builds, 36 GB),
   `bin/a2g-edge verify` and `bin/clojure-tests --java-fixtures verify` passed.
+
+## 2026-10-12: S4's preparation merged
+
+- Branch `s4-seed` (`7498921`, `6aac846`, `fb4ef2d`, `da504d5`, `bd0934c`, with main merged),
+  merged. SA4 as the user chose: GOROOT's hash, the SHA-256 over sha256sum's lines for `VERSION`
+  and every file under `src/` sorted by path (C locale), non-regular files refused; TamaGo
+  go1.27.1: 12,175 files, `5745170fd3c83cb77ec88bc50aee8606f0436e718c222b48376b5943ac0cebe5`,
+  pinned in `seed/goroot.sha256` and `SEED.edn`'s `:goroot-sha256`; `--go-make`, `--go-build`,
+  `--go-verify` refuse a mismatch (checked with one changed runtime file); 0.65 s warm, 3.6 s
+  cold. `test/oracle/expected/forms/files.edn` re-recorded from main's JVM reference: exactly the
+  six cases of the `.ae` rename. On the branch after merging `329af1a`: the essential gate passed
+  (6m06s); a candidate seed (3,063,800 bytes) as pinned, stage 0 from it byte-identical to
+  `--build` on amd64 and arm64 (19 s); the oracle its 46 known mismatches. The candidate is not
+  committed (SA7).
