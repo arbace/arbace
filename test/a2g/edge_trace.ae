@@ -1,0 +1,71 @@
+(ns a2g.edge-trace
+  "bin/a2g-edge trace's classification of a JFR recording of a2g's run under method tracing
+  (doc/STANDALONE-NOTES.md, S2): each traced call (the JVM's reflection and class loading,
+  ASM's objects) made inside a2g's run (a frame of arbace.a2g.main$run on its stack, or a
+  stack too deep to tell) by what made it: the JVM's own machinery (linking a method handle
+  constant, a throwable's stack trace, a class initializer loading its class constants), the
+  runtime on a2g's own objects (Reflector's member lookup for untyped interop, protocol
+  dispatch's arbace.core/bases), TypeReference's arithmetic (the analysis's type annotation
+  targets), or else a2g itself: those fail the trace.
+
+  Usage: -m a2g.edge-trace RECORDING.jfr OUT.txt"
+  (:require [arbace.string :as str])
+  (:import (jdk.jfr.consumer RecordingFile RecordedEvent RecordedFrame RecordedMethod)
+           (java.nio.file Path)))
+
+(defn- frame-name [^RecordedFrame f]
+  (let [^RecordedMethod m (.getMethod f)]
+    (str (.getName (.getType m)) "." (.getName m))))
+
+(defn- kind
+  "What made the traced call method m (a frame name) with stack frames st (names, innermost
+  first): a description when allowed, else ::a2g. The maker is the first frame of Arbace's
+  code but RT's class loading; a call that reaches it through java.lang.reflect.Method.invoke is
+  Arbace's code calling the traced method by reflection, whatever the frame."
+  [m st]
+  (if (str/starts-with? m "arbace.asm.TypeReference.")
+    "TypeReference's arithmetic"
+    (loop [[f & more] st invoked false]
+      (cond
+        (nil? f) ::a2g
+        (or (str/starts-with? f "java.lang.reflect.Method.invoke")
+            (str/starts-with? f "jdk.internal.reflect."))
+        (recur more true)
+        (and (not invoked)
+             (or (str/starts-with? f "java.lang.invoke.MethodHandleNatives.link")
+                 (str/starts-with? f "java.lang.Throwable.getOurStackTrace")
+                 (str/starts-with? f "java.lang.Throwable.fillInStackTrace")))
+        "the JVM (linkage, stack traces)"
+        (str/starts-with? f "arbace.lang.RT.classForName") (recur more invoked)
+        (str/starts-with? f "arbace.")
+        (cond invoked ::a2g
+              (str/ends-with? f ".<clinit>") "the JVM (class constants)"
+              (or (str/starts-with? f "arbace.lang.Reflector.")
+                  (str/starts-with? f "arbace.lang.Compiler$FISupport."))
+              "the runtime (Reflector's member lookup)"
+              (str/starts-with? f "arbace.core$bases.") "the runtime (protocol dispatch)"
+              :else ::a2g)
+        :else (recur more invoked)))))
+
+(defn -main [jfr out]
+  (let [allowed (atom (sorted-map)) bad (atom {}) total (atom 0)]
+    (with-open [rf (RecordingFile. (Path/of ^String jfr (make-array String 0)))]
+      (while (.hasMoreEvents rf)
+        (let [^RecordedEvent e (.readEvent rf)]
+          (when (= "jdk.MethodTrace" (.getName (.getEventType e)))
+            (swap! total inc)
+            (let [st (.getStackTrace e)
+                  frames (mapv frame-name (.getFrames st))]
+              (when (or (.isTruncated st) (some #(str/starts-with? % "arbace.a2g.main$run") frames))
+                (let [^RecordedMethod rm (.getValue e "method")
+                      m (str (.getName (.getType rm)) "." (.getName rm))
+                      k (kind m frames)]
+                  (if (not= k ::a2g)
+                    (swap! allowed update k (fnil inc 0))
+                    (swap! bad update (str m "  <-  " (or (first (filter #(str/starts-with? % "arbace.") frames)) (first frames)))
+                           (fnil inc 0))))))))))
+    (spit out (apply str (for [[k v] (sort-by (comp - val) @bad)] (format "%7d  %s\n" v k))))
+    (println (str @total " traced calls, " (+ (reduce + (vals @allowed)) (reduce + (vals @bad))) " in a2g's run: "
+                  (str/join ", " (for [[k v] @allowed] (str v " by " k)))
+                  "; by a2g: " (reduce + (vals @bad))))
+    (System/exit (if (seq @bad) 1 0))))

@@ -24,7 +24,14 @@
                        a2g writes the main package arbace/cmd/arbace, whose main makes the
                        calling goroutine the thread main (jrt.RunMain) and calls
                        arbace.lang.Main.main(args) (RT's initialization first); build it with
-                       bin/g2a build --line-file DIR/prog"
+                       bin/g2a build --line-file DIR/prog
+    --edge FILE        the classes outside the forms, as data (default jdk/edge.edn:
+                       doc/STANDALONE-NOTES.md, S2): a2g loads no class, reflects on none and
+                       runs no ASM
+    --record-edge FILE instead, ask the JVM (reflection, class files) and write what this run
+                       asked into FILE (bin/a2g-edge update merges the builds' runs)
+    --jvm-reflection   instead, ask the JVM, without recording (a world the edge does not
+                       cover)"
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [arbace.classes.types :as t]
@@ -46,6 +53,7 @@
             [arbace.a2g.fromfn :as fromfn]
             [arbace.a2g.checks :as chk]
             [arbace.a2g.embed :as embed]
+            [arbace.a2g.edge :as edge]
             [arbace.g2a.print :as gp]
             [arbace.pprint]))
 
@@ -65,6 +73,9 @@
       "--tests" (recur more (assoc opts :tests true))
       "--main" (recur (rest more) (update opts :mains (fnil conj []) (first more)))
       "--program" (recur more (-> opts (assoc :program true) (update :roots conj "arbace.lang.Main#main")))
+      "--edge" (recur (rest more) (assoc opts :edge (first more)))
+      "--record-edge" (recur (rest more) (assoc opts :record-edge (first more)))
+      "--jvm-reflection" (recur more (assoc opts :jvm-reflection true))
       (throw (ex-info (str "a2g: unknown option " a) {})))))
 
 (defn- internal [s] (str/replace s "." "/"))
@@ -97,9 +108,10 @@
   [^String n]
   (let [i (.lastIndexOf n "/")
         pkg (.replace (subs n 0 (max i 0)) \/ \.)]
-    (if-let [^java.lang.Module m (get @boot-packages pkg)]
-      (.isExported m pkg)
-      true)))
+    ;; the packages a JDK module does not export: the edge's :unexported
+    (not (edge/jvm? :unexported pkg
+                    #(when-let [^java.lang.Module m (get @boot-packages pkg)]
+                       (not (.isExported m pkg)))))))
 
 (defn- root-keys
   "Method keys of a root spec. CLASS$* is the class and every named class nested in it (the
@@ -303,7 +315,11 @@
       (str (subs top 0 (inc (.lastIndexOf ^String top "/"))) (subs b 0 (- (count b) 3))))
     top))
 
-(defn run [opts]
+(def default-edge "jdk/edge.edn")
+
+(defn run*
+  "a2g's run, in the class environment run binds."
+  [opts]
   (let [t0 (now)
         root-dir "."
         ;; the converted JDK: --jdk, else $JRT_CONV, else the committed forms (jdk/README.md)
@@ -696,6 +712,57 @@
                             (count races) " classes (report.edn :race-candidates); "
                             (count collisions) " name collisions, " (count pp-overrides) " package-private overrides"))
               report)))))))
+
+(def id-floor
+  "Where the runtime's id counter (RT/nextID, gensym's) stands when a2g's run starts. The
+  analyzer and the translator name temporaries by it (arr_100417), so a2g first advances it to
+  this fixed value: its output then depends on its inputs, not on how much code the running
+  Arbace compiled before (a2g's own namespaces load from source, and on the Go executable in
+  other amounts than on the JVM). A round value well above what loading a2g takes
+  (doc/STANDALONE-NOTES.md, SA13)."
+  100000)
+
+(defn- advance-ids!
+  "Advances the runtime's id counter to id-floor (an error when it is past it already)."
+  []
+  (let [v (arbace.lang.RT/nextID)]
+    (when (>= v (dec id-floor))
+      (throw (ex-info (str "a2g: the runtime's id counter (" v ") is at a2g's id-floor (" id-floor
+                           ") already: raise it (a2g's output then names its temporaries afresh)") {})))
+    (loop [x v] (when (< x (dec id-floor)) (recur (arbace.lang.RT/nextID))))))
+
+(defn run
+  "a2g's run (bin/a2g's options as parse-args gives them). The classes outside the forms come
+  from the edge (--edge, default jdk/edge.edn: doc/STANDALONE-NOTES.md, S2), without the JVM's
+  reflection or ASM; --record-edge FILE: from the JVM's reflection, writing the edge of what
+  this run asked into FILE; --jvm-reflection: from the JVM's reflection (the edge unused)."
+  [opts]
+  (advance-ids!)
+  (cond
+    (:record-edge opts)
+    (let [env-rec (atom {})
+          a2g-rec (atom {})
+          report (binding [env/*recorded* env-rec edge/*recording* a2g-rec]
+                   (run* opts))]
+      (edge/write-edge! (:record-edge opts) (edge/recorded-edge @env-rec @a2g-rec))
+      (println (str "a2g: the edge of this run in " (:record-edge opts) ": " (count @env-rec) " classes"))
+      report)
+
+    (:jvm-reflection opts)
+    (run* opts)
+
+    :else
+    (let [t0 (now)
+          f (or (:edge opts) default-edge)
+          _ (when-not (.isFile (io/file f))
+              (throw (ex-info (str "a2g: no edge " f " (bin/a2g-edge update, or --jvm-reflection)") {})))
+          e (edge/read-edge f)]
+      (println (str "a2g: the edge " f ": " (count (:classes e)) " classes, read in " (secs t0) " s"))
+      (binding [env/*declared* (:classes e)
+                edge/*edge* e
+                ;; no class forms sources from the class path (§9.2), as on the Go build
+                a/*source-lookup* false]
+        (run* opts)))))
 
 (defn -main [& args]
   (let [opts (parse-args args)

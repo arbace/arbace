@@ -89,7 +89,12 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   in `--full`; the build reaches no javac or jdk26u.
 - TLS in the box (2026-10-12, BX70-BX75): Go's crypto/tls in jrt, `arbace.tls`, `arbace.http`,
   Mozilla's roots (`x509roots/`); the Claude API reachable from the box.
-- Now: standalone S2, a2g without the JVM's reflection and ASM (agent, branch `standalone-s2`);
+- Standalone S2 done (2026-10-12): a2g reads `jdk/edge.edn` instead of the JVM's reflection,
+  accessors as data, the id floor (SA10-SA15 accepted); the test build's fixtures as forms in
+  `test/java-fixtures/` (no javac in any build). S4's preparation: the Go-source seed proven
+  (SA1-SA9 accepted; branch `s4-seed`, finishing).
+- Now: S3, the Go-hosted fixpoint: g2a on the Go executable (agent, branch `s3-g2a`), then a2g
+  on it.
   `bin/gate --full` runs the amd64 box smoke test (`box-smoke`). The Mac: a bundle per box
   milestone, the user's run following the tag.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no

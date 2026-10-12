@@ -11,7 +11,8 @@
   appended to it; arbace/lang/go/ns/P.subst.ae, a vector [old new ...] of strings, replaces
   each old (found exactly once) in it."
   (:require [arbace.string :as str]
-            [arbace.java.io :as io])
+            [arbace.java.io :as io]
+            [arbace.a2g.edge :as edge])
   (:import (java.io File PushbackReader StringReader)
            (arbace.lang LispReader$Resolver)))
 
@@ -143,8 +144,10 @@
   (set (for [n (concat (for [[_ text] srcs n (names text)] n) library-cuts)
              :when (and (or (re-find #"^(java|javax|jdk|sun)\." n)
                             (re-find #"^arbace\.(lang|asm)\." n))
-                        (try (Class/forName n false (ClassLoader/getSystemClassLoader)) true
-                             (catch Throwable _ false)))]
+                        ;; on this JVM (the edge's :exists)
+                        (edge/jvm? :exists n
+                                   #(try (Class/forName n false (ClassLoader/getSystemClassLoader)) true
+                                         (catch Throwable _ false))))]
          (str/replace n "." "/"))))
 
 (defn with-member-types
@@ -157,16 +160,21 @@
                         (map (fn [^java.lang.reflect.Field f] (.getType f)) (.getFields c))
                         (mapcat (fn [^java.lang.reflect.Constructor k] (.getParameterTypes k)) (.getConstructors c))))
         elem (fn [^Class c] (if (.isArray c) (recur (.getComponentType c)) c))
+        ;; the JDK's public classes the members of class n name (the edge's :member-types)
+        member-types (fn [n]
+                       (when-let [c (try (Class/forName (str/replace n "/" ".") false (ClassLoader/getSystemClassLoader))
+                                         (catch Throwable _ nil))]
+                         (vec (sort (distinct
+                                      (for [^Class t (map elem (types c))
+                                            :when (not (.isPrimitive t))
+                                            :let [tn (str/replace (.getName t) "." "/")]
+                                            :when (and (re-find #"^(java|javax|jdk|sun)/" tn)
+                                                       (java.lang.reflect.Modifier/isPublic (.getModifiers t)))]
+                                        tn))))))
         more (for [n cands
-                   :let [c (try (Class/forName (str/replace n "/" ".") false (ClassLoader/getSystemClassLoader))
-                                (catch Throwable _ nil))]
-                   :when (and c (not (in-world? n)))
-                   ^Class t (map elem (types c))
-                   :when (not (.isPrimitive t))
-                   :let [tn (str/replace (.getName t) "." "/")]
-                   :when (and (re-find #"^(java|javax|jdk|sun)/" tn)
-                              (java.lang.reflect.Modifier/isPublic (.getModifiers t))
-                              (not (in-world? tn)))]
+                   :when (not (in-world? n))
+                   tn (edge/jvm :member-types n #(member-types n))
+                   :when (not (in-world? tn))]
                tn)]
     (sort (distinct (concat cands more)))))
 

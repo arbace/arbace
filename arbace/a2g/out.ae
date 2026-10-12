@@ -13,7 +13,8 @@
             [arbace.a2g.names :as nm]
             [arbace.a2g.jrt :as jrt]
             [arbace.a2g.code :as c]
-            [arbace.a2g.decls :as d])
+            [arbace.a2g.decls :as d]
+            [arbace.a2g.edge :as edge])
   (:import (arbace.asm Opcodes)))
 
 (defn- tag [sym type] (with-meta sym {:tag type}))
@@ -582,21 +583,23 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
   "Whether member tables list the public methods that do not exist in Go (bin/a2g --program)."
   false)
 
-(def ^:private archived-classes
-  "The classes of the running JDK's default CDS archive (its lib/classlist, the archive's
-  input; internal names), when the JVM maps the archive (java.vm.info says sharing), else
-  #{}. HotSpot sorts a class's methods by the address of their name's Symbol, so the order of
-  getDeclaredMethods, a name's overloads included, varies from one JVM process to the next
-  for a class it loads and parses (Arbace's own, the JDK's outside the archive); an archived
-  class keeps the order of the archive, fixed for the JDK build."
-  (delay
-    (let [f (io/file (System/getProperty "java.home") "lib" "classlist")]
-      (if (and (.isFile f) (str/includes? (str (System/getProperty "java.vm.info")) "sharing"))
-        (into #{} (remove #(re-find #"[\s@#]" %)) (str/split-lines (slurp f)))
-        (do (binding [*out* *err*]
-              (println "a2g: warning: the JVM does not use the JDK's CDS archive: member tables order"
-                       "every class's overloads by descriptor"))
-            #{})))))
+(defn- method-order
+  "The order of the JVM's getDeclaredMethods for the overloads of class n among methods mms, when
+  it is stable (edge/archived-classes): {name [[parameter binary names] ...]} for each name of more
+  than one of mms, the parameter lists in the order of their (last) index; else nil."
+  [n mms]
+  (when-let [^Class jc (when (contains? @edge/archived-classes n)
+                         (try (Class/forName (java-name n) false (ClassLoader/getSystemClassLoader))
+                              (catch Throwable _ nil)))]
+    (let [order (into {} (map-indexed (fn [i ^java.lang.reflect.Method x]
+                                        [[(.getName x) (vec (map #(.getName ^Class %) (.getParameterTypes x)))] i])
+                                      (.getDeclaredMethods jc)))
+          names (for [[nme k] (frequencies (map :name mms)) :when (> k 1)] nme)
+          m (into {} (for [nme names
+                           :let [ps (mapv (comp second key) (sort-by val (filter #(= nme (first (key %))) order)))]
+                           :when (seq ps)]
+                       [nme ps]))]
+      (when (seq m) m))))
 
 (defn- dotted-desc
   "A descriptor with binary names (java.util.Map$Entry), as jrt's member tables hold them."
@@ -681,23 +684,20 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                 :when (and (public? mm) (not= "<init>" (:name mm)) (not= "<clinit>" (:name mm))
                                            (not (present [(:name mm) (:desc mm)])))]
                             mm))))
-          methods (let [^Class jc (when (contains? @archived-classes n)
-                                    (try (Class/forName (java-name n) false (ClassLoader/getSystemClassLoader))
-                                         (catch Throwable _ nil)))
-                        order (when jc
-                                (into {} (map-indexed (fn [i ^java.lang.reflect.Method x]
-                                                        [[(.getName x) (vec (map #(.getName ^Class %) (.getParameterTypes x)))] i])
-                                                      (.getDeclaredMethods jc))))
-                        jname (fn [d] (cond (t/prim? d) (t/prim-desc->name d)
+          methods (let [jname (fn [d] (cond (t/prim? d) (t/prim-desc->name d)
                                             (t/array? d) (str/replace d "/" ".")
-                                            :else (str/replace (t/desc->internal d) "/" ".")))]
+                                            :else (str/replace (t/desc->internal d) "/" ".")))
+                        jparams (fn [mm] (vec (map jname (first (t/parse-method-desc (:desc mm))))))
+                        ;; the JVM's order of the overloads of each name of more than one (the
+                        ;; edge's :method-order: their parameters, in getDeclaredMethods's order)
+                        order (edge/jvm :method-order n #(method-order n mms))]
                     (assert (= (count mms) (count methods)))
                     (map (fn [[_ i]] (nth (vec methods) i))
                          (sort-by (fn [[mm i]]
                                     [(:name mm)
-                                     (if order
-                                       (get order [(:name mm) (vec (map jname (first (t/parse-method-desc (:desc mm)))))]
-                                            Integer/MAX_VALUE)
+                                     (if-let [ps (get order (:name mm))]
+                                       (or (first (keep-indexed (fn [j p] (when (= p (jparams mm)) j)) ps))
+                                           Integer/MAX_VALUE)
                                        0)
                                      (:desc mm)
                                      i])
@@ -979,14 +979,14 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                     '(do (System_SetOut_PrintStream__V (PrintStream_Cast (aget args 0))) (return nil)))))])))])))
 
 (defn- cut-type-expr
-  "The Class expression of JVM class c as a cut class's member table names it from pkg, or nil
+  "The Class expression of type descriptor d (a cut class's member names it) from pkg, or nil
   when the Go build has no Class object for it there (a class outside the world that is not
   cut, or one of arbace/lang named from jrt)."
-  [pkg cuts ^Class c]
+  [pkg cuts d]
   (cond
-    (.isPrimitive c) (symbol (str (if (= pkg :jrt) "" "jrt/") "Prim_" (.getName c)))
-    (.isArray c) (when-let [e (cut-type-expr pkg cuts (.getComponentType c))] (list '.ArrayClass e))
-    :else (let [n (str/replace (.getName c) "." "/")]
+    (t/prim-desc->name d) (symbol (str (if (= pkg :jrt) "" "jrt/") "Prim_" (t/prim-desc->name d)))
+    (t/array? d) (when-let [e (cut-type-expr pkg cuts (subs d 1))] (list '.ArrayClass e))
+    :else (let [n (t/desc->internal d)]
             (when (and (or (m/in-world? n) (contains? cuts n))
                        (or (= pkg :lang) (= :jrt (m/pkg n)))
                        ;; jrt's hand-written classes without a Class object
@@ -995,59 +995,83 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
               (if (= n "java/lang/Object") (m/jrt-sym pkg "Object_class") (m/class-sym pkg n "_class"))))))
 
 (defn- cut-constant
-  "The Go value of field fd of a cut class when it is a constant (static final, of a primitive
-  type or String: its ConstantValue, read by reflection), else nil: cut classes' constants are
+  "The Go value of a cut class's constant (static final, of a primitive type or String: its
+  value, read by reflection when the edge was recorded), else nil: cut classes' constants are
   readable (ASM's Opcodes in the class forms compiler's analysis, doc/go/CLASSFORMS-REPL.md)."
-  [pkg ^java.lang.reflect.Field fd]
-  (let [mods (.getModifiers fd)
-        t (.getType fd)]
-    (when (and (java.lang.reflect.Modifier/isStatic mods) (java.lang.reflect.Modifier/isFinal mods)
-               (or (.isPrimitive t) (= t String)))
-      (when-let [v (try (.get fd nil) (catch Throwable _ nil))]
-        (condp = t
-          Integer/TYPE (list 'conv 'int32 (long v))
-          Long/TYPE (list 'conv 'int64 (long v))
-          Short/TYPE (list 'conv 'int16 (long v))
-          Byte/TYPE (list 'conv 'int8 (long v))
-          Character/TYPE (list 'conv 'uint16 (long (int (char v))))
-          Boolean/TYPE (boolean v)
-          String (list (m/jrt-sym pkg "Str") v)
-          nil)))))
+  [pkg {:keys [type const]}]
+  (when (some? const)
+    (case type
+      "I" (list 'conv 'int32 (long const))
+      "J" (list 'conv 'int64 (long const))
+      "S" (list 'conv 'int16 (long const))
+      "B" (list 'conv 'int8 (long const))
+      "C" (list 'conv 'uint16 (long const))
+      "Z" (boolean const)
+      "Ljava/lang/String;" (list (m/jrt-sym pkg "Str") const)
+      nil)))
+
+(defn- cut-class-members
+  "The public members class n declares on this JVM, as the edge's :cut records them, or nil:
+  {:methods [{:mods :name :params [desc] :ret desc}] :fields [{:mods :name :type desc :const v}]
+  :ctors [{:mods :params [desc]}]}, each in the order of the member tables."
+  [n]
+  (when-let [^Class c (try (Class/forName (str/replace n "/" ".") false (ClassLoader/getSystemClassLoader))
+                           (catch Throwable _ nil))]
+    (let [desc (fn [^Class c] (.descriptorString c))]
+      {:methods (vec (for [^java.lang.reflect.Method mt (sort-by #(str (.getName ^java.lang.reflect.Method %) (vec (map str (.getParameterTypes ^java.lang.reflect.Method %)))
+                                                                      " " (.getReturnType ^java.lang.reflect.Method %))
+                                                                 (.getMethods c))
+                            :when (= c (.getDeclaringClass mt))]
+                        {:mods (.getModifiers mt) :name (.getName mt)
+                         :params (mapv desc (.getParameterTypes mt)) :ret (desc (.getReturnType mt))}))
+       :fields (vec (for [^java.lang.reflect.Field fd (sort-by #(.getName ^java.lang.reflect.Field %) (.getFields c))
+                           :when (= c (.getDeclaringClass fd))
+                           :let [mods (.getModifiers fd)
+                                 t (.getType fd)
+                                 v (when (and (java.lang.reflect.Modifier/isStatic mods) (java.lang.reflect.Modifier/isFinal mods)
+                                              (or (.isPrimitive t) (= t String)))
+                                     (try (.get fd nil) (catch Throwable _ nil)))
+                                 v (condp = t
+                                     Integer/TYPE (some-> v long) Long/TYPE (some-> v long)
+                                     Short/TYPE (some-> v long) Byte/TYPE (some-> v long)
+                                     Character/TYPE (some-> v char int long)
+                                     Boolean/TYPE v
+                                     String v
+                                     nil)]]
+                       (cond-> {:mods mods :name (.getName fd) :type (desc t)}
+                         (some? v) (assoc :const v))))
+       :ctors (vec (for [^java.lang.reflect.Constructor k (sort-by #(vec (map str (.getParameterTypes ^java.lang.reflect.Constructor %))) (.getConstructors c))]
+                     {:mods (.getModifiers k) :params (mapv desc (.getParameterTypes k))}))})))
 
 (defn cut-table-forms
   "The member tables of the cut classes of pkg (A2G-SPEC §4.1, D6; doc/go/EVAL-NOTES.md): their
-  public members as the JVM reports them, whose types the Go build can name, each throwing
-  UnsupportedOperationException when called, so that code naming them analyzes (core's
-  annotation support names ASM's Type) and fails only when run. As MemberTables (amendment
-  SZ3) whose functions are nil (jrt throws, MemberTable.Cut) but for a constant's getter."
+  public members as the JVM reports them (the edge's :cut), whose types the Go build can name,
+  each throwing UnsupportedOperationException when called, so that code naming them analyzes
+  (core's annotation support names ASM's Type) and fails only when run. As MemberTables
+  (amendment SZ3) whose functions are nil (jrt throws, MemberTable.Cut) but for a constant's
+  getter."
   [pkg cuts classes]
-  (let [desc (fn [^Class c] (str/replace (.descriptorString c) "/" "."))
-        mdesc (fn [ps r] (str "(" (apply str (map desc ps)) ")" (desc r)))
+  (let [dotted (fn [d] (str/replace d "/" "."))
+        mdesc (fn [ps r] (str "(" (apply str (map dotted ps)) ")" (dotted r)))
         tables (for [n (sort classes)
-                     :let [^Class c (try (Class/forName (str/replace n "/" ".") false (ClassLoader/getSystemClassLoader))
-                                         (catch Throwable _ nil))]
-                     :when c
+                     :let [cm (edge/jvm :cut n #(cut-class-members n))]
+                     :when cm
                      :let [texpr #(cut-type-expr pkg cuts %)
-                           ms (for [^java.lang.reflect.Method mt (sort-by #(str (.getName ^java.lang.reflect.Method %) (vec (map str (.getParameterTypes ^java.lang.reflect.Method %)))
-                                                                              " " (.getReturnType ^java.lang.reflect.Method %))
-                                                                         (.getMethods c))
-                                    :when (= c (.getDeclaringClass mt))
-                                    :let [ps (map texpr (.getParameterTypes mt))
-                                          r (texpr (.getReturnType mt))]
+                           ms (for [{:keys [mods name params ret]} (:methods cm)
+                                    :let [ps (map texpr params)
+                                          r (texpr ret)]
                                     :when (and r (every? some? ps))]
-                                {:line (str "m" (.getModifiers mt) " " (.getName mt) " "
-                                            (mdesc (.getParameterTypes mt) (.getReturnType mt)))})
-                           fs (for [^java.lang.reflect.Field fd (sort-by #(.getName ^java.lang.reflect.Field %) (.getFields c))
-                                    :when (= c (.getDeclaringClass fd))
-                                    :let [t (texpr (.getType fd))]
+                                {:line (str "m" mods " " name " " (mdesc params ret))})
+                           fs (for [{:keys [mods name type] :as fd} (:fields cm)
+                                    :let [t (texpr type)]
                                     :when t]
                                 (let [k (cut-constant pkg fd)]
-                                  {:line (str (if k "G" "f") (.getModifiers fd) " " (.getName fd) " " (desc (.getType fd)))
+                                  {:line (str (if k "G" "f") mods " " name " " (dotted type))
                                    :get (when k [(list 'return k)])}))
-                           ks (for [^java.lang.reflect.Constructor k (sort-by #(vec (map str (.getParameterTypes ^java.lang.reflect.Constructor %))) (.getConstructors c))
-                                    :let [ps (map texpr (.getParameterTypes k))]
+                           ks (for [{:keys [mods params]} (:ctors cm)
+                                    :let [ps (map texpr params)]
                                     :when (every? some? ps)]
-                                {:line (str "c" (.getModifiers k) " " (mdesc (.getParameterTypes k) Void/TYPE))})]
+                                {:line (str "c" mods " " (mdesc params "V"))})]
                      :when (or (seq ms) (seq fs) (seq ks))]
                  [n (member-table-form pkg (m/go-name n) {:methods ms :ctors ks :fields fs :cut true})])]
     (concat
