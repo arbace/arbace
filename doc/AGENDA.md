@@ -105,6 +105,9 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   milestone, the user's run following the tag.
 - The milestone's `bin/gate --full` runs with a failing `go` first on PATH, proving no use of
   the host's Go (`bin/box-vendor` was the last, fixed 2026-10-12).
+- The host's kernel (the user, 2026-10-12): running 6.18.52 with 6.18.55's modules installed
+  (`apk upgrade` would bring 6.18.56); reboot after the milestone `arbace-seed-is-go-v1` is
+  tagged, then `bin/arbace-go --smoke --box` for nested KVM. Upgrading before it is safe.
 - `bin/box-vendor convert` fails on the launcher (`cmd/arbace-box`, not in go-whim's clone):
   S0's replay, outside the gate; to fix with the box's next work.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
