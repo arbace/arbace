@@ -15,9 +15,12 @@ Direction:
     binary compatible with it;
   - Go: `arbace-for-golang` (tag `arbace-for-go1.27.1-v1`, 2026-10-11), Arbace as one static
     executable for Linux, its runtime and the part of jdk26u it needs translated into Go.
-- The box on amd64, Arbace built with TamaGo as a guest of go-whim's monitor on /dev/kvm, is a
-  milestone on main (tag `arbace-box-amd64-v1`, 2026-10-12; not a freeze: no branch).
-- Now: the box on arm64 (B1b S4: KVM/arm64, Hypervisor.framework on the Mac; doc/AGENDA.md).
+- The box, Arbace built with TamaGo as a guest of go-whim's monitor, is two milestones on main
+  (not freezes: no branch): on amd64 with /dev/kvm (tag `arbace-box-amd64-v1`, 2026-10-12) and
+  on arm64 with KVM/arm64 (tag `arbace-box-arm64-v1`, 2026-10-12, checked in an emulated aarch64
+  VM).
+- Now: the user's run of the box on the Mac (Hypervisor.framework, the bundle of
+  `bin/box-mac-bundle`); doc/AGENDA.md.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through j2a. The language is Clojure extended with an idiomatic
   representation of Java (the class forms), and later of Go: the Arbace language. The goal is a
@@ -80,15 +83,19 @@ Prior art:
   `test/oracle/`, `doc/go/ORACLE.md`) checks it against the JVM Arbace. Notes in `doc/go/`.
 - The box (B1b, `doc/go/BOX-SURVEY.md`, `doc/go/BOX-NOTES.md`): the same program built with
   TamaGo (`GOOS=tamago`) as a guest of a monitor on /dev/kvm (amd64) and Hypervisor.framework
-  (arm64). `box/` holds the hypervisor API, the monitor, the doorbell ABI and the TamaGo board,
-  vendored as Go forms from go-whim (`box/README.md` records the origin; `bin/box-vendor`
-  reproduces and proves it); import paths `arbace/box/*`. `tamago/` holds the guest's own Go as Go
+  (arm64; KVM/arm64 too). `box/` holds the hypervisor API, the monitor, the doorbell ABI and the
+  TamaGo board, vendored as Go forms from go-whim, and purego for the launcher on darwin/arm64
+  (`box/README.md` records the origins; `bin/box-vendor` reproduces and proves them); import
+  paths `arbace/box/*`. `tamago/` holds the guest's own Go as Go
   forms (S6): TamaGo's runtime and standard library (`tamago/goroot/`, GOROOT/src's layout) and
-  its `goos` module (`tamago/goos/`), for tamago/amd64, converted by `bin/tamago-vendor`
+  its `goos` module (`tamago/goos/`), for tamago/amd64 and tamago/arm64 as one tree, converted by `bin/tamago-vendor`
   (`convert`, `verify`; `check` proves the guest image built from them byte-identical to one
   built from the originals); the box's guest is built from them printed (`ARBACE_BOX_GO=orig`:
   from the toolchain's tree). `bin/arbace-go --build --box` builds the
-  guest image and Arbace's launcher `arbace-box` (`--smoke --box`; `bin/box-suite`). The store (S3):
+  guest image and Arbace's launcher `arbace-box` (`--smoke --box`, which runs `bin/box-smoke`;
+  `bin/box-suite`; arm64 with `ARBACE_BOX_ARCHES`). `bin/box-arm64-vm` runs an emulated aarch64
+  VM with KVM/arm64 for the arm64 box's checks (`check`: its smoke test, go-whim's tests);
+  `bin/box-mac-bundle` packs the Mac's launcher, guest and checklist (`box/mac/`). The store (S3):
   blobs and refs in a host directory (`ARBACE_BOX_STORE`, `arbace-box --store DIR`, which is also
   its tool), the namespace `arbace.box` over it in the box, natively and on the JVM (BX37).
 - `bin/gate` is the check every change to main must pass: the seed's hash, the bootstrap, then

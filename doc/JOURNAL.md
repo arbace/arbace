@@ -588,3 +588,36 @@ the first. The history before it is on the frozen branches and in git history:
   per architecture; `bin/box-arm64-vm`; `bin/box-smoke`; `bin/box-mac-bundle`); the VM's Alpine
   pinned to a release by SHA-256 rather than edge; before the tag only the box's smoke test in
   the arm64 VM must pass (not the oracle subset, about 1-2 h, nor `box-suite`, about 3 h).
+
+## 2026-10-12: B1b S4 merged; the milestone `arbace-box-arm64-v1`
+
+- The agent's branch `box-s4` merged into main (`c6deb8e`; its tree identical to `be8521e`, where the
+  arm64 VM's check ran). What S4 made (BX60-BX66, doc/go/BOX-NOTES.md, "S4"): `board.NilPanics`
+  on arm64 (BX60: `boot_arm64.s`'s vector turns a data abort below the first page into a call to
+  `sigpanic`, as Go's runtime on linux/arm64; NullPointerException where the guest ended before);
+  `bin/box-smoke` out of `bin/arbace-go` (`--slow N` for emulation, `--native`);
+  `bin/box-arm64-vm` (Alpine 3.24.2 netboot, SHA-256 pinned; QEMU with `virtualization=on`, 16
+  vCPUs, 12 GB; ssh by dropbear); `tamago/` one tree for tamago/amd64 and tamago/arm64 (1,759
+  files once, 11 per architecture under `tamago/goroot/arch/ARCH/go`); purego v0.11.1
+  (github.com/ebitengine/purego, darwin/arm64 files) vendored as Go forms under
+  `box/go/arbace/box/purego` (`bin/box-vendor purego`, `purego-check`: the darwin launcher
+  byte-identical, without DWARF, to one built from the originals); the launcher on darwin/arm64
+  (`bin/g2a build --goos darwin`); `bin/box-mac-bundle` and `box/mac/` (`mac.sh`, entitlements,
+  README.txt) for the user's run. The gate's `box` step runs `purego-check`; `box-forms` builds
+  and checks both guests.
+- The agent's checks: `bin/box-arm64-vm check` passed (38 min): the box smoke test 103 of 103 on
+  KVM/arm64 in the VM (4 and 1 vCPUs, the store, shared with the native arm64 executable, rlwrap on
+  a pty, nil dereferences), go-whim's hv (4) and vmm (15) tests. amd64 unchanged: `--smoke --box`
+  103 of 103, the box oracle subset 21,779 of 21,825 and the native oracle 22,232 of 22,278 (the 46
+  recorded). Not run, by the user's decision: the arm64 oracle subset (stopped after about 1 h 40
+  min at -j 12: 30-60 min a corpus file emulated) and `box-suite` in the VM. Left: g2a's printer
+  places a multi-line parameter list's names on its first line (DWARF's `decl_line` only).
+- `bin/gate --full` passed on `c6deb8e` in 19m37s: stage 2 = stage 3 (5,777 classes); Clojure's suite
+  on stages 1 and 2 20,750 of 20,750; j2a's suite without regressions; g2a's round trip for
+  tamago/amd64 and linux/amd64; `box` (round trip, go-whim's KVM tests, `tamago-vendor verify`,
+  `purego-check`); the Go build: smoke, the suite on its test build 20,506 of 20,520 without
+  regressions, the oracle with its 46 known mismatches; `box-forms`: both guests from
+  `tamago/`'s forms identical to the originals', as linked and cut.
+- The annotated tag `arbace-box-arm64-v1` (a milestone, not a freeze: no branch). README's box
+  section, CLAUDE.md's direction and layout, the agenda follow. Next: the user's Mac run from the
+  bundle (Hypervisor.framework), which follows the tag by the user's decision.

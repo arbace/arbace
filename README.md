@@ -70,15 +70,17 @@ bin/arbace-go                  # a REPL (with rlwrap on a terminal); also -e '(+
 
 ## Arbace in the box
 
-The tag `arbace-box-amd64-v1` (2026-10-12, on main) marks the same program built with TamaGo
-(`GOOS=tamago`) as the guest of a small monitor on /dev/kvm, with no operating system inside:
-go-whim's monitor vendored as Go forms in `box/`, TamaGo's runtime and standard library as Go
-forms in `tamago/`, the guest built from them byte-identical to one built from TamaGo's own
-sources. The REPL, `-e`, `-m` and scripts run on one to four vCPUs; files live in memory; a
-content-addressed store (`arbace.box`, also natively and on the JVM) and TCP streams proxied by
-the launcher under a policy are its only ways out ([doc/go/BOX-NOTES.md](doc/go/BOX-NOTES.md),
-[doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md)). amd64 only, on a Linux host with /dev/kvm; arm64
-and the Mac's Hypervisor.framework are the next milestone.
+The tags `arbace-box-amd64-v1` and `arbace-box-arm64-v1` (2026-10-12, on main) mark the same
+program built with TamaGo (`GOOS=tamago`) as the guest of a small monitor on /dev/kvm, with no
+operating system inside: go-whim's monitor vendored as Go forms in `box/`, TamaGo's runtime and
+standard library as Go forms in `tamago/` (one tree for amd64 and arm64), each guest built from
+them byte-identical to one built from TamaGo's own sources. The REPL, `-e`, `-m` and scripts run
+on one to four vCPUs; files live in memory; a content-addressed store (`arbace.box`, also natively
+and on the JVM) and TCP streams proxied by the launcher under a policy are its only ways out
+([doc/go/BOX-NOTES.md](doc/go/BOX-NOTES.md), [doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md)). amd64
+runs on a Linux host with /dev/kvm; arm64 on KVM/arm64, checked here in an emulated aarch64 VM
+(`bin/box-arm64-vm check`). The Mac's Hypervisor.framework has a launcher (purego vendored as Go
+forms) and a bundle with a checklist (`bin/box-mac-bundle`), not yet run on a Mac.
 
 ```sh
 bin/arbace-go --build && bin/arbace-go --build --box   # target/arbace-go/box-amd64/arbace-box
@@ -88,6 +90,7 @@ $B --store st put hello.ae                             # prints the blob's hash
 $B --store st ref hello HASH; $B --store st ls         # a ref names it
 ARBACE_BOX_STORE=st $B ref:hello                       # run the script from the store
 ARBACE_BOX_NET=loopback $B                             # with a network: loopback only
+ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box && bin/box-arm64-vm check
 ```
 
 ## Clojure code on Arbace

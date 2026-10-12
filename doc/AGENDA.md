@@ -69,11 +69,16 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   polling; idle host CPU 0.00 s per 20 s.
 - The milestone reached (2026-10-12): `bin/gate --full` passed (19m47s) and the tag
   `arbace-box-amd64-v1` is on main (a milestone, not a freeze: no branch, the journal continues).
-- Now, towards the milestone `arbace-box-arm64-v1` (a tag on main after `bin/gate --full`, not a
-  freeze): S4, arm64: the arm64 guest with everything the amd64 box does (`board.NilPanics` for
-  arm64, the event area, the store, the network), KVM/arm64 in an emulated aarch64 VM here, S6's
-  arm64 half (one `tamago/` tree), purego vendored as Go forms, a Mac bundle (a tarball and a
-  checklist script) for the user's run on Hypervisor.framework, which follows the tag.
+- S4 done (2026-10-12), arm64 (BX60-BX66): nil dereferences raise NullPointerException on
+  arm64 (the vectors' return to `sigpanic`); `tamago/` one tree for amd64 and arm64, the arm64
+  guest byte-identical to the originals'; purego vendored as Go forms and the launcher on
+  darwin/arm64; `bin/box-smoke`, `bin/box-arm64-vm` (KVM/arm64 in an emulated aarch64 VM:
+  the smoke test 103 of 103, go-whim's hv and vmm tests), `bin/box-mac-bundle`.
+- The milestone reached (2026-10-12): `bin/gate --full` passed and the tag `arbace-box-arm64-v1`
+  is on main (not a freeze).
+- Now: the user's Mac run from the bundle (`./mac.sh all`, `mac-results.tar.gz` back): the
+  launcher on macOS, purego's fakecgo, HVF with this guest and nil dereferences on it, all
+  untested until then.
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 
@@ -85,8 +90,9 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux host) and
   Hypervisor.framework on arm64 (macOS host). Open: the runtime's design, Go-inspired (scheduler,
   GC), with proper tail calls possible.
-- After `arbace-box-arm64-v1`: the Mac run on Hypervisor.framework (the user's, from the bundle);
-  the box's own checks in `bin/gate --full` (deferred); the mapped start measured without nested
-  KVM; TLS once jrt has JSSE.
+- After `arbace-box-arm64-v1`: the box's own checks in `bin/gate --full` (deferred); the mapped start measured without nested
+  KVM; TLS once jrt has JSSE; the arm64 box's oracle subset and
+  `box-suite` (hours in the emulated VM; an arm64 host with KVM); g2a's printer placing a
+  multi-line parameter list's names on its first line (DWARF's `decl_line` only).
 - g2a's open ends: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s
   directory tests.
