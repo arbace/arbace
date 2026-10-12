@@ -80,7 +80,10 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   42 on Hypervisor.framework with 4 and 1 vCPUs (the REPL, scripts, `-m`, nil dereferences as
   NullPointerException, futures, R2/R3, the loopback network and a socket REPL from the Mac, the
   store), go-whim's hv tests 4 of 4, idle 0.01 s of CPU per 20 s, start about 0.17 s.
-- Now (the user, 2026-10-12): a survey of the standalone Arbace (agent, branch `standalone-survey`);
+- The standalone survey done ([STANDALONE-SURVEY.md](STANDALONE-SURVEY.md)); D1-D13 decided as
+  recommended: the Go-hosted bootstrap first (S1-S4), then the box (S5-S8).
+- Now (the user, 2026-10-12): standalone S1, the JDK's forms committed and `bin/jrt-convert` a
+  verify check (agent, branch `standalone-s1`);
   g2a's printer keeping a multi-line parameter list's lines (agent, branch `g2a-params`).
   TLS in the box through Go's crypto/tls, for the Claude API from the box (agent, branch
   `box-tls`; the user: option 2, now).

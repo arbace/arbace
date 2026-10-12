@@ -676,3 +676,23 @@ the first. The history before it is on the frozen branches and in git history:
   build for GOOS=tamago unchanged (not run in a guest); gc needs 7-8 GB for `arbace/jrt`, more
   than a guest's 3 GiB. Stages S1-S9 (about 40-70 days; the Go-hosted bootstrap S1-S4 11-21) and
   decisions D1-D13 for the user, recommendations in the document.
+
+## 2026-10-12: The user's decisions on the standalone survey (D1-D13)
+
+All as recommended in doc/STANDALONE-SURVEY.md:
+- D1 the Go-hosted bootstrap first (S1-S4), then the box (S5-S8), rather than the box or the
+  runtime first. D2 j2a's output (the JDK's forms, 909 files, 11 MB) committed as sources,
+  `bin/jrt-convert` a verify check (reversing "regenerated each build, untracked"). D3 the seed
+  becomes the fixpoint's printed Go source pinned by hash (rather than executables per
+  architecture or the jar). D4 after S4 the JVM stays on main only as the oracle's reference (the
+  frozen jar) and j2a's front end.
+- D5 R1: Go's runtime kept, `arbace.lang` by a2g, jrt slimmed, Arbace compiled to Go forms
+  (rather than a new Go-shaped runtime, or Arbace's own collector and scheduler now). D6 tail calls
+  staged: T1 now, T3 measured in S6, T4 with an own back end. D7 jrt as a core and a library, in
+  Go packages split by the dependency graph. D8 smaller packages first; a larger guest slot only
+  if needed.
+- D9 Go's tools in the box as tool guests through a spawn call. D10 source trees in the store as
+  a blob per file plus EDN tree maps, to and from git by the host tool. D11 `String` stays UTF-16.
+  D12 j2a a host tool now, javac translated after S6. D13 divergence from Clojure recorded, each as
+  an amendment and a known oracle mismatch, Clojure's suite through c2a the yardstick.
+- S1 started now (the user), as one agent beside the TLS and g2a agents: branch `standalone-s1`.
