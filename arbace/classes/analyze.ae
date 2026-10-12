@@ -1,12 +1,15 @@
 (ns arbace.classes.analyze
   "Entering class declarations (names, supertypes, members, what javac derives) and analyzing
-  code into typed nodes for arbace.classes.emit (SPEC §4 to §6)."
+  code into typed nodes (SPEC §4 to §6), which the Go build's interpreter
+  (arbace.classes.interp) runs and a2g translates. (The bytecode back end, arbace.classes.emit,
+  is on the branch arbace-for-java-26.)"
   (:require [arbace.string :as str]
             [arbace.classes.types :as t]
             [arbace.classes.env :as env]
             [arbace.classes.parse :as p]
-            [arbace.classes.lower :as lower])
-  (:import (arbace.asm Opcodes Type MethodVisitor ClassWriter TypeReference)))
+            [arbace.classes.lower :as lower]
+            [arbace.classes.opcodes :as Opcodes]
+            [arbace.classes.go :as TypeReference]))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; compilation unit
@@ -32,9 +35,8 @@
 
 (defn nest-host [n] (env/nest-host n))
 
-;; javac's implicit constructor parameters and outer instance field, which the bytecode back end
-;; (arbace.classes.emit) and a2g both name (in the analysis, so that a2g needs no back end:
-;; doc/STANDALONE-NOTES.md, S3)
+;; javac's implicit constructor parameters and outer instance field, which the interpreter and
+;; a2g name (the bytecode back end did too: doc/STANDALONE-NOTES.md, S3)
 
 (defn- outer-level
   "How many enclosing instances class o has (javac's nesting level of the outer type)."
@@ -4185,31 +4187,17 @@
 ;; from a nested class, and Outer/super calls, go through a static synthetic method of the
 ;; enclosing class, named as javac names them
 
-(defn- xop [d base] (.getOpcode (Type/getType (if (keyword? d) t/object-desc d)) (int base)))
-
 (defn- add-accessor!
-  "Registers accessor method code (emitted with the class) and, as data, the one member
-  instruction it holds, target {:insn :owner :name :desc :itf} (:insn :getfield, :putfield,
-  :getstatic, :putstatic, :invokevirtual, :invokestatic or :invokespecial: what a2g reads,
-  arbace.a2g.access); returns its name."
-  [o code desc target emit-body]
+  "Registers an accessor of class o and, as data, the one member instruction it holds, target
+  {:insn :owner :name :desc :itf} (:insn :getfield, :putfield, :getstatic, :putstatic,
+  :invokevirtual, :invokestatic or :invokespecial: what a2g reads, arbace.a2g.access); returns
+  its name. (The JVM's back end also wrote the accessor's bytecode; it is on the branch
+  arbace-for-java-26.)"
+  [o code desc target]
   (let [anum (dec (get (swap! (state o) update :access-count (fnil inc 0)) :access-count))
         nm (str "access$" anum (quot code 10) (mod code 10))]
     (swap! (state o) update :accessors assoc nm target)
-    (swap! (state o) update :extra-methods (fnil conj [])
-           (fn [^ClassWriter cw]
-             (let [mv (.visitMethod cw (bit-or Opcodes/ACC_STATIC Opcodes/ACC_SYNTHETIC) nm desc nil nil)]
-               (.visitCode mv)
-               (emit-body mv)
-               (.visitMaxs mv 0 0)
-               (.visitEnd mv))))
     nm))
-
-(defn- load-params [^MethodVisitor mv descs start]
-  (loop [[d & more] descs slot start]
-    (when d
-      (.visitVarInsn mv (xop d Opcodes/ILOAD) slot)
-      (recur more (+ slot (t/size d))))))
 
 (defn- accessor-owner
   "The enclosing class of the current class through which protected member m is accessible,
@@ -4250,18 +4238,7 @@
                                 {:insn (if static?
                                          (if write? :putstatic :getstatic)
                                          (if write? :putfield :getfield))
-                                 :owner o :name (:name f) :desc fd}
-                                (fn [^MethodVisitor mv]
-                                  (load-params mv ps 0)
-                                  (when write?
-                                    (.visitInsn mv (if (= 2 (t/size fd))
-                                                     (if static? Opcodes/DUP2 Opcodes/DUP2_X1)
-                                                     (if static? Opcodes/DUP Opcodes/DUP_X1))))
-                                  (.visitFieldInsn mv (if static?
-                                                        (if write? Opcodes/PUTSTATIC Opcodes/GETSTATIC)
-                                                        (if write? Opcodes/PUTFIELD Opcodes/GETFIELD))
-                                                   o (:name f) fd)
-                                  (.visitInsn mv (xop fd Opcodes/IRETURN))))]
+                                 :owner o :name (:name f) :desc fd})]
           {:op :invoke :kind :static :owner o :itf false :name nm :desc desc :target nil
            :args (vec (concat (when-not static? [(:target node)]) (when write? [(:val node)])))
            :type fd})
@@ -4277,12 +4254,7 @@
               desc (t/method-desc ps r)
               nm (add-accessor! o 0 desc
                                 {:insn (if static? :invokestatic :invokevirtual)
-                                 :owner o :name (:name node) :desc (:desc node) :itf false}
-                                (fn [^MethodVisitor mv]
-                                  (load-params mv ps 0)
-                                  (.visitMethodInsn mv (if static? Opcodes/INVOKESTATIC Opcodes/INVOKEVIRTUAL)
-                                                    o (:name node) (:desc node) false)
-                                  (.visitInsn mv (if (= "V" r) Opcodes/RETURN (xop r Opcodes/IRETURN)))))]
+                                 :owner o :name (:name node) :desc (:desc node) :itf false})]
           {:op :invoke :kind :static :owner o :itf false :name nm :desc desc :target nil
            :args (vec (concat (when-not static? [(:target node)]) (:args node))) :type r})
         node))
@@ -4302,11 +4274,7 @@
         ps (into [od] mps)
         desc (t/method-desc ps r)
         nm (add-accessor! o 1 desc
-                          {:insn :invokespecial :owner sup :name mname :desc (:desc m) :itf false}
-                          (fn [^MethodVisitor mv]
-                            (load-params mv ps 0)
-                            (.visitMethodInsn mv Opcodes/INVOKESPECIAL sup mname (:desc m) false)
-                            (.visitInsn mv (if (= "V" r) Opcodes/RETURN (xop r Opcodes/IRETURN)))))]
+                          {:insn :invokespecial :owner sup :name mname :desc (:desc m) :itf false})]
     {:op :invoke :kind :static :owner o :itf false :name nm :desc desc :target nil
      :args (into [on] (convert-args m arg-nodes va)) :type r}))
 

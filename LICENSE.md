@@ -18,8 +18,13 @@ covers what.
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
   with its Java converted to Clojure class forms (doc/VENDOR-NOTES.md). Each file stays under its
   source's license:
-  - `arbace/asm/` and `arbace/asm.ae`: ASM, under the BSD 3-Clause License (the package
-    renamed from `org.objectweb.asm`, by way of `clojure.asm`, to `arbace.asm`);
+  - ASM, under the BSD 3-Clause License (the package renamed from `org.objectweb.asm`, by way
+    of `clojure.asm`, to `arbace.asm`), was `arbace/asm/` and `arbace/asm.ae` until 2026-10-12,
+    when it left main with the JVM's bytecode back end (doc/STANDALONE-NOTES.md, S4; it remains
+    on the branch `arbace-for-java-26`). No file of main is derived from it now; its license
+    stays below for the JVM jars main uses, which embed it (`seed/arbace-seed.jar` while it is
+    committed, and the frozen jar of `arbace-for-java-26-v4`, the oracle's reference, built from
+    its tag), and for `jdk/edge.edn` while it holds ASM's declarations;
   - `arbace/lang/Murmur3.ae`: from Guava (Copyright (C) 2011 The Guava Authors), as included in
     Clojure, under the Apache License 2.0; the MurmurHash3 algorithm it implements was written
     by Austin Appleby and placed in the public domain;
@@ -156,8 +161,9 @@ covers what.
     declarations (names, modifiers, signatures, constants, annotations) of the classes outside
     the forms, as the JVM reports them: of the JDK's classes (JDK 26.0.2.1, built from jdk26u at
     `baf63fb`) under the GNU General Public License version 2 with the Classpath Exception; of
-    ASM's (`arbace/asm`, Arbace's ASM) and Arbace's runtime classes, their sources' licenses
-    (ASM's BSD 3-Clause License, the Eclipse Public License 1.0).
+    ASM's (Arbace's ASM, `arbace.asm`, until the file is recorded again without them: ASM left
+    main on 2026-10-12) and Arbace's runtime classes, their sources' licenses (ASM's BSD 3-Clause
+    License, the Eclipse Public License 1.0).
   - `jdk/sources.txt` and `jdk/provenance.edn` (lists made by `bin/jrt-convert`) and
     `jdk/README.md`: Arbace's own, under the Eclipse Public License 1.0.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
@@ -381,7 +387,7 @@ covers what.
     the main package (`go/arbace/cmd/arbace/` with what a2g writes): under the licenses given
     above for their files, the Eclipse Public License 1.0 but for `arbace/lang/Murmur3.ae`
     (the Apache License 2.0) and the parts derived from jdk26u (the GNU General Public License
-    version 2 with the Classpath Exception). ASM (`arbace/asm/`) is not in them.
+    version 2 with the Classpath Exception). ASM is not in them.
   - jdk26u: the classes of java.base that `bin/jrt-convert` converts to class forms from
     https://github.com/openjdk/jdk26u at `baf63fb` (committed in `jdk/forms/`; 835 files with the default locale set, the
     sources the JDK build generates among them; with `JRT_LOCALES`, jdk.localedata's bundles of

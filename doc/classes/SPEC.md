@@ -5,6 +5,16 @@ Status: accepted (2026-10-06), with the amendments found while implementing it f
 special forms of `arbace.lang.Compiler` at every stage, the seed's stage 0 included, §9.5, §9.6)
 and `arbace/j2a/` (the converter).
 
+Since 2026-10-12 (standalone S4, doc/STANDALONE-NOTES.md, "S4: the JVM removed") main has no
+bytecode back end: the compiler's front end (`parse`, `lower`, `analyze`, `env`, `types`,
+`native`) stays and analyzes the class forms as this spec says, the Go build runs what it
+analyzes with its interpreter (`arbace.classes.interp`, doc/go/CLASSFORMS-REPL.md) and a2g
+translates it to Go (doc/go/A2G-SPEC.md); the back end that wrote the class files (`emit`,
+`compiler`, `shape`, `verify`, `build`, `boot`, with ASM) is on the branch `arbace-for-java-26`,
+whose jar (the frozen `arbace-for-java-26-v4`) still compiles class forms to bytecode for j2a's
+checks against javac. Where this spec says "the compiler emits" or names an attribute, it states
+the class file that the forms are equivalent to (§3), which that back end writes.
+
 This spec defines the **class forms**: how every construct javac can put into a class file is
 written as idiomatic Clojure, in ordinary Arbace sources (`.ae` files), and compiled by Arbace's own compiler
 to classes equivalent to javac's. It covers the forms, what they mean, what the compiler
@@ -1117,7 +1127,10 @@ primitive signatures a local class implementing the `IFn$...` interfaces.
 
 The forms state the source construct; the compiler derives the class file pattern the way javac
 does (javac's `Lower`, `TransTypes`, `TransPatterns`, `LambdaToMethod`, `Gen` and `ClassWriter`),
-with javac's names. The converter writes none of this.
+with javac's names. The converter writes none of this. (On main the analysis derives the
+members, names and accessors of this table as data, which the Go build's interpreter and a2g
+follow; the class file parts, attributes and bytecode patterns, are the back end's, on the
+branch `arbace-for-java-26`.)
 
 | construct | derived as javac does |
 |---|---|
@@ -1264,6 +1277,9 @@ come from `defmodule` metadata or are derived.
 
 ### 8.3 Attributes
 
+The attributes the back end writes (on the branch `arbace-for-java-26` since 2026-10-12; on main
+they describe the class files the forms are equivalent to):
+
 | attribute | where | source |
 |---|---|---|
 | `ConstantValue` | field | final field with constant initializer |
@@ -1349,14 +1365,18 @@ cycles.
 
 ### 9.3 AOT
 
-Under `*compile-files*` every class a class form defines is written to `*compile-path*`, nested,
-local, anonymous and synthetic ones (`$SwitchMap$` holders) included, as `deftype` classes are.
-Loading the namespace's `__init` then defines nothing: the classes load from the class path. A
-`defclass` in AOT-compiled code evaluates to its class, loaded by name. Classes written only with
-the Java subset have no link to their namespace and can be used without loading it, which is
-what `arbace.lang` needs.
-
+On the JVM (the branch `arbace-for-java-26`): under `*compile-files*` every class a class form
+defines is written to `*compile-path*`, nested, local, anonymous and synthetic ones
+(`$SwitchMap$` holders) included, as `deftype` classes are. Loading the namespace's `__init`
+then defines nothing: the classes load from the class path. A `defclass` in AOT-compiled code
+evaluates to its class, loaded by name. Classes written only with the Java subset have no link
+to their namespace and can be used without loading it, which is what `arbace.lang` needed.
 `defmodule` and `defpackage` only write files.
+
+On main since 2026-10-12 there is no AOT compilation: no class file is written (`compile` loads
+the namespace, `*compile-files*` changes nothing); the classes of `arbace.lang` are translated to
+Go by a2g, and a class form evaluated at run time makes an interpreted class
+(doc/go/CLASSFORMS-REPL.md). `defmodule` and `defpackage` do nothing.
 
 ### 9.4 Relation to `deftype`, `defrecord`, `reify`, `proxy`, `gen-class`
 
@@ -1375,7 +1395,8 @@ They all stay as they are; they implement Clojure's data types, not Java's.
 | self-reference while compiling | a stub class | the class environment |
 
 `gen-class` generates stub classes delegating to vars, for AOT only. `defclass` covers its uses
-directly. Arbace could later define `deftype*` and `reify*` as macros over `class*`; that is not
+directly. (On main, without AOT since 2026-10-12, `gen-class` does nothing, as Clojure's does
+when not compiling; `gen-interface` makes its interface at run time, and `proxy` its class.) Arbace could later define `deftype*` and `reify*` as macros over `class*`; that is not
 part of this spec.
 
 ### 9.5 Special forms and macros
@@ -1440,6 +1461,11 @@ forms); its value is `nil`. `import*` imports into the current namespace at run 
 `ImportExpr` does.
 
 ### 9.6 Bootstrap
+
+This is the JVM bootstrap, on the branch `arbace-for-java-26` since 2026-10-12. Main is
+bootstrapped from the Go-source seed instead (doc/STANDALONE-NOTES.md, "S4: the Go-source
+seed"): the Go executable embeds the class forms' analysis and interprets class forms; a2g
+(running on it) translates `arbace.lang`'s class forms to Go.
 
 - **Stage 0**: since 2026-10-08 (the user's decision), the binary seed `seed/arbace-seed.jar`:
   Arbace as built at the tag `arbace-for-java-26-v1`, pinned by hash, whose own class forms

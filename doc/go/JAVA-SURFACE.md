@@ -24,6 +24,11 @@ in the last section.
 
 ## Method
 
+(Retired on 2026-10-12, standalone S4: `bin/java-surface` and `test/jrt/java_surface.ae` read
+the JVM build's `target/stage2`, which main no longer builds; they are on the branch
+`arbace-for-java-26`. Their output, `java-surface.edn`, stays as data, and this document as the
+record of the survey.)
+
 `bin/java-surface` (script) and `test/jrt/java_surface.ae` (the tool, on Arbace's stage 2)
 read every class file of `target/stage2` (5,777 classes, after `bin/build-arbace`) with the
 JDK's class file API (`java.lang.classfile`), and collect each reference to a class outside
