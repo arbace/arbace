@@ -2107,4 +2107,5 @@ that `bin/box-vendor purego-check` compares the launchers with DWARF.
   declaration's line (SPEC §10.1, lists inside metadata), so its fields are a line or more off.
   Neither carries a `decl_line` (struct members and interface methods have none in gc's DWARF),
   and the round trip's code level passes.
-- The essential `bin/gate`: below.
+- The essential `bin/gate` (the bootstrap compiles `arbace/g2a`): passed in 6 min 46 s (Clojure's
+  suite on stage 2 with no regressions, the class forms tests, the Go executable's smoke test).
