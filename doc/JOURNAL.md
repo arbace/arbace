@@ -621,3 +621,16 @@ the first. The history before it is on the frozen branches and in git history:
 - The annotated tag `arbace-box-arm64-v1` (a milestone, not a freeze: no branch). README's box
   section, CLAUDE.md's direction and layout, the agenda follow. Next: the user's Mac run from the
   bundle (Hypervisor.framework), which follows the tag by the user's decision.
+
+## 2026-10-12: The box on the Mac: the user's run of the bundle
+
+- The user ran `arbace-box-mac-arm64.tar.gz` (`bin/box-mac-bundle`, built from `120da5f`; between
+  it and the tag `arbace-box-arm64-v1` only `box/mac/` and docs changed, so the results hold for
+  the tag) with `./mac.sh all` on macOS 14.8.7 (23J520), Apple M2 Max, and sent back
+  `mac-results.tar.gz`: check, sign, hv and the checklist all status 0.
+- go-whim's hv tests 4 of 4 on Hypervisor.framework; the checklist 42 of 42 on 4 and 1 vCPUs,
+  among them nil dereferences as NullPointerException (BX60 on HVF), the network on loopback with
+  a socket REPL from the Mac, and the store; idle 0.01 s of CPU per 20 s; the start about 0.17 s,
+  `(fib 25)` 29 ms. What was untested before (the launcher on macOS, purego's `fakecgo` under the
+  renamed path, HVF with this guest) works. Details in doc/go/BOX-NOTES.md, "The Mac run".
+- No new tag: the milestone's tag already names this code; the run completes S4. Next: to be set.

@@ -80,7 +80,7 @@ and on the JVM) and TCP streams proxied by the launcher under a policy are its o
 ([doc/go/BOX-NOTES.md](doc/go/BOX-NOTES.md), [doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md)). amd64
 runs on a Linux host with /dev/kvm; arm64 on KVM/arm64, checked here in an emulated aarch64 VM
 (`bin/box-arm64-vm check`). The Mac's Hypervisor.framework has a launcher (purego vendored as Go
-forms) and a bundle with a checklist (`bin/box-mac-bundle`), not yet run on a Mac.
+forms) and a bundle with a checklist (`bin/box-mac-bundle`), which passed on an M2 Max.
 
 ```sh
 bin/arbace-go --build && bin/arbace-go --build --box   # target/arbace-go/box-amd64/arbace-box

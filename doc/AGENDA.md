@@ -76,9 +76,11 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   the smoke test 103 of 103, go-whim's hv and vmm tests), `bin/box-mac-bundle`.
 - The milestone reached (2026-10-12): `bin/gate --full` passed and the tag `arbace-box-arm64-v1`
   is on main (not a freeze).
-- Now: the user's Mac run from the bundle (`./mac.sh all`, `mac-results.tar.gz` back): the
-  launcher on macOS, purego's fakecgo, HVF with this guest and nil dereferences on it, all
-  untested until then.
+- The Mac run (2026-10-12, the user's, macOS 14.8.7 on an M2 Max): the bundle's checklist 42 of
+  42 on Hypervisor.framework with 4 and 1 vCPUs (the REPL, scripts, `-m`, nil dereferences as
+  NullPointerException, futures, R2/R3, the loopback network and a socket REPL from the Mac, the
+  store), go-whim's hv tests 4 of 4, idle 0.01 s of CPU per 20 s, start about 0.17 s.
+- Next: to be set by the user (Later below).
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 

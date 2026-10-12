@@ -17,10 +17,9 @@ Direction:
     executable for Linux, its runtime and the part of jdk26u it needs translated into Go.
 - The box, Arbace built with TamaGo as a guest of go-whim's monitor, is two milestones on main
   (not freezes: no branch): on amd64 with /dev/kvm (tag `arbace-box-amd64-v1`, 2026-10-12) and
-  on arm64 with KVM/arm64 (tag `arbace-box-arm64-v1`, 2026-10-12, checked in an emulated aarch64
-  VM).
-- Now: the user's run of the box on the Mac (Hypervisor.framework, the bundle of
-  `bin/box-mac-bundle`); doc/AGENDA.md.
+  on arm64 (tag `arbace-box-arm64-v1`, 2026-10-12): KVM/arm64, checked in an emulated aarch64
+  VM, and Hypervisor.framework on an M2 Max (the bundle of `bin/box-mac-bundle`, 42 of 42).
+- Next: to be set (doc/AGENDA.md).
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through j2a. The language is Clojure extended with an idiomatic
   representation of Java (the class forms), and later of Go: the Arbace language. The goal is a

@@ -2041,3 +2041,23 @@ the Mac (perl's alarm; `shasum`). The checklist ran here on Linux with the amd64
   guest), and `board.NilPanics` on Hypervisor.framework (the same vectors as KVM/arm64's).
 - Left for later: the printer's placement of a multi-line parameter list's names (DWARF only);
   the arm64 oracle in the VM with fewer vCPUs a box, or on an arm64 host with KVM.
+
+### The Mac run (2026-10-12)
+
+The user ran the bundle (built from `120da5f`; the launcher's and the guest's code unchanged up
+to the tag `arbace-box-arm64-v1`, only `box/mac/` and docs added) on macOS 14.8.7 (23J520), an
+Apple M2 Max (12 cores, 96 GB, `kern.hv_support: 1`): `./mac.sh all`, every step status 0.
+
+- Signed with `com.apple.security.hypervisor` (ad hoc): the launcher and `hv.test`.
+- go-whim's hv tests on Hypervisor.framework: 4 of 4 (doorbell, store again, system registers,
+  counter with vCPUs).
+- The checklist 42 of 42 on 4 and 1 vCPUs: `-e`, the Mac's wall clock, the REPL, stdin and
+  in-memory scripts, `-m`, errors and `System/exit`'s status, files in memory only, nil
+  dereferences as NullPointerException (BX60 on HVF), futures and `send`, R2, R3, no processes;
+  no network without `ARBACE_BOX_NET`, loopback connections, socket options, a socket REPL from
+  the Mac by `nc`; the store (put and `arbace.box/load`, get, ls, `ref:NAME`, compare-and-set).
+  So the console's `select` on darwin, the image read beside the signed launcher, purego's
+  `fakecgo` under `arbace/box/purego` and HVF with this guest all work.
+- Idle at the prompt: 0.01 s of CPU over 20 s (4 vCPUs: 505 exits, 449 parks; 1 vCPU: 14 exits).
+- Times, best of 5 (4 vCPUs / 1 vCPU): `nil` 171 / 162 ms (the start), `(reduce + (map inc
+  (range 1000000)))` 449 / 525 ms, `(fib 25)` 29 / 28 ms, sorting 200,000 strings 135 / 151 ms.
