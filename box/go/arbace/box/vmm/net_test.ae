@@ -1,0 +1,211 @@
+(in-ns 'go.arbace.box.vmm) (go/file "net_test.go" :imports [
+
+
+    ^{:line 4} [net "net"]
+    ^{:line 5} [netip "net/netip"]
+    ^{:line 6} [strconv "strconv"]
+    ^{:line 7} [syscall "syscall"]
+    ^{:line 8} [testing "testing"]
+    ^{:line 9} [time "time"]])
+
+
+^{:go/end 69} (go/func TestNetPolicy [^{:tag (* testing/T)} t]
+  (when [(values p err) (ParseNetPolicy "")] (or (!= p nil) (!= err nil))
+    ^{:go/via [common]} (.Fatalf t "empty: %v %v" p err))
+
+  (when [(values p err) (ParseNetPolicy "off")] (or (!= p nil) (!= err nil))
+    ^{:go/via [common]} (.Fatalf t "off: %v %v" p err))
+
+  (range [_ bad (lit (slice string) "listen=1.2.3.4" "dial=:80" "dial=a b:1" "dial=x:70000" "dial=x:9-8" "open")]
+    (when [(values _ err) (ParseNetPolicy bad)] (== err nil)
+      ^{:go/via [common]} (.Errorf t "%q: no error" bad)))
+
+
+  (let [(values p err) (ParseNetPolicy "listen, dial=*.example.org:443, dial=10.0.0.0/8:1000-2000 dial=[::1]:*")]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (let [ap netip/MustParseAddrPort]
+      (range [_ c (lit (slice (struct
+                ^{:line 30 :tag string} in ^string at
+                ^{:line 31 :tag bool} ok))
+
+            (lit _ "127.0.0.1:0" "127.0.0.1:0" true) (lit _ "0.0.0.0:80" "127.0.0.1:80" true) (lit _ "[::]:80" "[::1]:80" true)
+            (lit _ "10.0.0.1:80" "" false) (lit _ "127.0.0.2:5" "127.0.0.2:5" true))]
+
+        (let [(values at ok) (.listenAddr p (ap (.-in c)))]
+          (when (or (!= ok (.-ok c)) (and ok (!= at (ap (.-at c)))))
+            ^{:go/via [common]} (.Errorf t "listen %s: %v %v" (.-in c) at ok))))
+
+
+      (when [(values q _) (ParseNetPolicy "listen=*:8080")] (^{:go/end 41} (fn ^bool [] (let [(values a ok) (.listenAddr q (ap "0.0.0.0:8080"))] (or (not ok) (!= a (ap "0.0.0.0:8080"))))))
+        ^{:go/via [common]} (.Errorf t "listen=*:8080 does not take the wildcard"))
+
+      (range [_ c (lit (slice (struct
+                ^{:line 45 :tag string} to
+                ^{:line 46 :tag (slice string)} names
+                ^{:line 47 :tag bool} ok))
+
+            (lit _ "10.1.2.3:1500" nil true) (lit _ "10.1.2.3:80" nil false) (lit _ "11.0.0.1:1500" nil false)
+            (lit _ "[::1]:22" nil true) (lit _ "127.0.0.1:22" nil false)
+            (lit _ "93.184.216.34:443" (lit (slice string) "www.example.org") true) (lit _ "93.184.216.34:443" (lit (slice string) "example.org") true)
+            (lit _ "93.184.216.34:80" (lit (slice string) "www.example.org") false) (lit _ "93.184.216.34:443" (lit (slice string) "badexample.org") false))]
+
+        (when [ok (.dialAddr p (ap (.-to c)) (.-names c))] (!= ok (.-ok c))
+          ^{:go/via [common]} (.Errorf t "dial %s %v: %v" (.-to c) (.-names c) ok)))
+
+
+      (range [_ c (lit (slice (struct
+                ^{:line 59 :tag string} name
+                ^{:line 60 :tag bool} ok))
+            (lit _ "localhost" true) (lit _ "example.org" true) (lit _ "A.Example.Org." true) (lit _ "example.com" false))]
+        (when (!= (.lookup p (.-name c)) (.-ok c))
+          ^{:go/via [common]} (.Errorf t "lookup %s: %v" (.-name c) (not (.-ok c)))))
+
+
+      (when (.reverse p)
+        ^{:go/via [common]} (.Errorf t "reverse without dial=*")))))
+
+
+
+
+^{:go/breaks [7] :go/end 82} (go/func wait "wait asks f until it answers other than EAGAIN or EINPROGRESS.\n" ^int64 [^{:tag (* testing/T)} t ^{:tag (func [] [int64])} f]
+  ^{:go/via [common]} (.Helper t)
+  (for [i 0] (< i 5000) (inc! i)
+    (when [r (f)] (and (!= r netEAGAIN) (!= r netEINPROGRESS))
+      (return r))
+
+    (time/Sleep time/Millisecond))
+
+  ^{:go/via [common]} (.Fatal t "no answer in 5 s")
+  0)
+
+
+^{:go/end 150} (go/func TestNetStreams [^{:tag (* testing/T)} t]
+  (let [(values p _) (ParseNetPolicy "listen")
+      ^{:line 86} n (NewNet p)]
+    (defer (.Close n))
+    (let [l (.listen n "127.0.0.1:0")]
+      (when (< l 0)
+        ^{:go/via [common]} (.Fatalf t "listen: %d" l))
+
+      (let [buf (make (slice byte) 64)
+          ^{:line 93} k (.addr (.get n l) false buf)
+          (values _ port _) (net/SplitHostPort (conv string (subslice buf _ k)))]
+        (when [r (.dial n "" "127.0.0.1:1" 0)] (!= r (- (conv int64 syscall/EPERM)))
+          ^{:go/via [common]} (.Errorf t "a dial the policy refuses: %d" r))
+
+        (when [r (.listen n "10.0.0.1:0")] (!= r (- (conv int64 syscall/EACCES)))
+          ^{:go/via [common]} (.Errorf t "a listen the policy refuses: %d" r))
+
+        ;; the guest's own listener may be dialled
+        (let [c (.dial n "" (+ "127.0.0.1:" port) 0)]
+          (when [r (wait t ^{:go/end 103} (fn ^int64 [] (let [(values r _) (.status (.get n c))] r)))] (!= r 0)
+            ^{:go/via [common]} (.Fatalf t "dial: %d" r))
+
+          (let [s (wait t (.-accept (.get n l)))]
+            (when (< s 0)
+              ^{:go/via [common]} (.Fatalf t "accept: %d" s))
+
+            (when [r (.write (.get n c) (conv (slice byte) "hello"))] (!= r 5)
+              ^{:go/via [common]} (.Fatalf t "write: %d" r))
+
+            (let [got ""]
+              (while (< (len got) 5)
+                (let [r (wait t ^{:go/end 115} (fn ^int64 [] (.read (.get n s) buf)))]
+                  (when (<= r 0)
+                    ^{:go/via [common]} (.Fatalf t "read: %d" r))
+
+                  (set! got + (conv string (subslice buf _ r)))))
+
+              (when (!= got "hello")
+                ^{:go/via [common]} (.Fatalf t "read %q" got))
+
+              (when [(values v r) (.option (.get n c) optTcpNoDelay 0 false)] (or (!= r 0) (!= v 0))
+                ^{:go/via [common]} (.Errorf t "TCP_NODELAY: %d %d" v r))
+
+              (when [(values _ r) (.option (.get n c) optTcpNoDelay 1 true)] (!= r 0)
+                ^{:go/via [common]} (.Errorf t "set TCP_NODELAY: %d" r))
+
+              (when [(values v _) (.option (.get n c) optTcpNoDelay 0 false)] (!= v 1)
+                ^{:go/via [common]} (.Errorf t "TCP_NODELAY set: %d" v))
+
+              (.shutdown (.get n c) 1)
+              (when [r (wait t ^{:go/end 134} (fn ^int64 [] (.read (.get n s) buf)))] (!= r 0)
+                ^{:go/via [common]} (.Fatalf t "the end: %d" r))
+
+              (let [e (.Load (.-events n))]
+                (.close (.get n c))
+                (when [r (wait t ^{:go/end 139} (fn ^int64 [] (.read (.get n s) buf)))] (!= r 0)
+                  ^{:go/via [common]} (.Fatalf t "after close: %d" r))
+
+                (when (== (.Load (.-events n)) e)
+                  ^{:go/via [common]} (.Errorf t "no event"))
+
+                (.close (.get n l))
+                (when [r (wait t ^{:go/end 146} (fn ^int64 [] (.dial n "" (+ "127.0.0.1:" port) 0)))] (!= r (- (conv int64 syscall/EPERM)))
+                  ^{:go/via [common]} (.Errorf t "dial to a closed listener: %d" r))
+
+                (set! _ strconv/Itoa)))))))))
+
+
+^{:go/end 171} (go/func TestNetLookup [^{:tag (* testing/T)} t]
+  (let [(values p _) (ParseNetPolicy "loopback")
+      ^{:line 154} n (NewNet p)]
+    (when [r (.lookup n "example.org" false)] (!= r netErrNotFound)
+      ^{:go/via [common]} (.Errorf t "a lookup the policy refuses: %d" r))
+
+    (let [h (.lookup n "localhost" false)]
+      (when [r (wait t ^{:go/end 159} (fn ^int64 [] (let [(values r _) (.status (.get n h))] r)))] (!= r 0)
+        ^{:go/via [common]} (.Fatalf t "localhost: %d" r))
+
+      (let [buf (make (slice byte) 256)
+          ^{:line 163} k (.read (.get n h) buf)]
+        (when (or (<= k 0) (!= (% k 16) 0))
+          ^{:go/via [common]} (.Fatalf t "localhost's answer: %d bytes" k))
+
+        (let [a (.Unmap (netip/AddrFrom16 (conv (array 16 byte) (subslice buf _ 16))))]
+          (when (not (.IsLoopback a))
+            ^{:go/via [common]} (.Errorf t "localhost is %v" a)))))))
+
+
+
+
+
+^{:go/end 213} (go/func TestNetCloseLingers "TestNetCloseLingers: bytes queued when a connection is closed reach its\npeer before the end, as a socket's close sends what was written to it.\n" [^{:tag (* testing/T)} t]
+  (let [(values p _) (ParseNetPolicy "listen")
+      ^{:line 177} n (NewNet p)]
+    (defer (.Close n))
+    (let [l (.listen n "127.0.0.1:0")
+        ^{:line 180} buf (make (slice byte) (<< 1 16))
+        ^{:line 181} k (.addr (.get n l) false buf)
+        (values _ port _) (net/SplitHostPort (conv string (subslice buf _ k)))]
+      (for [i 0] (< i 20) (inc! i)
+        (let [c (.dial n "" (+ "127.0.0.1:" port) 0)]
+          (when [r (wait t ^{:go/end 185} (fn ^int64 [] (let [(values r _) (.status (.get n c))] r)))] (!= r 0)
+            ^{:go/via [common]} (.Fatalf t "dial: %d" r))
+
+          (let [s (wait t (.-accept (.get n l)))
+              ^{:line 189} data (make (slice byte) 100000)]
+            (range [j data]
+              (aset data j (conv byte (+ i j))))
+
+            (for [off 0] (< off (len data)) _
+              (set! off + (conv int (wait t ^{:go/end 194} (fn ^int64 [] (.write (.get n c) (subslice data off)))))))
+
+            (.close (.get n c))
+            (let [^{:tag (slice byte)} got (zero (slice byte))]
+              (while true
+                (let [r (wait t ^{:go/end 199} (fn ^int64 [] (.read (.get n s) buf)))]
+                  (when (< r 0)
+                    ^{:go/via [common]} (.Fatalf t "read: %d" r))
+
+                  (when (== r 0)
+                    (break))
+
+                  (set! got (append got (spread (subslice buf _ r))))))
+
+              (when (!= (conv string got) (conv string data))
+                ^{:go/via [common]} (.Fatalf t "run %d: %d of %d bytes before the end" i (len got) (len data)))
+
+              (.close (.get n s)))))))))

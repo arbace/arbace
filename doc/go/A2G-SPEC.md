@@ -2411,7 +2411,13 @@ at the entry (D10), `NumCPU` the vCPUs (`GOMAXPROCS`), and the command line and 
 those the monitor wrote at the entry, which jrt's `init` makes `os.Args` and the process's
 environment (TamaGo's runtime gives neither) before jrt reads them, applying `GOGC` too. It has
 none of the optional interfaces below: no `HostFS`, `HostLinks`, `NetHost`, `HostProc` or
-`HostExecutable`, so those features fail as on a host without them (BX1). `OSHost`'s network
+`HostExecutable`, so those features fail as on a host without them (BX1); but when the
+launcher gives the box a network (`ARBACE_BOX_NET`, the monitor's `NetInfo`), its host is
+`netbox_tamago.ae`'s `boxNetHost`, the box host with a `NetHost` over the monitor's network
+calls: connections and listeners as `net.Conn` and `net.Listener` over the monitor's handles,
+errors as Linux's (amendment BX42, accepted 2026-10-11; BOX-NOTES.md, S5). The box host's `init`
+drops the system properties a package variable's initializer made before the environment was
+set, so that `JAVA_TOOL_OPTIONS`' `-D` options are properties in the box too (BX43, accepted). `OSHost`'s network
 (`NetHost`'s methods, with their `syscall` socket options and `TIOCINQ`) is Linux's,
 `net_linux.ae` (`//go:build linux`): jrt builds for `GOOS=tamago` (BX2). a2g's view of jrt (its
 names, the collisions it checks) leaves out the files named for another system than Linux

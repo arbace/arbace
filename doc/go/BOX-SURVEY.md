@@ -5,8 +5,9 @@ box"). The decisions (§10) are the user's, taken 2026-10-11, after the `arbace-
 freeze. Stage S0 is done (2026-10-11: go-whim's box vendored as Go forms under `box/`;
 [BOX-NOTES.md](BOX-NOTES.md)), S1 (2026-10-11: the boxed REPL on amd64, BOX-NOTES.md, S1)
 and S2 (2026-10-11: measured and hardened, BOX-NOTES.md, S2), S6's amd64 half (2026-10-11:
-the guest's Go as forms in `tamago/`, BOX-NOTES.md, S6) and S3 on amd64 (2026-10-11: the store,
-BOX-NOTES.md, S3); the rest of this document is the
+the guest's Go as forms in `tamago/`, BOX-NOTES.md, S6), S3 on amd64 (2026-10-11: the store,
+BOX-NOTES.md, S3) and S5 on amd64 (2026-10-11: the network as a stream proxy, D12 decided;
+BOX-NOTES.md, S5); the rest of this document is the
 survey as written. The experiments (§9) ran in `.tmp/boxsurvey/` on copies; go-whim
 was read only.
 
@@ -378,7 +379,7 @@ each re-running S6's byte-identity proof; S4 (arm64, the Mac) and S6's arm64 hal
 | **S2 measured and hardened**. *Done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S2): the image mapped (BX11), the symbol table cut to the monitor's three symbols, a default memory limit, the watchdog kept off, the suite's file tests and reducers in the box, `fold` 3.2-3.4x on 4 vCPUs; the times against native in BOX-NOTES* | the start (63 `Random` exits batched, the 85 MB image's DWARF: the box image keeps its symbol table, which the monitor reads, §9.4, while the native executables are stripped since SZ1; `-w` alone could drop the DWARF), the collector's setting in the box, the watchdog's setting for long evaluations, the suite's file tests over the in-memory fs, `ARBACE_PATH` inside it | the suite's file tests pass; reducers' `fold` scales on 4 vCPUs; start and suite times recorded against native |
 | **S3 the store**. *Done on amd64 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S3): `arbace.box` in the box and natively (one directory format, shareable), the monitor's refusals as answers of their own, scripts by `ref:NAME` and namespaces by `ARBACE_PATH`'s `store:PREFIX`, the in-memory file system's snapshot as a tar (`save-fs!`, `ARBACE_BOX_FS`), the launcher's `--store` and its tool; the store's checks in both smoke tests; S6's proof holds* | an `arbace.box` namespace (`put`, `get`, `ref`, `ref!` as Joker's `box`); scripts and namespaces loaded from refs; optionally the in-memory fs seeded from / saved to a ref (a tar or EDN snapshot) | a script run from a ref; `load` from the store; the store's refusals |
 | **S4 arm64** | the same image for arm64; KVM/arm64 in the emulated aarch64 VM here; Hypervisor.framework on the Mac (the user's run, go-whim's `mac.sh` as the model) | the S1 gate in the aarch64 VM and on the Mac |
-| **S5 the network** | the design first (R5): a stream proxy (`NetHost` over calls: `Dial`/`Listen` under the launcher's policy) or packets (a datagram call, netstack and TLS in the guest, go-whim's sketch); the socket REPL from the host | `java.net`'s oracle forms; a socket REPL session from the host |
+| **S5 the network**. *Done on amd64 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S5): D12 decided, a stream proxy: TCP streams through the calls 40-52, the monitor dialling, listening and resolving on the host under the launcher's `ARBACE_BOX_NET` policy, jrt's `NetHost` over them; `forms/net.ae` in the box's oracle (83 of 83), `bin/net-check --box`, the socket REPL from the host; TLS out (jrt has none); amendments BX40-BX44 accepted* | the design first (R5): a stream proxy (`NetHost` over calls: `Dial`/`Listen` under the launcher's policy) or packets (a datagram call, netstack and TLS in the guest, go-whim's sketch); the socket REPL from the host | `java.net`'s oracle forms; a socket REPL session from the host |
 | **S6 the image's Go as forms**. *amd64 half done 2026-10-11 ([BOX-NOTES.md](BOX-NOTES.md), S6): TamaGo's std (371 packages) and goos module (69) for tamago/amd64 as forms in `tamago/` (`bin/tamago-vendor`), the guest built from them printed by default; the guest image byte-identical to the originals' (`bin/tamago-vendor check`); arm64 the next milestone* | the board, TamaGo's runtime and std in the image as round-tripped Go forms; the image byte-identical to one built from the originals (B1-PLAN.md, B1b) | byte identity, amd64 and arm64 |
 
 Not staged: processes (cut for good in the box), the terminal's raw mode.
@@ -538,6 +539,11 @@ good in the box; D14 the monitor stays a Go program on the host.
   `NetHost` shape as calls, the launcher's policy) and packets with netstack and TLS in the
   guest (go-whim's sketch: the host sees nothing). The socket REPL is the first user either
   way.
+  *Decided by the user at S5 (2026-10-11), as recommended there (BOX-NOTES.md, S5, the design
+  note): the stream proxy*; the policy: no network unless the launcher allows it, listening on
+  the loopback addresses by default, dialing by an allow-list of host:port patterns; TCP only,
+  DNS resolved by the host under the policy, TLS in the guest only once jrt has it (it has not:
+  out of S5); the socket REPL by `arbace.server.repl` as natively, on the host's loopback.
 - **D13 Processes.** *Recommended: cut for good in the box* (absent `HostProc`); revisit only
   as "start another box".
 - **D14 The monitor's language.** The monitor is a Linux/macOS Go program, not part of the

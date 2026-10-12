@@ -1137,3 +1137,282 @@ launcher converted from its Go. `box/` printed again and the edited Go compared:
 - Confirmed: snapshot tars with epoch times; no transactions (`ref!` with an old hash is the
   compare-and-set); a `store:` entry of `ARBACE_PATH` runs to the next `:` (ref names hold no
   `:`).
+
+## S5: the network, amd64 (2026-10-11)
+
+Branch `box-s5`. BOX-SURVEY §6, S5: "the design first (R5): a stream proxy (`NetHost` over
+calls: `Dial`/`Listen` under the launcher's policy) or packets (a datagram call, netstack and
+TLS in the guest, go-whim's sketch); the socket REPL from the host". The design note came first
+(below), then the user's decisions, then the implementation.
+
+### The design note: a stream proxy or packets
+
+What jrt asks of a network is already narrow: `NetHost` (A2G-SPEC §9.4, `net.ae`) is `Listen`,
+`Dial`, `LookupIP`, `LookupAddr`, `Hostname`, `HasFamily`, `SetOption`/`GetOption` (by
+`java.net.SocketOptions`' numbers) and `Available`, and gives back Go's `net.Listener` and
+`net.Conn` *interfaces*: anything that reads, writes, closes and has deadlines serves. jrt's
+`HostNet` natives on top (the socket table, the JVM's error kinds and texts) do not change with
+the host. `java.net`'s classes reach no further (`HostSocketImpl` resolves names first and
+gives `Connect0` an address literal, `Listen0` a literal or "" for every address). So both
+designs end in the same place in jrt: a `NetHost` for the box; they differ in where TCP/IP runs.
+
+| | stream proxy (TCP streams through calls) | packets (a datagram call, netstack in the guest) |
+|---|---|---|
+| guest side | a `NetHost` over about a dozen calls, its `net.Conn` and `net.Listener` over handles: about 400 lines of Go forms in jrt | gVisor's netstack (`gvisor.dev/gvisor/pkg/tcpip`: IPv4/6, TCP, UDP, ARP, a link endpoint over the datagram call; `gonet` gives `net.Conn`/`net.Listener`) plus its dependencies (`pkg/sync`, `atomicbitops`, `buffer`, `sleep`, `waiter`, `state`, `log`, `rand`, `golang.org/x/time/rate`...): by estimate (not measured here: the module is not in Go's module cache, and this work fetched nothing) several tens of thousands of lines of Go, a new third-party vendoring as Go forms (Apache-2.0, `LICENSE.md` has the text), whose `go` line follows Go's releases closely (R5's coupling twice over); a resolver in the guest (Go's, over `net.SocketFunc` for UDP to a DNS server the host forwards to); TamaGo's `net` already takes a `SocketFunc` for it (`net/net_tamago.go`) |
+| host side | the monitor dials and listens with Go's `net`, a handle table, a goroutine reading each connection into a buffer and one writing from it: about 600 lines in `vmm` | a datagram relay, and something to turn the guest's packets into host traffic: a TAP device (root or `CAP_NET_ADMIN` on Linux, `vmnet` and an entitlement on macOS: against the box's point) or a user-space NAT, which is a TCP/IP stack on the host (gvisor-tap-vsock, slirp, passt): the stream proxy again, behind a second netstack |
+| the image | unchanged but for the `NetHost` | netstack in every guest: a few MB more (estimate) |
+| blocking (R2, R3) | no call waits: a dial and a lookup run in the monitor while the guest goes on, reads and writes take what the monitor's buffers hold or answer EAGAIN, and a waiting goroutine polls one count of events, sleeping 1 to 10 ms between polls, as the console does (S1, R3); a vCPU never stops in the monitor, the collector's stops of the world never wait for one | netstack's own timers (retransmission, delayed ACKs) run in the guest, which has no preemption (R2): a long evaluation on one vCPU delays them; packets arrive by polling the datagram call, as often, and a stream costs an exit per packet (1,500 bytes) where the proxy's costs one per call of up to 1 MiB |
+| the host's control | the policy sees what is asked: listen at an address and port, dial an address and port, resolve a name; dial patterns can name hosts (`*.example.org:443`), since the host resolves names and remembers which addresses an allowed name gave | the relay sees packets: addresses and ports; a policy by name needs the guest's DNS snooped, or the NAT's own resolver forced |
+| what the host sees | destinations and the bytes of each stream (plain text unless TLS) | the same destinations, and the same bytes unless TLS: the guest's netstack hides nothing from a host that relays its packets |
+| TLS | in the guest either way, over any `net.Conn`; jrt's build has no TLS (no `SunJSSE`, no `javax.net.ssl`: A2G-SPEC, the providers are SUN and SunJCE, amendment SC4), so out of S5 for both; when it comes, the proxy carries the ciphertext | the same |
+| DNS | the host's resolver, under the policy (only names the dial patterns name, and `localhost`); the guest's lookups are calls | the guest's resolver, through the relay to the host's DNS server; the policy sees UDP to port 53 |
+| the socket REPL from the host | the guest listens (`arbace.server.repl`, as natively), the monitor's listener is on the host's loopback: a host client connects to it directly | a host-side port forward into the guest's stack (the NAT's) |
+| loopback inside the box | a guest connecting to its own listener goes through the host's loopback (the policy allows the box's own listeners): socket options, `shutdown`, timeouts and errors are the host kernel's, as natively, which is what `forms/net.ae` checks | netstack's own loopback: its options and errors are netstack's, not Linux's |
+| `bin/net-check`, `forms/net.ae` | unchanged, the box in place of the executable, with a policy that allows the host's loopback | the same, after port forwards |
+| arm64, the Mac | nothing ISA- or hypervisor-specific: the same calls | the same, plus the relay's host side per OS |
+
+**Recommended: the stream proxy.** It is what jrt's `NetHost` already is (Go's `net.Conn` and
+`net.Listener`), a fraction of the size, needs no vendoring and no privilege on the host, never
+blocks a vCPU, keeps the host's semantics where the oracle checks them, and gives the launcher a
+policy by name. The packets design's one advantage, "the host sees nothing", does not hold: the
+host relays the packets and sees what the proxy sees; only TLS hides content, and it works the
+same over either. Netstack stays possible later (a `NetHost` over `gonet` beside this one), if
+UDP, raw IP or box-to-box networking without the host's sockets are wanted.
+
+### The user's decisions (2026-10-11)
+
+- **D12** (BOX-SURVEY §10), decided as recommended: **the stream proxy** (TCP streams through
+  hypercalls; the launcher dials and listens on the host).
+- **The policy**: no network unless the launcher allows it (`ARBACE_BOX_NET`), listening on
+  the loopback addresses by default, dialing by an allow-list of host:port patterns.
+- **The scope**: TCP only; DNS resolved by the host under the same policy; TLS in the guest only
+  if jrt's Linux build already supports it: it does not (no `SunJSSE`), so TLS is out of S5.
+- **The socket REPL**: the same `arbace.server.repl` mechanism as natively (the system property,
+  through `JAVA_TOOL_OPTIONS`, which the launcher passes), its port on the host's loopback by the
+  launcher's listen policy.
+
+### The calls (BX40)
+
+`abi` and `vmm` number them from 40 (the store keeps 25-29; 30-39 are unknown calls, a fault),
+`abi.NCalls` one past the last (53). Not host functions: not serialised with the console's, as
+the store's and SMP's are not. A handle is the monitor's (0 up); an answer below 0 is `-errno`
+(Linux's numbers, which TamaGo's `syscall` has too) or `NetErrTimeout` (-1000, a dial's time),
+`NetErrNotFound`, `NetErrTemp` (a lookup's), `NetErrOther`. Addresses are `host:port` strings,
+the host an IP literal, empty for every address.
+
+| # | call | arguments, answer |
+|---|---|---|
+| 40 | `NetInfo` | ret 0 when the box has a network (-1 without), a[0] the host's families (1 IPv4, 2 IPv6) |
+| 41 | `NetEvents` | ret a count of the changes a guest may wait for: data come, a connection accepted, a dial or a lookup done, room to write, a handle closed |
+| 42 | `NetListen` | the address: ret a handle |
+| 43 | `NetDial` | the address, a local one, a timeout in ms: ret a handle at once, the connection made in the monitor |
+| 44 | `NetAccept` | a listener: ret a connection's handle, or EAGAIN |
+| 45 | `NetRead` | up to n bytes of what the monitor's buffer holds: the count, 0 at the end, EAGAIN |
+| 46 | `NetWrite` | queues up to n bytes (the queue holds 256 KiB): the count taken, EAGAIN when full |
+| 47 | `NetClose` | closes the handle (an operation waiting on it ends) |
+| 48 | `NetShutdown` | for reading, or for writing once the queue is written |
+| 49 | `NetStatus` | 0, EINPROGRESS while a dial or a lookup runs, or its failure; a[0] what there is to read (`Available`) |
+| 50 | `NetAddr` | the local or remote address into a buffer: its length |
+| 51 | `NetOption` | sets or reads `java.net.SocketOptions`' option (the native `OSHost`'s mapping to the socket's, `vmm/net_linux.go`) |
+| 52 | `NetLookup` | a name (or an address's names): ret a handle whose answer `NetRead` reads once `NetStatus` says 0: 16-byte addresses, or names |
+
+The monitor's side (`vmm/net.go`, `Config.Net`, `vmm.NewNet`): Go's `net` on the host, a handle
+table; each connection has a goroutine reading it into a buffer of up to 256 KiB (then waiting
+for the guest) and one writing the guest's queue to it, a listener one accepting (up to 128
+held), a dial and a lookup one each; each change adds one to the count. Nothing the guest asks
+waits: a vCPU never stops in the monitor (R3), and the collector's stops of the world never wait
+for one. The accepted and dialled connections get the JVM's defaults (no `TCP_NODELAY`, no
+keep-alive), as `OSHost`'s.
+
+### The policy (BX41)
+
+`ARBACE_BOX_NET` (the launcher's; `vmm.ParseNetPolicy`): items separated by commas or spaces:
+`listen=PATTERN`, `dial=PATTERN`, `listen` (`listen=loopback:*`), `loopback` (listen and dial on
+the loopback addresses), `off`. A pattern is `HOST:PORT`: `*`, `loopback` (127.0.0.0/8, ::1), an
+address or a CIDR prefix (`[...]` for IPv6), a name or `*.NAME`; the port `*`, `N` or `N-M`.
+Unset, empty or `off`: no network, as before (S1: `NetInfo` answers -1, the guest's host has no
+`NetHost`, "Network not available"); a value the launcher cannot read ends it (status 1).
+
+- A listen at every address (`ServerSocket(port)`) is made at the loopback address of its
+  family unless a pattern allows the wildcard itself (`listen=*:8080`, `listen=0.0.0.0:8080`).
+  Elsewhere than the patterns: `EACCES` (`BindException: Permission denied`, as a privileged
+  port natively).
+- A dial must match a dial pattern, by address, or by a name that an allowed lookup gave that
+  address (the host remembers what its lookups answered: `java.net` resolves names in the guest
+  and connects to the address), or be one of the box's own open listeners (a box with `listen`
+  alone talks to itself through the host's loopback, which `forms/net.ae` needs). Else `EPERM`
+  (`SocketException: Operation not permitted`, as a firewall's refusal natively).
+- A lookup is the host's resolver's, for names a dial pattern names (or `*`) and `localhost`;
+  others are not found (`UnknownHostException: NAME: Name does not resolve`), without a query.
+  A reverse lookup only when the policy dials `*`.
+- The guest's host name is `localhost` (the box has none of its own; the host's is not the
+  guest's to know).
+- The system-call filter: `vmm.SeccompNet`, the filter with the sockets' calls and `uname` (Go's
+  `net` reads the kernel's version) and `eventfd2` (its poller), only when there is a network.
+
+### The guest (BX42, BX43)
+
+`go/arbace/jrt/netbox_tamago.ae` (new, `//go:build tamago`): `ProgramHost` asks `NetInfo` once;
+with a network the host is `boxNetHost`, `boxHost` with `NetHost`'s methods over the calls. Its
+connections and listeners are `net.Conn` and `net.Listener` over handles (deadlines kept in the
+guest), so net.ae's `HostNet` natives, the JVM's error kinds and texts are unchanged: errors come
+back as the `syscall.Errno`s Linux's would be (TamaGo's numbers are Linux's), a dial's timeout as
+`os.ErrDeadlineExceeded`, a closed handle as `net.ErrClosed`, a failed lookup as a
+`net.DNSError`. Waiting (BOX-SURVEY R3): an operation that has nothing yet takes the poller's
+channel, asks again, and waits for the channel or its deadline; one goroutine polls `NetEvents`
+while some goroutine waits, from 1 to 10 ms between polls as the console's reader (S1), and
+closes the channel when the count changed; it stops when nobody waits.
+
+One defect found on the way (BX43): in the box, `JAVA_TOOL_OPTIONS`' `-D` options were not
+system properties: a package variable's initializer made the properties before the box host's
+`init` set the environment the monitor wrote, so `arbace.server.repl` was never seen. The
+host's `init` now drops them, to be made again at their next use; `-Dfoo=bar` reaches
+`System.getProperty` as natively.
+
+### The socket REPL from the host
+
+As natively (EXEC-NOTES.md, JRT-NOTES.md "Sockets"):
+
+```
+$ ARBACE_BOX_NET=listen JAVA_TOOL_OPTIONS='-Darbace.server.repl="{:port 5555 :accept arbace.core.server/repl}"' \
+    target/arbace-go/box-amd64/arbace-box
+$ nc 127.0.0.1 5555        # on the host
+user=> (+ 1 2)
+3
+```
+
+The guest listens at its loopback address; the monitor's listener is the host's
+`127.0.0.1:5555`.
+
+### Measured (amd64, nested KVM, the shared machine)
+
+| | box, 4 vCPUs | box, 1 vCPU | native |
+|---|---:|---:|---:|
+| 64 MiB through a loopback connection within the program (64 KiB writes) | 194-207 ms | 227-244 ms | 32-36 ms |
+| a socket REPL's `(+ 1 2)` from the host, median of 200 (p90) | 47.0 ms (48.0) | 47.0 ms (47.1) | 41.0 ms (42.0) |
+| host CPU over 20 s idle, a socket REPL server listening (without one) | 1.82 s (0.66) | 1.02 s (0.53) | |
+
+The REPL's round trip is mostly TCP's delayed acknowledgement against Nagle's algorithm (the
+server writes the result and the prompt in two writes without `TCP_NODELAY`, the JVM's default),
+natively too; the box adds about 6 ms, the poller's waits. An idle server waits in `accept`, so
+the poller runs: about 99 `net_events` and as many `cpu_park` exits a second (one vCPU), half a
+second of host CPU over 20 s on one vCPU and 1.2 s on four (the console's polling at the prompt
+costs as much, S1). Throughput is about 330 MB/s in the box against 1.9 GB/s natively: an exit per
+64 KiB written and read, under nested paging.
+
+### Checks
+
+- `bin/arbace-go --build` (amd64; 66,519,200 bytes: the Linux program's sources are unchanged)
+  and `--build --box` (the guest 65,974,606 bytes; the launcher 4.6 MB, 3.7 before: Go's `net`;
+  with the guest 70,627,678).
+- `bin/arbace-go --smoke`: 42 checks pass. `--smoke --box`: 84 on 4 and 1 vCPUs and on a terminal,
+  seven new for each vCPU count: no network without `ARBACE_BOX_NET` (S1's), a loopback
+  connection, a dial the policy refuses, a listen it refuses, a name it refuses, `localhost` and a
+  refused connection under `loopback`, an `ARBACE_BOX_NET` the launcher refuses, a socket REPL
+  session from the host (`arbace.server.repl`, `ARBACE_BOX_NET=listen`).
+- `bin/net-check` natively and `bin/net-check --box` (new: the launcher in place of the
+  executable, `ARBACE_BOX_NET=loopback`): the socket REPL and io-prepl sessions equal the JVM's,
+  8 concurrent sessions, `remote-prepl` from the box against the JVM's io-prepl, `start-server`
+  and `stop-server`: 5 of 5 each.
+- The box's oracle with `forms/net.ae` brought in (`ARBACE_BOX_NET=loopback`, `-j 12`): 21,779 of
+  21,825 cases match, `forms/net.ae` 83 of 83 (S1's full run: 57 of 83); the 46 mismatches are
+  `known-go-box-amd64.edn`'s, unchanged but for its `:about`. The native oracle: 22,232 of 22,278,
+  the 46 of `known-go-amd64.edn`.
+- `bin/box-suite` (`ARBACE_BOX_NET=listen` by default now): 67 namespaces, 685 tests, 19,647 of
+  19,647 assertions; `java.io`'s `test-socket-iofactory` passes (15 tests, 115 assertions, as on
+  Linux), `test/arbace-box-results.edn` updated.
+- `bin/box-vendor roundtrip`: 16 of 16 at all three levels; `bin/box-vendor kvm-tests`: `hv`,
+  `vmm` (with `TestABI` over the new numbers, `TestNetPolicy`, `TestNetStreams`,
+  `TestNetLookup`) and the guest tests pass.
+- `bin/tamago-vendor verify`: identical; `check`: std 371 of 371, the goos module 69 of 69, the
+  guest image from the forms byte-identical to the one from the originals (76,837,431 bytes as
+  linked, 65,974,570 cut): S6's proof holds. `tamago/` is unchanged.
+- The essential `bin/gate` was not run: no source the bootstrap compiles changed (`box/`, `go/`,
+  `bin/`, `test/`).
+
+How `box/` was changed: Go written in a printed copy of `box/` (the new files, and the edits to
+`vmm.go`, `abi.go`, `abi_test.go` and the launcher's `main.go`), converted by `bin/g2a convert` for
+the five configurations as `bin/box-vendor` does; the new files' forms taken as converted, the
+changed files' forms three-way merged into `box/`'s (`git merge-file` of `box/`'s, the converted
+printing of `box/`, and the converted printing of the edit), so that their `;` comments stay; the
+round trip and the KVM tests check the result.
+
+### Amendments (BX40-BX44, proposed 2026-10-11, accepted by the user the same day)
+
+- **BX40 (box/: abi, vmm) The network's calls** 40-52 (`NetInfo` ... `NetLookup`), not host
+  functions, none waiting; `abi.NCalls` 53; the error answers `-errno` and `NetErr*`.
+- **BX41 (box/: vmm, the launcher) The policy**: `ARBACE_BOX_NET`, `vmm.ParseNetPolicy`,
+  `vmm.Net` (`Config.Net`), the listen at every address made at the loopback's, the box's own
+  listeners dialable, names resolved by the host and remembered for the dial, reverse lookups only
+  with `dial=*`; `vmm.SeccompNet` (the filter with the sockets' calls only with a network).
+- **BX42 (A2G-SPEC §9.4; jrt) The box's `NetHost`** (`netbox_tamago.ae`): `boxNetHost` when the
+  monitor gives a network, the poller of `NetEvents`, `Hostname` `localhost`, `HasFamily`
+  `NetInfo`'s.
+- **BX43 (A2G-SPEC §9.4; jrt) The box's system properties made after the environment**:
+  `JAVA_TOOL_OPTIONS`' `-D` options in the box.
+- **BX44 (checks)** `--smoke --box`'s network checks, `bin/net-check --box`, `forms/net.ae` in
+  the box's oracle (`ARBACE_BOX_NET=loopback`), `bin/box-suite`'s `ARBACE_BOX_NET=listen` and
+  `java.io` back, `vmm`'s network tests.
+
+### The user's decisions on the open points (2026-10-11)
+
+- BX40-BX44 accepted.
+- The network's semantics kept as built: the guest's host name `localhost`; a listen at every
+  address made at the loopback address of its family unless a pattern allows `*` (the server's
+  `getInetAddress` then says 127.0.0.1, where the JVM says 0.0.0.0); a connection to one of the
+  box's own listeners once it is closed refused by the policy (`EPERM`) under `listen` alone, as
+  the real refusal (`Connection refused`) only under `loopback`; reverse lookups only with
+  `dial=*`.
+- TLS later, with JSSE (jrt's `SunJSSE`), in the guest over these streams.
+- The box's checks in `bin/gate --full` (`--smoke --box`'s network checks, `bin/net-check
+  --box`) stay deferred, with the box's smoke test (S1's decision).
+- The idle cost of polling (the console's and the network's): replaced by a wake-on-event in the
+  monitor (below, "Wake on events").
+
+### Merged with S3 (2026-10-12)
+
+Branch `box-net-merge`, from main `f79e53a` (S3 merged), `box-s5` (`b6addbc`) merged into it.
+Git's merge conflicted in `box/README.md`, the docs (B1-PLAN, BOX-NOTES, BOX-SURVEY: both stages'
+text kept), jrt's `hostbox_tamago.ae` (its header comment only: the store and the network both
+named) and three of `box/`'s forms files: `abi/abi.ae`, `cmd/arbace_box.ae` (the package file:
+its files' list, `net.go` and `store.go` both) and `cmd/arbace_box/main.ae`. The two forms files
+conflicted where the Go did not: the forms carry the Go's line numbers (`:line`, `:go/end`), and
+each stage's additions moved the other's lines. So they were merged as Go, as S1-S5 changed
+`box/`:
+
+1. `box/` printed (`bin/g2a build --print-only --tests --layout lines`) at the merge base
+   (`4351f04`), at S3 (`f79e53a`) and at S5 (`b6addbc`), and the Go of `abi.go` and the
+   launcher's `main.go` merged three ways (`git merge-file`): `main.go` merged cleanly (S3's
+   `--store` and store opening, S5's `netConfig(&cfg)` after the filter's choice, so that a
+   network's filter is `SeccompNet`); `abi.go` conflicted where both added constants after the
+   calls, resolved by keeping S3's `Store*` block and S5's `NetErr*` block, the call numbers
+   S5's (the network from 40, `NCalls` 53).
+2. The merged Go (with S3's and S5's other files) vetted and converted back (`bin/g2a convert
+   --tests`, linux/amd64: the files' forms are the same for every configuration), and the
+   decorations of the hand-kept forms carried over: S3's `;` comments and literal spellings from
+   S3's forms against S3's printing converted, S5's likewise, onto the merged conversion, with
+   the line numbers normalized for the comparison and the conversion's put back.
+3. Checked: `box/` printed after the merge is the merged Go, every package, byte for byte.
+
+**A defect of S5's found by the merge's checks.** The box's oracle run with `forms/net.ae`
+found one new mismatch, `forms/net.ae:91`: `(slurp (io/reader s))` read "" where the JVM reads
+"via io\n", the peer having written the line and closed its socket. It failed on `box-s5`'s own
+launcher too (4 of 4 runs here; S5's runs passed by timing): `NetClose` closed the host's
+connection at once, and the bytes the guest had written and the monitor not yet sent (its
+queue, `out`, or taken by the writer goroutine and not yet written) were dropped. A socket's
+close sends what was written to it, so now a connection closed with bytes queued or being
+written lingers (`netHandle.lingering`, `writing`): its writer goroutine writes them, then closes
+it (after a write's error too); the end of the run (`Net.Close`) still closes everything at once.
+vmm's new `TestNetCloseLingers` (20 connections closed right after 100,000 bytes queued, each
+read whole by its peer) fails without the change and passes with it. Made in the Go and carried
+into the forms as above.
+
+Checks on the merge (amd64): `bin/arbace-go --build` (66,801,824 bytes, as S3's) and `--build
+--box` (the guest 66,187,598 bytes, the launcher with it 70,906,206); `--smoke` 53 of 53;
+`--smoke --box` 100 of 100 (S3's 86 and S5's 14); `bin/net-check` and `bin/net-check --box` 5 of
+5 each; the box's oracle with `forms/net.ae` (`ARBACE_BOX_NET=loopback`) 21,779 of 21,825, the 46
+of `known-go-box-amd64.edn`; the native oracle 22,232 of 22,278, the 46 of `known-go-amd64.edn`;
+`bin/box-suite` 67 namespaces, 19,647 of 19,647 assertions; `bin/box-vendor roundtrip` 16 of 16
+at all three levels and `kvm-tests` (with `TestNetCloseLingers`) pass; `bin/tamago-vendor verify`
+(identical) and `check` (the guest image from the forms and from the originals identical:
+77,067,117 bytes as linked, 66,187,562 cut). No source the bootstrap compiles changed.
