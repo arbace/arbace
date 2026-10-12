@@ -1138,7 +1138,7 @@ launcher converted from its Go. `box/` printed again and the edited Go compared:
   compare-and-set); a `store:` entry of `ARBACE_PATH` runs to the next `:` (ref names hold no
   `:`).
 
-### The JVM's `arbace.box` (2026-10-12; amendment BX37, accepted by the user 2026-10-11)
+### The JVM's `arbace.box` (2026-10-12; amendment BX37, accepted by the user 2026-10-12)
 
 Branch `box-jvm`, the user's decision above. **One source, two host layers.** `arbace/box.ae`
 (BX34's namespace, moved from `arbace/lang/go/ns/box.ae` with `git mv`) is now shared: what it

@@ -499,3 +499,12 @@ the first. The history before it is on the frozen branches and in git history:
 - The user: BX37 accepted, and on the JVM `ARBACE_PATH`'s directories are read too, not only its
   `store:` entries, so that it works the same on all three (the same agent, branch
   `box-jvm-path`).
+- `ARBACE_PATH` on the JVM: agent, branch `box-jvm-path` (`2dbc212`), merged into main; the
+  essential `bin/gate` passed on its tree. `RT.load`, when the class path has no namespace, looks
+  through `ARBACE_PATH` as the Go build does (`RT.loadFromPath` → `arbace.box.host/load-from-path`):
+  entries in order, directories and `store:` alike, `.ae` in all, then `.clj`, then `.cljc`;
+  `bin/arbace-j` appends its directories to the class path (resources, `data_readers.ae`), and a
+  source the class path finds in one of them goes through `RT.loadFromPath` so that an earlier
+  `store:` entry still wins (`RT.inArbacePath`, in Java: a first version in Clojure recursed while
+  `arbace.core` loaded). Started by plain `java -cp`, resources in its directories are not found.
+  Tests: `box_test.ae` 75 assertions; the smoke test checks the same order on the JVM and natively.
