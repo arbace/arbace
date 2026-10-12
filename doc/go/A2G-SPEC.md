@@ -2334,7 +2334,7 @@ the forms to equal the conversion but for the marked lines, so a toolchain updat
 failure. Without the overlay jrt fails to link (`relocation target runtime.arbace_setLocal not
 defined`), so a build cannot silently miss the patch.
 
-**The box's event goroutine** (amendment BX52, proposed 2026-10-12; BOX-NOTES.md, "Wake on
+**The box's event goroutine** (amendment BX52, accepted 2026-10-12; BOX-NOTES.md, "Wake on
 events"). The patch also holds what lets the box's guest wait for its host without polling:
 `arbace_local.go` keeps one goroutine parked in `arbace_eventPark` (`gopark`, as `IO wait`) and
 a hook set by `arbace_setEventHook` (both pushed by `//go:linkname`, pulled by jrt's

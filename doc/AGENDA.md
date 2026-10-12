@@ -61,16 +61,14 @@ The user's decisions D3, D8-D14 are taken, all as recommended.
   forms in `tamago/` (`bin/tamago-vendor`; 32 MB), the box's guest built from them by default,
   byte-identical to one built from TamaGo's originals (BX20-BX24, accepted); `bin/gate --full`
   runs `tamago-vendor verify` and the proof (`box-forms`).
-- S3 done (2026-10-11), the store: `arbace.box` (BX30-BX36, accepted); follow-ups in progress:
-  the monitor's blob cache bounded, `arbace.box` on the JVM Arbace.
-- S5 done on its branch (BX40-BX44, accepted), being merged with S3; then the wake-on-event
-  (the guest parked until console, network or timer events, instead of polling). The network
-  (D12: a stream proxy): TCP streams through hypercalls,
-  the launcher dials and listens on the host; no network unless the launcher allows it, listening
-  on loopback by default, dialing by an allow-list; DNS by the host; TLS only if jrt has it; the
-  socket REPL as natively, its port on the host's loopback. S3 and S5 each re-run S6's proof.
-  Then this milestone: `bin/gate --full` and a tag on main (no branch, no freeze; the journal
-  continues).
+- S3 done (2026-10-11), the store: `arbace.box` (BX30-BX36), on the JVM too (BX37), `ARBACE_PATH`
+  the same on all three; the monitor's blob cache bounded (BX38).
+- S5 done (2026-10-12), the network (D12: a stream proxy; BX40-BX44): TCP through the launcher
+  under `ARBACE_BOX_NET`'s policy; the socket REPL from the host; TLS later, with JSSE.
+- Wake on events (BX50-BX54): the guest parks until console, network or timer events instead of
+  polling; idle host CPU 0.00 s per 20 s.
+- Next: `bin/gate --full`, then the tag `arbace-box-amd64-v1` on main (a milestone, not a freeze:
+  no branch, the journal continues).
 - Checks until the next milestone (the user): the essential `bin/gate` and targeted checks; no
   `bin/gate --full`.
 

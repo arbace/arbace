@@ -1257,7 +1257,7 @@ Checks (after main `a8d59a0` merged): `bin/arbace-go --build` and `--build --box
 included), `bin/box-vendor kvm-tests` (`TestDirStoreCache` with vmm's tests) and `roundtrip` (16
 of 16) pass; the rest of the checks with the wake on events' (below).
 
-Amendment (proposed 2026-10-12): **BX38 (box/: vmm, the launcher) The blob cache bounded**:
+Amendment (proposed 2026-10-12, accepted by the user the same day): **BX38 (box/: vmm, the launcher) The blob cache bounded**:
 `DirStore.CacheMax`, `vmm.DefaultCacheMax` (256 MiB), least recently used dropped first, a blob
 larger than the cache read from its file at each use; the launcher's `ARBACE_BOX_STORE_CACHE`;
 `TestDirStoreCache` and the smoke test's check.
@@ -1550,7 +1550,7 @@ host event ends. Polled, an idle box made about 99 `wait_read` or `net_events` c
 `cpu_park` exits a second: 0.5 s of host CPU per 20 s on one vCPU and 1.2 s on four at the
 prompt or with a listening server.
 
-### The design (BX50-BX54, proposed)
+### The design (BX50-BX54, accepted 2026-10-12)
 
 What a wait must keep (BOX-SURVEY R2, R3): the guest's scheduler runs its timers and its other
 goroutines (TamaGo's sleeping goroutines, a future's output while the REPL waits for a line),
@@ -1663,7 +1663,7 @@ evaluator's next `Gosched`, as the poller's timer was. A `-e` that used a future
   66,199,850 cut): S6's proof holds.
 - The essential `bin/gate`: passed (6 min 30 s).
 
-### Amendments (BX50-BX54, proposed 2026-10-12)
+### Amendments (BX50-BX54, proposed 2026-10-12, accepted by the user the same day)
 
 - **BX50 (box/: abi, vmm) The event area**: `abi.EventArea` (call 53, `abi.NCalls` 54), the
   monitor's posts (`vmm/events.go`: console input for a reader that found none, the network's

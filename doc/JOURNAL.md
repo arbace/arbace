@@ -508,3 +508,43 @@ the first. The history before it is on the frozen branches and in git history:
   `store:` entry still wins (`RT.inArbacePath`, in Java: a first version in Clojure recursed while
   `arbace.core` loaded). Started by plain `java -cp`, resources in its directories are not found.
   Tests: `box_test.ae` 75 assertions; the smoke test checks the same order on the JVM and natively.
+
+## 2026-10-12: S5 merged with S3; the blob cache bounded; wake on events
+
+- Agent, branch `box-net-merge` (`9c4b777` the merge of `box-s5`, `582e805`, `28f69fb`, main
+  merged in twice, `b076b51`), merged into main. Details: BOX-NOTES.md, S3 (BX38), S5, "Wake on
+  events" (BX50-BX54).
+- S5 (`b6addbc`, from the S5 agent): a stream proxy, hypercalls 40-52 (`NetInfo` ... `NetLookup`),
+  never waiting, the monitor's host goroutines dialing, accepting, resolving and moving buffers of
+  up to 256 KiB; the policy `ARBACE_BOX_NET` (`listen`, `loopback`, `listen=` and `dial=`
+  patterns of host and port; unset, no network), the socket system calls in the seccomp filter
+  only when a network is given; jrt's `netbox_tamago.ae`; `JAVA_TOOL_OPTIONS`' `-D` options had
+  never become properties in the box (built before the box's environment): rebuilt in `init`
+  (BX43). TLS out of S5: jrt has no JSSE. Packets with netstack rejected (a new vendoring, a TAP
+  device or a second TCP/IP stack on the host, the guest's timers under R2).
+- The merge: `box/`'s forms conflicted by shifted line numbers only; resolved by printing `box/`
+  at the merge base and both sides, `git merge-file` on the Go, converting back and carrying both
+  sides' comments; printing `box/` after the merge gives the merged Go byte for byte. The merge's
+  oracle run found a bug of S5's: `NetClose` closed the host connection at once and dropped bytes
+  still queued (`forms/net.ae:91`, failing 4 of 4 on S5's own launcher); a closed connection now
+  lingers until they are written (`TestNetCloseLingers`).
+- BX38: the monitor's blob cache bounded, least recently used, `DirStore.CacheMax` 256 MiB by
+  default (`ARBACE_BOX_STORE_CACHE`); a larger blob is served from its file, checked each use.
+- BX50-BX54, wake on events: a 16-byte event area (posted, taken; call 53, `NCalls` 54) the
+  monitor posts to on console input for a waiting reader and on every network change, waking
+  parked vCPUs; a park ends or never starts while an event is untaken; a lone idle vCPU parks
+  until its next timer or an event; in Go's runtime overlay one line in `findRunnable` readies
+  jrt's parked event goroutine (as wasm's runtime does its event handler; a nil check on Linux);
+  jrt's console reader and the network's retries wait on a channel instead of polling. Rejected:
+  a blocking call (it stops the vCPU and the collector's stop-the-world), TamaGo's netpoll (its
+  scheduler never reaches it), readying a goroutine from the board by linkname. Measured: idle
+  host CPU per 20 s at the prompt 0.25 → 0.00 s (1 vCPU), 1.10 → 0.00 s (4); a listening server
+  1.26 → 0.01 s (4); the socket REPL's round trip 47 → 42 ms (native 41); output latency
+  unchanged.
+- Checks on the final branch: `bin/build-arbace`, `jrt-convert`, `jrt overlay --check`,
+  `--smoke` 69, `--smoke --box` 103, `net-check` and `net-check --box` 5 each, the box oracle with
+  `forms/net` 21,779 of 21,825 and the native 22,232 of 22,278 (the 46 known each), `box-suite`
+  19,647 of 19,647, `box-vendor roundtrip` 16 and `kvm-tests`, `tamago-vendor verify` and
+  `check` (identical), the essential `bin/gate`.
+- The user: BX38, BX50-BX54 and the `NetClose` fix accepted. Next, `bin/gate --full` and the
+  tag `arbace-box-amd64-v1`.
