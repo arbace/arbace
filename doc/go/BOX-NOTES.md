@@ -1138,7 +1138,7 @@ launcher converted from its Go. `box/` printed again and the edited Go compared:
   compare-and-set); a `store:` entry of `ARBACE_PATH` runs to the next `:` (ref names hold no
   `:`).
 
-### The JVM's `arbace.box` (2026-10-12; amendment BX37, proposed)
+### The JVM's `arbace.box` (2026-10-12; amendment BX37, accepted by the user 2026-10-12)
 
 Branch `box-jvm`, the user's decision above. **One source, two host layers.** `arbace/box.ae`
 (BX34's namespace, moved from `arbace/lang/go/ns/box.ae` with `git mv`) is now shared: what it
@@ -1169,14 +1169,25 @@ and Go's error texts (`archive/tar: invalid tar header`, `unexpected EOF`, `stat
 file or directory`).
 
 **Loading from refs.** `arbace.main`'s `ref:NAME` is now in `arbace/main.ae` itself (VENDOR-NOTES
-hand change 22), for both builds (`main.subst.ae` lost that substitution). `ARBACE_PATH` is the
-Go build's: the JVM's counterpart is its class path (`ARBACE_CLASSPATH` for `bin/arbace-j`). So
-on the JVM only its store entries are read, as `RT.load`'s last resort: a namespace the class
-path has neither as a class nor as a source is looked for in the `store:PREFIX` entries in order
-(`.ae`, `.clj`, `.cljc`, as the Go build's), only when `ARBACE_PATH` has one; its directories are
-not read, and resources (`io/resource`, `getResourceAsStream`) do not see store entries on the
-JVM. The same program and the same `ARBACE_BOX_STORE`/`ARBACE_PATH` thus run on the JVM, natively
-and in the box (with the JVM's libraries on its class path).
+hand change 22), for both builds (`main.subst.ae` lost that substitution).
+
+**`ARBACE_PATH` on the JVM (the user's decision with BX37: it works the same on all three).** As
+on the Go build, `ARBACE_PATH`'s entries come after what the program has itself (the Go build's
+embedded sources, the JVM's class path) and in their order, directories and `store:PREFIX`
+entries alike, a namespace's `.ae` looked for in all of them, then its `.clj`, then its `.cljc`.
+`RT.load`'s last resort, `RT.loadFromPath` (when `ARBACE_PATH` is set), calls
+`arbace.box.host/load-from-path`, which reads them so (a directory's `DIR/a/b_c.ae`, a store
+entry's ref `PREFIXa.b_c.ae`; source path `a/b_c.ae`). Resources: the Go build gives
+`ARBACE_PATH`'s directories to `getResource`/`getResources` (`ClassPathResources`, so
+`io/resource` and `data_readers.ae`), and its store entries to `RT`'s own resource reads only;
+on the JVM `bin/arbace-j` appends the directories to the class path, after `ARBACE_CLASSPATH`
+(store entries left to `RT.load`), so the class loaders find their resources. A source the class
+path then finds in one of those directories is not loaded from there: `RT.load` leaves it to
+`RT.loadFromPath` (`RT.inArbacePath`, in Java since it is asked while `arbace.core` loads), so
+an earlier store entry still wins, as natively. Started without `bin/arbace-j` (`java -cp ...`),
+namespaces still load from all of `ARBACE_PATH`; only resources need the directories on the
+class path. The same program and the same `ARBACE_BOX_STORE`/`ARBACE_PATH` thus run on the JVM,
+natively and in the box.
 
 **Checks.** `test/native/box_test.ae` (in `bin/native-tests`, so in `bin/build-arbace` and the
 gate; 6 tests, 73 assertions, about 17 s): the API, compare-and-set, every refusal, the limit,
@@ -1184,24 +1195,32 @@ the directory's format and modes, a blob left short, a second store on the direc
 snapshot of a tree with a name that is not ASCII, one longer than USTAR's name and one it splits
 (its hash is the native executable's, measured), tars of GNU tar's `gnu`, `posix` and `ustar`
 formats restored, names outside the directory and a tar that is not refused; in fresh JVMs, no
-store, `ARBACE_BOX_STORE_MAX`, `ref:NAME` and `-i ref:NAME`, `ARBACE_PATH`'s store entries, and
-the refs' lock held by the test's JVM keeping another JVM's `ref!` waiting.
+store, `ARBACE_BOX_STORE_MAX`, `ref:NAME` and `-i ref:NAME`, `ARBACE_PATH`'s store entries and
+(since the decision above) its directories in order with them (a directory's namespace requiring
+a store's; an earlier store entry before a later directory; `.ae` before `.clj` across entries;
+`.cljc`), and the refs' lock held by the test's JVM keeping another JVM's `ref!` waiting.
 `bin/arbace-go --smoke` (amd64, when `target/arbace.jar` is built: in the gate it is) runs
 `store_checks` on the JVM too (`bin/arbace-j`), then one directory used by the JVM and the native
 executable: each reads the other's refs; the same tree's snapshot is the same tar from both, and
 each restores the other's; compare-and-set counters run by two JVMs and two native processes at
-once end at 200 (no update lost); the JVM holding the refs' lock keeps the native `ref!` waiting.
+once end at 200 (no update lost); the JVM holding the refs' lock keeps the native `ref!` waiting;
+`ARBACE_PATH`'s order the same on both (a store entry before a directory, and the reverse), and
+on the JVM a directory's `data_readers.ae` and `io/resource`.
 The essential `bin/gate` passed (6m46s): the bootstrap (stage 2 = stage 3, 5,777 classes
 verified; the native tests 60 of 60, the six new included), Clojure's suite on stage 2 without
 regressions, `bin/class-forms-tests`, and the Go executable built again (a2g with the shared
 `arbace.box`, its host variant and `RT`'s cut; 66,814,112 bytes) and smoke-tested: 67 of 67 on
 amd64, fourteen new (the nine store checks on the JVM, the five shared-directory checks).
+With `ARBACE_PATH`'s directories (branch `box-jvm-path`): the essential `bin/gate` passed again
+(7m01s; the native tests 60 of 60, `box_test` 75 assertions; the smoke test 69 of 69 on amd64,
+the two `ARBACE_PATH` checks new).
 
 - **BX37 (BX34, EVAL-NOTES' namespace variants; VENDOR-NOTES hand change 22) `arbace.box` on
   the JVM**: `arbace/box.ae` shared, its host layer `arbace.box.host` (the JVM's over java.nio,
   the Go build's variant over `HostStore`); `ref:NAME` scripts in `arbace/main.ae`; `RT.load`'s
-  last resort, `ARBACE_PATH`'s store entries on the JVM (`RT.loadFromStore`, cut in the Go
-  build's `RT`); the checks above.
+  last resort, `ARBACE_PATH` on the JVM, its directories and store entries in the Go build's
+  order (`RT.loadFromPath`, `RT.inArbacePath`, cut in the Go build's `RT`; `bin/arbace-j`
+  appends its directories to the class path for resources); the checks above.
 
 ### The blob cache bounded (2026-10-12, the user's decision above)
 
