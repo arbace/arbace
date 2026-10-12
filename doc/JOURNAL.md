@@ -650,3 +650,17 @@ the first. The history before it is on the frozen branches and in git history:
   `decl_line`), so `purego-check` compares with DWARF (rather than leaving it for later).
 - The Mac: each box milestone ships a bundle and its checklist; the user's run follows the tag
   (rather than before the tag, or only on request).
+
+## 2026-10-12: TLS in the box through Go's crypto/tls (the user: "do option 2 now")
+
+- The user asked whether TLS (then "once jrt has JSSE") is needed to reach the Claude API from the
+  box: yes, the API is HTTPS only. Three ways were put: (1) JSSE converted into jrt, TLS in the
+  guest with the Java API (large); (2) Go's crypto/tls, already in TamaGo's std and the guest,
+  bound for Arbace, TLS in the guest (small; the key and the encryption stay in the box, the
+  launcher carries ciphertext); (3) TLS by the launcher on the host (smallest; the key in clear
+  on the host). Recommended and chosen: (2), now, before the standalone survey's decisions.
+- Agent, branch `box-tls`: the Arbace surface (a namespace, an HTTPS helper enough for the Claude
+  API's messages endpoint), crypto/tls over the guest's stream path with wake on events, root
+  certificates embedded (Mozilla's, via golang.org/x/crypto/x509roots/fallback as Go forms,
+  likely) with an override for private CAs; natively and on the JVM if cheap; amendments BX70..
+  for the user.
