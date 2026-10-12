@@ -140,9 +140,10 @@ bin/c2a-check --libs      # the suite's test libraries as .ae, run on the tools'
   its reader selected by a conditional) and a `.cljc` namespace, become `.ae` files under
   `.tmp/c2a-check/ae`, and no `.clj` or `.cljc` is left.
   `test/c2a/libs.ae` then runs on them on the tools' host and on a Go build
-  (`target/arbace-go/<arch>/arbace` or the argument, `ARBACE_PATH`), whose outputs must be equal
-  (until standalone S4 the first was the JVM build, `target/stage2`; on 2026-10-12 the host's
-  output was still the JVM's byte for byte). It runs:
+  (`target/arbace-go/<arch>/arbace` or the argument, `ARBACE_PATH`), each output equal to
+  `test/c2a/libs.out`, the JVM's (recorded on main's last `target/stage2`, 2026-10-12, when the
+  host's was the same byte for byte; until standalone S4 the JVM build ran beside the Go one).
+  It runs:
   - test.check: a property that holds; one that fails and shrinks to `[0 0 0 0]`; values
     generated from a fixed seed; a `defspec` under `arbace.test`;
   - data.generators on a fixed `Random`;
