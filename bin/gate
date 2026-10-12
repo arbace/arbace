@@ -1,90 +1,68 @@
 #!/bin/bash
-# The gate: the checks a change must pass before it is committed to main.
+# The gate: the checks a change must pass before it is committed to main. Since standalone S4
+# (doc/STANDALONE-NOTES.md, "S4: the JVM removed") the bootstrap starts from the Go-source seed
+# and every build is Go-hosted; the JVM runs only the oracle's reference (the frozen v4 jar) and,
+# with --full, j2a and the checks of what j2a and the JVM made (jdk/, the edge, the fixtures).
 #
 # Usage: bin/gate [--full]
 #   (default)  the essential gate:
-#                1. bin/seed --check                the seed is the pinned one
-#                2. bin/build-arbace                the bootstrap: stages 1-3 (2 = 3 byte for
-#                                                   byte), the verifier, the native tests, the
-#                                                   jar and the AOT cache
-#                3. concurrently:
-#                   suite-stage2  Clojure's test suite on stage 2, the stage the jar ships
-#                   cft           bin/class-forms-tests
-#                   go            bin/arbace-go --gate: the Go executable's smoke test (amd64,
-#                                 seconds) on the executable cached in .tmp/arbace-go-gate,
-#                                 built again only when what it is built from changed (its key:
-#                                 the hash of Arbace's sources, go/, overlay/, the JDK's
-#                                 committed forms jdk/, the build's scripts and toolchains):
-#                                 then a2g, the Go build and the image, about 4 minutes beside
-#                                 the suite (doc/go/EXEC-NOTES.md); needs TamaGo's go, G2A_GOROOT.
-#                                 Not with --full, whose go chain builds and smoke-tests anew
-#   --full     also, concurrently with step 3:
-#                   suite-stage1  Clojure's suite on stage 1 (built by the seed's compiler; it
-#                                 matters when stage 1 differs from stage 2)
-#                   j2a           bin/j2a-check --suite (the converter on the frozen clojure/
-#                                 and its samples, and Clojure's suite on the converted baseline)
-#                   g2a           bin/g2a roundtrip amd64, then linux/amd64 (B1a's target): Go ->
-#                                 forms -> Go over std and $GOROOT/test, against
-#                                 test/g2a/roundtrip-amd64.edn and roundtrip-linux-amd64.edn;
-#                                 one after the other, since two converters at once exhaust
-#                                 the memory beside the suites; needs TamaGo's go, G2A_GOROOT
-#                   go            the Go build on amd64 (doc/go/EVAL-NOTES.md), one chain:
-#                     jrt-convert   bin/jrt-convert verify (jrt's JDK sources converted afresh
-#                                   into .tmp/jrt/conv, with its checks, and compared byte for
-#                                   byte with the committed jdk/: jdk/README.md)
-#                     a2g-edge      bin/a2g-edge verify (a2g's edge recorded afresh on the JVM
-#                                   and compared byte for byte with jdk/edge.edn:
-#                                   doc/STANDALONE-NOTES.md, S2)
-#                     go-build      ARBACE_GO_ARCHES=amd64 bin/arbace-go --build
-#                     then concurrently:
-#                     go-smoke      ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke
+#                1. seed          bin/seed --check: the seed is the pinned one
+#                2. stage0        bin/seed --build: stage 0, the host of the build's tools, built
+#                                 from the seed by Go's toolchain (target/seed; seconds with Go's
+#                                 build cache warm)
+#                3. go-build      bin/arbace-go --gate-build: the executable and the test build
+#                                 (amd64), a2g and g2a on stage 0, cached in
+#                                 .tmp/arbace-go-gate and built again only when what they are
+#                                 built from changed (gate_key: Arbace's sources, go/, overlay/,
+#                                 jdk/, the fixtures' forms, the build's scripts, the seed's and
+#                                 the toolchain's pins): seconds on a hit, two Go-hosted builds
+#                                 on a miss
+#                4. concurrently, on the cached executables:
+#                   go-smoke      bin/arbace-go --gate: the smoke test (seconds)
+#                   suite-go      Clojure's suite on the test build, against
+#                                 test/arbace-go-results.edn (c2a's translation on stage 0)
+#                   oracle-go     bin/oracle check on the executable against the frozen JVM
+#                                 Arbace's expected results, with its known mismatches,
+#                                 test/oracle/known-go-amd64-frozen.edn
+#   --full     also, once those are done, concurrently:
+#                   jvm           on the frozen JVM (bin/lib/frozen.bash), one after the other:
+#                     j2a           bin/j2a-check --suite (the converter's checks, and Clojure's
+#                                   suite on the converted baseline)
+#                     jrt-convert   bin/jrt-convert verify (jdk/'s forms converted afresh by j2a
+#                                   and compared byte for byte: jdk/README.md)
+#                     a2g-edge      bin/a2g-edge verify (a2g's edge recorded afresh on the JVM and
+#                                   compared byte for byte with jdk/edge.edn)
 #                     java-fixtures bin/clojure-tests --java-fixtures verify (the suite's Java
-#                                   fixtures converted afresh by j2a and compared byte for byte
-#                                   with the committed test/java-fixtures: its README.md); then
-#                     go-build-tests  ARBACE_GO_ARCHES=amd64 bin/arbace-go --build-tests: the
-#                                   test build, with the suite's Java fixtures (their committed
-#                                   forms); then
-#                     suite-go      Clojure's suite on the test build, against
-#                                   test/arbace-go-results.edn
-#                     oracle-go     bin/oracle check on the Go build, against its known
-#                                   mismatches, test/oracle/known-go-amd64.edn
+#                                   fixtures converted afresh by j2a, compared with
+#                                   test/java-fixtures)
+#                   go            the Go build afresh, one after the other:
+#                     go-build-full ARBACE_GO_ARCHES=amd64 bin/arbace-go --build, then --smoke
 #                     box-forms     bin/arbace-go --build --box for amd64 and arm64 (the guests
 #                                   from tamago/'s forms), then bin/tamago-vendor check: each
-#                                   guest built from the printed forms byte-identical to one
-#                                   built from TamaGo's originals (doc/go/BOX-NOTES.md, S6, S4);
-#                                   then
-#                     box-smoke     ARBACE_BOX_ARCHES=amd64 bin/arbace-go --smoke --box: the
-#                                   box's smoke test on /dev/kvm (bin/box-smoke; the user,
-#                                   2026-10-12; the box's oracle and box-suite stay manual)
-#                   (arm64, under qemu, stays out: its suite takes hours)
-#                   box           the box's vendored packages (box/, doc/go/BOX-NOTES.md):
-#                                 bin/box-vendor roundtrip (box/ printed, converted back and
-#                                 printed again, the printings compared by gocmp per
-#                                 configuration), then bin/box-vendor kvm-tests (go-whim's KVM
-#                                 tests, at go-whim's commit, on box/: hv, vmm, the C and TamaGo
-#                                 guests on the monitor, on /dev/kvm); needs /root/go-whim
-#                                 (cloned, read only) and TamaGo's go; bin/box-vendor
-#                                 purego-check (purego's forms: gocmp, the darwin launcher
-#                                 byte-identical to one from purego's module; S4); then
-#                                 bin/tamago-vendor verify (tamago/ converted afresh, compared
-#                                 byte for byte); bin/x509roots-vendor verify and check
-#                                 (x509roots/, the TLS roots: converted afresh and compared,
-#                                 printed against the original by gocmp, its tests)
-#              g2a, box and the go chain start, concurrently, when suite-stage1, suite-stage2 and
-#              j2a (whose suite runs on the converted baseline) are done: their converters
-#              beside the three suites exhaust the memory
-# The suite on stage 1 is not essential: the build requires stage 2 = stage 3, and reports
-# whether stage 1 = stage 2; when they are equal, the suite on stage 1 tests the same classes.
+#                                   guest byte-identical to one built from TamaGo's originals
+#                     box-smoke     ARBACE_BOX_ARCHES=amd64 bin/arbace-go --smoke --box (the
+#                                   box's smoke test on /dev/kvm)
+#                     fixpoint      bin/arbace-go --fixpoint: G1 by stage 0, G2 by G1, G3 by G2;
+#                                   G2 = G3 (a2g's trees and the executables); G1 = G2 and stage
+#                                   0 = G1 reported (they hold when the seed is current)
+#                   g2a           bin/g2a roundtrip amd64, then linux/amd64 (Go -> forms -> Go
+#                                 over std and $GOROOT/test, against test/g2a/roundtrip-*.edn);
+#                                 then the box's vendored packages: bin/box-vendor roundtrip,
+#                                 kvm-tests (go-whim's KVM tests on box/, on /dev/kvm; needs
+#                                 /root/go-whim), purego-check; bin/tamago-vendor verify
+#                                 (tamago/ converted afresh, compared byte for byte);
+#                                 bin/x509roots-vendor verify and check
+#              (arm64, under qemu, stays out: its suite takes hours)
+# Every build and tool needs TamaGo's go (G2A_GOROOT, default /root/tamago-go), never the host's.
 # The gate first trims Go's build cache of entries unused for six hours (bin/lib/gocache.bash,
-# ARBACE_GOCACHE_KEEP_MIN; Go itself keeps them five days, and a2g's programs, the round trips
-# and parallel builds fill it by tens of GB in hours).
+# ARBACE_GOCACHE_KEEP_MIN). ARBACE_HOST_EXE is ignored: the gate's host is stage 0.
 # Logs go to .tmp/gate/NAME.log; the summary prints each check's outcome and wall time.
-# Environment: GATE_TEST_JOBS, parallel test JVMs of each suite run (default 12, since 24 with --full's three concurrent JVM suites ran out of memory on 2026-10-11; the concurrent
-#   runs share the machine), and what the scripts above read (ARBACE_JVM_OPTS, J2A_JVM_OPTS).
+# Environment: GATE_TEST_JOBS, the suite's parallel processes (default 12).
 # Exit status: 0 when every check passed.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
+unset ARBACE_HOST_EXE A2G_GO_EXE G2A_GO_EXE
 full=
 case ${1:-} in
   "") ;;
@@ -98,76 +76,22 @@ jobs=${GATE_TEST_JOBS:-12}
 start=$(date +%s)
 secs() { local s=$(( $(date +%s) - $1 )); printf '%dm%02ds' $((s / 60)) $((s % 60)); }
 summary() { grep -E "$2" "$logs/$1.log" | tail -${3:-2} | sed 's/^/     /'; }
+status=0
 
 echo "== gate$( [ -n "$full" ] && echo ' --full'): $(git log -1 --format='%h %s')"
 # Go's build cache, trimmed by every gate run (bin/lib/gocache.bash)
 . "$root/bin/lib/gocache.bash"
 gocache_trim
-t=$(date +%s)
-if ! bin/seed --check > "$logs/seed.log" 2>&1; then
-  cat "$logs/seed.log"; echo "== gate FAILED: the seed"; exit 1
-fi
-if ! bin/build-arbace > "$logs/build.log" 2>&1; then
-  tail -20 "$logs/build.log"; echo "== gate FAILED: bin/build-arbace (log $logs/build.log)"; exit 1
-fi
-echo "   ok  build ($(secs "$t"))"
-summary build 'identical|differ|^Ran|failures' 4
 
-suite() {  # suite N: Clojure's suite on stage N, as bin/build-arbace --suite runs it
-  CLOJURE_TESTS_RENAME=arbace CLOJURE_TESTS_RUN=stage$1 CLOJURE_SRC="$root/target/stage$1:$root" \
-    CLOJURE_TESTS_PRECOMPILED=1 bin/clojure-tests -j "$jobs"
-}
-step() {  # step NAME COMMAND...: one check of the go chain, logged as launch logs its checks
+step() {  # step NAME COMMAND...: one check, logged, its status and seconds recorded
   local name=$1 t0; shift; t0=$(date +%s)
   "$@" > "$logs/$name.log" 2>&1
   local st=$?
   echo $st > "$logs/$name.status"; echo $(( $(date +%s) - t0 )) > "$logs/$name.secs"
   return $st
 }
-go_chain() {  # the Go build on amd64, then its three checks concurrently
-  step jrt-convert bin/jrt-convert verify || return 1
-  step a2g-edge bin/a2g-edge verify || return 1
-  step go-build env ARBACE_GO_ARCHES=amd64 bin/arbace-go --build || return 1
-  step go-smoke env ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke &
-  # the suite on the test build (the shipped executable does not carry the suite's Java
-  # fixtures: doc/go/EVAL-NOTES.md, "The suite's Java fixtures")
-  { step java-fixtures bin/clojure-tests --java-fixtures verify \
-      && step go-build-tests env ARBACE_GO_ARCHES=amd64 bin/arbace-go --build-tests \
-      && step suite-go env CLOJURE_TESTS_GO="$root/target/arbace-go/amd64/arbace-tests" bin/clojure-tests -j 12; } &
-  # --timeout: the reducers file takes about 285 s of the default 300 (EVAL-NOTES.md, part 4)
-  step oracle-go bin/oracle check 'target/arbace-go/amd64/arbace -' --timeout 900 \
-    --expected test/oracle/known-go-amd64.edn &
-  { step box-forms sh -c 'env ARBACE_GO_ARCHES=amd64 ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box && bin/tamago-vendor check' \
-      && step box-smoke env ARBACE_BOX_ARCHES=amd64 bin/arbace-go --smoke --box; } &
-  wait
-}
-converters() {  # g2a and the go chain, once the three suites are done: a converter (g2a's
-  # takes up to 12 GB, jrt-convert's 8) beside the suites (up to 43 GB at once, 24 JVMs each)
-  # exhausts the memory (the OOM killer took g2a's in both runs of 2026-10-09 that tried)
-  until [ -f "$logs/suite-stage1.status" ] && [ -f "$logs/suite-stage2.status" ] \
-          && [ -f "$logs/j2a.status" ]; do sleep 2; done
-  step g2a sh -c 'bin/g2a roundtrip amd64 && bin/g2a roundtrip linux/amd64' &
-  step box sh -c 'bin/box-vendor roundtrip && bin/box-vendor kvm-tests && bin/box-vendor purego-check && bin/tamago-vendor verify && bin/x509roots-vendor verify && bin/x509roots-vendor check' &
-  go_chain &
-  wait
-}
-declare -A pids starts
-launch() {  # launch NAME COMMAND...
-  local name=$1; shift
-  starts[$name]=$(date +%s)
-  ( "$@" > "$logs/$name.log" 2>&1; echo $? > "$logs/$name.status"; echo $(( $(date +%s) - ${starts[$name]} )) > "$logs/$name.secs" ) &
-  pids[$name]=$!
-}
-launch suite-stage2 suite 2
-launch cft bin/class-forms-tests
-[ -n "$full" ] || launch go bin/arbace-go --gate
-if [ -n "$full" ]; then
-  launch suite-stage1 suite 1
-  launch j2a env J2A_TEST_JOBS="$jobs" bin/j2a-check --suite
-  launch converters converters
-fi
 report() {  # report NAME: a check's outcome, wall time and summary lines
-  local name=$1
+  local name=$1 s w
   if [ ! -f "$logs/$name.status" ]; then
     echo "   FAILED  $name (not run: an earlier step failed)"; status=1; return
   fi
@@ -178,29 +102,60 @@ report() {  # report NAME: a check's outcome, wall time and summary lines
     echo "   FAILED  $name ($w; log $logs/$name.log)"; status=1
   fi
   case $name in
-    suite-*|j2a) summary "$name" 'TOTAL|regressions' ;;
-    g2a) summary g2a '^package|^test |regressions' 6 ;;
-    box) summary box 'FAIL|^ok|^--- ' 3 ;;
-    cft) summary cft '^Ran|failures' ;;
-    go) summary go 'cached executable|building the executable|built in|FAIL' 4 ;;
+    seed) summary seed 'pinned' 1 ;;
+    stage0) summary stage0 'bin/seed: .*arbace|stage 0 in' 2 ;;
+    go-build) summary go-build 'cached executables|building the executables|built in|FAIL' 3 ;;
+    go-smoke|go-build-full) summary "$name" 'ok|FAIL' 1 ;;
+    suite-go|j2a) summary "$name" 'TOTAL|regressions' ;;
+    oracle-go) summary oracle-go '^== ' ;;
     jrt-convert) summary jrt-convert '^verify:|^jrt-convert:' 2 ;;
     a2g-edge) summary a2g-edge '^a2g-edge:' 1 ;;
     java-fixtures) summary java-fixtures '^verify:' 1 ;;
-    go-build|go-build-tests) summary "$name" . 1 ;;
-    go-smoke) summary go-smoke 'ok|FAIL' 1 ;;
-    oracle-go) summary oracle-go '^== ' ;;
     box-forms) summary box-forms 'identical|differ|FAIL' 3 ;;
     box-smoke) summary box-smoke 'checks|ok|FAIL' 2 ;;
+    fixpoint) summary fixpoint '^fixpoint:' 9 ;;
+    g2a) summary g2a '^package|^test |regressions|FAIL|^ok' 8 ;;
   esac
 }
-status=0
-for name in suite-stage2 cft $( [ -n "$full" ] || echo go ) ${full:+suite-stage1 j2a converters}; do
-  wait "${pids[$name]}"
-  if [ "$name" = converters ]; then
-    for g in g2a box jrt-convert a2g-edge go-build go-smoke java-fixtures go-build-tests suite-go oracle-go box-forms box-smoke; do report "$g"; done
-  else
-    report "$name"
+
+# 1-3, one after the other: each needs the one before
+for s in "seed bin/seed --check" "stage0 bin/seed --build" "go-build bin/arbace-go --gate-build"; do
+  set -- $s
+  name=$1; shift
+  step "$name" "$@"; report "$name"
+  if [ "$(cat "$logs/$name.status")" != 0 ]; then
+    tail -20 "$logs/$name.log"; echo "== gate FAILED ($(secs "$start"))"; exit 1
   fi
 done
+
+# 4: the checks of the cached executables, concurrently
+cache=$root/.tmp/arbace-go-gate/amd64
+step go-smoke bin/arbace-go --gate &
+step suite-go env CLOJURE_TESTS_GO="$cache/arbace-tests" bin/clojure-tests -j "$jobs" &
+# --timeout: the reducers file takes about 285 s of the default 300 (EVAL-NOTES.md, part 4)
+step oracle-go bin/oracle check "$cache/arbace -" --timeout 900 --expected test/oracle/known-go-amd64-frozen.edn &
+wait
+for name in go-smoke suite-go oracle-go; do report "$name"; done
+
+if [ -n "$full" ]; then
+  jvm_chain() {
+    step j2a env J2A_TEST_JOBS="$jobs" bin/j2a-check --suite
+    step jrt-convert bin/jrt-convert verify
+    step a2g-edge bin/a2g-edge verify
+    step java-fixtures bin/clojure-tests --java-fixtures verify
+  }
+  go_chain() {
+    step go-build-full sh -c 'ARBACE_GO_ARCHES=amd64 bin/arbace-go --build && ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke' || return 1
+    step box-forms sh -c 'ARBACE_GO_ARCHES=amd64 ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box && bin/tamago-vendor check' \
+      && step box-smoke env ARBACE_BOX_ARCHES=amd64 bin/arbace-go --smoke --box
+    step fixpoint bin/arbace-go --fixpoint
+  }
+  g2a_chain() {
+    step g2a sh -c 'bin/g2a roundtrip amd64 && bin/g2a roundtrip linux/amd64 && bin/box-vendor roundtrip && bin/box-vendor kvm-tests && bin/box-vendor purego-check && bin/tamago-vendor verify && bin/x509roots-vendor verify && bin/x509roots-vendor check'
+  }
+  jvm_chain & go_chain & g2a_chain &
+  wait
+  for name in j2a jrt-convert a2g-edge java-fixtures go-build-full box-forms box-smoke fixpoint g2a; do report "$name"; done
+fi
 if [ $status = 0 ]; then echo "== gate passed ($(secs "$start"))"; else echo "== gate FAILED ($(secs "$start"))"; fi
 exit $status

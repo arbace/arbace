@@ -1,6 +1,6 @@
-# Arbace's version (doc/VENDOR-NOTES.md, hand change 20), for bin/build-arbace (the resource
-# arbace/version.edn of every stage and of the jar) and bin/arbace-go (the Go program's
-# arbaceVersion, set with go build -ldflags -X). Sourced. Defines:
+# Arbace's version (doc/VENDOR-NOTES.md, hand change 20), for bin/arbace-go (the Go program's
+# arbaceVersion, set with go build -ldflags -X) and bin/seed --make (the seed's SEED.edn; until
+# S4 also the JVM stages' resource arbace/version.edn). Sourced. Defines:
 #
 #   arbace_version ROOT  prints the version map, read by *arbace-version*:
 #                          {:describe "arbace-for-go1.27.1-v1-6-ge2a9f6b" :commit "<40 hex>" :dirty false}

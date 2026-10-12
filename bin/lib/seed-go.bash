@@ -106,7 +106,7 @@ seed_go_make() {
   case $version in *':dirty true'*) echo "bin/seed: warning: the checkout is dirty; the seed records it" >&2 ;; esac
   goversion=$(head -1 "$(seed_go_goroot)/VERSION")
   goroothash=$(seed_go_toolchain_check) || return 1
-  printedby="the JVM chain: bin/build-arbace, then bin/arbace-go --build (a2g and g2a on target/stage2)"
+  printedby="bin/arbace-go --build: a2g and g2a on the host executable"
   [ -s "$dir/printed-by" ] && printedby=$(cat "$dir/printed-by")
   t=$(mktemp -d "$root/.tmp/seed-go-make.XXXXXX") || return 1
   mkdir -p "$t/$seed_go_top/overlay"
@@ -119,7 +119,7 @@ seed_go_make() {
   bytes=$(find "$t/$seed_go_top" -type f -printf '%s\n' | awk '{s+=$1} END {print s}')
   cat > "$t/$seed_go_top/SEED.edn" <<EOF
 ;; The Go-source seed of Arbace's bootstrap (doc/STANDALONE-NOTES.md, "S4: the Go-source seed"),
-;; made by bin/seed --go-make, built into stage 0 by bin/seed --go-build.
+;; made by bin/seed --make, built into stage 0 by bin/seed --build.
 {:format $seed_go_format
  ;; the version map of the commit the seed was printed from, linked as main.arbaceVersion
  :version $version
