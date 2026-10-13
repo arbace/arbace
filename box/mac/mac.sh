@@ -160,6 +160,24 @@ do_checklist() {
   check "a script run from a ref (ref:NAME)" '[:from-ref ("a" "b")]' "$(ARBACE_BOX_STORE=$s box ref:hello.ae a b 2>&1)"
   check "compare-and-set" "[true false]" \
     "$(box --store "$s" -e '(require (quote [arbace.box :as b]))' -e '(let [x (b/put "x") y (b/put "y")] (prn [(b/ref! "c" x nil) (b/ref! "c" y nil)]))' 2>&1)"
+  echo "== RAM above 4 GiB (HV1 (b), doc/go/BOX-NOTES.md): the framework's default IPA, 36 bits"
+  check "ARBACE_BOX_RAM=6GiB: the collector's limit 1 GiB under it, a 1 GiB array" "[5120 7]" \
+    "$(ARBACE_BOX_RAM=6GiB box -e '(let [a (byte-array (* 1024 1024 1024))] (aset a (dec (alength a)) (byte 7)) (prn [(quot (.maxMemory (Runtime/getRuntime)) 1048576) (aget a (dec (alength a)))]))' 2>&1)"
+  check "ARBACE_BOX_RAM=60GiB: the most under 64 GiB (4 GiB + 60 GiB), mapped, not touched" "61440" \
+    "$(ARBACE_BOX_RAM=60GiB box -e '(print (quot (+ (.maxMemory (Runtime/getRuntime)) (* 1024 1024 1024)) 1048576))' 2>&1)"
+  ARBACE_BOX_RAM=61GiB box -e nil > "$TMPDIR/ram.txt" 2>&1; st=$?
+  check "ARBACE_BOX_RAM=61GiB: refused, beyond the 36-bit addresses" "1 beyond" "$st $(grep -o beyond "$TMPDIR/ram.txt" | head -1)"
+  m=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+  echo "hw.memsize $m" >> "$res/measures.txt"
+  if [ "$m" -ge $((24 << 30)) ]; then
+    d0=$(ms)
+    out=$(ARBACE_BOX_RAM=16GiB box -e '(let [g (* 1024 1024 1024) as (vec (for [i (range 10)] (let [a (byte-array g)] (java.util.Arrays/fill a (byte (inc i))) a)))] (print (count as) (reduce + (for [a as k (range 0 g (* 64 1024 1024))] (aget ^bytes a k)))))' 2>&1)
+    d=$(ms)
+    check "ARBACE_BOX_RAM=16GiB: 10 GiB allocated and touched" "10 880" "$out"
+    echo "ram 16 GiB, 10 GiB touched: $((d - d0)) ms" >> "$res/measures.txt"
+  else
+    echo "  (the 10 GiB probe skipped: hw.memsize $m, under 24 GiB)"
+  fi
   echo "== the checklist: $oks ok, $fails failed"
   [ $fails -eq 0 ]
 }
