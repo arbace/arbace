@@ -69,6 +69,9 @@ The current state of the work. This file is rewritten as things change. For the 
   they land. S8 must pass byte for byte on amd64 (/dev/kvm), in the emulated arm64 VM and on the
   Mac (one bundle at the end, also carrying the Mac's HV1 RAM checks and HV6/HV7 clock run). S9
   (Go's toolchain as forms) stays later.
+- Status: S5 closed by measurement (SA100-SA107); S7 done (a Go program built by tool guests in
+  the box and booted by ref, amd64 and the arm64 VM); S6 running; S8 started before S6 lands,
+  its byte-for-byte run redone after.
 - Known issues from S4 (STANDALONE-NOTES, "S4: the JVM removed", Left), and reflection on a
   member typed by a sibling defined later (SA90 (b)):
   - `go/arbace/jrt/reflect_tables.ae` stale against `bin/jrt manifest` (regenerating it changes

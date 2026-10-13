@@ -1258,3 +1258,22 @@ All as recommended in doc/STANDALONE-SURVEY.md:
 - usbarmory/tamago-go has GitHub issues disabled; the user decided not to post the report
   elsewhere (alternatives: an issue on usbarmory/tamago, a pull request to tamago-go). The
   draft stays in `.tmp/tamago-fs-issue.md` for the user.
+
+## 2026-10-13: S7's exit criterion met; S8 started
+
+- S7 (doc/go/BOX-NOTES.md, "S7's exit criterion"): in the box, a Go program of 55 packages
+  (`test/box-build/hello`, runtime and the board among them) built from its sources in the store
+  by 108 tool guests in 9.3 s (amd64, nested KVM), by the build driver in Arbace
+  (`arbace/box/build.ae`, `arbace.box.build`) with the action cache (BX98 (a); a rerun 1.1 s); the
+  image (`cf8857b3...`) the same as the same driver's built natively, booted by
+  `ARBACE_BOX_IMAGE=ref:NAME`. On arm64 in the emulated VM: 103 tool guests in 621 s, booted by
+  ref. Added: `jdk.internal.jrt.HostSpawn` and its natives (`go/arbace/jrt/spawn*.ae`),
+  `arbace.box`'s trees and spawns, `tools/goplan`, the box smoke test's six tool-guest checks
+  (119 ok), and BX95 (b): TamaGo's file-system patch in Arbace's own guest too
+  (`bin/lib/box-overlay.bash`). The driver's own flags (no build IDs) make its image differ from
+  `go build`'s: for S8, the comparison's "host-built" to be decided.
+- The BX95 report's draft corrected: the linker hit the seek bug reading its input archives
+  (`cmd/link`'s `nextar`), not writing them.
+- S8 started now, before S6 lands, against the plan's "S8 once they land": its driver work (the
+  overlay in the plan, jrt in a 12 GiB tool guest, a2g and g2a in the box) does not depend on S6;
+  its byte-for-byte run is redone, by one script, after S6 merges.
