@@ -1167,7 +1167,27 @@ box's smoke test, then `bin/arbace-go --fixpoint`; g2a's round trips, the box's 
 
 ### Proofs
 
-PROOFS-TBD
+On `s4-final` (2026-10-13), the sources at `ed892a1`, the seed committed alone in `eaea7dd`:
+
+- The fixpoint (`bin/arbace-go --fixpoint`, host S3's G3 `2f19b3d1…`, which embeds main's older
+  analyzer, so host ≠ G1): G1 = G2 = G3 byte for byte,
+  `f114b6bd943a508b8cb6e3b0bb8d7b0728d35b531fd612326ee4fb40073fce8a` (68,972,704 bytes), a2g's
+  trees equal; 280, 274 and 273 s a build (a2g load 106-108 s, reach 55 s, translate 29 s, write
+  19 s).
+- The seed: `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make`:
+  `seed/arbace-seed-go.tar.xz`, 3,058,352 bytes, 1,145 files (29,069,147 bytes unpacked),
+  SHA-256 `8ad2fb89b0ef7bf7923b59f9f6ec951d66791363f6c30c3c23ae8167a000e072`; `SEED.edn`'s
+  `:commit` `ed892a1…`, `:dirty false`.
+- `bin/seed --verify` (14m48s): the fixpoint from the seed's own stage 0 printed again at
+  `ed892a1`, the same tree byte for byte (the tar `262d37e5…`), stage 0 = G1 = G2 = G3
+  (`f114b6bd…`).
+- The essential `bin/gate` on `eaea7dd` (13m29s): the seed as pinned; stage 0 in 15 s
+  (`f114b6bd…`); the executables built by stage 0 in 587 s; the smoke test; Clojure's suite on
+  the Go test build 20,506 of 20,520, no regressions; the oracle against the frozen v4 22,490 of
+  22,547, the 57 known, 0 new.
+- The box: `ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box` (245 s); `bin/tamago-vendor
+  check` (233 s): both guests, with and without symbols, identical to TamaGo's originals;
+  `ARBACE_BOX_ARCHES=amd64 bin/arbace-go --smoke --box` (215 s): 111 ok, no failures.
 
 ### Left
 
