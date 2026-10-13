@@ -1226,3 +1226,23 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   guest, and an issue for TamaGo drafted for the user's review; BX99 without `bin/box-tools
   build` in `bin/gate --full`, the user's choice against the recommendation (the other checks
   as proposed).
+
+## 2026-10-13: S5 closed by measurement, the known issues fixed (SA100-SA107 decided)
+
+- S5 (doc/STANDALONE-NOTES.md, "S5: jrt as core and library"): a new tool, `tools/godeps`,
+  builds the declarations' graph of one printed Go package and its strongly connected
+  components. R1 holds: the reached classes are one component tying 74 of 75 Java packages,
+  84% of jrt with all edges, 14% (421k AST nodes) counting only signatures and fields, the core
+  so named. gc's peak: jrt 8.46 GiB by default (52 s), 5.22 GiB with `-c=1` and `GOGC=25`; lang
+  3.66 GiB. No split under 2.5 GiB without a cross-package mechanism in a2g.
+- The known issues: SA90 (b) fixed (a class whose member types named a later sibling is
+  published again when the sibling is defined; one oracle group now passes, 53 known
+  mismatches); `go/arbace/jrt/reflect_tables.ae` regenerated; the box's oracle run on amd64
+  (22,052 of 22,105, the 53 known); `Var`, `Reflector` and the front end's three `.subst`
+  variants merged into their bases (VENDOR-NOTES hand change 24), RT, Main and Compiler's four
+  left until S6; `bin/box-vendor convert` converts the packages the clone holds.
+- The user decided SA100 (a) and SA103 (a): no split, the exit criterion replaced by jrt and lang
+  compiling in the tool guest's RAM; SA101 (b), against the recommendation (a): gc with its
+  defaults in a 12 GiB guest, the faster run (52 s against about 2 minutes); SA102 and
+  SA104-SA107 as recommended. Alternatives: a class-level split with linkname pulls (5-10 days
+  in a2g), hooks set by the library's init.

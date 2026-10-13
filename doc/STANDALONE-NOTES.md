@@ -1717,3 +1717,8 @@ Proposed, for the user's decision.
 - **SA107 S0's replay.** (a) `bin/box-vendor convert` converts the packages the clone holds (as
   done); (b) the launcher's configurations removed from `configs`, kept in `rt_configs` only.
   *Recommended: (a)*: an edited clone (`--from`) holding the launcher still converts it.
+
+**Decided (2026-10-13, the user):** SA100 (a) and SA103 (a): no split; S5 closes with the
+measurement, `tools/godeps` and the core named, its exit criterion "jrt and lang compile in the
+tool guest's RAM", measured. SA101 (b), against the recommendation: gc's defaults (no `-c=1`, no
+`GOGC`), the guest that compiles jrt given 12 GiB. SA102, SA104-SA107 (a), as recommended.
