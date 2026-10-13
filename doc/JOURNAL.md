@@ -1071,3 +1071,5 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   are built on first call) and SA92 (an `ExceptionInfo` when a sibling is never defined).
 - The runtime changed, so the committed seed is no longer the program's fixpoint print; by the
   user's practice the seed is remade at the next milestone.
+- Correction to the line above: remaking the seed only at a milestone was my instruction to the
+  agent, not a decision of the user's. Whether and when to remake it is open.
