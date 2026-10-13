@@ -1816,3 +1816,22 @@ translation, as before. So `bin/arbace-go --fixpoint` (G2 = G3) and `bin/seed --
 0 = G1 = G2 = G3 for the seed's commit) keep their meaning; the seed grows by the compiled
 namespaces' Go and its stage 0 hosts the tools compiled.
 
+### Checking the back end's output
+
+- `arbace.aot.check` (`(arbace.aot.check/check DIR)` in the executable): the compiled tree's
+  class forms analyzed in the running program by the class forms' analysis the REPL uses,
+  against the program's classes by reflection, every class's failure reported; minutes, not a
+  build, but it sees the classes made at run time where a2g sees the class forms, so it reports
+  some failures a2g does not have.
+- The build: a2g's analysis failures (`report.edn`, `:analysis-failures`) and translation errors
+  are the reference; a source list can be compiled alone (`arbace.aot.main/run OUT [SOURCES]`)
+  and built as the test build's extra input (`bin/arbace-go --build-tests OUT`).
+
+Fixed in the runtime's translation on the way (each a change to shared code, small):
+a2g casts to a class jrt writes by hand without a `C_Cast` (`ForkJoinPool`) with `jrt.As`; its
+"unexpected primitive coercion" names the method; jrt's `DefineDynamic` lets the evaluator
+define a compiled namespace's class again (SA136). One finding about the analysis: a fn's
+`closes` map, keyed by `LocalBinding`s that hash by their index (Arbace's deterministic
+`hashCode`, for reproducible output), cannot be asked `containsKey` once `FnExpr.parse` has
+renumbered a direct fn's arguments; the back end reads the keys by identity.
+
