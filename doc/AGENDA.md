@@ -62,8 +62,11 @@ The current state of the work. This file is rewritten as things change. For the 
   decided as recommended (the slot 3 GiB by default, `ARBACE_BOX_RAM` per launch); the Mac's
   RAM checks with the next Mac bundle. HV6 measured (29 ppm, no resync).
 
-- The standalone survey's S5-S8: the box rebuilding Arbace inside itself.
-- Known issues from S4 (STANDALONE-NOTES, "S4: the JVM removed", Left):
+- The next milestone, `arbace-inside-itself-v1` (the user, 2026-10-13), includes all of this
+  section: the standalone survey's S5-S8 (the box rebuilding Arbace inside itself), the known
+  issues below and the speed item. `bin/gate --full` runs at it.
+- Known issues from S4 (STANDALONE-NOTES, "S4: the JVM removed", Left), and reflection on a
+  member typed by a sibling defined later (SA90 (b)):
   - `go/arbace/jrt/reflect_tables.ae` stale against `bin/jrt manifest` (regenerating it changes
     the build);
   - `test/oracle/known-go-box-amd64.edn` updated but not run on the box;

@@ -1184,3 +1184,11 @@ All as recommended in doc/STANDALONE-SURVEY.md:
 - The user decided BX80 (a), BX81 (a), BX82 (a) and BX84 (a) now, (b) later, all as
   recommended. On main after the merge, the essential gate passed and the amd64 box's smoke
   test gave 113 ok, the 6 GiB check among them.
+
+## 2026-10-13: the next milestone named, `arbace-inside-itself-v1`
+
+- The user named the next milestone `arbace-inside-itself-v1`. It includes everything under
+  doc/AGENDA.md's "Next": the standalone survey's S5-S8 (jrt split into a core and a library,
+  Arbace compiled to Go, the toolchain as tool guests, the rebuild inside the box), the known
+  issues left from S4 and SA90 (b), and a2g's speed. `bin/gate --full` runs at it, as at the
+  milestones before.
