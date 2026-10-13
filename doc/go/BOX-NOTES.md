@@ -2517,8 +2517,8 @@ explicit metadata after any line inserted.
   "ARBACE_BOX_RAM=6GiB: RAM above 4 GiB (HV1 (b)) ..." on 1 and 4 vCPUs.
 - `bin/box-arm64-vm smoke` (KVM/arm64 in the VM, the same smoke test, the arm64 build before the
   board's last edit, which only changed how `Hwinit0` tells the RAM is past the image): the RAM
-  check ok on 4 and 1 vCPUs, and every check through the store and TLS ok (the result at the end
-  of the run is in the report to the user).
+  check ok on 4 and 1 vCPUs, and every check ok (the run
+  of the run: 112 ok, 0 failed).
 - `bin/box-vendor kvm-tests`: 27 passed, none failed (go-whim's tests on `box/` as it is: hv, vmm
   with the new `TestPlanGoHigh`, the C and TamaGo guests, go-whim's own guests on the old layout).
 - `bin/box-vendor roundtrip`: every package in every configuration passes (tree, export, code).
