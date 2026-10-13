@@ -41,9 +41,45 @@
    (class? t) (with-meta {'arbace.core.protocols/datafy
                           (fn [_] (datafy t))})))
 
+(defn- resource-name
+  "Given a typeref, return implied resource name. Used by Reflectors
+   such as ASM that need to find and read classbytes from files."
+  [typeref]
+  (-> (typename typeref)
+      (str/replace "." "/")
+      (str ".class")))
+
 (defn- access-flag
   [[name flag & contexts]]
   {:name name :flag flag :contexts (set (map keyword contexts))})
+
+(defn- descriptor-class-name
+  "Type.getType(d).getClassName() of field descriptor d, without ASM."
+  [^String d]
+  (case (.charAt d 0)
+    \[ (str (descriptor-class-name (subs d 1)) "[]")
+    \L (str/replace (subs d 1 (dec (count d))) "/" ".")
+    ({"Z" "boolean" "B" "byte" "C" "char" "S" "short" "I" "int" "J" "long"
+      "F" "float" "D" "double" "V" "void"} d)))
+
+(defn- field-descriptor->class-symbol
+  "Convert a Java field descriptor to a Clojure class symbol. Field
+   descriptors are described in section 4.3.2 of the JVM spec, 2nd ed.:
+   http://java.sun.com/docs/books/jvms/second_edition/html/ClassFile.doc.html#14152"
+  [^String d]
+  {:pre [(string? d)]}
+  (symbol (str/replace (descriptor-class-name d) "[]" "<>")))
+
+(defn- internal-name->class-symbol
+  "Convert a Java internal name to a Clojure class symbol. Internal
+   names uses slashes instead of dots, e.g. java/lang/String. See
+   Section 4.2 of the JVM spec, 2nd ed.:
+
+   http://java.sun.com/docs/books/jvms/second_edition/html/ClassFile.doc.html#14757"
+  [d]
+  {:pre [(string? d)]}
+  (symbol (str/replace (if (.startsWith ^String d "[") (descriptor-class-name d) (str/replace d "/" "."))
+                       "[]" "<>")))
 
 (def ^{:doc "The Java access bitflags, along with their friendly names and
 the kinds of objects to which they can apply."}
@@ -158,3 +194,24 @@ the kinds of objects to which they can apply."}
 
 (def ^:private default-reflector
      (JavaReflector. (.getContextClassLoader (Thread/currentThread))))
+
+(defprotocol ClassResolver
+  (^InputStream resolve-class [this name]
+                "Given a class name, return that typeref's class bytes as an InputStream."))
+
+(extend-protocol ClassResolver
+  arbace.lang.Fn
+  (resolve-class [this typeref] (this typeref))
+
+  ClassLoader
+  (resolve-class [this typeref]
+                 (.getResourceAsStream this (resource-name typeref))))
+
+;; Clojure's AsmReflector reads the class bytes (resolve-class) with ASM's ClassReader. ASM left
+;; Arbace with the JVM's bytecode back end (2026-10-12; doc/STANDALONE-SURVEY.md D13), and the Go
+;; build has no class files: the type remains, its reflection throws.
+(deftype AsmReflector [class-resolver]
+  Reflector
+  (do-reflect [_ typeref]
+    (throw (UnsupportedOperationException.
+             (str "AsmReflector: no class file reader in Arbace (reflecting " (typename typeref) ")")))))
