@@ -1722,3 +1722,97 @@ Proposed, for the user's decision.
 measurement, `tools/godeps` and the core named, its exit criterion "jrt and lang compile in the
 tool guest's RAM", measured. SA101 (b), against the recommendation: gc's defaults (no `-c=1`, no
 `GOGC`), the guest that compiles jrt given 12 GiB. SA102, SA104-SA107 (a), as recommended.
+
+## S6: Arbace compiled to Go
+
+Status: in progress on the branch `s6-compile` (from main at `38bcad1`, main merged at
+`86b744f`), 2026-10-13: the design below, the back end, and its first checks. Survey §9.1, row
+S6; decisions D5 (a) (R1: Arbace compiled to Go forms) and D6 (a) (T1 now, T3 measured here,
+T4 with Arbace's own back end). The amendments SA130 onward are proposals for the user's
+decision; the recommended choice is applied meanwhile.
+
+### The design
+
+**The route.** An analyzed namespace (`Compiler`'s `Expr` trees) is compiled to **class forms**,
+which a2g translates into Go forms like the runtime's own classes, which g2a prints and gc
+builds. Not to Go forms directly: a2g already implements Java's semantics in Go (the object model
+and dispatch, exceptions and `finally`, monitors, boxing, statics and their initialization, the
+member tables reflection reads, stack traces mapped to class forms lines), and the JVM's bytecode
+back end (`Compiler.clj` on `arbace-for-java-26`: `ObjExpr.compile`, the `emit` methods) is the
+specification of what each `Expr` compiles to. Class forms are Java's class files written in
+Clojure (classes/SPEC.md), so the port is one to one: each `emit` method becomes a function that
+returns class forms where it wrote bytecode (SA130).
+
+**The analysis as data.** The `Expr` classes are package-private members of `Compiler`; the back
+end is Arbace code outside `arbace.lang`. A Go-build variant of `Compiler`,
+`arbace/lang/go/CompilerAST.ae`, adds `Compiler$AST/node`: for a node (an `Expr`, an
+`ObjMethod`, a `LocalBinding`, a `BindingInit`, a `CatchClause`) a map of its kind (`:op`) and
+of every field the bytecode back end read, its children left as the objects they are, plus an
+`Expr`'s Java class and primitive type (`maybePrimitiveType`). The back end itself is the
+namespace `arbace.aot` (`arbace/aot/emit.ae`, `main.ae`), which changes without rebuilding the
+runtime; the same view is the input of Arbace's own code generator later (survey §7, b3)
+(SA131).
+
+**Where the analysis comes from: the prepare step.** The build already runs the program it built
+(the first link) once to prepare the image of its embedded namespaces: every namespace loaded
+from source, each top-level form (a *unit*) analyzed, recorded, then evaluated
+(`Compiler$Image`, EXEC-NOTES.md). With `ARBACE_COMPILE` set, the same run also keeps every unit
+it records (`Compiler$AST/UNITS`, with the source and `*unchecked-math*` as the analysis saw
+them); when the namespaces are loaded, `arbace.aot.main/run` compiles the units of each source
+into a tree of class forms. So the compiled code is a function of the sources alone, analyzed by
+the program built from those same sources, as the image is: the host executable does not enter
+into it (SA132).
+
+**What is emitted** (each the bytecode back end's counterpart):
+
+| analyzed | class forms |
+|---|---|
+| a source's top-level forms | the static methods `unitK` of its loader class `SCRIPTBASE__init` (`arbace.walk__init`, the JVM's name), whose `load()` runs them in order; a unit `(fn* [] form)` is its body inline; each starts with `Compiler$AOT/at` (the line for errors) and the unit's events made again (below) |
+| `fn*` (`FnExpr`) | a class named as the JVM names it (`arbace.walk$walk`, `arbace.walk$walk$fn__4307`), a static member class nested as its name nests, in a holder class per namespace (`arbace.walk`; holders made for missing levels); `extends AFunction`, `RestFn` when variadic (`doInvoke`, `getRequiredArity`); an `invoke` per arity; the closed-over locals as fields set by the constructor (primitive ones typed); with literal metadata a `__meta` field, `meta`, `withMeta` |
+| a fn's `^long`/`^double` parameters | converted on entry (`RT.longCast`), as the evaluator's `invokeFn` (the Go build makes no fn primitive: `primInterface` is nil, EVAL-PLAN Q1) |
+| constants | a static final field per distinct object in the class that uses it (`const__N`), made by `emitValue`'s code (`RT.var`, `RT.keyword`, `Symbol.intern`, `RT.map`, `Tuple.create`, `PersistentList.create`, `Pattern.compile`, `RT.readString` of `print-dup` for the rest; metadata by `withMeta`); a class made at run time looked up where used |
+| vars | `.getRawRoot` of the var's constant, `.get` when the var is dynamic (when compiled); `def` as `DefExpr.emit` in a fn, and at the top level as the Go build's `DefExpr.eval` of an embedded source |
+| `invoke` | `IFn.invoke` of the fn (`applyTo` past 20 arguments); a protocol fn's call: the target's interface method when it implements the protocol's interface, else the fn (`emitProto`, without its class cache) |
+| interop | the analyzer's resolved `Method`, `Field`, `Constructor`, called with param-tags pinning the overload, arguments converted as `emitTypedArgs` converts them (`RT.intCast`, unboxing, a fn adapted to a functional interface); reflection (`Reflector.invokeInstanceMethod` ...) where the analysis left it unresolved or the member's class is made at run time |
+| `let`, `loop`, `recur` | `let` and `loop` with typed locals (`^long`, `^double`, else `^Object`); `recur` to a fn's arity: its body is a `loop` over its parameters |
+| `letfn` | the fns made with nil for one another, then their fields set (`emitLetFnInits`) |
+| `if`, `do`, `try`, `throw`, `case` | the same forms; `case` as `label`, `switch` on the hash (or the int) and `break` with the then's value, the default after the switch |
+| `(str ...)` | `Compiler$AOT/strConcat` (the evaluator's `CodeStrConcat`) |
+| `monitor-enter`, `-exit` | `Compiler$Evaluator`'s natives |
+| `deftype*`, `defrecord` | a top-level class named as the deftype (`arbace.core.Vec`): its fields (`^:volatile-mutable`, `^:unsynchronized-mutable`), constructors (records' shorter ones), `getBasis`, a record's `create`, its methods; the value of `deftype*` is nil |
+| `reify*` | a class as a fn's (nested, `extends Object`), implementing the reify's interfaces, with `__meta` |
+| `gen-interface` (`definterface`, `defprotocol`) | an interface class from the analysis's events (`iface`, `imethod`) |
+| `proxy` | its class made again at load (the event `proxy`, `get-proxy-class`): proxies stay classes made at run time |
+| events of a unit | `ns` (the boot `ns` macro) sets `*ns*`; `stub`, `type`, `iface`, `imethod` make nothing: their class is compiled |
+
+A source fails to compile when it needs what the back end does not do; then it stays evaluated,
+its classes stay made at run time, and the others are compiled again with that knowledge.
+Locals are not cleared (Go's liveness analysis leaves a dead local out of the collector's roots),
+but for a `^:once` fn's closed-over value, cleared when read as the bytecode does.
+
+**Compiled and evaluated code together.** A compiled fn is an `IFn` like an evaluated one; each
+calls the other through `IFn.invoke`, and vars are where they meet. `RT.load` (the Go-build
+variant) loads a source by its compiled loader when the program holds it
+(`Compiler$AOT/load`: `Class.forName("arbace.walk__init")`, its `load()` in the bindings
+`Compiler.load` makes), once, as an embedded source; `ARBACE_NO_AOT` set makes every source
+load as before (from the image or from source). A compiled namespace loaded again from source
+(`ARBACE_NO_AOT`, `:reload`) defines its classes again as classes made at run time, which then
+shadow the compiled ones by name, as a new class loader's do on the JVM (jrt's
+`DefineDynamic`) (SA136).
+
+**The build.** Today's chain gains one step: a2g (the runtime), the first link, then the
+prepare run with `ARBACE_COMPILE`, which writes both the image and the compiled tree, then a2g
+again with the tree as one more input (`bin/a2g --input`, as the test build gives it the Java
+fixtures), gc (the runtime's packages but `lang` from its cache), and the final link with the
+image (now only the namespaces that stay evaluated). The tools (a2g, g2a, c2a, the suite's
+runner, the class forms' front end) are compiled the same way once they are among the program's
+namespaces: a2g's load (106 s) and reach (55 s) are the analyzer and a2g evaluated, and the
+measured target of this stage (SA133, SA134).
+
+**The fixpoint and the seed.** The compiled tree is a function of the sources (the prepare run
+is deterministic, the back end numbers its own temporaries and never uses the program's gensym
+counter, constants are ordered by first use); the program a2g writes from it is a2g's
+translation, as before. So `bin/arbace-go --fixpoint` (G2 = G3) and `bin/seed --verify` (stage
+0 = G1 = G2 = G3 for the seed's commit) keep their meaning; the seed grows by the compiled
+namespaces' Go and its stage 0 hosts the tools compiled.
+
