@@ -1181,7 +1181,7 @@
     (set! (.-info k) {:fields [] :field-index {} :statics [] :static-index {} :lambda true})
     k))
 
-(declare publish!)
+(declare publish! publish-members!)
 
 (defn- lambda-done!
   "k (a lambda's class) with its method mt: defined by the host, the method published."
@@ -1264,12 +1264,27 @@
 ;; publishing: the host learns the members (Go: Dyn slots and member tables, for translated
 ;; code and reflection)
 
+(def ^:dynamic *pending-types*
+  "While publish! publishes a class: an atom of the sibling classes its members' types name that
+  are not defined yet."
+  nil)
+
+(def ^:private waiting
+  "internal name of a sibling class not defined yet -> the Klasses whose members' types name it,
+  published with Object for it, to publish again when it is defined (SA90 (b))."
+  (atom {}))
+
 (defn- sig-class
   "The Class of a member's type for the host: desc->class, Object for a sibling class not
-  defined yet (SPEC §9.2: the classes of a top-level do refer to each other in their types too)."
+  defined yet (SPEC §9.2: the classes of a top-level do refer to each other in their types too),
+  which publish! records to publish the member again when the sibling is defined."
   ^Class [d]
   (try (desc->class d)
-       (catch Throwable e (if (pending? e) Object (throw e)))))
+       (catch Throwable e
+         (if (pending? e)
+           (do (when *pending-types* (swap! *pending-types* conj (::pending (ex-data e))))
+               Object)
+           (throw e)))))
 
 (defn- meth-classes [^arbace.lang.Compiler$CF$Meth mt]
   (let [[ps r] (t/parse-method-desc (.-desc mt))]
@@ -1278,7 +1293,28 @@
 
 (defn publish!
   "Hands k's members to the host: its virtual methods (its own and those it inherits from
-  interpreted classes), its static and private methods, constructors, fields."
+  interpreted classes), its static and private methods, constructors, fields. A sibling class not
+  defined yet in their types is Object until it is defined: k then waits for it (republish!)."
+  [^arbace.lang.Compiler$CF$Klass k]
+  (let [pending (atom #{})]
+    (binding [*pending-types* pending]
+      (publish-members! k))
+    (doseq [n @pending]
+      (swap! waiting update n (fnil conj []) k))))
+
+(defn- republish!
+  "The classes whose members' types name n (internal name), just defined, published again with
+  n's class: their compilation's classes and declarations, with the classes defined now (ks)."
+  [n ks]
+  (let [ws (get @waiting n)]
+    (swap! waiting dissoc n)
+    (doseq [^arbace.lang.Compiler$CF$Klass k ws]
+      (binding [env/*compile-set* (atom (:compile-set (.-info k)))
+                *klasses* (merge (:klasses (.-info k)) ks)]
+        (.clearMembers (host) k)
+        (publish! k)))))
+
+(defn- publish-members!
   [^arbace.lang.Compiler$CF$Klass k]
   (let [h (host)
         seen (java.util.HashSet.)]
@@ -1381,6 +1417,8 @@
             (when (.-cls k)
               (swap! env/defined assoc n (assoc (a/decl n) :class (.-cls k) :loader nil))))
           (swap! registry merge ks)
+          ;; the classes of earlier forms of the do whose members' types name these (SA90 (b))
+          (doseq [n order] (republish! n ks))
           (mapv (fn [n] [(str/replace n "/" ".") (.-cls ^arbace.lang.Compiler$CF$Klass (ks n))]) names))))))
 
 (defn compile-and-load!

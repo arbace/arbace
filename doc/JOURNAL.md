@@ -1201,3 +1201,48 @@ All as recommended in doc/STANDALONE-SURVEY.md:
 - The same evening the balloon inflated again: 18.9 GiB visible, 43.8 GiB held by the outer
   host (HOST-VM-SURVEY's table). The tracks therefore run their memory-heavy steps (Go builds,
   the gate, large guests) one at a time, through a host-wide lock in `.tmp/`.
+- The balloon is outside the user's control: the user reported the shrinking memory to the outer
+  host's operator, who promised to restore the 64 GiB ceiling as soon as possible. Until then the
+  single heavy slot stands; it goes to two slots once `free` shows the memory back.
+- Restored the same evening: `free` shows 62.8 GiB again (59 GiB available). The heavy lock
+  goes to two slots.
+
+## 2026-10-13: S7's first checkpoint merged, BX90-BX99 decided
+
+- S7 (doc/go/BOX-NOTES.md, "S7: tool guests"): the spawn calls `Spawn`, `SpawnPoll`,
+  `SpawnOut` (54-56); a child is a launcher process of its own, started by a helper before the
+  system-call filter, its store a view (no refs, no network, no spawn), within a RAM and CPU
+  budget; trees as canonical EDN maps in the store (`box/go/arbace/box/tree`, the store tool's
+  `tree put|tar|get|ls`); Go's `compile`, `link` and `asm` from /root/tamago-go (go1.27.1)
+  unchanged, built as TamaGo guests through an overlay of GOROOT's `cmd` module
+  (`bin/box-tools`). R3 answered: gc needs only TamaGo's in-memory file system, no mmap, no
+  temporary files, no `os/exec`, no network. A hello-world guest's whole `go build -a` plan
+  replayed as 82 tool guests gave an image byte-identical to the host tools' (15.4 s against
+  2.9 s), and it booted.
+- Found: three bugs in TamaGo's in-memory file system (`fsysFile.seek` past the end shrinks
+  the file, a write past the end adds the offset to the size, `O_TRUNC` keeps the size),
+  patched for the tool guests in `overlay/go/syscall/fs_tamago.ae`.
+- The user decided BX90-BX98 as recommended, with BX95 (b) and (c): the patch also in Arbace's
+  guest, and an issue for TamaGo drafted for the user's review; BX99 without `bin/box-tools
+  build` in `bin/gate --full`, the user's choice against the recommendation (the other checks
+  as proposed).
+
+## 2026-10-13: S5 closed by measurement, the known issues fixed (SA100-SA107 decided)
+
+- S5 (doc/STANDALONE-NOTES.md, "S5: jrt as core and library"): a new tool, `tools/godeps`,
+  builds the declarations' graph of one printed Go package and its strongly connected
+  components. R1 holds: the reached classes are one component tying 74 of 75 Java packages,
+  84% of jrt with all edges, 14% (421k AST nodes) counting only signatures and fields, the core
+  so named. gc's peak: jrt 8.46 GiB by default (52 s), 5.22 GiB with `-c=1` and `GOGC=25`; lang
+  3.66 GiB. No split under 2.5 GiB without a cross-package mechanism in a2g.
+- The known issues: SA90 (b) fixed (a class whose member types named a later sibling is
+  published again when the sibling is defined; one oracle group now passes, 53 known
+  mismatches); `go/arbace/jrt/reflect_tables.ae` regenerated; the box's oracle run on amd64
+  (22,052 of 22,105, the 53 known); `Var`, `Reflector` and the front end's three `.subst`
+  variants merged into their bases (VENDOR-NOTES hand change 24), RT, Main and Compiler's four
+  left until S6; `bin/box-vendor convert` converts the packages the clone holds.
+- The user decided SA100 (a) and SA103 (a): no split, the exit criterion replaced by jrt and lang
+  compiling in the tool guest's RAM; SA101 (b), against the recommendation (a): gc with its
+  defaults in a 12 GiB guest, the faster run (52 s against about 2 minutes); SA102 and
+  SA104-SA107 as recommended. Alternatives: a class-level split with linkname pulls (5-10 days
+  in a2g), hooks set by the library's init.
