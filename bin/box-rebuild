@@ -23,6 +23,10 @@
 #             when the images are equal
 #   boot      the image built in the box booted by its ref (ARBACE_BOX_IMAGE=ref:rebuilt.box.ARCH)
 #   smoke     bin/box-smoke on a launcher with that image appended (DIR/arbace-box)
+#   plan-check  the box's plan (arbace.box.plan) against go list's (tools/goplan) on the same
+#             printed trees (the box's steps' GOROOT/src, goos module and module, written out
+#             under DIR/plan-check): every package's files, imports, import map, language and
+#             embedded files; not in the default steps
 #
 # Options:
 #   --arch ARCH   amd64 (default) or arm64 (arm64's box step runs in the aarch64 VM: bin/box-arm64-vm,
@@ -49,7 +53,7 @@ while [ $# -gt 0 ]; do
     --dir) dir=$2; shift 2 ;;
     --dev) dev=true; shift ;;
     --jobs) jobs=$2; shift 2 ;;
-    prepare|box|host|compare|boot|smoke) steps+=("$1"); shift ;;
+    prepare|box|host|compare|boot|smoke|plan-check) steps+=("$1"); shift ;;
     *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
@@ -213,8 +217,34 @@ smoke() {
   "$root/bin/box-smoke" --arch "$arch" --native "$native" "$dir/arbace-box"
 }
 
+plan_check() {
+  local pc=$dir/plan-check gr
+  [ -s "$dir/box-steps.edn" ] || { echo "box-rebuild: no box-steps.edn (box)" >&2; return 1; }
+  rm -rf "$pc"; mkdir -p "$pc/goroot"
+  ARBACE_BOX_STORE=$bs "$native" -e "(require (quote [arbace.box :as box]) (quote [arbace.edn :as edn]))
+(let [b (edn/read-string (slurp \"$dir/box-steps.edn\"))]
+  (box/get-tree (:goroot b) \"$pc/goroot/src\") (box/get-tree (:goos b) \"$pc/goos\") (box/get-tree (:mod b) \"$pc/mod\")
+  (spit \"$pc/plan.edn\" (box/get (:plan b))))" || return 1
+  for e in "$goroot"/*; do [ "$(basename "$e")" = src ] || ln -s "$e" "$pc/goroot/"; done
+  sed -i "s#=> /goos#=> $pc/goos#" "$pc/mod/go.mod"
+  (cd "$root/tools/goplan" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOPROXY=off \
+     CGO_ENABLED=0 "$goroot/bin/go" build -o "$pc/goplan" .) || return 1
+  (cd "$pc/mod" && env -i PATH=/usr/bin:/bin HOME="$pc" GOROOT="$pc/goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off \
+     GO111MODULE=on GOPROXY=off CGO_ENABLED=0 GOOS=tamago GOARCH="$arch" GOAMD64=v1 GOARM64=v8.0 \
+     GOOSPKG=github.com/usbarmory/tamago "$pc/goplan" arbace/cmd/arbace) > "$pc/goplan.edn" || return 1
+  "$native" -e "(require (quote [arbace.edn :as edn]))
+(let [p (edn/read-string (slurp \"$pc/plan.edn\")) g (edn/read-string (slurp \"$pc/goplan.edn\"))
+      norm #(select-keys % [:path :name :std :lang :go :s :imports :importmap])
+      emb #(vector (set (keys (:patterns (:embed %)))) (set (mapcat val (:patterns (:embed %)))))
+      gemb #(vector (set (:embed-patterns %)) (set (:embed-files %)))
+      bad (remove (fn [[a b]] (and (= (norm a) (norm b)) (= (emb a) (gemb b)))) (map vector (:packages p) (:packages g)))]
+  (println \"plan-check:\" (count (:packages p)) \"packages planned in Arbace,\" (count (:packages g)) \"by go list;\"
+           (if (and (empty? bad) (= (count (:packages p)) (count (:packages g)))) \"the same\" (str \"DIFFERENT: \" (pr-str (map (comp :path first) bad)))))
+  (System/exit (if (and (empty? bad) (= (count (:packages p)) (count (:packages g)))) 0 1)))"
+}
+
 status=0
 for s in "${steps[@]}"; do
-  "$s" || { status=1; [ "$s" = compare ] || break; }
+  "${s/-/_}" || { status=1; [ "$s" = compare ] || break; }
 done
 exit $status

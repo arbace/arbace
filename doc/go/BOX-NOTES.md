@@ -3014,3 +3014,89 @@ the byte-for-byte run is redone cheaply after it.
 - Order: the guest as a tool guest and the driver's additions; the planner checked against
   goplan; the steps one by one on amd64 natively, then in the box; the comparison; arm64; the
   Mac bundle.
+
+### What was built
+
+- **Arbace's guest as a tool guest** (`go/arbace/jrt/hostbox_tamago.ae`; BX111). jrt's box host
+  calls box/'s `tool.Start` in its `init` (in place of its own reading of the command line and
+  the environment, which `tool.Start` does the same way), and its `Exit` ends the guest through
+  `goos.Exit`, which `tool.Start` wraps in a spawned guest. A request naming Arbace's image
+  then runs it as a tool guest: its trees mounted lazily, its working directory made, its output
+  directory stored as a tree at an exit with 0. A guest not spawned is as before.
+- **The plan in Arbace** (`arbace.box.plan`; BX112). From GOROOT/src, the modules' trees and the
+  main package: go/build's selection of files (the name's GOOS and GOARCH, `//go:build`
+  expressions over the toolchain's tags, test files and files beginning with `_` or `.` left
+  out, files importing `"C"` left out with cgo off), each Go file's package clause and imports
+  read from its header (a small tokenizer: comments, strings, Go's semicolon insertion),
+  `//go:embed` patterns, imports resolved (a module's path prefix; GOOSPKG's runtime/goos in the
+  goos module, not standard, as go list says; the standard library's vendor directory for its
+  own imports, with the import map), the language version from each go.mod, the packages in go
+  list's order (each after those it imports, imports in the order written). A package's source
+  tree is its directory's files, the `.h` files below it and its embedded files, so that an
+  action's key changes only with what it reads. Checked: on Arbace's box program (the trees
+  `bin/arbace-go --build --box` prints, with its overlay), the plan equals tools/goplan's (go list
+  -deps with that overlay) for every package and field, amd64 (181 packages) and arm64 (180);
+  2.4 s natively, 3 s in the box. tools/goplan now reports embedded files (`:embed-patterns`,
+  `:embed-files`) instead of refusing them, and the driver refuses to build such a package
+  from a plan that does not say how (`:embed`).
+- **The toolchain's facts** (`bin/box-tools put`; BX113): beside the tool guests, the ref
+  `tool.config.<arch>`, `{:tool-tags [...] :release-tags [...] :include TREE :goversion
+  "go1.27.1"}`: go list's `context.ToolTags` and `ReleaseTags` for tamago/<arch> (the default
+  experiments' tags, `amd64.v1` or `arm64.v8.0`), `GOROOT/pkg/include` as a tree.
+- **The driver** (`arbace.box.build`): `archives` and `link` apart (the main package is compiled
+  again with the image of prepared namespaces, the others' archives kept: `:only`,
+  `:archives`), `action` public (the rebuild's own steps are actions), `-embedcfg` from the
+  plan's `:embed` (JSON, keys sorted, files at `/s`), per-package resources (`:resources`, and
+  `:link`), and the executor as an option (`:run`).
+- **The printing** (`arbace.box.print`), run as an action in Arbace's guest with g2a's namespaces
+  from the sources (`ARBACE_PATH=/s`): `print-goroot` prints tamago/'s standard library and goos
+  module as `bin/tamago-vendor print` does (each `go/` with `arch/amd64/go` laid over it, layout
+  lines) and overlay/go's runtime and syscall as `bin/jrt overlay` and `box_overlay` do (layout
+  gofmt); `print-program` prints a2g's program as `bin/arbace-go --build --box` does (`--goos
+  tamago --line-file`, the roots box/ and x509roots/, the goos module named `/goos`). g2a's
+  `program` takes `:go` (go.mod's go line) from its caller, and asks the toolchain (a process)
+  only when neither program.edn nor the caller gives it and the module is not std.
+- **The symbol cut** (`arbace.box.elf/cut-symbols`; BX118): tools/elfsyms in Arbace. On the
+  guest image linked by `go build`, the same bytes as elfsyms's (3.0 s natively).
+- **The rebuild** (`arbace.box.rebuild/steps`, `rebuild`): the chain above, every step an action
+  (a2g `--program` with `ARBACE_PATH=/s`, `GOGC=400`, `GOMEMLIMIT=12GiB`, `A2G_JOBS=8` in a
+  14 GiB, 8-vCPU guest; the two printings at once, 8 GiB and 4 vCPUs each; jrt's and lang's
+  compiles in 12 GiB, 4 vCPUs; the link in 8 GiB; the rest 3 GiB, 1 vCPU), GOROOT/src assembled
+  from the printed trees (std, tamago/goroot/src's own files over it, the runtime overlay's
+  files, the patched `syscall/fs_tamago.go`), the goos module with its go.mod, the plan, the
+  first link with Arbace's version (`-X main.arbaceVersion=` the tree's `VERSION` read as
+  `bin/lib/version.bash` reads a tarball's), the namespaces prepared by that image spawned with
+  `ARBACE_PREPARE=/o/image.bin` and bin/arbace-go's prepare script, the main package compiled
+  and linked again, the cut. It answers every intermediate result (the trees, the plan, the
+  version, both images, the image of prepared namespaces).
+- **The host's executor** (`arbace.box.rebuild/host-run`, `tools/chrootrun`; BX110): an action
+  for an image it knows runs as a host process, `chroot`ed into a directory holding the
+  request's trees at their mount points (`tools/chrootrun ROOT DIR PROG ARG...`: chroot, chdir,
+  exec), its output directory stored as a tree, its console as a blob, the result written as
+  `tree.Result` prints it. The tool guests' images run the toolchain's own
+  `pkg/tool/linux_amd64/{compile,asm,link}` with `GOOS=tamago GOARCH=<arch>`; Arbace's image the
+  native executable; the image's own preparing run the native executable (the image of
+  prepared namespaces is the same for every GOOS and GOARCH: bin/arbace-go prepares it once).
+- **`bin/box-rebuild`**: `prepare` (the commit's sources as a tree, `git archive` of `VERSION
+  arbace box go jdk overlay tamago x509roots`; the tool guests and facts; the image that runs the
+  tools, bin/arbace-go's guest, as `arbace.<arch>`; one store for the box and one for the host,
+  so that neither run takes the other's results from the action cache), `box` (arm64: in the
+  aarch64 VM, detached, its log followed), `host`, `compare` (every step's result; a2g's
+  program and the image of prepared namespaces against `bin/arbace-go --build`'s, which also
+  proves that the host step prepared with an executable of the same program), `boot`, `smoke`
+  (bin/box-smoke on a launcher with the rebuilt image appended). `--dev` loads the driver's
+  namespaces from the source tree over the image's.
+- **The store's race** (box/vmm `DirStore.Put`; BX115). The first run in the box failed with
+  "the store refused" while compiling: the driver and its spawned guests write the same
+  directory, and a blob two of them put at once (an empty `go_asm.h`, a shared tree) was refused
+  to the second, whose exclusive create found the first's file. The monitor's system-call
+  filter allows no rename, so `Put` cannot write aside and rename; it now waits (20 ms steps, at
+  most a minute) for the other writer's file to be whole (its size by `fstat`, its hash by the
+  read) before refusing, as it refused a short one before.
+- **The Mac's bundle** (`bin/box-mac-bundle`, `box/mac/mac.sh`): `rebuild/store` (the commit's
+  sources and the arm64 tool guests and facts) and `rebuild/expected.txt` (the arm64 image the
+  host step gives); `./mac.sh rebuild` puts the bundle's guest as `arbace.arm64`, runs the
+  rebuild in the box (the spawns' budget 60% of the Mac's memory), times it (HV7), requires the
+  expected image, boots it by ref, and runs it again from the action cache; `./mac.sh clock` is
+  HV6's hour (the guest's clock against the Mac's, a line a minute); `./mac.sh all` runs the
+  clock beside check, sign, hv, the checklist and the rebuild.
