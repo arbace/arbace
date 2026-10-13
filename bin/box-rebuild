@@ -37,6 +37,10 @@
 #   --dev         the driver's namespaces (arbace/box/{build,plan,elf,rebuild}.ae) loaded from the
 #                 source tree over the image's embedded ones (the actions still run the image's)
 #   --jobs N      the compiles at once (default 4)
+#   --given DIR   the box step takes a2g's output and the two printings (the same for every
+#                 architecture) from another run's box step (DIR/box-steps.edn, its store DIR/box,
+#                 for the same sources), their blobs copied into this run's box store, and does
+#                 not run them (BX117: the arm64 VM, where every instruction is emulated)
 # Environment: ARBACE_BOX_SPAWN_RAM (the box's budget for its spawned guests; by default 40GiB),
 # ARBACE_BOX_SPAWN_CPUS (by default 16). Prerequisites: bin/arbace-go --build --box (ARBACE_BOX_ARCHES
 # with ARCH) and the native executable it builds first, from the same commit (the host step's
@@ -45,7 +49,7 @@
 # guest asks 14 GiB, jrt's and lang's compiles 12 GiB each: run it through .tmp/heavy.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-arch=amd64 rev=HEAD dir="" dev=false jobs=4 steps=()
+arch=amd64 rev=HEAD dir="" dev=false jobs=4 steps=() given=""
 while [ $# -gt 0 ]; do
   case $1 in
     --arch) arch=$2; shift 2 ;;
@@ -53,6 +57,7 @@ while [ $# -gt 0 ]; do
     --dir) dir=$2; shift 2 ;;
     --dev) dev=true; shift ;;
     --jobs) jobs=$2; shift 2 ;;
+    --given) given=$(cd "$2" && pwd) || exit 2; shift 2 ;;
     prepare|box|host|compare|boot|smoke|plan-check) steps+=("$1"); shift ;;
     *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
@@ -101,16 +106,30 @@ rebuild_expr() {
     "$(dev_loads)" "$1" "$jobs" "$arch" "$2" "$1"
 }
 
+# the box step's options: {} or, with --given, the given steps' trees (their blobs copied into the
+# box store: every blob each tree reaches)
+box_opts() {
+  [ -n "$given" ] || { echo '{}'; return; }
+  ARBACE_BOX_STORE=$given/box "$native" -e "(require (quote [arbace.box :as box]) (quote [arbace.edn :as edn]))
+(let [b (edn/read-string (slurp \"$given/box-steps.edn\"))
+      walk (fn walk [h] (cons h (mapcat (fn [[_ [k eh]]] (if (= k :dir) (walk eh) [eh])) (box/tree h))))]
+  (doseq [h (distinct (mapcat walk [(:a2g b) (:printed-goroot b) (:printed-program b)]))] (println h)))" > "$dir/given-blobs.txt" || return 1
+  mkdir -p "$bs/blobs"
+  (cd "$given/box/blobs" && xargs -a "$dir/given-blobs.txt" cp -n -t "$bs/blobs/") || return 1
+  "$native" -e "(require (quote [arbace.edn :as edn])) (let [b (edn/read-string (slurp \"$given/box-steps.edn\"))] (print (pr-str {:given (select-keys b [:a2g :printed-goroot :printed-program])})))"
+}
+
 box() {
-  local t0 st
+  local t0 st opts
   t0=$(date +%s)
+  opts=$(box_opts) || return 1
   if [ "$arch" != "$harch" ]; then
-    vm_box; return
+    vm_box "$opts"; return
   fi
   echo "== the rebuild in the box ($arch)"
   ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-40GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-16} \
     ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.$arch \
-    "$launcher" --store "$bs" -e "$(rebuild_expr "rebuilt.box.$arch" '{}')" 2>&1 | tee "$dir/box.log"
+    "$launcher" --store "$bs" -e "$(rebuild_expr "rebuilt.box.$arch" "$opts")" 2>&1 | tee "$dir/box.log"
   st=${PIPESTATUS[0]}
   "$launcher" --store "$bs" get "rebuilt.box.$arch.steps" > "$dir/box-steps.edn" 2>/dev/null
   echo "box-rebuild: the box's run: status $st ($(since "$t0"))"
@@ -128,7 +147,7 @@ vm_box() {
   "$vmrun" put "$vl" "$dir/box-store.tar" || return 1
   "$vmrun" sh 'rm -rf box && tar -xf box-store.tar && rm box-store.tar' || return 1
   # the run detached in the VM (hours: every instruction is emulated), its log followed from here
-  printf '%s\n' '#!/bin/sh' "cd /h && ARBACE_BOX_STORE_MAX=off ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-20GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-16} ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.arm64 ./arbace-box --store box -e '$(rebuild_expr rebuilt.box.arm64 '{}' | sed "s/'/'\\\\''/g")' > rebuild.log 2>&1; echo \$? > rebuild.status" > "$dir/vm-rebuild.sh"
+  printf '%s\n' '#!/bin/sh' "cd /h && ARBACE_BOX_STORE_MAX=off ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-20GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-16} ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.arm64 ./arbace-box --store box -e '$(rebuild_expr rebuilt.box.arm64 "$1" | sed "s/'/'\\\\''/g")' > rebuild.log 2>&1; echo \$? > rebuild.status" > "$dir/vm-rebuild.sh"
   "$vmrun" put "$dir/vm-rebuild.sh" || return 1
   "$vmrun" sh 'rm -f rebuild.status rebuild.log; chmod +x vm-rebuild.sh; nohup ./vm-rebuild.sh > /dev/null 2>&1 &' || return 1
   local n=0
