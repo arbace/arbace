@@ -124,10 +124,12 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
         ...]}
 
   `:form` is the case's text (shortened), for the reader; only `:case` is compared.
-  `test/oracle/known-go-amd64.edn` is the Go build's on amd64 (34 cases in 7 groups,
-  2026-10-09; 6 cases in 4 groups since the branch `gofix`; 7 in 5 since `gosec`, 2026-10-10),
-  against which `bin/gate --full` checks it (with `--timeout 900`: the reducers file takes
-  about 285 s there).
+  `test/oracle/known-go-amd64-frozen.edn` is the Go build's on amd64 since S4, against the
+  expected files recorded from the frozen jar (SA60; "The reference" below), and the gate's
+  (`bin/oracle check ... --timeout 900 --expected test/oracle/known-go-amd64-frozen.edn`: the
+  reducers file takes about 285 s there). Before it, `test/oracle/known-go-amd64.edn` was the
+  reference against main's JVM (34 cases in 7 groups, 2026-10-09; 6 cases in 4 groups since the
+  branch `gofix`; 7 in 5 since `gosec`, 2026-10-10; 46 at S3), removed at S4 with that JVM.
   A reference may also name, under `:incomplete`, the corpus files whose run is known not to
   complete (the box's memory, below): the check then passes when the runs that did not
   complete are exactly those (their cases after the end mismatch, and are recorded like the
