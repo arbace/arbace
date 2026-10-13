@@ -2513,14 +2513,19 @@ explicit metadata after any line inserted.
 
 - `ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box`: built (the amd64 guest 68,419,918
   bytes, as before but for the board).
-- `bin/arbace-go --smoke --box` (amd64): 113 ok, none failed, with the new check
+- `bin/arbace-go --smoke --box` (amd64, the final build): 113 ok, none failed, with the new check
   "ARBACE_BOX_RAM=6GiB: RAM above 4 GiB (HV1 (b)) ..." on 1 and 4 vCPUs.
-- `bin/box-arm64-vm smoke` (KVM/arm64 in the VM, the same smoke test): see the report below.
-- `bin/box-vendor kvm-tests`: pass (go-whim's tests on `box/` as it is: hv, vmm with the new
-  `TestPlanGoHigh`, the C and TamaGo guests). `bin/box-vendor roundtrip`: see below.
+- `bin/box-arm64-vm smoke` (KVM/arm64 in the VM, the same smoke test, the arm64 build before the
+  board's last edit, which only changed how `Hwinit0` tells the RAM is past the image): the RAM
+  check ok on 4 and 1 vCPUs, and every check through the store and TLS ok (the result at the end
+  of the run is in the report to the user).
+- `bin/box-vendor kvm-tests`: 27 passed, none failed (go-whim's tests on `box/` as it is: hv, vmm
+  with the new `TestPlanGoHigh`, the C and TamaGo guests, go-whim's own guests on the old layout).
+- `bin/box-vendor roundtrip`: every package in every configuration passes (tree, export, code).
 - `bin/tamago-vendor check`: both guest images identical to the originals' (amd64 and arm64):
   `tamago/` is untouched, so its identity holds.
-- `bin/gate` (essential) on the branch with main merged: see below.
+- `bin/gate` (essential) on the branch with main `40154ca` merged: passed (14m48s; the suite with no
+  regressions, the oracle 54 known mismatches, 0 new).
 
 ### Amendments (proposed 2026-10-13)
 
