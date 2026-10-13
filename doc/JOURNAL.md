@@ -1204,3 +1204,5 @@ All as recommended in doc/STANDALONE-SURVEY.md:
 - The balloon is outside the user's control: the user reported the shrinking memory to the outer
   host's operator, who promised to restore the 64 GiB ceiling as soon as possible. Until then the
   single heavy slot stands; it goes to two slots once `free` shows the memory back.
+- Restored the same evening: `free` shows 62.8 GiB again (59 GiB available). The heavy lock
+  goes to two slots.
