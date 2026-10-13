@@ -554,6 +554,10 @@ Not a design: the shape the proposals below add up to, if accepted.
 
 Numbered HV (a prefix not used in `doc/`). Each lists options with one *Recommended*.
 
+**Decided (the user, 2026-10-13): HV1-HV9 all accepted as recommended.** HV1's measurement
+(a2g natively under `GOMEMLIMIT=2GiB`) and HV6's (an hour's drift) come first; their results
+are recorded below each.
+
 - **HV1 The guest's RAM beyond 3 GiB.** a2g's run (S8) needs a 1.1-1.6 GB live heap and has
   peaked at 10 GB under `GOMEMLIMIT=12GiB`. gc's `jrt` needs 7-8 GB until S5 splits it (D8).
   Options:

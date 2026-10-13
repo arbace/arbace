@@ -1117,3 +1117,19 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   - In conversation (not in the repo, by the redaction rule): the public address's registry
     and the platform's evidence point to a dedicated EPYC 7763 server that its operator
     virtualizes.
+
+## 2026-10-13: HV1-HV9 decided
+
+- The user accepted all of the host VM survey's proposals as recommended:
+  - HV1: the guest's RAM. First measure a2g under `GOMEMLIMIT=2GiB`; if it is within about 1.5×
+    of the 12 GiB run, D8's 3 GiB slot stands, otherwise RAM above 4 GiB with the doorbell kept.
+  - HV2: no memory release for short tool guests.
+  - HV3: read-only input trees by store ref, served name by name.
+  - HV4: a memory and vCPU budget in the monitor.
+  - HV5: the spawn call is an image hash, arguments, input trees and asks in; an exit status
+    and an output tree out.
+  - HV6: the clock as it is; an hour's drift measured first.
+  - HV7: S8's times measured here and on the Mac.
+  - HV8: no network in a build box.
+  - HV9: the build driver's action cache in the store.
+- Alternatives considered are in doc/go/HOST-VM-SURVEY.md §14.

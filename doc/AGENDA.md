@@ -56,8 +56,10 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- The host VM survey ([go/HOST-VM-SURVEY.md](go/HOST-VM-SURVEY.md)): HV1-HV9 proposed, for the
-  user to decide; they shape S5-S8 (the guest's memory beyond 3 GiB first).
+- The host VM survey ([go/HOST-VM-SURVEY.md](go/HOST-VM-SURVEY.md)): HV1-HV9 accepted as
+  recommended (2026-10-13). First the measurements: a2g under `GOMEMLIMIT=2GiB` (HV1: within
+  ~1.5× of the 12 GiB run, the 3 GiB slot stands; else RAM above 4 GiB) and the box's clock
+  drift over an hour here (HV6; on the Mac at the next box milestone).
 
 - The standalone survey's S5-S8: the box rebuilding Arbace inside itself.
 - Known issues from S4 (STANDALONE-NOTES, "S4: the JVM removed", Left):
