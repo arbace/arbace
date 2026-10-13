@@ -487,7 +487,8 @@ this branch, the diff only its six `.ae`-rename cases); recording them into
 ## S4: inventory for the JVM's removal
 
 What S4 removes from main or moves off the JVM, with what replaces each (D4: the JVM stays only
-as the oracle's reference, the frozen jar, and as j2a's front end). Nothing is removed yet.
+as the oracle's reference, the frozen jar, and as j2a's front end). (Done at S4's end, the boxes
+below left as planned: "S4: the JVM removed" records what was done and what is left.)
 Tags: **[P]** the JVM product, leaves main (kept on `arbace-for-java-26`); **[T]** a tool that
 runs on the JVM today and is hosted by the Go executable after S3; **[R]** stays on a JVM (the
 oracle's reference or j2a). Counts at `b0f5730`.
