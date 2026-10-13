@@ -36,7 +36,8 @@
   :no-blob (a ref to a blob the store has not), :no-ref (load-ref, load-fs!) or :refused (the
   host's error)."
   (:refer-clojure :exclude [get load ref])
-  (:require [arbace.box.host :as host])
+  (:require [arbace.box.host :as host]
+            [arbace.edn :as edn])
   (:import (java.io StringReader)
            (java.nio.charset StandardCharsets)))
 
@@ -200,3 +201,166 @@
      (when-let [e (host/untar tar d)]
        (fail :refused (str "arbace.box/load-fs!: " d ": " e) {:name ref :dir d}))
      nil)))
+
+;; ---------------------------------------------------------------------------------------
+;; Trees (doc/go/BOX-NOTES.md, S7, BX93): a tree is a blob holding a map from a name to
+;; [:file HASH SIZE], [:exec HASH SIZE] (a file with an execute bit) or [:dir HASH] (a tree),
+;; printed canonically (names sorted by their UTF-8 bytes, one entry a line, " and \ escaped), as
+;; arbace/box/tree's Format prints it: the same files are the same blob.
+
+(defn- quote-str
+  "s as a string the reader reads back: \" and \\ escaped, nothing else."
+  [^String s]
+  (str \" (-> s (.replace "\\" "\\\\") (.replace "\"" "\\\"")) \"))
+
+(defn- utf8-compare
+  "Compares strings a and b by their UTF-8 bytes, unsigned."
+  [^String a ^String b]
+  (let [^bytes x (.getBytes a StandardCharsets/UTF_8)
+        ^bytes y (.getBytes b StandardCharsets/UTF_8)
+        n (min (alength x) (alength y))]
+    (loop [i 0]
+      (if (< i n)
+        (let [c (compare (bit-and (aget x i) 0xff) (bit-and (aget y i) 0xff))]
+          (if (zero? c) (recur (inc i)) c))
+        (compare (alength x) (alength y))))))
+
+(defn- tree-name? [^String n]
+  (and (string? n) (not (contains? #{"" "." ".."} n))
+       (every? #(and (not= % \/) (>= (int %) 0x20) (not= (int %) 0x7f)) n)))
+
+(defn tree-text
+  "Tree m ({name [:file HASH SIZE] | [:exec HASH SIZE] | [:dir HASH]}) printed canonically."
+  [m]
+  (str "{"
+       (->> (sort-by key utf8-compare m)
+            (map (fn [[n [kind h size :as e]]]
+                   (when-not (tree-name? n)
+                     (fail :bad-tree (str "arbace.box/tree-text: a name a tree does not take: " (pr-str n)) {:name n}))
+                   (hash-bytes h "arbace.box/tree-text")
+                   (str (quote-str n) " "
+                        (case kind
+                          (:file :exec) (str "[" kind " \"" h "\" " (long size) "]")
+                          :dir (str "[:dir \"" h "\"]")
+                          (fail :bad-tree (str "arbace.box/tree-text: not an entry: " (pr-str e)) {:name n})))))
+            (interpose "\n ")
+            (apply str))
+       "}\n"))
+
+(defn put-tree
+  "Stores tree m (tree-text): its hash."
+  [m]
+  (put (tree-text m)))
+
+(defn tree
+  "Tree h as its map, nil when the store has no such blob."
+  [h]
+  (some-> (get h) edn/read-string))
+
+(defn put-file
+  "Stores the bytes of x (put) as the entry of a tree: [:file HASH SIZE], or [:exec ...] with
+  exec."
+  ([x] (put-file x false))
+  ([x exec]
+   (let [h (put x)]
+     [(if exec :exec :file) h (size h)])))
+
+(defn put-dir
+  "Stores the directory dir (a path), its files and directories under it, as a tree: its hash. A
+  file is :exec when it can be executed."
+  [dir]
+  (let [d (java.io.File. (str dir))
+        fs (.listFiles d)]
+    (when (nil? fs)
+      (fail :refused (str "arbace.box/put-dir: not a directory: " dir) {:dir dir}))
+    (put-tree
+      (into {}
+            (for [^java.io.File f fs]
+              [(.getName f)
+               (if (.isDirectory f)
+                 [:dir (put-dir f)]
+                 (put-file (java.nio.file.Files/readAllBytes (.toPath f)) (.canExecute f)))])))))
+
+(defn get-tree
+  "Writes tree h into the directory dir (made when missing): nil."
+  [h dir]
+  (let [m (tree h)
+        d (java.io.File. (str dir))]
+    (when (nil? m)
+      (fail :no-blob (str "arbace.box/get-tree: no tree " h) {:hash h}))
+    (.mkdirs d)
+    (doseq [[n [kind eh]] m]
+      (let [f (java.io.File. d ^String n)]
+        (if (= kind :dir)
+          (get-tree eh f)
+          (do (with-open [o (java.io.FileOutputStream. f)]
+                (.write o ^bytes (or (get-bytes eh) (fail :no-blob (str "arbace.box/get-tree: no blob " eh) {:hash eh}))))
+              (when (= kind :exec) (.setExecutable f true))))))
+    nil))
+
+(defn tree-get
+  "The entry at path p (\"a/b.go\") of tree h, nil when there is none."
+  [h ^String p]
+  (reduce (fn [e n]
+            (if (and e (= :dir (first e)))
+              (arbace.core/get (tree (second e)) n)
+              (reduced nil)))
+          [:dir h]
+          (remove empty? (.split p "/"))))
+
+;; ---------------------------------------------------------------------------------------
+;; Tool guests (doc/go/BOX-NOTES.md, S7, BX90-BX94): a request, a map
+;;   {:image HASH :args [...] :env ["NAME=VALUE" ...] :trees [[PATH HASH] ...] :out PATH
+;;    :cwd PATH :ram BYTES :cpus N}
+;; stored as a blob (printed as arbace/box/tree's Request.Format prints it), spawned; the result
+;; a blob {:exit N :out TREE :console HASH} (or :fault instead of :exit).
+
+(defn request-text
+  "Request req printed canonically: the keys in the order above, those with nothing left out
+  (:cwd \"/\", :ram 0, :cpus 0 too)."
+  [{:keys [image args env trees out cwd ram cpus]}]
+  (let [v (fn [xs] (str "[" (apply str (interpose " " (map quote-str xs))) "]"))]
+    (hash-bytes image "arbace.box/request-text")
+    (str "{:image \"" image "\"\n :args " (v args)
+         (when (seq env) (str "\n :env " (v env)))
+         (when (seq trees)
+           (str "\n :trees ["
+                (apply str (interpose "\n         " (for [[p h] trees] (str "[" (quote-str p) " \"" h "\"]"))))
+                "]"))
+         (when (seq out) (str "\n :out " (quote-str out)))
+         (when (and (seq cwd) (not= cwd "/")) (str "\n :cwd " (quote-str cwd)))
+         (when (and ram (pos? ram)) (str "\n :ram " (long ram)))
+         (when (and cpus (pos? cpus)) (str "\n :cpus " (long cpus)))
+         "}\n")))
+
+(defn spawn
+  "Starts the guest request req asks for (a map, stored first, or a request blob's hash): a
+  handle. Refused (no spawning: the launcher's ARBACE_BOX_SPAWN; natively ARBACE_BOX_LAUNCHER):
+  an ex-info :refused."
+  [req]
+  (let [h (if (map? req) (put (request-text req)) req)
+        n (host/spawn (hash-bytes h "arbace.box/spawn"))]
+    (when (neg? n)
+      (fail :refused (str "arbace.box/spawn: refused: " h) {:request h}))
+    n))
+
+(defn result
+  "Result blob h as a map, its :hash added."
+  [h]
+  (let [s (get h)]
+    (when (nil? s)
+      (fail :no-blob (str "arbace.box/result: no blob " h) {:hash h}))
+    (assoc (edn/read-string s) :hash h)))
+
+(defn spawn-wait
+  "Waits for spawn n's end: its result (result)."
+  [n]
+  (let [h (byte-array 32)]
+    (when-not (zero? (host/spawn-await n h))
+      (fail :refused (str "arbace.box/spawn-wait: the guest could not run (spawn " n ")") {:spawn n}))
+    (result (hex h))))
+
+(defn run
+  "Spawns req and waits for it: its result."
+  [req]
+  (spawn-wait (spawn req)))

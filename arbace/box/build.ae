@@ -1,0 +1,271 @@
+;; The box's build driver (doc/go/BOX-NOTES.md, S7): a Go program compiled and linked by tool
+;; guests (Go's compile, asm and link as guests of the box, bin/box-tools), each action a spawn
+;; whose inputs are trees of the store, its result kept in the action cache (HV9, BX98).
+(ns arbace.box.build
+  "Builds a Go program from a plan, in the box or natively, by tool guests.
+
+    (import-plan plan)     natively (or wherever the sources are files): the plan of
+                           tools/goplan (a map, or its file's path) with each package's
+                           directory stored as a tree (:src) and the assembly's includes
+                           (:include, GOROOT/pkg/include); its hash
+    (build plan opts)      the program built: the plan (a map, or a hash or ref of
+                           import-plan's), each package's archive by compile, asm (its
+                           symbols, then each .s) and the archive's members appended here,
+                           then link; the image's hash (a blob), and ref (:ref opts) pointed
+                           at it
+
+  opts: :tools {:compile H :asm H :link H} (by default the refs tool.<tool>.<arch>), :ldflags
+  (by default the box's guests' link: -T 0x201000 -R 0x1000 -w), :ref, :jobs (the actions run at
+  once, by default 4), :cache (false: no action cache), :log (a function of a line, by default
+  println).
+
+  Each action is a request (arbace.box/request-text): the tool's image, its command line, the
+  trees it reads (/s the package's sources, /d the archives it imports, /c the import
+  configuration and the like, /i the includes) and its output directory (/o); its key the hash
+  of the request less :ram and :cpus, its result kept under the ref ac.KEY (61 hexadecimal
+  digits): a rerun after an interruption redoes only what has no result."
+  (:require [arbace.box :as box]
+            [arbace.edn :as edn]
+            [arbace.string :as str])
+  (:import (java.io ByteArrayOutputStream)
+           (java.nio.charset StandardCharsets)
+           (java.security MessageDigest)))
+
+(defn- fail [msg data]
+  (throw (ex-info msg (assoc data ::error true))))
+
+(defn- sha256-hex [^String s]
+  (let [d (.digest (MessageDigest/getInstance "SHA-256") (.getBytes s StandardCharsets/UTF_8))
+        sb (StringBuilder.)]
+    (doseq [b d]
+      (let [x (bit-and b 0xff)]
+        (.append sb (Character/forDigit (bit-shift-right x 4) 16))
+        (.append sb (Character/forDigit (bit-and x 15) 16))))
+    (str sb)))
+
+;; ---------------------------------------------------------------------------------------
+;; The plan, imported
+
+(defn- source-tree
+  "A package's directory as a tree: its files (not its subdirectories, other packages), and the
+  .h files of its subdirectories (an assembly file includes them by a relative path)."
+  [^java.io.File d]
+  (let [fs (.listFiles d)
+        headers (fn headers [^java.io.File s]
+                  (let [m (into {}
+                                (for [^java.io.File f (.listFiles s)
+                                      :let [e (cond (.isDirectory f) (when-let [h (headers f)] [:dir h])
+                                                    (str/ends-with? (.getName f) ".h")
+                                                      (box/put-file (java.nio.file.Files/readAllBytes (.toPath f))))]
+                                      :when e]
+                                  [(.getName f) e]))]
+                    (when (seq m) (box/put-tree m))))]
+    (box/put-tree
+      (into {}
+            (for [^java.io.File f fs
+                  :let [e (if (.isDirectory f)
+                            (when-let [h (headers f)] [:dir h])
+                            (box/put-file (java.nio.file.Files/readAllBytes (.toPath f))))]
+                  :when e]
+              [(.getName f) e])))))
+
+(defn import-plan
+  "Stores the plan's sources as trees and the plan itself (see the namespace's doc): its hash.
+  goroot is the GOROOT whose pkg/include the assembly reads (by default /root/tamago-go)."
+  ([plan] (import-plan plan "/root/tamago-go"))
+  ([plan goroot]
+   (let [p (if (map? plan) plan (edn/read-string (slurp plan)))
+         dirs (atom {})
+         src (fn [dir] (or (@dirs dir) (let [h (source-tree (java.io.File. ^String dir))] (swap! dirs assoc dir h) h)))
+         p (-> p
+               (assoc :include (box/put-dir (str goroot "/pkg/include")))
+               (update :packages (fn [ps] (mapv #(-> % (assoc :src (src (:dir %))) (dissoc :dir)) ps))))]
+     (box/put (pr-str p)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Actions
+
+(def ^:private ^:dynamic *opts* nil)
+
+(defn- log [& xs]
+  ((:log *opts* println) (apply str xs)))
+
+(defn- cache-ref [req]
+  (str "ac." (subs (sha256-hex (box/request-text (dissoc req :ram :cpus))) 0 61)))
+
+(defn- action
+  "Runs request req (or takes its result from the cache): its result. A result that is not
+  :exit 0 is an ex-info with the console."
+  [what req]
+  (let [cref (cache-ref req)
+        cached (when (:cache *opts* true)
+                 (when-let [h (box/ref cref)]
+                   (when (box/size h) (box/result h))))
+        t0 (System/nanoTime)
+        res (or cached (box/run req))]
+    (when-not (= 0 (:exit res))
+      (fail (str "arbace.box.build: " what ": " (if (:fault res) (str "the guest faulted: " (:fault res)) (str "exit " (:exit res)))
+                 "\n" (box/get (:console res)))
+            {:what what :result res}))
+    (when (and (not cached) (:cache *opts* true))
+      (box/ref! cref (:hash res)))
+    (log (format "%-8s %s%s" (first (:args req)) what
+                 (if cached " (cached)" (format " %.2f s" (/ (- (System/nanoTime) t0) 1e9)))))
+    res))
+
+(defn- out-file
+  "The entry name of result res's output tree."
+  [res what name]
+  (or (box/tree-get (:out res) name)
+      (fail (str "arbace.box.build: " what ": no " name " in its output") {:result res})))
+
+(defn- file-tree
+  "A tree of files given as {name string-or-bytes}."
+  [m]
+  (box/put-tree (into {} (for [[n x] m] [n (box/put-file x)]))))
+
+(defn- arch-defines [plan]
+  (let [a (:goarch plan)]
+    (concat ["-D" (str "GOOS_" (:goos plan)) "-D" (str "GOARCH_" a)]
+            [:std]
+            (case a
+              "amd64" ["-D" (str "GOAMD64_" (:goamd64 plan))]
+              []))))
+
+(defn- asm-args [plan pkg out & more]
+  (vec (concat ["asm" "-p" (:path pkg) "-trimpath" (str "/s=>" (:path pkg) ";/c=>")
+                "-I" "/c/" "-I" "/i"]
+               (mapcat #(if (= % :std) (when (:std pkg) ["-std"]) [%]) (arch-defines plan))
+               more ["-o" out])))
+
+;; The archive (Go's ar format, as go tool pack r appends): its members appended, a name cut
+;; to 16 bytes as pack cuts it
+(defn- ar-member ^bytes [^String name ^bytes data]
+  (let [pad (fn [^String s n] (str s (apply str (repeat (- n (count s)) \space))))
+        hdr (str (pad (subs name 0 (min 16 (count name))) 16) (pad "0" 12) (pad "0" 6) (pad "0" 6) (pad "644" 8) (pad (str (alength data)) 10) "`\n")
+        o (ByteArrayOutputStream.)]
+    (.write o (.getBytes hdr StandardCharsets/US_ASCII))
+    (.write o data)
+    (when (odd? (alength data)) (.write o 10))
+    (.toByteArray o)))
+
+(defn- append-members ^bytes [^bytes archive members]
+  (let [o (ByteArrayOutputStream.)]
+    (.write o archive)
+    (doseq [[n data] members] (.write o (ar-member n data)))
+    (.toByteArray o)))
+
+(def ^:private forward-declaring
+  "The standard packages with declarations the runtime supplies, which go build compiles without
+  -complete (cmd/go/internal/work/gc.go)."
+  #{"bytes" "internal/poll" "net" "os" "runtime/metrics" "runtime/pprof" "runtime/trace" "sync" "syscall" "time"})
+
+(defn- complete?
+  "Is the package's Go all of it (go build's -complete)?"
+  [pkg]
+  (and (empty? (:s pkg)) (not (and (:std pkg) (forward-declaring (:path pkg))))))
+
+(defn- deps-tree
+  "The tree /d: the archives of the packages imports names, each <index>.a; and the
+  importcfg lines naming them."
+  [archives index paths]
+  [(box/put-tree (into {} (for [p paths :let [a (archives p)]] [(str (index p) ".a") a])))
+   (for [p paths] (str "packagefile " p "=/d/" (index p) ".a"))])
+
+(defn- build-package
+  "The package's archive: its tree entry [:file HASH SIZE]."
+  [plan pkg archives index]
+  (let [{:keys [tools]} *opts*
+        P (:path pkg)
+        imports (:imports pkg)
+        [dtree lines] (deps-tree archives index imports)
+        importcfg (str "# import config\n"
+                       (apply str (for [[k v] (sort (:importmap pkg))] (str "importmap " k "=" v "\n")))
+                       (apply str (for [l lines] (str l "\n"))))
+        sfiles (:s pkg)
+        res-of (fn [what req] (action (str P " " what) (merge {:out "/o" :cwd "/s"} req)))
+        symabis (when (seq sfiles)
+                  (out-file (res-of "symabis"
+                                    {:image (:asm tools)
+                                     :args (into (asm-args plan pkg "/o/symabis" "-gensymabis") (map #(str "./" %) sfiles))
+                                     :trees [["/s" (:src pkg)] ["/i" (:include plan)] ["/c" (file-tree {"go_asm.h" ""})]]})
+                            P "symabis"))
+        compile (res-of "compile"
+                        {:image (:compile tools)
+                         :args (vec (concat ["compile" "-o" "/o/_pkg_.a" "-trimpath" (str "/s=>" P ";/o=>;/c=>")
+                                             "-p" (if (= "main" (:name pkg)) "main" P) (str "-lang=" (:lang pkg))]
+                                            (when (:std pkg) ["-std"])
+                                            (when (complete? pkg) ["-complete"])
+                                            ["-goversion" "go1.27.1"]
+                                            (when symabis ["-symabis" "/c/symabis"])
+                                            ["-c=4" "-nolocalimports" "-importcfg" "/c/importcfg" "-pack"]
+                                            (when symabis ["-asmhdr" "/o/go_asm.h"])
+                                            (map #(str "/s/" %) (:go pkg))))
+                         :trees (vec (concat [["/s" (:src pkg)] ["/d" dtree]
+                                              ["/c" (box/put-tree (cond-> {"importcfg" (box/put-file importcfg)}
+                                                                    symabis (assoc "symabis" symabis)))]]))})
+        archive (out-file compile P "_pkg_.a")]
+    (if (empty? sfiles)
+      archive
+      (let [asmh (out-file compile P "go_asm.h")
+            ctree (box/put-tree {"go_asm.h" asmh})
+            objs (doall
+                   (for [s sfiles]
+                     (let [o (str (subs s 0 (- (count s) 2)) ".o")]
+                       [o (future
+                            (out-file (res-of (str "asm " s)
+                                              {:image (:asm tools)
+                                               :args (conj (asm-args plan pkg (str "/o/" o)) (str "./" s))
+                                               :trees [["/s" (:src pkg)] ["/i" (:include plan)] ["/c" ctree]]})
+                                      P o))])))
+            members (for [[o f] objs] [o (box/get-bytes (second @f))])]
+        (box/put-file (append-members (box/get-bytes (second archive)) members))))))
+
+(defn build
+  "Builds the plan's program (see the namespace's doc): the image's hash."
+  ([plan] (build plan {}))
+  ([plan opts]
+   (let [p (cond (map? plan) plan
+                 (re-matches #"[0-9a-f]{64}" plan) (edn/read-string (box/get plan))
+                 :else (edn/read-string (or (box/load plan) (fail (str "arbace.box.build: no plan " plan) {:plan plan}))))
+         arch (:goarch p)
+         tools (merge (into {} (for [t [:compile :asm :link]]
+                                 [t (box/ref (str "tool." (name t) "." arch))]))
+                      (:tools opts))
+         _ (doseq [[t h] tools] (when-not h (fail (str "arbace.box.build: no image for " (name t) " (the ref tool." (name t) "." arch ")") {})))
+         opts (assoc opts :tools tools)
+         pkgs (:packages p)
+         index (into {} (map-indexed (fn [i q] [(:path q) i]) pkgs))
+         t0 (System/nanoTime)
+         ;; each package a future: it waits for those it imports
+         futures (atom {})
+         sem (java.util.concurrent.Semaphore. (int (:jobs opts 4)))
+         conveyed (fn [f] (let [o opts] (fn [] (binding [*opts* o] (f)))))]
+     (binding [*opts* opts]
+       (doseq [q pkgs]
+         (let [deps (map @futures (:imports q))]
+           (swap! futures assoc (:path q)
+                  (future
+                    ((conveyed
+                       (fn []
+                         (let [archives (into {} (map (fn [i d] [i @d]) (:imports q) deps))]
+                           (.acquire sem)
+                           (try
+                             (build-package p q archives index)
+                             (finally (.release sem)))))))))))
+       (let [archives (into {} (for [[k f] @futures] [k @f]))
+             paths (map :path pkgs)
+             [dtree lines] (deps-tree archives index paths)
+             cfg (str "# import config\n" (apply str (for [l lines] (str l "\n"))))
+             res (action (str (:main p) " link")
+                         {:image (:link tools)
+                          :args (vec (concat ["link" "-o" "/o/a.out" "-importcfg" "/c/importcfg.link" "-buildmode=exe" "-buildid="]
+                                             (:ldflags opts ["-T" "0x201000" "-R" "0x1000" "-w"])
+                                             [(str "/d/" (index (:main p)) ".a")]))
+                          :trees [["/d" dtree] ["/c" (file-tree {"importcfg.link" cfg})]]
+                          :out "/o" :cwd "/o"})
+             image (second (out-file res (:main p) "a.out"))]
+         (when-let [r (:ref opts)] (box/ref! r image))
+         (log (format "%s: %d packages, the image %s (%d bytes) in %.1f s" (:main p) (count pkgs) image (box/size image)
+                      (/ (- (System/nanoTime) t0) 1e9)))
+         image)))))

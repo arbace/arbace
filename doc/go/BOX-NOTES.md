@@ -2861,3 +2861,109 @@ is itself a driver, BX93 (a), BX94 (a), BX96 (a), BX97 (a) ((b) if a cross build
 later), BX98 (a), all as recommended; BX95 (b) and (c): the patch in Arbace's guest too, and an
 issue for usbarmory/tamago-go drafted for the user to review before anything is posted; BX99
 without `bin/box-tools build` in `bin/gate --full` (the other checks as proposed).
+
+### S7's exit criterion (2026-10-13)
+
+After BX90-BX99 were decided, on `s7-tools` with main `86b744f` (S5) merged.
+
+**The exit criterion is met on amd64 and arm64.** In the box, a Go program was built from its
+sources in the store by tool guests: 55 packages, among them `runtime`, `os` and the board. The
+launcher then booted the image from the store by its ref.
+
+- **amd64 (nested KVM):**
+  - `ARBACE_BOX_SPAWN=1 arbace-box --store S -e '(arbace.box.build/build "plan.hello.amd64"
+    {:ref "hello.amd64" :jobs 8})'` ran 108 tool guests in 9.3 s.
+  - `runtime`'s compile was the longest, 4.5 s with seven other guests running.
+  - The image is 1,308,832 bytes, `cf8857b3...`, the same as the one the same driver built
+    natively (7.3 s).
+  - `ARBACE_BOX_IMAGE=ref:hello.amd64 arbace-box --store S "booted by ref"` printed "hello from a
+    guest compiled and linked in the box: booted by ref".
+  - Spawned from the box (`(box/run {:image (box/ref "hello.amd64") :args [...]})`), its exit and
+    console came back in the result.
+  - A rerun took 1.1 s, every action from the action cache.
+- **arm64 (KVM/arm64 in the emulated aarch64 VM, `bin/box-arm64-vm`, 16 vCPUs):**
+  - The same build of the arm64 plan, with the arm64 tool images, ran 103 tool guests in
+    621 s (every instruction is emulated).
+  - The image is 1,242,173 bytes, `5ee5360c...`, and booted by ref in the VM.
+
+### What was added for it
+
+- **jrt** (new files, and the package's file list): `jdk.internal.jrt.HostSpawn` (overlay/jdk, its
+  forms in jdk/ by `bin/jrt-convert update`). Its natives are in `go/arbace/jrt/spawn.ae` (the
+  optional `SpawnHost`).
+  - In the box, the calls (`spawn_tamago.ae`).
+  - Natively, OSHost (`spawn_linux.ae`) runs `ARBACE_BOX_LAUNCHER --store ARBACE_BOX_STORE --tool
+    REQUEST` as a process, with no budget. The native executable is a host tool for the driver.
+- **`arbace.box`:**
+  - trees: `tree-text`, `put-tree`, `tree`, `put-file`, `put-dir`, `get-tree`, `tree-get`; the
+    printing is the same as `tree.Format`'s, and the same directory is the same hash from the
+    launcher's `tree put` and from `put-dir`;
+  - spawns: `request-text` (the same printing as `tree.Request.Format`), `spawn`, `spawn-wait`,
+    `run`, `result`.
+- **`arbace.box.build`, the driver in Arbace:**
+  - `import-plan` stores a plan's package directories as trees: each directory's files, and the
+    `.h` files of its subdirectories, which an assembly file includes by relative paths. It also
+    stores `GOROOT/pkg/include`.
+  - `build` builds the program:
+    - each package in a future that waits for those it imports;
+    - for each, asm `-gensymabis`, then compile (`-symabis -asmhdr`, `-complete` as go build gives
+      it, `-std`, `-p main` for the command), then one asm per `.s`;
+    - then the archive's members are appended in Arbace (Go's ar format, a name cut to 16 bytes
+      as pack cuts it), and the program is linked;
+    - every action is a spawn, whose trees are `/s` sources, `/d` archives, `/c` configuration
+      and `/i` includes, with its output in `/o`.
+  - The action cache (BX98) keeps the result under `ac.` plus 61 hexadecimal digits of the
+    request's hash without `:ram` and `:cpus`, written unconditionally: a request has one result.
+  - The driver's flags are its own: no build IDs, `-trimpath` mapping its mount points. Its image
+    is not `go build`'s byte for byte, but it is the same wherever the driver runs.
+- **`tools/goplan`:** `go list -deps -json` printed as the plan (EDN). It refuses cgo, `.syso`
+  and embedded files.
+- **The launcher:** `ARBACE_BOX_IMAGE=ref:NAME`, or a hash, boots a blob of the store. The blob's
+  hash is checked before the monitor maps the store's file.
+- **BX95 (b):** the patched `fs_tamago.go` in Arbace's own guest (`bin/lib/box-overlay.bash`:
+  `bin/arbace-go --build --box`, both of `bin/tamago-vendor check`'s images, `bin/box-tools`).
+- **`bin/box-smoke`'s tool-guest checks (BX99):**
+  - a tree from the launcher's tool read by `arbace.box`;
+  - no spawn without `ARBACE_BOX_SPAWN`;
+  - compile spawned with a tree in and out;
+  - a failing compile's exit and console;
+  - a spawn beyond the budget refused;
+  - an image booted by `ref:NAME`.
+
+  The images come from `--tools DIR`, by default `target/box-tools/ARCH`; the section is skipped
+  without them.
+- **Found on the way:**
+  - The archive's member names must be cut to 16 bytes: `rt0_tamago_amd64.o` broke the archive
+    and made the linker choose external linking ("unrecognized file format").
+  - Go's `-complete` has exceptions for the standard packages whose declarations the runtime
+    supplies (`sync`, `os`, `syscall`, ...).
+  - The embedded `arbace.box` wins over `ARBACE_PATH`'s, so iterating on it needs `load-file`.
+
+### Checks (exit criterion)
+
+- `bin/box-smoke` (amd64, the rebuilt box and native executable): 119 ok, none failed. These are
+  113 as before and six tool-guest checks.
+- `bin/box-vendor roundtrip`: 27 of 27 pass. `kvm-tests`: 27 passed, none failed.
+- `bin/jrt build --arch amd64`: build and vet pass.
+- `bin/jrt-convert update`: 838 of 838 converted, one form added (`HostSpawn`), one changed (the
+  package file).
+- `bin/tamago-vendor check`: both architectures' guest images, from the originals and from
+  `tamago/`'s forms, are identical (amd64 and arm64, with and without the symbols cut), both now
+  with the file system's patch; the goos module's packages pass (69 of 69, 62 of 62).
+- The essential `bin/gate` (on this branch with main `86b744f` merged): passed in 13m27s.
+  - The suite: no regressions.
+  - The oracle: 53 known mismatches, 0 new.
+- The arm64 box's smoke test in the VM was not rerun (the build in the VM above exercises the
+  calls). `bin/box-tools build` is not in the gate (BX99 as decided).
+
+### For S8
+
+- The driver builds what `go list` gives it. For Arbace's own program it needs:
+  - the printed module (a2g's output and box/'s forms printed, `overlay/go`'s runtime files given
+    as an overlay: the plan's directories replaced per file);
+  - `jrt` and `lang` compiled in a 12 GiB guest (SA101 (b): the request's `:ram`; through the
+    host's `.tmp/heavy` here);
+  - the version stamped with `-X` (link's flags in the plan).
+- The image is not `go build`'s byte for byte. Its build IDs and flags are the driver's own, so S8
+  compares the image built in the box with the one the same driver builds natively (as above,
+  `cf8857b3...` both ways).

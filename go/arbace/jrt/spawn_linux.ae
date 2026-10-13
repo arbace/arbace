@@ -1,0 +1,61 @@
+;; jrt: tool guests from the native executable (doc/go/BOX-NOTES.md, S7): OSHost as a SpawnHost,
+;; each spawn a launcher process, `ARBACE_BOX_LAUNCHER --store ARBACE_BOX_STORE --tool REQUEST`
+;; (the box's launcher's child, which runs the request's guest under the tool's policy and prints
+;; its result's hash), started at once: natively there is no budget but the caller's. Without
+;; ARBACE_BOX_LAUNCHER or a store every spawn is refused.
+(in-ns 'go.arbace.jrt)
+
+(go/file "spawn_linux.go"
+  :build ["//go:build linux"]
+  :imports [[hex "encoding/hex"] [exec "os/exec"] [os "os"] [strings "strings"] [sync "sync"]])
+
+(go/type osSpawn
+  "osSpawn is a spawn's launcher process: done is closed when it has ended, res its result's hash
+when ok.\n"
+  (struct ^{:tag (chan (struct))} done ^{:tag (array 32 byte)} res ^bool ok))
+
+(go/var ^{:tag sync/Mutex} osSpawnMu)
+(go/var ^{:tag (map int64 (* osSpawn))} osSpawns (make (map int64 (* osSpawn))))
+(go/var ^int64 osSpawnNext)
+
+(go/method Spawn
+  "Spawn starts the launcher's child for request req.\n"
+  [^OSHost h ^{:tag (array 32 byte)} req] :results [int64 error]
+  (let [launcher (os/Getenv "ARBACE_BOX_LAUNCHER")
+        dir (os/Getenv "ARBACE_BOX_STORE")]
+    (when (or (== launcher "") (== dir ""))
+      (return 0 ErrSpawnRefused))
+    (let [cmd (exec/Command launcher "--store" dir "--tool" (hex/EncodeToString (subslice req)))
+          s (addr (lit osSpawn :done (make (chan (struct)))))]
+      (set! (.-Stderr cmd) os/Stderr)
+      (go ((fn []
+             (let [(values out err) (.Output cmd)]
+               (when (== err nil)
+                 (let [(values b derr) (hex/DecodeString (strings/TrimSpace (conv string out)))]
+                   (when (and (== derr nil) (== (len b) 32))
+                     (copy (subslice (.-res s)) b)
+                     (set! (.-ok s) true)))))
+             (close (.-done s)))))
+      (.Lock osSpawnMu)
+      (defer (.Unlock osSpawnMu))
+      (let [id osSpawnNext]
+        (inc! osSpawnNext)
+        (aset osSpawns id s)
+        (return id nil)))))
+
+(go/method SpawnPoll
+  "SpawnPoll is spawn id's result, once its launcher has ended.\n"
+  [^OSHost h ^int64 id] :results [(array 32 byte) bool error]
+  (.Lock osSpawnMu)
+  (defer (.Unlock osSpawnMu))
+  (let [(values s ok) (aget osSpawns id)]
+    (when (not ok)
+      (return (lit (array 32 byte)) false ErrSpawnRefused))
+    (select
+      (case (<! (.-done s)))
+      (default
+        (return (lit (array 32 byte)) false nil)))
+    (delete osSpawns id)
+    (when (not (.-ok s))
+      (return (lit (array 32 byte)) false ErrSpawnRefused))
+    (return (.-res s) true nil)))
