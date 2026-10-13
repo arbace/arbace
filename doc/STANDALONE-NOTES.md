@@ -1858,6 +1858,18 @@ namespaces' Go and its stage 0 hosts the tools compiled.
   (`(hash-ordered-coll "abc")`: `Iterable` taken for a functional interface; the back end now asks
   the analysis's `FISupport`, `Compiler$AST/fiMethod`). One compiled tool namespace failed a2g's
   analysis (a local named `const` met the constant fields `const__N`: they are `const-N` now).
+- **The last build** (all fixes, `ARBACE_AOT=1`, 95 sources, 7,327 classes): the oracle 22,505
+  of 22,558, **the 53 known mismatches, 0 new, 0 now passing**, as recorded.
+- **a2g compiled** (`A2G_GO_EXE` = that build, `bin/a2g --program`; the same run on stage 0 at the
+  same time, the machine shared):
+
+  | a2g | load | reach | translate | write |
+  |---|---:|---:|---:|---:|
+  | stage 0 (evaluated) | 119.0 s | 59.8 s | 32.9 s | 34.9 s |
+  | compiled | 38.2 s | 15.9 s | 12.4 s | 12.2 s |
+
+  Their program trees are identical (`diff -r`, `report.edn` without its times): the compiled
+  a2g writes the evaluated one's program byte for byte.
 - **The cost today**: the compiled program is 243 MB (69 MB evaluated; 347 MB with the tools): 4,826 classes, each with
   a2g's member tables and the forwarders of `IFn`'s 21 `invoke` arities; gc compiles `lang` in
   455-492 s; a2g's second run, its analyzer evaluated on stage 0, takes 1,100-1,500 s. A build is
