@@ -835,7 +835,7 @@ architecture-dependent constants may not merge, unmeasured.
 The host (standalone S4, 2026-10-12): `bin/box-vendor`, `bin/tamago-vendor` and
 `bin/x509roots-vendor` run g2a through `bin/g2a`, on Arbace's Go executable (`bin/lib/g2a-host.bash`:
 `G2A_GO_EXE`, else the tools' host, `bin/lib/host.bash`); the times above are the JVM's. On main's
-G3 as the host, amd64: `tamago-vendor verify` 383 s (5.9 GB), `print` 24 s; `box-vendor
+G3 as the host, amd64: `tamago-vendor verify` 383 s (5.9 GB), `print` 24 s, `check` 115 s (after `--build --box`, 1,644 s with a2g on Go: both guests identical); `box-vendor
 roundtrip` 51 s (20 of 20), `kvm-tests` 34 s, `purego-check` 10 s; `x509roots-vendor verify`
 4 s, `check` 7 s. All pass as on the JVM.
 
