@@ -2566,3 +2566,52 @@ explicit metadata after any line inserted.
 
 **Decided (2026-10-13, the user):** BX80 (a), BX81 (a), BX82 (a), BX84 (a) now and (b) with the
 first long-lived large box, all as recommended; BX83's checks stand as built.
+
+## S7: tool guests (2026-10-13)
+
+Branch `s7-tools`, from main `38bcad1`. STANDALONE-SURVEY §9.1 row S7, D9 (a) (gc as tool guests
+through a spawn call), D10 (a) (trees: a blob per file and EDN tree maps); HOST-VM-SURVEY HV3 (b),
+HV4 (b), HV5 (a), HV8 (a), HV9 (a); BX81 (a) (a spawn asks the RAM it needs). Exit criterion: in
+the box, a Go package compiled and linked into a guest image which the launcher then boots from
+the store. Go's toolchain is TamaGo's go1.27.1 (`/root/tamago-go`) as it is (S9, the toolchain as
+forms, is later).
+
+### The plan (written first)
+
+- **Tool images.** `cmd/compile`, `cmd/link` and `cmd/asm` built for `GOOS=tamago` (amd64,
+  arm64) with the board of `box/`, and a shim that gives the tool its command line, its
+  environment and its file system: a `-overlay` adds the board, the call ABI, the tree format and
+  the shim to the `cmd` module's tree (a package of `cmd` cannot import the module `arbace`), and
+  one file to each tool's `main` package that starts the shim. The images go into the store as
+  blobs; refs name them (`tool.compile.amd64`, ...).
+- **Trees (D10).** A tree is a blob holding an EDN map from a name to `[:file HASH SIZE]`,
+  `[:exec HASH SIZE]` or `[:dir HASH]`, printed canonically (names sorted by their bytes, one entry
+  a line), so that the same files are the same hash. The launcher's store tool imports a
+  directory (or a tar on standard input, `git archive`'s) as a tree and exports one.
+- **The spawn call (HV5).** A guest asks the monitor to run a tool guest by a request blob's hash:
+  an EDN map naming the image (a hash), the command line, the environment, the input trees and
+  where each is mounted (read only, HV3), the output directory, the working directory, and the
+  resources asked (RAM, vCPUs). The answer, once the child has exited, is a result blob's hash:
+  its exit code, its output tree and its console (a blob). Nothing else crosses: no host paths,
+  no network (HV8), no refs. The calls do not wait (as the network's): `Spawn` answers a handle,
+  `SpawnPoll` the result when it is there, and an event is posted at each end.
+- **Where a child runs.** A tool guest is a launcher process of its own (Hypervisor.framework
+  allows one VM a process, and the monitor's system-call filter allows no `fork` or `exec`):
+  a helper process, started by the launcher before the filter goes on, runs the children
+  (`arbace-box --store DIR --tool REQUEST`) and holds the budget (HV4): the RAM and vCPUs of
+  the children running together, the rest queued.
+- **The child's policy.** Its store is a view: blobs it puts, and the blobs reachable from its
+  input trees (and its image); no refs. Its console is captured (bounded) into the result. No
+  network, no spawn of its own (a leaf), no host environment.
+- **The child's file system.** The input trees appear as read-only files in TamaGo's in-memory
+  file system, each file's contents read from the store at its first read (on demand, HV3 (b) in
+  the guest's terms); the output directory is saved as a tree when the tool exits with 0, and
+  declared to the monitor (`SpawnOut`).
+- **The action cache (HV9).** The build driver keys an action by the hash of its request less the
+  resources, and keeps the result's hash under a ref; a rerun after an interruption redoes only
+  what has no result.
+- **The build driver** in Arbace (`arbace.box.build`): from a package graph (`go list`'s, imported
+  as data), the actions `go build` runs (compile, asm, pack, link), each a spawn, the archives
+  passed as trees; the image put in the store under a ref, which the launcher boots.
+- Order: R3 first (what gc needs, by experiment); then the spawn call with trees in and out; then
+  compile, link and the boot by ref on amd64; then arm64 in the emulated VM.
