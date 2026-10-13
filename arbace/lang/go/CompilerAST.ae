@@ -1,0 +1,322 @@
+;; Go-build variant of arbace.lang.Compiler (A2G-SPEC §4.6): read by a2g only. Standalone S6
+;; (doc/STANDALONE-NOTES.md, "S6: Arbace compiled to Go"): the analyzed Expr trees seen as data,
+;; for the back end that compiles namespaces to class forms (arbace.aot), and the run-time side
+;; of compiled namespaces.
+;;
+;; Compiler$AST/node answers, for an analyzed node (an Expr, an ObjMethod, a LocalBinding, a
+;; BindingInit, a CatchClause), a map of its kind (:op) and every field the bytecode back end
+;; read, the node's children left as the objects they are (node again descends); the node
+;; classes are package-private, so code outside arbace.lang cannot read them. While the program
+;; prepares its namespaces with ARBACE_COMPILE set, each unit Compiler$Image records (a top-level
+;; form, analyzed) is also kept in Compiler$AST/UNITS, in order, with the source it came from.
+;;
+;; Compiler$AOT is what compiled code and RT.load use at run time: a source whose namespace was
+;; compiled into the program is loaded by its class SCRIPTBASE__init (the JVM's name) rather than
+;; from the image or from source.
+(in-ns 'arbace.lang)
+
+(a2g/variant Compiler
+  (a2g/add
+    (defclass ^:public ^:static AST
+      ;; the units recorded while preparing, each {source unit} (Object[2]; the unit as
+      ;; Compiler$Image records it: kind line column lineBefore columnBefore expr events), or
+      ;; nil when ARBACE_COMPILE is not set
+      (field ^:public ^:static ^:final ^java.util.ArrayList UNITS
+        (when (some? (System/getenv "ARBACE_COMPILE")) (java.util.ArrayList.)))
+
+      (method ^:public ^:static units ^java.util.ArrayList [] UNITS)
+
+      ;; a unit analyzed for source path (Image.evalUnit), with *unchecked-math* as its
+      ;; analysis saw it (the bytecode back end's conversions of arguments depend on it)
+      (method ^:public ^:static record ^void [^String source ^Object/1 u]
+        (when (some? UNITS)
+          (.add UNITS (new Object/1 [source u (.deref RT/UNCHECKED_MATH)]))))
+
+      ;; a map from alternating names (strings) and values
+      (method ^:static m ^IPersistentMap [^Object/1 kvs]
+        (let [^:mutable ret (cast IPersistentMap PersistentHashMap/EMPTY)]
+          (loop [^int i 0]
+            (when (< i (alength kvs))
+              (set! ret (.assoc ret (Keyword/intern nil (cast String (aget kvs i))) (aget kvs (unchecked-inc-int i))))
+              (recur (unchecked-add-int i 2))))
+          ret))
+
+      ;; an Expr's Java class, when it has one (nil when it has none or cannot say)
+      (method ^:public ^:static javaClass ^Class [x]
+        (if (instance? Expr x)
+            (try
+              (let [e (cast Expr x)]
+                (when (.hasJavaClass e) (.getJavaClass e)))
+              (catch Throwable t nil))
+            nil))
+
+      (method ^:public ^:static primType ^Class [x]
+        (if (instance? Expr x)
+            (try (arbace.lang.Compiler/maybePrimitiveType (cast Expr x)) (catch Throwable t nil))
+            nil))
+
+      (method ^:public ^:static canEmitPrimitive ^boolean [x]
+        (and (instance? MaybePrimitiveExpr x) (.canEmitPrimitive (cast MaybePrimitiveExpr x))))
+
+      (method ^:public ^:static isMutable ^boolean [^ObjExpr ox ^LocalBinding lb] (.isMutable ox lb))
+
+      (method ^:public ^:static isVolatile ^boolean [^ObjExpr ox ^LocalBinding lb] (.isVolatile ox lb))
+
+      (method ^:static objx ^Object/1 [^ObjExpr x]
+        (new Object/1 ["name" (.-name x) "internalName" (.-internalName x) "thisName" (.-thisName x)
+                       "tag" (.-tag x) "closes" (.-closes x) "closesExprs" (.-closesExprs x)
+                       "volatiles" (.-volatiles x) "fields" (.-fields x) "hintedFields" (.-hintedFields x)
+                       "keywords" (.-keywords x) "vars" (.-vars x) "compiledClass" (.-compiledClass x)
+                       "line" (Integer/valueOf (.-line x)) "column" (Integer/valueOf (.-column x))
+                       "constants" (.-constants x) "constantsID" (Integer/valueOf (.-constantsID x))
+                       "altCtorDrops" (Integer/valueOf (.-altCtorDrops x))
+                       "keywordCallsites" (.-keywordCallsites x) "protocolCallsites" (.-protocolCallsites x)
+                       "onceOnly" (Boolean/valueOf (.-onceOnly x)) "opts" (.-opts x)
+                       "classMeta" (.-classMeta x) "canBeDirect" (Boolean/valueOf (.-canBeDirect x))
+                       "isDeftype" (Boolean/valueOf (.isDeftype x))
+                       "supportsMeta" (Boolean/valueOf (.supportsMeta x))]))
+
+      (method ^:static objm ^Object/1 [^ObjMethod x]
+        (new Object/1 ["parent" (.-parent x) "locals" (.-locals x) "body" (.-body x) "objx" (.-objx x)
+                       "argLocals" (.-argLocals x) "maxLocal" (Integer/valueOf (.-maxLocal x))
+                       "line" (Integer/valueOf (.-line x)) "column" (Integer/valueOf (.-column x))
+                       "usesThis" (Boolean/valueOf (.-usesThis x))
+                       "localsUsedInCatchFinally" (.-localsUsedInCatchFinally x)
+                       "methodMeta" (.-methodMeta x)]))
+
+      (method ^:static cat ^Object/1 [^Object/1 a ^Object/1 b]
+        (let [r (new Object/1 (unchecked-add-int (alength a) (alength b)))]
+          (System/arraycopy a 0 r 0 (alength a))
+          (System/arraycopy b 0 r (alength a) (alength b))
+          r))
+
+      (method ^:static b ^Boolean [^boolean v] (Boolean/valueOf v))
+
+      (method ^:static i ^Integer [^int v] (Integer/valueOf v))
+
+      ;; the node as a map: :op, the node's fields, and for an Expr :class (its Java class) and
+      ;; :prim (its primitive type, Compiler.maybePrimitiveType)
+      (method ^:public ^:static node ^IPersistentMap [x]
+        (let [kvs
+              (cond
+                (instance? LocalBindingExpr x)
+                  (let [e (cast LocalBindingExpr x)]
+                    (new Object/1 ["op" "local" "b" (.-b e) "tag" (.-tag e) "shouldClear" (AST/b (.-shouldClear e))]))
+                (instance? LocalBinding x)
+                  (let [e (cast LocalBinding x)]
+                    (new Object/1 ["op" "binding" "sym" (.-sym e) "tag" (.-tag e) "init" (.-init e)
+                                   "idx" (AST/i (.-idx e)) "name" (.-name e) "isArg" (AST/b (.-isArg e))
+                                   "canBeCleared" (AST/b (.-canBeCleared e))
+                                   "recurMismatch" (AST/b (.-recurMistmatch e)) "used" (AST/b (.-used e))
+                                   "bindingClass" (when (.hasJavaClass e) (.getJavaClass e))
+                                   "bindingPrim" (.getPrimitiveType e)]))
+                (instance? NumberExpr x)
+                  (let [e (cast NumberExpr x)] (new Object/1 ["op" "number" "n" (.-n e) "id" (AST/i (.-id e))]))
+                (instance? ConstantExpr x)
+                  (let [e (cast ConstantExpr x)] (new Object/1 ["op" "constant" "v" (.-v e) "id" (AST/i (.-id e))]))
+                (instance? StringExpr x) (new Object/1 ["op" "string" "str" (.-str (cast StringExpr x))])
+                (instance? KeywordExpr x) (new Object/1 ["op" "keyword" "k" (.-k (cast KeywordExpr x))])
+                (instance? NilExpr x) (new Object/1 ["op" "nil"])
+                (instance? BooleanExpr x) (new Object/1 ["op" "boolean" "val" (AST/b (.-val (cast BooleanExpr x)))])
+                (instance? EmptyExpr x) (new Object/1 ["op" "empty" "coll" (.-coll (cast EmptyExpr x))])
+                (instance? VarExpr x)
+                  (let [e (cast VarExpr x)] (new Object/1 ["op" "var" "var" (.-var e) "tag" (.-tag e)]))
+                (instance? TheVarExpr x) (new Object/1 ["op" "the-var" "var" (.-var (cast TheVarExpr x))])
+                (instance? DefExpr x)
+                  (let [e (cast DefExpr x)]
+                    (new Object/1 ["op" "def" "var" (.-var e) "init" (.-init e) "meta" (.-meta e)
+                                   "initProvided" (AST/b (.-initProvided e)) "isDynamic" (AST/b (.-isDynamic e))
+                                   "source" (.-source e) "line" (AST/i (.-line e)) "column" (AST/i (.-column e))]))
+                (instance? AssignExpr x)
+                  (let [e (cast AssignExpr x)] (new Object/1 ["op" "set!" "target" (.-target e) "val" (.-val e)]))
+                (instance? ImportExpr x) (new Object/1 ["op" "import" "c" (.-c (cast ImportExpr x))])
+                (instance? QualifiedMethodExpr x)
+                  (let [e (cast QualifiedMethodExpr x)]
+                    (new Object/1 ["op" "qualified-method" "c" (.-c e) "hintedSig" (.-hintedSig e)
+                                   "methodSymbol" (.-methodSymbol e) "methodName" (.-methodName e)
+                                   "kind" (.name (.-kind e)) "tagClass" (.-tagClass e)
+                                   "fieldOverload" (.-fieldOverload e)]))
+                (instance? InstanceFieldExpr x)
+                  (let [e (cast InstanceFieldExpr x)]
+                    (new Object/1 ["op" "instance-field" "target" (.-target e) "targetClass" (.-targetClass e)
+                                   "field" (.-field e) "fieldName" (.-fieldName e) "line" (AST/i (.-line e))
+                                   "column" (AST/i (.-column e)) "tag" (.-tag e)
+                                   "requireField" (AST/b (.-requireField e))]))
+                (instance? StaticFieldExpr x)
+                  (let [e (cast StaticFieldExpr x)]
+                    (new Object/1 ["op" "static-field" "fieldName" (.-fieldName e) "c" (.-c e) "field" (.-field e)
+                                   "tag" (.-tag e) "line" (AST/i (.-line e)) "column" (AST/i (.-column e))]))
+                (instance? InstanceMethodExpr x)
+                  (let [e (cast InstanceMethodExpr x)]
+                    (new Object/1 ["op" "instance-method" "target" (.-target e) "methodName" (.-methodName e)
+                                   "args" (.-args e) "source" (.-source e) "line" (AST/i (.-line e))
+                                   "column" (AST/i (.-column e)) "tag" (.-tag e)
+                                   "tailPosition" (AST/b (.-tailPosition e)) "method" (.-method e)
+                                   "qualifyingClass" (.-qualifyingClass e)]))
+                (instance? StaticMethodExpr x)
+                  (let [e (cast StaticMethodExpr x)]
+                    (new Object/1 ["op" "static-method" "c" (.-c e) "methodName" (.-methodName e) "args" (.-args e)
+                                   "source" (.-source e) "line" (AST/i (.-line e)) "column" (AST/i (.-column e))
+                                   "method" (.-method e) "tag" (.-tag e) "tailPosition" (AST/b (.-tailPosition e))]))
+                (instance? UnresolvedVarExpr x)
+                  (new Object/1 ["op" "unresolved-var" "symbol" (.-symbol (cast UnresolvedVarExpr x))])
+                (instance? MonitorEnterExpr x) (new Object/1 ["op" "monitor-enter" "target" (.-target (cast MonitorEnterExpr x))])
+                (instance? MonitorExitExpr x) (new Object/1 ["op" "monitor-exit" "target" (.-target (cast MonitorExitExpr x))])
+                (instance? TryExpr x)
+                  (let [e (cast TryExpr x)]
+                    (new Object/1 ["op" "try" "tryExpr" (.-tryExpr e) "finallyExpr" (.-finallyExpr e)
+                                   "catchExprs" (.-catchExprs e) "retLocal" (AST/i (.-retLocal e))
+                                   "finallyLocal" (AST/i (.-finallyLocal e))]))
+                (instance? Compiler$TryExpr$CatchClause x)
+                  (let [e (cast Compiler$TryExpr$CatchClause x)]
+                    (new Object/1 ["op" "catch" "c" (.-c e) "lb" (.-lb e) "handler" (.-handler e)]))
+                (instance? ThrowExpr x) (new Object/1 ["op" "throw" "excExpr" (.-excExpr (cast ThrowExpr x))])
+                (instance? NewExpr x)
+                  (let [e (cast NewExpr x)] (new Object/1 ["op" "new" "args" (.-args e) "ctor" (.-ctor e) "c" (.-c e)]))
+                (instance? MetaExpr x)
+                  (let [e (cast MetaExpr x)] (new Object/1 ["op" "with-meta" "expr" (.-expr e) "meta" (.-meta e)]))
+                (instance? IfExpr x)
+                  (let [e (cast IfExpr x)]
+                    (new Object/1 ["op" "if" "testExpr" (.-testExpr e) "thenExpr" (.-thenExpr e)
+                                   "elseExpr" (.-elseExpr e) "line" (AST/i (.-line e)) "column" (AST/i (.-column e))]))
+                (instance? ListExpr x) (new Object/1 ["op" "list" "args" (.-args (cast ListExpr x))])
+                (instance? VectorExpr x) (new Object/1 ["op" "vector" "args" (.-args (cast VectorExpr x))])
+                (instance? MapExpr x) (new Object/1 ["op" "map" "keyvals" (.-keyvals (cast MapExpr x))])
+                (instance? SetExpr x) (new Object/1 ["op" "set" "keys" (.-keys (cast SetExpr x))])
+                (instance? KeywordInvokeExpr x)
+                  (let [e (cast KeywordInvokeExpr x)]
+                    (new Object/1 ["op" "keyword-invoke" "kw" (.-kw e) "tag" (.-tag e) "target" (.-target e)
+                                   "line" (AST/i (.-line e)) "column" (AST/i (.-column e)) "source" (.-source e)]))
+                (instance? StrConcatExpr x)
+                  (let [e (cast StrConcatExpr x)]
+                    (new Object/1 ["op" "str-concat" "args" (.-args e) "texts" (.-texts e) "prims" (.-prims e)
+                                   "temps" (.-temps e) "line" (AST/i (.-line e)) "column" (AST/i (.-column e))
+                                   "source" (.-source e)]))
+                (instance? InstanceOfExpr x)
+                  (let [e (cast InstanceOfExpr x)] (new Object/1 ["op" "instance?" "expr" (.-expr e) "c" (.-c e)]))
+                (instance? InvokeExpr x)
+                  (let [e (cast InvokeExpr x)]
+                    (new Object/1 ["op" "invoke" "fexpr" (.-fexpr e) "tag" (.-tag e) "args" (.-args e)
+                                   "line" (AST/i (.-line e)) "column" (AST/i (.-column e))
+                                   "tailPosition" (AST/b (.-tailPosition e)) "source" (.-source e)
+                                   "isProtocol" (AST/b (.-isProtocol e)) "isDirect" (AST/b (.-isDirect e))
+                                   "siteIndex" (AST/i (.-siteIndex e)) "protocolOn" (.-protocolOn e)
+                                   "onMethod" (.-onMethod e)]))
+                (instance? FnExpr x)
+                  (let [e (cast FnExpr x)]
+                    (AST/cat (AST/objx e)
+                             (new Object/1 ["op" "fn" "variadicMethod" (.-variadicMethod e) "methods" (.-methods e)
+                                            "hasPrimSigs" (AST/b (.-hasPrimSigs e)) "hasMeta" (AST/b (.-hasMeta e))
+                                            "hasEnclosingMethod" (AST/b (.-hasEnclosingMethod e))
+                                            "isVariadic" (AST/b (.isVariadic e))])))
+                (instance? NewInstanceExpr x)
+                  (let [e (cast NewInstanceExpr x)]
+                    (AST/cat (AST/objx e)
+                             (new Object/1 ["op" "new-instance" "methods" (.-methods e) "mmap" (.-mmap e)
+                                            "covariants" (.-covariants e)])))
+                (instance? FnMethod x)
+                  (let [e (cast FnMethod x)]
+                    (AST/cat (AST/objm e)
+                             (new Object/1 ["op" "fn-method" "reqParms" (.-reqParms e) "restParm" (.-restParm e)
+                                            "argclasses" (.-argclasses e) "retClass" (.-retClass e) "prim" (.-prim e)
+                                            "isVariadic" (AST/b (.isVariadic e))])))
+                (instance? NewInstanceMethod x)
+                  (let [e (cast NewInstanceMethod x)]
+                    (AST/cat (AST/objm e)
+                             (new Object/1 ["op" "new-instance-method" "name" (.-name e) "retClass" (.-retClass e)
+                                            "exclasses" (.-exclasses e) "parms" (.-parms e)])))
+                (instance? BodyExpr x) (new Object/1 ["op" "do" "exprs" (.-exprs (cast BodyExpr x))])
+                (instance? BindingInit x)
+                  (let [e (cast BindingInit x)] (new Object/1 ["op" "binding-init" "binding" (.-binding e) "init" (.-init e)]))
+                (instance? LetFnExpr x)
+                  (let [e (cast LetFnExpr x)] (new Object/1 ["op" "letfn" "bindingInits" (.-bindingInits e) "body" (.-body e)]))
+                (instance? LetExpr x)
+                  (let [e (cast LetExpr x)]
+                    (new Object/1 ["op" "let" "bindingInits" (.-bindingInits e) "body" (.-body e)
+                                   "isLoop" (AST/b (.-isLoop e))]))
+                (instance? RecurExpr x)
+                  (let [e (cast RecurExpr x)]
+                    (new Object/1 ["op" "recur" "args" (.-args e) "loopLocals" (.-loopLocals e)
+                                   "line" (AST/i (.-line e)) "column" (AST/i (.-column e)) "source" (.-source e)]))
+                (instance? MethodParamExpr x) (new Object/1 ["op" "method-param" "c" (.-c (cast MethodParamExpr x))])
+                (instance? CaseExpr x)
+                  (let [e (cast CaseExpr x)]
+                    (new Object/1 ["op" "case" "expr" (.-expr e) "shift" (AST/i (.-shift e)) "mask" (AST/i (.-mask e))
+                                   "low" (AST/i (.-low e)) "high" (AST/i (.-high e)) "defaultExpr" (.-defaultExpr e)
+                                   "tests" (.-tests e) "thens" (.-thens e) "switchType" (.-switchType e)
+                                   "testType" (.-testType e) "skipCheck" (.-skipCheck e)
+                                   "returnType" (.-returnType e) "line" (AST/i (.-line e)) "column" (AST/i (.-column e))]))
+                :else (new Object/1 ["op" "unknown" "type" (.getName (.getClass x))]))]
+          (if (instance? Expr x)
+              (AST/m (AST/cat kvs (new Object/1 ["class" (AST/javaClass x) "prim" (AST/primType x)
+                                                 "canEmitPrimitive" (AST/b (AST/canEmitPrimitive x))])))
+              (AST/m kvs))))))
+
+  (a2g/add
+    (defclass ^:public ^:static AOT
+      ;; RT.load of scriptbase (an embedded source or one on ARBACE_PATH): when the program holds
+      ;; the source's compiled loader, the class SCRIPTBASE__init (dots for slashes), its static
+      ;; load() runs the source's top-level forms, compiled, in the bindings Compiler.load makes;
+      ;; true when it did. ARBACE_NO_AOT set: never (the source is loaded as before)
+      (method ^:public ^:static load ^boolean [^String scriptbase ^String sourcePath ^String sourceName]
+        (let [c (AOT/loader scriptbase)]
+          (if (nil? c)
+              false
+              (do
+                (Var/pushThreadBindings
+                  (^[Object/1] RT/mapUniqueKeys LOADER (RT/makeClassLoader) SOURCE_PATH sourcePath
+                                                SOURCE sourceName METHOD nil LOCAL_ENV nil LOOP_LOCALS nil
+                                                CLASS_FORM_SIBLINGS nil NEXT_LOCAL_NUM (Integer/valueOf 0)
+                                                RT/READEVAL RT/T RT/CURRENT_NS (.deref RT/CURRENT_NS)
+                                                LINE_BEFORE (Integer/valueOf 1) COLUMN_BEFORE (Integer/valueOf 1)
+                                                LINE_AFTER (Integer/valueOf 1) COLUMN_AFTER (Integer/valueOf 1)
+                                                RT/UNCHECKED_MATH (.deref RT/UNCHECKED_MATH)
+                                                RT/WARN_ON_REFLECTION (.deref RT/WARN_ON_REFLECTION)
+                                                RT/DATA_READERS (.deref RT/DATA_READERS)
+                                                Compiler$Image/RECORDER nil Compiler$Image/PENDING nil))
+                (try
+                  (Reflector/invokeStaticMethod c "load" (new Object/1 0))
+                  true
+                  (catch Throwable e
+                    (if (not (instance? CompilerException e))
+                        (throw (CompilerException. sourcePath
+                                                   (cast Integer (.deref LINE_BEFORE))
+                                                   (cast Integer (.deref COLUMN_BEFORE))
+                                                   nil
+                                                   CompilerException/PHASE_EXECUTION
+                                                   e))
+                        (throw (cast CompilerException e))))
+                  (finally (Var/popThreadBindings)))))))
+
+      ;; the compiled loader of scriptbase, or nil
+      (method ^:public ^:static loader ^Class [^String scriptbase]
+        (if (some? (System/getenv "ARBACE_NO_AOT"))
+            nil
+            (try
+              (Class/forName (java-str (.replace scriptbase \/ \.) "__init"))
+              (catch ClassNotFoundException e nil))))
+
+      ;; (str x y ...) as the bytecode concatenates (StrConcatExpr.emit, CodeStrConcat): a
+      ;; constant's text as folded (texts), the other values (vs) each converted as str
+      ;; converts it: nil to "", else its toString; the first one's null toString a
+      ;; NullPointerException, as (StringBuilder. nil) throws in str
+      (method ^:public ^:static strConcat ^String [^String/1 texts ^Object/1 vs]
+        (let [n (alength texts)
+              sb (StringBuilder.)]
+          (loop [^int i 0]
+            (when (< i n)
+              (let [t (aget texts i)]
+                (if (some? t)
+                    (.append sb t)
+                    (let [v (aget vs i)]
+                      (when (some? v)
+                        (let [x (.toString v)]
+                          (when (and (nil? x) (== i 0)) (throw (NullPointerException.)))
+                          (.append sb x))))))
+              (recur (unchecked-inc-int i))))
+          (.toString sb)))
+
+      ;; a compiled unit starts: the line of its form, for errors (Compiler.load's LINE_BEFORE)
+      (method ^:public ^:static at ^void [^int line ^int column]
+        (.set LINE_BEFORE (Integer/valueOf line))
+        (.set COLUMN_BEFORE (Integer/valueOf column))))))
