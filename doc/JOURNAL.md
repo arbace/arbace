@@ -1246,3 +1246,15 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   defaults in a 12 GiB guest, the faster run (52 s against about 2 minutes); SA102 and
   SA104-SA107 as recommended. Alternatives: a class-level split with linkname pulls (5-10 days
   in a2g), hooks set by the library's init.
+
+## 2026-10-13: BX95's bug report verified, not posted
+
+- The three bugs of TamaGo's in-memory file system (BX95) reproduced on a guest under the
+  monitor on /dev/kvm (amd64), a small TamaGo program built by go-whim's guest harness in a
+  scratch copy: with go1.27.1's `src/syscall/fs_tamago.go` a seek past the end changes the size
+  (8 bytes, seek to 100: 9; 100 bytes, seek to 10 then 200: 11), the next write panics (`slice
+  bounds out of range [100:99]`, `fs_tamago.go:510`), and `O_TRUNC` keeps the old size; with
+  the three-line patch Arbace's overlay carries, the sizes are 8, 101, 100 and 0.
+- usbarmory/tamago-go has GitHub issues disabled; the user decided not to post the report
+  elsewhere (alternatives: an issue on usbarmory/tamago, a pull request to tamago-go). The
+  draft stays in `.tmp/tamago-fs-issue.md` for the user.
