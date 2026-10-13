@@ -1155,3 +1155,6 @@ All as recommended in doc/STANDALONE-SURVEY.md:
 - The result is below the 1 s an hour criterion, so HV6 (a) stands: no resync for now. The Mac's
   run is due at the next box milestone, and a resync would matter for boxes running for days.
   Details are in doc/go/HOST-VM-SURVEY.md, under HV6.
+- Later the same day the VM showed 62.8 GiB (61 GiB available): the outer host had deflated the
+  balloon. The survey records both readings. Planning keeps about 30 GiB as the floor, since the
+  balloon may inflate again and there is no swap.
