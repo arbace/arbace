@@ -1,0 +1,78 @@
+;; jrt: tool guests (doc/go/BOX-NOTES.md, S7): a program runs another guest of the box by a request
+;; blob of the store (the image, the command line, the environment, the input trees, the output
+;; directory, the RAM and vCPUs asked) and gets a result blob (the exit code, the output tree, the
+;; console). A host that can implements the optional SpawnHost: the box's (spawn_tamago.ae) over
+;; the monitor's calls Spawn and SpawnPoll, OSHost on Linux (spawn_linux.ae) by the launcher
+;; ARBACE_BOX_LAUNCHER names. The natives of jrt's own Java jdk.internal.jrt.HostSpawn
+;; (overlay/jdk), which the namespace arbace.box uses, answer with the box's ABI's codes
+;; (arbace/box/abi: Spawn*).
+(in-ns 'go.arbace.jrt)
+
+(go/file "spawn.go"
+  :imports [[errors "errors"] [time "time"]])
+
+(go/type SpawnHost
+  "SpawnHost is a host that runs tool guests: a Host may implement it. Its methods are called from
+any goroutine.\n"
+  (interface
+    (^{:doc "Spawn starts the guest request req (a blob's hash) asks for and returns at once: a
+handle, or ErrSpawnRefused.\n"}
+      Spawn [^{:tag (array 32 byte)} req] :results [int64 error])
+    (^{:doc "SpawnPoll is handle h's result: its hash and true once the guest has ended (the handle
+then released), false while it runs; ErrSpawnRefused for no such handle, or a guest that could
+not run.\n"}
+      SpawnPoll [^int64 h] :results [(array 32 byte) bool error])))
+
+(go/var ^{:tag error :doc "ErrSpawnRefused is a spawn the host refused, or could not run.\n"}
+  ErrSpawnRefused (errors/New "the spawn was refused"))
+
+(go/func CurrentSpawnHost
+  "CurrentSpawnHost is the current host as a SpawnHost, or nil.\n"
+  ^SpawnHost []
+  (let [(values sh ok) (assert SpawnHost (CurrentHost))]
+    (when (not ok)
+      (return nil))
+    sh))
+
+(go/const "The answers of HostSpawn's natives (arbace/box/abi: SpawnRefused, SpawnRunning).\n"
+  [^{:val 0} spawnOK 0]
+  [^{:val -1} spawnRefused -1]
+  [^{:val -11} spawnRunning -11])
+
+(go/func HostSpawn_Start0_B1__J_native
+  "HostSpawn_Start0_B1__J_native starts the guest request req asks for: a handle, or spawnRefused.\n"
+  ^int64 [^{:tag (* ByteArray)} req]
+  (let [sh (CurrentSpawnHost)]
+    (when (== sh nil)
+      (return spawnRefused))
+    (let [(values h err) (.Spawn sh (hashOf req))]
+      (when (!= err nil)
+        (return spawnRefused))
+      h)))
+
+(go/func HostSpawn_Poll0_J_B1__I_native
+  "HostSpawn_Poll0_J_B1__I_native: spawnOK once handle h's guest has ended, its result's hash
+written to res; spawnRunning; spawnRefused.\n"
+  ^int32 [^int64 h ^{:tag (* ByteArray)} res]
+  (let [sh (CurrentSpawnHost)]
+    (when (== sh nil)
+      (return spawnRefused))
+    (let [(values r ended err) (.SpawnPoll sh h)]
+      (when (!= err nil)
+        (return spawnRefused))
+      (when (not ended)
+        (return spawnRunning))
+      (copy (byteView res 0 32) (subslice r))
+      spawnOK)))
+
+(go/func HostSpawn_Await0_J_B1__I_native
+  "HostSpawn_Await0_J_B1__I_native waits for handle h's end, polling every millisecond (the
+goroutine sleeps; in the box the vCPU parks): spawnOK, its result's hash written to res, or
+spawnRefused.\n"
+  ^int32 [^int64 h ^{:tag (* ByteArray)} res]
+  (for [] true _
+    (let [r (HostSpawn_Poll0_J_B1__I_native h res)]
+      (when (!= r spawnRunning)
+        (return r)))
+    (time/Sleep time/Millisecond))
+  spawnRefused)
