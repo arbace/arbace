@@ -64,7 +64,11 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - The next milestone, `arbace-inside-itself-v1` (the user, 2026-10-13), includes all of this
   section: the standalone survey's S5-S8 (the box rebuilding Arbace inside itself), the known
-  issues below and the speed item. `bin/gate --full` runs at it.
+  issues below and the speed item. `bin/gate --full` runs at it. Decided (the user): three
+  tracks in parallel, S5 with the known issues, S6 (which carries the speed item), S7; S8 when
+  they land. S8 must pass byte for byte on amd64 (/dev/kvm), in the emulated arm64 VM and on the
+  Mac (one bundle at the end, also carrying the Mac's HV1 RAM checks and HV6/HV7 clock run). S9
+  (Go's toolchain as forms) stays later.
 - Known issues from S4 (STANDALONE-NOTES, "S4: the JVM removed", Left), and reflection on a
   member typed by a sibling defined later (SA90 (b)):
   - `go/arbace/jrt/reflect_tables.ae` stale against `bin/jrt manifest` (regenerating it changes

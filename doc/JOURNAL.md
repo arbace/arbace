@@ -1192,3 +1192,9 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   Arbace compiled to Go, the toolchain as tool guests, the rebuild inside the box), the known
   issues left from S4 and SA90 (b), and a2g's speed. `bin/gate --full` runs at it, as at the
   milestones before.
+- The user decided how it runs, each as recommended: three tracks in parallel (S5 with the known
+  issues; S6, which carries the speed item; S7), S8 once they land; S8 byte for byte on amd64,
+  in the emulated arm64 VM and on the Mac, whose one bundle at the end also carries the Mac's
+  HV1 RAM checks and its HV6/HV7 clock run; S9 (Go's toolchain as forms) not in this milestone.
+  Alternatives considered: the stages strictly in sequence; S6 first; amd64 and the arm64 VM
+  without the Mac, or amd64 only; S9 included.
