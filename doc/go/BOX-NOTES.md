@@ -3100,3 +3100,34 @@ the byte-for-byte run is redone cheaply after it.
   expected image, boots it by ref, and runs it again from the action cache; `./mac.sh clock` is
   HV6's hour (the guest's clock against the Mac's, a line a minute); `./mac.sh all` runs the
   clock beside check, sign, hv, the checklist and the rebuild.
+
+### Measured (amd64, nested KVM, the shared machine)
+
+`bin/box-rebuild --dir .tmp/box-rebuild/amd64-clean prepare box host compare boot smoke` from empty
+stores, the commit `53d9b5d` (the aarch64 VM's run going on beside it, 16 emulated vCPUs; the
+times are this machine's under that load, not the box's best):
+
+| step | in the box | on the host |
+|---|---:|---:|
+| a2g `--program` (8 jobs) | 407 s | 387 s |
+| the two printings, at once | 138 s | 47 s |
+| the plan (181 packages) | 3 s | 4 s |
+| 273 compiles and assemblies, 4 at once, and the link | 183 s | 150 s |
+| of which jrt's compile, lang's | 108 s, 44 s | 90 s, 35 s |
+| the namespaces prepared (the new image; natively the executable) | 21 s | 16 s |
+| the main package and the link again, the cut | 41 s | 35 s |
+| all | 773 s | 623 s |
+
+- **The image built in the box equals the host's byte for byte**: `a3e7c069…`, 68,911,402 bytes,
+  and so does every step's result: the sources' tree, a2g's program (`d57cb321…`), GOROOT/src as
+  printed (`108bd7bc…`), the goos module, the module, the plan, the version, the first image, the
+  image of prepared namespaces (`de06d439…`), the image before the cut.
+- a2g's program (but `image.bin`) and the image of prepared namespaces equal `bin/arbace-go
+  --build`'s: the box's a2g and the box-prepared image are the host's.
+- Booted by its ref (`ARBACE_BOX_IMAGE=ref:rebuilt.box.amd64`): "booted by ref:
+  arbace-seed-is-go-v1-62-g53d9b5d amd64", the version from the tree's `VERSION`.
+- `bin/box-smoke` on a launcher with the rebuilt image appended: 119 ok, none failed.
+- `plan-check`: 181 packages planned in Arbace, 181 by go list: the same.
+- A rerun from the action cache: 65 s in the box (every action cached; the driver reads the
+  trees and the plan again, and the guest's start).
+- The guest that runs the driver: 6 GiB; the spawns' budget 40 GiB, 16 vCPUs.
