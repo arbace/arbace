@@ -239,9 +239,9 @@ the writing's steps in `:steps`): the load (reading, entering and analyzing ever
 analysis is complete before any translation, `analyze-class!` of all of them), the reach
 (the classes and methods reachable from the roots), the translation, and the writing.
 
-**The run in parallel** (standalone S4, amendments SA50-SA52). The translation of the classes
+**The run in parallel** (standalone S4, amendments SA50-SA53). The translation of the classes
 and the texts of the files are computed on `A2G_JOBS` threads (default: the number of
-processors; 1: one after another), and the output is byte-identical whatever their number,
+processors, at most 16; 1: one after another), and the output is byte-identical whatever their number,
 the same as the sequential translation's:
 - **Each class is translated on its own** (`arbace.a2g.main/translate-one`), the classes the
   costliest first (by the size of their class forms file), in a package state of its own: its
@@ -275,7 +275,8 @@ the same as the sequential translation's:
   parallel first (`out/unlined-texts`): only a list with `:a2g/line` makes a text depend on
   the line it starts on (the layout above), so the others are laid out by their newlines. The
   embedded resources are compressed in parallel and written in order; `report.edn` is printed
-  beside the writing, its times put in at the end.
+  beside the writing, its times put in at the end (on one line: `:times`, with the steps'
+  times in `:steps`, is the one part of `report.edn` that differs from run to run).
 - **The load**: the class forms files are read in parallel (they hold no `#()` or
   syntax-quote: reading them takes no ids), as are the embedded sources scanned for the
   classes they name (`embed/cut-candidates`: their reading takes ids, as many whatever the
