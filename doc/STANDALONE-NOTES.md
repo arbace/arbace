@@ -1847,6 +1847,12 @@ namespaces' Go and its stage 0 hosts the tools compiled.
   evaluated from the checkout, the class forms' analysis `arbace.classes.*` and `arbace.core`
   compiled): load 105.7 → 54.9 s, reach 55.7 → 35.7 s, translate 29.6 → 20.7 s, write 29.3 →
   17.9 s (the machine shared with other agents' builds).
+- **The oracle on the compiled program** (before the fixes below; `bin/oracle check`, against
+  `known-go-amd64-frozen.edn`): 22,483 of 22,558, 22 new mismatches, of three causes, since
+  fixed in the back end: a fn argument adapted as if every interface were a functional one
+  (`(conj "" 1)`'s `ClassCastException` message, 15 cases); a fn's `^long` return not converted
+  (`hash-ordered-coll` returned an `Integer`, 15 cases of `hashing.ae`); two fns of one name
+  (core's bootstrap `dotimes` and the final one) given one class, the first's (1 case).
 - **The cost today**: the compiled program is 243 MB (69 MB evaluated): 4,826 classes, each with
   a2g's member tables and the forwarders of `IFn`'s 21 `invoke` arities; gc compiles `lang` in
   455-492 s; a2g's second run, its analyzer evaluated on stage 0, takes 1,100-1,500 s. A build is
