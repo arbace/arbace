@@ -2855,3 +2855,9 @@ the shared host), the launcher of main `38bcad1`:
 - **BX99 (checks)** `tree_test.go`; `bin/box-vendor roundtrip` with `tree` and `tool`; the spawn's
   and the trees' checks in `bin/box-smoke` (to add with `arbace.box`'s calls); `bin/box-tools build`
   in `bin/gate --full` beside `bin/arbace-go --build --box`.
+
+**Decided (2026-10-13, the user):** BX90 (a), BX91 (a), BX92 (a) now and (b) when a tool guest
+is itself a driver, BX93 (a), BX94 (a), BX96 (a), BX97 (a) ((b) if a cross build is wanted
+later), BX98 (a), all as recommended; BX95 (b) and (c): the patch in Arbace's guest too, and an
+issue for usbarmory/tamago-go drafted for the user to review before anything is posted; BX99
+without `bin/box-tools build` in `bin/gate --full` (the other checks as proposed).

@@ -1206,3 +1206,23 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   single heavy slot stands; it goes to two slots once `free` shows the memory back.
 - Restored the same evening: `free` shows 62.8 GiB again (59 GiB available). The heavy lock
   goes to two slots.
+
+## 2026-10-13: S7's first checkpoint merged, BX90-BX99 decided
+
+- S7 (doc/go/BOX-NOTES.md, "S7: tool guests"): the spawn calls `Spawn`, `SpawnPoll`,
+  `SpawnOut` (54-56); a child is a launcher process of its own, started by a helper before the
+  system-call filter, its store a view (no refs, no network, no spawn), within a RAM and CPU
+  budget; trees as canonical EDN maps in the store (`box/go/arbace/box/tree`, the store tool's
+  `tree put|tar|get|ls`); Go's `compile`, `link` and `asm` from /root/tamago-go (go1.27.1)
+  unchanged, built as TamaGo guests through an overlay of GOROOT's `cmd` module
+  (`bin/box-tools`). R3 answered: gc needs only TamaGo's in-memory file system, no mmap, no
+  temporary files, no `os/exec`, no network. A hello-world guest's whole `go build -a` plan
+  replayed as 82 tool guests gave an image byte-identical to the host tools' (15.4 s against
+  2.9 s), and it booted.
+- Found: three bugs in TamaGo's in-memory file system (`fsysFile.seek` past the end shrinks
+  the file, a write past the end adds the offset to the size, `O_TRUNC` keeps the size),
+  patched for the tool guests in `overlay/go/syscall/fs_tamago.ae`.
+- The user decided BX90-BX98 as recommended, with BX95 (b) and (c): the patch also in Arbace's
+  guest, and an issue for TamaGo drafted for the user's review; BX99 without `bin/box-tools
+  build` in `bin/gate --full`, the user's choice against the recommendation (the other checks
+  as proposed).
