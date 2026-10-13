@@ -15,7 +15,15 @@
 #                        the store (the launcher's tool, a script by ref), the network on loopback
 #                        (a connection within the box, a socket REPL from the host by nc), the idle
 #                        CPU at the prompt (20 s), and times (the start, three evaluations)
-#   ./mac.sh all         check, sign, hv, checklist, then mac-results.tar.gz
+#   ./mac.sh rebuild     S8 (doc/go/BOX-NOTES.md, "S8: the rebuild in the box"): Arbace's arm64
+#                        guest image rebuilt inside the box from the sources in rebuild/store
+#                        (a2g and g2a in Arbace's guest, Go's compile, asm and link in tool guests,
+#                        each a spawned guest), timed (HV7); the image must equal the one built on
+#                        Linux by the host's tools (rebuild/expected.txt), byte for byte; then booted
+#                        by its ref
+#   ./mac.sh clock       HV6: an idle box's wall clock against the Mac's, once a minute for an hour
+#   ./mac.sh all         check, sign, hv, checklist, rebuild, with clock running beside them (an
+#                        hour from its start), then mac-results.tar.gz
 #   ./mac.sh run [ARG...]  the box: the REPL (under rlwrap when it is installed), or arbace's ARGs
 set -u
 cd "$(dirname "$0")"
@@ -182,6 +190,55 @@ do_checklist() {
   [ $fails -eq 0 ]
 }
 
+# the rebuild (S8): the store rebuild/store holds the sources (the ref src: the commit's
+# directories the build reads, VERSION filled), the arm64 tool guests and the toolchain's facts
+# (tool.*.arm64, tool.config.arm64) and the image that runs a2g and g2a (arbace.arm64, the
+# bundle's arbace-box.elf); rebuild/expected.txt the image built on Linux by the host's tools
+do_rebuild() {
+  local m budget st d0 d want got
+  m=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+  # the spawned guests' budget: 60% of the Mac's memory (a2g's guest asks 14 GiB, jrt's and lang's
+  # compiles 12 GiB each; the rest 3 GiB)
+  budget=$(( m * 6 / 10 / 1048576 ))MiB
+  want=$(cat rebuild/expected.txt)
+  # the image that runs a2g and g2a: the bundle's guest
+  "$B" --store rebuild/store put arbace-box.elf arbace.arm64 > /dev/null || return 1
+  echo "hw.memsize $m, the spawns' budget $budget, $(sysctl -n hw.ncpu) CPUs"
+  d0=$(ms)
+  ARBACE_BOX_STORE_MAX=off ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=$budget ARBACE_BOX_SPAWN_CPUS=$(sysctl -n hw.ncpu) \
+    ARBACE_BOX_RAM=6GiB ARBACE_BOX_CPUS=4 ARBACE_BOX_IMAGE=ref:arbace.arm64 "$B" --store rebuild/store \
+    -e '(require (quote arbace.box.rebuild)) (let [r (arbace.box.rebuild/steps "src" {:ref "rebuilt.mac.arm64" :arch "arm64" :jobs 6})] (arbace.box/put! "rebuilt.mac.arm64.steps" (pr-str r)) (prn r))'
+  st=$?
+  d=$(ms)
+  echo "rebuild: $(( (d - d0) / 1000 )) s, status $st" | tee -a "$res/measures.txt"
+  "$B" --store rebuild/store get rebuilt.mac.arm64.steps > "$res/rebuild-steps.edn" 2>/dev/null
+  got=$("$B" --store rebuild/store ref rebuilt.mac.arm64 2>/dev/null)
+  check "the rebuild in the box ran" "0" "$st"
+  check "the image rebuilt on the Mac = the one built on Linux by the host's tools" "$want" "$got"
+  check "the image booted by its ref (ARBACE_BOX_IMAGE=ref:rebuilt.mac.arm64)" "booted by ref arm64" \
+    "$(ARBACE_BOX_IMAGE=ref:rebuilt.mac.arm64 box --store rebuild/store -e '(print "booted by ref" (System/getProperty "os.arch"))' 2>&1)"
+  # a rerun: every action from the action cache
+  d0=$(ms)
+  ARBACE_BOX_STORE_MAX=off ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=$budget ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.arm64 \
+    "$B" --store rebuild/store -e '(require (quote arbace.box.rebuild)) (print (arbace.box.rebuild/rebuild "src" {:arch "arm64"}))' > "$TMPDIR/rerun.txt" 2>&1
+  d=$(ms)
+  echo "rebuild again, from the action cache: $(( (d - d0) / 1000 )) s" | tee -a "$res/measures.txt"
+  check "the rerun, from the action cache, gives the same image" "$want" "$(tail -c 64 "$TMPDIR/rerun.txt")"
+  echo "== the rebuild: $oks ok, $fails failed"
+  [ $fails -eq 0 ]
+}
+
+# HV6 (doc/go/HOST-VM-SURVEY.md): an idle box (1 vCPU) prints its wall clock every minute for an
+# hour, each line stamped with the Mac's on arrival: guest minus Mac, in ms
+do_clock() {
+  echo "minute guest-ms mac-ms guest-minus-mac"
+  ARBACE_BOX_CPUS=1 "$B" -e '(dotimes [i 61] (println "guest" i (System/currentTimeMillis)) (flush) (Thread/sleep 60000))' 2>&1 |
+  while read -r tag i g; do
+    h=$(ms)
+    if [ "$tag" = guest ]; then echo "$i $g $h $((g - h))"; else echo "# $tag $i $g"; fi
+  done
+}
+
 step() { # NAME: the step, its output saved and shown, its status recorded
   local n=$1 st
   echo "#### $n" >&2
@@ -194,14 +251,20 @@ step() { # NAME: the step, its output saved and shown, its status recorded
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
-  check|sign|hv|checklist) step "$cmd" ;;
+  check|sign|hv|checklist|rebuild|clock) step "$cmd" ;;
   all)
     rm -rf "$res"; mkdir -p "$res"
     s=0
     step check || s=1
     step sign || s=1
+    # the hour of HV6's clock beside the other steps
+    ( do_clock > "$res/clock.log" 2>&1; echo "clock: status $?" >> "$res/status.txt" ) &
+    clock=$!
     step hv || s=1
     step checklist || s=1
+    step rebuild || s=1
+    echo "mac.sh: waiting for the clock's hour (mac-results/clock.log)" >&2
+    wait $clock
     tar -czf mac-results.tar.gz mac-results
     echo "mac.sh: $(cat "$res/status.txt" | tr '\n' ' ')" >&2
     echo "mac.sh: send back $here/mac-results.tar.gz" >&2
