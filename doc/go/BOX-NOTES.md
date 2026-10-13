@@ -2967,3 +2967,50 @@ launcher then booted the image from the store by its ref.
 - The image is not `go build`'s byte for byte. Its build IDs and flags are the driver's own, so S8
   compares the image built in the box with the one the same driver builds natively (as above,
   `cf8857b3...` both ways).
+
+## S8: the rebuild in the box (2026-10-13)
+
+Branch `s8-rebuild`, from main `920564e` (S7 merged). STANDALONE-SURVEY §9.1 row S8: S3's chain
+inside the guest, sources from a tree ref, the new guest image to the store, the launcher boots
+it by ref; the image built in the box equals the host-built one byte for byte, on amd64
+(/dev/kvm), then arm64 (the emulated VM, the Mac's bundle). S6 (Arbace compiled to Go) lands
+later and changes the printed program: the whole run is one script, `bin/box-rebuild`, so that
+the byte-for-byte run is redone cheaply after it.
+
+### The plan (written first)
+
+- **Every step an action.** The chain of `bin/arbace-go --build --box`, each step a spawned
+  guest kept in the action cache (BX98): a2g (`--program`), g2a's printing (tamago/'s standard
+  library and goos module with overlay/go's runtime and file system patches; the program with
+  box/ and x509roots/), the plan, compile and asm per package, the link, the namespaces
+  prepared, the main package compiled and linked again with the image, the symbol table cut.
+  The guest that runs the driver only orchestrates: a 6 GiB slot is enough for it.
+- **Arbace's guest is a tool guest too.** a2g and g2a need Arbace; the a2g step needs 14 GiB
+  (BX81). Rather than the REPL guest itself (`ARBACE_BOX_RAM`), Arbace's own image runs them as
+  spawned guests: jrt's box host calls box/'s `tool.Start` (the request's trees mounted, the
+  output stored at an exit with 0), so a request names Arbace's image as it names `compile`'s.
+  The same makes the new image prepare its own namespaces (`ARBACE_PREPARE` in a spawned run).
+- **The plan in Arbace.** S7's plans came from `go list` on the host (tools/goplan); in the box
+  there is no go command. `arbace.box.plan` computes the same from trees: go/build's file
+  selection (GOOS/GOARCH suffixes, `//go:build`, cgo off), imports from each file's header,
+  std's vendor directory, GOOSPKG's runtime/goos, the module's language version, embedded
+  files. The toolchain's facts it needs (its tool tags, release tags, `pkg/include`) are put
+  in the store beside the tool guests (`tool.config.<arch>`). Checked against goplan on the
+  same trees.
+- **Embedded files, version, symbols.** The driver gains `-embedcfg` (the main package embeds
+  the namespaces' sources and the image of prepared namespaces; x509roots its bundle), link's
+  `-X main.arbaceVersion` from the tree's `VERSION` (git archive's export-subst, as a tarball's
+  build reads it), and `tools/elfsyms`'s cut in Arbace (`arbace.box.elf`).
+- **The host-built reference.** The driver's image is not `go build`'s (its flags, no build
+  IDs, no module information; S7). The reference is the same steps run natively with the
+  host's tools: a2g, g2a and the preparing on the native executable, the toolchain's own
+  compile, asm and link, each action a host process chrooted to the request's trees
+  (`arbace.box.rebuild/host-run`, `tools/chrootrun`). Its intermediate results are compared
+  too, and a2g's program and the image of prepared namespaces with `bin/arbace-go --build`'s
+  (BX110).
+- **arm64.** The tool guests and the toolchain's facts for arm64; the box step in the aarch64 VM
+  (every instruction emulated: hours), the host step on amd64 cross-compiling (GOARCH=arm64);
+  the Mac's bundle gets the same run.
+- Order: the guest as a tool guest and the driver's additions; the planner checked against
+  goplan; the steps one by one on amd64 natively, then in the box; the comparison; arm64; the
+  Mac bundle.

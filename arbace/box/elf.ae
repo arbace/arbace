@@ -1,0 +1,119 @@
+;; A box guest's symbol table cut (doc/go/BOX-NOTES.md, S8): tools/elfsyms in Arbace, so that the
+;; box's build driver ships the image as bin/arbace-go does (S2, BX11).
+(ns arbace.box.elf
+  "(cut-symbols image names): image (the bytes of a 64-bit little-endian ELF executable whose
+  .symtab, .strtab and .shstrtab are the last things in the file, as Go's linker writes them)
+  with a symbol table of the named symbols alone, in the image's order, each of which it must
+  define as a global symbol: everything before the three tables as it is, then the three, each
+  aligned as its section header says; only their offsets and sizes and the symbol table's first
+  global index change. tools/elfsyms does the same with Go's debug/elf; the two give the same
+  bytes."
+  (:import (java.io ByteArrayOutputStream)
+           (java.nio ByteBuffer ByteOrder)
+           (java.nio.charset StandardCharsets)))
+
+(defn- fail [msg]
+  (throw (ex-info (str "arbace.box.elf: " msg) {::error true})))
+
+(def ^:private SHT_NULL 0)
+(def ^:private SHT_SYMTAB 2)
+(def ^:private SHT_NOBITS 8)
+(def ^:private STB_LOCAL 0)
+
+(defn- le ^ByteBuffer [^bytes b]
+  (.order (ByteBuffer/wrap b) ByteOrder/LITTLE_ENDIAN))
+
+(defn- c-string [^bytes b ^long off]
+  (loop [e off]
+    (if (zero? (aget b e))
+      (String. b (int off) (int (- e off)) StandardCharsets/UTF_8)
+      (recur (inc e)))))
+
+(defn- align ^ByteArrayOutputStream [^ByteArrayOutputStream o ^long a]
+  (when (> a 1)
+    (while (not (zero? (mod (.size o) a)))
+      (.write o 0)))
+  o)
+
+(defn cut-symbols
+  "Image (bytes) with its symbol table cut to names (see the namespace's doc): the new bytes."
+  ^bytes [^bytes data names]
+  (let [b (le data)]
+    (when-not (and (> (alength data) 64) (= 0x7f (aget data 0)) (= 2 (aget data 4)) (= 1 (aget data 5)))
+      (fail "not a 64-bit little-endian ELF file"))
+    (let [phoff (.getLong b 32) shoff (.getLong b 40)
+          phentsize (bit-and (.getShort b 54) 0xffff) phnum (bit-and (.getShort b 56) 0xffff)
+          shentsize (bit-and (.getShort b 58) 0xffff) shnum (bit-and (.getShort b 60) 0xffff)
+          shstrndx (bit-and (.getShort b 62) 0xffff)
+          sec (fn [i] (let [h (+ shoff (* i shentsize))]
+                        {:type (.getInt b (int (+ h 4))) :offset (.getLong b (int (+ h 24)))
+                         :size (.getLong b (int (+ h 32))) :link (.getInt b (int (+ h 40)))
+                         :align (.getLong b (int (+ h 48))) :entsize (.getLong b (int (+ h 56)))}))
+          secs (mapv sec (range shnum))
+          symtab (first (keep-indexed (fn [i s] (when (= SHT_SYMTAB (:type s)) i)) secs))
+          strtab (when symtab (:link (secs symtab)))]
+      (when (or (nil? symtab) (<= strtab 0) (>= strtab shnum) (<= shstrndx 0) (>= shstrndx shnum))
+        (fail "no symbol table"))
+      (let [tail (sort-by #(:offset (secs %)) [symtab strtab shstrndx])
+            start (:offset (secs (first tail)))]
+        (when (> (+ shoff (* shnum shentsize)) start)
+          (fail "the section headers are not before the symbol table"))
+        (doseq [[i s] (map-indexed vector secs)
+                :when (not (or (#{symtab strtab shstrndx} i) (#{SHT_NOBITS SHT_NULL} (:type s))))]
+          (when (> (+ (:offset s) (:size s)) start)
+            (fail "a section is after the symbol table")))
+        (doseq [i (range phnum)]
+          (let [h (+ phoff (* i phentsize))]
+            (when (> (+ (.getLong b (int (+ h 8))) (.getLong b (int (+ h 32)))) start)
+              (fail "a segment is after the symbol table"))))
+        (let [l (secs (last tail))]
+          (when-not (= (+ (:offset l) (:size l)) (alength data))
+            (fail "something after the symbol table and the section names")))
+        ;; the symbols (the null symbol, index 0, left out, as debug/elf's Symbols leaves it)
+        (let [st (secs symtab) strs (:offset (secs strtab))
+              n (quot (:size st) 24)
+              want (set names)
+              kept (vec (for [i (range 1 n)
+                              :let [e (+ (:offset st) (* 24 i))
+                                    nm (c-string data (+ strs (bit-and (.getInt b (int e)) 0xffffffff)))]
+                              :when (want nm)]
+                          {:name nm :entry e}))
+              _ (doseq [{:keys [name entry]} kept]
+                  (when (= STB_LOCAL (bit-shift-right (bit-and (aget data (+ entry 4)) 0xff) 4))
+                    (fail (str "symbol " name " is local"))))
+              missing (sort (remove (set (map :name kept)) want))
+              _ (when (seq missing) (fail (str "no symbol " (vec missing))))
+              ;; kept in the table's order, each once (the first of a name)
+              kept (reduce (fn [acc k] (if (some #(= (:name k) (:name %)) acc) acc (conj acc k))) [] kept)
+              strb (ByteArrayOutputStream.)
+              symb (ByteArrayOutputStream.)]
+          (.write strb 0)
+          (.write symb (byte-array 24))
+          (doseq [{:keys [name entry]} kept]
+            (let [e (byte-array 24)
+                  eb (le e)]
+              (System/arraycopy data (int entry) e 0 24)
+              (.putInt eb 0 (int (.size strb)))
+              (.write symb e)
+              (.write strb (.getBytes ^String name StandardCharsets/UTF_8))
+              (.write strb 0)))
+          (let [o (ByteArrayOutputStream.)
+                _ (.write o data 0 (int start))
+                shstr (java.util.Arrays/copyOfRange data (int (:offset (secs shstrndx))) (int (+ (:offset (secs shstrndx)) (:size (secs shstrndx)))))
+                places (atom {})
+                place (fn [i ^bytes bs]
+                        (align o (:align (secs i)))
+                        (swap! places assoc i [(.size o) (alength bs)])
+                        (.write o bs))]
+            (place symtab (.toByteArray symb))
+            (place strtab (.toByteArray strb))
+            (place shstrndx shstr)
+            (let [out (.toByteArray o)
+                  ob (le out)]
+              (doseq [[i [off size]] @places]
+                (let [h (+ shoff (* i shentsize))]
+                  (.putLong ob (int (+ h 24)) (long off))
+                  (.putLong ob (int (+ h 32)) (long size))))
+              ;; sh_info of the symbol table: the index of its first global symbol, here 1
+              (.putInt ob (int (+ shoff (* symtab shentsize) 44)) 1)
+              out)))))))

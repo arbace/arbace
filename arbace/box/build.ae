@@ -93,16 +93,14 @@
 (defn- cache-ref [req]
   (str "ac." (subs (sha256-hex (box/request-text (dissoc req :ram :cpus))) 0 61)))
 
-(defn- action
-  "Runs request req (or takes its result from the cache): its result. A result that is not
-  :exit 0 is an ex-info with the console."
+(defn- action*
   [what req]
   (let [cref (cache-ref req)
         cached (when (:cache *opts* true)
                  (when-let [h (box/ref cref)]
                    (when (box/size h) (box/result h))))
         t0 (System/nanoTime)
-        res (or cached (box/run req))]
+        res (or cached ((:run *opts* box/run) req))]
     (when-not (= 0 (:exit res))
       (fail (str "arbace.box.build: " what ": " (if (:fault res) (str "the guest faulted: " (:fault res)) (str "exit " (:exit res)))
                  "\n" (box/get (:console res)))
@@ -112,6 +110,13 @@
     (log (format "%-8s %s%s" (first (:args req)) what
                  (if cached " (cached)" (format " %.2f s" (/ (- (System/nanoTime) t0) 1e9)))))
     res))
+
+(defn action
+  "Runs request req (or takes its result from the cache): its result. A result that is not
+  :exit 0 is an ex-info with the console. opts: the namespace's (:run, :cache, :log), by
+  default those of the build running."
+  ([what req] (action* what req))
+  ([what req opts] (binding [*opts* opts] (action* what req))))
 
 (defn- out-file
   "The entry name of result res's output tree."
@@ -172,6 +177,27 @@
   [(box/put-tree (into {} (for [p paths :let [a (archives p)]] [(str (index p) ".a") a])))
    (for [p paths] (str "packagefile " p "=/d/" (index p) ".a"))])
 
+(defn- json-str
+  "s as a JSON string."
+  [^String s]
+  (str \" (apply str (map (fn [c] (cond (= c \") "\\\"" (= c \\) "\\\\"
+                                        (< (int c) 0x20) (format "\\u%04x" (int c))
+                                        :else (str c)))
+                          s))
+       \"))
+
+(defn- embed-config
+  "compile's -embedcfg for the patterns {PATTERN [FILE ...]} (files relative to the package's
+  directory, mounted at /s): JSON, the keys sorted."
+  [patterns]
+  (let [files (sort (distinct (mapcat val patterns)))]
+    (str "{\"Patterns\":{"
+         (apply str (interpose "," (for [[p fs] (sort-by key patterns)]
+                                     (str (json-str p) ":[" (apply str (interpose "," (map json-str fs))) "]"))))
+         "},\"Files\":{"
+         (apply str (interpose "," (for [f files] (str (json-str f) ":" (json-str (str "/s/" f))))))
+         "}}\n")))
+
 (defn- build-package
   "The package's archive: its tree entry [:file HASH SIZE]."
   [plan pkg archives index]
@@ -183,7 +209,14 @@
                        (apply str (for [[k v] (sort (:importmap pkg))] (str "importmap " k "=" v "\n")))
                        (apply str (for [l lines] (str l "\n"))))
         sfiles (:s pkg)
-        res-of (fn [what req] (action (str P " " what) (merge {:out "/o" :cwd "/s"} req)))
+        res-of (fn [what req] (action* (str P " " what) (merge {:out "/o" :cwd "/s"} req)))
+        ;; the compile's guest: :resources opts' entry for the package ({:ram BYTES :cpus N}), the
+        ;; defaults' otherwise (doc/go/BOX-NOTES.md, S8: jrt and lang ask 12 GiB, SA101 (b))
+        rsc (get (:resources *opts*) P)
+        _ (when (and (:embed-files pkg) (not (:embed pkg)))
+            (fail (str "arbace.box.build: " P " embeds files: plan it with arbace.box.plan") {:path P}))
+        embedcfg (when-let [pats (:patterns (:embed pkg))]
+                   (embed-config pats))
         symabis (when (seq sfiles)
                   (out-file (res-of "symabis"
                                     {:image (:asm tools)
@@ -191,6 +224,7 @@
                                      :trees [["/s" (:src pkg)] ["/i" (:include plan)] ["/c" (file-tree {"go_asm.h" ""})]]})
                             P "symabis"))
         compile (res-of "compile"
+                        (merge
                         {:image (:compile tools)
                          :args (vec (concat ["compile" "-o" "/o/_pkg_.a" "-trimpath" (str "/s=>" P ";/o=>;/c=>")
                                              "-p" (if (= "main" (:name pkg)) "main" P) (str "-lang=" (:lang pkg))]
@@ -199,11 +233,14 @@
                                             ["-goversion" "go1.27.1"]
                                             (when symabis ["-symabis" "/c/symabis"])
                                             ["-c=4" "-nolocalimports" "-importcfg" "/c/importcfg" "-pack"]
+                                            (when embedcfg ["-embedcfg" "/c/embedcfg"])
                                             (when symabis ["-asmhdr" "/o/go_asm.h"])
                                             (map #(str "/s/" %) (:go pkg))))
                          :trees (vec (concat [["/s" (:src pkg)] ["/d" dtree]
                                               ["/c" (box/put-tree (cond-> {"importcfg" (box/put-file importcfg)}
-                                                                    symabis (assoc "symabis" symabis)))]]))})
+                                                                    symabis (assoc "symabis" symabis)
+                                                                    embedcfg (assoc "embedcfg" (box/put-file embedcfg))))]]))}
+                                    (select-keys rsc [:ram :cpus])))
         archive (out-file compile P "_pkg_.a")]
     (if (empty? sfiles)
       archive
@@ -221,51 +258,86 @@
             members (for [[o f] objs] [o (box/get-bytes (second @f))])]
         (box/put-file (append-members (box/get-bytes (second archive)) members))))))
 
+(defn- read-plan [plan]
+  (cond (map? plan) plan
+        (re-matches #"[0-9a-f]{64}" plan) (edn/read-string (box/get plan))
+        :else (edn/read-string (or (box/load plan) (fail (str "arbace.box.build: no plan " plan) {:plan plan})))))
+
+(defn- with-tools
+  "opts with :tools complete: the refs tool.<tool>.<arch> for those it does not name."
+  [p opts]
+  (let [arch (:goarch p)
+        tools (merge (into {} (for [t [:compile :asm :link]]
+                                [t (box/ref (str "tool." (name t) "." arch))]))
+                     (:tools opts))]
+    (doseq [[t h] tools] (when-not h (fail (str "arbace.box.build: no image for " (name t) " (the ref tool." (name t) "." arch ")") {})))
+    (assoc opts :tools tools)))
+
+(defn archives
+  "The archives of the plan's packages, built (see the namespace's doc): {path entry}, each
+  entry the archive's [:file HASH SIZE]. With :only (opts), a set of paths, only those are
+  built again, the others taken from :archives (opts)."
+  [plan opts]
+  (let [p (read-plan plan)
+        opts (with-tools p opts)
+        pkgs (:packages p)
+        index (into {} (map-indexed (fn [i q] [(:path q) i]) pkgs))
+        given (:archives opts)
+        only (:only opts)
+        ;; each package a future: it waits for those it imports
+        futures (atom {})
+        sem (java.util.concurrent.Semaphore. (int (:jobs opts 4)))
+        conveyed (fn [f] (let [o opts] (fn [] (binding [*opts* o] (f)))))]
+    (binding [*opts* opts]
+      (doseq [q pkgs]
+        (let [deps (map @futures (:imports q))]
+          (swap! futures assoc (:path q)
+                 (if (and only (not (only (:path q))))
+                   (delay (or (get given (:path q)) (fail (str "arbace.box.build: no archive given for " (:path q)) {})))
+                   (future
+                     ((conveyed
+                        (fn []
+                          (let [archives (into {} (map (fn [i d] [i @d]) (:imports q) deps))]
+                            (.acquire sem)
+                            (try
+                              (build-package p q archives index)
+                              (finally (.release sem))))))))))))
+      (into {} (for [[k f] @futures] [k @f])))))
+
+(defn link
+  "Links the plan's program from its archives ({path entry}, archives' answer): the image's
+  hash. The link's flags are :ldflags (opts; by default the box's guests': -T 0x201000 -R 0x1000
+  -w) after -buildmode=exe -buildid=."
+  [plan archives opts]
+  (let [p (read-plan plan)
+        opts (with-tools p opts)
+        pkgs (:packages p)
+        index (into {} (map-indexed (fn [i q] [(:path q) i]) pkgs))]
+    (binding [*opts* opts]
+      (let [paths (map :path pkgs)
+            [dtree lines] (deps-tree archives index paths)
+            cfg (str "# import config\n" (apply str (for [l lines] (str l "\n"))))
+            res (action* (str (:main p) " link")
+                        (merge
+                          {:image (:link (:tools opts))
+                           :args (vec (concat ["link" "-o" "/o/a.out" "-importcfg" "/c/importcfg.link" "-buildmode=exe" "-buildid="]
+                                              (:ldflags opts ["-T" "0x201000" "-R" "0x1000" "-w"])
+                                              [(str "/d/" (index (:main p)) ".a")]))
+                           :trees [["/d" dtree] ["/c" (file-tree {"importcfg.link" cfg})]]
+                           :out "/o" :cwd "/o"}
+                          (select-keys (get (:resources opts) :link) [:ram :cpus])))]
+        (second (out-file res (:main p) "a.out"))))))
+
 (defn build
   "Builds the plan's program (see the namespace's doc): the image's hash."
   ([plan] (build plan {}))
   ([plan opts]
-   (let [p (cond (map? plan) plan
-                 (re-matches #"[0-9a-f]{64}" plan) (edn/read-string (box/get plan))
-                 :else (edn/read-string (or (box/load plan) (fail (str "arbace.box.build: no plan " plan) {:plan plan}))))
-         arch (:goarch p)
-         tools (merge (into {} (for [t [:compile :asm :link]]
-                                 [t (box/ref (str "tool." (name t) "." arch))]))
-                      (:tools opts))
-         _ (doseq [[t h] tools] (when-not h (fail (str "arbace.box.build: no image for " (name t) " (the ref tool." (name t) "." arch ")") {})))
-         opts (assoc opts :tools tools)
-         pkgs (:packages p)
-         index (into {} (map-indexed (fn [i q] [(:path q) i]) pkgs))
+   (let [p (read-plan plan)
          t0 (System/nanoTime)
-         ;; each package a future: it waits for those it imports
-         futures (atom {})
-         sem (java.util.concurrent.Semaphore. (int (:jobs opts 4)))
-         conveyed (fn [f] (let [o opts] (fn [] (binding [*opts* o] (f)))))]
+         as (archives p opts)
+         image (link p as opts)]
+     (when-let [r (:ref opts)] (box/ref! r image))
      (binding [*opts* opts]
-       (doseq [q pkgs]
-         (let [deps (map @futures (:imports q))]
-           (swap! futures assoc (:path q)
-                  (future
-                    ((conveyed
-                       (fn []
-                         (let [archives (into {} (map (fn [i d] [i @d]) (:imports q) deps))]
-                           (.acquire sem)
-                           (try
-                             (build-package p q archives index)
-                             (finally (.release sem)))))))))))
-       (let [archives (into {} (for [[k f] @futures] [k @f]))
-             paths (map :path pkgs)
-             [dtree lines] (deps-tree archives index paths)
-             cfg (str "# import config\n" (apply str (for [l lines] (str l "\n"))))
-             res (action (str (:main p) " link")
-                         {:image (:link tools)
-                          :args (vec (concat ["link" "-o" "/o/a.out" "-importcfg" "/c/importcfg.link" "-buildmode=exe" "-buildid="]
-                                             (:ldflags opts ["-T" "0x201000" "-R" "0x1000" "-w"])
-                                             [(str "/d/" (index (:main p)) ".a")]))
-                          :trees [["/d" dtree] ["/c" (file-tree {"importcfg.link" cfg})]]
-                          :out "/o" :cwd "/o"})
-             image (second (out-file res (:main p) "a.out"))]
-         (when-let [r (:ref opts)] (box/ref! r image))
-         (log (format "%s: %d packages, the image %s (%d bytes) in %.1f s" (:main p) (count pkgs) image (box/size image)
-                      (/ (- (System/nanoTime) t0) 1e9)))
-         image)))))
+       (log (format "%s: %d packages, the image %s (%d bytes) in %.1f s" (:main p) (count (:packages p)) image (box/size image)
+                    (/ (- (System/nanoTime) t0) 1e9))))
+     image)))
