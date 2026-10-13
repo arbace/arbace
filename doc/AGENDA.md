@@ -51,8 +51,7 @@ The current state of the work. This file is rewritten as things change. For the 
   reflection on a member typed by a sibling defined later reports `Object` (SA90 (b) if needed).
   The seed is no longer the program's exact print; when to remake it is open (the next
   milestone at the latest).
-- The host's reboot (the user: after the milestone): it runs kernel 6.18.52 with 6.18.56's
-  modules installed; after it, `bin/arbace-go --smoke --box` for nested KVM.
+- The host rebooted into 6.18.56 (2026-10-13): nested KVM works, the box's smoke test 111 ok.
 - The Mac bundle for this milestone, if wanted (`bin/box-mac-bundle`).
 
 ## Next

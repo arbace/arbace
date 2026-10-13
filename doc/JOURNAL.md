@@ -1073,3 +1073,20 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   user's practice the seed is remade at the next milestone.
 - Correction to the line above: remaking the seed only at a milestone was my instruction to the
   agent, not a decision of the user's. Whether and when to remake it is open.
+
+## 2026-10-13: the host rebooted into 6.18.56
+
+- The user rebooted the host after the milestone, as planned. It now runs kernel 6.18.56-0-virt;
+  `/dev/kvm` is present and `kvm_amd`'s nested is 1.
+- `ARBACE_BOX_ARCHES=amd64 bin/arbace-go --smoke --box` gave 111 ok, no failures (218 s), as
+  before the reboot.
+- Earlier that morning, outside the repository, at the user's request:
+  - the host's leftovers were cleaned: Arbace's retired JVM products and stale work in
+    `target/` and `.tmp/`, Go's build cache trimmed to six hours, Arbace's error reports in
+    `/tmp`;
+  - go-whim's, slim-vim's, ghc-lisp's, go-lisp's and rust-lisp's scratch and build output were
+    removed, their hand-written configuration kept;
+  - `spinnerTipsEnabled: false` was moved from ten repositories' `.claude/settings.local.json`
+    into the global `~/.claude/settings.json`. For Arbace's `.claude/` this was an exception the
+    user approved.
+  - Disk went from 53% to 38%.
