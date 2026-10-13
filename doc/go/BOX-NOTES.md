@@ -2748,3 +2748,110 @@ the shared host), the launcher of main `38bcad1`:
 - Not run: `bin/tamago-vendor check` (`tamago/` is untouched); the essential `bin/gate` (no source
   the bootstrap compiles changed; `overlay/go/syscall` is printed by `bin/box-tools` only, though
   it enters the gate's key).
+
+### Next (S7's rest)
+
+- `arbace.box` gains the spawn (`spawn`, `spawn-wait`, the request and result as maps) and the
+  trees (`put-tree`, `tree`, `get-tree`, mounted or extracted), over new natives of jrt's
+  `HostStore` in the box (the calls) and natively (the launcher's `--tool` as a process, or a
+  refusal); this touches jrt (`go/arbace/jrt`, `overlay/jdk`), S5's lane, and needs the Go build
+  and the box rebuilt (heavy).
+- The build driver in Arbace (`arbace.box.build`): from a package graph imported as data (`go
+  list -deps -json`'s fields, put in the store by the host tool with the source trees), the
+  actions `go build` runs (asm `-gensymabis`, compile with `-symabis -asmhdr`, asm, the archive's
+  members appended in Arbace, link), each a spawn with its inputs as trees; the action cache
+  (HV9: the key the request's hash less `:ram` and `:cpus`, the result under a ref `ac.` and 61
+  hexadecimal digits of it, BX98); the image's blob under a ref the launcher boots
+  (`ARBACE_BOX_IMAGE=ref:NAME`, to add). The exit criterion: in the box, the hello guest (or the
+  box's own test guest) built from its sources and booted by ref.
+- arm64: the tool images built (above); their run in the aarch64 VM (`bin/box-arm64-vm`).
+- A spawn check in `bin/box-smoke` once `arbace.box` has the calls.
+
+### Amendments (proposed 2026-10-13)
+
+- **BX90 (box/: abi, vmm) The spawn calls.** Options:
+  - (a) three calls that do not wait (as the network's): `Spawn` answers a handle, `SpawnPoll` the
+    result's hash once the child has ended, `SpawnOut` the child's output tree; an event at each
+    end (built);
+  - (b) one call that waits until the child ends (its vCPU parked meanwhile);
+  - (c) host commands by name (HOST-VM-SURVEY HV5 (c)).
+
+  *Recommended: (a)*: the driver keeps several children running from one guest, and an idle guest
+  parks on the event; (b) holds a vCPU for each child; (c) was declined (HV5).
+- **BX91 (box/: the launcher) Where a child runs.** Options:
+  - (a) a launcher process of its own, run by a helper the launcher starts before its system-call
+    filter goes on (built);
+  - (b) a second VM in the monitor's process (KVM allows several; Hypervisor.framework one a
+    process, so not on the Mac);
+  - (c) `execve` allowed by the filter.
+
+  *Recommended: (a)*: the same on Linux and macOS, the filter unchanged, and a child's fault or
+  memory ends only its process.
+- **BX92 (box/: the launcher) The policy and the budget.** Options:
+  - (a) spawning off unless `ARBACE_BOX_SPAWN=1` and a store; a child's store a view (its puts,
+    the blobs reachable from its trees and its request), no refs, no network, no spawn (a leaf), its
+    environment the request's only, its console captured (16 MiB); the budget
+    `ARBACE_BOX_SPAWN_RAM` (by default half the host's available memory) and
+    `ARBACE_BOX_SPAWN_CPUS` (by default the host's CPUs), first come first served, a request beyond
+    it refused (built);
+  - (b) as (a), and a child may spawn through its parent's helper, under the same budget;
+  - (c) as (a), and a child reads refs.
+
+  *Recommended: (a) now, (b) when a tool guest is itself a driver*; (c) would let a child's
+  result depend on more than its request, which the action cache (HV9) relies on.
+- **BX93 (D10) The tree format.** Options:
+  - (a) an EDN map from a name to `[:file HASH SIZE]`, `[:exec HASH SIZE]` or `[:dir HASH]`,
+    printed canonically (built), and the store tool's `tree put|tar|get|ls`;
+  - (b) the same without sizes (a stat then reads the blob's size from the store);
+  - (c) git's tree objects (binary, SHA-1 or SHA-256 per repository).
+
+  *Recommended: (a)*: the Clojure reader reads it, the size lets a lazy file answer `stat`
+  without a call, and a tree is the same blob wherever it is made.
+- **BX94 The request and the result.** Options:
+  - (a) both EDN blobs (`tree.Request`, `tree.Result` above), the result holding nothing of the
+    run's time or place (built);
+  - (b) the result with the run's times and counts;
+  - (c) the spawn's arguments in the call block, without a request blob.
+
+  *Recommended: (a)*: the request's hash is the action's key (HV9), and the same request gives
+  the same result blob; the times belong in a log or stats, not in what the cache keeps.
+- **BX95 (overlay/go/syscall) TamaGo's file system.** Its seek past the end shrinks the file
+  (`Size = f.offset + 1`, the old offset), a write past the end adds the offset to the size, and
+  `O_TRUNC` keeps the size. Options:
+  - (a) patched for the tool guests only (built), with `MkLazy`;
+  - (b) (a), and the same patch in Arbace's guest (jrt's files: `RandomAccessFile.seek` past the
+    end then a read, a truncated file's size);
+  - (c) (a) or (b), and reported to TamaGo (usbarmory/tamago-go).
+
+  *Recommended: (b) and (c)*: the bugs are TamaGo's and touch any guest that seeks; (b) changes
+  the Arbace guest's build (bin/arbace-go's overlay), which is S5's and S6's to schedule.
+- **BX96 (bin/box-tools) The tool images.** Options:
+  - (a) GOROOT's `cmd/compile`, `cmd/link` and `cmd/asm` as they are, the board and the shim added
+    by an overlay into the `cmd` module (built); put in the store under `tool.<tool>.<arch>`;
+  - (b) a copy of `cmd` as a module of its own, its imports renamed;
+  - (c) wait for S9 (the toolchain as forms).
+
+  *Recommended: (a)*: no source of the toolchain changes; S9 replaces the source, not the way.
+- **BX97 (box/: tool) A tool's target.** TamaGo's runtime has no environment when `internal/buildcfg`
+  initialises, so a tool guest targets tamago and its own architecture whatever `GOARCH` its
+  request says. Options:
+  - (a) a tool image per target architecture, each run on its own architecture (built);
+  - (b) the board hands the runtime its environment before the packages initialise (`runtime.envs`
+    set in `Hwinit1`), so that `GOARCH` and `GOOS` in a request choose the target (an amd64 box
+    building arm64 objects);
+  - (c) the tools built with `GOARCH`'s default changed (a `buildcfg` overlay per target).
+
+  *Recommended: (a) for S7 and S8* (each architecture rebuilds itself), (b) if a cross build is
+  wanted later.
+- **BX98 (HV9) The action cache.** Options:
+  - (a) in the driver: the key the hash of the request without `:ram` and `:cpus`, the result's
+    hash under a ref `ac.` plus 61 hexadecimal digits of the key (a ref name has at most 64
+    characters), compare-and-set (to build);
+  - (b) in the helper: a request whose result the store has is answered without a run;
+  - (c) a cache blob (an EDN map) under one ref.
+
+  *Recommended: (a)*: it is the build driver's (HV9 as decided), the refs survive a reboot, and the
+  store's tool lists and removes them (R6's collection works on refs).
+- **BX99 (checks)** `tree_test.go`; `bin/box-vendor roundtrip` with `tree` and `tool`; the spawn's
+  and the trees' checks in `bin/box-smoke` (to add with `arbace.box`'s calls); `bin/box-tools build`
+  in `bin/gate --full` beside `bin/arbace-go --build --box`.
