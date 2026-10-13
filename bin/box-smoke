@@ -8,8 +8,10 @@
 # pseudo-terminal. Run by bin/arbace-go --smoke --box on the host (amd64, /dev/kvm) and by
 # bin/box-arm64-vm smoke in the aarch64 VM (KVM/arm64), from a copy of bin/ and test/.
 #
-#   bin/box-smoke [--arch ARCH] [--native EXE] [--tls-server EXE] [--slow N] LAUNCHER
+#   bin/box-smoke [--arch ARCH] [--native EXE] [--tls-server EXE] [--tools DIR] [--slow N] LAUNCHER
 #
+# --tools DIR: the tool guests' images (bin/box-tools build: DIR/compile.elf; by default
+# target/box-tools/ARCH), for the spawn's checks (doc/go/BOX-NOTES.md, S7; skipped without them);
 # --native: the native executable of the same architecture, which writes a store directory the
 # box then reads (skipped without it); --tls-server EXE: tools/tlsserver for the host, the TLS
 # checks' server (by default built here with Go's toolchain; the TLS checks skipped when there is
@@ -19,12 +21,13 @@ set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/store-checks.bash"
 . "$root/bin/lib/tls-checks.bash"
-a=$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac) native="" slow=${ARBACE_SMOKE_SLOW:-1} tls_exe=""
+a=$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac) native="" slow=${ARBACE_SMOKE_SLOW:-1} tls_exe="" tools=""
 while [ $# -gt 0 ]; do
   case $1 in
     --arch) a=$2; shift 2 ;;
     --native) native=$2; shift 2 ;;
     --tls-server) tls_exe=$2; shift 2 ;;
+    --tools) tools=$2; shift 2 ;;
     --slow) slow=$2; shift 2 ;;
     *) break ;;
   esac
@@ -183,6 +186,32 @@ PY
       ARBACE_BOX_STORE=$s "$native" -e '(require (quote arbace.box))' -e '(arbace.box/put! "native" "from the native executable")' > /dev/null 2>&1
       check "a store directory shared with the native executable" "from the native executable" \
         "$(box --store "$s" -e '(require (quote arbace.box))' -e '(print (arbace.box/load "native"))' 2>&1)"
+    fi
+    [ $fails -eq 0 ] || status=1
+    # tool guests (doc/go/BOX-NOTES.md, S7), on 4 vCPUs: trees, a spawn of compile with a tree in
+    # and out, the policy's refusals, an image booted from the store
+    fails=0
+    echo "== box $a: tool guests"
+    [ -n "$tools" ] || tools=$root/target/box-tools/$a
+    if [ -f "$tools/compile.elf" ]; then
+      s=$t/tstore
+      mkdir -p "$t/src" && printf 'package p\n\nfunc F(x int) int { return x * 2 }\n' > "$t/src/p.go" && : > "$t/src/importcfg"
+      img=$("$b" --store "$s" put "$tools/compile.elf" tool.compile) src=$("$b" --store "$s" tree put "$t/src" src)
+      check "a tree stored by the launcher's tool, read by arbace.box" '{"importcfg" [:file "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" 0], "p.go" [:file "'"$(sha256sum < "$t/src/p.go" | cut -c1-64)"'" 46]}' \
+        "$(box --store "$s" -e '(require (quote [arbace.box :as box]))' -e '(prn (box/tree (box/ref "src")))' 2>&1)"
+      req='{:image (box/ref "tool.compile") :args ["compile" "-p" "p" "-pack" "-o" "/out/p.a" "-importcfg" "/s/importcfg" "/s/p.go"] :trees [["/s" (box/ref "src")]] :out "/out" :cwd "/s"}'
+      check "no spawn without ARBACE_BOX_SPAWN" ":refused" \
+        "$(box --store "$s" -e '(require (quote [arbace.box :as box]))' -e "(prn (try (box/run $req) (catch Exception e (:arbace.box/error (ex-data e)))))" 2>&1)"
+      check "compile spawned with a tree in and out (ARBACE_BOX_SPAWN=1)" "[0 [:file 2344]]" \
+        "$(ARBACE_BOX_SPAWN=1 box --store "$s" -e '(require (quote [arbace.box :as box]))' -e "(let [r (box/run $req) [k _ n] (box/tree-get (:out r) \"p.a\")] (prn [(:exit r) [k n]]))" 2>&1)"
+      check "a failing compile: its exit, its console, no output" '[2 nil "/s/p.go:1:1: syntax error: package statement must be first"]' \
+        "$(ARBACE_BOX_SPAWN=1 box --store "$s" -e '(require (quote [arbace.box :as box]))' -e "(let [b (box/put-tree {\"p.go\" (box/put-file \"x\") \"importcfg\" (box/put-file \"\")}) r (box/run (assoc $req :trees [[\"/s\" b]]))] (prn [(:exit r) (:out r) (.trim (box/get (:console r)))]))" 2>&1)"
+      check "a spawn asking more than the budget is refused (ARBACE_BOX_SPAWN_RAM=1GiB)" ":refused" \
+        "$(ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=1GiB box --store "$s" -e '(require (quote [arbace.box :as box]))' -e "(prn (try (box/run $req) (catch Exception e (:arbace.box/error (ex-data e)))))" 2>&1)"
+      check "an image booted from the store (ARBACE_BOX_IMAGE=ref:NAME): compile -V (its name the launcher's arbace)" "arbace version go1.27.1" \
+        "$(ARBACE_BOX_IMAGE=ref:tool.compile "$b" --store "$s" -V 2>&1)"
+    else
+      echo "  skip tool guests (no $tools/compile.elf: bin/box-tools build)"
     fi
     [ $fails -eq 0 ] || status=1
     # TLS (doc/go/BOX-NOTES.md, "TLS (option 2)"), on 4 vCPUs: Go's crypto/tls in the guest over
