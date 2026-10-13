@@ -178,7 +178,10 @@
     ^{:line 178 :tag int :doc "CPUs is a Go guest's vCPUs (doc/GUEST.md, *SMP*), 1 to MaxCPUs: 0\nor 1 is one, the boot vCPU alone, as before there were more.  A C\nguest has one whatever this says.\n"} CPUs
 
 
-    ^{:line 181 :tag time/Duration :doc "Park is the longest a parked vCPU waits while another runs the\nguest (vmm/smp.go): 0 is DefaultPark.\n"} Park))
+    ^{:line 181 :tag time/Duration :doc "Park is the longest a parked vCPU waits while another runs the\nguest (vmm/smp.go): 0 is DefaultPark.\n"} Park
+
+
+    ^{:tag uint64 :doc "RAM is a Go guest's memory in bytes, from its image's base (0:\nGoRAMBytes, 3 GiB).  An image linked below the doorbell has at most\nthe doorbell less its base; one linked above 4 GiB as much as the\nguest's addresses reach (HV1 (b), doc/go/BOX-NOTES.md), committed as\nthe guest touches it.\n"} RAM))
 
 
 
@@ -309,7 +312,7 @@
         (when (and (> n 1) (== (.-apEntry im) 0))
           (return nil (fmt/Errorf "the guest image has no whim_apentry: it runs on one vCPU, not %d" n)))
 
-        (let [m (addr (lit machine :cfg cfg :l (layoutFor im n) :host (make (chan (struct)) 1) :quit (make (chan (struct))) :start (time/Now)))]
+        (let [m (addr (lit machine :cfg cfg :l (layoutFor im n (.-RAM cfg)) :host (make (chan (struct)) 1) :quit (make (chan (struct))) :start (time/Now)))]
           (set! (.-limit (.-smp m)) (^{:inst [time/Duration]} cmp/Or (.-Park cfg) DefaultPark))
           (set! (.-watch (.-ev m)) (make (chan (struct)) 1))
           (when (!= (.-Net cfg) nil)
@@ -334,10 +337,11 @@
             (return nil err))
 
           (vmSetup)
-          (when [err (hv/VMMap (.-mem m) 0 (bit-or hv/MemoryRead hv/MemoryWrite hv/MemoryExec))] (!= err nil)
-            (hv/VMDestroy)
-            (.close m)
-            (return nil err))
+          (range [_ r (.-ram (.-l m))]
+            (when [err (hv/VMMap (subslice (.-mem m) (.-lo r) (.-hi r)) (conv hv/IPA (.-lo r)) (bit-or hv/MemoryRead hv/MemoryWrite hv/MemoryExec))] (!= err nil)
+              (hv/VMDestroy)
+              (.close m)
+              (return nil err)))
 
           (let [boot (.newVCPU m 0)]
             (set! (values (.-v boot) (.-exit boot) err) (hv/VCPUCreate))
@@ -560,7 +564,7 @@
       (when [err (advance (.-v c) s)] (!= err nil)
         (return 1 false err))
 
-      (when (or (!= (% cb cbSize) 0) (< cb imageBase) (> (+ cb cbSize) (.-size (.-l m))))
+      (when (or (!= (% cb cbSize) 0) (< cb imageBase) (not (.inRAM (.-l m) cb cbSize)))
         (return 1 false (.fault m (fmt/Sprintf "a call block at %#x, outside the guest's memory" cb))))
 
       (.Store (.-lastCall c) (.UnixNano (time/Now)))
@@ -581,7 +585,7 @@
 
 
 ^{:go/end 588} (go/method guest "guest is a slice of guest memory a call names, or false when it is not\nall in the slot.\n" [^{:tag (* machine)} m ^int64 gpa ^int64 n] :results [(slice byte) bool]
-  (when (or (< n 0) (< gpa 0) (> (conv uint64 gpa) (.-size (.-l m))) (> (conv uint64 n) (- (.-size (.-l m)) (conv uint64 gpa))))
+  (when (or (< n 0) (< gpa 0) (not (.inRAM (.-l m) (conv uint64 gpa) (conv uint64 n))))
     (return nil false))
 
   (return (subslice (.-mem m) gpa (+ gpa n)) true))
