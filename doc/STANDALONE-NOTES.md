@@ -1193,12 +1193,11 @@ On `s4-final` (2026-10-13), the sources at `ed892a1`, the seed committed alone i
 
 - `go/arbace/jrt/reflect_tables.ae` is stale against `bin/jrt manifest` (the order of
   `ForkJoinTask.adapt`'s overloads): regenerate it deliberately (it changes the Go build).
-- Two Go-build bugs found by the moved native tests, recorded in `known-go-amd64-frozen.edn`: a
-  top-level `do` of mutually referring `defclass`es fails (`No method user/Od.o(I)Z`;
-  `defclasses` works; `native.ae:29`, `:32`, `:50`); a class forms `lambda` inside a handed-over
-  fn throws `ArrayIndexOutOfBoundsException -1` when called (`native.ae:184`). By design: eval
-  fns implement no primitive `IFn$LL` interfaces (`:233`, `:234`, `:237`); no
-  `java.lang.SecurityManager` (`:412`); jrt's `Method.invoke` wrong-receiver message (`:652`).
+- Two Go-build bugs found by the moved native tests (a top-level `do` of mutually referring
+  `defclass`es; a class forms `lambda` called in a handed-over fn): fixed after S4 (below, "After
+  S4: two Go-build bugs"). By design: eval fns implement no primitive `IFn$LL` interfaces
+  (`native.ae:233`, `:234`, `:237`); no `java.lang.SecurityManager` (`:412`); jrt's
+  `Method.invoke` wrong-receiver message (`:652`).
 - `test/oracle/known-go-box-amd64.edn` has the new groups but was not run on the box.
 - The class forms' Go variants (`arbace/lang/go/*.ae`) and the front end's `.subst` variants stay
   (SA82, SA83): merging them waits until nothing else reads the bases.
@@ -1341,3 +1340,100 @@ Provisional (the user, away, asked for the recommended choices applied and marke
     recorded (b). *Recommended: (a)*. Provisional.
   - **SA88 Direct linking**: `StaticInvokeExpr` removed, `:direct-linking` ignored (a); a stub
     kept (b). *Recommended: (a)*. Provisional.
+
+## After S4: two Go-build bugs
+
+Status: on the branch `go-bugs` (2026-10-13), from main at `7f7a2b6` (the milestone
+`arbace-seed-is-go-v1` and record commits). The two bugs S4's "Left" named, found when the native
+tests moved into the oracle; the frozen v4 jar (the oracle's reference) answered them right.
+
+### A top-level `do` of mutually referring `defclass`es
+
+`(do (defclass Even ... (Odd/odd ...)) (defclass Odd ... (Even/even ...)))` failed on Go with `No
+method user/Odd.odd(I)Z` (`native.ae:29`, `:32`, `:50`). The compiler evaluates the do's forms
+one by one, each class form compiled with the others entered as declarations (SPEC §9.2:
+`ClassFormsExpr/pushSiblings`, `compile-top`'s `siblings`), which worked: Even's code was
+analyzed against Odd's declaration. The cause was in `arbace.classes.interp/define!`, the Go
+build's class forms: it built every method's interpreter tree right after defining the classes
+("as the JVM compiles them all"), and building a call resolves its target, the `Klass` of an
+interpreted class or a reflective `Method`. Odd, declared but not yet defined (its form comes
+next in the do), had neither, and the build failed. On the JVM the bytecode names Odd and the
+JVM resolves the name when the code first runs, after the do has defined it.
+
+The fix (`arbace/classes/interp.ae`): a class the compilation holds as a declaration only (a
+sibling, `sibling?`) that a body refers to and that cannot be resolved throws a signal
+(`pending!`, an `ex-info` with `::pending`), from `klass`, `desc->class` and `real-method`.
+`define!`'s eager build catches it per method: the method keeps its builder, so its tree is built
+on its first call (`Meth.ensure`, as the interpreter already did for lambdas' and lazily built
+methods, with the compilation's class set rebound), when the do's later form has defined the
+sibling. A static initializer that refers to a sibling becomes a static method `<clinit>` of its
+own, built and called on the class's initialization. While `define!` builds (`*eager*`), a
+sibling is pending even when a class of that name exists, so a do evaluated again binds the new
+classes, as the JVM's lazy resolution does (case `native.ae:750`, `:753`). At a first call
+where the sibling is still not defined (a later form of the do threw), the call throws "Class X
+(a class form of the enclosing do) is not defined yet" where the JVM throws
+`NoClassDefFoundError`. The member types the host needs at definition (parameters, return,
+fields: `meth-classes`, `publish!`) take `Object` for a sibling not yet defined (`sig-class`,
+SA90): calls and values are right, reflection reports `Object` for that type
+(`native.ae:745`, a known mismatch).
+
+### A `lambda` called by class forms code
+
+`(.apply (lambda java.util.function.Function [s] (str s "!")) "hi")` at the top level (the form
+handed over to the class forms as an eval fn) threw `ArrayIndexOutOfBoundsException -1`
+(`native.ae:184`). The interpreter's virtual call `CF$CallV` (`arbace/lang/go/ClassForms.ae`),
+finding the receiver's interpreted method by its class's vtable, stored the receiver in the
+callee's frame at `(.-self m)` unconditionally; a lambda's (or method reference's) method has
+no receiver slot (`self` -1; its object holds the captured values, which `Meth.invoke` copies
+into the frame with `Meth/capture`). The existing cases called lambdas only from Clojure code or
+from the world (`ArrayList.sort`), through `Meth.invoke`; no class forms code had called one.
+The fix: `CallV.enter`, used by `eval`, `evalJ` and `evalD`, makes the callee's frame as
+`Meth.invoke` does: the receiver when the method has a slot for it, then the captured values.
+Without it a capturing lambda called this way would also have lost its captures.
+
+### Cases and checks
+
+New oracle cases (`test/oracle/forms/native.ae`, namespace `native.siblings`, before the final
+`(shutdown-agents)`, so earlier cases keep their lines; recorded from the frozen jar, `bin/oracle
+record forms/native`, which changed only those entries): a do whose classes use a sibling in a
+static initializer, a field's and a method's type, a constructor and a call each way; the
+reflected return type; a mutually recursive do evaluated twice with different bodies; lambdas
+capturing locals and returning objects, longs and doubles, a bound and an unbound method
+reference, called in a handed-over fn; a lambda and a bound method reference called inside class
+methods. `known-go-amd64-frozen.edn` and `known-go-box-amd64.edn`: the two bugs' groups (four
+cases) removed, the reflected type's group (one case) added.
+
+- `bin/arbace-go --build` (Go-hosted from stage 0, 7m29s); amd64 executable 68,984,992 bytes.
+- `ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke`: 60 ok, no failures.
+- The oracle against the frozen reference, `--expected known-go-amd64-frozen.edn` before the
+  edit: 22,504 of 22,558, `:29`, `:32`, `:50`, `:184` now passing, `:745` the one new; after it,
+  as recorded.
+- The essential `bin/gate`: see the branch's commit.
+
+The runtime changed (`ClassForms.ae` is translated into the program), so the committed seed is no
+longer the program's fixpoint print; it is remade only at a milestone.
+
+### Amendments
+
+For the user to decide.
+
+- **SA90 A sibling's type in a member's signature.** The host gets each member's types when the
+  class is defined, before a later form of the do defines the sibling. (a) `Object` for a
+  sibling not yet defined (as done): calls, fields and values right, reflection on the member
+  reports `java.lang.Object` (`native.ae:745`, a known mismatch); (b) the members published again
+  when the sibling is defined (jrt's member tables replace an entry: a change to `CFGo` and its
+  natives); (c) an error, as before the fix (a do of classes referring to each other in their
+  types fails). *Recommended: (a)* now, (b) if reflection on such members matters.
+- **SA91 When a body referring to a sibling is built.** (a) On its first call (as done), only
+  the bodies that refer to a sibling not resolvable while `define!` builds, every other body built
+  at definition as before; (b) every body of a compilation with siblings on its first call;
+  (c) a deferred call node resolving its target at its first run, the rest of the body built at
+  definition. *Recommended: (a)*: build errors other than the sibling's absence are found by the
+  analysis, which has run on every body; (c) needs a new node kind in the runtime for the same
+  effect.
+- **SA92 The error when a sibling is never defined.** (a) The pending signal's `ExceptionInfo`
+  ("Class X (a class form of the enclosing do) is not defined yet") at the first call, where the
+  JVM throws `NoClassDefFoundError`; (b) a `NoClassDefFoundError` with the class's name.
+  *Recommended: (a)* (as done): a compile error of the class forms, as the other build failures
+  are; (b) when code needs to catch the JVM's error (no case covers it).
+
