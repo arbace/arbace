@@ -301,99 +301,92 @@
     top))
 
 ;; ---------------------------------------------------------------------------------------
-;; the parallel translation and writing (A2G-SPEC §4.5)
+;; the parallel translation and writing (A2G-SPEC §4.1, "The run in parallel")
 
-(defn jobs
-  "How many threads translate and write: A2G_JOBS, else the number of processors."
-  []
-  (let [e (System/getenv "A2G_JOBS")]
-    (max 1 (if (seq e) (Long/parseLong e) (.availableProcessors (Runtime/getRuntime))))))
-
-(defn par-mapv
-  "(mapv f xs), f applied on up to n threads, each taking the next element (in xs' order, or
-  in the order of the indices `order`: the longest first); the results in xs' order. f's
-  dynamic bindings are the caller's (future's conveyance)."
-  [n f xs & [order]]
-  (let [xs (vec xs)
-        cnt (count xs)
-        n (min n cnt)
-        order (if order (vec order) (vec (range cnt)))]
-    (if (<= n 1)
-      (mapv f xs)
-      (let [res (object-array cnt)
-            next-i (atom -1)
-            work (fn [] (loop []
-                          (let [k (swap! next-i inc)]
-                            (when (< k cnt)
-                              (let [i (nth order k)]
-                                (aset res i (f (nth xs i))))
-                              (recur)))))
-            ws (doall (repeatedly n #(future (work))))]
-        (run! deref ws)
-        (vec res)))))
-
-(defn- translate-one
-  "Translates class n (the i-th in order) on its own: its forms, or its error, with the effects
-  the sequential translation has on the package's state recorded rather than applied: its
-  literals named apart (Lit?i_k, in first-use order), what it conj'ed into the package's ups,
-  lambdas and cuts and into the races, in order, and its printed output."
-  [i n]
+(defn- apart
+  "Runs f (forms of class n, the i-th of its kind, tag naming the kind) on its own, with the
+  effects the sequential run has on the package's state recorded rather than applied: its
+  literals named apart (Lit?<tag><i>_k, in first-use order), what it conj'ed into the
+  package's ups, lambdas and cuts and into the races, in order, and its printed output. With
+  catch?, an exception is the result's :error [n message] (a translation's), else it is
+  thrown."
+  [tag i n f catch?]
   (let [t0 (now)
-        ps {:lits (atom {}) :lit-prefix (str "Lit?" i "_")
+        ps {:lits (atom {}) :lit-prefix (str "Lit?" tag i "_")
             :ups (atom []) :lambdas (atom []) :cuts (atom [])}
         races (atom [])
         sw (java.io.StringWriter.)
         r (binding [c/*pkgstate* ps c/*races* races *out* sw]
-            (try
-              {:forms (if (m/reflected? n) (d/reflected-forms n) (d/class-forms n))}
-              (catch Throwable ex
-                (println "a2g: error in" n ":" (.getMessage ex))
-                (when (System/getenv "A2G_TRACE") (.printStackTrace ex))
-                {:error [n (.getMessage ex)]})))]
+            (if catch?
+              (try
+                {:forms (f)}
+                (catch Throwable ex
+                  (println "a2g: error in" n ":" (.getMessage ex))
+                  (when (System/getenv "A2G_TRACE") (.printStackTrace ex))
+                  {:error [n (.getMessage ex)]}))
+              {:forms (f)}))]
     (assoc r :lits @(:lits ps) :lit-prefix (:lit-prefix ps) :ups @(:ups ps) :lambdas @(:lambdas ps)
            :cuts @(:cuts ps) :races @races :out (str sw) :secs (secs t0))))
 
-(defn translate-classes
-  "Translates the classes ns (in order) in parallel (jobs threads) and merges what each did, in
-  their order, as the sequential translation would have done it class after class: the forms
-  into files ([pkg go-file] -> forms; file-of gives a class's), its errors, its printed output,
-  its conj's into the package states' sets (ups, lambdas, cuts; c/*races*) replayed one by
-  one, its literals given their names in the package's pool (Lit_n, numbered in order of
-  first use). cost-of estimates a class's translation time (the costliest start first).
-  Returns the renames of the classes' literals (out/*renames*)."
-  [ns file-of cost-of pkgstates files errors]
-  (let [results (par-mapv (jobs) (fn [[i n]] (translate-one i n)) (map-indexed vector ns)
-                          ;; the costliest first, so that none is left to the end alone
-                          (sort-by #(- (cost-of (nth ns %))) (range (count ns))))
+(defn- merge-apart!
+  "Applies to the package state ps (and c/*races*) what result r of apart recorded, as the
+  sequential run would have done it: its printed output, its conj's replayed one by one, its
+  literals named in the package's pool (Lit_n, numbered in order of first use; one an earlier
+  class used keeps its name). Returns renames with r's literals' renames added."
+  [r ps renames]
+  (let [plen (count (:lit-prefix r))
         conj-all (fn [a xs] (when (seq xs) (swap! a #(reduce conj % xs))))
+        lits (:lits ps)
+        renames (reduce (fn [renames [s sym]]
+                          (let [g (or (get @lits s)
+                                      (let [g (symbol (str "Lit_" (count @lits)))]
+                                        (swap! lits assoc s g)
+                                        g))]
+                            (assoc renames sym g)))
+                        renames
+                        (sort-by #(Long/parseLong (subs (name (val %)) plen)) (:lits r)))]
+    (print (:out r))
+    (conj-all (:ups ps) (:ups r))
+    (conj-all (:lambdas ps) (:lambdas r))
+    (conj-all (:cuts ps) (:cuts r))
+    (conj-all c/*races* (:races r))
+    renames))
+
+(defn translate-classes
+  "Translates the classes ns (in order) in parallel (jobs threads), each apart, and merges what
+  each did, in their order, as the sequential translation would have done it class after
+  class (merge-apart!): the forms into files ([pkg go-file] -> forms; file-of gives a
+  class's), its errors into errors. cost-of estimates a class's translation time (the
+  costliest start first). Returns the renames of the classes' literals (out/*renames*)."
+  [ns file-of cost-of pkgstates files errors]
+  (let [results (m/par-mapv (m/jobs)
+                            (fn [[i n]] (apart "" i n #(if (m/reflected? n) (d/reflected-forms n) (d/class-forms n)) true))
+                            (map-indexed vector ns)
+                            ;; the costliest first, so that none is left to the end alone
+                            (sort-by #(- (cost-of (nth ns %))) (range (count ns))))
         _ (when (System/getenv "A2G_CLASS_TIMES")
             (doseq [[n r] (take 25 (sort-by (comp - :secs second) (map vector ns results)))]
               (println "a2g: class time" n (:secs r))))]
     (reduce
       (fn [renames [n r]]
         (let [[pkg fname] (file-of n)
-              ps (get pkgstates pkg)
-              plen (count (:lit-prefix r))
-              renames (reduce (fn [renames [s sym]]
-                                (let [lits (:lits ps)
-                                      g (or (get @lits s)
-                                            (let [g (symbol (str "Lit_" (count @lits)))]
-                                              (swap! lits assoc s g)
-                                              g))]
-                                  (assoc renames sym g)))
-                              renames
-                              (sort-by #(Long/parseLong (subs (name (val %)) plen)) (:lits r)))]
-          (print (:out r))
-          (conj-all (:ups ps) (:ups r))
-          (conj-all (:lambdas ps) (:lambdas r))
-          (conj-all (:cuts ps) (:cuts r))
-          (conj-all c/*races* (:races r))
+              renames (merge-apart! r (get pkgstates pkg) renames)]
           (if-let [e (:error r)]
             (swap! errors conj e)
             (swap! files update [pkg fname] (fnil into []) (:forms r)))
           renames))
       {}
       (map vector ns results))))
+
+(defn registrations
+  "The forms of a2g_classes.go of package pkg (out/class-registration of each class, in order),
+  the classes in parallel, each apart, merged in order into the package state ps (as
+  translate-classes). Returns [forms renames]."
+  [pkg classes ps]
+  (let [rs (m/par-mapv (m/jobs) (fn [[i n]] (apart (str "r" (name pkg)) i n #(out/class-registration pkg n) false))
+                       (map-indexed vector classes))]
+    [(vec (mapcat :forms rs))
+     (reduce (fn [renames r] (merge-apart! r ps renames)) {} rs)]))
 
 (def default-edge "jdk/edge.edn")
 
@@ -614,8 +607,10 @@
                   :let [ps (get pkgstates pkg)
                         classes (sort (filter #(= pkg (m/pkg %)) T))]
                   :when (or (seq classes) (= pkg :jrt))]
-            (binding [c/*pkgstate* ps]
-              (swap! files assoc [pkg "a2g_classes.go"] (vec (mapcat #(out/class-registration pkg %) classes)))))
+            ;; in parallel, each class apart (registrations)
+            (let [[forms renames] (registrations pkg (vec classes) ps)]
+              (swap! lit-renames merge renames)
+              (swap! files assoc [pkg "a2g_classes.go"] forms)))
           (lap :registrations)
           (doseq [pkg [:jrt :lang]
                   :let [ps (get pkgstates pkg)
@@ -684,7 +679,7 @@
                                     :when (seq forms)]
                                 [pkg fname forms]))
                 texts (binding [out/*renames* @lit-renames]
-                        (par-mapv (jobs) (fn [[pkg fname forms]] (out/file-text pkg fname forms)) to-write
+                        (m/par-mapv (m/jobs) (fn [[pkg fname forms]] (out/file-text pkg fname forms)) to-write
                                   ;; the files of most declarations first
                                   (sort-by #(- (count (nth (nth to-write %) 2))) (range (count to-write)))))
                 _ (lap :texts)
@@ -812,7 +807,7 @@
                                   :steps (do (lap :files) @steps)}}]
               (write! (str (:out opts) "/report.edn") (with-out-str (arbace.pprint/pprint report)))
               (println (str "a2g: steps (s): " (str/join ", " (for [[k v] @steps] (str (name k) " " v)))
-                            " (" (jobs) " jobs)"))
+                            " (" (m/jobs) " jobs)"))
               (println (str "a2g: translated in " t-trans " s, written in " (secs t3) " s: "
                             (count written) " files; program root " prog-dir))
               (println (str "a2g: " (reduce + (map count (vals races))) " candidate two-word race fields in "
