@@ -1044,3 +1044,30 @@ All as recommended in doc/STANDALONE-SURVEY.md:
     `arbace.xml` now (over Go's `encoding/xml`) was the alternative.
   - Marked "Accepted." in doc/STANDALONE-NOTES.md.
 - The user asked for the two Go-build bugs to be fixed; an agent is on it (branch `go-bugs`).
+
+## 2026-10-13: two Go-build bugs fixed
+
+- Agent, branch `go-bugs` (`3de0fde`, main `88498b1` merged `bb0eed2`, `f8e8437`), merged as
+  `284313a`. Account in doc/STANDALONE-NOTES.md, "After S4: two Go-build bugs".
+  - A top-level `do` of mutually referring `defclass`es (`native.ae:29`, `:32`, `:50`).
+    `arbace.classes.interp/define!` built every method's interpreter tree at definition, and a
+    call needs its target, so a sibling defined by a later form of the do was missing; the JVM
+    resolves names at first run. Now a body that refers to a sibling not yet resolvable is built
+    at its first call (`*eager*`, the pending signal, `Meth.ensure`). A static initializer that
+    refers to one becomes a lazily built `<clinit>`. A sibling's type in a member's signature is
+    `Object` to the host (SA90).
+  - A class forms `lambda` called from a handed-over fn (`native.ae:184`):
+    `CF$CallV` (`arbace/lang/go/ClassForms.ae`) stored the receiver at the callee's `self` slot
+    (-1 for a lambda) and never copied the captured values. Now `CallV.enter` builds the frame
+    as `Meth.invoke` does.
+  - 11 new oracle cases (`native.siblings`, `native.ae:727-772`), expected values recorded from
+    the frozen jar. The 4 fixed cases left both known-mismatch files; one was added
+    (`native.ae:745`, reflection reports `Object`, SA90).
+  - Checks: the Go build (7m29s), `--smoke` 60 ok, the oracle 22,504 of 22,558 (the 54 known,
+    0 new), and the essential gate on `bb0eed2` (13m38s; the suite 20,506 of 20,520, no
+    regressions). main had not moved, so the merge is the gated tree plus a notes commit.
+- The user accepted SA90 (a sibling's signature type as `Object` now; republishing members
+  later if reflection needs it), SA91 (only the bodies that refer to an undefined sibling
+  are built on first call) and SA92 (an `ExceptionInfo` when a sibling is never defined).
+- The runtime changed, so the committed seed is no longer the program's fixpoint print; by the
+  user's practice the seed is remade at the next milestone.

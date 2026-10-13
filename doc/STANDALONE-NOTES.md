@@ -1419,7 +1419,7 @@ longer the program's fixpoint print; it is remade only at a milestone.
 
 ### Amendments
 
-For the user to decide.
+Accepted by the user as recommended (2026-10-13).
 
 - **SA90 A sibling's type in a member's signature.** The host gets each member's types when the
   class is defined, before a later form of the do defines the sibling. (a) `Object` for a
@@ -1427,16 +1427,16 @@ For the user to decide.
   reports `java.lang.Object` (`native.ae:745`, a known mismatch); (b) the members published again
   when the sibling is defined (jrt's member tables replace an entry: a change to `CFGo` and its
   natives); (c) an error, as before the fix (a do of classes referring to each other in their
-  types fails). *Recommended: (a)* now, (b) if reflection on such members matters.
+  types fails). *Recommended: (a)* now, (b) if reflection on such members matters. Accepted.
 - **SA91 When a body referring to a sibling is built.** (a) On its first call (as done), only
   the bodies that refer to a sibling not resolvable while `define!` builds, every other body built
   at definition as before; (b) every body of a compilation with siblings on its first call;
   (c) a deferred call node resolving its target at its first run, the rest of the body built at
   definition. *Recommended: (a)*: build errors other than the sibling's absence are found by the
   analysis, which has run on every body; (c) needs a new node kind in the runtime for the same
-  effect.
+  effect. Accepted.
 - **SA92 The error when a sibling is never defined.** (a) The pending signal's `ExceptionInfo`
   ("Class X (a class form of the enclosing do) is not defined yet") at the first call, where the
   JVM throws `NoClassDefFoundError`; (b) a `NoClassDefFoundError` with the class's name.
   *Recommended: (a)* (as done): a compile error of the class forms, as the other build failures
-  are; (b) when code needs to catch the JVM's error (no case covers it).
+  are; (b) when code needs to catch the JVM's error (no case covers it). Accepted.

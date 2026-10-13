@@ -46,8 +46,10 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - The user accepted the amendments SA20-SA25 and SA40-SA88 as applied (2026-10-13;
   [STANDALONE-NOTES.md](STANDALONE-NOTES.md)).
-- The two Go-build bugs the native tests found (agent, branch `go-bugs`): a top-level `do` of
-  mutually referring `defclass`es; a class forms `lambda` in a handed-over fn.
+- Fixed (2026-10-13): the two Go-build bugs the native tests found (a top-level `do` of mutually
+  referring `defclass`es; a class forms `lambda` in a handed-over fn), SA90-SA92 accepted. Left:
+  reflection on a member typed by a sibling defined later reports `Object` (SA90 (b) if needed).
+  The seed is no longer the program's exact print: remade at the next milestone.
 - The host's reboot (the user: after the milestone): it runs kernel 6.18.52 with 6.18.56's
   modules installed; after it, `bin/arbace-go --smoke --box` for nested KVM.
 - The Mac bundle for this milestone, if wanted (`bin/box-mac-bundle`).
