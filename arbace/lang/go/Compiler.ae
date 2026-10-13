@@ -1,41 +1,22 @@
 ;; Go-build variant of arbace.lang.Compiler (A2G-SPEC §4.6, §10.1): read by a2g only. The Go
-;; build has no bytecode back end (ASM is cut, D6) and no system properties for compiler
-;; options. The analyzer (reader, macroexpansion, resolution, parse into Expr trees) is
-;; translated unchanged; what loads or writes classes is replaced here, and the evaluator over
-;; the Expr tree (doc/go/EVAL-PLAN.md) takes the place of class generation: a fn* evaluates to
-;; an EvalFn, whose invocation walks its FnMethod's body with Eval.
+;; build has no system properties for compiler options. The analyzer (reader, macroexpansion,
+;; resolution, parse into Expr trees) is translated unchanged; what makes classes is replaced
+;; here, and the evaluator over the Expr tree (doc/go/EVAL-PLAN.md) takes the place of class
+;; generation: a fn* evaluates to an EvalFn, whose invocation walks its FnMethod's body with
+;; Eval.
 ;;
-;; ASM is erased (A2G-NOTES.md, proposed amendment B2): arbace.asm is outside the closed world,
-;; and every value of one of its types (the back end's Type and Method constants, an ObjExpr's
-;; objtype, a FnMethod's argtypes) is nil in Go, its computation skipped. The emit methods are
-;; not reached once ObjExpr.compile is replaced, so they are not translated.
+;; The JVM's bytecode back end (the emit methods, ASM) left Compiler.ae on 2026-10-12
+;; (doc/STANDALONE-NOTES.md, S4); until then this variant erased ASM (a2g/erase, A2G-SPEC §4.6),
+;; and the back end is on the branch arbace-for-java-26.
 (in-ns 'arbace.lang)
 
-(a2g/erase "arbace/asm/")
-
 (a2g/variant Compiler
-  ;; ARG_TYPES: ASM's types of the back end's method descriptors
-  (a2g/cut (static-initializer 0))
-
   ;; *compiler-options* from the arbace.compiler.* system properties: none
-  ^{:a2g/nth 1}
   (static-initializer
     (set! COMPILER_OPTIONS
           (.setDynamic (Var/intern (Namespace/findOrCreate (Symbol/intern "arbace.core"))
                                    (Symbol/intern "*compiler-options*")
                                    nil))))
-
-  ;; the class file version the back end writes: Java 26's
-  (field ^:public ^:static ^:final ^int JVM_BYTECODE_VERSION 70)
-
-  ;; AOT compilation writes class files: there are none in the Go build (A2G-SPEC §10.3)
-  (method ^:public ^:static compile :throws [IOException] [^Reader rdr ^String sourcePath
-                                                            ^String sourceName]
-    (throw (UnsupportedOperationException. "compile: the Go build writes no class files")))
-
-  (method ^:public ^:static writeClassFile :throws [IOException] ^void [^String internalName
-                                                                        ^byte/1 bytecode]
-    (throw (UnsupportedOperationException. "compile: the Go build writes no class files")))
 
   ;; ---------------------------------------------------------------------------------------
   ;; The evaluator (doc/go/EVAL-PLAN.md, doc/go/EVAL-NOTES.md). Every Expr has evalIn(Frame), a
@@ -1049,8 +1030,6 @@
       (Compiler$Image/event (new Object/1 ["type" name this interfaceNames]))
       (set! compiledClass (Compiler$Evaluator/defineType (cast NewInstanceExpr this) interfaceNames))))
 
-  (method ^:synchronized getCompiledClass ^Class [this] compiledClass)
-
   ;; a fn* evaluated as a top-level form: a fn without a frame (it closes over nothing); a
   ;; deftype: nil; a reify: its object
   (method ^:public eval [this]
@@ -1103,12 +1082,6 @@
       (let [c (Compiler$Dyn/defineClass (java-str COMPILE_STUB_PREFIX "." (.-name ret)) ifaces names)]
         (when (.isDeftype ret) (Compiler$Evaluator/defineCtors c ret bs))
         c))))
-
-(a2g/variant Compiler$FnMethod
-  ;; primitive fns are evaluated boxed (EVAL-PLAN.md Q1, A2G-SPEC §10.2): no fn has a
-  ;; primitive interface, so callers call invoke; the evaluator converts ^long and ^double
-  ;; parameters and returns
-  (method ^:public ^:static primInterface ^String [^IPersistentVector arglist] nil))
 
 (a2g/variant Compiler$LocalBindingExpr
   (a2g/add
@@ -1706,37 +1679,6 @@
                   (if (identical? v (.eval test)) (.evalIn then f) (.evalIn defaultExpr f))
                 :else
                   (if (Util/equiv v (.eval test)) (.evalIn then f) (.evalIn defaultExpr f)))))))))
-
-(a2g/variant Compiler$HostExpr
-  ;; the descriptor of an array class from its symbol (String/2): a primitive's descriptor
-  ;; by its name where the JVM build asks ASM's Type
-  (method ^:public ^:static buildArrayClassDescriptor ^String [^Symbol sym]
-    (let [dim (unchecked-subtract-int (.charAt (.-name sym) 0) \0)
-          componentClassName (Symbol/intern nil (.-ns sym))
-          ^:mutable componentClass (arbace.lang.Compiler/primClass componentClassName)]
-      (when (nil? componentClass)
-        (set! componentClass (HostExpr/maybeClass componentClassName false)))
-      (when (nil? componentClass)
-        (throw (Util/sneakyThrow
-                 (ClassNotFoundException.
-                   (java-str "Unable to resolve component classname: " componentClassName)))))
-      (let [arrayDescriptor (StringBuilder.)]
-        (loop [^int i 0]
-          (when (< i dim)
-            (^[char] StringBuilder/.append arrayDescriptor \[)
-            (recur (unchecked-inc-int i))))
-        (.append arrayDescriptor
-                 (if (.isPrimitive componentClass)
-                     (switch (.getName componentClass)
-                       "boolean" "Z" "byte" "B" "char" "C" "short" "S" "int" "I" "long" "J"
-                       "float" "F" "double" "D" "V")
-                     (java-str "L" (.getName componentClass) ";")))
-        (.toString arrayDescriptor)))))
-
-(a2g/variant Compiler$StaticInvokeExpr
-  ;; direct linking calls a fn's static invokeStatic method: the evaluator's fns have none, so
-  ;; a direct-linked call is an ordinary invoke (and *compiler-options* has no :direct-linking)
-  (method ^:static parse ^Expr [^Var v ^ISeq args tag ^boolean tailPosition] nil))
 
 (a2g/variant Compiler$QualifiedMethodExpr
   ;; the JVM build filters with streams, which the Go build has not (JAVA-SURFACE.md: rewritten

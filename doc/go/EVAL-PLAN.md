@@ -13,6 +13,9 @@ the questions the user should decide (§9).
 
 ## 1. Where things stand (phase 2B)
 
+- (Since 2026-10-12, standalone S4: the back end is gone from `Compiler.ae` itself, nothing is
+  erased, and the variant's back-end replacements are the base's: A2G-SPEC §10.1. The rest of
+  this section is as of phase 2B.)
 - **`Compiler` translates as a whole.** `bin/a2g --root 'arbace.lang.Compiler$*'` translates 94
   of `Compiler`'s 96 classes (its analyzer: `analyze`, macroexpansion, resolution, every `Expr`
   class and its parser, `eval`, `load`), about 17,400 lines of Go; the two left are the back

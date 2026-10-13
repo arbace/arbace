@@ -16,6 +16,17 @@
 > image", "Clojure's test suite on stages 1 and 2", "The binary seed") are the record of that
 > path. Main's bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (hand change
 > 23).
+>
+> Since 2026-10-12 (standalone S4, doc/STANDALONE-NOTES.md, "S4: the JVM removed") main holds no
+> JVM back end: ASM (`arbace/asm.ae`, `arbace/asm/`), the bytecode emitters of
+> `arbace/lang/Compiler.ae` (the `emit*` methods, the class generation of `ObjExpr`,
+> `SourceDebugExtensionAttribute`, the ASM-typed fields and constants), `arbace/lang/Compile.ae`,
+> `arbace/lang/DynamicClassLoader.ae`, `arbace/lang/Intrinsics.ae`, and the class forms
+> compiler's back end (`arbace/classes/emit.ae`, `compiler.ae`, `shape.ae`, `verify.ae`,
+> `build.ae`, `boot.ae`) are on the branch `arbace-for-java-26` only; `arbace/genclass.ae`,
+> `arbace/core_proxy.ae`, `arbace/reflect/java.ae`, `arbace/main.ae` and `arbace/core/server.ae`
+> are the Go build's variants now. Where the sections below (the bootstrap, hand changes 7, 11,
+> 14, 16, ..., the binary seed) describe them, they describe that branch.
 
 The frozen baseline `clojure/` is vendored under `arbace/`, renamed `clojure.*` → `arbace.*`, all
 of it `.clj`: the Java files as class forms (doc/classes/SPEC.md), Clojure's own `.clj` renamed.
@@ -32,7 +43,7 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 |---|---|
 | `arbace/*.ae`, `arbace/{core,java,pprint,reflect,repl,test,tools}/**.ae` | Clojure's namespaces, renamed: `arbace.core` (with `core_print.ae` and the other files it loads), `arbace.main`, `arbace.pprint`, `arbace.java.io`, ... |
 | `arbace/lang.ae`, `arbace/lang/*.ae` | namespace `arbace.lang` (Java package `clojure.lang`), one file per Java file: `RT.ae`, `Compiler.ae`, ... |
-| `arbace/asm.ae`, `arbace/asm/**.ae` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause) |
+| `arbace/asm.ae`, `arbace/asm/**.ae` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause); on the branch `arbace-for-java-26` only since 2026-10-12 |
 | `arbace/java/api.ae`, `arbace/java/api/Clojure.ae` | `arbace.java.api` |
 | `arbace/lang/Main.ae` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
 | `arbace/classes/`, `arbace/j2a/` (then `arbace/j2c/`) | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them. Later tools there: `arbace/g2a/`, `arbace/a2g/`, `arbace/c2a/` (the renaming rules below, now c2a's, doc/C2A.md) |

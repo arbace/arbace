@@ -4,7 +4,8 @@ What `arbace/` holds (all `.ae`, Arbace's source extension since 2026-10-11: Clo
 class forms, which Clojure cannot evaluate; VENDOR-NOTES.md, hand change 19): Arbace's Clojure
 code. Two kinds of things live here:
 
-- Arbace's own tools: `classes/` (the class forms compiler, `arbace.classes.*`), `c2a/` (the
+- Arbace's own tools: `classes/` (the class forms' analysis and the Go build's interpreter of
+  them, `arbace.classes.*`; the bytecode back end is on the branch `arbace-for-java-26`), `c2a/` (the
   Clojure to Arbace translator, `arbace.c2a.*`; doc/C2A.md), `j2a/`
   (the Java to class forms converter, `arbace.j2a.*`), `g2a/` (Go to Arbace forms,
   `arbace.g2a.*`, with its Go helpers under `tools/godump/` and `tools/gocmp/`; doc/go/) and
@@ -12,13 +13,20 @@ code. Two kinds of things live here:
   doc/go/A2G-SPEC.md).
 - The vendored Clojure, renamed `clojure.*` → `arbace.*`, everything else: the namespaces
   `arbace.core`, `arbace.main`, `arbace.pprint`, ... (`*.ae`), and the Java classes as class
-  forms, one namespace per Java package (`lang.ae`, `asm.ae`, `java/api.ae`) with one file per
-  Java file (`lang/RT.ae`, `asm/ClassReader.ae`, ...). Clojure's main class `clojure.main` is
+  forms, one namespace per Java package (`lang.ae`, `java/api.ae`) with one file per
+  Java file (`lang/RT.ae`, `lang/Compiler.ae`, ...). Clojure's main class `clojure.main` is
   `arbace.lang.Main` (`lang/Main.ae`). A few files among them are Arbace's own, not derived from
   Clojure, and say so in their header (`lang/KeywordInvokeSite.ae`,
   `lang/ReflectorCallSite.ae`). `lang/go/` holds the Go build's variants of some of these
-  classes and namespaces (derived from the vendored files; read by a2g only, not by the JVM
-  build).
+  classes and namespaces (derived from the vendored files; read by a2g only).
+
+ASM (`asm.ae`, `asm/`, Clojure's `clojure.asm` renamed `arbace.asm`), the JVM's bytecode back end
+of `lang/Compiler.ae` and of the class forms compiler (`classes/emit.ae` ...), `lang/Compile.ae`,
+`lang/DynamicClassLoader.ae` and `lang/Intrinsics.ae` left main on 2026-10-12 with the JVM build
+(doc/STANDALONE-NOTES.md, S4: the JVM removed); they remain on the branch `arbace-for-java-26`,
+whose `doc/ARBACE.md` records ASM's origin (below). The namespaces `genclass.ae`,
+`core_proxy.ae`, `reflect/java.ae`, `main.ae` and `core/server.ae` took the Go build's variants
+then (`lang/go/ns/`).
 
 Origin of the vendored Clojure: the frozen baseline `clojure/` this repository held until the
 freeze (it remains on the branch `arbace-for-java-26`), that is

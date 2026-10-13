@@ -193,7 +193,12 @@ without `java.io.File`.
 **Namespace variants** (`arbace/lang/go/ns/`, amendment V1, M1 in A2G-SPEC §10.3): the Go
 build's differences in the namespaces, applied when the sources are embedded: `P.ae` replaces
 `arbace/P.ae`, `P.after.ae` is appended to it, `P.subst.ae` (a vector of strings, old and
-new) replaces text found exactly once. Each file's header says why; as of 2026-10-11:
+new) replaces text found exactly once. Each file's header says why; as of 2026-10-11 (since
+2026-10-12, when the JVM's back end and ASM left main, standalone S4, `genclass.ae`,
+`core_proxy.ae`, `main.after.ae`, `main.subst.ae`, `core/server.subst.ae`,
+`reflect/java.subst.ae`, `classes/native.subst.ae`, `classes/go.ae` and `classes/interp.ae` are
+applied to or moved into their sources and gone from `arbace/lang/go/ns/`; `gen-class` does
+nothing there, as Clojure's when not compiling):
 
 | variant | why |
 |---|---|
@@ -213,7 +218,7 @@ new) replaces text found exactly once. Each file's header says why; as of 2026-1
 
 **Cut classes.** The namespaces name classes outside the world (`(:import (java.nio.file
 Files))`, `^java.util.stream.BaseStream`, `arbace.asm.Type/getDescriptor` in core's annotation
-support). `bin/a2g --program` reads the embedded sources, collects the class names their forms
+support until 2026-10-12). `bin/a2g --program` reads the embedded sources, collects the class names their forms
 mention (qualified symbols, a qualified symbol's namespace, import lists, metadata), keeps those
 the JVM has from the JDK or `arbace.lang`/`arbace.asm` and the world lacks, adds the JDK classes
 their public members name (one level: `Files/createTempFile` returns a `Path`), and registers

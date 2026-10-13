@@ -12,8 +12,7 @@
 (require '[arbace.datafy :refer (datafy)]
          '[arbace.set :as set]
          '[arbace.string :as str])
-(import '[arbace.asm ClassReader ClassVisitor Type Opcodes]
-         '[java.lang.reflect Modifier]
+(import '[java.lang.reflect Modifier]
          java.io.InputStream)
 
 (set! *warn-on-reflection* true)
@@ -23,15 +22,13 @@
   (typename [s] (str/replace (str s) "<>" "[]"))
 
   Class
-  ;; neither .getName not .getSimpleName returns the right thing, so best to delegate to Type
+  ;; neither .getName not .getSimpleName returns the right thing (Clojure delegates to ASM's
+  ;; Type, which left with the bytecode back end: doc/STANDALONE-SURVEY.md D13)
   (typename
    [c]
-   (typename (Type/getType c)))
-
-  Type
-  (typename
-   [t]
-   (-> (.getClassName t))))
+   (if (.isArray ^Class c)
+     (str (typename (.getComponentType ^Class c)) "[]")
+     (.getName ^Class c))))
 
 (defn- typesym
   "Given a typeref, create a legal Clojure symbol version of the
@@ -56,13 +53,22 @@
   [[name flag & contexts]]
   {:name name :flag flag :contexts (set (map keyword contexts))})
 
+(defn- descriptor-class-name
+  "Type.getType(d).getClassName() of field descriptor d, without ASM."
+  [^String d]
+  (case (.charAt d 0)
+    \[ (str (descriptor-class-name (subs d 1)) "[]")
+    \L (str/replace (subs d 1 (dec (count d))) "/" ".")
+    ({"Z" "boolean" "B" "byte" "C" "char" "S" "short" "I" "int" "J" "long"
+      "F" "float" "D" "double" "V" "void"} d)))
+
 (defn- field-descriptor->class-symbol
   "Convert a Java field descriptor to a Clojure class symbol. Field
    descriptors are described in section 4.3.2 of the JVM spec, 2nd ed.:
    http://java.sun.com/docs/books/jvms/second_edition/html/ClassFile.doc.html#14152"
   [^String d]
   {:pre [(string? d)]}
-  (typesym (Type/getType d)))
+  (symbol (str/replace (descriptor-class-name d) "[]" "<>")))
 
 (defn- internal-name->class-symbol
   "Convert a Java internal name to a Clojure class symbol. Internal
@@ -72,7 +78,8 @@
    http://java.sun.com/docs/books/jvms/second_edition/html/ClassFile.doc.html#14757"
   [d]
   {:pre [(string? d)]}
-  (typesym (Type/getObjectType d)))
+  (symbol (str/replace (if (.startsWith ^String d "[") (descriptor-class-name d) (str/replace d "/" "."))
+                       "[]" "<>")))
 
 (def ^{:doc "The Java access bitflags, along with their friendly names and
 the kinds of objects to which they can apply."}
@@ -188,11 +195,6 @@ the kinds of objects to which they can apply."}
 (def ^:private default-reflector
      (JavaReflector. (.getContextClassLoader (Thread/currentThread))))
 
-(defn- parse-method-descriptor
-  [^String md]
-  {:parameter-types (vec (map typesym (Type/getArgumentTypes md)))
-   :return-type (typesym (Type/getReturnType md))})
-
 (defprotocol ClassResolver
   (^InputStream resolve-class [this name]
                 "Given a class name, return that typeref's class bytes as an InputStream."))
@@ -205,63 +207,11 @@ the kinds of objects to which they can apply."}
   (resolve-class [this typeref]
                  (.getResourceAsStream this (resource-name typeref))))
 
+;; Clojure's AsmReflector reads the class bytes (resolve-class) with ASM's ClassReader. ASM left
+;; Arbace with the JVM's bytecode back end (2026-10-12; doc/STANDALONE-SURVEY.md D13), and the Go
+;; build has no class files: the type remains, its reflection throws.
 (deftype AsmReflector [class-resolver]
   Reflector
   (do-reflect [_ typeref]
-    (with-open [is (resolve-class class-resolver typeref)]
-      (let [class-symbol (typesym typeref)
-            r (ClassReader. is)
-            result (atom {:bases #{} :flags #{} :members #{}})]
-        (.accept
-         r
-         (proxy
-          [ClassVisitor]
-          [Opcodes/ASM4]
-          (visit [version access name signature superName interfaces]
-                 (let [flags (parse-flags access :class)
-                       ;; ignore java.lang.Object on interfaces to match reflection
-                       superName (if (and (flags :interface)
-                                          (= superName "java/lang/Object"))
-                                   nil
-                                   superName)
-                       bases (->> (cons superName interfaces)
-                                  (remove nil?)
-                                  (map internal-name->class-symbol)
-                                  (map symbol)
-                                  (set)
-                                  (not-empty))]
-                   (swap! result merge {:bases bases
-                                        :flags flags})))
-          (visitAnnotation [desc visible])
-          (visitSource [name debug])
-          (visitInnerClass [name outerName innerName access])
-          (visitField [access name desc signature value]
-                      (swap! result update :members (fnil conj #{})
-                             (Field. (symbol name)
-                                     (field-descriptor->class-symbol desc)
-                                     class-symbol
-                                     (parse-flags access :field)))
-                      nil)
-          (visitMethod [access name desc signature exceptions]
-                       (when-not (= name "<clinit>")
-                         (let [constructor? (= name "<init>")]
-                           (swap! result update :members (fnil conj #{})
-                                  (let [{:keys [parameter-types return-type]} (parse-method-descriptor desc)
-                                        flags (parse-flags access :method)]
-                                    (if constructor?
-                                      (Constructor. class-symbol
-                                                    class-symbol
-                                                    parameter-types
-                                                    (vec (map internal-name->class-symbol exceptions))
-                                                    flags)
-                                      (Method. (symbol name)
-                                               return-type
-                                               class-symbol
-                                               parameter-types
-                                               (vec (map internal-name->class-symbol exceptions))
-                                               flags))))))
-                       nil)
-          (visitEnd [])
-          ) 0)
-        @result))))
-
+    (throw (UnsupportedOperationException.
+             (str "AsmReflector: no class file reader in Arbace (reflecting " (typename typeref) ")")))))

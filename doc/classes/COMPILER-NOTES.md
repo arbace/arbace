@@ -8,6 +8,18 @@ These notes say how it is built, how to use and test it, what it covers (the §8
 where implementing the spec suggested changes to it (amendments, accepted and folded into
 SPEC.md, last section).
 
+> **Since 2026-10-12 (standalone S4, doc/STANDALONE-NOTES.md, "S4: the JVM removed") main
+> holds the front end only**: `types`, `env`, `parse`, `lower`, `analyze` and `native`, with
+> `opcodes` (the access flags, ASM's `Opcodes/ACC_*` values), `go` (ASM's `TypeReference`
+> arithmetic, and the Go build's generic signatures), `interp` (the Go build's interpreter of
+> the analyzed classes, doc/go/CLASSFORMS-REPL.md; formerly a namespace variant) and `jvm` (the
+> class file reading of `env` on a JVM, with ASM: loaded on demand only by a2g's edge
+> recording on the frozen jar). The back end (`emit`, `compiler`, `shape`, `verify`, `build`,
+> `boot`), its tests (`test/classes/*_test.ae`, `bin/class-forms-tests`) and ASM are on the
+> branch `arbace-for-java-26`; the frozen jar `arbace-for-java-26-v4` runs them where j2a's
+> checks compile converted forms to bytecode. The sections below describe the compiler as it was
+> there, the back end included.
+
 ## Layout
 
 | file | namespace | role |
