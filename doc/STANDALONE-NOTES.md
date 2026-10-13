@@ -1409,7 +1409,10 @@ cases) removed, the reflected type's group (one case) added.
 - The oracle against the frozen reference, `--expected known-go-amd64-frozen.edn` before the
   edit: 22,504 of 22,558, `:29`, `:32`, `:50`, `:184` now passing, `:745` the one new; after it,
   as recorded.
-- The essential `bin/gate`: see the branch's commit.
+- The essential `bin/gate` on `bb0eed2` (this branch with main at `88498b1` merged; 13m38s): the
+  seed as pinned; stage 0 (`f114b6bd…`) in 16 s; the executables built in 608 s; the smoke test;
+  Clojure's suite on the Go test build 20,506 of 20,520, no regressions; the oracle against the
+  frozen v4 22,504 of 22,558, the 54 known, 0 new.
 
 The runtime changed (`ClassForms.ae` is translated into the program), so the committed seed is no
 longer the program's fixpoint print; it is remade only at a milestone.
