@@ -167,6 +167,7 @@ what the host VM's design teaches.
 | RAM at boot | 67,065,548 KiB (64 GiB): "Memory: 65731048K/67065548K available"; RAM in two ranges, below about 2 GiB and from `0x100000000` (4 GiB) to `0x107fffffff`. The PC's hole below 4 GiB holds the firmware and the PCI windows | `dmesg` |
 | RAM now | `MemTotal` 31,161,232 kB (29.7 GiB), `MemAvailable` 29.4 GB | `/proc/meminfo`, `free -m` |
 | balloon | virtio-balloon, **8,659,792 pages inflated (33.0 GiB)**, none deflated. Its features (bits of `features`): the stats queue and free-page reporting; not deflate-on-OOM *(read from the bit string)*. Earlier records give the host 33 GB (BOX-NOTES S4) and the user 36 GB: the outer host changes the balloon *(inferred)* | `/proc/vmstat` (`balloon_inflate`, `nr_balloon_pages`), `/sys/bus/virtio/devices/virtio2/features`; `CONFIG_PAGE_REPORTING=y` |
+| balloon, later (2026-10-13, after noon) | `free`: 65,800,400 KiB total (62.8 GiB), 61 GiB available: the balloon deflated by the outer host, the full 64 GiB nearly back. Without deflate-on-OOM or swap, plan around the low watermark seen (29.7 GiB) and take the rest as headroom | `free`, `/proc/vmstat` |
 | swap | none (`SwapTotal` 0, no `/proc/swaps` entry); no zswap in use | `/proc/meminfo`, `/proc/swaps` |
 | overcommit | heuristic (`overcommit_memory` 0, ratio 50), `CommitLimit` 15.6 GB (not enforced in mode 0), `max_map_count` 65,530 | `/proc/sys/vm/*`, `/proc/meminfo` |
 | huge pages | THP `always` (defrag `madvise`), 434 MB of anonymous huge pages in use; no hugetlbfs pages reserved (`nr_hugepages` 0); the direct map mostly 1 GiB pages | `/sys/kernel/mm/transparent_hugepage/*`, `/proc/meminfo` |
@@ -639,6 +640,17 @@ are recorded below each.
 
   *Recommended: (a), and measure*: a box idle for an hour beside the host's clock, here and
   on the Mac. Take (b) only if the drift exceeds about a second an hour.
+
+  **Measured (2026-10-13), HV6's test here:** an idle box (1 vCPU, the launcher of
+  `target/arbace-go/box-amd64`) printed `System/currentTimeMillis` every minute for an hour,
+  each line stamped by the host's clock on arrival (`.tmp/hv6/run.sh`). The guest's clock minus
+  the host's went from -6 ms to -111 ms, steadily, about 1.75 ms a minute: the guest's clock
+  runs about 29 ppm slow, about 0.1 s an hour (2.5 s a day), presumably the TSC's rate as the
+  board takes it, not tracking the host's NTP-disciplined clock. Five single-minute outliers
+  (-73, -96, -94, -75 ms and one of -4.3 s at minute 51, while another agent's large guest
+  was starting) came back to the line the next minute: delivery delays, not clock steps. Below
+  the 1 s an hour criterion, so (a) stands here; the Mac's run is due at the next box
+  milestone (HV7). A resync (b) would be wanted for boxes living for days.
 
 - **HV7 Where S8's times are measured.** Options:
   - (a) here only (nested SVM without decode assists: exits 16-18 µs);
