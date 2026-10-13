@@ -1875,6 +1875,25 @@ namespaces' Go and its stage 0 hosts the tools compiled.
   455-492 s; a2g's second run, its analyzer evaluated on stage 0, takes 1,100-1,500 s. A build is
   about 45 minutes until the tools run compiled on their host (SA133) and the size is worked on.
 
+### Left (next steps)
+
+- Clojure's suite on the compiled test build (`ARBACE_AOT=1 bin/arbace-go --build-tests`), then
+  `ARBACE_AOT=1` the default (SA140) and the gate's.
+- The build's time: the tools' host compiled (a build hosted by a compiled one; the seed remade
+  from a compiled fixpoint makes stage 0 compiled), a2g's second run reusing the first's world;
+  gc's time and memory for `lang` (455-606 s); the program's size (the compiled classes are
+  rooted as the REPL's world, every public member in the member tables, and each fn class gets
+  forwarders for `IFn`'s arities).
+- The fixpoint and `bin/seed --verify` with `ARBACE_AOT=1` (the compiled tree a function of the
+  sources: to prove).
+- T3 measured (SA139): the benchmarks compiled (a script's code is evaluated; a namespace of
+  them compiled into a test build).
+- Stack traces name the class forms file (`aot_arbace_core.ae:49`) with the source's line; the
+  source's file name per member (a2g's line file) is to do.
+- Primitive fns (`invokePrim`): the analysis makes none in the Go build (EVAL-PLAN Q1); compiled
+  code could have them, the analysis's variant permitting.
+- The variants of `RT`, `Main` and `Compiler` merged into their bases (the milestone, after S6).
+
 ### Checking the back end's output
 
 - `arbace.aot.check` (`(arbace.aot.check/check DIR)` in the executable): the compiled tree's
