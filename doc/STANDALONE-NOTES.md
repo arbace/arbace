@@ -1694,6 +1694,8 @@ S4 ("S4: the JVM removed", Left) and SA90 (b).
   20,506 of 20,520, no regressions; the oracle against the frozen v4 22,505 of 22,558, the 53
   known, 0 new.
 - The box (above): built, smoke test 113 ok, its oracle 22,052 of 22,105, 53 known, 0 new.
+- The merged front end on the frozen jar: `bin/a2g-edge verify` (`jdk/edge.edn` is the JVM's
+  answer) and `bin/j2a-check` (the baseline, samples and module forms as expected).
 
 ### Amendments
 
