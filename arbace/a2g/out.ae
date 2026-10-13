@@ -130,10 +130,45 @@
       (run! w forms))
     @acc))
 
+(defn- lined?
+  "Does form f hold a list with a class forms line (:a2g/line), its tags included? Then its
+  text depends on the line it starts on (write-list); else not."
+  [f]
+  (let [lined-meta? (fn [x] (when-let [mt (meta x)] (or (some? (:a2g/line mt)) (lined? (:tag mt)))))]
+    (cond (seq? f) (boolean (or (lined-meta? f) (some lined? f)))
+          (vector? f) (boolean (or (lined-meta? f) (some lined? f)))
+          (symbol? f) (boolean (lined-meta? f))
+          (map? f) (boolean (some (fn [[k v]] (or (lined? k) (lined? v))) f))
+          :else false)))
+
+(def ^:private split-min
+  "A file of this many forms or more has the texts of its forms without lines computed in
+  parallel (a2g_classes.go: 8,000 registrations), before it is laid out."
+  256)
+
+(defn- unlined-texts
+  "For the forms of a long file (split-min), by index, the text of each form that holds no line
+  (lined?), cleaned and written as file-text writes it (its text does not depend on where it
+  starts), or nil for the others; computed in parallel, by chunks. nil for a short file."
+  [forms]
+  (when (>= (count forms) split-min)
+    (let [one (fn [f]
+                (when-not (and (seq? f) (= 'a2g/comment (first f)))
+                  (let [f (clean f)]
+                    (when-not (lined? f)
+                      (let [sb (StringBuilder.)]
+                        (binding [*lay* {:line (volatile! 1) :forced nil}] (write-form sb f))
+                        (str sb))))))
+          chunks (partition-all (max 16 (quot (count forms) (* 2 (m/jobs)))) forms)]
+      (into [] cat (m/par-mapv (m/jobs) (fn [fs] (mapv one fs)) chunks)))))
+
 (defn file-text
-  "The text of a Go forms file of package pkg named go-name holding forms."
+  "The text of a Go forms file of package pkg named go-name holding forms (a long one's forms
+  without lines written in parallel first, unlined-texts)."
   [pkg go-name forms & [header]]
-  (let [quals (used-qualifiers forms)
+  (let [forms (vec forms)
+        pre (unlined-texts forms)
+        quals (used-qualifiers forms)
         imports (vec (for [q (sort quals)
                            :when (contains? import-paths q)
                            :when (not (and (= pkg :jrt) (= q "jrt")))
@@ -148,15 +183,20 @@
       (out! sb "\n")
       ;; Go's package-level declarations may come in any order: those with a class forms line
       ;; first, by line (so that each lands on its line), then the rest in their order
-      (doseq [f (let [line-of #(when (seq? %) (:a2g/line (meta %)))
-                      lined (filter line-of forms)]
-                  (concat (sort-by line-of lined) (remove line-of forms)))]
+      ;; (by index: pre is the text of the i-th form, or nil)
+      (doseq [i (let [line-of #(when (seq? (nth forms %)) (:a2g/line (meta (nth forms %))))
+                      lined (filter line-of (range (count forms)))]
+                  (concat (sort-by line-of lined) (remove line-of (range (count forms)))))
+              :let [f (nth forms i)]]
         (if (and (seq? f) (= 'a2g/comment (first f)))
           (out! sb (str "\n;; " (second f) "\n"))
           (let [own (when (seq? f) (:a2g/line (meta f)))]
             ;; a blank line between declarations, unless the next one's line comes later
             (when-not (and own (>= own @(:line *lay*))) (out! sb "\n"))
-            (write-form sb (clean f)) (out! sb "\n")))))
+            (if-let [text (and pre (nth pre i))]
+              (out! sb text)
+              (write-form sb (clean f)))
+            (out! sb "\n")))))
     (str sb)))
 
 (defn go-file-name

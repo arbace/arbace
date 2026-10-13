@@ -266,9 +266,21 @@ the same as the sequential translation's:
   computes a value twice. Local names (`fresh`, `tmp`) are counted per Go function. The
   dynamic bindings (the world, `*reached*`, `*absent-members*`, the edge) are conveyed to the
   threads by `future`.
+- **The registrations** (`a2g_classes.go`, §5.11) are made the same way, each class apart,
+  merged in order (`registrations`). The slot methods of `a2g_dyn.go` (§5.12), pure, are
+  computed in parallel.
 - **The writing**: each file's text is computed on its own (`out/file-text`, the renames
-  applied), in parallel, the files written in order. The slot methods of `a2g_dyn.go` (§5.12),
-  pure, are computed in parallel too.
+  applied), in parallel, the files written in order. A long file (256 forms or more:
+  `a2g_classes.go`, 4 MB) has the texts of its forms without a class forms line computed in
+  parallel first (`out/unlined-texts`): only a list with `:a2g/line` makes a text depend on
+  the line it starts on (the layout above), so the others are laid out by their newlines. The
+  embedded resources are compressed in parallel and written in order; `report.edn` is printed
+  beside the writing, its times put in at the end.
+- **The load**: the class forms files are read in parallel (they hold no `#()` or
+  syntax-quote: reading them takes no ids), as are the embedded sources scanned for the
+  classes they name (`embed/cut-candidates`: their reading takes ids, as many whatever the
+  order, all before the analysis). Entering and analyzing the classes stay sequential
+  (`arbace.classes.analyze` numbers anonymous classes and ids in order), as does the reach.
 
 **jrt's own Java and the JDK's variants** (amendment K1, accepted 2026-10-09). The JDK input is
 `bin/jrt-convert`'s output (committed as `jdk/forms` since standalone S1, 2026-10-12; `--jdk`'s
