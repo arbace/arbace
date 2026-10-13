@@ -63,6 +63,11 @@ covers what.
   (doc/go/JRT-NOTES.md, phase 2a): Copyright 2009 The Go Authors, under Go's BSD 3-Clause
   License (text below). `overlay/go/runtime/arbace_local.ae` and `overlay/go/runtime.ae` are
   Arbace's own.
+- `overlay/go/syscall/fs_tamago.ae`: TamaGo's simulated file system, the file
+  `src/syscall/fs_tamago.go` of the same TamaGo go1.27.1 tree (itself adapted from Go's
+  `fs_nacl.go`), patched and converted to Go forms by `bin/g2a convert` (doc/go/BOX-NOTES.md,
+  S7): Copyright 2019 The Go Authors, under Go's BSD 3-Clause License (text below).
+  `overlay/go/syscall.ae` is Arbace's own.
 - Excerpts of Go's standard library in g2a's cases, tests and spec: `test/g2a/cases/s14_2_utf8.go`
   (from `src/unicode/utf8/utf8.go`), `s14_3_sort.go` (from `src/sort/sort.go` and
   `zsortinterface.go`), `s02_search.go` (`sort.Search`, from `src/sort/search.go`), the Go forms

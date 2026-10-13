@@ -1,0 +1,270 @@
+(in-ns 'go.arbace.box.tree) (go/file "request.go" :imports [
+
+
+    ^{:line 4} [bytes "bytes"]
+    ^{:line 5} [hex "encoding/hex"]
+    ^{:line 6} [errors "errors"]
+    ^{:line 7} [fmt "fmt"]
+    ^{:line 8} [path "path"]
+    ^{:line 9} [strconv "strconv"]
+    ^{:line 10} [strings "strings"]])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(go/type Request "Request is a spawn's request (doc/go/BOX-NOTES.md, S7): a blob holding\nan EDN map, which the spawn call names by its hash.\n\n\t{:image \"HASH\"            the tool guest's image, a blob\n\t :args [\"compile\" ...]    its command line, the program's name first\n\t :env [\"NAME=VALUE\" ...]  its environment, nothing else\n\t :trees [[\"/src\" \"HASH\"] ...]\n\t                          the trees mounted read only, at absolute paths\n\t :out \"/out\"              the directory saved as the output tree (or none)\n\t :cwd \"/src\"              the working directory (or /)\n\t :ram 3221225472          the guest's RAM in bytes (0 or none: 3 GiB)\n\t :cpus 4}                 its vCPUs (0 or none: 1)\n\nEvery key but :image and :args may be left out.\n" (struct
+    ^{:line 28 :tag (array 32 byte)} Image
+    ^{:line 29 :tag (slice string)} Args
+    ^{:line 30 :tag (slice string)} Env
+    ^{:line 31 :tag (slice Mount)} Trees
+    ^{:line 32 :tag string} Out
+    ^{:line 33 :tag string} Cwd
+    ^{:line 34 :tag int64} RAM
+    ^{:line 35 :tag int} CPUs))
+
+
+
+(go/type Mount "Mount is a tree and where it appears.\n" (struct
+    ^{:line 40 :tag string} Path
+    ^{:line 41 :tag (array 32 byte)} Hash))
+
+
+
+
+^{:go/breaks [[6 55]] :go/end 56} (go/func ValidPath "ValidPath is whether p is a path a request takes: absolute, clean, no\ncontrol characters.\n" ^bool [^string p]
+  (when (or (not (strings/HasPrefix p "/")) (!= (path/Clean p) p))
+    (return false))
+
+  (for [i 0] (< i (len p)) (inc! i)
+    (when [c (aget p i)] (or (< c 0x20) (== c 0x7f))
+      (return false)))
+
+
+  true)
+
+
+
+^{:go/end 158} (go/func ParseRequest "ParseRequest reads a request blob.\n" [^{:tag (slice byte)} data] :results [(* Request) error]
+  (let [(values v err) (ReadEDN data)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values m ok) (assert Map v)]
+      (when (not ok)
+        (return nil (errors/New "request: not a map")))
+
+      (let [r (addr (lit Request :Cwd "/"))
+          ^{:line 69} strs ^{:go/end 85} (fn [^string k] :results [(slice string) error]
+            (let [x (.Get m (conv Keyword k))]
+              (when (== x nil)
+                (return nil nil))
+
+              (let [(values vec ok) (assert Vector x)]
+                (when (not ok)
+                  (return nil (fmt/Errorf "request: :%s is not a vector" k)))
+
+                (let [out (make (slice string) (len vec))]
+                  (range [i s vec]
+                    (when [(set! (values (aget out i) ok) (assert string s))] (not ok)
+                      (return nil (fmt/Errorf "request: :%s holds a non-string" k))))
+
+
+                  (return out nil)))))]
+
+        (range [_ kv m]
+          (let [(values k ok) (assert Keyword (.-Key kv))]
+            (when (not ok)
+              (return nil (fmt/Errorf "request: a key that is not a keyword: %v" (.-Key kv))))
+
+            (switch k
+              (case ["image" "args" "env" "trees" "out" "cwd" "ram" "cpus"])
+              (default
+                (return nil (fmt/Errorf "request: no key :%s" k))))))
+
+
+        (let [(values s _) (assert string (.Get m (conv Keyword "image")))]
+          (when [(set! (values (.-Image r) ok) (ParseHash s))] (not ok)
+            (return nil (errors/New "request: :image is not a hash")))
+
+          (when [(set! (values (.-Args r) err) (strs "args"))] (!= err nil)
+            (return nil err))
+
+          (when (== (len (.-Args r)) 0)
+            (return nil (errors/New "request: no :args")))
+
+          (when [(set! (values (.-Env r) err) (strs "env"))] (!= err nil)
+            (return nil err))
+
+          (range [_ kv (.-Env r)]
+            (when [(values n _ ok) (strings/Cut kv "=")] (or (not ok) (== n ""))
+              (return nil (fmt/Errorf "request: :env holds %q, not NAME=VALUE" kv))))
+
+
+          (when [x (.Get m (conv Keyword "trees"))] (!= x nil)
+            (let [(values vec ok) (assert Vector x)]
+              (when (not ok)
+                (return nil (errors/New "request: :trees is not a vector")))
+
+              (range [_ t vec]
+                (let [(values pair ok) (assert Vector t)]
+                  (when (or (not ok) (!= (len pair) 2))
+                    (return nil (errors/New "request: :trees holds a non-pair")))
+
+                  (let [(values p _) (assert string (aget pair 0))
+                      (values hs _) (assert string (aget pair 1))
+                      (values h ^:assign ok) (ParseHash hs)]
+                    (when (or (not (ValidPath p)) (== p "/") (not ok))
+                      (return nil (fmt/Errorf "request: :trees: %v" pair)))
+
+                    (set! (.-Trees r) (append (.-Trees r) (lit Mount p h))))))))
+
+
+          (range [k dst (lit (map string (* string)) ["out" (addr (.-Out r))] ["cwd" (addr (.-Cwd r))])]
+            (when [x (.Get m (conv Keyword k))] (!= x nil)
+              (let [(values s ok) (assert string x)]
+                (when (or (not ok) (not (ValidPath s)))
+                  (return nil (fmt/Errorf "request: :%s is not an absolute path" k)))
+
+                (set! @dst s))))
+
+
+          (when [x (.Get m (conv Keyword "ram"))] (!= x nil)
+            (let [(values n ok) (assert int64 x)]
+              (when (or (not ok) (< n 0))
+                (return nil (errors/New "request: :ram is not a size")))
+
+              (set! (.-RAM r) n)))
+
+          (when [x (.Get m (conv Keyword "cpus"))] (!= x nil)
+            (let [(values n ok) (assert int64 x)]
+              (when (or (not ok) (< n 0) (> n 1024))
+                (return nil (errors/New "request: :cpus is not a count")))
+
+              (set! (.-CPUs r) (conv int n))))
+
+          (return r nil))))))
+
+
+
+
+^{:go/end 208} (go/method Format "Format prints the request as Arbace's driver does: the keys in the\norder above, those with nothing left out.\n" ^{:tag (slice byte)} [^{:tag (* Request)} r]
+  (let [^bytes/Buffer b (zero bytes/Buffer)
+      ^{:line 164} vec ^{:go/end 173} (fn [^{:tag (slice string)} ss]
+        (.WriteByte b \[)
+        (range [i s ss]
+          (when (> i 0)
+            (.WriteByte b \space))
+
+          (writeString (addr b) s))
+
+        (.WriteByte b \]))]
+
+    (fmt/Fprintf (addr b) "{:image %q\n :args " (hex/EncodeToString (subslice (.-Image r))))
+    (vec (.-Args r))
+    (when (> (len (.-Env r)) 0)
+      (.WriteString b "\n :env ")
+      (vec (.-Env r)))
+
+    (when (> (len (.-Trees r)) 0)
+      (.WriteString b "\n :trees [")
+      (range [i t (.-Trees r)]
+        (when (> i 0)
+          (.WriteString b "\n         "))
+
+        (.WriteByte b \[)
+        (writeString (addr b) (.-Path t))
+        (fmt/Fprintf (addr b) " %q]" (hex/EncodeToString (subslice (.-Hash t)))))
+
+      (.WriteByte b \]))
+
+    (when (!= (.-Out r) "")
+      (.WriteString b "\n :out ")
+      (writeString (addr b) (.-Out r)))
+
+    (when (and (!= (.-Cwd r) "") (!= (.-Cwd r) "/"))
+      (.WriteString b "\n :cwd ")
+      (writeString (addr b) (.-Cwd r)))
+
+    (when (> (.-RAM r) 0)
+      (.WriteString b (+ "\n :ram " (strconv/FormatInt (.-RAM r) 10))))
+
+    (when (> (.-CPUs r) 0)
+      (.WriteString b (+ "\n :cpus " (strconv/Itoa (.-CPUs r)))))
+
+    (.WriteString b "}\n")
+    (.Bytes b)))
+
+
+
+
+
+
+
+
+
+
+(go/type Result "Result is how a spawned guest ended (doc/go/BOX-NOTES.md, S7), a blob the\nspawn call answers by its hash:\n\n\t{:exit 0 :out \"HASH\" :console \"HASH\"}\n\n:exit the guest's exit code; :out its output tree, when it declared one\nand exited with 0; :console what it wrote (both streams, in order), a\nblob; :fault, instead of :exit, why the monitor ended it.\n" (struct
+    ^{:line 219 :tag int} Exit
+    ^{:line 220 :tag (* (array 32 byte))} Out
+    ^{:line 221 :tag (array 32 byte)} Console
+    ^{:line 222 :tag string} Fault))
+
+
+
+^{:go/end 239} (go/method Format "Format prints the result.\n" ^{:tag (slice byte)} [^{:tag (* Result)} r]
+  (let [^bytes/Buffer b (zero bytes/Buffer)]
+    (if (!= (.-Fault r) "") (do
+        (.WriteString b "{:fault ")
+        (writeString (addr b) (.-Fault r)))
+
+      (fmt/Fprintf (addr b) "{:exit %d" (.-Exit r)))
+
+    (when (!= (.-Out r) nil)
+      (fmt/Fprintf (addr b) "\n :out %q" (hex/EncodeToString (subslice (.-Out r)))))
+
+    (fmt/Fprintf (addr b) "\n :console %q}\n" (hex/EncodeToString (subslice (.-Console r))))
+    (.Bytes b)))
+
+
+
+^{:go/end 271} (go/func ParseResult "ParseResult reads a result blob.\n" [^{:tag (slice byte)} data] :results [(* Result) error]
+  (let [(values v err) (ReadEDN data)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values m ok) (assert Map v)]
+      (when (not ok)
+        (return nil (errors/New "result: not a map")))
+
+      (let [r (addr (lit Result))]
+        (if [(values f ok) (assert string (.Get m (conv Keyword "fault")))] ok
+          (set! (.-Fault r) f)
+          (if [(values n ok) (assert int64 (.Get m (conv Keyword "exit")))] ok
+            (set! (.-Exit r) (conv int n))
+
+            (return nil (errors/New "result: neither :exit nor :fault"))))
+
+        (when [(values s ok) (assert string (.Get m (conv Keyword "out")))] ok
+          (let [(values h ok) (ParseHash s)]
+            (when (not ok)
+              (return nil (errors/New "result: :out is not a hash")))
+
+            (set! (.-Out r) (addr h))))
+
+        (let [(values s _) (assert string (.Get m (conv Keyword "console")))]
+          (when [(set! (values (.-Console r) ok) (ParseHash s))] (not ok)
+            (return nil (errors/New "result: :console is not a hash")))
+
+          (return r nil))))))

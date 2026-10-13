@@ -1,0 +1,174 @@
+
+
+;; Package tool makes a Go program a tool guest (doc/go/BOX-NOTES.md, S7):
+;; Go's compile, link and asm built for the box, each with one file in its
+;; main package whose init calls Start.  Start gives the program the
+;; command line and the environment the monitor wrote (TamaGo's runtime
+;; reads neither), and, in a spawned guest (ARBACE_TOOL_REQUEST, the
+;; request's hash), its file system: the request's input trees mounted
+;; read only, each file read from the store at its first use (syscall's
+;; MkLazy), the working directory, and the output directory, which a
+;; guest that exits with 0 stores as a tree and declares to the monitor
+;; (abi.SpawnOut).
+(in-ns 'go.arbace.box.tool) (go/file "tool.go" :build ["//go:build tamago"] :doc "Package tool makes a Go program a tool guest (doc/go/BOX-NOTES.md, S7):\nGo's compile, link and asm built for the box, each with one file in its\nmain package whose init calls Start.  Start gives the program the\ncommand line and the environment the monitor wrote (TamaGo's runtime\nreads neither), and, in a spawned guest (ARBACE_TOOL_REQUEST, the\nrequest's hash), its file system: the request's input trees mounted\nread only, each file read from the store at its first use (syscall's\nMkLazy), the working directory, and the output directory, which a\nguest that exits with 0 stores as a tree and declares to the monitor\n(abi.SpawnOut).\n" :imports [
+
+
+    ^{:line 16} [hex "encoding/hex"]
+    ^{:line 17} [errors "errors"]
+    ^{:line 18} [fmt "fmt"]
+    ^{:line 19} [os "os"]
+    ^{:line 20} [path "path"]
+    ^{:line 21} [goos "runtime/goos"]
+    ^{:line 22} [strings "strings"]
+    ^{:line 23} [_ "unsafe"] ; go:linkname
+
+    ^{:line 25} [abi "arbace/box/abi"]
+    ^{:line 26} [board "arbace/box/board"]
+    ^{:line 27} [tree "arbace/box/tree"]])
+
+
+
+(go/type store "store is the guest's store over the monitor's calls (tree.Store).\n" (struct))
+
+^{:go/end 42} (go/method Put [store ^{:tag (slice byte)} data] :results [(array 32 byte) error]
+  (let [h (make (slice byte) 32)]
+    (when (== (len data) 0)
+      (set! data (subslice (make (slice byte) 1) _ 0)))
+
+    (when [r (.-Ret (board/Call abi/BlobPut (board/Addr data) (conv int64 (len data)) (board/Addr h) 0 0))] (!= r 0)
+      (return (lit (array 32 byte)) (fmt/Errorf "the store refused a blob (%d)" r)))
+
+    (return (conv (array 32 byte) h) nil)))
+
+
+^{:go/end 60} (go/method Read [store ^{:tag (array 32 byte)} h] :results [(slice byte) error]
+  (let [hb (make (slice byte) 32)]
+    (copy hb (subslice h))
+    (let [n (.-Ret (board/Call abi/BlobSize (board/Addr hb) 0 0 0 0))]
+      (when (< n 0)
+        (return nil (fmt/Errorf "no blob %x" h)))
+
+      (let [b (make (slice byte) n)]
+        (for [off (conv int64 0)] (< off n) _
+          (let [r (.-Ret (board/Call abi/BlobGet (board/Addr hb) (board/Addr (subslice b off)) (- n off) off 0))]
+            (when (<= r 0)
+              (return nil (fmt/Errorf "blob %x: a read at %d failed (%d)" h off r)))
+
+            (set! off + r)))
+
+        (return b nil)))))
+
+
+
+
+^{:go/end 79} (go/func Start "Start sets the program up; see the package's comment.  A failure ends\nthe guest with status 125, before the tool runs.\n" []
+  (set! os/Args (board/Args))
+  (range [_ kv (board/Env)]
+    (when [(values k v ok) (strings/Cut kv "=")] ok
+      (os/Setenv k v)))
+
+
+  (let [rh (os/Getenv "ARBACE_TOOL_REQUEST")]
+    (when (== rh "")
+      (return))
+
+    (when [err (start rh)] (!= err nil)
+      (fmt/Fprintln os/Stderr "tool:" err)
+      (os/Exit 125))))
+
+
+
+^{:go/end 125} (go/func start ^error [^string rh]
+  (let [(values h ok) (tree/ParseHash rh)]
+    (when (not ok)
+      (return (errors/New "ARBACE_TOOL_REQUEST is not a hash")))
+
+    (let [^store st (zero store)
+        (values b err) (.Read st h)]
+      (when (!= err nil)
+        (return err))
+
+      (let [(values req ^:assign err) (tree/ParseRequest b)]
+        (when (!= err nil)
+          (return err))
+
+        (range [_ m (.-Trees req)]
+          (when [err (mount st (.-Hash m) (.-Path m))] (!= err nil)
+            (return (fmt/Errorf "mounting %s: %w" (.-Path m) err))))
+
+
+        (when [err (os/MkdirAll (.-Cwd req) 0755)] (!= err nil)
+          (return err))
+
+        (when [err (os/Chdir (.-Cwd req))] (!= err nil)
+          (return err))
+
+        (when (== (.-Out req) "")
+          (return nil))
+
+        (when [err (os/MkdirAll (.-Out req) 0755)] (!= err nil)
+          (return err))
+
+        ^{:go/breaks [[3 124]]} (let [exit goos/Exit]
+          (set! goos/Exit ^{:go/end 123} (fn [^int32 code]
+              ;; not on another code: the runtime's fatal errors exit (2) on the
+              ;; system stack, where the output cannot be stored
+              (when (== code 0)
+                (when [err (output st (.-Out req))] (!= err nil)
+                  (fmt/Fprintln os/Stderr "tool: the output:" err)
+                  (set! code 125)))
+
+
+              (exit code)))
+
+          nil)))))
+
+
+
+
+
+
+(go/func ^:extern ^{:go/linkname "mkLazy syscall.MkLazy"} mkLazy "mkLazy is syscall's MkLazy, which the tool guests' syscall has\n(overlay/go/syscall/fs_tamago.ae, the file system's patch for them).\n" ^error [^string path ^uint32 mode ^int64 size ^{:tag (func [] [(slice byte) error])} load])
+
+
+
+^{:go/end 161} (go/func mount "mount makes tree h's files appear under dir, read only, their contents\nread at the first use.\n" ^error [^store st ^{:tag (array 32 byte)} h ^string dir]
+  (when [err (os/MkdirAll dir 0755)] (!= err nil)
+    (return err))
+
+  ^{:go/breaks [[4 160]]} (let [(values es err) (tree/Get st h)]
+    (when (!= err nil)
+      (return err))
+
+    (range [_ e es]
+      (let [p (path/Join dir (.-Name e))]
+        (when (== (.-Kind e) tree/Dir)
+          (when [err (mount st (.-Hash e) p)] (!= err nil)
+            (return err))
+
+          (continue))
+
+        (let [mode (conv uint32 0444)]
+          (when (== (.-Kind e) tree/Exec)
+            (set! mode 0555))
+
+          (let [fh (.-Hash e)]
+            (when [err (mkLazy p mode (.-Size e) ^{:go/end 156} (fn [] :results [(slice byte) error] (.Read st fh)))] (!= err nil)
+              (return (fmt/Errorf "%s: %w" p err)))))))
+
+
+    nil))
+
+
+
+^{:go/end 175} (go/func output "output stores dir as a tree and declares it.\n" ^error [^store st ^string dir]
+  (let [(values h err) (tree/PutDir st dir)]
+    (when (!= err nil)
+      (return err))
+
+    ^{:go/breaks [[4 174]]} (let [hb (make (slice byte) 32)]
+      (copy hb (subslice h))
+      (when [r (.-Ret (board/Call abi/SpawnOut (board/Addr hb) 0 0 0 0))] (!= r 0)
+        (return (fmt/Errorf "the monitor refused the output tree %s (%d)" (hex/EncodeToString hb) r)))
+
+      nil)))
