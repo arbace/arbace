@@ -1835,3 +1835,69 @@ define a compiled namespace's class again (SA136). One finding about the analysi
 `hashCode`, for reproducible output), cannot be asked `containsKey` once `FnExpr.parse` has
 renumbered a direct fn's arguments; the back end reads the keys by identity.
 
+### Amendments
+
+Proposed (2026-10-13); the recommended choice is applied meanwhile.
+
+- **SA130 The route of compiled code.** (a) `Expr` → class forms → a2g → Go forms (as done):
+  a2g's translation of Java's semantics is reused, the bytecode back end is the specification;
+  (b) `Expr` → Go forms directly: a second translator of Java's semantics beside a2g (the object
+  model, exceptions, monitors, boxing, reflection's tables, stack traces), faster to build but
+  twice the code to keep equal; (c) Clojure source → class forms by the class forms compiler's
+  own Clojure lowering (`arbace.classes.native/compile-fn`, SPEC §5.13): no use of `Compiler`'s
+  analysis, whose rules (protocol call sites, `recur`, locals, boxing) it would have to repeat.
+  *Recommended: (a)*.
+- **SA131 The analysis as data, the back end in Arbace.** (a) `Compiler$AST/node` (a Go-build
+  variant) shows the analyzed nodes as maps; the back end is the namespace `arbace.aot`, changed
+  without a rebuild of the runtime and compiled like the other tools (as done); (b) the back end
+  as methods of the `Expr` classes in a `Compiler` variant (the JVM's shape: `emit` per class),
+  each change a rebuild. *Recommended: (a)*; the view is also the input of an own code
+  generator (§7).
+- **SA132 Where namespaces are compiled.** (a) In the prepare run of the program built from the
+  same sources (as done): the compiled code is a function of the sources; a build runs a2g
+  twice (the runtime, then the program with the compiled tree); (b) on the host executable: one
+  a2g run, but the host's runtime must analyze the new sources, so a change of the runtime with
+  the namespaces that use it breaks the bootstrap, and the result depends on the host;
+  (c) the image only (no compilation). *Recommended: (a)*; the second a2g run shrinks when a2g
+  is compiled (SA133) and can later reuse the first's world (its load).
+- **SA133 The tools in the program.** (a) a2g, g2a, c2a and `arbace.aot` embedded and compiled
+  like the namespaces (j2a stays out: it needs javac), the host running them compiled; a tool's
+  source on `ARBACE_PATH` that differs from the program's embedded copy is loaded from source
+  (`RT.toolSource`: the checkout's change runs, evaluated, until the next build); (b) the tools
+  embedded and compiled, the program's copy always used (a change in the checkout takes effect
+  only after a rebuild); (c) the tools stay loaded from the checkout, evaluated (no speed gain for
+  the build). *Recommended: (a)*.
+- **SA134 The Go package of compiled classes.** (a) Package `lang`, beside the runtime, each
+  class named by its whole binary name, `A_..._A` (as done: the suffixes a2g appends cannot make
+  another name; `lang` grows by the compiled namespaces); (b) a package of their own: needs the
+  evaluator's `Dyn` (in `lang`, implementing every interface of the world) to implement the
+  compiled protocols' interfaces across packages, or those interfaces kept in `lang`; (c) a
+  package per namespace (more of (b)). *Recommended: (a)* now, (b) if gc's memory for `lang`
+  requires it (survey §8.2, S5's SA100-SA107).
+- **SA135 A namespace's holder class.** A namespace's fns are member classes of a class named as
+  the namespace (`arbace.walk`), so that their binary names are the JVM's (`arbace.walk$walk`,
+  printed by `class`, `pr` and stack traces). (a) The holder is a class of the program like the
+  others, `Class/forName "arbace.walk"` finds it (where the JVM finds none); (b) a2g leaves
+  holder classes out of the registry (a flag on the class). *Recommended: (a)* now, recorded as a
+  divergence; (b) if a case depends on it.
+- **SA136 A compiled namespace loaded from source.** (a) The evaluator's classes may replace a
+  compiled namespace's classes by name (jrt's `DefineDynamic`, as a new class loader on the JVM;
+  the compiled classes stay for the code that holds them; the runtime's and the JDK's classes
+  cannot be replaced) (as done); (b) an error, as before. *Recommended: (a)*: `ARBACE_NO_AOT`,
+  `:reload` and a tool's changed source need it.
+- **SA137 Members jrt lacks.** Some members of the classes jrt writes by hand exist only in the
+  member tables (`Thread.getContextClassLoader`): a2g turns a direct call of one into a throw.
+  (a) The back end reads jrt's forms (`arbace.a2g.jrt/scan`) and calls such a member by
+  reflection (as done); (b) a2g calls a missing member through the member tables itself, for
+  every class it translates. *Recommended: (a)* now; (b) when the runtime's own code needs it.
+- **SA138 Var reads in compiled code.** (a) `getRawRoot`, or `get` for a var dynamic when
+  compiled (the bytecode's rule; the flag read after the namespaces are loaded, not at
+  analysis) (as done); (b) always `deref`, as the evaluator does. *Recommended: (a)*: a binding
+  of a var not declared dynamic is not seen, as on the JVM.
+- **SA139 Proper tail calls (D6: T3 measured).** T3 (calls in tail position trampolined in
+  compiled code) is to be measured once `arbace.core` runs compiled: (a) T1 (no trampolines) as
+  built, T3 measured on the benchmarks, the choice made on the numbers; (b) T3 for every compiled
+  tail call now. *Recommended: (a)*, D6's own recommendation.
+- **SA140 The build's switch.** (a) `ARBACE_AOT=1 bin/arbace-go --build` builds the compiled
+  program (as done) until Clojure's suite and the oracle pass on it, then the default, the
+  gate's and the fixpoint's; (b) the default at once. *Recommended: (a)*.
