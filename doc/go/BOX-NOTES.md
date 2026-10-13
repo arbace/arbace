@@ -2563,3 +2563,6 @@ explicit metadata after any line inserted.
   - (b) HV2 (b)'s release call before a long-lived box gets a large slot.
 
   *Recommended: (a) now, (b) with the first long-lived large box* (as HV2 decided).
+
+**Decided (2026-10-13, the user):** BX80 (a), BX81 (a), BX82 (a), BX84 (a) now and (b) with the
+first long-lived large box, all as recommended; BX83's checks stand as built.

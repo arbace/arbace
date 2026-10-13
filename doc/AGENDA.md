@@ -56,10 +56,11 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- The host VM survey ([go/HOST-VM-SURVEY.md](go/HOST-VM-SURVEY.md)): HV1-HV9 accepted as
-  recommended (2026-10-13). First the measurements: a2g under `GOMEMLIMIT=2GiB` (HV1: within
-  ~1.5× of the 12 GiB run, the 3 GiB slot stands; else RAM above 4 GiB) and the box's clock
-  drift over an hour here (HV6; on the Mac at the next box milestone).
+- The host VM survey ([go/HOST-VM-SURVEY.md](go/HOST-VM-SURVEY.md)): HV1-HV9 accepted
+  (2026-10-13). HV1 measured (a2g under 2 GiB is 3.0× slower), so HV1 (b): RAM above 4 GiB
+  for a Go guest, built and merged ([go/BOX-NOTES.md](go/BOX-NOTES.md), "HV1 (b)"), BX80-BX84
+  decided as recommended (the slot 3 GiB by default, `ARBACE_BOX_RAM` per launch); the Mac's RAM checks with the next Mac bundle. HV6 measured
+  (29 ppm, no resync).
 
 - The standalone survey's S5-S8: the box rebuilding Arbace inside itself.
 - Known issues from S4 (STANDALONE-NOTES, "S4: the JVM removed", Left):

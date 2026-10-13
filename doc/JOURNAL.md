@@ -1158,3 +1158,29 @@ All as recommended in doc/STANDALONE-SURVEY.md:
 - Later the same day the VM showed 62.8 GiB (61 GiB available): the outer host had deflated the
   balloon. The survey records both readings. Planning keeps about 30 GiB as the floor, since the
   balloon may inflate again and there is no swap.
+
+## 2026-10-13: HV1 (b), RAM above 4 GiB for a Go guest (merged; BX80-BX84 proposed)
+
+- The experiment of linking the guest at `0x100201000`: TamaGo's linker accepts it on both
+  arches, but the amd64 guest faults at its first TLS store, because TamaGo's `runtime·settls`
+  (`/root/tamago-go/src/runtime/sys_tamago_amd64.s`, lines 152-163, go1.27.1) writes
+  `IA32_FS_BASE` with its high half zero. Fixing it means patching TamaGo's runtime and giving
+  up `tamago/`'s identity with TamaGo's tree, so it was not pursued.
+- Built instead (BX80 (a)): the image stays linked at `0x201000`; RAM that does not fit under
+  the doorbell is mapped at `[4 GiB, 4 GiB + RAM)`, the doorbell in the gap; the board's
+  `Hwinit0` starts the heap there through TamaGo's own hook `goos.Bloc`. `tamago/`, the link
+  address, the doorbell ABI and go-whim's guests are unchanged. `ARBACE_BOX_RAM=SIZE` sets a
+  launch's slot; the default stays 3 GiB. On arm64 the guest's translation is widened from 32
+  to 36 bits (T0SZ 28): up to 60 GiB, within Hypervisor.framework's default IPA.
+- Measured on amd64 with 4 vCPUs: 10 GiB touched in a 16 GiB slot in 24.3 s, against 24.8 s
+  natively; 9.3 GiB live after GC in 148.6 s, against 123.6 s natively; 14 GiB live at the
+  15 GiB limit completed. 60 GiB boots; 1100 GiB is refused (the runtime's 40-bit heap). On
+  KVM/arm64 (the emulated VM) 8 GiB works and the smoke test passed, 112 ok.
+- Checks: amd64 box smoke 113 ok; `bin/box-vendor roundtrip`, `kvm-tests` (27); `bin/tamago-vendor
+  check` (both images identical); the essential gate passed. The Mac's run (the RAM section of
+  `box/mac/mac.sh`) is open, for the next Mac bundle.
+- Alternatives and the amendments BX80-BX84 are in doc/go/BOX-NOTES.md, "HV1 (b): RAM above
+  4 GiB", for the user's decision.
+- The user decided BX80 (a), BX81 (a), BX82 (a) and BX84 (a) now, (b) later, all as
+  recommended. On main after the merge, the essential gate passed and the amd64 box's smoke
+  test gave 113 ok, the 6 GiB check among them.
