@@ -1201,3 +1201,6 @@ All as recommended in doc/STANDALONE-SURVEY.md:
 - The same evening the balloon inflated again: 18.9 GiB visible, 43.8 GiB held by the outer
   host (HOST-VM-SURVEY's table). The tracks therefore run their memory-heavy steps (Go builds,
   the gate, large guests) one at a time, through a host-wide lock in `.tmp/`.
+- The balloon is outside the user's control: the user reported the shrinking memory to the outer
+  host's operator, who promised to restore the 64 GiB ceiling as soon as possible. Until then the
+  single heavy slot stands; it goes to two slots once `free` shows the memory back.
