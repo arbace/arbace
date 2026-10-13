@@ -84,3 +84,13 @@ The current state of the work. This file is rewritten as things change. For the 
   without nested KVM; the arm64 box's oracle subset and `box-suite` (an arm64 host with KVM).
 - g2a's open ends: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s
   directory tests.
+- A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
+  Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info
+  (`go version -m`, on the user's Mac): module `moshi-go` at `1516bf8173a5` (2026-10-12), go1.27.1
+  (as ours), darwin/arm64, `CGO_ENABLED=0`, `-trimpath`, tag `mygo_noinspector`. Its deps:
+  `github.com/egoist/mygo` v0.4.5 replaced by the fork `github.com/rjyo/mygo` (the GUI toolkit),
+  `github.com/ebitengine/purego` v0.11.1 (as the box's launcher uses), `go-text/typesetting`
+  v0.3.5, `golang.org/x/image`, `alecthomas/chroma/v2` (highlighting), `yuin/goldmark`
+  (Markdown), `creack/pty` and `charmbracelet/x` (pty, conpty, term, termios: a terminal),
+  `coder/websocket`, `dlclark/regexp2/v2`. A pure-Go, cgo-free GUI on macOS is the same shape
+  as the box's launcher there.
