@@ -7,6 +7,26 @@
 > Since 2026-10-11 Arbace's sources are `.ae` files (hand change 19). The layout, the bootstrap
 > and spec's sections below name the current files; the derivation and the records of hand
 > changes 1 to 18 name them as they were then, `.clj`.
+>
+> Since standalone S4 (2026-10-12; doc/STANDALONE-NOTES.md, "S4: the JVM removed") main builds
+> no JVM Arbace: the three-stage bootstrap (`bin/build-arbace`), the jar and its AOT cache, the
+> runtime image, Clojure's suite on stages 1 and 2, the binary seed (`seed/arbace-seed.jar`),
+> ASM and the bytecode back ends are on the branch `arbace-for-java-26`; the sections below that
+> describe them ("The bootstrap", "Compiled namespaces, the jar and the AOT cache", "The runtime
+> image", "Clojure's test suite on stages 1 and 2", "The binary seed") are the record of that
+> path. Main's bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (hand change
+> 23).
+>
+> Since 2026-10-12 (standalone S4, doc/STANDALONE-NOTES.md, "S4: the JVM removed") main holds no
+> JVM back end: ASM (`arbace/asm.ae`, `arbace/asm/`), the bytecode emitters of
+> `arbace/lang/Compiler.ae` (the `emit*` methods, the class generation of `ObjExpr`,
+> `SourceDebugExtensionAttribute`, the ASM-typed fields and constants), `arbace/lang/Compile.ae`,
+> `arbace/lang/DynamicClassLoader.ae`, `arbace/lang/Intrinsics.ae`, and the class forms
+> compiler's back end (`arbace/classes/emit.ae`, `compiler.ae`, `shape.ae`, `verify.ae`,
+> `build.ae`, `boot.ae`) are on the branch `arbace-for-java-26` only; `arbace/genclass.ae`,
+> `arbace/core_proxy.ae`, `arbace/reflect/java.ae`, `arbace/main.ae` and `arbace/core/server.ae`
+> are the Go build's variants now. Where the sections below (the bootstrap, hand changes 7, 11,
+> 14, 16, ..., the binary seed) describe them, they describe that branch.
 
 The frozen baseline `clojure/` is vendored under `arbace/`, renamed `clojure.*` → `arbace.*`, all
 of it `.clj`: the Java files as class forms (doc/classes/SPEC.md), Clojure's own `.clj` renamed.
@@ -23,7 +43,7 @@ and stage 2, and, since spec was vendored too (below, "Spec"), passes in full.
 |---|---|
 | `arbace/*.ae`, `arbace/{core,java,pprint,reflect,repl,test,tools}/**.ae` | Clojure's namespaces, renamed: `arbace.core` (with `core_print.ae` and the other files it loads), `arbace.main`, `arbace.pprint`, `arbace.java.io`, ... |
 | `arbace/lang.ae`, `arbace/lang/*.ae` | namespace `arbace.lang` (Java package `clojure.lang`), one file per Java file: `RT.ae`, `Compiler.ae`, ... |
-| `arbace/asm.ae`, `arbace/asm/**.ae` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause) |
+| `arbace/asm.ae`, `arbace/asm/**.ae` | `arbace.asm`, `arbace.asm.commons`, `arbace.asm.signature` (ASM, BSD 3-Clause); on the branch `arbace-for-java-26` only since 2026-10-12 |
 | `arbace/java/api.ae`, `arbace/java/api/Clojure.ae` | `arbace.java.api` |
 | `arbace/lang/Main.ae` | the class `arbace.lang.Main`, Clojure's main class `clojure.main` (`clojure/main.java`); vendored as `arbace.main` in `arbace/main_class.clj` with the package file `arbace.clj`, moved after vendoring (below) |
 | `arbace/classes/`, `arbace/j2a/` (then `arbace/j2c/`) | the tools (javalisp, `arbace/javalisp/`, was dropped later), unchanged in place; no vendored name clashes with them. Later tools there: `arbace/g2a/`, `arbace/a2g/`, `arbace/c2a/` (the renaming rules below, now c2a's, doc/C2A.md) |
@@ -153,6 +173,9 @@ Left alone (with the reason):
    `arbace.server.*` properties.
 
 ## The bootstrap
+
+(The JVM's, until standalone S4; on the branch `arbace-for-java-26` since. Main's bootstrap:
+doc/STANDALONE-NOTES.md, "S4: the JVM removed".)
 
 `bin/build-arbace` (about 1.5 minutes):
 
@@ -351,6 +374,11 @@ image: `-e`, a REPL, `#inst` read, printed and round-tripped (also through `arba
 (that branch's `doc/ALPINE.md`).
 
 ## Clojure's test suite on stages 1 and 2
+
+> Standalone S4 (2026-10-12): the JVM stages left main, and with them these runs
+> (`CLOJURE_TESTS_RENAME`, `CLOJURE_TESTS_PRECOMPILED`, `test/arbace-results.edn`); they stay on
+> `arbace-for-java-26`. The renaming below lives on in `bin/clojure-tests`' Go mode
+> (`CLOJURE_TESTS_GO`), c2a on the tools' Go host.
 
 `bin/clojure-tests` has a rename mode, `CLOJURE_TESTS_RENAME=arbace` (since 2026-10-11 the
 suite and its libraries are translated by c2a, `bin/c2a --in-place --keep-ext`, doc/C2A.md:
@@ -923,6 +951,25 @@ step 4 (2026-10-07); the others came with later work, as each says:
     `bin/arbace-go --smoke` (the JVM's checks beside the native executable's, one directory
     used by both). Listed under "Dialect divergences".
 
+23. **Standalone S4: the JVM's parts leave the sources** (2026-10-12/13, the user's decisions
+    D4 and D13; doc/STANDALONE-NOTES.md, "S4: the JVM removed", amendments SA45, SA46,
+    SA80-SA88). Main builds no JVM Arbace: ASM (`arbace/asm.ae`, `arbace/asm/`), the bytecode
+    back end of `arbace/lang/Compiler.ae` (the emit methods, `ObjExpr`'s class generation, the
+    ASM-typed fields, `SourceDebugExtensionAttribute`, `StaticInvokeExpr` and direct linking, the
+    annotation hooks), `Compile.ae`, `DynamicClassLoader.ae`, `Intrinsics.ae` and the class forms
+    compiler's back end (`arbace/classes/{emit,compiler,shape,verify,build,boot}.ae`) are removed;
+    the access flags are `arbace.classes.opcodes`, required as `Opcodes`. The Go build's variants
+    with no JVM counterpart left became the sources: `genclass` (gen-class a no-op, gen-interface
+    at run time), `core_proxy`, `main` (no `DynamicClassLoader` for the REPL's thread, its
+    `repl-requires` `arbace.repl`'s, the error report printed with `prn`), `core/server`,
+    `reflect/java` (`AsmReflector` a type whose reflection throws), `instant` (with the
+    Timestamp part of `instant_timestamp`), `box/host`, `tls/host`, `core_bean`, `java/io`,
+    `classes/{native,go,interp}`. `arbace.core` lost `descriptor`, `add-annotation` and its
+    helpers; `defmodule` and `defpackage` do nothing. The namespaces the Go build left out are
+    removed: `repl.deps`, `java.basis` (and `.impl`), `tools.deps.interop`, `java.browse`,
+    `java.browse-ui`, `java.javadoc`, `inspector`, `xml`. The JVM's version of every file is on
+    the branch `arbace-for-java-26`.
+
 ## Dialect divergences
 
 Where Arbace behaves differently from upstream Clojure on purpose, beyond the renaming
@@ -970,6 +1017,13 @@ the runtime-visible renames are listed once, as c2a's mechanical part.
 - **Runtime-visible names** (hand change 2, step 4's cleanups): agent, socket server and process
   thread names, the error report files' prefix and the proxy methods (`__initArbaceFnMappings`
   and the rest, the field `__arbaceFnMap`) say `arbace`, not `clojure`.
+- **Without the JVM** (hand change 23, D13): `gen-class` does nothing and `ns`'s `:gen-class`
+  is ignored; `compile` writes no class files; interfaces, protocols' interfaces, proxies and
+  deftypes are made at run time with no class file, so annotations in their metadata are carried
+  by none; `add-classpath` throws, `*loader*` is nil, and no `DynamicClassLoader` exists;
+  `:direct-linking` is ignored; `arbace.reflect`'s `AsmReflector` throws; the namespaces
+  `arbace.repl.deps`, `arbace.java.basis`, `arbace.tools.deps.interop`, `arbace.java.browse`,
+  `arbace.java.javadoc`, `arbace.inspector` and `arbace.xml` do not exist.
 
 ## Spec (2026-10-07)
 
@@ -1051,6 +1105,10 @@ default run of `bin/clojure-tests`), with its 32 spec failures. Result on stages
 the renamed test.check 1.1.3) pass on stage 2: 13 tests, 174 assertions.
 
 ## The binary seed (2026-10-08)
+
+(Replaced at standalone S4, 2026-10-12, by the Go-source seed `seed/arbace-seed-go.tar.xz`:
+doc/STANDALONE-NOTES.md, "S4: the Go-source seed" and "S4: the JVM removed". The jar and
+`bin/seed`'s jar modes are on the branch `arbace-for-java-26`.)
 
 After the freeze (doc/FREEZE.md), main's stage 0 is no longer the frozen `clojure/` but a binary
 seed, as Go bootstraps from a previous Go toolchain: `seed/arbace-seed.jar`, the

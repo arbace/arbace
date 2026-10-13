@@ -25,7 +25,9 @@
 
 (def ^:dynamic *pkgstate*
   "Per package: {:lits (atom {string sym}) :ups (atom #{[from to]}) :lambdas (atom #{fi})
-  :imports (atom #{})}."
+  :cuts (atom #{class})}; for one class translated on its own (arbace.a2g.main's parallel
+  translation): :lits local with a :lit-prefix, :ups :lambdas :cuts atoms of vectors (what
+  was conj'ed, in order, for the merge to replay)."
   nil)
 
 (def ^:dynamic *races*
@@ -325,6 +327,15 @@
     (use-sym! s)
     (assoc val :x s :pure true)))
 
+(defn- any-after
+  "For a vector of flags: whether one after position i is true, for each i (one pass from the
+  right, so that an array initializer of n elements costs n tests, not n squared)."
+  [flags]
+  (loop [i (dec (count flags)) acc false out ()]
+    (if (neg? i)
+      (vec out)
+      (recur (dec i) (boolean (or acc (nth flags i))) (conj out acc)))))
+
 (defn operands
   "Translates nodes left to right as operands of one Go expression (or call), each converted
   to its type in `wants` (a desc or nil). An operand is moved to a temporary when a later
@@ -332,17 +343,18 @@
   [nodes wants]
   (let [nodes (vec nodes)
         n (count nodes)
-        stmt-after (vec (for [i (range n)] (some #(not (simple? %)) (subvec nodes (inc i)))))
-        eff-after (vec (for [i (range n)] (some effects? (subvec nodes (inc i)))))
+        stmt-after (any-after (mapv #(not (simple? %)) nodes))
+        eff-after (any-after (mapv #(boolean (effects? %)) nodes))
         base (vec (for [i (range n) :let [node (nth nodes i)]]
                     (boolean (and (not (stable? node))
                                   (or (nth stmt-after i)
                                       (and (nth eff-after i) (reads-state? node)))))))
         ;; a hoisted operand is evaluated before the expression: so must every operand before
         ;; it that is not stable, to keep Java's left-to-right order
+        base-after (any-after base)
         need-at (vec (for [i (range n)]
                        (or (nth base i)
-                           (and (not (stable? (nth nodes i))) (some true? (subvec base (inc i)))))))]
+                           (and (not (stable? (nth nodes i))) (nth base-after i)))))]
     (vec (for [i (range n)]
            (let [node (nth nodes i)
                  want (nth wants i nil)
@@ -360,11 +372,13 @@
 (defn- java-hash [^String s] (.hashCode s))
 
 (defn string-lit
-  "The pooled literal (§7.5) of Java string s: a package variable Lit_n."
+  "The pooled literal (§7.5) of Java string s: a package variable Lit_n. In a class translated
+  on its own (arbace.a2g.main's parallel translation), :lit-prefix names the class's literals
+  apart, in its own first-use order; the merge renames them Lit_n in the package's order."
   [s]
   (let [lits (:lits *pkgstate*)]
     (or (get @lits s)
-        (let [sym (symbol (str "Lit_" (count @lits)))]
+        (let [sym (symbol (str (:lit-prefix *pkgstate* "Lit_") (count @lits)))]
           (swap! lits assoc s sym)
           sym))))
 

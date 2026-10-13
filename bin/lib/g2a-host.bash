@@ -1,36 +1,30 @@
 # g2a's host: what runs g2a's namespaces (arbace.g2a.build, .print, .main, .read) for bin/g2a and
 # bin/g2a-print. Sourced, with $root set to the repository root. Defines:
 #
-#   g2a_exec HEAP NS ARG...  replaces the shell by -m NS ARG... on the host G2A_HOST names:
-#                   jvm (the default): Arbace on the JVM, target/stage2 plus the checkout
-#                   (bin/lib/tools.bash), with G2A_JVM_OPTS or else HEAP (e.g. -Xmx2g) and a 64 MB
-#                   stack;
-#                   go: the native Go executable (standalone S3, doc/STANDALONE-NOTES.md), the
-#                   checkout first on ARBACE_PATH, so that arbace.g2a (not embedded in the
-#                   executable) loads from the checkout's sources, as on the JVM. The executable
-#                   is G2A_GO_EXE (default target/arbace-go/<host arch>/arbace, built by
-#                   bin/arbace-go --build), run from a copy in .tmp/g2a-host/ refreshed when it
-#                   differs: a build of the executable (bin/arbace-go --build on this host)
-#                   replaces it while the copy runs. The collector's settings are the
+#   g2a_exec NS ARG...  replaces the shell by -m NS ARG... on Arbace's Go executable (standalone
+#                   S3 and S4, doc/STANDALONE-NOTES.md), the checkout first on ARBACE_PATH, so
+#                   that arbace.g2a (not embedded in the executable) loads from the checkout's
+#                   sources. The executable is G2A_GO_EXE, else the tools' host (bin/lib/host.bash:
+#                   ARBACE_HOST_EXE, else stage 0 built from the Go seed), run from a copy in
+#                   .tmp/g2a-host/ refreshed when it differs: a build of the executable
+#                   (bin/arbace-go --build, G2A_GO_EXE=target/arbace-go/<arch>/arbace) may
+#                   replace it while the copy runs. The collector's settings are the
 #                   executable's (GOGC 200 unless set: GOGC=400 saves about 13% of the CPU
 #                   time, not of the wall time, for a third more memory; doc/STANDALONE-NOTES.md).
-#   g2a_run HEAP NS ARG...  the same, as a command of the shell (not replacing it)
-#   g2a_host        prints the host: jvm or go (fails on another value of G2A_HOST)
-
-g2a_host() {
-  case ${G2A_HOST:-jvm} in
-    jvm|go) echo "${G2A_HOST:-jvm}" ;;
-    *) echo "G2A_HOST is jvm or go, not $G2A_HOST" >&2; return 2 ;;
-  esac
-}
+#                   G2A_HOST, which chose the JVM until S4, may only be go (or unset).
+#   g2a_run NS ARG...   the same, as a command of the shell (not replacing it)
 
 # g2a_go_exe: prints the path of the copy of the Go executable to run (made or refreshed)
 g2a_go_exe() {
-  local exe arch dir=$root/.tmp/g2a-host
-  case $(uname -m) in aarch64) arch=arm64 ;; *) arch=amd64 ;; esac
-  exe=${G2A_GO_EXE:-$root/target/arbace-go/$arch/arbace}
+  local exe dir=$root/.tmp/g2a-host
+  case ${G2A_HOST:-go} in
+    go) ;;
+    *) echo "G2A_HOST: g2a runs on the Go executable only (the JVM host left with standalone S4), not $G2A_HOST" >&2; return 2 ;;
+  esac
+  . "$root/bin/lib/host.bash"
+  exe=${G2A_GO_EXE:-$(arbace_host_exe)} || return 1
   if [ ! -x "$exe" ]; then
-    echo "G2A_HOST=go: no executable $exe (bin/arbace-go --build with G2A_HOST=jvm first, or set G2A_GO_EXE)" >&2
+    echo "g2a: no executable $exe (G2A_GO_EXE)" >&2
     return 1
   fi
   mkdir -p "$dir"
@@ -46,18 +40,10 @@ g2a_go_exe() {
 }
 
 g2a_run() {
-  local heap=$1 ns=$2 host exe
-  shift 2
-  host=$(g2a_host) || return 2
-  if [ "$host" = go ]; then
-    exe=$(g2a_go_exe) || return 1
-    ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} "$exe" -m "$ns" "$@"
-    return
-  fi
-  . "$root/bin/lib/tools.bash"
-  arbace_runtime || return 1
-  # shellcheck disable=SC2086
-  java ${G2A_JVM_OPTS:-$heap} -Xss64m -cp "$ARBACE_CP" arbace.lang.Main -m "$ns" "$@"
+  local ns=$1 exe
+  shift
+  exe=$(g2a_go_exe) || return 1
+  ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} "$exe" -m "$ns" "$@"
 }
 
 g2a_exec() {

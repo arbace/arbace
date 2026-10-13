@@ -1,12 +1,15 @@
 #!/bin/bash
 # Arbace as a static Go executable (B1a; doc/go/EVAL-NOTES.md, doc/go/EXEC-NOTES.md): run it
-# as bin/arbace-j runs the JVM Arbace (any arbace.main option: -e, -m, a script, - for stdin, none
-# for the REPL), build it, or smoke-test it.
+# (any arbace.main option: -e, -m, a script, - for stdin, none for the REPL), build it, or
+# smoke-test it. Since standalone S4 (doc/STANDALONE-NOTES.md, "S4: the JVM removed") the build is
+# Go-hosted: a2g and g2a run on the host executable (bin/lib/host.bash: stage 0, built from the
+# Go-source seed by bin/seed --build, unless ARBACE_HOST_EXE names another).
 #
 # Usage: bin/arbace-go [ARG...]        run target/arbace-go/<arch>/arbace (built first when
 #                                      missing); arm64 runs under qemu-aarch64
-#        bin/arbace-go --build         translate (bin/a2g --program) and build the executables
-#                                      of $ARBACE_GO_ARCHES into target/arbace-go/<arch>/arbace
+#        bin/arbace-go --build         translate (bin/a2g --program, on the host executable) and
+#                                      build the executables of $ARBACE_GO_ARCHES into
+#                                      target/arbace-go/<arch>/arbace
 #        bin/arbace-go --build --pgo   the same, then a profile-guided build (doc/go/SPEED-NOTES.md):
 #                                      the host's executable runs test/arbace-go-pgo.ae with a
 #                                      CPU profile (target/arbace-go/pgo.pprof), and every
@@ -22,18 +25,23 @@
 #                                      target/arbace-go/<arch>/arbace-tests for
 #                                      $ARBACE_GO_ARCHES; what bin/clojure-tests runs the suite
 #                                      on. The shipped executable does not carry them
-#        bin/arbace-go --fixpoint      the Go-hosted fixpoint (standalone S3,
-#                                      doc/STANDALONE-NOTES.md): G1 built by the JVM-hosted chain
-#                                      (--build), G2 by G1 (a2g on G1), G3 by G2, for amd64,
-#                                      into target/arbace-go/fixpoint/g{1,2,3}; a2g's three
-#                                      program trees must be identical (diff -r, but report.edn's
-#                                      times) and G1 = G2 = G3 byte for byte; prints their hashes
+#        bin/arbace-go --fixpoint      the Go-hosted fixpoint (standalone S3, S4;
+#                                      doc/STANDALONE-NOTES.md): G1 built by the host executable
+#                                      (stage 0 by default), G2 by G1 (a2g and g2a on G1), G3 by
+#                                      G2, for amd64, into target/arbace-go/fixpoint/g{1,2,3}. The
+#                                      fixpoint holds when a2g's program trees of G2 and G3 are
+#                                      identical (diff -r, but report.edn's times) and G2 = G3
+#                                      byte for byte; G1 = G2 and the host = G1 are reported (they
+#                                      hold when the host is stage 0 of a seed printed from these
+#                                      sources: bin/seed --verify); prints the hashes
 #        bin/arbace-go --image         prepare the namespaces again (the image of their analyzed
 #                                      forms, doc/go/EXEC-NOTES.md) with the built executables
 #                                      and link them again with it
-#        bin/arbace-go --gate          the essential bin/gate's check: --smoke on amd64, on the
-#                                      executable cached in .tmp/arbace-go-gate and built again
-#                                      only when what it is built from changed (gate_key)
+#        bin/arbace-go --gate-build    the essential bin/gate's builds: the executable and the
+#                                      test build (amd64), cached in .tmp/arbace-go-gate/amd64/
+#                                      (arbace, arbace-tests) and built again only when what they
+#                                      are built from changed (gate_key), by stage 0
+#        bin/arbace-go --gate          --gate-build, then --smoke on the cached executable
 #        bin/arbace-go --smoke         the smoke test: -e, a script, the REPL on stdin, an
 #                                      error's exit status, for each of $ARBACE_GO_ARCHES; on
 #                                      amd64 the REPL under rlwrap on a pseudo-terminal
@@ -65,16 +73,14 @@
 #                     WATCHDOG, STATS, IMAGE, ...)
 #   ARBACE_PATH       directories (separated by :) where RT.load finds namespaces after the
 #                     sources embedded in the executable (the JVM's class path)
-#   A2G_JVM_OPTS      bin/a2g's JVM options
-#   ARBACE_GO_HOST    what runs the build's Arbace tools (doc/STANDALONE-NOTES.md, S3): jvm (the
-#                     default), or go: a2g (bin/a2g's A2G_HOST) and g2a (bin/g2a's G2A_HOST) on
-#                     the native executable of the previous build of the host's architecture
-#                     (target/arbace-go/<arch>/arbace, or A2G_GO_EXE / G2A_GO_EXE)
-# The build needs bin/build-arbace first; it reads the JDK's class forms and resource data
-# committed under jdk/ (bin/a2g; regenerated by bin/jrt-convert update), and the test build the
-# suite's Java fixtures' forms committed under test/java-fixtures (regenerated by
-# bin/clojure-tests --java-fixtures update); neither javac nor jdk26u's checkout. Exit status:
-# the program's; for --build and --smoke 0 when all went well.
+#   ARBACE_HOST_EXE   the executable that runs the build's Arbace tools, a2g and g2a (bin/lib/
+#                     host.bash; default stage 0, target/seed/<arch>/arbace, which bin/seed --build
+#                     makes from the seed when missing); A2G_GO_EXE and G2A_GO_EXE name one per tool
+# The build reads the JDK's class forms and resource data committed under jdk/ (bin/a2g;
+# regenerated by bin/jrt-convert update), and the test build the suite's Java fixtures' forms
+# committed under test/java-fixtures (regenerated by bin/clojure-tests --java-fixtures update);
+# no JVM, javac or jdk26u's checkout. Exit status: the program's; for --build and --smoke 0 when
+# all went well.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/gocache.bash"
@@ -124,7 +130,9 @@ build() {
   t0=$(date +%s)
   # Go's build cache, trimmed before each build (bin/lib/gocache.bash)
   gocache_trim "${G2A_GOROOT:-/root/tamago-go}/bin/go" >&2
-  echo "== bin/a2g --program ${a2g_args[*]} (on ${A2G_HOST:-jvm})" >&2
+  local hostexe
+  hostexe=${A2G_GO_EXE:-$(. "$root/bin/lib/host.bash" && arbace_host_exe)} || return 1
+  echo "== bin/a2g --program ${a2g_args[*]} (on $hostexe)" >&2
   (cd "$root" && bin/a2g --program "${a2g_args[@]}" --out "$dir/a2g$variant") > "$dir/a2g$variant.log" 2>&1 \
     || { tail -20 "$dir/a2g$variant.log" >&2; echo "arbace-go: a2g failed ($dir/a2g$variant.log)" >&2; return 1; }
   echo "   a2g: $(since "$t0")" >&2
@@ -141,6 +149,8 @@ build() {
     echo "   g2a build $a: $(since "$t0")" >&2
   done
   image || return 1
+  # what printed the module (bin/seed --make records it in the seed's SEED.edn)
+  [ -n "$variant" ] || echo "bin/arbace-go --build: a2g and g2a on the host executable" > "$dir/printed-by"
   [ "${pgo:-}" ] || return 0
   pgo_build
 }
@@ -257,68 +267,6 @@ run_for() { # run_for SECONDS ARCH ARG...: run, killed after SECONDS (status 124
 # tls_checks, tls_server: bin/lib/tls-checks.bash (shared with bin/box-smoke)
 . "$root/bin/lib/tls-checks.bash"
 
-# jvm_store_checks T: the JVM's arbace.box (doc/go/BOX-NOTES.md, S3, BX37) beside the native
-# executable's (the function native, amd64): store_checks on the JVM Arbace (target/arbace.jar, as
-# bin/build-arbace left it; bin/arbace-j), then one directory used by both: each reads the other's
-# blobs and refs, a snapshot of the same files is the same tar from both and each restores the
-# other's, compare-and-set counters run by two JVMs and two native processes at once lose no
-# update, and the refs' lock held by the JVM keeps the native ref! waiting (both take fcntl's
-# POSIX record lock of refs/.lock). Uses the caller's check
-jvm_store_checks() {
-  local t=$1 s=$1/shared e='(require (quote [arbace.box :as box]))' x hj hn
-  jvm() { "$root/bin/arbace-j" "$@"; }
-  echo "  -- the JVM's arbace.box (target/arbace.jar)"
-  mkdir -p "$t/jvm"
-  store_checks jvm "$t/jvm"
-  ARBACE_BOX_STORE=$s jvm -e "$e" -e '(box/put! "from-jvm" "written by the JVM")' > /dev/null 2>&1
-  ARBACE_BOX_STORE=$s native -e "$e" -e '(box/put! "from-go" "written natively")' > /dev/null 2>&1
-  check "one store directory: the JVM's ref read natively, the native one on the JVM" \
-    "written by the JVM|written natively" \
-    "$(ARBACE_BOX_STORE=$s native -e "$e" -e '(print (box/load "from-jvm"))' 2>&1)|$(ARBACE_BOX_STORE=$s jvm -e "$e" -e '(print (box/load "from-go"))' 2>&1)"
-  # a tree with a name that is not ASCII, one too long for USTAR and one it splits
-  x=$t/xsrc
-  mkdir -p "$x/d" "$x/empty" "$x/$(printf 'p%.0s' $(seq 60))/$(printf 'q%.0s' $(seq 60))"
-  echo A > "$x/a.txt"; printf '\xc3\xa9' > "$x/d/$(printf '\xc3\xa9').txt"; echo L > "$x/d/$(printf 'n%.0s' $(seq 120))"
-  echo deep > "$x/$(printf 'p%.0s' $(seq 60))/$(printf 'q%.0s' $(seq 60))/$(printf 'r%.0s' $(seq 30))"
-  chmod 600 "$x/a.txt"; chmod 700 "$x/empty"
-  hj=$(ARBACE_BOX_STORE=$s jvm -e "$e" -e "(print (box/save-fs! \"snap-jvm\" \"$x\"))" 2>&1)
-  hn=$(ARBACE_BOX_STORE=$s native -e "$e" -e "(print (box/save-fs! \"snap-go\" \"$x\"))" 2>&1)
-  check "a snapshot of the same files: the same tar on the JVM and natively" "$hn" "$hj"
-  ARBACE_BOX_STORE=$s jvm -e "$e" -e "(box/load-fs! \"snap-go\" \"$t/xj\")" > /dev/null 2>&1
-  ARBACE_BOX_STORE=$s native -e "$e" -e "(box/load-fs! \"snap-jvm\" \"$t/xn\")" > /dev/null 2>&1
-  check "each restores the other's snapshot" "same same" \
-    "$(diff -r "$x" "$t/xj" > /dev/null && echo same) $(diff -r "$x" "$t/xn" > /dev/null && echo same)"
-  cat > "$t/cas.ae" <<'EOF2'
-(require '[arbace.box :as box])
-(dotimes [_ 50]
-  (loop []
-    (let [old (box/ref "counter")
-          h (box/put (str (inc (if old (parse-long (box/get old)) 0))))]
-      (when-not (box/ref! "counter" h old) (recur)))))
-EOF2
-  ARBACE_BOX_STORE=$s jvm "$t/cas.ae" & ARBACE_BOX_STORE=$s native "$t/cas.ae" &
-  ARBACE_BOX_STORE=$s jvm "$t/cas.ae" & ARBACE_BOX_STORE=$s native "$t/cas.ae" &
-  wait
-  check "compare-and-set counters, two JVMs and two native processes at once" "200" \
-    "$(ARBACE_BOX_STORE=$s native -e "$e" -e '(print (box/load "counter"))' 2>&1)"
-  # ARBACE_PATH on the JVM as natively (BX37): its entries in order for a namespace (an earlier
-  # store entry first, an earlier directory first), its directories' resources and data_readers
-  mkdir -p "$t/pl/pq" && echo '(ns pq.x) (def v :dir)' > "$t/pl/pq/x.ae"
-  ARBACE_BOX_STORE=$s native -e "$e" -e '(box/put! "q.pq.x.ae" "(ns pq.x) (def v :store)")' > /dev/null 2>&1
-  x='(require (quote pq.x)) (print @(resolve (quote pq.x/v)))'
-  check "ARBACE_PATH's entries in order, on the JVM as natively" ":store :store :dir :dir" \
-    "$(ARBACE_BOX_STORE=$s ARBACE_PATH=store:q.:$t/pl jvm -e "$x" 2>&1) $(ARBACE_BOX_STORE=$s ARBACE_PATH=store:q.:$t/pl native -e "$x" 2>&1) $(ARBACE_BOX_STORE=$s ARBACE_PATH=$t/pl:store:q. jvm -e "$x" 2>&1) $(ARBACE_BOX_STORE=$s ARBACE_PATH=$t/pl:store:q. native -e "$x" 2>&1)"
-  check "ARBACE_PATH's directories on the JVM: data_readers.ae and .clj, io/resource" "[[:ae 1] [:clj 2]] true" \
-    "$(ARBACE_PATH=$t/dr jvm -e '(require (quote dr.fns)) (print (read-string "[#dr.ae/tag 1 #dr.clj/tag 2]") (some? (arbace.java.io/resource "dr/fns.ae")))' 2>&1)"
-  rm -f "$t/held"
-  ARBACE_BOX_STORE=$s jvm -e "$e" -e "(#'arbace.box.host/with-refs-lock (arbace.box.host/current) false (fn [] (spit \"$t/held\" \"\") (Thread/sleep 3000) (print (if (.exists (java.io.File. \"$s/refs/locked\")) :written :absent))))" > "$t/held.out" 2>&1 &
-  for _ in $(seq 300); do [ -e "$t/held" ] && break; sleep 0.1; done
-  ARBACE_BOX_STORE=$s native -e "$e" -e '(print (box/ref! "locked" (box/ref "from-go")))' > "$t/locked.out" 2>&1 &
-  wait
-  check "the JVM's refs lock keeps the native ref! waiting (fcntl's lock, both)" ":absent true" \
-    "$(cat "$t/held.out") $(cat "$t/locked.out")"
-}
-
 smoke() {
   local status=0 t
   t=$(mktemp -d "$root/.tmp/arbace-go-smoke.XXXXXX")
@@ -372,8 +320,8 @@ EOF
     check "the REPL on stdin" "$(printf 'user=> 3\nuser=> #'"'"'user/sq\nuser=> 49\nuser=> ')" \
       "$(printf '(+ 1 2)\n(defn sq [x] (* x x))\n(sq 7)\n' | run "$a" 2>&1 | tail -n +2)"
     # the REPL as a user process: multi-line input, doc, an error and the REPL going on, *1
-    # *2 *3 and *e, end of input ending it with status 0 (the transcript is the JVM's,
-    # bin/arbace-j's, but for the eval class's number)
+    # *2 *3 and *e, end of input ending it with status 0 (the transcript was the JVM Arbace's
+    # until S4, but for the eval class's number)
     run "$a" < "$t/repl.in" > "$t/repl.out" 2>&1; st=$?
     check "a REPL session" "$(cat "$t/repl.expected")" \
       "$(sed -e 's/user\/eval[0-9]*/user\/evalN/' -e '1s/^Arbace [^ ]* ([0-9a-f]\{7\})$/Arbace DESCRIBE (HASH)/' "$t/repl.out")"
@@ -415,22 +363,11 @@ EOF
     check "natively, a snapshot names its directory" "java.lang.IllegalArgumentException" \
       "$(ARBACE_BOX_STORE=$t/store run "$a" -e '(require (quote arbace.box))' -e '(try (arbace.box/save-fs! "snap") (catch Exception e (print (.getName (class e)))))' 2>&1)"
     # TLS (doc/go/BOX-NOTES.md, "TLS (option 2)"): arbace.tls and arbace.http against the test
-    # server on the loopback (tools/tlsserver), natively, and on the JVM (amd64, its jar built)
+    # server on the loopback (tools/tlsserver)
     if [ -n "${TLS_SERVER_PID:-}" ]; then
       tls_checks native "$t/tls" "$t/tls/ca.pem"
-      if [ "$a" = amd64 ] && [ -f "$root/target/arbace.jar" ]; then
-        echo "  -- the JVM's arbace.tls (target/arbace.jar)"
-        jvm() { "$root/bin/arbace-j" "$@"; }
-        tls_checks jvm "$t/tls" "$t/tls/ca.pem"
-      fi
     else
       echo "  skip TLS (tools/tlsserver not built: Go's toolchain needed)"
-    fi
-    # the JVM's arbace.box beside the native one (BX37), when the JVM Arbace is built
-    if [ "$a" = amd64 ] && [ -f "$root/target/arbace.jar" ]; then
-      jvm_store_checks "$t"
-    else
-      echo "  skip the JVM's arbace.box beside the native one (amd64 and target/arbace.jar needed)"
     fi
     # the interactive REPL under rlwrap (doc/go/EXEC-NOTES.md, "Line editing: rlwrap"), on a
     # pseudo-terminal: amd64 only (under qemu-aarch64 rlwrap would run the arm64 executable
@@ -448,64 +385,71 @@ EOF
   return $status
 }
 
-# gate_key: the hash of what the executable is built from (not the commit: a commit that
-# changes none of these keeps the cached executable, whose *arbace-version* then names the
-# commit it was built at; right for the smoke test, which checks only that the banner shows
-# the executable's own version, and it keeps the gate's hits; a release builds anew): Arbace's sources (the runtime's
-# class forms and their Go variants, the embedded namespaces, a2g, g2a, the class forms
-# compiler), the JDK's forms and resource data (jdk/, committed since standalone S1: j2a, javac
-# and jdk26u's checkout are no longer inputs of the build), jrt's forms and the overlays, the
-# scripts of the build, the seed, and the toolchains (Go, and the JDK a2g runs on)
+# gate_key: the hash of what the executables are built from (not the commit: a commit that
+# changes none of these keeps the cached executables, whose *arbace-version* then names the
+# commit they were built at; right for the smoke test, which checks only that the banner shows
+# the executable's own version, and it keeps the gate's hits; a release builds anew): Arbace's
+# sources (the runtime's class forms and their Go variants, the embedded namespaces, a2g, g2a,
+# the class forms' analysis), the JDK's forms and resource data (jdk/), jrt's forms and the
+# overlays, the suite's Java fixtures' forms (the test build), the scripts of the build, the
+# seed and the toolchain's pins (stage 0, the host of a2g and g2a, is built from the seed; or the
+# host executable ARBACE_HOST_EXE names), and Go's version
 gate_key() {
   (cd "$root" && {
-    find arbace go overlay jdk x509roots bin/lib -type f | sort
-    printf '%s\n' seed/arbace-seed.jar.sha256 bin/arbace-go bin/a2g bin/g2a bin/jrt bin/arbace-j bin/build-arbace
+    find arbace go overlay jdk x509roots bin/lib test/java-fixtures -type f | sort
+    printf '%s\n' seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/arbace-go bin/a2g bin/g2a bin/jrt bin/seed
   } | xargs sha256sum
-    cat "${G2A_GOROOT:-/root/tamago-go}/VERSION"
-    java -version 2>&1) | sha256sum | cut -c1-64
+    [ -z "${ARBACE_HOST_EXE:-}" ] || sha256sum < "$ARBACE_HOST_EXE"
+    cat "${G2A_GOROOT:-/root/tamago-go}/VERSION") | sha256sum | cut -c1-64
 }
 
-# gate: the smoke test of the essential bin/gate (amd64) on the executable cached under
-# .tmp/arbace-go-gate, built again only when gate_key changed: --build for amd64, from the
-# committed JDK forms (jdk/). Needs bin/build-arbace first. A hit takes seconds; a miss about 4
-# minutes
-gate() {
+# gate_build: the essential bin/gate's builds (amd64), cached under .tmp/arbace-go-gate: the
+# executable (--build) and the test build (--build-tests), built again only when gate_key
+# changed. A hit takes seconds; a miss two Go-hosted builds. Prints where they are
+gate_build() {
   local cache=$root/.tmp/arbace-go-gate key t0
   t0=$(date +%s)
   key=$(gate_key)
-  if [ -x "$cache/amd64/arbace" ] && [ "$(cat "$cache/key" 2>/dev/null)" = "$key" ]; then
-    echo "arbace-go: the cached executable (its inputs unchanged, key ${key:0:12})"
+  if [ -x "$cache/amd64/arbace" ] && [ -x "$cache/amd64/arbace-tests" ] && [ "$(cat "$cache/key" 2>/dev/null)" = "$key" ]; then
+    echo "arbace-go: the cached executables (their inputs unchanged, key ${key:0:12})"
   else
-    echo "arbace-go: building the executable (key ${key:0:12})"
+    echo "arbace-go: building the executables (key ${key:0:12})"
     rm -rf "$cache"
     arches=amd64 build 2>&1 || return 1
+    arches=amd64 build_tests 2>&1 || return 1
     mkdir -p "$cache/amd64"
-    cp "$dir/amd64/arbace" "$cache/amd64/arbace"
+    cp "$dir/amd64/arbace" "$dir/amd64/arbace-tests" "$cache/amd64/"
     echo "$key" > "$cache/key"
     echo "   built in $(since "$t0")"
   fi
-  dir=$cache arches=amd64 smoke
+  echo "arbace-go: $cache/amd64/arbace $cache/amd64/arbace-tests"
 }
 
-# fixpoint: the Go-hosted fixpoint (standalone S3, doc/STANDALONE-NOTES.md): G1 built by the
-# JVM-hosted chain, G2 by a2g (and g2a, when bin/g2a runs on the executable) on G1, G3 by G2; each
-# a whole --build for amd64 in its own directory (target/arbace-go/fixpoint/gN: a2g's output, the
-# work module, the executable). Then a2g's program trees are compared (diff -r, report.edn's times
-# left out) and the executables byte for byte. Status 0 when all are identical
+# gate: gate_build, then the smoke test on the cached executable
+gate() {
+  gate_build || return 1
+  dir=$root/.tmp/arbace-go-gate arches=amd64 smoke
+}
+
+# fixpoint: the Go-hosted fixpoint (standalone S3, S4, doc/STANDALONE-NOTES.md): G1 built by the
+# host executable (stage 0 by default, or ARBACE_HOST_EXE), G2 by G1 (a2g and g2a on G1), G3 by
+# G2; each a whole --build for amd64 in its own directory (target/arbace-go/fixpoint/gN: a2g's
+# output, the work module, the executable). Then a2g's program trees are compared (diff -r,
+# report.edn's times left out) and the executables byte for byte. Status 0 when G2 = G3 (the
+# trees and the executables); G1 = G2 and host = G1 are reported: they hold when the host is
+# the fixpoint of these sources already (stage 0 of a seed printed from them)
 fixpoint() {
-  local fp=$root/target/arbace-go/fixpoint n prev status=0 t0 h
+  local fp=$root/target/arbace-go/fixpoint n prev status=0 t0 h host
   [ "$(host_arch)" = amd64 ] || { echo "arbace-go: --fixpoint runs on amd64" >&2; return 1; }
+  host=$(. "$root/bin/lib/host.bash" && arbace_host_exe) || return 1
   rm -rf "$fp"
+  mkdir -p "$fp"
+  cp "$host" "$fp/host"
   for n in 1 2 3; do
     t0=$(date +%s)
-    if [ $n = 1 ]; then
-      echo "== G1: the JVM-hosted chain" >&2
-      (dir=$fp/g1 arches=amd64 A2G_HOST=jvm G2A_HOST=jvm build) || return 1
-    else
-      prev=$fp/g$((n-1))/amd64/arbace
-      echo "== G$n: built by G$((n-1)) ($prev)" >&2
-      (dir=$fp/g$n arches=amd64 A2G_HOST=go A2G_GO_EXE=$prev G2A_HOST=${G2A_HOST:-go} G2A_GO_EXE=$prev build) || return 1
-    fi
+    if [ $n = 1 ]; then prev=$fp/host; else prev=$fp/g$((n-1))/amd64/arbace; fi
+    echo "== G$n: built by $( [ $n = 1 ] && echo "the host ($host)" || echo "G$((n-1))")" >&2
+    (dir=$fp/g$n arches=amd64 A2G_GO_EXE=$prev G2A_GO_EXE=$prev build) || return 1
     echo "   G$n in $(since "$t0"); a2g: $(grep -o ':times {[^}]*}' "$fp/g$n/a2g/report.edn")" >&2
     # report.edn's times differ from run to run: the rest of it is compared
     sed -i 's/ :times {[^}]*}//' "$fp/g$n/a2g/report.edn"
@@ -514,20 +458,29 @@ fixpoint() {
     if diff -r "$fp/g$((n-1))/a2g" "$fp/g$n/a2g" > "$fp/diff-a2g-$((n-1))-$n.txt"; then
       echo "fixpoint: a2g's program G$((n-1)) = G$n (diff -r)"
     else
-      echo "fixpoint: a2g's program G$((n-1)) != G$n: $fp/diff-a2g-$((n-1))-$n.txt"; status=1
+      echo "fixpoint: a2g's program G$((n-1)) != G$n: $fp/diff-a2g-$((n-1))-$n.txt"
+      [ $n = 3 ] && status=1
     fi
   done
+  h=$(sha256sum < "$fp/host" | cut -c1-64)
+  echo "fixpoint: host $h $(stat -c %s "$fp/host") bytes"
   for n in 1 2 3; do
     h=$(sha256sum < "$fp/g$n/amd64/arbace" | cut -c1-64)
     echo "fixpoint: G$n $h $(stat -c %s "$fp/g$n/amd64/arbace") bytes"
   done
-  # what bin/seed --go-make records when it packs G3 (ARBACE_SEED_GO_BUILD=$fp/g3)
-  echo "the Go-hosted fixpoint (bin/arbace-go --fixpoint): G3, a2g on G2 (A2G_HOST=go), g2a's printing on ${G2A_HOST:-go}, G2 built by G1, G1 by the JVM chain" > "$fp/g3/printed-by"
+  # what bin/seed --make records when it packs G3 (ARBACE_SEED_GO_BUILD=$fp/g3): the procedure,
+  # not the host, so that bin/seed --verify, which runs it from the seed's own stage 0, prints
+  # the same seed
+  echo "the Go-hosted fixpoint (bin/arbace-go --fixpoint): G3, a2g and g2a on G2, G2 built by G1, G1 by the host executable" > "$fp/g3/printed-by"
+  cmp -s "$fp/host" "$fp/g1/amd64/arbace" && echo "fixpoint: host = G1 byte for byte" || echo "fixpoint: host != G1"
   for n in 2 3; do
-    cmp -s "$fp/g$((n-1))/amd64/arbace" "$fp/g$n/amd64/arbace" \
-      && echo "fixpoint: G$((n-1)) = G$n byte for byte" \
-      || { echo "fixpoint: G$((n-1)) != G$n"; status=1; }
+    if cmp -s "$fp/g$((n-1))/amd64/arbace" "$fp/g$n/amd64/arbace"; then
+      echo "fixpoint: G$((n-1)) = G$n byte for byte"
+    else
+      echo "fixpoint: G$((n-1)) != G$n"; [ $n = 3 ] && status=1
+    fi
   done
+  [ $status = 0 ] && echo "fixpoint: holds (G2 = G3)" || echo "fixpoint: does not hold"
   return $status
 }
 
@@ -631,15 +584,9 @@ box_smoke() {
   return $status
 }
 
-# ARBACE_GO_HOST: the build's tools on the native executable (S3)
-case ${ARBACE_GO_HOST:-jvm} in
-  jvm) ;;
-  go) export A2G_HOST=go G2A_HOST=go ;;
-  *) echo "arbace-go: ARBACE_GO_HOST is jvm or go, not $ARBACE_GO_HOST" >&2; exit 2 ;;
-esac
-
 case ${1:-} in
   --gate) gate ;;
+  --gate-build) gate_build ;;
   --fixpoint) fixpoint ;;
   --build) if [ "${2:-}" = --box ]; then box_build; else [ "${2:-}" = --pgo ] && pgo=1; build; fi ;;
   --build-tests) build_tests "${2:-}" ;;

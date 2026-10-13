@@ -5,8 +5,8 @@
   (:require [arbace.string :as str]
             [arbace.classes.analyze :as a]
             [arbace.a2g.model :as m]
-            [arbace.a2g.jrt :as jrt])
-  (:import (arbace.asm Opcodes)))
+            [arbace.a2g.jrt :as jrt]
+            [arbace.classes.opcodes :as Opcodes]))
 
 (defn- sym-name [x] (when (symbol? x) (name x)))
 
@@ -52,8 +52,8 @@
                  :when (not (#{"init" "_"} (second k)))]
              [[:jrt k] (str "jrt/" fname)])
         by (group-by first (concat gen hw))]
-    (vec (for [[[pkg [kind n]] srcs] (sort-by (comp str key) by)
-               :when (> (count srcs) 1)]
+    ;; the duplicates (few) sorted, not every name
+    (vec (for [[[pkg [kind n]] srcs] (sort-by (comp str key) (filter #(> (count (val %)) 1) by))]
            {:pkg pkg :name (if (= :pkg kind) n (str "(" kind ")." n)) :sources (vec (sort (map second srcs)))}))))
 
 (defn- jpkg [n] (let [i (.lastIndexOf ^String n "/")] (if (neg? i) "" (subs n 0 i))))
@@ -63,18 +63,22 @@
   another Java package declares again with the same name and descriptor: Java does not
   override them (JVMS 5.4.5), Go's method sets would (A2G-SPEC §4.4). [{:method :hidden-by}]."
   [T]
-  (vec
-    (for [n (sort T)
+  (let [sorted (sort T)
+        ;; each class's translated subclasses (direct or not), in order
+        subs (reduce (fn [acc s] (reduce #(update %1 %2 (fnil conj []) s) acc (rest (m/superclass-chain s))))
+                     {} sorted)]
+   (vec
+    (for [n sorted
           :let [d (a/decl n)]
           :when (and d (not (m/interface? n)))
           mm (:methods d)
           :when (and (not= "<init>" (:name mm)) (not (m/static? mm)) (not (m/private? mm))
                      (zero? (bit-and (:flags mm) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED))))
-          s (sort T)
-          :when (and (not= s n) (not= (jpkg s) (jpkg n)) (some #{n} (rest (m/superclass-chain s))))
+          s (get subs n)
+          :when (and (not= s n) (not= (jpkg s) (jpkg n)))
           sm (:methods (a/decl s))
           :when (and (= (:name sm) (:name mm)) (= (:desc sm) (:desc mm)) (not (m/static? sm)))]
-      {:method (str n "." (:name mm) (:desc mm)) :hidden-by s})))
+      {:method (str n "." (:name mm) (:desc mm)) :hidden-by s}))))
 
 (defn race-report
   "The candidate two-word races (§8.3) as {class [\"field (writers...)\"]}."

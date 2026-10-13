@@ -19,10 +19,11 @@ Direction:
   (not freezes: no branch): on amd64 with /dev/kvm (tag `arbace-box-amd64-v1`, 2026-10-12) and
   on arm64 (tag `arbace-box-arm64-v1`, 2026-10-12): KVM/arm64, checked in an emulated aarch64
   VM, and Hypervisor.framework on an M2 Max (the bundle of `bin/box-mac-bundle`, 42 of 42).
-- Now: the standalone Arbace (doc/STANDALONE-SURVEY.md, D1-D13 decided): first the Go-hosted
-  bootstrap (S1-S4: no JVM in the build but the oracle's reference and j2a; the milestone
-  `arbace-seed-is-go-v1`), then the box
-  rebuilding Arbace inside itself (S5-S8); doc/AGENDA.md.
+- Now: the standalone Arbace (doc/STANDALONE-SURVEY.md, D1-D13 decided). The Go-hosted
+  bootstrap (S1-S4) is done: the seed is Arbace's Go program as Arbace printed it, the Go
+  executable rebuilds itself, and the JVM stays only as the oracle's reference (the frozen v4
+  jar) and j2a's front end (the milestone `arbace-seed-is-go-v1`). Next: the box rebuilding
+  Arbace inside itself (S5-S8); doc/AGENDA.md.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through j2a. The language is Clojure extended with an idiomatic
   representation of Java (the class forms), and later of Go: the Arbace language. The goal is a
@@ -41,49 +42,57 @@ Prior art:
 
 ## Layout
 
-- `seed/arbace-seed.jar` is the binary seed of the bootstrap: Arbace's jar as built at the tag
-  `arbace-for-java-26-v1`, pinned by `seed/arbace-seed.jar.sha256`. `bin/seed --check` checks
-  the hash; `bin/seed --verify` rebuilds it from the tag. Its successor (standalone S4,
-  doc/STANDALONE-NOTES.md): the Go-source seed `seed/arbace-seed-go.tar.xz`, the printed Go
-  program pinned by hash, the toolchain pinned by `seed/goroot.sha256` (`bin/seed --go-check`,
-  `--go-make`, `--go-build`, `--go-verify`; committed at S4's end). It replaced the frozen reference tree
-  `clojure/` (upstream Clojure and ASM), which remains on the branch `arbace-for-java-26`. The
-  tools take what they need of that tree as data (j2a's corpus, the baseline of Clojure's suite)
-  from the tag, extracted into `.tmp/frozen/` by `bin/lib/tools.bash`.
+- `seed/arbace-seed-go.tar.xz` is the seed of the bootstrap: Arbace's Go program as the Go-hosted
+  fixpoint printed it (a2g's translation printed by g2a, the module `go build` compiles, with Go's
+  runtime as `overlay/go` patches it), one deterministic tar.xz pinned by
+  `seed/arbace-seed-go.tar.xz.sha256`; the Go toolchain that builds it (TamaGo's go1.27.1) pinned
+  by `seed/goroot.sha256` (doc/STANDALONE-NOTES.md, "S4: the Go-source seed", "S4: the JVM
+  removed"). `bin/seed --check` checks the hash; `--build` builds stage 0 from it with Go's
+  toolchain alone (`target/seed/<arch>/arbace`); `--make` packs a build (the fixpoint's G3, for a
+  seed to commit, rarely: a re-seed); `--verify` prints it again from its commit (the fixpoint from
+  the seed's own stage 0) and requires the same tar and stage 0 = G1 = G2 = G3. Until S4 the seed
+  was a jar (`arbace-for-java-26-v1`'s), and before that the frozen reference tree `clojure/`
+  (upstream Clojure and ASM): both on the branch `arbace-for-java-26`. The tools take what they
+  need of that tree as data (j2a's corpus, the baseline of Clojure's suite) from the tag,
+  extracted into `.tmp/frozen/` by `bin/lib/tools.bash`.
+- Stage 0 hosts Arbace's tools (`bin/lib/host.bash`'s `arbace_host_exe`: `ARBACE_HOST_EXE`, else
+  stage 0, built when missing or when the seed changed): a2g, g2a, c2a, the suite's runner, run
+  on it with their namespaces loaded from the checkout (`bin/lib/tools.bash`'s `arbace_tool`,
+  `ARBACE_PATH`). The JVM runs only the frozen jar of `arbace-for-java-26-v4` (built from its tag,
+  pinned by `test/oracle/frozen-jar.sha256`; `bin/lib/frozen.bash`, its tools' namespaces from the
+  checkout as `.clj` links before the jar): the oracle's reference, j2a (javac's front end:
+  `bin/j2a`, `j2a-check`, `jrt-convert`, `--java-fixtures`), a2g's edge (`bin/a2g-edge`) and the
+  data generators (`bin/jrt testdata|manifest|standins`, `jrt-coverage`).
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
-  frozen baseline, and checks the result against `test/baseline-results.edn` (Arbace's:
-  `test/arbace-results.edn`; the Go build's, `CLOJURE_TESTS_GO`: `test/arbace-go-results.edn`).
+  frozen baseline on the JVM (`test/baseline-results.edn`), or with `CLOJURE_TESTS_GO` the Go
+  build's test executable (`test/arbace-go-results.edn`; c2a's translation and the report on the
+  tools' host).
 - `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
   stated nowhere else, apart from the notices source files came with, which stay. Extend it when
   vendoring from a new source.
 - `arbace/` holds Arbace's own Clojure code, namespaces `arbace.*`, all `.ae` (Arbace's source
   extension: Clojure plus forms Clojure cannot evaluate; the loaders take `.ae`, then `.clj`):
-  - the vendored Clojure, renamed from `clojure.*` (`arbace.core`, `arbace.lang`, `arbace.asm`
-    and the rest; the Java parts are class forms). It is hand-maintained source; its
-    derivation is recorded in `doc/VENDOR-NOTES.md` (replayable on `arbace-for-java-26`).
-    `bin/build-arbace [--suite]` bootstraps it: stage 0 (the seed, which reads `.clj` only,
-    through `target/seed-view`, `.clj` links to the `.ae` sources) builds `target/stage1`,
-    which builds `target/stage2`, which must rebuild itself byte for byte (`target/stage3`). Each stage holds its namespaces AOT-compiled by
-    its own runtime. Every class of stages 1 and 2 must pass the JDK's class file verifier
-    (`arbace.classes.verify`). The build then makes `target/arbace.jar` (stage 2,
-    reproducible) and the JDK AOT cache `target/arbace.aot` (training workload
-    `test/aot-training.ae`). With `--suite` it also runs Clojure's test suite on stages 1
-    and 2. Run Arbace with `bin/arbace-j` (the jar, with the cache when it applies), or a stage
-    with `java -cp target/stageN:. arbace.lang.Main`. `bin/arbace-image` (or `bin/build-arbace
-    --image`) builds `target/arbace-image`, a self-contained jlink image with its own AOT cache.
-  - `arbace/classes/`: the class forms compiler (spec `doc/classes/SPEC.md`).
+  - the vendored Clojure, renamed from `clojure.*` (`arbace.core`, `arbace.lang` and the rest;
+    the Java parts are class forms). It is hand-maintained source; its derivation is recorded in
+    `doc/VENDOR-NOTES.md` (replayable on `arbace-for-java-26`). Since S4 it has no bytecode back
+    end, no ASM and no class loader (on `arbace-for-java-26`, with the JVM's three-stage
+    bootstrap, the jar, its AOT cache, the jlink image and `bin/arbace-j`): the Go build
+    translates it, with its variants in `arbace/lang/go/`. The divergences this makes
+    (gen-class a no-op, no class files, ...) are recorded in doc/VENDOR-NOTES.md and
+    doc/STANDALONE-NOTES.md (D13).
+  - `arbace/classes/`: the class forms' front end (spec `doc/classes/SPEC.md`): parse, lower,
+    analyze, env, types, native, the access flags (`opcodes`), `go`, the interpreter (`interp`);
+    `jvm`, env's class-file reading, only for the frozen jar.
   - `arbace/c2a/`: the Clojure → Arbace translator (`doc/C2A.md`; `bin/c2a`, `bin/c2a-check`):
     the names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the
     dialects' divergences; `bin/clojure-tests` translates Clojure's suite with it.
   - `arbace/j2a/`: the Java → class forms converter.
   - `arbace/g2a/`: Go as Go forms and back (spec `doc/go/SPEC.md`; helpers `tools/godump`,
-    `tools/gocmp`; `bin/g2a`; hosted on the JVM, or with `G2A_HOST=go` on the Go executable,
-    `G2A_GO_EXE`, byte-identical, for every caller of `bin/g2a`).
-  - `arbace/a2g/`'s host likewise: `A2G_HOST=jvm|go` (`A2G_GO_EXE`); `bin/arbace-go`'s
-    `ARBACE_GO_HOST=go` sets both; `bin/arbace-go --fixpoint` builds G1 → G2 → G3 into
-    `target/arbace-go/fixpoint/` (S3), and `ARBACE_SEED_GO_BUILD` names the build `bin/seed
-    --go-make` packs. The resources are compressed by `arbace/a2g/zlib.ae` (SA21).
-  - `arbace/a2g/`: the class forms → Go forms translator (spec `doc/go/A2G-SPEC.md`; `bin/a2g`).
+    `tools/gocmp`; `bin/g2a`), on the tools' host (`G2A_GO_EXE` names another executable).
+  - `arbace/a2g/`: the class forms → Go forms translator (spec `doc/go/A2G-SPEC.md`; `bin/a2g`),
+    on the tools' host (`A2G_GO_EXE`), its classes translated in parallel (`A2G_JOBS`, default at
+    most 16) with the sequential output byte for byte; the resources compressed by
+    `arbace/a2g/zlib.ae` (SA21).
 - The Go build (B1a, `doc/go/B1-PLAN.md`): Arbace as a static Go executable. a2g translates
   the runtime, with the Go-build variants of Clojure's classes and namespaces in
   `arbace/lang/go/`, and jrt, the Java runtime on Go (`go/arbace/jrt`, hand-written Go forms;
@@ -92,12 +101,13 @@ Prior art:
   `jdk/provenance.edn`; `bin/jrt-convert update` regenerates them, `verify` checks them; standalone
   S1); `jdk/edge.edn`, the JVM's answers a2g needs, so a2g uses no JVM reflection or ASM
   (`bin/a2g-edge update`, `verify`, `trace`; S2, doc/STANDALONE-NOTES.md); `bin/jrt`); `overlay/go/` patches Go's runtime. `bin/arbace-go` builds
-  (`--build`, `--build-tests`, `--pgo`; the test build's Java fixtures committed as forms in
-  `test/java-fixtures/`, `bin/clojure-tests --java-fixtures update`, `verify`), smoke-tests and
-  runs it. The oracle (`bin/oracle`,
-  `test/oracle/`, `doc/go/ORACLE.md`) checks it against the JVM Arbace (`ARBACE_ORACLE_REF=frozen`:
-  the frozen `arbace-for-java-26-v4` built from its tag, pinned by `test/oracle/frozen-jar.sha256`,
-  against `test/oracle/known-go-amd64-frozen.edn`; the gate's reference from S4). Notes in `doc/go/`.
+  (`--build`, `--build-tests`, `--pgo`, by the tools' host: about 5 minutes; the test build's Java
+  fixtures committed as forms in `test/java-fixtures/`, `bin/clojure-tests --java-fixtures update`,
+  `verify`), smoke-tests and runs it; `--fixpoint` builds G1 by the host, G2 by G1, G3 by G2 into
+  `target/arbace-go/fixpoint/` and requires G2 = G3. The oracle (`bin/oracle`, `test/oracle/`,
+  `doc/go/ORACLE.md`) checks it against the frozen JVM Arbace (the v4 jar's expected results,
+  `test/oracle/expected`), against its known mismatches `test/oracle/known-go-amd64-frozen.edn`.
+  Notes in `doc/go/`.
 - The box (B1b, `doc/go/BOX-SURVEY.md`, `doc/go/BOX-NOTES.md`): the same program built with
   TamaGo (`GOOS=tamago`) as a guest of a monitor on /dev/kvm (amd64) and Hypervisor.framework
   (arm64; KVM/arm64 too). `box/` holds the hypervisor API, the monitor, the doorbell ABI and the
@@ -114,35 +124,29 @@ Prior art:
   VM with KVM/arm64 for the arm64 box's checks (`check`: its smoke test, go-whim's tests);
   `bin/box-mac-bundle` packs the Mac's launcher, guest and checklist (`box/mac/`). The store (S3):
   blobs and refs in a host directory (`ARBACE_BOX_STORE`, `arbace-box --store DIR`, which is also
-  its tool), the namespace `arbace.box` over it in the box, natively and on the JVM (BX37).
+  its tool), the namespace `arbace.box` over it in the box and natively.
 - `doc/ALPINE.md`: the host's Alpine packages as one minimal `apk add` line (`bin/alpine-env
   world`, `check`, `simulate`), the subset Arbace uses, and what apk does not provide (jdk26u,
   TamaGo's Go, go-whim, Go's module cache).
-- `bin/gate` is the check every change to main must pass: the seed's hash, the bootstrap, then
-  concurrently Clojure's suite on stage 2, `bin/class-forms-tests` and the Go executable's
-  smoke test on amd64 (`bin/arbace-go --gate`; about 4 minutes). The smoke test runs on an
-  executable cached in `.tmp/arbace-go-gate`, keyed by a hash of what it is built from
-  (`arbace/`, `go/`, `overlay/`, `jdk/`, the build's scripts, the seed, the toolchains): seconds when
-  they are unchanged, else it is built again beside the suite (a2g, the Go build, the image:
-  the gate then takes about 7 minutes).
-  `bin/gate --full` adds, concurrently, the suite on stage 1, `bin/j2a-check --suite`, the
-  g2a round trip on amd64 for tamago and linux (`bin/g2a roundtrip amd64`, `linux/amd64`), the
-  box's round trip and go-whim's KVM tests on it (`bin/box-vendor roundtrip`, `kvm-tests`),
-  `tamago/` converted afresh and compared (`bin/tamago-vendor verify`) and
-  the Go build on amd64: `bin/jrt-convert verify` (`jdk/` converted afresh and compared byte
-  for byte), `bin/a2g-edge verify`, `bin/arbace-go --build`, then its smoke test,
-  Clojure's suite on its test build (`bin/clojure-tests --java-fixtures verify`, then
-  `bin/arbace-go --build-tests`: the program with the
-  suite's Java fixtures; `test/arbace-go-results.edn`) and the oracle on it, against its known
-  mismatches (`bin/oracle check ... --expected test/oracle/known-go-amd64.edn`) and the box's
-  guest built from `tamago/`'s forms, byte-identical to one from TamaGo's originals
-  (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), then its smoke test (`--smoke --box`); g2a and the
-  Go chain start when the three suites are done, for memory (about 21 minutes, Clojure's suite
-  on Go the longest): run it when
-  the class forms compiler, j2a, g2a, a2g or jrt change (after a change to `overlay/jdk/java.base`,
-  jrt's closure or j2a, `bin/jrt-convert update` first; after a change to what a2g asks of the
-  JVM, `bin/a2g-edge update`). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build` first trims Go's build
-  cache of entries unused for six hours (`bin/lib/gocache.bash`, `ARBACE_GOCACHE_KEEP_MIN`).
+- `bin/gate` is the check every change to main must pass: the seed's hash, stage 0 built from
+  it (`bin/seed --build`), the executable and the test build by stage 0 (`bin/arbace-go
+  --gate-build`, cached in `.tmp/arbace-go-gate` and keyed by a hash of what they are built from:
+  `arbace/`, `go/`, `overlay/`, `jdk/`, `x509roots/`, the fixtures' forms, the build's scripts, the
+  seed's and Go's pins; seconds when unchanged, else two Go-hosted builds, about 10 minutes), then
+  concurrently the smoke test, Clojure's suite on the test build (`test/arbace-go-results.edn`) and
+  the oracle against the frozen reference. `bin/gate --full` adds, concurrently: on the frozen
+  JVM `bin/j2a-check --suite`, `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte),
+  `bin/a2g-edge verify`, `bin/clojure-tests --java-fixtures verify`; the Go build afresh with its
+  smoke test, the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
+  (`bin/arbace-go --build --box`, `bin/tamago-vendor check`) and the box's smoke test, then
+  `bin/arbace-go --fixpoint`; g2a's round trips (`bin/g2a roundtrip amd64`, `linux/amd64`), the
+  box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
+  `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`. Run it when the class forms'
+  front end, j2a, g2a, a2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
+  or j2a, `bin/jrt-convert update` first; after a change to what a2g asks of the JVM,
+  `bin/a2g-edge update`). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`
+  first trims Go's build cache of entries unused for six hours (`bin/lib/gocache.bash`,
+  `ARBACE_GOCACHE_KEEP_MIN`). No build may use the host's `go`: only TamaGo's (`G2A_GOROOT`).
 
 ## Records
 
@@ -164,7 +168,8 @@ Prior art:
   slightly, and where in doubt the Clojure reader wins.
 - The translators name Arbace (`a`) as their target or source: c2a, j2a, g2a, a2g (until
   2026-10-11 j2c, g2c, c2g, as the frozen branches and dated records name them).
-- The tools (c2a, j2a, the class forms checks, the suite runner) run on Arbace's
-  `target/stage2` plus the checkout (`bin/lib/tools.bash`), so build first.
+- The tools (c2a, a2g, g2a, the suite runner) run on the tools' Go host, stage 0 by default
+  (`bin/lib/host.bash`, `bin/lib/tools.bash`); j2a and the JVM's records on the frozen jar
+  (`bin/lib/frozen.bash`). Nothing builds or runs a JVM Arbace of the checkout.
 - Put temporary and scratch files in `.tmp/`, which is gitignored.
 - Never create or modify anything under `.claude/`.

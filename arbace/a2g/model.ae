@@ -7,12 +7,54 @@
             [arbace.classes.env :as env]
             [arbace.classes.analyze :as a]
             [arbace.a2g.names :as nm]
-            [arbace.a2g.jrt :as jrt])
-  (:import (arbace.asm Opcodes)))
+            [arbace.a2g.jrt :as jrt]
+            [arbace.classes.opcodes :as Opcodes]))
 
 (def ^:dynamic *w*
   "The world: {:jrt scan :T atom-or-set :jrt-classes {internal {:go :var :standin :file}}}."
   nil)
+
+;; ---------------------------------------------------------------------------------------
+;; the parallel translation (A2G-SPEC §4.1, "The run in parallel")
+
+(def default-jobs
+  "At most this many threads by default: on Go, 16 take 10 GB at most for the program, 64 take
+  12 GB (GOMEMLIMIT 12GiB) for 5% less time (doc/STANDALONE-NOTES.md, S4, amendment SA51)."
+  16)
+
+(defn jobs
+  "How many threads translate and write: A2G_JOBS, else the number of processors, at most
+  default-jobs."
+  []
+  (let [e (System/getenv "A2G_JOBS")]
+    (max 1 (if (seq e)
+             (Long/parseLong e)
+             (min default-jobs (.availableProcessors (Runtime/getRuntime)))))))
+
+(defn par-mapv
+  "(mapv f xs), f applied on up to n threads, each taking the next element (in xs' order, or
+  in the order of the indices `order`: the longest first); the results in xs' order. f's
+  dynamic bindings are the caller's (future's conveyance)."
+  [n f xs & [order]]
+  (let [xs (vec xs)
+        cnt (count xs)
+        n (min n cnt)
+        order (if order (vec order) (vec (range cnt)))]
+    (if (<= n 1)
+      (mapv f xs)
+      (let [res (object-array cnt)
+            next-i (atom -1)
+            work (fn [] (loop []
+                          (let [k (swap! next-i inc)]
+                            (when (< k cnt)
+                              (let [i (nth order k)]
+                                (aset res i (f (nth xs i))))
+                              (recur)))))
+            ws (doall (repeatedly n #(future (work))))]
+        (run! deref ws)
+        (vec res)))))
+
+;; ---------------------------------------------------------------------------------------
 
 (defn has? [flags f] (not (zero? (bit-and (or flags 0) f))))
 

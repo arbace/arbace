@@ -98,7 +98,8 @@ seed_go_make() {
   nss=$dir/a2g/prog/namespaces.txt
   [ -f "$mod/go.mod" ] && [ -f "$nss" ] && [ -x "$dir/$host/arbace" ] \
     || { echo "bin/seed: no build in $dir: run bin/arbace-go --build first" >&2; return 1; }
-  ovl=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
+  # the overlay printed by g2a, on the packed build's own executable when no host is named
+  ovl=$(cd "$root" && ARBACE_HOST_EXE=${ARBACE_HOST_EXE:-$dir/$host/arbace} bin/jrt overlay | tail -1) || return 1
   rt=$(dirname "$ovl")/runtime
   [ -d "$rt" ] || { echo "bin/seed: no patched runtime in $rt" >&2; return 1; }
   . "$root/bin/lib/version.bash"
@@ -106,7 +107,7 @@ seed_go_make() {
   case $version in *':dirty true'*) echo "bin/seed: warning: the checkout is dirty; the seed records it" >&2 ;; esac
   goversion=$(head -1 "$(seed_go_goroot)/VERSION")
   goroothash=$(seed_go_toolchain_check) || return 1
-  printedby="the JVM chain: bin/build-arbace, then bin/arbace-go --build (a2g and g2a on target/stage2)"
+  printedby="bin/arbace-go --build: a2g and g2a on the host executable"
   [ -s "$dir/printed-by" ] && printedby=$(cat "$dir/printed-by")
   t=$(mktemp -d "$root/.tmp/seed-go-make.XXXXXX") || return 1
   mkdir -p "$t/$seed_go_top/overlay"
@@ -119,7 +120,7 @@ seed_go_make() {
   bytes=$(find "$t/$seed_go_top" -type f -printf '%s\n' | awk '{s+=$1} END {print s}')
   cat > "$t/$seed_go_top/SEED.edn" <<EOF
 ;; The Go-source seed of Arbace's bootstrap (doc/STANDALONE-NOTES.md, "S4: the Go-source seed"),
-;; made by bin/seed --go-make, built into stage 0 by bin/seed --go-build.
+;; made by bin/seed --make, built into stage 0 by bin/seed --build.
 {:format $seed_go_format
  ;; the version map of the commit the seed was printed from, linked as main.arbaceVersion
  :version $version

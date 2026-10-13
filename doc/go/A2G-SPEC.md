@@ -198,7 +198,8 @@ cache and `==` on boxes (§7.6), the exception thrown by each implicit check (§
 
 ### 4.1 Inputs and the closed world
 
-a2g runs on the JVM Arbace (`target/stage2`, as the other tools, `bin/lib/tools.bash`), as
+a2g runs on Arbace's Go executable (the tools' host, `bin/lib/host.bash`, as the other tools;
+on the JVM Arbace's `target/stage2` until standalone S4, which gave the same output), as
 `bin/a2g`, implemented in `arbace/a2g/` (namespaces `arbace.a2g.*`). Its input is a set of
 class forms files and a jrt manifest:
 
@@ -233,6 +234,55 @@ questions as data. With it a2g loads no class, reflects on none and writes no cl
 (javac's accessors are the analyzer's data); a class neither in the forms nor in the edge does
 not exist. `--jvm-reflection` asks the JVM instead. a2g first advances the runtime's id counter
 to a fixed value (`id-floor`), so that its output depends on its inputs alone.
+
+**The run** has four phases, each timed in `report.edn`'s `:times` (with the translation's and
+the writing's steps in `:steps`): the load (reading, entering and analyzing every class: the
+analysis is complete before any translation, `analyze-class!` of all of them), the reach
+(the classes and methods reachable from the roots), the translation, and the writing.
+
+**The run in parallel** (standalone S4, amendments SA50-SA53). The translation of the classes
+and the texts of the files are computed on `A2G_JOBS` threads (default: the number of
+processors, at most 16; 1: one after another), and the output is byte-identical whatever their number,
+the same as the sequential translation's:
+- **Each class is translated on its own** (`arbace.a2g.main/translate-one`), the classes the
+  costliest first (by the size of their class forms file), in a package state of its own: its
+  string literals are named apart (`Lit?i_k`, i the class's place in the sorted order, k its
+  own order of first use), and what it adds to the package's sets (the `Up_` conversions, the
+  lambdas' adapters, the cut classes) and to the race candidates is recorded in order instead
+  of applied, as is what it prints.
+- **The merge**, in class order (`translate-classes`), does what the sequential translation
+  did class after class: it appends the class's forms to its file's, replays its additions to
+  the sets one by one (so that even the sets' internal order is the same), prints its output,
+  records its error, and numbers its literals in the package's pool (`Lit_n`, a literal of an
+  earlier class keeping its name) into a table of renames, which `out/clean` applies when the
+  files are written (`out/*renames*`). The steps after it (the dynamic classes, the
+  adapters, the registrations, the pools) run on the merged state as before.
+- **What else is order-dependent, and why it does not matter here**: the ids the analyzer
+  names its temporaries by (`arr_100417`, `RT/nextID`) are all taken in the load, before any
+  translation; the translation's own ids (`gensym` of the functions `f`, `fn`, `lambda`) only
+  tell functions apart, are never printed, and stay unique across threads (`RT/nextID` is
+  atomic). The translation does not enter or analyze anything (it only asks `a/decl`,
+  `find-sam`, `ctor-real-desc` ...); its caches (`vmethods-cache`, `trivial-cache`, the
+  subclass index, built before the translation) memoize pure functions, so a race only
+  computes a value twice. Local names (`fresh`, `tmp`) are counted per Go function. The
+  dynamic bindings (the world, `*reached*`, `*absent-members*`, the edge) are conveyed to the
+  threads by `future`.
+- **The registrations** (`a2g_classes.go`, §5.11) are made the same way, each class apart,
+  merged in order (`registrations`). The slot methods of `a2g_dyn.go` (§5.12), pure, are
+  computed in parallel.
+- **The writing**: each file's text is computed on its own (`out/file-text`, the renames
+  applied), in parallel, the files written in order. A long file (256 forms or more:
+  `a2g_classes.go`, 4 MB) has the texts of its forms without a class forms line computed in
+  parallel first (`out/unlined-texts`): only a list with `:a2g/line` makes a text depend on
+  the line it starts on (the layout above), so the others are laid out by their newlines. The
+  embedded resources are compressed in parallel and written in order; `report.edn` is printed
+  beside the writing, its times put in at the end (on one line: `:times`, with the steps'
+  times in `:steps`, is the one part of `report.edn` that differs from run to run).
+- **The load**: the class forms files are read in parallel (they hold no `#()` or
+  syntax-quote: reading them takes no ids), as are the embedded sources scanned for the
+  classes they name (`embed/cut-candidates`: their reading takes ids, as many whatever the
+  order, all before the analysis). Entering and analyzing the classes stay sequential
+  (`arbace.classes.analyze` numbers anonymous classes and ids in order), as does the reach.
 
 **jrt's own Java and the JDK's variants** (amendment K1, accepted 2026-10-09). The JDK input is
 `bin/jrt-convert`'s output (committed as `jdk/forms` since standalone S1, 2026-10-12; `--jdk`'s
@@ -461,7 +511,7 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
 - **The REPL's cut classes and absent members** (amendment M3, accepted 2026-10-09). With
   `--program` (§10.6), a2g reads the embedded namespaces' sources (§10.3), collects the class
   names their forms mention (qualified symbols and their namespaces, import lists, metadata), and
-  registers those the JVM has (from the JDK, `arbace.lang` or `arbace.asm`) and the world lacks,
+  registers those the JVM has (from the JDK, `arbace.lang`, or `arbace.asm` until 2026-10-12) and the world lacks,
   with the JDK classes their public members name (one level), as cut classes whose member tables
   come from the JVM's reflection (sorted: methods by name, parameter and return types; fields by
   name; constructors by parameter types) and whose members throw `UnsupportedOperationException("... is
@@ -472,8 +522,9 @@ calls members by name must root the members it may call (§10.6; amendment P2, a
 - **A cut class's constants are readable** (amendment CF1, accepted 2026-10-10). In a cut
   class's member table, a static final field of a primitive type or `String` with a constant
   value answers that value (read by reflection when a2g runs) instead of throwing; its other
-  members still throw. The class forms' analysis reads ASM's `Opcodes` this way
-  (CLASSFORMS-REPL.md; `arbace.a2g.out/cut-constant`).
+  members still throw. The class forms' analysis read ASM's `Opcodes` this way
+  (CLASSFORMS-REPL.md; `arbace.a2g.out/cut-constant`) until 2026-10-12, when the flags moved
+  to `arbace.classes.opcodes` (vars).
 - **Library cuts** (amendment SL7, accepted 2026-10-10). Besides the classes the embedded
   namespaces name, `--program` cuts a fixed list of JDK classes that libraries loaded from
   `ARBACE_PATH` import, when the world lacks them (`arbace.a2g.embed/library-cuts`:
@@ -736,7 +787,8 @@ amendment K1, accepted 2026-10-09), read by a2g only:
   may declare `^:native` methods: they are calls of the Go function `C_M..._native` (§9.1),
   which is how the Go build's `arbace.lang` reaches Go-only code (the host streams,
   `jrt.AdaptFn`, `Dyn`) without a jrt class with a Java API for it.
-- **Erased packages** (amendment E2, accepted 2026-10-09). A variant file's top-level
+- **Erased packages** (amendment E2, accepted 2026-10-09; unused since 2026-10-12, when ASM and
+  the back end left main: the mechanism stays). A variant file's top-level
   `(a2g/erase "p/")` erases the classes of a package outside the closed world (by internal-name
   prefix): an expression whose type is an erased class is `nil`, its operands not evaluated (the
   erased code must be pure where it is skipped: ASM's factories are); a store into a field or an
@@ -744,7 +796,12 @@ amendment K1, accepted 2026-10-09), read by a2g only:
   do not exist in Go, as for any class outside the world (§4.1). An operation of a non-erased
   type on an erased value still throws (an operation-level stub). The Go build erases ASM so,
   instead of cutting `Compiler`'s about 150 `emit` methods and 120 ASM fields one by one, and
-  the variant copies no line of `Compiler` (§10.1, EVAL-PLAN Q7).
+  the variant copies no line of `Compiler` (§10.1, EVAL-PLAN Q7). Since 2026-10-12 the base
+  `Compiler.ae` has no back end (the emit methods, ASM's fields, `ARG_TYPES`' static
+  initializer, `JVM_BYTECODE_VERSION` removed; `compile`, `writeClassFile`, `primInterface`,
+  `buildArrayClassDescriptor`, `StaticInvokeExpr`'s direct linking taken from the variant into
+  the base), and the variant no longer erases anything; the example below is the variant as it
+  was.
 
 ```clojure
 (in-ns 'arbace.lang)
@@ -2512,7 +2569,12 @@ computation skipped, so the `emit` methods, whose descriptors name ASM, do not e
 variant replaces only what loads or writes classes (`ObjExpr.compile` generates nothing,
 `getCompiledClass` is nil, AOT compilation throws, `StaticInvokeExpr.parse` links nothing directly),
 copying no line of `Compiler`. `bin/a2g --root 'arbace.lang.Compiler$*'` translates 94 of its 96
-classes. Interop expressions resolve and run through reflection (§5.11): `InstanceMethodExpr`,
+classes. Since 2026-10-12 (standalone S4) the back end is gone from `Compiler.ae` itself (on the
+branch `arbace-for-java-26`; `Intrinsics`, `Compile`, `DynamicClassLoader` too): what the
+variant replaced only to drop the back end (`compile`, `writeClassFile`, `primInterface`,
+`buildArrayClassDescriptor`, `RT.makeClassLoader`, `RT.classForName`) is the base's now,
+`StaticInvokeExpr` (direct linking) is removed, `ObjExpr.compile` and
+`NewInstanceExpr.compileStub` throw in the base and stay the variant's, and nothing is erased. Interop expressions resolve and run through reflection (§5.11): `InstanceMethodExpr`,
 `StaticMethodExpr`, `InstanceFieldExpr`, `NewExpr` find their `Method`, `Field` or `Constructor`
 with jrt's `Class.getMethods` and the rest at analysis, and their `eval` calls the invoker;
 un-hinted calls go through `Reflector` at run time, as on the JVM. The invokers take Go
@@ -2654,6 +2716,10 @@ JVM gives Clojure code nil for `java.base`'s; jdk26u's own classes read them as 
 An embedded resource is stored zlib-compressed as `P.z` when that is at least a quarter smaller
 (the namespaces' sources, `generics.edn`, `tzdb.dat`, ICU's data), and the host's `Resource`
 inflates `P.z` when asked for `P` (amendment SZ2, accepted 2026-10-10; JRT-NOTES.md, "Size"). The
+compressor is a2g's own, `arbace/a2g/zlib.ae` (a DEFLATE writer in Arbace: the same bytes on
+every host, so that a2g on the Go executable writes the JVM's tree; amendment SA21 of
+doc/STANDALONE-NOTES.md, "S3: the Go-hosted fixpoint"); until then a2g used the JDK's
+`Deflater`, zlib's level 9, which the Go build does not have. The
 data include an image file, `lib/tzdb.dat`, the time-zone database made as the JDK build's
 `GendataTZDB.gmk` makes it and compared with the image's `jdk/lib` (a data file under `lib/` is
 the image's, the others are module resources): `TzdbZoneRulesProvider` and `ZoneInfoFile` read it
@@ -2691,7 +2757,9 @@ not encoded. A load from source (`ARBACE_PATH`, `load-file`, a program without a
 namespaces live in `arbace/lang/go/ns/`, applied by `--program` when it embeds the sources:
 `P.ae` replaces `arbace/P.ae`, `P.after.ae` is appended to it, and `P.subst.ae`, a vector of
 strings `[old new ...]`, replaces each `old`, which must occur exactly once. They are
-`genclass.ae` (`gen-interface` at run time, `gen-class` throws), `core_proxy.ae` (§10.4),
+`genclass.ae` (`gen-interface` at run time, `gen-class` throws; since 2026-10-12 the source,
+`arbace/genclass.ae`, and `gen-class` does nothing), `core_proxy.ae` (§10.4; the source since
+2026-10-12),
 `instant.ae` (JAVA-SURFACE.md decision 7), `main.after.ae` and `main.subst.ae` (the REPL's
 trimmed start, no `DynamicClassLoader`, the error report printed with `prn`), and
 `java/io.subst.ae` (no reflection warnings; `copy` between two files through their streams,
@@ -2700,6 +2768,9 @@ not their channels; the escape of `+` written out as `"%2B"`, not computed with 
 `core/server.subst.ae` (prepl makes no `DynamicClassLoader` for its thread; NT1) and
 `reflect/java.subst.ae` (`arbace.reflect` without ASM: the names ASM's `Type` gives classes,
 computed; amendment FX5, accepted 2026-10-10), besides those of the class forms (CF2, below).
+Since 2026-10-12 `genclass`, `core_proxy`, `main` (both), `core/server` and `reflect/java` are
+applied to their sources (the JVM's versions left main with the back end) and deleted from
+`arbace/lang/go/ns/`.
 Since files are in the world (amendment FS6, accepted 2026-10-10), the error report goes to a
 temporary file through `Files/createTempFile` as on the JVM, and `Compiler.loadFile` has no
 variant: `load-file` is the JVM's, with `File`'s absolute path and name.
@@ -2712,7 +2783,9 @@ variants in `arbace/lang/go/ns/classes/`: `types.subst.ae` (the runtime's packag
 list), `analyze.subst.ae` (ASM's `TypeReference` and the world's generic signatures from
 `arbace.classes.go`; no source path lookup), `native.subst.ae` (the classes interpreted:
 `arbace.classes.interp`'s `compile-and-load!`), and the Go build's own namespaces `go.ae` and
-`interp.ae`. `Compiler.classForms`' variant loads them on the first class form without
+`interp.ae`. (Since 2026-10-12, with the back end gone: `native`, `go` and `interp` are sources
+in `arbace/classes/`, the access flags come from `arbace.classes.opcodes`, and the embedded tree
+leaves out `arbace/classes/jvm.ae`, the JVM's class file reading.) `Compiler.classForms`' variant loads them on the first class form without
 checking the macros' specs, as the JVM loads them compiled.
 
 **The world's generic signatures** (amendment CF5, accepted 2026-10-10). `--program` also

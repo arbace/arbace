@@ -1,0 +1,730 @@
+;; The class forms native to Arbace in ordinary code (doc/classes/SPEC.md §9.5), and the hand
+;; changes the stages' own tests checked: moved from test/native/*_test.ae (bin/native-tests, on
+;; the JVM's stages, which left main at standalone S4; doc/STANDALONE-NOTES.md, "S4: the JVM
+;; removed"). What those tests checked of the JVM's classes (the shapes the class forms compiler
+;; gives a deftype or a bridge beside arbace.lang.Compiler's, the instructions emitted, the
+;; reflective call sites' caching, AOT compilation and the class file verifier) left with the
+;; JVM back end; their results stay here, each section in a namespace of its test's name.
+
+;; ----- defclass (native/defclass_test.ae): defclass and the code forms are arbace.core vars,
+;; class* a special form, with no boot step
+(ns native.defclass (:require [arbace.string :as str]))
+
+(defclass ^:public Counter
+  (field ^:private ^int n)
+  (method ^:public inc ^int [this] (set! n (unchecked-inc-int n))))
+
+(let [c (Counter.)] (.inc c) (.inc c))
+(.getName Counter)
+(vec (for [s '[defclass defclasses anon letclass defmodule defpackage label break continue return
+               switch lambda method-ref java-str java-assert for-each with-resources if-instance
+               when-instance bit-and-int unchecked-add-float]]
+       [s (str (:ns (meta (resolve s))))]))
+(vec (for [s '[class* label* break* continue* return* switch* lambda* method-ref* java-str*
+               java-assert* for-each* with-resources* if-instance*]]
+       [s (special-symbol? s)]))
+(bit-and-int 7 12)
+
+;; a top-level do of mutually referring class forms (§9.2)
+(do
+  (defclass ^:public Even (method ^:public ^:static even ^boolean [^int n] (if (== n 0) true (Odd/odd (unchecked-dec-int n)))))
+  (defclass ^:public Odd (method ^:public ^:static odd ^boolean [^int n] (if (== n 0) false (Even/even (unchecked-dec-int n))))))
+[(Even/even 10) (Odd/odd 7)]
+
+(defn- eval-here [form] (binding [*ns* (the-ns 'native.defclass)] (eval form)))
+(let [cs (eval-here '(defclasses (defclass ^:public P1 (method ^:public ^:static f ^int [] (P2/g)))
+                                 (defclass ^:public P2 (method ^:public ^:static g ^int [] 7))))]
+  [(mapv #(.getName ^Class %) cs) (eval-here '(P1/f))])
+
+(defn- repl-session
+  "Output of a REPL (arbace.main/repl) reading `input`, in a fresh namespace."
+  [input]
+  (let [ns (gensym "native.session")]
+    (binding [*ns* (create-ns ns)]
+      (refer-clojure)
+      (with-out-str
+        (with-in-str input
+          (arbace.main/repl :prompt (fn [] (print "=> "))
+                            :init (fn [])
+                            :caught (fn [e] (println "ERROR" (.getMessage ^Throwable e)))))))))
+(let [out (repl-session (str "(defclass ^:public Pt (field ^:public ^int x) (constructor ^:public [this ^int x] (set! (.-x this) x)))\n"
+                             "(.-x (Pt. 5))\n"
+                             "(do (defclass ^:public R1 (method ^:public ^:static a ^int [] (R2/b)))\n"
+                             "    (defclass ^:public R2 (method ^:public ^:static b ^int [] 9)))\n"
+                             "(R1/a)\n"))]
+  [(str/includes? out "ERROR") (boolean (re-find #"=> \S*\.Pt\n=> 5\n=> \S*\.R2\n=> 9" out))])
+
+;; ----- deftype (native/deftype_test.ae): class forms in the methods of deftype, defrecord and
+;; reify; their methods implement the interface method arbace.lang.Compiler would choose
+(ns native.deftype)
+
+(definterface Counter
+  (^long add [^long x])
+  (^String add [^String x])
+  (total [xs])
+  (^String describe [x]))
+
+(defprotocol Shape (area [s]) (scaled [s k]))
+
+;; the same deftype twice: its methods using the class forms (handed over) and not
+(deftype Native [^long base ^:unsynchronized-mutable ^long n ^:volatile-mutable flag ^String title
+                 plain-field]
+  Counter
+  (^long add [this ^long x] (set! n (+ n x)) (label :done (when (neg? x) (break :done -1)) (+ base n)))
+  (^String add [this ^String x] (str title x))
+  (total [this xs]
+    (let [^:mutable t 0]
+      (for-each [x ^Iterable xs] (set! t (+ t (long x))))
+      t))
+  (describe [this x] (switch (int x) 0 "zero" 1 (.toUpperCase title) "many"))
+  Shape
+  (area [this] (label :a (break :a (* base base))))
+  (scaled [this k] (Native. (* base (long k)) 0 nil title plain-field))
+  Object
+  (toString [this] (label :s (when (zero? n) (break :s (str title ":none"))) (str title ":" n))))
+
+(deftype Plain [^long base ^:unsynchronized-mutable ^long n ^:volatile-mutable flag ^String title
+                plain-field]
+  Counter
+  (^long add [this ^long x] (set! n (+ n x)) (+ base n))
+  (^String add [this ^String x] (str title x))
+  (total [this xs] (reduce + 0 xs))
+  (describe [this x] (.toUpperCase title))
+  Shape
+  (area [this] (* base base))
+  (scaled [this k] (Plain. (* base (long k)) 0 nil title plain-field))
+  Object
+  (toString [this] (str title ":" n)))
+
+(let [a (->Native 10 0 nil "lbl" :p)]
+  [(str a) (.add a 5) (.add a -1) (str a) (.add a "x") (.total a [1 2 3])
+   (mapv #(.describe a %) [0 1 2]) (area a) (area (scaled a 2)) (instance? arbace.lang.IType a)
+   (.-plain-field a)])
+(Native/getBasis)
+(= (map meta (Plain/getBasis)) (map meta (Native/getBasis)))
+(let [a (->Plain 10 0 nil "lbl" :p)]
+  [(str a) (.add a 5) (.add a -1) (str a) (.add a "x") (.total a [1 2 3]) (area (scaled a 2))])
+
+(defrecord NativeRec [a ^long b]
+  Comparable
+  (compareTo [this o] (label :c (switch (int b) 1 (break :c -1) 2 (break :c 0)) 1)))
+
+(defrecord PlainRec [a ^long b]
+  Comparable
+  (compareTo [this o] (if (= 1 b) -1 (if (= 2 b) 0 1))))
+
+(let [r (->NativeRec 1 2)]
+  [(.compareTo r nil) (.compareTo (assoc r :b 1) nil) (into {} r) (= r (map->NativeRec {:a 1 :b 2}))
+   (= (assoc r :c 3) (NativeRec/create {:a 1 :b 2 :c 3})) [(:a r) (:b r) (:c r)] (get r :b)
+   (meta (with-meta r {:m 1})) (= (hash (into {} r)) (hash (into {} (->PlainRec 1 2)))) (pr-str r)
+   (into {} (dissoc r :b)) (count (assoc r :z 0))])
+(NativeRec/getBasis)
+(= (map meta (PlainRec/getBasis)) (map meta (NativeRec/getBasis)))
+
+(definterface Overloaded
+  (^long f [^long x])
+  (^Object f [^Object x])
+  (^String g [^String x])
+  (h [x y]))
+
+(defn- reify-with-class-forms []
+  (reify Overloaded
+    (^long f [this ^long x] (label :l (break :l (inc x))))
+    (f [this ^Object x] (label :l (break :l [x])))
+    (g [this x] (switch (.length x) 0 "empty" (str "len" (.length x))))
+    (h [this x y] (label :l (break :l (+ x y))))))
+(let [^Overloaded r (reify-with-class-forms)]
+  [(.f r (long 1)) (.f r :k) (.g r "") (.g r "abc") (.h r 1 2)])
+
+(defn- root-message [e]
+  (ex-message (last (take-while some? (iterate ex-cause e)))))
+(defn- compile-error [form]
+  (try (binding [*ns* (the-ns 'native.deftype)] (eval form)) nil
+       (catch Throwable e (root-message e))))
+(compile-error '(fn [] (reify Overloaded (f [this x] (label :l x)))))
+(compile-error '(fn [] (reify Overloaded (f [this ^String x] (label :l x)))))
+(compile-error '(fn [] (reify Overloaded (f [this ^long x] (label :l x)))))
+(compile-error '(fn [] (reify Overloaded (g [this ^Object x] (label :l x)))))
+(compile-error '(deftype Bad [] Overloaded (nope [this] (label :l 1))))
+(compile-error '(fn [] (reify Overloaded (f [this x] x))))
+(compile-error '(fn [] (reify Overloaded (f [this ^long x] x))))
+
+(deftype Ext [x])
+(extend-protocol Shape
+  Ext
+  (area [e] (label :l (break :l (* (.-x e) 2))))
+  (scaled [e k] (Ext. (* (.-x e) k))))
+(deftype Mutual [^:unsynchronized-mutable cnt]
+  Shape
+  (area [this] (set! cnt (inc cnt)) (label :l (for-each [s ^Iterable [(->Ext 1) (->Ext 2)]] (set! cnt (+ cnt (area s)))) cnt))
+  (scaled [this k] (if (pos? k) (recur (dec k)) cnt)))
+[(area (->Ext 3)) (area (scaled (->Ext 3) 2)) (area (->Mutual 0)) (scaled (->Mutual 5) 3)
+ (satisfies? Shape (->Native 1 0 nil "" nil)) (map area [(->Native 10 0 nil "" nil) (->Ext 2)])]
+
+;; ----- fn (native/fn_test.ae): the code forms in ordinary fns, handed over to the class forms
+;; compiler and compiled with Clojure's meaning (§5.13)
+(ns native.fn)
+
+(defn day [n] (switch (int n) 0 "Sun" (1 2 3 4 5) "work" "Sat"))
+(defn find-first [pred xs]
+  (label :found
+    (for-each [x ^Iterable xs] (when (pred x) (break :found x)))
+    nil))
+(defn early [x] (when (neg? x) (return :neg)) (* 2 x))
+(defn varargs [a & more] (switch (int a) 1 (count more) 2 (apply + more) -1))
+(defn named [n] (switch (int n) 0 0 (+ n (named (dec n)))))
+
+(map day [0 3 6])
+[(find-first even? [1 3 4 5 6]) (find-first even? [1 3])]
+(java-str "a" 1 \c nil 2.5)
+[(early -1) (early 4)]
+[(varargs 1 2 3) (varargs 2 3 4 5) (varargs 9)]
+(named 4)
+(switch "b" "a" 1 "b" 2 0)
+(.apply (lambda java.util.function.Function [s] (str s "!")) "hi")
+(let [x 5] (label :L (if (> x 3) (break :L :big) :small)))
+(str (anon Object [] (method ^:public toString [this] "anon!")))
+
+(let [k 10 s "str"]
+  [((fn [x] (switch (int x) 1 (+ k 1) 2 (+ k 2) 0)) 2) ((fn [] (switch (int 5) 5 (str s 5) :no)))])
+(switch (int 1) 1 (vec (map (fn [x] (* x 2)) [1 2 3])) nil)
+(letfn [(ev? [n] (if (zero? n) true (od? (dec n)))) (od? [n] (if (zero? n) false (ev? (dec n))))]
+  (switch (int 0) 0 [(ev? 10) (ev? 7)] nil))
+(map (fn [x] (switch (int 1) 1 (case x :a "A" (1 2) "num" "b" "B" "other") nil)) [:a 1 2 "b" 'zz])
+(map (fn [x] (switch (int 1) 1 (try (/ 1 x) (catch ArithmeticException e :div0)) nil)) [0 2])
+(let [m {:a 1 :b 2}] (switch (int 1) 1 [(:a m) (m :b) ({:c 3} :c)] nil))
+((fn [n] (loop [i 0 acc []]
+           (if (< i n)
+             (switch (int (rem i 3)) 0 (recur (inc i) (conj acc :z)) 1 (recur (inc i) (conj acc :o))
+                     (recur (inc i) (conj acc :t)))
+             acc)))
+ 5)
+((fn [s] (switch (int (.length s)) 3 :three :other)) "abc")
+(switch (int 1) 1 (binding [*print-length* 2] (pr-str (range 10))) nil)
+((fn [{:keys [a b]} [x y]] (switch (int 1) 1 [a b x y] nil)) {:a 1 :b 2} [3 4])
+(switch (int 1) 1 (meta ^{:x 1} (fn [] 1)) nil)
+
+(def from-def (switch (int 2) 1 :one 2 :two :other))
+(defn defining [] (switch (int 1) 1 (def defined-inside 42) nil) defined-inside)
+[from-def (defining)]
+
+(defn sum-ints [^ints a] (let [^:mutable ^int s 0] (for-each [^int x a] (set! s (unchecked-add-int s x))) s))
+(sum-ints (int-array [1 2 3]))
+(let [a (new int/1 3)] (aset a 0 7) (vec a))
+(let [^:mutable c 0] (dotimes [i 5] (set! c (inc c))) c)
+(let [^int i 3] (class i))
+(with-out-str
+  ((fn [n] (loop [i 0] (when (< i n) (when (= i 2) (continue (inc i))) (print i) (recur (inc i))))) 4))
+;; recur out of tail position and across try stay Clojure's errors
+(class (try (eval '(loop [x 5] (try (recur 1)))) (catch Throwable t t)))
+(class (try (eval '(loop [x 5] (inc (recur 1)))) (catch Throwable t t)))
+
+(defclass ^:public Holder
+  (method ^:public ^:static twice [xs] (vec (map (fn [x] (* 2 x)) xs)))
+  (method ^:public ^:static pick [x] (case x :a 1 :b 2 0))
+  (method ^:public ^:static evens [n]
+    (letfn [(e? [n] (if (zero? n) true (o? (dec n)))) (o? [n] (if (zero? n) false (e? (dec n))))] (e? n))))
+[(Holder/twice [1 2]) (Holder/pick :b) (Holder/evens 4)]
+
+(defn sq ^long [^long x] (switch (int x) 0 0 (* x x)))
+(defn mixed (^long [^long a ^Object b] (switch (int a) 1 (count b) a)) ([a] (java-str a)))
+(defn obj-ret ^long [m] (switch (int 1) 1 (get m :a) 0))
+[(sq 5) (sq 0)]
+(.invokePrim ^arbace.lang.IFn$LL sq 6)
+(instance? arbace.lang.IFn$LOL mixed)
+[(mixed 1 [1 2 3]) (mixed 7 nil) (mixed :k)]
+(obj-ret {:a 41})
+(let [f (fn ^long [^long x] (java-str x) (inc x))] [(f 1) (instance? arbace.lang.IFn$LL f)])
+
+(def reified (reify Runnable (run [this] (switch (int 1) 1 (print "reified") nil))))
+(with-out-str (.run ^Runnable reified))
+(let [k 5
+      o (reify Object (toString [this] (java-str "k=" k)))]
+  [(str o) (meta o) (meta (with-meta o {:a 1})) (str (with-meta o {:a 1}))])
+(sort (reify java.util.Comparator (compare [this a b] (switch (int 0) 0 (- (count a) (count b)) 0)))
+      ["ccc" "a" "bb"])
+
+(defn long-selector [n] (switch n 1 :one (2 3) :few :many))
+(map long-selector [1 3 10])
+(switch 1 1 :x :y)
+(long-selector Long/MAX_VALUE)
+
+;; ----- overload (native/overload_test.ae): overloads chosen in handed-over fns as
+;; arbace.lang.Compiler chooses them, with its errors, and reflection where it chooses none
+(ns native.overload)
+
+(defclass ^:public Over
+  (method ^:public ^:static f ^String [^int x] "int")
+  (method ^:public ^:static f ^String [^long x] "long")
+  (method ^:public ^:static f ^String [^double x] "double")
+  (method ^:public ^:static f ^String [^Object x] "Object")
+  (method ^:public ^:static f ^String [^String x] "String")
+  (method ^:public ^:static f ^String [^CharSequence x] "CharSequence")
+  (method ^:public ^:static g ^String [^Number x ^Object y] "Number,Object")
+  (method ^:public ^:static g ^String [^Object x ^Number y] "Object,Number")
+  (method ^:public ^:static g ^String [^Long x ^Long y] "Long,Long")
+  (method ^:public ^:static h ^String [^float x] "float")
+  (method ^:public ^:static h ^String [^Integer x] "Integer")
+  (method ^:public ^:static one ^String [^int x] (java-str "one" x))
+  (method ^:public ^:static fi ^Object [^java.util.function.Function f ^Object x] (.apply f x))
+  (method ^:public ^:static fi ^Object [^String s ^Object x] "String")
+  (constructor ^:public [this ^int x])
+  (constructor ^:public [this ^String x])
+  (method ^:public tag ^String [this ^long x] "long")
+  (method ^:public tag ^String [this ^Object x] "Object"))
+
+(defmacro ^:private both
+  "[(fn compiled by arbace.lang.Compiler) (the same, handed over)] of a body using the args."
+  [args body]
+  `[(fn ~args ~body) (fn ~args (label :l# ~body))])
+
+(defn- results [[plain native] & args]
+  [(apply plain args) (apply native args)])
+
+(vec (for [[fs args]
+           [[(both [^long x] (Over/f x)) [1]]
+            [(both [^double x] (Over/f x)) [1.5]]
+            [(both [x] (Over/f (int x))) [1]]
+            [(both [^String x] (Over/f x)) ["s"]]
+            [(both [^StringBuilder x] (Over/f x)) [(StringBuilder.)]]
+            [(both [] (Over/f nil)) []]
+            [(both [] (Over/f 1)) []]
+            [(both [] (Over/f "lit")) []]
+            [(both [^Long x] (Over/g x x)) [1]]
+            [(both [^Integer x] (Over/h x)) [(int 1)]]
+            [(both [^double x] (Over/h x)) [1.5]]
+            [(both [x] (Over/one x)) [7]]
+            [(both [^long x] (Over/one x)) [7]]
+            [(both [^double x] (Over/one x)) [7.0]]
+            [(both [^Over o ^long x] (.tag o x)) [(Over. 1) 1]]
+            [(both [^Over o ^String x] (.tag o x)) [(Over. 1) "s"]]
+            [(both [^Over o x] (.tag o x)) [(Over. 1) :k]]
+            [(both [x] (Over/fi (fn [y] [y]) x)) [1]]
+            [(both [x] (Over/fi "s" x)) [1]]
+            [(both [^long x] (.getName (class (Over. x)))) [1]]]]
+       (apply results fs args)))
+
+(defn- root-message [e]
+  (ex-message (last (take-while some? (iterate ex-cause e)))))
+(defn- compile-error [form]
+  (try (binding [*ns* (the-ns 'native.overload)] (eval form)) nil
+       (catch Throwable e (root-message e))))
+(vec (for [body '[(Over/g 1 2)
+                  (Over/g (Long/valueOf 1) (Integer/valueOf 2))
+                  (Over/f 1 2)
+                  (Over/h (Long/valueOf 1))
+                  (Over. 1 2)]]
+       [(compile-error (list 'fn [] body)) (compile-error (list 'fn [] (list 'label :l body)))]))
+(compile-error '(fn [] (label :l (Over/g (Long/valueOf 1) (Integer/valueOf 2)))))
+(compile-error '(fn [] (label :l (Over/f 1 2))))
+(compile-error '(fn [] (label :l (Over. 1 2))))
+;; untyped: no method chosen, the call goes through Reflector at run time
+(let [[p n] (both [x] (Over/f x))] [(p 1) (n 1) (p "s") (n "s")])
+(let [[p n] (both [] (Over/g 1 2))] [(p) (n)])
+
+;; ----- nan (native/nan_test.ae): every ordered comparison and == with NaN are false, whichever
+;; way the compiler arranges the jump (once (< 1.0 ##NaN) was true on the JVM Arbace)
+(ns native.nan)
+
+(defclass ^:public NanOps
+  (method ^:public ^:static lt ^boolean [^double a ^double b] (if (< a b) true false))
+  (method ^:public ^:static le ^boolean [^double a ^double b] (if (<= a b) true false))
+  (method ^:public ^:static gt ^boolean [^double a ^double b] (if (> a b) true false))
+  (method ^:public ^:static ge ^boolean [^double a ^double b] (if (>= a b) true false))
+  (method ^:public ^:static eq ^boolean [^double a ^double b] (if (== a b) true false))
+  (method ^:public ^:static nlt ^boolean [^double a ^double b] (if (not (< a b)) false true))
+  (method ^:public ^:static nge ^boolean [^double a ^double b] (if (not (>= a b)) false true))
+  (method ^:public ^:static andLt ^boolean [^double a ^double b] (and (< a b) (< a b)))
+  (method ^:public ^:static orGt ^boolean [^double a ^double b] (or (> a b) (> a b)))
+  (method ^:public ^:static flt ^boolean [^float a ^float b] (if (< a b) true false))
+  (method ^:public ^:static fge ^boolean [^float a ^float b] (if (>= a b) true false)))
+
+(def nan ##NaN)
+(vec (for [[a b] [[1.0 nan] [nan 1.0] [nan nan] [1.0 2.0] [2.0 2.0]]]
+       [(NanOps/lt a b) (NanOps/le a b) (NanOps/gt a b) (NanOps/ge a b) (NanOps/eq a b)
+        (NanOps/nlt a b) (NanOps/nge a b) (NanOps/andLt a b) (NanOps/orGt a b)
+        (NanOps/flt (float a) (float b)) (NanOps/fge (float a) (float b))]))
+(vec (for [[a b] [[1.0 nan] [nan 1.0] [nan nan] [1 nan] [nan 1N] [1/2 nan]]]
+       [(< a b) (<= a b) (> a b) (>= a b) (== a b)]))
+(< 1.0 2.0 nan)
+(mapv #(% 1.0 nan) [< <= > >=])
+
+;; ----- bridge (native/bridge_test.ae): the covariant bridges of handed-over reify and deftype
+;; classes, called through each interface
+(ns native.bridge)
+
+(definterface Base (^Object item []) (^CharSequence label [^long i]) (^Object other []))
+(definterface Narrow (^String item []) (^String label [^long i]))
+(definterface Narrower (^String other []))
+
+(deftype NativeT [s]
+  Base
+  (other [this] (label :l (break :l "o")))
+  Narrow
+  (item [this] (label :l (when (nil? s) (break :l "none")) (str s)))
+  Narrower)
+
+(defn- native-reify [s] (reify Base Narrow (item [this] (label :l (break :l (str s))))))
+
+(let [x (->NativeT 5)]
+  [(.item ^Base x) (.item ^Narrow x) (.other ^Base x) (.other ^Narrower x)
+   (.item ^Base (->NativeT nil))])
+;; not implemented: the bridge calls the interface method
+(.label ^Base (->NativeT 5) 1)
+[(.item ^Base (native-reify 7)) (.item ^Narrow (native-reify 8))]
+
+;; ----- reduce (native/reduce_test.ae): reduce without an init on an IReduceInit that is not an
+;; IReduce (doc/VENDOR-NOTES.md, hand change on arbace/core/protocols.ae, 2026-10-10)
+(ns native.reduce)
+
+(defn- reduce-init-only
+  "A reify of IReduceInit alone over the items of xs."
+  [xs]
+  (reify arbace.lang.IReduceInit
+    (reduce [_ f init]
+      (loop [acc init xs (seq xs)]
+        (if xs
+          (let [acc (f acc (first xs))]
+            (if (reduced? acc) @acc (recur acc (next xs))))
+          acc)))))
+
+(def ^:private init-only-impl
+  (get-in arbace.core.protocols/CollReduce [:impls arbace.lang.IReduceInit :coll-reduce]))
+
+(reduce + (eduction (map inc) (range 10)))
+(init-only-impl (eduction (map inc) (range 10)) +)
+[(reduce + (eduction (map inc) [])) (reduce + (eduction (map inc) [4]))]
+(reduce into (eduction (partition-all 3) (range 7)))
+(reduce + (eduction (filter even?) (range 10)))
+(reduce + (iteration (fn [k] k) :somef #(< % 10) :kf inc :initk 0))
+[(reduce + (reduce-init-only [1 2 3])) (reduce conj (reduce-init-only []))]
+(reduce (fn [_ _] (throw (Exception. "f called"))) (reduce-init-only [:x]))
+(reduce vector (reduce-init-only [1 2 3]))
+(reduce (fn [a x] (if (> a 5) (reduced :stop) (+ a x))) (reduce-init-only (range 10)))
+(reduce + 4 (reduce-init-only [1 2 3]))
+
+;; ----- imports (native/imports_test.ae): RT's default imports without SecurityManager (JEP
+;; 486; doc/VENDOR-NOTES.md, hand change 11); the class itself is still there by its full name
+(ns native.imports)
+
+(ns-resolve (create-ns 'native.imports.fresh) 'SecurityManager)
+(ns-resolve (create-ns 'native.imports.fresh) 'SecurityException)
+(.getName (resolve 'java.lang.SecurityManager))
+
+;; ----- nested deftype (native/nested_deftype_test.ae): deftype and defrecord inside code the
+;; class forms compiler compiles; a deftype* sees only its fields; import* imports at run time
+(ns native.nested-deftype)
+
+(defn- in-fn [n]
+  (deftype InFn [^long a b] Object (toString [this] (str "InFn" a b)))
+  (switch (int n) 0 (str (->InFn 1 2)) (str (native.nested_deftype.InFn. n :x))))
+(defn- class-forms-in-methods [n]
+  (deftype WithForms [^long a]
+    Object
+    (toString [this] (label :l (when (neg? a) (break :l "neg")) (java-str "a=" a))))
+  (label :done (break :done [(str (->WithForms n)) (str (->WithForms -1))])))
+(defn- record-in-fn []
+  (label :l (defrecord RecInFn [x ^long y]
+              Comparable (compareTo [this o] (switch (int y) 1 -1 0))))
+  (->RecInFn :a 1))
+(defn- import-in-fn []
+  (label :l (break :l (import 'java.util.concurrent.atomic.LongAdder))))
+(defclass ^:public Host
+  (method ^:public ^:static make [n]
+    (deftype InHost [q] Object (toString [_] (str "q=" q)))
+    (str (native.nested_deftype.InHost. n))))
+
+[(in-fn 0) (in-fn 5)]
+(native.nested_deftype.InFn/getBasis)
+(class-forms-in-methods 3)
+(let [r (record-in-fn)] [(into {} r) (.compareTo ^Comparable r nil) (.getName (class r))])
+;; into the namespace current at run time, as Clojure's ImportExpr
+(let [ns (create-ns 'native.nested-deftype.imports)]
+  [(binding [*ns* ns] (import-in-fn)) (ns-resolve ns 'LongAdder)])
+(Host/make 3)
+(str ((resolve 'native.nested-deftype/->InHost) 4))
+(try (eval '(fn [x] (label :l (monitor-enter x)))) nil
+     (catch Throwable e (boolean (re-find #"monitor-enter is not supported"
+                                          (ex-message (last (take-while some? (iterate ex-cause e))))))))
+
+;; ----- inline (native/inline_test.ae): the operators arbace.core adds (bit-and-int ...
+;; unchecked-remainder) in ordinary code, Java's results on any operands, against the same
+;; operators in a class body (the instructions)
+(ns native.inline)
+
+(defclass ^:public JavaOps
+  (method ^:public ^:static iand ^int [^int a ^int b] (bit-and-int a b))
+  (method ^:public ^:static ior ^int [^int a ^int b] (bit-or-int a b))
+  (method ^:public ^:static ixor ^int [^int a ^int b] (bit-xor-int a b))
+  (method ^:public ^:static inot ^int [^int a] (bit-not-int a))
+  (method ^:public ^:static ishl ^int [^int a ^int n] (bit-shift-left-int a n))
+  (method ^:public ^:static ishr ^int [^int a ^int n] (bit-shift-right-int a n))
+  (method ^:public ^:static iushr ^int [^int a ^int n] (unsigned-bit-shift-right-int a n))
+  (method ^:public ^:static fadd ^float [^float a ^float b] (unchecked-add-float a b))
+  (method ^:public ^:static fsub ^float [^float a ^float b] (unchecked-subtract-float a b))
+  (method ^:public ^:static fmul ^float [^float a ^float b] (unchecked-multiply-float a b))
+  (method ^:public ^:static fdiv ^float [^float a ^float b] (unchecked-divide-float a b))
+  (method ^:public ^:static frem ^float [^float a ^float b] (unchecked-remainder-float a b))
+  (method ^:public ^:static fneg ^float [^float a] (unchecked-negate-float a))
+  (method ^:public ^:static ldiv ^long [^long a ^long b] (unchecked-divide a b))
+  (method ^:public ^:static lrem ^long [^long a ^long b] (unchecked-remainder a b))
+  (method ^:public ^:static ddiv ^double [^double a ^double b] (unchecked-divide a b))
+  (method ^:public ^:static drem ^double [^double a ^double b] (unchecked-remainder a b)))
+
+(def int-vals [0 1 -1 7 -7 31 32 33 0x7fffffff -0x80000000 0x12345678])
+(def float-vals [(float 0) (float -0.0) (float 1.5) (float -2.25) (float 3) Float/MAX_VALUE
+                 Float/MIN_VALUE Float/POSITIVE_INFINITY Float/NaN])
+(def long-vals [1 -1 7 -7 3 Long/MAX_VALUE Long/MIN_VALUE])
+(def double-vals [0.0 -0.0 1.5 -2.25 7.0 1e300 Double/MIN_VALUE Double/NEGATIVE_INFINITY Double/NaN])
+(defn- same? [x y]
+  (or (= x y) (and (number? x) (number? y) (Double/isNaN (double x)) (Double/isNaN (double y)))))
+;; a NullPointerException's message is HotSpot's helpful message (JEP 358), which the Go build
+;; has not (ORACLE.md, V11): its class alone
+(defn- message [^Throwable t] (when-not (instance? NullPointerException t) (.getMessage t)))
+(defn- outcome [f] (try (f) (catch Throwable t [:threw (.getName (class t)) (message t)])))
+(def call (fn [f & args] (apply f args)))
+
+;; int locals: the fns and their inlined calls, the class body's instructions
+(vec (for [a int-vals b int-vals]
+       (let [i (int a) j (int b)]
+         [(bit-and-int i j) (bit-or-int i j) (bit-xor-int i j) (bit-shift-left-int i j)
+          (bit-shift-right-int i j) (unsigned-bit-shift-right-int i j)])))
+(every? true? (for [a int-vals b int-vals]
+                (let [i (int a) j (int b)]
+                  (and (== (JavaOps/iand i j) (bit-and-int a b)) (== (JavaOps/ior i j) (bit-or-int a b))
+                       (== (JavaOps/ixor i j) (bit-xor-int a b)) (== (JavaOps/ishl i j) (bit-shift-left-int a b))
+                       (== (JavaOps/ishr i j) (bit-shift-right-int a b))
+                       (== (JavaOps/iushr i j) (unsigned-bit-shift-right-int a b))))))
+(mapv #(vector (JavaOps/inot (int %)) (bit-not-int (int %)) (bit-not-int %)) int-vals)
+(vec (for [a float-vals b float-vals]
+       (let [x (float a) y (float b)]
+         [(unchecked-add-float x y) (unchecked-subtract-float x y) (unchecked-multiply-float x y)
+          (unchecked-divide-float x y) (unchecked-remainder-float x y) (unchecked-negate-float x)])))
+(every? true? (for [a float-vals b float-vals]
+                (let [x (float a) y (float b)]
+                  (and (same? (JavaOps/fadd x y) (unchecked-add-float x y))
+                       (same? (JavaOps/fsub x y) (unchecked-subtract-float x y))
+                       (same? (JavaOps/fmul x y) (unchecked-multiply-float x y))
+                       (same? (JavaOps/fdiv x y) (unchecked-divide-float x y))
+                       (same? (JavaOps/frem x y) (unchecked-remainder-float x y))
+                       (same? (JavaOps/fneg x) (unchecked-negate-float x))))))
+(vec (for [a long-vals b long-vals]
+       (let [x (long a) y (long b)] [(unchecked-divide x y) (unchecked-remainder x y)])))
+(every? true? (for [a long-vals b long-vals]
+                (let [x (long a) y (long b)]
+                  (and (== (JavaOps/ldiv x y) (unchecked-divide x y)) (== (JavaOps/lrem x y) (unchecked-remainder x y))))))
+;; Object operands (through a fn and apply): the same results, boxed as Clojure boxes them
+(vec (for [a int-vals b int-vals] [(call bit-and-int a b) (call unsigned-bit-shift-right-int a b)]))
+(class (call bit-xor-int 1 2))
+(vec (for [a float-vals b float-vals] [(call unchecked-add-float a b) (call unchecked-remainder-float a b)]))
+(class (call unchecked-multiply-float 2 3))
+(call unchecked-add-float Float/MAX_VALUE Float/MAX_VALUE)
+(vec (for [a long-vals b long-vals] [(call unchecked-divide a b) (call unchecked-remainder a b)]))
+(vec (for [a double-vals b double-vals] [(call unchecked-divide a b) (call unchecked-remainder a b)]))
+[(call unchecked-divide 7 2) (call unchecked-divide 7.0 2) (call unchecked-divide 7 (float 2))
+ (call unchecked-remainder -7 2) (call unchecked-remainder 5.5 2)]
+(class (call unchecked-divide (int 7) (int 2)))
+(call unchecked-divide Long/MIN_VALUE -1)
+[(outcome #(call unchecked-divide 1 0)) (outcome #(call unchecked-remainder 1 0))]
+;; operands are converted as by int: out of range is an error
+(outcome #(call bit-and-int 0x100000000 1))
+(let [o (Long. 12) d (Double. 2.5) i (int 10)]
+  [(bit-and-int o i) (bit-or-int i o) (bit-shift-left-int o 2) (bit-and-int o 0xff) (bit-and-int 0xff 12)
+   (unchecked-divide o 3) (unchecked-remainder o d) (unchecked-divide o d) (unchecked-divide 12 d)
+   (unchecked-divide (long o) 2.5) (unchecked-remainder 12 o) (unchecked-add-float o (float d))
+   (unchecked-add-float 1 2.5)])
+(defclass ^:public ObjectOps
+  (method ^:public ^:static ops [x y]
+    [(bit-and-int x y) (bit-shift-left-int x y) (bit-not-int x) (unchecked-add-float x y)
+     (unchecked-divide x y) (unchecked-remainder x y) (unchecked-add-int x y)]))
+(ObjectOps/ops 12 10)
+(subvec (ObjectOps/ops 9.0 2) 4 6)
+((fn [x y] (switch (int 1) 1 [(bit-xor-int x y) (unchecked-multiply-float x y) (unchecked-remainder x y)] nil)) 5 3)
+
+;; ----- reflection (native/reflect_test.ae): untyped interop, chosen at run time by the
+;; receiver's and the arguments' classes, each site called three times (the JVM links and caches
+;; it on the second); the results and errors, as Reflector's own
+(ns native.reflect (:import (arbace.lang Reflector)))
+
+(defclass ^:public Probe
+  (field ^:public a)
+  (field ^:public ^:final ^Boolean flag)
+  (field ^:public ^int n)
+  (constructor ^:public [this a] (set! (.-a this) a) (set! (.-flag this) (Boolean. true)))
+  (method ^:public a [this] (java-str "method a " (.-a this)))
+  (method ^:public via ^String [this x] "Object")
+  (method ^:public via ^String [this ^long x ^String y] "long,String")
+  (method ^:public via ^String [this ^double x ^String y] "double,String")
+  (method ^:public via ^String [this ^String x ^String y] "String,String")
+  (method ^:public viaInt ^String [this ^int x] (java-str "int " x))
+  (method ^:public viaFn ^Object [this ^java.util.function.Supplier x] (.get x))
+  (method ^:public boxed ^Boolean [this] (Boolean. false))
+  (method ^:public over [this ^long x] (java-str "long " x))
+  (method ^:public over [this ^String x] (java-str "String " x))
+  (method ^:public over [this ^double x] (java-str "double " x))
+  (method ^:public takesInt [this ^int x] (java-str "int " x))
+  (method ^:public fi [this ^java.util.function.Function f x] (.apply f x)))
+
+;; a NullPointerException's message is HotSpot's helpful message (JEP 358), which the Go build
+;; has not (ORACLE.md, V11): its class alone
+(defn- message [^Throwable t] (when-not (instance? NullPointerException t) (.getMessage t)))
+(defn outcome [f] (try [:ok (f)] (catch Throwable t [:threw (.getName (class t)) (message t)])))
+(defn reflector [target name & args]
+  (outcome #(Reflector/invokeInstanceMethod target name (object-array args))))
+(defn call-length [x] (.length x))
+(defn call-index-of [s x] (.indexOf s x))
+(defn call-index-of2 [s x i] (.indexOf s x i))
+(defn call-starts-with [s x] (.startsWith s x))
+(defn call-foo [x y] (.foo x y))
+(defn call-over [p x] (.over p x))
+(defn call-takes-int [p x] (.takesInt p x))
+(defn call-equals [x y] (.equals x y))
+(defn call-size [c] (.size c))
+(defn call-via [p x] (.via p x))
+(defn call-via2 [p x y] (.via p x y))
+(defn call-via-int [p x] (.viaInt p x))
+(defn call-via-fn [p x] (.viaFn p x))
+(defn call-boxed [p] (.boxed p))
+(defn call-fi [p f x] (.fi p f x))
+(defn call-remove-if [l f] (.removeIf l f))
+(defn call-qualified [s x] (String/.indexOf s x))
+(defn call-format [fm s args] (.format fm s args))
+(defn field-a [p] (.-a p))
+(defn field-flag [p] (.-flag p))
+(defn field-n [p] (.-n p))
+(defn member-a [p] (.a p))
+(defn field-missing [p] (.-missing p))
+(defn member-to-string [x] (.toString x))
+(defn thrice [f & args] (vec (repeatedly 3 #(outcome (fn [] (apply f args))))))
+
+[(thrice call-length "abc") (thrice call-length (StringBuilder. "abc")) (thrice call-starts-with "abcb" "ab")
+ (reflector "abcb" "startsWith" "ab") (outcome #(call-equals "a" "a"))]
+(let [p (Probe. 1)]
+  [(thrice call-via p 1) (thrice call-via-int p 1) (thrice call-via-fn p (fn [] 1))
+   (vec (for [x [1 (int 1) (float 1.5) 2.5 "s" nil]] (thrice call-via2 p x "y")))])
+(let [cs [(java.util.ArrayList. [1]) (java.util.HashMap. {1 2}) (java.util.HashSet. [1 2])
+          (java.util.LinkedList. [1 2 3]) (java.util.TreeMap. {1 2}) (java.util.TreeSet. [1])
+          (java.util.ArrayDeque. [1 2]) (java.util.Vector. [1]) (java.util.LinkedHashMap. {1 2})
+          (java.util.IdentityHashMap. {1 2}) (java.util.concurrent.ConcurrentHashMap. {1 2})
+          (java.util.Hashtable. {1 2 3 4}) [1 2] {1 2 3 4} #{1}]]
+  (vec (for [_ (range 4)]
+         [(= (map #(reflector % "size") cs) (map #(outcome (fn [] (call-size %))) cs))
+          (mapv #(outcome (fn [] (call-size %))) cs)])))
+;; past the megamorphic limit (64 classes)
+(let [xs (eval `(vector ~@(for [i (range 80)] `(reify Object (toString [_] ~(str "mega" i))))))]
+  (vec (for [_ (range 3)] (= (map #(str "mega" %) (range 80)) (map member-to-string xs)))))
+;; several threads
+(let [xs ["abc" (StringBuilder. "abcd") "" (StringBuffer. "ab")]
+      fs (doall (for [t (range 8)] (future (doall (for [i (range 2000)] (call-length (nth xs (mod (+ i t) 4))))))))]
+  (mapv #(frequencies (deref %)) fs))
+(let [p (Probe. 1)
+      args [1 "s" 2.5 (int 3) (short 4) (byte 5) (float 1.5) nil \c 2/3 (bigint 7)]]
+  (vec (for [x args]
+         [(reflector p "over" x) (thrice call-over p x) (reflector p "takesInt" x) (thrice call-takes-int p x)])))
+(vec (for [x ["c" \c 99 (int 99) nil 2.0]]
+       [(reflector "abcabc" "indexOf" x) (thrice call-index-of "abcabc" x)
+        (reflector "abcabc" "indexOf" x 2) (thrice call-index-of2 "abcabc" x 2)]))
+(vec (for [[a b] [["a" "a"] ["a" nil] [1 1] [1 1.0] [nil 1]]] [(reflector a "equals" b) (thrice call-equals a b)]))
+;; nil arguments and receivers
+[(reflector "abc" "startsWith" nil) (thrice call-starts-with "abc" nil)]
+[(reflector "abc" "charAt" nil) (thrice (fn [s x] (.charAt s x)) "abc" nil)]
+[(outcome #(Reflector/invokeInstanceMethod nil "indexOf" (object-array ["a"]))) (thrice call-index-of nil "a")]
+[(outcome #(Reflector/invokeNoArgInstanceMember nil "length" false)) (thrice call-length nil)]
+[(outcome #(Reflector/invokeNoArgInstanceMember nil "a" true)) (thrice field-a nil)]
+;; errors
+(thrice call-foo "a" 1)
+[(reflector "abc" "startsWith" 1) (thrice call-starts-with "abc" 1)]
+(let [p (Probe. 1)] [(outcome #(Reflector/invokeNoArgInstanceMember p "missing" true)) (thrice field-missing p)])
+(thrice (fn [s] (.nope s)) "a")
+;; a site that keeps failing to link (Reflector refuses the call)
+(let [o (Object.)]
+  [(= (vec (repeat 12 (reflector "abc" "indexOf" o))) (vec (repeatedly 12 #(outcome (fn [] (call-index-of "abc" o))))))
+   (second (reflector "abc" "indexOf" o)) (outcome #(call-index-of "abc" "b"))])
+;; exceptions of the called method pass through unchanged
+(subvec (outcome #((fn [s i] (.charAt s i)) "abc" 7)) 0 2)
+;; members and fields
+(let [p (Probe. 42)]
+  (set! (.-n p) 7)
+  (vec (for [_ (range 3)]
+         [(field-a p) (field-n p) (member-a p) (call-length "abc")
+          (identical? Boolean/TRUE (field-flag p)) (identical? Boolean/FALSE (call-boxed p))])))
+;; conversions
+(let [p (Probe. 1)]
+  (vec (for [_ (range 3)]
+         [(call-fi p (fn [x] (str x "!")) 1)
+          (let [l (java.util.ArrayList. [1 2 3 4])] (call-remove-if l even?) (vec l))
+          (= (reflector "abcabc" "indexOf" "c") (outcome #(call-qualified "abcabc" "c")))
+          (outcome #(call-qualified 5 "c"))
+          (= (outcome #(Reflector/invokeInstanceMethodOfClass 5 "java.lang.String" "indexOf" (object-array ["c"])))
+             (outcome #(call-qualified 5 "c")))
+          (str (call-format (java.util.Formatter.) "x %s %s" (object-array ["a" 1])))])))
+
+(defn call-abs [x] (Math/abs x))
+(defn call-max [x y] (Math/max x y))
+(defn call-require [x f] (java.util.Objects/requireNonNull x f))
+(defn new-list [x] (java.util.ArrayList. x))
+(defn new-sb [x] (StringBuilder. x))
+(defn call-insert [sb i x s e] (.insert sb i x s e))
+(defn call-fill [a from to v] (java.util.Arrays/fill a from to v))
+
+(vec (for [x [-1 (int -2) -2.5 (float -1.5) (short -3) nil "s" 2/3]]
+       [(outcome #(Reflector/invokeStaticMethod Math "abs" (object-array [x]))) (thrice call-abs x)]))
+(vec (for [[x y] [[1 2] [1.5 2] [1.5 2.5] [(int 1) (int 2)] [nil 1]]]
+       [(outcome #(Reflector/invokeStaticMethod Math "max" (object-array [x y]))) (thrice call-max x y)]))
+(thrice call-abs "s")
+(thrice call-require nil (fn [] "true"))
+(vec (for [x [4 (int 4) [1 2] nil "s" -1]]
+       [(outcome #(Reflector/invokeConstructor java.util.ArrayList (object-array [x]))) (thrice new-list x)]))
+(vec (for [x ["abc" 16 (int 16) nil \c]]
+       [(update (outcome #(Reflector/invokeConstructor StringBuilder (object-array [x]))) 1 str)
+        (mapv #(update % 1 str) (thrice new-sb x))]))
+(vec (for [x ["xyz" (char-array "xyz") (StringBuilder. "xyz")]]
+       [(outcome #(str (Reflector/invokeInstanceMethod (StringBuilder. "ab") "insert" (object-array [1 x 0 2]))))
+        (vec (repeatedly 3 #(outcome (fn [] (str (call-insert (StringBuilder. "ab") 1 x 0 2))))))]))
+(vec (for [[a v] [[(long-array 3) 7] [(object-array 3) "s"] [(int-array 3) (int 7)] [(double-array 3) 1.5]]]
+       (do (call-fill a 0 2 v) (vec a))))
+
+;; ----- virtual threads (native/virtual_threads_test.ae): the opt-in virtual-thread executor of
+;; send-off, future and pmap at run time (arbace.lang.Agent); the property's opt-in at launch
+;; is not a form
+(ns native.virtual-threads
+  (:require [arbace.string :as str])
+  (:import (arbace.lang Agent)
+           (java.util.concurrent ExecutorService)))
+
+(def ^:dynamic *b* :root)
+(defn- thread-info []
+  (let [t (Thread/currentThread)] [(.isVirtual t) (.getName t) (.isDaemon t)]))
+(defn- shape [[virtual? name daemon?]]
+  [virtual? (str/replace name #"\d+$" "N") daemon?])
+
+(shape @(future (thread-info)))
+(let [old Agent/soloExecutor
+      ^ExecutorService vexec (Agent/newVirtualThreadExecutor)]
+  (set-agent-send-off-executor! vexec)
+  (try
+    [(shape @(future (thread-info)))
+     (let [a (agent nil)] (send-off a (fn [_] (thread-info))) (await a) (shape @a))
+     ;; send stays on the fixed pool
+     (let [a (agent nil)] (send a (fn [_] (thread-info))) (await a) (shape @a))
+     (= (map inc (range 100)) (pmap inc (range 100)))
+     (every? true? (pmap (fn [_] (.isVirtual (Thread/currentThread))) (range 20)))
+     ;; binding conveyance
+     (binding [*b* :bound]
+       [@(future *b*) (let [a (agent nil)] (send-off a (fn [_] *b*)) (await a) @a)])
+     ;; an action sending from a virtual thread, held until the action ends
+     (let [a (agent 0) b (agent 0)]
+       (send-off a (fn [x] (send-off b inc) (inc x)))
+       (await a)
+       (await b)
+       [@a @b])
+     ;; many blocking futures at once
+     (let [fs (doall (repeatedly 2000 #(future (Thread/sleep 50) 1)))]
+       (reduce + (map deref fs)))]
+    (finally
+      (set-agent-send-off-executor! old)
+      (.shutdown vexec))))
+;; the agents' threads would keep the run's process alive (as concurrency.ae)
+(shutdown-agents)
+
+(in-ns 'user)

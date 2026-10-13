@@ -1,72 +1,114 @@
 #!/bin/bash
-# Checks of the Java -> class forms converter (arbace.j2a). Writes only under .tmp/j2a-check/.
+# Checks of the Java -> class forms converter (arbace.j2a), forms-level (doc/STANDALONE-NOTES.md,
+# "S4: the JVM removed", O2 (b)): j2a's output compared with the expected forms committed under
+# test/j2a/expected/, no class files compared with javac's. Writes only under .tmp/j2a-check/.
 #
-# Usage: bin/j2a-check [--suite]
+# Usage: bin/j2a-check [--suite | --update]
 #        bin/j2a-check --jdk [MODULE...]   (long; not part of the default checks, see below)
-# Runs on Arbace (bin/lib/tools.bash: needs bin/build-arbace's target/stage2). The baseline is
-# the frozen clojure/, extracted from the freeze tag into .tmp/frozen/ (frozen_clojure).
+# j2a runs on the frozen JVM Arbace (bin/j2a, bin/lib/frozen.bash). The baseline is the frozen
+# clojure/ (upstream Clojure and ASM), extracted from the freeze tag into .tmp/frozen/
+# (bin/lib/tools.bash's frozen_clojure).
 #   1. converts the baseline's 183 Java files (clojure/) with --check: no failures, every file
-#      read by arbace.core/read;
-#   2. compiles the converted baseline with the class forms compiler (arbace.classes) and
-#      compares every class's shape with the frozen tree's javac classes (bin/class-forms-check);
-#   3. converts test/j2a/java (the language features the baseline does not use) and compares
-#      the compiled classes with javac's the same way (all identical); 3b. converts
-#      test/j2a/module (a module declaration and package annotations) without failures;
-#   4. with --suite: compiles the converted baseline into class files and runs Clojure's test
-#      suite on them (bin/clojure-tests, run "converted"), which must show no regressions;
-#      J2A_TEST_JOBS parallel test JVMs (default 16), J2A_JVM_OPTS as for bin/j2a.
+#      read by arbace.core/read; the converted files equal the expected ones, by their SHA-256
+#      (test/j2a/expected/baseline.sha256: the forms themselves are 2.2 MB, about the size of their
+#      Java, and the suite of step 4 is their semantic check);
+#   2. converts test/j2a/java (the language features the baseline does not use) the same way;
+#      the converted files equal test/j2a/expected/java/, byte for byte;
+#   3. converts test/j2a/module (a module declaration and package annotations) likewise, against
+#      test/j2a/expected/module/;
+#   4. with --suite: compiles the converted baseline into class files with the frozen jar's own
+#      class forms compiler (test/j2a/build.ae: the checkout has no back end, O2 (a)) and runs
+#      Clojure's test suite on them (bin/clojure-tests, run "converted"), which must show no
+#      regressions against test/baseline-results.edn; J2A_TEST_JOBS parallel test JVMs
+#      (default 16), J2A_JVM_OPTS as for bin/j2a.
+# Each converted file's first line names its source: the checkout's path is left out of it
+# (clojure/..., test/j2a/...), so that the output does not depend on where it was made. j2a's
+# report (j2a-report.edn: timings) is not compared.
+# With --update, steps 1-3 then write the expected files from this run (after a change to j2a or
+# to the samples: commit test/j2a/expected with it).
 # With --jdk it instead converts jdk26u's modules (all of $JDK_SRC/*/share/classes, or the
-# MODULEs), compiles the converted forms with the class forms compiler and compares every class
-# with javac's, compiled twice from the same sources (classes whose two javac runs differ are not
-# compared). Work and report under .tmp/j2a-jdk/ (report.md, report.edn); see
-# doc/classes/CONVERTER-NOTES.md, "The converted JDK".
+# MODULEs) with --check: no conversion failures (test/j2a/jdk.bash; work under .tmp/j2a-jdk/;
+# doc/classes/CONVERTER-NOTES.md, "The converted JDK").
 #   JDK_SRC     jdk26u's src directory (default /root/jdk26u/src)
-#   JDK_JOBS    parallel compile-and-compare JVMs (default 40)
-#   JDK_STEPS   which steps to run: convert,javac,check,report (default all)
 # Exit status: 0 when all checks pass.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 . bin/lib/tools.bash
+. bin/lib/frozen.bash
 
 if [ "${1:-}" = "--jdk" ]; then
   shift
   exec bash test/j2a/jdk.bash "$@"
 fi
+mode=${1:-}
+case $mode in ""|--suite|--update) ;; *) sed -n '5,6p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;; esac
 work=.tmp/j2a-check
+expected=test/j2a/expected
 rm -rf "$work"
 mkdir -p "$work"
 status=0
 frozen=$(frozen_clojure) || exit 1
 
+# convert NAME SRC-DIR PREFIX [ARGS...]: SRC-DIR into $work/NAME with --check, then each file's
+# first line without PREFIX (the checkout's path)
+convert() {
+  local name=$1 src=$2 prefix=$3
+  shift 3
+  bin/j2a -m arbace.j2a.main convert --check "$work/$name" "$src" "$@" | grep -v '^slowest' | tee "$work/$name.log"
+  grep -q " 0 failed, 0 javac errors, .* 0 unreadable" "$work/$name.log" || { echo "$name: conversion failures"; return 1; }
+  find "$work/$name" -name '*.ae' -exec sed -i "1s|^;; Converted from $prefix/|;; Converted from |" {} +
+  if grep -rlF "$root" "$work/$name"; then echo "$name: the forms above name the checkout ($root)"; return 1; fi
+}
+
+# manifest DIR: the SHA-256 of every converted file of DIR, by path
+manifest() { (cd "$1" && find . -name '*.ae' | sed 's|^\./||' | LC_ALL=C sort | xargs sha256sum); }
+
 echo "== 1. convert the baseline"
-bin/j2a -m arbace.j2a.main convert --check "$work/baseline" "$frozen" clojure | grep -v '^slowest' | tee "$work/convert.log"
-grep -q " 0 failed, 0 javac errors, .* 0 unreadable" "$work/convert.log" || status=1
+if convert baseline "$frozen" "$frozen" clojure; then
+  manifest "$work/baseline" > "$work/baseline.sha256"
+  if [ "$mode" = --update ]; then
+    mkdir -p "$expected" && cp "$work/baseline.sha256" "$expected/baseline.sha256"
+  elif diff "$expected/baseline.sha256" "$work/baseline.sha256" > "$work/baseline.diff"; then
+    echo "baseline: $(wc -l < "$work/baseline.sha256") files, as expected ($expected/baseline.sha256)"
+  else
+    echo "baseline: the converted files differ from $expected/baseline.sha256 ($work/baseline.diff):"
+    grep '^[<>]' "$work/baseline.diff" | awk '{print $1, $3}' | sort -k2 -u | head -20
+    status=1
+  fi
+else
+  status=1
+fi
 
-echo "== 2. compile the converted baseline and compare with javac's classes"
-for d in clojure clojure/lang clojure/asm clojure/asm/signature clojure/asm/commons clojure/java/api; do
-  out=$(CLASS_FORMS_CP=$frozen bin/class-forms-check "$work/baseline" "$d" 2>&1)
-  echo "$d: $(echo "$out" | grep -o 'files .*')"
-  echo "$out" | grep -q "errors 0 diffs 0" || { echo "$out" | tail -20; status=1; }
-done
+# sample NAME: test/j2a/NAME converted and compared with (or, --update, written to) expected/NAME
+sample() {
+  local name=$1
+  convert "$name" "$root/test/j2a/$name" "$root" || return 1
+  if [ "$mode" = --update ]; then
+    rm -rf "${expected:?}/$name" && mkdir -p "$expected" && cp -r "$work/$name" "$expected/$name" &&
+      rm -f "$expected/$name/j2a-report.edn"
+  elif diff -r -x j2a-report.edn "$expected/$name" "$work/$name" > "$work/$name.diff"; then
+    echo "$name: $(find "$work/$name" -name '*.ae' | wc -l) files, as expected ($expected/$name)"
+  else
+    echo "$name: the converted files differ from $expected/$name ($work/$name.diff):"
+    head -40 "$work/$name.diff"
+    return 1
+  fi
+}
 
-echo "== 3. language features (test/j2a/java)"
-javac -d "$work/sample-classes" $(find test/j2a/java -name '*.java') || status=1
-bin/j2a -m arbace.j2a.main convert --check "$work/sample" test/j2a/java | grep -v '^slowest'
-for d in $(cd test/j2a/java && find . -mindepth 1 -type d | sed 's|^\./||'); do
-  out=$(ALL=1 CLASS_FORMS_CP=$work/sample-classes bin/class-forms-check "$work/sample" "$d" 2>&1)
-  echo "$out" | tail -20
-  echo "$out" | grep -q "errors 0 diffs 0" || status=1
-done
+echo "== 2. language features (test/j2a/java)"
+sample java || status=1
 
-echo "== 3b. a module declaration and package annotations (test/j2a/module)"
-bin/j2a -m arbace.j2a.main convert --check "$work/module" test/j2a/module | grep -v '^slowest' | tee "$work/module.log"
-grep -q " 0 failed, 0 javac errors, .* 0 unreadable" "$work/module.log" || status=1
+echo "== 3. a module declaration and package annotations (test/j2a/module)"
+sample module || status=1
 
-if [ "${1:-}" = "--suite" ]; then
-  echo "== 4. Clojure's test suite on the converted baseline"
+[ "$mode" = --update ] && echo "update: $expected written: commit it"
+
+if [ "$mode" = --suite ]; then
+  echo "== 4. Clojure's test suite on the converted baseline, compiled by the frozen jar's compiler"
   # compiled against the frozen tree's javac classes (the classes the converted ones replace)
-  J2A_CP=$frozen bin/j2a -m arbace.j2a.build "$work/baseline" "$work/run/classes" || status=1
+  FROZEN_CP=$frozen frozen_java test -Xss64m ${J2A_JVM_OPTS:--Xmx24g} -- \
+    -m j2a.build "$work/baseline" "$work/run/classes" || status=1
   mkdir -p "$work/run/src"
   (cd "$frozen" && find clojure -type f ! -name '*.java' ! -name '*.class' | while read -r f; do
      mkdir -p "$root/$work/run/src/$(dirname "$f")"; cp "$f" "$root/$work/run/src/$f"; done)

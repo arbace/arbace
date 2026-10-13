@@ -36,14 +36,10 @@ the commands `arbace` and `arb`) and `-v4` (`reduce` without an init over an
 and [doc/ALPINE.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/ALPINE.md) on
 the branch describe what it holds, how to build, run and verify it, and its known limits.
 
-Main still builds the JVM Arbace, as the bootstrap and the reference the Go build is checked
-against:
-
-```sh
-bin/build-arbace         # bootstrap into target/: the stages, target/arbace.jar and its AOT cache
-bin/arbace-j             # a REPL (with rlwrap on a terminal); also -e '(+ 1 2)', a script
-bin/arbace-image         # target/arbace-image: a self-contained jlink image (java.base, jdk.unsupported)
-```
+Main no longer builds the JVM Arbace (since standalone S4, the milestone `arbace-seed-is-go-v1`). The
+frozen jar of `arbace-for-java-26-v4`, built from its tag and pinned by hash, stays main's
+reference for the Go build's differential tests ([doc/go/ORACLE.md](doc/go/ORACLE.md)), and
+the JVM hosts j2a's Java front end (javac).
 
 ## Arbace for Golang
 
@@ -59,12 +55,27 @@ on 22,232 of the oracle's 22,278 cases (42 of the rest need locale data beyond r
 which the default build leaves out); it leaves out `gen-class`, XML, Java serialization and
 Swing. [doc/go/FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-golang/doc/go/FREEZE.md)
 on the branch describes what it holds, how to build, run and verify it, and its known limits.
-Main still builds it: the commands below, now leading to what comes next.
+Main builds it from its own seed (next section).
+
+## The seed: Arbace builds itself
+
+Since standalone S4 (2026-10-12; the milestone `arbace-seed-is-go-v1`) the bootstrap needs no JVM
+([doc/STANDALONE-NOTES.md](doc/STANDALONE-NOTES.md), [doc/STANDALONE-SURVEY.md](doc/STANDALONE-SURVEY.md)).
+Its seed is Arbace's own Go program as Arbace printed it, `seed/arbace-seed-go.tar.xz` (about 3
+MB of Go source, pinned by its SHA-256; the Go toolchain that builds it, TamaGo's go1.27.1,
+pinned by the hash of its sources). Go's toolchain alone builds it into stage 0, an Arbace
+executable; stage 0 runs a2g and g2a on Arbace's sources and prints and builds the program
+again; that program does the same, and the third generation is the second byte for byte (the
+fixpoint). The seed is that fixpoint's printed source, so the executable built from it rebuilds
+itself exactly (`bin/seed --verify`). The JDK's classes Arbace needs are committed as class
+forms (`jdk/`), converted once by j2a.
 
 ```sh
-bin/build-arbace               # the JVM Arbace first: the bootstrap and the tools run on it
-bin/arbace-go --build --pgo    # target/arbace-go/{amd64,arm64}/arbace, profile-guided
-bin/arbace-go                  # a REPL (with rlwrap on a terminal); also -e '(+ 1 2)', a script
+bin/seed --check && bin/seed --build    # stage 0 from the seed: target/seed/amd64/arbace
+bin/arbace-go --build --pgo             # target/arbace-go/{amd64,arm64}/arbace, built by stage 0
+bin/arbace-go                           # a REPL (with rlwrap on a terminal); also -e '(+ 1 2)', a script
+bin/arbace-go --fixpoint                # G1 by stage 0, G2 by G1, G3 by G2: G2 = G3
+bin/seed --verify                       # the seed printed again from its commit, and identical
 ```
 
 ## Arbace in the box
@@ -74,8 +85,8 @@ program built with TamaGo (`GOOS=tamago`) as the guest of a small monitor on /de
 operating system inside: go-whim's monitor vendored as Go forms in `box/`, TamaGo's runtime and
 standard library as Go forms in `tamago/` (one tree for amd64 and arm64), each guest built from
 them byte-identical to one built from TamaGo's own sources. The REPL, `-e`, `-m` and scripts run
-on one to four vCPUs; files live in memory; a content-addressed store (`arbace.box`, also natively
-and on the JVM) and TCP streams proxied by the launcher under a policy are its only ways out
+on one to four vCPUs; files live in memory; a content-addressed store (`arbace.box`, also natively)
+and TCP streams proxied by the launcher under a policy are its only ways out
 ([doc/go/BOX-NOTES.md](doc/go/BOX-NOTES.md), [doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md)). amd64
 runs on a Linux host with /dev/kvm; arm64 on KVM/arm64, checked here in an emulated aarch64 VM
 (`bin/box-arm64-vm check`). The Mac's Hypervisor.framework has a launcher (purego vendored as Go
@@ -103,9 +114,7 @@ it.
 
 ```sh
 bin/c2a -o lib/ae path/to/library/src                       # .clj/.cljc -> .ae, into lib/ae
-ARBACE_CLASSPATH=lib/ae bin/arbace-j -e "(require 'my.lib)"  # the JVM build
-ARBACE_PATH=lib/ae bin/arbace-go -e "(require 'my.lib)"      # the Go build
-ARBACE_PATH=lib/ae bin/arbace-j -e "(require 'my.lib)"       # the JVM build reads it too
+ARBACE_PATH=lib/ae bin/arbace-go -e "(require 'my.lib)"
 ```
 
 The translators name Arbace (`a`) as their target or source: c2a (Clojure → Arbace), j2a
@@ -117,17 +126,17 @@ the journals and the dated records name them.
 
 Arbace names the commit it was built from: the REPL's banner says `Arbace <git describe>
 (<short commit>)`, and `*arbace-version*` holds `{:describe ... :commit ... :dirty ...}`
-(`(arbace-version)` the describe), on both builds; `*clojure-version*` stays 1.13 for the
-libraries that test it.
+(`(arbace-version)` the describe); `*clojure-version*` stays 1.13 for the libraries that test
+it.
 
 ```sh
-bin/arbace-j -e '(prn *arbace-version*)'   # or bin/arbace-go -e ...; java -cp target/stage2:. arbace.lang.Main -e ...
-unzip -p target/arbace.jar arbace/version.edn
+bin/arbace-go -e '(prn *arbace-version*)'
 ```
 
-In a checkout it is `git describe --tags --always --dirty` at build time (the jar's resource
-`arbace/version.edn`, the Go executable's link); in a tarball made by `git archive` (GitHub's
-archives) the file `VERSION`, which `git archive` fills with the commit and its describe.
+In a checkout it is `git describe --tags --always --dirty` at build time (the Go executable's
+link); in a tarball made by `git archive` (GitHub's archives) the file `VERSION`, which `git
+archive` fills with the commit and its describe. Stage 0 carries the version of the commit its
+seed was printed from (the seed's `SEED.edn`).
 
 ## Documentation
 
@@ -143,6 +152,8 @@ archives) the file `VERSION`, which `git archive` fills with the commit and its 
   and [doc/go/BOX-NOTES.md](doc/go/BOX-NOTES.md), the box (B1b); the rest of `doc/go/`, the notes of each part
 - [doc/C2A.md](doc/C2A.md): c2a, Clojure source translated into Arbace's
 - [doc/G2C-SURVEY.md](doc/G2C-SURVEY.md): the survey for g2a (then g2c), Go as Arbace forms
+- [doc/STANDALONE-SURVEY.md](doc/STANDALONE-SURVEY.md) and [doc/STANDALONE-NOTES.md](doc/STANDALONE-NOTES.md):
+  the standalone Arbace, the Go-hosted bootstrap and the seed
 - [doc/VENDOR-NOTES.md](doc/VENDOR-NOTES.md): how Clojure became Arbace, and every change since
 - [doc/BENCHMARKS.md](https://github.com/arbace/arbace/blob/arbace-for-java-26/doc/BENCHMARKS.md)
   (on the branch `arbace-for-java-26`): Arbace on the JVM against Clojure 1.12

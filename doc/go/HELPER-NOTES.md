@@ -17,7 +17,7 @@ bin/g2a dump fmt runtime             # .tmp/godump/out/fmt.edn, .tmp/godump/out/
 bin/g2a dump -goarch arm64 -o DIR std
 bin/g2a dump -tests fmt              # fmt.edn with fmt's _test.go files, and fmt_test.edn
 bin/g2a dump -files prog.go a.go,b.go   # single-file programs; a.go,b.go is one program
-bin/g2a read .tmp/godump/out         # read on Arbace (needs bin/build-arbace), print a summary
+bin/g2a read .tmp/godump/out         # read on Arbace (the Go executable), print a summary
 bin/g2a corpus [amd64|arm64|test|test-arm64|tests]  # the coverage runs below, into .tmp/godump/corpus/
 bin/g2a corpus linux-amd64 linux-test linux-arm64 linux-test-arm64   # the same for GOOS=linux
 bin/g2a dump -goos linux -goarch arm64 -o DIR std

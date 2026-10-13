@@ -1,17 +1,23 @@
-# Shared by the scripts that run Arbace's tools and checks (bin/j2a, bin/class-forms-tests,
-# bin/clojure-tests, ...). Sourced, with $root set to the repository root. Defines:
+# Shared by the scripts that run Arbace's tools and checks (bin/c2a, bin/clojure-tests, bin/g2a's
+# checks, bin/a2g-check, ...). Sourced, with $root set to the repository root. Defines:
 #
-#   arbace_runtime  sets ARBACE_CP, the class path of the runtime the tools run on, for
-#                   `java -cp "$ARBACE_CP:..." arbace.lang.Main`: target/stageN (default stage 2,
-#                   ARBACE_STAGE=N for another), built by bin/build-arbace, then the repository
-#                   root. The stage holds the class forms (arbace.lang, arbace.asm, ...) and its
-#                   namespaces AOT-compiled; the tools' own namespaces (arbace.j2a, arbace.c2a, test/) load
-#                   from source. RT.load takes a namespace's __init class only when it is newer
-#                   than its source, so a namespace edited since the build (arbace.classes when
-#                   working on the compiler) loads from the checkout's source, the rest from the
-#                   stage's classes. Not target/arbace.jar: its own copies of the sources would
-#                   shadow the checkout's (edits silently ignored), and its AOT cache applies
-#                   only to the jar alone anyway.
+#   arbace_tool [-p DIR]... [-s NS]... [-D NAME=VALUE]... ARG...
+#                   runs Arbace's Go executable, the host of the tools (bin/lib/host.bash's
+#                   arbace_host_exe: ARBACE_HOST_EXE, else stage 0 built from the Go seed), with
+#                   ARG... (e.g. -m NS ARGS..., -e EXPR, a script), from the current directory.
+#                   ARBACE_PATH is the checkout ($root), then each -p DIR (test/, a scratch tree),
+#                   then the caller's ARBACE_PATH: the tools' namespaces (arbace.g2a, arbace.a2g,
+#                   arbace.j2a, test/'s) are not embedded in the executable and load from the
+#                   checkout's sources, as they did on the JVM's target/stage2 until standalone S4.
+#                   -s NS loads an embedded namespace from the checkout instead (its file under
+#                   $root, by load-file, then marked loaded, so that requires keep it): the
+#                   executable's embedded sources come before ARBACE_PATH, and a tool embedded
+#                   with them (c2a) must run as checked out, not as the executable was built; the
+#                   namespaces in the order of their requires. -D sets a system property before
+#                   ARG... (as the JVM's -D did; the executable takes no -D). The exit status is
+#                   the executable's.
+#   c2a_sources     the arguments -s NS... of arbace_tool for c2a (doc/C2A.md), embedded in the
+#                   executable, from the checkout
 #   frozen_clojure  prints the directory holding the frozen reference tree clojure/ (upstream
 #                   Clojure and ASM sources with their javac classes), extracted once from the
 #                   freeze tag arbace-for-java-26-v1 into .tmp/frozen/: j2a's
@@ -20,20 +26,26 @@
 #                   moves. Its classes are dated after its sources, so javac does not recompile
 #                   them.
 
-arbace_runtime() {
-  local stage=${ARBACE_STAGE:-2} dir newer
-  dir=$root/target/stage$stage
-  if [ ! -f "$dir/arbace/lang/Main.class" ] || [ ! -f "$dir/arbace/core__init.class" ]; then
-    echo "no $dir: run bin/build-arbace first" >&2
-    return 1
-  fi
-  # The class forms of the runtime itself never load from source: say when they are stale
-  newer=$(cd "$root" && find arbace -name '*.ae' ! -path 'arbace/classes/*' ! -path 'arbace/j2a/*' ! -path 'arbace/c2a/*' ! -path 'arbace/g2a/*' ! -path 'arbace/a2g/*' ! -path 'arbace/lang/go/*' \
-            -newer "$dir/arbace/core__init.class" -print -quit)
-  if [ -n "$newer" ]; then
-    echo "warning: $newer is newer than target/stage$stage; run bin/build-arbace" >&2
-  fi
-  ARBACE_CP=$dir:$root
+c2a_sources=(-s arbace.c2a.text -s arbace.c2a.rename -s arbace.c2a.rules -s arbace.c2a.main)
+
+arbace_tool() {
+  local exe path=$root init=() srcs="" kv f n
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -p) path=$path:$2; shift 2 ;;
+      -s) f=$root/$(echo "$2" | tr .- /_).ae
+          [ -f "$f" ] || { echo "arbace_tool: no $f for $2" >&2; return 2; }
+          srcs="$srcs [$2 \"$f\"]"; shift 2 ;;
+      -D) kv=$2; n=${kv%%=*}
+          init+=(-e "(do (System/setProperty \"$n\" \"$(printf '%s' "${kv#*=}" | sed 's/\\/\\\\/g; s/"/\\"/g')\") nil)")
+          shift 2 ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$srcs" ] && init+=(-e "(doseq [[n f] '[$srcs]] (load-file f) (dosync (commute @#'arbace.core/*loaded-libs* conj n)))")
+  . "$root/bin/lib/host.bash"
+  exe=$(arbace_host_exe) || return 1
+  ARBACE_PATH=$path${ARBACE_PATH:+:$ARBACE_PATH} "$exe" "${init[@]}" "$@"
 }
 
 frozen_clojure() {

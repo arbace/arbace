@@ -832,6 +832,13 @@ architecture-dependent constants may not merge, unmeasured.
   GOROOT; reused while `tamago/`'s hash is unchanged. About 20 s (printed in parallel).
 - `check` (after `bin/arbace-go --build --box`): below.
 
+The host (standalone S4, 2026-10-12): `bin/box-vendor`, `bin/tamago-vendor` and
+`bin/x509roots-vendor` run g2a through `bin/g2a`, on Arbace's Go executable (`bin/lib/g2a-host.bash`:
+`G2A_GO_EXE`, else the tools' host, `bin/lib/host.bash`); the times above are the JVM's. On main's
+G3 as the host, amd64: `tamago-vendor verify` 383 s (5.9 GB), `print` 24 s, `check` 115 s (after `--build --box`, 1,644 s with a2g on Go: both guests identical); `box-vendor
+roundtrip` 51 s (20 of 20), `kvm-tests` 34 s, `purego-check` 10 s; `x509roots-vendor verify`
+4 s, `check` 7 s. All pass as on the JVM.
+
 `bin/g2a build` gained `--print-only --module std` (packages at their import paths, no
 `go.mod`) and `--goos-dir DIR` (the goos module from DIR by a `replace`, no `go.sum`) (BX21).
 
@@ -2336,3 +2343,15 @@ BX70-BX73 accepted as built; BX74 accepted (no `javax.net.ssl` in the Go build f
 accepted. The roots' licence: LICENSE.md records `bundle.der`'s certificates under NSS's
 Mozilla Public License 2.0 as well as x/crypto's BSD 3-Clause (rather than BSD-3 only). The
 branch merged after the printer's case-list fix (`g2a-cases`), so `box-forms` stays identical.
+
+## After standalone S4: the JVM's host layers gone (2026-10-12)
+
+With the JVM Arbace off main (doc/STANDALONE-NOTES.md, "S4: the JVM removed"), BX37's and BX71's
+JVM halves are on the frozen branch only: `arbace/box/host.ae` and `arbace/tls/host.ae` are the
+Go build's host layers (jrt's `HostStore` and `TlsSocket`), moved from `arbace/lang/go/ns/` with
+`git mv`; the JVM's (java.nio, `javax.net.ssl`) left. `arbace.box`, `arbace.tls` and
+`arbace.http` are one source for the native executable and the box. `bin/arbace-go --smoke` no
+longer runs the store's and TLS's checks on the JVM (`jvm_store_checks`, the JVM's
+`tls_checks`), nor `test/native/box_test.ae` (`bin/native-tests` left too); the native and boxed
+checks are unchanged. The default TLS roots are Mozilla's everywhere (BX72's "the JVM's own on the
+JVM" no longer applies).

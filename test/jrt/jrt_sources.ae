@@ -2,14 +2,14 @@
   "jrt's translated input (B1a step 3, doc/go/JRT-SOURCES.md): the Java source files of the
   translation closure measured by bin/java-surface (doc/go/java-surface.edn, :closure :repl
   :sources), converted by j2a into class forms. Run by bin/jrt-convert, which also generates
-  the JDK build's generated sources, converts, compiles and compares; this namespace holds the
+  the JDK build's generated sources, converts and compares; this namespace holds the
   parts written in Clojure:
 
   - `sources`: the closure's source files, as paths relative to jdk26u;
-  - `edge`: what the translated classes (whole files, compiled) call outside themselves (the
+  - `edge`: what the translated classes (whole files, javac's classes) call outside themselves (the
     edge jrt hand-writes), with the natives and the VM intrinsics they declare, cross-checked
     against the closure's boundary (reached methods only) recorded by bin/java-surface;
-  - `report`: the counts of a run, from class-forms-check's results.
+  - `report`: the counts of a run: the conversion, the forms compared with the committed ones.
 
   Outputs are deterministic: sorted, without times."
   (:require [arbace.java.io :as io]
@@ -932,63 +932,44 @@
 ;; ---------------------------------------------------------------------------------------
 ;; the report
 
-(def known-differences
-  "Converted files whose classes differ from javac's in known, harmless ways (the class forms
-  compiler's, doc/classes/CONVERTER-NOTES.md, \"The converted JDK\"), by file: the kind and the
-  number of differences. Counted as converted to javac's shapes; any other difference fails."
-  {;; a lambda that constructs a local class passes the class's captured variables in their
-   ;; order of capture, javac in the reverse order (the synthetic lambda method's parameters)
-   "java/util/stream/Collectors.ae" [:local-class-capture-order 3]
-   "java/util/stream/Gatherers.ae" [:local-class-capture-order 9]
-   "java/util/stream/MatchOps.ae" [:local-class-capture-order 12]
-   ;; InnerClasses: a nested class javac's stack map frames name (Spliterator$OfPrimitive)
-   "java/util/stream/Nodes.ae" [:inner-classes-of-frames 2]
-   ;; a switch expression of String arms as an argument of a varargs call (Locale's
-   ;; getDisplayKeyTypeExtensionString): javac checkcasts the switch's value to String, the
-   ;; class forms do not (its arms are Strings already; JRT-NOTES.md, "Text and locales")
-   "java/util/Locale.ae" [:switch-expression-checkcast 1]})
-
-(defn known-difference? [r]
-  (when-let [[_ n] (known-differences (:file r))]
-    (= n (:ndiffs r))))
-
 (defn- fmt [n] (let [s (str n)] (if (> (count s) 3) (str (subs s 0 (- (count s) 3)) "," (subs s (- (count s) 3))) s)))
 
 (defn- row [& cells] (str "| " (str/join " | " cells) " |"))
 
-(defn check-results
-  "class-forms-check's results under work/res: per converted file."
-  [work]
-  (vec (sort-by :file
-                (for [^File f (sort (or (.listFiles (io/file work "res")) []))
-                      :when (str/ends-with? (.getName f) ".edn")
-                      r (read-data f)]
-                  (update r :file #(str/replace % #"^.*/conv/" ""))))))
+(defn- identical-trees?
+  "The class files of dirs a and b by path: [same differing], those of a compared with b's."
+  [a b]
+  (let [fa (class-files (io/file a))
+        rel (fn [^File f] (subs (str f) (inc (count (str (io/file a))))))
+        d (count (remove (fn [^File f]
+                           (let [g (io/file b (rel f))]
+                             (and (.isFile g)
+                                  (java.util.Arrays/equals (Files/readAllBytes (.toPath f))
+                                                           (Files/readAllBytes (.toPath g))))))
+                         fa))]
+    [(- (count fa) d) d]))
 
 (defn summary
-  "The counts of a run in work: sources, generated, converted, compiled, identical."
+  "The counts of a run in work: sources, generated, converted, compared with the committed forms
+  (forms-check.edn, bin/jrt-convert's check step), javac's classes."
   [work]
-  (let [rs (check-results work)
-        conv (read-data (io/file work "conv/j2a-report.edn"))
+  (let [conv (read-data (io/file work "conv/j2a-report.edn"))
         gen (some-> (io/file work "generated.edn") (#(when (.isFile ^File %) (read-data %))))
-        n-ref (count (class-files (io/file work "ref1")))
-        n-forms (count (class-files (io/file work "forms-classes")))]
+        fc (some-> (io/file work "forms-check.edn") (#(when (.isFile ^File %) (read-data %))))
+        [_ nondet] (if (.isDirectory (io/file work "ref2")) (identical-trees? (io/file work "ref1") (io/file work "ref2")) [0 0])]
     {:java-files (:files conv)
      :converted (:converted conv)
      :convert-failures (count (:failures conv))
      :javac-errors (:javac-errors conv)
      :unreadable (count (:unreadable conv))
      :generated gen
-     :checked-files (count rs)
-     :identical-files (count (filter :ok rs))
-     :known-differing-files (count (filter known-difference? rs))
-     :differing-files (count (filter #(pos? (:ndiffs % 0)) rs))
-     :error-files (count (filter :error rs))
-     :classes-compiled (reduce + (keep :classes rs))
-     :classes-written n-forms
-     :javac-classes n-ref
-     :nondet (vec (sort (mapcat :nondet rs)))
-     :problems (vec (for [r rs :when (not (:ok r))] (select-keys r [:file :error :ndiffs :diffs])))}))
+     :forms-files (:files fc)
+     :same-as-committed (:same fc)
+     :different-from-committed (:different fc)
+     :added (:added fc)
+     :removed (:removed fc)
+     :javac-classes (count (class-files (io/file work "ref1")))
+     :javac-nondeterministic nondet}))
 
 (defn edge-tables
   "Markdown tables of an edge."
@@ -996,7 +977,7 @@
   (str/join
    "\n"
    (concat
-    [(str "Translated classes (compiled from the forms): " (fmt (:translated-classes e))
+    [(str "Translated classes (javac's, of the converted files): " (fmt (:translated-classes e))
           " (" (:translated-top-level e) " top-level).")
      (str "Edge: " (:edge-classes e) " classes, " (fmt (:edge-members e)) " members (whole files).")
      ""
@@ -1045,7 +1026,6 @@
   [work]
   (let [s (summary work)
         e (let [f (io/file work "edge.edn")] (when (.isFile f) (read-data f)))
-        e2 (let [f (io/file work "edge-javac.edn")] (when (.isFile f) (read-data f)))
         md (str/join
             "\n"
             (concat
@@ -1055,13 +1035,10 @@
               (row "of which generated by the JDK build's tools" (count (:files (:generated s))))
               (row "converted by j2a" (:converted s))
               (row "conversion failures / javac errors / unreadable" (str (:convert-failures s) " / " (:javac-errors s) " / " (:unreadable s)))
-              (row "files compiled by the class forms compiler" (:checked-files s))
-              (row "of which all classes shape-identical to javac's" (:identical-files s))
-              (row "differing (of them known, `known-differences`) / errors"
-                   (str (:differing-files s) " (" (:known-differing-files s) ") / " (:error-files s)))
-              (row "classes compiled from the forms" (fmt (:classes-compiled s)))
+              (row "converted files equal to the committed ones (jdk/forms)" (str (:same-as-committed s) " of " (:forms-files s)))
+              (row "different / added / removed" (str (count (:different-from-committed s)) " / " (count (:added s)) " / " (count (:removed s))))
               (row "javac's classes of the same files" (fmt (:javac-classes s)))
-              (row "classes not compared (javac's two runs differ)" (count (:nondet s)))
+              (row "of which differing between javac's two runs" (:javac-nondeterministic s))
               ""]
              (when-let [g (:generated s)]
                [(str "Generated sources equal to the JDK build's (" (:jdk-gensrc g) "): "
@@ -1070,20 +1047,15 @@
                        (when (seq d) (str "; " (str/join ", " d))))
                      ".")
                 ""])
-             (for [p (:problems s)] (str "- " (pr-str p)))
-             (when e ["" "## The edge" "" (edge-tables e)])
-             (when (and e e2)
-               ["" (str "Edge from javac's classes of the same files: "
-                        (if (= (dissoc e :translated-classes) (dissoc e2 :translated-classes))
-                          "identical to the edge from the forms' classes."
-                          (str "DIFFERENT from the edge from the forms' classes ("
-                               (:edge-members e2) " members, " (:translated-classes e2) " classes).")))])))]
+             (for [k [:different-from-committed :added :removed] f (get s k)] (str "- " (name k) " " f))
+             (when e ["" "## The edge (from javac's classes)" "" (edge-tables e)])))]
     (spit (io/file work "report.edn") (with-out-str (pp/pprint (assoc s :edge (some-> e (dissoc :members :class-uses :type-uses :array-members :natives :intrinsics))))))
     (spit (io/file work "report.md") (str md "\n"))
-    (println (format "%d Java files (%d generated), %d converted, %d compiled, %d identical, %d differing (%d known), %d errors; %d classes from the forms, %d javac classes%s"
-                     (:java-files s) (count (:files (:generated s))) (:converted s) (:checked-files s)
-                     (:identical-files s) (:differing-files s) (:known-differing-files s) (:error-files s)
-                     (:classes-compiled s) (:javac-classes s)
+    (println (format "%d Java files (%d generated), %d converted, %d failures, %d javac errors, %d unreadable; %s of %s equal to the committed forms, %d different, %d added, %d removed; %d javac classes%s"
+                     (:java-files s) (count (:files (:generated s))) (:converted s) (:convert-failures s)
+                     (:javac-errors s) (:unreadable s) (:same-as-committed s) (:forms-files s)
+                     (count (:different-from-committed s)) (count (:added s)) (count (:removed s))
+                     (:javac-classes s)
                      (if e (format "; edge %d classes, %d members" (:edge-classes e) (:edge-members e)) "")))
     s))
 
