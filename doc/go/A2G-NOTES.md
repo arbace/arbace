@@ -19,8 +19,9 @@ per script are in "End-to-end results" below.
 
 ## Structure
 
-`arbace/a2g/` (namespaces `arbace.a2g.*`, run on Arbace's `target/stage2` by `bin/a2g`;
-exempt from tools.bash's staleness warning like g2a):
+`arbace/a2g/` (namespaces `arbace.a2g.*`, run by `bin/a2g` on Arbace's Go executable,
+`A2G_GO_EXE`, else the tools' host, `bin/lib/host.bash`, loaded from the checkout's sources;
+on `target/stage2` until standalone S4):
 
 | namespace | what |
 |---|---|
@@ -152,9 +153,15 @@ expected result is printed (`:pr`) needs `RT.printString` translated and reached
 counted apart. The JVM's helpful `NullPointerException` messages are accepted as a null
 message (V11). A Go panic that is no Java exception ends its step, not the program.
 
-`fixtures` (in the script list, and by default) loads `test/a2g/fixtures/*.ae` into this JVM
-(`load-file`), runs every public static method named `t[A-Z]...` without parameters, records
-the results the same way, adds the fixtures as an `--input` and compares likewise.
+`fixtures` (in the script list, and by default) compares likewise with the results of
+`test/a2g/fixtures/*.ae` recorded on a JVM in `test/a2g/fixtures.edn`: every public static
+method named `t[A-Z]...` without parameters, run with the fixtures loaded (`load-file`) by
+`test/a2g/record_fixtures.ae` (`bin/a2g-check --record-fixtures`, on the frozen jar), and adds
+the fixtures as an `--input`. Until standalone S4 the check recorded them itself, in-process on
+the JVM running it; the check now runs on the Go executable, whose class forms cannot evaluate
+every fixture (a class extending `java.io.StringReader`, `java.lang.invoke`, a forward
+reference between the classes of one `do`). The recording on main's last `target/stage2` and
+on the frozen `arbace-for-java-26-v4` jar are identical, and equal to the in-process one.
 
 ## End-to-end results
 

@@ -30,9 +30,10 @@ bin/g2a print ...                     # the printer (bin/g2a-print)
 bin/g2a test                          # the converter's tests (bin/g2a-convert-tests)
 ```
 
-The tools run on Arbace's `target/stage2` (`bin/lib/tools.bash`); `arbace.g2a` loads from
-source. Conversion runs one package per task on a thread pool (`G2A_JOBS`, default half the
-cores; heap `G2A_JVM_OPTS`, default `-Xmx12g`). Every file written is read back with Arbace's
+The tools run on Arbace's Go executable (`bin/lib/g2a-host.bash`: `G2A_GO_EXE`, else the
+tools' host, `bin/lib/host.bash`; on `target/stage2` until standalone S4, with a heap
+`G2A_JVM_OPTS`, default `-Xmx12g`); `arbace.g2a` loads from the checkout's sources. Conversion
+runs one package per task on a thread pool (`G2A_JOBS`, default half the cores). Every file written is read back with Arbace's
 reader (`LineNumberingPushbackReader`, `*read-eval*` false) and compared with the forms in
 memory: data, every metadata key, and, in mode `:lines`, the line of every list (the reader's
 `:line` or an explicit one) against the Go line it stands for. A difference fails the run.

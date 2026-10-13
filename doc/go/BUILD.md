@@ -13,8 +13,9 @@ bin/g2a build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|
 bin/g2a-build-tests [--arch amd64|arm64]... [PROG...]
 ```
 
-The logic is `arbace/g2a/build.ae` (`arbace.g2a.build`), run on Arbace's `target/stage2`
-through `bin/lib/tools.bash` like the rest of `bin/g2a` (so `bin/build-arbace` first).
+The logic is `arbace/g2a/build.ae` (`arbace.g2a.build`), run on Arbace's Go executable like
+the rest of `bin/g2a` (`bin/lib/g2a-host.bash`: `G2A_GO_EXE`, else the tools' host,
+`bin/lib/host.bash`).
 `bin/g2a build` without arguments still builds g2a's helper (`tools/godump`).
 
 ## The program's layout
@@ -97,10 +98,10 @@ Alpine's own go1.27.1 (`/usr/lib/go`, `G2A_GOROOT=/usr/lib/go`) works too and pa
 tests, but its executables differ from TamaGo's (code and data, not only the build ID: the two
 trees differ in `cmd/` and std, TamaGo's additions and Alpine's patches); each is reproducible.
 
-**Host.** `bin/g2a build` (and `bin/g2a print`) runs on the JVM by default; `G2A_HOST=go` runs
-it on the native Go executable instead (`target/arbace-go/<arch>/arbace`, or `G2A_GO_EXE`),
-with the same output byte for byte (standalone S3, [../STANDALONE-NOTES.md](../STANDALONE-NOTES.md),
-"S3: g2a on Go"; `bin/lib/g2a-host.bash`).
+**Host.** `bin/g2a build` (and `bin/g2a print`) runs on the native Go executable
+(`G2A_GO_EXE`, else the tools' host: `ARBACE_HOST_EXE`, else stage 0 built from the Go seed),
+with the output the JVM gave, byte for byte (standalone S3, [../STANDALONE-NOTES.md](../STANDALONE-NOTES.md),
+"S3: g2a on Go"; `bin/lib/g2a-host.bash`). The JVM host (`G2A_HOST=jvm`) left with S4.
 
 **Static.** `CGO_ENABLED=0` makes gc's internal linker write a static executable: `file` says
 "statically linked", `readelf -l` shows no `INTERP` segment and `readelf -d` no dynamic

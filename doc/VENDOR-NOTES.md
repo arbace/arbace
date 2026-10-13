@@ -364,6 +364,11 @@ image: `-e`, a REPL, `#inst` read, printed and round-tripped (also through `arba
 
 ## Clojure's test suite on stages 1 and 2
 
+> Standalone S4 (2026-10-12): the JVM stages left main, and with them these runs
+> (`CLOJURE_TESTS_RENAME`, `CLOJURE_TESTS_PRECOMPILED`, `test/arbace-results.edn`); they stay on
+> `arbace-for-java-26`. The renaming below lives on in `bin/clojure-tests`' Go mode
+> (`CLOJURE_TESTS_GO`), c2a on the tools' Go host.
+
 `bin/clojure-tests` has a rename mode, `CLOJURE_TESTS_RENAME=arbace` (since 2026-10-11 the
 suite and its libraries are translated by c2a, `bin/c2a --in-place --keep-ext`, doc/C2A.md:
 the same trees, `arbace.j2c.rename`'s rules being its rule `:rename` and the second `sed` below

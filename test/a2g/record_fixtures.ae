@@ -1,0 +1,74 @@
+;; The recorded results of a2g's fixtures (test/a2g/fixtures/*.ae), which bin/a2g-check compares
+;; the translated fixtures with (doc/go/A2G-NOTES.md, "The harness"): each fixture's top-level
+;; class's public static methods without parameters whose name starts with t, in name order,
+;; called on a JVM (the fixtures loaded here by load-file) and recorded as the oracle's class
+;; scripts are. Written to test/a2g/fixtures.edn as [[class-simple-name {:cases [...]}] ...] in
+;; the files' and classes' order.
+;;
+;; Runs on a JVM Arbace (the Go build's class forms cannot evaluate every fixture: extending a
+;; JDK class, java.lang.invoke): `bin/a2g-check --record-fixtures` on the frozen jar
+;; (bin/lib/frozen.bash), from the repository's root. It needs arbace.core only. Until
+;; standalone S4 bin/a2g-check recorded them on every run, on target/stage2.
+;;
+;; Usage: SCRIPT [OUT]   (OUT default test/a2g/fixtures.edn)
+
+(ns a2g.record-fixtures
+  (:require [arbace.string :as str]))
+
+(def fixtures-dir "test/a2g/fixtures")
+
+(defn- observe [v]
+  (cond (nil? v) {:type "nil"}
+        (or (string? v) (instance? Boolean v) (instance? Integer v) (instance? Long v) (instance? Double v))
+        {:type (.getName (class v)) :value v}
+        :else {:type (.getName (class v))}))
+
+(defn- chain [^Throwable e]
+  (loop [e e acc [] n 0]
+    (if (or (nil? e) (= n 8)) acc (recur (.getCause e) (conj acc [(.getName (class e)) (.getMessage e)]) (inc n)))))
+
+(defn- read-forms [f]
+  (with-open [r (arbace.lang.LineNumberingPushbackReader. (java.io.FileReader. ^String f))]
+    (binding [*read-eval* false]
+      (loop [acc []]
+        (let [x (read {:eof ::eof :read-cond :allow} r)]
+          (if (= x ::eof) acc (recur (conj acc x))))))))
+
+(defn record []
+  (let [files (sort (filter #(str/ends-with? % ".ae") (map #(.getPath ^java.io.File %) (.listFiles (java.io.File. ^String fixtures-dir)))))
+        nsname 'a2g.fixtures]
+    (binding [*ns* (create-ns nsname)]
+      (refer 'arbace.core)
+      (doseq [f files] (load-file f)))
+    (let [tops (for [f files
+                     cf (read-forms f)
+                     :when (and (seq? cf) (= 'do (first cf)))
+                     dc (rest cf)
+                     :when (and (seq? dc) (= 'defclass (first dc)))]
+                 (name (second dc)))]
+      (vec (for [cn tops
+                 :let [^Class c (ns-resolve (the-ns nsname) (symbol cn))
+                       ms (->> (.getDeclaredMethods c)
+                               (filter (fn [^java.lang.reflect.Method m]
+                                         (and (re-matches #"t[A-Z].*" (.getName m)) (zero? (.getParameterCount m))
+                                              (java.lang.reflect.Modifier/isStatic (.getModifiers m))
+                                              (java.lang.reflect.Modifier/isPublic (.getModifiers m)))))
+                               (sort-by #(.getName ^java.lang.reflect.Method %)))]
+                 :when (seq ms)]
+             [cn {:cases (vec (map-indexed
+                                (fn [i ^java.lang.reflect.Method m]
+                                  (let [base {:i (inc i) :op :static :class (str nsname "." cn) :name (.getName m) :sig []
+                                              :src (str "(" cn "/" (.getName m) ")")}]
+                                    (try (assoc base :result (observe (.invoke m nil (object-array 0))))
+                                         (catch java.lang.reflect.InvocationTargetException e
+                                           (assoc base :throws (chain (.getCause e)))))))
+                                ms))}])))))
+
+(let [out (or (first *command-line-args*) "test/a2g/fixtures.edn")
+      rs (record)]
+  (spit out (str ";; The recorded results of test/a2g/fixtures/*.ae (test/a2g/record_fixtures.ae,\n"
+                 ";; bin/a2g-check --record-fixtures), on a JVM Arbace.\n"
+                 "[\n" (apply str (for [r rs] (str (pr-str r) "\n"))) "]\n"))
+  (println "recorded" (count rs) "classes," (reduce + (map #(count (:cases (second %))) rs)) "cases into" out)
+  (shutdown-agents)
+  (System/exit 0))

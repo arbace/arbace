@@ -645,7 +645,8 @@ it; since `gofix` (FX1, "The suite's Java fixtures", below) that is the test bui
 
 It implies rename mode: the suite and the test libraries renamed as for the JVM (the same
 `arbace.j2c.rename`, on the JVM; since 2026-10-11 c2a, doc/C2A.md), into `.tmp/clojure-tests/go/` (`CLOJURE_TESTS_RUN`, default `go`).
-Listing the namespaces and the report run on the JVM's `target/stage2` (`CLOJURE_SRC`); each test
+Listing the namespaces and the report run on the JVM's `target/stage2` (`CLOJURE_SRC`; since
+standalone S4 they, and c2a, run on the tools' Go host, `bin/lib/host.bash`: no JVM); each test
 namespace runs in its own Go process (`TMPDIR` the run's `tmp/`, `ARBACE_PATH` the renamed libraries
 then the suite's `test/`), which, as upstream's JVM does, requires every test namespace first. The
 fixtures step is skipped: the Go build loads no class files, so the AOT fixtures load from source;

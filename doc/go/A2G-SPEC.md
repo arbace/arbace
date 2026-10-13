@@ -198,7 +198,8 @@ cache and `==` on boxes (§7.6), the exception thrown by each implicit check (§
 
 ### 4.1 Inputs and the closed world
 
-a2g runs on the JVM Arbace (`target/stage2`, as the other tools, `bin/lib/tools.bash`), as
+a2g runs on Arbace's Go executable (the tools' host, `bin/lib/host.bash`, as the other tools;
+on the JVM Arbace's `target/stage2` until standalone S4, which gave the same output), as
 `bin/a2g`, implemented in `arbace/a2g/` (namespaces `arbace.a2g.*`). Its input is a set of
 class forms files and a jrt manifest:
 
