@@ -1198,3 +1198,6 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   HV1 RAM checks and its HV6/HV7 clock run; S9 (Go's toolchain as forms) not in this milestone.
   Alternatives considered: the stages strictly in sequence; S6 first; amd64 and the arm64 VM
   without the Mac, or amd64 only; S9 included.
+- The same evening the balloon inflated again: 18.9 GiB visible, 43.8 GiB held by the outer
+  host (HOST-VM-SURVEY's table). The tracks therefore run their memory-heavy steps (Go builds,
+  the gate, large guests) one at a time, through a host-wide lock in `.tmp/`.
