@@ -1133,3 +1133,15 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   - HV8: no network in a build box.
   - HV9: the build driver's action cache in the store.
 - Alternatives considered are in doc/go/HOST-VM-SURVEY.md §14.
+
+## 2026-10-13: HV1 measured, the 3 GiB slot is not enough
+
+- a2g natively, three sequential runs on an otherwise idle host; all three outputs byte for
+  byte the same:
+  - `GOMEMLIMIT=12GiB` with 16 threads: 4m03s, peak RSS 10.6 GB;
+  - `GOMEMLIMIT=2GiB` with 16 threads: 12m03s (3.0×), 2.34 GB;
+  - `GOMEMLIMIT=2GiB` with 4 threads: 25m55s (6.4×), 2.32 GB.
+- The extra time is the collector in translate and write. It is beyond the 1.5× criterion, so
+  by the user's HV1 decision the next step is (b): RAM above 4 GiB with the doorbell kept,
+  starting with the experiment of linking and loading a TamaGo guest above 4 GiB. The table is
+  in doc/go/HOST-VM-SURVEY.md, under HV1.

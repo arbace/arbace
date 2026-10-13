@@ -575,6 +575,21 @@ are recorded below each.
   times the 12 GiB run, the slot is enough for a2g and D8 stands as decided. Otherwise try (b),
   which keeps the doorbell and go-whim's guests as they are, before (c).
 
+  **Measured (2026-10-13), HV1's test:** `bin/a2g --program` natively on stage 0, sequential
+  runs, the host otherwise idle; all three outputs byte for byte the same (`diff -r`, the report's
+  times aside):
+
+  | run | wall | peak RSS | load / reach / translate / write (s) |
+  |---|---|---|---|
+  | `GOMEMLIMIT=12GiB`, 16 threads (today's) | 4m03s | 10.6 GB | 107 / 57 / 32 / 23 |
+  | `GOMEMLIMIT=2GiB`, 16 threads | 12m03s (3.0×) | 2.34 GB | 113 / 67 / 226 / 157 |
+  | `GOMEMLIMIT=2GiB`, 4 threads (a box's vCPUs) | 25m55s (6.4×) | 2.32 GB | 113 / 66 / 800 / 496 |
+
+  a2g fits in the slot but the collector runs constantly in translate and write: beyond the
+  1.5× criterion, so by the user's decision HV1 goes to (b), RAM above 4 GiB with the doorbell
+  unchanged, starting with its experiment (a TamaGo guest linked and loaded above 4 GiB on amd64;
+  the IPA limits on KVM/arm64 and Hypervisor.framework).
+
 - **HV2 Memory back to the host.** Options:
   - (a) nothing: tool guests are short, and their exit frees all;
   - (b) a release call: TamaGo's scavenger (`sysUnused`) reaches the board, which asks the
