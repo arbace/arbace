@@ -20,7 +20,9 @@
   - each Expr becomes the class forms code its emit method's bytecode is: interop on the
     analyzer's resolved members (param-tags pin the overload), reflection where it was
     unresolved, Clojure's boxing and conversions (emitBoxReturn, emitTypedArgs)."
-  (:require [arbace.string :as str])
+  (:require [arbace.string :as str]
+            [arbace.a2g.jrt :as jrt]
+            [arbace.a2g.names :as nm])
   (:import [arbace.lang Compiler$AST Var Keyword Symbol IObj IPersistentMap IPersistentVector
             IPersistentSet IPersistentList ISeq IType IRecord PersistentHashSet Namespace]
            [java.util IdentityHashMap]
@@ -235,11 +237,16 @@
 
 (defn- can-prim? [n] (boolean (:canEmitPrimitive n)))
 
+(declare box-of)
+
 (defn- box
-  "Form f of primitive type c as a boxed value (emitBoxReturn); class forms box implicitly
-  where an Object is expected, so only void needs a form."
-  [f c]
-  (if (= c Void/TYPE) (list 'do f nil) f))
+  "Form f of type c as a boxed value (emitBoxReturn: valueOf, long's Numbers.num being
+  Long.valueOf; void as nil)."
+  [f ^Class c]
+  (cond
+    (= c Void/TYPE) (list 'do f nil)
+    (.isPrimitive c) (list (with-meta (box-of c) {:param-tags [(prim-names c)]}) f)
+    :else f))
 
 (defn- unbox-arg
   "Boxed form f converted to parameter type p (HostExpr.emitUnboxArg)."
@@ -338,6 +345,36 @@
                            (map #(emit ctx %) rest-args)))))
       (call (emit ctx fexpr)))))
 
+(defn- descriptor [^Class c]
+  (cond
+    (= c Void/TYPE) "V" (= c Long/TYPE) "J" (= c Integer/TYPE) "I" (= c Double/TYPE) "D"
+    (= c Boolean/TYPE) "Z" (= c Character/TYPE) "C" (= c Float/TYPE) "F" (= c Short/TYPE) "S"
+    (= c Byte/TYPE) "B"
+    (.isArray c) (str/replace (.getName c) "." "/")
+    :else (str "L" (str/replace (destub (.getName c)) "." "/") ";")))
+
+(def ^:private jrt-scan
+  (delay (jrt/scan (str (or (System/getenv "ARBACE_AOT_ROOT") ".") "/go/arbace/jrt"))))
+
+(defn- jrt-lacks?
+  "Is method m declared by a class jrt writes by hand (not a stand-in a2g's translation
+  replaces) without it in Go? a2g would translate a direct call to a throw; the member tables
+  (reflection) have such members, so compiled code calls them by reflection."
+  [^java.lang.reflect.Method m]
+  (let [scan @jrt-scan
+        c (.getDeclaringClass m)
+        jc (get (:classes scan) (.getName c))]
+    (when (and jc (not (:standin jc)) (not= c Object))
+      (let [g (nm/go-class-name (str/replace (.getName c) "." "/"))
+            desc (str "(" (apply str (map #(descriptor %) (.getParameterTypes m))) ")"
+                      (descriptor (.getReturnType m)))
+            base (nm/method-base (.getName m) desc)]
+        (if (java.lang.reflect.Modifier/isStatic (.getModifiers m))
+          (not (contains? (:funcs scan) (str g "_" base)))
+          (let [ms (into (jrt/struct-methods scan g) (jrt/iface-methods scan g))]
+            (not (or (contains? ms base) (contains? ms (nm/impl-name base))
+                     (contains? (:funcs scan) (str g "_" base))))))))))
+
 (defn- method-call
   "A call of resolved method m: static (target nil) or on target form t."
   [ctx ^java.lang.reflect.Method m t args]
@@ -354,9 +391,14 @@
 (defn- emit-instance-method [ctx n unboxed?]
   (let [^java.lang.reflect.Method m (:method n)]
     (cond
-      (and m (public? (.getDeclaringClass m)) (not (runtime-class? (.getDeclaringClass m) ctx)))
+      (and m (public? (.getDeclaringClass m)) (not (runtime-class? (.getDeclaringClass m) ctx))
+           (not (jrt-lacks? m)))
       (let [f (method-call ctx m (emit ctx (:target n)) (:args n))]
         (if unboxed? f (box f (.getReturnType m))))
+      (and m unboxed?)
+      (unbox-arg ctx (emit-instance-method ctx (assoc n :method nil :qualifyingClass (.getDeclaringClass m)) false)
+                 (.getReturnType m))
+      m (emit-instance-method ctx (assoc n :method nil :qualifyingClass (.getDeclaringClass m)) false)
       (:qualifyingClass n)
       (list 'arbace.lang.Reflector/invokeInstanceMethodOfClass (emit ctx (:target n))
             (constant ctx (:qualifyingClass n)) (:methodName n) (obj-array ctx (:args n)))
@@ -367,9 +409,14 @@
 
 (defn- emit-static-method [ctx n unboxed?]
   (let [^java.lang.reflect.Method m (:method n)]
-    (if (and m (public? (.getDeclaringClass m)) (not (runtime-class? (.getDeclaringClass m) ctx)))
+    (cond
+      (and m (public? (.getDeclaringClass m)) (not (runtime-class? (.getDeclaringClass m) ctx))
+           (not (jrt-lacks? m)))
       (let [f (method-call ctx m nil (:args n))]
         (if unboxed? f (box f (.getReturnType m))))
+      (and m unboxed?)
+      (unbox-arg ctx (emit-static-method ctx (assoc n :method nil) false) (.getReturnType m))
+      :else
       (list (with-meta 'arbace.lang.Reflector/invokeStaticMethod
               {:param-tags '[java.lang.Class java.lang.String java.lang.Object/1]})
             (constant ctx (:c n)) (:methodName n) (obj-array ctx (:args n))))))
@@ -380,7 +427,8 @@
 (defn- emit-instance-field [ctx n unboxed?]
   (let [^java.lang.reflect.Field f (:field n)]
     (if (field-ok? ctx f)
-      (list (symbol (str ".-" (.getName f))) (list 'cast (type-sym (.getDeclaringClass f)) (emit ctx (:target n))))
+      (let [r (list (symbol (str ".-" (.getName f))) (list 'cast (type-sym (.getDeclaringClass f)) (emit ctx (:target n))))]
+        (if unboxed? r (box r (.getType f))))
       (list (with-meta 'arbace.lang.Reflector/invokeNoArgInstanceMember
               {:param-tags '[java.lang.Object java.lang.String boolean]})
             (emit ctx (:target n)) (:fieldName n) (:requireField n)))))
@@ -388,7 +436,8 @@
 (defn- emit-static-field [ctx n unboxed?]
   (let [^java.lang.reflect.Field f (:field n)]
     (if (field-ok? ctx f)
-      (symbol (str (type-sym (.getDeclaringClass f))) (.getName f))
+      (let [r (symbol (str (type-sym (.getDeclaringClass f))) (.getName f))]
+        (if unboxed? r (box r (.getType f))))
       (list (with-meta 'arbace.lang.Reflector/getStaticField {:param-tags '[java.lang.Class java.lang.String]})
             (constant ctx (:c n)) (:fieldName n)))))
 
@@ -585,7 +634,7 @@
   emit leaves one."
   [f n]
   (let [p (:prim n)]
-    (if (and p (#{"local" "instance-method" "static-method" "instance-field" "static-field" "instance?"} (:op n))
+    (if (and p (#{"local" "instance?"} (:op n))
              (box-of p))
       (list (with-meta (box-of p) {:param-tags [(prim-names p)]}) f)
       f)))

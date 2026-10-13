@@ -148,6 +148,21 @@ build() {
       || { grep -v '^==' "$dir/build$variant-$a.log" | tail -20 >&2; echo "arbace-go: $a: build failed" >&2; return 1; }
     echo "   g2a build $a: $(since "$t0")" >&2
   done
+  if [ "${ARBACE_AOT:-}" = 1 ] && [ -z "${aot_phase2:-}" ]; then
+    # standalone S6: the program just built prepares its namespaces and compiles them to class
+    # forms ($dir/aot$variant); a2g translates the program again with them, and that program,
+    # built and given the image of what stays evaluated, is the build's
+    echo "== the namespaces compiled (arbace.aot)" >&2
+    t0=$(date +%s)
+    aot_out=$dir/aot$variant prepare "$dir/$(host_arch)/$exe" "$dir/aot$variant.image" || return 1
+    echo "   compiled: $(since "$t0")" >&2
+    local saved=("${a2g_args[@]}")
+    a2g_args+=(--input "$dir/aot$variant")
+    aot_phase2=1 build
+    local st=$?
+    a2g_args=("${saved[@]}")
+    return $st
+  fi
   image || return 1
   # what printed the module (bin/seed --make records it in the seed's SEED.edn)
   [ -n "$variant" ] || echo "bin/arbace-go --build: a2g and g2a on the host executable" > "$dir/printed-by"
@@ -235,10 +250,19 @@ prepare() {
   rm -f "$image"
   printf '(doseq [n (quote [%s])]\n  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)))))\n' "$nss" \
     > "$dir/prepare$variant.ae"
-  GOGC=${GOGC:-400} ARBACE_PREPARE=$image "$exe" "$dir/prepare$variant.ae" > "$dir/prepare$variant.log" 2>&1 \
+  # the namespaces compiled to class forms too (standalone S6, arbace.aot): the units the run
+  # records, compiled when all are loaded into the tree $aot_out
+  local compile=()
+  if [ -n "${aot_out:-}" ]; then
+    rm -rf "$aot_out"
+    printf '(require (quote arbace.aot.main))\n(let [r (arbace.aot.main/run "%s" nil)]\n  (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")\n  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m)))\n' "$aot_out" \
+      >> "$dir/prepare$variant.ae"
+    compile=(env ARBACE_COMPILE=1 ARBACE_PATH="$root" ARBACE_AOT_ROOT="$root")
+  fi
+  "${compile[@]}" env GOGC=${GOGC:-400} ARBACE_PREPARE=$image "$exe" "$dir/prepare$variant.ae" > "$dir/prepare$variant.log" 2>&1 \
     || { tail -20 "$dir/prepare$variant.log" >&2; echo "arbace-go: prepare failed ($dir/prepare$variant.log)" >&2; return 1; }
   [ -s "$image" ] || { echo "arbace-go: prepare wrote no image ($dir/prepare$variant.log)" >&2; return 1; }
-  grep '^image:' "$dir/prepare$variant.log" >&2
+  grep '^image:\|^aot:' "$dir/prepare$variant.log" >&2
   echo "arbace-go: image $(stat -c %s "$image") bytes" >&2
 }
 
