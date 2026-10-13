@@ -1440,3 +1440,285 @@ Accepted by the user as recommended (2026-10-13).
   JVM throws `NoClassDefFoundError`; (b) a `NoClassDefFoundError` with the class's name.
   *Recommended: (a)* (as done): a compile error of the class forms, as the other build failures
   are; (b) when code needs to catch the JVM's error (no case covers it). Accepted.
+
+## S5: jrt as core and library
+
+Status: measured on the branch `s5-jrt` (2026-10-13), from main at `38bcad1`; the split is not
+built. R1 (STANDALONE-SURVEY §9.3) bites: the reached classes form one strongly connected
+component however the graph is cut at the level of Java packages, and the cuts that would make
+a core small enough need a cross-package mechanism a2g does not have. The amendments SA100-SA103
+ask what to do; meanwhile HV1 (b) (RAM above 4 GiB for a guest, BOX-NOTES.md) has removed the
+premise that a package must compile in 3 GiB.
+
+### The graph (`tools/godeps`)
+
+`tools/godeps` (Go, built with TamaGo's toolchain as the other `tools/`) reads one printed
+package (`target/arbace-go/work-amd64/mod/jrt`, `lang`), with GOOS and GOARCH's build
+constraints, and builds a graph whose edges are exactly what makes a Go package import another
+when two declarations are put apart: a unit names a top-level declaration of another unit
+(identifiers resolved by go/parser's scopes: locals, parameters, fields and selectors are not
+references). The units: with `-classes`, a class of a translated file (its struct or interface
+type, its methods, which Go requires in the type's package, its `C_` functions), the
+declarations a2g writes for it into the shared files (`a2g_classes.go`: its invoker, member
+table, class variable and registering `init`) joining it by their name's longest class prefix;
+without `-classes`, a translated Java source file; each other top-level declaration (jrt's
+hand-written forms, the literal pool, the `Up_` conversions, the adapters) a unit of its own, a
+method with its type. Tarjan's algorithm (iterative) gives the components. Four models of which
+edges count:
+
+- all edges (`godeps -classes`): the program as a2g writes it;
+- `-linkname`: a value (function, variable) reached through a `//go:linkname` pull from a lower
+  package costs only the types its declaration names (its signature, the variable's type);
+- `-types`: only the edges that name a type: every value edge cut (a function variable the
+  higher package sets, its types erased);
+- `-decls`: only what declarations name (signatures, fields, supertypes, interfaces' method
+  sets), not bodies or initial values: the bound when bodies can move up too (a method a stub
+  calling its body in a higher package).
+
+`-why A,B` prints the declarations of A naming B's; `-edn` writes the graph for the Clojure
+reader. Measured on main's printed program of `38d4827` (the sources of the seed's fixpoint,
+`68e00ce`); jrt: 19,431,335 bytes of declarations, 3,071,591 AST nodes; lang 7,781,689 bytes,
+1,246,049 nodes.
+
+| jrt, unit per class | units | edges | largest component | of jrt's nodes | with what it reaches |
+|---|---:|---:|---|---:|---:|
+| all edges | 11,350 | 82,821 | 9,449 units, 16.5 MB, 2,571,179 nodes | 83.7% | 2,595,747 |
+| `-linkname` | 13,486 | 49,970 | 994 units, 8.4 MB, 1,371,085 nodes | 44.6% | 1,371,927 |
+| `-types` | 11,350 | 82,821 (all listed) | 474 units, 5.0 MB, 831,788 nodes | 27.1% | 832,386 |
+| `-decls` | 13,486 | 29,489 | 261 units, 2.5 MB, 421,123 nodes | 13.7% | 423,085 |
+
+A unit per Java source file (all edges): 10,052 units, the largest component 8,367 of them,
+85.6% of the bytes. **By Java package** (a package depends on another when one of its classes'
+units does): of the 75 (73 Java packages, jrt's hand-written forms and a2g's shared files), 74
+are one component with all edges (`java.sql` alone outside), 72 with `-linkname`, 57 with
+`-types`, 49 with `-decls`. A split along Java packages, as A2G-SPEC §4.2 planned it, is not
+possible.
+
+The largest component's content (all edges, by nodes): `java.util` 573k, `java.util.stream`
+436k, `java.util.concurrent` 167k, `java.text` 128k, `java.lang` 102k, `java.time` 80k,
+`java.math` 79k, `java.time.format` 71k, jrt's hand-written 65k, `java.io` 63k,
+`java.util.regex` 61k, `java.net` 56k, a2g's shared 55k, `java.nio` 48k, the security
+providers, the locale providers, ICU's normalizer ... : everything but a few leaves
+(`ConcurrentHashMap`'s spliterators, ICU's `Normalizer2Impl`, a few concurrent classes).
+
+lang (unit per class, `-lang`): all edges, the largest component 449 of 2,587 units, 4.6 MB,
+820,698 nodes (65.9%; 938,258 with what it reaches); with `-types` it falls apart (the largest
+component is one class: `a2g_dyn.go`'s `dynCore` 117k nodes, `RestFn` 107k): lang's cycles are
+calls (`RT`, `Util`, `Numbers` ...), not types.
+
+### Why one component
+
+The paths that close the cycles (`path` over the graphs; jrt's hand-written forms are core):
+
+- **Bodies of core classes that use the library**: the hand-written `String` names `Formatter`
+  (`String.format`), whose `Formatter$FormatSpecifier` names `java.time` (`Instant`,
+  `TemporalAccessor`, `ChronoField`), `java.math` (`BigDecimal`, `MathContext`) and `java.text`
+  (`DecimalFormat`, `DecimalFormatSymbols`, `NumberFormat`); `String` names `Locale`, whose
+  display names reach `LocaleProviderAdapter`, `LocaleResources`, `MessageFormat`, and through
+  them `ConcurrentHashMap`, `Pattern`, `NumberFormat` → `Currency` → `LocalDateTime`;
+  `GregorianCalendar`, `TimeZone`, `SimpleTimeZone`, `Calendar` name `java.time` and
+  `sun.util.calendar`; `File` names `URL`, `URI`, `Path`; `Random` names the streams.
+- **Declarations**, which no body cut removes: every collection's `stream()` (the interface
+  `Stream` in its method set, and `Stream`'s own: `Collector`, `Optional`, `Spliterator` ...);
+  `Thread.sleep(Duration)`, `TimeUnit.toChronoUnit()` and `convert(Duration)` (jrt's
+  `ForkJoinPool` names `TimeUnit`), so `java.time.Duration` and `ChronoUnit`, whose own
+  declarations name `BigDecimal`, `Temporal`, `TemporalUnit`; `Optional*.stream()`,
+  `Random.ints()`; `Reader.read(CharBuffer)`. The `-decls` component (421k nodes) is what the
+  JDK's API ties together by its signatures: by nodes `java.math` 73k, `java.time` 62k,
+  `java.util` 57k, jrt's hand-written 30k, `java.util.concurrent` 29k, `java.util.regex` 26k,
+  `java.lang` 26k, `java.time.format` 24k, `java.time.chrono` 20k, `java.util.function` 17k,
+  `java.util.stream` 11k, `java.text` 11k.
+
+Simulated (`-linkname`, the edges from 22 bridging classes' bodies to non-core packages removed:
+`Formatter` and its `FormatSpecifier`, `Locale` and its nested classes, `Currency`, the
+calendars and time zones, `File`, `Properties`, `ResourceBundle$Control`, `Long`'s
+`BigInteger` ...): the component falls from 1,371,085 to 1,201,533 nodes. What holds the rest
+is declarations (`Thread` → `ForkJoinPool` → `TimeUnit` → `Duration` → `ChronoField` →
+`Instant` → `ZonedDateTime` → `LocalDate`; `Duration` → `BigDecimal`; `ChronoField` →
+`LocaleProviderAdapter` → `NumberFormatProviderImpl` → `DecimalFormat`).
+
+### What gc needs (measured)
+
+`go build -p 1 -toolexec` with GNU time around each tool, a fresh cache, the program above
+(`.tmp/s5/gcmem*.sh`); peak RSS in GiB (KiB / 2^20), seconds:
+
+| package | nodes | default | `-c=1` | `-c=1`, `GOGC=25` | `-c=1 -l` | `-c=1`, `GOMEMLIMIT=2500MiB` | default, `GOGC=25` |
+|---|---:|---|---|---|---|---|---|
+| `arbace/jrt` | 3,071,591 | 8.46 (52 s) | 6.52 (114 s) | 5.22 (125 s) | 5.39 (90 s) | 4.38 (627 s) | 6.07 (61 s) |
+| `arbace/lang` | 1,246,049 | 3.66 (25 s) | 3.02 (46 s) | 2.31 (49 s) | | | |
+| `main` (`cmd/arbace`) | | 0.55 (2.5 s) | 0.53 | | | | |
+| the link | | 1.11 (3.2 s) | 1.11 | | | | |
+
+The collector's live heap is most of the peak (a limit under it costs 5.5 times the time and
+still needs 4.4 GiB). Fitted on jrt and lang at `-c=1`: about 0.63 GiB + 2.0 KiB per AST node,
+so "about 2.5 GB" (2.5 GiB) is about 975,000 nodes, a third of jrt. The models' components at
+that rate: all edges 5.6 GiB, `-linkname` 3.2 GiB, `-types` 2.2 GiB, `-decls` 1.4 GiB; lang's
+component 2.4 GiB. Only `-types` and `-decls` fit, and lang (3.0 GiB, 2.3 with `GOGC=25`) is
+over too.
+
+### What a split would take
+
+Go refuses an import cycle and wants a type's methods in its package. A class-level split (the
+Java packages cannot be the unit) needs, besides a2g writing N packages (each its shared files,
+names qualified across packages, the partition computed from the components and checked
+acyclic, jrt's eager initializations and the registrations' `Go:` names, `bin/g2a build`'s
+packages, the seed and the fixpoint), one of:
+
+- **linkname pulls** for the upward value edges: `//go:linkname f arbace/jrt/x.F` in the lower
+  package, a body-less declaration and an empty `.s` file. Tried (`.tmp/s5/lnk`): TamaGo's
+  go1.27.1 links it for linux/amd64 and arm64 without a push marker in the defining package (the
+  linker's check is for the standard library); the call is direct, not inlined. Bound:
+  `-linkname`, 3.2 GiB: not enough alone.
+- **outlined bodies** with them: a core method whose body names the library becomes a stub, its
+  body a function of a higher package reached by linkname. Bound: `-decls` (1.4 GiB), at the
+  cost of a call per outlined method and a table of them (or rules) in a2g.
+- **function variables** (hooks) the library's `init` sets, their types erased to the core's:
+  bound `-types` (2.2 GiB); every call from the core to what is not in it (`Arrays`, `TreeMap`,
+  the streams) goes through a variable, and initialization order matters.
+
+In each case lang needs the same (its calls form the cycle). Estimate: S5's 5-10 days, most of
+it in a2g, for a result that the box can now do without (below).
+
+### HV1 (b) and the premise
+
+The survey's premise (§6.2, D8) was the 3 GiB slot. HV1 (b) (BOX-NOTES.md, BX80-BX84) gives a
+guest RAM above 4 GiB (`ARBACE_BOX_RAM`, amd64 up to 1 TiB, arm64 64 GiB). A tool guest of 8 GiB
+compiles jrt as it is with `-c=1` (6.5 GiB), or in 6 GiB with `GOGC=25` (5.2 GiB): neither
+changes the compiler's output (`-c` is the back end's concurrency, `GOGC` the compiler's own
+collector), so S8's byte-for-byte equality is not affected. The host here shows 18.9 GiB to 62
+GiB depending on the balloon; the Mac (M2 Max) has more.
+
+### Reachability per program and the core
+
+a2g already translates per program: its reach phase (A2G-SPEC §4.1) keeps the methods reachable
+from the program's roots (27,896 of the closed world's, report.edn), and Go's linker drops
+what is unreferenced, except that every translated class's registration (`a2g_classes.go`'s
+`init`) keeps the class's member table and invokers live. Packages would let a program that
+imports no `java.time` not carry it; with one package, the member tables decide.
+
+The core, named from the graph: what the JDK's signatures tie to `java.lang` and the
+collections (the `-decls` component, 421k nodes, 2.5 MB): `java.lang`, `java.util` (the
+collections, `Locale`, `Formatter`'s declarations, `Optional`, `Random`), `java.util.function`,
+the stream interfaces, `java.util.concurrent`'s `TimeUnit` and the executors' interfaces,
+`java.time`'s value types (`Duration`, `Instant`, `LocalDate` ..., `ChronoField`, `ChronoUnit`),
+`java.math`'s `BigInteger` and `BigDecimal`, `java.util.regex.Pattern`, `java.io`'s readers and
+writers, and jrt's hand-written classes. The library around it: the streams' implementations
+(2.7 MB), `java.util.concurrent`'s implementations (1.0 MB), `java.text` (0.8 MB), the time
+formatting and chronologies, the locale and security providers, ICU's normalizer, sockets and
+`java.nio.file`.
+
+### Checks
+
+- `tools/godeps` on this branch's own printed program (`target/arbace-go/work-amd64/mod/jrt`,
+  after the gate's build): the four models' components as in the table, to the node.
+- The linkname experiment (`.tmp/s5/lnk`): built and run for linux/amd64, built for arm64.
+- gc's measurements: `.tmp/s5/gcmem-*.txt`, `.tmp/s5/v-*.txt`.
+
+### Amendments
+
+Proposed, for the user's decision.
+
+- **SA100 S5's split.** The reached classes are one component at the level of Java packages
+  (74 of 75), 84% of jrt at the level of classes; a core under 2.5 GiB needs a cross-package
+  mechanism in a2g, and lang needs splitting too. (a) No split now: tool guests compile jrt and
+  lang as they are, with RAM above 4 GiB (HV1 (b)); S5 closes with the measurement, the graph
+  tool and the core named; (b) a class-level split with linkname pulls and outlined bodies,
+  computed by a2g from the components (5-10 days, lang included); (c) a split with function
+  variables set by the library's `init`, types erased at the hooks. *Recommended: (a)*: the
+  box no longer needs it, (b) and (c) change a2g's output everywhere for a memory gain HV1 (b)
+  already gives, and (c) costs every call from the core to the rest; (b) stays the way to
+  modularity when a program should not carry `java.time` or the streams.
+- **SA101 How gc runs in a tool guest.** (a) `-c=1` and `GOGC=25` for jrt and lang (5.2 and
+  2.3 GiB, the time of `-c=1`), the guest given 8 GiB; (b) gc's defaults (8.5 GiB for jrt, a
+  12 GiB guest); (c) `-c=1` alone (6.5 GiB). *Recommended: (a)*; the output is the same in all
+  three. For S7/S8, which own the guests' parameters.
+- **SA102 `tools/godeps`.** (a) Kept in `tools/` as the measuring tool of the package graph
+  (outside the gate); (b) removed once recorded. *Recommended: (a)*: a split, if ever decided,
+  starts from it.
+- **SA103 The exit criterion.** S5's "no package needs more than about 2.5 GB" (survey §9.1).
+  (a) Replaced by "jrt and lang compile in the tool guest's RAM" (S7, SA101), measured;
+  (b) kept, which needs SA100 (b) or (c). *Recommended: (a)*, with SA100 (a).
+
+## After S4: the known issues
+
+Status: on the branch `s5-jrt` (2026-10-13), with S5's measurement. AGENDA's known issues from
+S4 ("S4: the JVM removed", Left) and SA90 (b).
+
+- **SA90 (b): reflection on a member typed by a later sibling.** `arbace.classes.interp`:
+  `publish!` binds `*pending-types*`, into which `sig-class` records each sibling not yet defined
+  that a member's type names (still `Object` then), and enters the class in `waiting` under each
+  such sibling; `define!`, once its classes are defined and in the registry, publishes the
+  classes waiting for each of them again (`republish!`), in their own compilation's context
+  (its compile set, its classes merged with the ones just defined), after the host forgot
+  their members: `CF$Host.clearMembers` (a no-op by default, the test host's), the Go host's
+  `CFGo.clearMembers` (a native in `arbace.a2g.dyncf`: the class info's `Methods`, `Ctors` and
+  `Fields` emptied, and `jrt.ClearReflectionCaches`, new in `go/arbace/jrt/reflect.ae`, which
+  empties the public members' lists of every class, since a subclass's include the class's).
+  The dynamic class's slots and methods by key are set again by the second publication.
+  `native.ae:745` passes (its group removed from both known-mismatch files); a field's type and
+  a parameter's report the sibling too. A do evaluated again still reports the previous
+  sibling class while the new one is not defined (the name resolves to it): not covered.
+- **`go/arbace/jrt/reflect_tables.ae`** regenerated by `bin/jrt manifest` on the frozen jar:
+  `ForkJoinTask.adapt`'s three overloads in the JDK's CDS order (`Runnable, Object`,
+  `Callable`, `Runnable`), as the generator orders a class of the CDS archive; two runs give the
+  same file; `manifest.edn` and `manifest_test.ae` unchanged. (Without the archive,
+  `-Xshare:off`, the generator warns and orders every class's overloads by descriptor: not
+  what is committed.)
+- **The box's oracle** run for real (`ARBACE_BOX_ARCHES=amd64 bin/arbace-go --build --box`, the
+  smoke test 113 ok, then `ARBACE_BOX_NET=loopback bin/oracle check 'target/arbace-go/box-amd64/arbace-box -' -j 8 --timeout 900 --exclude forms/files. --exclude forms/processes. --expected test/oracle/known-go-box-amd64.edn`):
+  22,052 of 22,105 cases match, the 53 known, 0 new, 0 now passing: the file was right but for
+  the case SA90 (b) fixed; its `:about` says so.
+- **Variants merged into their bases** (VENDOR-NOTES hand change 24): `arbace/lang/go/Var.ae`
+  and `Reflector.ae` applied to `arbace/lang/{Var,Reflector}.ae` (nothing but a2g reads those
+  bases since S4); the front end's `classes/{types,env,analyze}.subst.ae` merged so that one
+  source runs on Go and on the frozen jar: `types/lang` is the constant `"arbace/lang"`, `env`'s
+  reflection cache a `HashMap` and its constructors of abstract classes from the world's
+  signatures when jrt lists none (on the JVM every class lists its own, and nothing is added),
+  `analyze`'s generic signatures from `arbace.classes.go` and no source lookup when
+  `arbace.classes.go/go-build?`. a2g's output before and after (`bin/a2g --program`, the
+  commits `3f31072` and the merge's): the same but for the analyzer's gensym numbers
+  (`i_101061` → `i_101062`), lines, the order of `Reflector`'s and `Var`'s members, the
+  embedded front end's text and report.edn's variant counts; `Var`'s and `Reflector`'s forms
+  equal as multisets of tokens. Not merged: `RT`, `Main`, and `Compiler`'s variants
+  (`Compiler`, `CompilerCode`, `CompilerOps`, `ClassForms`), which S6 is changing.
+- **`bin/box-vendor convert`** (S0's replay): it converts the packages the clone holds, so the
+  replay from go-whim's commit no longer asks for the launcher, which is Arbace's own (S1) and
+  comes only with an edited clone (`--from`). Run into `.tmp/s5/bv-out` (52 s): it succeeds;
+  against S0's commit `3fa588c` the forms differ only by g2a's later layout data
+  (`:go/breaks [4]` → `[[4 123]]`) and purego, vendored after S0.
+
+### Checks
+
+- The essential `bin/gate` on `b263b84` (18m14s): the seed as pinned; stage 0 (`d144af21…`) in
+  20 s; the executables built in 837 s; the smoke test; Clojure's suite on the Go test build
+  20,506 of 20,520, no regressions; the oracle against the frozen v4 22,505 of 22,558, the 53
+  known, 0 new.
+- The box (above): built, smoke test 113 ok, its oracle 22,052 of 22,105, 53 known, 0 new.
+- The merged front end on the frozen jar: `bin/a2g-edge verify` (`jdk/edge.edn` is the JVM's
+  answer) and `bin/j2a-check` (the baseline, samples and module forms as expected).
+
+### Amendments
+
+Proposed, for the user's decision.
+
+- **SA104 SA90 (b) as built.** (a) The classes whose member types named a sibling not yet
+  defined are published again when it is defined, their members first forgotten by the host
+  and reflection's lists emptied for every class (as done); (b) jrt's member infos carry a
+  type resolved lazily (a resolver per entry; jrt's reflection changed); (c) only the named
+  members replaced in place. *Recommended: (a)*: no change to jrt's reflection model, and a
+  second publication is rare (a top-level do of classes naming later siblings).
+- **SA105 Which variants are merged.** (a) `Var`, `Reflector` and the front end's three
+  substitutions now; `RT`, `Main` and `Compiler`'s four after S6, which changes them; (b) all
+  now. *Recommended: (a)*: merging S6's files under it would only make conflicts.
+- **SA106 The front end's host test.** (a) `arbace.classes.go/go-build?`, true when
+  `arbace.lang.Compiler$CFGo` (the Go build's class forms host) exists; (b) a system property
+  the Go program sets; (c) the substitutions kept. *Recommended: (a)*: no new property, and
+  the class is the thing whose presence makes the difference.
+- **SA107 S0's replay.** (a) `bin/box-vendor convert` converts the packages the clone holds (as
+  done); (b) the launcher's configurations removed from `configs`, kept in `rt_configs` only.
+  *Recommended: (a)*: an edited clone (`--from`) holding the launcher still converts it.
+
+**Decided (2026-10-13, the user):** SA100 (a) and SA103 (a): no split; S5 closes with the
+measurement, `tools/godeps` and the core named, its exit criterion "jrt and lang compile in the
+tool guest's RAM", measured. SA101 (b), against the recommendation: gc's defaults (no `-c=1`, no
+`GOGC`), the guest that compiles jrt given 12 GiB. SA102, SA104-SA107 (a), as recommended.

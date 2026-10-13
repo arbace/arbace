@@ -969,6 +969,20 @@ step 4 (2026-10-07); the others came with later work, as each says:
     removed: `repl.deps`, `java.basis` (and `.impl`), `tools.deps.interop`, `java.browse`,
     `java.browse-ui`, `java.javadoc`, `inspector`, `xml`. The JVM's version of every file is on
     the branch `arbace-for-java-26`.
+24. **Standalone S5: Go-build variants merged into their bases** (2026-10-13;
+    doc/STANDALONE-NOTES.md, "After S4: the known issues", SA105, SA106). `arbace/lang/Var.ae`:
+    `getThreadBinding` looks the binding up with `valAt`, not `entryAt` (no `MapEntry` per deref
+    of a bound var; doc/go/SPEED-NOTES.md). `arbace/lang/Reflector.ae`: no `java.lang.invoke`,
+    `java.util.stream` or `Proxy`: `canAccess` calls `Method.canAccess`, `instanceMethods`
+    collects with a loop, `boxArg` adapts a fn to a functional interface with the native
+    `adaptFn` (jrt's `AdaptFn`, A2G-SPEC §11). The class forms' front end, which runs both on
+    Go and on the frozen jar (j2a, the edge): `types/lang` is `"arbace/lang"`; `env`'s
+    reflection cache is a `HashMap`, and the constructors jrt's reflection omits for abstract
+    classes come from the world's signatures; `analyze` takes the generic signatures from
+    `arbace.classes.go` and does no source lookup when `arbace.classes.go/go-build?`
+    (`arbace.lang.Compiler$CFGo` exists), else reflects as before. The files
+    `arbace/lang/go/{Var,Reflector}.ae` and `arbace/lang/go/ns/classes/*.subst.ae` are removed.
+    `RT`, `Main` and `Compiler`'s variants stay (S6 changes them).
 
 ## Dialect divergences
 
