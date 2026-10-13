@@ -174,12 +174,18 @@
 (defn- const-type [v]
   (cond (var? v) 'arbace.lang.Var
         (keyword? v) 'arbace.lang.Keyword
+        (class? v) 'java.lang.Class
         :else 'java.lang.Object))
 
 (defn- constant [ctx v]
-  (if (or (nil? v) (string? v))
-    v
-    (const-field ctx v (const-type v))))
+  (cond
+    (or (nil? v) (string? v)) v
+    ;; a class made at run time may not exist yet when the class holding the constant is
+    ;; initialized: looked up where used
+    (and (class? v) (runtime-class? v ctx))
+    (list (with-meta 'arbace.lang.RT/classForNameNonLoading {:param-tags '[java.lang.String]})
+          (destub (.getName ^Class v)))
+    :else (const-field ctx v (const-type v))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; locals
@@ -198,8 +204,18 @@
   [b]
   (symbol (str (:name b) "__" (:idx b))))
 
+(defn- identity-set
+  "The objects of xs as a set by identity. A fn's closes map cannot be asked containsKey: its
+  keys, LocalBindings, hash by their index (Arbace's deterministic hashCode), and FnExpr.parse
+  renumbers a direct fn's arguments after its inner fns closed over them."
+  [xs]
+  (let [m (IdentityHashMap.)]
+    (doseq [x xs] (.put m x true))
+    m))
+
 (defn- closed? [ctx lb]
-  (and (:objx ctx) (contains? (:closes (:objx ctx)) lb)))
+  (when-let [^IdentityHashMap s (:closed ctx)]
+    (.containsKey s lb)))
 
 (defn- field-sym [b] (symbol (str ".-" (:name b))))
 
@@ -209,7 +225,7 @@
 ;; ---------------------------------------------------------------------------------------
 ;; expressions
 
-(declare emit emit-unboxed emit-fn-class! emit-body)
+(declare emit emit-unboxed emit-fn-class! emit-deftype-class! emit-body)
 
 (defn- prim [e] (:prim (node e)))
 
@@ -476,22 +492,22 @@
   [ctx ox nil-locals]
   (let [cname (emit-fn-class! ctx ox)
         args (for [lb (keys (:closes ox))]
-               (if (contains? nil-locals lb)
+               (if (.containsKey ^IdentityHashMap nil-locals lb)
                  nil
                  (let [b (node lb)]
                    (emit-local ctx {:b lb :shouldClear false} (boolean (:bindingPrim b))))))]
-    (list* 'new (symbol cname) (concat (when (:supportsMeta ox) (when (:hasMeta ox) [nil])) args))))
+    (list* 'new (symbol cname) (concat (when (:supportsMeta ox) [nil]) args))))
 
 (defn- emit-letfn [ctx n unboxed?]
   (let [bis (map node (:bindingInits n))
-        lbs (set (map :binding bis))
+        lbs (identity-set (map :binding bis))
         syms (map #(local-sym (node (:binding %))) bis)
         inits (for [bi bis] (fn-instance ctx (node (:init bi)) lbs))
         sets (for [bi bis
                    :let [ox (node (:init bi))
                          cname (emit-fn-class! ctx ox)]
                    lb (keys (:closes ox))
-                   :when (contains? lbs lb)]
+                   :when (.containsKey ^IdentityHashMap lbs lb)]
                (list 'set! (list (field-sym (node lb)) (list 'cast (symbol cname) (local-sym (node (:binding bi)))))
                      (local-sym (node lb))))]
     (list 'let (vec (mapcat (fn [s i] [(tagged s Object) i]) syms inits))
@@ -609,8 +625,11 @@
                             (list '.isInstance (constant ctx c) (emit ctx (:expr n)))
                             (list 'instance? (type-sym c) (emit ctx (:expr n)))))
             "invoke" (emit-invoke ctx n)
-            "fn" (fn-instance ctx n #{})
-            "new-instance" (if (:isDeftype n) (fail "deftype*") (fn-instance ctx n #{}))
+            "fn" (fn-instance ctx n (IdentityHashMap.))
+            "new-instance" (if (:isDeftype n)
+                             ;; deftype*: the class, made once; its value nil (ObjExpr.emit)
+                             (do (emit-deftype-class! ctx n) nil)
+                             (fn-instance ctx n (IdentityHashMap.)))
             "do" (let [es (:exprs n)]
                    (if (empty? es)
                      nil
@@ -630,7 +649,7 @@
   "Code for analyzed node e, its value of its primitive type (emitUnboxed)."
   [ctx e]
   (let [n (node e)]
-    (when-not (can-prim? n) (fail (str "unboxed emit of " (:op n))))
+    (when-not (or (can-prim? n) (= "throw" (:op n))) (fail (str "unboxed emit of " (:op n))))
     (line-meta
       (case (:op n)
         "local" (emit-local ctx n true)
@@ -651,6 +670,7 @@
                         (list '.isInstance (constant ctx c) (emit ctx (:expr n)))
                         (list 'instance? (type-sym c) (emit ctx (:expr n)))))
         "recur" (emit-recur ctx n)
+        "throw" (list 'throw (list 'cast 'java.lang.Throwable (emit ctx (:excExpr n))))
         (fail (str "no unboxed back end for " (:op n))))
       n)))
 
@@ -669,6 +689,31 @@
 (defn- simple-name [^String binary]
   (subs binary (inc (.lastIndexOf binary "$"))))
 
+(defn- ret-body
+  "A deftype's method body as returned in type ret (ObjMethod.emitBody): unboxed when it can be,
+  else boxed then cast or unboxed as ASM's unbox does."
+  [ctx body ^Class ret]
+  (let [n (node body)
+        bc (:prim n)]
+    (if (and (.isPrimitive ret) (not= ret Void/TYPE) (can-prim? n))
+      (cond
+        (= bc ret) (emit-unboxed ctx body)
+        (and (= ret Long/TYPE) (= bc Integer/TYPE)) (emit-unboxed ctx body)
+        (and (= ret Double/TYPE) (= bc Float/TYPE)) (emit-unboxed ctx body)
+        (and (= ret Integer/TYPE) (= bc Long/TYPE))
+        (list (with-meta 'arbace.lang.RT/intCast {:param-tags '[long]}) (emit-unboxed ctx body))
+        (and (= ret Float/TYPE) (= bc Double/TYPE)) (list 'unchecked-float (emit-unboxed ctx body))
+        :else (fail (str "mismatched primitive return, expected " ret ", had " bc)))
+      (let [f (emit ctx body)]
+        (cond
+          (= ret Void/TYPE) f
+          (= ret Object) f
+          (= ret Boolean/TYPE) (list '.booleanValue (list 'cast 'java.lang.Boolean f))
+          (= ret Character/TYPE) (list '.charValue (list 'cast 'java.lang.Character f))
+          (.isPrimitive ret) (list (symbol (str "." (.getName ret) "Value")) (list 'cast 'java.lang.Number f))
+          (or (runtime-class? ret ctx) (not (public? ret))) f
+          :else (list 'cast (type-sym ret) f))))))
+
 (defn- method-body
   "The body of FnMethod or NewInstanceMethod m (its node), in the method's context: wrapped in
   a loop over its parameters when a recur targets them."
@@ -679,11 +724,14 @@
         ctx' (assoc ctx :method-recur rec :method-locals locals :loop-locals locals)
         ;; ^long and ^double parameters of a fn that is not primitive: converted on entry, as
         ;; the evaluator's invokeFn does (RT.longCast, doubleCast)
-        prims (for [lb locals
-                    :let [b (node lb)]
-                    :when (:bindingPrim b)]
-                b)
-        body (emit ctx' (:body mn))
+        fn-method? (= "fn-method" (:op mn))
+        prims (when fn-method?
+                (for [lb locals
+                      :let [b (node lb)]
+                      :when (:bindingPrim b)]
+                  b))
+        ret (:retClass mn)
+        body (if fn-method? (emit ctx' (:body mn)) (ret-body ctx' (:body mn) ret))
         body (if @rec
                (list 'loop (vec (mapcat (fn [lb] (let [b (node lb)] [(tagged (local-sym b) (or (:bindingPrim b) Object)) (local-sym b)]))
                                         locals))
@@ -704,6 +752,108 @@
       (symbol (str "p__" (local-sym b)))
       (local-sym b))))
 
+(def ^:private prim-classes
+  {'long Long/TYPE 'double Double/TYPE 'int Integer/TYPE 'boolean Boolean/TYPE 'char Character/TYPE
+   'float Float/TYPE 'short Short/TYPE 'byte Byte/TYPE})
+
+(defn- tag-class
+  "The class a field's tag names (Compiler.tagClass): Object without one."
+  [tag]
+  (cond
+    (nil? tag) Object
+    (prim-classes tag) (prim-classes tag)
+    (class? tag) tag
+    :else (let [c (ns-resolve *ns* tag)] (if (class? c) c (Class/forName (str tag))))))
+
+(defn- box-class [^Class c]
+  ({Long/TYPE Long Double/TYPE Double Integer/TYPE Integer Boolean/TYPE Boolean Character/TYPE Character
+    Float/TYPE Float Short/TYPE Short Byte/TYPE Byte} c))
+
+(defn- class-interfaces
+  "The interfaces of a deftype's or reify's class (its node ox), as the analysis made the
+  class: their names."
+  [ctx ox]
+  (let [^Class c (:compiledClass ox)]
+    (when-not c (fail (str "no class for " (:name ox))))
+    (vec (for [^Class i (.getInterfaces c)] (symbol (destub (.getName i)))))))
+
+(defn- field-mods
+  "The modifiers of a deftype's field lb (ObjExpr.compile): volatile, mutable (package), or
+  public final."
+  [ox lb]
+  (let [m (meta (:sym (node lb)))]
+    (cond
+      (:volatile-mutable m) {:volatile true}
+      (:unsynchronized-mutable m) {}
+      :else {:public true :final true})))
+
+(defn emit-deftype-class!
+  "Defines deftype ox's class (its node), a top-level class named as the deftype, once:
+  its fields, constructors, getBasis (and create for a record), and methods
+  (NewInstanceExpr.compile, emitStatics)."
+  [ctx ox]
+  (let [cname (destub (:name ox))]
+    (when-not (contains? @(:classes ctx) cname)
+      (swap! (:classes ctx) assoc cname ::pending)
+      (let [cls (atom {:name cname :consts [] :const-map (IdentityHashMap.) :const-prefix ""})
+            fields (vec (keys (:closes ox)))
+            ctx' (assoc ctx :cls cls :objx ox :once false :closed (identity-set fields))
+            fbs (mapv node fields)
+            ftype (fn [b] (or (:bindingPrim b) Object))
+            fsym (fn [b] (symbol (:name b)))
+            hinted (:hintedFields ox)
+            nh (count hinted)
+            drops (:altCtorDrops ox)
+            ctor (list* 'constructor (with-meta (vec (cons 'this (map #(tagged (fsym %) (ftype %)) fbs))) {:public true})
+                        '(super.)
+                        (for [b fbs] (list 'set! (list (field-sym b) 'this) (fsym b))))
+            alt-ctors (when (pos? drops)
+                        (let [n (count fbs)
+                              ps (fn [k] (vec (cons 'this (map #(tagged (fsym %) (ftype %)) (take k fbs)))))]
+                          [(list 'constructor (with-meta (ps (- n drops)) {:public true})
+                                 (list* 'this. (concat (map fsym (take (- n drops) fbs)) [nil nil (list 'unchecked-int 0) (list 'unchecked-int 0)])))
+                           (list 'constructor (with-meta (ps (- n 2)) {:public true})
+                                 (list* 'this. (concat (map fsym (take (- n 2) fbs)) [(list 'unchecked-int 0) (list 'unchecked-int 0)])))]))
+            basis (list 'method (tagged (with-meta 'getBasis {:public true :static true}) 'arbace.lang.IPersistentVector) []
+                        (emit-value ctx' hinted))
+            create (when (> (count fbs) nh)
+                     (let [m 'm__]
+                       (list 'method (tagged (with-meta 'create {:public true :static true}) (symbol cname))
+                             [(tagged m 'arbace.lang.IPersistentMap)]
+                             (let [steps (for [[i f] (map-indexed vector hinted)
+                                               :let [k (list (with-meta 'arbace.lang.Keyword/intern {:param-tags '[java.lang.String]}) (name f))
+                                                     c (tag-class (:tag (meta f)))]]
+                                           [(symbol (str "v__" i))
+                                            (let [v (list '.valAt m k nil)]
+                                              (if (.isPrimitive ^Class c)
+                                                (list (symbol (str "." (.getName ^Class c) "Value"))
+                                                      (list 'cast (type-sym (box-class c)) v))
+                                                v))
+                                            k])]
+                               (list 'let [(with-meta m {:mutable true}) m]
+                                     (list* 'let (vec (mapcat (fn [[v x _]] [v x]) steps))
+                                            (concat (for [[_ _ k] steps] (list 'set! m (list '.without m k)))
+                                                    [(list* 'new (symbol cname)
+                                                            (concat (map first steps)
+                                                                    [nil (list 'arbace.lang.RT/seqOrElse m)
+                                                                     (list 'unchecked-int 0) (list 'unchecked-int 0)]))])))))))
+            methods (for [m (:methods ox)
+                          :let [mn (node m)
+                                als (:argLocals mn)
+                                ptypes (map #(:c (node (:init (node %)))) als)
+                                ps (vec (cons 'this (map (fn [lb c] (tagged (local-sym (node lb)) c)) als ptypes)))]]
+                      (vary-meta
+                        (list 'method (tagged (with-meta (symbol (:name mn)) {:public true}) (:retClass mn)) ps
+                              (method-body ctx' mn ps))
+                        assoc :aot/line (:line mn)))
+            fields-forms (for [lb fields :let [b (node lb)]]
+                           (list 'field (tagged (with-meta (fsym b) (field-mods ox lb)) (ftype b))))
+            members (deep (concat fields-forms [ctor] alt-ctors [basis] (when create [create]) methods))]
+        (swap! (:classes ctx) assoc cname
+               {:name cname :kind :deftype :super 'java.lang.Object :interfaces (class-interfaces ctx ox)
+                :members members :consts (:consts @cls) :line (:line ox)})))
+    cname))
+
 (defn emit-fn-class!
   "Defines the class of fn or reify ox (its node) once, in the classes being emitted; returns
   its binary name."
@@ -713,12 +863,12 @@
       (swap! (:classes ctx) assoc cname ::pending)
       (let [cls (atom {:name cname :consts [] :const-map (IdentityHashMap.) :const-prefix ""})
             fn? (= "fn" (:op ox))
-            ctx' (assoc ctx :cls cls :objx ox :once (:onceOnly ox))
+            ctx' (assoc ctx :cls cls :objx ox :once (:onceOnly ox) :closed (identity-set (keys (:closes ox))))
             closes (keys (:closes ox))
-            meta? (and fn? (:hasMeta ox))
+            meta? (boolean (:supportsMeta ox))
             fields (for [lb closes :let [b (node lb)]]
                      (list 'field (tagged (symbol (:name b)) (or (:bindingPrim b) Object))))
-            ctor (list* 'constructor (with-meta (vec (concat ['this] (when meta? ['meta__])
+            ctor (list* 'constructor (with-meta (vec (concat ['this] (when meta? [(tagged 'meta__ 'arbace.lang.IPersistentMap)])
                                                              (for [lb closes :let [b (node lb)]]
                                                                (tagged (symbol (str "c__" (:name b))) (or (:bindingPrim b) Object)))))
                                        {:public true})
@@ -741,7 +891,7 @@
                     :let [mn (node m)
                           als (:argLocals mn)
                           ptypes (map #(:c (node (:init (node %)))) als)
-                          ps (vec (cons 'this (map (fn [lb c] (tagged (param-sym lb) c)) als ptypes)))]]
+                          ps (vec (cons 'this (map (fn [lb c] (tagged (local-sym (node lb)) c)) als ptypes)))]]
                 (list 'method (tagged (with-meta (symbol (:name mn)) {:public true}) (:retClass mn)) ps
                       (method-body ctx' mn ps))))
             variadic (some #(when (:isVariadic (node %)) (node %)) (when fn? (:methods ox)))
@@ -755,14 +905,14 @@
                        (list 'method (tagged (with-meta 'withMeta {:public true}) 'arbace.lang.IObj) '[this m]
                              (list* 'new (symbol cname) '(cast arbace.lang.IPersistentMap m)
                                     (for [lb closes] (list (field-sym (node lb)) 'this))))]))
-            interfaces (when-not fn?
-                         (let [ifs (:interfaces ox)] ifs))]
+            interfaces (when-not fn? (class-interfaces ctx ox))]
         (let [members (deep (concat fields [ctor] methods extra))]
         (swap! (:classes ctx) assoc cname
                {:name cname
                 :members members
                 :kind (if fn? :fn :reify)
                 :super (if fn? (if (:isVariadic ox) 'arbace.lang.RestFn 'arbace.lang.AFunction) 'java.lang.Object)
+                :interfaces interfaces
                 :consts (:consts @cls)
                 :line (:line ox)}))))
     cname))
@@ -774,17 +924,31 @@
   "The static method unitK of a source's loader class: unit u's events made again, then its
   code."
   [ctx k [kind line column _ _ expr events]]
-  (let [ns-events (for [ev events
+  (let [ns-events (keep identity (for [ev events
                         :let [ev (vec ev)]]
                     (case (first ev)
                       "ns" (list '.set 'arbace.lang.RT/CURRENT_NS
-                                 (list 'arbace.lang.Namespace/findOrCreate (constant ctx (nth ev 2))))
-                      (fail (str "an event of kind " (first ev)))))
+                                 (list 'arbace.lang.Namespace/findOrCreate (list 'cast 'arbace.lang.Symbol (constant ctx (nth ev 2)))))
+                      ;; the class a deftype*, reify* or gen-interface made is compiled
+                      ("stub" "type" "iface" "imethod")
+                      (if-let [n (and (string? (nth ev 1)) (nth ev 1))]
+                        (if (runtime-class? (Class/forName (destub n)) ctx)
+                          (fail (str "an event of a class made at run time: " n))
+                          nil)
+                        nil)
+                      ;; proxy's class, made again (Compiler$Image.replay)
+                      "proxy" (list '.applyTo
+                                    (list 'cast 'arbace.lang.IFn (list '.getRawRoot (const-field ctx #'arbace.core/get-proxy-class 'arbace.lang.Var)))
+                                    (list (with-meta 'arbace.lang.RT/cons {:param-tags '[java.lang.Object java.lang.Object]})
+                                          (constant ctx (nth ev 2))
+                                          (list (with-meta 'arbace.lang.RT/seq {:param-tags '[java.lang.Object]})
+                                                (list 'new 'java.lang.Object/1 (mapv #(constant ctx %) (seq (nth ev 3)))))))
+                      (fail (str "an event of kind " (first ev))))))
         n (node expr)
         code (if (= kind 1)
                ;; (fn* [] form): its one method's body, inline
                (let [m (node (first (:methods n)))
-                     ctx' (assoc ctx :objx n :once false)]
+                     ctx' (assoc ctx :objx n :once false :closed nil)]
                  (when (seq (:closes n)) (fail "a top-level fn closing over locals"))
                  (emit ctx' (:body m)))
                (if (= "def" (:op n))
@@ -797,6 +961,17 @@
                     [code]))
       assoc :aot/line line)))
 
+(defn- unit-ns
+  "The namespace unit u was analyzed in: its fn's (kind 1) or its def's, else nil."
+  [[kind _ _ _ _ expr]]
+  (let [n (node expr)]
+    (cond
+      (= kind 1) (let [nm ^String (:name n)
+                       i (.indexOf nm "$")]
+                   (find-ns (symbol (arbace.lang.Compiler/demunge (if (neg? i) nm (subs nm 0 i))))))
+      (= "def" (:op n)) (.-ns ^Var (:var n))
+      :else nil)))
+
 (defn emit-source
   "The class forms of source path src (scriptbase.ae), compiled from its units: the loader
   class SCRIPTBASE__init's form and the fn classes made, into the atom classes."
@@ -805,7 +980,12 @@
         lname (str (str/replace base "/" ".") "__init")
         cls (atom {:name lname :consts [] :const-map (IdentityHashMap.) :const-prefix ""})
         ctx {:classes classes :runtime-classes runtime-classes :cls cls}
-        ms (deep (map-indexed (fn [k [u um]] (unit-method (assoc ctx :unchecked-math um) k u)) units))]
+        ms (vec (map-indexed (fn [k [u um]]
+                               ;; the analysis resolved tags lazily, against *ns*: the unit's
+                               ;; namespace while it is emitted
+                               (binding [*ns* (or (unit-ns u) *ns*)]
+                                 (deep (unit-method (assoc ctx :unchecked-math um) k u))))
+                             units))]
     {:name lname
      :form (concat (list 'defclass (with-meta (symbol lname) {:public true :final true}))
                    (for [[s t v] (:consts @cls)]
@@ -818,27 +998,35 @@
 ;; the holder classes: fn classes nested as their names nest
 
 (defn- class-form
-  "The defclass form of fn class c (its record), its nested classes inside, as a static member
-  class (simple name) or, at the top, a holder."
-  [c children-of]
+  "The defclass form of class c (its record: a fn's, a reify's, a deftype's, an interface's, or
+  a holder of nested classes), its nested classes inside; at the top its full name, else a static
+  member class by its simple name."
+  [c children-of top?]
   (let [nm (:name c)
-        nested (map #(class-form % children-of) (children-of nm))]
-    (if (= :holder (:kind c))
-      (concat (list 'defclass (with-meta (symbol (simple-name nm)) {:public true :static true})) nested)
-      (let [ctx {:cls (atom {}) :runtime-classes (atom #{})}]
-        (vary-meta
-          (concat (list 'defclass (with-meta (symbol (simple-name nm)) {:public true :static true :final true})
-                        :extends (:super c))
-                  (when (:interfaces c) [:implements (:interfaces c)])
-                  (for [[s t v] (:consts c)]
-                    (list 'field (tagged (with-meta s {:static true :final true}) t) (emit-value ctx v)))
-                  (:members c)
-                  nested)
-          assoc :aot/line (:line c))))))
+        nested (map #(class-form % children-of false) (children-of nm))
+        mods (fn [m] (if top? (dissoc m :static) m))
+        head (if top? (symbol nm) (symbol (simple-name nm)))
+        ctx {:cls (atom {}) :runtime-classes (atom #{})}]
+    (vary-meta
+      (case (:kind c)
+        :holder (concat (list 'defclass (with-meta head (mods {:public true :static true :final true}))) nested)
+        :interface (concat (list 'defclass (with-meta head (mods {:public true :static true :interface true})))
+                           (when (seq (:extends c)) [:extends (:extends c)])
+                           (:members c)
+                           nested)
+        (concat (list 'defclass (with-meta head (mods {:public true :static true :final true}))
+                      :extends (:super c))
+                (when (seq (:interfaces c)) [:implements (:interfaces c)])
+                (for [[s t v] (:consts c)]
+                  (list 'field (tagged (with-meta s {:static true :final true}) t) (emit-value ctx v)))
+                (:members c)
+                nested))
+      assoc :aot/line (:line c))))
 
-(defn holder-forms
-  "The top-level holder classes (one per namespace prefix) holding every fn class of classes
-  (name → record), with holders made for the missing levels."
+(defn class-forms
+  "The top-level class forms holding every class of classes (name → record), nested as their
+  binary names nest, with holder classes made for the missing levels (a namespace's fns nest
+  in a holder named as the namespace)."
   [classes]
   (let [names (set (keys classes))
         parent (fn [^String n] (let [i (.lastIndexOf n "$")] (when (pos? i) (subs n 0 i))))
@@ -853,7 +1041,14 @@
         kids (group-by parent (sort all))
         children-of (fn [n] (map recs (get kids n)))]
     (for [top (sort (get kids nil))]
-      (let [f (class-form (recs top) children-of)]
-        ;; the top class: its full name, not static
-        (concat (list 'defclass (with-meta (symbol top) {:public true :final true}))
-                (drop 2 (if (= :holder (:kind (recs top))) f (fail (str "a fn class at the top: " top)))))))))
+      (class-form (recs top) children-of true))))
+
+(defn interface-record
+  "The record of an interface made by gen-interface (events iface and imethod): name, the
+  interfaces it extends, its abstract methods."
+  [name extends methods]
+  {:name name :kind :interface
+   :extends (mapv #(symbol (destub (.getName ^Class %))) extends)
+   :members (for [[mname ps ret] methods]
+              (list 'method (tagged (with-meta (symbol mname) {:public true :abstract true}) ret)
+                    (vec (cons 'this (map-indexed (fn [i p] (tagged (symbol (str "p" i)) p)) ps)))))})

@@ -8,6 +8,7 @@
   others), one file per loader class (aot_SCRIPTBASE__init.ae) and per holder class
   (aot_HOLDER.ae), and OUT/aot.edn (the sources compiled, those that failed and why)."
   (:require [arbace.string :as str]
+            [arbace.set]
             [arbace.java.io :as io]
             [arbace.aot.emit :as e])
   (:import [arbace.lang Compiler$AST]))
@@ -21,15 +22,29 @@
     (for [src order]
       [src (mapv (fn [^objects a] [(vec (aget a 1)) (boolean (aget a 2))]) (get by src))])))
 
-(defn- event-classes
-  "The names of the classes the events of units make at run time."
-  [us]
-  (set (for [[_ ss] us
-             [u _] ss
-             ev (nth u 6)
-             :let [n (aget ^objects ev 1)]
+(defn- events [ss]
+  (for [[u _] ss, ev (nth u 6)] (vec ev)))
+
+(defn- source-classes
+  "The names of the classes the events of a source's units make at run time (deftypes,
+  interfaces, proxies)."
+  [ss]
+  (set (for [ev (events ss)
+             :let [n (nth ev 1)]
              :when (string? n)]
          (e/destub n))))
+
+(defn- interfaces
+  "The interfaces gen-interface made in a source's units (events iface, imethod): name →
+  record."
+  [ss]
+  (let [evs (events ss)
+        ms (group-by #(.getName ^Class (nth % 2)) (filter #(= "imethod" (first %)) evs))]
+    (into {} (for [ev evs
+                   :when (= "iface" (first ev))
+                   :let [n (nth ev 2)]]
+               [n (e/interface-record n (seq (nth ev 3))
+                                      (for [m (get ms n)] [(nth m 3) (seq (nth m 4)) (nth m 5)]))]))))
 
 (defn- clean-meta
   "The metadata m of an emitted form for printing: the back end's line (:aot/line) as :line;
@@ -58,48 +73,60 @@
 (defn- file-name [^String cname]
   (str "aot_" (str/replace cname "." "_") ".ae"))
 
+(defn- compile-all
+  "Compiles the sources of us (each [src units]) whose names are in want: their results, and the
+  classes made (name → record). A class a source's events make is a class of the program when
+  that source compiles, else made at run time (named only by reflection); a source that fails
+  makes its classes run-time ones, and the others are compiled again until none fails anew."
+  [us want]
+  (let [all-rt (apply arbace.set/union #{} (map (comp source-classes second) us))
+        proxies (set (for [[_ ss] us, ev (events ss) :when (= "proxy" (first ev))] (nth ev 1)))]
+    (loop [failed #{}]
+      (let [compiled (remove (fn [[src _]] (or (not (want src)) (failed src))) us)
+            rt (atom (apply arbace.set/difference all-rt
+                            (map (comp #(arbace.set/difference % proxies) source-classes second) compiled)))
+            classes (atom (apply merge {} (map (comp interfaces second) compiled)))
+            results (doall
+                      (for [[src ss] compiled]
+                        (let [before @classes]
+                          (try
+                            {:src src :loader (e/emit-source classes rt src ss)}
+                            (catch Throwable t
+                              (reset! classes before)
+                              {:src src :error (str (.getMessage t)
+                                                    (when-let [d (not-empty (ex-data t))] (str " " (pr-str d))))})))))
+            bad (set (map :src (filter :error results)))]
+        (if (empty? bad)
+          [(concat results (for [src failed] {:src src :error (get-in (meta failed) [:errors src])})) @classes]
+          (recur (with-meta (into failed bad)
+                   {:errors (merge (:errors (meta failed))
+                                   (into {} (for [r results :when (:error r)] [(:src r) (:error r)])))})))))))
+
 (defn run
   "Compiles sources (or all recorded) into directory out; returns the report."
   [out sources]
   (let [us (units)
         want (if sources (set sources) (set (map first us)))
-        rt (atom (event-classes us))
-        classes (atom {})
-        results (for [[src ss] us
-                      :when (want src)]
-                  (let [before @classes]
-                    (try
-                      (let [r (e/emit-source classes rt src ss)]
-                        {:src src :loader r})
-                      (catch Throwable t
-                        (reset! classes before)
-                        {:src src :error (str (.getMessage t)
-                                              (when-let [d (not-empty (ex-data t))] (str " " (pr-str d))))}))))
-        results (doall results)
+        [results classes] (compile-all us want)
         ok (filter :loader results)
-        dir (io/file out)]
-    (.mkdirs dir)
+        dir (io/file out)
+        tops (e/class-forms classes)
+        loader-files (for [r ok] [(file-name (:name (:loader r))) (:src r) (:form (:loader r))])
+        class-files (for [h tops] [(file-name (str (second h))) nil h])]
+    (.mkdirs (io/file dir "arbace"))
     (with-open [w (io/writer (io/file dir "arbace.ae"))]
       (write-form w '(ns arbace))
-      (doseq [r ok]
-        (write-form w (list 'load (str "arbace/" (subs (file-name (:name (:loader r))) 0 (- (count (file-name (:name (:loader r)))) 3))))))
-      (doseq [h (e/holder-forms @classes)]
-        (let [n (str (second h))]
-          (write-form w (list 'load (str "arbace/" (subs (file-name n) 0 (- (count (file-name n)) 3))))))))
-    (.mkdirs (io/file dir "arbace"))
-    (doseq [r ok]
-      (with-open [w (io/writer (io/file dir "arbace" (file-name (:name (:loader r)))))]
-        (.write w (str ";; Compiled from " (:src r) " by arbace.aot (standalone S6). Regenerated by the build.\n\n"))
+      (doseq [[f] (concat loader-files class-files)]
+        (write-form w (list 'load (str "arbace/" (subs f 0 (- (count f) 3)))))))
+    (doseq [[f src form] (concat loader-files class-files)]
+      (with-open [w (io/writer (io/file dir "arbace" f))]
+        (.write w (str ";; Compiled by arbace.aot (standalone S6)"
+                       (if src (str " from " src ": its loader") ": the classes of a namespace")
+                       ". Regenerated by the build.\n\n"))
         (write-form w '(in-ns 'arbace))
-        (write-form w (:form (:loader r)))))
-    (doseq [h (e/holder-forms @classes)]
-      (let [n (str (second h))]
-        (with-open [w (io/writer (io/file dir "arbace" (file-name n)))]
-          (.write w ";; Compiled by arbace.aot (standalone S6): the fn classes of a namespace. Regenerated by the build.\n\n")
-          (write-form w '(in-ns 'arbace))
-          (write-form w h))))
-    (let [report {:compiled (mapv :src ok)
+        (write-form w form)))
+    (let [report {:compiled (vec (sort (map :src ok)))
                   :failed (into (sorted-map) (for [r results :when (:error r)] [(:src r) (:error r)]))
-                  :classes (count (remove #(= :holder (:kind %)) (vals @classes)))}]
+                  :classes (count (remove #(= :holder (:kind %)) (vals classes)))}]
       (spit (io/file dir "aot.edn") (with-out-str (prn report)))
       report)))
