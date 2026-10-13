@@ -21,7 +21,9 @@ comparison of float constants).
 
 `bin/jrt-convert [--twice]` (bash) with its Clojure in `test/jrt/jrt_sources.ae`
 (`jrt.jrt-sources`, next to `jrt.java-surface`, whose class reading and treatments it reuses).
-It runs on Arbace's `target/stage2` (`bin/build-arbace` first) and writes only under
+It ran on Arbace's `target/stage2` until standalone S4, and since on the frozen JVM Arbace
+(`bin/lib/frozen.bash`: the jar of `arbace-for-java-26-v4`, j2a and the class forms' front end
+from the checkout's sources; "Since S4" below), and writes only under
 `.tmp/jrt/` (`JRT_WORK`), regenerated on every run and not tracked (the user's decision for
 j2a's output; reversed by standalone S1's D2, 2026-10-12: the output is committed as `jdk/`, and
 `bin/jrt-convert update` and `verify` write and check it, "The committed forms" below). Steps
@@ -33,9 +35,9 @@ j2a's output; reversed by standalone S1's D2, 2026-10-12: the output is committe
 | generate | the 8 generated files, made as the JDK build makes them (below) and compared byte for byte with the JDK build's `support/gensrc` when `$JDK/build` has one | `src/java.base/`, `generated.edn` |
 | convert | `bin/j2a -m arbace.j2a.main jdk --check conv java.base src/java.base`: attributed as `java.base` with `--patch-module` against the running JDK (built from the same sources), run from `.tmp/jrt` so its patch directories stay there; `--origins origins.edn` (made from `sources.txt`) names each file's source in its header by where it comes from (`jdk26u src/java.base/share/classes/...`, `overlay/jdk/java.base/...`, `jdk26u support/gensrc/...` for a generated one), not by j2a's scratch copy, whose numbered directory moved with the chunking (2026-10-11) | `conv/` (184 class-form files and 17 package files, 70,146 lines) |
 | javac | the same tree compiled twice by javac with `java.base`'s build options (`-XDstringConcat=inline`, `--patch-module`, `-implicit:none`, as `bin/j2a-check --jdk`) | `ref1/`, `ref2/` (591 classes) |
-| check | `bin/class-forms-check` on chunks of about 8 files, `JRT_JOBS` JVMs (default 4, `-Xmx3g` each), `REF=ref1:ref2` (classes javac made from a file that the forms did not make count as differences), the compiled classes written out | `res/`, `forms-classes/` |
-| edge | `jrt.jrt-sources/write-edge` on the forms' classes, and on javac's for a cross-check (the two must be the same) | `edge.edn`, `edge-javac.edn` |
-| report | the counts and the edge's tables; a hash of every file of `src/`, `conv/`, `forms-classes/` | `report.md`, `report.edn`, `manifest.sha256` |
+| check | until S4: `bin/class-forms-check` on chunks of about 8 files, `JRT_JOBS` JVMs (default 4, `-Xmx3g` each), `REF=ref1:ref2` (classes javac made from a file that the forms did not make count as differences), the compiled classes written out; since S4 forms-level: each converted file compared with the committed `jdk/forms` (the same, different, added, removed: a report, not a failure) | until S4 `res/`, `forms-classes/`; since `forms-check.edn` |
+| edge | `jrt.jrt-sources/write-edge` on the forms' classes, and on javac's for a cross-check (the two must be the same); since S4 on javac's classes alone | `edge.edn` (and until S4 `edge-javac.edn`) |
+| report | the counts and the edge's tables; a hash of every file of `src/`, `conv/` (and until S4 `forms-classes/`) | `report.md`, `report.edn`, `manifest.sha256` |
 
 `--twice` then makes the sources, runs the generators and j2a a second time into
 `.tmp/jrt/again/` and requires identical trees. Exit status 0 when all 184 files convert and
@@ -562,7 +564,7 @@ top-level directory `jdk/` (jdk/README.md), as `tamago/` holds TamaGo's Go as fo
 | `jdk/forms/` | `conv/` without j2a's report `j2a-report.edn`: 909 class forms files (836 Java files: 755 of `share`, 6 `unix`, 2 of java.sql, 31 generated, `LocaleDataIndex`, 41 of jrt's own `overlay/jdk/java.base`), 202,034 lines, 11 MB |
 | `jdk/data/` | `data/`: the 10 resource data files the program embeds (545 KB) |
 | `jdk/sources.txt` | `sources.txt`, each file's module, kind and path (`bin/jrt-coverage` reads it by default) |
-| `jdk/provenance.edn` | jdk26u's repository, commit and clean state, the JDK attributing for j2a, the generators' JDK, `JRT_LOCALES`, a hash of j2a's sources (`arbace/j2a`, `bin/j2a`), the counts: written by every run's convert step into `provenance.edn`, nothing of the run's place or time |
+| `jdk/provenance.edn` | jdk26u's repository, commit and clean state, the JDK attributing for j2a, the generators' JDK, `JRT_LOCALES`, a hash of j2a's sources (`arbace/j2a`, `bin/j2a`) and, since S4, the frozen jar that runs it, the counts: written by every run's convert step into `provenance.edn`, nothing of the run's place or time |
 
 `bin/a2g` (`arbace/a2g/main.ae`) takes `--jdk`, else `JRT_CONV`, else `jdk/forms`, and embeds the
 data from the directory `data` beside it (`jdk/data`). So `bin/arbace-go --build`,
@@ -572,7 +574,23 @@ suite's Java, are still converted by j2a). The gate's key (`bin/arbace-go`, `gat
 `jdk/` and no longer the conversion's inputs (`doc/go/java-surface.edn`,
 `test/jrt/jrt_sources.ae`, `bin/j2a`, `bin/jrt-convert`, jdk26u's commit).
 
-`bin/jrt-convert` keeps its steps and checks, and gains two modes, after them:
+### Since S4: on the frozen JVM Arbace, forms-level
+
+Main has no JVM build and no class forms back end since standalone S4 (doc/STANDALONE-NOTES.md,
+"S4: the JVM removed", O1 and O2). `bin/jrt-convert` runs j2a (`bin/j2a`) and its Clojure
+(`jrt.jrt-sources`) on the frozen jar (`bin/lib/frozen.bash`), and its `check` step is
+forms-level: the conversion is compared with the committed forms file by file
+(`forms-check.edn`, and the report's counts), where it compiled the forms and compared the
+classes with javac's; the edge is read from javac's classes (`ref1`), which until then gave the
+same edge as the forms' classes (the cross-check of every earlier run). The exit status no longer
+depends on the compiled shapes: every file converted, no failures, no javac errors, every file
+read back. `verify` stays the proof that `jdk/` is the conversion, byte for byte; what the forms
+mean is checked downstream, by a2g's analysis of them in the Go build, the oracle and Clojure's
+suite on it. `provenance.edn`'s converter names the frozen jar too (`:host`, its name and
+SHA-256). The forms j2a makes on the frozen jar are those it made on main's `target/stage2`, byte
+for byte (`verify`; doc/STANDALONE-NOTES.md).
+
+`bin/jrt-convert` kept its steps and checks at S1, and gained two modes, after them:
 
 - `bin/jrt-convert verify`: `$JRT_WORK`'s conversion (`conv/` without the report, `data/`,
   `sources.txt`, `provenance.edn`, assembled in `$JRT_WORK/jdk`) compared with `jdk/` by `diff -r`

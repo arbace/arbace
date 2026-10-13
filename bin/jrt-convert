@@ -1,9 +1,9 @@
 #!/bin/bash
 # jrt's translated input (B1a step 3, doc/go/JRT-SOURCES.md): the Java source files of the
 # translation closure that bin/java-surface measured (doc/go/java-surface.edn, :closure :repl
-# :sources; 184 files of java.base), converted by j2a into class forms, compiled back with the
-# class forms compiler and compared with javac's classes, and the edge the translated classes
-# call into (what jrt hand-writes). Since standalone S1 (doc/STANDALONE-SURVEY.md, D2) its
+# :sources; 184 files of java.base), converted by j2a into class forms (on the frozen JVM
+# Arbace: bin/j2a), compared with the committed forms, and the edge the translated classes call
+# into (what jrt hand-writes). Since standalone S1 (doc/STANDALONE-SURVEY.md, D2) its
 # output is a source of the repository: jdk/ (jdk/README.md) holds the converted forms
 # (jdk/forms), the resource data (jdk/data), the source list (jdk/sources.txt) and the
 # provenance (jdk/provenance.edn), and the Go build (bin/a2g) reads them from there, without
@@ -43,13 +43,15 @@
 #             into $JRT_WORK/data, compared with the build's jdk/modules (jdk/lib for lib/)
 #   convert   bin/j2a ... jdk --check: the tree into class forms, $JRT_WORK/conv (java.base,
 #             attributed with --patch-module against the running JDK, built from the same sources)
-#   javac     the tree compiled twice by javac (ref1, ref2) with java.base's build options
-#   check     bin/class-forms-check on chunks of the converted files ($JRT_JOBS parallel JVMs):
-#             every class compiled from the forms (written to forms-classes) compared with
-#             javac's (REF=ref1:ref2), results in res/
-#   edge      jrt.jrt-sources/write-edge on forms-classes (edge.edn) and on ref1
-#             (edge-javac.edn, which must be the same)
-#   report    report.md and report.edn; manifest.sha256 (every file of src, conv, forms-classes)
+#   javac     the tree compiled twice by javac (ref1, ref2) with java.base's build options: the
+#             classes the edge is read from, and javac's determinism (the two the same)
+#   check     forms-level (doc/STANDALONE-NOTES.md, "S4: the JVM removed", O2 (b); until S4 the
+#             forms were compiled by the class forms compiler and compared with javac's
+#             classes): each converted file compared with the committed one, jdk/forms
+#             (forms-check.edn: the same, different, added, removed); a report, not a
+#             failure (update's change shows there; verify requires none)
+#   edge      jrt.jrt-sources/write-edge on javac's classes (ref1): edge.edn
+#   report    report.md and report.edn; manifest.sha256 (every file of src and conv)
 # Environment:
 #   JDK        jdk26u's checkout (default /root/jdk26u)
 #   SURFACE    the java-surface data (default doc/go/java-surface.edn; `bin/java-surface F`
@@ -59,21 +61,20 @@
 #   JRT_LOCALES  jdk.localedata's locales in the build (JRT-NOTES.md, "Text and locales"):
 #              none (the default: java.base's root and English data alone), common (the 27
 #              locales of jrt.jrt-sources/text-locales), all, or comma-separated language tags
-#   JRT_WORK   work directory (default .tmp/jrt);  JRT_JOBS check JVMs (default 4, -Xmx3g each)
+#   JRT_WORK   work directory (default .tmp/jrt)
 #   J2A_JVM_OPTS  j2a's heap (default here -Xmx8g)
-# Runs on Arbace (bin/lib/tools.bash: target/stage2, from bin/build-arbace). Exit status 0 when
-# every file converts and compiles to javac's class shapes (with --twice, is deterministic; with
-# verify, jdk/ is the conversion's output).
+# Runs on the frozen JVM Arbace (bin/lib/frozen.bash; j2a with its namespaces from the checkout,
+# bin/j2a). Exit status 0 when every file converts and javac compiles the tree
+# (with --twice, the conversion is deterministic; with verify, jdk/ is the conversion's output).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-. bin/lib/tools.bash
-arbace_runtime || exit 1
+. bin/lib/frozen.bash
+frozen_jar > /dev/null || exit 1
 jdk=${JDK:-/root/jdk26u}
 surface=${SURFACE:-$root/doc/go/java-surface.edn}
 work=${JRT_WORK:-$root/.tmp/jrt}
 case "$work" in /*) ;; *) work=$root/$work ;; esac
-jobs=${JRT_JOBS:-4}
 steps=${JRT_STEPS:-sources,generate,convert,javac,check,edge,report}
 twice=0 mode=
 case ${1:-} in verify|update) mode=$1; shift ;; esac
@@ -81,7 +82,7 @@ case ${1:-} in verify|update) mode=$1; shift ;; esac
 # the committed tree (jdk/README.md)
 committed=$root/jdk
 has() { case ",$steps," in *",$1,"*) return 0 ;; esac; return 1; }
-clj() { java -Xss64m -Xmx4g -cp "$ARBACE_CP:$root/test" arbace.lang.Main -e "(require 'jrt.jrt-sources) $1"; }
+clj() { frozen_java test -Xss64m -Xmx4g -- -e "(require 'jrt.jrt-sources) $1"; }
 status=0
 mkdir -p "$work/log"
 t00=$(date +%s)
@@ -423,7 +424,8 @@ fi
 # provenance: what the forms and the data are made from, $work/provenance.edn (jdk/'s
 # provenance.edn): jdk26u's repository and commit (and whether its checkout is clean), the JDK
 # whose javac attributes the sources for j2a, the JDK that runs the generators, the locales, the
-# converter (a hash of j2a's sources, arbace/j2a, and of bin/j2a) and the counts; nothing of the
+# converter (a hash of j2a's sources, arbace/j2a, and of bin/j2a; the frozen jar that runs it, by
+# its tag and hash) and the counts; nothing of the
 # run's place or time, so that verify compares it too
 provenance() {
   local q='s/\\/\\\\/g; s/"/\\"/g' url commit clean
@@ -436,7 +438,8 @@ provenance() {
   echo " :jdk \"$(java -version 2>&1 | head -1 | sed "$q")\""
   echo " :gen-jdk \"$("$GEN_JDK/bin/java" -version 2>&1 | head -1 | sed "$q")\""
   echo " :locales \"${JRT_LOCALES:-none}\""
-  echo " :converter {:j2a \"$( (find arbace/j2a -type f | LC_ALL=C sort; echo bin/j2a) | xargs sha256sum | sha256sum | cut -c1-64)\"}"
+  echo " :converter {:j2a \"$( (find arbace/j2a -type f | LC_ALL=C sort; echo bin/j2a) | xargs sha256sum | sha256sum | cut -c1-64)\""
+  echo "             :host \"$(frozen_host)\"}"
   echo " :files {:sources $(grep -vc " locales " "$work/sources.txt") :forms $(find "$work/conv" -name '*.ae' | wc -l) :data $(find "$work/data" -type f | wc -l)}}"
 }
 
@@ -464,44 +467,34 @@ if has javac; then
 fi
 
 if has check; then
-  echo "== compile the forms and compare with javac's classes ($jobs JVMs)"
-  t0=$(date +%s)
-  rm -rf "$work/res" "$work/chunks" "$work/forms-classes"
-  mkdir -p "$work/res" "$work/chunks" "$work/forms-classes"
-  # jrt's own files (overlay/jdk) in one chunk: they use each other's members that jdk26u's
-  # classes of the same names lack, which only the same compilation sees
-  sed -n 's|^java\.base overlay \(.*\)\.java$|\1.ae|p' "$work/sources.txt" | sort > "$work/chunks/c.overlay"
-  # the others largest first, dealt round-robin into chunks of about 8
-  (cd "$work/conv" && find . -mindepth 2 -name '*.ae' -printf '%s %P\n' | sort -k1,1nr -k2) |
-    awk 'NR == FNR { own[$1] = 1; next } !($2 in own) { print $2 }' "$work/chunks/c.overlay" - |
-    awk -v n=$(( ($(find "$work/conv" -mindepth 2 -name '*.ae' | wc -l) + 7) / 8 )) \
-      '{ f = sprintf("'"$work"'/chunks/c.%04d", (NR - 1) % n); print $1 > f }'
-  [ -s "$work/chunks/c.overlay" ] || rm -f "$work/chunks/c.overlay"
-  ls "$work/chunks" | xargs -P "$jobs" -I{} bash -c '
-    k=${1#c.}
-    # jrt own Java replaces JDK classes and adds members: its chunk takes them from source
-    fs=
-    [ "$1" = c.overlay ] && fs=$(sed "s|\.ae\$||" "$2/chunks/c.overlay" | paste -sd, -)
-    FROM_SOURCE=$fs CONCAT=inline FILES="$2/chunks/$1" REF="$2/ref1:$2/ref2" CLASS_FORMS_CP="$2/conv" WRITE="$2/forms-classes" \
-      OUT="$2/res/$k.edn" JAVA_OPTS="-Xmx3g -XX:+UseSerialGC --add-modules ALL-SYSTEM" \
-      timeout 1800 bin/class-forms-check "$2/conv" > "$2/log/check-$k.log" 2>&1
-    [ -s "$2/res/$k.edn" ] || echo "check $k: no result, see $2/log/check-$k.log"' _ {} "$work"
-  echo "($(( $(date +%s) - t0 )) s)"
+  echo "== the forms compared with the committed ones (${committed#$root/}/forms)"
+  list() { (cd "$1" && find . -type f -name '*.ae' | sed 's|^\./||' | LC_ALL=C sort); }
+  list "$work/conv" > "$work/forms.new"
+  list "$committed/forms" > "$work/forms.old"
+  {
+    echo "{:files $(wc -l < "$work/forms.new")"
+    echo " :same $(comm -12 "$work/forms.old" "$work/forms.new" | while read -r f; do cmp -s "$work/conv/$f" "$committed/forms/$f" && echo; done | wc -l)"
+    echo " :different ["
+    comm -12 "$work/forms.old" "$work/forms.new" | while read -r f; do cmp -s "$work/conv/$f" "$committed/forms/$f" || echo "  \"$f\""; done
+    echo " ]"
+    echo " :added ["; comm -13 "$work/forms.old" "$work/forms.new" | sed 's/.*/  "&"/'; echo " ]"
+    echo " :removed ["; comm -23 "$work/forms.old" "$work/forms.new" | sed 's/.*/  "&"/'; echo " ]}"
+  } > "$work/forms-check.edn"
+  echo "$(grep -c '^  "' "$work/forms-check.edn") files differ from, are added to or removed from ${committed#$root/}/forms ($work/forms-check.edn)"
 fi
 
 if has edge; then
   echo "== the edge"
-  clj "(jrt.jrt-sources/write-edge \"$work/forms-classes\" \"$surface\" \"$work/edge.edn\")
-       (jrt.jrt-sources/write-edge \"$work/ref1\" \"$surface\" \"$work/edge-javac.edn\")" || status=1
+  clj "(jrt.jrt-sources/write-edge \"$work/ref1\" \"$surface\" \"$work/edge.edn\")" || status=1
 fi
 
 if has report; then
   echo "== report ($work/report.md)"
-  (cd "$work" && find src conv forms-classes -type f | LC_ALL=C sort | xargs sha256sum) > "$work/manifest.sha256"
+  (cd "$work" && find src conv -type f | LC_ALL=C sort | xargs sha256sum) > "$work/manifest.sha256"
   out=$(clj "(let [s (jrt.jrt-sources/report \"$work\")]
-                (System/exit (if (and (= (:java-files s) (:converted s) (:checked-files s)
-                                         (+ (:identical-files s) (:known-differing-files s)))
-                                      (zero? (:convert-failures s)) (zero? (:javac-errors s)))
+                (System/exit (if (and (= (:java-files s) (:converted s))
+                                      (zero? (:convert-failures s)) (zero? (:javac-errors s))
+                                      (zero? (:unreadable s)))
                                0 1)))") || status=1
   echo "$out"
 fi

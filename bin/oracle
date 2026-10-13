@@ -1,114 +1,63 @@
 #!/bin/bash
 # The differential oracle for Arbace on Go (B1a, doc/go/ORACLE.md): corpora of forms, class
-# scripts and regex cases under test/oracle/, their expected results recorded from the JVM
-# Arbace (bin/arbace-j, built by bin/build-arbace) in test/oracle/expected/, and a runner that
-# checks any implementation against them. The runner (test/oracle/runner.ae) runs on the JVM
-# Arbace; each corpus file is one run of the implementation, fed the driver
+# scripts and regex cases under test/oracle/, their expected results recorded from the frozen
+# JVM Arbace (below) in test/oracle/expected/, and a runner that checks any implementation
+# against them. The runner (test/oracle/runner.ae) runs on the frozen JVM Arbace; each corpus file is one run of the implementation, fed the driver
 # test/oracle/driver.ae and then the cases on its standard input.
 #
 # Usage: bin/oracle record [-j JOBS] [--timeout S] [SEL...]
-#            regenerate the expected files from the JVM Arbace (and its JDK, for regex); the
-#            output is byte-identical across runs
+#            regenerate the expected files from the frozen JVM Arbace (and its JDK, for regex);
+#            the output is byte-identical across runs (but for the noisy cases, ORACLE.md)
 #        bin/oracle check IMPL [-j JOBS] [--timeout S] [--expected FILE | --write-expected FILE]
 #                         [--exclude PART]... [SEL...]
 #            run the expected files against IMPL, a shell command that evaluates the forms on
 #            its standard input as `arbace.main -` does and lets them print to its standard
-#            output; `jvm` stands for `bin/arbace-j -`. Reports the mismatches (all of them in
+#            output; `jvm` stands for the frozen jar's `arbace.lang.Main -`. Reports the mismatches (all of them in
 #            .tmp/oracle/check.txt); exit status 0 when every case matches, or with
 #            --expected FILE when the mismatching cases are exactly those FILE records (a
-#            reference of known mismatches with their reasons, e.g. test/oracle/known-go-amd64.edn);
+#            reference of known mismatches with their reasons, e.g. test/oracle/known-go-amd64-frozen.edn);
 #            --write-expected FILE rewrites FILE from this run's mismatches, keeping the
 #            reasons of the cases still recorded (new ones get a placeholder reason)
 #        bin/oracle harvest [SUITE]
 #            regenerate test/oracle/forms/harvest/ from Clojure's test suite as bin/clojure-tests
-#            renames it (default SUITE .tmp/clojure-tests/stage2/suite)
+#            renames it (default SUITE .tmp/clojure-tests/go/suite, CLOJURE_TESTS_GO's run)
 #   SEL      parts (forms, classes, regex) or parts of file paths (forms/numbers); default all;
 #            --exclude PART leaves out the files whose path holds PART (the box's subset,
 #            doc/go/BOX-NOTES.md: --exclude forms/files. --exclude forms/processes., with
 #            ARBACE_BOX_NET=loopback for forms/net)
 #   -j JOBS  concurrent runs (default 16); --timeout S per run (default 300)
-# Environment (doc/STANDALONE-NOTES.md, "S4: the oracle's reference"; the survey's D4):
-#   ARBACE_ORACLE_REF       the JVM Arbace the runner runs on and `jvm` (and record) stands for:
-#                           main (default), target/arbace.jar through bin/arbace-j, built by
-#                           bin/build-arbace; frozen, the frozen JVM Arbace, the jar of the
-#                           frozen branch's last release ARBACE_ORACLE_TAG, run by java alone (no
-#                           bin/arbace-j: what stays on main after S4). The jar is built once
-#                           from the tag (its own bin/build-arbace in a temporary git worktree,
-#                           a few minutes) into .tmp/oracle-frozen/TAG.jar and checked against
-#                           its pinned hash, test/oracle/frozen-jar.sha256. The frozen jar reads
-#                           .clj only, so the runner's namespaces are given to it as .clj links
-#                           (.tmp/oracle-view)
+# The reference (doc/STANDALONE-NOTES.md, "S4: the oracle's reference", "S4: the JVM removed";
+# the survey's D4): the frozen JVM Arbace, the jar of the frozen branch's last release, run by
+# java alone (bin/lib/frozen.bash: built once from its tag into .tmp/oracle-frozen/TAG.jar and
+# checked against its pinned hash, test/oracle/frozen-jar.sha256). The frozen jar reads .clj
+# only, so the runner's namespaces are given to it as .clj links (frozen_view test).
+# Environment:
 #   ARBACE_ORACLE_TAG       the frozen release (default arbace-for-java-26-v4: v1, the seed's,
-#                           still has the NaN comparisons that v2 fixed)
-#   ARBACE_ORACLE_JAR       another frozen jar instead (seed/arbace-seed.jar is v1's), unchecked
+#                           still has the NaN comparisons that v2 fixed); FROZEN_TAG likewise
+#   ARBACE_ORACLE_JAR       an already built frozen jar instead, unchecked; FROZEN_JAR likewise
 #   ARBACE_ORACLE_EXPECTED  the expected files' directory (default test/oracle/expected): record
 #                           writes there, check reads there
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-ref=${ARBACE_ORACLE_REF:-main}
-
-# frozen_jar: the frozen release's jar, .tmp/oracle-frozen/TAG.jar, built from the tag when
-# missing (as bin/seed --verify rebuilds the seed), and checked against its pinned SHA-256
-# (test/oracle/frozen-jar.sha256, sha256sum's format, one line per tag); prints its path
-frozen_jar() {
-  local tag=${ARBACE_ORACLE_TAG:-arbace-for-java-26-v4} dir=$root/.tmp/oracle-frozen wt st want got
-  local jar=$dir/$tag.jar
-  mkdir -p "$dir"
-  exec 9> "$dir/.lock"; flock 9
-  if [ ! -f "$jar" ]; then
-    wt=$dir/wt
-    git worktree remove --force "$wt" 2> /dev/null; rm -rf "$wt"
-    git worktree add --detach "$wt" "$tag" > /dev/null 2>&1 || { echo "bin/oracle: no worktree of $tag" >&2; return 1; }
-    find "$wt/clojure" -name '*.class' -exec touch {} +
-    echo "bin/oracle: building the frozen jar of $tag (log $dir/$tag.log)" >&2
-    "$wt/bin/build-arbace" > "$dir/$tag.log" 2>&1; st=$?
-    [ $st = 0 ] && cp "$wt/target/arbace.jar" "$jar.new" && mv "$jar.new" "$jar"
-    git worktree remove --force "$wt"
-    [ $st = 0 ] || { echo "bin/oracle: the build of $tag failed, see $dir/$tag.log" >&2; return 1; }
-  fi
-  flock -u 9
-  want=$(sed -n "s/^\([0-9a-f]\{64\}\)  $tag.jar\$/\1/p" "$root/test/oracle/frozen-jar.sha256" 2>/dev/null)
-  got=$(sha256sum "$jar" | cut -d' ' -f1)
-  if [ -z "$want" ]; then
-    echo "bin/oracle: warning: no pinned hash for $tag.jar in test/oracle/frozen-jar.sha256 (it is $got)" >&2
-  elif [ "$want" != "$got" ]; then
-    echo "bin/oracle: $jar: SHA-256 $got, pinned $want" >&2; return 1
-  fi
-  echo "$jar"
-}
-case $ref in
-  main)
-    if [ ! -f target/arbace.jar ]; then
-      echo "bin/oracle: no target/arbace.jar; run bin/build-arbace first (or ARBACE_ORACLE_REF=frozen)" >&2
-      exit 1
-    fi
-    jvm() { env ARBACE_CLASSPATH="$root/test" bin/arbace-j "$@"; } ;;
-  frozen)
-    if [ -n "${ARBACE_ORACLE_JAR:-}" ]; then
-      jar=$ARBACE_ORACLE_JAR
-      case $jar in /*) ;; *) jar=$root/$jar ;; esac
-    else
-      jar=$(frozen_jar) || exit 1
-    fi
-    [ -f "$jar" ] || { echo "bin/oracle: no frozen jar $jar" >&2; exit 1; }
-    # the runner's and the harvest's namespaces as .clj, which the frozen jar's loader reads
-    view=$root/.tmp/oracle-view
-    mkdir -p "$view/oracle"
-    for n in runner harvest; do ln -sfn "$root/test/oracle/$n.ae" "$view/oracle/$n.clj"; done
-    # as bin/arbace-j runs a jar: compact object headers; the reference keeps its messages
-    # under load (runner.ae's default-impl)
-    export ARBACE_ORACLE_JVM="java -XX:+UseCompactObjectHeaders -XX:-OmitStackTraceInFastThrow -cp $jar arbace.lang.Main -"
-    jvm() { java -XX:+UseCompactObjectHeaders -cp "$jar:$view:$root/test" arbace.lang.Main "$@"; } ;;
-  *) echo "bin/oracle: ARBACE_ORACLE_REF is main or frozen, not $ref" >&2; exit 2 ;;
+. bin/lib/frozen.bash
+case ${ARBACE_ORACLE_REF:-frozen} in
+  frozen) ;;
+  *) echo "bin/oracle: the reference is the frozen jar only since S4 (ARBACE_ORACLE_REF=$ARBACE_ORACLE_REF)" >&2; exit 2 ;;
 esac
+jar=$(frozen_jar) || exit 1
+view=$(frozen_view test) || exit 1
+# as Arbace's jar ran: compact object headers; the reference keeps its messages under load
+# (runner.ae's default-impl)
+export ARBACE_ORACLE_JVM="java -XX:+UseCompactObjectHeaders -XX:-OmitStackTraceInFastThrow -cp $jar arbace.lang.Main -"
+jvm() { java -XX:+UseCompactObjectHeaders -cp "$jar:$view:$root/test" arbace.lang.Main "$@"; }
 cmd=${1:-}
 case $cmd in
   record|check) shift ;;
   harvest)
     shift
-    suite=${1:-$root/.tmp/clojure-tests/stage2/suite}
+    suite=${1:-$root/.tmp/clojure-tests/go/suite}
     jvm -m oracle.harvest "$suite"; exit ;;
-  *) sed -n '9,30p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  *) sed -n '8,28p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
 jvm -m oracle.runner "$cmd" "$@"
