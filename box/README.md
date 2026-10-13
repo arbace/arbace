@@ -51,7 +51,9 @@ identity is S0's record; `bin/box-vendor roundtrip` and `kvm-tests` check `box/`
 darwin, `hv` and `libsys` import purego, vendored since S4 (below); since S4 the board's arm64
 vectors make a nil dereference a run-time panic (`board.NilPanics`, BX60) and the launcher builds
 for darwin/arm64 (its console and rlwrap in `console_OS.go`, `rlwrap_unix.go`; the socket options
-in `vmm/net_unix.go`, BX61).
+in `vmm/net_unix.go`, BX61); since HV1 (b) a Go guest's RAM that does not fit under the doorbell is
+above 4 GiB, the image where it is linked (`vmm.Config.RAM`, two RAM ranges, the board's `Hwinit0`
+setting `goos.Bloc`, arm64's translation 36 bits; the launcher's `ARBACE_BOX_RAM`; BX80-BX83).
 
 purego (S4, BX62): https://github.com/ebitengine/purego v0.11.1 (go.sum
 `h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=`, from Go's module cache), the files of its

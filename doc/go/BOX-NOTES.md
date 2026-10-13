@@ -2355,3 +2355,211 @@ longer runs the store's and TLS's checks on the JVM (`jvm_store_checks`, the JVM
 `tls_checks`), nor `test/native/box_test.ae` (`bin/native-tests` left too); the native and boxed
 checks are unchanged. The default TLS roots are Mozilla's everywhere (BX72's "the JVM's own on the
 JVM" no longer applies).
+
+## HV1 (b): RAM above 4 GiB (2026-10-13)
+
+Branch `hv1-ram`, from main `f7926f1`. HOST-VM-SURVEY §14 HV1, decided (b) by the user after
+its measurement (a2g under a 2 GiB collector limit 3.0× slower, 6.4× on 4 threads): give a Go
+guest RAM above 4 GiB with the doorbell where it is (`0xf0000000`, under 4 GiB), so that a tool
+guest runs a2g under `GOMEMLIMIT=12GiB` rather than in the 3 GiB slot. The experiment first, then
+the design it led to, built and checked on amd64 (nested KVM here) and on KVM/arm64 (the
+emulated aarch64 VM); the Mac's side prepared.
+
+### What the slot was
+
+One span from the image's base (2 MiB) to `GoRAMBytes` (3 GiB) above it, identity-mapped, under
+the doorbell; the low 2 MiB hold the system tables (`0x1000`), the command line and environment
+(`0x4000`) and the page tables (`0x10000`). The monitor `mmap`s the slot `MAP_NORESERVE` and maps
+it into the VM as one range from guest-physical 0 (`hv.VMMap(mem, 0, ...)`), and passes the
+runtime its RAM in registers (amd64 RDX, RCX, R8: `RamStart`, `RamSize`, the first stack's offset
+under the top; arm64 X2-X4). TamaGo's runtime (`tamago/goroot`, go1.27.1) manages one contiguous
+range: its heap is a break (`sbrk`, `mem_tamago.go`) from the image's end (`initBloc`) up to the
+first stack, under `RamStart + RamSize`, unless `goos.Bloc` names another start (`os_tamago.go`,
+`osinit`); its heap addresses have 40 bits (`goos.HeapAddrBits`, TamaGo's goos module), so 1 TiB.
+
+### The experiment: the image linked above 4 GiB (`-T 0x100201000`)
+
+The first try was HV1 (b) as the survey wrote it: the guest linked at `0x100201000` (its RAM from
+`0x100200000`), the monitor mapping a low range (`[0, 2 MiB)`: the tables, the command line) and
+the high one, the doorbell in the hole between them.
+
+- **The links work**: TamaGo's linker takes `-T 0x100201000 -R 0x1000` for both architectures
+  (the amd64 guest's text at `0x100200000`, data at `0x104211000`; arm64's likewise), no
+  relocation out of range.
+- **The amd64 guest dies at its fourth instruction of the runtime**: "the guest took exception 14
+  (code 0x2) at pc 0x10027e922, address 0x4367150": `rt0_amd64_tamago`'s first store through TLS
+  (`MOVQ $0x123, g(BX)`, `runtime/sys_tamago_amd64.s:52`), at `m0.tls` (`0x104367150`) cut to
+  32 bits. TamaGo's `runtime·settls` at ring 0 writes `IA32_FS_BASE` with `MOVQ DI, AX; MOVQ
+  $0x0, DX; WRMSR` (`/root/tamago-go/src/runtime/sys_tamago_amd64.s`, lines 152-163): the high
+  half is always zero, so a TLS block above 4 GiB cannot be addressed. (The board's own
+  `whim_apentry` sets the high half for APs; the boot vCPU goes through `settls`.)
+- So the image above 4 GiB needs a change to TamaGo's runtime: in `tamago/` (which breaks
+  `bin/tamago-vendor check`'s byte identity with TamaGo's tree), or as one more file in the
+  runtime's overlay (`overlay/go/`, the `-overlay` that jrt's runtime patches already use: a
+  copy of `sys_tamago_amd64.s` with `MOVQ DI, DX; SHRQ $32, DX`). And it moves every address of
+  the image: the symbols the monitor reads, the build's `-T` in three places (`bin/arbace-go`,
+  `arbace.g2a.build/tamago-ldflags`, `bin/tamago-vendor`), every existing image unbootable on the
+  new layout and the other way round.
+
+### The design: the image where it is, the RAM above 4 GiB (BX80)
+
+The runtime does not need its image inside its RAM: only its heap and first stack must be there,
+and the heap's start is a hook the TamaGo port already has (`goos.Bloc`, "to redefine the heap
+memory start address"). So the image stays linked at `0x201000`, and RAM that does not fit under
+the doorbell goes above it:
+
+| guest-physical | what | mapped |
+|---|---|---|
+| `0` - `0x1000` | nothing (a nil dereference faults) | low range |
+| `0x1000` - `0x200000` | system tables, command line and environment, page tables | low range |
+| `0x200000` - the image's end (2 MiB up) | the image, as today | low range |
+| up to `0xf0000000`, `0xf0001000` - 4 GiB | the hole: no memory | no |
+| `0xf0000000` | the doorbell (no memory: a store exits) | no |
+| `0x100000000` - `+ RAM` | the runtime's RAM: heap from its start, first stack and the vectors' stacks at its top | high range |
+
+- **vmm** (`layout.ae`, `tamago.ae`, `vmm.ae`, `smp.ae`): `Config.RAM` (bytes; 0 is
+  `GoRAMBytes`, 3 GiB). `planGo` keeps the slot as it was when the RAM fits under the doorbell
+  (image base + RAM ≤ `0xf0000000`: one range, the same layout, registers and tables as before);
+  else `RamStart` is `highBase` (4 GiB), `RamSize` the RAM, and the layout records two RAM ranges
+  (`layout.ram`: `[0, roundUp(image end, 2 MiB))` and `[4 GiB, 4 GiB + RAM)`), each mapped by its
+  own `hv.VMMap` (KVM: two memory slots; the framework: two `hv_vm_map`s, both 2 MiB-aligned).
+  The host side stays one `mmap` from 0 to the top (`MAP_NORESERVE`: the hole costs address
+  space, nothing else). Every check of a guest address against the slot's size (a call block,
+  `machine.guest`, `CPUStart`'s release) asks `layout.inRAM` instead, so the hole is outside the
+  guest's memory for the calls too. `boot` refuses RAM that would reach the doorbell from below
+  (as before) and RAM ending beyond `maxGuestEnd`: amd64 1 TiB (the runtime's 40-bit heap
+  addresses), arm64 64 GiB (below).
+- **The board** (`board.ae`): `Hwinit0`, empty until now, sets `goos.Bloc = RamStart` when
+  `RamStart` is past the image (above the board's own variables, in its bss): the runtime's
+  break then starts at 4 GiB. `osinit` reads it after. Nothing else changes: the entry registers, the stacks (at the
+  top of `RamStart + RamSize`, as before), the TLS (in the image's bss, under 4 GiB), the
+  doorbell's store, the vectors.
+- **The launcher**: `ARBACE_BOX_RAM=SIZE` (`storeSize`'s units: bytes, KiB ... TiB; `off` or
+  unset: 3 GiB), not passed to the guest. jrt is unchanged: its default collector limit is
+  `RamSize` less 1 GiB (BX13), so `ARBACE_BOX_RAM=16GiB` gives `GOMEMLIMIT` 15 GiB, and
+  `ARBACE_BOX_RAM=14GiB GOMEMLIMIT=12GiB` is a2g's run as the survey measured it natively.
+- **arm64** (`setup_arm64.ae`): the guest's translation was a 32-bit space (TCR_EL1 T0SZ 32);
+  now 36 bits (T0SZ 28, still 3 levels from level 1, IPS 36 bits as before), so the guest
+  reaches 64 GiB of addresses: RAM up to 60 GiB above 4 GiB.
+- **Not changed**: the doorbell ABI and its numbers (`abi`), the entry state's registers,
+  go-whim's guests (`kvm-tests`' `TestGoGuest`, `TestGoGuestSMP` ... pass: they ask no RAM, so
+  they get the old layout), `tamago/` and the build's link address, the default 3 GiB slot.
+  An old board given RAM above the doorbell would put its heap in the hole and fault at its
+  first allocation; the launcher carries its own guest, so the two always match.
+
+### Measured (amd64, nested KVM on the shared machine, 4 vCPUs, the balloon then deflated)
+
+All in the box built by `ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box` on this
+branch, `target/arbace-go/box-amd64/arbace-box`, against the native executable of the same build.
+
+| run | box | native | notes |
+|---|---|---|---|
+| start, `-e nil` | 0.60 s, 248 MB RSS (3 GiB); 0.61 s, 248 MB (`ARBACE_BOX_RAM=16GiB`) | | the slot's size costs nothing until touched |
+| 10 × 1 GiB `byte-array`s, each filled (10 GiB touched), 16 GiB | 24.3 s, 10.76 GB max RSS | 24.8 s, 10.69 GB | `maxMemory` 15,360 MiB in the box |
+| the same in the default 3 GiB slot | "out of memory: cannot allocate 1073741824-byte block (2352480256 in use)" after 3.7 s | | |
+| 25 M `[i (str i)]` in a vector, 9.3 GiB live after `System/gc`, 16 GiB | 148.6 s, 13.9 GB | 123.6 s (`GOMEMLIMIT=15GiB`), 14.3 GB | 1.2×: 4 vCPUs against the host's threads |
+| 40 M of them, 14.0 GiB live (at the 15 GiB limit), 16 GiB | 243.5 s, 15.1 GB | | the collector at its limit, and it holds |
+
+Boundaries: `ARBACE_BOX_RAM=60GiB` boots (`maxMemory` + 1 GiB = 61,440 MiB; nothing touched);
+`1100GiB` is refused ("the guest's RAM ends at 0x11400000000, beyond this monitor's
+0x10000000000"); `3700MiB` still fits under the doorbell (one range, `maxMemory` 2,805,989,376);
+`ARBACE_BOX_RAM=1x` is refused by the launcher. `a2g --program` in the box was not run (not
+required); the probes above hold a larger live heap than a2g's (1.1-1.6 GB live, 10 GB peak).
+
+### arm64: KVM/arm64 and Hypervisor.framework
+
+- **KVM/arm64** (the aarch64 VM, `bin/box-arm64-vm`, QEMU `-cpu max`): the VM's kernel reports
+  "kvm [1]: IPA Size Limit: 52 bits"; the monitor creates its VM with type 0, which is KVM's
+  default 40-bit IPA (1 TiB; `KVM_CAP_ARM_VM_IPA_SIZE` and the type's IPA field are there if
+  more is ever needed: `hv.VMConfig.IPASize`, `vmType`). The arm64 box of this branch (T0SZ 28)
+  runs there: `-e` with the default slot (`maxMemory` 2,147,483,648) in 18 s; with
+  `ARBACE_BOX_RAM=8GiB` a 1 GiB array allocated and written, `maxMemory` 7,168 MiB, in 25 s; nil
+  dereferences and futures as before; and the box's smoke test (below).
+- **Hypervisor.framework**: its default IPA size is 36 bits (64 GiB) — the reason for 36 bits
+  here, with no `hv_vm_config_set_ipa_size` call: RAM up to 60 GiB above 4 GiB fits the default.
+  `hv_vm_config_get_max_ipa_size` exists since macOS 13; the maximum is 40 bits from macOS 15 on
+  where the hardware supports it (39 before) (QEMU's hvf commits: "hvf: arm: Implement and use
+  hvf_get_physical_address_range", qemu `d54ffa54`; the patch "hvf: support changing IPA granule
+  size", 2025-12-19). Not run: the Mac is the user's (below).
+
+### What the Mac run needs (prepared)
+
+`box/mac/mac.sh`'s checklist gains a section "RAM above 4 GiB": `ARBACE_BOX_RAM=6GiB` (a 1 GiB
+array, the collector's limit), `60GiB` (the most under the framework's default IPA: boots,
+`maxMemory` + 1 GiB = 61,440 MiB, nothing touched), `61GiB` (refused, beyond 36 bits), and when
+`hw.memsize` is 24 GiB or more, 16 GiB with 10 GiB allocated and touched (its time and the
+Mac's memory in `measures.txt`). `bin/box-mac-bundle` packs it as before; the user's run of the
+new bundle answers whether `hv_vm_map` of a 60 GiB range (unwired, untouched) is accepted and how
+fast the framework faults 10 GiB in.
+
+### The forms' layout
+
+A form's position in its `.ae` file is its Go line (the converter's layout), and its explicit
+layout metadata (`:line`, `:go/end`, the lines in `:go/breaks`) are Go lines too. Edited by hand,
+the changed files first printed (`bin/g2a build --layout lines`, as `bin/box-vendor roundtrip`
+prints) with `//line` directives where a form came later than its line, and the first round trip
+failed on one: a directive in a one-line function's body (`board.go`'s `sigpanic`, after the
+package comment grew), which the converter takes back as a statement in an expression's place.
+So the edits keep the layout: the explicit metadata after an inserted or removed `.ae` line moved
+with it, blank lines put before a new form for its doc comment, and the board's change made
+without growing the package comment or its imports. The changed files now print with exactly
+the directives main's do (4 in `board.go`, 2 in `smp.go`, 1 in `net_unix.go`, 1 in
+`seccomp_net_linux_amd64.go`, all go-whim's own layout), gofmt'd. (The one-off script that did it,
+`.tmp/hv1/tools/relayout.py` in the worktree, is not committed.) A rule for future hand edits:
+reserve a form's Go lines (its doc comment's) as blank `.ae` lines before it, and move the
+explicit metadata after any line inserted.
+
+### Checks (the branch, amd64 here; arm64 in the VM)
+
+- `ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box`: built (the amd64 guest 68,419,918
+  bytes, as before but for the board).
+- `bin/arbace-go --smoke --box` (amd64, the final build): 113 ok, none failed, with the new check
+  "ARBACE_BOX_RAM=6GiB: RAM above 4 GiB (HV1 (b)) ..." on 1 and 4 vCPUs.
+- `bin/box-arm64-vm smoke` (KVM/arm64 in the VM, the same smoke test, the arm64 build before the
+  board's last edit, which only changed how `Hwinit0` tells the RAM is past the image): the RAM
+  check ok on 4 and 1 vCPUs, and every check ok (the run
+  of the run: 112 ok, 0 failed).
+- `bin/box-vendor kvm-tests`: 27 passed, none failed (go-whim's tests on `box/` as it is: hv, vmm
+  with the new `TestPlanGoHigh`, the C and TamaGo guests, go-whim's own guests on the old layout).
+- `bin/box-vendor roundtrip`: every package in every configuration passes (tree, export, code).
+- `bin/tamago-vendor check`: both guest images identical to the originals' (amd64 and arm64):
+  `tamago/` is untouched, so its identity holds.
+- `bin/gate` (essential) on the branch with main `40154ca` merged: passed (14m48s; the suite with no
+  regressions, the oracle 54 known mismatches, 0 new).
+
+### Amendments (proposed 2026-10-13)
+
+- **BX80 (box/: vmm, board, launcher) Where a Go guest's RAM beyond the doorbell goes.** Options:
+  - (a) *the image where it is linked, the RAM above 4 GiB* (built here): two RAM ranges, the
+    doorbell between them; the board starts the heap there by `goos.Bloc`; `tamago/`, the link,
+    the ABI and go-whim's guests unchanged;
+  - (b) the image linked at `0x100201000` with its RAM: needs TamaGo's `settls` fixed for a TLS
+    above 4 GiB (an overlay of `sys_tamago_amd64.s`, or `tamago/` changed and its identity with
+    TamaGo's tree given up), the build's `-T` changed everywhere, old and new images incompatible;
+  - (c) the doorbell moved above RAM (STANDALONE-SURVEY D8 (b)): an ABI change shared with
+    go-whim's guests and board, for no gain over (a).
+
+  *Recommended: (a)*.
+- **BX81 (launcher, later the spawn call) The slot's size.** Options:
+  - (a) 3 GiB by default as today, `ARBACE_BOX_RAM` per launch, and per spawn the RAM a spawn asks
+    for (HV5's resource asks, within HV4's budget);
+  - (b) a larger default (8 or 16 GiB): free until touched, but with no return of memory to the
+    host (HV2) a long-lived REPL keeps its peak;
+  - (c) a fraction of the host's memory.
+
+  *Recommended: (a)*; a2g's tool guest asks 14 GiB with `GOMEMLIMIT=12GiB`.
+- **BX82 (box/: vmm on arm64) The guest's addresses on arm64.** Options:
+  - (a) 36 bits (T0SZ 28, built here): RAM up to 60 GiB, the framework's default IPA, no
+    configuration;
+  - (b) 40 bits with `hv_vm_config_set_ipa_size(40)` and the IPA type on KVM: more RAM, macOS 15
+    and hardware that has it.
+
+  *Recommended: (a)*, (b) when a guest needs more than 60 GiB.
+- **BX83 (checks)** `TestPlanGoHigh` (vmm), the smoke test's `ARBACE_BOX_RAM=6GiB` check (also in
+  the arm64 VM), and the Mac checklist's RAM section (6, 60, 61 GiB; 10 GiB touched at 16 GiB).
+- **BX84 (HV2, follow-up) Memory back to the host for large slots.** With slots of 14-16 GiB, a
+  guest's peak stays committed until it exits (no `sysUnused` reaches the monitor). Options:
+  - (a) nothing for tool guests, which exit (HV2 (a));
+  - (b) HV2 (b)'s release call before a long-lived box gets a large slot.
+
+  *Recommended: (a) now, (b) with the first long-lived large box* (as HV2 decided).

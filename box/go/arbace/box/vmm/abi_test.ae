@@ -42,7 +42,7 @@
   (let [text (addr (lit elf/Prog :ProgHeader (lit elf/ProgHeader :Type elf/PT_LOAD :Flags (bit-or elf/PF_R elf/PF_X) :Vaddr imageBase :Memsz 0x200000)))
       ^{:line 43} data (addr (lit elf/Prog :ProgHeader (lit elf/ProgHeader :Type elf/PT_LOAD :Flags (bit-or elf/PF_R elf/PF_W) :Vaddr (+ imageBase 0x200000) :Memsz 0x145678)))
       ^{:line 44} im (addr (lit image :entry (+ imageBase 0x1000) :vectors (+ imageBase 0x2000) :end (+ imageBase 0x345678) :loads (lit (slice (* elf/Prog)) text data)))
-      ^{:line 45} l (planGo im 1)]
+      ^{:line 45} l (planGo im 1 0)]
     (when (or (!= (.-ramStart l) imageBase) (!= (.-size l) (+ imageBase GoRAMBytes)))
       ^{:go/via [common]} (.Fatalf t "ramStart %#x" (.-ramStart l)))
 
@@ -51,3 +51,34 @@
 
     (when (or (!= (.permAt l (.-heap l)) (bit-or pRead pWrite)) (!= (.permAt l (- (.-size l) 1)) (bit-or pRead pWrite)) (!= (.permAt l (.-size l)) 0) (!= (.permAt l imageBase) (bit-or pRead pExec)))
       ^{:go/via [common]} (.Fatalf t "spans %+v" (.-spans l)))))
+
+
+
+
+
+
+
+(go/func TestPlanGoHigh "TestPlanGoHigh: RAM that does not fit under the doorbell is above 4 GiB\n(HV1 (b)): the image where it is linked, two ranges of RAM, the doorbell in\nthe hole between them, the runtime's RAM and first stack at the top of\nthe high one; and RAM that fits is one slot, as before.\n" [^{:tag (* testing/T)} t]
+  (let [text (addr (lit elf/Prog :ProgHeader (lit elf/ProgHeader :Type elf/PT_LOAD :Flags (bit-or elf/PF_R elf/PF_X) :Vaddr imageBase :Memsz 0x200000)))
+      data (addr (lit elf/Prog :ProgHeader (lit elf/ProgHeader :Type elf/PT_LOAD :Flags (bit-or elf/PF_R elf/PF_W) :Vaddr (+ imageBase 0x200000) :Memsz 0x145678)))
+      im (addr (lit image :entry (+ imageBase 0x1000) :vectors (+ imageBase 0x2000) :end (+ imageBase 0x345678) :loads (lit (slice (* elf/Prog)) text data)))
+      ram (conv uint64 (<< 16 30))
+      l (planGo im 4 ram)]
+    (when (or (!= (.-ramStart l) highBase) (!= (.-size l) (+ highBase ram)) (!= (.-heap l) highBase))
+      ^{:go/via [common]} (.Fatalf t "layout %+v" l))
+
+    (when (or (!= (len (.-ram l)) 2) (!= (aget (.-ram l) 0) (lit span 0 (+ imageBase 0x400000) 0)) (!= (aget (.-ram l) 1) (lit span highBase (.-size l) 0)))
+      ^{:go/via [common]} (.Fatalf t "ram %+v" (.-ram l)))
+
+    (when (or (!= (- (.-size l) (.-stackTop l)) (* 4 FaultStackBytes)) (!= (.-faultTop l) (.-size l)))
+      ^{:go/via [common]} (.Fatalf t "stacks %+v" l))
+
+    (when (or (.inRAM l Doorbell 8) (.inRAM l (- highBase 8) 16) (not (.inRAM l highBase 8)) (not (.inRAM l (- (.-size l) 8) 8)) (.inRAM l (.-size l) 1) (not (.inRAM l argsBase 8)))
+      ^{:go/via [common]} (.Fatalf t "inRAM wrong for %+v" (.-ram l)))
+
+    (when (or (!= (.permAt l highBase) (bit-or pRead pWrite)) (!= (.permAt l (+ imageBase 0x400000)) 0) (!= (.permAt l Doorbell) (bit-or pWrite pDevice)) (!= (.permAt l imageBase) (bit-or pRead pExec)))
+      ^{:go/via [common]} (.Fatalf t "spans %+v" (.-spans l)))
+
+    (let [low (planGo im 1 (- Doorbell imageBase))]
+      (when (or (!= (.-ramStart low) imageBase) (!= (.-size low) Doorbell) (!= (len (.-ram low)) 1))
+        ^{:go/via [common]} (.Fatalf t "the most RAM under the doorbell: %+v" low)))))

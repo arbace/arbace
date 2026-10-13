@@ -26,13 +26,17 @@
 
 
 
+(go/const ^{:val 4294967296 :doc "highBase is where a Go guest's RAM starts when it does not fit under\nthe doorbell: 4 GiB (HV1 (b), doc/go/BOX-NOTES.md).\n"} highBase (<< 1 32))
+
+
+
 (go/const ^{:val "runtime/goos.RamStart" :doc "tamagoSymbol is how a TamaGo image is known (image.tamago): the variable\nits board sets before the runtime starts.\n"} tamagoSymbol "runtime/goos.RamStart")
 
 
 
-^{:go/end 38} (go/func layoutFor "layoutFor is the slot's layout for the image: the C guest's (plan), one\nvCPU, or a Go guest's (planGo) on cpus.\n" ^{:tag (* layout)} [^{:tag (* image)} im ^int cpus]
+^{:go/end 42} (go/func layoutFor "layoutFor is the slot's layout for the image: the C guest's (plan), one\nvCPU, or a Go guest's (planGo) on cpus with ram bytes of RAM (0:\nGoRAMBytes).\n" ^{:tag (* layout)} [^{:tag (* image)} im ^int cpus ^uint64 ram]
   (when (.-tamago im)
-    (return (planGo im cpus)))
+    (return (planGo im cpus ram)))
 
   (plan im cpus))
 
@@ -40,7 +44,12 @@
 
 
 
-^{:go/end 69} (go/func planGo "planGo lays a Go guest's slot out: the image, then one span read-write\nto GoRAMBytes above the image's base, its top FaultStackBytes for each\nvCPU the vectors' stacks (IST1) and below them the runtime's first stack.\n" ^{:tag (* layout)} [^{:tag (* image)} im ^int cpus]
+
+
+
+
+
+^{:go/end 90} (go/func planGo "planGo lays a Go guest's slot out: the image, then one span read-write\nto ram bytes (0: GoRAMBytes) above the image's base, its top\nFaultStackBytes for each vCPU the vectors' stacks (IST1) and below them\nthe runtime's first stack.  RAM that does not fit under the doorbell is\nput above 4 GiB (highBase; HV1 (b), doc/go/BOX-NOTES.md): the image stays\nwhere it is linked, the low part of the slot, and the runtime's RAM --\nits heap, which the board starts there (goos.Bloc), and its first stack\n-- is [highBase, highBase+ram), the doorbell in the hole between the two.\n" ^{:tag (* layout)} [^{:tag (* image)} im ^int cpus ^uint64 ram]
   (let [l (addr (lit layout :entry (.-entry im) :vectors (.-vectors im) :goGuest true :cpus cpus :apEntry (.-apEntry im)))]
     (set! (.-spans l) (append (.-spans l) (lit span sysBase argsEnd (bit-or pRead pWrite))))
     (let [base (conv uint64 Doorbell)]
@@ -58,21 +67,36 @@
           (set! (.-spans l) (append (.-spans l) (lit span ^{:go/via [ProgHeader]} (.-Vaddr p) (roundUp (+ ^{:go/via [ProgHeader]} (.-Vaddr p) ^{:go/via [ProgHeader]} (.-Memsz p)) page) pm)))
           (set! base (min base ^{:go/via [ProgHeader]} (.-Vaddr p)))))
 
-      (set! (.-ramStart l) base)
-      (set! (.-heap l) (roundUp (.-end im) page))
-      (set! (.-size l) (+ base GoRAMBytes))
+      (when (== ram 0)
+        (set! ram GoRAMBytes))
+
+      (if (<= ram (- Doorbell base))
+        (do
+          (set! (.-ramStart l) base)
+          (set! (.-heap l) (roundUp (.-end im) page))
+          (set! (.-size l) (+ base ram))
+          (set! (.-ram l) (lit (slice span) (lit span 0 (.-size l) 0))))
+        (do
+          (set! (.-ramStart l) highBase)
+          (set! (.-heap l) highBase)
+          (set! (.-size l) (+ highBase ram))
+          (set! (.-ram l) (lit (slice span) (lit span 0 (roundUp (.-end im) block) 0) (lit span highBase (.-size l) 0)))))
+
       (set! (.-faultTop l) (.-size l))
       (set! (.-stackTop l) (- (.-size l) (* (conv uint64 cpus) FaultStackBytes)))
       (set! (.-spans l) (append (.-spans l) (lit span (.-heap l) (.-size l) (bit-or pRead pWrite))))
       (set! (.-spans l) (append (.-spans l) (lit span Doorbell (+ Doorbell page) (bit-or pWrite pDevice))))
-      ^{:line 68} l)))
+      ^{:line 89} l)))
 
 
 
 
-^{:go/breaks [7] :go/end 84} (go/func boot "boot sets the vCPU up for the image: the C guest's state (setup), and a\nGo guest's registers besides (abi's entry state).\n" ^error [^hv/VCPU v ^{:tag (slice byte)} mem ^{:tag (* layout)} l]
-  (when (> (.-size l) Doorbell)
+^{:go/breaks [7] :go/end 108} (go/func boot "boot sets the vCPU up for the image: the C guest's state (setup), and a\nGo guest's registers besides (abi's entry state).\n" ^error [^hv/VCPU v ^{:tag (slice byte)} mem ^{:tag (* layout)} l]
+  (when (and (> (.-size l) Doorbell) (< (.-ramStart l) highBase))
     (return (fmt/Errorf "the guest's %d MiB reach the doorbell at %#x" (>> (.-size l) 20) Doorbell)))
+
+  (when (> (.-size l) maxGuestEnd)
+    (return (fmt/Errorf "the guest's RAM ends at %#x, beyond this monitor's %#x" (.-size l) (conv uint64 maxGuestEnd))))
 
   (when [err (setup v mem l)] (!= err nil)
     (return err))
@@ -84,7 +108,7 @@
 
 
 
-^{:go/end 92} (go/func random "random answers abi.Random: buf filled from the host's generator.\n" ^int64 [^{:tag (slice byte)} buf]
+^{:go/end 116} (go/func random "random answers abi.Random: buf filled from the host's generator.\n" ^int64 [^{:tag (slice byte)} buf]
   (when [(values _ err) (rand/Read buf)] (!= err nil)
     (return -1))
 
