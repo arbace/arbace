@@ -1,0 +1,295 @@
+;; Package tree is the store's file trees (doc/go/BOX-NOTES.md, S7; the
+;; standalone survey's D10): a tree is a blob holding an EDN map from a name
+;; to its entry -- [:file HASH SIZE], [:exec HASH SIZE] (a file whose mode
+;; has an execute bit) or [:dir HASH] (a tree) -- printed canonically, names
+;; sorted by their bytes and one entry a line, so that the same files are
+;; the same blob.  A file's contents are a blob of their own.  It imports
+;; only the standard library: the launcher, the native executable and the
+;; tool guests (GOOS=tamago) share it.
+(in-ns 'go.arbace.box.tree) (go/file "tree.go" :doc "Package tree is the store's file trees (doc/go/BOX-NOTES.md, S7; the\nstandalone survey's D10): a tree is a blob holding an EDN map from a name\nto its entry -- [:file HASH SIZE], [:exec HASH SIZE] (a file whose mode\nhas an execute bit) or [:dir HASH] (a tree) -- printed canonically, names\nsorted by their bytes and one entry a line, so that the same files are\nthe same blob.  A file's contents are a blob of their own.  It imports\nonly the standard library: the launcher, the native executable and the\ntool guests (GOOS=tamago) share it.\n" :imports [
+
+
+    ^{:line 12} [bytes "bytes"]
+    ^{:line 13} [sha256 "crypto/sha256"]
+    ^{:line 14} [hex "encoding/hex"]
+    ^{:line 15} [errors "errors"]
+    ^{:line 16} [fmt "fmt"]
+    ^{:line 17} [fs "io/fs"]
+    ^{:line 18} [os "os"]
+    ^{:line 19} [path "path"]
+    ^{:line 20} [filepath "path/filepath"]
+    ^{:line 21} [sort "sort"]
+    ^{:line 22} [strings "strings"]])
+
+
+
+(go/const "The kinds of entry.\n"
+  ^{:line 27} [^{:val "file"} File "file"]
+  ^{:line 28} [^{:val "exec"} Exec "exec"]
+  ^{:line 29} [^{:val "dir"} Dir "dir"])
+
+
+
+(go/type Entry "Entry is a name in a tree: a file's contents, or a tree, by hash.\n" (struct
+    ^{:line 34 :tag string} Name
+    ^{:line 35 :tag string} Kind
+    ^{:line 36 :tag (array 32 byte)} Hash
+    ^{:line 37 :tag int64} Size))
+
+
+
+
+(go/type Store "Store is what the trees are kept in: the launcher's directory store, or\na guest's calls.\n" (interface
+    (Put [^{:tag (slice byte)} data] :results [(array 32 byte) error])
+    (Read [^{:tag (array 32 byte)} h] :results [(slice byte) error])))
+
+
+
+
+^{:go/breaks [[6 58]] :go/end 59} (go/func ValidName "ValidName is whether a tree takes name: not empty, not . or .., no /, no\nNUL and no other control character.\n" ^bool [^string name]
+  (when (or (== name "") (== name ".") (== name ".."))
+    (return false))
+
+  (for [i 0] (< i (len name)) (inc! i)
+    (when [c (aget name i)] (or (== c \/) (< c 0x20) (== c 0x7f))
+      (return false)))
+
+
+  true)
+
+
+
+
+^{:go/end 91} (go/func Format "Format is the tree of entries, printed canonically.  The entries are\nsorted by name; a name twice, or one a tree does not take, is an error.\n" [^{:tag (slice Entry)} entries] :results [(slice byte) error]
+  (let [es (append (conv (slice Entry) nil) (spread entries))]
+    (sort/Slice es ^{:go/end 65} (fn ^bool [^int i ^int j] (< (.-Name (aget es i)) (.-Name (aget es j)))))
+    (let [^bytes/Buffer b (zero bytes/Buffer)]
+      (.WriteByte b \{)
+      (range [i e es]
+        (when (not (ValidName (.-Name e)))
+          (return nil (fmt/Errorf "tree: a name it does not take: %q" (.-Name e))))
+
+        (when (> i 0)
+          (when (== (.-Name (aget es (- i 1))) (.-Name e))
+            (return nil (fmt/Errorf "tree: %q twice" (.-Name e))))
+
+          (.WriteString b "\n "))
+
+        (writeString (addr b) (.-Name e))
+        (let [h (hex/EncodeToString (subslice (.-Hash e)))]
+          (switch (.-Kind e)
+            (case [File Exec]
+              (fmt/Fprintf (addr b) " [:%s %q %d]" (.-Kind e) h (.-Size e)))
+            (case [Dir]
+              (fmt/Fprintf (addr b) " [:dir %q]" h))
+            (default
+              (return nil (fmt/Errorf "tree: %q: no kind %q" (.-Name e) (.-Kind e)))))))
+
+
+      (.WriteString b "}\n")
+      (return (.Bytes b) nil))))
+
+
+
+^{:go/end 103} (go/func writeString "writeString writes s as a Clojure string: \" and \\ escaped.\n" [^{:tag (* bytes/Buffer)} b ^string s]
+  (.WriteByte b \")
+  (for [i 0] (< i (len s)) (inc! i)
+    (when [c (aget s i)] (or (== c \") (== c \\))
+      (.WriteByte b \\))
+
+    (.WriteByte b (aget s i)))
+
+  (.WriteByte b \"))
+
+
+
+
+^{:go/end 147} (go/func Parse "Parse is the entries of a tree blob, in its order.  It takes what Format\nprints, and the same map spaced otherwise (commas too).\n" [^{:tag (slice byte)} data] :results [(slice Entry) error]
+  (let [(values v err) (ReadEDN data)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [(values m ok) (assert Map v)]
+      (when (not ok)
+        (return nil (errors/New "tree: not a map")))
+
+      (let [es (make (slice Entry) 0 (len m))]
+        (range [_ kv m]
+          (let [(values name ok) (assert string (.-Key kv))]
+            (when (or (not ok) (not (ValidName name)))
+              (return nil (fmt/Errorf "tree: a key that is not a name: %v" (.-Key kv))))
+
+            (let [(values vec ^:assign ok) (assert Vector (.-Val kv))]
+              (when (or (not ok) (< (len vec) 2))
+                (return nil (fmt/Errorf "tree: %q: not an entry" name)))
+
+              (let [(values kind _) (assert Keyword (aget vec 0))
+                  (values hs _) (assert string (aget vec 1))
+                  (values h ^:assign ok) (ParseHash hs)]
+                (when (not ok)
+                  (return nil (fmt/Errorf "tree: %q: not a hash" name)))
+
+                (let [e (lit Entry :Name name :Kind (conv string kind) :Hash h)]
+                  (switch
+                    (case [(and ^:go/paren (or (== (.-Kind e) File) (== (.-Kind e) Exec)) (== (len vec) 3))]
+                      (let [(values n ok) (assert int64 (aget vec 2))]
+                        (when (or (not ok) (< n 0))
+                          (return nil (fmt/Errorf "tree: %q: not a size" name)))
+
+                        (set! (.-Size e) n)))
+                    (case [(and (== (.-Kind e) Dir) (== (len vec) 2))])
+                    (default
+                      (return nil (fmt/Errorf "tree: %q: not an entry" name))))
+
+                  (set! es (append es e)))))))
+
+        (return es nil)))))
+
+
+
+^{:go/end 157} (go/func ParseHash "ParseHash is s as a blob's hash: 64 lowercase hexadecimal digits.\n" [^string s] :results [(array 32 byte) bool]
+  (let [^{:tag (array 32 byte)} h (zero (array 32 byte))]
+    (when (or (!= (len s) 64) (!= (strings/ToLower s) s))
+      (return h false))
+
+    (let [(values n err) (hex/Decode (subslice h) (conv (slice byte) s))]
+      (return h (and (== err nil) (== n 32))))))
+
+
+
+^{:go/end 162} (go/func Hash "Hash is data's hash, as the store names it.\n" ^{:tag (array 32 byte)} [^{:tag (slice byte)} data]
+  (sha256/Sum256 data))
+
+
+
+^{:go/end 171} (go/func Put "Put stores the entries as a tree and returns its hash.\n" [^Store st ^{:tag (slice Entry)} entries] :results [(array 32 byte) error]
+  (let [(values b err) (Format entries)]
+    (when (!= err nil)
+      (return (lit (array 32 byte)) err))
+
+    (.Put st b)))
+
+
+
+^{:go/end 180} (go/func Get "Get is tree h's entries.\n" [^Store st ^{:tag (array 32 byte)} h] :results [(slice Entry) error]
+  (let [(values b err) (.Read st h)]
+    (when (!= err nil)
+      (return nil err))
+
+    (Parse b)))
+
+
+
+
+
+^{:go/end 222} (go/func PutDir "PutDir stores the directory dir as a tree, its files and directories\nunder it (symbolic links followed; other kinds refused), and returns its\nhash.  A file is :exec when its mode has an execute bit.\n" [^Store st ^string dir] :results [(array 32 byte) error]
+  (let [(values ents err) (os/ReadDir dir)]
+    (when (!= err nil)
+      (return (lit (array 32 byte)) err))
+
+    (let [^{:tag (slice Entry)} es (zero (slice Entry))]
+      (range [_ d ents]
+        (let [p (filepath/Join dir (.Name d))
+            (values fi err) (os/Stat p)]
+          (when (!= err nil)
+            (return (lit (array 32 byte)) err))
+
+          (let [e (lit Entry :Name (.Name d))]
+            (switch
+              (case [(.IsDir fi)]
+                (set! (.-Kind e) Dir)
+                (when [(set! (values (.-Hash e) err) (PutDir st p))] (!= err nil)
+                  (return (lit (array 32 byte)) err)))
+
+              (case [(.IsRegular (.Mode fi))]
+                (let [(values data err) (os/ReadFile p)]
+                  (when (!= err nil)
+                    (return (lit (array 32 byte)) err))
+
+                  (set! (values (.-Kind e) (.-Size e)) (values File (conv int64 (len data))))
+                  (when (!= (bit-and (.Mode fi) 0111) 0)
+                    (set! (.-Kind e) Exec))
+
+                  (when [(set! (values (.-Hash e) err) (.Put st data))] (!= err nil)
+                    (return (lit (array 32 byte)) err))))
+
+              (default
+                (return (lit (array 32 byte)) (fmt/Errorf "tree: %s: neither a file nor a directory" p))))
+
+            (set! es (append es e)))))
+
+      (Put st es))))
+
+
+
+
+
+^{:go/end 229} (go/func Walk "Walk calls fn for each entry under tree h, depth first in the tree's\norder, with its slash-separated path below the tree; a directory before\nwhat it holds.  An error of fn's ends the walk and is returned.\n" ^error [^Store st ^{:tag (array 32 byte)} h ^{:tag (func [^string p ^Entry e] [error])} fn]
+  (walk st h "" fn))
+
+
+^{:go/end 248} (go/func walk ^error [^Store st ^{:tag (array 32 byte)} h ^string dir ^{:tag (func [string Entry] [error])} fn]
+  ^{:go/breaks [[4 247]]} (let [(values es err) (Get st h)]
+    (when (!= err nil)
+      (return err))
+
+    (range [_ e es]
+      (let [p (path/Join dir (.-Name e))]
+        (when [err (go/call fn p e)] (!= err nil)
+          (return err))
+
+        (when (== (.-Kind e) Dir)
+          (when [err (walk st (.-Hash e) p fn)] (!= err nil)
+            (return err)))))
+
+
+
+    nil))
+
+
+
+
+^{:go/end 271} (go/func Extract "Extract writes tree h into the directory dir (made when missing): its\ndirectories, and its files with mode 0644, or 0755 for :exec.\n" ^error [^Store st ^{:tag (array 32 byte)} h ^string dir]
+  (when [err (os/MkdirAll dir 0755)] (!= err nil)
+    (return err))
+
+  (Walk st h ^{:go/end 270} (fn ^error [^string p ^Entry e]
+      (let [q (filepath/Join dir (filepath/FromSlash p))]
+        (when (== (.-Kind e) Dir)
+          (return (os/MkdirAll q 0755)))
+
+        (let [(values data err) (.Read st (.-Hash e))]
+          (when (!= err nil)
+            (return err))
+
+          (let [mode (conv fs/FileMode 0644)]
+            (when (== (.-Kind e) Exec)
+              (set! mode 0755))
+
+            (os/WriteFile q data mode)))))))
+
+
+
+
+
+^{:go/breaks [[5 295]] :go/end 296} (go/func Reachable "Reachable adds to set every blob under the trees roots: the trees and\nthe files' contents.\n" ^error [^Store st ^{:tag (slice (array 32 byte))} roots ^{:tag (map (array 32 byte) bool)} set]
+  (range [_ r roots]
+    (when (aget set r)
+      (continue))
+
+    (aset set r true)
+    (let [(values es err) (Get st r)]
+      (when (!= err nil)
+        (return err))
+
+      (range [_ e es]
+        (if (== (.-Kind e) Dir)
+          (when [err (Reachable st (lit (slice (array 32 byte)) (.-Hash e)) set)] (!= err nil)
+            (return err))
+
+
+          (aset set (.-Hash e) true)))))
+
+
+
+  nil)

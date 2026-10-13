@@ -2615,3 +2615,136 @@ forms, is later).
   passed as trees; the image put in the store under a ref, which the launcher boots.
 - Order: R3 first (what gc needs, by experiment); then the spawn call with trees in and out; then
   compile, link and the boot by ref on amd64; then arm64 in the emulated VM.
+
+### R3: what gc needs in a guest (measured first)
+
+Experiments in `.tmp/s7/` (not committed), TamaGo's go1.27.1 as it is, guests on /dev/kvm (nested,
+the shared host), the launcher of main `38bcad1`:
+
+- **It builds as a guest.** `cmd/compile`, `cmd/link` and `cmd/asm` link for `GOOS=tamago` with the
+  board when a `-overlay` adds the board, `abi` and a shim to GOROOT's `cmd` module (a package of
+  `cmd` imports only the standard library and `cmd`). The board's assembly needs a directory that
+  exists (the go command runs `asm` in the package's directory, which an overlay cannot make): the
+  board is the package `cmd/internal`, a directory with no Go files of its own.
+- **Its command line and environment.** TamaGo's runtime reads neither (`goenvs` is empty;
+  `os.Args` is `["tamago"]`): the shim sets `os.Args` from `board.Args` and the environment from
+  `board.Env` in the tool's `init`. `internal/buildcfg` reads `GOOS` and `GOARCH` at its package
+  initialisation, before that, and falls back to `runtime.GOOS` and `runtime.GOARCH`: a tool targets
+  tamago and its own architecture (BX97).
+- **Files.** It uses TamaGo's in-memory file system (`syscall/fs_tamago.go`) through `os` only: no
+  `mmap` (`tamago` is not a `unix` GOOS, so `cmd/internal/bio` and the linker's output buffer read
+  and write), no temporary files and no `os/exec` (the linker's internal linking; the external
+  linker and `-tmpdir` are not used), no network.
+- **A bug in TamaGo's file system.** The first link in a guest failed ("could not look up
+  runtime.mapinitnoop"): the linker read only the first member of each archive. `fsysFile.seek`
+  past the end sets the file's size to the *old* offset plus one ("simulate sparse file"), so a
+  seek to an odd-aligned member offset (`nextar`) shrank the archive for every later read. Two
+  more: a write past the end adds the offset to the size (`Size += offset`), and `O_TRUNC` leaves
+  the size. Patched for the tool guests (BX95): with it, every step below works.
+- **Exit.** The shim stores the output when the tool exits with 0 (`goos.Exit` wrapped): the
+  runtime's fatal errors exit with 2 on the system stack, where nothing can be allocated (the first
+  version, which stored on any exit, crashed there).
+- **Byte for byte.** `compile` of a small package in a guest writes the same archive as the host's
+  `compile` with the same flags (`-trimpath` mapping the guest's paths). A whole TamaGo guest (a
+  hello world on the board: 33 compiles, 48 assemblies, a link; `go build -a -n`'s plan replayed,
+  each step a guest, the archives packed on the host) built entirely by tool guests is
+  byte-identical to the same plan run by the host's tools, and boots: "hello from a guest compiled
+  and linked in the box".
+- **Cost.** That build: 82 guests, 15.4 s of tool time against 2.9 s on the host (each guest's
+  start about 0.1 s); `runtime`'s compile the longest, 3.0 s and 484 MB of the launcher's RSS
+  (the guest's touched memory). The default 3 GiB slot is ample for the standard library's
+  packages; Arbace's `jrt` (7-8 GB, STANDALONE-SURVEY §8.2) is S5's.
+
+### What was built
+
+- **Trees** (`box/`'s new package `arbace/box/tree`, standard library only, shared by the launcher
+  and the tool guests; BX93). A tree is a blob holding an EDN map, printed canonically (names
+  sorted by their bytes, one entry a line, `"` and `\` escaped):
+
+      {"a.go" [:file "HASH" 1234]
+       "bin" [:exec "HASH" 87]
+       "sub" [:dir "HASH"]}
+
+  `tree.Format`, `Parse`, `PutDir`, `Walk`, `Extract`, `Reachable`; a small reader of the EDN it
+  uses (maps, vectors, strings, keywords, integers). The launcher's store tool:
+  `arbace-box --store DIR tree put DIR [NAME]`, `tree tar FILE|- [NAME]` (`git archive REV |`),
+  `tree get HASH|NAME DIR`, `tree ls HASH|NAME`. The same files are the same tree (checked: a tree
+  extracted and stored again is the same hash).
+- **The spawn calls** (`abi`, `vmm`; BX90). After the events' call: `Spawn` (54; a[0] the request's
+  hash: a handle), `SpawnPoll` (55; handle a[0]: 0 and the result's hash at a[1], or
+  `SpawnRunning`, -11), `SpawnOut` (56; a spawned guest declares its output tree);
+  `SpawnRefused` (-1) for the rest. None waits; a spawn's end posts an event (the event area, as
+  the network's changes do). `vmm.Config` gains `Spawner` (an interface: `Start`, `Poll`) and
+  `Output`.
+- **The request and the result** (`tree.Request`, `tree.Result`; BX94):
+
+      {:image "HASH" :args ["compile" "-p" "p" ...] :env ["GOARCH=amd64"]
+       :trees [["/src" "HASH"] ["/deps/b8" "HASH"]] :out "/out" :cwd "/src"
+       :ram 3221225472 :cpus 4}
+
+      {:exit 0 :out "HASH" :console "HASH"}
+
+  `:out` only when the guest exited with 0 and declared one; `:console` both streams in order, a
+  blob (at most 16 MiB); `:fault` instead of `:exit` when the monitor ended the guest. The result
+  holds nothing of the run's time or place: the same request gives the same result blob.
+- **The launcher** (BX91, BX92). `ARBACE_BOX_SPAWN=1` (with a store) lets the guest spawn: before
+  the system-call filter goes on, the launcher starts its helper, `arbace-box --spawner DIR`, and
+  answers the calls over its standard input and output. The helper reads each request, refuses one
+  asking more than the budget (`ARBACE_BOX_SPAWN_RAM`, storeSize's units, by default half the
+  host's `MemAvailable`; `ARBACE_BOX_SPAWN_CPUS`, by default the host's CPUs), queues the others
+  first come first served, and runs each as `arbace-box --store DIR --tool REQUEST`: a launcher
+  whose guest is the request's image (read from the store, its hash checked), its command line
+  and environment the request's only (and `ARBACE_TOOL_REQUEST`), its store a view (the blobs it
+  puts, and those reachable from its trees and the request; no refs), no network, no spawn of its
+  own, its console captured, its RAM and vCPUs the request's (3 GiB and 1 by default), the filter
+  on. It writes the result blob and prints its hash. At the end of the parent the helper's input
+  ends and it kills the children still running.
+- **The tool guests' shim** (`box/`'s new package `arbace/box/tool`, GOOS=tamago). `tool.Start`,
+  called from an `init` the overlay adds to each tool's `main`: the command line and environment;
+  then, spawned, the request read from the store, each input tree mounted (directories made, each
+  file a lazy file of the patched file system: its size known, its contents read from the store at
+  the first read or write: HV3 (b) in the guest's terms), the working and output directories made,
+  and `goos.Exit` wrapped to store the output directory as a tree and declare it on exit 0.
+- **TamaGo's file system for the tool guests** (`overlay/go/syscall.ae`, `syscall/fs_tamago.ae`;
+  BX95): the seek, write and truncation fixes above, and `syscall.MkLazy` (marked `//go:linkname`
+  so the shim may reference it from outside the standard library). Converted from the patched
+  file (`bin/g2a convert --goos tamago syscall` from a GOROOT whose `fs_tamago.go` is the patched
+  one), the patch's lines marked "Arbace".
+- **The tool images** (`bin/box-tools build [ARCH...]`, `put STORE [ARCH...]`; BX96): box/ printed
+  for tamago, the overlay written (the board at `cmd/internal`, `abi`, `tree`, `tool` under
+  `cmd/internal/arbacebox`, their imports rewritten; `fs_tamago.go` replaced; one `init` file in
+  each tool's `main`), and each tool built with TamaGo's go as a box guest is linked; `put` stores
+  them under the refs `tool.compile.amd64` ... Sizes: amd64 `compile` 28,114,072 bytes, `link`
+  7,159,758, `asm` 5,407,243; arm64 26,386,992, 6,653,897, 5,147,626. About 70 s for both.
+- How the forms were made: the new files written in Go and converted (`bin/g2a convert --tests`,
+  every configuration that holds them, identical across them); the four changed files (`abi.go`,
+  `vmm.go`, the launcher's `main.go` and `store.go`) edited in a printing of box/ with
+  `--layout lines`, converted, and merged three ways into box/'s forms (base: the unedited
+  printing converted), which keeps box/'s comments and literal spellings; the only conflicts were
+  lines with a comment whose line number moved, resolved by taking the new numbers. The printed
+  code of every changed and new file equals the edited Go (comments and literal spellings apart),
+  and no `//line` directive appears.
+
+### Measured (amd64, nested KVM, the shared machine)
+
+- A spawn from a guest (a test guest calling `Spawn` and `SpawnPoll` directly) of `compile` on a
+  one-file package: 84-170 ms from the call to the result, the launcher's start included; the
+  archive the same as the host's `compile`'s.
+- Five spawns at once in a 7 GiB budget (3 GiB each by default): one refused at once (it asked
+  64 GiB), two running, the others queued; all done in 0.3 s.
+- The child's view: a file of its tree readable (46 bytes), its image, another request and
+  `RefGet` refused, `Spawn` refused (a leaf); a failing compile: `{:exit 2 :console ...}`, its
+  console "/src/p.go:3:23: undefined: x", no `:out`.
+
+### Checks (so far)
+
+- `bin/box-vendor roundtrip`: every package in every configuration passes, `tree` (five
+  configurations) and `tool` (tamago/amd64, tamago/arm64) added to its list (`own_pkgs`).
+- `bin/box-vendor kvm-tests`: 27 passed, none failed.
+- `tree`'s tests (`tree_test.go`: the format, a directory stored, extracted and stored again, the
+  request and result formats) pass, on the printed forms.
+- `bin/box-smoke` on the new launcher (built from the forms) with main's guest image appended (the
+  guest is unchanged but for `abi`'s new constants, which it does not use): 113 ok, none failed.
+- Not run: `bin/tamago-vendor check` (`tamago/` is untouched); the essential `bin/gate` (no source
+  the bootstrap compiles changed; `overlay/go/syscall` is printed by `bin/box-tools` only, though
+  it enters the gate's key).

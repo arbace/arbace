@@ -16,6 +16,8 @@ the box into a program.
 | `arbace/box/board` | `go/arbace/box/board.ae`, `board/` (with `boot_amd64.s`, `boot_arm64.s`) | `guest/tamago/board/` |
 | `arbace/box/libsys` | `go/arbace/box/libsys.ae`, `libsys/` | `internal/libsys/` |
 | `arbace/box/cmd/arbace-box` | `go/arbace/box/cmd/arbace_box.ae`, `arbace_box/` | Arbace's own (S1): the launcher, modelled on `vmm/cmd/whim-guest` |
+| `arbace/box/tree` | `go/arbace/box/tree.ae`, `tree/` | Arbace's own (S7): the store's file trees, a spawn's request and result |
+| `arbace/box/tool` | `go/arbace/box/tool.ae`, `tool/` | Arbace's own (S7): the tool guests' shim (GOOS=tamago) |
 | `arbace/box/purego`, `.../internal/fakecgo`, `.../internal/strings` | `go/arbace/box/purego.ae`, `purego/` | not go-whim's: purego v0.11.1 (S4, below) |
 
 `mac/` (S4): the Mac's checklist `mac.sh` (after go-whim's `guest/mac/mac.sh`), the hypervisor
@@ -53,7 +55,10 @@ vectors make a nil dereference a run-time panic (`board.NilPanics`, BX60) and th
 for darwin/arm64 (its console and rlwrap in `console_OS.go`, `rlwrap_unix.go`; the socket options
 in `vmm/net_unix.go`, BX61); since HV1 (b) a Go guest's RAM that does not fit under the doorbell is
 above 4 GiB, the image where it is linked (`vmm.Config.RAM`, two RAM ranges, the board's `Hwinit0`
-setting `goos.Bloc`, arm64's translation 36 bits; the launcher's `ARBACE_BOX_RAM`; BX80-BX83).
+setting `goos.Bloc`, arm64's translation 36 bits; the launcher's `ARBACE_BOX_RAM`; BX80-BX83);
+since S7 a guest may spawn tool guests (the calls 54-56, `abi.Spawn` ...; `vmm.Spawner`; the
+launcher's `ARBACE_BOX_SPAWN`, its helper `--spawner` and children `--tool`, the store tool's
+`tree`), and `tree` and `tool` are new (BX90-).
 
 purego (S4, BX62): https://github.com/ebitengine/purego v0.11.1 (go.sum
 `h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=`, from Go's module cache), the files of its

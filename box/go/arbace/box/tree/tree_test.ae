@@ -1,0 +1,130 @@
+(in-ns 'go.arbace.box.tree) (go/file "tree_test.go" :imports [
+
+
+    ^{:line 4} [bytes "bytes"]
+    ^{:line 5} [errors "errors"]
+    ^{:line 6} [os "os"]
+    ^{:line 7} [filepath "path/filepath"]
+    ^{:line 8} [reflect "reflect"]
+    ^{:line 9} [testing "testing"]])
+
+
+(go/type memStore (map (array 32 byte) (slice byte)))
+
+^{:go/end 18} (go/method Put [^memStore m ^{:tag (slice byte)} b] :results [(array 32 byte) error]
+  (let [h (Hash b)]
+    (aset m h (append (conv (slice byte) nil) (spread b)))
+    (return h nil)))
+
+
+^{:go/end 26} (go/method Read [^memStore m ^{:tag (array 32 byte)} h] :results [(slice byte) error]
+  (let [(values b ok) (aget m h)]
+    (when (not ok)
+      (return nil (errors/New "no blob")))
+
+    (return b nil)))
+
+
+^{:go/end 60} (go/func TestFormatParse [^{:tag (* testing/T)} t]
+  (let [es (lit (slice Entry)
+        (lit _ :Name "b.go" :Kind File :Hash (Hash (conv (slice byte) "b")) :Size 1)
+        (lit _ :Name "a \"q\" \\ é" :Kind Exec :Hash (Hash (conv (slice byte) "a")) :Size 7)
+        (lit _ :Name "sub" :Kind Dir :Hash (Hash (conv (slice byte) "{}\n"))))
+
+      (values b err) (Format es)]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (let [want (+ "{\"a \\\"q\\\" \\\\ é\" [:exec \"" (hexOf "a") "\" 7]\n \"b.go\" [:file \"" (hexOf "b") "\" 1]\n \"sub\" [:dir \"" (hexOf "{}\n") "\"]}\n")]
+      (when (!= (conv string b) want)
+        ^{:go/via [common]} (.Fatalf t "Format:\n%s\nwant\n%s" b want))
+
+      (let [(values got ^:assign err) (Parse b)]
+        (when (!= err nil)
+          ^{:go/via [common]} (.Fatal t err))
+
+        (when (not (reflect/DeepEqual got (lit (slice Entry) (aget es 1) (aget es 0) (aget es 2))))
+          ^{:go/via [common]} (.Fatalf t "Parse: %v" got))
+
+        (when [(values e _) (Format nil)] (!= (conv string e) "{}\n")
+          ^{:go/via [common]} (.Fatalf t "the empty tree: %q" e))
+
+        (range [_ bad (lit (slice string) "" "{" "{\"a\" [:file \"x\" 1]}" (+ "{\"a/b\" [:dir \"" (hexOf "") "\"]}") (+ "{\"a\" [:dir \"" (hexOf "") "\" 1]}") (+ "{\"a\" [:link \"" (hexOf "") "\"]}") (+ "{\"a\" [:file \"" (hexOf "") "\" -1]}") (+ "{\"a\" [:file \"" (hexOf "") "\" 1] \"a\" [:file \"" (hexOf "") "\" 1]}"))]
+          (when [(values _ err) (Parse (conv (slice byte) bad))] (== err nil)
+            ^{:go/via [common]} (.Errorf t "Parse(%q) took it" bad)))
+
+
+        (when [(values _ err) (Format (lit (slice Entry) (lit _ :Name "x" :Kind File) (lit _ :Name "x" :Kind File)))] (== err nil)
+          ^{:go/via [common]} (.Error t "Format took a name twice"))))))
+
+
+
+^{:go/end 70} (go/func hexOf ^string [^string s]
+  (let [h (Hash (conv (slice byte) s))
+      ^:const ^{:line 64 :val "0123456789abcdef"} d "0123456789abcdef"
+      ^{:line 65 :tag (slice byte)} b (zero (slice byte))]
+    (range [_ c h]
+      (set! b (append b (aget d (>> c 4)) (aget d (bit-and c 15)))))
+
+    (conv string b)))
+
+
+^{:go/end 103} (go/func TestDir [^{:tag (* testing/T)} t]
+  (let [src ^{:go/via [common]} (.TempDir t)]
+    (os/MkdirAll (filepath/Join src "d" "e") 0755)
+    (os/WriteFile (filepath/Join src "a.txt") (conv (slice byte) "A") 0644)
+    (os/WriteFile (filepath/Join src "d" "run") (conv (slice byte) "#!/bin/sh\n") 0755)
+    (os/WriteFile (filepath/Join src "d" "e" "empty") nil 0644)
+    (let [st (lit memStore)
+        (values h err) (PutDir st src)]
+      (when (!= err nil)
+        ^{:go/via [common]} (.Fatal t err))
+
+      (let [dst (filepath/Join ^{:go/via [common]} (.TempDir t) "x")]
+        (when [err (Extract st h dst)] (!= err nil)
+          ^{:go/via [common]} (.Fatal t err))
+
+        (let [(values h2 ^:assign err) (PutDir st dst)]
+          (when (or (!= err nil) (!= h2 h))
+            ^{:go/via [common]} (.Fatalf t "again: %x %v, want %x" h2 err h))
+
+          (let [^{:tag (slice string)} paths (zero (slice string))]
+            (Walk st h ^{:go/breaks [3] :go/end 95} (fn ^error [^string p ^Entry e]
+                (set! paths (append paths (+ p ":" (.-Kind e))))
+                nil))
+
+            (when [want (lit (slice string) "a.txt:file" "d:dir" "d/e:dir" "d/e/empty:file" "d/run:exec")] (not (reflect/DeepEqual paths want))
+              ^{:go/via [common]} (.Fatalf t "Walk: %v" paths))
+
+            (let [set (lit (map (array 32 byte) bool))]
+              (when [err (Reachable st (lit (slice (array 32 byte)) h) set)] (or (!= err nil) (!= (len set) 6))
+                ^{:go/via [common]} (.Fatalf t "Reachable: %d %v" (len set) err)))))))))
+
+
+
+^{:go/end 133} (go/func TestRequest [^{:tag (* testing/T)} t]
+  (let [r (addr ^{:go/breaks [8]} (lit Request :Image (Hash (conv (slice byte) "img")) :Args (lit (slice string) "compile" "-o" "/out/x.a" "a\"b") :Env (lit (slice string) "GOARCH=amd64")
+          :Trees (lit (slice Mount) (lit _ "/src" (Hash (conv (slice byte) "s"))) (lit _ "/deps/b1" (Hash (conv (slice byte) "d")))) :Out "/out" :Cwd "/src" :RAM (<< 3 30) :CPUs 2))
+      ^{:line 108} b (.Format r)
+      (values r2 err) (ParseRequest b)]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatalf t "%v\n%s" err b))
+
+    (when (not (reflect/DeepEqual r r2))
+      ^{:go/via [common]} (.Fatalf t "%+v\n%+v" r r2))
+
+    (when (not (bytes/Equal (.Format r2) b))
+      ^{:go/via [common]} (.Fatal t "not the same printing"))
+
+    (range [_ bad (lit (slice string) "{:args [\"x\"]}" (+ "{:image \"" (hexOf "") "\"}") (+ "{:image \"" (hexOf "") "\" :args [\"x\"] :out \"rel\"}")
+          (+ "{:image \"" (hexOf "") "\" :args [\"x\"] :trees [[\"/\" \"" (hexOf "") "\"]]}") (+ "{:image \"" (hexOf "") "\" :args [\"x\"] :env [\"NOEQ\"]}")
+          (+ "{:image \"" (hexOf "") "\" :args [\"x\"] :other 1}") (+ "{:image \"" (hexOf "") "\" :args [\"x\"] :cwd \"/a/../b\"}"))]
+      (when [(values _ err) (ParseRequest (conv (slice byte) bad))] (== err nil)
+        ^{:go/via [common]} (.Errorf t "ParseRequest(%s) took it" bad)))
+
+
+    (let [h (Hash (conv (slice byte) "out"))]
+      (range [_ res (lit (slice (* Result)) (lit _ :Exit 0 :Out (addr h) :Console (Hash nil)) (lit _ :Exit 2 :Console (Hash nil)) (lit _ :Fault "it \"faulted\"" :Console (Hash nil)))]
+        (let [(values r err) (ParseResult (.Format res))]
+          (when (or (!= err nil) (not (reflect/DeepEqual r res)))
+            ^{:go/via [common]} (.Errorf t "result %+v: %+v %v" res r err)))))))

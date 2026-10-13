@@ -1,0 +1,478 @@
+(in-ns 'go.arbace.box.cmd.arbace_box) (go/file "spawn.go" :imports [
+
+
+    ^{:line 4} [bufio "bufio"]
+    ^{:line 5} [hex "encoding/hex"]
+    ^{:line 6} [errors "errors"]
+    ^{:line 7} [fmt "fmt"]
+    ^{:line 8} [io "io"]
+    ^{:line 9} [os "os"]
+    ^{:line 10} [exec "os/exec"]
+    ^{:line 11} [runtime "runtime"]
+    ^{:line 12} [strconv "strconv"]
+    ^{:line 13} [strings "strings"]
+    ^{:line 14} [sync "sync"]
+
+    ^{:line 16} [tree "arbace/box/tree"]
+    ^{:line 17} [vmm "arbace/box/vmm"]])
+
+
+;; Tool guests (doc/go/BOX-NOTES.md, S7).  With ARBACE_BOX_SPAWN=1 and a
+;; store, a guest may spawn others (vmm.Spawner): each request a blob of the
+;; store (tree.Request), each child a launcher process of its own run as
+;; `arbace-box --store DIR --tool REQUEST` (Hypervisor.framework gives a
+;; process one VM, and the monitor's system-call filter allows no exec), by
+;; a helper process the launcher starts before the filter goes on
+;; (`arbace-box --spawner DIR`), which holds the budget: the RAM and vCPUs of
+;; the children running at once, ARBACE_BOX_SPAWN_RAM (storeSize's units; by
+;; default half the host's available memory) and ARBACE_BOX_SPAWN_CPUS (by
+;; default the host's CPUs).  A request asking more than the budget is
+;; refused; one that does not fit beside those running waits, first come
+;; first served.
+
+
+
+(go/const ^{:val 3221225472 :doc "defaultToolRAM is a child's RAM when its request asks none: vmm's\ndefault slot.\n"} defaultToolRAM (<< 3 30))
+
+
+
+(go/const ^{:val 16777216 :doc "consoleMax is the most of a child's console its result keeps: the rest\nis dropped, and a line says so.\n"} consoleMax (<< 16 20))
+
+
+
+(go/var ^{:doc "The environment a child launcher inherits from the helper: the store's\nand the monitor's settings, nothing of the guest's.\n"} toolLauncherEnv (lit (slice string) "ARBACE_BOX_STORE_MAX" "ARBACE_BOX_STORE_CACHE" "ARBACE_BOX_SECCOMP" "ARBACE_BOX_PARK" "ARBACE_BOX_WATCHDOG"))
+
+
+
+(go/type spawnClient "spawnClient is the monitor's side of the helper: vmm.Spawner over its\nstandard input and output, one line a message.\n" (struct
+    ^{:line 48 :tag sync/Mutex} mu
+    ^{:line 49 :tag io/Writer} w
+    ^{:line 50 :tag int64} next
+    ^{:line 51 :tag (map int64 (* spawnJob))} jobs
+    ^{:line 52 :tag error} dead))
+
+
+(go/type spawnJob (struct
+    ^{:line 56 :tag (array 32 byte)} res
+    ^{:line 57 :tag bool} ended
+    ^{:line 58 :tag error} err
+    ^{:line 59 :tag (func [])} done))
+
+
+
+^{:go/end 80} (go/func startSpawner "startSpawner starts the helper for the store in dir.\n" [^string exe ^string dir] :results [(* spawnClient) error]
+  (let [cmd (exec/Command exe "--spawner" dir)]
+    (set! (.-Stderr cmd) os/Stderr)
+    (let [(values in err) (.StdinPipe cmd)]
+      (when (!= err nil)
+        (return nil err))
+
+      (let [(values out ^:assign err) (.StdoutPipe cmd)]
+        (when (!= err nil)
+          (return nil err))
+
+        (when [err (.Start cmd)] (!= err nil)
+          (return nil err))
+
+        (let [c (addr (lit spawnClient :w in :jobs (lit (map int64 (* spawnJob)))))]
+          (go (.read c out))
+          (return c nil))))))
+
+
+
+^{:go/end 120} (go/method read "read takes the helper's answers: done ID RESULT, or fail ID WHY.\n" [^{:tag (* spawnClient)} c ^io/Reader r]
+  (let [sc (bufio/NewScanner r)]
+    (while (.Scan sc)
+      (let [f (strings/SplitN (.Text sc) " " 3)]
+        (when (!= (len f) 3)
+          (continue))
+
+        (let [(values id err) (strconv/ParseInt (aget f 1) 10 64)]
+          (when (!= err nil)
+            (continue))
+
+          (.Lock (.-mu c))
+          (let [j (aget (.-jobs c) id)]
+            (when (or (== j nil) (.-ended j))
+              (.Unlock (.-mu c))
+              (continue))
+
+            (set! (.-ended j) true)
+            (switch [(values h ok) (tree/ParseHash (aget f 2))]
+              (case [(and (== (aget f 0) "done") ok)]
+                (set! (.-res j) h))
+              (default
+                (set! (.-err j) (errors/New (aget f 2)))))
+
+            (let [done (.-done j)]
+              (.Unlock (.-mu c))
+              (done))))))
+
+    (.Lock (.-mu c))
+    (defer (.Unlock (.-mu c)))
+    (set! (.-dead c) (errors/New "the spawner has ended"))
+    (range [_ j (.-jobs c)]
+      (when (not (.-ended j))
+        (set! (values (.-ended j) (.-err j)) (values true (.-dead c)))
+        (go ((.-done j)))))))
+
+
+
+
+^{:go/end 135} (go/method Start [^{:tag (* spawnClient)} c ^{:tag (array 32 byte)} req ^{:tag (func [])} done] :results [int64 error]
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+  (when (!= (.-dead c) nil)
+    (return 0 (.-dead c)))
+
+  (let [id (.-next c)]
+    (when [(values _ err) (fmt/Fprintf (.-w c) "start %d %s\n" id (hex/EncodeToString (subslice req)))] (!= err nil)
+      (return 0 err))
+
+    (inc! (.-next c))
+    (aset (.-jobs c) id (addr (lit spawnJob :done done)))
+    (return id nil)))
+
+
+^{:go/end 149} (go/method Poll [^{:tag (* spawnClient)} c ^int64 h] :results [(array 32 byte) bool error]
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+  (let [j (aget (.-jobs c) h)]
+    (switch
+      (case [(== j nil)]
+        (return (lit (array 32 byte)) false (errors/New "no such spawn")))
+      (case [(not (.-ended j))]
+        (return (lit (array 32 byte)) false nil)))
+
+    (delete (.-jobs c) h)
+    (return (.-res j) true (.-err j))))
+
+
+
+(go/type treeStore "treeStore is a vmm.Store as the trees' store (tree.Store).\n" (struct vmm/Store))
+
+^{:go/end 160} (go/method Read [^treeStore s ^{:tag (array 32 byte)} h] :results [(slice byte) error]
+  (let [(values b ok) (readBlob (.-Store s) h)]
+    (when (not ok)
+      (return nil (fmt/Errorf "no blob %x" h)))
+
+    (return b nil)))
+
+
+
+
+
+
+^{:go/end 239} (go/func spawner "spawner is the helper (`arbace-box --spawner DIR`): it reads start ID\nREQUEST lines, runs each request's child when the budget lets it, and\nwrites done ID RESULT or fail ID WHY.  At the end of its input it ends\nthe children still running, and itself.\n" ^int [^string dir]
+  (let [(values st err) (openStore dir)]
+    (when (!= err nil)
+      (fmt/Fprintln os/Stderr "arbace-box --spawner:" err)
+      (return 1))
+
+    (let [(values exe ^:assign err) (os/Executable)]
+      (when (!= err nil)
+        (fmt/Fprintln os/Stderr "arbace-box --spawner:" err)
+        (return 1))
+
+      (let [(values ramBudget ^:assign err) (storeSize "ARBACE_BOX_SPAWN_RAM" (defaultSpawnRAM))]
+        (when (or (!= err nil) (<= ramBudget 0))
+          (fmt/Fprintln os/Stderr "arbace-box --spawner: ARBACE_BOX_SPAWN_RAM:" err)
+          (return 1))
+
+        (let [cpuBudget (runtime/NumCPU)]
+          (when [s (os/Getenv "ARBACE_BOX_SPAWN_CPUS")] (!= s "")
+            (when [(set! (values cpuBudget err) (strconv/Atoi s))] (or (!= err nil) (< cpuBudget 1))
+              (fmt/Fprintln os/Stderr (+ "arbace-box --spawner: ARBACE_BOX_SPAWN_CPUS=" s ": not a count"))
+              (return 1)))
+
+
+          (let [^{:tag (slice string)} env (zero (slice string))]
+            (range [_ n toolLauncherEnv]
+              (when [(values v ok) (os/LookupEnv n)] ok
+                (set! env (append env (+ n "=" v)))))
+
+
+            (let [s (addr (lit spawnerState :exe exe :dir dir :env env :ram ramBudget :cpus cpuBudget :running (lit (map (* exec/Cmd) bool))))]
+              (set! (.-cond s) (sync/NewCond (addr (.-mu s))))
+              ^{:go/breaks [7]} (let [sc (bufio/NewScanner os/Stdin)]
+                (while (.Scan sc)
+                  (let [f (strings/Fields (.Text sc))]
+                    (when (or (!= (len f) 3) (!= (aget f 0) "start"))
+                      (continue))
+
+                    (let [id (aget f 1)
+                        (values h ok) (tree/ParseHash (aget f 2))]
+                      (when (not ok)
+                        (.answer s "fail" id "not a hash")
+                        (continue))
+
+                      (let [(values b ^:assign ok) (readBlob st h)]
+                        (when (not ok)
+                          (.answer s "fail" id "no such request")
+                          (continue))
+
+                        (let [(values req err) (tree/ParseRequest b)]
+                          (when (!= err nil)
+                            (.answer s "fail" id (.Error err))
+                            (continue))
+
+                          (let [(values ram cpus) (values (.-RAM req) (max (.-CPUs req) 1))]
+                            (when (== ram 0)
+                              (set! ram defaultToolRAM))
+
+                            (when (or (> ram (.-ram s)) (> cpus (.-cpus s)))
+                              (.answer s "fail" id (fmt/Sprintf "the request asks %d bytes and %d vCPUs, beyond the budget (%d, %d)" ram cpus (.-ram s) (.-cpus s)))
+                              (continue))
+
+                            (.Lock (.-mu s))
+                            (set! (.-queue s) (append (.-queue s) (addr (lit spawnerJob :id id :req (aget f 2) :ram ram :cpus cpus))))
+                            (.Unlock (.-mu s))
+                            (.schedule s)))))))
+
+                (.Lock (.-mu s))
+                (set! (.-closed s) true)
+                (range [cmd (.-running s)]
+                  (.Kill (.-Process cmd)))
+
+                (.Unlock (.-mu s))
+                0))))))))
+
+
+
+
+^{:go/end 255} (go/func defaultSpawnRAM "defaultSpawnRAM is half the host's available memory (MemAvailable), or\n8 GiB where the host does not say.\n" ^int64 []
+  (let [(values b err) (os/ReadFile "/proc/meminfo")]
+    (when (== err nil)
+      (range [_ l (strings/Split (conv string b) "\n")]
+        (when [f (strings/Fields l)] (and (>= (len f) 2) (== (aget f 0) "MemAvailable:"))
+          (when [(values kb err) (strconv/ParseInt (aget f 1) 10 64)] (== err nil)
+            (return (/ (<< kb 10) 2))))))
+
+
+
+
+    (<< 8 30)))
+
+
+(go/type spawnerState (struct
+    ^{:line 258 :tag string} exe ^string dir
+    ^{:line 259 :tag (slice string)} env
+    ^{:line 260 :tag int64} ram
+    ^{:line 261 :tag int} cpus
+    ^{:line 262 :tag sync/Mutex} mu
+    ^{:line 263 :tag (* sync/Cond)} cond
+    ^{:line 264 :tag sync/Mutex} out
+    ^{:line 265 :tag (slice (* spawnerJob))} queue
+    ^{:line 266 :tag int64} usedRAM
+    ^{:line 267 :tag int} usedCPUs
+    ^{:line 268 :tag (map (* exec/Cmd) bool)} running
+    ^{:line 269 :tag bool} closed))
+
+
+(go/type spawnerJob (struct
+    ^{:line 273 :tag string} id ^string req
+    ^{:line 274 :tag int64} ram
+    ^{:line 275 :tag int} cpus))
+
+
+^{:go/end 282} (go/method answer [^{:tag (* spawnerState)} s ^string what ^string id ^string msg]
+  (.Lock (.-out s))
+  (defer (.Unlock (.-out s)))
+  (fmt/Printf "%s %s %s\n" what id (strings/ReplaceAll msg "\n" " ")))
+
+
+
+^{:go/end 324} (go/method schedule "schedule starts the queue's first jobs while they fit.\n" [^{:tag (* spawnerState)} s]
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (while (and (> (len (.-queue s)) 0) (not (.-closed s)))
+    (let [j (aget (.-queue s) 0)]
+      (when (or (> (+ (.-usedRAM s) (.-ram j)) (.-ram s)) (> (+ (.-usedCPUs s) (.-cpus j)) (.-cpus s)))
+        (return))
+
+      (set! (.-queue s) (subslice (.-queue s) 1))
+      (set! (.-usedRAM s) + (.-ram j))
+      (set! (.-usedCPUs s) + (.-cpus j))
+      (let [cmd (exec/Command (.-exe s) "--store" (.-dir s) "--tool" (.-req j))]
+        (set! (.-Env cmd) (.-env s))
+        (set! (.-Stderr cmd) os/Stderr)
+        (let [^strings/Builder out (zero strings/Builder)]
+          (set! (.-Stdout cmd) (addr out))
+          (when [err (.Start cmd)] (!= err nil)
+            (set! (.-usedRAM s) - (.-ram j))
+            (set! (.-usedCPUs s) - (.-cpus j))
+            (go (.answer s "fail" (.-id j) (.Error err)))
+            (continue))
+
+          (aset (.-running s) cmd true)
+          (go (^{:go/end 322} (fn []
+                (let [err (.Wait cmd)]
+                  (.Lock (.-mu s))
+                  (delete (.-running s) cmd)
+                  (set! (.-usedRAM s) - (.-ram j))
+                  (set! (.-usedCPUs s) - (.-cpus j))
+                  (.Unlock (.-mu s))
+                  (let [res (strings/TrimSpace (.String out))]
+                    (if [(values _ ok) (tree/ParseHash res)] (and (== err nil) ok)
+                      (.answer s "done" (.-id j) res)
+
+                      (.answer s "fail" (.-id j) (fmt/Sprintf "the tool's launcher: %v" err)))
+
+                    (.schedule s)))))))))))
+
+
+
+
+
+
+(go/type toolStore "toolStore is a child's view of the store: the blobs it puts, and those\nreachable from its request's trees (the request too); no refs.\n" (struct
+    ^{:line 329 :tag vmm/Store} st
+    ^{:line 330 :tag sync/Mutex} mu
+    ^{:line 331 :tag (map (array 32 byte) bool)} allowed))
+
+
+^{:go/end 342} (go/method Put [^{:tag (* toolStore)} s ^{:tag (slice byte)} data] :results [(array 32 byte) error]
+  (let [(values h err) (.Put (.-st s) data)]
+    (when (== err nil)
+      (.Lock (.-mu s))
+      (aset (.-allowed s) h true)
+      (.Unlock (.-mu s)))
+
+    (return h err)))
+
+
+^{:go/end 348} (go/method ok ^bool [^{:tag (* toolStore)} s ^{:tag (array 32 byte)} h]
+  (.Lock (.-mu s))
+  (defer (.Unlock (.-mu s)))
+  (aget (.-allowed s) h))
+
+
+^{:go/end 355} (go/method Size [^{:tag (* toolStore)} s ^{:tag (array 32 byte)} h] :results [int64 bool]
+  (when (not (.ok s h))
+    (return 0 false))
+
+  (.Size (.-st s) h))
+
+
+^{:go/end 362} (go/method Get [^{:tag (* toolStore)} s ^{:tag (array 32 byte)} h ^int64 off ^{:tag (slice byte)} p] :results [int bool]
+  (when (not (.ok s h))
+    (return 0 false))
+
+  (.Get (.-st s) h off p))
+
+
+^{:go/end 366} (go/method Ref [^{:tag (* toolStore)} s ^string name] :results [(array 32 byte) bool]
+  (return (lit (array 32 byte)) false))
+
+
+^{:go/end 370} (go/method SetRef ^error [^{:tag (* toolStore)} s ^string name ^{:tag (array 32 byte)} h ^{:tag (* (array 32 byte))} old]
+  (errors/New "a tool guest has no refs"))
+
+
+
+
+(go/type captureHost "captureHost is a child's console: no input, its output kept (both\nstreams, in order) up to consoleMax.\n" (struct
+    ^{:line 375 :tag sync/Mutex} mu
+    ^{:line 376 :tag (slice byte)} buf
+    ^{:line 377 :tag bool} cut
+    ^{:line 378 :tag int32} code))
+
+
+^{:go/end 381} (go/method WaitForInput ^bool [^{:tag (* captureHost)} h ^int64 ms] true)
+^{:go/end 382} (go/method ReadInput ^int32 [^{:tag (* captureHost)} h ^{:tag (slice byte)} buf] 0)
+
+^{:go/end 391} (go/method keep [^{:tag (* captureHost)} h ^{:tag (slice byte)} p]
+  (.Lock (.-mu h))
+  (defer (.Unlock (.-mu h)))
+  (when [n (- consoleMax (len (.-buf h)))] (> (len p) n)
+    (set! (values p (.-cut h)) (values (subslice p _ (max n 0)) true)))
+
+  (set! (.-buf h) (append (.-buf h) (spread p))))
+
+
+^{:go/end 396} (go/method Write ^int32 [^{:tag (* captureHost)} h ^{:tag (slice byte)} p]
+  (.keep h p)
+  (conv int32 (len p)))
+
+
+^{:go/end 398} (go/method Message [^{:tag (* captureHost)} h ^{:tag (slice byte)} msg ^bool err] (.keep h msg))
+^{:go/end 399} (go/method Exit [^{:tag (* captureHost)} h ^int32 code] (set! (.-code h) code))
+
+
+
+
+
+^{:go/end 479} (go/func tool "tool is a child (`arbace-box --store DIR --tool REQUEST`): the request's\nguest run under the tool's policy, its result put in the store and its\nhash written to standard output.  Exit status 1, with no result, when\nthe request cannot be run.\n" ^int [^string dir ^string reqHex]
+  (let [fail ^{:go/breaks [3] :go/end 409} (fn ^int [^error err]
+        (fmt/Fprintln os/Stderr "arbace-box --tool:" err)
+        1)
+
+      (values st err) (openStore dir)]
+    (when (!= err nil)
+      (return (fail err)))
+
+    (let [(values rh ok) (tree/ParseHash reqHex)]
+      (when (not ok)
+        (return (fail (errors/New (+ reqHex ": not a hash")))))
+
+      (let [(values b ^:assign ok) (readBlob st rh)]
+        (when (not ok)
+          (return (fail (fmt/Errorf "no request %s" reqHex))))
+
+        (let [(values req ^:assign err) (tree/ParseRequest b)]
+          (when (!= err nil)
+            (return (fail err)))
+
+          (let [(values img ^:assign ok) (readBlob st (.-Image req))]
+            (when (not ok)
+              (return (fail (fmt/Errorf "no image %x" (.-Image req)))))
+
+            (let [allowed (lit (map (array 32 byte) bool) [rh true])
+                ^{:line 431 :tag (slice (array 32 byte))} roots (zero (slice (array 32 byte)))]
+              (range [_ m (.-Trees req)]
+                (set! roots (append roots (.-Hash m))))
+
+              (when [err (tree/Reachable (lit treeStore st) roots allowed)] (!= err nil)
+                (return (fail (fmt/Errorf "the request's trees: %w" err))))
+
+              (let [ts (addr (lit toolStore :st st :allowed allowed))
+                  ^{:line 439} host (addr (lit captureHost))
+                  ^{:line 440 :tag (* (array 32 byte))} out (zero (* (array 32 byte)))
+                  ^{:line 441} cfg ^{:go/breaks [10 16]} (lit vmm/Config :Image img :Host host :Args (.-Args req) :Env (append (append (conv (slice string) nil) (spread (.-Env req))) (+ "ARBACE_TOOL_REQUEST=" reqHex))
+                    :Store ts :CPUs (max (.-CPUs req) 1) :RAM (conv uint64 (.-RAM req))
+                    :Output ^{:go/breaks [4] :go/end 449} (fn ^bool [^{:tag (array 32 byte)} h]
+                      (when [(values _ ok) (.Size ts h)] (not ok)
+                        (return false))
+
+                      (set! out (addr h))
+                      true))]
+
+                (when (!= (os/Getenv "ARBACE_BOX_SECCOMP") "0")
+                  (set! (.-Seccomp cfg) vmm/Seccomp))
+
+                (when [p (os/Getenv "ARBACE_BOX_PARK")] (!= p "")
+                  (set! (values (.-Park cfg) _) (parseDuration p)))
+
+                (when [w (os/Getenv "ARBACE_BOX_WATCHDOG")] (!= w "")
+                  (set! (values (.-Watchdog cfg) _) (parseDuration w)))
+
+                (let [(values code rerr) (vmm/Run cfg)
+                    ^{:line 460} res (lit tree/Result :Exit code)]
+                  (when (!= rerr nil)
+                    (set! (.-Fault res) (.Error rerr)))
+
+                  (when (and (== code 0) (== rerr nil))
+                    (set! (.-Out res) out))
+
+                  (when (.-cut host)
+                    (set! (.-buf host) (append (.-buf host) (spread "\n[the console cut at 16 MiB]\n"))))
+
+                  (when [(set! (values (.-Console res) err) (.Put st (.-buf host)))] (!= err nil)
+                    (return (fail err)))
+
+                  ^{:go/breaks [4]} (let [(values h ^:assign err) (.Put st (.Format res))]
+                    (when (!= err nil)
+                      (return (fail err)))
+
+                    (fmt/Println (hex/EncodeToString (subslice h)))
+                    0))))))))))

@@ -1,0 +1,1008 @@
+;; Copyright 2019 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; A simulated Unix-like file system for use within tamago (adapted from fs_nacl.go).
+;;
+;; The simulation is not particularly tied to NaCl other than the reuse
+;; of NaCl's definition for the Stat_t structure.
+;;
+;; The file system need never be written to disk, so it is represented as
+;; in-memory Go data structures, never in a serialized form.
+;;
+;; TODO: Perhaps support symlinks, although they muck everything up.
+
+(in-ns 'go.syscall) (go/file "fs_tamago.go" :imports [
+
+
+    ^{:line 18} [goos "runtime/goos"]
+    ^{:line 19} [sync "sync"]
+    ^{:line 20} [unsafe "unsafe"]])
+
+
+
+(go/func ^:extern now "Provided by package runtime.\n" [] :results [^int64 sec ^int32 nsec])
+
+
+
+
+
+(go/type fsys "An fsys is a file system.\nSince there is no I/O (everything is in memory),\nthe global lock mu protects the whole file system state,\nand that's okay.\n" (struct
+    ^{:line 31 :tag sync/Mutex} mu
+    ^{:line 32 :tag (* inode)} root ; root directory
+    ^{:line 33 :tag (* inode)} cwd ; process current directory
+    ^{:line 34 :tag uint64} inum ; number of inodes created
+    ^{:line 35 :tag (slice (func [] [DevFile error]))} dev)) ; table for opening devices
+
+
+
+
+(go/type DevFile "DevFile is the implementation required of device files\nlike /dev/null or /dev/random.\n" (interface
+    (Pread [(slice byte) int64] :results [int error])
+    (Pwrite [(slice byte) int64] :results [int error])))
+
+
+
+(go/type inode "An inode is a (possibly special) file in the file system.\n" (struct
+    ^{:line 47} Stat_t
+    ^{:line 48 :tag (slice byte)} data
+    ^{:line 49 :tag (slice dirent)} dir
+    ^{:line 50 :tag (func [] [(slice byte) error])} lazy)) ; Arbace: the contents, read at the first use (MkLazy)
+
+
+
+^{:go/breaks [[5 62]] :go/end 63} (go/method fill "fill reads a lazy file's contents (Arbace, MkLazy).\n" ^error [^{:tag (* inode)} ip]
+  (when (!= (.-lazy ip) nil)
+    (let [(values data err) ((.-lazy ip))]
+      (when (or (!= err nil) (!= (conv int64 (len data)) ^{:go/via [Stat_t]} (.-Size ip)))
+        (return EIO))
+
+      (set! (values (.-data ip) (.-lazy ip)) (values data nil))))
+
+  nil)
+
+
+
+(go/type dirent "A dirent describes a single directory entry.\n" (struct
+    ^{:line 67 :tag string} name
+    ^{:line 68 :tag (* inode)} inode))
+
+
+
+(go/type fsysFile "An fsysFile is the fileImpl implementation backed by the file system.\n" (struct
+    ^{:line 73} defaultFileImpl
+    ^{:line 74 :tag (* fsys)} fsys
+    ^{:line 75 :tag (* inode)} inode
+    ^{:line 76 :tag int} openmode
+    ^{:line 77 :tag int64} offset
+    ^{:line 78 :tag DevFile} dev))
+
+
+
+^{:go/end 93} (go/func newFsys "newFsys creates a new file system.\n" ^{:tag (* fsys)} []
+  (let [fs (addr (lit fsys))]
+    (.Lock (.-mu fs))
+    (defer (.Unlock (.-mu fs)))
+    (let [ip (.newInode fs)]
+      (set! ^{:go/via [Stat_t]} (.-Mode ip) (bit-or 0555 S_IFDIR))
+      (.dirlink fs ip "." ip)
+      (.dirlink fs ip ".." ip)
+      (set! (.-cwd fs) ip)
+      (set! (.-root fs) ip)
+      ^{:line 92} fs)))
+
+
+(go/var fs (newFsys))
+(go/var fsinit ^{:go/end 96} (fn []))
+
+^{:go/end 110} (go/func init []
+  ;; do not trigger loading of zipped file system here
+  (let [oldFsinit fsinit]
+    (defer (^{:go/end 101} (fn [] (set! fsinit oldFsinit))))
+    (set! fsinit ^{:go/end 102} (fn []))
+    (Mkdir "/dev" 0555)
+    (Mkdir "/tmp" 0777)
+    (MkDev "/dev/null" 0666 openNull)
+    (MkDev "/dev/random" 0444 openRandom)
+    (MkDev "/dev/urandom" 0444 openRandom)
+    (MkDev "/dev/zero" 0666 openZero)
+    (chdirEnv)))
+
+
+^{:go/end 117} (go/func chdirEnv []
+  (let [(values pwd ok) (Getenv "NACLPWD")]
+    (when ok
+      (chdir pwd))))
+
+
+
+;; Except where indicated otherwise, unexported methods on fsys
+;; expect fs.mu to have been locked by the caller.
+
+
+^{:go/end 132} (go/method newInode "newInode creates a new inode.\n" ^{:tag (* inode)} [^{:tag (* fsys)} fs]
+  (inc! (.-inum fs))
+  (let [ip (addr ^{:go/breaks [2]} (lit inode
+          :Stat_t ^{:go/breaks [2 4]} (lit Stat_t
+            :Ino (.-inum fs)
+            :Blksize 512)))]
+
+
+    ^{:line 131} ip))
+
+
+
+^{:go/end 138} (go/method atime "atime sets ip.Atime to the current time.\n" [^{:tag (* fsys)} fs ^{:tag (* inode)} ip]
+  (let [(values sec nsec) (now)]
+    (set! (values ^{:go/via [Stat_t]} (.-Atime ip) ^{:go/via [Stat_t]} (.-AtimeNsec ip)) (values sec (conv int64 nsec)))))
+
+
+
+^{:go/end 144} (go/method mtime "mtime sets ip.Mtime to the current time.\n" [^{:tag (* fsys)} fs ^{:tag (* inode)} ip]
+  (let [(values sec nsec) (now)]
+    (set! (values ^{:go/via [Stat_t]} (.-Mtime ip) ^{:go/via [Stat_t]} (.-MtimeNsec ip)) (values sec (conv int64 nsec)))))
+
+
+
+
+^{:go/end 156} (go/method dirlookup "dirlookup looks for an entry in the directory dp with the given name.\nIt returns the directory entry and its index within the directory.\n" [^{:tag (* fsys)} fs ^{:tag (* inode)} dp ^string name] :results [^{:tag (* dirent)} de ^int index ^error err]
+  (range [i (.-dir dp)]
+    (let [de (addr (aget (.-dir dp) i))]
+      (when (== (.-name de) name)
+        (return de i nil))))
+
+
+  (return nil 0 ENOENT))
+
+
+
+
+^{:go/end 173} (go/method dirlink "dirlink adds to the directory dp an entry for name pointing at the inode ip.\nIf dp already contains an entry for name, that entry is overwritten.\n" [^{:tag (* fsys)} fs ^{:tag (* inode)} dp ^string name ^{:tag (* inode)} ip] :results [^bool overwritten]
+  (.mtime fs dp)
+  (.atime fs ip)
+  (inc! ^{:go/via [Stat_t]} (.-Nlink ip))
+  (range [i (.-dir dp)]
+    (when (== (.-name (aget (.-dir dp) i)) name)
+      (aset (.-dir dp) i (lit dirent name ip))
+      (return true)))
+
+
+  (set! (.-dir dp) (append (.-dir dp) (lit dirent name ip)))
+  (.dirSize dp)
+  (return))
+
+
+^{:go/end 177} (go/method dirSize [^{:tag (* inode)} dp]
+  (set! ^{:go/via [Stat_t]} (.-Size dp) (* (conv int64 (len (.-dir dp))) (+ 8 8 2 256)))) ; Dirent
+
+
+
+
+
+^{:go/end 198} (go/func skipelem "skipelem splits path into the first element and the remainder.\nthe returned first element contains no slashes, and the returned\nremainder does not begin with a slash.\n" [^string path] :results [^string elem ^string rest]
+  (while (and (> (len path) 0) (== (aget path 0) \/))
+    (set! path (subslice path 1)))
+
+  (when (== (len path) 0)
+    (return "" ""))
+
+  (let [i 0]
+    (while (and (< i (len path)) (!= (aget path i) \/))
+      (inc! i))
+
+    (set! (values elem path) (values (subslice path _ i) (subslice path i)))
+    (while (and (> (len path) 0) (== (aget path 0) \/))
+      (set! path (subslice path 1)))
+
+    (return elem path)))
+
+
+
+
+
+
+^{:go/end 270} (go/method namei "namei translates a file system path name into an inode.\nIf parent is false, the returned ip corresponds to the given name, and elem is the empty string.\nIf parent is true, the walk stops at the next-to-last element in the name,\nso that ip is the parent directory and elem is the final element in the path.\n" [^{:tag (* fsys)} fs ^string path ^bool parent] :results [^{:tag (* inode)} ip ^string elem ^error err]
+  ;; Reject NUL in name.
+  (for [i 0] (< i (len path)) (inc! i)
+    (when (== (aget path i) \u0000)
+      (return nil "" EINVAL)))
+
+
+
+  ;; Reject empty name.
+  (when (== path "")
+    (return nil "" EINVAL))
+
+
+  (if (== (aget path 0) \/)
+    (set! ip (.-root fs))
+
+    (set! ip (.-cwd fs)))
+
+
+  (let [slash (== (aget path (- (len path) 1)) \/)]
+    (while (and (> (len path) 0) (== (aget path (- (len path) 1)) \/))
+      (set! path (subslice path _ (- (len path) 1))))
+
+
+    (while true
+      (let [(values elem rest) (skipelem path)]
+        (when (== elem "")
+          (when (and parent (== (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR))
+            (return ip "." nil))
+
+          (break))
+
+        (when (!= (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR)
+          (return nil "" ENOTDIR))
+
+        (when (>= (len elem) 256)
+          (return nil "" ENAMETOOLONG))
+
+        (when (and parent (== rest ""))
+          (when slash
+            ;; If the final element exists, a trailing
+            ;; slash requires it to be a directory. If it
+            ;; does not exist, creating a directory (Mkdir)
+            ;; is allowed, while creating anything else is
+            ;; rejected in open.
+            (when [(values de _ err) (.dirlookup fs ip elem)] (and (== err nil) (!= (bit-and ^{:go/via [Stat_t]} (.-Mode (.-inode de)) S_IFMT) S_IFDIR))
+              (return nil "" ENOTDIR)))
+
+
+          ;; Stop one level early.
+          (return ip elem nil))
+
+        (let [(values de _ err) (.dirlookup fs ip elem)]
+          (when (!= err nil)
+            (return nil "" err))
+
+          (set! ip (.-inode de))
+          (set! path rest))))
+
+    (when parent
+      (return nil "" ENOTDIR))
+
+    (when (and slash (!= (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR))
+      (return nil "" ENOTDIR))
+
+    (return ip "" nil)))
+
+
+
+
+^{:go/end 361} (go/method open "open opens or creates a file with the given name, open mode,\nand permission mode bits.\n" [^{:tag (* fsys)} fs ^string name ^int openmode ^uint32 mode] :results [fileImpl error]
+  (let [(values dp elem err) (.namei fs name true)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [
+        ^{:line 280 :tag (* inode)} ip (zero (* inode))
+        ^{:line 281 :tag DevFile} dev (zero DevFile)
+
+        (values de _ ^:assign err) (.dirlookup fs dp elem)]
+      (if (!= err nil) (do
+          (when (== (bit-and openmode O_CREATE) 0)
+            (return nil err))
+
+          (when (and (!= (bit-and mode S_IFMT) S_IFDIR) (== (aget name (- (len name) 1)) \/))
+            ;; A non-directory cannot be created through a name
+            ;; with a trailing slash.
+            (return nil EISDIR))
+
+          (set! ip (.newInode fs))
+          (set! ^{:go/via [Stat_t]} (.-Mode ip) mode)
+          (.dirlink fs dp elem ip)
+          (when (== (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR)
+            (.dirlink fs ip "." ip)
+            (.dirlink fs ip ".." dp)))
+
+        (do
+          (set! ip (.-inode de))
+          (when (== (bit-and openmode (bit-or O_CREATE O_EXCL)) (bit-or O_CREATE O_EXCL))
+            (return nil EEXIST))
+
+          (when (!= (bit-and openmode O_TRUNC) 0)
+            (when (== (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR)
+              (return nil EISDIR))
+
+            (set! (values (.-data ip) ^{:go/via [Stat_t]} (.-Size ip) (.-lazy ip)) (values nil 0 nil))) ; Arbace: the size too
+
+          (when (== (bit-and openmode O_DIRECTORY) O_DIRECTORY)
+            (when (!= (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR)
+              (return nil ENOTDIR)))
+
+
+          (when (== (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFCHR)
+            (when (or (< ^{:go/via [Stat_t]} (.-Rdev ip) 0) (>= ^{:go/via [Stat_t]} (.-Rdev ip) (conv int64 (len (.-dev fs)))) (== (aget (.-dev fs) ^{:go/via [Stat_t]} (.-Rdev ip)) nil))
+              (return nil ENODEV))
+
+            (set! (values dev err) ((aget (.-dev fs) ^{:go/via [Stat_t]} (.-Rdev ip))))
+            (when (!= err nil)
+              (return nil err)))))
+
+
+
+
+      (switch (bit-and openmode O_ACCMODE)
+        (case [O_WRONLY O_RDWR]
+          (when (== (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR)
+            (return nil EISDIR))))
+
+
+
+      (switch (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT)
+        (case [S_IFDIR]
+          (when (!= (bit-and openmode O_ACCMODE) O_RDONLY)
+            (return nil EISDIR)))
+
+
+        (case [S_IFREG])
+        ;; ok
+
+        (case [S_IFCHR])
+        ;; handled above
+
+        (default
+          ;; TODO: some kind of special file
+          (return nil EPERM)))
+
+
+      (let [f (addr ^{:go/breaks [2 4 6 8]} (lit fsysFile
+              :fsys fs
+              :inode ip
+              :openmode openmode
+              :dev dev))]
+
+        (when (!= (bit-and openmode O_APPEND) 0)
+          (set! (.-offset f) ^{:go/via [Stat_t]} (.-Size ip)))
+
+        (return f nil)))))
+
+
+;; fsysFile methods to implement fileImpl.
+
+^{:go/breaks [6] :go/end 370} (go/method stat ^error [^{:tag (* fsysFile)} f ^{:tag (* Stat_t)} st]
+  (.Lock (.-mu (.-fsys f)))
+  (defer (.Unlock (.-mu (.-fsys f))))
+  (set! @st (.-Stat_t (.-inode f)))
+  nil)
+
+
+^{:go/end 381} (go/method read [^{:tag (* fsysFile)} f ^{:tag (slice byte)} b] :results [int error]
+  (.Lock (.-mu (.-fsys f)))
+  (defer (.Unlock (.-mu (.-fsys f))))
+  (when (== (bit-and ^{:go/via [Stat_t]} (.-Mode (.-inode f)) S_IFMT) S_IFDIR)
+    (return 0 EISDIR))
+
+  (let [(values n err) (.preadLocked f b (.-offset f))]
+    (set! (.-offset f) + (conv int64 n))
+    (return n err)))
+
+
+^{:go/end 396} (go/func ReadDirent [^int fd ^{:tag (slice byte)} buf] :results [int error]
+  (let [(values f err) (fdToFsysFile fd)]
+    (when (!= err nil)
+      (return 0 err))
+
+    (.Lock (.-mu (.-fsys f)))
+    (defer (.Unlock (.-mu (.-fsys f))))
+    (when (!= (bit-and ^{:go/via [Stat_t]} (.-Mode (.-inode f)) S_IFMT) S_IFDIR)
+      (return 0 ENOTDIR))
+
+    (let [(values n ^:assign err) (.preadLocked f buf (.-offset f))]
+      (set! (.-offset f) + (conv int64 n))
+      (return n err))))
+
+
+^{:go/end 404} (go/method write [^{:tag (* fsysFile)} f ^{:tag (slice byte)} b] :results [int error]
+  (.Lock (.-mu (.-fsys f)))
+  (defer (.Unlock (.-mu (.-fsys f))))
+  (let [(values n err) (.pwriteLocked f b (.-offset f))]
+    (set! (.-offset f) + (conv int64 n))
+    (return n err)))
+
+
+^{:go/end 422} (go/method seek [^{:tag (* fsysFile)} f ^int64 offset ^int whence] :results [int64 error]
+  (.Lock (.-mu (.-fsys f)))
+  (defer (.Unlock (.-mu (.-fsys f))))
+  (switch whence
+    (case [1]
+      (set! offset + (.-offset f)))
+    (case [2]
+      (set! offset + ^{:go/via [Stat_t]} (.-Size (.-inode f)))))
+
+  (when (< offset 0)
+    (return 0 EINVAL))
+
+  ;; Arbace: past the end, a seek changes no size (it shrank the file);
+  ;; reads there find nothing, a write extends the file with zeros
+  (set! (.-offset f) offset)
+  (return offset nil))
+
+
+^{:go/end 426} (go/method Pread [^{:tag (* fsysFile)} f ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (.pread f b offset))
+
+
+^{:go/end 430} (go/method Pwrite [^{:tag (* fsysFile)} f ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (.pwrite f b offset))
+
+
+^{:go/end 439} (go/method pread [^{:tag (* fsysFile)} f ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (.Lock (.-mu (.-fsys f)))
+  (defer (.Unlock (.-mu (.-fsys f))))
+  (when (== (bit-and ^{:go/via [Stat_t]} (.-Mode (.-inode f)) S_IFMT) S_IFDIR)
+    (return 0 EISDIR))
+
+  (.preadLocked f b offset))
+
+
+^{:go/end 445} (go/method pwrite [^{:tag (* fsysFile)} f ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (.Lock (.-mu (.-fsys f)))
+  (defer (.Unlock (.-mu (.-fsys f))))
+  (.pwriteLocked f b offset))
+
+
+^{:go/end 504} (go/method preadLocked [^{:tag (* fsysFile)} f ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (when (== (bit-and (.-openmode f) O_ACCMODE) O_WRONLY)
+    (return 0 EINVAL))
+
+  (when (< offset 0)
+    (return 0 EINVAL))
+
+  (when (!= (.-dev f) nil)
+    (.atime (.-fsys f) (.-inode f))
+    (.Unlock (.-mu (.-fsys f)))
+    (defer (.Lock (.-mu (.-fsys f))))
+    (return (.Pread (.-dev f) b offset)))
+
+  (when (> offset ^{:go/via [Stat_t]} (.-Size (.-inode f)))
+    (return 0 nil))
+
+  (when (> (conv int64 (len b)) (- ^{:go/via [Stat_t]} (.-Size (.-inode f)) offset))
+    (set! b (subslice b _ (- ^{:go/via [Stat_t]} (.-Size (.-inode f)) offset))))
+
+
+  (when (== (bit-and ^{:go/via [Stat_t]} (.-Mode (.-inode f)) S_IFMT) S_IFDIR)
+    (when (or (!= (% offset direntSize) 0) (and (!= (len b) 0) (< (len b) direntSize)))
+      (return 0 EINVAL))
+
+    (.atime fs (.-inode f))
+    (let [n 0]
+      (while (>= (len b) direntSize)
+        ;; On tamago/arm we must go through a copy of b to cast
+        ;; *Dirent, this is necessary as b is not guaranteed to
+        ;; be 32-bit aligned.
+        (let [buf (make (slice byte) (len b))]
+          (copy buf b)
+
+          (let [src (aget (.-dir (.-inode f)) (conv int (/ offset direntSize)))
+              ^{:line 481} dst (conv (* Dirent) (conv unsafe/Pointer (addr (aget buf 0))))]
+            (set! (.-Ino dst) (conv int64 ^{:go/via [Stat_t]} (.-Ino (.-inode src))))
+            (set! (.-Off dst) offset)
+            (set! (.-Reclen dst) direntSize)
+            (range [i (.-Name dst)]
+              (aset (.-Name dst) i 0))
+
+            (copy (subslice (.-Name dst)) (.-name src))
+            (set! n + direntSize)
+            (set! offset + direntSize)
+
+            (copy b buf)
+            (set! b (subslice b direntSize)))))
+
+      (return n nil)))
+
+
+  (.atime fs (.-inode f))
+  (when [err (.fill (.-inode f))] (!= err nil) ; Arbace
+    (return 0 err))
+
+  (let [n (copy b (subslice (.-data (.-inode f)) offset))]
+    (return n nil)))
+
+
+^{:go/end 533} (go/method pwriteLocked [^{:tag (* fsysFile)} f ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (when (== (bit-and (.-openmode f) O_ACCMODE) O_RDONLY)
+    (return 0 EINVAL))
+
+  (when (< offset 0)
+    (return 0 EINVAL))
+
+  (when (!= (.-dev f) nil)
+    (.atime (.-fsys f) (.-inode f))
+    (.Unlock (.-mu (.-fsys f)))
+    (defer (.Lock (.-mu (.-fsys f))))
+    (return (.Pwrite (.-dev f) b offset)))
+
+  (when [err (.fill (.-inode f))] (!= err nil) ; Arbace
+    (return 0 err))
+
+  (when (> offset ^{:go/via [Stat_t]} (.-Size (.-inode f)))
+    (set! (.-data (.-inode f)) (append (.-data (.-inode f)) (spread (make (slice byte) (- offset ^{:go/via [Stat_t]} (.-Size (.-inode f)))))))
+    (set! ^{:go/via [Stat_t]} (.-Size (.-inode f)) offset)) ; Arbace: was += offset
+
+  (.mtime (.-fsys f) (.-inode f))
+  (let [n (copy (subslice (.-data (.-inode f)) offset) b)]
+    (when (< n (len b))
+      (set! (.-data (.-inode f)) (append (.-data (.-inode f)) (spread (subslice b n))))
+      (set! ^{:go/via [Stat_t]} (.-Size (.-inode f)) (conv int64 (len (.-data (.-inode f))))))
+
+    (return (len b) nil)))
+
+
+;; Standard Unix system calls.
+
+^{:go/end 546} (go/func Open [^string path ^int openmode ^uint32 perm] :results [^int fd ^error err]
+  (fsinit)
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  (let [(values f ^:assign err) (.open fs path openmode (bit-or (bit-and perm 0777) S_IFREG))]
+    (when (!= err nil)
+      (return -1 err))
+
+    (return (newFD f) nil)))
+
+
+^{:go/end 553} (go/func Mkdir ^error [^string path ^uint32 perm]
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  (let [(values _ err) (.open fs path (bit-or O_CREATE O_EXCL) (bit-or (bit-and perm 0777) S_IFDIR))]
+    ^{:line 552} err))
+
+
+^{:go/end 558} (go/func Getcwd [^{:tag (slice byte)} buf] :results [^int n ^error err]
+  ;; Force package os to default to the old algorithm using .. and directory reads.
+  (return 0 ENOSYS))
+
+
+^{:go/end 570} (go/func Stat ^error [^string path ^{:tag (* Stat_t)} st]
+  (fsinit)
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  ^{:go/breaks [4]} (let [(values ip _ err) (.namei fs path false)]
+    (when (!= err nil)
+      (return err))
+
+    (set! @st (.-Stat_t ip))
+    nil))
+
+
+^{:go/end 574} (go/func Lstat ^error [^string path ^{:tag (* Stat_t)} st]
+  (Stat path st))
+
+
+^{:go/end 608} (go/func unlink ^error [^string path ^bool isdir]
+  (fsinit)
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  (let [(values dp elem err) (.namei fs path true)]
+    (when (!= err nil)
+      (return err))
+
+    (when (or (== elem ".") (== elem ".."))
+      (return EINVAL))
+
+    ^{:go/breaks [8]} (let [(values de _ ^:assign err) (.dirlookup fs dp elem)]
+      (when (!= err nil)
+        (return err))
+
+      (if isdir (do
+          (when (!= (bit-and ^{:go/via [Stat_t]} (.-Mode (.-inode de)) S_IFMT) S_IFDIR)
+            (return ENOTDIR))
+
+          (when (!= (len (.-dir (.-inode de))) 2)
+            (return ENOTEMPTY)))
+
+        (do
+          (when (== (bit-and ^{:go/via [Stat_t]} (.-Mode (.-inode de)) S_IFMT) S_IFDIR)
+            (return EISDIR))))
+
+
+      (dec! ^{:go/via [Stat_t]} (.-Nlink (.-inode de)))
+      (set! @de (aget (.-dir dp) (- (len (.-dir dp)) 1)))
+      (set! (.-dir dp) (subslice (.-dir dp) _ (- (len (.-dir dp)) 1)))
+      (.dirSize dp)
+      nil)))
+
+
+^{:go/end 612} (go/func Unlink ^error [^string path]
+  (unlink path false))
+
+
+^{:go/end 616} (go/func Rmdir ^error [^string path]
+  (unlink path true))
+
+
+^{:go/end 628} (go/func Chmod ^error [^string path ^uint32 mode]
+  (fsinit)
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  ^{:go/breaks [4]} (let [(values ip _ err) (.namei fs path false)]
+    (when (!= err nil)
+      (return err))
+
+    (set! ^{:go/via [Stat_t]} (.-Mode ip) (bit-or (bit-and-not ^{:go/via [Stat_t]} (.-Mode ip) 0777) (bit-and mode 0777)))
+    nil))
+
+
+^{:go/end 639} (go/func Fchmod ^error [^int fd ^uint32 mode]
+  ^{:go/breaks [6]} (let [(values f err) (fdToFsysFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (.Lock (.-mu (.-fsys f)))
+    (defer (.Unlock (.-mu (.-fsys f))))
+    (set! ^{:go/via [Stat_t]} (.-Mode (.-inode f)) (bit-or (bit-and-not ^{:go/via [Stat_t]} (.-Mode (.-inode f)) 0777) (bit-and mode 0777)))
+    nil))
+
+
+^{:go/end 656} (go/func Chown ^error [^string path ^int uid ^int gid]
+  (fsinit)
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  ^{:go/breaks [[5 655]]} (let [(values ip _ err) (.namei fs path false)]
+    (when (!= err nil)
+      (return err))
+
+    (when (!= uid -1)
+      (set! ^{:go/via [Stat_t]} (.-Uid ip) (conv uint32 uid)))
+
+    (when (!= gid -1)
+      (set! ^{:go/via [Stat_t]} (.-Gid ip) (conv uint32 gid)))
+
+    nil))
+
+
+^{:go/end 670} (go/func Fchown ^error [^int fd ^int uid ^int gid]
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  ^{:go/breaks [7]} (let [(values f err) (fdToFsysFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (.Lock (.-mu (.-fsys f)))
+    (defer (.Unlock (.-mu (.-fsys f))))
+    (set! ^{:go/via [Stat_t]} (.-Uid (.-inode f)) (conv uint32 uid))
+    (set! ^{:go/via [Stat_t]} (.-Gid (.-inode f)) (conv uint32 gid))
+    nil))
+
+
+^{:go/end 674} (go/func Lchown ^error [^string path ^int uid ^int gid]
+  (Chown path uid gid))
+
+
+^{:go/end 700} (go/func UtimesNano ^error [^string path ^{:tag (slice Timespec)} ts]
+  (let [^:const ^{:val -2} UTIME_OMIT -0x2]
+    (when (!= (len ts) 2)
+      (return EINVAL))
+
+    (fsinit)
+    (.Lock (.-mu fs))
+    (defer (.Unlock (.-mu fs)))
+    ^{:go/breaks [[5 699]]} (let [(values ip _ err) (.namei fs path false)]
+      (when (!= err nil)
+        (return err))
+
+
+      (when (!= (.-Nsec (aget ts 0)) -2)
+        (set! ^{:go/via [Stat_t]} (.-Atime ip) (.-Sec (aget ts 0)))
+        (set! ^{:go/via [Stat_t]} (.-AtimeNsec ip) (conv int64 (.-Nsec (aget ts 0)))))
+
+
+      (when (!= (.-Nsec (aget ts 1)) -2)
+        (set! ^{:go/via [Stat_t]} (.-Mtime ip) (.-Sec (aget ts 1)))
+        (set! ^{:go/via [Stat_t]} (.-MtimeNsec ip) (conv int64 (.-Nsec (aget ts 1)))))
+
+
+      nil)))
+
+
+^{:go/end 723} (go/func Link ^error [^string path ^string link]
+  (fsinit)
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  (let [(values ip _ err) (.namei fs path false)]
+    (when (!= err nil)
+      (return err))
+
+    ^{:go/breaks [7]} (let [(values dp elem ^:assign err) (.namei fs link true)]
+      (when (!= err nil)
+        (return err))
+
+      (when (== (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR)
+        (return EPERM))
+
+      (set! (values _ _ err) (.dirlookup fs dp elem))
+      (when (== err nil)
+        (return EEXIST))
+
+      (.dirlink fs dp elem ip)
+      nil)))
+
+
+
+
+
+
+^{:go/end 740} (go/method subtreeContains "subtreeContains reports whether the directory tree rooted at dir\ncontains the directory p, following p's .. chain up to the root.\nThe root is detected by a .. entry referencing itself (or a missing\n.. entry). It expects fs.mu to be held.\n" ^bool [^{:tag (* fsys)} fs ^{:tag (* inode)} dir ^{:tag (* inode)} p]
+  (while true
+    (when (== p dir)
+      (return true))
+
+    (let [(values de _ err) (.dirlookup fs p "..")]
+      (when (or (!= err nil) (== (.-inode de) p))
+        (return false))
+
+      (set! p (.-inode de)))))
+
+
+
+^{:go/end 816} (go/func Rename ^error [^string from ^string to]
+  (fsinit)
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  (let [(values fdp felem err) (.namei fs from true)]
+    (when (!= err nil)
+      (return err))
+
+    (let [(values tdp telem ^:assign err) (.namei fs to true)]
+      (when (!= err nil)
+        (return err))
+
+      (when (or (== felem ".") (== felem "..") (== telem ".") (== telem ".."))
+        (return EINVAL))
+
+      (let [(values fde _ ^:assign err) (.dirlookup fs fdp felem)]
+        (when (!= err nil)
+          (return err))
+
+        (let [ip (.-inode fde)]
+
+          (when (and (== (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR) (.subtreeContains fs ip tdp))
+            ;; a directory cannot be moved into itself or its own subtree
+            (return EINVAL))
+
+
+          (if [(values tde _ err) (.dirlookup fs tdp telem)] (== err nil) (do
+              (when (== (.-inode tde) ip)
+                (return nil))
+
+              (switch
+                (case [(and (!= (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR) (== (bit-and ^{:go/via [Stat_t]} (.-Mode (.-inode tde)) S_IFMT) S_IFDIR))]
+                  (return EISDIR))
+                (case [(and (== (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR) (!= (bit-and ^{:go/via [Stat_t]} (.-Mode (.-inode tde)) S_IFMT) S_IFDIR))]
+                  (return ENOTDIR)))
+
+              (if (== (bit-and ^{:go/via [Stat_t]} (.-Mode (.-inode tde)) S_IFMT) S_IFDIR) (do
+                  (when (> (len (.-dir (.-inode tde))) 2)
+                    ;; the directory has entries other than . and ..
+                    (return ENOTEMPTY))
+
+                  (set! ^{:go/via [Stat_t]} (.-Nlink (.-inode tde)) - 2)
+                  (dec! ^{:go/via [Stat_t]} (.-Nlink tdp)))
+
+                (dec! ^{:go/via [Stat_t]} (.-Nlink (.-inode tde))))
+
+              (set! (.-inode tde) ip))
+            (do
+              (when (and (== (aget to (- (len to) 1)) \/) (!= (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR))
+                (return ENOTDIR))
+
+              (set! (.-dir tdp) (append (.-dir tdp) (lit dirent telem ip)))
+              (.dirSize tdp)))
+
+
+          ^{:go/breaks [9]} (let [(values _ fi ^:assign err) (.dirlookup fs fdp felem)]
+            (when (!= err nil)
+              (return err))
+
+            (aset (.-dir fdp) fi (aget (.-dir fdp) (- (len (.-dir fdp)) 1)))
+            (set! (.-dir fdp) (subslice (.-dir fdp) _ (- (len (.-dir fdp)) 1)))
+            (.dirSize fdp)
+
+            (when (and (== (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR) (!= fdp tdp))
+              (when [(values de _ err) (.dirlookup fs ip "..")] (== err nil)
+                (dec! ^{:go/via [Stat_t]} (.-Nlink (.-inode de)))
+                (set! (.-inode de) tdp)
+                (inc! ^{:go/via [Stat_t]} (.-Nlink tdp))))
+
+
+
+            (.mtime fs fdp)
+            (.mtime fs tdp)
+            nil))))))
+
+
+^{:go/breaks [7] :go/end 834} (go/method truncate ^error [^{:tag (* fsys)} fs ^{:tag (* inode)} ip ^int64 length]
+  (when (or (> length 1.0E9) (!= (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFREG))
+    (return EINVAL))
+
+  (when [err (.fill ip)] (!= err nil) ; Arbace
+    (return err))
+
+  (if (< length (conv int64 (len (.-data ip))))
+    (set! (.-data ip) (subslice (.-data ip) _ length))
+
+    (let [data (make (slice byte) length)]
+      (copy data (.-data ip))
+      (set! (.-data ip) data)))
+
+  (set! ^{:go/via [Stat_t]} (.-Size ip) (conv int64 (len (.-data ip))))
+  nil)
+
+
+^{:go/end 845} (go/func Truncate ^error [^string path ^int64 length]
+  (fsinit)
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  (let [(values ip _ err) (.namei fs path false)]
+    (when (!= err nil)
+      (return err))
+
+    (.truncate fs ip length)))
+
+
+^{:go/end 855} (go/func Ftruncate ^error [^int fd ^int64 length]
+  (let [(values f err) (fdToFsysFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (.Lock (.-mu (.-fsys f)))
+    (defer (.Unlock (.-mu (.-fsys f))))
+    (.truncate (.-fsys f) (.-inode f) length)))
+
+
+^{:go/end 860} (go/func Chdir ^error [^string path]
+  (fsinit)
+  (chdir path))
+
+
+^{:go/end 871} (go/func chdir ^error [^string path]
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  ^{:go/breaks [4]} (let [(values ip _ err) (.namei fs path false)]
+    (when (!= err nil)
+      (return err))
+
+    (set! (.-cwd fs) ip)
+    nil))
+
+
+^{:go/end 885} (go/func Fchdir ^error [^int fd]
+  ^{:go/breaks [7]} (let [(values f err) (fdToFsysFile fd)]
+    (when (!= err nil)
+      (return err))
+
+    (.Lock (.-mu (.-fsys f)))
+    (defer (.Unlock (.-mu (.-fsys f))))
+    (when (!= (bit-and ^{:go/via [Stat_t]} (.-Mode (.-inode f)) S_IFMT) S_IFDIR)
+      (return ENOTDIR))
+
+    (set! (.-cwd fs) (.-inode f))
+    nil))
+
+
+^{:go/end 889} (go/func Readlink [^string path ^{:tag (slice byte)} buf] :results [^int n ^error err]
+  (return 0 ENOSYS))
+
+
+^{:go/end 893} (go/func Symlink ^error [^string path ^string link]
+  ^{:line 892} ENOSYS)
+
+
+^{:go/breaks [3] :go/end 897} (go/func Fsync ^error [^int fd]
+  nil)
+
+
+
+
+
+
+
+
+^{:go/end 916} (go/func ^{:go/linkname "MkLazy"} MkLazy "MkLazy creates a regular file with an absolute path, a mode and a size,\nwhose contents load returns when the file is first read or written\n(Arbace's addition, doc/go/BOX-NOTES.md, S7: a tool guest's input trees,\nread from the store on demand).  load must return size bytes.\n" ^error [^string path ^uint32 mode ^int64 size ^{:tag (func [] [(slice byte) error])} load]
+  (fsinit)
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  (let [(values f err) (.open fs path (bit-or O_CREATE O_RDONLY O_EXCL) (bit-or S_IFREG (bit-and mode 0777)))]
+    (when (!= err nil)
+      (return err))
+
+    ^{:go/breaks [3]} (let [ip (.-inode (assert (* fsysFile) f))]
+      (set! (values ^{:go/via [Stat_t]} (.-Size ip) (.-lazy ip)) (values size load))
+      nil)))
+
+
+;; Special devices.
+
+
+
+^{:go/end 931} (go/func MkDev "MkDev creates a character special file with an absolute path and a mode,\nand a function which makes the device accessible.\n" ^error [^string path ^uint32 mode ^{:tag (func [] [DevFile error])} open]
+  (let [(values f err) (.open fs path (bit-or O_CREATE O_RDONLY O_EXCL) (bit-or S_IFCHR mode))]
+    (when (!= err nil)
+      (return err))
+
+    ^{:go/breaks [4]} (let [ip (.-inode (assert (* fsysFile) f))]
+      (set! ^{:go/via [Stat_t]} (.-Rdev ip) (conv int64 (len (.-dev fs))))
+      (set! (.-dev fs) (append (.-dev fs) open))
+      nil)))
+
+
+(go/type nullFile (struct))
+
+^{:go/end 935} (go/func openNull [] :results [DevFile error] (return (addr (lit nullFile)) nil))
+^{:go/end 936} (go/method close ^error [^{:tag (* nullFile)} f] nil)
+^{:go/end 937} (go/method Pread [^{:tag (* nullFile)} f ^{:tag (slice byte)} b ^int64 offset] :results [int error] (return 0 nil))
+^{:go/end 938} (go/method Pwrite [^{:tag (* nullFile)} f ^{:tag (slice byte)} b ^int64 offset] :results [int error] (return (len b) nil))
+
+(go/type zeroFile (struct))
+
+^{:go/end 942} (go/func openZero [] :results [DevFile error] (return (addr (lit zeroFile)) nil))
+^{:go/end 943} (go/method close ^error [^{:tag (* zeroFile)} f] nil)
+^{:go/end 944} (go/method Pwrite [^{:tag (* zeroFile)} f ^{:tag (slice byte)} b ^int64 offset] :results [int error] (return (len b) nil))
+
+^{:go/end 951} (go/method Pread [^{:tag (* zeroFile)} f ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (range [i b]
+    (aset b i 0))
+
+  (return (len b) nil))
+
+
+(go/type randomFile (struct))
+
+^{:go/end 957} (go/func openRandom [] :results [DevFile error]
+  (return (lit randomFile) nil))
+
+
+^{:go/breaks [3] :go/end 961} (go/method close ^error [^randomFile f]
+  nil)
+
+
+^{:go/end 966} (go/method Pread [^randomFile f ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (goos/GetRandomData b)
+  (return (len b) nil))
+
+
+^{:go/end 970} (go/method Pwrite [^randomFile f ^{:tag (slice byte)} b ^int64 offset] :results [int error]
+  (return 0 EPERM))
+
+
+^{:go/end 983} (go/func fdToFsysFile [^int fd] :results [(* fsysFile) error]
+  (let [(values f err) (fdToFile fd)]
+    (when (!= err nil)
+      (return nil err))
+
+    (let [impl (.-impl f)
+        (values fsysf ok) (assert (* fsysFile) impl)]
+      (when (not ok)
+        (return nil EINVAL))
+
+      (return fsysf nil))))
+
+
+
+
+^{:go/end 1009} (go/func create "create creates a file in the file system with the given name, mode, time, and data.\nIt is meant to be called when initializing the file system image.\n" ^error [^string name ^uint32 mode ^int64 sec ^{:tag (slice byte)} data]
+  (.Lock (.-mu fs))
+  (defer (.Unlock (.-mu fs)))
+  (let [(values f err) (.open fs name (bit-or O_CREATE O_EXCL) mode)]
+    (when (!= err nil)
+      (when (== (bit-and mode S_IFMT) S_IFDIR)
+        (let [(values ip _ err) (.namei fs name false)]
+          (when (and (== err nil) (== (bit-and ^{:go/via [Stat_t]} (.-Mode ip) S_IFMT) S_IFDIR))
+            (return nil)))) ; directory already exists
+
+
+      (return err))
+
+    ^{:go/breaks [[6 1008]]} (let [ip (.-inode (assert (* fsysFile) f))]
+      (set! ^{:go/via [Stat_t]} (.-Atime ip) sec)
+      (set! ^{:go/via [Stat_t]} (.-Mtime ip) sec)
+      (set! ^{:go/via [Stat_t]} (.-Ctime ip) sec)
+      (when (> (len data) 0)
+        (set! ^{:go/via [Stat_t]} (.-Size ip) (conv int64 (len data)))
+        (set! (.-data ip) data))
+
+      nil)))
