@@ -1032,3 +1032,15 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   SA40-SA88) and the host's reboot follow.
 - Correction to the entry above: the full gate ran with the failing `go` first on PATH only;
   `GOROOT` was not changed (the scripts set it to TamaGo's themselves).
+
+## 2026-10-13: the provisional amendments accepted
+
+- The user accepted, as applied, SA20-SA25 (S3's fixpoint) and SA40-SA88 (S4), all with the
+  recommended choices. Asked about separately:
+  - SA85 `gen-class`: a no-op, so namespaces with `(:gen-class)` load (`-main` through `-m`);
+    the alternatives were throwing, or a no-op in `ns` that throws when called.
+  - SA45 the JVM-only namespaces (`arbace.xml`, `inspector`, `java.browse`, `javadoc`,
+    `repl.deps`, `tools.deps`, `java.basis`): removed, each ported when a use appears; porting
+    `arbace.xml` now (over Go's `encoding/xml`) was the alternative.
+  - Marked "Accepted." in doc/STANDALONE-NOTES.md.
+- The user asked for the two Go-build bugs to be fixed; an agent is on it (branch `go-bugs`).

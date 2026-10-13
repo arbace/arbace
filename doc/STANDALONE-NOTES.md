@@ -911,36 +911,36 @@ uncompressed, the zlib not yet written).
 
 ### Amendments
 
-Provisional: the user, away, asked for the recommended choice applied and marked so (2026-10-12).
+Provisional at first (the user, away, asked for the recommended choice applied and marked so, 2026-10-12); accepted by the user as applied, 2026-10-13.
 
 - **SA20 a2g's host chosen by `A2G_HOST`; `ARBACE_GO_HOST` for the build.** (a) `A2G_HOST=jvm|go`
   in `bin/a2g` as SA30's `G2A_HOST`, and `ARBACE_GO_HOST=go` in `bin/arbace-go` setting both;
   the JVM the default until S4; (b) one variable for both tools only; (c) Go the default now (24
-  minutes a build). *Recommended: (a)*. Provisional.
+  minutes a build). *Recommended: (a)*. Accepted.
 - **SA21 The embedded resources compressed by a DEFLATE compressor in Arbace.** (a)
   `arbace.a2g.zlib`, the same bytes on every host (output 0.5-0.7% larger than zlib's; the
   executable +8 KB); (b) a2g writes the resources plain and the image step compresses them with
   Go's `compress/zlib` in the executable (a jrt native; a2g's tree then differs from today's
   shape, the build's steps change, the box's too); (c) no compression (+1.2 MB, SZ2 undone);
   (d) zlib's C algorithm ported to give the JDK's bytes (large, fragile). *Recommended: (a)*.
-  Provisional.
+  Accepted.
 - **SA22 javac's implicit constructor parameters in the analysis.** (a) `ctor-real-desc`,
   `this0-name` (and `outer-level`) move from `arbace.classes.emit` to `arbace.classes.analyze`;
   a2g no longer loads the bytecode back end; the embedded `analyze.ae` and the image change;
   (b) a copy in a2g (two definitions of javac's rule); (c) `emit` loadable on Go (ASM in the Go
-  world). *Recommended: (a)*. Provisional.
+  world). *Recommended: (a)*. Accepted.
 - **SA23 The JVM-only question in `arbace.a2g.jvm`, loaded on demand.** (a) the module layer's
   exports asked through `requiring-resolve` when recording the edge or with `--jvm-reflection`;
   (b) reflection by name (`Class/forName` of `java.lang.ModuleLayer`). *Recommended: (a)*: S4's
-  removal of the JVM paths then deletes one file. Provisional.
+  removal of the JVM paths then deletes one file. Accepted.
 - **SA24 The evaluator's static field reads** (runtime, `arbace/lang/go/CompilerCode.ae`):
   `CodeStaticField` reads the resolved `Field` (`Reflector.prepRet` as `getStaticField` does), a
-  primitive or `String` static final once. *Recommended: accept* (a fix, as SA32). Provisional.
+  primitive or `String` static final once. *Recommended: accept* (a fix, as SA32). Accepted.
 - **SA25 `bin/arbace-go --fixpoint` and the seed from G3.** (a) the chain as a mode of
   `bin/arbace-go` into `target/arbace-go/fixpoint/`, and `bin/seed --go-make` packing a named
   build (`ARBACE_SEED_GO_BUILD`, its `printed-by`); (b) a separate `bin/fixpoint` script; (c)
   the chain in `target/arbace-go` itself, each build replacing the previous (no comparison of
-  G1 and G2 after the fact). *Recommended: (a)*. Provisional.
+  G1 and G2 after the fact). *Recommended: (a)*. Accepted.
 
 ## S4: the JVM removed
 
@@ -1208,136 +1208,137 @@ On `s4-final` (2026-10-13), the sources at `ed892a1`, the seed committed alone i
 
 ### Amendments
 
-Provisional (the user, away, asked for the recommended choices applied and marked so;
-2026-10-12/13).
+Provisional at first (the user, away, asked for the recommended choices applied and marked so;
+2026-10-12/13); accepted by the user as applied, 2026-10-13 (SA85: `gen-class` a no-op; SA45:
+the JVM-only namespaces removed, ported when a use appears).
 
 - **SA40 The tools' host.** (a) `bin/lib/host.bash`'s `arbace_host_exe`: `ARBACE_HOST_EXE`, else
   stage 0 from the committed seed, rebuilt when the seed changes; (b) the last build
   (`target/arbace-go/<arch>/arbace`), as the JVM's stage 2 was; (c) an executable built from the
   checkout before each tool run. *Recommended: (a)*: a build is a function of the commit (its
   seed and sources), and the gate's key covers the host through the seed's pin; (b) makes a build
-  depend on what was built before, (c) costs a build per tool. Provisional.
+  depend on what was built before, (c) costs a build per tool. Accepted.
 - **SA41 `bin/seed --verify` reproduces the seed as it was made.** (a) The fixpoint at REV from
   the seed's own stage 0, G3 packed, the tars compared, and stage 0 = G1 = G2 = G3 (three
   Go-hosted builds, about 20 minutes); (b) one build by stage 0, the tars compared but for
   `:printed-by`; (c) S4's preparation's scheme (the commit's own JVM build). *Recommended: (a)*: it
   proves both that the seed is its commit's fixpoint and that its executable rebuilds itself.
-  Provisional.
+  Accepted.
 - **SA42 When `--fixpoint` holds.** (a) G2 = G3 (trees and executables), with G1 = G2 and host =
   G1 reported; (b) G1 = G2 = G3 required. *Recommended: (a)*: G1 is the host's translation, and
   differs legitimately when the host is not these sources' fixpoint (a seed older than a change
   of the analysis or the runtime); `--verify` requires all four equal for the seed's own commit.
-  Provisional.
+  Accepted.
 - **SA43 `SEED.edn`'s `:printed-by` names the procedure.** (a) "the Go-hosted fixpoint ...: G3,
   a2g and g2a on G2, G2 built by G1, G1 by the host executable", without the host's identity; (b)
   the host's hash. *Recommended: (a)*: `--verify` runs the same procedure from another host (the
   seed's stage 0) and must print the same tar; the fixpoint makes G3 independent of the host.
-  Provisional.
+  Accepted.
 - **SA44 The gate.** (a) As above: the essential gate builds both executables by stage 0
   (cached by key), then smoke test, suite and oracle; `--full` adds the frozen JVM's checks, the
   fresh build with the box, the fixpoint, g2a and the vendoring checks; (b) the fixpoint in the
   essential gate (three builds per change, about 15 minutes); (c) the suite and the oracle in
   `--full` only. *Recommended: (a)*: the survey's exit criterion makes the suite on Go the gate's
-  suite, and a parallel a2g makes a cache miss about 10 minutes of builds. Provisional.
+  suite, and a parallel a2g makes a cache miss about 10 minutes of builds. Accepted.
 - **SA45 The JVM-only namespaces removed, not ported.** (a) `repl/deps`, `java/basis`,
   `tools/deps`, `java/browse`, `browse_ui`, `javadoc`, `inspector`, `xml` removed (D13; the Go
   build never had them), `instant_timestamp` folded into `instant`; (b) kept as sources that fail
   to load; (c) ported (a SAX parser in jrt for `arbace.xml`, a browser launcher...).
-  *Recommended: (a)*; (c) when a use appears. Provisional.
+  *Recommended: (a)*; (c) when a use appears. Accepted.
 - **SA46 The namespace variants become the sources.** (a) Where the variant has no JVM
   counterpart left (`instant`, `box/host`, `tls/host`, `core_bean`, `java/io`, and `s4-backend`'s
   SA83), the variant's text is the source, moved with `git mv` or the substitutions applied, the
   embedded text unchanged but for headers; (b) keep the variants until a general merge.
-  *Recommended: (a)*. Provisional.
+  *Recommended: (a)*. Accepted.
 - SA50-SA53 (`s4-a2gpar`):
   - **SA50 The parallel translation's determinism.** (a) Each class translated apart, merged in
     class order (literals renamed to the sequential numbering, the sets' additions replayed): the
     output byte for byte today's; (b) per-class literal pools or a pre-pass (simpler, every file
-    changes); (c) sequential until S6. *Recommended: (a)*. Provisional.
+    changes); (c) sequential until S6. *Recommended: (a)*. Accepted.
   - **SA51 The threads.** (a) the processors (242 s, 12.2 GB); (b) min(processors, 16) (258 s,
-    10.1 GB); (c) fewer. *Recommended: (b)*. Provisional.
+    10.1 GB); (c) fewer. *Recommended: (b)*. Accepted.
   - **SA52 `report.edn`'s times.** (a) pprinted beside the writing, `:times` (with `:steps`) put
     in at the end on one line; (b) pprinted at the end. *Recommended: (a)* (30 s less on Go).
-    Provisional.
+    Accepted.
   - **SA53 The load's reading in parallel.** (a) The class forms files read and the embedded
     sources scanned in parallel (no reader construct in class forms takes ids; the scan takes the
-    same number in any order); (b) sequential (8 s more). *Recommended: (a)*. Provisional.
+    same number in any order); (b) sequential (8 s more). *Recommended: (a)*. Accepted.
 - SA60-SA69 (`s4-frozen`):
   - **SA60 The expected files from v4.** (a) v4's record wholesale; (b) v4's values where main
-    diverged, the stable values of noisy cases kept. *Recommended: (b)*. Provisional.
+    diverged, the stable values of noisy cases kept. *Recommended: (b)*. Accepted.
   - **SA61 The known-mismatch files.** (a) `known-go-amd64.edn` kept beside; (b) removed,
     `known-go-amd64-frozen.edn` the gate's; (c) the frozen file renamed to the old name.
     *Recommended: (b)*: 57 cases (the 48 and five groups for `native.ae`); the box's file
-    likewise. Provisional.
+    likewise. Accepted.
   - **SA62 What the frozen view loads from the checkout.** (a) the front end with
     `arbace.classes.native`; (b) without `native` (the jar's compiler's hook into its own back
     end), plus the tools' namespaces and every namespace the jar lacks, the view before the jar.
-    *Recommended: (b)*. Provisional.
+    *Recommended: (b)*. Accepted.
   - **SA63 j2a-check's forms-level criterion.** (a) every expected form committed; (b) the
     samples' forms and a SHA-256 manifest of the 2.2 MB baseline; (c) hashes only.
-    *Recommended: (b)*. Provisional.
+    *Recommended: (b)*. Accepted.
   - **SA64 jrt-convert's check step.** (a) dropped; (b) a comparison with the committed
     `jdk/forms`, as a report; (c) the forms analysed by the front end. *Recommended: (b)*;
-    `verify` stays the proof. Provisional.
+    `verify` stays the proof. Accepted.
   - **SA65 Provenance names j2a's host** (`:host "arbace-for-java-26-v4 <sha>"`), since the output
     depends on the runtime running j2a; alternative: the j2a sources' hash only. *Recommended:
-    name it*. Provisional.
+    name it*. Accepted.
   - **SA66 What moved from `test/native`**: the nine named tests and the semantic parts of
     inline, reflect, virtual_threads; retired: aot, verify, version, box, shapes, opcodes and
     stack checks, the property opt-in; NPE messages compared by class only, `(shutdown-agents)`
-    at the end. Provisional.
-  - **SA67 j2a's build driver** in `test/j2a/build.ae`, on the jar's own compiler. Provisional.
+    at the end. Accepted.
+  - **SA67 j2a's build driver** in `test/j2a/build.ae`, on the jar's own compiler. Accepted.
   - **SA68 gen_corpus and class_scripts.** class_scripts kept on the frozen jar; gen_corpus
-    retired with `test/classes` (at integration), its corpus kept as data. Provisional.
+    retired with `test/classes` (at integration), its corpus kept as data. Accepted.
   - **SA69 a2g-edge's fixtures** default to the committed `test/java-fixtures/forms`.
-    Provisional.
+    Accepted.
 - SA70-SA79 (`s4-tools`):
   - **SA70 The tools' runner `arbace_tool`** in `bin/lib/tools.bash` (a); each script invoking
-    the executable itself (b); a `bin/arbace-tool` (c). *Recommended: (a)*. Provisional.
+    the executable itself (b); a `bin/arbace-tool` (c). *Recommended: (a)*. Accepted.
   - **SA71 c2a loaded from the checkout over the embedded copy** (a, `-s`: `load-file`, then
     marked loaded); the embedded c2a (b: an edit takes effect only after a build); c2a left out of
-    the embedded tree (c). *Recommended: (a)*. Provisional.
+    the embedded tree (c). *Recommended: (a)*. Accepted.
   - **SA72 a2g-check's fixtures recorded on a JVM and committed** (`test/a2g/fixtures.edn`, by
     `test/a2g/record_fixtures.ae` on the frozen jar) (a); recorded on the Go host at each run (b:
     not possible, the Go build's class forms cannot evaluate three of them); dropped (c).
-    *Recommended: (a)*. Provisional.
+    *Recommended: (a)*. Accepted.
   - **SA73 `G2A_HOST`/`A2G_HOST` kept as guards** (a: unset or `go`; `jvm` fails naming S4);
-    removed (b); `jvm` kept (c). *Recommended: (a)*. Provisional.
+    removed (b); `jvm` kept (c). *Recommended: (a)*. Accepted.
   - **SA74 The suite's listing and report on the tools' host** (a), not on the build under test
-    (b). *Recommended: (a)*; `CLOJURE_TESTS_RENAME` is no longer a setting. Provisional.
+    (b). *Recommended: (a)*; `CLOJURE_TESTS_RENAME` is no longer a setting. Accepted.
   - **SA75 `c2a-check --libs` against the JVM's recorded output** `test/c2a/libs.out` (a); the
-    host against a Go build only (b); the host alone (c). *Recommended: (a)*. Provisional.
+    host against a Go build only (b); the host alone (c). *Recommended: (a)*. Accepted.
   - **SA76 `bin/java-surface` retired**, its output and the library `test/jrt/java_surface.ae`
-    kept (a); moved to the frozen jar (b: meaningless there). *Recommended: (a)*. Provisional.
+    kept (a); moved to the frozen jar (b: meaningless there). *Recommended: (a)*. Accepted.
   - **SA77 net-check's client on the tools' host** (a); on the frozen jar (b). *Recommended:
-    (a)*. Provisional.
+    (a)*. Accepted.
   - **SA78 `eval_ops.ae` reflects the Go executable's own classes** (a: run on an executable
     built from the checkout; two builds when `Numbers`, `RT`, `Util` or `Math` change); listed
-    from the class forms by the analysis (b, later). *Recommended: (a) now*. Provisional.
+    from the class forms by the analysis (b, later). *Recommended: (a) now*. Accepted.
   - **SA79 a2g-check's programs run without the host's `ARBACE_PATH`** (a: check's `sh`
-    removes it); (b) another way in `bin/a2g-check`. *Recommended: (a)*. Provisional.
+    removes it); (b) another way in `bin/a2g-check`. *Recommended: (a)*. Accepted.
 - SA80-SA88 (`s4-backend`):
   - **SA80 Opcodes' home**: `arbace.classes.opcodes`, `^:const` ints required `:as Opcodes` (a);
     an interface class form translated into the Go world (b); flags as keywords (c).
-    *Recommended: (a)*. Provisional.
+    *Recommended: (a)*. Accepted.
   - **SA81 TypeReference**: `arbace.classes.go` the source, required as `TypeReference` on every
     host (a); split into a host-neutral and a Go-only namespace (b). *Recommended: (a)*.
-    Provisional.
+    Accepted.
   - **SA82 The class forms' Go variants stay variants** (a; the members the base kept only to be
     replaced take the variant's text; `ObjExpr.compile` and `compileStub` throw in the base and
     stay replaced); merge every variant now (b, about 8,000 lines); only delete the emitters (c).
-    *Recommended: (a)*. Provisional.
+    *Recommended: (a)*. Accepted.
   - **SA83 Which namespace variants become sources**: `genclass`, `core_proxy`, `main`,
     `core/server`, `reflect/java`, `classes/native`, `go`, `interp` (a), the front end's `.subst`
-    staying variants for the frozen JVM; all of them (b). *Recommended: (a)*. Provisional.
+    staying variants for the frozen JVM; all of them (b). *Recommended: (a)*. Accepted.
   - **SA84 env's JVM part**: the class-file reading with ASM in `arbace.classes.jvm`, loaded on
     demand on a JVM only, `getDeclared*` kept in env for the Go REPL's class forms (a); all
-    reflection moved (b). *Recommended: (a)*. Provisional.
+    reflection moved (b). *Recommended: (a)*. Accepted.
   - **SA85 gen-class** a no-op (a); throws, as the Go variant did (b); removed with the ns clause
-    (c). *Recommended: (a)*. Provisional.
+    (c). *Recommended: (a)*. Accepted.
   - **SA86 defmodule and defpackage** do nothing (a); throw (b). *Recommended: (a)*.
-    Provisional.
+    Accepted.
   - **SA87 edge.edn pruned by hand**, then recorded again at integration (a); left alone until
-    recorded (b). *Recommended: (a)*. Provisional.
+    recorded (b). *Recommended: (a)*. Accepted.
   - **SA88 Direct linking**: `StaticInvokeExpr` removed, `:direct-linking` ignored (a); a stub
-    kept (b). *Recommended: (a)*. Provisional.
+    kept (b). *Recommended: (a)*. Accepted.
