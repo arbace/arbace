@@ -3085,7 +3085,12 @@ the byte-for-byte run is redone cheaply after it.
   program and the image of prepared namespaces against `bin/arbace-go --build`'s, which also
   proves that the host step prepared with an executable of the same program), `boot`, `smoke`
   (bin/box-smoke on a launcher with the rebuilt image appended). `--dev` loads the driver's
-  namespaces from the source tree over the image's.
+  namespaces from the source tree over the image's; `--given DIR` takes a2g's output and the
+  two printings from another run's box step (their blobs copied into this run's store) and
+  does not run them (`:given`; BX117); `plan-check` compares the box's plan with go list's on
+  the box's printed trees. Redoing the byte-for-byte run after S6: `bin/arbace-go --build --box`
+  (with arm64), then `bin/box-rebuild`, `bin/box-rebuild --arch arm64 prepare host`, the VM's
+  `--given` run, `bin/box-mac-bundle`.
 - **The store's race** (box/vmm `DirStore.Put`; BX115). The first run in the box failed with
   "the store refused" while compiling: the driver and its spawned guests write the same
   directory, and a blob two of them put at once (an empty `go_asm.h`, a shared tree) was refused
