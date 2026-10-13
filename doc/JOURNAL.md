@@ -970,3 +970,63 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   - `--build-tests` and `--build --box` on Go;
   - A2G-SPEC §10.3 and JRT-NOTES SZ2 to name the new compressor.
 - On main after the merge (`5bf08af`): the essential gate passed (5m21s).
+
+## 2026-10-13: S4 done, the seed is Go
+
+- Agent, branch `s4-final` (from main `6cb552a`). It worked as five branches, merged into
+  `s4-final` and then removed (doc/STANDALONE-NOTES.md, "S4: the JVM removed", holds the full
+  account and SA40-SA88):
+  - the coordinator: the seed's modes, `bin/lib/host.bash`, the Go-hosted `bin/arbace-go`, the
+    gate, the JVM's products and the JVM-only namespaces;
+  - `s4-a2gpar`: a2g's classes translated in parallel, deterministically. Go-hosted a2g went
+    from 1,365 s to 242-258 s and a build from about 23.5 to 4.8 minutes, with byte-identical
+    output.
+  - `s4-frozen`: what stays on a JVM runs on the frozen v4 jar (`bin/lib/frozen.bash`): j2a,
+    j2a-check (forms-level, and the suite on the jar's own compiler), jrt-convert, the edge's
+    recording, the fixtures, the oracle's reference, the data generators. The oracle's expected
+    files were re-recorded from v4 (SA9). The native tests moved into the oracle
+    (`forms/native.ae`, 269 cases).
+  - `s4-tools`: the tools on the Go executable (`arbace_tool`): c2a, the suite's runner, g2a,
+    a2g's checks, the vendoring tools.
+  - `s4-backend`: ASM (45 files, 14,747 lines) and the bytecode back ends removed
+    (`Compiler.ae` 8,717 → 5,525 lines; `classes/{emit,compiler,shape,verify,build,boot}`,
+    `Compile`, `DynamicClassLoader`, `Intrinsics`). The access flags moved to
+    `arbace.classes.opcodes` (O3). The Go variants became the sources. `gen-class`, `defmodule`
+    and `defpackage` are no-ops (D13).
+  - In all, 132 files and 25,474 lines deleted.
+- The agent's runs were cut short by hand-backs three times, so I finished the last steps on
+  `s4-final`:
+  - The fixpoint at `ed892a1` (hosted by S3's G3, `2f19b3d1…`, whose older analyzer makes host
+    ≠ G1): G1 = G2 = G3, `f114b6bd943a508b8cb6e3b0bb8d7b0728d35b531fd612326ee4fb40073fce8a`
+    (68,972,704 bytes), about 275 s a build.
+  - The seed packed from G3 and committed alone (`eaea7dd`): `seed/arbace-seed-go.tar.xz`,
+    3,058,352 bytes, 1,145 files, SHA-256
+    `8ad2fb89b0ef7bf7923b59f9f6ec951d66791363f6c30c3c23ae8167a000e072`, `:commit ed892a1`,
+    `:dirty false`.
+  - `bin/seed --verify` (14m48s): printed again from the seed's own stage 0, the same tree byte
+    for byte; stage 0 = G1 = G2 = G3.
+  - The essential gate (13m29s): the suite on Go 20,506 of 20,520, no regressions; the oracle
+    against v4 22,490 of 22,547, the 57 known, 0 new.
+  - The box: `--build --box` for amd64 and arm64; `tamago-vendor check` both guests identical;
+    `--smoke --box` 111 ok.
+  - Proofs in STANDALONE-NOTES (`966a804`). Merged into main as `c41f00f`.
+- Housekeeping: seven stale wait loops of the helper agents were stopped. They matched their
+  own command lines in `pgrep -f`, so they would never end.
+- Known issues, in the agenda:
+  - two Go-build bugs exposed by the moved native tests (a top-level `do` of mutually
+    referring `defclass`es; a class forms `lambda` in a handed-over fn);
+  - `reflect_tables.ae` stale against `bin/jrt manifest`;
+  - the box's known-mismatch file not run on the box.
+- The milestone (the user's, 2026-10-12): `bin/gate --full` on `c41f00f` passed (41m41s). It
+  ran with a failing `go` first on PATH and `GOROOT` unset of the host's, and the stub was never
+  called.
+  - Its steps: the seed, stage 0, the Go-hosted build, the smoke test, the suite on Go, the
+    oracle against v4, `j2a-check --suite` (20,718 of 20,750, no regressions), `jrt-convert
+    verify`, `a2g-edge verify`, `--java-fixtures verify`, the fresh build, the box's guests
+    identical to TamaGo's, the box's smoke test, g2a's round trips, the box's vendoring checks
+    and go-whim's KVM tests, `tamago-vendor verify`.
+  - The fixpoint from stage 0: G1 = G2 = G3 (`1ac98441…`; host ≠ G1 only by the linked
+    version, `c41f00f` against the seed's `ed892a1`).
+- The annotated tag `arbace-seed-is-go-v1` on `c41f00f`, pushed: a milestone on main, not a
+  freeze (no branch; the journal continues). The user's provisional amendments (SA20-SA25,
+  SA40-SA88) and the host's reboot follow.

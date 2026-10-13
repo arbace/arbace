@@ -22,7 +22,7 @@ Direction:
 - Now: the standalone Arbace (doc/STANDALONE-SURVEY.md, D1-D13 decided). The Go-hosted
   bootstrap (S1-S4) is done: the seed is Arbace's Go program as Arbace printed it, the Go
   executable rebuilds itself, and the JVM stays only as the oracle's reference (the frozen v4
-  jar) and j2a's front end (the milestone `arbace-seed-is-go-v1`). Next: the box rebuilding
+  jar) and j2a's front end (the milestone `arbace-seed-is-go-v1`, tag on main, 2026-10-13). Next: the box rebuilding
   Arbace inside itself (S5-S8); doc/AGENDA.md.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through j2a. The language is Clojure extended with an idiomatic
