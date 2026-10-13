@@ -1030,3 +1030,5 @@ All as recommended in doc/STANDALONE-SURVEY.md:
 - The annotated tag `arbace-seed-is-go-v1` on `c41f00f`, pushed: a milestone on main, not a
   freeze (no branch; the journal continues). The user's provisional amendments (SA20-SA25,
   SA40-SA88) and the host's reboot follow.
+- Correction to the entry above: the full gate ran with the failing `go` first on PATH only;
+  `GOROOT` was not changed (the scripts set it to TamaGo's themselves).
