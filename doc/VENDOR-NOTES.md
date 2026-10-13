@@ -951,6 +951,25 @@ step 4 (2026-10-07); the others came with later work, as each says:
     `bin/arbace-go --smoke` (the JVM's checks beside the native executable's, one directory
     used by both). Listed under "Dialect divergences".
 
+23. **Standalone S4: the JVM's parts leave the sources** (2026-10-12/13, the user's decisions
+    D4 and D13; doc/STANDALONE-NOTES.md, "S4: the JVM removed", amendments SA45, SA46,
+    SA80-SA88). Main builds no JVM Arbace: ASM (`arbace/asm.ae`, `arbace/asm/`), the bytecode
+    back end of `arbace/lang/Compiler.ae` (the emit methods, `ObjExpr`'s class generation, the
+    ASM-typed fields, `SourceDebugExtensionAttribute`, `StaticInvokeExpr` and direct linking, the
+    annotation hooks), `Compile.ae`, `DynamicClassLoader.ae`, `Intrinsics.ae` and the class forms
+    compiler's back end (`arbace/classes/{emit,compiler,shape,verify,build,boot}.ae`) are removed;
+    the access flags are `arbace.classes.opcodes`, required as `Opcodes`. The Go build's variants
+    with no JVM counterpart left became the sources: `genclass` (gen-class a no-op, gen-interface
+    at run time), `core_proxy`, `main` (no `DynamicClassLoader` for the REPL's thread, its
+    `repl-requires` `arbace.repl`'s, the error report printed with `prn`), `core/server`,
+    `reflect/java` (`AsmReflector` a type whose reflection throws), `instant` (with the
+    Timestamp part of `instant_timestamp`), `box/host`, `tls/host`, `core_bean`, `java/io`,
+    `classes/{native,go,interp}`. `arbace.core` lost `descriptor`, `add-annotation` and its
+    helpers; `defmodule` and `defpackage` do nothing. The namespaces the Go build left out are
+    removed: `repl.deps`, `java.basis` (and `.impl`), `tools.deps.interop`, `java.browse`,
+    `java.browse-ui`, `java.javadoc`, `inspector`, `xml`. The JVM's version of every file is on
+    the branch `arbace-for-java-26`.
+
 ## Dialect divergences
 
 Where Arbace behaves differently from upstream Clojure on purpose, beyond the renaming
@@ -998,6 +1017,13 @@ the runtime-visible renames are listed once, as c2a's mechanical part.
 - **Runtime-visible names** (hand change 2, step 4's cleanups): agent, socket server and process
   thread names, the error report files' prefix and the proxy methods (`__initArbaceFnMappings`
   and the rest, the field `__arbaceFnMap`) say `arbace`, not `clojure`.
+- **Without the JVM** (hand change 23, D13): `gen-class` does nothing and `ns`'s `:gen-class`
+  is ignored; `compile` writes no class files; interfaces, protocols' interfaces, proxies and
+  deftypes are made at run time with no class file, so annotations in their metadata are carried
+  by none; `add-classpath` throws, `*loader*` is nil, and no `DynamicClassLoader` exists;
+  `:direct-linking` is ignored; `arbace.reflect`'s `AsmReflector` throws; the namespaces
+  `arbace.repl.deps`, `arbace.java.basis`, `arbace.tools.deps.interop`, `arbace.java.browse`,
+  `arbace.java.javadoc`, `arbace.inspector` and `arbace.xml` do not exist.
 
 ## Spec (2026-10-07)
 
