@@ -15,39 +15,19 @@
 
 (in-ns 'arbace.lang)
 
-(import '(java.lang.invoke MethodHandle MethodHandles MethodType)
-        '(java.lang.reflect Constructor Field InvocationHandler Modifier Proxy)
-        '(java.util ArrayDeque ArrayList Arrays Collection Deque HashSet List Objects Set)
-        '(java.util.function Function Predicate)
-        '(java.util.stream Collectors))
+(import '(java.lang.reflect Constructor Field Modifier)
+        '(java.util ArrayDeque ArrayList Arrays Collection Deque HashSet List Set))
 
+;; Arbace (doc/VENDOR-NOTES.md, hand change 24; until standalone S5 the Go build's variant):
+;; no java.lang.invoke, java.util.stream or java.lang.reflect.Proxy here. canAccess calls
+;; Method.canAccess directly (upstream looks it up as a MethodHandle in its static initializer,
+;; for Java 8, where it is absent); instanceMethods collects with a loop instead of a stream;
+;; boxArg adapts a Clojure function to a functional interface with the runtime's adapter of that
+;; interface (adaptFn, a native: jrt.AdaptFn) instead of Proxy.newProxyInstance. Everything else,
+;; the method selection included, is upstream's.
 (defclass ^:public Reflector
-  (field ^:private ^:static ^:final ^MethodHandle CAN_ACCESS_PRED)
-
-  (method ^:private ^:static isJava8 ^boolean []
-    (.equals (System/getProperty "java.vm.specification.version") "1.8"))
-
-  (static-initializer
-    (let [^:mutable ^MethodHandle pred nil]
-      (try
-        (when-not (Reflector/isJava8)
-          (set! pred
-                (.findVirtual (MethodHandles/lookup)
-                              java.lang.reflect.Method
-                              "canAccess"
-                              (MethodType/methodType Boolean/TYPE Object))))
-        (catch Throwable t (Util/sneakyThrow t)))
-      (set! CAN_ACCESS_PRED pred)))
-
   (method ^:private ^:static canAccess ^boolean [^java.lang.reflect.Method m target]
-    (if (some? CAN_ACCESS_PRED)
-        (try
-          ^boolean (^[java.lang.reflect.Method Object] MethodHandle/.invoke
-                     CAN_ACCESS_PRED
-                     m
-                     target)
-          (catch Throwable t (throw (Util/sneakyThrow t))))
-        true))
+    (.canAccess m target))
 
   (method ^:private ^:static interfaces ^{:tag (Collection Class)} [^Class c]
     (let [^{:tag (Set Class)} interfaces (HashSet.)
@@ -90,15 +70,11 @@
 
   ;; The candidates of invokeInstanceMethodOfClass, also used by ReflectorCallSite (Arbace)
   (method ^:static instanceMethods ^List [target ^Class c ^String methodName ^int arity]
-    (cast List
-          (.collect
-            (.filter
-              (.map
-                (.stream (Reflector/getMethods c arity methodName false))
-                (lambda Function ^java.lang.reflect.Method [^java.lang.reflect.Method method]
-                  (Reflector/toAccessibleSuperMethod method target)))
-              (method-ref Predicate [java.lang.reflect.Method] Objects/nonNull))
-            (Collectors/toList))))
+    (let [found (ArrayList.)]
+      (for-each [^java.lang.reflect.Method method (Reflector/getMethods c arity methodName false)]
+        (let [m (Reflector/toAccessibleSuperMethod method target)]
+          (when (some? m) (.add found m))))
+      found))
 
   (method ^:public ^:static invokeInstanceMethodOfClass [target ^String className ^String methodName
                                                          ^Object/1 args]
@@ -450,16 +426,15 @@
         "float" (return (RT/floatCast ret))))
     ret)
 
+  ;; f, an IFn, as an instance of the functional interface c, through the runtime's adapter of
+  ;; c (jrt.AdaptFn, A2G-SPEC §11); UnsupportedOperationException when c has none
+  (method ^:private ^:static ^:native adaptFn [^Class c f])
+
   (method ^:static boxArg [^Class paramType arg]
     (cond
       (and (and (instance? IFn arg) (some? (Compiler$FISupport/maybeFIMethod paramType)))
            (not (.isInstance paramType arg)))
-        (Proxy/newProxyInstance (RT/baseLoader)
-                                (new Class/1 [paramType])
-                                (lambda InvocationHandler [proxy ^java.lang.reflect.Method method
-                                                           ^Object/1 methodArgs]
-                                  (let [ret (.applyTo (cast IFn arg) (RT/seq methodArgs))]
-                                    (Reflector/coerceAdapterReturn ret (.getReturnType method)))))
+        (Reflector/adaptFn paramType arg)
       (not (.isPrimitive paramType)) (.cast paramType arg)
       (identical? paramType Boolean/TYPE) (.cast Boolean arg)
       (identical? paramType Character/TYPE) (.cast Character arg)
