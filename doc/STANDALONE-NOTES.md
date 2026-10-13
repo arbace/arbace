@@ -1816,6 +1816,42 @@ translation, as before. So `bin/arbace-go --fixpoint` (G2 = G3) and `bin/seed --
 0 = G1 = G2 = G3 for the seed's commit) keep their meaning; the seed grows by the compiled
 namespaces' Go and its stage 0 hosts the tools compiled.
 
+### First results (2026-10-13)
+
+- **The first namespace end to end** (`arbace.walk`, compiled alone, built as the test build's
+  extra input): `(require 'arbace.walk)` runs its loader `arbace.walk__init`; `(class
+  arbace.walk/postwalk)` is `arbace.walk$postwalk`; `postwalk`, `prewalk-replace`,
+  `keywordize-keys`, `stringify-keys`, `macroexpand-all` give the evaluator's results; an error's
+  stack trace names `arbace.walk$walk.invoke` and the source's line. 23 classes.
+- **Every embedded namespace** (`ARBACE_AOT=1 bin/arbace-go --build`, amd64, Go-hosted by stage
+  0): 66 sources, 4,826 classes, none left evaluated; the image of what stays evaluated is empty
+  (16 bytes), preparing it takes no time. The compiled tree is 17 MB of class forms. The program
+  starts, loads `arbace.core` compiled and runs Clojure code (the checks below).
+- **Start** (`-e nil`, amd64): 0.41 s with the image → 0.16 s compiled.
+- **The benchmarks** (`test/bench/eval-bench.ae`, ms, best run; the benchmarks' own fns are
+  still evaluated, being the script's, so what changes is the time spent in `arbace.core`):
+
+  | benchmark | evaluated (image) | compiled core | speedup |
+  |---|---:|---:|---:|
+  | `reduce-range` | 139.2 | 54.0 | 2.6x |
+  | `vector-conj` | 37.7 | 29.6 | 1.3x |
+  | `seq-ops` | 173.5 | 38.1 | 4.6x |
+  | `lazy-walk` | 166.7 | 25.7 | 6.5x |
+  | `transduce` | 89.2 | 18.0 | 5.0x |
+  | `into-xform` | 89.1 | 9.3 | 9.6x |
+  | `destructure` | 82.4 | 63.2 | 1.3x |
+  | `closures` | 83.1 | 51.1 | 1.6x |
+  | `fib`, `fib-prim`, `loop-long`, `protocol`, `multimethod`, `str-build` | | | 1.0x (the script's own code) |
+
+- **a2g on the compiled program** (`A2G_GO_EXE`, `bin/a2g --program`; a2g's own namespaces still
+  evaluated from the checkout, the class forms' analysis `arbace.classes.*` and `arbace.core`
+  compiled): load 105.7 → 54.9 s, reach 55.7 → 35.7 s, translate 29.6 → 20.7 s, write 29.3 →
+  17.9 s (the machine shared with other agents' builds).
+- **The cost today**: the compiled program is 243 MB (69 MB evaluated): 4,826 classes, each with
+  a2g's member tables and the forwarders of `IFn`'s 21 `invoke` arities; gc compiles `lang` in
+  455-492 s; a2g's second run, its analyzer evaluated on stage 0, takes 1,100-1,500 s. A build is
+  about 45 minutes until the tools run compiled on their host (SA133) and the size is worked on.
+
 ### Checking the back end's output
 
 - `arbace.aot.check` (`(arbace.aot.check/check DIR)` in the executable): the compiled tree's
