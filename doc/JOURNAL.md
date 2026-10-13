@@ -1145,3 +1145,13 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   by the user's HV1 decision the next step is (b): RAM above 4 GiB with the doorbell kept,
   starting with the experiment of linking and loading a TamaGo guest above 4 GiB. The table is
   in doc/go/HOST-VM-SURVEY.md, under HV1.
+
+## 2026-10-13: HV6 measured, the box's clock
+
+- An idle box (1 vCPU) printed its wall clock once a minute for an hour, each line stamped by the
+  host's clock on arrival. The guest fell steadily behind, from -6 to -111 ms: about 29 ppm, 0.1 s
+  an hour. Five one-minute outliers, the largest -4.3 s while another agent's large guest
+  started, were delivery delays: the next minute was back on the line.
+- The result is below the 1 s an hour criterion, so HV6 (a) stands: no resync for now. The Mac's
+  run is due at the next box milestone, and a resync would matter for boxes running for days.
+  Details are in doc/go/HOST-VM-SURVEY.md, under HV6.
