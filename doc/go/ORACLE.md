@@ -66,7 +66,14 @@ root locales), `processes` (`ProcessBuilder`, `Process`, `Runtime.exec`, `Proces
 `hint_namespaces` (type hints resolved in the namespace the code is analyzed in, whatever `*ns*` is
 when it runs), and `security` (java.security basics: `MessageDigest`, HMACs, the providers `SUN` and
 `SunJCE`, `SecureRandom` as far as it is deterministic, `UUID`'s `randomUUID` (its shape) and
-`nameUUIDFromBytes`; JRT-NOTES.md, "Security").
+`nameUUIDFromBytes`; JRT-NOTES.md, "Security"). And `native` (since S4: the semantic tests of the JVM stages'
+`test/native/`, run by `bin/native-tests` until main's JVM build left: the class forms' code forms
+in ordinary fns, deftypes, records and reifys handed over to them, overloads chosen as
+`arbace.lang.Compiler` chooses them and its errors, NaN comparisons, covariant bridges called
+through each interface, `reduce` on an `IReduceInit` alone, RT's default imports, deftypes nested
+in handed-over code, the `:inline` operators' results on any operands, untyped interop's results
+and errors on many receivers and arguments, the virtual-thread executor of `send-off`; one
+namespace per test file, `native.*`; doc/STANDALONE-NOTES.md, "S4: the JVM removed").
 
 Class scripts (`classes/`): `PersistentVector` (across the 32 and 1,056 element boundaries,
 transients, chunked seqs), `PersistentHashMap` (collisions, nil key, transients),
