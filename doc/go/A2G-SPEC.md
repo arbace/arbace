@@ -235,6 +235,55 @@ questions as data. With it a2g loads no class, reflects on none and writes no cl
 not exist. `--jvm-reflection` asks the JVM instead. a2g first advances the runtime's id counter
 to a fixed value (`id-floor`), so that its output depends on its inputs alone.
 
+**The run** has four phases, each timed in `report.edn`'s `:times` (with the translation's and
+the writing's steps in `:steps`): the load (reading, entering and analyzing every class: the
+analysis is complete before any translation, `analyze-class!` of all of them), the reach
+(the classes and methods reachable from the roots), the translation, and the writing.
+
+**The run in parallel** (standalone S4, amendments SA50-SA53). The translation of the classes
+and the texts of the files are computed on `A2G_JOBS` threads (default: the number of
+processors, at most 16; 1: one after another), and the output is byte-identical whatever their number,
+the same as the sequential translation's:
+- **Each class is translated on its own** (`arbace.a2g.main/translate-one`), the classes the
+  costliest first (by the size of their class forms file), in a package state of its own: its
+  string literals are named apart (`Lit?i_k`, i the class's place in the sorted order, k its
+  own order of first use), and what it adds to the package's sets (the `Up_` conversions, the
+  lambdas' adapters, the cut classes) and to the race candidates is recorded in order instead
+  of applied, as is what it prints.
+- **The merge**, in class order (`translate-classes`), does what the sequential translation
+  did class after class: it appends the class's forms to its file's, replays its additions to
+  the sets one by one (so that even the sets' internal order is the same), prints its output,
+  records its error, and numbers its literals in the package's pool (`Lit_n`, a literal of an
+  earlier class keeping its name) into a table of renames, which `out/clean` applies when the
+  files are written (`out/*renames*`). The steps after it (the dynamic classes, the
+  adapters, the registrations, the pools) run on the merged state as before.
+- **What else is order-dependent, and why it does not matter here**: the ids the analyzer
+  names its temporaries by (`arr_100417`, `RT/nextID`) are all taken in the load, before any
+  translation; the translation's own ids (`gensym` of the functions `f`, `fn`, `lambda`) only
+  tell functions apart, are never printed, and stay unique across threads (`RT/nextID` is
+  atomic). The translation does not enter or analyze anything (it only asks `a/decl`,
+  `find-sam`, `ctor-real-desc` ...); its caches (`vmethods-cache`, `trivial-cache`, the
+  subclass index, built before the translation) memoize pure functions, so a race only
+  computes a value twice. Local names (`fresh`, `tmp`) are counted per Go function. The
+  dynamic bindings (the world, `*reached*`, `*absent-members*`, the edge) are conveyed to the
+  threads by `future`.
+- **The registrations** (`a2g_classes.go`, §5.11) are made the same way, each class apart,
+  merged in order (`registrations`). The slot methods of `a2g_dyn.go` (§5.12), pure, are
+  computed in parallel.
+- **The writing**: each file's text is computed on its own (`out/file-text`, the renames
+  applied), in parallel, the files written in order. A long file (256 forms or more:
+  `a2g_classes.go`, 4 MB) has the texts of its forms without a class forms line computed in
+  parallel first (`out/unlined-texts`): only a list with `:a2g/line` makes a text depend on
+  the line it starts on (the layout above), so the others are laid out by their newlines. The
+  embedded resources are compressed in parallel and written in order; `report.edn` is printed
+  beside the writing, its times put in at the end (on one line: `:times`, with the steps'
+  times in `:steps`, is the one part of `report.edn` that differs from run to run).
+- **The load**: the class forms files are read in parallel (they hold no `#()` or
+  syntax-quote: reading them takes no ids), as are the embedded sources scanned for the
+  classes they name (`embed/cut-candidates`: their reading takes ids, as many whatever the
+  order, all before the analysis). Entering and analyzing the classes stay sequential
+  (`arbace.classes.analyze` numbers anonymous classes and ids in order), as does the reach.
+
 **jrt's own Java and the JDK's variants** (amendment K1, accepted 2026-10-09). The JDK input is
 `bin/jrt-convert`'s output (committed as `jdk/forms` since standalone S1, 2026-10-12; `--jdk`'s
 default, or `JRT_CONV`): the closure's jdk26u files, the jdk26u files added to it (the
