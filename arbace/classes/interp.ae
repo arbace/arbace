@@ -43,12 +43,35 @@
   "internal name -> Klass of the classes of the compilation being built."
   nil)
 
+(def ^:dynamic *eager*
+  "True while define! builds the compilation's bodies, before any of its methods is called: a
+  sibling class (below) is then pending even when a class of its name exists."
+  false)
+
+(defn sibling?
+  "Is n a class of the enclosing top-level do entered as a declaration (SPEC §9.2): declared in
+  the compilation being built, compiled and defined by a later form of the do?"
+  [n]
+  (and (string? n) (not (contains? *klasses* n)) (boolean (:declared-only (a/decl n)))))
+
+(defn pending!
+  "Throws the signal that a body refers to sibling class n, not defined yet (define! leaves that
+  body to be built on its first call, when the do's later forms have defined n; at that call, an
+  error)."
+  [n]
+  (throw (ex-info (str "Class " (str/replace n "/" ".") " (a class form of the enclosing do) is not defined yet")
+                  {:arbace/compile-error true ::pending n})))
+
+(defn pending? [e] (and (instance? arbace.lang.ExceptionInfo e) (contains? (ex-data e) ::pending)))
+
 (defn klass
   "The Klass of internal name n when n is an interpreted class (of this compilation, or defined
-  earlier and still the class of that name), else nil."
+  earlier and still the class of that name), else nil. A sibling while define! builds the
+  bodies (*eager*): pending, the class of that name defined later by the do."
   ^arbace.lang.Compiler$CF$Klass [n]
   (when (string? n)
     (or (get *klasses* n)
+        (when (and *eager* (sibling? n)) (pending! n))
         (when-let [^arbace.lang.Compiler$CF$Klass k (get @registry n)]
           ;; on Go the name may have been taken by a class made since (deftype); on the JVM's
           ;; test host there are no Class objects
@@ -89,7 +112,9 @@
     :else (let [n (t/desc->internal d)]
             (if-let [k (klass n)]
               (or (.-cls k) Object)
-              (or (env/load-class n) (fail (str "Class not found: " (str/replace n "/" "."))))))))
+              (or (env/load-class n)
+                  (when (sibling? n) (pending! n))
+                  (fail (str "Class not found: " (str/replace n "/" "."))))))))
 
 (defn internal->class ^Class [n] (desc->class (t/internal->desc n)))
 
@@ -184,8 +209,9 @@
         (some #(find-method % mname desc) (seq (.-interfaces k)))
         (when (.-sup k) (real-method (.-iname (.-sup k)) mname desc))
         (some #(real-method (.-iname ^arbace.lang.Compiler$CF$Klass %) mname desc) (seq (.-ifaces k))))
-    (when-let [c (env/load-class owner)]
-      (find-method c mname desc))))
+    (if-let [c (env/load-class owner)]
+      (find-method c mname desc)
+      (when (sibling? owner) (pending! owner)))))
 
 (defn find-field ^Field [^Class c fname]
   (loop [c c]
@@ -1238,10 +1264,17 @@
 ;; publishing: the host learns the members (Go: Dyn slots and member tables, for translated
 ;; code and reflection)
 
+(defn- sig-class
+  "The Class of a member's type for the host: desc->class, Object for a sibling class not
+  defined yet (SPEC §9.2: the classes of a top-level do refer to each other in their types too)."
+  ^Class [d]
+  (try (desc->class d)
+       (catch Throwable e (if (pending? e) Object (throw e)))))
+
 (defn- meth-classes [^arbace.lang.Compiler$CF$Meth mt]
   (let [[ps r] (t/parse-method-desc (.-desc mt))]
-    (set! (.-params mt) (into-array Class (map desc->class ps)))
-    (set! (.-retClass mt) (desc->class (if (= "<init>" (.-name mt)) "V" r)))))
+    (set! (.-params mt) (into-array Class (map sig-class ps)))
+    (set! (.-retClass mt) (sig-class (if (= "<init>" (.-name mt)) "V" r)))))
 
 (defn publish!
   "Hands k's members to the host: its virtual methods (its own and those it inherits from
@@ -1259,9 +1292,9 @@
       (.ctor h k m))
     (let [info (.-info k)]
       (doseq [f (:own-fields info)]
-        (.addField h k (:name f) (desc->class (:desc f)) (int (:flags f)) (int (field-index k (:name f))) false))
+        (.addField h k (:name f) (sig-class (:desc f)) (int (:flags f)) (int (field-index k (:name f))) false))
       (doseq [[i f] (map-indexed vector (:statics info))]
-        (.addField h k (:name f) (desc->class (:desc f)) (int (:flags f)) (int i) true)))))
+        (.addField h k (:name f) (sig-class (:desc f)) (int (:flags f)) (int i) true)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; a compilation
@@ -1272,11 +1305,26 @@
   (let [st @(:state (a/decl n))
         nodes* (:clinit st)]
     (when (seq nodes*)
-      (let [ctx (new-ctx n "V")
-            body (arbace.lang.Compiler$CF$Do. \V (nodes (map #(node ctx %) nodes*)) (konst "V" nil))]
-        (set! (.-clinit k) body)
-        (set! (.-clinitR k) (int @(:nr ctx)))
-        (set! (.-clinitP k) (int @(:np ctx)))))))
+      (let [build (fn []
+                    (let [ctx (new-ctx n "V")]
+                      [ctx (arbace.lang.Compiler$CF$Do. \V (nodes (map #(node ctx %) nodes*)) (konst "V" nil))]))
+            [ctx body] (try (build) (catch Throwable e (if (pending? e) nil (throw e))))]
+        (if body
+          (do (set! (.-clinit k) body)
+              (set! (.-clinitR k) (int @(:nr ctx)))
+              (set! (.-clinitP k) (int @(:np ctx))))
+          ;; it refers to a sibling not defined yet: a static method of its own, built on the
+          ;; class's initialization as a method is on its first call
+          (let [mt (arbace.lang.Compiler$CF$Meth. k "<clinit>" "()V" (int ACC_STATIC))]
+            (set! (.-ret mt) \V)
+            (set! (.-ptypes mt) (char-array 0))
+            (set! (.-pslots mt) (int-array 0))
+            (set! (.-builder mt)
+                  (fn [mt]
+                    (binding [env/*compile-set* (atom (:compile-set (.-info k)))
+                              *klasses* (:klasses (.-info k))]
+                      (let [[ctx body] (build)] (finish! ctx mt body)))))
+            (set! (.-clinit k) (arbace.lang.Compiler$CF$CallI. \V mt nil (nodes [])))))))))
 
 (defn define!
   "Compiles class forms (each the rest of a defclass form) in namespace ns as one compilation,
@@ -1306,13 +1354,17 @@
                   [key m] (.-vtable k)
                   :when (str/starts-with? key "doInvoke(")]
             (.put (.-vtable k) "doInvoke" m))
-          ;; every body, as the JVM compiles them all
-          (doseq [n order
-                  :let [^arbace.lang.Compiler$CF$Klass k (ks n)]]
-            (doseq [[_ ^arbace.lang.Compiler$CF$Meth m] (concat (.-methods k) (.-ctors k))
-                    :when (not (has? (.-flags m) ACC_ABSTRACT))]
-              (.ensure m))
-            (clinit! k n))
+          ;; every body, as the JVM compiles them all; but one that refers to a sibling class
+          ;; (SPEC §9.2), defined by a later form of the top-level do, is built on its first
+          ;; call, as the JVM resolves the sibling's name when the code first runs it
+          (binding [*eager* true]
+            (doseq [n order
+                    :let [^arbace.lang.Compiler$CF$Klass k (ks n)]]
+              (doseq [[_ ^arbace.lang.Compiler$CF$Meth m] (concat (.-methods k) (.-ctors k))
+                      :when (not (has? (.-flags m) ACC_ABSTRACT))]
+                (try (.ensure m)
+                     (catch Throwable e (when-not (pending? e) (throw e)))))
+              (clinit! k n)))
           (doseq [n sorted] (publish! (ks n)))
           (doseq [n sorted
                   :let [d (a/decl n)]
