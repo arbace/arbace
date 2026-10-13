@@ -34,7 +34,7 @@
 (defn node
   "The analyzed node x as a map (Compiler$AST/node), nil for nil."
   [x]
-  (when (some? x) (Compiler$AST/node x)))
+  (when (some? x) (assoc (Compiler$AST/node x) :self x)))
 
 (defn- fail [msg & [data]]
   (throw (ex-info (str "aot: " msg) (or data {}))))
@@ -271,6 +271,19 @@
     (or (runtime-class? p ctx) (not (public? p))) f
     :else (list 'cast (type-sym p) f)))
 
+(def ^:private object-method-keys
+  (set (for [^java.lang.reflect.Method m (.getMethods Object)] [(.getName m) (vec (.getParameterTypes m))])))
+
+(defn- fi?
+  "Is p a functional interface a fn argument is adapted to (Clojure 1.12's FISupport): an
+  interface, not an IFn's, with one abstract method (Object's left out)."
+  [^Class p]
+  (and (.isInterface p) (not (.isAssignableFrom arbace.lang.IFn p))
+       (= 1 (count (for [^java.lang.reflect.Method m (.getMethods p)
+                         :when (java.lang.reflect.Modifier/isAbstract (.getModifiers m))
+                         :when (not (object-method-keys [(.getName m) (vec (.getParameterTypes m))]))]
+                     m)))))
+
 (defn- typed-args
   "The arguments es as parameters of types ps (MethodExpr.emitTypedArgs)."
   [ctx ps es]
@@ -289,8 +302,7 @@
               :else
               (let [f (emit ctx e)
                     jc (:class n)]
-                (if (and (not (.isPrimitive p)) (.isInterface p) (not (.isAssignableFrom arbace.lang.IFn p))
-                         (not (and jc (.isAssignableFrom p jc))))
+                (if (and (fi? p) (not (and jc (.isAssignableFrom p jc))))
                   ;; Clojure 1.12: a fn passed where a functional interface is expected
                   (unbox-arg ctx (list 'arbace.lang.Compiler$Evaluator/fiAdapt (constant ctx p) f) p)
                   (unbox-arg ctx f p))))))
@@ -815,7 +827,12 @@
                       :when (:bindingPrim b)]
                   b))
         ret (:retClass mn)
-        body (if fn-method? (emit ctx' (:body mn)) (ret-body ctx' (:body mn) ret))
+        body (cond
+               ;; a fn's ^long or ^double return: converted on exit, as the evaluator's
+               ;; Evaluator.result (the Go build makes no fn primitive)
+               (and fn-method? (#{Long/TYPE Double/TYPE} ret)) (box (ret-body ctx' (:body mn) ret) ret)
+               fn-method? (emit ctx' (:body mn))
+               :else (ret-body ctx' (:body mn) ret))
         body (if @rec
                (list 'loop (vec (mapcat (fn [lb] (let [b (node lb)] [(tagged (local-sym b) (or (:bindingPrim b) Object)) (local-sym b)]))
                                         locals))
@@ -945,8 +962,18 @@
   "Defines the class of fn or reify ox (its node) once, in the classes being emitted; returns
   its binary name."
   [ctx ox]
-  (let [cname (destub (:name ox))]
-    (when-not (contains? @(:classes ctx) cname)
+  (let [^IdentityHashMap named (:fn-names ctx)
+        known (.get named (:self ox))
+        base (destub (:name ox))
+        ;; two fns of one name (a defn evaluated again in its source, as core's bootstrap
+        ;; definitions are: the JVM's AOT keeps the last class file of the name): the later one
+        ;; numbered
+        cname (or known
+                  (loop [k 0]
+                    (let [c (if (zero? k) base (str base "__" k))]
+                      (if (contains? @(:classes ctx) c) (recur (inc k)) c))))]
+    (when-not known
+      (.put named (:self ox) cname)
       (swap! (:classes ctx) assoc cname ::pending)
       (let [cls (atom {:name cname :consts [] :const-map (IdentityHashMap.) :const-prefix ""})
             fn? (= "fn" (:op ox))
@@ -1061,12 +1088,13 @@
 
 (defn emit-source
   "The class forms of source path src (scriptbase.ae), compiled from its units: the loader
-  class SCRIPTBASE__init's form and the fn classes made, into the atom classes."
-  [classes runtime-classes src units]
+  class SCRIPTBASE__init's form and the fn classes made, into the atom classes (fn-names: the
+  fns' class names by their FnExpr, an IdentityHashMap shared by the sources)."
+  [classes runtime-classes fn-names src units]
   (let [base (subs src 0 (.lastIndexOf ^String src "."))
         lname (str (str/replace base "/" ".") "__init")
         cls (atom {:name lname :consts [] :const-map (IdentityHashMap.) :const-prefix ""})
-        ctx {:classes classes :runtime-classes runtime-classes :cls cls}
+        ctx {:classes classes :runtime-classes runtime-classes :cls cls :fn-names fn-names}
         ms (vec (map-indexed (fn [k [u um]]
                                ;; the analysis resolved tags lazily, against *ns*: the unit's
                                ;; namespace while it is emitted
