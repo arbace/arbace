@@ -44,8 +44,10 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Now
 
-- The user's review of the provisional amendments: SA20-SA25 (S3's fixpoint) and SA40-SA88
-  (S4), applied as recommended while the user was away ([STANDALONE-NOTES.md](STANDALONE-NOTES.md)).
+- The user accepted the amendments SA20-SA25 and SA40-SA88 as applied (2026-10-13;
+  [STANDALONE-NOTES.md](STANDALONE-NOTES.md)).
+- The two Go-build bugs the native tests found (agent, branch `go-bugs`): a top-level `do` of
+  mutually referring `defclass`es; a class forms `lambda` in a handed-over fn.
 - The host's reboot (the user: after the milestone): it runs kernel 6.18.52 with 6.18.56's
   modules installed; after it, `bin/arbace-go --smoke --box` for nested KVM.
 - The Mac bundle for this milestone, if wanted (`bin/box-mac-bundle`).
@@ -54,9 +56,6 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - The standalone survey's S5-S8: the box rebuilding Arbace inside itself.
 - Known issues from S4 (STANDALONE-NOTES, "S4: the JVM removed", Left):
-  - two Go-build bugs found by the native tests moved into the oracle (a top-level `do` of
-    mutually referring `defclass`es; a class forms `lambda` in a handed-over fn), recorded in
-    `test/oracle/known-go-amd64-frozen.edn`;
   - `go/arbace/jrt/reflect_tables.ae` stale against `bin/jrt manifest` (regenerating it changes
     the build);
   - `test/oracle/known-go-box-amd64.edn` updated but not run on the box;
