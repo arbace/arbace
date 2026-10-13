@@ -1853,7 +1853,12 @@ namespaces' Go and its stage 0 hosts the tools compiled.
   (`(conj "" 1)`'s `ClassCastException` message, 8 cases); a fn's `^long` return not converted
   (`hash-ordered-coll` returned an `Integer`, 13 cases of `hashing.ae`); two fns of one name
   (core's bootstrap `dotimes` and the final one) given one class, the first's (1 case).
-- **The cost today**: the compiled program is 243 MB (69 MB evaluated): 4,826 classes, each with
+- **With the fixes and the tools** (a2g, g2a, `arbace.aot` embedded, SA133; 95 sources, 7,334
+  classes): the oracle 22,504 of 22,558, the 53 known mismatches and 1 new
+  (`(hash-ordered-coll "abc")`: `Iterable` taken for a functional interface; the back end now asks
+  the analysis's `FISupport`, `Compiler$AST/fiMethod`). One compiled tool namespace failed a2g's
+  analysis (a local named `const` met the constant fields `const__N`: they are `const-N` now).
+- **The cost today**: the compiled program is 243 MB (69 MB evaluated; 347 MB with the tools): 4,826 classes, each with
   a2g's member tables and the forwarders of `IFn`'s 21 `invoke` arities; gc compiles `lang` in
   455-492 s; a2g's second run, its analyzer evaluated on stage 0, takes 1,100-1,500 s. A build is
   about 45 minutes until the tools run compiled on their host (SA133) and the size is worked on.
