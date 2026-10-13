@@ -49,12 +49,15 @@ The current state of the work. This file is rewritten as things change. For the 
 - Fixed (2026-10-13): the two Go-build bugs the native tests found (a top-level `do` of mutually
   referring `defclass`es; a class forms `lambda` in a handed-over fn), SA90-SA92 accepted. Left:
   reflection on a member typed by a sibling defined later reports `Object` (SA90 (b) if needed).
-  The seed is no longer the program's exact print; when to remake it is open (the next
-  milestone at the latest).
+- The seed remade (2026-10-13, the user): the fixpoint at `68e00ce`, `f7d27e48…`; verified
+  (stage 0 = G1 = G2 = G3, `d144af21…`).
 - The host rebooted into 6.18.56 (2026-10-13): nested KVM works, the box's smoke test 111 ok.
-- The Mac bundle for this milestone, if wanted (`bin/box-mac-bundle`).
+- No Mac bundle for this milestone (the user).
 
 ## Next
+
+- The host VM survey ([go/HOST-VM-SURVEY.md](go/HOST-VM-SURVEY.md)): HV1-HV9 proposed, for the
+  user to decide; they shape S5-S8 (the guest's memory beyond 3 GiB first).
 
 - The standalone survey's S5-S8: the box rebuilding Arbace inside itself.
 - Known issues from S4 (STANDALONE-NOTES, "S4: the JVM removed", Left):

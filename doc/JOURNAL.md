@@ -1090,3 +1090,30 @@ All as recommended in doc/STANDALONE-SURVEY.md:
     into the global `~/.claude/settings.json`. For Arbace's `.claude/` this was an exception the
     user approved.
   - Disk went from 53% to 38%.
+
+## 2026-10-13: the seed remade; the host VM surveyed
+
+- The seed remade, at the user's request, after the Go-build bug fixes changed the runtime:
+  - `bin/arbace-go --fixpoint` at `68e00ce`, hosted by the previous seed's stage 0
+    (`f114b6bd…`, so host ≠ G1): G1 = G2 = G3,
+    `d144af21085971fdc327ce6ea03494a2127b1a4e089ff713083413e11f6ecdb6` (68,984,992 bytes; 849 s).
+  - Packed and committed alone (`38d4827`): 3,059,072 bytes, 1,145 files, SHA-256
+    `f7d27e4857b388a028acc79de22b2b85975615a9a3748a7bdb53d37b3dcf55eb`, `:dirty false`.
+  - `bin/seed --verify` (897 s): the same tree byte for byte; stage 0 = G1 = G2 = G3.
+  - The essential gate passed (18m22s): the suite 20,506 of 20,520, the oracle's 54 known
+    mismatches, 0 new.
+  - A Mac bundle for the milestone is not wanted (the user).
+- The host VM survey, at the user's request ("we are now in a virtualization"): agent, branch
+  `host-vm-survey` (`1ee5bab`), merged. `doc/go/HOST-VM-SURVEY.md`, read-only measurements with
+  identifiers redacted, puts the host VM's boundaries beside the box's. Proposals HV1-HV9 are
+  for the user.
+  - The host VM: QEMU/KVM 9.2 (Q35, OVMF), 64 vCPUs of an EPYC 7763; nested SVM without decode
+    assists, AVIC or vNMI; booted with 64 GiB, of which the balloon had taken 33 GiB back
+    (29.7 GiB visible); virtio devices only; root without seccomp or cgroups.
+  - The box against it: a 3 GiB slot with a 2 GiB limit, no block device, no network but the
+    proxy.
+  - The gaps for S5-S8: memory first (a2g peaks at 10 GB), files served on demand, a budget
+    for tool guests.
+  - In conversation (not in the repo, by the redaction rule): the public address's registry
+    and the platform's evidence point to a dedicated EPYC 7763 server that its operator
+    virtualizes.
