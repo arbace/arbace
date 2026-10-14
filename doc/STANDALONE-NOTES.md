@@ -2437,3 +2437,53 @@ program without its image (code +18.6 MB, function table +14.8, types +3.0, stri
   errors).
 - **Deftypes, records and reifies** (761 classes) keep the full object model, member tables
   included: they are Java objects that Clojure code reflects on.
+
+### The test build reuses the compiled namespaces (SA157)
+
+`--build-tests` compiled the namespaces again (the host's 48 s), the same tree as the shipped
+build's: the test build adds the suite's Java fixtures, not namespaces. The tree is a function
+of the runtime (`arbace_runtime_key`: the program that compiles them has that runtime, SA144)
+and of Arbace's sources (the namespaces and the back end, `arbace/aot`): `bin/arbace-go` records
+that key beside the tree it makes (`target/arbace-go/aot.key`, written after the host's or the
+first program's compiling), and the test build takes `target/arbace-go/aot` as its input when
+the key is the checkout's (`== the namespaces compiled: the shipped build's`), else compiles
+as before. The gate's builds (`--gate-build`: the executable, then the test build) reuse it.
+
+### Correctness, speed, the build's time
+
+- **Clojure's suite** on the test build (`b6`, the program before its last cut, SA156's `Ref`):
+  20,506 of 20,520, no regressions against `test/arbace-go-results.edn`. **The oracle**: 22,505
+  of 22,558, the 53 known mismatches, 0 new, 0 now passing, as recorded. The smoke test: passed.
+  (Again on the final program: the gate, below.)
+- **Start** (`-e nil`, amd64, the best of 8, alternating): 0.09 s before and after (the machine
+  quieter than S6's 0.17 s measurement).
+- **The benchmarks** (`test/bench/eval-bench.ae`, the script evaluated, `arbace.core` compiled;
+  the best of two runs each): geometric mean 1.001 of main's (from `vector-conj` 0.91 and
+  `reduce-range` 0.95 to `seq-ops` 1.08 and `dotimes-array` 1.08; profiles of `seq-ops` show the
+  same functions: code layout). T3 stays as measured (SA139).
+- **gc on the compiled program, cold** (`go build -toolexec time`, 16 jobs): `aot_arbace_core`
+  74 s and 3.5 GB → **6.4 s and 1.0 GB**; the longest compiled package now
+  `aot_arbace_classes_analyze`, 4.1 s and 0.7 GB; `jrt` (57 s, 9.3 GB) and `lang` (19 s, 4.0 GB)
+  as before, now the build's critical path; the link 6 s and 2.9 GB → 4 s and 1.8 GB; the whole
+  cold build 2:40 → 1:40. The packages' archives 2.15 GB → 1.35 GB, the compiled namespaces'
+  1.37 GB → 0.50 GB (`aot_arbace_core` 186 MB → 48 MB).
+- **The build** (`bin/arbace-go --build`, amd64, 16 jobs), the usual case, one a2g run (the
+  host of the checkout's runtime): main 5:20 (host compile 50 s, a2g 268 s, g2a build 44 s);
+  now the fixpoint's G2 4:13 and G3 4:19 (host compile 54-55 s, a2g 222 s, g2a build 27 s). Two
+  runs (a change to the runtime): main 9:31; now the fixpoint's G1 6:18.
+
+### The fixpoint and the seed
+
+- **The fixpoint from the old stage 0** (the seed `62c699af...`, at `bf8c461`): G1 in two runs
+  (6:18; its runtime is not the host's), G2 and G3 in one each (4:13, 4:19): a2g's programs G1 =
+  G2 = G3 (diff -r), **G1 = G2 = G3 byte for byte**, `79ae1ef6...`, 101,322,912 bytes (main's
+  fixpoint: 209,887,392).
+- **The seed remade** from that G3 (`ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed
+  --make`, at `fdbcf8b`, the notes committed first so that the seed's version map is a clean
+  commit's): `seed/arbace-seed-go.tar.xz`
+  **`c7f5e3d53947d6c8bbbbf3bbe79dfbcaa4dca3c75da29ed78c41a4b028fe2823`** (5,378,472 bytes, 1,691
+  files, 62.9 MB unpacked), was `62c699af12efc71d095c308a749d63ad14837dc2a13e899977515e2522fa30cb`
+  (6,607,876 bytes, 1,700 files, 97.8 MB unpacked).
+- **`bin/seed --verify`** (13:42): at `fdbcf8b`, stage 0 from the new seed hosted the fixpoint
+  (each G in one run: 4:31, 4:14, 4:02); printed again, the same tree (the tar `52be4d69...`) and
+  the same archive `c7f5e3d5...`; **stage 0 = G1 = G2 = G3 byte for byte**, `a72f08b2...`.

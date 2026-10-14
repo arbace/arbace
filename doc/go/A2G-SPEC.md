@@ -1504,6 +1504,15 @@ protocol:
   methods (`Integer.rotateLeft`): `Murmur3.hashLong` went from 9.4 to 3.7 ns.
 - The guard costs about 0.07 ns per access when inlined, 0.3 ns at a non-inlined static
   method's entry (§13.4).
+- **A long static initializer in parts** (standalone SA153, STANDALONE-NOTES.md, "S6: the
+  compiled program's size"): `C_clinit`'s statements of more than 96 calls are cut into
+  functions `C_clinit_p0` ... of at most 48, which `C_clinit` calls in order, unless one may
+  leave early (`return`, `goto`, `defer`, a label) or declares locals for the rest; gc's stack
+  maps of one function grow as its safepoints times its stack slots.
+- **A compiled fn's code** (`:aot/code`, standalone SA156, SA158, SA159): not a Java object in
+  Go (a header word, its arities' methods, none of `Object`'s protocol, no member table, no
+  instance check, registered by the package's static `jrt.CodeDecl` table); its `C_New`
+  initializes its nest's top-level class, whose statics its methods then read unguarded.
 
 ### 6.3 Go's package initialization
 
