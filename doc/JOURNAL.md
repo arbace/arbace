@@ -1454,3 +1454,33 @@ for SSH (`russh`) and its own mosh client (`prost`, `flate2`, `aes`), Ghostty's 
 built for iOS (GhosttyKit, MIT; Zig, Metal) and whisper.cpp for dictation (`whisper.rn`): not
 Swift with gomobile, as guessed earlier the same day (the guess was wrong). Recorded in
 `doc/IOS-REPL-SURVEY.md` §2, with libghostty as prior art for the terminal core.
+
+## 2026-10-14: S8 again on the final program; the Mac byte for byte
+
+After S6 and its size work, S8's runs again (`.tmp/s8b/run.sh`, main at `3bf351b`):
+`bin/arbace-go --build --box` (amd64, arm64), `bin/box-tools build`, then `bin/box-rebuild --dir
+.tmp/box-rebuild/amd64-v1 prepare box host compare boot smoke plan-check`: in the box 785 s, on the
+host 661 s; the image built in the box = the host's, byte for byte, `b7c00302…`, 100,757,802 bytes;
+booted by its ref; the box smoke test 119 ok; plan-check 281 packages, the same as go list's.
+arm64 on the host (`prepare host`): 656 s, `a733f9bc…`.
+
+The Mac (Apple M2 Max, 96 GB, macOS 14.8.7, on power; the earlier runs were on battery in
+power-saving mode): the bundle of `3bf351b` (`./mac.sh all`): check, sign, hv, the clock passed;
+the rebuild in the box gave `a733f9bc…`, the Linux host's image, byte for byte, in 353 s (from
+the action cache again 61 s). Two failures, both the checklist's: `mac.sh`'s `box` read `cpus`,
+set only inside the checklist (`unbound variable` in the rebuild's boot check; the boot by ref,
+run by hand by the user, works, and reports `aarch64`, which the check did not expect), and the
+61 GiB refusal (status 1) came from Hypervisor.framework's `hv_vm_map` (`HV_BAD_ARGUMENT`)
+before the monitor's limit check could name the limit. Fixed (`338c4a2`): the monitor checks the
+guest's RAM against `maxGuestEnd` before any memory is mapped (amd64: `the guest's RAM ends at
+0x11400000000, beyond this monitor's 0x10000000000`; the box smoke test 119 ok); `mac.sh`'s
+`box` defaults to 4 vCPUs and the boot check expects `aarch64`. A new bundle of `338c4a2` (the
+arm64 host's image `579c8b3b…`, 820 s), run by the user (check, sign, checklist, rebuild): the
+checklist 46 of 46, the rebuild 4 of 4: the image rebuilt on the Mac = Linux's, `579c8b3b…`,
+98,464,042 bytes, in 352 s, booted by its ref, the rerun from the action cache the same. HV1 on
+the Mac: 6 GiB and 60 GiB slots, 61 GiB refused, 16 GiB with 10 GiB touched in 7.1 s. HV6: the
+guest's clock against the Mac's over an hour: from -12 ms to -30 ms, about 5 ppm; no resync.
+HV7: the rebuild 352 s on the Mac against 785 s in the amd64 box (nested KVM).
+
+Also found: `bin/box-rebuild --given` did not give the compiled namespaces (SA152 added the step;
+fixed in `77b20b6`), so the arm64 VM's run (started before the fix) compiles them emulated.
