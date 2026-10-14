@@ -1407,3 +1407,14 @@ bytes, was `62c699af…`; `bin/seed --verify` holds (stage 0 = G1 = G2 = G3, `a7
 regressions; the oracle 53 known, 0 new). The user accepted SA153-SA159 as (a). The track's agent
 reported one slip: a check started in the main checkout instead of its worktree, touching only
 gitignored scratch (`.tmp/clojure-tests/go/suite` regenerated); the tracked tree was clean.
+
+## 2026-10-14: Futamura's projections on the agenda's Later
+
+Asked how Arbace relates to Futamura's projections: it has no partial evaluator, and its compiler
+(S6: the analyzer's AST emitted as class forms, translated by a2g) is written by hand. But it
+holds the pairs the projections relate: the evaluated build and the compiled one (the first
+projection's input and output), the class forms' interpreter and a2g (the second's), both kept in
+step by the suite and the oracle; the fixpoint is self-application as bootstrapping, not the
+third projection. The user asked for it on the agenda's Later: closure generation (SA156 (c)),
+partial evaluation of the evaluator ahead of time for code generation (T4; Truffle/Graal as the
+model), a2g derived from the interpreter; the cost, binding times under Clojure's dynamism.

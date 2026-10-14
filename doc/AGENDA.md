@@ -95,6 +95,16 @@ The current state of the work. This file is rewritten as things change. For the 
   of Go plus TamaGo. Targets: /dev/kvm on amd64 (Alpine edge Linux host) and
   Hypervisor.framework on arm64 (macOS host). Open: the runtime's design, Go-inspired (scheduler,
   GC), with proper tail calls possible.
+- Futamura's projections (the user, 2026-10-14): Arbace's compiler is written by hand, not
+  derived, but it has the pairs the projections relate: the evaluated build (the evaluator and
+  the image) against the compiled one (S6), and the class forms' interpreter
+  (`arbace/classes/interp`) against a2g, kept in step by the suite and the oracle, not by
+  construction. To survey: fns as Go closures (SA156 (c), closure generation, also a Go type
+  fewer per fn); code generation (T4) by partial evaluation of the evaluator, ahead of time, in
+  the way of Truffle/Graal (speculating on vars, falling back when one is redefined); the second
+  projection, a2g derived from the interpreter, one definition of each language's semantics
+  (Clojure, the class forms, later Go). The cost: binding times in a dynamic language (vars,
+  `eval`, macros at load time).
 - The box's oracle and `box-suite` in `bin/gate --full` (manual today); the mapped start measured
   without nested KVM; the arm64 box's oracle subset and `box-suite` (an arm64 host with KVM).
 - The build's use of the host's 64 cores (the user, 2026-10-14): S6's AOT builds (about 5
