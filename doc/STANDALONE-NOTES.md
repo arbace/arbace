@@ -2029,8 +2029,9 @@ apart.
 
 - **One a2g run when the host's runtime is the checkout's** (SA144). The version map linked into
   the program carries `:runtime`, the SHA-256 of the runtime's sources (`bin/lib/version.bash`'s
-  `arbace_runtime_key`: `arbace/lang`, `arbace/a2g`, `arbace/classes`, `go`, `overlay`, `jdk`,
-  `x509roots`, Go's pin). When the host's equals the checkout's, the host compiles the checkout's
+  `arbace_runtime_key`: first `arbace/lang`, `arbace/a2g`, `arbace/classes`, `go`, `overlay`,
+  `jdk`, `x509roots`, Go's pin; since SA147 only what compiling namespaces depends on,
+  `arbace/lang`, `go`, `overlay/jdk`, `jdk`). When the host's equals the checkout's, the host compiles the checkout's
   namespaces itself (`host_compile`: `ARBACE_PATH_FIRST` reads them from the checkout as embedded
   sources, analyzed and recorded afresh, no compiled loader, no image), in the order the program's
   `namespaces.txt` lists them; else the first program is built and compiles them (SA132), and a2g
