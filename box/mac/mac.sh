@@ -43,7 +43,7 @@ t() {
 check() { # NAME EXPECTED ACTUAL
   if [ "$2" = "$3" ]; then echo "  ok   $1"; oks=$((oks+1)); else echo "  FAIL $1"; echo "    expected: $2"; echo "    got:      $3"; fails=$((fails+1)); fi
 }
-box() { ARBACE_BOX_CPUS=$cpus t 300 "$B" "$@"; }
+box() { ARBACE_BOX_CPUS=${cpus:-4} t 300 "$B" "$@"; }
 ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 # cpu_s PID: the process's CPU time in seconds (user + system)
 cpu_s() { ps -o time= -p "$1" | awk -F'[:.]' '{ n = NF; s = $(n-1) + $(n-2) * 60; if (n > 3) s += $(n-3) * 3600; printf "%.2f\n", s + $n / 100 }'; }
@@ -215,7 +215,7 @@ do_rebuild() {
   got=$("$B" --store rebuild/store ref rebuilt.mac.arm64 2>/dev/null)
   check "the rebuild in the box ran" "0" "$st"
   check "the image rebuilt on the Mac = the one built on Linux by the host's tools" "$want" "$got"
-  check "the image booted by its ref (ARBACE_BOX_IMAGE=ref:rebuilt.mac.arm64)" "booted by ref arm64" \
+  check "the image booted by its ref (ARBACE_BOX_IMAGE=ref:rebuilt.mac.arm64)" "booted by ref aarch64" \
     "$(ARBACE_BOX_IMAGE=ref:rebuilt.mac.arm64 box --store rebuild/store -e '(print "booted by ref" (System/getProperty "os.arch"))' 2>&1)"
   # a rerun: every action from the action cache
   d0=$(ms)
