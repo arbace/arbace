@@ -1497,3 +1497,22 @@ booted by its ref in the VM (`aarch64`). With amd64 and the Mac (the entry above
 holds on the final program on all three. Recorded in `doc/go/BOX-NOTES.md`, "The runs again on
 the final program". Next: the whole chain in the VM (BX117 (a)) tried again, detached, at the same
 time as `bin/gate --full`, then `bin/box-rebuild` by hand and the tag.
+
+## 2026-10-14: the milestone's first `bin/gate --full`: two failures, fixed
+
+`bin/gate --full` at `434021a` (31 min 42 s) passed every step but two:
+- `a2g-edge`: `jdk/edge.edn`'s `:exists` set (the classes the sources name that exist on the
+  JVM, a2g's cut candidates) was recorded before S6 and its size work; the sources now also name
+  `arbace.lang.ArraySeq`, `Tuple`, `LispReader$Resolver`, `java.lang.String`,
+  `java.math.BigInteger`, `java.nio.ByteBuffer`, `java.security.MessageDigest`,
+  `java.util.Base64` and a few more. `bin/a2g-edge update` recorded them again. a2g's program
+  built with the new edge is the old one byte for byte (only `report.edn`'s timings differ), so
+  the seed and S8's runs stand.
+- `g2a`: `bin/box-vendor roundtrip` failed printing the converted vmm (`a statement in an
+  expression position: (go/directive "/*line :398:1*/")`): `338c4a2`'s check of the guest's RAM
+  added five lines to `newMachine`, past its `:go/end 386`, so the printing resynchronized the
+  lines with a directive that came back inside `boot0`. As with `storewait.go` (`dabda9e`), the
+  check moved to a file of its own, `box/go/arbace/box/vmm/guestram.ae` (`mapGuest`, the RAM
+  checked against `maxGuestEnd`, then `syscall.Mmap`), called where `newMachine` called
+  `syscall.Mmap`: vmm.go's layout is the vendored one again; the round trip 27 of 27.
+The essential gate does not run either check; `bin/gate --full` runs again.
