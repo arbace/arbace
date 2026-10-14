@@ -75,8 +75,9 @@ The current state of the work. This file is rewritten as things change. For the 
   test build, an AOT build no slower than 5 minutes, the AOT fixpoint, then AOT the default and
   the seed remade; RT, Main and Compiler's variants merged into their bases. Then: S8's runs
   again on the final program (`bin/box-rebuild`, amd64, the arm64 VM, the whole chain there
-  tried again), the Mac bundle for the user (`./mac.sh all`; on macOS 14, as the earlier 42 of 42: the user upgrades to 26 only after it), `bin/gate --full` with
-  `bin/box-rebuild` by hand, the tag.
+  tried again), the Mac bundle for the user (`./mac.sh all`; on macOS 14, as the earlier 42 of
+  42: the user upgrades to 26 only after it), `bin/gate --full` with `bin/box-rebuild` by hand,
+  the tag.
 - Known issues: fixed in S5 (SA90 (b), `reflect_tables.ae`, the box's oracle run, `Var`,
   `Reflector` and the `.subst` variants merged, `bin/box-vendor convert`); left: RT, Main and
   Compiler's variants (with S6).
