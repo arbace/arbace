@@ -2312,7 +2312,11 @@ Status: on the branch `s6-size` (from main at `b979754`), 2026-10-14, the user's
 the milestone `arbace-inside-itself-v1`: shrink the compiled executable (209.9 MB stripped, the
 evaluated one 74.9 MB), without trading away correctness (Clojure's suite and the oracle as
 recorded), the compiled speed or the build's time; and let the test build reuse the shipped
-build's compiled namespaces. Amendments SA153-SA159, proposed, the recommended choice applied.
+build's compiled namespaces. Done: the executable **209.9 MB → 101.3 MB** stripped (the box's
+guest 209.3 → 100.8 MB, the seed 6.6 → 5.4 MB), the build's time and the compiled speed kept, the
+test build reusing the namespaces; the fixpoint, the seed remade (`c7f5e3d5...`, was
+`62c699af...`) and verified, the box's rebuild byte for byte, the gate passed. Amendments
+SA153-SA159, proposed, the recommended choice applied.
 
 ### What the bytes were
 
@@ -2487,3 +2491,81 @@ as before. The gate's builds (`--gate-build`: the executable, then the test buil
 - **`bin/seed --verify`** (13:42): at `fdbcf8b`, stage 0 from the new seed hosted the fixpoint
   (each G in one run: 4:31, 4:14, 4:02); printed again, the same tree (the tar `52be4d69...`) and
   the same archive `c7f5e3d5...`; **stage 0 = G1 = G2 = G3 byte for byte**, `a72f08b2...`.
+
+### The box
+
+- **The guests**: `bin/arbace-go --build --box` with `ARBACE_BOX_ARCHES=amd64,arm64`: the amd64
+  guest 100.8 MB (was 209.3 MB), the launcher with it 105.9 MB; the arm64 guest 98.5 MB, its
+  launcher 103.4 MB (4:27 for both, after the native build by the new stage 0, 4:41). The box's
+  smoke test (`bin/arbace-go --smoke --box`, amd64: 4 and 1 vCPUs, the store, the tool guests,
+  TLS, the terminal): 113 checks ok, 3:26. (The arm64 VM was not run.)
+- **`bin/box-rebuild`** (amd64, at `761a781`, the new seed's commit, 23:38 with `bin/box-tools
+  build`): the namespaces compiled in the box (67 s), a2g there (307 s, was 500), the image built
+  in the box **= the host's, byte for byte** (`4f394cc6...`, 100,757,802 bytes; the box's run
+  12:34, was 16 min; the host's 11:00), a2g's program and the image of prepared namespaces =
+  bin/arbace-go --build's, and the image booted by its ref.
+
+### The gate
+
+The essential gate at `9d46cb8` (the new seed), 9:50 (S6's: 12:00): stage 0 from the seed in 8 s
+(`a72f08b2...`); the executable and the test build by stage 0 in one a2g run each (7:47, was
+9:51: the executable 5:10, the test build 3:31 with the executable's compiled namespaces,
+SA157); the smoke test; Clojure's suite 20,506 of 20,520, no regressions; the oracle 22,505 of
+22,558, the 53 known, 0 new: passed.
+
+### Amendments
+
+Proposed (2026-10-14); the recommended choice applied on `s6-size`.
+
+- **SA153 Long static initializers in parts.** (a) a2g cuts a static initializer of more than
+  96 calls into functions of at most 48, called in order (not one that may leave early, and not
+  inside a block declaring locals); the main package's table of the image's types in init
+  functions of 128 (built: gc's stack maps 55.8 MB to 14 MB; with SA155 `aot_arbace_core`'s
+  compile 74 s to 6 s); (b) the back end emits the parts itself (the runtime's and the JDK's long
+  initializers, `Character$UnicodeScript`'s, stay whole); (c) leave it to gc (stack slot
+  merging does not reach these temporaries). *Recommended: (a)*.
+- **SA154 A fn's class made by its first fn; what reflection never asks.** (a) A fn's code
+  class has no static initializer: its static field `fn-class` is set where a fn of it is made,
+  when null, by `Compiler$AOT/fnClass` (one class per name, under a lock: two threads racing
+  set the field to the same class; a pointer, one word); fns' code classes have no member
+  tables, the loaders' units are private, compiled classes register no Go types for `Unsafe`
+  (built); (b)
+  the fn class looked up by name at every fn made (a map per closure); (c) as before (a static
+  initializer per fn class, 15,362 functions). *Recommended: (a)*.
+- **SA155 Constant pools as data.** (a) A class's constants encoded in one string that
+  `Compiler$AOT/pool` decodes at its initialization, each value made by the calls emitValue's
+  code made, in order, keywords and symbols without metadata made once; the typed static fields
+  stay, each assigned its element (built: 10.7 MB of code to 2.5 MB and the strings); (b) one
+  `RT.readString` of the pool printed with `*print-dup*` (the reader's types differ: a line
+  number read is a `Long`, emitValue's an `Integer`; slower); (c) code, sharing only the
+  keywords and symbols as fields. *Recommended: (a)*.
+- **SA156 A fn's code is not a Java object in Go.** (a) A class the back end marks `:aot/code`
+  gets a header word and its arities' methods, none of `Object`'s protocol and no `Ref` (its
+  values converted to `Object` directly: they come from `new`); `Compiler$AOTF<n>` and `$AOTR<k>`
+  do not embed `jrt.Object_I`; `AOTFn`'s `body` not public; `jrt.notObject` throws
+  `UnsupportedOperationException` (built: 8 functions less per fn, 121.8 to 101.3 MB with
+  SA158-SA159); (b) the code classes keep the object model (66,728 functions of `Object`'s
+  protocol); (c) a fn's code as a Go closure through one adapter per arity (A2G-SPEC §7.11): no
+  Go type per fn either, but `^:once`'s clearing, `letfn`, captured loop locals and stack
+  traces' names to solve. *Recommended: (a)*; (c) later, if the size of a Go type per fn matters.
+- **SA157 The test build reuses the compiled namespaces.** (a) `bin/arbace-go` keys the
+  compiled tree by the runtime key and Arbace's sources (`target/arbace-go/aot.key`), and the
+  test build takes the shipped build's tree when its key is the checkout's (built); (b) the test
+  build compiles them again (48 s); (c) the test build always takes the shipped build's tree
+  (stale after a change to a namespace). *Recommended: (a)*.
+- **SA158 A fn's code reads its namespace's constants unguarded.** (a) A code class's
+  constructor initializes its nest's top-level class, so its methods read that class's statics
+  without the initialization guard; the constant pools' fields are marked `:aot/nn`, read as
+  never null (built: guards 81,016 to 13,670, `jrt.NN` checks on constants gone); (b) the guards
+  and null checks as Java's semantics require of other code. *Recommended: (a)*: a code object
+  exists only once its constructor ran, and a pool's field is null only while its class
+  initializes (when no fn of it runs).
+- **SA159 Fns' code registered by static data.** (a) A compiled package's code classes are one
+  table of `jrt.CodeDecl` (static data: names, modifiers, the addresses of their class
+  variables, declaring classes and interfaces) that `jrt.DefineCode` registers at the package's
+  variable initialization and `jrt.LinkCode` completes at its init; no `IsInstance`, no marker
+  methods (`Compiler$AOTF<n>`'s Go interface is its one method) (built: the package
+  initialization 3.5 MB to 1.0 MB, 8,000 init functions gone); (b) a `jrt.Define` call and an
+  `init` function per class, as for every other class; (c) the same table for every class of
+  the program (a `ClassInfo` of static data is about as large as the code it replaces).
+  *Recommended: (a)*.

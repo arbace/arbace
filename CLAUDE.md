@@ -145,7 +145,8 @@ Prior art:
   it (`bin/seed --build`), the executable and the test build by stage 0 (`bin/arbace-go
   --gate-build`, cached in `.tmp/arbace-go-gate` and keyed by a hash of what they are built from:
   `arbace/`, `go/`, `overlay/`, `jdk/`, `x509roots/`, the fixtures' forms, the build's scripts, the
-  seed's and Go's pins; seconds when unchanged, else two Go-hosted builds, about 10 minutes), then
+  seed's and Go's pins; seconds when unchanged, else two Go-hosted builds, about 8 minutes: the
+  test build reuses the executable's compiled namespaces), then
   concurrently the smoke test, Clojure's suite on the test build (`test/arbace-go-results.edn`) and
   the oracle against the frozen reference. `bin/gate --full` adds, concurrently: on the frozen
   JVM `bin/j2a-check --suite`, `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte),
