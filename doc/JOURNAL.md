@@ -1313,3 +1313,14 @@ All as recommended in doc/STANDALONE-SURVEY.md:
 - The user decided BX110-BX118 as recommended (BX117: (b) now, the whole chain in the VM tried
   again after S6), and BX119 against the recommendation: `bin/box-rebuild` not in
   `bin/gate --full`, run by hand at milestones; the Mac's bundle run once, after S6.
+
+## 2026-10-14: the build's core use, a follow-up for after the milestone
+
+Measured on S6's AOT builds (`.tmp/worktrees/s6-compile/.tmp/build20-22`): wall 5m14s, 4m46s,
+5m40s against user time 47m58s, 38m53s, 28m47s, so 9.2, 8.2 and 5.1 of the host's 64 cores busy
+on average. a2g takes 214 to 253 s of a build on at most 16 threads (`bin/a2g`'s `A2G_JOBS` cap,
+chosen for memory: 64 threads take about 12 GB); g2a's build 26 to 101 s, bound by the largest
+runtime packages; the namespaces' compiling (about 50 s), prepare and the link are one process
+each. The user asked for it on the agenda's Later: a higher cap within memory, more of the
+analysis in parallel, the largest packages split, aiming at 2 to 3 minutes. Not now: SA140's
+bound (about 5 minutes) is met, and a change to a2g now would redo S6's fixpoint and seed.

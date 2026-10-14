@@ -93,6 +93,12 @@ The current state of the work. This file is rewritten as things change. For the 
   GC), with proper tail calls possible.
 - The box's oracle and `box-suite` in `bin/gate --full` (manual today); the mapped start measured
   without nested KVM; the arm64 box's oracle subset and `box-suite` (an arm64 host with KVM).
+- The build's use of the host's 64 cores (the user, 2026-10-14): S6's AOT builds (about 5
+  minutes) keep 5 to 9 cores busy on average. a2g is about 70% of a build on at most 16 threads
+  (`A2G_JOBS`'s cap, chosen for memory), its load and analysis partly sequential; g2a's build
+  waits on the largest runtime packages; the namespaces' compiling, prepare and the link are one
+  process each. To try after the milestone: a higher cap within memory, more of the analysis in
+  parallel, the largest packages split; aim 2 to 3 minutes.
 - g2a's open ends: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s
   directory tests.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
