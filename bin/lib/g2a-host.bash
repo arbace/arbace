@@ -40,9 +40,19 @@ g2a_go_exe() {
 }
 
 g2a_run() {
-  local ns=$1 exe
+  local ns=$1 exe a
   shift
   exe=$(g2a_go_exe) || return 1
+  # build --print-cache (standalone S6): the host's identity keys the cache of printed
+  # packages, the executable's hash and that of g2a's sources in the checkout (a tool source
+  # there that differs from the executable's own is loaded from it)
+  for a in "$@"; do
+    if [ "$a" = --print-cache ]; then
+      G2A_HOST_ID=$( (sha256sum < "$exe"; cat "$root"/arbace/g2a/*.ae | sha256sum) | sha256sum | cut -c1-64)
+      export G2A_HOST_ID
+      break
+    fi
+  done
   ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} "$exe" -m "$ns" "$@"
 }
 
