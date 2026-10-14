@@ -229,13 +229,20 @@
                 (catch Throwable e
                   (swap! failed conj [(str file) (str "parse: " (.getMessage e))])))))))
       ;; process-classes! 0, with failures per class recorded rather than fatal
-      (let [names @(:order unit)]
+      (let [names @(:order unit)
+            t (atom (System/nanoTime))
+            laps (atom [])
+            lap (fn [k] (let [x (System/nanoTime)] (swap! laps conj [k (/ (Math/round (/ (- x @t) 1e7)) 100.0)]) (reset! t x)))]
+        (lap :declare)
         (doseq [n names :when (not (:headers-done (a/decl n)))]
           (try (a/resolve-header! n) (catch Throwable e (swap! failed conj [n (str "header: " (.getMessage e))]))))
+        (lap :headers)
         (doseq [n names]
           (try (a/resolve-members! n) (catch Throwable e (swap! failed conj [n (str "members: " (.getMessage e))]))))
+        (lap :members)
         (doseq [n (#'a/supertypes-first names)]
           (try (a/add-bridges! n) (catch Throwable e (swap! failed conj [n (str "bridges: " (.getMessage e))]))))
+        (lap :bridges)
         (doseq [n names]
           (try (#'a/mark-enum-abstract! n) (catch Throwable e (swap! failed conj [n (str "enum: " (.getMessage e))]))))
         ;; the code, in parallel by top-level class (a class and its nested ones in one task,
@@ -253,21 +260,27 @@
               ;; the compiled namespaces' classes (S6) depend on none of theirs
               compiled? (fn [n] (nm/compiled-class? n))
               _ (run! analyze! (remove compiled? names))
+              _ (lap :analysis-runtime)
               names (filter compiled? names)
               ;; a group's member classes before the class enclosing them (a holder's analysis
               ;; would analyze its members, and one member's failure would fail the holder)
-              depth (fn [^String n] (count (filter #(= % \$) n)))
-              groups (vec (for [g (vals (group-by top-of names))] (sort-by #(- (depth %)) g)))]
+              ;; each member class a task of its own (a compiled namespace's classes have no
+              ;; local or anonymous classes, whose numbering is the nest's), the top-level ones
+              ;; (holders, deftypes, loaders) after them
+              tops? (fn [^String n] (not (str/includes? n "$")))
+              groups (vec (concat (for [n names :when (not (tops? n))] [n])))
+              top-groups (vec (for [n names :when (tops? n)] [n]))]
           (if-let [^ThreadLocal space (id-space)]
-            (m/par-mapv (m/jobs)
-                        (fn [g]
-                          (.set space (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base)))
-                          (try (run! analyze! g) (finally (.remove space))))
-                        groups
-                        ;; the largest groups first
-                        (sort-by #(- (count (nth groups %))) (range (count groups))))
+            (doseq [gs [groups top-groups]]
+              (m/par-mapv (m/jobs)
+                          (fn [g]
+                            (.set space (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base)))
+                            (try (run! analyze! g) (finally (.remove space))))
+                          gs))
             ;; a host without id spaces (older than SA143): one after another, as before
-            (run! analyze! names)))))
+            (run! analyze! names)))
+        (lap :analysis-compiled)
+        (println (str "a2g: load (s): " (str/join ", " (for [[k v] @laps] (str (name k) " " v)))))))
     (doseq [n (keys variants) :when (not (contains? @applied n))]
       (swap! failed conj [n "a variant for a class not in the inputs"]))
     {:compile-set cs :unit unit :from-source from-source :files files :tops tops
