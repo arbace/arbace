@@ -106,6 +106,19 @@
                   (recur (unchecked-inc-int i)))))))
         nil)))
 
+  ;; the id counter (gensym's, the compiler's fn names) of the calling thread when it has an id
+  ;; space of its own (ID_SPACE: an AtomicInteger), else the runtime's: a2g analyzes classes in
+  ;; parallel, each in a space that starts at the same value, so that the names it gives
+  ;; temporaries depend on the class alone (standalone S6, SA143)
+  (a2g/add
+    (field ^:public ^:static ^:final ^ThreadLocal ID_SPACE (ThreadLocal.)))
+
+  (method ^:public ^:static nextID ^int []
+    (let [s (.get ID_SPACE)]
+      (if (nil? s)
+          (.getAndIncrement id)
+          (.getAndIncrement (cast java.util.concurrent.atomic.AtomicInteger s)))))
+
   (a2g/add
     (method ^:static toolSource ^boolean [^String scriptbase]
       (or (.startsWith scriptbase "arbace/a2g/") (.startsWith scriptbase "arbace/g2a/")
@@ -145,7 +158,15 @@
           cljfile (java-str scriptbase ".clj")
           cljcfile (java-str scriptbase ".cljc")
           ^:mutable scriptfile aefile
-          ^:mutable ins (RT/resourceAsStream nil aefile)]
+          ;; ARBACE_PATH_FIRST set: a source of ARBACE_PATH before the embedded one (the
+          ;; compilation of a checkout's namespaces by a program built from the same runtime,
+          ;; S6's one-pass build, SA144)
+          ^:mutable ins (or (when (some? (System/getenv "ARBACE_PATH_FIRST"))
+                              ;; as an embedded source (recorded when the program prepares)
+                              (let [p (RT/pathResource aefile)]
+                                (when (some? p)
+                                  (let [b (.readAllBytes p)] (.close p) (java.io.ByteArrayInputStream. b)))))
+                            (RT/resourceAsStream nil aefile))]
       (when (nil? ins)
         (set! scriptfile cljfile)
         (set! ins (RT/resourceAsStream nil cljfile)))
@@ -156,7 +177,8 @@
       ;; before S6) that a source of ARBACE_PATH differs from: the latter, loaded from source,
       ;; so that a tool changed in the checkout runs as changed (S6: the program's compiled code
       ;; is the embedded source's); the runtime's namespaces stay the program's own
-      (when (and (instance? java.io.ByteArrayInputStream ins) (RT/toolSource scriptbase))
+      (when (and (instance? java.io.ByteArrayInputStream ins) (RT/toolSource scriptbase)
+                 (nil? (System/getenv "ARBACE_PATH_FIRST")))
         (let [other (RT/pathResource scriptfile)]
           (when (some? other)
             (let [b (.readAllBytes other)]

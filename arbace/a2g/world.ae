@@ -178,6 +178,16 @@
   {:order (atom []) :counters (atom {}) :switch-maps (atom {}) :switch-holders (atom {})
    :source-tried (atom #{}) :assert-holders (atom {}) :holder-first (atom {})})
 
+(def analysis-id-base
+  "Where each task of the analysis starts its id space (RT.ID_SPACE, SA143): a round value well
+  above what loading a2g takes, as main's id-floor (SA13)."
+  100000)
+
+(defn- id-space
+  "The runtime's per-thread id space (RT.ID_SPACE, SA143), or nil on a host without it."
+  []
+  (try (.get (.getField arbace.lang.RT "ID_SPACE") nil) (catch Throwable _ nil)))
+
 (defn load-world
   "Reads, enters and analyzes the class forms of the inputs, each {:root :dirs|:tree|:files},
   with the Go-build variants of the variant files applied. Returns the world:
@@ -227,12 +237,27 @@
           (try (a/add-bridges! n) (catch Throwable e (swap! failed conj [n (str "bridges: " (.getMessage e))]))))
         (doseq [n names]
           (try (#'a/mark-enum-abstract! n) (catch Throwable e (swap! failed conj [n (str "enum: " (.getMessage e))]))))
-        (doseq [n names]
-          (try (a/analyze-class! n)
-               (catch Throwable e
-                 (swap! (:state (a/decl n)) assoc :analysis-failed (.getMessage e))
-                 (swap! failed conj [n (str "analysis: " (.getMessage e)
-                                            (some->> (.getCause e) .getMessage (str " / ")))]))))))
+        ;; the code, in parallel by top-level class (a class and its nested ones in one task,
+        ;; as their analysis shares the nest's counters), each task in an id space of its own
+        ;; starting at the same value (RT.ID_SPACE: the gensyms that name temporaries depend on
+        ;; the class alone; standalone S6, SA143)
+        (let [analyze! (fn [n]
+                         (try (a/analyze-class! n)
+                              (catch Throwable e
+                                (swap! (:state (a/decl n)) assoc :analysis-failed (.getMessage e))
+                                (swap! failed conj [n (str "analysis: " (.getMessage e)
+                                                           (some->> (.getCause e) .getMessage (str " / ")))]))))
+              groups (vec (vals (group-by top-of names)))]
+          (if-let [^ThreadLocal space (id-space)]
+            (m/par-mapv (m/jobs)
+                        (fn [g]
+                          (.set space (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base)))
+                          (try (run! analyze! g) (finally (.remove space))))
+                        groups
+                        ;; the largest groups first
+                        (sort-by #(- (count (nth groups %))) (range (count groups))))
+            ;; a host without id spaces (older than SA143): one after another, as before
+            (run! analyze! names)))))
     (doseq [n (keys variants) :when (not (contains? @applied n))]
       (swap! failed conj [n "a variant for a class not in the inputs"]))
     {:compile-set cs :unit unit :from-source from-source :files files :tops tops
@@ -240,7 +265,7 @@
      :source-of (into {} (for [{:keys [file ns forms]} parsed :when ns
                                n (top-names ns forms)]
                            [n (str file)]))
-     :failed @failed :variants @applied :erased erased}))
+     :failed (vec (sort-by (juxt first second) @failed)) :variants @applied :erased erased}))
 
 (defmacro with-world
   "Runs body with the world's class environment bound (analyzer and env functions see it)."

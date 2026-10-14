@@ -133,6 +133,14 @@ build() {
   gocache_trim "${G2A_GOROOT:-/root/tamago-go}/bin/go" >&2
   local hostexe
   hostexe=${A2G_GO_EXE:-$(. "$root/bin/lib/host.bash" && arbace_host_exe)} || return 1
+  # standalone S6, one a2g run (SA144): a host of the checkout's runtime (its version's
+  # :runtime, bin/lib/version.bash) compiles the checkout's namespaces itself, as the program
+  # built from them would
+  local saved1=("${a2g_args[@]}") onepass=
+  if [ "${ARBACE_AOT:-}" = 1 ] && [ -z "${aot_phase2:-}" ] && host_compile "$hostexe" "$dir/aot$variant"; then
+    onepass=1
+    a2g_args+=(--input "$dir/aot$variant")
+  fi
   echo "== bin/a2g --program ${a2g_args[*]} (on $hostexe)" >&2
   (cd "$root" && bin/a2g --program "${a2g_args[@]}" --out "$dir/a2g$variant") > "$dir/a2g$variant.log" 2>&1 \
     || { tail -20 "$dir/a2g$variant.log" >&2; echo "arbace-go: a2g failed ($dir/a2g$variant.log)" >&2; return 1; }
@@ -149,7 +157,8 @@ build() {
       || { grep -v '^==' "$dir/build$variant-$a.log" | tail -20 >&2; echo "arbace-go: $a: build failed" >&2; return 1; }
     echo "   g2a build $a: $(since "$t0")" >&2
   done
-  if [ "${ARBACE_AOT:-}" = 1 ] && [ -z "${aot_phase2:-}" ]; then
+  if [ -n "$onepass" ]; then a2g_args=("${saved1[@]}"); fi
+  if [ "${ARBACE_AOT:-}" = 1 ] && [ -z "${aot_phase2:-}" ] && [ -z "$onepass" ]; then
     # standalone S6: the program just built prepares its namespaces and compiles them to class
     # forms ($dir/aot$variant); a2g translates the program again with them, and that program,
     # built and given the image of what stays evaluated, is the build's
@@ -169,6 +178,46 @@ build() {
   [ -n "$variant" ] || echo "bin/arbace-go --build: a2g and g2a on the host executable" > "$dir/printed-by"
   [ "${pgo:-}" ] || return 0
   pgo_build
+}
+
+# host_compile HOST OUT: the checkout's namespaces compiled to class forms into OUT by HOST, when
+# HOST's runtime is the checkout's (the :runtime of its version map, SA144): HOST prepares them
+# from the checkout's sources (ARBACE_PATH_FIRST, as embedded ones, analyzed afresh: no compiled
+# loader, no image), in the order the program's namespaces.txt lists them, then arbace.aot
+# compiles the units; status 1 (and nothing made) when HOST's runtime differs
+host_compile() {
+  local host=$1 out=$2 key hkey nss t0
+  . "$root/bin/lib/version.bash"
+  key=$(arbace_runtime_key "$root")
+  hkey=$(env -u ARBACE_NO_AOT "$host" -e '(print (:runtime *arbace-version*))' 2>/dev/null)
+  if [ "$key" != "$hkey" ]; then
+    echo "== the namespaces compiled after a first build (the host's runtime is not the checkout's)" >&2
+    return 1
+  fi
+  t0=$(date +%s)
+  echo "== the namespaces compiled by the host (arbace.aot; its runtime is the checkout's)" >&2
+  mkdir -p "$dir"
+  # the embedded namespaces as a2g lists them (namespaces.txt)
+  nss=$(cd "$root" && ARBACE_PATH=$root "$host" -e '(require (quote arbace.a2g.embed) (quote arbace.string))
+(doseq [[p text] (sort (arbace.a2g.embed/sources "."))
+        :when (and (arbace.string/starts-with? p "arbace/") (arbace.string/ends-with? p ".ae") (re-find #"(?m)^\(ns( |$)" text))]
+  (println (-> (subs p 0 (- (count p) 3)) (arbace.string/replace "/" ".") (arbace.string/replace "_" "-"))))' | tr '
+' ' ') || return 1
+  rm -rf "$out"
+  printf '(doseq [n (quote [%s])]
+  (try (require n) (catch Throwable e (println "image: not prepared:" n (.getMessage e)))))
+(require (quote arbace.aot.main))
+(let [r (arbace.aot.main/run "%s" nil)]
+  (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")
+  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m)))
+' "$nss" "$out"     > "$dir/host-compile$variant.ae"
+  (cd "$root" && GOGC=${GOGC:-400} ARBACE_COMPILE=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 ARBACE_PATH_FIRST=1 \
+     ARBACE_PATH=$root ARBACE_AOT_ROOT=$root ARBACE_PREPARE=$dir/host-compile$variant.image \
+     "$host" "$dir/host-compile$variant.ae") > "$dir/host-compile$variant.log" 2>&1 \
+    || { tail -20 "$dir/host-compile$variant.log" >&2; echo "arbace-go: the host's compilation failed" >&2; return 2; }
+  grep '^aot:' "$dir/host-compile$variant.log" >&2
+  [ -f "$out/packages.edn" ] || { echo "arbace-go: the host compiled nothing ($dir/host-compile$variant.log)" >&2; return 2; }
+  echo "   compiled: $(since "$t0")" >&2
 }
 
 # pgo_build: the training run of the host's executable with a CPU profile, then each
