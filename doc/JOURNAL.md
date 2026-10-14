@@ -1434,3 +1434,14 @@ The user added (same day): a guest per tool may not be possible when the box is 
 the Later item now says: on bare metal a guest per tool needs Arbace itself as the hypervisor
 (EL2 on arm64, VMX root on amd64), only where the hardware allows it; the EL1/EL0 split works on
 any hardware. GoTEE (github.com/usbarmory/GoTEE) named as prior art to check.
+
+## 2026-10-14: the touch terminal's survey, a screen recording
+
+The user's 72-second screen recording of the model app, looked at as frames every 3 s (ffmpeg
+installed on the host for it, the user's choice: `apk add ffmpeg`, kept; not part of
+doc/ALPINE.md's line). Described in `doc/IOS-REPL-SURVEY.md` §2: reconnecting, the toolbar's
+further keys (jump, history), the composer's toolbar, the usage sheet and the inbox of the
+agent's finished turns (fed by a hook command on the host, listed in Claude Code's settings and
+not inspected), the rest of the settings. §3 now asks first for the app's own "Open Source
+Licenses" page, which names its libraries as any user sees them: the tooling question answered
+without reverse engineering.

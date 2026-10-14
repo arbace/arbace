@@ -95,14 +95,40 @@ That is the model's server side on Linux and macOS (Go, per the user's measureme
 Arbace, the same shape fits the REPL: a long evaluation or a future that finishes, a question
 the REPL asks, as notifications and approvals.
 
+**A screen recording** (72 s, 2026-10-14, the user's; frames every 3 s):
+
+- **Reconnecting**: on returning to the session the header reads "Reconnecting..." in place of
+  the connection's name; the screen keeps the last state until the server's arrives (mosh's
+  state synchronization), then the session continues.
+- **The toolbar scrolls** sideways: past the paste key come a jump key (with nothing to jump to it
+  says so in a toast at the top, "Nothing to jump to": presumably to the previous prompt or
+  output mark), a history key (a clock with an arrow), the chat key and the keyboard key.
+- **The composer's own toolbar**: close, Esc, the pad, history and a stack (shortcuts or saved
+  snippets), beside the send button.
+- **The home screen's banner**: a count of connections this month against the free tier.
+- **The ring** at the top opens a **Usage** sheet: an agent account's usage limits (a five-hour
+  and a seven-day window as bars, with the time to reset), read from the agent running on the
+  host. The model integrates with Claude Code on the host through a hook command the user
+  installed there (`~/.claude/settings.json` lists it for Notification, PermissionRequest and
+  PostToolUse; not inspected further: its binary is the model's).
+- **The inbox** (a house icon beside settings): a "Done" list of the agent's finished turns, each
+  with its first words, the prompt, the project directory, the model and the age (here a turn of
+  this very conversation), and a live pill of the agent's progress at the bottom.
+- **More settings**: Input (toolbar, shortcuts, gestures, speech, hardware keyboard); Security
+  and sync (biometrics for keys and on resume, SSH keys, sync of settings and of credentials);
+  General (language, app icon, what the home screen shows); Help (docs, what's new, support, open
+  source licenses); version 4.0.1.
+
 ## 3. What more screenshots would answer
 
-1. The list key and the curved arrow in the toolbar: what they open.
-2. The chat composer's + and toolbar buttons; what Comment does with a selection.
+1. The jump and history keys at work (with output to jump through, with a history).
+2. What Comment does with a selection; the composer's stack button.
 3. Scrollback (swipe), pinch to zoom, landscape, an external keyboard.
-4. A lost network: what the session shows while mosh waits.
-5. Settings' Advanced, Toolbar, Shortcuts, Hooks, Notifications, Sidebar, Inbox & Approvals.
+4. A long loss of network (the recording shows a short reconnect).
+5. Settings' Advanced, Toolbar, Shortcuts, Gestures, Speech, Hooks, Notifications, Sidebar.
 6. The QR pairing's command on the host (what it installs and runs).
+7. Help, "Open Source Licenses": the libraries the app ships, as the app itself shows them to
+   any user; it answers which tooling the iOS app uses without any reverse engineering.
 
 ## 4. The functional specification to write (the specification side)
 
