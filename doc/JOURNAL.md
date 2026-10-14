@@ -1418,3 +1418,14 @@ step by the suite and the oracle; the fixpoint is self-application as bootstrapp
 third projection. The user asked for it on the agenda's Later: closure generation (SA156 (c)),
 partial evaluation of the evaluator ahead of time for code generation (T4; Truffle/Graal as the
 model), a2g derived from the interpreter; the cost, binding times under Clojure's dynamism.
+
+## 2026-10-14: a kernel and a user part in the box, on the agenda's Later
+
+The user asked to consider splitting Arbace in the box into a kernel part (the collector, the
+scheduler, the compiler, I/O) at EL1/ring 0 and a user part (the application level) at EL0/ring 3,
+both in one guest. Recorded on the agenda's Later with what to survey: the boundary's call ABI,
+the heap and the collector across privilege levels, the scheduler running user code at EL0, the
+crossings' cost for a REPL, and the alternatives already at hand (a guest per tool as S7 spawns
+them; isolation in the language). Also noted in the conversation, as a correction: a JIT is
+possible in the box (the guest owns its page tables) and natively on Linux and macOS (with
+`MAP_JIT` and its entitlement); only iOS forbids it.

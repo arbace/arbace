@@ -105,6 +105,16 @@ The current state of the work. This file is rewritten as things change. For the 
   projection, a2g derived from the interpreter, one definition of each language's semantics
   (Clojure, the class forms, later Go). The cost: binding times in a dynamic language (vars,
   `eval`, macros at load time).
+- A kernel and a user part in the box (the user, 2026-10-14): the infrastructure (the
+  collector, the scheduler, the compiler, I/O, the store) at EL1/ring 0 and the application
+  level at EL0/ring 3, inside one guest. Today the guest is one TamaGo program at EL1/ring 0, one
+  address space, one Go runtime for both. To survey: what crosses the boundary (a call ABI like
+  the doorbell's, one level down); one heap the kernel's collector scans across the privilege
+  levels, or a heap per user part; the scheduler's goroutines running user code at EL0 (the
+  page tables and exception vectors TamaGo's board sets up); the cost of the crossings for a
+  REPL's fine-grained calls; against the isolation S7 already has (a guest per tool, spawned) and
+  isolation in the language (namespaces, capabilities). Prior art: Go's runtime as a user
+  process; TamaGo's EL0 support on arm64, if any; unikernels with a privilege split.
 - The box's oracle and `box-suite` in `bin/gate --full` (manual today); the mapped start measured
   without nested KVM; the arm64 box's oracle subset and `box-suite` (an arm64 host with KVM).
 - The build's use of the host's 64 cores (the user, 2026-10-14): S6's AOT builds (about 5
