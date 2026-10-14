@@ -132,6 +132,10 @@
 ;; ---------------------------------------------------------------------------------------
 ;; types (§5.2, §5.3, §5.5)
 
+(def code-class? m/code-class?)
+
+(def code-iface? m/code-iface?)
+
 (defn super-struct-type
   "The Go struct type a class embeds: its superclass's struct (jrt.Object at the root)."
   [pkg n]
@@ -336,6 +340,11 @@
                              (with-meta new-ps {:tag (list '* (symbol g))})
                              (concat
                                (when-not (m/trivial-init? n) [(list (symbol (str g "_Init")))])
+                               ;; a fn's code: its nest's top-level class, whose statics its
+                               ;; code reads unguarded (SA158)
+                               (let [top (m/nest-top n)]
+                                 (when (and (code-class? n) (not= top n) (m/translated? top) (not (m/trivial-init? top)))
+                                   [(list (m/class-sym pkg top "_Init"))]))
                                [(list 'let ['t (list 'addr (list 'lit (symbol g)))]
                                       (apply list (symbol (str "." base)) 't (concat (when-not leaf ['t]) (map #(symbol (str %)) new-ps)))
                                       't)])))]
@@ -636,6 +645,44 @@
         :else
         (list 'go/var (tag s (field-go-type pkg f)))))))
 
+(def clinit-part-calls
+  "The calls a part of a long static initializer holds at most (split-clinit)."
+  48)
+
+(defn- calls-in
+  "The calls (lists) in Go form f."
+  [f]
+  (if (coll? f) (+ (if (seq? f) 1 0) (reduce + 0 (map calls-in f))) 0))
+
+(defn- splittable?
+  "Can the statements of body run as consecutive functions of their own? Not when one leaves
+  the function or the block (return, goto, defer, a label's break), whatever its depth."
+  [body]
+  (not-any? #{'return 'goto 'defer 'recover 'label 'break 'continue 'fallthrough}
+            (filter symbol? (tree-seq coll? seq body))))
+
+(defn split-clinit
+  "A long static initializer's statements (body) in parts of at most clinit-part-calls calls,
+  each the body of a function of its own, the initializer calling them in order: [calls parts]
+  (amendment SA153). gc's stack maps of one function are about its safepoints times its stack
+  slots, so a class's thousands of constants in one function made megabytes of them (and most
+  of gc's time); in parts they grow with the code. A statement declaring locals (a let) holds
+  the rest of the block, so it ends the last part; a body that may leave early is not split."
+  [g body]
+  (let [body (vec body)]
+    (if (or (< (calls-in body) (* 2 clinit-part-calls)) (not (splittable? body)))
+      [body nil]
+      (let [parts (reduce (fn [parts st]
+                            (let [w (calls-in st)
+                                  cur (peek parts)]
+                              (if (and (seq (:sts cur)) (> (+ (:w cur) w) clinit-part-calls))
+                                (conj parts {:w w :sts [st]})
+                                (conj (pop parts) {:w (+ (:w cur) w) :sts (conj (:sts cur) st)}))))
+                          [{:w 0 :sts []}] body)
+            names (for [k (range (count parts))] (symbol (str g "_clinit_p" k)))]
+        [(mapv list names)
+         (mapv (fn [nm {:keys [sts]}] (list* 'go/func nm [] sts)) names parts)]))))
+
 (defn init-forms
   "C_init, C_Init and C_clinit of a class with non-trivial initialization (§6.2)."
   [pkg n]
@@ -658,12 +705,14 @@
                              (c/emit! (list 'set! (symbol (nm/static-field-name g name))
                                             (c/missing-expr (str "Clojure constant " (case (:kind init) :var (str "#'" (:ns init) "/" (:name init)) (:text init)))
                                                             desc))))
-                           (doseq [nd (:clinit st)] (c/stmt! nd))))))))]
-      [(list 'go/var (tag (symbol (str g "_init")) (m/jrt-sym pkg "ClassInit")))
-       (list 'go/func (symbol (str g "_Init")) []
-             (list 'when (list 'not (list '.Done (symbol (str g "_init"))))
-                   (list '.Run (symbol (str g "_init")) (symbol (str g "_clinit")))))
-       (list* 'go/func (symbol (str g "_clinit")) [] body)])))
+                           (doseq [nd (:clinit st)] (c/stmt! nd))))))))
+          [body parts] (split-clinit g body)]
+      (into [(list 'go/var (tag (symbol (str g "_init")) (m/jrt-sym pkg "ClassInit")))
+             (list 'go/func (symbol (str g "_Init")) []
+                   (list 'when (list 'not (list '.Done (symbol (str g "_init"))))
+                         (list '.Run (symbol (str g "_init")) (symbol (str g "_clinit")))))
+             (list* 'go/func (symbol (str g "_clinit")) [] body)]
+            parts))))
 
 (defn clj-const-fields [pkg n]
   (let [g (m/go-name n)
@@ -761,17 +810,20 @@
         [(list 'a2g/comment (str "---- " (str/replace n "/" ".")))]
         (if iface
           [(list 'go/type (symbol g)
-                 (apply list 'interface (m/jrt-sym pkg "Object_I")
+                 (apply list 'interface
                         (concat
+                          (when-not (code-iface? n) [(m/jrt-sym pkg "Object_I")])
                           (for [s (interface-closure n)] (m/class-sym pkg s))
-                          [(list (symbol (str "Is_" g)) [])]
+                          ;; (a code interface has no marker: its method's name and arity tell
+                          ;; its code classes apart, SA159)
+                          (when-not (code-iface? n) [(list (symbol (str "Is_" g)) [])])
                           (for [mm (:methods d)
                                 :when (and (not (m/static? mm)) (not (m/private? mm)) (m/mdesc-in-world? (:desc mm)))
                                 :when (not (m/object-keys [(:name mm) (:desc mm)]))]
                             (iface-method-elem pkg mm)))))]
           (concat
             [(list 'go/type (symbol g)
-                   (apply list 'struct (super-struct-type pkg n)
+                   (apply list 'struct (if (code-class? n) (tag 'a2g_header 'uint64) (super-struct-type pkg n))
                           (concat
                             (for [f ifields] (tag (symbol (nm/field-name (:name f))) (field-go-type pkg f)))
                             (extra-fields pkg n))))]
@@ -786,7 +838,8 @@
                                     :when (not (m/object-keys [(:name mm) (:desc mm)]))]
                                 (iface-method-elem pkg mm)))))
                (list 'go/method (symbol (str "Self_" g)) (with-meta [(tag 't (list '* (symbol g)))] {:tag (list '* (symbol g))}) 't)])
-            (for [j (markers n)]
+            (for [j (markers n)
+                  :when (not (code-iface? j))]
               (list 'go/method (symbol (str "Is_" (m/go-name j))) [(tag 't (list '* (symbol g)))]))))
         (static-forms pkg n)
         (clj-const-fields pkg n)
@@ -795,5 +848,10 @@
           (mapcat #(ctor-forms pkg n %) (filter #(= "<init>" (:name %)) methods)))
         (mapcat #(method-forms pkg n %) (remove #(= "<init>" (:name %)) methods))
         (when (and (not iface) (not abstract))
-          (concat (dispatch-forms pkg n) (object-forms pkg n)))
-        (instance-forms pkg n)))))
+          (if (code-class? n)
+            ;; a fn's code: none of Object's protocol, not even Ref (its values are converted
+            ;; to Object directly: they are never null), SA156
+            nil
+            (concat (dispatch-forms pkg n) (object-forms pkg n))))
+        ;; (a fn's code: no instance check, its class is not named, SA159)
+        (when-not (code-class? n) (instance-forms pkg n))))))

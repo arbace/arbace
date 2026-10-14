@@ -226,6 +226,137 @@
             (list 'cast 'arbace.lang.IPersistentMap (emit-value ctx m)))
       form)))
 
+;; ---------------------------------------------------------------------------------------
+;; constant pools as data (SA155): a class's constants are encoded in one string, which
+;; Compiler$AOT/pool decodes when the class is initialized, making each value as emit-value's
+;; code would (the same calls, in the same order); its keywords and symbols without metadata
+;; are made once and named by the values that hold them. The code that made the values was
+;; most of a compiled namespace's static initializers (and of gc's stack maps)
+
+(defn- pool-kind
+  "The tag of constant v, in the order of emit-value's cases."
+  [v]
+  (cond
+    (nil? v) :nil
+    (string? v) :string
+    (instance? Boolean v) :boolean
+    (instance? Integer v) :int
+    (instance? Long v) :long
+    (instance? Double v) :double
+    (instance? Character v) :char
+    (class? v) :class
+    (symbol? v) :symbol
+    (keyword? v) :keyword
+    (var? v) :var
+    (instance? Namespace v) :ns
+    (instance? IRecord v) (fail (str "a record as a constant: " (class v)))
+    (instance? IType v) (fail (str "a deftype as a constant: " (class v)))
+    (map? v) :map
+    (vector? v) :vector
+    (instance? PersistentHashSet v) :set
+    (or (seq? v) (list? v)) :list
+    (instance? Pattern v) :pattern
+    :else :read))
+
+(def ^:private pool-partial
+  "The kinds whose metadata is made too (emit-value's partial?)."
+  #{:nil :string :boolean :int :long :double :char :class :symbol :keyword :var :map :vector :set :list :pattern})
+
+(defn- pool-shared?
+  "Is v made once in a pool and named where used: a keyword, a symbol without metadata."
+  [v]
+  (or (keyword? v) (and (symbol? v) (empty? (meta v)))))
+
+(defn- pool-parts
+  "The values constant v is made of (its elements, its metadata)."
+  [v]
+  (let [k (pool-kind v)]
+    (concat (case k
+              :map (mapcat identity v)
+              (:vector :set :list) (seq v)
+              nil)
+            (when (and (contains? pool-partial k) (instance? IObj v) (pos? (count (meta v))))
+              [(meta v)]))))
+
+(defn- pool-str [^StringBuilder sb ^String s]
+  (-> sb (.append (.length s)) (.append \,) (.append s)))
+
+(defn- pool-encode
+  "Appends the encoding of v to sb (Compiler$AOT/poolValue's format); shared: shared value →
+  its index."
+  [^StringBuilder sb shared v]
+  (if-let [i (and (pool-shared? v) (get shared v))]
+    (-> sb (.append \R) (.append (long i)) (.append \,))
+    (let [k (pool-kind v)
+          num (fn [tag n] (-> sb (.append tag) (.append (long n)) (.append \,)))
+          arr (fn [tag xs] (.append sb tag) (.append sb (long (count xs))) (.append sb \,)
+                (doseq [x xs] (pool-encode sb shared x)))
+          m (when (and (contains? pool-partial k) (instance? IObj v)) (meta v))
+          m? (pos? (count m))]
+      (when m? (.append sb \M))
+      (case k
+        :nil (.append sb \n)
+        :string (do (.append sb \s) (pool-str sb v))
+        :boolean (.append sb (if v \T \F))
+        :int (num \i v)
+        :long (num \l v)
+        :double (num \d (Double/doubleToRawLongBits (double v)))
+        :char (num \c (int (.charValue ^Character v)))
+        :class (if (.isPrimitive ^Class v)
+                 (-> sb (.append \P)
+                     (.append ({Boolean/TYPE \Z Byte/TYPE \B Character/TYPE \C Double/TYPE \D Float/TYPE \F
+                                Integer/TYPE \I Long/TYPE \J Short/TYPE \S Void/TYPE \V} v)))
+                 (do (.append sb \C) (pool-str sb (destub (.getName ^Class v)))))
+        :symbol (do (.append sb \y)
+                    (if (namespace v) (do (.append sb \s) (pool-str sb (namespace v))) (.append sb \n))
+                    (pool-str sb (name v)))
+        :keyword (do (.append sb \k)
+                     (if (namespace v) (do (.append sb \s) (pool-str sb (namespace v))) (.append sb \n))
+                     (pool-str sb (name v)))
+        :var (do (.append sb \v)
+                 (pool-str sb (str (.-name (.-ns ^Var v))))
+                 (pool-str sb (str (.-sym ^Var v))))
+        :ns (do (.append sb \N) (pool-str sb (str (.-name ^Namespace v))))
+        :map (arr \m (vec (mapcat identity v)))
+        :vector (arr \V (vec v))
+        :set (if (empty? v) (.append sb \E) (arr \S (vec (seq v))))
+        :list (arr \L (vec v))
+        :pattern (do (.append sb \p) (pool-str sb (str v)))
+        :read (let [s (binding [*print-dup* true] (pr-str v))]
+                (when (or (empty? s) (str/starts-with? s "#<"))
+                  (fail (str "can't embed unreadable object in code: " s)))
+                (.append sb \r) (pool-str sb s)))
+      (when m? (pool-encode sb shared m))
+      sb)))
+
+(defn- pool-fields
+  "The static fields of constants consts ([sym type value] ...): the pool's array, decoded
+  once (Compiler$AOT/pool), then each constant's field, its element."
+  [consts]
+  (when (seq consts)
+    (let [;; the keywords and symbols of the values, first met first (depth first)
+          seen (java.util.LinkedHashSet.)
+          walk (fn walk [v]
+                 (when (pool-shared? v) (.add seen v))
+                 (run! walk (pool-parts v)))
+          _ (doseq [[_ _ v] consts] (walk v))
+          sh (vec seen)
+          shared (into {} (map-indexed (fn [i v] [v i]) sh))
+          sb (StringBuilder.)
+          _ (doseq [v sh] (pool-encode sb {} v))
+          base (count sh)
+          ;; a constant that is itself a shared value is that entry
+          _ (doseq [[_ _ v] consts] (pool-encode sb shared v))
+          n (+ base (count consts))]
+      (cons (list 'field (tagged (with-meta 'const-pool {:static true :final true :private true}) (class (object-array 0)))
+                  (list (with-meta 'arbace.lang.Compiler$AOT/pool {:param-tags '[java.lang.String int]})
+                        (str sb) (list 'unchecked-int n)))
+            (map-indexed (fn [i [s t _]]
+                           (list 'field (tagged (with-meta s {:static true :final true :aot/nn true}) t)
+                                 (let [e (list 'aget 'const-pool (list 'unchecked-int (+ base i)))]
+                                   (if (= t 'java.lang.Object) e (list 'cast t e)))))
+                         consts)))))
+
 (defn- const-type [v]
   (cond (var? v) 'arbace.lang.Var
         (keyword? v) 'arbace.lang.Keyword
@@ -635,7 +766,19 @@
   [ctx ox body]
   (let [cname (emit-fn-class! ctx ox)
         k (:variadic (get @(:classes ctx) cname))
-        cls (symbol cname "fn-class")]
+        f (symbol cname "fn-class")
+        c (gsym ctx "fncls__")
+        ;; the fn's class, made at run time on the first fn of this code and kept in the code
+        ;; class's static field (SA154: no static initializer per fn class)
+        cls (list 'let [(tagged c 'java.lang.Class) f]
+                  (list 'if (list 'nil? c)
+                        (let [d (symbol (str c "d"))]
+                          (list 'let [(tagged d 'java.lang.Class)
+                                      (list (with-meta 'arbace.lang.Compiler$AOT/fnClass {:param-tags '[java.lang.String boolean]})
+                                            cname (boolean k))]
+                                (list 'set! f d)
+                                d))
+                        c))]
     (if k
       (list 'new 'arbace.lang.Compiler$AOTRestFn body cls nil (list 'unchecked-int k))
       (list 'new 'arbace.lang.Compiler$AOTFn body cls nil))))
@@ -1098,9 +1241,8 @@
                     (when fn?
                       ;; the fn's class, named as the JVM names it, a subclass of the fn's
                       ;; Compiler$AOTFn made at run time (getClass answers it: a2g$class)
-                      [(list 'field (tagged (with-meta 'fn-class {:public true :static true :final true}) 'java.lang.Class)
-                             (list (with-meta 'arbace.lang.Compiler$Dyn/defineFnClass {:param-tags '[java.lang.String java.lang.Class]})
-                                   cname (if variadic 'arbace.lang.Compiler$AOTRestFn 'arbace.lang.Compiler$AOTFn)))])
+                      ;; (SA154: set by the code making the fn, fn-wrap; no static initializer)
+                      [(list 'field (tagged (with-meta 'fn-class {:public true :static true}) 'java.lang.Class))])
                     (when meta?
                       [(list 'field (tagged '__meta 'arbace.lang.IPersistentMap))
                        (list 'method (with-meta 'meta {:public true}) (tagged '[this] 'arbace.lang.IPersistentMap) '(.-__meta this))
@@ -1162,7 +1304,7 @@
                  (emit-def ctx n true)
                  (emit ctx expr)))]
     (vary-meta
-      (list 'method (with-meta (symbol (str "unit" k)) {:public true :static true}) []
+      (list 'method (with-meta (symbol (str "unit" k)) {:private true :static true}) []
             (concat (list 'do (list 'arbace.lang.Compiler$AOT/at (list 'unchecked-int line) (list 'unchecked-int column)))
                     ns-events
                     [code]))
@@ -1199,8 +1341,7 @@
                              units))]
     {:name lname
      :form (concat (list 'defclass (with-meta (symbol lname) {:public true :final true :aot/source file}))
-                   (for [[s t v] (:consts @cls)]
-                     (list 'field (tagged (with-meta s {:static true :final true}) t) (emit-value ctx v)))
+                   (pool-fields (:consts @cls))
                    ms
                    [(list 'method (with-meta 'load {:public true :static true}) []
                           (concat (list 'do) (for [k (range (count ms))] (list (symbol lname (str "unit" k)))) [nil]))])}))
@@ -1219,12 +1360,13 @@
         ;; the source file a class was compiled from (not a holder's: its fns may come from
         ;; several), its frames' file in stack traces (a2g's ClassInfo.Source)
         mods (fn [m] (cond-> (if top? (dissoc m :static) m)
-                       (:source c) (assoc :aot/source (:source c))))
+                       (:source c) (assoc :aot/source (:source c))
+                       ;; a fn's code: no member table (SA154), reflection sees its fn's class
+                       (= :fn (:kind c)) (assoc :aot/code true)))
         head (if top? (symbol nm) (symbol (simple-name nm)))
         ctx {:cls (atom {}) :runtime-classes (atom #{})}
         consts (when top? (when-let [p (get pools nm)] (:consts @p)))
-        const-forms (for [[s t v] consts]
-                      (list 'field (tagged (with-meta s {:static true :final true}) t) (emit-value ctx v)))]
+        const-forms (pool-fields consts)]
     (vary-meta
       (case (:kind c)
         :holder (concat (list 'defclass (with-meta head (mods {:public true :static true :final true}))) const-forms nested)

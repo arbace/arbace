@@ -10062,6 +10062,98 @@
     ;; compiled call of a protocol's method then goes through the protocol's fn (SA142)
     (method ^:public ^:static ^:native isDyn ^boolean [o])
 
+    ;; the class of a compiled fn named name, made at run time once (Dyn.defineFnClass: a
+    ;; subclass of AOTFn, of AOTRestFn when rest), when the first fn of that code is made: the
+    ;; code class caches it in a static field of its own, set by the code making the fn (SA154)
+    (field ^:private ^:static ^:final ^java.util.HashMap FN_CLASSES (java.util.HashMap.))
+
+    (method ^:public ^:static fnClass ^Class [^String name ^boolean rest]
+      (locking FN_CLASSES
+        (let [c (.get FN_CLASSES name)]
+          (if (some? c)
+              (cast Class c)
+              (let [d (Dyn/defineFnClass name (if rest AOTRestFn AOTFn))]
+                (.put FN_CLASSES name d)
+                d)))))
+
+    ;; the constants of a compiled class (SA155): the n values encoded in s by arbace.aot.emit
+    ;; (pool-encode), each made as the code emitValue writes would make it, in order; a value
+    ;; may name an earlier one (R), so that a keyword or a symbol is made once. A value is a
+    ;; tag and its parts; a number is decimal, ended by a comma; a string its length, a comma
+    ;; and its chars (interned, as a class file's string constants are)
+    (method ^:public ^:static pool ^Object/1 [^String s ^int n]
+      (let [out (new Object/1 n)
+            pos (new int/1 1)]
+        (loop [^int i 0]
+          (when (< i n)
+            (aset out i (AOT/poolValue s pos out))
+            (recur (unchecked-inc-int i))))
+        out))
+
+    (method ^:private ^:static poolLong ^long [^String s ^int/1 pos]
+      (let [p (aget pos 0)
+            neg (== (.charAt s p) \-)
+            p (if neg (unchecked-inc-int p) p)]
+        (loop [^int p p ^long v 0]
+          (let [c (.charAt s p)]
+            (if (== c \,)
+                (do (aset pos 0 (unchecked-inc-int p))
+                    (if neg (unchecked-negate v) v))
+                (recur (unchecked-inc-int p) (unchecked-add (unchecked-multiply v 10) (unchecked-long (unchecked-subtract-int (int c) 48)))))))))
+
+    (method ^:private ^:static poolString ^String [^String s ^int/1 pos]
+      (let [n (unchecked-int (AOT/poolLong s pos))
+            p (aget pos 0)]
+        (aset pos 0 (unchecked-add-int p n))
+        (.intern (.substring s p (unchecked-add-int p n)))))
+
+    (method ^:private ^:static poolArray ^Object/1 [^String s ^int/1 pos ^Object/1 out]
+      (let [n (unchecked-int (AOT/poolLong s pos))
+            a (new Object/1 n)]
+        (loop [^int i 0]
+          (when (< i n)
+            (aset a i (AOT/poolValue s pos out))
+            (recur (unchecked-inc-int i))))
+        a))
+
+    (method ^:private ^:static poolValue [^String s ^int/1 pos ^Object/1 out]
+      (let [t (.charAt s (aget pos 0))]
+        (aset pos 0 (unchecked-inc-int (aget pos 0)))
+        (switch t
+          \n nil
+          \s (AOT/poolString s pos)
+          \T Boolean/TRUE
+          \F Boolean/FALSE
+          \i (Integer/valueOf (unchecked-int (AOT/poolLong s pos)))
+          \l (Long/valueOf (AOT/poolLong s pos))
+          \d (Double/valueOf (Double/longBitsToDouble (AOT/poolLong s pos)))
+          \c (Character/valueOf (unchecked-char (AOT/poolLong s pos)))
+          \P (let [c (.charAt s (aget pos 0))]
+               (aset pos 0 (unchecked-inc-int (aget pos 0)))
+               (switch c
+                 \Z Boolean/TYPE \B Byte/TYPE \C Character/TYPE \D Double/TYPE \F Float/TYPE
+                 \I Integer/TYPE \J Long/TYPE \S Short/TYPE Void/TYPE))
+          \C (RT/classForNameNonLoading (AOT/poolString s pos))
+          \y (let [ns (cast String (AOT/poolValue s pos out))]
+               (Symbol/intern ns (AOT/poolString s pos)))
+          \k (let [ns (cast String (AOT/poolValue s pos out))]
+               (RT/keyword ns (AOT/poolString s pos)))
+          \v (let [ns (AOT/poolString s pos)]
+               (RT/var ns (AOT/poolString s pos)))
+          \N (Namespace/findOrCreate (Symbol/intern nil (AOT/poolString s pos)))
+          \m (RT/map (AOT/poolArray s pos out))
+          \V (let [a (AOT/poolArray s pos out)]
+               (if (== (alength a) 0) PersistentVector/EMPTY (RT/vector a)))
+          \S (PersistentHashSet/create (AOT/poolArray s pos out))
+          \E PersistentHashSet/EMPTY
+          \L (PersistentList/create (java.util.Arrays/asList (AOT/poolArray s pos out)))
+          \p (java.util.regex.Pattern/compile (AOT/poolString s pos))
+          \r (RT/readString (AOT/poolString s pos))
+          \M (let [v (AOT/poolValue s pos out)]
+               (.withMeta (cast IObj v) (cast IPersistentMap (AOT/poolValue s pos out))))
+          \R (aget out (unchecked-int (AOT/poolLong s pos)))
+          (throw (IllegalStateException. (java-str "aot: a constant pool's tag " (String/valueOf t)))))))
+
     ;; a compiled unit starts: the line of its form, for errors (Compiler.load's LINE_BEFORE)
     (method ^:public ^:static at ^void [^int line ^int column]
       (.set LINE_BEFORE (Integer/valueOf line))
