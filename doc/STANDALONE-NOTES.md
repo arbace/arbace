@@ -1985,3 +1985,110 @@ measured, the choice on the numbers; SA140 (a), sharpened: `ARBACE_AOT=1` become
 (the build, the gate, the fixpoint, the seed) once Clojure's suite and the oracle pass on it and
 a build takes no longer than today's (about 5 minutes); the work to get there (a compiled tools
 host, the second a2g pass reusing the first's world, `lang` smaller) is in the milestone.
+
+## S6: the compiled build as the default
+
+Status: in progress on `s6-compile` (2026-10-14), main merged at `e6f1f48` (S8). The user's
+decision on SA140: `ARBACE_AOT=1` becomes the default of the build, the gate, the fixpoint and
+the seed once Clojure's suite and the oracle pass on it and a build takes no longer than today's
+(about 5 minutes). Amendments SA141 onward, proposed, the recommended choice applied meanwhile.
+
+### A compiled fn's representation (SA141)
+
+The first build gave each fn a class extending `AFunction` (or `RestFn`): a2g writes, for every
+class, a forwarder of every virtual method it inherits (A2G-SPEC §5.4: `IFn`'s 21 `invoke`
+arities, `Comparator`'s defaults, `applyTo`, `meta` ...), about 45 Go methods per fn, 72,000 in
+`arbace.core` alone. Now a fn's code is a class that implements only the interfaces of its
+arities, `Compiler$AOTF<n>` (`invoke(self, a1..an)`) and `Compiler$AOTR<k>` (`doInvoke(self,
+a1..ak, rest)`), and holds the closed-over values; the fn is a `Compiler$AOTFn` (or
+`Compiler$AOTRestFn`, a `RestFn` of the required arity), one class of the runtime, holding the
+code object and the fn's class, whose `invoke` asks the code for the arity (else `throwArity`).
+`self` is the fn (its name in its own body). The fn's class, as `class` and printing name it
+(`arbace.walk$walk`), is made at run time once per code class as a subclass of `AOTFn` (the
+evaluator's `defineFnClass`; `getClass` answers it through the field `a2g$class`, as for
+evaluated fns), and replaces the code class's registration by name (SA136). Stack traces show
+the code's `invoke` frames (`arbace.walk$walk.invoke`); `AOTFn`'s are hidden as the evaluator's
+are. The classes are generated (`test/aot/gen_fns.ae`, `arbace/lang/go/CompilerAOTFn.ae`).
+
+### Go packages (SA142)
+
+A compiled namespace's classes form a Go package of their own, `arbace/aot_<munged namespace>`
+(a holder and its fns, the namespace's deftypes and interfaces; a source's loader with its
+namespace, or its own for a loaded file such as `core_print`), named in the tree's
+`packages.edn`, which a2g reads (`arbace.a2g.names/compiled-packages`); a2g handles any number of
+packages (registrations, literal pools, frames per package; the main package imports them for
+their registration). So gc compiles them in parallel and caches each, and `lang` is the
+runtime's again. The evaluator's `Dyn` (in `lang`) implements the runtime's interfaces only (a
+compiled interface's package imports `lang`); an object of a class made at run time is an
+instance of a compiled interface by its class (a2g's `C_InstanceOf` asks `DynImplements`), and
+compiled code calls a compiled interface's methods by reflection on such objects (a proxy over
+`PrettyFlush`, an evaluated deftype of a compiled protocol). `Compiler$AOT/isDyn` tells them
+apart.
+
+### The build (SA143, SA144)
+
+- **One a2g run when the host's runtime is the checkout's** (SA144). The version map linked into
+  the program carries `:runtime`, the SHA-256 of the runtime's sources (`bin/lib/version.bash`'s
+  `arbace_runtime_key`: `arbace/lang`, `arbace/a2g`, `arbace/classes`, `go`, `overlay`, `jdk`,
+  `x509roots`, Go's pin). When the host's equals the checkout's, the host compiles the checkout's
+  namespaces itself (`host_compile`: `ARBACE_PATH_FIRST` reads them from the checkout as embedded
+  sources, analyzed and recorded afresh, no compiled loader, no image), in the order the program's
+  `namespaces.txt` lists them; else the first program is built and compiles them (SA132), and a2g
+  runs again. The two give the same tree when the runtimes are the same: the analysis is the
+  runtime's.
+- **a2g analyzes the compiled classes in parallel** (SA143): the runtime's classes one after
+  another as before (javac's rules make a class's analysis depend on others'), then each
+  compiled member class apart, then the top-level ones, each task in an id space of its own
+  starting at the same value (`RT.ID_SPACE`, a per-thread id counter that `RT.nextID` takes when
+  set: gensym's names of temporaries depend on the class alone).
+- **Constants shared by a namespace's classes** (SA145): a fn's constants are static fields of
+  its namespace's holder (one pool per top-level class), not of each fn class.
+- Compiled fns' code classes are not the REPL's roots (they are reached by their interfaces'
+  calls); jrt's `Method.getName` keeps its interned name (compiled tools reflect from many
+  threads: the intern table's lock was a fifth of a2g's CPU); a2g's limit 20 GiB.
+
+### Clojure's suite and the oracle (2026-10-14)
+
+On the compiled test build (`ARBACE_AOT=1 bin/arbace-go --build-tests`, 100 sources compiled,
+7,618 classes): Clojure's suite 20,506 of 20,520, **no regressions** against
+`test/arbace-go-results.edn`; the oracle 22,505 of 22,558, **the 53 known mismatches, 0 new**.
+
+### Benchmarks and T3 (SA139)
+
+`test/bench/eval-bench.ae`'s benchmarks compiled as a namespace (a measurement build, branch
+`s6-t3`; ms, best run, amd64): all evaluated (main before S6), the script evaluated with
+`arbace.core` compiled, the benchmarks compiled (T1), the same with T3, the frozen JVM.
+
+| benchmark | all evaluated | script evaluated | compiled (T1) | compiled (T3) | JVM |
+|---|---:|---:|---:|---:|---:|
+| `fib` | 12.80 | 12.47 | 6.36 | 6.45 | 0.16 |
+| `fib-prim` | 8.15 | 8.25 | 2.72 | 2.50 | 0.09 |
+| `loop-long` | 69.52 | 66.74 | 12.21 | 11.88 | 0.41 |
+| `loop-double` | 12.82 | 11.89 | 1.56 | 1.54 | 0.55 |
+| `dotimes-array` | 26.40 | 26.17 | 11.50 | 11.53 | 0.09 |
+| `reduce-range` | 139.24 | 63.81 | 63.13 | 64.76 | 2.32 |
+| `reduce-fn` | 38.08 | 38.36 | 21.73 | 22.42 | 3.80 |
+| `vector-conj` | 37.67 | 25.62 | 18.79 | 18.67 | 1.49 |
+| `map-assoc-get` | 27.82 | 23.71 | 19.83 | 19.49 | 3.93 |
+| `keyword-map` | 26.33 | 25.69 | 11.85 | 12.79 | 0.65 |
+| `str-build` | 11.65 | 11.57 | 6.25 | 6.30 | 0.42 |
+| `seq-ops` | 173.48 | 46.75 | 45.11 | 51.10 | 5.64 |
+| `lazy-walk` | 166.67 | 34.00 | 30.12 | 37.97 | 2.68 |
+| `transduce` | 89.16 | 24.49 | 20.04 | 31.15 | 0.84 |
+| `into-xform` | 89.10 | 16.08 | 16.37 | 27.35 | 0.93 |
+| `protocol` | 123.02 | 122.69 | 7.93 | 8.01 | 0.96 |
+| `multimethod` | 20.94 | 21.01 | 9.52 | 9.64 | 1.27 |
+| `destructure` | 82.35 | 65.67 | 31.29 | 32.51 | 3.17 |
+| `closures` | 83.05 | 56.75 | 28.72 | 33.82 | 0.22 |
+| `tail-calls` (9,000 deep) | | | 0.55 | 0.99 | |
+
+Geometric means: compiled 3.2 times faster than all evaluated, 16 times slower than the JVM
+(the evaluator was 54 times). **T3** (a call in tail position of a fn's code returns a
+`Compiler$AOTTail`, which the fn's `AOTFn` settles: a trampoline; the other call sites
+unchanged): 8% slower in the geometric mean, 13-67% on the sequence benchmarks (`seq-ops`,
+`lazy-walk`, `transduce`, `into-xform`, `closures`), 80% on the tail calls themselves; and a call
+in tail position inside a `try` body would leave the `try` before it runs. So T1 stays (SA139,
+D6: T4 with Arbace's own back end), and the T3 build is not merged (`s6-t3`).
+What makes compiled code slower than Go could be: boxed arithmetic through `Numbers`, a2g's
+class initialization guards on every static call, the casts (`IFn`) and interface assertions
+of each call.
