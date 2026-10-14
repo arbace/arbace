@@ -2316,7 +2316,7 @@ build's compiled namespaces. Done: the executable **209.9 MB → 101.3 MB** stri
 guest 209.3 → 100.8 MB, the seed 6.6 → 5.4 MB), the build's time and the compiled speed kept, the
 test build reusing the namespaces; the fixpoint, the seed remade (`c7f5e3d5...`, was
 `62c699af...`) and verified, the box's rebuild byte for byte, the gate passed. Amendments
-SA153-SA159, proposed, the recommended choice applied.
+SA153-SA159, proposed, the recommended choice applied; the user accepted all as (a) (2026-10-14).
 
 ### What the bytes were
 

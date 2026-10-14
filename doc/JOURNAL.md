@@ -1381,3 +1381,29 @@ new connection by QR pairing or SSH, the floating pad, the Ctrl latch, the chat 
 selection with Copy and Comment, settings with Terminal, Agents and Input); IR9 now JetBrains Mono
 (OFL 1.1); IR13 added: the agent features (notifications, an inbox of approvals, the composer)
 for the REPL, after the terminal. The host's name in the screenshots is not recorded.
+
+## 2026-10-14: the compiled program's size halved; SA153-SA159 accepted
+
+The track `s6-size` (head `f334962`) merged into main as `c2ba1f5` (doc/STANDALONE-NOTES.md, "S6:
+the compiled program's size"). Measured first: the compiled executable's 209.9 MB stripped were
+`.gopclntab` 117.3 MB (of it 55.8 MB gc's stack maps, 39.4 MB of them in 14 giant functions: the
+constant pools' static initializers and the main package's table of the image's types, whose
+maps grow as calls times stack slots) and `.text` 71.2 MB (fns' code 14.9, the pools'
+initializers 10.7, registration and package init 7.9, `Object`'s protocol on every class 4.9 in
+66,728 functions). Cut: long static initializers in parts (SA153); a fn's class made by its first
+fn, no member tables for fns' code (SA154); constant pools as data decoded at initialization
+(SA155); a fn's code not a Java object in Go (SA156); constants read without initialization
+guards or null checks (SA158); fns' code registered from a static table (SA159). The result:
+101.3 MB (the evaluated build 72.4, of which 11.5 the image), the box's guest 100.8 MB amd64,
+98.5 arm64; gc's `aot_arbace_core` 74 s and 3.5 GB to 6.4 s and 1.0 GB; a build 4:13 to 4:41
+(was 5:20), 6:18 when the runtime changed (was 9:31). The test build reuses the shipped build's
+compiled namespaces when their key matches (SA157). Unchanged: startup 0.09 s, the benchmarks'
+geometric mean 1.001×. Left as alternatives: fns as Go closures (SA156 (c)), which would remove a
+Go type per fn (about 7,800). The fixpoint at `bf8c461`: G1 = G2 = G3, `79ae1ef6…`; the seed
+remade from G3: `c7f5e3d53947d6c8bbbbf3bbe79dfbcaa4dca3c75da29ed78c41a4b028fe2823`, 5,378,472
+bytes, was `62c699af…`; `bin/seed --verify` holds (stage 0 = G1 = G2 = G3, `a72f08b2…`);
+`bin/box-rebuild` amd64: the image built in the box = the host's, `4f394cc6…`, the box's run 12:34
+(was 16 min). The essential gate on the merge passes in 10m32s (the suite 20,506 of 20,520, no
+regressions; the oracle 53 known, 0 new). The user accepted SA153-SA159 as (a). The track's agent
+reported one slip: a check started in the main checkout instead of its worktree, touching only
+gitignored scratch (`.tmp/clojure-tests/go/suite` regenerated); the tracked tree was clean.
