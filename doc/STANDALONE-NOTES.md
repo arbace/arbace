@@ -2054,6 +2054,16 @@ On the compiled test build (`ARBACE_AOT=1 bin/arbace-go --build-tests`, 100 sour
 7,618 classes): Clojure's suite 20,506 of 20,520, **no regressions** against
 `test/arbace-go-results.edn`; the oracle 22,505 of 22,558, **the 53 known mismatches, 0 new**.
 
+Again after the changes below (the build's time, the variants merged, the id spaces, the stack
+traces; 7,660 classes): the suite 20,506 of 20,520, no regressions; the oracle first showed 8 new
+mismatches, all one cause: a `defrecord` whose method the class forms compile (`defclass.ae`
+555-556, `native.ae` 108-440) failed with "No static field identical? in arbace/core". A compiled
+namespace's holder class is named as the namespace (`arbace.core`), and the class forms'
+analyzer took a qualified symbol whose qualifier names a class as a static field, where
+Clojure's `analyzeSymbol` takes the var when the class has no such field (the calls' rule
+already preferred the var); `arbace.classes.analyze` now does the same. Then the oracle: 22,505
+of 22,558, the 53 known, 0 new.
+
 ### Benchmarks and T3 (SA139)
 
 `test/bench/eval-bench.ae`'s benchmarks compiled as a namespace (a measurement build, branch
@@ -2093,3 +2103,102 @@ D6: T4 with Arbace's own back end), and the T3 build is not merged (`s6-t3`).
 What makes compiled code slower than Go could be: boxed arithmetic through `Numbers`, a2g's
 class initialization guards on every static call, the casts (`IFn`) and interface assertions
 of each call.
+
+### The build's time (SA146-SA148)
+
+`bin/arbace-go --build` for amd64 on the 64 GiB host (16 jobs; minutes:seconds, the steps in
+seconds; the host compile is the host's own preparing and compiling of the namespaces, SA144):
+
+| build | host compile | a2g | g2a build | total |
+|---|---:|---:|---:|---:|
+| evaluated (`ARBACE_AOT=0`) on stage 0, today's (the tools evaluated) | | 214 | 101 | 5:40 |
+| compiled, two a2g runs, before the changes | | | | 12:00 |
+| compiled, one run (host of the same runtime), before the changes | 82 | 318 | 45 | 7:30 |
+| compiled, one run, the print cache cold | 50 | 208 | 48 | 5:14 |
+| compiled, one run after a namespace changed (the usual case) | 50 | 203 | 26 | 4:46 |
+| compiled, two runs (the runtime changed) | 69 | 83 + 239 | 40 + 133 | 9:31 |
+
+So a build takes no longer than today's (SA140's condition) but when the runtime changed (SA147
+makes that rarer). What changed:
+
+- **The host compile, 82 s to 50 s.** Printing the class forms was 35 of its seconds (the
+  printer evaluated: the host compiles with `ARBACE_NO_AOT`, so `arbace.core` itself runs
+  evaluated); the files are printed on 16 threads of their own (not futures: their pool kept the
+  program alive a minute after the run). Left: preparing the namespaces 18 s, the back end 21 s.
+- **a2g, 318 s to about 205 s.** The runtime's classes are analyzed one after another on a
+  thread of their own while the compiled ones are analyzed in parallel (the load 121 s to 92 s;
+  the output is the same byte for byte); the stand-in roots' reachability continues the first
+  closure (reachability is monotone) rather than computing it again (50 s to 27-42 s); jrt's
+  `Method.getName` keeps its interned name (the intern table's lock was a fifth of a2g's CPU on
+  a compiled host). Left: parsing 18 s, analysis 60 s, reachability 30 s, translation 35 s,
+  writing 40 s (the Go forms' texts 24 s).
+- **g2a build** keeps a cache of printed packages (`--print-cache DIR`, bin/arbace-go's
+  `.tmp/g2a-print-cache`, trimmed as Go's build cache is): a package's Go files by the SHA-256 of
+  the host's identity (the executable's and g2a's sources' hashes: `G2A_HOST_ID`, set by
+  `bin/lib/g2a-host.bash`), the printing options, the package's path and its forms files. Printing
+  is 550 CPU-seconds of g2a's run on a compiled host; with the cache a build reprints what
+  changed (37 s to 17 s for an unchanged program).
+- **Each source compiled in an id space of its own** (SA148). A fn's class is named by the id
+  counter (`fn__123`), which ran over every namespace loaded before: a change to one namespace
+  renamed the classes of all those loaded after it, so a2g translated them anew, g2a printed
+  them anew and gc compiled them anew (g2a 69 s after `a2g/world.ae` changed). While a program
+  compiles namespaces (`ARBACE_COMPILE`), `Compiler.load` gives each source an id space
+  (`RT.ID_SPACE`) of a million ids, its slot from the source path's hash (the next free slot
+  when two collide: the sources of one namespace, `core.ae`, `core_print.ae` ..., must not share
+  names); `RT.ID_SPACE` is initialized before RT's static initializer, so `arbace/core.ae` gets
+  its own too. A namespace's change now recompiles its own package and the main package.
+- **The runtime key narrowed** (SA147): `arbace_runtime_key` hashes what compiling the
+  namespaces depends on in the runtime, `arbace/lang`, `go` (jrt's classes and natives),
+  `overlay/jdk`, `jdk`; no longer a2g, the class forms' front end (namespaces, loaded from the
+  checkout by the compiling host), Go's runtime patches, the roots, Go's pin. A change to a2g is
+  the usual change; it now builds in one a2g run. The program the host's translation made
+  compiles the namespaces; were a2g's change to alter how the runtime's compiler behaves, the
+  next build would show it, and the fixpoint (G2 by G1, whose runtime a2g translated afresh)
+  proves the build's stable.
+
+gc on the compiled program, cold (`go build -toolexec time`, the whole program, 2:40 on 16
+cores): `jrt` 48 s and 8.5 GB, `lang` 17 s and 4.0 GB, **`aot_arbace_core` 74 s and 3.5 GB**
+(the longest package, alone at the end of the build), `aot_arbace_classes_analyze` 19 s and
+2.0 GB, every other package under 1 GB and 26 s; the link 6 s and 2.9 GB. The packages'
+archives: 2.15 GB, of which the compiled namespaces' 1.37 GB (`aot_arbace_core` 186 MB, jrt
+526 MB, lang 244 MB). The executable: 209.9 MB stripped, the evaluated one 74.9 MB (2.8 times).
+
+### Stack traces of compiled code (SA149)
+
+A compiled fn's frames showed a2g's Go names (`arbace.aot_arbace_walk.A_arbace_walk_walk_A
+Invoke_O_O_O_O__O aot_arbace_walk.ae 50`): jrt finds a frame's class by its Go type among the
+registered classes, and the fn's class made at run time (SA141) replaces the code class's
+registration by name. jrt now keeps the compiled namespaces' classes by their Go names apart
+(`compiledByGo`, filled by `Define`), and their `ClassInfo` carries `Source`, the source file
+the back end compiled them from (the class forms' `:aot/source`, a2g's `ClassInfo.Source`): the
+frame reads `arbace.walk$walk invoke walk.ae 50`, as on the JVM; the lines were the source's
+already (the forms carry them, and a2g lays the Go text out on them). A holder class has no
+source (its fns may come from several files: `core.ae`, `core_print.ae`).
+
+### The variants merged into their bases (SA150)
+
+The Go build's hand-written variants of `RT`, `Main` and `Compiler`
+(`arbace/lang/go/{RT,Main,Compiler,CompilerCode,ClassForms,CompilerAST}.ae`) are merged into
+`arbace/lang/{RT,Main,Compiler}.ae` (doc/VENDOR-NOTES.md, hand change 25) by
+`test/aot/merge_variants.ae`, as text: a replaced member's text in the base member's place, an
+added member at the end of its class in a2g's order (`apply-variant`'s), a cut member removed,
+the comments before a variant's member with it, each file's header reworded before its first
+member. Checked: each merged class form equals, as data with its type hints, the base with the
+variants applied by a2g's own `apply-variant`. The generated variants stay
+(`CompilerOps.ae`, `test/a2g/eval_ops.ae`; `CompilerAOTFn.ae`, `test/aot/gen_fns.ae`): a
+generator writes a file, not a part of `Compiler.ae`. `RT.ID_SPACE` moved before RT's static
+initializer afterwards (an added member had landed at the class's end).
+
+### The rebuild in the box (SA152)
+
+`arbace.box.rebuild` compiles the namespaces first, as bin/arbace-go's host does: an action
+lists the namespaces (the tools' image, `arbace.a2g.embed`), another prepares them from the
+sources and compiles them (`ARBACE_COMPILE`, `ARBACE_NO_AOT`, `ARBACE_PATH_FIRST`, the back end
+reading jrt's forms under `/s/go`), and a2g takes the tree (`--input /i`); the tools' image is
+the program of the same sources (`bin/arbace-go --build --box`), so its runtime is theirs.
+`:aot false` rebuilds the evaluated program. The compiled `arbace.core`'s and
+`arbace.classes.analyze`'s compiles get guests of 8 and 6 GiB (BX116's 3 GiB default would not
+hold gc's 3.5 GB). The box's guest is 209.3 MB (the launcher with it 214.5 MB); its smoke test
+(`bin/arbace-go --smoke --box`: 4 and 1 vCPUs, the store, the tool guests, TLS, the terminal)
+passes.
+
