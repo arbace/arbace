@@ -13,7 +13,11 @@
 //	             :s [FILE ...] :imports [P ...] :importmap {FROM TO}} ...]}
 //
 // leaving out unsafe (which nothing compiles), and refuses packages with cgo,
-// .syso, embedded files or other kinds of source the driver does not build.
+// .syso or other kinds of source the driver does not build. A package that
+// embeds files has :embed-patterns [PATTERN ...] and :embed-files [FILE ...]
+// too (go list's EmbedPatterns and EmbedFiles), which S8's planner
+// (arbace.box.plan) is checked against; the driver builds a package that
+// embeds only from that planner's :embed.
 package main
 
 import (
@@ -34,6 +38,7 @@ type pkg struct {
 	GoFiles, SFiles       []string
 	CgoFiles, SysoFiles   []string
 	CFiles, CXXFiles      []string
+	EmbedPatterns         []string
 	EmbedFiles            []string
 	Imports               []string
 	ImportMap             map[string]string
@@ -106,8 +111,8 @@ func main() {
 		if p.ImportPath == "unsafe" {
 			continue
 		}
-		if len(p.CgoFiles)+len(p.SysoFiles)+len(p.CFiles)+len(p.CXXFiles)+len(p.EmbedFiles) > 0 {
-			fail("%s: cgo, .syso, C or embedded files: not built by the box's driver", p.ImportPath)
+		if len(p.CgoFiles)+len(p.SysoFiles)+len(p.CFiles)+len(p.CXXFiles) > 0 {
+			fail("%s: cgo, .syso or C files: not built by the box's driver", p.ImportPath)
 		}
 		lang := stdLang
 		if p.Module != nil && p.Module.GoVersion != "" {
@@ -135,8 +140,12 @@ func main() {
 			fmt.Print("\n            ")
 		}
 		first = false
-		fmt.Printf("{:path %s :name %s :dir %s :std %t :lang %s\n             :go %s\n             :s %s\n             :imports %s\n             :importmap {%s}}",
-			q(p.ImportPath), q(p.Name), q(p.Dir), p.Standard, q(lang), strs(p.GoFiles), strs(p.SFiles), strs(imports), im.String())
+		embed := ""
+		if len(p.EmbedFiles) > 0 {
+			embed = "\n             :embed-patterns " + strs(p.EmbedPatterns) + "\n             :embed-files " + strs(p.EmbedFiles)
+		}
+		fmt.Printf("{:path %s :name %s :dir %s :std %t :lang %s\n             :go %s\n             :s %s\n             :imports %s\n             :importmap {%s}%s}",
+			q(p.ImportPath), q(p.Name), q(p.Dir), p.Standard, q(lang), strs(p.GoFiles), strs(p.SFiles), strs(imports), im.String(), embed)
 	}
 	fmt.Println("]}")
 }

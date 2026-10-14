@@ -1,0 +1,269 @@
+#!/bin/bash
+# The rebuild in the box (doc/go/BOX-NOTES.md, S8): Arbace's guest image built inside the box from
+# a source tree in the store (arbace.box.rebuild: a2g and g2a's printing in Arbace's own guest, the
+# plan in Arbace, Go's compile, asm and link in tool guests, the namespaces prepared by the new
+# image), and the same steps run on the host with the host's tools (a2g, g2a and the preparing on
+# the native executable, the toolchain's own compile, asm and link): the two images must be equal
+# byte for byte.
+#
+#   bin/box-rebuild [OPTIONS] [STEP...]
+#
+# Steps (by default all, in this order):
+#   prepare   two stores in DIR (box/, host/): the commit REV's sources as a tree (git archive of
+#             what the build reads, VERSION filled; the ref src), the tool guests and the toolchain's facts (bin/box-tools put),
+#             and the image that runs a2g and g2a, bin/arbace-go --build --box's guest (the ref
+#             arbace.ARCH)
+#   box       the rebuild in the box: the launcher (ARBACE_BOX_SPAWN=1) runs it in its guest; the
+#             image under the ref rebuilt.box.ARCH, every step's result under
+#             rebuilt.box.ARCH.steps (DIR/box-steps.edn)
+#   host      the same steps natively, every action a host process (arbace.box.rebuild/host-run,
+#             tools/chrootrun): rebuilt.host.ARCH, DIR/host-steps.edn
+#   compare   the two runs' steps and images compared; a2g's program and the image of prepared
+#             namespaces also against bin/arbace-go --build's (target/arbace-go/a2g); status 0
+#             when the images are equal
+#   boot      the image built in the box booted by its ref (ARBACE_BOX_IMAGE=ref:rebuilt.box.ARCH)
+#   smoke     bin/box-smoke on a launcher with that image appended (DIR/arbace-box)
+#   plan-check  the box's plan (arbace.box.plan) against go list's (tools/goplan) on the same
+#             printed trees (the box's steps' GOROOT/src, goos module and module, written out
+#             under DIR/plan-check): every package's files, imports, import map, language and
+#             embedded files; not in the default steps
+#
+# Options:
+#   --arch ARCH   amd64 (default) or arm64 (arm64's box step runs in the aarch64 VM: bin/box-arm64-vm,
+#                 started first; its host step cross-compiles here)
+#   --rev REV     the commit built (default HEAD); the checkout's uncommitted changes are not in it
+#   --dir DIR     the stores and logs (default .tmp/box-rebuild/ARCH); the action cache stays there,
+#                 so a rerun redoes only what changed
+#   --dev         the driver's namespaces (arbace/box/{build,plan,elf,rebuild}.ae) loaded from the
+#                 source tree over the image's embedded ones (the actions still run the image's)
+#   --jobs N      the compiles at once (default 4)
+#   --given DIR   the box step takes a2g's output and the two printings (the same for every
+#                 architecture) from another run's box step (DIR/box-steps.edn, its store DIR/box,
+#                 for the same sources), their blobs copied into this run's box store, and does
+#                 not run them (BX117: the arm64 VM, where every instruction is emulated)
+# Environment: ARBACE_BOX_SPAWN_RAM (the box's budget for its spawned guests; by default 40GiB),
+# ARBACE_BOX_SPAWN_CPUS (by default 16). Prerequisites: bin/arbace-go --build --box (ARBACE_BOX_ARCHES
+# with ARCH) and the native executable it builds first, from the same commit (the host step's
+# preparing runs that executable: compare checks a2g's program against it), bin/box-tools build
+# ARCH. Memory: a2g's
+# guest asks 14 GiB, jrt's and lang's compiles 12 GiB each: run it through .tmp/heavy.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+arch=amd64 rev=HEAD dir="" dev=false jobs=4 steps=() given=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --arch) arch=$2; shift 2 ;;
+    --rev) rev=$2; shift 2 ;;
+    --dir) dir=$2; shift 2 ;;
+    --dev) dev=true; shift ;;
+    --jobs) jobs=$2; shift 2 ;;
+    --given) given=$(cd "$2" && pwd) || exit 2; shift 2 ;;
+    prepare|box|host|compare|boot|smoke|plan-check) steps+=("$1"); shift ;;
+    *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+[ ${#steps[@]} -gt 0 ] || steps=(prepare box host compare boot)
+case $arch in amd64|arm64) ;; *) echo "box-rebuild: no architecture $arch" >&2; exit 2 ;; esac
+harch=$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac)
+dir=${dir:-$root/.tmp/box-rebuild/$arch}
+mkdir -p "$dir"
+dir=$(cd "$dir" && pwd)
+goroot=${G2A_GOROOT:-/root/tamago-go}
+launcher=$root/target/arbace-go/box-$harch/arbace-box   # the host's launcher: the store's tool
+guest=$root/target/arbace-go/box-$arch/arbace.elf        # the image that runs a2g and g2a
+native=$root/target/arbace-go/$harch/arbace             # the host step's Arbace
+bs=$dir/box hs=$dir/host
+# what the build reads of the commit (a2g: arbace, go, jdk, overlay; g2a's printing: tamago, box,
+# x509roots; the version: VERSION)
+src_dirs="VERSION arbace box go jdk overlay tamago x509roots"
+export ARBACE_BOX_STORE_MAX=off
+
+need() { [ -e "$1" ] || { echo "box-rebuild: no $1 ($2)" >&2; exit 1; }; }
+since() { echo "$(( $(date +%s) - $1 )) s"; }
+
+# the driver's namespaces from the source tree (--dev), before arbace.box.rebuild is required
+dev_loads() {
+  $dev || { printf '%s' '(require (quote arbace.box.rebuild))'; return 0; }
+  printf '%s' '(require (quote arbace.box)) (let [src (arbace.box/ref "src")] (doseq [f ["arbace/box/build.ae" "arbace/box/plan.ae" "arbace/box/elf.ae" "arbace/box/print.ae" "arbace/box/rebuild.ae"]] (arbace.lang.Compiler/load (java.io.StringReader. (arbace.box/get (second (arbace.box/tree-get src f)))) f f)))'
+}
+
+prepare() {
+  local s t0 src
+  need "$launcher" "bin/arbace-go --build --box"; need "$guest" "ARBACE_BOX_ARCHES=$arch bin/arbace-go --build --box"
+  t0=$(date +%s)
+  for s in "$bs" "$hs"; do
+    mkdir -p "$s"
+    src=$(git -C "$root" archive --format=tar "$rev" $src_dirs | "$launcher" --store "$s" tree tar - src) || return 1
+    ARBACE_BOX_LAUNCHER=$launcher "$root/bin/box-tools" put "$s" "$arch" > "$dir/tools.txt" || return 1
+    "$launcher" --store "$s" put "$guest" "arbace.$arch" > /dev/null || return 1
+  done
+  echo "box-rebuild: prepared: $rev ($(git -C "$root" rev-parse "$rev")) as the tree $src; $(cat "$dir/tools.txt" | tr '\n' ' ')($(since "$t0"))"
+}
+
+# the expression that runs the rebuild and keeps its steps: rebuild_expr NAME OPTS
+rebuild_expr() {
+  printf '%s (let [r (arbace.box.rebuild/steps "src" (merge {:ref "%s" :jobs %s :arch "%s"} %s))] (arbace.box/put! "%s.steps" (pr-str r)) (prn r))' \
+    "$(dev_loads)" "$1" "$jobs" "$arch" "$2" "$1"
+}
+
+# the box step's options: {} or, with --given, the given steps' trees (their blobs copied into the
+# box store: every blob each tree reaches)
+box_opts() {
+  [ -n "$given" ] || { echo '{}'; return; }
+  ARBACE_BOX_STORE=$given/box "$native" -e "(require (quote [arbace.box :as box]) (quote [arbace.edn :as edn]))
+(let [b (edn/read-string (slurp \"$given/box-steps.edn\"))
+      walk (fn walk [h] (cons h (mapcat (fn [[_ [k eh]]] (if (= k :dir) (walk eh) [eh])) (box/tree h))))]
+  (doseq [h (distinct (mapcat walk [(:a2g b) (:printed-goroot b) (:printed-program b)]))] (println h)))" > "$dir/given-blobs.txt" || return 1
+  mkdir -p "$bs/blobs"
+  (cd "$given/box/blobs" && xargs -a "$dir/given-blobs.txt" cp -n -t "$bs/blobs/") || return 1
+  "$native" -e "(require (quote [arbace.edn :as edn])) (let [b (edn/read-string (slurp \"$given/box-steps.edn\"))] (print (pr-str {:given (select-keys b [:a2g :printed-goroot :printed-program])})))"
+}
+
+box() {
+  local t0 st opts
+  t0=$(date +%s)
+  opts=$(box_opts) || return 1
+  if [ "$arch" != "$harch" ]; then
+    vm_box "$opts"; return
+  fi
+  echo "== the rebuild in the box ($arch)"
+  ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-40GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-16} \
+    ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.$arch \
+    "$launcher" --store "$bs" -e "$(rebuild_expr "rebuilt.box.$arch" "$opts")" 2>&1 | tee "$dir/box.log"
+  st=${PIPESTATUS[0]}
+  "$launcher" --store "$bs" get "rebuilt.box.$arch.steps" > "$dir/box-steps.edn" 2>/dev/null
+  echo "box-rebuild: the box's run: status $st ($(since "$t0"))"
+  return $st
+}
+
+# arm64: the box step in the aarch64 VM (bin/box-arm64-vm), the store copied in and back
+vm_box() {
+  local vmrun=$root/bin/box-arm64-vm vl=$root/target/arbace-go/box-arm64/arbace-box st
+  need "$vl" "ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box"
+  "$vmrun" status > /dev/null 2>&1 || { echo "box-rebuild: start the VM first (bin/box-arm64-vm start; MEM)" >&2; return 1; }
+  echo "== the rebuild in the box (arm64, in the aarch64 VM)"
+  : > "$dir/box.log"
+  tar -C "$dir" -cf "$dir/box-store.tar" box || return 1
+  "$vmrun" put "$vl" "$dir/box-store.tar" || return 1
+  "$vmrun" sh 'rm -rf box && tar -xf box-store.tar && rm box-store.tar' || return 1
+  # the run detached in the VM (hours: every instruction is emulated), its log followed from here
+  printf '%s\n' '#!/bin/sh' "cd /h && ARBACE_BOX_STORE_MAX=off ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-20GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-16} ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.arm64 ./arbace-box --store box -e '$(rebuild_expr rebuilt.box.arm64 "$1" | sed "s/'/'\\\\''/g")' > rebuild.log 2>&1; echo \$? > rebuild.status" > "$dir/vm-rebuild.sh"
+  "$vmrun" put "$dir/vm-rebuild.sh" || return 1
+  "$vmrun" sh 'rm -f rebuild.status rebuild.log; chmod +x vm-rebuild.sh; nohup ./vm-rebuild.sh > /dev/null 2>&1 &' || return 1
+  local n=0
+  until "$vmrun" sh 'test -f rebuild.status' 2> /dev/null; do
+    sleep 60
+    "$vmrun" sh "tail -n +$((n + 1)) rebuild.log" 2> /dev/null | tee -a "$dir/box.log" | grep -v '^compile\|^asm' || true
+    n=$(wc -l < "$dir/box.log")
+  done
+  "$vmrun" sh "tail -n +$((n + 1)) rebuild.log" | tee -a "$dir/box.log"
+  st=$("$vmrun" sh 'cat rebuild.status')
+  "$vmrun" sh 'tar -cf box-store.tar box' && "$vmrun" exec cat box-store.tar > "$dir/box-store.tar" \
+    && rm -rf "$bs" && tar -C "$dir" -xf "$dir/box-store.tar" && rm -f "$dir/box-store.tar" || return 1
+  "$launcher" --store "$bs" get "rebuilt.box.arm64.steps" > "$dir/box-steps.edn" 2>/dev/null
+  return $st
+}
+
+host() {
+  local t0 st tools=$goroot/pkg/tool/linux_$harch cr=$dir/chrootrun opts env
+  need "$native" "bin/arbace-go --build"
+  t0=$(date +%s)
+  echo "== the same steps on the host ($arch)"
+  (cd "$root/tools/chrootrun" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOPROXY=off \
+     CGO_ENABLED=0 "$goroot/bin/go" build -o "$cr" .) || return 1
+  env='["GOOS=tamago" "GOARCH='$arch'" "GOAMD64=v1" "GOARM64=v8.0"]'
+  opts="{:run (arbace.box.rebuild/host-run {:chrootrun \"$cr\" :work \"$dir/host-work\" :prepare-exe \"$native\"
+    :images {(arbace.box/ref \"tool.compile.$arch\") {:exe \"$tools/compile\" :env $env}
+             (arbace.box/ref \"tool.asm.$arch\") {:exe \"$tools/asm\" :env $env}
+             (arbace.box/ref \"tool.link.$arch\") {:exe \"$tools/link\" :env $env}
+             (arbace.box/ref \"arbace.$arch\") {:exe \"$native\" :env [\"HOME=/tmp\"]}}})}"
+  ARBACE_BOX_STORE=$hs ARBACE_BOX_LAUNCHER=$launcher "$native" -e "$(rebuild_expr "rebuilt.host.$arch" "$opts")" 2>&1 | tee "$dir/host.log"
+  st=${PIPESTATUS[0]}
+  "$launcher" --store "$hs" get "rebuilt.host.$arch.steps" > "$dir/host-steps.edn" 2>/dev/null
+  rm -rf "$dir/host-work"
+  echo "box-rebuild: the host's run: status $st ($(since "$t0"))"
+  return $st
+}
+
+compare() {
+  local a2g=$root/target/arbace-go/a2g/prog
+  [ -s "$dir/box-steps.edn" ] && [ -s "$dir/host-steps.edn" ] || { echo "box-rebuild: no steps to compare (box, host)" >&2; return 1; }
+  # bin/arbace-go --build's a2g program (its image.bin is the prepared one: compared apart) into the
+  # host's store, to compare with the steps' trees
+  ARBACE_BOX_STORE=$hs "$native" -e "
+(require (quote [arbace.box :as box]) (quote [arbace.edn :as edn]) (quote arbace.box.rebuild))
+(let [b (edn/read-string (slurp \"$dir/box-steps.edn\"))
+      h (edn/read-string (slurp \"$dir/host-steps.edn\"))
+      ks [:src :prog :goroot :goos :mod :plan :version :image1 :image-bin :linked :image]
+      prog (when (.isDirectory (java.io.File. \"$a2g\")) (box/put-dir \"$a2g\"))
+      img-bin (java.io.File. \"$a2g/go/arbace/cmd/arbace/image.bin\")
+      same (atom true)]
+  (doseq [k ks]
+    (let [e (= (b k) (h k))]
+      (when (#{:image} k) (reset! same e))
+      (println (format \"%-10s %s %s\" (name k) (if e \"=\" \"DIFFERS\") (if e (b k) (str (b k) \" (box) \" (h k) \" (host)\"))))))
+  (when prog
+    (let [p (= (b :prog) (arbace.box.rebuild/put-at prog \"go/arbace/cmd/arbace/image.bin\" (box/tree-get (b :prog) \"go/arbace/cmd/arbace/image.bin\")))
+          i (= (b :image-bin) (box/put (java.nio.file.Files/readAllBytes (.toPath img-bin))))]
+      (println \"a2g's program, but image.bin, = bin/arbace-go --build's:\" p)
+      (println \"the image of prepared namespaces = bin/arbace-go --build's:\" i)
+      ;; the host step prepared the namespaces with bin/arbace-go --build's executable: of no
+      ;; worth unless it is the same program
+      (when-not p (println \"box-rebuild: target/arbace-go is not built from these sources (bin/arbace-go --build --box)\") (reset! same false))))
+  (println (if @same \"box-rebuild: the image built in the box = the host's, byte for byte:\" \"box-rebuild: the images DIFFER\") (b :image) (box/size (b :image)) \"bytes\")
+  (System/exit (if @same 0 1)))"
+}
+
+boot() {
+  echo "== the image built in the box, booted by its ref"
+  if [ "$arch" != "$harch" ]; then
+    "$root/bin/box-arm64-vm" sh "ARBACE_BOX_IMAGE=ref:rebuilt.box.arm64 ./arbace-box --store box -e '(println \"booted by ref:\" (arbace-version) (System/getProperty \"os.arch\"))'"
+  else
+    ARBACE_BOX_IMAGE=ref:rebuilt.box.$arch "$launcher" --store "$bs" -e '(println "booted by ref:" (arbace-version) (System/getProperty "os.arch"))'
+  fi
+}
+
+smoke() {
+  local img=$dir/rebuilt.elf
+  [ "$arch" = "$harch" ] || { echo "box-rebuild: smoke runs here for $harch only" >&2; return 1; }
+  "$launcher" --store "$bs" get "rebuilt.box.$arch" > "$img" || return 1
+  # the launcher with the image appended, as bin/arbace-go's box_append makes it
+  local n p i len=""
+  n=$(stat -c %s "$img"); p=$(( (65536 - $(stat -c %s "$root/target/arbace-go/box-$arch/arbace-box.bin") % 65536) % 65536 ))
+  for i in 0 1 2 3 4 5 6 7; do len+=$(printf '\\x%02x' $(( (n >> (8 * i)) & 255 ))); done
+  { cat "$root/target/arbace-go/box-$arch/arbace-box.bin"; head -c "$p" /dev/zero; cat "$img"; printf "$len"; printf 'WHIMGST1'; } > "$dir/arbace-box"
+  chmod +x "$dir/arbace-box"
+  "$root/bin/box-smoke" --arch "$arch" --native "$native" "$dir/arbace-box"
+}
+
+plan_check() {
+  local pc=$dir/plan-check gr
+  [ -s "$dir/box-steps.edn" ] || { echo "box-rebuild: no box-steps.edn (box)" >&2; return 1; }
+  rm -rf "$pc"; mkdir -p "$pc/goroot"
+  ARBACE_BOX_STORE=$bs "$native" -e "(require (quote [arbace.box :as box]) (quote [arbace.edn :as edn]))
+(let [b (edn/read-string (slurp \"$dir/box-steps.edn\"))]
+  (box/get-tree (:goroot b) \"$pc/goroot/src\") (box/get-tree (:goos b) \"$pc/goos\") (box/get-tree (:mod b) \"$pc/mod\")
+  (spit \"$pc/plan.edn\" (box/get (:plan b))))" || return 1
+  for e in "$goroot"/*; do [ "$(basename "$e")" = src ] || ln -s "$e" "$pc/goroot/"; done
+  sed -i "s#=> /goos#=> $pc/goos#" "$pc/mod/go.mod"
+  (cd "$root/tools/goplan" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOPROXY=off \
+     CGO_ENABLED=0 "$goroot/bin/go" build -o "$pc/goplan" .) || return 1
+  (cd "$pc/mod" && env -i PATH=/usr/bin:/bin HOME="$pc" GOROOT="$pc/goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off \
+     GO111MODULE=on GOPROXY=off CGO_ENABLED=0 GOOS=tamago GOARCH="$arch" GOAMD64=v1 GOARM64=v8.0 \
+     GOOSPKG=github.com/usbarmory/tamago "$pc/goplan" arbace/cmd/arbace) > "$pc/goplan.edn" || return 1
+  "$native" -e "(require (quote [arbace.edn :as edn]))
+(let [p (edn/read-string (slurp \"$pc/plan.edn\")) g (edn/read-string (slurp \"$pc/goplan.edn\"))
+      norm #(select-keys % [:path :name :std :lang :go :s :imports :importmap])
+      emb #(vector (set (keys (:patterns (:embed %)))) (set (mapcat val (:patterns (:embed %)))))
+      gemb #(vector (set (:embed-patterns %)) (set (:embed-files %)))
+      bad (remove (fn [[a b]] (and (= (norm a) (norm b)) (= (emb a) (gemb b)))) (map vector (:packages p) (:packages g)))]
+  (println \"plan-check:\" (count (:packages p)) \"packages planned in Arbace,\" (count (:packages g)) \"by go list;\"
+           (if (and (empty? bad) (= (count (:packages p)) (count (:packages g)))) \"the same\" (str \"DIFFERENT: \" (pr-str (map (comp :path first) bad)))))
+  (System/exit (if (and (empty? bad) (= (count (:packages p)) (count (:packages g)))) 0 1)))"
+}
+
+status=0
+for s in "${steps[@]}"; do
+  "${s/-/_}" || { status=1; [ "$s" = compare ] || break; }
+done
+exit $status

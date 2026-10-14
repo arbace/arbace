@@ -1,0 +1,346 @@
+;; The box's build plan (doc/go/BOX-NOTES.md, S8): what go list -deps tells the build driver
+;; (arbace.box.build) of a Go program's packages, computed in Arbace from trees of the store, so
+;; that the box plans its own builds (S7's plans came from tools/goplan, go list on the host).
+(ns arbace.box.plan
+  "A Go program's build plan from source trees of the store (arbace.box's trees), as go list
+  -deps gives it for one GOOS and GOARCH with cgo off: the packages the main package reaches,
+  each after those it imports, each with its Go and assembly files (go/build's rules: the file
+  name's GOOS and GOARCH, //go:build lines, test files and files beginning with _ or . left
+  out, files importing \"C\" left out), its imports resolved (the standard library's vendor
+  directory, GOOSPKG's runtime/goos), its language version and its embedded files.
+
+    (plan cfg)   the plan: {:goos :goarch :goamd64 :goarm64 :main :include
+                            :packages [{:path :name :src :std :lang :go :s :imports
+                                        :importmap :embed} ...]}
+
+  cfg:
+    :goroot    the tree of GOROOT/src (std's packages at their import paths, vendor/, go.mod)
+    :modules   {module-path tree}: each module's root (its go.mod's go line is :lang)
+    :goospkg   the module whose goos/ is runtime/goos (TamaGo's GOOSPKG), when :goos is tamago
+    :main      the main package's import path
+    :goos :goarch :goamd64 :goarm64
+    :tool-tags, :release-tags   the toolchain's (go list's context.ToolTags, ReleaseTags)
+    :tags      more build tags (the program's)
+    :include   GOROOT/pkg/include's tree, passed on to the plan
+
+  A package's :src is a tree of its directory's files, the .h files of its subdirectories
+  (an assembly file includes them by a relative path) and its embedded files: what its compile
+  and asm read, so that a change elsewhere leaves its actions' keys alone. :embed is
+  {:patterns {PATTERN [FILE ...]}} (FILE relative to the package's directory) when it embeds.
+  Glob patterns in //go:embed are refused, as are packages with cgo, C or .syso files (the
+  driver builds Go and Go's assembly only)."
+  (:require [arbace.box :as box]
+            [arbace.string :as str]))
+
+(defn- fail [msg data]
+  (throw (ex-info msg (assoc data ::error true))))
+
+;; ---------------------------------------------------------------------------------------
+;; Trees, read once
+
+(def ^:private ^:dynamic *trees* nil)
+
+(defn- entries
+  "Tree h's map (read once a plan)."
+  [h]
+  (or (get @*trees* h)
+      (let [m (or (box/tree h) (fail (str "arbace.box.plan: no tree " h) {:tree h}))]
+        (swap! *trees* assoc h m)
+        m)))
+
+(defn- dir-at
+  "The hash of directory path p (\"a/b\") under tree h, nil when there is none."
+  [h ^String p]
+  (reduce (fn [d n]
+            (let [[k eh] (get (entries d) n)]
+              (if (= k :dir) eh (reduced nil))))
+          h
+          (remove empty? (str/split p #"/"))))
+
+(defn- text [[_ h]]
+  (or (box/get h) (fail (str "arbace.box.plan: no blob " h) {:blob h})))
+
+;; ---------------------------------------------------------------------------------------
+;; Build constraints (go/build's: the file name, //go:build)
+
+(def known-os
+  #{"aix" "android" "darwin" "dragonfly" "freebsd" "hurd" "illumos" "ios" "js" "linux" "nacl"
+    "netbsd" "openbsd" "plan9" "solaris" "tamago" "wasip1" "windows" "zos"})
+
+(def unix-os
+  #{"aix" "android" "darwin" "dragonfly" "freebsd" "hurd" "illumos" "ios" "linux" "netbsd"
+    "openbsd" "solaris"})
+
+(def known-arch
+  #{"386" "amd64" "amd64p32" "arm" "armbe" "arm64" "arm64be" "loong64" "mips" "mipsle" "mips64"
+    "mips64le" "mips64p32" "mips64p32le" "ppc" "ppc64" "ppc64le" "riscv" "riscv64" "s390"
+    "s390x" "sparc" "sparc64" "wasm"})
+
+(defn- tag-fn
+  "go/build's matchTag for cfg (cgo off, the gc compiler)."
+  [{:keys [goos goarch tool-tags release-tags tags]}]
+  (let [on (set (concat [goos goarch "gc"] tool-tags release-tags tags))]
+    (fn [t]
+      (cond (= t "unix") (contains? unix-os goos)
+            (= t "cgo") false
+            :else (contains? on t)))))
+
+(defn- name-ok?
+  "Whether file name n's GOOS and GOARCH suffixes match (go/build's goodOSArchFile)."
+  [match? ^String n]
+  (let [n (first (str/split n #"\." 2))
+        i (.indexOf n "_")]
+    (if (neg? i)
+      true
+      (let [l (vec (str/split (subs n i) #"_" -1))
+            l (if (= "test" (peek l)) (pop l) l)
+            c (count l)]
+        (cond (and (>= c 2) (known-os (l (- c 2))) (known-arch (l (- c 1))))
+                (and (match? (l (- c 2))) (match? (l (- c 1))))
+              (and (>= c 1) (or (known-os (l (- c 1))) (known-arch (l (- c 1)))))
+                (match? (l (- c 1)))
+              :else true)))))
+
+(defn- expr-tokens [^String s]
+  (re-seq #"\(|\)|!|&&|\|\||[A-Za-z0-9_.]+" s))
+
+(defn- eval-expr
+  "The //go:build expression s under match?: || over && over !, parentheses."
+  [match? ^String s]
+  (let [toks (atom (expr-tokens s))
+        peek-t #(first @toks)
+        next-t #(let [t (first @toks)] (swap! toks rest) t)]
+    (letfn [(or-e [] (loop [v (and-e)] (if (= "||" (peek-t)) (do (next-t) (let [w (and-e)] (recur (or v w)))) v)))
+            (and-e [] (loop [v (not-e)] (if (= "&&" (peek-t)) (do (next-t) (let [w (not-e)] (recur (and v w)))) v)))
+            (not-e [] (let [t (next-t)]
+                        (cond (= t "!") (not (not-e))
+                              (= t "(") (let [v (or-e)] (when-not (= ")" (next-t)) (fail (str "//go:build " s ": no )") {})) v)
+                              (and t (re-matches #"[A-Za-z0-9_.]+" t)) (boolean (match? t))
+                              :else (fail (str "arbace.box.plan: //go:build " s ": not an expression") {}))))]
+      (let [v (or-e)]
+        (when (seq @toks) (fail (str "arbace.box.plan: //go:build " s ": more after the expression") {}))
+        v))))
+
+(defn- header-build
+  "The //go:build line of source s's header (before its first line that is not a comment or
+  blank), nil when none."
+  [^String s]
+  (loop [[l & ls] (str/split-lines s) in-star false]
+    (when l
+      (let [t (str/trim l)]
+        (cond
+          in-star (recur ls (not (str/includes? t "*/")))
+          (str/blank? t) (recur ls false)
+          (str/starts-with? t "//go:build") (if (re-find #"^//go:build[ \t]" t)
+                                              (subs t 10)
+                                              (recur ls false))
+          (str/starts-with? t "//") (recur ls false)
+          (str/starts-with? t "/*") (recur ls (not (str/includes? (subs t 2) "*/")))
+          :else nil)))))
+
+;; ---------------------------------------------------------------------------------------
+;; A Go file's package clause and imports (go/build's readGoInfo, the header only)
+
+(defn- go-tokens
+  "The tokens of Go source s from its start: identifiers, strings (their values), and the
+  punctuation ( ) ; . -- comments skipped, newlines given as ; where Go inserts one. Lazy."
+  [^String s]
+  (let [n (count s)]
+    (letfn [(step [i last]
+              (lazy-seq
+                (when (< i n)
+                  (let [c (.charAt s i)]
+                    (cond
+                      (= c \newline) (if (#{:ident :string ")"} last)
+                                       (cons ";" (step (inc i) ";"))
+                                       (step (inc i) last))
+                      (Character/isWhitespace c) (step (inc i) last)
+                      (and (= c \/) (< (inc i) n) (= \/ (.charAt s (inc i))))
+                        (let [j (.indexOf s "\n" i)] (step (if (neg? j) n j) last))
+                      (and (= c \/) (< (inc i) n) (= \* (.charAt s (inc i))))
+                        (let [j (.indexOf s "*/" (+ i 2))
+                              nl (and (pos? j) (str/includes? (subs s i j) "\n"))]
+                          (if (and nl (#{:ident :string ")"} last))
+                            (cons ";" (step (if (neg? j) n (+ j 2)) ";"))
+                            (step (if (neg? j) n (+ j 2)) last)))
+                      (= c \") (let [sb (StringBuilder.)
+                                     j (loop [j (inc i)]
+                                         (let [d (.charAt s j)]
+                                           (cond (= d \\) (do (.append sb (.charAt s (inc j))) (recur (+ j 2)))
+                                                 (= d \") (inc j)
+                                                 :else (do (.append sb d) (recur (inc j))))))]
+                                 (cons [:string (str sb)] (step j :string)))
+                      (= c \`) (let [j (.indexOf s "`" (inc i))]
+                                 (cons [:string (subs s (inc i) j)] (step (inc j) :string)))
+                      (or (Character/isLetterOrDigit c) (= c \_))
+                        (let [j (loop [j i] (if (and (< j n) (let [d (.charAt s j)] (or (Character/isLetterOrDigit d) (= d \_)))) (recur (inc j)) j))]
+                          (cons [:ident (subs s i j)] (step j :ident)))
+                      (= c \)) (cons ")" (step (inc i) ")"))
+                      :else (cons (str c) (step (inc i) (str c))))))))]
+      (step 0 nil))))
+
+(defn- go-info
+  "Go source s's {:package NAME :imports [PATH ...] :embeds [PATTERN ...]}."
+  [^String s what]
+  (let [toks (drop-while #(= ";" %) (go-tokens s))
+        _ (when-not (= [:ident "package"] (first toks))
+            (fail (str "arbace.box.plan: " what ": no package clause") {}))
+        pkg (second (second toks))
+        imports (loop [ts (drop 2 toks) acc []]
+                  (let [ts (drop-while #(= ";" %) ts)]
+                    (if (= [:ident "import"] (first ts))
+                      (let [ts (rest ts)]
+                        (if (= "(" (first ts))
+                          (let [[spec more] (split-with #(not= ")" %) (rest ts))]
+                            (recur (rest more) (into acc (keep #(when (= :string (first %)) (second %)) spec))))
+                          (let [[spec more] (split-with #(not= ";" %) ts)]
+                            (recur more (into acc (keep #(when (and (vector? %) (= :string (first %))) (second %)) spec))))))
+                      acc)))
+        embeds (when (some #{"embed"} imports)
+                 (vec (mapcat (fn [l] (let [t (str/trim l)]
+                                        (when (str/starts-with? t "//go:embed ")
+                                          (map (fn [p] (if (str/starts-with? p "\"") (subs p 1 (dec (count p))) p))
+                                               (re-seq #"\"[^\"]*\"|`[^`]*`|\S+" (subs t 11))))))
+                              (str/split-lines s))))]
+    {:package pkg :imports imports :embeds embeds}))
+
+;; ---------------------------------------------------------------------------------------
+;; Packages
+
+(defn- go-mod-lang
+  "go.mod's go line of tree h, as -lang takes it (go1.N), nil when none."
+  [h]
+  (when-let [e (get (entries h) "go.mod")]
+    (when-let [[_ v] (re-find #"(?m)^go[ \t]+(\d+\.\d+)" (text e))]
+      (str "go" v))))
+
+(defn- locate
+  "Where import path p is: {:dir TREE :std BOOL :lang L :path RESOLVED}, or nil. from-std:
+  whether the importing package is the standard library's (its imports resolve in GOROOT's
+  vendor directory)."
+  [cfg p from-std]
+  (let [{:keys [goroot modules goospkg goos]} cfg
+        mod (first (filter (fn [[m _]] (or (= p m) (str/starts-with? p (str m "/")))) modules))]
+    (cond
+      (and (= goos "tamago") goospkg (or (= p "runtime/goos") (str/starts-with? p "runtime/goos/")))
+        (let [mt (or (get modules goospkg) (fail (str "arbace.box.plan: no module " goospkg " (GOOSPKG)") {}))]
+          (when-let [d (dir-at mt (str "goos" (subs p (count "runtime/goos"))))]
+            ;; not standard (go list's Standard): the module's package, at runtime/goos
+            {:dir d :std false :lang (go-mod-lang mt) :path p}))
+      mod (let [[m mt] mod]
+            (when-let [d (if (= p m) mt (dir-at mt (subs p (inc (count m)))))]
+              {:dir d :std false :lang (go-mod-lang mt) :path p}))
+      :else (or (when-let [d (dir-at goroot p)] {:dir d :std true :lang (go-mod-lang goroot) :path p})
+                (when from-std
+                  (when-let [d (dir-at goroot (str "vendor/" p))]
+                    {:dir d :std true :lang (go-mod-lang goroot) :path (str "vendor/" p)}))))))
+
+(defn- embed-files
+  "The files pattern names in directory tree d (cmd/go's resolveEmbed, without globs): a file,
+  or a directory's files (not those beginning with . or _ unless the pattern says all:)."
+  [d ^String pattern what]
+  (let [all (str/starts-with? pattern "all:")
+        p (if all (subs pattern 4) pattern)]
+    (when (re-find #"[*?\[\\]" p)
+      (fail (str "arbace.box.plan: " what ": //go:embed " pattern ": globs are not supported") {}))
+    (let [segs (str/split p #"/")
+          parent (dir-at d (str/join "/" (butlast segs)))
+          [k h :as e] (when parent (get (entries parent) (last segs)))
+          walk (fn walk [h prefix]
+                 (mapcat (fn [[n [k eh]]]
+                           (when (or all (not (or (str/starts-with? n ".") (str/starts-with? n "_"))))
+                             (if (= k :dir) (walk eh (str prefix n "/")) [(str prefix n)])))
+                         (sort-by key (entries h))))]
+      (cond (nil? e) (fail (str "arbace.box.plan: " what ": //go:embed " pattern ": no matching files") {})
+            (= k :dir) (vec (walk h (str p "/")))
+            :else [p]))))
+
+(defn- package-info
+  "Package p's entry (without :imports resolved), located as loc."
+  [cfg match? p {:keys [dir std lang path]}]
+  (let [es (entries dir)
+        what (str "package " path)
+        files (for [[n [k :as e]] (sort-by key es)
+                    :when (and (not= k :dir) (not (str/starts-with? n ".")) (not (str/starts-with? n "_")))
+                    :let [ext (second (re-find #"(\.[^.]*)$" n))]
+                    :when (and (#{".go" ".s" ".S" ".c" ".syso" ".cc" ".cpp" ".m" ".f" ".F" ".swig"} ext)
+                               (not (str/ends-with? n "_test.go"))
+                               (name-ok? match? n))]
+                [n ext e])
+        go (for [[n ext e] files :when (= ext ".go")
+                 :let [s (text e)
+                       b (header-build s)]
+                 :when (or (nil? b) (eval-expr match? b))
+                 :let [info (go-info s (str path "/" n))]
+                 :when (not (some #{"C"} (:imports info)))]
+             [n info])
+        others (for [[n ext e] files :when (not= ext ".go")
+                     :let [b (header-build (text e))]
+                     :when (or (nil? b) (eval-expr match? b))]
+                 [n ext])
+        names (distinct (map (comp :package second) go))]
+    (when (empty? go)
+      (fail (str "arbace.box.plan: " what ": no Go files for " (:goos cfg) "/" (:goarch cfg)) {:path path}))
+    (when (> (count names) 1)
+      (fail (str "arbace.box.plan: " what ": packages " (str/join ", " names)) {:path path}))
+    (when-let [[n] (first (filter #(not (#{".s"} (second %))) others))]
+      (fail (str "arbace.box.plan: " what ": " n ": cgo, C or .syso files are not built by the box's driver") {:path path}))
+    (let [patterns (distinct (mapcat (comp :embeds second) go))
+          embed (when (seq patterns)
+                  {:patterns (into (sorted-map) (for [pt patterns] [pt (embed-files dir pt what)]))})]
+      {:path path :name (first names) :std std :lang (or lang (:std-lang cfg))
+       :go (mapv first go) :s (mapv first others)
+       :raw-imports (vec (sort (distinct (remove #{"unsafe"} (mapcat (comp :imports second) go)))))
+       :embed embed :dir dir})))
+
+(defn- src-tree
+  "Package pkg's source tree: its directory's files, the .h files under its subdirectories and
+  its embedded files."
+  [{:keys [dir embed]}]
+  (let [embedded (set (mapcat val (:patterns embed)))
+        sub (fn sub [h prefix]
+              (let [m (into {}
+                            (for [[n [k eh :as e]] (entries h)
+                                  :let [p (str prefix n)
+                                        e (cond (= k :dir) (when-let [t (sub eh (str p "/"))] [:dir t])
+                                                (or (str/ends-with? n ".h") (embedded p)) e)]
+                                  :when e]
+                              [n e]))]
+                (when (seq m) (box/put-tree m))))]
+    (box/put-tree
+      (into {}
+            (for [[n [k eh :as e]] (entries dir)
+                  :let [e (if (= k :dir) (when-let [t (sub eh (str n "/"))] [:dir t]) e)]
+                  :when e]
+              [n e])))))
+
+(defn plan
+  "The plan of cfg's program (see the namespace's doc)."
+  [cfg]
+  (binding [*trees* (atom {})]
+    (let [match? (tag-fn cfg)
+          cfg (assoc cfg :std-lang (or (go-mod-lang (:goroot cfg)) (fail "arbace.box.plan: GOROOT/src has no go.mod" {})))
+          done (atom {})
+          order (atom [])
+          visit (fn visit [p from-std stack]
+                  (when (some #{p} stack)
+                    (fail (str "arbace.box.plan: an import cycle: " (str/join " -> " (reverse (cons p stack)))) {}))
+                  (or (get @done p)
+                      (let [loc (or (locate cfg p from-std)
+                                    (fail (str "arbace.box.plan: no package " p (when (seq stack) (str ", imported by " (first stack)))) {:path p}))
+                            info (package-info cfg match? p loc)
+                            resolved (mapv (fn [i] [i (:path (visit i (:std loc) (cons p stack)))]) (:raw-imports info))
+                            pkg (-> info
+                                    (dissoc :raw-imports)
+                                    ;; go list's order: by the import as written
+                                    (assoc :imports (vec (distinct (map second resolved)))
+                                           :importmap (into (sorted-map) (filter (fn [[a b]] (not= a b)) resolved))))]
+                        (swap! done assoc p pkg)
+                        (when (not= p (:path pkg)) (swap! done assoc (:path pkg) pkg))
+                        (swap! order conj pkg)
+                        pkg)))]
+      (visit (:main cfg) false ())
+      {:goos (:goos cfg) :goarch (:goarch cfg) :goamd64 (:goamd64 cfg "v1") :goarm64 (:goarm64 cfg "v8.0")
+       :main (:main cfg) :include (:include cfg)
+       :packages (mapv (fn [pkg] (-> pkg (assoc :src (src-tree pkg)) (dissoc :dir) (cond-> (nil? (:embed pkg)) (dissoc :embed))))
+                       @order)})))

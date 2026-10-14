@@ -10,12 +10,22 @@ nc and perl are macOS's own):
 
     tar xzf arbace-box-mac-arm64.tar.gz
     cd arbace-box-mac-arm64
-    ./mac.sh all          # check, sign, hv, checklist: about 5 minutes
+    ./mac.sh all          # check, sign, hv, checklist, rebuild, with the clock's
+                          # hour beside them: about an hour and a quarter
 
 then send back mac-results.tar.gz (in this directory): every step's output,
 its status, the idle CPU and the times.
 
-Steps one by one: ./mac.sh check | sign | hv | checklist. After `sign`:
+The rebuild (S8, doc/go/BOX-NOTES.md): Arbace's arm64 guest image rebuilt
+inside the box from the sources in rebuild/store, a2g and g2a in Arbace's own
+guest, Go's compile, asm and link in tool guests; it must equal the image the
+same steps gave on Linux with the host's tools (rebuild/expected.txt). Its
+guests ask up to 14 GiB each; the spawns' budget is 60% of the Mac's memory.
+The clock (HV6): an idle box's wall clock against the Mac's, once a minute for
+an hour.
+
+Steps one by one: ./mac.sh check | sign | hv | checklist | rebuild | clock.
+After `sign`:
 
     ./mac.sh run                        # the REPL (rlwrap from Homebrew, if installed)
     ./mac.sh run -e '(+ 1 2)'

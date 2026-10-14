@@ -1,0 +1,298 @@
+;; The rebuild in the box (doc/go/BOX-NOTES.md, S8): Arbace's guest image built from a source
+;; tree of the store, every step a spawned guest (an action of arbace.box.build, kept in the
+;; action cache): a2g and g2a's printing in Arbace's own guest, the plan in Arbace, Go's compile,
+;; asm and link in tool guests, the image of prepared namespaces made by the new image itself.
+(ns arbace.box.rebuild
+  "S3's chain in the box: Arbace's guest image from its sources, as bin/arbace-go --build --box
+  makes it on the host.
+
+    (rebuild src opts)   the image built from source tree src (a hash or a ref; the checkout as
+                         git archive gives it, VERSION filled): its hash; ref :ref (opts) pointed
+                         at it
+
+  The steps, each an action (arbace.box.build: a spawn, its result in the action cache):
+    a2g         a2g --program in Arbace's guest (:host, the image that runs the tools), the
+                sources arbace/, go/, jdk/, overlay/ at /s: the program as Go forms (prog)
+    print       g2a's printing (arbace.box.print), in two guests: tamago/'s standard library and goos module
+                with jrt's runtime overlay and the file system's patch (overlay/go); the
+                program with box/ and x509roots/ (bin/arbace-go --build --box's printing)
+    plan        GOROOT/src, the module arbace and TamaGo's goos module as trees, planned in
+                Arbace (arbace.box.plan)
+    build       every package compiled (jrt and lang in 12 GiB guests: SA101 (b)), the image
+                linked with Arbace's version (-X main.arbaceVersion, from the tree's VERSION)
+    prepare     the image run once (ARBACE_PREPARE): the image of prepared namespaces
+    image       the main package compiled again with it, linked again, its symbol table cut
+                to the monitor's symbols (arbace.box.elf, tools/elfsyms's)
+
+  opts: :arch (amd64, arm64; by default the guest's own), :host (the image that runs a2g and
+  g2a, a hash or a ref; by default the ref arbace.<arch>), :config (the toolchain's facts, a
+  hash or a ref; by default tool.config.<arch>: {:tool-tags [...] :release-tags [...] :include
+  TREE}, bin/box-tools put), :ref, :jobs (the compiles at once, by default 4), :a2g-cpus (by
+  default 8), :run (arbace.box.build's, the actions' executor: by default a spawn), :log,
+  :given ({:a2g TREE :printed-goroot TREE :printed-program TREE}: those steps' results taken
+  as given, another run's, those steps not run: they are the same for every architecture;
+  doc/go/BOX-NOTES.md, S8, BX117).
+  (steps src opts) answers every intermediate result as a map instead.
+
+  natively, (host-run cfg) is an executor for :run that runs an action as a host process,
+  chrooted (tools/chrootrun) into a directory holding its trees at their mount points: the
+  images in (:images cfg), {HASH {:exe PATH :env [...]}}, run so (Go's compile, asm and link of
+  the host's toolchain; Arbace's native executable for the tools' image), any other spawned:
+  the same steps with the host's tools, the reference the image built in the box equals."
+  (:require [arbace.box :as box]
+            [arbace.box.build :as build]
+            [arbace.box.plan :as plan]
+            [arbace.box.elf :as elf]
+            [arbace.edn :as edn]
+            [arbace.string :as str])
+  (:import (java.io File)
+           (java.nio.file Files)))
+
+(def ^:private GiB (* 1024 1024 1024))
+
+(defn- fail [msg data]
+  (throw (ex-info (str "arbace.box.rebuild: " msg) (assoc data ::error true))))
+
+;; ---------------------------------------------------------------------------------------
+;; Trees
+
+(defn- hash-of
+  "x, a hash or a ref's name, as a hash."
+  [x what]
+  (cond (and (string? x) (re-matches #"[0-9a-f]{64}" x)) x
+        (string? x) (or (box/ref x) (fail (str "no ref " x " (" what ")") {:ref x}))
+        :else (fail (str "not a hash or a ref: " (pr-str x) " (" what ")") {})))
+
+(defn- dir-at
+  "The tree at path p of tree t, nil when there is none."
+  [t ^String p]
+  (let [[k h] (box/tree-get t p)]
+    (when (= k :dir) h)))
+
+(defn- dir-at!
+  [t p what]
+  (or (dir-at t p) (fail (str what ": no directory " p) {:tree t :path p})))
+
+(defn- select-tree
+  "Tree t with only the named entries."
+  [t names]
+  (box/put-tree (select-keys (box/tree t) names)))
+
+(defn- lay-over
+  "Tree b laid over tree a: b's entries replace a's, but for directories in both, laid over
+  each other."
+  [a b]
+  (let [ma (box/tree a) mb (box/tree b)]
+    (box/put-tree
+      (reduce (fn [m [n [k h :as e]]]
+                (let [[ka ha] (get m n)]
+                  (assoc m n (if (and (= k :dir) (= ka :dir)) [:dir (lay-over ha h)] e))))
+              ma mb))))
+
+(defn put-at
+  "Tree t (nil: an empty one) with entry e at path p (\"a/b.go\"), the directories made."
+  [t ^String p e]
+  (let [[n & more] (remove empty? (str/split p #"/"))
+        m (if t (box/tree t) {})]
+    (box/put-tree
+      (assoc m n (if more
+                   [:dir (put-at (let [[k h] (get m n)] (when (= k :dir) h)) (str/join "/" more) e)]
+                   e)))))
+
+(defn- file-text [t p]
+  (let [[k h] (box/tree-get t p)]
+    (when (#{:file :exec} k) (box/get h))))
+
+;; ---------------------------------------------------------------------------------------
+;; Arbace's version, as bin/lib/version.bash reads it from a tarball's VERSION
+
+(defn version
+  "The version map's text of source tree src (its VERSION, as git archive fills it):
+  {:describe \"...\" :commit \"...\" :dirty false}, or the unknown one."
+  [src]
+  (let [v (file-text src "VERSION")]
+    (if (or (nil? v) (str/includes? v "$Format:"))
+      "{:describe \"unknown\" :commit nil :dirty nil}"
+      (let [c (second (re-find #"(?m)^commit (.*)$" v))
+            d (second (re-find #"(?m)^describe (.*)$" v))
+            d (if (str/blank? d) (subs (str c) 0 (min 7 (count (str c)))) d)]
+        (str "{:describe \"" d "\" :commit \"" c "\" :dirty false}")))))
+
+;; ---------------------------------------------------------------------------------------
+;; The steps
+
+(def guest-symbols
+  "The symbols the monitor reads (bin/arbace-go's box_symbols)."
+  ["whim_vectors" "whim_apentry" "runtime/goos.RamStart"])
+
+(def ^:private default-resources
+  ;; SA101 (b): gc's defaults, jrt compiled in a 12 GiB guest; lang likewise
+  {"arbace/jrt" {:ram (* 12 GiB) :cpus 4}
+   "arbace/lang" {:ram (* 12 GiB) :cpus 4}
+   "arbace/cmd/arbace" {:ram (* 6 GiB) :cpus 2}
+   :link {:ram (* 8 GiB) :cpus 2}})
+
+(defn- arch-of []
+  (case (System/getProperty "os.arch") ("aarch64" "arm64") "arm64" "amd64"))
+
+(defn- out [res what]
+  (or (:out res) (fail (str what ": no output tree") {:result res})))
+
+(defn- prepare-script
+  "bin/arbace-go's prepare script for the namespaces of namespaces.txt's text."
+  [nss]
+  (str "(doseq [n (quote [" (str/replace nss "\n" " ") "])]\n"
+       "  (try (require n) (catch Throwable e (println \"image: not prepared:\" n (.getMessage e)))))\n"))
+
+(defn steps
+  "The rebuild of source tree src (see the namespace's doc): a map of every step's result
+  (trees, the plan, the images), :image the final one's hash."
+  [src opts]
+  (let [src (hash-of src "the sources")
+        arch (:arch opts (arch-of))
+        host (hash-of (:host opts (str "arbace." arch)) "the tools' image")
+        cfg (edn/read-string (box/get (hash-of (:config opts (str "tool.config." arch)) "the toolchain's facts")))
+        bopts (merge {:jobs 4 :resources default-resources} (select-keys opts [:jobs :run :log :cache :tools :resources]))
+        log (:log opts println)
+        run (fn [what req] (build/action what req bopts))
+        t0 (System/nanoTime)
+        secs #(format "%.1f s" (/ (- (System/nanoTime) t0) 1e9))
+        cpus (:a2g-cpus opts 8)
+        ;; a2g
+        given (:given opts)
+        a2g (or (:a2g given)
+             (out (run "a2g --program"
+                      {:image host :args ["arbace" "-m" "arbace.a2g.main" "--program" "--out" "/o/a2g"]
+                       :env ["ARBACE_PATH=/s" "GOGC=400" "GOMEMLIMIT=12GiB" (str "A2G_JOBS=" cpus)]
+                       :trees [["/s" (select-tree src ["arbace" "go" "jdk" "overlay"])]]
+                       :out "/o" :cwd "/s" :ram (* 14 GiB) :cpus cpus})
+                 "a2g"))
+        prog (dir-at! a2g "a2g/prog" "a2g")
+        _ (log (str "rebuild: a2g's program " prog " (" (secs) ")"))
+        ;; the printing: two guests at once
+        tg (dir-at! src "tamago" "the sources")
+        forms (fn [t] (let [base (dir-at! t "go" "tamago/")
+                            more (dir-at t "arch/amd64/go")]
+                        (box/put-tree {"go" [:dir (if more (lay-over base more) base)]})))
+        pg (future (or (:printed-goroot given)
+                       (out (run "print tamago/ and overlay/go"
+                             {:image host :args ["arbace" "-m" "arbace.box.print" "print-goroot"]
+                              :env ["ARBACE_PATH=/s"]
+                              :trees [["/s" (select-tree src ["arbace" "overlay"])]
+                                      ["/f" (forms (dir-at! tg "goroot" "tamago/"))]
+                                      ["/g" (forms (dir-at! tg "goos" "tamago/"))]]
+                              :out "/o" :cwd "/s" :ram (* 8 GiB) :cpus 4})
+                        "print-goroot")))
+        pp (future (or (:printed-program given)
+                       (out (run "print the program"
+                             {:image host :args ["arbace" "-m" "arbace.box.print" "print-program"]
+                              :env ["ARBACE_PATH=/s"]
+                              :trees [["/s" (select-tree src ["arbace" "box" "x509roots"])] ["/p" prog]]
+                              :out "/o" :cwd "/s" :ram (* 8 GiB) :cpus 4})
+                        "print-program")))
+        printed-goroot @pg
+        printed-program @pp
+        ;; GOROOT/src: std printed, tamago/goroot/src's files over it (bin/tamago-vendor print),
+        ;; then jrt's runtime overlay and the file system's patch (bin/jrt overlay, box_overlay)
+        goroot (reduce (fn [t [p e]] (put-at t p e))
+                       (lay-over (dir-at! printed-goroot "std" "print-goroot") (dir-at! tg "goroot/src" "tamago/"))
+                       (concat (for [[n e] (box/tree (dir-at! printed-goroot "runtime" "print-goroot"))] [(str "runtime/" n) e])
+                               [["syscall/fs_tamago.go" (box/tree-get printed-goroot "syscall/fs_tamago.go")]]))
+        goos (put-at (dir-at! printed-goroot "goos" "print-goroot") "go.mod" (box/tree-get tg "goos/go.mod"))
+        mod (dir-at! printed-program "mod" "print-program")
+        config (edn/read-string (or (file-text printed-program "config.edn") "{}"))
+        _ (when (seq (:goexperiment config))
+            (fail (str "the program sets GOEXPERIMENT " (:goexperiment config) ": not built by the driver") {}))
+        _ (log (str "rebuild: printed: GOROOT/src " goroot ", goos " goos ", the module " mod " (" (secs) ")"))
+        ;; the plan
+        the-plan (plan/plan {:goroot goroot :modules {"arbace" mod "github.com/usbarmory/tamago" goos}
+                             :goospkg "github.com/usbarmory/tamago" :main "arbace/cmd/arbace"
+                             :goos "tamago" :goarch arch :goamd64 "v1" :goarm64 "v8.0"
+                             :tool-tags (:tool-tags cfg) :release-tags (:release-tags cfg)
+                             :tags (:tags config) :include (:include cfg)})
+        plan-hash (box/put (pr-str the-plan))
+        _ (log (str "rebuild: the plan " plan-hash ", " (count (:packages the-plan)) " packages (" (secs) ")"))
+        ;; the build, then the image linked with Arbace's version
+        v (version src)
+        lopts (assoc bopts :ldflags ["-T" "0x201000" "-R" "0x1000" "-w" "-X" (str "main.arbaceVersion=" v)])
+        archives (build/archives the-plan lopts)
+        image1 (build/link the-plan archives lopts)
+        _ (log (str "rebuild: the first image " image1 " (" (secs) ")"))
+        ;; the image of prepared namespaces, by the image itself
+        nss (or (file-text prog "namespaces.txt") (fail "a2g's program has no namespaces.txt" {}))
+        prep (run "prepare the namespaces"
+                  {:image image1 :args ["arbace" "/c/prepare.ae"]
+                   :env ["ARBACE_PREPARE=/o/image.bin" "GOGC=400"]
+                   :trees [["/c" (box/put-tree {"prepare.ae" (box/put-file (prepare-script nss))})]]
+                   :out "/o" :cwd "/" :ram (* 6 GiB) :cpus 2})
+        _ (doseq [l (str/split-lines (or (box/get (:console prep)) ""))
+                  :when (str/starts-with? l "image:")]
+            (log (str "rebuild: " l)))
+        image-bin (or (box/tree-get (out prep "prepare") "image.bin") (fail "prepare wrote no image" {:result prep}))
+        ;; the main package again, with the image
+        main-path "arbace/cmd/arbace"
+        the-plan2 (update the-plan :packages
+                          (fn [ps] (mapv (fn [p] (if (= main-path (:path p)) (update p :src put-at "image.bin" image-bin) p)) ps)))
+        archives2 (build/archives the-plan2 (assoc lopts :only #{main-path} :archives archives))
+        linked (build/link the-plan2 archives2 lopts)
+        image (box/put (elf/cut-symbols (box/get-bytes linked) guest-symbols))]
+    (when-let [r (:ref opts)] (box/ref! r image))
+    (log (str "rebuild: the image " image " (" (box/size image) " bytes) in " (secs)))
+    {:src src :a2g a2g :prog prog :printed-goroot printed-goroot :printed-program printed-program
+     :goroot goroot :goos goos :mod mod :plan plan-hash :version v :image1 image1
+     :image-bin (second image-bin) :linked linked :image image}))
+
+(defn rebuild
+  "The image rebuilt from source tree src (see the namespace's doc): its hash."
+  ([src] (rebuild src {}))
+  ([src opts] (:image (steps src opts))))
+
+;; ---------------------------------------------------------------------------------------
+;; The host's executor
+
+(defn- result-text [{:keys [exit out console]}]
+  (str "{:exit " exit (when out (str "\n :out \"" out "\"")) "\n :console \"" console "\"}\n"))
+
+(defn- delete-tree [^File f]
+  (when (.isDirectory f)
+    (doseq [c (.listFiles f)]
+      (delete-tree c)))
+  (.delete f))
+
+(defn host-run
+  "An executor for arbace.box.build's :run (see the namespace's doc): cfg {:images {HASH
+  {:exe PATH :env [NAME=VALUE ...]}} :chrootrun PATH :work DIR :prepare-exe PATH}: a request
+  for an image of :images runs its :exe, one setting ARBACE_PREPARE runs :prepare-exe (the
+  native executable of the program: the image is the same on every architecture), any other
+  is spawned."
+  [{:keys [images chrootrun work prepare-exe]}]
+  (let [n (atom 0)]
+    (fn [req]
+      (if-let [{:keys [exe env]} (or (get images (:image req))
+                                     ;; the image of prepared namespaces: by the native executable
+                                     ;; of the same program, as bin/arbace-go prepares it
+                                     (when (and prepare-exe (some #(str/starts-with? % "ARBACE_PREPARE=") (:env req)))
+                                       {:exe prepare-exe}))]
+        (let [root (File. (str work "/" (swap! n inc)))
+              _ (delete-tree root)
+              _ (.mkdirs root)
+              _ (doseq [[p h] (:trees req)] (box/get-tree h (str root p)))
+              _ (doseq [d [(:out req) (:cwd req "/") "/tmp" "/.x"] :when (seq d)] (.mkdirs (File. root ^String d)))
+              x (File. root ".x/prog")
+              _ (Files/copy (.toPath (File. ^String exe)) (.toPath x) ^"[Ljava.nio.file.CopyOption;" (make-array java.nio.file.CopyOption 0))
+              _ (.setExecutable x true)
+              pb (ProcessBuilder. ^java.util.List (vec (concat [chrootrun (str root) (:cwd req "/") "/.x/prog"] (:args req))))
+              penv (.environment pb)
+              _ (.clear penv)
+              _ (doseq [kv (concat env (:env req))]
+                  (let [i (.indexOf ^String kv "=")] (.put penv (subs kv 0 i) (subs kv (inc i)))))
+              _ (.redirectErrorStream pb true)
+              p (.start pb)
+              console (let [o (java.io.ByteArrayOutputStream.)] (.transferTo (.getInputStream p) o) (.toByteArray o))
+              exit (.waitFor p)
+              o (when (and (zero? exit) (seq (:out req))) (box/put-dir (str root (:out req))))
+              res {:exit exit :out o :console (box/put console)}
+              h (box/put (result-text res))]
+          (delete-tree root)
+          (assoc res :hash h))
+        (box/run req)))))
