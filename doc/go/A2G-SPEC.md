@@ -2585,8 +2585,8 @@ hinted interop. A Clojure function passed where a functional interface is expect
 
 **Closure compilation** (amendments EC1, EC2, EC5, accepted 2026-10-10; SPEED-NOTES.md, "The
 evaluator: closure compilation"). The evaluator compiles each method of an evaluated fn,
-deftype, defrecord or reify, at its first call, into a tree of `Code` nodes (the variant file
-`arbace/lang/go/CompilerCode.ae`): locals as slot indexes, `long` and `double` locals unboxed
+deftype, defrecord or reify, at its first call, into a tree of `Code` nodes
+(`arbace/lang/Compiler.ae`'s `Code`; until standalone S6 the variant file `CompilerCode.ae`): locals as slot indexes, `long` and `double` locals unboxed
 in the frame's `prims`, constants made once, a node of a primitive analyzed type answering
 `runLong`, `runDouble` or `runBool` (the bytecode's `emitUnboxed`), `recur` by a frame flag;
 `evalIn` remains the evaluation of top-level forms and of node kinds the compiler does not know
@@ -2834,7 +2834,8 @@ and the code forms, B1-PLAN.md; `gen-class` stays out). `defclass` and the code 
 §9.5) are analyzed by the embedded analysis (§10.3) and interpreted (CLASSFORMS-REPL.md):
 `arbace.classes.native`'s boundary is kept, `compile-and-load!` is `arbace.classes.interp`'s,
 which builds from the analyzed nodes trees of the interpreter's nodes (`Compiler$CF`, class forms
-in the `Compiler` variant `arbace/lang/go/ClassForms.ae`, translated), one per method, and
+in `arbace/lang/Compiler.ae`, until standalone S6 the variant `arbace/lang/go/ClassForms.ae`,
+translated), one per method, and
 makes the classes through the host `Compiler$CFGo` (§5.12, amendment CF4): classes made at run
 time whose objects are `Dyn` (DynSub_C for a superclass of the world, `Compiler$CF$FnObj` for a
 Clojure fn's class), their members in the member tables and `Dyn`'s slots.

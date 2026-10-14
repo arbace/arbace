@@ -1,0 +1,250 @@
+;; Merges Go-build variant files (arbace/lang/go/*.ae: (a2g/variant Class member... (a2g/add
+;; member) (a2g/cut head))) into their bases (arbace/lang/*.ae), as text: each replaced member's
+;; text takes the base member's place, each added member is inserted at the end of its class
+;; (a2g's order), each cut member is removed; the comments before a variant's member go with it.
+;; The base keeps its own text and comments everywhere else. Run once (standalone S6,
+;; doc/STANDALONE-NOTES.md, "The variants merged into their bases"):
+;;
+;;   ARBACE_PATH=. target/arbace-go/amd64/arbace test/aot/merge_variants.ae VARIANT-FILE...
+;;
+;; prints what it merged; the variant files are left for the caller to delete.
+(require '[arbace.string :as str]
+         '[arbace.java.io :as io]
+         'arbace.a2g.world)
+
+(def param-key #'arbace.a2g.world/param-key)
+(def cut-key #'arbace.a2g.world/cut-key)
+
+;; ---------------------------------------------------------------------------------------
+;; spans: the forms of a text with their offsets
+
+(defn- skip-ws
+  "The offset of the next form at or after i (whitespace, commas and comments skipped), or nil
+  at a closing delimiter or the end."
+  [^String s i end]
+  (loop [i i]
+    (if (>= i end)
+      nil
+      (let [c (.charAt s i)]
+        (cond
+          (or (Character/isWhitespace c) (= c \,)) (recur (inc i))
+          (= c \;) (let [j (.indexOf s "\n" (int i))] (if (neg? j) nil (recur (inc j))))
+          (#{\) \] \}} c) nil
+          :else i)))))
+
+(declare form-end)
+
+(defn- string-end [^String s i]
+  ;; i at the opening quote
+  (loop [j (inc i)]
+    (let [c (.charAt s j)]
+      (cond (= c \\) (recur (+ j 2))
+            (= c \") (inc j)
+            :else (recur (inc j))))))
+
+(defn- coll-end [^String s i close]
+  ;; i just after the opening delimiter
+  (loop [j i]
+    (let [k (skip-ws s j (.length s))]
+      (if (nil? k)
+        ;; at a closing delimiter (or a comment's end handled by skip-ws)
+        (let [j2 (loop [j j] (let [c (.charAt s j)]
+                               (cond (or (Character/isWhitespace c) (= c \,)) (recur (inc j))
+                                     (= c \;) (recur (inc (.indexOf s "\n" (int j))))
+                                     :else j)))]
+          (when-not (= (.charAt s j2) close) (throw (ex-info (str "unbalanced at " j2) {})))
+          (inc j2))
+        (recur (form-end s k))))))
+
+(defn form-end
+  "The offset just after the form starting at i."
+  [^String s i]
+  (let [c (.charAt s i)]
+    (cond
+      (= c \() (coll-end s (inc i) \))
+      (= c \[) (coll-end s (inc i) \])
+      (= c \{) (coll-end s (inc i) \})
+      (= c \") (string-end s i)
+      (= c \\) (let [j (inc i)]
+                 ;; a character: \x, or a name (\newline, A)
+                 (loop [k (inc j)]
+                   (if (and (< k (.length s)) (Character/isLetterOrDigit (.charAt s k)) (Character/isLetter (.charAt s j)))
+                     (recur (inc k))
+                     k)))
+      (#{\' \` \@} c) (form-end s (skip-ws s (inc i) (.length s)))
+      (= c \~) (form-end s (skip-ws s (if (= \@ (.charAt s (inc i))) (+ i 2) (inc i)) (.length s)))
+      (= c \^) (let [m (form-end s (inc i))] (form-end s (skip-ws s m (.length s))))
+      (= c \#) (let [d (.charAt s (inc i))]
+                 (cond (= d \{) (coll-end s (+ i 2) \})
+                       (= d \() (coll-end s (+ i 2) \))
+                       (= d \") (string-end s (inc i))
+                       (= d \_) (form-end s (skip-ws s (+ i 2) (.length s)))
+                       (= d \') (form-end s (skip-ws s (+ i 2) (.length s)))
+                       (= d \#) (form-end s (+ i 2))
+                       :else (form-end s (inc i))))
+      :else (loop [k i]
+              (if (and (< k (.length s))
+                       (let [c (.charAt s k)]
+                         (not (or (Character/isWhitespace c) (#{\( \) \[ \] \{ \} \" \, \;} c)))))
+                (recur (inc k))
+                k)))))
+
+(defn children
+  "The child forms of the list starting at i: [[start end] ...]."
+  [^String s i]
+  (loop [j (inc i) acc []]
+    (let [k (skip-ws s j (.length s))]
+      (if (nil? k) acc (let [e (form-end s k)] (recur e (conj acc [k e])))))))
+
+(defn top-forms [^String s]
+  (loop [j 0 acc []]
+    (let [k (skip-ws s j (.length s))]
+      (if (nil? k) acc (let [e (form-end s k)] (recur e (conj acc [k e])))))))
+
+(defn- rd [^String s [a b]]
+  (binding [*read-eval* false *ns* (find-ns 'user)]
+    (read-string (subs s a b))))
+
+(defn- head [f] (when (and (seq? f) (symbol? (first f))) (name (first f))))
+
+;; ---------------------------------------------------------------------------------------
+;; text helpers
+
+(defn- column [^String s i] (- i (inc (.lastIndexOf s "\n" (int (dec i))))))
+
+(defn- reindent
+  "Text t (whose first line starts at column from) moved to column to: every line after the
+  first shifted by to - from."
+  [^String t from to]
+  (let [d (- to from)
+        lines (str/split t #"\n" -1)]
+    (str/join "\n" (cons (first lines)
+                         (for [l (rest lines)]
+                           (cond (str/blank? l) ""
+                                 (pos? d) (str (apply str (repeat d \space)) l)
+                                 :else (let [n (min (- d) (count (take-while #(= % \space) l)))] (subs l n))))))))
+
+(defn- lead-comments
+  "The comment lines just before offset i in s (from the end of the previous form p), trimmed:
+  those after the last blank line."
+  [^String s p i]
+  (let [between (subs s p i)
+        lines (str/split between #"\n" -1)]
+    (vec (map str/trim (reverse (take-while #(str/starts-with? (str/trim %) ";") (reverse (butlast lines))))))))
+
+(defn- render
+  "Comment lines cs and the form text t (whose first line was at column from) as text whose
+  first line starts at column to (its indentation not included)."
+  [cs ^String t from to]
+  (str/join (str "\n" (apply str (repeat to \space))) (conj (vec cs) (reindent t from to))))
+
+;; ---------------------------------------------------------------------------------------
+;; a base's classes
+
+(defn class-span
+  "The span of the class named path (a vector of simple names: [\"Compiler\" \"DefExpr\"]) in
+  base text s."
+  [^String s path]
+  (letfn [(find-in [spans names]
+            (let [[n & more] names
+                  sp (first (filter (fn [sp] (let [f (rd s sp)]
+                                               (and (= "defclass" (head f)) (= n (name (second f))))))
+                                    spans))]
+              (when-not sp (throw (ex-info (str "no class " n) {})))
+              (if (seq more) (find-in (children s (first sp)) more) sp)))]
+    (find-in (top-forms s) path)))
+
+(defn members
+  "The member spans of the class at span sp with their keys: [[key [a b]] ...] (static
+  initializers numbered in order)."
+  [^String s sp]
+  (let [cs (children s (first sp))
+        n (atom -1)]
+    (for [c cs
+          :let [f (try (rd s c) (catch Throwable _ nil))]
+          :when (seq? f)
+          :let [k (if (= "static-initializer" (head f))
+                    [:static-initializer (swap! n inc)]
+                    (param-key f))]
+          :when k]
+      [k c])))
+
+;; ---------------------------------------------------------------------------------------
+;; a variant file's members
+
+(defn variant-members
+  "[[class-path kind member-form comment-lines text column] ...] of a variant file's text v:
+  kind :replace, :add or :cut."
+  [^String v]
+  (let [tops (top-forms v)]
+    (for [sp tops
+          :let [f (rd v sp)]
+          :when (= "variant" (head f))
+          :let [cls (str (second f))
+                path (str/split cls #"\$")
+                cs (children v (first sp))
+                ;; the children after the head and the class name
+                ms (drop 2 cs)]
+          [prev-end msp] (map vector (map second (drop 1 cs)) ms)
+          :let [m (rd v msp)
+                comments (lead-comments v prev-end (first msp))]]
+      (case (head m)
+        "add" (let [inner (second (children v (first msp)))]
+                [path :add (rd v inner) (into comments (lead-comments v (first msp) (first inner)))
+                 (subs v (first inner) (second inner)) (column v (first inner))])
+        "cut" [path :cut m nil nil nil]
+        [path :replace m comments (subs v (first msp) (second msp)) (column v (first msp))]))))
+
+;; ---------------------------------------------------------------------------------------
+;; merging
+
+(defn merge-into
+  "The base text s with the variant members vms applied."
+  [^String s vms]
+  (let [edits (atom [])]
+    (doseq [[path kind m cs text col] vms
+            :let [sp (class-span s path)
+                  ms (members s sp)]]
+      (case kind
+        :replace (let [k (if (= "static-initializer" (head m)) [:static-initializer 0] (param-key m))
+                       hit (first (filter #(= k (first %)) ms))]
+                   (when-not hit (throw (ex-info (str "replaces no member: " (pr-str k) " in " path) {})))
+                   (let [[a b] (second hit)]
+                     (swap! edits conj [a b (render cs text col (column s a))])))
+        :cut (let [k (cut-key (if (symbol? (second m)) (rest m) (second m)))
+                   hit (first (filter #(= k (first %)) ms))]
+               (when-not hit (throw (ex-info (str "cuts no member: " (pr-str k) " in " path) {})))
+               (let [[a b] (second hit)
+                     ;; the member's line, its leading blank line too
+                     a2 (inc (.lastIndexOf s "\n" (int (dec a))))
+                     a3 (let [p (.lastIndexOf s "\n" (int (- a2 2)))] (if (str/blank? (subs s (inc p) a2)) (inc p) a2))
+                     b2 (let [e (.indexOf s "\n" (int b))] (if (neg? e) b e))]
+                 (swap! edits conj [a3 b2 ""])))
+        :add (let [[a b] sp
+                   ;; the class's last member's column, else its head's + 2
+                   mc (if-let [last-m (last ms)] (column s (first (second last-m))) (+ 2 (column s a)))
+                   at (dec b)]
+               (swap! edits conj [at at (str "\n\n" (apply str (repeat mc \space)) (render cs text col mc))]))))
+    ;; from the end: an insertion at the class's end after the replacements in it
+    (reduce (fn [^String acc [a b t]] (str (subs acc 0 a) t (subs acc b)))
+            s
+            (sort-by (fn [[a b _ i]] [(- a) (- (or i 0))])
+                     (map-indexed (fn [i [a b t]] [a b t i]) @edits)))))
+
+(defn base-of [path] (str "arbace/lang/" (first path) ".ae"))
+
+(let [files *command-line-args*
+      ;; a file's header (its comments before in-ns) goes before its first member, after
+      ;; a blank comment line
+      vms (mapcat (fn [f]
+                    (let [v (slurp f)
+                          header (lead-comments v 0 (.indexOf v "(in-ns"))
+                          [m & more] (variant-members v)]
+                      (cons (update m 3 #(into (conj header ";;") %)) more)))
+                  files)
+      by-base (group-by (comp base-of first) vms)]
+  (doseq [[base ms] by-base]
+    (let [s (slurp base)
+          s2 (merge-into s (vec ms))]
+      (spit base s2)
+      (println "merged" (count ms) "members into" base))))
