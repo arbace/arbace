@@ -78,9 +78,12 @@ The current state of the work. This file is rewritten as things change. For the 
   101.3 MB (was 209.9; the evaluated 72.4), the box's guest 100.8 MB, a build 4:13 to 4:41, the
   gate 10:32, the test build reusing the compiled namespaces; the seed remade (`c7f5e3d5…`) and
   verified, the box's rebuild byte for byte (`4f394cc6…`); SA153-SA159 accepted as (a).
-  Then: S8's runs again on the final program (`bin/box-rebuild`, amd64, the arm64 VM, the whole chain there tried again), the Mac bundle for the user
-  (`./mac.sh all`; on macOS 14, as the earlier 42 of 42: the user upgrades to 26 only after it),
-  `bin/gate --full` with `bin/box-rebuild` by hand, the tag.
+  S8's runs again on the final program, done (2026-10-14; [go/BOX-NOTES.md](go/BOX-NOTES.md)):
+  byte for byte on amd64 (`b7c00302…`), in the emulated arm64 VM (`a733f9bc…`, 8 h 21 min) and on
+  the Mac (`579c8b3b…`, 352 s; the checklist 46 of 46, the rebuild 4 of 4; two checklist fixes,
+  `338c4a2`); the Mac's HV1, HV6 (5 ppm) and HV7 (352 s against the amd64 box's 785 s) measured.
+  Left: the whole chain in the VM tried again (BX117 (a)), `bin/gate --full` with `bin/box-rebuild`
+  by hand, the tag. The user may upgrade the Mac to macOS 26.
 - Known issues: fixed in S5 (SA90 (b), `reflect_tables.ae`, the box's oracle run, `Var`,
   `Reflector` and the `.subst` variants merged, `bin/box-vendor convert`); RT, Main and
   Compiler's hand-written variants merged in S6 (SA150).

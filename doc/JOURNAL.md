@@ -1484,3 +1484,16 @@ HV7: the rebuild 352 s on the Mac against 785 s in the amd64 box (nested KVM).
 
 Also found: `bin/box-rebuild --given` did not give the compiled namespaces (SA152 added the step;
 fixed in `77b20b6`), so the arm64 VM's run (started before the fix) compiles them emulated.
+
+## 2026-10-14: S8 in the emulated arm64 VM on the final program, byte for byte
+
+The arm64 VM's run of the day's S8 runs (`.tmp/s8b/run.sh` at `3bf351b`: the VM with 16 vCPUs and
+28 GiB, `bin/box-rebuild --arch arm64 --dir .tmp/box-rebuild/arm64-v1 --given
+.tmp/box-rebuild/amd64-v1 box boot`, then `compare`) finished in 30,039 s (8 h 21 min). Started
+before `77b20b6`, it compiled the namespaces itself, emulated (11,183 s, the amd64 runs' result);
+jrt's compile took 8,118 s, lang's 2,526 s (86 and 77 times the amd64 box's). The arm64 image built
+in the box = the host's, byte for byte, `a733f9bc…`, 98,464,042 bytes, every step's result equal;
+booted by its ref in the VM (`aarch64`). With amd64 and the Mac (the entry above) S8's criterion
+holds on the final program on all three. Recorded in `doc/go/BOX-NOTES.md`, "The runs again on
+the final program". Next: the whole chain in the VM (BX117 (a)) tried again, detached, at the same
+time as `bin/gate --full`, then `bin/box-rebuild` by hand and the tag.

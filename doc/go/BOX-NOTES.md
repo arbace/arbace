@@ -3282,12 +3282,44 @@ times are this machine's under that load, not the box's best):
   --full` beside `bin/arbace-go --build --box` (about 25 minutes, 40 GiB of guests at most); the
   arm64 VM's run (hours) and the Mac's at the milestone.
 
+### The runs again on the final program (2026-10-14, the commits `3bf351b`, `338c4a2`)
+
+After S6 and its size work (`.tmp/s8b/run.sh`, at `3bf351b`; the journal's entry of the day):
+
+- **amd64** (`bin/box-rebuild --dir .tmp/box-rebuild/amd64-v1 prepare box host compare boot smoke
+  plan-check`): in the box 785 s, on the host 661 s. **The image built in the box = the host's,
+  byte for byte**: `b7c00302bd689c975a01dc2151980fff1fcff88765495f64d32025eb6e5e3008`, 100,757,802
+  bytes; booted by its ref; bin/box-smoke 119 ok; plan-check 281 packages, the same as go list's.
+- **arm64, the host's reference** (`prepare host`): 656 s,
+  `a733f9bc43971bbb78e56a10efeba25688d552b132919637c103359e6ffc3772`, 98,464,042 bytes.
+- **arm64 in the aarch64 VM** (16 vCPUs, 28 GiB; `--given .tmp/box-rebuild/amd64-v1 box boot`,
+  then `compare`): 30,039 s (8 h 21 min). The run began before `77b20b6`, so `--given` gave a2g's
+  program and the printings but not the compiled namespaces: the VM compiled them itself,
+  emulated, 11,183 s (100 sources, 7,689 classes, the amd64 runs' `effde3ca…`). Then the plan
+  (280 packages, `1e70e360…`) 146 s; jrt's compile 8,118 s and lang's 2,526 s (86 and 77 times
+  the amd64 box's); the links 151 s and 148 s; the preparing 38 s. **The arm64 image built in the
+  box = the host's, byte for byte**: `a733f9bc…`, every step's result equal, a2g's program and the
+  image of prepared namespaces equal `bin/arbace-go --build`'s; booted by its ref in the VM
+  ("booted by ref: arbace-seed-is-go-v1-145-g3bf351b aarch64").
+- **The Mac** (Apple M2 Max, macOS 14.8.7): the bundle of `3bf351b` rebuilt `a733f9bc…` byte for
+  byte in 353 s, with two failures of the checklist script's own: `mac.sh`'s `box` read `cpus`,
+  set only inside the checklist, and its boot check did not expect `aarch64`; and a guest of 61
+  GiB was refused by Hypervisor.framework's `hv_vm_map` (`HV_BAD_ARGUMENT`) before the monitor's
+  limit check could name the limit. Fixed in `338c4a2`: the monitor checks the guest's RAM against
+  `maxGuestEnd` before any memory is mapped; `box` defaults to 4 vCPUs; the boot check expects
+  `aarch64`. The bundle of `338c4a2` (its arm64 host image `579c8b3b…`): the checklist 46 of 46,
+  the rebuild 4 of 4, the image rebuilt on the Mac = Linux's, `579c8b3b…`, 98,464,042 bytes, in 352
+  s, booted by its ref. HV1 on the Mac: 6 GiB and 60 GiB slots, 61 GiB refused with the limit
+  named, 16 GiB with 10 GiB touched in 7.1 s. HV6: about 5 ppm over an hour, no resync. HV7: 352 s
+  on the Mac against 785 s in the amd64 box (nested KVM). The whole chain on arm64 hardware holds.
+
+So S8's exit criterion holds on the final program: byte for byte on amd64, in the emulated arm64
+VM and on the Mac. The whole chain in the VM (BX117 (a)) is tried again after it.
+
 ### Left
 
-- The Mac's run (`./mac.sh all` on the bundle above), by the user; its results decide HV6 and
-  HV7 there and prove the whole chain on arm64 hardware.
-- After S6: the byte-for-byte runs again (the script's order in "What was built"); the whole
-  chain in the VM (BX117 (a)) if S6's speed allows it.
+- The Mac's run and the runs again after S6: done (above).
+- The whole chain in the VM (BX117 (a)), tried again after S6.
 - The guests' peak memory per step is not measured (the launcher's statistics report counts,
   not a guest's touched pages); BX116's sizes are SA101's and S7's.
 - `bin/box-rebuild` is not in `bin/gate --full` until BX119 is decided.
