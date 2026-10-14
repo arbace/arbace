@@ -402,12 +402,30 @@
       (list* head (typed-args ctx ps args))
       (list* head (list 'cast (type-sym dc) t) (typed-args ctx ps args)))))
 
+(defn- compiled-interface?
+  "Is class c an interface of a namespace being compiled (gen-interface's, a protocol's)?"
+  [ctx ^Class c]
+  (= :interface (:kind (get @(:classes ctx) (destub (.getName c))))))
+
 (defn- emit-instance-method [ctx n unboxed?]
   (let [^java.lang.reflect.Method m (:method n)]
     (cond
+      ;; a method of a compiled namespace's interface: an object of a class made at run time
+      ;; implements it only nominally (its Go type is the runtime's Dyn), so it is called by
+      ;; reflection on such an object (SA142)
+      (and m (compiled-interface? ctx (.getDeclaringClass m)) (not (:dyn-guarded n)))
+      (let [t (gsym ctx "target-")
+            dc (.getDeclaringClass m)
+            n' (assoc n :target ::local :dyn-guarded true :target-sym t)]
+        (list 'let [(tagged t Object) (emit ctx (:target n))]
+              (list 'if (list 'and (list 'some? t) (list 'arbace.lang.Compiler$AOT/isDyn t))
+                    (let [r (list 'arbace.lang.Reflector/invokeInstanceMethodOfClass t (constant ctx dc)
+                                  (:methodName n) (obj-array ctx (:args n)))]
+                      (if unboxed? (unbox-arg ctx r (.getReturnType m)) r))
+                    (emit-instance-method ctx n' unboxed?))))
       (and m (public? (.getDeclaringClass m)) (not (runtime-class? (.getDeclaringClass m) ctx))
            (not (jrt-lacks? m)))
-      (let [f (method-call ctx m (emit ctx (:target n)) (:args n))]
+      (let [f (method-call ctx m (if (:target-sym n) (:target-sym n) (emit ctx (:target n))) (:args n))]
         (if unboxed? f (box f (.getReturnType m))))
       (and m unboxed?)
       (unbox-arg ctx (emit-instance-method ctx (assoc n :method nil :qualifyingClass (.getDeclaringClass m)) false)
