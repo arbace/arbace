@@ -802,8 +802,26 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
           ;; reaches Collection (core's print-method preferences: EVAL-NOTES.md)
           ifaces (distinct (mapcat (fn up [i] (if (m/in-world? i) [i] (mapcat up (:interfaces (m/info i)))))
                                    (:interfaces dd)))
-          tables (if (:reflected dd) {} (member-tables pkg n))
+          ;; a compiled fn's code (S6, :aot/code) has none: nothing reflects on it, its fn's
+          ;; class is made at run time (SA154)
+          tables (if (or (:reflected dd) (:aot/code (:meta dd))) {} (member-tables pkg n))
           cls-sym (symbol (str g "_class"))]
+      (if (m/code-class? n)
+        ;; a compiled fn's code (SA159): its variable, and its entry of the package's table of
+        ;; static data, which jrt.DefineCode registers (main/registrations)
+        [(list 'go/var (tag cls-sym (list '* (m/jrt-sym pkg "Class"))))
+         (list 'a2g/code-decl
+               (apply list 'lit (m/jrt-sym pkg "CodeDecl")
+                      (concat
+                        [:Out (list 'addr cls-sym) :Name (java-name n) :Modifiers (modifiers n)]
+                        (when-not (= :top (:nesting dd)) [:Simple (or (:simple dd) "")])
+                        [:Go (str (nm/pkg-path pkg) "." g)]
+                        (when-let [src (:aot/source (:meta dd))] [:Source src])
+                        (when (and (= :member (:nesting dd)) (m/in-world? (:outer dd)))
+                          [:Declaring (list 'addr (c/class-val (str "L" (:outer dd) ";")))])
+                        (when (seq ifaces)
+                          [:Interfaces (apply list 'lit (list 'slice (list '* (list '* (m/jrt-sym pkg "Class"))))
+                                              (map #(list 'addr (c/class-val (str "L" % ";"))) ifaces))]))))]
       (vec (remove nil? (concat (when-let [[fns t] (member-table-form pkg g tables)]
          (conj (vec fns) (list 'go/var (tag (symbol (str g "_members")) (list '* (m/jrt-sym pkg "MemberTable"))) t)))
        [(list 'go/var cls-sym
@@ -836,8 +854,9 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                                               [(symbol (str g "__VALUES"))])))])
                       (when (member-table-form pkg g tables)
                         [(list 'set! (list '.-Table 'i) (symbol (str g "_members")))])
-                      (when-not iface
-                        [(list (m/jrt-sym pkg "RegisterGoType") cls-sym (list (list 'inst 'reflect/TypeFor (symbol g))))]))))]))))))
+                      ;; (Unsafe's field offsets: not of a compiled namespace's classes, SA154)
+                      (when-not (or iface (nm/compiled-pkg? pkg))
+                        [(list (m/jrt-sym pkg "RegisterGoType") cls-sym (list (list 'inst 'reflect/TypeFor (symbol g))))]))))])))))))
 
 (defn cut-forms
   "Class objects of classes outside the closed world that code names (class literals):
