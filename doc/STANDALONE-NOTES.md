@@ -1988,10 +1988,12 @@ host, the second a2g pass reusing the first's world, `lang` smaller) is in the m
 
 ## S6: the compiled build as the default
 
-Status: in progress on `s6-compile` (2026-10-14), main merged at `e6f1f48` (S8). The user's
-decision on SA140: `ARBACE_AOT=1` becomes the default of the build, the gate, the fixpoint and
-the seed once Clojure's suite and the oracle pass on it and a build takes no longer than today's
-(about 5 minutes). Amendments SA141 onward, proposed, the recommended choice applied meanwhile.
+Status: done on `s6-compile` (2026-10-14), main merged at `e6f1f48` (S8): `ARBACE_AOT=1` is the
+default, the seed is the compiled program, printed again and rebuilt by itself (`bin/seed
+--verify`). The user's decision on SA140: `ARBACE_AOT=1` becomes the default of the build, the
+gate, the fixpoint and the seed once Clojure's suite and the oracle pass on it and a build takes
+no longer than today's (about 5 minutes): both hold (below). Amendments SA141-SA152, proposed,
+the recommended choice applied.
 
 ### A compiled fn's representation (SA141)
 
@@ -2202,6 +2204,36 @@ it imports (0.8 GB), and the first run's `arbace.pprint` ran out of BX116's 3 Gi
 (`arbace.box.build`'s `:resources` takes a key ending in `*` for a prefix, `"arbace/aot_*"`).
 The box's guest is 209.3 MB (the launcher with it 214.5 MB); its smoke test (`bin/arbace-go
 --smoke --box`: 4 and 1 vCPUs, the store, the tool guests, TLS, the terminal) passes.
+
+### The default, the fixpoint and the seed (SA151)
+
+`ARBACE_AOT` defaults to 1 in bin/arbace-go (`ARBACE_AOT=0`: the namespaces evaluated, the image
+of prepared namespaces, as before S6), so the gate's builds, the fixpoint and the seed build the
+compiled program. A two-run build's second a2g and g2a run on the host, or on the first program
+when the host has no id spaces (a program older than S6): the second run then translates as a
+one-run build's host would.
+
+- **The fixpoint from the old stage 0** (the evaluated seed `f7d27e48...`, `cef4f0c`): G1 in
+  two runs (17:40), G2 and G3 in one each (4:54, 5:44): a2g's programs G1 = G2 = G3 (diff -r), G2
+  = G3 byte for byte (`80207dbf...`, 209,875,104 bytes; G1 differed by its version map only).
+- **The fixpoint at `e3b5792`** hosted by that G3 (each G in one run, 5:26, 5:39, 4:57): G1 = G2 =
+  G3 byte for byte, `d380df44...`, 209,887,392 bytes.
+- **The seed remade** from that G3 (`ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed
+  --make`): `seed/arbace-seed-go.tar.xz` **`62c699af12efc71d095c308a749d63ad14837dc2a13e899977515e2522fa30cb`**
+  (6,607,876 bytes, 1,700 files, 97.8 MB unpacked), was `f7d27e4857b388a028acc79de22b2b85975615a9a3748a7bdb53d37b3dcf55eb`
+  (3,059,072 bytes): the compiled namespaces' packages are most of the growth.
+- **`bin/seed --verify`** (18:56): at `e3b5792`, stage 0 from the new seed hosted the fixpoint
+  (each G in one run); printed again, the same tree (the tar `859f58ec...`) and the same archive
+  `62c699af...`; **stage 0 = G1 = G2 = G3 byte for byte**, `d380df44...`.
+- **`bin/box-rebuild`** (amd64, `e3b5792`, 39 min with the build): the namespaces compiled in the
+  box (65 s), a2g there (500 s), the image built in the box **= the host's, byte for byte**
+  (`9c802100...`, 209,322,282 bytes; the box's run 16 min, the host's 16 min), a2g's program and
+  the image of prepared namespaces = bin/arbace-go --build's, and the image booted by its ref.
+  (The first run, before the 6 GiB guests, stopped at `arbace.pprint`'s compile: out of memory.)
+- **The essential gate** at `0e4c7e4` (the new seed), 12:00: stage 0 from the seed in 13 s
+  (`d380df44...`), the executable and the test build by stage 0 in one a2g run each (9:51), the
+  smoke test, Clojure's suite 20,506 of 20,520 (no regressions), the oracle 22,505 of 22,558
+  (the 53 known, 0 new): passed.
 
 ### Amendments
 
