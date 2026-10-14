@@ -70,19 +70,21 @@ The current state of the work. This file is rewritten as things change. For the 
   Mac (one bundle at the end, also carrying the Mac's HV1 RAM checks and HV6/HV7 clock run). S9
   (Go's toolchain as forms) stays later.
 - Status: S5 closed by measurement (SA100-SA107); S7 done; S8 done before S6 (byte for byte in
-  the box on amd64 and, with a2g's output from amd64, in the arm64 VM; BX110-BX119); S6's
-  checkpoint merged (`ARBACE_AOT=1`, SA130-SA140), its remaining work: the suite on the compiled
-  test build, an AOT build no slower than 5 minutes, the AOT fixpoint, then AOT the default and
-  the seed remade; RT, Main and Compiler's variants merged into their bases. Then: S8's runs
-  again on the final program (`bin/box-rebuild`, amd64, the arm64 VM, the whole chain there
-  tried again), the Mac bundle for the user (`./mac.sh all`; on macOS 14, as the earlier 42 of
-  42: the user upgrades to 26 only after it), `bin/gate --full` with `bin/box-rebuild` by hand,
-  the tag.
+  the box on amd64 and, with a2g's output from amd64, in the arm64 VM; BX110-BX119); S6 merged
+  (2026-10-14): Arbace compiled to Go the default (`ARBACE_AOT=1`), a build 4:46 to 5:14, the
+  suite and the oracle as recorded, the fixpoint, the seed remade from it (`62c699af…`, was
+  `f7d27e48…`) and verified, the box's rebuild byte for byte on amd64 (`9c802100…`); SA141-SA152
+  accepted as (a). In progress (the user: inside the milestone): the compiled executable's size
+  (209.9 MB against 74.9 MB evaluated) and the test build reusing the compiled namespaces; then
+  the fixpoint and the seed again. Then: S8's runs again on the final program (`bin/box-rebuild`,
+  amd64, the arm64 VM, the whole chain there tried again), the Mac bundle for the user
+  (`./mac.sh all`; on macOS 14, as the earlier 42 of 42: the user upgrades to 26 only after it),
+  `bin/gate --full` with `bin/box-rebuild` by hand, the tag.
 - Known issues: fixed in S5 (SA90 (b), `reflect_tables.ae`, the box's oracle run, `Var`,
-  `Reflector` and the `.subst` variants merged, `bin/box-vendor convert`); left: RT, Main and
-  Compiler's variants (with S6).
-- Speed: S6 (a2g compiled: load 119 s to 38 s, reach 60 s to 16 s); left: the AOT build itself
-  no slower than 5 minutes (SA140).
+  `Reflector` and the `.subst` variants merged, `bin/box-vendor convert`); RT, Main and
+  Compiler's hand-written variants merged in S6 (SA150).
+- Speed: S6 (a2g compiled: load 119 s to 38 s, reach 60 s to 16 s; the compiled build 4:46,
+  SA140's bound held); left: the executable's size (above).
 
 ## Later
 

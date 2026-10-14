@@ -1993,7 +1993,7 @@ default, the seed is the compiled program, printed again and rebuilt by itself (
 --verify`). The user's decision on SA140: `ARBACE_AOT=1` becomes the default of the build, the
 gate, the fixpoint and the seed once Clojure's suite and the oracle pass on it and a build takes
 no longer than today's (about 5 minutes): both hold (below). Amendments SA141-SA152, proposed,
-the recommended choice applied.
+the recommended choice applied; the user accepted all as (a) (2026-10-14).
 
 ### A compiled fn's representation (SA141)
 

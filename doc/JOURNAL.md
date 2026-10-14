@@ -1338,3 +1338,32 @@ xterm's ctlseqs), what one screenshot shows, what more screenshots would answer,
 X1-X5, checks, proposals IR1-IR12 and stages T1-T6. Observed on the host for it: the user's
 sessions are served by Alpine's `mosh-server` (`new -s -c 256`). Nothing built; the agenda's
 Later points to it.
+
+## 2026-10-14: S6 merged, compiled Arbace the default, the seed remade; SA141-SA152 accepted
+
+S6's branch `s6-compile` (30 commits after `e6f1f48`, head `725c0af`) merged into main; the essential gate on the merge passes (12m48s: the suite as recorded, the oracle 53 known, 0 new)
+(doc/STANDALONE-NOTES.md, "S6: the compiled build as the default"). SA140's conditions held on
+its gate at `0e4c7e4`: Clojure's suite 20,506 of 20,520, no regressions; the oracle 22,505 of
+22,558, the 53 known mismatches, 0 new (8 new on an earlier run, one cause: a compiled
+namespace's holder class bears the namespace's name, so the class forms' analyzer read
+`arbace.core/identical?` as a static field; fixed in `arbace/classes/analyze.ae` to take the var
+when the class has no such field, as Clojure's `analyzeSymbol`). The build: 4:46 after a
+namespace's edit, 5:14 cold, 9:31 when the runtime changed (two a2g runs), against 5:40 for the
+evaluated build; was 12:00 and 7:30 before this work (the host compile printed on 16 threads,
+a2g's runtime analyzed beside the compiled classes, g2a build's `--print-cache`, per-source id
+spaces while compiling, a narrower runtime key). `ARBACE_AOT=1` is now `bin/arbace-go`'s
+default. RT, Main and Compiler's hand-written Go-build variants merged into their bases
+(VENDOR-NOTES hand change 25). Compiled frames in stack traces. The fixpoint at `e3b5792`:
+G1 = G2 = G3 = `d380df448dd17c8e…`; the seed remade from G3 (`0e4c7e4`):
+`62c699af12efc71d095c308a749d63ad14837dc2a13e899977515e2522fa30cb`, 6,607,876 bytes, was
+`f7d27e4857b388a0…`, 3,059,072 bytes; `bin/seed --verify` holds. The box's rebuild compiles the
+namespaces as the host does (6 GiB guests for compiled packages, 8 for `arbace.core`: the first
+run ran out of memory on `arbace.pprint` in 3); `bin/box-rebuild` amd64: the image built in the
+box = the host's, `9c802100…`, 209,322,282 bytes. T3 stays (8% slower, SA139).
+
+The user accepted SA141-SA152 as (a), as recommended. Asked whether the executable's size (209.9
+MB stripped compiled, against 74.9 MB evaluated) and the test build's recompiling of the
+namespaces (48 s) wait until after the milestone (recommended), the user chose to have them
+inside the milestone: a new track `s6-size` (worktree `.tmp/worktrees/s6-size` from `b979754`)
+measures the size's causes and cuts them without losing correctness, the compiled speed or the
+5-minute build, then remakes the fixpoint and the seed; S8's runs and the Mac bundle follow it.
