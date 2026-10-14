@@ -1445,3 +1445,12 @@ agent's finished turns (fed by a hook command on the host, listed in Claude Code
 not inspected), the rest of the settings. §3 now asks first for the app's own "Open Source
 Licenses" page, which names its libraries as any user sees them: the tooling question answered
 without reverse engineering.
+
+## 2026-10-14: the model app's tooling, from its licenses page
+
+The user's second recording (18 s) scrolls the model app's "Open Source Licenses" page (56 direct
+dependencies, 700+ transitive). The iOS app is React Native with Expo (TypeScript), a Rust core
+for SSH (`russh`) and its own mosh client (`prost`, `flate2`, `aes`), Ghostty's terminal core
+built for iOS (GhosttyKit, MIT; Zig, Metal) and whisper.cpp for dictation (`whisper.rn`): not
+Swift with gomobile, as guessed earlier the same day (the guess was wrong). Recorded in
+`doc/IOS-REPL-SURVEY.md` §2, with libghostty as prior art for the terminal core.

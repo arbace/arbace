@@ -119,6 +119,31 @@ the REPL asks, as notifications and approvals.
   General (language, app icon, what the home screen shows); Help (docs, what's new, support, open
   source licenses); version 4.0.1.
 
+**The app's tooling, from its own "Open Source Licenses" page** (a second recording, 2026-10-14;
+56 direct dependencies, "700+" transitive; versions as listed):
+
+- **The UI: React Native with Expo**, not Swift or Go: `expo` 57.0.25, `react-native` 0.86.3,
+  `react` 19.2.3, `react-native-reanimated`, `-gesture-handler`, `-screens`, `-svg`,
+  `-safe-area-context`, `-keyboard-controller`, `-nitro-modules`, `-worklets`, `-webview`,
+  `-iap` (the paid tier), `-fs`, `-zip-archive`, `-sortables`, a fork of
+  `react-native-enriched-markdown`; `heroui-native` (components), `uniwind`, `tailwindcss`,
+  `tailwind-merge`, `tailwind-variants` (styling), `lucide-react-native` (icons), `i18next`,
+  `@tanstack/react-query`, `zustand` (state), `@op-engineering/op-sqlite`, Firebase analytics,
+  `@expo-google-fonts/jetbrains-mono` (OFL-1.1).
+- **The terminal: GhosttyKit** (MIT, `v1.3.2-dev-ios-build`): Ghostty's terminal core
+  (libghostty, written in Zig, rendering with Metal) built for iOS. The GPU rendering is Ghostty's.
+- **The transport: Rust**: `russh` 0.57 and `russh-sftp` (SSH), `tokio`, `ssh-key`,
+  `ssh-encoding`, `aes`, `sha2`, `dryoc` (libsodium's primitives), `rand`; `prost` (protobuf: mosh's
+  messages are protobuf, so the mosh client is the app's own, in Rust), `flate2` (zlib, as mosh
+  compresses its instructions), `bincode`, `serde`, `crossbeam-channel`, `regex`.
+- **Speech: `whisper.rn`** (whisper.cpp, on the device): the composer's dictation.
+
+So the iOS app is TypeScript over React Native, a Rust core and a Zig terminal; Go is the model's
+only on the host and on the Mac (the user's measurements). For Arbace this changes nothing in
+§5.3 (the aim is Arbace, not the model's stack), but it names prior art: libghostty for the
+terminal core's design (T2; MIT, studied or vendored under `LICENSE.md`), a mosh client written
+apart from mosh's own code (as IR6 (a) proposes), and on-device speech recognition.
+
 ## 3. What more screenshots would answer
 
 1. The jump and history keys at work (with output to jump through, with a history).
@@ -127,8 +152,6 @@ the REPL asks, as notifications and approvals.
 4. A long loss of network (the recording shows a short reconnect).
 5. Settings' Advanced, Toolbar, Shortcuts, Gestures, Speech, Hooks, Notifications, Sidebar.
 6. The QR pairing's command on the host (what it installs and runs).
-7. Help, "Open Source Licenses": the libraries the app ships, as the app itself shows them to
-   any user; it answers which tooling the iOS app uses without any reverse engineering.
 
 ## 4. The functional specification to write (the specification side)
 
