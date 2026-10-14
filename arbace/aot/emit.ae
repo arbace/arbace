@@ -276,7 +276,8 @@
   "Is p a functional interface a fn argument is adapted to (Clojure 1.12's FISupport, as the
   analysis decides it: Compiler$AST/fiMethod)?"
   [^Class p]
-  (and (.isInterface p) (some? (Compiler$AST/fiMethod p))))
+  (and (.isInterface p)
+       (some? (arbace.lang.Reflector/invokeStaticMethod "arbace.lang.Compiler$AST" "fiMethod" (object-array [p])))))
 
 (defn- typed-args
   "The arguments es as parameters of types ps (MethodExpr.emitTypedArgs)."
@@ -325,7 +326,7 @@
         (if (and (:once ctx) (:shouldClear n) (:canBeCleared b) (not (:bindingPrim b)))
           (list 'let ['t- r] (list 'set! r nil) 't-)
           r))
-      (and (zero? (:idx b)) (not (:isArg b))) 'this
+      (and (zero? (:idx b)) (not (:isArg b))) (or (:self-sym ctx) 'this)
       :else (local-sym b))))
 
 (defn- emit-invoke [ctx n]
@@ -549,9 +550,10 @@
                      (emit ctx arg))))
                lls (:args n)))))
 
-(defn- fn-instance
+(defn- body-instance
   "A new instance of fn or reify class ox (its node), its closed-over values from the current
-  method: (new C closed...) (ObjExpr.emit); letfn's own locals nil (set after)."
+  method: (new C closed...) (ObjExpr.emit); letfn's own locals nil (set after). A fn's is its
+  code (SA141), which fn-wrap makes the fn."
   [ctx ox nil-locals]
   (let [cname (emit-fn-class! ctx ox)
         args (for [lb (keys (:closes ox))]
@@ -559,21 +561,40 @@
                  nil
                  (let [b (node lb)]
                    (emit-local ctx {:b lb :shouldClear false} (boolean (:bindingPrim b))))))]
-    (list* 'new (symbol cname) (concat (when (:supportsMeta ox) [nil]) args))))
+    (list* 'new (symbol cname) (concat (when (and (= "new-instance" (:op ox)) (:supportsMeta ox)) [nil]) args))))
+
+(defn- fn-wrap
+  "The fn of fn ox (its node) whose code is form body: a Compiler$AOTFn, or a
+  Compiler$AOTRestFn of the variadic arity's required count."
+  [ctx ox body]
+  (let [cname (emit-fn-class! ctx ox)
+        k (:variadic (get @(:classes ctx) cname))
+        cls (symbol cname "fn-class")]
+    (if k
+      (list 'new 'arbace.lang.Compiler$AOTRestFn body cls nil (list 'unchecked-int k))
+      (list 'new 'arbace.lang.Compiler$AOTFn body cls nil))))
+
+(defn- fn-instance
+  "A new fn or reify (ox, its node)."
+  [ctx ox nil-locals]
+  (let [b (body-instance ctx ox nil-locals)]
+    (if (= "fn" (:op ox)) (fn-wrap ctx ox b) b)))
 
 (defn- emit-letfn [ctx n unboxed?]
   (let [bis (map node (:bindingInits n))
         lbs (identity-set (map :binding bis))
         syms (map #(local-sym (node (:binding %))) bis)
-        inits (for [bi bis] (fn-instance ctx (node (:init bi)) lbs))
-        sets (for [bi bis
+        bsyms (map #(symbol (str "body-" %)) syms)
+        bodies (for [bi bis] (body-instance ctx (node (:init bi)) lbs))
+        sets (for [[bi bs] (map vector bis bsyms)
                    :let [ox (node (:init bi))
                          cname (emit-fn-class! ctx ox)]
                    lb (keys (:closes ox))
                    :when (.containsKey ^IdentityHashMap lbs lb)]
-               (list 'set! (list (field-sym (node lb)) (list 'cast (symbol cname) (local-sym (node (:binding bi)))))
-                     (local-sym (node lb))))]
-    (list 'let (vec (mapcat (fn [s i] [(tagged s Object) i]) syms inits))
+               (list 'set! (list (field-sym (node lb)) bs) (local-sym (node lb))))]
+    (list 'let (vec (concat
+                      (mapcat (fn [bs bi b] [(tagged bs (symbol (emit-fn-class! ctx (node (:init bi))))) b]) bsyms bis bodies)
+                      (mapcat (fn [s bs bi] [(tagged s Object) (fn-wrap ctx (node (:init bi)) bs)]) syms bsyms bis)))
           (concat (list 'do) sets [(if unboxed? (emit-unboxed ctx (:body n)) (emit ctx (:body n)))]))))
 
 (defn- emit-try [ctx n unboxed?]
@@ -971,9 +992,11 @@
       (swap! (:classes ctx) assoc cname ::pending)
       (let [cls (atom {:name cname :consts [] :const-map (IdentityHashMap.) :const-prefix ""})
             fn? (= "fn" (:op ox))
-            ctx' (assoc ctx :cls cls :objx ox :once (:onceOnly ox) :closed (identity-set (keys (:closes ox))))
+            ctx' (assoc ctx :cls cls :objx ox :once (:onceOnly ox) :closed (identity-set (keys (:closes ox)))
+                        :self-sym (if fn? 'self 'this))
             closes (keys (:closes ox))
-            meta? (boolean (:supportsMeta ox))
+            ;; a reify's metadata is its object's (__meta); a fn's is its Compiler$AOTFn's
+            meta? (and (not fn?) (boolean (:supportsMeta ox)))
             fields (for [lb closes :let [b (node lb)]]
                      (list 'field (tagged (symbol (:name b)) (or (:bindingPrim b) Object))))
             ctor (list* 'constructor (with-meta (vec (concat ['this] (when meta? [(tagged 'meta__ 'arbace.lang.IPersistentMap)])
@@ -984,12 +1007,15 @@
                         (concat (when meta? ['(set! (.-__meta this) meta__)])
                                 (for [lb closes :let [b (node lb)]]
                                   (list 'set! (list (field-sym b) 'this) (symbol (str "c__" (:name b)))))))
+            variadic (some #(when (:isVariadic (node %)) (node %)) (when fn? (:methods ox)))
             methods
             (if fn?
+              ;; a fn's code (SA141): invoke(self, a...) of Compiler$AOTF<n>, doInvoke(self, a...,
+              ;; rest) of Compiler$AOTR<k>, self the fn (its name in its body)
               (for [m (:methods ox)
                     :let [mn (node m)
                           req (:reqParms mn)
-                          ps (vec (concat ['this] (map param-sym req)
+                          ps (vec (concat ['this 'self] (map param-sym req)
                                           (when (:restParm mn) [(param-sym (:restParm mn))])))]]
                 (vary-meta
                   (list 'method (with-meta (if (:isVariadic mn) 'doInvoke 'invoke) {:public true}) ps
@@ -1002,25 +1028,32 @@
                           ps (vec (cons 'this (map (fn [lb c] (tagged (local-sym (node lb)) c)) als ptypes)))]]
                 (list 'method (with-meta (symbol (:name mn)) {:public true}) (tagged ps (:retClass mn))
                       (method-body ctx' mn ps))))
-            variadic (some #(when (:isVariadic (node %)) (node %)) (when fn? (:methods ox)))
             extra (concat
-                    (when variadic
-                      [(list 'method (with-meta 'getRequiredArity {:public true}) (tagged '[this] Integer/TYPE)
-                             (list 'unchecked-int (count (:reqParms variadic))))])
+                    (when fn?
+                      ;; the fn's class, named as the JVM names it, a subclass of the fn's
+                      ;; Compiler$AOTFn made at run time (getClass answers it: a2g$class)
+                      [(list 'field (tagged (with-meta 'fn-class {:public true :static true :final true}) 'java.lang.Class)
+                             (list (with-meta 'arbace.lang.Compiler$Dyn/defineFnClass {:param-tags '[java.lang.String java.lang.Class]})
+                                   cname (if variadic 'arbace.lang.Compiler$AOTRestFn 'arbace.lang.Compiler$AOTFn)))])
                     (when meta?
                       [(list 'field (tagged '__meta 'arbace.lang.IPersistentMap))
                        (list 'method (with-meta 'meta {:public true}) (tagged '[this] 'arbace.lang.IPersistentMap) '(.-__meta this))
                        (list 'method (with-meta 'withMeta {:public true}) (tagged ['this (tagged 'm 'arbace.lang.IPersistentMap)] 'arbace.lang.IObj)
                              (list* 'new (symbol cname) 'm
                                     (for [lb closes] (list (field-sym (node lb)) 'this))))]))
-            interfaces (when-not fn? (class-interfaces ctx ox))]
+            interfaces (if fn?
+                         (vec (for [m (:methods ox) :let [mn (node m)]]
+                                (symbol (str (if (:isVariadic mn) "arbace.lang.Compiler$AOTR" "arbace.lang.Compiler$AOTF")
+                                             (count (:reqParms mn))))))
+                         (class-interfaces ctx ox))]
         (let [members (deep (concat fields [ctor] methods extra))]
         (swap! (:classes ctx) assoc cname
                {:name cname
                 :members members
                 :kind (if fn? :fn :reify)
-                :super (if fn? (if (:isVariadic ox) 'arbace.lang.RestFn 'arbace.lang.AFunction) 'java.lang.Object)
+                :super 'java.lang.Object
                 :interfaces interfaces
+                :variadic (when variadic (count (:reqParms variadic)))
                 :consts (:consts @cls)
                 :line (:line ox)}))))
     cname))
