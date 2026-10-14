@@ -1324,3 +1324,17 @@ runtime packages; the namespaces' compiling (about 50 s), prepare and the link a
 each. The user asked for it on the agenda's Later: a higher cap within memory, more of the
 analysis in parallel, the largest packages split, aiming at 2 to 3 minutes. Not now: SA140's
 bound (about 5 minutes) is met, and a change to a2g now would redo S6's fixpoint and seed.
+
+## 2026-10-14: a touch terminal for Arbace's REPL, survey and plan (for discussion)
+
+The user asked for a plan of a clean-room reimplementation of the iOS terminal interface of
+Moshi (a mosh terminal for iOS the user uses to reach the host) for Arbace's REPL, a long-term
+goal to discuss. Written as `doc/IOS-REPL-SURVEY.md`: the clean-room roles (a specification from
+observation only; mosh's protocol from the USENIX ATC 2012 paper and the wire against the host's
+stock `mosh-server`, not from mosh's GPL source; escape sequences from ECMA-48, DEC's manuals and
+xterm's ctlseqs), what one screenshot shows, what more screenshots would answer, the layers
+(terminal core, transport, renderer, platform shell), how much can be Arbace on iOS (Go's
+`ios/arm64` with UIKit through the Objective-C runtime, against a Swift shell), experiments
+X1-X5, checks, proposals IR1-IR12 and stages T1-T6. Observed on the host for it: the user's
+sessions are served by Alpine's `mosh-server` (`new -s -c 256`). Nothing built; the agenda's
+Later points to it.

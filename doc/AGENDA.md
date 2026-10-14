@@ -112,3 +112,7 @@ The current state of the work. This file is rewritten as things change. For the 
   (Markdown), `creack/pty` and `charmbracelet/x` (pty, conpty, term, termios: a terminal),
   `coder/websocket`, `dlclark/regexp2/v2`. A pure-Go, cgo-free GUI on macOS is the same shape
   as the box's launcher there.
+- A touch terminal for Arbace's REPL, a clean-room reimplementation of Moshi's iOS terminal
+  interface (the user, 2026-10-14; long term, for discussion): survey and plan in
+  [IOS-REPL-SURVEY.md](IOS-REPL-SURVEY.md), proposals IR1-IR12 open; more screenshots from the
+  user would answer its §3.
