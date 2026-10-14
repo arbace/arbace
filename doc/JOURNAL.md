@@ -1429,3 +1429,8 @@ crossings' cost for a REPL, and the alternatives already at hand (a guest per to
 them; isolation in the language). Also noted in the conversation, as a correction: a JIT is
 possible in the box (the guest owns its page tables) and natively on Linux and macOS (with
 `MAP_JIT` and its entitlement); only iOS forbids it.
+
+The user added (same day): a guest per tool may not be possible when the box is bare metal. So
+the Later item now says: on bare metal a guest per tool needs Arbace itself as the hypervisor
+(EL2 on arm64, VMX root on amd64), only where the hardware allows it; the EL1/EL0 split works on
+any hardware. GoTEE (github.com/usbarmory/GoTEE) named as prior art to check.
