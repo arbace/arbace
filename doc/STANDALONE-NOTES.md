@@ -2305,3 +2305,135 @@ Proposed (2026-10-14); the recommended choice applied on `s6-compile`.
   evaluated program (`:aot false`), which is no longer the build's; (c) the box takes the
   compiled tree from the host. *Recommended: (a)*: the box rebuilds what the host builds, from
   its sources alone.
+
+## S6: the compiled program's size
+
+Status: on the branch `s6-size` (from main at `b979754`), 2026-10-14, the user's decision inside
+the milestone `arbace-inside-itself-v1`: shrink the compiled executable (209.9 MB stripped, the
+evaluated one 74.9 MB), without trading away correctness (Clojure's suite and the oracle as
+recorded), the compiled speed or the build's time; and let the test build reuse the shipped
+build's compiled namespaces. Amendments SA153-SA159, proposed, the recommended choice applied.
+
+### What the bytes were
+
+Measured on main's program (`ARBACE_GO_SYMBOLS=1 bin/arbace-go --build`, amd64; `go tool nm
+-size`, `readelf -S`, and `go tool nm` on the packages' archives for what the linker merges).
+The loaded sections, MB:
+
+| section | compiled (main) | compiled (now) | evaluated (now) |
+|---|---:|---:|---:|
+| `.text` (code) | 71.2 | 42.2 | 23.7 |
+| `.gopclntab` (function table, names, pc tables, funcdata) | 117.3 | 40.8 | 26.0 |
+| of it `go:func.*` (funcdata: stack maps, inlining trees) | 55.8 | 7.3 | 2.9 |
+| `.go.type` (type descriptors, itabs) | 12.5 | 9.3 | 6.2 |
+| `.rodata` (strings, the image of prepared namespaces) | 5.6 | 6.4 | 15.2 |
+| `.data`, `.noptrdata` | 2.8 | 2.5 | 1.2 |
+| **the executable, stripped** | **209.9** | **101.3** | **72.4** |
+
+("now": this branch; the evaluated program shrank too, 74.9 to 72.4 MB, by SA153. Its
+`.rodata` holds the image of prepared namespaces, 11.5 MB, which the compiled program does not
+need.)
+
+Main's code by package: jrt 13.3 MB, lang 5.7, the compiled namespaces' packages 45.0 (145,656
+of the program's 262,448 functions). The compiled packages' code by kind:
+
+| kind | functions | MB |
+|---|---:|---:|
+| fns' code (`Invoke`, `DoInvoke`) | 9,237 | 14.9 |
+| static initializers: the 188 constant pools | 188 | 10.7 |
+| static initializers of the fn classes (`fn-class`), their `Init` | 15,362 | 1.1 |
+| package initialization: registrations (`jrt.Define`), literals | 100 | 6.4 |
+| per-class `init` functions (member tables, `IsInstance`, Go types) | 8,367 | 1.5 |
+| `Object`'s protocol per class (`Equals`, `Clone`, `CloneShallow`, `ToString`, `HashCode`, `Ref`, `GetClass`, `Self_Object`) | 66,728 | 4.9 |
+| member tables' dispatch (`C_invoke`, `C_new`, `C_get`) | 23,695 | 3.0 |
+| loaders' units | 5,079 | 2.6 |
+| constructors, instance checks | about 16,000 | 1.2 |
+
+And the funcdata: **39.4 MB of gc's stack maps were in 14 functions** (the archives'
+`gclocals`): the constant pools' static initializers (`arbace.core`'s loader 13.5 MB, the holder
+of `arbace.a2g.dyn` 7.2 MB, `arbace.core.specs.alpha` 3.0, ...) and the main package's table of
+the image's types (2.5 MB, in the evaluated program too). A function's stack maps are about its
+safepoints times its stack slots: a pool's thousands of constants made in one function are
+quadratic. Per function, the rest of the function table (name, entry, pc tables) is about 230
+bytes: the 66,728 functions of `Object`'s protocol cost more there than in code.
+
+### What was cut
+
+Each step measured on the program it built (stripped, MB):
+
+| step | stripped |
+|---|---:|
+| main (`b979754`) | 209.9 |
+| SA153 static initializers in parts, SA154 a fn's class made by its first fn and no member tables for fns' code, SA155 constant pools as data | 141.5 |
+| SA156 a fn's code not a Java object in Go | 121.8 |
+| SA158 its namespace's constants read unguarded, never null | 108.5 |
+| SA159 fns' code registered by a table of static data, without markers and instance checks | 103.1 |
+| SA156 fns' code without `Ref` (converted to `Object` directly) | 101.3 |
+
+- **Static initializers in parts** (SA153, a2g): a static initializer of more than 96 calls
+  is cut into functions of at most 48 (`C_clinit_p0` ...), which `C_clinit` calls in order;
+  not when it may leave early (`return`, `goto`, `defer`, a label) and not inside a block that
+  declares locals (a `let` holds the rest of its block). The table of the image's types is made
+  by init functions of 128 types. Stack maps 55.8 to 14 MB; gc's time on `aot_arbace_core`
+  went with them (below).
+- **Constant pools as data** (SA155, the back end and `Compiler$AOT/pool`): a class's
+  constants are one string, which `Compiler$AOT/pool` decodes into an array when the class is
+  initialized, each value made by the same calls emitValue's code made (`RT.var`, `RT.keyword`,
+  `Symbol.intern`, `RT.map`, `Tuple.create`, `PersistentList.create`, `Pattern.compile`,
+  `RT.readString`, `withMeta` ...), in the same order; the pool's keywords and symbols without
+  metadata are made once and named by the values that hold them (`R`); strings are interned,
+  as a class file's are. The fields stay (typed, static, final): each is assigned its element.
+  10.7 MB of code became 2.5 MB of assignments and the pools' strings.
+- **A fn's class made by its first fn** (SA154): the code class's static field `fn-class` was
+  set by a static initializer per fn (15,362 functions with its guard); it is now set where the
+  fn is made, when null, from `Compiler$AOT/fnClass` (one class per name, under a lock). Fns'
+  code classes have no member tables (nothing reflects on them: their fn's class is made at run
+  time), the loaders' units are private (only `load` is called by reflection), and the compiled
+  packages' classes register no Go types for `Unsafe`.
+- **A fn's code is not a Java object in Go** (SA156, a2g): a class marked `:aot/code` by the
+  back end gets a struct starting with a header word that stays zero (`jrt.IsDynamic` reads an
+  object's first word), its constructor and its arities' methods, and nothing of `Object`'s
+  protocol: no `Equals`, `HashCode`, `ToString`, `GetClass`, `Clone`, `CloneShallow`,
+  `Self_Object`, `Ref`. The interfaces `Compiler$AOTF<n>` and `$AOTR<k>` do not embed
+  `jrt.Object_I`. A value of a code class is converted to `Object` directly (it comes from `new`,
+  never null). `AOTFn`'s `body` is no longer public, and `jrt`'s `notObject` throws
+  `UnsupportedOperationException` instead of a Go panic, should a code object reach `Object`'s
+  methods (`(.hashCode x)` on it: no path but reflection on internals).
+- **A namespace's constants read unguarded** (SA158, a2g): a fn's code reads its namespace's
+  constants (statics of its nest's top-level class, the holder); its constructor initializes the
+  holder (`Holder_Init()` in `C_New`), so its methods read them without the class initialization
+  guard (81,016 guards to 13,670). The pools' fields are marked `:aot/nn` (never null once
+  initialized), so calls on them are not null-checked (`jrt.NN`).
+- **Fns' code registered by static data** (SA159, a2g and jrt): a compiled package's code
+  classes are one table of `jrt.CodeDecl` (their names, modifiers, Go name, source file, and the
+  addresses of their class variable, declaring class and interfaces), which `jrt.DefineCode`
+  registers at the package's variable initialization (first in the package's order, the other
+  classes may name them) and `jrt.LinkCode` completes at its init; no `jrt.Define` call and no
+  `init` function per class. Code classes have no `IsInstance` (reflection's `isInstance` then
+  asks the class of the value) and no marker methods: `Compiler$AOTF<n>`'s Go interface is its
+  one method, whose name and arity tell code classes apart (an `IFn` with the same Go method
+  satisfies it structurally, and only a fn's body is ever asserted to it).
+
+### What is left, and why
+
+The compiled program is 101.3 MB, the evaluated one 72.4 MB, of which 11.5 MB is the image the
+compiled program does not need: the namespaces compiled cost 40.4 MB over the evaluated
+program without its image (code +18.6 MB, function table +14.8, types +3.0, strings +2.7, data
++1.3). Of the compiled packages' 17.9 MB of code (34,157 functions):
+
+- **The fns' code itself**, 10.0 MB (9,267 methods), and its share of the function table (pc
+  tables and funcdata grow with the code; a2g lays the Go text out on the forms' lines, so the
+  line table changes at every form). It shrinks only with better code: unboxed arithmetic,
+  fewer casts and interface assertions per call (T4, Arbace's own back end).
+- **A Go type per fn**: 7,800 code classes, each a type descriptor, a constructor (1.0 MB), a
+  `CodeDecl` and their names, about 1 KB each with their function table entries. A fn's code as
+  a Go closure (a2g's lambdas: one adapter per interface, A2G-SPEC §7.11) would have none; it
+  needs `^:once`'s clearing (a captured local set to null), `letfn`'s mutual references, locals
+  of a `loop` captured by value, and stack traces that name the fn (the closure's Go name is its
+  enclosing method's); not done.
+- **The constant pools' fields**, 2.5 MB of assignments (26,700 typed static fields), and the
+  pools' strings.
+- **The loaders' units**, 2.3 MB (5,097 methods, one per top-level form, each with the line for
+  errors).
+- **Deftypes, records and reifies** (761 classes) keep the full object model, member tables
+  included: they are Java objects that Clojure code reflects on.
