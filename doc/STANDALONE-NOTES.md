@@ -2301,7 +2301,7 @@ Proposed (2026-10-14); the recommended choice applied on `s6-compile`.
   takes no longer than today's.
 - **SA152 The rebuild in the box compiles the namespaces.** (a) The box's chain lists and
   compiles the namespaces in the tools' guest before a2g, as bin/arbace-go's host does, the
-  largest compiled packages' compiles in 8 and 6 GiB guests (built); (b) the box rebuilds the
+  compiled packages' compiles in 6 GiB guests, `arbace.core`'s in 8 (built); (b) the box rebuilds the
   evaluated program (`:aot false`), which is no longer the build's; (c) the box takes the
   compiled tree from the host. *Recommended: (a)*: the box rebuilds what the host builds, from
   its sources alone.
