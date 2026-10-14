@@ -1277,3 +1277,20 @@ All as recommended in doc/STANDALONE-SURVEY.md:
 - S8 started now, before S6 lands, against the plan's "S8 once they land": its driver work (the
   overlay in the plan, jrt in a 12 GiB tool guest, a2g and g2a in the box) does not depend on S6;
   its byte-for-byte run is redone, by one script, after S6 merges.
+
+## 2026-10-14: S6's checkpoint merged (Arbace compiled to Go behind ARBACE_AOT=1)
+
+- S6 (doc/STANDALONE-NOTES.md, "S6: Arbace compiled to Go"): `Compiler`'s analyzed trees,
+  seen as data (`arbace/lang/go/CompilerAST.ae`), compiled to class forms by the namespace
+  `arbace.aot` (the bytecode back end of `arbace-for-java-26` as its specification), then a2g,
+  g2a and gc as for the runtime; compiled in the build's prepare run, so the code is a function
+  of the sources. All 95 embedded sources (7,327 classes) and the tools (a2g, g2a, `arbace.aot`)
+  compiled; the oracle on the compiled program as recorded (53 known, 0 new). Measured: start
+  0.41 s to 0.17 s; core's benchmarks 2.6x-9.6x; a2g compiled: load 119 s to 38 s, reach 60 s to
+  16 s, its output byte for byte the same. Costs today: the executable 347 MB (69 MB), an
+  `ARBACE_AOT=1` build 45-60 minutes (gc on `lang` 8-10 minutes, the second a2g pass evaluated).
+  The default build is unchanged; the essential gate passed on main after the merge.
+- The user decided SA130-SA139 as recommended, and SA140: the compiled build becomes the default
+  once the suite and the oracle pass on it and a build is no slower than today's 5 minutes, the
+  speed work inside the milestone (alternatives: the default as soon as the suite passes; opt-in
+  for this milestone).

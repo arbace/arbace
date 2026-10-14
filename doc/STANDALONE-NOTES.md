@@ -1979,3 +1979,9 @@ Proposed (2026-10-13); the recommended choice is applied meanwhile.
 - **SA140 The build's switch.** (a) `ARBACE_AOT=1 bin/arbace-go --build` builds the compiled
   program (as done) until Clojure's suite and the oracle pass on it, then the default, the
   gate's and the fixpoint's; (b) the default at once. *Recommended: (a)*.
+
+**Decided (2026-10-14, the user):** SA130-SA138 (a) as recommended; SA139 (a): T1 as built, T3
+measured, the choice on the numbers; SA140 (a), sharpened: `ARBACE_AOT=1` becomes the default
+(the build, the gate, the fixpoint, the seed) once Clojure's suite and the oracle pass on it and
+a build takes no longer than today's (about 5 minutes); the work to get there (a compiled tools
+host, the second a2g pass reusing the first's world, `lang` smaller) is in the milestone.
