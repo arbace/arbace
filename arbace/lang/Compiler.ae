@@ -5198,9 +5198,37 @@
   (method ^:private ^:static readerOpts [^String sourceName]
     (when (and (some? sourceName) (.endsWith sourceName ".cljc")) OPTS_COND_ALLOWED))
 
+  ;; Compiler.load while the program compiles namespaces (ARBACE_COMPILE, standalone S6): each
+  ;; source in an id space of its own (RT.ID_SPACE), so that the names of its fn classes and
+  ;; gensyms depend on that source alone, not on what was loaded before it (a change to one
+  ;; namespace would rename the classes of every namespace loaded after it). Sources of one
+  ;; namespace (arbace/core.ae, core_print.ae ...) need spaces apart: each source has a slot of
+  ;; a million ids from its path's hash, the next free one when two collide
+  (method ^:public ^:static load [^Reader rdr ^String sourcePath ^String sourceName]
+    (if (nil? (System/getenv "ARBACE_COMPILE"))
+        (arbace.lang.Compiler/load1 rdr sourcePath sourceName)
+        (let [tl RT/ID_SPACE
+              old (.get tl)]
+          (.set tl (java.util.concurrent.atomic.AtomicInteger. (arbace.lang.Compiler/sourceIdBase sourcePath)))
+          (try
+            (arbace.lang.Compiler/load1 rdr sourcePath sourceName)
+            (finally (if (some? old) (.set tl old) (.remove tl)))))))
+
+  (field ^:private ^:static ^:final ^HashMap SOURCE_ID_SLOTS (HashMap.))
+
+  (method ^:static ^:synchronized sourceIdBase ^int [^String sourcePath]
+    (let [p (if (nil? sourcePath) "" sourcePath)]
+      (loop [slot (Math/floorMod (.hashCode p) (int 2000))]
+        (let [taken (cast String (.get SOURCE_ID_SLOTS (Integer/valueOf slot)))]
+          (cond
+            (nil? taken) (do (.put SOURCE_ID_SLOTS (Integer/valueOf slot) p)
+                             (unchecked-multiply-int (unchecked-inc-int slot) (int 1000000)))
+            (.equals taken p) (unchecked-multiply-int (unchecked-inc-int slot) (int 1000000))
+            :else (recur (Math/floorMod (unchecked-inc-int slot) (int 2000))))))))
+
   ;; Compiler.load: a source being recorded (Image.PENDING) has its top-level forms evaluated
   ;; by Image.evalUnit; else as upstream's
-  (method ^:public ^:static load [^Reader rdr ^String sourcePath ^String sourceName]
+  (method ^:static load1 [^Reader rdr ^String sourcePath ^String sourceName]
     (let [EOF (Object.)
           rec (cast Object/1 (.deref Compiler$Image/PENDING))
           ^:mutable ^Object ret nil
