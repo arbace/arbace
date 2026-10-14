@@ -2196,9 +2196,80 @@ lists the namespaces (the tools' image, `arbace.a2g.embed`), another prepares th
 sources and compiles them (`ARBACE_COMPILE`, `ARBACE_NO_AOT`, `ARBACE_PATH_FIRST`, the back end
 reading jrt's forms under `/s/go`), and a2g takes the tree (`--input /i`); the tools' image is
 the program of the same sources (`bin/arbace-go --build --box`), so its runtime is theirs.
-`:aot false` rebuilds the evaluated program. The compiled `arbace.core`'s and
-`arbace.classes.analyze`'s compiles get guests of 8 and 6 GiB (BX116's 3 GiB default would not
-hold gc's 3.5 GB). The box's guest is 209.3 MB (the launcher with it 214.5 MB); its smoke test
-(`bin/arbace-go --smoke --box`: 4 and 1 vCPUs, the store, the tool guests, TLS, the terminal)
-passes.
+`:aot false` rebuilds the evaluated program. The compiled packages' compiles get guests of
+6 GiB (`arbace.core`'s 8 GiB): a compile's guest holds, besides gc, the archives of jrt and lang
+it imports (0.8 GB), and the first run's `arbace.pprint` ran out of BX116's 3 GiB default
+(`arbace.box.build`'s `:resources` takes a key ending in `*` for a prefix, `"arbace/aot_*"`).
+The box's guest is 209.3 MB (the launcher with it 214.5 MB); its smoke test (`bin/arbace-go
+--smoke --box`: 4 and 1 vCPUs, the store, the tool guests, TLS, the terminal) passes.
 
+### Amendments
+
+Proposed (2026-10-14); the recommended choice applied on `s6-compile`.
+
+- **SA141 A compiled fn's representation.** (a) A fn's code is a class implementing only its
+  arities' interfaces (`Compiler$AOTF<n>`, `Compiler$AOTR<k>`), the fn one runtime class
+  (`Compiler$AOTFn`, `Compiler$AOTRestFn`) holding it, its class made at run time as a subclass
+  of `AOTFn` (built); (b) each fn a class extending `AFunction`/`RestFn`, as the JVM's (the first
+  build: about 45 Go forwarders per fn, 72,000 methods in `arbace.core`); (c) (a) with the arity
+  interfaces generic over the closed-over values. *Recommended: (a)*.
+- **SA142 A Go package per compiled namespace.** (a) `arbace/aot_<munged namespace>`, named in
+  the tree's `packages.edn`, the evaluator's `Dyn` implementing only the runtime's interfaces and
+  compiled code reaching `Dyn` objects of compiled interfaces by reflection (built); (b) every
+  compiled class in `lang` (the first build: `lang` 3 times larger, gc's longest step); (c) one
+  package for all compiled namespaces. *Recommended: (a)*: gc compiles and caches them apart.
+- **SA143 a2g's analysis of compiled classes in parallel.** (a) The runtime's classes in order,
+  each compiled member class and then each top-level one a task, each task in an id space of its
+  own from the same value (`RT.ID_SPACE`), so temporaries' names depend on the class alone
+  (built); (b) all in order, as before (90 s more); (c) parallel without id spaces (names then
+  depend on the schedule: no fixpoint). *Recommended: (a)*.
+- **SA144 One a2g run when the host's runtime is the checkout's.** (a) The version map's
+  `:runtime` key; a host of the checkout's key compiles the namespaces itself, else the first
+  program does and a2g runs again (built; the two ways give the same program byte for byte);
+  (b) always two runs; (c) always one, whatever the host. *Recommended: (a)*.
+- **SA145 Constants per top-level class.** (a) A holder's fns share its constant pool (built);
+  (b) a pool per fn class, as the JVM's. *Recommended: (a)*: fewer static fields and
+  initializations.
+- **SA146 The build's time.** (a) The host compile's files printed on 16 threads; a2g's runtime
+  analysis beside the compiled classes' and the stand-ins' reachability continued, not
+  recomputed; g2a build's cache of printed packages, keyed by the host's identity and the
+  package's forms (built: 4:46 for the usual build, 5:14 cold, against 5:40 today); (b) without
+  the print cache (g2a then prints every package: 48 s for the usual build's 26); (c) also reuse
+  a2g's analysis of the runtime between builds (a cache of analyzed class forms: more machinery,
+  for the runtime's analysis, which now runs beside the compiled classes').
+  *Recommended: (a)*.
+- **SA147 The runtime key.** (a) What compiling namespaces depends on in the runtime:
+  `arbace/lang`, `go`, `overlay/jdk`, `jdk` (built: a change to a2g or the class forms' front end
+  builds in one a2g run; were it to change how the translated compiler behaves, the next build and
+  the fixpoint show it); (b) everything the runtime is translated from, as SA144 first had (a2g's
+  change: two runs, 9:31); (c) no key: the host always compiles (a host of another runtime may
+  then compile against members that changed: a2g's failure, or a fixpoint one build later).
+  *Recommended: (a)*.
+- **SA148 Each source compiled in an id space of its own.** (a) While compiling
+  (`ARBACE_COMPILE`), each source's load in a space of a million ids, its slot from the path's
+  hash, the next free one on a collision (built: a namespace's change renames no other
+  namespace's classes; g2a reprints and gc recompiles that namespace's package alone);
+  (b) a space per namespace (the sources of one namespace, `core.ae` and `core_print.ae`, would
+  then depend on each other's order); (c) the one counter, as before (one change recompiles every
+  namespace loaded after it: about a minute more). *Recommended: (a)*.
+- **SA149 Compiled code in stack traces.** (a) jrt keeps the compiled namespaces' classes by Go
+  name, and their `ClassInfo.Source` names the source file (the class forms' `:aot/source`):
+  `arbace.walk$walk invoke walk.ae 50` (built); (b) a2g registers a frame per compiled method
+  (a table of about 15,000 entries); (c) the Go names, as before. *Recommended: (a)*.
+- **SA150 The Go-build variants of `RT`, `Main` and `Compiler`.** (a) The hand-written ones
+  merged into their bases (`test/aot/merge_variants.ae`, checked as data against
+  `apply-variant`), the generated ones (`CompilerOps.ae`, `CompilerAOTFn.ae`) kept as variants
+  (built); (b) the generated ones merged too (their generators would then edit `Compiler.ae`);
+  (c) all kept. *Recommended: (a)*.
+- **SA151 The compiled build as the default.** (a) `ARBACE_AOT=1` the default of `bin/arbace-go`
+  (`ARBACE_AOT=0`: the namespaces evaluated, as before S6), so of the gate's builds, the fixpoint
+  and the seed, which is remade from the fixpoint's G3 (built); (b) the default of the build only,
+  the seed staying evaluated (a seed of the program it does not build). *Recommended: (a)*, the
+  user's decision on SA140 once its conditions hold: Clojure's suite and the oracle pass, a build
+  takes no longer than today's.
+- **SA152 The rebuild in the box compiles the namespaces.** (a) The box's chain lists and
+  compiles the namespaces in the tools' guest before a2g, as bin/arbace-go's host does, the
+  largest compiled packages' compiles in 8 and 6 GiB guests (built); (b) the box rebuilds the
+  evaluated program (`:aot false`), which is no longer the build's; (c) the box takes the
+  compiled tree from the host. *Recommended: (a)*: the box rebuilds what the host builds, from
+  its sources alone.
