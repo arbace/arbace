@@ -11,8 +11,13 @@
                          at it
 
   The steps, each an action (arbace.box.build: a spawn, its result in the action cache):
+    compile     the namespaces compiled to class forms (standalone S6, SA152) by the tools'
+                image, whose runtime is these sources' (bin/arbace-go's host_compile): the
+                namespaces listed, then prepared from the sources at /s and compiled
+                (arbace.aot.main), the tree aot; skipped with :aot false (opts)
     a2g         a2g --program in Arbace's guest (:host, the image that runs the tools), the
-                sources arbace/, go/, jdk/, overlay/ at /s: the program as Go forms (prog)
+                sources arbace/, go/, jdk/, overlay/ at /s and the compiled namespaces at /i:
+                the program as Go forms (prog)
     print       g2a's printing (arbace.box.print), in two guests: tamago/'s standard library and goos module
                 with jrt's runtime overlay and the file system's patch (overlay/go); the
                 program with box/ and x509roots/ (bin/arbace-go --build --box's printing)
@@ -29,7 +34,8 @@
   hash or a ref; by default tool.config.<arch>: {:tool-tags [...] :release-tags [...] :include
   TREE}, bin/box-tools put), :ref, :jobs (the compiles at once, by default 4), :a2g-cpus (by
   default 8), :run (arbace.box.build's, the actions' executor: by default a spawn), :log,
-  :given ({:a2g TREE :printed-goroot TREE :printed-program TREE}: those steps' results taken
+  :aot (false: the namespaces evaluated, ARBACE_AOT=0's build),
+  :given ({:aot TREE :a2g TREE :printed-goroot TREE :printed-program TREE}: those steps' results taken
   as given, another run's, those steps not run: they are the same for every architecture;
   doc/go/BOX-NOTES.md, S8, BX117).
   (steps src opts) answers every intermediate result as a map instead.
@@ -144,6 +150,24 @@
   (str "(doseq [n (quote [" (str/replace nss "\n" " ") "])]\n"
        "  (try (require n) (catch Throwable e (println \"image: not prepared:\" n (.getMessage e)))))\n"))
 
+(defn- namespaces-script
+  "bin/arbace-go's list of the embedded namespaces (a2g's namespaces.txt), written to /o/nss.txt."
+  []
+  (str "(require (quote arbace.a2g.embed) (quote arbace.string))\n"
+       "(spit \"/o/nss.txt\" (apply str (for [[p text] (sort (arbace.a2g.embed/sources \".\"))\n"
+       "  :when (and (arbace.string/starts-with? p \"arbace/\") (arbace.string/ends-with? p \".ae\") (re-find #\"(?m)^\\(ns( |$)\" text))]\n"
+       "  (str (-> (subs p 0 (- (count p) 3)) (arbace.string/replace \"/\" \".\") (arbace.string/replace \"_\" \"-\")) \"\\n\"))))\n"))
+
+(defn- compile-script
+  "bin/arbace-go's host_compile script: the namespaces of nss's text prepared, then compiled
+  into out."
+  [nss out]
+  (str (prepare-script nss)
+       "(require (quote arbace.aot.main))\n"
+       "(let [r (arbace.aot.main/run \"" out "\" nil)]\n"
+       "  (println \"aot:\" (count (:compiled r)) \"sources compiled,\" (:classes r) \"classes;\" (count (:failed r)) \"failed\")\n"
+       "  (doseq [[s m] (:failed r)] (println \"aot: not compiled:\" s m)))\n"))
+
 (defn steps
   "The rebuild of source tree src (see the namespace's doc): a map of every step's result
   (trees, the plan, the images), :image the final one's hash."
@@ -158,13 +182,43 @@
         t0 (System/nanoTime)
         secs #(format "%.1f s" (/ (- (System/nanoTime) t0) 1e9))
         cpus (:a2g-cpus opts 8)
-        ;; a2g
         given (:given opts)
+        ;; the namespaces compiled (SA152): listed, then prepared and compiled, as bin/arbace-go's
+        ;; host_compile does (the tools' image is these sources' program)
+        aot (when-not (false? (:aot opts))
+              (or (:aot given)
+                  (let [nss (or (file-text
+                                       (out (run "list the namespaces"
+                                                 {:image host :args ["arbace" "/c/nss.ae"]
+                                                  :env ["ARBACE_PATH=/s"]
+                                                  :trees [["/s" (select-tree src ["arbace"])]
+                                                          ["/c" (box/put-tree {"nss.ae" (box/put-file (namespaces-script))})]]
+                                                  :out "/o" :cwd "/s" :ram (* 4 GiB) :cpus 2})
+                                            "list the namespaces")
+                                       "nss.txt")
+                                (fail "list the namespaces: no nss.txt" {}))
+                        res (run "compile the namespaces"
+                                 {:image host :args ["arbace" "/c/compile.ae"]
+                                  :env ["ARBACE_COMPILE=1" "ARBACE_NO_AOT=1" "ARBACE_NO_IMAGE=1" "ARBACE_PATH_FIRST=1"
+                                        "ARBACE_PATH=/s" "ARBACE_AOT_ROOT=/s" "ARBACE_PREPARE=/o/compile.image" "GOGC=400"]
+                                  ;; go/: the back end reads jrt's hand-written forms (ARBACE_AOT_ROOT)
+                                  :trees [["/s" (select-tree src ["arbace" "go"])]
+                                          ["/c" (box/put-tree {"compile.ae" (box/put-file (compile-script nss "/o/aot"))})]]
+                                  :out "/o" :cwd "/s" :ram (* 8 GiB) :cpus 4})]
+                    (doseq [l (str/split-lines (or (box/get (:console res)) ""))
+                            :when (str/starts-with? l "aot:")]
+                      (log (str "rebuild: " l)))
+                    (dir-at! (out res "compile the namespaces") "aot" "compile the namespaces"))))
+        _ (when aot (log (str "rebuild: the namespaces compiled " aot " (" (secs) ")")))
+        ;; a2g
         a2g (or (:a2g given)
              (out (run "a2g --program"
-                      {:image host :args ["arbace" "-m" "arbace.a2g.main" "--program" "--out" "/o/a2g"]
+                      {:image host :args (cond-> ["arbace" "-m" "arbace.a2g.main" "--program"]
+                                           aot (into ["--input" "/i"])
+                                           true (into ["--out" "/o/a2g"]))
                        :env ["ARBACE_PATH=/s" "GOGC=400" "GOMEMLIMIT=12GiB" (str "A2G_JOBS=" cpus)]
-                       :trees [["/s" (select-tree src ["arbace" "go" "jdk" "overlay"])]]
+                       :trees (cond-> [["/s" (select-tree src ["arbace" "go" "jdk" "overlay"])]]
+                                aot (conj ["/i" aot]))
                        :out "/o" :cwd "/s" :ram (* 14 GiB) :cpus cpus})
                  "a2g"))
         prog (dir-at! a2g "a2g/prog" "a2g")
@@ -238,7 +292,7 @@
         image (box/put (elf/cut-symbols (box/get-bytes linked) guest-symbols))]
     (when-let [r (:ref opts)] (box/ref! r image))
     (log (str "rebuild: the image " image " (" (box/size image) " bytes) in " (secs)))
-    {:src src :a2g a2g :prog prog :printed-goroot printed-goroot :printed-program printed-program
+    {:src src :aot aot :a2g a2g :prog prog :printed-goroot printed-goroot :printed-program printed-program
      :goroot goroot :goos goos :mod mod :plan plan-hash :version v :image1 image1
      :image-bin (second image-bin) :linked linked :image image}))
 
