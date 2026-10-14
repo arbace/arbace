@@ -1367,3 +1367,17 @@ namespaces (48 s) wait until after the milestone (recommended), the user chose t
 inside the milestone: a new track `s6-size` (worktree `.tmp/worktrees/s6-size` from `b979754`)
 measures the size's causes and cuts them without losing correctness, the compiled speed or the
 5-minute build, then remakes the fixpoint and the seed; S8's runs and the Mac bundle follow it.
+
+## 2026-10-14: the touch terminal's survey, the clean room defined, the screenshots
+
+The user defined the clean room for `doc/IOS-REPL-SURVEY.md`: no reverse engineering of the
+model app, but published source (mosh's, github.com/mobile-shell/mosh, GPL-3.0+) may be studied
+and used, under the licenses `LICENSE.md` records. The survey's §1 rewritten so: the bundle
+inspection suggested earlier the same day dropped as reverse engineering; mosh's source and the
+USENIX ATC 2012 paper as the protocol's reference; IR6 now (a) a client of Arbace's own written
+from them, EPL, against (b) mosh's code translated or vendored (GPL-3.0, which the EPL 1.0 does
+not combine with), recommended (a). The user's seven screenshots described in §2 (home screen,
+new connection by QR pairing or SSH, the floating pad, the Ctrl latch, the chat composer, word
+selection with Copy and Comment, settings with Terminal, Agents and Input); IR9 now JetBrains Mono
+(OFL 1.1); IR13 added: the agent features (notifications, an inbox of approvals, the composer)
+for the REPL, after the terminal. The host's name in the screenshots is not recorded.

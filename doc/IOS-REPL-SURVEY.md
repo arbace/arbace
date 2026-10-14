@@ -1,8 +1,8 @@
 # A touch terminal for Arbace's REPL: a survey and plan
 
 Status: survey and plan for discussion, 2026-10-14, long term (after `arbace-inside-itself-v1`;
-the agenda's Later). Nothing here is built. The proposals (IR1-IR12, §8) are the user's to
-decide. The user offered more screenshots of the model app; §3 lists what they would answer.
+the agenda's Later). Nothing here is built. The proposals (IR1-IR13, §8) are the user's to
+decide. The user's screenshots of the model app (§2); §3 lists what more would answer.
 
 ## Why
 
@@ -16,61 +16,93 @@ macOS, confirmed by the user's measurements; the iOS app's tooling is not known.
 
 ## 1. Clean room
 
-A clean-room reimplementation keeps two roles apart:
+The user's definition (2026-10-14): clean room means **no reverse engineering** of the model app
+(no inspection of its binaries or resources, no decompiling, no interception of its traffic to
+others' servers). Source code that is published, mosh's for one, may be studied and used, under
+its license as `LICENSE.md` records it.
 
-- **The specification side** observes the model app only as a user does: screenshots, screen
-  recordings, its public pages and App Store text, and the bytes it sends on the network to a
-  server we run. It writes a functional specification (§4) with no code, no assets and no
-  wording copied from the app.
-- **The implementation side** builds from that specification and from public standards and
-  papers alone. It never sees the app's binaries, its resources or decompiled code.
+- **The model app** is known only as a user knows it: its screens, its behavior, its public
+  pages, and what it sends to a server we run (our own `mosh-server` and `sshd`). The
+  specification (§4) is written from that, with no artwork, icons, themes' colors or wording
+  taken; the product's name stays out of Arbace's UI and code (this document names it as the
+  model). The bundle inspection suggested earlier on 2026-10-14 (Apple Configurator, `otool -L`)
+  is reverse engineering by this definition and is dropped.
+- **mosh** (github.com/mobile-shell/mosh; GPL-3.0 or later, with an exception for OpenSSL) may
+  be studied: its source, its protocol as the source defines it, and the paper (Winstein and
+  Balakrishnan, "Mosh: An Interactive Remote Shell for Mobile Clients", USENIX ATC 2012). What
+  is taken is recorded as for any prior art (the journal, `doc/ARBACE.md` or the vendored
+  code's notes, `LICENSE.md`). The license matters for how it is taken (IR6): Arbace is EPL 1.0
+  (`LICENSE.md`), and the EPL 1.0 and the GPL do not combine in one program, so translating or
+  vendoring mosh's code would make the client a GPL work; a client of Arbace's own written with
+  mosh's source as the reference for the protocol keeps it EPL.
+- **Other sources**: the escape sequences from ECMA-48, DEC's VT100/VT220 manuals and xterm's
+  "ctlseqs"; open terminal emulators (xterm, SwiftTerm, libvterm, alacritty, ...) may be studied
+  under their licenses in the same way; the font (§2: the model uses JetBrains Mono, OFL 1.1)
+  can be vendored with its license.
 
-Consequences:
+## 2. What is observed (screenshots, 2026-10-14)
 
-- The bundle inspection suggested on 2026-10-14 (Apple Configurator, `otool -L`) tells only
-  which tooling the app uses. If it is done, it is done by the specification side, and the
-  record keeps only that fact (Swift or Go, which frameworks), not symbols or code.
-- No artwork, icons, fonts, colors taken from its themes, or names (the product's name stays
-  out of the UI and the code; this document names it as the model).
-- mosh (the protocol and its reference implementation, GPL-3.0 with an OpenSSL exception): if
-  Arbace speaks mosh's protocol, it is implemented from the published description (Winstein and
-  Balakrishnan, "Mosh: An Interactive Remote Shell for Mobile Clients", USENIX ATC 2012) and
-  from observing the wire against the host's stock `mosh-server` (Alpine's `mosh`), not from
-  mosh's source, so that the result can be EPL as the rest of Arbace (`LICENSE.md`). The
-  interoperability tests run against that binary. If the paper is not enough, reading the source
-  is a decision with a license cost (IR6).
-- The terminal's escape sequences come from public references (ECMA-48, the DEC VT100/VT220
-  manuals, xterm's "ctlseqs" document), which every emulator uses.
+**The terminal** (a session on the host, `free`):
 
-## 2. What is observed so far (2026-10-14)
+- A full-screen dark terminal on a sheet with a grab handle; above the text, a row with two round
+  buttons (a yellow one with a minus: back to the home screen, the session kept; a green one
+  with a list: the sessions), the connection's name, and on the right a badge naming the
+  transport ("Mosh").
+- A monospace font (JetBrains Mono, per its settings) with a slashed zero, ANSI colors in the
+  prompt, a block cursor (hollow when the keyboard is hidden), about 46 columns in portrait.
+- Above the system keyboard, a rounded toolbar, scrollable and configurable (Settings, Input,
+  Toolbar): **Ctrl** (a latch: it lights up green until the next key), **Esc**, **Tab**, a **pad**
+  key, a **list** key, **paste**, a curved arrow, a **chat** key, and a key that hides or shows the
+  keyboard.
+- **The pad**: a floating cross of keys over the terminal, with a drag handle and a lock (to pin
+  it in place): up, down, left, right, Enter in the middle, backspace and a **clear** key (a broom)
+  in the top corners. With the keyboard hidden, the terminal takes the screen and the pad sends
+  the keys.
+- **The chat composer** (the chat key): a text field at the bottom ("Chat via ..."), with buttons
+  to attach (+), open the toolbar, close (×), dictate (mic) and send (↑). It composes a whole
+  message before sending it to the session (for an agent running in the terminal, or any long
+  line), with dictation, instead of typing into the terminal key by key.
+- **Selection**: a long press selects a word on the grid with two handles; the menu offers
+  **Copy** and **Comment** (a comment on the selected output, presumably attached to a chat
+  message).
+- The system keyboard (here the Hungarian QWERTZ layout, with the globe and dictation keys): the
+  app takes system input.
 
-From one screenshot (a session on the host, `free`):
+**The home screen**:
 
-- A full-screen dark terminal on a sheet with a grab handle; above the text, a row with two
-  round buttons (a yellow one with a minus: minimize or close the session; a green one with a
-  list: the sessions), the host's name, and on the right a badge naming the transport ("Mosh").
-- The terminal: a monospace font with a slashed zero, ANSI colors in the prompt (green host,
-  yellow path), a block cursor, about 46 columns in portrait, the output wrapped at the width.
-- Above the system keyboard, a rounded accessory bar, scrollable: Ctrl, Esc, Tab, a cross of
-  four (arrows as a pad, presumably), a list (sessions or a command list), a clipboard (paste),
-  then a curved arrow (history or undo), a speech bubble (a chat or an agent prompt), and a
-  hide-the-keyboard key.
-- The system keyboard (here the Hungarian QWERTZ layout, with the globe and dictation keys):
-  the app takes system input, so dictation and the user's layouts work.
+- **Sessions**: live thumbnails of each open session's screen with its name; long press for
+  options.
+- **Connections**: saved hosts (a name, `user@host:port`, a status dot); long press for options;
+  a floating **+** to add one.
+- Two round buttons at the top: a ring (a gauge; what it measures is not shown) and Settings.
+- A "Discover" row of feature cards (Chat View, Sidebar, Inbox & Approvals; 18 of 18 seen).
 
-From the host's side: the session's server is the stock `mosh-server` (`new -s -c 256`), so the
-app is a mosh client, 256 colors.
+**A new connection** (a sheet with two ways):
+
+- **Pair with a QR code**: run one command on the Mac or Linux machine, scan the QR code it
+  prints, and the app installs its SSH key there (about a minute).
+- **Your own SSH**: host name, user and key by hand; mosh keeps the session across networks.
+
+**Settings**: a paid tier and its license; Terminal (theme, font and size, advanced); Agents
+(hooks, notifications, chat view, sidebar); Input (toolbar, shortcuts, more below the screen).
+
+From the host's side: the session's server is the stock `mosh-server` (`new -s -c 256`), reached
+after an SSH login, so the app is an SSH and mosh client, 256 colors.
+
+**The Agents settings** show what the app is built around: coding agents running in the terminal
+(hooks the agent calls, notifications to the phone, an inbox where its requests are approved).
+That is the model's server side on Linux and macOS (Go, per the user's measurements). For
+Arbace, the same shape fits the REPL: a long evaluation or a future that finishes, a question
+the REPL asks, as notifications and approvals.
 
 ## 3. What more screenshots would answer
 
-1. The session list and how a session is created (host, user, key, transport choices).
-2. The pad behind the cross of four, and what Ctrl does (a latch for the next key, or held).
-3. The list key and the curved arrow: what they open.
-4. The speech bubble: a chat with an agent, a composer for a long line, or dictation.
-5. Selection and copy: how text is selected on the grid; scrollback by swipe; pinch to zoom.
-6. Landscape, an external keyboard, the iPad if any.
-7. Disconnection and roaming: what the screen shows on a lost network (mosh's "last contact").
-8. Settings: fonts, themes, key mappings, notifications (a bell, a finished command).
+1. The list key and the curved arrow in the toolbar: what they open.
+2. The chat composer's + and toolbar buttons; what Comment does with a selection.
+3. Scrollback (swipe), pinch to zoom, landscape, an external keyboard.
+4. A lost network: what the session shows while mosh waits.
+5. Settings' Advanced, Toolbar, Shortcuts, Hooks, Notifications, Sidebar, Inbox & Approvals.
+6. The QR pairing's command on the host (what it installs and runs).
 
 ## 4. The functional specification to write (the specification side)
 
@@ -138,8 +170,8 @@ REPL's own line editing replaces rlwrap there.
   Xcode.
 - **X2**: Arbace's REPL built for `ios/arm64` (the AOT program): its size, startup and memory on
   the phone; what of jrt does not apply (processes, files outside the sandbox).
-- **X3**: mosh's handshake and datagrams against the host's `mosh-server`, from the paper: is
-  the paper enough for a client that interoperates (IR6).
+- **X3**: a mosh client of Arbace's own (from mosh's source and paper) against the host's
+  `mosh-server`: the handshake, datagrams, roaming (IR6).
 - **X4**: the terminal core on the host against `vttest` and xterm's behavior, headless.
 - **X5**: Metal from Go (purego) on macOS, a grid of glyphs at 120 Hz; then on iOS.
 
@@ -167,12 +199,14 @@ REPL's own line editing replaces rlwrap there.
   dependency); (c) Arbace's own over QUIC or TLS. Recommended (a) for the terminal, (c) later for
   the REPL's side channel.
 - **IR5** The terminal core in Arbace, tested headless on the host before any UI. Recommended.
-- **IR6** The clean-room boundary as §1: the specification from observation, mosh from the
-  paper and the wire; reading mosh's source only by a later decision. Recommended.
+- **IR6** mosh's protocol (§1): (a) Arbace's own client, written with mosh's source and paper as
+  the reference, EPL, interoperating with the stock `mosh-server`; (b) mosh's code translated or
+  vendored (GPL-3.0: the client, and the program it is linked into, become a GPL work).
+  Recommended (a).
 - **IR7** The renderer: Core Text first, Metal when the core is done. Recommended.
 - **IR8** The REPL-aware features (§5.4) after the terminal is complete.
-- **IR9** The font: a monospace font under the OFL vendored with its license in `LICENSE.md`
-  (Apple's SF Mono is not licensed for bundling). Which one is open.
+- **IR9** The font: JetBrains Mono (OFL 1.1, the model's default too) vendored with its license
+  in `LICENSE.md` (Apple's SF Mono is not licensed for bundling). Recommended.
 - **IR10** Distribution: the user's own devices through a developer account (free provisioning
   lasts 7 days; a paid account gives a year and TestFlight). The user's choice; the App Store is
   not a goal.
@@ -180,12 +214,15 @@ REPL's own line editing replaces rlwrap there.
   packaging), with a survey-and-notes pair as the box had. Recommended.
 - **IR12** Order: after `arbace-inside-itself-v1` and S9 (Go's toolchain as forms), or beside
   S9. The user's choice.
+- **IR13** The agent features (§2, Agents): notifications, an inbox of questions to approve, a
+  chat composer, for the REPL (a long evaluation done, a future finished, the REPL asking). After
+  the terminal. Recommended.
 
-## 9. Stages (if IR1-IR12 as recommended)
+## 9. Stages (if IR1-IR13 as recommended)
 
-- **T1** the specification from observation (screenshots, recordings, the wire).
+- **T1** the specification from observation (screenshots, recordings, our servers' side).
 - **T2** the terminal core in Arbace, headless, `vttest`.
-- **T3** the mosh client clean-room, against the host's `mosh-server`.
+- **T3** the mosh client of Arbace's own (IR6 (a)), against the host's `mosh-server`.
 - **T4** the macOS app: Core Text, then Metal; the accessory bar's keys as a toolbar.
 - **T5** X1 then the iOS shell: the system keyboard, the accessory bar, gestures, lifecycle.
-- **T6** the REPL-aware features; the REPL on the device (X2).
+- **T6** the REPL-aware features and the agent features (IR13); the REPL on the device (X2).
