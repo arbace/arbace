@@ -983,6 +983,18 @@ step 4 (2026-10-07); the others came with later work, as each says:
     (`arbace.lang.Compiler$CFGo` exists), else reflects as before. The files
     `arbace/lang/go/{Var,Reflector}.ae` and `arbace/lang/go/ns/classes/*.subst.ae` are removed.
     `RT`, `Main` and `Compiler`'s variants stay (S6 changes them).
+25. **Standalone S6: the variants of `RT`, `Main` and `Compiler` merged into their bases**
+    (2026-10-14; doc/STANDALONE-NOTES.md, "S6: the compiled build as the default", SA150).
+    `arbace/lang/go/{RT,Main,Compiler,CompilerCode,ClassForms,CompilerAST}.ae` are merged into
+    `arbace/lang/{RT,Main,Compiler}.ae` by `test/aot/merge_variants.ae`, as text: a replaced
+    member's text takes the base member's place, an added member goes at the end of its class
+    in a2g's order, the comments before a variant's member go with it, each file's header goes
+    (reworded) before its first member; two base comments that only said the variant replaces
+    the member are dropped. The merged class forms equal, as data with their type hints, the
+    bases with the variants applied by a2g's `apply-variant` (checked for the three classes).
+    The generated variants stay: `CompilerOps.ae` (`test/a2g/eval_ops.ae`) and
+    `CompilerAOTFn.ae` (`test/aot/gen_fns.ae`). The JVM's `RT`, `Main` and `Compiler` are on the
+    branch `arbace-for-java-26`.
 
 ## Dialect divergences
 

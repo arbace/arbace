@@ -3,7 +3,7 @@
   executable (doc/go/BUILD.md).
 
   bin/g2a build [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines]
-                [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--root ROOT]...
+                [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--print-cache DIR] [--root ROOT]...
                 [--goos-dir DIR] DIR
   bin/g2a build --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
                 [--line-file] SRC
@@ -29,6 +29,9 @@
                   files of the build, such as patched Go runtime files (BUILD.md, \"Overlays\")
     --pgo FILE    passed to go build as -pgo FILE (absolute): a CPU profile for gc's
                   profile-guided optimization (doc/go/SPEED-NOTES.md)
+    --print-cache DIR  a cache of printed packages (with G2A_HOST_ID set, as bin/g2a sets it
+                  for this option): a package the same host printed from the same forms
+                  is not printed again
     --goos        linux (default); darwin (the box's launcher on the Mac, cgo off: S4, BX61);
                   or tamago: a guest image for the box (doc/go/BOX-NOTES.md,
                   S1), built with GOOS=tamago and TamaGo's goos module as GOOSPKG
@@ -133,11 +136,13 @@
     (let [files (clj-files root)
           read-fn (read-all files)
           pkgs (for [f files :when (package-file? f read-fn)]
-                 (let [pkg (p/collect f read-fn)
+                 (let [read (atom [])
+                       pkg (p/collect f (fn [file] (swap! read conj file) (read-fn file)))
                        path (:path (:package pkg))]
                    (when-not (string? path)
                      (fail (str (rel-path dir f) ": go/package without :path")))
-                   (assoc pkg :file f :path path)))]
+                   ;; :read, the forms files the package is made of (print-module's cache)
+                   (assoc pkg :file f :path path :read @read)))]
       (when (empty? pkgs)
         (fail (str "no package files (ns and go/package) under " (.getPath root))))
       (doseq [[path ps] (group-by :path pkgs) :when (> (count ps) 1)]
@@ -304,14 +309,53 @@
   (let [fdir (forms-dir pkg)]
     (update pkg :files (fn [fs] (mapv #(update % :src (fn [s] (rel-path fdir (File. (str s))))) fs)))))
 
+(declare delete-tree)
+
+(defn- print-cache-key
+  "The key of a package's printed files in the print cache: the host's identity (G2A_HOST_ID:
+  the executable's and g2a's sources' hashes, bin/lib/g2a-host.bash), the options that change
+  the printing, the package's path and its forms files (their paths in dir and contents)."
+  [host-id pkg ^File dir opts tests]
+  (let [md (MessageDigest/getInstance "SHA-256")
+        add (fn [^String x] (.update md (.getBytes (str x "\n") "UTF-8")))]
+    (add host-id)
+    (add (pr-str [(:layout opts) (boolean (:line-file opts)) (boolean tests) (:path pkg) (str (:name pkg))]))
+    (doseq [^File f (:read pkg)]
+      (add (rel-path dir f))
+      (.update md (Files/readAllBytes (.toPath f)))
+      (add ""))
+    (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md)))))
+
+(defn- cached-texts
+  "The printed files of a package from the print cache (its entry's mtime set: bin/arbace-go
+  trims entries unused for hours), or nil."
+  [^File entry]
+  (let [names (File. entry "names")]
+    (when (.isFile names)
+      (.setLastModified entry (System/currentTimeMillis))
+      (into (sorted-map)
+            (for [n (str/split-lines (slurp names)) :when (seq n)]
+              [n (slurp (File. entry (str "f-" n)))])))))
+
+(defn- cache-texts!
+  "Records a package's printed files in the print cache, atomically (a directory renamed)."
+  [^File entry texts]
+  (let [tmp (File. (.getParentFile entry) (str (.getName entry) ".tmp." (System/nanoTime)))]
+    (.mkdirs tmp)
+    (doseq [[n text] texts] (spit (File. tmp (str "f-" n)) text))
+    (spit (File. tmp "names") (str/join (map #(str % "\n") (keys texts))))
+    (when-not (.renameTo tmp entry) (delete-tree tmp))))
+
 (defn print-module
   "Prints the program into the module directory out: go.mod, and per package its Go files
   and the other and embedded files it names. Returns the printed files, relative to out.
   The module std (the standard library, GOROOT/src) gets no go.mod: GOROOT/src's go.mod,
   go.sum and vendor/modules.txt are files of the tree it is printed into (bin/tamago-vendor).
   With goos-dir (GOOS=tamago), TamaGo's goos module is that directory (a replace), not Go's
-  module cache. Packages are printed in parallel."
-  [{:keys [module packages] golang :go} ^File dir ^File out {:keys [layout line-file tests goos goroot goos-dir]}]
+  module cache. Packages are printed in parallel. With print-cache (a directory) and the
+  environment's G2A_HOST_ID, a package printed before by the same host from the same forms is
+  taken from the cache (standalone S6: a build reprints only what changed)."
+  [{:keys [module packages] golang :go} ^File dir ^File out {:keys [layout line-file tests goos goroot goos-dir print-cache]}]
   (.mkdirs out)
   (when-not (= module "std")
     (spit (File. out "go.mod") (str "module " module "\n\ngo " golang "\n"
@@ -335,7 +379,16 @@
                     pkg (if tests
                           pkg
                           (update pkg :files (fn [fs] (filterv #(not (test-files (str (:name %)))) fs))))
-                    texts (p/print-forms (cond-> pkg line-file with-line-files) opts)
+                    host-id (System/getenv "G2A_HOST_ID")
+                    entry (when (and print-cache (seq host-id))
+                            (let [k (print-cache-key host-id pkg dir opts tests)]
+                              (File. (File. (str print-cache) (subs k 0 2)) k)))
+                    texts (or (when entry (cached-texts entry))
+                              (let [t (p/print-forms (cond-> pkg line-file with-line-files) opts)]
+                                (when entry
+                                  (.mkdirs (.getParentFile entry))
+                                  (cache-texts! entry t))
+                                t))
                     declared (when-let [fs (:files (:package pkg))]
                                (concat fs (when tests (:test-files (:package pkg)))))
                     rel #(if (= "" (:dir pkg)) % (str (:dir pkg) "/" %))
@@ -419,6 +472,7 @@
         "--tests" (recur (next as) (assoc opts :tests true))
         "--module" (recur (nnext as) (assoc opts :module (second as)))
         "--goos-dir" (recur (nnext as) (assoc opts :goos-dir (second as)))
+        "--print-cache" (recur (nnext as) (assoc opts :print-cache (second as)))
         (do
           (when-not (and (= 1 (count as)) (not (str/starts-with? (first as) "-"))
                          (#{"amd64" "arm64"} (:arch opts))

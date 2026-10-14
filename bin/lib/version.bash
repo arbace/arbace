@@ -3,7 +3,8 @@
 # S4 also the JVM stages' resource arbace/version.edn). Sourced. Defines:
 #
 #   arbace_version ROOT  prints the version map, read by *arbace-version*:
-#                          {:describe "arbace-for-go1.27.1-v1-6-ge2a9f6b" :commit "<40 hex>" :dirty false}
+#                          {:describe "arbace-for-go1.27.1-v1-6-ge2a9f6b" :commit "<40 hex>" :dirty false
+#                           :runtime "<64 hex>"} (:runtime: arbace_runtime_key, below)
 #                        In a git checkout whose top level is ROOT: git describe --tags --always
 #                        --dirty, git rev-parse HEAD, and :dirty when describe ends -dirty
 #                        (tracked files modified; the gitignored target/ and .tmp/ do not
@@ -17,6 +18,20 @@
 # <last freeze tag>-<commits since>-g<hash> until main has a tag of its own, which then wins as
 # the nearest; the frozen branches' later tags (v2, v3 on arbace-for-java-26) are not ancestors
 # of main and never show.
+
+# arbace_runtime_key ROOT: the SHA-256 of what a program's compilation of namespaces depends on
+# in its runtime (standalone S6, doc/STANDALONE-NOTES.md, SA144, SA147): the runtime's class
+# forms and their Go-build variants (the compiler, the classes it resolves members of), jrt
+# (its classes and natives), the JDK's forms, data and jrt's own Java; not the namespaces'
+# sources, nor a2g and the class forms' front end (namespaces the compiling host loads from the
+# checkout; their translation of the runtime shows in the next build, and the fixpoint's G2 =
+# G3 proves it), Go's runtime patches, the roots and Go's pin. Two programs of one runtime key
+# analyze a checkout's namespaces alike, so a build's host of that key compiles them (one a2g
+# run).
+arbace_runtime_key() {
+  (cd "$1" && find arbace/lang go overlay/jdk jdk -type f 2>/dev/null \
+     | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64)
+}
 
 arbace_version() {
   local r top d c dirty=false
@@ -33,5 +48,5 @@ arbace_version() {
     printf '{:describe "unknown" :commit nil :dirty nil}\n'
     return 0
   fi
-  printf '{:describe "%s" :commit "%s" :dirty %s}\n' "$d" "$c" "$dirty"
+  printf '{:describe "%s" :commit "%s" :dirty %s :runtime "%s"}\n' "$d" "$c" "$dirty" "$(arbace_runtime_key "$r")"
 }

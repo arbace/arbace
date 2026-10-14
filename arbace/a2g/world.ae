@@ -10,7 +10,8 @@
             [arbace.classes.env :as env]
             [arbace.classes.parse :as p]
             [arbace.classes.analyze :as a]
-            [arbace.a2g.model :as m])
+            [arbace.a2g.model :as m]
+            [arbace.a2g.names :as nm])
   (:import (arbace.lang LineNumberingPushbackReader)))
 
 (defn read-forms [f]
@@ -178,6 +179,16 @@
   {:order (atom []) :counters (atom {}) :switch-maps (atom {}) :switch-holders (atom {})
    :source-tried (atom #{}) :assert-holders (atom {}) :holder-first (atom {})})
 
+(def analysis-id-base
+  "Where each task of the analysis starts its id space (RT.ID_SPACE, SA143): a round value well
+  above what loading a2g takes, as main's id-floor (SA13)."
+  100000)
+
+(defn- id-space
+  "The runtime's per-thread id space (RT.ID_SPACE, SA143), or nil on a host without it."
+  []
+  (try (.get (.getField arbace.lang.RT "ID_SPACE") nil) (catch Throwable _ nil)))
+
 (defn load-world
   "Reads, enters and analyzes the class forms of the inputs, each {:root :dirs|:tree|:files},
   with the Go-build variants of the variant files applied. Returns the world:
@@ -200,6 +211,12 @@
     (binding [env/*compile-set* cs
               a/*unit* unit
               env/*from-source* from-source]
+      ;; the sequential part (entering, headers, members, bridges, the runtime's analysis) in an
+      ;; id space of its own too: its temporaries' names then do not depend on what the running
+      ;; program evaluated before (a tool loaded from source compiles its fns as they are first
+      ;; called, taking ids; SA143)
+      (when-let [^ThreadLocal space (id-space)]
+        (.set space (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base))))
       (doseq [{:keys [file forms ns]} parsed :when ns]
         (binding [*ns* *ns*]
           (doseq [fm forms
@@ -218,21 +235,69 @@
                 (catch Throwable e
                   (swap! failed conj [(str file) (str "parse: " (.getMessage e))])))))))
       ;; process-classes! 0, with failures per class recorded rather than fatal
-      (let [names @(:order unit)]
+      (let [names @(:order unit)
+            t (atom (System/nanoTime))
+            laps (atom [])
+            lap (fn [k] (let [x (System/nanoTime)] (swap! laps conj [k (/ (Math/round (/ (- x @t) 1e7)) 100.0)]) (reset! t x)))]
+        (lap :declare)
         (doseq [n names :when (not (:headers-done (a/decl n)))]
           (try (a/resolve-header! n) (catch Throwable e (swap! failed conj [n (str "header: " (.getMessage e))]))))
+        (lap :headers)
         (doseq [n names]
           (try (a/resolve-members! n) (catch Throwable e (swap! failed conj [n (str "members: " (.getMessage e))]))))
+        (lap :members)
         (doseq [n (#'a/supertypes-first names)]
           (try (a/add-bridges! n) (catch Throwable e (swap! failed conj [n (str "bridges: " (.getMessage e))]))))
+        (lap :bridges)
         (doseq [n names]
           (try (#'a/mark-enum-abstract! n) (catch Throwable e (swap! failed conj [n (str "enum: " (.getMessage e))]))))
-        (doseq [n names]
-          (try (a/analyze-class! n)
-               (catch Throwable e
-                 (swap! (:state (a/decl n)) assoc :analysis-failed (.getMessage e))
-                 (swap! failed conj [n (str "analysis: " (.getMessage e)
-                                            (some->> (.getCause e) .getMessage (str " / ")))]))))))
+        ;; the code, in parallel by top-level class (a class and its nested ones in one task,
+        ;; as their analysis shares the nest's counters), each task in an id space of its own
+        ;; starting at the same value (RT.ID_SPACE: the gensyms that name temporaries depend on
+        ;; the class alone; standalone S6, SA143)
+        (let [analyze! (fn [n]
+                         (try (a/analyze-class! n)
+                              (catch Throwable e
+                                (swap! (:state (a/decl n)) assoc :analysis-failed (.getMessage e))
+                                (swap! failed conj [n (str "analysis: " (.getMessage e)
+                                                           (some->> (.getCause e) .getMessage (str " / ")))]))))
+              ;; the runtime's classes one after another, as before: javac's rules make the
+              ;; analysis of a class depend on others' (a local class's captured variables);
+              ;; the compiled namespaces' classes (S6) depend on none of theirs, and are
+              ;; analyzed meanwhile: the runtime's on a thread of their own, in this thread's id
+              ;; space continued
+              compiled? (fn [n] (nm/compiled-class? n))
+              rt-space (some-> ^ThreadLocal (id-space) .get)
+              ;; (a host without id spaces: first, as before)
+              runtime (if rt-space
+                        (future
+                          (.set ^ThreadLocal (id-space) rt-space)
+                          (try (run! analyze! (remove compiled? names))
+                               (finally (.remove ^ThreadLocal (id-space)))))
+                        (do (run! analyze! (remove compiled? names)) nil))
+              names (filter compiled? names)
+              ;; a group's member classes before the class enclosing them (a holder's analysis
+              ;; would analyze its members, and one member's failure would fail the holder)
+              ;; each member class a task of its own (a compiled namespace's classes have no
+              ;; local or anonymous classes, whose numbering is the nest's), the top-level ones
+              ;; (holders, deftypes, loaders) after them
+              tops? (fn [^String n] (not (str/includes? n "$")))
+              groups (vec (concat (for [n names :when (not (tops? n))] [n])))
+              top-groups (vec (for [n names :when (tops? n)] [n]))]
+          (if-let [^ThreadLocal space (id-space)]
+            (doseq [gs [groups top-groups]]
+              (m/par-mapv (m/jobs)
+                          (fn [g]
+                            (.set space (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base)))
+                            (try (run! analyze! g) (finally (.remove space))))
+                          gs))
+            ;; a host without id spaces (older than SA143): one after another, as before
+            (run! analyze! names))
+          (lap :analysis-compiled)
+          (some-> runtime deref)
+          (when-let [^ThreadLocal space (id-space)] (.remove space)))
+        (lap :analysis-runtime)
+        (println (str "a2g: load (s): " (str/join ", " (for [[k v] @laps] (str (name k) " " v)))))))
     (doseq [n (keys variants) :when (not (contains? @applied n))]
       (swap! failed conj [n "a variant for a class not in the inputs"]))
     {:compile-set cs :unit unit :from-source from-source :files files :tops tops
@@ -240,7 +305,7 @@
      :source-of (into {} (for [{:keys [file ns forms]} parsed :when ns
                                n (top-names ns forms)]
                            [n (str file)]))
-     :failed @failed :variants @applied :erased erased}))
+     :failed (vec (sort-by (juxt first second) @failed)) :variants @applied :erased erased}))
 
 (defmacro with-world
   "Runs body with the world's class environment bound (analyzer and env functions see it)."

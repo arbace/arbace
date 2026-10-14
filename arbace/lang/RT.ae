@@ -403,7 +403,10 @@
   (field ^:static ^:final ^IFn bootNamespace
     (anon AFn []
       (method ^:public invoke [this __form __env arg1]
-        (let [nsname (cast Symbol arg1) ns (Namespace/findOrCreate nsname)] (.set CURRENT_NS ns) ns))))
+        (let [nsname (cast Symbol arg1) ns (Namespace/findOrCreate nsname)]
+          (Compiler$Image/event (new Object/1 ["ns" nil nsname]))
+          (.set CURRENT_NS ns)
+          ns))))
 
   (method ^:public ^:static processCommandLine ^{:tag (List String)} [^String/1 args]
     (let [^{:tag (List String)} arglist (Arrays/asList args)
@@ -457,6 +460,20 @@
 
   (field ^:static ^:volatile ^boolean CHECK_SPECS false)
 
+  ;; the id counter (gensym's, the compiler's fn names) of the calling thread when it has an id
+  ;; space of its own (ID_SPACE: an AtomicInteger), else the runtime's: a2g analyzes classes in
+  ;; parallel, each in a space that starts at the same value, so that the names it gives
+  ;; temporaries depend on the class alone (standalone S6, SA143);
+  ;; before the static initializer, which loads arbace.core (compiled: in a space of its own,
+  ;; SA148)
+  (field ^:public ^:static ^:final ^ThreadLocal ID_SPACE (ThreadLocal.))
+
+  ;; The Go build's RT (until standalone S6 a variant, arbace/lang/go/RT.ae; the JVM's RT is
+  ;; on the branch arbace-for-java-26). The JVM's static initializer loaded arbace/core through
+  ;; the compiler; this one initializes RT's vars as the JVM's does and leaves the loading of
+  ;; arbace/core to the program (RT.init; B1a step 5). What needs no arbace.core works without
+  ;; it: vars, namespaces, the reader, RT.print's own printer (used until arbace.core sets
+  ;; *print-initialized*), and *out*, *err*, *in* over System's streams.
   (static-initializer
     (let [arglistskw (Keyword/intern nil "arglists")
           namesym (Symbol/intern "name")]
@@ -492,8 +509,12 @@
                       "Sequentially read and evaluate the set of forms contained in the file."
                       arglistskw
                       (RT/list (RT/vector namesym))))
-          (try (RT/load "arbace/core") (catch Exception e (throw (Util/sneakyThrow e))))
-          (set! CHECK_SPECS RT/instrumentMacros)))))
+          ;; arbace.core, as the JVM's RT loads it: from the program's embedded sources (B1a step
+          ;; 5; doc/go/EVAL-NOTES.md). A program without them (a2g's check programs, the
+          ;; evaluator's proof) runs without arbace.core, as before step 5
+          (when (some? (RT/resourceAsStream nil "arbace/core.ae"))
+            (try (RT/load "arbace/core") (catch Exception e (throw (Util/sneakyThrow e))))
+            (set! CHECK_SPECS RT/instrumentMacros))))))
 
   (method ^:public ^:static keyword ^Keyword [^String ns ^String name]
     (Keyword/intern (Symbol/intern ns name)))
@@ -557,101 +578,106 @@
 
   (method ^:public ^:static load :throws [IOException ClassNotFoundException] ^void [^String scriptbase
                                                                                      ^boolean failIfNotFound]
-    ;; Arbace (hand change 19, doc/VENDOR-NOTES.md): a namespace's source is its .ae file, else
-    ;; its .clj file (a Clojure library), else its .cljc file
+    ;; a namespace's .ae, else its .clj, else its .cljc, as the JVM's (VENDOR-NOTES.md, hand
+    ;; change 19)
     (let [classfile (java-str scriptbase LOADER_SUFFIX ".class")
           aefile (java-str scriptbase ".ae")
           cljfile (java-str scriptbase ".clj")
           cljcfile (java-str scriptbase ".cljc")
           ^:mutable scriptfile aefile
-          classURL (RT/getResource (RT/baseLoader) classfile)
-          ^:mutable cljURL (RT/getResource (RT/baseLoader) scriptfile)]
-      (when (nil? cljURL)
+          ;; ARBACE_PATH_FIRST set: a source of ARBACE_PATH before the embedded one (the
+          ;; compilation of a checkout's namespaces by a program built from the same runtime,
+          ;; S6's one-pass build, SA144)
+          ^:mutable ins (or (when (some? (System/getenv "ARBACE_PATH_FIRST"))
+                              ;; as an embedded source (recorded when the program prepares)
+                              (let [p (RT/pathResource aefile)]
+                                (when (some? p)
+                                  (let [b (.readAllBytes p)] (.close p) (java.io.ByteArrayInputStream. b)))))
+                            (RT/resourceAsStream nil aefile))]
+      (when (nil? ins)
         (set! scriptfile cljfile)
-        (set! cljURL (RT/getResource (RT/baseLoader) scriptfile)))
-      (when (nil? cljURL)
+        (set! ins (RT/resourceAsStream nil cljfile)))
+      (when (nil? ins)
         (set! scriptfile cljcfile)
-        (set! cljURL (RT/getResource (RT/baseLoader) scriptfile)))
-      ;; Arbace (hand change 22): a source the class path finds in one of ARBACE_PATH's
-      ;; directories (the JVM's bin/arbace-j appended them to it) is left to loadFromPath, below, which
-      ;; takes ARBACE_PATH's entries in order, its store entries among them, as the Go build
-      (when (and (some? cljURL) (RT/inArbacePath cljURL))
-        (set! cljURL nil))
-      (let [^:mutable loaded false]
-        (when (or (and (some? classURL)
-                       (or (nil? cljURL)
-                           (> (RT/lastModified classURL classfile)
-                              (RT/lastModified cljURL scriptfile))))
-                  (nil? classURL))
-          (try
-            (Var/pushThreadBindings
-              (^[Object/1] RT/mapUniqueKeys CURRENT_NS
-                                            (.deref CURRENT_NS)
-                                            WARN_ON_REFLECTION
-                                            (.deref WARN_ON_REFLECTION)
-                                            RT/UNCHECKED_MATH
-                                            (.deref RT/UNCHECKED_MATH)))
-            (set!
-              loaded
-              (some? (RT/loadClassForName (java-str (.replace scriptbase \/ \.) LOADER_SUFFIX))))
-            (finally (Var/popThreadBindings))))
-        ;; Arbace (hand change 22, doc/VENDOR-NOTES.md; doc/go/BOX-NOTES.md, S3, BX37): a
-        ;; namespace the class path has neither as a class nor as a source is looked for in
-        ;; ARBACE_PATH's entries, its directories and its store entries (store:PREFIX), as the Go
-        ;; build's RT.load finds it there
-        (when (and (not loaded) (nil? cljURL))
-          (set! loaded (RT/loadFromPath scriptbase)))
-        (cond
-          (and (not loaded) (some? cljURL))
-            (if (RT/booleanCast (.deref arbace.lang.Compiler/COMPILE_FILES))
-                (RT/compile scriptfile)
-                (RT/loadResourceScript RT scriptfile))
-          (and (not loaded) failIfNotFound)
-            (throw
-              (FileNotFoundException.
-                (String/format
-                  "Could not locate %s, %s, %s or %s on classpath.%s"
-                  (new
-                    Object/1
-                    [classfile
-                     aefile
-                     cljfile
-                     cljcfile
-                     (if (.contains scriptbase "_")
-                         " Please check that namespaces with dashes use underscores in the Clojure file name."
-                         "")]))))))))
+        (set! ins (RT/resourceAsStream nil cljcfile)))
+      ;; a tool's embedded source (a2g, g2a, c2a, j2a, arbace.aot: loaded from the checkout
+      ;; before S6) that a source of ARBACE_PATH differs from: the latter, loaded from source,
+      ;; so that a tool changed in the checkout runs as changed (S6: the program's compiled code
+      ;; is the embedded source's); the runtime's namespaces stay the program's own
+      (when (and (instance? java.io.ByteArrayInputStream ins) (RT/toolSource scriptbase)
+                 (nil? (System/getenv "ARBACE_PATH_FIRST")))
+        (let [other (RT/pathResource scriptfile)]
+          (when (some? other)
+            (let [b (.readAllBytes other)]
+              (.close other)
+              (if (java.util.Arrays/equals b (RT/hostResource scriptfile))
+                nil
+                (do (.close ins)
+                    (set! ins (java.io.BufferedInputStream. (java.io.ByteArrayInputStream. b)))))))))
+      (cond
+        ;; a source compiled into the program (S6, Compiler$AOT): its loader, once, as an
+        ;; embedded source
+        (and (instance? java.io.ByteArrayInputStream ins) (some? (Compiler$AOT/loader scriptbase)))
+          (do
+            (when (some? ins) (.close ins))
+            (when-not (.containsKey (RT/loadedEmbedded) scriptbase)
+              (let [slash (.lastIndexOf scriptfile \/)
+                    file (if (>= slash 0) (.substring scriptfile (unchecked-add-int slash 1)) scriptfile)]
+                (Var/pushThreadBindings
+                  (^[Object/1] RT/map Compiler$Evaluator/EMBEDDED_LOAD Boolean/TRUE))
+                (try
+                  (Compiler$AOT/load scriptbase scriptfile file)
+                  (.put (RT/loadedEmbedded) scriptbase Boolean/TRUE)
+                  (finally (Var/popThreadBindings))))))
+        (and (instance? java.io.ByteArrayInputStream ins) (.containsKey (RT/loadedEmbedded) scriptbase))
+          (.close ins)
+        (some? ins)
+          (let [slash (.lastIndexOf scriptfile \/)
+                file (if (>= slash 0) (.substring scriptfile (unchecked-add-int slash 1)) scriptfile)]
+            (let [t0 (System/nanoTime)]
+              ;; the embedded sources are the namespaces the JVM ships AOT-compiled
+              (Var/pushThreadBindings
+                (^[Object/1] RT/map Compiler$Evaluator/EMBEDDED_LOAD
+                                    (Boolean/valueOf (instance? java.io.ByteArrayInputStream ins))))
+              (try
+                ;; an embedded source: replayed from the program's image of prepared
+                ;; namespaces when it holds it, recorded when the program prepares them
+                ;; (Compiler$Image, doc/go/EXEC-NOTES.md)
+                (if (instance? java.io.ByteArrayInputStream ins)
+                    (do
+                      (Compiler$Image/load (InputStreamReader. ins UTF8) scriptfile file)
+                      (.put (RT/loadedEmbedded) scriptbase Boolean/TRUE))
+                    (arbace.lang.Compiler/load (InputStreamReader. ins UTF8) scriptfile file))
+                (finally
+                  (Var/popThreadBindings)
+                  (.close ins)
+                  ;; ARBACE_LOAD_TIMES: each source's load time on stderr (EVAL-NOTES.md)
+                  (when (some? (System/getenv "ARBACE_LOAD_TIMES"))
+                    (.println (RT/errPrintWriter)
+                              (java-str "load " scriptfile " "
+                                        (quot (- (System/nanoTime) t0) 1000000) " ms")))))))
+        failIfNotFound
+          (throw
+            (FileNotFoundException.
+              (String/format
+                "Could not locate %s, %s, %s or %s on classpath.%s"
+                (new
+                  Object/1
+                  [classfile
+                   aefile
+                   cljfile
+                   cljcfile
+                   (if (.contains scriptbase "_")
+                       " Please check that namespaces with dashes use underscores in the Clojure file name."
+                       "")])))))))
 
   ;; Arbace (hand change 22): RT.load's last resort when ARBACE_PATH is set,
   ;; arbace.box.host/load-from-path (its entries in order, directories and store entries)
   ;; Is url (a file: URL the class path gave) a file under one of ARBACE_PATH's directories
   ;; (its entries split as jdk.internal.jrt.HostStore.pathEntries splits them)? In Java, not
   ;; through arbace.box.host: RT.load asks it while arbace.core loads
-  (method ^:static inArbacePath ^boolean [^URL url]
-    (let [path (System/getenv "ARBACE_PATH")]
-      (when (and (some? path) (.equals "file" (.getProtocol url)))
-        (try
-          (let [file (.getCanonicalPath (File. (.toURI url)))]
-            (loop [^int i 0]
-              (when (<= i (.length path))
-                (let [store (.startsWith path "store:" i)
-                      from (if store (unchecked-add-int i 6) i)
-                      colon (.indexOf path ":" from)
-                      end (if (< colon 0) (.length path) colon)]
-                  (when (and (not store)
-                             (> end i)
-                             (.startsWith file (java-str (.getCanonicalPath (File. (.substring path i end))) "/")))
-                    (return true))
-                  (recur (unchecked-add-int end 1))))))
-          (catch Exception e nil)))
-      false))
 
-  (method ^:static loadFromPath :throws [IOException] ^boolean [^String scriptbase]
-    (let [path (System/getenv "ARBACE_PATH")]
-      (if (and (some? path) (not (.isEmpty path)))
-          (do
-            (.invoke (RT/var "arbace.core" "require") (Symbol/intern "arbace.box.host"))
-            (RT/booleanCast (.invoke (RT/var "arbace.box.host" "load-from-path") scriptbase)))
-          false)))
+
 
   (method ^:public ^:static init ^void [] (RT/doInit))
 
@@ -674,20 +700,29 @@
               refer (RT/var "arbace.core" "refer")]
           (.invoke in_ns USER)
           (.invoke refer CLOJURE)
-          ;; user.ae, else user.clj (hand change 19)
-          (let [ins (RT/resourceAsStream (RT/baseLoader) "user.ae")]
+          ;; user.ae, else user.clj, as the JVM's
+          (let [ins (RT/resourceAsStream nil "user.ae")]
             (if (some? ins)
                 (do (.close ins) (RT/maybeLoadResourceScript "user.ae"))
                 (RT/maybeLoadResourceScript "user.clj")))
+          ;; as the JVM's: arbace.core.server, then the servers of the arbace.server.*
+          ;; properties; System.getProperties() through the reflection tables, where a2g writes it
           (let [require (RT/var "arbace.core" "require")
                 SERVER (Symbol/intern "arbace.core.server")]
             (.invoke require SERVER)
             (let [start_servers (RT/var "arbace.core.server" "start-servers")]
-              (.invoke start_servers (System/getProperties)))))
+              (.invoke start_servers
+                       (Reflector/invokeStaticMethod "java.lang.System" "getProperties" (new Object/1 0))))))
         (catch Exception e (throw (Util/sneakyThrow e)))
         (finally (Var/popThreadBindings)))))
 
-  (method ^:public ^:static nextID ^int [] (.getAndIncrement id))
+  (method ^:public ^:static nextID ^int []
+    ;; (ID_SPACE is nil until RT's static fields are initialized)
+    (let [tl ID_SPACE
+          s (when (some? tl) (.get tl))]
+      (if (nil? s)
+          (.getAndIncrement id)
+          (.getAndIncrement (cast java.util.concurrent.atomic.AtomicInteger s)))))
 
   (method ^:public ^:static loadLibrary ^void [^String libname]
     (System/loadLibrary libname))
@@ -1767,17 +1802,23 @@
   ;; (Compiler.eval and Compiler.load bind *loader* to this, and nothing reads it)
   (method ^:public ^:static makeClassLoader ^ClassLoader [] nil)
 
+  ;; Classes by name (A2G-SPEC §10.3): the closed world in jrt's registry, through the one
+  ;; class loader the Go build has; no DynamicClassLoader (not translated: no classes are
+  ;; defined at run time) and no thread context loader to consult (*use-context-classloader*
+  ;; is kept, but every loader is the same)
+  ;; Compiler/LOADER is bound to nil in the Go build (no DynamicClassLoader: makeClassLoader),
+  ;; so the base loader is the application loader then (repl/source-fn's resources)
   (method ^:public ^:static baseLoader ^ClassLoader []
-    (cond
-      (.isBound arbace.lang.Compiler/LOADER) (cast ClassLoader (.deref arbace.lang.Compiler/LOADER))
-      (RT/booleanCast (.deref USE_CONTEXT_CLASSLOADER))
-        (.getContextClassLoader (Thread/currentThread))
-      :else (.getClassLoader arbace.lang.Compiler)))
+    (let [l (when (.isBound arbace.lang.Compiler/LOADER) (.deref arbace.lang.Compiler/LOADER))]
+      (if (some? l)
+          (cast ClassLoader l)
+          (.getClassLoader arbace.lang.Compiler))))
 
   (method ^:public ^:static resourceAsStream ^InputStream [^ClassLoader loader ^String name]
-    (if (nil? loader)
-        (ClassLoader/getSystemResourceAsStream name)
-        (.getResourceAsStream loader name)))
+    (let [b (RT/hostResource name)]
+      (if (some? b)
+          (java.io.ByteArrayInputStream. b)
+          (RT/pathResource name))))
 
   (method ^:public ^:static getResource ^URL [^ClassLoader loader ^String name]
     (if (nil? loader) (ClassLoader/getSystemResource name) (.getResource loader name)))
@@ -1886,4 +1927,52 @@
 
   (method ^:public ^:static alength ^int [^Object/1 xs] (alength xs))
 
-  (method ^:public ^:static aclone ^Object/1 [^Object/1 xs] (.clone xs)))
+  (method ^:public ^:static aclone ^Object/1 [^Object/1 xs] (.clone xs))
+
+  (method ^:static ^:native hostResource ^byte/1 [^String name])
+
+  ;; ARBACE_PATH's entries (jdk.internal.jrt.HostStore/pathEntries): directories, and the store's
+  ;; entries store:PREFIX, which find name in the store (doc/go/BOX-NOTES.md, S3): its stream is
+  ;; not a ByteArrayInputStream, which load takes for an embedded source
+  (method ^:static pathResource ^InputStream [^String name]
+    (let [path (System/getenv "ARBACE_PATH")]
+      (when (some? path)
+        (let [entries (jdk.internal.jrt.HostStore/pathEntries path)]
+          (loop [^int i 0]
+            (when (< i (alength entries))
+              (let [^String e (aget entries i)]
+                (if (.startsWith e "store:")
+                    (let [b (jdk.internal.jrt.HostStore/resource (.substring e 6) name)]
+                      (when (some? b)
+                        (return (java.io.BufferedInputStream. (java.io.ByteArrayInputStream. b)))))
+                    (let [ins (RT/openFile (java-str e "/" name))]
+                      (when (some? ins) (return ins))))
+                (recur (unchecked-inc-int i)))))))
+      nil))
+
+
+  (method ^:static toolSource ^boolean [^String scriptbase]
+    (or (.startsWith scriptbase "arbace/a2g/") (.startsWith scriptbase "arbace/g2a/")
+        (.startsWith scriptbase "arbace/c2a/") (.startsWith scriptbase "arbace/j2a/")
+        (.startsWith scriptbase "arbace/aot/")))
+
+  (method ^:static openFile ^InputStream [^String file]
+    (try
+      (java.io.FileInputStream. file)
+      (catch FileNotFoundException e nil)))
+
+  ;; the embedded sources loaded (by scriptbase): each is loaded once, as the JVM initializes the
+  ;; class of an AOT-compiled namespace (its __init) once, however often RT.load is asked for it
+  ;; (a require of arbace.core, which is not in *loaded-libs*, or a :reload): loading one again
+  ;; would define its protocols' interfaces and its types anew, and the instances of the old ones
+  ;; would no longer satisfy them (doc/go/BOX-NOTES.md, S2: the reducers' tests)
+  ;; (made when first needed: RT's static initializer loads arbace.core through RT.load, which
+  ;; may run before a static field's initializer; that first load is on one thread)
+  (field ^:static ^java.util.concurrent.ConcurrentHashMap LOADED_EMBEDDED)
+
+  (method ^:static loadedEmbedded ^java.util.concurrent.ConcurrentHashMap []
+    (let [^:mutable m LOADED_EMBEDDED]
+      (when (nil? m)
+        (set! m (java.util.concurrent.ConcurrentHashMap.))
+        (set! LOADED_EMBEDDED m))
+      m)))

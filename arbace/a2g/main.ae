@@ -273,7 +273,10 @@
   (the thread main, uncaught exceptions printed as the JVM prints them, status 1), its status
   the process's."
   []
-  ['(go/file "main.go" :imports [[embed "embed"] [fs "io/fs"] [os "os"] [jrt "arbace/jrt"] [lang "arbace/lang"]])
+  [(list 'go/file "main.go" :imports (vec (concat '[[embed "embed"] [fs "io/fs"] [os "os"] [jrt "arbace/jrt"] [lang "arbace/lang"]]
+                                                 ;; the compiled namespaces' packages, for their classes' registration (S6)
+                                                 (for [p (sort (distinct (vals @nm/compiled-packages)))]
+                                                   ['_ (nm/pkg-path (keyword p))]))))
    '(go/var ^{:go/embed ["res"] :tag embed/FS
               :doc "resources are the namespaces' sources RT.load reads (EVAL-NOTES.md, \"Loading\").\n"}
       resources)
@@ -303,7 +306,7 @@
   class top (FxClasses for the classes of FxClasses.ae, so that --line-file positions name
   it), in jrt the class (its Java source path)."
   [world pkg top]
-  (if-let [f (and (= pkg :lang) (get (:source-of world) top))]
+  (if-let [f (and (not= pkg :jrt) (get (:source-of world) top))]
     (let [b (.getName (io/file f))]
       (str (subs top 0 (inc (.lastIndexOf ^String top "/"))) (subs b 0 (- (count b) 3))))
     top))
@@ -411,6 +414,11 @@
                         ;; the JDK's resource data, next to the converted JDK (jdk/data)
                         :embedded-data (embed/data (str (.getParent (io/file jdk)) "/data"))))
                opts)
+        _ (reset! nm/compiled-packages
+                  (apply merge {} (for [i (:inputs opts)
+                                        :let [f (io/file i "packages.edn")]
+                                        :when (.isFile f)]
+                                    (read-string (slurp f)))))
         inputs (vec (concat
                       (when (or (:lang opts) (not (:jdk opts)))
                         ;; --program: the Java API arbace.java.api.Clojure too (a class of
@@ -483,7 +491,12 @@
                                                          ;; --program: the REPL's world, every public
                                                          ;; member of every class with class forms
                                                          ;; (A2G-SPEC §10.6, EVAL-PLAN.md Q2)
-                                                         (when (:program opts) (filter #(and (a/decl %) (repl-visible? %)) (sort @(:order a/*unit*))))))
+                                                         (when (:program opts) (filter #(and (a/decl %) (repl-visible? %)
+                                                                                             ;; not a compiled fn's code or a
+                                                                                             ;; reify's (S6): reached by their
+                                                                                             ;; interfaces' calls
+                                                                                             (not (and (nm/compiled-class? %) (str/includes? % "$"))))
+                                                                                       (sort @(:order a/*unit*))))))
                                ;; what the evaluator's Dyn (a2g_dyn.go) calls
                                (when (a/decl dyn/api-class) (concat (dyn/roots) (dyn/proxy-roots)))
                                (when (a/decl "arbace/lang/RT") (fromfn/roots))
@@ -541,9 +554,10 @@
             ;; too (jrt's own code uses them), to a fixpoint
             ;; every stand-in a2g can translate (in the slice) is replaced (A2G-SPEC §4.3)
             standins (vec (for [[n j] jc :when (and (:standin j) (m/translatable? n) (slice? n))] n))
+            ;; each round continues the previous one from the new roots (reach/run's :state)
             res (loop [res (binding [m/*w* wst] (r/run {:roots roots :slice? slice? :classes standins})) n 0]
                   (let [sroots (binding [m/*w* (assoc wst :T (:T res))] (vec (standin-roots scan (:T res))))
-                        res2 (binding [m/*w* wst] (r/run {:roots (vec (concat roots sroots)) :slice? slice? :classes standins
+                        res2 (binding [m/*w* wst] (r/run {:roots sroots :slice? slice? :state (:state res)
                                                           :fis (binding [m/*w* (assoc wst :T (:T res))] (fromfn/fis (:T res)))}))]
                     (if (or (= (:T res2) (:T res)) (> n 8)) res2 (recur res2 (inc n)))))
             T (:T res)
@@ -558,8 +572,9 @@
             gen-dir (str (:out opts) "/gen")
             prog-dir (str (:out opts) "/prog")
             cuts (atom #{})
-            pkgstates {:jrt {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts cuts}
-                       :lang {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts cuts}}
+            ;; the Go packages: jrt, lang, and the compiled namespaces' (S6, SA142)
+            pkgs (vec (concat [:jrt :lang] (sort (distinct (filter nm/compiled-pkg? (map m/pkg T))))))
+            pkgstates (into {} (for [p pkgs] [p {:lits (atom {}) :ups (atom #{}) :lambdas (atom #{}) :cuts cuts}]))
             files (atom {})   ; [pkg go-file] -> forms
             errors (atom [])
             lit-renames (atom {})
@@ -611,7 +626,7 @@
           (lap :adapters)
           ;; per package: registrations first (their member tables may name cut classes of
           ;; either package), then the literal pool, conversions, frames, support, cut classes
-          (doseq [pkg [:jrt :lang]
+          (doseq [pkg pkgs
                   :let [ps (get pkgstates pkg)
                         classes (sort (filter #(= pkg (m/pkg %)) T))]
                   :when (or (seq classes) (= pkg :jrt))]
@@ -620,7 +635,7 @@
               (swap! lit-renames merge renames)
               (swap! files assoc [pkg "a2g_classes.go"] forms)))
           (lap :registrations)
-          (doseq [pkg [:jrt :lang]
+          (doseq [pkg pkgs
                   :let [ps (get pkgstates pkg)
                         classes (sort (filter #(= pkg (m/pkg %)) T))]
                   :when (or (seq classes) (= pkg :jrt))]
@@ -631,7 +646,9 @@
                 (when-let [tf (out/support-table-forms)]
                   (swap! files assoc [pkg "reflect_tables_a2g.go"] (vec tf)))))
             ;; --program: the classes the embedded namespaces name outside the world are cut
-            ;; classes too, so that their imports and hints resolve (EVAL-NOTES.md)
+            ;; classes too, so that their imports and hints resolve (EVAL-NOTES.md); found once
+            ;; (with jrt's package), the runtime's packages' alone
+            (when (= pkg :jrt)
             (let [taken (into (set (map m/go-name T)) (concat (:vars (:jrt m/*w*)) (keys (:types (:jrt m/*w*)))))
                   taken (into taken (map #(str (m/go-name %) "_class") T))
                   cands (set (:cut-candidates opts))]
@@ -643,7 +660,7 @@
                       :when (or (contains? cands n)
                                 (not (or (taken (m/go-name n)) (taken (str (m/go-name n) "_class"))
                                          (some #(and (not= % n) (= (m/go-name %) (m/go-name n))) @cuts))))]
-                (swap! cuts conj n)))
+                (swap! cuts conj n))))
             (swap! files assoc [pkg "a2g_cut.go"]
                    (vec (concat (out/cut-forms pkg (filter #(= pkg (m/pkg %)) @cuts))
                                 ;; --program: the cut classes' members, throwing (EVAL-NOTES.md)
@@ -761,12 +778,15 @@
                                                (when (seq jrt-tests) [:test-files (go-names jrt-tests)]))) "\n\n"
                          (str/join "\n" (for [s (sort (concat jrt-stems jrt-tests))] (out/form-text (list 'load (str "jrt/" s)))))
                          "\n"))
-            (when (seq gen-lang)
-              (write! (str prog-dir "/go/arbace/lang.ae")
-                      (str ";; Generated by a2g (A2G-SPEC §4.2): the package arbace/lang.\n"
-                           (out/form-text '(ns go.arbace.lang (:require [arbace.go :as go]))) "\n\n"
-                           (out/form-text (list 'go/package 'lang :path "arbace/lang" :files (go-names gen-lang))) "\n\n"
-                           (str/join "\n" (for [s gen-lang] (out/form-text (list 'load (str "lang/" s)))))
+            (doseq [pkg (rest pkgs)
+                    :let [stems (sort (for [[p _ stem] written :when (= p pkg)] stem))
+                          pn (nm/pkg-name pkg)]
+                    :when (seq stems)]
+              (write! (str prog-dir "/go/arbace/" pn ".ae")
+                      (str ";; Generated by a2g (A2G-SPEC §4.2): the package " (nm/pkg-path pkg) ".\n"
+                           (out/form-text (list 'ns (symbol (nm/pkg-ns pkg)) '(:require [arbace.go :as go]))) "\n\n"
+                           (out/form-text (list 'go/package (symbol pn) :path (nm/pkg-path pkg) :files (go-names stems))) "\n\n"
+                           (str/join "\n" (for [s stems] (out/form-text (list 'load (str pn "/" s)))))
                            "\n")))
             (write! (str prog-dir "/program.edn") "{:module \"arbace\" :go \"1.27\"}\n")
             (when (:program opts)
