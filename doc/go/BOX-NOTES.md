@@ -3291,3 +3291,8 @@ times are this machine's under that load, not the box's best):
 - The guests' peak memory per step is not measured (the launcher's statistics report counts,
   not a guest's touched pages); BX116's sizes are SA101's and S7's.
 - `bin/box-rebuild` is not in `bin/gate --full` until BX119 is decided.
+
+**Decided (2026-10-14, the user):** BX110 (a), BX111-BX116 (a), BX118 (a), as recommended;
+BX117 (b) now, (a) tried again after S6, the Mac running the whole chain on arm64; BX119 against
+the recommendation: `bin/box-rebuild` stays out of `bin/gate --full`, run by hand at milestones;
+the Mac's bundle run once, built from the program after S6.

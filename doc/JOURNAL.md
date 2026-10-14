@@ -1294,3 +1294,22 @@ All as recommended in doc/STANDALONE-SURVEY.md:
   once the suite and the oracle pass on it and a build is no slower than today's 5 minutes, the
   speed work inside the milestone (alternatives: the default as soon as the suite passes; opt-in
   for this milestone).
+
+## 2026-10-14: S8 merged, the rebuild in the box byte for byte (BX110-BX119 decided)
+
+- S8 (doc/go/BOX-NOTES.md, "S8: the rebuild in the box"), sources at `90c6f70`: in the box on
+  amd64 (/dev/kvm), from a `git archive` tree in the store, a2g (a 14 GiB tool guest), the two
+  g2a printings, the plan (`arbace.box.plan`, equal to go list's on 181 packages), the compiles,
+  the link, the new image preparing its own namespaces and the symbol cut (`arbace.box.elf`),
+  every step a cached spawned action: the guest image `6c53c3b0...` (68,911,402 bytes) equal
+  byte for byte to the same steps run on the host with the host's tools (BX110 (a)), and every
+  intermediate result too; 670 s in the box, 625 s on the host, 65 s from the action cache;
+  booted by ref, the box smoke test 119 ok. arm64 in the emulated VM: the arm64 steps in the box
+  (a2g's output and the printings, the same on both architectures, from the amd64 run), the
+  image `f78f4959...` equal to the host's, booted by ref; the whole chain there was stopped
+  after 2 h 15 min (the evaluator 40 times slower emulated). `bin/box-rebuild` does the whole
+  run and comparison. Fixed: two writers of one blob in the store (`box/vmm`'s storewait).
+  A Mac bundle with a `rebuild` and a `clock` step is prepared, to be rebuilt after S6.
+- The user decided BX110-BX118 as recommended (BX117: (b) now, the whole chain in the VM tried
+  again after S6), and BX119 against the recommendation: `bin/box-rebuild` not in
+  `bin/gate --full`, run by hand at milestones; the Mac's bundle run once, after S6.
