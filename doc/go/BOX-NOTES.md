@@ -3136,3 +3136,158 @@ times are this machine's under that load, not the box's best):
 - A rerun from the action cache: 65 s in the box (every action cached; the driver reads the
   trees and the plan again, and the guest's start).
 - The guest that runs the driver: 6 GiB; the spawns' budget 40 GiB, 16 vCPUs.
+
+### The exit criterion's runs (the commit `90c6f70`)
+
+`bin/arbace-go --build` and `--build --box` (amd64 and arm64) at `90c6f70`, then:
+
+- **amd64** (`bin/box-rebuild --dir .tmp/box-rebuild/amd64-final prepare box host compare boot smoke
+  plan-check`): in the box 670 s (a2g 328 s; the printings 102 s; jrt's compile 90 s, lang's 37 s;
+  the preparing 16 s), on the host 625 s. **The image built in the box = the host's, byte for
+  byte**: `6c53c3b0432c0bafe633da0fb806d9c8f6c497e9b56032d5cf73f80b923ca9eb`, 68,911,402 bytes;
+  every step's result equal; a2g's program and the image of prepared namespaces equal `bin/arbace-go
+  --build`'s; booted by its ref ("booted by ref: arbace-seed-is-go-v1-66-g90c6f70 amd64");
+  bin/box-smoke on it 119 ok, none failed; plan-check the same (181 packages).
+- **arm64, the host's reference** (`bin/box-rebuild --arch arm64 --dir .tmp/box-rebuild/arm64-final
+  prepare host`, cross-compiled here with the arm64 tool guests' facts): 523 s, the image
+  `f78f49598272fbde58e3c5c045ebc78ac239eb26a6255eb575730f49dbf2a672`, 66,498,858 bytes. a2g's
+  program and both printings are the amd64 runs' (`83011b56…`, `108bd7bc…`, `149a24de…`,
+  `cbf675fa…`): they do not depend on the architecture.
+- **arm64 in the aarch64 VM** (`.tmp/s8/vm-run2.sh`: the VM with 16 vCPUs and 28 GiB, then
+  `bin/box-rebuild --arch arm64 --dir .tmp/box-rebuild/arm64-final --given .tmp/box-rebuild/amd64-final
+  box boot`, then `compare`; BX117 (b)): 9,588 s in the VM (2 h 40 min: the plan
+  204 s; jrt's compile 3,957 s, lang's 1,660 s, 44 times the amd64 box's; the first link 124 s;
+  the preparing by the new arm64 image 1,287 s). **The arm64 image built in the box = the host's,
+  byte for byte**: `f78f4959…`, 66,498,858 bytes, and every step's result equal (the plan, 180
+  packages, `7b94168f…`; the first image `9092e16c…`; the image of prepared namespaces
+  `60dd1605…`, the amd64 runs' too); booted by its ref in the VM ("booted by ref:
+  arbace-seed-is-go-v1-66-g90c6f70 aarch64"). The whole chain in the VM, tried first, is in BX117.
+- **The Mac** (`bin/box-mac-bundle` with `MAC_REBUILD_DIR=.tmp/box-rebuild/arm64-final`):
+  `target/arbace-go/arbace-box-mac-arm64.tar.gz`, 46,884,873 bytes, for the user to run
+  (`./mac.sh all`): the checklist as before with HV1's RAM checks, the rebuild of the whole chain
+  (expected `f78f4959…`), timed for HV7, and HV6's hour of the clock beside them.
+
+### Checks
+
+- The essential `bin/gate` at `63e6ce0` (the code as at `90c6f70`): passed in 14m11s; the suite on
+  the Go test build 20,506 of 20,520, no regressions; the oracle against the frozen v4 22,505 of
+  22,558, the 53 known mismatches, 0 new. (An earlier run at `bfc52bd`, before the store's change
+  moved files and `:given`, passed too, 17m30s.)
+- `bin/arbace-go --smoke --box` (amd64): 119 ok, none failed. `bin/box-smoke` on the rebuilt
+  image: 119 ok.
+- `bin/box-vendor roundtrip`: 27 of 27 pass (vmm's new `storewait.go`; the first try, with the
+  wait in `store.go` and its import, failed on a `/*line*/` directive the moved lines made:
+  BOX-NOTES's layout rule, so the wait has a file of its own). `bin/box-vendor kvm-tests`: hv,
+  vmm, go-whim's guest tests pass.
+- `bin/tamago-vendor check` (amd64 and arm64, the guest with jrt's tool guest change): the guest
+  images from the originals and from `tamago/`'s forms identical, as linked and cut; std's
+  printing no regressions; the goos module's packages pass.
+- `arbace.box.elf/cut-symbols` = tools/elfsyms on a linked guest image; `arbace.box.plan` =
+  goplan on amd64 and arm64 (`.tmp/s8/ptest/run.sh`, and `plan-check`).
+
+### Amendments (proposed 2026-10-13)
+
+- **BX110 (S7's "For S8") What "the host-built image" is.** The driver's image is not `go
+  build`'s: no build IDs (`-buildid=`), no module information, its own `-trimpath` mappings.
+  Options:
+  - (a) the same steps run on the host with the host's tools: a2g, g2a and the preparing on the
+    native executable, the toolchain's own compile, asm and link, each action a host process
+    chrooted to its trees (`host-run`); its intermediate results compared too, and a2g's program
+    and the image of prepared namespaces against `bin/arbace-go --build`'s (built);
+  - (b) the driver's flags made `go build`'s: its action and content IDs computed as cmd/go
+    computes them, the module information generated, so that the image equals
+    `bin/arbace-go --build --box`'s;
+  - (c) the same driver run natively, its actions still guests (S7's comparison).
+
+  *Recommended: (a)*: every step's tool runs outside the box, so the equality says the box
+  computes what the host computes; (b) reimplements cmd/go's build ID scheme for no gain in what
+  is proved; (c) runs the same guests twice.
+- **BX111 (jrt) Arbace's guest as a tool guest.** a2g's step needs 14 GiB (BX81); the printing
+  and the preparing need Arbace. Options:
+  - (a) jrt's box host calls `tool.Start`, its exit goes through `goos.Exit`: Arbace's image is
+    spawned like `compile`, each Arbace step an action in its own guest and slot (built);
+  - (b) the REPL guest runs a2g and g2a itself, with `ARBACE_BOX_RAM=16GiB`, and only Go's tools
+    are spawned;
+  - (c) a separate image for the tools (a2g, g2a built into a program of their own).
+
+  *Recommended: (a)*: the steps are cached and resumable like the compiles, the driver's guest
+  stays small, and the new image prepares its own namespaces the same way; (b) has no action
+  cache for the longest step; (c) waits for S6.
+- **BX112 Where the plan comes from in the box.** Options:
+  - (a) `arbace.box.plan`, go/build's rules for these trees in Arbace, checked against go list
+    (built);
+  - (b) cmd/go built as a tool guest, `go list -deps -json` spawned (its module loading, file
+    locks and caches on TamaGo: untried), its JSON read in Arbace;
+  - (c) the plan computed on the host and imported with the sources.
+
+  *Recommended: (a)*: 300 lines, the same plan as go list on both architectures, and the driver
+  stays Arbace's; (c) leaves part of the build outside the box.
+- **BX113 (bin/box-tools) The toolchain's facts.** The planner needs the toolchain's tags (its
+  default experiments) and `pkg/include`. Options:
+  - (a) a blob `tool.config.<arch>` put beside the tool guests, from go list on the host (built);
+  - (b) computed in Arbace from `internal/buildcfg`'s sources in the tree;
+  - (c) written into the driver as constants.
+
+  *Recommended: (a)*: they are facts of the toolchain, as its images are, and change with it.
+- **BX114 (bin/box-rebuild) The source tree.** Options:
+  - (a) `git archive REV` of what the build reads (`VERSION arbace box go jdk overlay tamago
+    x509roots`), `VERSION` filled by export-subst, the version read from it as a tarball's
+    build reads it (built);
+  - (b) the whole commit;
+  - (c) the checkout's files as they are (uncommitted changes in).
+
+  *Recommended: (a)*: the same commit gives the same tree, 56 MB (7 MB as xz, for the Mac's
+  bundle); (b) carries the tests and documents for nothing; (c) has no version and no commit to
+  name.
+- **BX115 (box/vmm) Two writers of one blob.** Options:
+  - (a) `DirStore.Put` waits for the other writer's file to be whole, then succeeds (built);
+  - (b) write aside and rename (the filter allows no rename: the filter widened);
+  - (c) the driver serializes its puts (the spawned guests write the same directory still).
+
+  *Recommended: (a)*: the filter stays as it is, and a short file left by a crash is still
+  refused, after the wait.
+- **BX116 The steps' resources.** Options:
+  - (a) a2g 14 GiB and 8 vCPUs (`A2G_JOBS=8`); each printing 8 GiB, 4 vCPUs; jrt's and lang's
+    compiles 12 GiB, 4 vCPUs (SA101 (b)); the main package 6 GiB; the link 8 GiB; the rest the
+    3 GiB default; the driver's guest 6 GiB; the spawns' budget 40 GiB here, 60% of memory on the
+    Mac, 20 GiB in the VM (built);
+  - (b) as (a) with lang at the 3 GiB default (it needs about 2.3-4 GiB);
+  - (c) every compile 12 GiB.
+
+  *Recommended: (a)*, to be lowered once measured per guest (the launcher's statistics do not
+  yet report a guest's peak).
+- **BX117 arm64 in the emulated VM.** Every instruction is emulated there: the evaluator ran 40
+  times slower than in the amd64 box (24.9 s against 0.62 s for the same loop). The whole chain
+  was started in the VM (16 vCPUs, 32 GiB) and stopped after 2 h 15 min: a2g's guest was still
+  loading (1.4 GB touched, 15 CPU-hours of the guest's process), against 407 s in the amd64
+  box; the whole chain would take well over ten hours there. Options:
+  - (a) the whole chain in the VM, detached and followed (`bin/box-rebuild --arch arm64 box`);
+  - (b) in the VM the architecture's own steps (the plan, the compiles, the link, the preparing
+    by the new image, the cut), a2g's output and the two printings taken from the amd64 box's
+    run of the same sources (they are the same on both: the arm64 host step's equal the amd64
+    box's), `bin/box-rebuild --arch arm64 --given DIR` (built); the whole chain on the Mac
+    (`./mac.sh rebuild`);
+  - (c) arm64 on the Mac only.
+
+  *Recommended: (b) now, (a) again after S6*, whose compiled a2g and g2a are what the VM is
+  slowest at; the Mac runs the whole chain on arm64 hardware either way.
+- **BX118 The symbol cut in the box.** Options:
+  - (a) `arbace.box.elf`, tools/elfsyms in Arbace, the same bytes (built);
+  - (b) elfsyms built as a tool guest by the driver;
+  - (c) the image kept whole in the store (the monitor reads the whole table).
+
+  *Recommended: (a)*: 140 lines, no other image to keep.
+- **BX119 (checks)** `bin/box-rebuild` (amd64: prepare, box, host, compare, boot, smoke, and
+  `plan-check`, the box's plan against go list's on the box's printed trees) in `bin/gate
+  --full` beside `bin/arbace-go --build --box` (about 25 minutes, 40 GiB of guests at most); the
+  arm64 VM's run (hours) and the Mac's at the milestone.
+
+### Left
+
+- The Mac's run (`./mac.sh all` on the bundle above), by the user; its results decide HV6 and
+  HV7 there and prove the whole chain on arm64 hardware.
+- After S6: the byte-for-byte runs again (the script's order in "What was built"); the whole
+  chain in the VM (BX117 (a)) if S6's speed allows it.
+- The guests' peak memory per step is not measured (the launcher's statistics report counts,
+  not a guest's touched pages); BX116's sizes are SA101's and S7's.
+- `bin/box-rebuild` is not in `bin/gate --full` until BX119 is decided.
