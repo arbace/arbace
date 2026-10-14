@@ -31,10 +31,18 @@
 ;; ---------------------------------------------------------------------------------------
 ;; nodes
 
+(def ^:private node-cache
+  "The nodes' maps by node (the back end runs on one thread)."
+  (IdentityHashMap.))
+
 (defn node
   "The analyzed node x as a map (Compiler$AST/node), nil for nil."
   [x]
-  (when (some? x) (assoc (Compiler$AST/node x) :self x)))
+  (when (some? x)
+    (or (.get ^IdentityHashMap node-cache x)
+        (let [n (assoc (Compiler$AST/node x) :self x)]
+          (.put ^IdentityHashMap node-cache x n)
+          n))))
 
 (defn- fail [msg & [data]]
   (throw (ex-info (str "aot: " msg) (or data {}))))
@@ -82,6 +90,18 @@
 
 ;; ---------------------------------------------------------------------------------------
 ;; the class being emitted: its constants
+
+(defn- top-name [^String n] (let [i (.indexOf n "$")] (if (neg? i) n (subs n 0 i))))
+
+(defn- pool
+  "The constants of top-level class top (a namespace's holder, a deftype, a loader), which its
+  member classes share (SA145): an atom {:name :consts :const-map}, made on first use."
+  [ctx top]
+  (let [pools (:pools ctx)]
+    (or (get @pools top)
+        (get (swap! pools (fn [m] (if (contains? m top) m
+                                     (assoc m top (atom {:name top :consts [] :const-map (IdentityHashMap.) :const-prefix ""})))))
+             top))))
 
 (defn- const-field
   "The static field holding constant value v in the class being emitted, made on first use (as
@@ -936,7 +956,7 @@
   (let [cname (destub (:name ox))]
     (when-not (contains? @(:classes ctx) cname)
       (swap! (:classes ctx) assoc cname ::pending)
-      (let [cls (atom {:name cname :consts [] :const-map (IdentityHashMap.) :const-prefix ""})
+      (let [cls (pool ctx cname)
             fields (vec (keys (:closes ox)))
             ctx' (assoc ctx :cls cls :objx ox :once false :closed (identity-set fields))
             fbs (mapv node fields)
@@ -992,7 +1012,7 @@
             members (deep (concat fields-forms [ctor] alt-ctors [basis] (when create [create]) methods))]
         (swap! (:classes ctx) assoc cname
                {:name cname :kind :deftype :super 'java.lang.Object :interfaces (class-interfaces ctx ox)
-                :members members :consts (:consts @cls) :line (:line ox)})))
+                :members members :line (:line ox)})))
     cname))
 
 (defn emit-fn-class!
@@ -1012,7 +1032,7 @@
     (when-not known
       (.put named (:self ox) cname)
       (swap! (:classes ctx) assoc cname ::pending)
-      (let [cls (atom {:name cname :consts [] :const-map (IdentityHashMap.) :const-prefix ""})
+      (let [cls (pool ctx (top-name cname))
             fn? (= "fn" (:op ox))
             ctx' (assoc ctx :cls cls :objx ox :once (:onceOnly ox) :closed (identity-set (keys (:closes ox)))
                         :self-sym (if fn? 'self 'this))
@@ -1076,7 +1096,6 @@
                 :super 'java.lang.Object
                 :interfaces interfaces
                 :variadic (when variadic (count (:reqParms variadic)))
-                :consts (:consts @cls)
                 :line (:line ox)}))))
     cname))
 
@@ -1139,11 +1158,11 @@
   "The class forms of source path src (scriptbase.ae), compiled from its units: the loader
   class SCRIPTBASE__init's form and the fn classes made, into the atom classes (fn-names: the
   fns' class names by their FnExpr, an IdentityHashMap shared by the sources)."
-  [classes runtime-classes fn-names src units]
+  [classes runtime-classes fn-names pools src units]
   (let [base (subs src 0 (.lastIndexOf ^String src "."))
         lname (str (str/replace base "/" ".") "__init")
-        cls (atom {:name lname :consts [] :const-map (IdentityHashMap.) :const-prefix ""})
-        ctx {:classes classes :runtime-classes runtime-classes :cls cls :fn-names fn-names}
+        cls (pool {:pools pools} lname)
+        ctx {:classes classes :runtime-classes runtime-classes :cls cls :fn-names fn-names :pools pools}
         ms (vec (map-indexed (fn [k [u um]]
                                ;; the analysis resolved tags lazily, against *ns*: the unit's
                                ;; namespace while it is emitted
@@ -1163,17 +1182,21 @@
 
 (defn- class-form
   "The defclass form of class c (its record: a fn's, a reify's, a deftype's, an interface's, or
-  a holder of nested classes), its nested classes inside; at the top its full name, else a static
-  member class by its simple name."
-  [c children-of top?]
+  a holder of nested classes), its nested classes inside; at the top its full name and the
+  constants it shares with them (pools: top → its pool), else a static member class by its
+  simple name."
+  [c children-of top? pools]
   (let [nm (:name c)
-        nested (map #(class-form % children-of false) (children-of nm))
+        nested (map #(class-form % children-of false pools) (children-of nm))
         mods (fn [m] (if top? (dissoc m :static) m))
         head (if top? (symbol nm) (symbol (simple-name nm)))
-        ctx {:cls (atom {}) :runtime-classes (atom #{})}]
+        ctx {:cls (atom {}) :runtime-classes (atom #{})}
+        consts (when top? (when-let [p (get pools nm)] (:consts @p)))
+        const-forms (for [[s t v] consts]
+                      (list 'field (tagged (with-meta s {:static true :final true}) t) (emit-value ctx v)))]
     (vary-meta
       (case (:kind c)
-        :holder (concat (list 'defclass (with-meta head (mods {:public true :static true :final true}))) nested)
+        :holder (concat (list 'defclass (with-meta head (mods {:public true :static true :final true}))) const-forms nested)
         :interface (concat (list 'defclass (with-meta head (mods {:public true :static true :interface true})))
                            (when (seq (:extends c)) [:extends (:extends c)])
                            (:members c)
@@ -1181,8 +1204,7 @@
         (concat (list 'defclass (with-meta head (mods {:public true :static true :final true}))
                       :extends (:super c))
                 (when (seq (:interfaces c)) [:implements (:interfaces c)])
-                (for [[s t v] (:consts c)]
-                  (list 'field (tagged (with-meta s {:static true :final true}) t) (emit-value ctx v)))
+                const-forms
                 (:members c)
                 nested))
       assoc :aot/line (:line c))))
@@ -1190,8 +1212,8 @@
 (defn class-forms
   "The top-level class forms holding every class of classes (name → record), nested as their
   binary names nest, with holder classes made for the missing levels (a namespace's fns nest
-  in a holder named as the namespace)."
-  [classes]
+  in a holder named as the namespace); pools: the top-level classes' constants."
+  [classes pools]
   (let [names (set (keys classes))
         parent (fn [^String n] (let [i (.lastIndexOf n "$")] (when (pos? i) (subs n 0 i))))
         all (loop [todo (vec names) acc names]
@@ -1207,7 +1229,7 @@
         kids (group-by parent (sort-by (fn [n] [(or (:line (recs n)) 0) n]) all))
         children-of (fn [n] (map recs (get kids n)))]
     (for [top (sort (get kids nil))]
-      (class-form (recs top) children-of true))))
+      (class-form (recs top) children-of true pools))))
 
 (defn interface-record
   "The record of an interface made by gen-interface (events iface and imethod): name, the
