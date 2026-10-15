@@ -2701,77 +2701,67 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
 
 **Decided (2026-10-15, the user):** SA160-SA163 (a) as recommended, all as built.
 
-## The build's speed, second round, part C: `jrt` split? (2026-10-15)
+## After the milestone: the build's speed, second round, part A: the host's compiling (2026-10-15)
 
-Status: measured on the branch `speed2-jrt` (from main at `9942951`); no split built. The
-question: `jrt`, one Go package of 20 MB (914 files: about 840 translated JDK sources, a2g's
-shared files such as `a2g_classes.go` of 3.5 MB, about 70 hand-written forms), is the program's
-largest; is Go compiling it on the critical path of the host's builds, and would a split pay?
+The user's order after the first round: a second one, in three parts on branches of their own
+(A: the host's compiling of the namespaces; B: a2g; C: g2a's builds). Measured on the shared
+host, busy with the emulated arm64 VM and other builds: single timings vary by up to a half.
 
-### Measured (`.tmp/speed2/`, TamaGo's go1.27.1, the amd64 work module of a build at `9942951`)
+### A: the host's compiling of the namespaces (branch `speed2-host`)
 
-`go build -debug-trace` of `target/arbace-go/work-amd64/mod` as g2a runs it (`-trimpath`, the
-overlay of `bin/jrt overlay`), each compile timed by a `-toolexec` wrapper, on the shared host
-(the emulated arm64 VM busy):
+**Where the time went** (`9942951`, stage 0 the host, alone): loading the 100 sources (85
+namespaces) about 19 s, the back end about 32 s (`compile-all` 27 s on one core, the printing
+8.5 s on 16 threads), about 53 s in all (56 to 64 s in a build, beside a2g). A CPU profile: four
+fifths of it the evaluator. The host prepares the namespaces from source (`ARBACE_NO_AOT`, so
+that their units are recorded), so the back end, and `arbace.core` and the other namespaces it
+calls, ran evaluated, not as the host's compiled code.
 
-| case | wall | the chain |
-|---|---:|---|
-| a fresh build cache (the standard library too) | 96.9 s | `jrt` 54.7 s (from 5.0 s), then `lang` 21.0 s, the namespaces' packages about 9 s (`aot_arbace_core` last, 6.7 s), the link 4.4 s |
-| the standard library cached, every Arbace package changed | 103.9 s | `jrt` 64.1 s (wall 62.3, user 235.1 s, `-c=64`, peak RSS 8.8 GiB), `lang` 22.1 s (user 94.2 s, 3.7 GiB), the namespaces' about 10 s, `main` 2.2 s, the link |
-| everything cached (the output path new) | 5.2 s | the link alone, 4.9 s |
+**What changed (SA164).** `arbace.aot.main/run`, before compiling, runs the compiled loaders of
+the back end's namespaces and the ones they need when the program holds them for the sources on
+`ARBACE_PATH`: the closure of `arbace.aot.main` and `arbace.core` under `:require`, `:use` and
+top-level `load`, found from the sources' forms (23 sources: core's ten with
+`arbace.core.protocols`, `arbace.instant` and `arbace.uuid`, `arbace.java.io`, `string`, `set`,
+`classes.types`, `a2g.names`, `a2g.jrt`, `g2a.print`'s four, `aot.emit`, `aot.main`), each
+source's text compared with the embedded one. The loaders run in the order the sources were
+loaded, in the bindings `Compiler$AOT/load` makes (a nested `load` is then a no-op: the source is
+loaded); their vars' roots become the compiled fns, and the units the back end reads are the
+analysis' as before. When a source of the closure is not the program's own (stage 0 the host
+and the checkout's core or back end changed since the seed), the back end runs evaluated, as
+before. Where it applies: the fixpoint's G2 and G3, `bin/seed --verify`, the box's rebuild (its
+host image is built from the same sources), and builds by stage 0 once the seed holds it and as
+long as those 23 sources are unchanged since.
 
-`jrt`'s compile by phase (`-gcflags=arbace/jrt=-bench`, 53.6 s): the front end 30.5 s on one
-core (parsing and type checking 1,079,724 lines 18.1 s, devirtualizing and inlining 9.5 s, escape
-analysis 2.9 s), the back end 23.1 s (its functions, 202,064, compiled in parallel 14.6 s; the
-object written 8.5 s, one core). So Go uses about 3.8 cores on `jrt`; `lang` waits for its export
-data, and every namespace's package for `lang`'s.
+**Tried and left.** Only `arbace.aot` compiled: 4 to 11 s (core's fns stay evaluated). The
+closure without core: no better than `arbace.aot` alone. `GOGC` 1000 or 2000 instead of 400: no
+faster, the peak RSS 5.1 → 9.7 GB. Not tried: the namespaces' loading compiled. The analysis
+needs each top-level form evaluated before the next, and a unit run as the host's compiled code
+would mix the analysis' evaluated classes (deftypes, protocols' interfaces) with the compiled
+ones. The namespace list (0.6 s) is not worth it.
 
-**But `jrt` is cached in the builds that matter for speed.** Go's cache is keyed by content:
-`jrt` compiles again only when its printed text changes, i.e. when the runtime does
-(`go/arbace/jrt`, `jdk/`, `overlay/jdk`, a2g's translation of them). A change to the namespaces
-leaves it as it was (the shipped build's and the test build's `jrt` are identical, `diff -r`,
-though the test build has more namespaces). The one-run build (the runtime the checkout's) and
-the fixpoint's G2 and G3 compile no `jrt`: g2a's step there is about 18 s (`bin/g2a build` on
-the current program, everything cached, 18.6 s wall, 76 s user): Go's part is about 5 s (the
-link), the rest g2a's own (reading the forms, printing with the print cache, writing 61 MB of
-Go). After a change to the runtime (two runs), `jrt` compiles once (the second run's `jrt` is the
-same text, cached): about 60 s of that build's 5.5 minutes. In the box's rebuild (a fresh cache
-in the guest), 94 s.
+**Measured** (`b65bb74`):
 
-### What a split could gain, and cost
+| | evaluated (stage 0 the host) | compiled (G1 the host) |
+|---|---|---|
+| alone, the back end (the host busy) | 55 to 58 s | 22 to 29 s |
+| in `bin/arbace-go --build`, the host's compiling (two pairs) | 56 s, 80 s | 38 s, 61 s |
 
-The bound: S5's graph ("S5: jrt as core and library", `tools/godeps`): with all edges the
-reached classes are one strongly connected component of 84% of `jrt`'s nodes, and by Java
-packages 74 of 75 are one component; only with bodies outlined (`-decls`, 13.7% of the nodes in
-the largest component) would the rest compile in parallel. At best the chain `jrt` → `lang`
-would lose about 45 s, and only in the builds where `jrt` changed: **0 s on the one-run build**,
-about 45 s once per change to the runtime. The cost, from S5: a2g writing several packages, the
-partition checked acyclic, linkname pulls or outlined bodies or hook variables for the upward
-edges (a call more per outlined method), `lang` the same (its cycles are calls), the seed and
-the fixpoint again: 5 to 10 days, decided against at S5 (SA100 (a)) on other grounds.
-
-Cheaper levers on `jrt`'s compile all change the output and the program (`-l`, no inlining:
-slower code; a smaller `jrt` means fewer reached JDK members, which reachability already
-minimizes) or do nothing (`-c` is already 64; GOGC raised in the first round was slower).
-
-Where g2a's 18 s on the one-run build goes is the next lever (g2a's own printing and writing,
-not Go): left for the round's other parts.
+**Checked.** The tree compiled by the evaluated back end (G1, built by stage 0) and by the
+compiled one (G2, built by G1): the same, and **G2 = G1 byte for byte** (amd64 `1cd633b0...`,
+arm64 `9483503d...`). The essential gate on `b65bb74` passed (12:56, the host busy): the suite
+as recorded, the oracle's 53 known mismatches, 0 new. The executable is not main's: `aot/main.ae`
+is one of the compiled sources. A quirk found: the line of `arbace.pprint`'s last unit is
+the line of the driver script's `require` (bin/arbace-go's and the box's both on line 1), so a
+driver laid out differently prints another tree; not changed.
 
 ### Amendments (proposed 2026-10-15)
 
-- **SA180 `jrt` split for the build's speed.** (a) Not split: `jrt` is cached in the one-run
-  build and the fixpoint's later stages, so a split gains nothing there; about 45 s at best once
-  per change to the runtime, for S5's 5 to 10 days of a2g's work; (b) split along S5's `-decls`
-  model (outlined bodies, linkname pulls), `lang` too. *Recommended: (a)*.
-- **SA181 What is measured as a build's Go step.** (a) The trace and the per-compile timing
-  above kept as the method (`.tmp/speed2/trace.sh`, `tx.sh`, `an.py`: `go build -debug-trace`, a
-  `-toolexec` timer, `-gcflags=<pkg>=-bench`), not committed as tools; (b) a `tools/` command for
-  it. *Recommended: (a)*: a measurement, not a check the build runs.
+- **SA164 The back end compiled while the host prepares the namespaces.** (a) The compiled
+  loaders of the back end's closure run first when their sources are the program's own (built);
+  (b) evaluated, as before; (c) only `arbace.aot`'s two sources compiled (a smaller closure, a
+  third of the gain). *Recommended: (a)*: the same tree, the back end about half as long, and
+  nothing changes when a source of the closure is not the program's.
 
-**Decided (2026-10-15, the user):** SA180 (a), `jrt` not split; SA181 (a), the scripts kept in
-`.tmp/speed2/`.
-
-## The build's speed, second round: a2g (2026-10-15)
+## The build's speed, second round, part B: a2g (2026-10-15)
 
 The user's order (a second round, part B): a2g's phases after the compiled namespaces arrive,
 which ran on few cores. Branch `speed2-a2g`. Measured as `bin/arbace-go` runs a2g (`--await`, the
@@ -2843,6 +2833,76 @@ oracle 22,505 of 22,558, the 53 known, 0 new).
 - The load's sequential part after the tree arrives (10 s: entering, headers, members,
   bridges), in `arbace.classes`; reachability's scan (12 to 16 s, one core).
 
+## The build's speed, second round, part C: `jrt` split? (2026-10-15)
+
+Status: measured on the branch `speed2-jrt` (from main at `9942951`); no split built. The
+question: `jrt`, one Go package of 20 MB (914 files: about 840 translated JDK sources, a2g's
+shared files such as `a2g_classes.go` of 3.5 MB, about 70 hand-written forms), is the program's
+largest; is Go compiling it on the critical path of the host's builds, and would a split pay?
+
+### Measured (`.tmp/speed2/`, TamaGo's go1.27.1, the amd64 work module of a build at `9942951`)
+
+`go build -debug-trace` of `target/arbace-go/work-amd64/mod` as g2a runs it (`-trimpath`, the
+overlay of `bin/jrt overlay`), each compile timed by a `-toolexec` wrapper, on the shared host
+(the emulated arm64 VM busy):
+
+| case | wall | the chain |
+|---|---:|---|
+| a fresh build cache (the standard library too) | 96.9 s | `jrt` 54.7 s (from 5.0 s), then `lang` 21.0 s, the namespaces' packages about 9 s (`aot_arbace_core` last, 6.7 s), the link 4.4 s |
+| the standard library cached, every Arbace package changed | 103.9 s | `jrt` 64.1 s (wall 62.3, user 235.1 s, `-c=64`, peak RSS 8.8 GiB), `lang` 22.1 s (user 94.2 s, 3.7 GiB), the namespaces' about 10 s, `main` 2.2 s, the link |
+| everything cached (the output path new) | 5.2 s | the link alone, 4.9 s |
+
+`jrt`'s compile by phase (`-gcflags=arbace/jrt=-bench`, 53.6 s): the front end 30.5 s on one
+core (parsing and type checking 1,079,724 lines 18.1 s, devirtualizing and inlining 9.5 s, escape
+analysis 2.9 s), the back end 23.1 s (its functions, 202,064, compiled in parallel 14.6 s; the
+object written 8.5 s, one core). So Go uses about 3.8 cores on `jrt`; `lang` waits for its export
+data, and every namespace's package for `lang`'s.
+
+**But `jrt` is cached in the builds that matter for speed.** Go's cache is keyed by content:
+`jrt` compiles again only when its printed text changes, i.e. when the runtime does
+(`go/arbace/jrt`, `jdk/`, `overlay/jdk`, a2g's translation of them). A change to the namespaces
+leaves it as it was (the shipped build's and the test build's `jrt` are identical, `diff -r`,
+though the test build has more namespaces). The one-run build (the runtime the checkout's) and
+the fixpoint's G2 and G3 compile no `jrt`: g2a's step there is about 18 s (`bin/g2a build` on
+the current program, everything cached, 18.6 s wall, 76 s user): Go's part is about 5 s (the
+link), the rest g2a's own (reading the forms, printing with the print cache, writing 61 MB of
+Go). After a change to the runtime (two runs), `jrt` compiles once (the second run's `jrt` is the
+same text, cached): about 60 s of that build's 5.5 minutes. In the box's rebuild (a fresh cache
+in the guest), 94 s.
+
+### What a split could gain, and cost
+
+The bound: S5's graph ("S5: jrt as core and library", `tools/godeps`): with all edges the
+reached classes are one strongly connected component of 84% of `jrt`'s nodes, and by Java
+packages 74 of 75 are one component; only with bodies outlined (`-decls`, 13.7% of the nodes in
+the largest component) would the rest compile in parallel. At best the chain `jrt` → `lang`
+would lose about 45 s, and only in the builds where `jrt` changed: **0 s on the one-run build**,
+about 45 s once per change to the runtime. The cost, from S5: a2g writing several packages, the
+partition checked acyclic, linkname pulls or outlined bodies or hook variables for the upward
+edges (a call more per outlined method), `lang` the same (its cycles are calls), the seed and
+the fixpoint again: 5 to 10 days, decided against at S5 (SA100 (a)) on other grounds.
+
+Cheaper levers on `jrt`'s compile all change the output and the program (`-l`, no inlining:
+slower code; a smaller `jrt` means fewer reached JDK members, which reachability already
+minimizes) or do nothing (`-c` is already 64; GOGC raised in the first round was slower).
+
+Where g2a's 18 s on the one-run build goes is the next lever (g2a's own printing and writing,
+not Go): left for the round's other parts.
+
+### Amendments (proposed 2026-10-15)
+
+- **SA180 `jrt` split for the build's speed.** (a) Not split: `jrt` is cached in the one-run
+  build and the fixpoint's later stages, so a split gains nothing there; about 45 s at best once
+  per change to the runtime, for S5's 5 to 10 days of a2g's work; (b) split along S5's `-decls`
+  model (outlined bodies, linkname pulls), `lang` too. *Recommended: (a)*.
+- **SA181 What is measured as a build's Go step.** (a) The trace and the per-compile timing
+  above kept as the method (`.tmp/speed2/trace.sh`, `tx.sh`, `an.py`: `go build -debug-trace`, a
+  `-toolexec` timer, `-gcflags=<pkg>=-bench`), not committed as tools; (b) a `tools/` command for
+  it. *Recommended: (a)*: a measurement, not a check the build runs.
+
+**Decided (2026-10-15, the user):** SA180 (a), `jrt` not split; SA181 (a), the scripts kept in
+`.tmp/speed2/`.
+
 ## The build's speed, second round, part D: g2a's own work (2026-10-15)
 
 Status: on the branch `speed2-g2a` (from main at `1b24757`). Part C measured g2a's step in a
@@ -2910,63 +2970,3 @@ not done (SA191).
 - **SA191 `aot_arbace_core_protocols`.** (a) Left a package of its own; (b) merged into
   `aot_arbace_core` (the back end's packaging). *Recommended: (a)*: about 2 s, only when the
   runtime or the protocols change.
-
-## After the milestone: the build's speed, second round (2026-10-15)
-
-The user's order after the first round: a second one, in three parts on branches of their own
-(A: the host's compiling of the namespaces; B: a2g; C: g2a's builds). Measured on the shared
-host, busy with the emulated arm64 VM and other builds: single timings vary by up to a half.
-
-### A: the host's compiling of the namespaces (branch `speed2-host`)
-
-**Where the time went** (`9942951`, stage 0 the host, alone): loading the 100 sources (85
-namespaces) about 19 s, the back end about 32 s (`compile-all` 27 s on one core, the printing
-8.5 s on 16 threads), about 53 s in all (56 to 64 s in a build, beside a2g). A CPU profile: four
-fifths of it the evaluator. The host prepares the namespaces from source (`ARBACE_NO_AOT`, so
-that their units are recorded), so the back end, and `arbace.core` and the other namespaces it
-calls, ran evaluated, not as the host's compiled code.
-
-**What changed (SA164).** `arbace.aot.main/run`, before compiling, runs the compiled loaders of
-the back end's namespaces and the ones they need when the program holds them for the sources on
-`ARBACE_PATH`: the closure of `arbace.aot.main` and `arbace.core` under `:require`, `:use` and
-top-level `load`, found from the sources' forms (23 sources: core's ten with
-`arbace.core.protocols`, `arbace.instant` and `arbace.uuid`, `arbace.java.io`, `string`, `set`,
-`classes.types`, `a2g.names`, `a2g.jrt`, `g2a.print`'s four, `aot.emit`, `aot.main`), each
-source's text compared with the embedded one. The loaders run in the order the sources were
-loaded, in the bindings `Compiler$AOT/load` makes (a nested `load` is then a no-op: the source is
-loaded); their vars' roots become the compiled fns, and the units the back end reads are the
-analysis' as before. When a source of the closure is not the program's own (stage 0 the host
-and the checkout's core or back end changed since the seed), the back end runs evaluated, as
-before. Where it applies: the fixpoint's G2 and G3, `bin/seed --verify`, the box's rebuild (its
-host image is built from the same sources), and builds by stage 0 once the seed holds it and as
-long as those 23 sources are unchanged since.
-
-**Tried and left.** Only `arbace.aot` compiled: 4 to 11 s (core's fns stay evaluated). The
-closure without core: no better than `arbace.aot` alone. `GOGC` 1000 or 2000 instead of 400: no
-faster, the peak RSS 5.1 → 9.7 GB. Not tried: the namespaces' loading compiled. The analysis
-needs each top-level form evaluated before the next, and a unit run as the host's compiled code
-would mix the analysis' evaluated classes (deftypes, protocols' interfaces) with the compiled
-ones. The namespace list (0.6 s) is not worth it.
-
-**Measured** (`b65bb74`):
-
-| | evaluated (stage 0 the host) | compiled (G1 the host) |
-|---|---|---|
-| alone, the back end (the host busy) | 55 to 58 s | 22 to 29 s |
-| in `bin/arbace-go --build`, the host's compiling (two pairs) | 56 s, 80 s | 38 s, 61 s |
-
-**Checked.** The tree compiled by the evaluated back end (G1, built by stage 0) and by the
-compiled one (G2, built by G1): the same, and **G2 = G1 byte for byte** (amd64 `1cd633b0...`,
-arm64 `9483503d...`). The essential gate on `b65bb74` passed (12:56, the host busy): the suite
-as recorded, the oracle's 53 known mismatches, 0 new. The executable is not main's: `aot/main.ae`
-is one of the compiled sources. A quirk found: the line of `arbace.pprint`'s last unit is
-the line of the driver script's `require` (bin/arbace-go's and the box's both on line 1), so a
-driver laid out differently prints another tree; not changed.
-
-### Amendments (proposed 2026-10-15)
-
-- **SA164 The back end compiled while the host prepares the namespaces.** (a) The compiled
-  loaders of the back end's closure run first when their sources are the program's own (built);
-  (b) evaluated, as before; (c) only `arbace.aot`'s two sources compiled (a smaller closure, a
-  third of the gain). *Recommended: (a)*: the same tree, the back end about half as long, and
-  nothing changes when a source of the closure is not the program's.
