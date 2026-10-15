@@ -2696,3 +2696,75 @@ byte**, `b6f2e89e...`, the three builds one run each from the new stage 0, 561 s
   other. *Recommended: (a)*.
 - **SA163 a2g's edge outside the runtime key.** (a) Left out (built); (b) in the key (a
   re-recorded edge makes builds two runs until a re-seed). *Recommended: (a)*.
+
+## The build's speed, second round: a2g (2026-10-15)
+
+The user's order (a second round, part B): a2g's phases after the compiled namespaces arrive,
+which ran on few cores. Branch `speed2-a2g`. Measured as `bin/arbace-go` runs a2g (`--await`, the
+same compiled tree copied in 60 s after a2g starts), on the shared host (the emulated arm64 VM
+and other builds beside it: single timings vary by a fifth or more).
+
+### Where the time went (`9942951`)
+
+After the compiled tree was ready, a2g took 123 s: loading it 31 s (the sequential part 10 s,
+the analysis 22 s, of which `arbace.core`'s loader alone, 903 methods and 1,588 fields, the last
+9 to 14 s), reachability 23 s on one core, the translation 41 s (the classes 17 s in parallel;
+then dyn 6, registrations 6, the packages 11, collisions 3, one after another) and the writing
+24 s (the files' texts 19 s in parallel). The parallel steps were bound by allocation (Go's
+collector), not threads.
+
+### What changed (`cb834cf`; a2g's output unchanged)
+
+- **The writer** (`arbace.a2g.out`): the layout passed along as an argument, not a dynamic var
+  bound for every tag; a text's newlines counted with `indexOf`, not a lazy seq per character;
+  no `map-indexed` per list; `*print-meta*` bound only for a value with metadata. The texts
+  19 → 4.3 s.
+- **`simple?` and `effects?`** (`arbace.a2g.code`) kept per node, by identity, while a class is
+  translated (`*node-memo*`, bound by `apart`; with the class and staticness of the function
+  being written, on which `guarded-static?` depends): each walked an operand's whole subtree,
+  and `operands` asks them again at every level of an expression. With the names below, the
+  classes 17 → 8 s.
+- **Names**: `munge-name`, `go-class-name`, `method-base` and model's `method-desc-classes`
+  kept per argument (pure; asked for again and again from every thread).
+- **dyn**: a slot's default methods asked only of the interfaces of which a supertype declares
+  the method (an index), not of all 627 for each of the 1,410 slots. dyn 6 → 0.5 to 1 s.
+- **Registrations**: the classes of all the packages in one parallel pass (they ran per
+  package, the small packages on few threads), merged in package order as before; T grouped by
+  package once; the literal pool's lone-surrogate test a loop. Registrations 6 → 0.5 to 1 s, the
+  packages 11 → 0.7 s.
+- **Collisions**: the files' declared names collected in parallel. 3 → 0.8 s.
+- **Reachability**: the queue in batches, each batch's code flattened (the nodes the scan acts
+  on) in parallel, then scanned in the queue's order, as before; `java-impl-of`'s lookups
+  through an index of each class's methods. 23 → 12 to 16 s; the rest is the scan itself, one
+  core, many small lookups.
+- **`arbace.classes.analyze/find-own-field`**: a Clojure name munged once per lookup, not once
+  per field of the class (the loader's 1,588 fields for each symbol).
+
+Tried and left: `arbace.core`'s loader analyzed with the member classes, the largest first
+(not after them, alone): no gain, the one long task slower among the 16 (the collector). The
+analysis of one class is sequential (its temporaries are numbered in one id space): the loader
+split into several classes (the compiler's emit, part A's) would let it run in parallel.
+
+### Measured
+
+| | before (`9942951`) | after (`cb834cf`) |
+|---|---|---|
+| a2g after the tree is ready | 123 s | 66 to 75 s |
+| reachability | 23 s | 12 to 16 s |
+| the translation (its steps after the classes) | 41 s (27 s) | 10 to 14 s (2 to 3 s) |
+| the writing (the texts) | 24 s (19 s) | 8 to 11 s (4 to 5 s) |
+| the fixpoint's one-run builds (G2 by G1, G3 by G2) | 2:57, 2:44 | 2:32, 2:15 |
+
+a2g's output for the same compiled tree is the same, byte for byte, but its own embedded
+sources and report.edn's times (`diff -r`). The fixpoint at `cb834cf` (G1 by the seed's stage
+0, whose a2g is the previous one): a2g's programs G1 = G2 = G3, **G1 = G2 = G3 byte for byte**
+(`bb9a9bf7...`, 101,515,424 bytes): the new a2g prints the program the old one printed. The
+essential gate passed on `cb834cf` (9:08: the suite 20,506 of 20,520, no regressions; the
+oracle 22,505 of 22,558, the 53 known, 0 new).
+
+### Left
+
+- `arbace.core`'s loader: one class of 903 methods, analyzed in one task (9 to 14 s, at the end
+  of the analysis, alone); split by the compiler (part A), its parts would analyze in parallel.
+- The load's sequential part after the tree arrives (10 s: entering, headers, members,
+  bridges), in `arbace.classes`; reachability's scan (12 to 16 s, one core).
