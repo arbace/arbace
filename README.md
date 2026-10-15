@@ -59,16 +59,17 @@ Main builds it from its own seed (next section).
 
 ## The seed: Arbace builds itself
 
-Since standalone S4 (2026-10-12; the milestone `arbace-seed-is-go-v1`) the bootstrap needs no JVM
+Since standalone S4 (2026-10-12; the milestone `arbace-seed-is-go-v1`, 2026-10-13) the bootstrap needs no JVM
 ([doc/STANDALONE-NOTES.md](doc/STANDALONE-NOTES.md), [doc/STANDALONE-SURVEY.md](doc/STANDALONE-SURVEY.md)).
-Its seed is Arbace's own Go program as Arbace printed it, `seed/arbace-seed-go.tar.xz` (about 3
-MB of Go source, pinned by its SHA-256; the Go toolchain that builds it, TamaGo's go1.27.1,
+Its seed is Arbace's own Go program as Arbace printed it, `seed/arbace-seed-go.tar.xz` (5.4 MB
+as xz, 61 MB of Go source, pinned by its SHA-256; the Go toolchain that builds it, TamaGo's go1.27.1,
 pinned by the hash of its sources). Go's toolchain alone builds it into stage 0, an Arbace
 executable; stage 0 runs a2g and g2a on Arbace's sources and prints and builds the program
 again; that program does the same, and the third generation is the second byte for byte (the
 fixpoint). The seed is that fixpoint's printed source, so the executable built from it rebuilds
 itself exactly (`bin/seed --verify`). The JDK's classes Arbace needs are committed as class
-forms (`jdk/`), converted once by j2a.
+forms (`jdk/`), converted once by j2a. Since standalone S6 the program's namespaces are compiled
+to Go (`ARBACE_AOT=1`, the default; `ARBACE_AOT=0` evaluates them from an image, as before).
 
 ```sh
 bin/seed --check && bin/seed --build    # stage 0 from the seed: target/seed/amd64/arbace
@@ -91,6 +92,12 @@ and TCP streams proxied by the launcher under a policy are its only ways out
 runs on a Linux host with /dev/kvm; arm64 on KVM/arm64, checked here in an emulated aarch64 VM
 (`bin/box-arm64-vm check`). The Mac's Hypervisor.framework has a launcher (purego vendored as Go
 forms) and a bundle with a checklist (`bin/box-mac-bundle`), which passed on an M2 Max.
+
+The tag `arbace-inside-itself-v1` (2026-10-15, on main) marks the box rebuilding Arbace inside
+itself: a guest runs a2g, g2a's printing, the plan and Go's compiler and linker as spawned tool
+guests over the store, and the image it builds is the host's byte for byte, on amd64, in the
+emulated arm64 VM and on the Mac (`bin/box-rebuild`; [doc/go/BOX-NOTES.md](doc/go/BOX-NOTES.md),
+"S8").
 
 ```sh
 bin/arbace-go --build && bin/arbace-go --build --box   # target/arbace-go/box-amd64/arbace-box
@@ -143,7 +150,8 @@ seed was printed from (the seed's `SEED.edn`).
 - [doc/AGENDA.md](doc/AGENDA.md): where the work stands and what comes next
 - [doc/go/FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-golang/doc/go/FREEZE.md)
   (on `arbace-for-golang`): Arbace for Golang: build, run, verify, the frozen branch
-- [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only
+- [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only (since 2026-10-15;
+  the earlier history at the tag `arbace-inside-itself-v1` and on the frozen branches)
 - [doc/classes/SPEC.md](doc/classes/SPEC.md): the class forms
 - [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/A2G-SPEC.md](doc/go/A2G-SPEC.md),
   its translation; [doc/go/EXEC-NOTES.md](doc/go/EXEC-NOTES.md), the executable;

@@ -1,20 +1,24 @@
 # Agenda
 
 The current state of the work. This file is rewritten as things change. For the history, see
-[JOURNAL.md](JOURNAL.md).
+[JOURNAL.md](JOURNAL.md) (since 2026-10-15), the journal at the tag
+[`arbace-inside-itself-v1`](https://github.com/arbace/arbace/blob/arbace-inside-itself-v1/doc/JOURNAL.md)
+(2026-10-11 to 2026-10-15) and the frozen branches' (before).
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz`, the program printed
-  by the Go-hosted fixpoint, pinned by `seed/arbace-seed-go.tar.xz.sha256`, its toolchain
-  (TamaGo's go1.27.1) by `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0),
-  `--make`, `--verify` (the fixpoint from the seed's own stage 0 prints the same seed).
-- Stage 0 hosts every Arbace tool (a2g, g2a, c2a, the suite's runner); `bin/arbace-go --build`
-  is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3.
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`c7f5e3d5…`), the
+  program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
+  `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
+- Stage 0 hosts every Arbace tool (a2g, g2a, c2a, the suite's runner), compiled into it;
+  `bin/arbace-go --build` is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3.
+- The program's namespaces are compiled to Go (`ARBACE_AOT=1`, the default since S6): the
+  executable 101.3 MB (amd64), a build about 4.5 minutes.
+- The box: the same program as a TamaGo guest of go-whim's monitor (/dev/kvm on amd64; KVM/arm64
+  and Hypervisor.framework on arm64), and the box rebuilding Arbace inside itself byte for byte
+  (`bin/box-rebuild`, run by hand at milestones).
 - The JVM runs only the frozen jar of `arbace-for-java-26-v4` (pinned by hash): the oracle's
-  reference, j2a (javac), and the recording or checking of what the JVM answered (`jdk/`'s forms,
-  the edge, the fixtures' forms, data generators). The JVM Arbace's build, ASM and the bytecode
-  back ends are on the frozen branch `arbace-for-java-26`.
+  reference, j2a (javac), the edge, the fixtures' forms and the data generators.
 - `LICENSE.md` holds all licenses and which files each covers.
 - The host: Alpine edge on amd64 with /dev/kvm ([ALPINE.md](ALPINE.md); `bin/alpine-env`).
 
@@ -33,67 +37,38 @@ The current state of the work. This file is rewritten as things change. For the 
   `arbace-box-arm64-v1` (KVM/arm64; Hypervisor.framework on an M2 Max, 42 of 42).
 - **The standalone Go-hosted bootstrap, S1-S4 (2026-10-12 to 2026-10-13;
   [STANDALONE-SURVEY.md](STANDALONE-SURVEY.md), [STANDALONE-NOTES.md](STANDALONE-NOTES.md)).**
-  - S1: the JDK's forms committed in `jdk/`.
-  - S2: a2g without the JVM's reflection and ASM (`jdk/edge.edn`); the test fixtures as forms.
-  - S3: g2a and a2g on the Go executable; the fixpoint G1 = G2 = G3.
-  - S4: the seed printed by the fixpoint and committed; the build Go-hosted from it; a2g
-    translating in parallel (a build 4.8 minutes); the JVM's products, ASM and the back ends
-    removed (132 files, 25,474 lines); the oracle against the frozen v4.
-  - The milestone `arbace-seed-is-go-v1` (2026-10-13): `bin/gate --full`, run with a failing
-    `go` first on PATH, then the tag on main (not a freeze).
+  The JDK's forms committed, a2g without the JVM's reflection, the tools on the Go executable,
+  the seed printed by the fixpoint; the JVM's products removed. Milestone `arbace-seed-is-go-v1`.
+- **Arbace inside itself, S5-S8 (2026-10-13 to 2026-10-15).** S5 (the known issues, closed by
+  measurement), S7 (tool guests, spawned, the action cache), S6 (the namespaces compiled to Go,
+  the default; the size halved, 209.9 → 101.3 MB; the variants merged), S8 (the rebuild in the
+  box byte for byte on amd64, in the emulated arm64 VM and on the Mac, 46 of 46). The host VM
+  survey's HV1-HV9 decided, HV1 (b) built, HV6/HV7 measured on the Mac. Milestone
+  `arbace-inside-itself-v1` (2026-10-15): `bin/gate --full` at `c3fdd36`, `bin/box-rebuild` by
+  hand (`3131e754…`).
 
 ## Now
 
-- The user accepted the amendments SA20-SA25 and SA40-SA88 as applied (2026-10-13;
-  [STANDALONE-NOTES.md](STANDALONE-NOTES.md)).
-- Fixed (2026-10-13): the two Go-build bugs the native tests found (a top-level `do` of mutually
-  referring `defclass`es; a class forms `lambda` in a handed-over fn), SA90-SA92 accepted. Left:
-  reflection on a member typed by a sibling defined later reports `Object` (SA90 (b) if needed).
-- The seed remade (2026-10-13, the user): the fixpoint at `68e00ce`, `f7d27e48…`; verified
-  (stage 0 = G1 = G2 = G3, `d144af21…`).
-- The host rebooted into 6.18.56 (2026-10-13): nested KVM works, the box's smoke test 111 ok.
-- No Mac bundle for this milestone (the user).
+- The journal started over after the milestone (the user, 2026-10-15).
+- Running: the whole chain in the emulated arm64 VM, nothing given (BX117 (a), at `434021a`,
+  since 2026-10-14 22:49); recorded when it ends.
+- The docs searched for sloppiness and fixed (the user's order, 2026-10-15).
+- Next: the build's speed (below, from "Later").
+- The Mac may move to macOS 26 (the user).
 
 ## Next
 
-- The host VM survey ([go/HOST-VM-SURVEY.md](go/HOST-VM-SURVEY.md)): HV1-HV9 accepted
-  (2026-10-13). HV1 measured (a2g under 2 GiB is 3.0× slower), so HV1 (b): RAM above 4 GiB
-  for a Go guest, built and merged ([go/BOX-NOTES.md](go/BOX-NOTES.md), "HV1 (b)"), BX80-BX84
-  decided as recommended (the slot 3 GiB by default, `ARBACE_BOX_RAM` per launch); the Mac's
-  RAM checks with the next Mac bundle. HV6 measured (29 ppm, no resync).
-
-- The milestone `arbace-inside-itself-v1` (the user, 2026-10-13; reached 2026-10-15) includes all of this
-  section: the standalone survey's S5-S8 (the box rebuilding Arbace inside itself), the known
-  issues below and the speed item. `bin/gate --full` runs at it. Decided (the user): three
-  tracks in parallel, S5 with the known issues, S6 (which carries the speed item), S7; S8 when
-  they land. S8 must pass byte for byte on amd64 (/dev/kvm), in the emulated arm64 VM and on the
-  Mac (one bundle at the end, also carrying the Mac's HV1 RAM checks and HV6/HV7 clock run). S9
-  (Go's toolchain as forms) stays later.
-- Status: S5 closed by measurement (SA100-SA107); S7 done; S8 done before S6 (byte for byte in
-  the box on amd64 and, with a2g's output from amd64, in the arm64 VM; BX110-BX119); S6 merged
-  (2026-10-14): Arbace compiled to Go the default (`ARBACE_AOT=1`), a build 4:46 to 5:14, the
-  suite and the oracle as recorded, the fixpoint, the seed remade from it (`62c699af…`, was
-  `f7d27e48…`) and verified, the box's rebuild byte for byte on amd64 (`9c802100…`); SA141-SA152
-  accepted as (a). The size (the user: inside the milestone), merged: the compiled program
-  101.3 MB (was 209.9; the evaluated 72.4), the box's guest 100.8 MB, a build 4:13 to 4:41, the
-  gate 10:32, the test build reusing the compiled namespaces; the seed remade (`c7f5e3d5…`) and
-  verified, the box's rebuild byte for byte (`4f394cc6…`); SA153-SA159 accepted as (a).
-  S8's runs again on the final program, done (2026-10-14; [go/BOX-NOTES.md](go/BOX-NOTES.md)):
-  byte for byte on amd64 (`b7c00302…`), in the emulated arm64 VM (`a733f9bc…`, 8 h 21 min) and on
-  the Mac (`579c8b3b…`, 352 s; the checklist 46 of 46, the rebuild 4 of 4; two checklist fixes,
-  `338c4a2`); the Mac's HV1, HV6 (5 ppm) and HV7 (352 s against the amd64 box's 785 s) measured.
-  `bin/gate --full` passed at `c3fdd36` (after two fixes: the edge recorded again, the RAM check
-  in `vmm/guestram.go`), `bin/box-rebuild` by hand byte for byte (`3131e754…`). **The milestone
-  `arbace-inside-itself-v1` reached and tagged (2026-10-15).** Running: the whole chain in the VM
-  (BX117 (a)), recorded when it ends. The user may upgrade the Mac to macOS 26.
-- Known issues: fixed in S5 (SA90 (b), `reflect_tables.ae`, the box's oracle run, `Var`,
-  `Reflector` and the `.subst` variants merged, `bin/box-vendor convert`); RT, Main and
-  Compiler's hand-written variants merged in S6 (SA150).
-- Speed: S6 (a2g compiled: load 119 s to 38 s, reach 60 s to 16 s; the compiled build 4:46,
-  SA140's bound held; the size halved, SA153-SA159).
+- The build's speed (the user, 2026-10-15): a build keeps few of the host's 64 cores busy.
+  Measured on `dfe2e5e`: a2g is most of a one-run build (about 190 s: its load about 67 s, mostly
+  the compiled namespaces' analysis, nearly sequential; reach 21 s, translate 30 s, write 16 s),
+  g2a's builds 22 s (amd64) and 18 s (arm64), one after the other; the namespaces' compiling 70
+  s. Aim: 2 to 3 minutes.
+- Left from earlier: reflection on a member typed by a sibling defined later reports `Object`
+  (SA90 (b) if needed).
 
 ## Later
 
+- S9: Go's toolchain as forms (STANDALONE-SURVEY.md).
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through j2a.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
   self-sustaining REPL in a virtual sandbox, in Arbace down to the bare metal ISA, in the style
@@ -127,12 +102,6 @@ The current state of the work. This file is rewritten as things change. For the 
   on arm), to check; unikernels with a privilege split.
 - The box's oracle and `box-suite` in `bin/gate --full` (manual today); the mapped start measured
   without nested KVM; the arm64 box's oracle subset and `box-suite` (an arm64 host with KVM).
-- The build's use of the host's 64 cores (the user, 2026-10-14): S6's AOT builds (about 5
-  minutes) keep 5 to 9 cores busy on average. a2g is about 70% of a build on at most 16 threads
-  (`A2G_JOBS`'s cap, chosen for memory), its load and analysis partly sequential; g2a's build
-  waits on the largest runtime packages; the namespaces' compiling, prepare and the link are one
-  process each. To try after the milestone: a higher cap within memory, more of the analysis in
-  parallel, the largest packages split; aim 2 to 3 minutes.
 - g2a's open ends: mode `:full` in the printer (columns; positions exact); `$GOROOT/test`'s
   directory tests.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
