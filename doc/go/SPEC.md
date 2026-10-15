@@ -2396,12 +2396,13 @@ printer's over the helper's):
 - Arbace's reader (`arbace/lang/LispReader.ae`, `MetaReader`): explicit `:line`/`:column`
   metadata is kept over the reader's; `~` is unquote, `^` metadata, `.5` a symbol, `1e400`
   `##Inf`, and `|`, `%`, `&`, `&&`, `||`, `!=`, `<<`, `>>`, `...`, `<!`, `>!`, `inc!` symbols
-  (checked with the JVM REPL, then `bin/arbace`, now `bin/arbace-j`).
+  (checked with the JVM REPL, then `bin/arbace`, later `bin/arbace-j`, on `arbace-for-java-26` since
+  standalone S4).
 - go-lisp `/root/go-lisp` (`2483a496`): `golisp/SPEC.md` (invariants I1-I4, the node tables,
   directives, round-trip normalizations, end positions F10), `golisp/DESIGN.md` §4.1.
 - The amendments of 2026-10-08: `doc/go/HELPER-NOTES.md`, `doc/go/PRINTER-NOTES.md`,
   `doc/go/CONVERTER-NOTES.md`, the oracle's normalizations and configurations in
   `doc/go/ROUNDTRIP.md`, and the program build in `doc/go/BUILD.md`.
 - Arbace: `doc/classes/SPEC.md` (structure, principles, tags, labels, `switch`),
-  `doc/G2C-SURVEY.md`, the journal entry "Decisions on g2a's open questions" (2026-10-07, on
+  `doc/G2C-SURVEY.md`, the journal entry "Decisions on g2c's open questions" (2026-10-07, on
   the branch `arbace-for-java-26`).

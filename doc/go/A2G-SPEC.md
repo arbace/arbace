@@ -37,7 +37,8 @@ classes) to **Go forms** ([SPEC.md](SPEC.md), Go programs as Clojure data, print
 `bin/g2a build`). It says how Java's types, objects, statics and code become Go, what a2g writes
 and what it leaves to **jrt** (the Java runtime in Go forms under the translated classes), and
 how the evaluator of B1a step 5 sits on top. It is the counterpart for Go of the class forms
-compiler's back end (`arbace.classes.emit`), and follows the two form specs in structure.
+compiler's JVM back end (`arbace.classes.emit`, on `arbace-for-java-26` since standalone S4), and
+follows the two form specs in structure.
 
 Words used throughout:
 
@@ -72,7 +73,7 @@ questions · 17 Sources.
    translates its typed nodes. Name resolution, overloads, conversions, boxing, constant
    folding, bridges, inner class plumbing, enum and record members, switch maps and the other
    derivations of class forms §6 are the analyzer's; a2g never re-derives them. So the Go build
-   and the JVM build cannot disagree on what a form means.
+   and the JVM build (the frozen one since standalone S4) cannot disagree on what a form means.
 3. **Go's machinery where it fits.** Objects are Go structs, references Go interface values or
    pointers, dispatch Go interface calls, exceptions Go panics, threads goroutines, the heap
    Go's garbage collector. jrt adds only what Go lacks (class initialization, monitors, UTF-16
@@ -203,7 +204,8 @@ on the JVM Arbace's `target/stage2` until standalone S4, which gave the same out
 `bin/a2g`, implemented in `arbace/a2g/` (namespaces `arbace.a2g.*`). Its input is a set of
 class forms files and a jrt manifest:
 
-1. **Arbace's runtime**, `arbace/lang/*.ae`, with the Go-build variants of §4.6.
+1. **Arbace's runtime**, `arbace/lang/*.ae`, with the Go-build variants of §4.6 (since SA150,
+   2026-10-13/14, only the generated `CompilerOps.ae` and `CompilerAOTFn.ae`).
 2. **The translated JDK closure**: j2a's conversion of the jdk26u source files of the closure
    (JAVA-SURFACE.md, "The translation closure": 184 files, 422 classes; with D5's regex), with
    their own variants; since phase 2C, 223 files (below), and since step 5's phase 2B, 340
@@ -219,11 +221,11 @@ class forms files and a jrt manifest:
 
 a2g enters all classes into one class environment (classes/SPEC.md §9.2: the compilation set,
 then sources), runs the analyzer over every class body (`resolve-members!`, `analyze-class!`,
-`add-bridges!`, as `arbace.classes.compiler` does before emitting), and translates the analyzed
-classes. The closed world is exactly these classes. A reference to any other class is an error
-that names the class and the referring member; the cure is a variant (§4.6) or a jrt stub
-(JAVA-SURFACE.md, "cut": a class that must exist as a name, whose members throw
-`UnsupportedOperationException`).
+`add-bridges!`, as `arbace.classes.compiler` did before emitting, on `arbace-for-java-26` since
+S4), and translates the analyzed classes. The closed world is exactly these classes. A reference
+to any other class is an error that names the class and the referring member; the cure is a
+variant (§4.6) or a jrt stub (JAVA-SURFACE.md, "cut": a class that must exist as a name, whose
+members throw `UnsupportedOperationException`).
 
 **The edge** (standalone S2, [STANDALONE-NOTES.md](../STANDALONE-NOTES.md); amendments SA10-SA15).
 What a2g knows of the classes outside the forms (jrt's hand-written classes, the JDK's classes
@@ -578,8 +580,10 @@ runtime's two functions (§9.3). The module is `arbace` (`program.edn`: `{:modul
   `a2g_support.go` (a2g's helpers `A2g_*` and what a2g generates into jrt's package, §11) and
   `a2g_init.go` (the eager initialization of replaced stand-ins, below) (amendments C2-C5, E4,
   E5, accepted 2026-10-09).
-- The forms tree follows Go forms SPEC §4.1: a2g writes `target/a2g/go/arbace/jrt.ae` (`ns`,
-  `go/package`, `load`s), `target/a2g/go/arbace/jrt/java_util_HashMap.ae` and so on. It is
+- The forms tree follows Go forms SPEC §4.1: a2g writes, under its `--out` directory OUT
+  (`target/arbace-go/a2g/` for `bin/arbace-go`), `OUT/gen/go/arbace/jrt/java_util_HashMap.ae` and
+  so on, and the program root `OUT/prog/` merging them with jrt's hand-written forms, with its
+  `OUT/prog/go/arbace/jrt.ae` (`ns`, `go/package`, `load`s). It is
   regenerated, not tracked, as converted Go is (g2a decision 9).
 - **jrt's hand-written forms** are source, tracked, in a forms root of their own (§16 Q19),
   `go/arbace/jrt/*.ae`; the build merges the two trees into one program root before
@@ -598,12 +602,12 @@ runtime's two functions (§9.3). The module is `arbace` (`program.edn`: `{:modul
   `java.lang.reflect.Type`, `InvocationTargetException`) is one of them (amendment R19, accepted
   2026-10-08). When a2g's output joins, the translated classes define the same names; jrt's
   core uses only their constructors and interfaces, so a change of leafness in the larger
-  closed world does not affect it. **All 64 stand-ins are translated classes in a a2g program**
+  closed world does not affect it. **All 64 stand-ins are translated classes in an a2g program**
   (amendment K3, accepted 2026-10-09; the 26 without sources before phase 2C were added to the
   JDK input from jdk26u, K1): no `standin_*` class remains hand-written there, each replaced as
   below. The stand-in files are not deleted: they remain **only for jrt's own build**
   (`bin/jrt build`, `bin/jrt test` without a2g, which has no translated classes); nothing in
-  them is meant to stay otherwise. `bin/jrt build|test --prog DIR` builds or tests jrt within a
+  them is meant to stay otherwise. `bin/jrt build|test --prog DIR` builds or tests jrt within an
   a2g program root, the stand-ins replaced.
 - **Replaced stand-ins** (amendment C3, accepted 2026-10-09). A stand-in whose class has class
   forms in the world is replaced by the translation: a2g filters jrt's hand-written forms for
@@ -756,7 +760,11 @@ JAVA-SURFACE.md's "rework" (about 300 lines of `RT`, `Compiler` and `Reflector`)
 need the Go build's `arbace.lang` to differ in places from the JVM's. The source stays one: the
 differences are **variant files**, `arbace/lang/go/<Class>.ae` (and, for the translated JDK,
 whose class forms j2a regenerates, `overlay/jdk/variants/<Class>.ae`, in the class's package:
-amendment K1, accepted 2026-10-09), read by a2g only:
+amendment K1, accepted 2026-10-09), read by a2g only. (Since SA150, 2026-10-13/14, the
+hand-written variants of `arbace/lang` are merged into their bases by
+`test/aot/merge_variants.ae`, and `arbace/lang/go/` holds only the generated `CompilerOps.ae` and
+`CompilerAOTFn.ae`; the mechanism and the JDK's variants stay: STANDALONE-NOTES.md, "The
+variants merged into their bases (SA150)".)
 
 ```clojure
 (in-ns 'arbace.lang)
@@ -1559,9 +1567,9 @@ initializes what its initializer uses by §6.2's protocol, so their initializers
 ### 7.2 Contexts, temporaries and the order of evaluation
 
 The analyzer's nodes are expressions (Clojure's `if`, `let`, `loop`, `try` have values); Go
-separates statements from expressions and has no conditional expression. a2g translates each
-node in one of four **contexts**, as the JVM back end does (`arbace.classes.emit`: `:stmt`,
-`:expr`, `:return`):
+separates statements from expressions and has no conditional expression. a2g translates each node
+in one of four **contexts**, as the JVM back end did (`arbace.classes.emit`, on
+`arbace-for-java-26` since S4: `:stmt`, `:expr`, `:return`):
 
 - **statement**: the value is discarded;
 - **return**: the value is the enclosing Go function's result (a method, a function literal of
@@ -1904,7 +1912,7 @@ each check; a2g may generate them later.
 - An exception that leaves a thread's `run` (or `main`) is handed to the thread's uncaught
   exception handler, else the default one, else printed as the JVM prints it (`Exception in
   thread "main" ...`, `jrt.Uncaught`) by jrt's thread entry; for `main`, `jrt.RunMain` then
-  makes the program's status 1 (§8.4, §10.6). In a a2g program, `printStackTrace()` and the
+  makes the program's status 1 (§8.4, §10.6). In an a2g program, `printStackTrace()` and the
   uncaught exceptions print through `System.err`, as the JVM's do (jrt's `StderrPrint`, which
   a2g's support redirects; the host's stream while `System.err` is null: amendment K2, §11).
 
@@ -1981,9 +1989,9 @@ each check; a2g may generate them later.
 - **Enums** extend jrt's `Enum` (shim: `F_name`, `F_ordinal`, the final methods). The constants
   are static fields set by the class initialization in order; `values()` clones `$VALUES`;
   `valueOf(String)` searches the constants (the analyzer derives both members; a2g writes their
-  bodies as `arbace.classes.emit` does). A constant with a body is an anonymous subclass, which
-  makes the enum non-leaf. `Enum`'s promotable methods (§5.4, §9.1) are `name`, `ordinal`,
-  `hashCode` and `equals`; `clone` is `Impl_Clone__O` (final, throwing
+  bodies as `arbace.classes.emit` did, on `arbace-for-java-26`). A constant with a body is an
+  anonymous subclass, which makes the enum non-leaf. `Enum`'s promotable methods (§5.4, §9.1) are
+  `name`, `ordinal`, `hashCode` and `equals`; `clone` is `Impl_Clone__O` (final, throwing
   `CloneNotSupportedException` without a message, as `Enum.clone` does), to which every enum
   class's `Clone__O` forwards (amendment J10, accepted 2026-10-08).
 - **Records** extend jrt's `Record`. Their fields, accessors and canonical constructor come from
@@ -2290,7 +2298,7 @@ the translated code may use, as the analyzer needs it:
   forward, §7.13: amendment J10, accepted 2026-10-08).
 - A hand-written class declares the JDK's interfaces even when it cannot implement all their
   methods (amendment S3, accepted 2026-10-09): `String` implements `java.lang.constant.Constable`
-  and `ConstantDesc` (translated in a a2g program, marker stand-ins in jrt's own build), so that
+  and `ConstantDesc` (translated in an a2g program, marker stand-ins in jrt's own build), so that
   `supers` and `ancestors` of `String` and the boxed numbers are the JVM's; `describeConstable`
   is a2g's (§11), and `resolveConstantDesc`, whose parameter is `MethodHandles.Lookup`, does not
   exist in Go.
@@ -2546,7 +2554,7 @@ blocking for the first char and then taking only what is buffered. Nothing flush
 exit, as on the JVM. When jrt has the two adapters, the variant's `OUT`, `ERR` and `IN` return
 to the JVM's initializers and the two classes and their natives go.
 
-**`System`'s streams in a a2g program** (amendment K2, accepted 2026-10-09; it supersedes P4's
+**`System`'s streams in an a2g program** (amendment K2, accepted 2026-10-09; it supersedes P4's
 interim streams above, which are gone, and P4's class lookup stays, §10.3). jrt now has the two
 adapters, as jrt's own Java (§4.1, K1): `OutputStreamWriter` and `InputStreamReader` over jrt's
 three charsets with the JDK's REPLACE behavior (the behavior P4 describes, now the JDK's
@@ -2599,12 +2607,13 @@ deftype, defrecord or reify, at its first call, into a tree of `Code` nodes
 in the frame's `prims`, constants made once, a node of a primitive analyzed type answering
 `runLong`, `runDouble` or `runBool` (the bytecode's `emitUnboxed`), `recur` by a frame flag;
 `evalIn` remains the evaluation of top-level forms and of node kinds the compiler does not know
-(compat mode). The public static methods of `Numbers`, `RT`, `Util` and jrt's `Math` with at
-most three parameters of the kinds long, int, double, boolean or a reference are called
-directly, as Go calls: `arbace/lang/go/CompilerOps.ae` (`CodeOp0` .. `CodeOp3`), generated by
-`test/a2g/eval_ops.ae` from the JVM's classes and checked in, regenerated when those methods
-change. Other resolved methods go through `Evaluator.invokeResolved` (their invoker directly,
-when the declaring class is public), resolved constructors through jrt's
+(compat mode). The public static methods of `Numbers`, `RT`, `Util` and jrt's `Math` with at most
+three parameters of the kinds long, int, double, boolean or a reference are called directly, as Go
+calls: `arbace/lang/go/CompilerOps.ae` (`CodeOp0` .. `CodeOp3`), generated by
+`test/a2g/eval_ops.ae` from the classes' reflection (on Arbace's Go executable built from the
+checkout's sources since standalone S4, on the JVM's until then) and checked in, regenerated when
+those methods change. Other resolved methods go through `Evaluator.invokeResolved` (their invoker
+directly, when the declaring class is public), resolved constructors through jrt's
 `Compiler_CodeRun_Construct_Constructor_O1__O`, exceptions unwrapped.
 
 ### 10.2 Functions
@@ -2745,10 +2754,11 @@ iterators' rule data `sun/text/resources/WordBreakIteratorData`, `LineBreakItera
 **Prepared namespaces** (amendment U1, accepted 2026-10-09; EXEC-NOTES.md). The program holds an
 image of its embedded namespaces analyzed at build time, and `RT.load` of an embedded source the
 image holds replays it instead of reading and analyzing it (`Compiler$Image`, in the `Compiler`
-variant): for each *unit* (a top-level form, or each form of a top-level `do`, as
-`Compiler.eval` splits them) it decodes the `Expr` tree the analysis made, makes again the
-*events* of that analysis (deftype's stub and class, `gen-interface`'s interfaces and methods,
-`proxy`'s class, the boot `ns` macro's `*ns*`), and evaluates the tree as `Compiler.eval` does.
+variant; in `Compiler.ae` since SA150): for each *unit* (a top-level form, or each form of a
+top-level `do`, as `Compiler.eval` splits them) it decodes the `Expr` tree the analysis made,
+makes again the *events* of that analysis (deftype's stub and class, `gen-interface`'s interfaces
+and methods, `proxy`'s class, the boot `ns` macro's `*ns*`), and evaluates the tree as
+`Compiler.eval` does.
 Evaluation is unchanged; only the analysis is skipped, as for the JVM's AOT-compiled namespaces.
 The image is recorded by the program itself, run once with `ARBACE_PREPARE=FILE` requiring every
 embedded namespace (`bin/arbace-go --build`): `Compiler.load` hands each top-level form of an
@@ -2760,7 +2770,10 @@ by Go's reflection over the program's struct types, by name (`Var`, `Keyword`, `
 collections and `Compiler`'s constant nodes; the graph keeps its sharing and the objects their
 identity hashes; fields only the bytecode back end reads (`ObjExpr.src`, the clearing paths) are
 not encoded. A load from source (`ARBACE_PATH`, `load-file`, a program without an image,
-`ARBACE_NO_IMAGE`) is as before.
+`ARBACE_NO_IMAGE`) is as before. Since S6 (2026-10-14, `ARBACE_AOT=1` the default of
+`bin/arbace-go`) the namespaces are compiled to Go and the image holds only what stays evaluated
+(`ARBACE_AOT=0`: all of them evaluated from the image, as before; STANDALONE-NOTES.md, "S6: the
+compiled build as the default").
 
 **Namespace variants** (amendment M1, accepted 2026-10-09). The Go build's differences in the
 namespaces live in `arbace/lang/go/ns/`, applied by `--program` when it embeds the sources:
@@ -2779,7 +2792,10 @@ not their channels; the escape of `+` written out as `"%2B"`, not computed with 
 computed; amendment FX5, accepted 2026-10-10), besides those of the class forms (CF2, below).
 Since 2026-10-12 `genclass`, `core_proxy`, `main` (both), `core/server` and `reflect/java` are
 applied to their sources (the JVM's versions left main with the back end) and deleted from
-`arbace/lang/go/ns/`.
+`arbace/lang/go/ns/`, as `instant`, `java/io` and `core_bean` were the same day with the JVM-only
+namespaces (ac66b27), and the class forms' `types`, `env` and `analyze` on 2026-10-13 (35255c7):
+since then `arbace/lang/go/ns/` is gone, every namespace is its source (`arbace/a2g/embed.ae`
+keeps the mechanism, with nothing to apply).
 Since files are in the world (amendment FS6, accepted 2026-10-10), the error report goes to a
 temporary file through `Files/createTempFile` as on the JVM, and `Compiler.loadFile` has no
 variant: `load-file` is the JVM's, with `File`'s absolute path and name.
@@ -2794,7 +2810,9 @@ list), `analyze.subst.ae` (ASM's `TypeReference` and the world's generic signatu
 `arbace.classes.interp`'s `compile-and-load!`), and the Go build's own namespaces `go.ae` and
 `interp.ae`. (Since 2026-10-12, with the back end gone: `native`, `go` and `interp` are sources
 in `arbace/classes/`, the access flags come from `arbace.classes.opcodes`, and the embedded tree
-leaves out `arbace/classes/jvm.ae`, the JVM's class file reading.) `Compiler.classForms`' variant loads them on the first class form without
+leaves out `arbace/classes/jvm.ae`, the JVM's class file reading. Since 2026-10-13 `types`, `env`
+and `analyze` are one source for both hosts too, `arbace.classes.go/go-build?` choosing.)
+`Compiler.classForms`' variant loads them on the first class form without
 checking the macros' specs, as the JVM loads them compiled.
 
 **The world's generic signatures** (amendment CF5, accepted 2026-10-10). `--program` also
@@ -2940,7 +2958,8 @@ image: when the arguments start the REPL (none, or `arbace.main`'s init options 
 neither `off` (the user's switch) nor `wrapped` (the marker for the child), it replaces itself
 (`syscall.Exec`) with `rlwrap` with `clj`'s flags around the executable's own path and
 arguments, `ARBACE_RLWRAP=wrapped` added; otherwise, or when the exec fails, it runs on,
-silently. The JVM launcher `bin/arbace-j` follows the same convention. `Host` is unchanged.
+silently. The JVM launcher `bin/arbace-j` followed the same convention (until S4; on
+`arbace-for-java-26`). `Host` is unchanged.
 
 **The box's program** (amendment BX4, accepted 2026-10-11; BOX-NOTES.md, S1). `main` sets the
 host with `jrt.ProgramHost` (§9.4) rather than `OSHost`, so the same main package serves both
@@ -2958,8 +2977,8 @@ image, and the profile-guided ones) set it with `go build -ldflags "-X
 'main.arbaceVersion=...'"` to the version map of `bin/lib/version.bash` (`{:describe "..."
 :commit "..." :dirty false}`, from git in a checkout, from `VERSION` in a tarball), read at link
 time. `main`, after `execRlwrap`, sets the system property `arbace.version` to it when it is not
-empty, and `arbace.core` reads `*arbace-version*` from that property when it loads (on the JVM,
-from the resource `arbace/version.edn`). So a2g's output, the Go build's cache and the image of
+empty, and `arbace.core` reads `*arbace-version*` from that property when it loads (on the frozen
+JVM, from the resource `arbace/version.edn`). So a2g's output, the Go build's cache and the image of
 prepared namespaces hold no version (the executable that prepares the image, from the first
 link, has none: its `*arbace-version*` says `unknown`, and nothing of it is kept), and a new
 commit only links again. `-ldflags -X` rather than a constant a2g writes: a2g's output stays a
@@ -4134,7 +4153,7 @@ text above, marked "(amendment Xn, accepted 2026-10-09)":
   `java-names` table: §4.1, §4.3, §4.6, §9.1, §11. K2 the jrt members a2g writes (`System`'s
   streams and setters, `String.CASE_INSENSITIVE_ORDER`, `String`'s regex methods;
   `printStackTrace()` and uncaught exceptions through `System.err`): §7.9.6, §9.1, §9.4, §11.
-  K3 all 64 stand-ins translated in a a2g program, the stand-in files only for jrt's own
+  K3 all 64 stand-ins translated in an a2g program, the stand-in files only for jrt's own
   build: §4.3.
 - **Phase 2D (W), from A2G-NOTES "Phase 2D":** W1 line positions in the forms and `--line-file`
   builds: §4.3, §7.9.6. W2 pattern switches as a labeled `if` chain, with `MatchException`
@@ -4156,7 +4175,7 @@ Where they meet each other or the text they amend, this is what holds:
   `overlay/jdk/variants/`, and widens §4.1's JDK input beyond JAVA-SURFACE.md's measured
   closure (184 files) to `bin/jrt-convert`'s 223.
 - K3 replaces J9's "the stand-in files are deleted": they are kept for jrt's own build, and C3's
-  replacement removes all of them from a a2g program.
+  replacement removes all of them from an a2g program.
 - W4 replaces §4.4's renaming of package-private pairs (`_pp_`) with an error, and compares Java
   packages, not Go packages; the rename table stays one entry (C6; later sets add entries:
   S1, FS4, RD5, TM7, SC2, §4.4).
@@ -4507,7 +4526,7 @@ text above follows:
   T11-T16, the deviations V11-V13 and §12's reduced scope, with their own sources);
   `doc/go/A2G-NOTES.md` (a2g's core and phase 2's parts A to D: the amendments C1-C8, P1-P4,
   E1-E8, K1-K3, W1-W6, and D7's measurements) and `doc/go/EVAL-PLAN.md` (the evaluator's design, its questions Q1-Q7); the variants
-  `arbace/lang/go/Compiler.ae`, `RT.ae`, `Reflector.ae` and jrt's `dyn.ae`, `natives.ae`;
+  `arbace/lang/go/Compiler.ae`, `RT.ae`, `Reflector.ae` (merged into their bases since SA150) and jrt's `dyn.ae`, `natives.ae`;
   jrt's own Java `overlay/jdk/java.base/` and the JDK's variants `overlay/jdk/variants/`,
   `go/arbace/jrt/files.ae`, `arbace/a2g/out.ae` (`string-regex-methods`, `java-names`,
   `support-forms`), `arbace/a2g/checks.ae`, `arbace/a2g/model.ae` (`benign-init?`);
@@ -4541,7 +4560,7 @@ text above follows:
   package of a2g's shape), `modpath` (a main module named `arbace`), `leaves.ae` (the leaf
   classes of stage 2's `arbace.lang`); `.tmp/a2g-proto/` (the
   prototype of §15, built with `bin/g2a build` for both architectures and compared with
-  the JVM Arbace, then `bin/arbace`, now `bin/arbace-j`).
+  the JVM Arbace, then `bin/arbace`, later `bin/arbace-j`, on `arbace-for-java-26` since S4).
 - JDK: jdk26u (`/root/jdk26u`): `java/util/function/Predicate.java` (default and static
   methods), `java/lang/runtime/ObjectMethods.java` (records' methods), JDK-8273914 (string
   concatenation's order of conversion, fixed in JDK 19). The JVM specification 5.4.3.3 (default

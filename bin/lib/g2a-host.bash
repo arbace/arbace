@@ -2,10 +2,12 @@
 # bin/g2a-print. Sourced, with $root set to the repository root. Defines:
 #
 #   g2a_exec NS ARG...  replaces the shell by -m NS ARG... on Arbace's Go executable (standalone
-#                   S3 and S4, doc/STANDALONE-NOTES.md), the checkout first on ARBACE_PATH, so
-#                   that arbace.g2a (not embedded in the executable) loads from the checkout's
-#                   sources. The executable is G2A_GO_EXE, else the tools' host (bin/lib/host.bash:
-#                   ARBACE_HOST_EXE, else stage 0 built from the Go seed), run from a copy in
+#                   S3 and S4, doc/STANDALONE-NOTES.md), the checkout first on ARBACE_PATH:
+#                   arbace.g2a is embedded in the executable and compiled since S6 (SA133), and a
+#                   source of it in the checkout that differs from the embedded copy is loaded
+#                   from the checkout instead, evaluated (RT.toolSource; until S6 all of it loaded
+#                   from the checkout). The executable is G2A_GO_EXE, else the tools' host
+#                   (bin/lib/host.bash: ARBACE_HOST_EXE, else stage 0 built from the Go seed), run from a copy in
 #                   .tmp/g2a-host/ refreshed when it differs: a build of the executable
 #                   (bin/arbace-go --build, G2A_GO_EXE=target/arbace-go/<arch>/arbace) may
 #                   replace it while the copy runs. The collector's settings are the

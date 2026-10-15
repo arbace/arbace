@@ -14,7 +14,7 @@ Under `test/oracle/`:
 
 | part | sources | what | size |
 |---|---|---|---|
-| forms | `forms/*.ae` (hand-written, by topic) | Clojure forms, evaluated in order | 8,753 forms, 25 files |
+| forms | `forms/*.ae` (hand-written, by topic) | Clojure forms, evaluated in order | 8,753 forms, 25 files (as of 2026-10-10; 9,193 forms, 27 files on 2026-10-15) |
 | forms | `forms/harvest/*.ae` (generated) | the self-contained expressions of the assertions of Clojure's test suite | 3,189 forms, 29 files |
 | classes | `classes/*.ae` | operation scripts on the runtime's classes, by reflection | 8,943 steps, 18 files |
 | regex | `regex/*.ae` | patterns × flag sets × inputs for `java.util.regex` | 1,233 patterns × flag sets, 11,682 inputs, 11 files |
@@ -22,7 +22,8 @@ Under `test/oracle/`:
 and `driver.ae` (sent to the implementation under test), `runner.ae` (the runner, on the JVM
 Arbace), `harvest.ae` (the harvest), and the recorded results in `expected/<part>/<file>.edn`,
 one per source file. Expected files total 5.8 MB (forms 1.7 MB, classes 2.5 MB, regex 1.6 MB).
-Counts and sizes as of 2026-10-10 (after `gosec`): 22,118 cases in all.
+Counts and sizes as of 2026-10-10 (after `gosec`): 22,118 cases in all; 22,558 on 2026-10-15
+(the expected files' `:count`s: forms 9,193, harvest 3,189, classes 8,943, regex 1,233).
 
 Hand-written forms (`forms/`): `numbers` (overflow and promotion, ratios, BigInt, BigDecimal,
 doubles, casts, bit operations, literals, `parse-*`, hashes), `strings` (UTF-16 and non-BMP
@@ -60,7 +61,11 @@ executors, the atomic arrays, adders and accumulators, `StampedLock`, `LockSuppo
 time-zone database and its rules, the formatters, `java.time.temporal`, the interplay with
 `TimeZone`, `Calendar`, `Date` and `#inst`; fixed instants and zones, no clock; JRT-NOTES.md,
 "Time"), `time_zones` (every time zone's standard, daylight and generic names in the US English and
-root locales), `processes` (`ProcessBuilder`, `Process`, `Runtime.exec`, `ProcessHandle`,
+root locales), `text` (java.text and the locales: the number, date and message formats and
+their symbols, field positions, `Formatter`'s locale-dependent conversions, `Locale`, `Currency`,
+`ListFormat`, `Collator`, `BreakIterator`, `Bidi`, and jdk.localedata's locales beyond the root
+and English; every locale, zone and date explicit; JRT-NOTES.md, "Text and locales"),
+`processes` (`ProcessBuilder`, `Process`, `Runtime.exec`, `ProcessHandle`,
 `arbace.java.shell` and `arbace.java.process` on this machine's `sh`, `echo`, `cat`, `sort`,
 `sleep`; no process IDs, paths, user names or times in the results; JRT-NOTES.md, "Processes"),
 `hint_namespaces` (type hints resolved in the namespace the code is analyzed in, whatever `*ns*` is
