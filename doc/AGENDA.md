@@ -56,6 +56,11 @@ The current state of the work. This file is rewritten as things change. For the 
   seed remade (`79d4f552…`) and verified. SA160-SA163 decided (a), as built. SA90 (b)'s last
   case: a do evaluated again names the new sibling class in reflection (`6e9af3c`). The box's
   oracle and `bin/box-suite` in `bin/gate --full`.
+- Done (2026-10-15): S9, Go's toolchain as forms ([STANDALONE-NOTES.md](STANDALONE-NOTES.md),
+  "S9"; STANDALONE-SURVEY.md §7 b1'): `tamago/cmd/`, the 105 packages `compile`, `link` and
+  `asm` build from, for linux/amd64, tamago/amd64 and tamago/arm64 (`bin/toolchain-vendor`); the
+  nine tools built from the forms byte-identical to the originals'; the box's tool guests built
+  from them (SA203 (b)); `verify` and `check` in `bin/gate --full` (SA204 (a)).
 - Running: the whole chain in the emulated arm64 VM, nothing given (BX117 (a), at `434021a`,
   since 2026-10-14 22:49); recorded when it ends.
 - The Mac may move to macOS 26 (the user).
@@ -65,9 +70,6 @@ The current state of the work. This file is rewritten as things change. For the 
 - Running: the build's speed, second round (the user, 2026-10-15), on three branches: the host's
   compiling of the namespaces (`speed2-host`), a2g's single-core phases (`speed2-a2g`), `jrt`
   split into Go packages, measured first (`speed2-jrt`).
-- Running: S9, Go's toolchain as forms (the user, 2026-10-15; branch `s9`; STANDALONE-SURVEY.md
-  §7 b1', §8.1): `cmd/compile`, `cmd/link`, `cmd/asm` and `cmd/internal` converted by g2a, the
-  tools built from the forms byte-identical to the originals'.
 
 ## Later
 

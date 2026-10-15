@@ -1,8 +1,10 @@
 #!/bin/bash
 # Go's compile, link and asm as the box's tool guests (doc/go/BOX-NOTES.md, S7): TamaGo's go1.27.1
-# ($G2A_GOROOT, default /root/tamago-go) built for GOOS=tamago as it is, with the board of box/
-# and the tool guests' shim (box/'s arbace/box/tool, which gives the tool its command line, its
-# environment and, spawned, its file system: the request's trees in, the output tree out).
+# built for GOOS=tamago from its Go forms, tamago/cmd/ printed for tamago/ARCH (bin/toolchain-vendor
+# print: GOROOT/src/cmd printed, the rest of the toolchain's tree, $G2A_GOROOT, default
+# /root/tamago-go, linked; standalone S9, SA203), with the board of box/ and the tool guests' shim
+# (box/'s arbace/box/tool, which gives the tool its command line, its environment and, spawned,
+# its file system: the request's trees in, the output tree out).
 #
 #   bin/box-tools build [ARCH...]       the tool guests for each ARCH (amd64, arm64; default both)
 #                                       into target/box-tools/<arch>/{compile,link,asm}.elf
@@ -24,8 +26,10 @@
 # package whose init calls tool.Start; it replaces syscall/fs_tamago.go. Linked as the box's
 # guests are (-T 0x201000 -R 0x1000 -w), from the module the printing makes (GOOSPKG, TamaGo's
 # goos module from Go's module cache). No build uses the host's go.
-# Environment: BOX_TOOLS_OUT, the output directory (default target/box-tools); BOX_TOOLS_LDFLAGS,
-# more link flags (bin/toolchain-vendor check: -buildid=).
+# Environment: BOX_TOOLS_GO=orig, the tools from the toolchain's own tree ($G2A_GOROOT), not from
+# tamago/cmd/; BOX_TOOLS_GOROOT, the tools from that GOROOT (bin/toolchain-vendor check);
+# BOX_TOOLS_OUT, the output directory (default target/box-tools); BOX_TOOLS_LDFLAGS, more link
+# flags (bin/toolchain-vendor check: its empty build IDs).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 goroot=${G2A_GOROOT:-/root/tamago-go}
@@ -34,15 +38,33 @@ work=$out/work
 tools="compile link asm"
 . "$root/bin/lib/box-overlay.bash"
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
-# prepare: box/ and the patched syscall printed, the overlay written: $work/overlay.json
+# arch_goroot ARCH: the GOROOT the tools for tamago/ARCH are built from: BOX_TOOLS_GOROOT, the
+# toolchain's own (BOX_TOOLS_GO=orig), else tamago/cmd/ printed for tamago/ARCH (reused while its
+# key holds: bin/toolchain-vendor print)
+arch_goroot() {
+  if [ -n "${BOX_TOOLS_GOROOT:-}" ]; then echo "$BOX_TOOLS_GOROOT"
+  elif [ "${BOX_TOOLS_GO:-}" = orig ]; then echo "$goroot"
+  else
+    local d=$root/.tmp/toolchain-vendor/print-tamago-$1
+    "$root/bin/toolchain-vendor" print "tamago-$1" "$d" >&2 || return 1
+    echo "$d/goroot"
+  fi
+}
+
+# prepare: box/ and the patched syscall printed: the overlay's files in $work/ov
 prepare() {
-  local g=$goroot/src ov=$work/ov f b fs
+  local ov=$work/ov
   rm -rf "$work"; mkdir -p "$ov"
   echo "== print box/ (GOOS=tamago) and overlay/go/syscall.ae" >&2
   (cd "$root" && bin/g2a build --print-only --goos tamago --module arbace --work "$work/print" box) > "$work/print.log" 2>&1 \
     || { tail -20 "$work/print.log" >&2; return 1; }
+}
+
+# overlay GOROOT ARCH: the overlay for building from GOROOT, $work/overlay-ARCH.json
+overlay() {
+  local g=$1/src ov=$work/ov f b fs
   fs=$(box_fs_file) || return 1
   local p=$work/print/mod/box
   rw() { sed -e 's#"arbace/box/abi"#"cmd/internal/arbacebox/abi"#' -e 's#"arbace/box/board"#"cmd/internal"#' \
@@ -66,22 +88,25 @@ prepare() {
       echo " \"$g/cmd/$t/arbace_tool.go\": \"$ov/main_tool.go\"$sep"
     done
     echo '}}'
-  } > "$work/overlay.json"
+  } > "$work/overlay-$2.json"
 }
 
 build() {
-  local a t t0
+  local a t t0 g
   [ $# -gt 0 ] || set -- amd64 arm64
   prepare || return 1
   for a in "$@"; do
     case $a in amd64|arm64) ;; *) echo "box-tools: no architecture $a" >&2; return 2 ;; esac
     mkdir -p "$out/$a"
+    g=$(arch_goroot "$a") || return 1
+    overlay "$g" "$a" || return 1
+    echo "== the tool guests for tamago/$a from ${g#$root/}" >&2
     for t in $tools; do
       t0=$(date +%s)
-      (cd "$work/print/mod" && env GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off \
+      (cd "$work/print/mod" && env GOROOT="$g" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off \
          GOEXPERIMENT= CGO_ENABLED=0 GOOS=tamago GOARCH="$a" GOAMD64=v1 GOARM64=v8.0 GOOSPKG=github.com/usbarmory/tamago \
-         "$goroot/bin/go" build -trimpath -buildvcs=false "-ldflags=-T 0x201000 -R 0x1000 -w${BOX_TOOLS_LDFLAGS:+ $BOX_TOOLS_LDFLAGS}" \
-         -overlay "$work/overlay.json" -o "$out/$a/$t.elf" "cmd/$t") > "$work/build-$t-$a.log" 2>&1 \
+         "$g/bin/go" build -trimpath -buildvcs=false "-ldflags=-T 0x201000 -R 0x1000 -w${BOX_TOOLS_LDFLAGS:+ $BOX_TOOLS_LDFLAGS}" \
+         -overlay "$work/overlay-$a.json" -o "$out/$a/$t.elf" "cmd/$t") > "$work/build-$t-$a.log" 2>&1 \
         || { tail -20 "$work/build-$t-$a.log" >&2; echo "box-tools: $t for $a failed" >&2; return 1; }
       echo "box-tools: $out/$a/$t.elf ($(stat -c %s "$out/$a/$t.elf") bytes, $(( $(date +%s) - t0 )) s)" >&2
     done

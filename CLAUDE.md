@@ -19,13 +19,13 @@ Direction:
   (not freezes: no branch): on amd64 with /dev/kvm (tag `arbace-box-amd64-v1`, 2026-10-12) and
   on arm64 (tag `arbace-box-arm64-v1`, 2026-10-12): KVM/arm64, checked in an emulated aarch64
   VM, and Hypervisor.framework on an M2 Max (the bundle of `bin/box-mac-bundle`, 42 of 42).
-- The standalone Arbace (doc/STANDALONE-SURVEY.md, D1-D13 decided), S1-S8 done, two milestones
+- The standalone Arbace (doc/STANDALONE-SURVEY.md, D1-D13 decided), S1-S9 done, two milestones
   on main (tags, not freezes): the Go-hosted bootstrap (S1-S4): the seed is Arbace's Go program
   as Arbace printed it, the Go executable rebuilds itself, and the JVM stays only as the oracle's
   reference (the frozen v4 jar) and j2a's front end (`arbace-seed-is-go-v1`, 2026-10-13); the box
   rebuilding Arbace inside itself (S5-S8), its namespaces compiled to Go (S6), byte for byte on
-  amd64, in the emulated arm64 VM and on the Mac (`arbace-inside-itself-v1`, 2026-10-15). Now:
-  doc/AGENDA.md (the build's speed; S9, Go's toolchain as forms, later).
+  amd64, in the emulated arm64 VM and on the Mac (`arbace-inside-itself-v1`, 2026-10-15); then S9, Go's
+  toolchain as forms (`tamago/cmd/`, 2026-10-15). Now: doc/AGENDA.md.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through j2a. The language is Clojure extended with an idiomatic
   representation of Java (the class forms), and later of Go: the Arbace language. The goal is a
@@ -133,7 +133,12 @@ Prior art:
   its `goos` module (`tamago/goos/`), for tamago/amd64 and tamago/arm64 as one tree, converted by `bin/tamago-vendor`
   (`convert`, `verify`; `check` proves the guest image built from them byte-identical to one
   built from the originals); the box's guest is built from them printed (`ARBACE_BOX_GO=orig`:
-  from the toolchain's tree). `bin/arbace-go --build --box` builds the
+  from the toolchain's tree). `tamago/cmd/` holds Go's toolchain as Go forms (S9): the 105
+  packages of GOROOT/src/cmd that `compile`, `link` and `asm` build from, for linux/amd64,
+  tamago/amd64 and tamago/arm64 as one tree, converted by `bin/toolchain-vendor` (`convert`,
+  `verify`; `check` proves the nine tools built from them byte-identical to the originals'); the
+  box's tool guests (`bin/box-tools`) are built from them printed (`BOX_TOOLS_GO=orig`: from the
+  toolchain's tree). `bin/arbace-go --build --box` builds the
   guest image and Arbace's launcher `arbace-box` (`--smoke --box`, which runs `bin/box-smoke`;
   `bin/box-suite`; arm64 with `ARBACE_BOX_ARCHES`). `bin/box-arm64-vm` runs an emulated aarch64
   VM with KVM/arm64 for the arm64 box's checks (`check`: its smoke test, go-whim's tests);
@@ -158,7 +163,8 @@ Prior art:
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; g2a's round trips (`bin/g2a roundtrip amd64`, `linux/amd64`), the
   box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
-  `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`. Run it when the class forms'
+  `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; Go's toolchain as forms
+  (`bin/toolchain-vendor verify`, `check`). Run it when the class forms'
   front end, j2a, g2a, a2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
   or j2a, `bin/jrt-convert update` first; after a change to what a2g asks of the JVM,
   `bin/a2g-edge update`). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`
