@@ -3119,3 +3119,13 @@ the toolchain's forms.
   the dumps' directory from `G2A_DUMPS` (default `.tmp/g2a/dumps`), which `bin/toolchain-vendor`
   sets to its own per configuration: `bin/tamago-vendor verify` in the g2a chain converts beside
   it.
+
+Checked after main's merge (the speed's second round, `d45e718`): `bin/box-tools build amd64`
+from the forms (28 s: the printing; Go's cache held the compiles); the box's smoke test with
+them (`bin/arbace-go --smoke --box`: compile spawned with trees in and out, a failing compile,
+the spawn budget, an image booted from the store, all ok); `bin/toolchain-vendor check
+tamago-amd64` through the reworked `bin/box-tools` (`BOX_TOOLS_GOROOT`): identical; a one-run
+build (`ARBACE_GO_ARCHES=amd64 bin/arbace-go --build`, 4:49 on the busy host: one a2g run, g2a 59
+s), and the print cache with its collect index after it (the gate's shipped build, the same
+program: g2a 9 s); the essential `bin/gate` on `84667f3` (10m04s): the suite 20,506 of 20,520, no
+regressions; the oracle 22,508 of 22,561, the 53 known, 0 new.
